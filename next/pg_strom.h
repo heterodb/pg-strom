@@ -80,6 +80,7 @@
 #include "utils/regproc.h"
 #include "utils/rel.h"
 #include "utils/resowner.h"
+#include "utils/ruleutils.h"
 #include "utils/selfuncs.h"
 #include "utils/spccache.h"
 #include "utils/syscache.h"
@@ -258,6 +259,12 @@ extern bool		pgstrom_gpu_expression(Expr *expr,
 									   int num_rels,
 									   List **rel_tlist,
 									   int *p_devcost);
+
+extern void		pgstrom_explain_xpucode(StringInfo buf,
+										bytea *xpu_code,
+										const CustomScanState *css,
+										ExplainState *es,
+										List *ancestors);
 extern char	   *pgstrom_xpucode_to_string(bytea *xpu_code);
 extern void		pgstrom_init_codegen(void);
 

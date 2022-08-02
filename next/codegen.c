@@ -1441,51 +1441,144 @@ pgstrom_gpu_expression(Expr *expr,
  * transforms xPU code to human readable form.
  */
 static void
-__xpucode_to_cstring(StringInfo buf, const kern_expression *kexp)
+__xpucode_const_cstring(StringInfo buf,
+						const kern_expression *kexp,
+						devtype_info *dtype)
+{
+	if (kexp->u.c.const_isnull)
+	{
+		appendStringInfo(buf, "{Const(%s): value=null}",
+						 !dtype ? "???" : dtype->type_name);
+	}
+	else
+	{
+		int16	type_len;
+		bool	type_byval;
+		char	type_align;
+		char	type_delim;
+		Oid		type_ioparam;
+		Oid		type_outfunc;
+		Datum	datum = 0;
+		Datum	label;
+
+		get_type_io_data(kexp->u.c.const_type,
+						 IOFunc_output,
+						 &type_len,
+						 &type_byval,
+						 &type_align,
+						 &type_delim,
+						 &type_ioparam,
+						 &type_outfunc);
+		if (type_byval)
+			memcpy(&datum, kexp->u.c.const_value, type_len);
+		else
+			datum = PointerGetDatum(kexp->u.c.const_value);
+		label = OidFunctionCall1(type_outfunc, datum);
+		appendStringInfo(buf, "{Const: value='%s'}",
+						 DatumGetCString(label));
+	}
+}
+
+static char *
+__xpucode_loadvars_cstring(const kern_expression *kexp,
+						   const CustomScanState *css,
+						   ExplainState *es,
+						   List *ancestors)
+{
+	StringInfoData temp;
+	bool	verbose = false;
+	int		i;
+
+	initStringInfo(&temp);
+	appendStringInfo(&temp, "[");
+	if (css)
+	{
+		CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
+		verbose = (es->verbose || cscan->custom_plans != NIL);
+	}
+
+	for (i=0; i < kexp->u.ld.nloads; i++)
+	{
+		int16_t		__depth = kexp->u.ld.kvars[i].var_depth;
+		int16_t		__resno = kexp->u.ld.kvars[i].var_resno;
+		uint32_t	__slot_id = kexp->u.ld.kvars[i].var_slot_id;
+
+		if (i > 0)
+			appendStringInfo(&temp, ", ");
+		if (!css)
+		{
+			appendStringInfo(&temp, "(slot_id=%u, depth=%d, resno=%d)",
+							 __slot_id,
+							 __depth,
+							 __resno);
+		}
+		else if (css->ss.ss_currentRelation && __depth == 0)
+		{
+			TupleDesc	tupdesc = RelationGetDescr(css->ss.ss_currentRelation);
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, __resno);
+			CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
+			List	   *dcontext;
+			Var		   *kvar;
+
+			dcontext = set_deparse_context_plan(es->deparse_cxt,
+												(Plan *)cscan, ancestors);
+			kvar = makeVar(cscan->scan.scanrelid,
+						   attr->attnum,
+						   attr->atttypid,
+						   attr->atttypmod,
+						   attr->attcollation, 0);
+			appendStringInfo(&temp, "(slot_id=%u, %s)",
+							 __slot_id,
+							 deparse_expression((Node *)kvar,
+												dcontext,
+												verbose, false));
+			pfree(kvar);
+		}
+		else
+		{
+			CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
+			Plan	   *plan;
+			List	   *dcontext;
+			TargetEntry *tle;
+
+			if (!css->ss.ss_currentRelation)
+				plan = list_nth(cscan->custom_plans, __depth);
+			else
+				plan = list_nth(cscan->custom_plans, __depth - 1);
+
+			dcontext = set_deparse_context_plan(es->deparse_cxt,
+												plan, ancestors);
+			tle = list_nth(plan->targetlist, __resno - 1);
+			appendStringInfo(&temp, "(slot_id=%u, %s)",
+							 __slot_id,
+							 deparse_expression((Node *)tle->expr,
+												dcontext,
+												verbose, false));
+		}
+	}
+	appendStringInfo(&temp, "]");
+
+	return temp.data;
+}
+
+static void
+__xpucode_to_cstring(StringInfo buf,
+					 const kern_expression *kexp,
+					 const CustomScanState *css,	/* optional */
+					 ExplainState *es,				/* optional */
+					 List *ancestors)				/* optionsl */
 {
 	devtype_info   *dtype = devtype_lookup_by_opcode(kexp->rettype);
 	devfunc_info   *dfunc = devfunc_lookup_by_opcode(kexp->opcode);
 	const char	   *label;
 	const char	   *extra = NULL;
 	const char	   *pos = kexp->u.data;
-	StringInfoData	temp;
 	int				i;
 
 	switch (kexp->opcode)
 	{
 		case FuncOpCode__ConstExpr:
-			if (kexp->u.c.const_isnull)
-			{
-				appendStringInfo(buf, "{Const(%s): value=null}",
-								 !dtype ? "???" : dtype->type_name);
-			}
-			else
-			{
-				int16	type_len;
-				bool	type_byval;
-				char	type_align;
-				char	type_delim;
-				Oid		type_ioparam;
-				Oid		type_outfunc;
-				Datum	datum;
-				Datum	label;
-
-				get_type_io_data(kexp->u.c.const_type,
-								 IOFunc_output,
-								 &type_len,
-								 &type_byval,
-								 &type_align,
-								 &type_delim,
-								 &type_ioparam,
-								 &type_outfunc);
-				if (!type_byval)
-					datum = PointerGetDatum(kexp->u.c.const_value);
-				else
-					memcpy(&datum, kexp->u.c.const_value, type_len);
-				label = OidFunctionCall1(type_outfunc, datum);
-				appendStringInfo(buf, "{Const: value='%s'}",
-								 DatumGetCString(label));
-			}
+			__xpucode_const_cstring(buf, kexp, dtype);
 			return;
 
 		case FuncOpCode__ParamExpr:
@@ -1538,22 +1631,7 @@ __xpucode_to_cstring(StringInfo buf, const kern_expression *kexp)
 			break;
 		case FuncOpCode__LoadVars:
 			label = "LoadVars";
-			initStringInfo(&temp);
-			appendStringInfo(&temp, "[");
-			for (i=0; i < kexp->u.ld.nloads; i++)
-			{
-				int16_t		__depth = kexp->u.ld.kvars[i].var_depth;
-				int16_t		__resno = kexp->u.ld.kvars[i].var_resno;
-				uint32_t	__slot_id = kexp->u.ld.kvars[i].var_slot_id;
-
-				appendStringInfo(&temp, "%s(slot_id=%u, depth=%d, resno=%d)",
-								 i > 0 ? ", " : "",
-								 __slot_id,
-								 __depth,
-								 __resno);
-			}
-			appendStringInfo(&temp, "]");
-			extra = temp.data;
+			extra = __xpucode_loadvars_cstring(kexp, css, es, ancestors);
 			break;
 		default:
 			if (dfunc)
@@ -1561,10 +1639,10 @@ __xpucode_to_cstring(StringInfo buf, const kern_expression *kexp)
 			else
 				label = "Func::unknown";
 	}
-	appendStringInfo(buf, "{%s(%s) %sargs=[",
-					 label,
-					 !dtype ? "???" : dtype->type_name,
-					 !extra ? "" : extra);
+	appendStringInfo(buf, "{%s(%s)", label, !dtype ? "???" : dtype->type_name);
+	if (extra)
+		appendStringInfo(buf, " %s", extra);
+	appendStringInfo(buf, " args=[");
 	for (i=0; i < kexp->nargs; i++)
 	{
 		const kern_expression *arg = (const kern_expression *)pos;
@@ -1574,10 +1652,23 @@ __xpucode_to_cstring(StringInfo buf, const kern_expression *kexp)
 				 VARSIZE(kexp),
 				 (pos - kexp->u.data),
 				 (pos - kexp->u.data) + VARSIZE(arg));
-		__xpucode_to_cstring(buf, arg);
+		if (i > 0)
+			appendStringInfo(buf, ", ");
+		__xpucode_to_cstring(buf, arg, css, es, ancestors);
 		pos += MAXALIGN(VARSIZE(arg));
 	}
 	appendStringInfoString(buf, "]}");
+}
+
+void
+pgstrom_explain_xpucode(StringInfo buf,
+						bytea *xpu_code,
+						const CustomScanState *css,
+						ExplainState *es,
+						List *ancestors)
+{
+	__xpucode_to_cstring(buf, (const kern_expression *)xpu_code,
+						 css, es, ancestors);
 }
 
 char *
@@ -1586,7 +1677,8 @@ pgstrom_xpucode_to_string(bytea *xpu_code)
 	StringInfoData buf;
 
 	initStringInfo(&buf);
-	__xpucode_to_cstring(&buf, (const kern_expression *)xpu_code);
+	__xpucode_to_cstring(&buf, (const kern_expression *)xpu_code,
+						 NULL, NULL, NIL);
 
 	return buf.data;
 }

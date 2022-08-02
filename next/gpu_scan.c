@@ -852,7 +852,20 @@ static void
 ExplainGpuScan(CustomScanState *node,
 			   List *ancestors,
 			   ExplainState *es)
-{}
+{
+	GpuScanState   *gss = (GpuScanState *) node;
+	StringInfoData	temp;
+
+	initStringInfo(&temp);
+	pgstrom_explain_xpucode(&temp,
+							gss->gs_info.kern_quals,
+							&gss->css,
+							es, ancestors);
+	ExplainPropertyText("XPU Code", temp.data, es);
+
+
+
+}
 
 /*
  * createGpuScanSharedState
