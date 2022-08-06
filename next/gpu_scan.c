@@ -208,6 +208,8 @@ create_gpuscan_path(PlannerInfo *root,
 		parallel_nworkers = compute_parallel_worker(baserel,
 													baserel->pages, -1,
 													max_parallel_workers_per_gather);
+		if (parallel_nworkers <= 0)
+			return NULL;
 		parallel_divisor = (double)parallel_nworkers;
 		if (parallel_leader_participation)
 		{
@@ -439,7 +441,7 @@ GpuScanAddScanPath(PlannerInfo *root,
 								indexConds,
 								indexQuals,
 								indexNBlocks);
-	if (custom_path_remember(root, baserel, false, false, cpath))
+	if (cpath && custom_path_remember(root, baserel, false, false, cpath))
 		add_path(baserel, &cpath->path);
 	/* If appropriate, consider parallel GpuScan */
 	if (baserel->consider_parallel && baserel->lateral_relids == NULL)
@@ -452,7 +454,7 @@ GpuScanAddScanPath(PlannerInfo *root,
 									indexConds,
 									indexQuals,
 									indexNBlocks);
-		if (custom_path_remember(root, baserel, true, false, cpath))
+		if (cpath && custom_path_remember(root, baserel, true, false, cpath))
 			add_partial_path(baserel, &cpath->path);
 	}
 }
@@ -555,7 +557,6 @@ PlanGpuScanPath(PlannerInfo *root,
 		   baserel->rtekind == RTE_RELATION &&
 		   custom_children == NIL);
 	/* check referenced columns */
-	pull_varattnos((Node *)clauses, baserel->relid, &outer_refs);
 	for (j=baserel->min_attr; j <= baserel->max_attr; j++)
 	{
 		if (!baserel->attr_needed[j - baserel->min_attr])
@@ -572,7 +573,7 @@ PlanGpuScanPath(PlannerInfo *root,
 		RestrictInfo *rinfo = lfirst(cell);
 		int		devcost;
 
-		Assert(exprType((Node *)rinfo->clause) != BOOLOID);
+		Assert(exprType((Node *)rinfo->clause) == BOOLOID);
 		if (pgstrom_gpu_expression(rinfo->clause, 0, NULL, &devcost))
 		{
 			ListCell   *lc1, *lc2;
@@ -599,6 +600,7 @@ PlanGpuScanPath(PlannerInfo *root,
 		{
 			host_quals = lappend(host_quals, rinfo);
 		}
+		pull_varattnos((Node *)rinfo->clause, baserel->relid, &outer_refs);
 	}
 	if (dev_quals == NIL)
 		elog(ERROR, "GpuScan: Bug? no device executable qualifiers are given");

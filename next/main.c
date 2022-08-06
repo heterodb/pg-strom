@@ -162,7 +162,7 @@ static uint32
 custom_path_entry_hashvalue(const void *key, Size keysize)
 {
 	custom_path_entry *cent = (custom_path_entry *)key;
-	const char *custom_name = cent->cpath->methods->CustomName;
+	const char *custom_name = cent->custom_name;
 	uint32      hash;
 
 	hash = hash_any((unsigned char *)&cent->root, sizeof(PlannerInfo *));
@@ -265,7 +265,7 @@ custom_path_remember(PlannerInfo *root,
 		   bms_equal(cent->relids, rel->relids) &&
 		   cent->outer_parallel == outer_parallel &&
 		   cent->inner_parallel == inner_parallel &&
-		   cent->custom_name == cpath->methods->CustomName);
+		   strcmp(cent->custom_name, cpath->methods->CustomName) == 0);
 	cent->cpath = (const CustomPath *)pgstrom_copy_pathnode(&cpath->path);
 
 	return true;
@@ -345,7 +345,6 @@ _PG_init(void)
 	/* init pg-strom infrastructure */
 	pgstrom_init_misc_options();
 	pgstrom_init_extra();
-	pgstrom_init_shmbuf();
 	pgstrom_init_codegen();
 	pgstrom_init_relscan();
 	/* dump version number */

@@ -814,6 +814,8 @@ devfunc_lookup_by_opcode(FuncOpCode func_code)
 typedef struct
 {
 	StringInfo	buf;
+	int			elevel;
+	Expr	   *top_expr;
 	List	   *used_params;
 	uint32_t	required_flags;
 	uint32_t	extra_flags;
@@ -825,12 +827,15 @@ typedef struct
 	List	   *rel_tlist[1];
 } codegen_context;
 
-#define __Elog(fmt,...)							\
-	do {										\
-		errmsg("%s:%d" fmt,						\
-			   basename(__FILE__), __LINE__,	\
-			   ##__VA_ARGS__);					\
-		return -1;								\
+#define __Elog(fmt,...)													\
+	do {																\
+		ereport(context->elevel,										\
+				(errcode(ERRCODE_INTERNAL_ERROR),						\
+				 errmsg("(%s:%d) " fmt,	__FUNCTION__, __LINE__,			\
+						##__VA_ARGS__),									\
+				 errdetail("problematic expression: %s",				\
+						   nodeToString(context->top_expr))));			\
+		return -1;														\
 	} while(0)
 
 static int	codegen_expression_walker(codegen_context *context, Expr *expr,
@@ -860,7 +865,7 @@ codegen_const_expression(codegen_context *context, Const *con)
 		}
 		kexp = alloca(sz);
 		memset(kexp, 0, sz);
-		SET_VARSIZE(&kexp, sz);
+		SET_VARSIZE(kexp, sz);
 		kexp->opcode = FuncOpCode__ConstExpr;
 		kexp->rettype = dtype->type_code;
 		kexp->u.c.const_type = con->consttype;
@@ -934,10 +939,10 @@ __codegen_var_expression(codegen_context *context,
 			goto found;
 		slot_id++;
 	}
-	context->kvars_depth = lappend_int(context->kvars_depth, kvar_depth);
-	context->kvars_resno = lappend_int(context->kvars_resno, kvar_resno);
 	Assert(slot_id == list_length(context->kvars_depth) &&
 		   slot_id == list_length(context->kvars_resno));
+	context->kvars_depth = lappend_int(context->kvars_depth, kvar_depth);
+	context->kvars_resno = lappend_int(context->kvars_resno, kvar_resno);
 found:
 	if (context->buf)
 	{
@@ -1281,7 +1286,7 @@ attach_varloads_xpucode(codegen_context *context,
 	appendBinaryStringInfo(&buf, (const char *)vl, sz);
 	if (kexp)
 		appendBinaryStringInfo(&buf, (const char *)kexp, VARSIZE(kexp));
-	SET_VARSIZE(&buf, buf.len);
+	SET_VARSIZE(buf.data, buf.len);
 
 	return (bytea *)buf.data;
 }
@@ -1303,6 +1308,8 @@ pgstrom_build_xpucode(bytea **p_xpucode,
 	memset(context, 0, offsetof(codegen_context, rel_tlist));
 
 	initStringInfo(&buf);
+	context->elevel = ERROR;
+	context->top_expr = expr;
 	context->buf = &buf;
 	if (p_extra_flags)
 		context->extra_flags = *p_extra_flags;
@@ -1314,18 +1321,18 @@ pgstrom_build_xpucode(bytea **p_xpucode,
 		memcpy(context->rel_tlist, rel_tlist, sizeof(List *) * num_rels);
 	context->num_rels = num_rels;
 
-	if (IsA(expr, List) && list_length((List *)expr) > 1)
-		expr = make_andclause((List *)expr);
-	if (codegen_expression_walker(context, expr, false) < 0)
+	if (IsA(expr, List))
 	{
-		/* errmsg shall be already set */
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errdetail("problematic expression: %s", nodeToString(expr))));
+		if (list_length((List *)expr) == 1)
+			expr = linitial((List *)expr);
+		else
+			expr = make_andclause((List *)expr);
 	}
+	codegen_expression_walker(context, expr, false);
 	SET_VARSIZE(buf.data, buf.len);
 	/* attach VarLoads operation */
 	*p_xpucode = attach_varloads_xpucode(context, (kern_expression *)buf.data);
+	pfree(buf.data);
 
 	if (p_used_params)
 		*p_used_params = context->used_params;
@@ -1335,7 +1342,6 @@ pgstrom_build_xpucode(bytea **p_xpucode,
 		*p_extra_bufsz = context->extra_bufsz;
 	if (p_kvars_nslots)
 		*p_kvars_nslots = list_length(context->kvars_depth);
-	pfree(buf.data);
 }
 
 /*
@@ -1361,6 +1367,7 @@ pgstrom_build_projection(bytea **p_xpucode_proj_prep,
 	memset(context, 0, offsetof(codegen_context, rel_tlist));
 	initStringInfo(&buf);
 	context->buf = &buf;
+	context->elevel = ERROR;
 	if (p_extra_flags)
 		context->extra_flags = *p_extra_flags;
 	if (p_extra_bufsz)
@@ -1382,14 +1389,8 @@ pgstrom_build_projection(bytea **p_xpucode_proj_prep,
 	{
 		TargetEntry *tle = lfirst(lc);
 
-		if (codegen_expression_walker(context, tle->expr, true) < 0)
-		{
-			/* errmsg shall be already set */
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errdetail("problematic expression: %s",
-							   nodeToString(tle->expr))));
-		}
+		context->top_expr = tle->expr;
+		codegen_expression_walker(context, tle->expr, true);
 	}
 	SET_VARSIZE(buf.data, buf.len);
 	*p_xpucode_proj_exec = (bytea *)buf.data;
@@ -1421,13 +1422,20 @@ pgstrom_gpu_expression(Expr *expr,
 	codegen_context	   *context;
 
 	context = alloca(offsetof(codegen_context, rel_tlist[num_rels]));
-	memset(&context, 0, offsetof(codegen_context, rel_tlist[num_rels]));
+	memset(context, 0, offsetof(codegen_context, rel_tlist[num_rels]));
+	context->elevel = DEBUG2;
+	context->top_expr = expr;
 	if (num_rels > 0)
 		memcpy(context->rel_tlist, rel_tlist, sizeof(List *) * num_rels);
 	context->num_rels = num_rels;
 
-	if (IsA(expr, List) && list_length((List *)expr) > 0)
-		expr = make_andclause((List *)expr);
+	if (IsA(expr, List))
+	{
+		if (list_length((List *)expr) == 1)
+			expr = linitial((List *)expr);
+		else
+			expr = make_andclause((List *)expr);
+	}
 	if (codegen_expression_walker(context, expr, false) < 0)
 		return false;
 	if (p_devcost)
@@ -1474,23 +1482,26 @@ __xpucode_const_cstring(StringInfo buf,
 		else
 			datum = PointerGetDatum(kexp->u.c.const_value);
 		label = OidFunctionCall1(type_outfunc, datum);
-		appendStringInfo(buf, "{Const: value='%s'}",
+		appendStringInfo(buf, "{Const(%s): value='%s'}",
+						 !dtype ? "???" : dtype->type_name,
 						 DatumGetCString(label));
 	}
 }
 
 static char *
-__xpucode_loadvars_cstring(const kern_expression *kexp,
+__xpucode_loadvars_cstring(StringInfo buf,
+						   const kern_expression *kexp,
 						   const CustomScanState *css,
 						   ExplainState *es,
 						   List *ancestors)
 {
-	StringInfoData temp;
 	bool	verbose = false;
 	int		i;
 
-	initStringInfo(&temp);
-	appendStringInfo(&temp, "[");
+	appendStringInfo(buf, "{LoadVars:");
+	if (kexp->u.ld.nloads > 0)
+		appendStringInfo(buf, " kvars=[");
+
 	if (css)
 	{
 		CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
@@ -1504,10 +1515,10 @@ __xpucode_loadvars_cstring(const kern_expression *kexp,
 		uint32_t	__slot_id = kexp->u.ld.kvars[i].var_slot_id;
 
 		if (i > 0)
-			appendStringInfo(&temp, ", ");
+			appendStringInfo(buf, ", ");
 		if (!css)
 		{
-			appendStringInfo(&temp, "(slot_id=%u, depth=%d, resno=%d)",
+			appendStringInfo(buf, "(slot_id=%u, depth=%d, resno=%d)",
 							 __slot_id,
 							 __depth,
 							 __resno);
@@ -1527,7 +1538,7 @@ __xpucode_loadvars_cstring(const kern_expression *kexp,
 						   attr->atttypid,
 						   attr->atttypmod,
 						   attr->attcollation, 0);
-			appendStringInfo(&temp, "(slot_id=%u, %s)",
+			appendStringInfo(buf, "(slot_id=%u, %s)",
 							 __slot_id,
 							 deparse_expression((Node *)kvar,
 												dcontext,
@@ -1549,16 +1560,18 @@ __xpucode_loadvars_cstring(const kern_expression *kexp,
 			dcontext = set_deparse_context_plan(es->deparse_cxt,
 												plan, ancestors);
 			tle = list_nth(plan->targetlist, __resno - 1);
-			appendStringInfo(&temp, "(slot_id=%u, %s)",
+			appendStringInfo(buf, "(slot_id=%u, %s)",
 							 __slot_id,
 							 deparse_expression((Node *)tle->expr,
 												dcontext,
 												verbose, false));
 		}
 	}
-	appendStringInfo(&temp, "]");
+	if (kexp->u.ld.nloads > 0)
+		appendStringInfo(buf, "]");
 
-	return temp.data;
+	return (char *)kexp + MAXALIGN(offsetof(kern_expression,
+											u.ld.kvars[kexp->u.ld.nloads]));
 }
 
 static void
@@ -1570,8 +1583,6 @@ __xpucode_to_cstring(StringInfo buf,
 {
 	devtype_info   *dtype = devtype_lookup_by_opcode(kexp->rettype);
 	devfunc_info   *dfunc = devfunc_lookup_by_opcode(kexp->opcode);
-	const char	   *label;
-	const char	   *extra = NULL;
 	const char	   *pos = kexp->u.data;
 	int				i;
 
@@ -1594,70 +1605,70 @@ __xpucode_to_cstring(StringInfo buf,
 			return;
 
 		case FuncOpCode__BoolExpr_And:
-			label = "Bool::AND";
+			appendStringInfo(buf, "{Bool::AND");
 			break;
 		case FuncOpCode__BoolExpr_Or:
-			label = "Bool::OR";
+			appendStringInfo(buf, "{Bool::OR");
 			break;
 		case FuncOpCode__BoolExpr_Not:
-			label = "Bool::NOT";
+			appendStringInfo(buf, "{Bool::NOT");
 			break;
 		case FuncOpCode__NullTestExpr_IsNull:
-			label = "IsNull";
+			appendStringInfo(buf, "{IsNull");
 			break;
 		case FuncOpCode__NullTestExpr_IsNotNull:
-			label = "IsNotNull";
+			appendStringInfo(buf, "{IsNotNull");
 			break;
 		case FuncOpCode__BoolTestExpr_IsTrue:
-			label = "BoolTest::IsTrue";
+			appendStringInfo(buf, "{BoolTest::IsTrue");
 			break;
 		case FuncOpCode__BoolTestExpr_IsNotTrue:
-			label = "BoolTest::IsNotTrue";
+			appendStringInfo(buf, "{BoolTest::IsNotTrue");
 			break;
 		case FuncOpCode__BoolTestExpr_IsFalse:
-			label = "BoolTest::IsFalse";
+			appendStringInfo(buf, "{BoolTest::IsFalse");
 			break;
 		case FuncOpCode__BoolTestExpr_IsNotFalse:
-			label = "BoolTest::IsNotFalse";
+			appendStringInfo(buf, "{BoolTest::IsNotFalse");
 			break;
 		case FuncOpCode__BoolTestExpr_IsUnknown:
-			label = "BoolTest::IsUnknown";
+			appendStringInfo(buf, "{BoolTest::IsUnknown");
 			break;
 		case FuncOpCode__BoolTestExpr_IsNotUnknown:
-			label = "BoolTest::IsNotUnknown";
+			appendStringInfo(buf, "{BoolTest::IsNotUnknown");
 			break;
 		case FuncOpCode__Projection:
-			label = "Projection";
+			appendStringInfo(buf, "{Projection");
 			break;
 		case FuncOpCode__LoadVars:
-			label = "LoadVars";
-			extra = __xpucode_loadvars_cstring(kexp, css, es, ancestors);
+			pos = __xpucode_loadvars_cstring(buf, kexp, css, es, ancestors);
 			break;
 		default:
-			if (dfunc)
-				label = psprintf("Func::%s", dfunc->func_name);
-			else
-				label = "Func::unknown";
+			appendStringInfo(buf, "{Func::%s(%s)",
+							 dfunc ? dfunc->func_name : "unknown",
+							 dtype ? dtype->type_name : "???");
+			break;
 	}
-	appendStringInfo(buf, "{%s(%s)", label, !dtype ? "???" : dtype->type_name);
-	if (extra)
-		appendStringInfo(buf, " %s", extra);
-	appendStringInfo(buf, " args=[");
-	for (i=0; i < kexp->nargs; i++)
+	if (kexp->nargs > 0)
 	{
-		const kern_expression *arg = (const kern_expression *)pos;
+		appendStringInfo(buf, " args=[");
+		for (i=0; i < kexp->nargs; i++)
+		{
+			const kern_expression *arg = (const kern_expression *)pos;
 
-		if (VARSIZE(kexp) < (pos + VARSIZE(arg)) - (char *)kexp)
-			elog(ERROR, "XpuCode looks corrupted: kexp (sz=%u, arg=[%lu...%lu])",
-				 VARSIZE(kexp),
-				 (pos - kexp->u.data),
-				 (pos - kexp->u.data) + VARSIZE(arg));
-		if (i > 0)
-			appendStringInfo(buf, ", ");
-		__xpucode_to_cstring(buf, arg, css, es, ancestors);
-		pos += MAXALIGN(VARSIZE(arg));
+			if (VARSIZE(kexp) < (pos + VARSIZE(arg)) - (char *)kexp)
+				elog(ERROR, "XpuCode looks corrupted: kexp (sz=%u, arg=[%lu...%lu])",
+					 VARSIZE(kexp),
+					 (pos - kexp->u.data),
+					 (pos - kexp->u.data) + VARSIZE(arg));
+			if (i > 0)
+				appendStringInfo(buf, ", ");
+			__xpucode_to_cstring(buf, arg, css, es, ancestors);
+			pos += MAXALIGN(VARSIZE(arg));
+		}
+		appendStringInfoChar(buf, ']');
 	}
-	appendStringInfoString(buf, "]}");
+	appendStringInfoChar(buf, '}');
 }
 
 void
