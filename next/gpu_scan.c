@@ -633,11 +633,6 @@ PlanGpuScanPath(PlannerInfo *root,
 								proj_kvars_nslots);
 	gs_info->dev_quals = dev_quals;
 	gs_info->outer_refs = outer_refs;
-
-	elog(ERROR, "kern_quals = %s\nkern_projs = %s\nkern_vload = %s",
-		 pgstrom_xpucode_to_string(gs_info->kern_quals),
-		 pgstrom_xpucode_to_string(gs_info->kern_proj_prep),
-		 pgstrom_xpucode_to_string(gs_info->kern_proj_exec));
 	
 	/*
 	 * Build CustomScan(GpuScan) node
@@ -796,14 +791,30 @@ ExecGpuScan(CustomScanState *node)
  */
 static void
 ExecEndGpuScan(CustomScanState *node)
-{}
+{
+	GpuScanState   *gss = (GpuScanState *)node;
+
+	if (gss->conn)
+		gpuClientCloseSession(gss->conn);
+	if (gss->base_slot)
+		ExecDropSingleTupleTableSlot(gss->base_slot);
+
+}
 
 /*
  * ExecReScanGpuScan
  */
 static void
 ExecReScanGpuScan(CustomScanState *node)
-{}
+{
+	GpuScanState   *gss = (GpuScanState *)node;
+
+	if (gss->conn)
+	{
+		gpuClientCloseSession(gss->conn);
+		gss->conn = NULL;
+	}
+}
 
 /*
  * EstimateGpuScanDSM

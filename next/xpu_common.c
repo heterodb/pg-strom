@@ -316,6 +316,26 @@ pgfn_BoolTestExpr(XPU_PGFUNCTION_ARGS)
 }
 
 /*
+ * Projection
+ */
+STATIC_FUNCTION(bool)
+pgfn_Projection(XPU_PGFUNCTION_ARGS)
+{
+	STROM_ELOG(kcxt, "Projection is not implemented");
+	return false;
+}
+
+/*
+ * LoadVars
+ */
+STATIC_FUNCTION(bool)
+pgfn_LoadVars(XPU_PGFUNCTION_ARGS)
+{
+	STROM_ELOG(kcxt, "Projection is not implemented");
+	return false;
+}
+
+/*
  * Catalog of built-in device types
  */
 /*
@@ -349,6 +369,8 @@ PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
     {FuncOpCode__BoolTestExpr_IsUnknown,	pgfn_BoolTestExpr},
     {FuncOpCode__BoolTestExpr_IsNotUnknown,	pgfn_BoolTestExpr},
 #include "xpu_opcodes.h"
+	{FuncOpCode__Projection,                pgfn_Projection},
+	{FuncOpCode__LoadVars,                  pgfn_LoadVars},
 	{FuncOpCode__Invalid, NULL},
 };
 

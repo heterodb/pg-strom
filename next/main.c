@@ -320,6 +320,15 @@ pgstrom_post_planner(Query *parse,
 }
 
 /*
+ * pgstrom_sigpoll_handler
+ */
+static void
+pgstrom_sigpoll_handler(SIGNAL_ARGS)
+{
+	/* do nothing here, but invocation of this handler may wake up epoll(2) / poll(2) */
+}
+
+/*
  * _PG_init
  *
  * Main entrypoint of PG-Strom. It shall be invoked only once when postmaster
@@ -365,4 +374,6 @@ _PG_init(void)
 	/* post planner hook */
 	planner_hook_next = (planner_hook ? planner_hook : standard_planner);
 	planner_hook = pgstrom_post_planner;
+	/* signal handler for wake up */
+	pqsignal(SIGPOLL, pgstrom_sigpoll_handler);
 }

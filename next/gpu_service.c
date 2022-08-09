@@ -482,6 +482,7 @@ gpuClientELog(gpuClient *gclient, const char *fmt, ...)
 	va_start(ap, fmt);
 	off = vsnprintf(resp->data, 1024, fmt, ap);
 	va_end(ap);
+	
 	off = INTALIGN(off + 1);
 	*((uint32_t *)(resp->data + off)) = XpuCommandMagicNumber;
 	resp->length = offsetof(XpuCommand, data) + off + sizeof(uint32_t);
@@ -493,7 +494,8 @@ gpuClientELog(gpuClient *gclient, const char *fmt, ...)
  * gpuservHandleOpenSession
  */
 static bool
-__resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp)
+__resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
+							  char *emsg, size_t emsg_sz)
 {
 	xpu_type_catalog_entry *xpu_type;
 	xpu_function_catalog_entry *xpu_func;
@@ -506,8 +508,9 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp)
 						   HASH_FIND, NULL);
 	if (!xpu_func)
 	{
-		fprintf(stderr, "device function pointer for %u not found.\n",
-				(int)kexp->opcode);
+		snprintf(emsg, emsg_sz,
+				 "device function pointer for opcode:%u not found.",
+				 (int)kexp->opcode);
 		return false;
 	}
 	kexp->fn_dptr = xpu_func->func_dptr;
@@ -518,8 +521,9 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp)
 						   HASH_FIND, NULL);
 	if (!xpu_type)
 	{
-		fprintf(stderr, "device type pointer for %u not found.\n",
-                (int)kexp->rettype);
+		snprintf(emsg, emsg_sz,
+				 "device type pointer for opcode:%u not found.",
+				 (int)kexp->rettype);
 		return false;
 	}
 	kexp->rettype_ops = xpu_type->type_ops;
@@ -530,10 +534,10 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp)
 
 		if (VARSIZE(kexp) < (pos + VARSIZE(arg) - (char *)kexp))
 		{
-			fprintf(stderr, "corrupted XPU code\n");
+			snprintf(emsg, emsg_sz, "Corrupted XPU code.");
 			return false;
 		}
-		if (!__resolveDevicePointersWalker(gmodule, arg))
+		if (!__resolveDevicePointersWalker(gmodule, arg, emsg, emsg_sz))
 			return false;
 		pos += MAXALIGN(VARSIZE(arg));
 	}
@@ -541,29 +545,35 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp)
 }
 
 static bool
-__resolveDevicePointers(gpuModule *gmodule, kern_session_info *session)
+__resolveDevicePointers(gpuModule *gmodule,
+						kern_session_info *session,
+						char *emsg, size_t emsg_sz)
 {
 	xpu_encode_info	*encode = SESSION_ENCODE(session);
 	kern_expression *kexp;
-	
+
+	fprintf(stderr, "-- xpucode_scan_quals --------\n");
 	if (session->xpucode_scan_quals)
 	{
 		kexp = (kern_expression *)((char *)session + session->xpucode_scan_quals);
-		if (!__resolveDevicePointersWalker(gmodule, kexp))
+		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
 			return false;
 	}
+	fprintf(stderr, "-- xpucode_scan_proj_prep --------\n");
 	if (session->xpucode_scan_proj_prep)
 	{
 		kexp = (kern_expression *)((char *)session + session->xpucode_scan_proj_prep);
-		if (!__resolveDevicePointersWalker(gmodule, kexp))
+		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
 			return false;
 	}
+	fprintf(stderr, "-- xpucode_scan_proj_exec --------\n");
 	if (session->xpucode_scan_proj_exec)
 	{
 		kexp = (kern_expression *)((char *)session + session->xpucode_scan_proj_exec);
-		if (!__resolveDevicePointersWalker(gmodule, kexp))
+		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
 			return false;
 	}
+	fprintf(stderr, "------------------------------\n");
 
 	if (encode)
 	{
@@ -574,7 +584,8 @@ __resolveDevicePointers(gpuModule *gmodule, kern_session_info *session)
 		{
 			if (!catalog[i].enc_mblen || catalog[i].enc_maxlen < 1)
 			{
-				fprintf(stderr, "encode [%s] was not found.\n", encode->encname);
+				snprintf(emsg, emsg_sz,
+						 "encode [%s] was not found.", encode->encname);
 				return false;
 			}
 			if (strcmp(encode->encname, catalog[i].encname) == 0)
@@ -596,6 +607,7 @@ gpuservHandleOpenSession(XpuCommand *xcmd)
 	gpuModule  *gmodule;
 	kern_session_info *session = (kern_session_info *)xcmd;
 	XpuCommand	resp;
+	char		emsg[512];
 
 	if (gclient->session)
 	{
@@ -608,10 +620,10 @@ gpuservHandleOpenSession(XpuCommand *xcmd)
 		gmodule = &gcontext->normal;
 	else
 		gmodule = &gcontext->debug;
-	if (!__resolveDevicePointers(gmodule, session))
+	if (!__resolveDevicePointers(gmodule, session, emsg, sizeof(emsg)))
 	{
 		cuMemFree((CUdeviceptr)session);
-		gpuClientELog(gclient, "failed on device pointer lookup");
+		gpuClientELog(gclient, "%s", emsg);
 		return;
 	}
 	gclient->session = session;
@@ -1062,6 +1074,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 	CUresult	rc;
 	int			i, status;
 	struct sockaddr_un addr;
+	struct epoll_event ev;
 
 	/* gpuContext allocation */
 	gcontext = calloc(1, SizeOfGpuContext);
@@ -1091,6 +1104,12 @@ gpuservSetupGpuContext(int cuda_dindex)
 			elog(ERROR, "failed on bind('%s'): %m", addr.sun_path);
 		if (listen(gcontext->serv_fd, 32) != 0)
 			elog(ERROR, "failed on listen(2): %m");
+		ev.events = EPOLLIN;
+		ev.data.ptr = gcontext;
+		if (epoll_ctl(gpuserv_epoll_fdesc,
+					  EPOLL_CTL_ADD,
+					  gcontext->serv_fd, &ev) != 0)
+			elog(ERROR, "failed on epoll_ctl(2): %m");
 
 		/* Setup raw CUDA context */
 		rc = cuDeviceGet(&gcontext->cuda_device, dattrs->DEV_ID);

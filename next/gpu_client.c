@@ -17,7 +17,7 @@ struct GpuConnection
 {
 	dlist_node		chain;	/* link to gpuserv_connection_slots */
 	int				cuda_dindex;
-	pgsocket		sockfd;
+	volatile pgsocket sockfd;
 	ResourceOwner	resowner;
 	pthread_t		worker;
 	pthread_mutex_t	mutex;
@@ -43,11 +43,13 @@ __gpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
 {
 	GpuConnection *conn = __priv;
 
+	xcmd->priv = conn;
 	pthreadMutexLock(&conn->mutex);
 	Assert(conn->num_running_tasks > 0);
 	dlist_push_tail(&conn->ready_commands_list, &xcmd->chain);
 	conn->num_running_tasks--;
 	pthreadMutexUnlock(&conn->mutex);
+	SetLatch(MyLatch);
 }
 
 static void *
@@ -59,9 +61,13 @@ __gpuConnectSessionWorker(void *__priv)
 	for (;;)
 	{
 		struct pollfd pfd;
+		int		sockfd;
 		int		nevents;
 
-		pfd.fd = conn->sockfd;
+		sockfd = conn->sockfd;
+		if (sockfd < 0)
+			break;
+		pfd.fd = sockfd;
 		pfd.events = POLLIN;
 		pfd.revents = 0;
 		nevents = poll(&pfd, 1, -1);
@@ -104,6 +110,25 @@ __gpuConnectSessionWorker(void *__priv)
 }
 
 /*
+ * gpuClientSendCommand
+ */
+void
+gpuClientSendCommand(GpuConnection *conn, XpuCommand *xcmd)
+{
+	int		sockfd = conn->sockfd;
+	ssize_t	nbytes;
+
+	pthreadMutexLock(&conn->mutex);
+	conn->num_running_tasks++;
+	pthreadMutexUnlock(&conn->mutex);
+
+	nbytes = __writeFile(sockfd, xcmd, xcmd->length);
+	if (nbytes != xcmd->length)
+		elog(ERROR, "unable to send XPU command to GPU service (%zd of %u): %m",
+			 nbytes, xcmd->length);
+}
+
+/*
  * gpuClientGetResponse
  */
 XpuCommand *
@@ -111,7 +136,7 @@ gpuClientGetResponse(GpuConnection *conn, long timeout)
 {
 	XpuCommand *xcmd = NULL;
 	dlist_node *dnode;
-	TimestampTz	ts_expired = 0;
+	TimestampTz	ts_expired;
 	TimestampTz	ts_curr;
 	int			ev, flags = WL_LATCH_SET | WL_POSTMASTER_DEATH;
 
@@ -150,10 +175,13 @@ gpuClientGetResponse(GpuConnection *conn, long timeout)
 			elog(FATAL, "unexpected postmaster dead");
 		if (ev & WL_TIMEOUT)
 			break;
-		ts_curr = GetCurrentTimestamp() / 1000L;
-		if (ts_expired <= ts_curr)
-			break;
-		timeout = ts_expired - ts_curr;
+		if (flags & WL_TIMEOUT)
+		{
+			ts_curr = GetCurrentTimestamp() / 1000L;
+			if (ts_expired <= ts_curr)
+				break;
+			timeout = ts_expired - ts_curr;
+		}
 		CHECK_FOR_INTERRUPTS();
 	}
 	return NULL;
@@ -180,15 +208,12 @@ static GpuConnection *
 __gpuClientInitSession(GpuConnection *conn,
 					   const kern_session_info *session)
 {
-	ssize_t		nbytes;
 	XpuCommand *resp;
 
-	nbytes = __writeFile(conn->sockfd, session, session->length);
-	if (nbytes != session->length)
-		elog(ERROR, "unable to initialize GPU service session");
+	gpuClientSendCommand(conn, (XpuCommand *)session);
 	resp = gpuClientGetResponse(conn, -1);
 	if (resp->tag != XpuCommandTag__Success)
-		elog(ERROR, "failed on GPU:OpenSession");
+		elog(ERROR, "GPU:OpenSession failed - %s", resp->data);
 	gpuClientPutResponse(resp);
 
 	return conn;
@@ -290,8 +315,11 @@ gpuClientCloseSession(GpuConnection *conn)
 	XpuCommand *xcmd;
 	dlist_node *dnode;
 
-	dlist_delete(&conn->chain);
+	/* ensure termination of worker thread */
 	close(conn->sockfd);
+	conn->sockfd = -1;
+	pg_memory_barrier();
+	pthread_kill(conn->worker, SIGPOLL);
 	pthread_join(conn->worker, NULL);
 
 	while (!dlist_is_empty(&conn->ready_commands_list))
@@ -306,6 +334,7 @@ gpuClientCloseSession(GpuConnection *conn)
 		xcmd = dlist_container(XpuCommand, chain, dnode);
 		free(xcmd);
 	}
+	dlist_delete(&conn->chain);
 	free(conn);
 }
 

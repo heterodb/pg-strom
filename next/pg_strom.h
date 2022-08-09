@@ -347,6 +347,7 @@ typedef struct GpuConnection	GpuConnection;
 extern GpuConnection *gpuClientOpenSession(const Bitmapset *gpuset,
 										   const kern_session_info *session);
 extern void		gpuClientCloseSession(GpuConnection *conn);
+extern void		gpuClientSendCommand(GpuConnection *conn, XpuCommand *xcmd);
 extern XpuCommand *gpuClientGetResponse(GpuConnection *conn, long timeout);
 extern void		gpuClientPutResponse(XpuCommand *xcmd);
 

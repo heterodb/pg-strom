@@ -314,6 +314,7 @@ restart:
 							 errmsg_label, temp->length);
 					return -1;
 				}
+				memcpy(xcmd, temp, temp->length);
 				attach_f(priv, xcmd);
 				count++;
 

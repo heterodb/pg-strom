@@ -154,10 +154,15 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 
 		dtype = pgstrom_devtype_lookup(attr->atttypid);
 		if (!dtype)
+		{
+			ReleaseTupleDesc(tupdesc);
 			return NULL;
+		}
 		extra_flags &= dtype->type_flags;
 		subtypes[j] = dtype;
 	}
+	ReleaseTupleDesc(tupdesc);
+
 	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 	dtype = palloc0(offsetof(devtype_info,
 							 comp_subtypes[tupdesc->natts]));
@@ -932,8 +937,8 @@ __codegen_var_expression(codegen_context *context,
 	forboth (lc1, context->kvars_depth,
 			 lc2, context->kvars_resno)
 	{
-		int		__depth = kvar_depth;
-		int		__resno = kvar_resno;
+		int		__depth = lfirst_int(lc1);
+		int		__resno = lfirst_int(lc2);
 
 		if (kvar_depth == __depth && kvar_resno == __resno)
 			goto found;
@@ -1526,7 +1531,7 @@ __xpucode_loadvars_cstring(StringInfo buf,
 		else if (css->ss.ss_currentRelation && __depth == 0)
 		{
 			TupleDesc	tupdesc = RelationGetDescr(css->ss.ss_currentRelation);
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, __resno);
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, __resno - 1);
 			CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
 			List	   *dcontext;
 			Var		   *kvar;
