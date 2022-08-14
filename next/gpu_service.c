@@ -517,16 +517,16 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
 
 	/* lookup device type */
 	xpu_type = hash_search(gmodule->cuda_type_htab,
-						   &kexp->rettype,
+						   &kexp->exptype,
 						   HASH_FIND, NULL);
 	if (!xpu_type)
 	{
 		snprintf(emsg, emsg_sz,
 				 "device type pointer for opcode:%u not found.",
-				 (int)kexp->rettype);
+				 (int)kexp->exptype);
 		return false;
 	}
-	kexp->rettype_ops = xpu_type->type_ops;
+	kexp->exptype_ops = xpu_type->type_ops;
 
 	for (i=0; i < kexp->nargs; i++)
 	{
@@ -869,6 +869,7 @@ __setupDevTypeLinkageTable(gpuModule *gmodule)
 		xpu_type_catalog_entry *entry;
 		bool		found;
 
+		elog(LOG, "type_opcode = %u", (int)type_opcode);
 		entry = hash_search(htab, &type_opcode, HASH_ENTER, &found);
 		if (found)
 			elog(ERROR, "Bug? duplicated TypeOpCode: %u", (uint32_t)type_opcode);

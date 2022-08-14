@@ -10,21 +10,6 @@
  * it under the terms of the PostgreSQL License.
  */
 
-/* extension names */
-#ifndef EXPR_OPCODE
-#define EXPR_OPCODE(NAME)
-#endif
-
-/*
- * PostgreSQL Expressions
- */
-EXPR_OPCODE(Var)
-EXPR_OPCODE(Const)
-EXPR_OPCODE(Param)
-EXPR_OPCODE(FuncExpr)
-EXPR_OPCODE(OpExpr)
-EXPR_OPCODE(BoolExpr)
-
 /*
  * PostgreSQL Device Types
  */

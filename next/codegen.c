@@ -39,9 +39,11 @@ static struct {
 } devtype_catalog[] = {
 #include "xpu_opcodes.h"
 	/* alias device data types */
-	{NULL, "varchar", TypeOpCode__text, DEVKERN__ANY, devtype_text_hash, TEXTOID},
-	{NULL, "cidr",    TypeOpCode__inet, DEVKERN__ANY, devtype_inet_hash, INETOID},
-	{NULL, NULL, TypeOpCode__Invalid, 0, NULL, InvalidOid}
+	{NULL, "varchar", TypeOpCode__text, DEVKERN__ANY,
+	 devtype_text_hash, sizeof(xpu_text_t), TEXTOID},
+	{NULL, "cidr",    TypeOpCode__inet, DEVKERN__ANY,
+	 devtype_inet_hash, sizeof(xpu_inet_t), INETOID},
+	{NULL, NULL, TypeOpCode__Invalid, 0, NULL, 0, InvalidOid}
 };
 
 static const char *
@@ -872,9 +874,9 @@ codegen_const_expression(codegen_context *context, Const *con)
 		memset(kexp, 0, sz);
 		SET_VARSIZE(kexp, sz);
 		kexp->opcode = FuncOpCode__ConstExpr;
-		kexp->rettype = dtype->type_code;
+		kexp->exptype = dtype->type_code;
 		kexp->u.c.const_type = con->consttype;
-        kexp->u.c.const_isnull = con->constisnull;
+		kexp->u.c.const_isnull = con->constisnull;
 		if (!con->constisnull)
 		{
 			if (con->constbyval)
@@ -909,7 +911,7 @@ codegen_param_expression(codegen_context *context, Param *param)
 		memset(&kexp, 0, sizeof(kexp));
 		SET_VARSIZE(&kexp, SizeOfKernExprParam);
 		kexp.opcode = FuncOpCode__ParamExpr;
-		kexp.rettype = dtype->type_code;
+		kexp.exptype = dtype->type_code;
 		kexp.u.p.param_id = param->paramid;
 		__appendBinaryStringInfo(context->buf, &kexp,
 								 SizeOfKernExprParam);
@@ -961,7 +963,7 @@ found:
 		memset(&kexp, 0, sizeof(kexp));
 		kexp.opcode = FuncOpCode__VarExpr;
 		kexp.nargs = 0;
-		kexp.rettype = (dtype ? dtype->type_code : TypeOpCode__unsupported);
+		kexp.exptype = (dtype ? dtype->type_code : TypeOpCode__unsupported);
 		kexp.u.v.var_typlen = typlen;
 		kexp.u.v.var_typbyval = typbyval;
 		kexp.u.v.var_typalign = typealign_get_width(typalign);
@@ -1004,7 +1006,7 @@ __codegen_func_expression(codegen_context *context,
 	memset(&kexp, 0, sizeof(kexp));
 	kexp.opcode = dfunc->func_code;
 	kexp.nargs = list_length(func_args);
-	kexp.rettype = dtype->type_code;
+	kexp.exptype = dtype->type_code;
 	if (buf)
 		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
 	foreach (lc, func_args)
@@ -1069,7 +1071,7 @@ codegen_bool_expression(codegen_context *context, BoolExpr *b)
 		default:
 			__Elog("BoolExpr has unknown bool operation (%d)", (int)b->boolop);
 	}
-	kexp.rettype = TypeOpCode__bool;
+	kexp.exptype = TypeOpCode__bool;
 	if (buf)
 		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
 	foreach (lc, b->args)
@@ -1103,7 +1105,7 @@ codegen_nulltest_expression(codegen_context *context, NullTest *nt)
 			__Elog("NullTest has unknown NullTestType (%d)", (int)nt->nulltesttype);
 	}
 	kexp.nargs = 1;
-	kexp.rettype = TypeOpCode__bool;
+	kexp.exptype = TypeOpCode__bool;
 	if (buf)
 		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
 	if (codegen_expression_walker(context, nt->arg, false) < 0)
@@ -1146,7 +1148,7 @@ codegen_booleantest_expression(codegen_context *context, BooleanTest *bt)
 				   (int)bt->booltesttype);
 	}
 	kexp.nargs = 1;
-	kexp.rettype = TypeOpCode__bool;
+	kexp.exptype = TypeOpCode__bool;
 	if (buf)
 		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
 	if (codegen_expression_walker(context, bt->arg, false) < 0)
@@ -1225,41 +1227,39 @@ codegen_expression_walker(codegen_context *context, Expr *expr,
 
 static bytea *
 attach_varloads_xpucode(codegen_context *context,
-						kern_expression *kexp)
+						kern_expression *arg)
 {
 	StringInfoData	buf;
-	kern_expression *vl;
+	kern_expression kexp;
+	kern_preload_vars *lv;
 	ListCell   *lc1, *lc2;
-	size_t		sz;
 	int			nloads = list_length(context->kvars_depth);
-	int			i, j, k;
+	int			i, j, k, sz;
 
-	sz = MAXALIGN(offsetof(kern_expression,
-						   u.ld.kvars[nloads]));
-	vl = alloca(sz);
-	memset(vl, 0, sz);
-	vl->opcode = FuncOpCode__LoadVars;
-	if (kexp)
+	memset(&kexp, 0, sizeof(kern_expression));
+	kexp.opcode = FuncOpCode__LoadVars;
+	if (arg)
 	{
-		vl->nargs = 1;
-		vl->rettype = kexp->rettype;
+		kexp.nargs = 1;
+		kexp.exptype = arg->exptype;
 	}
 	else
 	{
-		vl->nargs = 0;
-		vl->rettype = TypeOpCode__bool;
+		kexp.nargs = 0;
+        kexp.exptype = TypeOpCode__bool;
 	}
-	vl->u.ld.nloads = nloads;
+	
+	sz = MAXALIGN(offsetof(kern_preload_vars, kvars[nloads]));
+	lv = alloca(sz);
+	memset(lv, 0, sz);
+	lv->nloads = nloads;
 	i = 0;
 	forboth (lc1, context->kvars_depth,
 			 lc2, context->kvars_resno)
 	{
-		int		__depth = lfirst_int(lc1);
-		int		__resno = lfirst_int(lc2);
-
-		vl->u.ld.kvars[i].var_depth = __depth;
-		vl->u.ld.kvars[i].var_resno = __resno;
-		vl->u.ld.kvars[i].var_slot_id = i;
+		lv->kvars[i].var_depth = lfirst_int(lc1);
+		lv->kvars[i].var_resno = lfirst_int(lc2);
+		lv->kvars[i].var_slot_id = i;
 		i++;
 	}
 	/* sort by depth/resno */
@@ -1268,29 +1268,31 @@ attach_varloads_xpucode(codegen_context *context,
 		k = i;
 		for (j=i+1; j < nloads; j++)
 		{
-			if (vl->u.ld.kvars[j].var_depth < vl->u.ld.kvars[k].var_depth ||
-				(vl->u.ld.kvars[j].var_depth == vl->u.ld.kvars[k].var_depth &&
-				 vl->u.ld.kvars[j].var_resno < vl->u.ld.kvars[k].var_resno))
+			if (lv->kvars[j].var_depth < lv->kvars[k].var_depth ||
+				(lv->kvars[j].var_depth == lv->kvars[k].var_depth &&
+				 lv->kvars[j].var_resno < lv->kvars[k].var_resno))
 				k = j;
 		}
 		if (i != k)
 		{
-			int16_t		__depth = vl->u.ld.kvars[i].var_depth;
-			int16_t		__resno = vl->u.ld.kvars[i].var_resno;
-			uint32_t	__slot_id = vl->u.ld.kvars[i].var_slot_id;
+			int16_t		__depth = lv->kvars[i].var_depth;
+			int16_t		__resno = lv->kvars[i].var_resno;
+			uint32_t	__slot_id = lv->kvars[i].var_slot_id;
 
-			vl->u.ld.kvars[i].var_depth   = vl->u.ld.kvars[k].var_depth;
-			vl->u.ld.kvars[i].var_resno   = vl->u.ld.kvars[k].var_resno;
-			vl->u.ld.kvars[i].var_slot_id = vl->u.ld.kvars[k].var_slot_id;
-			vl->u.ld.kvars[k].var_depth   = __depth;
-			vl->u.ld.kvars[k].var_resno   = __resno;
-			vl->u.ld.kvars[k].var_slot_id = __slot_id;
+			lv->kvars[i].var_depth   = lv->kvars[k].var_depth;
+			lv->kvars[i].var_resno   = lv->kvars[k].var_resno;
+			lv->kvars[i].var_slot_id = lv->kvars[k].var_slot_id;
+			lv->kvars[k].var_depth   = __depth;
+			lv->kvars[k].var_resno   = __resno;
+			lv->kvars[k].var_slot_id = __slot_id;
 		}
 	}
 	initStringInfo(&buf);
-	appendBinaryStringInfo(&buf, (const char *)vl, sz);
-	if (kexp)
-		appendBinaryStringInfo(&buf, (const char *)kexp, VARSIZE(kexp));
+	appendBinaryStringInfo(&buf, (const char *)&kexp,
+						   offsetof(kern_expression, u.data));
+	if (arg)
+		appendBinaryStringInfo(&buf, (const char *)arg, VARSIZE(arg));
+	__appendBinaryStringInfo(&buf, lv, sz);
 	SET_VARSIZE(buf.data, buf.len);
 
 	return (bytea *)buf.data;
@@ -1366,6 +1368,7 @@ pgstrom_build_projection(bytea **p_xpucode_proj_prep,
 	codegen_context	   *context;
 	StringInfoData		buf;
 	kern_expression		kexp;
+	int					nargs = 0;
 	ListCell		   *lc;
 
 	context = alloca(offsetof(codegen_context, rel_tlist[num_rels]));
@@ -1384,16 +1387,25 @@ pgstrom_build_projection(bytea **p_xpucode_proj_prep,
 	context->num_rels = num_rels;
 
 	/* FuncOp__Projection */
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry *tle = lfirst(lc);
+
+		if (!tle->resjunk)
+			nargs++;
+	}
 	memset(&kexp, 0, sizeof(kexp));
 	kexp.opcode = FuncOpCode__Projection;
-	kexp.nargs = list_length(tlist_dev);
-	kexp.rettype = TypeOpCode__record;
+	kexp.nargs = nargs;
+	kexp.exptype = TypeOpCode__record;
 	appendBinaryStringInfo(&buf, (char *)&kexp,
 						   offsetof(kern_expression, u.data));
 	foreach (lc, tlist_dev)
 	{
 		TargetEntry *tle = lfirst(lc);
 
+		if (tle->resjunk)
+			continue;
 		context->top_expr = tle->expr;
 		codegen_expression_walker(context, tle->expr, true);
 	}
@@ -1493,18 +1505,25 @@ __xpucode_const_cstring(StringInfo buf,
 	}
 }
 
-static char *
+static void
 __xpucode_loadvars_cstring(StringInfo buf,
 						   const kern_expression *kexp,
 						   const CustomScanState *css,
 						   ExplainState *es,
 						   List *ancestors)
 {
-	bool	verbose = false;
-	int		i;
+	const char *pos = kexp->u.data;
+	const kern_preload_vars *lv;
+	bool		verbose = false;
+	int			i;
 
+	Assert(kexp->nargs == 0 || kexp->nargs == 1);
+	if (kexp->nargs > 0)
+		pos += MAXALIGN(VARSIZE(pos));
+	lv = (const kern_preload_vars *)pos;
+	
 	appendStringInfo(buf, "{LoadVars:");
-	if (kexp->u.ld.nloads > 0)
+	if (lv->nloads > 0)
 		appendStringInfo(buf, " kvars=[");
 
 	if (css)
@@ -1513,11 +1532,11 @@ __xpucode_loadvars_cstring(StringInfo buf,
 		verbose = (es->verbose || cscan->custom_plans != NIL);
 	}
 
-	for (i=0; i < kexp->u.ld.nloads; i++)
+	for (i=0; i < lv->nloads; i++)
 	{
-		int16_t		__depth = kexp->u.ld.kvars[i].var_depth;
-		int16_t		__resno = kexp->u.ld.kvars[i].var_resno;
-		uint32_t	__slot_id = kexp->u.ld.kvars[i].var_slot_id;
+		int16_t		__depth   = lv->kvars[i].var_depth;
+		int16_t		__resno   = lv->kvars[i].var_resno;
+		uint32_t	__slot_id = lv->kvars[i].var_slot_id;
 
 		if (i > 0)
 			appendStringInfo(buf, ", ");
@@ -1543,7 +1562,7 @@ __xpucode_loadvars_cstring(StringInfo buf,
 						   attr->atttypid,
 						   attr->atttypmod,
 						   attr->attcollation, 0);
-			appendStringInfo(buf, "(slot_id=%u, %s)",
+			appendStringInfo(buf, "%u:%s",
 							 __slot_id,
 							 deparse_expression((Node *)kvar,
 												dcontext,
@@ -1565,18 +1584,15 @@ __xpucode_loadvars_cstring(StringInfo buf,
 			dcontext = set_deparse_context_plan(es->deparse_cxt,
 												plan, ancestors);
 			tle = list_nth(plan->targetlist, __resno - 1);
-			appendStringInfo(buf, "(slot_id=%u, %s)",
+			appendStringInfo(buf, "%u:%s",
 							 __slot_id,
 							 deparse_expression((Node *)tle->expr,
 												dcontext,
 												verbose, false));
 		}
 	}
-	if (kexp->u.ld.nloads > 0)
+	if (lv->nloads > 0)
 		appendStringInfo(buf, "]");
-
-	return (char *)kexp + MAXALIGN(offsetof(kern_expression,
-											u.ld.kvars[kexp->u.ld.nloads]));
 }
 
 static void
@@ -1586,10 +1602,8 @@ __xpucode_to_cstring(StringInfo buf,
 					 ExplainState *es,				/* optional */
 					 List *ancestors)				/* optionsl */
 {
-	devtype_info   *dtype = devtype_lookup_by_opcode(kexp->rettype);
+	devtype_info   *dtype = devtype_lookup_by_opcode(kexp->exptype);
 	devfunc_info   *dfunc = devfunc_lookup_by_opcode(kexp->opcode);
-	const char	   *pos = kexp->u.data;
-	int				i;
 
 	switch (kexp->opcode)
 	{
@@ -1646,7 +1660,7 @@ __xpucode_to_cstring(StringInfo buf,
 			appendStringInfo(buf, "{Projection");
 			break;
 		case FuncOpCode__LoadVars:
-			pos = __xpucode_loadvars_cstring(buf, kexp, css, es, ancestors);
+			__xpucode_loadvars_cstring(buf, kexp, css, es, ancestors);
 			break;
 		default:
 			appendStringInfo(buf, "{Func::%s(%s)",
@@ -1656,7 +1670,13 @@ __xpucode_to_cstring(StringInfo buf,
 	}
 	if (kexp->nargs > 0)
 	{
-		appendStringInfo(buf, " args=[");
+		const char *pos = kexp->u.data;
+		int			i;
+
+		if (kexp->nargs == 1)
+			appendStringInfo(buf, " arg=");
+		else
+			appendStringInfo(buf, " args=[");
 		for (i=0; i < kexp->nargs; i++)
 		{
 			const kern_expression *arg = (const kern_expression *)pos;
@@ -1671,7 +1691,8 @@ __xpucode_to_cstring(StringInfo buf,
 			__xpucode_to_cstring(buf, arg, css, es, ancestors);
 			pos += MAXALIGN(VARSIZE(arg));
 		}
-		appendStringInfoChar(buf, ']');
+		if (kexp->nargs > 1)
+			appendStringInfoChar(buf, ']');
 	}
 	appendStringInfoChar(buf, '}');
 }

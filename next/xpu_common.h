@@ -1283,6 +1283,7 @@ typedef enum {
 	FuncOpCode__ConstExpr,
 	FuncOpCode__ParamExpr,
 	FuncOpCode__VarExpr,
+	//FuncOpCode__VarAsIsExpr ... only used in projection
 	FuncOpCode__BoolExpr_And,
 	FuncOpCode__BoolExpr_Or,
 	FuncOpCode__BoolExpr_Not,
@@ -1313,25 +1314,17 @@ struct kern_expression
 	FuncOpCode		opcode;
 	xpu_function_t	fn_dptr;		/* to be set by xPU service */
 	int				nargs;
-	TypeOpCode		rettype;
-	const xpu_datum_operators *rettype_ops;	/* to be set by xPU service */
+	TypeOpCode		exptype;
+	const xpu_datum_operators *exptype_ops;	/* to be set by xPU service */
 	union {
-		char		data[1]			__attribute__((aligned(MAXIMUM_ALIGNOF)));
+		char			data[1]			__attribute__((aligned(MAXIMUM_ALIGNOF)));
 		struct {
-			int		nloads;
-			struct {
-				int16_t		var_depth;
-				int16_t		var_resno;
-				uint32_t	var_slot_id;
-			} kvars[1];
-		} ld;		/* LoadVars */
-		struct {
-			Oid		const_type;
-			bool	const_isnull;
-			char	const_value[1]	__attribute__((aligned(MAXIMUM_ALIGNOF)));
+			Oid			const_type;
+			bool		const_isnull;
+			char		const_value[1]	__attribute__((aligned(MAXIMUM_ALIGNOF)));
 		} c;		/* ConstExpr */
 		struct {
-			uint32_t param_id;
+			uint32_t	param_id;
 		} p;		/* ParamExpr */
 		struct {
 			int16_t		var_typlen;
@@ -1341,13 +1334,24 @@ struct kern_expression
 		} v;		/* VarExpr */
 	} u;
 };
+
+typedef struct
+{
+	int				nloads;
+	struct {
+		int16_t		var_depth;
+		int16_t		var_resno;
+		uint32_t	var_slot_id;
+	} kvars[1];
+} kern_preload_vars;
+
 #define EXEC_KERN_EXPRESSION(__kcxt,__kexp,__retval)	\
 	(__kexp)->fn_dptr((__kcxt),(__kexp),(xpu_datum_t *)__retval)
 #define KEXP_OVERRUN_CHECKS(__kexp,__arg)						\
 	assert((char *)(__arg) + VARSIZE(__arg) <= (char *)(__kexp) + VARSIZE(__kexp))
 
 INLINE_FUNCTION(const kern_expression *)
-__KEXP_FIRST_ARG(int nargs, const kern_expression *kexp, TypeOpCode rettype)
+__KEXP_FIRST_ARG(int nargs, const kern_expression *kexp, TypeOpCode exptype)
 {
 	const kern_expression *arg = NULL;
 
@@ -1356,25 +1360,25 @@ __KEXP_FIRST_ARG(int nargs, const kern_expression *kexp, TypeOpCode rettype)
 	{
 		arg = ((const kern_expression *)((kexp)->u.data));
 		assert((char *)arg + VARSIZE(arg) <= (char *)kexp + VARSIZE(kexp));
-		assert(arg->rettype == rettype || rettype == TypeOpCode__Invalid);
+		assert(arg->exptype == exptype || exptype == TypeOpCode__Invalid);
 	}
 	return arg;
 }
-#define KEXP_FIRST_ARG(__nargs, __rettype)		\
-	__KEXP_FIRST_ARG((__nargs), kexp, TypeOpCode__##__rettype)
+#define KEXP_FIRST_ARG(__nargs, __exptype)		\
+	__KEXP_FIRST_ARG((__nargs), kexp, TypeOpCode__##__exptype)
 
 INLINE_FUNCTION(const kern_expression *)
 __KEXP_NEXT_ARG(const kern_expression *kexp,
-				const kern_expression *prev, TypeOpCode rettype)
+				const kern_expression *prev, TypeOpCode exptype)
 {
 	const kern_expression *next = (const kern_expression *)
 		((const char *)prev + MAXALIGN(VARSIZE(prev)));
 	assert((char *)next + VARSIZE(next) <= (char *)kexp + VARSIZE(kexp));
-	assert(next->rettype == rettype);
+	assert(next->exptype == exptype);
 	return next;
 }
-#define KEXP_NEXT_ARG(__prev, __rettype)		\
-	__KEXP_NEXT_ARG(kexp, (__prev), TypeOpCode__##__rettype)
+#define KEXP_NEXT_ARG(__prev, __exptype)		\
+	__KEXP_NEXT_ARG(kexp, (__prev), TypeOpCode__##__exptype)
 
 #define SizeOfKernExpr(__PAYLOAD_SZ)						\
 	(offsetof(kern_expression, u.data) + (__PAYLOAD_SZ))

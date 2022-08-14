@@ -136,7 +136,7 @@ gpuClientGetResponse(GpuConnection *conn, long timeout)
 {
 	XpuCommand *xcmd = NULL;
 	dlist_node *dnode;
-	TimestampTz	ts_expired;
+	TimestampTz	ts_expired = INT64_MAX;
 	TimestampTz	ts_curr;
 	int			ev, flags = WL_LATCH_SET | WL_POSTMASTER_DEATH;
 

@@ -134,7 +134,7 @@ pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 		addr = NULL;
 	else
 		addr = kexp->u.c.const_value;
-	return kexp->rettype_ops->xpu_datum_ref(kcxt, __result, NULL, addr, -1);
+	return kexp->exptype_ops->xpu_datum_ref(kcxt, __result, NULL, addr, -1);
 }
 
 STATIC_FUNCTION(bool)
@@ -146,7 +146,7 @@ pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 
 	if (param_id < session->nparams && session->poffset[param_id] != 0)
 		addr = (char *)session + session->poffset[param_id];
-	return kexp->rettype_ops->xpu_datum_ref(kcxt, __result, NULL, addr, -1);
+	return kexp->exptype_ops->xpu_datum_ref(kcxt, __result, NULL, addr, -1);
 }
 
 STATIC_FUNCTION(bool)
@@ -169,7 +169,7 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 		addr = NULL;
 		len = -1;
 	}
-	return kexp->rettype_ops->xpu_datum_ref(kcxt, __result, cmeta, addr, len);
+	return kexp->exptype_ops->xpu_datum_ref(kcxt, __result, cmeta, addr, len);
 }
 
 STATIC_FUNCTION(bool)
@@ -257,7 +257,7 @@ pgfn_NullTestExpr(XPU_PGFUNCTION_ARGS)
 	xpu_datum_t	   *status;
 	const kern_expression *arg = KEXP_FIRST_ARG(1,Invalid);
 
-	status = (xpu_datum_t *)alloca(arg->rettype_ops->xpu_type_sizeof);
+	status = (xpu_datum_t *)alloca(arg->exptype_ops->xpu_type_sizeof);
 	if (!EXEC_KERN_EXPRESSION(kcxt, arg, status))
 		return false;
 	result->ops = &xpu_bool_ops;
@@ -345,6 +345,7 @@ pgfn_LoadVars(XPU_PGFUNCTION_ARGS)
 	{ TypeOpCode__##NAME, &xpu_##NAME##_ops },
 PUBLIC_DATA xpu_type_catalog_entry builtin_xpu_types_catalog[] = {
 #include "xpu_opcodes.h"
+	{ TypeOpCode__unsupported, &xpu_unsupported_ops },
 	{ TypeOpCode__Invalid, NULL }
 };
 

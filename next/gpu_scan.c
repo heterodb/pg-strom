@@ -518,11 +518,13 @@ gpuscan_build_projection(List *tlist,
 		__gpuscan_build_projection_walker((Node *)tle->expr, &context);
 	}
 	vars_list = pull_vars_of_level((Node *)host_quals, 0);
-	__gpuscan_build_projection_walker((Node *)vars_list, &context);
+	foreach (lc, vars_list)
+		__gpuscan_build_projection_walker((Node *)lfirst(lc), &context);
 
 	context.resjunk = true;
 	vars_list = pull_vars_of_level((Node *)dev_quals, 0);
-	__gpuscan_build_projection_walker((Node *)vars_list, &context);
+	foreach (lc, vars_list)
+		__gpuscan_build_projection_walker((Node *)lfirst(lc), &context);
 
 	return context.tlist_dev;
 }
@@ -874,9 +876,21 @@ ExplainGpuScan(CustomScanState *node,
 							gss->gs_info.kern_quals,
 							&gss->css,
 							es, ancestors);
-	ExplainPropertyText("XPU Code", temp.data, es);
+	ExplainPropertyText("GPU Quals", temp.data, es);
 
+	resetStringInfo(&temp);
+	pgstrom_explain_xpucode(&temp,
+							gss->gs_info.kern_proj_prep,
+							&gss->css,
+							es, ancestors);
+	ExplainPropertyText("GPU Proj[p]", temp.data, es);
 
+	resetStringInfo(&temp);
+	pgstrom_explain_xpucode(&temp,
+							gss->gs_info.kern_proj_exec,
+							&gss->css,
+							es, ancestors);
+    ExplainPropertyText("GPU Proj[e]", temp.data, es);
 
 }
 
