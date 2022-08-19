@@ -27,8 +27,7 @@ typedef struct
 	const Bitmapset *gpu_cache_devs; /* device for GpuCache, if any */
 	const Bitmapset *gpu_direct_devs; /* device for GPU-Direct SQL, if any */
 	bytea		   *kern_quals;		/* device qualifiers */
-	bytea		   *kern_proj_prep;	/* VarLoad for projection */
-	bytea		   *kern_proj_exec;	/* device projection */
+	bytea		   *kern_projs;		/* device projection */
 	uint32_t		extra_flags;
 	uint32_t		extra_bufsz;
 	uint32_t		kvars_nslots;
@@ -60,15 +59,8 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 									 -1,
 									 InvalidOid,
 									 -1,
-									 PointerGetDatum(gs_info->kern_proj_prep),
-									 (gs_info->kern_proj_prep == NULL),
-									 false));
-	privs = lappend(privs, makeConst(BYTEAOID,
-									 -1,
-									 InvalidOid,
-									 -1,
-									 PointerGetDatum(gs_info->kern_proj_exec),
-									 (gs_info->kern_proj_exec == NULL),
+									 PointerGetDatum(gs_info->kern_projs),
+									 (gs_info->kern_projs == NULL),
 									 false));
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
 	privs = lappend(privs, makeInteger(gs_info->extra_bufsz));
@@ -101,10 +93,7 @@ deform_gpuscan_info(GpuScanInfo *gs_info, CustomScan *cscan)
 		gs_info->kern_quals	= DatumGetByteaP(con->constvalue);
 	con = list_nth(privs, pindex++);
 	if (!con->constisnull)
-		gs_info->kern_proj_prep = DatumGetByteaP(con->constvalue);
-	con = list_nth(privs, pindex++);
-	if (!con->constisnull)
-		gs_info->kern_proj_exec = DatumGetByteaP(con->constvalue);
+		gs_info->kern_projs = DatumGetByteaP(con->constvalue);
 	gs_info->extra_flags	= intVal(list_nth(privs, pindex++));
 	gs_info->extra_bufsz	= intVal(list_nth(privs, pindex++));
 	gs_info->kvars_nslots   = intVal(list_nth(privs, pindex++));
@@ -418,8 +407,9 @@ GpuScanAddScanPath(PlannerInfo *root,
 	foreach (lc, baserel->baserestrictinfo)
 	{
 		RestrictInfo *rinfo = lfirst(lc);
+		List	   *input_rels_tlist = list_make1(makeInteger(baserel->relid));
 
-		if (pgstrom_gpu_expression(rinfo->clause, 0, NULL, NULL))
+		if (pgstrom_gpu_expression(rinfo->clause, input_rels_tlist, NULL))
 			dev_quals = lappend(dev_quals, rinfo);
 		else
 			host_quals = lappend(host_quals, rinfo);
@@ -465,6 +455,7 @@ GpuScanAddScanPath(PlannerInfo *root,
 typedef struct
 {
 	List	   *tlist_dev;
+	List	   *input_rels_tlist;
 	bool		resjunk;
 } build_projection_context;
 
@@ -484,7 +475,7 @@ __gpuscan_build_projection_walker(Node *node, void *__priv)
 			return false;
 	}
 	if (IsA(node, Var) ||
-		pgstrom_gpu_expression((Expr *)node, 0, NULL, NULL))
+		pgstrom_gpu_expression((Expr *)node, context->input_rels_tlist, NULL))
 	{
 		AttrNumber		resno = list_length(context->tlist_dev) + 1;
 		TargetEntry	   *tle = makeTargetEntry((Expr *)node,
@@ -498,24 +489,49 @@ __gpuscan_build_projection_walker(Node *node, void *__priv)
 }
 
 static List *
-gpuscan_build_projection(List *tlist,
+gpuscan_build_projection(RelOptInfo *baserel,
+						 List *tlist,
 						 List *host_quals,
-						 List *dev_quals)
+						 List *dev_quals,
+						 List *input_rels_tlist)
 {
 	build_projection_context context;
 	List	   *vars_list;
 	ListCell   *lc;
 
-	if (!tlist)
-		return NIL;		/* GPU returns tuple as is? */
 	memset(&context, 0, sizeof(build_projection_context));
-	foreach (lc, tlist)
-	{
-		TargetEntry *tle = lfirst(lc);
+	context.input_rels_tlist = input_rels_tlist;
 
-		if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
-			continue;	/* no need to be carried back from GPU */
-		__gpuscan_build_projection_walker((Node *)tle->expr, &context);
+	if (tlist != NIL)
+	{
+		foreach (lc, tlist)
+		{
+			TargetEntry *tle = lfirst(lc);
+
+			if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
+				continue;
+			__gpuscan_build_projection_walker((Node *)tle->expr, &context);
+		}
+	}
+	else
+	{
+		/*
+		 * When ProjectionPath is on CustomPath(GpuScan), it always assigns
+		 * the result of build_path_tlist() and calls PlanCustomPath method
+		 * with tlist == NIL.
+		 * So, if GPU projection wants to make something valuable, we need
+		 * to check path-target.
+		 * Also don't forget all the Var-nodes to be added must exist at
+		 * the custom_scan_tlist because setrefs.c references this list.
+		 */
+		foreach (lc, baserel->reltarget->exprs)
+		{
+			Node   *node = lfirst(lc);
+
+			if (IsA(node, Const) || IsA(node, Param))
+				continue;
+			__gpuscan_build_projection_walker(node, &context);
+        }
 	}
 	vars_list = pull_vars_of_level((Node *)host_quals, 0);
 	foreach (lc, vars_list)
@@ -546,6 +562,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	List		   *dev_quals = NIL;
 	List		   *dev_costs = NIL;
 	List		   *tlist_dev = NIL;
+	List		   *input_rels_tlist = list_make1(makeInteger(baserel->relid));
 	Bitmapset	   *outer_refs = NULL;
 	uint32_t		qual_extra_bufsz = 0;
 	uint32_t		proj_extra_bufsz = 0;
@@ -576,7 +593,7 @@ PlanGpuScanPath(PlannerInfo *root,
 		int		devcost;
 
 		Assert(exprType((Node *)rinfo->clause) == BOOLOID);
-		if (pgstrom_gpu_expression(rinfo->clause, 0, NULL, &devcost))
+		if (pgstrom_gpu_expression(rinfo->clause, input_rels_tlist, &devcost))
 		{
 			ListCell   *lc1, *lc2;
 			int			pos = 0;
@@ -612,19 +629,20 @@ PlanGpuScanPath(PlannerInfo *root,
 	/* code generation for WHERE-clause */
 	pgstrom_build_xpucode(&gs_info->kern_quals,
 						  (Expr *)dev_quals,
-						  0, NULL,
+						  input_rels_tlist,
 						  &gs_info->extra_flags,
 						  &qual_extra_bufsz,
 						  &qual_kvars_nslots,
 						  &gs_info->used_params);
 	/* code generation for the Projection */
-	tlist_dev = gpuscan_build_projection(tlist,
+	tlist_dev = gpuscan_build_projection(baserel,
+										 tlist,
 										 host_quals,
-										 dev_quals);
-	pgstrom_build_projection(&gs_info->kern_proj_prep,
-							 &gs_info->kern_proj_exec,
+										 dev_quals,
+										 input_rels_tlist);
+	pgstrom_build_projection(&gs_info->kern_projs,
 							 tlist_dev,
-							 0, NULL,
+							 input_rels_tlist,
 							 &gs_info->extra_flags,
 							 &proj_extra_bufsz,
 							 &proj_kvars_nslots,
@@ -775,8 +793,7 @@ ExecGpuScan(CustomScanState *node)
 											 gss->gs_info.extra_bufsz,
 											 gss->gs_info.kvars_nslots,
 											 gss->gs_info.kern_quals,
-											 gss->gs_info.kern_proj_prep,
-											 gss->gs_info.kern_proj_exec);
+											 gss->gs_info.kern_projs);
 		if (gss->gc_state)
 			gpuset = gss->gs_info.gpu_cache_devs;
 		else if (gss->gd_state)
@@ -880,18 +897,10 @@ ExplainGpuScan(CustomScanState *node,
 
 	resetStringInfo(&temp);
 	pgstrom_explain_xpucode(&temp,
-							gss->gs_info.kern_proj_prep,
+							gss->gs_info.kern_projs,
 							&gss->css,
 							es, ancestors);
-	ExplainPropertyText("GPU Proj[p]", temp.data, es);
-
-	resetStringInfo(&temp);
-	pgstrom_explain_xpucode(&temp,
-							gss->gs_info.kern_proj_exec,
-							&gss->css,
-							es, ancestors);
-    ExplainPropertyText("GPU Proj[e]", temp.data, es);
-
+	ExplainPropertyText("GPU Projection", temp.data, es);
 }
 
 /*

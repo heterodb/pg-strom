@@ -67,8 +67,7 @@ pgstrom_build_session_info(PlanState *ps,
 						   uint32_t kcxt_extra_bufsz,
 						   uint32_t kcxt_kvars_nslots,
 						   const bytea *xpucode_scan_quals,
-						   const bytea *xpucode_scan_proj_prep,
-						   const bytea *xpucode_scan_proj_exec)
+						   const bytea *xpucode_scan_projs)
 {
 	ExprContext	   *econtext = ps->ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
@@ -94,17 +93,11 @@ pgstrom_build_session_info(PlanState *ps,
 			__appendBinaryStringInfo(&buf, xpucode_scan_quals,
 									 VARSIZE(xpucode_scan_quals));
 	}
-	if (xpucode_scan_proj_prep)
+	if (xpucode_scan_projs)
 	{
-		session->xpucode_scan_proj_prep =
-			__appendBinaryStringInfo(&buf, xpucode_scan_proj_prep,
-									 VARSIZE(xpucode_scan_proj_prep));
-	}
-	if (xpucode_scan_proj_exec)
-	{
-		session->xpucode_scan_proj_exec =
-			__appendBinaryStringInfo(&buf, xpucode_scan_proj_exec,
-									 VARSIZE(xpucode_scan_proj_exec));
+		session->xpucode_scan_projs =
+			__appendBinaryStringInfo(&buf, xpucode_scan_projs,
+									 VARSIZE(xpucode_scan_projs));
 	}
 
 	/* put executor parameters */

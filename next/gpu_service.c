@@ -559,17 +559,10 @@ __resolveDevicePointers(gpuModule *gmodule,
 		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
 			return false;
 	}
-	fprintf(stderr, "-- xpucode_scan_proj_prep --------\n");
-	if (session->xpucode_scan_proj_prep)
+	fprintf(stderr, "-- xpucode_scan_projs --------\n");
+	if (session->xpucode_scan_projs)
 	{
-		kexp = (kern_expression *)((char *)session + session->xpucode_scan_proj_prep);
-		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-			return false;
-	}
-	fprintf(stderr, "-- xpucode_scan_proj_exec --------\n");
-	if (session->xpucode_scan_proj_exec)
-	{
-		kexp = (kern_expression *)((char *)session + session->xpucode_scan_proj_exec);
+		kexp = (kern_expression *)((char *)session + session->xpucode_scan_projs);
 		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
 			return false;
 	}
@@ -869,7 +862,6 @@ __setupDevTypeLinkageTable(gpuModule *gmodule)
 		xpu_type_catalog_entry *entry;
 		bool		found;
 
-		elog(LOG, "type_opcode = %u", (int)type_opcode);
 		entry = hash_search(htab, &type_opcode, HASH_ENTER, &found);
 		if (found)
 			elog(ERROR, "Bug? duplicated TypeOpCode: %u", (uint32_t)type_opcode);

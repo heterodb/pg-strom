@@ -194,8 +194,7 @@ struct kern_session_info
 	/* xpucode for this session */
 	bool		xpucode_use_debug_code;
 	uint32_t	xpucode_scan_quals;
-	uint32_t	xpucode_scan_proj_prep;
-	uint32_t	xpucode_scan_proj_exec;
+	uint32_t	xpucode_scan_projs;
 	
 	/* database session info */
 	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
@@ -1337,13 +1336,37 @@ struct kern_expression
 
 typedef struct
 {
+	int16_t		var_depth;
+	int16_t		var_resno;
+	uint32_t	var_slot_id;
+} __kern_preload_vars_item;
+
+typedef struct
+{
+	uint32_t		_vl_len;
 	int				nloads;
-	struct {
-		int16_t		var_depth;
-		int16_t		var_resno;
-		uint32_t	var_slot_id;
-	} kvars[1];
+	__kern_preload_vars_item kvars[1];
 } kern_preload_vars;
+
+typedef struct
+{
+	uint32_t		_vl_len;
+	int				nexprs;		/* number of expressions to be computed */
+	int				nattrs;		/* number of destination attribute */
+	uint32_t		slot_id[1];	/* destination or source slot-id */
+	/*
+	 * ----------------------
+	 * ^  slot_id[0]            slot_id to store the projection result that
+	 * |     :                  involves any calculations.
+	 * V  slot_id[nexprs-1]     'nexprs' should equal to 'nargs' of Projection
+	 * ----------------------
+	 * ^  slot_id[nexprs]       source slot_id ordered by the attributes in
+	 * |     :                  the destination tuple. Same slot_id may appear
+	 * |     :                  several times.
+	 * V  slot_id[nexprs + nattrs - 1]
+	 *    slot_id[nexprs + nattrs] --> size of this kern_projection_map.
+	 */
+} kern_projection_map;
 
 #define EXEC_KERN_EXPRESSION(__kcxt,__kexp,__retval)	\
 	(__kexp)->fn_dptr((__kcxt),(__kexp),(xpu_datum_t *)__retval)

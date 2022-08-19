@@ -240,24 +240,20 @@ extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 											Oid func_collid);
 extern void	pgstrom_build_xpucode(bytea **p_xpucode,
 								  Expr *expr,
-								  int num_rels,
-								  List **rel_tlist,
+								  List *input_rels_tlist,
 								  uint32_t *p_extra_flags,
 								  uint32_t *p_extra_bufsz,
 								  uint32_t *p_kvars_nslots,
 								  List **p_used_params);
-extern void	pgstrom_build_projection(bytea **p_xpucode_proj_prep,
-									 bytea **p_xpucode_proj_exec,
+extern void	pgstrom_build_projection(bytea **p_xpucode_proj,
 									 List *tlist_dev,
-									 int num_rels,
-									 List **rel_tlist,
+									 List *input_rels_tlist,
 									 uint32_t *p_extra_flags,
 									 uint32_t *p_extra_bufsz,
 									 uint32_t *p_kvars_nslots,
 									 List **p_used_params);
 extern bool		pgstrom_gpu_expression(Expr *expr,
-									   int num_rels,
-									   List **rel_tlist,
+									   List *input_rels_tlist,
 									   int *p_devcost);
 
 extern void		pgstrom_explain_xpucode(StringInfo buf,
@@ -277,8 +273,7 @@ pgstrom_build_session_info(PlanState *ps,
 						   uint32_t num_cached_kvars,
 						   uint32_t kcxt_extra_bufsz,
 						   const bytea *xpucode_scan_quals,
-						   const bytea *xpucode_scan_proj_prep,
-						   const bytea *xpucode_scan_proj_exec);
+						   const bytea *xpucode_scan_projs);
 extern int
 pgstrom_receive_xpu_command(pgsocket sockfd,
 							void *(*alloc_f)(void *priv, size_t sz),
