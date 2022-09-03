@@ -267,7 +267,7 @@ extern void		pgstrom_init_codegen(void);
 /*
  * exec.c
  */
-extern const kern_session_info *
+extern const XpuCommand *
 pgstrom_build_session_info(PlanState *ps,
 						   List *used_params,
 						   uint32_t num_cached_kvars,
@@ -340,9 +340,9 @@ extern void		pgstrom_init_gpu_service(void);
 typedef struct GpuConnection	GpuConnection;
 
 extern GpuConnection *gpuClientOpenSession(const Bitmapset *gpuset,
-										   const kern_session_info *session);
+										   const XpuCommand *session);
 extern void		gpuClientCloseSession(GpuConnection *conn);
-extern void		gpuClientSendCommand(GpuConnection *conn, XpuCommand *xcmd);
+extern void		gpuClientSendCommand(GpuConnection *conn, const XpuCommand *xcmd);
 extern XpuCommand *gpuClientGetResponse(GpuConnection *conn, long timeout);
 extern void		gpuClientPutResponse(XpuCommand *xcmd);
 
@@ -373,6 +373,7 @@ extern void		pgstrom_init_gpu_scan(void);
 extern Node	   *fixup_varnode_to_origin(Node *node, List *cscan_tlist);
 extern int		__appendBinaryStringInfo(StringInfo buf,
 										 const void *data, int datalen);
+extern int		__appendZeroStringInfo(StringInfo buf, int nbytes);
 extern char	   *get_type_name(Oid type_oid, bool missing_ok);
 extern Oid		get_relation_am(Oid rel_oid, bool missing_ok);
 extern List	   *bms_to_pglist(const Bitmapset *bms);
@@ -381,10 +382,12 @@ extern ssize_t	__readFile(int fdesc, void *buffer, size_t nbytes);
 extern ssize_t	__preadFile(int fdesc, void *buffer, size_t nbytes, off_t f_pos);
 extern ssize_t	__writeFile(int fdesc, const void *buffer, size_t nbytes);
 extern ssize_t	__pwriteFile(int fdesc, const void *buffer, size_t nbytes, off_t f_pos);
+
 extern void	   *__mmapFile(void *addr, size_t length,
 						   int prot, int flags, int fdesc, off_t offset);
-extern int		__munmapFile(void *mmap_addr);
+extern bool		__munmapFile(void *mmap_addr);
 extern void	   *__mremapFile(void *mmap_addr, size_t new_size);
+extern void	   *__mmapShmem(size_t length);
 extern Path	   *pgstrom_copy_pathnode(const Path *pathnode);
 
 /*

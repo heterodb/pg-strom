@@ -113,7 +113,7 @@ __gpuConnectSessionWorker(void *__priv)
  * gpuClientSendCommand
  */
 void
-gpuClientSendCommand(GpuConnection *conn, XpuCommand *xcmd)
+gpuClientSendCommand(GpuConnection *conn, const XpuCommand *xcmd)
 {
 	int		sockfd = conn->sockfd;
 	ssize_t	nbytes;
@@ -124,7 +124,7 @@ gpuClientSendCommand(GpuConnection *conn, XpuCommand *xcmd)
 
 	nbytes = __writeFile(sockfd, xcmd, xcmd->length);
 	if (nbytes != xcmd->length)
-		elog(ERROR, "unable to send XPU command to GPU service (%zd of %u): %m",
+		elog(ERROR, "unable to send XPU command to GPU service (%zd of %lu): %m",
 			 nbytes, xcmd->length);
 }
 
@@ -205,15 +205,19 @@ gpuClientPutResponse(XpuCommand *xcmd)
  * __gpuClientInitSession
  */
 static GpuConnection *
-__gpuClientInitSession(GpuConnection *conn,
-					   const kern_session_info *session)
+__gpuClientInitSession(GpuConnection *conn, const XpuCommand *session)
 {
 	XpuCommand *resp;
 
-	gpuClientSendCommand(conn, (XpuCommand *)session);
+	Assert(session->tag == XpuCommandTag__OpenSession);
+	gpuClientSendCommand(conn, session);
 	resp = gpuClientGetResponse(conn, -1);
 	if (resp->tag != XpuCommandTag__Success)
-		elog(ERROR, "GPU:OpenSession failed - %s", resp->data);
+		elog(ERROR, "GPU:OpenSession failed - %s (%s:%d %s)",
+			 resp->u.error.message,
+			 resp->u.error.filename,
+			 resp->u.error.lineno,
+			 resp->u.error.funcname);
 	gpuClientPutResponse(resp);
 
 	return conn;
@@ -258,7 +262,7 @@ __gpuClientChooseDevice(const Bitmapset *gpuset)
  */
 GpuConnection *
 gpuClientOpenSession(const Bitmapset *gpuset,
-					 const kern_session_info *session)
+					 const XpuCommand *session)
 {
 	int				cuda_dindex = __gpuClientChooseDevice(gpuset);
 	GpuConnection  *conn;

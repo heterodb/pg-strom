@@ -60,7 +60,7 @@ typedef struct
 {
 	dlist_node		chain;		/* gcontext->client_list */
 	gpuContext	   *gcontext;
-	kern_session_info *session;
+	kernSessionInfo *session;
 	pg_atomic_uint32 refcnt;	/* odd number, if error status */
 	pthread_mutex_t	mutex;		/* mutex to write the socket */
 	int				sockfd;		/* connection to PG backend */
@@ -440,7 +440,7 @@ gpuClientPut(gpuClient *gclient)
 static void
 gpuClientWriteBack(gpuClient *gclient, XpuCommand *resp)
 {
-	XPU_COMMAND_SANITY_CHECK(resp);
+	assert(resp->magic == XpuCommandMagicNumber);
 
 	pthreadMutexLock(&gclient->mutex);
 	if (gclient->sockfd >= 0)
@@ -470,25 +470,36 @@ gpuClientWriteBack(gpuClient *gclient, XpuCommand *resp)
  * gpuClientELog
  */
 static void
-gpuClientELog(gpuClient *gclient, const char *fmt, ...)
+__gpuClientELog(gpuClient *gclient,
+				const char *filename, int lineno,
+				const char *funcname,
+				const char *fmt, ...)
 {
-	XpuCommand *resp;
-	int			off;
+	XpuCommand	resp;
 	va_list		ap;
+	const char *s;
 
-	resp = alloca(offsetof(XpuCommand, data) + 1024 + sizeof(uint32_t));
-	memset(resp, 0, offsetof(XpuCommand, data));
-	resp->tag = XpuCommandTag__Error;
+	s = strrchr(filename, '/');
+	if (s)
+		filename = s + 1;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag = XpuCommandTag__Error;
+	resp.length = offsetof(XpuCommand, u.error) + sizeof(kern_errorbuf);
+	resp.u.error.errcode = ERRCODE_INTERNAL_ERROR;
+	resp.u.error.lineno = lineno;
+	strncpy(resp.u.error.filename, filename, KERN_ERRORBUF_FILENAME_LEN);
+	strncpy(resp.u.error.funcname, funcname, KERN_ERRORBUF_FUNCNAME_LEN);
+
 	va_start(ap, fmt);
-	off = vsnprintf(resp->data, 1024, fmt, ap);
+	vsnprintf(resp.u.error.message, KERN_ERRORBUF_MESSAGE_LEN, fmt, ap);
 	va_end(ap);
-	
-	off = INTALIGN(off + 1);
-	*((uint32_t *)(resp->data + off)) = XpuCommandMagicNumber;
-	resp->length = offsetof(XpuCommand, data) + off + sizeof(uint32_t);
 
-	gpuClientWriteBack(gclient, resp);
+	gpuClientWriteBack(gclient, &resp);
 }
+#define gpuClientELog(gclient,fmt,...)			\
+	__gpuClientELog((gclient),__FILE__,__LINE__,__FUNCTION__,(fmt),##__VA_ARGS__)
 
 /*
  * gpuservHandleOpenSession
@@ -546,7 +557,7 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
 
 static bool
 __resolveDevicePointers(gpuModule *gmodule,
-						kern_session_info *session,
+						kernSessionInfo *session,
 						char *emsg, size_t emsg_sz)
 {
 	xpu_encode_info	*encode = SESSION_ENCODE(session);
@@ -598,7 +609,7 @@ gpuservHandleOpenSession(XpuCommand *xcmd)
 	gpuClient  *gclient = xcmd->priv;
 	gpuContext *gcontext = gclient->gcontext;
 	gpuModule  *gmodule;
-	kern_session_info *session = (kern_session_info *)xcmd;
+	kernSessionInfo *session = &xcmd->u.session;
 	XpuCommand	resp;
 	char		emsg[512];
 
@@ -623,9 +634,9 @@ gpuservHandleOpenSession(XpuCommand *xcmd)
 
 	/* success status */
 	memset(&resp, 0, sizeof(resp));
+	resp.magic = XpuCommandMagicNumber;
 	resp.tag = XpuCommandTag__Success;
-	*((uint32_t *)resp.data) = XpuCommandMagicNumber;
-	resp.length = offsetof(XpuCommand, data) + sizeof(uint32_t);
+	resp.length = offsetof(XpuCommand, u);
 	gpuClientWriteBack(gclient, &resp);
 }
 

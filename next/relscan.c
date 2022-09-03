@@ -544,6 +544,34 @@ baseRelCanUseGpuDirect(PlannerInfo *root, RelOptInfo *baserel)
 	return optimal_gpus;
 }
 
+/* ----------------------------------------------------------------
+ *
+ * Routines to load blocks from storage
+ *
+ * ----------------------------------------------------------------
+ */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 void
 pgstrom_init_relscan(void)
 {

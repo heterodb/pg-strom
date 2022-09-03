@@ -141,98 +141,6 @@ typedef struct {
 } kern_errorbuf;
 
 /*
- * PG-Strom Command Tag
- */
-#define XpuCommandTag__Success			0
-#define XpuCommandTag__Error			1
-#define XpuCommandTag__CPUFallback		2
-#define XpuCommandTag__OpenSession		100
-#define XpuCommandTag__XpuScanExec		200
-#define XpuCommandMagicNumber			0xdeadbeafU
-
-#ifndef ILIST_H
-typedef struct dlist_node dlist_node;
-struct dlist_node
-{
-	dlist_node *prev;
-	dlist_node *next;
-};
-#endif
-typedef struct
-{
-	uint32_t	tag;
-	uint32_t	length;
-	void	   *priv;
-	dlist_node	chain;
-	char		data[sizeof(uint32_t)]		__attribute__((__aligned__(8)));
-} XpuCommand;
-
-#define XPU_COMMAND_SANITY_CHECK(xcmd)									\
-	Assert(__Fetch((uint32_t *)((char *)(xcmd) +						\
-								((XpuCommand *)(xcmd))->length -		\
-								sizeof(uint32_t))) == XpuCommandMagicNumber)
-#define XPU_COMMAND_COMMON_FIELDS								\
-	uint32_t	tag;											\
-	uint32_t	length;											\
-	char		__dont_touch__[offsetof(XpuCommand, data)   -	\
-							   offsetof(XpuCommand, length) +	\
-							   sizeof(uint32_t)]
-
-/*
- * kern_session_info
- *
- * A set of immutable data during query execution (like, transaction info, timezone,
- * parameter buffer).
- */
-struct kern_session_info
-{
-	XPU_COMMAND_COMMON_FIELDS;
-	/* kcxt initialization parameters */
-	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
-	uint32_t	kcxt_kvars_nslots;	/* length of kvars slot */
-
-	/* xpucode for this session */
-	bool		xpucode_use_debug_code;
-	uint32_t	xpucode_scan_quals;
-	uint32_t	xpucode_scan_projs;
-	
-	/* database session info */
-	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
-	uint32_t	xact_id_array;		/* offset to array of xid */
-	uint32_t	session_timezone;	/* offset to pg_tz */
-	uint32_t	session_encode;		/* offset to xpu_encode_info;
-									 * !! function pointer must be set by server */
-	/* executor parameter buffer */
-	uint32_t	nparams;	/* number of parameters */
-	uint32_t	poffset[1];	/* offset of params */
-};
-typedef struct kern_session_info	kern_session_info;
-
-INLINE_FUNCTION(struct varlena *)
-SESSION_XACT_ID_ARRAY(kern_session_info *session)
-{
-	if (session->xact_id_array == 0)
-		return NULL;
-	return (struct varlena *)((char *)session + session->xact_id_array);
-}
-
-INLINE_FUNCTION(struct pg_tz *)
-SESSION_TIMEZONE(kern_session_info *session)
-{
-	if (session->session_timezone == 0)
-		return NULL;
-	return (struct pg_tz *)((char *)session + session->session_timezone);
-}
-
-INLINE_FUNCTION(struct xpu_encode_info *)
-SESSION_ENCODE(kern_session_info *session)
-{
-	if (session->session_encode == 0)
-		return NULL;
-	return (struct xpu_encode_info *)((char *)session + session->session_encode);
-}
-
-/*
  * kern_context - a set of run-time information
  */
 typedef struct
@@ -242,7 +150,7 @@ typedef struct
 	uint32_t		error_lineno;
 	const char	   *error_funcname;
 	const char	   *error_message;
-	kern_session_info *session;
+	struct kernSessionInfo *session;
 	/* current slot of kernel variable references */
 	const struct kern_colmeta **kvars_cmeta;
 	const void	  **kvars_addr;
@@ -1417,6 +1325,107 @@ typedef struct {
 } xpu_function_catalog_entry;
 
 EXTERN_DATA xpu_function_catalog_entry	builtin_xpu_functions_catalog[];
+
+
+
+
+/*
+ * PG-Strom Command Tag
+ */
+#define XpuCommandTag__Success			0
+#define XpuCommandTag__Error			1
+#define XpuCommandTag__CPUFallback		2
+#define XpuCommandTag__OpenSession		100
+#define XpuCommandTag__XpuScanExec		200
+#define XpuCommandMagicNumber			0xdeadbeafU
+
+/*
+ * kernSessionInfo - A set of immutable data during query execution
+ * (like, transaction info, timezone, parameter buffer).
+ */
+typedef struct kernSessionInfo
+{
+	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
+	uint32_t	kcxt_kvars_nslots;	/* length of kvars slot */
+
+	/* xpucode for this session */
+	bool		xpucode_use_debug_code;
+	uint32_t	xpucode_scan_quals;
+	uint32_t	xpucode_scan_projs;
+
+	/* database session info */
+	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
+	uint32_t	xact_id_array;		/* offset to array of xid */
+	uint32_t	session_timezone;	/* offset to pg_tz */
+	uint32_t	session_encode;		/* offset to xpu_encode_info;
+									 * !! function pointer must be set by server */
+	/* executor parameter buffer */
+	uint32_t	nparams;	/* number of parameters */
+	uint32_t	poffset[1];	/* offset of params */
+} kernSessionInfo;
+
+typedef struct {
+	uint32_t	kds_src_offset;
+	uint32_t	kds_dst_offset;
+	char		data[1];
+} kernExecScan;
+
+typedef struct {
+	kern_data_store		kds;
+} kernExecResult;
+
+#ifndef ILIST_H
+typedef struct dlist_node dlist_node;
+struct dlist_node
+{
+	dlist_node *prev;
+	dlist_node *next;
+};
+#endif
+
+typedef struct
+{
+	uint32_t	magic;
+	uint32_t	tag;
+	uint64_t	length;
+	void	   *priv;
+	dlist_node	chain;
+	union {
+		kern_errorbuf	error;
+		kernSessionInfo	session;
+		kernExecScan	scan;
+		kernExecResult	result;
+	} u;
+} XpuCommand;
+
+/*
+ * kernSessionInfo utility functions.
+ */
+INLINE_FUNCTION(struct varlena *)
+SESSION_XACT_ID_ARRAY(kernSessionInfo *session)
+{
+	if (session->xact_id_array == 0)
+		return NULL;
+	return (struct varlena *)((char *)session + session->xact_id_array);
+}
+
+INLINE_FUNCTION(struct pg_tz *)
+SESSION_TIMEZONE(kernSessionInfo *session)
+{
+	if (session->session_timezone == 0)
+		return NULL;
+	return (struct pg_tz *)((char *)session + session->session_timezone);
+}
+
+INLINE_FUNCTION(struct xpu_encode_info *)
+SESSION_ENCODE(kernSessionInfo *session)
+{
+	if (session->session_encode == 0)
+		return NULL;
+	return (struct xpu_encode_info *)((char *)session + session->session_encode);
+}
+
+
 
 /* ----------------------------------------------------------------
  *

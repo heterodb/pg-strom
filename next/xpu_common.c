@@ -140,7 +140,7 @@ pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 {
-	kern_session_info *session = kcxt->session;
+	kernSessionInfo *session = kcxt->session;
 	uint32_t	param_id = kexp->u.p.param_id;
 	void	   *addr = NULL;
 

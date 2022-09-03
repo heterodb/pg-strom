@@ -61,7 +61,7 @@ __build_session_encode(StringInfo buf)
 	return __appendBinaryStringInfo(buf, &encode, sizeof(xpu_encode_info));
 }
 
-const kern_session_info *
+const XpuCommand *
 pgstrom_build_session_info(PlanState *ps,
 						   List *used_params,
 						   uint32_t kcxt_extra_bufsz,
@@ -72,19 +72,15 @@ pgstrom_build_session_info(PlanState *ps,
 	ExprContext	   *econtext = ps->ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
 	uint32_t		nparams = (param_info ? param_info->numParams : 0);
-	uint32_t		offset;
+	uint32_t		session_sz = offsetof(kernSessionInfo, poffset[nparams]);
 	StringInfoData	buf;
-	kern_session_info *session;
-	static uint32_t	__magic = XpuCommandMagicNumber;
-
-	offset = offsetof(kern_session_info, poffset[nparams]);
-	session = alloca(offset);
-	memset(session, 0, offset);
+	XpuCommand	   *xcmd;
+	kernSessionInfo *session;
 
 	initStringInfo(&buf);
-	enlargeStringInfo(&buf, offset);
-	memset(buf.data, 0, offset);
-	buf.len = offset;
+	__appendZeroStringInfo(&buf, session_sz);
+	session = alloca(session_sz);
+	memset(session, 0, session_sz);
 
 	/* put XPU code */
 	if (xpucode_scan_quals)
@@ -111,6 +107,7 @@ pgstrom_build_session_info(PlanState *ps,
 			Param  *param = lfirst(lc);
 			Datum	param_value;
 			bool	param_isnull;
+			uint32_t	offset;
 
 			if (param->paramkind == PARAM_EXEC)
 			{
@@ -189,7 +186,6 @@ pgstrom_build_session_info(PlanState *ps,
 					elog(ERROR, "Not a supported data type for kernel parameter: %s",
 						 format_type_be(param->paramtype));
 				}
-				offset -= offsetof(XpuCommand, data);
 			}
 			Assert(param->paramid >= 0 && param->paramid < nparams);
 			session->poffset[param->paramid] = offset;
@@ -202,13 +198,18 @@ pgstrom_build_session_info(PlanState *ps,
 	session->xact_id_array = __build_session_xact_id_vector(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
-	__appendBinaryStringInfo(&buf, &__magic, sizeof(uint32_t));
+	memcpy(buf.data, session, session_sz);
 
-	session->tag = XpuCommandTag__OpenSession;
-	session->length = buf.len;
-	memcpy(buf.data, session, offsetof(kern_session_info, poffset[nparams]));
+	/* setup XpuCommand */
+	xcmd = palloc(offsetof(XpuCommand, u.session) + buf.len);
+	memset(xcmd, 0, offsetof(XpuCommand, u.session));
+	xcmd->magic = XpuCommandMagicNumber;
+	xcmd->tag = XpuCommandTag__OpenSession;
+	xcmd->length = offsetof(XpuCommand, u.session) + buf.len;
+	memcpy(&xcmd->u.session, buf.data, buf.len);
+	pfree(buf.data);
 
-	return (const kern_session_info *)buf.data;
+	return xcmd;
 }
 
 /*
@@ -284,7 +285,7 @@ restart:
 		{
 			XpuCommand *temp, *xcmd;
 		next:
-			if (offset < offsetof(XpuCommand, data))
+			if (offset < offsetof(XpuCommand, u))
 			{
 				if (buffer != buffer_local)
 				{
@@ -298,12 +299,12 @@ restart:
 			temp = (XpuCommand *)buffer;
 			if (temp->length <= offset)
 			{
-				XPU_COMMAND_SANITY_CHECK(temp);
+				assert(temp->magic == XpuCommandMagicNumber);
 				xcmd = alloc_f(priv, temp->length);
 				if (!xcmd)
 				{
 					snprintf(errmsg_buffer, errmsg_bufsz,
-							 "%s: out of memory (sz=%u): %m",
+							 "%s: out of memory (sz=%lu): %m",
 							 errmsg_label, temp->length);
 					return -1;
 				}
@@ -324,7 +325,7 @@ restart:
 				if (!curr)
 				{
 					snprintf(errmsg_buffer, errmsg_bufsz,
-							 "%s: out of memory (sz=%u): %m",
+							 "%s: out of memory (sz=%lu): %m",
 							 errmsg_label, temp->length);
 					return -1;
 				}
@@ -336,8 +337,8 @@ restart:
 		}
 		else if (offset >= curr->length)
 		{
-			assert(offset == curr->length);
-			XPU_COMMAND_SANITY_CHECK(curr);
+			assert(curr->magic == XpuCommandMagicNumber);
+			assert(curr->length == offset);
 			attach_f(priv, curr);
 			count++;
 			goto restart;

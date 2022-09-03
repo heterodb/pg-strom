@@ -748,7 +748,6 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	//init BRIN-Index Support
 	//init Arrow_Fdw Support
 
-	// build session info
 }
 
 /*
@@ -785,7 +784,7 @@ ExecGpuScan(CustomScanState *node)
 		createGpuScanSharedState(gss, NULL, NULL);
 	if (!gss->conn)
 	{
-		const kern_session_info *session;
+		const XpuCommand *session;
 		const Bitmapset *gpuset = NULL;
 
 		session = pgstrom_build_session_info(&gss->css.ss.ps,

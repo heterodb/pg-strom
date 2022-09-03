@@ -170,6 +170,23 @@ __appendBinaryStringInfo(StringInfo buf, const void *data, int datalen)
 	return pos;
 }
 
+int
+__appendZeroStringInfo(StringInfo buf, int nbytes)
+{
+	static uint64_t __zero = 0;
+	int		padding = (MAXALIGN(buf->len) - buf->len);
+	int		pos;
+
+	if (padding > 0)
+		appendBinaryStringInfo(buf, (char *)&__zero, padding);
+	pos = buf->len;
+	enlargeStringInfo(buf, nbytes);
+	memset(buf->data + pos, 0, nbytes);
+	buf->len += nbytes;
+
+	return pos;
+}
+
 /*
  * get_type_name
  */
@@ -761,7 +778,7 @@ __random(void)
 {
 	if (!pgstrom_random_seed_set)
 	{
-		pgstrom_random_seed = (unsigned int)MyProcPid ^ 0xdeadbeaf;
+		pgstrom_random_seed = (unsigned int)MyProcPid ^ 0xdeadbeafU;
 		pgstrom_random_seed_set = true;
 	}
 	return (uint64_t)rand_r(&pgstrom_random_seed);
@@ -1452,8 +1469,10 @@ typedef struct
 	size_t		mmap_size;
 	int			mmap_prot;
 	int			mmap_flags;
+	int			mmap_fdesc;
 	ResourceOwner owner;
 } mmapEntry;
+
 static HTAB	   *mmap_tracker_htab = NULL;
 
 static void
@@ -1478,9 +1497,13 @@ cleanup_mmap_chunks(ResourceReleasePhase phase,
 					 (char *)entry->mmap_addr,
 					 (char *)entry->mmap_addr + entry->mmap_size,
 					 entry->mmap_size);
+
+			
 			if (munmap(entry->mmap_addr, entry->mmap_size) != 0)
 				elog(WARNING, "failed on munmap(%p, %zu): %m",
 					 entry->mmap_addr, entry->mmap_size);
+			if (close(entry->mmap_fdesc) != 0)
+				elog(WARNING, "failed on close(%d): %m", entry->mmap_fdesc);
 			hash_search(mmap_tracker_htab,
 						&entry->mmap_addr,
 						HASH_REMOVE,
@@ -1514,7 +1537,7 @@ __mmapFile(void *addr, size_t length,
 	}
 	mmap_addr = mmap(addr, mmap_size, prot, flags, fdesc, offset);
 	if (mmap_addr == MAP_FAILED)
-		return MAP_FAILED;
+		elog(ERROR, "failed on mmap(%zu): %m", mmap_size);
 	PG_TRY();
 	{
 		entry = hash_search(mmap_tracker_htab,
@@ -1527,6 +1550,7 @@ __mmapFile(void *addr, size_t length,
 		entry->mmap_size = mmap_size;
 		entry->mmap_prot = prot;
 		entry->mmap_flags = flags;
+		entry->mmap_fdesc = fdesc;
 		entry->owner = CurrentResourceOwner;
 	}
 	PG_CATCH();
@@ -1541,54 +1565,43 @@ __mmapFile(void *addr, size_t length,
 	return mmap_addr;
 }
 
-int
+bool
 __munmapFile(void *mmap_addr)
 {
 	mmapEntry  *entry;
-	int			rv;
 
-	if (mmap_tracker_htab)
+	if (mmap_tracker_htab &&
+		(entry = hash_search(mmap_tracker_htab,
+							 &mmap_addr,
+							 HASH_REMOVE,
+							 NULL)) != NULL)
 	{
-		entry = hash_search(mmap_tracker_htab,
-							&mmap_addr, HASH_REMOVE, NULL);
-		if (entry)
-		{
-			rv = munmap(entry->mmap_addr,
-						entry->mmap_size);
-			if (rv != 0)
-			{
-				int		errno_saved = errno;
-
-				elog(WARNING, "failed on munmap(%p, %zu): %m",
-					 entry->mmap_addr,
-					 entry->mmap_size);
-				errno = errno_saved;
-			}
-			return rv;
-		}
+		if (munmap(entry->mmap_addr,
+				   entry->mmap_size) != 0)
+			elog(WARNING, "failed on munmap(%p, %zu): %m",
+				 entry->mmap_addr,
+				 entry->mmap_size);
+		if (close(entry->mmap_fdesc) != 0)
+			elog(WARNING, "failed on close(%d): %m",
+				 entry->mmap_fdesc);
+		return true;
 	}
-	/* mmapEntry not found */
-	errno = EINVAL;
-	return -1;
+	elog(WARNING, "addr=%p looks not memory-mapped", mmap_addr);
+	return false;
 }
 
 void *
 __mremapFile(void *mmap_addr, size_t new_size)
 {
-	mmapEntry  *entry = NULL;
+	mmapEntry  *entry;
 	void	   *addr;
 
-	if (mmap_tracker_htab)
-	{
-		entry = hash_search(mmap_tracker_htab,
-							&mmap_addr, HASH_FIND, NULL);
-	}
-	if (!entry)
-	{
-		errno = EINVAL;
-		return MAP_FAILED;
-	}
-	/* nothing to do */
+	if (!mmap_tracker_htab ||
+		!(entry = hash_search(mmap_tracker_htab,
+							  &mmap_addr, HASH_FIND, NULL)))
+		return NULL;	/* not found */
+
+	/* nothing to do? */
 	if (new_size <= entry->mmap_size)
 		return entry->mmap_addr;
 	addr = mremap(entry->mmap_addr,
@@ -1596,9 +1609,65 @@ __mremapFile(void *mmap_addr, size_t new_size)
 				  new_size,
 				  MREMAP_MAYMOVE);
 	if (addr == MAP_FAILED)
+	{
+		elog(WARNING, "failed on mremap(%p, %zu, %zu): %m",
+			 entry->mmap_addr,
+			 entry->mmap_size,
+			 new_size);
 		return MAP_FAILED;
-
+	}
 	entry->mmap_addr = addr;
 	entry->mmap_size = new_size;
+	return addr;
+}
+
+void *
+__mmapShmem(size_t length)
+{
+	static uint	my_random_seed = 0;
+	static bool	my_random_initialized = false;
+	char	namebuf[128];
+	int		fdesc;
+	void   *addr;
+
+	if (!my_random_initialized)
+	{
+		my_random_seed = (uint)MyProcPid ^ 0xcafebabeU;
+		my_random_initialized = true;
+	}
+
+	do {
+		snprintf(namebuf, sizeof(namebuf),
+				 ".pgstrom_shmbuf_%u_%d",
+				 PostPortNumber, rand_r(&my_random_seed));
+		fdesc = shm_open(namebuf, O_RDWR | O_CREAT | O_EXCL, 0600);
+		if (fdesc < 0 && errno != EEXIST)
+			elog(ERROR, "failed on shm_open('%s'): %m", namebuf);
+	} while (fdesc < 0);
+
+	PG_TRY();
+	{
+		length = (length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+		if (ftruncate(fdesc, length) != 0)
+			elog(ERROR, "failed on ftruncate('%s', %zu): %m", namebuf, length);
+		addr = __mmapFile(NULL, length,
+						  PROT_READ | PROT_WRITE,
+						  MAP_SHARED,
+						  fdesc, length);
+	}
+	PG_CATCH();
+	{
+		if (shm_unlink(namebuf) != 0)
+			elog(WARNING, "failed on shm_unlink('%s'): %m", namebuf);
+		if (close(fdesc) != 0)
+			elog(WARNING, "failed on close(%s): %m", namebuf);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	if (shm_unlink(namebuf) != 0)
+		elog(WARNING, "failed on shm_unlink('%s'): %m", namebuf);
+
 	return addr;
 }
