@@ -356,6 +356,7 @@ _PG_init(void)
 	pgstrom_init_extra();
 	pgstrom_init_codegen();
 	pgstrom_init_relscan();
+	pgstrom_init_xpu_client();
 	/* dump version number */
 	elog(LOG, "PG-Strom version %s built for PostgreSQL %s (git: %s)",
 		 PGSTROM_VERSION,
@@ -366,7 +367,6 @@ _PG_init(void)
 	{
 		pgstrom_init_gpu_options();
 		pgstrom_init_gpu_service();
-		pgstrom_init_gpu_client();
 		pgstrom_init_gpu_scan();
 		//pgstrom_init_gpu_join();
 		//pgstrom_init_gpu_preagg();

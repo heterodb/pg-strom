@@ -565,12 +565,77 @@ baseRelCanUseGpuDirect(PlannerInfo *root, RelOptInfo *baserel)
 
 
 
+/*
+ * pgstromSharedStateEstimate
+ */
+Size
+pgstromSharedStateEstimate(CustomScanState *css)
+{
+	EState	   *estate = css->ss.ps.state;
 
+	return (sizeof(pgstromSharedState) +
+			table_parallelscan_estimate(css->ss.ss_currentRelation,
+										estate->es_snapshot));
+}
 
+/*
+ * pgstromSharedStateCreate
+ */
+pgstromSharedState *
+pgstromSharedStateCreate(CustomScanState *css, void *dsm_addr)
+{
+	pgstromSharedState *xss_state;
+	TableScanDesc	scan;
 
+	Assert(!css->ss.ss_currentScanDesc);
+	if (dsm_addr)
+	{
+		xss_state = dsm_addr;
+		memset(xss_state, 0, offsetof(pgstromSharedState, bpscan));
+		scan = table_beginscan_parallel(css->ss.ss_currentRelation,
+										&xss_state->bpscan.base);
+	}
+	else
+	{
+		EState	   *estate = css->ss.ps.state;
 
+		xss_state = MemoryContextAllocZero(estate->es_query_cxt,
+										   sizeof(pgstromSharedState));
+		scan = table_beginscan(css->ss.ss_currentRelation,
+							   estate->es_snapshot,
+							   0, NULL);
+	}
+	css->ss.ss_currentScanDesc = scan;
 
+	return xss_state;
+}
 
+/*
+ * pgstromSharedStateReset
+ */
+void
+pgstromSharedStateReset(pgstromSharedState *ps_state)
+{
+	/* reset it */
+}
+
+/*
+ * pgstromSharedStateShutdown
+ */
+pgstromSharedState *
+pgstromSharedStateShutdown(CustomScanState *css, pgstromSharedState *src_state)
+{
+	pgstromSharedState *dst_state = NULL;
+	EState	   *estate = css->ss.ps.state;
+
+	if (src_state)
+	{
+		dst_state = MemoryContextAllocZero(estate->es_query_cxt,
+										   sizeof(pgstromSharedState));
+		memcpy(dst_state, src_state, offsetof(pgstromSharedState, bpscan));
+	}
+	return dst_state;
+}
 
 void
 pgstrom_init_relscan(void)

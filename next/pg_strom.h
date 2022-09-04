@@ -23,6 +23,7 @@
 #include "access/genam.h"
 #include "access/relscan.h"
 #include "access/table.h"
+#include "access/tableam.h"
 #include "access/xact.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/dependency.h"
@@ -186,6 +187,7 @@ typedef struct devfunc_info
 typedef struct GpuCacheState	GpuCacheState;
 typedef struct GpuDirectState	GpuDirectState;
 typedef struct ArrowFdwState	ArrowFdwState;
+typedef struct BrinIndexState	BrinIndexState;
 
 /*
  * Global variables
@@ -265,8 +267,80 @@ extern char	   *pgstrom_xpucode_to_string(bytea *xpu_code);
 extern void		pgstrom_init_codegen(void);
 
 /*
+ * xpu_client.c
+ */
+typedef struct XpuConnection XpuConnection;
+
+extern XpuConnection *gpuClientOpenSession(const Bitmapset *gpuset,
+										   const XpuCommand *session);
+extern void		xpuClientCloseSession(XpuConnection *conn);
+extern void		xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd);
+extern XpuCommand *xpuClientGetResponse(XpuConnection *conn, long timeout);
+extern void		xpuClientPutResponse(XpuCommand *xcmd);
+
+extern void		pgstrom_init_xpu_client(void);
+
+/*
+ * datastore.c
+ */
+#define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
+
+
+
+/*
+ * relscan.c
+ */
+typedef struct
+{
+	/* statistics */
+	pg_atomic_uint64	ntuples_valid;
+	pg_atomic_uint64	ntuples_dropped;
+	/* for arrow_fdw */
+	pg_atomic_uint32	af_rbatch_index;
+	pg_atomic_uint32	af_rbatch_nload;	/* # of loaded record-batches */
+	pg_atomic_uint32	af_rbatch_nskip;	/* # of skipped record-batches */
+	/* for gpu-cache */
+	pg_atomic_uint32	gc_fetch_count;
+	/* common block-based table scan descriptor */
+	ParallelBlockTableScanDescData bpscan;
+} pgstromSharedState;
+
+extern IndexOptInfo *pgstrom_tryfind_brinindex(PlannerInfo *root,
+											   RelOptInfo *baserel,
+											   List **p_indexConds,
+											   List **p_indexQuals,
+											   int64_t *p_indexNBlocks);
+
+extern const Bitmapset *GetOptimalGpusForRelation(PlannerInfo *root,
+												  RelOptInfo *rel);
+extern const Bitmapset *baseRelCanUseGpuDirect(PlannerInfo *root,
+											   RelOptInfo *baserel);
+extern Size		pgstromSharedStateEstimate(CustomScanState *css);
+extern pgstromSharedState *pgstromSharedStateCreate(CustomScanState *css,
+													void *dsm_addr);
+extern void		pgstromSharedStateReset(pgstromSharedState *ps_state);
+extern pgstromSharedState *pgstromSharedStateShutdown(CustomScanState *css,
+													  pgstromSharedState *ps_state);
+extern void		pgstrom_init_relscan(void);
+
+/*
  * exec.c
  */
+typedef struct
+{
+	CustomScanState		css;
+	XpuConnection	   *conn;
+	pgstromSharedState *ps_state;
+	GpuCacheState	   *gc_state;
+	GpuDirectState	   *gd_state;
+	ArrowFdwState	   *af_state;
+	BrinIndexState	   *br_state;
+	/* current chunk */
+	int64_t				curr_index;
+	XpuCommand		   *curr_task;
+	/* callback used by exec.c */
+} pgstromTaskState;
+
 extern const XpuCommand *
 pgstrom_build_session_info(PlanState *ps,
 						   List *used_params,
@@ -286,27 +360,11 @@ pgstrom_receive_xpu_command(pgsocket sockfd,
 extern void		pgstrom_init_exec_common(void);
 
 
-/*
- * datastore.c
- */
-#define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
 
 
 
-/*
- * relscan.c
- */
-extern IndexOptInfo *pgstrom_tryfind_brinindex(PlannerInfo *root,
-											   RelOptInfo *baserel,
-											   List **p_indexConds,
-											   List **p_indexQuals,
-											   int64_t *p_indexNBlocks);
 
-extern const Bitmapset *GetOptimalGpusForRelation(PlannerInfo *root,
-												  RelOptInfo *rel);
-extern const Bitmapset *baseRelCanUseGpuDirect(PlannerInfo *root,
-											   RelOptInfo *baserel);
-extern void		pgstrom_init_relscan(void);
+
 
 /*
  * gpu_device.c
@@ -333,20 +391,6 @@ extern bool		pgstrom_load_gpu_debug_module;	/* GUC */
 extern const char *cuStrError(CUresult rc);
 extern void		pgstrom_init_gpu_service(void);
 
-
-/*
- * gpu_client.c
- */
-typedef struct GpuConnection	GpuConnection;
-
-extern GpuConnection *gpuClientOpenSession(const Bitmapset *gpuset,
-										   const XpuCommand *session);
-extern void		gpuClientCloseSession(GpuConnection *conn);
-extern void		gpuClientSendCommand(GpuConnection *conn, const XpuCommand *xcmd);
-extern XpuCommand *gpuClientGetResponse(GpuConnection *conn, long timeout);
-extern void		gpuClientPutResponse(XpuCommand *xcmd);
-
-extern void		pgstrom_init_gpu_client(void);
 
 /*
  * gpu_cache.c

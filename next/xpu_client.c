@@ -11,12 +11,12 @@
  */
 #include "pg_strom.h"
 
-static dlist_head	gpu_connections_list;
+static dlist_head	xpu_connections_list;
 
-struct GpuConnection
+struct XpuConnection
 {
 	dlist_node		chain;	/* link to gpuserv_connection_slots */
-	int				cuda_dindex;
+	char			devname[32];
 	volatile pgsocket sockfd;
 	ResourceOwner	resowner;
 	pthread_t		worker;
@@ -33,15 +33,15 @@ struct GpuConnection
  * Worker thread to receive response messages
  */
 static void *
-__gpuConnectSessionWorkerAlloc(void *__priv, size_t sz)
+__xpuConnectSessionWorkerAlloc(void *__priv, size_t sz)
 {
 	return malloc(sz);
 }
 
 static void
-__gpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
+__xpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
 {
-	GpuConnection *conn = __priv;
+	XpuConnection *conn = __priv;
 
 	xcmd->priv = conn;
 	pthreadMutexLock(&conn->mutex);
@@ -53,9 +53,9 @@ __gpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
 }
 
 static void *
-__gpuConnectSessionWorker(void *__priv)
+__xpuConnectSessionWorker(void *__priv)
 {
-	GpuConnection *conn = __priv;
+	XpuConnection *conn = __priv;
 	char		errmsg[200];
 
 	for (;;)
@@ -93,8 +93,8 @@ __gpuConnectSessionWorker(void *__priv)
 			else if (pfd.revents & POLLIN)
 			{
 				if (pgstrom_receive_xpu_command(conn->sockfd,
-												__gpuConnectSessionWorkerAlloc,
-												__gpuConnectSessionWorkerAttach,
+												__xpuConnectSessionWorkerAlloc,
+												__xpuConnectSessionWorkerAttach,
 												conn,
 												__FUNCTION__,
 												errmsg, sizeof(errmsg)) < 0)
@@ -110,10 +110,10 @@ __gpuConnectSessionWorker(void *__priv)
 }
 
 /*
- * gpuClientSendCommand
+ * xpuClientSendCommand
  */
 void
-gpuClientSendCommand(GpuConnection *conn, const XpuCommand *xcmd)
+xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd)
 {
 	int		sockfd = conn->sockfd;
 	ssize_t	nbytes;
@@ -129,10 +129,10 @@ gpuClientSendCommand(GpuConnection *conn, const XpuCommand *xcmd)
 }
 
 /*
- * gpuClientGetResponse
+ * xpuClientGetResponse
  */
 XpuCommand *
-gpuClientGetResponse(GpuConnection *conn, long timeout)
+xpuClientGetResponse(XpuConnection *conn, long timeout)
 {
 	XpuCommand *xcmd = NULL;
 	dlist_node *dnode;
@@ -152,7 +152,7 @@ gpuClientGetResponse(GpuConnection *conn, long timeout)
 		if (conn->terminated < 0)
 		{
 			pthreadMutexUnlock(&conn->mutex);
-			elog(ERROR, "GPU%d) %s", conn->cuda_dindex, conn->errmsg);
+			elog(ERROR, "%s: %s", conn->devname, conn->errmsg);
 		}
 		if (!dlist_is_empty(&conn->ready_commands_list))
 		{
@@ -188,12 +188,12 @@ gpuClientGetResponse(GpuConnection *conn, long timeout)
 }
 
 /*
- * gpuClientPutResponse
+ * xpuClientPutResponse
  */
 void
-gpuClientPutResponse(XpuCommand *xcmd)
+xpuClientPutResponse(XpuCommand *xcmd)
 {
-	GpuConnection  *conn = xcmd->priv;
+	XpuConnection  *conn = xcmd->priv;
 	
 	pthreadMutexLock(&conn->mutex);
 	dlist_delete(&xcmd->chain);
@@ -202,29 +202,30 @@ gpuClientPutResponse(XpuCommand *xcmd)
 }
 
 /*
- * __gpuClientInitSession
+ * __xpuClientInitSession
  */
-static GpuConnection *
-__gpuClientInitSession(GpuConnection *conn, const XpuCommand *session)
+static XpuConnection *
+__xpuClientInitSession(XpuConnection *conn, const XpuCommand *session)
 {
 	XpuCommand *resp;
 
 	Assert(session->tag == XpuCommandTag__OpenSession);
-	gpuClientSendCommand(conn, session);
-	resp = gpuClientGetResponse(conn, -1);
+	xpuClientSendCommand(conn, session);
+	resp = xpuClientGetResponse(conn, -1);
 	if (resp->tag != XpuCommandTag__Success)
-		elog(ERROR, "GPU:OpenSession failed - %s (%s:%d %s)",
+		elog(ERROR, "%s:OpenSession failed - %s (%s:%d %s)",
+			 conn->devname,
 			 resp->u.error.message,
 			 resp->u.error.filename,
 			 resp->u.error.lineno,
 			 resp->u.error.funcname);
-	gpuClientPutResponse(resp);
+	xpuClientPutResponse(resp);
 
 	return conn;
 }
 
 /*
- * __gpuClientChooseDevice
+ * gpuClientOpenSession
  */
 static int
 __gpuClientChooseDevice(const Bitmapset *gpuset)
@@ -257,64 +258,61 @@ __gpuClientChooseDevice(const Bitmapset *gpuset)
 	return (rr_counter++ % numGpuDevAttrs);
 }
 
-/*
- * gpuClientOpenSession
- */
-GpuConnection *
+XpuConnection *
 gpuClientOpenSession(const Bitmapset *gpuset,
 					 const XpuCommand *session)
 {
-	int				cuda_dindex = __gpuClientChooseDevice(gpuset);
-	GpuConnection  *conn;
 	struct sockaddr_un addr;
-	pgsocket		sockfd;
+	pgsocket	sockfd;
+	XpuConnection *conn = NULL;
 
 	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (sockfd < 0)
 		elog(ERROR, "failed on socket(2): %m");
-
-	addr.sun_family = AF_UNIX;
-	snprintf(addr.sun_path, sizeof(addr.sun_path),
-			 ".pg_strom.%u.gpu%u.sock",
-			 PostmasterPid, cuda_dindex);
-	if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+	PG_TRY();
 	{
-		int		__errno = errno;
+		int		cuda_dindex = __gpuClientChooseDevice(gpuset);
+		int		errcode;
 
-		close(sockfd);
-		elog(ERROR, "failed on connect('%s'): %s",
-			 addr.sun_path, strerror(__errno));
+		addr.sun_family = AF_UNIX;
+		snprintf(addr.sun_path, sizeof(addr.sun_path),
+				 ".pg_strom.%u.gpu%u.sock",
+				 PostmasterPid, cuda_dindex);
+		if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+			elog(ERROR, "failed on connect('%s'): %m", addr.sun_path);
+
+		conn = calloc(1, sizeof(XpuConnection));
+		if (!conn)
+			elog(ERROR, "out of memory");
+		snprintf(conn->devname, 32, "GPU-%d", cuda_dindex);
+		conn->sockfd = sockfd;
+		conn->resowner = CurrentResourceOwner;
+		pthreadMutexInit(&conn->mutex);
+		dlist_init(&conn->ready_commands_list);
+		dlist_init(&conn->active_commands_list);
+		if ((errcode = pthread_create(&conn->worker, NULL,
+									  __xpuConnectSessionWorker, conn)) != 0)
+		{
+			free(conn);
+			elog(ERROR, "failed on pthread_create: %s", strerror(errcode));
+		}
+		dlist_push_tail(&xpu_connections_list, &conn->chain);
 	}
-	/* remember the connection */
-	conn = calloc(1, sizeof(GpuConnection));
-	if (!conn)
+	PG_CATCH();
 	{
 		close(sockfd);
-		elog(ERROR, "out of memory");
+		PG_RE_THROW();
 	}
-	conn->cuda_dindex = cuda_dindex;
-	conn->sockfd = sockfd;
-	conn->resowner = CurrentResourceOwner;
-	pthreadMutexInit(&conn->mutex);
-	dlist_init(&conn->ready_commands_list);
-	dlist_init(&conn->active_commands_list);
-	if ((errno = pthread_create(&conn->worker, NULL,
-								__gpuConnectSessionWorker, conn)) != 0)
-	{
-		free(conn);
-		close(sockfd);
-		elog(ERROR, "failed on pthread_create: %m");
-	}
-	dlist_push_tail(&gpu_connections_list, &conn->chain);
+	PG_END_TRY();
 
-	return __gpuClientInitSession(conn, session);
+	return __xpuClientInitSession(conn, session);
 }
 
 /*
- * gpuClientCloseSession
+ * xpuClientCloseSession
  */
 void
-gpuClientCloseSession(GpuConnection *conn)
+xpuClientCloseSession(XpuConnection *conn)
 {
 	XpuCommand *xcmd;
 	dlist_node *dnode;
@@ -343,36 +341,36 @@ gpuClientCloseSession(GpuConnection *conn)
 }
 
 /*
- * gpuclientCleanupConnections
+ * xpuclientCleanupConnections
  */
 static void
-gpuclientCleanupConnections(ResourceReleasePhase phase,
-						  bool isCommit,
-						  bool isTopLevel,
-						  void *arg)
+xpuclientCleanupConnections(ResourceReleasePhase phase,
+							bool isCommit,
+							bool isTopLevel,
+							void *arg)
 {
 	dlist_mutable_iter	iter;
 
 	if (phase != RESOURCE_RELEASE_BEFORE_LOCKS)
 		return;
 
-	dlist_foreach_modify(iter, &gpu_connections_list)
+	dlist_foreach_modify(iter, &xpu_connections_list)
 	{
-		GpuConnection  *conn = dlist_container(GpuConnection,
+		XpuConnection  *conn = dlist_container(XpuConnection,
 											   chain, iter.cur);
 		if (conn->resowner == CurrentResourceOwner)
 		{
 			if (isCommit)
 				elog(LOG, "Bug? GPU connection %d is not closed on ExecEnd",
 					 conn->sockfd);
-			gpuClientCloseSession(conn);
+			xpuClientCloseSession(conn);
 		}
 	}
 }
 
 void
-pgstrom_init_gpu_client(void)
+pgstrom_init_xpu_client(void)
 {
-	dlist_init(&gpu_connections_list);
-	RegisterResourceReleaseCallback(gpuclientCleanupConnections, NULL);
+	dlist_init(&xpu_connections_list);
+	RegisterResourceReleaseCallback(xpuclientCleanupConnections, NULL);
 }
