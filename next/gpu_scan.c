@@ -794,12 +794,12 @@ ExecGpuScan(CustomScanState *node)
 		const XpuCommand *session;
 		const Bitmapset *gpuset = NULL;
 
-		session = pgstrom_build_session_info(&gss->pts.css.ss.ps,
-											 gss->gs_info.used_params,
-											 gss->gs_info.extra_bufsz,
-											 gss->gs_info.kvars_nslots,
-											 gss->gs_info.kern_quals,
-											 gss->gs_info.kern_projs);
+		session = pgstromBuildSessionInfo(&gss->pts.css.ss.ps,
+										  gss->gs_info.used_params,
+										  gss->gs_info.extra_bufsz,
+										  gss->gs_info.kvars_nslots,
+										  gss->gs_info.kern_quals,
+										  gss->gs_info.kern_projs);
 		if (gss->pts.gc_state)
 			gpuset = gss->gs_info.gpu_cache_devs;
 		else if (gss->pts.gd_state)

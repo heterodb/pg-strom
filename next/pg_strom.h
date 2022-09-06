@@ -184,6 +184,7 @@ typedef struct devfunc_info
 	struct devtype_info *func_argtypes[1];
 } devfunc_info;
 
+typedef struct XpuConnection	XpuConnection;
 typedef struct GpuCacheState	GpuCacheState;
 typedef struct GpuDirectState	GpuDirectState;
 typedef struct ArrowFdwState	ArrowFdwState;
@@ -269,7 +270,22 @@ extern void		pgstrom_init_codegen(void);
 /*
  * xpu_client.c
  */
-typedef struct XpuConnection XpuConnection;
+struct XpuConnection
+{
+	dlist_node		chain;	/* link to gpuserv_connection_slots */
+	char			devname[32];
+	volatile pgsocket sockfd;
+	volatile int	terminated;		/* positive: normal exit
+									 * negative: exit by errors */
+	ResourceOwner	resowner;
+	pthread_t		worker;
+	pthread_mutex_t	mutex;
+	int				num_running_cmds;
+	int				num_ready_cmds;
+	dlist_head		ready_cmds_list;	/* ready, but not fetched yet  */
+	dlist_head		active_cmds_list;	/* currently in-use */
+	kern_errorbuf	errorbuf;
+};
 
 extern XpuConnection *gpuClientOpenSession(const Bitmapset *gpuset,
 										   const XpuCommand *session);
@@ -326,7 +342,7 @@ extern void		pgstrom_init_relscan(void);
 /*
  * exec.c
  */
-typedef struct
+struct pgstromTaskState
 {
 	CustomScanState		css;
 	XpuConnection	   *conn;
@@ -336,26 +352,30 @@ typedef struct
 	ArrowFdwState	   *af_state;
 	BrinIndexState	   *br_state;
 	/* current chunk */
+	XpuCommand		   *curr_resp;
 	int64_t				curr_index;
-	XpuCommand		   *curr_task;
+	bool				scan_done;
+	bool				final_done;
 	/* callback used by exec.c */
-} pgstromTaskState;
+	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
+	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts);
+	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts);
+};
+typedef struct pgstromTaskState		pgstromTaskState;
 
 extern const XpuCommand *
-pgstrom_build_session_info(PlanState *ps,
-						   List *used_params,
-						   uint32_t num_cached_kvars,
-						   uint32_t kcxt_extra_bufsz,
-						   const bytea *xpucode_scan_quals,
-						   const bytea *xpucode_scan_projs);
+pgstromBuildSessionInfo(PlanState *ps,
+						List *used_params,
+						uint32_t num_cached_kvars,
+						uint32_t kcxt_extra_bufsz,
+						const bytea *xpucode_scan_quals,
+						const bytea *xpucode_scan_projs);
 extern int
 pgstrom_receive_xpu_command(pgsocket sockfd,
 							void *(*alloc_f)(void *priv, size_t sz),
 							void  (*attach_f)(void *priv, XpuCommand *xcmd),
 							void *priv,
-							const char *errmsg_label,
-							char *errmsg_buffer,
-							size_t errmsg_bufsz);
+							const char *error_label);
 
 extern void		pgstrom_init_exec_common(void);
 
@@ -440,6 +460,7 @@ extern Path	   *pgstrom_copy_pathnode(const Path *pathnode);
 extern bool		pgstrom_enabled;
 extern bool		pgstrom_cpu_fallback_enabled;
 extern bool		pgstrom_regression_test_mode;
+extern int		pgstrom_max_async_tasks;
 extern double	pgstrom_gpu_setup_cost;
 extern double	pgstrom_gpu_dma_cost;
 extern double	pgstrom_gpu_operator_cost;

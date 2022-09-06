@@ -62,12 +62,12 @@ __build_session_encode(StringInfo buf)
 }
 
 const XpuCommand *
-pgstrom_build_session_info(PlanState *ps,
-						   List *used_params,
-						   uint32_t kcxt_extra_bufsz,
-						   uint32_t kcxt_kvars_nslots,
-						   const bytea *xpucode_scan_quals,
-						   const bytea *xpucode_scan_projs)
+pgstromBuildSessionInfo(PlanState *ps,
+						List *used_params,
+						uint32_t kcxt_extra_bufsz,
+						uint32_t kcxt_kvars_nslots,
+						const bytea *xpucode_scan_quals,
+						const bytea *xpucode_scan_projs)
 {
 	ExprContext	   *econtext = ps->ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
@@ -212,6 +212,14 @@ pgstrom_build_session_info(PlanState *ps,
 	return xcmd;
 }
 
+
+
+
+
+
+
+
+
 /*
  * pgstrom_receive_xpu_command
  */
@@ -220,9 +228,7 @@ pgstrom_receive_xpu_command(pgsocket sockfd,
 							void *(*alloc_f)(void *priv, size_t sz),
 							void  (*attach_f)(void *priv, XpuCommand *xcmd),
 							void *priv,
-							const char *errmsg_label,
-							char *errmsg_buffer,
-							size_t errmsg_bufsz)
+							const char *error_label)
 {
 	char		buffer_local[2 * BLCKSZ];
 	char	   *buffer;
@@ -232,6 +238,10 @@ pgstrom_receive_xpu_command(pgsocket sockfd,
 	int			count = 0;
 	XpuCommand *curr = NULL;
 
+#define __fprintf(filp,fmt,...)										\
+	fprintf((filp), "[%s; %s:%d] " fmt "\n",						\
+			error_label, __FILE_NAME__, __LINE__, ##__VA_ARGS__)
+	
 restart:
 	buffer = buffer_local;
 	bufsz  = sizeof(buffer_local);
@@ -261,10 +271,8 @@ restart:
 				recv_flags = 0;
 				continue;
 			}
-			snprintf(errmsg_buffer, errmsg_bufsz,
-					 "%s: failed on recv(%d, %p, %ld, %d): %m",
-					 errmsg_label,
-					 sockfd, buffer + offset, bufsz - offset, recv_flags);
+			__fprintf(stderr, "failed on recv(%d, %p, %ld, %d): %m",
+					  sockfd, buffer + offset, bufsz - offset, recv_flags);
 			return -1;
 		}
 		else if (nbytes == 0)
@@ -272,9 +280,7 @@ restart:
 			/* end of the stream */
 			if (curr || offset > 0)
 			{
-				snprintf(errmsg_buffer, errmsg_bufsz,
-						 "%s: connection closed during XpuCommand read",
-						 errmsg_label);
+				__fprintf(stderr, "connection closed during XpuCommand read");
 				return -1;
 			}
 			return count;
@@ -303,9 +309,7 @@ restart:
 				xcmd = alloc_f(priv, temp->length);
 				if (!xcmd)
 				{
-					snprintf(errmsg_buffer, errmsg_bufsz,
-							 "%s: out of memory (sz=%lu): %m",
-							 errmsg_label, temp->length);
+					__fprintf(stderr, "out of memory (sz=%lu): %m", temp->length);
 					return -1;
 				}
 				memcpy(xcmd, temp, temp->length);
@@ -324,9 +328,7 @@ restart:
 				curr = alloc_f(priv, temp->length);
 				if (!curr)
 				{
-					snprintf(errmsg_buffer, errmsg_bufsz,
-							 "%s: out of memory (sz=%lu): %m",
-							 errmsg_label, temp->length);
+					__fprintf(stderr, "out of memory (sz=%lu): %m", temp->length);
 					return -1;
 				}
 				memcpy(curr, temp, offset);
@@ -344,8 +346,172 @@ restart:
 			goto restart;
 		}
 	}
-	snprintf(errmsg_buffer, errmsg_bufsz,
-			 "%s: Bug? should not break this loop",
-			 errmsg_label);
+	__fprintf(stderr, "Bug? should not break this loop");
 	return -1;
+#undef __fprintf
 }
+
+/*
+ * __fetchNextXpuCommand
+ */
+static XpuCommand *
+__fetchNextXpuCommand(pgstromTaskState *pts)
+{
+	XpuConnection  *conn = pts->conn;
+	XpuCommand	   *xcmd;
+	dlist_node	   *dnode;
+	int				ev;
+
+	while (!pts->scan_done)
+	{
+		pthreadMutexLock(&conn->mutex);
+		/*
+		 * Device error checks
+		 */
+		if (conn->errorbuf.errcode != ERRCODE_STROM_SUCCESS)
+		{
+			pthreadMutexUnlock(&conn->mutex);
+			ereport(ERROR,
+					(errcode(conn->errorbuf.errcode),
+					 errmsg("%s:%d  %s",
+							conn->errorbuf.filename,
+							conn->errorbuf.lineno,
+							conn->errorbuf.message),
+					 errhint("Device at %s, Function at %s",
+							 conn->devname,
+							 conn->errorbuf.funcname)));
+		}
+
+		if ((conn->num_running_cmds +
+			 conn->num_ready_cmds) < pgstrom_max_async_tasks &&
+			(dlist_is_empty(&conn->ready_cmds_list) ||
+			 conn->num_running_cmds < pgstrom_max_async_tasks / 2))
+		{
+			/*
+			 * Sum of running + ready commands is still less than the
+			 * pg_strom.max_async_tasks. So, if we have no ready commands,
+			 * or running commands are not sufficient, we try to load the
+			 * next chunks and enqueue them.
+			 */
+			pthreadMutexUnlock(&conn->mutex);
+			xcmd = pts->cb_next_chunk(pts);
+			if (!xcmd)
+			{
+				pts->scan_done = true;
+				break;
+			}
+			//use sendfile?
+			xpuClientSendCommand(conn, xcmd);
+		}
+		else if (!dlist_is_empty(&conn->ready_cmds_list))
+		{
+			/*
+			 * This block means we already runs enough number of concurrent
+			 * tasks, and some of then are already finished.
+			 * So, let's pick up one of the command result.
+			 */
+			goto pickup_ready_command;
+		}
+		else if (conn->num_running_cmds > 0)
+		{
+			/*
+			 * This block means we already runs enough number of concurrent
+			 * tasks, but none of them are already finished.
+			 * So, let's wait for the response.
+			 */
+			ResetLatch(MyLatch);
+			pthreadMutexUnlock(&conn->mutex);
+
+			ev = WaitLatch(MyLatch,
+						   WL_LATCH_SET |
+						   WL_TIMEOUT |
+						   WL_POSTMASTER_DEATH,
+						   1000L,
+						   PG_WAIT_EXTENSION);
+			if (ev & WL_POSTMASTER_DEATH)
+				ereport(FATAL,
+						(errcode(ERRCODE_ADMIN_SHUTDOWN),
+						 errmsg("Unexpected Postmaster dead")));
+		}
+		else
+		{
+			/*
+			 * Unfortunately, we touched the threshold. Take a short wait
+			 */
+			pthreadMutexUnlock(&conn->mutex);
+			pg_usleep(20000L);		/* 20ms */
+		}
+	}
+
+	/*
+	 * Once scan_done is set, no more XpuCommand will not be sent
+	 * (except for the terminator command)
+	 */
+	pthreadMutexLock(&conn->mutex);
+	ResetLatch(MyLatch);
+	while (dlist_is_empty(&conn->ready_cmds_list))
+	{
+		if (conn->num_running_cmds > 0)
+		{
+			pthreadMutexUnlock(&conn->mutex);
+		}
+		else
+		{
+			pthreadMutexUnlock(&conn->mutex);
+			if (!pts->cb_final_chunk || pts->final_done)
+				return NULL;
+			xcmd = pts->cb_final_chunk(pts);
+			if (!xcmd)
+				return NULL;
+			xpuClientSendCommand(conn, xcmd);
+		}
+		ev = WaitLatch(MyLatch,
+					   WL_LATCH_SET |
+					   WL_TIMEOUT |
+					   WL_POSTMASTER_DEATH,
+					   1000L,
+					   PG_WAIT_EXTENSION);
+		if (ev & WL_POSTMASTER_DEATH)
+			ereport(FATAL,
+					(errcode(ERRCODE_ADMIN_SHUTDOWN),
+					 errmsg("Unexpected Postmaster dead")));
+		pthreadMutexLock(&conn->mutex);
+		ResetLatch(MyLatch);
+	}
+pickup_ready_command:
+	Assert(conn->num_ready_cmds > 0);
+	dnode = dlist_pop_head_node(&conn->ready_cmds_list);
+	xcmd = dlist_container(XpuCommand, chain, dnode);
+	dlist_push_tail(&conn->active_cmds_list, &xcmd->chain);
+	conn->num_ready_cmds--;
+	pthreadMutexUnlock(&conn->mutex);
+
+	return xcmd;
+}
+
+/*
+ * pgstromExecTaskState
+ */
+TupleTableSlot *
+pgstromExecTaskState(pgstromTaskState *pts)
+{
+	TupleTableSlot *slot = NULL;
+
+	while (!pts->curr_resp || !(slot = pts->cb_next_tuple(pts)))
+	{
+		if (pts->curr_resp)
+			free(pts->curr_resp);
+		pts->curr_resp = __fetchNextXpuCommand(pts);
+		pts->curr_index = 0;
+	}
+	return slot;
+}
+
+
+
+
+
+
+
+
+

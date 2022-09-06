@@ -13,22 +13,6 @@
 
 static dlist_head	xpu_connections_list;
 
-struct XpuConnection
-{
-	dlist_node		chain;	/* link to gpuserv_connection_slots */
-	char			devname[32];
-	volatile pgsocket sockfd;
-	ResourceOwner	resowner;
-	pthread_t		worker;
-	pthread_mutex_t	mutex;
-	int				num_running_tasks;
-	dlist_head		ready_commands_list;
-	dlist_head		active_commands_list;
-	int				terminated;	/* positive: normal exit
-								 * negative: exit with error */
-	char			errmsg[200];
-};
-
 /*
  * Worker thread to receive response messages
  */
@@ -45,9 +29,10 @@ __xpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
 
 	xcmd->priv = conn;
 	pthreadMutexLock(&conn->mutex);
-	Assert(conn->num_running_tasks > 0);
-	dlist_push_tail(&conn->ready_commands_list, &xcmd->chain);
-	conn->num_running_tasks--;
+	Assert(conn->num_running_cmds > 0);
+	dlist_push_tail(&conn->ready_cmds_list, &xcmd->chain);
+	conn->num_running_cmds--;
+	conn->num_ready_cmds++;
 	pthreadMutexUnlock(&conn->mutex);
 	SetLatch(MyLatch);
 }
@@ -56,7 +41,10 @@ static void *
 __xpuConnectSessionWorker(void *__priv)
 {
 	XpuConnection *conn = __priv;
-	char		errmsg[200];
+
+#define __fprintf(filp,fmt,...)										\
+	fprintf((filp), "[%s; %s:%d] " fmt "\n",						\
+			conn->devname, __FILE_NAME__, __LINE__, ##__VA_ARGS__)
 
 	for (;;)
 	{
@@ -75,8 +63,7 @@ __xpuConnectSessionWorker(void *__priv)
 		{
 			if (errno == EINTR)
 				continue;
-			snprintf(errmsg, sizeof(errmsg),
-					 "failed on poll(2): %m");
+			__fprintf(stderr, "failed on poll(2): %m");
 			break;
 		}
 		else if (nevents > 0)
@@ -88,6 +75,7 @@ __xpuConnectSessionWorker(void *__priv)
 				pthreadMutexLock(&conn->mutex);
 				conn->terminated = 1;
 				pthreadMutexUnlock(&conn->mutex);
+				__fprintf(stderr, "peer socket closed.");
 				return NULL;
 			}
 			else if (pfd.revents & POLLIN)
@@ -95,18 +83,17 @@ __xpuConnectSessionWorker(void *__priv)
 				if (pgstrom_receive_xpu_command(conn->sockfd,
 												__xpuConnectSessionWorkerAlloc,
 												__xpuConnectSessionWorkerAttach,
-												conn,
-												__FUNCTION__,
-												errmsg, sizeof(errmsg)) < 0)
+												conn, conn->devname) < 0)
 					break;
 			}
 		}
 	}
 	pthreadMutexLock(&conn->mutex);
 	conn->terminated = -1;
-	strcpy(conn->errmsg, errmsg);
 	pthreadMutexUnlock(&conn->mutex);
+
 	return NULL;
+#undef __fprintf
 }
 
 /*
@@ -119,7 +106,7 @@ xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd)
 	ssize_t	nbytes;
 
 	pthreadMutexLock(&conn->mutex);
-	conn->num_running_tasks++;
+	conn->num_running_cmds++;
 	pthreadMutexUnlock(&conn->mutex);
 
 	nbytes = __writeFile(sockfd, xcmd, xcmd->length);
@@ -152,18 +139,19 @@ xpuClientGetResponse(XpuConnection *conn, long timeout)
 		if (conn->terminated < 0)
 		{
 			pthreadMutexUnlock(&conn->mutex);
-			elog(ERROR, "%s: %s", conn->devname, conn->errmsg);
+			elog(ERROR, "%s: connection terminated", conn->devname);
 		}
-		if (!dlist_is_empty(&conn->ready_commands_list))
+		if (!dlist_is_empty(&conn->ready_cmds_list))
 		{
-			dnode = dlist_pop_head_node(&conn->ready_commands_list);
+			dnode = dlist_pop_head_node(&conn->ready_cmds_list);
 			xcmd = dlist_container(XpuCommand, chain, dnode);
-			dlist_push_tail(&conn->active_commands_list, &xcmd->chain);
+			dlist_push_tail(&conn->active_cmds_list, &xcmd->chain);
+			conn->num_ready_cmds--;
 			pthreadMutexUnlock(&conn->mutex);
 			return xcmd;
 		}
 		/* if no running tasks, it makes no sense to wait for */
-		if (conn->num_running_tasks == 0 || conn->terminated != 0)
+		if (conn->num_running_cmds == 0 || conn->terminated != 0)
 			timeout = 0;
 		pthreadMutexUnlock(&conn->mutex);
 		if (timeout == 0)
@@ -288,8 +276,10 @@ gpuClientOpenSession(const Bitmapset *gpuset,
 		conn->sockfd = sockfd;
 		conn->resowner = CurrentResourceOwner;
 		pthreadMutexInit(&conn->mutex);
-		dlist_init(&conn->ready_commands_list);
-		dlist_init(&conn->active_commands_list);
+		conn->num_running_cmds = 0;
+		conn->num_ready_cmds = 0;
+		dlist_init(&conn->ready_cmds_list);
+		dlist_init(&conn->active_cmds_list);
 		if ((errcode = pthread_create(&conn->worker, NULL,
 									  __xpuConnectSessionWorker, conn)) != 0)
 		{
@@ -324,15 +314,15 @@ xpuClientCloseSession(XpuConnection *conn)
 	pthread_kill(conn->worker, SIGPOLL);
 	pthread_join(conn->worker, NULL);
 
-	while (!dlist_is_empty(&conn->ready_commands_list))
+	while (!dlist_is_empty(&conn->ready_cmds_list))
 	{
-		dnode = dlist_pop_head_node(&conn->ready_commands_list);
+		dnode = dlist_pop_head_node(&conn->ready_cmds_list);
 		xcmd = dlist_container(XpuCommand, chain, dnode);
 		free(xcmd);
 	}
-	while (!dlist_is_empty(&conn->active_commands_list))
+	while (!dlist_is_empty(&conn->active_cmds_list))
 	{
-		dnode = dlist_pop_head_node(&conn->active_commands_list);
+		dnode = dlist_pop_head_node(&conn->active_cmds_list);
 		xcmd = dlist_container(XpuCommand, chain, dnode);
 		free(xcmd);
 	}

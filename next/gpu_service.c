@@ -733,13 +733,16 @@ gpuservMonitorClient(void *__priv)
 	gpuClient  *gclient = __priv;
 	gpuContext *gcontext = gclient->gcontext;
 	pgsocket	sockfd = gclient->sockfd;
-	char		errmsg[200];
+	char		elabel[32];
 	CUresult	rc;
+
+	snprintf(elabel, sizeof(elabel), "GPU%d-serv", gcontext->cuda_dindex);
 
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 	{
-		fprintf(stderr, "failed on cuCtxSetCurrent: %s\n", cuStrError(rc));
+		fprintf(stderr, "[%s; %s:%d] failed on cuCtxSetCurrent: %s\n",
+				elabel, __FILE_NAME__,__LINE__, cuStrError(rc));
 		goto out;
 	}
 	GpuWorkerCurrentContext = gcontext;
@@ -758,7 +761,8 @@ gpuservMonitorClient(void *__priv)
 		{
 			if (errno == EINTR)
 				continue;
-			fprintf(stderr, "failed on poll(2): %m\n");
+			fprintf(stderr, "[%s; %s:%d] failed on poll(2): %m\n",
+					elabel, __FILE_NAME__,__LINE__);
 			break;
 		}
 		if (nevents == 0)
@@ -769,17 +773,13 @@ gpuservMonitorClient(void *__priv)
 			if (pgstrom_receive_xpu_command(sockfd,
 											__gpuservMonitorClientAlloc,
 											__gpuservMonitorClientAttach,
-											gclient,
-											__FUNCTION__,
-											errmsg, sizeof(errmsg)) < 0)
-			{
-				fputs(errmsg, stderr);
+											gclient, elabel) < 0)
 				break;
-			}
 		}
 		else if (pfd.revents & ~POLLIN)
 		{
-			fprintf(stderr, "peer socket closed\n");
+			fprintf(stderr, "[%s; %s:%d] peer socket closed.\n",
+					elabel, __FILE_NAME__,__LINE__);
 			break;
 		}
 	}

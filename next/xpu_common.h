@@ -80,6 +80,22 @@ typedef uint64_t			Datum;
 #endif	/* POSTGRES_H */
 #define MAXIMUM_ALIGNOF_SHIFT 3
 
+#ifndef __FILE_NAME__
+INLINE_FUNCTION(const char *)
+__runtime_file_name(const char *path)
+{
+	const char *s;
+
+	for (s = path; *s != '\0'; s++)
+	{
+		if (*s == '/')
+			path = s + 1;
+	}
+	return path;
+}
+#define __FILE_NAME__	__runtime_file_name(__FILE__)
+#endif
+
 #ifdef __CUDACC__
 template <typename T>
 INLINE_FUNCTION(T)
