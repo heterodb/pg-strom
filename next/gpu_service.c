@@ -770,10 +770,10 @@ gpuservMonitorClient(void *__priv)
 		Assert(nevents == 1);
 		if (pfd.revents == POLLIN)
 		{
-			if (pgstrom_receive_xpu_command(sockfd,
-											__gpuservMonitorClientAlloc,
-											__gpuservMonitorClientAttach,
-											gclient, elabel) < 0)
+			if (xpuConnectReceiveCommands(sockfd,
+										  __gpuservMonitorClientAlloc,
+										  __gpuservMonitorClientAttach,
+										  gclient, elabel) < 0)
 				break;
 		}
 		else if (pfd.revents & ~POLLIN)

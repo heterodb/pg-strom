@@ -268,35 +268,6 @@ extern char	   *pgstrom_xpucode_to_string(bytea *xpu_code);
 extern void		pgstrom_init_codegen(void);
 
 /*
- * xpu_client.c
- */
-struct XpuConnection
-{
-	dlist_node		chain;	/* link to gpuserv_connection_slots */
-	char			devname[32];
-	volatile pgsocket sockfd;
-	volatile int	terminated;		/* positive: normal exit
-									 * negative: exit by errors */
-	ResourceOwner	resowner;
-	pthread_t		worker;
-	pthread_mutex_t	mutex;
-	int				num_running_cmds;
-	int				num_ready_cmds;
-	dlist_head		ready_cmds_list;	/* ready, but not fetched yet  */
-	dlist_head		active_cmds_list;	/* currently in-use */
-	kern_errorbuf	errorbuf;
-};
-
-extern XpuConnection *gpuClientOpenSession(const Bitmapset *gpuset,
-										   const XpuCommand *session);
-extern void		xpuClientCloseSession(XpuConnection *conn);
-extern void		xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd);
-extern XpuCommand *xpuClientGetResponse(XpuConnection *conn, long timeout);
-extern void		xpuClientPutResponse(XpuCommand *xcmd);
-
-extern void		pgstrom_init_xpu_client(void);
-
-/*
  * datastore.c
  */
 #define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
@@ -340,7 +311,7 @@ extern pgstromSharedState *pgstromSharedStateShutdown(CustomScanState *css,
 extern void		pgstrom_init_relscan(void);
 
 /*
- * exec.c
+ * executor.c
  */
 struct pgstromTaskState
 {
@@ -363,6 +334,20 @@ struct pgstromTaskState
 };
 typedef struct pgstromTaskState		pgstromTaskState;
 
+extern XpuConnection *gpuClientOpenSession(const Bitmapset *gpuset,
+										   const XpuCommand *session);
+extern int
+xpuConnectReceiveCommands(pgsocket sockfd,
+						  void *(*alloc_f)(void *priv, size_t sz),
+						  void  (*attach_f)(void *priv, XpuCommand *xcmd),
+						  void *priv,
+						  const char *error_label);
+
+extern void		xpuClientCloseSession(XpuConnection *conn);
+extern void		xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd);
+extern XpuCommand *xpuClientGetResponse(XpuConnection *conn, long timeout);
+extern void		xpuClientPutResponse(XpuCommand *xcmd);
+
 extern const XpuCommand *
 pgstromBuildSessionInfo(PlanState *ps,
 						List *used_params,
@@ -370,21 +355,8 @@ pgstromBuildSessionInfo(PlanState *ps,
 						uint32_t kcxt_extra_bufsz,
 						const bytea *xpucode_scan_quals,
 						const bytea *xpucode_scan_projs);
-extern int
-pgstrom_receive_xpu_command(pgsocket sockfd,
-							void *(*alloc_f)(void *priv, size_t sz),
-							void  (*attach_f)(void *priv, XpuCommand *xcmd),
-							void *priv,
-							const char *error_label);
-
-extern void		pgstrom_init_exec_common(void);
-
-
-
-
-
-
-
+extern TupleTableSlot  *pgstromExecTaskState(pgstromTaskState *pts);
+extern void		pgstrom_init_executor(void);
 
 /*
  * gpu_device.c
