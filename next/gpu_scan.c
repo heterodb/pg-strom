@@ -804,7 +804,7 @@ ExecGpuScan(CustomScanState *node)
 			gpuset = gss->gs_info.gpu_cache_devs;
 		else if (gss->pts.gd_state)
 			gpuset = gss->gs_info.gpu_direct_devs;
-		gss->pts.conn = gpuClientOpenSession(gpuset, session);
+		gpuClientOpenSession(&gss->pts, gpuset, session);
 	}
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) GpuScanGetNext,

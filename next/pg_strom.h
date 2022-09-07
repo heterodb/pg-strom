@@ -334,18 +334,17 @@ struct pgstromTaskState
 };
 typedef struct pgstromTaskState		pgstromTaskState;
 
-extern XpuConnection *gpuClientOpenSession(const Bitmapset *gpuset,
-										   const XpuCommand *session);
+extern void		gpuClientOpenSession(pgstromTaskState *pts,
+									 const Bitmapset *gpuset,
+									 const XpuCommand *session);
 extern int
 xpuConnectReceiveCommands(pgsocket sockfd,
 						  void *(*alloc_f)(void *priv, size_t sz),
 						  void  (*attach_f)(void *priv, XpuCommand *xcmd),
 						  void *priv,
 						  const char *error_label);
-
 extern void		xpuClientCloseSession(XpuConnection *conn);
 extern void		xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd);
-extern XpuCommand *xpuClientGetResponse(XpuConnection *conn, long timeout);
 extern void		xpuClientPutResponse(XpuCommand *xcmd);
 
 extern const XpuCommand *

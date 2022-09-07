@@ -227,11 +227,11 @@ __xpuConnectSessionWorker(void *__priv)
 			Assert(nevents == 1);
 			if (pfd.revents & ~POLLIN)
 			{
-				/* peer socket closed */
+				__fprintf(stderr, "peer socket closed.");
 				pthreadMutexLock(&conn->mutex);
 				conn->terminated = 1;
+				SetLatch(MyLatch);
 				pthreadMutexUnlock(&conn->mutex);
-				__fprintf(stderr, "peer socket closed.");
 				return NULL;
 			}
 			else if (pfd.revents & POLLIN)
@@ -246,6 +246,7 @@ __xpuConnectSessionWorker(void *__priv)
 	}
 	pthreadMutexLock(&conn->mutex);
 	conn->terminated = -1;
+	SetLatch(MyLatch);
 	pthreadMutexUnlock(&conn->mutex);
 
 	return NULL;
@@ -272,66 +273,6 @@ xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd)
 }
 
 /*
- * xpuClientGetResponse
- */
-XpuCommand *
-xpuClientGetResponse(XpuConnection *conn, long timeout)
-{
-	XpuCommand *xcmd = NULL;
-	dlist_node *dnode;
-	TimestampTz	ts_expired = INT64_MAX;
-	TimestampTz	ts_curr;
-	int			ev, flags = WL_LATCH_SET | WL_POSTMASTER_DEATH;
-
-	if (timeout > 0)
-	{
-		flags |= WL_TIMEOUT;
-		ts_expired = GetCurrentTimestamp() / 1000L + timeout;
-	}
-
-	for (;;)
-	{
-		pthreadMutexLock(&conn->mutex);
-		if (conn->terminated < 0)
-		{
-			pthreadMutexUnlock(&conn->mutex);
-			elog(ERROR, "%s: connection terminated", conn->devname);
-		}
-		if (!dlist_is_empty(&conn->ready_cmds_list))
-		{
-			dnode = dlist_pop_head_node(&conn->ready_cmds_list);
-			xcmd = dlist_container(XpuCommand, chain, dnode);
-			dlist_push_tail(&conn->active_cmds_list, &xcmd->chain);
-			conn->num_ready_cmds--;
-			pthreadMutexUnlock(&conn->mutex);
-			return xcmd;
-		}
-		/* if no running tasks, it makes no sense to wait for */
-		if (conn->num_running_cmds == 0 || conn->terminated != 0)
-			timeout = 0;
-		pthreadMutexUnlock(&conn->mutex);
-		if (timeout == 0)
-			break;
-		/* wait for response */
-		ev = WaitLatch(MyLatch, flags, timeout,
-					   PG_WAIT_EXTENSION);
-		if (ev & WL_POSTMASTER_DEATH)
-			elog(FATAL, "unexpected postmaster dead");
-		if (ev & WL_TIMEOUT)
-			break;
-		if (flags & WL_TIMEOUT)
-		{
-			ts_curr = GetCurrentTimestamp() / 1000L;
-			if (ts_expired <= ts_curr)
-				break;
-			timeout = ts_expired - ts_curr;
-		}
-		CHECK_FOR_INTERRUPTS();
-	}
-	return NULL;
-}
-
-/*
  * xpuClientPutResponse
  */
 void
@@ -343,115 +284,6 @@ xpuClientPutResponse(XpuCommand *xcmd)
 	dlist_delete(&xcmd->chain);
 	pthreadMutexUnlock(&conn->mutex);
 	free(xcmd);
-}
-
-/*
- * __xpuClientInitSession
- */
-static XpuConnection *
-__xpuClientInitSession(XpuConnection *conn, const XpuCommand *session)
-{
-	XpuCommand *resp;
-
-	Assert(session->tag == XpuCommandTag__OpenSession);
-	xpuClientSendCommand(conn, session);
-	resp = xpuClientGetResponse(conn, -1);
-	if (resp->tag != XpuCommandTag__Success)
-		elog(ERROR, "%s:OpenSession failed - %s (%s:%d %s)",
-			 conn->devname,
-			 resp->u.error.message,
-			 resp->u.error.filename,
-			 resp->u.error.lineno,
-			 resp->u.error.funcname);
-	xpuClientPutResponse(resp);
-
-	return conn;
-}
-
-/*
- * gpuClientOpenSession
- */
-static int
-__gpuClientChooseDevice(const Bitmapset *gpuset)
-{
-	static bool		rr_initialized = false;
-	static uint32	rr_counter = 0;
-
-	if (!rr_initialized)
-	{
-		rr_counter = (uint32)getpid();
-		rr_initialized = true;
-	}
-
-	if (!bms_is_empty(gpuset))
-	{
-		int		num = bms_num_members(gpuset);
-		int	   *dindex = alloca(sizeof(int) * num);
-		int		i, k;
-
-		for (i=0, k=bms_next_member(gpuset, -1);
-			 k >= 0;
-			 i++, k=bms_next_member(gpuset, k))
-		{
-			dindex[i] = k;
-		}
-		Assert(i == num);
-		return dindex[rr_counter++ % num];
-	}
-	/* a simple round-robin if no GPUs preference */
-	return (rr_counter++ % numGpuDevAttrs);
-}
-
-XpuConnection *
-gpuClientOpenSession(const Bitmapset *gpuset,
-					 const XpuCommand *session)
-{
-	struct sockaddr_un addr;
-	pgsocket	sockfd;
-	XpuConnection *conn = NULL;
-
-	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (sockfd < 0)
-		elog(ERROR, "failed on socket(2): %m");
-	PG_TRY();
-	{
-		int		cuda_dindex = __gpuClientChooseDevice(gpuset);
-		int		errcode;
-
-		addr.sun_family = AF_UNIX;
-		snprintf(addr.sun_path, sizeof(addr.sun_path),
-				 ".pg_strom.%u.gpu%u.sock",
-				 PostmasterPid, cuda_dindex);
-		if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
-			elog(ERROR, "failed on connect('%s'): %m", addr.sun_path);
-
-		conn = calloc(1, sizeof(XpuConnection));
-		if (!conn)
-			elog(ERROR, "out of memory");
-		snprintf(conn->devname, 32, "GPU-%d", cuda_dindex);
-		conn->sockfd = sockfd;
-		conn->resowner = CurrentResourceOwner;
-		pthreadMutexInit(&conn->mutex);
-		conn->num_running_cmds = 0;
-		conn->num_ready_cmds = 0;
-		dlist_init(&conn->ready_cmds_list);
-		dlist_init(&conn->active_cmds_list);
-		if ((errcode = pthread_create(&conn->worker, NULL,
-									  __xpuConnectSessionWorker, conn)) != 0)
-		{
-			free(conn);
-			elog(ERROR, "failed on pthread_create: %s", strerror(errcode));
-		}
-		dlist_push_tail(&xpu_connections_list, &conn->chain);
-	}
-	PG_CATCH();
-	{
-		close(sockfd);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	return __xpuClientInitSession(conn, session);
 }
 
 /*
@@ -718,22 +550,36 @@ pgstromBuildSessionInfo(PlanState *ps,
 }
 
 /*
- * __fetchNextXpuCommand
+ * __pickupNextXpuCommand
+ *
+ * MEMO: caller must hold 'conn->mutex'
  */
 static XpuCommand *
-__fetchNextXpuCommand(pgstromTaskState *pts)
+__pickupNextXpuCommand(XpuConnection *conn)
+{
+	XpuCommand	   *xcmd;
+	dlist_node	   *dnode;
+
+	Assert(conn->num_ready_cmds > 0);
+	dnode = dlist_pop_head_node(&conn->ready_cmds_list);
+	xcmd = dlist_container(XpuCommand, chain, dnode);
+	dlist_push_tail(&conn->active_cmds_list, &xcmd->chain);
+	conn->num_ready_cmds--;
+
+	return xcmd;
+}
+
+static XpuCommand *
+__waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 {
 	XpuConnection  *conn = pts->conn;
 	XpuCommand	   *xcmd;
-	dlist_node	   *dnode;
 	int				ev;
 
-	while (!pts->scan_done)
+	pthreadMutexLock(&conn->mutex);
+	for (;;)
 	{
-		pthreadMutexLock(&conn->mutex);
-		/*
-		 * Device error checks
-		 */
+		/* device error checks */
 		if (conn->errorbuf.errcode != ERRCODE_STROM_SUCCESS)
 		{
 			pthreadMutexUnlock(&conn->mutex);
@@ -743,7 +589,72 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 							conn->errorbuf.filename,
 							conn->errorbuf.lineno,
 							conn->errorbuf.message),
-					 errhint("Device at %s, Function at %s",
+					 errhint("device at %s, function at %s",
+							 conn->devname,
+							 conn->errorbuf.funcname)));
+
+		}
+		if (!dlist_is_empty(&conn->ready_cmds_list))
+		{
+			/* ok, ready commands we have */
+			break;
+		}
+		else if (conn->num_running_cmds > 0)
+		{
+			/* wait for the running commands */
+			pthreadMutexUnlock(&conn->mutex);
+		}
+		else
+		{
+			pthreadMutexUnlock(&conn->mutex);
+			if (!try_final_callback)
+				return NULL;
+			if (!pts->cb_final_chunk || pts->final_done)
+				return NULL;
+			xcmd = pts->cb_final_chunk(pts);
+			if (!xcmd)
+				return NULL;
+			xpuClientSendCommand(conn, xcmd);
+		}
+		ev = WaitLatch(MyLatch,
+					   WL_LATCH_SET |
+					   WL_TIMEOUT |
+					   WL_POSTMASTER_DEATH,
+					   1000L,
+					   PG_WAIT_EXTENSION);
+		if (ev & WL_POSTMASTER_DEATH)
+			ereport(FATAL,
+					(errcode(ERRCODE_ADMIN_SHUTDOWN),
+					 errmsg("Unexpected Postmaster dead")));
+		pthreadMutexLock(&conn->mutex);
+	}
+	xcmd = __pickupNextXpuCommand(conn);
+	pthreadMutexUnlock(&conn->mutex);
+
+	return xcmd;
+}
+
+static XpuCommand *
+__fetchNextXpuCommand(pgstromTaskState *pts)
+{
+	XpuConnection  *conn = pts->conn;
+	XpuCommand	   *xcmd;
+	int				ev;
+
+	while (!pts->scan_done)
+	{
+		pthreadMutexLock(&conn->mutex);
+		/* device error checks */
+		if (conn->errorbuf.errcode != ERRCODE_STROM_SUCCESS)
+		{
+			pthreadMutexUnlock(&conn->mutex);
+			ereport(ERROR,
+					(errcode(conn->errorbuf.errcode),
+					 errmsg("%s:%d  %s",
+							conn->errorbuf.filename,
+							conn->errorbuf.lineno,
+							conn->errorbuf.message),
+					 errhint("device at %s, function at %s",
 							 conn->devname,
 							 conn->errorbuf.funcname)));
 		}
@@ -754,29 +665,27 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 			 conn->num_running_cmds < pgstrom_max_async_tasks / 2))
 		{
 			/*
-			 * Sum of running + ready commands is still less than the
-			 * pg_strom.max_async_tasks. So, if we have no ready commands,
-			 * or running commands are not sufficient, we try to load the
-			 * next chunks and enqueue them.
+			 * xPU service still has margin to enqueue new commands.
+			 * If we have no ready commands or number of running commands
+			 * are less than pg_strom.max_async_tasks/2, we try to load
+			 * the next chunk and enqueue this command.
 			 */
 			pthreadMutexUnlock(&conn->mutex);
 			xcmd = pts->cb_next_chunk(pts);
 			if (!xcmd)
 			{
+				/* end of scan */
 				pts->scan_done = true;
 				break;
 			}
-			//use sendfile?
 			xpuClientSendCommand(conn, xcmd);
 		}
 		else if (!dlist_is_empty(&conn->ready_cmds_list))
 		{
-			/*
-			 * This block means we already runs enough number of concurrent
-			 * tasks, and some of then are already finished.
-			 * So, let's pick up one of the command result.
-			 */
-			goto pickup_ready_command;
+			xcmd = __pickupNextXpuCommand(conn);
+			pthreadMutexUnlock(&conn->mutex);
+
+			return xcmd;
 		}
 		else if (conn->num_running_cmds > 0)
 		{
@@ -808,51 +717,7 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 			pg_usleep(20000L);		/* 20ms */
 		}
 	}
-
-	/*
-	 * Once scan_done is set, no more XpuCommand will not be sent
-	 * (except for the terminator command)
-	 */
-	pthreadMutexLock(&conn->mutex);
-	ResetLatch(MyLatch);
-	while (dlist_is_empty(&conn->ready_cmds_list))
-	{
-		if (conn->num_running_cmds > 0)
-		{
-			pthreadMutexUnlock(&conn->mutex);
-		}
-		else
-		{
-			pthreadMutexUnlock(&conn->mutex);
-			if (!pts->cb_final_chunk || pts->final_done)
-				return NULL;
-			xcmd = pts->cb_final_chunk(pts);
-			if (!xcmd)
-				return NULL;
-			xpuClientSendCommand(conn, xcmd);
-		}
-		ev = WaitLatch(MyLatch,
-					   WL_LATCH_SET |
-					   WL_TIMEOUT |
-					   WL_POSTMASTER_DEATH,
-					   1000L,
-					   PG_WAIT_EXTENSION);
-		if (ev & WL_POSTMASTER_DEATH)
-			ereport(FATAL,
-					(errcode(ERRCODE_ADMIN_SHUTDOWN),
-					 errmsg("Unexpected Postmaster dead")));
-		pthreadMutexLock(&conn->mutex);
-		ResetLatch(MyLatch);
-	}
-pickup_ready_command:
-	Assert(conn->num_ready_cmds > 0);
-	dnode = dlist_pop_head_node(&conn->ready_cmds_list);
-	xcmd = dlist_container(XpuCommand, chain, dnode);
-	dlist_push_tail(&conn->active_cmds_list, &xcmd->chain);
-	conn->num_ready_cmds--;
-	pthreadMutexUnlock(&conn->mutex);
-
-	return xcmd;
+	return __waitAndFetchNextXpuCommand(pts, true);
 }
 
 /*
@@ -868,9 +733,132 @@ pgstromExecTaskState(pgstromTaskState *pts)
 		if (pts->curr_resp)
 			free(pts->curr_resp);
 		pts->curr_resp = __fetchNextXpuCommand(pts);
+		if (!pts->curr_resp)
+			return NULL;
 		pts->curr_index = 0;
 	}
 	return slot;
+}
+
+/*
+ * __xpuClientOpenSession
+ */
+static void
+__xpuClientOpenSession(pgstromTaskState *pts,
+					   const XpuCommand *session,
+					   pgsocket sockfd,
+					   const char *devname)
+{
+	XpuConnection  *conn;
+	XpuCommand	   *resp;
+	int				rv;
+
+	Assert(!pts->conn);
+	conn = calloc(1, sizeof(XpuConnection));
+	if (!conn)
+	{
+		close(sockfd);
+		elog(ERROR, "out of memory");
+	}
+	strncpy(conn->devname, devname, 32);
+	conn->sockfd = sockfd;
+	conn->resowner = CurrentResourceOwner;
+	conn->worker = pthread_self();	/* to be over-written by worker's-id */
+	pthreadMutexInit(&conn->mutex);
+	conn->num_running_cmds = 0;
+	conn->num_ready_cmds = 0;
+	dlist_init(&conn->ready_cmds_list);
+	dlist_init(&conn->active_cmds_list);
+	dlist_push_tail(&xpu_connections_list, &conn->chain);
+	pts->conn = conn;
+
+	/*
+	 * Ok, sockfd and conn shall be automatically released on ereport()
+	 * after that.
+	 */
+	if ((rv = pthread_create(&conn->worker, NULL,
+							 __xpuConnectSessionWorker, conn)) != 0)
+		elog(ERROR, "failed on pthread_create: %s", strerror(rv));
+
+	/*
+	 * Initialize the new session
+	 */
+	Assert(session->tag == XpuCommandTag__OpenSession);
+	xpuClientSendCommand(conn, session);
+	resp = __waitAndFetchNextXpuCommand(pts, false);
+	if (!resp)
+		elog(ERROR, "Bug? %s:OpenSession response is missing", conn->devname);
+	if (resp->tag != XpuCommandTag__Success)
+		elog(ERROR, "%s:OpenSession failed - %s (%s:%d %s)",
+			 conn->devname,
+			 resp->u.error.message,
+			 resp->u.error.filename,
+			 resp->u.error.lineno,
+			 resp->u.error.funcname);
+	xpuClientPutResponse(resp);
+}
+
+/*
+ * gpuClientOpenSession
+ */
+static int
+__gpuClientChooseDevice(const Bitmapset *gpuset)
+{
+	static bool		rr_initialized = false;
+	static uint32	rr_counter = 0;
+
+	if (!rr_initialized)
+	{
+		rr_counter = (uint32)getpid();
+		rr_initialized = true;
+	}
+
+	if (!bms_is_empty(gpuset))
+	{
+		int		num = bms_num_members(gpuset);
+		int	   *dindex = alloca(sizeof(int) * num);
+		int		i, k;
+
+		for (i=0, k=bms_next_member(gpuset, -1);
+			 k >= 0;
+			 i++, k=bms_next_member(gpuset, k))
+		{
+			dindex[i] = k;
+		}
+		Assert(i == num);
+		return dindex[rr_counter++ % num];
+	}
+	/* a simple round-robin if no GPUs preference */
+	return (rr_counter++ % numGpuDevAttrs);
+}
+
+void
+gpuClientOpenSession(pgstromTaskState *pts,
+					 const Bitmapset *gpuset,
+					 const XpuCommand *session)
+{
+	struct sockaddr_un addr;
+	pgsocket	sockfd;
+	int			cuda_dindex = __gpuClientChooseDevice(gpuset);
+	char		namebuf[32];
+
+	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (sockfd < 0)
+		elog(ERROR, "failed on socket(2): %m");
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	snprintf(addr.sun_path, sizeof(addr.sun_path),
+			 ".pg_strom.%u.gpu%u.sock",
+			 PostmasterPid, cuda_dindex);
+	if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+	{
+		close(sockfd);
+		elog(ERROR, "failed on connect('%s'): %m", addr.sun_path);
+	}
+	snprintf(namebuf, sizeof(namebuf), "GPU-%d", cuda_dindex);
+
+	__xpuClientOpenSession(pts, session, sockfd, namebuf);
 }
 
 /*

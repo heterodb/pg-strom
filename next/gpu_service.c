@@ -736,7 +736,7 @@ gpuservMonitorClient(void *__priv)
 	char		elabel[32];
 	CUresult	rc;
 
-	snprintf(elabel, sizeof(elabel), "GPU%d-serv", gcontext->cuda_dindex);
+	snprintf(elabel, sizeof(elabel), "GPU-%d", gcontext->cuda_dindex);
 
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
