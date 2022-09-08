@@ -546,19 +546,250 @@ baseRelCanUseGpuDirect(PlannerInfo *root, RelOptInfo *baserel)
 
 /* ----------------------------------------------------------------
  *
- * Routines to load blocks from storage
+ * Routines to setup kern_data_store
  *
  * ----------------------------------------------------------------
  */
+static int
+count_num_of_subfields(Oid type_oid)
+{
+	TypeCacheEntry *tcache;
+	int		j, count = 0;
 
+	tcache = lookup_type_cache(type_oid, TYPECACHE_TUPDESC);
+	if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+	{
+		/* array type */
+		count = 1 + count_num_of_subfields(tcache->typelem);
+	}
+	else if (tcache->tupDesc)
+	{
+		/* composite type */
+		TupleDesc	tupdesc = tcache->tupDesc;
 
+		for (j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
 
+			count += count_num_of_subfields(attr->atttypid);
+		}
+	}
+	return count;
+}
 
+static void
+__setup_kern_colmeta(kern_data_store *kds,
+					 int column_index,
+					 const char *attname,
+					 int attnum,
+					 bool attbyval,
+					 char attalign,
+					 int16 attlen,
+					 Oid atttypid,
+					 int atttypmod,
+					 int *p_attcacheoff)
+{
+	kern_colmeta   *cmeta = &kds->colmeta[column_index];
+	TypeCacheEntry *tcache;
 
+	cmeta->attbyval	= attbyval;
+	cmeta->attalign	= typealign_get_width(attalign);
+	cmeta->attlen	= attlen;
+	if (attlen == 0 || attlen < -1)
+		elog(ERROR, "attribute %s has unexpected length (%d)", attname, attlen);
+	else if (attlen == -1)
+		kds->has_varlena = true;
+	cmeta->attnum	= attnum;
 
+	if (!p_attcacheoff || *p_attcacheoff < 0)
+		cmeta->attcacheoff = -1;
+	else if (attlen > 0)
+	{
+		cmeta->attcacheoff = att_align_nominal(*p_attcacheoff, attalign);
+		*p_attcacheoff = cmeta->attcacheoff + attlen;
+	}
+	else if (attlen == -1)
+	{
+		/*
+		 * Note that attcacheoff is also available on varlena datum
+		 * only if it appeared at the first, and its offset is aligned.
+		 * Elsewhere, we cannot utilize the attcacheoff for varlena
+		 */
+		uint32_t	__off = att_align_nominal(*p_attcacheoff, attalign);
 
+		if (*p_attcacheoff == __off)
+			cmeta->attcacheoff = __off;
+		else
+			cmeta->attcacheoff = -1;
+		*p_attcacheoff = -1;
+	}
+	else
+	{
+		cmeta->attcacheoff = *p_attcacheoff = -1;
+	}
+	cmeta->atttypid = atttypid;
+	cmeta->atttypmod = atttypmod;
+	strncpy(cmeta->attname, attname, NAMEDATALEN);
 
+	/* array? composite type? */
+	tcache = lookup_type_cache(atttypid, TYPECACHE_TUPDESC);
+	if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+	{
+		char		elem_name[NAMEDATALEN+10];
+		int16		elem_len;
+		bool		elem_byval;
+		char		elem_align;
 
+		cmeta->atttypkind = TYPE_KIND__ARRAY;
+		cmeta->idx_subattrs = kds->nr_colmeta++;
+		cmeta->num_subattrs = 1;
+
+		snprintf(elem_name, sizeof(elem_name), "__%s", attname);
+		get_typlenbyvalalign(tcache->typelem,
+							 &elem_len,
+							 &elem_byval,
+							 &elem_align);
+		__setup_kern_colmeta(kds,
+							 cmeta->idx_subattrs,
+							 elem_name,			/* attname */
+							 1,					/* attnum */
+							 elem_byval,		/* attbyval */
+							 elem_align,		/* attalign */
+							 elem_len,			/* attlen */
+							 tcache->typelem,	/* atttypid */
+							 -1,				/* atttypmod */
+							 NULL);				/* attcacheoff */
+	}
+	else if (tcache->tupDesc)
+	{
+		TupleDesc	tupdesc = tcache->tupDesc;
+		int			j, attcacheoff = -1;
+
+		cmeta->atttypkind = TYPE_KIND__COMPOSITE;
+		cmeta->idx_subattrs = kds->nr_colmeta;
+		cmeta->num_subattrs = tupdesc->natts;
+		kds->nr_colmeta += tupdesc->natts;
+
+		for (j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
+
+			__setup_kern_colmeta(kds,
+								 cmeta->idx_subattrs + j,
+								 NameStr(attr->attname),
+								 attr->attnum,
+								 attr->attbyval,
+								 attr->attalign,
+								 attr->attlen,
+								 attr->atttypid,
+								 attr->atttypmod,
+								 &attcacheoff);
+		}
+	}
+	else
+	{
+		switch (tcache->typtype)
+		{
+			case TYPTYPE_BASE:
+				cmeta->atttypkind = TYPE_KIND__BASE;
+				break;
+			case TYPTYPE_DOMAIN:
+				cmeta->atttypkind = TYPE_KIND__DOMAIN;
+				break;
+			case TYPTYPE_ENUM:
+				cmeta->atttypkind = TYPE_KIND__ENUM;
+				break;
+			case TYPTYPE_PSEUDO:
+				cmeta->atttypkind = TYPE_KIND__PSEUDO;
+				break;
+			case TYPTYPE_RANGE:
+				cmeta->atttypkind = TYPE_KIND__RANGE;
+				break;
+			default:
+				elog(ERROR, "Unexpected typtype ('%c')", tcache->typtype);
+				break;
+		}
+	}
+}
+
+void
+setup_kern_data_store(kern_data_store *kds,
+					  TupleDesc tupdesc,
+					  size_t length,
+					  char format)
+{
+	int		j, attcacheoff = -1;
+
+	memset(kds, 0, offsetof(kern_data_store, colmeta));
+	kds->length		= length;
+	kds->nitems		= 0;
+	kds->usage		= 0;
+	kds->ncols		= tupdesc->natts;
+	kds->format		= format;
+	kds->tdhasoid	= false;	/* PG12 removed 'oid' system column */
+	kds->tdtypeid	= tupdesc->tdtypeid;
+	kds->tdtypmod	= tupdesc->tdtypmod;
+	kds->table_oid	= InvalidOid;	/* to be set by the caller */
+	kds->nslots		= 0;			/* to be set by the caller, if any */
+	kds->nr_colmeta	= tupdesc->natts;
+
+	if (format == KDS_FORMAT_ROW  ||
+		format == KDS_FORMAT_HASH ||
+		format == KDS_FORMAT_BLOCK)
+		attcacheoff = 0;
+
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
+
+		__setup_kern_colmeta(kds, j,
+							 NameStr(attr->attname),
+							 attr->attnum,
+							 attr->attbyval,
+							 attr->attalign,
+							 attr->attlen,
+							 attr->atttypid,
+							 attr->atttypmod,
+							 &attcacheoff);
+	}
+	/* internal system attribute */
+	if (format == KDS_FORMAT_COLUMN)
+	{
+		kern_colmeta *cmeta = &kds->colmeta[kds->nr_colmeta++];
+
+		memset(cmeta, 0, sizeof(kern_colmeta));
+		cmeta->attbyval = true;
+		cmeta->attalign = sizeof(int32_t);
+		cmeta->attlen = sizeof(GpuCacheSysattr);
+		cmeta->attnum = -1;
+		cmeta->attcacheoff = -1;
+		cmeta->atttypid = InvalidOid;
+		cmeta->atttypmod = -1;
+		cmeta->atttypkind = TYPE_KIND__BASE;
+		strcpy(cmeta->attname, "__gcache_sysattr__");
+	}
+}
+
+size_t
+estimate_kern_data_store(TupleDesc tupdesc)
+{
+	int		j, nr_colmeta = tupdesc->natts;
+
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
+
+		nr_colmeta += count_num_of_subfields(attr->atttypid);
+	}
+	return MAXALIGN(offsetof(kern_data_store, colmeta[nr_colmeta]));
+}
+
+/* ----------------------------------------------------------------
+ *
+ * Routines to load chunks from storage
+ *
+ * ----------------------------------------------------------------
+ */
 
 
 

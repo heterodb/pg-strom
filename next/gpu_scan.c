@@ -133,6 +133,7 @@ typedef struct
 {
 	pgstromTaskState	pts;
 	GpuScanInfo			gs_info;
+	XpuCommand		   *xcmd_src;	/* souce command buffer */
 	/* for CPU fallbacks */
 	ExprState		   *dev_quals;
 	TupleTableSlot	   *base_slot;	/* base relation */
@@ -661,6 +662,43 @@ PlanGpuScanPath(PlannerInfo *root,
 	return &cscan->scan.plan;
 }
 
+static XpuCommand *
+gpuScanChunkArrowFdw(pgstromTaskState *pts)
+{
+	elog(ERROR, "not implemented yet");
+	return NULL;
+}
+
+static XpuCommand *
+gpuScanChunkGpuCache(pgstromTaskState *pts)
+{
+	elog(ERROR, "not implemented yet");
+	return NULL;
+}
+
+static XpuCommand *
+gpuScanChunkGpuDirect(pgstromTaskState *pts)
+{
+	elog(ERROR, "not implemented yet");
+	return NULL;
+}
+
+static XpuCommand *
+gpuScanChunkNormal(pgstromTaskState *pts)
+{
+	elog(ERROR, "not implemented yet");
+	return NULL;
+}
+
+static TupleTableSlot *
+gpuScanNextTuple(pgstromTaskState *pts)
+{
+//	XpuCommand	   *resp = pts->curr_resp;
+//	kern_data_store *kds;
+	elog(ERROR, "not implemented yet");
+    return NULL;
+}
+
 /*
  * CreateGpuScanState
  */
@@ -735,9 +773,24 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 											 gss->pts.css.ss.ss_ScanTupleSlot,
 											 &gss->pts.css.ss.ps,
 											 RelationGetDescr(rel));
-	//init BRIN-Index Support
-	//init Arrow_Fdw Support
+	//setup xcmd
+	
 
+
+
+	
+
+
+	if (gss->pts.af_state)
+		gss->pts.cb_next_chunk = gpuScanChunkArrowFdw;
+	else if (gss->pts.gc_state)
+		gss->pts.cb_next_chunk = gpuScanChunkGpuCache;
+	else if (gss->pts.gd_state)
+		gss->pts.cb_next_chunk = gpuScanChunkGpuDirect;
+	else
+		gss->pts.cb_next_chunk = gpuScanChunkNormal;
+	gss->pts.cb_next_tuple = gpuScanNextTuple;
+	gss->pts.cb_final_chunk = NULL;
 }
 
 /*
@@ -807,7 +860,7 @@ ExecGpuScan(CustomScanState *node)
 		gpuClientOpenSession(&gss->pts, gpuset, session);
 	}
 	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) GpuScanGetNext,
+					(ExecScanAccessMtd) pgstromExecTaskState,
 					(ExecScanRecheckMtd) GpuScanReCheckTuple);
 }
 

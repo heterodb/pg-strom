@@ -329,12 +329,11 @@ struct kern_colmeta {
 };
 typedef struct kern_colmeta		kern_colmeta;
 
-#define KDS_FORMAT_HEAP			1
-#define KDS_FORMAT_SLOT			2
-#define KDS_FORMAT_HASH			3	/* inner hash table for GpuHashJoin */
-#define KDS_FORMAT_BLOCK		4	/* raw blocks for direct loading */
-#define KDS_FORMAT_COLUMN		5	/* columnar based storage format */
-#define KDS_FORMAT_ARROW		6	/* apache arrow format */
+#define KDS_FORMAT_ROW			'r'		/* normal heap-tuples */
+#define KDS_FORMAT_HASH			'h'		/* inner hash table for HashJoin */
+#define KDS_FORMAT_BLOCK		'b'		/* raw blocks for direct loading */
+#define KDS_FORMAT_COLUMN		'c'		/* columnar based storage format */
+#define KDS_FORMAT_ARROW		'a'		/* apache arrow format */
 
 struct kern_data_store {
 	uint64_t		length;		/* length of this data-store */
@@ -344,22 +343,91 @@ struct kern_data_store {
 	 */
 	uint32_t		nitems; 	/* number of rows in this store */
 	uint32_t		usage;		/* usage of this data-store (PACKED) */
-	uint32_t		nrooms;		/* number of available rows in this store */
 	uint32_t		ncols;		/* number of columns in this store */
-	int8_t			format;		/* one of KDS_FORMAT_* above */
+	char			format;		/* one of KDS_FORMAT_* above */
 	bool			has_varlena; /* true, if any varlena attribute */
 	bool			tdhasoid;	/* copy of TupleDesc.tdhasoid */
 	Oid				tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	int32_t			tdtypmod;	/* copy of TupleDesc.tdtypmod */
 	Oid				table_oid;	/* OID of the table (only if GpuScan) */
 	uint32_t		nslots;		/* width of hash-slot (only HASH format) */
-	uint32_t		nrows_per_block; /* average number of rows per
-									  * PostgreSQL block (only BLOCK format) */
+	uint32_t		nloaded;	/* number of blocks already loaded (only BLOCK format) */
 	uint32_t		nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */
 	kern_colmeta	colmeta[1];	/* metadata of columns */
 };
 typedef struct kern_data_store		kern_data_store;
+
+/*
+ * Layout of KDS_FORMAT_ROW / KDS_FORMAT_HASH
+ *
+ * +---------------------+
+ * | kern_data_store     |
+ * |        :            |
+ * | +-------------------+
+ * | | kern_colmeta      |
+ * | |   colmeta[...]    |
+ * +-+-------------------+  <-- KDS_BODY_ADDR(kds)
+ * | ^                   |
+ * | | Hash slots if any | (*) KDS_FORMAT_ROW should have 'nslots' == 0, thus,
+ * | | (uint32 * nslots) |     this field is only for KDS_FORMAT_HASH
+ * | v                   |
+ * +---------------------+
+ * | ^                   |
+ * | | Row index      o--------+
+ * | | (uint32 * nitems) |     |
+ * | v                   |     |
+ * +---------------------+     |
+ * |        :            |     |
+ * +---------------------+ --- |
+ * | ^                   |  ^  |
+ * | | Buffer for        |  |  |
+ * | | kern_tupitem,  <--------+
+ * | | or kern_hashitem  |  | packed 'usage'
+ * | v                   |  v
+ * +---------------------+----
+ *
+ * Layout of KDS_FORMAT_BLOCK
+ *
+ * +-----------------------+
+ * | kern_data_store       |
+ * |        :              |
+ * | +---------------------+
+ * | | kern_colmeta        |
+ * | |   colmeta[...]      |
+ * +-+---------------------+ <-- KDS_BODY_ADDR(kds)
+ * |                       |  ^
+ * | Array of BlockNumber  |  | (BlockNumber * nitems)
+ * |                       |  v
+ * +-----------------------+ ---
+ * |                       |  ^
+ * | Raw blocks loaded by  |  | (BLCKSZ * nloaded)
+ * | the host module.      |  |
+ * |                       |  v
+ * +------------+----------+ -----
+ * | Row blocks | iovec of |  ^ ^
+ * | loaded by  | blocks   |  | | offsetof(strom_io_vector, ioc[nr_chunks])
+ * | the device | to load  |  | v     (nr_chunks == nitems - nloaded)
+ * | module     +----------+  | ---
+ * |     :      |             |
+ * |     :      |             v
+ * +------------+            ---
+ *
+ * Layout of KDS_FORMAT_ARROW
+ *
+ * +-----------------------+
+ * | kern_data_store       |
+ * |        :              |
+ * | +---------------------+
+ * | | kern_colmeta        |
+ * | |   colmeta[...]      |
+ * +-+---------------------+ <-- KDS_BODY_ADDR(kds)
+ * |                       |  ^
+ * | iovec of chunks to be |  | offsetof(strom_io_vector, ioc[nr_chunks])
+ * | loaded                |  |
+ * |                       |  v
+ * +-----------------------+ ---
+ */
 
 /*
  * kern_data_extra - extra buffer of KDS_FORMAT_COLUMN
@@ -725,13 +793,13 @@ KDS_BODY_ADDR(kern_data_store *kds)
 	return (char *)kds + KDS_HEAD_LENGTH(kds);
 }
 
-/* access functions for KDS_FORMAT_HEAP/HASH */
+/* access functions for KDS_FORMAT_ROW/HASH */
 INLINE_FUNCTION(uint32_t *)
 KDS_GET_ROWINDEX(kern_data_store *kds)
 {
-	Assert(kds->format == KDS_FORMAT_HEAP ||
+	Assert(kds->format == KDS_FORMAT_ROW ||
 		   kds->format == KDS_FORMAT_HASH);
-	return (uint32_t *)KDS_BODY_ADDR(kds);
+	return (uint32_t *)KDS_BODY_ADDR(kds) + kds->nslots;
 }
 
 /* kern_tupitem by kds_index */
@@ -754,7 +822,7 @@ KDS_FETCH_TUPITEM(kern_data_store *kds,
 {
 	kern_tupitem   *tupitem;
 
-	Assert(kds->format == KDS_FORMAT_HEAP ||
+	Assert(kds->format == KDS_FORMAT_ROW ||
 		   kds->format == KDS_FORMAT_HASH);
 	if (tuple_offset == 0)
 		return NULL;
@@ -771,9 +839,8 @@ KDS_FETCH_TUPITEM(kern_data_store *kds,
 INLINE_FUNCTION(uint32_t *)
 KDS_GET_HASHSLOT(kern_data_store *kds)
 {
-	Assert(kds->format == KDS_FORMAT_HASH);
-	return (uint32_t *)(KDS_BODY_ADDR(kds) +
-						MAXALIGN(sizeof(uint32_t) * kds->nrooms));
+	Assert(kds->format == KDS_FORMAT_HASH && kds->nslots > 0);
+	return (uint32_t *)(KDS_BODY_ADDR(kds));
 }
 
 INLINE_FUNCTION(kern_hashitem *)
@@ -801,20 +868,13 @@ KDS_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 }
 
 /* access macros for KDS_FORMAT_BLOCK */
-#if 0
-//Only GPU?
-#define KERN_DATA_STORE_PARTSZ(kds)             \
-    Min(((kds)->nrows_per_block +               \
-         warpSize - 1) & ~(warpSize - 1),       \
-        get_local_size())
-#endif
 #define KDS_BLOCK_BLCKNR(kds,block_id)				\
 	(((BlockNumber *)KDS_BODY_ADDR(kds))[block_id])
 #define KDS_BLOCK_PGPAGE(kds,block_id)					\
 	((struct PageHeaderData *)							\
 	 (KDS_BODY_ADDR(kds) +								\
-	  MAXALIGN(sizeof(BlockNumber) * (kds)->nrooms) +	\
-      BLCKSZ * block_id))
+	  MAXALIGN(sizeof(BlockNumber) * (kds)->nitems) +	\
+	  BLCKSZ * block_id))
 
 INLINE_FUNCTION(HeapTupleHeaderData *)
 KDS_BLOCK_REF_HTUP(kern_data_store *kds,
@@ -827,7 +887,7 @@ KDS_BLOCK_REF_HTUP(kern_data_store *kds,
 	 * KDS_FORMAT_BLOCK must never be larger than 4GB.
 	 */
 	ItemIdData	   *lpp = (ItemIdData *)((char *)kds + lp_offset);
-	uint32_t		head_size;
+	uint32_t		head_sz;
 	uint32_t		block_id;
 	BlockNumber		block_nr;
 	PageHeaderData *pg_page;
@@ -835,12 +895,11 @@ KDS_BLOCK_REF_HTUP(kern_data_store *kds,
 	Assert(kds->format == KDS_FORMAT_BLOCK);
 	if (lp_offset == 0)
 		return NULL;
-	head_size = (KDS_HEAD_LENGTH(kds) +
-				 MAXALIGN(sizeof(BlockNumber) * kds->nrooms));
-	Assert(lp_offset >= head_size &&
-		   lp_offset <  head_size + BLCKSZ * kds->nitems);
-    block_id = (lp_offset - head_size) / BLCKSZ;
-    block_nr = KDS_BLOCK_BLCKNR(kds, block_id);
+	head_sz = KDS_HEAD_LENGTH(kds) + MAXALIGN(sizeof(BlockNumber) * kds->nitems);
+	Assert(lp_offset >= head_sz &&
+		   lp_offset <  head_sz + BLCKSZ * kds->nitems);
+	block_id = (lp_offset - head_sz) / BLCKSZ;
+	block_nr = KDS_BLOCK_BLCKNR(kds, block_id);
 	pg_page = KDS_BLOCK_PGPAGE(kds, block_id);
 
 	Assert(lpp >= pg_page->pd_linp &&
@@ -911,6 +970,21 @@ KDS_ARROW_REF_VARLENA_DATUM(kern_data_store *kds,
 	*p_length = offset[rowidx+1] - offset[rowidx];
 	return (extra + offset[rowidx]);	
 }
+
+/*
+ * GpuCacheSysattr
+ *
+ * An internal system attribute of GPU cache
+ */
+struct GpuCacheSysattr
+{
+	uint32_t	xmin;
+	uint32_t	xmax;
+	uint32_t	owner;
+	ItemPointerData ctid;
+	uint16_t	__padding__;	//can be used for t_infomask?
+};
+typedef struct GpuCacheSysattr	GpuCacheSysattr;
 
 /* ----------------------------------------------------------------
  *

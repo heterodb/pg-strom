@@ -302,6 +302,13 @@ extern const Bitmapset *GetOptimalGpusForRelation(PlannerInfo *root,
 												  RelOptInfo *rel);
 extern const Bitmapset *baseRelCanUseGpuDirect(PlannerInfo *root,
 											   RelOptInfo *baserel);
+
+extern size_t	estimate_kern_data_store(TupleDesc tupdesc);
+extern void		setup_kern_data_store(kern_data_store *kds,
+									  TupleDesc tupdesc,
+									  size_t length,
+									  char format);
+
 extern Size		pgstromSharedStateEstimate(CustomScanState *css);
 extern pgstromSharedState *pgstromSharedStateCreate(CustomScanState *css,
 													void *dsm_addr);
