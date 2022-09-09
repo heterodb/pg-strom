@@ -190,6 +190,46 @@ typedef struct GpuDirectState	GpuDirectState;
 typedef struct ArrowFdwState	ArrowFdwState;
 typedef struct BrinIndexState	BrinIndexState;
 
+typedef struct
+{
+	/* statistics */
+	pg_atomic_uint64	ntuples_valid;
+	pg_atomic_uint64	ntuples_dropped;
+	/* for arrow_fdw */
+	pg_atomic_uint32	af_rbatch_index;
+	pg_atomic_uint32	af_rbatch_nload;	/* # of loaded record-batches */
+	pg_atomic_uint32	af_rbatch_nskip;	/* # of skipped record-batches */
+	/* for gpu-cache */
+	pg_atomic_uint32	gc_fetch_count;
+	/* common block-based table scan descriptor */
+	ParallelBlockTableScanDescData bpscan;
+} pgstromSharedState;
+
+struct pgstromTaskState
+{
+	CustomScanState		css;
+	XpuConnection	   *conn;
+	pgstromSharedState *ps_state;
+	GpuCacheState	   *gc_state;
+	GpuDirectState	   *gd_state;
+	ArrowFdwState	   *af_state;
+	BrinIndexState	   *br_state;
+	/* current chunk */
+	XpuCommand		   *curr_resp;
+	int64_t				curr_index;
+	bool				scan_done;
+	bool				final_done;
+	/* base relation scan, if any */
+	TupleTableSlot	   *base_slot;
+	ExprState		   *base_quals;	/* equivalent to device quals */
+	ProjectionInfo	   *base_proj;	/* base --> custom_tlist projection */
+	/* callback used by exec.c */
+	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
+	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts);
+	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts);
+};
+typedef struct pgstromTaskState		pgstromTaskState;
+
 /*
  * Global variables
  */
@@ -277,21 +317,6 @@ extern void		pgstrom_init_codegen(void);
 /*
  * relscan.c
  */
-typedef struct
-{
-	/* statistics */
-	pg_atomic_uint64	ntuples_valid;
-	pg_atomic_uint64	ntuples_dropped;
-	/* for arrow_fdw */
-	pg_atomic_uint32	af_rbatch_index;
-	pg_atomic_uint32	af_rbatch_nload;	/* # of loaded record-batches */
-	pg_atomic_uint32	af_rbatch_nskip;	/* # of skipped record-batches */
-	/* for gpu-cache */
-	pg_atomic_uint32	gc_fetch_count;
-	/* common block-based table scan descriptor */
-	ParallelBlockTableScanDescData bpscan;
-} pgstromSharedState;
-
 extern IndexOptInfo *pgstrom_tryfind_brinindex(PlannerInfo *root,
 											   RelOptInfo *baserel,
 											   List **p_indexConds,
@@ -304,10 +329,13 @@ extern const Bitmapset *baseRelCanUseGpuDirect(PlannerInfo *root,
 											   RelOptInfo *baserel);
 
 extern size_t	estimate_kern_data_store(TupleDesc tupdesc);
-extern void		setup_kern_data_store(kern_data_store *kds,
+extern size_t	setup_kern_data_store(kern_data_store *kds,
 									  TupleDesc tupdesc,
 									  size_t length,
 									  char format);
+
+extern bool		pgstromRelScanChunkNormal(kern_data_store *kds,
+										  pgstromTaskState *pts);
 
 extern Size		pgstromSharedStateEstimate(CustomScanState *css);
 extern pgstromSharedState *pgstromSharedStateCreate(CustomScanState *css,
@@ -320,27 +348,6 @@ extern void		pgstrom_init_relscan(void);
 /*
  * executor.c
  */
-struct pgstromTaskState
-{
-	CustomScanState		css;
-	XpuConnection	   *conn;
-	pgstromSharedState *ps_state;
-	GpuCacheState	   *gc_state;
-	GpuDirectState	   *gd_state;
-	ArrowFdwState	   *af_state;
-	BrinIndexState	   *br_state;
-	/* current chunk */
-	XpuCommand		   *curr_resp;
-	int64_t				curr_index;
-	bool				scan_done;
-	bool				final_done;
-	/* callback used by exec.c */
-	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
-	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts);
-	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts);
-};
-typedef struct pgstromTaskState		pgstromTaskState;
-
 extern void		gpuClientOpenSession(pgstromTaskState *pts,
 									 const Bitmapset *gpuset,
 									 const XpuCommand *session);

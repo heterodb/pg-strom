@@ -186,11 +186,23 @@ __xpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
 	xcmd->priv = conn;
 	pthreadMutexLock(&conn->mutex);
 	Assert(conn->num_running_cmds > 0);
-	dlist_push_tail(&conn->ready_cmds_list, &xcmd->chain);
 	conn->num_running_cmds--;
-	conn->num_ready_cmds++;
-	pthreadMutexUnlock(&conn->mutex);
+	if (xcmd->tag == XpuCommandTag__Error)
+	{
+		if (conn->errorbuf.errcode == ERRCODE_STROM_SUCCESS)
+		{
+			Assert(xcmd->u.error.errcode != ERRCODE_STROM_SUCCESS);
+			memcpy(&conn->errorbuf, &xcmd->u.error, sizeof(kern_errorbuf));
+		}
+		free(xcmd);
+	}
+	else
+	{
+		dlist_push_tail(&conn->ready_cmds_list, &xcmd->chain);
+		conn->num_ready_cmds++;
+	}
 	SetLatch(MyLatch);
+	pthreadMutexUnlock(&conn->mutex);
 }
 
 static void *

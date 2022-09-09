@@ -712,7 +712,7 @@ __setup_kern_colmeta(kern_data_store *kds,
 	}
 }
 
-void
+size_t
 setup_kern_data_store(kern_data_store *kds,
 					  TupleDesc tupdesc,
 					  size_t length,
@@ -768,6 +768,7 @@ setup_kern_data_store(kern_data_store *kds,
 		cmeta->atttypkind = TYPE_KIND__BASE;
 		strcpy(cmeta->attname, "__gcache_sysattr__");
 	}
+	return MAXALIGN(offsetof(kern_data_store, colmeta[kds->nr_colmeta]));
 }
 
 size_t
@@ -790,11 +791,68 @@ estimate_kern_data_store(TupleDesc tupdesc)
  *
  * ----------------------------------------------------------------
  */
+static bool
+__kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
+{
+	uint32_t   *rowindex = KDS_GET_ROWINDEX(kds);
+	HeapTuple	tuple;
+	size_t		sz, __usage;
+	bool		should_free;
+	kern_tupitem *titem;
 
+	Assert(kds->format == KDS_FORMAT_ROW && kds->nslots == 0);
+	tuple = ExecFetchSlotHeapTuple(slot, false, &should_free);
 
+	__usage = (__kds_unpack(kds->usage) +
+			   MAXALIGN(offsetof(kern_tupitem, htup) + tuple->t_len));
+	sz = KDS_HEAD_LENGTH(kds) + sizeof(uint32_t) * (kds->nitems + 1) + __usage;
+	if (sz > kds->length)
+		return false;	/* no more items! */
+	titem = (kern_tupitem *)((char *)kds + kds->length - __usage);
+	titem->t_len = tuple->t_len;
+	titem->rowid = kds->nitems;
+	memcpy(&titem->htup, tuple->t_data, tuple->t_len);
+	kds->usage = rowindex[kds->nitems++] = __kds_packed(__usage);
 
+	if (should_free)
+		heap_freetuple(tuple);
+	ExecClearTuple(slot);
 
+	return true;
+}
 
+static bool
+__relScanChunkNormalBrin(kern_data_store *kds,
+						 pgstromTaskState *pts)
+{
+	//BrinIndexState *br_state = pts->br_state;
+	elog(ERROR, "to be implement");
+	return false;
+}
+
+bool
+pgstromRelScanChunkNormal(kern_data_store *kds,
+						  pgstromTaskState *pts)
+{
+	EState		   *estate = pts->css.ss.ps.state;
+	TableScanDesc	scan = pts->css.ss.ss_currentScanDesc;
+	TupleTableSlot *slot = pts->base_slot;
+
+	if (pts->br_state)
+		return __relScanChunkNormalBrin(kds, pts);
+	for (;;)
+	{
+		if (!TTS_EMPTY(slot) &&
+			!__kds_row_insert_tuple(kds, slot))
+			break;
+		if (!table_scan_getnextslot(scan, estate->es_direction, slot))
+			break;
+		if (!__kds_row_insert_tuple(kds, slot))
+			break;
+	}
+	elog(INFO, "nitems=%u usage=%lu", kds->nitems, __kds_unpack(kds->usage));
+	return (kds->nitems > 0);
+}
 
 /*
  * pgstromSharedStateEstimate

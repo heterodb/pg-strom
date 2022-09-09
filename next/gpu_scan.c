@@ -133,11 +133,8 @@ typedef struct
 {
 	pgstromTaskState	pts;
 	GpuScanInfo			gs_info;
-	XpuCommand		   *xcmd_src;	/* souce command buffer */
-	/* for CPU fallbacks */
-	ExprState		   *dev_quals;
-	TupleTableSlot	   *base_slot;	/* base relation */
-	ProjectionInfo	   *base_proj;	/* base --> tlist_dev projection */
+	XpuCommand		   *xcmd_req;	/* request command buffer */
+	size_t				xcmd_len;
 } GpuScanState;
 
 
@@ -686,7 +683,18 @@ gpuScanChunkGpuDirect(pgstromTaskState *pts)
 static XpuCommand *
 gpuScanChunkNormal(pgstromTaskState *pts)
 {
-	elog(ERROR, "not implemented yet");
+	GpuScanState   *gss = (GpuScanState *)pts;
+	XpuCommand	   *xcmd = gss->xcmd_req;
+	kernExecScan   *kscan = &xcmd->u.scan;
+	kern_data_store	*kds;
+
+	kds = (kern_data_store *)((char *)kscan + kscan->kds_src_offset);
+	kds->length = gss->xcmd_len - (offsetof(XpuCommand, u.scan) +
+								   kscan->kds_src_offset);
+	kds->nitems = 0;
+	kds->usage = 0;
+	if (pgstromRelScanChunkNormal(kds, pts))
+		return xcmd;
 	return NULL;
 }
 
@@ -718,6 +726,45 @@ CreateGpuScanState(CustomScan *cscan)
 }
 
 /*
+ * setupGpuScanRequestBuffer
+ */
+static void
+setupGpuScanRequestBuffer(GpuScanState *gss,
+						  TupleDesc tdesc_src,
+						  TupleDesc tdesc_dst,
+						  char format,
+						  size_t bufsz)
+{
+	XpuCommand	   *xcmd;
+	kernExecScan   *kscan;
+	kern_data_store *kds;
+	size_t			len, off;
+
+	len = (offsetof(XpuCommand, u.scan.data) +
+		   estimate_kern_data_store(tdesc_src) +
+		   estimate_kern_data_store(tdesc_dst) + bufsz);
+	xcmd = palloc(len);
+
+	memset(xcmd, 0, offsetof(XpuCommand, u.scan.data));
+	xcmd->magic = XpuCommandMagicNumber;
+	xcmd->tag = XpuCommandTag__XpuScanExec;
+	xcmd->length = len;
+
+	kscan = &xcmd->u.scan;
+	kscan->kds_dst_offset = offsetof(kernExecScan, data);
+	kds = (kern_data_store *)kscan->data;
+	off = setup_kern_data_store(kds, tdesc_dst, 0, KDS_FORMAT_ROW);
+	if (format != KDS_FORMAT_COLUMN)
+	{
+		kscan->kds_src_offset = kscan->kds_dst_offset + off;
+		kds = (kern_data_store *)((char *)kscan + kscan->kds_src_offset);
+		setup_kern_data_store(kds, tdesc_src, 0, format);
+	}
+	gss->xcmd_req = xcmd;
+	gss->xcmd_len = len;
+}
+
+/*
  * ExecInitGpuScan
  */
 static void
@@ -730,7 +777,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	List		   *dev_quals;
 	List		   *tlist_dev = NIL;
 	ListCell	   *lc;
-
+	char			format;
+	size_t			bufsz;
 
 	/* sanity checks */
 	Assert(rel != NULL &&
@@ -758,7 +806,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	dev_quals = (List *)
 		fixup_varnode_to_origin((Node *)gss->gs_info.dev_quals,
 								cscan->custom_scan_tlist);
-	gss->dev_quals = ExecInitQual(dev_quals, &gss->pts.css.ss.ps);
+	gss->pts.base_quals = ExecInitQual(dev_quals, &gss->pts.css.ss.ps);
 	foreach (lc, cscan->custom_scan_tlist)
 	{
 		TargetEntry *tle = lfirst(lc);
@@ -766,57 +814,40 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		if (!tle->resjunk)
 			tlist_dev = lappend(tlist_dev, tle);
 	}
-	gss->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
-											  &TTSOpsHeapTuple);
-	gss->base_proj = ExecBuildProjectionInfo(tlist_dev,
-											 gss->pts.css.ss.ps.ps_ExprContext,
-											 gss->pts.css.ss.ss_ScanTupleSlot,
-											 &gss->pts.css.ss.ps,
-											 RelationGetDescr(rel));
-	//setup xcmd
-	
-
-
-
-	
-
-
+	gss->pts.base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
+												  table_slot_callbacks(rel));
+	gss->pts.base_proj = ExecBuildProjectionInfo(tlist_dev,
+												 gss->pts.css.ss.ps.ps_ExprContext,
+												 gss->pts.base_slot,
+												 &gss->pts.css.ss.ps,
+												 RelationGetDescr(rel));
 	if (gss->pts.af_state)
+	{
 		gss->pts.cb_next_chunk = gpuScanChunkArrowFdw;
+		format = KDS_FORMAT_ARROW;
+		bufsz = (1UL<<16);	/* 64kB for iovec */
+	}
 	else if (gss->pts.gc_state)
+	{
 		gss->pts.cb_next_chunk = gpuScanChunkGpuCache;
+		format = KDS_FORMAT_COLUMN;
+		bufsz = 0;
+	}
 	else if (gss->pts.gd_state)
+	{
 		gss->pts.cb_next_chunk = gpuScanChunkGpuDirect;
+		format = KDS_FORMAT_BLOCK;
+		bufsz = sizeof(BlockNumber) * PGSTROM_CHUNK_SIZE / BLCKSZ + (2UL<<20);
+	}
 	else
+	{
 		gss->pts.cb_next_chunk = gpuScanChunkNormal;
+		format = KDS_FORMAT_ROW;
+		bufsz = PGSTROM_CHUNK_SIZE;
+	}
 	gss->pts.cb_next_tuple = gpuScanNextTuple;
-	gss->pts.cb_final_chunk = NULL;
-}
 
-/*
- * GpuScanGetNext
- */
-static TupleTableSlot *
-GpuScanGetNext(GpuScanState *gss)
-{
-#if 0
-	if (gss->gc_state)
-		pds = loadGpuCache();
-#endif
-#if 0
-	if (gss->af_state)
-		pds = loadArrow();
-	if (gss->gd_state)
-	{
-		pds = loadBlock();
-	}
-	else
-	{
-		pds = execScanChunk();
-	}
-
-#endif	
-	return NULL;
+	setupGpuScanRequestBuffer(gss, RelationGetDescr(rel), tupdesc, format, bufsz);
 }
 
 /*
@@ -874,8 +905,8 @@ ExecEndGpuScan(CustomScanState *node)
 
 	if (gss->pts.conn)
 		xpuClientCloseSession(gss->pts.conn);
-	if (gss->base_slot)
-		ExecDropSingleTupleTableSlot(gss->base_slot);
+	if (gss->pts.base_slot)
+		ExecDropSingleTupleTableSlot(gss->pts.base_slot);
 	if (gss->pts.css.ss.ss_currentScanDesc)
 		table_endscan(gss->pts.css.ss.ss_currentScanDesc);
 }
