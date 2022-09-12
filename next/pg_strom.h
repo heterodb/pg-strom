@@ -215,6 +215,7 @@ struct pgstromTaskState
 	ArrowFdwState	   *af_state;
 	BrinIndexState	   *br_state;
 	/* current chunk */
+	TBMIterateResult   *curr_tbm;
 	XpuCommand		   *curr_resp;
 	int64_t				curr_index;
 	bool				scan_done;
@@ -237,7 +238,8 @@ extern long		PAGE_SIZE;
 extern long		PAGE_MASK;
 extern int		PAGE_SHIFT;
 extern long		PHYS_PAGES;
-#define PAGE_ALIGN(x)	TYPEALIGN(PAGE_SIZE,(x))
+#define PAGE_ALIGN(x)			TYPEALIGN(PAGE_SIZE,(x))
+#define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
 
 /*
  * extra.c
@@ -267,34 +269,26 @@ extern Bitmapset *extraSysfsLookupOptimalGpus(int fdesc);
 extern ssize_t	extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_sz);
 
 /*
- * shmbuf.c
- */
-extern void	   *shmbufAlloc(size_t sz);
-extern void	   *shmbufAllocZero(size_t sz);
-extern void		shmbufFree(void *addr);
-extern void		pgstrom_init_shmbuf(void);
-
-/*
  * codegen.c
  */
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 											List *func_args,
 											Oid func_collid);
-extern void	pgstrom_build_xpucode(bytea **p_xpucode,
-								  Expr *expr,
-								  List *input_rels_tlist,
-								  uint32_t *p_extra_flags,
-								  uint32_t *p_extra_bufsz,
-								  uint32_t *p_kvars_nslots,
-								  List **p_used_params);
-extern void	pgstrom_build_projection(bytea **p_xpucode_proj,
-									 List *tlist_dev,
-									 List *input_rels_tlist,
-									 uint32_t *p_extra_flags,
-									 uint32_t *p_extra_bufsz,
-									 uint32_t *p_kvars_nslots,
-									 List **p_used_params);
+extern void		pgstrom_build_xpucode(bytea **p_xpucode,
+									  Expr *expr,
+									  List *input_rels_tlist,
+									  uint32_t *p_extra_flags,
+									  uint32_t *p_extra_bufsz,
+									  uint32_t *p_kvars_nslots,
+									  List **p_used_params);
+extern void		pgstrom_build_projection(bytea **p_xpucode_proj,
+										 List *tlist_dev,
+										 List *input_rels_tlist,
+										 uint32_t *p_extra_flags,
+										 uint32_t *p_extra_bufsz,
+										 uint32_t *p_kvars_nslots,
+										 List **p_used_params);
 extern bool		pgstrom_gpu_expression(Expr *expr,
 									   List *input_rels_tlist,
 									   int *p_devcost);
@@ -308,21 +302,33 @@ extern char	   *pgstrom_xpucode_to_string(bytea *xpu_code);
 extern void		pgstrom_init_codegen(void);
 
 /*
- * datastore.c
+ * brin.c
  */
-#define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
+extern IndexOptInfo *pgstromTryFindBrinIndex(PlannerInfo *root,
+											 RelOptInfo *baserel,
+											 List **p_indexConds,
+											 List **p_indexQuals,
+											 int64_t *p_indexNBlocks);
 
-
+extern void		pgstromBrinIndexExecBegin(pgstromTaskState *pts,
+										  Oid index_oid,
+										  List *index_conds,
+										  List *index_quals);
+extern BlockNumber	pgstromBrinIndexNextChunk(pgstromTaskState *pts,
+											  BlockNumber *p_chunk_sz);
+extern TBMIterateResult *pgstromBrinIndexNextBlock(pgstromTaskState *pts);
+extern void		pgstromBrinIndexExecEnd(pgstromTaskState *pts);
+extern void		pgstromBrinIndexExecReset(pgstromTaskState *pts);
+extern Size		pgstromBrinIndexEstimateDSM(pgstromTaskState *pts);
+extern Size		pgstromBrinIndexInitDSM(pgstromTaskState *pts, char *dsm_addr);
+extern void		pgstromBrinIndexReInitDSM(pgstromTaskState *pts);
+extern Size		pgstromBrinIndexAttachDSM(pgstromTaskState *pts, char *dsm_addr);
+extern void		pgstromBrinIndexShutdownDSM(pgstromTaskState *pts);
+extern void		pgstrom_init_brin(void);
 
 /*
  * relscan.c
  */
-extern IndexOptInfo *pgstrom_tryfind_brinindex(PlannerInfo *root,
-											   RelOptInfo *baserel,
-											   List **p_indexConds,
-											   List **p_indexQuals,
-											   int64_t *p_indexNBlocks);
-
 extern const Bitmapset *GetOptimalGpusForRelation(PlannerInfo *root,
 												  RelOptInfo *rel);
 extern const Bitmapset *baseRelCanUseGpuDirect(PlannerInfo *root,
@@ -337,12 +343,12 @@ extern size_t	setup_kern_data_store(kern_data_store *kds,
 extern bool		pgstromRelScanChunkNormal(kern_data_store *kds,
 										  pgstromTaskState *pts);
 
-extern Size		pgstromSharedStateEstimate(CustomScanState *css);
-extern pgstromSharedState *pgstromSharedStateCreate(CustomScanState *css,
-													void *dsm_addr);
-extern void		pgstromSharedStateReset(pgstromSharedState *ps_state);
-extern pgstromSharedState *pgstromSharedStateShutdown(CustomScanState *css,
-													  pgstromSharedState *ps_state);
+extern Size		pgstromSharedStateEstimateDSM(pgstromTaskState *pts);
+extern void		pgstromSharedSteteCreate(pgstromTaskState *pts);
+extern void		pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr);
+extern void		pgstromSharedStateReInitDSM(pgstromTaskState *pts);
+extern void		pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr);
+extern void		pgstromSharedStateShutdownDSM(pgstromTaskState *pts);
 extern void		pgstrom_init_relscan(void);
 
 /*

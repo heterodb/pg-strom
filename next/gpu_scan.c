@@ -70,7 +70,7 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 	exprs = lappend(exprs, gs_info->used_params);
 	exprs = lappend(exprs, gs_info->dev_quals);
 	privs = lappend(privs, makeInteger(gs_info->index_oid));
-	exprs = lappend(exprs, gs_info->index_conds);
+	privs = lappend(privs, gs_info->index_conds);
 	exprs = lappend(exprs, gs_info->index_quals);
 
 	cscan->custom_private = privs;
@@ -102,7 +102,7 @@ deform_gpuscan_info(GpuScanInfo *gs_info, CustomScan *cscan)
 	gs_info->used_params	= list_nth(exprs, eindex++);
 	gs_info->dev_quals		= list_nth(exprs, eindex++);
 	gs_info->index_oid		= intVal(list_nth(privs, pindex++));
-	gs_info->index_conds	= list_nth(exprs, eindex++);
+	gs_info->index_conds	= list_nth(privs, pindex++);
 	gs_info->index_quals	= list_nth(exprs, eindex++);
 }
 
@@ -136,13 +136,6 @@ typedef struct
 	XpuCommand		   *xcmd_req;	/* request command buffer */
 	size_t				xcmd_len;
 } GpuScanState;
-
-
-
-
-
-
-
 
 /*
  * create_gpuscan_path - constructor of CustomPath(GpuScan) node
@@ -369,6 +362,7 @@ GpuScanAddScanPath(PlannerInfo *root,
 	/* It is the role of built-in Append node */
 	if (rte->inh)
 		return;
+
 	/* GpuScan can run on heap relations or arrow_fdw table */
 	switch (rte->relkind)
 	{
@@ -406,10 +400,10 @@ GpuScanAddScanPath(PlannerInfo *root,
 		return;
 
 	/* Check opportunity of GpuScan+BRIN-index */
-	indexOpt = pgstrom_tryfind_brinindex(root, baserel,
-										 &indexConds,
-										 &indexQuals,
-										 &indexNBlocks);
+	indexOpt = pgstromTryFindBrinIndex(root, baserel,
+									   &indexConds,
+									   &indexQuals,
+									   &indexNBlocks);
 	/* add GpuScan path in single process */
 	cpath = create_gpuscan_path(root, baserel,
 								dev_quals,
@@ -519,7 +513,7 @@ gpuscan_build_projection(RelOptInfo *baserel,
 			if (IsA(node, Const) || IsA(node, Param))
 				continue;
 			__gpuscan_build_projection_walker(node, &context);
-        }
+		}
 	}
 	vars_list = pull_vars_of_level((Node *)host_quals, 0);
 	foreach (lc, vars_list)
@@ -653,7 +647,6 @@ PlanGpuScanPath(PlannerInfo *root,
 	cscan->methods = &gpuscan_plan_methods;
 	cscan->custom_plans = NIL;
 	cscan->custom_scan_tlist = tlist_dev;
-
 	form_gpuscan_info(cscan, gs_info);
 
 	return &cscan->scan.plan;
@@ -821,6 +814,12 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 												 gss->pts.base_slot,
 												 &gss->pts.css.ss.ps,
 												 RelationGetDescr(rel));
+	/* BRIN Index If Any */
+	pgstromBrinIndexExecBegin(&gss->pts,
+							  gss->gs_info.index_oid,
+							  gss->gs_info.index_conds,
+							  gss->gs_info.index_quals);
+
 	if (gss->pts.af_state)
 	{
 		gss->pts.cb_next_chunk = gpuScanChunkArrowFdw;
@@ -871,8 +870,8 @@ ExecGpuScan(CustomScanState *node)
 {
 	GpuScanState   *gss = (GpuScanState *)node;
 
-	if (!gss->pts.css.ss.ss_currentScanDesc)
-		gss->pts.ps_state = pgstromSharedStateCreate(&gss->pts.css, NULL);
+	if (!gss->pts.ps_state)
+		pgstromSharedStateInitDSM(&gss->pts, NULL);
 	if (!gss->pts.conn)
 	{
 		const XpuCommand *session;
@@ -905,6 +904,8 @@ ExecEndGpuScan(CustomScanState *node)
 
 	if (gss->pts.conn)
 		xpuClientCloseSession(gss->pts.conn);
+	if (gss->pts.br_state)
+		pgstromBrinIndexExecEnd(&gss->pts);
 	if (gss->pts.base_slot)
 		ExecDropSingleTupleTableSlot(gss->pts.base_slot);
 	if (gss->pts.css.ss.ss_currentScanDesc)
@@ -924,6 +925,8 @@ ExecReScanGpuScan(CustomScanState *node)
 		xpuClientCloseSession(gss->pts.conn);
 		gss->pts.conn = NULL;
 	}
+	if (gss->pts.br_state)
+		pgstromBrinIndexExecReset(&gss->pts);
 }
 
 /*
@@ -933,7 +936,7 @@ static Size
 EstimateGpuScanDSM(CustomScanState *node,
 				   ParallelContext *pcxt)
 {
-	return pgstromSharedStateEstimate(node);
+	return pgstromSharedStateEstimateDSM((pgstromTaskState *)node);
 }
 
 /*
@@ -942,11 +945,9 @@ EstimateGpuScanDSM(CustomScanState *node,
 static void
 InitializeGpuScanDSM(CustomScanState *node,
 					 ParallelContext *pcxt,
-					 void *coordinate)
+					 void *dsm_addr)
 {
-	GpuScanState   *gss = (GpuScanState *)node;
-
-	gss->pts.ps_state = pgstromSharedStateCreate(node, coordinate);
+	pgstromSharedStateInitDSM((pgstromTaskState *)node, dsm_addr);
 }
 
 /*
@@ -955,22 +956,22 @@ InitializeGpuScanDSM(CustomScanState *node,
 static void
 ReInitializeGpuScanDSM(CustomScanState *node,
 					   ParallelContext *pcxt,
-					   void *coordinate)
+					   void *dsm_addr)
 {
 	GpuScanState   *gss = (GpuScanState *)node;
 
-	pgstromSharedStateReset(gss->pts.ps_state);
+	pgstromSharedStateReInitDSM(&gss->pts);
 }
 
 /*
  * InitGpuScanWorker
  */
 static void
-InitGpuScanWorker(CustomScanState *node, shm_toc *toc, void *coordinate)
+InitGpuScanWorker(CustomScanState *node, shm_toc *toc, void *dsm_addr)
 {
 	GpuScanState   *gss = (GpuScanState *)node;
-
-	gss->pts.ps_state = (pgstromSharedState *)coordinate;
+		
+	pgstromSharedStateAttachDSM(&gss->pts, dsm_addr);
 }
 
 /*
@@ -981,7 +982,7 @@ ExecShutdownGpuScan(CustomScanState *node)
 {
 	GpuScanState   *gss = (GpuScanState *)node;
 
-	gss->pts.ps_state = pgstromSharedStateShutdown(&gss->pts.css, gss->pts.ps_state);
+	pgstromSharedStateShutdownDSM(&gss->pts);
 }
 
 /*

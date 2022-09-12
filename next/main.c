@@ -63,10 +63,10 @@ pg_hash_any(const void *ptr, int sz)
 }
 
 /*
- * pgstrom_init_misc_options
+ * pgstrom_init_gucs
  */
 static void
-pgstrom_init_misc_options(void)
+pgstrom_init_gucs(void)
 {
 	/* Disables PG-Strom features at all */
 	DefineCustomBoolVariable("pg_strom.enabled",
@@ -363,10 +363,11 @@ _PG_init(void)
 	PHYS_PAGES = sysconf(_SC_PHYS_PAGES);
 
 	/* init pg-strom infrastructure */
-	pgstrom_init_misc_options();
+	pgstrom_init_gucs();
 	pgstrom_init_extra();
 	pgstrom_init_codegen();
 	pgstrom_init_relscan();
+	pgstrom_init_brin();
 	pgstrom_init_executor();
 	/* dump version number */
 	elog(LOG, "PG-Strom version %s built for PostgreSQL %s (git: %s)",

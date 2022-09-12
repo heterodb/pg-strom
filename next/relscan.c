@@ -11,402 +11,6 @@
  */
 #include "pg_strom.h"
 
-/* Data structure for collecting qual clauses that match an index */
-typedef struct
-{
-	bool		nonempty;	/* True if lists are not all empty */
-	/* Lists of RestrictInfos, one per index column */
-	List	   *indexclauses[INDEX_MAX_KEYS];
-} IndexClauseSet;
-
-/* static variables */
-static bool		pgstrom_enable_brin;
-static HTAB	   *tablespace_optimal_xpu_htable = NULL;
-
-/*
- * simple_match_clause_to_indexcol
- *
- * It is a simplified version of match_clause_to_indexcol.
- * Also see optimizer/path/indxpath.c
- */
-static bool
-simple_match_clause_to_indexcol(IndexOptInfo *index,
-								int indexcol,
-								RestrictInfo *rinfo)
-{
-	Expr	   *clause = rinfo->clause;
-	Index		index_relid = index->rel->relid;
-	Oid			opfamily = index->opfamily[indexcol];
-	Oid			idxcollation = index->indexcollations[indexcol];
-	Node	   *leftop;
-	Node	   *rightop;
-	Relids		left_relids;
-	Relids		right_relids;
-	Oid			expr_op;
-	Oid			expr_coll;
-
-	/* Clause must be a binary opclause */
-	if (!is_opclause(clause))
-		return false;
-
-	leftop = get_leftop(clause);
-	rightop = get_rightop(clause);
-	if (!leftop || !rightop)
-		return false;
-	left_relids = rinfo->left_relids;
-	right_relids = rinfo->right_relids;
-	expr_op = ((OpExpr *) clause)->opno;
-	expr_coll = ((OpExpr *) clause)->inputcollid;
-
-	if (OidIsValid(idxcollation) && idxcollation != expr_coll)
-		return false;
-
-	/*
-	 * Check for clauses of the form:
-	 *    (indexkey operator constant) OR
-	 *    (constant operator indexkey)
-	 */
-	if (match_index_to_operand(leftop, indexcol, index) &&
-		!bms_is_member(index_relid, right_relids) &&
-		!contain_volatile_functions(rightop) &&
-		op_in_opfamily(expr_op, opfamily))
-		return true;
-
-	if (match_index_to_operand(rightop, indexcol, index) &&
-		!bms_is_member(index_relid, left_relids) &&
-		!contain_volatile_functions(leftop) &&
-		op_in_opfamily(get_commutator(expr_op), opfamily))
-		return true;
-
-	return false;
-}
-
-/*
- * simple_match_clause_to_index
- *
- * It is a simplified version of match_clause_to_index.
- * Also see optimizer/path/indxpath.c
- */
-static void
-simple_match_clause_to_index(IndexOptInfo *index,
-							 RestrictInfo *rinfo,
-							 IndexClauseSet *clauseset)
-{
-	int		indexcol;
-
-	/*
-	 * Never match pseudoconstants to indexes.  (Normally a match could not
-	 * happen anyway, since a pseudoconstant clause couldn't contain a Var,
-	 * but what if someone builds an expression index on a constant? It's not
-	 * totally unreasonable to do so with a partial index, either.)
-	 */
-	if (rinfo->pseudoconstant)
-		return;
-
-	/*
-	 * If clause can't be used as an indexqual because it must wait till after
-	 * some lower-security-level restriction clause, reject it.
-	 */
-	if (!restriction_is_securely_promotable(rinfo, index->rel))
-		return;
-
-	/* OK, check each index column for a match */
-	for (indexcol = 0; indexcol < index->ncolumns; indexcol++)
-	{
-		if (simple_match_clause_to_indexcol(index,
-											indexcol,
-											rinfo))
-		{
-			clauseset->indexclauses[indexcol] =
-				list_append_unique_ptr(clauseset->indexclauses[indexcol],
-									   rinfo);
-			clauseset->nonempty = true;
-			break;
-		}
-	}
-}
-
-/*
- * estimate_brinindex_scan_nblocks
- *
- * see brincostestimate at utils/adt/selfuncs.c
- */
-static int64_t
-estimate_brinindex_scan_nblocks(PlannerInfo *root,
-                                RelOptInfo *baserel,
-                                IndexOptInfo *index,
-                                IndexClauseSet *clauseset,
-                                List **p_indexQuals)
-{
-	Relation		indexRel;
-	BrinStatsData	statsData;
-	List		   *indexQuals = NIL;
-	ListCell	   *lc;
-	int				icol;
-	Selectivity		qualSelectivity;
-	Selectivity		indexSelectivity;
-	double			indexCorrelation = 0.0;
-	double			indexRanges;
-	double			minimalRanges;
-	double			estimatedRanges;
-
-	/* Obtain some data from the index itself. */
-	indexRel = index_open(index->indexoid, AccessShareLock);
-	brinGetStats(indexRel, &statsData);
-	index_close(indexRel, AccessShareLock);
-
-	/* Get selectivity of the index qualifiers */
-	icol = 1;
-	foreach (lc, index->indextlist)
-	{
-		TargetEntry *tle = lfirst(lc);
-		ListCell   *cell;
-		VariableStatData vardata;
-
-		foreach (cell, clauseset->indexclauses[icol-1])
-		{
-			RestrictInfo *rinfo = lfirst(cell);
-
-			indexQuals = lappend(indexQuals, rinfo);
-		}
-
-		if (IsA(tle->expr, Var))
-		{
-			Var	   *var = (Var *) tle->expr;
-			RangeTblEntry *rte;
-
-			/* in case of BRIN index on simple column */
-			rte = root->simple_rte_array[var->varno];
-			if (get_relation_stats_hook &&
-				(*get_relation_stats_hook)(root, rte, var->varattno,
-										   &vardata))
-			{
-				if (HeapTupleIsValid(vardata.statsTuple) && !vardata.freefunc)
-					elog(ERROR, "no callback to release stats variable");
-			}
-			else
-			{
-				vardata.statsTuple =
-					SearchSysCache3(STATRELATTINH,
-									ObjectIdGetDatum(rte->relid),
-									Int16GetDatum(var->varattno),
-									BoolGetDatum(false));
-				vardata.freefunc = ReleaseSysCache;
-			}
-		}
-		else
-		{
-			if (get_index_stats_hook &&
-				(*get_index_stats_hook)(root, index->indexoid, icol,
-										&vardata))
-			{
-				if (HeapTupleIsValid(vardata.statsTuple) && !vardata.freefunc)
-					elog(ERROR, "no callback to release stats variable");
-			}
-			else
-			{
-				vardata.statsTuple
-					= SearchSysCache3(STATRELATTINH,
-									  ObjectIdGetDatum(index->indexoid),
-									  Int16GetDatum(icol),
-									  BoolGetDatum(false));
-                vardata.freefunc = ReleaseSysCache;
-			}
-		}
-
-		if (HeapTupleIsValid(vardata.statsTuple))
-		{
-			AttStatsSlot	sslot;
-
-			if (get_attstatsslot(&sslot, vardata.statsTuple,
-								 STATISTIC_KIND_CORRELATION,
-								 InvalidOid,
-								 ATTSTATSSLOT_NUMBERS))
-			{
-				double		varCorrelation = 0.0;
-
-				if (sslot.nnumbers > 0)
-					varCorrelation = Abs(sslot.numbers[0]);
-
-				if (varCorrelation > indexCorrelation)
-					indexCorrelation = varCorrelation;
-
-				free_attstatsslot(&sslot);
-			}
-		}
-		ReleaseVariableStats(vardata);
-
-		icol++;
-	}
-	qualSelectivity = clauselist_selectivity(root,
-											 indexQuals,
-											 baserel->relid,
-											 JOIN_INNER,
-											 NULL);
-
-	/* estimate number of blocks to read */
-	indexRanges = ceil((double) baserel->pages / statsData.pagesPerRange);
-	if (indexRanges < 1.0)
-		indexRanges = 1.0;
-	minimalRanges = ceil(indexRanges * qualSelectivity);
-
-	//elog(INFO, "strom: qualSelectivity=%.6f indexRanges=%.6f minimalRanges=%.6f indexCorrelation=%.6f", qualSelectivity, indexRanges, minimalRanges, indexCorrelation);
-
-	if (indexCorrelation < 1.0e-10)
-		estimatedRanges = indexRanges;
-	else
-		estimatedRanges = Min(minimalRanges / indexCorrelation, indexRanges);
-
-	indexSelectivity = estimatedRanges / indexRanges;
-	if (indexSelectivity < 0.0)
-		indexSelectivity = 0.0;
-	if (indexSelectivity > 1.0)
-		indexSelectivity = 1.0;
-
-	/* index quals, if any */
-	if (p_indexQuals)
-		*p_indexQuals = indexQuals;
-	/* estimated number of blocks to read */
-	return (int64_t)(indexSelectivity * (double) baserel->pages);
-}
-
-/*
- * extract_index_conditions
- */
-static Node *
-__fixup_indexqual_operand(Node *node, IndexOptInfo *indexOpt)
-{
-	ListCell   *lc;
-
-	if (!node)
-		return NULL;
-
-	if (IsA(node, RelabelType))
-	{
-		RelabelType *relabel = (RelabelType *) node;
-
-		return __fixup_indexqual_operand((Node *)relabel->arg, indexOpt);
-	}
-
-	foreach (lc, indexOpt->indextlist)
-	{
-		TargetEntry *tle = lfirst(lc);
-
-		if (equal(node, tle->expr))
-		{
-			return (Node *)makeVar(INDEX_VAR,
-								   tle->resno,
-								   exprType((Node *)tle->expr),
-								   exprTypmod((Node *) tle->expr),
-								   exprCollation((Node *) tle->expr),
-								   0);
-		}
-	}
-	if (IsA(node, Var))
-		elog(ERROR, "Bug? variable is not found at index tlist");
-	return expression_tree_mutator(node, __fixup_indexqual_operand, indexOpt);
-}
-
-static List *
-extract_index_conditions(List *index_quals, IndexOptInfo *indexOpt)
-{
-	List	   *result = NIL;
-	ListCell   *lc;
-
-	foreach (lc, index_quals)
-	{
-		RestrictInfo *rinfo = lfirst(lc);
-		OpExpr	   *op = (OpExpr *) rinfo->clause;
-
-		if (!IsA(rinfo->clause, OpExpr))
-			elog(ERROR, "Bug? unexpected index clause: %s",
-				 nodeToString(rinfo->clause));
-		if (list_length(((OpExpr *)rinfo->clause)->args) != 2)
-			elog(ERROR, "indexqual clause must be binary opclause");
-		op = (OpExpr *)copyObject(rinfo->clause);
-		if (!bms_equal(rinfo->left_relids, indexOpt->rel->relids))
-			CommuteOpExpr(op);
-		/* replace the indexkey expression with an index Var */
-		linitial(op->args) = __fixup_indexqual_operand(linitial(op->args),
-													   indexOpt);
-		result = lappend(result, op);
-	}
-	return result;
-}
-
-/*
- * pgstrom_tryfind_brinindex
- */
-IndexOptInfo *
-pgstrom_tryfind_brinindex(PlannerInfo *root,
-						  RelOptInfo *baserel,
-						  List **p_indexConds,
-						  List **p_indexQuals,
-						  int64_t *p_indexNBlocks)
-{
-	int64_t			indexNBlocks = INT64_MAX;
-	IndexOptInfo   *indexOpt = NULL;
-	List		   *indexQuals = NIL;
-	ListCell	   *cell;
-
-	if (!pgstrom_enable_brin || baserel->indexlist == NIL)
-		return NULL;
-
-	foreach (cell, baserel->indexlist)
-	{
-		IndexOptInfo   *index = (IndexOptInfo *) lfirst(cell);
-        List		   *temp = NIL;
-        ListCell	   *lc;
-        uint64_t		nblocks;
-        IndexClauseSet	clauseset;
-
-        /* Protect limited-size array in IndexClauseSets */
-        Assert(index->ncolumns <= INDEX_MAX_KEYS);
-
-        /* Ignore partial indexes that do not match the query. */
-        if (index->indpred != NIL && !index->predOK)
-            continue;
-
-        /* Only BRIN-indexes are now supported */
-        if (index->relam != BRIN_AM_OID)
-            continue;
-
-        /* see match_clauses_to_index */
-        memset(&clauseset, 0, sizeof(IndexClauseSet));
-        foreach (lc, index->indrestrictinfo)
-        {
-            RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
-
-            simple_match_clause_to_index(index, rinfo, &clauseset);
-        }
-        if (!clauseset.nonempty)
-            continue;
-
-        /*
-         * In case when multiple BRIN-indexes are configured,
-         * the one with minimal selectivity is the best choice.
-         */
-        nblocks = estimate_brinindex_scan_nblocks(root, baserel,
-												  index,
-												  &clauseset,
-												  &temp);
-		if (indexNBlocks > nblocks)
-		{
-			indexOpt = index;
-			indexQuals = temp;
-			indexNBlocks = nblocks;
-		}
-	}
-
-	if (indexOpt)
-	{
-		*p_indexConds = extract_index_conditions(indexQuals, indexOpt);
-		*p_indexQuals = extract_actual_clauses(indexQuals, false);
-		*p_indexNBlocks = indexNBlocks;
-	}
-	return indexOpt;
-}
-
 /* ----------------------------------------------------------------
  *
  * GPUDirectSQL related routines
@@ -821,15 +425,6 @@ __kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 	return true;
 }
 
-static bool
-__relScanChunkNormalBrin(kern_data_store *kds,
-						 pgstromTaskState *pts)
-{
-	//BrinIndexState *br_state = pts->br_state;
-	elog(ERROR, "to be implement");
-	return false;
-}
-
 bool
 pgstromRelScanChunkNormal(kern_data_store *kds,
 						  pgstromTaskState *pts)
@@ -839,91 +434,137 @@ pgstromRelScanChunkNormal(kern_data_store *kds,
 	TupleTableSlot *slot = pts->base_slot;
 
 	if (pts->br_state)
-		return __relScanChunkNormalBrin(kds, pts);
-	for (;;)
 	{
-		if (!TTS_EMPTY(slot) &&
-			!__kds_row_insert_tuple(kds, slot))
-			break;
-		if (!table_scan_getnextslot(scan, estate->es_direction, slot))
-			break;
-		if (!__kds_row_insert_tuple(kds, slot))
-			break;
+		/* scan by BRIN index */
+		for (;;)
+		{
+			if (!pts->curr_tbm)
+			{
+				TBMIterateResult *next_tbm = pgstromBrinIndexNextBlock(pts);
+
+				if (!next_tbm)
+					break;
+				if (!table_scan_bitmap_next_block(scan, next_tbm))
+					elog(ERROR, "failed on table_scan_bitmap_next_block");
+				pts->curr_tbm = next_tbm;
+			}
+			if (!TTS_EMPTY(slot) &&
+				!__kds_row_insert_tuple(kds, slot))
+				break;
+			if (!table_scan_bitmap_next_tuple(scan, pts->curr_tbm, slot))
+				pts->curr_tbm = NULL;
+			else if (!__kds_row_insert_tuple(kds, slot))
+				break;
+		}
 	}
-	elog(INFO, "nitems=%u usage=%lu", kds->nitems, __kds_unpack(kds->usage));
+	else
+	{
+		/* full table scan */
+		for (;;)
+		{
+			if (!TTS_EMPTY(slot) &&
+				!__kds_row_insert_tuple(kds, slot))
+				break;
+			if (!table_scan_getnextslot(scan, estate->es_direction, slot))
+				break;
+			if (!__kds_row_insert_tuple(kds, slot))
+				break;
+		}
+	}
 	return (kds->nitems > 0);
 }
 
 /*
- * pgstromSharedStateEstimate
+ * pgstromSharedStateEstimateDSM
  */
 Size
-pgstromSharedStateEstimate(CustomScanState *css)
+pgstromSharedStateEstimateDSM(pgstromTaskState *pts)
 {
-	EState	   *estate = css->ss.ps.state;
+	EState	   *estate = pts->css.ss.ps.state;
+	Snapshot	snapshot = estate->es_snapshot;
+	Relation	relation = pts->css.ss.ss_currentRelation;
+	Size		len = 0;
 
-	return (sizeof(pgstromSharedState) +
-			table_parallelscan_estimate(css->ss.ss_currentRelation,
-										estate->es_snapshot));
+	if (pts->br_state)
+		len += pgstromBrinIndexEstimateDSM(pts);
+	len += MAXALIGN(sizeof(pgstromSharedState) +
+					table_parallelscan_estimate(relation, snapshot));
+	return len;
 }
 
 /*
- * pgstromSharedStateCreate
+ * pgstromSharedStateInitDSM
  */
-pgstromSharedState *
-pgstromSharedStateCreate(CustomScanState *css, void *dsm_addr)
+void
+pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 {
-	pgstromSharedState *xss_state;
+	pgstromSharedState *ps_state;
+	Relation		relation = pts->css.ss.ss_currentRelation;
 	TableScanDesc	scan;
 
-	Assert(!css->ss.ss_currentScanDesc);
+	if (pts->br_state)
+		dsm_addr += pgstromBrinIndexInitDSM(pts, dsm_addr);
+
+	Assert(!pts->css.ss.ss_currentScanDesc);
 	if (dsm_addr)
 	{
-		xss_state = dsm_addr;
-		memset(xss_state, 0, offsetof(pgstromSharedState, bpscan));
-		scan = table_beginscan_parallel(css->ss.ss_currentRelation,
-										&xss_state->bpscan.base);
+		ps_state = (pgstromSharedState *)dsm_addr;
+		memset(ps_state, 0, offsetof(pgstromSharedState, bpscan));
+		scan = table_beginscan_parallel(relation, &ps_state->bpscan.base);
 	}
 	else
 	{
-		EState	   *estate = css->ss.ps.state;
+		EState	   *estate = pts->css.ss.ps.state;
 
-		xss_state = MemoryContextAllocZero(estate->es_query_cxt,
-										   sizeof(pgstromSharedState));
-		scan = table_beginscan(css->ss.ss_currentRelation,
-							   estate->es_snapshot,
-							   0, NULL);
+		ps_state = MemoryContextAllocZero(estate->es_query_cxt,
+										  sizeof(pgstromSharedState));
+		scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
 	}
-	css->ss.ss_currentScanDesc = scan;
-
-	return xss_state;
+	pts->ps_state = ps_state;
+	pts->css.ss.ss_currentScanDesc = scan;
 }
 
 /*
- * pgstromSharedStateReset
+ * pgstromSharedStateReInitDSM
  */
 void
-pgstromSharedStateReset(pgstromSharedState *ps_state)
+pgstromSharedStateReInitDSM(pgstromTaskState *pts)
 {
-	/* reset it */
+	//pgstromSharedState *ps_state = pts->ps_state;
+	if (pts->br_state)
+		pgstromBrinIndexReInitDSM(pts);
 }
 
 /*
- * pgstromSharedStateShutdown
+ * pgstromSharedStateAttachDSM
  */
-pgstromSharedState *
-pgstromSharedStateShutdown(CustomScanState *css, pgstromSharedState *src_state)
+void
+pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr)
 {
-	pgstromSharedState *dst_state = NULL;
-	EState	   *estate = css->ss.ps.state;
+	if (pts->br_state)
+		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
+	pts->ps_state = (pgstromSharedState *)dsm_addr;
+}
 
+/*
+ * pgstromSharedStateShutdownDSM
+ */
+void
+pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
+{
+	pgstromSharedState *src_state = pts->ps_state;
+	pgstromSharedState *dst_state;
+	EState	   *estate = pts->css.ss.ps.state;
+
+	if (pts->br_state)
+		pgstromBrinIndexShutdownDSM(pts);
 	if (src_state)
 	{
 		dst_state = MemoryContextAllocZero(estate->es_query_cxt,
 										   sizeof(pgstromSharedState));
-		memcpy(dst_state, src_state, offsetof(pgstromSharedState, bpscan));
+		memcpy(dst_state, src_state, sizeof(pgstromSharedState));
+		pts->ps_state = dst_state;
 	}
-	return dst_state;
 }
 
 void
@@ -933,15 +574,6 @@ pgstrom_init_relscan(void)
 	char	buffer[1280];
 	int		index = 0;
 
-	/* pg_strom.enable_brin */
-	DefineCustomBoolVariable("pg_strom.enable_brin",
-							 "Enables to use BRIN-index",
-							 NULL,
-							 &pgstrom_enable_brin,
-							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
 	/*
 	 * pg_strom.nvme_distance_map
 	 *
@@ -965,7 +597,7 @@ pgstrom_init_relscan(void)
 		index++;
 	}
 	/* hash table for tablespace <-> optimal GPU */
-	tablespace_optimal_xpu_htable = NULL;
+	tablespace_optimal_gpu_htable = NULL;
 	CacheRegisterSyscacheCallback(TABLESPACEOID,
 								  tablespace_optimal_gpu_cache_callback,
 								  (Datum) 0);
