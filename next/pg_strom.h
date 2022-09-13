@@ -102,6 +102,7 @@
 #include <sys/un.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include "xpu_common.h"
@@ -226,8 +227,10 @@ struct pgstromTaskState
 	ProjectionInfo	   *base_proj;	/* base --> custom_tlist projection */
 	/* callback used by exec.c */
 	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
-	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts);
-	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts);
+	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts,
+									   struct iovec *xcmd_iov, int *xcmd_iovcnt);
+	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts,
+										struct iovec *xcmd_iov, int *xcmd_iovcnt);
 };
 typedef struct pgstromTaskState		pgstromTaskState;
 
@@ -340,8 +343,9 @@ extern size_t	setup_kern_data_store(kern_data_store *kds,
 									  size_t length,
 									  char format);
 
-extern bool		pgstromRelScanChunkNormal(kern_data_store *kds,
-										  pgstromTaskState *pts);
+extern bool		pgstromRelScanChunkNormal(pgstromTaskState *pts,
+										  kern_data_store *kds,
+										  size_t kds_length);
 
 extern Size		pgstromSharedStateEstimateDSM(pgstromTaskState *pts);
 extern void		pgstromSharedSteteCreate(pgstromTaskState *pts);

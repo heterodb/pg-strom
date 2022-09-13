@@ -396,7 +396,8 @@ estimate_kern_data_store(TupleDesc tupdesc)
  * ----------------------------------------------------------------
  */
 static bool
-__kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
+__kds_row_insert_tuple(TupleTableSlot *slot,
+					   kern_data_store *kds, size_t kds_length)
 {
 	uint32_t   *rowindex = KDS_GET_ROWINDEX(kds);
 	HeapTuple	tuple;
@@ -410,9 +411,9 @@ __kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 	__usage = (__kds_unpack(kds->usage) +
 			   MAXALIGN(offsetof(kern_tupitem, htup) + tuple->t_len));
 	sz = KDS_HEAD_LENGTH(kds) + sizeof(uint32_t) * (kds->nitems + 1) + __usage;
-	if (sz > kds->length)
+	if (sz > kds_length)
 		return false;	/* no more items! */
-	titem = (kern_tupitem *)((char *)kds + kds->length - __usage);
+	titem = (kern_tupitem *)((char *)kds + kds_length - __usage);
 	titem->t_len = tuple->t_len;
 	titem->rowid = kds->nitems;
 	memcpy(&titem->htup, tuple->t_data, tuple->t_len);
@@ -426,8 +427,8 @@ __kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 }
 
 bool
-pgstromRelScanChunkNormal(kern_data_store *kds,
-						  pgstromTaskState *pts)
+pgstromRelScanChunkNormal(pgstromTaskState *pts,
+						  kern_data_store *kds, size_t kds_length)
 {
 	EState		   *estate = pts->css.ss.ps.state;
 	TableScanDesc	scan = pts->css.ss.ss_currentScanDesc;
@@ -449,11 +450,11 @@ pgstromRelScanChunkNormal(kern_data_store *kds,
 				pts->curr_tbm = next_tbm;
 			}
 			if (!TTS_EMPTY(slot) &&
-				!__kds_row_insert_tuple(kds, slot))
+				!__kds_row_insert_tuple(slot, kds, kds_length))
 				break;
 			if (!table_scan_bitmap_next_tuple(scan, pts->curr_tbm, slot))
 				pts->curr_tbm = NULL;
-			else if (!__kds_row_insert_tuple(kds, slot))
+			else if (!__kds_row_insert_tuple(slot, kds, kds_length))
 				break;
 		}
 	}
@@ -463,11 +464,11 @@ pgstromRelScanChunkNormal(kern_data_store *kds,
 		for (;;)
 		{
 			if (!TTS_EMPTY(slot) &&
-				!__kds_row_insert_tuple(kds, slot))
+				!__kds_row_insert_tuple(slot, kds, kds_length))
 				break;
 			if (!table_scan_getnextslot(scan, estate->es_direction, slot))
 				break;
-			if (!__kds_row_insert_tuple(kds, slot))
+			if (!__kds_row_insert_tuple(slot, kds, kds_length))
 				break;
 		}
 	}

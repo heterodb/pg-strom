@@ -653,42 +653,65 @@ PlanGpuScanPath(PlannerInfo *root,
 }
 
 static XpuCommand *
-gpuScanChunkArrowFdw(pgstromTaskState *pts)
+gpuScanChunkArrowFdw(pgstromTaskState *pts,
+					 struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
 	elog(ERROR, "not implemented yet");
 	return NULL;
 }
 
 static XpuCommand *
-gpuScanChunkGpuCache(pgstromTaskState *pts)
+gpuScanChunkGpuCache(pgstromTaskState *pts,
+					 struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
 	elog(ERROR, "not implemented yet");
 	return NULL;
 }
 
 static XpuCommand *
-gpuScanChunkGpuDirect(pgstromTaskState *pts)
+gpuScanChunkGpuDirect(pgstromTaskState *pts,
+					  struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
 	elog(ERROR, "not implemented yet");
 	return NULL;
 }
 
 static XpuCommand *
-gpuScanChunkNormal(pgstromTaskState *pts)
+gpuScanChunkNormal(pgstromTaskState *pts,
+				   struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
 	GpuScanState   *gss = (GpuScanState *)pts;
 	XpuCommand	   *xcmd = gss->xcmd_req;
 	kernExecScan   *kscan = &xcmd->u.scan;
 	kern_data_store	*kds;
+	void		   *__usage;
+	size_t			kds_length;
+	size_t			sz1, sz2;
 
 	kds = (kern_data_store *)((char *)kscan + kscan->kds_src_offset);
-	kds->length = gss->xcmd_len - (offsetof(XpuCommand, u.scan) +
+	kds->nitems	= 0;
+	kds->usage	= 0;
+	kds_length	= gss->xcmd_len - (offsetof(XpuCommand, u.scan) +
 								   kscan->kds_src_offset);
-	kds->nitems = 0;
-	kds->usage = 0;
-	if (pgstromRelScanChunkNormal(kds, pts))
-		return xcmd;
-	return NULL;
+	if (!pgstromRelScanChunkNormal(pts, kds, kds_length))
+		return NULL;
+	/* setup iovec to skip the hole between row-index and tuples-buffer */
+	sz1 = KDS_HEAD_LENGTH(kds) + MAXALIGN(sizeof(uint32_t) * kds->nitems);
+	sz2 = __kds_unpack(kds->usage);
+	Assert(sz1 + sz2 <= kds_length);
+	__usage = ((char *)kds + kds_length - sz2);
+	kds->length = sz1 + sz2;
+
+	sz1 += (offsetof(XpuCommand, u.scan) + kscan->kds_src_offset);
+	xcmd->length = sz1 + sz2;
+
+	xcmd_iov[0].iov_base = xcmd;
+	xcmd_iov[0].iov_len  = sz1;
+	xcmd_iov[1].iov_base = __usage;
+	xcmd_iov[1].iov_len  = sz2;
+	*xcmd_iovcnt = 2;
+
+	return xcmd;
 }
 
 static TupleTableSlot *

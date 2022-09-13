@@ -271,17 +271,73 @@ __xpuConnectSessionWorker(void *__priv)
 void
 xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd)
 {
-	int		sockfd = conn->sockfd;
-	ssize_t	nbytes;
+	int			sockfd = conn->sockfd;
+	const char *buf = (const char *)xcmd;
+	size_t		len = xcmd->length;
+	ssize_t		nbytes;
 
 	pthreadMutexLock(&conn->mutex);
 	conn->num_running_cmds++;
 	pthreadMutexUnlock(&conn->mutex);
 
-	nbytes = __writeFile(sockfd, xcmd, xcmd->length);
-	if (nbytes != xcmd->length)
-		elog(ERROR, "unable to send XPU command to GPU service (%zd of %lu): %m",
-			 nbytes, xcmd->length);
+	while (len > 0)
+	{
+		nbytes = write(sockfd, buf, len);
+		if (nbytes > 0)
+		{
+			buf += nbytes;
+			len -= nbytes;
+		}
+		else if (nbytes == 0)
+			elog(ERROR, "unable to send xPU command to the service");
+		else if (errno == EINTR)
+			CHECK_FOR_INTERRUPTS();
+		else
+			elog(ERROR, "failed on write(2): %m");
+	}
+}
+
+/*
+ * xpuClientSendCommandIOV
+ */
+static void
+xpuClientSendCommandIOV(XpuConnection *conn, struct iovec *iov, int iovcnt)
+{
+	int			sockfd = conn->sockfd;
+	ssize_t		nbytes;
+
+	Assert(iovcnt > 0);
+	pthreadMutexLock(&conn->mutex);
+	conn->num_running_cmds++;
+	pthreadMutexUnlock(&conn->mutex);
+
+	while (iovcnt > 0)
+	{
+		nbytes = writev(sockfd, iov, iovcnt);
+		if (nbytes > 0)
+		{
+			do {
+				if (iov->iov_len <= nbytes)
+				{
+					nbytes -= iov->iov_len;
+					iov++;
+					iovcnt--;
+				}
+				else
+				{
+					iov->iov_base = (char *)iov->iov_base + nbytes;
+					iov->iov_len -= nbytes;
+					break;
+				}
+			} while (iovcnt > 0 && nbytes > 0);
+		}
+		else if (nbytes == 0)
+			elog(ERROR, "unable to send xPU command to the service");
+		else if (errno == EINTR)
+			CHECK_FOR_INTERRUPTS();
+		else
+			elog(ERROR, "failed on writev(2): %m");
+	}
 }
 
 /*
@@ -586,6 +642,8 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 {
 	XpuConnection  *conn = pts->conn;
 	XpuCommand	   *xcmd;
+	struct iovec	xcmd_iov[10];
+	int				xcmd_iovcnt;
 	int				ev;
 
 	pthreadMutexLock(&conn->mutex);
@@ -623,10 +681,10 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 				return NULL;
 			if (!pts->cb_final_chunk || pts->final_done)
 				return NULL;
-			xcmd = pts->cb_final_chunk(pts);
+			xcmd = pts->cb_final_chunk(pts, xcmd_iov, &xcmd_iovcnt);
 			if (!xcmd)
 				return NULL;
-			xpuClientSendCommand(conn, xcmd);
+			xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
 		}
 		ev = WaitLatch(MyLatch,
 					   WL_LATCH_SET |
@@ -651,6 +709,8 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 {
 	XpuConnection  *conn = pts->conn;
 	XpuCommand	   *xcmd;
+	struct iovec	xcmd_iov[10];
+	int				xcmd_iovcnt;
 	int				ev;
 
 	while (!pts->scan_done)
@@ -683,14 +743,14 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 			 * the next chunk and enqueue this command.
 			 */
 			pthreadMutexUnlock(&conn->mutex);
-			xcmd = pts->cb_next_chunk(pts);
+			xcmd = pts->cb_next_chunk(pts, xcmd_iov, &xcmd_iovcnt);
 			if (!xcmd)
 			{
 				/* end of scan */
 				pts->scan_done = true;
 				break;
 			}
-			xpuClientSendCommand(conn, xcmd);
+			xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
 		}
 		else if (!dlist_is_empty(&conn->ready_cmds_list))
 		{

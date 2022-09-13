@@ -374,8 +374,8 @@ typedef struct kern_data_store		kern_data_store;
  * | v                   |
  * +---------------------+
  * | ^                   |
- * | | Row index      o--------+
- * | | (uint32 * nitems) |     |
+ * | | Row index      o--------+  ((char *)kds + kds->length -
+ * | | (uint32 * nitems) |     |    __kds_unpack(row_index[i]))
  * | v                   |     |
  * +---------------------+     |
  * |        :            |     |
