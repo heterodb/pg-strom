@@ -112,21 +112,6 @@ __Fetch(const T *ptr)
 #endif
 
 /*
- * Thread index at CUDA C
- */
-#ifdef __CUDACC__
-#define get_group_id()			(blockIdx.x)
-#define get_num_groups()		(gridDim.x)
-#define get_local_id()			(threadIdx.x)
-#define get_local_size()		(blockDim.x)
-#define get_global_id()			(threadIdx.x + blockIdx.x * blockDim.x)
-#define get_global_size()		(blockDim.x * gridDim.x)
-#define get_global_base()		(blockIdx.x * blockDim.x)
-#define get_warp_id()			(threadIdx.x / warpSize)
-#define get_lane_id()			(threadIdx.x & (warpSize-1))
-#endif
-
-/*
  * Error status
  */
 #ifndef MAKE_SQLSTATE
@@ -166,10 +151,10 @@ typedef struct
 	uint32_t		error_lineno;
 	const char	   *error_funcname;
 	const char	   *error_message;
-	struct kernSessionInfo *session;
+	struct kern_session_info *session;
 	/* current slot of kernel variable references */
-	const struct kern_colmeta **kvars_cmeta;
-	const void	  **kvars_addr;
+	struct kern_colmeta **kvars_cmeta;
+	void		  **kvars_addr;
 	int			   *kvars_len;
 	uint32_t		kvars_nslots;
 	/* variable length buffer */
@@ -180,18 +165,21 @@ typedef struct
 
 #define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
 	do {																\
-		uint32_t	__nslots = (SESSION)->kvars_nslots;					\
+		uint32_t	__nslots = (SESSION)->kcxt_kvars_nslots;			\
 		uint32_t	__sz = (offsetof(kern_context, vlbuf) +				\
 							MAXALIGN((SESSION)->kcxt_extra_bufsz));		\
-		KCXT = alloca(__sz);											\
+		KCXT = (kern_context *)alloca(__sz);							\
 		memset(KCXT, 0, __sz);											\
 		KCXT->session = (SESSION);										\
 		if (__nslots > 0)												\
 		{																\
 			KCXT->kvars_nslots = __nslots;								\
-			KCXT->kvars_cmeta = alloca(sizeof(void *) * __nslots);		\
-			KCXT->kvars_addr = alloca(sizeof(void *) * __nslots);		\
-			KCXT->kvars_len  = alloca(sizeof(int) * __nslots);			\
+			KCXT->kvars_cmeta  = (struct kern_colmeta **)				\
+				alloca(sizeof(struct kern_colmeta *) * __nslots);		\
+			KCXT->kvars_addr   = (void **)								\
+				alloca(sizeof(void *) * __nslots);						\
+			KCXT->kvars_len    = (int *)								\
+				alloca(sizeof(int) * __nslots);							\
 			memset(KCXT->kvars_cmeta, 0, sizeof(void *) * __nslots);	\
 			memset(KCXT->kvars_addr, 0, sizeof(void *) * __nslots);		\
 			memset(KCXT->kvars_len, -1, sizeof(int) * __nslots);		\
@@ -260,6 +248,39 @@ __STROM_EREPORT(kern_context *kcxt,
 #define STROM_CPU_FALLBACK(kcxt, errcode, message)					\
 	__STROM_EREPORT((kcxt),(errcode) | ERRCODE_FLAGS_CPU_FALLBACK,	\
 					__FILE__,__LINE__,__FUNCTION__,(message))
+
+INLINE_FUNCTION(void)
+__strncpy(char *d, const char *s, uint32_t n)
+{
+	uint32_t	i, m = n-1;
+
+	for (i=0; i < m && s[i] != '\0'; i++)
+		d[i] = s[i];
+	while (i < n)
+		d[i++] = '\0';
+}
+
+INLINE_FUNCTION(void)
+STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
+{
+	if (kcxt->errcode != ERRCODE_STROM_SUCCESS &&
+		atomicCAS(&ebuf->errcode,
+				  ERRCODE_STROM_SUCCESS,
+				  kcxt->errcode) == ERRCODE_STROM_SUCCESS)
+	{
+		ebuf->errcode = kcxt->errcode;
+		ebuf->lineno  = kcxt->error_lineno;
+		__strncpy(ebuf->filename,
+				  kcxt->error_filename,
+				  KERN_ERRORBUF_FILENAME_LEN);
+		__strncpy(ebuf->funcname,
+				  kcxt->error_funcname,
+				  KERN_ERRORBUF_FUNCNAME_LEN);
+		__strncpy(ebuf->message,
+				  kcxt->error_message,
+				  KERN_ERRORBUF_MESSAGE_LEN);
+	}
+}
 
 /* ----------------------------------------------------------------
  *
@@ -1337,13 +1358,13 @@ typedef struct
 	int16_t		var_depth;
 	int16_t		var_resno;
 	uint32_t	var_slot_id;
-} __kern_preload_vars_item;
+} kern_preload_vars_item;
 
 typedef struct
 {
 	uint32_t		_vl_len;
 	int				nloads;
-	__kern_preload_vars_item kvars[1];
+	kern_preload_vars_item kvars[1];
 } kern_preload_vars;
 
 typedef struct
@@ -1430,10 +1451,10 @@ EXTERN_DATA xpu_function_catalog_entry	builtin_xpu_functions_catalog[];
 #define XpuCommandMagicNumber			0xdeadbeafU
 
 /*
- * kernSessionInfo - A set of immutable data during query execution
+ * kern_session_info - A set of immutable data during query execution
  * (like, transaction info, timezone, parameter buffer).
  */
-typedef struct kernSessionInfo
+typedef struct kern_session_info
 {
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	kcxt_kvars_nslots;	/* length of kvars slot */
@@ -1452,7 +1473,7 @@ typedef struct kernSessionInfo
 	/* executor parameter buffer */
 	uint32_t	nparams;	/* number of parameters */
 	uint32_t	poffset[1];	/* offset of params */
-} kernSessionInfo;
+} kern_session_info;
 
 typedef struct {
 	uint32_t	kds_src_offset;
@@ -1482,17 +1503,33 @@ typedef struct
 	dlist_node	chain;
 	union {
 		kern_errorbuf	error;
-		kernSessionInfo	session;
+		kern_session_info session;
 		kernExecScan	scan;
 		kernExecResult	result;
 	} u;
 } XpuCommand;
 
 /*
- * kernSessionInfo utility functions.
+ * kern_session_info utility functions.
  */
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_SCAN_QUALS(kern_session_info *session)
+{
+	if (session->xpucode_scan_quals == 0)
+		return NULL;
+	return (kern_expression *)((char *)session + session->xpucode_scan_quals);
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_SCAN_PROJS(kern_session_info *session)
+{
+	if (session->xpucode_scan_projs == 0)
+		return NULL;
+	return (kern_expression *)((char *)session + session->xpucode_scan_projs);
+}
+
 INLINE_FUNCTION(struct varlena *)
-SESSION_XACT_ID_ARRAY(kernSessionInfo *session)
+SESSION_XACT_ID_ARRAY(kern_session_info *session)
 {
 	if (session->xact_id_array == 0)
 		return NULL;
@@ -1500,7 +1537,7 @@ SESSION_XACT_ID_ARRAY(kernSessionInfo *session)
 }
 
 INLINE_FUNCTION(struct pg_tz *)
-SESSION_TIMEZONE(kernSessionInfo *session)
+SESSION_TIMEZONE(kern_session_info *session)
 {
 	if (session->session_timezone == 0)
 		return NULL;
@@ -1508,14 +1545,49 @@ SESSION_TIMEZONE(kernSessionInfo *session)
 }
 
 INLINE_FUNCTION(struct xpu_encode_info *)
-SESSION_ENCODE(kernSessionInfo *session)
+SESSION_ENCODE(kern_session_info *session)
 {
 	if (session->session_encode == 0)
 		return NULL;
 	return (struct xpu_encode_info *)((char *)session + session->session_encode);
 }
 
-
+/* ----------------------------------------------------------------
+ *
+ * Entrypoint for LoadVars
+ *
+ * ----------------------------------------------------------------
+ */
+PUBLIC_FUNCTION(bool)
+ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
+					 kern_data_store *kds_outer,
+					 kern_tupitem *tupitem_outer,
+					 int num_inners,
+					 kern_data_store **kds_inners,
+					 kern_tupitem **tupitem_inners);
+PUBLIC_FUNCTION(bool)
+ExecLoadVarsOuterColumn(XPU_PGFUNCTION_ARGS,
+						kern_data_store *kds_outer,
+						uint32_t kds_index,
+						int num_inners,
+						kern_data_store **kds_inners,
+						kern_tupitem **tupitem_inners);
+PUBLIC_FUNCTION(bool)
+ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
+					   kern_data_store *kds_outer,
+					   uint32_t kds_index,
+					   int num_inners,
+					   kern_data_store **kds_inners,
+					   kern_tupitem **tupitem_inners);
+PUBLIC_FUNCTION(bool)
+ExecProjectionOuterRow(kern_context *kcxt,
+					   kern_expression *kexp,
+					   kern_data_store *kds_dst,
+					   kern_data_store *kds_outer,
+					   kern_tupitem *tupitem_outer,
+					   int num_inners,
+					   kern_data_store **kds_inners,
+					   kern_tupitem **tupitem_inners);
 
 /* ----------------------------------------------------------------
  *

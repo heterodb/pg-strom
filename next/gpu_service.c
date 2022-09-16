@@ -20,6 +20,11 @@ typedef struct
 	HTAB		   *cuda_type_htab;
 	HTAB		   *cuda_func_htab;
 	xpu_encode_info *cuda_encode_catalog;
+	/* GpuScan kernel entrypoint */
+	CUfunction		f_gpuscan_main_row;
+	CUfunction		f_gpuscan_main_block;
+	CUfunction		f_gpuscan_main_column;
+	CUfunction		f_gpuscan_main_arrow;
 } gpuModule;
 
 typedef struct
@@ -60,7 +65,7 @@ typedef struct
 {
 	dlist_node		chain;		/* gcontext->client_list */
 	gpuContext	   *gcontext;
-	kernSessionInfo *session;
+	kern_session_info *session;
 	pg_atomic_uint32 refcnt;	/* odd number, if error status */
 	pthread_mutex_t	mutex;		/* mutex to write the socket */
 	int				sockfd;		/* connection to PG backend */
@@ -557,7 +562,7 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
 
 static bool
 __resolveDevicePointers(gpuModule *gmodule,
-						kernSessionInfo *session,
+						kern_session_info *session,
 						char *emsg, size_t emsg_sz)
 {
 	xpu_encode_info	*encode = SESSION_ENCODE(session);
@@ -609,7 +614,7 @@ gpuservHandleOpenSession(XpuCommand *xcmd)
 	gpuClient  *gclient = xcmd->priv;
 	gpuContext *gcontext = gclient->gcontext;
 	gpuModule  *gmodule;
-	kernSessionInfo *session = &xcmd->u.session;
+	kern_session_info *session = &xcmd->u.session;
 	XpuCommand	resp;
 	char		emsg[512];
 
@@ -674,6 +679,9 @@ gpuservGpuWorkerMain(void *__arg)
 			{
 				case XpuCommandTag__OpenSession:
 					gpuservHandleOpenSession(xcmd);
+					break;
+				case XpuCommandTag__XpuScanExec:
+					gpuservHandleGpuScanExec(xcmd);
 					break;
 				default:
 					gpuClientELog(gclient, "unknown XPU command (%d)", (int)xcmd->tag);

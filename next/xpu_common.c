@@ -11,6 +11,7 @@
  */
 #include "xpu_common.h"
 
+#if 0
 /*
  * kern_get_datum_xxx
  *
@@ -112,6 +113,7 @@ kern_get_datum_column(kern_data_store *kds,
 	}
 	return NULL;
 }
+#endif
 
 /*
  * Const Expression
@@ -140,7 +142,7 @@ pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 {
-	kernSessionInfo *session = kcxt->session;
+	kern_session_info *session = kcxt->session;
 	uint32_t	param_id = kexp->u.p.param_id;
 	void	   *addr = NULL;
 
@@ -325,14 +327,388 @@ pgfn_Projection(XPU_PGFUNCTION_ARGS)
 	return false;
 }
 
-/*
- * LoadVars
+/* ----------------------------------------------------------------
+ *
+ * LoadVars / Projection
+ *
+ * ----------------------------------------------------------------
  */
+STATIC_FUNCTION(int)
+kern_extract_heap_tuple(kern_context *kcxt,
+						kern_data_store *kds,
+						kern_tupitem *tupitem,
+						int curr_depth,
+						const kern_preload_vars_item *kvars_items,
+						int kvars_nloads)
+{
+	const kern_preload_vars_item *kvars = kvars_items;
+	HeapTupleHeaderData *htup = &tupitem->htup;
+	uint32_t	offset = htup->t_hoff;
+	int			kvars_nloads_saved = kvars_nloads;
+	int			resno = 1;
+	int			slot_id;
+	int			ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
+	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+
+	/* shortcut if no columns in this depth */
+	if (kvars->var_depth != curr_depth)
+		return 0;
+
+	if (ncols > kds->ncols)
+		ncols = kds->ncols;
+	/* try attcacheoff shortcut, if available. */
+	if (!heap_hasnull)
+	{
+		while (kvars_nloads > 0 &&
+			   kvars->var_depth == curr_depth &&
+			   kvars->var_resno <= ncols)
+		{
+			kern_colmeta   *cmeta = &kds->colmeta[kvars->var_resno - 1];
+
+			if (cmeta->attcacheoff < 0)
+				break;
+			slot_id = kvars->var_slot_id;
+			resno   = kvars->var_resno;
+			offset  = htup->t_hoff + cmeta->attcacheoff;
+			assert(slot_id < kcxt->kvars_nslots);
+
+			kcxt->kvars_cmeta[slot_id] = cmeta;
+			kcxt->kvars_addr[slot_id]  = (char *)htup + offset;
+			kcxt->kvars_len[slot_id]   = -1;
+
+			kvars++;
+			kvars_nloads--;
+		}
+	}
+
+	/* move to the slow heap-tuple extract */
+	while (kvars_nloads > 0 &&
+		   kvars->var_depth == curr_depth &&
+		   kvars->var_resno >= resno &&
+		   kvars->var_resno <= ncols)
+	{
+		while (resno <= ncols)
+		{
+			kern_colmeta   *cmeta = &kds->colmeta[resno-1];
+			char		   *addr;
+
+			if (heap_hasnull && att_isnull(resno-1, htup->t_bits))
+			{
+				addr = NULL;
+			}
+			else
+			{
+				if (cmeta->attlen > 0)
+					offset = TYPEALIGN(cmeta->attalign, offset);
+				else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
+					offset = TYPEALIGN(cmeta->attalign, offset);
+
+				addr = ((char *)htup + offset);
+				if (cmeta->attlen > 0)
+					offset += cmeta->attlen;
+				else
+					offset += VARSIZE_ANY(addr);
+			}
+
+			if (kvars->var_resno == resno)
+			{
+				slot_id = kvars->var_slot_id;
+				assert(slot_id < kcxt->kvars_nslots);
+
+				kcxt->kvars_cmeta[slot_id] = cmeta;
+				kcxt->kvars_addr[slot_id]  = addr;
+				kcxt->kvars_len[slot_id]   = -1;
+
+				kvars++;
+				kvars_nloads--;
+				break;
+			}
+		}
+	}
+
+	/* other fields, which refers out of ranges, are NULL */
+	while (kvars_nloads > 0 &&
+		   kvars->var_depth == curr_depth)
+	{
+		kern_colmeta *cmeta = &kds->colmeta[kvars->var_resno-1];
+		int		slot_id = kvars->var_slot_id;
+
+		assert(slot_id < kcxt->kvars_nslots);
+		kcxt->kvars_cmeta[slot_id] = cmeta;
+		kcxt->kvars_addr[slot_id]  = NULL;
+		kcxt->kvars_len[slot_id]   = -1;
+
+		kvars++;
+		kvars_nloads--;
+	}
+	return (kvars_nloads_saved - kvars_nloads);
+}
+
 STATIC_FUNCTION(bool)
 pgfn_LoadVars(XPU_PGFUNCTION_ARGS)
 {
-	STROM_ELOG(kcxt, "Projection is not implemented");
+	STROM_ELOG(kcxt, "Bug? LoadVars shall not be called as a part of expression");
 	return false;
+}
+
+PUBLIC_FUNCTION(bool)
+ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
+					 kern_data_store *kds_outer,
+					 kern_tupitem *tupitem_outer,
+					 int num_inners,
+					 kern_data_store **kds_inners,
+					 kern_tupitem **tupitem_inners)
+{
+	const kern_preload_vars *preload;
+	const kern_expression *karg;
+	int			index;
+	int			depth;
+
+	assert(kexp->opcode == FuncOpCode__LoadVars &&
+		   kexp->nargs == 1);
+	karg = (const kern_expression *)kexp->u.data;
+	assert(kexp->exptype == karg->exptype);
+	preload = (const kern_preload_vars *)((const char *)karg +
+										  MAXALIGN(VARSIZE(karg)));
+	/*
+	 * Walking on the outer/inner tuples
+	 */
+	for (depth=0, index=0;
+		 depth <= num_inners && index < preload->nloads;
+		 depth++)
+	{
+		kern_data_store *kds;
+		kern_tupitem *tupitem;
+
+		if (depth == 0)
+		{
+			kds     = kds_outer;
+			tupitem = tupitem_outer;
+		}
+		else
+		{
+			kds     = kds_inners[depth - 1];
+			tupitem = tupitem_inners[depth - 1];
+		}
+		index += kern_extract_heap_tuple(kcxt,
+										 kds,
+										 tupitem,
+										 depth,
+										 preload->kvars + index,
+										 preload->nloads - index);
+	}
+	/*
+	 * Call the argument
+	 */
+	return EXEC_KERN_EXPRESSION(kcxt, karg, __result);
+}
+
+/*
+ * __form_kern_heaptuple
+ */
+STATIC_FUNCTION(uint32_t)
+__form_kern_heaptuple(kern_context    *kcxt,
+					  kern_expression *kproj,
+					  kern_data_store *kds,
+					  HeapTupleHeaderData *htup)
+{
+	kern_projection_map *proj_map;
+	uint32_t   *proj_slot;
+	bool		t_hasnull = false;
+	uint16_t	t_infomask = 0;
+	uint32_t	t_hoff;
+	uint32_t	sz;
+	int			j, ncols = 0;
+
+	/*
+	 * Fetch 'kern_projection_map' from the tail of 'kern_expression'
+	 */
+	assert(kproj->opcode == FuncOpCode__Projection);
+	sz = *((uint32_t *)((char *)kproj + VARSIZE(kproj) - sizeof(uint32_t)));
+	proj_map = (kern_projection_map *)((char *)kproj + VARSIZE(kproj) - sz);
+	proj_slot = proj_map->slot_id + proj_map->nexprs;
+
+	/* has any NULL attributes? */
+	for (j = proj_map->nattrs; j > 0; j--)
+	{
+		uint32_t	slot_id = proj_slot[j-1];
+
+		assert(slot_id < kcxt->kvars_nslots);
+		if (kcxt->kvars_addr[slot_id])
+		{
+			if (ncols == 0)
+				ncols = j;
+		}
+		else if (ncols > 0)
+		{
+			t_infomask |= HEAP_HASNULL;
+			t_hasnull = true;
+			break;
+		}
+	}
+
+	/* set up headers */
+	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
+	if (t_hasnull)
+		t_hoff = BITMAPLEN(ncols);
+	t_hoff = MAXALIGN(t_hoff);
+
+	memset(htup, 0, t_hoff);
+	htup->t_choice.t_datum.datum_typmod = kds->tdtypmod;
+	htup->t_choice.t_datum.datum_typeid = kds->tdtypeid;
+	htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
+	htup->t_ctid.ip_blkid.bi_lo = 0xffff;
+	htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
+	htup->t_infomask2 = (ncols & HEAP_NATTS_MASK);
+	htup->t_hoff = t_hoff;
+
+	/* walk on the columns */
+	for (j=0; j < ncols; j++)
+	{
+		uint32_t		slot_id = proj_slot[j];
+		kern_colmeta   *cmeta = kcxt->kvars_cmeta[slot_id];
+		void		   *vaddr = kcxt->kvars_addr[slot_id];
+		int				vlen  = kcxt->kvars_len[slot_id];
+
+		assert(slot_id < kcxt->kvars_nslots);
+		if (!vaddr)
+		{
+			assert(t_hasnull);
+			continue;
+		}
+		if (t_hasnull)
+			htup->t_bits[j>>3] |= (1<<(j & 7));
+		//put datum
+
+
+		
+
+
+
+	}
+	htup->t_infomask = t_infomask;
+	SET_VARSIZE(&htup->t_choice.t_datum, t_hoff);
+
+	return t_hoff;
+}
+
+/*
+ * __execProjectionCommon
+ */
+STATIC_FUNCTION(bool)
+__execProjectionCommon(kern_context *kcxt,
+					   kern_expression *kexp,
+					   kern_data_store *kds_dst,
+					   int nvalids,
+					   uint32_t tupsz)
+{
+	size_t		offset;
+	uint32_t	total_sz;
+	union {
+		struct {
+			uint32_t	nitems;
+			uint32_t	usage;
+		} i;
+		uint64_t		v64;
+	} oldval, curval, newval;
+
+	/* allocation of the destination buffer */
+	assert(kds_dst->format == KDS_FORMAT_ROW);
+	offset = __reduce_stair_add_sync(tupsz, &total_sz);
+	if (LaneId() == 0)
+	{
+		curval.i.nitems = kds_dst->nitems;
+		curval.i.usage  = kds_dst->usage;
+		do {
+			newval = oldval = curval;
+			newval.i.nitems += nvalids;
+			newval.i.usage  += __kds_packed(total_sz);
+
+			if (KDS_HEAD_LENGTH(kds_dst) +
+				MAXALIGN(sizeof(uint32_t) * newval.i.nitems) +
+				__kds_unpack(newval.i.usage) > kds_dst->length)
+			{
+				STROM_EREPORT(kcxt, ERRCODE_STROM_DATASTORE_NOSPACE,
+							  "No space left on the destination buffer");
+				break;
+			}
+		} while ((curval.v64 = atomicCAS((uint64_t *)&kds_dst->nitems,
+										 oldval.v64,
+										 newval.v64)) != oldval.v64);
+	}
+	oldval.v64 = __shfl_sync(__activemask(), oldval.v64, 0);
+	/* error checks */
+	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+		return false;
+
+	/* write out the tuple */
+	if (LaneId() < nvalids)
+	{
+		kern_expression *kproj = (kern_expression *)kexp->u.data;
+		uint32_t	row_id = oldval.i.nitems + LaneId();
+		kern_tupitem *tupitem;
+
+		offset += __kds_unpack(oldval.i.usage);
+		KDS_GET_ROWINDEX(kds_dst)[row_id] = __kds_packed(offset);
+		tupitem = (kern_tupitem *)
+			((char *)kds_dst + kds_dst->length - offset);
+		tupitem->rowid = row_id;
+		tupitem->t_len = __form_kern_heaptuple(kcxt, kproj,
+											   kds_dst,
+											   &tupitem->htup);
+	}
+}
+
+/*
+ * ExecKernProjection
+ */
+PUBLIC_FUNCTION(bool)
+ExecProjectionOuterRow(kern_context *kcxt,
+					   kern_expression *kexp,	/* LoadVars + Projection */
+					   kern_data_store *kds_dst,
+					   kern_data_store *kds_outer,
+					   kern_tupitem *tupitem_outer,
+					   int num_inners,
+					   kern_data_store **kds_inners,
+					   kern_tupitem **tupitem_inners)
+{
+	uint32_t	nvalids;
+	uint32_t	mask;
+	uint32_t	tupsz = 0;
+
+	assert(__activemask() == 0xffffffffU);
+	mask = __ballot_sync(__activemask(), tupitem_outer != NULL);
+	nvalids = __popc(mask);
+	assert(tupitem_outer != NULL
+		   ? LaneId() <  nvalids
+		   : LaneId() >= nvalids);
+	/*
+	 * First, extract the variables from outer/inner tuples, and
+	 * calculate expressions, if any.
+	 */
+	assert(kexp->opcode == FuncOpCode__LoadVars &&
+		   kexp->exptype == TypeOpCode__int4);
+	if (LaneId() < nvalids)
+	{
+		xpu_int4_t	__tupsz;
+
+		if (ExecLoadVarsOuterRow(kcxt,
+								 kexp,
+								 (xpu_datum_t *)&tupsz,
+								 kds_outer,
+								 tupitem_outer,
+								 num_inners,
+								 kds_inners,
+								 tupitem_inners))
+		{
+			if (!__tupsz.isnull)
+			{
+				tupsz = MAXALIGN(__tupsz.value);
+				assert(tupsz > 0);
+			}
+		}
+	}
+	return __execProjectionCommon(kcxt, kexp, kds_dst, unitsz);
 }
 
 /*

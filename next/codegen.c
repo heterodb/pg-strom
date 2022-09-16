@@ -1265,8 +1265,8 @@ codegen_expression_walker(codegen_context *context, Expr *expr)
 static int
 kern_preload_vars_comp(const void *__a, const void *__b)
 {
-	const __kern_preload_vars_item *a = __a;
-	const __kern_preload_vars_item *b = __b;
+	const kern_preload_vars_item *a = __a;
+	const kern_preload_vars_item *b = __b;
 
 	if (a->var_depth < 0 || a->var_resno < 0)
 		return 1;
@@ -1304,7 +1304,7 @@ attach_varloads_xpucode(codegen_context *context,
 		i++;
 	}
 	pg_qsort(kload->kvars, nloads,
-			 sizeof(__kern_preload_vars_item),
+			 sizeof(kern_preload_vars_item),
 			 kern_preload_vars_comp);
 	for (i=0; i < nloads; i++)
 	{

@@ -477,10 +477,10 @@ pgstromBuildSessionInfo(PlanState *ps,
 	ExprContext	   *econtext = ps->ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
 	uint32_t		nparams = (param_info ? param_info->numParams : 0);
-	uint32_t		session_sz = offsetof(kernSessionInfo, poffset[nparams]);
+	uint32_t		session_sz = offsetof(kern_session_info, poffset[nparams]);
 	StringInfoData	buf;
 	XpuCommand	   *xcmd;
-	kernSessionInfo *session;
+	kern_session_info *session;
 
 	initStringInfo(&buf);
 	__appendZeroStringInfo(&buf, session_sz);
