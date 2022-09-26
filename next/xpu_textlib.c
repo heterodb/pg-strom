@@ -28,21 +28,15 @@ bpchar_truelen(const char *s, int len)
 	return i + 1;
 }
 
-STATIC_FUNCTION(bool)
-xpu_bpchar_datum_extract(kern_context *kcxt, const char **s, int *len)
+INLINE_FUNCTION(bool)
+xpu_bpchar_is_valid(kern_context *kcxt, const xpu_bpchar_t *arg)
 {
-	if (*len < 0)
+	if (arg->length < 0)
 	{
-		if (VARATT_IS_COMPRESSED(*s) || VARATT_IS_EXTERNAL(*s))
-        {
-            STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
-							   "bpchar datum is compressed or external");
-			return false;
-        }
-		*len = bpchar_truelen(VARDATA_ANY(*s), VARSIZE_ANY_EXHDR(*s));
-		*s = VARDATA_ANY(*s);
+		STROM_CPU_FALLBACK(kcxt, "bpchar datum is compressed or external");
+		return false;
 	}
-    return true;
+	return true;
 }
 
 STATIC_FUNCTION(bool)
@@ -57,19 +51,37 @@ xpu_bpchar_datum_ref(kern_context *kcxt,
 	result->ops = &xpu_bpchar_ops;
 	if (!addr)
 		result->isnull = true;
-	else if (!cmeta)
-	{
-		result->length = -1;
-		result->value = (char *)addr;
-	}
 	else
 	{
-		int		unitsz = Min(cmeta->attopts.fixed_size_binary.byteWidth, len);
-
 		result->value = (const char *)addr;
-		result->length = bpchar_truelen((const char *)addr, unitsz);
+		result->length = len;
 	}
 	return true;
+}
+
+STATIC_FUNCTION(int)
+xpu_bpchar_datum_move(kern_context *kcxt,
+					  char *buffer,
+					  const kern_colmeta *cmeta,
+					  const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (len < 0)
+	{
+		/* compressed or external varlena */
+		len = VARSIZE_ANY(addr);
+		if (buffer)
+			memcpy(buffer, addr, len);
+		return len;
+	}
+	/* normal uncompressed cases */
+	if (buffer)
+	{
+		memcpy(buffer + VARHDRSZ, addr, len);
+		SET_VARSIZE(buffer, VARHDRSZ + len);
+	}
+	return VARHDRSZ + len;
 }
 
 STATIC_FUNCTION(int)
@@ -78,29 +90,26 @@ xpu_bpchar_datum_store(kern_context *kcxt,
 					   xpu_datum_t *__arg)
 {
 	xpu_bpchar_t *arg = (xpu_bpchar_t *)__arg;
-	const char *data;
-	int		len;
+	int		sz;
 
 	if (arg->isnull)
 		return 0;
 	if (arg->length < 0)
 	{
-		data = VARDATA_ANY(arg->value);
-		len = VARSIZE_ANY_EXHDR(arg->value);
-		if (!VARATT_IS_COMPRESSED(data) && !VARATT_IS_EXTERNAL(data))
-			len = bpchar_truelen(data, len);
+		sz = VARSIZE_ANY(arg->value);
+		if (buffer)
+			memcpy(buffer, arg->value, sz);
 	}
 	else
 	{
-		data = arg->value;
-		len = bpchar_truelen(data, arg->length);
+		sz = VARHDRSZ + arg->length;
+		if (buffer)
+		{
+			memcpy(buffer + VARHDRSZ, arg->value, arg->length);
+			SET_VARSIZE(buffer, sz);
+		}
 	}
-	if (buffer)
-	{
-		memcpy(buffer + VARHDRSZ, data, len);
-		SET_VARSIZE(buffer, len + VARHDRSZ);
-	}
-	return len + VARHDRSZ;
+	return sz;
 }
 
 STATIC_FUNCTION(bool)
@@ -112,37 +121,26 @@ xpu_bpchar_datum_hash(kern_context*kcxt,
 
 	if (arg->isnull)
 		*p_hash = 0;
+	else if (xpu_bpchar_is_valid(kcxt, arg))
+		*p_hash = pg_hash_any(arg->value, arg->length);
 	else
-	{
-		const char *data = arg->value;
-		int		len = arg->length;
-
-		if (!xpu_bpchar_datum_extract(kcxt, &data, &len))
-			return false;
-		*p_hash = pg_hash_any(data, len);
-    }
+		return false;
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(bpchar);
+PGSTROM_SQLTYPE_OPERATORS(bpchar, false, 4, -1);
 
 /*
  * xpu_text_t device type handler
  */
-STATIC_FUNCTION(bool)
-xpu_text_datum_extract(kern_context *kcxt, const char **s, int *len)
+INLINE_FUNCTION(bool)
+xpu_text_is_valid(kern_context *kcxt, const xpu_text_t *arg)
 {
-	if (*len < 0)
+	if (arg->length < 0)
 	{
-		if (VARATT_IS_COMPRESSED(*s) || VARATT_IS_EXTERNAL(*s))
-		{
-			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
-							   "text datum is compressed or external");
-			return false;
-        }
-		*len = VARSIZE_ANY_EXHDR(*s);
-		*s = (const char *)VARDATA_ANY(*s);
+		STROM_CPU_FALLBACK(kcxt, "text datum is compressed or external");
+		return false;
 	}
-    return true;
+	return true;
 }
 
 STATIC_FUNCTION(bool)
@@ -157,17 +155,37 @@ xpu_text_datum_ref(kern_context *kcxt,
 	result->ops = &xpu_text_ops;
 	if (!addr)
 		result->isnull = true;
-	else if (cmeta)
-	{
-		result->length = -1;
-		result->value = (const char *)addr;
-	}
 	else
 	{
-		result->length = len;
-		result->value = (const char *)addr;
+		result->length = -1;
+		result->value  = (const char *)addr;
 	}
 	return true;
+}
+
+STATIC_FUNCTION(int)
+xpu_text_datum_move(kern_context *kcxt,
+					char *buffer,
+					const kern_colmeta *cmeta,
+					const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (len < 0)
+	{
+		/* compressed or external varlena */
+		len = VARSIZE_ANY(addr);
+		if (buffer)
+			memcpy(buffer, addr, len);
+		return len;
+	}
+	/* normal uncompressed cases */
+	if (buffer)
+	{
+		memcpy(buffer + VARHDRSZ, addr, len);
+		SET_VARSIZE(buffer, VARHDRSZ + len);
+	}
+	return VARHDRSZ + len;
 }
 
 STATIC_FUNCTION(int)
@@ -180,9 +198,21 @@ xpu_text_datum_store(kern_context *kcxt,
 
 	if (arg->isnull)
 		return 0;
-	sz = (arg->length < 0 ? VARSIZE_ANY(arg->value) : arg->length);
-	if (buffer)
-		memcpy(buffer, arg->value, sz);
+	if (arg->length < 0)
+	{
+		sz = VARSIZE_ANY(arg->value);
+		if (buffer)
+			memcpy(buffer, arg->value, sz);
+	}
+	else
+	{
+		sz = VARHDRSZ + arg->length;
+		if (buffer)
+		{
+			memcpy(buffer + VARHDRSZ, arg->value, arg->length);
+			SET_VARSIZE(buffer, sz);
+		}
+	}
 	return sz;
 }
 
@@ -195,22 +225,28 @@ xpu_text_datum_hash(kern_context *kcxt,
 
 	if (arg->isnull)
 		*p_hash = 0;
+	else if (!xpu_text_is_valid(kcxt, arg))
+		*p_hash = pg_hash_any(arg->value, arg->length);
 	else
-	{
-		const char *data = arg->value;
-		int		len = arg->length;
-
-		if (!xpu_text_datum_extract(kcxt, &data, &len))
-			return false;
-		*p_hash = pg_hash_any(data, len);
-	}
+		return false;
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(text);
+PGSTROM_SQLTYPE_OPERATORS(text, false, 4, -1);
 
 /*
  * xpu_bytea_t device type handler
  */
+INLINE_FUNCTION(bool)
+xpu_bytea_is_valid(kern_context *kcxt, const xpu_bytea_t *arg)
+{
+	if (arg->length < 0)
+	{
+		STROM_CPU_FALLBACK(kcxt, "bytea datum is compressed or external");
+		return false;
+	}
+	return true;
+}
+
 STATIC_FUNCTION(bool)
 xpu_bytea_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
@@ -223,11 +259,6 @@ xpu_bytea_datum_ref(kern_context *kcxt,
 	result->ops = &xpu_bytea_ops;
 	if (!addr)
 		result->isnull = true;
-	else if (cmeta)
-	{
-		result->length = -1;
-		result->value = (const char *)addr;
-	}
 	else
 	{
 		result->length = len;
@@ -246,10 +277,47 @@ xpu_bytea_datum_store(kern_context *kcxt,
 
 	if (arg->isnull)
 		return 0;
-	sz = (arg->length < 0 ? VARSIZE_ANY(arg->value) : arg->length);
-	if (buffer)
-		memcpy(buffer, arg->value, sz);
+	if (arg->length < 0)
+	{
+		sz = VARSIZE_ANY(arg->value);
+		if (buffer)
+			memcpy(buffer, arg->value, sz);
+	}
+	else
+	{
+		sz = VARHDRSZ + arg->length;
+		if (buffer)
+		{
+			memcpy(buffer + VARHDRSZ, arg->value, arg->length);
+			SET_VARSIZE(buffer, sz);
+		}
+	}
 	return sz;
+}
+
+STATIC_FUNCTION(int)
+xpu_bytea_datum_move(kern_context *kcxt,
+					char *buffer,
+					const kern_colmeta *cmeta,
+					const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (len < 0)
+	{
+		/* compressed or external varlena */
+		len = VARSIZE_ANY(addr);
+		if (buffer)
+			memcpy(buffer, addr, len);
+		return len;
+	}
+	/* normal uncompressed cases */
+	if (buffer)
+	{
+		memcpy(buffer + VARHDRSZ, addr, len);
+		SET_VARSIZE(buffer, VARHDRSZ + len);
+	}
+	return VARHDRSZ + len;
 }
 
 STATIC_FUNCTION(bool)
@@ -261,18 +329,13 @@ xpu_bytea_datum_hash(kern_context *kcxt,
 
 	if (arg->isnull)
 		*p_hash = 0;
+	else if (xpu_bytea_is_valid(kcxt, arg))
+		*p_hash = pg_hash_any(arg->value, arg->length);
 	else
-	{
-		const char *data = arg->value;
-		int		len = arg->length;
-
-		if (!xpu_text_datum_extract(kcxt, &data, &len))
-			return false;
-		*p_hash = pg_hash_any(data, len);
-	}
+		return false;
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(bytea);
+PGSTROM_SQLTYPE_OPERATORS(bytea, false, 4, -1);
 
 /*
  * Bpchar functions
@@ -280,16 +343,18 @@ PGSTROM_SQLTYPE_OPERATORS(bytea);
 STATIC_FUNCTION(bool)
 __bpchar_compare(kern_context *kcxt,
 				 int *p_status,
-				 const char *s1, int len1,
-				 const char *s2, int len2)
+				 const xpu_bpchar_t *str1,
+				 const xpu_bpchar_t *str2)
 {
+	const char *s1 = str1->value;
+	const char *s2 = str2->value;
 	int		len;
 
-	if (!xpu_bpchar_datum_extract(kcxt, &s1, &len1) ||
-		!xpu_bpchar_datum_extract(kcxt, &s2, &len2))
+	if (!xpu_bpchar_is_valid(kcxt, str1) ||
+		!xpu_bpchar_is_valid(kcxt, str2))
 		return false;
 
-	len = Min(len1, len2);
+	len = Min(str1->length, str2->length);
 	while (len > 0)
 	{
 		if (*s1 < *s2)
@@ -306,10 +371,12 @@ __bpchar_compare(kern_context *kcxt,
 		s2++;
 		len--;
 	}
-	if (len1 != len2)
-		*p_status = (len1 > len2 ? 1 : -1);
-	else
+	if (str1->length == str2->length)
 		*p_status = 0;
+	else if (str1->length > str2->length)
+		*p_status = 1;
+	else
+		*p_status = -1;
 	return true;
 }
 
@@ -335,8 +402,8 @@ __bpchar_compare(kern_context *kcxt,
 			int		status;											\
 																	\
 			if (!__bpchar_compare(kcxt, &status,					\
-								  datum_a.value, datum_a.length,	\
-								  datum_b.value, datum_b.length))	\
+								  &datum_a,							\
+								  &datum_b))						\
 				return false;										\
 			result->value = (status OPER 0);						\
 		}															\
@@ -358,21 +425,14 @@ pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
 
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
+	memset(&result, 0, sizeof(xpu_int4_t));
+	result->ops = &xpu_int4_ops;
 	result->isnull = datum.isnull;
 	if (!datum.isnull)
 	{
-		if (datum.length >= 0)
-			result->value = datum.length;
-		else if (!VARATT_IS_COMPRESSED(datum.value) &&
-				 !VARATT_IS_EXTERNAL(datum.value))
-			result->value = bpchar_truelen(VARDATA_ANY(datum.value),
-										   VARSIZE_ANY_EXHDR(datum.value));
-		else
-		{
-			STROM_CPU_FALLBACK(kcxt, ERRCODE_STROM_VARLENA_UNSUPPORTED,
-							   "varlena datum is compressed or external");
+		if (!xpu_bpchar_is_valid(kcxt, &datum))
 			return false;
-		}
+		result->value = datum.length;
 	}
 	return true;
 }
@@ -383,15 +443,17 @@ pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 __text_compare(kern_context *kcxt,
 			   int *p_status,
-			   const char *s1, int len1,
-			   const char *s2, int len2)
+			   const xpu_text_t *str1,
+			   const xpu_text_t *str2)
 {
+	const char *s1 = str1->value;
+	const char *s2 = str2->value;
 	int		len;
 
-	if (!xpu_text_datum_extract(kcxt, &s1, &len1) ||
-		!xpu_text_datum_extract(kcxt, &s2, &len2))
+	if (!xpu_text_is_valid(kcxt, str1) ||
+		!xpu_text_is_valid(kcxt, str2))
 		return false;
-	len = min(len1, len2);
+	len = min(str1->length, str2->length);
 	while (len > 0)
 	{
 		if (*s1 < *s2)
@@ -405,8 +467,8 @@ __text_compare(kern_context *kcxt,
 			return true;
 		}
 	}
-	if (len1 != len2)
-		*p_status = (len1 > len2 ? 1 : -1);
+	if (str1->length != str2->length)
+		*p_status = (str1->length > str2->length ? 1 : -1);
 	else
 		*p_status = 0;
 	return true;
@@ -434,8 +496,8 @@ __text_compare(kern_context *kcxt,
 			int		status;											\
 																	\
 			if (!__text_compare(kcxt, &status,						\
-								datum_a.value, datum_a.length,		\
-								datum_b.value, datum_b.length))		\
+								&datum_a,							\
+								&datum_b))							\
 				return false;										\
 			result->value = (status OPER 0);						\
 		}															\
@@ -457,14 +519,66 @@ pgfn_textlen(XPU_PGFUNCTION_ARGS)
 
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
+	memset(result, 0, sizeof(xpu_int4_t));
+	result->ops = &xpu_int4_ops;
 	result->isnull = datum.isnull;
 	if (!datum.isnull)
 	{
-		const char *s = datum.value;
+		xpu_encode_info *encode = SESSION_ENCODE(kcxt->session);
 		int		len = datum.length;
 
-		if (!xpu_text_datum_extract(kcxt, &s, &len))
+		if (!encode)
+		{
+			STROM_ELOG(kcxt, "No encoding info was supplied");
 			return false;
+		}
+		else if (encode->enc_maxlen == 1)
+		{
+			if (len < 0)
+			{
+				if (VARATT_IS_COMPRESSED(datum.value))
+				{
+					toast_compress_header	c_hdr;
+
+					memcpy(&c_hdr, VARDATA(datum.value),
+						   sizeof(toast_compress_header));
+					len = TOAST_COMPRESS_EXTSIZE(&c_hdr);
+				}
+				else if (VARATT_IS_EXTERNAL(datum.value))
+				{
+					varatt_external			e_hdr;
+
+					memcpy(&e_hdr, VARDATA_1B_E(datum.value),
+						   sizeof(varatt_external));
+					len = (e_hdr.va_extinfo & VARLENA_EXTSIZE_MASK);
+				}
+				else
+				{
+					STROM_ELOG(kcxt, "unknown varlena format");
+					return false;
+				}
+			}
+		}
+		else if (len >= 0)
+		{
+			const char *mbstr = datum.value;
+			int			sz = 0;
+
+			while (len > 0 && *mbstr)
+			{
+				int		n = encode->enc_mblen(mbstr);
+
+				len   -= n;
+				mbstr += n;
+				sz++;
+			}
+			len = sz;
+		}
+		else
+		{
+			STROM_ELOG(kcxt, "unable to count compressed/external text under multi-bytes encoding");
+			return false;
+		}
 		result->value = len;
 	}
 	return true;
@@ -830,40 +944,38 @@ PUBLIC_DATA	xpu_encode_info	xpu_encode_catalog[] = {
 GENERIC_MATCH_TEXT_TEMPLATE(GenericMatchText, GetChar)
 GENERIC_MATCH_TEXT_TEMPLATE(GenericCaseMatchText, GetCharUpper)
 
-#define PG_TEXTLIKE_TEMPLATE(FN_NAME,FN_MATCH,OPER)				\
-	PUBLIC_FUNCTION(bool)										\
-	pgfn_##FN_NAME(XPU_PGFUNCTION_ARGS)							\
-	{															\
-		xpu_bool_t	   *result = (xpu_bool_t *)__result;		\
-		xpu_text_t		datum_a;	/* string */				\
-		xpu_text_t		datum_b;	/* pattern */				\
-		const kern_expression *karg = KEXP_FIRST_ARG(2, text);	\
-																\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))		\
-			return false;										\
-		karg = KEXP_NEXT_ARG(karg, text);						\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))		\
-			return false;										\
-		result->ops = &xpu_bool_ops;							\
-		result->isnull = (datum_a.isnull | datum_b.isnull);		\
-		if (!result->isnull)									\
-		{														\
-			const char *s1 = datum_a.value;						\
-			const char *s2 = datum_b.value;						\
-			int		len1 = datum_a.length;						\
-			int		len2 = datum_b.length;						\
-			int		status;										\
-																\
-			if (!xpu_text_datum_extract(kcxt, &s1, &len1) ||	\
-				!xpu_text_datum_extract(kcxt, &s2, &len2))		\
-				return false;									\
-			status = FN_MATCH(kcxt, s1, len1, s2, len2, 0);		\
-			if (status == LIKE_EXCEPTION)						\
-				return false;									\
-			result->value = (status OPER LIKE_TRUE);			\
-		}														\
-		return true;											\
-	}															\
+#define PG_TEXTLIKE_TEMPLATE(FN_NAME,FN_MATCH,OPER)					\
+	PUBLIC_FUNCTION(bool)											\
+	pgfn_##FN_NAME(XPU_PGFUNCTION_ARGS)								\
+	{																\
+		xpu_bool_t	   *result = (xpu_bool_t *)__result;			\
+		xpu_text_t		datum_a;	/* string */					\
+		xpu_text_t		datum_b;	/* pattern */					\
+		const kern_expression *karg = KEXP_FIRST_ARG(2, text);		\
+																	\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))			\
+			return false;											\
+		karg = KEXP_NEXT_ARG(karg, text);							\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))			\
+			return false;											\
+		result->ops = &xpu_bool_ops;								\
+		result->isnull = (datum_a.isnull | datum_b.isnull);			\
+		if (!result->isnull)										\
+		{															\
+			int		status;											\
+																	\
+			if (!xpu_text_is_valid(kcxt, &datum_a) ||				\
+				!xpu_text_is_valid(kcxt, &datum_b))					\
+				return false;										\
+			status = FN_MATCH(kcxt,									\
+							  datum_a.value, datum_a.length,		\
+							  datum_b.value, datum_b.length, 0);	\
+			if (status == LIKE_EXCEPTION)							\
+				return false;										\
+			result->value = (status OPER LIKE_TRUE);				\
+		}															\
+		return true;												\
+	}																\
 
 PG_TEXTLIKE_TEMPLATE(like, GenericMatchText, ==)
 PG_TEXTLIKE_TEMPLATE(textlike, GenericMatchText, ==)
@@ -890,16 +1002,14 @@ PG_TEXTLIKE_TEMPLATE(texticnlike, GenericCaseMatchText, !=)
 		result->isnull = (datum_a.isnull | datum_b.isnull);			\
 		if (!result->isnull)										\
 		{															\
-			const char *s1 = datum_a.value;							\
-			const char *s2 = datum_b.value;							\
-			int		len1 = datum_a.length;							\
-			int		len2 = datum_b.length;							\
 			int		status;											\
 																	\
-			if (!xpu_bpchar_datum_extract(kcxt, &s1, &len1) ||		\
-				!xpu_text_datum_extract(kcxt, &s2, &len2))			\
+			if (!xpu_bpchar_is_valid(kcxt, &datum_a) ||				\
+				!xpu_text_is_valid(kcxt, &datum_b))					\
 				return false;										\
-			status = FN_MATCH(kcxt, s1, len1, s2, len2, 0);			\
+			status = FN_MATCH(kcxt,									\
+							  datum_a.value, datum_a.length,		\
+							  datum_b.value, datum_b.length, 0);	\
 			if (status == LIKE_EXCEPTION)							\
 				return false;										\
 			result->value = (status OPER LIKE_TRUE);				\

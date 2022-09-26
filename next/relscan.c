@@ -314,6 +314,11 @@ __setup_kern_colmeta(kern_data_store *kds,
 				break;
 		}
 	}
+	/*
+	 * for the reverse references to KDS
+	 */
+	cmeta->kds_format = kds->format;
+	cmeta->kds_offset = (char *)cmeta - (char *)kds;
 }
 
 size_t

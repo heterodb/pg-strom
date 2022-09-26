@@ -198,6 +198,8 @@ __xpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
 	}
 	else
 	{
+		Assert(xcmd->tag == XpuCommandTag__Success ||
+			   xcmd->tag == XpuCommandTag__CPUFallback);
 		dlist_push_tail(&conn->ready_cmds_list, &xcmd->chain);
 		conn->num_ready_cmds++;
 	}
@@ -686,6 +688,8 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 				return NULL;
 			xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
 		}
+		CHECK_FOR_INTERRUPTS();
+
 		ev = WaitLatch(MyLatch,
 					   WL_LATCH_SET |
 					   WL_TIMEOUT |
@@ -799,15 +803,33 @@ TupleTableSlot *
 pgstromExecTaskState(pgstromTaskState *pts)
 {
 	TupleTableSlot *slot = NULL;
+	XpuCommand	   *resp;
 
 	while (!pts->curr_resp || !(slot = pts->cb_next_tuple(pts)))
 	{
+	next_chunks:
 		if (pts->curr_resp)
 			free(pts->curr_resp);
 		pts->curr_resp = __fetchNextXpuCommand(pts);
 		if (!pts->curr_resp)
 			return NULL;
-		pts->curr_index = 0;
+		resp = pts->curr_resp;
+		if (resp->tag == XpuCommandTag__Success)
+		{
+			if (resp->u.results.chunks_nitems == 0)
+				goto next_chunks;
+			pts->curr_kds = (kern_data_store *)
+				((char *)resp + resp->u.results.chunks_offset);
+			pts->curr_chunk = 0;
+			pts->curr_index = 0;
+		}
+		else
+		{
+			Assert(resp->tag == XpuCommandTag__CPUFallback);
+			//run CPU fallback
+			//attach alternative KDS
+			elog(ERROR, "CPU fallback is not ready");
+		}
 	}
 	return slot;
 }

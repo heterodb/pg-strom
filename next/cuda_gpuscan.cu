@@ -15,35 +15,32 @@
 #define GPUSCAN_THREADS_UNITSZ_MASK		(GPUSCAN_THREADS_UNITSZ - 1)
 #define GPUSCAN_THREADS_UNITSZ			(1U<<GPUSCAN_THREADS_UNITSZ_SHIFT)
 
-
-
 KERNEL_FUNCTION(void)
 kern_gpuscan_main_row(kern_session_info *session,
 					  kern_gpuscan *kgscan,
 					  kern_data_store *kds_src,
-					  kern_data_extra *__not_in_use__,
 					  kern_data_store *kds_dst)
 {
 	kern_context	   *kcxt;
 	kern_expression	   *kexp_scan_quals = SESSION_KEXP_SCAN_QUALS(session);
 	kern_expression	   *kexp_scan_projs = SESSION_KEXP_SCAN_PROJS(session);
 	bool				scan_done = false;
+	kern_gpuscan_suspend_context *__suspend_cxt;
 	kern_gpuscan_suspend_warp *warp;
-	kern_gpuscan_suspend_smx *__smx;
-	__shared__ kern_gpuscan_suspend_smx smx;
+	__shared__ kern_gpuscan_suspend_context smx;
 
 	assert(kds_src->format == KDS_FORMAT_ROW &&
 		   kexp_scan_quals->opcode == FuncOpCode__LoadVars &&
 		   kexp_scan_projs->opcode == FuncOpCode__LoadVars);
 	INIT_KERNEL_CONTEXT(kcxt, session);
 
-	/* resume the gpuscan execution context */
-	__smx = &kgscan->suspend_smx[get_group_id()];
+	/* resume the previous execution state */
+	__suspend_cxt = &kgscan->suspend_context[get_group_id()];
 	if (get_local_id() == 0)
-		smx.smx_count = __smx->smx_count;
+		smx.row_count = __suspend_cxt->row_count;
 	warp = &smx.warps[WarpId()];
 	if (LaneId() == 0)
-		memcpy(warp, &__smx->warps[WarpId()],
+		memcpy(warp, &__suspend_cxt->warps[WarpId()],
 			   sizeof(kern_gpuscan_suspend_warp));
 	__syncthreads();
 
@@ -65,12 +62,18 @@ kern_gpuscan_main_row(kern_session_info *session,
 		if (write_pos >= read_pos + warpSize)
 		{
 			read_pos = (read_pos + LaneId()) % GPUSCAN_TUPLES_PER_WARP;
-			ExecProjectionOuterRow(kcxt,
-								   kexp_scan_projs,
-								   kds_dst,
-								   kds_src,
-								   warp->tupitems[read_pos],
-								   0, NULL, NULL);
+			if (!ExecProjectionOuterRow(kcxt,
+										kexp_scan_projs,
+										kds_dst,
+										kds_src,
+										warp->tupitems[read_pos],
+										0, NULL, NULL))
+			{
+				assert(__activemask() == 0xffffffffU);
+				if (LaneId() == 0)
+					atomicAdd(&kgscan->suspend_count, 1);
+				break;		/* no space */
+			}
 			if (LaneId() == 0)
 				warp->read_pos += warpSize;
 		}
@@ -81,14 +84,20 @@ kern_gpuscan_main_row(kern_session_info *session,
 				uint32_t	nvalids = write_pos - read_pos;
 
 				read_pos = (read_pos + LaneId()) % GPUSCAN_TUPLES_PER_WARP;
-				ExecProjectionOuterRow(kcxt,
-									   kexp_scan_projs,
-									   kds_dst,
-									   kds_src,
-									   LaneId() < nvalids
-									   ? warp->tupitems[read_pos]
-									   : NULL,
-									   0, NULL, NULL);
+				if (!ExecProjectionOuterRow(kcxt,
+											kexp_scan_projs,
+											kds_dst,
+											kds_src,
+											LaneId() < nvalids
+											? warp->tupitems[read_pos]
+											: NULL,
+											0, NULL, NULL))
+				{
+					assert(__activemask() == 0xffffffffU);
+					if (LaneId() == 0)
+						atomicAdd(&kgscan->suspend_count, 1);
+					break;		/* no space */
+				}
 				if (LaneId() == 0)
 					warp->read_pos += nvalids;
 			}
@@ -99,7 +108,7 @@ kern_gpuscan_main_row(kern_session_info *session,
 		 * Identify the row-index to be fetched
 		 */
 		if (LaneId() == 0)
-			count = atomicAdd(&smx.smx_count, warpSize);
+			count = atomicAdd(&smx.row_count, warpSize);
 		count = __shfl_sync(__activemask(), count, 0);
 		index = ((count >> GPUSCAN_THREADS_UNITSZ_SHIFT) * get_num_groups() +
 				 (count & GPUSCAN_THREADS_UNITSZ_MASK));
@@ -150,8 +159,8 @@ kern_gpuscan_main_row(kern_session_info *session,
 	/* save the execution context (may be resumed if needed) */
 	if (LaneId() == 0)
 	{
-		atomicMax(&__smx->smx_count, smx.smx_count);
-		memcpy(&__smx->warps[WarpId()], warp,
+		atomicMax(&__suspend_cxt->row_count, smx.row_count);
+		memcpy(&__suspend_cxt->warps[WarpId()], warp,
 			   sizeof(kern_gpuscan_suspend_warp));
 	}
 	STROM_WRITEBACK_ERROR_STATUS(&kgscan->kerror, kcxt);
@@ -161,7 +170,6 @@ KERNEL_FUNCTION(void)
 kern_gpuscan_main_block(kern_session_info *session,
 						kern_gpuscan *kgscan,
 						kern_data_store *kds_src,
-						kern_data_extra *__not_in_use__,
 						kern_data_store *kds_dst)
 {
 	kern_context   *kcxt;
@@ -176,7 +184,6 @@ KERNEL_FUNCTION(void)
 kern_gpuscan_main_arrow(kern_session_info *session,
 						kern_gpuscan *kgscan,
 						kern_data_store *kds_src,
-						kern_data_extra *__not_in_use__,
 						kern_data_store *kds_dst)
 {
 	kern_context   *kcxt;

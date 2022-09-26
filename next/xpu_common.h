@@ -114,27 +114,18 @@ __Fetch(const T *ptr)
 /*
  * Error status
  */
-#ifndef MAKE_SQLSTATE
-#define PGSIXBIT(ch)			(((ch) - '0') & 0x3F)
-#define MAKE_SQLSTATE(ch1,ch2,ch3,ch4,ch5)				\
-	(PGSIXBIT(ch1) +  (PGSIXBIT(ch2) << 6) +			\
-	 (PGSIXBIT(ch3) << 12) + (PGSIXBIT(ch4) << 18) +	\
-	 (PGSIXBIT(ch5) << 24))
-#endif  /* MAKE_SQLSTATE */
-#include "utils/errcodes.h"
-#define ERRCODE_FLAGS_CPU_FALLBACK			(1U<<30)
-#define ERRCODE_STROM_SUCCESS				0
-#define ERRCODE_STROM_DATASTORE_NOSPACE		MAKE_SQLSTATE('H','D','B','0','4')
-#define ERRCODE_STROM_WRONG_CODE_GENERATION	MAKE_SQLSTATE('H','D','B','0','5')
-#define ERRCODE_STROM_DATA_CORRUPTION		MAKE_SQLSTATE('H','D','B','0','7')
-#define ERRCODE_STROM_VARLENA_UNSUPPORTED	MAKE_SQLSTATE('H','D','B','0','8')
-#define ERRCODE_STROM_RECURSION_TOO_DEEP	MAKE_SQLSTATE('H','D','B','0','9')
+#define ERRCODE_STROM_SUCCESS			0
+#define ERRCODE_CPU_FALLBACK			1
+#define ERRCODE_WRONG_XPU_CODE			3
+#define ERRCODE_VARLENA_UNSUPPORTED		4
+#define ERRCODE_RECURSION_TOO_DEEP		5
+#define ERRCODE_DEVICE_INTERNAL			9
 
-#define KERN_ERRORBUF_FILENAME_LEN		24
+#define KERN_ERRORBUF_FILENAME_LEN		32
 #define KERN_ERRORBUF_FUNCNAME_LEN		64
 #define KERN_ERRORBUF_MESSAGE_LEN		200
 typedef struct {
-	int32_t		errcode;	/* one of the ERRCODE_* */
+	uint32_t	errcode;	/* one of the ERRCODE_* */
 	int32_t		lineno;
 	char		filename[KERN_ERRORBUF_FILENAME_LEN];
 	char		funcname[KERN_ERRORBUF_FUNCNAME_LEN];
@@ -146,17 +137,28 @@ typedef struct {
  */
 typedef struct
 {
-	int				errcode;
+	uint32_t		errcode;
 	const char	   *error_filename;
 	uint32_t		error_lineno;
 	const char	   *error_funcname;
 	const char	   *error_message;
 	struct kern_session_info *session;
-	/* current slot of kernel variable references */
+
+	/*
+	 * current slot of the kernel variable references
+	 *
+	 * if (!kvars_cmeta[slot_id])
+	 *     kvars_addr[slot_id] references xpu_datum_t
+	 *     kvars_len[slot_id] is always -1
+	 * else
+	 *     kvars_addr[slot_id] references the item on the KDS; it's format
+	 *       follows the cmeta->kds_format
+	 *     kvars_len[slot_id] is the length of Arrow::Utf8 or Arrow::Binary.
+	 */
+	uint32_t		kvars_nslots;
 	struct kern_colmeta **kvars_cmeta;
 	void		  **kvars_addr;
 	int			   *kvars_len;
-	uint32_t		kvars_nslots;
 	/* variable length buffer */
 	char		   *vlpos;
 	char		   *vlend;
@@ -207,32 +209,25 @@ kcxt_reset(kern_context *kcxt)
 	if (kcxt->kvars_nslots > 0)
 	{
 		memset(kcxt->kvars_cmeta, 0, sizeof(void *) * kcxt->kvars_nslots);
-		memset(kcxt->kvars_addr, 0, sizeof(void *) * kcxt->kvars_nslots);
-		memset(kcxt->kvars_len, -1, sizeof(int) * kcxt->kvars_nslots);
+		memset(kcxt->kvars_addr,  0, sizeof(void *) * kcxt->kvars_nslots);
+		memset(kcxt->kvars_len,  -1, sizeof(int)    * kcxt->kvars_nslots);
 	}
 	kcxt->vlpos = kcxt->vlbuf;
 }
 
 INLINE_FUNCTION(void)
 __STROM_EREPORT(kern_context *kcxt,
-				int errcode,
+				uint32_t errcode,
 				const char *filename,
 				int lineno,
 				const char *funcname,
 				const char *message)
 {
-	if (kcxt->errcode == 0 && errcode != 0)
+	if ((kcxt->errcode == ERRCODE_STROM_SUCCESS && errcode != ERRCODE_STROM_SUCCESS) ||
+		(kcxt->errcode == ERRCODE_CPU_FALLBACK  && (errcode != ERRCODE_STROM_SUCCESS &&
+													errcode != ERRCODE_STROM_SUCCESS)))
 	{
-		const char *pos;
-
-		for (pos = filename; *pos != '\0'; pos++)
-		{
-			if (pos[0] == '/' && pos[1] != '\0')
-				filename = pos + 1;
-		}
-		if (!message)
-			message = "GPU kernel internal error";
-		kcxt->errcode  = errcode;
+		kcxt->errcode        = errcode;
 		kcxt->error_filename = filename;
 		kcxt->error_lineno   = lineno;
 		kcxt->error_funcname = funcname;
@@ -240,13 +235,13 @@ __STROM_EREPORT(kern_context *kcxt,
 	}
 }
 #define STROM_ELOG(kcxt, message)									\
-	__STROM_EREPORT((kcxt),ERRCODE_INTERNAL_ERROR,					\
+	__STROM_EREPORT((kcxt),ERRCODE_DEVICE_INTERNAL,					\
 					__FILE__,__LINE__,__FUNCTION__,(message))
 #define STROM_EREPORT(kcxt, errcode, message)						\
 	__STROM_EREPORT((kcxt),(errcode),								\
 					__FILE__,__LINE__,__FUNCTION__,(message))
-#define STROM_CPU_FALLBACK(kcxt, errcode, message)					\
-	__STROM_EREPORT((kcxt),(errcode) | ERRCODE_FLAGS_CPU_FALLBACK,	\
+#define STROM_CPU_FALLBACK(kcxt, message)							\
+	__STROM_EREPORT((kcxt),ERRCODE_CPU_FALLBACK,					\
 					__FILE__,__LINE__,__FUNCTION__,(message))
 
 INLINE_FUNCTION(void)
@@ -258,28 +253,6 @@ __strncpy(char *d, const char *s, uint32_t n)
 		d[i] = s[i];
 	while (i < n)
 		d[i++] = '\0';
-}
-
-INLINE_FUNCTION(void)
-STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
-{
-	if (kcxt->errcode != ERRCODE_STROM_SUCCESS &&
-		atomicCAS(&ebuf->errcode,
-				  ERRCODE_STROM_SUCCESS,
-				  kcxt->errcode) == ERRCODE_STROM_SUCCESS)
-	{
-		ebuf->errcode = kcxt->errcode;
-		ebuf->lineno  = kcxt->error_lineno;
-		__strncpy(ebuf->filename,
-				  kcxt->error_filename,
-				  KERN_ERRORBUF_FILENAME_LEN);
-		__strncpy(ebuf->funcname,
-				  kcxt->error_funcname,
-				  KERN_ERRORBUF_FUNCNAME_LEN);
-		__strncpy(ebuf->message,
-				  kcxt->error_message,
-				  KERN_ERRORBUF_MESSAGE_LEN);
-	}
 }
 
 /* ----------------------------------------------------------------
@@ -316,6 +289,13 @@ struct kern_colmeta {
 	int32_t			atttypmod;
 	/* one of TYPE_KIND__* */
 	int8_t			atttypkind;
+	/* copy of kds->format */
+	char			kds_format;
+	/*
+	 * offset from kds for the reverse reference.
+	 * kds = (kern_data_store *)((char *)cmeta - cmeta->kds_offset)
+	 */
+	uint32_t		kds_offset;
 	/*
 	 * (for array and composite types)
 	 * Some of types contain sub-fields like array or composite type.
@@ -831,7 +811,9 @@ KDS_GET_TUPITEM(kern_data_store *kds, uint32_t kds_index)
 
 	if (!offset)
 		return NULL;
-	return (kern_tupitem *)((char *)kds + __kds_unpack(offset));
+	return (kern_tupitem *)((char *)kds
+							+ kds->length
+							- __kds_unpack(offset));
 }
 
 /* kern_tupitem by tuple-offset */
@@ -848,8 +830,8 @@ KDS_FETCH_TUPITEM(kern_data_store *kds,
 	if (tuple_offset == 0)
 		return NULL;
 	tupitem = (kern_tupitem *)((char *)kds
-							   + __kds_unpack(tuple_offset)
-							   - offsetof(kern_tupitem, htup));
+							   + kds->length
+							   - __kds_unpack(tuple_offset));
 	if (p_self)
 		*p_self = tupitem->htup.t_ctid;
 	if (p_len)
@@ -1069,10 +1051,18 @@ typedef enum vartag_external
 typedef struct varatt_external
 {
 	int32_t		va_rawsize;		/* Original data size (includes header) */
-	uint32_t	va_extsize;		/* External saved size (doesn't) */
+	uint32_t	va_extinfo;		/* External saved size (doesn't) */
 	Oid			va_valueid;		/* Unique ID of value within TOAST table */
 	Oid			va_toastrelid;	/* RelID of TOAST table containing it */
 } varatt_external;
+
+/*
+ * These macros define the "saved size" portion of va_extinfo.  Its remaining
+ * two high-order bits identify the compression method.
+ */
+#define VARLENA_EXTSIZE_BITS	30
+#define VARLENA_EXTSIZE_MASK	((1U << VARLENA_EXTSIZE_BITS) - 1)
+
 
 typedef struct varatt_indirect
 {
@@ -1095,9 +1085,14 @@ typedef struct varatt_indirect
 typedef struct toast_compress_header
 {
 	int32_t		vl_len_;		/* varlena header (do not touch directly!) */
-    uint32_t	rawsize;		/* 2 bits for compression method and 30bits
+    uint32_t	tcinfo;			/* 2 bits for compression method and 30bits
 								 * external size; see va_extinfo */
 } toast_compress_header;
+
+#define TOAST_COMPRESS_EXTSIZE(ptr)										\
+	(((toast_compress_header *) (ptr))->tcinfo & VARLENA_EXTSIZE_MASK)
+#define TOAST_COMPRESS_METHOD(ptr)										\
+	(((toast_compress_header *) (ptr))->tcinfo >> VARLENA_EXTSIZE_BITS)
 
 #define TOAST_COMPRESS_HDRSZ        ((uint32_t)sizeof(toast_compress_header))
 #define TOAST_COMPRESS_RAWSIZE(ptr)             \
@@ -1148,9 +1143,11 @@ typedef struct toast_compress_header
      (VARATT_IS_1B(PTR) ? VARSIZE_1B(PTR) :			\
       VARSIZE_4B(PTR)))
 
-#define VARDATA_4B(PTR)	(((varattrib_4b *) (PTR))->va_4byte.va_data)
-#define VARDATA_1B(PTR)	(((varattrib_1b *) (PTR))->va_data)
-#define VARDATA_ANY(PTR) \
+#define VARDATA_4B(PTR)		(((varattrib_4b *) (PTR))->va_4byte.va_data)
+#define VARDATA_4B_C(PTR)	(((varattrib_4b *) (PTR))->va_compressed.va_data)
+#define VARDATA_1B(PTR)		(((varattrib_1b *) (PTR))->va_data)
+#define VARDATA_1B_E(PTR)	(((varattrib_1b_e *) (PTR))->va_data)
+#define VARDATA_ANY(PTR)									\
 	(VARATT_IS_1B(PTR) ? VARDATA_1B(PTR) : VARDATA_4B(PTR))
 
 #define SET_VARSIZE(PTR, len)                       \
@@ -1187,6 +1184,9 @@ struct xpu_datum_t {
 
 struct xpu_datum_operators {
 	const char *xpu_type_name;
+	bool		xpu_type_byval;		/* = pg_type.typbyval */
+	int8_t		xpu_type_align;		/* = pg_type.typalign */
+	int16_t		xpu_type_length;	/* = pg_type.typlen */
 	TypeOpCode	xpu_type_code;
 	int			xpu_type_sizeof;	/* =sizeof(xpu_XXXX_t), not PG type! */
 	bool	  (*xpu_datum_ref)(kern_context *kcxt,
@@ -1196,6 +1196,10 @@ struct xpu_datum_operators {
 	int		  (*xpu_datum_store)(kern_context *kcxt,
 								 char *buffer,
 								 xpu_datum_t *arg);
+	int		  (*xpu_datum_move)(kern_context *kcxt,
+								char *buffer,
+								const kern_colmeta *cmeta,
+								const void *addr, int len);
 	bool	  (*xpu_datum_hash)(kern_context *kcxt,
 								uint32_t *p_hash,
 								xpu_datum_t *arg);
@@ -1214,14 +1218,18 @@ struct xpu_datum_operators {
 		const char *value;									\
 	} xpu_##NAME##_t;										\
 	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
-#define PGSTROM_SQLTYPE_OPERATORS(NAME)						\
-	PUBLIC_DATA xpu_datum_operators xpu_##NAME##_ops = {	\
-		.xpu_type_name = #NAME,								\
-		.xpu_type_code = TypeOpCode__##NAME,				\
-		.xpu_type_sizeof = sizeof(xpu_##NAME##_t),			\
-		.xpu_datum_ref = xpu_##NAME##_datum_ref,			\
-		.xpu_datum_store = xpu_##NAME##_datum_store,		\
-		.xpu_datum_hash = xpu_##NAME##_datum_hash,			\
+#define PGSTROM_SQLTYPE_OPERATORS(NAME,TYPBYVAL,TYPALIGN,TYPLENGTH) \
+	PUBLIC_DATA xpu_datum_operators xpu_##NAME##_ops = {			\
+		.xpu_type_name = #NAME,										\
+		.xpu_type_byval = TYPBYVAL,									\
+		.xpu_type_align = TYPALIGN,									\
+		.xpu_type_length = TYPLENGTH,								\
+		.xpu_type_code = TypeOpCode__##NAME,						\
+		.xpu_type_sizeof = sizeof(xpu_##NAME##_t),					\
+		.xpu_datum_ref = xpu_##NAME##_datum_ref,					\
+		.xpu_datum_store = xpu_##NAME##_datum_store,				\
+		.xpu_datum_move = xpu_##NAME##_datum_move,					\
+		.xpu_datum_hash = xpu_##NAME##_datum_hash,					\
 	}
 
 #include "xpu_basetype.h"
@@ -1231,7 +1239,7 @@ struct xpu_datum_operators {
 #include "xpu_misclib.h"
 
 /*
- * pg_array_t - array type support
+ * xpu_array_t - array type support
  *
  * NOTE: pg_array_t is designed to store both of PostgreSQL / Arrow array
  * values. If @length < 0, it means @value points a varlena based PostgreSQL
@@ -1245,13 +1253,13 @@ typedef struct {
 	int			length;
 	uint32_t	start;
 	kern_colmeta *smeta;
-} pg_array_t;
-PGSTROM_SQLTYPE_SIMPLE_DECLARATION(array, pg_array_t);
+} xpu_array_t;
+EXTERN_DATA xpu_datum_operators		xpu_array_ops;
 
 /*
- * pg_composite_t - composite type support
+ * xpu_composite_t - composite type support
  *
- * NOTE: pg_composite_t is designed to store both of PostgreSQL / Arrow composite
+ * NOTE: xpu_composite_t is designed to store both of PostgreSQL / Arrow composite
  * values. If @nfields < 0, it means @value.htup points a varlena base PostgreSQL
  * composite values. Elsewhere (@nfields >= 0), it points composite values on
  * KDS_FORMAT_ARROW chunk. In this case, smeta[0] ... smeta[@nfields-1] describes
@@ -1262,11 +1270,11 @@ typedef struct {
 	int16_t		nfields;
 	uint32_t	rowidx;
 	char	   *value;
-	Oid			comp_typid;
-	int			comp_typmod;
+//	Oid			comp_typid;
+//	int			comp_typmod;
 	kern_colmeta *smeta;
-} pg_composite_t;
-PGSTROM_SQLTYPE_SIMPLE_DECLARATION(composite, pg_composite_t);
+} xpu_composite_t;
+EXTERN_DATA xpu_composite_t		xpu_composite_ops;
 
 typedef struct {
 	TypeOpCode		type_opcode;
@@ -1369,23 +1377,48 @@ typedef struct
 
 typedef struct
 {
+	uint32_t		slot_id;
+	TypeOpCode		slot_type;
+	const xpu_datum_operators *slot_ops;
+} kern_projection_desc;
+
+#define KERN_PROJECTION_MAP_MAGIC	(0x50726f6aU)
+typedef struct
+{
 	uint32_t		_vl_len;
+	uint32_t		magic;		/* = KERN_PROJECTION_MAP_MAGIC */
 	int				nexprs;		/* number of expressions to be computed */
 	int				nattrs;		/* number of destination attribute */
-	uint32_t		slot_id[1];	/* destination or source slot-id */
+	/* array of kern_projection_desc */
+	kern_projection_desc desc[1];
 	/*
 	 * ----------------------
-	 * ^  slot_id[0]            slot_id to store the projection result that
-	 * |     :                  involves any calculations.
-	 * V  slot_id[nexprs-1]     'nexprs' should equal to 'nargs' of Projection
+	 * ^  desc[0]            slot_id to store the projection result that
+	 * |     :               involves any calculations.
+	 * V  desc[nexprs-1]     'nexprs' should equal to 'nargs' of Projection
 	 * ----------------------
-	 * ^  slot_id[nexprs]       source slot_id ordered by the attributes in
-	 * |     :                  the destination tuple. Same slot_id may appear
-	 * |     :                  several times.
-	 * V  slot_id[nexprs + nattrs - 1]
-	 *    slot_id[nexprs + nattrs] --> size of this kern_projection_map.
+	 * ^  desc[nexprs]       source slot_id ordered by the attributes in
+	 * |     :               the destination tuple. Same slot_id may appear
+	 * |     :               several times.
+	 * V  desc[nexprs + nattrs - 1]
+	 *    (uint32_t *)desc[nexprs + nattrs] --> size of this kern_projection_map.
 	 */
 } kern_projection_map;
+
+INLINE_FUNCTION(const kern_projection_map *)
+__KEXP_GET_PROJECTION_MAP(const kern_expression *kexp)
+{
+	const char *tail = (const char *)kexp + VARSIZE(kexp);
+	uint32_t	sz;
+	const kern_projection_map *proj_map;
+
+	assert(kexp->opcode == FuncOpCode__Projection &&
+		   kexp->exptype == TypeOpCode__int4);
+	sz = *((uint32_t *)(tail - sizeof(uint32_t)));
+	proj_map = (const kern_projection_map *)(tail - sz);
+	assert(VARSIZE(proj_map) == sz && proj_map->magic == KERN_PROJECTION_MAP_MAGIC);
+	return proj_map;
+}
 
 #define EXEC_KERN_EXPRESSION(__kcxt,__kexp,__retval)	\
 	(__kexp)->fn_dptr((__kcxt),(__kexp),(xpu_datum_t *)__retval)
@@ -1416,7 +1449,7 @@ __KEXP_NEXT_ARG(const kern_expression *kexp,
 	const kern_expression *next = (const kern_expression *)
 		((const char *)prev + MAXALIGN(VARSIZE(prev)));
 	assert((char *)next + VARSIZE(next) <= (char *)kexp + VARSIZE(kexp));
-	assert(next->exptype == exptype);
+	assert(next->exptype == exptype || exptype == TypeOpCode__Invalid);
 	return next;
 }
 #define KEXP_NEXT_ARG(__prev, __exptype)		\
@@ -1436,9 +1469,6 @@ typedef struct {
 } xpu_function_catalog_entry;
 
 EXTERN_DATA xpu_function_catalog_entry	builtin_xpu_functions_catalog[];
-
-
-
 
 /*
  * PG-Strom Command Tag
@@ -1482,8 +1512,16 @@ typedef struct {
 } kernExecScan;
 
 typedef struct {
-	kern_data_store		kds;
-} kernExecResult;
+	uint32_t	chunks_nitems;
+	uint32_t	chunks_offset;
+	union {
+		struct {
+			uint32_t	nitems_in;
+			uint32_t	nitems_out;
+			char		data[1];
+		} scan;
+	} stats;
+} kernExecResults;
 
 #ifndef ILIST_H
 typedef struct dlist_node dlist_node;
@@ -1505,7 +1543,7 @@ typedef struct
 		kern_errorbuf	error;
 		kern_session_info session;
 		kernExecScan	scan;
-		kernExecResult	result;
+		kernExecResults	results;
 	} u;
 } XpuCommand;
 
@@ -1558,6 +1596,11 @@ SESSION_ENCODE(kern_session_info *session)
  *
  * ----------------------------------------------------------------
  */
+PUBLIC_FUNCTION(int)
+kern_form_heaptuple(kern_context *kcxt,
+					const kern_expression *kproj,
+					const kern_data_store *kds_dst,
+					HeapTupleHeaderData *htup);
 PUBLIC_FUNCTION(bool)
 ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
 					 kern_data_store *kds_outer,

@@ -92,8 +92,7 @@ __numeric_from_varlena(kern_context *kcxt,
 				 */
 				if ((value >> 114) != 0)
 				{
-					STROM_EREPORT(kcxt, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-								  "numeric value is out of range");
+					STROM_ELOG(kcxt, "numeric value is out of range");
 					return false;
 				}
 				value = value * PG_NBASE + dig;
@@ -107,8 +106,7 @@ __numeric_from_varlena(kern_context *kcxt,
 		return true;
 	}
 error:
-	STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
-				  "corrupted numeric header");
+	STROM_ELOG(kcxt, "corrupted numeric header");
 	return false;
 }
 
@@ -188,7 +186,7 @@ xpu_numeric_datum_ref(kern_context *kcxt,
 	result->ops = &xpu_numeric_ops;
 	if (!addr)
 		result->isnull = true;
-	else if (cmeta)
+	else if (cmeta->kds_format == KDS_FORMAT_ARROW)
 	{
 		/*
 		 * Note that Decimal::scale is equivalent to numeric::weight.
@@ -237,6 +235,31 @@ xpu_numeric_datum_store(kern_context *kcxt,
 	return __numeric_to_varlena(buffer, arg->weight, arg->value);
 }
 
+STATIC_FUNCTION(int)
+xpu_numeric_datum_move(kern_context *kcxt,
+					   char *buffer,
+					   const kern_colmeta *cmeta,
+					   const void *addr, int len)
+{
+	int		sz;
+
+	if (!addr)
+		return 0;
+	if (cmeta->kds_format != KDS_FORMAT_ARROW)
+	{
+		sz = VARSIZE_ANY(addr);
+		if (buffer)
+			memcpy(buffer, addr, sz);
+	}
+	else
+	{
+		sz = __numeric_to_varlena(buffer,
+								  cmeta->attopts.decimal.scale,
+								  *((int128_t *)addr));
+	}
+	return sz;
+}
+
 PUBLIC_FUNCTION(bool)
 xpu_numeric_datum_hash(kern_context *kcxt,
 					   uint32_t *p_hash,
@@ -253,7 +276,7 @@ xpu_numeric_datum_hash(kern_context *kcxt,
 				   pg_hash_any(&arg->value, sizeof(int128_t)));
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(numeric);
+PGSTROM_SQLTYPE_OPERATORS(numeric, false, 4, -1);
 
 #define PG_NUMERIC_TO_INT_TEMPLATE(TARGET,MIN_VALUE,MAX_VALUE)		\
 	PUBLIC_FUNCTION(bool)											\

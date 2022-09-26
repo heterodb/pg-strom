@@ -141,6 +141,34 @@
 /*
  * xpu_date_t device type handlers
  */
+INLINE_FUNCTION(bool)
+__xpu_date_datum_load(kern_context *kcxt,
+					  DateADT *value,
+					  const kern_colmeta *cmeta,
+					  const void *addr)
+{
+	if (cmeta->kds_format != KDS_FORMAT_ARROW)
+		*value = *((const DateADT *)addr);
+	else
+	{
+		switch (cmeta->attopts.date.unit)
+		{
+			case ArrowDateUnit__Day:
+				*value = *((uint32_t *)addr)
+					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+				break;
+			case ArrowDateUnit__MilliSecond:
+				*value = *((uint64_t *)addr) / 1000
+					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+				break;
+			default:
+				STROM_ELOG(kcxt, "unknown unit size of Arrow::Date");
+				return false;
+		}
+	}
+	return true;
+}
+
 STATIC_FUNCTION(bool)
 xpu_date_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
@@ -153,26 +181,8 @@ xpu_date_datum_ref(kern_context *kcxt,
 	result->ops = &xpu_date_ops;
 	if (!addr)
 		result->isnull = true;
-	else if (!cmeta)
-		memcpy(&result->value, addr, sizeof(DateADT));
-	else
-	{
-		switch (cmeta->attopts.date.unit)
-		{
-			case ArrowDateUnit__Day:
-				result->value = *((uint32_t *)addr)
-					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
-				break;
-			case ArrowDateUnit__MilliSecond:
-				result->value = *((uint64_t *)addr) / 1000
-					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
-				break;
-			default:
-				STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
-							  "corrupted unit-size of Arrow::Date");
-				return false;
-		}
-	}
+	else if (!__xpu_date_datum_load(kcxt, &result->value, cmeta, addr))
+		return false;
 	return true;
 }
 
@@ -190,6 +200,19 @@ xpu_date_datum_store(kern_context *kcxt,
 	return sizeof(DateADT);
 }
 
+STATIC_FUNCTION(int)
+xpu_date_datum_move(kern_context *kcxt,
+					char *buffer,
+					const kern_colmeta *cmeta,
+					const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (buffer && !__xpu_date_datum_load(kcxt, (DateADT *)buffer, cmeta, addr))
+		return -1;
+	return sizeof(DateADT);
+}
+
 STATIC_FUNCTION(bool)
 xpu_date_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
@@ -203,11 +226,43 @@ xpu_date_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(DateADT));
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(date);
+PGSTROM_SQLTYPE_OPERATORS(date, true, 4, sizeof(DateADT));
 
 /*
  * xpu_time_t device type handlers
  */
+INLINE_FUNCTION(bool)
+__xpu_time_datum_load(kern_context *kcxt,
+					  TimeADT *value,
+					  const kern_colmeta *cmeta,
+					  const void *addr)
+{
+	if (cmeta->kds_format != KDS_FORMAT_ARROW)
+		*value = *((const TimeADT *)addr);
+	else
+	{
+		switch (cmeta->attopts.time.unit)
+		{
+			case ArrowTimeUnit__Second:
+				*value = *((uint32_t *)addr) * 1000000L;
+				break;
+			case ArrowTimeUnit__MilliSecond:
+				*value = *((uint32_t *)addr) * 1000L;
+				break;
+			case ArrowTimeUnit__MicroSecond:
+				*value = *((uint64_t *)addr);
+				break;
+			case ArrowTimeUnit__NanoSecond:
+				*value = *((uint64_t *)addr) / 1000L;
+				break;
+			default:
+				STROM_ELOG(kcxt, "unknown unit size of Arrow::Time");
+				return false;
+		}
+	}
+	return true;
+}
+
 STATIC_FUNCTION(bool)
 xpu_time_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
@@ -220,32 +275,8 @@ xpu_time_datum_ref(kern_context *kcxt,
 	result->ops = &xpu_time_ops;
 	if (!addr)
 		result->isnull = true;
-	else if (!cmeta)
-		memcpy(&result->value, addr, sizeof(TimeADT));
-	else
-	{
-		uint64_t	tval = *((uint64_t *)addr);
-
-		switch (cmeta->attopts.time.unit)
-		{
-			case ArrowTimeUnit__Second:
-				result->value = tval * 1000000L;
-				break;
-			case ArrowTimeUnit__MilliSecond:
-				result->value = tval * 1000L;
-				break;
-			case ArrowTimeUnit__MicroSecond:
-				result->value = tval;
-				break;
-			case ArrowTimeUnit__NanoSecond:
-				result->value = tval / 1000L;
-				break;
-			default:
-				STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
-							  "corrupted unit-size of Arrow::Time");
-				return false;
-		}
-	}
+	else if (!__xpu_time_datum_load(kcxt, &result->value, cmeta, addr))
+		return false;
 	return true;
 }
 
@@ -263,6 +294,19 @@ xpu_time_datum_store(kern_context *kcxt,
 	return sizeof(TimeADT);
 }
 
+STATIC_FUNCTION(int)
+xpu_time_datum_move(kern_context *kcxt,
+                    char *buffer,
+                    const kern_colmeta *cmeta,
+                    const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (buffer && !__xpu_time_datum_load(kcxt, (TimeADT *)buffer, cmeta, addr))
+		return -1;
+	return sizeof(TimeADT);
+}
+
 STATIC_FUNCTION(bool)
 xpu_time_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
@@ -276,7 +320,7 @@ xpu_time_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(TimeADT));
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(time);
+PGSTROM_SQLTYPE_OPERATORS(time, true, 8, sizeof(TimeADT));
 
 /*
  * xpu_timetz_t device type handlers
@@ -293,15 +337,13 @@ xpu_timetz_datum_ref(kern_context *kcxt,
 	result->ops = &xpu_timetz_ops;
 	if (!addr)
 		result->isnull = true;
-	else if (!cmeta)
+	else if (cmeta->kds_format != KDS_FORMAT_ARROW)
 		memcpy(&result->value, addr, SizeOfTimeTzADT);
 	else
 	{
-		STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
-					  "timetz on Arrow is not supported");
+		STROM_ELOG(kcxt, "timetz on Arrow is not supported");
 		return false;
 	}
-	return true;
 }
 
 STATIC_FUNCTION(int)
@@ -318,6 +360,27 @@ xpu_timetz_datum_store(kern_context *kcxt,
 	return SizeOfTimeTzADT;
 }
 
+STATIC_FUNCTION(int)
+xpu_timetz_datum_move(kern_context *kcxt,
+					  char *buffer,
+					  const kern_colmeta *cmeta,
+					  const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (buffer)
+	{
+		if (cmeta->kds_format != KDS_FORMAT_ARROW)
+			memcpy(buffer, addr, SizeOfTimeTzADT);
+		else
+		{
+			STROM_ELOG(kcxt, "timetz on Arrow is not supported");
+			return -1;
+		}
+	}
+	return SizeOfTimeTzADT;
+}
+
 STATIC_FUNCTION(bool)
 xpu_timetz_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
@@ -331,16 +394,50 @@ xpu_timetz_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, SizeOfTimeTzADT);
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(timetz);
+PGSTROM_SQLTYPE_OPERATORS(timetz, false, 8, SizeOfTimeTzADT);
 
 /*
  * xpu_timestamp_t device type handlers
  */
+INLINE_FUNCTION(bool)
+__xpu_timestamp_datum_load(kern_context *kcxt,
+						   Timestamp *value,
+						   const kern_colmeta *cmeta,
+						   const void *addr)
+{
+	if (cmeta->kds_format != KDS_FORMAT_ARROW)
+		*value = *((const Timestamp *)addr);
+	else
+	{
+		uint64_t	tval = *((uint64_t *)addr);
+
+		switch (cmeta->attopts.timestamp.unit)
+		{
+			case ArrowTimeUnit__Second:
+				tval *= 1000000L;
+				break;
+			case ArrowTimeUnit__MilliSecond:
+				tval *= 1000L;
+				break;
+			case ArrowTimeUnit__MicroSecond:
+				break;
+			case ArrowTimeUnit__NanoSecond:
+				tval /= 1000L;
+				break;
+			default:
+				STROM_ELOG(kcxt, "unknown unit size of Arrow::Timestamp");
+				return false;
+		}
+		*value = tval - (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+	}
+	return true;
+}
+
 STATIC_FUNCTION(bool)
 xpu_timestamp_datum_ref(kern_context *kcxt,
-				   xpu_datum_t *__result,
-				   const kern_colmeta *cmeta,
-				   const void *addr, int len)
+						xpu_datum_t *__result,
+						const kern_colmeta *cmeta,
+						const void *addr, int len)
 {
 	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
 
@@ -348,43 +445,15 @@ xpu_timestamp_datum_ref(kern_context *kcxt,
 	result->ops = &xpu_timestamp_ops;
 	if (!addr)
 		result->isnull = true;
-	else if (!cmeta)
-		memcpy(&result->value, addr, sizeof(Timestamp));
-	else
-	{
-		uint64_t	tval = *((uint64_t *)addr);
-
-		switch (cmeta->attopts.time.unit)
-		{
-			case ArrowTimeUnit__Second:
-				result->value = tval * 1000000L -
-					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-				break;
-			case ArrowTimeUnit__MilliSecond:
-				result->value = tval * 1000L -
-					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-				break;
-			case ArrowTimeUnit__MicroSecond:
-				result->value = tval -
-					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-				break;
-			case ArrowTimeUnit__NanoSecond:
-				result->value = tval / 1000L -
-					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-				break;
-			default:
-				STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
-							  "corrupted unit-size of Arrow::Timestamp");
-                return false;
-		}
-	}
+	else if (!__xpu_timestamp_datum_load(kcxt, &result->value, cmeta, addr))
+		return false;
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_timestamp_datum_store(kern_context *kcxt,
-					 char *buffer,
-					 xpu_datum_t *__arg)
+						  char *buffer,
+						  xpu_datum_t *__arg)
 {
 	xpu_timestamp_t *arg = (xpu_timestamp_t *)__arg;
 
@@ -392,6 +461,20 @@ xpu_timestamp_datum_store(kern_context *kcxt,
 		return 0;
 	if (buffer)
 		memcpy(buffer, &arg->value, sizeof(Timestamp));
+	return sizeof(Timestamp);
+}
+
+STATIC_FUNCTION(int)
+xpu_timestamp_datum_move(kern_context *kcxt,
+						 char *buffer,
+						 const kern_colmeta *cmeta,
+						 const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (buffer &&
+		!__xpu_timestamp_datum_load(kcxt, (Timestamp *)buffer, cmeta, addr))
+		return -1;
 	return sizeof(Timestamp);
 }
 
@@ -408,7 +491,7 @@ xpu_timestamp_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(Timestamp));
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(timestamp);
+PGSTROM_SQLTYPE_OPERATORS(timestamp, true, 8, sizeof(Timestamp));
 
 /*
  * xpu_timestamptz_t device type handlers
@@ -425,36 +508,8 @@ xpu_timestamptz_datum_ref(kern_context *kcxt,
 	result->ops = &xpu_timestamptz_ops;
 	if (!addr)
 		result->isnull = true;
-	else if (!cmeta)
-		memcpy(&result->value, addr, sizeof(TimestampTz));
-	else
-	{
-		uint64_t	tval = *((uint64_t *)addr);
-
-		switch (cmeta->attopts.time.unit)
-		{
-			case ArrowTimeUnit__Second:
-				result->value = tval * 1000000L -
-					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-				break;
-			case ArrowTimeUnit__MilliSecond:
-				result->value = tval * 1000L -
-					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-				break;
-			case ArrowTimeUnit__MicroSecond:
-				result->value = tval -
-					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-				break;
-			case ArrowTimeUnit__NanoSecond:
-				result->value = tval / 1000L -
-					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-				break;
-			default:
-				STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
-							  "corrupted unit-size of Arrow::Timestamp");
-				return false;
-		}
-	}
+	else if (!__xpu_timestamp_datum_load(kcxt, &result->value, cmeta, addr))
+		return false;
 	return true;
 }
 
@@ -472,6 +527,20 @@ xpu_timestamptz_datum_store(kern_context *kcxt,
 	return sizeof(TimestampTz);
 }
 
+STATIC_FUNCTION(int)
+xpu_timestamptz_datum_move(kern_context *kcxt,
+						   char *buffer,
+						   const kern_colmeta *cmeta,
+						   const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (buffer &&
+		!__xpu_timestamp_datum_load(kcxt, (Timestamp *)buffer, cmeta, addr))
+		return -1;
+	return sizeof(Timestamp);
+}
+
 STATIC_FUNCTION(bool)
 xpu_timestamptz_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
@@ -485,7 +554,7 @@ xpu_timestamptz_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(TimestampTz));
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(timestamptz);
+PGSTROM_SQLTYPE_OPERATORS(timestamptz, true, 8, sizeof(TimestampTz));
 
 /*
  * xpu_interval_t device type handlers
@@ -508,6 +577,38 @@ STATIC_DATA const int year_lengths[2] = {
     DAYSPERNYEAR, DAYSPERLYEAR
 };
 
+INLINE_FUNCTION(bool)
+__xpu_interval_datum_load(kern_context *kcxt,
+						  Interval *value,
+						  const kern_colmeta *cmeta,
+						  const void *addr)
+{
+	if (cmeta->kds_format != KDS_FORMAT_ARROW)
+		memcpy(value, addr, sizeof(Interval));
+	else
+	{
+		uint32_t   *ival = (uint32_t *)addr;
+
+		switch (cmeta->attopts.interval.unit)
+		{
+			case ArrowIntervalUnit__Year_Month:
+				value->month = *ival;
+				value->day   = 0;
+				value->time  = 0;
+				break;
+			case ArrowIntervalUnit__Day_Time:
+				value->month = 0;
+				value->day   = ival[0];
+				value->time  = ival[1];
+				break;
+			default:
+				STROM_ELOG(kcxt, "unknown unit-size of Arrow::Interval");
+				return false;
+		}
+	}
+	return true;
+}
+
 STATIC_FUNCTION(bool)
 xpu_interval_datum_ref(kern_context *kcxt,
 					   xpu_datum_t *__result,
@@ -520,27 +621,8 @@ xpu_interval_datum_ref(kern_context *kcxt,
 	result->ops = &xpu_interval_ops;
 	if (!addr)
 		result->isnull = true;
-	else if (!cmeta)
-		memcpy(&result->value, addr, sizeof(Interval));
-	else
-	{
-		uint32_t   *ival = (uint32_t *)addr;
-
-		switch (cmeta->attopts.interval.unit)
-		{
-			case ArrowIntervalUnit__Year_Month:
-				result->value.month = *ival;
-				break;
-			case ArrowIntervalUnit__Day_Time:
-				result->value.day = ival[0];
-				result->value.time = ival[1];
-				break;
-			default:
-				STROM_EREPORT(kcxt, ERRCODE_DATA_CORRUPTED,
-							  "unknown unit-size of Arrow::Interval");
-				return false;
-		}
-	}
+	else if (!__xpu_interval_datum_load(kcxt, &result->value, cmeta, addr))
+		return false;
 	return true;
 }
 
@@ -558,6 +640,20 @@ xpu_interval_datum_store(kern_context *kcxt,
 	return sizeof(Interval);
 }
 
+STATIC_FUNCTION(int)
+xpu_interval_datum_move(kern_context *kcxt,
+						char *buffer,
+						const kern_colmeta *cmeta,
+						const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (buffer &&
+		!__xpu_interval_datum_load(kcxt, (Interval *)buffer, cmeta, addr))
+		return -1;
+	return sizeof(Interval);
+}
+
 STATIC_FUNCTION(bool)
 xpu_interval_datum_hash(kern_context *kcxt,
 						uint32_t *p_hash,
@@ -571,7 +667,7 @@ xpu_interval_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(Interval));
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(interval);
+PGSTROM_SQLTYPE_OPERATORS(interval, false, 8, sizeof(Interval));
 
 
 STATIC_FUNCTION(int)

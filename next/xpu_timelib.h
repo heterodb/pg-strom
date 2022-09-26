@@ -61,6 +61,19 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(timestamp, Timestamp);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(timestamptz, TimestampTz);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(interval, Interval);
 
+
+
+PUBLIC_FUNCTION(int)
+xpu_date_arrow_datum_store(kern_context *kcxt,
+						   void *buffer,
+						   const kern_colmeta *cmeta,
+						   const void *addr, int len);
+
+
+
+
+
+
 /*
  * session_timezone (src/timezone/pgtz.h - pg_tz definition)
  */

@@ -1390,10 +1390,12 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 	codegen_context	context;
 	StringInfoData	buf;
 	List		   *proj_prep_slots = NIL;
+	List		   *proj_prep_types = NIL;
 	List		   *proj_dest_slots = NIL;
-	ListCell	   *lc;
+	List		   *proj_dest_types = NIL;
+	ListCell	   *lc1, *lc2;
 	kern_expression	kexp;
-	kern_projection_map *kproj;
+	kern_projection_map *proj_map;
 	int				nexprs;
 	int				nattrs;
 	int				i, sz;
@@ -1417,9 +1419,11 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 		context.used_params = *p_used_params;
 	context.input_rels_tlist = input_rels_tlist;
 
-	foreach (lc, tlist_dev)
+	foreach (lc1, tlist_dev)
 	{
-		TargetEntry *tle = lfirst(lc);
+		TargetEntry	*tle = lfirst(lc1);
+		devtype_info *dtype;
+		TypeOpCode __type_code = TypeOpCode__Invalid;
 		int		__depth;
 		int		__resno;
 		int		__slot_id;
@@ -1431,6 +1435,10 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 		}
 		else if (meet_resjunk)
 			elog(ERROR, "Bug? a valid TLE after junk TLEs");
+
+		dtype = pgstrom_devtype_lookup(exprType((Node *)tle->expr));
+		if (dtype)
+			__type_code = dtype->type_code;
 
 		if ((__slot_id = is_expression_equals_tlist(&context,
 													tle->expr,
@@ -1448,28 +1456,43 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 			context.kvars_resno = lappend_int(context.kvars_resno, -1);
 
 			proj_prep_slots = lappend_int(proj_prep_slots, __slot_id);
+			proj_prep_types = lappend_int(proj_prep_types, __type_code);
 		}
 		proj_dest_slots = lappend_int(proj_dest_slots, __slot_id);
+		proj_dest_types = lappend_int(proj_dest_types, __type_code);
 	}
 	nexprs = list_length(proj_prep_slots);
 	nattrs = list_length(proj_dest_slots);
 	((kern_expression *)buf.data)->nargs = nexprs;
 
 	/* setup kern_projection_map */
-	sz = offsetof(kern_projection_map, slot_id[nexprs + nattrs + 1]);
-	kproj = alloca(sz);
-	kproj->nexprs = nexprs;
-	kproj->nattrs = nattrs;
+	sz = offsetof(kern_projection_map,
+				  desc[nexprs + nattrs]) + sizeof(uint32_t);
+	proj_map = alloca(sz);
+	memset(proj_map, 0, sz);
+	proj_map->magic = KERN_PROJECTION_MAP_MAGIC;
+	proj_map->nexprs = nexprs;
+	proj_map->nattrs = nattrs;
 	i = 0;
-	foreach (lc, proj_prep_slots)
-		kproj->slot_id[i++] = lfirst_int(lc);
+	forboth (lc1, proj_prep_slots,
+			 lc2, proj_dest_types)
+	{
+		kern_projection_desc *desc = &proj_map->desc[i++];
+		desc->slot_id   = lfirst_int(lc1);
+		desc->slot_type = lfirst_int(lc2);
+	}
 	Assert(i == nexprs);
-	foreach (lc, proj_dest_slots)
-		kproj->slot_id[i++] = lfirst_int(lc);
+	forboth (lc1, proj_dest_slots,
+			 lc2, proj_dest_types)
+	{
+		kern_projection_desc *desc = &proj_map->desc[i++];
+		desc->slot_id   = lfirst_int(lc1);
+		desc->slot_type = lfirst_int(lc2);
+	}
 	Assert(i == nexprs + nattrs);
-	kproj->slot_id[i] = sz;
-	SET_VARSIZE(kproj, sz);
-	__appendBinaryStringInfo(&buf, (char *)kproj, sz);
+	*((uint32_t *)&proj_map->desc[nexprs + nattrs]) = sz;
+	SET_VARSIZE(proj_map, sz);
+	__appendBinaryStringInfo(&buf, (char *)proj_map, sz);
 	SET_VARSIZE(buf.data, buf.len);
 
 	*p_xpucode_proj = attach_varloads_xpucode(&context, (kern_expression *)buf.data);
@@ -1683,21 +1706,16 @@ __xpucode_projection_cstring(StringInfo buf,
 							 ExplainState *es,				/* optional */
 							 List *ancestors)
 {
-	const char	   *pos = (const char *)kexp + VARSIZE(kexp);
-	const kern_projection_map *kproj;
-	int				i, sz;
-
-	sz = *((uint32_t *)(pos - sizeof(uint32_t)));
-	kproj = (const kern_projection_map *)(pos - sz);
-	Assert(VARSIZE(kproj) == sz);
-	Assert(kproj->nexprs == kexp->nargs);
+	const kern_projection_map *proj_map = __KEXP_GET_PROJECTION_MAP(kexp);
+	int		i;
 
 	appendStringInfo(buf, "{Projection record=(");
-	for (i=0; i < kproj->nattrs; i++)
+	for (i=0; i < proj_map->nattrs; i++)
 	{
+		const kern_projection_desc *desc = &proj_map->desc[proj_map->nexprs + i];
 		if (i > 0)
 			appendStringInfoChar(buf, ',');
-		appendStringInfo(buf, "%d", kproj->slot_id[kproj->nexprs + i]);
+		appendStringInfo(buf, "%d", desc->slot_id);
 	}
 	appendStringInfo(buf, ")");
 
@@ -1711,6 +1729,7 @@ __xpucode_projection_cstring(StringInfo buf,
 			appendStringInfo(buf, " args=[");
 		for (i=0; i < kexp->nargs; i++)
 		{
+			const kern_projection_desc *desc = &proj_map->desc[i];
 			const kern_expression *arg = (const kern_expression *)pos;
 
 			if (VARSIZE(kexp) < (pos + VARSIZE(arg)) - (char *)kexp)
@@ -1720,7 +1739,7 @@ __xpucode_projection_cstring(StringInfo buf,
 					 (pos - kexp->u.data) + VARSIZE(arg));
 			if (i > 0)
 				appendStringInfo(buf, ", ");
-			appendStringInfo(buf, "%d:", kproj->slot_id[i]);
+			appendStringInfo(buf, "%d:", desc->slot_id);
 			__xpucode_to_cstring(buf, arg, css, es, ancestors);
 			pos += MAXALIGN(VARSIZE(arg));
 		}

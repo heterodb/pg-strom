@@ -31,16 +31,17 @@ xpu_uuid_datum_ref(kern_context *kcxt,
 	memset(result, 0, sizeof(xpu_uuid_t));
 	result->ops = &xpu_uuid_ops;
 	if (!addr)
+	{
 		result->isnull = true;
+	}
+	else if (len == UUID_LEN)
+	{
+		memcpy(&result->value.data, addr, UUID_LEN);
+	}
 	else
 	{
-		if (cmeta &&
-			cmeta->attopts.fixed_size_binary.byteWidth != UUID_LEN)
-		{
-			STROM_ELOG(kcxt, "Arrow::FixedSizeBinary has wrong byteWidth");
-			return false;
-		}
-		memcpy(&result->value.data, addr, UUID_LEN);
+		STROM_ELOG(kcxt, "wrong length for uuid type");
+		return false;
 	}
 	return true;
 }
@@ -59,7 +60,25 @@ xpu_uuid_datum_store(kern_context *kcxt,
 	return UUID_LEN;
 }
 
-PUBLIC_FUNCTION(bool)
+STATIC_FUNCTION(int)
+xpu_uuid_datum_move(kern_context *kcxt,
+					char *buffer,
+					const kern_colmeta *cmeta,
+					const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (len != UUID_LEN)
+	{
+		STROM_ELOG(kcxt, "Bug? uuid length mismatch");
+		return false;
+	}
+	if (buffer)
+		memcpy(buffer, addr, UUID_LEN);
+	return UUID_LEN;
+}
+
+STATIC_FUNCTION(bool)
 xpu_uuid_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
 					xpu_datum_t *__arg)
@@ -72,7 +91,7 @@ xpu_uuid_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(arg->value.data, UUID_LEN);
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(uuid);
+PGSTROM_SQLTYPE_OPERATORS(uuid, false, 1, UUID_LEN);
 
 /*
  * Macaddr data type (xpu_macaddr_t), functions and operators
@@ -89,15 +108,12 @@ xpu_macaddr_datum_ref(kern_context *kcxt,
 	result->ops = &xpu_macaddr_ops;
 	if (!addr)
 		result->isnull = true;
+	else if (len == sizeof(macaddr))
+		memcpy(&result->value, addr, sizeof(macaddr));
 	else
 	{
-		if (cmeta &&
-			cmeta->attopts.fixed_size_binary.byteWidth != sizeof(macaddr))
-		{
-			STROM_ELOG(kcxt, "Arrow::FixedSizeBinary has wrong byteWidth");
-			return false;
-		}
-		memcpy(&result->value, addr, sizeof(macaddr));
+		STROM_ELOG(kcxt, "Bug? device macaddr type length mismatch");
+		return false;
 	}
 	return true;
 }
@@ -116,6 +132,24 @@ xpu_macaddr_datum_store(kern_context *kcxt,
 	return sizeof(macaddr);
 }
 
+STATIC_FUNCTION(int)
+xpu_macaddr_datum_move(kern_context *kcxt,
+					   char *buffer,
+					   const kern_colmeta *cmeta,
+					   const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (len != sizeof(macaddr))
+	{
+		STROM_ELOG(kcxt, "Bug? macaddr length mismatch");
+		return false;
+	}
+	if (buffer)
+		memcpy(buffer, addr, sizeof(macaddr));
+	return sizeof(macaddr);
+}
+
 PUBLIC_FUNCTION(bool)
 xpu_macaddr_datum_hash(kern_context *kcxt,
 					   uint32_t *p_hash,
@@ -129,7 +163,7 @@ xpu_macaddr_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(macaddr));
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(macaddr);
+PGSTROM_SQLTYPE_OPERATORS(macaddr, false, 4, sizeof(macaddr));
 
 /*
  * Inet data type (xpu_iner_t), functions and operators
@@ -145,52 +179,33 @@ xpu_inet_datum_ref(kern_context *kcxt,
 	memset(result, 0, sizeof(xpu_inet_t));
 	result->ops = &xpu_inet_ops;
 	if (!addr)
-	{
 		result->isnull = true;
-	}
-	else if (!cmeta)
+	else if (cmeta->kds_format == KDS_FORMAT_ARROW)
 	{
-		if (VARATT_IS_COMPRESSED(addr) || VARATT_IS_EXTERNAL(addr))
-		{
-			STROM_CPU_FALLBACK(kcxt, ERRCODE_INTERNAL_ERROR,
-							   "inet value is compressed or toasted");
-			return false;
-		}
-		else if (VARSIZE_ANY_EXHDR(addr) < offsetof(inet_struct, ipaddr))
-		{
-			STROM_ELOG(kcxt, "corrupted inet datum");
-			return false;
-		}
+		if (len == 4)
+			result->value.family = PGSQL_AF_INET;
+		else if (len == 16)
+			result->value.family = PGSQL_AF_INET6;
 		else
 		{
-			inet_struct *ip_data = (inet_struct *)VARDATA_ANY(addr);
-			int		ip_size = ip_addrsize(ip_data);
-
-			memcpy(&result->value, VARDATA_ANY(addr),
-				   offsetof(inet_struct, ipaddr[ip_size]));		
+			STROM_ELOG(kcxt, "Bug? device inet length mismatch");
+			return false;
 		}
+		result->value.bits = 8 * len;
+		memcpy(result->value.ipaddr, addr, len);
+	}
+	else if (len == offsetof(inet_struct, ipaddr[4]) ||
+			 len == offsetof(inet_struct, ipaddr[16]))
+	{
+		memcpy(&result->value, addr, len);
 	}
 	else
 	{
-		int		byteWidth = cmeta->attopts.fixed_size_binary.byteWidth;
-
-		if (byteWidth == 4)
-		{
-			result->value.family = PGSQL_AF_INET;
-			result->value.bits = 32;
-			memcpy(result->value.ipaddr, addr, byteWidth);
-		}
-		else if (byteWidth == 16)
-		{
-			result->value.family = PGSQL_AF_INET6;
-			result->value.bits = 128;
-			memcpy(result->value.ipaddr, addr, byteWidth);
-		}
+		if (len < 0)
+			STROM_CPU_FALLBACK(kcxt, "inet value is compressed or toasted");
 		else
-		{
-			STROM_ELOG(kcxt, "corrupted inet datum");
-			return false;
-		}
+			STROM_ELOG(kcxt, "Bug? device inet length mismatch");
+		return false;
 	}
 	return true;
 }
@@ -217,9 +232,62 @@ xpu_inet_datum_store(kern_context *kcxt,
 	if (buffer)
 	{
 		memcpy(buffer + VARHDRSZ, &arg->value, len);
-		SET_VARSIZE(buffer, len + VARHDRSZ);
+		SET_VARSIZE(buffer, VARHDRSZ + len);
 	}
-	return len + VARHDRSZ;
+	return VARHDRSZ + len;
+}
+
+STATIC_FUNCTION(int)
+xpu_inet_datum_move(kern_context *kcxt,
+					char *buffer,
+					const kern_colmeta *cmeta,
+					const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (cmeta->kds_format == KDS_FORMAT_ARROW)
+	{
+		inet_struct	ibuf;
+		int		sz;
+
+		if (len == 4)
+			ibuf.family = PGSQL_AF_INET;
+		else if (len == 16)
+			ibuf.family = PGSQL_AF_INET6;
+		else
+		{
+			STROM_ELOG(kcxt, "Bug? device inet length mismatch");
+			return false;
+		}
+		ibuf.bits = 8 * len;
+		memcpy(ibuf.ipaddr, addr, len);
+		sz = offsetof(inet_struct, ipaddr[len]);
+		if (buffer)
+		{
+			memcpy(buffer + VARHDRSZ, &ibuf, sz);
+			SET_VARSIZE(buffer, VARHDRSZ + sz);
+		}
+		return VARHDRSZ + sz;
+	}
+	else if (len == offsetof(inet_struct, ipaddr[4]) ||
+			 len == offsetof(inet_struct, ipaddr[16]))
+	{
+		if (buffer)
+		{
+			memcpy(buffer + VARHDRSZ, addr, VARHDRSZ + len);
+			SET_VARSIZE(buffer, VARHDRSZ + len);
+		}
+		return VARHDRSZ + len;
+    }
+	else if (len < 0)
+	{
+		STROM_CPU_FALLBACK(kcxt, "inet value is compressed or toasted");
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "Bug? device inet length mismatch");
+	}
+	return -1;
 }
 
 PUBLIC_FUNCTION(bool)
@@ -247,4 +315,4 @@ xpu_inet_datum_hash(kern_context *kcxt,
 	}
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(inet);
+PGSTROM_SQLTYPE_OPERATORS(inet, false, 4, -1);

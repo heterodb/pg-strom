@@ -25,7 +25,10 @@
 		if (!addr)														\
 			result->isnull = true;										\
 		else															\
+		{																\
+			assert(len == sizeof(BASETYPE));							\
 			result->value = *((const BASETYPE *)addr);					\
+		}																\
 		result->ops = &xpu_##NAME##_ops;								\
 		return true;													\
 	}																	\
@@ -38,7 +41,21 @@
 																		\
 		if (arg->isnull)												\
 			return 0;													\
-		*((BASETYPE *)buffer) = arg->value;								\
+		if (buffer)														\
+			*((BASETYPE *)buffer) = arg->value;							\
+		return sizeof(BASETYPE);										\
+	}																	\
+	STATIC_FUNCTION(int)												\
+	xpu_##NAME##_datum_move(kern_context *kcxt,							\
+							char *buffer,								\
+							const kern_colmeta *cmeta,					\
+							const void *addr, int len)					\
+	{																	\
+		if (!addr)														\
+			return 0;													\
+		assert(len == sizeof(BASETYPE));								\
+		if (buffer)														\
+			*((BASETYPE *)buffer) = *((const BASETYPE *)addr);			\
 		return sizeof(BASETYPE);										\
 	}																	\
 	STATIC_FUNCTION(bool)												\
@@ -54,8 +71,11 @@
 			*p_hash = pg_hash_any(&arg->value, sizeof(BASETYPE));		\
 		return true;													\
 	}																	\
-	PGSTROM_SQLTYPE_OPERATORS(NAME)
-		
+	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
+
+#ifndef PG_BOOLOID
+#define PG_BOOLOID		16
+#endif	/* PG_BOOLOID */
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(bool, int8_t);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(int1, int8_t);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(int2, int16_t);
@@ -64,12 +84,6 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(int8, int64_t);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float2, float2_t);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float4, float4_t);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float8, float8_t);
-
-/*
- * dummy handler for unsupported device types
- */
-typedef xpu_datum_t		xpu_unsupported_t;
-EXTERN_DATA xpu_datum_operators xpu_unsupported_ops;
 
 /*
  * Template for simple comparison

@@ -90,6 +90,7 @@
 #include "utils/uuid.h"
 #include "utils/wait_event.h"
 #include <assert.h>
+#define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
 #include <float.h>
 #include <limits.h>
@@ -218,6 +219,9 @@ struct pgstromTaskState
 	/* current chunk */
 	TBMIterateResult   *curr_tbm;
 	XpuCommand		   *curr_resp;
+	HeapTupleData		curr_htup;
+	kern_data_store	   *curr_kds;
+	int					curr_chunk;
 	int64_t				curr_index;
 	bool				scan_done;
 	bool				final_done;
@@ -401,11 +405,46 @@ extern bool		pgstrom_init_gpu_device(void);
 /*
  * gpu_service.c
  */
+struct gpuClient
+{
+	struct gpuContext *gcontext;/* per-device status */
+	dlist_node		chain;		/* gcontext->client_list */
+	CUmodule		cuda_module;/* preload cuda binary */
+	kern_session_info *session;	/* per session info (on cuda managed memory) */
+	pg_atomic_uint32 refcnt;	/* odd number, if error status */
+	pthread_mutex_t	mutex;		/* mutex to write the socket */
+	int				sockfd;		/* connection to PG backend */
+	pthread_t		worker;		/* receiver thread */
+};
+typedef struct gpuClient	gpuClient;
+
 extern int		pgstrom_max_async_gpu_tasks;	/* GUC */
 extern bool		pgstrom_load_gpu_debug_module;	/* GUC */
 extern const char *cuStrError(CUresult rc);
-extern void		pgstrom_init_gpu_service(void);
+extern void		__gpuClientELogRaw(gpuClient *gclient,
+								   kern_errorbuf *errorbuf);
+extern void		__gpuClientELog(gpuClient *gclient,
+								int errcode,
+								const char *filename, int lineno,
+								const char *funcname,
+								const char *fmt, ...);
+#define gpuClientELog(gclient,fmt,...)						\
+	__gpuClientELog((gclient), ERRCODE_INTERNAL_ERROR,		\
+					__FILE__, __LINE__, __FUNCTION__,		\
+					(fmt), ##__VA_ARGS__)
 
+extern __thread int			CU_DINDEX_PER_THREAD;
+extern __thread CUdevice	CU_DEVICE_PER_THREAD;
+extern __thread CUcontext	CU_CONTEXT_PER_THREAD;
+extern __thread CUevent		CU_EVENT_PER_THREAD;
+extern CUresult	gpuMemAlloc(CUdeviceptr *dptr, size_t bytesize);
+extern CUresult	gpuMemFree(CUdeviceptr devptr);
+extern void		gpuClientWriteBack(gpuClient *gclient,
+								   XpuCommand *resp,
+								   size_t resp_sz,
+								   int kds_nitems,
+								   kern_data_store **kds_array);
+extern void		pgstrom_init_gpu_service(void);
 
 /*
  * gpu_cache.c
@@ -418,6 +457,7 @@ extern void		pgstrom_init_gpu_service(void);
 /*
  * gpu_scan.c
  */
+extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
 extern void		pgstrom_init_gpu_scan(void);
 
 

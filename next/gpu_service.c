@@ -20,11 +20,6 @@ typedef struct
 	HTAB		   *cuda_type_htab;
 	HTAB		   *cuda_func_htab;
 	xpu_encode_info *cuda_encode_catalog;
-	/* GpuScan kernel entrypoint */
-	CUfunction		f_gpuscan_main_row;
-	CUfunction		f_gpuscan_main_block;
-	CUfunction		f_gpuscan_main_column;
-	CUfunction		f_gpuscan_main_arrow;
 } gpuModule;
 
 typedef struct
@@ -36,7 +31,7 @@ typedef struct
 	dlist_head		segment_list;
 } gpuMemoryPool;
 
-typedef struct
+struct gpuContext
 {
 	dlist_node		chain;
 	int				serv_fd;		/* for accept(2) */
@@ -57,29 +52,21 @@ typedef struct
 	volatile bool	terminate_workers;
 	int				n_workers;
 	pthread_t		workers[1];
-} gpuContext;
-#define SizeOfGpuContext		\
+};
+typedef struct gpuContext	gpuContext;
+#define SizeOfGpuContext	\
 	offsetof(gpuContext, workers[pgstrom_max_async_gpu_tasks])
-
-typedef struct
-{
-	dlist_node		chain;		/* gcontext->client_list */
-	gpuContext	   *gcontext;
-	kern_session_info *session;
-	pg_atomic_uint32 refcnt;	/* odd number, if error status */
-	pthread_mutex_t	mutex;		/* mutex to write the socket */
-	int				sockfd;		/* connection to PG backend */
-	pthread_t		worker;		/* receiver thread */
-} gpuClient;
 
 /*
  * variables
  */
 int		pgstrom_max_async_gpu_tasks;	/* GUC */
 bool	pgstrom_load_gpu_debug_module;	/* GUC */
+__thread int		CU_DINDEX_PER_THREAD = -1;
+__thread CUdevice	CU_DEVICE_PER_THREAD = -1;
+__thread CUcontext	CU_CONTEXT_PER_THREAD = NULL;
+__thread CUevent	CU_EVENT_PER_THREAD = NULL;
 static __thread gpuContext *GpuWorkerCurrentContext = NULL;
-#define CU_CONTEXT_PER_THREAD	(GpuWorkerCurrentContext->cuda_context)
-#define CU_DEVICE_PER_THREAD	(GpuWorkerCurrentContext->cuda_device)
 static volatile int		gpuserv_bgworker_got_signal = 0;
 static dlist_head		gpuserv_gpucontext_list;
 static int				gpuserv_epoll_fdesc = -1;
@@ -418,7 +405,7 @@ gpuMemoryPoolInit(gpuMemoryPool *pool, size_t dev_total_memsz)
 static void
 gpuClientPut(gpuClient *gclient)
 {
-	if (pg_atomic_sub_fetch_u32(&gclient->refcnt, 1) == 0)
+	if (pg_atomic_sub_fetch_u32(&gclient->refcnt, 2) == 0)
 	{
 		gpuContext *gcontext = gclient->gcontext;
 		CUresult	rc;
@@ -431,9 +418,11 @@ gpuClientPut(gpuClient *gclient)
 			close(gclient->sockfd);
 		if (gclient->session)
 		{
-			rc = cuMemFree((CUdeviceptr)gclient->session);
+			CUdeviceptr		dptr = ((CUdeviceptr)gclient->session -
+									offsetof(XpuCommand, u.session));
+			rc = cuMemFree(dptr);
 			if (rc != CUDA_SUCCESS)
-				fprintf(stderr, "failed on cuMemFree: %s", cuStrError(rc));
+				fprintf(stderr, "failed on cuMemFree: %s\n", cuStrError(rc));
 		}
 		free(gclient);
 	}
@@ -443,56 +432,138 @@ gpuClientPut(gpuClient *gclient)
  * gpuClientWriteBack
  */
 static void
-gpuClientWriteBack(gpuClient *gclient, XpuCommand *resp)
+__gpuClientWriteBack(gpuClient *gclient, struct iovec *iov, int iovcnt)
 {
-	assert(resp->magic == XpuCommandMagicNumber);
-
 	pthreadMutexLock(&gclient->mutex);
 	if (gclient->sockfd >= 0)
 	{
-		ssize_t		count = 0;
 		ssize_t		nbytes;
 
-		while (count < resp->length)
+		while (iovcnt > 0)
 		{
-			nbytes = write(gclient->sockfd,
-						   (const char *)resp + count,
-						   resp->length - count);
+			nbytes = writev(gclient->sockfd, iov, iovcnt);
 			if (nbytes > 0)
-				count += nbytes;
-			else if (nbytes == 0 || errno != EINTR)
 			{
+				do {
+					if (iov->iov_len <= nbytes)
+					{
+						nbytes -= iov->iov_len;
+						iov++;
+						iovcnt--;
+					}
+					else
+					{
+						iov->iov_base = (char *)iov->iov_base + nbytes;
+						iov->iov_len -= nbytes;
+						break;
+					}
+				} while (iovcnt > 0 && nbytes > 0);
+			}
+			else if (errno != EINTR)
+			{
+				/*
+				 * Peer socket is closed? Anyway, it looks we cannot continue
+				 * to send back the message any more. So, clean up this gpuClient.
+				 */
+				pg_atomic_fetch_and_u32(&gclient->refcnt, ~1U);
 				close(gclient->sockfd);
 				gclient->sockfd = -1;
-				break;
 			}
 		}
 	}
-	pthreadMutexUnlock(&gclient->mutex);	
+	pthreadMutexUnlock(&gclient->mutex);
+}
+
+void
+gpuClientWriteBack(gpuClient  *gclient,
+				   XpuCommand *resp,
+				   size_t      resp_sz,
+				   int         kds_nitems,
+				   kern_data_store **kds_array)
+{
+	struct iovec   *iov_array;
+	struct iovec   *iov;
+	int				i, iovcnt = 0;
+
+	iov_array = alloca(sizeof(struct iovec) * (2 * kds_nitems + 1));
+	iov = &iov_array[iovcnt++];
+	iov->iov_base = resp;
+	iov->iov_len  = resp_sz;
+	for (i=0; i < kds_nitems; i++)
+	{
+		kern_data_store *kds = kds_array[i];
+		size_t		sz1, sz2;
+
+		sz1 = KDS_HEAD_LENGTH(kds) + MAXALIGN(sizeof(uint32_t) * kds->nitems);
+		sz2 = __kds_unpack(kds->usage);
+		if (sz1 + sz2 == kds->length)
+		{
+			iov = &iov_array[iovcnt++];
+			iov->iov_base = kds;
+			iov->iov_len  = kds->length;
+		}
+		else
+		{
+			assert(sz1 + sz2 < kds->length);
+			iov = &iov_array[iovcnt++];
+			iov->iov_base = kds;
+			iov->iov_len  = sz1;
+
+			iov = &iov_array[iovcnt++];
+			iov->iov_base = (char *)kds + kds->length;
+			iov->iov_len  = sz2;
+			kds->length = (sz1 + sz2);
+		}
+		resp_sz += kds->length;
+	}
+	resp->length = resp_sz;
+
+	__gpuClientWriteBack(gclient, iov_array, iovcnt);
 }
 
 /*
  * gpuClientELog
  */
-static void
-__gpuClientELog(gpuClient *gclient,
-				const char *filename, int lineno,
-				const char *funcname,
-				const char *fmt, ...)
+void
+__gpuClientELogRaw(gpuClient *gclient, kern_errorbuf *errorbuf)
 {
-	XpuCommand	resp;
-	va_list		ap;
-	const char *s;
-
-	s = strrchr(filename, '/');
-	if (s)
-		filename = s + 1;
+	XpuCommand		resp;
+	struct iovec	iov;
 
 	memset(&resp, 0, sizeof(resp));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag = XpuCommandTag__Error;
 	resp.length = offsetof(XpuCommand, u.error) + sizeof(kern_errorbuf);
-	resp.u.error.errcode = ERRCODE_INTERNAL_ERROR;
+	memcpy(&resp.u.error, errorbuf, sizeof(kern_errorbuf));
+
+	iov.iov_base = &resp;
+	iov.iov_len  = resp.length;
+	__gpuClientWriteBack(gclient, &iov, 1);
+}
+
+void
+__gpuClientELog(gpuClient *gclient,
+				int errcode,
+				const char *filename, int lineno,
+				const char *funcname,
+				const char *fmt, ...)
+{
+	XpuCommand		resp;
+	va_list			ap;
+	struct iovec	iov;
+	const char	   *pos;
+
+	for (pos = filename; *pos != '\0'; pos++)
+	{
+		if (pos[0] == '/' && pos[1] != '\0')
+			filename = pos + 1;
+	}
+	
+	memset(&resp, 0, sizeof(resp));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag = XpuCommandTag__Error;
+	resp.length = offsetof(XpuCommand, u.error) + sizeof(kern_errorbuf);
+	resp.u.error.errcode = errcode,
 	resp.u.error.lineno = lineno;
 	strncpy(resp.u.error.filename, filename, KERN_ERRORBUF_FILENAME_LEN);
 	strncpy(resp.u.error.funcname, funcname, KERN_ERRORBUF_FUNCNAME_LEN);
@@ -501,10 +572,10 @@ __gpuClientELog(gpuClient *gclient,
 	vsnprintf(resp.u.error.message, KERN_ERRORBUF_MESSAGE_LEN, fmt, ap);
 	va_end(ap);
 
-	gpuClientWriteBack(gclient, &resp);
+	iov.iov_base = &resp;
+	iov.iov_len  = resp.length;
+	__gpuClientWriteBack(gclient, &iov, 1);
 }
-#define gpuClientELog(gclient,fmt,...)			\
-	__gpuClientELog((gclient),__FILE__,__LINE__,__FUNCTION__,(fmt),##__VA_ARGS__)
 
 /*
  * gpuservHandleOpenSession
@@ -557,6 +628,28 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
 			return false;
 		pos += MAXALIGN(VARSIZE(arg));
 	}
+
+	/*
+	 * Extra device type operators lookup for Projection
+	 */
+	if (kexp->opcode == FuncOpCode__Projection)
+	{
+		const kern_projection_map *proj_map = __KEXP_GET_PROJECTION_MAP(kexp);
+		uint32_t	i, ndesc = (proj_map->nexprs + proj_map->nattrs);
+
+		for (i=0; i < ndesc; i++)
+		{
+			kern_projection_desc *desc = (kern_projection_desc *)&proj_map->desc[i];
+
+			xpu_type = hash_search(gmodule->cuda_type_htab,
+								   &kexp->exptype,
+								   HASH_FIND, NULL);
+			if (!xpu_type)
+				desc->slot_ops = NULL;
+			else
+				desc->slot_ops = xpu_type->type_ops;
+		}
+	}
 	return true;
 }
 
@@ -608,20 +701,20 @@ __resolveDevicePointers(gpuModule *gmodule,
 	return true;
 }
 
-static void
-gpuservHandleOpenSession(XpuCommand *xcmd)
+static bool
+gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 {
-	gpuClient  *gclient = xcmd->priv;
-	gpuContext *gcontext = gclient->gcontext;
-	gpuModule  *gmodule;
+	gpuContext	   *gcontext = gclient->gcontext;
+	gpuModule	   *gmodule;
 	kern_session_info *session = &xcmd->u.session;
-	XpuCommand	resp;
-	char		emsg[512];
+	XpuCommand		resp;
+	char			emsg[512];
+	struct iovec	iov;
 
 	if (gclient->session)
 	{
 		gpuClientELog(gclient, "OpenSession is called twice");
-		return;
+		return false;
 	}
 
 	/* resolve device pointers */
@@ -631,20 +724,24 @@ gpuservHandleOpenSession(XpuCommand *xcmd)
 		gmodule = &gcontext->debug;
 	if (!__resolveDevicePointers(gmodule, session, emsg, sizeof(emsg)))
 	{
-		cuMemFree((CUdeviceptr)session);
 		gpuClientELog(gclient, "%s", emsg);
-		return;
+		return false;
 	}
 	gclient->session = session;
+	gclient->cuda_module = gmodule->cuda_module;
 
 	/* success status */
 	memset(&resp, 0, sizeof(resp));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag = XpuCommandTag__Success;
 	resp.length = offsetof(XpuCommand, u);
-	gpuClientWriteBack(gclient, &resp);
-}
 
+	iov.iov_base = &resp;
+	iov.iov_len  = resp.length;
+	__gpuClientWriteBack(gclient, &iov, 1);
+
+	return true;
+}
 
 /*
  * gpuservGpuWorkerMain -- actual worker
@@ -654,12 +751,21 @@ gpuservGpuWorkerMain(void *__arg)
 {
 	gpuContext *gcontext = (gpuContext *)__arg;
 	gpuClient  *gclient;
+	CUevent		cuda_event;
 	CUresult	rc;
 
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuCtxSetCurrent: %s", cuStrError(rc));
+	rc = cuEventCreate(&cuda_event, CU_EVENT_DEFAULT);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuEventCreate: %s", cuStrError(rc));
+
 	GpuWorkerCurrentContext = gcontext;
+	CU_DINDEX_PER_THREAD  = gcontext->cuda_dindex;
+	CU_DEVICE_PER_THREAD  = gcontext->cuda_device;
+	CU_CONTEXT_PER_THREAD = gcontext->cuda_context;
+	CU_EVENT_PER_THREAD = cuda_event;
 	pg_memory_barrier();
 
 	pthreadMutexLock(&gcontext->lock);
@@ -675,19 +781,32 @@ gpuservGpuWorkerMain(void *__arg)
 			pthreadMutexUnlock(&gcontext->lock);
 
 			gclient = xcmd->priv;
-			switch (xcmd->tag)
+			/*
+			 * MEMO: If the least bit of gclient->refcnt is not set,
+			 * it means the gpu-client connection is no longer available.
+			 * (already closed, or error detected.)
+			 */
+			if ((pg_atomic_read_u32(&gclient->refcnt) & 1) == 1)
 			{
-				case XpuCommandTag__OpenSession:
-					gpuservHandleOpenSession(xcmd);
-					break;
-				case XpuCommandTag__XpuScanExec:
-					gpuservHandleGpuScanExec(xcmd);
-					break;
-				default:
-					gpuClientELog(gclient, "unknown XPU command (%d)", (int)xcmd->tag);
-					gpuClientPut(gclient);
-					break;
+				switch (xcmd->tag)
+				{
+					case XpuCommandTag__OpenSession:
+						if (gpuservHandleOpenSession(gclient, xcmd))
+							xcmd = NULL;	/* session information shall be kept until
+											 * end of the session. */
+						break;
+					case XpuCommandTag__XpuScanExec:
+						gpuservHandleGpuScanExec(gclient, xcmd);
+						break;
+					default:
+						gpuClientELog(gclient, "unknown XPU command (%d)",
+									  (int)xcmd->tag);
+						break;
+				}
 			}
+			if (xcmd)
+				cuMemFree((CUdeviceptr)xcmd);
+			gpuClientPut(gclient);
 			pthreadMutexLock(&gcontext->lock);
 			continue;
 		}
@@ -726,7 +845,7 @@ __gpuservMonitorClientAttach(void *__priv, XpuCommand *xcmd)
 	gpuClient  *gclient = (gpuClient *)__priv;
 	gpuContext *gcontext = gclient->gcontext;
 
-	pg_atomic_fetch_add_u32(&gclient->refcnt, 1);
+	pg_atomic_fetch_add_u32(&gclient->refcnt, 2);
 	xcmd->priv = gclient;
 
 	pthreadMutexLock(&gcontext->lock);
@@ -824,7 +943,7 @@ gpuservAcceptClient(gpuContext *gcontext)
 		return;
 	}
 	gclient->gcontext = gcontext;
-	pg_atomic_init_u32(&gclient->refcnt, 1);
+	pg_atomic_init_u32(&gclient->refcnt, 3);
 	pthreadMutexInit(&gclient->mutex);
 	gclient->sockfd = sockfd;
 

@@ -135,48 +135,6 @@ typedef enum
 } ArrowUnionMode;
 
 /*
- * ArrowTypeOptions - our own definition
- */
-typedef union		ArrowTypeOptions
-{
-	struct {
-		unsigned short		precision;
-		unsigned short		scale;
-	} decimal;
-	struct {
-		ArrowDateUnit		unit;
-	} date;
-	struct {
-		ArrowTimeUnit		unit;
-	} time;
-	struct {
-		ArrowTimeUnit		unit;
-	} timestamp;
-	struct {
-		ArrowIntervalUnit	unit;
-	} interval;
-	struct {
-		int					byteWidth;
-	} fixed_size_binary;
-} ArrowTypeOptions;
-
-#ifndef __CUDACC__
-#include <stdint.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#ifndef bool
-typedef unsigned char	bool;
-#endif
-#ifndef true
-#define true	((bool) 1)
-#endif
-#ifndef false
-#define false	((bool) 0)
-#endif
-
-/*
  * ArrowNodeTag
  */
 typedef enum
@@ -217,6 +175,72 @@ typedef enum
 	ArrowNodeTag__Footer,
 	ArrowNodeTag__BodyCompression,
 } ArrowNodeTag;
+
+/*
+ * ArrowTypeOptions - our own definition
+ */
+#define ARROW_TYPE_OPTIONS_COMMON_FIELDS		\
+	ArrowNodeTag			tag;				\
+	int16_t					unitsz
+
+typedef union		ArrowTypeOptions
+{
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+	} common;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		uint16_t			bitWidth;
+		bool				is_signed;
+	} integer;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowPrecision		precision;
+	} floating_point;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		unsigned short		precision;
+		unsigned short		scale;
+	} decimal;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowDateUnit		unit;
+	} date;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowTimeUnit		unit;
+	} time;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowTimeUnit		unit;
+	} timestamp;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowIntervalUnit	unit;
+	} interval;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		int					byteWidth;
+	} fixed_size_binary;
+} ArrowTypeOptions;
+
+#undef ARROW_TYPE_OPTIONS_COMMON_FIELDS
+
+#ifndef __CUDACC__
+#include <stdint.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#ifndef bool
+typedef unsigned char	bool;
+#endif
+#ifndef true
+#define true	((bool) 1)
+#endif
+#ifndef false
+#define false	((bool) 0)
+#endif
 
 /*
  * ArrowNode
