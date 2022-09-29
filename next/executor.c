@@ -37,6 +37,7 @@ extern TransactionId   *ParallelCurrentXids;
 
 /* static variables */
 static dlist_head		xpu_connections_list;
+static bool				pgstrom_use_debug_code;		/* GUC */
 
 /*
  * xpuConnectReceiveCommands
@@ -202,6 +203,7 @@ __xpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
 			   xcmd->tag == XpuCommandTag__CPUFallback);
 		dlist_push_tail(&conn->ready_cmds_list, &xcmd->chain);
 		conn->num_ready_cmds++;
+		fprintf(stderr, "%s: response attached. (%p)\n", __FUNCTION__, xcmd);
 	}
 	SetLatch(MyLatch);
 	pthreadMutexUnlock(&conn->mutex);
@@ -601,6 +603,7 @@ pgstromBuildSessionInfo(PlanState *ps,
 	/* other database session information */
 	session->kcxt_extra_bufsz = kcxt_extra_bufsz;
 	session->kcxt_kvars_nslots = kcxt_kvars_nslots;
+	session->xpucode_use_debug_code = pgstrom_use_debug_code;
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	session->xact_id_array = __build_session_xact_id_vector(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
@@ -651,6 +654,8 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 	pthreadMutexLock(&conn->mutex);
 	for (;;)
 	{
+		ResetLatch(MyLatch);
+
 		/* device error checks */
 		if (conn->errorbuf.errcode != ERRCODE_STROM_SUCCESS)
 		{
@@ -809,7 +814,7 @@ pgstromExecTaskState(pgstromTaskState *pts)
 	{
 	next_chunks:
 		if (pts->curr_resp)
-			free(pts->curr_resp);
+			xpuClientPutResponse(pts->curr_resp);
 		pts->curr_resp = __fetchNextXpuCommand(pts);
 		if (!pts->curr_resp)
 			return NULL;
@@ -961,6 +966,14 @@ gpuClientOpenSession(pgstromTaskState *pts,
 void
 pgstrom_init_executor(void)
 {
+    DefineCustomBoolVariable("pg_strom.use_debug_code",
+							 "Use debug-mode enabled device code",
+							 NULL,
+							 &pgstrom_use_debug_code,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
+							 NULL, NULL, NULL);
 	dlist_init(&xpu_connections_list);
 	RegisterResourceReleaseCallback(xpuclientCleanupConnections, NULL);
 }

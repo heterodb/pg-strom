@@ -25,10 +25,10 @@ STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/next/,$(__STROM_OBJS))
 #
 # Source of NVIDIA GPU device code
 #
-include $(STROM_BUILD_ROOT)/Makefile.cuda
+include $(STROM_BUILD_ROOT)/next/Makefile.cuda
 __CUDA_OBJS = cuda_common cuda_gpuscan \
               cuda_basetype cuda_numeric cuda_timelib cuda_textlib cuda_misclib
-__CUDA_HEADERS = xpu_common.h xpu_numeric.h
+__CUDA_HEADERS = xpu_common.h xpu_common.c xpu_numeric.h
 __CUDA_OPT_OBJS = $(addsuffix .fatbin,$(__CUDA_OBJS))
 __CUDA_DBG_OBJS = $(addsuffix .debug.fatbin,$(__CUDA_OBJS))
 CUDA_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/next/,$(__CUDA_HEADERS))
@@ -108,5 +108,5 @@ include $(PGXS)
 #
 %.fatbin: %.cu $(CUDA_HEADERS)
 	$(NVCC) $(NVCC_FLAGS) -o $@ $<
-%.debug.fatbin: %.cu $(GPU_HEADERS)
+%.debug.fatbin: %.cu $(CUDA_HEADERS)
 	$(NVCC) $(NVCC_DEBUG_FLAGS) -o $@ $<

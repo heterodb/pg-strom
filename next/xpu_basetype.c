@@ -35,7 +35,8 @@ PGSTROM_SIMPLE_BASETYPE_TEMPLATE(bool, int8_t);
 		else															\
 		{																\
 			result->value = *((const BASE_TYPE *)addr);					\
-			if (cmeta->kds_format == KDS_FORMAT_ARROW &&				\
+			if (cmeta &&												\
+				cmeta->kds_format == KDS_FORMAT_ARROW &&				\
 				!cmeta->attopts.integer.is_signed &&					\
 				result->value < 0)										\
 			{															\

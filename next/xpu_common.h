@@ -119,7 +119,8 @@ __Fetch(const T *ptr)
 #define ERRCODE_WRONG_XPU_CODE			3
 #define ERRCODE_VARLENA_UNSUPPORTED		4
 #define ERRCODE_RECURSION_TOO_DEEP		5
-#define ERRCODE_DEVICE_INTERNAL			9
+#define ERRCODE_DEVICE_INTERNAL			99
+#define ERRCODE_DEVICE_FATAL			999
 
 #define KERN_ERRORBUF_FILENAME_LEN		32
 #define KERN_ERRORBUF_FUNCNAME_LEN		64
@@ -168,8 +169,9 @@ typedef struct
 #define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
 	do {																\
 		uint32_t	__nslots = (SESSION)->kcxt_kvars_nslots;			\
-		uint32_t	__sz = (offsetof(kern_context, vlbuf) +				\
-							MAXALIGN((SESSION)->kcxt_extra_bufsz));		\
+		uint32_t	__sz = offsetof(kern_context, vlbuf) +				\
+			Max(1024, MAXALIGN((SESSION)->kcxt_extra_bufsz));			\
+																		\
 		KCXT = (kern_context *)alloca(__sz);							\
 		memset(KCXT, 0, __sz);											\
 		KCXT->session = (SESSION);										\

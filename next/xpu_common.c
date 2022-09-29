@@ -45,23 +45,10 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 
 	if (slot_id < kcxt->kvars_nslots)
 	{
-		kern_colmeta *cmeta = kcxt->kvars_cmeta[slot_id];
-		void		 *vaddr = kcxt->kvars_addr[slot_id];
-		int			  vlen  = kcxt->kvars_len[slot_id];
-
-		if (!cmeta)
-		{
-			xpu_datum_t *__datum = (xpu_datum_t *)vaddr;
-
-			if (kexp->exptype != __datum->ops->xpu_type_code)
-			{
-				STROM_ELOG(kcxt, "Bug? cached xpu_datum_t does not have compatible type");
-				return false;
-			}
-			memcpy(__result, __datum, __datum->ops->xpu_type_sizeof);
-			return true;
-		}
-		return kexp->exptype_ops->xpu_datum_ref(kcxt, __result, cmeta, vaddr, vlen);
+		return kexp->exptype_ops->xpu_datum_ref(kcxt, __result,
+												kcxt->kvars_cmeta[slot_id],
+												kcxt->kvars_addr[slot_id],
+												kcxt->kvars_len[slot_id]);
 	}
 	STROM_ELOG(kcxt, "Bug? slot_id is out of range");
 	return false;
@@ -73,14 +60,18 @@ pgfn_BoolExprAnd(XPU_PGFUNCTION_ARGS)
 	xpu_bool_t *result = (xpu_bool_t *)__result;
 	int			i;
 	bool		anynull = false;
-	const kern_expression *arg = KEXP_FIRST_ARG(-1,bool);
+	const kern_expression *karg = KEXP_FIRST_ARG(-1,bool);
 
+	memset(result, 0, sizeof(xpu_bool_t));
 	result->ops = &xpu_bool_ops;
-	for (i=0; i < kexp->nargs; i++)
+	for (i=0, karg=(const kern_expression *)kexp->u.data;
+		 i < kexp->nargs;
+		 i++, karg=(const kern_expression *)((char *)karg + MAXALIGN(VARSIZE(karg))))
 	{
 		xpu_bool_t	status;
 
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &status))
+		assert((char *)karg + VARSIZE(karg) <= (char *)kexp + VARSIZE(kexp));
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &status))
 			return false;
 		if (status.isnull)
 			anynull = true;
@@ -89,7 +80,6 @@ pgfn_BoolExprAnd(XPU_PGFUNCTION_ARGS)
 			result->value = false;
 			return true;
 		}
-		arg = KEXP_NEXT_ARG(arg, bool);
 	}
 	result->isnull = anynull;
 	result->value  = true;
@@ -331,9 +321,12 @@ kern_form_heaptuple(kern_context *kcxt,
 			t_hoff = t_next + sz;
 		}
 	}
-	htup->t_infomask = t_infomask;
-	SET_VARSIZE(&htup->t_choice.t_datum, t_hoff);
 
+	if (htup)
+	{
+		htup->t_infomask = t_infomask;
+		SET_VARSIZE(&htup->t_choice.t_datum, t_hoff);
+	}
 	return t_hoff;	
 }
 
@@ -400,7 +393,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 {
 	const kern_preload_vars_item *kvars = kvars_items;
 	HeapTupleHeaderData *htup = &tupitem->htup;
-	uint32_t	offset = htup->t_hoff;
+	uint32_t	offset;
 	int			kvars_nloads_saved = kvars_nloads;
 	int			resno = 1;
 	int			slot_id;
@@ -429,7 +422,6 @@ kern_extract_heap_tuple(kern_context *kcxt,
 			resno   = kvars->var_resno;
 			offset  = htup->t_hoff + cmeta->attcacheoff;
 			assert(slot_id < kcxt->kvars_nslots);
-
 			kcxt->kvars_cmeta[slot_id] = cmeta;
 			kcxt->kvars_addr[slot_id]  = (char *)htup + offset;
 			kcxt->kvars_len[slot_id]   = -1;
@@ -439,6 +431,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 	}
 
 	/* move to the slow heap-tuple extract */
+	offset = htup->t_hoff;
 	while (kvars_nloads > 0 &&
 		   kvars->var_depth == curr_depth &&
 		   kvars->var_resno >= resno &&
@@ -481,7 +474,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 				}
 			}
 
-			if (kvars->var_resno == resno)
+			if (kvars->var_resno == resno++)
 			{
 				slot_id = kvars->var_slot_id;
 				assert(slot_id < kcxt->kvars_nslots);
@@ -495,7 +488,6 @@ kern_extract_heap_tuple(kern_context *kcxt,
 			}
 		}
 	}
-
 	/* other fields, which refers out of ranges, are NULL */
 	while (kvars_nloads > 0 &&
 		   kvars->var_depth == curr_depth)

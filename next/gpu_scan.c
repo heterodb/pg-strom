@@ -733,7 +733,7 @@ gpuScanNextTuple(pgstromTaskState *pts)
 			pts->curr_htup.t_data = &tupitem->htup;
 			return ExecStoreHeapTuple(&pts->curr_htup, slot, false);
 		}
-		if (pts->curr_chunk++ < pts->curr_resp->u.results.chunks_nitems)
+		if (++pts->curr_chunk < pts->curr_resp->u.results.chunks_nitems)
 		{
 			pts->curr_kds = (kern_data_store *)((char *)kds + kds->length);
 			pts->curr_index = 0;
@@ -1080,8 +1080,8 @@ handleGpuScanExecRow(gpuClient *gclient,
 							 "kern_gpuscan_main_row");
 	if (rc != CUDA_SUCCESS)
 	{
-		gpuClientELog(gclient, "failed on cuModuleGetFunction: %s",
-					  cuStrError(rc));
+		gpuClientFatal(gclient, "failed on cuModuleGetFunction: %s",
+					   cuStrError(rc));
 		goto bailout;
 	}
 
@@ -1092,7 +1092,7 @@ handleGpuScanExecRow(gpuClient *gclient,
 							 0, 0);
 	if (rc != CUDA_SUCCESS)
 	{
-		gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
+		gpuClientFatal(gclient, "failed on gpuOptimalBlockSize: %s",
 					  cuStrError(rc));
 		goto bailout;
 	}
@@ -1107,7 +1107,7 @@ handleGpuScanExecRow(gpuClient *gclient,
 	rc = cuMemAllocManaged(&dptr, sz, CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
-		gpuClientELog(gclient, "failed on cuMemAllocManaged(%lu): %s",
+		gpuClientFatal(gclient, "failed on cuMemAllocManaged(%lu): %s",
 					  sz, cuStrError(rc));
 		goto bailout;
 	}
@@ -1115,7 +1115,7 @@ handleGpuScanExecRow(gpuClient *gclient,
 	memset(kgscan, 0, sz);
 	kgscan->grid_sz		= grid_sz;
 	kgscan->block_sz	= block_sz;
-
+	
 	/* prefetch source KDS */
 	rc = cuMemPrefetchAsync((CUdeviceptr)kds_src,
 							kds_src->length,
@@ -1123,7 +1123,7 @@ handleGpuScanExecRow(gpuClient *gclient,
 							CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 	{
-		gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
+		gpuClientFatal(gclient, "failed on cuMemPrefetchAsync: %s",
 					  cuStrError(rc));
 		goto bailout;
 	}
@@ -1136,12 +1136,13 @@ resume_kernel:
 	rc = cuMemAllocManaged(&dptr, sz, CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
-		gpuClientELog(gclient, "failed on cuMemAllocManaged(%lu): %s",
-					  sz, cuStrError(rc));
+		gpuClientFatal(gclient, "failed on cuMemAllocManaged(%lu): %s",
+					   sz, cuStrError(rc));
 		goto bailout;
 	}
 	kds_dst = (kern_data_store *)dptr;
 	memcpy(kds_dst, kds_dst_head, KDS_HEAD_LENGTH(kds_dst_head));
+	kds_dst->length = sz;
 	if (kds_dst_nitems >= kds_dst_nrooms)
 	{
 		kern_data_store **kds_dst_temp;
@@ -1173,14 +1174,15 @@ resume_kernel:
 						NULL);
 	if (rc != CUDA_SUCCESS)
 	{
-		gpuClientELog(gclient, "failed on cuLaunchKernel: %s", cuStrError(rc));
+		gpuClientFatal(gclient, "failed on cuLaunchKernel: %s", cuStrError(rc));
 		goto bailout;
 	}
+	fprintf(stderr, "cuLaunchKernel done\n");
 
 	rc = cuEventRecord(CU_EVENT_PER_THREAD, CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 	{
-		gpuClientELog(gclient, "failed on cuEventRecord: %s", cuStrError(rc));
+		gpuClientFatal(gclient, "failed on cuEventRecord: %s", cuStrError(rc));
 		goto bailout;
 	}
 
@@ -1188,9 +1190,10 @@ resume_kernel:
 	rc = cuEventSynchronize(CU_EVENT_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 	{
-		gpuClientELog(gclient, "failed on cuEventSynchronize: %s", cuStrError(rc));
+		gpuClientFatal(gclient, "failed on cuEventSynchronize: %s", cuStrError(rc));
 		goto bailout;
 	}
+	fprintf(stderr, "cuEventSynchronize done\n");
 
 	/* status check */
 	if (kgscan->kerror.errcode == ERRCODE_STROM_SUCCESS)
@@ -1199,6 +1202,11 @@ resume_kernel:
 
 		if (kgscan->suspend_count > 0)
 		{
+			if (gpuServiceGoingTerminate())
+			{
+				gpuClientFatal(gclient, "GpuService is going to terminate during GpuScan kernel suspend/resume");
+				goto bailout;
+			}
 			/* reset */
 			kgscan->suspend_count = 0;
 			goto resume_kernel;
@@ -1211,9 +1219,11 @@ resume_kernel:
 		resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
 		resp.u.results.stats.scan.nitems_in = kgscan->nitems_in;
 		resp.u.results.stats.scan.nitems_out = kgscan->nitems_out;
+		fprintf(stderr, "resp nitems=%u usage=%u len=%zu\n", kds_dst->nitems, kds_dst->usage, kds_dst->length);
 		gpuClientWriteBack(gclient,
 						   &resp, resp.u.results.chunks_offset,
 						   kds_dst_nitems, kds_dst_array);
+		fputs("done", stderr);
 	}
 	else if (kgscan->kerror.errcode == ERRCODE_CPU_FALLBACK)
 	{

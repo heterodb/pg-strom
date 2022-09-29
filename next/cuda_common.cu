@@ -55,6 +55,13 @@ __execProjectionCommon(kern_context *kcxt,
 		} while ((curval.v64 = atomicCAS((unsigned long long *)&kds_dst->nitems,
 										 oldval.v64,
 										 newval.v64)) != oldval.v64);
+#if 0
+		printf("nitems %u->%u usage %u->%u len=%lu try_suspend=%d\n",
+			   curval.i.nitems, newval.i.nitems,
+			   curval.i.usage,  newval.i.usage,
+			   kds_dst->length,
+			   (int)try_suspend);
+#endif
 	}
 	oldval.v64 = __shfl_sync(__activemask(), oldval.v64, 0);
 	/* data store no space? */
@@ -101,6 +108,7 @@ ExecProjectionOuterRow(kern_context *kcxt,
 	assert(tupitem_outer != NULL
 		   ? LaneId() <  nvalids
 		   : LaneId() >= nvalids);
+
 	/*
 	 * First, extract the variables from outer/inner tuples, and
 	 * calculate expressions, if any.

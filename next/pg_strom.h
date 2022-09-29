@@ -429,7 +429,11 @@ extern void		__gpuClientELog(gpuClient *gclient,
 								const char *funcname,
 								const char *fmt, ...);
 #define gpuClientELog(gclient,fmt,...)						\
-	__gpuClientELog((gclient), ERRCODE_INTERNAL_ERROR,		\
+	__gpuClientELog((gclient), ERRCODE_DEVICE_INTERNAL,		\
+					__FILE__, __LINE__, __FUNCTION__,		\
+					(fmt), ##__VA_ARGS__)
+#define gpuClientFatal(gclient,fmt,...)						\
+	__gpuClientELog((gclient), ERRCODE_DEVICE_FATAL,		\
 					__FILE__, __LINE__, __FUNCTION__,		\
 					(fmt), ##__VA_ARGS__)
 
@@ -437,6 +441,7 @@ extern __thread int			CU_DINDEX_PER_THREAD;
 extern __thread CUdevice	CU_DEVICE_PER_THREAD;
 extern __thread CUcontext	CU_CONTEXT_PER_THREAD;
 extern __thread CUevent		CU_EVENT_PER_THREAD;
+extern bool		gpuServiceGoingTerminate(void);
 extern CUresult	gpuMemAlloc(CUdeviceptr *dptr, size_t bytesize);
 extern CUresult	gpuMemFree(CUdeviceptr devptr);
 extern void		gpuClientWriteBack(gpuClient *gclient,

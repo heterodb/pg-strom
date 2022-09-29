@@ -95,7 +95,7 @@ pgstrom_init_gucs(void)
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	DefineCustomIntVariable("pgstrom.max_async_tasks",
+	DefineCustomIntVariable("pg_strom.max_async_tasks",
 							"Limit of conccurent execution at the xPU devices",
 							NULL,
 							&pgstrom_max_async_tasks,

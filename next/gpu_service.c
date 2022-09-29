@@ -49,7 +49,6 @@ struct gpuContext
 	pthread_mutex_t	lock;
 	dlist_head		command_list;
 	/* GPU task workers */
-	volatile bool	terminate_workers;
 	int				n_workers;
 	pthread_t		workers[1];
 };
@@ -399,6 +398,12 @@ gpuMemoryPoolInit(gpuMemoryPool *pool, size_t dev_total_memsz)
 	dlist_init(&pool->segment_list);
 }
 
+bool
+gpuServiceGoingTerminate(void)
+{
+	return (gpuserv_bgworker_got_signal != 0);
+}
+
 /*
  * gpuClientPut
  */
@@ -444,6 +449,7 @@ __gpuClientWriteBack(gpuClient *gclient, struct iovec *iov, int iovcnt)
 			nbytes = writev(gclient->sockfd, iov, iovcnt);
 			if (nbytes > 0)
 			{
+				fprintf(stderr, "sent %zu bytes\n", nbytes);
 				do {
 					if (iov->iov_len <= nbytes)
 					{
@@ -468,8 +474,10 @@ __gpuClientWriteBack(gpuClient *gclient, struct iovec *iov, int iovcnt)
 				pg_atomic_fetch_and_u32(&gclient->refcnt, ~1U);
 				close(gclient->sockfd);
 				gclient->sockfd = -1;
+				break;
 			}
 		}
+		fprintf(stderr, "__gpuClientWriteBack done\n");
 	}
 	pthreadMutexUnlock(&gclient->mutex);
 }
@@ -509,15 +517,18 @@ gpuClientWriteBack(gpuClient  *gclient,
 			iov->iov_base = kds;
 			iov->iov_len  = sz1;
 
-			iov = &iov_array[iovcnt++];
-			iov->iov_base = (char *)kds + kds->length;
-			iov->iov_len  = sz2;
+			if (sz2 > 0)
+			{
+				iov = &iov_array[iovcnt++];
+				iov->iov_base = (char *)kds + kds->length - sz2;
+				iov->iov_len  = sz2;
+			}
 			kds->length = (sz1 + sz2);
 		}
 		resp_sz += kds->length;
 	}
 	resp->length = resp_sz;
-
+	fprintf(stderr, "response-length: %zu\n", resp_sz);
 	__gpuClientWriteBack(gclient, iov_array, iovcnt);
 }
 
@@ -575,6 +586,19 @@ __gpuClientELog(gpuClient *gclient,
 	iov.iov_base = &resp;
 	iov.iov_len  = resp.length;
 	__gpuClientWriteBack(gclient, &iov, 1);
+
+	/* unable to continue GPU service, so try to restart */
+	if (errcode == ERRCODE_DEVICE_FATAL)
+	{
+		fprintf(stderr, "(%s:%d, %s) GPU faal - %s\n",
+				resp.u.error.filename,
+				resp.u.error.lineno,
+				resp.u.error.funcname,
+				resp.u.error.message);
+		gpuserv_bgworker_got_signal |= (1 << SIGHUP);
+		pg_memory_barrier();
+		SetLatch(MyLatch);
+	}
 }
 
 /*
@@ -617,16 +641,16 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
 
 	for (i=0; i < kexp->nargs; i++)
 	{
-		kern_expression *arg = (kern_expression *)pos;
+		kern_expression *karg = (kern_expression *)pos;
 
-		if (VARSIZE(kexp) < (pos + VARSIZE(arg) - (char *)kexp))
+		if ((char *)kexp + VARSIZE(kexp) < (char *)karg + VARSIZE(karg))
 		{
 			snprintf(emsg, emsg_sz, "Corrupted XPU code.");
 			return false;
 		}
-		if (!__resolveDevicePointersWalker(gmodule, arg, emsg, emsg_sz))
+		if (!__resolveDevicePointersWalker(gmodule, karg, emsg, emsg_sz))
 			return false;
-		pos += MAXALIGN(VARSIZE(arg));
+		pos += MAXALIGN(VARSIZE(karg));
 	}
 
 	/*
@@ -718,10 +742,10 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	}
 
 	/* resolve device pointers */
-	if (!session->xpucode_use_debug_code)
-		gmodule = &gcontext->normal;
-	else
+	if (session->xpucode_use_debug_code && pgstrom_load_gpu_debug_module)
 		gmodule = &gcontext->debug;
+	else
+		gmodule = &gcontext->normal;
 	if (!__resolveDevicePointers(gmodule, session, emsg, sizeof(emsg)))
 	{
 		gpuClientELog(gclient, "%s", emsg);
@@ -729,6 +753,7 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	}
 	gclient->session = session;
 	gclient->cuda_module = gmodule->cuda_module;
+	fprintf(stderr, "xpucode_use_debug_code = %d\n", session->xpucode_use_debug_code);
 
 	/* success status */
 	memset(&resp, 0, sizeof(resp));
@@ -769,7 +794,7 @@ gpuservGpuWorkerMain(void *__arg)
 	pg_memory_barrier();
 
 	pthreadMutexLock(&gcontext->lock);
-	while (!gcontext->terminate_workers)
+	while (!gpuServiceGoingTerminate())
 	{
 		XpuCommand *xcmd;
 		dlist_node *dnode;
@@ -808,11 +833,10 @@ gpuservGpuWorkerMain(void *__arg)
 				cuMemFree((CUdeviceptr)xcmd);
 			gpuClientPut(gclient);
 			pthreadMutexLock(&gcontext->lock);
-			continue;
 		}
 		if (!pthreadCondWaitTimeout(&gcontext->cond,
-									&gcontext->lock,
-									15000))
+										 &gcontext->lock,
+										 15000))
 		{
 			pthreadMutexUnlock(&gcontext->lock);
 			/* maintenance works */
@@ -1119,6 +1143,10 @@ gpuservSetupGpuModule(gpuModule *gmodule, bool debug_module)
 		jit_options[jit_index] = CU_JIT_GENERATE_LINE_INFO;
 		jit_option_values[jit_index] = (void *)1UL;
 		jit_index++;
+
+		jit_options[jit_index] = CU_JIT_OPTIMIZATION_LEVEL;
+		jit_option_values[jit_index] = (void *)0UL;
+		jit_index++;
 	}
 	/* Link log buffer */
 	jit_options[jit_index] = CU_JIT_ERROR_LOG_BUFFER;
@@ -1186,7 +1214,7 @@ __gpuContextTerminateWorkers(gpuContext *gcontext)
 {
 	int		i;
 
-	gcontext->terminate_workers = true;
+	gpuserv_bgworker_got_signal |= (1 << SIGHUP);
 	pg_memory_barrier();
 
 	pthreadCondBroadcast(&gcontext->cond);
@@ -1203,6 +1231,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 	GpuDevAttributes *dattrs = &gpuDevAttrs[cuda_dindex];
 	gpuContext *gcontext = NULL;
 	CUresult	rc;
+	size_t		stack_sz;
 	int			i, status;
 	struct sockaddr_un addr;
 	struct epoll_event ev;
@@ -1251,6 +1280,16 @@ gpuservSetupGpuContext(int cuda_dindex)
 						 gcontext->cuda_device);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuCtxCreate: %s", cuStrError(rc));
+
+		rc = cuCtxGetLimit(&stack_sz, CU_LIMIT_STACK_SIZE);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxGetLimit: %s", cuStrError(rc));
+		//stack_sz += 6144;	// 6kB extra stack
+		stack_sz += 2048;
+		rc = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, stack_sz);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxSetLimit: %s", cuStrError(rc));
+
 		gpuservSetupGpuModule(&gcontext->normal, false);
 		if (pgstrom_load_gpu_debug_module)
 			gpuservSetupGpuModule(&gcontext->debug, true);
@@ -1385,7 +1424,7 @@ gpuservBgWorkerMain(Datum arg)
 			dlist_push_tail(&gpuserv_gpucontext_list, &gcontext->chain);
 		}
 
-		while (!gpuserv_bgworker_got_signal)
+		while (!gpuServiceGoingTerminate())
 		{
 			struct epoll_event	ep_ev;
 			int		status;

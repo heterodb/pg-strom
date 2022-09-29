@@ -991,7 +991,10 @@ __codegen_func_expression(codegen_context *context,
 			return -1;
 	}
 	if (buf)
+	{
 		SET_VARSIZE(buf->data + pos, buf->len - pos);
+		elog(INFO, "func=%s pos=%u len=%u", get_func_name(func_oid), pos, buf->len - pos);
+	}
 	return 0;
 }
 
@@ -1051,11 +1054,15 @@ codegen_bool_expression(codegen_context *context, BoolExpr *b)
 	foreach (lc, b->args)
 	{
 		Expr   *arg = lfirst(lc);
+
 		if (codegen_expression_walker(context, arg) < 0)
 			return -1;
 	}
 	if (buf)
+	{
 		SET_VARSIZE(buf->data + pos, buf->len - pos);
+		elog(INFO, "Bool pos=%u len=%u", pos, buf->len - pos);
+	}
 	return 0;
 }
 
@@ -1320,11 +1327,11 @@ attach_varloads_xpucode(codegen_context *context,
 	kexp.opcode = FuncOpCode__LoadVars;
 	kexp.nargs = 1;
 	kexp.exptype = arg->exptype;
-	__appendBinaryStringInfo(&buf, (const char *)&kexp,
-							 offsetof(kern_expression, u.data));
+	__appendBinaryStringInfo(&buf, (const char *)&kexp, SizeOfKernExpr(0));
 	__appendBinaryStringInfo(&buf, (const char *)arg, VARSIZE(arg));
 	__appendBinaryStringInfo(&buf, kload, offsetof(kern_preload_vars, kvars[nloads]));
 	SET_VARSIZE(buf.data, buf.len);
+	elog(INFO, "VarLoad len=%u", buf.len);
 
 	return (bytea *)buf.data;
 }
