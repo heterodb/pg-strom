@@ -449,7 +449,6 @@ __gpuClientWriteBack(gpuClient *gclient, struct iovec *iov, int iovcnt)
 			nbytes = writev(gclient->sockfd, iov, iovcnt);
 			if (nbytes > 0)
 			{
-				fprintf(stderr, "sent %zu bytes\n", nbytes);
 				do {
 					if (iov->iov_len <= nbytes)
 					{
@@ -477,7 +476,6 @@ __gpuClientWriteBack(gpuClient *gclient, struct iovec *iov, int iovcnt)
 				break;
 			}
 		}
-		fprintf(stderr, "__gpuClientWriteBack done\n");
 	}
 	pthreadMutexUnlock(&gclient->mutex);
 }
@@ -528,7 +526,6 @@ gpuClientWriteBack(gpuClient  *gclient,
 		resp_sz += kds->length;
 	}
 	resp->length = resp_sz;
-	fprintf(stderr, "response-length: %zu\n", resp_sz);
 	__gpuClientWriteBack(gclient, iov_array, iovcnt);
 }
 
@@ -753,7 +750,6 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	}
 	gclient->session = session;
 	gclient->cuda_module = gmodule->cuda_module;
-	fprintf(stderr, "xpucode_use_debug_code = %d\n", session->xpucode_use_debug_code);
 
 	/* success status */
 	memset(&resp, 0, sizeof(resp));

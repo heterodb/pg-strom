@@ -37,6 +37,7 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
+#include "commands/defrem.h"
 #include "commands/extension.h"
 #include "commands/typecmds.h"
 #include "common/hashfn.h"
@@ -229,7 +230,10 @@ struct pgstromTaskState
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
 	ProjectionInfo	   *base_proj;	/* base --> custom_tlist projection */
-	/* callback used by exec.c */
+	/* Request command buffer */
+	XpuCommand		   *xcmd_req;
+	size_t				xcmd_len;
+	/* callbacks */
 	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
 	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts,
 									   struct iovec *xcmd_iov, int *xcmd_iovcnt);
@@ -382,7 +386,11 @@ pgstromBuildSessionInfo(PlanState *ps,
 						uint32_t kcxt_extra_bufsz,
 						const bytea *xpucode_scan_quals,
 						const bytea *xpucode_scan_projs);
+extern void		pgstromExecInitTaskState(pgstromTaskState *pts,
+										 List *outer_dev_quals);
 extern TupleTableSlot  *pgstromExecTaskState(pgstromTaskState *pts);
+extern void		pgstromExecEndTaskState(pgstromTaskState *pts);
+extern void		pgstromExecResetTaskState(pgstromTaskState *pts);
 extern void		pgstrom_init_executor(void);
 
 /*

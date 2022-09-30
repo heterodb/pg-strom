@@ -442,14 +442,17 @@ pgstromRelScanChunkNormal(pgstromTaskState *pts,
 	if (pts->br_state)
 	{
 		/* scan by BRIN index */
-		for (;;)
+		while (!pts->scan_done)
 		{
 			if (!pts->curr_tbm)
 			{
 				TBMIterateResult *next_tbm = pgstromBrinIndexNextBlock(pts);
 
 				if (!next_tbm)
+				{
+					pts->scan_done = true;
 					break;
+				}
 				if (!table_scan_bitmap_next_block(scan, next_tbm))
 					elog(ERROR, "failed on table_scan_bitmap_next_block");
 				pts->curr_tbm = next_tbm;
@@ -466,13 +469,16 @@ pgstromRelScanChunkNormal(pgstromTaskState *pts,
 	else
 	{
 		/* full table scan */
-		for (;;)
+		while (!pts->scan_done)
 		{
 			if (!TTS_EMPTY(slot) &&
 				!__kds_row_insert_tuple(slot, kds, kds_length))
 				break;
 			if (!table_scan_getnextslot(scan, estate->es_direction, slot))
+			{
+				pts->scan_done = true;
 				break;
+			}
 			if (!__kds_row_insert_tuple(slot, kds, kds_length))
 				break;
 		}

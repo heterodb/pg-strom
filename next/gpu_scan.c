@@ -653,96 +653,6 @@ PlanGpuScanPath(PlannerInfo *root,
 	return &cscan->scan.plan;
 }
 
-static XpuCommand *
-gpuScanChunkArrowFdw(pgstromTaskState *pts,
-					 struct iovec *xcmd_iov, int *xcmd_iovcnt)
-{
-	elog(ERROR, "not implemented yet");
-	return NULL;
-}
-
-static XpuCommand *
-gpuScanChunkGpuCache(pgstromTaskState *pts,
-					 struct iovec *xcmd_iov, int *xcmd_iovcnt)
-{
-	elog(ERROR, "not implemented yet");
-	return NULL;
-}
-
-static XpuCommand *
-gpuScanChunkGpuDirect(pgstromTaskState *pts,
-					  struct iovec *xcmd_iov, int *xcmd_iovcnt)
-{
-	elog(ERROR, "not implemented yet");
-	return NULL;
-}
-
-static XpuCommand *
-gpuScanChunkNormal(pgstromTaskState *pts,
-				   struct iovec *xcmd_iov, int *xcmd_iovcnt)
-{
-	GpuScanState   *gss = (GpuScanState *)pts;
-	XpuCommand	   *xcmd = gss->xcmd_req;
-	kernExecScan   *kscan = &xcmd->u.scan;
-	kern_data_store	*kds;
-	void		   *__usage;
-	size_t			kds_length;
-	size_t			sz1, sz2;
-
-	kds = (kern_data_store *)((char *)kscan + kscan->kds_src_offset);
-	kds->nitems	= 0;
-	kds->usage	= 0;
-	kds_length	= gss->xcmd_len - (offsetof(XpuCommand, u.scan) +
-								   kscan->kds_src_offset);
-	if (!pgstromRelScanChunkNormal(pts, kds, kds_length))
-		return NULL;
-
-	/* setup iovec to skip the hole between row-index and tuples-buffer */
-	sz1 = KDS_HEAD_LENGTH(kds) + MAXALIGN(sizeof(uint32_t) * kds->nitems);
-	sz2 = __kds_unpack(kds->usage);
-	Assert(sz1 + sz2 <= kds_length);
-	__usage = ((char *)kds + kds_length - sz2);
-	kds->length = sz1 + sz2;
-
-	sz1 += (offsetof(XpuCommand, u.scan) + kscan->kds_src_offset);
-	xcmd->length = sz1 + sz2;
-
-	xcmd_iov[0].iov_base = xcmd;
-	xcmd_iov[0].iov_len  = sz1;
-	xcmd_iov[1].iov_base = __usage;
-	xcmd_iov[1].iov_len  = sz2;
-	*xcmd_iovcnt = 2;
-
-	return xcmd;
-}
-
-static TupleTableSlot *
-gpuScanNextTuple(pgstromTaskState *pts)
-{
-	for (;;)
-	{
-		kern_data_store *kds = pts->curr_kds;
-		int64_t		index = pts->curr_index++;
-
-		if (index < kds->nitems)
-		{
-			TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
-			kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds, index);
-
-			pts->curr_htup.t_len = tupitem->t_len;
-			pts->curr_htup.t_data = &tupitem->htup;
-			return ExecStoreHeapTuple(&pts->curr_htup, slot, false);
-		}
-		if (++pts->curr_chunk < pts->curr_resp->u.results.chunks_nitems)
-		{
-			pts->curr_kds = (kern_data_store *)((char *)kds + kds->length);
-			pts->curr_index = 0;
-			continue;
-		}
-		return NULL;
-	}
-}
-
 /*
  * CreateGpuScanState
  */
@@ -762,134 +672,24 @@ CreateGpuScanState(CustomScan *cscan)
 }
 
 /*
- * setupGpuScanRequestBuffer
- */
-static void
-setupGpuScanRequestBuffer(GpuScanState *gss,
-						  TupleDesc tdesc_src,
-						  TupleDesc tdesc_dst,
-						  char format,
-						  size_t bufsz)
-{
-	XpuCommand	   *xcmd;
-	kernExecScan   *kscan;
-	kern_data_store *kds;
-	size_t			len, off;
-
-	len = (offsetof(XpuCommand, u.scan.data) +
-		   estimate_kern_data_store(tdesc_src) +
-		   estimate_kern_data_store(tdesc_dst) + bufsz);
-	xcmd = palloc(len);
-
-	memset(xcmd, 0, offsetof(XpuCommand, u.scan.data));
-	xcmd->magic = XpuCommandMagicNumber;
-	xcmd->tag = XpuCommandTag__XpuScanExec;
-	xcmd->length = len;
-
-	kscan = &xcmd->u.scan;
-	kscan->kds_dst_offset = offsetof(kernExecScan, data);
-	kds = (kern_data_store *)kscan->data;
-	off = setup_kern_data_store(kds, tdesc_dst, 0, KDS_FORMAT_ROW);
-	if (format != KDS_FORMAT_COLUMN)
-	{
-		kscan->kds_src_offset = kscan->kds_dst_offset + off;
-		kds = (kern_data_store *)((char *)kscan + kscan->kds_src_offset);
-		setup_kern_data_store(kds, tdesc_src, 0, format);
-	}
-	gss->xcmd_req = xcmd;
-	gss->xcmd_len = len;
-}
-
-/*
  * ExecInitGpuScan
  */
 static void
 ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 {
 	GpuScanState   *gss = (GpuScanState *)node;
-	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
-	Relation		rel = gss->pts.css.ss.ss_currentRelation;
-	TupleDesc		tupdesc;
-	List		   *dev_quals;
-	List		   *tlist_dev = NIL;
-	ListCell	   *lc;
-	char			format;
-	size_t			bufsz;
 
 	/* sanity checks */
-	Assert(rel != NULL &&
+	Assert(node->ss.ss_currentRelation != NULL &&
 		   outerPlanState(node) == NULL &&
 		   innerPlanState(node) == NULL);
-
-	/*
-	 * Re-initialization of scan tuple-descriptor and projection-info,
-	 * because commit 1a8a4e5cde2b7755e11bde2ea7897bd650622d3e of
-	 * PostgreSQL makes to assign result of ExecTypeFromTL() instead
-	 * of ExecCleanTypeFromTL; that leads incorrect projection.
-	 * So, we try to remove junk attributes from the scan-descriptor.
-	 *
-	 * And, device projection returns a tuple in heap-format, so we
-	 * prefer TTSOpsHeapTuple, instead of the TTSOpsVirtual.
-	 */
-	tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist);
-	ExecInitScanTupleSlot(estate, &gss->pts.css.ss, tupdesc,
-						  &TTSOpsHeapTuple);
-	ExecAssignScanProjectionInfoWithVarno(&gss->pts.css.ss, INDEX_VAR);
-
-	/*
-	 * Init resources for CPU fallbacks
-	 */
-	dev_quals = (List *)
-		fixup_varnode_to_origin((Node *)gss->gs_info.dev_quals,
-								cscan->custom_scan_tlist);
-	gss->pts.base_quals = ExecInitQual(dev_quals, &gss->pts.css.ss.ps);
-	foreach (lc, cscan->custom_scan_tlist)
-	{
-		TargetEntry *tle = lfirst(lc);
-
-		if (!tle->resjunk)
-			tlist_dev = lappend(tlist_dev, tle);
-	}
-	gss->pts.base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
-												  table_slot_callbacks(rel));
-	gss->pts.base_proj = ExecBuildProjectionInfo(tlist_dev,
-												 gss->pts.css.ss.ps.ps_ExprContext,
-												 gss->pts.base_slot,
-												 &gss->pts.css.ss.ps,
-												 RelationGetDescr(rel));
-	/* BRIN Index If Any */
 	pgstromBrinIndexExecBegin(&gss->pts,
 							  gss->gs_info.index_oid,
 							  gss->gs_info.index_conds,
 							  gss->gs_info.index_quals);
-
-	if (gss->pts.af_state)
-	{
-		gss->pts.cb_next_chunk = gpuScanChunkArrowFdw;
-		format = KDS_FORMAT_ARROW;
-		bufsz = (1UL<<16);	/* 64kB for iovec */
-	}
-	else if (gss->pts.gc_state)
-	{
-		gss->pts.cb_next_chunk = gpuScanChunkGpuCache;
-		format = KDS_FORMAT_COLUMN;
-		bufsz = 0;
-	}
-	else if (gss->pts.gd_state)
-	{
-		gss->pts.cb_next_chunk = gpuScanChunkGpuDirect;
-		format = KDS_FORMAT_BLOCK;
-		bufsz = sizeof(BlockNumber) * PGSTROM_CHUNK_SIZE / BLCKSZ + (2UL<<20);
-	}
-	else
-	{
-		gss->pts.cb_next_chunk = gpuScanChunkNormal;
-		format = KDS_FORMAT_ROW;
-		bufsz = PGSTROM_CHUNK_SIZE;
-	}
-	gss->pts.cb_next_tuple = gpuScanNextTuple;
-
-	setupGpuScanRequestBuffer(gss, RelationGetDescr(rel), tupdesc, format, bufsz);
+	//pgstromGpuCacheExecBegin here
+	//pgstromGpuDirectExecBegin here
+	pgstromExecInitTaskState(&gss->pts, gss->gs_info.dev_quals);
 }
 
 /*
@@ -945,14 +745,7 @@ ExecEndGpuScan(CustomScanState *node)
 {
 	GpuScanState   *gss = (GpuScanState *)node;
 
-	if (gss->pts.conn)
-		xpuClientCloseSession(gss->pts.conn);
-	if (gss->pts.br_state)
-		pgstromBrinIndexExecEnd(&gss->pts);
-	if (gss->pts.base_slot)
-		ExecDropSingleTupleTableSlot(gss->pts.base_slot);
-	if (gss->pts.css.ss.ss_currentScanDesc)
-		table_endscan(gss->pts.css.ss.ss_currentScanDesc);
+	pgstromExecEndTaskState(&gss->pts);
 }
 
 /*
@@ -963,13 +756,7 @@ ExecReScanGpuScan(CustomScanState *node)
 {
 	GpuScanState   *gss = (GpuScanState *)node;
 
-	if (gss->pts.conn)
-	{
-		xpuClientCloseSession(gss->pts.conn);
-		gss->pts.conn = NULL;
-	}
-	if (gss->pts.br_state)
-		pgstromBrinIndexExecReset(&gss->pts);
+	pgstromExecResetTaskState(&gss->pts);
 }
 
 /*
@@ -1177,7 +964,6 @@ resume_kernel:
 		gpuClientFatal(gclient, "failed on cuLaunchKernel: %s", cuStrError(rc));
 		goto bailout;
 	}
-	fprintf(stderr, "cuLaunchKernel done\n");
 
 	rc = cuEventRecord(CU_EVENT_PER_THREAD, CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
@@ -1193,7 +979,6 @@ resume_kernel:
 		gpuClientFatal(gclient, "failed on cuEventSynchronize: %s", cuStrError(rc));
 		goto bailout;
 	}
-	fprintf(stderr, "cuEventSynchronize done\n");
 
 	/* status check */
 	if (kgscan->kerror.errcode == ERRCODE_STROM_SUCCESS)
@@ -1219,11 +1004,9 @@ resume_kernel:
 		resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
 		resp.u.results.stats.scan.nitems_in = kgscan->nitems_in;
 		resp.u.results.stats.scan.nitems_out = kgscan->nitems_out;
-		fprintf(stderr, "resp nitems=%u usage=%u len=%zu\n", kds_dst->nitems, kds_dst->usage, kds_dst->length);
 		gpuClientWriteBack(gclient,
 						   &resp, resp.u.results.chunks_offset,
 						   kds_dst_nitems, kds_dst_array);
-		fputs("done", stderr);
 	}
 	else if (kgscan->kerror.errcode == ERRCODE_CPU_FALLBACK)
 	{

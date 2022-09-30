@@ -301,6 +301,7 @@ kern_form_heaptuple(kern_context *kcxt,
 				STROM_ELOG(kcxt, "unexpected type length");
 				return -1;
 			}
+			t_hoff = t_next + sz;
 		}
 		else
 		{

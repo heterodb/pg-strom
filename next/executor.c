@@ -203,7 +203,6 @@ __xpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
 			   xcmd->tag == XpuCommandTag__CPUFallback);
 		dlist_push_tail(&conn->ready_cmds_list, &xcmd->chain);
 		conn->num_ready_cmds++;
-		fprintf(stderr, "%s: response attached. (%p)\n", __FUNCTION__, xcmd);
 	}
 	SetLatch(MyLatch);
 	pthreadMutexUnlock(&conn->mutex);
@@ -755,8 +754,7 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 			xcmd = pts->cb_next_chunk(pts, xcmd_iov, &xcmd_iovcnt);
 			if (!xcmd)
 			{
-				/* end of scan */
-				pts->scan_done = true;
+				Assert(pts->scan_done);
 				break;
 			}
 			xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
@@ -801,6 +799,254 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 	return __waitAndFetchNextXpuCommand(pts, true);
 }
 
+static XpuCommand *
+pgstromScanChunkArrowFdw(pgstromTaskState *pts,
+						 struct iovec *xcmd_iov, int *xcmd_iovcnt)
+{
+	elog(ERROR, "not implemented yet");
+	return NULL;
+}
+
+static XpuCommand *
+pgstromScanChunkGpuCache(pgstromTaskState *pts,
+						 struct iovec *xcmd_iov, int *xcmd_iovcnt)
+{
+	elog(ERROR, "not implemented yet");
+	return NULL;
+}
+
+static XpuCommand *
+pgstromScanChunkGpuDirect(pgstromTaskState *pts,
+						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
+{
+	elog(ERROR, "not implemented yet");
+	return NULL;
+}
+
+static XpuCommand *
+pgstromScanChunkNormal(pgstromTaskState *pts,
+					   struct iovec *xcmd_iov, int *xcmd_iovcnt)
+{
+	XpuCommand	   *xcmd = pts->xcmd_req;
+	kernExecScan   *kscan = &xcmd->u.scan;
+	kern_data_store	*kds;
+	void		   *__usage;
+	size_t			kds_length;
+	size_t			sz1, sz2;
+
+	kds = (kern_data_store *)((char *)kscan + kscan->kds_src_offset);
+	kds->nitems	= 0;
+	kds->usage	= 0;
+	kds_length	= pts->xcmd_len - (offsetof(XpuCommand, u.scan) +
+								   kscan->kds_src_offset);
+	if (!pgstromRelScanChunkNormal(pts, kds, kds_length))
+		return NULL;
+
+	/* setup iovec to skip the hole between row-index and tuples-buffer */
+	sz1 = KDS_HEAD_LENGTH(kds) + MAXALIGN(sizeof(uint32_t) * kds->nitems);
+	sz2 = __kds_unpack(kds->usage);
+	Assert(sz1 + sz2 <= kds_length);
+	__usage = ((char *)kds + kds_length - sz2);
+	kds->length = sz1 + sz2;
+
+	sz1 += (offsetof(XpuCommand, u.scan) + kscan->kds_src_offset);
+	xcmd->length = sz1 + sz2;
+
+	xcmd_iov[0].iov_base = xcmd;
+	xcmd_iov[0].iov_len  = sz1;
+	xcmd_iov[1].iov_base = __usage;
+	xcmd_iov[1].iov_len  = sz2;
+	*xcmd_iovcnt = 2;
+
+	return xcmd;
+}
+
+/*
+ * pgstromScanNextTuple
+ */
+static TupleTableSlot *
+pgstromScanNextTuple(pgstromTaskState *pts)
+{
+	for (;;)
+	{
+		kern_data_store *kds = pts->curr_kds;
+		int64_t		index = pts->curr_index++;
+
+		if (index < kds->nitems)
+		{
+			TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
+			kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds, index);
+
+			pts->curr_htup.t_len = tupitem->t_len;
+			pts->curr_htup.t_data = &tupitem->htup;
+			return ExecStoreHeapTuple(&pts->curr_htup, slot, false);
+		}
+		if (++pts->curr_chunk < pts->curr_resp->u.results.chunks_nitems)
+		{
+			pts->curr_kds = (kern_data_store *)((char *)kds + kds->length);
+			pts->curr_index = 0;
+			continue;
+		}
+		return NULL;
+	}
+}
+
+/*
+ * __setupTaskStateRequestBuffer
+ */
+static void
+__setupTaskStateRequestBuffer(pgstromTaskState *pts,
+							  TupleDesc tdesc_src,
+							  TupleDesc tdesc_dst,
+							  char format,
+							  size_t bufsz)
+{
+	XpuCommand	   *xcmd;
+	kernExecScan   *kscan;
+	kern_data_store *kds;
+	size_t			off;
+
+	bufsz += MAXALIGN(offsetof(XpuCommand, u.scan.data));
+	if (tdesc_src)
+		bufsz += estimate_kern_data_store(tdesc_src);
+	if (tdesc_dst)
+		bufsz += estimate_kern_data_store(tdesc_dst);
+	xcmd = palloc(bufsz);
+
+	memset(xcmd, 0, offsetof(XpuCommand, u.scan.data));
+	xcmd->magic  = XpuCommandMagicNumber;
+	xcmd->tag    = XpuCommandTag__XpuScanExec;
+	xcmd->length = bufsz;
+
+	kscan = &xcmd->u.scan;
+	off = offsetof(kernExecScan, data);
+	if (tdesc_dst)
+	{
+		kscan->kds_dst_offset = off;
+		kds  = (kern_data_store *)((char *)kscan + off);
+		off += setup_kern_data_store(kds, tdesc_dst, 0, KDS_FORMAT_ROW);
+	}
+	if (tdesc_src)
+	{
+		kscan->kds_src_offset = off;
+		kds  = (kern_data_store *)((char *)kscan + off);
+		off += setup_kern_data_store(kds, tdesc_src, 0, format);
+	}
+	pts->xcmd_req = xcmd;
+	pts->xcmd_len = bufsz;
+}
+
+/*
+ * pgstromExecInitTaskState
+ */
+void
+pgstromExecInitTaskState(pgstromTaskState *pts,
+						 List *outer_dev_quals)
+{
+	EState		   *estate = pts->css.ss.ps.state;
+	CustomScan	   *cscan = (CustomScan *)pts->css.ss.ps.plan;
+	Relation		rel = pts->css.ss.ss_currentRelation;
+	TupleDesc		tupdesc_src = RelationGetDescr(rel);
+	TupleDesc		tupdesc_dst;
+	List		   *tlist_dev = NIL;
+	ListCell	   *lc;
+//	ArrowFdwState  *af_state = NULL;
+	char			format;
+	size_t			bufsz;
+
+	/*
+	 * PG-Strom supports:
+	 * - regular relation with 'heap' access method
+	 * - foreign-table with 'arrow_fdw' driver
+	 */
+	if (RelationGetForm(rel)->relkind == RELKIND_RELATION ||
+		RelationGetForm(rel)->relkind == RELKIND_MATVIEW)
+	{
+		Oid		am_oid = RelationGetForm(rel)->relam;
+
+		if (am_oid != HEAP_TABLE_AM_OID)
+			elog(ERROR, "PG-Strom does not support table access method: %s",
+				 get_am_name(am_oid));
+	}
+	else if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
+	{
+		//call pgstromArrowFdwExecBegin here
+		elog(ERROR, "Arrow support is not implemented yet");
+	}
+	else
+	{
+		elog(ERROR, "Bug? PG-Strom does not support relation type of '%s'",
+			 RelationGetRelationName(rel));
+	}
+
+	/*
+	 * Re-initialization of scan tuple-descriptor and projection-info,
+	 * because commit 1a8a4e5cde2b7755e11bde2ea7897bd650622d3e of
+	 * PostgreSQL makes to assign result of ExecTypeFromTL() instead
+	 * of ExecCleanTypeFromTL; that leads incorrect projection.
+	 * So, we try to remove junk attributes from the scan-descriptor.
+	 *
+	 * And, device projection returns a tuple in heap-format, so we
+	 * prefer TTSOpsHeapTuple, instead of the TTSOpsVirtual.
+	 */
+	tupdesc_dst = ExecCleanTypeFromTL(cscan->custom_scan_tlist);
+	ExecInitScanTupleSlot(estate, &pts->css.ss, tupdesc_dst,
+						  &TTSOpsHeapTuple);
+	ExecAssignScanProjectionInfoWithVarno(&pts->css.ss, INDEX_VAR);
+
+	/*
+	 * Init resources for CPU fallbacks
+	 */
+	outer_dev_quals = (List *)
+		fixup_varnode_to_origin((Node *)outer_dev_quals,
+								cscan->custom_scan_tlist);
+	pts->base_quals = ExecInitQual(outer_dev_quals, &pts->css.ss.ps);
+	foreach (lc, cscan->custom_scan_tlist)
+	{
+		TargetEntry *tle = lfirst(lc);
+
+		if (!tle->resjunk)
+			tlist_dev = lappend(tlist_dev, tle);
+	}
+	pts->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
+											  table_slot_callbacks(rel));
+	pts->base_proj = ExecBuildProjectionInfo(tlist_dev,
+											 pts->css.ss.ps.ps_ExprContext,
+											 pts->base_slot,
+											 &pts->css.ss.ps,
+											 RelationGetDescr(rel));
+	/*
+	 * Setup request buffer
+	 */
+	if (pts->af_state)
+	{
+		pts->cb_next_chunk = pgstromScanChunkArrowFdw;
+		format = KDS_FORMAT_ARROW;
+		bufsz  = (1UL << 16);		/* 64kB for iovec */
+	}
+	else if (pts->gc_state)
+	{
+		pts->cb_next_chunk = pgstromScanChunkGpuCache;
+		tupdesc_src = NULL;			/* no kds_src with GpuCache */
+		format = KDS_FORMAT_COLUMN;
+	}
+	else if (pts->gd_state)
+	{
+		pts->cb_next_chunk = pgstromScanChunkGpuDirect;
+		format = KDS_FORMAT_BLOCK;
+		bufsz  = (sizeof(BlockNumber) * PGSTROM_CHUNK_SIZE / BLCKSZ +
+				  (4UL << 20));	/* 4MB buffer for dirty cache */
+	}
+	else
+	{
+		pts->cb_next_chunk = pgstromScanChunkNormal;
+		format = KDS_FORMAT_ROW;
+		bufsz  = PGSTROM_CHUNK_SIZE;
+	}
+	__setupTaskStateRequestBuffer(pts, tupdesc_src, tupdesc_dst, format, bufsz);
+	pts->cb_next_tuple = pgstromScanNextTuple;
+}
+
 /*
  * pgstromExecTaskState
  */
@@ -837,6 +1083,37 @@ pgstromExecTaskState(pgstromTaskState *pts)
 		}
 	}
 	return slot;
+}
+
+/*
+ * pgstromExecEndTaskState
+ */
+void
+pgstromExecEndTaskState(pgstromTaskState *pts)
+{
+	if (pts->conn)
+		xpuClientCloseSession(pts->conn);
+	if (pts->br_state)
+		pgstromBrinIndexExecEnd(pts);
+	if (pts->base_slot)
+		ExecDropSingleTupleTableSlot(pts->base_slot);
+	if (pts->css.ss.ss_currentScanDesc)
+		table_endscan(pts->css.ss.ss_currentScanDesc);
+}
+
+/*
+ * pgstromExecResetTaskState
+ */
+void
+pgstromExecResetTaskState(pgstromTaskState *pts)
+{
+	if (pts->conn)
+	{
+		xpuClientCloseSession(pts->conn);
+		pts->conn = NULL;
+	}
+	if (pts->br_state)
+		pgstromBrinIndexExecReset(pts);
 }
 
 /*
