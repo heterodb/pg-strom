@@ -42,40 +42,54 @@ xpu_bpchar_is_valid(kern_context *kcxt, const xpu_bpchar_t *arg)
 STATIC_FUNCTION(bool)
 xpu_bpchar_datum_ref(kern_context *kcxt,
 					 xpu_datum_t *__result,
+					 const void *addr)
+{
+	xpu_bpchar_t *result = (xpu_bpchar_t *)__result;
+
+	if (!addr)
+		result->isnull = true;
+	else if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+	{
+		result->isnull = false;
+		result->value  = (const char *)addr;
+		result->length = -1;
+	}
+	else
+	{
+		result->isnull = false;
+		result->value  = VARDATA_ANY(addr);
+		result->length = bpchar_truelen(result->value, VARSIZE_ANY_EXHDR(addr));
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bpchar_arrow_ref(kern_context *kcxt,
+					 xpu_datum_t *__result,
 					 const kern_colmeta *cmeta,
 					 const void *addr, int len)
 {
 	xpu_bpchar_t *result = (xpu_bpchar_t *)__result;
 
-	memset(result, 0, sizeof(xpu_bpchar_t));
-	result->ops = &xpu_bpchar_ops;
 	if (!addr)
 		result->isnull = true;
 	else
 	{
-		result->value = (const char *)addr;
+		result->isnull = false;
+		result->value  = (const char *)addr;
 		result->length = len;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_bpchar_datum_move(kern_context *kcxt,
+xpu_bpchar_arrow_move(kern_context *kcxt,
 					  char *buffer,
 					  const kern_colmeta *cmeta,
 					  const void *addr, int len)
 {
 	if (!addr)
 		return 0;
-	if (len < 0)
-	{
-		/* compressed or external varlena */
-		len = VARSIZE_ANY(addr);
-		if (buffer)
-			memcpy(buffer, addr, len);
-		return len;
-	}
-	/* normal uncompressed cases */
 	if (buffer)
 	{
 		memcpy(buffer + VARHDRSZ, addr, len);
@@ -87,9 +101,9 @@ xpu_bpchar_datum_move(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_bpchar_datum_store(kern_context *kcxt,
 					   char *buffer,
-					   xpu_datum_t *__arg)
+					   const xpu_datum_t *__arg)
 {
-	xpu_bpchar_t *arg = (xpu_bpchar_t *)__arg;
+	const xpu_bpchar_t *arg = (const xpu_bpchar_t *)__arg;
 	int		sz;
 
 	if (arg->isnull)
@@ -115,9 +129,9 @@ xpu_bpchar_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_bpchar_datum_hash(kern_context*kcxt,
 					  uint32_t *p_hash,
-					  xpu_datum_t *__arg)
+					  const xpu_datum_t *__arg)
 {
-	xpu_bpchar_t *arg = (xpu_bpchar_t *)__arg;
+	const xpu_bpchar_t *arg = (const xpu_bpchar_t *)__arg;
 
 	if (arg->isnull)
 		*p_hash = 0;
@@ -146,40 +160,54 @@ xpu_text_is_valid(kern_context *kcxt, const xpu_text_t *arg)
 STATIC_FUNCTION(bool)
 xpu_text_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
+				   const void *addr)
+{
+	xpu_text_t *result = (xpu_text_t *)__result;
+
+	if (!addr)
+		result->isnull = true;
+	else if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+	{
+		result->isnull = false;
+		result->value  = (const char *)addr;
+		result->length = -1;
+	}
+	else
+	{
+		result->isnull = false;
+		result->value  = VARDATA_ANY(addr);
+		result->length = VARSIZE_ANY(addr);
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_text_arrow_ref(kern_context *kcxt,
+				   xpu_datum_t *__result,
 				   const kern_colmeta *cmeta,
 				   const void *addr, int len)
 {
 	xpu_text_t *result = (xpu_text_t *)__result;
 
-	memset(result, 0, sizeof(xpu_text_t));
-	result->ops = &xpu_text_ops;
 	if (!addr)
 		result->isnull = true;
 	else
 	{
-		result->length = -1;
+		result->isnull = false;
 		result->value  = (const char *)addr;
+		result->length = len;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_text_datum_move(kern_context *kcxt,
+xpu_text_arrow_move(kern_context *kcxt,
 					char *buffer,
 					const kern_colmeta *cmeta,
 					const void *addr, int len)
 {
 	if (!addr)
 		return 0;
-	if (len < 0)
-	{
-		/* compressed or external varlena */
-		len = VARSIZE_ANY(addr);
-		if (buffer)
-			memcpy(buffer, addr, len);
-		return len;
-	}
-	/* normal uncompressed cases */
 	if (buffer)
 	{
 		memcpy(buffer + VARHDRSZ, addr, len);
@@ -191,9 +219,9 @@ xpu_text_datum_move(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_text_datum_store(kern_context *kcxt,
 					 char *buffer,
-					 xpu_datum_t *__arg)
+					 const xpu_datum_t *__arg)
 {
-	xpu_text_t *arg = (xpu_text_t *)__arg;
+	const xpu_text_t *arg = (const xpu_text_t *)__arg;
 	int		sz;
 
 	if (arg->isnull)
@@ -219,9 +247,9 @@ xpu_text_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_text_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					xpu_datum_t *__arg)
+					const xpu_datum_t *__arg)
 {
-	xpu_text_t *arg = (xpu_text_t *)__arg;
+	const xpu_text_t *arg = (const xpu_text_t *)__arg;
 
 	if (arg->isnull)
 		*p_hash = 0;
@@ -250,29 +278,68 @@ xpu_bytea_is_valid(kern_context *kcxt, const xpu_bytea_t *arg)
 STATIC_FUNCTION(bool)
 xpu_bytea_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
-				   const kern_colmeta *cmeta,
-				   const void *addr, int len)
+					const void *addr)
 {
 	xpu_bytea_t *result = (xpu_bytea_t *)__result;
 
-	memset(result, 0, sizeof(xpu_bytea_t));
-	result->ops = &xpu_bytea_ops;
+	if (!addr)
+		result->isnull = true;
+	else if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+	{
+		result->isnull = false;
+		result->value  = (const char *)addr;
+		result->length = -1;
+	}
+	else
+	{
+		result->isnull = false;
+		result->value  = VARDATA_ANY(addr);
+		result->length = VARSIZE_ANY(addr);
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bytea_arrow_ref(kern_context *kcxt,
+					xpu_datum_t *__result,
+					const kern_colmeta *cmeta,
+					const void *addr, int len)
+{
+	xpu_bytea_t *result = (xpu_bytea_t *)__result;
+
 	if (!addr)
 		result->isnull = true;
 	else
 	{
+		result->isnull = false;
+		result->value  = (const char *)addr;
 		result->length = len;
-		result->value = (const char *)addr;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
+xpu_bytea_arrow_move(kern_context *kcxt,
+					 char *buffer,
+					 const kern_colmeta *cmeta,
+					 const void *addr, int len)
+{
+	if (!addr)
+		return 0;
+	if (buffer)
+	{
+		memcpy(buffer + VARHDRSZ, addr, len);
+		SET_VARSIZE(buffer, VARHDRSZ + len);
+	}
+	return VARHDRSZ + len;
+}
+
+STATIC_FUNCTION(int)
 xpu_bytea_datum_store(kern_context *kcxt,
 					  char *buffer,
-					  xpu_datum_t *__arg)
+					  const xpu_datum_t *__arg)
 {
-	xpu_bytea_t *arg = (xpu_bytea_t *)__arg;
+	const xpu_bytea_t *arg = (const xpu_bytea_t *)__arg;
 	int		sz;
 
 	if (arg->isnull)
@@ -295,41 +362,16 @@ xpu_bytea_datum_store(kern_context *kcxt,
 	return sz;
 }
 
-STATIC_FUNCTION(int)
-xpu_bytea_datum_move(kern_context *kcxt,
-					char *buffer,
-					const kern_colmeta *cmeta,
-					const void *addr, int len)
-{
-	if (!addr)
-		return 0;
-	if (len < 0)
-	{
-		/* compressed or external varlena */
-		len = VARSIZE_ANY(addr);
-		if (buffer)
-			memcpy(buffer, addr, len);
-		return len;
-	}
-	/* normal uncompressed cases */
-	if (buffer)
-	{
-		memcpy(buffer + VARHDRSZ, addr, len);
-		SET_VARSIZE(buffer, VARHDRSZ + len);
-	}
-	return VARHDRSZ + len;
-}
-
 STATIC_FUNCTION(bool)
 xpu_bytea_datum_hash(kern_context *kcxt,
 					 uint32_t *p_hash,
-					 xpu_datum_t *__arg)
+					 const xpu_datum_t *__arg)
 {
-	xpu_bytea_t *arg = (xpu_bytea_t *)__arg;
+	const xpu_bytea_t *arg = (const xpu_bytea_t *)__arg;
 
 	if (arg->isnull)
 		*p_hash = 0;
-	else if (xpu_bytea_is_valid(kcxt, arg))
+	else if (!xpu_bytea_is_valid(kcxt, arg))
 		*p_hash = pg_hash_any(arg->value, arg->length);
 	else
 		return false;

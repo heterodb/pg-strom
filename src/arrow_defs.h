@@ -180,7 +180,7 @@ typedef enum
  * ArrowTypeOptions - our own definition
  */
 #define ARROW_TYPE_OPTIONS_COMMON_FIELDS		\
-	ArrowNodeTag			tag;				\
+	ArrowTypeTag			tag;				\
 	int16_t					unitsz
 
 typedef union		ArrowTypeOptions
@@ -201,6 +201,7 @@ typedef union		ArrowTypeOptions
 		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
 		unsigned short		precision;
 		unsigned short		scale;
+		unsigned short		bitWidth;
 	} decimal;
 	struct {
 		ARROW_TYPE_OPTIONS_COMMON_FIELDS;

@@ -177,40 +177,67 @@ __numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 STATIC_FUNCTION(bool)
 xpu_numeric_datum_ref(kern_context *kcxt,
 					  xpu_datum_t *__result,
+					  const void *addr)
+{
+	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
+
+	if (!addr)
+		result->isnull = true;
+	else if (!__numeric_from_varlena(kcxt, result,
+									 (const varlena *)addr))
+	{
+		return false;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_numeric_arrow_ref(kern_context *kcxt,
+					  xpu_datum_t *__result,
 					  const kern_colmeta *cmeta,
 					  const void *addr, int len)
 {
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-	bool			rv = true;
 
-	result->ops = &xpu_numeric_ops;
+	if (cmeta->attopts.common.tag != ArrowType__Decimal ||
+		cmeta->attopts.decimal.bitWidth != 128)
+	{
+		STROM_ELOG(kcxt, "Not a convertible Arrow::Decimal value");
+		return false;
+	}
 	if (!addr)
 		result->isnull = true;
-	else if (cmeta->kds_format == KDS_FORMAT_ARROW)
-	{
-		/*
-		 * Note that Decimal::scale is equivalent to numeric::weight.
-		 * It is the number of digits after the decimal point.
-		 */
-		result->isnull = false;
-		set_normalized_numeric(result,
-							   *((int128_t *)addr),
-							   cmeta->attopts.decimal.scale);
-	}
 	else
+		set_normalized_numeric(result, *((int128_t *)addr),
+							   cmeta->attopts.decimal.scale);
+	return true;
+}
+
+STATIC_FUNCTION(int)
+xpu_numeric_arrow_move(kern_context *kcxt,
+					   char *buffer,
+					   const kern_colmeta *cmeta,
+					   const void *addr, int len)
+{
+	if (cmeta->attopts.common.tag != ArrowType__Decimal ||
+		cmeta->attopts.decimal.bitWidth != 128)
 	{
-		result->isnull = false;
-		rv = __numeric_from_varlena(kcxt, result, (const varlena *)addr);
+		STROM_ELOG(kcxt, "Not a convertible Arrow::Decimal value");
+		return -1;
 	}
-	return rv;
+	if (!addr)
+		return 0;
+	return __numeric_to_varlena(buffer,
+								cmeta->attopts.decimal.scale,
+								*((int128_t *)addr));
 }
 
 PUBLIC_FUNCTION(int)
 xpu_numeric_datum_store(kern_context *kcxt,
 						char *buffer,
-						xpu_datum_t *__arg)
+						const xpu_datum_t *__arg)
 {
-	xpu_numeric_t *arg = (xpu_numeric_t *)__arg;
+	const xpu_numeric_t *arg = (const xpu_numeric_t *)__arg;
 
 	if (arg->isnull)
 		return 0;
@@ -235,37 +262,12 @@ xpu_numeric_datum_store(kern_context *kcxt,
 	return __numeric_to_varlena(buffer, arg->weight, arg->value);
 }
 
-STATIC_FUNCTION(int)
-xpu_numeric_datum_move(kern_context *kcxt,
-					   char *buffer,
-					   const kern_colmeta *cmeta,
-					   const void *addr, int len)
-{
-	int		sz;
-
-	if (!addr)
-		return 0;
-	if (cmeta->kds_format != KDS_FORMAT_ARROW)
-	{
-		sz = VARSIZE_ANY(addr);
-		if (buffer)
-			memcpy(buffer, addr, sz);
-	}
-	else
-	{
-		sz = __numeric_to_varlena(buffer,
-								  cmeta->attopts.decimal.scale,
-								  *((int128_t *)addr));
-	}
-	return sz;
-}
-
 PUBLIC_FUNCTION(bool)
 xpu_numeric_datum_hash(kern_context *kcxt,
 					   uint32_t *p_hash,
-					   xpu_datum_t *__arg)
+					   const xpu_datum_t *__arg)
 {
-	xpu_numeric_t *arg = (xpu_numeric_t *)__arg;
+	const xpu_numeric_t *arg = (const xpu_numeric_t *)__arg;
 
 	if (arg->isnull)
 		*p_hash = 0;

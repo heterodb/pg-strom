@@ -157,7 +157,7 @@ typedef struct
 	 *     kvars_len[slot_id] is the length of Arrow::Utf8 or Arrow::Binary.
 	 */
 	uint32_t		kvars_nslots;
-	struct kern_colmeta **kvars_cmeta;
+	const struct kern_colmeta **kvars_cmeta;
 	void		  **kvars_addr;
 	int			   *kvars_len;
 	/* variable length buffer */
@@ -178,8 +178,8 @@ typedef struct
 		if (__nslots > 0)												\
 		{																\
 			KCXT->kvars_nslots = __nslots;								\
-			KCXT->kvars_cmeta  = (struct kern_colmeta **)				\
-				alloca(sizeof(struct kern_colmeta *) * __nslots);		\
+			KCXT->kvars_cmeta  = (const struct kern_colmeta **)			\
+				alloca(sizeof(const struct kern_colmeta *) * __nslots);	\
 			KCXT->kvars_addr   = (void **)								\
 				alloca(sizeof(void *) * __nslots);						\
 			KCXT->kvars_len    = (int *)								\
@@ -1193,18 +1193,21 @@ struct xpu_datum_operators {
 	int			xpu_type_sizeof;	/* =sizeof(xpu_XXXX_t), not PG type! */
 	bool	  (*xpu_datum_ref)(kern_context *kcxt,
 							   xpu_datum_t *result,
+							   const void *addr);
+	bool	  (*xpu_arrow_ref)(kern_context *kcxt,
+							   xpu_datum_t *result,
 							   const kern_colmeta *cmeta,
 							   const void *addr, int len);
-	int		  (*xpu_datum_store)(kern_context *kcxt,
-								 char *buffer,
-								 xpu_datum_t *arg);
-	int		  (*xpu_datum_move)(kern_context *kcxt,
+	int		  (*xpu_arrow_move)(kern_context *kcxt,
 								char *buffer,
 								const kern_colmeta *cmeta,
 								const void *addr, int len);
+	int		  (*xpu_datum_store)(kern_context *kcxt,
+								 char *buffer,
+								 const xpu_datum_t *arg);
 	bool	  (*xpu_datum_hash)(kern_context *kcxt,
 								uint32_t *p_hash,
-								xpu_datum_t *arg);
+								const xpu_datum_t *arg);
 };
 
 #define PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\
@@ -1229,8 +1232,9 @@ struct xpu_datum_operators {
 		.xpu_type_code = TypeOpCode__##NAME,						\
 		.xpu_type_sizeof = sizeof(xpu_##NAME##_t),					\
 		.xpu_datum_ref = xpu_##NAME##_datum_ref,					\
+		.xpu_arrow_ref = xpu_##NAME##_arrow_ref,					\
+		.xpu_arrow_move = xpu_##NAME##_arrow_move,					\
 		.xpu_datum_store = xpu_##NAME##_datum_store,				\
-		.xpu_datum_move = xpu_##NAME##_datum_move,					\
 		.xpu_datum_hash = xpu_##NAME##_datum_hash,					\
 	}
 

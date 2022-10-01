@@ -15,94 +15,159 @@
 /*
  * Bool type handlers
  */
-PGSTROM_SIMPLE_BASETYPE_TEMPLATE(bool, int8_t);
+STATIC_FUNCTION(bool)
+xpu_bool_datum_ref(kern_context *kcxt,
+				   xpu_datum_t *__result,
+				   const void *addr)
+{
+	xpu_bool_t *result = (xpu_bool_t *)__result;
+
+	if (!addr)
+		result->isnull = true;
+	else
+	{
+		result->isnull = false;
+		result->value = *((const bool *)addr);
+	}
+	return true;
+}
+STATIC_FUNCTION(bool)
+xpu_bool_arrow_ref(kern_context *kcxt,
+				   xpu_datum_t *result,
+				   const kern_colmeta *cmeta,
+				   const void *addr, int len)
+{
+	STROM_ELOG(kcxt, "Bug? Arrow::Bool shall not be referenced by generic handler");
+	return false;
+}
+STATIC_FUNCTION(int)
+xpu_bool_arrow_move(kern_context *kcxt,
+					char *buffer,
+					const kern_colmeta *cmeta,
+					const void *addr, int len)
+{
+	STROM_ELOG(kcxt, "Bug? Arrow::Bool shall not be moved by generic handler");
+	return false;
+}
+STATIC_FUNCTION(int)
+xpu_bool_datum_store(kern_context *kcxt,
+					 char *buffer,
+					 const xpu_datum_t *__arg)
+{
+	const xpu_bool_t *arg = (const xpu_bool_t *)__arg;
+
+	if (arg->isnull)
+		return 0;
+	if (buffer)
+		*((bool *)buffer) = arg->value;
+	return sizeof(bool);
+}
+STATIC_FUNCTION(bool)
+xpu_bool_datum_hash(kern_context *kcxt,
+					uint32_t *p_hash,
+					const xpu_datum_t *__arg)
+{
+	const xpu_bool_t *arg = (const xpu_bool_t *)__arg;
+
+	if (arg->isnull)
+		*p_hash = 0;
+	else
+		*p_hash = pg_hash_any(&arg->value, sizeof(bool));
+	return true;
+}
+PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 
 /*
  * Int1/Int2/Int4/Int8 handlers
  */
-#define PGSTROM_SIMPLE_INTEGER_TEMPLATE(NAME,BASE_TYPE)					\
+#define PGSTROM_SIMPLE_INTEGER_TEMPLATE(NAME,BASETYPE)					\
 	STATIC_FUNCTION(bool)												\
 	xpu_##NAME##_datum_ref(kern_context *kcxt,							\
+						   xpu_datum_t *__result,						\
+						   const void *addr)							\
+	{																	\
+		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
+		if (!addr)														\
+			result->isnull = true;										\
+		else															\
+		{																\
+			result->isnull = false;										\
+			result->value = *((const BASETYPE *)addr);					\
+		}																\
+		return true;													\
+	}																	\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_arrow_ref(kern_context *kcxt,							\
 						   xpu_datum_t *__result,						\
 						   const kern_colmeta *cmeta,					\
 						   const void *addr, int len)					\
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
-																		\
-		memset(result, 0, sizeof(xpu_##NAME##_t));						\
+		if (cmeta->attopts.common.tag != ArrowType__Int ||				\
+			cmeta->attopts.integer.bitWidth != 8 * sizeof(BASETYPE))	\
+		{																\
+			STROM_ELOG(kcxt, "value is not compatible Arrow::Int");		\
+			return false;												\
+		}																\
 		if (!addr)														\
 			result->isnull = true;										\
 		else															\
 		{																\
-			result->value = *((const BASE_TYPE *)addr);					\
-			if (cmeta &&												\
-				cmeta->kds_format == KDS_FORMAT_ARROW &&				\
-				!cmeta->attopts.integer.is_signed &&					\
-				result->value < 0)										\
+			result->isnull = false;										\
+			result->value = *((BASETYPE *)addr);						\
+			if (!cmeta->attopts.integer.is_signed && result->value < 0)	\
 			{															\
 				STROM_ELOG(kcxt, "Arrow::Uint - out of range");			\
 				return false;											\
 			}															\
 		}																\
-		result->ops = &xpu_##NAME##_ops;								\
 		return true;													\
+	}																	\
+	STATIC_FUNCTION(int)												\
+	xpu_##NAME##_arrow_move(kern_context *kcxt,							\
+							char *buffer,								\
+							const kern_colmeta *cmeta,					\
+							const void *addr, int len)					\
+	{																	\
+		if (cmeta->attopts.common.tag != ArrowType__Int ||				\
+			cmeta->attopts.integer.bitWidth != 8 * sizeof(BASETYPE))	\
+		{																\
+			STROM_ELOG(kcxt, "value is not compatible Arrow::Int");		\
+			return -1;													\
+		}																\
+		if (!addr)														\
+			return 0;													\
+		if (buffer)														\
+			*((BASETYPE *)buffer) = *((BASETYPE *)addr);				\
+		return sizeof(BASETYPE);										\
 	}																	\
 	STATIC_FUNCTION(int)												\
 	xpu_##NAME##_datum_store(kern_context *kcxt,						\
 							 char *buffer,								\
-							 xpu_datum_t *__arg)						\
+							 const xpu_datum_t *__arg)					\
 	{																	\
 		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
 																		\
 		if (arg->isnull)												\
 			return 0;													\
 		if (buffer)														\
-			*((BASE_TYPE *)buffer) = arg->value;						\
-		return sizeof(BASE_TYPE);										\
-	}																	\
-	STATIC_FUNCTION(int)												\
-	xpu_##NAME##_datum_move(kern_context *kcxt,							\
-							char *buffer,								\
-							const kern_colmeta *cmeta,					\
-							const void *addr, int len)					\
-	{																	\
-		if (!addr)														\
-			return 0;													\
-		if (!buffer)													\
-			return sizeof(BASE_TYPE);									\
-		if (cmeta->kds_format == KDS_FORMAT_ARROW &&					\
-			!cmeta->attopts.integer.is_signed)							\
-		{																\
-			BASE_TYPE	ival;											\
-																		\
-			ival = *((const BASE_TYPE *)addr);							\
-			if (ival < 0)												\
-			{															\
-				STROM_ELOG(kcxt, "Arrow::Uint - out of range");			\
-				return -1;												\
-			}															\
-			*((BASE_TYPE *)buffer) = ival;								\
-		}																\
-		else															\
-		{																\
-			*((BASE_TYPE *)buffer) = *((const BASE_TYPE *)addr);		\
-		}																\
-		return sizeof(BASE_TYPE);										\
+ 			*((BASETYPE *)buffer) = arg->value;							\
+		return sizeof(BASETYPE);										\
 	}																	\
 	STATIC_FUNCTION(bool)												\
 	xpu_##NAME##_datum_hash(kern_context *kcxt,							\
 							uint32_t *p_hash,							\
-							xpu_datum_t *__arg)							\
+							const xpu_datum_t *__arg)					\
 	{																	\
 		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
 																		\
 		if (arg->isnull)												\
 			*p_hash = 0;												\
 		else															\
-			*p_hash = pg_hash_any(&arg->value, sizeof(BASE_TYPE));		\
+			*p_hash = pg_hash_any(&arg->value, sizeof(BASETYPE));		\
 		return true;													\
 	}																	\
-	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASE_TYPE),sizeof(BASE_TYPE))
+	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
 
 PGSTROM_SIMPLE_INTEGER_TEMPLATE(int1,int8_t);
 PGSTROM_SIMPLE_INTEGER_TEMPLATE(int2,int16_t);
@@ -112,10 +177,97 @@ PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t);
 /*
  * FloatingPoint handlers
  */
-PGSTROM_SIMPLE_BASETYPE_TEMPLATE(float2, float2_t);
-PGSTROM_SIMPLE_BASETYPE_TEMPLATE(float4, float4_t);
-PGSTROM_SIMPLE_BASETYPE_TEMPLATE(float8, float8_t);
+#define PGSTROM_SIMPLE_FLOAT_TEMPLATE(NAME,BASETYPE,PRECISION)			\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_datum_ref(kern_context *kcxt,							\
+						   xpu_datum_t *__result,						\
+						   const void *addr)							\
+	{																	\
+		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
+																		\
+		if (!addr)														\
+			result->isnull = true;										\
+		else															\
+		{																\
+			result->isnull = false;										\
+			result->value = *((BASETYPE *)addr);						\
+		}																\
+		return true;													\
+	}																	\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_arrow_ref(kern_context *kcxt,							\
+						   xpu_datum_t *__result,						\
+						   const kern_colmeta *cmeta,					\
+						   const void *addr, int len)					\
+	{																	\
+		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
+																		\
+		if (cmeta->attopts.common.tag != ArrowType__FloatingPoint ||	\
+			cmeta->attopts.floating_point.precision != ArrowPrecision__##PRECISION || \
+			len != sizeof(BASETYPE))									\
+		{																\
+			STROM_ELOG(kcxt, "Arrow::FloatingPoint - not a compatible value"); \
+			return false;												\
+		}																\
+		if (!addr)														\
+			result->isnull = true;										\
+		else															\
+		{																\
+			result->isnull = false;										\
+			result->value  = *((BASETYPE *)addr);						\
+		}																\
+		return true;													\
+	}																	\
+	STATIC_FUNCTION(int)												\
+	xpu_##NAME##_arrow_move(kern_context *kcxt,							\
+							char *buffer,								\
+							const kern_colmeta *cmeta,					\
+							const void *addr, int len)					\
+	{																	\
+		if (cmeta->attopts.common.tag != ArrowType__FloatingPoint ||	\
+			cmeta->attopts.floating_point.precision != ArrowPrecision__##PRECISION || \
+			len != sizeof(BASETYPE))									\
+		{																\
+			STROM_ELOG(kcxt, "Arrow::FloatingPoint - not a compatible value"); \
+			return -1;													\
+		}																\
+		if (!addr)														\
+			return 0;													\
+		if (buffer)														\
+			*((BASETYPE *)buffer) = *((BASETYPE *)addr);				\
+		return sizeof(BASETYPE);										\
+	}																	\
+	STATIC_FUNCTION(int)												\
+	xpu_##NAME##_datum_store(kern_context *kcxt,						\
+							 char *buffer,								\
+							 const xpu_datum_t *__arg)					\
+	{																	\
+		const xpu_##NAME##_t *arg = (const xpu_##NAME##_t *)__arg;		\
+																		\
+		if (arg->isnull)												\
+			return 0;													\
+		if (buffer)														\
+			memcpy(buffer, &arg->value, sizeof(BASETYPE));				\
+		return sizeof(BASETYPE);										\
+	}																	\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_datum_hash(kern_context *kcxt,							\
+							uint32_t *p_hash,							\
+							const xpu_datum_t *__arg)					\
+	{																	\
+		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
+																		\
+		if (arg->isnull)												\
+			*p_hash = 0;												\
+		else															\
+			*p_hash = pg_hash_any(&arg->value, sizeof(BASETYPE));		\
+		return true;													\
+	}																	\
+	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
 
+PGSTROM_SIMPLE_FLOAT_TEMPLATE(float2, float2_t, Half);
+PGSTROM_SIMPLE_FLOAT_TEMPLATE(float4, float4_t, Single);
+PGSTROM_SIMPLE_FLOAT_TEMPLATE(float8, float8_t, Double);
 
 /* special support functions for float2 */
 INLINE_FUNCTION(bool) isinf(float2_t fval) { return isinf((float)fval); }

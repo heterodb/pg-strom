@@ -12,66 +12,6 @@
 #ifndef XPU_BASETYPE_H
 #define XPU_BASETYPE_H
 
-#define PGSTROM_SIMPLE_BASETYPE_TEMPLATE(NAME,BASETYPE)					\
-	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_ref(kern_context *kcxt,							\
-						   xpu_datum_t *__result,						\
-						   const kern_colmeta *cmeta,					\
-						   const void *addr, int len)					\
-	{																	\
-		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
-																		\
-		memset(result, 0, sizeof(xpu_##NAME##_t));						\
-		if (!addr)														\
-			result->isnull = true;										\
-		else															\
-		{																\
-			assert(len == sizeof(BASETYPE));							\
-			result->value = *((const BASETYPE *)addr);					\
-		}																\
-		result->ops = &xpu_##NAME##_ops;								\
-		return true;													\
-	}																	\
-	STATIC_FUNCTION(int)												\
-	xpu_##NAME##_datum_store(kern_context *kcxt,						\
-							 char *buffer,								\
-							 xpu_datum_t *__arg)						\
-	{																	\
-		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
-																		\
-		if (arg->isnull)												\
-			return 0;													\
-		if (buffer)														\
-			*((BASETYPE *)buffer) = arg->value;							\
-		return sizeof(BASETYPE);										\
-	}																	\
-	STATIC_FUNCTION(int)												\
-	xpu_##NAME##_datum_move(kern_context *kcxt,							\
-							char *buffer,								\
-							const kern_colmeta *cmeta,					\
-							const void *addr, int len)					\
-	{																	\
-		if (!addr)														\
-			return 0;													\
-		assert(len == sizeof(BASETYPE));								\
-		if (buffer)														\
-			*((BASETYPE *)buffer) = *((const BASETYPE *)addr);			\
-		return sizeof(BASETYPE);										\
-	}																	\
-	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_hash(kern_context *kcxt,							\
-							uint32_t *p_hash,							\
-							xpu_datum_t *__arg)							\
-	{																	\
-		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
-																		\
-		if (arg->isnull)												\
-			*p_hash = 0;												\
-		else															\
-			*p_hash = pg_hash_any(&arg->value, sizeof(BASETYPE));		\
-		return true;													\
-	}																	\
-	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
 
 #ifndef PG_BOOLOID
 #define PG_BOOLOID		16
