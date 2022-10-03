@@ -846,6 +846,24 @@ typedef struct
 
 static int	codegen_expression_walker(codegen_context *context, Expr *expr);
 
+static void
+__appendKernExpMagicAndLength(StringInfo buf, int head_pos)
+{
+	static uint64_t __zero = 0;
+	const kern_expression *kexp;
+	int			padding = (INTALIGN(buf->len) - buf->len);
+	uint32_t	magic;
+
+	if (padding > 0)
+		appendBinaryStringInfo(buf, (char *)&__zero, padding);
+	kexp = (const kern_expression *)(buf->data + head_pos);
+	magic = (KERN_EXPRESSION_MAGIC
+			 ^ ((uint32_t)kexp->exptype << 6)
+			 ^ ((uint32_t)kexp->opcode << 14));
+	appendBinaryStringInfo(buf, (char *)&magic, sizeof(uint32_t));
+	((kern_expression *)(buf->data + head_pos))->len = buf->len - head_pos;
+}
+
 static int
 codegen_const_expression(codegen_context *context, Const *con)
 {
@@ -858,8 +876,9 @@ codegen_const_expression(codegen_context *context, Const *con)
 	if (context->buf)
 	{
 		kern_expression *kexp;
-		int		sz = offsetof(kern_expression, u.c.const_value);
+		int			pos, sz = 0;
 
+		sz = offsetof(kern_expression, u.c.const_value);
 		if (!con->constisnull)
 		{
 			if (con->constbyval)
@@ -871,9 +890,8 @@ codegen_const_expression(codegen_context *context, Const *con)
 		}
 		kexp = alloca(sz);
 		memset(kexp, 0, sz);
-		SET_VARSIZE(kexp, sz);
-		kexp->opcode = FuncOpCode__ConstExpr;
 		kexp->exptype = dtype->type_code;
+		kexp->opcode = FuncOpCode__ConstExpr;
 		kexp->u.c.const_type = con->consttype;
 		kexp->u.c.const_isnull = con->constisnull;
 		if (!con->constisnull)
@@ -887,7 +905,8 @@ codegen_const_expression(codegen_context *context, Const *con)
 					   DatumGetPointer(con->constvalue),
 					   VARSIZE_ANY(con->constvalue));
 		}
-		__appendBinaryStringInfo(context->buf, kexp, sz);
+		pos = __appendBinaryStringInfo(context->buf, kexp, sz);
+		__appendKernExpMagicAndLength(context->buf, pos);
 	}
 	return 0;
 }
@@ -897,6 +916,7 @@ codegen_param_expression(codegen_context *context, Param *param)
 {
 	kern_expression	kexp;
 	devtype_info   *dtype;
+	int				pos;
 
 	if (param->paramkind != PARAM_EXTERN)
 		__Elog("Only PARAM_EXTERN is supported on device: %d",
@@ -908,12 +928,12 @@ codegen_param_expression(codegen_context *context, Param *param)
 	if (context->buf)
 	{
 		memset(&kexp, 0, sizeof(kexp));
-		SET_VARSIZE(&kexp, SizeOfKernExprParam);
 		kexp.opcode = FuncOpCode__ParamExpr;
 		kexp.exptype = dtype->type_code;
 		kexp.u.p.param_id = param->paramid;
-		__appendBinaryStringInfo(context->buf, &kexp,
-								 SizeOfKernExprParam);
+		pos = __appendBinaryStringInfo(context->buf, &kexp,
+									   SizeOfKernExprParam);
+		__appendKernExpMagicAndLength(context->buf, pos);
 	}
 	context->used_params = list_append_unique(context->used_params, param);
 
@@ -940,21 +960,22 @@ codegen_var_expression(codegen_context *context,
 		int16		typlen;
 		bool		typbyval;
 		char		typalign;
+		int			pos;
 
 		get_typlenbyvalalign(type_oid,
 							 &typlen,
 							 &typbyval,
 							 &typalign);
 		memset(&kexp, 0, sizeof(kexp));
-		kexp.opcode = FuncOpCode__VarExpr;
-		kexp.nargs = 0;
 		kexp.exptype = dtype->type_code;
+		kexp.opcode = FuncOpCode__VarExpr;
 		kexp.u.v.var_typlen = typlen;
 		kexp.u.v.var_typbyval = typbyval;
 		kexp.u.v.var_typalign = typealign_get_width(typalign);
 		kexp.u.v.var_slot_id = kvar_slot_id;
-		SET_VARSIZE(&kexp, SizeOfKernExprVar);
-		__appendBinaryStringInfo(context->buf, &kexp, SizeOfKernExprVar);
+		pos = __appendBinaryStringInfo(context->buf, &kexp,
+									   SizeOfKernExprVar);
+		__appendKernExpMagicAndLength(context->buf, pos);
 	}
 	return 0;
 }
@@ -963,7 +984,6 @@ static int
 __codegen_func_expression(codegen_context *context,
 						  Oid func_oid, List *func_args, Oid func_collid)
 {
-	StringInfo		buf = context->buf;
 	devfunc_info   *dfunc;
 	devtype_info   *dtype;
 	kern_expression	kexp;
@@ -978,11 +998,12 @@ __codegen_func_expression(codegen_context *context,
 	context->device_cost += dfunc->func_cost;
 
 	memset(&kexp, 0, sizeof(kexp));
-	kexp.opcode = dfunc->func_code;
-	kexp.nargs = list_length(func_args);
 	kexp.exptype = dtype->type_code;
-	if (buf)
-		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+	kexp.opcode = dfunc->func_code;
+	kexp.nr_args = list_length(func_args);
+	kexp.args_offset = SizeOfKernExpr(0);
+	if (context->buf)
+		pos = __appendBinaryStringInfo(context->buf, &kexp, SizeOfKernExpr(0));
 	foreach (lc, func_args)
 	{
 		Expr   *arg = lfirst(lc);
@@ -990,8 +1011,8 @@ __codegen_func_expression(codegen_context *context,
 		if (codegen_expression_walker(context, arg) < 0)
 			return -1;
 	}
-	if (buf)
-		SET_VARSIZE(buf->data + pos, buf->len - pos);
+	if (context->buf)
+		__appendKernExpMagicAndLength(context->buf, pos);
 	return 0;
 }
 
@@ -1016,7 +1037,6 @@ codegen_oper_expression(codegen_context *context, OpExpr *oper)
 static int
 codegen_bool_expression(codegen_context *context, BoolExpr *b)
 {
-	StringInfo		buf = context->buf;
 	kern_expression	kexp;
 	int				pos = -1;
 	ListCell	   *lc;
@@ -1026,28 +1046,29 @@ codegen_bool_expression(codegen_context *context, BoolExpr *b)
 	{
 		case AND_EXPR:
 			kexp.opcode = FuncOpCode__BoolExpr_And;
-			kexp.nargs = list_length(b->args);
-			if (kexp.nargs < 2)
+			kexp.nr_args = list_length(b->args);
+			if (kexp.nr_args < 2)
 				__Elog("BoolExpr(AND) must have 2 or more arguments");
 			break;
 		case OR_EXPR:
 			kexp.opcode = FuncOpCode__BoolExpr_Or;
-			kexp.nargs = list_length(b->args);
-			if (kexp.nargs < 2)
+			kexp.nr_args = list_length(b->args);
+			if (kexp.nr_args < 2)
 				__Elog("BoolExpr(OR) must have 2 or more arguments");
 			break;
 		case NOT_EXPR:
 			kexp.opcode = FuncOpCode__BoolExpr_Not;
-			kexp.nargs = list_length(b->args);
-			if (kexp.nargs != 1)
+			kexp.nr_args = list_length(b->args);
+			if (kexp.nr_args != 1)
 				__Elog("BoolExpr(OR) must not have multiple arguments");
 			break;
 		default:
 			__Elog("BoolExpr has unknown bool operation (%d)", (int)b->boolop);
 	}
 	kexp.exptype = TypeOpCode__bool;
-	if (buf)
-		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+	kexp.args_offset = SizeOfKernExpr(0);
+	if (context->buf)
+		pos = __appendBinaryStringInfo(context->buf, &kexp, SizeOfKernExpr(0));
 	foreach (lc, b->args)
 	{
 		Expr   *arg = lfirst(lc);
@@ -1055,15 +1076,14 @@ codegen_bool_expression(codegen_context *context, BoolExpr *b)
 		if (codegen_expression_walker(context, arg) < 0)
 			return -1;
 	}
-	if (buf)
-		SET_VARSIZE(buf->data + pos, buf->len - pos);
+	if (context->buf)
+		__appendKernExpMagicAndLength(context->buf, pos);
 	return 0;
 }
 
 static int
 codegen_nulltest_expression(codegen_context *context, NullTest *nt)
 {
-	StringInfo		buf = context->buf;
 	kern_expression	kexp;
 	int				pos = -1;
 
@@ -1079,21 +1099,21 @@ codegen_nulltest_expression(codegen_context *context, NullTest *nt)
 		default:
 			__Elog("NullTest has unknown NullTestType (%d)", (int)nt->nulltesttype);
 	}
-	kexp.nargs = 1;
 	kexp.exptype = TypeOpCode__bool;
-	if (buf)
-		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+	kexp.nr_args = 1;
+	kexp.args_offset = SizeOfKernExpr(0);
+	if (context->buf)
+		pos = __appendBinaryStringInfo(context->buf, &kexp, SizeOfKernExpr(0));
 	if (codegen_expression_walker(context, nt->arg) < 0)
 		return -1;
-	if (buf)
-		SET_VARSIZE(buf->data + pos, buf->len - pos);
+	if (context->buf)
+		__appendKernExpMagicAndLength(context->buf, pos);
 	return 0;
 }
 
 static int
 codegen_booleantest_expression(codegen_context *context, BooleanTest *bt)
 {
-	StringInfo		buf = context->buf;
 	kern_expression	kexp;
 	int				pos = -1;
 
@@ -1122,14 +1142,15 @@ codegen_booleantest_expression(codegen_context *context, BooleanTest *bt)
 			__Elog("BooleanTest has unknown BoolTestType (%d)",
 				   (int)bt->booltesttype);
 	}
-	kexp.nargs = 1;
 	kexp.exptype = TypeOpCode__bool;
-	if (buf)
-		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+	kexp.nr_args = 1;
+	kexp.args_offset = SizeOfKernExpr(0);
+	if (context->buf)
+		pos = __appendBinaryStringInfo(context->buf, &kexp, SizeOfKernExpr(0));
 	if (codegen_expression_walker(context, bt->arg) < 0)
 		return -1;
-	if (buf)
-		SET_VARSIZE(buf->data + pos, buf->len - pos);
+	if (context->buf)
+		__appendKernExpMagicAndLength(context->buf, pos);
 	return 0;
 }
 
@@ -1286,44 +1307,46 @@ kern_preload_vars_comp(const void *__a, const void *__b)
 
 static bytea *
 attach_varloads_xpucode(codegen_context *context,
-						kern_expression *arg)
+						kern_expression *karg)
 {
 	StringInfoData	buf;
-	kern_expression kexp;
-	kern_preload_vars *kload;
+	kern_expression *kexp;
 	ListCell   *lc1, *lc2;
 	int			i, nloads = list_length(context->kvars_depth);
 
-	kload = alloca(offsetof(kern_preload_vars, kvars[nloads]));
+	kexp = alloca(MAXALIGN(offsetof(kern_expression,
+									u.load.kvars[nloads])));
+	kexp->exptype = karg->exptype;
+	kexp->opcode  = FuncOpCode__LoadVars;
+	kexp->nr_args = 1;
+
 	i = 0;
 	forboth (lc1, context->kvars_depth,
 			 lc2, context->kvars_resno)
 	{
-		kload->kvars[i].var_depth = lfirst_int(lc1);
-		kload->kvars[i].var_resno = lfirst_int(lc2);
-		kload->kvars[i].var_slot_id = i;
+		kexp->u.load.kvars[i].var_depth = lfirst_int(lc1);
+		kexp->u.load.kvars[i].var_resno = lfirst_int(lc2);
+		kexp->u.load.kvars[i].var_slot_id = i;
 		i++;
 	}
-	pg_qsort(kload->kvars, nloads,
+	pg_qsort(kexp->u.load.kvars, nloads,
 			 sizeof(kern_preload_vars_item),
 			 kern_preload_vars_comp);
 	for (i=0; i < nloads; i++)
 	{
-		if (kload->kvars[i].var_depth < 0 ||
-			kload->kvars[i].var_resno < 0)
+		if (kexp->u.load.kvars[i].var_depth < 0 ||
+			kexp->u.load.kvars[i].var_resno < 0)
 			break;
 	}
-	kload->nloads = nloads = i;
-	SET_VARSIZE(kload, offsetof(kern_preload_vars, kvars[nloads]));
-
+	kexp->u.load.nloads = nloads = i;
+	kexp->args_offset = MAXALIGN(offsetof(kern_expression,
+										  u.load.kvars[nloads]));
 	initStringInfo(&buf);
-	memset(&kexp, 0, sizeof(kern_expression));
-	kexp.opcode = FuncOpCode__LoadVars;
-	kexp.nargs = 1;
-	kexp.exptype = arg->exptype;
-	__appendBinaryStringInfo(&buf, (const char *)&kexp, SizeOfKernExpr(0));
-	__appendBinaryStringInfo(&buf, (const char *)arg, VARSIZE(arg));
-	__appendBinaryStringInfo(&buf, kload, offsetof(kern_preload_vars, kvars[nloads]));
+	buf.len = VARHDRSZ;
+	appendBinaryStringInfo(&buf, (const char *)kexp, kexp->args_offset);
+	appendBinaryStringInfo(&buf, (const char *)karg, karg->len);
+	__appendKernExpMagicAndLength(&buf, VARHDRSZ);
+
 	SET_VARSIZE(buf.data, buf.len);
 
 	return (bytea *)buf.data;
@@ -1360,8 +1383,7 @@ pgstrom_build_xpucode(bytea **p_xpucode,
 			expr = make_andclause((List *)expr);
 	}
 	codegen_expression_walker(&context, expr);
-	SET_VARSIZE(buf.data, buf.len);
-	/* attach VarLoads operation */
+	/* attach VarLoads operation prior to the kern_expression above */
 	*p_xpucode = attach_varloads_xpucode(&context, (kern_expression *)buf.data);
 	pfree(buf.data);
 
@@ -1388,30 +1410,23 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 						 List **p_used_params)
 {
 	codegen_context	context;
+	StringInfoData	arg;
 	StringInfoData	buf;
 	List		   *proj_prep_slots = NIL;
 	List		   *proj_prep_types = NIL;
 	List		   *proj_dest_slots = NIL;
 	List		   *proj_dest_types = NIL;
 	ListCell	   *lc1, *lc2;
-	kern_expression	kexp;
-	kern_projection_map *proj_map;
+	kern_expression	*kexp;
 	int				nexprs;
 	int				nattrs;
 	int				i, sz;
 	bool			meet_resjunk = false;
 
-	/* Projection header portion */
-	initStringInfo(&buf);
-	memset(&kexp, 0, sizeof(kexp));
-	kexp.opcode = FuncOpCode__Projection;
-	kexp.nargs = -1;	/* to be set later */
-	kexp.exptype = TypeOpCode__int4;
-	__appendBinaryStringInfo(&buf, (char *)&kexp,
-							 offsetof(kern_expression, u.data));
 	/* setup Projection arguments */
+	initStringInfo(&arg);
 	memset(&context, 0, sizeof(context));
-	context.buf = &buf;
+	context.buf = &arg;
 	context.elevel = ERROR;
 	if (p_extra_flags)
 		context.extra_flags = *p_extra_flags;
@@ -1463,21 +1478,24 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 	}
 	nexprs = list_length(proj_prep_slots);
 	nattrs = list_length(proj_dest_slots);
-	((kern_expression *)buf.data)->nargs = nexprs;
 
-	/* setup kern_projection_map */
-	sz = offsetof(kern_projection_map,
-				  desc[nexprs + nattrs]) + sizeof(uint32_t);
-	proj_map = alloca(sz);
-	memset(proj_map, 0, sz);
-	proj_map->magic = KERN_PROJECTION_MAP_MAGIC;
-	proj_map->nexprs = nexprs;
-	proj_map->nattrs = nattrs;
+	/* setup kern_expression for Projection */
+	sz = MAXALIGN(offsetof(kern_expression,
+						   u.proj.desc[nexprs + nattrs]));
+	kexp = alloca(sz);
+	memset(kexp, 0, sz);
+	kexp->exptype = TypeOpCode__int4;
+	kexp->opcode  = FuncOpCode__Projection;
+	kexp->nr_args = nexprs;
+	kexp->args_offset = sz;
+	kexp->u.proj.nexprs = nexprs;
+	kexp->u.proj.nattrs = nattrs;
+
 	i = 0;
 	forboth (lc1, proj_prep_slots,
-			 lc2, proj_dest_types)
+			 lc2, proj_prep_types)
 	{
-		kern_projection_desc *desc = &proj_map->desc[i++];
+		kern_projection_desc *desc = &kexp->u.proj.desc[i++];
 		desc->slot_id   = lfirst_int(lc1);
 		desc->slot_type = lfirst_int(lc2);
 	}
@@ -1485,26 +1503,27 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 	forboth (lc1, proj_dest_slots,
 			 lc2, proj_dest_types)
 	{
-		kern_projection_desc *desc = &proj_map->desc[i++];
+		kern_projection_desc *desc = &kexp->u.proj.desc[i++];
 		desc->slot_id   = lfirst_int(lc1);
 		desc->slot_type = lfirst_int(lc2);
 	}
 	Assert(i == nexprs + nattrs);
-	*((uint32_t *)&proj_map->desc[nexprs + nattrs]) = sz;
-	SET_VARSIZE(proj_map, sz);
-	__appendBinaryStringInfo(&buf, (char *)proj_map, sz);
-	SET_VARSIZE(buf.data, buf.len);
+	initStringInfo(&buf);
+	appendBinaryStringInfo(&buf, (const char *)kexp, sz);
+	appendBinaryStringInfo(&buf, arg.data, arg.len);
+	__appendKernExpMagicAndLength(&buf, 0);
+	pfree(arg.data);
 
 	*p_xpucode_proj = attach_varloads_xpucode(&context, (kern_expression *)buf.data);
 	pfree(buf.data);
 
 	if (p_extra_flags)
 		*p_extra_flags = context.extra_flags;
-    if (p_extra_bufsz)
-		*p_extra_bufsz = Max(*p_extra_bufsz, context.extra_bufsz);
-    if (p_kvars_nslots)
-		*p_kvars_nslots = Max(*p_kvars_nslots, nattrs);
-    if (p_used_params)
+	if (p_extra_bufsz)
+		*p_extra_bufsz = context.extra_bufsz;
+	if (p_kvars_nslots)
+		*p_kvars_nslots = nexprs + nattrs;
+	if (p_used_params)
 		*p_used_params = context.used_params;
 }
 
@@ -1617,17 +1636,12 @@ __xpucode_loadvars_cstring(StringInfo buf,
 						   ExplainState *es,
 						   List *ancestors)
 {
-	const char *pos = kexp->u.data;
-	const kern_preload_vars *kload;
-	bool		verbose = false;
-	int			i;
+	bool	verbose = false;
+	int		i;
 
-	Assert(kexp->nargs == 1);
-	pos += MAXALIGN(VARSIZE(pos));
-	kload = (const kern_preload_vars *)pos;
-	
+	Assert(kexp->nr_args == 1);
 	appendStringInfo(buf, "{LoadVars:");
-	if (kload->nloads > 0)
+	if (kexp->u.load.nloads > 0)
 		appendStringInfo(buf, " kvars=[");
 
 	if (css)
@@ -1636,25 +1650,23 @@ __xpucode_loadvars_cstring(StringInfo buf,
 		verbose = (cscan->custom_plans != NIL);
 	}
 
-	for (i=0; i < kload->nloads; i++)
+	for (i=0; i < kexp->u.load.nloads; i++)
 	{
-		int16_t		__depth   = kload->kvars[i].var_depth;
-		int16_t		__resno   = kload->kvars[i].var_resno;
-		uint32_t	__slot_id = kload->kvars[i].var_slot_id;
+		const kern_preload_vars_item *vitem = &kexp->u.load.kvars[i];
 
 		if (i > 0)
 			appendStringInfo(buf, ", ");
 		if (!css)
 		{
 			appendStringInfo(buf, "(slot_id=%u, depth=%d, resno=%d)",
-							 __slot_id,
-							 __depth,
-							 __resno);
+							 vitem->var_slot_id,
+							 vitem->var_depth,
+							 vitem->var_resno);
 		}
-		else if (css->ss.ss_currentRelation && __depth == 0)
+		else if (vitem->var_depth == 0)
 		{
 			TupleDesc	tupdesc = RelationGetDescr(css->ss.ss_currentRelation);
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, __resno - 1);
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, vitem->var_resno - 1);
 			CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
 			List	   *dcontext;
 			Var		   *kvar;
@@ -1667,7 +1679,7 @@ __xpucode_loadvars_cstring(StringInfo buf,
 						   attr->atttypmod,
 						   attr->attcollation, 0);
 			appendStringInfo(buf, "%u:%s",
-							 __slot_id,
+							 vitem->var_slot_id,
 							 deparse_expression((Node *)kvar,
 												dcontext,
 												verbose, false));
@@ -1680,22 +1692,18 @@ __xpucode_loadvars_cstring(StringInfo buf,
 			List	   *dcontext;
 			TargetEntry *tle;
 
-			if (!css->ss.ss_currentRelation)
-				plan = list_nth(cscan->custom_plans, __depth);
-			else
-				plan = list_nth(cscan->custom_plans, __depth - 1);
-
+			plan = list_nth(cscan->custom_plans, vitem->var_depth - 1);
 			dcontext = set_deparse_context_plan(es->deparse_cxt,
 												plan, ancestors);
-			tle = list_nth(plan->targetlist, __resno - 1);
+			tle = list_nth(plan->targetlist, vitem->var_resno - 1);
 			appendStringInfo(buf, "%u:%s",
-							 __slot_id,
+							 vitem->var_slot_id,
 							 deparse_expression((Node *)tle->expr,
 												dcontext,
 												verbose, false));
 		}
 	}
-	if (kload->nloads > 0)
+	if (kexp->u.load.nloads > 0)
 		appendStringInfo(buf, "]");
 }
 
@@ -1706,44 +1714,40 @@ __xpucode_projection_cstring(StringInfo buf,
 							 ExplainState *es,				/* optional */
 							 List *ancestors)
 {
-	const kern_projection_map *proj_map = __KEXP_GET_PROJECTION_MAP(kexp);
-	int		i;
+	int		i, nexprs = kexp->u.proj.nexprs;
 
 	appendStringInfo(buf, "{Projection record=(");
-	for (i=0; i < proj_map->nattrs; i++)
+	for (i=0; i < kexp->u.proj.nattrs; i++)
 	{
-		const kern_projection_desc *desc = &proj_map->desc[proj_map->nexprs + i];
+		const kern_projection_desc *desc = &kexp->u.proj.desc[nexprs + i];
 		if (i > 0)
 			appendStringInfoChar(buf, ',');
 		appendStringInfo(buf, "%d", desc->slot_id);
 	}
 	appendStringInfo(buf, ")");
 
-	if (kexp->nargs > 0)
+	if (kexp->nr_args > 0)
 	{
-		const char *pos = kexp->u.data;
+		const kern_expression *karg;
 
-		if (kexp->nargs == 1)
+		if (kexp->nr_args == 1)
 			appendStringInfo(buf, " arg=");
 		else
 			appendStringInfo(buf, " args=[");
-		for (i=0; i < kexp->nargs; i++)
+		for (i=0, karg = KEXP_FIRST_ARG(kexp);
+			 i < kexp->nr_args;
+			 i++, karg = KEXP_NEXT_ARG(karg))
 		{
-			const kern_projection_desc *desc = &proj_map->desc[i];
-			const kern_expression *arg = (const kern_expression *)pos;
+			const kern_projection_desc *desc = &kexp->u.proj.desc[i];
 
-			if (VARSIZE(kexp) < (pos + VARSIZE(arg)) - (char *)kexp)
-				elog(ERROR, "XpuCode looks corrupted: kexp (sz=%u, arg=[%lu...%lu])",
-					 VARSIZE(kexp),
-					 (pos - kexp->u.data),
-					 (pos - kexp->u.data) + VARSIZE(arg));
+			if (!__KEXP_IS_VALID(kexp, karg))
+				elog(ERROR, "XpuCode looks corrupted");
 			if (i > 0)
 				appendStringInfo(buf, ", ");
 			appendStringInfo(buf, "%d:", desc->slot_id);
-			__xpucode_to_cstring(buf, arg, css, es, ancestors);
-			pos += MAXALIGN(VARSIZE(arg));
+			__xpucode_to_cstring(buf, karg, css, es, ancestors);
 		}
-		if (kexp->nargs > 1)
+		if (kexp->nr_args > 1)
 			appendStringInfoChar(buf, ']');
 	}
 	appendStringInfoChar(buf, '}');
@@ -1817,30 +1821,26 @@ __xpucode_to_cstring(StringInfo buf,
 			}
 			break;
 	}
-	if (kexp->nargs > 0)
+	if (kexp->nr_args > 0)
 	{
-		const char *pos = kexp->u.data;
+		const kern_expression *karg;
 		int			i;
 
-		if (kexp->nargs == 1)
+		if (kexp->nr_args == 1)
 			appendStringInfo(buf, " arg=");
 		else
 			appendStringInfo(buf, " args=[");
-		for (i=0; i < kexp->nargs; i++)
+		for (i=0, karg=KEXP_FIRST_ARG(kexp);
+			 i < kexp->nr_args;
+			 i++, karg=KEXP_NEXT_ARG(karg))
 		{
-			const kern_expression *arg = (const kern_expression *)pos;
-
-			if (VARSIZE(kexp) < (pos + VARSIZE(arg)) - (char *)kexp)
-				elog(ERROR, "XpuCode looks corrupted: kexp (sz=%u, arg=[%lu...%lu])",
-					 VARSIZE(kexp),
-					 (pos - kexp->u.data),
-					 (pos - kexp->u.data) + VARSIZE(arg));
+			if (!__KEXP_IS_VALID(kexp,karg))
+				elog(ERROR, "XpuCode looks corrupted");
 			if (i > 0)
 				appendStringInfo(buf, ", ");
-			__xpucode_to_cstring(buf, arg, css, es, ancestors);
-			pos += MAXALIGN(VARSIZE(arg));
+			__xpucode_to_cstring(buf, karg, css, es, ancestors);
 		}
-		if (kexp->nargs > 1)
+		if (kexp->nr_args > 1)
 			appendStringInfoChar(buf, ']');
 	}
 	appendStringInfoChar(buf, '}');
@@ -1853,7 +1853,7 @@ pgstrom_explain_xpucode(StringInfo buf,
 						ExplainState *es,
 						List *ancestors)
 {
-	__xpucode_to_cstring(buf, (const kern_expression *)xpu_code,
+	__xpucode_to_cstring(buf, (const kern_expression *)VARDATA(xpu_code),
 						 css, es, ancestors);
 }
 
@@ -1863,7 +1863,7 @@ pgstrom_xpucode_to_string(bytea *xpu_code)
 	StringInfoData buf;
 
 	initStringInfo(&buf);
-	__xpucode_to_cstring(&buf, (const kern_expression *)xpu_code,
+	__xpucode_to_cstring(&buf, (const kern_expression *)VARDATA(xpu_code),
 						 NULL, NULL, NIL);
 
 	return buf.data;

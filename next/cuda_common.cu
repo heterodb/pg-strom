@@ -64,10 +64,12 @@ __execProjectionCommon(kern_context *kcxt,
 	/* write out the tuple */
 	if (LaneId() < nvalids)
 	{
-		kern_expression *kproj = (kern_expression *)kexp->u.data;
+		kern_expression *kproj = KEXP_FIRST_ARG(kexp);
 		uint32_t	row_id = oldval.i.nitems + LaneId();
 		kern_tupitem *tupitem;
 
+		assert(KEXP_IS_VALID(kproj, int4) &&
+			   kproj->opcode == FuncOpCode__Projection);
 		offset += __kds_unpack(oldval.i.usage);
 		KDS_GET_ROWINDEX(kds_dst)[row_id] = __kds_packed(offset);
 		tupitem = (kern_tupitem *)

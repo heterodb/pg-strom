@@ -35,14 +35,15 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float8, float8_t);
 		xpu_bool_t *result = (xpu_bool_t *)__result;					\
 		xpu_##LNAME##_t lval;											\
 		xpu_##RNAME##_t rval;											\
-		const kern_expression *arg = KEXP_FIRST_ARG(2,LNAME);			\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &lval))					\
+		assert(KEXP_IS_VALID(karg,LNAME));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &lval))					\
 			return false;												\
-		arg = KEXP_NEXT_ARG(arg, RNAME);								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &rval))					\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg,RNAME));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &rval))					\
 			return false;												\
-		result->ops = &xpu_bool_ops;									\
 		result->isnull = (lval.isnull | rval.isnull);					\
 		if (!result->isnull)											\
 			result->value = ((CAST)lval.value OPER (CAST)rval.value);	\

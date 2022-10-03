@@ -286,11 +286,12 @@ INLINE_FUNCTION(bool) __iszero(float8_t fval) { return fval == 0.0; }
 	{																	\
 		xpu_##TARGET##_t *result = (xpu_##TARGET##_t *)__result;		\
 		xpu_##SOURCE##_t  datum;										\
-		const kern_expression *arg = KEXP_FIRST_ARG(1,SOURCE);			\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &datum))					\
+		assert(kexp->nr_args == 1);\
+		assert(KEXP_IS_VALID(karg,SOURCE));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))					\
 			return false;												\
-		result->ops = &xpu_##TARGET##_ops;								\
 		result->isnull = datum.isnull;									\
 		if (!result->isnull)											\
 		{																\
@@ -435,15 +436,16 @@ PG_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, float8_t)
 		xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;			\
 		xpu_##XTYPE##_t x_val;											\
 		xpu_##YTYPE##_t y_val;											\
-		const kern_expression *arg;										\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
-		arg = KEXP_FIRST_ARG(2, XTYPE);									\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))					\
+		assert(kexp->nr_args == 2);										\
+		assert(KEXP_IS_VALID(karg, XTYPE));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
 			return false;												\
-		arg = KEXP_NEXT_ARG(arg, YTYPE);								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &y_val))					\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, YTYPE));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
 			return false;												\
-		result->ops = &xpu_##RTYPE##_ops;								\
 		result->isnull = (x_val.isnull | y_val.isnull);					\
 		if (!result->isnull)											\
 		{																\
@@ -467,19 +469,21 @@ PG_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, float8_t)
 		xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;			\
 		xpu_##XTYPE##_t x_val;											\
 		xpu_##YTYPE##_t y_val;											\
-		const kern_expression *arg;										\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
-		arg = KEXP_FIRST_ARG(2, XTYPE);									\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))					\
+		assert(kexp->nr_args == 2);										\
+		assert(KEXP_IS_VALID(karg,XTYPE));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
 			return false;												\
-		arg = KEXP_NEXT_ARG(arg, YTYPE);								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &y_val))					\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, YTYPE));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
 			return false;												\
-		result->ops = &xpu_##RTYPE##_ops;								\
 		result->isnull = (x_val.isnull | y_val.isnull);					\
 		if (!result->isnull)											\
 		{																\
-			result->value = (__CAST)x_val.value OPER (__CAST)y_val.value; \
+			result->value = ((__CAST)x_val.value OPER					\
+							 (__CAST)y_val.value);						\
 			if ((__INF_CHECK  && (isinf(result->value) &&				\
 								  !isinf(x_val.value) &&				\
 								  !isinf(y_val.value))) ||				\
@@ -586,15 +590,16 @@ PG_FLOAT_BIN_OPERATOR_TEMPLATE(float8mul, float8,float8,float8,*,float8_t,true,f
 		xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;			\
 		xpu_##XTYPE##_t x_val;											\
 		xpu_##YTYPE##_t y_val;											\
-		const kern_expression *arg;										\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
-		arg = KEXP_FIRST_ARG(2, XTYPE);									\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))					\
+		assert(kexp->nr_args == 2);										\
+		assert(KEXP_IS_VALID(karg,XTYPE));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
 			return false;												\
-		arg = KEXP_NEXT_ARG(arg, YTYPE);								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &y_val))					\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg,YTYPE));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
 			return false;												\
-		result->ops = &xpu_##RTYPE##_ops;								\
 		result->isnull = (x_val.isnull | y_val.isnull);					\
 		if (!result->isnull)											\
 		{																\
@@ -628,15 +633,16 @@ PG_FLOAT_BIN_OPERATOR_TEMPLATE(float8mul, float8,float8,float8,*,float8_t,true,f
         xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;          \
         xpu_##XTYPE##_t x_val;                                          \
         xpu_##YTYPE##_t y_val;                                          \
-        const kern_expression *arg;                                     \
+        const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
                                                                         \
-        arg = KEXP_FIRST_ARG(2, XTYPE);                                 \
-        if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))                   \
+		assert(kexp->nr_args == 2);										\
+		assert(KEXP_IS_VALID(karg,XTYPE));								\
+        if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
             return false;                                               \
-        arg = KEXP_NEXT_ARG(arg, YTYPE);                                \
-        if (!EXEC_KERN_EXPRESSION(kcxt, arg, &y_val))                   \
+        karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg,YTYPE));								\
+        if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
             return false;                                               \
-        result->ops = &xpu_##RTYPE##_ops;                               \
         result->isnull = (x_val.isnull | y_val.isnull);                 \
         if (!result->isnull)                                            \
         {                                                               \
@@ -694,15 +700,16 @@ PG_FLOAT_DIV_OPERATOR_TEMPLATE(float8div, float8,float8,float8,float8_t)
 		xpu_##TYPE##_t *result = (xpu_##TYPE##_t *)__result;			\
 		xpu_##TYPE##_t x_val;											\
 		xpu_##TYPE##_t y_val;											\
-		const kern_expression *arg;										\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
-		arg = KEXP_FIRST_ARG(2, TYPE);									\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))					\
+		assert(kexp->nr_args == 2);										\
+		assert(KEXP_IS_VALID(karg, TYPE));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
 			return false;												\
-		arg = KEXP_NEXT_ARG(arg, TYPE);									\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &y_val))					\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, TYPE));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
 			return false;												\
-		result->ops = &xpu_##TYPE##_ops;								\
 		result->isnull = (x_val.isnull | y_val.isnull);					\
 		if (!result->isnull)											\
 		{																\
@@ -730,12 +737,11 @@ PG_INT_MOD_OPERATOR_TEMPLATE(int8)
 	{																	\
 		xpu_##XTYPE##_t *result = (xpu_##XTYPE##_t *)__result;			\
 		xpu_##XTYPE##_t x_val;											\
-		const kern_expression *arg;										\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
-		arg = KEXP_FIRST_ARG(1, XTYPE);									\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))					\
+		assert(kexp->nr_args==1 && KEXP_IS_VALID(karg,XTYPE));			\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
 			return false;												\
-		result->ops = &xpu_##XTYPE##_ops;								\
 		result->isnull = x_val.isnull;									\
 		if (!result->isnull)											\
 			result->value = OPER(CAST(x_val.value));					\
@@ -749,15 +755,16 @@ PG_INT_MOD_OPERATOR_TEMPLATE(int8)
 		xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;			\
 		xpu_##XTYPE##_t x_val;											\
 		xpu_##YTYPE##_t y_val;											\
-		const kern_expression *arg;										\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
-		arg = KEXP_FIRST_ARG(2, XTYPE);									\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &x_val))					\
+		assert(karg->nr_args == 2);										\
+		assert(KEXP_IS_VALID(karg,XTYPE));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
 			return false;												\
-		arg = KEXP_NEXT_ARG(arg, YTYPE);								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &y_val))					\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg,YTYPE));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
 			return false;												\
-		result->ops = &xpu_##RTYPE##_ops;								\
 		result->isnull = (x_val.isnull | y_val.isnull);					\
 		if (!result->isnull)											\
 			result->value = x_val.value OPER y_val.value;				\

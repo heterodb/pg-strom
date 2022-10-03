@@ -1406,11 +1406,12 @@ pgfn_date_to_timestamp(XPU_PGFUNCTION_ARGS)
 {
 	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
 	xpu_date_t	datum;
-	const kern_expression *arg = KEXP_FIRST_ARG(1, date);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
-	if (!EXEC_KERN_EXPRESSION(kcxt, arg, &datum))
+	assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, date));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
-	result->ops = &xpu_timestamp_ops;
 	result->isnull = datum.isnull;
 	if (!datum.isnull)
 	{
@@ -1434,11 +1435,12 @@ pgfn_date_to_timestamptz(XPU_PGFUNCTION_ARGS)
 {
 	xpu_timestamptz_t *result = (xpu_timestamptz_t *)__result;
 	xpu_date_t	datum;
-	const kern_expression *arg = KEXP_FIRST_ARG(1, date);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
-	if (!EXEC_KERN_EXPRESSION(kcxt, arg, &datum))
+	assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, date));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
-	result->ops = &xpu_timestamptz_ops;
 	result->isnull = datum.isnull;
 	if (!datum.isnull)
 	{
@@ -1479,11 +1481,12 @@ pgfn_timestamptz_to_timestamp(XPU_PGFUNCTION_ARGS)
 {
 	xpu_timestamp_t	   *result = (xpu_timestamp_t *)__result;
 	xpu_timestamptz_t	datum;
-	const kern_expression *arg = KEXP_FIRST_ARG(1,timestamptz);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
-	if (!EXEC_KERN_EXPRESSION(kcxt, arg, &datum))
+	assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, timestamptz));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
-	result->ops = &xpu_timestamp_ops;
 	result->isnull = datum.isnull;
 	if (!datum.isnull)
 	{
@@ -1507,11 +1510,12 @@ pgfn_timestamp_to_timestamptz(XPU_PGFUNCTION_ARGS)
 {
 	xpu_timestamptz_t  *result = (xpu_timestamptz_t *)__result;
 	xpu_timestamp_t		datum;
-	const kern_expression *arg = KEXP_FIRST_ARG(1,timestamp);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
-	if (!EXEC_KERN_EXPRESSION(kcxt, arg, &datum))
+	assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, timestamp));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
-	result->ops = &xpu_timestamptz_ops;
 	result->isnull = datum.isnull;
 	if (!datum.isnull)
 	{
@@ -1555,15 +1559,17 @@ PG_SIMPLE_COMPARE_TEMPLATE(timestamptz_,timestamptz,timestamptz,TimestampTz)
 		xpu_timetz_t	datum_b;										\
 		TimeOffset		t1, t2;											\
 		int				comp;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(2,timetz);			\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
+		assert(kexp->nr_args == 2 &&									\
+			   KEXP_IS_VALID(karg,timetz));								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
 			return false;												\
-		karg = KEXP_NEXT_ARG(karg, timetz);								\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, timetz));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
 																		\
-		result->ops = &xpu_bool_ops;									\
 		result->isnull = (datum_a.isnull | datum_b.isnull);				\
 		if (!result->isnull)											\
 		{																\
@@ -1620,15 +1626,17 @@ __compare_date_timestamp(DateADT a, Timestamp b)
 		xpu_date_t		datum_a;										\
 		xpu_timestamp_t	datum_b;										\
 		int				comp;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(2,date);			\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
+		assert(kexp->nr_args == 2 &&									\
+			   KEXP_IS_VALID(karg,date));								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
 			return false;												\
-		karg = KEXP_NEXT_ARG(karg, timestamp);							\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, timestamp));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
 																		\
-		result->ops = &xpu_bool_ops;									\
 		result->isnull = (datum_a.isnull | datum_b.isnull);				\
 		if (!result->isnull)											\
 		{																\
@@ -1653,15 +1661,17 @@ PG_DATE_TIMESTAMP_COMPARE_TEMPLATE(ge, >=);
 		xpu_timestamp_t	datum_a;										\
 		xpu_date_t		datum_b;										\
 		int				comp;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(2, timestamp);		\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
+		assert(kexp->nr_args == 2 &&									\
+			   KEXP_IS_VALID(karg, timestamp));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
 			return false;												\
-		karg = KEXP_NEXT_ARG(karg, date);								\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, date));								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
 																		\
-		result->ops = &xpu_bool_ops;									\
 		result->isnull = (datum_a.isnull | datum_b.isnull);				\
 		if (!result->isnull)											\
 		{																\
@@ -1724,15 +1734,17 @@ __compare_date_timestamptz(DateADT a, TimestampTz b, const pg_tz *tz_info)
 		xpu_date_t	datum_a;											\
 		xpu_timestamptz_t datum_b;										\
 		int			comp;												\
-		const kern_expression *karg = KEXP_FIRST_ARG(2,date);			\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
+		assert(kexp->nr_args == 2 &&									\
+			   KEXP_IS_VALID(karg, date));								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
 			return false;												\
-		karg = KEXP_NEXT_ARG(karg, timestamptz);						\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, timestamptz));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
 																		\
-		result->ops = &xpu_bool_ops;									\
 		result->isnull = (datum_a.isnull | datum_b.isnull);				\
 		if (!result->isnull)											\
 		{																\
@@ -1759,15 +1771,17 @@ PG_DATE_TIMESTAMPTZ_COMPARE_TEMPLATE(ge, >=);
 		xpu_timestamptz_t datum_a;										\
 		xpu_date_t	datum_b;											\
 		int			comp;												\
-		const kern_expression *karg = KEXP_FIRST_ARG(2,timestamptz);	\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
+		assert(kexp->nr_args == 2 &&									\
+			   KEXP_IS_VALID(karg, timestamptz));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
 			return false;												\
-		karg = KEXP_NEXT_ARG(karg, date);								\
+		karg = KEXP_NEXT_ARG(karg);										\
+		KEXP_IS_VALID(karg, date);										\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
 																		\
-		result->ops = &xpu_bool_ops;									\
 		result->isnull = (datum_a.isnull | datum_b.isnull);				\
 		if (!result->isnull)											\
 		{																\
@@ -1824,15 +1838,17 @@ __compare_timestamp_timestamptz(Timestamp a,
         xpu_timestamp_t		datum_a;									\
         xpu_timestamptz_t	datum_b;									\
         int			comp;												\
-		const kern_expression *karg = KEXP_FIRST_ARG(2,timestamp);		\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
+		assert(kexp->nr_args == 2 &&									\
+			   KEXP_IS_VALID(karg, timestamp));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))                \
 			return false;                                               \
-		karg = KEXP_NEXT_ARG(karg, timestamptz);						\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))                \
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, timestamptz));						\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;                                               \
                                                                         \
-		result->ops = &xpu_bool_ops;                                    \
 		result->isnull = (datum_a.isnull | datum_b.isnull);             \
         if (!result->isnull)                                            \
         {                                                               \
@@ -1859,15 +1875,17 @@ PG_TIMESTAMP_TIMESTAMPTZ_COMPARE_TEMPLATE(ge, >=)
         xpu_timestamp_t		datum_a;									\
         xpu_timestamptz_t	datum_b;									\
         int			comp;												\
-		const kern_expression *karg = KEXP_FIRST_ARG(2,timestamp);		\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
+		assert(kexp->nr_args == 2 &&									\
+			   KEXP_IS_VALID(karg, timestamp));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))                \
 			return false;                                               \
-		karg = KEXP_NEXT_ARG(karg, timestamptz);						\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, timestamptz));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))                \
 			return false;                                               \
                                                                         \
-		result->ops = &xpu_bool_ops;                                    \
 		result->isnull = (datum_a.isnull | datum_b.isnull);             \
         if (!result->isnull)                                            \
         {                                                               \
@@ -1909,15 +1927,17 @@ interval_cmp_value(const Interval *ival)
 		xpu_bool_t *result = (xpu_bool_t *)__result;                    \
         xpu_interval_t	datum_a;										\
         xpu_interval_t	datum_b;										\
-		const kern_expression *karg = KEXP_FIRST_ARG(2,interval);		\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
 																		\
+		assert(kexp->nr_args == 2 &&									\
+			   KEXP_IS_VALID(karg, interval));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))                \
 			return false;                                               \
-		karg = KEXP_NEXT_ARG(karg, interval);							\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, interval));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))                \
 			return false;                                               \
                                                                         \
-		result->ops = &xpu_bool_ops;                                    \
 		result->isnull = (datum_a.isnull | datum_b.isnull);             \
 		if (!result->isnull)                                            \
 		{                                                               \

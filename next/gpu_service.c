@@ -605,10 +605,10 @@ static bool
 __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
 							  char *emsg, size_t emsg_sz)
 {
-	xpu_type_catalog_entry *xpu_type;
 	xpu_function_catalog_entry *xpu_func;
-	char   *pos = kexp->u.data;
-	int		i;
+	xpu_type_catalog_entry *xpu_type;
+	kern_expression *karg;
+	int		i, n;
 
 	/* lookup device function */
 	xpu_func = hash_search(gmodule->cuda_func_htab,
@@ -623,7 +623,7 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
 	}
 	kexp->fn_dptr = xpu_func->func_dptr;
 
-	/* lookup device type */
+	/* lookup device type operator */
 	xpu_type = hash_search(gmodule->cuda_type_htab,
 						   &kexp->exptype,
 						   HASH_FIND, NULL);
@@ -634,42 +634,44 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
 				 (int)kexp->exptype);
 		return false;
 	}
-	kexp->exptype_ops = xpu_type->type_ops;
+	kexp->expr_ops = xpu_type->type_ops;
 
-	for (i=0; i < kexp->nargs; i++)
+	if (kexp->opcode == FuncOpCode__Projection)
 	{
-		kern_expression *karg = (kern_expression *)pos;
-
-		if ((char *)kexp + VARSIZE(kexp) < (char *)karg + VARSIZE(karg))
+		n = kexp->u.proj.nexprs + kexp->u.proj.nattrs;
+		for (i=0; i < n; i++)
 		{
-			snprintf(emsg, emsg_sz, "Corrupted XPU code.");
+			kern_projection_desc *desc = &kexp->u.proj.desc[i];
+
+			xpu_type = hash_search(gmodule->cuda_type_htab,
+								   &desc->slot_type,
+								   HASH_FIND, NULL);
+			if (xpu_type)
+				desc->slot_ops = xpu_type->type_ops;
+			else if (i >= kexp->u.proj.nexprs)
+				desc->slot_ops = NULL;	/* PostgreSQL generic projection */
+			else
+			{
+				snprintf(emsg, emsg_sz,
+						 "device type pointer for opcode:%u not found.",
+						 (int)desc->slot_type);
+				return false;
+			}
+			fprintf(stderr, "desc[%d] slot_id=%u slot_type=%d\n", i, desc->slot_id, desc->slot_type);
+		}
+	}
+
+	for (i=0, karg=KEXP_FIRST_ARG(kexp);
+		 i < kexp->nr_args;
+		 i++, karg=KEXP_NEXT_ARG(karg))
+	{
+		if (!__KEXP_IS_VALID(kexp,karg))
+		{
+			snprintf(emsg, emsg_sz, "XPU code corruption at args[%d]", i);
 			return false;
 		}
 		if (!__resolveDevicePointersWalker(gmodule, karg, emsg, emsg_sz))
 			return false;
-		pos += MAXALIGN(VARSIZE(karg));
-	}
-
-	/*
-	 * Extra device type operators lookup for Projection
-	 */
-	if (kexp->opcode == FuncOpCode__Projection)
-	{
-		const kern_projection_map *proj_map = __KEXP_GET_PROJECTION_MAP(kexp);
-		uint32_t	i, ndesc = (proj_map->nexprs + proj_map->nattrs);
-
-		for (i=0; i < ndesc; i++)
-		{
-			kern_projection_desc *desc = (kern_projection_desc *)&proj_map->desc[i];
-
-			xpu_type = hash_search(gmodule->cuda_type_htab,
-								   &kexp->exptype,
-								   HASH_FIND, NULL);
-			if (!xpu_type)
-				desc->slot_ops = NULL;
-			else
-				desc->slot_ops = xpu_type->type_ops;
-		}
 	}
 	return true;
 }
@@ -748,6 +750,11 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 		gpuClientELog(gclient, "%s", emsg);
 		return false;
 	}
+
+	fprintf(stderr, "session kcxt_kvars_nslots=%u kcxt_extra_bufsz=%u\n",
+			session->kcxt_kvars_nslots,
+			session->kcxt_extra_bufsz);
+
 	gclient->session = session;
 	gclient->cuda_module = gmodule->cuda_module;
 

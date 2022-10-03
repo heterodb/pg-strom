@@ -286,11 +286,12 @@ PGSTROM_SQLTYPE_OPERATORS(numeric, false, 4, -1);
 	{																\
 		xpu_##TARGET##_t *result = (xpu_##TARGET##_t *)__result;	\
 		xpu_numeric_t	datum;										\
-		const kern_expression *karg = KEXP_FIRST_ARG(1,numeric);	\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
+		assert(kexp->nr_args == 1 &&								\
+			   KEXP_IS_VALID(karg, numeric));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))				\
 			return false;											\
-		result->ops = &xpu_##TARGET##_ops;							\
 		result->isnull = datum.isnull;								\
 		if (result->isnull)											\
 			return true;											\
@@ -340,11 +341,12 @@ PG_NUMERIC_TO_INT_TEMPLATE(money,LLONG_MIN,LLONG_MAX)
 	{																\
 		xpu_##TARGET##_t *result = (xpu_##TARGET##_t *)__result;	\
 		xpu_numeric_t	datum;										\
-		const kern_expression *karg = KEXP_FIRST_ARG(1,numeric);	\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
+		assert(kexp->nr_args == 1 &&								\
+			   KEXP_IS_VALID(karg, numeric));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))				\
 			return false;											\
-		result->ops = &xpu_##TARGET##_ops;							\
 		result->isnull = datum.isnull;								\
 		if (result->isnull)											\
 			return true;											\
@@ -391,11 +393,12 @@ PG_NUMERIC_TO_FLOAT_TEMPLATE(float8,double)
 	{																\
 		xpu_numeric_t	   *result = (xpu_numeric_t *)__result;		\
 		xpu_##SOURCE##_t	datum;									\
-		const kern_expression *karg = KEXP_FIRST_ARG(1,SOURCE);		\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
+		assert(kexp->nr_args == 1 &&								\
+			   KEXP_IS_VALID(karg,SOURCE));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))				\
 			return false;											\
-		result->ops = &xpu_numeric_ops;								\
 		result->isnull = datum.isnull;								\
 		if (!result->isnull)										\
 			set_normalized_numeric(result, datum.value, 0);			\
@@ -414,11 +417,12 @@ PG_INT_TO_NUMERIC_TEMPLATE(money)
 		xpu_numeric_t	   *result = (xpu_numeric_t *)__result;		\
 		xpu_##SOURCE##_t	datum;									\
 		__TYPE				fval;									\
-		const kern_expression *karg = KEXP_FIRST_ARG(1,SOURCE);		\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
+		assert(kexp->nr_args == 1 &&								\
+			   KEXP_IS_VALID(karg,SOURCE));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))				\
 			return false;											\
-		result->ops = &xpu_numeric_ops;								\
 		result->isnull = datum.isnull;								\
 		if (result->isnull)											\
 			return true;											\
@@ -519,14 +523,16 @@ __numeric_compare(const xpu_numeric_t *a, const xpu_numeric_t *b)
 	{																\
 		xpu_bool_t	   *result = (xpu_bool_t *)__result;			\
 		xpu_numeric_t	datum_a, datum_b;							\
-		const kern_expression *karg = KEXP_FIRST_ARG(2,numeric);	\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
+		assert(kexp->nr_args == 2 &&								\
+			   KEXP_IS_VALID(karg,numeric));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))			\
 			return false;											\
-		karg = KEXP_NEXT_ARG(karg, numeric);						\
+		karg = KEXP_NEXT_ARG(karg);									\
+		assert(KEXP_IS_VALID(karg, numeric));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))			\
 			return false;											\
-		result->ops = &xpu_bool_ops;								\
 		result->isnull = (datum_a.isnull | datum_b.isnull);			\
 		if (!result->isnull)										\
 			result->value = (__numeric_compare(&datum_a,			\
@@ -546,14 +552,16 @@ pgfn_numeric_add(XPU_PGFUNCTION_ARGS)
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
 	xpu_numeric_t	datum_a;
 	xpu_numeric_t	datum_b;
-	const kern_expression *karg = KEXP_FIRST_ARG(2, numeric);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
+	assert(kexp->nr_args == 2 &&
+		   KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))
 		return false;
-	karg = KEXP_NEXT_ARG(karg, numeric);
+	karg = KEXP_NEXT_ARG(karg);
+	assert(KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))
 		return false;
-	result->ops = &xpu_numeric_ops;
 	result->isnull = (datum_a.isnull | datum_b.isnull);
 	if (!result->isnull)
 	{
@@ -608,14 +616,16 @@ pgfn_numeric_sub(XPU_PGFUNCTION_ARGS)
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
 	xpu_numeric_t	datum_a;
 	xpu_numeric_t	datum_b;
-	const kern_expression *karg = KEXP_FIRST_ARG(2, numeric);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
+	assert(kexp->nr_args == 2 &&
+		   KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))
 		return false;
-	karg = KEXP_NEXT_ARG(karg, numeric);
+	karg = KEXP_NEXT_ARG(karg);
+	assert(KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))
 		return false;
-	result->ops = &xpu_numeric_ops;
 	result->isnull = (datum_a.isnull | datum_b.isnull);
 	if (!result->isnull)
 	{
@@ -670,14 +680,16 @@ pgfn_numeric_mul(XPU_PGFUNCTION_ARGS)
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
 	xpu_numeric_t	datum_a;
 	xpu_numeric_t	datum_b;
-	const kern_expression *karg = KEXP_FIRST_ARG(2, numeric);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
+	assert(kexp->nr_args == 2 &&
+		   KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))
 		return false;
-	karg = KEXP_NEXT_ARG(karg, numeric);
+	karg = KEXP_NEXT_ARG(karg);
+	assert(KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))
 		return false;
-	result->ops = &xpu_numeric_ops;
 	result->isnull = (datum_a.isnull | datum_b.isnull);
 	if (!result->isnull)
 	{
@@ -750,14 +762,16 @@ pgfn_numeric_div(XPU_PGFUNCTION_ARGS)
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
 	xpu_numeric_t	datum_a;
 	xpu_numeric_t	datum_b;
-	const kern_expression *karg = KEXP_FIRST_ARG(2, numeric);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
+	assert(kexp->nr_args == 2 &&
+		   KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))
 		return false;
-	karg = KEXP_NEXT_ARG(karg, numeric);
+	karg = KEXP_NEXT_ARG(karg);
+	assert(KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))
 		return false;
-	result->ops = &xpu_numeric_ops;
 	result->isnull = (datum_a.isnull | datum_b.isnull);
 	if (result->isnull)
 		return true;
@@ -858,14 +872,16 @@ pgfn_numeric_mod(XPU_PGFUNCTION_ARGS)
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
 	xpu_numeric_t	datum_a;
 	xpu_numeric_t	datum_b;
-	const kern_expression *karg = KEXP_FIRST_ARG(2, numeric);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
+	assert(kexp->nr_args == 2 &&
+		   KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))
 		return false;
-	karg = KEXP_NEXT_ARG(karg, numeric);
+	karg = KEXP_NEXT_ARG(karg);
+	assert(KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))
 		return false;
-	result->ops = &xpu_numeric_ops;
 	result->isnull = (datum_a.isnull | datum_b.isnull);
 	if (result->isnull)
 		return true;
@@ -926,8 +942,10 @@ PUBLIC_FUNCTION(bool)
 pgfn_numeric_uplus(XPU_PGFUNCTION_ARGS)
 {
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-	const kern_expression *karg = KEXP_FIRST_ARG(1, numeric);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
+	assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, result))
 		return false;
 	return true;
@@ -937,7 +955,10 @@ PUBLIC_FUNCTION(bool)
 pgfn_numeric_uminus(XPU_PGFUNCTION_ARGS)
 {
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-	const kern_expression *karg = KEXP_FIRST_ARG(1, numeric);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+
+		assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, numeric));
 
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, result))
 		return false;
@@ -951,8 +972,10 @@ PUBLIC_FUNCTION(bool)
 pgfn_numeric_abs(XPU_PGFUNCTION_ARGS)
 {
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-	const kern_expression *karg = KEXP_FIRST_ARG(1, numeric);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
+	assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, result))
 		return false;
 	if (!result->isnull &&

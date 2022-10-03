@@ -429,15 +429,16 @@ __bpchar_compare(kern_context *kcxt,
 		xpu_bool_t	   *result = (xpu_bool_t *)__result;			\
 		xpu_bpchar_t	datum_a;									\
 		xpu_bpchar_t	datum_b;									\
-		const kern_expression *karg = KEXP_FIRST_ARG(2, bpchar);	\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
+		assert(kexp->nr_args == 2 &&								\
+			   KEXP_IS_VALID(karg, bpchar));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))			\
 			return false;											\
-		karg = KEXP_NEXT_ARG(karg, bpchar);							\
+		karg = KEXP_NEXT_ARG(karg);									\
+		assert(KEXP_IS_VALID(karg, bpchar));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))			\
 			return false;											\
-																	\
-		result->ops = &xpu_bool_ops;								\
 		result->isnull = (datum_a.isnull | datum_b.isnull);			\
 		if (!result->isnull)										\
 		{															\
@@ -463,12 +464,13 @@ pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
 {
 	xpu_int4_t	   *result = (xpu_int4_t *)__result;
 	xpu_bpchar_t	datum;
-	const kern_expression *karg = KEXP_FIRST_ARG(1, bpchar);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
+	assert(karg->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, bpchar));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
 	memset(&result, 0, sizeof(xpu_int4_t));
-	result->ops = &xpu_int4_ops;
 	result->isnull = datum.isnull;
 	if (!datum.isnull)
 	{
@@ -523,15 +525,16 @@ __text_compare(kern_context *kcxt,
 		xpu_bool_t	   *result = (xpu_bool_t *)__result;			\
 		xpu_text_t		datum_a;									\
 		xpu_text_t		datum_b;									\
-		const kern_expression *karg = KEXP_FIRST_ARG(2, text);		\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
+		assert(kexp->nr_args == 2 &&								\
+			   KEXP_IS_VALID(karg, text));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))			\
 			return false;											\
-		karg = KEXP_NEXT_ARG(karg, text);							\
+		karg = KEXP_NEXT_ARG(karg);									\
+		assert(KEXP_IS_VALID(karg, text));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))			\
 			return false;											\
-																	\
-		result->ops = &xpu_bool_ops;								\
 		result->isnull = (datum_a.isnull | datum_b.isnull);			\
 		if (!result->isnull)										\
 		{															\
@@ -557,12 +560,13 @@ pgfn_textlen(XPU_PGFUNCTION_ARGS)
 {
 	xpu_int4_t	   *result = (xpu_int4_t *)__result;
 	xpu_text_t		datum;
-	const kern_expression *karg = KEXP_FIRST_ARG(1, text);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
+	assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, text));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
 	memset(result, 0, sizeof(xpu_int4_t));
-	result->ops = &xpu_int4_ops;
 	result->isnull = datum.isnull;
 	if (!datum.isnull)
 	{
@@ -993,14 +997,16 @@ GENERIC_MATCH_TEXT_TEMPLATE(GenericCaseMatchText, GetCharUpper)
 		xpu_bool_t	   *result = (xpu_bool_t *)__result;			\
 		xpu_text_t		datum_a;	/* string */					\
 		xpu_text_t		datum_b;	/* pattern */					\
-		const kern_expression *karg = KEXP_FIRST_ARG(2, text);		\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
+		assert(kexp->nr_args == 2 &&								\
+			   KEXP_IS_VALID(karg, text));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))			\
 			return false;											\
-		karg = KEXP_NEXT_ARG(karg, text);							\
+		karg = KEXP_NEXT_ARG(karg);									\
+		assert(KEXP_IS_VALID(karg, text));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))			\
 			return false;											\
-		result->ops = &xpu_bool_ops;								\
 		result->isnull = (datum_a.isnull | datum_b.isnull);			\
 		if (!result->isnull)										\
 		{															\
@@ -1033,14 +1039,16 @@ PG_TEXTLIKE_TEMPLATE(texticnlike, GenericCaseMatchText, !=)
 		xpu_bool_t	   *result = (xpu_bool_t *)__result;			\
 		xpu_bpchar_t	datum_a;	/* string */					\
 		xpu_text_t		datum_b;	/* pattern */					\
-		const kern_expression *karg = KEXP_FIRST_ARG(2, bpchar);	\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
+		assert(kexp->nr_args == 2 &&								\
+			   KEXP_IS_VALID(karg, bpchar));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))			\
 			return false;											\
-		karg = KEXP_NEXT_ARG(karg, text);							\
+		karg = KEXP_NEXT_ARG(karg);									\
+		assert(KEXP_IS_VALID(karg, text));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))			\
 			return false;											\
-		result->ops = &xpu_bool_ops;								\
 		result->isnull = (datum_a.isnull | datum_b.isnull);			\
 		if (!result->isnull)										\
 		{															\

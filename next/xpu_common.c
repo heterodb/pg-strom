@@ -21,7 +21,7 @@ pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 
 	if (!kexp->u.c.const_isnull)
 		addr = kexp->u.c.const_value;
-	return kexp->exptype_ops->xpu_datum_ref(kcxt, __result, addr);
+	return kexp->expr_ops->xpu_datum_ref(kcxt, __result, addr);
 }
 
 STATIC_FUNCTION(bool)
@@ -33,7 +33,7 @@ pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 
 	if (param_id < session->nparams && session->poffset[param_id] != 0)
 		addr = (char *)session + session->poffset[param_id];
-	return kexp->exptype_ops->xpu_datum_ref(kcxt, __result, addr);
+	return kexp->expr_ops->xpu_datum_ref(kcxt, __result, addr);
 }
 
 STATIC_FUNCTION(bool)
@@ -49,10 +49,10 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 
 		/* special case handling if Apache Arrow */
 		if (cmeta && cmeta->kds_format == KDS_FORMAT_ARROW)
-			return kexp->exptype_ops->xpu_arrow_ref(kcxt, __result,
-													cmeta, addr, len);
+			return kexp->expr_ops->xpu_arrow_ref(kcxt, __result,
+												 cmeta, addr, len);
 		/* elsewhere, PostgreSQL heap format */
-		return kexp->exptype_ops->xpu_datum_ref(kcxt, __result, addr);
+		return kexp->expr_ops->xpu_datum_ref(kcxt, __result, addr);
 	}
 	STROM_ELOG(kcxt, "Bug? slot_id is out of range");
 	return false;
@@ -64,24 +64,23 @@ pgfn_BoolExprAnd(XPU_PGFUNCTION_ARGS)
 	xpu_bool_t *result = (xpu_bool_t *)__result;
 	int			i;
 	bool		anynull = false;
-	const kern_expression *karg = KEXP_FIRST_ARG(-1,bool);
+	const kern_expression *karg;
 
-	memset(result, 0, sizeof(xpu_bool_t));
-	result->ops = &xpu_bool_ops;
-	for (i=0, karg=(const kern_expression *)kexp->u.data;
-		 i < kexp->nargs;
-		 i++, karg=(const kern_expression *)((char *)karg + MAXALIGN(VARSIZE(karg))))
+	for (i=0, karg=KEXP_FIRST_ARG(kexp);
+		 i < kexp->nr_args;
+		 i++, karg=KEXP_NEXT_ARG(karg))
 	{
 		xpu_bool_t	status;
 
-		assert((char *)karg + VARSIZE(karg) <= (char *)kexp + VARSIZE(kexp));
+		assert(KEXP_IS_VALID(karg, bool));
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &status))
 			return false;
 		if (status.isnull)
 			anynull = true;
 		else if (!status.value)
 		{
-			result->value = false;
+			result->isnull = false;
+			result->value  = false;
 			return true;
 		}
 	}
@@ -96,23 +95,25 @@ pgfn_BoolExprOr(XPU_PGFUNCTION_ARGS)
 	xpu_bool_t *result = (xpu_bool_t *)__result;
 	int			i;
 	bool		anynull = false;
-	const kern_expression *arg = KEXP_FIRST_ARG(-1,bool);
+	const kern_expression *karg;
 
-	result->ops = &xpu_bool_ops;
-	for (i=0; i < kexp->nargs; i++)
+	for (i=0, karg=KEXP_FIRST_ARG(kexp);
+		 i < karg->nr_args;
+		 i++, karg=KEXP_NEXT_ARG(karg))
 	{
 		xpu_bool_t	status;
 
-		if (!EXEC_KERN_EXPRESSION(kcxt, arg, &status))
+		assert(KEXP_IS_VALID(karg, bool));
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &status))
 			return false;
 		if (status.isnull)
 			anynull = true;
 		else if (status.value)
 		{
+			result->isnull = false;
 			result->value = true;
 			return true;
 		}
-		arg = KEXP_NEXT_ARG(arg, bool);
 	}
 	result->isnull = anynull;
 	result->value  = false;
@@ -124,11 +125,11 @@ pgfn_BoolExprNot(XPU_PGFUNCTION_ARGS)
 {
 	xpu_bool_t *result = (xpu_bool_t *)__result;
 	xpu_bool_t	status;
-	const kern_expression *arg = KEXP_FIRST_ARG(1,bool);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
-	if (!EXEC_KERN_EXPRESSION(kcxt, arg, &status))
+	assert(kexp->nr_args == 1 && KEXP_IS_VALID(karg, bool));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &status))
 		return false;
-	result->ops = &xpu_bool_ops;
 	if (status.isnull)
 		result->isnull = true;
 	else
@@ -144,12 +145,12 @@ pgfn_NullTestExpr(XPU_PGFUNCTION_ARGS)
 {
 	xpu_bool_t	   *result = (xpu_bool_t *)__result;
 	xpu_datum_t	   *status;
-	const kern_expression *arg = KEXP_FIRST_ARG(1,Invalid);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
-	status = (xpu_datum_t *)alloca(arg->exptype_ops->xpu_type_sizeof);
-	if (!EXEC_KERN_EXPRESSION(kcxt, arg, status))
+	assert(kexp->nr_args == 1 && __KEXP_IS_VALID(kexp, karg));
+	status = (xpu_datum_t *)alloca(karg->expr_ops->xpu_type_sizeof);
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, status))
 		return false;
-	result->ops = &xpu_bool_ops;
 	result->isnull = false;
 	switch (kexp->opcode)
 	{
@@ -171,11 +172,11 @@ pgfn_BoolTestExpr(XPU_PGFUNCTION_ARGS)
 {
 	xpu_bool_t	   *result = (xpu_bool_t *)__result;
 	xpu_bool_t		status;
-	const kern_expression *arg = KEXP_FIRST_ARG(1,bool);
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
-	if (!EXEC_KERN_EXPRESSION(kcxt, arg, &status))
+	assert(kexp->nr_args == 1 && KEXP_IS_VALID(karg, bool));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &status))
 		return false;
-	result->ops = &xpu_bool_ops;
 	result->isnull = false;
 	switch (kexp->opcode)
 	{
@@ -216,7 +217,6 @@ kern_form_heaptuple(kern_context *kcxt,
 					const kern_data_store *kds_dst,
 					HeapTupleHeaderData *htup)
 {
-	const kern_projection_map *proj_map = __KEXP_GET_PROJECTION_MAP(kproj);
 	uint32_t	t_hoff;
 	uint32_t	t_next;
 	uint16_t	t_infomask = 0;
@@ -224,10 +224,10 @@ kern_form_heaptuple(kern_context *kcxt,
 	int			j, sz;
 
 	/* has any NULL attributes? */
-	for (j=0; j < proj_map->nattrs; j++)
+	for (j=0; j < kproj->u.proj.nattrs; j++)
 	{
-		const kern_projection_desc *desc = &proj_map->desc[proj_map->nexprs + j];
-
+		const kern_projection_desc *desc
+			= &kproj->u.proj.desc[kproj->u.proj.nexprs + j];
 		assert(desc->slot_id < kcxt->kvars_nslots);
 		if (!kcxt->kvars_addr[desc->slot_id])
 		{
@@ -240,7 +240,7 @@ kern_form_heaptuple(kern_context *kcxt,
 	/* set up headers */
 	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
 	if (t_hasnull)
-		t_hoff += BITMAPLEN(proj_map->nattrs);
+		t_hoff += BITMAPLEN(kproj->u.proj.nattrs);
 	t_hoff = MAXALIGN(t_hoff);
 
 	if (htup)
@@ -251,14 +251,15 @@ kern_form_heaptuple(kern_context *kcxt,
 		htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
 		htup->t_ctid.ip_blkid.bi_lo = 0xffff;
 		htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
-		htup->t_infomask2 = (proj_map->nattrs & HEAP_NATTS_MASK);
+		htup->t_infomask2 = (kproj->u.proj.nattrs & HEAP_NATTS_MASK);
 		htup->t_hoff = t_hoff;
 	}
 
 	/* walk on the columns */
-	for (j=0; j < proj_map->nattrs; j++)
+	for (j=0; j < kproj->u.proj.nattrs; j++)
 	{
-		const kern_projection_desc *desc = &proj_map->desc[proj_map->nexprs + j];
+		const kern_projection_desc *desc
+			= &kproj->u.proj.desc[kproj->u.proj.nexprs + j];
 		const kern_colmeta *cmeta = kcxt->kvars_cmeta[desc->slot_id];
 		void   *addr = kcxt->kvars_addr[desc->slot_id];
 		int		len  = kcxt->kvars_len[desc->slot_id];
@@ -342,47 +343,39 @@ kern_form_heaptuple(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 pgfn_Projection(XPU_PGFUNCTION_ARGS)
 {
-	const kern_projection_map *proj_map = __KEXP_GET_PROJECTION_MAP(kexp);
 	const kern_expression *karg;
-	xpu_int4_t *result;
+	xpu_int4_t *result = (xpu_int4_t *)__result;
 	int			i, sz;
 
 	/* exec sub-expressions */
-	for (i=0, karg = KEXP_FIRST_ARG(-1, Invalid);
-		 i < kexp->nargs;
-		 i++, karg = KEXP_NEXT_ARG(karg, Invalid))
+	for (i=0, karg = KEXP_FIRST_ARG(kexp);
+		 i < kexp->nr_args;
+		 i++, karg = KEXP_NEXT_ARG(karg))
 	{
-		const kern_projection_desc *desc = &proj_map->desc[i];
+		const kern_projection_desc *desc = &kexp->u.proj.desc[i];
 		xpu_datum_t *datum;
 
-		assert(desc->slot_id < kcxt->kvars_nslots &&
-			   desc->slot_type == karg->exptype_ops->xpu_type_code);
+		assert(__KEXP_IS_VALID(kexp, karg) && karg->exptype == desc->slot_type);
+		assert(desc->slot_id < kcxt->kvars_nslots);
 
-		datum = (xpu_datum_t *)kcxt_alloc(kcxt, karg->exptype_ops->xpu_type_sizeof);
+		datum = (xpu_datum_t *)kcxt_alloc(kcxt, karg->expr_ops->xpu_type_sizeof);
 		if (!datum)
-		{
-			STROM_ELOG(kcxt, "out of kcxt memory");
 			return false;
-		}
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, datum))
 			return false;
 		kcxt->kvars_cmeta[desc->slot_id] = NULL;
 		kcxt->kvars_addr[desc->slot_id]  = (!datum->isnull ? datum : NULL);
 		kcxt->kvars_len[desc->slot_id]   = -1;
 	}
-	assert(i == proj_map->nexprs);
+	assert(i == kexp->u.proj.nexprs);
 
 	/* then, estimate the length */
 	sz = kern_form_heaptuple(kcxt, kexp, NULL, NULL);
 	if (sz < 0)
 		return false;
-	/* setup the result */
-	result = (xpu_int4_t *)__result;
-	memset(result, 0, sizeof(xpu_int4_t));
-	result->ops = &xpu_int4_ops;
+
 	result->isnull = false;
 	result->value  = offsetof(kern_tupitem, htup) + sz;
-
 	return true;
 }
 
@@ -471,8 +464,8 @@ kern_extract_heap_tuple(kern_context *kcxt,
 			if (kvars->var_resno == resno++)
 			{
 				slot_id = kvars->var_slot_id;
-				assert(slot_id < kcxt->kvars_nslots);
 
+				assert(slot_id < kcxt->kvars_nslots);
 				kcxt->kvars_cmeta[slot_id] = cmeta;
 				kcxt->kvars_addr[slot_id]  = addr;
 				kcxt->kvars_len[slot_id]   = -1;
@@ -589,11 +582,7 @@ __arrow_fetch_bool_datum(kern_context *kcxt,
 
 	datum = (xpu_bool_t *)kcxt_alloc(kcxt, sizeof(xpu_bool_t));
 	if (!datum)
-	{
-		STROM_ELOG(kcxt, "out of memory");
 		return false;
-	}
-	datum->ops = &xpu_bool_ops;
 	datum->isnull = false;
 	datum->value = arrow_bitmap_check(kds, kds_index,
 									  cmeta->values_offset,
@@ -713,10 +702,7 @@ __arrow_fetch_array_datum(kern_context *kcxt,
 		}
 		datum = (xpu_array_t *)kcxt_alloc(kcxt, sizeof(xpu_array_t));
 		if (!datum)
-		{
-			STROM_ELOG(kcxt, "out of memory");
 			return false;
-		}
 		datum->isnull = false;
 		datum->value  = (char *)kds;
 		datum->start  = start;
@@ -743,10 +729,7 @@ __arrow_fetch_composite_datum(kern_context *kcxt,
 	{
 		datum = (xpu_composite_t *)kcxt_alloc(kcxt, sizeof(xpu_composite_t));
 		if (!datum)
-		{
-			STROM_ELOG(kcxt, "out of memory");
 			return false;
-		}
 		datum->isnull  = false;
 		datum->nfields = cmeta->num_subattrs;
 		datum->rowidx  = kds_index;
@@ -911,22 +894,18 @@ ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
 					 kern_data_store **kds_inners,
 					 kern_tupitem **tupitem_inners)
 {
-	const kern_preload_vars *preload;
-	const kern_expression *karg;
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 	int			index;
 	int			depth;
 
 	assert(kexp->opcode == FuncOpCode__LoadVars &&
-		   kexp->nargs == 1);
-	karg = (const kern_expression *)kexp->u.data;
-	assert(kexp->exptype == karg->exptype);
-	preload = (const kern_preload_vars *)((const char *)karg +
-										  MAXALIGN(VARSIZE(karg)));
+		   kexp->nr_args == 1 &&
+		   kexp->exptype == karg->exptype);
 	/*
 	 * Walking on the outer/inner tuples
 	 */
 	for (depth=0, index=0;
-		 depth <= num_inners && index < preload->nloads;
+		 depth <= num_inners && index < kexp->u.load.nloads;
 		 depth++)
 	{
 		kern_data_store *kds;
@@ -946,8 +925,8 @@ ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
 										 kds,
 										 tupitem,
 										 depth,
-										 preload->kvars + index,
-										 preload->nloads - index);
+										 kexp->u.load.kvars + index,
+										 kexp->u.load.nloads - index);
 	}
 	return EXEC_KERN_EXPRESSION(kcxt, karg, __result);
 }
@@ -960,22 +939,19 @@ ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
                        kern_data_store **kds_inners,
                        kern_tupitem **tupitem_inners)
 {
-	const kern_expression *karg = (const kern_expression *)kexp->u.data;
-	const kern_preload_vars *preload;
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 	int			index;
 	int			depth;
 	int			count;
 
 	assert(kexp->opcode == FuncOpCode__LoadVars &&
-		   kexp->nargs == 1 &&
+		   kexp->nr_args == 1 &&
 		   kexp->exptype == karg->exptype);
-	preload = (const kern_preload_vars *)((char *)karg + MAXALIGN(VARSIZE(karg)));
-
 	/*
 	 * Walking on the outer/inner tuples
 	 */
 	for (depth=0, index=0;
-		 depth <= num_inners && index < preload->nloads;
+		 depth <= num_inners && index < kexp->u.load.nloads;
 		 depth++)
 	{
 		if (depth == 0)
@@ -983,8 +959,8 @@ ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
 			count = kern_extract_arrow_tuple(kcxt,
 											 kds_outer,
 											 kds_index,
-											 preload->kvars + index,
-											 preload->nloads - index);
+											 kexp->u.load.kvars + index,
+											 kexp->u.load.nloads - index);
 		}
 		else
 		{
@@ -992,8 +968,8 @@ ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
 											kds_inners[depth - 1],
 											tupitem_inners[depth - 1],
 											depth,
-											preload->kvars + index,
-											preload->nloads - index);
+											kexp->u.load.kvars + index,
+											kexp->u.load.nloads - index);
 		}
 		if (count < 0)
 			return false;

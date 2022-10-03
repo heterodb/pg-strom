@@ -169,11 +169,11 @@ typedef struct
 #define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
 	do {																\
 		uint32_t	__nslots = (SESSION)->kcxt_kvars_nslots;			\
-		uint32_t	__sz = offsetof(kern_context, vlbuf) +				\
-			Max(1024, MAXALIGN((SESSION)->kcxt_extra_bufsz));			\
+		uint32_t	__bufsz = Max(1024, (SESSION)->kcxt_extra_bufsz);	\
+		uint32_t	__len = offsetof(kern_context, vlbuf) +	__bufsz;	\
 																		\
-		KCXT = (kern_context *)alloca(__sz);							\
-		memset(KCXT, 0, __sz);											\
+		KCXT = (kern_context *)alloca(__len);\
+		memset(KCXT, 0, __len);											\
 		KCXT->session = (SESSION);										\
 		if (__nslots > 0)												\
 		{																\
@@ -189,33 +189,8 @@ typedef struct
 			memset(KCXT->kvars_len, -1, sizeof(int) * __nslots);		\
 		}																\
 		KCXT->vlpos = KCXT->vlbuf;										\
-		KCXT->vlend = KCXT->vlbuf + (SESSION)->kcxt_extra_bufsz;		\
+		KCXT->vlend = KCXT->vlbuf + __bufsz;							\
 	} while(0)
-
-INLINE_FUNCTION(void *)
-kcxt_alloc(kern_context *kcxt, size_t len)
-{
-	char   *pos = (char *)MAXALIGN(kcxt->vlpos);
-
-	if (pos >= kcxt->vlbuf && pos + len <= kcxt->vlend)
-	{
-		kcxt->vlpos = pos + len;
-		return pos;
-	}
-	return NULL;
-}
-
-INLINE_FUNCTION(void)
-kcxt_reset(kern_context *kcxt)
-{
-	if (kcxt->kvars_nslots > 0)
-	{
-		memset(kcxt->kvars_cmeta, 0, sizeof(void *) * kcxt->kvars_nslots);
-		memset(kcxt->kvars_addr,  0, sizeof(void *) * kcxt->kvars_nslots);
-		memset(kcxt->kvars_len,  -1, sizeof(int)    * kcxt->kvars_nslots);
-	}
-	kcxt->vlpos = kcxt->vlbuf;
-}
 
 INLINE_FUNCTION(void)
 __STROM_EREPORT(kern_context *kcxt,
@@ -245,6 +220,32 @@ __STROM_EREPORT(kern_context *kcxt,
 #define STROM_CPU_FALLBACK(kcxt, message)							\
 	__STROM_EREPORT((kcxt),ERRCODE_CPU_FALLBACK,					\
 					__FILE__,__LINE__,__FUNCTION__,(message))
+
+INLINE_FUNCTION(void *)
+kcxt_alloc(kern_context *kcxt, size_t len)
+{
+	char   *pos = (char *)MAXALIGN(kcxt->vlpos);
+
+	if (pos >= kcxt->vlbuf && pos + len <= kcxt->vlend)
+	{
+		kcxt->vlpos = pos + len;
+		return pos;
+	}
+	STROM_ELOG(kcxt, "out of kcxt memory");
+	return NULL;
+}
+
+INLINE_FUNCTION(void)
+kcxt_reset(kern_context *kcxt)
+{
+	if (kcxt->kvars_nslots > 0)
+	{
+		memset(kcxt->kvars_cmeta, 0, sizeof(void *) * kcxt->kvars_nslots);
+		memset(kcxt->kvars_addr,  0, sizeof(void *) * kcxt->kvars_nslots);
+		memset(kcxt->kvars_len,  -1, sizeof(int)    * kcxt->kvars_nslots);
+	}
+	kcxt->vlpos = kcxt->vlbuf;
+}
 
 INLINE_FUNCTION(void)
 __strncpy(char *d, const char *s, uint32_t n)
@@ -1177,7 +1178,6 @@ typedef struct xpu_datum_t		xpu_datum_t;
 typedef struct xpu_datum_operators xpu_datum_operators;
 
 #define XPU_DATUM_COMMON_FIELD			\
-	const xpu_datum_operators *ops;		\
 	bool		isnull
 
 struct xpu_datum_t {
@@ -1335,19 +1335,35 @@ typedef enum {
 } FuncOpCode;
 
 typedef struct kern_expression	kern_expression;
-#define XPU_PGFUNCTION_ARGS		kern_context *kcxt,			\
-								const kern_expression *kexp,\
+#define XPU_PGFUNCTION_ARGS		kern_context *kcxt,				\
+								const kern_expression *kexp,	\
 								xpu_datum_t *__result
 typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 
+typedef struct
+{
+	int16_t			var_depth;
+	int16_t			var_resno;
+	uint32_t		var_slot_id;
+} kern_preload_vars_item;
+
+typedef struct
+{
+	uint32_t		slot_id;
+	TypeOpCode		slot_type;
+	const xpu_datum_operators *slot_ops;
+} kern_projection_desc;
+
+#define KERN_EXPRESSION_MAGIC	(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 struct kern_expression
 {
-	uint32_t		_vl_len;
+	uint32_t		len;			/* length of this expression */
+	TypeOpCode		exptype;
+	const xpu_datum_operators *expr_ops;
 	FuncOpCode		opcode;
 	xpu_function_t	fn_dptr;		/* to be set by xPU service */
-	int				nargs;
-	TypeOpCode		exptype;
-	const xpu_datum_operators *exptype_ops;	/* to be set by xPU service */
+	uint32_t		nr_args;		/* number of arguments */
+	uint32_t		args_offset;	/* offset to the arguments */
 	union {
 		char			data[1]			__attribute__((aligned(MAXIMUM_ALIGNOF)));
 		struct {
@@ -1364,107 +1380,48 @@ struct kern_expression
 			uint8_t		var_typalign;
 			uint32_t	var_slot_id;
 		} v;		/* VarExpr */
+		struct {
+			int			nloads;
+			kern_preload_vars_item kvars[1];
+		} load;		/* VarLoads */
+		struct {
+			int			nexprs;
+			int			nattrs;
+			kern_projection_desc desc[1];
+		} proj;		/* Projection */
 	} u;
 };
 
-typedef struct
-{
-	int16_t		var_depth;
-	int16_t		var_resno;
-	uint32_t	var_slot_id;
-} kern_preload_vars_item;
-
-typedef struct
-{
-	uint32_t		_vl_len;
-	int				nloads;
-	kern_preload_vars_item kvars[1];
-} kern_preload_vars;
-
-typedef struct
-{
-	uint32_t		slot_id;
-	TypeOpCode		slot_type;
-	const xpu_datum_operators *slot_ops;
-} kern_projection_desc;
-
-#define KERN_PROJECTION_MAP_MAGIC	(0x50726f6aU)
-typedef struct
-{
-	uint32_t		_vl_len;
-	uint32_t		magic;		/* = KERN_PROJECTION_MAP_MAGIC */
-	int				nexprs;		/* number of expressions to be computed */
-	int				nattrs;		/* number of destination attribute */
-	/* array of kern_projection_desc */
-	kern_projection_desc desc[1];
-	/*
-	 * ----------------------
-	 * ^  desc[0]            slot_id to store the projection result that
-	 * |     :               involves any calculations.
-	 * V  desc[nexprs-1]     'nexprs' should equal to 'nargs' of Projection
-	 * ----------------------
-	 * ^  desc[nexprs]       source slot_id ordered by the attributes in
-	 * |     :               the destination tuple. Same slot_id may appear
-	 * |     :               several times.
-	 * V  desc[nexprs + nattrs - 1]
-	 *    (uint32_t *)desc[nexprs + nattrs] --> size of this kern_projection_map.
-	 */
-} kern_projection_map;
-
-INLINE_FUNCTION(const kern_projection_map *)
-__KEXP_GET_PROJECTION_MAP(const kern_expression *kexp)
-{
-	const char *tail = (const char *)kexp + VARSIZE(kexp);
-	uint32_t	sz;
-	const kern_projection_map *proj_map;
-
-	assert(kexp->opcode == FuncOpCode__Projection &&
-		   kexp->exptype == TypeOpCode__int4);
-	sz = *((uint32_t *)(tail - sizeof(uint32_t)));
-	proj_map = (const kern_projection_map *)(tail - sz);
-	assert(VARSIZE(proj_map) == sz && proj_map->magic == KERN_PROJECTION_MAP_MAGIC);
-	return proj_map;
-}
-
 #define EXEC_KERN_EXPRESSION(__kcxt,__kexp,__retval)	\
 	(__kexp)->fn_dptr((__kcxt),(__kexp),(xpu_datum_t *)__retval)
-#define KEXP_OVERRUN_CHECKS(__kexp,__arg)						\
-	assert((char *)(__arg) + VARSIZE(__arg) <= (char *)(__kexp) + VARSIZE(__kexp))
 
-INLINE_FUNCTION(const kern_expression *)
-__KEXP_FIRST_ARG(int nargs, const kern_expression *kexp, TypeOpCode exptype)
+INLINE_FUNCTION(bool)
+__KEXP_IS_VALID(const kern_expression *kexp,
+				const kern_expression *karg)
 {
-	const kern_expression *arg = NULL;
+	uint32_t   *magic = (uint32_t *)((char *)karg + karg->len - sizeof(uint32_t));
 
-	assert(kexp->nargs == nargs || nargs < 0);
-	if (kexp->nargs > 0)
-	{
-		arg = ((const kern_expression *)((kexp)->u.data));
-		assert((char *)arg + VARSIZE(arg) <= (char *)kexp + VARSIZE(kexp));
-		assert(arg->exptype == exptype || exptype == TypeOpCode__Invalid);
-	}
-	return arg;
+	if (*magic != (KERN_EXPRESSION_MAGIC
+				   ^ ((uint32_t)karg->exptype << 6)
+				   ^ ((uint32_t)karg->opcode << 14)))
+		return false;
+	if (kexp && ((char *)karg < kexp->u.data ||
+				 (char *)karg + karg->len > (char *)kexp + kexp->len))
+		return false;
+	return true;
 }
-#define KEXP_FIRST_ARG(__nargs, __exptype)		\
-	__KEXP_FIRST_ARG((__nargs), kexp, TypeOpCode__##__exptype)
-
-INLINE_FUNCTION(const kern_expression *)
-__KEXP_NEXT_ARG(const kern_expression *kexp,
-				const kern_expression *prev, TypeOpCode exptype)
-{
-	const kern_expression *next = (const kern_expression *)
-		((const char *)prev + MAXALIGN(VARSIZE(prev)));
-	assert((char *)next + VARSIZE(next) <= (char *)kexp + VARSIZE(kexp));
-	assert(next->exptype == exptype || exptype == TypeOpCode__Invalid);
-	return next;
-}
-#define KEXP_NEXT_ARG(__prev, __exptype)		\
-	__KEXP_NEXT_ARG(kexp, (__prev), TypeOpCode__##__exptype)
+#define KEXP_IS_VALID(__karg,EXPTYPE)				\
+	(__KEXP_IS_VALID(kexp,(__karg)) &&				\
+	 (__karg)->exptype == TypeOpCode__##EXPTYPE)
+#define KEXP_FIRST_ARG(__kexp)											\
+	(((__kexp)->nr_args > 0 && (__kexp)->args_offset > 0)				\
+	 ? ((kern_expression *)((char *)(__kexp) + (__kexp)->args_offset))	\
+	 : NULL)
+#define KEXP_NEXT_ARG(__karg)											\
+	((kern_expression *)((char *)(__karg) + MAXALIGN((__karg)->len)))
 
 #define SizeOfKernExpr(__PAYLOAD_SZ)						\
 	(offsetof(kern_expression, u.data) + (__PAYLOAD_SZ))
-#define SizeOfKernExprConst(__PAYLOAD_SZ)	\
-	(offsetof(kern_expression, u.c.const_value) + (__PAYLOAD_SZ))
 #define SizeOfKernExprParam					\
 	(offsetof(kern_expression, u.p.param_id) + sizeof(uint32_t))
 #define SizeOfKernExprVar					\

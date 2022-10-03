@@ -494,14 +494,16 @@ pgstromBuildSessionInfo(PlanState *ps,
 	if (xpucode_scan_quals)
 	{
 		session->xpucode_scan_quals =
-			__appendBinaryStringInfo(&buf, xpucode_scan_quals,
-									 VARSIZE(xpucode_scan_quals));
+			__appendBinaryStringInfo(&buf,
+									 VARDATA_ANY(xpucode_scan_quals),
+									 VARSIZE_ANY_EXHDR(xpucode_scan_quals));
 	}
 	if (xpucode_scan_projs)
 	{
 		session->xpucode_scan_projs =
-			__appendBinaryStringInfo(&buf, xpucode_scan_projs,
-									 VARSIZE(xpucode_scan_projs));
+			__appendBinaryStringInfo(&buf,
+									 VARDATA_ANY(xpucode_scan_projs),
+									 VARSIZE_ANY_EXHDR(xpucode_scan_projs));
 	}
 
 	/* put executor parameters */

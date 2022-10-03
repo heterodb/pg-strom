@@ -634,6 +634,7 @@ PlanGpuScanPath(PlannerInfo *root,
 							   proj_extra_bufsz);
 	gs_info->kvars_nslots = Max(qual_kvars_nslots,
 								proj_kvars_nslots);
+	elog(INFO, "qual_kvars_nslots=%d proj_kvars_nslots=%d", qual_kvars_nslots, proj_kvars_nslots);
 	gs_info->dev_quals = dev_quals;
 	gs_info->outer_refs = outer_refs;
 	
