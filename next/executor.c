@@ -817,52 +817,6 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 	return NULL;
 }
 
-static XpuCommand *
-pgstromScanChunkGpuDirect(pgstromTaskState *pts,
-						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
-{
-	elog(ERROR, "not implemented yet");
-	return NULL;
-}
-
-static XpuCommand *
-pgstromScanChunkNormal(pgstromTaskState *pts,
-					   struct iovec *xcmd_iov, int *xcmd_iovcnt)
-{
-	XpuCommand	   *xcmd = pts->xcmd_req;
-	kernExecScan   *kscan = &xcmd->u.scan;
-	kern_data_store	*kds;
-	void		   *__usage;
-	size_t			kds_length;
-	size_t			sz1, sz2;
-
-	kds = (kern_data_store *)((char *)kscan + kscan->kds_src_offset);
-	kds->nitems	= 0;
-	kds->usage	= 0;
-	kds_length	= pts->xcmd_len - (offsetof(XpuCommand, u.scan) +
-								   kscan->kds_src_offset);
-	if (!pgstromRelScanChunkNormal(pts, kds, kds_length))
-		return NULL;
-
-	/* setup iovec to skip the hole between row-index and tuples-buffer */
-	sz1 = KDS_HEAD_LENGTH(kds) + MAXALIGN(sizeof(uint32_t) * kds->nitems);
-	sz2 = __kds_unpack(kds->usage);
-	Assert(sz1 + sz2 <= kds_length);
-	__usage = ((char *)kds + kds_length - sz2);
-	kds->length = sz1 + sz2;
-
-	sz1 += (offsetof(XpuCommand, u.scan) + kscan->kds_src_offset);
-	xcmd->length = sz1 + sz2;
-
-	xcmd_iov[0].iov_base = xcmd;
-	xcmd_iov[0].iov_len  = sz1;
-	xcmd_iov[1].iov_base = __usage;
-	xcmd_iov[1].iov_len  = sz2;
-	*xcmd_iovcnt = 2;
-
-	return xcmd;
-}
-
 /*
  * pgstromScanNextTuple
  */
@@ -900,42 +854,41 @@ static void
 __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 							  TupleDesc tdesc_src,
 							  TupleDesc tdesc_dst,
-							  char format,
-							  size_t bufsz)
+							  char format)
 {
 	XpuCommand	   *xcmd;
-	kernExecScan   *kscan;
 	kern_data_store *kds;
+	size_t			bufsz;
 	size_t			off;
 
+	initStringInfo(&pts->xcmd_buf);
 	bufsz += MAXALIGN(offsetof(XpuCommand, u.scan.data));
 	if (tdesc_src)
 		bufsz += estimate_kern_data_store(tdesc_src);
 	if (tdesc_dst)
 		bufsz += estimate_kern_data_store(tdesc_dst);
-	xcmd = palloc(bufsz);
+	enlargeStringInfo(&pts->xcmd_buf, bufsz);
 
+	xcmd = (XpuCommand *)pts->xcmd_buf.data;
 	memset(xcmd, 0, offsetof(XpuCommand, u.scan.data));
 	xcmd->magic  = XpuCommandMagicNumber;
 	xcmd->tag    = XpuCommandTag__XpuScanExec;
 	xcmd->length = bufsz;
 
-	kscan = &xcmd->u.scan;
-	off = offsetof(kernExecScan, data);
+	off = offsetof(XpuCommand, u.scan.data);
 	if (tdesc_dst)
 	{
-		kscan->kds_dst_offset = off;
-		kds  = (kern_data_store *)((char *)kscan + off);
+		xcmd->u.scan.kds_dst_offset = off;
+		kds  = (kern_data_store *)((char *)xcmd + off);
 		off += setup_kern_data_store(kds, tdesc_dst, 0, KDS_FORMAT_ROW);
 	}
 	if (tdesc_src)
 	{
-		kscan->kds_src_offset = off;
-		kds  = (kern_data_store *)((char *)kscan + off);
+		xcmd->u.scan.kds_src_offset = off;
+		kds  = (kern_data_store *)((char *)xcmd + off);
 		off += setup_kern_data_store(kds, tdesc_src, 0, format);
 	}
-	pts->xcmd_req = xcmd;
-	pts->xcmd_len = bufsz;
+	pts->xcmd_buf.len = off;
 }
 
 /*
@@ -954,7 +907,6 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	ListCell	   *lc;
 //	ArrowFdwState  *af_state = NULL;
 	char			format;
-	size_t			bufsz;
 
 	/*
 	 * PG-Strom supports:
@@ -1024,29 +976,27 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	{
 		pts->cb_next_chunk = pgstromScanChunkArrowFdw;
 		format = KDS_FORMAT_ARROW;
-		bufsz  = (1UL << 16);		/* 64kB for iovec */
 	}
 	else if (pts->gc_state)
 	{
 		pts->cb_next_chunk = pgstromScanChunkGpuCache;
 		tupdesc_src = NULL;			/* no kds_src with GpuCache */
-		format = KDS_FORMAT_COLUMN;
 	}
 	else if (pts->gd_state)
 	{
-		pts->cb_next_chunk = pgstromScanChunkGpuDirect;
+		pts->cb_next_chunk = pgstromRelScanChunkDirect;
 		format = KDS_FORMAT_BLOCK;
-		bufsz  = (sizeof(BlockNumber) * PGSTROM_CHUNK_SIZE / BLCKSZ +
-				  (4UL << 20));	/* 4MB buffer for dirty cache */
 	}
 	else
 	{
-		pts->cb_next_chunk = pgstromScanChunkNormal;
+		pts->cb_next_chunk = pgstromRelScanChunkNormal;
 		format = KDS_FORMAT_ROW;
-		bufsz  = PGSTROM_CHUNK_SIZE;
 	}
-	__setupTaskStateRequestBuffer(pts, tupdesc_src, tupdesc_dst, format, bufsz);
+	__setupTaskStateRequestBuffer(pts, tupdesc_src, tupdesc_dst, format);
 	pts->cb_next_tuple = pgstromScanNextTuple;
+
+	/* other fields init */
+	pts->curr_vm_buffer = InvalidBuffer;
 }
 
 /*
@@ -1093,6 +1043,8 @@ pgstromExecTaskState(pgstromTaskState *pts)
 void
 pgstromExecEndTaskState(pgstromTaskState *pts)
 {
+	if (pts->curr_vm_buffer != InvalidBuffer)
+		ReleaseBuffer(pts->curr_vm_buffer);
 	if (pts->conn)
 		xpuClientCloseSession(pts->conn);
 	if (pts->br_state)

@@ -867,21 +867,6 @@ __BrinIndexGetResults(pgstromTaskState *pts)
 	return br_results;
 }
 
-BlockNumber
-pgstromBrinIndexNextChunk(pgstromTaskState *pts, BlockNumber *p_chunk_sz)
-{
-	BrinIndexState *br_state = pts->br_state;
-	BrinIndexResults *br_results = __BrinIndexGetResults(pts);
-	uint32_t	index;
-
-	index = pg_atomic_fetch_add_u32(&br_results->index, 1);
-	if (index < br_results->nitems)
-		return InvalidBlockNumber;
-
-	*p_chunk_sz = br_state->pagesPerRange;
-	return br_results->chunks[index];
-}
-
 TBMIterateResult *
 pgstromBrinIndexNextBlock(pgstromTaskState *pts)
 {
@@ -907,6 +892,29 @@ pgstromBrinIndexNextBlock(pgstromTaskState *pts)
 	br_state->tbmres.ntuples = -1;
 	br_state->tbmres.recheck = true;
 	return &br_state->tbmres;
+}
+
+bool
+pgstromBrinIndexNextChunk(pgstromTaskState *pts)
+{
+	BrinIndexState *br_state = pts->br_state;
+	BrinIndexResults *br_results = __BrinIndexGetResults(pts);
+	uint32_t		index;
+
+	index = pg_atomic_fetch_add_u32(&br_results->index, 1);
+	if (index < br_results->nitems)
+	{
+		BlockNumber	pagesPerRange = br_state->pagesPerRange;
+
+		pts->curr_block_num  = br_results->chunks[index] * pagesPerRange;
+		pts->curr_block_tail = pts->curr_block_num + pagesPerRange;
+		if (pts->curr_block_num >= br_state->nblocks)
+			return false;
+		if (pts->curr_block_tail > br_state->nblocks)
+			pts->curr_block_tail = br_state->nblocks;
+		return true;
+	}
+	return false;
 }
 
 void

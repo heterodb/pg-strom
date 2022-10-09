@@ -634,7 +634,6 @@ PlanGpuScanPath(PlannerInfo *root,
 							   proj_extra_bufsz);
 	gs_info->kvars_nslots = Max(qual_kvars_nslots,
 								proj_kvars_nslots);
-	elog(INFO, "qual_kvars_nslots=%d proj_kvars_nslots=%d", qual_kvars_nslots, proj_kvars_nslots);
 	gs_info->dev_quals = dev_quals;
 	gs_info->outer_refs = outer_refs;
 	
@@ -1048,15 +1047,13 @@ bailout:
 void
 gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 {
-	kernExecScan	*kscan = &xcmd->u.scan;
 	kern_data_store *kds_src = NULL;
 	kern_data_store *kds_dst = NULL;
 
-	if (kscan->kds_src_offset)
-		kds_src = (kern_data_store *)((char *)kscan + kscan->kds_src_offset);
-	if (kscan->kds_dst_offset)
-		kds_dst = (kern_data_store *)((char *)kscan + kscan->kds_dst_offset);
-
+	if (xcmd->u.scan.kds_src_offset)
+		kds_src = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_src_offset);
+	if (xcmd->u.scan.kds_dst_offset)
+		kds_dst = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_dst_offset);
 	if (!kds_src)
 	{
 		gpuClientELog(gclient, "KDS_FORMAT_COLUMN is not yet implemented");

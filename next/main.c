@@ -25,6 +25,7 @@ long		PAGE_SIZE;
 long		PAGE_MASK;
 int			PAGE_SHIFT;
 long		PHYS_PAGES;
+long		PAGES_PER_BLOCK;
 
 static planner_hook_type	planner_hook_next = NULL;
 
@@ -361,6 +362,7 @@ _PG_init(void)
 	PAGE_MASK = PAGE_SIZE - 1;
 	PAGE_SHIFT = get_next_log2(PAGE_SIZE);
 	PHYS_PAGES = sysconf(_SC_PHYS_PAGES);
+	PAGES_PER_BLOCK = BLCKSZ / PAGE_SIZE;
 
 	/* init pg-strom infrastructure */
 	pgstrom_init_gucs();

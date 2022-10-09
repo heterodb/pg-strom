@@ -339,7 +339,7 @@ setup_kern_data_store(kern_data_store *kds,
 	kds->tdtypeid	= tupdesc->tdtypeid;
 	kds->tdtypmod	= tupdesc->tdtypmod;
 	kds->table_oid	= InvalidOid;	/* to be set by the caller */
-	kds->nslots		= 0;			/* to be set by the caller, if any */
+	kds->hash_nslots = 0;			/* to be set by the caller, if any */
 	kds->nr_colmeta	= tupdesc->natts;
 
 	if (format == KDS_FORMAT_ROW  ||
@@ -400,9 +400,231 @@ estimate_kern_data_store(TupleDesc tupdesc)
  *
  * ----------------------------------------------------------------
  */
+#define __XCMD_KDS_SRC_OFFSET(buf)							\
+	(((XpuCommand *)((buf)->data))->u.scan.kds_src_offset)
+#define __XCMD_GET_KDS_SRC(buf)								\
+	((kern_data_store *)((buf)->data + __XCMD_KDS_SRC_OFFSET(buf)))
+
+XpuCommand *
+pgstromRelScanChunkDirect(pgstromTaskState *pts,
+						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
+{
+	EState		   *estate = pts->css.ss.ps.state;
+	Snapshot		snapshot = estate->es_snapshot;
+	Relation		relation = pts->css.ss.ss_currentRelation;
+	HeapScanDesc    h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
+	XpuCommand	   *xcmd;
+	kern_data_store *kds;
+	unsigned long	m_offset = 0UL;
+	BlockNumber		segment_id = InvalidBlockNumber;
+	strom_io_vector *strom_iovec;
+	strom_io_chunk *strom_ioc = NULL;
+	BlockNumber	   *strom_blknums;
+	uint32_t		strom_nblocks = 0;
+	uint32_t		kds_src_pathname = 0;
+	uint32_t		kds_src_iovec = 0;
+	uint32_t		kds_nrooms;
+
+	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
+	kds_nrooms = (PGSTROM_CHUNK_SIZE -
+				  KDS_HEAD_LENGTH(kds)) / (sizeof(BlockNumber) + BLCKSZ);
+	kds->nitems  = 0;
+	kds->usage   = 0;
+	kds->block_offset = (KDS_HEAD_LENGTH(kds) +
+						 MAXALIGN(sizeof(BlockNumber) * kds_nrooms));
+	pts->xcmd_buf.len = __XCMD_KDS_SRC_OFFSET(&pts->xcmd_buf) + kds->block_offset;
+	Assert(pts->xcmd_buf.len == MAXALIGN(pts->xcmd_buf.len));
+	enlargeStringInfo(&pts->xcmd_buf, 0);
+
+	strom_iovec = alloca(offsetof(strom_io_vector, ioc[kds_nrooms]));
+	strom_iovec->nr_chunks = 0;
+	strom_blknums = alloca(sizeof(BlockNumber) * kds_nrooms);
+	strom_nblocks = 0;
+	while (!pts->scan_done)
+	{
+		while (pts->curr_block_num < pts->curr_block_tail)
+		{
+			BlockNumber		block_num = pts->curr_block_num;
+			unsigned int	fchunk_id;
+
+			if (kds->nitems >= kds_nrooms)
+				goto out;
+
+			/*
+			 * MEMO: right now, we allow GPU Direct SQL for the all-visible
+			 * pages only, due to the restrictions about MVCC checks.
+			 * However, it is too strict for the purpose. If we would have
+			 * a mechanism to perform MVCC checks without commit logs.
+			 * In other words, if all the tuples in a certain page have
+			 * HEAP_XMIN_* or HEAP_XMAX_* flags correctly, we can have MVCC
+			 * logic in the device code.
+			 */
+			if (VM_ALL_VISIBLE(relation, block_num, &pts->curr_vm_buffer))
+			{
+				/*
+				 * We don't allow xPU Direct SQL across multiple heap
+				 * segments (for the code simplification). So, once
+				 * relation scan is broken out, then restart with new
+				 * KDS buffer.
+				 */
+				if (segment_id == InvalidBlockNumber)
+					segment_id = block_num / RELSEG_SIZE;
+				else if (segment_id != block_num / RELSEG_SIZE)
+					goto out;
+
+				fchunk_id = (block_num % RELSEG_SIZE) * PAGES_PER_BLOCK;
+				if (strom_ioc != NULL && (strom_ioc->fchunk_id +
+										  strom_ioc->nr_pages) == fchunk_id)
+				{
+					/* expand the iovec entry */
+					strom_ioc->nr_pages += PAGES_PER_BLOCK;
+				}
+				else
+				{
+					/* add the next iovec entry */
+					strom_ioc = &strom_iovec->ioc[strom_iovec->nr_chunks++];
+					strom_ioc->m_offset  = m_offset;
+					strom_ioc->fchunk_id = fchunk_id;
+					strom_ioc->nr_pages  = PAGES_PER_BLOCK;
+				}
+				kds->nitems++;
+				strom_blknums[strom_nblocks++] = block_num;
+				m_offset += BLCKSZ;
+			}
+			else
+			{
+				Buffer		buffer;
+				Page		spage;
+				Page		dpage;
+				uint32_t	bindex = kds->block_nloaded++;
+
+				/*
+				 * Load the source buffer with synchronous read
+				 */
+				buffer = ReadBufferExtended(relation,
+											MAIN_FORKNUM,
+											block_num,
+											RBM_NORMAL,
+											h_scan->rs_strategy);
+				/* prune the old items, if any */
+				heap_page_prune_opt(relation, buffer);
+				/* let's check tuples visibility for each */
+				LockBuffer(buffer, BUFFER_LOCK_SHARE);
+				spage = (Page) BufferGetPage(buffer);
+				appendBinaryStringInfo(&pts->xcmd_buf, (const char *)spage, BLCKSZ);
+				kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
+				dpage = (Page) KDS_BLOCK_PGPAGE(kds, bindex);
+				KDS_BLOCK_BLCKNR(kds, bindex) = block_num;
+
+				/*
+				 * Logic is almost equivalent as heapgetpage() doing.
+				 * We have to invalidate tuples prior to GPU kernel
+				 * execution, if not all-visible.
+				 */
+				if (!PageIsAllVisible(dpage) || snapshot->takenDuringRecovery)
+				{
+					int		lines = PageGetMaxOffsetNumber(dpage);
+					ItemId	lpp;
+					OffsetNumber lineoff;
+
+					for (lineoff = FirstOffsetNumber,
+							 lpp = PageGetItemId(dpage, lineoff);
+						 lineoff <= lines;
+						 lineoff++, lpp++)
+					{
+						HeapTupleData htup;
+						bool	valid;
+
+						if (!ItemIdIsNormal(lpp))
+							continue;
+						htup.t_tableOid = RelationGetRelid(relation);
+						htup.t_data = (HeapTupleHeader) PageGetItem((Page) dpage, lpp);
+						htup.t_len = ItemIdGetLength(lpp);
+						ItemPointerSet(&htup.t_self, block_num, lineoff);
+
+						valid = HeapTupleSatisfiesVisibility(&htup, snapshot, buffer);
+						HeapCheckForSerializableConflictOut(valid, relation, &htup,
+															buffer, snapshot);
+						if (!valid)
+							ItemIdSetUnused(lpp);
+					}
+				}
+				UnlockReleaseBuffer(buffer);
+				/* dpage became all-visible also */
+				PageSetAllVisible(dpage);
+				kds->block_nloaded++;
+			}
+			pts->curr_block_num++;
+		}
+
+		if (pts->br_state)
+		{
+			if (!pgstromBrinIndexNextChunk(pts))
+				pts->scan_done = true;
+		}
+		else if (!h_scan->rs_base.rs_parallel)
+		{
+			/* single process scan */
+			pts->curr_block_num = h_scan->rs_cblock;
+			h_scan->rs_cblock += (kds_nrooms - kds->nitems);
+			pts->curr_block_tail  = h_scan->rs_cblock;
+			if (pts->curr_block_num >= h_scan->rs_nblocks)
+				pts->scan_done = true;
+			else if (pts->curr_block_tail > h_scan->rs_nblocks)
+				pts->curr_block_tail = h_scan->rs_nblocks;
+		}
+		else
+		{
+			/* parallel processes scan */
+			ParallelBlockTableScanDesc pb_scan =
+				(ParallelBlockTableScanDesc)h_scan->rs_base.rs_parallel;
+			BlockNumber		chunk_sz = kds_nrooms - kds->nitems;
+
+			pts->curr_block_num = pg_atomic_fetch_add_u64(&pb_scan->phs_nallocated,
+														  chunk_sz);
+			pts->curr_block_tail  = pts->curr_block_num + chunk_sz;
+			if (pts->curr_block_num >= pb_scan->phs_nblocks)
+				pts->scan_done = true;
+			else if (pts->curr_block_tail > pb_scan->phs_nblocks)
+				pts->curr_block_tail = pb_scan->phs_nblocks;
+		}
+	}
+out:
+	Assert(kds->block_nloaded + strom_nblocks == kds->nitems);
+	if (kds->nitems == 0)
+		return NULL;
+	if (strom_iovec->nr_chunks > 0)
+	{
+		char   *filename;
+		int		sz;
+
+		filename = relpath(relation->rd_smgr->smgr_rnode, MAIN_FORKNUM);
+		kds_src_pathname = pts->xcmd_buf.len;
+		appendStringInfoString(&pts->xcmd_buf, filename);
+		pfree(filename);
+
+		sz = offsetof(strom_io_vector, ioc[strom_iovec->nr_chunks]);
+		kds_src_iovec = __appendBinaryStringInfo(&pts->xcmd_buf,
+												 (const char *)strom_iovec, sz);
+	}
+	else
+	{
+		Assert(segment_id == InvalidBlockNumber);
+	}
+	xcmd = (XpuCommand *)pts->xcmd_buf.data;
+	xcmd->u.scan.kds_src_pathname = kds_src_pathname;
+	xcmd->u.scan.kds_src_iovec = kds_src_iovec;
+	xcmd->length = pts->xcmd_buf.len;
+
+	xcmd_iov[0].iov_base = xcmd;
+	xcmd_iov[0].iov_len  = xcmd->length;
+	*xcmd_iovcnt = 1;
+	
+	return xcmd;
+}
+
 static bool
-__kds_row_insert_tuple(TupleTableSlot *slot,
-					   kern_data_store *kds, size_t kds_length)
+__kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 {
 	uint32_t   *rowindex = KDS_GET_ROWINDEX(kds);
 	HeapTuple	tuple;
@@ -410,15 +632,15 @@ __kds_row_insert_tuple(TupleTableSlot *slot,
 	bool		should_free;
 	kern_tupitem *titem;
 
-	Assert(kds->format == KDS_FORMAT_ROW && kds->nslots == 0);
+	Assert(kds->format == KDS_FORMAT_ROW && kds->hash_nslots == 0);
 	tuple = ExecFetchSlotHeapTuple(slot, false, &should_free);
 
 	__usage = (__kds_unpack(kds->usage) +
 			   MAXALIGN(offsetof(kern_tupitem, htup) + tuple->t_len));
 	sz = KDS_HEAD_LENGTH(kds) + sizeof(uint32_t) * (kds->nitems + 1) + __usage;
-	if (sz > kds_length)
+	if (sz > kds->length)
 		return false;	/* no more items! */
-	titem = (kern_tupitem *)((char *)kds + kds_length - __usage);
+	titem = (kern_tupitem *)((char *)kds + kds->length - __usage);
 	titem->t_len = tuple->t_len;
 	titem->rowid = kds->nitems;
 	memcpy(&titem->htup, tuple->t_data, tuple->t_len);
@@ -431,13 +653,23 @@ __kds_row_insert_tuple(TupleTableSlot *slot,
 	return true;
 }
 
-bool
+XpuCommand *
 pgstromRelScanChunkNormal(pgstromTaskState *pts,
-						  kern_data_store *kds, size_t kds_length)
+						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
 	EState		   *estate = pts->css.ss.ps.state;
 	TableScanDesc	scan = pts->css.ss.ss_currentScanDesc;
 	TupleTableSlot *slot = pts->base_slot;
+	kern_data_store *kds;
+	XpuCommand	   *xcmd;
+	size_t			sz1, sz2;
+
+	pts->xcmd_buf.len = __XCMD_KDS_SRC_OFFSET(&pts->xcmd_buf) + PGSTROM_CHUNK_SIZE;
+	enlargeStringInfo(&pts->xcmd_buf, 0);
+	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
+	kds->nitems = 0;
+	kds->usage  = 0;
+	kds->length = PGSTROM_CHUNK_SIZE;
 
 	if (pts->br_state)
 	{
@@ -458,11 +690,11 @@ pgstromRelScanChunkNormal(pgstromTaskState *pts,
 				pts->curr_tbm = next_tbm;
 			}
 			if (!TTS_EMPTY(slot) &&
-				!__kds_row_insert_tuple(slot, kds, kds_length))
+				!__kds_row_insert_tuple(kds, slot))
 				break;
 			if (!table_scan_bitmap_next_tuple(scan, pts->curr_tbm, slot))
 				pts->curr_tbm = NULL;
-			else if (!__kds_row_insert_tuple(slot, kds, kds_length))
+			else if (!__kds_row_insert_tuple(kds, slot))
 				break;
 		}
 	}
@@ -472,18 +704,37 @@ pgstromRelScanChunkNormal(pgstromTaskState *pts,
 		while (!pts->scan_done)
 		{
 			if (!TTS_EMPTY(slot) &&
-				!__kds_row_insert_tuple(slot, kds, kds_length))
+				!__kds_row_insert_tuple(kds, slot))
 				break;
 			if (!table_scan_getnextslot(scan, estate->es_direction, slot))
 			{
 				pts->scan_done = true;
 				break;
 			}
-			if (!__kds_row_insert_tuple(slot, kds, kds_length))
+			if (!__kds_row_insert_tuple(kds, slot))
 				break;
 		}
 	}
-	return (kds->nitems > 0);
+
+	if (kds->nitems == 0)
+		return NULL;
+
+	/* setup iovec that may skip the hole between row-index and tuples-buffer */
+	sz1 = ((KDS_BODY_ADDR(kds) - pts->xcmd_buf.data) +
+		   MAXALIGN(sizeof(uint32_t) * kds->nitems));
+	sz2 = __kds_unpack(kds->usage);
+	Assert(sz1 + sz2 <= pts->xcmd_buf.len);
+	kds->length = (KDS_HEAD_LENGTH(kds) +
+				   MAXALIGN(sizeof(uint32_t) * kds->nitems) + sz2);
+	xcmd = (XpuCommand *)pts->xcmd_buf.data;
+	xcmd->length = sz1 + sz2;
+	xcmd_iov[0].iov_base = xcmd;
+	xcmd_iov[0].iov_len  = sz1;
+	xcmd_iov[1].iov_base = (pts->xcmd_buf.data + pts->xcmd_buf.len - sz2);
+	xcmd_iov[1].iov_len  = sz2;
+	*xcmd_iovcnt = 2;
+
+	return xcmd;
 }
 
 /*

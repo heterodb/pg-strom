@@ -354,8 +354,12 @@ struct kern_data_store {
 	Oid				tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	int32_t			tdtypmod;	/* copy of TupleDesc.tdtypmod */
 	Oid				table_oid;	/* OID of the table (only if GpuScan) */
-	uint32_t		nslots;		/* width of hash-slot (only HASH format) */
-	uint32_t		nloaded;	/* number of blocks already loaded (only BLOCK format) */
+	/* only KDS_FORMAT_HASH */
+	uint32_t		hash_nslots;	/* width of the hash-slot */
+	/* only KDS_FORMAT_BLOCK */
+	uint32_t		block_offset;	/* offset of blocks array */
+	uint32_t		block_nloaded;	/* number of blocks already loaded by CPU */
+	/* column definition */
 	uint32_t		nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */
 	kern_colmeta	colmeta[1];	/* metadata of columns */
@@ -373,8 +377,8 @@ typedef struct kern_data_store		kern_data_store;
  * | |   colmeta[...]    |
  * +-+-------------------+  <-- KDS_BODY_ADDR(kds)
  * | ^                   |
- * | | Hash slots if any | (*) KDS_FORMAT_ROW should have 'nslots' == 0, thus,
- * | | (uint32 * nslots) |     this field is only for KDS_FORMAT_HASH
+ * | | Hash slots if any | (*) KDS_FORMAT_ROW always has 'hash_nslots' == 0,
+ * | | (uint32 * nslots) |     thus, this field is only for KDS_FORMAT_HASH
  * | v                   |
  * +---------------------+
  * | ^                   |
@@ -403,19 +407,18 @@ typedef struct kern_data_store		kern_data_store;
  * |                       |  ^
  * | Array of BlockNumber  |  | (BlockNumber * nitems)
  * |                       |  v
- * +-----------------------+ ---
+ * +-----------------------+ ---  <--- (char *)kds + kds->block_offset
  * |                       |  ^
- * | Raw blocks loaded by  |  | (BLCKSZ * nloaded)
+ * | Raw blocks loaded by  |  | (BLCKSZ * block_nloaded)
  * | the host module.      |  |
  * |                       |  v
- * +------------+----------+ -----
- * | Row blocks | iovec of |  ^ ^
- * | loaded by  | blocks   |  | | offsetof(strom_io_vector, ioc[nr_chunks])
- * | the device | to load  |  | v     (nr_chunks == nitems - nloaded)
- * | module     +----------+  | ---
- * |     :      |             |
- * |     :      |             v
- * +------------+            ---
+ * +-------------+---------+ -----
+ * | Raw blocks  |   ^
+ * | loaded aby  |   | (BLCKSZ * (nitems - block_nloaded)
+ * | the device  |   |
+ * | module      |   | (*) available only device side
+ * |     :       |   v
+ * +-------------+ -----
  *
  * Layout of KDS_FORMAT_ARROW
  *
@@ -803,7 +806,7 @@ KDS_GET_ROWINDEX(kern_data_store *kds)
 {
 	Assert(kds->format == KDS_FORMAT_ROW ||
 		   kds->format == KDS_FORMAT_HASH);
-	return (uint32_t *)KDS_BODY_ADDR(kds) + kds->nslots;
+	return (uint32_t *)KDS_BODY_ADDR(kds) + kds->hash_nslots;
 }
 
 /* kern_tupitem by kds_index */
@@ -845,7 +848,7 @@ KDS_FETCH_TUPITEM(kern_data_store *kds,
 INLINE_FUNCTION(uint32_t *)
 KDS_GET_HASHSLOT(kern_data_store *kds)
 {
-	Assert(kds->format == KDS_FORMAT_HASH && kds->nslots > 0);
+	Assert(kds->format == KDS_FORMAT_HASH && kds->hash_nslots > 0);
 	return (uint32_t *)(KDS_BODY_ADDR(kds));
 }
 
@@ -853,7 +856,7 @@ INLINE_FUNCTION(kern_hashitem *)
 KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t hash)
 {
     uint32_t   *slot = KDS_GET_HASHSLOT(kds);
-	size_t		offset = __kds_unpack(slot[hash % kds->nslots]);
+	size_t		offset = __kds_unpack(slot[hash % kds->hash_nslots]);
 
 	if (offset == 0)
 		return NULL;
@@ -874,13 +877,13 @@ KDS_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 }
 
 /* access macros for KDS_FORMAT_BLOCK */
-#define KDS_BLOCK_BLCKNR(kds,block_id)				\
+#define KDS_BLOCK_BLCKNR(kds,block_id)					\
 	(((BlockNumber *)KDS_BODY_ADDR(kds))[block_id])
 #define KDS_BLOCK_PGPAGE(kds,block_id)					\
-	((struct PageHeaderData *)							\
-	 (KDS_BODY_ADDR(kds) +								\
-	  MAXALIGN(sizeof(BlockNumber) * (kds)->nitems) +	\
-	  BLCKSZ * block_id))
+	((struct PageHeaderData *)((char *)(kds) +			\
+							   (kds)->block_offset +	\
+							   BLCKSZ * (block_id)))
+
 
 INLINE_FUNCTION(HeapTupleHeaderData *)
 KDS_BLOCK_REF_HTUP(kern_data_store *kds,
@@ -1469,9 +1472,11 @@ typedef struct kern_session_info
 } kern_session_info;
 
 typedef struct {
-	uint32_t	kds_src_offset;
-	uint32_t	kds_dst_offset;
-	char		data[1];
+	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
+	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
+	uint32_t	kds_src_offset;		/* offset to kds_src */
+	uint32_t	kds_dst_offset;		/* offset to kds_dst */
+	char		data[1]				__attribute__((aligned(MAXIMUM_ALIGNOF)));
 } kernExecScan;
 
 typedef struct {

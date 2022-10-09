@@ -20,10 +20,12 @@
 #define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
 
 #include "access/brin.h"
+#include "access/heapam.h"
 #include "access/genam.h"
 #include "access/relscan.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "access/visibilitymap.h"
 #include "access/xact.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/dependency.h"
@@ -66,6 +68,7 @@
 #include "storage/latch.h"
 #include "storage/pmsignal.h"
 #include "storage/shmem.h"
+#include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/cash.h"
 #include "utils/date.h"
@@ -217,8 +220,7 @@ struct pgstromTaskState
 	GpuDirectState	   *gd_state;
 	ArrowFdwState	   *af_state;
 	BrinIndexState	   *br_state;
-	/* current chunk */
-	TBMIterateResult   *curr_tbm;
+	/* current chunk (already processed by the device) */
 	XpuCommand		   *curr_resp;
 	HeapTupleData		curr_htup;
 	kern_data_store	   *curr_kds;
@@ -230,9 +232,12 @@ struct pgstromTaskState
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
 	ProjectionInfo	   *base_proj;	/* base --> custom_tlist projection */
-	/* Request command buffer */
-	XpuCommand		   *xcmd_req;
-	size_t				xcmd_len;
+	/* request command buffer (+ status for table scan) */
+	TBMIterateResult   *curr_tbm;
+	Buffer				curr_vm_buffer;		/* for visibility-map */
+	BlockNumber			curr_block_num;		/* for KDS_FORMAT_BLOCK */
+	BlockNumber			curr_block_tail;	/* for KDS_FORMAT_BLOCK */
+	StringInfoData		xcmd_buf;
 	/* callbacks */
 	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
 	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts,
@@ -249,6 +254,7 @@ extern long		PAGE_SIZE;
 extern long		PAGE_MASK;
 extern int		PAGE_SHIFT;
 extern long		PHYS_PAGES;
+extern long		PAGES_PER_BLOCK;	/* (BLCKSZ / PAGE_SIZE) */
 #define PAGE_ALIGN(x)			TYPEALIGN(PAGE_SIZE,(x))
 #define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
 
@@ -325,8 +331,7 @@ extern void		pgstromBrinIndexExecBegin(pgstromTaskState *pts,
 										  Oid index_oid,
 										  List *index_conds,
 										  List *index_quals);
-extern BlockNumber	pgstromBrinIndexNextChunk(pgstromTaskState *pts,
-											  BlockNumber *p_chunk_sz);
+extern bool		pgstromBrinIndexNextChunk(pgstromTaskState *pts);
 extern TBMIterateResult *pgstromBrinIndexNextBlock(pgstromTaskState *pts);
 extern void		pgstromBrinIndexExecEnd(pgstromTaskState *pts);
 extern void		pgstromBrinIndexExecReset(pgstromTaskState *pts);
@@ -350,11 +355,12 @@ extern size_t	setup_kern_data_store(kern_data_store *kds,
 									  TupleDesc tupdesc,
 									  size_t length,
 									  char format);
-
-extern bool		pgstromRelScanChunkNormal(pgstromTaskState *pts,
-										  kern_data_store *kds,
-										  size_t kds_length);
-
+extern XpuCommand *pgstromRelScanChunkDirect(pgstromTaskState *pts,
+											 struct iovec *xcmd_iov,
+											 int *xcmd_iovcnt);
+extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
+											 struct iovec *xcmd_iov,
+											 int *xcmd_iovcnt);
 extern Size		pgstromSharedStateEstimateDSM(pgstromTaskState *pts);
 extern void		pgstromSharedSteteCreate(pgstromTaskState *pts);
 extern void		pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr);
