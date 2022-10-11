@@ -5,6 +5,17 @@
  */
 #ifndef _ARROW_DEFS_H_
 #define _ARROW_DEFS_H_
+
+#ifndef bool
+typedef unsigned char	bool;
+#endif
+#ifndef true
+#define true	((bool) 1)
+#endif
+#ifndef false
+#define false	((bool) 0)
+#endif
+
 /*
  * MetadataVersion : short
  */
@@ -232,16 +243,6 @@ typedef union		ArrowTypeOptions
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-#ifndef bool
-typedef unsigned char	bool;
-#endif
-#ifndef true
-#define true	((bool) 1)
-#endif
-#ifndef false
-#define false	((bool) 0)
-#endif
 
 /*
  * ArrowNode
