@@ -1572,17 +1572,17 @@ kern_form_heaptuple(kern_context *kcxt,
 PUBLIC_FUNCTION(bool)
 ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
 					 kern_data_store *kds_outer,
-					 kern_tupitem *tupitem_outer,
+					 HeapTupleHeaderData *htup,
 					 int num_inners,
 					 kern_data_store **kds_inners,
-					 kern_tupitem **tupitem_inners);
+					 HeapTupleHeaderData **htup_inners);
 PUBLIC_FUNCTION(bool)
 ExecLoadVarsOuterColumn(XPU_PGFUNCTION_ARGS,
 						kern_data_store *kds_outer,
 						uint32_t kds_index,
 						int num_inners,
 						kern_data_store **kds_inners,
-						kern_tupitem **tupitem_inners);
+						HeapTupleHeaderData **htup_inners);
 PUBLIC_FUNCTION(bool)
 ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
 					   kern_data_store *kds_outer,
@@ -1595,10 +1595,10 @@ ExecProjectionOuterRow(kern_context *kcxt,
 					   kern_expression *kexp,
 					   kern_data_store *kds_dst,
 					   kern_data_store *kds_outer,
-					   kern_tupitem *tupitem_outer,
+					   HeapTupleHeaderData *htup_outer,
 					   int num_inners,
 					   kern_data_store **kds_inners,
-					   kern_tupitem **tupitem_inners);
+					   HeapTupleHeaderData **htup_inners);
 
 /* ----------------------------------------------------------------
  *

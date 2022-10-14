@@ -13,9 +13,9 @@
 #define CUDA_COMMON_H
 #include "xpu_common.h"
 
-#define WARP_SIZE				32
+#define WARPSIZE				32
 #define MAXTHREADS_PER_BLOCK	1024
-#define MAXWARPS_PER_BLOCK		(MAXTHREADS_PER_BLOCK / WARP_SIZE)
+#define MAXWARPS_PER_BLOCK		(MAXTHREADS_PER_BLOCK / WARPSIZE)
 
 #if defined(__CUDACC__)
 /*
@@ -30,6 +30,10 @@
 #define get_global_base()		(blockIdx.x * blockDim.x)
 #define get_warp_id()			(threadIdx.x / warpSize)
 #define get_lane_id()			(threadIdx.x & (warpSize-1))
+
+/* Dynamic shared memory entrypoint */
+extern __shared__ char			__pgstrom_dynamic_shared_workmem[];
+#define SHARED_WORKMEM(TYPE)	((TYPE *) __pgstrom_dynamic_shared_workmem)
 
 INLINE_FUNCTION(uint32_t) WarpId(void)
 {
@@ -99,17 +103,17 @@ STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
  *
  * ----------------------------------------------------------------
  */
-#define GPUSCAN_TUPLES_PER_WARP		(2 * WARP_SIZE)
-typedef struct {
-	uint32_t		write_pos;
-	uint32_t		read_pos;
-	kern_tupitem   *tupitems[GPUSCAN_TUPLES_PER_WARP];
-} kern_gpuscan_suspend_warp;
-
+#define GPUSCAN_TUPLES_PER_WARP		(2 * WARPSIZE)
 typedef struct {
 	uint32_t		row_count;
-	kern_gpuscan_suspend_warp warps[MAXTHREADS_PER_BLOCK / WARP_SIZE];
-} kern_gpuscan_suspend_context;
+	uint32_t		lp_count;		/* only KDS_FORMAT_BLOCK */
+	uint32_t		write_pos;
+	uint32_t		read_pos;
+	uint32_t		write_lp_pos;	/* only KDS_FORMAT_BLOCK */
+	uint32_t		read_lp_pos;	/* only KDS_FORMAT_BLOCK */
+	uint32_t		lpitems[GPUSCAN_TUPLES_PER_WARP];	/* only KDS_FORMAT_BLOCK */
+	uint32_t		htuples[GPUSCAN_TUPLES_PER_WARP];
+} kern_gpuscan_suspend_warp;
 
 typedef struct {
 	kern_errorbuf	kerror;
@@ -120,7 +124,7 @@ typedef struct {
 	uint32_t		extra_sz;
 	/* suspend/resume support */
 	uint32_t		suspend_count;
-	kern_gpuscan_suspend_context suspend_context[1];	/* per SM */
+	kern_gpuscan_suspend_warp suspend_context[1];	/* per warp */
 } kern_gpuscan;
 
 KERNEL_FUNCTION(void)

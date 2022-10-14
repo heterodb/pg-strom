@@ -388,13 +388,12 @@ pgfn_Projection(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(int)
 kern_extract_heap_tuple(kern_context *kcxt,
 						kern_data_store *kds,
-						kern_tupitem *tupitem,
+						const HeapTupleHeaderData *htup,
 						int curr_depth,
 						const kern_preload_vars_item *kvars_items,
 						int kvars_nloads)
 {
 	const kern_preload_vars_item *kvars = kvars_items;
-	HeapTupleHeaderData *htup = &tupitem->htup;
 	uint32_t	offset;
 	int			kvars_nloads_saved = kvars_nloads;
 	int			resno = 1;
@@ -889,10 +888,10 @@ pgfn_LoadVars(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
 					 kern_data_store *kds_outer,
-					 kern_tupitem *tupitem_outer,
+					 HeapTupleHeaderData *htup_outer,
 					 int num_inners,
 					 kern_data_store **kds_inners,
-					 kern_tupitem **tupitem_inners)
+					 HeapTupleHeaderData **htup_inners)
 {
 	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 	int			index;
@@ -909,21 +908,21 @@ ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
 		 depth++)
 	{
 		kern_data_store *kds;
-		kern_tupitem *tupitem;
+		HeapTupleHeaderData *htup;
 
 		if (depth == 0)
 		{
-			kds     = kds_outer;
-			tupitem = tupitem_outer;
+			kds  = kds_outer;
+			htup = htup_outer;
 		}
 		else
 		{
-			kds     = kds_inners[depth - 1];
-			tupitem = tupitem_inners[depth - 1];
+			kds  = kds_inners[depth - 1];
+			htup = htup_inners[depth - 1];
 		}
 		index += kern_extract_heap_tuple(kcxt,
 										 kds,
-										 tupitem,
+										 htup,
 										 depth,
 										 kexp->u.load.kvars + index,
 										 kexp->u.load.nloads - index);
@@ -937,7 +936,7 @@ ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
                        uint32_t kds_index,
                        int num_inners,
                        kern_data_store **kds_inners,
-                       kern_tupitem **tupitem_inners)
+                       HeapTupleHeaderData **htup_inners)
 {
 	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 	int			index;
@@ -966,7 +965,7 @@ ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
 		{
 			count = kern_extract_heap_tuple(kcxt,
 											kds_inners[depth - 1],
-											tupitem_inners[depth - 1],
+											htup_inners[depth - 1],
 											depth,
 											kexp->u.load.kvars + index,
 											kexp->u.load.nloads - index);

@@ -45,35 +45,14 @@ heterodbExtraModuleInit(void)
  */
 static heterodb_extra_error_info   *p_heterodb_extra_error_data = NULL;
 
-static void
+static inline void
 heterodbExtraEreport(int elevel)
 {
-	/* see ereport_domain definition */
-#if PG_VERSION_NUM >= 130000
-	pg_prevent_errno_in_scope();
-	if (errstart(elevel, TEXTDOMAIN))
-	{
-		errcode(ERRCODE_INTERNAL_ERROR);
-		errmsg("[extra] %s", p_heterodb_extra_error_data->message);
-		errfinish(p_heterodb_extra_error_data->filename,
-				  p_heterodb_extra_error_data->lineno,
-				  p_heterodb_extra_error_data->funcname);
-	}
-#else
-#if PG_VERSION_NUM >= 120000
-	pg_prevent_errno_in_scope();
-#endif
-	if (errstart(elevel,
-				 p_heterodb_extra_error_data->filename,
-                 p_heterodb_extra_error_data->lineno,
-                 p_heterodb_extra_error_data->funcname,
-				 TEXTDOMAIN))
-	{
-		errcode(ERRCODE_INTERNAL_ERROR);
-		errmsg("%s", p_heterodb_extra_error_data->message);
-		errfinish(0);
-	}
-#endif
+	elog(elevel, "(%s; %s:%d) %s",
+		 p_heterodb_extra_error_data->funcname,
+		 p_heterodb_extra_error_data->filename,
+		 p_heterodb_extra_error_data->lineno,
+		 p_heterodb_extra_error_data->message);
 }
 
 /*
@@ -186,14 +165,21 @@ static int (*p_gpudirect_file_desc_open)(
 	GPUDirectFileDesc *gds_fdesc,
 	int rawfd, const char *pathname) = NULL;
 
-void
+bool
 gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc, File pg_fdesc)
 {
 	int		rawfd = FileGetRawDesc(pg_fdesc);
 	char   *pathname = FilePathName(pg_fdesc);
 
-	if (p_gpudirect_file_desc_open(gds_fdesc, rawfd, pathname))
-		heterodbExtraEreport(ERROR);
+	if (p_gpudirect_file_desc_open(gds_fdesc, rawfd, pathname) == 0)
+		return true;
+
+	fprintf(stderr, "(%s; %s:%d) %s\n",
+			p_heterodb_extra_error_data->funcname,
+			p_heterodb_extra_error_data->filename,
+			p_heterodb_extra_error_data->lineno,
+			p_heterodb_extra_error_data->message);
+	return false;
 }
 
 /*
@@ -203,12 +189,19 @@ static int (*p_gpudirect_file_desc_open_by_path)(
 	GPUDirectFileDesc *gds_fdesc,
 	const char *pathname) = NULL;
 
-void
+bool
 gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
 							const char *pathname)
 {
-	if (p_gpudirect_file_desc_open_by_path(gds_fdesc, pathname))
-		heterodbExtraEreport(ERROR);
+	if (p_gpudirect_file_desc_open_by_path(gds_fdesc, pathname) == 0)
+		return true;
+
+	fprintf(stderr, "(%s; %s:%d) %s\n",
+			p_heterodb_extra_error_data->funcname,
+			p_heterodb_extra_error_data->filename,
+			p_heterodb_extra_error_data->lineno,
+			p_heterodb_extra_error_data->message);
+	return false;
 }
 
 /*

@@ -688,6 +688,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 							  gss->gs_info.index_conds,
 							  gss->gs_info.index_quals);
 	//pgstromGpuCacheExecBegin here
+	pgstromGpuDirectExecBegin(&gss->pts, gss->gs_info.gpu_direct_devs);
+	
 	//pgstromGpuDirectExecBegin here
 	pgstromExecInitTaskState(&gss->pts, gss->gs_info.dev_quals);
 }
@@ -729,7 +731,7 @@ ExecGpuScan(CustomScanState *node)
 		if (gss->pts.gc_state)
 			gpuset = gss->gs_info.gpu_cache_devs;
 		else if (gss->pts.gd_state)
-			gpuset = gss->gs_info.gpu_direct_devs;
+			gpuset = pgstromGpuDirectDevices(&gss->pts);
 		gpuClientOpenSession(&gss->pts, gpuset, session);
 	}
 	return ExecScan(&node->ss,
@@ -844,27 +846,82 @@ ExplainGpuScan(CustomScanState *node,
 /*
  * Handle GpuScan Commands
  */
-static void
-handleGpuScanExecRow(gpuClient *gclient,
-					 kern_data_store *kds_src,
-					 kern_data_store *kds_dst_head)
+void
+gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 {
 	kern_gpuscan	*kgscan = NULL;
+	const char		*kds_src_pathname = NULL;
+	strom_io_vector *kds_src_iovec = NULL;
+	kern_data_store *kds_src = NULL;
 	kern_data_store *kds_dst = NULL;
+	kern_data_store *kds_dst_head = NULL;
 	kern_data_store **kds_dst_array = NULL;
 	int				kds_dst_nrooms = 0;
 	int				kds_dst_nitems = 0;
+	const char	   *kern_funcname;
 	CUfunction		f_kern_gpuscan;
+	CUdeviceptr		m_kds_src = 0UL;
+	//CUdeviceptr		m_kds_dst = 0UL;
+	//CUdeviceptr	m_kds_extra = 0UL;
 	CUdeviceptr		dptr;
 	CUresult		rc;
 	int				grid_sz;
 	int				block_sz;
+	unsigned int	shmem_sz;
 	size_t			sz;
+	bool			prefetch_kds_src = true;
 	void		   *kern_args[5];
+
+	if (xcmd->u.scan.kds_src_pathname)
+		kds_src_pathname = (char *)xcmd + xcmd->u.scan.kds_src_pathname;
+	if (xcmd->u.scan.kds_src_iovec)
+		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.scan.kds_src_iovec);
+	if (xcmd->u.scan.kds_src_offset)
+		kds_src = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_src_offset);
+	if (xcmd->u.scan.kds_dst_offset)
+		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_dst_offset);
+
+	if (!kds_src)
+	{
+		gpuClientELog(gclient, "KDS_FORMAT_COLUMN is not yet implemented");
+		return;
+	}
+	else if (kds_src->format == KDS_FORMAT_ROW)
+	{
+		kern_funcname = "kern_gpuscan_main_row";
+		m_kds_src = (CUdeviceptr)kds_src;
+	}
+	else if (kds_src->format == KDS_FORMAT_BLOCK)
+	{
+		kern_funcname = "kern_gpuscan_main_block";
+
+		fprintf(stderr, "kds->len = %zu\n", kds_src->length);
+		if (kds_src_pathname && kds_src_iovec)
+		{
+			m_kds_src = gpuservLoadKdsBlock(gclient,
+											kds_src,
+											kds_src_pathname,
+											kds_src_iovec);
+			if (m_kds_src == 0UL)
+				return;
+			prefetch_kds_src = false;
+		}
+		else
+		{
+			Assert(kds_src->block_nloaded == kds_src->nitems);
+			m_kds_src = (CUdeviceptr)kds_src;
+		}
+	}
+	else
+	{
+		gpuClientELog(gclient, "unknown GpuScan Source format (%c)",
+					  kds_src->format);
+		return;
+	}
 
 	rc = cuModuleGetFunction(&f_kern_gpuscan,
 							 gclient->cuda_module,
-							 "kern_gpuscan_main_row");
+							 kern_funcname);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientFatal(gclient, "failed on cuModuleGetFunction: %s",
@@ -874,47 +931,55 @@ handleGpuScanExecRow(gpuClient *gclient,
 
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
+							 &shmem_sz,
 							 f_kern_gpuscan,
-							 CU_DINDEX_PER_THREAD,
-							 0, 0);
+							 0,
+							 sizeof(kern_gpuscan_suspend_warp),
+							 0);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientFatal(gclient, "failed on gpuOptimalBlockSize: %s",
-					  cuStrError(rc));
+					   cuStrError(rc));
 		goto bailout;
 	}
+	fprintf(stderr, "grid_sz=%d block_sz=%d shmem_sz=%u\n", grid_sz, block_sz, shmem_sz);
 	
 	/*
 	 * Allocation of the control structure
 	 */
-	grid_sz = Min3(gpuDevAttrs->MULTIPROCESSOR_COUNT * 3,
-				   (kds_src->nitems + block_sz - 1) / block_sz,
-				   grid_sz);
-	sz = offsetof(kern_gpuscan, suspend_context[grid_sz]);
+	grid_sz = Min(grid_sz, (kds_src->nitems + block_sz - 1) / block_sz);
+
+	block_sz = 32;
+	grid_sz = 1;
+
+	sz = offsetof(kern_gpuscan, suspend_context) + shmem_sz * grid_sz;
 	rc = cuMemAllocManaged(&dptr, sz, CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientFatal(gclient, "failed on cuMemAllocManaged(%lu): %s",
-					  sz, cuStrError(rc));
+					   sz, cuStrError(rc));
 		goto bailout;
 	}
 	kgscan = (kern_gpuscan *)dptr;
 	memset(kgscan, 0, sz);
 	kgscan->grid_sz		= grid_sz;
 	kgscan->block_sz	= block_sz;
-	
+
 	/* prefetch source KDS */
-	rc = cuMemPrefetchAsync((CUdeviceptr)kds_src,
-							kds_src->length,
-							CU_DEVICE_PER_THREAD,
-							CU_STREAM_PER_THREAD);
-	if (rc != CUDA_SUCCESS)
+	if (prefetch_kds_src)
 	{
-		gpuClientFatal(gclient, "failed on cuMemPrefetchAsync: %s",
-					  cuStrError(rc));
-		goto bailout;
+		rc = cuMemPrefetchAsync((CUdeviceptr)kds_src,
+								kds_src->length,
+								CU_DEVICE_PER_THREAD,
+								CU_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientFatal(gclient, "failed on cuMemPrefetchAsync: %s",
+						   cuStrError(rc));
+			goto bailout;
+		}
 	}
-	
+
 	/*
 	 * Allocation of the destination buffer
 	 */
@@ -955,7 +1020,7 @@ resume_kernel:
 	rc = cuLaunchKernel(f_kern_gpuscan,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
-						0,
+						shmem_sz,
 						CU_STREAM_PER_THREAD,
 						kern_args,
 						NULL);
@@ -1034,6 +1099,9 @@ bailout:
 		if (rc != CUDA_SUCCESS)
 			fprintf(stderr, "warning: failed on cuMemFree: %s\n", cuStrError(rc));
 	}
+	if (m_kds_src != 0UL &&
+		m_kds_src != (CUdeviceptr)kds_src)
+		gpuMemFree(m_kds_src);
 	while (kds_dst_nitems > 0)
 	{
 		kds_dst = kds_dst_array[--kds_dst_nitems];
@@ -1041,30 +1109,6 @@ bailout:
 		rc = cuMemFree((CUdeviceptr)kds_dst);
 		if (rc != CUDA_SUCCESS)
 			fprintf(stderr, "warning: failed on cuMemFree: %s\n", cuStrError(rc));
-	}
-}
-
-void
-gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
-{
-	kern_data_store *kds_src = NULL;
-	kern_data_store *kds_dst = NULL;
-
-	if (xcmd->u.scan.kds_src_offset)
-		kds_src = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_src_offset);
-	if (xcmd->u.scan.kds_dst_offset)
-		kds_dst = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_dst_offset);
-	if (!kds_src)
-	{
-		gpuClientELog(gclient, "KDS_FORMAT_COLUMN is not yet implemented");
-	}
-	else if (kds_src->format == KDS_FORMAT_ROW)
-	{
-		handleGpuScanExecRow(gclient, kds_src, kds_dst);
-	}
-	else
-	{
-		gpuClientELog(gclient, "unknown GpuScan Source format (%c)", kds_src->format);
 	}
 }
 

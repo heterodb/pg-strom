@@ -13,143 +13,6 @@
 
 /* ----------------------------------------------------------------
  *
- * GPUDirectSQL related routines
- *
- * ----------------------------------------------------------------
- */
-static HTAB	   *tablespace_optimal_gpu_htable = NULL;
-typedef struct
-{
-	Oid			tablespace_oid;
-	bool		is_valid;
-	Bitmapset	optimal_gpus;
-} tablespace_optimal_gpu_hentry;
-
-static void
-tablespace_optimal_gpu_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
-{
-	/* invalidate all the cached status */
-	if (tablespace_optimal_gpu_htable)
-	{
-		hash_destroy(tablespace_optimal_gpu_htable);
-		tablespace_optimal_gpu_htable = NULL;
-	}
-}
-
-/*
- * GetOptimalGpusForTablespace
- */
-static const Bitmapset *
-GetOptimalGpusForTablespace(Oid tablespace_oid)
-{
-	tablespace_optimal_gpu_hentry *hentry;
-	bool		found;
-
-	if (!pgstrom_gpudirect_enabled())
-		return NULL;
-
-	if (!OidIsValid(tablespace_oid))
-		tablespace_oid = MyDatabaseTableSpace;
-
-	if (!tablespace_optimal_gpu_htable)
-	{
-		HASHCTL		hctl;
-		int			nwords = (numGpuDevAttrs / BITS_PER_BITMAPWORD) + 1;
-
-		memset(&hctl, 0, sizeof(HASHCTL));
-		hctl.keysize = sizeof(Oid);
-		hctl.entrysize = MAXALIGN(offsetof(tablespace_optimal_gpu_hentry,
-										   optimal_gpus.words[nwords]));
-		tablespace_optimal_gpu_htable
-			= hash_create("TablespaceOptimalGpu", 128,
-						  &hctl, HASH_ELEM | HASH_BLOBS);
-	}
-
-	hentry = (tablespace_optimal_gpu_hentry *)
-		hash_search(tablespace_optimal_gpu_htable,
-					&tablespace_oid,
-					HASH_ENTER,
-					&found);
-	if (!found || !hentry->is_valid)
-	{
-		char	   *pathname;
-		File		filp;
-		Bitmapset  *optimal_gpus;
-
-		Assert(hentry->tablespace_oid == tablespace_oid);
-
-		pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
-		filp = PathNameOpenFile(pathname, O_RDONLY);
-		if (filp < 0)
-		{
-			elog(WARNING, "failed on open('%s') of tablespace %u: %m",
-				 pathname, tablespace_oid);
-			return NULL;
-		}
-		optimal_gpus = extraSysfsLookupOptimalGpus(filp);
-		if (!optimal_gpus)
-			hentry->optimal_gpus.nwords = 0;
-		else
-		{
-			Assert(optimal_gpus->nwords <= (numGpuDevAttrs/BITS_PER_BITMAPWORD)+1);
-			memcpy(&hentry->optimal_gpus, optimal_gpus,
-				   offsetof(Bitmapset, words[optimal_gpus->nwords]));
-			bms_free(optimal_gpus);
-		}
-		FileClose(filp);
-		hentry->is_valid = true;
-	}
-	Assert(hentry->is_valid);
-	return (hentry->optimal_gpus.nwords > 0 ? &hentry->optimal_gpus : NULL);
-}
-
-/*
- * baseRelCanUseGpuDirect - checks wthere the relation can use GPU-Direct SQL.
- * If possible, it returns a bitmap of optimal GPUs.
- */
-const Bitmapset *
-baseRelCanUseGpuDirect(PlannerInfo *root, RelOptInfo *baserel)
-{
-	const Bitmapset *optimal_gpus;
-	double		total_sz;
-
-	if (!pgstrom_gpudirect_enabled())
-		return NULL;
-#if 0
-	if (baseRelIsArrowFdw(baserel))
-	{
-		if (pgstrom_gpudirect_enabled())
-			return GetOptimalGpusForArrowFdw(root, baserel);
-		return NULL;
-	}
-#endif
-	total_sz = (size_t)baserel->pages * (size_t)BLCKSZ;
-	if (total_sz < pgstrom_gpudirect_threshold())
-		return NULL;	/* table is too small */
-
-	optimal_gpus = GetOptimalGpusForTablespace(baserel->reltablespace);
-	if (optimal_gpus)
-	{
-		RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
-		HeapTuple	tup;
-		char		relpersistence;
-
-		tup = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
-		if (!HeapTupleIsValid(tup))
-			elog(ERROR, "cache lookup failed for relation %u", rte->relid);
-		relpersistence = ((Form_pg_class) GETSTRUCT(tup))->relpersistence;
-		ReleaseSysCache(tup);
-
-		/* temporary table is not supported by GPU-Direct SQL */
-		if (relpersistence != RELPERSISTENCE_PERMANENT &&
-			relpersistence != RELPERSISTENCE_UNLOGGED)
-			optimal_gpus = NULL;
-	}
-	return optimal_gpus;
-}
-
-/* ----------------------------------------------------------------
- *
  * Routines to setup kern_data_store
  *
  * ----------------------------------------------------------------
@@ -432,9 +295,12 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	kds->usage   = 0;
 	kds->block_offset = (KDS_HEAD_LENGTH(kds) +
 						 MAXALIGN(sizeof(BlockNumber) * kds_nrooms));
+	kds->block_nloaded = 0;
 	pts->xcmd_buf.len = __XCMD_KDS_SRC_OFFSET(&pts->xcmd_buf) + kds->block_offset;
 	Assert(pts->xcmd_buf.len == MAXALIGN(pts->xcmd_buf.len));
 	enlargeStringInfo(&pts->xcmd_buf, 0);
+	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
+	elog(INFO, "Buf.len = %d", pts->xcmd_buf.len);
 
 	strom_iovec = alloca(offsetof(strom_io_vector, ioc[kds_nrooms]));
 	strom_iovec->nr_chunks = 0;
@@ -459,7 +325,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			 * HEAP_XMIN_* or HEAP_XMAX_* flags correctly, we can have MVCC
 			 * logic in the device code.
 			 */
-			if (VM_ALL_VISIBLE(relation, block_num, &pts->curr_vm_buffer))
+			if (false) //VM_ALL_VISIBLE(relation, block_num, &pts->curr_vm_buffer))
 			{
 				/*
 				 * We don't allow xPU Direct SQL across multiple heap
@@ -514,6 +380,8 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				appendBinaryStringInfo(&pts->xcmd_buf, (const char *)spage, BLCKSZ);
 				kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
 				dpage = (Page) KDS_BLOCK_PGPAGE(kds, bindex);
+				Assert(dpage >= pts->xcmd_buf.data &&
+					   dpage + BLCKSZ <= pts->xcmd_buf.data + pts->xcmd_buf.len);
 				KDS_BLOCK_BLCKNR(kds, bindex) = block_num;
 
 				/*
@@ -539,6 +407,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 							continue;
 						htup.t_tableOid = RelationGetRelid(relation);
 						htup.t_data = (HeapTupleHeader) PageGetItem((Page) dpage, lpp);
+						Assert((((uintptr_t)htup.t_data - (uintptr_t)dpage) & 7) == 0);
 						htup.t_len = ItemIdGetLength(lpp);
 						ItemPointerSet(&htup.t_self, block_num, lineoff);
 
@@ -552,7 +421,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				UnlockReleaseBuffer(buffer);
 				/* dpage became all-visible also */
 				PageSetAllVisible(dpage);
-				kds->block_nloaded++;
+				kds->nitems++;
 			}
 			pts->curr_block_num++;
 		}
@@ -590,7 +459,9 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 		}
 	}
 out:
-	Assert(kds->block_nloaded + strom_nblocks == kds->nitems);
+	Assert(kds->nitems == kds->block_nloaded + strom_nblocks);
+	kds->length = kds->block_offset + BLCKSZ * kds->nitems;
+	elog(INFO, "kds block {length=%zu, nitems=%u, block_nloaded=%u}", kds->length, kds->nitems, kds->block_nloaded);
 	if (kds->nitems == 0)
 		return NULL;
 	if (strom_iovec->nr_chunks > 0)
@@ -833,35 +704,5 @@ pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
 void
 pgstrom_init_relscan(void)
 {
-	static char *nvme_manual_distance_map = NULL;
-	char	buffer[1280];
-	int		index = 0;
-
-	/*
-	 * pg_strom.nvme_distance_map
-	 *
-	 * config := <token>[,<token>...]
-	 * token  := nvmeXX:gpuXX
-	 *
-	 * eg) nvme0:gpu0,nvme1:gpu1
-	 */
-	DefineCustomStringVariable("pg_strom.nvme_distance_map",
-							   "Manual configuration of optimal GPU for each NVME",
-							   NULL,
-							   &nvme_manual_distance_map,
-							   NULL,
-							   PGC_POSTMASTER,
-							   GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
-	extraSysfsSetupDistanceMap(nvme_manual_distance_map);
-	while (extraSysfsPrintNvmeInfo(index, buffer, sizeof(buffer)) >= 0)
-	{
-		elog(LOG, "- %s", buffer);
-		index++;
-	}
-	/* hash table for tablespace <-> optimal GPU */
-	tablespace_optimal_gpu_htable = NULL;
-	CacheRegisterSyscacheCallback(TABLESPACEOID,
-								  tablespace_optimal_gpu_cache_callback,
-								  (Datum) 0);
+	/* nothing to do */
 }

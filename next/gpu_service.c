@@ -199,6 +199,7 @@ __gpuMemAllocNewSegment(gpuMemoryPool *pool, size_t segment_sz)
 	dlist_push_head(&mseg->free_chunks, &chunk->free_chain);
 	dlist_push_head(&mseg->addr_chunks, &chunk->addr_chain);
 
+	dlist_push_head(&pool->segment_list, &mseg->chain);
 	pool->total_sz += segment_sz;
 
 	return mseg;
@@ -398,6 +399,73 @@ gpuMemoryPoolInit(gpuMemoryPool *pool, size_t dev_total_memsz)
 	dlist_init(&pool->segment_list);
 }
 
+/*
+ * gpuservLoadKdsBlock
+ *
+ * fill up KDS_FORMAT_BLOCK using GPU-Direct
+ */
+CUdeviceptr
+gpuservLoadKdsBlock(gpuClient *gclient,
+					kern_data_store *kds,
+					const char *kds_pathname,
+					strom_io_vector *kds_iovec)
+{
+	GPUDirectFileDesc gdfdesc;
+	CUdeviceptr		m_kds;
+	CUresult		rc;
+	size_t			sz;
+	int i;
+
+	if (!gpuDirectFileDescOpenByPath(&gdfdesc, kds_pathname))
+	{
+		gpuClientELog(gclient, "failed on gpuDirectFileDescOpenByPath('%s')",
+					  kds_pathname);
+		return 0UL;
+	}
+
+	rc = gpuMemAlloc(&m_kds, kds->length);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on gpuMemAlloc(%zu): %s",
+					  kds->length, cuStrError(rc));
+		goto error_1;
+	}
+
+	sz = kds->block_offset + kds->block_nloaded * BLCKSZ;
+	rc = cuMemcpyHtoD(m_kds, kds, sz);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuMemcpyHtoD: %s", cuStrError(rc));
+		goto error_2;
+	}
+	fprintf(stderr, "cuMemcpyHtoD %zu of %zu\n", sz, kds->length);
+	
+	if (!gpuDirectFileReadIOV(&gdfdesc, m_kds, -1, sz, kds_iovec))
+	{
+		gpuClientELog(gclient, "failed on gpuDirectFileReadIOV");
+		goto error_2;
+	}
+	for (i=0; i < kds_iovec->nr_chunks; i++)
+	{
+		strom_io_chunk *ioc = &kds_iovec->ioc[i];
+
+		fprintf(stderr, "ioc[%d] %lx + %zu fchunk_id=%d\n", i,
+				ioc->m_offset, PAGE_SIZE * ioc->nr_pages, ioc->fchunk_id);
+	}
+	
+	gpuDirectFileDescClose(&gdfdesc);
+	return m_kds;
+
+error_2:
+	gpuMemFree(m_kds);
+error_1:
+	gpuDirectFileDescClose(&gdfdesc);
+	return 0UL;
+}
+
+/*
+ * gpuServiceGoingTerminate
+ */
 bool
 gpuServiceGoingTerminate(void)
 {

@@ -862,7 +862,7 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 	size_t			off;
 
 	initStringInfo(&pts->xcmd_buf);
-	bufsz += MAXALIGN(offsetof(XpuCommand, u.scan.data));
+	bufsz = MAXALIGN(offsetof(XpuCommand, u.scan.data));
 	if (tdesc_src)
 		bufsz += estimate_kern_data_store(tdesc_src);
 	if (tdesc_dst)

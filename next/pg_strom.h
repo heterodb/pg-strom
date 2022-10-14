@@ -266,9 +266,9 @@ extern bool		heterodbValidateDevice(int gpu_device_id,
 									   const char *gpu_device_name,
 									   const char *gpu_device_uuid);
 extern int		gpuDirectInitDriver(void);
-extern void		gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc,
+extern bool		gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc,
 									  File pg_fdesc);
-extern void		gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
+extern bool		gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
 											const char *pathname);
 extern void		gpuDirectFileDescClose(const GPUDirectFileDesc *gds_fdesc);
 extern CUresult	gpuDirectMapGpuMemory(CUdeviceptr m_segment,
@@ -343,6 +343,16 @@ extern void		pgstromBrinIndexShutdownDSM(pgstromTaskState *pts);
 extern void		pgstrom_init_brin(void);
 
 /*
+ * gpu_direct.c
+ */
+
+//cost estimation
+//device selection here
+
+
+
+
+/*
  * relscan.c
  */
 extern const Bitmapset *GetOptimalGpusForRelation(PlannerInfo *root,
@@ -402,18 +412,16 @@ extern void		pgstrom_init_executor(void);
 /*
  * gpu_device.c
  */
-extern bool		pgstrom_gpudirect_enabled(void);
-extern Size		pgstrom_gpudirect_threshold(void);
-
 extern CUresult	gpuMemAlloc(CUdeviceptr *dptr, size_t bytesize);
 extern CUresult gpuMemFree(CUdeviceptr dptr);
 
 extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,
 									int *p_block_sz,
+									unsigned int *p_shmem_sz,
 									CUfunction kern_function,
-									CUdevice cuda_device,
-									size_t dyn_shmem_per_block,
-									size_t dyn_shmem_per_thread);
+									size_t dynamic_shmem_per_block,
+									size_t dynamic_shmem_per_warp,
+									size_t dynamic_shmem_per_thread);
 extern bool		pgstrom_init_gpu_device(void);
 
 /*
@@ -458,12 +466,27 @@ extern __thread CUevent		CU_EVENT_PER_THREAD;
 extern bool		gpuServiceGoingTerminate(void);
 extern CUresult	gpuMemAlloc(CUdeviceptr *dptr, size_t bytesize);
 extern CUresult	gpuMemFree(CUdeviceptr devptr);
+extern CUdeviceptr gpuservLoadKdsBlock(gpuClient *gclient,
+									   kern_data_store *kds,
+									   const char *kds_pathname,
+									   strom_io_vector *kds_iovec);
 extern void		gpuClientWriteBack(gpuClient *gclient,
 								   XpuCommand *resp,
 								   size_t resp_sz,
 								   int kds_nitems,
 								   kern_data_store **kds_array);
 extern void		pgstrom_init_gpu_service(void);
+
+/*
+ * gpu_direct.c
+ */
+extern void		pgstromGpuDirectExecBegin(pgstromTaskState *pts,
+										  const Bitmapset *gpuset);
+extern const Bitmapset *pgstromGpuDirectDevices(pgstromTaskState *pts);
+extern void		pgstromGpuDirectExecEnd(pgstromTaskState *pts);
+extern void		pgstrom_init_gpu_direct(void);
+
+
 
 /*
  * gpu_cache.c

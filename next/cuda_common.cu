@@ -88,19 +88,19 @@ ExecProjectionOuterRow(kern_context *kcxt,
 					   kern_expression *kexp,	/* LoadVars + Projection */
 					   kern_data_store *kds_dst,
 					   kern_data_store *kds_outer,
-					   kern_tupitem *tupitem_outer,
+					   HeapTupleHeaderData *htup_outer,
 					   int num_inners,
 					   kern_data_store **kds_inners,
-					   kern_tupitem **tupitem_inners)
+					   HeapTupleHeaderData **htup_inners)
 {
 	uint32_t	nvalids;
 	uint32_t	mask;
 	uint32_t	tupsz = 0;
 
 	assert(__activemask() == 0xffffffffU);
-	mask = __ballot_sync(__activemask(), tupitem_outer != NULL);
+	mask = __ballot_sync(__activemask(), htup_outer != NULL);
 	nvalids = __popc(mask);
-	assert(tupitem_outer != NULL
+	assert(htup_outer != NULL
 		   ? LaneId() <  nvalids
 		   : LaneId() >= nvalids);
 
@@ -118,10 +118,10 @@ ExecProjectionOuterRow(kern_context *kcxt,
 								 kexp,
 								 (xpu_datum_t *)&__tupsz,
 								 kds_outer,
-								 tupitem_outer,
+								 htup_outer,
 								 num_inners,
 								 kds_inners,
-								 tupitem_inners))
+								 htup_inners))
 		{
 			if (!__tupsz.isnull)
 			{

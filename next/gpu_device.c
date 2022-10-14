@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include "cuda_common.h"
 
 /* variable declarations */
 GpuDevAttributes *gpuDevAttrs = NULL;
@@ -355,8 +356,6 @@ bool
 pgstrom_init_gpu_device(void)
 {
 	static char	*cuda_visible_devices = NULL;
-	bool		default_gpudirect_enabled = false;
-	int			i;
 
 	/*
 	 * Set CUDA_VISIBLE_DEVICES environment variable prior to CUDA
@@ -377,39 +376,8 @@ pgstrom_init_gpu_device(void)
 	}
 	/* collect device attributes using child process */
 	pgstrom_collect_gpu_devices();
-	if (numGpuDevAttrs == 0)
-		return false;
 
-	/* pgstrom.gpudirect_enabled */
-	if (gpuDirectInitDriver() == 0)
-	{
-		for (i=0; i < numGpuDevAttrs; i++)
-		{
-			if (gpuDevAttrs[i].DEV_SUPPORT_GPUDIRECTSQL)
-				default_gpudirect_enabled = true;
-		}
-		gpudirect_driver_is_initialized = true;
-	}
-	DefineCustomBoolVariable("pg_strom.gpudirect_enabled",
-							 "enables GPUDirect SQL",
-							 NULL,
-							 &__pgstrom_gpudirect_enabled,
-							 default_gpudirect_enabled,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE,
-							 pgstrom_gpudirect_enabled_checker, NULL, NULL);
-
-	DefineCustomIntVariable("pg_strom.gpudirect_threshold",
-							"Tablesize threshold to use GPUDirect SQL",
-							NULL,
-							&__pgstrom_gpudirect_threshold,
-							5242880,	/* 5GB */
-							262144,		/* 256MB */
-							INT_MAX,
-							PGC_SUSET,
-							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-							NULL, NULL, NULL);
-	return true;
+	return (numGpuDevAttrs > 0);
 }
 
 /*
@@ -417,94 +385,57 @@ pgstrom_init_gpu_device(void)
  * according to the function and device attributes
  */
 static __thread size_t __dynamic_shmem_per_block;
+static __thread size_t __dynamic_shmem_per_warp;
 static __thread size_t __dynamic_shmem_per_thread;
 
 static size_t
 blocksize_to_shmemsize_helper(int blocksize)
 {
-	return (__dynamic_shmem_per_block +
-			__dynamic_shmem_per_thread * (size_t)blocksize);
-}
+	size_t	num_warps = (blocksize + WARPSIZE - 1) / WARPSIZE;
 
-/*
- * gpuOccupancyMaxPotentialBlockSize
- */
-static CUresult
-gpuOccupancyMaxPotentialBlockSize(int *p_min_grid_sz,
-								  int *p_max_block_sz,
-								  CUfunction kern_function,
-								  size_t dynamic_shmem_per_block,
-								  size_t dynamic_shmem_per_thread)
-{
-	int32		min_grid_sz;
-	int32		max_block_sz;
-	CUresult	rc;
-
-	if (dynamic_shmem_per_thread > 0)
-	{
-		__dynamic_shmem_per_block = dynamic_shmem_per_block;
-		__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
-		rc = cuOccupancyMaxPotentialBlockSize(&min_grid_sz,
-											  &max_block_sz,
-											  kern_function,
-											  blocksize_to_shmemsize_helper,
-											  0,
-											  0);
-	}
-	else
-	{
-		rc = cuOccupancyMaxPotentialBlockSize(&min_grid_sz,
-											  &max_block_sz,
-											  kern_function,
-											  0,
-											  dynamic_shmem_per_block,
-											  0);
-	}
-	if (p_min_grid_sz)
-		*p_min_grid_sz = min_grid_sz;
-	if (p_max_block_sz)
-		*p_max_block_sz = max_block_sz;
-	return rc;
+	return MAXALIGN(__dynamic_shmem_per_block +
+					__dynamic_shmem_per_warp * num_warps +
+					__dynamic_shmem_per_thread * (size_t)blocksize);
 }
 
 CUresult
 gpuOptimalBlockSize(int *p_grid_sz,
 					int *p_block_sz,
+					unsigned int *p_shmem_sz,
 					CUfunction kern_function,
-					/* memo: in old version, cuda_device was given instead */
-					int cuda_dindex,
 					size_t dynamic_shmem_per_block,
+					size_t dynamic_shmem_per_warp,
 					size_t dynamic_shmem_per_thread)
 {
-	int			mp_count = gpuDevAttrs[cuda_dindex].MULTIPROCESSOR_COUNT;
-	int			min_grid_sz;
-	int			max_block_sz;
-	int			max_multiplicity;
-	size_t		dynamic_shmem_sz;
 	CUresult	rc;
 
-	rc = gpuOccupancyMaxPotentialBlockSize(&min_grid_sz,
-										   &max_block_sz,
-										   kern_function,
-										   dynamic_shmem_per_block,
-										   dynamic_shmem_per_thread);
-	if (rc != CUDA_SUCCESS)
-		return rc;
-
-	dynamic_shmem_sz = (dynamic_shmem_per_block +
-						dynamic_shmem_per_thread * max_block_sz);
-	rc = cuOccupancyMaxActiveBlocksPerMultiprocessor(&max_multiplicity,
-													 kern_function,
-													 max_block_sz,
-													 dynamic_shmem_sz);
-	if (rc != CUDA_SUCCESS)
-		return rc;
-
-	*p_grid_sz = Min(GPUKERNEL_MAX_SM_MULTIPLICITY,
-					 max_multiplicity) * mp_count;
-	*p_block_sz = max_block_sz;
-
-	return CUDA_SUCCESS;
+	if (dynamic_shmem_per_warp == 0 &&
+		dynamic_shmem_per_thread == 0)
+	{
+		rc = cuOccupancyMaxPotentialBlockSize(p_grid_sz,
+											  p_block_sz,
+											  kern_function,
+											  NULL,
+											  dynamic_shmem_per_block,
+											  0);
+		if (rc == CUDA_SUCCESS)
+			*p_shmem_sz = dynamic_shmem_per_block;
+	}
+	else
+	{
+		__dynamic_shmem_per_block  = dynamic_shmem_per_block;
+		__dynamic_shmem_per_warp   = dynamic_shmem_per_warp;
+		__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
+		rc = cuOccupancyMaxPotentialBlockSize(p_grid_sz,
+											  p_block_sz,
+											  kern_function,
+											  blocksize_to_shmemsize_helper,
+											  0,
+											  0);
+		if (rc == CUDA_SUCCESS)
+			*p_shmem_sz = blocksize_to_shmemsize_helper(*p_block_sz);
+	}
+	return rc;
 }
 
 /*

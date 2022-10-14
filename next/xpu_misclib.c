@@ -361,8 +361,6 @@ xpu_inet_arrow_ref(kern_context *kcxt,
 		result->isnull = true;
 	else
 	{
-		int		sz = offsetof(inet_struct, ipaddr[len]);
-
 		if (len == 4)
 			result->value.family = PGSQL_AF_INET;
 		else if (len == 16)
