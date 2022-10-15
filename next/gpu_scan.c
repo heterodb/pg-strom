@@ -860,16 +860,14 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	int				kds_dst_nitems = 0;
 	const char	   *kern_funcname;
 	CUfunction		f_kern_gpuscan;
+	const gpuMemChunk *chunk = NULL;
 	CUdeviceptr		m_kds_src = 0UL;
-	//CUdeviceptr		m_kds_dst = 0UL;
-	//CUdeviceptr	m_kds_extra = 0UL;
 	CUdeviceptr		dptr;
 	CUresult		rc;
 	int				grid_sz;
 	int				block_sz;
 	unsigned int	shmem_sz;
 	size_t			sz;
-	bool			prefetch_kds_src = true;
 	void		   *kern_args[5];
 
 	if (xcmd->u.scan.kds_src_pathname)
@@ -898,13 +896,13 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 		fprintf(stderr, "kds->len = %zu\n", kds_src->length);
 		if (kds_src_pathname && kds_src_iovec)
 		{
-			m_kds_src = gpuservLoadKdsBlock(gclient,
-											kds_src,
-											kds_src_pathname,
-											kds_src_iovec);
-			if (m_kds_src == 0UL)
+			chunk = gpuservLoadKdsBlock(gclient,
+										kds_src,
+										kds_src_pathname,
+										kds_src_iovec);
+			if (!chunk)
 				return;
-			prefetch_kds_src = false;
+			m_kds_src = chunk->base + chunk->offset;
 		}
 		else
 		{
@@ -949,8 +947,8 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	 */
 	grid_sz = Min(grid_sz, (kds_src->nitems + block_sz - 1) / block_sz);
 
-	block_sz = 32;
-	grid_sz = 1;
+//	block_sz = 32;
+//	grid_sz = 1;
 
 	sz = offsetof(kern_gpuscan, suspend_context) + shmem_sz * grid_sz;
 	rc = cuMemAllocManaged(&dptr, sz, CU_MEM_ATTACH_GLOBAL);
@@ -965,8 +963,8 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	kgscan->grid_sz		= grid_sz;
 	kgscan->block_sz	= block_sz;
 
-	/* prefetch source KDS */
-	if (prefetch_kds_src)
+	/* prefetch source KDS, if managed memory */
+	if (!chunk)
 	{
 		rc = cuMemPrefetchAsync((CUdeviceptr)kds_src,
 								kds_src->length,
@@ -1014,7 +1012,7 @@ resume_kernel:
 	 */
 	kern_args[0] = &gclient->session;
 	kern_args[1] = &kgscan;
-	kern_args[2] = &kds_src;
+	kern_args[2] = &m_kds_src;
 	kern_args[3] = &kds_dst;
 
 	rc = cuLaunchKernel(f_kern_gpuscan,
@@ -1099,9 +1097,8 @@ bailout:
 		if (rc != CUDA_SUCCESS)
 			fprintf(stderr, "warning: failed on cuMemFree: %s\n", cuStrError(rc));
 	}
-	if (m_kds_src != 0UL &&
-		m_kds_src != (CUdeviceptr)kds_src)
-		gpuMemFree(m_kds_src);
+	if (chunk)
+		gpuMemFree(chunk);
 	while (kds_dst_nitems > 0)
 	{
 		kds_dst = kds_dst_array[--kds_dst_nitems];

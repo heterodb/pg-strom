@@ -243,9 +243,9 @@ pthreadCondWaitTimeout(pthread_cond_t *cond, pthread_mutex_t *mutex,
 	struct timespec tm;
 
 	clock_gettime(CLOCK_REALTIME, &tm);
-	tm.tv_sec += timeout_ms / 1000;
+	tm.tv_sec  += (timeout_ms / 1000);
 	tm.tv_nsec += (timeout_ms % 1000) * 1000000;
-	if (tm.tv_nsec > 1000000000)
+	if (tm.tv_nsec >= 1000000000L)
 	{
 		tm.tv_sec += tm.tv_nsec / 1000000000;
 		tm.tv_nsec = tm.tv_nsec % 1000000000;

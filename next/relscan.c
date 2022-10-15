@@ -325,7 +325,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			 * HEAP_XMIN_* or HEAP_XMAX_* flags correctly, we can have MVCC
 			 * logic in the device code.
 			 */
-			if (false) //VM_ALL_VISIBLE(relation, block_num, &pts->curr_vm_buffer))
+			if (VM_ALL_VISIBLE(relation, block_num, &pts->curr_vm_buffer))
 			{
 				/*
 				 * We don't allow xPU Direct SQL across multiple heap

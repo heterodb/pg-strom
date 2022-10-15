@@ -412,9 +412,6 @@ extern void		pgstrom_init_executor(void);
 /*
  * gpu_device.c
  */
-extern CUresult	gpuMemAlloc(CUdeviceptr *dptr, size_t bytesize);
-extern CUresult gpuMemFree(CUdeviceptr dptr);
-
 extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,
 									int *p_block_sz,
 									unsigned int *p_shmem_sz,
@@ -463,13 +460,22 @@ extern __thread int			CU_DINDEX_PER_THREAD;
 extern __thread CUdevice	CU_DEVICE_PER_THREAD;
 extern __thread CUcontext	CU_CONTEXT_PER_THREAD;
 extern __thread CUevent		CU_EVENT_PER_THREAD;
+
+typedef struct
+{
+	CUdeviceptr	base;
+	size_t		offset;
+	size_t		length;
+	unsigned long iomap_handle;		/* for old nvme_strom kmod */
+} gpuMemChunk;
+
+extern const gpuMemChunk *gpuMemAlloc(size_t bytesize);
+extern void		gpuMemFree(const gpuMemChunk *chunk);
+extern const gpuMemChunk *gpuservLoadKdsBlock(gpuClient *gclient,
+											  kern_data_store *kds,
+											  const char *kds_pathname,
+											  strom_io_vector *kds_iovec);
 extern bool		gpuServiceGoingTerminate(void);
-extern CUresult	gpuMemAlloc(CUdeviceptr *dptr, size_t bytesize);
-extern CUresult	gpuMemFree(CUdeviceptr devptr);
-extern CUdeviceptr gpuservLoadKdsBlock(gpuClient *gclient,
-									   kern_data_store *kds,
-									   const char *kds_pathname,
-									   strom_io_vector *kds_iovec);
 extern void		gpuClientWriteBack(gpuClient *gclient,
 								   XpuCommand *resp,
 								   size_t resp_sz,

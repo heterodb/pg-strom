@@ -45,42 +45,6 @@ static struct {
 /* declaration */
 Datum pgstrom_gpu_device_info(PG_FUNCTION_ARGS);
 
-/* static variables */
-static bool		gpudirect_driver_is_initialized = false;
-static bool		__pgstrom_gpudirect_enabled;	/* GUC */
-static int		__pgstrom_gpudirect_threshold;	/* GUC */
-
-/*
- * pgstrom_gpudirect_enabled
- */
-bool
-pgstrom_gpudirect_enabled(void)
-{
-	return __pgstrom_gpudirect_enabled;
-}
-
-/*
- * pgstrom_gpudirect_enabled_checker
- */
-static bool
-pgstrom_gpudirect_enabled_checker(bool *p_newval, void **extra, GucSource source)
-{
-	bool	newval = *p_newval;
-
-	if (newval && !gpudirect_driver_is_initialized)
-		elog(ERROR, "cannot enable GPUDirectSQL without driver module loaded");
-	return true;
-}
-
-/*
- * pgstrom_gpudirect_threshold
- */
-Size
-pgstrom_gpudirect_threshold(void)
-{
-	return (Size)__pgstrom_gpudirect_threshold << 10;
-}
-
 /*
  * collectGpuDevAttrs
  */
