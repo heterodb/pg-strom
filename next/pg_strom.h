@@ -41,6 +41,7 @@
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
+#include "commands/tablespace.h"
 #include "commands/typecmds.h"
 #include "common/hashfn.h"
 #include "common/int.h"
@@ -343,16 +344,6 @@ extern void		pgstromBrinIndexShutdownDSM(pgstromTaskState *pts);
 extern void		pgstrom_init_brin(void);
 
 /*
- * gpu_direct.c
- */
-
-//cost estimation
-//device selection here
-
-
-
-
-/*
  * relscan.c
  */
 extern const Bitmapset *GetOptimalGpusForRelation(PlannerInfo *root,
@@ -512,6 +503,24 @@ extern void		pgstrom_init_gpu_scan(void);
 /*
  * apache arrow related stuff
  */
+
+
+
+
+
+/*
+ * dpu_device.c
+ */
+typedef struct dpu_tablespace_entry	dpu_tablespace_entry;
+const dpu_tablespace_entry *GetOptimalDpuForRelation(PlannerInfo *root,
+													 RelOptInfo *rel);
+extern bool		pgstrom_init_dpu_device(void);
+
+/*
+ * dpu_scan.c
+ */
+extern void		pgstrom_init_dpu_scan(void);
+
 
 
 /*

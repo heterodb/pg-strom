@@ -18,7 +18,7 @@ PGSTROM_RELEASE := devel
 #
 __STROM_OBJS = main.o extra.o codegen.o misc.o executor.o brin.o relscan.o \
                gpu_scan.o gpu_device.o gpu_direct.o gpu_service.o \
-               $(__XPU_COMMON_OBJS) \
+               dpu_device.o dpu_scan.o \
                float2.o tinyint.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/next/,$(__STROM_OBJS))
 
