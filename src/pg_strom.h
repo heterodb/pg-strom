@@ -182,7 +182,9 @@
 #include "utils/json.h"
 #include "utils/jsonb.h"
 #include "utils/inet.h"
+#if PG_VERSION_NUM < 150000
 #include "utils/int8.h"
+#endif
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -1494,11 +1496,8 @@ trim_cstring(char *str)
 /*
  * pmakeFloat - for convenient; makeFloat + psprintf
  */
-static inline Value *
-pmakeFloat(cl_double float_value)
-{
-	return makeFloat(psprintf("%.*e", DBL_DIG+3, float_value));
-}
+#define pmakeFloat(fval)						\
+	makeFloat(psprintf("%.*e", DBL_DIG+3, (double)(fval)))
 
 /*
  * get_prev_log2

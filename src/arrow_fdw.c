@@ -2577,8 +2577,7 @@ RecordBatchAcquireSampleRows(Relation relation,
 	for (count = 0; count < nsamples; count++)
 	{
 		/* fetch a row randomly */
-		i = (double)pds->kds.nitems * (((double) random()) /
-									   ((double)MAX_RANDOM_VALUE + 1));
+		i = (double)pds->kds.nitems * drand48();
 		Assert(i < pds->kds.nitems);
 
 		for (j=0; j < pds->kds.ncols; j++)
@@ -4596,7 +4595,7 @@ __arrowFdwExtractFilesList(List *options_list,
 		{
 			if (parallel_nworkers >= 0)
 				elog(ERROR, "'parallel_workers' appeared twice");
-			parallel_nworkers = pg_atoi(strVal(defel->arg), sizeof(int), '\0');
+			parallel_nworkers = atoi(strVal(defel->arg));
 		}
 		else if (strcmp(defel->defname, "writable") == 0)
 		{
@@ -4653,7 +4652,7 @@ __arrowFdwExtractFilesList(List *options_list,
 		elog(ERROR, "no files are configured on behalf of the arrow_fdw foreign table");
 	foreach (lc, filesList)
 	{
-		const char *fname = strVal((Value *)lfirst(lc));
+		const char *fname = strVal(lfirst(lc));
 
 		if (!writable)
 		{

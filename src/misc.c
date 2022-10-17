@@ -639,6 +639,17 @@ pathtree_has_parallel_aware(Path *node)
  * never release fields of individual path-nodes, so this function tries
  * to make a copy of path-node itself and child path-nodes only.
  */
+static Path *
+__pgstrom_copy_joinpath(const JoinPath *a, size_t sz)
+{
+	JoinPath   *b = pmemdup(a, sz);
+
+	b->outerjoinpath = pgstrom_copy_pathnode(a->outerjoinpath);
+	b->innerjoinpath = pgstrom_copy_pathnode(a->innerjoinpath);
+
+	return &b->path;
+}
+
 Path *
 pgstrom_copy_pathnode(const Path *pathnode)
 {
@@ -693,33 +704,11 @@ pgstrom_copy_pathnode(const Path *pathnode)
 				return &b->path;
 			}
 		case T_NestPath:
-			{
-				NestPath   *a = (NestPath *)pathnode;
-				NestPath   *b = pmemdup(a, sizeof(NestPath));
-				b->outerjoinpath = pgstrom_copy_pathnode(a->outerjoinpath);
-				b->innerjoinpath = pgstrom_copy_pathnode(a->innerjoinpath);
-				return &b->path;
-			}
+			return __pgstrom_copy_joinpath((JoinPath *)pathnode, sizeof(NestPath));
 		case T_MergePath:
-			{
-				MergePath  *a = (MergePath *)pathnode;
-				MergePath  *b = pmemdup(a, sizeof(MergePath));
-				b->jpath.outerjoinpath =
-					pgstrom_copy_pathnode(a->jpath.outerjoinpath);
-				b->jpath.innerjoinpath =
-					pgstrom_copy_pathnode(a->jpath.innerjoinpath);
-				return &b->jpath.path;
-			}
+			return __pgstrom_copy_joinpath((JoinPath *)pathnode, sizeof(MergePath));
 		case T_HashPath:
-			{
-				HashPath   *a = (HashPath *)pathnode;
-				HashPath   *b = pmemdup(a, sizeof(HashPath));
-				b->jpath.outerjoinpath =
-					pgstrom_copy_pathnode(a->jpath.outerjoinpath);
-				b->jpath.innerjoinpath =
-					pgstrom_copy_pathnode(a->jpath.innerjoinpath);
-				return &b->jpath.path;
-			}
+			return __pgstrom_copy_joinpath((JoinPath *)pathnode, sizeof(HashPath));
 		case T_AppendPath:
 			{
 				AppendPath *a = (AppendPath *)pathnode;

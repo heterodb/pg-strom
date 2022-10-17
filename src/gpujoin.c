@@ -2183,7 +2183,6 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 							 bool try_inner_parallel)
 {
 #if PG_VERSION_NUM >= 110000
-	Value	   *join_nrows = makeFloat(psprintf("%e", joinrel->rows));
 	List	   *subpaths_list = NIL;
 	AppendPath *append_path;
 	int			parallel_nworkers;
@@ -2202,7 +2201,7 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 										 list_make1(inner_path->parent),
 										 list_make1_int(join_type),
 										 list_make1(extra->restrictlist),
-										 list_make1(join_nrows),
+										 list_make1(pmakeFloat(joinrel->rows)),
 										 required_outer,
 										 param_info,
 										 try_outer_parallel,

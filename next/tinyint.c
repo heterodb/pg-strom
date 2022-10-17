@@ -165,8 +165,16 @@ Datum
 pgstrom_int1in(PG_FUNCTION_ARGS)
 {
 	char   *num = PG_GETARG_CSTRING(0);
-	int32	ival = pg_atoi(num, sizeof(int32), '\0');
+	char   *end;
+	long	ival;
 
+	if (!num)
+		elog(ERROR, "NULL pointer");
+	ival = strtol(num, &end, 10);
+	if (*num == '\0' || *end != '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				 errmsg("invalid input syntax for tinyint: \"%s\"", num)));
 	if (ival < PG_INT8_MIN || ival > PG_INT8_MAX)
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),

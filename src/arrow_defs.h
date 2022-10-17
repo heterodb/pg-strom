@@ -5,6 +5,10 @@
  */
 #ifndef _ARROW_DEFS_H_
 #define _ARROW_DEFS_H_
+#include <stdint.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /*
  * MetadataVersion : short
@@ -192,7 +196,7 @@ typedef union		ArrowTypeOptions
 	struct {
 		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
 		uint16_t			bitWidth;
-		unsigned char		is_signed;
+		bool				is_signed;
 	} integer;
 	struct {
 		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
@@ -229,11 +233,6 @@ typedef union		ArrowTypeOptions
 #undef ARROW_TYPE_OPTIONS_COMMON_FIELDS
 
 #ifndef __CUDACC__
-#include <stdint.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #ifndef bool
 typedef unsigned char	bool;
 #endif
