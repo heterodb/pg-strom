@@ -5,10 +5,22 @@
  */
 #ifndef _ARROW_DEFS_H_
 #define _ARROW_DEFS_H_
+
+#ifndef __CUDACC__
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifndef bool
+typedef unsigned char	bool;
+#endif
+#ifndef true
+#define true	((bool) 1)
+#endif
+#ifndef false
+#define false	((bool) 0)
+#endif
+#endif	/* !__CUDACC__ */
 
 /*
  * MetadataVersion : short
@@ -186,7 +198,7 @@ typedef enum
  */
 #define ARROW_TYPE_OPTIONS_COMMON_FIELDS		\
 	ArrowTypeTag			tag;				\
-	int16_t					unitsz
+	unsigned short			unitsz
 
 typedef union		ArrowTypeOptions
 {
@@ -195,7 +207,7 @@ typedef union		ArrowTypeOptions
 	} common;
 	struct {
 		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
-		uint16_t			bitWidth;
+		unsigned short		bitWidth;
 		bool				is_signed;
 	} integer;
 	struct {
@@ -233,16 +245,6 @@ typedef union		ArrowTypeOptions
 #undef ARROW_TYPE_OPTIONS_COMMON_FIELDS
 
 #ifndef __CUDACC__
-#ifndef bool
-typedef unsigned char	bool;
-#endif
-#ifndef true
-#define true	((bool) 1)
-#endif
-#ifndef false
-#define false	((bool) 0)
-#endif
-
 /*
  * ArrowNode
  */
