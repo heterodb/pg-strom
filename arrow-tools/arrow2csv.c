@@ -275,7 +275,7 @@ print_arrow_int16(ARROW_PRINT_DATUM_ARGS)
 static bool
 print_arrow_uint16(ARROW_PRINT_DATUM_ARGS)
 {
-	ARROW_PRINT_DATUM_SETUP_INLINE(int16_t);
+	ARROW_PRINT_DATUM_SETUP_INLINE(uint16_t);
 	fprintf(output_filp, "%u", (unsigned int)datum);
 	return true;
 }
