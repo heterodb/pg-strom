@@ -35,9 +35,10 @@ endif
 PREFIX		?= /usr/local
 
 all: $(ALL_PROGS)
-	echo "HAS_PG_CONFIG[$(HAS_PG_CONFIG)]"
-	echo "HAS_MYSQL_CONFIG[$(HAS_MYSQL_CONFIG)]"
 
+#
+# Only if pg_config is available
+#
 ifeq ($(HAS_PG_CONFIG),yes)
 pg2arrow: $(PG2ARROW_OBJS)
 	$(CC) -o $@ $(PG2ARROW_OBJS) -lpq \
@@ -52,6 +53,9 @@ __pgsql2arrow.o: sql2arrow.c
 	$(CC) $(CFLAGS) -D__PG2ARROW__ -c -o $@ $<
 endif
 
+#
+# Only if mysql_config is available
+#
 ifeq ($(HAS_MYSQL_CONFIG),yes)
 mysql2arrow: $(MYSQL2ARROW_OBJS)
 	$(CC) -o $@ $(MYSQL2ARROW_OBJS) \
@@ -66,6 +70,9 @@ __mysql2arrow.o: sql2arrow.c
 	$(CC) $(CFLAGS) -D__MYSQL2ARROW__ -c -o $@ $<
 endif
 
+#
+# Pcap2Arrow
+#
 pcap2arrow: $(PCAP2ARROW_OBJS)
 	$(CC) -o $@ $(PCAP2ARROW_OBJS) -lpthread -lpfring -lpcap
 
@@ -73,6 +80,9 @@ install-pcap2arrow: pcap2arrow
 	mkdir -p $(DESTDIR)$(PREFIX)/bin && \
 	install -m 0755 pcap2arrow $(DESTDIR)$(PREFIX)/bin
 
+#
+# Arrow2CSV
+#
 install-arrow2csv: arrow2csv
 	mkdir -p $(DESTDIR)$(PREFIX)/bin && \
 	install -m 0755 arrow2csv $(DESTDIR)$(PREFIX)/bin
