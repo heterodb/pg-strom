@@ -4,8 +4,8 @@
 PG_CONFIG        ?= pg_config
 MYSQL_CONFIG     ?= mysql_config
 
-HAS_PG_CONFIG = $(shell which $(PG_CONFIG)>&/dev/null && echo yes)
-HAS_MYSQL_CONFIG = $(shell which $(MYSQL_CONFIG)>&/dev/null && echo yes)
+HAS_PG_CONFIG = $(shell which $(PG_CONFIG)>/dev/null 2>&1 && echo yes)
+HAS_MYSQL_CONFIG = $(shell which $(MYSQL_CONFIG)>/dev/null 2>&1 && echo yes)
 
 ALL_PROGS = pcap2arrow arrow2csv
 ifeq ($(HAS_PG_CONFIG),yes)
