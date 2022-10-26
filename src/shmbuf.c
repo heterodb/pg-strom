@@ -80,6 +80,7 @@ typedef struct
 } shmBufferContext;
 
 /* -------- static variables -------- */
+static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static struct sigaction sigaction_orig_sigsegv;
 static struct sigaction sigaction_orig_sigbus;
@@ -1362,6 +1363,20 @@ shmbufFree(void *addr)
 }
 
 /*
+ * pgstrom_request_shmbuf
+ */
+static void
+pgstrom_request_shmbuf(void)
+{
+	Size	sz;
+
+	if (shmem_request_next)
+		shmem_request_next();
+	sz = offsetof(shmBufferSegmentHead, segments[shmbuf_num_logical_segment]);
+	RequestAddinShmemSpace(STROMALIGN(sz));
+}
+
+/*
  * pgstrom_startup_shmbuf
  */
 static void
@@ -1496,8 +1511,8 @@ pgstrom_init_shmbuf(void)
 	shmbuf_segment_vaddr_tail = shmbuf_segment_vaddr_head + length;
 
 	/* allocation of static shared memory */
-	RequestAddinShmemSpace(offsetof(shmBufferSegmentHead,
-									segments[shmbuf_num_logical_segment]));
+	shmem_request_next = shmem_request_hook;
+	shmem_request_hook = pgstrom_request_shmbuf;
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_shmbuf;
 

@@ -366,4 +366,13 @@ add_function_cost(PlannerInfo *root, Oid funcid, Node *node,
 #define pull_varnos_of_level(a,b,c)		pull_varnos_of_level((b),(c))
 #define pull_varnos(a,b)				pull_varnos(b)
 #endif
+
+/*
+ * PG15 enforced RequestAddinShmemSpace() must be called on shmem_request_hook
+ */
+#if PG_VERSION_NUM < 150000
+typedef void (*shmem_request_hook_type) (void);
+extern shmem_request_hook_type	shmem_request_hook;
+#endif
+
 #endif	/* PG_COMPAT_H */

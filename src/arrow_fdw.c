@@ -186,6 +186,7 @@ struct ArrowFdwState
 
 /* ---------- static variables ---------- */
 static FdwRoutine		pgstrom_arrow_fdw_routine;
+static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static arrowMetadataState *arrow_metadata_state = NULL;
 static dlist_head		arrow_write_redo_list;
@@ -6095,6 +6096,17 @@ arrowFdwSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 }
 
 /*
+ * pgstrom_request_arrow_fdw
+ */
+static void
+pgstrom_request_arrow_fdw(void)
+{
+	if (shmem_request_next)
+		shmem_request_next();
+	RequestAddinShmemSpace(MAXALIGN(sizeof(arrowMetadataState)));
+}
+
+/*
  * pgstrom_startup_arrow_fdw
  */
 static void
@@ -6221,7 +6233,8 @@ pgstrom_init_arrow_fdw(void)
 							NULL, NULL, NULL);
 
 	/* shared memory size */
-	RequestAddinShmemSpace(MAXALIGN(sizeof(arrowMetadataState)));
+	shmem_request_next = shmem_request_hook;
+	shmem_request_hook = pgstrom_request_arrow_fdw;
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_arrow_fdw;
 

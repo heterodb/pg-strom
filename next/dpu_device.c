@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include <netdb.h>
 
 static char	   *pgstrom_dpu_endpoint_list;	/* GUC */
 static int		pgstrom_dpu_endpoint_default_port;	/* GUC */
@@ -43,6 +44,7 @@ struct dpu_tablespace_hash
 typedef struct dpu_tablespace_hash	dpu_tablespace_hash;
 
 static dpu_tablespace_info	   *dpu_tablespace_master = NULL;	/* shared memory */
+static shmem_request_hook_type	shmem_request_next = NULL;
 static shmem_startup_hook_type	shmem_startup_next = NULL;
 #define DPU_TABLESPACE_HASH_NSLOTS		640
 static dpu_tablespace_hash	   *dpu_tablespace_hash_slots[DPU_TABLESPACE_HASH_NSLOTS];
@@ -106,7 +108,7 @@ tablespace_optimal_dpu_htable_invalidate(Datum arg, int cacheid, uint32 hashvalu
 /*
  * parse_dpu_endpoint_list
  */
-static size_t
+static bool
 parse_dpu_endpoint_list(void)
 {
 	char	   *tok, *saveptr;
@@ -226,6 +228,17 @@ parse_dpu_endpoint_list(void)
 }
 
 /*
+ *
+ */
+static void
+pgstrom_request_dpu_device(void)
+{
+	if (shmem_request_next)
+		shmem_request_next();
+	RequestAddinShmemSpace(dpu_tablespace_master->extra_sz);
+}
+
+/*
  * pgstrom_startup_dpu_device
  */
 static void
@@ -236,6 +249,9 @@ pgstrom_startup_dpu_device(void)
 	char	   *extra;
 	uint32_t	i, nitems = dpu_tablespace_master->nitems;
 
+	if (shmem_startup_next)
+		shmem_startup_next();
+	
 	Assert(nitems > 0);
 	new_tablespace_master = ShmemInitStruct("DPU-Tablespace Info",
 											dpu_tablespace_master->extra_sz,
@@ -286,8 +302,6 @@ pgstrom_startup_dpu_device(void)
 bool
 pgstrom_init_dpu_device(void)
 {
-	size_t		extra_sz;
-
 	/*
 	 * format:
 	 * <tablespace-name>=<host/ipaddr>[;<port>][, ...]
@@ -316,10 +330,10 @@ pgstrom_init_dpu_device(void)
 													   ALLOCSET_DEFAULT_SIZES);
 	memset(dpu_tablespace_hash_slots, 0, sizeof(dpu_tablespace_hash_slots));
 
-	extra_sz = parse_dpu_endpoint_list();
-	if (extra_sz > 0)
+	if (parse_dpu_endpoint_list())
 	{
-		RequestAddinShmemSpace(extra_sz);
+		shmem_request_next = shmem_request_hook;
+		shmem_request_hook = pgstrom_request_dpu_device;
 		shmem_startup_next = shmem_startup_hook;
 		shmem_startup_hook = pgstrom_startup_dpu_device;
 

@@ -128,6 +128,7 @@ static GpuCacheSharedHead *gcache_shared_head = NULL;
 static HTAB		   *gcache_descriptors_htab = NULL;
 static HTAB		   *gcache_signatures_htab = NULL;
 static dlist_head	gcache_state_tracker_list;
+static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static object_access_hook_type object_access_next = NULL;
 static CUmodule		gcache_cuda_module = NULL;
@@ -4051,6 +4052,20 @@ gpuCacheBgWorkerEnd(int cuda_dindex)
 }
 
 /*
+ * pgstrom_request_gpu_cache
+ */
+static void
+pgstrom_request_gpu_cache(void)
+{
+	Size	sz;
+
+	if (shmem_request_next)
+		shmem_request_next();
+	sz = offsetof(GpuCacheSharedHead, bgworkers[numDevAttrs]);
+	RequestAddinShmemSpace(STROMALIGN(sz));
+}
+
+/*
  * pgstrom_startup_gpu_cache
  */
 static void
@@ -4155,8 +4170,8 @@ pgstrom_init_gpu_cache(void)
 	}
 
 	/* request for the static shared memory */
-	RequestAddinShmemSpace(STROMALIGN(offsetof(GpuCacheSharedHead,
-											   bgworkers[numDevAttrs])));
+	shmem_request_next = shmem_request_hook;
+	shmem_request_hook = pgstrom_request_gpu_cache;
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gpu_cache;
 
