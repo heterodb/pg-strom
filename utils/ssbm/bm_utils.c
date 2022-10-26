@@ -404,7 +404,7 @@ long      weight,
 FILE     *
 tbl_open(int tbl, char *mode)
 {
-    char      prompt[256];
+    char      prompt[300];
     char      fullpath[256];
     FILE     *f;
     struct stat fstats;

@@ -8325,7 +8325,7 @@ createGpuJoinSharedState(GpuJoinState *gjs,
 	EState	   *estate = gjs->gts.css.ss.ps.state;
 	GpuJoinSharedState *gj_sstate;
 	GpuJoinRuntimeStat *gj_rtstat;
-	cl_uint		shmem_handle;
+	cl_uint		shmem_handle = UINT_MAX;
 	int			fdesc = -1;
 	char		name[200];
 	size_t		ss_length;
