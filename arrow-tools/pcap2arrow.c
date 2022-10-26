@@ -2818,7 +2818,7 @@ usage(int status)
 		  "       specifies a network device to capture packet.\n"
 		  "     --num-queues=N_QUEUE : num of PF-RING queues.\n"
 		  "  -o|--output=<output file; with format>\n"
-		  "       filename format can contains:"
+		  "       filename format can contains:\n"
 		  "         %i : interface name\n"
 		  "         %Y : year in 4-digits\n"
 		  "         %y : year in 2-digits\n"
