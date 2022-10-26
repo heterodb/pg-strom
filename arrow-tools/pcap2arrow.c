@@ -66,6 +66,8 @@ static bool				enable_direct_io = false;
 static bool				no_payload = false;
 static bool				composite_options = false;
 static int				print_stat_interval = -1;
+static bool				enable_interface_id = false;	/* for PCAP-NG */
+static __thread uint32_t *current_interface_id = NULL;	/* for PCAP-NG */
 
 /*
  * definition of output Arrow files
@@ -301,7 +303,6 @@ put_uint16_value_bswap(SQLfield *column, const char *addr, int sz)
 	return __buffer_usage_inline_type(column);
 }
 
-#if 0
 static size_t
 put_uint32_value(SQLfield *column, const char *addr, int sz)
 {
@@ -317,7 +318,6 @@ put_uint32_value(SQLfield *column, const char *addr, int sz)
 	}
 	return __buffer_usage_inline_type(column);
 }
-#endif
 
 static size_t
 put_uint32_value_bswap(SQLfield *column, const char *addr, int sz)
@@ -561,7 +561,6 @@ arrowFieldInitAsUint16Bswap(SQLtable *table, int cindex, const char *field_name)
 	table->numBuffers += 2;
 }
 
-#if 0
 static void
 arrowFieldInitAsUint32(SQLtable *table, int cindex, const char *field_name)
 {
@@ -577,7 +576,6 @@ arrowFieldInitAsUint32(SQLtable *table, int cindex, const char *field_name)
 	table->numFieldNodes++;
 	table->numBuffers += 2;
 }
-#endif
 
 static void
 arrowFieldInitAsUint32Bswap(SQLtable *table, int cindex, const char *field_name)
@@ -719,6 +717,8 @@ static int arrow_cindex__timestamp			= -1;
 static int arrow_cindex__dst_mac			= -1;
 static int arrow_cindex__src_mac			= -1;
 static int arrow_cindex__ether_type			= -1;
+/* --interface-id (for PCAP-NG) */
+static int arrow_cindex__interface_id		= -1;
 /* IPv4 headers */
 static int arrow_cindex__tos				= -1;
 static int arrow_cindex__ip_length			= -1;
@@ -778,6 +778,12 @@ arrowPcapSchemaInit(SQLtable *table)
     __ARROW_FIELD_INIT(src_mac,		MacAddr);
     __ARROW_FIELD_INIT(ether_type,	Uint16);	/* byte swap by caller */
 
+	/* --interface-id */
+	if (enable_interface_id)
+	{
+		__ARROW_FIELD_INIT(interface_id, Uint32);
+	}
+	
 	/* IPv4 */
 	if ((protocol_mask & __PCAP_PROTO__IPv4) != 0)
 	{
@@ -881,6 +887,10 @@ handlePacketRawEthernet(SQLtable *chunk,
 	}		   *raw_ether = (struct __raw_ether *)buf;
 
 	__FIELD_PUT_VALUE(timestamp, &hdr->ts, sizeof(hdr->ts));
+	if (enable_interface_id)
+	{
+		__FIELD_PUT_VALUE(interface_id, current_interface_id, sizeof(uint32_t));
+	}
 	if (hdr->caplen < sizeof(struct __raw_ether))
 	{
 		__FIELD_PUT_VALUE(dst_mac, NULL, 0);
@@ -2176,11 +2186,7 @@ typedef struct
 
 typedef struct
 {
-	uint8_t		maddr[6];
-} pcapngMACaddr;
-
-typedef struct
-{
+	uint32_t	interface_id;
 	uint16_t	link_type;
 	uint32_t	snaplen;
 	char	   *comment;
@@ -2193,8 +2199,8 @@ typedef struct
 	int			_num_if_ipv4addr;
 	pcapngIPv6addr *if_ipv6addr;
 	int			_num_if_ipv6addr;
-	pcapngMACaddr  *if_macaddr;
-	uint64_t	if_euiaddr;
+	uint8_t		if_macaddr[6];
+	uint8_t		if_euiaddr[8];
 	uint64_t	if_speed;
 	uint8_t		if_tsresol;
 	uint32_t	if_tzone;
@@ -2285,14 +2291,17 @@ __process_pcapng_interface_description(SQLtable *chunk, pcapngSectionState *sect
 									   pcapngInterfaceDescriptionBlock *idb)
 {
 	pcapngInterfaceState *i_state;
+	uint32_t		interface_id;
 	uint32_t		block_sz;
 	unsigned char  *pos, *end;
 	size_t			sz;
 
-	sz = sizeof(pcapngInterfaceState) * (section->_num_if_states + 1);
+	interface_id = section->_num_if_states++;
+	sz = sizeof(pcapngInterfaceState) * section->_num_if_states;
 	section->if_states = repalloc(section->if_states, sz);
-	i_state = &section->if_states[section->_num_if_states++];
+	i_state = &section->if_states[interface_id];
 	memset(i_state, 0, sizeof(pcapngInterfaceState));
+	i_state->interface_id = interface_id;
 	i_state->if_tsresol = 6;	/* default setting; right? */
 
 	block_sz = __to_host32(idb->c.block_length);
@@ -2337,11 +2346,10 @@ __process_pcapng_interface_description(SQLtable *chunk, pcapngSectionState *sect
 				memcpy(ipv6, pos, 17);
 				break;
 			case 6:		/* if_MACaddr */
-				i_state->if_macaddr = palloc(sizeof(pcapngMACaddr));
 				memcpy(i_state->if_macaddr, pos, 6);
 				break;
 			case 7:		/* if_EUIaddr */
-				i_state->if_euiaddr = __to_host64(*((uint64_t *)pos));
+				memcpy(i_state->if_euiaddr, pos, 8);
 				break;
 			case 8:		/* if_speed */
 				i_state->if_speed = __to_host64(*((uint64_t *)pos));
@@ -2428,6 +2436,8 @@ __process_pcapng_enhanced_packet(SQLtable *chunk, pcapngSectionState *section,
 	if (interface_id >= section->_num_if_states)
 		Elog("pcapng file '%s' looks corrupted", section->filename);
 	i_state = &section->if_states[interface_id];
+	Assert(i_state->interface_id == interface_id);
+	current_interface_id = &i_state->interface_id;
 
 	/* timestamp */
 	ts_raw = ((uint64_t)__to_host32(epb->timestamp_hi) << 32 |
@@ -2589,6 +2599,7 @@ process_one_pcapng_section(SQLtable *chunk, pcapngSectionState *section)
 	uint32_t	block_sz;
 	uint32_t	options_sz;
 	unsigned char *pos, *end;
+	uint32_t   *saved_interface_id;
 
 	if (fread(&hdr, offsetof(pcapngSectionHeaderBlock,
 							 options), 1, section->filp) != 1)
@@ -2677,6 +2688,7 @@ process_one_pcapng_section(SQLtable *chunk, pcapngSectionState *section)
 	}
 
 	/* walk on the following blocks */
+	saved_interface_id = current_interface_id;
 	while (!feof(section->filp))
 	{
 		if (section->section_sz != ~0UL)
@@ -2691,6 +2703,8 @@ process_one_pcapng_section(SQLtable *chunk, pcapngSectionState *section)
 		if (!process_one_pcapng_block(chunk, section))
 			break;
 	}
+	current_interface_id = saved_interface_id;
+	
 	/* move to the next section head, if any */
 	if (section->section_sz != ~0UL)
 	{
@@ -2742,8 +2756,6 @@ process_one_pcapng_file(SQLtable *chunk, pcapFileDesc *pfdesc)
 				pfree(if_state->if_ipv4addr);
 			if (if_state->if_ipv6addr)
 				pfree(if_state->if_ipv6addr);
-			if (if_state->if_macaddr)
-				pfree(if_state->if_macaddr);
 			if (if_state->if_os)
 				pfree(if_state->if_os);
 			if (if_state->if_hardware)
@@ -2831,6 +2843,9 @@ usage(int status)
 		  "       (default: 'tcp4,udp4,icmp4')\n"
 		  "     --composite-options:\n"
 		  "        write out IPv4,IPv6 and TCP options as an array of composite values\n"
+		  "     --interface-id\n"
+		  "        enables the field to embed interface-id attribute, if source is\n"
+		  "        PCAP-NG files. Elsewhere, NULL shall be assigned here.\n"
 		  "  -r|--rule=RULE : packet filtering rules\n"
 		  "       (default: none; valid only capturing mode)\n"
 		  "  -s|--stat=INTERVAL\n"
@@ -2864,6 +2879,7 @@ parse_options(int argc, char *argv[])
 		{"num-queues",     required_argument, NULL, 1004},
 		{"parallel-write", required_argument, NULL, 1005},
 		{"composite-options", no_argument,    NULL, 1006},
+		{"interface-id",   no_argument,       NULL, 1007},
 		{"help",           no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0}
 	};
@@ -2998,6 +3014,10 @@ parse_options(int argc, char *argv[])
 
 			case 1006:	/* --composite-options */
 				composite_options = true;
+				break;
+
+			case 1007:
+				enable_interface_id = true;
 				break;
 
 			default:
