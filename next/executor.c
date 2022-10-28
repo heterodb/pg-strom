@@ -424,21 +424,17 @@ xpuclientCleanupConnections(ResourceReleasePhase phase,
  * ----------------------------------------------------------------
  */
 static uint32_t
-__build_session_xact_id_vector(StringInfo buf)
+__build_session_xact_state(StringInfo buf)
 {
-	uint32_t	offset = 0;
+	Size		bufsz;
+	char	   *buffer;
+	uint32_t	offset;
 
-	if (nParallelCurrentXids > 0)
-	{
-		uint32_t	sz = VARHDRSZ + sizeof(TransactionId) * nParallelCurrentXids;
-		uint32_t	temp;
+	bufsz = EstimateTransactionStateSpace();
+	buffer = alloca(bufsz);
+	SerializeTransactionState(bufsz, buffer);
 
-		SET_VARSIZE(&temp, sz);
-		offset = __appendBinaryStringInfo(buf, &temp, sizeof(uint32_t));
-		appendBinaryStringInfo(buf, (char *)ParallelCurrentXids,
-							   sizeof(TransactionId) * nParallelCurrentXids);
-	}
-	return offset;
+	return __appendBinaryStringInfo(buf, buffer, bufsz);
 }
 
 static uint32_t
@@ -606,7 +602,7 @@ pgstromBuildSessionInfo(PlanState *ps,
 	session->kcxt_kvars_nslots = kcxt_kvars_nslots;
 	session->xpucode_use_debug_code = pgstrom_use_debug_code;
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
-	session->xact_id_array = __build_session_xact_id_vector(&buf);
+	session->session_xact_state = __build_session_xact_state(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
 	memcpy(buf.data, session, session_sz);

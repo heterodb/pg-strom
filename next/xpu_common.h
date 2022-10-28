@@ -631,6 +631,15 @@ typedef uint32_t		TransactionId;
 #define FirstNormalTransactionId	((TransactionId) 3)
 #define MaxTransactionId			((TransactionId) 0xffffffff)
 
+typedef struct
+{
+	uint64_t			value;
+} FullTransactionId;
+
+typedef uint32_t		CommandId;
+#define FirstCommandId				((CommandId) 0)
+#define InvalidCommandId			(~(CommandId)0)
+
 /* definitions in storage/block.h */
 typedef uint32_t		BlockNumber;
 
@@ -1462,7 +1471,7 @@ typedef struct kern_session_info
 
 	/* database session info */
 	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
-	uint32_t	xact_id_array;		/* offset to array of xid */
+	uint32_t	session_xact_state;	/* offset to SerializedTransactionState */
 	uint32_t	session_timezone;	/* offset to pg_tz */
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
@@ -1534,12 +1543,24 @@ SESSION_KEXP_SCAN_PROJS(kern_session_info *session)
 	return (kern_expression *)((char *)session + session->xpucode_scan_projs);
 }
 
-INLINE_FUNCTION(struct varlena *)
-SESSION_XACT_ID_ARRAY(kern_session_info *session)
+/* see access/transam/xact.c */
+typedef struct
 {
-	if (session->xact_id_array == 0)
+	int			xactIsoLevel;
+	bool		xactDeferrable;
+	FullTransactionId topFullTransactionId;
+	FullTransactionId currentFullTransactionId;
+	CommandId	currentCommandId;
+	int			nParallelCurrentXids;
+	TransactionId parallelCurrentXids[1];	/* variable */
+} SerializedTransactionState;
+
+INLINE_FUNCTION(SerializedTransactionState *)
+SESSION_XACT_STATE(kern_session_info *session)
+{
+	if (session->session_xact_state == 0)
 		return NULL;
-	return (struct varlena *)((char *)session + session->xact_id_array);
+	return (SerializedTransactionState *)((char *)session + session->session_xact_state);
 }
 
 INLINE_FUNCTION(struct pg_tz *)

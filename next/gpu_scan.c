@@ -551,21 +551,12 @@ PlanGpuScanPath(PlannerInfo *root,
 	uint32_t		proj_extra_bufsz = 0;
 	uint32_t		qual_kvars_nslots = 0;
 	uint32_t		proj_kvars_nslots = 0;
-	int				j, k;
 	ListCell	   *cell;
 
 	/* sanity checks */
 	Assert(baserel->relid > 0 &&
 		   baserel->rtekind == RTE_RELATION &&
 		   custom_children == NIL);
-	/* check referenced columns */
-	for (j=baserel->min_attr; j <= baserel->max_attr; j++)
-	{
-		if (!baserel->attr_needed[j - baserel->min_attr])
-			continue;
-		k = j - FirstLowInvalidHeapAttributeNumber;
-		outer_refs = bms_add_member(outer_refs, k);
-	}
 
 	/*
 	 * Distribution of clauses into device executable and others.
@@ -608,6 +599,8 @@ PlanGpuScanPath(PlannerInfo *root,
 		elog(ERROR, "GpuScan: Bug? no device executable qualifiers are given");
 	dev_quals = extract_actual_clauses(dev_quals, false);
 	host_quals = extract_actual_clauses(host_quals, false);
+	/* pickup referenced attributes */
+	outer_refs = pickup_outer_referenced(root, baserel, outer_refs);
 
 	/* code generation for WHERE-clause */
 	pgstrom_build_xpucode(&gs_info->kern_quals,
@@ -636,7 +629,7 @@ PlanGpuScanPath(PlannerInfo *root,
 								proj_kvars_nslots);
 	gs_info->dev_quals = dev_quals;
 	gs_info->outer_refs = outer_refs;
-	
+
 	/*
 	 * Build CustomScan(GpuScan) node
 	 */

@@ -13,6 +13,75 @@
 
 /* ----------------------------------------------------------------
  *
+ * Routines to support optimization / path or plan construction
+ *
+ * ----------------------------------------------------------------
+ */
+Bitmapset *
+pickup_outer_referenced(PlannerInfo *root,
+						RelOptInfo *base_rel,
+						Bitmapset *referenced)
+{
+	ListCell   *lc;
+	int			j, k;
+
+	if (base_rel->reloptkind == RELOPT_BASEREL)
+	{
+		for (j=base_rel->min_attr; j <= base_rel->max_attr; j++)
+		{
+			if (j <= 0 || !base_rel->attr_needed[j - base_rel->min_attr])
+				continue;
+			k = j - FirstLowInvalidHeapAttributeNumber;
+			referenced = bms_add_member(referenced, k);
+		}
+	}
+	else if (base_rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
+	{
+		foreach (lc, root->append_rel_list)
+		{
+			AppendRelInfo  *apinfo = lfirst(lc);
+			RelOptInfo	   *parent_rel;
+			Bitmapset	   *parent_refs;
+			Var			   *var;
+
+			if (apinfo->child_relid != base_rel->relid)
+				continue;
+			Assert(apinfo->parent_relid < root->simple_rel_array_size);
+			parent_rel = root->simple_rel_array[apinfo->parent_relid];
+			parent_refs = pickup_outer_referenced(root, parent_rel, NULL);
+
+			for (k = bms_next_member(parent_refs, -1);
+				 k >= 0;
+				 k = bms_next_member(parent_refs, k))
+			{
+				j = k + FirstLowInvalidHeapAttributeNumber;
+				if (j <= 0)
+					bms_add_member(referenced, k);
+				else if (j > list_length(apinfo->translated_vars))
+					elog(ERROR, "Bug? column reference out of range");
+				else
+				{
+					var = list_nth(apinfo->translated_vars, j-1);
+					Assert(IsA(var, Var));
+					j = var->varattno - FirstLowInvalidHeapAttributeNumber;
+					referenced = bms_add_member(referenced, j);
+				}
+			}
+			break;
+		}
+		if (!lc)
+			elog(ERROR, "Bug? AppendRelInfo not found (relid=%u)",
+				 base_rel->relid);
+	}
+	else
+	{
+		elog(ERROR, "Bug? outer relation is not a simple relation");
+	}
+	return referenced;
+}
+
+/* ----------------------------------------------------------------
+ *
  * Routines to setup kern_data_store
  *
  * ----------------------------------------------------------------
@@ -300,7 +369,6 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	Assert(pts->xcmd_buf.len == MAXALIGN(pts->xcmd_buf.len));
 	enlargeStringInfo(&pts->xcmd_buf, 0);
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
-	elog(INFO, "Buf.len = %d", pts->xcmd_buf.len);
 
 	strom_iovec = alloca(offsetof(strom_io_vector, ioc[kds_nrooms]));
 	strom_iovec->nr_chunks = 0;

@@ -346,11 +346,9 @@ extern void		pgstrom_init_brin(void);
 /*
  * relscan.c
  */
-extern const Bitmapset *GetOptimalGpusForRelation(PlannerInfo *root,
-												  RelOptInfo *rel);
-extern const Bitmapset *baseRelCanUseGpuDirect(PlannerInfo *root,
-											   RelOptInfo *baserel);
-
+extern Bitmapset *pickup_outer_referenced(PlannerInfo *root,
+										  RelOptInfo *base_rel,
+										  Bitmapset *referenced);
 extern size_t	estimate_kern_data_store(TupleDesc tupdesc);
 extern size_t	setup_kern_data_store(kern_data_store *kds,
 									  TupleDesc tupdesc,
@@ -477,6 +475,8 @@ extern void		pgstrom_init_gpu_service(void);
 /*
  * gpu_direct.c
  */
+extern const Bitmapset *baseRelCanUseGpuDirect(PlannerInfo *root,
+											   RelOptInfo *baserel);
 extern void		pgstromGpuDirectExecBegin(pgstromTaskState *pts,
 										  const Bitmapset *gpuset);
 extern const Bitmapset *pgstromGpuDirectDevices(pgstromTaskState *pts);
