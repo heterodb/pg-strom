@@ -44,9 +44,6 @@ RUN dnf install -y cuda-nvrtc-$CUDA_VERSION
 RUN dnf install -y https://heterodb.github.io/swdc/yum/rhel8-noarch/heterodb-swdc-$HETERODB_SWDC_VERSION.el8.noarch.rpm
 RUN dnf install -y pg_strom-PG$PG_MAJOR_VERSION
 
-# Workaround/hack for library not found with the error of "failed on open 'libnvrtc.so'". More research is needed on the reason why this error happens.
-RUN ln -s /usr/local/cuda/lib64/libnvrtc.so.$LIBNVRTC_VERSION /usr/pgsql-$PG_MAJOR_VERSION/lib/libnvrtc.so
-
 # Workaround/hack for https://github.com/heterodb/pg-strom/issues/552#issuecomment-1288449738
 # When running in a VM or container, the NVIDIA driver will not be available under '/sys/module/nvidia/version'
 # Move the original 'gpuinfo' executable
@@ -69,6 +66,10 @@ RUN rm /usr/local/bin/gosu.asc \
     && rm -r /root/.gnupg/ \
     && chmod +x /usr/local/bin/gosu
 
+# Workaround/hack for library not found with the error of " failed on open 'libnvrtc.so.11.7' and 'libnvrtc.so': No such file or directory". More research is needed on the reason why this error happens.
+RUN ln -s /usr/local/cuda/lib64/libnvrtc.so.$LIBNVRTC_VERSION /usr/local/cuda/lib64/libnvrtc.so
+
+ENV LD_LIBRARY_PATH ${LD_LIBRARY_PATH}:/usr/local/cuda/lib64
 ENV PATH $PATH:/usr/pgsql-$PG_MAJOR_VERSION/bin
 ENV PGDATA /var/lib/postgresql/data
 # This 777 will be replaced by 700 at runtime (allows semi-arbitrary "--user" values)
