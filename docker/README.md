@@ -38,17 +38,17 @@ pgstrom-postgis33-pg13-cuda11.7.0-rockylinux8   latest    c7f30399ebe4   25 minu
 
 ## Run the PostGIS + PG-Strom Docker Container
 
-This command will run the PostGIS + PG-Strom Docker Image with a volume and as detached.
+This command will run the PostGIS + PG-Strom Docker Image with a volume and as detached. `--gpus=all` enables all virtualized GPUs for the container. `--shm-size` sets the System V shared memory size for the container, which is needs to be larger than default to accomodate PG-Strom. `--shm-size` is not the same as `shared_buffers` in `postgresql.conf` which is POSIX shared memory.
 
 ```
 docker run --name postgis-db \
 -d \
 --gpus=all \
+--shm-size=512MB \
 -e POSTGRES_USER=postgis \
 -e POSTGRES_PASSWORD=password \
 -e POSTGRES_DB=postgis \
 -p 5432:5432 \
---shm-size=2gb \
 -v ${PWD}/postgis-data:/var/lib/postgresql/data \
 -d pgstrom-postgis33-pg13-cuda11.7.0-rockylinux8
 ```
