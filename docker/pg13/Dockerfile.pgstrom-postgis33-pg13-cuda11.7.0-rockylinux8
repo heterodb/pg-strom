@@ -1,0 +1,89 @@
+FROM nvidia/cuda:11.7.0-base-rockylinux8
+
+ENV SUMMARY="This PostGIS Dockerfile uses PG-Strom which is an extension module of PostgreSQL that enables the GPU acceleration of SQL workloads for data analytics or batch processing." \
+    DESCRIPTION="PG-Strom features a GPU code generator that automatically generates GPU program according to the SQL commands and asynchronous \
+	parallel execution engine to run SQL workloads on a GPU device. The latest version supports SCAN (evaluation of WHERE-clause), JOIN and GROUP BY workloads. \
+	In the case when GPU-processing has advantage, PG-Strom replaces the vanilla implementation of PostgreSQL and transparentlly works from users and applications. \
+	PG-Strom supports the execution of some PostGIS functions and GiST index search on the GPU side. Along with the GPU cache, it enables search / analysis processing \
+	based on real-time geo-location information. This Dockerfile is partly based on the official PostGIS Dockerfile https://github.com/postgis/docker-postgis which is based \
+	on https://github.com/docker-library/postgres, but a major difference is that this image is based on Rocky Linux to support PG-Strom."
+
+ENV PG_MAJOR_VERSION 13
+ENV POSTGIS_VERSION 33_$PG_MAJOR_VERSION
+ENV GOSU_VERSION 1.14
+ENV CUDA_VERSION 11-7
+ENV LIBNVRTC_VERSION 11.2
+ENV HETERODB_SWDC_VERSION 1.2-1
+
+# Explicitly set the user/group IDs
+RUN set -eux; \
+	groupadd -r postgres --gid=5432; \
+	useradd -r -g postgres --uid=5432 --home-dir=/var/lib/postgresql --shell=/bin/bash postgres; \
+	mkdir -p /var/lib/postgresql; \
+	chown -R postgres:postgres /var/lib/postgresql
+
+RUN mkdir /docker-entrypoint-initdb.d
+
+RUN dnf update -y
+RUN dnf module list postgresql
+RUN dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+RUN dnf -qy module disable postgresql
+
+RUN dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+RUN dnf install -y dnf-plugins-core
+RUN dnf config-manager --set-enabled powertools
+
+# Install PostGIS and additional packages that may be needed
+RUN dnf install -y postgis$POSTGIS_VERSION ca-certificates findutils
+# Install some utilities for convenience for things like loading that TIGER dataset
+RUN dnf install -y wget curl unzip nano
+
+# Install 'cuda-nvrtc' which is needed by PG-Strom
+RUN dnf install -y cuda-nvrtc-$CUDA_VERSION
+# Install PG-Strom
+RUN dnf install -y https://heterodb.github.io/swdc/yum/rhel8-noarch/heterodb-swdc-$HETERODB_SWDC_VERSION.el8.noarch.rpm
+RUN dnf install -y pg_strom-PG$PG_MAJOR_VERSION
+
+# Workaround/hack for library not found with the error of "failed on open 'libnvrtc.so'". More research is needed on the reason why this error happens.
+RUN ln -s /usr/local/cuda/lib64/libnvrtc.so.$LIBNVRTC_VERSION /usr/pgsql-$PG_MAJOR_VERSION/lib/libnvrtc.so
+
+# Workaround/hack for https://github.com/heterodb/pg-strom/issues/552#issuecomment-1288449738
+# When running in a VM or container, the NVIDIA driver will not be available under '/sys/module/nvidia/version'
+# Move the original 'gpuinfo' executable
+RUN mv /usr/pgsql-$PG_MAJOR_VERSION/bin/gpuinfo /usr/pgsql-$PG_MAJOR_VERSION/bin/gpuinfo.orig
+# Add the 'gpuinfo.sh' workaround script as a substitute 'gpuinfo'
+COPY gpuinfo.sh /usr/pgsql-$PG_MAJOR_VERSION/bin/gpuinfo
+RUN chmod +x /usr/pgsql-$PG_MAJOR_VERSION/bin/gpuinfo
+
+# OPTIONAL and untested!: heterodb-extra requires a license file in /etc/heterodb.license
+# Modify this Dockerfile if you wish to use 'heterodb-extra'
+# COPY heterodb.license /etc/heterodb.license
+# RUN dnf install heterodb-extra
+
+# Setup gosu for docker-entrypoint.sh
+RUN gpg --keyserver hkps://keys.openpgp.org --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4
+RUN curl -o /usr/local/bin/gosu -SL "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-amd64" \
+    && curl -o /usr/local/bin/gosu.asc -SL "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-amd64.asc"
+RUN gpg --verify /usr/local/bin/gosu.asc
+RUN rm /usr/local/bin/gosu.asc \
+    && rm -r /root/.gnupg/ \
+    && chmod +x /usr/local/bin/gosu
+
+ENV PATH $PATH:/usr/pgsql-$PG_MAJOR_VERSION/bin
+ENV PGDATA /var/lib/postgresql/data
+# This 777 will be replaced by 700 at runtime (allows semi-arbitrary "--user" values)
+RUN mkdir -p "$PGDATA" && chown -R postgres:postgres "$PGDATA" && chmod 777 "$PGDATA"
+VOLUME ["/var/lib/postgresql/data"]
+
+COPY docker-entrypoint.sh /usr/local/bin/
+COPY initdb-postgis.sh /docker-entrypoint-initdb.d/10_postgis.sh
+COPY update-postgis.sh /usr/local/bin
+
+# Copy the PG-Strom customized 'postgresql.conf' to a custom location
+COPY postgresql.conf /etc/postgresql/postgresql.conf 
+
+RUN ["chmod", "+x", "/usr/local/bin/docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+STOPSIGNAL SIGINT
+EXPOSE 5432
+CMD ["postgres","-c","config_file=/etc/postgresql/postgresql.conf"]
