@@ -327,16 +327,7 @@ kern_gpuscan_main_block(kern_session_info *session,
 				write_pos += __popc(mask);
 				if (htup != NULL)
 				{
-					if (((uintptr_t)htup - (uintptr_t)kds_src) & 7UL != 0)
-					{
-						printf("gid=%u htup=%p page=%p index=%u lp_count=%u of %u kds=%p diff=%lu\n",
-							   get_global_id(), htup, curr_page, __last_index__, lp_count, (int)PageGetMaxOffsetNumber(curr_page), kds_src, (uintptr_t)htup - (uintptr_t)kds_src);
-						htup = NULL;
-					}
-					else
-					{
 					__WARP_SET_LPITEM(write_pos, htup);
-					}
 				}
 				if (LaneId() == 0)
 					warp->lp_count += warpSize;
@@ -416,7 +407,6 @@ kern_gpuscan_main_block(kern_session_info *session,
 										warp->write_lp_pos);
 		}
 	}
-bailout:
 	__syncthreads();
 
 	return;

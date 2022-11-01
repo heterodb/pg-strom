@@ -18,11 +18,6 @@ bool		pgstrom_enabled;				/* GUC */
 bool		pgstrom_cpu_fallback_enabled;	/* GUC */
 bool		pgstrom_regression_test_mode;	/* GUC */
 int			pgstrom_max_async_tasks;		/* GUC */
-double		pgstrom_gpu_setup_cost;			/* GUC */
-double		pgstrom_gpu_dma_cost;			/* GUC */
-double		pgstrom_gpu_operator_cost;		/* GUC */
-double		pgstrom_dpu_setup_cost;			/* GUC */
-double		pgstrom_dpu_operator_cost;		/* GUC */
 long		PAGE_SIZE;
 long		PAGE_MASK;
 int			PAGE_SHIFT;
@@ -108,77 +103,6 @@ pgstrom_init_gucs(void)
 							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
-}
-
-/*
- * pgstrom_init_gpu_options - init GUC params related to GPUs
- */
-static void
-pgstrom_init_gpu_options(void)
-{
-	/* cost factor for GPU setup */
-	DefineCustomRealVariable("pg_strom.gpu_setup_cost",
-							 "Cost to setup GPU device to run",
-							 NULL,
-							 &pgstrom_gpu_setup_cost,
-							 100 * DEFAULT_SEQ_PAGE_COST,
-							 0,
-							 DBL_MAX,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* cost factor for each Gpu task */
-	DefineCustomRealVariable("pg_strom.gpu_dma_cost",
-							 "Cost to send/recv tuple via DMA",
-							 NULL,
-							 &pgstrom_gpu_dma_cost,
-							 DEFAULT_CPU_TUPLE_COST,
-							 0,
-							 DBL_MAX,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* cost factor for GPU operator */
-	DefineCustomRealVariable("pg_strom.gpu_operator_cost",
-							 "Cost of processing each operators by GPU",
-							 NULL,
-							 &pgstrom_gpu_operator_cost,
-							 DEFAULT_CPU_OPERATOR_COST / 16.0,
-							 0,
-							 DBL_MAX,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-}
-
-/*
- * pgstrom_init_dpu_options
- */
-static void
-pgstrom_init_dpu_options(void)
-{
-	/* cost factor for DPU setup */
-	DefineCustomRealVariable("pg_strom.dpu_setup_cost",
-							 "Cost to setup DPU device to run",
-							 NULL,
-							 &pgstrom_dpu_setup_cost,
-							 100 * DEFAULT_SEQ_PAGE_COST,
-							 0,
-							 DBL_MAX,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* cost factor for DPU operator */
-	DefineCustomRealVariable("pg_strom.dpu_operator_cost",
-							 "Cost of processing each operators by DPU",
-							 NULL,
-							 &pgstrom_dpu_operator_cost,
-							 DEFAULT_CPU_OPERATOR_COST * 2.0,
-							 0,
-							 DBL_MAX,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
 }
 
 /*
@@ -411,7 +335,6 @@ _PG_init(void)
 	/* init GPU related stuff */
 	if (pgstrom_init_gpu_device())
 	{
-		pgstrom_init_gpu_options();
 		pgstrom_init_gpu_service();
 		pgstrom_init_gpu_direct();
 		pgstrom_init_gpu_scan();
@@ -421,9 +344,9 @@ _PG_init(void)
 	/* init DPU related stuff */
 	if (pgstrom_init_dpu_device())
 	{
-		pgstrom_init_dpu_options();
-		pgstrom_init_gpu_scan();
-
+		pgstrom_init_dpu_scan();
+		//pgstrom_init_dpu_join();
+		//pgstrom_init_dpu_preagg();
 	}
 	/* post planner hook */
 	planner_hook_next = (planner_hook ? planner_hook : standard_planner);

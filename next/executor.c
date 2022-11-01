@@ -428,7 +428,6 @@ __build_session_xact_state(StringInfo buf)
 {
 	Size		bufsz;
 	char	   *buffer;
-	uint32_t	offset;
 
 	bufsz = EstimateTransactionStateSpace();
 	buffer = alloca(bufsz);
@@ -819,6 +818,20 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 static TupleTableSlot *
 pgstromScanNextTuple(pgstromTaskState *pts)
 {
+	TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
+
+	if (pts->fallback_store)
+	{
+		if (tuplestore_gettupleslot(pts->fallback_store,
+									true,	/* forward scan */
+									false,	/* no copy */
+									slot))
+			return slot;
+		/* no more fallback tuples */
+		tuplestore_end(pts->fallback_store);
+		pts->fallback_store = NULL;
+	}
+
 	for (;;)
 	{
 		kern_data_store *kds = pts->curr_kds;
@@ -826,7 +839,6 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 
 		if (index < kds->nitems)
 		{
-			TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
 			kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds, index);
 
 			pts->curr_htup.t_len = tupitem->t_len;
@@ -902,7 +914,6 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	List		   *tlist_dev = NIL;
 	ListCell	   *lc;
 //	ArrowFdwState  *af_state = NULL;
-	char			format;
 
 	/*
 	 * PG-Strom supports:
@@ -968,29 +979,51 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	/*
 	 * Setup request buffer
 	 */
-	if (pts->af_state)
+	if (pts->af_state)			/* Apache Arrow */
 	{
 		pts->cb_next_chunk = pgstromScanChunkArrowFdw;
-		format = KDS_FORMAT_ARROW;
+		pts->cb_next_tuple = pgstromScanNextTuple;
+		 __setupTaskStateRequestBuffer(pts,
+									   tupdesc_src,
+									   tupdesc_dst,
+									   KDS_FORMAT_ARROW);
 	}
-	else if (pts->gc_state)
+	else if (pts->gc_state)		/* GPU-Cache */
 	{
 		pts->cb_next_chunk = pgstromScanChunkGpuCache;
-		tupdesc_src = NULL;			/* no kds_src with GpuCache */
+		pts->cb_next_tuple = pgstromScanNextTuple;
+		__setupTaskStateRequestBuffer(pts,
+									  NULL,
+									  tupdesc_dst,
+									  KDS_FORMAT_COLUMN);
 	}
-	else if (pts->gd_state)
+	else if (pts->gd_state)		/* GPU-Direct SQL */
 	{
 		pts->cb_next_chunk = pgstromRelScanChunkDirect;
-		format = KDS_FORMAT_BLOCK;
+		pts->cb_next_tuple = pgstromScanNextTuple;
+		__setupTaskStateRequestBuffer(pts,
+									  tupdesc_src,
+									  tupdesc_dst,
+									  KDS_FORMAT_BLOCK);
+	}
+	else if (pts->ds_entry)		/* DPU Storage */
+	{
+		pts->cb_next_chunk = pgstromRelScanChunkDirect;
+		pts->cb_next_tuple = pgstromScanNextTuple;
+		__setupTaskStateRequestBuffer(pts,
+									  tupdesc_src,
+									  tupdesc_dst,
+									  KDS_FORMAT_BLOCK);
 	}
 	else
 	{
 		pts->cb_next_chunk = pgstromRelScanChunkNormal;
-		format = KDS_FORMAT_ROW;
+		pts->cb_next_tuple = pgstromScanNextTuple;
+		__setupTaskStateRequestBuffer(pts,
+									  tupdesc_src,
+									  tupdesc_dst,
+									  KDS_FORMAT_ROW);
 	}
-	__setupTaskStateRequestBuffer(pts, tupdesc_src, tupdesc_dst, format);
-	pts->cb_next_tuple = pgstromScanNextTuple;
-
 	/* other fields init */
 	pts->curr_vm_buffer = InvalidBuffer;
 }
@@ -1069,7 +1102,7 @@ pgstromExecResetTaskState(pgstromTaskState *pts)
 /*
  * __xpuClientOpenSession
  */
-static void
+void
 __xpuClientOpenSession(pgstromTaskState *pts,
 					   const XpuCommand *session,
 					   pgsocket sockfd,
@@ -1122,69 +1155,6 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 			 resp->u.error.lineno,
 			 resp->u.error.funcname);
 	xpuClientPutResponse(resp);
-}
-
-/*
- * gpuClientOpenSession
- */
-static int
-__gpuClientChooseDevice(const Bitmapset *gpuset)
-{
-	static bool		rr_initialized = false;
-	static uint32	rr_counter = 0;
-
-	if (!rr_initialized)
-	{
-		rr_counter = (uint32)getpid();
-		rr_initialized = true;
-	}
-
-	if (!bms_is_empty(gpuset))
-	{
-		int		num = bms_num_members(gpuset);
-		int	   *dindex = alloca(sizeof(int) * num);
-		int		i, k;
-
-		for (i=0, k=bms_next_member(gpuset, -1);
-			 k >= 0;
-			 i++, k=bms_next_member(gpuset, k))
-		{
-			dindex[i] = k;
-		}
-		Assert(i == num);
-		return dindex[rr_counter++ % num];
-	}
-	/* a simple round-robin if no GPUs preference */
-	return (rr_counter++ % numGpuDevAttrs);
-}
-
-void
-gpuClientOpenSession(pgstromTaskState *pts,
-					 const Bitmapset *gpuset,
-					 const XpuCommand *session)
-{
-	struct sockaddr_un addr;
-	pgsocket	sockfd;
-	int			cuda_dindex = __gpuClientChooseDevice(gpuset);
-	char		namebuf[32];
-
-	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (sockfd < 0)
-		elog(ERROR, "failed on socket(2): %m");
-
-	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
-	snprintf(addr.sun_path, sizeof(addr.sun_path),
-			 ".pg_strom.%u.gpu%u.sock",
-			 PostmasterPid, cuda_dindex);
-	if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
-	{
-		close(sockfd);
-		elog(ERROR, "failed on connect('%s'): %m", addr.sun_path);
-	}
-	snprintf(namebuf, sizeof(namebuf), "GPU-%d", cuda_dindex);
-
-	__xpuClientOpenSession(pts, session, sockfd, namebuf);
 }
 
 /*

@@ -15,7 +15,10 @@
 /* variable declarations */
 GpuDevAttributes *gpuDevAttrs = NULL;
 int			numGpuDevAttrs = 0;
-
+double		pgstrom_gpu_setup_cost;			/* GUC */
+double		pgstrom_gpu_dma_cost;			/* GUC */
+double		pgstrom_gpu_operator_cost;		/* GUC */
+double		pgstrom_gpu_direct_seq_page_cost; /* GUC */
 /* catalog of device attributes */
 typedef enum {
 	DEVATTRKIND__INT,
@@ -314,6 +317,58 @@ pgstrom_collect_gpu_devices(void)
 }
 
 /*
+ * pgstrom_init_gpu_options - init GUC options related to GPUs
+ */
+static void
+pgstrom_init_gpu_options(void)
+{
+	/* cost factor for GPU setup */
+	DefineCustomRealVariable("pg_strom.gpu_setup_cost",
+							 "Cost to setup GPU device to run",
+							 NULL,
+							 &pgstrom_gpu_setup_cost,
+							 100 * DEFAULT_SEQ_PAGE_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for each Gpu task */
+	DefineCustomRealVariable("pg_strom.gpu_dma_cost",
+							 "Cost to send/recv tuple via DMA",
+							 NULL,
+							 &pgstrom_gpu_dma_cost,
+							 DEFAULT_CPU_TUPLE_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for GPU operator */
+	DefineCustomRealVariable("pg_strom.gpu_operator_cost",
+							 "Cost of processing each operators by GPU",
+							 NULL,
+							 &pgstrom_gpu_operator_cost,
+							 DEFAULT_CPU_OPERATOR_COST / 16.0,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for GPU-Direct SQL */
+	DefineCustomRealVariable("pg_strom.gpu_direct_seq_page_cost",
+							 "Cost for sequential page read by GPU-Direct SQL",
+							 NULL,
+							 &pgstrom_gpu_direct_seq_page_cost,
+							 DEFAULT_SEQ_PAGE_COST / 4.0,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+}
+
+/*
  * pgstrom_init_gpu_device
  */
 bool
@@ -340,8 +395,75 @@ pgstrom_init_gpu_device(void)
 	}
 	/* collect device attributes using child process */
 	pgstrom_collect_gpu_devices();
+	if (numGpuDevAttrs > 0)
+	{
+		pgstrom_init_gpu_options();
+		return true;
+	}
+	return false;
+}
 
-	return (numGpuDevAttrs > 0);
+/*
+ * gpuClientOpenSession
+ */
+static int
+__gpuClientChooseDevice(const Bitmapset *gpuset)
+{
+	static bool		rr_initialized = false;
+	static uint32	rr_counter = 0;
+
+	if (!rr_initialized)
+	{
+		rr_counter = (uint32)getpid();
+		rr_initialized = true;
+	}
+
+	if (!bms_is_empty(gpuset))
+	{
+		int		num = bms_num_members(gpuset);
+		int	   *dindex = alloca(sizeof(int) * num);
+		int		i, k;
+
+		for (i=0, k=bms_next_member(gpuset, -1);
+			 k >= 0;
+			 i++, k=bms_next_member(gpuset, k))
+		{
+			dindex[i] = k;
+		}
+		Assert(i == num);
+		return dindex[rr_counter++ % num];
+	}
+	/* a simple round-robin if no GPUs preference */
+	return (rr_counter++ % numGpuDevAttrs);
+}
+
+void
+gpuClientOpenSession(pgstromTaskState *pts,
+					 const Bitmapset *gpuset,
+					 const XpuCommand *session)
+{
+	struct sockaddr_un addr;
+	pgsocket	sockfd;
+	int			cuda_dindex = __gpuClientChooseDevice(gpuset);
+	char		namebuf[32];
+
+	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (sockfd < 0)
+		elog(ERROR, "failed on socket(2): %m");
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	snprintf(addr.sun_path, sizeof(addr.sun_path),
+			 ".pg_strom.%u.gpu%u.sock",
+			 PostmasterPid, cuda_dindex);
+	if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+	{
+		close(sockfd);
+		elog(ERROR, "failed on connect('%s'): %m", addr.sun_path);
+	}
+	snprintf(namebuf, sizeof(namebuf), "GPU-%d", cuda_dindex);
+
+	__xpuClientOpenSession(pts, session, sockfd, namebuf);
 }
 
 /*

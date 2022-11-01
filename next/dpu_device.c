@@ -15,54 +15,64 @@
 static char	   *pgstrom_dpu_endpoint_list;	/* GUC */
 static int		pgstrom_dpu_endpoint_default_port;	/* GUC */
 #define PGSTROM_DPU_ENDPOINT_DEFAULT_PORT	6543
+#define DEFAULT_DPU_SETUP_COST		(100 * DEFAULT_SEQ_PAGE_COST)
+#define DEFAULT_DPU_OPERATOR_COST	(1.2 * DEFAULT_CPU_OPERATOR_COST)
+#define DEFAULT_DPU_SEQ_PAGE_COST	(DEFAULT_SEQ_PAGE_COST / 4)
+#define DEFAULT_DPU_TUPLE_COST		(DEFAULT_CPU_TUPLE_COST)
 
-struct dpu_tablespace_entry
+double		pgstrom_dpu_setup_cost    = DEFAULT_DPU_SETUP_COST;		/* GUC */
+double		pgstrom_dpu_operator_cost = DEFAULT_DPU_OPERATOR_COST;	/* GUC */
+double		pgstrom_dpu_seq_page_cost = DEFAULT_DPU_SEQ_PAGE_COST;	/* GUC */
+double		pgstrom_dpu_tuple_cost    = DEFAULT_DPU_TUPLE_COST;		/* GUC */
+bool		pgstrom_dpu_handle_cached_pages = false;	/* GUC */
+
+struct DpuStorageEntry
 {
 	Oid			tablespace_oid;
 	const char *tablespace_name;
 	const char *config_host;
 	const char *config_port;
+	int			endpoint_domain;	/* AF_UNIX/AF_INET/AF_INET6 */
 	const struct sockaddr *endpoint_addr;
 	socklen_t	endpoint_addr_len;
 	int			validated;
 };
 
-struct dpu_tablespace_info
+struct DpuTablespaceInfo
 {
 	uint32_t	extra_sz;
 	uint32_t	nitems;
-	dpu_tablespace_entry entries[1];
+	DpuStorageEntry entries[1];
 };
-typedef struct dpu_tablespace_info	dpu_tablespace_info;
+typedef struct DpuTablespaceInfo	DpuTablespaceInfo;
 
-struct dpu_tablespace_hash
+struct DpuTablespaceHash
 {
-	struct dpu_tablespace_hash *next;
+	struct DpuTablespaceHash *next;
 	Oid			tablespace_oid;
-	dpu_tablespace_entry *entry;
+	DpuStorageEntry *entry;
 };
-typedef struct dpu_tablespace_hash	dpu_tablespace_hash;
+typedef struct DpuTablespaceHash	DpuTablespaceHash;
 
-static dpu_tablespace_info	   *dpu_tablespace_master = NULL;	/* shared memory */
+static DpuTablespaceInfo	   *dpu_tablespace_master = NULL;	/* shared memory */
 static shmem_request_hook_type	shmem_request_next = NULL;
 static shmem_startup_hook_type	shmem_startup_next = NULL;
 #define DPU_TABLESPACE_HASH_NSLOTS		640
-static dpu_tablespace_hash	   *dpu_tablespace_hash_slots[DPU_TABLESPACE_HASH_NSLOTS];
+static DpuTablespaceHash	   *dpu_tablespace_hash_slots[DPU_TABLESPACE_HASH_NSLOTS];
 static MemoryContext			dpu_tablespace_hash_memcxt = NULL;
 
 /*
  * GetOptimalDpuForRelation
  */
-const dpu_tablespace_entry *
-GetOptimalDpuForRelation(PlannerInfo *root, RelOptInfo *rel)
+DpuStorageEntry *
+GetOptimalDpuForTablespace(Oid tablespace_oid)
 {
-	dpu_tablespace_hash *hitem;
-	Oid			tablespace_oid = rel->reltablespace;
+	DpuTablespaceHash *hitem;
 	char	   *tablespace_name;
 	uint32_t	i, hindex;
 
-	if (!IS_SIMPLE_REL(rel) || !dpu_tablespace_master)
-		return NULL;
+	if (!dpu_tablespace_master)
+		return NULL;	/* quick bailout */
 	if (!OidIsValid(tablespace_oid))
 		tablespace_oid = MyDatabaseTableSpace;
 	hindex = hash_uint32((uint32)tablespace_oid) % DPU_TABLESPACE_HASH_NSLOTS;
@@ -77,13 +87,13 @@ GetOptimalDpuForRelation(PlannerInfo *root, RelOptInfo *rel)
 	/* not found, so create a new entry */
 	tablespace_name = get_tablespace_name(tablespace_oid);
 	hitem = MemoryContextAllocZero(dpu_tablespace_hash_memcxt,
-								   sizeof(dpu_tablespace_hash));
+								   sizeof(DpuTablespaceHash));
 	hitem->tablespace_oid = tablespace_oid;
 	hitem->next = dpu_tablespace_hash_slots[hindex];
 	dpu_tablespace_hash_slots[hindex] = hitem;
 	for (i=0; i < dpu_tablespace_master->nitems; i++)
 	{
-		dpu_tablespace_entry *curr = &dpu_tablespace_master->entries[i];
+		DpuStorageEntry *curr = &dpu_tablespace_master->entries[i];
 
 		if (strcmp(curr->tablespace_name, tablespace_name) == 0)
 		{
@@ -92,6 +102,45 @@ GetOptimalDpuForRelation(PlannerInfo *root, RelOptInfo *rel)
 		}
 	}
 	return hitem->entry;
+}
+
+/*
+ * GetOptimalDpuForRelation
+ */
+DpuStorageEntry *
+GetOptimalDpuForRelation(Relation relation)
+{
+	Oid		tablespace_oid = RelationGetForm(relation)->reltablespace;
+
+	return GetOptimalDpuForTablespace(tablespace_oid);
+}
+
+/*
+ * DpuClientOpenSession 
+ */
+void
+DpuClientOpenSession(pgstromTaskState *pts,
+					 const XpuCommand *session)
+{
+	DpuStorageEntry *ds_entry = pts->ds_entry;
+    pgsocket    sockfd;
+    char        namebuf[32];
+
+	if (!ds_entry)
+		elog(ERROR, "Bug? no DPU device is configured");
+	sockfd = socket(ds_entry->endpoint_domain, SOCK_STREAM, 0);
+	if (sockfd < 0)
+		elog(ERROR, "failed on socket(2): %m");
+	if (connect(sockfd,
+				ds_entry->endpoint_addr,
+				ds_entry->endpoint_addr_len) != 0)
+	{
+		close(sockfd);
+		elog(ERROR, "failed on connect('%s'): %m", ds_entry->config_host);
+	}
+	snprintf(namebuf, sizeof(namebuf), "DPU-%u", ds_entry->tablespace_oid);
+
+	__xpuClientOpenSession(pts, session, sockfd, namebuf);
 }
 
 /*
@@ -120,7 +169,7 @@ parse_dpu_endpoint_list(void)
 	
 	if (!pgstrom_dpu_endpoint_list)
 		return 0;
-	dpu_tablespace_master = malloc(offsetof(dpu_tablespace_info,
+	dpu_tablespace_master = malloc(offsetof(DpuTablespaceInfo,
 											entries[nrooms]));
 	if (!dpu_tablespace_master)
 		elog(ERROR, "out of memory");
@@ -132,7 +181,7 @@ parse_dpu_endpoint_list(void)
 		 tok != NULL;
 		 tok = strtok_r(NULL, ",", &saveptr))
 	{
-		dpu_tablespace_entry *curr;
+		DpuStorageEntry *curr;
 		char	   *name;
 		char	   *host;
 		char	   *port;
@@ -149,11 +198,11 @@ parse_dpu_endpoint_list(void)
 		{
 			nrooms *= 2;
 			dpu_tablespace_master = realloc(dpu_tablespace_master,
-											offsetof(dpu_tablespace_info,
+											offsetof(DpuTablespaceInfo,
 													 entries[nrooms]));
 		}
 		curr = &dpu_tablespace_master->entries[nitems++];
-		memset(curr, 0, sizeof(dpu_tablespace_entry));
+		memset(curr, 0, sizeof(DpuStorageEntry));
 
 		curr->tablespace_name = strdup(name);
 		if (!curr->tablespace_name)
@@ -171,6 +220,7 @@ parse_dpu_endpoint_list(void)
 				elog(ERROR, "out of memory");
 			curr->config_port = NULL;
 			extra_sz += MAXALIGN(strlen(host) + 1);
+			curr->endpoint_domain = AF_UNIX;
 			curr->endpoint_addr = (struct sockaddr *)addr;
 			curr->endpoint_addr_len = sizeof(struct sockaddr_un);
 			curr->validated = -1;
@@ -214,13 +264,14 @@ parse_dpu_endpoint_list(void)
 			if (!curr->config_host || !curr->config_port)
 				elog(ERROR, "out of memory");
 			extra_sz += MAXALIGN(strlen(host) + 1) + MAXALIGN(strlen(port) + 1);
+			curr->endpoint_domain = addr->ai_family;
 			curr->endpoint_addr = addr->ai_addr;
 			curr->endpoint_addr_len = addr->ai_addrlen;
 			curr->validated = -1;
 		}
 		extra_sz += MAXALIGN(curr->endpoint_addr_len);
 	}
-	extra_sz += MAXALIGN(offsetof(dpu_tablespace_info, entries[nitems]));
+	extra_sz += MAXALIGN(offsetof(DpuTablespaceInfo, entries[nitems]));
 	dpu_tablespace_master->extra_sz = extra_sz;
 	dpu_tablespace_master->nitems   = nitems;
 
@@ -228,7 +279,7 @@ parse_dpu_endpoint_list(void)
 }
 
 /*
- *
+ * pgstrom_request_dpu_device
  */
 static void
 pgstrom_request_dpu_device(void)
@@ -244,7 +295,7 @@ pgstrom_request_dpu_device(void)
 static void
 pgstrom_startup_dpu_device(void)
 {
-	dpu_tablespace_info *new_tablespace_master;
+	DpuTablespaceInfo *new_tablespace_master;
 	bool		found;
 	char	   *extra;
 	uint32_t	i, nitems = dpu_tablespace_master->nitems;
@@ -257,11 +308,11 @@ pgstrom_startup_dpu_device(void)
 											dpu_tablespace_master->extra_sz,
 											&found);
 	extra = (char *)new_tablespace_master
-		+ MAXALIGN(offsetof(dpu_tablespace_info, entries[nitems]));
+		+ MAXALIGN(offsetof(DpuTablespaceInfo, entries[nitems]));
 	for (i=0; i < dpu_tablespace_master->nitems; i++)
 	{
-		dpu_tablespace_entry *old_item = &dpu_tablespace_master->entries[i];
-		dpu_tablespace_entry *new_item = &new_tablespace_master->entries[i];
+		DpuStorageEntry *old_item = &dpu_tablespace_master->entries[i];
+		DpuStorageEntry *new_item = &new_tablespace_master->entries[i];
 
 		new_item->tablespace_oid = InvalidOid;
 		new_item->tablespace_name = extra;
@@ -294,6 +345,67 @@ pgstrom_startup_dpu_device(void)
 	Assert(extra - (char *)new_tablespace_master == dpu_tablespace_master->extra_sz);
 	/* switch to shared memory structure */
 	dpu_tablespace_master = new_tablespace_master;
+}
+
+/*
+ * pgstrom_init_dpu_options
+ */
+static void
+pgstrom_init_dpu_options(void)
+{
+	/* cost factor for DPU setup */
+	DefineCustomRealVariable("pg_strom.dpu_setup_cost",
+							 "Cost to setup DPU device to run",
+							 NULL,
+							 &pgstrom_dpu_setup_cost,
+							 DEFAULT_DPU_SETUP_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for DPU operator */
+	DefineCustomRealVariable("pg_strom.dpu_operator_cost",
+							 "Cost of processing each operators by DPU",
+							 NULL,
+							 &pgstrom_dpu_operator_cost,
+							 DEFAULT_DPU_OPERATOR_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for DPU disk scan */
+	DefineCustomRealVariable("pg_strom.dpu_seq_page_cost",
+							 "Default cost to scan page on DPU device",
+							 NULL,
+							 &pgstrom_dpu_seq_page_cost,
+							 DEFAULT_DPU_SEQ_PAGE_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for DPU<-->Host data transfer per tuple */
+	DefineCustomRealVariable("pg_strom.dpu_tuple_cost",
+							 "Default cost to transfer DPU<->Host per tuple",
+							 NULL,
+							 &pgstrom_dpu_tuple_cost,
+							 DEFAULT_DPU_TUPLE_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* control whether DPU handles cached pages */
+	DefineCustomBoolVariable("pg_strom.dpu_handle_cached_pages",
+							 "Control whether DPUs handles cached clean pages",
+							 NULL,
+							 &pgstrom_dpu_handle_cached_pages,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 }
 
 /*
@@ -332,6 +444,8 @@ pgstrom_init_dpu_device(void)
 
 	if (parse_dpu_endpoint_list())
 	{
+		pgstrom_init_dpu_options();
+
 		shmem_request_next = shmem_request_hook;
 		shmem_request_hook = pgstrom_request_dpu_device;
 		shmem_startup_next = shmem_startup_hook;

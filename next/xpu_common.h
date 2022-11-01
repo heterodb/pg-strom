@@ -1308,8 +1308,7 @@ EXTERN_DATA xpu_type_catalog_entry	builtin_xpu_types_catalog[];
  * ---------------------------------------------------------------- */
 #define DEVKERN__NVIDIA_GPU			0x0001UL	/* for CUDA-based GPU */
 #define DEVKERN__NVIDIA_DPU			0x0002UL	/* for BlueField-X DPU */
-#define DEVKERN__ARMv8_SPU			0x0004UL	/* for ARMv8-based SPU */
-#define DEVKERN__ANY				0x0007UL	/* Runnable on any xPU */
+#define DEVKERN__ANY				0x0003UL	/* Both of GPU and DPU */
 #define DEVFUNC__LOCALE_AWARE		0x0100UL	/* Device function is locale aware,
 												 * thus, available only if "C" or
 												 * no locale configuration */

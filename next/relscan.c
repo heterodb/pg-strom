@@ -332,10 +332,60 @@ estimate_kern_data_store(TupleDesc tupdesc)
  *
  * ----------------------------------------------------------------
  */
+static void
+__relScanChunkDirectCached(pgstromTaskState *pts, BlockNumber block_num)
+{
+	Relation	relation = pts->css.ss.ss_currentRelation;
+	HeapScanDesc h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
+	Snapshot	snapshot = pts->css.ss.ps.state->es_snapshot;
+	Buffer		buffer;
+	Page		page;
+	int			lines;
+	OffsetNumber lineoff;
+	ItemId		lpp;
+
+	buffer = ReadBufferExtended(relation,
+								MAIN_FORKNUM,
+								block_num,
+								RBM_NORMAL,
+								h_scan->rs_strategy);
+	/* just like heapgetpage() */
+	heap_page_prune_opt(relation, buffer);
+	/* pick up valid tuples from the target page */
+	page = BufferGetPage(buffer);
+	lines = PageGetMaxOffsetNumber(page);
+	for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(page, lineoff);
+		 lineoff <= lines;
+		 lineoff++, lpp++)
+	{
+		HeapTupleData htup;
+		bool		valid;
+
+		if (!ItemIdIsNormal(lpp))
+			continue;
+
+		htup.t_tableOid = RelationGetRelid(relation);
+		htup.t_data = (HeapTupleHeader) PageGetItem((Page)page, lpp);
+		htup.t_len = ItemIdGetLength(lpp);
+		ItemPointerSet(&htup.t_self, block_num, lineoff);
+
+		valid = HeapTupleSatisfiesVisibility(&htup, snapshot, buffer);
+		HeapCheckForSerializableConflictOut(valid, relation, &htup,
+											buffer, snapshot);
+		if (valid)
+			pts->cb_cpu_fallback(pts, &htup);
+	}
+	UnlockReleaseBuffer(buffer);
+}
+
 #define __XCMD_KDS_SRC_OFFSET(buf)							\
 	(((XpuCommand *)((buf)->data))->u.scan.kds_src_offset)
 #define __XCMD_GET_KDS_SRC(buf)								\
 	((kern_data_store *)((buf)->data + __XCMD_KDS_SRC_OFFSET(buf)))
+
+/* NOTE: 'smgr_rnode' always locates on the head of SMgrRelationData */
+#define RelationGetRelFileNode(r)					\
+	(((RelFileNodeBackend *)((r)->rd_smgr))->node)
 
 XpuCommand *
 pgstromRelScanChunkDirect(pgstromTaskState *pts,
@@ -345,6 +395,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	Snapshot		snapshot = estate->es_snapshot;
 	Relation		relation = pts->css.ss.ss_currentRelation;
 	HeapScanDesc    h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
+	RelFileNode		smgr_rnode = RelationGetRelFileNode(relation);
 	XpuCommand	   *xcmd;
 	kern_data_store *kds;
 	unsigned long	m_offset = 0UL;
@@ -385,6 +436,35 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				goto out;
 
 			/*
+			 * MEMO: Usually, CPU is more powerful device than DPU.
+			 * In case when the source cache is already on the shared-
+			 * buffer, it makes no sense to handle this page on the
+			 * DPU device.
+			 */
+			if (pts->ds_entry && pgstrom_dpu_handle_cached_pages)
+			{
+				BufferTag	bufTag;
+				uint32		bufHash;
+				LWLock	   *bufLock;
+				int			buf_id;
+
+				INIT_BUFFERTAG(bufTag, smgr_rnode, MAIN_FORKNUM, block_num);
+				bufHash = BufTableHashCode(&bufTag);
+				bufLock = BufMappingPartitionLock(bufHash);
+
+				/* check whether the block exists on the shared buffer? */
+				LWLockAcquire(bufLock, LW_SHARED);
+				buf_id = BufTableLookup(&bufTag, bufHash);
+				if (buf_id >= 0)
+				{
+					LWLockRelease(bufLock);
+					__relScanChunkDirectCached(pts, block_num);
+					continue;
+				}
+				LWLockRelease(bufLock);
+			}
+			
+			/*
 			 * MEMO: right now, we allow GPU Direct SQL for the all-visible
 			 * pages only, due to the restrictions about MVCC checks.
 			 * However, it is too strict for the purpose. If we would have
@@ -424,6 +504,10 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				kds->nitems++;
 				strom_blknums[strom_nblocks++] = block_num;
 				m_offset += BLCKSZ;
+			}
+			else if (pts->ds_entry)
+			{
+				__relScanChunkDirectCached(pts, block_num);
 			}
 			else
 			{

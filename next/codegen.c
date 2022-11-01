@@ -991,8 +991,8 @@ __codegen_func_expression(codegen_context *context,
 	ListCell	   *lc;
 
 	dfunc = pgstrom_devfunc_lookup(func_oid, func_args, func_collid);
-	if (!dfunc)
-		__Elog("function %s is not supported",
+	if (!dfunc || (dfunc->func_flags & context->required_flags) == 0)
+		__Elog("function %s is not supported on the target device",
 			   format_procedure(func_oid));
 	dtype = dfunc->func_rettype;
 	context->device_cost += dfunc->func_cost;
@@ -1530,7 +1530,7 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 /*
  * pgstrom_gpu_expression
  *
- * checker whether the supplied expression is executable on GPU devices.
+ * checks whether the expression is executable on GPU devices.
  */
 bool
 pgstrom_gpu_expression(Expr *expr,
@@ -1542,6 +1542,39 @@ pgstrom_gpu_expression(Expr *expr,
 	memset(&context, 0, sizeof(context));
 	context.elevel = DEBUG2;
 	context.top_expr = expr;
+	context.required_flags = DEVKERN__NVIDIA_GPU;
+	context.input_rels_tlist = input_rels_tlist;
+
+	if (IsA(expr, List))
+	{
+		if (list_length((List *)expr) == 1)
+			expr = linitial((List *)expr);
+		else
+			expr = make_andclause((List *)expr);
+	}
+	if (codegen_expression_walker(&context, expr) < 0)
+		return false;
+	if (p_devcost)
+		*p_devcost = context.device_cost;
+	return true;
+}
+
+/*
+ * pgstrom_dpu_expression
+ *
+ * checks whether the expression is executable on DPU devices.
+ */
+bool
+pgstrom_dpu_expression(Expr *expr,
+					   List *input_rels_tlist,
+					   int *p_devcost)
+{
+	codegen_context	context;
+
+	memset(&context, 0, sizeof(context));
+	context.elevel = DEBUG2;
+	context.top_expr = expr;
+	context.required_flags = DEVKERN__NVIDIA_DPU;
 	context.input_rels_tlist = input_rels_tlist;
 
 	if (IsA(expr, List))
