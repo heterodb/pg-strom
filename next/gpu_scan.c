@@ -864,7 +864,7 @@ void
 gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 {
 	kern_gpuscan	*kgscan = NULL;
-	const char		*kds_src_pathname = NULL;
+	const char		*kds_src_fullpath = NULL;
 	strom_io_vector *kds_src_iovec = NULL;
 	kern_data_store *kds_src = NULL;
 	kern_data_store *kds_dst = NULL;
@@ -884,8 +884,8 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	size_t			sz;
 	void		   *kern_args[5];
 
-	if (xcmd->u.scan.kds_src_pathname)
-		kds_src_pathname = (char *)xcmd + xcmd->u.scan.kds_src_pathname;
+	if (xcmd->u.scan.kds_src_fullpath)
+		kds_src_fullpath = (char *)xcmd + xcmd->u.scan.kds_src_fullpath;
 	if (xcmd->u.scan.kds_src_iovec)
 		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.scan.kds_src_iovec);
 	if (xcmd->u.scan.kds_src_offset)
@@ -908,11 +908,11 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 		kern_funcname = "kern_gpuscan_main_block";
 
 		fprintf(stderr, "kds->len = %zu\n", kds_src->length);
-		if (kds_src_pathname && kds_src_iovec)
+		if (kds_src_fullpath && kds_src_iovec)
 		{
 			chunk = gpuservLoadKdsBlock(gclient,
 										kds_src,
-										kds_src_pathname,
+										kds_src_fullpath,
 										kds_src_iovec);
 			if (!chunk)
 				return;

@@ -38,6 +38,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic.h"
+#include "catalog/pg_tablespace_d.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
@@ -484,7 +485,7 @@ extern const gpuMemChunk *gpuMemAlloc(size_t bytesize);
 extern void		gpuMemFree(const gpuMemChunk *chunk);
 extern const gpuMemChunk *gpuservLoadKdsBlock(gpuClient *gclient,
 											  kern_data_store *kds,
-											  const char *kds_pathname,
+											  const char *pathname,
 											  strom_io_vector *kds_iovec);
 extern bool		gpuServiceGoingTerminate(void);
 extern void		gpuClientWriteBack(gpuClient *gclient,

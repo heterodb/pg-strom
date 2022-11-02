@@ -383,10 +383,6 @@ __relScanChunkDirectCached(pgstromTaskState *pts, BlockNumber block_num)
 #define __XCMD_GET_KDS_SRC(buf)								\
 	((kern_data_store *)((buf)->data + __XCMD_KDS_SRC_OFFSET(buf)))
 
-/* NOTE: 'smgr_rnode' always locates on the head of SMgrRelationData */
-#define RelationGetRelFileNode(r)					\
-	(((RelFileNodeBackend *)((r)->rd_smgr))->node)
-
 XpuCommand *
 pgstromRelScanChunkDirect(pgstromTaskState *pts,
 						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
@@ -395,7 +391,8 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	Snapshot		snapshot = estate->es_snapshot;
 	Relation		relation = pts->css.ss.ss_currentRelation;
 	HeapScanDesc    h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
-	RelFileNode		smgr_rnode = RelationGetRelFileNode(relation);
+	/* NOTE: 'smgr_rnode' always locates on the head of SMgrRelationData */
+	RelFileNodeBackend *smgr_rnode = (RelFileNodeBackend *)(relation->rd_smgr);
 	XpuCommand	   *xcmd;
 	kern_data_store *kds;
 	unsigned long	m_offset = 0UL;
@@ -404,6 +401,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	strom_io_chunk *strom_ioc = NULL;
 	BlockNumber	   *strom_blknums;
 	uint32_t		strom_nblocks = 0;
+	uint32_t		kds_src_fullpath = 0;
 	uint32_t		kds_src_pathname = 0;
 	uint32_t		kds_src_iovec = 0;
 	uint32_t		kds_nrooms;
@@ -448,7 +446,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				LWLock	   *bufLock;
 				int			buf_id;
 
-				INIT_BUFFERTAG(bufTag, smgr_rnode, MAIN_FORKNUM, block_num);
+				INIT_BUFFERTAG(bufTag, smgr_rnode->node, MAIN_FORKNUM, block_num);
 				bufHash = BufTableHashCode(&bufTag);
 				bufLock = BufMappingPartitionLock(bufHash);
 
@@ -618,14 +616,47 @@ out:
 		return NULL;
 	if (strom_iovec->nr_chunks > 0)
 	{
-		char   *filename;
+		/* see logic in GetRelationPath */
 		int		sz;
 
-		filename = relpath(relation->rd_smgr->smgr_rnode, MAIN_FORKNUM);
-		kds_src_pathname = pts->xcmd_buf.len;
-		appendStringInfoString(&pts->xcmd_buf, filename);
-		pfree(filename);
-
+		if (smgr_rnode->node.spcNode == GLOBALTABLESPACE_OID)
+		{
+			Assert(smgr_rnode->node.dbNode == InvalidOid &&
+				   smgr_rnode->backend == InvalidBackendId);
+			kds_src_fullpath = kds_src_pathname = pts->xcmd_buf.len;
+			appendStringInfo(&pts->xcmd_buf, "global/%u",
+							 smgr_rnode->node.relNode);
+		}
+		else if (smgr_rnode->node.spcNode == DEFAULTTABLESPACE_OID)
+		{
+			kds_src_fullpath = kds_src_pathname = pts->xcmd_buf.len;
+			if (smgr_rnode->backend == InvalidBackendId)
+				appendStringInfo(&pts->xcmd_buf, "base/%u/%u",
+								 smgr_rnode->node.dbNode,
+								 smgr_rnode->node.relNode);
+			else
+				appendStringInfo(&pts->xcmd_buf, "base/%u/t%d_%u",
+								 smgr_rnode->node.dbNode,
+								 smgr_rnode->backend,
+								 smgr_rnode->node.relNode);
+		}
+		else
+		{
+			kds_src_fullpath = pts->xcmd_buf.len;
+			appendStringInfo(&pts->xcmd_buf, "pg_tblspc/%u/%s/",
+							 smgr_rnode->node.spcNode,
+							 TABLESPACE_VERSION_DIRECTORY);
+			kds_src_pathname = pts->xcmd_buf.len;
+			if (smgr_rnode->backend == InvalidBackendId)
+				appendStringInfo(&pts->xcmd_buf, "%u/%u",
+								 smgr_rnode->node.dbNode,
+								 smgr_rnode->node.relNode);
+			else
+				appendStringInfo(&pts->xcmd_buf, "%u/t%d_%u",
+								 smgr_rnode->node.dbNode,
+								 smgr_rnode->backend,
+								 smgr_rnode->node.relNode);
+		}
 		sz = offsetof(strom_io_vector, ioc[strom_iovec->nr_chunks]);
 		kds_src_iovec = __appendBinaryStringInfo(&pts->xcmd_buf,
 												 (const char *)strom_iovec, sz);
@@ -635,6 +666,7 @@ out:
 		Assert(segment_id == InvalidBlockNumber);
 	}
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
+	xcmd->u.scan.kds_src_fullpath = kds_src_fullpath;
 	xcmd->u.scan.kds_src_pathname = kds_src_pathname;
 	xcmd->u.scan.kds_src_iovec = kds_src_iovec;
 	xcmd->length = pts->xcmd_buf.len;

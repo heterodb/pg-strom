@@ -1480,6 +1480,7 @@ typedef struct kern_session_info
 } kern_session_info;
 
 typedef struct {
+	uint32_t	kds_src_fullpath;	/* offset to const char *fullpath */
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */

@@ -394,7 +394,7 @@ gpuMemoryPoolInit(gpuMemoryPool *pool, size_t dev_total_memsz)
 const gpuMemChunk *
 gpuservLoadKdsBlock(gpuClient *gclient,
 					kern_data_store *kds,
-					const char *kds_pathname,
+					const char *pathname,
 					strom_io_vector *kds_iovec)
 {
 	const gpuMemChunk *chunk;
@@ -402,10 +402,9 @@ gpuservLoadKdsBlock(gpuClient *gclient,
 	CUresult	rc;
 	size_t		len;
 
-	if (!gpuDirectFileDescOpenByPath(&gdfdesc, kds_pathname))
+	if (!gpuDirectFileDescOpenByPath(&gdfdesc, pathname))
 	{
-		gpuClientELog(gclient, "failed on gpuDirectFileDescOpenByPath('%s')",
-					  kds_pathname);
+		gpuClientELog(gclient, "failed on gpuDirectFileDescOpenByPath('%s')", pathname);
 		return NULL;
 	}
 
