@@ -627,6 +627,7 @@ PlanGpuScanPath(PlannerInfo *root,
 								  clauses,
 								  gs_info,
 								  &gpuscan_plan_methods);
+	form_gpuscan_info(cscan, gs_info);
 	return &cscan->scan.plan;
 }
 

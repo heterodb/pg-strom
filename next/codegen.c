@@ -991,7 +991,8 @@ __codegen_func_expression(codegen_context *context,
 	ListCell	   *lc;
 
 	dfunc = pgstrom_devfunc_lookup(func_oid, func_args, func_collid);
-	if (!dfunc || (dfunc->func_flags & context->required_flags) == 0)
+	if (!dfunc ||
+		(dfunc->func_flags & context->required_flags) != context->required_flags)
 		__Elog("function %s is not supported on the target device",
 			   format_procedure(func_oid));
 	dtype = dfunc->func_rettype;

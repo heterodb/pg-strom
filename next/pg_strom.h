@@ -23,6 +23,7 @@
 #include "access/heapam.h"
 #include "access/genam.h"
 #include "access/relscan.h"
+#include "access/syncscan.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/visibilitymap.h"
