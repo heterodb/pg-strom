@@ -40,147 +40,16 @@ static dlist_head		xpu_connections_list;
 static bool				pgstrom_use_debug_code;		/* GUC */
 
 /*
- * xpuConnectReceiveCommands
- */
-int
-xpuConnectReceiveCommands(pgsocket sockfd,
-						  void *(*alloc_f)(void *priv, size_t sz),
-						  void  (*attach_f)(void *priv, XpuCommand *xcmd),
-						  void *priv,
-						  const char *error_label)
-{
-	char		buffer_local[2 * BLCKSZ];
-	char	   *buffer;
-	size_t		bufsz, offset;
-	ssize_t		nbytes;
-	int			recv_flags;
-	int			count = 0;
-	XpuCommand *curr = NULL;
-
-#define __fprintf(filp,fmt,...)										\
-	fprintf((filp), "[%s; %s:%d] " fmt "\n",						\
-			error_label, __FILE_NAME__, __LINE__, ##__VA_ARGS__)
-	
-restart:
-	buffer = buffer_local;
-	bufsz  = sizeof(buffer_local);
-	offset = 0;
-	recv_flags = MSG_DONTWAIT;
-	curr   = NULL;
-
-	for (;;)
-	{
-		nbytes = recv(sockfd, buffer + offset, bufsz - offset, recv_flags);
-		if (nbytes < 0)
-		{
-			if (errno == EINTR)
-				continue;
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-			{
-				/*
-				 * If we are under the read of a XpuCommand fraction,
-				 * we have to wait for completion of the XpuCommand.
-				 * (Its peer side should send the entire command very
-				 * soon.)
-				 * Elsewhere, we have no queued XpuCommand right now.
-				 */
-				if (!curr && offset == 0)
-					return count;
-				/* next recv(2) shall be blocking call */
-				recv_flags = 0;
-				continue;
-			}
-			__fprintf(stderr, "failed on recv(%d, %p, %ld, %d): %m",
-					  sockfd, buffer + offset, bufsz - offset, recv_flags);
-			return -1;
-		}
-		else if (nbytes == 0)
-		{
-			/* end of the stream */
-			if (curr || offset > 0)
-			{
-				__fprintf(stderr, "connection closed during XpuCommand read");
-				return -1;
-			}
-			return count;
-		}
-
-		offset += nbytes;
-		if (!curr)
-		{
-			XpuCommand *temp, *xcmd;
-		next:
-			if (offset < offsetof(XpuCommand, u))
-			{
-				if (buffer != buffer_local)
-				{
-					memmove(buffer_local, buffer, offset);
-					buffer = buffer_local;
-					bufsz  = sizeof(buffer_local);
-				}
-				recv_flags = 0;		/* next recv(2) shall be blockable */
-				continue;
-			}
-			temp = (XpuCommand *)buffer;
-			if (temp->length <= offset)
-			{
-				assert(temp->magic == XpuCommandMagicNumber);
-				xcmd = alloc_f(priv, temp->length);
-				if (!xcmd)
-				{
-					__fprintf(stderr, "out of memory (sz=%lu): %m", temp->length);
-					return -1;
-				}
-				memcpy(xcmd, temp, temp->length);
-				attach_f(priv, xcmd);
-				count++;
-
-				if (temp->length == offset)
-					goto restart;
-				/* read remained portion, if any */
-				buffer += temp->length;
-				offset -= temp->length;
-				goto next;
-			}
-			else
-			{
-				curr = alloc_f(priv, temp->length);
-				if (!curr)
-				{
-					__fprintf(stderr, "out of memory (sz=%lu): %m", temp->length);
-					return -1;
-				}
-				memcpy(curr, temp, offset);
-				buffer = (char *)curr;
-				bufsz  = temp->length;
-				recv_flags = 0;		/* blocking enabled */
-			}
-		}
-		else if (offset >= curr->length)
-		{
-			assert(curr->magic == XpuCommandMagicNumber);
-			assert(curr->length == offset);
-			attach_f(priv, curr);
-			count++;
-			goto restart;
-		}
-	}
-	__fprintf(stderr, "Bug? should not break this loop");
-	return -1;
-#undef __fprintf
-}
-
-/*
  * Worker thread to receive response messages
  */
 static void *
-__xpuConnectSessionWorkerAlloc(void *__priv, size_t sz)
+__xpuConnectAllocCommand(void *__priv, size_t sz)
 {
 	return malloc(sz);
 }
 
 static void
-__xpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
+__xpuConnectAttachCommand(void *__priv, XpuCommand *xcmd)
 {
 	XpuConnection *conn = __priv;
 
@@ -207,15 +76,12 @@ __xpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
 	SetLatch(MyLatch);
 	pthreadMutexUnlock(&conn->mutex);
 }
+TEMPLATE_XPU_CONNECT_RECEIVE_COMMANDS(__xpuConnect)
 
 static void *
 __xpuConnectSessionWorker(void *__priv)
 {
 	XpuConnection *conn = __priv;
-
-#define __fprintf(filp,fmt,...)										\
-	fprintf((filp), "[%s; %s:%d] " fmt "\n",						\
-			conn->devname, __FILE_NAME__, __LINE__, ##__VA_ARGS__)
 
 	for (;;)
 	{
@@ -234,7 +100,8 @@ __xpuConnectSessionWorker(void *__priv)
 		{
 			if (errno == EINTR)
 				continue;
-			__fprintf(stderr, "failed on poll(2): %m");
+			fprintf(stderr, "[%s; %s:%d] failed on poll(2): %m\n",
+					conn->devname, __FILE_NAME__, __LINE__);
 			break;
 		}
 		else if (nevents > 0)
@@ -242,7 +109,8 @@ __xpuConnectSessionWorker(void *__priv)
 			Assert(nevents == 1);
 			if (pfd.revents & ~POLLIN)
 			{
-				__fprintf(stderr, "peer socket closed.");
+				fprintf(stderr, "[%s; %s:%d] peer socket closed.\n",
+						conn->devname, __FILE_NAME__, __LINE__);
 				pthreadMutexLock(&conn->mutex);
 				conn->terminated = 1;
 				SetLatch(MyLatch);
@@ -251,10 +119,9 @@ __xpuConnectSessionWorker(void *__priv)
 			}
 			else if (pfd.revents & POLLIN)
 			{
-				if (xpuConnectReceiveCommands(conn->sockfd,
-											  __xpuConnectSessionWorkerAlloc,
-											  __xpuConnectSessionWorkerAttach,
-											  conn, conn->devname) < 0)
+				if (__xpuConnectReceiveCommands(conn->sockfd,
+												conn,
+												conn->devname) < 0)
 					break;
 			}
 		}
@@ -265,7 +132,6 @@ __xpuConnectSessionWorker(void *__priv)
 	pthreadMutexUnlock(&conn->mutex);
 
 	return NULL;
-#undef __fprintf
 }
 
 /*

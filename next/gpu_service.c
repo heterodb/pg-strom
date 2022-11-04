@@ -900,7 +900,7 @@ gpuservGpuWorkerMain(void *__arg)
  * gpuservMonitorClient
  */
 static void *
-__gpuservMonitorClientAlloc(void *__priv, size_t sz)
+__gpuServiceAllocCommand(void *__priv, size_t sz)
 {
 	CUdeviceptr	devptr;
 	CUresult	rc;
@@ -912,7 +912,7 @@ __gpuservMonitorClientAlloc(void *__priv, size_t sz)
 }
 
 static void
-__gpuservMonitorClientAttach(void *__priv, XpuCommand *xcmd)
+__gpuServiceAttachCommand(void *__priv, XpuCommand *xcmd)
 {
 	gpuClient  *gclient = (gpuClient *)__priv;
 	gpuContext *gcontext = gclient->gcontext;
@@ -925,6 +925,7 @@ __gpuservMonitorClientAttach(void *__priv, XpuCommand *xcmd)
 	pthreadMutexUnlock(&gcontext->lock);
 	pthreadCondSignal(&gcontext->cond);
 }
+TEMPLATE_XPU_CONNECT_RECEIVE_COMMANDS(__gpuService)
 
 static void *
 gpuservMonitorClient(void *__priv)
@@ -969,10 +970,7 @@ gpuservMonitorClient(void *__priv)
 		Assert(nevents == 1);
 		if (pfd.revents == POLLIN)
 		{
-			if (xpuConnectReceiveCommands(sockfd,
-										  __gpuservMonitorClientAlloc,
-										  __gpuservMonitorClientAttach,
-										  gclient, elabel) < 0)
+			if (__gpuServiceReceiveCommands(sockfd, gclient, elabel) < 0)
 				break;
 		}
 		else if (pfd.revents & ~POLLIN)

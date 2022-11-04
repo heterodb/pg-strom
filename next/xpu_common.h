@@ -1486,7 +1486,7 @@ typedef struct {
 	uint32_t	kds_src_offset;		/* offset to kds_src */
 	uint32_t	kds_dst_offset;		/* offset to kds_dst */
 	char		data[1]				__attribute__((aligned(MAXIMUM_ALIGNOF)));
-} kernExecScan;
+} kern_exec_scan;
 
 typedef struct {
 	uint32_t	chunks_nitems;
@@ -1498,7 +1498,7 @@ typedef struct {
 			char		data[1];
 		} scan;
 	} stats;
-} kernExecResults;
+} kern_exec_results;
 
 #ifndef ILIST_H
 typedef struct dlist_node dlist_node;
@@ -1517,10 +1517,10 @@ typedef struct
 	void	   *priv;
 	dlist_node	chain;
 	union {
-		kern_errorbuf	error;
-		kern_session_info session;
-		kernExecScan	scan;
-		kernExecResults	results;
+		kern_errorbuf		error;
+		kern_session_info	session;
+		kern_exec_scan		scan;
+		kern_exec_results	results;
 	} u;
 } XpuCommand;
 
@@ -1578,6 +1578,142 @@ SESSION_ENCODE(kern_session_info *session)
 		return NULL;
 	return (struct xpu_encode_info *)((char *)session + session->session_encode);
 }
+
+/* ----------------------------------------------------------------
+ *
+ * Template for xPU connection commands receive
+ *
+ * ----------------------------------------------------------------
+ */
+#define TEMPLATE_XPU_CONNECT_RECEIVE_COMMANDS(__XPU_PREFIX)				\
+	static int															\
+	__XPU_PREFIX##ReceiveCommands(int sockfd,							\
+								  void *priv,							\
+								  const char *error_label)				\
+	{																	\
+		char		buffer_local[10000];								\
+		char	   *buffer;												\
+		size_t		bufsz, offset;										\
+		ssize_t		nbytes;												\
+		int			recv_flags;											\
+		int			count = 0;											\
+		XpuCommand *curr = NULL;										\
+																		\
+	restart:															\
+		buffer = buffer_local;											\
+		bufsz  = sizeof(buffer_local);									\
+		offset = 0;														\
+		recv_flags = MSG_DONTWAIT;										\
+		curr   = NULL;													\
+																		\
+		for (;;)														\
+		{																\
+			nbytes = recv(sockfd,										\
+						  buffer + offset,								\
+						  bufsz - offset,								\
+						  recv_flags);									\
+			if (nbytes < 0)												\
+			{															\
+				if (errno == EINTR)										\
+					continue;											\
+				if (errno == EAGAIN || errno == EWOULDBLOCK)			\
+				{														\
+					/*													\
+					 * If we are in the halfway through the read of		\
+					 * XpuCommand fraction, we have to wait for			\
+					 * the complete XpuCommand.							\
+					 * (The peer side should send the entire command	\
+					 * very soon.) Elsewhere, we have no queued			\
+					 * XpuCommand right now.							\
+					 */													\
+					if (!curr && offset == 0)							\
+						return count;									\
+					/* next recv(2) shall be blocking call */			\
+					recv_flags = 0;										\
+					continue;											\
+				}														\
+				fprintf(stderr, "[%s] failed on recv(2): %m\n",			\
+						error_label);									\
+				return -1;												\
+			}															\
+			else if (nbytes == 0)										\
+			{															\
+				/* end of the stream */									\
+				if (curr || offset > 0)									\
+				{														\
+					fprintf(stderr, "[%s] connection closed in the halfway through XpuCommands read\n", \
+							error_label);								\
+					return -1;											\
+				}														\
+				return count;											\
+			}															\
+																		\
+			offset += nbytes;											\
+			if (!curr)													\
+			{															\
+				XpuCommand *temp, *xcmd;								\
+			next:														\
+				if (offset < offsetof(XpuCommand, u))					\
+				{														\
+					if (buffer != buffer_local)							\
+					{													\
+						memmove(buffer_local, buffer, offset);			\
+						buffer = buffer_local;							\
+						bufsz  = sizeof(buffer_local);					\
+					}													\
+					recv_flags = 0;		/* next recv(2) is blockable */	\
+					continue;											\
+				}														\
+				temp = (XpuCommand *)buffer;							\
+				if (temp->length <= offset)								\
+				{														\
+					assert(temp->magic == XpuCommandMagicNumber);		\
+					xcmd = __XPU_PREFIX##AllocCommand(priv, temp->length); \
+					if (!xcmd)											\
+					{													\
+						fprintf(stderr, "[%s] out of memory (sz=%lu): %m\n", \
+								error_label, temp->length);				\
+						return -1;										\
+					}													\
+					memcpy(xcmd, temp, temp->length);					\
+					__XPU_PREFIX##AttachCommand(priv, xcmd);			\
+					count++;											\
+																		\
+					if (temp->length == offset)							\
+						goto restart;									\
+					/* read remained portion, if any */					\
+					buffer += temp->length;								\
+					offset -= temp->length;								\
+					goto next;											\
+				}														\
+				else													\
+				{														\
+					curr = __XPU_PREFIX##AllocCommand(priv, temp->length); \
+					if (!curr)											\
+					{													\
+						fprintf(stderr, "[%s] out of memory (sz=%lu): %m\n", \
+								error_label, temp->length);				\
+						return -1;										\
+					}													\
+					memcpy(curr, temp, offset);							\
+					buffer = (char *)curr;								\
+					bufsz  = temp->length;								\
+					recv_flags = 0;		/* blocking enabled */			\
+				}														\
+			}															\
+			else if (offset >= curr->length)							\
+			{															\
+				assert(curr->magic == XpuCommandMagicNumber);			\
+				assert(curr->length == offset);							\
+				__XPU_PREFIX##AttachCommand(priv, curr);				\
+				count++;												\
+				goto restart;											\
+			}															\
+		}																\
+		fprintf(stderr, "[%s] Bug? unexpected loop break\n",			\
+				error_label);											\
+		return -1;														\
+	}
 
 /* ----------------------------------------------------------------
  *
