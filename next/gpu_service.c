@@ -731,21 +731,19 @@ __resolveDevicePointers(gpuModule *gmodule,
 	xpu_encode_info	*encode = SESSION_ENCODE(session);
 	kern_expression *kexp;
 
-	fprintf(stderr, "-- xpucode_scan_quals --------\n");
 	if (session->xpucode_scan_quals)
 	{
 		kexp = (kern_expression *)((char *)session + session->xpucode_scan_quals);
 		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
 			return false;
 	}
-	fprintf(stderr, "-- xpucode_scan_projs --------\n");
+
 	if (session->xpucode_scan_projs)
 	{
 		kexp = (kern_expression *)((char *)session + session->xpucode_scan_projs);
 		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
 			return false;
 	}
-	fprintf(stderr, "------------------------------\n");
 
 	if (encode)
 	{
@@ -884,9 +882,9 @@ gpuservGpuWorkerMain(void *__arg)
 			gpuClientPut(gclient);
 			pthreadMutexLock(&gcontext->lock);
 		}
-		if (!pthreadCondWaitTimeout(&gcontext->cond,
-									&gcontext->lock,
-									5000))
+		else if (!pthreadCondWaitTimeout(&gcontext->cond,
+										 &gcontext->lock,
+										 5000))
 		{
 			pthreadMutexUnlock(&gcontext->lock);
 			/* maintenance works */

@@ -908,7 +908,6 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	{
 		kern_funcname = "kern_gpuscan_main_block";
 
-		fprintf(stderr, "kds->len = %zu\n", kds_src->length);
 		if (kds_src_fullpath && kds_src_iovec)
 		{
 			chunk = gpuservLoadKdsBlock(gclient,
@@ -955,7 +954,6 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 					   cuStrError(rc));
 		goto bailout;
 	}
-	fprintf(stderr, "grid_sz=%d block_sz=%d shmem_sz=%u\n", grid_sz, block_sz, shmem_sz);
 	
 	/*
 	 * Allocation of the control structure
