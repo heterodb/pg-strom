@@ -18,7 +18,7 @@ ENV HETERODB_SWDC_VERSION 1.2-1
 # Explicitly set the user/group IDs
 RUN set -eux; \
 	groupadd -r postgres --gid=5432; \
-	useradd -r -g postgres --uid=5432 --home-dir=/var/lib/postgresql --shell=/bin/bash postgres; \
+	useradd -r -g postgres --uid=5432 --home-dir=/var/lib/postgresql --shell=/bin/bash postgres; \ 
 	mkdir -p /var/lib/postgresql; \
 	chown -R postgres:postgres /var/lib/postgresql
 
@@ -33,13 +33,21 @@ RUN dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.n
 RUN dnf install -y dnf-plugins-core
 RUN dnf config-manager --set-enabled powertools
 
-# Install PostGIS and additional packages that may be needed
+# Install PostGIS and additional packages that will be needed to run
 RUN dnf install -y postgis$POSTGIS_VERSION ca-certificates findutils
-# Install some utilities for convenience for things like loading that TIGER dataset
+# Install some utilities for convenience for things like loading the Tiger dataset from within the container
 RUN dnf install -y wget curl unzip nano
 
-# Install 'cuda-nvrtc' which is needed by PG-Strom
+RUN dnf install -y postgresql$PG_MAJOR_VERSION-devel
+
+# Install postgresql-devel for header files that are needed by PG-Strom
+RUN dnf install -y postgresql$PG_MAJOR_VERSION-devel
+
+# Install 'cuda-nvrtc and cuda-cudart-devel' which is needed by PG-Strom
 RUN dnf install -y cuda-nvrtc-$CUDA_VERSION
+# This installs the header files for Cuda
+RUN dnf install -y cuda-cudart-devel-$CUDA_VERSION
+
 # Install PG-Strom
 RUN dnf install -y https://heterodb.github.io/swdc/yum/rhel8-noarch/heterodb-swdc-$HETERODB_SWDC_VERSION.el8.noarch.rpm
 RUN dnf install -y pg_strom-PG$PG_MAJOR_VERSION
@@ -69,6 +77,8 @@ RUN rm /usr/local/bin/gosu.asc \
 # Workaround/hack for library not found with the error of " failed on open 'libnvrtc.so.11.7' and 'libnvrtc.so': No such file or directory". More research is needed on the reason why this error happens.
 RUN ln -s /usr/local/cuda/lib64/libnvrtc.so.$LIBNVRTC_VERSION /usr/local/cuda/lib64/libnvrtc.so
 
+#ENV CUDA_VISIBLE_DEVICES 0
+#ENV CUDA_DEVICE_ORDER 00000000:01:00.0
 ENV LD_LIBRARY_PATH ${LD_LIBRARY_PATH}:/usr/local/cuda/lib64
 ENV PATH $PATH:/usr/pgsql-$PG_MAJOR_VERSION/bin
 ENV PGDATA /var/lib/postgresql/data
