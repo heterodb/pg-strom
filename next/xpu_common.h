@@ -1501,12 +1501,15 @@ typedef struct {
 } kern_exec_results;
 
 #ifndef ILIST_H
-typedef struct dlist_node dlist_node;
-struct dlist_node
+typedef struct dlist_node
 {
-	dlist_node *prev;
-	dlist_node *next;
-};
+	struct dlist_node *prev;
+	struct dlist_node *next;
+} dlist_node;
+typedef struct dlist_head
+{
+	dlist_node		head;
+} dlist_head;
 #endif
 
 typedef struct
