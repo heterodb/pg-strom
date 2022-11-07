@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "xpu_common.h"
+#include <alloca.h>
 
 /*
  * Const Expression

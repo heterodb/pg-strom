@@ -21,6 +21,7 @@
 #include "postgres_ext.h"
 #include "pg_config.h"
 #include "pg_config_manual.h"
+#include "float2.h"
 
 /* Definition of several primitive types */
 typedef __int128	int128_t;
@@ -55,7 +56,7 @@ typedef double		float8_t;
 #define KERNEL_FUNCTION(RET_TYPE)		RET_TYPE
 #define EXTERN_DATA						extern
 #define PUBLIC_DATA
-#define STATIC_DATE						static
+#define STATIC_DATA						static
 #endif	/* __CUDACC__ */
 
 /*

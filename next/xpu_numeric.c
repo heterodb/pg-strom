@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "xpu_common.h"
+#include <math.h>
 
 INLINE_FUNCTION(int)
 xpu_numeric_sign(xpu_numeric_t *num)
@@ -157,8 +158,8 @@ __numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 		ndigits++;
 		n_data[PG_MAX_DATA - ndigits] = mod;
 	}
-	len = offsetof(NumericData, choice.n_long.n_data[ndigits]);
-
+	len = (offsetof(NumericData, choice.n_long.n_data)
+		   + sizeof(NumericDigit) * ndigits);
 	if (buffer)
 	{
 		memcpy(numBody->n_data,

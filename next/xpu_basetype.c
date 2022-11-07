@@ -11,6 +11,7 @@
  *
  */
 #include "xpu_common.h"
+#include <math.h>
 
 /*
  * Bool type handlers

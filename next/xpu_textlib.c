@@ -497,7 +497,7 @@ __text_compare(kern_context *kcxt,
 	if (!xpu_text_is_valid(kcxt, str1) ||
 		!xpu_text_is_valid(kcxt, str2))
 		return false;
-	len = min(str1->length, str2->length);
+	len = Min(str1->length, str2->length);
 	while (len > 0)
 	{
 		if (*s1 < *s2)

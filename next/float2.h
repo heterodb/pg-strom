@@ -216,5 +216,4 @@ fp16_to_fp64(half_t fp16val)
 	}
 	return long_as_double(result);
 }
-
 #endif	/* FLOAT2_H */
