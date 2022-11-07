@@ -524,7 +524,7 @@ arrow_fetch_secondary_index(kern_context *kcxt,
 							uint64_t *p_end)
 {
 	char	   *base = (char *)kds + __kds_unpack(values_offset);
-	char	   *extra = (char *)kds + __kds_unpack(values_length);
+	//char	   *extra = (char *)kds + __kds_unpack(values_length);
 	uint64_t	start, end;
 
 	if (!values_offset || !values_length)

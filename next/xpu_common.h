@@ -22,20 +22,6 @@
 #include "postgres_ext.h"
 #include "pg_config.h"
 #include "pg_config_manual.h"
-#include "float2.h"
-
-/* Definition of several primitive types */
-typedef __int128	int128_t;
-#if defined(__CUDACC__)
-#include <cuda_fp16.h>
-typedef __half		float2_t;
-#elif defined(HAVE_FLOAT2)
-typedef _Float16	float2_t;
-#else
-typedef uint16_t	float2_t;
-#endif
-typedef float		float4_t;
-typedef double		float8_t;
 
 /*
  * Functions with qualifiers
@@ -59,6 +45,59 @@ typedef double		float8_t;
 #define PUBLIC_DATA
 #define STATIC_DATA						static
 #endif	/* __CUDACC__ */
+
+/* Definition of several primitive types */
+typedef __int128	int128_t;
+#include "float2.h"
+
+/*
+ * Limitation of types
+ */
+#ifndef SCHAR_MAX
+#define SCHAR_MAX       127
+#endif
+#ifndef SCHAR_MIN
+#define SCHAR_MIN       (-128)
+#endif
+#ifndef UCHAR_MAX
+#define UCHAR_MAX       255
+#endif
+#ifndef SHRT_MAX
+#define SHRT_MAX        32767
+#endif
+#ifndef SHRT_MIN
+#define SHRT_MIN        (-32767-1)
+#endif
+#ifndef USHRT_MAX
+#define USHRT_MAX       65535
+#endif
+#ifndef INT_MAX
+#define INT_MAX         2147483647
+#endif
+#ifndef INT_MIN
+#define INT_MIN         (-INT_MAX - 1)
+#endif
+#ifndef UINT_MAX
+#define UINT_MAX        4294967295U
+#endif
+#ifndef LONG_MAX
+#define LONG_MAX        0x7FFFFFFFFFFFFFFFLL
+#endif
+#ifndef LONG_MIN
+#define LONG_MIN        (-LONG_MAX - 1LL)
+#endif
+#ifndef ULONG_MAX
+#define ULONG_MAX       0xFFFFFFFFFFFFFFFFULL
+#endif
+#ifndef HALF_MAX
+#define HALF_MAX        __short_as_half__(0x7bff)
+#endif
+#ifndef FLT_MAX
+#define FLT_MAX         __int_as_float__(0x7f7fffffU)
+#endif
+#ifndef DBL_MAX
+#define DBL_MAX         __longlong_as_double__(0x7fefffffffffffffULL)
+#endif
 
 /*
  * Several fundamental data types and macros

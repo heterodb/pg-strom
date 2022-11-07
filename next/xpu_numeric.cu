@@ -336,7 +336,7 @@ PG_NUMERIC_TO_INT_TEMPLATE(int4,INT_MIN,INT_MAX)
 PG_NUMERIC_TO_INT_TEMPLATE(int8,LLONG_MIN,LLONG_MAX)
 PG_NUMERIC_TO_INT_TEMPLATE(money,LLONG_MIN,LLONG_MAX)
 
-#define PG_NUMERIC_TO_FLOAT_TEMPLATE(TARGET,__TYPE)					\
+#define PG_NUMERIC_TO_FLOAT_TEMPLATE(TARGET,__TEMP,__CAST)			\
 	PUBLIC_FUNCTION(bool)											\
 	pgfn_numeric_to_##TARGET(XPU_PGFUNCTION_ARGS)					\
 	{																\
@@ -353,7 +353,7 @@ PG_NUMERIC_TO_INT_TEMPLATE(money,LLONG_MIN,LLONG_MAX)
 			return true;											\
 		if (datum.kind == XPU_NUMERIC_KIND__VALID)					\
 		{															\
-			__TYPE		fval = datum.value;							\
+			__TEMP		fval = datum.value;							\
 			int16_t		weight = datum.weight;						\
 																	\
 			if (fval != 0.0)										\
@@ -374,19 +374,19 @@ PG_NUMERIC_TO_INT_TEMPLATE(money,LLONG_MIN,LLONG_MAX)
 					return false;									\
 				}													\
 			}														\
-			result->value = fval;									\
+			result->value = __CAST(fval);							\
 		}															\
 		else if (datum.kind == XPU_NUMERIC_KIND__POS_INF)			\
-			result->value = INFINITY;								\
+			result->value = __CAST(INFINITY);						\
 		else if (datum.kind == XPU_NUMERIC_KIND__NEG_INF)			\
-			result->value = -INFINITY;								\
+			result->value = __CAST(-INFINITY);						\
 		else														\
-			result->value = NAN;									\
+			result->value = __CAST(NAN);							\
 		return true;												\
 	}
-PG_NUMERIC_TO_FLOAT_TEMPLATE(float2,float)
-PG_NUMERIC_TO_FLOAT_TEMPLATE(float4,float)
-PG_NUMERIC_TO_FLOAT_TEMPLATE(float8,double)
+PG_NUMERIC_TO_FLOAT_TEMPLATE(float2, float,__to_fp16)
+PG_NUMERIC_TO_FLOAT_TEMPLATE(float4, float,__to_fp32)
+PG_NUMERIC_TO_FLOAT_TEMPLATE(float8,double,__to_fp64)
 
 #define PG_INT_TO_NUMERIC_TEMPLATE(SOURCE)							\
 	PUBLIC_FUNCTION(bool)											\
@@ -411,7 +411,8 @@ PG_INT_TO_NUMERIC_TEMPLATE(int4)
 PG_INT_TO_NUMERIC_TEMPLATE(int8)
 PG_INT_TO_NUMERIC_TEMPLATE(money)
 
-#define PG_FLOAT_TO_NUMERIC_TEMPLATE(SOURCE,__TYPE,__MODF,__RINTL)	\
+#define PG_FLOAT_TO_NUMERIC_TEMPLATE(SOURCE,__TYPE,__CAST,			\
+									 __MODF,__RINTL)				\
 	PUBLIC_FUNCTION(bool)											\
 	pgfn_##SOURCE##_to_numeric(XPU_PGFUNCTION_ARGS)					\
 	{																\
@@ -427,7 +428,7 @@ PG_INT_TO_NUMERIC_TEMPLATE(money)
 		result->isnull = datum.isnull;								\
 		if (result->isnull)											\
 			return true;											\
-		fval = datum.value;											\
+		fval = __CAST(datum.value);									\
 		if (isinf(fval))											\
 			result->kind = (fval > 0.0								\
 							? XPU_NUMERIC_KIND__POS_INF				\
@@ -453,9 +454,9 @@ PG_INT_TO_NUMERIC_TEMPLATE(money)
 		}															\
 		return true;												\
 	}
-PG_FLOAT_TO_NUMERIC_TEMPLATE(float2,float,modff,rintf)
-PG_FLOAT_TO_NUMERIC_TEMPLATE(float4,float,modff,rintf)
-PG_FLOAT_TO_NUMERIC_TEMPLATE(float8,double,modf,rint)
+PG_FLOAT_TO_NUMERIC_TEMPLATE(float2, float,__to_fp32,modff,rintf)
+PG_FLOAT_TO_NUMERIC_TEMPLATE(float4, float,__to_fp32,modff,rintf)
+PG_FLOAT_TO_NUMERIC_TEMPLATE(float8,double,__to_fp64,modf, rint)
 
 STATIC_FUNCTION(int)
 __numeric_compare(const xpu_numeric_t *a, const xpu_numeric_t *b)
