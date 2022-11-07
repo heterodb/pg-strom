@@ -1,7 +1,7 @@
 /*
- * xpu_common.c
+ * xpu_common.cu
  *
- * Core implementation of xPU device code
+ * Core implementation of GPU/DPU device code
  * ----
  * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2022 (C) PG-Strom Developers Team
@@ -10,7 +10,6 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "xpu_common.h"
-#include <alloca.h>
 
 /*
  * Const Expression

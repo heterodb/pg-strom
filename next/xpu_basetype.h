@@ -1,10 +1,10 @@
 /*
  * xpu_basetype.h
  *
- * Collection of base Int/Float functions for xPU (GPU/DPU/SPU)
+ * Collection of base Int/Float functions for both of GPU and DPU
  * --
- * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2021 (C) PG-Strom Developers Team
+ * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2022 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.

@@ -1,7 +1,7 @@
 /*
- * xpu_basetype.c
+ * xpu_basetype.cc
  *
- * Collection of primitive Int/Float type support on XPU(GPU/DPU/SPU)
+ * Collection of primitive Int/Float type support for both of GPU and DPU
  * ----
  * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2022 (C) PG-Strom Developers Team

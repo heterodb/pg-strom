@@ -4,8 +4,8 @@
 PG_CONFIG ?= pg_config
 CC ?= gcc
 
-DPUSERV_OBJS = dpuserv.o dpu_common.o dpu_basetype.o \
-               dpu_numeric.o dpu_timelib.o dpu_textlib.o dpu_misclib.o
+DPUSERV_OBJS = dpuserv.o xpu_common.o xpu_basetype.o \
+               xpu_numeric.o xpu_timelib.o xpu_textlib.o xpu_misclib.o
 DPUSERB_HEADS = dpuserv.h arrow_defs.h xpu_common.h xpu_basetype.h \
                 xpu_basetype.h xpu_numeric.h xpu_textlib.h \
                 xpu_timelib.h xpu_misclib.h

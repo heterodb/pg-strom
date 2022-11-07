@@ -36,7 +36,7 @@ typedef uint16_t			half_t;
 
 /* int/float reinterpret functions */
 static inline double
-long_as_double(uint64_t ival)
+__long_as_double__(const uint64_t ival)
 {
 	union {
 		uint64_t	ival;
@@ -47,7 +47,7 @@ long_as_double(uint64_t ival)
 }
 
 static inline uint64_t
-double_as_long(double fval)
+__double_as_long(const double fval)
 {
 	union {
 		uint64_t	ival;
@@ -58,7 +58,7 @@ double_as_long(double fval)
 }
 
 static inline float
-int_as_float(uint32_t ival)
+__int_as_float__(const uint32_t ival)
 {
 	union {
 		uint32_t	ival;
@@ -69,7 +69,7 @@ int_as_float(uint32_t ival)
 }
 
 static inline uint32_t
-float_as_int(float fval)
+__float_as_int__(const float fval)
 {
 	union {
 		uint32_t	ival;
@@ -85,7 +85,7 @@ float_as_int(float fval)
 static inline half_t
 fp32_to_fp16(float value)
 {
-	uint32_t	x = float_as_int(value);
+	uint32_t	x = __float_as_int__(value);
 	uint32_t	u = (x & 0x7fffffffU);
 	uint32_t	sign = ((x >> 16U) & 0x8000U);
 	uint32_t	remainder;
@@ -176,7 +176,7 @@ fp16_to_fp32(half_t fp16val)
 
 		result = (sign | (expo << FP32_FRAC_BITS) | (frac << 13));
 	}
-	return int_as_float(result);
+	return __int_as_float__(result);
 }
 
 static inline double
@@ -214,6 +214,6 @@ fp16_to_fp64(half_t fp16val)
 		expo += FP64_EXPO_BIAS;
 		result = (sign | (expo << FP64_FRAC_BITS) | (frac << 42));
 	}
-	return long_as_double(result);
+	return __long_as_double__(result);
 }
 #endif	/* FLOAT2_H */

@@ -1,7 +1,7 @@
 /*
  * xpu_common.h
  *
- * Common header portion for xPU(GPU/DPU/SPU) device code.
+ * Common header portion for both of GPU and DPU device code
  * --
  * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2021 (C) PG-Strom Developers Team
@@ -11,6 +11,7 @@
  */
 #ifndef XPU_COMMON_H
 #define XPU_COMMON_H
+#include <alloca.h>
 #include <assert.h>
 #include <limits.h>
 #include <stddef.h>

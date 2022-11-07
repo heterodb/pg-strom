@@ -214,7 +214,6 @@ kern_gpuscan_main_block(kern_session_info *session,
 	__shared__ uint32_t	smx_row_count;
 	PageHeaderData	   *curr_page = NULL;
 	uint32_t			count, index, mask;
-	uint32_t			__last_index__ = INT_MAX;
 	
 	assert(kds_src->format == KDS_FORMAT_BLOCK &&
 		   kexp_scan_quals->opcode == FuncOpCode__LoadVars &&
@@ -338,7 +337,6 @@ kern_gpuscan_main_block(kern_session_info *session,
 					warp->row_count = atomicAdd(&smx_row_count, 1);
 				count = __shfl_sync(__activemask(), warp->row_count, 0);
 				index = count * get_num_groups() + get_group_id();
-				__last_index__ = index;
 				if (index < kds_src->nitems)
 				{
 					curr_page = (PageHeaderData *)((char *)kds_src +

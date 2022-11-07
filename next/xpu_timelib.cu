@@ -1,7 +1,7 @@
 /*
- * xpu_timelib.c
+ * xpu_timelib.cu
  *
- * Collection of the primitive Date/Time type support on xPU(GPU/DPU/SPU)
+ * Collection of the primitive Date/Time type support for both of GPU and DPU
  * ----
  * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2022 (C) PG-Strom Developers Team
