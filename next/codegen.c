@@ -1810,7 +1810,7 @@ __xpucode_to_cstring(StringInfo buf,
 			break;
 		case FuncOpCode__Projection:
 			__xpucode_projection_cstring(buf, kexp, css, es, ancestors);
-			break;
+			return;
 		case FuncOpCode__BoolExpr_And:
 			appendStringInfo(buf, "{Bool::AND");
 			break;
