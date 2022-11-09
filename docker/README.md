@@ -4,7 +4,7 @@ It is possible to run PG-Strom in a Docker container where CUDA is enabled. This
 
 ## System Requirements
 
-PG-Strom requires a recent NVIDIA video card. There is an official hardware validation list located [here](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List), but it is not comprehensive and assumes that you are running PG-Strom on a bare-metal system rather than a VM or Docker container.
+PG-Strom requires a Linux host and a recent NVIDIA video card. There is an official hardware validation list located [here](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List), but it is not comprehensive and assumes that you are running PG-Strom on a bare-metal system rather than a VM or Docker container.
 
 This Dockerfile was tested on a computer with the following specs:
 
@@ -16,11 +16,11 @@ This Dockerfile was tested on a computer with the following specs:
 * Linux NVIDIA Driver 520.61.05
 * Linux Docker 20.10.21
 
-**Note:** Running in Windows with WSL2 Linux is NOT possible, as the Windows NVIDIA driver is lacking the necessary CUDA APIs for PG-Strom, therefore resulting in an error.
+**Note:** Running in Windows with Docker on WSL 2 Linux is NOT possible, as the Windows NVIDIA driver is lacking the necessary CUDA APIs for PG-Strom, therefore resulting in an error.
 
 ## Run the Published Experimental Image `murphye/pgstrom-postgis33:v1`
 
-If you choose to not build your own image (see next section), you may choose to use a pre-built image on DockerHub.
+If you choose to not build your own image (see next section), you may choose to use a pre-built image on DockerHub. See the next sections for more information on the command line options used. This command will pull and run the container, provided that there are not any errors due to hardware or system configuration.
 
 ```
 docker run --name postgis-db \
@@ -34,6 +34,11 @@ docker run --name postgis-db \
 -p 5432:5432 \
 -v ${HOME}/postgis-data:/var/lib/postgresql/data \
 -d murphye/pgstrom-postgis33:v1
+```
+
+Tail the logs and watch for any errors!
+```
+docker logs postgis-db -f
 ```
 
 ## Build the PostGIS + PG-Strom Docker Image
@@ -147,7 +152,7 @@ You can optionally run NVIDIA-SMI to validate that the query is executing on the
 nvidia-smi -l 1
 ```
 
-Next, run a bunch of queries in succession, and you can just run the example `SELECT` from above.
+Next, run `SELECT` rapidly in succession, and you can just run the example `SELECT` from above.
 
 Every 1 second you will see outputs from `nvidia-smi`, and some of the outputs will show a `SELECT` command running at that exact moment. Not all of them will show this. See the last row here in this output as you can see the `SELECT` in the 6th column.
 
