@@ -1,6 +1,6 @@
 # PG-Strom Experimental Dockerfile Documentation
 
-It is possible to run PG-Strom in a Docker container where CUDA is enabled. This is an experimental Dockerfile that you can try to run on your own system. There is a good possibility that this Dockerfile will NOT work on your own system as-is. This Dockerfile was tested originally using WSL2 Ubuntu on Windows 11, but should, in theory, work on any CUDA-enabled container runtime.
+It is possible to run PG-Strom in a Docker container where CUDA is enabled. This is an **experimental** Dockerfile that you can try to run on your own system.
 
 ## System Requirements
 
@@ -11,29 +11,25 @@ This Dockerfile was tested on a computer with the following specs:
 * Dell Precision 3240 Compact
 * 3.3 GHz Intel Xeon W 6-Core (10th Gen)
 * NVIDIA Quadro RTX 3000 (6GB GDDR6)
-* 64 GB of 2666 MHz DDR4 RAM
-* Windows 11
-* Windows NVIDIA Driver 517.37
-* Windows Subsystem for Linux 2 (WSL 2) with 31Gi of Memory and 8Gi of Swap (Run `free -mh` in Linux)
-* Ubuntu 20.04.5 LTS running in WSL 2
-* Windows Docker v20.10.17 (WSL 2 Backend)
+* 64 GB of DDR4 RAM
+* Rocky Linux 9.0 (RHEL9 Compatible)
+* Linux NVIDIA Driver 520.61.05
+* Linux Docker 20.10.21
 
-### WSL2 Docker Support with CUDA GPU Acceleration
+**Note:** Running in Windows with WSL2 Linux is NOT possible, as the Windows NVIDIA driver is lacking the necessary CUDA APIs for PG-Strom, therefore resulting in an error.
 
-The NVIDIA driver supports the virtualization of the GPU with CUDA support under WSL 2, and it works automatically. You can read more on this capability [here](https://docs.nvidia.com/cuda/wsl-user-guide/index.html). Docker for WSL 2 also support GPU virtualization to the Containers, and you can read more [here](https://www.docker.com/blog/wsl-2-gpu-support-for-docker-desktop-on-nvidia-gpus/). These integrations make it really easy to get up and running with CUDA support in containers!
 
 ## Build the PostGIS + PG-Strom Docker Image
 
 ```
 cd docker/pg13
-docker build -t pgstrom-postgis33-pg13-cuda11.7.0-rockylinux8 -f Dockerfile.pgstrom-postgis33-pg13-cuda11.7.0-rockylinux8 .
+docker build -t pgstrom-postgis33 -f Dockerfile.pgstrom-postgis33 .
 ```
-
-The generated Docker image will be 2.23GB in size.
+The generated Docker image will be 2.63GB in size. This is a large image, but many dependences are required to run PostGIS and PG-Strom.
 
 ```
-docker images | grep pgstrom-postgis33-pg13-cuda11.7.0-rockylinux8
-pgstrom-postgis33-pg13-cuda11.7.0-rockylinux8   latest    c7f30399ebe4   25 minutes ago   2.23GB
+docker images | grep pgstrom-postgis33
+pgstrom-postgis33                    latest                    96a26ca3d494   4 minutes ago    2.63GB
 ```
 
 ## Run the PostGIS + PG-Strom Docker Container
@@ -43,14 +39,15 @@ This command will run the PostGIS + PG-Strom Docker Image with a volume and as d
 ```
 docker run --name postgis-db \
 -d \
+--privileged \
 --gpus=all \
 --shm-size=512MB \
 -e POSTGRES_USER=postgis \
 -e POSTGRES_PASSWORD=password \
 -e POSTGRES_DB=postgis \
 -p 5432:5432 \
--v ${PWD}/postgis-data:/var/lib/postgresql/data \
--d pgstrom-postgis33-pg13-cuda11.7.0-rockylinux8
+-v ${HOME}/postgis-data:/var/lib/postgresql/data \
+-d pgstrom-postgis33
 ```
 
 Tail the logs and watch for any errors!
@@ -95,4 +92,61 @@ docker rm postgis-db
 Remove the data directory from the PostGIS + PG-Strom Docker volume.
 ```
 sudo rm -r postgis-data
+```
+
+## Run and Verify
+
+### Setup Test Table
+
+First, create a very simple table containing a point.
+
+```
+CREATE TABLE testtable(test_id serial primary key, description text, geom geometry(POINT));
+INSERT INTO testtable(description, geom) VALUES('some place', ST_MakePoint(15, 15));
+SELECT * FROM testtable;
+```
+
+Next, run an `EXPLAIN SELECT` to verify that the query is planned to be run on the GPU. Notice the `Custom Scan (GpuScan)`.
+
+```
+EXPLAIN SELECT * FROM testtable WHERE st_contains('polygon ((11 10,30 10,30 20,10 20,11 10))', geom);
+
+Custom Scan (GpuScan) on testtable  (cost=5348.13..5348.13 rows=1 width=68)
+"  GPU Filter: st_contains('01030000000100000005000000000000000000264000000000000024400000000000003E4000000000000024400000000000003E4000000000000034400000000000002440000000000000344000000000000026400000000000002440'::geometry, geom)"
+```
+
+Verify that the query can execute without an error.
+```
+SELECT * FROM testtable WHERE st_contains('polygon ((11 10,30 10,30 20,10 20,11 10))', geom);
+
+1,some place,01010000000000000000002E400000000000002E40
+```
+
+### Run NVIDIA-SMI
+
+You can optionally run NVIDIA-SMI to validate that the query is executing on the GPU.
+
+```
+nvidia-smi -l 1
+```
+
+Next, run a bunch of queries in succession, and you can just run the example `SELECT` from above.
+
+Every 1 second you will see outputs from `nvidia-smi`, and some of the outputs will show a `SELECT` command running at that exact moment. Not all of them will show this. See the last row here in this output as you can see the `SELECT` in the 6th column.
+
+```
++-----------------------------------------------------------------------------+
+| Processes:                                                                  |
+|  GPU   GI   CI        PID   Type   Process name                  GPU Memory |
+|        ID   ID                                                   Usage      |
+|=============================================================================|
+|    0   N/A  N/A      2524      G   /usr/libexec/Xorg                 585MiB |
+|    0   N/A  N/A      2648      G   /usr/bin/gnome-shell              143MiB |
+|    0   N/A  N/A      3198      G   ...AAAAAAAAA= --shared-files       53MiB |
+|    0   N/A  N/A      3712      G   /usr/lib64/firefox/firefox        142MiB |
+|    0   N/A  N/A      4417      G   ...RendererForSitePerProcess       77MiB |
+|    0   N/A  N/A      7001      G   ...RendererForSitePerProcess       22MiB |
+|    0   N/A  N/A     13036      C   postgres: GPU0 memory keeper       80MiB |
+|    0   N/A  N/A     13714      C   ... 172.17.0.1(38868) SELECT      300MiB |
++-----------------------------------------------------------------------------+
 ```
