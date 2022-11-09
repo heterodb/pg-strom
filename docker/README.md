@@ -47,7 +47,7 @@ docker logs postgis-db -f
 cd docker/pg13
 docker build -t pgstrom-postgis33 -f Dockerfile.pgstrom-postgis33 .
 ```
-The generated Docker image will be 2.63GB in size. This is a large image, but many dependences are required to run PostGIS and PG-Strom.
+The generated Docker image will be 2.63GB in size. When compressed, the size is appromimately 1.2 GB per DockerHub.
 
 ```
 docker images | grep pgstrom-postgis33
