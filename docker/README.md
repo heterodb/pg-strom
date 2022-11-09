@@ -18,6 +18,23 @@ This Dockerfile was tested on a computer with the following specs:
 
 **Note:** Running in Windows with WSL2 Linux is NOT possible, as the Windows NVIDIA driver is lacking the necessary CUDA APIs for PG-Strom, therefore resulting in an error.
 
+## Run the Published Experimental Image `murphye/pgstrom-postgis33:v1`
+
+If you choose to not build your own image (see next section), you may choose to use a pre-built image on DockerHub.
+
+```
+docker run --name postgis-db \
+-d \
+--privileged \
+--gpus=all \
+--shm-size=512MB \
+-e POSTGRES_USER=postgis \
+-e POSTGRES_PASSWORD=password \
+-e POSTGRES_DB=postgis \
+-p 5432:5432 \
+-v ${HOME}/postgis-data:/var/lib/postgresql/data \
+-d murphye/pgstrom-postgis33:v1
+```
 
 ## Build the PostGIS + PG-Strom Docker Image
 
@@ -91,7 +108,7 @@ docker rm postgis-db
 ```
 Remove the data directory from the PostGIS + PG-Strom Docker volume.
 ```
-sudo rm -r postgis-data
+sudo rm -r ${HOME}/postgis-data
 ```
 
 ## Run and Verify
@@ -149,4 +166,13 @@ Every 1 second you will see outputs from `nvidia-smi`, and some of the outputs w
 |    0   N/A  N/A     13036      C   postgres: GPU0 memory keeper       80MiB |
 |    0   N/A  N/A     13714      C   ... 172.17.0.1(38868) SELECT      300MiB |
 +-----------------------------------------------------------------------------+
+```
+
+## Publish Docker Image
+
+If you choose to publish the image to your own repository, you can retag the image and use `docker push`. Here is an example for `murphye`.
+
+```
+docker tag pgstrom-postgis33 murphye/pgstrom-postgis33:v1
+docker push murphye/pgstrom-postgis33:v1
 ```
