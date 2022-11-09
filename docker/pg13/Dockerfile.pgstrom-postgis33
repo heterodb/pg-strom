@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.7.0-base-rockylinux8
+FROM nvidia/cuda:11.8.0-base-rockylinux8
 
 ENV SUMMARY="This PostGIS Dockerfile uses PG-Strom which is an extension module of PostgreSQL that enables the GPU acceleration of SQL workloads for data analytics or batch processing." \
     DESCRIPTION="PG-Strom features a GPU code generator that automatically generates GPU program according to the SQL commands and asynchronous \
@@ -11,7 +11,7 @@ ENV SUMMARY="This PostGIS Dockerfile uses PG-Strom which is an extension module 
 ENV PG_MAJOR_VERSION 13
 ENV POSTGIS_VERSION 33_$PG_MAJOR_VERSION
 ENV GOSU_VERSION 1.14
-ENV CUDA_VERSION 11-7
+ENV CUDA_VERSION 11-8
 ENV LIBNVRTC_VERSION 11.2
 ENV HETERODB_SWDC_VERSION 1.2-1
 
@@ -34,14 +34,15 @@ RUN dnf install -y dnf-plugins-core
 RUN dnf config-manager --set-enabled powertools
 
 # Install PostGIS and additional packages that will be needed to run
-RUN dnf install -y postgis$POSTGIS_VERSION ca-certificates findutils
+RUN dnf install -y postgis$POSTGIS_VERSION
 # Install some utilities for convenience for things like loading the Tiger dataset from within the container
-RUN dnf install -y wget curl unzip nano
-
-RUN dnf install -y postgresql$PG_MAJOR_VERSION-devel
+RUN dnf install -y ca-certificates findutils wget curl unzip nano
 
 # Install postgresql-devel for header files that are needed by PG-Strom
-RUN dnf install -y postgresql$PG_MAJOR_VERSION-devel
+# RUN dnf install -y postgresql$PG_MAJOR_VERSION-devel
+# HACK: Line commented above and replaced with the following 2 lines. This significantly lowers the size of the container image, but is poor practice with RPM
+RUN wget https://download.postgresql.org/pub/repos/yum/13/redhat/rhel-8-x86_64/postgresql13-devel-13.8-1PGDG.rhel8.x86_64.rpm
+RUN rpm -i postgresql13-devel-13.8-1PGDG.rhel8.x86_64.rpm --force --nodeps --noverify
 
 # Install 'cuda-nvrtc and cuda-cudart-devel' which is needed by PG-Strom
 RUN dnf install -y cuda-nvrtc-$CUDA_VERSION
@@ -51,14 +52,6 @@ RUN dnf install -y cuda-cudart-devel-$CUDA_VERSION
 # Install PG-Strom
 RUN dnf install -y https://heterodb.github.io/swdc/yum/rhel8-noarch/heterodb-swdc-$HETERODB_SWDC_VERSION.el8.noarch.rpm
 RUN dnf install -y pg_strom-PG$PG_MAJOR_VERSION
-
-# Workaround/hack for https://github.com/heterodb/pg-strom/issues/552#issuecomment-1288449738
-# When running in a VM or container, the NVIDIA driver will not be available under '/sys/module/nvidia/version'
-# Move the original 'gpuinfo' executable
-RUN mv /usr/pgsql-$PG_MAJOR_VERSION/bin/gpuinfo /usr/pgsql-$PG_MAJOR_VERSION/bin/gpuinfo.orig
-# Add the 'gpuinfo.sh' workaround script as a substitute 'gpuinfo'
-COPY gpuinfo.sh /usr/pgsql-$PG_MAJOR_VERSION/bin/gpuinfo
-RUN chmod +x /usr/pgsql-$PG_MAJOR_VERSION/bin/gpuinfo
 
 # OPTIONAL and untested!: heterodb-extra requires a license file in /etc/heterodb.license
 # Modify this Dockerfile if you wish to use 'heterodb-extra'
@@ -74,11 +67,9 @@ RUN rm /usr/local/bin/gosu.asc \
     && rm -r /root/.gnupg/ \
     && chmod +x /usr/local/bin/gosu
 
-# Workaround/hack for library not found with the error of " failed on open 'libnvrtc.so.11.7' and 'libnvrtc.so': No such file or directory". More research is needed on the reason why this error happens.
+# Workaround/hack for library not found with the error of " failed on open 'libnvrtc.so.11.8' and 'libnvrtc.so': No such file or directory". More research is needed on the reason why this error happens.
 RUN ln -s /usr/local/cuda/lib64/libnvrtc.so.$LIBNVRTC_VERSION /usr/local/cuda/lib64/libnvrtc.so
 
-#ENV CUDA_VISIBLE_DEVICES 0
-#ENV CUDA_DEVICE_ORDER 00000000:01:00.0
 ENV LD_LIBRARY_PATH ${LD_LIBRARY_PATH}:/usr/local/cuda/lib64
 ENV PATH $PATH:/usr/pgsql-$PG_MAJOR_VERSION/bin
 ENV PGDATA /var/lib/postgresql/data
