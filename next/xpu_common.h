@@ -169,9 +169,9 @@ __Fetch(const T *ptr)
 typedef struct {
 	uint32_t	errcode;	/* one of the ERRCODE_* */
 	int32_t		lineno;
-	char		filename[KERN_ERRORBUF_FILENAME_LEN];
-	char		funcname[KERN_ERRORBUF_FUNCNAME_LEN];
-	char		message[KERN_ERRORBUF_MESSAGE_LEN];
+	char		filename[KERN_ERRORBUF_FILENAME_LEN+1];
+	char		funcname[KERN_ERRORBUF_FUNCNAME_LEN+1];
+	char		message[KERN_ERRORBUF_MESSAGE_LEN+1];
 } kern_errorbuf;
 
 /*
@@ -1342,6 +1342,20 @@ typedef struct {
 
 EXTERN_DATA xpu_type_catalog_entry	builtin_xpu_types_catalog[];
 
+/* device type hash for xPU service */
+typedef struct xpu_type_hash_entry xpu_type_hash_entry;
+struct xpu_type_hash_entry
+{
+	xpu_type_hash_entry	   *next;
+	xpu_type_catalog_entry	cat;
+};
+typedef struct
+{
+	uint32_t		nitems;
+	uint32_t		nslots;
+	xpu_type_hash_entry *slots[1];	/* variable */
+} xpu_type_hash_table;
+
 /* ----------------------------------------------------------------
  *
  * Definition of device flags
@@ -1484,6 +1498,20 @@ typedef struct {
 } xpu_function_catalog_entry;
 
 EXTERN_DATA xpu_function_catalog_entry	builtin_xpu_functions_catalog[];
+
+/* device function hash for xPU service */
+typedef struct xpu_func_hash_entry	xpu_func_hash_entry;
+struct xpu_func_hash_entry
+{
+	xpu_func_hash_entry *next;
+	xpu_function_catalog_entry cat;
+};
+typedef struct
+{
+	uint32_t	nitems;
+	uint32_t	nslots;
+	xpu_func_hash_entry *slots[1];	/* variable */
+} xpu_func_hash_table;
 
 /*
  * PG-Strom Command Tag

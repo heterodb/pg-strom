@@ -25,6 +25,7 @@
 #include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <netdb.h>
 #include <arpa/inet.h>
 #include "xpu_common.h"
@@ -140,4 +141,5 @@ pthreadCondSignal(pthread_cond_t *cond)
 	if ((errno = pthread_cond_signal(cond)) != 0)
 		__Elog("failed on pthread_cond_signal: %m");
 }
+
 #endif	/* DPUSERV_H */

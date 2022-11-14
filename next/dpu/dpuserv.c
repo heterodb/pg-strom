@@ -35,6 +35,414 @@ static pthread_mutex_t	dpu_command_mutex;
 static pthread_cond_t	dpu_command_cond;
 static dlist_head		dpu_command_list;
 static volatile bool	got_sigterm = false;
+static xpu_type_hash_table *dpuserv_type_htable = NULL;
+static xpu_func_hash_table *dpuserv_func_htable = NULL;
+
+/*
+ * dpuClientWriteBack
+ */
+static void
+__dpuClientWriteBack(dpuClient *dclient, struct iovec *iov, int iovcnt)
+{
+	pthreadMutexLock(&dclient->mutex);
+	if (dclient->sockfd >= 0)
+	{
+		ssize_t		nbytes;
+
+		while (iovcnt > 0)
+		{
+			nbytes = writev(dclient->sockfd, iov, iovcnt);
+			if (nbytes > 0)
+			{
+				do {
+					if (iov->iov_len <= nbytes)
+					{
+						nbytes -= iov->iov_len;
+						iov++;
+						iovcnt--;
+					}
+					else
+					{
+						iov->iov_base = (char *)iov->iov_base + nbytes;
+						iov->iov_len -= nbytes;
+						break;
+					}
+				} while (iovcnt > 0 && nbytes > 0);
+			}
+			else if (errno != EINTR)
+			{
+				/*
+				 * Peer socket is closed? Anyway, we cannot continue to
+				 * send back the message any more. So, clean up this client.
+				 */
+				close(dclient->sockfd);
+				dclient->sockfd = -1;
+				break;
+			}
+		}
+	}
+	pthreadMutexUnlock(&dclient->mutex);
+}
+
+static void
+dpuClientWriteBack(dpuClient *dclient,
+				   XpuCommand *resp,
+				   size_t      resp_sz,
+				   int         kds_nitems,
+				   kern_data_store **kds_array)
+{
+	struct iovec   *iov_array;
+	struct iovec   *iov;
+	int				i, iovcnt = 0;
+
+	iov_array = alloca(sizeof(struct iovec) * (2 * kds_nitems + 1));
+	iov = &iov_array[iovcnt++];
+	iov->iov_base = resp;
+	iov->iov_len  = resp_sz;
+	for (i=0; i < kds_nitems; i++)
+	{
+		kern_data_store *kds = kds_array[i];
+		size_t		sz1, sz2;
+
+		assert(kds->format == KDS_FORMAT_ROW);
+		sz1 = KDS_HEAD_LENGTH(kds) + MAXALIGN(sizeof(uint32_t) * kds->nitems);
+		sz2 = __kds_unpack(kds->usage);
+		if (sz1 + sz2 == kds->length)
+		{
+			iov = &iov_array[iovcnt++];
+			iov->iov_base = kds;
+			iov->iov_len  = kds->length;
+		}
+		else
+		{
+			assert(sz1 + sz2 < kds->length);
+			iov = &iov_array[iovcnt++];
+			iov->iov_base = kds;
+			iov->iov_len  = sz1;
+
+			if (sz2 > 0)
+			{
+				iov = &iov_array[iovcnt++];
+				iov->iov_base = (char *)kds + kds->length - sz2;
+				iov->iov_len  = sz2;
+			}
+			kds->length = (sz1 + sz2);
+		}
+		resp_sz += kds->length;
+	}
+	resp->length = resp_sz;
+	__dpuClientWriteBack(dclient, iov_array, iovcnt);
+}
+
+/*
+ * dpuClientElog
+ */
+static void
+__dpuClientElogRaw(dpuClient *dclient, kern_errorbuf *errorbuf)
+{
+	XpuCommand		resp;
+	struct iovec	iov;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag = XpuCommandTag__Error;
+	resp.length = offsetof(XpuCommand, u.error) + sizeof(kern_errorbuf);
+	memcpy(&resp.u.error, errorbuf, sizeof(kern_errorbuf));
+
+	iov.iov_base = &resp;
+	iov.iov_len  = resp.length;
+	__dpuClientWriteBack(dclient, &iov, 1);
+}
+
+static void
+__dpuClientElog(dpuClient *dclient,
+				int errcode,
+				const char *filename, int lineno,
+				const char *funcname,
+				const char *fmt, ...)
+{
+	XpuCommand		resp;
+	va_list			ap;
+	struct iovec	iov;
+	const char	   *pos;
+
+	for (pos = filename; *pos != '\0'; pos++)
+	{
+		if (pos[0] == '/' && pos[1] != '\0')
+			filename = pos + 1;
+	}
+	memset(&resp, 0, sizeof(resp));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag = XpuCommandTag__Error;
+	resp.length = offsetof(XpuCommand, u.error) + sizeof(kern_errorbuf);
+	resp.u.error.errcode = errcode;
+	resp.u.error.lineno = lineno;
+	strncpy(resp.u.error.filename, filename, KERN_ERRORBUF_FILENAME_LEN);
+	strncpy(resp.u.error.funcname, funcname, KERN_ERRORBUF_FUNCNAME_LEN);
+
+	va_start(ap, fmt);
+	vsnprintf(resp.u.error.message, KERN_ERRORBUF_MESSAGE_LEN, fmt, ap);
+	va_end(ap);
+
+	iov.iov_base = &resp;
+	iov.iov_len  = resp.length;
+	__dpuClientWriteBack(dclient, &iov, 1);
+}
+
+#define dpuClientElog(dclient,fmt,...)			\
+	__dpuClientElog((dclient), ERRCODE_DEVICE_INTERNAL,	\
+					__FILE__, __LINE__, __FUNCTION__,	\
+					(fmt), ##__VA_ARGS__)
+/*
+ * xPU type/func lookup hash-table
+ */
+static void
+__setupDevTypeLinkageTable(uint32_t xpu_type_hash_nslots)
+{
+	xpu_type_hash_entry *entry;
+	uint32_t	i, k;
+
+	dpuserv_type_htable = calloc(1, offsetof(xpu_type_hash_table,
+											 slots[xpu_type_hash_nslots]));
+	if (!dpuserv_type_htable)
+		__Elog("out of memory");
+	dpuserv_type_htable->nslots = xpu_type_hash_nslots;
+	for (i=0; builtin_xpu_types_catalog[i].type_ops != NULL; i++)
+	{
+		entry = malloc(sizeof(xpu_type_hash_entry));
+		if (!entry)
+			__Elog("out of memory");
+		memcpy(&entry->cat,
+			   &builtin_xpu_types_catalog[i],
+			   sizeof(xpu_type_catalog_entry));
+		k = builtin_xpu_types_catalog[i].type_opcode % xpu_type_hash_nslots;
+		entry->next = dpuserv_type_htable->slots[k];
+		dpuserv_type_htable->slots[k] = entry;
+	}
+	/* add custom type */
+}
+
+static void
+__setupDevFuncLinkageTable(uint32_t xpu_func_hash_nslots)
+{
+	xpu_func_hash_entry *entry;
+	uint32_t	i, k;
+
+	dpuserv_func_htable = calloc(1, offsetof(xpu_func_hash_table,
+											 slots[xpu_func_hash_nslots]));
+	if (!dpuserv_func_htable)
+		__Elog("out of memory");
+	dpuserv_func_htable->nslots = xpu_func_hash_nslots;
+	for (i=0; builtin_xpu_functions_catalog[i].func_dptr != NULL; i++)
+	{
+		entry = malloc(sizeof(xpu_func_hash_entry));
+		if (!entry)
+			__Elog("out of memory");
+		memcpy(&entry->cat,
+			   &builtin_xpu_functions_catalog[i],
+			   sizeof(xpu_function_catalog_entry));
+		k = entry->cat.func_opcode % xpu_func_hash_nslots;
+		entry->next = dpuserv_func_htable->slots[k];
+		dpuserv_func_htable->slots[k] = entry;
+	}
+	/* add custom functions here */
+}
+
+static bool
+__resolveDevicePointersWalker(kern_expression *kexp,
+							  const xpu_type_hash_table *xtype_htable,
+							  const xpu_func_hash_table *xfunc_htable)
+{
+	const xpu_type_hash_entry *dtype_hentry;
+	const xpu_func_hash_entry *dfunc_hentry;
+	kern_expression *karg;
+	uint32_t	i, k, n;
+
+	/* lookup device function */
+	k = (uint32_t)kexp->opcode % xfunc_htable->nslots;
+	for (dfunc_hentry = xfunc_htable->slots[k];
+		 dfunc_hentry != NULL;
+		 dfunc_hentry = dfunc_hentry->next)
+	{
+		if (dfunc_hentry->cat.func_opcode == kexp->opcode)
+			break;
+	}
+	if (!dfunc_hentry)
+	{
+		fprintf(stderr, "device function pointer for opcode:%u not found.\n",
+				(int)kexp->opcode);
+		return false;
+	}
+	kexp->fn_dptr = dfunc_hentry->cat.func_dptr;
+
+	/* lookup device type */
+	k = kexp->exptype % xtype_htable->nslots;
+	for (dtype_hentry = xtype_htable->slots[k];
+		 dtype_hentry != NULL;
+		 dtype_hentry = dtype_hentry->next)
+	{
+		if (dtype_hentry->cat.type_opcode == kexp->exptype)
+			break;
+	}
+	if (!dtype_hentry)
+	{
+		fprintf(stderr, "device type pointer for opcode:%u not found.\n",
+				(int)kexp->exptype);
+		return false;
+	}
+	kexp->expr_ops = dtype_hentry->cat.type_ops;
+
+	/* special handling for Projection */
+	if (kexp->opcode == FuncOpCode__Projection)
+	{
+		n = kexp->u.proj.nexprs + kexp->u.proj.nattrs;
+		for (i=0; i < n; i++)
+		{
+			kern_projection_desc *desc = &kexp->u.proj.desc[i];
+
+			k = desc->slot_type % xtype_htable->nslots;
+			for (dtype_hentry = xtype_htable->slots[k];
+				 dtype_hentry != NULL;
+				 dtype_hentry = dtype_hentry->next)
+			{
+				if (dtype_hentry->cat.type_opcode == desc->slot_type)
+					break;
+			}
+			if (dtype_hentry)
+				desc->slot_ops = dtype_hentry->cat.type_ops;
+			else if (i >= kexp->u.proj.nexprs)
+				desc->slot_ops = NULL;	/* PostgreSQL generic projection */
+			else
+			{
+				fprintf(stderr, "device type pointer for opcode:%u not found.\n",
+						(int)desc->slot_type);
+				return false;
+			}
+			fprintf(stderr, "desc[%d] slot_id=%u slot_type=%d\n",
+					i, desc->slot_id, desc->slot_type);
+		}
+	}
+
+	/* arguments  */
+	for (i=0, karg=KEXP_FIRST_ARG(kexp);
+		 i < kexp->nr_args;
+		 i++, karg=KEXP_NEXT_ARG(karg))
+	{
+		if (!__KEXP_IS_VALID(kexp,karg))
+		{
+			fprintf(stderr, "xPU code corruption at args[%d]\n", i);
+			return false;
+		}
+		if (!__resolveDevicePointersWalker(karg,
+										   xtype_htable,
+										   xfunc_htable))
+			return false;
+	}
+	return true;
+}
+
+static bool
+xpuServResolveDevicePointers(kern_session_info *session,
+							 const xpu_type_hash_table *xtype_htable,
+							 const xpu_func_hash_table *xfunc_htable,
+							 const xpu_encode_info *xpu_encode_catalog)
+{
+	xpu_encode_info *encode = SESSION_ENCODE(session);
+	kern_expression *kexp;
+
+	if (session->xpucode_scan_quals)
+	{
+		kexp = (kern_expression *)((char *)session + session->xpucode_scan_quals);
+		if (!__resolveDevicePointersWalker(kexp,
+										   xtype_htable,
+										   xfunc_htable))
+			return false;
+	}
+
+	if (session->xpucode_scan_projs)
+	{
+		kexp = (kern_expression *)((char *)session + session->xpucode_scan_projs);
+		if (!__resolveDevicePointersWalker(kexp,
+										   xtype_htable,
+										   xfunc_htable))
+			return false;
+	}
+
+	if (encode)
+	{
+		int		i = 0;
+
+		while (xpu_encode_catalog[i].enc_mblen &&
+			   xpu_encode_catalog[i].enc_maxlen > 0)
+		{
+			if (strcmp(encode->encname, xpu_encode_catalog[i].encname) == 0)
+			{
+				encode->enc_maxlen = xpu_encode_catalog[i].enc_maxlen;
+				encode->enc_mblen  = xpu_encode_catalog[i].enc_mblen;
+				goto found;
+			}
+		}
+	}
+found:
+	return true;
+}
+
+/*
+ * dpuservHandleOpenSession 
+ */
+static bool
+dpuservHandleOpenSession(dpuClient *dclient, XpuCommand *xcmd)
+{
+	kern_session_info *session = &xcmd->u.session;
+	XpuCommand		resp;
+	struct iovec	iov;
+
+	if (dclient->session)
+	{
+		dpuClientElog(dclient, "OpenSession is called twice");
+		return false;
+	}
+	if (!xpuServResolveDevicePointers(session,
+									  dpuserv_type_htable,
+									  dpuserv_func_htable,
+									  xpu_encode_catalog))
+	{
+		dpuClientElog(dclient, "unable to resolve device pointers");
+		return false;
+	}
+	dclient->session = session;
+
+	/* success status */
+	memset(&resp, 0, sizeof(resp));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag = XpuCommandTag__Success;
+	resp.length = offsetof(XpuCommand, u);
+
+	iov.iov_base = &resp;
+	iov.iov_len  = resp.length;
+	__dpuClientWriteBack(dclient, &iov, 1);
+	return true;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /*
  * getDpuClient
@@ -69,7 +477,11 @@ putDpuClient(dpuClient *dclient, int count)
 		pthreadMutexUnlock(&dpu_client_mutex);
 		
 		if (dclient->session)
-			free(dclient->session);
+		{
+			void   *xcmd = ((char *)dclient->session -
+							offsetof(XpuCommand, u.session));
+			free(xcmd);
+		}
 		close(dclient->sockfd);
 		free(dclient);
 	}
@@ -105,6 +517,10 @@ dpuservDpuWorkerMain(void *__priv)
 				switch (xcmd->tag)
 				{
 					case XpuCommandTag__OpenSession:
+						if (dpuservHandleOpenSession(dclient, xcmd))
+							xcmd = NULL;	/* session information shall be kept until
+											 * end of the session. */
+						break;
 					case XpuCommandTag__XpuScanExec:
 					default:
 						fprintf(stderr, "[DPU-%ld] unknown xPU command (%d)\n",
@@ -486,5 +902,11 @@ main(int argc, char *argv[])
 		addr = res->ai_addr;
 		addr_len = res->ai_addrlen;
 	}
+	/*
+	 * setup device type/func lookup table
+	 */
+	__setupDevTypeLinkageTable(2 * TypeOpCode__BuiltInMax + 20);
+	__setupDevFuncLinkageTable(2 * FuncOpCode__BuiltInMax + 100);
+
 	return dpuserv_main(addr, addr_len);
 }
