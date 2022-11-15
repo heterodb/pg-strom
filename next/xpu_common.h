@@ -26,21 +26,35 @@
 /*
  * Functions with qualifiers
  */
-#ifdef __CUDACC__
+#if defined(__CUDACC__)
+/* CUDA C++ */
 #define INLINE_FUNCTION(RET_TYPE)				\
 	__device__ __forceinline__					\
 	static RET_TYPE __attribute__ ((unused))
 #define STATIC_FUNCTION(RET_TYPE)		__device__ static RET_TYPE
 #define PUBLIC_FUNCTION(RET_TYPE)		__device__ RET_TYPE
+#define EXTERN_FUNCTION(RET_TYPE)		extern "C" __device__ RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)		extern "C" __global__ RET_TYPE
 #define EXTERN_DATA						extern __device__
 #define PUBLIC_DATA						__device__
 #define STATIC_DATA						static __device__
+#elif defined(__cplusplus)
+/* C++ */
+#define INLINE_FUNCTION(RET_TYPE)		static inline RET_TYPE
+#define STATIC_FUNCTION(RET_TYPE)		static RET_TYPE
+#define PUBLIC_FUNCTION(RET_TYPE)		RET_TYPE
+#define KERNEL_FUNCTION(RET_TYPE)		extern "C" RET_TYPE
+#define EXTERN_FUNCTION(RET_TYPE)		extern "C" RET_TYPE
+#define EXTERN_DATA						extern "C"
+#define PUBLIC_DATA
+#define STATIC_DATA						static
 #else
+/* C */
 #define INLINE_FUNCTION(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)		static RET_TYPE
 #define PUBLIC_FUNCTION(RET_TYPE)		RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)		RET_TYPE
+#define EXTERN_FUNCTION(RET_TYPE)		extern RET_TYPE
 #define EXTERN_DATA						extern
 #define PUBLIC_DATA
 #define STATIC_DATA						static
@@ -1793,33 +1807,33 @@ SESSION_ENCODE(kern_session_info *session)
  *
  * ----------------------------------------------------------------
  */
-PUBLIC_FUNCTION(int)
+EXTERN_FUNCTION(int)
 kern_form_heaptuple(kern_context *kcxt,
 					const kern_expression *kproj,
 					const kern_data_store *kds_dst,
 					HeapTupleHeaderData *htup);
-PUBLIC_FUNCTION(bool)
+EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
 					 kern_data_store *kds_outer,
 					 HeapTupleHeaderData *htup,
 					 int num_inners,
 					 kern_data_store **kds_inners,
 					 HeapTupleHeaderData **htup_inners);
-PUBLIC_FUNCTION(bool)
+EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterColumn(XPU_PGFUNCTION_ARGS,
 						kern_data_store *kds_outer,
 						uint32_t kds_index,
 						int num_inners,
 						kern_data_store **kds_inners,
 						HeapTupleHeaderData **htup_inners);
-PUBLIC_FUNCTION(bool)
+EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
 					   kern_data_store *kds_outer,
 					   uint32_t kds_index,
 					   int num_inners,
 					   kern_data_store **kds_inners,
 					   kern_tupitem **tupitem_inners);
-PUBLIC_FUNCTION(bool)
+EXTERN_FUNCTION(int)
 ExecProjectionOuterRow(kern_context *kcxt,
 					   kern_expression *kexp,
 					   kern_data_store *kds_dst,
@@ -1845,9 +1859,9 @@ ExecProjectionOuterRow(kern_context *kcxt,
  *
  * ----------------------------------------------------------------
  */
-PUBLIC_FUNCTION(void)
+EXTERN_FUNCTION(void)
 pg_kern_ereport(kern_context *kcxt);	/* only host code */
-PUBLIC_FUNCTION(uint32_t)
+EXTERN_FUNCTION(uint32_t)
 pg_hash_any(const void *ptr, int sz);
 
 #endif	/* XPU_COMMON_H */

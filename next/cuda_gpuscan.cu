@@ -66,6 +66,7 @@ kern_gpuscan_main_row(kern_session_info *session,
 		uint32_t		count;
 		uint32_t		index;
 		uint32_t		mask;
+		int				status;
 		HeapTupleHeaderData *htup;
 
 		/*
@@ -79,17 +80,18 @@ kern_gpuscan_main_row(kern_session_info *session,
 			kcxt_reset(kcxt);
 			read_pos += LaneId();
 			htup = __WARP_GET_HTUPLE(read_pos);
-			if (!ExecProjectionOuterRow(kcxt,
-										kexp_scan_projs,
-										kds_dst,
-										kds_src,
-										htup,
-										0, NULL, NULL))
+			status = ExecProjectionOuterRow(kcxt,
+											kexp_scan_projs,
+											kds_dst,
+											kds_src,
+											htup,
+											0, NULL, NULL);
+			if (status <= 0)
 			{
 				assert(__activemask() == 0xffffffffU);
-				if (LaneId() == 0)
+				if (status == 0 && LaneId() == 0)
 					atomicAdd(&kgscan->suspend_count, 1);
-				break;		/* no space */
+				break;		/* error or no space */
 			}
 			if (LaneId() == 0)
 				warp->read_pos += warpSize;
@@ -105,17 +107,18 @@ kern_gpuscan_main_row(kern_session_info *session,
 					htup = __WARP_GET_HTUPLE(read_pos);
 				else
 					htup = NULL;
-				if (!ExecProjectionOuterRow(kcxt,
-											kexp_scan_projs,
-											kds_dst,
-											kds_src,
-											htup,
-											0, NULL, NULL))
+				status = ExecProjectionOuterRow(kcxt,
+												kexp_scan_projs,
+												kds_dst,
+												kds_src,
+												htup,
+												0, NULL, NULL);
+				if (status <= 0)
 				{
 					assert(__activemask() == 0xffffffffU);
-					if (LaneId() == 0)
+					if (status == 0 && LaneId() == 0)
 						atomicAdd(&kgscan->suspend_count, 1);
-					break;		/* no space */
+					break;		/* error or no space */
 				}
 				if (LaneId() == 0)
 					warp->read_pos = warp->write_pos;
@@ -233,6 +236,7 @@ kern_gpuscan_main_block(kern_session_info *session,
 	{
 		uint32_t		write_pos;
 		uint32_t		read_pos;
+		int				status;
 		HeapTupleHeaderData *htup;
 
 		/*
@@ -246,17 +250,18 @@ kern_gpuscan_main_block(kern_session_info *session,
 			kcxt_reset(kcxt);
 			read_pos += LaneId();
 			htup = __WARP_GET_HTUPLE(read_pos);
-			if (!ExecProjectionOuterRow(kcxt,
-										kexp_scan_projs,
-										kds_dst,
-										kds_src,
-										htup,
-										0, NULL, NULL))
+			status = ExecProjectionOuterRow(kcxt,
+											kexp_scan_projs,
+											kds_dst,
+											kds_src,
+											htup,
+											0, NULL, NULL);
+			if (status <= 0)
 			{
 				assert(__activemask() == 0xffffffffU);
-				if (LaneId() == 0)
+				if (status == 0 && LaneId() == 0)
 					atomicAdd(&kgscan->suspend_count, 1);
-				break;		/* no space */
+				break;		/* error or no space */
 			}
 			if (LaneId() == 0)
 				warp->read_pos += warpSize;
@@ -271,15 +276,16 @@ kern_gpuscan_main_block(kern_session_info *session,
 				htup = (read_pos < write_pos
 						? __WARP_GET_HTUPLE(read_pos)
 						: NULL);
-				if (!ExecProjectionOuterRow(kcxt,
-											kexp_scan_projs,
-											kds_dst,
-											kds_src,
-											htup,
-											0, NULL, NULL))
+				status = ExecProjectionOuterRow(kcxt,
+												kexp_scan_projs,
+												kds_dst,
+												kds_src,
+												htup,
+												0, NULL, NULL);
+				if (status <= 0)
 				{
 					assert(__activemask() == 0xffffffffU);
-					if (LaneId() == 0)
+					if (status == 0 && LaneId() == 0)
 						atomicAdd(&kgscan->suspend_count, 1);
 					break;		/* no space */
 				}
