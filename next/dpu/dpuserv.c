@@ -16,6 +16,7 @@ typedef struct
 {
 	dlist_node			chain;	/* link to dpu_client_list */
 	kern_session_info  *session;/* per-session information */
+	volatile bool		in_termination; /* true, if error status */
 	volatile int32_t	refcnt;	/* odd-number as long as socket is active */
 	pthread_mutex_t		mutex;	/* mutex to write the socket */
 	int					sockfd;	/* connection to PG-backend */
@@ -138,23 +139,6 @@ dpuClientWriteBack(dpuClient *dclient,
  * dpuClientElog
  */
 static void
-__dpuClientElogRaw(dpuClient *dclient, kern_errorbuf *errorbuf)
-{
-	XpuCommand		resp;
-	struct iovec	iov;
-
-	memset(&resp, 0, sizeof(resp));
-	resp.magic = XpuCommandMagicNumber;
-	resp.tag = XpuCommandTag__Error;
-	resp.length = offsetof(XpuCommand, u.error) + sizeof(kern_errorbuf);
-	memcpy(&resp.u.error, errorbuf, sizeof(kern_errorbuf));
-
-	iov.iov_base = &resp;
-	iov.iov_len  = resp.length;
-	__dpuClientWriteBack(dclient, &iov, 1);
-}
-
-static void
 __dpuClientElog(dpuClient *dclient,
 				int errcode,
 				const char *filename, int lineno,
@@ -187,6 +171,10 @@ __dpuClientElog(dpuClient *dclient,
 	iov.iov_base = &resp;
 	iov.iov_len  = resp.length;
 	__dpuClientWriteBack(dclient, &iov, 1);
+
+	/* go to termination of this client */
+	dclient->in_termination = true;
+	pthread_kill(dclient->worker, SIGUSR1);
 }
 
 #define dpuClientElog(dclient,fmt,...)			\
@@ -424,14 +412,322 @@ dpuservHandleOpenSession(dpuClient *dclient, XpuCommand *xcmd)
 	return true;
 }
 
+/*
+ * dpuservLoadKdsBlock
+ *
+ * fill up KDS_FORMAT_BLOCK using device local filesystem
+ */
+static kern_data_store *
+dpuservLoadKdsBlock(dpuClient *dclient,
+					const kern_data_store *kds_head,
+					const char *pathname,
+					const strom_io_vector *kds_iovec)
+{
+	kern_data_store *kds;
+	int		fdesc;
 
+	fdesc = open(pathname, O_RDONLY | O_DIRECT | O_NOATIME);
+	if (fdesc < 0)
+	{
+		dpuClientElog(dclient, "failed on open('%s'): %m", pathname);
+		return NULL;
+	}
 
+	kds = malloc(kds_head->length);
+	if (!kds)
+	{
+		close(fdesc);
+		dpuClientElog(dclient, "out of memory: %m");
+		return NULL;
+	}
+	assert(kds_head->block_nloaded == 0);
+	memcpy(kds, kds_head, kds_head->block_offset);
 
+	if (kds_iovec)
+	{
+		char	   *base = (char *)kds + kds->block_offset;
 
+		for (int i=0; i < kds_iovec->nr_chunks; i++)
+		{
+			const strom_io_chunk *ioc = &kds_iovec->ioc[i];
+			char	   *dest = base + ioc->m_offset;
+			ssize_t		offset = PAGE_SIZE * ioc->fchunk_id;
+			ssize_t		length = PAGE_SIZE * ioc->nr_pages;
+			ssize_t		nbytes;
 
+			assert(dest + length <= (char *)kds + kds->length);
+			while (length > 0)
+			{
+				nbytes = pread(fdesc, dest, length, offset);
+				if (nbytes > 0)
+				{
+					assert(nbytes <= length);
+					dest += nbytes;
+					length -= nbytes;
+					offset -= nbytes;
+				}
+				else if (nbytes == 0 || errno != EINTR)
+				{
+					dpuClientElog(dclient, "failed on pread('%s', %ld, %ld) = %ld: %m",
+								  pathname, length, offset, nbytes);
+					free(kds);
+					close(fdesc);
+					return NULL;
+				}
+			}
+		}
+	}
+	close(fdesc);
 
+	return kds;
+}
 
+/* ----------------------------------------------------------------
+ *
+ * DPU Kernel Projection
+ *
+ * ---------------------------------------------------------------- */
+int
+ExecProjectionOuterRow(kern_context *kcxt,
+					   kern_expression *kexp,	/* LoadVars + Projection */
+					   kern_data_store *kds_dst,
+					   kern_data_store *kds_outer,
+					   HeapTupleHeaderData *htup_outer,
+					   int num_inners,
+					   kern_data_store **kds_inners,
+					   HeapTupleHeaderData **htup_inners)
+{
+	xpu_int4_t	__tupsz;
 
+	/*
+	 * First, extract the variables from outer/inner tuples, and
+	 * calculate expressions, if any.
+	 */
+	assert(kexp->opcode  == FuncOpCode__LoadVars &&
+		   kexp->exptype == TypeOpCode__int4);
+	if (!ExecLoadVarsOuterRow(kcxt,
+							  kexp,
+							  (xpu_datum_t *)&__tupsz,
+							  kds_outer,
+							  htup_outer,
+							  num_inners,
+							  kds_inners,
+							  htup_inners))
+		return -1;
+	if (!__tupsz.isnull && __tupsz.value > 0)
+	{
+		kern_expression *kproj = KEXP_FIRST_ARG(kexp);
+		int32_t		tupsz = MAXALIGN(__tupsz.value);
+		uint32_t	rowid;
+		size_t		offset;
+		size_t		newsz;
+		kern_tupitem *tupitem;
+
+		newsz = (KDS_HEAD_LENGTH(kds_dst) +
+				 MAXALIGN(sizeof(uint32_t) * (kds_dst->nitems + 1)) +
+				 __kds_unpack(kds_dst->usage) + tupsz);
+		if (newsz > kds_dst->length)
+			return 0;	/* retry with new kds_dst */
+		offset = kds_dst->usage + __kds_packed(tupsz);
+		rowid = kds_dst->nitems++;
+		KDS_GET_ROWINDEX(kds_dst)[rowid] = __kds_packed(offset);
+		tupitem = (kern_tupitem *)
+			((char *)kds_dst + kds_dst->length - offset);
+		tupitem->rowid = rowid;
+		tupitem->t_len = kern_form_heaptuple(kcxt, kproj, kds_dst, &tupitem->htup);
+
+		return tupsz;
+	}
+	return -1;
+}
+
+/* ----------------------------------------------------------------
+ *
+ * DPU service SCAN handler
+ *
+ * ---------------------------------------------------------------- */
+typedef struct
+{
+	kern_errorbuf	kerror;
+	uint32_t		nitems_in;
+	uint32_t		nitems_out;
+	uint32_t		extra_sz;
+} kern_dpuscan;
+
+static void
+__handleDpuScanExecBlock(dpuClient *dclient,
+						 kern_data_store *kds_src,
+						 kern_data_store *kds_dst_head)
+{
+	kern_session_info  *session = dclient->session;
+	kern_expression	   *kexp_scan_quals = SESSION_KEXP_SCAN_QUALS(session);
+	kern_expression	   *kexp_scan_projs = SESSION_KEXP_SCAN_PROJS(session);
+	kern_context	   *kcxt;
+	kern_data_store	   *kds_dst = NULL;
+	kern_data_store	  **kds_dst_array = NULL;
+	uint32_t			kds_dst_nrooms = 0;
+	uint32_t			kds_dst_nitems = 0;
+	uint32_t			block_index;
+	uint32_t			stat_nitems_in = 0;
+	uint32_t			stat_nitems_out = 0;
+	kern_dpuscan		kdscan;
+	XpuCommand			resp;
+
+	assert(kds_src->format == KDS_FORMAT_BLOCK &&
+		   kexp_scan_quals->opcode == FuncOpCode__LoadVars &&
+		   kexp_scan_projs->opcode == FuncOpCode__LoadVars);
+	memset(&kdscan, 0, sizeof(kern_dpuscan));
+	INIT_KERNEL_CONTEXT(kcxt, session);
+
+	for (block_index = 0; block_index < kds_src->nitems; block_index++)
+	{
+		PageHeaderData *page = KDS_BLOCK_PGPAGE(kds_src, block_index);
+		uint32_t		lp_nitems = PageGetMaxOffsetNumber(page);
+		uint32_t		lp_index;
+
+		for (lp_index = 0; lp_index < lp_nitems; lp_index++)
+		{
+			ItemIdData	   *lpp = &page->pd_linp[lp_index];
+			HeapTupleHeaderData *htup;
+			xpu_bool_t		retval;
+			int				status;
+
+			if (!ItemIdIsNormal(lpp))
+				continue;
+			kcxt_reset(kcxt);
+			htup = (HeapTupleHeaderData *) PageGetItem(page, lpp);
+			stat_nitems_in++;
+			if (!ExecLoadVarsOuterRow(kcxt,
+									  kexp_scan_quals,
+									  (xpu_datum_t *)&retval,
+									  kds_src,
+									  htup,
+									  0, NULL, NULL))
+			{
+				/* error to abort */
+				__dpuClientElog(dclient,
+								kcxt->errcode,
+								kcxt->error_filename,
+								kcxt->error_lineno,
+								kcxt->error_funcname,
+								kcxt->error_message);
+				goto bailout;
+			}
+			else if (retval.isnull || !retval.value)
+			{
+				/* not matched */
+				continue;
+			}
+			stat_nitems_out++;
+
+		retry:
+			if (!kds_dst)
+			{
+				if (kds_dst_nitems >= kds_dst_nrooms)
+				{
+					kern_data_store	  **__kds_dst_array;
+
+					kds_dst_nrooms = 2 * kds_dst_nrooms + 10;
+					__kds_dst_array = alloca(sizeof(kern_data_store *) * kds_dst_nrooms);
+					memcpy(__kds_dst_array, kds_dst_array,
+						   sizeof(kern_data_store *) * kds_dst_nitems);
+					kds_dst_array = __kds_dst_array;
+				}
+				kds_dst = malloc(KDS_HEAD_LENGTH(kds_dst_head) + PGSTROM_CHUNK_SIZE);
+				if (!kds_dst)
+				{
+					dpuClientElog(dclient, "out of memory");
+					goto bailout;
+				}
+				kds_dst_array[kds_dst_nitems++] = kds_dst;
+			}
+			status = ExecProjectionOuterRow(kcxt,
+											kexp_scan_projs,
+											kds_dst,
+											kds_src,
+											htup,
+											0, NULL, NULL);
+			if (status == 0)
+			{
+				kds_dst = NULL;
+				goto retry;
+			}
+			else if (status < 0)
+			{
+				__dpuClientElog(dclient,
+								kcxt->errcode,
+								kcxt->error_filename,
+								kcxt->error_lineno,
+								kcxt->error_funcname,
+								kcxt->error_message);
+				goto bailout;
+			}
+		}
+	}
+	/* write back the results */
+	memset(&resp, 0, offsetof(XpuCommand, u.results));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag   = XpuCommandTag__Success;
+	resp.u.results.chunks_nitems = kds_dst_nitems;
+	resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
+	resp.u.results.stats.scan.nitems_in = stat_nitems_in;
+	resp.u.results.stats.scan.nitems_out = stat_nitems_out;
+	dpuClientWriteBack(dclient,
+					   &resp, resp.u.results.chunks_offset,
+					   kds_dst_nitems,
+					   kds_dst_array);
+bailout:
+	for (int i=0; i < kds_dst_nitems; i++)
+		free(kds_dst_array[i]);
+}
+
+static void
+dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
+{
+	const char		   *kds_src_pathname = NULL;
+	strom_io_vector	   *kds_src_iovec = NULL;
+	kern_data_store	   *kds_src_head = NULL;
+	kern_data_store	   *kds_dst_head = NULL;
+	kern_data_store	   *kds_src = NULL;
+
+	if (xcmd->u.scan.kds_src_pathname)
+		kds_src_pathname = (char *)xcmd + xcmd->u.scan.kds_src_pathname;
+	if (xcmd->u.scan.kds_src_iovec)
+		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.scan.kds_src_iovec);
+	if (xcmd->u.scan.kds_src_offset)
+		kds_src_head = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_src_offset);
+	if (xcmd->u.scan.kds_dst_offset)
+		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_dst_offset);
+	if (!kds_src_pathname || !kds_src_iovec || !kds_src_head || !kds_dst_head)
+	{
+		dpuClientElog(dclient, "kern_data_store is corrupted");
+		return;
+	}
+
+	if (kds_src_head->format == KDS_FORMAT_BLOCK)
+	{
+		kds_src = dpuservLoadKdsBlock(dclient,
+									  kds_src_head,
+									  kds_src_pathname,
+									  kds_src_iovec);
+		if (kds_src)
+		{
+			__handleDpuScanExecBlock(dclient, kds_src, kds_dst_head);
+			free(kds_src);
+		}
+	}
+#if 0
+	else if (kds_src_head->format == KDS_FORMAT_ARROW)
+	{
+		//do arrow mode
+	}
+#endif
+	else
+	{
+		dpuClientElog(dclient, "not a supported kern_data_store format");
+		return;
+	}
+}
 
 
 
@@ -522,6 +818,8 @@ dpuservDpuWorkerMain(void *__priv)
 											 * end of the session. */
 						break;
 					case XpuCommandTag__XpuScanExec:
+						dpuservHandleDpuScanExec(dclient, xcmd);
+						break;
 					default:
 						fprintf(stderr, "[DPU-%ld] unknown xPU command (%d)\n",
 								worker_id, (int)xcmd->tag);
@@ -574,7 +872,7 @@ dpuservMonitorClient(void *__priv)
 	dpuClient  *dclient = (dpuClient *)__priv;
 	
 	printf("[%s] %s start\n", dclient->peer_addr, __FUNCTION__);
-	while (!got_sigterm)
+	while (!got_sigterm && !dclient->in_termination)
 	{
 		struct pollfd  pfd;
 		int		rv;
@@ -606,6 +904,7 @@ dpuservMonitorClient(void *__priv)
 			}
 		}
 	}
+	dclient->in_termination = true;
 	putDpuClient(dclient, 1);
 	printf("[%s] %s terminated\n", dclient->peer_addr, __FUNCTION__);
 	return NULL;

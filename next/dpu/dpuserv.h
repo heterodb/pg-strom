@@ -13,6 +13,7 @@
 #define DPUSERV_H
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <poll.h>
 #include <pthread.h>
@@ -25,10 +26,13 @@
 #include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/uio.h>
 #include <netdb.h>
 #include <arpa/inet.h>
 #include "xpu_common.h"
+#include "heterodb_extra.h"
 
 #define __Elog(fmt,...)								\
 	do {											\
@@ -40,6 +44,10 @@
 #define Max(a,b)		((a) > (b) ? (a) : (b))
 #define Min(a,b)		((a) < (b) ? (a) : (b))
 #define Assert(cond)	assert(cond)
+
+#define PAGE_SIZE				4096	/* assumes x86_64 host */
+#define PGSTROM_CHUNK_SIZE		(65534UL << 10)
+
 /*
  * dlist inline functions
  */
