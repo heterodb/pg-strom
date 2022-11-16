@@ -1,7 +1,6 @@
 #
 # Makefile for dpu_strom_serv
 #
-PG_CONFIG ?= pg_config
 CC ?= gcc
 
 DPUSERV_OBJS = dpuserv.o xpu_common.o xpu_basetype.o \
@@ -11,12 +10,11 @@ DPUSERB_HEADS = dpuserv.h arrow_defs.h xpu_common.h xpu_basetype.h \
                 xpu_timelib.h xpu_misclib.h
 
 CFLAGS  := -Wall -g -O2 -D_GNU_SOURCE \
-           -Wno-sign-compare \
-           -I $(shell $(PG_CONFIG) --includedir)
-LDFLAGS := $(shell $(PG_CONFIG) --ldflags)
+           -Wno-sign-compare
+LDFLAGS := -lpthread -lm -lstdc++
 
 dpuserv: $(DPUSERV_OBJS)
-	$(CC) -o $@ $(DPUSERV_OBJS) $(LDFLAGS) -lpthread -lm -lstdc++
+	$(CC) -o $@ $(DPUSERV_OBJS) $(LDFLAGS)
 
 .c.o: $(DPUSERB_HEADS)
 	$(CC) $(CFLAGS) -c -o $@ $<
