@@ -29,6 +29,7 @@ static long				dpuserv_listen_port = -1;
 static char			   *dpuserv_base_directory = NULL;
 static long				dpuserv_num_workers = -1;
 static char			   *dpuserv_identifier = NULL;
+static const char	   *dpuserv_logfile = NULL;
 static bool				verbose = false;
 static pthread_mutex_t	dpu_client_mutex;
 static dlist_head		dpu_client_list;
@@ -306,8 +307,6 @@ __resolveDevicePointersWalker(kern_expression *kexp,
 						(int)desc->slot_type);
 				return false;
 			}
-			fprintf(stderr, "desc[%d] slot_id=%u slot_type=%d\n",
-					i, desc->slot_id, desc->slot_type);
 		}
 	}
 
@@ -358,10 +357,8 @@ xpuServResolveDevicePointers(kern_session_info *session,
 
 	if (encode)
 	{
-		int		i = 0;
-
-		while (xpu_encode_catalog[i].enc_mblen &&
-			   xpu_encode_catalog[i].enc_maxlen > 0)
+		for (int i=0; (xpu_encode_catalog[i].enc_mblen &&
+					   xpu_encode_catalog[i].enc_maxlen > 0); i++)
 		{
 			if (strcmp(encode->encname, xpu_encode_catalog[i].encname) == 0)
 			{
@@ -370,6 +367,7 @@ xpuServResolveDevicePointers(kern_session_info *session,
 				goto found;
 			}
 		}
+		return false;
 	}
 found:
 	return true;
@@ -421,9 +419,11 @@ static kern_data_store *
 dpuservLoadKdsBlock(dpuClient *dclient,
 					const kern_data_store *kds_head,
 					const char *pathname,
-					const strom_io_vector *kds_iovec)
+					const strom_io_vector *kds_iovec,
+					char **p_base_addr)
 {
 	kern_data_store *kds;
+	char   *data;
 	int		fdesc;
 
 	fdesc = open(pathname, O_RDONLY | O_DIRECT | O_NOATIME);
@@ -433,14 +433,21 @@ dpuservLoadKdsBlock(dpuClient *dclient,
 		return NULL;
 	}
 
-	kds = malloc(kds_head->length);
-	if (!kds)
+	data = malloc(kds_head->length + PAGE_SIZE);
+	if (!data)
 	{
 		close(fdesc);
 		dpuClientElog(dclient, "out of memory: %m");
 		return NULL;
 	}
+
+	/*
+	 * Due to the restriction of O_DIRECT, ((char *)kds + kds->block_offset)
+	 * must be aligned to PAGE_SIZE.
+	 */
 	assert(kds_head->block_nloaded == 0);
+	kds = (kern_data_store *)
+		(PAGE_ALIGN(data + kds_head->block_offset) - kds_head->block_offset);
 	memcpy(kds, kds_head, kds_head->block_offset);
 
 	if (kds_iovec)
@@ -470,7 +477,7 @@ dpuservLoadKdsBlock(dpuClient *dclient,
 				{
 					dpuClientElog(dclient, "failed on pread('%s', %ld, %ld) = %ld: %m",
 								  pathname, length, offset, nbytes);
-					free(kds);
+					free(data);
 					close(fdesc);
 					return NULL;
 				}
@@ -478,6 +485,7 @@ dpuservLoadKdsBlock(dpuClient *dclient,
 		}
 	}
 	close(fdesc);
+	*p_base_addr = data;
 
 	return kds;
 }
@@ -523,14 +531,15 @@ ExecProjectionOuterRow(kern_context *kcxt,
 		size_t		newsz;
 		kern_tupitem *tupitem;
 
+		offset = __kds_unpack(kds_dst->usage) + tupsz;
 		newsz = (KDS_HEAD_LENGTH(kds_dst) +
 				 MAXALIGN(sizeof(uint32_t) * (kds_dst->nitems + 1)) +
-				 __kds_unpack(kds_dst->usage) + tupsz);
+				 offset);
 		if (newsz > kds_dst->length)
 			return 0;	/* retry with new kds_dst */
-		offset = kds_dst->usage + __kds_packed(tupsz);
+		kds_dst->usage = __kds_packed(offset);
 		rowid = kds_dst->nitems++;
-		KDS_GET_ROWINDEX(kds_dst)[rowid] = __kds_packed(offset);
+		KDS_GET_ROWINDEX(kds_dst)[rowid] = kds_dst->usage;
 		tupitem = (kern_tupitem *)
 			((char *)kds_dst + kds_dst->length - offset);
 		tupitem->rowid = rowid;
@@ -590,6 +599,7 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 			ItemIdData	   *lpp = &page->pd_linp[lp_index];
 			HeapTupleHeaderData *htup;
 			xpu_bool_t		retval;
+			size_t			sz;
 			int				status;
 
 			if (!ItemIdIsNormal(lpp))
@@ -633,12 +643,15 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 						   sizeof(kern_data_store *) * kds_dst_nitems);
 					kds_dst_array = __kds_dst_array;
 				}
-				kds_dst = malloc(KDS_HEAD_LENGTH(kds_dst_head) + PGSTROM_CHUNK_SIZE);
+				sz = KDS_HEAD_LENGTH(kds_dst_head) + PGSTROM_CHUNK_SIZE;
+				kds_dst = malloc(sz);
 				if (!kds_dst)
 				{
 					dpuClientElog(dclient, "out of memory");
 					goto bailout;
 				}
+				memcpy(kds_dst, kds_dst_head, KDS_HEAD_LENGTH(kds_dst_head));
+				kds_dst->length = sz;
 				kds_dst_array[kds_dst_nitems++] = kds_dst;
 			}
 			status = ExecProjectionOuterRow(kcxt,
@@ -706,14 +719,17 @@ dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
 
 	if (kds_src_head->format == KDS_FORMAT_BLOCK)
 	{
+		char   *base_addr;
+
 		kds_src = dpuservLoadKdsBlock(dclient,
 									  kds_src_head,
 									  kds_src_pathname,
-									  kds_src_iovec);
+									  kds_src_iovec,
+									  &base_addr);
 		if (kds_src)
 		{
 			__handleDpuScanExecBlock(dclient, kds_src, kds_dst_head);
-			free(kds_src);
+			free(base_addr);
 		}
 	}
 #if 0
@@ -791,7 +807,8 @@ dpuservDpuWorkerMain(void *__priv)
 {
 	long	worker_id = (long)__priv;
 
-	printf("[DPU-%ld] start\n", worker_id);
+	if (verbose)
+		fprintf(stderr, "[worker-%lu] DPU service worker start.\n", worker_id);
 	pthreadMutexLock(&dpu_command_mutex);
 	while (!got_sigterm)
 	{
@@ -808,7 +825,7 @@ dpuservDpuWorkerMain(void *__priv)
 			 * it means the gpu-client connection is no longer available.
 			 * (monitor thread has already gone)
 			 */
-			if ((dclient->refcnt & 1) != 1)
+			if ((dclient->refcnt & 1) == 1)
 			{
 				switch (xcmd->tag)
 				{
@@ -816,13 +833,22 @@ dpuservDpuWorkerMain(void *__priv)
 						if (dpuservHandleOpenSession(dclient, xcmd))
 							xcmd = NULL;	/* session information shall be kept until
 											 * end of the session. */
+						if (verbose)
+							fprintf(stderr, "[DPU-%ld@%s] OpenSession ... %s\n",
+									worker_id, dclient->peer_addr,
+									(xcmd != NULL ? "failed" : "ok"));
 						break;
 					case XpuCommandTag__XpuScanExec:
 						dpuservHandleDpuScanExec(dclient, xcmd);
+						if (verbose)
+							fprintf(stderr, "[DPU-%ld@%s] DpuScanExec\n",
+									worker_id, dclient->peer_addr);
 						break;
 					default:
-						fprintf(stderr, "[DPU-%ld] unknown xPU command (%d)\n",
-								worker_id, (int)xcmd->tag);
+						fprintf(stderr, "[DPU-%ld@%s] unknown xPU command (tag=%u, len=%ld)\n",
+								worker_id, dclient->peer_addr,
+								xcmd->tag, xcmd->length);
+						break;
 				}
 			}
 			if (xcmd)
@@ -837,7 +863,8 @@ dpuservDpuWorkerMain(void *__priv)
 		}
 	}
 	pthreadMutexUnlock(&dpu_command_mutex);
-	printf("[worker-%ld] terminate\n", worker_id);
+	if (verbose)
+		fprintf(stderr, "[worker-%lu] DPU service worker terminated.\n", worker_id);
 	return NULL;
 }
 
@@ -858,6 +885,11 @@ __dpuServAttachCommand(void *__priv, XpuCommand *xcmd)
 	getDpuClient(dclient, 2);
 	xcmd->priv = dclient;
 
+	if (verbose)
+		fprintf(stderr, "[%s] received xcmd (tag=%u len=%lu)\n",
+				dclient->peer_addr,
+				xcmd->tag, xcmd->length);
+
 	pthreadMutexLock(&dpu_command_mutex);
 	dlist_push_tail(&dpu_command_list, &xcmd->chain);
 	pthreadCondSignal(&dpu_command_cond);
@@ -870,8 +902,9 @@ static void *
 dpuservMonitorClient(void *__priv)
 {
 	dpuClient  *dclient = (dpuClient *)__priv;
-	
-	printf("[%s] %s start\n", dclient->peer_addr, __FUNCTION__);
+
+	if (verbose)
+		fprintf(stderr, "[%s] connection start\n", dclient->peer_addr);
 	while (!got_sigterm && !dclient->in_termination)
 	{
 		struct pollfd  pfd;
@@ -885,7 +918,7 @@ dpuservMonitorClient(void *__priv)
 		{
 			if (errno == EINTR)
 				continue;
-			fprintf(stderr, "failed on poll(2): %m\n");
+			fprintf(stderr, "[%s] failed on poll(2): %m\n", dclient->peer_addr);
 			break;
 		}
 		else if (rv > 0)
@@ -899,14 +932,16 @@ dpuservMonitorClient(void *__priv)
 			}
 			else if (pfd.revents & ~POLLIN)
 			{
-				fprintf(stderr, "[%s] peer socket closed\n", dclient->peer_addr);
+				if (verbose)
+					fprintf(stderr, "[%s] peer socket closed\n", dclient->peer_addr);
 				break;
 			}
 		}
 	}
 	dclient->in_termination = true;
 	putDpuClient(dclient, 1);
-	printf("[%s] %s terminated\n", dclient->peer_addr, __FUNCTION__);
+	if (verbose)
+		fprintf(stderr, "[%s] connection terminated\n", dclient->peer_addr);
 	return NULL;
 }
 
@@ -917,7 +952,8 @@ dpuserv_signal_handler(int signum)
 
 	if (signum == SIGTERM)
 		got_sigterm = true;
-	printf("thread %lu got signal %d\n", pthread_self(), signum);
+	if (verbose)
+		fprintf(stderr, "got signal (%d)\n", signum);
 	errno = errno_saved;
 }
 
@@ -1082,6 +1118,7 @@ main(int argc, char *argv[])
 		{"directory",  required_argument, 0, 'd'},
 		{"nworkers",   required_argument, 0, 'n'},
 		{"identifier", required_argument, 0, 'i'},
+		{"log",        required_argument, 0, 'l'},
 		{"verbose",    no_argument,       0, 'v'},
 		{"help",       no_argument,       0, 'h'},
 		{NULL, 0, 0, 0},
@@ -1099,7 +1136,8 @@ main(int argc, char *argv[])
 	/* parse command line options */
 	for (;;)
 	{
-		int		c = getopt_long(argc, argv, "a:p:d:n:i:vh", command_options, NULL);
+		int		c = getopt_long(argc, argv, "a:p:d:n:i:l:vh",
+								command_options, NULL);
 		char   *end;
 
 		if (c < 0)
@@ -1145,13 +1183,19 @@ main(int argc, char *argv[])
 				dpuserv_identifier = optarg;
 				break;
 
+			case 'l':
+				if (dpuserv_logfile)
+					__Elog("-l|--log option was given twice");
+				dpuserv_logfile = optarg;
+				break;
+				
 			case 'v':
 				verbose = true;
 				break;
 			default:	/* --help */
 				fputs("usage: dpuserv [OPTIONS]\n"
 					  "\n"
-					  "\t-p|--port=PORT           listen port (default: 54321)\n"
+					  "\t-p|--port=PORT           listen port (default: 6543)\n"
 					  "\t-d|--directory=DIR       tablespace base (default: .)\n"
 					  "\t-n|--nworkers=N_WORKERS  number of workers (default: auto)\n"
 					  "\t-i|--identifier=IDENT    security identifier\n"
@@ -1163,11 +1207,21 @@ main(int argc, char *argv[])
 	}
 	/* apply default values */
 	if (dpuserv_listen_port < 0)
-		dpuserv_listen_port = 54321;
+		dpuserv_listen_port = 6543;
 	if (!dpuserv_base_directory)
 		dpuserv_base_directory = ".";
 	if (dpuserv_num_workers < 0)
 		dpuserv_num_workers = Max(4 * sysconf(_SC_NPROCESSORS_ONLN), 20);
+	if (dpuserv_logfile)
+	{
+		FILE   *stdlog;
+
+		stdlog = fopen(dpuserv_logfile, "ab");
+		if (!stdlog)
+			__Elog("failed on fopen('%s','ab'): %m", dpuserv_logfile);
+		fclose(stderr);
+		stderr = stdlog;
+	}
 
 	/* change the current working directory */
 	if (chdir(dpuserv_base_directory) != 0)

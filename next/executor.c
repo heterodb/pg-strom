@@ -109,8 +109,6 @@ __xpuConnectSessionWorker(void *__priv)
 			Assert(nevents == 1);
 			if (pfd.revents & ~POLLIN)
 			{
-				fprintf(stderr, "[%s; %s:%d] peer socket closed.\n",
-						conn->devname, __FILE_NAME__, __LINE__);
 				pthreadMutexLock(&conn->mutex);
 				conn->terminated = 1;
 				SetLatch(MyLatch);
@@ -586,6 +584,8 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 
 	while (!pts->scan_done)
 	{
+		CHECK_FOR_INTERRUPTS();
+
 		pthreadMutexLock(&conn->mutex);
 		/* device error checks */
 		if (conn->errorbuf.errcode != ERRCODE_STROM_SUCCESS)

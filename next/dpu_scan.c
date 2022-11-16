@@ -192,7 +192,7 @@ create_dpuscan_path(PlannerInfo *root,
 	cpath->path.startup_cost = startup_cost;
 	cpath->path.total_cost = startup_cost + run_cost;
 	cpath->path.pathkeys = NIL; /* unsorted results */
-	cpath->flags = 0;
+	cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	cpath->custom_paths = NIL;
 	cpath->custom_private = list_make1(ds_info);
 	cpath->methods = &dpuscan_path_methods;
@@ -297,7 +297,7 @@ DpuScanAddScanPath(PlannerInfo *root,
 									indexQuals,
 									indexNBlocks);
 		if (cpath && custom_path_remember(root, baserel, true, false, cpath))
-			add_path(baserel, &cpath->path);
+			add_partial_path(baserel, &cpath->path);
 	}
 }
 

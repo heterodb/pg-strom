@@ -16,7 +16,7 @@ CFLAGS  := -Wall -g -O2 -D_GNU_SOURCE \
 LDFLAGS := $(shell $(PG_CONFIG) --ldflags)
 
 dpuserv: $(DPUSERV_OBJS)
-	$(CC) -o $@ $(DPUSERV_OBJS) $(LDFLAGS) -lpthread -lm
+	$(CC) -o $@ $(DPUSERV_OBJS) $(LDFLAGS) -lpthread -lm -lstdc++
 
 .c.o: $(DPUSERB_HEADS)
 	$(CC) $(CFLAGS) -c -o $@ $<

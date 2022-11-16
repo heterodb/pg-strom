@@ -46,6 +46,8 @@
 #define Assert(cond)	assert(cond)
 
 #define PAGE_SIZE				4096	/* assumes x86_64 host */
+#define PAGE_ALIGN(LEN)			TYPEALIGN(PAGE_SIZE,LEN)
+#define PAGE_ALIGN_DOWN(LEN)	TYPEALIGN_DOWN(PAGE_SIZE,LEN)
 #define PGSTROM_CHUNK_SIZE		(65534UL << 10)
 
 /*

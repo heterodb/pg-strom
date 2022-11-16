@@ -28,7 +28,7 @@ bool		pgstrom_dpu_handle_cached_pages = false;	/* GUC */
 
 struct DpuStorageEntry
 {
-	Oid			tablespace_oid;
+	uint32_t	endpoint_id;
 	const char *tablespace_name;
 	const char *config_host;
 	const char *config_port;
@@ -125,12 +125,12 @@ DpuClientOpenSession(pgstromTaskState *pts,
 	DpuStorageEntry *ds_entry = pts->ds_entry;
     pgsocket    sockfd;
     char        namebuf[32];
-
 	if (!ds_entry)
 		elog(ERROR, "Bug? no DPU device is configured");
+
 	sockfd = socket(ds_entry->endpoint_domain, SOCK_STREAM, 0);
 	if (sockfd < 0)
-		elog(ERROR, "failed on socket(2): %m");
+		elog(ERROR, "failed on socket(2) dom=%d: %m", ds_entry->endpoint_domain);
 	if (connect(sockfd,
 				ds_entry->endpoint_addr,
 				ds_entry->endpoint_addr_len) != 0)
@@ -138,7 +138,7 @@ DpuClientOpenSession(pgstromTaskState *pts,
 		close(sockfd);
 		elog(ERROR, "failed on connect('%s'): %m", ds_entry->config_host);
 	}
-	snprintf(namebuf, sizeof(namebuf), "DPU-%u", ds_entry->tablespace_oid);
+	snprintf(namebuf, sizeof(namebuf), "DPU-%u", ds_entry->endpoint_id);
 
 	__xpuClientOpenSession(pts, session, sockfd, namebuf);
 }
@@ -162,6 +162,7 @@ parse_dpu_endpoint_list(void)
 {
 	char	   *tok, *saveptr;
 	char	   *buf;
+	uint32_t	endpoint_id = 0;
 	uint32_t	nrooms = 48;
 	uint32_t	nitems = 0;
 	size_t		extra_sz = 0;
@@ -204,6 +205,7 @@ parse_dpu_endpoint_list(void)
 		curr = &dpu_tablespace_master->entries[nitems++];
 		memset(curr, 0, sizeof(DpuStorageEntry));
 
+		curr->endpoint_id = endpoint_id++;
 		curr->tablespace_name = strdup(name);
 		if (!curr->tablespace_name)
 			elog(ERROR, "out of memory");
@@ -231,30 +233,13 @@ parse_dpu_endpoint_list(void)
 			struct addrinfo *addr;
 
 			memset(&hints, 0, sizeof(struct addrinfo));
-			hints.ai_family = AF_UNSPEC;
+			hints.ai_family = AF_INET;
 			hints.ai_socktype = SOCK_STREAM;
-			if (*host == '[')
-			{
-				/* assume IPv6 [2001:db8::1]:80 format */
-				port = strrchr(host, ']');
-				if (!port)
-					elog(ERROR, "pg_strom.dpu_endpoint_list - invalid token");
+			/* TODO: IPv6 support */
+			port = strrchr(host, ':');
+			if (port)
 				*port++ = '\0';
-				if (*port == '\0')
-					port = NULL;
-				else if (*port != ':')
-					elog(ERROR, "pg_strom.dpu_endpoint_list - invalid token");
-				else
-					port++;
-				hints.ai_family = AF_INET6;
-			}
 			else
-			{
-				port = strrchr(host, ':');
-				if (port)
-					*port++ = '\0';
-			}
-			if (!port)
 				port = __default_port;
 			if (getaddrinfo(host, port, &hints, &addr) != 0)
 				elog(ERROR, "failed on getaddrinfo('%s','%s')", host, port);
@@ -314,7 +299,7 @@ pgstrom_startup_dpu_device(void)
 		DpuStorageEntry *old_item = &dpu_tablespace_master->entries[i];
 		DpuStorageEntry *new_item = &new_tablespace_master->entries[i];
 
-		new_item->tablespace_oid = InvalidOid;
+		new_item->endpoint_id = old_item->endpoint_id;
 		new_item->tablespace_name = extra;
 		strcpy(extra, old_item->tablespace_name);
 		extra += MAXALIGN(strlen(extra) + 1);
@@ -334,6 +319,7 @@ pgstrom_startup_dpu_device(void)
 			strcpy(extra, old_item->config_port);
 			extra += MAXALIGN(strlen(extra) + 1);
 		}
+		new_item->endpoint_domain = old_item->endpoint_domain;
 		new_item->endpoint_addr = (struct sockaddr *)extra;
 		memcpy(extra, old_item->endpoint_addr, old_item->endpoint_addr_len);
 		extra += MAXALIGN(old_item->endpoint_addr_len);

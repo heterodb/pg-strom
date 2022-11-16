@@ -510,16 +510,17 @@ __relScanDirectAssignFilename(StringInfo buf,
 	else
 	{
 		*p_fullpath_offset = buf->len;
-		appendStringInfo(buf, "pg_tblspc/%u/%s/",
-						 smgr_rnode->node.spcNode,
-						 TABLESPACE_VERSION_DIRECTORY);
+		appendStringInfo(buf, "pg_tblspc/%u/",
+						 smgr_rnode->node.spcNode);
 		*p_pathname_offset = buf->len;
 		if (smgr_rnode->backend == InvalidBackendId)
-			appendStringInfo(buf, "%u/%u",
+			appendStringInfo(buf, "%s/%u/%u",
+							 TABLESPACE_VERSION_DIRECTORY,
 							 smgr_rnode->node.dbNode,
 							 smgr_rnode->node.relNode);
 		else
-			appendStringInfo(buf, "%u/t%d_%u",
+			appendStringInfo(buf, "%s/%u/t%d_%u",
+							 TABLESPACE_VERSION_DIRECTORY,
 							 smgr_rnode->node.dbNode,
 							 smgr_rnode->backend,
 							 smgr_rnode->node.relNode);
