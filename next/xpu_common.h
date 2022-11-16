@@ -19,9 +19,6 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
-#include "postgres_ext.h"
-#include "pg_config.h"
-#include "pg_config_manual.h"
 
 /*
  * Functions with qualifiers
@@ -59,10 +56,6 @@
 #define PUBLIC_DATA
 #define STATIC_DATA						static
 #endif	/* __CUDACC__ */
-
-/* Definition of several primitive types */
-typedef __int128	int128_t;
-#include "float2.h"
 
 /*
  * Limitation of types
@@ -121,6 +114,10 @@ typedef __int128	int128_t;
 #define Max(a,b)			((a) > (b) ? (a) : (b))
 #define Min(a,b)			((a) < (b) ? (a) : (b))
 typedef uint64_t			Datum;
+typedef unsigned int		Oid;
+
+#define NAMEDATALEN			64		/* must follow the host configuration */
+#define BLCKSZ				8192	/* must follow the host configuration */
 
 #define PointerGetDatum(X)	((Datum)(X))
 #define DatumGetPointer(X)	((char *)(X))
@@ -128,12 +125,15 @@ typedef uint64_t			Datum;
 	(((uint64_t)(LEN) + ((ALIGNVAL) - 1)) & ~((uint64_t)((ALIGNVAL) - 1)))
 #define TYPEALIGN_DOWN(ALIGNVAL,LEN)                        \
 	(((uint64_t) (LEN)) & ~((uint64_t) ((ALIGNVAL) - 1)))
-
 #define MAXIMUM_ALIGNOF		8
 #define MAXALIGN(LEN)		TYPEALIGN(MAXIMUM_ALIGNOF,LEN)
 #define MAXALIGN_DOWN(LEN)	TYPEALIGN_DOWN(MAXIMUM_ALIGNOF,LEN)
 #endif	/* POSTGRES_H */
 #define MAXIMUM_ALIGNOF_SHIFT 3
+
+/* Definition of several primitive types */
+typedef __int128	int128_t;
+#include "float2.h"
 
 #ifndef __FILE_NAME__
 INLINE_FUNCTION(const char *)
@@ -653,11 +653,6 @@ typedef struct IndexTupleData
 
 	char				data[1];	/* data or IndexAttributeBitMapData */
 } IndexTupleData;
-
-typedef struct IndexAttributeBitMapData
-{
-	uint8_t				bits[(INDEX_MAX_KEYS + 8 - 1) / 8];
-} IndexAttributeBitMapData;
 
 #define INDEX_SIZE_MASK     0x1fff
 #define INDEX_VAR_MASK      0x4000
