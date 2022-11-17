@@ -27,7 +27,7 @@ docker run --name postgis-db \
 -d \
 --privileged \
 --gpus=all \
---shm-size=512MB \
+--shm-size=4096MB \
 -e POSTGRES_USER=postgis \
 -e POSTGRES_PASSWORD=password \
 -e POSTGRES_DB=postgis \
@@ -63,7 +63,7 @@ docker run --name postgis-db \
 -d \
 --privileged \
 --gpus=all \
---shm-size=512MB \
+--shm-size=4096MB \
 -e POSTGRES_USER=postgis \
 -e POSTGRES_PASSWORD=password \
 -e POSTGRES_DB=postgis \
