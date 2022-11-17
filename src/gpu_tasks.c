@@ -814,12 +814,11 @@ pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
 		ExecInitWorkerArrowFdw(gts->af_state, gtss);
 	if (gts->gc_state)
 		ExecInitWorkerGpuCache(gts->gc_state, gtss);
-	if (relation)
+	if (relation && RELATION_HAS_STORAGE(relation))
 	{
 		/* begin parallel scan */
-		if (RELATION_HAS_STORAGE(relation))
-			gts->css.ss.ss_currentScanDesc =
-				table_beginscan_parallel(relation, &gtss->phscan);
+		gts->css.ss.ss_currentScanDesc =
+			table_beginscan_parallel(relation, &gtss->phscan);
 		/* try to choose NVMe-Strom, if available */
 		PDS_init_heapscan_state(gts);
 	}

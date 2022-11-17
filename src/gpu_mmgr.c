@@ -113,6 +113,7 @@ extern void gpummgrBgWorkerMain(Datum arg);
 
 /* static variables */
 static shmem_startup_hook_type shmem_startup_next = NULL;
+static shmem_request_hook_type shmem_request_next = NULL;
 static GpuMemStatistics *gm_stat_array = NULL;
 static int			gpu_memory_segment_size_kb;	/* GUC */
 static size_t		gm_segment_sz;	/* bytesize */
@@ -1340,6 +1341,22 @@ pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_device_preserved_meminfo);
 
 /*
+ * pgstrom_request_gpu_mmgr
+ */
+static void
+pgstrom_request_gpu_mmgr(void)
+{
+	Size	sz;
+
+	if (shmem_request_next)
+		shmem_request_next();
+
+	sz = (STROMALIGN(sizeof(GpuMemStatistics) * numDevAttrs) +
+		  STROMALIGN(offsetof(GpuMemPreservedHead, bgworkers[numDevAttrs])));
+	RequestAddinShmemSpace(sz);
+}
+
+/*
  * pgstrom_startup_gpu_mmgr
  */
 static void
@@ -1395,7 +1412,6 @@ void
 pgstrom_init_gpu_mmgr(void)
 {
 	Size		segment_sz;
-	Size		required;
 	int			dindex;
 
 	/*
@@ -1440,9 +1456,8 @@ pgstrom_init_gpu_mmgr(void)
 	/*
 	 * request for the static shared memory
 	 */
-	required = STROMALIGN(sizeof(GpuMemStatistics) * numDevAttrs) +
-		STROMALIGN(offsetof(GpuMemPreservedHead, bgworkers[numDevAttrs]));
-	RequestAddinShmemSpace(required);
+	shmem_request_next = shmem_request_hook;
+	shmem_request_hook = pgstrom_request_gpu_mmgr;
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gpu_mmgr;
 }

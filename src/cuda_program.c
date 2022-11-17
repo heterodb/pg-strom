@@ -84,6 +84,7 @@ static bool		pgstrom_debug_cuda_enable_coredump_on_exception;
 static int		pgstrom_extra_kernel_stack_size;
 
 /* ---- static variables ---- */
+static shmem_request_hook_type shmem_request_next;
 static shmem_startup_hook_type shmem_startup_next;
 static program_cache_head *pgcache_head = NULL;
 static program_builder_state *pgbuilder_state = NULL;
@@ -1825,6 +1826,17 @@ assign_cuda_enable_coredump_on_exception(bool newval, void *extra)
 }
 
 static void
+pgstrom_request_cuda_program(void)
+{
+	if (shmem_request_next)
+		shmem_request_next();
+
+	RequestAddinShmemSpace(MAXALIGN(sizeof(program_cache_head)) +
+						   MAXALIGN(offsetof(program_builder_state,
+											 builders[num_program_builders])));
+}
+
+static void
 pgstrom_startup_cuda_program(void)
 {
 	size_t		length;
@@ -1931,9 +1943,8 @@ pgstrom_init_cuda_program(void)
 							NULL, NULL, NULL);
 
 	/* allocation of static shared memory */
-	RequestAddinShmemSpace(MAXALIGN(sizeof(program_cache_head)) +
-						   MAXALIGN(offsetof(program_builder_state,
-											 builders[num_program_builders])));
+	shmem_request_next = shmem_request_hook;
+	shmem_request_hook = pgstrom_request_cuda_program;
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_cuda_program;
 

@@ -5,6 +5,19 @@
  */
 #ifndef _ARROW_DEFS_H_
 #define _ARROW_DEFS_H_
+
+#ifdef __cplusplus
+typedef bool			__boolean;
+#else
+typedef unsigned char	__boolean;
+#ifndef true
+#define true	((__boolean) 1)
+#endif
+#ifndef false
+#define false	((__boolean) 0)
+#endif
+#endif	/* !__CUDACC__ */
+
 /*
  * MetadataVersion : short
  */
@@ -135,48 +148,6 @@ typedef enum
 } ArrowUnionMode;
 
 /*
- * ArrowTypeOptions - our own definition
- */
-typedef union		ArrowTypeOptions
-{
-	struct {
-		unsigned short		precision;
-		unsigned short		scale;
-	} decimal;
-	struct {
-		ArrowDateUnit		unit;
-	} date;
-	struct {
-		ArrowTimeUnit		unit;
-	} time;
-	struct {
-		ArrowTimeUnit		unit;
-	} timestamp;
-	struct {
-		ArrowIntervalUnit	unit;
-	} interval;
-	struct {
-		int					byteWidth;
-	} fixed_size_binary;
-} ArrowTypeOptions;
-
-#ifndef __CUDACC__
-#include <stdint.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#ifndef bool
-typedef unsigned char	bool;
-#endif
-#ifndef true
-#define true	((bool) 1)
-#endif
-#ifndef false
-#define false	((bool) 0)
-#endif
-
-/*
  * ArrowNodeTag
  */
 typedef enum
@@ -219,6 +190,62 @@ typedef enum
 } ArrowNodeTag;
 
 /*
+ * ArrowTypeOptions - our own definition
+ */
+#define ARROW_TYPE_OPTIONS_COMMON_FIELDS		\
+	ArrowTypeTag			tag;				\
+	unsigned short			unitsz
+
+typedef union		ArrowTypeOptions
+{
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+	} common;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		unsigned short		bitWidth;
+		__boolean			is_signed;
+	} integer;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowPrecision		precision;
+	} floating_point;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		unsigned short		precision;
+		unsigned short		scale;
+		unsigned short		bitWidth;
+	} decimal;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowDateUnit		unit;
+	} date;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowTimeUnit		unit;
+	} time;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowTimeUnit		unit;
+	} timestamp;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowIntervalUnit	unit;
+	} interval;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		int					byteWidth;
+	} fixed_size_binary;
+} ArrowTypeOptions;
+
+#undef ARROW_TYPE_OPTIONS_COMMON_FIELDS
+
+#ifndef __CUDACC__
+#include <stdint.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+/*
  * ArrowNode
  */
 struct SQLbuffer;
@@ -245,7 +272,7 @@ typedef struct		ArrowTypeInt
 {
 	ArrowNode		node;
 	int32_t			bitWidth;
-	bool			is_signed;
+	__boolean		is_signed;
 } ArrowTypeInt;
 
 /* FloatingPoint */
@@ -337,7 +364,7 @@ typedef struct		ArrowTypeFixedSizeList
 typedef struct		ArrowTypeMap
 {
 	ArrowNode		node;
-	bool			keysSorted;
+	__boolean		keysSorted;
 } ArrowTypeMap;
 
 /* Duration */
@@ -415,7 +442,7 @@ typedef struct		ArrowDictionaryEncoding
 	ArrowNode		node;
 	int64_t			id;
 	ArrowTypeInt	indexType;
-	bool			isOrdered;
+	__boolean		isOrdered;
 } ArrowDictionaryEncoding;
 
 /*
@@ -426,7 +453,7 @@ typedef struct		ArrowField
 	ArrowNode		node;
 	const char	   *name;
 	int				_name_len;
-	bool			nullable;
+	__boolean		nullable;
 	ArrowType		type;
 	ArrowDictionaryEncoding *dictionary;
 	/* vector of nested data types */
@@ -517,13 +544,13 @@ typedef struct		ArrowDictionaryBatch
 	ArrowNode		node;
 	int64_t			id;
 	ArrowRecordBatch data;
-	bool			isDelta;
+	__boolean		isDelta;
 } ArrowDictionaryBatch;
 
 /*
- * ArrowMessageHeader
+ * ArrowMessageBody
  */
-typedef union		ArrowMessageHeader
+typedef union
 {
 	ArrowNode		node;
 	ArrowSchema		schema;

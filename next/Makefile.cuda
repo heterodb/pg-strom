@@ -1,0 +1,50 @@
+#
+# Definitions for nvcc code build for PG-Strom
+#
+
+# standalone build?
+ifeq ($(STROM_BUILD_ROOT),)
+PG_CONFIG       ?= pg_config
+endif
+
+#
+# Header and Libraries of CUDA
+#
+CUDA_PATH_LIST := /usr/local/cuda /usr/local/cuda-*
+CUDA_PATH := $(shell for x in $(CUDA_PATH_LIST);    \
+           do test -e "$$x/include/cuda.h" && echo $$x; done | head -1)
+CUDA_IPATH := $(CUDA_PATH)/include
+CUDA_BPATH := $(CUDA_PATH)/bin
+CUDA_LPATH := $(CUDA_PATH)/lib64
+NVCC  := $(CUDA_PATH)/bin/nvcc
+CUDA_VERSION := $(shell grep -E '^\#define[ ]+CUDA_VERSION[ ]+[0-9]+$$' $(CUDA_IPATH)/cuda.h | awk '{print $$3}')
+
+# Max number of registers per GPU thread for PG-Strom modules
+# (64k / 128 = up to 512 threads per SM)
+MAXREGCOUNT := 128
+
+# flags to build GPU libraries
+__NVCC_FLAGS ?= $(NVCC_FLAGS_CUSTOM)
+__NVCC_FLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
+                --fatbin \
+                --maxrregcount=$(MAXREGCOUNT) \
+                --gpu-architecture=compute_60
+# supported device depends on CUDA version
+# don't forget to update the logic of target_cc in cuda_program.c
+ifeq ($(shell test $(CUDA_VERSION) -ge 11020; echo $$?), 0)
+  __NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80,sm_86
+  __NVCC_FLAGS += --threads 6	# CUDA 11.2 supports nvcc --threads option
+else ifeq ($(shell test $(CUDA_VERSION) -ge 11010; echo $$?), 0)
+  __NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80
+else ifeq ($(shell test $(CUDA_VERSION) -ge 10010; echo $$?), 0)
+  __NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75
+else
+  __NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70
+endif
+__NVCC_FLAGS += --source-in-ptx
+__NVCC_FLAGS += -DHAVE_FLOAT2
+__NVCC_FLAGS += --relocatable-device-code=true
+
+# nvcc flags
+NVCC_FLAGS = $(__NVCC_FLAGS) -lineinfo
+NVCC_DEBUG_FLAGS = $(__NVCC_FLAGS) --device-debug -DPGSTROM_DEBUG_BUILD=1

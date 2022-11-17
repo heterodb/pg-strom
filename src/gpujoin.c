@@ -936,7 +936,7 @@ create_gpujoin_path(PlannerInfo *root,
 	gjpath->cpath.path.parallel_workers = parallel_nworkers;
 	gjpath->cpath.path.pathkeys = NIL;
 	gjpath->cpath.path.rows = joinrel->rows;
-	gjpath->cpath.flags = 0;
+	gjpath->cpath.flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	gjpath->cpath.methods = &gpujoin_path_methods;
 	gjpath->outer_relid = 0;
 	gjpath->outer_quals = NULL;
@@ -2183,7 +2183,6 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 							 bool try_inner_parallel)
 {
 #if PG_VERSION_NUM >= 110000
-	Value	   *join_nrows = makeFloat(psprintf("%e", joinrel->rows));
 	List	   *subpaths_list = NIL;
 	AppendPath *append_path;
 	int			parallel_nworkers;
@@ -2202,7 +2201,7 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 										 list_make1(inner_path->parent),
 										 list_make1_int(join_type),
 										 list_make1(extra->restrictlist),
-										 list_make1(join_nrows),
+										 list_make1(pmakeFloat(joinrel->rows)),
 										 required_outer,
 										 param_info,
 										 try_outer_parallel,
@@ -7109,11 +7108,11 @@ resume_kernel:
 	m_kds_dst = (CUdeviceptr)&pds_dst->kds;
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &gjs->gts.kern_params;
-	kern_args[1] = &gjs->m_kmrels;
-	kern_args[2] = &m_kds_src;
-	kern_args[3] = &m_kds_extra;
-	kern_args[4] = &m_kds_dst;
-	kern_args[5] = &m_nullptr;
+	kern_args[2] = &gjs->m_kmrels;
+	kern_args[3] = &m_kds_src;
+	kern_args[4] = &m_kds_extra;
+	kern_args[5] = &m_kds_dst;
+	kern_args[6] = &m_nullptr;
 
 	rc = cuLaunchKernel(kern_gpujoin_main,
 						grid_sz, 1, 1,

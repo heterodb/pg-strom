@@ -1,0 +1,6 @@
+# pg_strom extension
+comment = 'PG-Strom - Extension for Big-Data Processing using GPU/DPU/SPU'
+directory = 'pg_strom'
+default_version = '5.0'
+module_pathname = '$libdir/pg_strom'
+relocatable = false

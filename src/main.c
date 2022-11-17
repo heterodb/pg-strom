@@ -31,6 +31,11 @@ static planner_hook_type	planner_hook_next = NULL;
 static CustomPathMethods	pgstrom_dummy_path_methods;
 static CustomScanMethods	pgstrom_dummy_plan_methods;
 
+/* for compatibility of shmem_request_hook in PG14 or former */
+#if PG_VERSION_NUM < 150000
+shmem_request_hook_type		shmem_request_hook = NULL;
+#endif
+
 /* misc variables */
 long		PAGE_SIZE;
 long		PAGE_MASK;
@@ -595,6 +600,16 @@ _PG_init(void)
 	pgstrom_init_relscan();
 	pgstrom_init_arrow_fdw();
 	pgstrom_init_gpu_cache();
+
+#if PG_VERSION_NUM < 150000
+	/*
+	 * PG15 enforces shared memory requirement is added in the 'shmem_request_hook'
+	 * but PG14 or former don't have such infrastructure. So, we provide our own
+	 * infrastructure with same name and definition.
+	 */
+	if (shmem_request_hook)
+		shmem_request_hook();
+#endif
 
 	/* dummy custom-scan node */
 	memset(&pgstrom_dummy_path_methods, 0, sizeof(CustomPathMethods));

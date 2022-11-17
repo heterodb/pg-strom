@@ -1294,11 +1294,11 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ NULL,    "float8 float8pl(float8,float8)",   1, "p/f:float8pl" },
 
 	/* '-' : subtract operators */
-	{ PGSTROM, "int1 int1pl(int1,int1)",  1, "p/f:int1mi" },
-	{ PGSTROM, "int2 int12pl(int1,int2)", 1, "p/f:int12mi" },
-	{ PGSTROM, "int4 int14pl(int1,int4)", 1, "p/f:int14mi" },
-	{ PGSTROM, "int8 int18pl(int1,int8)", 1, "p/f:int18mi" },
-	{ PGSTROM, "int2 int21pl(int2,int1)", 1, "p/f:int21mi" },
+	{ PGSTROM, "int1 int1mi(int1,int1)",  1, "p/f:int1mi" },
+	{ PGSTROM, "int2 int12mi(int1,int2)", 1, "p/f:int12mi" },
+	{ PGSTROM, "int4 int14mi(int1,int4)", 1, "p/f:int14mi" },
+	{ PGSTROM, "int8 int18mi(int1,int8)", 1, "p/f:int18mi" },
+	{ PGSTROM, "int2 int21mi(int2,int1)", 1, "p/f:int21mi" },
 	{ NULL,    "int2 int2mi(int2,int2)",  1, "p/f:int2mi" },
 	{ NULL,    "int4 int24mi(int2,int4)", 1, "p/f:int24mi" },
 	{ NULL,    "int8 int28mi(int2,int8)", 1, "p/f:int28mi" },
@@ -2680,11 +2680,22 @@ build_extra_devfunc_info(const char *func_extension,
 				continue;
 			}
 			oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
-			dfunc = pmemdup(&__dfunc, sizeof(devfunc_info));
+			dfunc = palloc0(sizeof(devfunc_info));
+			dfunc->func_extension = pstrdup(__dfunc.func_extension);
+			dfunc->func_oid = __dfunc.func_oid;
+			dfunc->func_collid = __dfunc.func_collid;
+			dfunc->func_is_negative = __dfunc.func_is_negative;
+			dfunc->func_is_strict = __dfunc.func_is_strict;
+			dfunc->func_flags = __dfunc.func_flags;
+			dfunc->func_args = list_copy(__dfunc.func_args);
+			dfunc->func_rettype = __dfunc.func_rettype;
 			dfunc->func_sqlname = pstrdup(__dfunc.func_sqlname);
 			dfunc->func_devname = pstrdup(__dfunc.func_devname);
+			if (__dfunc.devfunc_result_sz)
+				dfunc->devfunc_result_sz = __dfunc.devfunc_result_sz;
+			else
+				dfunc->devfunc_result_sz = devfunc_generic_result_sz;
 			MemoryContextSwitchTo(oldcxt);
-
 			break;
 		}
 	}

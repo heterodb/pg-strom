@@ -182,7 +182,9 @@
 #include "utils/json.h"
 #include "utils/jsonb.h"
 #include "utils/inet.h"
+#if PG_VERSION_NUM < 150000
 #include "utils/int8.h"
+#endif
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -1406,7 +1408,7 @@ extern void		gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
 									 off_t m_offset,
 									 strom_io_vector *iovec);
 extern void	extraSysfsSetupDistanceMap(const char *manual_config);
-extern Bitmapset *extraSysfsLookupOptimalGpus(int fdesc);
+extern Bitmapset *extraSysfsLookupOptimalGpus(File filp);
 extern ssize_t extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_sz);
 
 /*
@@ -1494,11 +1496,8 @@ trim_cstring(char *str)
 /*
  * pmakeFloat - for convenient; makeFloat + psprintf
  */
-static inline Value *
-pmakeFloat(cl_double float_value)
-{
-	return makeFloat(psprintf("%.*e", DBL_DIG+3, float_value));
-}
+#define pmakeFloat(fval)						\
+	makeFloat(psprintf("%.*e", DBL_DIG+3, (double)(fval)))
 
 /*
  * get_prev_log2

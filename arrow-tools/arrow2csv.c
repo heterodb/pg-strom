@@ -12,6 +12,7 @@
  */
 #include <ctype.h>
 #include <getopt.h>
+#include <netinet/in.h>
 #include <stdarg.h>
 #include <unistd.h>
 #include "arrow_ipc.h"
@@ -274,7 +275,7 @@ print_arrow_int16(ARROW_PRINT_DATUM_ARGS)
 static bool
 print_arrow_uint16(ARROW_PRINT_DATUM_ARGS)
 {
-	ARROW_PRINT_DATUM_SETUP_INLINE(int16_t);
+	ARROW_PRINT_DATUM_SETUP_INLINE(uint16_t);
 	fprintf(output_filp, "%u", (unsigned int)datum);
 	return true;
 }
@@ -422,7 +423,7 @@ print_arrow_large_binary(ARROW_PRINT_DATUM_ARGS)
 static bool
 print_arrow_bool(ARROW_PRINT_DATUM_ARGS)
 {
-	int64_t		k = (index << 3);
+	int64_t		k = (index >> 3);
 	int32_t		mask = (1 << (index & 7));
 	const char *bitmap = rb_chunk + buffers[1].offset;
 
@@ -444,7 +445,13 @@ print_arrow_decimal128(ARROW_PRINT_DATUM_ARGS)
 	size_t		len = 200 + (scale < 0 ? -scale : 0);
 	char	   *buf = alloca(len);
 	char	   *pos = buf + len;
-	ARROW_PRINT_DATUM_SETUP_INLINE(int128_t);
+	const char *src;
+	int128_t	datum;
+
+	if (sizeof(int128_t) * (index+1) > buffers[1].length)
+		return false;
+	src = rb_chunk + buffers[1].offset + sizeof(int128_t) * index;
+	memcpy(&datum, src, sizeof(int128_t));
 
 	/* zero handling */
 	if (datum == 0)
@@ -882,25 +889,28 @@ static bool
 print_arrow_inet6(ARROW_PRINT_DATUM_ARGS)
 {
 	int32_t		width = column->arrow_type.FixedSizeBinary.byteWidth;
-	uint16_t   *words;
+	uint16_t	words[8];
 	int			zero_base = -1;
 	int			zero_len = -1;
 	int			i, j;
 	ARROW_PRINT_DATUM_SETUP_FIXEDSIZEBINARY(width);
 	assert(width == 16);
 
+	/* copy IPv6 address */
+	for (i=0; i < 8; i++)
+		words[i] = ntohs(((uint16_t *)addr)[i]);
 	/* lookup the longest run of 0x00 */
-	words = (uint16_t *)addr;
 	for (i=0; i < 8; i++)
 	{
 		if (words[i] == 0)
 		{
 			int		count = 1;
 
-			for (j=i+i; j < 8; j++, count++)
+			for (j=i+1; j < 8; j++)
 			{
 				if (words[j] != 0)
 					break;
+				count++;
 			}
 			if (count > 1 && count > zero_len)
 			{
@@ -916,7 +926,7 @@ print_arrow_inet6(ARROW_PRINT_DATUM_ARGS)
 	{
 		if (zero_base >= 0 &&
 			i >= zero_base &&
-			i <= zero_base + zero_len)
+			i <  zero_base + zero_len)
 		{
 			if (i == zero_base)
 				fputc(':', output_filp);
