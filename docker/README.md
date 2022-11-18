@@ -173,6 +173,25 @@ Every 1 second you will see outputs from `nvidia-smi`, and some of the outputs w
 +-----------------------------------------------------------------------------+
 ```
 
+## Sample Performance Test Result
+
+By using a large set of geographic data from the US Census and Open Addresses, a benchmark was run with and without GPU. This benchmark was run on the test computer described above in the README.md.
+
+Here is the sample query:
+
+```
+select a.id
+from fl_statewide_addresses a, census_zcta_geometry g
+where st_contains(g.geom, a.geom4269)
+limit 1000000
+```
+
+### Results:
+
+1. 5s with GPU (using PG-Strom)
+2. 56s without GPU (CPU-only)
+
+
 ## Publish Docker Image
 
 If you choose to publish the image to your own repository, you can retag the image and use `docker push`. Here is an example for `murphye`.
