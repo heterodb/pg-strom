@@ -144,18 +144,46 @@ pgstrom_license_query(PG_FUNCTION_ARGS)
  */
 static int	  (*p_gpudirect_init_driver)() = NULL;
 
-int
+bool
 gpuDirectInitDriver(void)
 {
-	int		rv = -1;
-
 	if (p_gpudirect_init_driver)
 	{
-		rv = p_gpudirect_init_driver();
-		if (rv)
-			heterodbExtraEreport(LOG);
+		if (p_gpudirect_init_driver() != 0)
+			heterodbExtraEreport(ERROR);
+		return true;
 	}
-	return rv;
+	return false;
+}
+
+/*
+ * gpuDirectOpenDriver
+ */
+static int	  (*p_gpudirect_open_driver)() = NULL;
+
+bool
+gpuDirectOpenDriver(void)
+{
+	if (p_gpudirect_open_driver)
+	{
+		if (p_gpudirect_open_driver() != 0)
+			heterodbExtraEreport(ERROR);
+		return true;
+	}
+	return false;
+}
+
+/*
+ * gpuDirectCloseDriver
+ */
+static int	  (*p_gpudirect_close_driver)() = NULL;
+
+void
+gpuDirectCloseDriver(void)
+{
+	if (p_gpudirect_close_driver &&
+		p_gpudirect_close_driver() != 0)
+		heterodbExtraEreport(LOG);
 }
 
 /*
@@ -171,15 +199,16 @@ gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc, File pg_fdesc)
 	int		rawfd = FileGetRawDesc(pg_fdesc);
 	char   *pathname = FilePathName(pg_fdesc);
 
-	if (p_gpudirect_file_desc_open(gds_fdesc, rawfd, pathname) == 0)
-		return true;
-
-	fprintf(stderr, "(%s; %s:%d) %s\n",
-			p_heterodb_extra_error_data->funcname,
-			p_heterodb_extra_error_data->filename,
-			p_heterodb_extra_error_data->lineno,
-			p_heterodb_extra_error_data->message);
-	return false;
+	if (p_gpudirect_file_desc_open(gds_fdesc, rawfd, pathname) != 0)
+	{
+		fprintf(stderr, "(%s; %s:%d) %s\n",
+				p_heterodb_extra_error_data->funcname,
+				p_heterodb_extra_error_data->filename,
+				p_heterodb_extra_error_data->lineno,
+				p_heterodb_extra_error_data->message);
+		return false;
+	}
+	return true;
 }
 
 /*
@@ -193,15 +222,16 @@ bool
 gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
 							const char *pathname)
 {
-	if (p_gpudirect_file_desc_open_by_path(gds_fdesc, pathname) == 0)
-		return true;
-
-	fprintf(stderr, "(%s; %s:%d) %s\n",
-			p_heterodb_extra_error_data->funcname,
-			p_heterodb_extra_error_data->filename,
-			p_heterodb_extra_error_data->lineno,
-			p_heterodb_extra_error_data->message);
-	return false;
+	if (p_gpudirect_file_desc_open_by_path(gds_fdesc, pathname) != 0)
+	{
+		fprintf(stderr, "(%s; %s:%d) %s\n",
+				p_heterodb_extra_error_data->funcname,
+				p_heterodb_extra_error_data->filename,
+				p_heterodb_extra_error_data->lineno,
+				p_heterodb_extra_error_data->message);
+		return false;
+	}
+	return true;
 }
 
 /*
@@ -526,6 +556,8 @@ pgstrom_init_extra(void)
 		if (prefix)
 		{
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, init_driver);
+			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, open_driver);
+			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, close_driver);
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, file_desc_open);
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, file_desc_open_by_path);
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, file_desc_close);
@@ -545,6 +577,8 @@ pgstrom_init_extra(void)
 		p_heterodb_extra_error_data = NULL;
 		p_heterodb_extra_module_init = NULL;
 		p_gpudirect_init_driver = NULL;
+		p_gpudirect_open_driver = NULL;
+		p_gpudirect_close_driver = NULL;
 		p_gpudirect_file_desc_open = NULL;
 		p_gpudirect_file_desc_open_by_path = NULL;
 		p_gpudirect_file_desc_close = NULL;

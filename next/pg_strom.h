@@ -275,7 +275,9 @@ extern void		pgstrom_init_extra(void);
 extern bool		heterodbValidateDevice(int gpu_device_id,
 									   const char *gpu_device_name,
 									   const char *gpu_device_uuid);
-extern int		gpuDirectInitDriver(void);
+extern bool		gpuDirectInitDriver(void);
+extern bool		gpuDirectOpenDriver(void);
+extern void		gpuDirectCloseDriver(void);
 extern bool		gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc,
 									  File pg_fdesc);
 extern bool		gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
@@ -292,7 +294,7 @@ extern bool		gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
 									 off_t m_offset,
 									 strom_io_vector *iovec);
 extern void		extraSysfsSetupDistanceMap(const char *manual_config);
-extern Bitmapset *extraSysfsLookupOptimalGpus(int fdesc);
+extern Bitmapset *extraSysfsLookupOptimalGpus(File filp);
 extern ssize_t	extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_sz);
 
 /*
