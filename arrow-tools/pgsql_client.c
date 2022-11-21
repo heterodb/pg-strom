@@ -542,7 +542,7 @@ pgsql_setup_attribute(PGconn *conn,
 	"         typrelid, typelem, NULL::int typtypmod"			\
 	"    FROM pg_catalog.pg_type t"								\
 	"   WHERE t.typbasetype = 0"								\
-	"UNION ALL"													\
+	" UNION ALL "												\
 	"  SELECT b.depth+1, t.oid type_id, b.base_id,"				\
 	"         b.typname, b.typnamespace,"						\
 	"         b.typlen, b.typbyval, b.typalign, b.typtype,"		\
