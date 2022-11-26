@@ -168,8 +168,7 @@ set_normalized_numeric(xpu_numeric_t *result, int128_t value, int16_t weight)
 }
 
 INLINE_FUNCTION(const char *)
-__xpu_numeric_from_varlena(xpu_numeric_t *result,
-						   const varlena *addr)
+__xpu_numeric_from_varlena(xpu_numeric_t *result, const varlena *addr)
 {
 	uint32_t		len;
 
