@@ -369,6 +369,8 @@ gpuMemoryPoolMaintenance(gpuContext *gcontext)
 			}
 			fprintf(stderr, "GPU-%d: i/o mapped device memory %lu bytes released",
 					gcontext->cuda_dindex, mseg->segment_sz);
+			Assert(pool->total_sz >= mseg->segment_sz);
+			pool->total_sz -= mseg->segment_sz;
 			free(mseg);
 			break;
 		}
@@ -1462,6 +1464,7 @@ gpuservBgWorkerMain(Datum arg)
 	rc = cuInit(0);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuInit: %s", cuStrError(rc));
+
 	PG_TRY();
 	{
 		for (dindex=0; dindex < numGpuDevAttrs; dindex++)
@@ -1469,7 +1472,7 @@ gpuservBgWorkerMain(Datum arg)
 			gpuContext *gcontext = gpuservSetupGpuContext(dindex);
 			dlist_push_tail(&gpuserv_gpucontext_list, &gcontext->chain);
 		}
-
+		gpuDirectOpenDriver();
 		while (!gpuServiceGoingTerminate())
 		{
 			struct epoll_event	ep_ev;
@@ -1507,9 +1510,11 @@ gpuservBgWorkerMain(Datum arg)
 			gpuContext *gcontext = dlist_container(gpuContext, chain, dnode);
 			gpuservCleanupGpuContext(gcontext);
 		}
+		gpuDirectCloseDriver();
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
 	/* cleanup */
 	while (!dlist_is_empty(&gpuserv_gpucontext_list))
 	{
@@ -1517,6 +1522,7 @@ gpuservBgWorkerMain(Datum arg)
 		gpuContext *gcontext = dlist_container(gpuContext, chain, dnode);
 		gpuservCleanupGpuContext(gcontext);
 	}
+	gpuDirectCloseDriver();
 
 	/*
 	 * If it received only SIGHUP (no SIGTERM), try to restart rather than

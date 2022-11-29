@@ -11,7 +11,6 @@
  */
 #include "pg_strom.h"
 
-static bool		gpudirect_driver_initialized = false;
 static bool		pgstrom_gpudirect_enabled;			/* GUC */
 static int		__pgstrom_gpudirect_threshold_kb;		/* GUC */
 #define pgstrom_gpudirect_threshold		((size_t)__pgstrom_gpudirect_threshold_kb << 10)
@@ -196,49 +195,38 @@ pgstromGpuDirectExecEnd(pgstromTaskState *pts)
 }
 
 /*
- * pgstrom_gpudirect_enabled_checker
- */
-static bool
-pgstrom_gpudirect_enabled_checker(bool *p_newval, void **extra, GucSource source)
-{
-	bool		newval = *p_newval;
-
-	if (newval && !gpudirect_driver_initialized)
-		elog(ERROR, "cannot enables GPU-Direct SQL without driver module loaded");
-	return true;
-}
-
-/*
  * pgstrom_init_gpu_direct
  */
 void
 pgstrom_init_gpu_direct(void)
 {
 	static char *nvme_manual_distance_map = NULL;
-	bool		default_gpudirect_enabled = true;
-	char		buffer[1280];
-	int			i;
+	bool	support_gpudirectsql = false;
+	char	buffer[1280];
+	int		i;
 
 	/*
 	 * pgstrom.gpudirect_enabled
 	 */
-	if (gpuDirectInitDriver() == 0)
+	if (gpuDirectInitDriver())
 	{
 		for (i=0; i < numGpuDevAttrs; i++)
 		{
 			if (gpuDevAttrs[i].DEV_SUPPORT_GPUDIRECTSQL)
-				default_gpudirect_enabled = true;
+			{
+				support_gpudirectsql = true;
+				break;
+			}
 		}
-		gpudirect_driver_initialized = true;
 	}
 	DefineCustomBoolVariable("pg_strom.gpudirect_enabled",
 							 "enables GPUDirect SQL",
 							 NULL,
 							 &pgstrom_gpudirect_enabled,
-							 default_gpudirect_enabled,
-							 PGC_SUSET,
+							 (support_gpudirectsql ? true : false),
+							 (support_gpudirectsql ? PGC_SUSET : PGC_POSTMASTER),
 							 GUC_NOT_IN_SAMPLE,
-							 pgstrom_gpudirect_enabled_checker, NULL, NULL);
+							 NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.gpudirect_threshold",
 							"table-size threshold to use GPU-Direct SQL",
 							NULL,

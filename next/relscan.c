@@ -527,6 +527,7 @@ __relScanDirectAssignFilename(StringInfo buf,
 	}
 	if (segment_id != 0)
 		appendStringInfo(buf, ".%u", segment_id);
+	appendStringInfoChar(buf, '\0');
 }
 
 XpuCommand *

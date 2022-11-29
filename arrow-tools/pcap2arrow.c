@@ -9,9 +9,9 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <limits.h>
-#include <pcap.h>
-#include <pfring.h>		/* install libpcap-devel */
-#include <pthread.h>	/* install pfring; see https://packages.ntop.org/ */
+#include <pcap.h>		/* install libpcap-devel */
+#include <pfring.h>		/* install pfring; see https://packages.ntop.org/ */
+#include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <stdint.h>
