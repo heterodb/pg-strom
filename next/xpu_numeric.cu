@@ -58,7 +58,7 @@ xpu_numeric_arrow_ref(kern_context *kcxt,
 {
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
 
-	if (cmeta->attopts.common.tag != ArrowType__Decimal ||
+	if (cmeta->attopts.tag != ArrowType__Decimal ||
 		cmeta->attopts.decimal.bitWidth != 128)
 	{
 		STROM_ELOG(kcxt, "Not a convertible Arrow::Decimal value");
@@ -78,7 +78,7 @@ xpu_numeric_arrow_move(kern_context *kcxt,
 					   const kern_colmeta *cmeta,
 					   const void *addr, int len)
 {
-	if (cmeta->attopts.common.tag != ArrowType__Decimal ||
+	if (cmeta->attopts.tag != ArrowType__Decimal ||
 		cmeta->attopts.decimal.bitWidth != 128)
 	{
 		STROM_ELOG(kcxt, "Not a convertible Arrow::Decimal value");

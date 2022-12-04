@@ -164,7 +164,7 @@ xpu_date_arrow_move(kern_context *kcxt,
 					const kern_colmeta *cmeta,
 					const void *addr, int len)
 {
-	if (cmeta->attopts.common.tag != ArrowType__Date)
+	if (cmeta->attopts.tag != ArrowType__Date)
 	{
 		STROM_ELOG(kcxt, "Value is not convertible to date");
 		return -1;
@@ -267,7 +267,7 @@ xpu_time_arrow_move(kern_context *kcxt,
 					const kern_colmeta *cmeta,
 					const void *addr, int len)
 {
-	if (cmeta->attopts.common.tag != ArrowType__Time)
+	if (cmeta->attopts.tag != ArrowType__Time)
 	{
 		STROM_ELOG(kcxt, "value is not convertible to time");
 		return -1;
@@ -445,7 +445,7 @@ xpu_timestamp_arrow_move(kern_context *kcxt,
 						 const kern_colmeta *cmeta,
 						 const void *addr, int len)
 {
-	if (cmeta->attopts.common.tag != ArrowType__Timestamp)
+	if (cmeta->attopts.tag != ArrowType__Timestamp)
 	{
 		STROM_ELOG(kcxt, "Value is not convertible to timestamp");
 		return -1;
@@ -553,7 +553,7 @@ xpu_timestamptz_arrow_move(kern_context *kcxt,
 						   const kern_colmeta *cmeta,
 						   const void *addr, int len)
 {
-	if (cmeta->attopts.common.tag != ArrowType__Timestamp)
+	if (cmeta->attopts.tag != ArrowType__Timestamp)
 	{
 		STROM_ELOG(kcxt, "Value is not convertible to timestamp");
 		return -1;
@@ -679,7 +679,7 @@ xpu_interval_arrow_move(kern_context *kcxt,
 						const kern_colmeta *cmeta,
 						const void *addr, int len)
 {
-	if (cmeta->attopts.common.tag != ArrowType__Interval)
+	if (cmeta->attopts.tag != ArrowType__Interval)
 	{
 		STROM_ELOG(kcxt, "value is not convertible to interval");
 		return -1;

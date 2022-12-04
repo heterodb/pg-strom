@@ -31,6 +31,7 @@
 #include "catalog/binary_upgrade.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
+#include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_cast.h"

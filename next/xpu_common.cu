@@ -558,7 +558,7 @@ arrow_fetch_secondary_index(kern_context *kcxt,
 	return true;
 }
 
-INLINE_FUNCTION(bool)
+STATIC_FUNCTION(bool)
 __arrow_fetch_bool_datum(kern_context *kcxt,
 						 kern_data_store *kds,
 						 kern_colmeta *cmeta,
@@ -590,7 +590,7 @@ __arrow_fetch_bool_datum(kern_context *kcxt,
 	return true;
 }
 
-INLINE_FUNCTION(bool)
+STATIC_FUNCTION(bool)
 __arrow_fetch_inline_datum(kern_context *kcxt,
 						   kern_data_store *kds,
 						   kern_colmeta *cmeta,
@@ -598,7 +598,7 @@ __arrow_fetch_inline_datum(kern_context *kcxt,
 						   void **p_addr,
 						   int *p_len)
 {
-	int			unitsz = cmeta->attopts.common.unitsz;
+	int		unitsz = cmeta->attopts.unitsz;
 
 	if (unitsz <= 0)
 	{
@@ -622,7 +622,7 @@ __arrow_fetch_inline_datum(kern_context *kcxt,
 	}
 	/* elsewhere, datum is NULL */
 	*p_addr = NULL;
-	*p_len  = -1;
+	*p_len = -1;
 	return true;
 }
 
@@ -760,7 +760,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 		int			len = -1;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		switch (cmeta->attopts.common.tag)
+		switch (cmeta->attopts.tag)
 		{
 			case ArrowNodeTag__Bool:
 				/* xpu_bool_t */
