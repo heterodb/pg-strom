@@ -65,6 +65,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planner.h"
+#include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/postmaster.h"
@@ -598,8 +599,11 @@ extern double	pgstrom_dpu_seq_page_cost;
 extern double	pgstrom_dpu_tuple_cost;
 extern bool		pgstrom_dpu_handle_cached_pages;
 
+extern DpuStorageEntry *GetOptimalDpuForFile(const char *filename);
 extern DpuStorageEntry *GetOptimalDpuForTablespace(Oid tablespace_oid);
 extern DpuStorageEntry *GetOptimalDpuForRelation(Relation relation);
+extern bool		DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
+									   const DpuStorageEntry *ds_entry2);
 extern void		DpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
 extern bool		pgstrom_init_dpu_device(void);

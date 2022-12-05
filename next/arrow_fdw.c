@@ -42,14 +42,10 @@ typedef struct RecordBatchFieldState
 
 typedef struct RecordBatchState
 {
-	const char *filename;	/* file that contains this record-batch */
-	File		filp;		/* valid file-descriptor if FDW(CPU) mode */
-	/* commonn fields with cache */
-	struct stat stat_buf;	/* result of stat(2) */
 	int			rb_index;	/* index number in a file */
-    off_t		rb_offset;	/* offset from the head */
-    size_t		rb_length;	/* length of the entire RecordBatch */
-    int64		rb_nitems;	/* number of items */
+	off_t		rb_offset;	/* offset from the head */
+	size_t		rb_length;	/* length of the entire RecordBatch */
+	int64		rb_nitems;	/* number of items */
 	/* per column information */
 	int			nfields;
 	RecordBatchFieldState fields[FLEXIBLE_ARRAY_MEMBER];
@@ -60,6 +56,8 @@ typedef struct ArrowFileState
 	const char *filename;
 	File		filp;
 	struct stat	stat_buf;
+	Bitmapset  *optimal_gpus;	/* optimal GPUs, if any */
+	DpuStorageEntry *ds_entry;	/* optimal DPU, if any */
 	List	   *rb_list;	/* list of RecordBatchState */
 } ArrowFileState;
 
@@ -115,9 +113,9 @@ struct arrowMetadataCache
 	arrowMetadataCache *next; /* next record-batch if any */
 	struct stat stat_buf;	/* result of stat(2) */
 	int			rb_index;	/* index number in a file */
-    off_t		rb_offset;	/* offset from the head */
-    size_t		rb_length;	/* length of the entire RecordBatch */
-    int64		rb_nitems;	/* number of items */
+	off_t		rb_offset;	/* offset from the head */
+	size_t		rb_length;	/* length of the entire RecordBatch */
+	int64		rb_nitems;	/* number of items */
 	/* per column information */
 	int			nfields;
 	dlist_head	fields;		/* list of arrowMetadataFieldCache */
@@ -203,48 +201,6 @@ arrowFieldGetPGTypeHint(ArrowField *field)
 	}
 	return InvalidOid;
 }
-
-#if 0
-static Oid	arrowTypeToPGTypeOid(ArrowField *field, int *p_type_mod);
-
-/*
- * __arrowStructTypeIsCompatible
- */
-static bool
-__arrowStructTypeIsCompatible(ArrowField *field, Oid comp_oid)
-{
-	TupleDesc	tupdesc;
-	int			j;
-	bool		compatible = false;
-
-	if (pg_type_aclcheck(comp_oid,
-						 GetUserId(),
-						 ACL_USAGE) != ACLCHECK_OK)
-		return false;
-
-	tupdesc = lookup_rowtype_tupdesc_noerror(comp_oid, -1, true);
-	if (tupdesc && tupdesc->natts == field->_num_children)
-	{
-		for (j=0; j < tupdesc->natts; j++)
-		{
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
-			ArrowField *child = &field->children[j];
-			Oid			typoid;
-			int			typmod;
-
-			typoid = arrowTypeToPGTypeOid(child, &typmod);
-			if (typoid != attr->atttypid)
-				break;
-		}
-		if (j >= tupdesc->natts)
-			compatible = true;
-	}
-	if (tupdesc)
-		ReleaseTupleDesc(tupdesc);
-
-	return compatible;
-}
-#endif
 
 /* ------------------------------------------------
  * Metadata Cache Management Routines
@@ -425,7 +381,7 @@ __allocMetadataFieldCache(void)
 static arrowMetadataCache *
 __allocMetadataCache(void)
 {
-	arrowMetadataCache *rb_cache;
+	arrowMetadataCache *mcache;
 	dlist_node *dnode;
 
 	if (dlist_is_empty(&arrow_metadata_cache->free_mcaches))
@@ -446,21 +402,21 @@ __allocMetadataCache(void)
 			 pos + mc_block->unitsz <= end;
 			 pos += mc_block->unitsz)
 		{
-			rb_cache = (arrowMetadataCache *)pos;
-			rb_cache->owner = mc_block;
-			rb_cache->magic = ARROW_METADATA_CACHE_FREE_MAGIC;
+			mcache = (arrowMetadataCache *)pos;
+			mcache->owner = mc_block;
+			mcache->magic = ARROW_METADATA_CACHE_FREE_MAGIC;
 			dlist_push_tail(&arrow_metadata_cache->free_mcaches,
-							&rb_cache->chain);
+							&mcache->chain);
 		}
 	}
 	dnode = dlist_pop_head_node(&arrow_metadata_cache->free_mcaches);
-	rb_cache = dlist_container(arrowMetadataCache, chain, dnode);
-	rb_cache->owner->n_actives++;
-	Assert(rb_cache->magic == ARROW_METADATA_CACHE_FREE_MAGIC);
-	memset(&rb_cache, 0, (offsetof(arrowMetadataCache, magic) -
-						  offsetof(arrowMetadataCache, chain)));
-	rb_cache->magic = ARROW_METADATA_CACHE_ACTIVE_MAGIC;
-	return rb_cache;
+	mcache = dlist_container(arrowMetadataCache, chain, dnode);
+	mcache->owner->n_actives++;
+	Assert(mcache->magic == ARROW_METADATA_CACHE_FREE_MAGIC);
+	memset(&mcache, 0, (offsetof(arrowMetadataCache, magic) -
+						offsetof(arrowMetadataCache, chain)));
+	mcache->magic = ARROW_METADATA_CACHE_ACTIVE_MAGIC;
+	return mcache;
 }
 
 /*
@@ -536,7 +492,387 @@ lookupArrowMetadataCache(struct stat *stat_buf, bool has_exclusive)
 
 /* ----------------------------------------------------------------
  *
- * BuildRecordBatchState
+ * buildArrowStatsBinary
+ *
+ * ...and, routines related to Arrow Min/Max statistics
+ *
+ * ----------------------------------------------------------------
+ */
+typedef struct arrowFieldStatsBinary
+{
+	uint32	nrooms;		/* number of record-batches */
+	int		unitsz;		/* unit size of min/max statistics */
+	bool   *isnull;
+	char   *min_values;
+	char   *max_values;
+	int		nfields;	/* if List/Struct data type */
+	struct arrowFieldStatsBinary *subfields;
+} arrowFieldStatsBinary;
+
+typedef struct
+{
+	int		nitems;		/* number of record-batches */
+	int		nfields;	/* number of columns */
+	arrowFieldStatsBinary fields[FLEXIBLE_ARRAY_MEMBER];
+} arrowStatsBinary;
+
+static void
+__releaseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats)
+{
+	if (bstats->subfields)
+	{
+		for (int j=0; j < bstats->nfields; j++)
+			__releaseArrowFieldStatsBinary(&bstats->subfields[j]);
+		pfree(bstats->subfields);
+	}
+	if (bstats->isnull)
+		pfree(bstats->isnull);
+	if (bstats->min_values)
+		pfree(bstats->min_values);
+	if (bstats->max_values)
+		pfree(bstats->max_values);
+}
+
+static void
+releaseArrowStatsBinary(arrowStatsBinary *arrow_bstats)
+{
+	if (arrow_bstats)
+	{
+		for (int j=0; j < arrow_bstats->nfields; j++)
+			__releaseArrowFieldStatsBinary(&arrow_bstats->fields[j]);
+		pfree(arrow_bstats);
+	}
+}
+
+static int128_t
+__atoi128(const char *tok, bool *p_isnull)
+{
+	int128_t	ival = 0;
+	bool		is_minus = false;
+
+	if (*tok == '-')
+	{
+		is_minus = true;
+		tok++;
+	}
+	while (isdigit(*tok))
+	{
+		ival = 10 * ival + (*tok - '0');
+		tok++;
+	}
+
+	if (*tok != '\0')
+		*p_isnull = true;
+	if (is_minus)
+	{
+		if (ival == 0)
+			*p_isnull = true;
+		ival = -ival;
+	}
+	return ival;
+}
+
+static bool
+__parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
+							 ArrowField *field,
+							 const char *min_tokens,
+							 const char *max_tokens)
+{
+	int			unitsz = -1;
+	char	   *min_buffer;
+	char	   *max_buffer;
+	char	   *min_values = NULL;
+	char	   *max_values = NULL;
+	bool	   *isnull = NULL;
+	char	   *tok1, *pos1;
+	char	   *tok2, *pos2;
+	uint32		index;
+
+	/* determine the unitsz of datum */
+	switch (field->type.node.tag)
+	{
+		case ArrowNodeTag__Int:
+			switch (field->type.Int.bitWidth)
+			{
+				case 8:
+					unitsz = sizeof(uint8_t);
+					break;
+				case 16:
+					unitsz = sizeof(uint16_t);
+					break;
+				case 32:
+					unitsz = sizeof(uint32_t);
+					break;
+				case 64:
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__FloatingPoint:
+			switch (field->type.FloatingPoint.precision)
+			{
+				case ArrowPrecision__Half:
+					unitsz = sizeof(uint16_t);
+					break;
+				case ArrowPrecision__Single:
+					unitsz = sizeof(uint32_t);
+					break;
+				case ArrowPrecision__Double:
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__Decimal:
+			unitsz = sizeof(int128_t);
+			break;
+
+		case ArrowNodeTag__Date:
+			switch (field->type.Date.unit)
+			{
+				case ArrowDateUnit__Day:
+					unitsz = sizeof(uint32_t);
+					break;
+				case ArrowDateUnit__MilliSecond:
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__Time:
+			switch (field->type.Time.unit)
+			{
+				case ArrowTimeUnit__Second:
+				case ArrowTimeUnit__MilliSecond:
+					unitsz = sizeof(uint32_t);
+					break;
+				case ArrowTimeUnit__MicroSecond:
+				case ArrowTimeUnit__NanoSecond:
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+
+		case ArrowNodeTag__Timestamp:
+			switch (field->type.Timestamp.unit)
+			{
+				case ArrowTimeUnit__Second:
+				case ArrowTimeUnit__MilliSecond:
+				case ArrowTimeUnit__MicroSecond:
+				case ArrowTimeUnit__NanoSecond:
+					unitsz = sizeof(uint64_t);
+					break;
+				default:
+					return false;
+			}
+			break;
+		default:
+			return false;
+	}
+	Assert(unitsz > 0);
+	/* parse the min_tokens/max_tokens */
+	min_buffer = alloca(strlen(min_tokens) + 1);
+	max_buffer = alloca(strlen(max_tokens) + 1);
+	strcpy(min_buffer, min_tokens);
+	strcpy(max_buffer, max_tokens);
+
+	min_values = palloc0(unitsz * bstats->nrooms);
+	max_values = palloc0(unitsz * bstats->nrooms);
+	isnull     = palloc0(sizeof(bool) * bstats->nrooms);
+	for (tok1 = strtok_r(min_buffer, ",", &pos1),
+		 tok2 = strtok_r(max_buffer, ",", &pos2), index = 0;
+		 tok1 != NULL && tok2 != NULL && index < bstats->nrooms;
+		 tok1 = strtok_r(NULL, ",", &pos1),
+		 tok2 = strtok_r(NULL, ",", &pos2), index++)
+	{
+		bool		__isnull = false;
+		int128_t	__min = __atoi128(__trim(tok1), &__isnull);
+		int128_t	__max = __atoi128(__trim(tok2), &__isnull);
+
+		if (__isnull)
+			isnull[index] = true;
+		else
+		{
+			memcpy(min_values + unitsz * index, &__min, unitsz);
+			memcpy(max_values + unitsz * index, &__max, unitsz);
+		}
+	}
+	/* sanity checks */
+	if (!tok1 && !tok2 && index == bstats->nrooms)
+	{
+		bstats->unitsz = unitsz;
+		bstats->isnull = isnull;
+		bstats->min_values = min_values;
+		bstats->max_values = max_values;
+		return true;
+	}
+	/* elsewhere, something wrong */
+	pfree(min_values);
+	pfree(max_values);
+	pfree(isnull);
+	return false;
+}
+
+static bool
+__buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
+							 ArrowField *field,
+							 uint32 numRecordBatches)
+{
+	const char *min_tokens = NULL;
+	const char *max_tokens = NULL;
+	int			j, k;
+	bool		retval = false;
+
+	for (k=0; k < field->_num_custom_metadata; k++)
+	{
+		ArrowKeyValue *kv = &field->custom_metadata[k];
+
+		if (strcmp(kv->key, "min_values") == 0)
+			min_tokens = kv->value;
+		else if (strcmp(kv->key, "max_values") == 0)
+			max_tokens = kv->value;
+	}
+
+	bstats->nrooms = numRecordBatches;
+	bstats->unitsz = -1;
+	if (min_tokens && max_tokens)
+	{
+		if (__parseArrowFieldStatsBinary(bstats, field,
+										 min_tokens,
+										 max_tokens))
+		{
+			retval = true;
+		}
+		else
+		{
+			/* parse error, ignore the stat */
+			if (bstats->isnull)
+				pfree(bstats->isnull);
+			if (bstats->min_values)
+				pfree(bstats->min_values);
+			if (bstats->max_values)
+				pfree(bstats->max_values);
+			bstats->unitsz     = -1;
+			bstats->isnull     = NULL;
+			bstats->min_values = NULL;
+			bstats->max_values = NULL;
+		}
+	}
+
+	if (field->_num_children > 0)
+	{
+		bstats->nfields = field->_num_children;
+		bstats->subfields = palloc0(sizeof(arrowFieldStatsBinary) * bstats->nfields);
+		for (j=0; j < bstats->nfields; j++)
+		{
+			if (__buildArrowFieldStatsBinary(&bstats->subfields[j],
+											 &field->children[j],
+											 numRecordBatches))
+				retval = true;
+		}
+	}
+	return retval;
+}
+
+static arrowStatsBinary *
+buildArrowStatsBinary(const ArrowFooter *footer)
+{
+	arrowStatsBinary *arrow_bstats;
+	int		nfields = footer->schema._num_fields;
+	bool	found = false;
+
+	arrow_bstats = palloc0(offsetof(arrowStatsBinary,
+									fields[nfields]));
+	arrow_bstats->nitems = footer->_num_recordBatches;
+	arrow_bstats->nfields = nfields;
+	for (int j=0; j < nfields; j++)
+	{
+		if (__buildArrowFieldStatsBinary(&arrow_bstats->fields[j],
+										 &footer->schema.fields[j],
+										 footer->_num_recordBatches))
+			found = true;
+	}
+	if (!found)
+	{
+		releaseArrowStatsBinary(arrow_bstats);
+		return NULL;
+	}
+	return arrow_bstats;
+}
+
+/*
+ * applyArrowStatsBinary
+ */
+static void
+__applyArrowFieldStatsBinary(RecordBatchFieldState *fstate,
+							 arrowFieldStatsBinary *bstats,
+							 int rb_index)
+{
+	int		j;
+
+	if (bstats->unitsz > 0 &&
+		bstats->isnull != NULL &&
+		bstats->min_values != NULL &&
+		bstats->max_values != NULL)
+	{
+		size_t	off = bstats->unitsz * rb_index;
+
+		memcpy(&fstate->stat_min,
+			   bstats->min_values + off, bstats->unitsz);
+		memcpy(&fstate->stat_max,
+			   bstats->max_values + off, bstats->unitsz);
+		fstate->stat_isnull = false;
+	}
+	else
+	{
+		memset(&fstate->stat_min, 0, sizeof(SQLstat__datum));
+		memset(&fstate->stat_max, 0, sizeof(SQLstat__datum));
+		fstate->stat_isnull = true;
+	}
+	
+	Assert(fstate->num_children == bstats->nfields);
+	for (j=0; j < fstate->num_children; j++)
+	{
+		RecordBatchFieldState  *__fstate = &fstate->children[j];
+		arrowFieldStatsBinary  *__bstats = &bstats->subfields[j];
+
+		__applyArrowFieldStatsBinary(__fstate, __bstats, rb_index);
+	}
+}
+
+static void
+applyArrowStatsBinary(RecordBatchState *rb_state, arrowStatsBinary *arrow_bstats)
+{
+	Assert(rb_state->nfields == arrow_bstats->nfields &&
+		   rb_state->rb_index < arrow_bstats->nitems);
+	for (int j=0; j < rb_state->nfields; j++)
+	{
+		__applyArrowFieldStatsBinary(&rb_state->fields[j],
+									 &arrow_bstats->fields[j],
+									 rb_state->rb_index);
+	}
+}
+
+
+
+
+
+
+
+
+
+/* ----------------------------------------------------------------
+ *
+ * BuildArrowFileState
  *
  * It build RecordBatchState based on the metadata-cache, or raw Arrow files.
  * ----------------------------------------------------------------
@@ -581,10 +917,15 @@ __buildRecordBatchFieldStateByCache(RecordBatchFieldState *rb_field,
 	}
 }
 
-static List *
-__buildRecordBatchStateByCache(const char *filename, arrowMetadataCache *mcache)
+static ArrowFileState *
+__buildArrowFileStateByCache(const char *filename, arrowMetadataCache *mcache)
 {
-	List   *results = NIL;
+	ArrowFileState	   *af_state;
+
+	af_state = palloc0(sizeof(ArrowFileState));
+	af_state->filename = pstrdup(filename);
+	af_state->filp = -1;
+	memcpy(&af_state->stat_buf, &mcache->stat_buf, sizeof(struct stat));
 
 	while (mcache)
 	{
@@ -594,10 +935,6 @@ __buildRecordBatchStateByCache(const char *filename, arrowMetadataCache *mcache)
 
 		rb_state = palloc0(offsetof(RecordBatchState,
 									fields[mcache->nfields]));
-		rb_state->filename = pstrdup(filename);
-		rb_state->filp = -1;
-		memcpy(&rb_state->stat_buf,
-			   &mcache->stat_buf, sizeof(struct stat));
 		rb_state->rb_index  = mcache->rb_index;
 		rb_state->rb_offset = mcache->rb_offset;
 		rb_state->rb_length = mcache->rb_length;
@@ -610,11 +947,11 @@ __buildRecordBatchStateByCache(const char *filename, arrowMetadataCache *mcache)
 			__buildRecordBatchFieldStateByCache(&rb_state->fields[j++], fcache);
 		}
 		Assert(j == rb_state->nfields);
-		results = lappend(results, rb_state);
+		af_state->rb_list = lappend(af_state->rb_list, rb_state);
 
 		mcache = mcache->next;
 	}
-	return results;
+	return af_state;
 }
 
 /*
@@ -1055,6 +1392,7 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 
 static RecordBatchState *
 __buildRecordBatchStateOne(ArrowSchema *schema,
+						   int rb_index,
 						   ArrowBlock *block,
 						   ArrowRecordBatch *rbatch)
 {
@@ -1066,6 +1404,7 @@ __buildRecordBatchStateOne(ArrowSchema *schema,
 		elog(ERROR, "arrow_fdw: right now, compressed record-batche is not supported");
 
 	rb_state = palloc0(offsetof(RecordBatchState, fields[ncols]));
+	rb_state->rb_index = rb_index;
 	rb_state->rb_offset = block->offset + block->metaDataLength;
 	rb_state->rb_length = block->bodyLength;
 	rb_state->rb_nitems = rbatch->length;
@@ -1088,21 +1427,21 @@ __buildRecordBatchStateOne(ArrowSchema *schema,
 	return rb_state;
 }
 
-static List *
-__buildRecordBatchStateByFile(const char *filename, struct stat *p_stat_buf)
+static ArrowFileState *
+__buildArrowFileStateByFile(const char *filename)
 {
 	ArrowFileInfo af_info;
+	ArrowFileState *af_state;
+	arrowStatsBinary *arrow_bstats;
 	File		filp;
-	List	   *results = NIL;
 
 	filp = PathNameOpenFile(filename, O_RDONLY | PG_BINARY);
 	if (filp < 0)
 	{
-		if (errno == ENOENT)
-			elog(LOG, "failed to open('%s'): %m", filename);
-		else
+		if (errno != ENOENT)
 			elog(ERROR, "failed to open('%s'): %m", filename);
-		return NIL;
+		elog(DEBUG2, "failed to open('%s'): %m", filename);
+		return NULL;
 	}
 
 	/* read the metadata */
@@ -1115,10 +1454,15 @@ __buildRecordBatchStateByFile(const char *filename, struct stat *p_stat_buf)
 	if (af_info.recordBatches == NULL)
 	{
 		elog(DEBUG2, "arrow file '%s' contains no RecordBatch", filename);
-		return NIL;
+		return NULL;
 	}
+	/* allocate ArrowFileState */
+	af_state = palloc0(sizeof(ArrowFileInfo));
+	af_state->filename = pstrdup(filename);
+	af_state->filp = -1;
+	memcpy(&af_state->stat_buf, &af_info.stat_buf, sizeof(struct stat));
 
-	//buildArrowStatsBinary();
+	arrow_bstats = buildArrowStatsBinary(&af_info.footer);
 	for (int i=0; i < af_info.footer._num_recordBatches; i++)
 	{
 		ArrowBlock	     *block  = &af_info.footer.recordBatches[i];
@@ -1126,24 +1470,14 @@ __buildRecordBatchStateByFile(const char *filename, struct stat *p_stat_buf)
 		RecordBatchState *rb_state;
 
 		rb_state = __buildRecordBatchStateOne(&af_info.footer.schema,
-											  block, rbatch);
-		rb_state->filename = pstrdup(filename);
-		memcpy(&rb_state->stat_buf, &af_info.stat_buf, sizeof(struct stat));
-		rb_state->rb_index = i;
-
-		results = lappend(results, rb_state);
+											  i, block, rbatch);
+		if (arrow_bstats)
+			applyArrowStatsBinary(rb_state, arrow_bstats);
+		af_state->rb_list = lappend(af_state->rb_list, rb_state);
 	}
-	if (p_stat_buf)
-		memcpy(p_stat_buf, &af_info.stat_buf, sizeof(struct stat));
+	releaseArrowStatsBinary(arrow_bstats);
 
-	
-
-
-	//releaseArrowStatsBinary();
-
-	
-
-	return results;
+	return af_state;
 }
 
 
@@ -1186,15 +1520,22 @@ __buildArrowMetadataFieldCache(RecordBatchFieldState *fstate)
 	return fcache;
 }
 
+/*
+ * __buildArrowMetadataCacheNoLock
+ *
+ * it builds arrowMetadataCache entries according to the supplied
+ * ArrowFileState
+ */
 static void
-__buildArrowMetadataCacheNoLock(List *rb_state_list)
+__buildArrowMetadataCacheNoLock(ArrowFileState *af_state)
 {
 	arrowMetadataCache *mcache_head = NULL;
 	arrowMetadataCache *mcache_prev = NULL;
 	arrowMetadataCache *mcache;
+	uint32_t	hindex;
 	ListCell   *lc;
 
-	foreach (lc, rb_state_list)
+	foreach (lc, af_state->rb_list)
 	{
 		RecordBatchState *rb_state = lfirst(lc);
 
@@ -1204,16 +1545,19 @@ __buildArrowMetadataCacheNoLock(List *rb_state_list)
 			__releaseMetadataCache(mcache_head);
 			return;
 		}
-		memcpy(&mcache->stat_buf, &rb_state->stat_buf, sizeof(struct stat));
-		mcache->rb_index = rb_state->rb_index;
+		memcpy(&mcache->stat_buf,
+			   &af_state->stat_buf, sizeof(struct stat));
+		mcache->rb_index  = rb_state->rb_index;
 		mcache->rb_offset = rb_state->rb_offset;
 		mcache->rb_length = rb_state->rb_length;
 		mcache->rb_nitems = rb_state->rb_nitems;
-		mcache->nfields = rb_state->nfields;
+		mcache->nfields   = rb_state->nfields;
+		dlist_init(&mcache->fields);
 		if (!mcache_head)
 			mcache_head = mcache;
 		else
 			mcache_prev->next = mcache;
+
 		for (int j=0; j < rb_state->nfields; j++)
 		{
 			arrowMetadataFieldCache *fcache;
@@ -1228,14 +1572,24 @@ __buildArrowMetadataCacheNoLock(List *rb_state_list)
 		}
 		mcache_prev = mcache;
 	}
+	/* chain to the list */
+	hindex = arrowMetadataHashIndex(&af_state->stat_buf);
+	dlist_push_tail(&arrow_metadata_cache->hash_slots[hindex],
+					&mcache_head->chain );
+	SpinLockAcquire(&arrow_metadata_cache->lru_lock);
+	gettimeofday(&mcache_head->lru_tv, NULL);
+	dlist_push_head(&arrow_metadata_cache->lru_list, &mcache_head->lru_chain);
+	SpinLockRelease(&arrow_metadata_cache->lru_lock);
 }
 
-static List *
-BuildRecordBatchState(const char *filename)
+static ArrowFileState *
+BuildArrowFileState(Relation frel, const char *filename)
 {
 	arrowMetadataCache *mcache;
-	struct stat	stat_buf;
-	List	   *results;
+	ArrowFileState *af_state;
+	RecordBatchState *rb_state;
+	struct stat		stat_buf;
+	TupleDesc		tupdesc;
 
 	if (stat(filename, &stat_buf) != 0)
 		elog(ERROR, "failed on stat('%s'): %m", filename);
@@ -1244,38 +1598,52 @@ BuildRecordBatchState(const char *filename)
 	if (mcache)
 	{
 		/* found a valid metadata-cache */
-		results = __buildRecordBatchStateByCache(filename, mcache);
+		af_state = __buildArrowFileStateByCache(filename, mcache);
 	}
 	else
 	{
 		LWLockRelease(&arrow_metadata_cache->mutex);
 
 		/* here is no valid metadata-cache, so build it from the raw file */
-		results = __buildRecordBatchStateByFile(filename, &stat_buf);
-		if (results == NIL)
-			return NIL;		/* file not found? */
+		af_state = __buildArrowFileStateByFile(filename);
+		if (!af_state)
+			return NULL;	/* file not found? */
 
 		LWLockAcquire(&arrow_metadata_cache->mutex, LW_EXCLUSIVE);
-		mcache = lookupArrowMetadataCache(&stat_buf, true);
+		mcache = lookupArrowMetadataCache(&af_state->stat_buf, true);
 		if (!mcache)
-			__buildArrowMetadataCacheNoLock(results);
+			__buildArrowMetadataCacheNoLock(af_state);
 	}
 	LWLockRelease(&arrow_metadata_cache->mutex);
 
-	return results;
+	/* compatibility checks */
+	rb_state = linitial(af_state->rb_list);
+	tupdesc = RelationGetDescr(frel);
+	if (tupdesc->natts != rb_state->nfields)
+		elog(ERROR, "arrow_fdw: foreign table '%s' is not compatible to '%s'",
+			 RelationGetRelationName(frel), filename);
+	for (int j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute	attr = TupleDescAttr(tupdesc, j);
+		RecordBatchFieldState *fstate = &rb_state->fields[j];
+
+		if (attr->atttypid != fstate->atttypid)
+			elog(ERROR, "arrow_fdw: foreign table '%s' column '%s' (%s) is not compatible to the arrow field (%s) in the '%s'",
+				 RelationGetRelationName(frel),
+				 NameStr(attr->attname),
+				 format_type_be(attr->atttypid),
+				 format_type_be(fstate->atttypid),
+				 filename);
+	}
+	/*
+	 * Lookup Optimal GPU & DPU for the Arrow file
+	 */
+	//af_state->optimal_gpus = GpuOptimalGpusForFile();
+	af_state->optimal_gpus = NULL;
+	af_state->ds_entry = GetOptimalDpuForFile(filename);
+
+	return af_state;
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 /*
  * baseRelIsArrowFdw
@@ -1411,54 +1779,94 @@ arrowFdwExtractFilesList(List *options_list,
 	return filesList;
 }
 
-
-
-
-
-
-
-
-
 /*
  * ArrowGetForeignRelSize
  */
+static size_t
+__recordBatchFieldLength(RecordBatchFieldState *fstate)
+{
+	size_t		len = 0;
+
+	if (fstate->null_count > 0)
+		len += fstate->nullmap_length;
+	len += (fstate->values_length +
+			fstate->extra_length);
+	for (int j=0; j < fstate->num_children; j++)
+		len += __recordBatchFieldLength(&fstate->children[j]);
+	return len;
+}
+
 static void
 ArrowGetForeignRelSize(PlannerInfo *root,
 					   RelOptInfo *baserel,
 					   Oid foreigntableid)
 {
 	ForeignTable   *ft = GetForeignTable(foreigntableid);
+	Relation		frel = table_open(foreigntableid, NoLock);
 	List		   *filesList;
+	List		   *results = NIL;
+	Bitmapset	   *referenced = NULL;
 	ListCell	   *lc1, *lc2;
+	size_t			totalLen = 0;
+	double			ntuples = 0.0;
 	int				parallel_nworkers;
 
+	/* columns to be referenced */
+	foreach (lc1, baserel->baserestrictinfo)
+	{
+		RestrictInfo   *rinfo = lfirst(lc1);
+
+		pull_varattnos((Node *)rinfo->clause, baserel->relid, &referenced);
+	}
+	referenced = pickup_outer_referenced(root, baserel, referenced);
+
+	/* read arrow-file metadta */
 	filesList = arrowFdwExtractFilesList(ft->options, &parallel_nworkers);
 	foreach (lc1, filesList)
 	{
+		ArrowFileState *af_state;
 		char	   *fname = strVal(lfirst(lc1));
-		List	   *rb_state_list;
 
-		rb_state_list = BuildRecordBatchState(fname);
-		foreach (lc2, rb_state_list)
+		af_state = BuildArrowFileState(frel, fname);
+		if (!af_state)
+			continue;
+
+		/*
+		 * Size calculation based the record-batch metadata
+		 */
+		foreach (lc2, af_state->rb_list)
 		{
 			RecordBatchState *rb_state = lfirst(lc2);
 
+			/* whole-row reference? */
+			if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
+			{
+				totalLen += rb_state->rb_length;
+			}
+			else
+			{
+				int		j, k;
 
-
+				for (k = bms_next_member(referenced, -1);
+					 k >= 0;
+					 k = bms_next_member(referenced, k))
+				{
+					j = k + FirstLowInvalidHeapAttributeNumber;
+					if (j <= 0 || j > rb_state->nfields)
+						continue;
+					totalLen += __recordBatchFieldLength(&rb_state->fields[j-1]);
+				}
+			}
+			ntuples += rb_state->rb_nitems;
 		}
+		results = lappend(results, af_state);
 	}
+	table_close(frel, NoLock);
 
-
-	
-	//pickup files list
-	//call BuildRecordBatchState(const char *filename)
-	//count number of rows expected
-
-
-/*
+	/* setup baserel */
 	baserel->rel_parallel_workers = parallel_nworkers;
-	baserel->fdw_private = list_make1(...);
-	baserel->pages = num_pages;
+	baserel->fdw_private = list_make2(results, referenced);
+	baserel->pages = totalLen / BLCKSZ;
 	baserel->tuples = ntuples;
 	baserel->rows = ntuples *
 		clauselist_selectivity(root,
@@ -1466,7 +1874,82 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 							   0,
 							   JOIN_INNER,
 							   NULL);
-*/
+}
+
+/*
+ * cost_arrow_fdw_seqscan
+ */
+static void
+cost_arrow_fdw_seqscan(Path *path,
+					   PlannerInfo *root,
+					   RelOptInfo *baserel,
+					   ParamPathInfo *param_info,
+					   int num_workers)
+{
+	Cost		startup_cost = 0.0;
+	Cost		disk_run_cost = 0.0;
+	Cost		cpu_run_cost = 0.0;
+	QualCost	qcost;
+	double		nrows;
+	double		spc_seq_page_cost;
+
+	if (param_info)
+		nrows = param_info->ppi_rows;
+	else
+		nrows = baserel->rows;
+
+	/* arrow_fdw.enabled */
+	if (!arrow_fdw_enabled)
+		startup_cost += disable_cost;
+
+	/*
+	 * Storage costs
+	 *
+	 * XXX - smaller number of columns to read shall have less disk cost
+	 * because of columnar format. Right now, we don't discount cost for
+	 * the pages not to be read.
+	 */
+	get_tablespace_page_costs(baserel->reltablespace,
+							  NULL,
+							  &spc_seq_page_cost);
+	disk_run_cost = spc_seq_page_cost * baserel->pages;
+
+	/* CPU costs */
+	if (param_info)
+	{
+		cost_qual_eval(&qcost, param_info->ppi_clauses, root);
+		qcost.startup += baserel->baserestrictcost.startup;
+        qcost.per_tuple += baserel->baserestrictcost.per_tuple;
+	}
+	else
+		qcost = baserel->baserestrictcost;
+	startup_cost += qcost.startup;
+	cpu_run_cost = (cpu_tuple_cost + qcost.per_tuple) * baserel->tuples;
+
+	/* tlist evaluation costs */
+	startup_cost += path->pathtarget->cost.startup;
+	cpu_run_cost += path->pathtarget->cost.per_tuple * path->rows;
+
+	/* adjust cost for CPU parallelism */
+	if (num_workers > 0)
+	{
+		double		leader_contribution;
+		double		parallel_divisor = (double) num_workers;
+
+		/* see get_parallel_divisor() */
+		leader_contribution = 1.0 - (0.3 * (double)num_workers);
+		parallel_divisor += Max(leader_contribution, 0.0);
+
+		/* The CPU cost is divided among all the workers. */
+		cpu_run_cost /= parallel_divisor;
+
+		/* Estimated row count per background worker process */
+		nrows = clamp_row_est(nrows / parallel_divisor);
+	}
+	path->rows = nrows;
+	path->startup_cost = startup_cost;
+	path->total_cost = startup_cost + cpu_run_cost + disk_run_cost;
+	path->parallel_workers = num_workers;
 }
 
 /*
@@ -1476,7 +1959,56 @@ static void
 ArrowGetForeignPaths(PlannerInfo *root,
                      RelOptInfo *baserel,
                      Oid foreigntableid)
-{}
+{
+	ForeignPath	   *fpath;
+	ParamPathInfo  *param_info;
+	Relids			required_outer = baserel->lateral_relids;
+
+	param_info = get_baserel_parampathinfo(root, baserel, required_outer);
+	fpath = create_foreignscan_path(root,
+									baserel,
+									NULL,	/* default pathtarget */
+									-1.0,	/* dummy */
+									-1.0,	/* dummy */
+									-1.0,	/* dummy */
+									NIL,	/* no pathkeys */
+									required_outer,
+									NULL,	/* no extra plan */
+									NIL);	/* no particular private */
+	cost_arrow_fdw_seqscan(&fpath->path,
+						   root,
+						   baserel,
+						   param_info, 0);
+	add_path(baserel, &fpath->path);
+
+	if (baserel->consider_parallel)
+	{
+		int		num_workers =
+			compute_parallel_worker(baserel,
+									baserel->pages, -1.0,
+									max_parallel_workers_per_gather);
+		if (num_workers == 0)
+			return;
+
+		fpath = create_foreignscan_path(root,
+										baserel,
+										NULL,	/* default pathtarget */
+										-1.0,	/* dummy */
+										-1.0,	/* dummy */
+										-1.0,	/* dummy */
+										NIL,	/* no pathkeys */
+										required_outer,
+										NULL,	/* no extra plan */
+										NIL);	/* no particular private */
+		fpath->path.parallel_aware = true;
+		cost_arrow_fdw_seqscan(&fpath->path,
+							   root,
+							   baserel,
+							   param_info,
+							   num_workers);
+		add_partial_path(baserel, (Path *)fpath);
+	}
+}
 
 /*
  * ArrowGetForeignPlan
@@ -1490,7 +2022,25 @@ ArrowGetForeignPlan(PlannerInfo *root,
 					List *scan_clauses,
 					Plan *outer_plan)
 {
-	return NULL;
+	Bitmapset  *referenced = lsecond(baserel->fdw_private);
+	List	   *ref_list = NIL;
+	int			j, k;
+
+	for (k = bms_next_member(referenced, -1);
+		 k >= 0;
+		 k = bms_next_member(referenced, k))
+	{
+		j = k + FirstLowInvalidHeapAttributeNumber;
+		ref_list = lappend_int(ref_list, j);
+	}
+	return make_foreignscan(tlist,
+							extract_actual_clauses(scan_clauses, false),
+							baserel->relid,
+							NIL,	/* no expressions to evaluate */
+							ref_list, /* list of referenced attnums */
+							NIL,	/* no custom tlist */
+							NIL,	/* no remote quals */
+							outer_plan);
 }
 
 /*
@@ -2109,176 +2659,6 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 	return linitial(baserel->fdw_private);
 }
 
-static void
-cost_arrow_fdw_seqscan(Path *path,
-					   PlannerInfo *root,
-					   RelOptInfo *baserel,
-					   ParamPathInfo *param_info,
-					   int num_workers)
-{
-	Cost		startup_cost = 0.0;
-	Cost		disk_run_cost = 0.0;
-	Cost		cpu_run_cost = 0.0;
-	QualCost	qcost;
-	double		nrows;
-	double		spc_seq_page_cost;
-
-	if (param_info)
-		nrows = param_info->ppi_rows;
-	else
-		nrows = baserel->rows;
-
-	/* arrow_fdw.enabled */
-	if (!arrow_fdw_enabled)
-		startup_cost += disable_cost;
-
-	/*
-	 * Storage costs
-	 *
-	 * XXX - smaller number of columns to read shall have less disk cost
-	 * because of columnar format. Right now, we don't discount cost for
-	 * the pages not to be read.
-	 */
-	get_tablespace_page_costs(baserel->reltablespace,
-							  NULL,
-							  &spc_seq_page_cost);
-	disk_run_cost = spc_seq_page_cost * baserel->pages;
-
-	/* CPU costs */
-	if (param_info)
-	{
-		cost_qual_eval(&qcost, param_info->ppi_clauses, root);
-		qcost.startup += baserel->baserestrictcost.startup;
-        qcost.per_tuple += baserel->baserestrictcost.per_tuple;
-	}
-	else
-		qcost = baserel->baserestrictcost;
-	startup_cost += qcost.startup;
-	cpu_run_cost = (cpu_tuple_cost + qcost.per_tuple) * baserel->tuples;
-
-	/* tlist evaluation costs */
-	startup_cost += path->pathtarget->cost.startup;
-	cpu_run_cost += path->pathtarget->cost.per_tuple * path->rows;
-
-	/* adjust cost for CPU parallelism */
-	if (num_workers > 0)
-	{
-		double		leader_contribution;
-		double		parallel_divisor = (double) num_workers;
-
-		/* see get_parallel_divisor() */
-		leader_contribution = 1.0 - (0.3 * (double)num_workers);
-		parallel_divisor += Max(leader_contribution, 0.0);
-
-		/* The CPU cost is divided among all the workers. */
-		cpu_run_cost /= parallel_divisor;
-
-		/* Estimated row count per background worker process */
-		nrows = clamp_row_est(nrows / parallel_divisor);
-	}
-	path->rows = nrows;
-	path->startup_cost = startup_cost;
-	path->total_cost = startup_cost + cpu_run_cost + disk_run_cost;
-	path->parallel_workers = num_workers;
-}
-
-/*
- * ArrowGetForeignPaths
- */
-static void
-ArrowGetForeignPaths(PlannerInfo *root,
-					 RelOptInfo *baserel,
-					 Oid foreigntableid)
-{
-	ForeignPath	   *fpath;
-	ParamPathInfo  *param_info;
-	Relids			required_outer = baserel->lateral_relids;
-
-	param_info = get_baserel_parampathinfo(root, baserel, required_outer);
-
-	fpath = create_foreignscan_path(root, baserel,
-									NULL,	/* default pathtarget */
-									-1,		/* dummy */
-									-1.0,	/* dummy */
-									-1.0,	/* dummy */
-									NIL,	/* no pathkeys */
-									required_outer,
-									NULL,	/* no extra plan */
-									NIL);	/* no particular private */
-	cost_arrow_fdw_seqscan(&fpath->path, root, baserel, param_info, 0);
-	add_path(baserel, (Path *)fpath);
-
-	if (baserel->consider_parallel)
-	{
-		int		num_workers =
-			compute_parallel_worker(baserel,
-									baserel->pages, -1.0,
-									max_parallel_workers_per_gather);
-		if (num_workers == 0)
-			return;
-
-		fpath = create_foreignscan_path(root,
-										baserel,
-										NULL,	/* default pathtarget */
-										-1,		/* dummy */
-										-1.0,	/* dummy */
-										-1.0,	/* dummy */
-										NIL,	/* no pathkeys */
-										required_outer,
-										NULL,	/* no extra plan */
-										NIL);	/* no particular private */
-		fpath->path.parallel_aware = true;
-
-		cost_arrow_fdw_seqscan(&fpath->path, root, baserel, param_info,
-							   num_workers);
-		add_partial_path(baserel, (Path *)fpath);
-	}
-}
-
-/*
- * ArrowGetForeignPlan
- */
-static ForeignScan *
-ArrowGetForeignPlan(PlannerInfo *root,
-					RelOptInfo *baserel,
-					Oid foreigntableid,
-					ForeignPath *best_path,
-					List *tlist,
-					List *scan_clauses,
-					Plan *outer_plan)
-{
-	Bitmapset  *referenced = NULL;
-	List	   *ref_list = NIL;
-	ListCell   *lc;
-	int			j, k;
-
-	foreach (lc, baserel->baserestrictinfo)
-	{
-		RestrictInfo   *rinfo = lfirst(lc);
-
-		pull_varattnos((Node *)rinfo->clause, baserel->relid, &referenced);
-	}
-	referenced = pgstrom_pullup_outer_refs(root, baserel, referenced);
-
-	for (k = bms_next_member(referenced, -1);
-		 k >= 0;
-		 k = bms_next_member(referenced, k))
-	{
-		j = k + FirstLowInvalidHeapAttributeNumber;
-		ref_list = lappend_int(ref_list, j);
-	}
-	bms_free(referenced);
-
-	return make_foreignscan(tlist,
-							extract_actual_clauses(scan_clauses, false),
-							baserel->relid,
-							NIL,	/* no expressions to evaluate */
-							ref_list, /* list of referenced attnums */
-							NIL,	/* no custom tlist */
-							NIL,	/* no remote quals */
-							outer_plan);
-}
-
 /* ----------------------------------------------------------------
  *
  * Routines related to min/max statistics and scan hint
@@ -2300,383 +2680,12 @@ ArrowGetForeignPlan(PlannerInfo *root,
  * It reconstruct binary min/max statistics per record-batch
  * from the custom-metadata of ArrowField.
  */
-typedef struct arrowFieldStatsBinary
-{
-	uint32	nrooms;		/* number of record-batches */
-	int		unitsz;		/* unit size of min/max statistics */
-	bool   *isnull;
-	char   *min_values;
-	char   *max_values;
-	int		nfields;	/* if List/Struct data type */
-	struct arrowFieldStatsBinary *subfields;
-} arrowFieldStatsBinary;
-
-typedef struct
-{
-	int		nitems;		/* number of record-batches */
-	int		ncols;
-	arrowFieldStatsBinary columns[FLEXIBLE_ARRAY_MEMBER];
-} arrowStatsBinary;
-
-static void
-__releaseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats)
-{
-	int			j;
-
-	if (bstats->subfields)
-	{
-		for (j=0; j < bstats->nfields; j++)
-			__releaseArrowFieldStatsBinary(&bstats->subfields[j]);
-		pfree(bstats->subfields);
-	}
-	if (bstats->isnull)
-		pfree(bstats->isnull);
-	if (bstats->min_values)
-		pfree(bstats->min_values);
-	if (bstats->max_values)
-		pfree(bstats->max_values);
-}
-
-static void
-releaseArrowStatsBinary(arrowStatsBinary *arrow_bstats)
-{
-	int			j;
-
-	if (arrow_bstats)
-	{
-		for (j=0; j < arrow_bstats->ncols; j++)
-			__releaseArrowFieldStatsBinary(&arrow_bstats->columns[j]);
-		pfree(arrow_bstats);
-	}
-}
-
-static int128_t
-__atoi128(const char *tok, bool *p_isnull)
-{
-	int128_t	ival = 0;
-	bool		is_minus = false;
-
-	if (*tok == '-')
-	{
-		is_minus = true;
-		tok++;
-	}
-	while (isdigit(*tok))
-	{
-		ival = 10 * ival + (*tok - '0');
-		tok++;
-	}
-
-	if (*tok != '\0')
-		*p_isnull = true;
-	if (is_minus)
-	{
-		if (ival == 0)
-			*p_isnull = true;
-		ival = -ival;
-	}
-	return ival;
-}
-
-static bool
-__parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
-							 ArrowField *field,
-							 const char *min_tokens,
-							 const char *max_tokens)
-{
-	int			unitsz = -1;
-	char	   *min_buffer;
-	char	   *max_buffer;
-	char	   *min_values = NULL;
-	char	   *max_values = NULL;
-	bool	   *isnull = NULL;
-	char	   *tok1, *pos1;
-	char	   *tok2, *pos2;
-	uint32		index;
-
-	/* determine the unitsz of datum */
-	switch (field->type.node.tag)
-	{
-		case ArrowNodeTag__Int:
-			switch (field->type.Int.bitWidth)
-			{
-				case 8:
-					unitsz = sizeof(uint8_t);
-					break;
-				case 16:
-					unitsz = sizeof(uint16_t);
-					break;
-				case 32:
-					unitsz = sizeof(uint32_t);
-					break;
-				case 64:
-					unitsz = sizeof(uint64_t);
-					break;
-				default:
-					return false;
-			}
-			break;
-
-		case ArrowNodeTag__FloatingPoint:
-			switch (field->type.FloatingPoint.precision)
-			{
-				case ArrowPrecision__Half:
-					unitsz = sizeof(uint16_t);
-					break;
-				case ArrowPrecision__Single:
-					unitsz = sizeof(uint32_t);
-					break;
-				case ArrowPrecision__Double:
-					unitsz = sizeof(uint64_t);
-					break;
-				default:
-					return false;
-			}
-			break;
-
-		case ArrowNodeTag__Decimal:
-			unitsz = sizeof(int128_t);
-			break;
-
-		case ArrowNodeTag__Date:
-			switch (field->type.Date.unit)
-			{
-				case ArrowDateUnit__Day:
-					unitsz = sizeof(uint32_t);
-					break;
-				case ArrowDateUnit__MilliSecond:
-					unitsz = sizeof(uint64_t);
-					break;
-				default:
-					return false;
-			}
-			break;
-
-		case ArrowNodeTag__Time:
-			switch (field->type.Time.unit)
-			{
-				case ArrowTimeUnit__Second:
-				case ArrowTimeUnit__MilliSecond:
-					unitsz = sizeof(uint32_t);
-					break;
-				case ArrowTimeUnit__MicroSecond:
-				case ArrowTimeUnit__NanoSecond:
-					unitsz = sizeof(uint64_t);
-					break;
-				default:
-					return false;
-			}
-			break;
-
-		case ArrowNodeTag__Timestamp:
-			switch (field->type.Timestamp.unit)
-			{
-				case ArrowTimeUnit__Second:
-				case ArrowTimeUnit__MilliSecond:
-				case ArrowTimeUnit__MicroSecond:
-				case ArrowTimeUnit__NanoSecond:
-					unitsz = sizeof(uint64_t);
-					break;
-				default:
-					return false;
-			}
-			break;
-		default:
-			return false;
-	}
-	Assert(unitsz > 0);
-	/* parse the min_tokens/max_tokens */
-	min_buffer = alloca(strlen(min_tokens) + 1);
-	max_buffer = alloca(strlen(max_tokens) + 1);
-	strcpy(min_buffer, min_tokens);
-	strcpy(max_buffer, max_tokens);
-
-	min_values = palloc0(unitsz * bstats->nrooms);
-	max_values = palloc0(unitsz * bstats->nrooms);
-	isnull     = palloc0(sizeof(bool) * bstats->nrooms);
-	for (tok1 = strtok_r(min_buffer, ",", &pos1),
-		 tok2 = strtok_r(max_buffer, ",", &pos2), index = 0;
-		 tok1 != NULL && tok2 != NULL && index < bstats->nrooms;
-		 tok1 = strtok_r(NULL, ",", &pos1),
-		 tok2 = strtok_r(NULL, ",", &pos2), index++)
-	{
-		bool		__isnull = false;
-		int128_t	__min = __atoi128(__trim(tok1), &__isnull);
-		int128_t	__max = __atoi128(__trim(tok2), &__isnull);
-
-		if (__isnull)
-			isnull[index] = true;
-		else
-		{
-			memcpy(min_values + unitsz * index, &__min, unitsz);
-			memcpy(max_values + unitsz * index, &__max, unitsz);
-		}
-	}
-	/* sanity checks */
-	if (!tok1 && !tok2 && index == bstats->nrooms)
-	{
-		bstats->unitsz = unitsz;
-		bstats->isnull = isnull;
-		bstats->min_values = min_values;
-		bstats->max_values = max_values;
-		return true;
-	}
-	/* elsewhere, something wrong */
-	pfree(min_values);
-	pfree(max_values);
-	pfree(isnull);
-	return false;
-}
-
-static bool
-__buildArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
-							 ArrowField *field,
-							 uint32 numRecordBatches)
-{
-	const char *min_tokens = NULL;
-	const char *max_tokens = NULL;
-	int			j, k;
-	bool		retval = false;
-
-	for (k=0; k < field->_num_custom_metadata; k++)
-	{
-		ArrowKeyValue *kv = &field->custom_metadata[k];
-
-		if (strcmp(kv->key, "min_values") == 0)
-			min_tokens = kv->value;
-		else if (strcmp(kv->key, "max_values") == 0)
-			max_tokens = kv->value;
-	}
-
-	bstats->nrooms = numRecordBatches;
-	bstats->unitsz = -1;
-	if (min_tokens && max_tokens)
-	{
-		if (__parseArrowFieldStatsBinary(bstats, field,
-										 min_tokens,
-										 max_tokens))
-		{
-			retval = true;
-		}
-		else
-		{
-			/* parse error, ignore the stat */
-			if (bstats->isnull)
-				pfree(bstats->isnull);
-			if (bstats->min_values)
-				pfree(bstats->min_values);
-			if (bstats->max_values)
-				pfree(bstats->max_values);
-			bstats->unitsz     = -1;
-			bstats->isnull     = NULL;
-			bstats->min_values = NULL;
-			bstats->max_values = NULL;
-		}
-	}
-
-	if (field->_num_children > 0)
-	{
-		bstats->nfields = field->_num_children;
-		bstats->subfields = palloc0(sizeof(arrowFieldStatsBinary) * bstats->nfields);
-		for (j=0; j < bstats->nfields; j++)
-		{
-			if (__buildArrowFieldStatsBinary(&bstats->subfields[j],
-											 &field->children[j],
-											 numRecordBatches))
-				retval = true;
-		}
-	}
-	return retval;
-}
-
-static arrowStatsBinary *
-buildArrowStatsBinary(const ArrowFooter *footer, Bitmapset **p_stat_attrs)
-{
-	arrowStatsBinary *arrow_bstats;
-	int		j, ncols = footer->schema._num_fields;
-	bool	found = false;
-
-	arrow_bstats = palloc0(offsetof(arrowStatsBinary,
-									columns[ncols]));
-	arrow_bstats->nitems = footer->_num_recordBatches;
-	arrow_bstats->ncols = ncols;
-	for (j=0; j < ncols; j++)
-	{
-		if (__buildArrowFieldStatsBinary(&arrow_bstats->columns[j],
-										 &footer->schema.fields[j],
-										 footer->_num_recordBatches))
-		{
-			if (p_stat_attrs)
-				*p_stat_attrs = bms_add_member(*p_stat_attrs, j+1);
-			found = true;
-		}
-	}
-	if (!found)
-	{
-		releaseArrowStatsBinary(arrow_bstats);
-		return NULL;
-	}
-	return arrow_bstats;
-}
 
 /*
  * applyArrowStatsBinary
  *
  * It applies the fetched min/max values on the cached record-batch metadata
  */
-static void
-__applyArrowFieldStatsBinary(RecordBatchFieldState *fstate,
-							 arrowFieldStatsBinary *bstats,
-							 int rb_index)
-{
-	int		j;
-
-	if (bstats->unitsz > 0 &&
-		bstats->isnull != NULL &&
-		bstats->min_values != NULL &&
-		bstats->max_values != NULL)
-	{
-		size_t	off = bstats->unitsz * rb_index;
-
-		memcpy(&fstate->stat_min,
-			   bstats->min_values + off, bstats->unitsz);
-		memcpy(&fstate->stat_max,
-			   bstats->max_values + off, bstats->unitsz);
-		fstate->stat_isnull = false;
-	}
-	else
-	{
-		memset(&fstate->stat_min, 0, sizeof(SQLstat__datum));
-		memset(&fstate->stat_max, 0, sizeof(SQLstat__datum));
-		fstate->stat_isnull = true;
-	}
-	
-	Assert(fstate->num_children == bstats->nfields);
-	for (j=0; j < fstate->num_children; j++)
-	{
-		RecordBatchFieldState  *__fstate = &fstate->children[j];
-		arrowFieldStatsBinary  *__bstats = &bstats->subfields[j];
-
-		__applyArrowFieldStatsBinary(__fstate, __bstats, rb_index);
-	}
-}
-
-static void
-applyArrowStatsBinary(RecordBatchState *rb_state, arrowStatsBinary *arrow_bstats)
-{
-	int		j, ncols = rb_state->ncols;
-
-	Assert(rb_state->ncols == arrow_bstats->ncols &&
-		   rb_state->rb_index < arrow_bstats->nitems);
-	for (j=0; j < ncols; j++)
-	{
-		RecordBatchFieldState  *fstate = &rb_state->columns[j];
-		arrowFieldStatsBinary  *bstats = &arrow_bstats->columns[j];
-
-		__applyArrowFieldStatsBinary(fstate, bstats, rb_state->rb_index);
-	}
-}
-
 static SQLstat *
 __buildArrowFieldStatsList(ArrowField *field, uint32 numRecordBatches)
 {
