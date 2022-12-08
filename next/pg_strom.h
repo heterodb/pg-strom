@@ -34,6 +34,7 @@
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_amop.h"
 #include "catalog/pg_cast.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_extension.h"
@@ -65,6 +66,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planner.h"
+#include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/postmaster.h"
@@ -78,6 +80,7 @@
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/cash.h"
+#include "utils/catcache.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
 #include "utils/float.h"
@@ -202,7 +205,7 @@ typedef struct XpuConnection	XpuConnection;
 typedef struct GpuCacheState	GpuCacheState;
 typedef struct GpuDirectState	GpuDirectState;
 typedef struct DpuStorageEntry	DpuStorageEntry;
-typedef struct ArrowFdwState	ArrowFdwState;
+typedef struct ArrowScanState	ArrowScanState;
 typedef struct BrinIndexState	BrinIndexState;
 
 typedef struct
@@ -227,7 +230,7 @@ struct pgstromTaskState
 	pgstromSharedState *ps_state;
 	GpuCacheState	   *gc_state;
 	GpuDirectState	   *gd_state;
-	ArrowFdwState	   *af_state;
+	ArrowScanState	   *as_state;
 	BrinIndexState	   *br_state;
 	DpuStorageEntry	   *ds_entry;
 	/* current chunk (already processed by the device) */
@@ -559,34 +562,28 @@ extern void		pgstrom_init_gpu_scan(void);
 /*
  * arrow_fdw.c and arrow_read.c
  */
-extern bool baseRelIsArrowFdw(RelOptInfo *baserel);
-extern bool RelationIsArrowFdw(Relation frel);
+extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
+extern bool 	RelationIsArrowFdw(Relation frel);
 extern Bitmapset *GetOptimalGpusForArrowFdw(PlannerInfo *root,
 											RelOptInfo *baserel);
-#if 0
-extern bool KDS_fetch_tuple_arrow(TupleTableSlot *slot,
-								  kern_data_store *kds,
-								  size_t row_index);
-
-extern ArrowFdwState *ExecInitArrowFdw(ScanState *ss,
-									   GpuContext *gcontext,
-									   List *outer_quals,
-									   Bitmapset *outer_refs);
-extern pgstrom_data_store *ExecScanChunkArrowFdw(GpuTaskState *gts);
-extern void ExecReScanArrowFdw(ArrowFdwState *af_state);
-extern void ExecEndArrowFdw(ArrowFdwState *af_state);
-
-extern void ExecInitDSMArrowFdw(ArrowFdwState *af_state,
-								GpuTaskSharedState *gtss);
-extern void ExecReInitDSMArrowFdw(ArrowFdwState *af_state);
-extern void ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
-								   GpuTaskSharedState *gtss);
-extern void ExecShutdownArrowFdw(ArrowFdwState *af_state);
-extern void ExplainArrowFdw(ArrowFdwState *af_state,
-							Relation frel,
-							ExplainState *es,
-							List *dcontext);
-#endif
+extern ArrowScanState *ExecInitArrowScan(ScanState *ss,
+										 List *outer_quals,
+										 Bitmapset *outer_refs);
+extern kern_data_store *ExecArrowScanChunk(ScanState *ss,
+										   ArrowScanState *as_state);
+extern void		ExecEndArrowScan(ArrowScanState *as_state);
+extern void		ExecReScanArrowScan(ArrowScanState *as_state);
+extern Size		ExecEstimateArrowScan();
+extern void		ExecInitDSMArrowScan();
+extern void		ExecInitWorkerArrowScan();
+extern void		ExecShutdownArrowScan();
+extern void		ExplainArrowScan(ArrowScanState *as_state,
+								 Relation frel,
+								 ExplainState *es,
+								 List *dcontext);
+extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
+									  kern_data_store *kds,
+									  size_t index);
 extern void pgstrom_init_arrow_fdw(void);
 
 /*
@@ -598,8 +595,11 @@ extern double	pgstrom_dpu_seq_page_cost;
 extern double	pgstrom_dpu_tuple_cost;
 extern bool		pgstrom_dpu_handle_cached_pages;
 
+extern DpuStorageEntry *GetOptimalDpuForFile(const char *filename);
 extern DpuStorageEntry *GetOptimalDpuForTablespace(Oid tablespace_oid);
 extern DpuStorageEntry *GetOptimalDpuForRelation(Relation relation);
+extern bool		DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
+									   const DpuStorageEntry *ds_entry2);
 extern void		DpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
 extern bool		pgstrom_init_dpu_device(void);

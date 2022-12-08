@@ -184,7 +184,7 @@ xpu_date_arrow_move(kern_context *kcxt,
 				break;
 			case ArrowDateUnit__MilliSecond:
 				assert(len == sizeof(uint64_t));
-				*value = *((uint64_t *)addr) / 1000
+				*value = *((uint64_t *)addr) / (SECS_PER_DAY * 1000)
 					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 				break;
 			default:

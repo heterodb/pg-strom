@@ -62,6 +62,16 @@ static DpuTablespaceHash	   *dpu_tablespace_hash_slots[DPU_TABLESPACE_HASH_NSLOT
 static MemoryContext			dpu_tablespace_hash_memcxt = NULL;
 
 /*
+ * GetOptimalDpuForFile
+ */
+DpuStorageEntry *
+GetOptimalDpuForFile(const char *filename)
+{
+	/* to be implemented later */
+	return NULL;
+}
+
+/*
  * GetOptimalDpuForRelation
  */
 DpuStorageEntry *
@@ -113,6 +123,21 @@ GetOptimalDpuForRelation(Relation relation)
 	Oid		tablespace_oid = RelationGetForm(relation)->reltablespace;
 
 	return GetOptimalDpuForTablespace(tablespace_oid);
+}
+
+/*
+ * DpuStorageEntryIsEqual
+ */
+bool
+DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
+					   const DpuStorageEntry *ds_entry2)
+{
+	if (ds_entry1 && ds_entry2)
+		return (ds_entry1->endpoint_id == ds_entry2->endpoint_id);
+	else if (!ds_entry1 && !ds_entry2)
+		return true;
+	else
+		return false;
 }
 
 /*
