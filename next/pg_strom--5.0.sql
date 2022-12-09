@@ -46,7 +46,7 @@ CREATE FUNCTION pgstrom.define_shell_type(text,oid,regnamespace='public')
 -- Arrow_Fdw functions
 --
 -- ================================================================
-/*
+
 CREATE FUNCTION pgstrom.arrow_fdw_handler()
   RETURNS fdw_handler
   AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_handler'
@@ -86,7 +86,6 @@ CREATE FUNCTION pgstrom.arrow_fdw_import_file(text,	    -- relname
   RETURNS void
   AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_import_file'
   LANGUAGE C;
-*/
 
 -- ================================================================
 --

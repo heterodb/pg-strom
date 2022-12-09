@@ -189,11 +189,10 @@ static bool					arrow_fdw_enabled;	/* GUC */
 static bool					arrow_fdw_stats_hint_enabled;	/* GUC */
 static int					arrow_metadata_cache_size_kb;	/* GUC */
 
-/*
- * Static functions
- */
-
-
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_handler);
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_validator);
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_import_file);
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_precheck_schema);
 
 /* ----------------------------------------------------------------
  *
@@ -206,7 +205,7 @@ static int					arrow_metadata_cache_size_kb;	/* GUC */
  * arrowFieldGetPGTypeHint
  */
 static Oid
-arrowFieldGetPGTypeHint(ArrowField *field)
+arrowFieldGetPGTypeHint(const ArrowField *field)
 {
 	for (int i=0; i < field->_num_custom_metadata; i++)
 	{
@@ -1210,69 +1209,13 @@ typedef struct
 	ArrowFieldNode *fnode_tail;
 } setupRecordBatchContext;
 
-static void
-__assignRecordBatchFieldStateBuffer(RecordBatchFieldState *rb_field,
-									setupRecordBatchContext *con,
-									bool has_extra)
-{
-	ArrowBuffer	   *buffer_curr;
-
-	/* nullmap */
-	buffer_curr = con->buffer_curr++;
-	if (buffer_curr >= con->buffer_tail)
-		elog(ERROR, "RecordBatch has less buffers than expected");
-	if (rb_field->null_count > 0)
-	{
-		rb_field->nullmap_offset = buffer_curr->offset;
-		rb_field->nullmap_length = buffer_curr->length;
-		if (rb_field->nullmap_length < BITMAPLEN(rb_field->nitems))
-			elog(ERROR, "nullmap length is smaller than expected");
-		if (rb_field->nullmap_offset != MAXALIGN(rb_field->nullmap_offset))
-			elog(ERROR, "nullmap is not aligned well");
-	}
-
-	if (rb_field->attopts.unitsz != 0)
-	{
-		size_t		least_length;
-
-		if (rb_field->attopts.unitsz < 0)
-			least_length = BITMAPLEN(rb_field->nitems);
-		else if (!has_extra)
-			least_length = rb_field->attopts.unitsz * rb_field->nitems;
-		else
-			least_length = rb_field->attopts.unitsz * (rb_field->nitems + 1);
-		
-		buffer_curr = con->buffer_curr++;
-		if (buffer_curr >= con->buffer_tail)
-			elog(ERROR, "RecordBatch has less buffers than expected");
-		rb_field->values_offset = buffer_curr->offset;
-		rb_field->values_length = buffer_curr->length;
-		if (rb_field->values_length < MAXALIGN(least_length))
-			elog(ERROR, "values array is smaller than expected");
-		if (rb_field->values_offset != MAXALIGN(rb_field->values_offset))
-			elog(ERROR, "values array is not aligned well");
-	}
-
-	if (has_extra)
-	{
-		Assert(rb_field->attopts.unitsz > 0);
-		buffer_curr = con->buffer_curr++;
-		if (buffer_curr >= con->buffer_tail)
-			elog(ERROR, "RecordBatch has less buffers than expected");
-		rb_field->extra_offset = buffer_curr->offset;
-		rb_field->extra_length = buffer_curr->length;
-		if (rb_field->extra_offset != MAXALIGN(rb_field->extra_offset))
-			elog(ERROR, "extra buffer is not aligned well");
-	}
-}
-
-static void
-__assignRecordBatchFieldStateComposite(RecordBatchFieldState *rb_field, Oid hint_oid)
+static Oid
+__lookupCompositePGType(int nattrs, Oid *type_oids, Oid hint_oid)
 {
 	Relation	rel;
 	ScanKeyData	skeys[3];
 	SysScanDesc	sscan;
-	bool		found = false;
+	Oid			comp_oid = InvalidOid;
 
 	rel = table_open(RelationRelationId, AccessShareLock);
 	ScanKeyInit(&skeys[0],
@@ -1282,9 +1225,9 @@ __assignRecordBatchFieldStateComposite(RecordBatchFieldState *rb_field, Oid hint
 	ScanKeyInit(&skeys[1],
 				Anum_pg_class_relnatts,
 				BTEqualStrategyNumber, F_INT2EQ,
-				Int16GetDatum(rb_field->num_children));
+				Int16GetDatum(nattrs));
 	ScanKeyInit(&skeys[2],
-                Anum_pg_class_oid,
+				Anum_pg_class_oid,
 				BTEqualStrategyNumber, F_OIDNE,
 				ObjectIdGetDatum(hint_oid));
 	sscan = systable_beginscan(rel, InvalidOid, false, NULL,
@@ -1293,7 +1236,7 @@ __assignRecordBatchFieldStateComposite(RecordBatchFieldState *rb_field, Oid hint
 	{
 		HeapTuple	htup;
 		TupleDesc	tupdesc;
-		Oid			comp_oid;
+		int			j;
 
 		if (OidIsValid(hint_oid))
 		{
@@ -1316,28 +1259,304 @@ __assignRecordBatchFieldStateComposite(RecordBatchFieldState *rb_field, Oid hint
 		tupdesc = lookup_rowtype_tupdesc_noerror(comp_oid, -1, true);
 		if (!tupdesc)
 			continue;
-		if (tupdesc->natts == rb_field->num_children)
+		if (tupdesc->natts == nattrs)
 		{
-			for (int j=0; j < tupdesc->natts; j++)
+			for (j=0; j < tupdesc->natts; j++)
 			{
 				Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
-				RecordBatchFieldState *rb_child = &rb_field->children[j];
 
-				if (attr->atttypid != rb_child->atttypid)
-					goto not_matched;
+				if (attr->atttypid != type_oids[j])
+					break;
 			}
-			rb_field->atttypid = comp_oid;
-			found = true;
-			break;
+			if (j == tupdesc->natts)
+			{
+				ReleaseTupleDesc(tupdesc);
+				goto found;
+			}
 		}
-	not_matched:
 		ReleaseTupleDesc(tupdesc);
 	}
+	comp_oid = InvalidOid;	/* not found */
+found:
 	systable_endscan(sscan);
 	table_close(rel, AccessShareLock);
 
-	if (!found)
-		elog(ERROR, "arrow_fdw: didn't find out compatible composite type");
+	return comp_oid;
+}
+
+static void
+__arrowFieldTypeToPGType(const ArrowField *field,
+						 Oid *p_type_oid,
+						 int32_t *p_type_mod,
+						 ArrowTypeOptions *p_attopts)
+{
+	const ArrowType *t = &field->type;
+	Oid			type_oid = InvalidOid;
+	int32_t		type_mod = -1;
+	Oid			hint_oid = arrowFieldGetPGTypeHint(field);
+	ArrowTypeOptions attopts;
+
+	memset(&attopts, 0, sizeof(ArrowTypeOptions));
+	switch (t->node.tag)
+	{
+		case ArrowNodeTag__Int:
+			attopts.tag = ArrowType__Int;
+			switch (t->Int.bitWidth)
+			{
+				case 8:
+					attopts.unitsz = sizeof(int8_t);
+					type_oid =
+						GetSysCacheOid2(TYPENAMENSP,
+										Anum_pg_type_oid,
+										CStringGetDatum("int1"),
+										ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+					break;
+				case 16:
+					attopts.unitsz = sizeof(int16_t);
+					type_oid = INT2OID;
+					break;
+				case 32:
+					attopts.unitsz = sizeof(int32_t);
+					type_oid = INT4OID;
+					break;
+				case 64:
+					attopts.unitsz = sizeof(int64_t);
+					type_oid = INT8OID;
+					break;
+				default:
+					elog(ERROR, "Arrow::Int bitWidth=%d is not supported",
+						 t->Int.bitWidth);
+			}
+			attopts.integer.bitWidth  = t->Int.bitWidth;
+			attopts.integer.is_signed = t->Int.is_signed;
+			break;
+
+		case ArrowNodeTag__FloatingPoint:
+			attopts.tag = ArrowType__FloatingPoint;
+			switch (t->FloatingPoint.precision)
+			{
+				case ArrowPrecision__Half:
+					attopts.unitsz = sizeof(float2_t);
+					type_oid =
+						GetSysCacheOid2(TYPENAMENSP,
+										Anum_pg_type_oid,
+										CStringGetDatum("float2"),
+										ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+					break;
+				case ArrowPrecision__Single:
+					attopts.unitsz = sizeof(float4_t);
+					type_oid = FLOAT4OID;
+					break;
+				case ArrowPrecision__Double:
+					attopts.unitsz = sizeof(float8_t);
+					type_oid = FLOAT8OID;
+					break;
+				default:
+					elog(ERROR, "Arrow::FloatingPoint unknown precision (%d)",
+						 (int)t->FloatingPoint.precision);
+			}
+			attopts.floating_point.precision = t->FloatingPoint.precision;
+			break;
+
+		case ArrowNodeTag__Bool:
+			attopts.tag = ArrowType__Bool;
+			attopts.unitsz = -1;		/* values is bitmap */
+			type_oid = BOOLOID;
+			break;
+
+		case ArrowNodeTag__Decimal:
+			if (t->Decimal.bitWidth != 128)
+				elog(ERROR, "Arrow::Decimal%u is not supported", t->Decimal.bitWidth);
+			attopts.tag               = ArrowType__Decimal;
+			attopts.unitsz            = sizeof(int128_t);
+			attopts.decimal.precision = t->Decimal.precision;
+			attopts.decimal.scale     = t->Decimal.scale;
+			attopts.decimal.bitWidth  = t->Decimal.bitWidth;
+			type_oid = NUMERICOID;
+			break;
+
+		case ArrowNodeTag__Date:
+			attopts.tag = ArrowType__Date;
+			switch (t->Date.unit)
+			{
+				case ArrowDateUnit__Day:
+					attopts.unitsz = sizeof(int32_t);
+					break;
+				case ArrowDateUnit__MilliSecond:
+					attopts.unitsz = sizeof(int32_t);
+					break;
+				default:
+					elog(ERROR, "Arrow::Date unknown unit (%d)",
+						 (int)t->Date.unit);
+			}
+			attopts.date.unit = t->Date.unit;
+			type_oid = DATEOID;
+			break;
+
+		case ArrowNodeTag__Time:
+			attopts.tag = ArrowType__Time;
+			switch (t->Time.unit)
+			{
+				case ArrowTimeUnit__Second:
+				case ArrowTimeUnit__MilliSecond:
+					attopts.unitsz = sizeof(int32_t);
+					break;
+				case ArrowTimeUnit__MicroSecond:
+				case ArrowTimeUnit__NanoSecond:
+					attopts.unitsz = sizeof(int64_t);
+					break;
+				default:
+					elog(ERROR, "unknown Time::unit (%d)",
+						 (int)t->Time.unit);
+			}
+			attopts.time.unit = t->Time.unit;
+			type_oid = TIMEOID;
+			break;
+
+		case ArrowNodeTag__Timestamp:
+			attopts.tag = ArrowType__Timestamp;
+			switch (t->Timestamp.unit)
+			{
+				case ArrowTimeUnit__Second:
+				case ArrowTimeUnit__MilliSecond:
+				case ArrowTimeUnit__MicroSecond:
+				case ArrowTimeUnit__NanoSecond:
+					attopts.unitsz = sizeof(int64_t);
+					break;
+				default:
+					elog(ERROR, "unknown Timestamp::unit (%d)",
+						 (int)t->Timestamp.unit);
+			}
+			attopts.timestamp.unit = t->Timestamp.unit;
+			type_oid = (t->Timestamp.timezone
+						? TIMESTAMPTZOID
+						: TIMESTAMPOID);
+			break;
+
+		case ArrowNodeTag__Interval:
+			attopts.tag = ArrowType__Interval;
+			switch (t->Interval.unit)
+			{
+				case ArrowIntervalUnit__Year_Month:
+					attopts.unitsz = sizeof(int32_t);
+					break;
+				case ArrowIntervalUnit__Day_Time:
+					attopts.unitsz = sizeof(int64_t);
+					break;
+				default:
+					elog(ERROR, "unknown Interval::unit (%d)",
+                         (int)t->Interval.unit);
+			}
+			attopts.interval.unit = t->Interval.unit;
+			type_oid = INTERVALOID;
+			break;
+
+		case ArrowNodeTag__FixedSizeBinary:
+			attopts.tag = ArrowType__FixedSizeBinary;
+			attopts.unitsz = t->FixedSizeBinary.byteWidth;
+			attopts.fixed_size_binary.byteWidth = t->FixedSizeBinary.byteWidth;
+			if (t->FixedSizeBinary.byteWidth <= 0 ||
+				t->FixedSizeBinary.byteWidth > BLCKSZ)
+				elog(ERROR, "arrow_fdw: %s with byteWidth=%d is not supported", 
+					 t->node.tagName,
+					 t->FixedSizeBinary.byteWidth);
+			if (hint_oid == MACADDROID &&
+				t->FixedSizeBinary.byteWidth == 6)
+			{
+				type_oid = MACADDROID;
+			}
+			else if (hint_oid == INETOID &&
+					 (t->FixedSizeBinary.byteWidth == 4 ||
+                      t->FixedSizeBinary.byteWidth == 16))
+			{
+				type_oid = INETOID;
+			}
+			else
+			{
+				type_oid = BPCHAROID;
+				type_mod = VARHDRSZ + t->FixedSizeBinary.byteWidth;
+			}
+			break;
+
+		case ArrowNodeTag__Utf8:
+			attopts.tag = ArrowType__Utf8;
+			attopts.unitsz = sizeof(uint32_t);
+			type_oid = TEXTOID;
+			break;
+
+		case ArrowNodeTag__LargeUtf8:
+			attopts.tag = ArrowType__LargeUtf8;
+			attopts.unitsz = sizeof(uint64_t);
+			type_oid = TEXTOID;
+			break;
+
+		case ArrowNodeTag__Binary:
+			attopts.tag = ArrowType__Binary;
+			attopts.unitsz = sizeof(uint32_t);
+			type_oid = BYTEAOID;
+			break;
+
+		case ArrowNodeTag__LargeBinary:
+			attopts.tag = ArrowType__LargeBinary;
+			attopts.unitsz = sizeof(uint64_t);
+			type_oid = BYTEAOID;
+			break;
+
+		case ArrowNodeTag__List:
+		case ArrowNodeTag__LargeList:
+			if (field->_num_children != 1)
+				elog(ERROR, "Bug? List of arrow type is corrupted");
+			else
+			{
+				Oid			__type_oid = InvalidOid;
+
+				attopts.tag = ArrowType__List;
+				attopts.unitsz = (t->node.tag == ArrowNodeTag__List
+								  ? sizeof(uint32_t)
+								  : sizeof(uint64_t));
+				__arrowFieldTypeToPGType(&field->children[0],
+										 &__type_oid,
+										 NULL,
+										 NULL);
+				type_oid = get_array_type(__type_oid);
+				if (!OidIsValid(type_oid))
+					elog(ERROR, "arrow_fdw: no array type for '%s'",
+						 format_type_be(__type_oid));
+			}
+			break;
+
+		case ArrowNodeTag__Struct:
+			{
+				Oid	   *__type_oids;
+
+				attopts.tag = ArrowType__Struct;
+				attopts.unitsz = 0;		/* only nullmap */
+				__type_oids = alloca(sizeof(Oid) * (field->_num_children + 1));
+				for (int j=0; j < field->_num_children; j++)
+				{
+					__arrowFieldTypeToPGType(&field->children[j],
+											 &__type_oids[j],
+											 NULL,
+											 NULL);
+				}
+				type_oid = __lookupCompositePGType(field->_num_children,
+												   __type_oids,
+												   hint_oid);
+				if (!OidIsValid(type_oid))
+					elog(ERROR, "arrow_fdw: no suitable composite type");
+			}
+			break;
+
+		default:
+			elog(ERROR, "Bug? ArrowSchema contains unsupported types");
+	}
+
+	if (p_type_oid)
+		*p_type_oid = type_oid;
+	if (p_type_mod)
+		*p_type_mod = type_mod;
+	if (p_attopts)
+		memcpy(p_attopts, &attopts, sizeof(ArrowTypeOptions));
 }
 
 static void
@@ -1346,9 +1565,9 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 							 ArrowField *field, int depth)
 {
 	ArrowFieldNode *fnode;
-	ArrowType	   *t = &field->type;
-	Oid				hint_oid = arrowFieldGetPGTypeHint(field);
-	ArrowTypeOptions *attopts = &rb_field->attopts;
+	ArrowBuffer	   *buffer_curr;
+	size_t			least_values_length = 0;
+	bool			has_extra_buffer = false;
 
 	if (con->fnode_curr >= con->fnode_tail)
 		elog(ERROR, "RecordBatch has less ArrowFieldNode than expected");
@@ -1358,281 +1577,106 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 	rb_field->nitems      = fnode->length;
 	rb_field->null_count  = fnode->null_count;
 	rb_field->stat_datum.isnull = true;
-
-	switch (t->node.tag)
+	__arrowFieldTypeToPGType(field,
+							 &rb_field->atttypid,
+							 &rb_field->atttypmod,
+							 &rb_field->attopts);
+	/* assign buffers */
+	switch (field->type.node.tag)
 	{
-		case ArrowNodeTag__Int:
-			attopts->tag = ArrowType__Int;
-			switch (t->Int.bitWidth)
-			{
-				case 8:
-					attopts->unitsz = sizeof(int8_t);
-					rb_field->atttypid =
-						GetSysCacheOid2(TYPENAMENSP,
-										Anum_pg_type_oid,
-										CStringGetDatum("int1"),
-										ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
-					break;
-				case 16:
-					attopts->unitsz = sizeof(int16_t);
-					rb_field->atttypid = INT2OID;
-					break;
-				case 32:
-					attopts->unitsz = sizeof(int32_t);
-					rb_field->atttypid = INT4OID;
-					break;
-				case 64:
-					attopts->unitsz = sizeof(int64_t);
-					rb_field->atttypid = INT8OID;
-					break;
-				default:
-					elog(ERROR, "Arrow::Int bitWidth=%d is not supported",
-						 t->Int.bitWidth);
-			}
-			attopts->integer.bitWidth  = t->Int.bitWidth;
-			attopts->integer.is_signed = t->Int.is_signed;
-			__assignRecordBatchFieldStateBuffer(rb_field, con, false);
-			break;
-
-		case ArrowNodeTag__FloatingPoint:
-			attopts->tag = ArrowType__FloatingPoint;
-			switch (t->FloatingPoint.precision)
-			{
-				case ArrowPrecision__Half:
-					attopts->unitsz = sizeof(float2_t);
-					rb_field->atttypid =
-						GetSysCacheOid2(TYPENAMENSP,
-										Anum_pg_type_oid,
-										CStringGetDatum("float2"),
-										ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
-					break;
-				case ArrowPrecision__Single:
-					attopts->unitsz = sizeof(float4_t);
-					rb_field->atttypid = FLOAT4OID;
-					break;
-				case ArrowPrecision__Double:
-					attopts->unitsz = sizeof(float8_t);
-					rb_field->atttypid = FLOAT8OID;
-					break;
-				default:
-					elog(ERROR, "Arrow::FloatingPoint unknown precision (%d)",
-						 (int)t->FloatingPoint.precision);
-			}
-			attopts->floating_point.precision = t->FloatingPoint.precision;
-			__assignRecordBatchFieldStateBuffer(rb_field, con, false);
-			break;
-
 		case ArrowNodeTag__Bool:
-			attopts->tag = ArrowType__Bool;
-			attopts->unitsz = -1;		/* values is bitmap */
-			rb_field->atttypid = BOOLOID;
-			__assignRecordBatchFieldStateBuffer(rb_field, con, false);
+			least_values_length = BITMAPLEN(rb_field->nitems);
 			break;
-			
+		case ArrowNodeTag__Int:
+		case ArrowNodeTag__FloatingPoint:
 		case ArrowNodeTag__Decimal:
-			if (t->Decimal.bitWidth != 128)
-				elog(ERROR, "Arrow::Decimal%u is not supported", t->Decimal.bitWidth);
-			attopts->tag               = ArrowType__Decimal;
-			attopts->unitsz            = sizeof(int128_t);
-			attopts->decimal.precision = t->Decimal.precision;
-			attopts->decimal.scale     = t->Decimal.scale;
-			attopts->decimal.bitWidth  = t->Decimal.bitWidth;
-			rb_field->atttypid = NUMERICOID;
-			__assignRecordBatchFieldStateBuffer(rb_field, con, false);
-			break;
-
 		case ArrowNodeTag__Date:
-			attopts->tag = ArrowType__Date;
-			switch (t->Date.unit)
-			{
-				case ArrowDateUnit__Day:
-					attopts->unitsz = sizeof(int32_t);
-					break;
-				case ArrowDateUnit__MilliSecond:
-					attopts->unitsz = sizeof(int32_t);
-                    break;
-				default:
-					elog(ERROR, "Arrow::Date unknown unit (%d)",
-						 (int)t->Date.unit);
-			}
-			attopts->date.unit = t->Date.unit;
-			rb_field->atttypid = DATEOID;
-			__assignRecordBatchFieldStateBuffer(rb_field, con, false);
-			break;
-
 		case ArrowNodeTag__Time:
-			attopts->tag = ArrowType__Time;
-			switch (t->Time.unit)
-			{
-				case ArrowTimeUnit__Second:
-				case ArrowTimeUnit__MilliSecond:
-					attopts->unitsz = sizeof(int32_t);
-					break;
-				case ArrowTimeUnit__MicroSecond:
-				case ArrowTimeUnit__NanoSecond:
-					attopts->unitsz = sizeof(int64_t);
-					break;
-				default:
-					elog(ERROR, "unknown Time::unit (%d)",
-						 (int)t->Time.unit);
-			}
-			attopts->time.unit = t->Time.unit;
-			rb_field->atttypid = TIMEOID;
-			__assignRecordBatchFieldStateBuffer(rb_field, con, false);
-			break;
-
 		case ArrowNodeTag__Timestamp:
-			attopts->tag = ArrowType__Timestamp;
-			switch (t->Timestamp.unit)
-			{
-				case ArrowTimeUnit__Second:
-				case ArrowTimeUnit__MilliSecond:
-				case ArrowTimeUnit__MicroSecond:
-				case ArrowTimeUnit__NanoSecond:
-					attopts->unitsz = sizeof(int64_t);
-					attopts->timestamp.unit = t->Timestamp.unit;
-					break;
-				default:
-					elog(ERROR, "unknown Timestamp::unit (%d)",
-						 (int)t->Timestamp.unit);
-			}
-			rb_field->atttypid = (t->Timestamp.timezone
-								? TIMESTAMPTZOID
-								: TIMESTAMPOID);
-			__assignRecordBatchFieldStateBuffer(rb_field, con, false);
-			break;
-
 		case ArrowNodeTag__Interval:
-			attopts->tag = ArrowType__Interval;
-			switch (t->Interval.unit)
-			{
-				case ArrowIntervalUnit__Year_Month:
-					attopts->unitsz = sizeof(int32_t);
-					break;
-				case ArrowIntervalUnit__Day_Time:
-					attopts->unitsz = sizeof(int64_t);
-					break;
-				default:
-					elog(ERROR, "unknown Interval::unit (%d)",
-                         (int)t->Interval.unit);
-			}
-			rb_field->atttypid = INTERVALOID;
-			__assignRecordBatchFieldStateBuffer(rb_field, con, false);
-			break;
-
 		case ArrowNodeTag__FixedSizeBinary:
-			attopts->tag = ArrowType__FixedSizeBinary;
-			attopts->unitsz = t->FixedSizeBinary.byteWidth;
-			attopts->fixed_size_binary.byteWidth = t->FixedSizeBinary.byteWidth;
-			if (t->FixedSizeBinary.byteWidth <= 0 ||
-				t->FixedSizeBinary.byteWidth > BLCKSZ)
-				elog(ERROR, "arrow_fdw: %s with byteWidth=%d is not supported", 
-					 t->node.tagName,
-					 t->FixedSizeBinary.byteWidth);
-			if (hint_oid == MACADDROID &&
-				t->FixedSizeBinary.byteWidth == 6)
-			{
-				rb_field->atttypid = MACADDROID;
-			}
-			else if (hint_oid == INETOID &&
-					 (t->FixedSizeBinary.byteWidth == 4 ||
-                      t->FixedSizeBinary.byteWidth == 16))
-			{
-				rb_field->atttypid = INETOID;
-			}
-			else
-			{
-				rb_field->atttypid = BPCHAROID;
-				rb_field->atttypmod = VARHDRSZ + t->FixedSizeBinary.byteWidth;
-			}
-			__assignRecordBatchFieldStateBuffer(rb_field, con, false);
+			least_values_length = rb_field->attopts.unitsz * rb_field->nitems;
 			break;
 
 		case ArrowNodeTag__Utf8:
-			attopts->tag = ArrowType__Utf8;
-			attopts->unitsz = sizeof(uint32_t);
-			rb_field->atttypid = TEXTOID;
-			__assignRecordBatchFieldStateBuffer(rb_field, con, true);
-			break;
-
 		case ArrowNodeTag__LargeUtf8:
-			attopts->tag = ArrowType__LargeUtf8;
-			attopts->unitsz = sizeof(uint64_t);
-			rb_field->atttypid = TEXTOID;
-			__assignRecordBatchFieldStateBuffer(rb_field, con, true);
-			break;
-
 		case ArrowNodeTag__Binary:
-			attopts->tag = ArrowType__Binary;
-			attopts->unitsz = sizeof(uint32_t);
-			rb_field->atttypid = BYTEAOID;
-			__assignRecordBatchFieldStateBuffer(rb_field, con, true);
-			break;
-
 		case ArrowNodeTag__LargeBinary:
-			attopts->tag = ArrowType__LargeBinary;
-			attopts->unitsz = sizeof(uint64_t);
-			rb_field->atttypid = BYTEAOID;
-			__assignRecordBatchFieldStateBuffer(rb_field, con, true);
+			least_values_length = rb_field->attopts.unitsz * (rb_field->nitems + 1);
+			has_extra_buffer = true;
 			break;
 
 		case ArrowNodeTag__List:
-		case ArrowNodeTag__LargeList:
-			if (field->_num_children != 1)
-				elog(ERROR, "Bug? List of arrow type is corrupted");
+        case ArrowNodeTag__LargeList:
 			if (depth > 0)
 				elog(ERROR, "nested array type is not supported");
-			if (t->node.tag == ArrowNodeTag__List)
-			{
-				attopts->tag = ArrowType__List;
-				attopts->unitsz = sizeof(uint32_t);
-			}
-			else
-			{
-				attopts->tag = ArrowType__LargeList;
-				attopts->unitsz = sizeof(uint64_t);
-			}
-			__assignRecordBatchFieldStateBuffer(rb_field, con, false);
-			/* setup element of the array */
-			rb_field->children = palloc0(sizeof(RecordBatchFieldState));
-			rb_field->num_children = 1;
-			__buildRecordBatchFieldState(con,
-										 &rb_field->children[0],
-										 &field->children[0],
-										 depth+1);
-			/* identify the PG array type */
-			rb_field->atttypid = get_array_type(rb_field->children[0].atttypid);
-			if (!OidIsValid(rb_field->atttypid))
-				elog(ERROR, "type '%s' has no array type",
-					 format_type_be(rb_field->children[0].atttypid));
+			least_values_length = rb_field->attopts.unitsz * (rb_field->nitems + 1);
 			break;
 
 		case ArrowNodeTag__Struct:
 			if (depth > 0)
 				elog(ERROR, "nested composite type is not supported");
-			attopts->tag = ArrowType__Struct;
-			attopts->unitsz = 0;		/* only nullmap */
-			__assignRecordBatchFieldStateBuffer(rb_field, con, false);
-
-			if (field->_num_children > 0)
-			{
-				rb_field->children = palloc0(sizeof(RecordBatchFieldState) *
-										   field->_num_children);
-				for (int i=0; i < field->_num_children; i++)
-				{
-					__buildRecordBatchFieldState(con,
-												 &rb_field->children[i],
-												 &field->children[i],
-												 depth+1);
-				}
-			}
-			rb_field->num_children = field->_num_children;
-			__assignRecordBatchFieldStateComposite(rb_field, hint_oid);
+			/* no values and extra buffer, only nullmap */
 			break;
-
 		default:
 			elog(ERROR, "Bug? ArrowSchema contains unsupported types");
 	}
+
+	/* setup nullmap buffer */
+	buffer_curr = con->buffer_curr++;
+	if (buffer_curr >= con->buffer_tail)
+		elog(ERROR, "RecordBatch has less buffers than expected");
+	if (rb_field->null_count > 0)
+	{
+		rb_field->nullmap_offset = buffer_curr->offset;
+		rb_field->nullmap_length = buffer_curr->length;
+		if (rb_field->nullmap_length < BITMAPLEN(rb_field->nitems))
+			elog(ERROR, "nullmap length is smaller than expected");
+		if (rb_field->nullmap_offset != MAXALIGN(rb_field->nullmap_offset))
+			elog(ERROR, "nullmap is not aligned well");
+	}
+
+	/* setup values buffer */
+	if (least_values_length > 0)
+	{
+		buffer_curr = con->buffer_curr++;
+		if (buffer_curr >= con->buffer_tail)
+			elog(ERROR, "RecordBatch has less buffers than expected");
+		rb_field->values_offset = buffer_curr->offset;
+		rb_field->values_length = buffer_curr->length;
+		if (rb_field->values_length < least_values_length)
+			elog(ERROR, "values array is smaller than expected");
+		if (rb_field->values_offset != MAXALIGN(rb_field->values_offset))
+			elog(ERROR, "values array is not aligned well");
+	}
+
+	/* setup extra buffer */
+	if (has_extra_buffer)
+	{
+		Assert(least_values_length > 0);
+		buffer_curr = con->buffer_curr++;
+		if (buffer_curr >= con->buffer_tail)
+			elog(ERROR, "RecordBatch has less buffers than expected");
+		rb_field->extra_offset = buffer_curr->offset;
+		rb_field->extra_length = buffer_curr->length;
+		if (rb_field->extra_offset != MAXALIGN(rb_field->extra_offset))
+			elog(ERROR, "extra buffer is not aligned well");
+	}
+
+	/* child fields, if any */
+	if (field->_num_children > 0)
+	{
+		rb_field->children = palloc0(sizeof(RecordBatchFieldState) *
+									 field->_num_children);
+		for (int j=0; j < field->_num_children; j++)
+		{
+			__buildRecordBatchFieldState(con,
+										 &rb_field->children[j],
+										 &field->children[j],
+										 depth+1);
+		}
+	}
+	rb_field->num_children = field->_num_children;
 }
 
 static RecordBatchState *
@@ -1674,30 +1718,42 @@ __buildRecordBatchStateOne(ArrowSchema *schema,
 	return rb_state;
 }
 
+/*
+ * readArrowFile
+ */
+static bool
+readArrowFile(const char *filename, ArrowFileInfo *af_info, bool missing_ok)
+{
+    File	filp = PathNameOpenFile(filename, O_RDONLY | PG_BINARY);
+
+	if (filp < 0)
+	{
+		if (missing_ok && errno == ENOENT)
+			return false;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\": %m", filename)));
+	}
+	readArrowFileDesc(FileGetRawDesc(filp), af_info);
+	FileClose(filp);
+	if (af_info->dictionaries != NULL)
+		elog(ERROR, "DictionaryBatch is not supported at '%s'", filename);
+	Assert(af_info->footer._num_dictionaries == 0);
+	return true;
+}
+
 static ArrowFileState *
 __buildArrowFileStateByFile(const char *filename, Bitmapset **p_stat_attrs)
 {
 	ArrowFileInfo af_info;
 	ArrowFileState *af_state;
 	arrowStatsBinary *arrow_bstats;
-	File		filp;
 
-	filp = PathNameOpenFile(filename, O_RDONLY | PG_BINARY);
-	if (filp < 0)
+	if (!readArrowFile(filename, &af_info, true))
 	{
-		if (errno != ENOENT)
-			elog(ERROR, "failed to open('%s'): %m", filename);
-		elog(DEBUG2, "failed to open('%s'): %m", filename);
+		elog(DEBUG2, "file '%s' is missing: %m", filename);
 		return NULL;
 	}
-
-	/* read the metadata */
-	readArrowFileDesc(FileGetRawDesc(filp), &af_info);
-	if (af_info.dictionaries != NULL)
-		elog(ERROR, "DictionaryBatch is not supported at '%s'", filename);
-	Assert(af_info.footer._num_dictionaries == 0);
-	FileClose(filp);
-
 	if (af_info.recordBatches == NULL)
 	{
 		elog(DEBUG2, "arrow file '%s' contains no RecordBatch", filename);
@@ -1916,15 +1972,14 @@ baseRelIsArrowFdw(RelOptInfo *baserel)
 bool
 RelationIsArrowFdw(Relation frel)
 {
-    if (RelationGetForm(frel)->relkind == RELKIND_FOREIGN_TABLE)
-    {
-        FdwRoutine *routine = GetFdwRoutineForRelation(frel, false);
+	if (RelationGetForm(frel)->relkind == RELKIND_FOREIGN_TABLE)
+	{
+		FdwRoutine *routine = GetFdwRoutineForRelation(frel, false);
 
-        if (memcmp(routine, &pgstrom_arrow_fdw_routine,
-                   sizeof(FdwRoutine)) == 0)
-            return true;
-    }
-    return false;
+		if (memcmp(routine, &pgstrom_arrow_fdw_routine, sizeof(FdwRoutine)) == 0)
+			return true;
+	}
+	return false;
 }
 
 /*
@@ -2208,7 +2263,8 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 		kern_colmeta *cmeta = &kds->colmeta[j];
 		int			attidx = j + 1 - FirstLowInvalidHeapAttributeNumber;
 
-		if (referenced && bms_is_member(attidx, referenced))
+		if (bms_is_member(attidx, referenced) ||
+			bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
 			arrowFdwSetupIOvectorField(con, rb_field, kds, cmeta);
 		else
 			cmeta->atttypkind = TYPE_KIND__NULL;	/* unreferenced */
@@ -3285,9 +3341,7 @@ ExecInitArrowScan(ScanState *ss,
 	ArrowScanState *as_state;
 	ListCell	   *lc1, *lc2;
 
-	Assert(RelationGetForm(frel)->relkind == RELKIND_FOREIGN_TABLE &&
-		   memcmp(GetFdwRoutineForRelation(frel, false),
-				  &pgstrom_arrow_fdw_routine, sizeof(FdwRoutine)) == 0);
+	Assert(RelationIsArrowFdw(frel));
 	/* expand 'referenced' if it has whole-row reference */
 	if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, outer_refs))
 		whole_row_ref = true;
@@ -3693,19 +3747,145 @@ ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 /*
  * ArrowAnalyzeForeignTable
  */
-static bool
-ArrowAnalyzeForeignTable(Relation frel,
-                         AcquireSampleRowsFunc *p_sample_rows_func,
-                         BlockNumber *p_totalpages)
+static int
+RecordBatchAcquireSampleRows(Relation relation,
+							 RecordBatchState *rb_state,
+							 HeapTuple *rows,
+							 int nsamples)
 {
-	return false;
+	TupleDesc		tupdesc = RelationGetDescr(relation);
+	kern_data_store *kds;
+	Bitmapset	   *referenced = NULL;
+	Datum		   *values;
+	bool		   *isnull;
+	int				count;
+	uint32_t		index;
+
+	/* ANALYZE needs to fetch all the attributes */
+	referenced = bms_make_singleton(-FirstLowInvalidHeapAttributeNumber);
+	kds = arrowFdwLoadRecordBatch(relation,
+								  referenced,
+								  rb_state,
+								  CurrentMemoryContext, true);
+	values = alloca(sizeof(Datum) * tupdesc->natts);
+	isnull = alloca(sizeof(bool)  * tupdesc->natts);
+	for (count = 0; count < nsamples; count++)
+	{
+		/* fetch a row randomly */
+		index = (double)kds->nitems * drand48();
+		Assert(index < kds->nitems);
+
+		for (int j=0; j < kds->ncols; j++)
+		{
+			kern_colmeta   *cmeta = &kds->colmeta[j];
+
+			pg_datum_arrow_ref(kds,
+							   cmeta,
+							   index,
+							   values + j,
+							   isnull + j);
+		}
+		rows[count] = heap_form_tuple(tupdesc, values, isnull);
+	}
+	pfree(kds);
+
+	return count;
 }
 
+static int
+ArrowAcquireSampleRows(Relation relation,
+					   int elevel,
+					   HeapTuple *rows,
+					   int nrooms,
+					   double *p_totalrows,
+					   double *p_totaldeadrows)
+{
+	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
+	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL);
+	List		   *rb_state_list = NIL;
+	ListCell	   *lc1, *lc2;
+	int64			total_nrows = 0;
+	int64			count_nrows = 0;
+	int				nsamples_min = nrooms / 100;
+	int				nitems = 0;
 
+	foreach (lc1, filesList)
+	{
+		ArrowFileState *af_state;
+		char	   *fname = strVal(lfirst(lc1));
 
+		af_state = BuildArrowFileState(relation, fname, NULL);
+		if (!af_state)
+			continue;
+		foreach (lc2, af_state->rb_list)
+		{
+			RecordBatchState *rb_state = lfirst(lc2);
 
+			if (rb_state->rb_nitems == 0)
+				continue;	/* not reasonable to sample, skipped */
+			total_nrows += rb_state->rb_nitems;
+			rb_state_list = lappend(rb_state_list, rb_state);
+		}
+	}
+	nrooms = Min(nrooms, total_nrows);
 
+	/* fetch samples for each record-batch */
+	foreach (lc1, rb_state_list)
+	{
+		RecordBatchState *rb_state = lfirst(lc1);
+		int			nsamples;
 
+		count_nrows += rb_state->rb_nitems;
+		nsamples = (double)nrooms * ((double)count_nrows /
+									 (double)total_nrows) - nitems;
+		if (nitems + nsamples > nrooms)
+			nsamples = nrooms - nitems;
+		if (nsamples > nsamples_min)
+			nitems += RecordBatchAcquireSampleRows(relation,
+												   rb_state,
+												   rows + nitems,
+												   nsamples);
+	}
+	*p_totalrows = total_nrows;
+	*p_totaldeadrows = 0.0;
+
+	return nitems;
+}
+
+/*
+ * ArrowAnalyzeForeignTable
+ */
+static bool
+ArrowAnalyzeForeignTable(Relation frel,
+						 AcquireSampleRowsFunc *p_sample_rows_func,
+						 BlockNumber *p_totalpages)
+{
+	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
+	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL);
+	ListCell	   *lc;
+	size_t			totalpages = 0;
+
+	foreach (lc, filesList)
+	{
+		const char	   *fname = strVal(lfirst(lc));
+		struct stat		stat_buf;
+
+		if (stat(fname, &stat_buf) != 0)
+		{
+			elog(NOTICE, "failed on stat('%s') on behalf of '%s', skipped",
+				 fname, get_rel_name(ft->relid));
+			continue;
+		}
+		totalpages += (stat_buf.st_size + BLCKSZ - 1) / BLCKSZ;
+	}
+	if (totalpages > MaxBlockNumber)
+		totalpages = MaxBlockNumber;
+
+	*p_sample_rows_func = ArrowAcquireSampleRows;
+	*p_totalpages = totalpages;
+
+	return true;
+}
 
 /*
  * ArrowImportForeignSchema
@@ -3713,12 +3893,427 @@ ArrowAnalyzeForeignTable(Relation frel,
 static List *
 ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 {
-	return NIL;
+	ArrowSchema	schema;
+	List	   *filesList;
+	ListCell   *lc;
+	int			j;
+	StringInfoData	cmd;
+
+	/* sanity checks */
+	switch (stmt->list_type)
+	{
+		case FDW_IMPORT_SCHEMA_ALL:
+			break;
+		case FDW_IMPORT_SCHEMA_LIMIT_TO:
+			elog(ERROR, "arrow_fdw does not support LIMIT TO clause");
+			break;
+		case FDW_IMPORT_SCHEMA_EXCEPT:
+			elog(ERROR, "arrow_fdw does not support EXCEPT clause");
+			break;
+		default:
+			elog(ERROR, "arrow_fdw: Bug? unknown list-type");
+			break;
+	}
+	filesList = arrowFdwExtractFilesList(stmt->options, NULL);
+	if (filesList == NIL)
+		ereport(ERROR,
+				(errmsg("No valid apache arrow files are specified"),
+				 errhint("Use 'file' or 'dir' option to specify apache arrow files on behalf of the foreign table")));
+
+	/* read the schema */
+	memset(&schema, 0, sizeof(ArrowSchema));
+	foreach (lc, filesList)
+	{
+		ArrowFileInfo af_info;
+		const char *fname = strVal(lfirst(lc));
+
+		readArrowFile(fname, &af_info, false);
+		if (lc == list_head(filesList))
+		{
+			copyArrowNode(&schema.node, &af_info.footer.schema.node);
+		}
+		else
+		{
+			/* compatibility checks */
+			ArrowSchema	   *stemp = &af_info.footer.schema;
+
+			if (schema.endianness != stemp->endianness ||
+				schema._num_fields != stemp->_num_fields)
+				elog(ERROR, "file '%s' has incompatible schema definition", fname);
+			for (j=0; j < schema._num_fields; j++)
+			{
+				if (arrowFieldTypeIsEqual(&schema.fields[j],
+										  &stemp->fields[j]))
+					elog(ERROR, "file '%s' has incompatible schema definition", fname);
+			}
+		}
+	}
+
+	/* makes a command to define foreign table */
+	initStringInfo(&cmd);
+	appendStringInfo(&cmd, "CREATE FOREIGN TABLE %s (\n",
+					 quote_identifier(stmt->remote_schema));
+	for (j=0; j < schema._num_fields; j++)
+	{
+		ArrowField *field = &schema.fields[j];
+		Oid				type_oid;
+		int32			type_mod;
+		char		   *schema;
+		HeapTuple		htup;
+		Form_pg_type	__type;
+
+		__arrowFieldTypeToPGType(field, &type_oid, &type_mod, NULL);
+		if (!OidIsValid(type_oid))
+			elog(ERROR, "unable to map Arrow type on any PG type");
+		htup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+		if (!HeapTupleIsValid(htup))
+			elog(ERROR, "cache lookup failed for type %u", type_oid);
+		__type = (Form_pg_type) GETSTRUCT(htup);
+		schema = get_namespace_name(__type->typnamespace);
+		if (!schema)
+			elog(ERROR, "cache lookup failed for schema %u", __type->typnamespace);
+		if (j > 0)
+			appendStringInfo(&cmd, ",\n");
+		if (type_mod < 0)
+		{
+			appendStringInfo(&cmd, "  %s %s.%s",
+							 quote_identifier(field->name),
+							 quote_identifier(schema),
+							 NameStr(__type->typname));
+		}
+		else
+		{
+			Assert(type_mod >= VARHDRSZ);
+			appendStringInfo(&cmd, "  %s %s.%s(%d)",
+							 quote_identifier(field->name),
+							 quote_identifier(schema),
+							 NameStr(__type->typname),
+							 type_mod - VARHDRSZ);
+		}
+		ReleaseSysCache(htup);
+	}
+	appendStringInfo(&cmd,
+					 "\n"
+					 ") SERVER %s\n"
+					 "  OPTIONS (", stmt->server_name);
+	foreach (lc, stmt->options)
+	{
+		DefElem	   *defel = lfirst(lc);
+
+		if (lc != list_head(stmt->options))
+			appendStringInfo(&cmd, ",\n           ");
+		appendStringInfo(&cmd, "%s '%s'",
+						 defel->defname,
+						 strVal(defel->arg));
+	}
+	appendStringInfo(&cmd, ")");
+
+	return list_make1(cmd.data);
 }
 
+/*
+ * pgstrom_arrow_fdw_import_file
+ *
+ * NOTE: Due to historical reason, PostgreSQL does not allow to define
+ * columns more than MaxHeapAttributeNumber (1600) for foreign-tables also,
+ * not only heap-tables. This restriction comes from NULL-bitmap length
+ * in HeapTupleHeaderData and width of t_hoff.
+ * However, it is not a reasonable restriction for foreign-table, because
+ * it does not use heap-format internally.
+ */
+static void
+__insertPgAttributeTuple(Relation pg_attr_rel,
+						 CatalogIndexState pg_attr_index,
+						 Oid ftable_oid,
+						 AttrNumber attnum,
+						 ArrowField *field)
+{
+	Oid			type_oid;
+	int32		type_mod;
+	int16		type_len;
+	bool		type_byval;
+	char		type_align;
+	int32		type_ndims;
+	char		type_storage;
+	Datum		values[Natts_pg_attribute];
+	bool		isnull[Natts_pg_attribute];
+	HeapTuple	tup;
+	ObjectAddress myself, referenced;
 
+	__arrowFieldTypeToPGType(field, &type_oid, &type_mod, NULL);
+	get_typlenbyvalalign(type_oid,
+						 &type_len,
+						 &type_byval,
+						 &type_align);
+	type_ndims = (type_is_array(type_oid) ? 1 : 0);
+	type_storage = get_typstorage(type_oid);
 
+	memset(values, 0, sizeof(values));
+	memset(isnull, 0, sizeof(isnull));
 
+	values[Anum_pg_attribute_attrelid - 1] = ObjectIdGetDatum(ftable_oid);
+	values[Anum_pg_attribute_attname - 1] = CStringGetDatum(field->name);
+	values[Anum_pg_attribute_atttypid - 1] = ObjectIdGetDatum(type_oid);
+	values[Anum_pg_attribute_attstattarget - 1] = Int32GetDatum(-1);
+	values[Anum_pg_attribute_attlen - 1] = Int16GetDatum(type_len);
+	values[Anum_pg_attribute_attnum - 1] = Int16GetDatum(attnum);
+	values[Anum_pg_attribute_attndims - 1] = Int32GetDatum(type_ndims);
+	values[Anum_pg_attribute_attcacheoff - 1] = Int32GetDatum(-1);
+	values[Anum_pg_attribute_atttypmod - 1] = Int32GetDatum(type_mod);
+	values[Anum_pg_attribute_attbyval - 1] = BoolGetDatum(type_byval);
+	values[Anum_pg_attribute_attstorage - 1] = CharGetDatum(type_storage);
+	values[Anum_pg_attribute_attalign - 1] = CharGetDatum(type_align);
+	values[Anum_pg_attribute_attnotnull - 1] = BoolGetDatum(!field->nullable);
+	values[Anum_pg_attribute_attislocal - 1] = BoolGetDatum(true);
+	isnull[Anum_pg_attribute_attacl - 1] = true;
+	isnull[Anum_pg_attribute_attoptions - 1] = true;
+	isnull[Anum_pg_attribute_attfdwoptions - 1] = true;
+	isnull[Anum_pg_attribute_attmissingval - 1] = true;
+
+	tup = heap_form_tuple(RelationGetDescr(pg_attr_rel), values, isnull);
+	CatalogTupleInsertWithInfo(pg_attr_rel, tup, pg_attr_index);
+
+	/* add dependency */
+	myself.classId = RelationRelationId;
+	myself.objectId = ftable_oid;
+	myself.objectSubId = attnum;
+	referenced.classId = TypeRelationId;
+	referenced.objectId = type_oid;
+	referenced.objectSubId = 0;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+
+	heap_freetuple(tup);
+}
+
+Datum
+pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
+{
+	CreateForeignTableStmt stmt;
+	ArrowSchema	schema;
+	List	   *tableElts = NIL;
+	char	   *ftable_name;
+	char	   *file_name;
+	char	   *namespace_name;
+	DefElem	   *defel;
+	int			j, nfields;
+	Oid			ftable_oid;
+	ObjectAddress myself;
+	ArrowFileInfo af_info;
+
+	/* read schema of the file */
+	if (PG_ARGISNULL(0))
+		elog(ERROR, "foreign table name is not supplied");
+	ftable_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+	if (PG_ARGISNULL(1))
+		elog(ERROR, "arrow filename is not supplied");
+	file_name = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	defel = makeDefElem("file", (Node *)makeString(file_name), -1);
+
+	if (PG_ARGISNULL(2))
+		namespace_name = NULL;
+	else
+		namespace_name = text_to_cstring(PG_GETARG_TEXT_PP(2));
+
+	readArrowFile(file_name, &af_info, false);
+	copyArrowNode(&schema.node, &af_info.footer.schema.node);
+	if (schema._num_fields > SHRT_MAX)
+		Elog("Arrow file '%s' has too much fields: %d",
+			 file_name, schema._num_fields);
+
+	/* setup CreateForeignTableStmt */
+	memset(&stmt, 0, sizeof(CreateForeignTableStmt));
+	NodeSetTag(&stmt, T_CreateForeignTableStmt);
+	stmt.base.relation = makeRangeVar(namespace_name, ftable_name, -1);
+
+	nfields = Min(schema._num_fields, 100);
+	for (j=0; j < nfields; j++)
+	{
+		ColumnDef  *cdef;
+		Oid			type_oid;
+		int32_t		type_mod;
+
+		__arrowFieldTypeToPGType(&schema.fields[j],
+								 &type_oid,
+								 &type_mod,
+								 NULL);
+		cdef = makeColumnDef(schema.fields[j].name,
+							 type_oid,
+							 type_mod,
+							 InvalidOid);
+		tableElts = lappend(tableElts, cdef);
+	}
+	stmt.base.tableElts = tableElts;
+	stmt.base.oncommit = ONCOMMIT_NOOP;
+	stmt.servername = "arrow_fdw";
+	stmt.options = list_make1(defel);
+
+	myself = DefineRelation(&stmt.base,
+							RELKIND_FOREIGN_TABLE,
+							InvalidOid,
+							NULL,
+							__FUNCTION__);
+	ftable_oid = myself.objectId;
+	CreateForeignTable(&stmt, ftable_oid);
+
+	if (nfields < schema._num_fields)
+	{
+		Relation	c_rel = table_open(RelationRelationId, RowExclusiveLock);
+		Relation	a_rel = table_open(AttributeRelationId, RowExclusiveLock);
+		CatalogIndexState c_index = CatalogOpenIndexes(c_rel);
+		CatalogIndexState a_index = CatalogOpenIndexes(a_rel);
+		HeapTuple	tup;
+
+		tup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(ftable_oid));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for relation %u", ftable_oid);
+
+		for (j=nfields; j < schema._num_fields; j++)
+		{
+			__insertPgAttributeTuple(a_rel,
+									 a_index,
+									 ftable_oid,
+									 j+1,
+                                     &schema.fields[j]);
+		}
+		/* update relnatts also */
+		((Form_pg_class) GETSTRUCT(tup))->relnatts = schema._num_fields;
+		CatalogTupleUpdate(c_rel, &tup->t_self, tup);
+
+		CatalogCloseIndexes(a_index);
+		CatalogCloseIndexes(c_index);
+		table_close(a_rel, RowExclusiveLock);
+		table_close(c_rel, RowExclusiveLock);
+
+		CommandCounterIncrement();
+	}
+	PG_RETURN_VOID();
+}
+
+/*
+ * handler of Arrow_Fdw
+ */
+Datum
+pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_POINTER(&pgstrom_arrow_fdw_routine);
+}
+
+/*
+ * validator of Arrow_Fdw
+ */
+Datum
+pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
+{
+	List   *options = untransformRelOptions(PG_GETARG_DATUM(0));
+	Oid		catalog = PG_GETARG_OID(1);
+
+	if (catalog == ForeignTableRelationId)
+	{
+		List	   *filesList = arrowFdwExtractFilesList(options, NULL);
+		ListCell   *lc;
+
+		foreach (lc, filesList)
+		{
+			const char *fname = strVal(lfirst(lc));
+			ArrowFileInfo af_info;
+
+			readArrowFile(fname, &af_info, true);
+		}
+	}
+	else if (options != NIL)
+	{
+		const char *label;
+
+		switch (catalog)
+		{
+			case ForeignDataWrapperRelationId:
+				label = "FOREIGN DATA WRAPPER";
+				break;
+			case ForeignServerRelationId:
+				label = "SERVER";
+				break;
+			case UserMappingRelationId:
+				label = "USER MAPPING";
+				break;
+			case AttributeRelationId:
+				label = "attribute of FOREIGN TABLE";
+				break;
+			default:
+				label = "????";
+				break;
+		}
+		elog(ERROR, "Arrow_Fdw does not support any options for %s", label);
+	}
+	PG_RETURN_VOID();
+}
+
+/*
+ * pgstrom_arrow_fdw_precheck_schema
+ */
+Datum
+pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
+{
+	EventTriggerData *trigdata;
+	Relation	frel = NULL;
+	ListCell   *lc;
+	bool		check_schema_compatibility = false;
+
+	if (!CALLED_AS_EVENT_TRIGGER(fcinfo))
+		elog(ERROR, "%s: must be called as EventTrigger", __FUNCTION__);
+	trigdata = (EventTriggerData *) fcinfo->context;
+	if (strcmp(trigdata->event, "ddl_command_end") != 0)
+		elog(ERROR, "%s: must be called on ddl_command_end event", __FUNCTION__);
+
+	if (strcmp(GetCommandTagName(trigdata->tag),
+			   "CREATE FOREIGN TABLE") == 0)
+	{
+		CreateStmt *stmt = (CreateStmt *)trigdata->parsetree;
+
+		frel = relation_openrv_extended(stmt->relation, NoLock, true);
+		if (frel && RelationIsArrowFdw(frel))
+			check_schema_compatibility = true;
+	}
+	else if (strcmp(GetCommandTagName(trigdata->tag),
+					"ALTER FOREIGN TABLE") == 0 &&
+			 IsA(trigdata->parsetree, AlterTableStmt))
+	{
+		AlterTableStmt *stmt = (AlterTableStmt *)trigdata->parsetree;
+
+		frel = relation_openrv_extended(stmt->relation, NoLock, true);
+		if (frel && RelationIsArrowFdw(frel))
+		{
+			foreach (lc, stmt->cmds)
+			{
+				AlterTableCmd  *cmd = lfirst(lc);
+
+				if (cmd->subtype == AT_AddColumn ||
+					cmd->subtype == AT_DropColumn ||
+					cmd->subtype == AT_AlterColumnType)
+				{
+					check_schema_compatibility = true;
+					break;
+				}
+			}
+		}
+	}
+
+	if (check_schema_compatibility)
+	{
+		ForeignTable *ft = GetForeignTable(RelationGetRelid(frel));
+		List	   *filesList = arrowFdwExtractFilesList(ft->options, NULL);
+
+		foreach (lc, filesList)
+		{
+			const char *fname = strVal(lfirst(lc));
+
+			(void)BuildArrowFileState(frel, fname, NULL);
+		}
+	}
+	if (frel)
+		relation_close(frel, NoLock);
+	PG_RETURN_NULL();
+}
 
 /*
  * pgstrom_request_arrow_fdw
@@ -3919,549 +4514,6 @@ pgstrom_init_arrow_fdw(void)
 
 
 #if 0
-
-/*
- * RecordBatchFieldCount
- */
-static int
-__RecordBatchFieldCount(RecordBatchFieldState *rb_field)
-{
-	int		j, count = 1;
-
-	for (j=0; j < rb_field->num_children; j++)
-		count += __RecordBatchFieldCount(&rb_field->children[j]);
-
-	return count;
-}
-
-static int
-RecordBatchFieldCount(RecordBatchState *rbstate)
-{
-	int		j, count = 0;
-
-	for (j=0; j < rbstate->ncols; j++)
-		count += __RecordBatchFieldCount(&rbstate->columns[j]);
-
-	return count;
-}
-
-/*
- * RecordBatchFieldLength
- */
-static size_t
-RecordBatchFieldLength(RecordBatchFieldState *rb_field)
-{
-	size_t	len;
-	int		j;
-
-	len = BLCKALIGN(rb_field->nullmap_length +
-					rb_field->values_length +
-					rb_field->extra_length);
-	for (j=0; j < rb_field->num_children; j++)
-		len += RecordBatchFieldLength(&rb_field->children[j]);
-	return len;
-}
-
-
-/*
- * ArrowReScanForeignScan
- */
-void
-ExecReScanArrowFdw(ArrowFdwState *af_state)
-{
-	/* rewind the current scan state */
-	pg_atomic_write_u32(af_state->rbatch_index, 0);
-	if (af_state->curr_pds)
-		PDS_release(af_state->curr_pds);
-	af_state->curr_pds = NULL;
-	af_state->curr_index = 0;
-}
-
-static void
-ArrowReScanForeignScan(ForeignScanState *node)
-{
-	ExecReScanArrowFdw((ArrowFdwState *)node->fdw_state);
-}
-
-
-
-/*
- * readArrowFile
- */
-static bool
-readArrowFile(const char *pathname, ArrowFileInfo *af_info, bool missing_ok)
-{
-    File	filp = PathNameOpenFile(pathname, O_RDONLY | PG_BINARY);
-
-	if (filp < 0)
-	{
-		if (missing_ok && errno == ENOENT)
-			return false;
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\": %m", pathname)));
-	}
-	readArrowFileDesc(FileGetRawDesc(filp), af_info);
-	FileClose(filp);
-	return true;
-}
-
-/*
- * RecordBatchAcquireSampleRows - random sampling
- */
-static int
-RecordBatchAcquireSampleRows(Relation relation,
-							 RecordBatchState *rb_state,
-							 HeapTuple *rows,
-							 int nsamples)
-{
-	TupleDesc		tupdesc = RelationGetDescr(relation);
-	pgstrom_data_store *pds;
-	Bitmapset	   *referenced = NULL;
-	Datum		   *values;
-	bool		   *isnull;
-	int				count;
-	int				i, j, nwords;
-
-	/* ANALYZE needs to fetch all the attributes */
-	nwords = (tupdesc->natts - FirstLowInvalidHeapAttributeNumber +
-			  BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
-	referenced = alloca(offsetof(Bitmapset, words[nwords]));
-	referenced->nwords = nwords;
-	memset(referenced->words, -1, sizeof(bitmapword) * nwords);
-	
-	pds = __arrowFdwLoadRecordBatch(rb_state,
-									relation,
-									referenced,
-									NULL,
-									CurrentMemoryContext,
-									NULL);
-	values = alloca(sizeof(Datum) * tupdesc->natts);
-	isnull = alloca(sizeof(bool)  * tupdesc->natts);
-	for (count = 0; count < nsamples; count++)
-	{
-		/* fetch a row randomly */
-		i = (double)pds->kds.nitems * drand48();
-		Assert(i < pds->kds.nitems);
-
-		for (j=0; j < pds->kds.ncols; j++)
-		{
-			kern_colmeta   *cmeta = &pds->kds.colmeta[j];
-			
-			pg_datum_arrow_ref(&pds->kds,
-							   cmeta,
-							   i,
-							   values + j,
-							   isnull + j);
-		}
-		rows[count] = heap_form_tuple(tupdesc, values, isnull);
-	}
-	PDS_release(pds);
-
-	return count;
-}
-
-/*
- * ArrowAcquireSampleRows
- */
-static int
-ArrowAcquireSampleRows(Relation relation,
-					   int elevel,
-					   HeapTuple *rows,
-					   int nrooms,
-					   double *p_totalrows,
-					   double *p_totaldeadrows)
-{
-	TupleDesc		tupdesc = RelationGetDescr(relation);
-	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
-	List		   *filesList = NIL;
-	List		   *fdescList = NIL;
-	List		   *rb_state_list = NIL;
-	ListCell	   *lc;
-	bool			writable;
-	int64			total_nrows = 0;
-	int64			count_nrows = 0;
-	int				nsamples_min = nrooms / 100;
-	int				nitems = 0;
-
-	filesList = __arrowFdwExtractFilesList(ft->options,
-										   NULL,
-										   &writable);
-	foreach (lc, filesList)
-	{
-		char	   *fname = strVal(lfirst(lc));
-		File		fdesc;
-		List	   *rb_cached;
-		ListCell   *cell;
-
-		fdesc = PathNameOpenFile(fname, O_RDONLY | PG_BINARY);
-        if (fdesc < 0)
-		{
-			if (writable && errno == ENOENT)
-				continue;
-			elog(ERROR, "failed to open file '%s' on behalf of '%s'",
-				 fname, RelationGetRelationName(relation));
-		}
-		fdescList = lappend_int(fdescList, fdesc);
-		
-		rb_cached = arrowLookupOrBuildMetadataCache(fdesc, NULL);
-		foreach (cell, rb_cached)
-		{
-			RecordBatchState *rb_state = lfirst(cell);
-
-			if (!arrowSchemaCompatibilityCheck(tupdesc, rb_state))
-				elog(ERROR, "arrow file '%s' on behalf of foreign table '%s' has incompatible schema definition",
-					 fname, RelationGetRelationName(relation));
-			if (rb_state->rb_nitems == 0)
-				continue;	/* not reasonable to sample, skipped */
-			total_nrows += rb_state->rb_nitems;
-
-			rb_state_list = lappend(rb_state_list, rb_state);
-		}
-	}
-	nrooms = Min(nrooms, total_nrows);
-
-	/* fetch samples for each record-batch */
-	foreach (lc, rb_state_list)
-	{
-		RecordBatchState *rb_state = lfirst(lc);
-		int			nsamples;
-
-		count_nrows += rb_state->rb_nitems;
-		nsamples = (double)nrooms * ((double)count_nrows /
-									 (double)total_nrows) - nitems;
-		if (nitems + nsamples > nrooms)
-			nsamples = nrooms - nitems;
-		if (nsamples > nsamples_min)
-			nitems += RecordBatchAcquireSampleRows(relation,
-												   rb_state,
-												   rows + nitems,
-												   nsamples);
-	}
-	foreach (lc, fdescList)
-		FileClose((File)lfirst_int(lc));
-
-	*p_totalrows = total_nrows;
-	*p_totaldeadrows = 0.0;
-
-	return nitems;
-}
-
-/*
- * ArrowAnalyzeForeignTable
- */
-static bool
-ArrowAnalyzeForeignTable(Relation frel,
-						 AcquireSampleRowsFunc *p_sample_rows_func,
-						 BlockNumber *p_totalpages)
-{
-	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
-	List		   *filesList = arrowFdwExtractFilesList(ft->options);
-	ListCell	   *lc;
-	Size			totalpages = 0;
-
-	foreach (lc, filesList)
-	{
-		const char *fname = strVal(lfirst(lc));
-		struct stat	statbuf;
-
-		if (stat(fname, &statbuf) != 0)
-		{
-			elog(NOTICE, "failed on stat('%s') on behalf of '%s', skipped",
-				 fname, get_rel_name(ft->relid));
-			continue;
-		}
-		totalpages += (statbuf.st_size + BLCKSZ - 1) / BLCKSZ;
-	}
-
-	if (totalpages > MaxBlockNumber)
-		totalpages = MaxBlockNumber;
-
-	*p_sample_rows_func = ArrowAcquireSampleRows;
-	*p_totalpages = totalpages;
-
-	return true;
-}
-
-/*
- * ArrowImportForeignSchema
- */
-static List *
-ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
-{
-	ArrowSchema	schema;
-	List	   *filesList;
-	ListCell   *lc;
-	int			j;
-	StringInfoData	cmd;
-
-	/* sanity checks */
-	switch (stmt->list_type)
-	{
-		case FDW_IMPORT_SCHEMA_ALL:
-			break;
-		case FDW_IMPORT_SCHEMA_LIMIT_TO:
-			elog(ERROR, "arrow_fdw does not support LIMIT TO clause");
-			break;
-		case FDW_IMPORT_SCHEMA_EXCEPT:
-			elog(ERROR, "arrow_fdw does not support EXCEPT clause");
-			break;
-		default:
-			elog(ERROR, "arrow_fdw: Bug? unknown list-type");
-			break;
-	}
-	filesList = arrowFdwExtractFilesList(stmt->options);
-	if (filesList == NIL)
-		ereport(ERROR,
-				(errmsg("No valid apache arrow files are specified"),
-				 errhint("Use 'file' or 'dir' option to specify apache arrow files on behalf of the foreign table")));
-
-	/* read the schema */
-	memset(&schema, 0, sizeof(ArrowSchema));
-	foreach (lc, filesList)
-	{
-		const char   *fname = strVal(lfirst(lc));
-		ArrowFileInfo af_info;
-
-		readArrowFile(fname, &af_info, false);
-		if (lc == list_head(filesList))
-		{
-			copyArrowNode(&schema.node, &af_info.footer.schema.node);
-		}
-		else
-		{
-			/* compatibility checks */
-			ArrowSchema	   *stemp = &af_info.footer.schema;
-
-			if (schema.endianness != stemp->endianness ||
-				schema._num_fields != stemp->_num_fields)
-				elog(ERROR, "file '%s' has incompatible schema definition", fname);
-			for (j=0; j < schema._num_fields; j++)
-			{
-				if (arrowFieldTypeIsEqual(&schema.fields[j],
-										  &stemp->fields[j]))
-					elog(ERROR, "file '%s' has incompatible schema definition", fname);
-			}
-		}
-	}
-
-	/* makes a command to define foreign table */
-	initStringInfo(&cmd);
-	appendStringInfo(&cmd, "CREATE FOREIGN TABLE %s (\n",
-					 quote_identifier(stmt->remote_schema));
-	for (j=0; j < schema._num_fields; j++)
-	{
-		ArrowField *field = &schema.fields[j];
-		const char *type_name = arrowTypeToPGTypeName(field);
-
-		if (j > 0)
-			appendStringInfo(&cmd, ",\n");
-		if (!field->name || field->_name_len == 0)
-		{
-			elog(NOTICE, "field %d has no name, so \"__col%02d\" is used",
-				 j+1, j+1);
-			appendStringInfo(&cmd, "  __col%02d  %s", j+1, type_name);
-		}
-		else
-			appendStringInfo(&cmd, "  %s %s",
-							 quote_identifier(field->name), type_name);
-	}
-	appendStringInfo(&cmd,
-					 "\n"
-					 ") SERVER %s\n"
-					 "  OPTIONS (", stmt->server_name);
-	foreach (lc, stmt->options)
-	{
-		DefElem	   *defel = lfirst(lc);
-
-		if (lc != list_head(stmt->options))
-			appendStringInfo(&cmd, ",\n           ");
-		appendStringInfo(&cmd, "%s '%s'",
-						 defel->defname,
-						 strVal(defel->arg));
-	}
-	appendStringInfo(&cmd, ")");
-
-	return list_make1(cmd.data);
-}
-
-/*
- * pgstrom_arrow_fdw_import_file
- *
- * NOTE: Due to historical reason, PostgreSQL does not allow to define
- * columns more than MaxHeapAttributeNumber (1600) for foreign-tables also,
- * not only heap-tables. This restriction comes from NULL-bitmap length
- * in HeapTupleHeaderData and width of t_hoff.
- * However, it is not a reasonable restriction for foreign-table, because
- * it does not use heap-format internally.
- */
-static void
-__insertPgAttributeTuple(Relation pg_attr_rel,
-						 CatalogIndexState pg_attr_index,
-						 Oid ftable_oid,
-						 AttrNumber attnum,
-						 ArrowField *field)
-{
-	Oid			type_oid;
-	int32		type_mod;
-	int16		type_len;
-	bool		type_byval;
-	char		type_align;
-	int32		type_ndims;
-	char		type_storage;
-	Datum		values[Natts_pg_attribute];
-	bool		isnull[Natts_pg_attribute];
-	HeapTuple	tup;
-	ObjectAddress myself, referenced;
-
-	type_oid = arrowTypeToPGTypeOid(field, &type_mod);
-	get_typlenbyvalalign(type_oid,
-						 &type_len,
-						 &type_byval,
-						 &type_align);
-	type_ndims = (type_is_array(type_oid) ? 1 : 0);
-	type_storage = get_typstorage(type_oid);
-
-	memset(values, 0, sizeof(values));
-	memset(isnull, 0, sizeof(isnull));
-
-	values[Anum_pg_attribute_attrelid - 1] = ObjectIdGetDatum(ftable_oid);
-	values[Anum_pg_attribute_attname - 1] = CStringGetDatum(field->name);
-	values[Anum_pg_attribute_atttypid - 1] = ObjectIdGetDatum(type_oid);
-	values[Anum_pg_attribute_attstattarget - 1] = Int32GetDatum(-1);
-	values[Anum_pg_attribute_attlen - 1] = Int16GetDatum(type_len);
-	values[Anum_pg_attribute_attnum - 1] = Int16GetDatum(attnum);
-	values[Anum_pg_attribute_attndims - 1] = Int32GetDatum(type_ndims);
-	values[Anum_pg_attribute_attcacheoff - 1] = Int32GetDatum(-1);
-	values[Anum_pg_attribute_atttypmod - 1] = Int32GetDatum(type_mod);
-	values[Anum_pg_attribute_attbyval - 1] = BoolGetDatum(type_byval);
-	values[Anum_pg_attribute_attstorage - 1] = CharGetDatum(type_storage);
-	values[Anum_pg_attribute_attalign - 1] = CharGetDatum(type_align);
-	values[Anum_pg_attribute_attnotnull - 1] = BoolGetDatum(!field->nullable);
-	values[Anum_pg_attribute_attislocal - 1] = BoolGetDatum(true);
-	isnull[Anum_pg_attribute_attacl - 1] = true;
-	isnull[Anum_pg_attribute_attoptions - 1] = true;
-	isnull[Anum_pg_attribute_attfdwoptions - 1] = true;
-	isnull[Anum_pg_attribute_attmissingval - 1] = true;
-
-	tup = heap_form_tuple(RelationGetDescr(pg_attr_rel), values, isnull);
-	CatalogTupleInsertWithInfo(pg_attr_rel, tup, pg_attr_index);
-
-	/* add dependency */
-	myself.classId = RelationRelationId;
-	myself.objectId = ftable_oid;
-	myself.objectSubId = attnum;
-	referenced.classId = TypeRelationId;
-	referenced.objectId = type_oid;
-	referenced.objectSubId = 0;
-	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-
-	heap_freetuple(tup);
-}
-
-Datum
-pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
-{
-	CreateForeignTableStmt stmt;
-	ArrowSchema	schema;
-	List	   *tableElts = NIL;
-	char	   *ftable_name;
-	char	   *file_name;
-	char	   *namespace_name;
-	DefElem	   *defel;
-	int			j, nfields;
-	Oid			ftable_oid;
-	Oid			type_oid;
-	int			type_mod;
-	ObjectAddress myself;
-	ArrowFileInfo af_info;
-
-	/* read schema of the file */
-	if (PG_ARGISNULL(0))
-		elog(ERROR, "foreign table name is not supplied");
-	ftable_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-
-	if (PG_ARGISNULL(1))
-		elog(ERROR, "arrow filename is not supplied");
-	file_name = text_to_cstring(PG_GETARG_TEXT_PP(1));
-	defel = makeDefElem("file", (Node *)makeString(file_name), -1);
-
-	if (PG_ARGISNULL(2))
-		namespace_name = NULL;
-	else
-		namespace_name = text_to_cstring(PG_GETARG_TEXT_PP(2));
-
-	readArrowFile(file_name, &af_info, false);
-	copyArrowNode(&schema.node, &af_info.footer.schema.node);
-	if (schema._num_fields > SHRT_MAX)
-		Elog("Arrow file '%s' has too much fields: %d",
-			 file_name, schema._num_fields);
-
-	/* setup CreateForeignTableStmt */
-	memset(&stmt, 0, sizeof(CreateForeignTableStmt));
-	NodeSetTag(&stmt, T_CreateForeignTableStmt);
-	stmt.base.relation = makeRangeVar(namespace_name, ftable_name, -1);
-
-	nfields = Min(schema._num_fields, 100);
-	for (j=0; j < nfields; j++)
-	{
-		ColumnDef  *cdef;
-
-		type_oid = arrowTypeToPGTypeOid(&schema.fields[j], &type_mod);
-		cdef = makeColumnDef(schema.fields[j].name,
-							 type_oid,
-							 type_mod,
-							 InvalidOid);
-		tableElts = lappend(tableElts, cdef);
-	}
-	stmt.base.tableElts = tableElts;
-	stmt.base.oncommit = ONCOMMIT_NOOP;
-	stmt.servername = "arrow_fdw";
-	stmt.options = list_make1(defel);
-
-	myself = DefineRelation(&stmt.base,
-							RELKIND_FOREIGN_TABLE,
-							InvalidOid,
-							NULL,
-							__FUNCTION__);
-	ftable_oid = myself.objectId;
-	CreateForeignTable(&stmt, ftable_oid);
-
-	if (nfields < schema._num_fields)
-	{
-		Relation	c_rel = table_open(RelationRelationId, RowExclusiveLock);
-		Relation	a_rel = table_open(AttributeRelationId, RowExclusiveLock);
-		CatalogIndexState c_index = CatalogOpenIndexes(c_rel);
-		CatalogIndexState a_index = CatalogOpenIndexes(a_rel);
-		HeapTuple	tup;
-
-		tup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(ftable_oid));
-		if (!HeapTupleIsValid(tup))
-			elog(ERROR, "cache lookup failed for relation %u", ftable_oid);
-		
-		for (j=nfields; j < schema._num_fields; j++)
-		{
-			__insertPgAttributeTuple(a_rel,
-									 a_index,
-									 ftable_oid,
-									 j+1,
-                                     &schema.fields[j]);
-		}
-		/* update relnatts also */
-		((Form_pg_class) GETSTRUCT(tup))->relnatts = schema._num_fields;
-		CatalogTupleUpdate(c_rel, &tup->t_self, tup);
-		
-		CatalogCloseIndexes(a_index);
-		CatalogCloseIndexes(c_index);
-		table_close(a_rel, RowExclusiveLock);
-		table_close(c_rel, RowExclusiveLock);
-
-		CommandCounterIncrement();
-	}	
-	PG_RETURN_VOID();
-}
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_import_file);
-
 /*
  * ArrowIsForeignScanParallelSafe
  */
@@ -4617,120 +4669,6 @@ ArrowShutdownForeignScan(ForeignScanState *node)
 }
 
 /*
- * handler of Arrow_Fdw
- */
-Datum
-pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS)
-{
-	PG_RETURN_POINTER(&pgstrom_arrow_fdw_routine);
-}
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_handler);
-
-
-
-static const char *
-arrowTypeToPGTypeName(ArrowField *field)
-{
-	Oid			typoid;
-	int			typmod;
-	HeapTuple	tup;
-	Form_pg_type type;
-	char	   *schema;
-	char	   *result;
-
-	typoid = arrowTypeToPGTypeOid(field, &typmod);
-	if (!OidIsValid(typoid))
-		return NULL;
-	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typoid));
-	if (!HeapTupleIsValid(tup))
-		elog(ERROR, "cache lookup failed for type %u", typoid);
-	type = (Form_pg_type) GETSTRUCT(tup);
-	schema = get_namespace_name(type->typnamespace);
-	if (typmod < 0)
-		result = psprintf("%s.%s",
-						  quote_identifier(schema),
-						  quote_identifier(NameStr(type->typname)));
-	else
-		result = psprintf("%s.%s(%d)",
-						  quote_identifier(schema),
-						  quote_identifier(NameStr(type->typname)),
-						  typmod);
-	ReleaseSysCache(tup);
-
-	return result;
-}
-
-#if 0
-//no longer needed?
-
-/*
- * arrowTypeIsConvertible
- */
-static bool
-arrowTypeIsConvertible(Oid type_oid, int typemod)
-{
-	HeapTuple		tup;
-	Form_pg_type	typeForm;
-	bool			retval = false;
-
-	switch (type_oid)
-	{
-		case INT1OID:		/* Int8 */
-		case INT2OID:		/* Int16 */
-		case INT4OID:		/* Int32 */
-		case INT8OID:		/* Int64 */
-		case FLOAT2OID:		/* FP16 */
-		case FLOAT4OID:		/* FP32 */
-		case FLOAT8OID:		/* FP64 */
-		case TEXTOID:		/* Utf8 */
-		case BYTEAOID:		/* Binary */
-		case BOOLOID:		/* Bool */
-		case NUMERICOID:	/* Decimal */
-		case DATEOID:		/* Date */
-		case TIMEOID:		/* Time */
-		case TIMESTAMPOID:	/* Timestamp */
-		case TIMESTAMPTZOID:/* TimestampTz */
-		case INTERVALOID:	/* Interval */
-		case BPCHAROID:		/* FixedSizeBinary */
-			return true;
-		default:
-			tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
-			if (!HeapTupleIsValid(tup))
-				elog(ERROR, "cache lookup failed for type %u", type_oid);
-			typeForm = (Form_pg_type) GETSTRUCT(tup);
-
-			if (OidIsValid(typeForm->typelem) && typeForm->typlen == -1)
-			{
-				retval = arrowTypeIsConvertible(typeForm->typelem, typemod);
-			}
-			else if (typeForm->typtype == TYPTYPE_COMPOSITE)
-			{
-				Relation	rel;
-				TupleDesc	tupdesc;
-				int			j;
-
-				rel = relation_open(typeForm->typrelid, AccessShareLock);
-				tupdesc = RelationGetDescr(rel);
-				for (j=0; j < tupdesc->natts; j++)
-				{
-					Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
-
-					if (!arrowTypeIsConvertible(attr->atttypid,
-												attr->atttypmod))
-						break;
-				}
-				if (j >= tupdesc->natts)
-					retval = true;
-				relation_close(rel, AccessShareLock);
-			}
-			ReleaseSysCache(tup);
-	}
-	return retval;
-}
-#endif
-
-
-/*
  * arrowSchemaCompatibilityCheck
  */
 static bool
@@ -4821,183 +4759,4 @@ arrowSchemaCompatibilityCheck(TupleDesc tupdesc, RecordBatchState *rb_state)
 		return false;
 	return __arrowSchemaCompatibilityCheck(tupdesc, rb_state->columns);
 }
-
-/*
- * validator of Arrow_Fdw
- */
-Datum
-pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
-{
-	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
-	Oid			catalog = PG_GETARG_OID(1);
-
-	if (catalog == ForeignTableRelationId)
-	{
-		List	   *filesList;
-		ListCell   *lc;
-
-		filesList = arrowFdwExtractFilesList(options_list);
-		foreach (lc, filesList)
-		{
-			ArrowFileInfo	af_info;
-			const char	   *fname = strVal(lfirst(lc));
-
-			readArrowFile(fname, &af_info, true);
-		}
-	}
-	else if (options_list != NIL)
-	{
-		const char	   *label;
-		char			temp[80];
-
-		switch (catalog)
-		{
-			case ForeignDataWrapperRelationId:
-				label = "FOREIGN DATA WRAPPER";
-				break;
-			case ForeignServerRelationId:
-				label = "SERVER";
-				break;
-			case UserMappingRelationId:
-				label = "USER MAPPING";
-				break;
-			case AttributeRelationId:
-				label = "attribute of FOREIGN TABLE";
-				break;
-			default:
-				snprintf(temp, sizeof(temp),
-						 "[unexpected object catalog=%u]", catalog);
-				label = temp;
-				break;
-		}
-		elog(ERROR, "Arrow_Fdw does not support any options for %s", label);
-	}
-	PG_RETURN_VOID();
-}
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_validator);
-
-/*
- * pgstrom_arrow_fdw_precheck_schema
- */
-static void
-arrow_fdw_precheck_schema(Relation rel)
-{
-	TupleDesc		tupdesc = RelationGetDescr(rel);
-	ForeignTable   *ft = GetForeignTable(RelationGetRelid(rel));
-	List		   *filesList;
-	ListCell	   *lc;
-	bool			writable;
-#if 0
-	int				j;
-
-	/* check schema definition is supported by Apache Arrow */
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		Form_pg_attribute	attr = tupleDescAttr(tupdesc, j);
-
-		if (!arrowTypeIsConvertible(attr->atttypid,
-									attr->atttypmod))
-			elog(ERROR, "column %s of foreign table %s has %s type that is not convertible any supported Apache Arrow types",
-				 NameStr(attr->attname),
-				 RelationGetRelationName(rel),
-				 format_type_be(attr->atttypid));
-	}
-#endif
-	filesList = __arrowFdwExtractFilesList(ft->options,
-										   NULL,
-										   &writable);
-	foreach (lc, filesList)
-	{
-		const char *fname = strVal(lfirst(lc));
-		File		filp;
-		List	   *rb_cached = NIL;
-		ListCell   *cell;
-
-		filp = PathNameOpenFile(fname, O_RDONLY | PG_BINARY);
-		if (filp < 0)
-		{
-			if (writable && errno == ENOENT)
-				continue;
-			elog(ERROR, "failed to open '%s' on behalf of '%s': %m",
-				 fname, RelationGetRelationName(rel));
-		}
-		/* check schema compatibility */
-		rb_cached = arrowLookupOrBuildMetadataCache(filp, NULL);
-		foreach (cell, rb_cached)
-		{
-			RecordBatchState *rb_state = lfirst(cell);
-
-			if (!arrowSchemaCompatibilityCheck(tupdesc, rb_state))
-				elog(ERROR, "arrow file '%s' on behalf of the foreign table '%s' has incompatible schema definition",
-					 fname, RelationGetRelationName(rel));
-		}
-		list_free(rb_cached);
-	}
-}
-
-Datum
-pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
-{
-	EventTriggerData   *trigdata;
-	
-	if (!CALLED_AS_EVENT_TRIGGER(fcinfo))
-		elog(ERROR, "%s: must be called as EventTrigger",
-			 __FUNCTION__);
-	trigdata = (EventTriggerData *) fcinfo->context;
-	if (strcmp(trigdata->event, "ddl_command_end") != 0)
-		elog(ERROR, "%s: must be called on ddl_command_end event",
-			 __FUNCTION__);
-	if (strcmp(GetCommandTagName(trigdata->tag),
-			   "CREATE FOREIGN TABLE") == 0)
-	{
-		CreateStmt	   *stmt = (CreateStmt *)trigdata->parsetree;
-		Relation		rel;
-
-		rel = relation_openrv_extended(stmt->relation, AccessShareLock, true);
-		if (!rel)
-			PG_RETURN_NULL();
-		if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE &&
-			GetFdwRoutineForRelation(rel, false) == &pgstrom_arrow_fdw_routine)
-		{
-			arrow_fdw_precheck_schema(rel);
-		}
-		relation_close(rel, AccessShareLock);
-	}
-	else if (strcmp(GetCommandTagName(trigdata->tag),
-					"ALTER FOREIGN TABLE") == 0 &&
-			 IsA(trigdata->parsetree, AlterTableStmt))
-	{
-		AlterTableStmt *stmt = (AlterTableStmt *)trigdata->parsetree;
-		Relation		rel;
-		ListCell	   *lc;
-		bool			has_schema_change = false;
-
-		rel = relation_openrv_extended(stmt->relation, AccessShareLock, true);
-		if (!rel)
-			PG_RETURN_NULL();
-		if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE &&
-			GetFdwRoutineForRelation(rel, false) == &pgstrom_arrow_fdw_routine)
-		{
-			foreach (lc, stmt->cmds)
-			{
-				AlterTableCmd  *cmd = lfirst(lc);
-
-				if (cmd->subtype == AT_AddColumn ||
-					cmd->subtype == AT_DropColumn ||
-					cmd->subtype == AT_AlterColumnType)
-				{
-					has_schema_change = true;
-					break;
-				}
-			}
-			if (has_schema_change)
-				arrow_fdw_precheck_schema(rel);
-		}
-		relation_close(rel, AccessShareLock);
-	}
-	PG_RETURN_NULL();
-}
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_precheck_schema);
-
-
 #endif
