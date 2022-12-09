@@ -212,7 +212,7 @@ typedef struct XpuConnection	XpuConnection;
 typedef struct GpuCacheState	GpuCacheState;
 typedef struct GpuDirectState	GpuDirectState;
 typedef struct DpuStorageEntry	DpuStorageEntry;
-typedef struct ArrowScanState	ArrowScanState;
+typedef struct ArrowFdwState	ArrowFdwState;
 typedef struct BrinIndexState	BrinIndexState;
 
 typedef struct
@@ -221,11 +221,11 @@ typedef struct
 	pg_atomic_uint64	ntuples_valid;
 	pg_atomic_uint64	ntuples_dropped;
 	/* for arrow_fdw */
-	pg_atomic_uint32	af_rbatch_index;
-	pg_atomic_uint32	af_rbatch_nload;	/* # of loaded record-batches */
-	pg_atomic_uint32	af_rbatch_nskip;	/* # of skipped record-batches */
+	pg_atomic_uint32	arrow_rbatch_index;
+	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */
+	pg_atomic_uint32	arrow_rbatch_nskip;	/* # of skipped record-batches */
 	/* for gpu-cache */
-	pg_atomic_uint32	gc_fetch_count;
+	pg_atomic_uint32	gcache_fetch_count;
 	/* common block-based table scan descriptor */
 	ParallelBlockTableScanDescData bpscan;
 } pgstromSharedState;
@@ -237,7 +237,7 @@ struct pgstromTaskState
 	pgstromSharedState *ps_state;
 	GpuCacheState	   *gc_state;
 	GpuDirectState	   *gd_state;
-	ArrowScanState	   *as_state;
+	ArrowFdwState	   *arrow_state;
 	BrinIndexState	   *br_state;
 	DpuStorageEntry	   *ds_entry;
 	/* current chunk (already processed by the device) */
@@ -573,21 +573,22 @@ extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
 extern bool 	RelationIsArrowFdw(Relation frel);
 extern Bitmapset *GetOptimalGpusForArrowFdw(PlannerInfo *root,
 											RelOptInfo *baserel);
-extern ArrowScanState *ExecInitArrowScan(ScanState *ss,
-										 List *outer_quals,
-										 Bitmapset *outer_refs);
-extern kern_data_store *ExecArrowScanChunk(ScanState *ss,
-										   ArrowScanState *as_state);
-extern void		ExecEndArrowScan(ArrowScanState *as_state);
-extern void		ExecReScanArrowScan(ArrowScanState *as_state);
-extern Size		ExecEstimateArrowScan();
-extern void		ExecInitDSMArrowScan();
-extern void		ExecInitWorkerArrowScan();
-extern void		ExecShutdownArrowScan();
-extern void		ExplainArrowScan(ArrowScanState *as_state,
-								 Relation frel,
-								 ExplainState *es,
-								 List *dcontext);
+extern ArrowFdwState *pgstromArrowFdwExecInit(ScanState *ss,
+											  List *outer_quals,
+											  Bitmapset *outer_refs);
+extern kern_data_store *pgstromArrowFdwExecChunk(ScanState *ss,
+												 ArrowFdwState *arrow_state);
+extern void		pgstromArrowFdwExecEnd(ArrowFdwState *arrow_state);
+extern void		pgstromArrowFdwExecRewind(ArrowFdwState *arrow_state);
+extern void		pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
+									   pgstromSharedState *ps_state);
+extern void		pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,
+										 pgstromSharedState *ps_state);
+extern void		pgstromArrowFdwShutdown(ArrowFdwState *arrow_state);
+extern void		pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
+									   Relation frel,
+									   ExplainState *es,
+									   List *dcontext);
 extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 									  kern_data_store *kds,
 									  size_t index);

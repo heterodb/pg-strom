@@ -913,7 +913,6 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexInitDSM(pts, dsm_addr);
-
 	Assert(!pts->css.ss.ss_currentScanDesc);
 	if (dsm_addr)
 	{
@@ -929,6 +928,8 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 										  sizeof(pgstromSharedState));
 		scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
 	}
+	if (pts->arrow_state)
+		pgstromArrowFdwInitDSM(pts->arrow_state, pts->ps_state);
 	pts->ps_state = ps_state;
 	pts->css.ss.ss_currentScanDesc = scan;
 }
@@ -953,6 +954,8 @@ pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr)
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
 	pts->ps_state = (pgstromSharedState *)dsm_addr;
+	if (pts->arrow_state)
+		
 	pts->css.ss.ss_currentScanDesc =
 		table_beginscan_parallel(pts->css.ss.ss_currentRelation,
 								 &pts->ps_state->bpscan.base);	

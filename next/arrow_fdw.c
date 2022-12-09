@@ -75,7 +75,7 @@ typedef struct ArrowFileState
 } ArrowFileState;
 
 /*
- * ArrowScanState - executor state to run apache arrow
+ * ArrowFdwState - executor state to run apache arrow
  */
 typedef struct
 {
@@ -87,7 +87,7 @@ typedef struct
 	ExprContext	   *econtext;
 } arrowStatsHint;
 
-struct ArrowScanState
+struct ArrowFdwState
 {
 	Bitmapset		   *referenced;
 	arrowStatsHint	   *stats_hint;
@@ -2369,8 +2369,7 @@ static kern_data_store *
 arrowFdwLoadRecordBatch(Relation relation,
 						Bitmapset *referenced,
 						RecordBatchState *rb_state,
-						MemoryContext memcxt,
-						bool fillup_data_chunk)
+						MemoryContext memcxt)
 {
 	TupleDesc	tupdesc = RelationGetDescr(relation);
 	size_t		head_sz = estimate_kern_data_store(tupdesc);
@@ -2392,11 +2391,10 @@ arrowFdwLoadRecordBatch(Relation relation,
 	iovec = arrowFdwSetupIOvector(kds_head, rb_state, referenced);
 	__dump_kds_and_iovec(kds_head, iovec);
 
-	if (!fillup_data_chunk)
+	if (!memcxt)
 	{
-		kds = MemoryContextAlloc(memcxt, head_sz +
-								 MAXALIGN(offsetof(strom_io_vector,
-												   ioc[iovec->nr_chunks])));
+		kds = palloc(head_sz + MAXALIGN(offsetof(strom_io_vector,
+												 ioc[iovec->nr_chunks])));
 		memcpy(kds, kds_head, head_sz);
 		memcpy((char *)kds + head_sz, iovec,
 			   offsetof(strom_io_vector, ioc[iovec->nr_chunks]));
@@ -3321,12 +3319,12 @@ kds_arrow_fetch_tuple(TupleTableSlot *slot,
  */
 
 /*
- * ExecInitArrowScan
+ * pgstromArrowFdwExecInit
  */
-ArrowScanState *
-ExecInitArrowScan(ScanState *ss,
-				  List *outer_quals,
-				  Bitmapset *outer_refs)
+ArrowFdwState *
+pgstromArrowFdwExecInit(ScanState *ss,
+						List *outer_quals,
+						Bitmapset *outer_refs)
 {
 	Relation		frel = ss->ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
@@ -3338,7 +3336,7 @@ ExecInitArrowScan(ScanState *ss,
 	List		   *af_states_list = NIL;
 	uint32_t		rb_nrooms = 0;
 	uint32_t		rb_nitems = 0;
-	ArrowScanState *as_state;
+	ArrowFdwState *arrow_state;
 	ListCell	   *lc1, *lc2;
 
 	Assert(RelationIsArrowFdw(frel));
@@ -3371,15 +3369,15 @@ ExecInitArrowScan(ScanState *ss,
 		}
 	}
 
-	/* setup ArrowScanState */
-	as_state = palloc0(offsetof(ArrowScanState, rb_states[rb_nrooms]));
-	as_state->referenced = referenced;
+	/* setup ArrowFdwState */
+	arrow_state = palloc0(offsetof(ArrowFdwState, rb_states[rb_nrooms]));
+	arrow_state->referenced = referenced;
 	if (arrow_fdw_stats_hint_enabled)
-		as_state->stats_hint = execInitArrowStatsHint(ss, outer_quals, stat_attrs);
-	as_state->curr_filp  = -1;
-	as_state->curr_kds   = NULL;
-	as_state->curr_index = 0;
-	as_state->af_states_list = af_states_list;
+		arrow_state->stats_hint = execInitArrowStatsHint(ss, outer_quals, stat_attrs);
+	arrow_state->curr_filp  = -1;
+	arrow_state->curr_kds   = NULL;
+	arrow_state->curr_index = 0;
+	arrow_state->af_states_list = af_states_list;
 	foreach (lc1, af_states_list)
 	{
 		ArrowFileState *af_state = lfirst(lc1);
@@ -3388,13 +3386,13 @@ ExecInitArrowScan(ScanState *ss,
 		{
 			RecordBatchState *rb_state = lfirst(lc2);
 
-			as_state->rb_states[rb_nitems++] = rb_state;
+			arrow_state->rb_states[rb_nitems++] = rb_state;
 		}
 	}
 	Assert(rb_nrooms == rb_nitems);
-	as_state->rb_nitems = rb_nitems;
+	arrow_state->rb_nitems = rb_nitems;
 
-	return as_state;
+	return arrow_state;
 }
 
 /*
@@ -3413,58 +3411,56 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 
 		referenced = bms_add_member(referenced, k);
 	}
-	node->fdw_state = ExecInitArrowScan(&node->ss,
-										fscan->scan.plan.qual,
-										referenced);
+	node->fdw_state = pgstromArrowFdwExecInit(&node->ss,
+											  fscan->scan.plan.qual,
+											  referenced);
 }
 
 /*
  * ExecArrowScanChunk
  */
 static kern_data_store *
-__execArrowScanChunk(ScanState *ss,
-					 ArrowScanState *as_state,
-					 MemoryContext memcxt,
-					 bool fillup_data_chunk)
+__arrowFdwExecChunk(ScanState *ss,
+					ArrowFdwState *arrow_state,
+					MemoryContext memcxt)
 {
 	RecordBatchState *rb_state;
 	uint32_t	rb_index;
 
 	/* fetch the next record-batch */
 retry:
-	rb_index = pg_atomic_fetch_add_u32(as_state->rbatch_index, 1);
-	if (rb_index >= as_state->rb_nitems)
+	rb_index = pg_atomic_fetch_add_u32(arrow_state->rbatch_index, 1);
+	if (rb_index >= arrow_state->rb_nitems)
 		return NULL;	/* no more record-batch to read */
-	rb_state = as_state->rb_states[rb_index];
+	rb_state = arrow_state->rb_states[rb_index];
 
-	if (as_state->stats_hint)
+	if (arrow_state->stats_hint)
 	{
-		if (execCheckArrowStatsHint(as_state->stats_hint, rb_state))
+		if (execCheckArrowStatsHint(arrow_state->stats_hint, rb_state))
 		{
-			pg_atomic_fetch_add_u32(as_state->rbatch_nskip, 1);
+			pg_atomic_fetch_add_u32(arrow_state->rbatch_nskip, 1);
 			goto retry;
 		}
-		pg_atomic_fetch_add_u32(as_state->rbatch_nload, 1);
+		pg_atomic_fetch_add_u32(arrow_state->rbatch_nload, 1);
 	}
 	return arrowFdwLoadRecordBatch(ss->ss_currentRelation,
-								   as_state->referenced,
+								   arrow_state->referenced,
 								   rb_state,
-								   memcxt,
-								   fillup_data_chunk);
+								   memcxt);
 }
 
 kern_data_store *
-ExecArrowScanChunk(ScanState *ss, ArrowScanState *as_state)
+pgstromArrowFdwExecChunk(ScanState *ss, ArrowFdwState *arrow_state)
 {
-	return __execArrowScanChunk(ss, as_state, CurrentMemoryContext, false);
+	return __arrowFdwExecChunk(ss, arrow_state, NULL);
 }
 
 static kern_data_store *
-ExecArrowScanChunkFillup(ScanState *ss, ArrowScanState *as_state)
+pgstromArrowFdwExecChunkFillup(ScanState *ss, ArrowFdwState *arrow_state)
 {
 	EState	   *estate = ss->ps.state;
 
-	return __execArrowScanChunk(ss, as_state, estate->es_query_cxt, true);
+	return __arrowFdwExecChunk(ss, arrow_state, estate->es_query_cxt);
 }
 
 /*
@@ -3473,22 +3469,22 @@ ExecArrowScanChunkFillup(ScanState *ss, ArrowScanState *as_state)
 static TupleTableSlot *
 ArrowIterateForeignScan(ForeignScanState *node)
 {
-	ArrowScanState *as_state = node->fdw_state;
+	ArrowFdwState *arrow_state = node->fdw_state;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
 	kern_data_store *kds;
 
-	while ((kds = as_state->curr_kds) == NULL ||
-		   as_state->curr_index >= kds->nitems)
+	while ((kds = arrow_state->curr_kds) == NULL ||
+		   arrow_state->curr_index >= kds->nitems)
 	{
 		if (kds)
 			pfree(kds);
-		as_state->curr_index = 0;
-		as_state->curr_kds = ExecArrowScanChunkFillup(&node->ss, as_state);
-		if (!as_state->curr_kds)
+		arrow_state->curr_index = 0;
+		arrow_state->curr_kds = pgstromArrowFdwExecChunkFillup(&node->ss, arrow_state);
+		if (!arrow_state->curr_kds)
 			return NULL;
 	}
-	Assert(kds && as_state->curr_index < kds->nitems);
-	if (kds_arrow_fetch_tuple(slot, kds, as_state->curr_index++))
+	Assert(kds && arrow_state->curr_index < kds->nitems);
+	if (kds_arrow_fetch_tuple(slot, kds, arrow_state->curr_index++))
 		return slot;
 	return NULL;
 }
@@ -3497,37 +3493,37 @@ ArrowIterateForeignScan(ForeignScanState *node)
  * ArrowReScanForeignScan
  */
 void
-ExecReScanArrowScan(ArrowScanState *as_state)
+pgstromArrowFdwExecRewind(ArrowFdwState *arrow_state)
 {
-	pg_atomic_write_u32(as_state->rbatch_index, 0);
-	if (as_state->curr_kds)
-		pfree(as_state->curr_kds);
-	as_state->curr_kds = NULL;
-	as_state->curr_index = 0;
+	pg_atomic_write_u32(arrow_state->rbatch_index, 0);
+	if (arrow_state->curr_kds)
+		pfree(arrow_state->curr_kds);
+	arrow_state->curr_kds = NULL;
+	arrow_state->curr_index = 0;
 }
 
 static void
 ArrowReScanForeignScan(ForeignScanState *node)
 {
-	ExecReScanArrowScan(node->fdw_state);
+	pgstromArrowFdwExecRewind(node->fdw_state);
 }
 
 /*
  * ExecEndArrowScan
  */
 void
-ExecEndArrowScan(ArrowScanState *as_state)
+pgstromArrowFdwExecEnd(ArrowFdwState *arrow_state)
 {
-	if (as_state->curr_filp >= 0)
-		FileClose(as_state->curr_filp);
-	if (as_state->stats_hint)
-		execEndArrowStatsHint(as_state->stats_hint);
+	if (arrow_state->curr_filp >= 0)
+		FileClose(arrow_state->curr_filp);
+	if (arrow_state->stats_hint)
+		execEndArrowStatsHint(arrow_state->stats_hint);
 }
 
 static void
 ArrowEndForeignScan(ForeignScanState *node)
 {
-	ExecEndArrowScan((ArrowScanState *)node->fdw_state);
+	pgstromArrowFdwExecEnd(node->fdw_state);
 }
 
 /*
@@ -3548,53 +3544,90 @@ static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
-	return 0;
+	return offsetof(pgstromSharedState, bpscan);
 }
 
 /*
  * ArrowInitializeDSMForeignScan
  */
+void
+pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
+					   pgstromSharedState *ps_state)
+{
+	arrow_state->rbatch_index = &ps_state->arrow_rbatch_index;
+	arrow_state->rbatch_nload = &ps_state->arrow_rbatch_nload;
+	arrow_state->rbatch_nskip = &ps_state->arrow_rbatch_nskip;
+}
+
 static void
 ArrowInitializeDSMForeignScan(ForeignScanState *node,
                               ParallelContext *pcxt,
                               void *coordinate)
-{}
-
-/*
- * ArrowReInitializeDSMForeignScan
- */
-static void
-ArrowReInitializeDSMForeignScan(ForeignScanState *node,
-                                ParallelContext *pcxt,
-                                void *coordinate)
 {
+	pgstromSharedState *ps_state = (pgstromSharedState *)coordinate;
+
+	memset(ps_state, 0, offsetof(pgstromSharedState, bpscan));
+	pgstromArrowFdwInitDSM(node->fdw_state, ps_state);
 }
 
 /*
  * ArrowInitializeWorkerForeignScan
  */
+void
+pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,
+						 pgstromSharedState *ps_state)
+{
+	arrow_state->rbatch_index = &ps_state->arrow_rbatch_index;
+	arrow_state->rbatch_nload = &ps_state->arrow_rbatch_nload;
+	arrow_state->rbatch_nskip = &ps_state->arrow_rbatch_nskip;
+}
+
 static void
 ArrowInitializeWorkerForeignScan(ForeignScanState *node,
 								 shm_toc *toc,
 								 void *coordinate)
-{}
+{
+	pgstromSharedState *ps_state = (pgstromSharedState *)coordinate;
+
+	pgstromArrowFdwAttachDSM(node->fdw_state, ps_state);
+}
 
 /*
  * ArrowShutdownForeignScan
  */
+void
+pgstromArrowFdwShutdown(ArrowFdwState *arrow_state)
+{
+	uint32		temp;
+
+	temp = pg_atomic_read_u32(arrow_state->rbatch_index);
+	pg_atomic_write_u32(&arrow_state->__rbatch_index_local, temp);
+	arrow_state->rbatch_index = &arrow_state->__rbatch_index_local;
+
+	temp = pg_atomic_read_u32(arrow_state->rbatch_nload);
+	pg_atomic_write_u32(&arrow_state->__rbatch_nload_local, temp);
+	arrow_state->rbatch_nload = &arrow_state->__rbatch_nload_local;
+
+	temp = pg_atomic_read_u32(arrow_state->rbatch_nskip);
+	pg_atomic_write_u32(&arrow_state->__rbatch_nskip_local, temp);
+	arrow_state->rbatch_nskip = &arrow_state->__rbatch_nskip_local;
+
+}
+
 static void
 ArrowShutdownForeignScan(ForeignScanState *node)
 {
+	pgstromArrowFdwShutdown(node->fdw_state);
 }
 
 /*
  * ArrowExplainForeignScan
  */
 void
-ExplainArrowScan(ArrowScanState *as_state,
-				 Relation frel,
-				 ExplainState *es,
-				 List *dcontext)
+pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
+					   Relation frel,
+					   ExplainState *es,
+					   List *dcontext)
 {
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	size_t	   *chunk_sz;
@@ -3606,9 +3639,9 @@ ExplainArrowScan(ArrowScanState *as_state,
 
 	initStringInfo(&buf);
 	/* shows referenced columns */
-	for (k = bms_next_member(as_state->referenced, -1);
+	for (k = bms_next_member(arrow_state->referenced, -1);
 		 k >= 0;
-		 k = bms_next_member(as_state->referenced, k))
+		 k = bms_next_member(arrow_state->referenced, k))
 	{
 		j = k + FirstLowInvalidHeapAttributeNumber;
 
@@ -3625,9 +3658,9 @@ ExplainArrowScan(ArrowScanState *as_state,
 	ExplainPropertyText("referenced", buf.data, es);
 
 	/* shows stats hint if any */
-	if (as_state->stats_hint)
+	if (arrow_state->stats_hint)
 	{
-		arrowStatsHint *stats_hint = as_state->stats_hint;
+		arrowStatsHint *stats_hint = arrow_state->stats_hint;
 
 		resetStringInfo(&buf);
 		foreach (lc1, stats_hint->orig_quals)
@@ -3643,15 +3676,15 @@ ExplainArrowScan(ArrowScanState *as_state,
 		}
 		if (es->analyze)
 			appendStringInfo(&buf, "  [loaded: %u, skipped: %u]",
-							 pg_atomic_read_u32(as_state->rbatch_nload),
-							 pg_atomic_read_u32(as_state->rbatch_nskip));
+							 pg_atomic_read_u32(arrow_state->rbatch_nload),
+							 pg_atomic_read_u32(arrow_state->rbatch_nskip));
 		ExplainPropertyText("Stats-Hint", buf.data, es);
 	}
 
 	/* shows files on behalf of the foreign table */
 	chunk_sz = alloca(sizeof(size_t) * tupdesc->natts);
 	memset(chunk_sz, 0, sizeof(size_t) * tupdesc->natts);
-	foreach (lc1, as_state->af_states_list)
+	foreach (lc1, arrow_state->af_states_list)
 	{
 		ArrowFileState *af_state = lfirst(lc1);
 		size_t		total_sz = af_state->stat_buf.st_size;
@@ -3663,16 +3696,16 @@ ExplainArrowScan(ArrowScanState *as_state,
 			RecordBatchState *rb_state = lfirst(lc2);
 
 			if (bms_is_member(-FirstLowInvalidHeapAttributeNumber,
-							  as_state->referenced))
+							  arrow_state->referenced))
 			{
 				/* whole-row reference */
 				read_sz += rb_state->rb_length;
 			}
 			else
 			{
-				for (k = bms_next_member(as_state->referenced, -1);
+				for (k = bms_next_member(arrow_state->referenced, -1);
 					 k >= 0;
-					 k = bms_next_member(as_state->referenced, k))
+					 k = bms_next_member(arrow_state->referenced, k))
 				{
 					j = k + FirstLowInvalidHeapAttributeNumber - 1;
 					if (j < 0 || j >=  tupdesc->natts)
@@ -3710,14 +3743,14 @@ ExplainArrowScan(ArrowScanState *as_state,
 	}
 
 	/* read-size per column (only verbose mode) */
-	if (es->verbose && as_state->rb_nitems > 0 &&
+	if (es->verbose && arrow_state->rb_nitems > 0 &&
 		!bms_is_member(-FirstLowInvalidHeapAttributeNumber,
-					   as_state->referenced))
+					   arrow_state->referenced))
 	{
 		resetStringInfo(&buf);
-		for (k = bms_next_member(as_state->referenced, -1);
+		for (k = bms_next_member(arrow_state->referenced, -1);
 			 k >= 0;
-			 k = bms_next_member(as_state->referenced, k))
+			 k = bms_next_member(arrow_state->referenced, k))
 		{
 			Form_pg_attribute attr;
 
@@ -3741,7 +3774,7 @@ ArrowExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
 										node->ss.ps.plan,
 										NULL);
-	ExplainArrowScan(node->fdw_state, frel, es, dcontext);
+	pgstromArrowFdwExplain(node->fdw_state, frel, es, dcontext);
 }
 
 /*
@@ -3766,7 +3799,7 @@ RecordBatchAcquireSampleRows(Relation relation,
 	kds = arrowFdwLoadRecordBatch(relation,
 								  referenced,
 								  rb_state,
-								  CurrentMemoryContext, true);
+								  CurrentMemoryContext);
 	values = alloca(sizeof(Datum) * tupdesc->natts);
 	isnull = alloca(sizeof(bool)  * tupdesc->natts);
 	for (count = 0; count < nsamples; count++)
@@ -4401,7 +4434,7 @@ pgstrom_init_arrow_fdw(void)
 	r->IsForeignScanParallelSafe	= ArrowIsForeignScanParallelSafe;
 	r->EstimateDSMForeignScan		= ArrowEstimateDSMForeignScan;
 	r->InitializeDSMForeignScan		= ArrowInitializeDSMForeignScan;
-	r->ReInitializeDSMForeignScan	= ArrowReInitializeDSMForeignScan;
+	//r->ReInitializeDSMForeignScan	= ArrowReInitializeDSMForeignScan;
 	r->InitializeWorkerForeignScan	= ArrowInitializeWorkerForeignScan;
 	r->ShutdownForeignScan			= ArrowShutdownForeignScan;
 	/* IMPORT FOREIGN SCHEMA support */
@@ -4456,307 +4489,3 @@ pgstrom_init_arrow_fdw(void)
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#if 0
-/*
- * ArrowIsForeignScanParallelSafe
- */
-static bool
-ArrowIsForeignScanParallelSafe(PlannerInfo *root,
-							   RelOptInfo *rel,
-							   RangeTblEntry *rte)
-{
-	return true;
-}
-
-/*
- * ArrowEstimateDSMForeignScan 
- */
-static Size
-ArrowEstimateDSMForeignScan(ForeignScanState *node,
-							ParallelContext *pcxt)
-{
-	return MAXALIGN(sizeof(pg_atomic_uint32) * 3);
-}
-
-/*
- * ArrowInitializeDSMForeignScan
- */
-static inline void
-__ExecInitDSMArrowFdw(ArrowFdwState *af_state,
-					  pg_atomic_uint32 *rbatch_index,
-					  pg_atomic_uint32 *rbatch_nload,
-					  pg_atomic_uint32 *rbatch_nskip)
-{
-	pg_atomic_init_u32(rbatch_index, 0);
-	af_state->rbatch_index = rbatch_index;
-	pg_atomic_init_u32(rbatch_nload, 0);
-	af_state->rbatch_nload = rbatch_nload;
-	pg_atomic_init_u32(rbatch_nskip, 0);
-	af_state->rbatch_nskip = rbatch_nskip;
-}
-
-void
-ExecInitDSMArrowFdw(ArrowFdwState *af_state, GpuTaskSharedState *gtss)
-{
-	__ExecInitDSMArrowFdw(af_state,
-						  &gtss->af_rbatch_index,
-						  &gtss->af_rbatch_nload,
-						  &gtss->af_rbatch_nskip);
-}
-
-static void
-ArrowInitializeDSMForeignScan(ForeignScanState *node,
-							  ParallelContext *pcxt,
-							  void *coordinate)
-{
-	pg_atomic_uint32 *atomic_buffer = coordinate;
-
-	__ExecInitDSMArrowFdw((ArrowFdwState *)node->fdw_state,
-						  atomic_buffer,
-						  atomic_buffer + 1,
-						  atomic_buffer + 2);
-}
-
-/*
- * ArrowReInitializeDSMForeignScan
- */
-static void
-__ExecReInitDSMArrowFdw(ArrowFdwState *af_state)
-{
-	pg_atomic_write_u32(af_state->rbatch_index, 0);
-}
-
-void
-ExecReInitDSMArrowFdw(ArrowFdwState *af_state)
-{
-	__ExecReInitDSMArrowFdw(af_state);
-}
-
-
-static void
-ArrowReInitializeDSMForeignScan(ForeignScanState *node,
-								ParallelContext *pcxt,
-								void *coordinate)
-{
-	__ExecReInitDSMArrowFdw((ArrowFdwState *)node->fdw_state);
-}
-
-/*
- * ArrowInitializeWorkerForeignScan
- */
-static inline void
-__ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
-						 pg_atomic_uint32 *rbatch_index,
-						 pg_atomic_uint32 *rbatch_nload,
-						 pg_atomic_uint32 *rbatch_nskip)
-{
-	af_state->rbatch_index = rbatch_index;
-	af_state->rbatch_nload = rbatch_nload;
-	af_state->rbatch_nskip = rbatch_nskip;
-}
-
-void
-ExecInitWorkerArrowFdw(ArrowFdwState *af_state,
-					   GpuTaskSharedState *gtss)
-{
-	__ExecInitWorkerArrowFdw(af_state,
-							 &gtss->af_rbatch_index,
-							 &gtss->af_rbatch_nload,
-							 &gtss->af_rbatch_nskip);
-}
-
-static void
-ArrowInitializeWorkerForeignScan(ForeignScanState *node,
-								 shm_toc *toc,
-								 void *coordinate)
-{
-	pg_atomic_uint32 *atomic_buffer = coordinate;
-
-	__ExecInitWorkerArrowFdw((ArrowFdwState *)node->fdw_state,
-							 atomic_buffer,
-							 atomic_buffer + 1,
-							 atomic_buffer + 2);
-}
-
-/*
- * ArrowShutdownForeignScan
- */
-static inline void
-__ExecShutdownArrowFdw(ArrowFdwState *af_state)
-{
-	uint32		temp;
-
-	temp = pg_atomic_read_u32(af_state->rbatch_index);
-	pg_atomic_write_u32(&af_state->__rbatch_index_local, temp);
-	af_state->rbatch_index = &af_state->__rbatch_index_local;
-
-	temp = pg_atomic_read_u32(af_state->rbatch_nload);
-	pg_atomic_write_u32(&af_state->__rbatch_nload_local, temp);
-	af_state->rbatch_nload = &af_state->__rbatch_nload_local;
-
-	temp = pg_atomic_read_u32(af_state->rbatch_nskip);
-	pg_atomic_write_u32(&af_state->__rbatch_nskip_local, temp);
-	af_state->rbatch_nskip = &af_state->__rbatch_nskip_local;
-}
-
-void
-ExecShutdownArrowFdw(ArrowFdwState *af_state)
-{
-	__ExecShutdownArrowFdw(af_state);
-}
-
-static void
-ArrowShutdownForeignScan(ForeignScanState *node)
-{
-	__ExecShutdownArrowFdw((ArrowFdwState *)node->fdw_state);
-}
-
-/*
- * arrowSchemaCompatibilityCheck
- */
-static bool
-__arrowSchemaCompatibilityCheck(TupleDesc tupdesc,
-								RecordBatchFieldState *rb_fstate)
-{
-	int		j;
-
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		RecordBatchFieldState *fstate = &rb_fstate[j];
-		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
-
-		if (!fstate->children)
-		{
-			/* shortcut, it should be a scalar built-in type */
-			Assert(fstate->num_children == 0);
-			if (attr->atttypid != fstate->atttypid)
-				return false;
-		}
-		else
-		{
-			Form_pg_type	typ;
-			HeapTuple		tup;
-			bool			type_is_ok = true;
-
-			tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(attr->atttypid));
-			if (!HeapTupleIsValid(tup))
-				elog(ERROR, "cache lookup failed for type %u", attr->atttypid);
-			typ = (Form_pg_type) GETSTRUCT(tup);
-			if (OidIsValid(typ->typelem) && typ->typlen == -1 &&
-				fstate->num_children == 1)
-			{
-				/* Arrow::List */
-				RecordBatchFieldState *cstate = &fstate->children[0];
-
-				if (typ->typelem == cstate->atttypid)
-				{
-					/*
-					 * overwrite typoid / typmod because a same arrow file
-					 * can be reused, and it may be on behalf of different
-					 * user defined data type.
-					 */
-					fstate->atttypid = attr->atttypid;
-					fstate->atttypmod = attr->atttypmod;
-				}
-				else
-				{
-					type_is_ok = false;
-				}
-			}
-			else if (typ->typlen == -1 && OidIsValid(typ->typrelid))
-			{
-				/* Arrow::Struct */
-				TupleDesc	sdesc = lookup_rowtype_tupdesc(attr->atttypid,
-														   attr->atttypmod);
-				if (sdesc->natts == fstate->num_children &&
-					__arrowSchemaCompatibilityCheck(sdesc, fstate->children))
-				{
-					/* see comment above */
-					fstate->atttypid = attr->atttypid;
-					fstate->atttypmod = attr->atttypmod;
-				}
-				else
-				{
-					type_is_ok = false;
-				}
-				DecrTupleDescRefCount(sdesc);
-
-			}
-			else
-			{
-				/* unknown */
-				type_is_ok = false;
-			}
-			ReleaseSysCache(tup);
-			if (!type_is_ok)
-				return false;
-		}
-	}
-	return true;
-}
-
-static bool
-arrowSchemaCompatibilityCheck(TupleDesc tupdesc, RecordBatchState *rb_state)
-{
-	if (tupdesc->natts != rb_state->ncols)
-		return false;
-	return __arrowSchemaCompatibilityCheck(tupdesc, rb_state->columns);
-}
-#endif
