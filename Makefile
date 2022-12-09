@@ -18,7 +18,7 @@ include $(STROM_BUILD_ROOT)/Makefile.cuda
 #
 # PG-Strom version
 #
-PGSTROM_VERSION := 3.3
+PGSTROM_VERSION := 3.4
 PGSTROM_RELEASE := devel
 
 #
