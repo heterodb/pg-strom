@@ -591,7 +591,8 @@ extern void		pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 									   List *dcontext);
 extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 									  kern_data_store *kds,
-									  size_t index);
+									  size_t index,
+									  const Bitmapset *referenced);
 extern void pgstrom_init_arrow_fdw(void);
 
 /*

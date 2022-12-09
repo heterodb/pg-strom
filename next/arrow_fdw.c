@@ -453,8 +453,8 @@ __allocMetadataCache(void)
 	mcache = dlist_container(arrowMetadataCache, chain, dnode);
 	mcache->owner->n_actives++;
 	Assert(mcache->magic == ARROW_METADATA_CACHE_FREE_MAGIC);
-	memset(&mcache, 0, (offsetof(arrowMetadataCache, magic) -
-						offsetof(arrowMetadataCache, chain)));
+	memset(&mcache->chain, 0, (offsetof(arrowMetadataCache, magic) -
+							   offsetof(arrowMetadataCache, chain)));
 	mcache->magic = ARROW_METADATA_CACHE_ACTIVE_MAGIC;
 	return mcache;
 }
@@ -1688,24 +1688,25 @@ __buildRecordBatchStateOne(ArrowSchema *schema,
 {
 	setupRecordBatchContext con;
 	RecordBatchState *rb_state;
-	int		j, ncols = schema->_num_fields;
+	int			nfields = schema->_num_fields;
 
 	if (rbatch->compression)
 		elog(ERROR, "arrow_fdw: right now, compressed record-batche is not supported");
 
-	rb_state = palloc0(offsetof(RecordBatchState, fields[ncols]));
+	rb_state = palloc0(offsetof(RecordBatchState, fields[nfields]));
 	rb_state->af_state = af_state;
 	rb_state->rb_index = rb_index;
 	rb_state->rb_offset = block->offset + block->metaDataLength;
 	rb_state->rb_length = block->bodyLength;
 	rb_state->rb_nitems = rbatch->length;
+	rb_state->nfields   = nfields;
 
 	memset(&con, 0, sizeof(setupRecordBatchContext));
 	con.buffer_curr = rbatch->buffers;
 	con.buffer_tail = rbatch->buffers + rbatch->_num_buffers;
 	con.fnode_curr  = rbatch->nodes;
 	con.fnode_tail  = rbatch->nodes + rbatch->_num_nodes;
-	for (j=0; j < ncols; j++)
+	for (int j=0; j < nfields; j++)
 	{
 		RecordBatchFieldState *rb_field = &rb_state->fields[j];
 		ArrowField	   *field = &schema->fields[j];
@@ -3295,13 +3296,21 @@ out:
 bool
 kds_arrow_fetch_tuple(TupleTableSlot *slot,
 					  kern_data_store *kds,
-					  size_t index)
+					  size_t index,
+					  const Bitmapset *referenced)
 {
-	if (index < kds->nitems)
+	int		j, k;
+
+	if (index >= kds->nitems)
 		return false;
 	ExecStoreAllNullTuple(slot);
-	for (int j=0; j < kds->ncols; j++)
+	for (k = bms_next_member(referenced, -1);
+		 k >= 0;
+		 k = bms_next_member(referenced, k))
 	{
+		j = k + FirstLowInvalidHeapAttributeNumber - 1;
+		if (j < 0)
+			continue;
 		pg_datum_arrow_ref(kds,
 						   &kds->colmeta[j],
 						   index,
@@ -3374,6 +3383,9 @@ pgstromArrowFdwExecInit(ScanState *ss,
 	arrow_state->referenced = referenced;
 	if (arrow_fdw_stats_hint_enabled)
 		arrow_state->stats_hint = execInitArrowStatsHint(ss, outer_quals, stat_attrs);
+	arrow_state->rbatch_index = &arrow_state->__rbatch_index_local;
+	arrow_state->rbatch_nload = &arrow_state->__rbatch_nload_local;
+	arrow_state->rbatch_nskip = &arrow_state->__rbatch_nskip_local;
 	arrow_state->curr_filp  = -1;
 	arrow_state->curr_kds   = NULL;
 	arrow_state->curr_index = 0;
@@ -3484,7 +3496,9 @@ ArrowIterateForeignScan(ForeignScanState *node)
 			return NULL;
 	}
 	Assert(kds && arrow_state->curr_index < kds->nitems);
-	if (kds_arrow_fetch_tuple(slot, kds, arrow_state->curr_index++))
+	if (kds_arrow_fetch_tuple(slot, kds,
+							  arrow_state->curr_index++,
+							  arrow_state->referenced))
 		return slot;
 	return NULL;
 }

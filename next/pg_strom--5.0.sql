@@ -35,12 +35,6 @@ CREATE FUNCTION pgstrom.gpu_device_info()
 CREATE VIEW pgstrom.gpu_device_info AS
   SELECT * FROM pgstrom.gpu_device_info();
 
--- Create a shell type with particular type-oid
-CREATE FUNCTION pgstrom.define_shell_type(text,oid,regnamespace='public')
-  RETURNS oid
-  AS 'MODULE_PATHNAME','pgstrom_define_shell_type'
-  LANGUAGE C STRICT VOLATILE;
-
 -- ================================================================
 --
 -- Arrow_Fdw functions
@@ -74,11 +68,6 @@ CREATE EVENT TRIGGER pgstrom_arrow_fdw_precheck_schema
   WHEN tag IN ('CREATE FOREIGN TABLE',
                'ALTER FOREIGN TABLE')
 EXECUTE PROCEDURE pgstrom.arrow_fdw_precheck_schema();
-
-CREATE OR REPLACE FUNCTION pgstrom.arrow_fdw_truncate(regclass)
-  RETURNS void
-  AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_truncate'
-  LANGUAGE C STRICT;
 
 CREATE FUNCTION pgstrom.arrow_fdw_import_file(text,	    -- relname
                                               text,	    -- filename
@@ -650,8 +639,7 @@ CREATE AGGREGATE pgstrom.regr_syy(float8[])
 -- float2 - half-precision floating point data support
 --
 -- ==================================================================
-SELECT pgstrom.define_shell_type('float2',421,'pg_catalog');
--- instead of CREATE TYPE pg_catalog.float2;
+CREATE TYPE pg_catalog.float2;
 
 CREATE FUNCTION pgstrom.float2in(cstring)
   RETURNS float2
@@ -1561,8 +1549,7 @@ CREATE OPERATOR CLASS pg_catalog.float2_ops
 -- int1(tinyint) - 8bit width integer data support
 --
 -- ==================================================================
-SELECT pgstrom.define_shell_type('int1',606,'pg_catalog');
---CREATE TYPE pg_catalog.int1;
+CREATE TYPE pg_catalog.int1;
 
 CREATE FUNCTION pgstrom.int1in(cstring)
   RETURNS pg_catalog.int1

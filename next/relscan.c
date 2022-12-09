@@ -128,6 +128,7 @@ __setup_kern_colmeta(kern_data_store *kds,
 	kern_colmeta   *cmeta = &kds->colmeta[column_index];
 	TypeCacheEntry *tcache;
 
+	memset(cmeta, 0, sizeof(kern_colmeta));
 	cmeta->attbyval	= attbyval;
 	cmeta->attalign	= typealign_get_width(attalign);
 	cmeta->attlen	= attlen;

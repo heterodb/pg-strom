@@ -683,6 +683,7 @@ pgstrom_copy_pathnode(const Path *pathnode)
 	return NULL;
 }
 
+#if 0
 /*
  * pgstrom_define_shell_type - A wrapper for TypeShellMake with a particular OID
  */
@@ -719,6 +720,7 @@ pgstrom_define_shell_type(PG_FUNCTION_ARGS)
 
 	PG_RETURN_OID(type_oid);
 }
+#endif
 
 /*
  * ----------------------------------------------------------------
@@ -1448,6 +1450,7 @@ __pwriteFile(int fdesc, const void *buffer, size_t nbytes, off_t f_pos)
 	return count;
 }
 
+#if 0
 /*
  * mmap/munmap wrapper that is automatically unmapped on regarding to
  * the resource-owner.
@@ -1660,3 +1663,4 @@ __mmapShmem(size_t length)
 
 	return addr;
 }
+#endif
