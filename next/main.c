@@ -349,6 +349,7 @@ _PG_init(void)
 		//pgstrom_init_dpu_join();
 		//pgstrom_init_dpu_preagg();
 	}
+	pgstrom_init_pcie();
 	/* post planner hook */
 	planner_hook_next = (planner_hook ? planner_hook : standard_planner);
 	planner_hook = pgstrom_post_planner;

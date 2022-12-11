@@ -20,7 +20,7 @@ __STROM_OBJS = main.o extra.o codegen.o misc.o executor.o brin.o relscan.o \
                gpu_scan.o gpu_device.o gpu_direct.o gpu_service.o \
                dpu_device.o dpu_scan.o \
                arrow_fdw.o arrow_nodes.o \
-               float2.o tinyint.o
+               pcie.o float2.o tinyint.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/next/,$(__STROM_OBJS))
 
 #

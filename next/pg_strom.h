@@ -431,6 +431,11 @@ extern void		pgstromExecResetTaskState(pgstromTaskState *pts);
 extern void		pgstrom_init_executor(void);
 
 /*
+ * pcie.c
+ */
+extern void		pgstrom_init_pcie(void);
+
+/*
  * gpu_device.c
  */
 extern double	pgstrom_gpu_setup_cost;		/* GUC */
