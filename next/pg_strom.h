@@ -115,6 +115,7 @@
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
 #include <float.h>
+#include <libgen.h>
 #include <limits.h>
 #include <pthread.h>
 #include <sys/epoll.h>
@@ -306,9 +307,6 @@ extern bool		gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
 									 unsigned long iomap_handle,
 									 off_t m_offset,
 									 strom_io_vector *iovec);
-extern void		extraSysfsSetupDistanceMap(const char *manual_config);
-extern Bitmapset *extraSysfsLookupOptimalGpus(File filp);
-extern ssize_t	extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_sz);
 
 /*
  * codegen.c
@@ -433,6 +431,7 @@ extern void		pgstrom_init_executor(void);
 /*
  * pcie.c
  */
+extern const Bitmapset *pgstromLookupOptimalGpus(const char *pathname);
 extern void		pgstrom_init_pcie(void);
 
 /*
