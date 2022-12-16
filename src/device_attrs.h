@@ -73,7 +73,6 @@ DEV_ATTR(MAXIMUM_SURFACE2D_LAYERED_LAYERS, INT, 1, "Maximum layers in a 2D layer
 DEV_ATTR(MAXIMUM_SURFACECUBEMAP_WIDTH, INT, 1, "Maximum cubemap surface width")
 DEV_ATTR(MAXIMUM_SURFACECUBEMAP_LAYERED_WIDTH, INT, 1, "Maximum cubemap layered surface width")
 DEV_ATTR(MAXIMUM_SURFACECUBEMAP_LAYERED_LAYERS, INT, 1, "Maximum layers in a cubemap layered surface")
-DEV_ATTR(MAXIMUM_TEXTURE1D_LINEAR_WIDTH, INT, 1, "Maximum 1D linear texture width")
 DEV_ATTR(MAXIMUM_TEXTURE2D_LINEAR_WIDTH, INT, 1, "Maximum 2D linear texture width")
 DEV_ATTR(MAXIMUM_TEXTURE2D_LINEAR_HEIGHT, INT, 1, "Maximum 2D linear texture height")
 DEV_ATTR(MAXIMUM_TEXTURE2D_LINEAR_PITCH, BYTES, 1, "Maximum 2D linear texture pitch in bytes")
@@ -99,11 +98,6 @@ DEV_ATTR(COMPUTE_PREEMPTION_SUPPORTED, BOOL, 0, "Device supports compute preempt
 DEV_ATTR(CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM, BOOL, 0, "Device can access host registered memory at the same virtual address as the CPU")
 #endif	/* CUDA 8.0 */
 #if CUDA_VERSION >= 9000
-DEV_ATTR(CAN_USE_STREAM_MEM_OPS, BOOL, 0, "cuStreamBatchMemOp and related APIs are supported")
-DEV_ATTR(CAN_USE_64_BIT_STREAM_MEM_OPS, BOOL, 1, "64-bit operations are supported in ::cuStreamBatchMemOp and related APIs")
-DEV_ATTR(CAN_USE_STREAM_WAIT_VALUE_NOR, BOOL, 1, "CU_STREAM_WAIT_VALUE_NOR is supported")
-DEV_ATTR(COOPERATIVE_LAUNCH, BOOL, 1, "Device supports launching cooperative kernels via cuLaunchCooperativeKernel")
-DEV_ATTR(COOPERATIVE_MULTI_DEVICE_LAUNCH, BOOL, 1, "Device can participate in cooperative kernels launched via cuLaunchCooperativeKernelMultiDevice")
 DEV_ATTR(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, INT, 1, "Maximum optin shared memory per block")
 #endif	/* CUDA 9.0 */
 #if CUDA_VERSION >= 9020
