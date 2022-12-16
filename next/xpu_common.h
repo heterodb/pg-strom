@@ -1827,16 +1827,27 @@ ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
 					   uint32_t kds_index,
 					   int num_inners,
 					   kern_data_store **kds_inners,
-					   kern_tupitem **tupitem_inners);
+					   HeapTupleHeaderData **htup_inners);
 EXTERN_FUNCTION(int)
 ExecProjectionOuterRow(kern_context *kcxt,
 					   kern_expression *kexp,
 					   kern_data_store *kds_dst,
+					   bool make_a_valid_tuple,
 					   kern_data_store *kds_outer,
 					   HeapTupleHeaderData *htup_outer,
 					   int num_inners,
 					   kern_data_store **kds_inners,
 					   HeapTupleHeaderData **htup_inners);
+EXTERN_FUNCTION(int)
+ExecProjectionOuterArrow(kern_context *kcxt,
+						 kern_expression *kexp,
+						 kern_data_store *kds_dst,
+						 bool make_a_valid_tuple,
+						 kern_data_store *kds_outer,
+						 uint32_t kds_index,
+						 int num_inners,
+						 kern_data_store **kds_inners,
+						 HeapTupleHeaderData **htup_inners);
 
 /* ----------------------------------------------------------------
  *

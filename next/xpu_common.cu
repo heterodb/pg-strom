@@ -474,20 +474,6 @@ kern_extract_heap_tuple(kern_context *kcxt,
 			}
 		}
 	}
-	/* other fields, which refers out of ranges, are NULL */
-	while (kvars_nloads > 0 &&
-		   kvars->var_depth == curr_depth)
-	{
-		const kern_colmeta *cmeta = &kds->colmeta[kvars->var_resno-1];
-		int		slot_id = kvars->var_slot_id;
-
-		assert(slot_id < kcxt->kvars_nslots);
-		kcxt->kvars_cmeta[slot_id] = cmeta;
-		kcxt->kvars_addr[slot_id]  = NULL;
-		kcxt->kvars_len[slot_id]   = -1;
-		kvars++;
-		kvars_nloads--;
-	}
 	return (kvars_nloads_saved - kvars_nloads);
 }
 
@@ -920,12 +906,30 @@ ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
 			kds  = kds_inners[depth - 1];
 			htup = htup_inners[depth - 1];
 		}
-		index += kern_extract_heap_tuple(kcxt,
-										 kds,
-										 htup,
-										 depth,
-										 kexp->u.load.kvars + index,
-										 kexp->u.load.nloads - index);
+
+		if (htup)
+		{
+			index += kern_extract_heap_tuple(kcxt,
+											 kds,
+											 htup,
+											 depth,
+											 kexp->u.load.kvars + index,
+											 kexp->u.load.nloads - index);
+		}
+		/* ensure NULL fields, if kvars are not advanced, or htup is NULL */
+		while (index < kexp->u.load.nloads)
+		{
+			const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index];
+			int			slot_id = kvars->var_slot_id;
+
+			assert(slot_id < kcxt->kvars_nslots);
+			if (kvars->var_depth != depth)
+				break;
+			kcxt->kvars_cmeta[slot_id] = NULL;
+			kcxt->kvars_addr[slot_id]  = NULL;
+			kcxt->kvars_len[slot_id]   = -1;
+			index++;
+		}
 	}
 	return EXEC_KERN_EXPRESSION(kcxt, karg, __result);
 }
@@ -973,6 +977,21 @@ ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
 		if (count < 0)
 			return false;
 		index += count;
+
+		/* fill up by NULL, if kvars are not assigned. */
+		while (index < kexp->u.load.nloads)
+		{
+			const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index];
+			int		slot_id = kvars->var_slot_id;
+
+			assert(slot_id < kcxt->kvars_nslots);
+			if (kvars->var_depth != depth)
+				break;
+			kcxt->kvars_cmeta[slot_id] = NULL;
+			kcxt->kvars_addr[slot_id]  = NULL;
+			kcxt->kvars_len[slot_id]   = -1;
+			index++;
+		}
 	}
 	return EXEC_KERN_EXPRESSION(kcxt, karg, __result);
 }

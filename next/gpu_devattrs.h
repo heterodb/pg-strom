@@ -99,7 +99,7 @@ DEV_ATTR(COMPUTE_PREEMPTION_SUPPORTED, BOOL, 0, "Device supports compute preempt
 DEV_ATTR(CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM, BOOL, 0, "Device can access host registered memory at the same virtual address as the CPU")
 #endif	/* CUDA 8.0 */
 #if CUDA_VERSION >= 9000
-DEV_ATTR(CAN_USE_STREAM_MEM_OPS, BOOL, 0, "cuStreamBatchMemOp and related APIs are supported")
+//DEV_ATTR(CAN_USE_STREAM_MEM_OPS, BOOL, 0, "cuStreamBatchMemOp and related APIs are supported")
 DEV_ATTR(CAN_USE_64_BIT_STREAM_MEM_OPS, BOOL, 1, "64-bit operations are supported in ::cuStreamBatchMemOp and related APIs")
 DEV_ATTR(CAN_USE_STREAM_WAIT_VALUE_NOR, BOOL, 1, "CU_STREAM_WAIT_VALUE_NOR is supported")
 DEV_ATTR(COOPERATIVE_LAUNCH, BOOL, 1, "Device supports launching cooperative kernels via cuLaunchCooperativeKernel")

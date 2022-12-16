@@ -83,6 +83,7 @@ kern_gpuscan_main_row(kern_session_info *session,
 			status = ExecProjectionOuterRow(kcxt,
 											kexp_scan_projs,
 											kds_dst,
+											true,
 											kds_src,
 											htup,
 											0, NULL, NULL);
@@ -110,6 +111,7 @@ kern_gpuscan_main_row(kern_session_info *session,
 				status = ExecProjectionOuterRow(kcxt,
 												kexp_scan_projs,
 												kds_dst,
+												(htup != NULL),
 												kds_src,
 												htup,
 												0, NULL, NULL);
@@ -253,6 +255,7 @@ kern_gpuscan_main_block(kern_session_info *session,
 			status = ExecProjectionOuterRow(kcxt,
 											kexp_scan_projs,
 											kds_dst,
+											true,
 											kds_src,
 											htup,
 											0, NULL, NULL);
@@ -273,12 +276,14 @@ kern_gpuscan_main_block(kern_session_info *session,
 				kcxt_reset(kcxt);
 				assert(write_pos - read_pos <= warpSize);
 				read_pos += LaneId();
-				htup = (read_pos < write_pos
-						? __WARP_GET_HTUPLE(read_pos)
-						: NULL);
+				if (read_pos < write_pos)
+					htup = __WARP_GET_HTUPLE(read_pos);
+				else
+					htup = NULL;
 				status = ExecProjectionOuterRow(kcxt,
 												kexp_scan_projs,
 												kds_dst,
+												(htup != NULL),
 												kds_src,
 												htup,
 												0, NULL, NULL);
@@ -413,7 +418,6 @@ kern_gpuscan_main_block(kern_session_info *session,
 	}
 	__syncthreads();
 
-	return;
 	/* save the execution context (may be resumed if needed) */
 	if (LaneId() == 0)
 	{
@@ -430,12 +434,161 @@ kern_gpuscan_main_arrow(kern_session_info *session,
 						kern_data_store *kds_src,
 						kern_data_store *kds_dst)
 {
-	kern_context   *kcxt;
+	kern_context	   *kcxt;
+	kern_expression	   *kexp_scan_quals = SESSION_KEXP_SCAN_QUALS(session);
+	kern_expression	   *kexp_scan_projs = SESSION_KEXP_SCAN_PROJS(session);
+	bool				scan_done = false;
+	kern_gpuscan_suspend_warp *__suspend_warp;
+	kern_gpuscan_suspend_warp *warp;
+	__shared__ uint32_t	smx_row_count;
 
-	assert(kds_src->format == KDS_FORMAT_ARROW);
+	assert(kds_src->format == KDS_FORMAT_ARROW &&
+		   kexp_scan_quals->opcode == FuncOpCode__LoadVars &&
+		   kexp_scan_projs->opcode == FuncOpCode__LoadVars);
 	INIT_KERNEL_CONTEXT(kcxt, session);
 
-	
+	/* resume the previous execution context */
+	__suspend_warp = &kgscan->suspend_context[get_global_id() / warpSize];
+	warp = SHARED_WORKMEM(kern_gpuscan_suspend_warp) + WarpId();
+	if (get_local_id() == 0)
+		smx_row_count = __suspend_warp->row_count;
+	if (LaneId() == 0)
+		memcpy(warp, __suspend_warp, sizeof(kern_gpuscan_suspend_warp));
+	__syncthreads();
+
+	for (;;)
+	{
+		uint32_t		write_pos;
+		uint32_t		read_pos;
+		uint32_t		count;
+		uint32_t		index;
+		uint32_t		mask;
+		int				status;
+		bool			row_is_valid;
+
+		/*
+		 * Projection
+		 */
+		write_pos = __shfl_sync(__activemask(), warp->write_pos, 0);
+		read_pos  = __shfl_sync(__activemask(), warp->read_pos, 0);
+		assert(write_pos >= read_pos);
+		if (write_pos >= read_pos + warpSize)
+		{
+			kcxt_reset(kcxt);
+			read_pos += LaneId();
+			index = warp->htuples[read_pos % GPUSCAN_TUPLES_PER_WARP];
+			status = ExecProjectionOuterArrow(kcxt,
+											  kexp_scan_projs,
+											  kds_dst,
+											  true,
+											  kds_src,
+											  index,
+											  0, NULL, NULL);
+			if (status <= 0)
+			{
+				assert(__activemask() == 0xffffffffU);
+				if (status == 0 && LaneId() == 0)
+					atomicAdd(&kgscan->suspend_count, 1);
+				break;		/* error or no space */
+			}
+			if (LaneId() == 0)
+				warp->read_pos += warpSize;
+		}
+		else if (scan_done)
+		{
+			if (write_pos > read_pos)
+			{
+				kcxt_reset(kcxt);
+				assert(write_pos - read_pos <= warpSize);
+				read_pos += LaneId();
+				if (read_pos < write_pos)
+					index = warp->htuples[read_pos % GPUSCAN_TUPLES_PER_WARP];
+				else
+					index = UINT_MAX;
+				status = ExecProjectionOuterArrow(kcxt,
+												  kexp_scan_projs,
+												  kds_dst,
+												  (read_pos < write_pos),
+												  kds_src,
+												  index,
+												  0, NULL, NULL);
+				if (status <= 0)
+				{
+					assert(__activemask() == 0xffffffffU);
+					if (status == 0 && LaneId() == 0)
+						atomicAdd(&kgscan->suspend_count, 1);
+					break;		/* error or no space */
+				}
+				if (LaneId() == 0)
+					warp->read_pos = warp->write_pos;
+			}
+			break;
+		}
+
+		/*
+		 * Identify the row-index to be fetched
+		 */
+		if (LaneId() == 0)
+			count = atomicAdd(&smx_row_count, warpSize);
+		count = __shfl_sync(__activemask(), count, 0);
+		index = ((count & ~GPUSCAN_THREADS_UNITSZ_MASK) * get_num_groups() +
+				 (GPUSCAN_THREADS_UNITSZ * get_group_id()) +
+				 (count &  GPUSCAN_THREADS_UNITSZ_MASK));
+		if (index >= kds_src->nitems)
+			scan_done = true;
+		index += LaneId();
+
+		/*
+		 * Fetch kern_tupitem
+		 */
+		row_is_valid = false;
+		if (index < kds_src->nitems)
+		{
+			xpu_bool_t	retval;
+
+			if (ExecLoadVarsOuterArrow(kcxt,
+									   kexp_scan_quals,
+									   (xpu_datum_t *)&retval,
+									   kds_src,
+									   index,
+									   0, NULL, NULL))
+			{
+				if (!retval.isnull && retval.value)
+					row_is_valid = true;
+			}
+			else
+			{
+				assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			}
+		}
+		/* error checks */
+		if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+			break;
+		/*
+		 * Save the tupitem on the local circular buffer
+		 */
+		mask = __ballot_sync(__activemask(), row_is_valid);
+		if (LaneId() == 0)
+		{
+			write_pos = warp->write_pos;
+			warp->write_pos += __popc(mask);
+		}
+		write_pos =  __shfl_sync(__activemask(), write_pos, 0);
+		mask &= ((1U << LaneId()) - 1);
+		write_pos += __popc(mask);
+		if (row_is_valid)
+			warp->htuples[write_pos % GPUSCAN_TUPLES_PER_WARP] = index;
+	}
+	__syncthreads();
+
+	/* save the execution context (may be resumed if needed) */
+	if (LaneId() == 0)
+	{
+		warp->row_count = smx_row_count;
+		memcpy(__suspend_warp, warp,
+			   sizeof(kern_gpuscan_suspend_warp));
+	}
+	STROM_WRITEBACK_ERROR_STATUS(&kgscan->kerror, kcxt);
 }
 
 KERNEL_FUNCTION(void)
