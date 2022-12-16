@@ -71,30 +71,19 @@ GetOptimalGpusForTablespace(Oid tablespace_oid)
 	if (!found || !hentry->is_valid)
 	{
 		char	   *pathname;
-		File		filp;
-		Bitmapset  *optimal_gpus;
+		const Bitmapset *optimal_gpus;
 
 		Assert(hentry->tablespace_oid == tablespace_oid);
-
 		pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
-		filp = PathNameOpenFile(pathname, O_RDONLY);
-		if (filp < 0)
-		{
-			elog(WARNING, "failed on open('%s') of tablespace %u: %m",
-				 pathname, tablespace_oid);
-			return NULL;
-		}
-		optimal_gpus = extraSysfsLookupOptimalGpus(filp);
-		if (!optimal_gpus)
+		optimal_gpus = pgstromLookupOptimalGpus(pathname);
+		if (bms_is_empty(optimal_gpus))
 			hentry->optimal_gpus.nwords = 0;
 		else
 		{
 			Assert(optimal_gpus->nwords <= (numGpuDevAttrs/BITS_PER_BITMAPWORD)+1);
 			memcpy(&hentry->optimal_gpus, optimal_gpus,
 				   offsetof(Bitmapset, words[optimal_gpus->nwords]));
-			bms_free(optimal_gpus);
 		}
-		FileClose(filp);
 		hentry->is_valid = true;
 	}
 	Assert(hentry->is_valid);
@@ -200,17 +189,14 @@ pgstromGpuDirectExecEnd(pgstromTaskState *pts)
 void
 pgstrom_init_gpu_direct(void)
 {
-	static char *nvme_manual_distance_map = NULL;
 	bool	support_gpudirectsql = false;
-	char	buffer[1280];
-	int		i;
 
 	/*
 	 * pgstrom.gpudirect_enabled
 	 */
 	if (gpuDirectInitDriver())
 	{
-		for (i=0; i < numGpuDevAttrs; i++)
+		for (int i=0; i < numGpuDevAttrs; i++)
 		{
 			if (gpuDevAttrs[i].DEV_SUPPORT_GPUDIRECTSQL)
 			{
@@ -237,25 +223,6 @@ pgstrom_init_gpu_direct(void)
 							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
-	/*
-	 * pg_strom.nvme_distance_map
-	 *
-	 * config := <token>[,<token>...]
-	 * token  := nvmeXX:gpuXX
-	 *
-	 * eg) nvme0:gpu0,nvme1:gpu1
-	 */
-	DefineCustomStringVariable("pg_strom.nvme_distance_map",
-							   "Manual configuration of optimal GPU for each NVME",
-							   NULL,
-							   &nvme_manual_distance_map,
-							   NULL,
-							   PGC_POSTMASTER,
-							   GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
-	extraSysfsSetupDistanceMap(nvme_manual_distance_map);
-	for (i=0; extraSysfsPrintNvmeInfo(i, buffer, sizeof(buffer)) >= 0; i++)
-		elog(LOG, "- %s", buffer);
 
 	/* hash table for tablespace <-> optimal GPU */
 	tablespace_optimal_gpu_htable = NULL;

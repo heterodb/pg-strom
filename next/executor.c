@@ -845,7 +845,7 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	/*
 	 * Setup request buffer
 	 */
-	if (pts->af_state)			/* Apache Arrow */
+	if (pts->arrow_state)		/* Apache Arrow */
 	{
 		pts->cb_next_chunk = pgstromScanChunkArrowFdw;
 		pts->cb_next_tuple = pgstromScanNextTuple;

@@ -326,6 +326,7 @@ _PG_init(void)
 	pgstrom_init_codegen();
 	pgstrom_init_relscan();
 	pgstrom_init_brin();
+	pgstrom_init_arrow_fdw();
 	pgstrom_init_executor();
 	/* dump version number */
 	elog(LOG, "PG-Strom version %s built for PostgreSQL %s (git: %s)",
@@ -348,6 +349,7 @@ _PG_init(void)
 		//pgstrom_init_dpu_join();
 		//pgstrom_init_dpu_preagg();
 	}
+	pgstrom_init_pcie();
 	/* post planner hook */
 	planner_hook_next = (planner_hook ? planner_hook : standard_planner);
 	planner_hook = pgstrom_post_planner;

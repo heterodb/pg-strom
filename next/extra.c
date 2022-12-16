@@ -304,88 +304,6 @@ gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
 									  iovec) == 0);
 }
 
-/*
- * extraSysfsSetupDistanceMap
- */
-static int (*p_sysfs_setup_distance_map)(
-	int gpu_count,
-	GpuPciDevItem *gpu_array,
-	const char *manual_config) = NULL;
-
-void
-extraSysfsSetupDistanceMap(const char *manual_config)
-{
-	GpuPciDevItem *gpu_array;
-	int			i;
-
-	if (!p_sysfs_setup_distance_map)
-		return;		/* nothing to do */
-
-	gpu_array = alloca(numGpuDevAttrs * sizeof(GpuPciDevItem));
-	memset(gpu_array, 0, numGpuDevAttrs * sizeof(GpuPciDevItem));
-	for (i=0; i < numGpuDevAttrs; i++)
-	{
-		GpuDevAttributes *dattr = &gpuDevAttrs[i];
-		GpuPciDevItem *gpu = &gpu_array[i];
-
-		gpu->device_id = dattr->DEV_ID;
-		strncpy(gpu->device_name, dattr->DEV_NAME,
-				sizeof(gpu->device_name));
-		gpu->pci_domain = dattr->PCI_DOMAIN_ID;
-		gpu->pci_bus_id = dattr->PCI_BUS_ID;
-		gpu->pci_dev_id = dattr->PCI_DEVICE_ID;
-		if (dattr->MULTI_GPU_BOARD)
-			gpu->pci_func_id = dattr->MULTI_GPU_BOARD_GROUP_ID;
-	}
-	if (p_sysfs_setup_distance_map(numGpuDevAttrs,
-								   gpu_array,
-								   manual_config) < 0)
-		heterodbExtraEreport(ERROR);
-}
-
-/*
- * extraSysfsLookupOptimalGpu
- */
-static int (*p_sysfs_lookup_optimal_gpus)(int fdesc,
-										  int nrooms,
-										  int *optimal_gpus) = NULL;
-Bitmapset *
-extraSysfsLookupOptimalGpus(int fdesc)
-{
-	Bitmapset  *optimal_gpus = NULL;
-	int			i, nitems;
-	int		   *__gpus;
-
-	if (!p_sysfs_lookup_optimal_gpus || numGpuDevAttrs == 0)
-		return NULL;
-	__gpus = alloca(sizeof(int) * numGpuDevAttrs);
-	nitems = p_sysfs_lookup_optimal_gpus(fdesc, numGpuDevAttrs, __gpus);
-	if (nitems < 0)
-		heterodbExtraEreport(ERROR);
-	for (i=0; i < nitems; i++)
-	{
-		Assert(__gpus[i] >= 0 && __gpus[i] < numGpuDevAttrs);
-		optimal_gpus = bms_add_member(optimal_gpus, __gpus[i]);
-	}
-	return optimal_gpus;
-}
-
-/*
- * extraSysfsPrintNvmeInfo
- */
-static ssize_t (*p_sysfs_print_nvme_info)(
-	int index,
-	char *buffer,
-	ssize_t buffer_sz) = NULL;
-
-ssize_t
-extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_sz)
-{
-	if (!p_sysfs_print_nvme_info)
-		return -1;
-	return p_sysfs_print_nvme_info(index, buffer, buffer_sz);
-}
-
 /* lookup_heterodb_extra_function */
 static void *
 lookup_heterodb_extra_function(void *handle, const char *symbol)
@@ -565,9 +483,6 @@ pgstrom_init_extra(void)
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, unmap_gpu_memory);
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, file_read_iov);
 		}
-		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_setup_distance_map);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_lookup_optimal_gpus);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(sysfs_print_nvme_info);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_reload);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_query);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_validate_device);
@@ -585,9 +500,6 @@ pgstrom_init_extra(void)
 		p_gpudirect_map_gpu_memory = NULL;
 		p_gpudirect_unmap_gpu_memory = NULL;
 		p_gpudirect_file_read_iov = NULL;
-		p_sysfs_setup_distance_map = NULL;
-		p_sysfs_lookup_optimal_gpus = NULL;
-		p_sysfs_print_nvme_info = NULL;
 		p_heterodb_license_reload = NULL;
 		p_heterodb_license_query = NULL;
 		p_heterodb_validate_device = NULL;

@@ -35,12 +35,11 @@ struct DpuStorageEntry
 	int			endpoint_domain;	/* AF_UNIX/AF_INET/AF_INET6 */
 	const struct sockaddr *endpoint_addr;
 	socklen_t	endpoint_addr_len;
-	int			validated;
+	pg_atomic_uint32 *validated;	/* shared memory */
 };
 
 struct DpuTablespaceInfo
 {
-	uint32_t	extra_sz;
 	uint32_t	nitems;
 	DpuStorageEntry entries[1];
 };
@@ -54,12 +53,22 @@ struct DpuTablespaceHash
 };
 typedef struct DpuTablespaceHash	DpuTablespaceHash;
 
-static DpuTablespaceInfo	   *dpu_tablespace_master = NULL;	/* shared memory */
+static DpuTablespaceInfo	   *dpu_tablespace_master = NULL;
 static shmem_request_hook_type	shmem_request_next = NULL;
 static shmem_startup_hook_type	shmem_startup_next = NULL;
 #define DPU_TABLESPACE_HASH_NSLOTS		640
 static DpuTablespaceHash	   *dpu_tablespace_hash_slots[DPU_TABLESPACE_HASH_NSLOTS];
 static MemoryContext			dpu_tablespace_hash_memcxt = NULL;
+
+/*
+ * GetOptimalDpuForFile
+ */
+DpuStorageEntry *
+GetOptimalDpuForFile(const char *filename)
+{
+	/* to be implemented later */
+	return NULL;
+}
 
 /*
  * GetOptimalDpuForRelation
@@ -116,6 +125,21 @@ GetOptimalDpuForRelation(Relation relation)
 }
 
 /*
+ * DpuStorageEntryIsEqual
+ */
+bool
+DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
+					   const DpuStorageEntry *ds_entry2)
+{
+	if (ds_entry1 && ds_entry2)
+		return (ds_entry1->endpoint_id == ds_entry2->endpoint_id);
+	else if (!ds_entry1 && !ds_entry2)
+		return true;
+	else
+		return false;
+}
+
+/*
  * DpuClientOpenSession 
  */
 void
@@ -165,7 +189,6 @@ parse_dpu_endpoint_list(void)
 	uint32_t	endpoint_id = 0;
 	uint32_t	nrooms = 48;
 	uint32_t	nitems = 0;
-	size_t		extra_sz = 0;
 	char		__default_port[32];
 	
 	if (!pgstrom_dpu_endpoint_list)
@@ -193,7 +216,6 @@ parse_dpu_endpoint_list(void)
 		*host++ = '\0';
 		name = __trim(tok);
 		host = __trim(host);
-		extra_sz += MAXALIGN(strlen(name) + 1);
 
 		if (nitems >= nrooms)
 		{
@@ -221,11 +243,9 @@ parse_dpu_endpoint_list(void)
 			if (!curr->config_host)
 				elog(ERROR, "out of memory");
 			curr->config_port = NULL;
-			extra_sz += MAXALIGN(strlen(host) + 1);
 			curr->endpoint_domain = AF_UNIX;
 			curr->endpoint_addr = (struct sockaddr *)addr;
 			curr->endpoint_addr_len = sizeof(struct sockaddr_un);
-			curr->validated = -1;
 		}
 		else
 		{
@@ -248,16 +268,11 @@ parse_dpu_endpoint_list(void)
 			curr->config_port = strdup(port);
 			if (!curr->config_host || !curr->config_port)
 				elog(ERROR, "out of memory");
-			extra_sz += MAXALIGN(strlen(host) + 1) + MAXALIGN(strlen(port) + 1);
 			curr->endpoint_domain = addr->ai_family;
 			curr->endpoint_addr = addr->ai_addr;
 			curr->endpoint_addr_len = addr->ai_addrlen;
-			curr->validated = -1;
 		}
-		extra_sz += MAXALIGN(curr->endpoint_addr_len);
 	}
-	extra_sz += MAXALIGN(offsetof(DpuTablespaceInfo, entries[nitems]));
-	dpu_tablespace_master->extra_sz = extra_sz;
 	dpu_tablespace_master->nitems   = nitems;
 
 	return (nitems > 0);
@@ -271,7 +286,8 @@ pgstrom_request_dpu_device(void)
 {
 	if (shmem_request_next)
 		shmem_request_next();
-	RequestAddinShmemSpace(dpu_tablespace_master->extra_sz);
+	RequestAddinShmemSpace(MAXALIGN(sizeof(pg_atomic_uint32) *
+									dpu_tablespace_master->nitems));
 }
 
 /*
@@ -280,57 +296,20 @@ pgstrom_request_dpu_device(void)
 static void
 pgstrom_startup_dpu_device(void)
 {
-	DpuTablespaceInfo *new_tablespace_master;
+	pg_atomic_uint32 *validated;
+	uint32_t	nitems = dpu_tablespace_master->nitems;
 	bool		found;
-	char	   *extra;
-	uint32_t	i, nitems = dpu_tablespace_master->nitems;
 
 	if (shmem_startup_next)
 		shmem_startup_next();
-	
 	Assert(nitems > 0);
-	new_tablespace_master = ShmemInitStruct("DPU-Tablespace Info",
-											dpu_tablespace_master->extra_sz,
-											&found);
-	extra = (char *)new_tablespace_master
-		+ MAXALIGN(offsetof(DpuTablespaceInfo, entries[nitems]));
-	for (i=0; i < dpu_tablespace_master->nitems; i++)
+	validated = ShmemInitStruct("DPU-Tablespace Info",
+								sizeof(pg_atomic_uint32) * nitems,
+								&found);
+	for (int i=0; i < dpu_tablespace_master->nitems; i++)
 	{
-		DpuStorageEntry *old_item = &dpu_tablespace_master->entries[i];
-		DpuStorageEntry *new_item = &new_tablespace_master->entries[i];
-
-		new_item->endpoint_id = old_item->endpoint_id;
-		new_item->tablespace_name = extra;
-		strcpy(extra, old_item->tablespace_name);
-		extra += MAXALIGN(strlen(extra) + 1);
-		if (!old_item->config_host)
-			new_item->config_host = NULL;
-		else
-		{
-			new_item->config_host = extra;
-			strcpy(extra, old_item->config_host);
-			extra += MAXALIGN(strlen(extra) + 1);
-		}
-		if (!old_item->config_port)
-			new_item->config_port = NULL;
-		else
-		{
-			new_item->config_port = extra;
-			strcpy(extra, old_item->config_port);
-			extra += MAXALIGN(strlen(extra) + 1);
-		}
-		new_item->endpoint_domain = old_item->endpoint_domain;
-		new_item->endpoint_addr = (struct sockaddr *)extra;
-		memcpy(extra, old_item->endpoint_addr, old_item->endpoint_addr_len);
-		extra += MAXALIGN(old_item->endpoint_addr_len);
-		new_item->endpoint_addr_len = old_item->endpoint_addr_len;
-		new_item->validated = -1;	/* validation on demand */
+		dpu_tablespace_master->entries[i].validated = &validated[i];
 	}
-	new_tablespace_master->extra_sz = dpu_tablespace_master->extra_sz;
-	new_tablespace_master->nitems   = dpu_tablespace_master->nitems;
-	Assert(extra - (char *)new_tablespace_master == dpu_tablespace_master->extra_sz);
-	/* switch to shared memory structure */
-	dpu_tablespace_master = new_tablespace_master;
 }
 
 /*

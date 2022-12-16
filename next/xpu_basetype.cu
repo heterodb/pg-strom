@@ -104,7 +104,7 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 						   const void *addr, int len)					\
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
-		if (cmeta->attopts.common.tag != ArrowType__Int ||				\
+		if (cmeta->attopts.tag != ArrowType__Int ||						\
 			cmeta->attopts.integer.bitWidth != 8 * sizeof(BASETYPE))	\
 		{																\
 			STROM_ELOG(kcxt, "value is not compatible Arrow::Int");		\
@@ -130,7 +130,7 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 							const kern_colmeta *cmeta,					\
 							const void *addr, int len)					\
 	{																	\
-		if (cmeta->attopts.common.tag != ArrowType__Int ||				\
+		if (cmeta->attopts.tag != ArrowType__Int ||						\
 			cmeta->attopts.integer.bitWidth != 8 * sizeof(BASETYPE))	\
 		{																\
 			STROM_ELOG(kcxt, "value is not compatible Arrow::Int");		\
@@ -203,7 +203,7 @@ PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t);
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
-		if (cmeta->attopts.common.tag != ArrowType__FloatingPoint ||	\
+		if (cmeta->attopts.tag != ArrowType__FloatingPoint ||			\
 			cmeta->attopts.floating_point.precision != ArrowPrecision__##PRECISION || \
 			len != sizeof(BASETYPE))									\
 		{																\
@@ -225,7 +225,7 @@ PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t);
 							const kern_colmeta *cmeta,					\
 							const void *addr, int len)					\
 	{																	\
-		if (cmeta->attopts.common.tag != ArrowType__FloatingPoint ||	\
+		if (cmeta->attopts.tag != ArrowType__FloatingPoint ||			\
 			cmeta->attopts.floating_point.precision != ArrowPrecision__##PRECISION || \
 			len != sizeof(BASETYPE))									\
 		{																\

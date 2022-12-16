@@ -22,6 +22,7 @@
 #include "access/brin.h"
 #include "access/heapam.h"
 #include "access/genam.h"
+#include "access/reloptions.h"
 #include "access/relscan.h"
 #include "access/syncscan.h"
 #include "access/table.h"
@@ -31,10 +32,16 @@
 #include "catalog/binary_upgrade.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
+#include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_amop.h"
 #include "catalog/pg_cast.h"
 #include "catalog/pg_depend.h"
+#include "catalog/pg_foreign_table.h"
+#include "catalog/pg_foreign_data_wrapper.h"
+#include "catalog/pg_foreign_server.h"
+#include "catalog/pg_user_mapping.h"
 #include "catalog/pg_extension.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
@@ -42,12 +49,16 @@
 #include "catalog/pg_tablespace_d.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
+#include "commands/event_trigger.h"
 #include "commands/extension.h"
+#include "commands/tablecmds.h"
 #include "commands/tablespace.h"
 #include "commands/typecmds.h"
 #include "common/hashfn.h"
 #include "common/int.h"
 #include "executor/nodeSubplan.h"
+#include "foreign/fdwapi.h"
+#include "foreign/foreign.h"
 #include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "lib/stringinfo.h"
@@ -62,6 +73,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planner.h"
+#include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/postmaster.h"
@@ -75,6 +87,7 @@
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/cash.h"
+#include "utils/catcache.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
 #include "utils/float.h"
@@ -102,6 +115,7 @@
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
 #include <float.h>
+#include <libgen.h>
 #include <limits.h>
 #include <pthread.h>
 #include <sys/epoll.h>
@@ -208,11 +222,11 @@ typedef struct
 	pg_atomic_uint64	ntuples_valid;
 	pg_atomic_uint64	ntuples_dropped;
 	/* for arrow_fdw */
-	pg_atomic_uint32	af_rbatch_index;
-	pg_atomic_uint32	af_rbatch_nload;	/* # of loaded record-batches */
-	pg_atomic_uint32	af_rbatch_nskip;	/* # of skipped record-batches */
+	pg_atomic_uint32	arrow_rbatch_index;
+	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */
+	pg_atomic_uint32	arrow_rbatch_nskip;	/* # of skipped record-batches */
 	/* for gpu-cache */
-	pg_atomic_uint32	gc_fetch_count;
+	pg_atomic_uint32	gcache_fetch_count;
 	/* common block-based table scan descriptor */
 	ParallelBlockTableScanDescData bpscan;
 } pgstromSharedState;
@@ -224,7 +238,7 @@ struct pgstromTaskState
 	pgstromSharedState *ps_state;
 	GpuCacheState	   *gc_state;
 	GpuDirectState	   *gd_state;
-	ArrowFdwState	   *af_state;
+	ArrowFdwState	   *arrow_state;
 	BrinIndexState	   *br_state;
 	DpuStorageEntry	   *ds_entry;
 	/* current chunk (already processed by the device) */
@@ -293,9 +307,6 @@ extern bool		gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
 									 unsigned long iomap_handle,
 									 off_t m_offset,
 									 strom_io_vector *iovec);
-extern void		extraSysfsSetupDistanceMap(const char *manual_config);
-extern Bitmapset *extraSysfsLookupOptimalGpus(File filp);
-extern ssize_t	extraSysfsPrintNvmeInfo(int index, char *buffer, ssize_t buffer_sz);
 
 /*
  * codegen.c
@@ -416,6 +427,12 @@ extern TupleTableSlot  *pgstromExecTaskState(pgstromTaskState *pts);
 extern void		pgstromExecEndTaskState(pgstromTaskState *pts);
 extern void		pgstromExecResetTaskState(pgstromTaskState *pts);
 extern void		pgstrom_init_executor(void);
+
+/*
+ * pcie.c
+ */
+extern const Bitmapset *pgstromLookupOptimalGpus(const char *pathname);
+extern void		pgstrom_init_pcie(void);
 
 /*
  * gpu_device.c
@@ -554,12 +571,33 @@ extern void		pgstrom_init_gpu_scan(void);
 
 
 /*
- * apache arrow related stuff
+ * arrow_fdw.c and arrow_read.c
  */
-
-
-
-
+extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
+extern bool 	RelationIsArrowFdw(Relation frel);
+extern Bitmapset *GetOptimalGpusForArrowFdw(PlannerInfo *root,
+											RelOptInfo *baserel);
+extern ArrowFdwState *pgstromArrowFdwExecInit(ScanState *ss,
+											  List *outer_quals,
+											  Bitmapset *outer_refs);
+extern kern_data_store *pgstromArrowFdwExecChunk(ScanState *ss,
+												 ArrowFdwState *arrow_state);
+extern void		pgstromArrowFdwExecEnd(ArrowFdwState *arrow_state);
+extern void		pgstromArrowFdwExecRewind(ArrowFdwState *arrow_state);
+extern void		pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
+									   pgstromSharedState *ps_state);
+extern void		pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,
+										 pgstromSharedState *ps_state);
+extern void		pgstromArrowFdwShutdown(ArrowFdwState *arrow_state);
+extern void		pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
+									   Relation frel,
+									   ExplainState *es,
+									   List *dcontext);
+extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
+									  kern_data_store *kds,
+									  size_t index,
+									  const Bitmapset *referenced);
+extern void pgstrom_init_arrow_fdw(void);
 
 /*
  * dpu_device.c
@@ -570,8 +608,11 @@ extern double	pgstrom_dpu_seq_page_cost;
 extern double	pgstrom_dpu_tuple_cost;
 extern bool		pgstrom_dpu_handle_cached_pages;
 
+extern DpuStorageEntry *GetOptimalDpuForFile(const char *filename);
 extern DpuStorageEntry *GetOptimalDpuForTablespace(Oid tablespace_oid);
 extern DpuStorageEntry *GetOptimalDpuForRelation(Relation relation);
+extern bool		DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
+									   const DpuStorageEntry *ds_entry2);
 extern void		DpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
 extern bool		pgstrom_init_dpu_device(void);
