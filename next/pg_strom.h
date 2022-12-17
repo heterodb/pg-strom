@@ -148,7 +148,7 @@ typedef struct GpuDevAttributes
 	size_t		DEV_TOTAL_MEMSZ;
 	size_t		DEV_BAR1_MEMSZ;
 	bool		DEV_SUPPORT_GPUDIRECTSQL;
-#define DEV_ATTR(LABEL,a,b,c)	\
+#define DEV_ATTR(LABEL,DESC)	\
 	int32		LABEL;
 #include "gpu_devattrs.h"
 #undef DEV_ATTR

@@ -32,15 +32,14 @@ typedef enum {
 
 static struct {
 	CUdevice_attribute	attr_id;
-	DevAttrKind	attr_kind;
 	size_t		attr_offset;
+	const char *attr_label;
 	const char *attr_desc;
 } GpuDevAttrCatalog[] = {
-#define DEV_ATTR(LABEL,KIND,a,DESC)				\
+#define DEV_ATTR(LABEL,DESC)					\
 	{ CU_DEVICE_ATTRIBUTE_##LABEL,				\
-	  DEVATTRKIND__##KIND,						\
 	  offsetof(struct GpuDevAttributes, LABEL),	\
-	  DESC },
+	  #LABEL, DESC },
 #include "gpu_devattrs.h"
 #undef DEV_ATTR
 };
@@ -69,7 +68,7 @@ __collectGpuDevAttrs(GpuDevAttributes *dattrs, CUdevice cuda_device)
 	rc = cuDeviceTotalMem(&dattrs->DEV_TOTAL_MEMSZ, cuda_device);
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuDeviceTotalMem: %s", cuStrError(rc));
-#define DEV_ATTR(LABEL,a,b,c)										\
+#define DEV_ATTR(LABEL,DESC)										\
 	rc = cuDeviceGetAttribute(&dattrs->LABEL,						\
 							  CU_DEVICE_ATTRIBUTE_##LABEL,			\
 							  cuda_device);							\
@@ -538,6 +537,7 @@ pgstrom_gpu_device_info(PG_FUNCTION_ARGS)
 	int			i, val;
 	const char *att_name;
 	const char *att_value;
+	const char *att_desc;
 	Datum		values[4];
 	bool		isnull[4];
 	HeapTuple	tuple;
@@ -553,11 +553,11 @@ pgstrom_gpu_device_info(PG_FUNCTION_ARGS)
 		tupdesc = CreateTemplateTupleDesc(4);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "gpu_id",
 						   INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "att_num",
-						   INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "att_key",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "att_name",
 						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "att_value",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "att_value",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "att_desc",
 						   TEXTOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
@@ -569,53 +569,78 @@ pgstrom_gpu_device_info(PG_FUNCTION_ARGS)
 
 	dindex = fncxt->call_cntr / (lengthof(GpuDevAttrCatalog) + 5);
 	aindex = fncxt->call_cntr % (lengthof(GpuDevAttrCatalog) + 5);
-
 	if (dindex >= numGpuDevAttrs)
 		SRF_RETURN_DONE(fncxt);
 	dattrs = &gpuDevAttrs[dindex];
 	switch (aindex)
 	{
 		case 0:
-			att_name = "GPU Device Name";
+			att_name = "DEV_NAME";
+			att_desc = "GPU Device Name";
 			att_value = dattrs->DEV_NAME;
 			break;
 		case 1:
-			att_name = "GPU Device ID";
+			att_name = "DEV_ID";
+			att_desc = "GPU Device ID";
 			att_value = psprintf("%d", dattrs->DEV_ID);
 			break;
 		case 2:
-			att_name = "GPU Device UUID";
-			att_value = dattrs->DEV_UUID;
+			att_name = "DEV_UUID";
+			att_desc = "GPU Device UUID";
+			att_value = psprintf("GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-"
+								 "%02x%02x-%02x%02x%02x%02x%02x%02x",
+								 (uint8_t)dattrs->DEV_UUID[0],
+								 (uint8_t)dattrs->DEV_UUID[1],
+								 (uint8_t)dattrs->DEV_UUID[2],
+								 (uint8_t)dattrs->DEV_UUID[3],
+								 (uint8_t)dattrs->DEV_UUID[4],
+								 (uint8_t)dattrs->DEV_UUID[5],
+								 (uint8_t)dattrs->DEV_UUID[6],
+								 (uint8_t)dattrs->DEV_UUID[7],
+								 (uint8_t)dattrs->DEV_UUID[8],
+								 (uint8_t)dattrs->DEV_UUID[9],
+								 (uint8_t)dattrs->DEV_UUID[10],
+								 (uint8_t)dattrs->DEV_UUID[11],
+								 (uint8_t)dattrs->DEV_UUID[12],
+								 (uint8_t)dattrs->DEV_UUID[13],
+								 (uint8_t)dattrs->DEV_UUID[14],
+								 (uint8_t)dattrs->DEV_UUID[15]);
 			break;
 		case 3:
-			att_name = "GPU Total RAM Size";
+			att_name = "DEV_TOTAL_MEMSZ";
+			att_desc = "GPU Total RAM Size";
 			att_value = format_bytesz(dattrs->DEV_TOTAL_MEMSZ);
 			break;
 		case 4:
-			att_name = "GPU PCI Bar1 Size";
+			att_name = "DEV_BAR1_MEMSZ";
+			att_desc = "GPU PCI Bar1 Size";
 			att_value = format_bytesz(dattrs->DEV_BAR1_MEMSZ);
 			break;
 		case 5:
-			att_name = "GPU NUMA Node Id";
+			att_name = "NUMA_NODE_ID";
+			att_desc = "GPU NUMA Node Id";
 			att_value = psprintf("%d", dattrs->NUMA_NODE_ID);
 			break;
 		default:
 			i = aindex - 6;
 			val = *((int *)((char *)dattrs +
 							GpuDevAttrCatalog[i].attr_offset));
-			att_name = GpuDevAttrCatalog[i].attr_desc;
-			switch (GpuDevAttrCatalog[i].attr_kind)
+			att_name = GpuDevAttrCatalog[i].attr_label;
+			att_desc = GpuDevAttrCatalog[i].attr_desc;
+			switch (GpuDevAttrCatalog[i].attr_id)
 			{
-				case DEVATTRKIND__INT:
-					att_value = psprintf("%d", val);
-					break;
-				case DEVATTRKIND__BYTES:
+				case CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK:
+				case CU_DEVICE_ATTRIBUTE_TOTAL_CONSTANT_MEMORY:
+				case CU_DEVICE_ATTRIBUTE_MAX_PITCH:
+				case CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE:
+				case CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR:
+					/* bytes */
 					att_value = format_bytesz((size_t)val);
 					break;
-				case DEVATTRKIND__KB:
-					att_value = format_bytesz((size_t)val * 1024);
-					break;
-				case DEVATTRKIND__KHZ:
+
+				case CU_DEVICE_ATTRIBUTE_CLOCK_RATE:
+				case CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE:
+					/* clock */
 					if (val > 4000000)
 						att_value = psprintf("%.2f GHz", (double)val/1000000.0);
 					else if (val > 4000)
@@ -623,17 +648,19 @@ pgstrom_gpu_device_info(PG_FUNCTION_ARGS)
 					else
 						att_value = psprintf("%d kHz", val);
 					break;
-				case DEVATTRKIND__COMPUTEMODE:
+
+				case CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH:
+					/* bits */
+					att_value = psprintf("%s", val != 0 ? "True" : "False");
+					break;
+
+				case CU_DEVICE_ATTRIBUTE_COMPUTE_MODE:
+					/* compute mode */
 					switch (val)
 					{
 						case CU_COMPUTEMODE_DEFAULT:
 							att_value = "Default";
 							break;
-#if CUDA_VERSION < 8000
-						case CU_COMPUTEMODE_EXCLUSIVE:
-							att_value = "Exclusive";
-							break;
-#endif
 						case CU_COMPUTEMODE_PROHIBITED:
 							att_value = "Prohibited";
 							break;
@@ -645,23 +672,18 @@ pgstrom_gpu_device_info(PG_FUNCTION_ARGS)
 							break;
 					}
 					break;
-				case DEVATTRKIND__BOOL:
-					att_value = psprintf("%s", val != 0 ? "True" : "False");
-					break;
-				case DEVATTRKIND__BITS:
-					att_value = psprintf("%dbits", val);
-					break;
+
 				default:
-					elog(ERROR, "Bug? unknown DevAttrKind: %d",
-						 (int)GpuDevAttrCatalog[i].attr_kind);
+					att_value = psprintf("%d", val);
+					break;
 			}
 			break;
 	}
 	memset(isnull, 0, sizeof(isnull));
 	values[0] = Int32GetDatum(dattrs->DEV_ID);
-	values[1] = Int32GetDatum(aindex);
-	values[2] = CStringGetTextDatum(att_name);
-	values[3] = CStringGetTextDatum(att_value);
+	values[1] = CStringGetTextDatum(att_name);
+	values[2] = CStringGetTextDatum(att_value);
+	values[3] = CStringGetTextDatum(att_desc);
 
 	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
 
