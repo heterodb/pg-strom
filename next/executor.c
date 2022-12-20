@@ -663,14 +663,6 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 }
 
 static XpuCommand *
-pgstromScanChunkArrowFdw(pgstromTaskState *pts,
-						 struct iovec *xcmd_iov, int *xcmd_iovcnt)
-{
-	elog(ERROR, "not implemented yet");
-	return NULL;
-}
-
-static XpuCommand *
 pgstromScanChunkGpuCache(pgstromTaskState *pts,
 						 struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
@@ -770,7 +762,11 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
  */
 void
 pgstromExecInitTaskState(pgstromTaskState *pts,
-						 List *outer_dev_quals)
+						 List *outer_quals,
+						 const Bitmapset *outer_refs,
+						 Oid   brin_index_oid,
+						 List *brin_index_conds,
+						 List *brin_index_quals)
 {
 	EState		   *estate = pts->css.ss.ps.state;
 	CustomScan	   *cscan = (CustomScan *)pts->css.ss.ps.plan;
@@ -779,7 +775,6 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	TupleDesc		tupdesc_dst;
 	List		   *tlist_dev = NIL;
 	ListCell	   *lc;
-//	ArrowFdwState  *af_state = NULL;
 
 	/*
 	 * PG-Strom supports:
@@ -794,11 +789,19 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 		if (am_oid != HEAP_TABLE_AM_OID)
 			elog(ERROR, "PG-Strom does not support table access method: %s",
 				 get_am_name(am_oid));
+
+		/* setup BRIN-index if any */
+		pgstromBrinIndexExecBegin(pts,
+								  brin_index_oid,
+								  brin_index_conds,
+								  brin_index_quals);
+		/* identify the optimal GPUs if any */
+		pts->optimal_gpus = GetOptimalGpusForRelation(rel);
 	}
 	else if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
 	{
-		//call pgstromArrowFdwExecBegin here
-		elog(ERROR, "Arrow support is not implemented yet");
+		if (!pgstromArrowFdwExecInit(pts, outer_quals, outer_refs))
+			elog(ERROR, "Bug? only arrow_fdw is supported in PG-Strom");
 	}
 	else
 	{
@@ -824,10 +827,10 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	/*
 	 * Init resources for CPU fallbacks
 	 */
-	outer_dev_quals = (List *)
-		fixup_varnode_to_origin((Node *)outer_dev_quals,
+	outer_quals = (List *)
+		fixup_varnode_to_origin((Node *)outer_quals,
 								cscan->custom_scan_tlist);
-	pts->base_quals = ExecInitQual(outer_dev_quals, &pts->css.ss.ps);
+	pts->base_quals = ExecInitQual(outer_quals, &pts->css.ss.ps);
 	foreach (lc, cscan->custom_scan_tlist)
 	{
 		TargetEntry *tle = lfirst(lc);
@@ -849,10 +852,10 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	{
 		pts->cb_next_chunk = pgstromScanChunkArrowFdw;
 		pts->cb_next_tuple = pgstromScanNextTuple;
-		 __setupTaskStateRequestBuffer(pts,
-									   tupdesc_src,
-									   tupdesc_dst,
-									   KDS_FORMAT_ARROW);
+	    __setupTaskStateRequestBuffer(pts,
+									  NULL,
+									  tupdesc_dst,
+									  KDS_FORMAT_ARROW);
 	}
 	else if (pts->gc_state)		/* GPU-Cache */
 	{
@@ -863,7 +866,8 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 									  tupdesc_dst,
 									  KDS_FORMAT_COLUMN);
 	}
-	else if (pts->gd_state)		/* GPU-Direct SQL */
+	else if (!bms_is_empty(pts->optimal_gpus) ||	/* GPU-Direct SQL */
+			 pts->ds_entry)							/* DPU Storage */
 	{
 		pts->cb_next_chunk = pgstromRelScanChunkDirect;
 		pts->cb_next_tuple = pgstromScanNextTuple;
@@ -872,16 +876,7 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 									  tupdesc_dst,
 									  KDS_FORMAT_BLOCK);
 	}
-	else if (pts->ds_entry)		/* DPU Storage */
-	{
-		pts->cb_next_chunk = pgstromRelScanChunkDirect;
-		pts->cb_next_tuple = pgstromScanNextTuple;
-		__setupTaskStateRequestBuffer(pts,
-									  tupdesc_src,
-									  tupdesc_dst,
-									  KDS_FORMAT_BLOCK);
-	}
-	else
+	else						/* Slow normal heap storage */
 	{
 		pts->cb_next_chunk = pgstromRelScanChunkNormal;
 		pts->cb_next_tuple = pgstromScanNextTuple;
@@ -944,6 +939,8 @@ pgstromExecEndTaskState(pgstromTaskState *pts)
 		xpuClientCloseSession(pts->conn);
 	if (pts->br_state)
 		pgstromBrinIndexExecEnd(pts);
+	if (pts->arrow_state)
+		pgstromArrowFdwExecEnd(pts->arrow_state);
 	if (pts->base_slot)
 		ExecDropSingleTupleTableSlot(pts->base_slot);
 	if (pts->css.ss.ss_currentScanDesc)
@@ -963,6 +960,22 @@ pgstromExecResetTaskState(pgstromTaskState *pts)
 	}
 	if (pts->br_state)
 		pgstromBrinIndexExecReset(pts);
+	if (pts->arrow_state)
+		pgstromArrowFdwExecReset(pts->arrow_state);
+}
+
+/*
+ * pgstromExplainTaskState
+ */
+void
+pgstromExplainTaskState(pgstromTaskState *pts,
+						ExplainState *es,
+						List *ancestors)
+{
+
+
+
+	
 }
 
 /*

@@ -910,7 +910,7 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 	pgstromSharedState *ps_state;
 	Relation	relation = pts->css.ss.ss_currentRelation;
 	EState	   *estate = pts->css.ss.ps.state;
-	TableScanDesc scan;
+	TableScanDesc scan = NULL;
 
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexInitDSM(pts, dsm_addr);
@@ -921,29 +921,22 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 		memset(ps_state, 0, offsetof(pgstromSharedState, bpscan));
 		table_parallelscan_initialize(relation, &ps_state->bpscan.base,
 									  estate->es_snapshot);
-		scan = table_beginscan_parallel(relation, &ps_state->bpscan.base);
+		if (pts->arrow_state)
+			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
+		else
+			scan = table_beginscan_parallel(relation, &ps_state->bpscan.base);
 	}
 	else
 	{
 		ps_state = MemoryContextAllocZero(estate->es_query_cxt,
 										  sizeof(pgstromSharedState));
-		scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
+		if (pts->arrow_state)
+			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
+		else
+			scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
 	}
-	if (pts->arrow_state)
-		pgstromArrowFdwInitDSM(pts->arrow_state, pts->ps_state);
 	pts->ps_state = ps_state;
 	pts->css.ss.ss_currentScanDesc = scan;
-}
-
-/*
- * pgstromSharedStateReInitDSM
- */
-void
-pgstromSharedStateReInitDSM(pgstromTaskState *pts)
-{
-	//pgstromSharedState *ps_state = pts->ps_state;
-	if (pts->br_state)
-		pgstromBrinIndexReInitDSM(pts);
 }
 
 /*
@@ -956,7 +949,7 @@ pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr)
 		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
 	pts->ps_state = (pgstromSharedState *)dsm_addr;
 	if (pts->arrow_state)
-		
+		pgstromArrowFdwAttachDSM(pts->arrow_state, pts->ps_state);
 	pts->css.ss.ss_currentScanDesc =
 		table_beginscan_parallel(pts->css.ss.ss_currentRelation,
 								 &pts->ps_state->bpscan.base);	
@@ -974,6 +967,8 @@ pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
 
 	if (pts->br_state)
 		pgstromBrinIndexShutdownDSM(pts);
+	if (pts->arrow_state)
+		pgstromArrowFdwShutdown(pts->arrow_state);
 	if (src_state)
 	{
 		dst_state = MemoryContextAllocZero(estate->es_query_cxt,

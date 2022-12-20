@@ -234,6 +234,7 @@ typedef struct
 struct pgstromTaskState
 {
 	CustomScanState		css;
+	const Bitmapset	   *optimal_gpus;		/* candidate GPUs to connect */
 	XpuConnection	   *conn;
 	pgstromSharedState *ps_state;
 	GpuCacheState	   *gc_state;
@@ -367,7 +368,6 @@ extern void		pgstromBrinIndexExecEnd(pgstromTaskState *pts);
 extern void		pgstromBrinIndexExecReset(pgstromTaskState *pts);
 extern Size		pgstromBrinIndexEstimateDSM(pgstromTaskState *pts);
 extern Size		pgstromBrinIndexInitDSM(pgstromTaskState *pts, char *dsm_addr);
-extern void		pgstromBrinIndexReInitDSM(pgstromTaskState *pts);
 extern Size		pgstromBrinIndexAttachDSM(pgstromTaskState *pts, char *dsm_addr);
 extern void		pgstromBrinIndexShutdownDSM(pgstromTaskState *pts);
 extern void		pgstrom_init_brin(void);
@@ -392,7 +392,6 @@ extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
 extern Size		pgstromSharedStateEstimateDSM(pgstromTaskState *pts);
 extern void		pgstromSharedSteteCreate(pgstromTaskState *pts);
 extern void		pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr);
-extern void		pgstromSharedStateReInitDSM(pgstromTaskState *pts);
 extern void		pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr);
 extern void		pgstromSharedStateShutdownDSM(pgstromTaskState *pts);
 extern void		pgstrom_init_relscan(void);
@@ -422,16 +421,23 @@ pgstromBuildSessionInfo(PlanState *ps,
 						const bytea *xpucode_scan_quals,
 						const bytea *xpucode_scan_projs);
 extern void		pgstromExecInitTaskState(pgstromTaskState *pts,
-										 List *outer_dev_quals);
+										 List *outer_quals,
+										 const Bitmapset *outer_refs,
+										 Oid   brin_index_oid,
+										 List *brin_index_conds,
+										 List *brin_index_quals);
 extern TupleTableSlot  *pgstromExecTaskState(pgstromTaskState *pts);
 extern void		pgstromExecEndTaskState(pgstromTaskState *pts);
 extern void		pgstromExecResetTaskState(pgstromTaskState *pts);
+extern void		pgstromExplainTaskState(pgstromTaskState *pts,
+										ExplainState *es,
+										List *ancestors);
 extern void		pgstrom_init_executor(void);
 
 /*
  * pcie.c
  */
-extern const Bitmapset *pgstromLookupOptimalGpus(const char *pathname);
+extern const Bitmapset *GetOptimalGpuForFile(const char *pathname);
 extern void		pgstrom_init_pcie(void);
 
 /*
@@ -518,6 +524,7 @@ extern void		pgstrom_init_gpu_service(void);
 /*
  * gpu_direct.c
  */
+extern const Bitmapset *GetOptimalGpusForRelation(Relation relation);
 extern const Bitmapset *baseRelCanUseGpuDirect(PlannerInfo *root,
 											   RelOptInfo *baserel);
 extern void		pgstromGpuDirectExecBegin(pgstromTaskState *pts,
@@ -577,13 +584,14 @@ extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
 extern bool 	RelationIsArrowFdw(Relation frel);
 extern Bitmapset *GetOptimalGpusForArrowFdw(PlannerInfo *root,
 											RelOptInfo *baserel);
-extern ArrowFdwState *pgstromArrowFdwExecInit(ScanState *ss,
-											  List *outer_quals,
-											  Bitmapset *outer_refs);
-extern kern_data_store *pgstromArrowFdwExecChunk(ScanState *ss,
-												 ArrowFdwState *arrow_state);
+extern bool		pgstromArrowFdwExecInit(pgstromTaskState *pts,
+										List *outer_quals,
+										const Bitmapset *outer_refs);
+extern XpuCommand *pgstromScanChunkArrowFdw(pgstromTaskState *pts,
+											struct iovec *xcmd_iov,
+											int *xcmd_iovcnt);
 extern void		pgstromArrowFdwExecEnd(ArrowFdwState *arrow_state);
-extern void		pgstromArrowFdwExecRewind(ArrowFdwState *arrow_state);
+extern void		pgstromArrowFdwExecReset(ArrowFdwState *arrow_state);
 extern void		pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
 									   pgstromSharedState *ps_state);
 extern void		pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,

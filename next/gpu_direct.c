@@ -75,7 +75,7 @@ GetOptimalGpusForTablespace(Oid tablespace_oid)
 
 		Assert(hentry->tablespace_oid == tablespace_oid);
 		pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
-		optimal_gpus = pgstromLookupOptimalGpus(pathname);
+		optimal_gpus = GetOptimalGpuForFile(pathname);
 		if (bms_is_empty(optimal_gpus))
 			hentry->optimal_gpus.nwords = 0;
 		else
@@ -88,6 +88,23 @@ GetOptimalGpusForTablespace(Oid tablespace_oid)
 	}
 	Assert(hentry->is_valid);
 	return (hentry->optimal_gpus.nwords > 0 ? &hentry->optimal_gpus : NULL);
+}
+
+/*
+ * GetOptimalGpusForRelation
+ */
+const Bitmapset *
+GetOptimalGpusForRelation(Relation relation)
+{
+	Oid		tablespace_oid;
+
+	/* only heap relation */
+	Assert(RelationGetForm(relation)->relam == HEAP_TABLE_AM_OID);
+	tablespace_oid = RelationGetForm(relation)->reltablespace;
+	if (!OidIsValid(tablespace_oid))
+		tablespace_oid = DEFAULTTABLESPACE_OID;
+
+	return GetOptimalGpusForTablespace(tablespace_oid);
 }
 
 /*
@@ -115,17 +132,10 @@ baseRelCanUseGpuDirect(PlannerInfo *root, RelOptInfo *baserel)
 		return NULL;	/* table is too small */
 
 	optimal_gpus = GetOptimalGpusForTablespace(baserel->reltablespace);
-	if (optimal_gpus)
+	if (!bms_is_empty(optimal_gpus))
 	{
 		RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
-		HeapTuple	tup;
-		char		relpersistence;
-
-		tup = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
-		if (!HeapTupleIsValid(tup))
-			elog(ERROR, "cache lookup failed for relation %u", rte->relid);
-		relpersistence = ((Form_pg_class) GETSTRUCT(tup))->relpersistence;
-		ReleaseSysCache(tup);
+		char	relpersistence = get_rel_persistence(rte->relid);
 
 		/* temporary table is not supported by GPU-Direct SQL */
 		if (relpersistence != RELPERSISTENCE_PERMANENT &&

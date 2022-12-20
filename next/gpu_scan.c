@@ -335,13 +335,9 @@ GpuScanAddScanPath(PlannerInfo *root,
 			break;
 
 		case RELKIND_FOREIGN_TABLE:
-#if 0
 			if (!baseRelIsArrowFdw(baserel))
 				return;
 			break;
-#else
-			return;
-#endif
 		default:
 			/* not supported */
 			return;
@@ -661,15 +657,12 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	Assert(node->ss.ss_currentRelation != NULL &&
 		   outerPlanState(node) == NULL &&
 		   innerPlanState(node) == NULL);
-	pgstromBrinIndexExecBegin(&gss->pts,
-							  gss->gs_info.index_oid,
-							  gss->gs_info.index_conds,
-							  gss->gs_info.index_quals);
-	//pgstromGpuCacheExecBegin here
-	pgstromGpuDirectExecBegin(&gss->pts, gss->gs_info.gpu_direct_devs);
-	
-	//pgstromGpuDirectExecBegin here
-	pgstromExecInitTaskState(&gss->pts, gss->gs_info.dev_quals);
+	pgstromExecInitTaskState(&gss->pts,
+							 gss->gs_info.dev_quals,
+							 gss->gs_info.outer_refs,
+							 gss->gs_info.index_oid,
+							 gss->gs_info.index_conds,
+							 gss->gs_info.index_quals);
 	gss->pts.cb_cpu_fallback = ExecFallbackCpuScan;
 }
 
@@ -699,7 +692,6 @@ ExecGpuScan(CustomScanState *node)
 	if (!gss->pts.conn)
 	{
 		const XpuCommand *session;
-		const Bitmapset *gpuset = NULL;
 
 		session = pgstromBuildSessionInfo(&gss->pts.css.ss.ps,
 										  gss->gs_info.used_params,
@@ -707,11 +699,7 @@ ExecGpuScan(CustomScanState *node)
 										  gss->gs_info.kvars_nslots,
 										  gss->gs_info.kern_quals,
 										  gss->gs_info.kern_projs);
-		if (gss->pts.gc_state)
-			gpuset = gss->gs_info.gpu_cache_devs;
-		else if (gss->pts.gd_state)
-			gpuset = pgstromGpuDirectDevices(&gss->pts);
-		gpuClientOpenSession(&gss->pts, gpuset, session);
+		gpuClientOpenSession(&gss->pts, gss->pts.optimal_gpus, session);
 	}
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecTaskState,
@@ -762,19 +750,6 @@ InitializeGpuScanDSM(CustomScanState *node,
 }
 
 /*
- * ReInitializeGpuScanDSM
- */
-static void
-ReInitializeGpuScanDSM(CustomScanState *node,
-					   ParallelContext *pcxt,
-					   void *dsm_addr)
-{
-	GpuScanState   *gss = (GpuScanState *)node;
-
-	pgstromSharedStateReInitDSM(&gss->pts);
-}
-
-/*
  * InitGpuScanWorker
  */
 static void
@@ -806,7 +781,7 @@ ExplainGpuScan(CustomScanState *node,
 {
 	GpuScanState   *gss = (GpuScanState *) node;
 	StringInfoData	temp;
-
+	
 	initStringInfo(&temp);
 	pgstrom_explain_xpucode(&temp,
 							gss->gs_info.kern_quals,
@@ -820,6 +795,8 @@ ExplainGpuScan(CustomScanState *node,
 							&gss->pts.css,
 							es, ancestors);
 	ExplainPropertyText("GPU Projection", temp.data, es);
+
+	pgstromExplainTaskState(&gss->pts, es, ancestors);
 }
 
 /*
@@ -1168,7 +1145,6 @@ pgstrom_init_gpu_scan(void)
     gpuscan_exec_methods.EstimateDSMCustomScan = EstimateGpuScanDSM;
     gpuscan_exec_methods.InitializeDSMCustomScan = InitializeGpuScanDSM;
     gpuscan_exec_methods.InitializeWorkerCustomScan = InitGpuScanWorker;
-    gpuscan_exec_methods.ReInitializeDSMCustomScan = ReInitializeGpuScanDSM;
     gpuscan_exec_methods.ShutdownCustomScan	= ExecShutdownGpuScan;
     gpuscan_exec_methods.ExplainCustomScan	= ExplainGpuScan;
 

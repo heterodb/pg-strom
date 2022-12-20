@@ -312,9 +312,9 @@ static void
 sysfs_read_pcie_subtree(void)
 {
 	/* walks on the PCI-E bus tree for each root complex */
-	const char *dirname = "/sys/devices";
-	DIR		   *dir;
-	struct dirent *dent;
+	const char	   *dirname = "/sys/devices";
+	DIR			   *dir;
+	struct dirent  *dent;
 
 	dir = AllocateDir(dirname);
 	if (!dir)
@@ -950,10 +950,10 @@ apply_manual_optimal_gpus(const char *__config)
 }
 
 /*
- * pgstromLookupOptimalGpus
+ * GetOptimalGpuForFile
  */
 const Bitmapset *
-pgstromLookupOptimalGpus(const char *pathname)
+GetOptimalGpuForFile(const char *pathname)
 {
 	struct stat	stat_buf;
 
@@ -999,6 +999,24 @@ pgstromLookupOptimalGpus(const char *pathname)
 	return sysfs_lookup_optimal_gpus(major(stat_buf.st_dev),
 									 minor(stat_buf.st_dev));
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /*
  * sysfs_preload_block_devices
@@ -1073,8 +1091,9 @@ sysfs_preload_block_devices(void)
 void
 pgstrom_init_pcie(void)
 {
-	static char	*pgstrom_manual_optimal_gpus = NULL;
-	HASHCTL		hctl;
+	static char	   *pgstrom_manual_optimal_gpus = NULL;
+	MemoryContext	memcxt;
+	HASHCTL			hctl;
 
 	memset(&hctl, 0, sizeof(HASHCTL));
 	hctl.keysize = BlockDevItemKeySize;
@@ -1103,11 +1122,12 @@ pgstrom_init_pcie(void)
 							   PGC_POSTMASTER,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
-	
+	memcxt = MemoryContextSwitchTo(TopMemoryContext);
 	sysfs_read_pcie_subtree();
 	sysfs_setup_optimal_gpus();
 	if (pgstrom_manual_optimal_gpus)
 		apply_manual_optimal_gpus(pgstrom_manual_optimal_gpus);
 	sysfs_print_pcie_subtree();
 	sysfs_preload_block_devices();
+	MemoryContextSwitchTo(memcxt);
 }

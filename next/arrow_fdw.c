@@ -69,9 +69,9 @@ typedef struct ArrowFileState
 {
 	const char *filename;
 	struct stat	stat_buf;
-	Bitmapset  *optimal_gpus;	/* optimal GPUs, if any */
-	DpuStorageEntry *ds_entry;	/* optimal DPU, if any */
-	List	   *rb_list;	/* list of RecordBatchState */
+	const Bitmapset *optimal_gpus;	/* optimal GPUs, if any */
+	DpuStorageEntry *ds_entry;		/* optimal DPU, if any */
+	List	   *rb_list;			/* list of RecordBatchState */
 } ArrowFileState;
 
 /*
@@ -89,14 +89,16 @@ typedef struct
 
 struct ArrowFdwState
 {
-	Bitmapset		   *referenced;
-	arrowStatsHint	   *stats_hint;
+	Bitmapset		   *referenced;		/* referenced columns */
+	Bitmapset		   *optimal_gpus;	/* optimal GPUs */
+	arrowStatsHint	   *stats_hint;		/* min/max statistics, if any */
 	pg_atomic_uint32   *rbatch_index;
 	pg_atomic_uint32	__rbatch_index_local;	/* if single process */
 	pg_atomic_uint32   *rbatch_nload;
 	pg_atomic_uint32	__rbatch_nload_local;	/* if single process */
 	pg_atomic_uint32   *rbatch_nskip;
 	pg_atomic_uint32	__rbatch_nskip_local;	/* if single process */
+	StringInfoData		chunk_buffer;	/* buffer to load record-batch */
 	File				curr_filp;		/* current arrow file to read */
 	kern_data_store	   *curr_kds;		/* current chunk to read */
 	uint32_t			curr_index;		/* current index on the chunk */
@@ -1941,8 +1943,7 @@ BuildArrowFileState(Relation frel, const char *filename, Bitmapset **p_stat_attr
 	/*
 	 * Lookup Optimal GPU & DPU for the Arrow file
 	 */
-	//af_state->optimal_gpus = GpuOptimalGpusForFile();
-	af_state->optimal_gpus = NULL;
+	af_state->optimal_gpus = GetOptimalGpuForFile(filename);
 	af_state->ds_entry = GetOptimalDpuForFile(filename);
 
 	return af_state;
@@ -2020,6 +2021,8 @@ arrowFdwExtractFilesList(List *options_list,
 			{
 				tok = __trim(tok);
 
+				if (*tok != '/')
+					elog(ERROR, "arrow_fdw: file '%s' must be absolute path", tok);
 				if (access(tok, R_OK) != 0)
 					elog(ERROR, "arrow_fdw: unable to access '%s': %m", tok);
 				filesList = lappend(filesList, makeString(pstrdup(tok)));
@@ -2029,6 +2032,8 @@ arrowFdwExtractFilesList(List *options_list,
 		else if (strcmp(defel->defname, "dir") == 0)
 		{
 			dir_path = strVal(defel->arg);
+			if (*dir_path != '/')
+				elog(ERROR, "arrow_fdw: dir '%s' must be absolute path", dir_path);
 		}
 		else if (strcmp(defel->defname, "suffix") == 0)
 		{
@@ -2098,8 +2103,8 @@ typedef struct
 	off_t		rb_offset;
 	off_t		f_offset;
 	off_t		m_offset;
-	int32_t		io_index;
 	int32_t		depth;
+	int32_t		io_index;
 	strom_io_chunk ioc[FLEXIBLE_ARRAY_MEMBER];
 } arrowFdwSetupIOContext;
 
@@ -2159,14 +2164,14 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 		strom_io_chunk *ioc;
 
 		if (con->io_index < 0)
-			con->io_index = 0;	/* no previous i/o chunks */
+			con->io_index = 0;		/* no previous i/o chunks */
 		else
 		{
 			ioc = &con->ioc[con->io_index++];
 
 			f_tail = TYPEALIGN(PAGE_SIZE, con->f_offset);
 			ioc->nr_pages = f_tail / PAGE_SIZE - ioc->fchunk_id;
-			con->m_offset += (f_tail - con->f_offset); //safety margin;
+			con->m_offset += (f_tail - con->f_offset);	/* margin for alignment */
 		}
 		ioc = &con->ioc[con->io_index];
 		/* adjust position if con->m_offset is not aligned well */
@@ -2242,13 +2247,12 @@ arrowFdwSetupIOvectorField(arrowFdwSetupIOContext *con,
 }
 
 static strom_io_vector *
-arrowFdwSetupIOvector(kern_data_store *kds,
-					  RecordBatchState *rb_state,
-					  Bitmapset *referenced)
+arrowFdwSetupIOvector(RecordBatchState *rb_state,
+					  Bitmapset *referenced,
+					  kern_data_store *kds)
 {
 	arrowFdwSetupIOContext *con;
-	strom_io_vector *iovec = NULL;
-	int			nr_chunks = 0;
+	strom_io_vector *iovec;
 
 	Assert(kds->ncols <= kds->nr_colmeta &&
 		   kds->ncols == rb_state->nfields);
@@ -2257,7 +2261,8 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 	con->rb_offset = rb_state->rb_offset;
 	con->f_offset  = ~0UL;	/* invalid offset */
 	con->m_offset  = PAGE_ALIGN(KDS_HEAD_LENGTH(kds));
-	con->io_index  = -1;
+	con->depth = 0;
+	con->io_index = -1;		/* invalid index */
 	for (int j=0; j < kds->ncols; j++)
 	{
 		RecordBatchFieldState *rb_field = &rb_state->fields[j];
@@ -2273,63 +2278,53 @@ arrowFdwSetupIOvector(kern_data_store *kds,
 	if (con->io_index >= 0)
 	{
 		/* close the last I/O chunks */
-		strom_io_chunk *ioc = &con->ioc[con->io_index];
+		strom_io_chunk *ioc = &con->ioc[con->io_index++];
 
 		ioc->nr_pages = (TYPEALIGN(PAGE_SIZE, con->f_offset) / PAGE_SIZE -
 						 ioc->fchunk_id);
 		con->m_offset = ioc->m_offset + PAGE_SIZE * ioc->nr_pages;
-		nr_chunks = con->io_index + 1;
 	}
 	kds->length = con->m_offset;
 
-	iovec = palloc0(offsetof(strom_io_vector, ioc[nr_chunks]));
-	iovec->nr_chunks = nr_chunks;
-	if (nr_chunks > 0)
-		memcpy(iovec->ioc, con->ioc, sizeof(strom_io_chunk) * nr_chunks);
-	return iovec;
-}
-
-
-/*
- * __dump_kds_and_iovec - just for debug
- */
-static inline void
-__dump_kds_and_iovec(kern_data_store *kds, strom_io_vector *iovec)
-{
+	iovec = palloc0(offsetof(strom_io_vector, ioc[con->io_index]));
+	iovec->nr_chunks = con->io_index;
+	if (iovec->nr_chunks > 0)
+		memcpy(iovec->ioc, con->ioc, sizeof(strom_io_chunk) * con->io_index);
 #if 0
-	int		j;
-
-	elog(INFO, "nchunks = %d", iovec->nr_chunks);
-	for (j=0; j < iovec->nr_chunks; j++)
+	/* for debug - dump the i/o vector */
 	{
-		strom_io_chunk *ioc = &iovec->ioc[j];
+		elog(INFO, "nchunks = %d", iovec->nr_chunks);
+		for (int j=0; j < iovec->nr_chunks; j++)
+		{
+			strom_io_chunk *ioc = &iovec->ioc[j];
 
-		elog(INFO, "io[%d] [ m_offset=%lu, f_read=%lu...%lu, nr_pages=%u}",
-			 j,
-			 ioc->m_offset,
-			 ioc->fchunk_id * PAGE_SIZE,
-			 (ioc->fchunk_id + ioc->nr_pages) * PAGE_SIZE,
-			 ioc->nr_pages);
-	}
+			elog(INFO, "io[%d] [ m_offset=%lu, f_read=%lu...%lu, nr_pages=%u}",
+				 j,
+				 ioc->m_offset,
+				 ioc->fchunk_id * PAGE_SIZE,
+				 (ioc->fchunk_id + ioc->nr_pages) * PAGE_SIZE,
+				 ioc->nr_pages);
+		}
 
-	elog(INFO, "kds {length=%zu nitems=%u typeid=%u typmod=%u table_oid=%u}",
-		 kds->length, kds->nitems,
-		 kds->tdtypeid, kds->tdtypmod, kds->table_oid);
-	for (j=0; j < kds->nr_colmeta; j++)
-	{
-		kern_colmeta *cmeta = &kds->colmeta[j];
+		elog(INFO, "kds {length=%zu nitems=%u typeid=%u typmod=%u table_oid=%u}",
+			 kds->length, kds->nitems,
+			 kds->tdtypeid, kds->tdtypmod, kds->table_oid);
+		for (j=0; j < kds->nr_colmeta; j++)
+		{
+			kern_colmeta *cmeta = &kds->colmeta[j];
 
-		elog(INFO, "%ccol[%d] nullmap=%lu,%lu values=%lu,%lu extra=%lu,%lu",
-			 j < kds->ncols ? ' ' : '*', j,
-			 __kds_unpack(cmeta->nullmap_offset),
-			 __kds_unpack(cmeta->nullmap_length),
-			 __kds_unpack(cmeta->values_offset),
-			 __kds_unpack(cmeta->values_length),
-			 __kds_unpack(cmeta->extra_offset),
-			 __kds_unpack(cmeta->extra_length));
-
+			elog(INFO, "%ccol[%d] nullmap=%lu,%lu values=%lu,%lu extra=%lu,%lu",
+				 j < kds->ncols ? ' ' : '*', j,
+				 __kds_unpack(cmeta->nullmap_offset),
+				 __kds_unpack(cmeta->nullmap_length),
+				 __kds_unpack(cmeta->values_offset),
+				 __kds_unpack(cmeta->values_length),
+				 __kds_unpack(cmeta->extra_offset),
+				 __kds_unpack(cmeta->extra_length));
+		}
 	}
 #endif
+	return iovec;
 }
 
 /*
@@ -2366,103 +2361,101 @@ __arrowKdsAssignAttrOptions(kern_data_store *kds,
 	}
 }
 
-static kern_data_store *
+static strom_io_vector *
 arrowFdwLoadRecordBatch(Relation relation,
 						Bitmapset *referenced,
 						RecordBatchState *rb_state,
-						MemoryContext memcxt)
+						StringInfo chunk_buffer)
 {
 	TupleDesc	tupdesc = RelationGetDescr(relation);
 	size_t		head_sz = estimate_kern_data_store(tupdesc);
-	kern_data_store *kds_head;
+	size_t		kds_offset = chunk_buffer->len;
 	kern_data_store *kds;
-	strom_io_vector *iovec;
 
 	/* setup KDS and I/O-vector */
-	kds_head = alloca(head_sz);
-	setup_kern_data_store(kds_head, tupdesc, 0, KDS_FORMAT_ARROW);
-	kds_head->nitems = rb_state->rb_nitems;
-	kds_head->table_oid = RelationGetRelid(relation);
-	Assert(head_sz == KDS_HEAD_LENGTH(kds_head));
-	Assert(kds_head->ncols == rb_state->nfields);
-	for (int j=0; j < kds_head->ncols; j++)
-		__arrowKdsAssignAttrOptions(kds_head,
-									&kds_head->colmeta[j],
+	enlargeStringInfo(chunk_buffer, head_sz);
+	kds = (kern_data_store *)(chunk_buffer->data + kds_offset);
+	setup_kern_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW);
+	kds->nitems = rb_state->rb_nitems;
+    kds->table_oid = RelationGetRelid(relation);
+	Assert(head_sz == KDS_HEAD_LENGTH(kds));
+	Assert(kds->ncols == rb_state->nfields);
+	for (int j=0; j < kds->ncols; j++)
+		__arrowKdsAssignAttrOptions(kds,
+									&kds->colmeta[j],
 									&rb_state->fields[j]);
-	iovec = arrowFdwSetupIOvector(kds_head, rb_state, referenced);
-	__dump_kds_and_iovec(kds_head, iovec);
+	chunk_buffer->len += head_sz;
 
-	if (!memcxt)
+	return arrowFdwSetupIOvector(rb_state, referenced, kds);
+}
+
+static kern_data_store *
+arrowFdwFillupRecordBatch(Relation relation,
+						  Bitmapset *referenced,
+						  RecordBatchState *rb_state,
+						  StringInfo chunk_buffer)
+{
+	ArrowFileState	*af_state = rb_state->af_state;
+	kern_data_store	*kds;
+	strom_io_vector	*iovec;
+	size_t		kds_offset = chunk_buffer->len;
+	size_t		kds_length;
+	File		filp;
+
+	iovec = arrowFdwLoadRecordBatch(relation,
+									referenced,
+									rb_state,
+									chunk_buffer);
+	kds = (kern_data_store *)(chunk_buffer->data + kds_offset);
+	kds_length = kds->length;
+
+	filp = PathNameOpenFile(af_state->filename, O_RDONLY | PG_BINARY);
+	enlargeStringInfo(chunk_buffer, kds_length);
+	kds = (kern_data_store *)(chunk_buffer->data + kds_offset);
+	for (int i=0; i < iovec->nr_chunks; i++)
 	{
-		kds = palloc(head_sz + MAXALIGN(offsetof(strom_io_vector,
-												 ioc[iovec->nr_chunks])));
-		memcpy(kds, kds_head, head_sz);
-		memcpy((char *)kds + head_sz, iovec,
-			   offsetof(strom_io_vector, ioc[iovec->nr_chunks]));
-	}
-	else
-	{
-		ArrowFileState *af_state = rb_state->af_state;
-		File		filp;
+		strom_io_chunk *ioc = &iovec->ioc[i];
+		char	   *dest = chunk_buffer->data + kds_offset + ioc->m_offset;
+		off_t		f_pos = (size_t)ioc->fchunk_id * PAGE_SIZE;
+		size_t		len = (size_t)ioc->nr_pages * PAGE_SIZE;
+		ssize_t		sz;
 
-		kds = MemoryContextAllocHuge(memcxt, kds_head->length);
-		memcpy(kds, kds_head, head_sz);
-
-		filp = PathNameOpenFile(af_state->filename, O_RDONLY | PG_BINARY);
-		for (int i=0; i < iovec->nr_chunks; i++)
+		while (len > 0)
 		{
-			strom_io_chunk *ioc = &iovec->ioc[i];
-			char	   *dest = (char *)kds + ioc->m_offset;
-			off_t		f_pos = (size_t)ioc->fchunk_id * PAGE_SIZE;
-			size_t		len = (size_t)ioc->nr_pages * PAGE_SIZE;
-			ssize_t		sz;
+			CHECK_FOR_INTERRUPTS();
 
-			while (len > 0)
+			sz = FileRead(filp, dest, len, f_pos,
+						  WAIT_EVENT_REORDER_BUFFER_READ);
+			if (sz > 0)
 			{
-				CHECK_FOR_INTERRUPTS();
-
-				sz = FileRead(filp, dest, len, f_pos,
-							  WAIT_EVENT_REORDER_BUFFER_READ);
-				if (sz > 0)
-				{
-					Assert(sz <= len);
-					dest += sz;
-					f_pos += sz;
-					len -= sz;
-				}
-				else if (sz == 0)
-				{
-					/*
-					 * Due to the page_sz alignment, we may try to read the file
-					 * over its tail. So, pread(2) may tell us unable to read
-					 * any more. The expected scenario happend only when remained
-					 * length is less than PAGE_SIZE.
-					 */
-					if (len >= PAGE_SIZE)
-						elog(ERROR, "unable to read arrow file any more");
-					memset(dest, 0, len);
-					break;
-				}
-				else if (errno != EINTR)
-				{
-					elog(ERROR, "failed on FileRead('%s', pos=%lu, len=%lu): %m",
-						 af_state->filename, f_pos, len);
-				}
+				Assert(sz <= len);
+				dest  += sz;
+				f_pos += sz;
+				len   -= sz;
 			}
-			/*
-			 * NOTE: Due to the page_sz alignment, we may try to read the file
-			 * over the its tail. So, above loop may terminate with non-zero
-			 * remaining length.
-			 */
-			if (len > 0)
+			else if (sz == 0)
 			{
-				Assert(len < PAGE_SIZE);
+				/*
+				 * Due to the page_sz alignment, we may try to read the file
+				 * over its tail. So, pread(2) may tell us unable to read
+				 * any more. The expected scenario happend only when remained
+				 * length is less than PAGE_SIZE.
+				 */
 				memset(dest, 0, len);
+				break;
+			}
+			else if (errno != EINTR)
+			{
+				elog(ERROR, "failed on FileRead('%s', pos=%lu, len=%lu): %m",
+					 af_state->filename, f_pos, len);
 			}
 		}
-		FileClose(filp);
 	}
+	chunk_buffer->len += kds->length;
+	FileClose(filp);
+
 	pfree(iovec);
+
 	return kds;
 }
 
@@ -3328,18 +3321,19 @@ kds_arrow_fetch_tuple(TupleTableSlot *slot,
  */
 
 /*
- * pgstromArrowFdwExecInit
+ * __arrowFdwExecInit
  */
-ArrowFdwState *
-pgstromArrowFdwExecInit(ScanState *ss,
-						List *outer_quals,
-						Bitmapset *outer_refs)
+static ArrowFdwState *
+__arrowFdwExecInit(ScanState *ss,
+				   List *outer_quals,
+				   const Bitmapset *outer_refs)
 {
 	Relation		frel = ss->ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
 	Bitmapset	   *referenced = NULL;
 	Bitmapset	   *stat_attrs = NULL;
+	Bitmapset	   *optimal_gpus = NULL;
 	bool			whole_row_ref = false;
 	List		   *filesList;
 	List		   *af_states_list = NIL;
@@ -3375,17 +3369,20 @@ pgstromArrowFdwExecInit(ScanState *ss,
 		{
 			rb_nrooms += list_length(af_state->rb_list);
 			af_states_list = lappend(af_states_list, af_state);
+			optimal_gpus = bms_difference(optimal_gpus, af_state->optimal_gpus);
 		}
 	}
 
 	/* setup ArrowFdwState */
 	arrow_state = palloc0(offsetof(ArrowFdwState, rb_states[rb_nrooms]));
 	arrow_state->referenced = referenced;
+	arrow_state->optimal_gpus = optimal_gpus;
 	if (arrow_fdw_stats_hint_enabled)
 		arrow_state->stats_hint = execInitArrowStatsHint(ss, outer_quals, stat_attrs);
 	arrow_state->rbatch_index = &arrow_state->__rbatch_index_local;
 	arrow_state->rbatch_nload = &arrow_state->__rbatch_nload_local;
 	arrow_state->rbatch_nskip = &arrow_state->__rbatch_nskip_local;
+	initStringInfo(&arrow_state->chunk_buffer);
 	arrow_state->curr_filp  = -1;
 	arrow_state->curr_kds   = NULL;
 	arrow_state->curr_index = 0;
@@ -3408,6 +3405,29 @@ pgstromArrowFdwExecInit(ScanState *ss,
 }
 
 /*
+ * pgstromArrowFdwExecInit
+ */
+bool
+pgstromArrowFdwExecInit(pgstromTaskState *pts,
+						List *outer_quals,
+						const Bitmapset *outer_refs)
+{
+	Relation		frel = pts->css.ss.ss_currentRelation;
+	ArrowFdwState  *arrow_state = NULL;
+
+	if (RelationIsArrowFdw(frel))
+	{
+		arrow_state = __arrowFdwExecInit(&pts->css.ss,
+										 outer_quals,
+										 outer_refs);
+		if (arrow_state)
+			pts->optimal_gpus = arrow_state->optimal_gpus;
+	}
+	pts->arrow_state = arrow_state;
+	return (pts->arrow_state != NULL);
+}
+
+/*
  * ArrowBeginForeignScan
  */
 static void
@@ -3423,29 +3443,25 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 
 		referenced = bms_add_member(referenced, k);
 	}
-	node->fdw_state = pgstromArrowFdwExecInit(&node->ss,
-											  fscan->scan.plan.qual,
-											  referenced);
+	node->fdw_state = __arrowFdwExecInit(&node->ss,
+										 fscan->scan.plan.qual,
+										 referenced);
 }
 
 /*
  * ExecArrowScanChunk
  */
-static kern_data_store *
-__arrowFdwExecChunk(ScanState *ss,
-					ArrowFdwState *arrow_state,
-					MemoryContext memcxt)
+static inline RecordBatchState *
+__arrowFdwNextRecordBatch(ArrowFdwState *arrow_state)
 {
 	RecordBatchState *rb_state;
 	uint32_t	rb_index;
 
-	/* fetch the next record-batch */
 retry:
 	rb_index = pg_atomic_fetch_add_u32(arrow_state->rbatch_index, 1);
 	if (rb_index >= arrow_state->rb_nitems)
-		return NULL;	/* no more record-batch to read */
+		return NULL;	/* no more chunks to load */
 	rb_state = arrow_state->rb_states[rb_index];
-
 	if (arrow_state->stats_hint)
 	{
 		if (execCheckArrowStatsHint(arrow_state->stats_hint, rb_state))
@@ -3455,24 +3471,64 @@ retry:
 		}
 		pg_atomic_fetch_add_u32(arrow_state->rbatch_nload, 1);
 	}
-	return arrowFdwLoadRecordBatch(ss->ss_currentRelation,
-								   arrow_state->referenced,
-								   rb_state,
-								   memcxt);
+	return rb_state;
 }
 
-kern_data_store *
-pgstromArrowFdwExecChunk(ScanState *ss, ArrowFdwState *arrow_state)
+/*
+ * pgstromScanChunkArrowFdw
+ */
+XpuCommand *
+pgstromScanChunkArrowFdw(pgstromTaskState *pts,
+						 struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
-	return __arrowFdwExecChunk(ss, arrow_state, NULL);
-}
+	ArrowFdwState  *arrow_state = pts->arrow_state;
+	StringInfo		chunk_buffer = &arrow_state->chunk_buffer;
+	RecordBatchState *rb_state;
+	ArrowFileState *af_state;
+	strom_io_vector *iovec;
+	XpuCommand	   *xcmd;
+	uint32_t		kds_src_offset;
+	uint32_t		kds_src_iovec;
+	uint32_t		kds_src_pathname;
 
-static kern_data_store *
-pgstromArrowFdwExecChunkFillup(ScanState *ss, ArrowFdwState *arrow_state)
-{
-	EState	   *estate = ss->ps.state;
+	rb_state = __arrowFdwNextRecordBatch(arrow_state);
+	if (!rb_state)
+		return NULL;
+	af_state = rb_state->af_state;
 
-	return __arrowFdwExecChunk(ss, arrow_state, estate->es_query_cxt);
+	resetStringInfo(chunk_buffer);
+	/* XpuCommand header */
+	appendBinaryStringInfo(chunk_buffer,
+						   pts->xcmd_buf.data,
+						   pts->xcmd_buf.len);
+	/* kds_src + iovec */
+	kds_src_offset = chunk_buffer->len;
+	iovec = arrowFdwLoadRecordBatch(pts->css.ss.ss_currentRelation,
+									arrow_state->referenced,
+									rb_state,
+									chunk_buffer);
+	kds_src_iovec = __appendBinaryStringInfo(chunk_buffer,
+											 iovec,
+											 offsetof(strom_io_vector,
+													  ioc[iovec->nr_chunks]));
+	/* arrow filename */
+	kds_src_pathname = chunk_buffer->len;
+	appendStringInfoString(chunk_buffer, af_state->filename);
+	appendStringInfoChar(chunk_buffer, '\0');
+
+	/* assign offset of XpuCommand */
+	xcmd = (XpuCommand *)chunk_buffer->data;
+	xcmd->length = chunk_buffer->len;
+	xcmd->u.scan.kds_src_fullpath = kds_src_pathname;
+	xcmd->u.scan.kds_src_pathname = kds_src_pathname;
+	xcmd->u.scan.kds_src_iovec    = kds_src_iovec;
+	xcmd->u.scan.kds_src_offset   = kds_src_offset;
+
+	xcmd_iov->iov_base = xcmd;
+	xcmd_iov->iov_len  = xcmd->length;
+	*xcmd_iovcnt = 1;
+
+	return xcmd;
 }
 
 /*
@@ -3488,12 +3544,18 @@ ArrowIterateForeignScan(ForeignScanState *node)
 	while ((kds = arrow_state->curr_kds) == NULL ||
 		   arrow_state->curr_index >= kds->nitems)
 	{
-		if (kds)
-			pfree(kds);
+		RecordBatchState *rb_state;
+
 		arrow_state->curr_index = 0;
-		arrow_state->curr_kds = pgstromArrowFdwExecChunkFillup(&node->ss, arrow_state);
-		if (!arrow_state->curr_kds)
+		arrow_state->curr_kds = NULL;
+		rb_state = __arrowFdwNextRecordBatch(arrow_state);
+		if (!rb_state)
 			return NULL;
+		arrow_state->curr_kds
+			= arrowFdwFillupRecordBatch(node->ss.ss_currentRelation,
+										arrow_state->referenced,
+										rb_state,
+										&arrow_state->chunk_buffer);
 	}
 	Assert(kds && arrow_state->curr_index < kds->nitems);
 	if (kds_arrow_fetch_tuple(slot, kds,
@@ -3507,7 +3569,7 @@ ArrowIterateForeignScan(ForeignScanState *node)
  * ArrowReScanForeignScan
  */
 void
-pgstromArrowFdwExecRewind(ArrowFdwState *arrow_state)
+pgstromArrowFdwExecReset(ArrowFdwState *arrow_state)
 {
 	pg_atomic_write_u32(arrow_state->rbatch_index, 0);
 	if (arrow_state->curr_kds)
@@ -3519,7 +3581,7 @@ pgstromArrowFdwExecRewind(ArrowFdwState *arrow_state)
 static void
 ArrowReScanForeignScan(ForeignScanState *node)
 {
-	pgstromArrowFdwExecRewind(node->fdw_state);
+	pgstromArrowFdwExecReset(node->fdw_state);
 }
 
 /*
@@ -3803,6 +3865,7 @@ RecordBatchAcquireSampleRows(Relation relation,
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	kern_data_store *kds;
 	Bitmapset	   *referenced = NULL;
+	StringInfoData	buffer;
 	Datum		   *values;
 	bool		   *isnull;
 	int				count;
@@ -3810,10 +3873,11 @@ RecordBatchAcquireSampleRows(Relation relation,
 
 	/* ANALYZE needs to fetch all the attributes */
 	referenced = bms_make_singleton(-FirstLowInvalidHeapAttributeNumber);
-	kds = arrowFdwLoadRecordBatch(relation,
-								  referenced,
-								  rb_state,
-								  CurrentMemoryContext);
+	initStringInfo(&buffer);
+	kds = arrowFdwFillupRecordBatch(relation,
+									referenced,
+									rb_state,
+									&buffer);
 	values = alloca(sizeof(Datum) * tupdesc->natts);
 	isnull = alloca(sizeof(bool)  * tupdesc->natts);
 	for (count = 0; count < nsamples; count++)
@@ -3834,7 +3898,7 @@ RecordBatchAcquireSampleRows(Relation relation,
 		}
 		rows[count] = heap_form_tuple(tupdesc, values, isnull);
 	}
-	pfree(kds);
+	pfree(buffer.data);
 
 	return count;
 }
