@@ -501,15 +501,19 @@ extern __thread CUevent		CU_EVENT_PER_THREAD;
 
 typedef struct
 {
-	CUdeviceptr	base;
-	size_t		offset;
-	size_t		length;
-	unsigned long iomap_handle;		/* for old nvme_strom kmod */
+	CUdeviceptr	__base__;
+	size_t		__offset__;
+	size_t		__length__;
+	CUdeviceptr	m_devptr;
 } gpuMemChunk;
 
 extern const gpuMemChunk *gpuMemAlloc(size_t bytesize);
 extern void		gpuMemFree(const gpuMemChunk *chunk);
 extern const gpuMemChunk *gpuservLoadKdsBlock(gpuClient *gclient,
+											  kern_data_store *kds,
+											  const char *pathname,
+											  strom_io_vector *kds_iovec);
+extern const gpuMemChunk *gpuservLoadKdsArrow(gpuClient *gclient,
 											  kern_data_store *kds,
 											  const char *pathname,
 											  strom_io_vector *kds_iovec);

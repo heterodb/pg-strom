@@ -2103,6 +2103,7 @@ typedef struct
 	off_t		rb_offset;
 	off_t		f_offset;
 	off_t		m_offset;
+	size_t		kds_head_sz;
 	int32_t		depth;
 	int32_t		io_index;
 	strom_io_chunk ioc[FLEXIBLE_ARRAY_MEMBER];
@@ -2118,12 +2119,13 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 	off_t		f_pos = con->rb_offset + chunk_offset;
 	size_t		__length = MAXALIGN(chunk_length);
 
-	Assert((con->m_offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+	Assert(con->m_offset == MAXALIGN(con->m_offset));
 
 	if (f_pos == con->f_offset)
 	{
 		/* good, buffer is fully continuous */
-		*p_cmeta_offset = __kds_packed(con->m_offset);
+		*p_cmeta_offset = __kds_packed(con->kds_head_sz +
+									   con->m_offset);
 		*p_cmeta_length = __kds_packed(__length);
 
 		con->m_offset += __length;
@@ -2131,7 +2133,7 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 	}
 	else if (f_pos > con->f_offset &&
 			 (f_pos & ~PAGE_MASK) == (con->f_offset & ~PAGE_MASK) &&
-			 ((f_pos - con->f_offset) & (MAXIMUM_ALIGNOF-1)) == 0)
+			 (f_pos - con->f_offset) == MAXALIGN(f_pos - con->f_offset))
 	{
 		/*
 		 * we can also consolidate the i/o of two chunks, if file position
@@ -2146,7 +2148,8 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 		con->m_offset += __gap;
 		con->f_offset += __gap;
 
-		*p_cmeta_offset = __kds_packed(con->m_offset);
+		*p_cmeta_offset = __kds_packed(con->kds_head_sz +
+									   con->m_offset);
 		*p_cmeta_length = __kds_packed(__length);
 
 		con->m_offset += __length;
@@ -2159,32 +2162,30 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 		 * the previous i/o-chunk. So, make a new i/o-chunk.
 		 */
 		off_t		f_base = TYPEALIGN_DOWN(PAGE_SIZE, f_pos);
-		off_t		f_tail;
-		off_t		shift = f_pos - f_base;
+		off_t		gap = f_pos - f_base;
 		strom_io_chunk *ioc;
 
 		if (con->io_index < 0)
 			con->io_index = 0;		/* no previous i/o chunks */
 		else
 		{
-			ioc = &con->ioc[con->io_index++];
+			off_t	f_tail = PAGE_ALIGN(con->f_offset);
 
-			f_tail = TYPEALIGN(PAGE_SIZE, con->f_offset);
+			ioc = &con->ioc[con->io_index++];
 			ioc->nr_pages = f_tail / PAGE_SIZE - ioc->fchunk_id;
 			con->m_offset += (f_tail - con->f_offset);	/* margin for alignment */
 		}
+		Assert(con->m_offset == PAGE_ALIGN(con->m_offset));
 		ioc = &con->ioc[con->io_index];
-		/* adjust position if con->m_offset is not aligned well */
-		if (con->m_offset + shift != MAXALIGN(con->m_offset + shift))
-			con->m_offset = MAXALIGN(con->m_offset + shift) - shift;
 		ioc->m_offset   = con->m_offset;
 		ioc->fchunk_id  = f_base / PAGE_SIZE;
 
-		*p_cmeta_offset = __kds_packed(con->m_offset + shift);
+		con->m_offset += gap;
+		*p_cmeta_offset = __kds_packed(con->kds_head_sz +
+									   con->m_offset);
 		*p_cmeta_length = __kds_packed(__length);
-
-		con->m_offset  += shift + __length;
-		con->f_offset   = f_pos + __length;
+		con->m_offset += __length;
+		con->f_offset  = f_pos + __length;
 	}
 }
 
@@ -2260,7 +2261,8 @@ arrowFdwSetupIOvector(RecordBatchState *rb_state,
 						  ioc[3 * kds->nr_colmeta]));
 	con->rb_offset = rb_state->rb_offset;
 	con->f_offset  = ~0UL;	/* invalid offset */
-	con->m_offset  = PAGE_ALIGN(KDS_HEAD_LENGTH(kds));
+	con->m_offset  = 0;
+	con->kds_head_sz = KDS_HEAD_LENGTH(kds);
 	con->depth = 0;
 	con->io_index = -1;		/* invalid index */
 	for (int j=0; j < kds->ncols; j++)
@@ -2369,15 +2371,15 @@ arrowFdwLoadRecordBatch(Relation relation,
 {
 	TupleDesc	tupdesc = RelationGetDescr(relation);
 	size_t		head_sz = estimate_kern_data_store(tupdesc);
-	size_t		kds_offset = chunk_buffer->len;
 	kern_data_store *kds;
 
 	/* setup KDS and I/O-vector */
 	enlargeStringInfo(chunk_buffer, head_sz);
-	kds = (kern_data_store *)(chunk_buffer->data + kds_offset);
+	kds = (kern_data_store *)(chunk_buffer->data +
+							  chunk_buffer->len);
 	setup_kern_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW);
 	kds->nitems = rb_state->rb_nitems;
-    kds->table_oid = RelationGetRelid(relation);
+	kds->table_oid = RelationGetRelid(relation);
 	Assert(head_sz == KDS_HEAD_LENGTH(kds));
 	Assert(kds->ncols == rb_state->nfields);
 	for (int j=0; j < kds->ncols; j++)
@@ -2399,7 +2401,7 @@ arrowFdwFillupRecordBatch(Relation relation,
 	kern_data_store	*kds;
 	strom_io_vector	*iovec;
 	size_t		kds_offset = chunk_buffer->len;
-	size_t		kds_length;
+	char	   *base;
 	File		filp;
 
 	iovec = arrowFdwLoadRecordBatch(relation,
@@ -2407,15 +2409,14 @@ arrowFdwFillupRecordBatch(Relation relation,
 									rb_state,
 									chunk_buffer);
 	kds = (kern_data_store *)(chunk_buffer->data + kds_offset);
-	kds_length = kds->length;
-
 	filp = PathNameOpenFile(af_state->filename, O_RDONLY | PG_BINARY);
-	enlargeStringInfo(chunk_buffer, kds_length);
+	enlargeStringInfo(chunk_buffer, kds->length);
 	kds = (kern_data_store *)(chunk_buffer->data + kds_offset);
+	base = (char *)kds + KDS_HEAD_LENGTH(kds);
 	for (int i=0; i < iovec->nr_chunks; i++)
 	{
 		strom_io_chunk *ioc = &iovec->ioc[i];
-		char	   *dest = chunk_buffer->data + kds_offset + ioc->m_offset;
+		char	   *dest = base + ioc->m_offset;
 		off_t		f_pos = (size_t)ioc->fchunk_id * PAGE_SIZE;
 		size_t		len = (size_t)ioc->nr_pages * PAGE_SIZE;
 		ssize_t		sz;
@@ -2446,6 +2447,7 @@ arrowFdwFillupRecordBatch(Relation relation,
 			}
 			else if (errno != EINTR)
 			{
+				assert(false);
 				elog(ERROR, "failed on FileRead('%s', pos=%lu, len=%lu): %m",
 					 af_state->filename, f_pos, len);
 			}

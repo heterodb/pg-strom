@@ -242,12 +242,9 @@ DpuScanAddScanPath(PlannerInfo *root,
 				break;
 			return;
 		case RELKIND_FOREIGN_TABLE:
-#if 0
-			// MEMO: directory --> tablespace mapping is necessary
 			if (baseRelIsArrowFdw(baserel))
 				break;
 			return;
-#endif
 		default:
 			/* not supported */
 			return;

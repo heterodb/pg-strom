@@ -499,6 +499,7 @@ int
 ExecProjectionOuterRow(kern_context *kcxt,
 					   kern_expression *kexp,	/* LoadVars + Projection */
 					   kern_data_store *kds_dst,
+					   bool make_a_valid_tuple,
 					   kern_data_store *kds_outer,
 					   HeapTupleHeaderData *htup_outer,
 					   int num_inners,
@@ -512,7 +513,8 @@ ExecProjectionOuterRow(kern_context *kcxt,
 	 * calculate expressions, if any.
 	 */
 	assert(kexp->opcode  == FuncOpCode__LoadVars &&
-		   kexp->exptype == TypeOpCode__int4);
+		   kexp->exptype == TypeOpCode__int4 &&
+		   make_a_valid_tuple);
 	if (!ExecLoadVarsOuterRow(kcxt,
 							  kexp,
 							  (xpu_datum_t *)&__tupsz,
@@ -521,6 +523,63 @@ ExecProjectionOuterRow(kern_context *kcxt,
 							  num_inners,
 							  kds_inners,
 							  htup_inners))
+		return -1;
+	if (!__tupsz.isnull && __tupsz.value > 0)
+	{
+		kern_expression *kproj = KEXP_FIRST_ARG(kexp);
+		int32_t		tupsz = MAXALIGN(__tupsz.value);
+		uint32_t	rowid;
+		size_t		offset;
+		size_t		newsz;
+		kern_tupitem *tupitem;
+
+		offset = __kds_unpack(kds_dst->usage) + tupsz;
+		newsz = (KDS_HEAD_LENGTH(kds_dst) +
+				 MAXALIGN(sizeof(uint32_t) * (kds_dst->nitems + 1)) +
+				 offset);
+		if (newsz > kds_dst->length)
+			return 0;	/* retry with new kds_dst */
+		kds_dst->usage = __kds_packed(offset);
+		rowid = kds_dst->nitems++;
+		KDS_GET_ROWINDEX(kds_dst)[rowid] = kds_dst->usage;
+		tupitem = (kern_tupitem *)
+			((char *)kds_dst + kds_dst->length - offset);
+		tupitem->rowid = rowid;
+		tupitem->t_len = kern_form_heaptuple(kcxt, kproj, kds_dst, &tupitem->htup);
+
+		return tupsz;
+	}
+	return -1;
+}
+
+int
+ExecProjectionOuterArrow(kern_context *kcxt,
+						 kern_expression *kexp,	/* LoadVars + Projection */
+						 kern_data_store *kds_dst,
+						 bool make_a_valid_tuple,
+						 kern_data_store *kds_outer,
+						 uint32_t kds_index,
+						 int num_inners,
+						 kern_data_store **kds_inners,
+						 HeapTupleHeaderData **htup_inners)
+{
+	xpu_int4_t	__tupsz;
+
+	/*
+	 * First, extract the variables from outer/inner tuples, and
+	 * calculate expressions, if any.
+	 */
+	assert(kexp->opcode  == FuncOpCode__LoadVars &&
+		   kexp->exptype == TypeOpCode__int4 &&
+		   make_a_valid_tuple);
+	if (!ExecLoadVarsOuterArrow(kcxt,
+								kexp,
+								(xpu_datum_t *)&__tupsz,
+								kds_outer,
+								kds_index,
+								num_inners,
+								kds_inners,
+								htup_inners))
 		return -1;
 	if (!__tupsz.isnull && __tupsz.value > 0)
 	{
@@ -657,6 +716,7 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 			status = ExecProjectionOuterRow(kcxt,
 											kexp_scan_projs,
 											kds_dst,
+											true,
 											kds_src,
 											htup,
 											0, NULL, NULL);
@@ -693,6 +753,127 @@ bailout:
 	for (int i=0; i < kds_dst_nitems; i++)
 		free(kds_dst_array[i]);
 }
+
+static void
+__handleDpuScanExecArrow(dpuClient *dclient,
+						 kern_data_store *kds_src,
+						 kern_data_store *kds_dst_head)
+{
+	kern_session_info  *session = dclient->session;
+	kern_expression	   *kexp_scan_quals = SESSION_KEXP_SCAN_QUALS(session);
+	kern_expression	   *kexp_scan_projs = SESSION_KEXP_SCAN_PROJS(session);
+	kern_context	   *kcxt;
+	kern_data_store	   *kds_dst = NULL;
+	kern_data_store	  **kds_dst_array = NULL;
+	uint32_t			kds_dst_nrooms = 0;
+	uint32_t			kds_dst_nitems = 0;
+	uint32_t			kds_index;
+	uint32_t			stat_nitems_in = 0;
+	uint32_t			stat_nitems_out = 0;
+	kern_dpuscan		kdscan;
+	XpuCommand			resp;
+
+	assert(kds_src->format == KDS_FORMAT_ARROW &&
+		   kexp_scan_quals->opcode == FuncOpCode__LoadVars &&
+		   kexp_scan_projs->opcode == FuncOpCode__LoadVars);
+	memset(&kdscan, 0, sizeof(kern_dpuscan));
+	INIT_KERNEL_CONTEXT(kcxt, session);
+
+	for (kds_index = 0; kds_index < kds_src->nitems; kds_index++)
+	{
+		xpu_bool_t	retval;
+		int			status;
+		size_t		sz;
+
+		kcxt_reset(kcxt);
+
+		stat_nitems_in++;
+		if (!ExecLoadVarsOuterArrow(kcxt,
+									kexp_scan_quals,
+									(xpu_datum_t *)&retval,
+									kds_src,
+									kds_index,
+									0, NULL, NULL))
+		{
+			__dpuClientElog(dclient,
+							kcxt->errcode,
+							kcxt->error_filename,
+							kcxt->error_lineno,
+							kcxt->error_funcname,
+							kcxt->error_message);
+			goto bailout;
+		}
+		else if (retval.isnull || !retval.value)
+		{
+			/* not matched */
+			continue;
+		}
+		stat_nitems_out++;
+
+	retry:
+		if (!kds_dst)
+		{
+			if (kds_dst_nitems >= kds_dst_nrooms)
+			{
+				kern_data_store	  **__kds_dst_array;
+
+				kds_dst_nrooms = 2 * kds_dst_nrooms + 10;
+				__kds_dst_array = alloca(sizeof(kern_data_store *) * kds_dst_nrooms);
+				memcpy(__kds_dst_array, kds_dst_array,
+					   sizeof(kern_data_store *) * kds_dst_nitems);
+				kds_dst_array = __kds_dst_array;
+			}
+			sz = KDS_HEAD_LENGTH(kds_dst_head) + PGSTROM_CHUNK_SIZE;
+			kds_dst = malloc(sz);
+			if (!kds_dst)
+			{
+				dpuClientElog(dclient, "out of memory");
+				goto bailout;
+			}
+			memcpy(kds_dst, kds_dst_head, KDS_HEAD_LENGTH(kds_dst_head));
+			kds_dst->length = sz;
+			kds_dst_array[kds_dst_nitems++] = kds_dst;
+		}
+		status = ExecProjectionOuterArrow(kcxt,
+										  kexp_scan_projs,
+										  kds_dst,
+										  true,
+										  kds_src,
+										  kds_index,
+										  0, NULL, NULL);
+		if (status == 0)
+		{
+			kds_dst = NULL;
+			goto retry;
+		}
+		else if (status < 0)
+		{
+			__dpuClientElog(dclient,
+							kcxt->errcode,
+							kcxt->error_filename,
+							kcxt->error_lineno,
+							kcxt->error_funcname,
+							kcxt->error_message);
+			goto bailout;
+		}
+	}
+	/* write back the results */
+	memset(&resp, 0, offsetof(XpuCommand, u.results));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag   = XpuCommandTag__Success;
+	resp.u.results.chunks_nitems = kds_dst_nitems;
+	resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
+	resp.u.results.stats.scan.nitems_in = stat_nitems_in;
+	resp.u.results.stats.scan.nitems_out = stat_nitems_out;
+	dpuClientWriteBack(dclient,
+					   &resp, resp.u.results.chunks_offset,
+					   kds_dst_nitems,
+					   kds_dst_array);
+bailout:
+	for (int i=0; i < kds_dst_nitems; i++)
+		free(kds_dst_array[i]);
+}
+
 
 static void
 dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
@@ -732,12 +913,22 @@ dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
 			free(base_addr);
 		}
 	}
-#if 0
 	else if (kds_src_head->format == KDS_FORMAT_ARROW)
 	{
-		//do arrow mode
+		char   *base_addr;
+
+		//to be renamed
+		kds_src = dpuservLoadKdsBlock(dclient,
+									  kds_src_head,
+									  kds_src_pathname,
+									  kds_src_iovec,
+									  &base_addr);
+		if (kds_src)
+		{
+			__handleDpuScanExecArrow(dclient, kds_src, kds_dst_head);
+			free(base_addr);
+		}
 	}
-#endif
 	else
 	{
 		dpuClientElog(dclient, "not a supported kern_data_store format");

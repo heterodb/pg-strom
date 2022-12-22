@@ -892,13 +892,13 @@ pgstromSharedStateEstimateDSM(pgstromTaskState *pts)
 	EState	   *estate = pts->css.ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
 	Relation	relation = pts->css.ss.ss_currentRelation;
-	Size		len = 0;
+	Size		len = offsetof(pgstromSharedState, bpscan);
 
 	if (pts->br_state)
 		len += pgstromBrinIndexEstimateDSM(pts);
-	len += MAXALIGN(sizeof(pgstromSharedState) +
-					table_parallelscan_estimate(relation, snapshot));
-	return len;
+	if (!pts->arrow_state)
+		len += table_parallelscan_estimate(relation, snapshot);
+	return MAXALIGN(len);
 }
 
 /*
@@ -919,12 +919,15 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 	{
 		ps_state = (pgstromSharedState *)dsm_addr;
 		memset(ps_state, 0, offsetof(pgstromSharedState, bpscan));
-		table_parallelscan_initialize(relation, &ps_state->bpscan.base,
-									  estate->es_snapshot);
 		if (pts->arrow_state)
 			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
 		else
+		{
+			table_parallelscan_initialize(relation,
+										  &ps_state->bpscan.base,
+										  estate->es_snapshot);
 			scan = table_beginscan_parallel(relation, &ps_state->bpscan.base);
+		}
 	}
 	else
 	{
@@ -950,9 +953,10 @@ pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr)
 	pts->ps_state = (pgstromSharedState *)dsm_addr;
 	if (pts->arrow_state)
 		pgstromArrowFdwAttachDSM(pts->arrow_state, pts->ps_state);
-	pts->css.ss.ss_currentScanDesc =
-		table_beginscan_parallel(pts->css.ss.ss_currentRelation,
-								 &pts->ps_state->bpscan.base);	
+	else
+		pts->css.ss.ss_currentScanDesc =
+			table_beginscan_parallel(pts->css.ss.ss_currentRelation,
+									 &pts->ps_state->bpscan.base);	
 }
 
 /*

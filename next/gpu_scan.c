@@ -893,7 +893,7 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 										kds_src_iovec);
 			if (!chunk)
 				return;
-			m_kds_src = chunk->base + chunk->offset;
+			m_kds_src = chunk->m_devptr;
 		}
 		else
 		{
