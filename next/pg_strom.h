@@ -114,6 +114,7 @@
 #include <assert.h>
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
+#include <cufile.h>
 #include <float.h>
 #include <libgen.h>
 #include <limits.h>
@@ -290,24 +291,19 @@ extern void		pgstrom_init_extra(void);
 extern bool		heterodbValidateDevice(int gpu_device_id,
 									   const char *gpu_device_name,
 									   const char *gpu_device_uuid);
-extern bool		gpuDirectInitDriver(void);
 extern bool		gpuDirectOpenDriver(void);
 extern void		gpuDirectCloseDriver(void);
-extern bool		gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc,
-									  File pg_fdesc);
-extern bool		gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
-											const char *pathname);
-extern void		gpuDirectFileDescClose(const GPUDirectFileDesc *gds_fdesc);
-extern CUresult	gpuDirectMapGpuMemory(CUdeviceptr m_segment,
-									  size_t m_segment_sz,
-									  unsigned long *p_iomap_handle);
-extern CUresult	gpuDirectUnmapGpuMemory(CUdeviceptr m_segment,
-										unsigned long iomap_handle);
-extern bool		gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
+extern const cufileDesc *gpuDirectFileOpen(const char *pathname);
+extern void		gpuDirectFileClose(const cufileDesc *cfdesc);
+extern bool		gpuDirectMapGpuMemory(CUdeviceptr m_segment,
+									  size_t segment_sz);
+extern bool		gpuDirectUnmapGpuMemory(CUdeviceptr m_segment);
+extern bool		gpuDirectFileReadIOV(const cufileDesc *cfdesc,
 									 CUdeviceptr m_segment,
-									 unsigned long iomap_handle,
 									 off_t m_offset,
-									 strom_io_vector *iovec);
+									 const strom_io_vector *iovec);
+extern char	   *gpuDirectGetProperty(void);
+extern void		gpuDirectSetProperty(const char *key, const char *value);
 
 /*
  * codegen.c

@@ -79,21 +79,14 @@ const char *
 cuStrError(CUresult rc)
 {
 	static __thread char buffer[300];
-	const char *err_name = NULL;
-	const char *err_string = NULL;
+	const char	   *err_name;
 
-	if (cuGetErrorName(rc, &err_name) != CUDA_SUCCESS)
-	{
-		snprintf(buffer, sizeof(buffer), "Unknown CUDA Error (%d)", (int)rc);
-	}
-	else if (cuGetErrorString(rc, &err_string) != CUDA_SUCCESS)
-	{
+	/* is it cufile error? */
+	if ((int)rc > CUFILEOP_BASE_ERR)
+		return cufileop_status_error((CUfileOpError)rc);
+	if (cuGetErrorName(rc, &err_name) == CUDA_SUCCESS)
 		return err_name;
-	}
-	else
-	{
-		snprintf(buffer, sizeof(buffer), "%s - %s", err_name, err_string);
-	}
+	snprintf(buffer, sizeof(buffer), "Unknown CUDA Error (%d)", (int)rc);
 	return buffer;
 }
 
@@ -116,7 +109,6 @@ typedef struct
 	dlist_head		free_chunks;	/* list of free chunks */
 	dlist_head		addr_chunks;	/* list of ordered chunks */
 	struct timeval	tval;
-	unsigned long	iomap_handle;	/* for old nvme_strom kmod */
 } gpuMemorySegment;
 
 typedef struct
@@ -192,10 +184,8 @@ __gpuMemAllocNewSegment(gpuMemoryPool *pool, size_t segment_sz)
 	rc = cuMemAlloc(&mseg->devptr, mseg->segment_sz);
 	if (rc != CUDA_SUCCESS)
 		goto error;
-	rc = gpuDirectMapGpuMemory(mseg->devptr,
-							   mseg->segment_sz,
-							   &mseg->iomap_handle);
-	if (rc != CUDA_SUCCESS)
+	if (!gpuDirectMapGpuMemory(mseg->devptr,
+							   mseg->segment_sz))
 		goto error;
 
 	chunk->mseg   = mseg;
@@ -355,10 +345,8 @@ gpuMemoryPoolMaintenance(gpuContext *gcontext)
 				continue;
 
 			/* ok, this segment should be released */
-			rc = gpuDirectUnmapGpuMemory(mseg->devptr,
-										 mseg->iomap_handle);
-			if (rc != CUDA_SUCCESS)
-				__FATAL("failed on gpuDirectUnmapGpuMemory: %s", cuStrError(rc));
+			if (!gpuDirectUnmapGpuMemory(mseg->devptr))
+				__FATAL("failed on gpuDirectUnmapGpuMemory");
 			rc = cuMemFree(mseg->devptr);
 			if (rc != CUDA_SUCCESS)
 				__FATAL("failed on cuMemFree: %s", cuStrError(rc));
@@ -406,15 +394,16 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 					   const char *pathname,
 					   strom_io_vector *kds_iovec)
 {
-	GPUDirectFileDesc gdfdesc;
+	const cufileDesc *cfdesc;
 	gpuMemChunk *chunk;
 	CUresult	rc;
 	size_t		gap;
 	off_t		off;
 
-	if (!gpuDirectFileDescOpenByPath(&gdfdesc, pathname))
+	cfdesc = gpuDirectFileOpen(pathname);
+	if (!cfdesc)
 	{
-		gpuClientELog(gclient, "failed on gpuDirectFileDescOpenByPath('%s')", pathname);
+		gpuClientELog(gclient, "failed on gpuDirectFileOpen('%s')", pathname);
 		return NULL;
 	}
 	off = PAGE_ALIGN(base_offset);
@@ -434,22 +423,21 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 		gpuClientELog(gclient, "failed on cuMemcpyHtoD: %s", cuStrError(rc));
 		goto error_2;
 	}
-	if (!gpuDirectFileReadIOV(&gdfdesc,
+	if (!gpuDirectFileReadIOV(cfdesc,
 							  chunk->__base__,
-							  0,	/* dummy for cuFile */
 							  chunk->__offset__ + off,
 							  kds_iovec))
 	{
 		gpuClientELog(gclient, "failed on gpuDirectFileReadIOV");
 		goto error_2;
 	}
-	gpuDirectFileDescClose(&gdfdesc);
+	gpuDirectFileClose(cfdesc);
 	return chunk;
 
 error_2:
 	gpuMemFree(chunk);
 error_1:
-	gpuDirectFileDescClose(&gdfdesc);
+	gpuDirectFileClose(cfdesc);
 	return NULL;
 }
 

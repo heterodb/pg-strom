@@ -204,7 +204,7 @@ pgstrom_init_gpu_direct(void)
 	/*
 	 * pgstrom.gpudirect_enabled
 	 */
-	if (gpuDirectInitDriver())
+	//if (gpuDirectInitDriver())
 	{
 		for (int i=0; i < numGpuDevAttrs; i++)
 		{
