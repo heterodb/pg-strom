@@ -337,7 +337,6 @@ _PG_init(void)
 	if (pgstrom_init_gpu_device())
 	{
 		pgstrom_init_gpu_service();
-		pgstrom_init_gpu_direct();
 		pgstrom_init_gpu_scan();
 		//pgstrom_init_gpu_join();
 		//pgstrom_init_gpu_preagg();

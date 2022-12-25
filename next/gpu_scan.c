@@ -177,7 +177,7 @@ create_gpuscan_path(PlannerInfo *root,
 	/* Has GpuCache? */
 //	gs_info->gpu_cache_devs = baseRelHasGpuCache(root, baserel);
 	/* Can use GPU-Direct SQL? */
-	gs_info->gpu_direct_devs = baseRelCanUseGpuDirect(root, baserel);
+	gs_info->gpu_direct_devs = GetOptimalGpuForBaseRel(root, baserel);
 	/* cost of full-disk scan */
 	get_tablespace_page_costs(baserel->reltablespace,
 							  &spc_rand_page_cost,

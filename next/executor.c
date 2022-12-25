@@ -796,7 +796,7 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 								  brin_index_conds,
 								  brin_index_quals);
 		/* identify the optimal GPUs if any */
-		pts->optimal_gpus = GetOptimalGpusForRelation(rel);
+		pts->optimal_gpus = GetOptimalGpuForRelation(rel);
 	}
 	else if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
 	{
@@ -857,7 +857,7 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 									  tupdesc_dst,
 									  KDS_FORMAT_ARROW);
 	}
-	else if (pts->gc_state)		/* GPU-Cache */
+	else if (pts->gcache_state)		/* GPU-Cache */
 	{
 		pts->cb_next_chunk = pgstromScanChunkGpuCache;
 		pts->cb_next_tuple = pgstromScanNextTuple;

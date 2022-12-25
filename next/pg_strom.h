@@ -212,7 +212,6 @@ typedef struct devfunc_info
 
 typedef struct XpuConnection	XpuConnection;
 typedef struct GpuCacheState	GpuCacheState;
-typedef struct GpuDirectState	GpuDirectState;
 typedef struct DpuStorageEntry	DpuStorageEntry;
 typedef struct ArrowFdwState	ArrowFdwState;
 typedef struct BrinIndexState	BrinIndexState;
@@ -238,8 +237,7 @@ struct pgstromTaskState
 	const Bitmapset	   *optimal_gpus;		/* candidate GPUs to connect */
 	XpuConnection	   *conn;
 	pgstromSharedState *ps_state;
-	GpuCacheState	   *gc_state;
-	GpuDirectState	   *gd_state;
+	GpuCacheState	   *gcache_state;
 	ArrowFdwState	   *arrow_state;
 	BrinIndexState	   *br_state;
 	DpuStorageEntry	   *ds_entry;
@@ -302,6 +300,7 @@ extern bool		gpuDirectFileReadIOV(const char *pathname,
 									 const strom_io_vector *iovec);
 extern char	   *gpuDirectGetProperty(void);
 extern void		gpuDirectSetProperty(const char *key, const char *value);
+extern bool		gpuDirectIsAvailable(void);
 
 /*
  * codegen.c
@@ -432,6 +431,9 @@ extern void		pgstrom_init_executor(void);
  * pcie.c
  */
 extern const Bitmapset *GetOptimalGpuForFile(const char *pathname);
+extern const Bitmapset *GetOptimalGpuForRelation(Relation relation);
+extern const Bitmapset *GetOptimalGpuForBaseRel(PlannerInfo *root,
+												RelOptInfo *baserel);
 extern void		pgstrom_init_pcie(void);
 
 /*
@@ -522,9 +524,6 @@ extern void		pgstrom_init_gpu_service(void);
 /*
  * gpu_direct.c
  */
-extern const Bitmapset *GetOptimalGpusForRelation(Relation relation);
-extern const Bitmapset *baseRelCanUseGpuDirect(PlannerInfo *root,
-											   RelOptInfo *baserel);
 extern void		pgstromGpuDirectExecBegin(pgstromTaskState *pts,
 										  const Bitmapset *gpuset);
 extern const Bitmapset *pgstromGpuDirectDevices(pgstromTaskState *pts);
@@ -580,8 +579,8 @@ extern void		pgstrom_init_gpu_scan(void);
  */
 extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
 extern bool 	RelationIsArrowFdw(Relation frel);
-extern Bitmapset *GetOptimalGpusForArrowFdw(PlannerInfo *root,
-											RelOptInfo *baserel);
+extern const Bitmapset *GetOptimalGpusForArrowFdw(PlannerInfo *root,
+												  RelOptInfo *baserel);
 extern bool		pgstromArrowFdwExecInit(pgstromTaskState *pts,
 										List *outer_quals,
 										const Bitmapset *outer_refs);

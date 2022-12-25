@@ -256,6 +256,35 @@ gpuDirectSetProperty(const char *key, const char *value)
 		heterodbExtraEreport(ERROR);
 }
 
+/*
+ * gpuDirectIsSupported
+ */
+bool
+gpuDirectIsAvailable(void)
+{
+	bool	has_gpudirectsql_supported = false;
+
+	if (p_cufile__driver_init_v2 &&
+		p_cufile__driver_open_v2 &&
+		p_cufile__driver_close_v2 &&
+		p_cufile__map_gpu_memory_v2 &&
+		p_cufile__unmap_gpu_memory_v2 &&
+		p_cufile__read_file_iov_v2 &&
+		p_cufile__get_property_v2 &&
+		p_cufile__set_property_v2)
+	{
+		for (int i=0; i < numGpuDevAttrs; i++)
+		{
+			if (gpuDevAttrs[i].DEV_SUPPORT_GPUDIRECTSQL)
+			{
+				has_gpudirectsql_supported = true;
+				break;
+			}
+		}
+	}
+	return has_gpudirectsql_supported;
+}
+
 /* lookup_heterodb_extra_function */
 static void *
 lookup_heterodb_extra_function(void *handle, const char *symbol)

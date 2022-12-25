@@ -1985,6 +1985,31 @@ RelationIsArrowFdw(Relation frel)
 }
 
 /*
+ * GetOptimalGpusForArrowFdw
+ */
+const Bitmapset *
+GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
+{
+	List	   *priv_list = (List *)baserel->fdw_private;
+	Bitmapset  *optimal_gpus = NULL;
+
+	if (baseRelIsArrowFdw(baserel) &&
+		IsA(priv_list, List) && list_length(priv_list) == 2)
+	{
+		List	   *af_list = lsecond(priv_list);
+		ListCell   *lc;
+
+		foreach (lc, af_list)
+		{
+			ArrowFileState *af_state = lfirst(lc);
+
+			optimal_gpus = bms_union(optimal_gpus, af_state->optimal_gpus);
+		}
+	}
+	return optimal_gpus;
+}
+
+/*
  * arrowFdwExtractFilesList
  */
 static List *
