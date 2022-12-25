@@ -16,7 +16,7 @@
 #define HETERODB_EXTRA_FILENAME		"heterodb_extra.so"
 #define HETERODB_EXTRA_PATHNAME		"/usr/lib64/" HETERODB_EXTRA_FILENAME
 
-#define HETERODB_EXTRA_API_VERSION	20221222
+#define HETERODB_EXTRA_API_VERSION	20221225
 
 /* gpudirect.c */
 typedef struct
@@ -32,9 +32,6 @@ typedef struct
 	unsigned int	nr_chunks;
 	strom_io_chunk	ioc[1];
 } strom_io_vector;
-
-typedef struct cufileDesc		cufileDesc;
-#define CUFILE_NOT_SUPPORTED	((void *)(~0UL))
 
 /* misc.c */
 typedef struct

@@ -293,12 +293,10 @@ extern bool		heterodbValidateDevice(int gpu_device_id,
 									   const char *gpu_device_uuid);
 extern bool		gpuDirectOpenDriver(void);
 extern void		gpuDirectCloseDriver(void);
-extern const cufileDesc *gpuDirectFileOpen(const char *pathname);
-extern void		gpuDirectFileClose(const cufileDesc *cfdesc);
 extern bool		gpuDirectMapGpuMemory(CUdeviceptr m_segment,
 									  size_t segment_sz);
 extern bool		gpuDirectUnmapGpuMemory(CUdeviceptr m_segment);
-extern bool		gpuDirectFileReadIOV(const cufileDesc *cfdesc,
+extern bool		gpuDirectFileReadIOV(const char *pathname,
 									 CUdeviceptr m_segment,
 									 off_t m_offset,
 									 const strom_io_vector *iovec);

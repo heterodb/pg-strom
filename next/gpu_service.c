@@ -394,26 +394,16 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 					   const char *pathname,
 					   strom_io_vector *kds_iovec)
 {
-	const cufileDesc *cfdesc;
 	gpuMemChunk *chunk;
 	CUresult	rc;
-	size_t		gap;
-	off_t		off;
-
-	cfdesc = gpuDirectFileOpen(pathname);
-	if (!cfdesc)
-	{
-		gpuClientELog(gclient, "failed on gpuDirectFileOpen('%s')", pathname);
-		return NULL;
-	}
-	off = PAGE_ALIGN(base_offset);
-	gap = off - base_offset;
+	off_t		off = PAGE_ALIGN(base_offset);
+	size_t		gap = off - base_offset;
 
 	chunk = __gpuMemAlloc(gap + kds->length);
 	if (!chunk)
 	{
 		gpuClientELog(gclient, "failed on gpuMemAlloc(%zu)", kds->length);
-		goto error_1;
+		return NULL;
 	}
 	chunk->m_devptr = chunk->__base__ + chunk->__offset__ + gap;
 
@@ -421,23 +411,20 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientELog(gclient, "failed on cuMemcpyHtoD: %s", cuStrError(rc));
-		goto error_2;
+		goto error;
 	}
-	if (!gpuDirectFileReadIOV(cfdesc,
+	if (!gpuDirectFileReadIOV(pathname,
 							  chunk->__base__,
 							  chunk->__offset__ + off,
 							  kds_iovec))
 	{
 		gpuClientELog(gclient, "failed on gpuDirectFileReadIOV");
-		goto error_2;
+		goto error;
 	}
-	gpuDirectFileClose(cfdesc);
 	return chunk;
 
-error_2:
+error:
 	gpuMemFree(chunk);
-error_1:
-	gpuDirectFileClose(cfdesc);
 	return NULL;
 }
 

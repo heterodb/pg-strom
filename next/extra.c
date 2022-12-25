@@ -176,31 +176,6 @@ gpuDirectCloseDriver(void)
 }
 
 /*
- * gpuDirectFileOpen
- */
-static const cufileDesc *(*p_cufile__open_file_v2)(const char *pathname) = NULL;
-
-const cufileDesc *
-gpuDirectFileOpen(const char *pathname)
-{
-	if (!p_cufile__open_file_v2)
-		return NULL;
-	return p_cufile__open_file_v2(pathname);
-}
-
-/*
- * gpuDirectFileClose
- */
-static void	(*p_cufile__close_file_v2)(const cufileDesc *cfdesc) = NULL;
-
-void
-gpuDirectFileClose(const cufileDesc *cfdesc)
-{
-	if (p_cufile__close_file_v2)
-		p_cufile__close_file_v2(cfdesc);
-}
-
-/*
  * gpuDirectMapGpuMemory
  */
 static int	(*p_cufile__map_gpu_memory_v2)(CUdeviceptr m_segment,
@@ -231,20 +206,20 @@ gpuDirectUnmapGpuMemory(CUdeviceptr m_segment)
  * gpuDirectFileReadIOV
  */
 static int	(*p_cufile__read_file_iov_v2)(
-	const cufileDesc *cfdesc,
+	const char *pathname,
 	CUdeviceptr m_segment,
 	off_t m_offset,
 	const strom_io_vector *iovec) = NULL;
 
 bool
-gpuDirectFileReadIOV(const cufileDesc *cfdesc,
+gpuDirectFileReadIOV(const char *pathname,
 					 CUdeviceptr m_segment,
 					 off_t m_offset,
 					 const strom_io_vector *iovec)
 {
 	if (!p_cufile__read_file_iov_v2)
 		return false;
-	return (p_cufile__read_file_iov_v2(cfdesc,
+	return (p_cufile__read_file_iov_v2(pathname,
 									   m_segment,
 									   m_offset,
 									   iovec) == 0);
@@ -379,8 +354,6 @@ pgstrom_init_extra(void)
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__driver_close_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__map_gpu_memory_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__unmap_gpu_memory_v2);
-			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__open_file_v2);
-			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__close_file_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__read_file_iov_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__get_property_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__set_property_v2);
@@ -400,8 +373,6 @@ pgstrom_init_extra(void)
 		p_cufile__driver_close_v2 = NULL;
 		p_cufile__map_gpu_memory_v2 = NULL;
 		p_cufile__unmap_gpu_memory_v2 = NULL;
-		p_cufile__open_file_v2 = NULL;
-		p_cufile__close_file_v2 = NULL;
 		p_cufile__read_file_iov_v2 = NULL;
 		p_cufile__get_property_v2 = NULL;
 		p_cufile__set_property_v2 = NULL;
