@@ -218,7 +218,7 @@ __gpuMemAlloc(size_t bytesize)
 	size_t			segment_sz;
 	gpuMemoryChunkInternal *chunk = NULL;
 
-	bytesize = MAXALIGN(bytesize);
+	bytesize = PAGE_ALIGN(bytesize);
 	pthreadMutexLock(&pool->lock);
 	dlist_foreach(iter, &pool->segment_list)
 	{

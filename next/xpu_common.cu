@@ -748,7 +748,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 		assert(slot_id < kcxt->kvars_nslots);
 		switch (cmeta->attopts.tag)
 		{
-			case ArrowNodeTag__Bool:
+			case ArrowType__Bool:
 				/* xpu_bool_t */
 				if (!__arrow_fetch_bool_datum(kcxt,
 											  kds,
@@ -760,14 +760,14 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					cmeta = NULL;	/* mark addr points xpu_datum_t */
 				break;
 
-			case ArrowNodeTag__Int:
-			case ArrowNodeTag__FloatingPoint:
-			case ArrowNodeTag__Decimal:
-			case ArrowNodeTag__Date:
-			case ArrowNodeTag__Time:
-			case ArrowNodeTag__Timestamp:
-			case ArrowNodeTag__Interval:
-			case ArrowNodeTag__FixedSizeBinary:
+			case ArrowType__Int:
+			case ArrowType__FloatingPoint:
+			case ArrowType__Decimal:
+			case ArrowType__Date:
+			case ArrowType__Time:
+			case ArrowType__Timestamp:
+			case ArrowType__Interval:
+			case ArrowType__FixedSizeBinary:
 				if (!__arrow_fetch_inline_datum(kcxt,
 												kds,
 												cmeta,
@@ -777,8 +777,8 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					return -1;
 				break;
 
-			case ArrowNodeTag__Utf8:
-			case ArrowNodeTag__Binary:
+			case ArrowType__Utf8:
+			case ArrowType__Binary:
 				if (!__arrow_fetch_variable_datum(kcxt,
 												  kds,
 												  cmeta,
@@ -788,8 +788,8 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 												  &len))
 					return -1;
 				break;
-			case ArrowNodeTag__LargeUtf8:
-			case ArrowNodeTag__LargeBinary:
+			case ArrowType__LargeUtf8:
+			case ArrowType__LargeBinary:
 				if (!__arrow_fetch_variable_datum(kcxt,
 												  kds,
 												  cmeta,
@@ -800,7 +800,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					return -1;
 				break;
 
-			case ArrowNodeTag__List:
+			case ArrowType__List:
 				/* xpu_array_t */
 				if (!__arrow_fetch_array_datum(kcxt,
 											   kds,
@@ -813,7 +813,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					cmeta = NULL;	/* mark addr points xpu_array_t */
 				break;
 
-			case ArrowNodeTag__LargeList:
+			case ArrowType__LargeList:
 				/* xpu_array_t */
 				if (!__arrow_fetch_array_datum(kcxt,
 											   kds,
@@ -826,7 +826,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					cmeta = NULL;	/* mark addr points xpu_array_t */
 				break;
 
-			case ArrowNodeTag__Struct:	/* composite */
+			case ArrowType__Struct:	/* composite */
 				/* xpu_composite_t */
 				if (!__arrow_fetch_composite_datum(kcxt,
 												   kds,
@@ -839,6 +839,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 				break;
 
 			default:
+				printf("hoge tag=%u unitsz=%d\n", (int)cmeta->attopts.tag, (int)cmeta->attopts.unitsz);
 				STROM_ELOG(kcxt, "Unsupported Apache Arrow type");
 				return -1;
 		}

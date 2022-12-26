@@ -442,9 +442,9 @@ kern_gpuscan_main_arrow(kern_session_info *session,
 	kern_gpuscan_suspend_warp *warp;
 	__shared__ uint32_t	smx_row_count;
 
-	assert(kds_src->format == KDS_FORMAT_ARROW &&
-		   kexp_scan_quals->opcode == FuncOpCode__LoadVars &&
-		   kexp_scan_projs->opcode == FuncOpCode__LoadVars);
+	assert(kds_src->format == KDS_FORMAT_ARROW);
+	assert(kexp_scan_quals->opcode == FuncOpCode__LoadVars);
+	assert(kexp_scan_projs->opcode == FuncOpCode__LoadVars);
 	INIT_KERNEL_CONTEXT(kcxt, session);
 
 	/* resume the previous execution context */

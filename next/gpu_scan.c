@@ -901,6 +901,28 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 			m_kds_src = (CUdeviceptr)kds_src;
 		}
 	}
+	else if (kds_src->format == KDS_FORMAT_ARROW)
+	{
+		kern_funcname = "kern_gpuscan_main_arrow";
+
+		if (kds_src_iovec->nr_chunks == 0)
+			m_kds_src = (CUdeviceptr)kds_src;
+		else
+		{
+			if (!kds_src_fullpath)
+			{
+				gpuClientELog(gclient, "GpuScan: arrow file is missing");
+				return;
+			}
+			chunk = gpuservLoadKdsArrow(gclient,
+										kds_src,
+										kds_src_fullpath,
+										kds_src_iovec);
+			if (!chunk)
+				return;
+			m_kds_src = chunk->m_devptr;
+		}
+	}
 	else
 	{
 		gpuClientELog(gclient, "unknown GpuScan Source format (%c)",

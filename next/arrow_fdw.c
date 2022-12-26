@@ -2425,18 +2425,18 @@ arrowFdwFillupRecordBatch(Relation relation,
 	ArrowFileState	*af_state = rb_state->af_state;
 	kern_data_store	*kds;
 	strom_io_vector	*iovec;
-	size_t		kds_offset = chunk_buffer->len;
 	char	   *base;
 	File		filp;
 
+	resetStringInfo(chunk_buffer);
 	iovec = arrowFdwLoadRecordBatch(relation,
 									referenced,
 									rb_state,
 									chunk_buffer);
-	kds = (kern_data_store *)(chunk_buffer->data + kds_offset);
-	filp = PathNameOpenFile(af_state->filename, O_RDONLY | PG_BINARY);
+	kds = (kern_data_store *)chunk_buffer->data;
 	enlargeStringInfo(chunk_buffer, kds->length);
-	kds = (kern_data_store *)(chunk_buffer->data + kds_offset);
+	kds = (kern_data_store *)chunk_buffer->data;
+	filp = PathNameOpenFile(af_state->filename, O_RDONLY | PG_BINARY);
 	base = (char *)kds + KDS_HEAD_LENGTH(kds);
 	for (int i=0; i < iovec->nr_chunks; i++)
 	{
