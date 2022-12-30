@@ -68,8 +68,9 @@ typedef struct RecordBatchState
 typedef struct ArrowFileState
 {
 	const char *filename;
+	const char *dpu_path;	/* relative pathname, if DPU */
 	struct stat	stat_buf;
-	List	   *rb_list;				/* list of RecordBatchState */
+	List	   *rb_list;	/* list of RecordBatchState */
 } ArrowFileState;
 
 /*
@@ -2025,7 +2026,7 @@ GetOptimalDpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 			ArrowFileState *af_state = lfirst(lc);
 			const DpuStorageEntry *__ds_entry;
 
-			__ds_entry = GetOptimalDpuForFile(af_state->filename);
+			__ds_entry = GetOptimalDpuForFile(af_state->filename, NULL);
 			if (lc == list_head(af_list))
 				ds_entry = __ds_entry;
 			else if (ds_entry && ds_entry != __ds_entry)
@@ -3436,8 +3437,9 @@ __arrowFdwExecInit(ScanState *ss,
 			if (p_ds_entry)
 			{
 				if (af_states_list == NIL)
-					ds_entry = GetOptimalDpuForFile(fname);
-				else if (ds_entry && ds_entry != GetOptimalDpuForFile(fname))
+					ds_entry = GetOptimalDpuForFile(fname, &af_state->dpu_path);
+				else if (ds_entry &&
+						 ds_entry != GetOptimalDpuForFile(fname, &af_state->dpu_path))
 					ds_entry = NULL;
 			}
 			af_states_list = lappend(af_states_list, af_state);
@@ -3497,9 +3499,9 @@ pgstromArrowFdwExecInit(pgstromTaskState *pts,
 										 outer_quals,
 										 outer_refs,
 										 (devkind_mask & DEVKIND__NVIDIA_GPU) != 0
-										 	? &pts->optimal_gpus : NULL,
+											? &pts->optimal_gpus : NULL,
 										 (devkind_mask & DEVKIND__NVIDIA_DPU) != 0
-										 	? &pts->ds_entry : NULL);
+											? &pts->ds_entry : NULL);
 	}
 	pts->arrow_state = arrow_state;
 	return (pts->arrow_state != NULL);
@@ -3593,7 +3595,10 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 													  ioc[iovec->nr_chunks]));
 	/* arrow filename */
 	kds_src_pathname = chunk_buffer->len;
-	appendStringInfoString(chunk_buffer, af_state->filename);
+	if (!pts->ds_entry)
+		appendStringInfoString(chunk_buffer, af_state->filename);
+	else
+		appendStringInfoString(chunk_buffer, af_state->dpu_path);
 	appendStringInfoChar(chunk_buffer, '\0');
 
 	/* assign offset of XpuCommand */
