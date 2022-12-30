@@ -617,7 +617,8 @@ extern double	pgstrom_dpu_seq_page_cost;
 extern double	pgstrom_dpu_tuple_cost;
 extern bool		pgstrom_dpu_handle_cached_pages;
 
-extern DpuStorageEntry *GetOptimalDpuForFile(const char *filename);
+extern DpuStorageEntry *GetOptimalDpuForFile(const char *filename,
+											 const char **p_dpu_pathname);
 extern DpuStorageEntry *GetOptimalDpuForTablespace(Oid tablespace_oid);
 extern DpuStorageEntry *GetOptimalDpuForRelation(Relation relation);
 extern bool		DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,

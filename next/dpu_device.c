@@ -52,7 +52,7 @@ static shmem_startup_hook_type	shmem_startup_next = NULL;
  * GetOptimalDpuForFile
  */
 static DpuStorageEntry *
-__getOptimalDpuForFile(const char *pathname)
+__getOptimalDpuForFile(const char *pathname, StringInfo dpu_path)
 {
 	DpuStorageEntry *ds_entry = NULL;
 	struct stat		stat_buf;
@@ -62,7 +62,14 @@ __getOptimalDpuForFile(const char *pathname)
 		char   *namebuf = alloca(strlen(pathname) + 1);
 
 		strcpy(namebuf, pathname);
-		ds_entry = __getOptimalDpuForFile(dirname(namebuf));
+		ds_entry = __getOptimalDpuForFile(dirname(namebuf), dpu_path);
+		if (dpu_path)
+		{
+			strcpy(namebuf, pathname);
+			appendStringInfo(dpu_path, "%s%s",
+							 dpu_path->len > 0 ? "/" : "",
+							 basename(namebuf));
+		}
 	}
 
 	if (stat(pathname, &stat_buf) == 0 &&
@@ -79,6 +86,8 @@ __getOptimalDpuForFile(const char *pathname)
 				stat_buf.st_ino == curr_buf.st_ino)
 			{
 				ds_entry = curr;
+				if (dpu_path)
+					resetStringInfo(dpu_path);
 				break;
 			}
 		}
@@ -87,21 +96,33 @@ __getOptimalDpuForFile(const char *pathname)
 }
 
 DpuStorageEntry *
-GetOptimalDpuForFile(const char *filename)
+GetOptimalDpuForFile(const char *filename,
+					 const char **p_dpu_pathname)
 {
-	char   *path;
-	size_t	len;
+	DpuStorageEntry *ds_entry;
+	StringInfoData buf;
+	char	   *namebuf;
+	size_t		len;
 
 	/* quick bailout */
 	if (!dpu_tablespace_master)
 		return NULL;
+	initStringInfo(&buf);
 	/* absolute path? */
 	if (*filename == '/')
-		return __getOptimalDpuForFile(filename);
-	len = strlen(DataDir) + strlen(filename) + 10;
-	path = alloca(len);
-	snprintf(path, len, "%s/%s", DataDir, filename);
-	return __getOptimalDpuForFile(path);
+		ds_entry = __getOptimalDpuForFile(filename, &buf);
+	else
+	{
+		len = strlen(DataDir) + strlen(filename) + 10;
+		namebuf = alloca(len);
+		snprintf(namebuf, len, "%s/%s", DataDir, filename);
+		ds_entry = __getOptimalDpuForFile(namebuf, &buf);
+	}
+	if (p_dpu_pathname)
+		*p_dpu_pathname = pstrdup(buf.data);
+	pfree(buf.data);
+
+	return ds_entry;
 }
 
 /*
@@ -158,7 +179,7 @@ GetOptimalDpuForTablespace(Oid tablespace_oid)
 	{
 		char   *pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
 
-		dt_cache->ds_entry =  GetOptimalDpuForFile(pathname);
+		dt_cache->ds_entry =  GetOptimalDpuForFile(pathname, NULL);
 	}
 	return dt_cache->ds_entry;
 }
