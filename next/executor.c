@@ -762,6 +762,7 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
  */
 void
 pgstromExecInitTaskState(pgstromTaskState *pts,
+						 uint64_t devkind_mask,	/* DEVKIND_* */
 						 List *outer_quals,
 						 const Bitmapset *outer_refs,
 						 Oid   brin_index_oid,
@@ -795,12 +796,17 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 								  brin_index_oid,
 								  brin_index_conds,
 								  brin_index_quals);
-		/* identify the optimal GPUs if any */
-		pts->optimal_gpus = GetOptimalGpuForRelation(rel);
+		if ((devkind_mask & DEVKIND__NVIDIA_GPU) != 0)
+			pts->optimal_gpus = GetOptimalGpuForRelation(rel);
+		if ((devkind_mask & DEVKIND__NVIDIA_DPU) != 0)
+			pts->ds_entry = GetOptimalDpuForRelation(rel);
 	}
 	else if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
 	{
-		if (!pgstromArrowFdwExecInit(pts, outer_quals, outer_refs))
+		if (!pgstromArrowFdwExecInit(pts,
+									 devkind_mask,
+									 outer_quals,
+									 outer_refs))
 			elog(ERROR, "Bug? only arrow_fdw is supported in PG-Strom");
 	}
 	else

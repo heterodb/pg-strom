@@ -499,6 +499,7 @@ __sysfs_print_pcie_subtree(PciDevItem *pcie, int depth)
 	const GpuDevAttributes *gattrs;
 	char		buffer[1024];
 	size_t		off = 0;
+	bool		close_brackets = false;
 	dlist_iter	iter;
 
 	if (depth > 0)
@@ -520,6 +521,7 @@ __sysfs_print_pcie_subtree(PciDevItem *pcie, int depth)
 							" ... %s (%s",
 							pcie->u.nvme.name,
 							pcie->u.nvme.model);
+			close_brackets = true;
 			break;
 		case PCIDEV_KIND__GPU:
 			gattrs = pcie->u.gpu.gpu_dev_attrs;
@@ -527,12 +529,14 @@ __sysfs_print_pcie_subtree(PciDevItem *pcie, int depth)
 							" ... GPU%d (%s",
 							pcie->u.gpu.cuda_dindex,
 							gattrs->DEV_NAME);
+			close_brackets = true;
 			break;
 		case PCIDEV_KIND__HCA:
 			off += snprintf(buffer + off, sizeof(buffer) - off,
 							" ... %s (%s",
 							pcie->u.hca.name,
 							pcie->u.hca.hca_type);
+			close_brackets = true;
 			break;
 		default:
 			break;
@@ -553,7 +557,8 @@ __sysfs_print_pcie_subtree(PciDevItem *pcie, int depth)
 		off += snprintf(buffer + off, sizeof(buffer) - off,
 						" [dist=%d]", pcie->distance);
     }
-	off += snprintf(buffer + off, sizeof(buffer) - off, ")");
+	if (close_brackets)
+		off += snprintf(buffer + off, sizeof(buffer) - off, ")");
 
 	elog(LOG, "%s", buffer);
 
@@ -1134,15 +1139,6 @@ GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 	}
 	return optimal_gpus;
 }
-
-
-
-
-
-
-
-
-
 
 /*
  * sysfs_preload_block_devices

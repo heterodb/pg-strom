@@ -358,12 +358,8 @@ ExecInitDpuScan(CustomScanState *node, EState *estate, int eflags)
     Assert(relation != NULL &&
            outerPlanState(node) == NULL &&
            innerPlanState(node) == NULL);
-	dss->pts.ds_entry = GetOptimalDpuForRelation(relation);
-	if (!dss->pts.ds_entry)
-		elog(ERROR, "No DPU is installed on the relation: %s",
-			 RelationGetRelationName(relation));
-
 	pgstromExecInitTaskState(&dss->pts,
+							 DEVKIND__NVIDIA_DPU,
 							 dss->ds_info.dev_quals,
 							 dss->ds_info.outer_refs,
 							 dss->ds_info.index_oid,

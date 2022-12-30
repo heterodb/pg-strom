@@ -26,7 +26,7 @@ static List	   *devfunc_code_slot[DEVFUNC_INFO_NSLOTS];	/* by FuncOpCode */
 
 #define TYPE_OPCODE(NAME,OID,EXTENSION)		\
 	{ EXTENSION, #NAME,						\
-	  TypeOpCode__##NAME, DEVKERN__ANY,		\
+	  TypeOpCode__##NAME, DEVKIND__ANY,		\
 	  devtype_##NAME##_hash, sizeof(xpu_##NAME##_t), InvalidOid},
 static struct {
 	const char	   *type_extension;
@@ -39,9 +39,9 @@ static struct {
 } devtype_catalog[] = {
 #include "xpu_opcodes.h"
 	/* alias device data types */
-	{NULL, "varchar", TypeOpCode__text, DEVKERN__ANY,
+	{NULL, "varchar", TypeOpCode__text, DEVKIND__ANY,
 	 devtype_text_hash, sizeof(xpu_text_t), TEXTOID},
-	{NULL, "cidr",    TypeOpCode__inet, DEVKERN__ANY,
+	{NULL, "cidr",    TypeOpCode__inet, DEVKIND__ANY,
 	 devtype_inet_hash, sizeof(xpu_inet_t), INETOID},
 	{NULL, NULL, TypeOpCode__Invalid, 0, NULL, 0, InvalidOid}
 };
@@ -147,7 +147,7 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	devtype_info  **subtypes = alloca(sizeof(devtype_info *) * tupdesc->natts);
 	devtype_info   *dtype;
 	MemoryContext	oldcxt;
-	uint32_t		extra_flags = DEVKERN__ANY;
+	uint32_t		extra_flags = DEVKIND__ANY;
 	int				j;
 
 	for (j=0; j < tupdesc->natts; j++)
@@ -1543,7 +1543,7 @@ pgstrom_gpu_expression(Expr *expr,
 	memset(&context, 0, sizeof(context));
 	context.elevel = DEBUG2;
 	context.top_expr = expr;
-	context.required_flags = DEVKERN__NVIDIA_GPU;
+	context.required_flags = DEVKIND__NVIDIA_GPU;
 	context.input_rels_tlist = input_rels_tlist;
 
 	if (IsA(expr, List))
@@ -1575,7 +1575,7 @@ pgstrom_dpu_expression(Expr *expr,
 	memset(&context, 0, sizeof(context));
 	context.elevel = DEBUG2;
 	context.top_expr = expr;
-	context.required_flags = DEVKERN__NVIDIA_DPU;
+	context.required_flags = DEVKIND__NVIDIA_DPU;
 	context.input_rels_tlist = input_rels_tlist;
 
 	if (IsA(expr, List))

@@ -416,15 +416,17 @@ dpuservHandleOpenSession(dpuClient *dclient, XpuCommand *xcmd)
  * fill up KDS_FORMAT_BLOCK using device local filesystem
  */
 static kern_data_store *
-dpuservLoadKdsBlock(dpuClient *dclient,
-					const kern_data_store *kds_head,
-					const char *pathname,
-					const strom_io_vector *kds_iovec,
-					char **p_base_addr)
+__dpuservLoadKdsCommon(dpuClient *dclient,
+					   const kern_data_store *kds_head,
+					   size_t preload_sz,
+					   const char *pathname,
+					   const strom_io_vector *kds_iovec,
+					   char **p_base_addr)
 {
 	kern_data_store *kds;
-	char   *data;
-	int		fdesc;
+	char	   *data;
+	char	   *end		__attribute__((unused));
+	int			fdesc;
 
 	fdesc = open(pathname, O_RDONLY | O_DIRECT | O_NOATIME);
 	if (fdesc < 0)
@@ -433,47 +435,58 @@ dpuservLoadKdsBlock(dpuClient *dclient,
 		return NULL;
 	}
 
-	data = malloc(kds_head->length + PAGE_SIZE);
+	data = malloc(kds_head->length + 2 * PAGE_SIZE);
 	if (!data)
 	{
 		close(fdesc);
 		dpuClientElog(dclient, "out of memory: %m");
 		return NULL;
 	}
+	end = data + kds_head->length + 2 * PAGE_SIZE;
 
 	/*
-	 * Due to the restriction of O_DIRECT, ((char *)kds + kds->block_offset)
-	 * must be aligned to PAGE_SIZE.
+	 * due to the restriction of O_DIRECT, ((char *)kds + preload_sz) must
+	 * be aligned to PAGE_SIZE.
 	 */
 	assert(kds_head->block_nloaded == 0);
-	kds = (kern_data_store *)
-		(PAGE_ALIGN(data + kds_head->block_offset) - kds_head->block_offset);
-	memcpy(kds, kds_head, kds_head->block_offset);
-
+	kds = (kern_data_store *)(PAGE_ALIGN(data + preload_sz) - preload_sz);
+	memcpy(kds, kds_head, preload_sz);
 	if (kds_iovec)
 	{
-		char	   *base = (char *)kds + kds->block_offset;
+		char   *base = (char *)kds + preload_sz;
+		int		count = 0;
 
+		assert(PAGE_ALIGN(base) == (uintptr_t)base);
 		for (int i=0; i < kds_iovec->nr_chunks; i++)
 		{
 			const strom_io_chunk *ioc = &kds_iovec->ioc[i];
-			char	   *dest = base + ioc->m_offset;
-			ssize_t		offset = PAGE_SIZE * ioc->fchunk_id;
-			ssize_t		length = PAGE_SIZE * ioc->nr_pages;
+			char	   *dest   = base + ioc->m_offset;
+			ssize_t		offset = PAGE_SIZE * (size_t)ioc->fchunk_id;
+			ssize_t		length = PAGE_SIZE * (size_t)ioc->nr_pages;
 			ssize_t		nbytes;
 
-			assert(dest + length <= (char *)kds + kds->length);
+			assert(dest + length <= end);
 			while (length > 0)
 			{
 				nbytes = pread(fdesc, dest, length, offset);
 				if (nbytes > 0)
 				{
 					assert(nbytes <= length);
-					dest += nbytes;
+					dest   += nbytes;
+					offset += nbytes;
 					length -= nbytes;
-					offset -= nbytes;
+					count++;
 				}
-				else if (nbytes == 0 || errno != EINTR)
+				else if (nbytes == 0)
+				{
+					/*
+					 * Due to PAGE_SIZE alignment, we may try to read the file
+					 * over the tail.
+					 */
+					memset(dest, 0, length);
+					break;
+				}
+				else if (errno != EINTR)
 				{
 					dpuClientElog(dclient, "failed on pread('%s', %ld, %ld) = %ld: %m",
 								  pathname, length, offset, nbytes);
@@ -488,6 +501,39 @@ dpuservLoadKdsBlock(dpuClient *dclient,
 	*p_base_addr = data;
 
 	return kds;
+}
+
+static kern_data_store *
+dpuservLoadKdsBlock(dpuClient *dclient,
+					const kern_data_store *kds_head,
+					const char *pathname,
+					const strom_io_vector *kds_iovec,
+					char **p_base_addr)
+{
+	Assert(kds_head->format == KDS_FORMAT_BLOCK &&
+		   kds_head->block_nloaded == 0);
+	return __dpuservLoadKdsCommon(dclient,
+								  kds_head,
+								  kds_head->block_offset,
+								  pathname,
+								  kds_iovec,
+								  p_base_addr);
+}
+
+static kern_data_store *
+dpuservLoadKdsArrow(dpuClient *dclient,
+					const kern_data_store *kds_head,
+					const char *pathname,
+					const strom_io_vector *kds_iovec,
+					char **p_base_addr)
+{
+	Assert(kds_head->format == KDS_FORMAT_ARROW);
+	return __dpuservLoadKdsCommon(dclient,
+								  kds_head,
+								  KDS_HEAD_LENGTH(kds_head),
+								  pathname,
+								  kds_iovec,
+								  p_base_addr);
 }
 
 /* ----------------------------------------------------------------
@@ -857,6 +903,7 @@ __handleDpuScanExecArrow(dpuClient *dclient,
 			goto bailout;
 		}
 	}
+
 	/* write back the results */
 	memset(&resp, 0, offsetof(XpuCommand, u.results));
 	resp.magic = XpuCommandMagicNumber;
@@ -917,8 +964,7 @@ dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
 	{
 		char   *base_addr;
 
-		//to be renamed
-		kds_src = dpuservLoadKdsBlock(dclient,
+		kds_src = dpuservLoadKdsArrow(dclient,
 									  kds_src_head,
 									  kds_src_pathname,
 									  kds_src_iovec,

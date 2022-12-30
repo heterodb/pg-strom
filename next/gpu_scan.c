@@ -658,6 +658,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		   outerPlanState(node) == NULL &&
 		   innerPlanState(node) == NULL);
 	pgstromExecInitTaskState(&gss->pts,
+							 DEVKIND__NVIDIA_GPU,
 							 gss->gs_info.dev_quals,
 							 gss->gs_info.outer_refs,
 							 gss->gs_info.index_oid,

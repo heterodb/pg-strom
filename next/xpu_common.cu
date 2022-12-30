@@ -839,7 +839,6 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 				break;
 
 			default:
-				printf("hoge tag=%u unitsz=%d\n", (int)cmeta->attopts.tag, (int)cmeta->attopts.unitsz);
 				STROM_ELOG(kcxt, "Unsupported Apache Arrow type");
 				return -1;
 		}

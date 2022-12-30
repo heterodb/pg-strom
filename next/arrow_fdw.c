@@ -69,9 +69,7 @@ typedef struct ArrowFileState
 {
 	const char *filename;
 	struct stat	stat_buf;
-	const Bitmapset *optimal_gpus;	/* optimal GPUs, if any */
-	DpuStorageEntry *ds_entry;		/* optimal DPU, if any */
-	List	   *rb_list;			/* list of RecordBatchState */
+	List	   *rb_list;				/* list of RecordBatchState */
 } ArrowFileState;
 
 /*
@@ -90,7 +88,6 @@ typedef struct
 struct ArrowFdwState
 {
 	Bitmapset		   *referenced;		/* referenced columns */
-	Bitmapset		   *optimal_gpus;	/* optimal GPUs */
 	arrowStatsHint	   *stats_hint;		/* min/max statistics, if any */
 	pg_atomic_uint32   *rbatch_index;
 	pg_atomic_uint32	__rbatch_index_local;	/* if single process */
@@ -1940,12 +1937,6 @@ BuildArrowFileState(Relation frel, const char *filename, Bitmapset **p_stat_attr
 				 format_type_be(rb_field->atttypid),
 				 filename);
 	}
-	/*
-	 * Lookup Optimal GPU & DPU for the Arrow file
-	 */
-	af_state->optimal_gpus = GetOptimalGpuForFile(filename);
-	af_state->ds_entry = GetOptimalDpuForFile(filename);
-
 	return af_state;
 }
 
@@ -2002,11 +1993,46 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 		foreach (lc, af_list)
 		{
 			ArrowFileState *af_state = lfirst(lc);
+			const Bitmapset *__optimal_gpus;
 
-			optimal_gpus = bms_union(optimal_gpus, af_state->optimal_gpus);
+			__optimal_gpus = GetOptimalGpuForFile(af_state->filename);
+			if (lc == list_head(af_list))
+				optimal_gpus = bms_copy(__optimal_gpus);
+			else
+				optimal_gpus = bms_intersect(optimal_gpus, __optimal_gpus);
 		}
 	}
 	return optimal_gpus;
+}
+
+/*
+ * GetOptimalDpuForArrowFdw
+ */
+const DpuStorageEntry *
+GetOptimalDpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
+{
+	List	   *priv_list = (List *)baserel->fdw_private;
+	const DpuStorageEntry *ds_entry = NULL;
+
+	if (baseRelIsArrowFdw(baserel) &&
+		IsA(priv_list, List) && list_length(priv_list) == 2)
+	{
+		List	   *af_list = lsecond(priv_list);
+		ListCell   *lc;
+
+		foreach (lc, af_list)
+		{
+			ArrowFileState *af_state = lfirst(lc);
+			const DpuStorageEntry *__ds_entry;
+
+			__ds_entry = GetOptimalDpuForFile(af_state->filename);
+			if (lc == list_head(af_list))
+				ds_entry = __ds_entry;
+			else if (ds_entry && ds_entry != __ds_entry)
+				ds_entry = NULL;
+		}
+	}
+	return ds_entry;
 }
 
 /*
@@ -2336,7 +2362,7 @@ arrowFdwSetupIOvector(RecordBatchState *rb_state,
 		elog(INFO, "kds {length=%zu nitems=%u typeid=%u typmod=%u table_oid=%u}",
 			 kds->length, kds->nitems,
 			 kds->tdtypeid, kds->tdtypmod, kds->table_oid);
-		for (j=0; j < kds->nr_colmeta; j++)
+		for (int j=0; j < kds->nr_colmeta; j++)
 		{
 			kern_colmeta *cmeta = &kds->colmeta[j];
 
@@ -3353,7 +3379,9 @@ kds_arrow_fetch_tuple(TupleTableSlot *slot,
 static ArrowFdwState *
 __arrowFdwExecInit(ScanState *ss,
 				   List *outer_quals,
-				   const Bitmapset *outer_refs)
+				   const Bitmapset *outer_refs,
+				   const Bitmapset **p_optimal_gpus,
+				   const DpuStorageEntry **p_ds_entry)
 {
 	Relation		frel = ss->ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
@@ -3361,6 +3389,7 @@ __arrowFdwExecInit(ScanState *ss,
 	Bitmapset	   *referenced = NULL;
 	Bitmapset	   *stat_attrs = NULL;
 	Bitmapset	   *optimal_gpus = NULL;
+	DpuStorageEntry *ds_entry = NULL;
 	bool			whole_row_ref = false;
 	List		   *filesList;
 	List		   *af_states_list = NIL;
@@ -3395,15 +3424,29 @@ __arrowFdwExecInit(ScanState *ss,
 		if (af_state)
 		{
 			rb_nrooms += list_length(af_state->rb_list);
+			if (p_optimal_gpus)
+			{
+				const Bitmapset  *__optimal_gpus = GetOptimalGpuForFile(fname);
+
+				if (af_states_list == NIL)
+					optimal_gpus = bms_copy(__optimal_gpus);
+				else
+					optimal_gpus = bms_intersect(optimal_gpus, __optimal_gpus);
+			}
+			if (p_ds_entry)
+			{
+				if (af_states_list == NIL)
+					ds_entry = GetOptimalDpuForFile(fname);
+				else if (ds_entry && ds_entry != GetOptimalDpuForFile(fname))
+					ds_entry = NULL;
+			}
 			af_states_list = lappend(af_states_list, af_state);
-			optimal_gpus = bms_difference(optimal_gpus, af_state->optimal_gpus);
 		}
 	}
 
 	/* setup ArrowFdwState */
 	arrow_state = palloc0(offsetof(ArrowFdwState, rb_states[rb_nrooms]));
 	arrow_state->referenced = referenced;
-	arrow_state->optimal_gpus = optimal_gpus;
 	if (arrow_fdw_stats_hint_enabled)
 		arrow_state->stats_hint = execInitArrowStatsHint(ss, outer_quals, stat_attrs);
 	arrow_state->rbatch_index = &arrow_state->__rbatch_index_local;
@@ -3428,6 +3471,11 @@ __arrowFdwExecInit(ScanState *ss,
 	Assert(rb_nrooms == rb_nitems);
 	arrow_state->rb_nitems = rb_nitems;
 
+	if (p_optimal_gpus)
+		*p_optimal_gpus = optimal_gpus;
+	if (p_ds_entry)
+		*p_ds_entry = ds_entry;
+
 	return arrow_state;
 }
 
@@ -3436,6 +3484,7 @@ __arrowFdwExecInit(ScanState *ss,
  */
 bool
 pgstromArrowFdwExecInit(pgstromTaskState *pts,
+						uint64_t devkind_mask,
 						List *outer_quals,
 						const Bitmapset *outer_refs)
 {
@@ -3446,9 +3495,11 @@ pgstromArrowFdwExecInit(pgstromTaskState *pts,
 	{
 		arrow_state = __arrowFdwExecInit(&pts->css.ss,
 										 outer_quals,
-										 outer_refs);
-		if (arrow_state)
-			pts->optimal_gpus = arrow_state->optimal_gpus;
+										 outer_refs,
+										 (devkind_mask & DEVKIND__NVIDIA_GPU) != 0
+										 	? &pts->optimal_gpus : NULL,
+										 (devkind_mask & DEVKIND__NVIDIA_DPU) != 0
+										 	? &pts->ds_entry : NULL);
 	}
 	pts->arrow_state = arrow_state;
 	return (pts->arrow_state != NULL);
@@ -3472,7 +3523,9 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 	}
 	node->fdw_state = __arrowFdwExecInit(&node->ss,
 										 fscan->scan.plan.qual,
-										 referenced);
+										 referenced,
+										 NULL,	/* no GPU */
+										 NULL);	/* no DPU */
 }
 
 /*
@@ -3523,8 +3576,8 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 		return NULL;
 	af_state = rb_state->af_state;
 
-	resetStringInfo(chunk_buffer);
 	/* XpuCommand header */
+	resetStringInfo(chunk_buffer);
 	appendBinaryStringInfo(chunk_buffer,
 						   pts->xcmd_buf.data,
 						   pts->xcmd_buf.len);
