@@ -150,7 +150,6 @@ GetOptimalDpuForTablespace(Oid tablespace_oid)
 						  &hctl,
 						  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	}
-
 	dt_cache = hash_search(dpu_tablespace_htable,
 						   &tablespace_oid,
 						   HASH_ENTER,
@@ -172,7 +171,7 @@ GetOptimalDpuForRelation(Relation relation)
 {
 	Oid		tablespace_oid = RelationGetForm(relation)->reltablespace;
 
-	return GetOptimalDpuForTablespace(tablespace_oid);
+	return GetOptimalDpuForTablespace(tablespace_oid);	
 }
 
 /*
@@ -197,9 +196,10 @@ void
 DpuClientOpenSession(pgstromTaskState *pts,
 					 const XpuCommand *session)
 {
-	DpuStorageEntry *ds_entry = pts->ds_entry;
+	const DpuStorageEntry *ds_entry = pts->ds_entry;
     pgsocket    sockfd;
     char        namebuf[32];
+
 	if (!ds_entry)
 		elog(ERROR, "Bug? no DPU device is configured");
 
@@ -436,6 +436,17 @@ pgstrom_init_dpu_device(void)
 		CacheRegisterSyscacheCallback(TABLESPACEOID,
 									  dpu_tablespace_htable_invalidator,
 									  (Datum)0);
+		/* output logs */
+		for (int i=0; i < dpu_tablespace_master->nitems; i++)
+		{
+			DpuStorageEntry *ds_entry = &dpu_tablespace_master->entries[i];
+
+			elog(LOG, "PG-Strom: DPU%d (dir: '%s', host: '%s', port: '%s')",
+				 ds_entry->endpoint_id,
+				 ds_entry->endpoint_dir,
+				 ds_entry->config_host,
+				 ds_entry->config_port);
+		}
 		return true;
 	}
 	return false;

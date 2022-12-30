@@ -847,14 +847,14 @@ typedef struct kern_hashitem	kern_hashitem;
 
 /* Length of the header postion of kern_data_store */
 INLINE_FUNCTION(size_t)
-KDS_HEAD_LENGTH(kern_data_store *kds)
+KDS_HEAD_LENGTH(const kern_data_store *kds)
 {
 	return MAXALIGN(offsetof(kern_data_store, colmeta[kds->nr_colmeta]));
 }
 
 /* Base address of the kern_data_store */
 INLINE_FUNCTION(char *)
-KDS_BODY_ADDR(kern_data_store *kds)
+KDS_BODY_ADDR(const kern_data_store *kds)
 {
 	return (char *)kds + KDS_HEAD_LENGTH(kds);
 }
@@ -1370,9 +1370,10 @@ typedef struct
  * Definition of device flags
  *
  * ---------------------------------------------------------------- */
-#define DEVKERN__NVIDIA_GPU			0x0001UL	/* for CUDA-based GPU */
-#define DEVKERN__NVIDIA_DPU			0x0002UL	/* for BlueField-X DPU */
-#define DEVKERN__ANY				0x0003UL	/* Both of GPU and DPU */
+#define DEVKIND__NONE				0x0000UL	/* no accelerator device */
+#define DEVKIND__NVIDIA_GPU			0x0001UL	/* for CUDA-based GPU */
+#define DEVKIND__NVIDIA_DPU			0x0002UL	/* for BlueField-X DPU */
+#define DEVKIND__ANY				0x0003UL	/* Both of GPU and DPU */
 #define DEVFUNC__LOCALE_AWARE		0x0100UL	/* Device function is locale aware,
 												 * thus, available only if "C" or
 												 * no locale configuration */

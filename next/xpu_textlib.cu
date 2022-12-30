@@ -390,13 +390,15 @@ __bpchar_compare(kern_context *kcxt,
 {
 	const char *s1 = str1->value;
 	const char *s2 = str2->value;
-	int		len;
+	int		len, sz1, sz2;
 
 	if (!xpu_bpchar_is_valid(kcxt, str1) ||
 		!xpu_bpchar_is_valid(kcxt, str2))
-		return false;
+	  return false;
 
-	len = Min(str1->length, str2->length);
+	sz1 = bpchar_truelen(s1, str1->length);
+	sz2 = bpchar_truelen(s2, str2->length);
+	len = Min(sz1, sz2);
 	while (len > 0)
 	{
 		if (*s1 < *s2)
@@ -413,9 +415,9 @@ __bpchar_compare(kern_context *kcxt,
 		s2++;
 		len--;
 	}
-	if (str1->length == str2->length)
+	if (sz1 == sz2)
 		*p_status = 0;
-	else if (str1->length > str2->length)
+	else if (sz1 > sz2)
 		*p_status = 1;
 	else
 		*p_status = -1;

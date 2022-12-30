@@ -234,13 +234,13 @@ typedef struct
 struct pgstromTaskState
 {
 	CustomScanState		css;
-	const Bitmapset	   *optimal_gpus;		/* candidate GPUs to connect */
+	const Bitmapset	   *optimal_gpus;	/* candidate GPUs to connect */
+	const DpuStorageEntry *ds_entry;	/* target DPU to connect */
 	XpuConnection	   *conn;
 	pgstromSharedState *ps_state;
 	GpuCacheState	   *gcache_state;
 	ArrowFdwState	   *arrow_state;
 	BrinIndexState	   *br_state;
-	DpuStorageEntry	   *ds_entry;
 	/* current chunk (already processed by the device) */
 	XpuCommand		   *curr_resp;
 	HeapTupleData		curr_htup;
@@ -414,6 +414,7 @@ pgstromBuildSessionInfo(PlanState *ps,
 						const bytea *xpucode_scan_quals,
 						const bytea *xpucode_scan_projs);
 extern void		pgstromExecInitTaskState(pgstromTaskState *pts,
+										 uint64_t devkind_mask,
 										 List *outer_quals,
 										 const Bitmapset *outer_refs,
 										 Oid   brin_index_oid,
@@ -581,7 +582,10 @@ extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
 extern bool 	RelationIsArrowFdw(Relation frel);
 extern const Bitmapset *GetOptimalGpusForArrowFdw(PlannerInfo *root,
 												  RelOptInfo *baserel);
+extern const DpuStorageEntry *GetOptimalDpuForArrowFdw(PlannerInfo *root,
+													   RelOptInfo *baserel);
 extern bool		pgstromArrowFdwExecInit(pgstromTaskState *pts,
+										uint64_t devkind_mask,
 										List *outer_quals,
 										const Bitmapset *outer_refs);
 extern XpuCommand *pgstromScanChunkArrowFdw(pgstromTaskState *pts,

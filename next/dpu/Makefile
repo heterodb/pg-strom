@@ -9,7 +9,7 @@ DPUSERB_HEADS = dpuserv.h arrow_defs.h xpu_common.h xpu_basetype.h \
                 xpu_basetype.h xpu_numeric.h xpu_textlib.h \
                 xpu_timelib.h xpu_misclib.h
 
-CFLAGS  := -Wall -g -O2 -D_GNU_SOURCE \
+CFLAGS  := -Wall -g -O3 -D_GNU_SOURCE \
            -Wno-sign-compare
 LDFLAGS := -lpthread -lm -lstdc++
 
