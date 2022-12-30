@@ -17,11 +17,14 @@ PGSTROM_RELEASE := devel
 # Source of PG-Strom host code
 #
 __STROM_OBJS = main.o extra.o codegen.o misc.o executor.o brin.o relscan.o \
-               gpu_scan.o gpu_device.o gpu_direct.o gpu_service.o \
+               gpu_scan.o gpu_device.o gpu_service.o \
                dpu_device.o dpu_scan.o \
                arrow_fdw.o arrow_nodes.o \
                pcie.o float2.o tinyint.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/next/,$(__STROM_OBJS))
+
+GPU_DEVATTRS_H = $(STROM_BUILD_ROOT)/next/gpu_devattrs.h
+GENERATED-HEADERS = $(GPU_DEVATTRS_H)
 
 #
 # Source of NVIDIA GPU device code
@@ -99,11 +102,25 @@ MODULEDIR  = pg_strom
 DATA = $(STROM_SQL)
 OBJS = $(STROM_OBJS)
 DATA_built = $(CUDA_OPT_OBJS) $(CUDA_DBG_OBJS)
-EXTRA_CLEAN = $(CUDA_OPT_OBJS) $(CUDA_DBG_OBJS)
+EXTRA_CLEAN = $(DATA_built) $(GENERATED-HEADERS)
 EXTENSION = pg_strom
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+#
+# Device Attributes
+#
+submake-generated-headers: $(GENERATED-HEADERS)
+
+$(GPU_DEVATTRS_H): $(CUDA_IPATH)/cuda.h
+	cat $(CUDA_IPATH)/cuda.h | \
+	grep -E '^[ ]+CU_DEVICE_ATTRIBUTE_' | \
+	grep -v -E 'CU_DEVICE_ATTRIBUTE_MAX$$' | \
+	grep -v 'Deprecated[,\.]' | \
+	sed -e 's|[ ]*CU_DEVICE_ATTRIBUTE_|DEV_ATTR(|g' \
+	    -e 's| =.*/\*\*<[ ]*|, "|g' \
+	    -e 's|[ ]*\*/|")|g' > $@
 
 #
 # GPU Device Code

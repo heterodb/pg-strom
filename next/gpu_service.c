@@ -79,21 +79,14 @@ const char *
 cuStrError(CUresult rc)
 {
 	static __thread char buffer[300];
-	const char *err_name = NULL;
-	const char *err_string = NULL;
+	const char	   *err_name;
 
-	if (cuGetErrorName(rc, &err_name) != CUDA_SUCCESS)
-	{
-		snprintf(buffer, sizeof(buffer), "Unknown CUDA Error (%d)", (int)rc);
-	}
-	else if (cuGetErrorString(rc, &err_string) != CUDA_SUCCESS)
-	{
+	/* is it cufile error? */
+	if ((int)rc > CUFILEOP_BASE_ERR)
+		return cufileop_status_error((CUfileOpError)rc);
+	if (cuGetErrorName(rc, &err_name) == CUDA_SUCCESS)
 		return err_name;
-	}
-	else
-	{
-		snprintf(buffer, sizeof(buffer), "%s - %s", err_name, err_string);
-	}
+	snprintf(buffer, sizeof(buffer), "Unknown CUDA Error (%d)", (int)rc);
 	return buffer;
 }
 
@@ -116,7 +109,6 @@ typedef struct
 	dlist_head		free_chunks;	/* list of free chunks */
 	dlist_head		addr_chunks;	/* list of ordered chunks */
 	struct timeval	tval;
-	unsigned long	iomap_handle;	/* for old nvme_strom kmod */
 } gpuMemorySegment;
 
 typedef struct
@@ -127,7 +119,7 @@ typedef struct
 	gpuMemChunk		c;
 } gpuMemoryChunkInternal;
 
-static const gpuMemoryChunkInternal *
+static gpuMemoryChunkInternal *
 __gpuMemAllocFromSegment(gpuMemoryPool *pool,
 						 gpuMemorySegment *mseg,
 						 size_t bytesize)
@@ -140,9 +132,9 @@ __gpuMemAllocFromSegment(gpuMemoryPool *pool,
 	{
 		chunk = dlist_container(gpuMemoryChunkInternal,
 								free_chain, iter.cur);
-		if (bytesize <= chunk->c.length)
+		if (bytesize <= chunk->c.__length__)
 		{
-			size_t	surplus = chunk->c.length - bytesize;
+			size_t	surplus = chunk->c.__length__ - bytesize;
 
 			/* try to split, if free chunk is enough large (>4MB) */
 			if (surplus > (4UL << 20))
@@ -150,20 +142,20 @@ __gpuMemAllocFromSegment(gpuMemoryPool *pool,
 				buddy = calloc(1, sizeof(gpuMemoryChunkInternal));
 				if (!buddy)
 					return NULL;	/* out of memory */
-				chunk->c.length -= surplus;
+				chunk->c.__length__ -= surplus;
 
 				buddy->mseg   = mseg;
-				buddy->c.base = mseg->devptr;
-				buddy->c.offset = chunk->c.offset + chunk->c.length;
-				buddy->c.length = surplus;
-				buddy->c.iomap_handle = mseg->iomap_handle;
+				buddy->c.__base__ = mseg->devptr;
+				buddy->c.__offset__ = chunk->c.__offset__ + chunk->c.__length__;
+				buddy->c.__length__ = surplus;
+				buddy->c.m_devptr = (buddy->c.__base__ + buddy->c.__offset__);
 				dlist_insert_after(&chunk->free_chain, &buddy->free_chain);
 				dlist_insert_after(&chunk->addr_chain, &buddy->addr_chain);
 			}
 			/* mark it as an active chunk */
 			dlist_delete(&chunk->free_chain);
 			memset(&chunk->free_chain, 0, sizeof(dlist_node));
-			mseg->active_sz += chunk->c.length;
+			mseg->active_sz += chunk->c.__length__;
 
 			/* update the LRU ordered segment list and timestamp */
 			gettimeofday(&mseg->tval, NULL);
@@ -192,17 +184,15 @@ __gpuMemAllocNewSegment(gpuMemoryPool *pool, size_t segment_sz)
 	rc = cuMemAlloc(&mseg->devptr, mseg->segment_sz);
 	if (rc != CUDA_SUCCESS)
 		goto error;
-	rc = gpuDirectMapGpuMemory(mseg->devptr,
-							   mseg->segment_sz,
-							   &mseg->iomap_handle);
-	if (rc != CUDA_SUCCESS)
+	if (!gpuDirectMapGpuMemory(mseg->devptr,
+							   mseg->segment_sz))
 		goto error;
 
 	chunk->mseg   = mseg;
-	chunk->c.base = mseg->devptr;
-	chunk->c.offset = 0;
-	chunk->c.length = segment_sz;
-	chunk->c.iomap_handle = mseg->iomap_handle;
+	chunk->c.__base__ = mseg->devptr;
+	chunk->c.__offset__ = 0;
+	chunk->c.__length__ = segment_sz;
+	chunk->c.m_devptr = (chunk->c.__base__ + chunk->c.__offset__);
 	dlist_push_head(&mseg->free_chunks, &chunk->free_chain);
 	dlist_push_head(&mseg->addr_chunks, &chunk->addr_chain);
 
@@ -220,15 +210,15 @@ error:
 	return NULL;
 }
 
-const gpuMemChunk *
-gpuMemAlloc(size_t bytesize)
+static gpuMemChunk *
+__gpuMemAlloc(size_t bytesize)
 {
 	gpuMemoryPool  *pool = &GpuWorkerCurrentContext->pool;
 	dlist_iter		iter;
 	size_t			segment_sz;
-	const gpuMemoryChunkInternal *chunk = NULL;
+	gpuMemoryChunkInternal *chunk = NULL;
 
-	bytesize = MAXALIGN(bytesize);
+	bytesize = PAGE_ALIGN(bytesize);
 	pthreadMutexLock(&pool->lock);
 	dlist_foreach(iter, &pool->segment_list)
 	{
@@ -257,6 +247,12 @@ out_unlock:
 	return (chunk ? &chunk->c : NULL);
 }
 
+const gpuMemChunk *
+gpuMemAlloc(size_t bytesize)
+{
+	return __gpuMemAlloc(bytesize);
+}
+
 void
 gpuMemFree(const gpuMemChunk *__chunk)
 {
@@ -273,7 +269,7 @@ gpuMemFree(const gpuMemChunk *__chunk)
 	pthreadMutexLock(&pool->lock);
 	/* revert this chunk state to 'free' */
 	mseg = chunk->mseg;
-	mseg->active_sz -= chunk->c.length;
+	mseg->active_sz -= chunk->c.__length__;
 	dlist_push_head(&mseg->free_chunks,
 					&chunk->free_chain);
 
@@ -287,10 +283,11 @@ gpuMemFree(const gpuMemChunk *__chunk)
 								addr_chain, dnode);
 		if (buddy->free_chain.prev && buddy->addr_chain.next)
 		{
-			Assert(chunk->c.offset + chunk->c.length == buddy->c.offset);
+			Assert(chunk->c.__offset__ +
+				   chunk->c.__length__ == buddy->c.__offset__);
 			dlist_delete(&buddy->free_chain);
 			dlist_delete(&buddy->addr_chain);
-			chunk->c.length += buddy->c.length;
+			chunk->c.__length__ += buddy->c.__length__;
 			free(buddy);
 		}
 	}
@@ -305,10 +302,11 @@ gpuMemFree(const gpuMemChunk *__chunk)
 		/* merge if prev chunk is also free */
 		if (buddy->free_chain.prev && buddy->addr_chain.next)
 		{
-			Assert(buddy->c.offset + buddy->c.length == chunk->c.offset);
+			Assert(buddy->c.__offset__ +
+				   buddy->c.__length__ == chunk->c.__offset__);
 			dlist_delete(&chunk->free_chain);
 			dlist_delete(&chunk->addr_chain);
-			buddy->c.length += chunk->c.length;
+			buddy->c.__length__ += chunk->c.__length__;
 			free(chunk);
 		}
 	}
@@ -347,10 +345,8 @@ gpuMemoryPoolMaintenance(gpuContext *gcontext)
 				continue;
 
 			/* ok, this segment should be released */
-			rc = gpuDirectUnmapGpuMemory(mseg->devptr,
-										 mseg->iomap_handle);
-			if (rc != CUDA_SUCCESS)
-				__FATAL("failed on gpuDirectUnmapGpuMemory: %s", cuStrError(rc));
+			if (!gpuDirectUnmapGpuMemory(mseg->devptr))
+				__FATAL("failed on gpuDirectUnmapGpuMemory");
 			rc = cuMemFree(mseg->devptr);
 			if (rc != CUDA_SUCCESS)
 				__FATAL("failed on cuMemFree: %s", cuStrError(rc));
@@ -389,6 +385,50 @@ gpuMemoryPoolInit(gpuMemoryPool *pool, size_t dev_total_memsz)
 }
 
 /*
+ * __gpuservLoadKdsCommon
+ */
+static const gpuMemChunk *
+__gpuservLoadKdsCommon(gpuClient *gclient,
+					   kern_data_store *kds,
+					   size_t base_offset,
+					   const char *pathname,
+					   strom_io_vector *kds_iovec)
+{
+	gpuMemChunk *chunk;
+	CUresult	rc;
+	off_t		off = PAGE_ALIGN(base_offset);
+	size_t		gap = off - base_offset;
+
+	chunk = __gpuMemAlloc(gap + kds->length);
+	if (!chunk)
+	{
+		gpuClientELog(gclient, "failed on gpuMemAlloc(%zu)", kds->length);
+		return NULL;
+	}
+	chunk->m_devptr = chunk->__base__ + chunk->__offset__ + gap;
+
+	rc = cuMemcpyHtoD(chunk->m_devptr, kds, base_offset);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuMemcpyHtoD: %s", cuStrError(rc));
+		goto error;
+	}
+	if (!gpuDirectFileReadIOV(pathname,
+							  chunk->__base__,
+							  chunk->__offset__ + off,
+							  kds_iovec))
+	{
+		gpuClientELog(gclient, "failed on gpuDirectFileReadIOV");
+		goto error;
+	}
+	return chunk;
+
+error:
+	gpuMemFree(chunk);
+	return NULL;
+}
+
+/*
  * gpuservLoadKdsBlock
  *
  * fill up KDS_FORMAT_BLOCK using GPU-Direct
@@ -399,49 +439,29 @@ gpuservLoadKdsBlock(gpuClient *gclient,
 					const char *pathname,
 					strom_io_vector *kds_iovec)
 {
-	const gpuMemChunk *chunk;
-	GPUDirectFileDesc gdfdesc;
-	CUresult	rc;
-	size_t		len;
+	size_t		base_offset;
 
-	if (!gpuDirectFileDescOpenByPath(&gdfdesc, pathname))
-	{
-		gpuClientELog(gclient, "failed on gpuDirectFileDescOpenByPath('%s')", pathname);
-		return NULL;
-	}
+	Assert(kds->format == KDS_FORMAT_BLOCK);
+	base_offset = kds->block_offset + kds->block_nloaded * BLCKSZ;
+	return __gpuservLoadKdsCommon(gclient, kds, base_offset, pathname, kds_iovec);
+}
 
-	chunk = gpuMemAlloc(kds->length);
-	if (!chunk)
-	{
-		gpuClientELog(gclient, "failed on gpuMemAlloc(%zu)", kds->length);
-		goto error_1;
-	}
+/*
+ * gpuservLoadKdsArrow
+ *
+ * fill up KDS_FORMAT_ARROW using GPU-Direct
+ */
+const gpuMemChunk *
+gpuservLoadKdsArrow(gpuClient *gclient,
+					kern_data_store *kds,
+					const char *pathname,
+					strom_io_vector *kds_iovec)
+{
+	size_t		base_offset;
 
-	len = kds->block_offset + kds->block_nloaded * BLCKSZ;
-	rc = cuMemcpyHtoD(chunk->base + chunk->offset, kds, len);
-	if (rc != CUDA_SUCCESS)
-	{
-		gpuClientELog(gclient, "failed on cuMemcpyHtoD: %s", cuStrError(rc));
-		goto error_2;
-	}
-
-	if (!gpuDirectFileReadIOV(&gdfdesc,
-							  chunk->base,
-							  chunk->iomap_handle,
-							  chunk->offset + len,
-							  kds_iovec))
-	{
-		gpuClientELog(gclient, "failed on gpuDirectFileReadIOV");
-		goto error_2;
-	}
-	gpuDirectFileDescClose(&gdfdesc);
-	return chunk;
-
-error_2:
-	gpuMemFree(chunk);
-error_1:
-	gpuDirectFileDescClose(&gdfdesc);
-	return NULL;
+	Assert(kds->format == KDS_FORMAT_ARROW);
+	base_offset = KDS_HEAD_LENGTH(kds);
+	return __gpuservLoadKdsCommon(gclient, kds, base_offset, pathname, kds_iovec);
 }
 
 /*

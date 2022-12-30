@@ -242,12 +242,9 @@ DpuScanAddScanPath(PlannerInfo *root,
 				break;
 			return;
 		case RELKIND_FOREIGN_TABLE:
-#if 0
-			// MEMO: directory --> tablespace mapping is necessary
 			if (baseRelIsArrowFdw(baserel))
 				break;
 			return;
-#endif
 		default:
 			/* not supported */
 			return;
@@ -366,12 +363,12 @@ ExecInitDpuScan(CustomScanState *node, EState *estate, int eflags)
 		elog(ERROR, "No DPU is installed on the relation: %s",
 			 RelationGetRelationName(relation));
 
-	pgstromBrinIndexExecBegin(&dss->pts,
-                              dss->ds_info.index_oid,
-                              dss->ds_info.index_conds,
-                              dss->ds_info.index_quals);
-
-	pgstromExecInitTaskState(&dss->pts, dss->ds_info.dev_quals);
+	pgstromExecInitTaskState(&dss->pts,
+							 dss->ds_info.dev_quals,
+							 dss->ds_info.outer_refs,
+							 dss->ds_info.index_oid,
+                             dss->ds_info.index_conds,
+                             dss->ds_info.index_quals);
 	dss->pts.cb_cpu_fallback = ExecFallbackCpuScan;
 }
 
@@ -455,17 +452,6 @@ InitializeDpuScanDSM(CustomScanState *node,
 }
 
 /*
- * ReInitializeDpuScanDSM
- */
-static void
-ReInitializeDpuScanDSM(CustomScanState *node,
-					   ParallelContext *pcxt,
-					   void *dsm_addr)
-{
-	pgstromSharedStateReInitDSM((pgstromTaskState *)node);
-}
-
-/*
  * InitDpuScanWorker
  */
 static void
@@ -545,7 +531,6 @@ pgstrom_init_dpu_scan(void)
     dpuscan_exec_methods.EstimateDSMCustomScan = EstimateDpuScanDSM;
     dpuscan_exec_methods.InitializeDSMCustomScan = InitializeDpuScanDSM;
     dpuscan_exec_methods.InitializeWorkerCustomScan = InitDpuScanWorker;
-    dpuscan_exec_methods.ReInitializeDSMCustomScan = ReInitializeDpuScanDSM;
     dpuscan_exec_methods.ShutdownCustomScan = ExecShutdownDpuScan;
     dpuscan_exec_methods.ExplainCustomScan	= ExplainDpuScan;
 

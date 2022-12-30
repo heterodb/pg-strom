@@ -550,6 +550,7 @@ pgstromBrinIndexExecReset(pgstromTaskState *pts)
 {
 	/* See, ExecReScanBitmapIndexScan */
 	BrinIndexState *br_state = pts->br_state;
+	BrinIndexResults *br_results = br_state->brinResults;
 
 	if (br_state->NumRuntimeKeys != 0)
 	{
@@ -564,6 +565,10 @@ pgstromBrinIndexExecReset(pgstromTaskState *pts)
 
 	br_state->curr_chunk_id = 0;
 	br_state->curr_block_id = UINT_MAX;
+
+	br_results->build_status = 0;
+	br_results->nitems   = 0;
+	pg_atomic_init_u32(&br_results->index, 0);
 }
 
 /*
@@ -999,17 +1004,6 @@ pgstromBrinIndexInitDSM(pgstromTaskState *pts, char *dsm_addr)
 	br_state->brinResults = br_results;
 
 	return (dsm_addr ? dsm_len : 0);
-}
-
-void
-pgstromBrinIndexReInitDSM(pgstromTaskState *pts)
-{
-	BrinIndexState *br_state = pts->br_state;
-	BrinIndexResults *br_results = br_state->brinResults;
-
-	br_results->build_status = 0;
-	br_results->nitems   = 0;
-	pg_atomic_init_u32(&br_results->index, 0);
 }
 
 Size

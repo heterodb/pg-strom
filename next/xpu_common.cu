@@ -474,20 +474,6 @@ kern_extract_heap_tuple(kern_context *kcxt,
 			}
 		}
 	}
-	/* other fields, which refers out of ranges, are NULL */
-	while (kvars_nloads > 0 &&
-		   kvars->var_depth == curr_depth)
-	{
-		const kern_colmeta *cmeta = &kds->colmeta[kvars->var_resno-1];
-		int		slot_id = kvars->var_slot_id;
-
-		assert(slot_id < kcxt->kvars_nslots);
-		kcxt->kvars_cmeta[slot_id] = cmeta;
-		kcxt->kvars_addr[slot_id]  = NULL;
-		kcxt->kvars_len[slot_id]   = -1;
-		kvars++;
-		kvars_nloads--;
-	}
 	return (kvars_nloads_saved - kvars_nloads);
 }
 
@@ -762,7 +748,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 		assert(slot_id < kcxt->kvars_nslots);
 		switch (cmeta->attopts.tag)
 		{
-			case ArrowNodeTag__Bool:
+			case ArrowType__Bool:
 				/* xpu_bool_t */
 				if (!__arrow_fetch_bool_datum(kcxt,
 											  kds,
@@ -774,14 +760,14 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					cmeta = NULL;	/* mark addr points xpu_datum_t */
 				break;
 
-			case ArrowNodeTag__Int:
-			case ArrowNodeTag__FloatingPoint:
-			case ArrowNodeTag__Decimal:
-			case ArrowNodeTag__Date:
-			case ArrowNodeTag__Time:
-			case ArrowNodeTag__Timestamp:
-			case ArrowNodeTag__Interval:
-			case ArrowNodeTag__FixedSizeBinary:
+			case ArrowType__Int:
+			case ArrowType__FloatingPoint:
+			case ArrowType__Decimal:
+			case ArrowType__Date:
+			case ArrowType__Time:
+			case ArrowType__Timestamp:
+			case ArrowType__Interval:
+			case ArrowType__FixedSizeBinary:
 				if (!__arrow_fetch_inline_datum(kcxt,
 												kds,
 												cmeta,
@@ -791,8 +777,8 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					return -1;
 				break;
 
-			case ArrowNodeTag__Utf8:
-			case ArrowNodeTag__Binary:
+			case ArrowType__Utf8:
+			case ArrowType__Binary:
 				if (!__arrow_fetch_variable_datum(kcxt,
 												  kds,
 												  cmeta,
@@ -802,8 +788,8 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 												  &len))
 					return -1;
 				break;
-			case ArrowNodeTag__LargeUtf8:
-			case ArrowNodeTag__LargeBinary:
+			case ArrowType__LargeUtf8:
+			case ArrowType__LargeBinary:
 				if (!__arrow_fetch_variable_datum(kcxt,
 												  kds,
 												  cmeta,
@@ -814,7 +800,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					return -1;
 				break;
 
-			case ArrowNodeTag__List:
+			case ArrowType__List:
 				/* xpu_array_t */
 				if (!__arrow_fetch_array_datum(kcxt,
 											   kds,
@@ -827,7 +813,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					cmeta = NULL;	/* mark addr points xpu_array_t */
 				break;
 
-			case ArrowNodeTag__LargeList:
+			case ArrowType__LargeList:
 				/* xpu_array_t */
 				if (!__arrow_fetch_array_datum(kcxt,
 											   kds,
@@ -840,7 +826,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					cmeta = NULL;	/* mark addr points xpu_array_t */
 				break;
 
-			case ArrowNodeTag__Struct:	/* composite */
+			case ArrowType__Struct:	/* composite */
 				/* xpu_composite_t */
 				if (!__arrow_fetch_composite_datum(kcxt,
 												   kds,
@@ -853,6 +839,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 				break;
 
 			default:
+				printf("hoge tag=%u unitsz=%d\n", (int)cmeta->attopts.tag, (int)cmeta->attopts.unitsz);
 				STROM_ELOG(kcxt, "Unsupported Apache Arrow type");
 				return -1;
 		}
@@ -920,12 +907,30 @@ ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
 			kds  = kds_inners[depth - 1];
 			htup = htup_inners[depth - 1];
 		}
-		index += kern_extract_heap_tuple(kcxt,
-										 kds,
-										 htup,
-										 depth,
-										 kexp->u.load.kvars + index,
-										 kexp->u.load.nloads - index);
+
+		if (htup)
+		{
+			index += kern_extract_heap_tuple(kcxt,
+											 kds,
+											 htup,
+											 depth,
+											 kexp->u.load.kvars + index,
+											 kexp->u.load.nloads - index);
+		}
+		/* ensure NULL fields, if kvars are not advanced, or htup is NULL */
+		while (index < kexp->u.load.nloads)
+		{
+			const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index];
+			int			slot_id = kvars->var_slot_id;
+
+			assert(slot_id < kcxt->kvars_nslots);
+			if (kvars->var_depth != depth)
+				break;
+			kcxt->kvars_cmeta[slot_id] = NULL;
+			kcxt->kvars_addr[slot_id]  = NULL;
+			kcxt->kvars_len[slot_id]   = -1;
+			index++;
+		}
 	}
 	return EXEC_KERN_EXPRESSION(kcxt, karg, __result);
 }
@@ -973,6 +978,21 @@ ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
 		if (count < 0)
 			return false;
 		index += count;
+
+		/* fill up by NULL, if kvars are not assigned. */
+		while (index < kexp->u.load.nloads)
+		{
+			const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index];
+			int		slot_id = kvars->var_slot_id;
+
+			assert(slot_id < kcxt->kvars_nslots);
+			if (kvars->var_depth != depth)
+				break;
+			kcxt->kvars_cmeta[slot_id] = NULL;
+			kcxt->kvars_addr[slot_id]  = NULL;
+			kcxt->kvars_len[slot_id]   = -1;
+			index++;
+		}
 	}
 	return EXEC_KERN_EXPRESSION(kcxt, karg, __result);
 }

@@ -114,6 +114,7 @@
 #include <assert.h>
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
+#include <cufile.h>
 #include <float.h>
 #include <libgen.h>
 #include <limits.h>
@@ -148,7 +149,7 @@ typedef struct GpuDevAttributes
 	size_t		DEV_TOTAL_MEMSZ;
 	size_t		DEV_BAR1_MEMSZ;
 	bool		DEV_SUPPORT_GPUDIRECTSQL;
-#define DEV_ATTR(LABEL,a,b,c)	\
+#define DEV_ATTR(LABEL,DESC)	\
 	int32		LABEL;
 #include "gpu_devattrs.h"
 #undef DEV_ATTR
@@ -211,7 +212,6 @@ typedef struct devfunc_info
 
 typedef struct XpuConnection	XpuConnection;
 typedef struct GpuCacheState	GpuCacheState;
-typedef struct GpuDirectState	GpuDirectState;
 typedef struct DpuStorageEntry	DpuStorageEntry;
 typedef struct ArrowFdwState	ArrowFdwState;
 typedef struct BrinIndexState	BrinIndexState;
@@ -234,10 +234,10 @@ typedef struct
 struct pgstromTaskState
 {
 	CustomScanState		css;
+	const Bitmapset	   *optimal_gpus;		/* candidate GPUs to connect */
 	XpuConnection	   *conn;
 	pgstromSharedState *ps_state;
-	GpuCacheState	   *gc_state;
-	GpuDirectState	   *gd_state;
+	GpuCacheState	   *gcache_state;
 	ArrowFdwState	   *arrow_state;
 	BrinIndexState	   *br_state;
 	DpuStorageEntry	   *ds_entry;
@@ -289,24 +289,18 @@ extern void		pgstrom_init_extra(void);
 extern bool		heterodbValidateDevice(int gpu_device_id,
 									   const char *gpu_device_name,
 									   const char *gpu_device_uuid);
-extern bool		gpuDirectInitDriver(void);
 extern bool		gpuDirectOpenDriver(void);
 extern void		gpuDirectCloseDriver(void);
-extern bool		gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc,
-									  File pg_fdesc);
-extern bool		gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
-											const char *pathname);
-extern void		gpuDirectFileDescClose(const GPUDirectFileDesc *gds_fdesc);
-extern CUresult	gpuDirectMapGpuMemory(CUdeviceptr m_segment,
-									  size_t m_segment_sz,
-									  unsigned long *p_iomap_handle);
-extern CUresult	gpuDirectUnmapGpuMemory(CUdeviceptr m_segment,
-										unsigned long iomap_handle);
-extern bool		gpuDirectFileReadIOV(const GPUDirectFileDesc *gds_fdesc,
+extern bool		gpuDirectMapGpuMemory(CUdeviceptr m_segment,
+									  size_t segment_sz);
+extern bool		gpuDirectUnmapGpuMemory(CUdeviceptr m_segment);
+extern bool		gpuDirectFileReadIOV(const char *pathname,
 									 CUdeviceptr m_segment,
-									 unsigned long iomap_handle,
 									 off_t m_offset,
-									 strom_io_vector *iovec);
+									 const strom_io_vector *iovec);
+extern char	   *gpuDirectGetProperty(void);
+extern void		gpuDirectSetProperty(const char *key, const char *value);
+extern bool		gpuDirectIsAvailable(void);
 
 /*
  * codegen.c
@@ -367,7 +361,6 @@ extern void		pgstromBrinIndexExecEnd(pgstromTaskState *pts);
 extern void		pgstromBrinIndexExecReset(pgstromTaskState *pts);
 extern Size		pgstromBrinIndexEstimateDSM(pgstromTaskState *pts);
 extern Size		pgstromBrinIndexInitDSM(pgstromTaskState *pts, char *dsm_addr);
-extern void		pgstromBrinIndexReInitDSM(pgstromTaskState *pts);
 extern Size		pgstromBrinIndexAttachDSM(pgstromTaskState *pts, char *dsm_addr);
 extern void		pgstromBrinIndexShutdownDSM(pgstromTaskState *pts);
 extern void		pgstrom_init_brin(void);
@@ -392,7 +385,6 @@ extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
 extern Size		pgstromSharedStateEstimateDSM(pgstromTaskState *pts);
 extern void		pgstromSharedSteteCreate(pgstromTaskState *pts);
 extern void		pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr);
-extern void		pgstromSharedStateReInitDSM(pgstromTaskState *pts);
 extern void		pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr);
 extern void		pgstromSharedStateShutdownDSM(pgstromTaskState *pts);
 extern void		pgstrom_init_relscan(void);
@@ -422,16 +414,26 @@ pgstromBuildSessionInfo(PlanState *ps,
 						const bytea *xpucode_scan_quals,
 						const bytea *xpucode_scan_projs);
 extern void		pgstromExecInitTaskState(pgstromTaskState *pts,
-										 List *outer_dev_quals);
+										 List *outer_quals,
+										 const Bitmapset *outer_refs,
+										 Oid   brin_index_oid,
+										 List *brin_index_conds,
+										 List *brin_index_quals);
 extern TupleTableSlot  *pgstromExecTaskState(pgstromTaskState *pts);
 extern void		pgstromExecEndTaskState(pgstromTaskState *pts);
 extern void		pgstromExecResetTaskState(pgstromTaskState *pts);
+extern void		pgstromExplainTaskState(pgstromTaskState *pts,
+										ExplainState *es,
+										List *ancestors);
 extern void		pgstrom_init_executor(void);
 
 /*
  * pcie.c
  */
-extern const Bitmapset *pgstromLookupOptimalGpus(const char *pathname);
+extern const Bitmapset *GetOptimalGpuForFile(const char *pathname);
+extern const Bitmapset *GetOptimalGpuForRelation(Relation relation);
+extern const Bitmapset *GetOptimalGpuForBaseRel(PlannerInfo *root,
+												RelOptInfo *baserel);
 extern void		pgstrom_init_pcie(void);
 
 /*
@@ -495,15 +497,19 @@ extern __thread CUevent		CU_EVENT_PER_THREAD;
 
 typedef struct
 {
-	CUdeviceptr	base;
-	size_t		offset;
-	size_t		length;
-	unsigned long iomap_handle;		/* for old nvme_strom kmod */
+	CUdeviceptr	__base__;
+	size_t		__offset__;
+	size_t		__length__;
+	CUdeviceptr	m_devptr;
 } gpuMemChunk;
 
 extern const gpuMemChunk *gpuMemAlloc(size_t bytesize);
 extern void		gpuMemFree(const gpuMemChunk *chunk);
 extern const gpuMemChunk *gpuservLoadKdsBlock(gpuClient *gclient,
+											  kern_data_store *kds,
+											  const char *pathname,
+											  strom_io_vector *kds_iovec);
+extern const gpuMemChunk *gpuservLoadKdsArrow(gpuClient *gclient,
 											  kern_data_store *kds,
 											  const char *pathname,
 											  strom_io_vector *kds_iovec);
@@ -518,8 +524,6 @@ extern void		pgstrom_init_gpu_service(void);
 /*
  * gpu_direct.c
  */
-extern const Bitmapset *baseRelCanUseGpuDirect(PlannerInfo *root,
-											   RelOptInfo *baserel);
 extern void		pgstromGpuDirectExecBegin(pgstromTaskState *pts,
 										  const Bitmapset *gpuset);
 extern const Bitmapset *pgstromGpuDirectDevices(pgstromTaskState *pts);
@@ -575,15 +579,16 @@ extern void		pgstrom_init_gpu_scan(void);
  */
 extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
 extern bool 	RelationIsArrowFdw(Relation frel);
-extern Bitmapset *GetOptimalGpusForArrowFdw(PlannerInfo *root,
-											RelOptInfo *baserel);
-extern ArrowFdwState *pgstromArrowFdwExecInit(ScanState *ss,
-											  List *outer_quals,
-											  Bitmapset *outer_refs);
-extern kern_data_store *pgstromArrowFdwExecChunk(ScanState *ss,
-												 ArrowFdwState *arrow_state);
+extern const Bitmapset *GetOptimalGpusForArrowFdw(PlannerInfo *root,
+												  RelOptInfo *baserel);
+extern bool		pgstromArrowFdwExecInit(pgstromTaskState *pts,
+										List *outer_quals,
+										const Bitmapset *outer_refs);
+extern XpuCommand *pgstromScanChunkArrowFdw(pgstromTaskState *pts,
+											struct iovec *xcmd_iov,
+											int *xcmd_iovcnt);
 extern void		pgstromArrowFdwExecEnd(ArrowFdwState *arrow_state);
-extern void		pgstromArrowFdwExecRewind(ArrowFdwState *arrow_state);
+extern void		pgstromArrowFdwExecReset(ArrowFdwState *arrow_state);
 extern void		pgstromArrowFdwInitDSM(ArrowFdwState *arrow_state,
 									   pgstromSharedState *ps_state);
 extern void		pgstromArrowFdwAttachDSM(ArrowFdwState *arrow_state,

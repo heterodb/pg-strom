@@ -312,9 +312,9 @@ static void
 sysfs_read_pcie_subtree(void)
 {
 	/* walks on the PCI-E bus tree for each root complex */
-	const char *dirname = "/sys/devices";
-	DIR		   *dir;
-	struct dirent *dent;
+	const char	   *dirname = "/sys/devices";
+	DIR			   *dir;
+	struct dirent  *dent;
 
 	dir = AllocateDir(dirname);
 	if (!dir)
@@ -950,10 +950,10 @@ apply_manual_optimal_gpus(const char *__config)
 }
 
 /*
- * pgstromLookupOptimalGpus
+ * GetOptimalGpuForFile
  */
 const Bitmapset *
-pgstromLookupOptimalGpus(const char *pathname)
+GetOptimalGpuForFile(const char *pathname)
 {
 	struct stat	stat_buf;
 
@@ -999,6 +999,150 @@ pgstromLookupOptimalGpus(const char *pathname)
 	return sysfs_lookup_optimal_gpus(major(stat_buf.st_dev),
 									 minor(stat_buf.st_dev));
 }
+
+/*
+ * GetOptimalGpuForTablespace
+ */
+static HTAB	   *tablespace_optimal_gpu_htable = NULL;
+static bool		pgstrom_gpudirect_enabled;			/* GUC */
+static int		__pgstrom_gpudirect_threshold_kb;	/* GUC */
+#define pgstrom_gpudirect_threshold		((size_t)__pgstrom_gpudirect_threshold_kb << 10)
+
+typedef struct
+{
+	Oid			tablespace_oid;
+	bool		is_valid;
+	Bitmapset	optimal_gpus;
+} tablespace_optimal_gpu_hentry;
+
+static void
+tablespace_optimal_gpu_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
+{
+	/* invalidate all the cached status */
+	if (tablespace_optimal_gpu_htable)
+	{
+		hash_destroy(tablespace_optimal_gpu_htable);
+		tablespace_optimal_gpu_htable = NULL;
+	}
+}
+
+/*
+ * GetOptimalGpuForTablespace
+ */
+static const Bitmapset *
+GetOptimalGpuForTablespace(Oid tablespace_oid)
+{
+	tablespace_optimal_gpu_hentry *hentry;
+	bool		found;
+
+	if (!pgstrom_gpudirect_enabled)
+		return NULL;
+
+	if (!OidIsValid(tablespace_oid))
+		tablespace_oid = MyDatabaseTableSpace;
+
+	if (!tablespace_optimal_gpu_htable)
+	{
+		HASHCTL		hctl;
+		int			nwords = (numGpuDevAttrs / BITS_PER_BITMAPWORD) + 1;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = sizeof(Oid);
+		hctl.entrysize = MAXALIGN(offsetof(tablespace_optimal_gpu_hentry,
+										   optimal_gpus.words[nwords]));
+		tablespace_optimal_gpu_htable
+			= hash_create("TablespaceOptimalGpu", 128,
+						  &hctl, HASH_ELEM | HASH_BLOBS);
+	}
+
+	hentry = (tablespace_optimal_gpu_hentry *)
+		hash_search(tablespace_optimal_gpu_htable,
+					&tablespace_oid,
+					HASH_ENTER,
+					&found);
+	if (!found || !hentry->is_valid)
+	{
+		char	   *pathname;
+		const Bitmapset *optimal_gpus;
+
+		Assert(hentry->tablespace_oid == tablespace_oid);
+		pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
+		optimal_gpus = GetOptimalGpuForFile(pathname);
+		if (bms_is_empty(optimal_gpus))
+			hentry->optimal_gpus.nwords = 0;
+		else
+		{
+			Assert(optimal_gpus->nwords <= (numGpuDevAttrs/BITS_PER_BITMAPWORD)+1);
+			memcpy(&hentry->optimal_gpus, optimal_gpus,
+				   offsetof(Bitmapset, words[optimal_gpus->nwords]));
+		}
+		hentry->is_valid = true;
+	}
+	Assert(hentry->is_valid);
+	return (hentry->optimal_gpus.nwords > 0 ? &hentry->optimal_gpus : NULL);
+}
+
+/*
+ * GetOptimalGpuForRelation
+ */
+const Bitmapset *
+GetOptimalGpuForRelation(Relation relation)
+{
+	Oid		tablespace_oid;
+
+	/* only heap relation */
+	Assert(RelationGetForm(relation)->relam == HEAP_TABLE_AM_OID);
+	tablespace_oid = RelationGetForm(relation)->reltablespace;
+	if (!OidIsValid(tablespace_oid))
+		tablespace_oid = DEFAULTTABLESPACE_OID;
+
+	return GetOptimalGpuForTablespace(tablespace_oid);
+}
+
+/*
+ * GetOptimalGpuForBaseRel - checks wthere the relation can use GPU-Direct SQL.
+ * If possible, it returns bitmap of the optimal GPUs.
+ */
+const Bitmapset *
+GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
+{
+	const Bitmapset *optimal_gpus;
+	double		total_sz;
+
+	if (!pgstrom_gpudirect_enabled)
+		return NULL;
+	if (baseRelIsArrowFdw(baserel))
+	{
+		if (pgstrom_gpudirect_enabled)
+			return GetOptimalGpusForArrowFdw(root, baserel);
+		return NULL;
+	}
+	total_sz = (size_t)baserel->pages * (size_t)BLCKSZ;
+	if (total_sz < pgstrom_gpudirect_threshold)
+		return NULL;	/* table is too small */
+
+	optimal_gpus = GetOptimalGpuForTablespace(baserel->reltablespace);
+	if (!bms_is_empty(optimal_gpus))
+	{
+		RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
+		char	relpersistence = get_rel_persistence(rte->relid);
+
+		/* temporary table is not supported by GPU-Direct SQL */
+		if (relpersistence != RELPERSISTENCE_PERMANENT &&
+			relpersistence != RELPERSISTENCE_UNLOGGED)
+			optimal_gpus = NULL;
+	}
+	return optimal_gpus;
+}
+
+
+
+
+
+
+
+
+
 
 /*
  * sysfs_preload_block_devices
@@ -1068,13 +1212,47 @@ sysfs_preload_block_devices(void)
 }
 
 /*
+ * pgstrom_init_gpudirect
+ */
+static void
+pgstrom_init_gpudirect(void)
+{
+	bool	has_gpudirectsql = gpuDirectIsAvailable();
+
+	DefineCustomBoolVariable("pg_strom.gpudirect_enabled",
+							 "enables GPUDirect SQL",
+							 NULL,
+							 &pgstrom_gpudirect_enabled,
+							 (has_gpudirectsql ? true : false),
+							 (has_gpudirectsql ? PGC_SUSET : PGC_POSTMASTER),
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_strom.gpudirect_threshold",
+							"table-size threshold to use GPU-Direct SQL",
+							NULL,
+							&__pgstrom_gpudirect_threshold_kb,
+							2097152,	/* 2GB */
+							0,
+							INT_MAX,
+							PGC_SUSET,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	/* tablespace cache */
+	tablespace_optimal_gpu_htable = NULL;
+	CacheRegisterSyscacheCallback(TABLESPACEOID,
+								  tablespace_optimal_gpu_cache_callback,
+								  (Datum) 0);
+}
+
+/*
  * pgstrom_init_pcie
  */
 void
 pgstrom_init_pcie(void)
 {
-	static char	*pgstrom_manual_optimal_gpus = NULL;
-	HASHCTL		hctl;
+	static char	   *pgstrom_manual_optimal_gpus = NULL;
+	MemoryContext	memcxt;
+	HASHCTL			hctl;
 
 	memset(&hctl, 0, sizeof(HASHCTL));
 	hctl.keysize = BlockDevItemKeySize;
@@ -1103,11 +1281,18 @@ pgstrom_init_pcie(void)
 							   PGC_POSTMASTER,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
-	
+	memcxt = MemoryContextSwitchTo(TopMemoryContext);
 	sysfs_read_pcie_subtree();
 	sysfs_setup_optimal_gpus();
 	if (pgstrom_manual_optimal_gpus)
 		apply_manual_optimal_gpus(pgstrom_manual_optimal_gpus);
 	sysfs_print_pcie_subtree();
 	sysfs_preload_block_devices();
+	MemoryContextSwitchTo(memcxt);
+
+	/*
+	 * Special initialization for GPU-Direct SQL
+	 */
+	pgstrom_init_gpudirect();
 }
+

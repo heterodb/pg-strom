@@ -23,10 +23,10 @@ CREATE FUNCTION pgstrom.license_query()
 
 -- System view for device information
 CREATE TYPE pgstrom.__gpu_device_info AS (
-  device_nr     int,
-  aindex        int,
-  attribute     text,
-  value         text
+  gpu_id        int,
+  att_name      text,
+  att_value     text,
+  att_desc      text
 );
 CREATE FUNCTION pgstrom.gpu_device_info()
   RETURNS SETOF pgstrom.__gpu_device_info
