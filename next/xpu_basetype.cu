@@ -273,7 +273,7 @@ PGSTROM_SIMPLE_FLOAT_TEMPLATE(float8, float8_t, Double);
 /* special support functions for float2 */
 INLINE_FUNCTION(bool) isinf(float2_t fval) { return isinf(fp16_to_fp32(fval)); }
 INLINE_FUNCTION(bool) isnan(float2_t fval) { return isnan(fp16_to_fp32(fval)); }
-INLINE_FUNCTION(int)  lrinth(float2_t fval) { return lrintf((float)fval); }
+INLINE_FUNCTION(int)  lrinth(float2_t fval) { return rintf(fp16_to_fp32(fval)); }
 INLINE_FUNCTION(bool) __iszero(float2_t fval) { return fp16_to_fp32(fval) == 0.0; }
 INLINE_FUNCTION(bool) __iszero(float4_t fval) { return fval == 0.0; }
 INLINE_FUNCTION(bool) __iszero(float8_t fval) { return fval == 0.0; }
@@ -311,64 +311,64 @@ PG_SIMPLE_TYPECAST_TEMPLATE(bool,int4,__INTEGER_TO_BOOL,__TYPECAST_NOCHECK)
 
 #define __INTEGER_FITS_IN_INT1(X)	((X) >= SCHAR_MIN && (X) <= SCHAR_MAX)
 #define __FLOAT2_FITS_IN_INT1(X)	(!isnan(X) &&						\
-									 fp16_to_fp32(lrinth(X)) >= (float)SCHAR_MIN && \
-									 fp16_to_fp32(lrinth(X)) <= (float)SCHAR_MAX)
+									 lrinth(X) >= SCHAR_MIN &&			\
+									 lrinth(X) <= SCHAR_MAX)
 #define __FLOAT4_FITS_IN_INT1(X)	(!isnan(X) &&						\
-									 lrintf(X) >= (float)SCHAR_MIN &&	\
-									 lrintf(X) <= (float)SCHAR_MAX)
+									 rintf(X) >= (float)SCHAR_MIN &&	\
+									 rintf(X) <= (float)SCHAR_MAX)
 #define __FLOAT8_FITS_IN_INT1(X)	(!isnan(X) &&						\
-									 llrintf(X) >= (double)SCHAR_MIN &&	\
-									 llrintf(X) <= (double)SCHAR_MAX)
+									 rint(X) >= (double)SCHAR_MIN &&	\
+									 rint(X) <= (double)SCHAR_MAX)
 PG_SIMPLE_TYPECAST_TEMPLATE(int1,int2,(int8_t), __INTEGER_FITS_IN_INT1)
 PG_SIMPLE_TYPECAST_TEMPLATE(int1,int4,(int8_t), __INTEGER_FITS_IN_INT1)
 PG_SIMPLE_TYPECAST_TEMPLATE(int1,int8,(int8_t), __INTEGER_FITS_IN_INT1)
 PG_SIMPLE_TYPECAST_TEMPLATE(int1,float2,lrinth, __FLOAT2_FITS_IN_INT1)
-PG_SIMPLE_TYPECAST_TEMPLATE(int1,float4,lrintf, __FLOAT4_FITS_IN_INT1)
-PG_SIMPLE_TYPECAST_TEMPLATE(int1,float8,llrintf,__FLOAT8_FITS_IN_INT1)
+PG_SIMPLE_TYPECAST_TEMPLATE(int1,float4,rintf, __FLOAT4_FITS_IN_INT1)
+PG_SIMPLE_TYPECAST_TEMPLATE(int1,float8,rint, __FLOAT8_FITS_IN_INT1)
 
 #define __INTEGER_FITS_IN_INT2(X)	((X) >= SHRT_MIN && (X) <= SHRT_MAX)
 #define __FLOAT2_FITS_IN_INT2(X)	(!isnan(X) &&						\
-									 fp16_to_fp32(lrinth(X)) >= (float)SHRT_MIN && \
-									 fp16_to_fp32(lrinth(X)) <= (float)SHRT_MAX)
+									 lrinth(X) >= SHRT_MIN &&			\
+									 lrinth(X) <= SHRT_MAX)
 #define __FLOAT4_FITS_IN_INT2(X)	(!isnan(X) &&						\
-									 lrintf(X) >= (float)SHRT_MIN &&	\
-									 lrintf(X) <= (float)SHRT_MAX)
+									 rintf(X) >= (float)SHRT_MIN &&		\
+									 rintf(X) <= (float)SHRT_MAX)
 #define __FLOAT8_FITS_IN_INT2(X)	(!isnan(X) &&						\
-									 llrintf(X) >= (double)SHRT_MIN &&	\
-									 llrintf(X) <= (double)SHRT_MAX)
+									 rint(X) >= (double)SHRT_MIN &&		\
+									 rint(X) <= (double)SHRT_MAX)
 PG_SIMPLE_TYPECAST_TEMPLATE(int2,int1,(int16_t),__TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(int2,int4,(int16_t),__INTEGER_FITS_IN_INT2)
 PG_SIMPLE_TYPECAST_TEMPLATE(int2,int8,(int16_t),__INTEGER_FITS_IN_INT2)
 PG_SIMPLE_TYPECAST_TEMPLATE(int2,float2,lrinth, __FLOAT2_FITS_IN_INT2)
-PG_SIMPLE_TYPECAST_TEMPLATE(int2,float4,lrintf, __FLOAT4_FITS_IN_INT2)
-PG_SIMPLE_TYPECAST_TEMPLATE(int2,float8,llrintf,__FLOAT8_FITS_IN_INT2)
+PG_SIMPLE_TYPECAST_TEMPLATE(int2,float4,rintf, __FLOAT4_FITS_IN_INT2)
+PG_SIMPLE_TYPECAST_TEMPLATE(int2,float8,rint, __FLOAT8_FITS_IN_INT2)
 
 #define __INTEGER_FITS_IN_INT4(X)	((X) >= INT_MIN && (X) <= INT_MAX)
 #define __FLOAT4_FITS_IN_INT4(X)	(!isnan(X) &&						\
-									 lrintf(X) >= (float)INT_MIN &&	\
-									 lrintf(X) <= (float)INT_MAX)
+									 rintf(X) >= (float)INT_MIN &&		\
+									 rintf(X) <= (float)INT_MAX)
 #define __FLOAT8_FITS_IN_INT4(X)	(!isnan(X) &&						\
-									 llrintf(X) >= (double)INT_MIN &&	\
-									 llrintf(X) <= (double)INT_MAX)
+									 rint(X) >= (double)INT_MIN &&			\
+									 rint(X) <= (double)INT_MAX)
 PG_SIMPLE_TYPECAST_TEMPLATE(int4,int1,(int32_t),__TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(int4,int2,(int32_t),__TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(int4,int8,(int32_t),__INTEGER_FITS_IN_INT4)
 PG_SIMPLE_TYPECAST_TEMPLATE(int4,float2,lrinth, __TYPECAST_NOCHECK)
-PG_SIMPLE_TYPECAST_TEMPLATE(int4,float4,lrintf, __FLOAT4_FITS_IN_INT4)
-PG_SIMPLE_TYPECAST_TEMPLATE(int4,float8,llrintf,__FLOAT8_FITS_IN_INT4)
+PG_SIMPLE_TYPECAST_TEMPLATE(int4,float4,rintf, __FLOAT4_FITS_IN_INT4)
+PG_SIMPLE_TYPECAST_TEMPLATE(int4,float8,rint, __FLOAT8_FITS_IN_INT4)
 
 #define __FLOAT4_FITS_IN_INT8(X)	(!isnan((float)(X)) &&				\
-									 lrintf(X) >= (float)LLONG_MIN && \
-									 lrintf(X) <= (float)LLONG_MAX)
+									 rintf(X) >= (float)LLONG_MIN &&	\
+									 rintf(X) <= (float)LLONG_MAX)
 #define __FLOAT8_FITS_IN_INT8(X)	(!isnan((double)(X)) &&				\
-									 llrintf(X) >= (double)LLONG_MIN && \
-									 llrintf(X) <= (double)LLONG_MAX)
+									 rint(X) >= (double)LLONG_MIN &&	\
+									 rint(X) <= (double)LLONG_MAX)
 PG_SIMPLE_TYPECAST_TEMPLATE(int8,int1,(int64_t),__TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(int8,int2,(int64_t),__TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(int8,int4,(int64_t),__TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(int8,float2,lrinth, __TYPECAST_NOCHECK)
-PG_SIMPLE_TYPECAST_TEMPLATE(int8,float4,lrintf, __FLOAT4_FITS_IN_INT8)
-PG_SIMPLE_TYPECAST_TEMPLATE(int8,float8,llrintf,__FLOAT8_FITS_IN_INT8)
+PG_SIMPLE_TYPECAST_TEMPLATE(int8,float4,rintf, __FLOAT4_FITS_IN_INT8)
+PG_SIMPLE_TYPECAST_TEMPLATE(int8,float8,rint, __FLOAT8_FITS_IN_INT8)
 
 #define __INTEGER_FITS_IN_FLOAT2(X)	((X) >= -65504 && (X) <= 65504)
 #define __FLOAT_FITS_IN_FLOAT2(X)	(!isinf(X) && !isnan(X) &&	\
@@ -395,7 +395,7 @@ PG_SIMPLE_TYPECAST_TEMPLATE(float8,  int1,(double), __TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,  int2,(double), __TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,  int4,(double), __TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,  int8,(double), __TYPECAST_NOCHECK)
-PG_SIMPLE_TYPECAST_TEMPLATE(float8,float2,(double), __TYPECAST_NOCHECK)
+PG_SIMPLE_TYPECAST_TEMPLATE(float8,float2,fp16_to_fp64, __TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,float4,(double), __TYPECAST_NOCHECK)
 #undef PG_SIMPLE_TYPECAST_TEMPLATE
 
