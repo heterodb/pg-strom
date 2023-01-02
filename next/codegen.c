@@ -1523,7 +1523,7 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 	if (p_extra_bufsz)
 		*p_extra_bufsz = context.extra_bufsz;
 	if (p_kvars_nslots)
-		*p_kvars_nslots = nexprs + nattrs;
+		*p_kvars_nslots = Max(*p_kvars_nslots, list_length(context.kvars_depth));
 	if (p_used_params)
 		*p_used_params = context.used_params;
 }
