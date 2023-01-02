@@ -807,9 +807,10 @@ void
 ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 {
 	TupleTableSlot *scan_slot = pts->base_slot;
+	bool			should_free = false;
 
-	/* check WHERE-clause if any */
 	ExecForceStoreHeapTuple(tuple, scan_slot, false);
+	/* check WHERE-clause if any */
 	if (pts->base_quals)
 	{
 		ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
@@ -821,19 +822,15 @@ ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 	}
 	/* apply Projection if any */
 	if (pts->base_proj)
-		scan_slot = ExecProject(pts->base_proj);
-
-	/* build fallback_store if none */
-	if (!pts->fallback_store)
 	{
-		EState	   *estate = pts->css.ss.ps.state;
-		MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+		TupleTableSlot *proj_slot = ExecProject(pts->base_proj);
 
-		pts->fallback_store = tuplestore_begin_heap(false, false, work_mem);
-
-		MemoryContextSwitchTo(oldcxt);
+		tuple = ExecFetchSlotHeapTuple(proj_slot, false, &should_free);
 	}
-	tuplestore_puttupleslot(pts->fallback_store, scan_slot);
+	/* save the tuple on the fallback buffer */
+	pgstromStoreFallbackTuple(pts, tuple);
+	if (should_free)
+		pfree(tuple);
 }
 
 /*

@@ -235,12 +235,13 @@ struct pgstromTaskState
 {
 	CustomScanState		css;
 	const Bitmapset	   *optimal_gpus;	/* candidate GPUs to connect */
-	const DpuStorageEntry *ds_entry;	/* target DPU to connect */
+	const DpuStorageEntry *ds_entry;	/* candidate DPUs to connect */
 	XpuConnection	   *conn;
 	pgstromSharedState *ps_state;
 	GpuCacheState	   *gcache_state;
 	ArrowFdwState	   *arrow_state;
 	BrinIndexState	   *br_state;
+	const char		   *kds_pathname;	/* pathname to be used for KDS setup */
 	/* current chunk (already processed by the device) */
 	XpuCommand		   *curr_resp;
 	HeapTupleData		curr_htup;
@@ -253,7 +254,14 @@ struct pgstromTaskState
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
 	ProjectionInfo	   *base_proj;	/* base --> custom_tlist projection */
-	Tuplestorestate	   *fallback_store; /* tuples processed by CPU-fallback */
+	/* CPU fallback support */
+	off_t			   *fallback_tuples;
+	size_t				fallback_index;
+	size_t				fallback_nitems;
+	size_t				fallback_nrooms;
+	size_t				fallback_usage;
+	size_t				fallback_bufsz;
+	char			   *fallback_buffer;
 	/* request command buffer (+ status for table scan) */
 	TBMIterateResult   *curr_tbm;
 	Buffer				curr_vm_buffer;		/* for visibility-map */
@@ -382,6 +390,9 @@ extern XpuCommand *pgstromRelScanChunkDirect(pgstromTaskState *pts,
 extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
 											 struct iovec *xcmd_iov,
 											 int *xcmd_iovcnt);
+extern void		pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple tuple);
+extern bool		pgstromFetchFallbackTuple(pgstromTaskState *pts,
+										  TupleTableSlot *slot);
 extern Size		pgstromSharedStateEstimateDSM(pgstromTaskState *pts);
 extern void		pgstromSharedSteteCreate(pgstromTaskState *pts);
 extern void		pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr);
@@ -617,10 +628,12 @@ extern double	pgstrom_dpu_seq_page_cost;
 extern double	pgstrom_dpu_tuple_cost;
 extern bool		pgstrom_dpu_handle_cached_pages;
 
-extern DpuStorageEntry *GetOptimalDpuForFile(const char *filename,
-											 const char **p_dpu_pathname);
-extern DpuStorageEntry *GetOptimalDpuForTablespace(Oid tablespace_oid);
-extern DpuStorageEntry *GetOptimalDpuForRelation(Relation relation);
+extern const DpuStorageEntry *GetOptimalDpuForFile(const char *filename,
+												   const char **p_dpu_pathname);
+extern const DpuStorageEntry *GetOptimalDpuForBaseRel(PlannerInfo *root,
+													  RelOptInfo *baserel);
+extern const DpuStorageEntry *GetOptimalDpuForRelation(Relation relation,
+													   const char **p_dpu_pathname);
 extern bool		DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
 									   const DpuStorageEntry *ds_entry2);
 extern void		DpuClientOpenSession(pgstromTaskState *pts,

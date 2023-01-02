@@ -678,18 +678,8 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 {
 	TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
 
-	if (pts->fallback_store)
-	{
-		if (tuplestore_gettupleslot(pts->fallback_store,
-									true,	/* forward scan */
-									false,	/* no copy */
-									slot))
-			return slot;
-		/* no more fallback tuples */
-		tuplestore_end(pts->fallback_store);
-		pts->fallback_store = NULL;
-	}
-
+	if (pgstromFetchFallbackTuple(pts, slot))
+		return slot;
 	for (;;)
 	{
 		kern_data_store *kds = pts->curr_kds;
@@ -785,7 +775,9 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	if (RelationGetForm(rel)->relkind == RELKIND_RELATION ||
 		RelationGetForm(rel)->relkind == RELKIND_MATVIEW)
 	{
-		Oid		am_oid = RelationGetForm(rel)->relam;
+		SMgrRelation smgr = RelationGetSmgr(rel);
+		Oid			am_oid = RelationGetForm(rel)->relam;
+		const char *kds_pathname = relpath(smgr->smgr_rnode, MAIN_FORKNUM);
 
 		if (am_oid != HEAP_TABLE_AM_OID)
 			elog(ERROR, "PG-Strom does not support table access method: %s",
@@ -799,7 +791,8 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 		if ((devkind_mask & DEVKIND__NVIDIA_GPU) != 0)
 			pts->optimal_gpus = GetOptimalGpuForRelation(rel);
 		if ((devkind_mask & DEVKIND__NVIDIA_DPU) != 0)
-			pts->ds_entry = GetOptimalDpuForRelation(rel);
+			pts->ds_entry = GetOptimalDpuForRelation(rel, &kds_pathname);
+		pts->kds_pathname = kds_pathname;
 	}
 	else if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
 	{
@@ -848,7 +841,7 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 											  table_slot_callbacks(rel));
 	pts->base_proj = ExecBuildProjectionInfo(tlist_dev,
 											 pts->css.ss.ps.ps_ExprContext,
-											 pts->base_slot,
+											 pts->css.ss.ss_ScanTupleSlot,
 											 &pts->css.ss.ps,
 											 RelationGetDescr(rel));
 	/*

@@ -281,7 +281,7 @@ kern_form_heaptuple(kern_context *kcxt,
 			{
 				if (t_next > t_hoff)
 					memset((char *)htup + t_hoff, 0, t_next - t_hoff);
-				buffer = (char *)htup + t_hoff;
+				buffer = (char *)htup + t_next;
 			}
 			sz = desc->slot_ops->xpu_datum_store(kcxt, buffer, datum);
 			if (sz < 0)

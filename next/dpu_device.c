@@ -28,13 +28,14 @@ bool		pgstrom_dpu_handle_cached_pages = false;	/* GUC */
 
 struct DpuStorageEntry
 {
-	uint32_t	endpoint_id;
+	int32_t		endpoint_id;
 	const char *endpoint_dir;
 	const char *config_host;
 	const char *config_port;
 	int			endpoint_domain;	/* AF_UNIX/AF_INET/AF_INET6 */
 	const struct sockaddr *endpoint_addr;
 	socklen_t	endpoint_addr_len;
+	struct stat	endpoint_stat_buf;
 	pg_atomic_uint32 *validated;	/* shared memory */
 };
 
@@ -44,7 +45,7 @@ typedef struct
 	DpuStorageEntry entries[1];
 } DpuStorageArray;
 
-static DpuStorageArray		   *dpu_tablespace_master = NULL;
+static DpuStorageArray		   *dpu_storage_master_array = NULL;
 static shmem_request_hook_type	shmem_request_next = NULL;
 static shmem_startup_hook_type	shmem_startup_next = NULL;
 
@@ -55,47 +56,57 @@ static DpuStorageEntry *
 __getOptimalDpuForFile(const char *pathname, StringInfo dpu_path)
 {
 	DpuStorageEntry *ds_entry = NULL;
-	struct stat		stat_buf;
+	char		namebuf[MAXPGPATH];
+	ssize_t		nbytes;
+	struct stat	stat_buf;
 
-	if (strcmp(pathname, "/") != 0)
+	if (lstat(pathname, &stat_buf) == 0)
 	{
-		char   *namebuf = alloca(strlen(pathname) + 1);
-
-		strcpy(namebuf, pathname);
-		ds_entry = __getOptimalDpuForFile(dirname(namebuf), dpu_path);
-		if (dpu_path)
+		for (int i=0; i < dpu_storage_master_array->nitems; i++)
 		{
-			strcpy(namebuf, pathname);
-			appendStringInfo(dpu_path, "%s%s",
-							 dpu_path->len > 0 ? "/" : "",
-							 basename(namebuf));
-		}
-	}
+			DpuStorageEntry *curr = &dpu_storage_master_array->entries[i];
 
-	if (stat(pathname, &stat_buf) == 0 &&
-		S_ISDIR(stat_buf.st_mode))
-	{
-		for (int i=0; i < dpu_tablespace_master->nitems; i++)
-		{
-			DpuStorageEntry *curr = &dpu_tablespace_master->entries[i];
-			struct stat		curr_buf;
-
-			if (stat(curr->endpoint_dir, &curr_buf) == 0 &&
-				S_ISDIR(curr_buf.st_mode) &&
-				stat_buf.st_dev == curr_buf.st_dev &&
-				stat_buf.st_ino == curr_buf.st_ino)
+			if (curr->endpoint_stat_buf.st_mode == 0)
 			{
-				ds_entry = curr;
+				if (stat(curr->endpoint_dir, &curr->endpoint_stat_buf) != 0)
+					continue;
+			}
+			if (stat_buf.st_dev == curr->endpoint_stat_buf.st_dev &&
+				stat_buf.st_ino == curr->endpoint_stat_buf.st_ino)
+			{
 				if (dpu_path)
 					resetStringInfo(dpu_path);
-				break;
+				return curr;
+			}
+		}
+
+		if (S_ISLNK(stat_buf.st_mode) &&
+			(nbytes = readlink(pathname, namebuf, MAXPGPATH)) > 0)
+		{
+			namebuf[nbytes] = '\0';
+			ds_entry = __getOptimalDpuForFile(namebuf, dpu_path);
+			if (ds_entry)
+				return ds_entry;
+		}
+
+		if (strcmp(pathname, "/") != 0)
+		{
+			strncpy(namebuf, pathname, MAXPGPATH);
+			ds_entry = __getOptimalDpuForFile(dirname(namebuf), dpu_path);
+			if (ds_entry)
+			{
+				strncpy(namebuf, pathname, MAXPGPATH);
+				appendStringInfo(dpu_path, "%s%s",
+								 dpu_path->len > 0 ? "/" : "",
+								 basename(namebuf));
+				return ds_entry;
 			}
 		}
 	}
-	return ds_entry;
+	return NULL;
 }
 
-DpuStorageEntry *
+const DpuStorageEntry *
 GetOptimalDpuForFile(const char *filename,
 					 const char **p_dpu_pathname)
 {
@@ -105,7 +116,7 @@ GetOptimalDpuForFile(const char *filename,
 	size_t		len;
 
 	/* quick bailout */
-	if (!dpu_tablespace_master)
+	if (!dpu_storage_master_array)
 		return NULL;
 	initStringInfo(&buf);
 	/* absolute path? */
@@ -126,73 +137,109 @@ GetOptimalDpuForFile(const char *filename,
 }
 
 /*
- * Tablespace-DPU hash table
+ * Relation Cached-DPU hash table invalidator
  */
 typedef struct
 {
-	Oid		tablespace_oid;
-	DpuStorageEntry	*ds_entry;
-} DpuTablespaceCache;
+	Oid		relation_oid;
+	char   *dpu_pathname;
+	const DpuStorageEntry *ds_entry;
+} DpuRelCacheItem;
 
-static HTAB	   *dpu_tablespace_htable = NULL;
+static HTAB	   *dpu_relcache_htable = NULL;
 
 static void
-dpu_tablespace_htable_invalidator(Datum arg, int cacheid, uint32 hashvalue)
+dpu_relcache_htable_invalidator(Datum arg, Oid relation_oid)
 {
-	hash_destroy(dpu_tablespace_htable);
-	dpu_tablespace_htable = NULL;
+	if (dpu_relcache_htable)
+	{
+		hash_search(dpu_relcache_htable,
+					&relation_oid,
+					HASH_REMOVE,
+					NULL);
+	}
 }
 
 /*
  * GetOptimalDpuForRelation
  */
-DpuStorageEntry *
-GetOptimalDpuForTablespace(Oid tablespace_oid)
+const DpuStorageEntry *
+GetOptimalDpuForRelation(Relation relation, const char **p_dpu_pathname)
 {
-	DpuTablespaceCache *dt_cache;
-	bool		found;
+	DpuRelCacheItem *drc_item;
+	Oid		relation_oid;
+	bool	found;
 
-	/* quick bailout */
-	if (!dpu_tablespace_master)
+	if (!dpu_storage_master_array)
 		return NULL;	/* quick bailout */
-	if (!OidIsValid(tablespace_oid))
-		tablespace_oid = MyDatabaseTableSpace;
-	if (!dpu_tablespace_htable)
+
+	relation_oid = RelationGetRelid(relation);
+	if (!dpu_relcache_htable)
 	{
-		HASHCTL		hctl;
+		HASHCTL	hctl;
 
 		memset(&hctl, 0, sizeof(HASHCTL));
 		hctl.keysize = sizeof(Oid);
-		hctl.entrysize = sizeof(DpuTablespaceCache);
+		hctl.entrysize = sizeof(DpuRelCacheItem);
 		hctl.hcxt = CacheMemoryContext;
-		dpu_tablespace_htable
-			= hash_create("DPU-Tablespace hashtable",
-						  256,
+		dpu_relcache_htable
+			= hash_create("DPU-Relcache hashtable",
+						  1024,
 						  &hctl,
 						  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	}
-	dt_cache = hash_search(dpu_tablespace_htable,
-						   &tablespace_oid,
+
+	drc_item = hash_search(dpu_relcache_htable,
+						   &relation_oid,
 						   HASH_ENTER,
 						   &found);
 	if (!found)
 	{
-		char   *pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
+		const DpuStorageEntry *ds_entry;
+		SMgrRelation smgr = RelationGetSmgr(relation);
+		char	   *rel_pathname = relpath(smgr->smgr_rnode, MAIN_FORKNUM);
+		const char *dpu_pathname;
 
-		dt_cache->ds_entry =  GetOptimalDpuForFile(pathname, NULL);
+		ds_entry = GetOptimalDpuForFile(rel_pathname, &dpu_pathname);
+		if (ds_entry)
+			drc_item->dpu_pathname = MemoryContextStrdup(CacheMemoryContext,
+														 dpu_pathname);
+		drc_item->ds_entry = ds_entry;
 	}
-	return dt_cache->ds_entry;
+	if (p_dpu_pathname)
+		*p_dpu_pathname = drc_item->dpu_pathname;
+	return drc_item->ds_entry;
 }
 
 /*
- * GetOptimalDpuForRelation
+ * GetOptimalDpuForBaseRel
  */
-DpuStorageEntry *
-GetOptimalDpuForRelation(Relation relation)
+const DpuStorageEntry *
+GetOptimalDpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 {
-	Oid		tablespace_oid = RelationGetForm(relation)->reltablespace;
+	RangeTblEntry  *rte = root->simple_rte_array[baserel->relid];
+	const DpuStorageEntry *ds_entry = NULL;
 
-	return GetOptimalDpuForTablespace(tablespace_oid);	
+	if (!dpu_storage_master_array)
+		return NULL;	/* quick bailout */
+	if (rte->rtekind == RTE_RELATION)
+	{
+		DpuRelCacheItem *drc_item;
+		Relation	relation;
+
+		/* fast path */
+		if (dpu_relcache_htable &&
+			(drc_item = hash_search(dpu_relcache_htable,
+									&rte->relid,
+									HASH_FIND,
+									NULL)) != NULL)
+			return drc_item->ds_entry;
+
+		relation = table_open(rte->relid, AccessShareLock);
+		ds_entry = GetOptimalDpuForRelation(relation, NULL);
+		table_close(relation, NoLock);
+	}
+	return ds_entry;
 }
 
 /*
@@ -254,9 +301,9 @@ parse_dpu_endpoint_list(void)
 	
 	if (!pgstrom_dpu_endpoint_list)
 		return 0;
-	dpu_tablespace_master = malloc(offsetof(DpuStorageArray,
-											entries[nrooms]));
-	if (!dpu_tablespace_master)
+	dpu_storage_master_array = malloc(offsetof(DpuStorageArray,
+											   entries[nrooms]));
+	if (!dpu_storage_master_array)
 		elog(ERROR, "out of memory");
 	sprintf(__default_port, "%u", pgstrom_dpu_endpoint_default_port);
 
@@ -284,11 +331,13 @@ parse_dpu_endpoint_list(void)
 		if (nitems >= nrooms)
 		{
 			nrooms *= 2;
-			dpu_tablespace_master = realloc(dpu_tablespace_master,
-											offsetof(DpuStorageArray,
-													 entries[nrooms]));
+			dpu_storage_master_array = realloc(dpu_storage_master_array,
+											   offsetof(DpuStorageArray,
+														entries[nrooms]));
+			if (!dpu_storage_master_array)
+				elog(ERROR, "out of memory");
 		}
-		curr = &dpu_tablespace_master->entries[nitems++];
+		curr = &dpu_storage_master_array->entries[nitems++];
 		memset(curr, 0, sizeof(DpuStorageEntry));
 
 		curr->endpoint_id = endpoint_id++;
@@ -316,7 +365,7 @@ parse_dpu_endpoint_list(void)
 		curr->endpoint_addr = addr->ai_addr;
 		curr->endpoint_addr_len = addr->ai_addrlen;
 	}
-	dpu_tablespace_master->nitems   = nitems;
+	dpu_storage_master_array->nitems   = nitems;
 
 	return (nitems > 0);
 }
@@ -330,7 +379,7 @@ pgstrom_request_dpu_device(void)
 	if (shmem_request_next)
 		shmem_request_next();
 	RequestAddinShmemSpace(MAXALIGN(sizeof(pg_atomic_uint32) *
-									dpu_tablespace_master->nitems));
+									dpu_storage_master_array->nitems));
 }
 
 /*
@@ -340,7 +389,7 @@ static void
 pgstrom_startup_dpu_device(void)
 {
 	pg_atomic_uint32 *validated;
-	uint32_t	nitems = dpu_tablespace_master->nitems;
+	uint32_t	nitems = dpu_storage_master_array->nitems;
 	bool		found;
 
 	if (shmem_startup_next)
@@ -349,9 +398,9 @@ pgstrom_startup_dpu_device(void)
 	validated = ShmemInitStruct("DPU-Tablespace Info",
 								sizeof(pg_atomic_uint32) * nitems,
 								&found);
-	for (int i=0; i < dpu_tablespace_master->nitems; i++)
+	for (int i=0; i < dpu_storage_master_array->nitems; i++)
 	{
-		dpu_tablespace_master->entries[i].validated = &validated[i];
+		dpu_storage_master_array->entries[i].validated = &validated[i];
 	}
 }
 
@@ -453,14 +502,12 @@ pgstrom_init_dpu_device(void)
 		shmem_request_hook = pgstrom_request_dpu_device;
 		shmem_startup_next = shmem_startup_hook;
 		shmem_startup_hook = pgstrom_startup_dpu_device;
+		CacheRegisterRelcacheCallback(dpu_relcache_htable_invalidator, 0);
 
-		CacheRegisterSyscacheCallback(TABLESPACEOID,
-									  dpu_tablespace_htable_invalidator,
-									  (Datum)0);
 		/* output logs */
-		for (int i=0; i < dpu_tablespace_master->nitems; i++)
+		for (int i=0; i < dpu_storage_master_array->nitems; i++)
 		{
-			DpuStorageEntry *ds_entry = &dpu_tablespace_master->entries[i];
+			DpuStorageEntry *ds_entry = &dpu_storage_master_array->entries[i];
 
 			elog(LOG, "PG-Strom: DPU%d (dir: '%s', host: '%s', port: '%s')",
 				 ds_entry->endpoint_id,

@@ -3390,7 +3390,7 @@ __arrowFdwExecInit(ScanState *ss,
 	Bitmapset	   *referenced = NULL;
 	Bitmapset	   *stat_attrs = NULL;
 	Bitmapset	   *optimal_gpus = NULL;
-	DpuStorageEntry *ds_entry = NULL;
+	const DpuStorageEntry *ds_entry = NULL;
 	bool			whole_row_ref = false;
 	List		   *filesList;
 	List		   *af_states_list = NIL;
@@ -3436,11 +3436,16 @@ __arrowFdwExecInit(ScanState *ss,
 			}
 			if (p_ds_entry)
 			{
+				const DpuStorageEntry *ds_temp;
+
 				if (af_states_list == NIL)
 					ds_entry = GetOptimalDpuForFile(fname, &af_state->dpu_path);
-				else if (ds_entry &&
-						 ds_entry != GetOptimalDpuForFile(fname, &af_state->dpu_path))
-					ds_entry = NULL;
+				else if (ds_entry)
+				{
+					ds_temp = GetOptimalDpuForFile(fname, &af_state->dpu_path);
+					if (!DpuStorageEntryIsEqual(ds_entry, ds_temp))
+						ds_entry = NULL;
+				}
 			}
 			af_states_list = lappend(af_states_list, af_state);
 		}

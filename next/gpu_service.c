@@ -817,11 +817,6 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 		gpuClientELog(gclient, "%s", emsg);
 		return false;
 	}
-
-	fprintf(stderr, "session kcxt_kvars_nslots=%u kcxt_extra_bufsz=%u\n",
-			session->kcxt_kvars_nslots,
-			session->kcxt_extra_bufsz);
-
 	gclient->session = session;
 	gclient->cuda_module = gmodule->cuda_module;
 
