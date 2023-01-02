@@ -254,7 +254,14 @@ struct pgstromTaskState
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
 	ProjectionInfo	   *base_proj;	/* base --> custom_tlist projection */
-	Tuplestorestate	   *fallback_store; /* tuples processed by CPU-fallback */
+	/* CPU fallback support */
+	off_t			   *fallback_tuples;
+	size_t				fallback_index;
+	size_t				fallback_nitems;
+	size_t				fallback_nrooms;
+	size_t				fallback_usage;
+	size_t				fallback_bufsz;
+	char			   *fallback_buffer;
 	/* request command buffer (+ status for table scan) */
 	TBMIterateResult   *curr_tbm;
 	Buffer				curr_vm_buffer;		/* for visibility-map */
@@ -383,6 +390,9 @@ extern XpuCommand *pgstromRelScanChunkDirect(pgstromTaskState *pts,
 extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
 											 struct iovec *xcmd_iov,
 											 int *xcmd_iovcnt);
+extern void		pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple tuple);
+extern bool		pgstromFetchFallbackTuple(pgstromTaskState *pts,
+										  TupleTableSlot *slot);
 extern Size		pgstromSharedStateEstimateDSM(pgstromTaskState *pts);
 extern void		pgstromSharedSteteCreate(pgstromTaskState *pts);
 extern void		pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr);

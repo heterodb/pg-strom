@@ -3390,7 +3390,7 @@ __arrowFdwExecInit(ScanState *ss,
 	Bitmapset	   *referenced = NULL;
 	Bitmapset	   *stat_attrs = NULL;
 	Bitmapset	   *optimal_gpus = NULL;
-	DpuStorageEntry *ds_entry = NULL;
+	const DpuStorageEntry *ds_entry = NULL;
 	bool			whole_row_ref = false;
 	List		   *filesList;
 	List		   *af_states_list = NIL;
@@ -3436,7 +3436,7 @@ __arrowFdwExecInit(ScanState *ss,
 			}
 			if (p_ds_entry)
 			{
-				DpuStorageEntry *ds_temp;
+				const DpuStorageEntry *ds_temp;
 
 				if (af_states_list == NIL)
 					ds_entry = GetOptimalDpuForFile(fname, &af_state->dpu_path);

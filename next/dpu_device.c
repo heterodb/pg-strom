@@ -106,7 +106,7 @@ __getOptimalDpuForFile(const char *pathname, StringInfo dpu_path)
 	return NULL;
 }
 
-DpuStorageEntry *
+const DpuStorageEntry *
 GetOptimalDpuForFile(const char *filename,
 					 const char **p_dpu_pathname)
 {
@@ -142,8 +142,8 @@ GetOptimalDpuForFile(const char *filename,
 typedef struct
 {
 	Oid		relation_oid;
-	char   *kds_pathname;
-	DpuStorageEntry *ds_entry;
+	char   *dpu_pathname;
+	const DpuStorageEntry *ds_entry;
 } DpuRelCacheItem;
 
 static HTAB	   *dpu_relcache_htable = NULL;
@@ -164,7 +164,7 @@ dpu_relcache_htable_invalidator(Datum arg, Oid relation_oid)
  * GetOptimalDpuForRelation
  */
 const DpuStorageEntry *
-GetOptimalDpuForRelation(Relation relation, const char **p_kds_pathname)
+GetOptimalDpuForRelation(Relation relation, const char **p_dpu_pathname)
 {
 	DpuRelCacheItem *drc_item;
 	Oid		relation_oid;
@@ -195,19 +195,19 @@ GetOptimalDpuForRelation(Relation relation, const char **p_kds_pathname)
 						   &found);
 	if (!found)
 	{
-		DpuStorageEntry *ds_entry;
+		const DpuStorageEntry *ds_entry;
 		SMgrRelation smgr = RelationGetSmgr(relation);
 		char	   *rel_pathname = relpath(smgr->smgr_rnode, MAIN_FORKNUM);
-		const char *kds_pathname;
+		const char *dpu_pathname;
 
-		ds_entry = GetOptimalDpuForFile(rel_pathname, &kds_pathname);
+		ds_entry = GetOptimalDpuForFile(rel_pathname, &dpu_pathname);
 		if (ds_entry)
-			drc_item->kds_pathname = MemoryContextStrdup(CacheMemoryContext,
-														 kds_pathname);
+			drc_item->dpu_pathname = MemoryContextStrdup(CacheMemoryContext,
+														 dpu_pathname);
 		drc_item->ds_entry = ds_entry;
 	}
-	if (p_kds_pathname)
-		*p_kds_pathname = drc_item->kds_pathname;
+	if (p_dpu_pathname)
+		*p_dpu_pathname = drc_item->dpu_pathname;
 	return drc_item->ds_entry;
 }
 

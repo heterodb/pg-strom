@@ -327,6 +327,82 @@ estimate_kern_data_store(TupleDesc tupdesc)
 	return MAXALIGN(offsetof(kern_data_store, colmeta[nr_colmeta]));
 }
 
+/*
+ * Routines to store/fetch fallback tuples
+ */
+void
+pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple htuple)
+{
+	MemoryContext memcxt = pts->css.ss.ps.state->es_query_cxt;
+	HeapTuple	dtuple;
+	size_t		sz;
+
+	if (!pts->fallback_tuples)
+	{
+		pts->fallback_index = 0;
+		pts->fallback_nitems = 0;
+		pts->fallback_nrooms = 1000;
+		pts->fallback_tuples =
+			MemoryContextAlloc(memcxt, sizeof(off_t) * pts->fallback_nrooms);
+	}
+	if (!pts->fallback_buffer)
+	{
+		pts->fallback_usage = 0;
+		pts->fallback_bufsz = 8 * BLCKSZ;
+		pts->fallback_buffer =
+			MemoryContextAlloc(memcxt, pts->fallback_bufsz);
+	}
+	sz = MAXALIGN(offsetof(HeapTupleData, t_data) + htuple->t_len);
+	while (pts->fallback_usage + sz > pts->fallback_bufsz)
+	{
+		pts->fallback_bufsz *= 2 + BLCKSZ;
+		pts->fallback_buffer = repalloc_huge(pts->fallback_buffer,
+											 pts->fallback_bufsz);
+	}
+	while (pts->fallback_nitems >= pts->fallback_nrooms)
+	{
+		pts->fallback_nrooms *= 2 + 100;
+		pts->fallback_tuples = repalloc_huge(pts->fallback_tuples,
+											 sizeof(off_t) * pts->fallback_nrooms);
+	}
+	dtuple = (HeapTuple)(pts->fallback_buffer +
+						 pts->fallback_usage);
+	memcpy(dtuple, htuple, offsetof(HeapTupleData, t_data));
+	memcpy((char *)dtuple + offsetof(HeapTupleData, t_data),
+		   htuple->t_data,
+		   htuple->t_len);
+	pts->fallback_tuples[pts->fallback_nitems++] = pts->fallback_usage;
+	pts->fallback_usage += sz;
+}
+
+bool
+pgstromFetchFallbackTuple(pgstromTaskState *pts, TupleTableSlot *slot)
+{
+	if (pts->fallback_tuples &&
+		pts->fallback_buffer &&
+		pts->fallback_index < pts->fallback_nitems)
+	{
+		HeapTupleData	htuple;
+		HeapTuple		ftuple;
+
+		ftuple = (HeapTuple)(pts->fallback_buffer +
+							 pts->fallback_tuples[pts->fallback_index++]);
+		memcpy(&htuple, ftuple, offsetof(HeapTupleData, t_data));
+		htuple.t_data = (HeapTupleHeader)((char *)ftuple +
+										  offsetof(HeapTupleData, t_data));
+		ExecForceStoreHeapTuple(&htuple, slot, false);
+		/* reset the buffer if last one */
+		if (pts->fallback_index == pts->fallback_nitems)
+		{
+			pts->fallback_index = 0;
+			pts->fallback_nitems = 0;
+			pts->fallback_usage = 0;
+		}
+		return true;
+	}
+	return false;
+}
+
 /* ----------------------------------------------------------------
  *
  * Routines to load chunks from storage
@@ -358,6 +434,7 @@ __relScanDirectFallbackBlock(pgstromTaskState *pts, BlockNumber block_num)
 	/* just like heapgetpage() */
 	heap_page_prune_opt(relation, buffer);
 	/* pick up valid tuples from the target page */
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	page = BufferGetPage(buffer);
 	lines = PageGetMaxOffsetNumber(page);
 	for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(page, lineoff);
@@ -520,12 +597,12 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			BlockNumber		block_num
 				= (pts->curr_block_num + h_scan->rs_startblock) % h_scan->rs_nblocks;
 			/*
-			 * MEMO: Usually, CPU is more powerful device than DPU.
+			 * MEMO: Usually, CPU is (much) more powerful than DPUs.
 			 * In case when the source cache is already on the shared-
 			 * buffer, it makes no sense to handle this page on the
 			 * DPU device.
 			 */
-			if (pts->ds_entry && pgstrom_dpu_handle_cached_pages)
+			if (pts->ds_entry && !pgstrom_dpu_handle_cached_pages)
 			{
 				BufferTag	bufTag;
 				uint32		bufHash;

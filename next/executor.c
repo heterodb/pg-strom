@@ -678,18 +678,8 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 {
 	TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
 
-	if (pts->fallback_store)
-	{
-		if (tuplestore_gettupleslot(pts->fallback_store,
-									true,	/* forward scan */
-									false,	/* no copy */
-									slot))
-			return slot;
-		/* no more fallback tuples */
-		tuplestore_end(pts->fallback_store);
-		pts->fallback_store = NULL;
-	}
-
+	if (pgstromFetchFallbackTuple(pts, slot))
+		return slot;
 	for (;;)
 	{
 		kern_data_store *kds = pts->curr_kds;
@@ -851,7 +841,7 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 											  table_slot_callbacks(rel));
 	pts->base_proj = ExecBuildProjectionInfo(tlist_dev,
 											 pts->css.ss.ps.ps_ExprContext,
-											 pts->base_slot,
+											 pts->css.ss.ss_ScanTupleSlot,
 											 &pts->css.ss.ps,
 											 RelationGetDescr(rel));
 	/*
