@@ -43,16 +43,17 @@ docker logs postgis-db -f
 
 ## Build the PostGIS + PG-Strom Docker Image
 
-```
-cd docker/pg13
-docker build -t pgstrom-postgis33-pg13 -f Dockerfile.pgstrom-postgis33 .
-```
-or
+For PostgreSQL 15:
 ```
 cd docker/pg15
 docker build -t pgstrom-postgis33-pg15 -f Dockerfile.pgstrom-postgis33 .
 ```
 
+Or, for PostgreSQL 13:
+```
+cd docker/pg13
+docker build -t pgstrom-postgis33-pg13 -f Dockerfile.pgstrom-postgis33 .
+```
 
 The generated Docker image will be 2.67GB in size. When compressed, the size is approximately 1.2 GB per DockerHub.
 
