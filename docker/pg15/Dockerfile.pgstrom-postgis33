@@ -8,8 +8,8 @@ ENV SUMMARY="This PostGIS Dockerfile uses PG-Strom which is an extension module 
 	based on real-time geo-location information. This Dockerfile is partly based on the official PostGIS Dockerfile https://github.com/postgis/docker-postgis which is based \
 	on https://github.com/docker-library/postgres, but a major difference is that this image is based on Rocky Linux to support PG-Strom."
 
-ENV PG_MAJOR_VERSION 13
-ENV PG_MINOR_VERSION 13.8-1
+ENV PG_MAJOR_VERSION 15
+ENV PG_MINOR_VERSION 15.0-1
 ENV POSTGIS_VERSION 33_$PG_MAJOR_VERSION
 ENV GOSU_VERSION 1.14
 ENV CUDA_VERSION 11-8

@@ -18,7 +18,7 @@ This Dockerfile was tested on a computer with the following specs:
 
 **Note:** Running in Windows with Docker on WSL 2 Linux is NOT possible, as the Windows NVIDIA driver is lacking the necessary CUDA APIs for PG-Strom, therefore resulting in an error.
 
-## Run the Published Experimental Image `murphye/pgstrom-postgis33:v1`
+## Run the Published Experimental Image `murphye/pgstrom-postgis33-pg15:v1`
 
 If you choose to not build your own image (see next section), you may choose to use a pre-built image on DockerHub. See the next sections for more information on the command line options used. This command will pull and run the container, provided that there are not any errors due to hardware or system configuration.
 
@@ -45,13 +45,20 @@ docker logs postgis-db -f
 
 ```
 cd docker/pg13
-docker build -t pgstrom-postgis33 -f Dockerfile.pgstrom-postgis33 .
+docker build -t pgstrom-postgis33-pg13 -f Dockerfile.pgstrom-postgis33 .
 ```
-The generated Docker image will be 2.63GB in size. When compressed, the size is approximately 1.2 GB per DockerHub.
+or
+```
+cd docker/pg15
+docker build -t pgstrom-postgis33-pg15 -f Dockerfile.pgstrom-postgis33 .
+```
+
+
+The generated Docker image will be 2.67GB in size. When compressed, the size is approximately 1.2 GB per DockerHub.
 
 ```
 docker images | grep pgstrom-postgis33
-pgstrom-postgis33                    latest                    96a26ca3d494   4 minutes ago    2.63GB
+pgstrom-postgis33-pg15                    latest                    96a26ca3d494   4 minutes ago    2.67GB
 ```
 
 ## Run the PostGIS + PG-Strom Docker Container
@@ -59,7 +66,7 @@ pgstrom-postgis33                    latest                    96a26ca3d494   4 
 This command will run the PostGIS + PG-Strom Docker Image with a volume and as detached. `--gpus=all` enables all virtualized GPUs for the container. `--shm-size` sets the System V shared memory size for the container, which is needs to be larger than default to accomodate PG-Strom. `--shm-size` is not the same as `shared_buffers` in `postgresql.conf` which is POSIX shared memory.
 
 ```
-docker run --name postgis-db \
+docker run --name postgis33-pg15-db \
 -d \
 --privileged \
 --gpus=all \
@@ -68,26 +75,24 @@ docker run --name postgis-db \
 -e POSTGRES_PASSWORD=password \
 -e POSTGRES_DB=postgis \
 -p 5432:5432 \
--v ${HOME}/postgis-data:/var/lib/postgresql/data \
--d pgstrom-postgis33
+-v ${HOME}/postgis33-pg15-data:/var/lib/postgresql/data \
+-d pgstrom-postgis33-pg15
 ```
 
 Tail the logs and watch for any errors!
 ```
-docker logs postgis-db -f
+docker logs postgis33-pg15-db -f
 ```
 
 ## Access the PostGIS + PG-Strom Docker Container
 
-If you are running on Windows, you can open the Task Manager application to watch for utilization of your NVIDIA GPU to verify that the GPU acceleration is working when running queries that PG-Strom supports.
-
 ### Access the PostGIS + PG-Strom Docker Container's Shell
 
 ```
-docker exec -it postgis-db bash
+docker exec -it postgis33-pg15-db bash
 ```
 
-### Access the PostGIS Database (After `docker exec -it postgis-db bash`)
+### Access the PostGIS Database (After `docker exec -it postgis33-pg15-db bash`)
 ```
 psql -U postgis
 ```
@@ -96,24 +101,24 @@ psql -U postgis
 
 Stop the PostGIS + PG-Strom Docker container.
 ```
-docker stop postgis-db
+docker stop postgis33-pg15-db
 ```
 
 Start the PostGIS + PG-Strom Docker container.
 ```
-docker start postgis-db
+docker start postgis33-pg15-db
 ```
 
 ## Clean Up the PostGIS + PG-Strom Docker Image
 
 Stop the PostGIS + PG-Strom Docker container and remove the image.
 ```
-docker stop postgis-db
-docker rm postgis-db
+docker stop postgis33-pg15-db
+docker rm postgis33-pg15-db
 ```
 Remove the data directory from the PostGIS + PG-Strom Docker volume.
 ```
-sudo rm -r ${HOME}/postgis-data
+sudo rm -r ${HOME}/postgis33-pg15-data
 ```
 
 ## Run and Verify
@@ -197,6 +202,6 @@ limit 1000000
 If you choose to publish the image to your own repository, you can retag the image and use `docker push`. Here is an example for `murphye`.
 
 ```
-docker tag pgstrom-postgis33 murphye/pgstrom-postgis33:v1
-docker push murphye/pgstrom-postgis33:v1
+docker tag pgstrom-postgis33-pg15 murphye/pgstrom-postgis33-pg15:v1
+docker push murphye/pgstrom-postgis33-pg15:v1
 ```
