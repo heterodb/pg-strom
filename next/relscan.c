@@ -474,63 +474,6 @@ __relScanDirectCachedBlock(pgstromTaskState *pts, BlockNumber block_num)
 	kds->block_nloaded++;
 }
 
-/*
- * __relScanDirectAssignFilename
- */
-static void
-__relScanDirectAssignFilename(StringInfo buf,
-							  RelFileNodeBackend *smgr_rnode,
-							  BlockNumber segment_id,
-							  uint32_t *p_fullpath_offset,
-							  uint32_t *p_pathname_offset)
-{
-	/* see logic in GetRelationPath */
-	Assert(segment_id != InvalidBlockNumber);
-		
-	if (smgr_rnode->node.spcNode == GLOBALTABLESPACE_OID)
-	{
-		Assert(smgr_rnode->node.dbNode == InvalidOid &&
-			   smgr_rnode->backend == InvalidBackendId);
-		*p_fullpath_offset = *p_pathname_offset = buf->len;
-		appendStringInfo(buf, "global/%u",
-						 smgr_rnode->node.relNode);
-	}
-	else if (smgr_rnode->node.spcNode == DEFAULTTABLESPACE_OID)
-	{
-		*p_fullpath_offset = *p_pathname_offset = buf->len;
-		if (smgr_rnode->backend == InvalidBackendId)
-			appendStringInfo(buf, "base/%u/%u",
-							 smgr_rnode->node.dbNode,
-							 smgr_rnode->node.relNode);
-		else
-			appendStringInfo(buf, "base/%u/t%d_%u",
-							 smgr_rnode->node.dbNode,
-							 smgr_rnode->backend,
-							 smgr_rnode->node.relNode);
-	}
-	else
-	{
-		*p_fullpath_offset = buf->len;
-		appendStringInfo(buf, "pg_tblspc/%u/",
-						 smgr_rnode->node.spcNode);
-		*p_pathname_offset = buf->len;
-		if (smgr_rnode->backend == InvalidBackendId)
-			appendStringInfo(buf, "%s/%u/%u",
-							 TABLESPACE_VERSION_DIRECTORY,
-							 smgr_rnode->node.dbNode,
-							 smgr_rnode->node.relNode);
-		else
-			appendStringInfo(buf, "%s/%u/t%d_%u",
-							 TABLESPACE_VERSION_DIRECTORY,
-							 smgr_rnode->node.dbNode,
-							 smgr_rnode->backend,
-							 smgr_rnode->node.relNode);
-	}
-	if (segment_id != 0)
-		appendStringInfo(buf, ".%u", segment_id);
-	appendStringInfoChar(buf, '\0');
-}
-
 XpuCommand *
 pgstromRelScanChunkDirect(pgstromTaskState *pts,
 						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
@@ -743,11 +686,12 @@ out:
 	{
 		size_t		sz;
 
-		__relScanDirectAssignFilename(&pts->xcmd_buf,
-									  smgr_rnode,
-									  segment_id,
-									  &kds_src_fullpath,
-									  &kds_src_pathname);
+		kds_src_fullpath = kds_src_pathname = pts->xcmd_buf.len;
+		appendStringInfoString(&pts->xcmd_buf, pts->kds_pathname);
+		if (segment_id > 0)
+			appendStringInfo(&pts->xcmd_buf, ".%u", segment_id);
+		appendStringInfoChar(&pts->xcmd_buf, '\0');
+
 		sz = offsetof(strom_io_vector, ioc[strom_iovec->nr_chunks]);
 		kds_src_iovec = __appendBinaryStringInfo(&pts->xcmd_buf,
 												 (const char *)strom_iovec, sz);

@@ -235,12 +235,13 @@ struct pgstromTaskState
 {
 	CustomScanState		css;
 	const Bitmapset	   *optimal_gpus;	/* candidate GPUs to connect */
-	const DpuStorageEntry *ds_entry;	/* target DPU to connect */
+	const DpuStorageEntry *ds_entry;	/* candidate DPUs to connect */
 	XpuConnection	   *conn;
 	pgstromSharedState *ps_state;
 	GpuCacheState	   *gcache_state;
 	ArrowFdwState	   *arrow_state;
 	BrinIndexState	   *br_state;
+	const char		   *kds_pathname;	/* pathname to be used for KDS setup */
 	/* current chunk (already processed by the device) */
 	XpuCommand		   *curr_resp;
 	HeapTupleData		curr_htup;
@@ -617,10 +618,12 @@ extern double	pgstrom_dpu_seq_page_cost;
 extern double	pgstrom_dpu_tuple_cost;
 extern bool		pgstrom_dpu_handle_cached_pages;
 
-extern DpuStorageEntry *GetOptimalDpuForFile(const char *filename,
-											 const char **p_dpu_pathname);
-extern DpuStorageEntry *GetOptimalDpuForTablespace(Oid tablespace_oid);
-extern DpuStorageEntry *GetOptimalDpuForRelation(Relation relation);
+extern const DpuStorageEntry *GetOptimalDpuForFile(const char *filename,
+												   const char **p_dpu_pathname);
+extern const DpuStorageEntry *GetOptimalDpuForBaseRel(PlannerInfo *root,
+													  RelOptInfo *baserel);
+extern const DpuStorageEntry *GetOptimalDpuForRelation(Relation relation,
+													   const char **p_dpu_pathname);
 extern bool		DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
 									   const DpuStorageEntry *ds_entry2);
 extern void		DpuClientOpenSession(pgstromTaskState *pts,

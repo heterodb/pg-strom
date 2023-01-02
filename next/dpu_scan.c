@@ -238,7 +238,7 @@ DpuScanAddScanPath(PlannerInfo *root,
 		case RELKIND_RELATION:
 		case RELKIND_MATVIEW:
 			if (get_relation_am(rte->relid, true) == HEAP_TABLE_AM_OID &&
-				GetOptimalDpuForTablespace(baserel->reltablespace) != NULL)
+				GetOptimalDpuForBaseRel(root, baserel) != NULL)
 				break;
 			return;
 		case RELKIND_FOREIGN_TABLE:
@@ -352,7 +352,6 @@ static void
 ExecInitDpuScan(CustomScanState *node, EState *estate, int eflags)
 {
 	DpuScanState   *dss = (DpuScanState *)node;
-	Relation		relation = node->ss.ss_currentRelation;
 
 	 /* sanity checks */
     Assert(relation != NULL &&

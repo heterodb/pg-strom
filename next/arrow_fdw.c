@@ -3436,11 +3436,16 @@ __arrowFdwExecInit(ScanState *ss,
 			}
 			if (p_ds_entry)
 			{
+				DpuStorageEntry *ds_temp;
+
 				if (af_states_list == NIL)
 					ds_entry = GetOptimalDpuForFile(fname, &af_state->dpu_path);
-				else if (ds_entry &&
-						 ds_entry != GetOptimalDpuForFile(fname, &af_state->dpu_path))
-					ds_entry = NULL;
+				else if (ds_entry)
+				{
+					ds_temp = GetOptimalDpuForFile(fname, &af_state->dpu_path);
+					if (!DpuStorageEntryIsEqual(ds_entry, ds_temp))
+						ds_entry = NULL;
+				}
 			}
 			af_states_list = lappend(af_states_list, af_state);
 		}

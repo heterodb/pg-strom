@@ -785,7 +785,9 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	if (RelationGetForm(rel)->relkind == RELKIND_RELATION ||
 		RelationGetForm(rel)->relkind == RELKIND_MATVIEW)
 	{
-		Oid		am_oid = RelationGetForm(rel)->relam;
+		SMgrRelation smgr = RelationGetSmgr(rel);
+		Oid			am_oid = RelationGetForm(rel)->relam;
+		const char *kds_pathname = relpath(smgr->smgr_rnode, MAIN_FORKNUM);
 
 		if (am_oid != HEAP_TABLE_AM_OID)
 			elog(ERROR, "PG-Strom does not support table access method: %s",
@@ -799,7 +801,8 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 		if ((devkind_mask & DEVKIND__NVIDIA_GPU) != 0)
 			pts->optimal_gpus = GetOptimalGpuForRelation(rel);
 		if ((devkind_mask & DEVKIND__NVIDIA_DPU) != 0)
-			pts->ds_entry = GetOptimalDpuForRelation(rel);
+			pts->ds_entry = GetOptimalDpuForRelation(rel, &kds_pathname);
+		pts->kds_pathname = kds_pathname;
 	}
 	else if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
 	{
