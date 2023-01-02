@@ -40,147 +40,16 @@ static dlist_head		xpu_connections_list;
 static bool				pgstrom_use_debug_code;		/* GUC */
 
 /*
- * xpuConnectReceiveCommands
- */
-int
-xpuConnectReceiveCommands(pgsocket sockfd,
-						  void *(*alloc_f)(void *priv, size_t sz),
-						  void  (*attach_f)(void *priv, XpuCommand *xcmd),
-						  void *priv,
-						  const char *error_label)
-{
-	char		buffer_local[2 * BLCKSZ];
-	char	   *buffer;
-	size_t		bufsz, offset;
-	ssize_t		nbytes;
-	int			recv_flags;
-	int			count = 0;
-	XpuCommand *curr = NULL;
-
-#define __fprintf(filp,fmt,...)										\
-	fprintf((filp), "[%s; %s:%d] " fmt "\n",						\
-			error_label, __FILE_NAME__, __LINE__, ##__VA_ARGS__)
-	
-restart:
-	buffer = buffer_local;
-	bufsz  = sizeof(buffer_local);
-	offset = 0;
-	recv_flags = MSG_DONTWAIT;
-	curr   = NULL;
-
-	for (;;)
-	{
-		nbytes = recv(sockfd, buffer + offset, bufsz - offset, recv_flags);
-		if (nbytes < 0)
-		{
-			if (errno == EINTR)
-				continue;
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-			{
-				/*
-				 * If we are under the read of a XpuCommand fraction,
-				 * we have to wait for completion of the XpuCommand.
-				 * (Its peer side should send the entire command very
-				 * soon.)
-				 * Elsewhere, we have no queued XpuCommand right now.
-				 */
-				if (!curr && offset == 0)
-					return count;
-				/* next recv(2) shall be blocking call */
-				recv_flags = 0;
-				continue;
-			}
-			__fprintf(stderr, "failed on recv(%d, %p, %ld, %d): %m",
-					  sockfd, buffer + offset, bufsz - offset, recv_flags);
-			return -1;
-		}
-		else if (nbytes == 0)
-		{
-			/* end of the stream */
-			if (curr || offset > 0)
-			{
-				__fprintf(stderr, "connection closed during XpuCommand read");
-				return -1;
-			}
-			return count;
-		}
-
-		offset += nbytes;
-		if (!curr)
-		{
-			XpuCommand *temp, *xcmd;
-		next:
-			if (offset < offsetof(XpuCommand, u))
-			{
-				if (buffer != buffer_local)
-				{
-					memmove(buffer_local, buffer, offset);
-					buffer = buffer_local;
-					bufsz  = sizeof(buffer_local);
-				}
-				recv_flags = 0;		/* next recv(2) shall be blockable */
-				continue;
-			}
-			temp = (XpuCommand *)buffer;
-			if (temp->length <= offset)
-			{
-				assert(temp->magic == XpuCommandMagicNumber);
-				xcmd = alloc_f(priv, temp->length);
-				if (!xcmd)
-				{
-					__fprintf(stderr, "out of memory (sz=%lu): %m", temp->length);
-					return -1;
-				}
-				memcpy(xcmd, temp, temp->length);
-				attach_f(priv, xcmd);
-				count++;
-
-				if (temp->length == offset)
-					goto restart;
-				/* read remained portion, if any */
-				buffer += temp->length;
-				offset -= temp->length;
-				goto next;
-			}
-			else
-			{
-				curr = alloc_f(priv, temp->length);
-				if (!curr)
-				{
-					__fprintf(stderr, "out of memory (sz=%lu): %m", temp->length);
-					return -1;
-				}
-				memcpy(curr, temp, offset);
-				buffer = (char *)curr;
-				bufsz  = temp->length;
-				recv_flags = 0;		/* blocking enabled */
-			}
-		}
-		else if (offset >= curr->length)
-		{
-			assert(curr->magic == XpuCommandMagicNumber);
-			assert(curr->length == offset);
-			attach_f(priv, curr);
-			count++;
-			goto restart;
-		}
-	}
-	__fprintf(stderr, "Bug? should not break this loop");
-	return -1;
-#undef __fprintf
-}
-
-/*
  * Worker thread to receive response messages
  */
 static void *
-__xpuConnectSessionWorkerAlloc(void *__priv, size_t sz)
+__xpuConnectAllocCommand(void *__priv, size_t sz)
 {
 	return malloc(sz);
 }
 
 static void
-__xpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
+__xpuConnectAttachCommand(void *__priv, XpuCommand *xcmd)
 {
 	XpuConnection *conn = __priv;
 
@@ -207,15 +76,12 @@ __xpuConnectSessionWorkerAttach(void *__priv, XpuCommand *xcmd)
 	SetLatch(MyLatch);
 	pthreadMutexUnlock(&conn->mutex);
 }
+TEMPLATE_XPU_CONNECT_RECEIVE_COMMANDS(__xpuConnect)
 
 static void *
 __xpuConnectSessionWorker(void *__priv)
 {
 	XpuConnection *conn = __priv;
-
-#define __fprintf(filp,fmt,...)										\
-	fprintf((filp), "[%s; %s:%d] " fmt "\n",						\
-			conn->devname, __FILE_NAME__, __LINE__, ##__VA_ARGS__)
 
 	for (;;)
 	{
@@ -234,7 +100,8 @@ __xpuConnectSessionWorker(void *__priv)
 		{
 			if (errno == EINTR)
 				continue;
-			__fprintf(stderr, "failed on poll(2): %m");
+			fprintf(stderr, "[%s; %s:%d] failed on poll(2): %m\n",
+					conn->devname, __FILE_NAME__, __LINE__);
 			break;
 		}
 		else if (nevents > 0)
@@ -242,7 +109,6 @@ __xpuConnectSessionWorker(void *__priv)
 			Assert(nevents == 1);
 			if (pfd.revents & ~POLLIN)
 			{
-				__fprintf(stderr, "peer socket closed.");
 				pthreadMutexLock(&conn->mutex);
 				conn->terminated = 1;
 				SetLatch(MyLatch);
@@ -251,10 +117,9 @@ __xpuConnectSessionWorker(void *__priv)
 			}
 			else if (pfd.revents & POLLIN)
 			{
-				if (xpuConnectReceiveCommands(conn->sockfd,
-											  __xpuConnectSessionWorkerAlloc,
-											  __xpuConnectSessionWorkerAttach,
-											  conn, conn->devname) < 0)
+				if (__xpuConnectReceiveCommands(conn->sockfd,
+												conn,
+												conn->devname) < 0)
 					break;
 			}
 		}
@@ -265,7 +130,6 @@ __xpuConnectSessionWorker(void *__priv)
 	pthreadMutexUnlock(&conn->mutex);
 
 	return NULL;
-#undef __fprintf
 }
 
 /*
@@ -424,21 +288,16 @@ xpuclientCleanupConnections(ResourceReleasePhase phase,
  * ----------------------------------------------------------------
  */
 static uint32_t
-__build_session_xact_id_vector(StringInfo buf)
+__build_session_xact_state(StringInfo buf)
 {
-	uint32_t	offset = 0;
+	Size		bufsz;
+	char	   *buffer;
 
-	if (nParallelCurrentXids > 0)
-	{
-		uint32_t	sz = VARHDRSZ + sizeof(TransactionId) * nParallelCurrentXids;
-		uint32_t	temp;
+	bufsz = EstimateTransactionStateSpace();
+	buffer = alloca(bufsz);
+	SerializeTransactionState(bufsz, buffer);
 
-		SET_VARSIZE(&temp, sz);
-		offset = __appendBinaryStringInfo(buf, &temp, sizeof(uint32_t));
-		appendBinaryStringInfo(buf, (char *)ParallelCurrentXids,
-							   sizeof(TransactionId) * nParallelCurrentXids);
-	}
-	return offset;
+	return __appendBinaryStringInfo(buf, buffer, bufsz);
 }
 
 static uint32_t
@@ -606,7 +465,7 @@ pgstromBuildSessionInfo(PlanState *ps,
 	session->kcxt_kvars_nslots = kcxt_kvars_nslots;
 	session->xpucode_use_debug_code = pgstrom_use_debug_code;
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
-	session->xact_id_array = __build_session_xact_id_vector(&buf);
+	session->session_xact_state = __build_session_xact_state(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
 	memcpy(buf.data, session, session_sz);
@@ -725,6 +584,8 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 
 	while (!pts->scan_done)
 	{
+		CHECK_FOR_INTERRUPTS();
+
 		pthreadMutexLock(&conn->mutex);
 		/* device error checks */
 		if (conn->errorbuf.errcode != ERRCODE_STROM_SUCCESS)
@@ -802,14 +663,6 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 }
 
 static XpuCommand *
-pgstromScanChunkArrowFdw(pgstromTaskState *pts,
-						 struct iovec *xcmd_iov, int *xcmd_iovcnt)
-{
-	elog(ERROR, "not implemented yet");
-	return NULL;
-}
-
-static XpuCommand *
 pgstromScanChunkGpuCache(pgstromTaskState *pts,
 						 struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
@@ -823,6 +676,10 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 static TupleTableSlot *
 pgstromScanNextTuple(pgstromTaskState *pts)
 {
+	TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
+
+	if (pgstromFetchFallbackTuple(pts, slot))
+		return slot;
 	for (;;)
 	{
 		kern_data_store *kds = pts->curr_kds;
@@ -830,7 +687,6 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 
 		if (index < kds->nitems)
 		{
-			TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
 			kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds, index);
 
 			pts->curr_htup.t_len = tupitem->t_len;
@@ -896,7 +752,12 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
  */
 void
 pgstromExecInitTaskState(pgstromTaskState *pts,
-						 List *outer_dev_quals)
+						 uint64_t devkind_mask,	/* DEVKIND_* */
+						 List *outer_quals,
+						 const Bitmapset *outer_refs,
+						 Oid   brin_index_oid,
+						 List *brin_index_conds,
+						 List *brin_index_quals)
 {
 	EState		   *estate = pts->css.ss.ps.state;
 	CustomScan	   *cscan = (CustomScan *)pts->css.ss.ps.plan;
@@ -905,8 +766,6 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	TupleDesc		tupdesc_dst;
 	List		   *tlist_dev = NIL;
 	ListCell	   *lc;
-//	ArrowFdwState  *af_state = NULL;
-	char			format;
 
 	/*
 	 * PG-Strom supports:
@@ -916,16 +775,32 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	if (RelationGetForm(rel)->relkind == RELKIND_RELATION ||
 		RelationGetForm(rel)->relkind == RELKIND_MATVIEW)
 	{
-		Oid		am_oid = RelationGetForm(rel)->relam;
+		SMgrRelation smgr = RelationGetSmgr(rel);
+		Oid			am_oid = RelationGetForm(rel)->relam;
+		const char *kds_pathname = relpath(smgr->smgr_rnode, MAIN_FORKNUM);
 
 		if (am_oid != HEAP_TABLE_AM_OID)
 			elog(ERROR, "PG-Strom does not support table access method: %s",
 				 get_am_name(am_oid));
+
+		/* setup BRIN-index if any */
+		pgstromBrinIndexExecBegin(pts,
+								  brin_index_oid,
+								  brin_index_conds,
+								  brin_index_quals);
+		if ((devkind_mask & DEVKIND__NVIDIA_GPU) != 0)
+			pts->optimal_gpus = GetOptimalGpuForRelation(rel);
+		if ((devkind_mask & DEVKIND__NVIDIA_DPU) != 0)
+			pts->ds_entry = GetOptimalDpuForRelation(rel, &kds_pathname);
+		pts->kds_pathname = kds_pathname;
 	}
 	else if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
 	{
-		//call pgstromArrowFdwExecBegin here
-		elog(ERROR, "Arrow support is not implemented yet");
+		if (!pgstromArrowFdwExecInit(pts,
+									 devkind_mask,
+									 outer_quals,
+									 outer_refs))
+			elog(ERROR, "Bug? only arrow_fdw is supported in PG-Strom");
 	}
 	else
 	{
@@ -951,10 +826,10 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	/*
 	 * Init resources for CPU fallbacks
 	 */
-	outer_dev_quals = (List *)
-		fixup_varnode_to_origin((Node *)outer_dev_quals,
+	outer_quals = (List *)
+		fixup_varnode_to_origin((Node *)outer_quals,
 								cscan->custom_scan_tlist);
-	pts->base_quals = ExecInitQual(outer_dev_quals, &pts->css.ss.ps);
+	pts->base_quals = ExecInitQual(outer_quals, &pts->css.ss.ps);
 	foreach (lc, cscan->custom_scan_tlist)
 	{
 		TargetEntry *tle = lfirst(lc);
@@ -966,35 +841,49 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 											  table_slot_callbacks(rel));
 	pts->base_proj = ExecBuildProjectionInfo(tlist_dev,
 											 pts->css.ss.ps.ps_ExprContext,
-											 pts->base_slot,
+											 pts->css.ss.ss_ScanTupleSlot,
 											 &pts->css.ss.ps,
 											 RelationGetDescr(rel));
 	/*
 	 * Setup request buffer
 	 */
-	if (pts->af_state)
+	if (pts->arrow_state)		/* Apache Arrow */
 	{
 		pts->cb_next_chunk = pgstromScanChunkArrowFdw;
-		format = KDS_FORMAT_ARROW;
+		pts->cb_next_tuple = pgstromScanNextTuple;
+	    __setupTaskStateRequestBuffer(pts,
+									  NULL,
+									  tupdesc_dst,
+									  KDS_FORMAT_ARROW);
 	}
-	else if (pts->gc_state)
+	else if (pts->gcache_state)		/* GPU-Cache */
 	{
 		pts->cb_next_chunk = pgstromScanChunkGpuCache;
-		tupdesc_src = NULL;			/* no kds_src with GpuCache */
+		pts->cb_next_tuple = pgstromScanNextTuple;
+		__setupTaskStateRequestBuffer(pts,
+									  NULL,
+									  tupdesc_dst,
+									  KDS_FORMAT_COLUMN);
 	}
-	else if (pts->gd_state)
+	else if (!bms_is_empty(pts->optimal_gpus) ||	/* GPU-Direct SQL */
+			 pts->ds_entry)							/* DPU Storage */
 	{
 		pts->cb_next_chunk = pgstromRelScanChunkDirect;
-		format = KDS_FORMAT_BLOCK;
+		pts->cb_next_tuple = pgstromScanNextTuple;
+		__setupTaskStateRequestBuffer(pts,
+									  tupdesc_src,
+									  tupdesc_dst,
+									  KDS_FORMAT_BLOCK);
 	}
-	else
+	else						/* Slow normal heap storage */
 	{
 		pts->cb_next_chunk = pgstromRelScanChunkNormal;
-		format = KDS_FORMAT_ROW;
+		pts->cb_next_tuple = pgstromScanNextTuple;
+		__setupTaskStateRequestBuffer(pts,
+									  tupdesc_src,
+									  tupdesc_dst,
+									  KDS_FORMAT_ROW);
 	}
-	__setupTaskStateRequestBuffer(pts, tupdesc_src, tupdesc_dst, format);
-	pts->cb_next_tuple = pgstromScanNextTuple;
-
 	/* other fields init */
 	pts->curr_vm_buffer = InvalidBuffer;
 }
@@ -1049,6 +938,8 @@ pgstromExecEndTaskState(pgstromTaskState *pts)
 		xpuClientCloseSession(pts->conn);
 	if (pts->br_state)
 		pgstromBrinIndexExecEnd(pts);
+	if (pts->arrow_state)
+		pgstromArrowFdwExecEnd(pts->arrow_state);
 	if (pts->base_slot)
 		ExecDropSingleTupleTableSlot(pts->base_slot);
 	if (pts->css.ss.ss_currentScanDesc)
@@ -1068,12 +959,28 @@ pgstromExecResetTaskState(pgstromTaskState *pts)
 	}
 	if (pts->br_state)
 		pgstromBrinIndexExecReset(pts);
+	if (pts->arrow_state)
+		pgstromArrowFdwExecReset(pts->arrow_state);
+}
+
+/*
+ * pgstromExplainTaskState
+ */
+void
+pgstromExplainTaskState(pgstromTaskState *pts,
+						ExplainState *es,
+						List *ancestors)
+{
+
+
+
+	
 }
 
 /*
  * __xpuClientOpenSession
  */
-static void
+void
 __xpuClientOpenSession(pgstromTaskState *pts,
 					   const XpuCommand *session,
 					   pgsocket sockfd,
@@ -1126,69 +1033,6 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 			 resp->u.error.lineno,
 			 resp->u.error.funcname);
 	xpuClientPutResponse(resp);
-}
-
-/*
- * gpuClientOpenSession
- */
-static int
-__gpuClientChooseDevice(const Bitmapset *gpuset)
-{
-	static bool		rr_initialized = false;
-	static uint32	rr_counter = 0;
-
-	if (!rr_initialized)
-	{
-		rr_counter = (uint32)getpid();
-		rr_initialized = true;
-	}
-
-	if (!bms_is_empty(gpuset))
-	{
-		int		num = bms_num_members(gpuset);
-		int	   *dindex = alloca(sizeof(int) * num);
-		int		i, k;
-
-		for (i=0, k=bms_next_member(gpuset, -1);
-			 k >= 0;
-			 i++, k=bms_next_member(gpuset, k))
-		{
-			dindex[i] = k;
-		}
-		Assert(i == num);
-		return dindex[rr_counter++ % num];
-	}
-	/* a simple round-robin if no GPUs preference */
-	return (rr_counter++ % numGpuDevAttrs);
-}
-
-void
-gpuClientOpenSession(pgstromTaskState *pts,
-					 const Bitmapset *gpuset,
-					 const XpuCommand *session)
-{
-	struct sockaddr_un addr;
-	pgsocket	sockfd;
-	int			cuda_dindex = __gpuClientChooseDevice(gpuset);
-	char		namebuf[32];
-
-	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (sockfd < 0)
-		elog(ERROR, "failed on socket(2): %m");
-
-	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
-	snprintf(addr.sun_path, sizeof(addr.sun_path),
-			 ".pg_strom.%u.gpu%u.sock",
-			 PostmasterPid, cuda_dindex);
-	if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
-	{
-		close(sockfd);
-		elog(ERROR, "failed on connect('%s'): %m", addr.sun_path);
-	}
-	snprintf(namebuf, sizeof(namebuf), "GPU-%d", cuda_dindex);
-
-	__xpuClientOpenSession(pts, session, sockfd, namebuf);
 }
 
 /*

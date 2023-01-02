@@ -1,7 +1,7 @@
 /*
- * xpu_numeric.c
+ * xpu_numeric.cu
  *
- * collection of numeric type support on xPU
+ * collection of numeric type support for both of GPU and DPU
  * ----
  * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2022 (C) PG-Strom Developers Team
@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "xpu_common.h"
+#include <math.h>
 
 INLINE_FUNCTION(int)
 xpu_numeric_sign(xpu_numeric_t *num)
@@ -27,166 +28,24 @@ xpu_numeric_sign(xpu_numeric_t *num)
 	return 0;
 }
 
-INLINE_FUNCTION(void)
-set_normalized_numeric(xpu_numeric_t *result, int128_t value, int16_t weight)
-{
-	if (value == 0)
-		weight = 0;
-	else
-	{
-		while (value % 10 == 0)
-		{
-			value /= 10;
-			weight--;
-		}
-	}
-	result->isnull = false;
-	result->kind = XPU_NUMERIC_KIND__VALID;
-	result->weight = weight;
-	result->value = value;
-}
-
-STATIC_FUNCTION(bool)
-__numeric_from_varlena(kern_context *kcxt,
-					   xpu_numeric_t *result,
-					   const varlena *addr)
-{
-	uint32_t		len;
-
-	len = VARSIZE_ANY_EXHDR(addr);
-	if (len >= sizeof(uint16_t))
-	{
-		NumericChoice *nc = (NumericChoice *)VARDATA_ANY(addr);
-		uint16_t	n_head = __Fetch(&nc->n_header);
-
-		/* special case if NaN, +/-Inf */
-		if (NUMERIC_IS_SPECIAL(n_head))
-		{
-			if (NUMERIC_IS_NAN(n_head))
-				result->kind = XPU_NUMERIC_KIND__NAN;
-			else if (NUMERIC_IS_PINF(n_head))
-				result->kind = XPU_NUMERIC_KIND__POS_INF;
-			else if (NUMERIC_IS_NINF(n_head))
-				result->kind = XPU_NUMERIC_KIND__NEG_INF;
-			else
-				goto error;
-
-			result->weight = 0;
-			result->value = 0;
-		}
-		else
-		{
-			NumericDigit *digits = NUMERIC_DIGITS(nc, n_head);
-			int			weight  = NUMERIC_WEIGHT(nc, n_head) + 1;
-			int			i, ndigits = NUMERIC_NDIGITS(n_head, len);
-			int128_t	value = 0;
-
-			for (i=0; i < ndigits; i++)
-			{
-				NumericDigit dig = __Fetch(&digits[i]);
-
-				/*
-				 * Rough overflow check - PG_NBASE is 10000, therefore,
-				 * we never touch the upper limit as long as the value's
-				 * significant 14bits are all zero.
-				 */
-				if ((value >> 114) != 0)
-				{
-					STROM_ELOG(kcxt, "numeric value is out of range");
-					return false;
-				}
-				value = value * PG_NBASE + dig;
-			}
-			if (NUMERIC_SIGN(n_head) == NUMERIC_NEG)
-				value = -value;
-			weight = PG_DEC_DIGITS * (ndigits - weight);
-
-			set_normalized_numeric(result, value, weight);
-		}
-		return true;
-	}
-error:
-	STROM_ELOG(kcxt, "corrupted numeric header");
-	return false;
-}
-
-STATIC_FUNCTION(int)
-__numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
-{
-	NumericData	   *numData = (NumericData *)buffer;
-	NumericLong	   *numBody = &numData->choice.n_long;
-	NumericDigit	n_data[PG_MAX_DATA];
-	int				ndigits;
-	int				len;
-	uint16_t		n_header = (Max(weight, 0) & NUMERIC_DSCALE_MASK);
-	bool			is_negative = (value < 0);
-
-	if (is_negative)
-		value = -value;
-	switch (weight % PG_DEC_DIGITS)
-	{
-		case 3:
-		case -1:
-			value *= 10;
-			weight += 1;
-			break;
-		case 2:
-		case -2:
-			value *= 100;
-			weight += 2;
-			break;
-		case 1:
-		case -3:
-			value *= 1000;
-			weight += 3;
-			break;
-		default:
-			/* ok */
-			break;
-	}
-	Assert(weight % PG_DEC_DIGITS == 0);
-
-	ndigits = 0;
-	while (value != 0)
-    {
-		int		mod;
-
-		mod = (value % PG_NBASE);
-		value /= PG_NBASE;
-		Assert(ndigits < PG_MAX_DATA);
-		ndigits++;
-		n_data[PG_MAX_DATA - ndigits] = mod;
-	}
-	len = offsetof(NumericData, choice.n_long.n_data[ndigits]);
-
-	if (buffer)
-	{
-		memcpy(numBody->n_data,
-			   n_data + PG_MAX_DATA - ndigits,
-			   sizeof(NumericDigit) * ndigits);
-		if (is_negative)
-			n_header |= NUMERIC_NEG;
-		numBody->n_sign_dscale = n_header;
-		numBody->n_weight = ndigits - (weight / PG_DEC_DIGITS) - 1;
-
-		SET_VARSIZE(numData, len);
-	}
-	return len;
-}
-
 STATIC_FUNCTION(bool)
 xpu_numeric_datum_ref(kern_context *kcxt,
 					  xpu_datum_t *__result,
 					  const void *addr)
 {
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
+	const char	   *errmsg;
 
 	if (!addr)
 		result->isnull = true;
-	else if (!__numeric_from_varlena(kcxt, result,
-									 (const varlena *)addr))
+	else
 	{
-		return false;
+		errmsg = __xpu_numeric_from_varlena(result, (const varlena *)addr);
+		if (errmsg)
+		{
+			STROM_ELOG(kcxt, errmsg);
+			return false;
+		}
 	}
 	return true;
 }
@@ -199,7 +58,7 @@ xpu_numeric_arrow_ref(kern_context *kcxt,
 {
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
 
-	if (cmeta->attopts.common.tag != ArrowType__Decimal ||
+	if (cmeta->attopts.tag != ArrowType__Decimal ||
 		cmeta->attopts.decimal.bitWidth != 128)
 	{
 		STROM_ELOG(kcxt, "Not a convertible Arrow::Decimal value");
@@ -219,7 +78,7 @@ xpu_numeric_arrow_move(kern_context *kcxt,
 					   const kern_colmeta *cmeta,
 					   const void *addr, int len)
 {
-	if (cmeta->attopts.common.tag != ArrowType__Decimal ||
+	if (cmeta->attopts.tag != ArrowType__Decimal ||
 		cmeta->attopts.decimal.bitWidth != 128)
 	{
 		STROM_ELOG(kcxt, "Not a convertible Arrow::Decimal value");
@@ -227,9 +86,9 @@ xpu_numeric_arrow_move(kern_context *kcxt,
 	}
 	if (!addr)
 		return 0;
-	return __numeric_to_varlena(buffer,
-								cmeta->attopts.decimal.scale,
-								*((int128_t *)addr));
+	return __xpu_numeric_to_varlena(buffer,
+									cmeta->attopts.decimal.scale,
+									*((int128_t *)addr));
 }
 
 PUBLIC_FUNCTION(int)
@@ -259,7 +118,7 @@ xpu_numeric_datum_store(kern_context *kcxt,
 		}
 		return sz;
 	}
-	return __numeric_to_varlena(buffer, arg->weight, arg->value);
+	return __xpu_numeric_to_varlena(buffer, arg->weight, arg->value);
 }
 
 PUBLIC_FUNCTION(bool)
@@ -335,7 +194,7 @@ PG_NUMERIC_TO_INT_TEMPLATE(int4,INT_MIN,INT_MAX)
 PG_NUMERIC_TO_INT_TEMPLATE(int8,LLONG_MIN,LLONG_MAX)
 PG_NUMERIC_TO_INT_TEMPLATE(money,LLONG_MIN,LLONG_MAX)
 
-#define PG_NUMERIC_TO_FLOAT_TEMPLATE(TARGET,__TYPE)					\
+#define PG_NUMERIC_TO_FLOAT_TEMPLATE(TARGET,__TEMP,__CAST)			\
 	PUBLIC_FUNCTION(bool)											\
 	pgfn_numeric_to_##TARGET(XPU_PGFUNCTION_ARGS)					\
 	{																\
@@ -352,7 +211,7 @@ PG_NUMERIC_TO_INT_TEMPLATE(money,LLONG_MIN,LLONG_MAX)
 			return true;											\
 		if (datum.kind == XPU_NUMERIC_KIND__VALID)					\
 		{															\
-			__TYPE		fval = datum.value;							\
+			__TEMP		fval = datum.value;							\
 			int16_t		weight = datum.weight;						\
 																	\
 			if (fval != 0.0)										\
@@ -373,19 +232,19 @@ PG_NUMERIC_TO_INT_TEMPLATE(money,LLONG_MIN,LLONG_MAX)
 					return false;									\
 				}													\
 			}														\
-			result->value = fval;									\
+			result->value = __CAST(fval);							\
 		}															\
 		else if (datum.kind == XPU_NUMERIC_KIND__POS_INF)			\
-			result->value = INFINITY;								\
+			result->value = __CAST(INFINITY);						\
 		else if (datum.kind == XPU_NUMERIC_KIND__NEG_INF)			\
-			result->value = -INFINITY;								\
+			result->value = __CAST(-INFINITY);						\
 		else														\
-			result->value = NAN;									\
+			result->value = __CAST(NAN);							\
 		return true;												\
 	}
-PG_NUMERIC_TO_FLOAT_TEMPLATE(float2,float)
-PG_NUMERIC_TO_FLOAT_TEMPLATE(float4,float)
-PG_NUMERIC_TO_FLOAT_TEMPLATE(float8,double)
+PG_NUMERIC_TO_FLOAT_TEMPLATE(float2, float,__to_fp16)
+PG_NUMERIC_TO_FLOAT_TEMPLATE(float4, float,__to_fp32)
+PG_NUMERIC_TO_FLOAT_TEMPLATE(float8,double,__to_fp64)
 
 #define PG_INT_TO_NUMERIC_TEMPLATE(SOURCE)							\
 	PUBLIC_FUNCTION(bool)											\
@@ -410,7 +269,8 @@ PG_INT_TO_NUMERIC_TEMPLATE(int4)
 PG_INT_TO_NUMERIC_TEMPLATE(int8)
 PG_INT_TO_NUMERIC_TEMPLATE(money)
 
-#define PG_FLOAT_TO_NUMERIC_TEMPLATE(SOURCE,__TYPE,__MODF,__RINTL)	\
+#define PG_FLOAT_TO_NUMERIC_TEMPLATE(SOURCE,__TYPE,__CAST,			\
+									 __MODF,__RINTL)				\
 	PUBLIC_FUNCTION(bool)											\
 	pgfn_##SOURCE##_to_numeric(XPU_PGFUNCTION_ARGS)					\
 	{																\
@@ -426,7 +286,7 @@ PG_INT_TO_NUMERIC_TEMPLATE(money)
 		result->isnull = datum.isnull;								\
 		if (result->isnull)											\
 			return true;											\
-		fval = datum.value;											\
+		fval = __CAST(datum.value);									\
 		if (isinf(fval))											\
 			result->kind = (fval > 0.0								\
 							? XPU_NUMERIC_KIND__POS_INF				\
@@ -452,9 +312,9 @@ PG_INT_TO_NUMERIC_TEMPLATE(money)
 		}															\
 		return true;												\
 	}
-PG_FLOAT_TO_NUMERIC_TEMPLATE(float2,float,modff,rintf)
-PG_FLOAT_TO_NUMERIC_TEMPLATE(float4,float,modff,rintf)
-PG_FLOAT_TO_NUMERIC_TEMPLATE(float8,double,modf,rint)
+PG_FLOAT_TO_NUMERIC_TEMPLATE(float2, float,__to_fp32,modff,rintf)
+PG_FLOAT_TO_NUMERIC_TEMPLATE(float4, float,__to_fp32,modff,rintf)
+PG_FLOAT_TO_NUMERIC_TEMPLATE(float8,double,__to_fp64,modf, rint)
 
 STATIC_FUNCTION(int)
 __numeric_compare(const xpu_numeric_t *a, const xpu_numeric_t *b)

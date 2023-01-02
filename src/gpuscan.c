@@ -253,7 +253,7 @@ create_gpuscan_path(PlannerInfo *root,
 	cpath->path.startup_cost = startup_cost + startup_delay;
 	cpath->path.total_cost = startup_cost + run_cost;
 	cpath->path.pathkeys = NIL;	/* unsorted results */
-	cpath->flags = 0;
+	cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	cpath->custom_paths = NIL;
 	cpath->custom_private = list_make1(gs_info);
 	cpath->methods = &gpuscan_path_methods;

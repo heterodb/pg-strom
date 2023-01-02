@@ -407,6 +407,44 @@ pgstromTryFindBrinIndex(PlannerInfo *root,
 	return indexOpt;
 }
 
+/*
+ * cost_brin_bitmap_build
+ */
+Cost
+cost_brin_bitmap_build(PlannerInfo *root,
+					   RelOptInfo *baserel,
+					   IndexOptInfo *indexOpt,
+					   List *indexQuals)
+{
+	BrinStatsData	statsData;
+	Relation		indexRel;
+	Cost			index_build_cost;
+	double			index_nitems;
+	double			spc_rand_page_cost;
+	double			spc_seq_page_cost;
+	ListCell	   *lc;
+
+	indexRel = index_open(indexOpt->indexoid, AccessShareLock);
+	brinGetStats(indexRel, &statsData);
+	index_close(indexRel, AccessShareLock);
+
+	get_tablespace_page_costs(indexOpt->reltablespace,
+							  &spc_rand_page_cost,
+							  &spc_seq_page_cost);
+	index_build_cost = spc_rand_page_cost * statsData.revmapNumPages;
+	index_nitems = ceil(baserel->pages / (double)statsData.pagesPerRange);
+	foreach (lc, indexQuals)
+	{
+		Node	   *qual = lfirst(lc);
+		QualCost	qcost;
+
+		cost_qual_eval_node(&qcost, qual, root);
+		index_build_cost += (qcost.startup +
+							 qcost.per_tuple * index_nitems);
+	}
+	return index_build_cost;
+}
+
 
 typedef struct
 {
@@ -512,6 +550,7 @@ pgstromBrinIndexExecReset(pgstromTaskState *pts)
 {
 	/* See, ExecReScanBitmapIndexScan */
 	BrinIndexState *br_state = pts->br_state;
+	BrinIndexResults *br_results = br_state->brinResults;
 
 	if (br_state->NumRuntimeKeys != 0)
 	{
@@ -526,6 +565,10 @@ pgstromBrinIndexExecReset(pgstromTaskState *pts)
 
 	br_state->curr_chunk_id = 0;
 	br_state->curr_block_id = UINT_MAX;
+
+	br_results->build_status = 0;
+	br_results->nitems   = 0;
+	pg_atomic_init_u32(&br_results->index, 0);
 }
 
 /*
@@ -961,17 +1004,6 @@ pgstromBrinIndexInitDSM(pgstromTaskState *pts, char *dsm_addr)
 	br_state->brinResults = br_results;
 
 	return (dsm_addr ? dsm_len : 0);
-}
-
-void
-pgstromBrinIndexReInitDSM(pgstromTaskState *pts)
-{
-	BrinIndexState *br_state = pts->br_state;
-	BrinIndexResults *br_results = br_state->brinResults;
-
-	br_results->build_status = 0;
-	br_results->nitems   = 0;
-	pg_atomic_init_u32(&br_results->index, 0);
 }
 
 Size

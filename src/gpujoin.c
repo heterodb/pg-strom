@@ -936,7 +936,7 @@ create_gpujoin_path(PlannerInfo *root,
 	gjpath->cpath.path.parallel_workers = parallel_nworkers;
 	gjpath->cpath.path.pathkeys = NIL;
 	gjpath->cpath.path.rows = joinrel->rows;
-	gjpath->cpath.flags = 0;
+	gjpath->cpath.flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	gjpath->cpath.methods = &gpujoin_path_methods;
 	gjpath->outer_relid = 0;
 	gjpath->outer_quals = NULL;

@@ -26,7 +26,7 @@ static List	   *devfunc_code_slot[DEVFUNC_INFO_NSLOTS];	/* by FuncOpCode */
 
 #define TYPE_OPCODE(NAME,OID,EXTENSION)		\
 	{ EXTENSION, #NAME,						\
-	  TypeOpCode__##NAME, DEVKERN__ANY,		\
+	  TypeOpCode__##NAME, DEVKIND__ANY,		\
 	  devtype_##NAME##_hash, sizeof(xpu_##NAME##_t), InvalidOid},
 static struct {
 	const char	   *type_extension;
@@ -39,9 +39,9 @@ static struct {
 } devtype_catalog[] = {
 #include "xpu_opcodes.h"
 	/* alias device data types */
-	{NULL, "varchar", TypeOpCode__text, DEVKERN__ANY,
+	{NULL, "varchar", TypeOpCode__text, DEVKIND__ANY,
 	 devtype_text_hash, sizeof(xpu_text_t), TEXTOID},
-	{NULL, "cidr",    TypeOpCode__inet, DEVKERN__ANY,
+	{NULL, "cidr",    TypeOpCode__inet, DEVKIND__ANY,
 	 devtype_inet_hash, sizeof(xpu_inet_t), INETOID},
 	{NULL, NULL, TypeOpCode__Invalid, 0, NULL, 0, InvalidOid}
 };
@@ -147,7 +147,7 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	devtype_info  **subtypes = alloca(sizeof(devtype_info *) * tupdesc->natts);
 	devtype_info   *dtype;
 	MemoryContext	oldcxt;
-	uint32_t		extra_flags = DEVKERN__ANY;
+	uint32_t		extra_flags = DEVKIND__ANY;
 	int				j;
 
 	for (j=0; j < tupdesc->natts; j++)
@@ -991,8 +991,9 @@ __codegen_func_expression(codegen_context *context,
 	ListCell	   *lc;
 
 	dfunc = pgstrom_devfunc_lookup(func_oid, func_args, func_collid);
-	if (!dfunc)
-		__Elog("function %s is not supported",
+	if (!dfunc ||
+		(dfunc->func_flags & context->required_flags) != context->required_flags)
+		__Elog("function %s is not supported on the target device",
 			   format_procedure(func_oid));
 	dtype = dfunc->func_rettype;
 	context->device_cost += dfunc->func_cost;
@@ -1522,7 +1523,7 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 	if (p_extra_bufsz)
 		*p_extra_bufsz = context.extra_bufsz;
 	if (p_kvars_nslots)
-		*p_kvars_nslots = nexprs + nattrs;
+		*p_kvars_nslots = Max(*p_kvars_nslots, list_length(context.kvars_depth));
 	if (p_used_params)
 		*p_used_params = context.used_params;
 }
@@ -1530,7 +1531,7 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 /*
  * pgstrom_gpu_expression
  *
- * checker whether the supplied expression is executable on GPU devices.
+ * checks whether the expression is executable on GPU devices.
  */
 bool
 pgstrom_gpu_expression(Expr *expr,
@@ -1542,6 +1543,39 @@ pgstrom_gpu_expression(Expr *expr,
 	memset(&context, 0, sizeof(context));
 	context.elevel = DEBUG2;
 	context.top_expr = expr;
+	context.required_flags = DEVKIND__NVIDIA_GPU;
+	context.input_rels_tlist = input_rels_tlist;
+
+	if (IsA(expr, List))
+	{
+		if (list_length((List *)expr) == 1)
+			expr = linitial((List *)expr);
+		else
+			expr = make_andclause((List *)expr);
+	}
+	if (codegen_expression_walker(&context, expr) < 0)
+		return false;
+	if (p_devcost)
+		*p_devcost = context.device_cost;
+	return true;
+}
+
+/*
+ * pgstrom_dpu_expression
+ *
+ * checks whether the expression is executable on DPU devices.
+ */
+bool
+pgstrom_dpu_expression(Expr *expr,
+					   List *input_rels_tlist,
+					   int *p_devcost)
+{
+	codegen_context	context;
+
+	memset(&context, 0, sizeof(context));
+	context.elevel = DEBUG2;
+	context.top_expr = expr;
+	context.required_flags = DEVKIND__NVIDIA_DPU;
 	context.input_rels_tlist = input_rels_tlist;
 
 	if (IsA(expr, List))
@@ -1776,7 +1810,7 @@ __xpucode_to_cstring(StringInfo buf,
 			break;
 		case FuncOpCode__Projection:
 			__xpucode_projection_cstring(buf, kexp, css, es, ancestors);
-			break;
+			return;
 		case FuncOpCode__BoolExpr_And:
 			appendStringInfo(buf, "{Bool::AND");
 			break;

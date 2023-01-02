@@ -1,7 +1,7 @@
 /*
- * xpu_common.c
+ * xpu_common.cu
  *
- * Core implementation of xPU device code
+ * Core implementation of GPU/DPU device code
  * ----
  * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2022 (C) PG-Strom Developers Team
@@ -281,7 +281,7 @@ kern_form_heaptuple(kern_context *kcxt,
 			{
 				if (t_next > t_hoff)
 					memset((char *)htup + t_hoff, 0, t_next - t_hoff);
-				buffer = (char *)htup + t_hoff;
+				buffer = (char *)htup + t_next;
 			}
 			sz = desc->slot_ops->xpu_datum_store(kcxt, buffer, datum);
 			if (sz < 0)
@@ -474,20 +474,6 @@ kern_extract_heap_tuple(kern_context *kcxt,
 			}
 		}
 	}
-	/* other fields, which refers out of ranges, are NULL */
-	while (kvars_nloads > 0 &&
-		   kvars->var_depth == curr_depth)
-	{
-		const kern_colmeta *cmeta = &kds->colmeta[kvars->var_resno-1];
-		int		slot_id = kvars->var_slot_id;
-
-		assert(slot_id < kcxt->kvars_nslots);
-		kcxt->kvars_cmeta[slot_id] = cmeta;
-		kcxt->kvars_addr[slot_id]  = NULL;
-		kcxt->kvars_len[slot_id]   = -1;
-		kvars++;
-		kvars_nloads--;
-	}
 	return (kvars_nloads_saved - kvars_nloads);
 }
 
@@ -524,7 +510,7 @@ arrow_fetch_secondary_index(kern_context *kcxt,
 							uint64_t *p_end)
 {
 	char	   *base = (char *)kds + __kds_unpack(values_offset);
-	char	   *extra = (char *)kds + __kds_unpack(values_length);
+	//char	   *extra = (char *)kds + __kds_unpack(values_length);
 	uint64_t	start, end;
 
 	if (!values_offset || !values_length)
@@ -558,7 +544,7 @@ arrow_fetch_secondary_index(kern_context *kcxt,
 	return true;
 }
 
-INLINE_FUNCTION(bool)
+STATIC_FUNCTION(bool)
 __arrow_fetch_bool_datum(kern_context *kcxt,
 						 kern_data_store *kds,
 						 kern_colmeta *cmeta,
@@ -590,7 +576,7 @@ __arrow_fetch_bool_datum(kern_context *kcxt,
 	return true;
 }
 
-INLINE_FUNCTION(bool)
+STATIC_FUNCTION(bool)
 __arrow_fetch_inline_datum(kern_context *kcxt,
 						   kern_data_store *kds,
 						   kern_colmeta *cmeta,
@@ -598,7 +584,7 @@ __arrow_fetch_inline_datum(kern_context *kcxt,
 						   void **p_addr,
 						   int *p_len)
 {
-	int			unitsz = cmeta->attopts.common.unitsz;
+	int		unitsz = cmeta->attopts.unitsz;
 
 	if (unitsz <= 0)
 	{
@@ -622,7 +608,7 @@ __arrow_fetch_inline_datum(kern_context *kcxt,
 	}
 	/* elsewhere, datum is NULL */
 	*p_addr = NULL;
-	*p_len  = -1;
+	*p_len = -1;
 	return true;
 }
 
@@ -760,9 +746,9 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 		int			len = -1;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		switch (cmeta->attopts.common.tag)
+		switch (cmeta->attopts.tag)
 		{
-			case ArrowNodeTag__Bool:
+			case ArrowType__Bool:
 				/* xpu_bool_t */
 				if (!__arrow_fetch_bool_datum(kcxt,
 											  kds,
@@ -774,14 +760,14 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					cmeta = NULL;	/* mark addr points xpu_datum_t */
 				break;
 
-			case ArrowNodeTag__Int:
-			case ArrowNodeTag__FloatingPoint:
-			case ArrowNodeTag__Decimal:
-			case ArrowNodeTag__Date:
-			case ArrowNodeTag__Time:
-			case ArrowNodeTag__Timestamp:
-			case ArrowNodeTag__Interval:
-			case ArrowNodeTag__FixedSizeBinary:
+			case ArrowType__Int:
+			case ArrowType__FloatingPoint:
+			case ArrowType__Decimal:
+			case ArrowType__Date:
+			case ArrowType__Time:
+			case ArrowType__Timestamp:
+			case ArrowType__Interval:
+			case ArrowType__FixedSizeBinary:
 				if (!__arrow_fetch_inline_datum(kcxt,
 												kds,
 												cmeta,
@@ -791,8 +777,8 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					return -1;
 				break;
 
-			case ArrowNodeTag__Utf8:
-			case ArrowNodeTag__Binary:
+			case ArrowType__Utf8:
+			case ArrowType__Binary:
 				if (!__arrow_fetch_variable_datum(kcxt,
 												  kds,
 												  cmeta,
@@ -802,8 +788,8 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 												  &len))
 					return -1;
 				break;
-			case ArrowNodeTag__LargeUtf8:
-			case ArrowNodeTag__LargeBinary:
+			case ArrowType__LargeUtf8:
+			case ArrowType__LargeBinary:
 				if (!__arrow_fetch_variable_datum(kcxt,
 												  kds,
 												  cmeta,
@@ -814,7 +800,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					return -1;
 				break;
 
-			case ArrowNodeTag__List:
+			case ArrowType__List:
 				/* xpu_array_t */
 				if (!__arrow_fetch_array_datum(kcxt,
 											   kds,
@@ -827,7 +813,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					cmeta = NULL;	/* mark addr points xpu_array_t */
 				break;
 
-			case ArrowNodeTag__LargeList:
+			case ArrowType__LargeList:
 				/* xpu_array_t */
 				if (!__arrow_fetch_array_datum(kcxt,
 											   kds,
@@ -840,7 +826,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 					cmeta = NULL;	/* mark addr points xpu_array_t */
 				break;
 
-			case ArrowNodeTag__Struct:	/* composite */
+			case ArrowType__Struct:	/* composite */
 				/* xpu_composite_t */
 				if (!__arrow_fetch_composite_datum(kcxt,
 												   kds,
@@ -920,12 +906,30 @@ ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
 			kds  = kds_inners[depth - 1];
 			htup = htup_inners[depth - 1];
 		}
-		index += kern_extract_heap_tuple(kcxt,
-										 kds,
-										 htup,
-										 depth,
-										 kexp->u.load.kvars + index,
-										 kexp->u.load.nloads - index);
+
+		if (htup)
+		{
+			index += kern_extract_heap_tuple(kcxt,
+											 kds,
+											 htup,
+											 depth,
+											 kexp->u.load.kvars + index,
+											 kexp->u.load.nloads - index);
+		}
+		/* ensure NULL fields, if kvars are not advanced, or htup is NULL */
+		while (index < kexp->u.load.nloads)
+		{
+			const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index];
+			int			slot_id = kvars->var_slot_id;
+
+			assert(slot_id < kcxt->kvars_nslots);
+			if (kvars->var_depth != depth)
+				break;
+			kcxt->kvars_cmeta[slot_id] = NULL;
+			kcxt->kvars_addr[slot_id]  = NULL;
+			kcxt->kvars_len[slot_id]   = -1;
+			index++;
+		}
 	}
 	return EXEC_KERN_EXPRESSION(kcxt, karg, __result);
 }
@@ -973,6 +977,21 @@ ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
 		if (count < 0)
 			return false;
 		index += count;
+
+		/* fill up by NULL, if kvars are not assigned. */
+		while (index < kexp->u.load.nloads)
+		{
+			const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index];
+			int		slot_id = kvars->var_slot_id;
+
+			assert(slot_id < kcxt->kvars_nslots);
+			if (kvars->var_depth != depth)
+				break;
+			kcxt->kvars_cmeta[slot_id] = NULL;
+			kcxt->kvars_addr[slot_id]  = NULL;
+			kcxt->kvars_len[slot_id]   = -1;
+			index++;
+		}
 	}
 	return EXEC_KERN_EXPRESSION(kcxt, karg, __result);
 }

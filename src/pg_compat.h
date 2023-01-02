@@ -375,4 +375,12 @@ typedef void (*shmem_request_hook_type) (void);
 extern shmem_request_hook_type	shmem_request_hook;
 #endif
 
+/*
+ * PG15 requires CustomPath CUSTOMPATH_SUPPORT_PROJECTION if it supports
+ * projection.
+ */
+#if PG_VERSION_NUM < 150000
+#define CUSTOMPATH_SUPPORT_PROJECTION		0x0004
+#endif
+
 #endif	/* PG_COMPAT_H */

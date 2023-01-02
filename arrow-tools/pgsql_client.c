@@ -542,7 +542,7 @@ pgsql_setup_attribute(PGconn *conn,
 	"         typrelid, typelem, NULL::int typtypmod"			\
 	"    FROM pg_catalog.pg_type t"								\
 	"   WHERE t.typbasetype = 0"								\
-	"UNION ALL"													\
+	" UNION ALL "												\
 	"  SELECT b.depth+1, t.oid type_id, b.base_id,"				\
 	"         b.typname, b.typnamespace,"						\
 	"         b.typlen, b.typbyval, b.typalign, b.typtype,"		\
@@ -1027,7 +1027,7 @@ sqldb_begin_query(void *sqldb_state,
 	PQclear(res);
 
 	/* move to the first tuple(-set) */
-	if (pgsql_move_next(pgstate, NULL) < 0)
+	if (!pgsql_move_next(pgstate, NULL))
 		return NULL;
 	return pgsql_create_buffer(pgstate, af_info, dictionary_list);
 }

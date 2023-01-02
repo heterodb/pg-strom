@@ -162,6 +162,36 @@ gpuDirectInitDriver(void)
 }
 
 /*
+ * gpuDirectOpenDriver
+ */
+static int	  (*p_gpudirect_open_driver)() = NULL;
+static void
+gpuDirectOpenDriver(void)
+{
+	if (!p_gpudirect_open_driver)
+	{
+		if (p_gpudirect_open_driver())
+			heterodbExtraEreport(ERROR);
+	}
+}
+
+/*
+ * gpuDirectCloseDriver
+ */
+static int	  (*p_gpudirect_close_driver)() = NULL;
+static bool		gpudirect_close_driver_is_registered = false;
+
+static void
+gpuDirectCloseDriverOnExit(int code, Datum arg)
+{
+	if (p_gpudirect_close_driver)
+	{
+		if (p_gpudirect_close_driver())
+			heterodbExtraEreport(LOG);
+	}
+}
+
+/*
  * gpuDirectFileDescOpen
  */
 static int (*p_gpudirect_file_desc_open)(
@@ -174,6 +204,12 @@ gpuDirectFileDescOpen(GPUDirectFileDesc *gds_fdesc, File pg_fdesc)
 	int		rawfd = FileGetRawDesc(pg_fdesc);
 	char   *pathname = FilePathName(pg_fdesc);
 
+	if (!gpudirect_close_driver_is_registered)
+	{
+		gpuDirectOpenDriver();
+		on_proc_exit(gpuDirectCloseDriverOnExit, 0);
+		gpudirect_close_driver_is_registered = true;
+	}
 	if (p_gpudirect_file_desc_open(gds_fdesc, rawfd, pathname))
 		heterodbExtraEreport(ERROR);
 }
@@ -189,6 +225,12 @@ void
 gpuDirectFileDescOpenByPath(GPUDirectFileDesc *gds_fdesc,
 							const char *pathname)
 {
+	if (!gpudirect_close_driver_is_registered)
+	{
+		gpuDirectOpenDriver();
+		on_proc_exit(gpuDirectCloseDriverOnExit, 0);
+		gpudirect_close_driver_is_registered = true;
+	}
 	if (p_gpudirect_file_desc_open_by_path(gds_fdesc, pathname))
 		heterodbExtraEreport(ERROR);
 }
@@ -499,6 +541,9 @@ pgstrom_init_extra(void)
 										 &has_cufile,
 										 &has_nvme_strom,
 										 &default_gpudirect_driver);
+		if (api_version < HETERODB_EXTRA_API_VERSION)
+			elog(ERROR, "HeteroDB Extra module is too old [API version=%u]",
+				 api_version);
 		/* pg_strom.gpudirect_driver */
 		DefineCustomEnumVariable("pg_strom.gpudirect_driver",
 								 "Selection of the GPUDirectSQL Driver",
@@ -517,6 +562,8 @@ pgstrom_init_extra(void)
 		if (prefix)
 		{
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, init_driver);
+			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, open_driver);
+			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, close_driver);
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, file_desc_open);
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, file_desc_open_by_path);
 			LOOKUP_GPUDIRECT_EXTRA_FUNCTION(prefix, file_desc_close);
@@ -535,6 +582,8 @@ pgstrom_init_extra(void)
 		p_heterodb_extra_error_data = NULL;
 		p_heterodb_extra_module_init = NULL;
 		p_gpudirect_init_driver = NULL;
+		p_gpudirect_open_driver = NULL;
+		p_gpudirect_close_driver = NULL;
 		p_gpudirect_file_desc_open = NULL;
 		p_gpudirect_file_desc_open_by_path = NULL;
 		p_gpudirect_file_desc_close = NULL;

@@ -584,24 +584,16 @@ ArrowGetForeignPlan(PlannerInfo *root,
 	Bitmapset  *referenced = NULL;
 	List	   *ref_list = NIL;
 	ListCell   *lc;
-	int			i, j, k;
+	int			j, k;
 
-	Assert(IS_SIMPLE_REL(baserel));
-	/* pick up referenced attributes */
 	foreach (lc, baserel->baserestrictinfo)
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
 
 		pull_varattnos((Node *)rinfo->clause, baserel->relid, &referenced);
 	}
-	for (i=baserel->min_attr, j=0; i <= baserel->max_attr; i++, j++)
-	{
-		if (baserel->attr_needed[j] != NULL)
-		{
-			k = i - FirstLowInvalidHeapAttributeNumber;
-			referenced = bms_add_member(referenced, k);
-		}
-	}
+	referenced = pgstrom_pullup_outer_refs(root, baserel, referenced);
+
 	for (k = bms_next_member(referenced, -1);
 		 k >= 0;
 		 k = bms_next_member(referenced, k))

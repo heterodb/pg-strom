@@ -1,7 +1,7 @@
 /*
- * xpu_timelib.c
+ * xpu_timelib.cu
  *
- * Collection of the primitive Date/Time type support on xPU(GPU/DPU/SPU)
+ * Collection of the primitive Date/Time type support for both of GPU and DPU
  * ----
  * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2022 (C) PG-Strom Developers Team
@@ -164,7 +164,7 @@ xpu_date_arrow_move(kern_context *kcxt,
 					const kern_colmeta *cmeta,
 					const void *addr, int len)
 {
-	if (cmeta->attopts.common.tag != ArrowNodeTag__Date)
+	if (cmeta->attopts.tag != ArrowType__Date)
 	{
 		STROM_ELOG(kcxt, "Value is not convertible to date");
 		return -1;
@@ -184,7 +184,7 @@ xpu_date_arrow_move(kern_context *kcxt,
 				break;
 			case ArrowDateUnit__MilliSecond:
 				assert(len == sizeof(uint64_t));
-				*value = *((uint64_t *)addr) / 1000
+				*value = *((uint64_t *)addr) / (SECS_PER_DAY * 1000)
 					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 				break;
 			default:
@@ -267,7 +267,7 @@ xpu_time_arrow_move(kern_context *kcxt,
 					const kern_colmeta *cmeta,
 					const void *addr, int len)
 {
-	if (cmeta->attopts.common.tag != ArrowNodeTag__Time)
+	if (cmeta->attopts.tag != ArrowType__Time)
 	{
 		STROM_ELOG(kcxt, "value is not convertible to time");
 		return -1;
@@ -445,7 +445,7 @@ xpu_timestamp_arrow_move(kern_context *kcxt,
 						 const kern_colmeta *cmeta,
 						 const void *addr, int len)
 {
-	if (cmeta->attopts.common.tag != ArrowNodeTag__Timestamp)
+	if (cmeta->attopts.tag != ArrowType__Timestamp)
 	{
 		STROM_ELOG(kcxt, "Value is not convertible to timestamp");
 		return -1;
@@ -553,7 +553,7 @@ xpu_timestamptz_arrow_move(kern_context *kcxt,
 						   const kern_colmeta *cmeta,
 						   const void *addr, int len)
 {
-	if (cmeta->attopts.common.tag != ArrowNodeTag__Timestamp)
+	if (cmeta->attopts.tag != ArrowType__Timestamp)
 	{
 		STROM_ELOG(kcxt, "Value is not convertible to timestamp");
 		return -1;
@@ -679,7 +679,7 @@ xpu_interval_arrow_move(kern_context *kcxt,
 						const kern_colmeta *cmeta,
 						const void *addr, int len)
 {
-	if (cmeta->attopts.common.tag != ArrowType__Interval)
+	if (cmeta->attopts.tag != ArrowType__Interval)
 	{
 		STROM_ELOG(kcxt, "value is not convertible to interval");
 		return -1;

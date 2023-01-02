@@ -15,94 +15,275 @@
 static char	   *pgstrom_dpu_endpoint_list;	/* GUC */
 static int		pgstrom_dpu_endpoint_default_port;	/* GUC */
 #define PGSTROM_DPU_ENDPOINT_DEFAULT_PORT	6543
+#define DEFAULT_DPU_SETUP_COST		(100 * DEFAULT_SEQ_PAGE_COST)
+#define DEFAULT_DPU_OPERATOR_COST	(1.2 * DEFAULT_CPU_OPERATOR_COST)
+#define DEFAULT_DPU_SEQ_PAGE_COST	(DEFAULT_SEQ_PAGE_COST / 4)
+#define DEFAULT_DPU_TUPLE_COST		(DEFAULT_CPU_TUPLE_COST)
 
-struct dpu_tablespace_entry
+double		pgstrom_dpu_setup_cost    = DEFAULT_DPU_SETUP_COST;		/* GUC */
+double		pgstrom_dpu_operator_cost = DEFAULT_DPU_OPERATOR_COST;	/* GUC */
+double		pgstrom_dpu_seq_page_cost = DEFAULT_DPU_SEQ_PAGE_COST;	/* GUC */
+double		pgstrom_dpu_tuple_cost    = DEFAULT_DPU_TUPLE_COST;		/* GUC */
+bool		pgstrom_dpu_handle_cached_pages = false;	/* GUC */
+
+struct DpuStorageEntry
 {
-	Oid			tablespace_oid;
-	const char *tablespace_name;
+	int32_t		endpoint_id;
+	const char *endpoint_dir;
 	const char *config_host;
 	const char *config_port;
+	int			endpoint_domain;	/* AF_UNIX/AF_INET/AF_INET6 */
 	const struct sockaddr *endpoint_addr;
 	socklen_t	endpoint_addr_len;
-	int			validated;
+	struct stat	endpoint_stat_buf;
+	pg_atomic_uint32 *validated;	/* shared memory */
 };
 
-struct dpu_tablespace_info
+typedef struct
 {
-	uint32_t	extra_sz;
 	uint32_t	nitems;
-	dpu_tablespace_entry entries[1];
-};
-typedef struct dpu_tablespace_info	dpu_tablespace_info;
+	DpuStorageEntry entries[1];
+} DpuStorageArray;
 
-struct dpu_tablespace_hash
-{
-	struct dpu_tablespace_hash *next;
-	Oid			tablespace_oid;
-	dpu_tablespace_entry *entry;
-};
-typedef struct dpu_tablespace_hash	dpu_tablespace_hash;
-
-static dpu_tablespace_info	   *dpu_tablespace_master = NULL;	/* shared memory */
+static DpuStorageArray		   *dpu_storage_master_array = NULL;
 static shmem_request_hook_type	shmem_request_next = NULL;
 static shmem_startup_hook_type	shmem_startup_next = NULL;
-#define DPU_TABLESPACE_HASH_NSLOTS		640
-static dpu_tablespace_hash	   *dpu_tablespace_hash_slots[DPU_TABLESPACE_HASH_NSLOTS];
-static MemoryContext			dpu_tablespace_hash_memcxt = NULL;
+
+/*
+ * GetOptimalDpuForFile
+ */
+static DpuStorageEntry *
+__getOptimalDpuForFile(const char *pathname, StringInfo dpu_path)
+{
+	DpuStorageEntry *ds_entry = NULL;
+	char		namebuf[MAXPGPATH];
+	ssize_t		nbytes;
+	struct stat	stat_buf;
+
+	if (lstat(pathname, &stat_buf) == 0)
+	{
+		for (int i=0; i < dpu_storage_master_array->nitems; i++)
+		{
+			DpuStorageEntry *curr = &dpu_storage_master_array->entries[i];
+
+			if (curr->endpoint_stat_buf.st_mode == 0)
+			{
+				if (stat(curr->endpoint_dir, &curr->endpoint_stat_buf) != 0)
+					continue;
+			}
+			if (stat_buf.st_dev == curr->endpoint_stat_buf.st_dev &&
+				stat_buf.st_ino == curr->endpoint_stat_buf.st_ino)
+			{
+				if (dpu_path)
+					resetStringInfo(dpu_path);
+				return curr;
+			}
+		}
+
+		if (S_ISLNK(stat_buf.st_mode) &&
+			(nbytes = readlink(pathname, namebuf, MAXPGPATH)) > 0)
+		{
+			namebuf[nbytes] = '\0';
+			ds_entry = __getOptimalDpuForFile(namebuf, dpu_path);
+			if (ds_entry)
+				return ds_entry;
+		}
+
+		if (strcmp(pathname, "/") != 0)
+		{
+			strncpy(namebuf, pathname, MAXPGPATH);
+			ds_entry = __getOptimalDpuForFile(dirname(namebuf), dpu_path);
+			if (ds_entry)
+			{
+				strncpy(namebuf, pathname, MAXPGPATH);
+				appendStringInfo(dpu_path, "%s%s",
+								 dpu_path->len > 0 ? "/" : "",
+								 basename(namebuf));
+				return ds_entry;
+			}
+		}
+	}
+	return NULL;
+}
+
+const DpuStorageEntry *
+GetOptimalDpuForFile(const char *filename,
+					 const char **p_dpu_pathname)
+{
+	DpuStorageEntry *ds_entry;
+	StringInfoData buf;
+	char	   *namebuf;
+	size_t		len;
+
+	/* quick bailout */
+	if (!dpu_storage_master_array)
+		return NULL;
+	initStringInfo(&buf);
+	/* absolute path? */
+	if (*filename == '/')
+		ds_entry = __getOptimalDpuForFile(filename, &buf);
+	else
+	{
+		len = strlen(DataDir) + strlen(filename) + 10;
+		namebuf = alloca(len);
+		snprintf(namebuf, len, "%s/%s", DataDir, filename);
+		ds_entry = __getOptimalDpuForFile(namebuf, &buf);
+	}
+	if (p_dpu_pathname)
+		*p_dpu_pathname = pstrdup(buf.data);
+	pfree(buf.data);
+
+	return ds_entry;
+}
+
+/*
+ * Relation Cached-DPU hash table invalidator
+ */
+typedef struct
+{
+	Oid		relation_oid;
+	char   *dpu_pathname;
+	const DpuStorageEntry *ds_entry;
+} DpuRelCacheItem;
+
+static HTAB	   *dpu_relcache_htable = NULL;
+
+static void
+dpu_relcache_htable_invalidator(Datum arg, Oid relation_oid)
+{
+	if (dpu_relcache_htable)
+	{
+		hash_search(dpu_relcache_htable,
+					&relation_oid,
+					HASH_REMOVE,
+					NULL);
+	}
+}
 
 /*
  * GetOptimalDpuForRelation
  */
-const dpu_tablespace_entry *
-GetOptimalDpuForRelation(PlannerInfo *root, RelOptInfo *rel)
+const DpuStorageEntry *
+GetOptimalDpuForRelation(Relation relation, const char **p_dpu_pathname)
 {
-	dpu_tablespace_hash *hitem;
-	Oid			tablespace_oid = rel->reltablespace;
-	char	   *tablespace_name;
-	uint32_t	i, hindex;
+	DpuRelCacheItem *drc_item;
+	Oid		relation_oid;
+	bool	found;
 
-	if (!IS_SIMPLE_REL(rel) || !dpu_tablespace_master)
-		return NULL;
-	if (!OidIsValid(tablespace_oid))
-		tablespace_oid = MyDatabaseTableSpace;
-	hindex = hash_uint32((uint32)tablespace_oid) % DPU_TABLESPACE_HASH_NSLOTS;
+	if (!dpu_storage_master_array)
+		return NULL;	/* quick bailout */
 
-	for (hitem = dpu_tablespace_hash_slots[hindex];
-		 hitem != NULL;
-		 hitem = hitem->next)
+	relation_oid = RelationGetRelid(relation);
+	if (!dpu_relcache_htable)
 	{
-		if (hitem->tablespace_oid == tablespace_oid)
-			return hitem->entry;
-	}
-	/* not found, so create a new entry */
-	tablespace_name = get_tablespace_name(tablespace_oid);
-	hitem = MemoryContextAllocZero(dpu_tablespace_hash_memcxt,
-								   sizeof(dpu_tablespace_hash));
-	hitem->tablespace_oid = tablespace_oid;
-	hitem->next = dpu_tablespace_hash_slots[hindex];
-	dpu_tablespace_hash_slots[hindex] = hitem;
-	for (i=0; i < dpu_tablespace_master->nitems; i++)
-	{
-		dpu_tablespace_entry *curr = &dpu_tablespace_master->entries[i];
+		HASHCTL	hctl;
 
-		if (strcmp(curr->tablespace_name, tablespace_name) == 0)
-		{
-			hitem->entry = curr;
-			break;
-		}
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = sizeof(Oid);
+		hctl.entrysize = sizeof(DpuRelCacheItem);
+		hctl.hcxt = CacheMemoryContext;
+		dpu_relcache_htable
+			= hash_create("DPU-Relcache hashtable",
+						  1024,
+						  &hctl,
+						  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	}
-	return hitem->entry;
+
+	drc_item = hash_search(dpu_relcache_htable,
+						   &relation_oid,
+						   HASH_ENTER,
+						   &found);
+	if (!found)
+	{
+		const DpuStorageEntry *ds_entry;
+		SMgrRelation smgr = RelationGetSmgr(relation);
+		char	   *rel_pathname = relpath(smgr->smgr_rnode, MAIN_FORKNUM);
+		const char *dpu_pathname;
+
+		ds_entry = GetOptimalDpuForFile(rel_pathname, &dpu_pathname);
+		if (ds_entry)
+			drc_item->dpu_pathname = MemoryContextStrdup(CacheMemoryContext,
+														 dpu_pathname);
+		drc_item->ds_entry = ds_entry;
+	}
+	if (p_dpu_pathname)
+		*p_dpu_pathname = drc_item->dpu_pathname;
+	return drc_item->ds_entry;
 }
 
 /*
- * tablespace_optimal_dpu_htable_invalidate
+ * GetOptimalDpuForBaseRel
  */
-static void
-tablespace_optimal_dpu_htable_invalidate(Datum arg, int cacheid, uint32 hashvalue)
+const DpuStorageEntry *
+GetOptimalDpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 {
-    /* invalidate all the cached status */
-	MemoryContextReset(dpu_tablespace_hash_memcxt);
-	memset(dpu_tablespace_hash_slots, 0, sizeof(dpu_tablespace_hash_slots));
+	RangeTblEntry  *rte = root->simple_rte_array[baserel->relid];
+	const DpuStorageEntry *ds_entry = NULL;
+
+	if (!dpu_storage_master_array)
+		return NULL;	/* quick bailout */
+	if (rte->rtekind == RTE_RELATION)
+	{
+		DpuRelCacheItem *drc_item;
+		Relation	relation;
+
+		/* fast path */
+		if (dpu_relcache_htable &&
+			(drc_item = hash_search(dpu_relcache_htable,
+									&rte->relid,
+									HASH_FIND,
+									NULL)) != NULL)
+			return drc_item->ds_entry;
+
+		relation = table_open(rte->relid, AccessShareLock);
+		ds_entry = GetOptimalDpuForRelation(relation, NULL);
+		table_close(relation, NoLock);
+	}
+	return ds_entry;
+}
+
+/*
+ * DpuStorageEntryIsEqual
+ */
+bool
+DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
+					   const DpuStorageEntry *ds_entry2)
+{
+	if (ds_entry1 && ds_entry2)
+		return (ds_entry1->endpoint_id == ds_entry2->endpoint_id);
+	else if (!ds_entry1 && !ds_entry2)
+		return true;
+	else
+		return false;
+}
+
+/*
+ * DpuClientOpenSession 
+ */
+void
+DpuClientOpenSession(pgstromTaskState *pts,
+					 const XpuCommand *session)
+{
+	const DpuStorageEntry *ds_entry = pts->ds_entry;
+    pgsocket    sockfd;
+    char        namebuf[32];
+
+	if (!ds_entry)
+		elog(ERROR, "Bug? no DPU device is configured");
+
+	sockfd = socket(ds_entry->endpoint_domain, SOCK_STREAM, 0);
+	if (sockfd < 0)
+		elog(ERROR, "failed on socket(2) dom=%d: %m", ds_entry->endpoint_domain);
+	if (connect(sockfd,
+				ds_entry->endpoint_addr,
+				ds_entry->endpoint_addr_len) != 0)
+	{
+		close(sockfd);
+		elog(ERROR, "failed on connect('%s'): %m", ds_entry->config_host);
+	}
+	snprintf(namebuf, sizeof(namebuf), "DPU-%u", ds_entry->endpoint_id);
+
+	__xpuClientOpenSession(pts, session, sockfd, namebuf);
 }
 
 /*
@@ -113,16 +294,16 @@ parse_dpu_endpoint_list(void)
 {
 	char	   *tok, *saveptr;
 	char	   *buf;
+	uint32_t	endpoint_id = 0;
 	uint32_t	nrooms = 48;
 	uint32_t	nitems = 0;
-	size_t		extra_sz = 0;
 	char		__default_port[32];
 	
 	if (!pgstrom_dpu_endpoint_list)
 		return 0;
-	dpu_tablespace_master = malloc(offsetof(dpu_tablespace_info,
-											entries[nrooms]));
-	if (!dpu_tablespace_master)
+	dpu_storage_master_array = malloc(offsetof(DpuStorageArray,
+											   entries[nrooms]));
+	if (!dpu_storage_master_array)
 		elog(ERROR, "out of memory");
 	sprintf(__default_port, "%u", pgstrom_dpu_endpoint_default_port);
 
@@ -132,110 +313,73 @@ parse_dpu_endpoint_list(void)
 		 tok != NULL;
 		 tok = strtok_r(NULL, ",", &saveptr))
 	{
-		dpu_tablespace_entry *curr;
+		DpuStorageEntry *curr;
 		char	   *name;
 		char	   *host;
 		char	   *port;
+		struct addrinfo hints, *addr;
 
-		host = strchr(tok, '=');
-		if (!host)
-			elog(ERROR, "pg_strom.dpu_endpoint_list - invalid token [%s]", name);
-		*host++ = '\0';
-		name = __trim(tok);
-		host = __trim(host);
-		extra_sz += MAXALIGN(strlen(name) + 1);
+		name = strchr(tok, '=');
+		if (!name)
+			elog(ERROR, "pg_strom.dpu_endpoint_list - invalid token [%s]", tok);
+		*name++ = '\0';
+		host = __trim(tok);
+		name = __trim(name);
+		if (*name != '/')
+			elog(ERROR, "endpoint directory must be absolute path");
 
 		if (nitems >= nrooms)
 		{
 			nrooms *= 2;
-			dpu_tablespace_master = realloc(dpu_tablespace_master,
-											offsetof(dpu_tablespace_info,
-													 entries[nrooms]));
+			dpu_storage_master_array = realloc(dpu_storage_master_array,
+											   offsetof(DpuStorageArray,
+														entries[nrooms]));
+			if (!dpu_storage_master_array)
+				elog(ERROR, "out of memory");
 		}
-		curr = &dpu_tablespace_master->entries[nitems++];
-		memset(curr, 0, sizeof(dpu_tablespace_entry));
+		curr = &dpu_storage_master_array->entries[nitems++];
+		memset(curr, 0, sizeof(DpuStorageEntry));
 
-		curr->tablespace_name = strdup(name);
-		if (!curr->tablespace_name)
+		curr->endpoint_id = endpoint_id++;
+		curr->endpoint_dir = strdup(name);
+		if (!curr->endpoint_dir)
 			elog(ERROR, "out of memory");
 
-		if (strncmp(host, "unix://", 7) == 0)
-		{
-			struct sockaddr_un *addr = calloc(1, sizeof(struct sockaddr_un));
-
-			addr->sun_family = AF_UNIX;
-			strncpy(addr->sun_path, host+7, 107);
-
-			curr->config_host = strdup(host);
-			if (!curr->config_host)
-				elog(ERROR, "out of memory");
-			curr->config_port = NULL;
-			extra_sz += MAXALIGN(strlen(host) + 1);
-			curr->endpoint_addr = (struct sockaddr *)addr;
-			curr->endpoint_addr_len = sizeof(struct sockaddr_un);
-			curr->validated = -1;
-		}
+		memset(&hints, 0, sizeof(struct addrinfo));
+		hints.ai_family = AF_INET;
+		hints.ai_socktype = SOCK_STREAM;
+		/* TODO: IPv6 support */
+		port = strrchr(host, ':');
+		if (port)
+			*port++ = '\0';
 		else
-		{
-			struct addrinfo hints;
-			struct addrinfo *addr;
+			port = __default_port;
+		if (getaddrinfo(host, port, &hints, &addr) != 0)
+			elog(ERROR, "failed on getaddrinfo('%s','%s')", host, port);
 
-			memset(&hints, 0, sizeof(struct addrinfo));
-			hints.ai_family = AF_UNSPEC;
-			hints.ai_socktype = SOCK_STREAM;
-			if (*host == '[')
-			{
-				/* assume IPv6 [2001:db8::1]:80 format */
-				port = strrchr(host, ']');
-				if (!port)
-					elog(ERROR, "pg_strom.dpu_endpoint_list - invalid token");
-				*port++ = '\0';
-				if (*port == '\0')
-					port = NULL;
-				else if (*port != ':')
-					elog(ERROR, "pg_strom.dpu_endpoint_list - invalid token");
-				else
-					port++;
-				hints.ai_family = AF_INET6;
-			}
-			else
-			{
-				port = strrchr(host, ':');
-				if (port)
-					*port++ = '\0';
-			}
-			if (!port)
-				port = __default_port;
-			if (getaddrinfo(host, port, &hints, &addr) != 0)
-				elog(ERROR, "failed on getaddrinfo('%s','%s')", host, port);
-
-			curr->config_host = strdup(host);
-			curr->config_port = strdup(port);
-			if (!curr->config_host || !curr->config_port)
-				elog(ERROR, "out of memory");
-			extra_sz += MAXALIGN(strlen(host) + 1) + MAXALIGN(strlen(port) + 1);
-			curr->endpoint_addr = addr->ai_addr;
-			curr->endpoint_addr_len = addr->ai_addrlen;
-			curr->validated = -1;
-		}
-		extra_sz += MAXALIGN(curr->endpoint_addr_len);
+		curr->config_host = strdup(host);
+		curr->config_port = strdup(port);
+		if (!curr->config_host || !curr->config_port)
+			elog(ERROR, "out of memory");
+		curr->endpoint_domain = addr->ai_family;
+		curr->endpoint_addr = addr->ai_addr;
+		curr->endpoint_addr_len = addr->ai_addrlen;
 	}
-	extra_sz += MAXALIGN(offsetof(dpu_tablespace_info, entries[nitems]));
-	dpu_tablespace_master->extra_sz = extra_sz;
-	dpu_tablespace_master->nitems   = nitems;
+	dpu_storage_master_array->nitems   = nitems;
 
 	return (nitems > 0);
 }
 
 /*
- *
+ * pgstrom_request_dpu_device
  */
 static void
 pgstrom_request_dpu_device(void)
 {
 	if (shmem_request_next)
 		shmem_request_next();
-	RequestAddinShmemSpace(dpu_tablespace_master->extra_sz);
+	RequestAddinShmemSpace(MAXALIGN(sizeof(pg_atomic_uint32) *
+									dpu_storage_master_array->nitems));
 }
 
 /*
@@ -244,56 +388,81 @@ pgstrom_request_dpu_device(void)
 static void
 pgstrom_startup_dpu_device(void)
 {
-	dpu_tablespace_info *new_tablespace_master;
+	pg_atomic_uint32 *validated;
+	uint32_t	nitems = dpu_storage_master_array->nitems;
 	bool		found;
-	char	   *extra;
-	uint32_t	i, nitems = dpu_tablespace_master->nitems;
 
 	if (shmem_startup_next)
 		shmem_startup_next();
-	
 	Assert(nitems > 0);
-	new_tablespace_master = ShmemInitStruct("DPU-Tablespace Info",
-											dpu_tablespace_master->extra_sz,
-											&found);
-	extra = (char *)new_tablespace_master
-		+ MAXALIGN(offsetof(dpu_tablespace_info, entries[nitems]));
-	for (i=0; i < dpu_tablespace_master->nitems; i++)
+	validated = ShmemInitStruct("DPU-Tablespace Info",
+								sizeof(pg_atomic_uint32) * nitems,
+								&found);
+	for (int i=0; i < dpu_storage_master_array->nitems; i++)
 	{
-		dpu_tablespace_entry *old_item = &dpu_tablespace_master->entries[i];
-		dpu_tablespace_entry *new_item = &new_tablespace_master->entries[i];
-
-		new_item->tablespace_oid = InvalidOid;
-		new_item->tablespace_name = extra;
-		strcpy(extra, old_item->tablespace_name);
-		extra += MAXALIGN(strlen(extra) + 1);
-		if (!old_item->config_host)
-			new_item->config_host = NULL;
-		else
-		{
-			new_item->config_host = extra;
-			strcpy(extra, old_item->config_host);
-			extra += MAXALIGN(strlen(extra) + 1);
-		}
-		if (!old_item->config_port)
-			new_item->config_port = NULL;
-		else
-		{
-			new_item->config_port = extra;
-			strcpy(extra, old_item->config_port);
-			extra += MAXALIGN(strlen(extra) + 1);
-		}
-		new_item->endpoint_addr = (struct sockaddr *)extra;
-		memcpy(extra, old_item->endpoint_addr, old_item->endpoint_addr_len);
-		extra += MAXALIGN(old_item->endpoint_addr_len);
-		new_item->endpoint_addr_len = old_item->endpoint_addr_len;
-		new_item->validated = -1;	/* validation on demand */
+		dpu_storage_master_array->entries[i].validated = &validated[i];
 	}
-	new_tablespace_master->extra_sz = dpu_tablespace_master->extra_sz;
-	new_tablespace_master->nitems   = dpu_tablespace_master->nitems;
-	Assert(extra - (char *)new_tablespace_master == dpu_tablespace_master->extra_sz);
-	/* switch to shared memory structure */
-	dpu_tablespace_master = new_tablespace_master;
+}
+
+/*
+ * pgstrom_init_dpu_options
+ */
+static void
+pgstrom_init_dpu_options(void)
+{
+	/* cost factor for DPU setup */
+	DefineCustomRealVariable("pg_strom.dpu_setup_cost",
+							 "Cost to setup DPU device to run",
+							 NULL,
+							 &pgstrom_dpu_setup_cost,
+							 DEFAULT_DPU_SETUP_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for DPU operator */
+	DefineCustomRealVariable("pg_strom.dpu_operator_cost",
+							 "Cost of processing each operators by DPU",
+							 NULL,
+							 &pgstrom_dpu_operator_cost,
+							 DEFAULT_DPU_OPERATOR_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for DPU disk scan */
+	DefineCustomRealVariable("pg_strom.dpu_seq_page_cost",
+							 "Default cost to scan page on DPU device",
+							 NULL,
+							 &pgstrom_dpu_seq_page_cost,
+							 DEFAULT_DPU_SEQ_PAGE_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for DPU<-->Host data transfer per tuple */
+	DefineCustomRealVariable("pg_strom.dpu_tuple_cost",
+							 "Default cost to transfer DPU<->Host per tuple",
+							 NULL,
+							 &pgstrom_dpu_tuple_cost,
+							 DEFAULT_DPU_TUPLE_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* control whether DPU handles cached pages */
+	DefineCustomBoolVariable("pg_strom.dpu_handle_cached_pages",
+							 "Control whether DPUs handles cached clean pages",
+							 NULL,
+							 &pgstrom_dpu_handle_cached_pages,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 }
 
 /*
@@ -304,7 +473,7 @@ pgstrom_init_dpu_device(void)
 {
 	/*
 	 * format:
-	 * <tablespace-name>=<host/ipaddr>[;<port>][, ...]
+	 * <host/ipaddr>[;<port>]=<pathname>[, ...]
 	 */
 	DefineCustomStringVariable("pg_strom.dpu_endpoint_list",
 							   "List of DPU endpoint definitions for each tablespace",
@@ -325,21 +494,27 @@ pgstrom_init_dpu_device(void)
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
-	dpu_tablespace_hash_memcxt = AllocSetContextCreate(CacheMemoryContext,
-													   "DPU-Tablespace Hash",
-													   ALLOCSET_DEFAULT_SIZES);
-	memset(dpu_tablespace_hash_slots, 0, sizeof(dpu_tablespace_hash_slots));
-
 	if (parse_dpu_endpoint_list())
 	{
+		pgstrom_init_dpu_options();
+
 		shmem_request_next = shmem_request_hook;
 		shmem_request_hook = pgstrom_request_dpu_device;
 		shmem_startup_next = shmem_startup_hook;
 		shmem_startup_hook = pgstrom_startup_dpu_device;
+		CacheRegisterRelcacheCallback(dpu_relcache_htable_invalidator, 0);
 
-		CacheRegisterSyscacheCallback(TABLESPACEOID,
-									  tablespace_optimal_dpu_htable_invalidate,
-									  (Datum)0);
+		/* output logs */
+		for (int i=0; i < dpu_storage_master_array->nitems; i++)
+		{
+			DpuStorageEntry *ds_entry = &dpu_storage_master_array->entries[i];
+
+			elog(LOG, "PG-Strom: DPU%d (dir: '%s', host: '%s', port: '%s')",
+				 ds_entry->endpoint_id,
+				 ds_entry->endpoint_dir,
+				 ds_entry->config_host,
+				 ds_entry->config_port);
+		}
 		return true;
 	}
 	return false;

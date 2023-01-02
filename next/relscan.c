@@ -13,6 +13,75 @@
 
 /* ----------------------------------------------------------------
  *
+ * Routines to support optimization / path or plan construction
+ *
+ * ----------------------------------------------------------------
+ */
+Bitmapset *
+pickup_outer_referenced(PlannerInfo *root,
+						RelOptInfo *base_rel,
+						Bitmapset *referenced)
+{
+	ListCell   *lc;
+	int			j, k;
+
+	if (base_rel->reloptkind == RELOPT_BASEREL)
+	{
+		for (j=base_rel->min_attr; j <= base_rel->max_attr; j++)
+		{
+			if (j <= 0 || !base_rel->attr_needed[j - base_rel->min_attr])
+				continue;
+			k = j - FirstLowInvalidHeapAttributeNumber;
+			referenced = bms_add_member(referenced, k);
+		}
+	}
+	else if (base_rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
+	{
+		foreach (lc, root->append_rel_list)
+		{
+			AppendRelInfo  *apinfo = lfirst(lc);
+			RelOptInfo	   *parent_rel;
+			Bitmapset	   *parent_refs;
+			Var			   *var;
+
+			if (apinfo->child_relid != base_rel->relid)
+				continue;
+			Assert(apinfo->parent_relid < root->simple_rel_array_size);
+			parent_rel = root->simple_rel_array[apinfo->parent_relid];
+			parent_refs = pickup_outer_referenced(root, parent_rel, NULL);
+
+			for (k = bms_next_member(parent_refs, -1);
+				 k >= 0;
+				 k = bms_next_member(parent_refs, k))
+			{
+				j = k + FirstLowInvalidHeapAttributeNumber;
+				if (j <= 0)
+					bms_add_member(referenced, k);
+				else if (j > list_length(apinfo->translated_vars))
+					elog(ERROR, "Bug? column reference out of range");
+				else
+				{
+					var = list_nth(apinfo->translated_vars, j-1);
+					Assert(IsA(var, Var));
+					j = var->varattno - FirstLowInvalidHeapAttributeNumber;
+					referenced = bms_add_member(referenced, j);
+				}
+			}
+			break;
+		}
+		if (!lc)
+			elog(ERROR, "Bug? AppendRelInfo not found (relid=%u)",
+				 base_rel->relid);
+	}
+	else
+	{
+		elog(ERROR, "Bug? outer relation is not a simple relation");
+	}
+	return referenced;
+}
+
+/* ----------------------------------------------------------------
+ *
  * Routines to setup kern_data_store
  *
  * ----------------------------------------------------------------
@@ -59,6 +128,7 @@ __setup_kern_colmeta(kern_data_store *kds,
 	kern_colmeta   *cmeta = &kds->colmeta[column_index];
 	TypeCacheEntry *tcache;
 
+	memset(cmeta, 0, sizeof(kern_colmeta));
 	cmeta->attbyval	= attbyval;
 	cmeta->attalign	= typealign_get_width(attalign);
 	cmeta->attlen	= attlen;
@@ -257,6 +327,82 @@ estimate_kern_data_store(TupleDesc tupdesc)
 	return MAXALIGN(offsetof(kern_data_store, colmeta[nr_colmeta]));
 }
 
+/*
+ * Routines to store/fetch fallback tuples
+ */
+void
+pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple htuple)
+{
+	MemoryContext memcxt = pts->css.ss.ps.state->es_query_cxt;
+	HeapTuple	dtuple;
+	size_t		sz;
+
+	if (!pts->fallback_tuples)
+	{
+		pts->fallback_index = 0;
+		pts->fallback_nitems = 0;
+		pts->fallback_nrooms = 1000;
+		pts->fallback_tuples =
+			MemoryContextAlloc(memcxt, sizeof(off_t) * pts->fallback_nrooms);
+	}
+	if (!pts->fallback_buffer)
+	{
+		pts->fallback_usage = 0;
+		pts->fallback_bufsz = 8 * BLCKSZ;
+		pts->fallback_buffer =
+			MemoryContextAlloc(memcxt, pts->fallback_bufsz);
+	}
+	sz = MAXALIGN(offsetof(HeapTupleData, t_data) + htuple->t_len);
+	while (pts->fallback_usage + sz > pts->fallback_bufsz)
+	{
+		pts->fallback_bufsz *= 2 + BLCKSZ;
+		pts->fallback_buffer = repalloc_huge(pts->fallback_buffer,
+											 pts->fallback_bufsz);
+	}
+	while (pts->fallback_nitems >= pts->fallback_nrooms)
+	{
+		pts->fallback_nrooms *= 2 + 100;
+		pts->fallback_tuples = repalloc_huge(pts->fallback_tuples,
+											 sizeof(off_t) * pts->fallback_nrooms);
+	}
+	dtuple = (HeapTuple)(pts->fallback_buffer +
+						 pts->fallback_usage);
+	memcpy(dtuple, htuple, offsetof(HeapTupleData, t_data));
+	memcpy((char *)dtuple + offsetof(HeapTupleData, t_data),
+		   htuple->t_data,
+		   htuple->t_len);
+	pts->fallback_tuples[pts->fallback_nitems++] = pts->fallback_usage;
+	pts->fallback_usage += sz;
+}
+
+bool
+pgstromFetchFallbackTuple(pgstromTaskState *pts, TupleTableSlot *slot)
+{
+	if (pts->fallback_tuples &&
+		pts->fallback_buffer &&
+		pts->fallback_index < pts->fallback_nitems)
+	{
+		HeapTupleData	htuple;
+		HeapTuple		ftuple;
+
+		ftuple = (HeapTuple)(pts->fallback_buffer +
+							 pts->fallback_tuples[pts->fallback_index++]);
+		memcpy(&htuple, ftuple, offsetof(HeapTupleData, t_data));
+		htuple.t_data = (HeapTupleHeader)((char *)ftuple +
+										  offsetof(HeapTupleData, t_data));
+		ExecForceStoreHeapTuple(&htuple, slot, false);
+		/* reset the buffer if last one */
+		if (pts->fallback_index == pts->fallback_nitems)
+		{
+			pts->fallback_index = 0;
+			pts->fallback_nitems = 0;
+			pts->fallback_usage = 0;
+		}
+		return true;
+	}
+	return false;
+}
+
 /* ----------------------------------------------------------------
  *
  * Routines to load chunks from storage
@@ -268,14 +414,151 @@ estimate_kern_data_store(TupleDesc tupdesc)
 #define __XCMD_GET_KDS_SRC(buf)								\
 	((kern_data_store *)((buf)->data + __XCMD_KDS_SRC_OFFSET(buf)))
 
+static void
+__relScanDirectFallbackBlock(pgstromTaskState *pts, BlockNumber block_num)
+{
+	Relation	relation = pts->css.ss.ss_currentRelation;
+	HeapScanDesc h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
+	Snapshot	snapshot = pts->css.ss.ps.state->es_snapshot;
+	Buffer		buffer;
+	Page		page;
+	int			lines;
+	OffsetNumber lineoff;
+	ItemId		lpp;
+
+	buffer = ReadBufferExtended(relation,
+								MAIN_FORKNUM,
+								block_num,
+								RBM_NORMAL,
+								h_scan->rs_strategy);
+	/* just like heapgetpage() */
+	heap_page_prune_opt(relation, buffer);
+	/* pick up valid tuples from the target page */
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+	page = BufferGetPage(buffer);
+	lines = PageGetMaxOffsetNumber(page);
+	for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(page, lineoff);
+		 lineoff <= lines;
+		 lineoff++, lpp++)
+	{
+		HeapTupleData htup;
+		bool		valid;
+
+		if (!ItemIdIsNormal(lpp))
+			continue;
+
+		htup.t_tableOid = RelationGetRelid(relation);
+		htup.t_data = (HeapTupleHeader) PageGetItem((Page)page, lpp);
+		htup.t_len = ItemIdGetLength(lpp);
+		ItemPointerSet(&htup.t_self, block_num, lineoff);
+
+		valid = HeapTupleSatisfiesVisibility(&htup, snapshot, buffer);
+		HeapCheckForSerializableConflictOut(valid, relation, &htup,
+											buffer, snapshot);
+		if (valid)
+			pts->cb_cpu_fallback(pts, &htup);
+	}
+	UnlockReleaseBuffer(buffer);
+}
+
+static void
+__relScanDirectCachedBlock(pgstromTaskState *pts, BlockNumber block_num)
+{
+	Relation	relation = pts->css.ss.ss_currentRelation;
+	HeapScanDesc h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
+	Snapshot	snapshot = pts->css.ss.ps.state->es_snapshot;
+	kern_data_store *kds;
+	Buffer		buffer;
+	Page		spage;
+	Page		dpage;
+	bool		has_valid_tuples = false;
+
+	/*
+	 * Load the source buffer with synchronous read
+	 */
+	buffer = ReadBufferExtended(relation,
+								MAIN_FORKNUM,
+								block_num,
+								RBM_NORMAL,
+								h_scan->rs_strategy);
+	/* prune the old items, if any */
+	heap_page_prune_opt(relation, buffer);
+	/* let's check tuples visibility for each */
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+	spage = (Page) BufferGetPage(buffer);
+	appendBinaryStringInfo(&pts->xcmd_buf, (const char *)spage, BLCKSZ);
+	UnlockReleaseBuffer(buffer);
+	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
+	dpage = (Page) KDS_BLOCK_PGPAGE(kds, kds->block_nloaded);
+	Assert(dpage >= pts->xcmd_buf.data &&
+		   dpage + BLCKSZ <= pts->xcmd_buf.data + pts->xcmd_buf.len);
+	KDS_BLOCK_BLCKNR(kds, kds->block_nloaded) = block_num;
+
+	/*
+	 * Logic is almost equivalent as heapgetpage() doing.
+	 * We have to invalidate tuples prior to GPU kernel
+	 * execution, if not all-visible.
+	 */
+	if (!PageIsAllVisible(dpage) || snapshot->takenDuringRecovery)
+	{
+		int		lines = PageGetMaxOffsetNumber(dpage);
+		ItemId	lpp;
+		OffsetNumber lineoff;
+
+
+		for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(dpage, lineoff);
+			 lineoff <= lines;
+			 lineoff++, lpp++)
+		{
+			HeapTupleData htup;
+			bool	valid;
+
+			if (!ItemIdIsNormal(lpp))
+				continue;
+			htup.t_tableOid = RelationGetRelid(relation);
+			htup.t_data = (HeapTupleHeader) PageGetItem((Page) dpage, lpp);
+			Assert((((uintptr_t)htup.t_data - (uintptr_t)dpage) & 7) == 0);
+			htup.t_len = ItemIdGetLength(lpp);
+			ItemPointerSet(&htup.t_self, block_num, lineoff);
+
+			valid = HeapTupleSatisfiesVisibility(&htup, snapshot, buffer);
+			HeapCheckForSerializableConflictOut(valid, relation, &htup,
+												buffer, snapshot);
+			if (valid)
+				has_valid_tuples = true;
+			else
+				ItemIdSetUnused(lpp);
+		}
+	}
+	else
+	{
+		has_valid_tuples = true;
+	}
+
+	/*
+	 * If no tuples in this block are visible, we don't need to load
+	 * them to xPU device (just wast of memory and bandwidth),
+	 * so it shall be reverted from the xcmd-buffer.
+	 */
+	if (has_valid_tuples)
+	{
+		pts->xcmd_buf.len -= BLCKSZ;
+		return;
+	}
+	/* dpage became all-visible also */
+	PageSetAllVisible(dpage);
+	kds->nitems++;
+	kds->block_nloaded++;
+}
+
 XpuCommand *
 pgstromRelScanChunkDirect(pgstromTaskState *pts,
 						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
-	EState		   *estate = pts->css.ss.ps.state;
-	Snapshot		snapshot = estate->es_snapshot;
 	Relation		relation = pts->css.ss.ss_currentRelation;
 	HeapScanDesc    h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
+	/* NOTE: 'smgr_rnode' always locates on the head of SMgrRelationData */
+	RelFileNodeBackend *smgr_rnode = (RelFileNodeBackend *)RelationGetSmgr(relation);
 	XpuCommand	   *xcmd;
 	kern_data_store *kds;
 	unsigned long	m_offset = 0UL;
@@ -284,6 +567,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	strom_io_chunk *strom_ioc = NULL;
 	BlockNumber	   *strom_blknums;
 	uint32_t		strom_nblocks = 0;
+	uint32_t		kds_src_fullpath = 0;
 	uint32_t		kds_src_pathname = 0;
 	uint32_t		kds_src_iovec = 0;
 	uint32_t		kds_nrooms;
@@ -300,7 +584,6 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	Assert(pts->xcmd_buf.len == MAXALIGN(pts->xcmd_buf.len));
 	enlargeStringInfo(&pts->xcmd_buf, 0);
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
-	elog(INFO, "Buf.len = %d", pts->xcmd_buf.len);
 
 	strom_iovec = alloca(offsetof(strom_io_vector, ioc[kds_nrooms]));
 	strom_iovec->nr_chunks = 0;
@@ -308,14 +591,41 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	strom_nblocks = 0;
 	while (!pts->scan_done)
 	{
-		while (pts->curr_block_num < pts->curr_block_tail)
+		while (pts->curr_block_num < pts->curr_block_tail &&
+			   kds->nitems < kds_nrooms)
 		{
-			BlockNumber		block_num = pts->curr_block_num;
-			unsigned int	fchunk_id;
+			BlockNumber		block_num
+				= (pts->curr_block_num + h_scan->rs_startblock) % h_scan->rs_nblocks;
+			/*
+			 * MEMO: Usually, CPU is (much) more powerful than DPUs.
+			 * In case when the source cache is already on the shared-
+			 * buffer, it makes no sense to handle this page on the
+			 * DPU device.
+			 */
+			if (pts->ds_entry && !pgstrom_dpu_handle_cached_pages)
+			{
+				BufferTag	bufTag;
+				uint32		bufHash;
+				LWLock	   *bufLock;
+				int			buf_id;
 
-			if (kds->nitems >= kds_nrooms)
-				goto out;
+				INIT_BUFFERTAG(bufTag, smgr_rnode->node, MAIN_FORKNUM, block_num);
+				bufHash = BufTableHashCode(&bufTag);
+				bufLock = BufMappingPartitionLock(bufHash);
 
+				/* check whether the block exists on the shared buffer? */
+				LWLockAcquire(bufLock, LW_SHARED);
+				buf_id = BufTableLookup(&bufTag, bufHash);
+				if (buf_id >= 0)
+				{
+					LWLockRelease(bufLock);
+					__relScanDirectFallbackBlock(pts, block_num);
+					pts->curr_block_num++;
+					continue;
+				}
+				LWLockRelease(bufLock);
+			}
+			
 			/*
 			 * MEMO: right now, we allow GPU Direct SQL for the all-visible
 			 * pages only, due to the restrictions about MVCC checks.
@@ -333,6 +643,8 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				 * relation scan is broken out, then restart with new
 				 * KDS buffer.
 				 */
+				unsigned int	fchunk_id;
+
 				if (segment_id == InvalidBlockNumber)
 					segment_id = block_num / RELSEG_SIZE;
 				else if (segment_id != block_num / RELSEG_SIZE)
@@ -357,76 +669,28 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				strom_blknums[strom_nblocks++] = block_num;
 				m_offset += BLCKSZ;
 			}
+			else if (pts->ds_entry)
+			{
+				/*
+				 * For DPU devices, it makes no sense to move the data blocks
+				 * to the (relatively) poor performance devices instead of CPUs.
+				 * So, we run CPU fallback for the tuples in dirty pages.
+				 */
+				__relScanDirectFallbackBlock(pts, block_num);
+			}
 			else
 			{
-				Buffer		buffer;
-				Page		spage;
-				Page		dpage;
-				uint32_t	bindex = kds->block_nloaded++;
-
-				/*
-				 * Load the source buffer with synchronous read
-				 */
-				buffer = ReadBufferExtended(relation,
-											MAIN_FORKNUM,
-											block_num,
-											RBM_NORMAL,
-											h_scan->rs_strategy);
-				/* prune the old items, if any */
-				heap_page_prune_opt(relation, buffer);
-				/* let's check tuples visibility for each */
-				LockBuffer(buffer, BUFFER_LOCK_SHARE);
-				spage = (Page) BufferGetPage(buffer);
-				appendBinaryStringInfo(&pts->xcmd_buf, (const char *)spage, BLCKSZ);
-				kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
-				dpage = (Page) KDS_BLOCK_PGPAGE(kds, bindex);
-				Assert(dpage >= pts->xcmd_buf.data &&
-					   dpage + BLCKSZ <= pts->xcmd_buf.data + pts->xcmd_buf.len);
-				KDS_BLOCK_BLCKNR(kds, bindex) = block_num;
-
-				/*
-				 * Logic is almost equivalent as heapgetpage() doing.
-				 * We have to invalidate tuples prior to GPU kernel
-				 * execution, if not all-visible.
-				 */
-				if (!PageIsAllVisible(dpage) || snapshot->takenDuringRecovery)
-				{
-					int		lines = PageGetMaxOffsetNumber(dpage);
-					ItemId	lpp;
-					OffsetNumber lineoff;
-
-					for (lineoff = FirstOffsetNumber,
-							 lpp = PageGetItemId(dpage, lineoff);
-						 lineoff <= lines;
-						 lineoff++, lpp++)
-					{
-						HeapTupleData htup;
-						bool	valid;
-
-						if (!ItemIdIsNormal(lpp))
-							continue;
-						htup.t_tableOid = RelationGetRelid(relation);
-						htup.t_data = (HeapTupleHeader) PageGetItem((Page) dpage, lpp);
-						Assert((((uintptr_t)htup.t_data - (uintptr_t)dpage) & 7) == 0);
-						htup.t_len = ItemIdGetLength(lpp);
-						ItemPointerSet(&htup.t_self, block_num, lineoff);
-
-						valid = HeapTupleSatisfiesVisibility(&htup, snapshot, buffer);
-						HeapCheckForSerializableConflictOut(valid, relation, &htup,
-															buffer, snapshot);
-						if (!valid)
-							ItemIdSetUnused(lpp);
-					}
-				}
-				UnlockReleaseBuffer(buffer);
-				/* dpage became all-visible also */
-				PageSetAllVisible(dpage);
-				kds->nitems++;
+				__relScanDirectCachedBlock(pts, block_num);
 			}
 			pts->curr_block_num++;
 		}
 
-		if (pts->br_state)
+		if (kds->nitems >= kds_nrooms)
+		{
+			/* ok, we cannot load more pages in this chunk */
+			break;
+		}
+		else if (pts->br_state)
 		{
 			if (!pgstromBrinIndexNextChunk(pts))
 				pts->scan_done = true;
@@ -434,45 +698,76 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 		else if (!h_scan->rs_base.rs_parallel)
 		{
 			/* single process scan */
+			BlockNumber		num_blocks = kds_nrooms - kds->nitems;
+
+			if (!h_scan->rs_inited)
+			{
+				h_scan->rs_cblock = 0;
+				h_scan->rs_inited = true;
+			}
 			pts->curr_block_num = h_scan->rs_cblock;
-			h_scan->rs_cblock += (kds_nrooms - kds->nitems);
-			pts->curr_block_tail  = h_scan->rs_cblock;
 			if (pts->curr_block_num >= h_scan->rs_nblocks)
 				pts->scan_done = true;
-			else if (pts->curr_block_tail > h_scan->rs_nblocks)
-				pts->curr_block_tail = h_scan->rs_nblocks;
+			else if (pts->curr_block_num + num_blocks > h_scan->rs_nblocks)
+				num_blocks = h_scan->rs_nblocks - pts->curr_block_num;
+			h_scan->rs_cblock += num_blocks;
+			pts->curr_block_tail = pts->curr_block_num + num_blocks;
 		}
 		else
 		{
 			/* parallel processes scan */
 			ParallelBlockTableScanDesc pb_scan =
 				(ParallelBlockTableScanDesc)h_scan->rs_base.rs_parallel;
-			BlockNumber		chunk_sz = kds_nrooms - kds->nitems;
+			BlockNumber		num_blocks = kds_nrooms - kds->nitems;
 
+			if (!h_scan->rs_inited)
+			{
+				/* see table_block_parallelscan_startblock_init */
+				BlockNumber	start_block = InvalidBlockNumber;
+
+			retry_parallel_init:
+				SpinLockAcquire(&pb_scan->phs_mutex);
+				if (pb_scan->phs_startblock == InvalidBlockNumber)
+				{
+					if (!pb_scan->base.phs_syncscan)
+						pb_scan->phs_startblock = 0;
+					else if (start_block != InvalidBlockNumber)
+						pb_scan->phs_startblock = start_block;
+					else
+					{
+						SpinLockRelease(&pb_scan->phs_mutex);
+						start_block = ss_get_location(relation, pb_scan->phs_nblocks);
+						goto retry_parallel_init;
+					}
+				}
+				h_scan->rs_nblocks = pb_scan->phs_nblocks;
+				h_scan->rs_startblock = pb_scan->phs_startblock;
+				SpinLockRelease(&pb_scan->phs_mutex);
+				h_scan->rs_inited = true;
+			}
 			pts->curr_block_num = pg_atomic_fetch_add_u64(&pb_scan->phs_nallocated,
-														  chunk_sz);
-			pts->curr_block_tail  = pts->curr_block_num + chunk_sz;
-			if (pts->curr_block_num >= pb_scan->phs_nblocks)
+														  num_blocks);
+			if (pts->curr_block_num >= h_scan->rs_nblocks)
 				pts->scan_done = true;
-			else if (pts->curr_block_tail > pb_scan->phs_nblocks)
-				pts->curr_block_tail = pb_scan->phs_nblocks;
+			else if (pts->curr_block_num + num_blocks > h_scan->rs_nblocks)
+				num_blocks = h_scan->rs_nblocks - pts->curr_block_num;
+			pts->curr_block_tail = pts->curr_block_num + num_blocks;
 		}
 	}
 out:
 	Assert(kds->nitems == kds->block_nloaded + strom_nblocks);
 	kds->length = kds->block_offset + BLCKSZ * kds->nitems;
-	elog(INFO, "kds block {length=%zu, nitems=%u, block_nloaded=%u}", kds->length, kds->nitems, kds->block_nloaded);
 	if (kds->nitems == 0)
 		return NULL;
 	if (strom_iovec->nr_chunks > 0)
 	{
-		char   *filename;
-		int		sz;
+		size_t		sz;
 
-		filename = relpath(relation->rd_smgr->smgr_rnode, MAIN_FORKNUM);
-		kds_src_pathname = pts->xcmd_buf.len;
-		appendStringInfoString(&pts->xcmd_buf, filename);
-		pfree(filename);
+		kds_src_fullpath = kds_src_pathname = pts->xcmd_buf.len;
+		appendStringInfoString(&pts->xcmd_buf, pts->kds_pathname);
+		if (segment_id > 0)
+			appendStringInfo(&pts->xcmd_buf, ".%u", segment_id);
+		appendStringInfoChar(&pts->xcmd_buf, '\0');
 
 		sz = offsetof(strom_io_vector, ioc[strom_iovec->nr_chunks]);
 		kds_src_iovec = __appendBinaryStringInfo(&pts->xcmd_buf,
@@ -483,6 +778,7 @@ out:
 		Assert(segment_id == InvalidBlockNumber);
 	}
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
+	xcmd->u.scan.kds_src_fullpath = kds_src_fullpath;
 	xcmd->u.scan.kds_src_pathname = kds_src_pathname;
 	xcmd->u.scan.kds_src_iovec = kds_src_iovec;
 	xcmd->length = pts->xcmd_buf.len;
@@ -617,13 +913,13 @@ pgstromSharedStateEstimateDSM(pgstromTaskState *pts)
 	EState	   *estate = pts->css.ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
 	Relation	relation = pts->css.ss.ss_currentRelation;
-	Size		len = 0;
+	Size		len = offsetof(pgstromSharedState, bpscan);
 
 	if (pts->br_state)
 		len += pgstromBrinIndexEstimateDSM(pts);
-	len += MAXALIGN(sizeof(pgstromSharedState) +
-					table_parallelscan_estimate(relation, snapshot));
-	return len;
+	if (!pts->arrow_state)
+		len += table_parallelscan_estimate(relation, snapshot);
+	return MAXALIGN(len);
 }
 
 /*
@@ -633,40 +929,38 @@ void
 pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 {
 	pgstromSharedState *ps_state;
-	Relation		relation = pts->css.ss.ss_currentRelation;
-	TableScanDesc	scan;
+	Relation	relation = pts->css.ss.ss_currentRelation;
+	EState	   *estate = pts->css.ss.ps.state;
+	TableScanDesc scan = NULL;
 
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexInitDSM(pts, dsm_addr);
-
 	Assert(!pts->css.ss.ss_currentScanDesc);
 	if (dsm_addr)
 	{
 		ps_state = (pgstromSharedState *)dsm_addr;
 		memset(ps_state, 0, offsetof(pgstromSharedState, bpscan));
-		scan = table_beginscan_parallel(relation, &ps_state->bpscan.base);
+		if (pts->arrow_state)
+			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
+		else
+		{
+			table_parallelscan_initialize(relation,
+										  &ps_state->bpscan.base,
+										  estate->es_snapshot);
+			scan = table_beginscan_parallel(relation, &ps_state->bpscan.base);
+		}
 	}
 	else
 	{
-		EState	   *estate = pts->css.ss.ps.state;
-
 		ps_state = MemoryContextAllocZero(estate->es_query_cxt,
 										  sizeof(pgstromSharedState));
-		scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
+		if (pts->arrow_state)
+			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
+		else
+			scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
 	}
 	pts->ps_state = ps_state;
 	pts->css.ss.ss_currentScanDesc = scan;
-}
-
-/*
- * pgstromSharedStateReInitDSM
- */
-void
-pgstromSharedStateReInitDSM(pgstromTaskState *pts)
-{
-	//pgstromSharedState *ps_state = pts->ps_state;
-	if (pts->br_state)
-		pgstromBrinIndexReInitDSM(pts);
 }
 
 /*
@@ -678,6 +972,12 @@ pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr)
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
 	pts->ps_state = (pgstromSharedState *)dsm_addr;
+	if (pts->arrow_state)
+		pgstromArrowFdwAttachDSM(pts->arrow_state, pts->ps_state);
+	else
+		pts->css.ss.ss_currentScanDesc =
+			table_beginscan_parallel(pts->css.ss.ss_currentRelation,
+									 &pts->ps_state->bpscan.base);	
 }
 
 /*
@@ -692,6 +992,8 @@ pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
 
 	if (pts->br_state)
 		pgstromBrinIndexShutdownDSM(pts);
+	if (pts->arrow_state)
+		pgstromArrowFdwShutdown(pts->arrow_state);
 	if (src_state)
 	{
 		dst_state = MemoryContextAllocZero(estate->es_query_cxt,

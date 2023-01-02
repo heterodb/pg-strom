@@ -1,7 +1,7 @@
 /*
  * xpu_common.h
  *
- * Common header portion for xPU(GPU/DPU/SPU) device code.
+ * Common header portion for both of GPU and DPU device code
  * --
  * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2021 (C) PG-Strom Developers Team
@@ -11,6 +11,7 @@
  */
 #ifndef XPU_COMMON_H
 #define XPU_COMMON_H
+#include <alloca.h>
 #include <assert.h>
 #include <limits.h>
 #include <stddef.h>
@@ -18,45 +19,92 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
-#include "postgres_ext.h"
-#include "pg_config.h"
-#include "pg_config_manual.h"
-
-/* Definition of several primitive types */
-typedef __int128	int128_t;
-#if defined(__CUDACC__)
-#include <cuda_fp16.h>
-typedef __half		float2_t;
-#elif defined(HAVE_FLOAT2)
-typedef _Float16	float2_t;
-#else
-typedef uint16_t	float2_t;
-#endif
-typedef float		float4_t;
-typedef double		float8_t;
 
 /*
  * Functions with qualifiers
  */
-#ifdef __CUDACC__
+#if defined(__CUDACC__)
+/* CUDA C++ */
 #define INLINE_FUNCTION(RET_TYPE)				\
 	__device__ __forceinline__					\
 	static RET_TYPE __attribute__ ((unused))
 #define STATIC_FUNCTION(RET_TYPE)		__device__ static RET_TYPE
 #define PUBLIC_FUNCTION(RET_TYPE)		__device__ RET_TYPE
+#define EXTERN_FUNCTION(RET_TYPE)		extern "C" __device__ RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)		extern "C" __global__ RET_TYPE
 #define EXTERN_DATA						extern __device__
 #define PUBLIC_DATA						__device__
 #define STATIC_DATA						static __device__
+#elif defined(__cplusplus)
+/* C++ */
+#define INLINE_FUNCTION(RET_TYPE)		static inline RET_TYPE
+#define STATIC_FUNCTION(RET_TYPE)		static RET_TYPE
+#define PUBLIC_FUNCTION(RET_TYPE)		RET_TYPE
+#define KERNEL_FUNCTION(RET_TYPE)		extern "C" RET_TYPE
+#define EXTERN_FUNCTION(RET_TYPE)		extern "C" RET_TYPE
+#define EXTERN_DATA						extern "C"
+#define PUBLIC_DATA
+#define STATIC_DATA						static
 #else
+/* C */
 #define INLINE_FUNCTION(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)		static RET_TYPE
 #define PUBLIC_FUNCTION(RET_TYPE)		RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)		RET_TYPE
+#define EXTERN_FUNCTION(RET_TYPE)		extern RET_TYPE
 #define EXTERN_DATA						extern
 #define PUBLIC_DATA
-#define STATIC_DATE						static
+#define STATIC_DATA						static
 #endif	/* __CUDACC__ */
+
+/*
+ * Limitation of types
+ */
+#ifndef SCHAR_MAX
+#define SCHAR_MAX       127
+#endif
+#ifndef SCHAR_MIN
+#define SCHAR_MIN       (-128)
+#endif
+#ifndef UCHAR_MAX
+#define UCHAR_MAX       255
+#endif
+#ifndef SHRT_MAX
+#define SHRT_MAX        32767
+#endif
+#ifndef SHRT_MIN
+#define SHRT_MIN        (-32767-1)
+#endif
+#ifndef USHRT_MAX
+#define USHRT_MAX       65535
+#endif
+#ifndef INT_MAX
+#define INT_MAX         2147483647
+#endif
+#ifndef INT_MIN
+#define INT_MIN         (-INT_MAX - 1)
+#endif
+#ifndef UINT_MAX
+#define UINT_MAX        4294967295U
+#endif
+#ifndef LONG_MAX
+#define LONG_MAX        0x7FFFFFFFFFFFFFFFLL
+#endif
+#ifndef LONG_MIN
+#define LONG_MIN        (-LONG_MAX - 1LL)
+#endif
+#ifndef ULONG_MAX
+#define ULONG_MAX       0xFFFFFFFFFFFFFFFFULL
+#endif
+#ifndef HALF_MAX
+#define HALF_MAX        __short_as_half__(0x7bff)
+#endif
+#ifndef FLT_MAX
+#define FLT_MAX         __int_as_float__(0x7f7fffffU)
+#endif
+#ifndef DBL_MAX
+#define DBL_MAX         __longlong_as_double__(0x7fefffffffffffffULL)
+#endif
 
 /*
  * Several fundamental data types and macros
@@ -66,6 +114,10 @@ typedef double		float8_t;
 #define Max(a,b)			((a) > (b) ? (a) : (b))
 #define Min(a,b)			((a) < (b) ? (a) : (b))
 typedef uint64_t			Datum;
+typedef unsigned int		Oid;
+
+#define NAMEDATALEN			64		/* must follow the host configuration */
+#define BLCKSZ				8192	/* must follow the host configuration */
 
 #define PointerGetDatum(X)	((Datum)(X))
 #define DatumGetPointer(X)	((char *)(X))
@@ -73,12 +125,15 @@ typedef uint64_t			Datum;
 	(((uint64_t)(LEN) + ((ALIGNVAL) - 1)) & ~((uint64_t)((ALIGNVAL) - 1)))
 #define TYPEALIGN_DOWN(ALIGNVAL,LEN)                        \
 	(((uint64_t) (LEN)) & ~((uint64_t) ((ALIGNVAL) - 1)))
-
 #define MAXIMUM_ALIGNOF		8
 #define MAXALIGN(LEN)		TYPEALIGN(MAXIMUM_ALIGNOF,LEN)
 #define MAXALIGN_DOWN(LEN)	TYPEALIGN_DOWN(MAXIMUM_ALIGNOF,LEN)
 #endif	/* POSTGRES_H */
 #define MAXIMUM_ALIGNOF_SHIFT 3
+
+/* Definition of several primitive types */
+typedef __int128	int128_t;
+#include "float2.h"
 
 #ifndef __FILE_NAME__
 INLINE_FUNCTION(const char *)
@@ -128,9 +183,9 @@ __Fetch(const T *ptr)
 typedef struct {
 	uint32_t	errcode;	/* one of the ERRCODE_* */
 	int32_t		lineno;
-	char		filename[KERN_ERRORBUF_FILENAME_LEN];
-	char		funcname[KERN_ERRORBUF_FUNCNAME_LEN];
-	char		message[KERN_ERRORBUF_MESSAGE_LEN];
+	char		filename[KERN_ERRORBUF_FILENAME_LEN+1];
+	char		funcname[KERN_ERRORBUF_FUNCNAME_LEN+1];
+	char		message[KERN_ERRORBUF_MESSAGE_LEN+1];
 } kern_errorbuf;
 
 /*
@@ -599,11 +654,6 @@ typedef struct IndexTupleData
 	char				data[1];	/* data or IndexAttributeBitMapData */
 } IndexTupleData;
 
-typedef struct IndexAttributeBitMapData
-{
-	uint8_t				bits[(INDEX_MAX_KEYS + 8 - 1) / 8];
-} IndexAttributeBitMapData;
-
 #define INDEX_SIZE_MASK     0x1fff
 #define INDEX_VAR_MASK      0x4000
 #define INDEX_NULL_MASK     0x8000
@@ -630,6 +680,15 @@ typedef uint32_t		TransactionId;
 #define FrozenTransactionId			((TransactionId) 2)
 #define FirstNormalTransactionId	((TransactionId) 3)
 #define MaxTransactionId			((TransactionId) 0xffffffff)
+
+typedef struct
+{
+	uint64_t			value;
+} FullTransactionId;
+
+typedef uint32_t		CommandId;
+#define FirstCommandId				((CommandId) 0)
+#define InvalidCommandId			(~(CommandId)0)
 
 /* definitions in storage/block.h */
 typedef uint32_t		BlockNumber;
@@ -788,14 +847,14 @@ typedef struct kern_hashitem	kern_hashitem;
 
 /* Length of the header postion of kern_data_store */
 INLINE_FUNCTION(size_t)
-KDS_HEAD_LENGTH(kern_data_store *kds)
+KDS_HEAD_LENGTH(const kern_data_store *kds)
 {
 	return MAXALIGN(offsetof(kern_data_store, colmeta[kds->nr_colmeta]));
 }
 
 /* Base address of the kern_data_store */
 INLINE_FUNCTION(char *)
-KDS_BODY_ADDR(kern_data_store *kds)
+KDS_BODY_ADDR(const kern_data_store *kds)
 {
 	return (char *)kds + KDS_HEAD_LENGTH(kds);
 }
@@ -1292,15 +1351,29 @@ typedef struct {
 
 EXTERN_DATA xpu_type_catalog_entry	builtin_xpu_types_catalog[];
 
+/* device type hash for xPU service */
+typedef struct xpu_type_hash_entry xpu_type_hash_entry;
+struct xpu_type_hash_entry
+{
+	xpu_type_hash_entry	   *next;
+	xpu_type_catalog_entry	cat;
+};
+typedef struct
+{
+	uint32_t		nitems;
+	uint32_t		nslots;
+	xpu_type_hash_entry *slots[1];	/* variable */
+} xpu_type_hash_table;
+
 /* ----------------------------------------------------------------
  *
  * Definition of device flags
  *
  * ---------------------------------------------------------------- */
-#define DEVKERN__NVIDIA_GPU			0x0001UL	/* for CUDA-based GPU */
-#define DEVKERN__NVIDIA_DPU			0x0002UL	/* for BlueField-X DPU */
-#define DEVKERN__ARMv8_SPU			0x0004UL	/* for ARMv8-based SPU */
-#define DEVKERN__ANY				0x0007UL	/* Runnable on any xPU */
+#define DEVKIND__NONE				0x0000UL	/* no accelerator device */
+#define DEVKIND__NVIDIA_GPU			0x0001UL	/* for CUDA-based GPU */
+#define DEVKIND__NVIDIA_DPU			0x0002UL	/* for BlueField-X DPU */
+#define DEVKIND__ANY				0x0003UL	/* Both of GPU and DPU */
 #define DEVFUNC__LOCALE_AWARE		0x0100UL	/* Device function is locale aware,
 												 * thus, available only if "C" or
 												 * no locale configuration */
@@ -1436,6 +1509,20 @@ typedef struct {
 
 EXTERN_DATA xpu_function_catalog_entry	builtin_xpu_functions_catalog[];
 
+/* device function hash for xPU service */
+typedef struct xpu_func_hash_entry	xpu_func_hash_entry;
+struct xpu_func_hash_entry
+{
+	xpu_func_hash_entry *next;
+	xpu_function_catalog_entry cat;
+};
+typedef struct
+{
+	uint32_t	nitems;
+	uint32_t	nslots;
+	xpu_func_hash_entry *slots[1];	/* variable */
+} xpu_func_hash_table;
+
 /*
  * PG-Strom Command Tag
  */
@@ -1462,7 +1549,7 @@ typedef struct kern_session_info
 
 	/* database session info */
 	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
-	uint32_t	xact_id_array;		/* offset to array of xid */
+	uint32_t	session_xact_state;	/* offset to SerializedTransactionState */
 	uint32_t	session_timezone;	/* offset to pg_tz */
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
@@ -1472,12 +1559,13 @@ typedef struct kern_session_info
 } kern_session_info;
 
 typedef struct {
+	uint32_t	kds_src_fullpath;	/* offset to const char *fullpath */
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
 	uint32_t	kds_dst_offset;		/* offset to kds_dst */
 	char		data[1]				__attribute__((aligned(MAXIMUM_ALIGNOF)));
-} kernExecScan;
+} kern_exec_scan;
 
 typedef struct {
 	uint32_t	chunks_nitems;
@@ -1489,15 +1577,18 @@ typedef struct {
 			char		data[1];
 		} scan;
 	} stats;
-} kernExecResults;
+} kern_exec_results;
 
 #ifndef ILIST_H
-typedef struct dlist_node dlist_node;
-struct dlist_node
+typedef struct dlist_node
 {
-	dlist_node *prev;
-	dlist_node *next;
-};
+	struct dlist_node *prev;
+	struct dlist_node *next;
+} dlist_node;
+typedef struct dlist_head
+{
+	dlist_node		head;
+} dlist_head;
 #endif
 
 typedef struct
@@ -1508,10 +1599,10 @@ typedef struct
 	void	   *priv;
 	dlist_node	chain;
 	union {
-		kern_errorbuf	error;
-		kern_session_info session;
-		kernExecScan	scan;
-		kernExecResults	results;
+		kern_errorbuf		error;
+		kern_session_info	session;
+		kern_exec_scan		scan;
+		kern_exec_results	results;
 	} u;
 } XpuCommand;
 
@@ -1534,12 +1625,24 @@ SESSION_KEXP_SCAN_PROJS(kern_session_info *session)
 	return (kern_expression *)((char *)session + session->xpucode_scan_projs);
 }
 
-INLINE_FUNCTION(struct varlena *)
-SESSION_XACT_ID_ARRAY(kern_session_info *session)
+/* see access/transam/xact.c */
+typedef struct
 {
-	if (session->xact_id_array == 0)
+	int			xactIsoLevel;
+	bool		xactDeferrable;
+	FullTransactionId topFullTransactionId;
+	FullTransactionId currentFullTransactionId;
+	CommandId	currentCommandId;
+	int			nParallelCurrentXids;
+	TransactionId parallelCurrentXids[1];	/* variable */
+} SerializedTransactionState;
+
+INLINE_FUNCTION(SerializedTransactionState *)
+SESSION_XACT_STATE(kern_session_info *session)
+{
+	if (session->session_xact_state == 0)
 		return NULL;
-	return (struct varlena *)((char *)session + session->xact_id_array);
+	return (SerializedTransactionState *)((char *)session + session->session_xact_state);
 }
 
 INLINE_FUNCTION(struct pg_tz *)
@@ -1560,45 +1663,192 @@ SESSION_ENCODE(kern_session_info *session)
 
 /* ----------------------------------------------------------------
  *
+ * Template for xPU connection commands receive
+ *
+ * ----------------------------------------------------------------
+ */
+#define TEMPLATE_XPU_CONNECT_RECEIVE_COMMANDS(__XPU_PREFIX)				\
+	static int															\
+	__XPU_PREFIX##ReceiveCommands(int sockfd,							\
+								  void *priv,							\
+								  const char *error_label)				\
+	{																	\
+		char		buffer_local[10000];								\
+		char	   *buffer;												\
+		size_t		bufsz, offset;										\
+		ssize_t		nbytes;												\
+		int			recv_flags;											\
+		int			count = 0;											\
+		XpuCommand *curr = NULL;										\
+																		\
+	restart:															\
+		buffer = buffer_local;											\
+		bufsz  = sizeof(buffer_local);									\
+		offset = 0;														\
+		recv_flags = MSG_DONTWAIT;										\
+		curr   = NULL;													\
+																		\
+		for (;;)														\
+		{																\
+			nbytes = recv(sockfd,										\
+						  buffer + offset,								\
+						  bufsz - offset,								\
+						  recv_flags);									\
+			if (nbytes < 0)												\
+			{															\
+				if (errno == EINTR)										\
+					continue;											\
+				if (errno == EAGAIN || errno == EWOULDBLOCK)			\
+				{														\
+					/*													\
+					 * If we are in the halfway through the read of		\
+					 * XpuCommand fraction, we have to wait for			\
+					 * the complete XpuCommand.							\
+					 * (The peer side should send the entire command	\
+					 * very soon.) Elsewhere, we have no queued			\
+					 * XpuCommand right now.							\
+					 */													\
+					if (!curr && offset == 0)							\
+						return count;									\
+					/* next recv(2) shall be blocking call */			\
+					recv_flags = 0;										\
+					continue;											\
+				}														\
+				fprintf(stderr, "[%s] failed on recv(2): %m\n",			\
+						error_label);									\
+				return -1;												\
+			}															\
+			else if (nbytes == 0)										\
+			{															\
+				/* end of the stream */									\
+				if (curr || offset > 0)									\
+				{														\
+					fprintf(stderr, "[%s] connection closed in the halfway through XpuCommands read\n", \
+							error_label);								\
+					return -1;											\
+				}														\
+				return count;											\
+			}															\
+																		\
+			offset += nbytes;											\
+			if (!curr)													\
+			{															\
+				XpuCommand *temp, *xcmd;								\
+			next:														\
+				if (offset < offsetof(XpuCommand, u))					\
+				{														\
+					if (buffer != buffer_local)							\
+					{													\
+						memmove(buffer_local, buffer, offset);			\
+						buffer = buffer_local;							\
+						bufsz  = sizeof(buffer_local);					\
+					}													\
+					recv_flags = 0;		/* next recv(2) is blockable */	\
+					continue;											\
+				}														\
+				temp = (XpuCommand *)buffer;							\
+				if (temp->length <= offset)								\
+				{														\
+					assert(temp->magic == XpuCommandMagicNumber);		\
+					xcmd = __XPU_PREFIX##AllocCommand(priv, temp->length); \
+					if (!xcmd)											\
+					{													\
+						fprintf(stderr, "[%s] out of memory (sz=%lu): %m\n", \
+								error_label, temp->length);				\
+						return -1;										\
+					}													\
+					memcpy(xcmd, temp, temp->length);					\
+					__XPU_PREFIX##AttachCommand(priv, xcmd);			\
+					count++;											\
+																		\
+					if (temp->length == offset)							\
+						goto restart;									\
+					/* read remained portion, if any */					\
+					buffer += temp->length;								\
+					offset -= temp->length;								\
+					goto next;											\
+				}														\
+				else													\
+				{														\
+					curr = __XPU_PREFIX##AllocCommand(priv, temp->length); \
+					if (!curr)											\
+					{													\
+						fprintf(stderr, "[%s] out of memory (sz=%lu): %m\n", \
+								error_label, temp->length);				\
+						return -1;										\
+					}													\
+					memcpy(curr, temp, offset);							\
+					buffer = (char *)curr;								\
+					bufsz  = temp->length;								\
+					recv_flags = 0;		/* blocking enabled */			\
+				}														\
+			}															\
+			else if (offset >= curr->length)							\
+			{															\
+				assert(curr->magic == XpuCommandMagicNumber);			\
+				assert(curr->length == offset);							\
+				__XPU_PREFIX##AttachCommand(priv, curr);				\
+				count++;												\
+				goto restart;											\
+			}															\
+		}																\
+		fprintf(stderr, "[%s] Bug? unexpected loop break\n",			\
+				error_label);											\
+		return -1;														\
+	}
+
+/* ----------------------------------------------------------------
+ *
  * Entrypoint for LoadVars
  *
  * ----------------------------------------------------------------
  */
-PUBLIC_FUNCTION(int)
+EXTERN_FUNCTION(int)
 kern_form_heaptuple(kern_context *kcxt,
 					const kern_expression *kproj,
 					const kern_data_store *kds_dst,
 					HeapTupleHeaderData *htup);
-PUBLIC_FUNCTION(bool)
+EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
 					 kern_data_store *kds_outer,
 					 HeapTupleHeaderData *htup,
 					 int num_inners,
 					 kern_data_store **kds_inners,
 					 HeapTupleHeaderData **htup_inners);
-PUBLIC_FUNCTION(bool)
+EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterColumn(XPU_PGFUNCTION_ARGS,
 						kern_data_store *kds_outer,
 						uint32_t kds_index,
 						int num_inners,
 						kern_data_store **kds_inners,
 						HeapTupleHeaderData **htup_inners);
-PUBLIC_FUNCTION(bool)
+EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
 					   kern_data_store *kds_outer,
 					   uint32_t kds_index,
 					   int num_inners,
 					   kern_data_store **kds_inners,
-					   kern_tupitem **tupitem_inners);
-PUBLIC_FUNCTION(bool)
+					   HeapTupleHeaderData **htup_inners);
+EXTERN_FUNCTION(int)
 ExecProjectionOuterRow(kern_context *kcxt,
 					   kern_expression *kexp,
 					   kern_data_store *kds_dst,
+					   bool make_a_valid_tuple,
 					   kern_data_store *kds_outer,
 					   HeapTupleHeaderData *htup_outer,
 					   int num_inners,
 					   kern_data_store **kds_inners,
 					   HeapTupleHeaderData **htup_inners);
+EXTERN_FUNCTION(int)
+ExecProjectionOuterArrow(kern_context *kcxt,
+						 kern_expression *kexp,
+						 kern_data_store *kds_dst,
+						 bool make_a_valid_tuple,
+						 kern_data_store *kds_outer,
+						 uint32_t kds_index,
+						 int num_inners,
+						 kern_data_store **kds_inners,
+						 HeapTupleHeaderData **htup_inners);
 
 /* ----------------------------------------------------------------
  *
@@ -1616,9 +1866,9 @@ ExecProjectionOuterRow(kern_context *kcxt,
  *
  * ----------------------------------------------------------------
  */
-PUBLIC_FUNCTION(void)
+EXTERN_FUNCTION(void)
 pg_kern_ereport(kern_context *kcxt);	/* only host code */
-PUBLIC_FUNCTION(uint32_t)
+EXTERN_FUNCTION(uint32_t)
 pg_hash_any(const void *ptr, int sz);
 
 #endif	/* XPU_COMMON_H */

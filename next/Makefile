@@ -17,18 +17,23 @@ PGSTROM_RELEASE := devel
 # Source of PG-Strom host code
 #
 __STROM_OBJS = main.o extra.o codegen.o misc.o executor.o brin.o relscan.o \
-               gpu_scan.o gpu_device.o gpu_direct.o gpu_service.o \
+               gpu_scan.o gpu_device.o gpu_service.o \
                dpu_device.o dpu_scan.o \
-               float2.o tinyint.o
+               arrow_fdw.o arrow_nodes.o \
+               pcie.o float2.o tinyint.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/next/,$(__STROM_OBJS))
+
+GPU_DEVATTRS_H = $(STROM_BUILD_ROOT)/next/gpu_devattrs.h
+GENERATED-HEADERS = $(GPU_DEVATTRS_H)
 
 #
 # Source of NVIDIA GPU device code
 #
 include $(STROM_BUILD_ROOT)/next/Makefile.cuda
 __CUDA_OBJS = cuda_common cuda_gpuscan \
-              cuda_basetype cuda_numeric cuda_timelib cuda_textlib cuda_misclib
-__CUDA_HEADERS = xpu_common.h xpu_common.c xpu_numeric.h
+              xpu_common xpu_basetype xpu_numeric xpu_timelib xpu_textlib xpu_misclib
+__CUDA_HEADERS = cuda_common.h xpu_common.h xpu_opcodes.h \
+                 xpu_basetype.h xpu_numeric.h xpu_textlib.h xpu_timelib.h xpu_misclib.h
 __CUDA_OPT_OBJS = $(addsuffix .fatbin,$(__CUDA_OBJS))
 __CUDA_DBG_OBJS = $(addsuffix .debug.fatbin,$(__CUDA_OBJS))
 CUDA_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/next/,$(__CUDA_HEADERS))
@@ -97,11 +102,25 @@ MODULEDIR  = pg_strom
 DATA = $(STROM_SQL)
 OBJS = $(STROM_OBJS)
 DATA_built = $(CUDA_OPT_OBJS) $(CUDA_DBG_OBJS)
-EXTRA_CLEAN = $(CUDA_OPT_OBJS) $(CUDA_DBG_OBJS)
+EXTRA_CLEAN = $(DATA_built) $(GENERATED-HEADERS)
 EXTENSION = pg_strom
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+#
+# Device Attributes
+#
+submake-generated-headers: $(GENERATED-HEADERS)
+
+$(GPU_DEVATTRS_H): $(CUDA_IPATH)/cuda.h
+	cat $(CUDA_IPATH)/cuda.h | \
+	grep -E '^[ ]+CU_DEVICE_ATTRIBUTE_' | \
+	grep -v -E 'CU_DEVICE_ATTRIBUTE_MAX$$' | \
+	grep -v 'Deprecated[,\.]' | \
+	sed -e 's|[ ]*CU_DEVICE_ATTRIBUTE_|DEV_ATTR(|g' \
+	    -e 's| =.*/\*\*<[ ]*|, "|g' \
+	    -e 's|[ ]*\*/|")|g' > $@
 
 #
 # GPU Device Code
