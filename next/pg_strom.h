@@ -115,6 +115,7 @@
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
 #include <cufile.h>
+#include <ctype.h>
 #include <float.h>
 #include <libgen.h>
 #include <limits.h>

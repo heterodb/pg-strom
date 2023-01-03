@@ -105,9 +105,9 @@ __trim(char *token)
 {
 	char   *tail = token + strlen(token) - 1;
 
-	while (*token == ' ' || *token == '\t')
+	while (isspace(*token))
 		token++;
-	while (tail >= token && (*tail == ' ' || *tail == '\t'))
+	while (tail >= token && isspace(*tail))
 		*tail-- = '\0';
 	return token;
 }
