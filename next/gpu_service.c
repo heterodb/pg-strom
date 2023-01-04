@@ -726,7 +726,6 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
 						 (int)desc->slot_type);
 				return false;
 			}
-			fprintf(stderr, "desc[%d] slot_id=%u slot_type=%d\n", i, desc->slot_id, desc->slot_type);
 		}
 	}
 

@@ -417,6 +417,7 @@ pgstromFetchFallbackTuple(pgstromTaskState *pts, TupleTableSlot *slot)
 static void
 __relScanDirectFallbackBlock(pgstromTaskState *pts, BlockNumber block_num)
 {
+	pgstromSharedState *ps_state = pts->ps_state;
 	Relation	relation = pts->css.ss.ss_currentRelation;
 	HeapScanDesc h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
 	Snapshot	snapshot = pts->css.ss.ps.state->es_snapshot;
@@ -459,6 +460,7 @@ __relScanDirectFallbackBlock(pgstromTaskState *pts, BlockNumber block_num)
 			pts->cb_cpu_fallback(pts, &htup);
 	}
 	UnlockReleaseBuffer(buffer);
+	pg_atomic_fetch_add_u32(&ps_state->heap_fallback_nblocks, 1);
 }
 
 static void
@@ -555,6 +557,7 @@ XpuCommand *
 pgstromRelScanChunkDirect(pgstromTaskState *pts,
 						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
+	pgstromSharedState *ps_state = pts->ps_state;
 	Relation		relation = pts->css.ss.ss_currentRelation;
 	HeapScanDesc    h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
 	/* NOTE: 'smgr_rnode' always locates on the head of SMgrRelationData */
@@ -756,6 +759,8 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	}
 out:
 	Assert(kds->nitems == kds->block_nloaded + strom_nblocks);
+	pg_atomic_fetch_add_u32(&ps_state->heap_normal_nblocks, kds->block_nloaded);
+	pg_atomic_fetch_add_u32(&ps_state->heap_direct_nblocks, strom_nblocks);
 	kds->length = kds->block_offset + BLCKSZ * kds->nitems;
 	if (kds->nitems == 0)
 		return NULL;
@@ -786,7 +791,7 @@ out:
 	xcmd_iov[0].iov_base = xcmd;
 	xcmd_iov[0].iov_len  = xcmd->length;
 	*xcmd_iovcnt = 1;
-	
+
 	return xcmd;
 }
 

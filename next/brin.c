@@ -459,6 +459,7 @@ typedef struct
 struct BrinIndexState
 {
 	Relation		index_rel;
+	List		   *index_quals;
 	BlockNumber		nblocks;
 	BlockNumber		nchunks;
 	BlockNumber		pagesPerRange;
@@ -504,6 +505,7 @@ pgstromBrinIndexExecBegin(pgstromTaskState *pts,
 	 */
 	lockmode = exec_rt_fetch(scanrelid, estate)->rellockmode;
 	br_state->index_rel = index_open(index_oid, lockmode);
+	br_state->index_quals = copyObject(index_quals);
 	br_state->brinRevmap = brinRevmapInitialize(br_state->index_rel,
 												&br_state->pagesPerRange,
 												estate->es_snapshot);
@@ -628,6 +630,7 @@ static void
 __BrinIndexExecBuildResults(pgstromTaskState *pts)
 {
 	/* see bringetbitmap() */
+	pgstromSharedState *ps_state = pts->ps_state;
 	EState		   *estate = pts->css.ss.ps.state;
 	BrinIndexState *br_state = pts->br_state;
 	BrinIndexResults *br_results = br_state->brinResults;
@@ -859,6 +862,10 @@ __BrinIndexExecBuildResults(pgstromTaskState *pts)
 			br_results->chunks[idx] = chunk_id;
 		}
 	}
+	/* update statistics */
+	pg_atomic_fetch_add_u32(&ps_state->brin_index_fetched, br_results->nitems);
+	pg_atomic_fetch_add_u32(&ps_state->brin_index_skipped,
+							br_state->nchunks - br_results->nitems);
 	MemoryContextSwitchTo(oldcxt);
 	MemoryContextDelete(per_range_cxt);
 
@@ -1020,6 +1027,52 @@ void
 pgstromBrinIndexShutdownDSM(pgstromTaskState *pts)
 {
 	/* nothing to do */
+}
+
+void
+pgstromBrinIndexExplain(pgstromTaskState *pts,
+						List *dcontext,
+						ExplainState *es)
+{
+	pgstromSharedState *ps_state = pts->ps_state;
+	BrinIndexState *brin_state = pts->br_state;
+	StringInfoData	buf;
+	ListCell	   *lc;
+	uint32_t		count;
+
+	initStringInfo(&buf);
+	foreach (lc, brin_state->index_quals)
+	{
+		Node   *qual = (Node *)lfirst(lc);
+		char   *temp;
+
+		temp = deparse_expression(qual, dcontext, false, true);
+		if (buf.len > 0)
+			appendStringInfoString(&buf, ", ");
+		appendStringInfoString(&buf, temp);
+	}
+	ExplainPropertyText("Brin Quals", buf.data, es);
+
+	if (es->analyze)
+	{
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			resetStringInfo(&buf);
+			appendStringInfo(&buf, "fetched=%u, skipped=%u",
+							 pg_atomic_read_u32(&ps_state->brin_index_fetched),
+							 pg_atomic_read_u32(&ps_state->brin_index_skipped));
+			ExplainPropertyText("Brin Stats", buf.data, es);
+		}
+		else
+		{
+			count = pg_atomic_read_u32(&ps_state->brin_index_fetched);
+			ExplainPropertyInteger("Brin Stats Fetched", NULL, count, es);
+
+			count = pg_atomic_read_u32(&ps_state->brin_index_skipped);
+			ExplainPropertyInteger("Brin Stats Skipped", NULL, count, es);
+		}
+	}
+	pfree(buf.data);
 }
 
 void

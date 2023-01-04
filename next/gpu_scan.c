@@ -530,7 +530,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 				if (devcost < lfirst_int(lc2))
 				{
 					dev_quals = list_insert_nth(dev_quals, pos, rinfo);
-					dev_costs = list_insert_nth_int(dev_quals, pos, devcost);
+					dev_costs = list_insert_nth_int(dev_costs, pos, devcost);
 					break;
 				}
 				pos++;
@@ -781,23 +781,64 @@ ExplainGpuScan(CustomScanState *node,
 			   ExplainState *es)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
-	StringInfoData	temp;
+	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
+	List		   *dcontext;
+	ListCell	   *lc;
+	char		   *temp;
+	StringInfoData	buf;
+
+	initStringInfo(&buf);
+	/* setup deparsing context */
+	dcontext = set_deparse_context_plan(es->deparse_cxt,
+										(Plan *)cscan,
+										ancestors);
+	if (gss->gs_info.dev_quals != NIL)
+	{
+		List   *dev_quals = gss->gs_info.dev_quals;
+		Expr   *expr;
+
+		if (list_length(dev_quals) > 1)
+			expr = make_andclause(dev_quals);
+		else
+			expr = linitial(dev_quals);
+		temp = deparse_expression((Node *)expr, dcontext, false, true);
+		ExplainPropertyText("GPU Quals", temp, es);
+	}
+
+	resetStringInfo(&buf);
+	foreach (lc, cscan->custom_scan_tlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (tle->resjunk)
+			continue;
+		temp = deparse_expression((Node *)tle->expr, dcontext, false, true);
+		if (buf.len > 0)
+			appendStringInfoString(&buf, ", ");
+		appendStringInfoString(&buf, temp);
+	}
+	ExplainPropertyText("GPU Projection", buf.data, es);
 	
-	initStringInfo(&temp);
-	pgstrom_explain_xpucode(&temp,
-							gss->gs_info.kern_quals,
-							&gss->pts.css,
-							es, ancestors);
-	ExplainPropertyText("GPU Quals", temp.data, es);
+	if (es->verbose)
+	{
+		resetStringInfo(&buf);
+		pgstrom_explain_xpucode(&buf,
+								gss->gs_info.kern_quals,
+								&gss->pts.css,
+								es, ancestors);
+		ExplainPropertyText("GPU Quals Code", buf.data, es);
+	}
 
-	resetStringInfo(&temp);
-	pgstrom_explain_xpucode(&temp,
-							gss->gs_info.kern_projs,
-							&gss->pts.css,
-							es, ancestors);
-	ExplainPropertyText("GPU Projection", temp.data, es);
-
-	pgstromExplainTaskState(&gss->pts, es, ancestors);
+	if (es->verbose)
+	{
+		resetStringInfo(&buf);
+		pgstrom_explain_xpucode(&buf,
+								gss->gs_info.kern_projs,
+								&gss->pts.css,
+								es, ancestors);
+		ExplainPropertyText("GPU Projection Code", buf.data, es);
+	}
+	pgstromExplainTaskState(&gss->pts, es, ancestors, dcontext);
 }
 
 /*

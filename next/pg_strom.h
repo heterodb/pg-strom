@@ -228,6 +228,13 @@ typedef struct
 	pg_atomic_uint32	arrow_rbatch_nskip;	/* # of skipped record-batches */
 	/* for gpu-cache */
 	pg_atomic_uint32	gcache_fetch_count;
+	/* for gpu/dpu-direct */
+	pg_atomic_uint32	heap_normal_nblocks;
+	pg_atomic_uint32	heap_direct_nblocks;
+	pg_atomic_uint32	heap_fallback_nblocks;
+	/* for brin-index */
+	pg_atomic_uint32	brin_index_fetched;
+	pg_atomic_uint32	brin_index_skipped;
 	/* common block-based table scan descriptor */
 	ParallelBlockTableScanDescData bpscan;
 } pgstromSharedState;
@@ -372,6 +379,9 @@ extern Size		pgstromBrinIndexEstimateDSM(pgstromTaskState *pts);
 extern Size		pgstromBrinIndexInitDSM(pgstromTaskState *pts, char *dsm_addr);
 extern Size		pgstromBrinIndexAttachDSM(pgstromTaskState *pts, char *dsm_addr);
 extern void		pgstromBrinIndexShutdownDSM(pgstromTaskState *pts);
+extern void		pgstromBrinIndexExplain(pgstromTaskState *pts,
+										List *dcontext,
+										ExplainState *es);
 extern void		pgstrom_init_brin(void);
 
 /*
@@ -437,7 +447,8 @@ extern void		pgstromExecEndTaskState(pgstromTaskState *pts);
 extern void		pgstromExecResetTaskState(pgstromTaskState *pts);
 extern void		pgstromExplainTaskState(pgstromTaskState *pts,
 										ExplainState *es,
-										List *ancestors);
+										List *ancestors,
+										List *dcontext);
 extern void		pgstrom_init_executor(void);
 
 /*
@@ -535,17 +546,6 @@ extern void		gpuClientWriteBack(gpuClient *gclient,
 extern void		pgstrom_init_gpu_service(void);
 
 /*
- * gpu_direct.c
- */
-extern void		pgstromGpuDirectExecBegin(pgstromTaskState *pts,
-										  const Bitmapset *gpuset);
-extern const Bitmapset *pgstromGpuDirectDevices(pgstromTaskState *pts);
-extern void		pgstromGpuDirectExecEnd(pgstromTaskState *pts);
-extern void		pgstrom_init_gpu_direct(void);
-
-
-
-/*
  * gpu_cache.c
  */
 
@@ -639,6 +639,8 @@ extern bool		DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
 									   const DpuStorageEntry *ds_entry2);
 extern void		DpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
+extern void		explainDpuStorageEntry(const DpuStorageEntry *ds_entry,
+									   ExplainState *es);
 extern bool		pgstrom_init_dpu_device(void);
 
 /*

@@ -287,6 +287,39 @@ DpuClientOpenSession(pgstromTaskState *pts,
 }
 
 /*
+ * explainDpuStorageEntry
+ */
+void
+explainDpuStorageEntry(const DpuStorageEntry *ds_entry, ExplainState *es)
+{
+	char	label[80];
+	StringInfoData buf;
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		snprintf(label, sizeof(label), "DPU%u", ds_entry->endpoint_id);
+		initStringInfo(&buf);
+		appendStringInfo(&buf, "dir='%s', host='%s', port='%s'",
+						 ds_entry->endpoint_dir,
+						 ds_entry->config_host,
+						 ds_entry->config_port);
+		ExplainPropertyText(label, buf.data, es);
+		pfree(buf.data);
+	}
+	else
+	{
+		snprintf(label, sizeof(label), "DPU%u-dir", ds_entry->endpoint_id);
+		ExplainPropertyText(label, ds_entry->endpoint_dir, es);
+
+		snprintf(label, sizeof(label), "DPU%u-host", ds_entry->endpoint_id);
+		ExplainPropertyText(label, ds_entry->config_host, es);
+
+		snprintf(label, sizeof(label), "DPU%u-port", ds_entry->endpoint_id);
+		ExplainPropertyText(label, ds_entry->config_port, es);
+	}
+}
+
+/*
  * parse_dpu_endpoint_list
  */
 static bool
