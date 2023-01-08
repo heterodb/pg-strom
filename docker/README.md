@@ -33,7 +33,7 @@ docker run --name postgis-db \
 -e POSTGRES_DB=postgis \
 -p 5432:5432 \
 -v ${HOME}/postgis-data:/var/lib/postgresql/data \
--d murphye/pgstrom-postgis33:v1
+-d murphye/pgstrom-postgis33-pg15:v1
 ```
 
 Tail the logs and watch for any errors!
