@@ -1407,6 +1407,7 @@ typedef enum {
 	/* for projection */
 	FuncOpCode__Projection,
 	FuncOpCode__LoadVars,
+	FuncOpCode__HashValue,
 	FuncOpCode__BuiltInMax,
 } FuncOpCode;
 

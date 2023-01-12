@@ -258,6 +258,30 @@ DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
 }
 
 /*
+ * DpuStorageEntryGetEndpointId
+ */
+int
+DpuStorageEntryGetEndpointId(const DpuStorageEntry *ds_entry)
+{
+	return ds_entry ? ds_entry->endpoint_id : -1;
+}
+
+/*
+ * DpuStorageEntryByEndpointId
+ */
+const DpuStorageEntry *
+DpuStorageEntryByEndpointId(int endpoint_id)
+{
+	if (dpu_storage_master_array &&
+		endpoint_id >= 0 &&
+		endpoint_id < dpu_storage_master_array->nitems)
+	{
+		return &dpu_storage_master_array->entries[endpoint_id];
+	}
+	return NULL;
+}
+
+/*
  * DpuClientOpenSession 
  */
 void
