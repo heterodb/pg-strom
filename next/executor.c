@@ -969,12 +969,76 @@ pgstromExecResetTaskState(pgstromTaskState *pts)
 void
 pgstromExplainTaskState(pgstromTaskState *pts,
 						ExplainState *es,
-						List *ancestors)
+						List *ancestors,
+						List *dcontext)
 {
+	StringInfoData buf;
+	int		k;
 
+	initStringInfo(&buf);
+	if (pts->arrow_state)
+	{
+		pgstromArrowFdwExplain(pts->arrow_state,
+							   pts->css.ss.ss_currentRelation,
+							   es, dcontext);
+	}
+	else if (pts->gcache_state)
+	{
+		/* GPU-Cache */
+	}
+	else if (!bms_is_empty(pts->optimal_gpus))
+	{
+		/* GPU-Direct */
+		resetStringInfo(&buf);
+		if (!es->analyze)
+		{
+			bool	is_first = true;
 
+			appendStringInfo(&buf, "enabled (");
+			for (k = bms_next_member(pts->optimal_gpus, -1);
+				 k >= 0;
+				 k = bms_next_member(pts->optimal_gpus, k))
+			{
+				if (!is_first)
+					appendStringInfo(&buf, ", ");
+				appendStringInfo(&buf, "GPU-%d", k);
+				is_first = false;
+			}
+			appendStringInfo(&buf, ")");
+		}
+		else
+		{
+			pgstromSharedState *ps_state = pts->ps_state;
+			XpuConnection  *conn = pts->conn;
+			uint32			count;
 
-	
+			count = pg_atomic_read_u32(&ps_state->heap_direct_nblocks);
+			appendStringInfo(&buf, "enabled (%s; direct=%u", conn->devname, count);
+			count = pg_atomic_read_u32(&ps_state->heap_normal_nblocks);
+			if (count > 0)
+				appendStringInfo(&buf, ", buffer=%u", count);
+			count = pg_atomic_read_u32(&ps_state->heap_fallback_nblocks);
+			if (count > 0)
+				appendStringInfo(&buf, ", fallback=%u", count);
+			appendStringInfo(&buf, ")");
+		}
+		ExplainPropertyText("GPU-Direct SQL", buf.data, es);
+	}
+	else if (pts->ds_entry)
+	{
+		/* DPU-Entry */
+		explainDpuStorageEntry(pts->ds_entry, es);
+	}
+	else
+	{
+		/* Normal Heap Storage */
+	}
+
+	/* State of BRIN-index */
+	if (pts->br_state)
+		pgstromBrinIndexExplain(pts, dcontext, es);
+
+	pfree(buf.data);
 }
 
 /*

@@ -262,6 +262,32 @@ bms_from_pglist(List *pglist)
 	return bms;
 }
 
+Float *
+__makeFloat(double fval)
+{
+	return makeFloat(psprintf("%e", fval));
+}
+
+Const *
+__makeByteaConst(bytea *data)
+{
+	return makeConst(BYTEAOID,
+					 -1,
+					 InvalidOid,
+					 -1,
+					 PointerGetDatum(data),
+					 data == NULL,
+					 false);
+}
+
+bytea *
+__getByteaConst(Const *con)
+{
+	Assert(IsA(con, Const) && con->consttype == BYTEAOID);
+
+	return (con->constisnull ? NULL : DatumGetByteaP(con->constvalue));
+}
+
 #if 0
 /*
  * pathnode_tree_walker

@@ -16,7 +16,7 @@
 GpuDevAttributes *gpuDevAttrs = NULL;
 int			numGpuDevAttrs = 0;
 double		pgstrom_gpu_setup_cost;			/* GUC */
-double		pgstrom_gpu_dma_cost;			/* GUC */
+double		pgstrom_gpu_tuple_cost;			/* GUC */
 double		pgstrom_gpu_operator_cost;		/* GUC */
 double		pgstrom_gpu_direct_seq_page_cost; /* GUC */
 /* catalog of device attributes */
@@ -333,10 +333,10 @@ pgstrom_init_gpu_options(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* cost factor for each Gpu task */
-	DefineCustomRealVariable("pg_strom.gpu_dma_cost",
-							 "Cost to send/recv tuple via DMA",
+	DefineCustomRealVariable("pg_strom.gpu_tuple_cost",
+							 "Default cost to transfer GPU<->Host per tuple",
 							 NULL,
-							 &pgstrom_gpu_dma_cost,
+							 &pgstrom_gpu_tuple_cost,
 							 DEFAULT_CPU_TUPLE_COST,
 							 0,
 							 DBL_MAX,

@@ -2767,8 +2767,8 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 				elog(ERROR, "file '%s' has incompatible schema definition", fname);
 			for (j=0; j < schema._num_fields; j++)
 			{
-				if (arrowFieldTypeIsEqual(&schema.fields[j],
-										  &stemp->fields[j]))
+				if (!arrowFieldTypeIsEqual(&schema.fields[j],
+										   &stemp->fields[j]))
 					elog(ERROR, "file '%s' has incompatible schema definition", fname);
 			}
 		}

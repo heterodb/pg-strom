@@ -258,6 +258,30 @@ DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
 }
 
 /*
+ * DpuStorageEntryGetEndpointId
+ */
+int
+DpuStorageEntryGetEndpointId(const DpuStorageEntry *ds_entry)
+{
+	return ds_entry ? ds_entry->endpoint_id : -1;
+}
+
+/*
+ * DpuStorageEntryByEndpointId
+ */
+const DpuStorageEntry *
+DpuStorageEntryByEndpointId(int endpoint_id)
+{
+	if (dpu_storage_master_array &&
+		endpoint_id >= 0 &&
+		endpoint_id < dpu_storage_master_array->nitems)
+	{
+		return &dpu_storage_master_array->entries[endpoint_id];
+	}
+	return NULL;
+}
+
+/*
  * DpuClientOpenSession 
  */
 void
@@ -284,6 +308,39 @@ DpuClientOpenSession(pgstromTaskState *pts,
 	snprintf(namebuf, sizeof(namebuf), "DPU-%u", ds_entry->endpoint_id);
 
 	__xpuClientOpenSession(pts, session, sockfd, namebuf);
+}
+
+/*
+ * explainDpuStorageEntry
+ */
+void
+explainDpuStorageEntry(const DpuStorageEntry *ds_entry, ExplainState *es)
+{
+	char	label[80];
+	StringInfoData buf;
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		snprintf(label, sizeof(label), "DPU%u", ds_entry->endpoint_id);
+		initStringInfo(&buf);
+		appendStringInfo(&buf, "dir='%s', host='%s', port='%s'",
+						 ds_entry->endpoint_dir,
+						 ds_entry->config_host,
+						 ds_entry->config_port);
+		ExplainPropertyText(label, buf.data, es);
+		pfree(buf.data);
+	}
+	else
+	{
+		snprintf(label, sizeof(label), "DPU%u-dir", ds_entry->endpoint_id);
+		ExplainPropertyText(label, ds_entry->endpoint_dir, es);
+
+		snprintf(label, sizeof(label), "DPU%u-host", ds_entry->endpoint_id);
+		ExplainPropertyText(label, ds_entry->config_host, es);
+
+		snprintf(label, sizeof(label), "DPU%u-port", ds_entry->endpoint_id);
+		ExplainPropertyText(label, ds_entry->config_port, es);
+	}
 }
 
 /*

@@ -1016,7 +1016,7 @@ __arrowFieldTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 
 	if (a->type.node.tag != b->type.node.tag)
 		return false;
-	switch (a->node.tag)
+	switch (a->type.node.tag)
 	{
 		case ArrowNodeTag__Int:
 			if (a->type.Int.bitWidth != b->type.Int.bitWidth)

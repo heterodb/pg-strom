@@ -1399,10 +1399,10 @@ pgstrom_build_xpucode(bytea **p_xpucode,
 }
 
 /*
- * pgstrom_build_projection
+ * codegen_build_projection
  */
 void
-pgstrom_build_projection(bytea **p_xpucode_proj,
+codegen_build_projection(bytea **p_xpucode_proj,
 						 List *tlist_dev,
 						 List *input_rels_tlist,
 						 uint32_t *p_extra_flags,
@@ -1529,6 +1529,99 @@ pgstrom_build_projection(bytea **p_xpucode_proj,
 }
 
 /*
+ * codegen_build_hashvalue
+ */
+void
+codegen_build_hashvalue(bytea **p_xpucode,
+						List *hash_exprs_list,
+						List *input_rels_tlist,
+						uint32_t *p_extra_flags,
+						uint32_t *p_extra_bufsz,
+						uint32_t *p_kvars_nslots,
+						List **p_used_params)
+{
+	codegen_context	context;
+	StringInfoData	buf;
+	kern_expression	kexp;
+	ListCell	   *lc;
+	int				pos;
+
+	initStringInfo(&buf);
+	memset(&context, 0, sizeof(codegen_context));
+	context.buf = &buf;
+	context.elevel = ERROR;
+	if (p_extra_flags)
+		context.extra_flags = *p_extra_flags;
+	context.extra_flags |= DEVKIND__NVIDIA_GPU;
+	if (p_used_params)
+		context.used_params = *p_used_params;
+	context.input_rels_tlist = input_rels_tlist;
+
+	memset(&kexp, 0, sizeof(kern_expression));
+	kexp.exptype = TypeOpCode__int4;
+	kexp.opcode = FuncOpCode__HashValue;
+	kexp.nr_args = list_length(hash_exprs_list);
+	kexp.args_offset = SizeOfKernExpr(0);
+	pos = __appendBinaryStringInfo(&buf, &kexp, SizeOfKernExpr(0));
+	foreach (lc, hash_exprs_list)
+	{
+		Expr   *hash = lfirst(lc);
+
+		codegen_expression_walker(&context, hash);
+	}
+	__appendKernExpMagicAndLength(&buf, pos);
+
+	*p_xpucode = attach_varloads_xpucode(&context, (kern_expression *)buf.data);
+
+	pfree(buf.data);
+	if (p_used_params)
+		*p_used_params = context.used_params;
+	if (p_extra_flags)
+		*p_extra_flags = context.extra_flags;
+	if (p_extra_bufsz)
+		*p_extra_bufsz = Max(*p_extra_bufsz, context.extra_bufsz);
+	if (p_kvars_nslots)
+		*p_kvars_nslots = Max(*p_kvars_nslots, list_length(context.kvars_depth));
+}
+
+/*
+ * pgstrom_xpu_expression
+ */
+bool
+pgstrom_xpu_expression(Expr *expr,
+					   uint32_t devkind,
+					   List *input_rels_tlist,
+					   int *p_devcost)
+{
+	codegen_context context;
+
+	Assert(devkind == DEVKIND__NVIDIA_GPU ||
+		   devkind == DEVKIND__NVIDIA_DPU);
+	memset(&context, 0, sizeof(context));
+	context.elevel = DEBUG2;
+	context.top_expr = expr;
+	context.required_flags = devkind;
+	context.input_rels_tlist = input_rels_tlist;
+
+	if (IsA(expr, List))
+	{
+		List   *l = (List *)expr;
+
+		if (list_length(l) == 0)
+			expr = NULL;
+		else if (list_length(l) == 1)
+			expr = linitial(l);
+		else
+			expr = make_andclause(l);
+	}
+	if (codegen_expression_walker(&context, expr) < 0)
+		return false;
+	if (p_devcost)
+		*p_devcost = context.device_cost;
+	return true;
+}
+
+/*
  * pgstrom_gpu_expression
  *
  * checks whether the expression is executable on GPU devices.
@@ -1538,26 +1631,10 @@ pgstrom_gpu_expression(Expr *expr,
 					   List *input_rels_tlist,
 					   int *p_devcost)
 {
-	codegen_context	context;
-
-	memset(&context, 0, sizeof(context));
-	context.elevel = DEBUG2;
-	context.top_expr = expr;
-	context.required_flags = DEVKIND__NVIDIA_GPU;
-	context.input_rels_tlist = input_rels_tlist;
-
-	if (IsA(expr, List))
-	{
-		if (list_length((List *)expr) == 1)
-			expr = linitial((List *)expr);
-		else
-			expr = make_andclause((List *)expr);
-	}
-	if (codegen_expression_walker(&context, expr) < 0)
-		return false;
-	if (p_devcost)
-		*p_devcost = context.device_cost;
-	return true;
+	return pgstrom_xpu_expression(expr,
+								  DEVKIND__NVIDIA_GPU,
+								  input_rels_tlist,
+								  p_devcost);
 }
 
 /*
@@ -1570,26 +1647,10 @@ pgstrom_dpu_expression(Expr *expr,
 					   List *input_rels_tlist,
 					   int *p_devcost)
 {
-	codegen_context	context;
-
-	memset(&context, 0, sizeof(context));
-	context.elevel = DEBUG2;
-	context.top_expr = expr;
-	context.required_flags = DEVKIND__NVIDIA_DPU;
-	context.input_rels_tlist = input_rels_tlist;
-
-	if (IsA(expr, List))
-	{
-		if (list_length((List *)expr) == 1)
-			expr = linitial((List *)expr);
-		else
-			expr = make_andclause((List *)expr);
-	}
-	if (codegen_expression_walker(&context, expr) < 0)
-		return false;
-	if (p_devcost)
-		*p_devcost = context.device_cost;
-	return true;
+	return pgstrom_xpu_expression(expr,
+								  DEVKIND__NVIDIA_DPU,
+								  input_rels_tlist,
+								  p_devcost);
 }
 
 /*

@@ -16,8 +16,9 @@ PGSTROM_RELEASE := devel
 #
 # Source of PG-Strom host code
 #
-__STROM_OBJS = main.o extra.o codegen.o misc.o executor.o brin.o relscan.o \
-               gpu_scan.o gpu_device.o gpu_service.o \
+__STROM_OBJS = main.o extra.o codegen.o misc.o executor.o \
+               relscan.o multirels.o brin.o \
+               gpu_device.o gpu_service.o gpu_scan.o gpu_join.o \
                dpu_device.o dpu_scan.o \
                arrow_fdw.o arrow_nodes.o \
                pcie.o float2.o tinyint.o
@@ -78,7 +79,6 @@ PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM)
 PGSTROM_FLAGS += -D__PGSTROM_MODULE__=1
 PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""
 
-PGSTROM_DEBUG = 1
 ifeq ($(PGSTROM_DEBUG),1)
 PGSTROM_FLAGS += -g -O0 -DPGSTROM_DEBUG_BUILD=1
 endif

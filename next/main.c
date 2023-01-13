@@ -118,8 +118,7 @@ typedef struct
 {
 	PlannerInfo	   *root;
 	Relids			relids;
-	bool			outer_parallel;
-	bool			inner_parallel;
+	bool			parallel_aware;
 	const char	   *custom_name;
 	const CustomPath *cpath;
 } custom_path_entry;
@@ -141,10 +140,8 @@ custom_path_entry_hashvalue(const void *key, Size keysize)
 		hash ^= hash_any((unsigned char *)relids,
 						 offsetof(Bitmapset, words[relids->nwords]));
 	}
-	if (cent->outer_parallel)
+	if (cent->parallel_aware)
 		hash ^= 0x9e3779b9U;
-	if (cent->inner_parallel)
-		hash ^= 0x49a0f4ddU;
 	hash ^= hash_any((unsigned char *)custom_name, strlen(custom_name));
 
 	return hash;
@@ -158,8 +155,7 @@ custom_path_entry_compare(const void *key1, const void *key2, Size keysize)
 
 	if (cent1->root == cent2->root &&
 		bms_equal(cent1->relids, cent2->relids) &&
-		cent1->outer_parallel == cent2->outer_parallel &&
-		cent1->inner_parallel == cent2->inner_parallel &&
+		cent1->parallel_aware == cent2->parallel_aware &&
 		strcmp(cent1->custom_name, cent2->custom_name) == 0)
 		return 0;
 	/* not equal */
@@ -174,8 +170,7 @@ custom_path_entry_keycopy(void *dest, const void *src, Size keysize)
 
 	dent->root = sent->root;
 	dent->relids = bms_copy(sent->relids);
-	dent->outer_parallel = sent->outer_parallel;
-	dent->inner_parallel = sent->inner_parallel;
+	dent->parallel_aware = sent->parallel_aware;
 	dent->custom_name = pstrdup(sent->custom_name);
 
 	return dest;
@@ -184,8 +179,7 @@ custom_path_entry_keycopy(void *dest, const void *src, Size keysize)
 const CustomPath *
 custom_path_find_cheapest(PlannerInfo *root,
 						  RelOptInfo *rel,
-						  bool outer_parallel,
-						  bool inner_parallel,
+						  bool parallel_aware,
 						  const char *custom_name)
 {
 	custom_path_entry  hkey;
@@ -194,8 +188,7 @@ custom_path_find_cheapest(PlannerInfo *root,
 	memset(&hkey, 0, sizeof(custom_path_entry));
 	hkey.root = root;
 	hkey.relids = rel->relids;
-	hkey.outer_parallel = outer_parallel;
-	hkey.inner_parallel = inner_parallel;
+	hkey.parallel_aware = (parallel_aware ? true : false);
 	hkey.custom_name = custom_name;
 
 	cent = hash_search(custom_path_htable, &hkey, HASH_FIND, NULL);
@@ -207,8 +200,7 @@ custom_path_find_cheapest(PlannerInfo *root,
 bool
 custom_path_remember(PlannerInfo *root,
 					 RelOptInfo *rel,
-					 bool outer_parallel,
-					 bool inner_parallel,
+					 bool parallel_aware,
 					 const CustomPath *cpath)
 {
 	custom_path_entry  hkey;
@@ -218,8 +210,7 @@ custom_path_remember(PlannerInfo *root,
 	memset(&hkey, 0, sizeof(custom_path_entry));
 	hkey.root = root;
 	hkey.relids = rel->relids;
-	hkey.outer_parallel = outer_parallel;
-	hkey.inner_parallel = inner_parallel;
+	hkey.parallel_aware = (parallel_aware ? true : false);
 	hkey.custom_name = cpath->methods->CustomName;
 
 	cent = hash_search(custom_path_htable, &hkey, HASH_ENTER, &found);
@@ -229,11 +220,6 @@ custom_path_remember(PlannerInfo *root,
 		if (cent->cpath->path.total_cost <= cpath->path.total_cost)
 			return false;
 	}
-	Assert(cent->root == root &&
-		   bms_equal(cent->relids, rel->relids) &&
-		   cent->outer_parallel == outer_parallel &&
-		   cent->inner_parallel == inner_parallel &&
-		   strcmp(cent->custom_name, cpath->methods->CustomName) == 0);
 	cent->cpath = (const CustomPath *)pgstrom_copy_pathnode(&cpath->path);
 
 	return true;
@@ -328,6 +314,7 @@ _PG_init(void)
 	pgstrom_init_brin();
 	pgstrom_init_arrow_fdw();
 	pgstrom_init_executor();
+	pgstrom_init_multirels();
 	/* dump version number */
 	elog(LOG, "PG-Strom version %s built for PostgreSQL %s (git: %s)",
 		 PGSTROM_VERSION,
@@ -338,7 +325,7 @@ _PG_init(void)
 	{
 		pgstrom_init_gpu_service();
 		pgstrom_init_gpu_scan();
-		//pgstrom_init_gpu_join();
+		pgstrom_init_gpu_join();
 		//pgstrom_init_gpu_preagg();
 	}
 	/* init DPU related stuff */
