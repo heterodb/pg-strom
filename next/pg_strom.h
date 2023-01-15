@@ -370,7 +370,7 @@ extern void		pgstrom_explain_xpucode(StringInfo buf,
 										bytea *xpu_code,
 										const CustomScanState *css,
 										ExplainState *es,
-										List *ancestors);
+										List *dcontext);
 extern char	   *pgstrom_xpucode_to_string(bytea *xpu_code);
 extern void		pgstrom_init_codegen(void);
 
@@ -450,6 +450,16 @@ extern void		pgstromSharedStateShutdownDSM(pgstromTaskState *pts);
 extern void		pgstrom_init_relscan(void);
 
 /*
+ * plan.c
+ */
+extern List	   *pgstrom_build_tlist_dev(RelOptInfo *rel,
+										List *tlist,      /* must be backed to CPU */
+										List *host_quals, /* must be backed to CPU */
+										List *misc_exprs,
+										List *input_rels_tlist);
+
+
+/*
  * executor.c
  */
 extern void		__xpuClientOpenSession(pgstromTaskState *pts,
@@ -483,9 +493,17 @@ extern void		pgstromExecInitTaskState(pgstromTaskState *pts,
 extern TupleTableSlot  *pgstromExecTaskState(pgstromTaskState *pts);
 extern void		pgstromExecEndTaskState(pgstromTaskState *pts);
 extern void		pgstromExecResetTaskState(pgstromTaskState *pts);
+extern void		pgstromExplainScanState(pgstromTaskState *pts,
+										ExplainState *es,
+										List *dev_quals,
+										bytea *kern_dev_quals,
+										List *dev_projs,
+										bytea *kern_dev_projs,
+										double scan_tuples,
+										double scan_rows,
+										List *dcontext);
 extern void		pgstromExplainTaskState(pgstromTaskState *pts,
 										ExplainState *es,
-										List *ancestors,
 										List *dcontext);
 extern void		pgstrom_init_executor(void);
 
@@ -606,6 +624,8 @@ typedef struct
 	const Bitmapset *outer_refs; /* referenced columns */
 	List	   *used_params;	/* Param list in use */
 	List	   *dev_quals;		/* Device qualifiers */
+	double		scan_tuples;	/* copy of baserel->tuples (input) */
+	double		scan_rows;		/* copy of baserel->rows (output) */
 	Oid			index_oid;		/* OID of BRIN-index, if any */
 	List	   *index_conds;	/* BRIN-index key conditions */
 	List	   *index_quals;	/* Original BRIN-index qualifier*/
@@ -649,7 +669,6 @@ typedef struct
 	const Bitmapset *gpu_cache_devs;	/* device for GpuCache, if any */
 	const Bitmapset *gpu_direct_devs;	/* device for GPU-Direct SQL, if any */
 	const DpuStorageEntry *ds_entry;	/* target DPU if DpuJoin */
-	List		   *input_rels_tlist;	/* for codegen.c */
 	bytea		   *kern_projs;			/* device projection */
 	uint32_t		extra_flags;
 	uint32_t		extra_bufsz;
@@ -659,6 +678,8 @@ typedef struct
 	Index			scan_relid;			/* relid of the outer relation to scan */
 	List		   *scan_quals;			/* device qualifiers to scan the outer */
 	bytea		   *kern_scan_quals;	/* outer scan qualifier, if any */
+	double			scan_tuples;		/* copy of baserel->tuples */
+	double			scan_rows;			/* copy of baserel->rows */
 	Cost			final_cost;			/* cost for sendback and host-side tasks */
 	/* BRIN-index support */
 	Oid				brin_index_oid;		/* OID of BRIN-index, if any */

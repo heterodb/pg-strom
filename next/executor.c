@@ -964,12 +964,85 @@ pgstromExecResetTaskState(pgstromTaskState *pts)
 }
 
 /*
+ * pgstromExplainScanState
+ */
+void
+pgstromExplainScanState(pgstromTaskState *pts,
+						ExplainState *es,
+						List *dev_quals,
+						bytea *kern_dev_quals,
+						List *tlist_dev,
+						bytea *kern_dev_projs,
+						double scan_tuples,
+						double scan_rows,
+						List *dcontext)
+{
+	const char *devkind = DevKindLabel(pts->devkind, false);
+	StringInfoData buf;
+	char		label[100];
+	char	   *str;
+	ListCell   *lc;
+
+	initStringInfo(&buf);
+	if (dev_quals != NIL)
+	{
+		Expr   *expr;
+
+		snprintf(label, sizeof(label), "%s Quals", devkind);
+		if (list_length(dev_quals) > 1)
+			expr = make_andclause(dev_quals);
+		else
+			expr = linitial(dev_quals);
+		str = deparse_expression((Node *)expr, dcontext, false, true);
+		appendStringInfo(&buf, "%s [rows: %.0f -> %.0f]",
+						 str, scan_tuples, scan_rows);
+		ExplainPropertyText(label, buf.data, es);
+	}
+
+	resetStringInfo(&buf);
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (tle->resjunk)
+			continue;
+	    str = deparse_expression((Node *)tle->expr, dcontext, false, true);
+		if (buf.len > 0)
+			appendStringInfoString(&buf, ", ");
+		appendStringInfoString(&buf, str);
+	}
+	snprintf(label, sizeof(label), "%s Projection", devkind);
+	ExplainPropertyText(label, buf.data, es);
+
+	if (es->verbose && kern_dev_quals)
+	{
+		resetStringInfo(&buf);
+		pgstrom_explain_xpucode(&buf,
+								kern_dev_quals,
+								&pts->css,
+								es, dcontext);
+		snprintf(label, sizeof(label), "%s Quals Code", devkind);
+		ExplainPropertyText(label, buf.data, es);
+	}
+
+	if (es->verbose && kern_dev_projs)
+	{
+		resetStringInfo(&buf);
+		pgstrom_explain_xpucode(&buf,
+								kern_dev_projs,
+								&pts->css,
+								es, dcontext);
+		snprintf(label, sizeof(label), "%s Projection Code", devkind);
+		ExplainPropertyText(label, buf.data, es);
+	}
+}
+
+/*
  * pgstromExplainTaskState
  */
 void
 pgstromExplainTaskState(pgstromTaskState *pts,
 						ExplainState *es,
-						List *ancestors,
 						List *dcontext)
 {
 	StringInfoData buf;

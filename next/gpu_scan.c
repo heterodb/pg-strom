@@ -41,6 +41,8 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 	privs = lappend(privs, bms_to_pglist(gs_info->outer_refs));
 	exprs = lappend(exprs, gs_info->used_params);
 	exprs = lappend(exprs, gs_info->dev_quals);
+	privs = lappend(privs, __makeFloat(gs_info->scan_tuples));
+	privs = lappend(privs, __makeFloat(gs_info->scan_rows));
 	privs = lappend(privs, makeInteger(gs_info->index_oid));
 	privs = lappend(privs, gs_info->index_conds);
 	exprs = lappend(exprs, gs_info->index_quals);
@@ -72,6 +74,8 @@ deform_gpuscan_info(GpuScanInfo *gs_info, CustomScan *cscan)
 	gs_info->outer_refs		= bms_from_pglist(list_nth(privs, pindex++));
 	gs_info->used_params	= list_nth(exprs, eindex++);
 	gs_info->dev_quals		= list_nth(exprs, eindex++);
+	gs_info->scan_tuples    = floatVal(list_nth(privs, pindex++));
+	gs_info->scan_rows      = floatVal(list_nth(privs, pindex++));
 	gs_info->index_oid		= intVal(list_nth(privs, pindex++));
 	gs_info->index_conds	= list_nth(privs, pindex++);
 	gs_info->index_quals	= list_nth(exprs, eindex++);
@@ -734,6 +738,8 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 								proj_kvars_nslots);
 	gs_info->dev_quals = dev_quals;
 	gs_info->outer_refs = outer_refs;
+	gs_info->scan_tuples = baserel->tuples;
+	gs_info->scan_rows = baserel->rows;
 
 	/*
 	 * Build CustomScan(GpuScan) node
@@ -788,10 +794,12 @@ CreateGpuScanState(CustomScan *cscan)
 {
 	GpuScanState   *gss = palloc0(sizeof(GpuScanState));
 
+	Assert(cscan->methods == &gpuscan_plan_methods);
+
 	/* Set tag and executor callbacks */
 	NodeSetTag(gss, T_CustomScanState);
+	gss->pts.devkind = DEVKIND__NVIDIA_GPU;
 	gss->pts.css.flags = cscan->flags;
-	Assert(cscan->methods == &gpuscan_plan_methods);
 	gss->pts.css.methods = &gpuscan_exec_methods;
 	deform_gpuscan_info(&gss->gs_info, cscan);
 
@@ -934,64 +942,23 @@ ExplainGpuScan(CustomScanState *node,
 			   ExplainState *es)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
+	GpuScanInfo	   *gs_info = &gss->gs_info;
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	List		   *dcontext;
-	ListCell	   *lc;
-	char		   *temp;
-	StringInfoData	buf;
 
-	initStringInfo(&buf);
 	/* setup deparsing context */
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
-										(Plan *)cscan,
+										node->ss.ps.plan,
 										ancestors);
-	if (gss->gs_info.dev_quals != NIL)
-	{
-		List   *dev_quals = gss->gs_info.dev_quals;
-		Expr   *expr;
-
-		if (list_length(dev_quals) > 1)
-			expr = make_andclause(dev_quals);
-		else
-			expr = linitial(dev_quals);
-		temp = deparse_expression((Node *)expr, dcontext, false, true);
-		ExplainPropertyText("GPU Quals", temp, es);
-	}
-
-	resetStringInfo(&buf);
-	foreach (lc, cscan->custom_scan_tlist)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-
-		if (tle->resjunk)
-			continue;
-		temp = deparse_expression((Node *)tle->expr, dcontext, false, true);
-		if (buf.len > 0)
-			appendStringInfoString(&buf, ", ");
-		appendStringInfoString(&buf, temp);
-	}
-	ExplainPropertyText("GPU Projection", buf.data, es);
-	
-	if (es->verbose)
-	{
-		resetStringInfo(&buf);
-		pgstrom_explain_xpucode(&buf,
-								gss->gs_info.kern_quals,
-								&gss->pts.css,
-								es, ancestors);
-		ExplainPropertyText("GPU Quals Code", buf.data, es);
-	}
-
-	if (es->verbose)
-	{
-		resetStringInfo(&buf);
-		pgstrom_explain_xpucode(&buf,
-								gss->gs_info.kern_projs,
-								&gss->pts.css,
-								es, ancestors);
-		ExplainPropertyText("GPU Projection Code", buf.data, es);
-	}
-	pgstromExplainTaskState(&gss->pts, es, ancestors, dcontext);
+	pgstromExplainScanState(&gss->pts, es,
+							gs_info->dev_quals,
+							gs_info->kern_quals,
+							cscan->custom_scan_tlist,
+							gs_info->kern_projs,
+							gs_info->scan_tuples,
+							gs_info->scan_rows,
+							dcontext);
+	pgstromExplainTaskState(&gss->pts, es, dcontext);
 }
 
 /*

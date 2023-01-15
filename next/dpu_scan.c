@@ -279,7 +279,7 @@ DpuScanAddScanPath(PlannerInfo *root,
 								indexConds,
 								indexQuals,
 								indexNBlocks);
-	if (cpath && custom_path_remember(root, baserel, false, false, cpath))
+	if (cpath && custom_path_remember(root, baserel, false, cpath))
 		add_path(baserel, &cpath->path);
 	/* if appropriate, consider parallel DpuScan */
 	if (baserel->consider_parallel && baserel->lateral_relids == NULL)
@@ -293,7 +293,7 @@ DpuScanAddScanPath(PlannerInfo *root,
 									indexConds,
 									indexQuals,
 									indexNBlocks);
-		if (cpath && custom_path_remember(root, baserel, true, false, cpath))
+		if (cpath && custom_path_remember(root, baserel, true, cpath))
 			add_partial_path(baserel, &cpath->path);
 	}
 }
@@ -336,10 +336,11 @@ CreateDpuScanState(CustomScan *cscan)
 {
 	DpuScanState   *dss = palloc0(sizeof(DpuScanState));
 
+    Assert(cscan->methods == &dpuscan_plan_methods);
 	NodeSetTag(dss, T_CustomScanState);
     dss->pts.css.flags = cscan->flags;
-    Assert(cscan->methods == &dpuscan_plan_methods);
     dss->pts.css.methods = &dpuscan_exec_methods;
+	dss->pts.devkind = DEVKIND__NVIDIA_DPU;
     deform_dpuscan_info(&dss->ds_info, cscan);
 
 	return (Node *)dss;
@@ -473,21 +474,22 @@ ExplainDpuScan(CustomScanState *node,
                ExplainState *es)
 {
 	DpuScanState   *dss = (DpuScanState *) node;
-	StringInfoData	temp;
+	DpuScanInfo	   *ds_info = &dss->ds_info;
+	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
+	List		   *dcontext;
 
-	initStringInfo(&temp);
-	pgstrom_explain_xpucode(&temp,
-							dss->ds_info.kern_quals,
-							&dss->pts.css,
-							es, ancestors);
-	ExplainPropertyText("DPU Quals", temp.data, es);
-
-	resetStringInfo(&temp);
-    pgstrom_explain_xpucode(&temp,
-                            dss->ds_info.kern_projs,
-                            &dss->pts.css,
-                            es, ancestors);
-    ExplainPropertyText("DPU Projection", temp.data, es);
+	dcontext = set_deparse_context_plan(es->deparse_cxt,
+										node->ss.ps.plan,
+										ancestors);
+	pgstromExplainScanState(&dss->pts, es,
+							ds_info->dev_quals,
+							ds_info->kern_quals,
+							cscan->custom_scan_tlist,
+							ds_info->kern_projs,
+							ds_info->scan_tuples,
+							ds_info->scan_rows,
+							dcontext);
+	pgstromExplainTaskState(&dss->pts, es, dcontext);
 }
 
 /*

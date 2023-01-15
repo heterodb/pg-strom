@@ -1379,6 +1379,21 @@ typedef struct
 												 * no locale configuration */
 #define DEVKERN__SESSION_TIMEZONE	0x0200UL	/* Device function needs session
 												 * timezone */
+INLINE_FUNCTION(const char *)
+DevKindLabel(uint32_t devkind, bool cap_only_head)
+{
+	switch (devkind & DEVKIND__ANY)
+	{
+		case DEVKIND__NONE:
+			return (cap_only_head ? "Cpu" : "CPU");
+		case DEVKIND__NVIDIA_GPU:
+			return (cap_only_head ? "Gpu" : "GPU");
+		case DEVKIND__NVIDIA_DPU:
+			return (cap_only_head ? "Dpu" : "DPU");
+		default:
+			return "???";
+	}
+}
 
 /* ----------------------------------------------------------------
  *

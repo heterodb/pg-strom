@@ -1185,31 +1185,18 @@ is_expression_equals_tlist(codegen_context *context,
 			{
 				resno = var->varattno;
 				goto found;
-				
-				*p_depth = depth;
-				*p_resno = var->varattno;
-				return true;
 			}
 		}
-		else if (IsA(node, List))
+		else if (IsA(node, PathTarget))
 		{
-			List   *tlist = (List *)node;
+			PathTarget *reltarget = (PathTarget *)node;
 
-			foreach (lc2, tlist)
+			resno = 1;
+			foreach (lc2, reltarget->exprs)
 			{
-				TargetEntry *tle = lfirst(lc2);
-
-				if (tle->resjunk)
-					continue;
-				if (equal(tle->expr, expr))
-				{
-					resno = tle->resno;
+				if (equal(expr, lfirst(lc2)))
 					goto found;
-					
-					 *p_depth = depth;
-					 *p_resno = tle->resno;
-					 return true;
-				}
+				resno++;
 			}
 		}
 		else
@@ -1279,7 +1266,7 @@ codegen_expression_walker(codegen_context *context, Expr *expr)
 		case T_CaseTestExpr:
 		case T_ScalarArrayOpExpr:
 		default:
-			__Elog("not a supported expression type: %d", (int)nodeTag(expr));
+			__Elog("not a supported expression type: %s", nodeToString(expr));
 	}
 	return -1;
 }
@@ -1663,7 +1650,7 @@ __xpucode_to_cstring(StringInfo buf,
 					 const kern_expression *kexp,
 					 const CustomScanState *css,	/* optional */
 					 ExplainState *es,				/* optional */
-					 List *ancestors);				/* optionsl */
+					 List *dcontext);				/* optionsl */
 
 static void
 __xpucode_const_cstring(StringInfo buf, const kern_expression *kexp)
@@ -1729,7 +1716,7 @@ __xpucode_loadvars_cstring(StringInfo buf,
 						   const kern_expression *kexp,
 						   const CustomScanState *css,
 						   ExplainState *es,
-						   List *ancestors)
+						   List *dcontext)
 {
 	bool	verbose = false;
 	int		i;
@@ -1763,11 +1750,8 @@ __xpucode_loadvars_cstring(StringInfo buf,
 			TupleDesc	tupdesc = RelationGetDescr(css->ss.ss_currentRelation);
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, vitem->var_resno - 1);
 			CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
-			List	   *dcontext;
 			Var		   *kvar;
 
-			dcontext = set_deparse_context_plan(es->deparse_cxt,
-												(Plan *)cscan, ancestors);
 			kvar = makeVar(cscan->scan.scanrelid,
 						   attr->attnum,
 						   attr->atttypid,
@@ -1784,12 +1768,10 @@ __xpucode_loadvars_cstring(StringInfo buf,
 		{
 			CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
 			Plan	   *plan;
-			List	   *dcontext;
 			TargetEntry *tle;
 
 			plan = list_nth(cscan->custom_plans, vitem->var_depth - 1);
-			dcontext = set_deparse_context_plan(es->deparse_cxt,
-												plan, ancestors);
+			//hoge
 			tle = list_nth(plan->targetlist, vitem->var_resno - 1);
 			appendStringInfo(buf, "%u:%s",
 							 vitem->var_slot_id,
@@ -1807,7 +1789,7 @@ __xpucode_projection_cstring(StringInfo buf,
 							 const kern_expression *kexp,
 							 const CustomScanState *css,	/* optional */
 							 ExplainState *es,				/* optional */
-							 List *ancestors)
+							 List *dcontext)
 {
 	int		i, nexprs = kexp->u.proj.nexprs;
 
@@ -1840,7 +1822,7 @@ __xpucode_projection_cstring(StringInfo buf,
 			if (i > 0)
 				appendStringInfo(buf, ", ");
 			appendStringInfo(buf, "%d:", desc->slot_id);
-			__xpucode_to_cstring(buf, karg, css, es, ancestors);
+			__xpucode_to_cstring(buf, karg, css, es, dcontext);
 		}
 		if (kexp->nr_args > 1)
 			appendStringInfoChar(buf, ']');
@@ -1853,7 +1835,7 @@ __xpucode_to_cstring(StringInfo buf,
 					 const kern_expression *kexp,
 					 const CustomScanState *css,	/* optional */
 					 ExplainState *es,				/* optional */
-					 List *ancestors)				/* optionsl */
+					 List *dcontext)				/* optionsl */
 {
 	switch (kexp->opcode)
 	{
@@ -1867,10 +1849,10 @@ __xpucode_to_cstring(StringInfo buf,
 			__xpucode_var_cstring(buf, kexp);
 			return;
 		case FuncOpCode__LoadVars:
-			__xpucode_loadvars_cstring(buf, kexp, css, es, ancestors);
+			__xpucode_loadvars_cstring(buf, kexp, css, es, dcontext);
 			break;
 		case FuncOpCode__Projection:
-			__xpucode_projection_cstring(buf, kexp, css, es, ancestors);
+			__xpucode_projection_cstring(buf, kexp, css, es, dcontext);
 			return;
 		case FuncOpCode__BoolExpr_And:
 			appendStringInfo(buf, "{Bool::AND");
@@ -1933,7 +1915,7 @@ __xpucode_to_cstring(StringInfo buf,
 				elog(ERROR, "XpuCode looks corrupted");
 			if (i > 0)
 				appendStringInfo(buf, ", ");
-			__xpucode_to_cstring(buf, karg, css, es, ancestors);
+			__xpucode_to_cstring(buf, karg, css, es, dcontext);
 		}
 		if (kexp->nr_args > 1)
 			appendStringInfoChar(buf, ']');
@@ -1946,10 +1928,10 @@ pgstrom_explain_xpucode(StringInfo buf,
 						bytea *xpu_code,
 						const CustomScanState *css,
 						ExplainState *es,
-						List *ancestors)
+						List *dcontext)
 {
 	__xpucode_to_cstring(buf, (const kern_expression *)VARDATA(xpu_code),
-						 css, es, ancestors);
+						 css, es, dcontext);
 }
 
 char *
