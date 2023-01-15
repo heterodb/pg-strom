@@ -1854,6 +1854,9 @@ __xpucode_to_cstring(StringInfo buf,
 		case FuncOpCode__Projection:
 			__xpucode_projection_cstring(buf, kexp, css, es, dcontext);
 			return;
+		case FuncOpCode__HashValue:
+			appendStringInfo(buf, "{HashValue");
+			break;
 		case FuncOpCode__BoolExpr_And:
 			appendStringInfo(buf, "{Bool::AND");
 			break;

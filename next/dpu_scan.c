@@ -48,159 +48,6 @@ typedef struct
 } DpuScanState;
 
 /*
- * create_dpuscan_path
- */
-static CustomPath *
-create_dpuscan_path(PlannerInfo *root,
-					RelOptInfo *baserel,
-					List *dev_quals,
-					List *host_quals,
-					bool parallel_aware,	/* for parallel-scan */
-					IndexOptInfo *indexOpt,	/* for BRIN-index */
-					List *indexConds,		/* for BRIN-index */
-					List *indexQuals,		/* for BRIN-index */
-					int64_t indexNBlocks)	/* for BRIN-index */
-{
-	DpuScanInfo	   *ds_info = palloc0(sizeof(DpuScanInfo));
-	CustomPath	   *cpath = makeNode(CustomPath);
-	ParamPathInfo  *param_info;
-	int				parallel_nworkers = 0;
-	double			parallel_divisor = 1.0;
-	Cost			startup_cost = pgstrom_dpu_setup_cost;
-	Cost			run_cost = 0.0;
-	Cost			disk_cost;
-	Cost			comp_cost;
-	double			ntuples;
-	double			dpu_ratio;
-	double			selectivity;
-	double			avg_seq_page_cost;
-	double			spc_seq_page_cost;
-	double			spc_rand_page_cost;
-	QualCost		qcost;
-
-	/* CPU parallel parameters */
-	if (parallel_aware)
-	{
-		double	leader_contribution;
-
-		parallel_nworkers = compute_parallel_worker(baserel,
-													baserel->pages, -1,
-													max_parallel_workers_per_gather);
-		if (parallel_nworkers <= 0)
-			return NULL;
-		parallel_divisor = (double)parallel_nworkers;
-		if (parallel_leader_participation)
-		{
-			leader_contribution = 1.0 - (0.3 * (double)parallel_nworkers);
-			if (leader_contribution > 0.0)
-				parallel_divisor += leader_contribution;
-		}
-	}
-	/* cost of full-disk scan */
-	get_tablespace_page_costs(baserel->reltablespace,
-							  &spc_rand_page_cost,
-							  &spc_seq_page_cost);
-	avg_seq_page_cost = (spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
-						 pgstrom_dpu_seq_page_cost * baserel->allvisfrac);
-	disk_cost = avg_seq_page_cost * baserel->pages;
-
-	/* consideration of BRIN-index, if any */
-	ntuples = baserel->tuples;
-	if (indexOpt)
-	{
-		Cost	index_disk_cost;
-
-		index_disk_cost = cost_brin_bitmap_build(root,
-												 baserel,
-												 indexOpt,
-												 indexQuals);
-		index_disk_cost += avg_seq_page_cost * indexNBlocks;
-		if (disk_cost > index_disk_cost)
-		{
-			if (baserel->pages > 0)
-				ntuples *= (double)indexNBlocks / (double)baserel->pages;
-			disk_cost = index_disk_cost;
-		}
-		else
-			indexOpt = NULL;	/* disables BRIN-index if no benefit */
-	}
-
-	/* Cost for CPU/DPU qualifiers */
-	if (cpu_operator_cost > 0.0)
-		dpu_ratio = pgstrom_dpu_operator_cost / cpu_operator_cost;
-	else if (pgstrom_dpu_operator_cost == 0.0)
-		dpu_ratio = 1.0;
-	else
-		dpu_ratio = disable_cost;	/* very large value but finite */
-
-	cost_qual_eval_node(&qcost, (Node *)dev_quals, root);
-	startup_cost += qcost.startup;
-	comp_cost = qcost.per_tuple *
-		(ntuples * (1.0 - baserel->allvisfrac) +		/* by CPU */
-		 ntuples * baserel->allvisfrac * dpu_ratio);	/* by DPU */
-
-	/* Cost for DMA transfers (DPU-->Host) */
-	selectivity = clauselist_selectivity(root,
-										 dev_quals,
-										 baserel->relid,
-										 JOIN_INNER,
-										 NULL);
-	ntuples *= selectivity;		/* # tuples after dev_quals */
-	run_cost += pgstrom_dpu_tuple_cost * ntuples * baserel->allvisfrac;
-
-	/* Cost for Host-only qualifiers */
-	cost_qual_eval(&qcost, host_quals, root);
-	startup_cost += qcost.startup;
-	comp_cost += qcost.per_tuple * ntuples;
-
-	/* PPI costs (as a part of host quals, if any) */
-	param_info = get_baserel_parampathinfo(root, baserel,
-										   baserel->lateral_relids);
-	if (param_info)
-	{
-		List   *ppi_quals = param_info->ppi_clauses;
-
-		cost_qual_eval(&qcost, ppi_quals, root);
-		startup_cost += qcost.startup;
-		comp_cost += qcost.per_tuple * ntuples;
-	}
-
-	/* Cost for Projection */
-	startup_cost += baserel->reltarget->cost.startup;
-	comp_cost += baserel->reltarget->cost.per_tuple * baserel->rows;
-
-	run_cost += disk_cost + (comp_cost / parallel_divisor);
-
-	/* setup DpuScanInfo */
-	if (indexOpt)
-	{
-		ds_info->index_oid = indexOpt->indexoid;
-		ds_info->index_conds = indexConds;
-		ds_info->index_quals = indexQuals;
-	}
-	/* setup CustomPath */
-	cpath->path.pathtype = T_CustomScan;
-	cpath->path.parent = baserel;
-	cpath->path.pathtarget = baserel->reltarget;
-	cpath->path.param_info = param_info;
-	cpath->path.parallel_aware = parallel_aware;
-	cpath->path.parallel_safe = baserel->consider_parallel;
-	cpath->path.parallel_workers = parallel_nworkers;
-	cpath->path.rows = (param_info
-						? param_info->ppi_rows
-						: baserel->rows) / parallel_divisor;
-	cpath->path.startup_cost = startup_cost;
-	cpath->path.total_cost = startup_cost + run_cost;
-	cpath->path.pathkeys = NIL; /* unsorted results */
-	cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
-	cpath->custom_paths = NIL;
-	cpath->custom_private = list_make1(ds_info);
-	cpath->methods = &dpuscan_path_methods;
-
-	return cpath;
-}
-
-/*
  * DpuScanAddScanPath
  */
 static void
@@ -209,13 +56,10 @@ DpuScanAddScanPath(PlannerInfo *root,
 				   Index rtindex,
 				   RangeTblEntry *rte)
 {
-	CustomPath *cpath;
+	List	   *input_rels_tlist;
 	List	   *dev_quals = NIL;
 	List	   *host_quals = NIL;
-	IndexOptInfo *indexOpt;
-	List	   *indexConds;
-	List	   *indexQuals;
-	int64_t		indexNBlocks;
+	ParamPathInfo *param_info;
 	ListCell   *lc;
 
 	/* call the secondary hook */
@@ -230,71 +74,99 @@ DpuScanAddScanPath(PlannerInfo *root,
 	/* It is the role of built-in Append node */
 	if (rte->inh)
 		return;
+
 	/*
-	 * DpuScan can run on only base relations or foreign table (arrow_fdw)
+	 * check whether the qualifier can run on DPU device
 	 */
-	switch (rte->relkind)
-	{
-		case RELKIND_RELATION:
-		case RELKIND_MATVIEW:
-			if (get_relation_am(rte->relid, true) == HEAP_TABLE_AM_OID &&
-				GetOptimalDpuForBaseRel(root, baserel) != NULL)
-				break;
-			return;
-		case RELKIND_FOREIGN_TABLE:
-			if (baseRelIsArrowFdw(baserel))
-				break;
-			return;
-		default:
-			/* not supported */
-			return;
-	}
-
-	/* check whether the qualifier can run on DPU device */
+	input_rels_tlist = list_make1(makeInteger(baserel->relid));
 	foreach (lc, baserel->baserestrictinfo)
-    {
+	{
 		RestrictInfo *rinfo = lfirst(lc);
-		List	   *input_rels_tlist = list_make1(makeInteger(baserel->relid));
 
-		if (pgstrom_dpu_expression(rinfo->clause, input_rels_tlist, NULL))
+		if (pgstrom_dpu_expression(rinfo->clause,
+								   input_rels_tlist,
+								   NULL))
 			dev_quals = lappend(dev_quals, rinfo);
 		else
 			host_quals = lappend(host_quals, rinfo);
 	}
-	if (dev_quals == NIL)
-		return;
-
-	/* Check availability of DpuScan+BRIN Index */
-	indexOpt = pgstromTryFindBrinIndex(root, baserel,
-									   &indexConds,
-									   &indexQuals,
-									   &indexNBlocks);
-	/* add DpuScan path in single process */
-	cpath = create_dpuscan_path(root,
-								baserel,
-								dev_quals,
-								host_quals,
-								false,
-								indexOpt,
-								indexConds,
-								indexQuals,
-								indexNBlocks);
-	if (cpath && custom_path_remember(root, baserel, false, cpath))
-		add_path(baserel, &cpath->path);
-	/* if appropriate, consider parallel DpuScan */
-	if (baserel->consider_parallel && baserel->lateral_relids == NULL)
+	/*
+	 * check parametalized qualifiers
+	 */
+	param_info = get_baserel_parampathinfo(root, baserel,
+										   baserel->lateral_relids);
+	if (param_info)
 	{
-		cpath = create_dpuscan_path(root,
-									baserel,
-									dev_quals,
-									host_quals,
-									true,
-									indexOpt,
-									indexConds,
-									indexQuals,
-									indexNBlocks);
-		if (cpath && custom_path_remember(root, baserel, true, cpath))
-			add_partial_path(baserel, &cpath->path);
+		foreach (lc, param_info->ppi_clauses)
+		{
+			RestrictInfo *rinfo = lfirst(lc);
+
+			if (pgstrom_gpu_expression(rinfo->clause,
+									   input_rels_tlist,
+									   NULL))
+				dev_quals = lappend(dev_quals, rinfo);
+			else
+				host_quals = lappend(host_quals, rinfo);
+		}
+	}
+
+	 /* Creation of DpuScan path */
+	for (int try_parallel=0; try_parallel < 2; try_parallel++)
+	{
+		DpuScanInfo		ds_data;
+		DpuScanInfo	   *ds_info;
+		CustomPath	   *cpath;
+		ParamPathInfo  *param_info = NULL;
+		int				parallel_nworkers = 0;
+		Cost			startup_cost = 0.0;
+		Cost			run_cost = 0.0;
+		Cost			final_cost = 0.0;
+
+		memset(&ds_data, 0, sizeof(GpuScanInfo));
+		if (!considerXpuScanPathParams(root,
+									   baserel,
+									   DEVKIND__NVIDIA_DPU,
+									   try_parallel > 0,	/* parallel_aware */
+									   dev_quals,
+									   host_quals,
+									   &parallel_nworkers,
+									   &ds_data.index_oid,
+									   &ds_data.index_conds,
+									   &ds_data.index_quals,
+									   &startup_cost,
+									   &run_cost,
+									   &final_cost,
+									   NULL,
+									   NULL,
+									   &ds_data.ds_entry))
+			return;
+
+		/* setup DpuScanInfo (Path phase) */
+		ds_info = pmemdup(&ds_data, sizeof(DpuScanInfo));
+		cpath = makeNode(CustomPath);
+		cpath->path.pathtype = T_CustomScan;
+		cpath->path.parent = baserel;
+		cpath->path.pathtarget = baserel->reltarget;
+		cpath->path.param_info = param_info;
+		cpath->path.parallel_aware = (try_parallel > 0);
+		cpath->path.parallel_safe = baserel->consider_parallel;
+		cpath->path.parallel_workers = parallel_nworkers;
+		cpath->path.rows = (param_info ? param_info->ppi_rows : baserel->rows);
+		cpath->path.startup_cost = startup_cost;
+		cpath->path.total_cost = startup_cost + run_cost + final_cost;
+		cpath->path.pathkeys = NIL; /* unsorted results */
+		cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+		cpath->custom_paths = NIL;
+		cpath->custom_private = list_make1(ds_info);
+		cpath->methods = &dpuscan_path_methods;
+
+		if (custom_path_remember(root, baserel, (try_parallel > 0), cpath))
+		{
+			if (try_parallel == 0)
+				add_path(baserel, &cpath->path);
+			else
+				add_partial_path(baserel, &cpath->path);
+		}
 	}
 }
 

@@ -614,8 +614,9 @@ extern void		pgstrom_init_gpu_service(void);
  */
 typedef struct
 {
-	const Bitmapset *gpu_cache_devs; /* device for GpuCache, if any */
+	const Bitmapset *gpu_cache_devs;  /* device for GpuCache, if any */
 	const Bitmapset *gpu_direct_devs; /* device for GPU-Direct SQL, if any */
+	const DpuStorageEntry *ds_entry;  /* suitable DPU device, if any */
 	bytea	   *kern_quals;		/* device qualifiers */
 	bytea	   *kern_projs;		/* device projection */
 	uint32_t	extra_flags;

@@ -1108,6 +1108,7 @@ ExplainGpuJoin(CustomScanState *node,
 		Node	   *expr;
 		char	   *str;
 		char		label[100];
+		int			off;
 
 		resetStringInfo(&buf);
 		if (list_length(gj_inner->join_quals) > 1)
@@ -1118,42 +1119,54 @@ ExplainGpuJoin(CustomScanState *node,
 		if (gj_inner->hash_outer != NIL &&
 			gj_inner->hash_inner != NIL)
 		{
-			snprintf(label, sizeof(label), "%sHash%sJoin-%d",
-					 devkind,
-					 join_type == JOIN_FULL ? "Full" :
-					 join_type == JOIN_LEFT ? "Left" :
-					 join_type == JOIN_RIGHT ? "Right" : "",
-					 depth);
+			off = snprintf(label, sizeof(label), "%sHash%sJoin-%d",
+						   devkind,
+						   join_type == JOIN_FULL ? "Full" :
+						   join_type == JOIN_LEFT ? "Left" :
+						   join_type == JOIN_RIGHT ? "Right" : "",
+						   depth);
 		}
 		else if (OidIsValid(gj_inner->gist_index_oid))
 		{
-			snprintf(label, sizeof(label), "%sGiST%sJoin-%d",
-					 devkind,
-					 join_type == JOIN_FULL ? "Full" :
-					 join_type == JOIN_LEFT ? "Left" :
-					 join_type == JOIN_RIGHT ? "Right" : "",
-					 depth);
+			off = snprintf(label, sizeof(label), "%sGiST%sJoin-%d",
+						   devkind,
+						   join_type == JOIN_FULL ? "Full" :
+						   join_type == JOIN_LEFT ? "Left" :
+						   join_type == JOIN_RIGHT ? "Right" : "",
+						   depth);
 		}
 		else
 		{
-			snprintf(label, sizeof(label), "%sNestLook%s-%d",
-					 devkind,
-					 join_type == JOIN_FULL ? "Full" :
-					 join_type == JOIN_LEFT ? "Left" :
-					 join_type == JOIN_RIGHT ? "Right" : "",
-					 depth);
+			off = snprintf(label, sizeof(label), "%sNestLook%s-%d",
+						   devkind,
+						   join_type == JOIN_FULL ? "Full" :
+						   join_type == JOIN_LEFT ? "Left" :
+						   join_type == JOIN_RIGHT ? "Right" : "",
+						   depth);
 		}
 		str = deparse_expression(expr, dcontext, false, true);
 		appendStringInfo(&buf, "%s [rows: %.0f -> %.0f]",
 						 str, ntuples, gj_inner->join_nrows);
 		ExplainPropertyText(label, buf.data, es);
 
+		if (es->verbose && gj_inner->kern_join_quals)
+		{
+			snprintf(label+off, sizeof(label)-off, " Code");
+
+			resetStringInfo(&buf);
+			pgstrom_explain_xpucode(&buf,
+									gj_inner->kern_join_quals,
+									&gjs->pts.css,
+									es, dcontext);
+			ExplainPropertyText(label, buf.data, es);
+		}
+
 		if (gj_inner->hash_outer != NIL &&
 			gj_inner->hash_inner != NIL)
 		{
-			resetStringInfo(&buf);
-			snprintf(label, sizeof(label), "%sHashKeys-%d", devkind, depth);
+			off = snprintf(label, sizeof(label), "%sHashKeys-%d", devkind, depth);
 
+			resetStringInfo(&buf);
 			appendStringInfo(&buf, "inner [");
 			foreach (lc, gj_inner->hash_inner)
 			{
@@ -1179,6 +1192,18 @@ ExplainGpuJoin(CustomScanState *node,
 			appendStringInfo(&buf, "]");
 
 			ExplainPropertyText(label, buf.data, es);
+
+			if (es->verbose && gj_inner->kern_hash_value)
+			{
+				snprintf(label+off, sizeof(label)-off, " Code");
+
+				resetStringInfo(&buf);
+				pgstrom_explain_xpucode(&buf,
+										gj_inner->kern_hash_value,
+										&gjs->pts.css,
+										es, dcontext);
+				ExplainPropertyText(label, buf.data, es);
+			}
 		}
 		else if (OidIsValid(gj_inner->gist_index_oid))
 		{
