@@ -1887,4 +1887,61 @@ pg_kern_ereport(kern_context *kcxt);	/* only host code */
 EXTERN_FUNCTION(uint32_t)
 pg_hash_any(const void *ptr, int sz);
 
+/* ----------------------------------------------------------------
+ *
+ * Definitions for xPU JOIN
+ *
+ * ----------------------------------------------------------------
+ */
+typedef struct
+{
+	size_t		length;
+	uint32_t	num_rels;
+	struct
+	{
+		uint64_t	kds_offset;		/* offset to KDS */
+		uint64_t	ojmap_offset;	/* offset to outer-join map, if any */
+		uint64_t	gist_offset;	/* offset to GiST-index pages, if any */
+		bool		is_nestloop;	/* true, if NestLoop */
+		bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
+		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
+	} chunks[1];
+} kern_multirels;
+
+INLINE_FUNCTION(kern_data_store *)
+KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int depth)
+{
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	return (kern_data_store *)
+		((char *)kmrels + kmrels->chunks[depth-1].kds_offset);
+}
+
+INLINE_FUNCTION(bool *)
+KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth)
+{
+	uint64_t	offset;
+
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	offset = kmrels->chunks[depth-1].ojmap_offset;
+	return (bool *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+}
+
+INLINE_FUNCTION(kern_data_store *)
+KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int depth)
+{
+	uint64_t	offset;
+
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	offset = kmrels->chunks[depth-1].gist_offset;
+	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+}
+
+
+
+
+
+
+
+
+
 #endif	/* XPU_COMMON_H */

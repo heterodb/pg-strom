@@ -220,6 +220,8 @@ typedef struct BrinIndexState	BrinIndexState;
 
 typedef struct
 {
+	dsm_handle			ss_handle;			/* DSM handle of the SharedState */
+	uint32_t			ss_length;			/* length of the SharedState */
 	/* statistics */
 	pg_atomic_uint64	ntuples_valid;
 	pg_atomic_uint64	ntuples_dropped;
@@ -236,9 +238,31 @@ typedef struct
 	/* for brin-index */
 	pg_atomic_uint32	brin_index_fetched;
 	pg_atomic_uint32	brin_index_skipped;
+	/* for join-inner-preload */
+	ConditionVariable	preload_cond;		/* sync object */
+	slock_t				preload_mutex;		/* mutex for inner-preloading */
+	int					preload_phase;		/* one of INNER_PHASE__* in gpu_join.c */
+	int					preload_nr_scanning;/* # of scanning process */
+	int					preload_nr_setup;	/* # of setup process */
+	uint32_t			preload_shmem_handle; /* host buffer handle */
+	uint64_t			preload_shmem_length; /* host buffer length */
 	/* common block-based table scan descriptor */
 	ParallelBlockTableScanDescData bpscan;
 } pgstromSharedState;
+
+typedef struct
+{
+	/* outer-scan statistics */
+	pg_atomic_uint64	source_ntuples;		/* # of source tuples */
+	pg_atomic_uint64	source_nvalids;		/* # of valid tuples */
+
+	/* join statistics */
+	uint32_t			num_rels;
+	struct {
+		pg_atomic_uint64	inner_nitems;
+		pg_atomic_uint64	inner_usage;
+	} jstats[FLEXIBLE_ARRAY_MEMBER];
+} pgstromRuntimeStats;
 
 typedef enum
 {
@@ -255,6 +279,7 @@ struct pgstromTaskState
 	const DpuStorageEntry *ds_entry;	/* candidate DPUs to connect */
 	XpuConnection	   *conn;
 	pgstromSharedState *ps_state;
+	pgstromRuntimeStats *rt_stats;
 	GpuCacheState	   *gcache_state;
 	ArrowFdwState	   *arrow_state;
 	BrinIndexState	   *br_state;
@@ -654,9 +679,10 @@ typedef struct
 {
 	JoinType		join_type;		/* one of JOIN_* */
 	double			join_nrows;		/* estimated nrows in this depth */
-	List		   *hash_outer;		/* hashing expression for outer-side */
-	List		   *hash_inner;		/* hashing expression for inner-side */
-	List		   *join_quals;		/* Join quals */
+	List		   *hash_outer_keys;/* hash-keys for outer-side */
+	List		   *hash_inner_keys;/* hash-keys for inner-side */
+	List		   *join_quals;		/* join quals */
+	List		   *other_quals;	/* other quals */
 	bytea		   *kern_hash_value;/* xPU code for hashing */
 	bytea		   *kern_join_quals;/* xPU code for join-quals */
 	Oid				gist_index_oid;	/* GiST index oid */
@@ -694,13 +720,6 @@ typedef struct
 
 
 extern void		pgstrom_init_gpu_join(void);
-
-/*
- * multirels.c
- */
-extern Plan	   *multirels_create_plan(GpuJoinInfo *gj_info,
-									  List *custom_plans);
-extern void		pgstrom_init_multirels(void);
 
 /*
  * arrow_fdw.c and arrow_read.c
@@ -788,11 +807,11 @@ extern ssize_t	__preadFile(int fdesc, void *buffer, size_t nbytes, off_t f_pos);
 extern ssize_t	__writeFile(int fdesc, const void *buffer, size_t nbytes);
 extern ssize_t	__pwriteFile(int fdesc, const void *buffer, size_t nbytes, off_t f_pos);
 
-extern void	   *__mmapFile(void *addr, size_t length,
-						   int prot, int flags, int fdesc, off_t offset);
-extern bool		__munmapFile(void *mmap_addr);
-extern void	   *__mremapFile(void *mmap_addr, size_t new_size);
-extern void	   *__mmapShmem(size_t length);
+extern uint32_t	__shmemCreate(void);
+extern void		__shmemDrop(uint32_t shmem_handle);
+extern void	   *__mmapShmem(uint32_t shmem_handle, size_t length);
+extern bool		__munmapShmem(void *mmap_addr);
+
 extern Path	   *pgstrom_copy_pathnode(const Path *pathnode);
 
 /*

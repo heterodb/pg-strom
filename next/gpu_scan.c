@@ -917,9 +917,7 @@ InitializeGpuScanDSM(CustomScanState *node,
 static void
 InitGpuScanWorker(CustomScanState *node, shm_toc *toc, void *dsm_addr)
 {
-	GpuScanState   *gss = (GpuScanState *)node;
-		
-	pgstromSharedStateAttachDSM(&gss->pts, dsm_addr);
+	pgstromSharedStateAttachDSM((pgstromTaskState *)node, dsm_addr);
 }
 
 /*
@@ -928,9 +926,7 @@ InitGpuScanWorker(CustomScanState *node, shm_toc *toc, void *dsm_addr)
 static void
 ExecShutdownGpuScan(CustomScanState *node)
 {
-	GpuScanState   *gss = (GpuScanState *)node;
-
-	pgstromSharedStateShutdownDSM(&gss->pts);
+	pgstromSharedStateShutdownDSM((pgstromTaskState *)node);
 }
 
 /*

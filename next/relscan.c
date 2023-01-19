@@ -918,10 +918,16 @@ pgstromSharedStateEstimateDSM(pgstromTaskState *pts)
 	EState	   *estate = pts->css.ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
 	Relation	relation = pts->css.ss.ss_currentRelation;
-	Size		len = offsetof(pgstromSharedState, bpscan);
+	int			num_rels = list_length(pts->css.custom_ps);
+	Size		len = 0;
 
 	if (pts->br_state)
 		len += pgstromBrinIndexEstimateDSM(pts);
+	/* pgstromRuntimeStats */
+	len = MAXALIGN(offsetof(pgstromRuntimeStats,
+							jstats[num_rels]));
+	/* pgstromSharedState */
+	len = offsetof(pgstromSharedState, bpscan);
 	if (!pts->arrow_state)
 		len += table_parallelscan_estimate(relation, snapshot);
 	return MAXALIGN(len);
@@ -934,8 +940,10 @@ void
 pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 {
 	pgstromSharedState *ps_state;
+	pgstromRuntimeStats *rt_stats;
 	Relation	relation = pts->css.ss.ss_currentRelation;
 	EState	   *estate = pts->css.ss.ps.state;
+	int			num_rels = list_length(pts->css.custom_ps);
 	TableScanDesc scan = NULL;
 
 	if (pts->br_state)
@@ -943,6 +951,15 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 	Assert(!pts->css.ss.ss_currentScanDesc);
 	if (dsm_addr)
 	{
+		/* pgstromRuntimeStats */
+		size_t	sz = MAXALIGN(offsetof(pgstromRuntimeStats,
+									   jstats[num_rels]));
+		rt_stats = (pgstromRuntimeStats *)dsm_addr;
+		memset(rt_stats, 0, sz);
+		rt_stats->num_rels = num_rels;
+		dsm_addr += sz;
+
+		/* pgstromSharedState */
 		ps_state = (pgstromSharedState *)dsm_addr;
 		memset(ps_state, 0, offsetof(pgstromSharedState, bpscan));
 		if (pts->arrow_state)
@@ -957,6 +974,13 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 	}
 	else
 	{
+		/* pgstromRuntimeStats */
+		rt_stats = MemoryContextAllocZero(estate->es_query_cxt,
+										  offsetof(pgstromRuntimeStats,
+												   jstats[num_rels]));
+		rt_stats->num_rels = num_rels;
+
+		/* pgstromSharedState */
 		ps_state = MemoryContextAllocZero(estate->es_query_cxt,
 										  sizeof(pgstromSharedState));
 		if (pts->arrow_state)
@@ -964,7 +988,12 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 		else
 			scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
 	}
+	ConditionVariableInit(&ps_state->preload_cond);
+	SpinLockInit(&ps_state->preload_mutex);
+	if (num_rels > 0)
+		ps_state->preload_shmem_handle = __shmemCreate();
 	pts->ps_state = ps_state;
+	pts->rt_stats = rt_stats;
 	pts->css.ss.ss_currentScanDesc = scan;
 }
 
@@ -974,8 +1003,14 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 void
 pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr)
 {
+	int		num_rels = list_length(pts->css.custom_ps);
+
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
+
+	pts->rt_stats = (pgstromRuntimeStats *) dsm_addr;
+	dsm_addr += MAXALIGN(offsetof(pgstromRuntimeStats, jstats[num_rels]));
+
 	pts->ps_state = (pgstromSharedState *)dsm_addr;
 	if (pts->arrow_state)
 		pgstromArrowFdwAttachDSM(pts->arrow_state, pts->ps_state);
