@@ -218,13 +218,25 @@ typedef struct DpuStorageEntry	DpuStorageEntry;
 typedef struct ArrowFdwState	ArrowFdwState;
 typedef struct BrinIndexState	BrinIndexState;
 
+/*
+ * pgstromSharedState
+ */
+typedef struct
+{
+	pg_atomic_uint64	inner_nitems;
+	pg_atomic_uint64	inner_usage;
+} pgstromSharedInnerState;
+
 typedef struct
 {
 	dsm_handle			ss_handle;			/* DSM handle of the SharedState */
 	uint32_t			ss_length;			/* length of the SharedState */
 	/* statistics */
-	pg_atomic_uint64	ntuples_valid;
-	pg_atomic_uint64	ntuples_dropped;
+	pg_atomic_uint64	source_ntuples;
+	pg_atomic_uint64	source_nvalids;
+	pg_atomic_uint32	source_nblocks;		/* only KDS_FORMAT_BLOCK */
+	uint32_t			num_rels;			/* if xPU-JOIN involved */
+	pgstromSharedInnerState *ps_istates;	/* if xPU-JOIN involved */
 	/* for arrow_fdw */
 	pg_atomic_uint32	arrow_rbatch_index;
 	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */
@@ -246,23 +258,13 @@ typedef struct
 	int					preload_nr_setup;	/* # of setup process */
 	uint32_t			preload_shmem_handle; /* host buffer handle */
 	uint64_t			preload_shmem_length; /* host buffer length */
-	/* common block-based table scan descriptor */
-	ParallelBlockTableScanDescData bpscan;
+	/* for join-inner relations */
+	pgstromSharedInnerState inners[FLEXIBLE_ARRAY_MEMBER];
+	/*
+	 * MEMO: ...and ParallelBlockTableScanDescData should be allocated
+	 *       next to the inners[nmum_rels] array
+	 */
 } pgstromSharedState;
-
-typedef struct
-{
-	/* outer-scan statistics */
-	pg_atomic_uint64	source_ntuples;		/* # of source tuples */
-	pg_atomic_uint64	source_nvalids;		/* # of valid tuples */
-
-	/* join statistics */
-	uint32_t			num_rels;
-	struct {
-		pg_atomic_uint64	inner_nitems;
-		pg_atomic_uint64	inner_usage;
-	} jstats[FLEXIBLE_ARRAY_MEMBER];
-} pgstromRuntimeStats;
 
 typedef enum
 {
@@ -279,7 +281,6 @@ struct pgstromTaskState
 	const DpuStorageEntry *ds_entry;	/* candidate DPUs to connect */
 	XpuConnection	   *conn;
 	pgstromSharedState *ps_state;
-	pgstromRuntimeStats *rt_stats;
 	GpuCacheState	   *gcache_state;
 	ArrowFdwState	   *arrow_state;
 	BrinIndexState	   *br_state;
@@ -467,11 +468,6 @@ extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
 extern void		pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple tuple);
 extern bool		pgstromFetchFallbackTuple(pgstromTaskState *pts,
 										  TupleTableSlot *slot);
-extern Size		pgstromSharedStateEstimateDSM(pgstromTaskState *pts);
-extern void		pgstromSharedSteteCreate(pgstromTaskState *pts);
-extern void		pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr);
-extern void		pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr);
-extern void		pgstromSharedStateShutdownDSM(pgstromTaskState *pts);
 extern void		pgstrom_init_relscan(void);
 
 /*
@@ -518,6 +514,11 @@ extern void		pgstromExecInitTaskState(pgstromTaskState *pts,
 extern TupleTableSlot  *pgstromExecTaskState(pgstromTaskState *pts);
 extern void		pgstromExecEndTaskState(pgstromTaskState *pts);
 extern void		pgstromExecResetTaskState(pgstromTaskState *pts);
+extern Size		pgstromSharedStateEstimateDSM(pgstromTaskState *pts);
+extern void		pgstromSharedSteteCreate(pgstromTaskState *pts);
+extern void		pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr);
+extern void		pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr);
+extern void		pgstromSharedStateShutdownDSM(pgstromTaskState *pts);
 extern void		pgstromExplainScanState(pgstromTaskState *pts,
 										ExplainState *es,
 										List *dev_quals,

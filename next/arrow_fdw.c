@@ -3710,7 +3710,7 @@ static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
-	return offsetof(pgstromSharedState, bpscan);
+	return offsetof(pgstromSharedState, inners);
 }
 
 /*
@@ -3732,7 +3732,7 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
 {
 	pgstromSharedState *ps_state = (pgstromSharedState *)coordinate;
 
-	memset(ps_state, 0, offsetof(pgstromSharedState, bpscan));
+	memset(ps_state, 0, offsetof(pgstromSharedState, inners));
 	pgstromArrowFdwInitDSM(node->fdw_state, ps_state);
 }
 

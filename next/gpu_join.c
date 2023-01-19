@@ -737,16 +737,60 @@ __pgstrom_build_tlist_dev_walker(Node *node, void *__priv)
 {
 	build_tlist_dev_context *context = __priv;
 	ListCell   *lc;
+	int			depth;
+	int			resno;
 
 	if (!node)
 		return false;
+
+	/* check whether the node is already on the tlist_dev */
 	foreach (lc, context->tlist_dev)
 	{
-		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	*tle = lfirst(lc);
 
 		if (equal(node, tle->expr))
 			return false;
 	}
+
+	/* check whether the node is identical with any of input */
+	depth = 0;
+	foreach (lc, context->input_rels_tlist)
+	{
+		Node   *curr = lfirst(lc);
+
+		if (IsA(curr, Integer))
+		{
+			Index	varno = intVal(curr);
+			Var	   *var = (Var *)node;
+
+			if (IsA(var, Var) && var->varno == varno)
+			{
+				resno = var->varattno;
+				goto found;
+			}
+		}
+		else if (IsA(curr, PathTarget))
+		{
+			PathTarget *reltarget = (PathTarget *)curr;
+			ListCell   *cell;
+
+			resno = 1;
+			foreach (cell, reltarget->exprs)
+			{
+				if (equal(node, lfirst(cell)))
+					goto found;
+				resno++;
+			}
+		}
+		else
+		{
+			elog(ERROR, "Bug? unexpected input_rels_tlist entry");
+		}
+		depth++;
+	}
+	depth = -1;
+	resno = -1;
+found:
 	if (IsA(node, Var) ||
 		(!context->only_vars &&
 		 pgstrom_xpu_expression((Expr *)node,
@@ -754,14 +798,16 @@ __pgstrom_build_tlist_dev_walker(Node *node, void *__priv)
 								context->input_rels_tlist,
 								NULL)))
 	{
-		AttrNumber	resno = list_length(context->tlist_dev) + 1;
 		TargetEntry *tle;
 
 		tle = makeTargetEntry((Expr *)node,
-							  resno,
+							  list_length(context->tlist_dev) + 1,
 							  NULL,
 							  context->resjunk);
+		tle->resorigtbl = (depth < 0 ? UINT_MAX : depth);
+		tle->resorigcol = resno;
 		context->tlist_dev = lappend(context->tlist_dev, tle);
+
 		return false;
 	}
 	return expression_tree_walker(node, __pgstrom_build_tlist_dev_walker, __priv);
@@ -1042,35 +1088,18 @@ __fixup_inner_varnode_walker(Node *node, void *data)
 	{
 		Var		   *var = (Var *)node;
 		List	   *tlist_dev = con->cscan->custom_scan_tlist;
-		List	   *tlist_inner = con->inner_plan->targetlist;
-		ListCell   *lc;
 		TargetEntry *tle;
 
 		Assert(var->varno == INDEX_VAR &&
 			   var->varattno >= 1 &&
 			   var->varattno <= list_length(tlist_dev));
 		tle = list_nth(tlist_dev, var->varattno - 1);
-		foreach (lc, tlist_inner)
-		{
-			TargetEntry *__tle = lfirst(lc);
-
-			if (equal(tle->expr, __tle->expr))
-			{
-				Var	   *rvar = makeVar(INNER_VAR,
-									   __tle->resno,
-									   exprType((Node *)__tle->expr),
-									   exprTypmod((Node *)__tle->expr),
-									   exprCollation((Node *)__tle->expr),
-									   0);
-				Assert(exprType((Node *)tle->expr) == rvar->vartype &&
-					   exprTypmod((Node *)tle->expr) == rvar->vartypmod &&
-					   exprCollation((Node *)tle->expr) == rvar->varcollid);
-				return (Node *)rvar;
-			}
-		}
-		elog(ERROR, "Bug? %s was not found on the inner targetlist %s",
-			 nodeToString(tle->expr),
-			 nodeToString(tlist_inner));
+		return (Node *)makeVar(INNER_VAR,
+							   tle->resorigcol,
+							   var->vartype,
+							   var->vartypmod,
+							   var->varcollid,
+							   0);
 	}
 	return expression_tree_mutator(node, __fixup_inner_varnode_walker, con);
 }
@@ -1201,7 +1230,7 @@ ExecGpuJoin(CustomScanState *node)
 
 	if (!gjs->h_kmrels)
 	{
-		/* attach pgstromSharedState and pgstromRuntimeStats, if none */
+		/* attach pgstromSharedState, if none */
 		if (!gjs->pts.ps_state)
 			pgstromSharedStateInitDSM(&gjs->pts, NULL);
 		/* preload inner buffer */
@@ -1565,7 +1594,6 @@ static void
 innerPreloadAllocHostBuffer(GpuJoinState *gjs)
 {
 	pgstromSharedState *ps_state = gjs->pts.ps_state;
-	pgstromRuntimeStats *rt_stats = gjs->pts.rt_stats;
 	kern_multirels	   *h_kmrels = NULL;
 	kern_data_store	   *kds = NULL;
 	size_t				offset;
@@ -1588,8 +1616,8 @@ again:
 		uint64_t	usage;
 		size_t		nbytes;
 
-		nrooms = pg_atomic_read_u64(&rt_stats->jstats[i].inner_nitems);
-		usage  = pg_atomic_read_u64(&rt_stats->jstats[i].inner_usage);
+		nrooms = pg_atomic_read_u64(&ps_state->inners[i].inner_nitems);
+		usage  = pg_atomic_read_u64(&ps_state->inners[i].inner_usage);
 		if (h_kmrels)
 		{
 			kds = (kern_data_store *)((char *)h_kmrels + offset);
