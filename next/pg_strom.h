@@ -570,6 +570,7 @@ struct gpuClient
 	dlist_node		chain;		/* gcontext->client_list */
 	CUmodule		cuda_module;/* preload cuda binary */
 	kern_session_info *session;	/* per session info (on cuda managed memory) */
+	struct gpuQueryBuffer *gq_buf; /* per query buffer (for JOIN/GROUP BY) */
 	pg_atomic_uint32 refcnt;	/* odd number, if error status */
 	pthread_mutex_t	mutex;		/* mutex to write the socket */
 	int				sockfd;		/* connection to PG backend */
