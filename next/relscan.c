@@ -570,7 +570,6 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	strom_io_chunk *strom_ioc = NULL;
 	BlockNumber	   *strom_blknums;
 	uint32_t		strom_nblocks = 0;
-	uint32_t		kds_src_fullpath = 0;
 	uint32_t		kds_src_pathname = 0;
 	uint32_t		kds_src_iovec = 0;
 	uint32_t		kds_nrooms;
@@ -768,7 +767,7 @@ out:
 	{
 		size_t		sz;
 
-		kds_src_fullpath = kds_src_pathname = pts->xcmd_buf.len;
+		kds_src_pathname = pts->xcmd_buf.len;
 		appendStringInfoString(&pts->xcmd_buf, pts->kds_pathname);
 		if (segment_id > 0)
 			appendStringInfo(&pts->xcmd_buf, ".%u", segment_id);
@@ -783,7 +782,6 @@ out:
 		Assert(segment_id == InvalidBlockNumber);
 	}
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
-	xcmd->u.scan.kds_src_fullpath = kds_src_fullpath;
 	xcmd->u.scan.kds_src_pathname = kds_src_pathname;
 	xcmd->u.scan.kds_src_iovec = kds_src_iovec;
 	xcmd->length = pts->xcmd_buf.len;

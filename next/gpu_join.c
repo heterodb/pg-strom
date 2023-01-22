@@ -38,7 +38,6 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, bms_to_pglist(gj_info->gpu_direct_devs));
 	endpoint_id = DpuStorageEntryGetEndpointId(gj_info->ds_entry);
 	privs = lappend(privs, makeInteger(endpoint_id));
-	privs = lappend(privs, __makeByteaConst(gj_info->kern_projs));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	privs = lappend(privs, makeInteger(gj_info->extra_bufsz));
 	privs = lappend(privs, makeInteger(gj_info->kvars_nslots));
@@ -46,13 +45,17 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	exprs = lappend(exprs, gj_info->used_params);
 	privs = lappend(privs, makeInteger(gj_info->scan_relid));
 	exprs = lappend(exprs, gj_info->scan_quals);
-	privs = lappend(privs, __makeByteaConst(gj_info->kern_scan_quals));
 	privs = lappend(privs, __makeFloat(gj_info->scan_tuples));
 	privs = lappend(privs, __makeFloat(gj_info->scan_rows));
 	privs = lappend(privs, __makeFloat(gj_info->final_cost));
 	privs = lappend(privs, makeInteger(gj_info->brin_index_oid));
 	exprs = lappend(exprs, gj_info->brin_index_conds);
 	exprs = lappend(exprs, gj_info->brin_index_quals);
+	privs = lappend(privs, __makeByteaConst(gj_info->kern_scan_quals));
+	privs = lappend(privs, __makeByteaConst(gj_info->kern_join_quals_packed));
+	privs = lappend(privs, __makeByteaConst(gj_info->kern_hash_keys_packed));
+	privs = lappend(privs, __makeByteaConst(gj_info->kern_gist_quals_packed));
+	privs = lappend(privs, __makeByteaConst(gj_info->kern_join_projs));
 	privs = lappend(privs, makeInteger(gj_info->num_rels));
 
 	for (int i=0; i < gj_info->num_rels; i++)
@@ -67,8 +70,6 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 		__exprs = lappend(__exprs, gj_inner->hash_inner_keys);
 		__exprs = lappend(__exprs, gj_inner->join_quals);
 		__exprs = lappend(__exprs, gj_inner->other_quals);
-		__privs = lappend(__privs, __makeByteaConst(gj_inner->kern_hash_value));
-		__privs = lappend(__privs, __makeByteaConst(gj_inner->kern_join_quals));
 		__privs = lappend(__privs, makeInteger(gj_inner->gist_index_oid));
 		__privs = lappend(__privs, makeInteger(gj_inner->gist_index_col));
 		__exprs = lappend(__exprs, gj_inner->gist_clause);
@@ -102,7 +103,6 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_data.gpu_direct_devs = bms_from_pglist(list_nth(privs, pindex++));
 	endpoint_id = intVal(list_nth(privs, pindex++));
 	gj_data.ds_entry = DpuStorageEntryByEndpointId(endpoint_id);
-	gj_data.kern_projs = __getByteaConst(list_nth(privs, pindex++));
 	gj_data.extra_flags = intVal(list_nth(privs, pindex++));
 	gj_data.extra_bufsz = intVal(list_nth(privs, pindex++));
 	gj_data.kvars_nslots = intVal(list_nth(privs, pindex++));
@@ -110,13 +110,17 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_data.used_params = list_nth(exprs, eindex++);
 	gj_data.scan_relid = intVal(list_nth(privs, pindex++));
 	gj_data.scan_quals = list_nth(exprs, eindex++);
-	gj_data.kern_scan_quals = __getByteaConst(list_nth(privs, pindex++));
 	gj_data.scan_tuples = floatVal(list_nth(privs, pindex++));
 	gj_data.scan_rows = floatVal(list_nth(privs, pindex++));
 	gj_data.final_cost = floatVal(list_nth(privs, pindex++));
 	gj_data.brin_index_oid = intVal(list_nth(privs, pindex++));
 	gj_data.brin_index_conds = list_nth(exprs, eindex++);
 	gj_data.brin_index_quals = list_nth(exprs, eindex++);
+	gj_data.kern_scan_quals = __getByteaConst(list_nth(privs, pindex++));
+	gj_data.kern_join_quals_packed = __getByteaConst(list_nth(privs, pindex++));
+	gj_data.kern_hash_keys_packed = __getByteaConst(list_nth(privs, pindex++));
+	gj_data.kern_gist_quals_packed = __getByteaConst(list_nth(privs, pindex++));
+	gj_data.kern_join_projs = __getByteaConst(list_nth(privs, pindex++));
 	gj_data.num_rels = intVal(list_nth(privs, pindex++));
 
 	gj_info = palloc0(offsetof(GpuJoinInfo, inners[gj_data.num_rels]));
@@ -135,8 +139,6 @@ deform_gpujoin_info(CustomScan *cscan)
 		gj_inner->hash_inner_keys = list_nth(__exprs, __eindex++);
 		gj_inner->join_quals = list_nth(__exprs, __eindex++);
 		gj_inner->other_quals = list_nth(__exprs, __eindex++);
-		gj_inner->kern_hash_value = __getByteaConst(list_nth(__privs, __pindex++));
-		gj_inner->kern_join_quals = __getByteaConst(list_nth(__privs, __pindex++));
 		gj_inner->gist_index_oid = intVal(list_nth(__privs, __pindex++));
 		gj_inner->gist_index_col = intVal(list_nth(__privs, __pindex++));
 		gj_inner->gist_clause = list_nth(__exprs, __eindex++);
@@ -878,31 +880,32 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 					  GpuJoinInfo *gj_info,
 					  const CustomScanMethods *xpujoin_plan_methods)
 {
+	codegen_context context;
 	CustomScan *cscan;
 	Bitmapset  *outer_refs = NULL;
+	List	   *join_quals_stacked = NIL;
+	List	   *hash_keys_stacked = NIL;
+	List	   *gist_quals_stacked = NIL;
 	List	   *misc_exprs = NIL;
 	List	   *input_rels_tlist;
 	List	   *tlist_dev;
 	ListCell   *lc;
 
-	/* sanity checks */
 	Assert(gj_info->num_rels == list_length(custom_plans));
+	memset(&context, 0, sizeof(codegen_context));
 	input_rels_tlist = list_make1(makeInteger(gj_info->scan_relid));
 	foreach (lc, cpath->custom_paths)
 	{
 		Path	   *__ipath = lfirst(lc);
 		input_rels_tlist = lappend(input_rels_tlist, __ipath->pathtarget);
 	}
+	context.input_rels_tlist = input_rels_tlist;
+
 	/* codegen for outer scan, if any */
 	if (gj_info->scan_quals)
 	{
-		pgstrom_build_xpucode(&gj_info->kern_scan_quals,
-							  (Expr *)gj_info->scan_quals,
-							  input_rels_tlist,
-							  &gj_info->extra_flags,
-							  &gj_info->extra_bufsz,
-							  &gj_info->kvars_nslots,
-							  &gj_info->used_params);
+		gj_info->kern_scan_quals
+			= codegen_build_qualifiers(&context, gj_info->scan_quals);
 		pull_varattnos((Node *)gj_info->scan_quals,
 					   gj_info->scan_relid,
 					   &outer_refs);
@@ -920,13 +923,8 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		if (gj_inner->hash_outer_keys != NIL &&
 			gj_inner->hash_inner_keys != NIL)
 		{
-			codegen_build_hashvalue(&gj_inner->kern_hash_value,
-									gj_inner->hash_outer_keys,
-									input_rels_tlist,
-									&gj_info->extra_flags,
-									&gj_info->extra_bufsz,
-									&gj_info->kvars_nslots,
-									&gj_info->used_params);
+			hash_keys_stacked = lappend(hash_keys_stacked,
+										gj_inner->hash_outer_keys);
 			pull_varattnos((Node *)gj_inner->hash_outer_keys,
 						   gj_info->scan_relid,
 						   &outer_refs);
@@ -937,16 +935,11 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		{
 			Assert(gj_inner->hash_outer_keys == NIL &&
 				   gj_inner->hash_inner_keys == NIL);
+			hash_keys_stacked = lappend(hash_keys_stacked, NIL);
 		}
 		
 		/* xpu code to evaluate join qualifiers */
-		pgstrom_build_xpucode(&gj_inner->kern_join_quals,
-							  (Expr *)gj_inner->join_quals,
-							  input_rels_tlist,
-							  &gj_info->extra_flags,
-							  &gj_info->extra_bufsz,
-							  &gj_info->kvars_nslots,
-							  &gj_info->used_params);
+		join_quals_stacked = lappend(join_quals_stacked, gj_inner->join_quals);
 		pull_varattnos((Node *)gj_inner->join_quals,
 					   gj_info->scan_relid,
 					   &outer_refs);
@@ -959,6 +952,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 			//TODO: XPU code generation
 			misc_exprs = lappend(misc_exprs, gj_inner->gist_clause);
 		}
+		gist_quals_stacked = lappend(gist_quals_stacked, NIL);
 	}
 	/* build device projection */
 	tlist_dev = pgstrom_build_tlist_dev(joinrel,
@@ -966,13 +960,17 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 										NIL,
 										misc_exprs,
 										input_rels_tlist);
-	codegen_build_projection(&gj_info->kern_projs,
-							 tlist_dev,
-							 input_rels_tlist,
-							 &gj_info->extra_flags,
-							 &gj_info->extra_bufsz,
-							 &gj_info->kvars_nslots,
-							 &gj_info->used_params);
+	gj_info->kern_join_projs = codegen_build_projection(&context, tlist_dev);
+	gj_info->kern_join_quals_packed
+		= codegen_build_packed_joinquals(&context, join_quals_stacked);
+	gj_info->kern_hash_keys_packed
+		= codegen_build_packed_hashkeys(&context, hash_keys_stacked);
+	gj_info->kern_gist_quals_packed = NULL;
+	gj_info->extra_flags  = context.extra_flags;
+	gj_info->extra_bufsz  = context.extra_bufsz;
+	gj_info->kvars_nslots = context.kvars_nslots;
+	gj_info->used_params  = context.used_params;
+	gj_info->outer_refs   = outer_refs;
 
 	cscan = makeNode(CustomScan);
 	cscan->scan.plan.targetlist = tlist;
@@ -1329,7 +1327,7 @@ ExplainGpuJoin(CustomScanState *node,
 							gj_info->scan_quals,
 							gj_info->kern_scan_quals,
 							cscan->custom_scan_tlist,
-							gj_info->kern_projs,
+							gj_info->kern_join_projs,
 							gj_info->scan_tuples,
 							gj_info->scan_rows,
 							dcontext);	
@@ -1342,7 +1340,6 @@ ExplainGpuJoin(CustomScanState *node,
 		Node	   *expr;
 		char	   *str;
 		char		label[100];
-		int			off;
 
 		resetStringInfo(&buf);
 		if (list_length(gj_inner->join_quals) > 1)
@@ -1353,52 +1350,40 @@ ExplainGpuJoin(CustomScanState *node,
 		if (gj_inner->hash_outer_keys != NIL &&
 			gj_inner->hash_inner_keys != NIL)
 		{
-			off = snprintf(label, sizeof(label), "%sHash%sJoin-%d",
-						   devkind,
-						   join_type == JOIN_FULL ? "Full" :
-						   join_type == JOIN_LEFT ? "Left" :
-						   join_type == JOIN_RIGHT ? "Right" : "",
-						   depth);
+			snprintf(label, sizeof(label), "%sHash%sJoin-%d",
+					 devkind,
+					 join_type == JOIN_FULL ? "Full" :
+					 join_type == JOIN_LEFT ? "Left" :
+					 join_type == JOIN_RIGHT ? "Right" : "",
+					 depth);
 		}
 		else if (OidIsValid(gj_inner->gist_index_oid))
 		{
-			off = snprintf(label, sizeof(label), "%sGiST%sJoin-%d",
-						   devkind,
-						   join_type == JOIN_FULL ? "Full" :
-						   join_type == JOIN_LEFT ? "Left" :
-						   join_type == JOIN_RIGHT ? "Right" : "",
-						   depth);
+			snprintf(label, sizeof(label), "%sGiST%sJoin-%d",
+					 devkind,
+					 join_type == JOIN_FULL ? "Full" :
+					 join_type == JOIN_LEFT ? "Left" :
+					 join_type == JOIN_RIGHT ? "Right" : "",
+					 depth);
 		}
 		else
 		{
-			off = snprintf(label, sizeof(label), "%sNestLook%s-%d",
-						   devkind,
-						   join_type == JOIN_FULL ? "Full" :
-						   join_type == JOIN_LEFT ? "Left" :
-						   join_type == JOIN_RIGHT ? "Right" : "",
-						   depth);
+			snprintf(label, sizeof(label), "%sNestLook%s-%d",
+					 devkind,
+					 join_type == JOIN_FULL ? "Full" :
+					 join_type == JOIN_LEFT ? "Left" :
+					 join_type == JOIN_RIGHT ? "Right" : "",
+					 depth);
 		}
 		str = deparse_expression(expr, dcontext, false, true);
 		appendStringInfo(&buf, "%s [rows: %.0f -> %.0f]",
 						 str, ntuples, gj_inner->join_nrows);
 		ExplainPropertyText(label, buf.data, es);
 
-		if (es->verbose && gj_inner->kern_join_quals)
-		{
-			snprintf(label+off, sizeof(label)-off, " Code");
-
-			resetStringInfo(&buf);
-			pgstrom_explain_xpucode(&buf,
-									gj_inner->kern_join_quals,
-									&gjs->pts.css,
-									es, dcontext);
-			ExplainPropertyText(label, buf.data, es);
-		}
-
 		if (gj_inner->hash_outer_keys != NIL &&
 			gj_inner->hash_inner_keys != NIL)
 		{
-			off = snprintf(label, sizeof(label), "%sHashKeys-%d", devkind, depth);
+			snprintf(label, sizeof(label), "%sHashKeys-%d", devkind, depth);
 
 			resetStringInfo(&buf);
 			appendStringInfo(&buf, "inner [");
@@ -1426,24 +1411,12 @@ ExplainGpuJoin(CustomScanState *node,
 			appendStringInfo(&buf, "]");
 
 			ExplainPropertyText(label, buf.data, es);
-
-			if (es->verbose && gj_inner->kern_hash_value)
-			{
-				snprintf(label+off, sizeof(label)-off, " Code");
-
-				resetStringInfo(&buf);
-				pgstrom_explain_xpucode(&buf,
-										gj_inner->kern_hash_value,
-										&gjs->pts.css,
-										es, dcontext);
-				ExplainPropertyText(label, buf.data, es);
-			}
 		}
 		else if (OidIsValid(gj_inner->gist_index_oid))
 		{
-			resetStringInfo(&buf);
 			snprintf(label, sizeof(label), "%sGiSTIndex-%d", devkind, depth);
 
+			resetStringInfo(&buf);
 			appendStringInfoString(&buf, deparse_expression(gj_inner->gist_clause,
 															dcontext,
 															false,
@@ -1455,6 +1428,34 @@ ExplainGpuJoin(CustomScanState *node,
 			ExplainPropertyText(label, buf.data, es);
 		}
 		ntuples = gj_inner->join_nrows;
+	}
+
+	if (es->verbose && gj_info->kern_join_quals_packed)
+	{
+		resetStringInfo(&buf);
+		pgstrom_explain_xpucode(&buf,
+								gj_info->kern_join_quals_packed,
+								&gjs->pts.css,
+								es, dcontext);
+		ExplainPropertyText("Join-Quals-Code", buf.data, es);
+	}
+	if (es->verbose && gj_info->kern_hash_keys_packed)
+	{
+		resetStringInfo(&buf);
+		pgstrom_explain_xpucode(&buf,
+								gj_info->kern_hash_keys_packed,
+								&gjs->pts.css,
+								es, dcontext);
+		ExplainPropertyText("Hash-Keys-Code", buf.data, es);
+	}
+	if (es->verbose && gj_info->kern_gist_quals_packed)
+	{
+		resetStringInfo(&buf);
+		pgstrom_explain_xpucode(&buf,
+								gj_info->kern_gist_quals_packed,
+								&gjs->pts.css,
+								es, dcontext);
+		ExplainPropertyText("GiST-Quals-Code", buf.data, es);
 	}
 	pgstromExplainTaskState(&gjs->pts, es, dcontext);
 }

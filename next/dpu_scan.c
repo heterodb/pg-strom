@@ -272,7 +272,11 @@ ExecDpuScan(CustomScanState *node)
 										  dss->ds_info.extra_bufsz,
 										  dss->ds_info.kvars_nslots,
 										  dss->ds_info.kern_quals,
-										  dss->ds_info.kern_projs);
+										  dss->ds_info.kern_projs,
+										  NULL,	/* join_quals */
+										  NULL,	/* hash_values */
+										  NULL,	/* gist_quals */
+										  0);	/* No join_inner_handle */
 		DpuClientOpenSession(&dss->pts, session);
 	}
 	return ExecScan(&node->ss,

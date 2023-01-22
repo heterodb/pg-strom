@@ -334,7 +334,11 @@ pgstromBuildSessionInfo(PlanState *ps,
 						uint32_t kcxt_extra_bufsz,
 						uint32_t kcxt_kvars_nslots,
 						const bytea *xpucode_scan_quals,
-						const bytea *xpucode_scan_projs)
+						const bytea *xpucode_scan_projs,
+						List *xpucode_join_quals_list,
+						List *xpucode_hash_values_list,
+						List *xpucode_gist_quals_list,
+						uint32_t join_inner_handle)
 {
 	ExprContext	   *econtext = ps->ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
@@ -365,6 +369,18 @@ pgstromBuildSessionInfo(PlanState *ps,
 									 VARSIZE_ANY_EXHDR(xpucode_scan_projs));
 	}
 
+	if (xpucode_join_quals_list != NIL &&
+		xpucode_hash_values_list != NIL &&
+		xpucode_gist_quals_list != NIL)
+	{
+	}
+	else
+	{
+		Assert(xpucode_join_quals_list == NIL &&
+			   xpucode_hash_values_list == NIL &&
+			   xpucode_gist_quals_list == NIL);
+	}
+	
 	/* put executor parameters */
 	if (param_info)
 	{
@@ -468,6 +484,7 @@ pgstromBuildSessionInfo(PlanState *ps,
 	session->session_xact_state = __build_session_xact_state(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
+	session->join_inner_handle = join_inner_handle;
 	memcpy(buf.data, session, session_sz);
 
 	/* setup XpuCommand */

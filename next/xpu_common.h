@@ -1423,6 +1423,7 @@ typedef enum {
 	FuncOpCode__Projection,
 	FuncOpCode__LoadVars,
 	FuncOpCode__HashValue,
+	FuncOpCode__JoinPacked,		/* packed */
 	FuncOpCode__BuiltInMax,
 } FuncOpCode;
 
@@ -1481,6 +1482,9 @@ struct kern_expression
 			int			nattrs;
 			kern_projection_desc desc[1];
 		} proj;		/* Projection */
+		struct {
+			uint32_t	subexp_offset[1];	/* sub-expression per depth */
+		} join;		/* Join */
 	} u;
 };
 
@@ -1562,6 +1566,9 @@ typedef struct kern_session_info
 	bool		xpucode_use_debug_code;
 	uint32_t	xpucode_scan_quals;
 	uint32_t	xpucode_scan_projs;
+	uint32_t	xpucode_packed_join_quals;
+	uint32_t	xpucode_packed_hash_values;
+	uint32_t	xpucode_packed_gist_quals;
 
 	/* database session info */
 	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
@@ -1569,13 +1576,15 @@ typedef struct kern_session_info
 	uint32_t	session_timezone;	/* offset to pg_tz */
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
+	/* join inner buffer */
+	uint32_t	join_inner_handle;	/* key of join inner buffer */
+
 	/* executor parameter buffer */
 	uint32_t	nparams;	/* number of parameters */
 	uint32_t	poffset[1];	/* offset of params */
 } kern_session_info;
 
 typedef struct {
-	uint32_t	kds_src_fullpath;	/* offset to const char *fullpath */
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */

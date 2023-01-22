@@ -356,31 +356,44 @@ extern bool		gpuDirectIsAvailable(void);
 /*
  * codegen.c
  */
+typedef struct
+{
+	int			elevel;			/* ERROR or DEBUG2 */
+	Expr	   *top_expr;
+	List	   *used_params;
+	uint32_t	required_flags;
+	uint32_t	extra_flags;
+	uint32_t	extra_bufsz;
+	uint32_t	device_cost;
+	List	   *kvars_depth;
+	List	   *kvars_resno;
+	uint32_t	kvars_nslots;
+	List	   *input_rels_tlist;
+} codegen_context;
+
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 											List *func_args,
 											Oid func_collid);
-extern void		pgstrom_build_xpucode(bytea **p_xpucode,
-									  Expr *expr,
-									  List *input_rels_tlist,
-									  uint32_t *p_extra_flags,
-									  uint32_t *p_extra_bufsz,
-									  uint32_t *p_kvars_nslots,
-									  List **p_used_params);
-extern void		codegen_build_projection(bytea **p_xpucode_proj,
-										 List *tlist_dev,
-										 List *input_rels_tlist,
-										 uint32_t *p_extra_flags,
-										 uint32_t *p_extra_bufsz,
-										 uint32_t *p_kvars_nslots,
-										 List **p_used_params);
-extern void		codegen_build_hashvalue(bytea **p_xpucode,
-										List *hash_exprs_list,
-										List *input_rels_tlist,
-										uint32_t *p_extra_flags,
-										uint32_t *p_extra_bufsz,
-										uint32_t *p_kvars_nslots,
-										List **p_used_params);
+extern void		codegen_context_init(codegen_context *context, uint32_t devkind);
+extern bytea   *codegen_build_qualifiers(codegen_context *context,
+										 List *dev_quals);
+extern bytea   *codegen_build_projection(codegen_context *context,
+										 List *tlist_dev);
+extern bytea   *codegen_build_packed_joinquals(codegen_context *context,
+											   List *stacked_join_quals);
+extern bytea   *codegen_build_packed_hashkeys(codegen_context *context,
+											  List *stacked_hash_values);
+
+
+extern void		codegen_build_packed_xpucode(bytea **p_xpucode,
+											 List *exprs_list,
+											 bool inject_hash_value,
+											 List *input_rels_tlist,
+											 uint32_t *p_extra_flags,
+											 uint32_t *p_extra_bufsz,
+											 uint32_t *p_kvars_nslots,
+											 List **p_used_params);
 extern bool		pgstrom_xpu_expression(Expr *expr,
 									   uint32_t devkind,
 									   List *input_rels_tlist,
@@ -503,7 +516,11 @@ pgstromBuildSessionInfo(PlanState *ps,
 						uint32_t num_cached_kvars,
 						uint32_t kcxt_extra_bufsz,
 						const bytea *xpucode_scan_quals,
-						const bytea *xpucode_scan_projs);
+						const bytea *xpucode_scan_projs,
+						List *xpucode_join_quals_list,
+						List *xpucode_hash_values_list,
+						List *xpucode_gist_quals_list,
+						uint32_t join_inner_handle);
 extern void		pgstromExecInitTaskState(pgstromTaskState *pts,
 										 uint64_t devkind_mask,
 										 List *outer_quals,
@@ -685,8 +702,6 @@ typedef struct
 	List		   *hash_inner_keys;/* hash-keys for inner-side */
 	List		   *join_quals;		/* join quals */
 	List		   *other_quals;	/* other quals */
-	bytea		   *kern_hash_value;/* xPU code for hashing */
-	bytea		   *kern_join_quals;/* xPU code for join-quals */
 	Oid				gist_index_oid;	/* GiST index oid */
 	AttrNumber		gist_index_col;	/* GiST index column number */
 	Node		   *gist_clause;	/* GiST index clause */
@@ -698,7 +713,6 @@ typedef struct
 	const Bitmapset *gpu_cache_devs;	/* device for GpuCache, if any */
 	const Bitmapset *gpu_direct_devs;	/* device for GPU-Direct SQL, if any */
 	const DpuStorageEntry *ds_entry;	/* target DPU if DpuJoin */
-	bytea		   *kern_projs;			/* device projection */
 	uint32_t		extra_flags;
 	uint32_t		extra_bufsz;
 	uint32_t		kvars_nslots;
@@ -706,7 +720,6 @@ typedef struct
 	List		   *used_params;		/* param list in use */
 	Index			scan_relid;			/* relid of the outer relation to scan */
 	List		   *scan_quals;			/* device qualifiers to scan the outer */
-	bytea		   *kern_scan_quals;	/* outer scan qualifier, if any */
 	double			scan_tuples;		/* copy of baserel->tuples */
 	double			scan_rows;			/* copy of baserel->rows */
 	Cost			final_cost;			/* cost for sendback and host-side tasks */
@@ -714,6 +727,12 @@ typedef struct
 	Oid				brin_index_oid;		/* OID of BRIN-index, if any */
 	List		   *brin_index_conds;	/* BRIN-index key conditions */
 	List		   *brin_index_quals;	/* Original BRIN-index qualifier */
+	/* XPU code for JOIN */
+	bytea		   *kern_scan_quals;
+	bytea		   *kern_join_quals_packed;
+	bytea		   *kern_hash_keys_packed;
+	bytea		   *kern_gist_quals_packed;
+	bytea		   *kern_join_projs;
 	/* inner relations */
 	int				num_rels;		/* # of inner relations */
 	GpuJoinInnerInfo inners[FLEXIBLE_ARRAY_MEMBER];
