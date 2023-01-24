@@ -1423,7 +1423,7 @@ typedef enum {
 	FuncOpCode__Projection,
 	FuncOpCode__LoadVars,
 	FuncOpCode__HashValue,
-	FuncOpCode__JoinPacked,		/* packed */
+	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
 	FuncOpCode__BuiltInMax,
 } FuncOpCode;
 
@@ -1559,6 +1559,7 @@ typedef struct
  */
 typedef struct kern_session_info
 {
+	uint64_t	query_plan_id;		/* unique-id to use per-query buffer */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	kcxt_kvars_nslots;	/* length of kvars slot */
 
@@ -1566,9 +1567,9 @@ typedef struct kern_session_info
 	bool		xpucode_use_debug_code;
 	uint32_t	xpucode_scan_quals;
 	uint32_t	xpucode_scan_projs;
-	uint32_t	xpucode_packed_join_quals;
-	uint32_t	xpucode_packed_hash_values;
-	uint32_t	xpucode_packed_gist_quals;
+	uint32_t	xpucode_join_quals_packed;
+	uint32_t	xpucode_hash_values_packed;
+	uint32_t	xpucode_gist_quals_packed;
 
 	/* database session info */
 	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
@@ -1649,6 +1650,62 @@ SESSION_KEXP_SCAN_PROJS(kern_session_info *session)
 		return NULL;
 	return (kern_expression *)((char *)session + session->xpucode_scan_projs);
 }
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int depth)
+{
+	kern_expression *kexp;
+	uint32_t	subexp_offset;
+
+	if (session->xpucode_join_quals_packed == 0)
+		return NULL;
+	kexp = (kern_expression *)((char *)session + session->xpucode_join_quals_packed);
+	if (depth < 1 || depth > kexp->nr_args)
+		return NULL;
+	assert(kexp->opcode == FuncOpCode__Packed);
+	subexp_offset = kexp->u.join.subexp_offset[depth-1];
+	if (subexp_offset == 0)
+		return NULL;
+	return (kern_expression *)((char *)kexp + subexp_offset);
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_HASH_VALUE(kern_session_info *session, int depth)
+{
+	kern_expression *kexp;
+	uint32_t	subexp_offset;
+
+	if (session->xpucode_hash_values_packed == 0)
+		return NULL;
+	kexp = (kern_expression *)((char *)session + session->xpucode_hash_values_packed);
+	if (depth < 1 || depth > kexp->nr_args)
+		return NULL;
+	assert(kexp->opcode == FuncOpCode__Packed);
+	subexp_offset = kexp->u.join.subexp_offset[depth-1];
+	if (subexp_offset == 0)
+		return NULL;
+	return (kern_expression *)((char *)kexp + subexp_offset);
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GIST_QUALS(kern_session_info *session, int depth)
+{
+	kern_expression *kexp;
+	uint32_t	subexp_offset;
+
+	if (session->xpucode_gist_quals_packed == 0)
+		return NULL;
+	kexp = (kern_expression *)((char *)session + session->xpucode_gist_quals_packed);
+	if (depth < 1 || depth > kexp->nr_args)
+		return NULL;
+	assert(kexp->opcode == FuncOpCode__Packed);
+	subexp_offset = kexp->u.join.subexp_offset[depth-1];
+	if (subexp_offset == 0)
+		return NULL;
+	return (kern_expression *)((char *)kexp + subexp_offset);
+}
+
+
 
 /* see access/transam/xact.c */
 typedef struct

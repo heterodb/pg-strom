@@ -38,6 +38,9 @@ extern TransactionId   *ParallelCurrentXids;
 /* static variables */
 static dlist_head		xpu_connections_list;
 static bool				pgstrom_use_debug_code;		/* GUC */
+static shmem_request_hook_type shmem_request_next = NULL;
+static shmem_startup_hook_type shmem_startup_next = NULL;
+static pg_atomic_uint32	*pgstrom_query_plan_id = NULL;
 
 /*
  * Worker thread to receive response messages
@@ -335,9 +338,9 @@ pgstromBuildSessionInfo(PlanState *ps,
 						uint32_t kcxt_kvars_nslots,
 						const bytea *xpucode_scan_quals,
 						const bytea *xpucode_scan_projs,
-						List *xpucode_join_quals_list,
-						List *xpucode_hash_values_list,
-						List *xpucode_gist_quals_list,
+						const bytea *xpucode_join_quals_packed,
+						const bytea *xpucode_hash_values_packed,
+						const bytea *xpucode_gist_quals_packed,
 						uint32_t join_inner_handle)
 {
 	ExprContext	   *econtext = ps->ps_ExprContext;
@@ -369,16 +372,28 @@ pgstromBuildSessionInfo(PlanState *ps,
 									 VARSIZE_ANY_EXHDR(xpucode_scan_projs));
 	}
 
-	if (xpucode_join_quals_list != NIL &&
-		xpucode_hash_values_list != NIL &&
-		xpucode_gist_quals_list != NIL)
+	if (xpucode_join_quals_packed)
 	{
+		session->xpucode_join_quals_packed =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA_ANY(xpucode_join_quals_packed),
+									 VARSIZE_ANY_EXHDR(xpucode_join_quals_packed));
 	}
-	else
+
+	if (xpucode_hash_values_packed)
 	{
-		Assert(xpucode_join_quals_list == NIL &&
-			   xpucode_hash_values_list == NIL &&
-			   xpucode_gist_quals_list == NIL);
+		session->xpucode_hash_values_packed =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA_ANY(xpucode_hash_values_packed),
+									 VARSIZE_ANY_EXHDR(xpucode_hash_values_packed));
+	}
+
+	if (xpucode_gist_quals_packed)
+	{
+		session->xpucode_gist_quals_packed =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA_ANY(xpucode_gist_quals_packed),
+									 VARSIZE_ANY_EXHDR(xpucode_gist_quals_packed));
 	}
 	
 	/* put executor parameters */
@@ -477,6 +492,8 @@ pgstromBuildSessionInfo(PlanState *ps,
 		}
 	}
 	/* other database session information */
+	session->query_plan_id = ((uint64_t)MyProcPid << 32) |
+		(uint64_t)pg_atomic_fetch_add_u32(pgstrom_query_plan_id, 1);
 	session->kcxt_extra_bufsz = kcxt_extra_bufsz;
 	session->kcxt_kvars_nslots = kcxt_kvars_nslots;
 	session->xpucode_use_debug_code = pgstrom_use_debug_code;
@@ -949,6 +966,9 @@ pgstromExecTaskState(pgstromTaskState *pts)
 void
 pgstromExecEndTaskState(pgstromTaskState *pts)
 {
+	pgstromSharedState *ps_state = pts->ps_state;
+	ListCell   *lc;
+
 	if (pts->curr_vm_buffer != InvalidBuffer)
 		ReleaseBuffer(pts->curr_vm_buffer);
 	if (pts->conn)
@@ -961,6 +981,15 @@ pgstromExecEndTaskState(pgstromTaskState *pts)
 		ExecDropSingleTupleTableSlot(pts->base_slot);
 	if (pts->css.ss.ss_currentScanDesc)
 		table_endscan(pts->css.ss.ss_currentScanDesc);
+	if (pts->h_kmrels)
+		__munmapShmem(pts->h_kmrels);
+	if (!IsParallelWorker())
+	{
+		if (ps_state && ps_state->preload_shmem_handle != 0)
+			__shmemDrop(ps_state->preload_shmem_handle);
+	}
+	foreach (lc, pts->css.custom_ps)
+		ExecEndNode((PlanState *) lfirst(lc));
 }
 
 /*
@@ -979,11 +1008,6 @@ pgstromExecResetTaskState(pgstromTaskState *pts)
 	if (pts->arrow_state)
 		pgstromArrowFdwExecReset(pts->arrow_state);
 }
-
-
-
-
-
 
 /*
  * pgstromSharedStateEstimateDSM
@@ -1009,26 +1033,28 @@ pgstromSharedStateEstimateDSM(pgstromTaskState *pts)
  * pgstromSharedStateInitDSM
  */
 void
-pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
+pgstromSharedStateInitDSM(pgstromTaskState *pts,
+						  ParallelContext *pcxt, char *dsm_addr)
 {
 	Relation	relation = pts->css.ss.ss_currentRelation;
 	EState	   *estate = pts->css.ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
 	int			num_rels = list_length(pts->css.custom_ps);
+	size_t		dsm_length = offsetof(pgstromSharedState, inners[num_rels]);
 	pgstromSharedState *ps_state;
 	TableScanDesc scan = NULL;
 
+	Assert(!IsBackgroundWorker);
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexInitDSM(pts, dsm_addr);
 	Assert(!pts->css.ss.ss_currentScanDesc);
 	if (dsm_addr)
 	{
-		size_t	sz = offsetof(pgstromSharedState, inners[num_rels]);
-
 		ps_state = (pgstromSharedState *) dsm_addr;
-		memset(ps_state, 0, sz);
-		dsm_addr += MAXALIGN(sz);
-
+		memset(ps_state, 0, dsm_length);
+		ps_state->ss_handle = dsm_segment_handle(pcxt->seg);
+		ps_state->ss_length = dsm_length;
+		dsm_addr += MAXALIGN(dsm_length);
 		if (pts->arrow_state)
 			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
 		else
@@ -1041,9 +1067,9 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 	}
 	else
 	{
-		ps_state = MemoryContextAllocZero(estate->es_query_cxt,
-										  offsetof(pgstromSharedState,
-												   inners[num_rels]));
+		ps_state = MemoryContextAllocZero(estate->es_query_cxt, dsm_length);
+		ps_state->ss_handle = DSM_HANDLE_INVALID;
+		ps_state->ss_length = dsm_length;
 		if (pts->arrow_state)
 			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
 		else
@@ -1053,7 +1079,7 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
 	ConditionVariableInit(&ps_state->preload_cond);
 	SpinLockInit(&ps_state->preload_mutex);
 	if (num_rels > 0)
-		ps_state->preload_shmem_handle = __shmemCreate();
+		ps_state->preload_shmem_handle = __shmemCreate();	
 	pts->ps_state = ps_state;
 	pts->css.ss.ss_currentScanDesc = scan;
 }
@@ -1106,30 +1132,6 @@ pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
 		pts->ps_state = dst_state;
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /*
  * pgstromExplainScanState
@@ -1341,6 +1343,36 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 }
 
 /*
+ * pgstrom_request_executor
+ */
+static void
+pgstrom_request_executor(void)
+{
+	if (shmem_request_next)
+		(*shmem_request_next)();
+	
+	RequestAddinShmemSpace(MAXALIGN(sizeof(pg_atomic_uint32)));
+}
+
+/*
+ * pgstrom_startup_executor
+ */
+static void
+pgstrom_startup_executor(void)
+{
+	bool	found;
+
+	if (shmem_startup_next)
+		(*shmem_startup_next)();
+
+	pgstrom_query_plan_id = ShmemInitStruct("pgstrom_query_plan_id",
+											MAXALIGN(sizeof(pg_atomic_uint32)),
+											&found);
+	if (!found)
+		pg_atomic_init_u32(pgstrom_query_plan_id, 0);
+}
+
+/*
  * pgstrom_init_executor
  */
 void
@@ -1356,4 +1388,9 @@ pgstrom_init_executor(void)
 							 NULL, NULL, NULL);
 	dlist_init(&xpu_connections_list);
 	RegisterResourceReleaseCallback(xpuclientCleanupConnections, NULL);
+	/* shared memory setup */
+	shmem_request_next = shmem_request_hook;
+	shmem_request_hook = pgstrom_request_executor;
+	shmem_startup_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_executor;
 }

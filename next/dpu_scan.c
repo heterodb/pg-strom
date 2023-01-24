@@ -262,7 +262,7 @@ ExecDpuScan(CustomScanState *node)
 	DpuScanState   *dss = (DpuScanState *)node;
 
 	if (!dss->pts.ps_state)
-		pgstromSharedStateInitDSM(&dss->pts, NULL);
+		pgstromSharedStateInitDSM(&dss->pts, NULL, NULL);
 	if (!dss->pts.conn)
 	{
 		const XpuCommand *session;
@@ -320,7 +320,7 @@ InitializeDpuScanDSM(CustomScanState *node,
 					 ParallelContext *pcxt,
 					 void *dsm_addr)
 {
-	pgstromSharedStateInitDSM((pgstromTaskState *)node, dsm_addr);
+	pgstromSharedStateInitDSM((pgstromTaskState *)node, pcxt, dsm_addr);
 }
 
 /*

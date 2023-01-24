@@ -397,17 +397,17 @@ struct gpuQueryBuffer
 {
 	dlist_node		chain;
 	int				refcnt;
-	int				phase;			/*  0: not initialized,
+	volatile int	phase;			/*  0: not initialized,
 									 *  1: buffer is ready,
 									 * -1: error, during buffer setup */
-	uint64_t		buffer_id;
-	int				cuda_dindex;
-	CUdeviceptr		m_kmrels;		/* GpuJoin inner buffer (device) */
-	kern_multirels *h_kmrels;		/* GpuJoin inner buffer (host) */
-	size_t			h_kmrels_sz;	/* length of GpuJoin inner buffer */
-	CUdeviceptr		m_kds_final;	/* GpuPreAgg final buffer (TODO) */
+	uint64_t		buffer_id;		/* unique buffer id */
+	char			buffer_kind;	/* purpose of the buffer (JOIN or GROUP BY) */
+	int				cuda_dindex;	/* GPU device identifier */
+	CUdeviceptr		m_devptr;		/* device managed memory */
+	void		   *h_shmptr;		/* host shared memory (if any) */
+	size_t			buffer_sz;		/* length of the buffer */
 };
-typedef struct gpuQueryBuffer	gpuQueryBuffer;
+typedef struct gpuQueryBuffer		gpuQueryBuffer;
 
 #define GPU_QUERY_BUFFER_NSLOTS		320
 static dlist_head		gpu_query_buffer_hslot[GPU_QUERY_BUFFER_NSLOTS];
@@ -422,59 +422,58 @@ __putGpuQueryBufferNoLock(gpuQueryBuffer *gq_buf)
 	{
 		CUresult	rc;
 
-		if (gq_buf->m_kmrels)
+		if (gq_buf->m_devptr)
 		{
-			rc = cuMemFree(gq_buf->m_kmrels);
+			rc = cuMemFree(gq_buf->m_devptr);
 			if (rc != CUDA_SUCCESS)
-				fprintf(stderr, "failed on cuMemFree: %s\n",
-						cuStrError(rc));
+				fprintf(stderr, "failed on cuMemFree: %s\n", cuStrError(rc));
 		}
-		if (gq_buf->h_kmrels)
+		if (gq_buf->h_shmptr)
 		{
-			Assert(gq_buf->h_kmrels != MAP_FAILED);
-			if (munmap(gq_buf->h_kmrels,
-					   gq_buf->h_kmrels_sz) != 0)
+			if (munmap(gq_buf->h_shmptr,
+					   gq_buf->buffer_sz) != 0)
 				fprintf(stderr, "failed on munmap: %m\n");
-		}
-		if (gq_buf->m_kds_final != 0UL)
-		{
-			rc = cuMemFree(gq_buf->m_kds_final);
-			if (rc != CUDA_SUCCESS)
-				fprintf(stderr, "failed on cuMemFree: %s\n",
-						cuStrError(rc));
 		}
 		dlist_delete(&gq_buf->chain);
 		free(gq_buf);
 	}
 }
 
+static void
+putGpuQueryBuffer(gpuQueryBuffer *gq_buf)
+{
+	pthreadMutexLock(&gpu_query_buffer_mutex);
+	__putGpuQueryBufferNoLock(gq_buf);
+	pthreadMutexUnlock(&gpu_query_buffer_mutex);
+}
+
 static bool
-__setupGpuQueryJoinBuffer(gpuQueryBuffer *gq_buf,
-						  uint32_t kmrels_handle)
+__setupGpuQueryJoinInnerBuffer(gpuQueryBuffer *gq_buf,
+							   uint32_t kmrels_handle,
+							   char *errmsg, size_t errmsg_sz)
 {
 	kern_multirels *h_kmrels;
 	CUdeviceptr	m_kmrels;
 	CUresult	rc;
 	int			fdesc;
 	struct stat	stat_buf;
-	size_t		mmap_sz;
 	char		namebuf[100];
-
-	if (kmrels_handle == 0)
-		return true;		/* nothing to do */
-
+	size_t		mmap_sz;
+	
 	snprintf(namebuf, sizeof(namebuf),
 			 ".pgstrom_shmbuf_%u_%d",
 			 PostPortNumber, kmrels_handle);
 	fdesc = shm_open(namebuf, O_RDWR, 0600);
 	if (fdesc < 0)
 	{
-		fprintf(stderr, "failed on shm_open('%s'): %m\n", namebuf);
+		snprintf(errmsg, errmsg_sz,
+				 "failed on shm_open('%s'): %m", namebuf);
 		return false;
 	}
 	if (fstat(fdesc, &stat_buf) != 0)
 	{
-		fprintf(stderr, "failed on fstat('%s'): %m\n", namebuf);
+		snprintf(errmsg, errmsg_sz,
+				 "failed on fstat('%s'): %m", namebuf);
 		close(fdesc);
 		return false;
 	}
@@ -487,7 +486,8 @@ __setupGpuQueryJoinBuffer(gpuQueryBuffer *gq_buf,
 	close(fdesc);
 	if (h_kmrels == MAP_FAILED)
 	{
-		fprintf(stderr, "failed on mmap('%s', %zu): %m\n", namebuf, mmap_sz);
+		snprintf(errmsg, errmsg_sz,
+				 "failed on mmap('%s', %zu): %m", namebuf, mmap_sz);
 		return false;
 	}
 
@@ -495,22 +495,26 @@ __setupGpuQueryJoinBuffer(gpuQueryBuffer *gq_buf,
 						   CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
+		snprintf(errmsg, errmsg_sz,
+				 "failed on cuMemAllocManaged: %s", cuStrError(rc));
 		munmap(h_kmrels, mmap_sz);
 		return false;
 	}
 	memcpy((void *)m_kmrels, h_kmrels, mmap_sz);
-	cuMemPrefetchAsync(m_kmrels, mmap_sz,
-					   CU_DEVICE_PER_THREAD,
-					   CU_STREAM_PER_THREAD);
-	gq_buf->m_kmrels = m_kmrels;
-	gq_buf->h_kmrels = h_kmrels;
-	gq_buf->h_kmrels_sz = mmap_sz;
+	(void)cuMemPrefetchAsync(m_kmrels, mmap_sz,
+							 CU_DEVICE_PER_THREAD,
+							 CU_STREAM_PER_THREAD);
+	gq_buf->m_devptr = m_kmrels;
+	gq_buf->h_shmptr = h_kmrels;
+	gq_buf->buffer_sz = mmap_sz;
+
 	return true;
 }
 
 static bool
 __setupGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
-							 kern_data_store *kds_final_head)
+							 kern_data_store *kds_final_head,
+							 char *errmsg, size_t errmsg_sz)
 {
 	CUdeviceptr	m_kds_final;
 	CUresult	rc;
@@ -519,11 +523,16 @@ __setupGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 		return true;	/* nothing to do */
 
 	Assert(KDS_HEAD_LENGTH(kds_final_head) <= kds_final_head->length);
-	rc = cuMemAllocManaged(&m_kds_final,
-						   kds_final_head->length,
-						   CU_MEM_ATTACH_GLOBAL);
+	rc =  cuMemAllocManaged(&m_kds_final,
+							kds_final_head->length,
+							CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
+	{
+		snprintf(errmsg, errmsg_sz,
+				 "failed on cuMemAllocManaged(%zu): %s",
+				 kds_final_head->length, cuStrError(rc));
 		return false;
+	}
 	memcpy((void *)m_kds_final,
 		   kds_final_head,
 		   KDS_HEAD_LENGTH(kds_final_head));
@@ -537,21 +546,44 @@ __setupGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 static gpuQueryBuffer *
 getGpuQueryBuffer(uint64_t buffer_id,
 				  uint32_t kmrels_handle,
-				  kern_data_store *kds_final_head)
+				  kern_data_store *kds_final_head,
+				  char *errmsg, size_t errmsg_sz)
 {
 	gpuQueryBuffer *gq_buf;
-	dlist_iter	iter;
-	int			hindex;
+	dlist_iter		iter;
+	int				hindex;
+	struct {
+		uint64_t	buffer_id;
+		char		buffer_kind;
+		uint32_t	cuda_dindex;
+	} hkey;
 
-	hindex = (hash_bytes((unsigned char *)&buffer_id, sizeof(uint64_t)) ^
-			  hash_bytes_uint32(CU_DINDEX_PER_THREAD)) % GPU_QUERY_BUFFER_NSLOTS;
+	Assert((kmrels_handle != 0 && kds_final_head == NULL) ||
+		   (kmrels_handle == 0 && kds_final_head != NULL));
+	/* lookup hash table first */
+	memset(&hkey, 0, sizeof(hkey));
+	hkey.buffer_id = buffer_id;
+	if (kmrels_handle != 0 && kds_final_head == NULL)
+		hkey.buffer_kind = 'J';		/* Join */
+	else if (kmrels_handle == 0 && kds_final_head != NULL)
+		hkey.buffer_kind = 'G';		/* GroupBy */
+	else
+	{
+		snprintf(errmsg, errmsg_sz,
+				 "Bug? getGpuQueryBuffer has invalid arguments");
+		return NULL;				/* should not happen */
+	}
+	hkey.cuda_dindex = CU_DINDEX_PER_THREAD;
+	hindex = hash_bytes((unsigned char *)&hkey,
+						sizeof(hkey)) % GPU_QUERY_BUFFER_NSLOTS;
 	pthreadMutexLock(&gpu_query_buffer_mutex);
 	dlist_foreach(iter, &gpu_query_buffer_hslot[hindex])
 	{
 		gq_buf = dlist_container(gpuQueryBuffer,
 								 chain, iter.cur);
-		if (gq_buf->cuda_dindex == CU_DINDEX_PER_THREAD &&
-			gq_buf->buffer_id   == buffer_id)
+		if (gq_buf->buffer_id   == buffer_id &&
+			gq_buf->buffer_kind == hkey.buffer_kind &&
+			gq_buf->cuda_dindex == CU_DINDEX_PER_THREAD)
 		{
 			gq_buf->refcnt++;
 
@@ -561,7 +593,7 @@ getGpuQueryBuffer(uint64_t buffer_id,
 				pthreadCondWait(&gpu_query_buffer_cond,
 								&gpu_query_buffer_mutex);
 			}
-			/* setup successfully done? */
+
 			if (gq_buf->phase < 0)
 			{
 				__putGpuQueryBufferNoLock(gq_buf);
@@ -581,39 +613,32 @@ getGpuQueryBuffer(uint64_t buffer_id,
 	gq_buf->refcnt = 1;
 	gq_buf->phase  = 0;	/* not initialized yet */
 	gq_buf->buffer_id = buffer_id;
+	gq_buf->buffer_kind = hkey.buffer_kind;
 	gq_buf->cuda_dindex = CU_DINDEX_PER_THREAD;
-	dlist_push_tail(&gpu_query_buffer_hslot[hindex],
-					&gq_buf->chain);
+	dlist_push_tail(&gpu_query_buffer_hslot[hindex], &gq_buf->chain);
 	pthreadMutexUnlock(&gpu_query_buffer_mutex);
 
-	/* setup the gpuQueryBuffer */
-	if (!__setupGpuQueryJoinBuffer(gq_buf, kmrels_handle) ||
-		!__setupGpuQueryGroupByBuffer(gq_buf, kds_final_head))
+	if ((kmrels_handle != 0 &&
+		 __setupGpuQueryJoinInnerBuffer(gq_buf, kmrels_handle,
+										errmsg, errmsg_sz)) ||
+		(kds_final_head != NULL &&
+		 __setupGpuQueryGroupByBuffer(gq_buf, kds_final_head,
+									  errmsg, errmsg_sz)))
 	{
-		/* unable to setup the buffer */
+		/* ok, buffer is now ready */
 		pthreadMutexLock(&gpu_query_buffer_mutex);
-		gq_buf->phase = -1;
-		__putGpuQueryBufferNoLock(gq_buf);
+		gq_buf->phase = 1;		/* buffer is now ready */
 		pthreadCondBroadcast(&gpu_query_buffer_cond);
-		pthreadMutexUnlock(&gpu_query_buffer_mutex);
-
-		return NULL;
+		pthreadMutexUnlock(&gpu_query_buffer_mutex);		
+		return gq_buf;
 	}
-	/* ok, buffer is now ready */
+	/* unable to setup the buffer */
 	pthreadMutexLock(&gpu_query_buffer_mutex);
-	gq_buf->phase = 1;	/* buffer is now ready */
+	gq_buf->phase = -1;			/* buffer unavailable */
+	__putGpuQueryBufferNoLock(gq_buf);
 	pthreadCondBroadcast(&gpu_query_buffer_cond);
 	pthreadMutexUnlock(&gpu_query_buffer_mutex);
-
-	return gq_buf;
-}
-
-static void
-putGpuQueryBuffer(gpuQueryBuffer *gq_buf)
-{
-	pthreadMutexLock(&gpu_query_buffer_mutex);
-	__putGpuQueryBufferNoLock(gq_buf);
-	pthreadMutexUnlock(&gpu_query_buffer_mutex);
+	return NULL;
 }
 
 /*
@@ -709,9 +734,12 @@ gpuServiceGoingTerminate(void)
  * gpuClientPut
  */
 static void
-gpuClientPut(gpuClient *gclient)
+gpuClientPut(gpuClient *gclient, bool exit_monitor_thread)
 {
-	if (pg_atomic_sub_fetch_u32(&gclient->refcnt, 2) == 0)
+	int		cnt = (exit_monitor_thread ? 1 : 2);
+	int		val;
+
+	if ((val = pg_atomic_sub_fetch_u32(&gclient->refcnt, cnt)) == 0)
 	{
 		gpuContext *gcontext = gclient->gcontext;
 		CUresult	rc;
@@ -722,6 +750,8 @@ gpuClientPut(gpuClient *gclient)
 
 		if (gclient->sockfd >= 0)
 			close(gclient->sockfd);
+		if (gclient->gq_kmrels)
+			putGpuQueryBuffer(gclient->gq_kmrels);
 		if (gclient->session)
 		{
 			CUdeviceptr		dptr = ((CUdeviceptr)gclient->session -
@@ -986,18 +1016,44 @@ __resolveDevicePointers(gpuModule *gmodule,
 
 	if (session->xpucode_scan_quals)
 	{
-		kexp = (kern_expression *)((char *)session + session->xpucode_scan_quals);
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_scan_quals);
 		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
 			return false;
 	}
 
 	if (session->xpucode_scan_projs)
 	{
-		kexp = (kern_expression *)((char *)session + session->xpucode_scan_projs);
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_scan_projs);
 		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
 			return false;
 	}
 
+	if (session->xpucode_join_quals_packed)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_join_quals_packed);
+		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
+			return false;
+	}
+
+	if (session->xpucode_hash_values_packed)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_hash_values_packed);
+		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
+			return false;
+	}
+
+	if (session->xpucode_gist_quals_packed)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_gist_quals_packed);
+		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
+			return false;
+	}
+	
 	if (encode)
 	{
 		xpu_encode_info *catalog = gmodule->cuda_encode_catalog;
@@ -1047,6 +1103,19 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	{
 		gpuClientELog(gclient, "%s", emsg);
 		return false;
+	}
+	if (session->join_inner_handle != 0)
+	{
+		gclient->gq_kmrels = getGpuQueryBuffer(session->query_plan_id,
+											   session->join_inner_handle,
+											   NULL,
+											   emsg, sizeof(emsg));
+		if (!gclient->gq_kmrels)
+		{
+			gpuClientELog(gclient, "%s", emsg);
+			return false;
+		}
+		fprintf(stderr, "gclient->gq_kmrels = %p\n", gclient->gq_kmrels);
 	}
 	gclient->session = session;
 	gclient->cuda_module = gmodule->cuda_module;
@@ -1127,7 +1196,7 @@ gpuservGpuWorkerMain(void *__arg)
 			}
 			if (xcmd)
 				cuMemFree((CUdeviceptr)xcmd);
-			gpuClientPut(gclient);
+			gpuClientPut(gclient, false);
 			pthreadMutexLock(&gcontext->lock);
 		}
 		else if (!pthreadCondWaitTimeout(&gcontext->cond,
@@ -1229,7 +1298,7 @@ gpuservMonitorClient(void *__priv)
 		}
 	}
 out:
-	gpuClientPut(gclient);
+	gpuClientPut(gclient, true);
 	return NULL;
 }
 
@@ -1261,7 +1330,7 @@ gpuservAcceptClient(gpuContext *gcontext)
 		return;
 	}
 	gclient->gcontext = gcontext;
-	pg_atomic_init_u32(&gclient->refcnt, 3);
+	pg_atomic_init_u32(&gclient->refcnt, 1);
 	pthreadMutexInit(&gclient->mutex);
 	gclient->sockfd = sockfd;
 

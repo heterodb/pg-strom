@@ -235,8 +235,6 @@ typedef struct
 	pg_atomic_uint64	source_ntuples;
 	pg_atomic_uint64	source_nvalids;
 	pg_atomic_uint32	source_nblocks;		/* only KDS_FORMAT_BLOCK */
-	uint32_t			num_rels;			/* if xPU-JOIN involved */
-	pgstromSharedInnerState *ps_istates;	/* if xPU-JOIN involved */
 	/* for arrow_fdw */
 	pg_atomic_uint32	arrow_rbatch_index;
 	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */
@@ -259,19 +257,13 @@ typedef struct
 	uint32_t			preload_shmem_handle; /* host buffer handle */
 	uint64_t			preload_shmem_length; /* host buffer length */
 	/* for join-inner relations */
+	uint32_t			num_rels;			/* if xPU-JOIN involved */
 	pgstromSharedInnerState inners[FLEXIBLE_ARRAY_MEMBER];
 	/*
 	 * MEMO: ...and ParallelBlockTableScanDescData should be allocated
 	 *       next to the inners[nmum_rels] array
 	 */
 } pgstromSharedState;
-
-typedef enum
-{
-	XPUKIND__X86_64_CPU = 1,
-	XPUKIND__NVIDIA_GPU = 2,
-	XPUKIND__NVIDIA_DPU = 3,
-} XpuKind;
 
 struct pgstromTaskState
 {
@@ -284,6 +276,7 @@ struct pgstromTaskState
 	GpuCacheState	   *gcache_state;
 	ArrowFdwState	   *arrow_state;
 	BrinIndexState	   *br_state;
+	kern_multirels	   *h_kmrels;		/* host inner buffer (if JOIN) */
 	const char		   *kds_pathname;	/* pathname to be used for KDS setup */
 	/* current chunk (already processed by the device) */
 	XpuCommand		   *curr_resp;
@@ -517,9 +510,9 @@ pgstromBuildSessionInfo(PlanState *ps,
 						uint32_t kcxt_extra_bufsz,
 						const bytea *xpucode_scan_quals,
 						const bytea *xpucode_scan_projs,
-						List *xpucode_join_quals_list,
-						List *xpucode_hash_values_list,
-						List *xpucode_gist_quals_list,
+						const bytea *xpucode_join_quals_packed,
+						const bytea *xpucode_hash_values_packed,
+						const bytea *xpucode_gist_quals_packed,
 						uint32_t join_inner_handle);
 extern void		pgstromExecInitTaskState(pgstromTaskState *pts,
 										 uint64_t devkind_mask,
@@ -533,7 +526,8 @@ extern void		pgstromExecEndTaskState(pgstromTaskState *pts);
 extern void		pgstromExecResetTaskState(pgstromTaskState *pts);
 extern Size		pgstromSharedStateEstimateDSM(pgstromTaskState *pts);
 extern void		pgstromSharedSteteCreate(pgstromTaskState *pts);
-extern void		pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr);
+extern void		pgstromSharedStateInitDSM(pgstromTaskState *pts,
+										  ParallelContext *pcxt, char *dsm_addr);
 extern void		pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr);
 extern void		pgstromSharedStateShutdownDSM(pgstromTaskState *pts);
 extern void		pgstromExplainScanState(pgstromTaskState *pts,
@@ -587,7 +581,7 @@ struct gpuClient
 	dlist_node		chain;		/* gcontext->client_list */
 	CUmodule		cuda_module;/* preload cuda binary */
 	kern_session_info *session;	/* per session info (on cuda managed memory) */
-	struct gpuQueryBuffer *gq_buf; /* per query buffer (for JOIN/GROUP BY) */
+	struct gpuQueryBuffer *gq_kmrels; /* per query join inner buffer */
 	pg_atomic_uint32 refcnt;	/* odd number, if error status */
 	pthread_mutex_t	mutex;		/* mutex to write the socket */
 	int				sockfd;		/* connection to PG backend */

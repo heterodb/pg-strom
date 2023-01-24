@@ -1052,7 +1052,6 @@ typedef struct GpuJoinState
 {
 	pgstromTaskState pts;
 	GpuJoinInfo	   *gj_info;
-	kern_multirels *h_kmrels;	/* inner buffer */
 	XpuCommand	   *xcmd_req;
 	size_t			xcmd_len;
 	/* inner relations */
@@ -1060,7 +1059,7 @@ typedef struct GpuJoinState
 	GpuJoinInnerState inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
 
-static bool		GpuJoinInnerPreload(GpuJoinState *gjs);
+static uint32_t		GpuJoinInnerPreload(GpuJoinState *gjs);
 
 /*
  * fixup_inner_varnode
@@ -1225,15 +1224,32 @@ static TupleTableSlot *
 ExecGpuJoin(CustomScanState *node)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
+	GpuJoinInfo	   *gj_info = gjs->gj_info;
 
-	if (!gjs->h_kmrels)
+	if (!gjs->pts.h_kmrels)
 	{
+		const XpuCommand *session;
+		uint32_t	inner_handle;
+
 		/* attach pgstromSharedState, if none */
 		if (!gjs->pts.ps_state)
-			pgstromSharedStateInitDSM(&gjs->pts, NULL);
+			pgstromSharedStateInitDSM(&gjs->pts, NULL, NULL);
 		/* preload inner buffer */
-		if (!GpuJoinInnerPreload(gjs))
+		inner_handle = GpuJoinInnerPreload(gjs);
+		if (inner_handle == 0)
 			return NULL;
+		/* open the GpuJoin session */
+		session = pgstromBuildSessionInfo(&gjs->pts.css.ss.ps,
+										  gj_info->used_params,
+                                          gj_info->extra_bufsz,
+										  gj_info->kvars_nslots,
+                                          gj_info->kern_scan_quals,
+                                          gj_info->kern_join_projs,
+                                          gj_info->kern_join_quals_packed,
+										  gj_info->kern_hash_keys_packed,
+										  gj_info->kern_gist_quals_packed,
+										  inner_handle);
+		gpuClientOpenSession(&gjs->pts, gjs->pts.optimal_gpus, session);
 	}
 	return NULL;
 }
@@ -1244,15 +1260,7 @@ ExecGpuJoin(CustomScanState *node)
 static void
 ExecEndGpuJoin(CustomScanState *node)
 {
-	GpuJoinState   *gjs = (GpuJoinState *)node;
-	ListCell	   *lc;
-
-	foreach (lc, gjs->pts.css.custom_ps)
-	{
-		PlanState  *ps = lfirst(lc);
-
-		ExecEndNode(ps);
-	}
+	pgstromExecEndTaskState((pgstromTaskState *)node);
 }
 
 /*
@@ -1280,7 +1288,7 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 				   ParallelContext *pcxt,
 				   void *dsm_addr)
 {
-	pgstromSharedStateInitDSM((pgstromTaskState *)node, dsm_addr);
+	pgstromSharedStateInitDSM((pgstromTaskState *)node, pcxt, dsm_addr);
 }
 
 /*
@@ -1460,14 +1468,6 @@ ExplainGpuJoin(CustomScanState *node,
 	pgstromExplainTaskState(&gjs->pts, es, dcontext);
 }
 
-
-
-
-
-
-
-
-
 /* ---------------------------------------------------------------- *
  *
  * Routines for inner-preloading
@@ -1538,6 +1538,7 @@ execInnerPreloadOneDepth(GpuJoinInnerState *istate,
 		slot = ExecProcNode(ps);
 		if (TupIsNull(slot))
 			break;
+
 		/*
 		 * NOTE: If varlena datum is compressed / toasted, obviously,
 		 * GPU kernel cannot handle operators that reference these
@@ -1742,10 +1743,14 @@ again:
 		Assert(ps_state->preload_shmem_handle != 0);
 		h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
 							   shmem_length);
+		memset(h_kmrels, 0, offsetof(kern_multirels,
+									 chunks[gjs->num_rels]));
+		h_kmrels->length = offset;
+		h_kmrels->num_rels = gjs->num_rels;
 		ps_state->preload_shmem_length = shmem_length;
 		goto again;
 	}
-	gjs->h_kmrels = h_kmrels;
+	gjs->pts.h_kmrels = h_kmrels;
 }
 
 /*
@@ -1827,7 +1832,7 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 #define INNER_PHASE__SETUP_BUFFERS		1
 #define INNER_PHASE__GPUJOIN_EXEC		2
 
-static bool
+static uint32_t
 GpuJoinInnerPreload(GpuJoinState *gjs)
 {
 	GpuJoinState	   *leader = gjs;
@@ -1856,7 +1861,15 @@ GpuJoinInnerPreload(GpuJoinState *gjs)
 			 * Scan inner relations, often in parallel
 			 */
 			for (int i=0; i < gjs->num_rels; i++)
-				execInnerPreloadOneDepth(&leader->inners[i], memcxt);
+			{
+				GpuJoinInnerState *istate = &leader->inners[i];
+
+				execInnerPreloadOneDepth(istate, memcxt);
+				pg_atomic_fetch_add_u64(&ps_state->inners[i].inner_nitems,
+										list_length(istate->preload_tuples));
+				pg_atomic_fetch_add_u64(&ps_state->inners[i].inner_usage,
+										istate->preload_usage);
+			}
 
 			/*
 			 * Once (parallel) scan completed, no other concurrent
@@ -1917,16 +1930,16 @@ GpuJoinInnerPreload(GpuJoinState *gjs)
 			/*
 			 * Setup the host inner buffer
 			 */
-			if (!gjs->h_kmrels)
+			if (!gjs->pts.h_kmrels)
 			{
-				gjs->h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
-											ps_state->preload_shmem_length);
+				gjs->pts.h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
+												ps_state->preload_shmem_length);
 			}
 
 			for (int i=0; i < leader->num_rels; i++)
 			{
 				GpuJoinInnerState *istate = &leader->inners[i];
-                kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(gjs->h_kmrels, i+1);
+                kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(gjs->pts.h_kmrels, i+1);
                 uint32_t		base_nitems;
 				uint32_t		base_usage;
 
@@ -1988,10 +2001,10 @@ GpuJoinInnerPreload(GpuJoinState *gjs)
 			 * is already built. So, all we need to do is just map the host
 			 * inner buffer here.
 			 */
-			if (!gjs->h_kmrels)
+			if (!gjs->pts.h_kmrels)
 			{
-				gjs->h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
-											ps_state->preload_shmem_length);
+				gjs->pts.h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
+												ps_state->preload_shmem_length);
 			}
 
 			//TODO: send the shmem handle to the GPU server or DPU server
@@ -2006,8 +2019,9 @@ GpuJoinInnerPreload(GpuJoinState *gjs)
 	SpinLockRelease(&ps_state->preload_mutex);
 	/* release working memory */
 	MemoryContextDelete(memcxt);
+	Assert(gjs->pts.h_kmrels != NULL);
 
-	return (gjs->h_kmrels != NULL);
+	return ps_state->preload_shmem_handle;
 }
 
 /*

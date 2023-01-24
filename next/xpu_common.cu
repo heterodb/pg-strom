@@ -379,6 +379,20 @@ pgfn_Projection(XPU_PGFUNCTION_ARGS)
 	return true;
 }
 
+STATIC_FUNCTION(bool)
+pgfn_HashValue(XPU_PGFUNCTION_ARGS)
+{
+	STROM_ELOG(kcxt, "pgfn_HashValue is not implemented yet");
+	return false;
+}
+
+STATIC_FUNCTION(bool)
+pgfn_Packed(XPU_PGFUNCTION_ARGS)
+{
+	STROM_ELOG(kcxt, "pgfn_Packed should not be called as a normal kernel expression");
+	return false;
+}
+
 /* ----------------------------------------------------------------
  *
  * LoadVars / Projection
@@ -1032,6 +1046,8 @@ PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
 #include "xpu_opcodes.h"
 	{FuncOpCode__Projection,                pgfn_Projection},
 	{FuncOpCode__LoadVars,                  pgfn_LoadVars},
+	{FuncOpCode__HashValue,                 pgfn_HashValue},
+	{FuncOpCode__Packed,                    pgfn_Packed},
 	{FuncOpCode__Invalid, NULL},
 };
 

@@ -837,7 +837,7 @@ ExecGpuScan(CustomScanState *node)
 	GpuScanState   *gss = (GpuScanState *)node;
 
 	if (!gss->pts.ps_state)
-		pgstromSharedStateInitDSM(&gss->pts, NULL);
+		pgstromSharedStateInitDSM(&gss->pts, NULL, NULL);
 	if (!gss->pts.conn)
 	{
 		const XpuCommand *session;
@@ -899,7 +899,7 @@ InitializeGpuScanDSM(CustomScanState *node,
 					 ParallelContext *pcxt,
 					 void *dsm_addr)
 {
-	pgstromSharedStateInitDSM((pgstromTaskState *)node, dsm_addr);
+	pgstromSharedStateInitDSM((pgstromTaskState *)node, pcxt, dsm_addr);
 }
 
 /*

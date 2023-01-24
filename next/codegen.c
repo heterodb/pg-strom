@@ -1508,8 +1508,8 @@ codegen_build_packed_joinquals(codegen_context *context,
 						   u.join.subexp_offset[nrels]));
 	kexp = alloca(sz);
 	memset(kexp, 0, sz);
-	kexp->exptype = TypeOpCode__Invalid;
-	kexp->opcode  = FuncOpCode__JoinPacked;
+	kexp->exptype = TypeOpCode__bool;
+	kexp->opcode  = FuncOpCode__Packed;
 	kexp->nr_args = nrels;
 	kexp->args_offset = sz;
 
@@ -1529,10 +1529,8 @@ codegen_build_packed_joinquals(codegen_context *context,
 			kern_expression *karg = (kern_expression *)VARDATA(xpucode);
 
 			Assert(VARHDRSZ + karg->len == VARSIZE(xpucode));
-			if (kexp->exptype == TypeOpCode__Invalid)
-				kexp->exptype = karg->exptype;
-			else if (kexp->exptype != karg->exptype)
-				elog(ERROR, "Bug? type mismatch in JoinPacked");
+			if (karg->exptype != TypeOpCode__bool)
+				elog(ERROR, "Bug? join-qualifier should return bool");
 			kexp->u.join.subexp_offset[i++] =
 				__appendBinaryStringInfo(&buf, karg, karg->len);
 		}
@@ -1540,7 +1538,6 @@ codegen_build_packed_joinquals(codegen_context *context,
 	Assert(nrels == i);
 	if (buf.len > sz)
 	{
-		Assert(kexp->exptype != TypeOpCode__Invalid);
 		memcpy(buf.data, kexp, sz);
 		__appendKernExpMagicAndLength(&buf, 0);
 
@@ -1610,7 +1607,7 @@ codegen_build_packed_hashkeys(codegen_context *context,
 	kexp = alloca(sz);
 	memset(kexp, 0, sz);
 	kexp->exptype = TypeOpCode__int4;
-	kexp->opcode  = FuncOpCode__JoinPacked;
+	kexp->opcode  = FuncOpCode__Packed;
 	kexp->nr_args = nrels;
 	kexp->args_offset = sz;
 
@@ -1938,16 +1935,16 @@ __xpucode_to_cstring(StringInfo buf,
 		case FuncOpCode__HashValue:
 			appendStringInfo(buf, "{HashValue");
 			break;
-		case FuncOpCode__JoinPacked:
-			appendStringInfo(buf, "{JoinPacked");
+		case FuncOpCode__Packed:
+			appendStringInfo(buf, "{Packed");
 			for (i=0, karg=KEXP_FIRST_ARG(kexp);
 				 i < kexp->nr_args;
 				 i++, karg=KEXP_NEXT_ARG(karg))
 			{
 				if (!__KEXP_IS_VALID(kexp,karg))
 					elog(ERROR, "XpuCode looks corrupted");
-				appendStringInfo(buf, "%s depth_%u=",
-								 i == 0 ? "" : ",", i+1);
+				appendStringInfo(buf, "%s items[%u]=",
+								 i == 0 ? "" : ",", i);
 				__xpucode_to_cstring(buf, karg, css, es, dcontext);
 			}
 			appendStringInfo(buf, "}");
