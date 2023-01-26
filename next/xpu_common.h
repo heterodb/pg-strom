@@ -129,6 +129,7 @@ typedef unsigned int		Oid;
 #define MAXALIGN(LEN)		TYPEALIGN(MAXIMUM_ALIGNOF,LEN)
 #define MAXALIGN_DOWN(LEN)	TYPEALIGN_DOWN(MAXIMUM_ALIGNOF,LEN)
 #endif	/* POSTGRES_H */
+#define __MAXALIGNED__		__attribute__((aligned(MAXIMUM_ALIGNOF)));
 #define MAXIMUM_ALIGNOF_SHIFT 3
 
 /* Definition of several primitive types */
@@ -1458,11 +1459,11 @@ struct kern_expression
 	uint32_t		nr_args;		/* number of arguments */
 	uint32_t		args_offset;	/* offset to the arguments */
 	union {
-		char			data[1]			__attribute__((aligned(MAXIMUM_ALIGNOF)));
+		char			data[1]			__MAXALIGNED__;
 		struct {
 			Oid			const_type;
 			bool		const_isnull;
-			char		const_value[1]	__attribute__((aligned(MAXIMUM_ALIGNOF)));
+			char		const_value[1]	__MAXALIGNED__;
 		} c;		/* ConstExpr */
 		struct {
 			uint32_t	param_id;
@@ -1590,7 +1591,7 @@ typedef struct {
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
 	uint32_t	kds_dst_offset;		/* offset to kds_dst */
-	char		data[1]				__attribute__((aligned(MAXIMUM_ALIGNOF)));
+	char		data[1]				__MAXALIGNED__;
 } kern_exec_scan;
 
 typedef struct {
@@ -2001,13 +2002,5 @@ KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int depth)
 	offset = kmrels->chunks[depth-1].gist_offset;
 	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
-
-
-
-
-
-
-
-
 
 #endif	/* XPU_COMMON_H */

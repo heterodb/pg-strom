@@ -11,6 +11,15 @@
  */
 #include "cuda_common.h"
 
+/*
+ * outer_row_count - read position counter of outer relation for each
+ *                   thread group.
+ */
+extern __shared__ uint32_t		outer_row_count;
+
+
+
+
 #define GPUSCAN_THREADS_UNITSZ_SHIFT	11
 #define GPUSCAN_THREADS_UNITSZ_MASK		(GPUSCAN_THREADS_UNITSZ - 1)
 #define GPUSCAN_THREADS_UNITSZ			(1U<<GPUSCAN_THREADS_UNITSZ_SHIFT)
