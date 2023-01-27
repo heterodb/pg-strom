@@ -570,7 +570,6 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	strom_io_chunk *strom_ioc = NULL;
 	BlockNumber	   *strom_blknums;
 	uint32_t		strom_nblocks = 0;
-	uint32_t		kds_src_fullpath = 0;
 	uint32_t		kds_src_pathname = 0;
 	uint32_t		kds_src_iovec = 0;
 	uint32_t		kds_nrooms;
@@ -768,7 +767,7 @@ out:
 	{
 		size_t		sz;
 
-		kds_src_fullpath = kds_src_pathname = pts->xcmd_buf.len;
+		kds_src_pathname = pts->xcmd_buf.len;
 		appendStringInfoString(&pts->xcmd_buf, pts->kds_pathname);
 		if (segment_id > 0)
 			appendStringInfo(&pts->xcmd_buf, ".%u", segment_id);
@@ -783,7 +782,6 @@ out:
 		Assert(segment_id == InvalidBlockNumber);
 	}
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
-	xcmd->u.scan.kds_src_fullpath = kds_src_fullpath;
 	xcmd->u.scan.kds_src_pathname = kds_src_pathname;
 	xcmd->u.scan.kds_src_iovec = kds_src_iovec;
 	xcmd->length = pts->xcmd_buf.len;
@@ -907,105 +905,6 @@ pgstromRelScanChunkNormal(pgstromTaskState *pts,
 	*xcmd_iovcnt = 2;
 
 	return xcmd;
-}
-
-/*
- * pgstromSharedStateEstimateDSM
- */
-Size
-pgstromSharedStateEstimateDSM(pgstromTaskState *pts)
-{
-	EState	   *estate = pts->css.ss.ps.state;
-	Snapshot	snapshot = estate->es_snapshot;
-	Relation	relation = pts->css.ss.ss_currentRelation;
-	Size		len = offsetof(pgstromSharedState, bpscan);
-
-	if (pts->br_state)
-		len += pgstromBrinIndexEstimateDSM(pts);
-	if (!pts->arrow_state)
-		len += table_parallelscan_estimate(relation, snapshot);
-	return MAXALIGN(len);
-}
-
-/*
- * pgstromSharedStateInitDSM
- */
-void
-pgstromSharedStateInitDSM(pgstromTaskState *pts, char *dsm_addr)
-{
-	pgstromSharedState *ps_state;
-	Relation	relation = pts->css.ss.ss_currentRelation;
-	EState	   *estate = pts->css.ss.ps.state;
-	TableScanDesc scan = NULL;
-
-	if (pts->br_state)
-		dsm_addr += pgstromBrinIndexInitDSM(pts, dsm_addr);
-	Assert(!pts->css.ss.ss_currentScanDesc);
-	if (dsm_addr)
-	{
-		ps_state = (pgstromSharedState *)dsm_addr;
-		memset(ps_state, 0, offsetof(pgstromSharedState, bpscan));
-		if (pts->arrow_state)
-			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
-		else
-		{
-			table_parallelscan_initialize(relation,
-										  &ps_state->bpscan.base,
-										  estate->es_snapshot);
-			scan = table_beginscan_parallel(relation, &ps_state->bpscan.base);
-		}
-	}
-	else
-	{
-		ps_state = MemoryContextAllocZero(estate->es_query_cxt,
-										  sizeof(pgstromSharedState));
-		if (pts->arrow_state)
-			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
-		else
-			scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
-	}
-	pts->ps_state = ps_state;
-	pts->css.ss.ss_currentScanDesc = scan;
-}
-
-/*
- * pgstromSharedStateAttachDSM
- */
-void
-pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr)
-{
-	if (pts->br_state)
-		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
-	pts->ps_state = (pgstromSharedState *)dsm_addr;
-	if (pts->arrow_state)
-		pgstromArrowFdwAttachDSM(pts->arrow_state, pts->ps_state);
-	else
-		pts->css.ss.ss_currentScanDesc =
-			table_beginscan_parallel(pts->css.ss.ss_currentRelation,
-									 &pts->ps_state->bpscan.base);	
-}
-
-/*
- * pgstromSharedStateShutdownDSM
- */
-void
-pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
-{
-	pgstromSharedState *src_state = pts->ps_state;
-	pgstromSharedState *dst_state;
-	EState	   *estate = pts->css.ss.ps.state;
-
-	if (pts->br_state)
-		pgstromBrinIndexShutdownDSM(pts);
-	if (pts->arrow_state)
-		pgstromArrowFdwShutdown(pts->arrow_state);
-	if (src_state)
-	{
-		dst_state = MemoryContextAllocZero(estate->es_query_cxt,
-										   sizeof(pgstromSharedState));
-		memcpy(dst_state, src_state, sizeof(pgstromSharedState));
-		pts->ps_state = dst_state;
-	}
 }
 
 void

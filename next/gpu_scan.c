@@ -41,6 +41,8 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 	privs = lappend(privs, bms_to_pglist(gs_info->outer_refs));
 	exprs = lappend(exprs, gs_info->used_params);
 	exprs = lappend(exprs, gs_info->dev_quals);
+	privs = lappend(privs, __makeFloat(gs_info->scan_tuples));
+	privs = lappend(privs, __makeFloat(gs_info->scan_rows));
 	privs = lappend(privs, makeInteger(gs_info->index_oid));
 	privs = lappend(privs, gs_info->index_conds);
 	exprs = lappend(exprs, gs_info->index_quals);
@@ -72,6 +74,8 @@ deform_gpuscan_info(GpuScanInfo *gs_info, CustomScan *cscan)
 	gs_info->outer_refs		= bms_from_pglist(list_nth(privs, pindex++));
 	gs_info->used_params	= list_nth(exprs, eindex++);
 	gs_info->dev_quals		= list_nth(exprs, eindex++);
+	gs_info->scan_tuples    = floatVal(list_nth(privs, pindex++));
+	gs_info->scan_rows      = floatVal(list_nth(privs, pindex++));
 	gs_info->index_oid		= intVal(list_nth(privs, pindex++));
 	gs_info->index_conds	= list_nth(privs, pindex++);
 	gs_info->index_quals	= list_nth(exprs, eindex++);
@@ -666,6 +670,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 					  GpuScanInfo *gs_info,
 					  const CustomScanMethods *xpuscan_plan_methods)
 {
+	codegen_context context;
 	CustomScan	   *cscan;
 	List		   *host_quals = NIL;
 	List		   *dev_quals = NIL;
@@ -673,10 +678,6 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	List		   *tlist_dev = NIL;
 	List		   *input_rels_tlist = list_make1(makeInteger(baserel->relid));
 	Bitmapset	   *outer_refs = NULL;
-	uint32_t		qual_extra_bufsz = 0;
-	uint32_t		proj_extra_bufsz = 0;
-	uint32_t		qual_kvars_nslots = 0;
-	uint32_t		proj_kvars_nslots = 0;
 	ListCell	   *cell;
 
 	/*
@@ -708,32 +709,24 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	outer_refs = pickup_outer_referenced(root, baserel, outer_refs);
 
 	/* code generation for WHERE-clause */
-	pgstrom_build_xpucode(&gs_info->kern_quals,
-						  (Expr *)dev_quals,
-						  input_rels_tlist,
-						  &gs_info->extra_flags,
-						  &qual_extra_bufsz,
-						  &qual_kvars_nslots,
-						  &gs_info->used_params);
+	codegen_context_init(&context, DEVKIND__NVIDIA_GPU);
+	context.input_rels_tlist = input_rels_tlist;
+	gs_info->kern_quals = codegen_build_qualifiers(&context, dev_quals);
 	/* code generation for the Projection */
 	tlist_dev = gpuscan_build_projection(baserel,
 										 tlist,
 										 host_quals,
 										 dev_quals,
 										 input_rels_tlist);
-	codegen_build_projection(&gs_info->kern_projs,
-							 tlist_dev,
-							 input_rels_tlist,
-							 &gs_info->extra_flags,
-							 &proj_extra_bufsz,
-							 &proj_kvars_nslots,
-							 &gs_info->used_params);
-	gs_info->extra_bufsz = Max(qual_extra_bufsz,
-							   proj_extra_bufsz);
-	gs_info->kvars_nslots = Max(qual_kvars_nslots,
-								proj_kvars_nslots);
+	gs_info->kern_projs = codegen_build_projection(&context, tlist_dev);
+	gs_info->extra_flags = context.extra_flags;
+	gs_info->extra_bufsz = context.extra_bufsz;
+	gs_info->kvars_nslots = context.kvars_nslots;
+	gs_info->used_params = context.used_params;
 	gs_info->dev_quals = dev_quals;
 	gs_info->outer_refs = outer_refs;
+	gs_info->scan_tuples = baserel->tuples;
+	gs_info->scan_rows = baserel->rows;
 
 	/*
 	 * Build CustomScan(GpuScan) node
@@ -788,10 +781,12 @@ CreateGpuScanState(CustomScan *cscan)
 {
 	GpuScanState   *gss = palloc0(sizeof(GpuScanState));
 
+	Assert(cscan->methods == &gpuscan_plan_methods);
+
 	/* Set tag and executor callbacks */
 	NodeSetTag(gss, T_CustomScanState);
+	gss->pts.devkind = DEVKIND__NVIDIA_GPU;
 	gss->pts.css.flags = cscan->flags;
-	Assert(cscan->methods == &gpuscan_plan_methods);
 	gss->pts.css.methods = &gpuscan_exec_methods;
 	deform_gpuscan_info(&gss->gs_info, cscan);
 
@@ -842,7 +837,7 @@ ExecGpuScan(CustomScanState *node)
 	GpuScanState   *gss = (GpuScanState *)node;
 
 	if (!gss->pts.ps_state)
-		pgstromSharedStateInitDSM(&gss->pts, NULL);
+		pgstromSharedStateInitDSM(&gss->pts, NULL, NULL);
 	if (!gss->pts.conn)
 	{
 		const XpuCommand *session;
@@ -852,7 +847,11 @@ ExecGpuScan(CustomScanState *node)
 										  gss->gs_info.extra_bufsz,
 										  gss->gs_info.kvars_nslots,
 										  gss->gs_info.kern_quals,
-										  gss->gs_info.kern_projs);
+										  gss->gs_info.kern_projs,
+										  NULL,	/* join_quals */
+										  NULL,	/* hash_values */
+										  NULL,	/* gist_quals */
+										  0);	/* No join_inner_handle */
 		gpuClientOpenSession(&gss->pts, gss->pts.optimal_gpus, session);
 	}
 	return ExecScan(&node->ss,
@@ -900,7 +899,7 @@ InitializeGpuScanDSM(CustomScanState *node,
 					 ParallelContext *pcxt,
 					 void *dsm_addr)
 {
-	pgstromSharedStateInitDSM((pgstromTaskState *)node, dsm_addr);
+	pgstromSharedStateInitDSM((pgstromTaskState *)node, pcxt, dsm_addr);
 }
 
 /*
@@ -909,9 +908,7 @@ InitializeGpuScanDSM(CustomScanState *node,
 static void
 InitGpuScanWorker(CustomScanState *node, shm_toc *toc, void *dsm_addr)
 {
-	GpuScanState   *gss = (GpuScanState *)node;
-		
-	pgstromSharedStateAttachDSM(&gss->pts, dsm_addr);
+	pgstromSharedStateAttachDSM((pgstromTaskState *)node, dsm_addr);
 }
 
 /*
@@ -920,9 +917,7 @@ InitGpuScanWorker(CustomScanState *node, shm_toc *toc, void *dsm_addr)
 static void
 ExecShutdownGpuScan(CustomScanState *node)
 {
-	GpuScanState   *gss = (GpuScanState *)node;
-
-	pgstromSharedStateShutdownDSM(&gss->pts);
+	pgstromSharedStateShutdownDSM((pgstromTaskState *)node);
 }
 
 /*
@@ -934,64 +929,23 @@ ExplainGpuScan(CustomScanState *node,
 			   ExplainState *es)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
+	GpuScanInfo	   *gs_info = &gss->gs_info;
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	List		   *dcontext;
-	ListCell	   *lc;
-	char		   *temp;
-	StringInfoData	buf;
 
-	initStringInfo(&buf);
 	/* setup deparsing context */
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
-										(Plan *)cscan,
+										node->ss.ps.plan,
 										ancestors);
-	if (gss->gs_info.dev_quals != NIL)
-	{
-		List   *dev_quals = gss->gs_info.dev_quals;
-		Expr   *expr;
-
-		if (list_length(dev_quals) > 1)
-			expr = make_andclause(dev_quals);
-		else
-			expr = linitial(dev_quals);
-		temp = deparse_expression((Node *)expr, dcontext, false, true);
-		ExplainPropertyText("GPU Quals", temp, es);
-	}
-
-	resetStringInfo(&buf);
-	foreach (lc, cscan->custom_scan_tlist)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-
-		if (tle->resjunk)
-			continue;
-		temp = deparse_expression((Node *)tle->expr, dcontext, false, true);
-		if (buf.len > 0)
-			appendStringInfoString(&buf, ", ");
-		appendStringInfoString(&buf, temp);
-	}
-	ExplainPropertyText("GPU Projection", buf.data, es);
-	
-	if (es->verbose)
-	{
-		resetStringInfo(&buf);
-		pgstrom_explain_xpucode(&buf,
-								gss->gs_info.kern_quals,
-								&gss->pts.css,
-								es, ancestors);
-		ExplainPropertyText("GPU Quals Code", buf.data, es);
-	}
-
-	if (es->verbose)
-	{
-		resetStringInfo(&buf);
-		pgstrom_explain_xpucode(&buf,
-								gss->gs_info.kern_projs,
-								&gss->pts.css,
-								es, ancestors);
-		ExplainPropertyText("GPU Projection Code", buf.data, es);
-	}
-	pgstromExplainTaskState(&gss->pts, es, ancestors, dcontext);
+	pgstromExplainScanState(&gss->pts, es,
+							gs_info->dev_quals,
+							gs_info->kern_quals,
+							cscan->custom_scan_tlist,
+							gs_info->kern_projs,
+							gs_info->scan_tuples,
+							gs_info->scan_rows,
+							dcontext);
+	pgstromExplainTaskState(&gss->pts, es, dcontext);
 }
 
 /*
@@ -1034,15 +988,15 @@ void
 gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 {
 	kern_gpuscan	*kgscan = NULL;
-	const char		*kds_src_fullpath = NULL;
+	const char		*kds_src_pathname = NULL;
 	strom_io_vector *kds_src_iovec = NULL;
 	kern_data_store *kds_src = NULL;
+	kern_data_extra	*kds_extra = NULL;
 	kern_data_store *kds_dst = NULL;
 	kern_data_store *kds_dst_head = NULL;
 	kern_data_store **kds_dst_array = NULL;
 	int				kds_dst_nrooms = 0;
 	int				kds_dst_nitems = 0;
-	const char	   *kern_funcname;
 	CUfunction		f_kern_gpuscan;
 	const gpuMemChunk *chunk = NULL;
 	CUdeviceptr		m_kds_src = 0UL;
@@ -1054,8 +1008,8 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	size_t			sz;
 	void		   *kern_args[5];
 
-	if (xcmd->u.scan.kds_src_fullpath)
-		kds_src_fullpath = (char *)xcmd + xcmd->u.scan.kds_src_fullpath;
+	if (xcmd->u.scan.kds_src_pathname)
+		kds_src_pathname = (char *)xcmd + xcmd->u.scan.kds_src_pathname;
 	if (xcmd->u.scan.kds_src_iovec)
 		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.scan.kds_src_iovec);
 	if (xcmd->u.scan.kds_src_offset)
@@ -1070,18 +1024,15 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	}
 	else if (kds_src->format == KDS_FORMAT_ROW)
 	{
-		kern_funcname = "kern_gpuscan_main_row";
 		m_kds_src = (CUdeviceptr)kds_src;
 	}
 	else if (kds_src->format == KDS_FORMAT_BLOCK)
 	{
-		kern_funcname = "kern_gpuscan_main_block";
-
-		if (kds_src_fullpath && kds_src_iovec)
+		if (kds_src_pathname && kds_src_iovec)
 		{
 			chunk = gpuservLoadKdsBlock(gclient,
 										kds_src,
-										kds_src_fullpath,
+										kds_src_pathname,
 										kds_src_iovec);
 			if (!chunk)
 				return;
@@ -1095,20 +1046,18 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	}
 	else if (kds_src->format == KDS_FORMAT_ARROW)
 	{
-		kern_funcname = "kern_gpuscan_main_arrow";
-
 		if (kds_src_iovec->nr_chunks == 0)
 			m_kds_src = (CUdeviceptr)kds_src;
 		else
 		{
-			if (!kds_src_fullpath)
+			if (!kds_src_pathname)
 			{
 				gpuClientELog(gclient, "GpuScan: arrow file is missing");
 				return;
 			}
 			chunk = gpuservLoadKdsArrow(gclient,
 										kds_src,
-										kds_src_fullpath,
+										kds_src_pathname,
 										kds_src_iovec);
 			if (!chunk)
 				return;
@@ -1124,7 +1073,7 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 
 	rc = cuModuleGetFunction(&f_kern_gpuscan,
 							 gclient->cuda_module,
-							 kern_funcname);
+							 "kern_gpuscan_main");
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientFatal(gclient, "failed on cuModuleGetFunction: %s",
@@ -1137,8 +1086,7 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 							 &shmem_sz,
 							 f_kern_gpuscan,
 							 0,
-							 sizeof(kern_gpuscan_suspend_warp),
-							 0);
+							 KERN_WARP_CONTEXT_UNITSZ(0));
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientFatal(gclient, "failed on gpuOptimalBlockSize: %s",
@@ -1154,7 +1102,7 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 //	block_sz = 32;
 //	grid_sz = 1;
 
-	sz = offsetof(kern_gpuscan, suspend_context) + shmem_sz * grid_sz;
+	sz = offsetof(kern_gpuscan, data) + shmem_sz * grid_sz;
 	rc = cuMemAllocManaged(&dptr, sz, CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -1217,7 +1165,8 @@ resume_kernel:
 	kern_args[0] = &gclient->session;
 	kern_args[1] = &kgscan;
 	kern_args[2] = &m_kds_src;
-	kern_args[3] = &kds_dst;
+	kern_args[3] = &kds_extra;
+	kern_args[4] = &kds_dst;
 
 	rc = cuLaunchKernel(f_kern_gpuscan,
 						grid_sz, 1, 1,

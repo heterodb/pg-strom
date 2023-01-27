@@ -314,7 +314,6 @@ _PG_init(void)
 	pgstrom_init_brin();
 	pgstrom_init_arrow_fdw();
 	pgstrom_init_executor();
-	pgstrom_init_multirels();
 	/* dump version number */
 	elog(LOG, "PG-Strom version %s built for PostgreSQL %s (git: %s)",
 		 PGSTROM_VERSION,

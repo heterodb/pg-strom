@@ -3609,7 +3609,6 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	/* assign offset of XpuCommand */
 	xcmd = (XpuCommand *)chunk_buffer->data;
 	xcmd->length = chunk_buffer->len;
-	xcmd->u.scan.kds_src_fullpath = kds_src_pathname;
 	xcmd->u.scan.kds_src_pathname = kds_src_pathname;
 	xcmd->u.scan.kds_src_iovec    = kds_src_iovec;
 	xcmd->u.scan.kds_src_offset   = kds_src_offset;
@@ -3710,7 +3709,7 @@ static Size
 ArrowEstimateDSMForeignScan(ForeignScanState *node,
 							ParallelContext *pcxt)
 {
-	return offsetof(pgstromSharedState, bpscan);
+	return offsetof(pgstromSharedState, inners);
 }
 
 /*
@@ -3732,7 +3731,7 @@ ArrowInitializeDSMForeignScan(ForeignScanState *node,
 {
 	pgstromSharedState *ps_state = (pgstromSharedState *)coordinate;
 
-	memset(ps_state, 0, offsetof(pgstromSharedState, bpscan));
+	memset(ps_state, 0, offsetof(pgstromSharedState, inners));
 	pgstromArrowFdwInitDSM(node->fdw_state, ps_state);
 }
 

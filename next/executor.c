@@ -38,6 +38,9 @@ extern TransactionId   *ParallelCurrentXids;
 /* static variables */
 static dlist_head		xpu_connections_list;
 static bool				pgstrom_use_debug_code;		/* GUC */
+static shmem_request_hook_type shmem_request_next = NULL;
+static shmem_startup_hook_type shmem_startup_next = NULL;
+static pg_atomic_uint32	*pgstrom_query_plan_id = NULL;
 
 /*
  * Worker thread to receive response messages
@@ -334,7 +337,11 @@ pgstromBuildSessionInfo(PlanState *ps,
 						uint32_t kcxt_extra_bufsz,
 						uint32_t kcxt_kvars_nslots,
 						const bytea *xpucode_scan_quals,
-						const bytea *xpucode_scan_projs)
+						const bytea *xpucode_scan_projs,
+						const bytea *xpucode_join_quals_packed,
+						const bytea *xpucode_hash_values_packed,
+						const bytea *xpucode_gist_quals_packed,
+						uint32_t join_inner_handle)
 {
 	ExprContext	   *econtext = ps->ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
@@ -365,6 +372,30 @@ pgstromBuildSessionInfo(PlanState *ps,
 									 VARSIZE_ANY_EXHDR(xpucode_scan_projs));
 	}
 
+	if (xpucode_join_quals_packed)
+	{
+		session->xpucode_join_quals_packed =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA_ANY(xpucode_join_quals_packed),
+									 VARSIZE_ANY_EXHDR(xpucode_join_quals_packed));
+	}
+
+	if (xpucode_hash_values_packed)
+	{
+		session->xpucode_hash_values_packed =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA_ANY(xpucode_hash_values_packed),
+									 VARSIZE_ANY_EXHDR(xpucode_hash_values_packed));
+	}
+
+	if (xpucode_gist_quals_packed)
+	{
+		session->xpucode_gist_quals_packed =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA_ANY(xpucode_gist_quals_packed),
+									 VARSIZE_ANY_EXHDR(xpucode_gist_quals_packed));
+	}
+	
 	/* put executor parameters */
 	if (param_info)
 	{
@@ -461,6 +492,8 @@ pgstromBuildSessionInfo(PlanState *ps,
 		}
 	}
 	/* other database session information */
+	session->query_plan_id = ((uint64_t)MyProcPid << 32) |
+		(uint64_t)pg_atomic_fetch_add_u32(pgstrom_query_plan_id, 1);
 	session->kcxt_extra_bufsz = kcxt_extra_bufsz;
 	session->kcxt_kvars_nslots = kcxt_kvars_nslots;
 	session->xpucode_use_debug_code = pgstrom_use_debug_code;
@@ -468,6 +501,7 @@ pgstromBuildSessionInfo(PlanState *ps,
 	session->session_xact_state = __build_session_xact_state(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
+	session->join_inner_handle = join_inner_handle;
 	memcpy(buf.data, session, session_sz);
 
 	/* setup XpuCommand */
@@ -932,6 +966,9 @@ pgstromExecTaskState(pgstromTaskState *pts)
 void
 pgstromExecEndTaskState(pgstromTaskState *pts)
 {
+	pgstromSharedState *ps_state = pts->ps_state;
+	ListCell   *lc;
+
 	if (pts->curr_vm_buffer != InvalidBuffer)
 		ReleaseBuffer(pts->curr_vm_buffer);
 	if (pts->conn)
@@ -944,6 +981,15 @@ pgstromExecEndTaskState(pgstromTaskState *pts)
 		ExecDropSingleTupleTableSlot(pts->base_slot);
 	if (pts->css.ss.ss_currentScanDesc)
 		table_endscan(pts->css.ss.ss_currentScanDesc);
+	if (pts->h_kmrels)
+		__munmapShmem(pts->h_kmrels);
+	if (!IsParallelWorker())
+	{
+		if (ps_state && ps_state->preload_shmem_handle != 0)
+			__shmemDrop(ps_state->preload_shmem_handle);
+	}
+	foreach (lc, pts->css.custom_ps)
+		ExecEndNode((PlanState *) lfirst(lc));
 }
 
 /*
@@ -964,12 +1010,209 @@ pgstromExecResetTaskState(pgstromTaskState *pts)
 }
 
 /*
+ * pgstromSharedStateEstimateDSM
+ */
+Size
+pgstromSharedStateEstimateDSM(pgstromTaskState *pts)
+{
+	Relation	relation = pts->css.ss.ss_currentRelation;
+	EState	   *estate = pts->css.ss.ps.state;
+	Snapshot	snapshot = estate->es_snapshot;
+	int			num_rels = list_length(pts->css.custom_ps);
+	Size		len = 0;
+
+	if (pts->br_state)
+		len += pgstromBrinIndexEstimateDSM(pts);
+	len += MAXALIGN(offsetof(pgstromSharedState, inners[num_rels]));
+	if (!pts->arrow_state)
+		len += table_parallelscan_estimate(relation, snapshot);
+	return MAXALIGN(len);
+}
+
+/*
+ * pgstromSharedStateInitDSM
+ */
+void
+pgstromSharedStateInitDSM(pgstromTaskState *pts,
+						  ParallelContext *pcxt, char *dsm_addr)
+{
+	Relation	relation = pts->css.ss.ss_currentRelation;
+	EState	   *estate = pts->css.ss.ps.state;
+	Snapshot	snapshot = estate->es_snapshot;
+	int			num_rels = list_length(pts->css.custom_ps);
+	size_t		dsm_length = offsetof(pgstromSharedState, inners[num_rels]);
+	pgstromSharedState *ps_state;
+	TableScanDesc scan = NULL;
+
+	Assert(!IsBackgroundWorker);
+	if (pts->br_state)
+		dsm_addr += pgstromBrinIndexInitDSM(pts, dsm_addr);
+	Assert(!pts->css.ss.ss_currentScanDesc);
+	if (dsm_addr)
+	{
+		ps_state = (pgstromSharedState *) dsm_addr;
+		memset(ps_state, 0, dsm_length);
+		ps_state->ss_handle = dsm_segment_handle(pcxt->seg);
+		ps_state->ss_length = dsm_length;
+		dsm_addr += MAXALIGN(dsm_length);
+		if (pts->arrow_state)
+			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
+		else
+		{
+			ParallelTableScanDesc pdesc = (ParallelTableScanDesc) dsm_addr;
+
+			table_parallelscan_initialize(relation, pdesc, snapshot);
+			scan = table_beginscan_parallel(relation, pdesc);
+		}
+	}
+	else
+	{
+		ps_state = MemoryContextAllocZero(estate->es_query_cxt, dsm_length);
+		ps_state->ss_handle = DSM_HANDLE_INVALID;
+		ps_state->ss_length = dsm_length;
+		if (pts->arrow_state)
+			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
+		else
+			scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
+	}
+	ps_state->num_rels = num_rels;
+	ConditionVariableInit(&ps_state->preload_cond);
+	SpinLockInit(&ps_state->preload_mutex);
+	if (num_rels > 0)
+		ps_state->preload_shmem_handle = __shmemCreate();	
+	pts->ps_state = ps_state;
+	pts->css.ss.ss_currentScanDesc = scan;
+}
+
+/*
+ * pgstromSharedStateAttachDSM
+ */
+void
+pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr)
+{
+	int		num_rels = list_length(pts->css.custom_ps);
+
+	if (pts->br_state)
+		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
+	pts->ps_state = (pgstromSharedState *)dsm_addr;
+	Assert(pts->ps_state->num_rels == num_rels);
+	dsm_addr += MAXALIGN(offsetof(pgstromSharedState, inners[num_rels]));
+
+	if (pts->arrow_state)
+		pgstromArrowFdwAttachDSM(pts->arrow_state, pts->ps_state);
+	else
+	{
+		Relation	relation = pts->css.ss.ss_currentRelation;
+		ParallelTableScanDesc pdesc = (ParallelTableScanDesc) dsm_addr;
+
+		pts->css.ss.ss_currentScanDesc = table_beginscan_parallel(relation, pdesc);
+	}
+}
+
+/*
+ * pgstromSharedStateShutdownDSM
+ */
+void
+pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
+{
+	pgstromSharedState *src_state = pts->ps_state;
+	pgstromSharedState *dst_state;
+	EState	   *estate = pts->css.ss.ps.state;
+
+	if (pts->br_state)
+		pgstromBrinIndexShutdownDSM(pts);
+	if (pts->arrow_state)
+		pgstromArrowFdwShutdown(pts->arrow_state);
+	if (src_state)
+	{
+		size_t	sz = offsetof(pgstromSharedState,
+							  inners[src_state->num_rels]);
+		dst_state = MemoryContextAllocZero(estate->es_query_cxt, sz);
+		memcpy(dst_state, src_state, sz);
+		pts->ps_state = dst_state;
+	}
+}
+
+/*
+ * pgstromExplainScanState
+ */
+void
+pgstromExplainScanState(pgstromTaskState *pts,
+						ExplainState *es,
+						List *dev_quals,
+						bytea *kern_dev_quals,
+						List *tlist_dev,
+						bytea *kern_dev_projs,
+						double scan_tuples,
+						double scan_rows,
+						List *dcontext)
+{
+	const char *devkind = DevKindLabel(pts->devkind, false);
+	StringInfoData buf;
+	char		label[100];
+	char	   *str;
+	ListCell   *lc;
+
+	initStringInfo(&buf);
+	if (dev_quals != NIL)
+	{
+		Expr   *expr;
+
+		snprintf(label, sizeof(label), "%s Quals", devkind);
+		if (list_length(dev_quals) > 1)
+			expr = make_andclause(dev_quals);
+		else
+			expr = linitial(dev_quals);
+		str = deparse_expression((Node *)expr, dcontext, false, true);
+		appendStringInfo(&buf, "%s [rows: %.0f -> %.0f]",
+						 str, scan_tuples, scan_rows);
+		ExplainPropertyText(label, buf.data, es);
+	}
+
+	resetStringInfo(&buf);
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (tle->resjunk)
+			continue;
+	    str = deparse_expression((Node *)tle->expr, dcontext, false, true);
+		if (buf.len > 0)
+			appendStringInfoString(&buf, ", ");
+		appendStringInfoString(&buf, str);
+	}
+	snprintf(label, sizeof(label), "%s Projection", devkind);
+	ExplainPropertyText(label, buf.data, es);
+
+	if (es->verbose && kern_dev_quals)
+	{
+		resetStringInfo(&buf);
+		pgstrom_explain_xpucode(&buf,
+								kern_dev_quals,
+								&pts->css,
+								es, dcontext);
+		snprintf(label, sizeof(label), "%s Quals Code", devkind);
+		ExplainPropertyText(label, buf.data, es);
+	}
+
+	if (es->verbose && kern_dev_projs)
+	{
+		resetStringInfo(&buf);
+		pgstrom_explain_xpucode(&buf,
+								kern_dev_projs,
+								&pts->css,
+								es, dcontext);
+		snprintf(label, sizeof(label), "%s Projection Code", devkind);
+		ExplainPropertyText(label, buf.data, es);
+	}
+}
+
+/*
  * pgstromExplainTaskState
  */
 void
 pgstromExplainTaskState(pgstromTaskState *pts,
 						ExplainState *es,
-						List *ancestors,
 						List *dcontext)
 {
 	StringInfoData buf;
@@ -1100,6 +1343,36 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 }
 
 /*
+ * pgstrom_request_executor
+ */
+static void
+pgstrom_request_executor(void)
+{
+	if (shmem_request_next)
+		(*shmem_request_next)();
+	
+	RequestAddinShmemSpace(MAXALIGN(sizeof(pg_atomic_uint32)));
+}
+
+/*
+ * pgstrom_startup_executor
+ */
+static void
+pgstrom_startup_executor(void)
+{
+	bool	found;
+
+	if (shmem_startup_next)
+		(*shmem_startup_next)();
+
+	pgstrom_query_plan_id = ShmemInitStruct("pgstrom_query_plan_id",
+											MAXALIGN(sizeof(pg_atomic_uint32)),
+											&found);
+	if (!found)
+		pg_atomic_init_u32(pgstrom_query_plan_id, 0);
+}
+
+/*
  * pgstrom_init_executor
  */
 void
@@ -1115,4 +1388,9 @@ pgstrom_init_executor(void)
 							 NULL, NULL, NULL);
 	dlist_init(&xpu_connections_list);
 	RegisterResourceReleaseCallback(xpuclientCleanupConnections, NULL);
+	/* shared memory setup */
+	shmem_request_next = shmem_request_hook;
+	shmem_request_hook = pgstrom_request_executor;
+	shmem_startup_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_executor;
 }

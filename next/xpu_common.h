@@ -129,6 +129,7 @@ typedef unsigned int		Oid;
 #define MAXALIGN(LEN)		TYPEALIGN(MAXIMUM_ALIGNOF,LEN)
 #define MAXALIGN_DOWN(LEN)	TYPEALIGN_DOWN(MAXIMUM_ALIGNOF,LEN)
 #endif	/* POSTGRES_H */
+#define __MAXALIGNED__		__attribute__((aligned(MAXIMUM_ALIGNOF)));
 #define MAXIMUM_ALIGNOF_SHIFT 3
 
 /* Definition of several primitive types */
@@ -1379,6 +1380,21 @@ typedef struct
 												 * no locale configuration */
 #define DEVKERN__SESSION_TIMEZONE	0x0200UL	/* Device function needs session
 												 * timezone */
+INLINE_FUNCTION(const char *)
+DevKindLabel(uint32_t devkind, bool cap_only_head)
+{
+	switch (devkind & DEVKIND__ANY)
+	{
+		case DEVKIND__NONE:
+			return (cap_only_head ? "Cpu" : "CPU");
+		case DEVKIND__NVIDIA_GPU:
+			return (cap_only_head ? "Gpu" : "GPU");
+		case DEVKIND__NVIDIA_DPU:
+			return (cap_only_head ? "Dpu" : "DPU");
+		default:
+			return "???";
+	}
+}
 
 /* ----------------------------------------------------------------
  *
@@ -1408,6 +1424,7 @@ typedef enum {
 	FuncOpCode__Projection,
 	FuncOpCode__LoadVars,
 	FuncOpCode__HashValue,
+	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
 	FuncOpCode__BuiltInMax,
 } FuncOpCode;
 
@@ -1442,11 +1459,11 @@ struct kern_expression
 	uint32_t		nr_args;		/* number of arguments */
 	uint32_t		args_offset;	/* offset to the arguments */
 	union {
-		char			data[1]			__attribute__((aligned(MAXIMUM_ALIGNOF)));
+		char			data[1]			__MAXALIGNED__;
 		struct {
 			Oid			const_type;
 			bool		const_isnull;
-			char		const_value[1]	__attribute__((aligned(MAXIMUM_ALIGNOF)));
+			char		const_value[1]	__MAXALIGNED__;
 		} c;		/* ConstExpr */
 		struct {
 			uint32_t	param_id;
@@ -1466,6 +1483,9 @@ struct kern_expression
 			int			nattrs;
 			kern_projection_desc desc[1];
 		} proj;		/* Projection */
+		struct {
+			uint32_t	subexp_offset[1];	/* sub-expression per depth */
+		} join;		/* Join */
 	} u;
 };
 
@@ -1540,6 +1560,7 @@ typedef struct
  */
 typedef struct kern_session_info
 {
+	uint64_t	query_plan_id;		/* unique-id to use per-query buffer */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	kcxt_kvars_nslots;	/* length of kvars slot */
 
@@ -1547,6 +1568,9 @@ typedef struct kern_session_info
 	bool		xpucode_use_debug_code;
 	uint32_t	xpucode_scan_quals;
 	uint32_t	xpucode_scan_projs;
+	uint32_t	xpucode_join_quals_packed;
+	uint32_t	xpucode_hash_values_packed;
+	uint32_t	xpucode_gist_quals_packed;
 
 	/* database session info */
 	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
@@ -1554,18 +1578,20 @@ typedef struct kern_session_info
 	uint32_t	session_timezone;	/* offset to pg_tz */
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
+	/* join inner buffer */
+	uint32_t	join_inner_handle;	/* key of join inner buffer */
+
 	/* executor parameter buffer */
 	uint32_t	nparams;	/* number of parameters */
 	uint32_t	poffset[1];	/* offset of params */
 } kern_session_info;
 
 typedef struct {
-	uint32_t	kds_src_fullpath;	/* offset to const char *fullpath */
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
 	uint32_t	kds_dst_offset;		/* offset to kds_dst */
-	char		data[1]				__attribute__((aligned(MAXIMUM_ALIGNOF)));
+	char		data[1]				__MAXALIGNED__;
 } kern_exec_scan;
 
 typedef struct {
@@ -1625,6 +1651,62 @@ SESSION_KEXP_SCAN_PROJS(kern_session_info *session)
 		return NULL;
 	return (kern_expression *)((char *)session + session->xpucode_scan_projs);
 }
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int depth)
+{
+	kern_expression *kexp;
+	uint32_t	subexp_offset;
+
+	if (session->xpucode_join_quals_packed == 0)
+		return NULL;
+	kexp = (kern_expression *)((char *)session + session->xpucode_join_quals_packed);
+	if (depth < 1 || depth > kexp->nr_args)
+		return NULL;
+	assert(kexp->opcode == FuncOpCode__Packed);
+	subexp_offset = kexp->u.join.subexp_offset[depth-1];
+	if (subexp_offset == 0)
+		return NULL;
+	return (kern_expression *)((char *)kexp + subexp_offset);
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_HASH_VALUE(kern_session_info *session, int depth)
+{
+	kern_expression *kexp;
+	uint32_t	subexp_offset;
+
+	if (session->xpucode_hash_values_packed == 0)
+		return NULL;
+	kexp = (kern_expression *)((char *)session + session->xpucode_hash_values_packed);
+	if (depth < 1 || depth > kexp->nr_args)
+		return NULL;
+	assert(kexp->opcode == FuncOpCode__Packed);
+	subexp_offset = kexp->u.join.subexp_offset[depth-1];
+	if (subexp_offset == 0)
+		return NULL;
+	return (kern_expression *)((char *)kexp + subexp_offset);
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GIST_QUALS(kern_session_info *session, int depth)
+{
+	kern_expression *kexp;
+	uint32_t	subexp_offset;
+
+	if (session->xpucode_gist_quals_packed == 0)
+		return NULL;
+	kexp = (kern_expression *)((char *)session + session->xpucode_gist_quals_packed);
+	if (depth < 1 || depth > kexp->nr_args)
+		return NULL;
+	assert(kexp->opcode == FuncOpCode__Packed);
+	subexp_offset = kexp->u.join.subexp_offset[depth-1];
+	if (subexp_offset == 0)
+		return NULL;
+	return (kern_expression *)((char *)kexp + subexp_offset);
+}
+
+
 
 /* see access/transam/xact.c */
 typedef struct
@@ -1871,5 +1953,54 @@ EXTERN_FUNCTION(void)
 pg_kern_ereport(kern_context *kcxt);	/* only host code */
 EXTERN_FUNCTION(uint32_t)
 pg_hash_any(const void *ptr, int sz);
+
+/* ----------------------------------------------------------------
+ *
+ * Definitions for xPU JOIN
+ *
+ * ----------------------------------------------------------------
+ */
+typedef struct
+{
+	size_t		length;
+	uint32_t	num_rels;
+	struct
+	{
+		uint64_t	kds_offset;		/* offset to KDS */
+		uint64_t	ojmap_offset;	/* offset to outer-join map, if any */
+		uint64_t	gist_offset;	/* offset to GiST-index pages, if any */
+		bool		is_nestloop;	/* true, if NestLoop */
+		bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
+		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
+	} chunks[1];
+} kern_multirels;
+
+INLINE_FUNCTION(kern_data_store *)
+KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int depth)
+{
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	return (kern_data_store *)
+		((char *)kmrels + kmrels->chunks[depth-1].kds_offset);
+}
+
+INLINE_FUNCTION(bool *)
+KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth)
+{
+	uint64_t	offset;
+
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	offset = kmrels->chunks[depth-1].ojmap_offset;
+	return (bool *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+}
+
+INLINE_FUNCTION(kern_data_store *)
+KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int depth)
+{
+	uint64_t	offset;
+
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	offset = kmrels->chunks[depth-1].gist_offset;
+	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+}
 
 #endif	/* XPU_COMMON_H */

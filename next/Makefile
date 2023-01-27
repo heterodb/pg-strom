@@ -16,8 +16,7 @@ PGSTROM_RELEASE := devel
 #
 # Source of PG-Strom host code
 #
-__STROM_OBJS = main.o extra.o codegen.o misc.o executor.o \
-               relscan.o multirels.o brin.o \
+__STROM_OBJS = main.o extra.o codegen.o misc.o executor.o relscan.o brin.o \
                gpu_device.o gpu_service.o gpu_scan.o gpu_join.o \
                dpu_device.o dpu_scan.o \
                arrow_fdw.o arrow_nodes.o \
@@ -31,7 +30,7 @@ GENERATED-HEADERS = $(GPU_DEVATTRS_H)
 # Source of NVIDIA GPU device code
 #
 include $(STROM_BUILD_ROOT)/next/Makefile.cuda
-__CUDA_OBJS = cuda_common cuda_gpuscan \
+__CUDA_OBJS = cuda_common cuda_gpuscan cuda_gpujoin \
               xpu_common xpu_basetype xpu_numeric xpu_timelib xpu_textlib xpu_misclib
 __CUDA_HEADERS = cuda_common.h xpu_common.h xpu_opcodes.h \
                  xpu_basetype.h xpu_numeric.h xpu_textlib.h xpu_timelib.h xpu_misclib.h
