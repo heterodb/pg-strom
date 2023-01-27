@@ -96,76 +96,14 @@ STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
 
 /* ----------------------------------------------------------------
  *
- * Definitions related to GpuScan
+ * Definitions related to per-warp context
  *
  * ----------------------------------------------------------------
  */
-#define GPUSCAN_TUPLES_PER_WARP		(2 * WARPSIZE)
-typedef struct {
-	uint32_t		row_count;
-	uint32_t		lp_count;		/* only KDS_FORMAT_BLOCK */
-	uint32_t		write_pos;
-	uint32_t		read_pos;
-	uint32_t		write_lp_pos;	/* only KDS_FORMAT_BLOCK */
-	uint32_t		read_lp_pos;	/* only KDS_FORMAT_BLOCK */
-	uint32_t		lpitems[GPUSCAN_TUPLES_PER_WARP];	/* only KDS_FORMAT_BLOCK */
-	uint32_t		htuples[GPUSCAN_TUPLES_PER_WARP];
-} kern_gpuscan_suspend_warp;
-
-typedef struct {
-	kern_errorbuf	kerror;
-	uint32_t		grid_sz;
-	uint32_t		block_sz;
-	uint32_t		nitems_in;
-	uint32_t		nitems_out;
-	uint32_t		extra_sz;
-	/* suspend/resume support */
-	uint32_t		suspend_count;
-	kern_gpuscan_suspend_warp suspend_context[1];	/* per warp */
-} kern_gpuscan;
-
-KERNEL_FUNCTION(void)
-kern_gpuscan_main_row(kern_session_info *session,
-					  kern_gpuscan *kgscan,
-					  kern_data_store *kds_src,
-					  kern_data_store *kds_dst);
-
-KERNEL_FUNCTION(void)
-kern_gpuscan_main_block(kern_session_info *session,
-						kern_gpuscan *kgscan,
-						kern_data_store *kds_src,
-						kern_data_store *kds_dst);
-KERNEL_FUNCTION(void)
-kern_gpuscan_main_arrow(kern_session_info *session,
-						kern_gpuscan *kgscan,
-						kern_data_store *kds_src,
-						kern_data_store *kds_dst);
-KERNEL_FUNCTION(void)
-kern_gpuscan_main_column(kern_session_info *session,
-						 kern_gpuscan *kgscan,
-						 kern_data_store *kds_src,
-						 kern_data_extra *kds_extra,
-						 kern_data_store *kds_dst);
-
-/*
- * Definitions related to GpuJoin
- */
-typedef struct
-{
-	kern_errorbuf	kerror;
-	uint32_t		grid_sz;
-	uint32_t		block_sz;
-	uint32_t		nitems_in;
-	uint32_t		nitems_out;
-	uint32_t		num_rels;
-	/* kern_warp_context array */
-	char			data[1]	__MAXALIGNED__;
-} kern_gpujoin;
-
 #define UNIT_TUPLES_PER_WARP		(2 * WARPSIZE)
 typedef struct
 {
-	uint32_t		__saved_row_count;
+	uint32_t		__saved_smx_row_count;
 	bool			scan_done;	/* true, if it already reached to the KDS tail */
 	int				depth;		/* current depth, if JOIN */
 	uint32_t		nrels;		/* number of inner relations, if JOIN */
@@ -217,7 +155,7 @@ typedef struct
 } kern_warp_context;
 
 INLINE_FUNCTION(uint32_t)
-KERN_WARP_CONTEXT_UNITSZ(int nrels = 0)
+KERN_WARP_CONTEXT_UNITSZ(int nrels)
 {
 	int		nitems = (2 * (nrels + 1)) +					/* read/write_pos */
 		((nrels+1) * (nrels+2) * (UNIT_TUPLES_PER_WARP/2));	/* combination buffer */
@@ -228,11 +166,78 @@ KERN_WARP_CONTEXT_UNITSZ(int nrels = 0)
 #define WARP_WRITE_POS(warp,depth)		((warp)->regs[2*(depth)+1])
 
 INLINE_FUNCTION(uint32_t *)
-WARP_COMB_BUF(kern_warp_context *warp, int depth=0)
+WARP_COMB_BUF(kern_warp_context *warp, int depth)
 {
 	uint32_t   *base = warp->regs + (2 * (warp->nrels + 1));
 
 	return base + warp->nrels * (warp->nrels + 1) * UNIT_TUPLES_PER_WARP;
 }
+
+/*
+ * definitions related to generic device executor routines
+ */
+EXTERN_FUNCTION(int)
+execGpuScanLoadSource(kern_context *kcxt,
+					  kern_warp_context *wp,
+					  kern_data_store *kds_src,
+					  kern_data_extra *kds_extra,
+					  kern_expression *kern_scan_quals,
+					  uint32_t *p_smx_row_count);
+
+EXTERN_FUNCTION(int)
+execGpuProjection(kern_context *kcxt,
+				  kern_expression *kexp_projs,
+				  kern_data_store *kds_dst,
+				  bool make_a_valid_tuple,
+				  kern_data_store *kds_outer,
+				  uint32_t outer_row_pos,
+				  int num_inners,
+				  kern_data_store **kds_inners,
+				  HeapTupleHeaderData **htup_inners);
+
+/*
+ * Definitions related to GpuScan
+ */
+typedef struct {
+	kern_errorbuf	kerror;
+	uint32_t		grid_sz;
+	uint32_t		block_sz;
+	uint32_t		nitems_in;
+	uint32_t		nitems_out;
+	uint32_t		extra_sz;
+	/* kern_warp_context array */
+	uint32_t		suspend_count;
+	char			data[1]	__MAXALIGNED__;
+} kern_gpuscan;
+
+KERNEL_FUNCTION(void)
+kern_gpuscan_main(kern_session_info *session,
+				  kern_gpuscan *kgscan,
+				  kern_data_store *kds_src,
+				  kern_data_extra *kds_extra,
+				  kern_data_store *kds_dst);
+
+/*
+ * Definitions related to GpuJoin
+ */
+typedef struct
+{
+	kern_errorbuf	kerror;
+	uint32_t		grid_sz;
+	uint32_t		block_sz;
+	uint32_t		nitems_in;
+	uint32_t		nitems_out;
+	uint32_t		num_rels;
+	/* kern_warp_context array */
+	char			data[1]	__MAXALIGNED__;
+} kern_gpujoin;
+
+KERNEL_FUNCTION(void)
+kern_gpujoin_main(kern_session_info *session,
+				  kern_gpujoin *kgjoin,
+				  kern_multirels *kmrels,
+				  kern_data_store *kds_src,
+				  kern_data_extra *kds_extra,
+				  kern_data_store *kds_dst);
 
 #endif	/* CUDA_COMMON_H */

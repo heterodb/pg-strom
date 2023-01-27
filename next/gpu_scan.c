@@ -991,12 +991,12 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	const char		*kds_src_pathname = NULL;
 	strom_io_vector *kds_src_iovec = NULL;
 	kern_data_store *kds_src = NULL;
+	kern_data_extra	*kds_extra = NULL;
 	kern_data_store *kds_dst = NULL;
 	kern_data_store *kds_dst_head = NULL;
 	kern_data_store **kds_dst_array = NULL;
 	int				kds_dst_nrooms = 0;
 	int				kds_dst_nitems = 0;
-	const char	   *kern_funcname;
 	CUfunction		f_kern_gpuscan;
 	const gpuMemChunk *chunk = NULL;
 	CUdeviceptr		m_kds_src = 0UL;
@@ -1024,13 +1024,10 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	}
 	else if (kds_src->format == KDS_FORMAT_ROW)
 	{
-		kern_funcname = "kern_gpuscan_main_row";
 		m_kds_src = (CUdeviceptr)kds_src;
 	}
 	else if (kds_src->format == KDS_FORMAT_BLOCK)
 	{
-		kern_funcname = "kern_gpuscan_main_block";
-
 		if (kds_src_pathname && kds_src_iovec)
 		{
 			chunk = gpuservLoadKdsBlock(gclient,
@@ -1049,8 +1046,6 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	}
 	else if (kds_src->format == KDS_FORMAT_ARROW)
 	{
-		kern_funcname = "kern_gpuscan_main_arrow";
-
 		if (kds_src_iovec->nr_chunks == 0)
 			m_kds_src = (CUdeviceptr)kds_src;
 		else
@@ -1078,7 +1073,7 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 
 	rc = cuModuleGetFunction(&f_kern_gpuscan,
 							 gclient->cuda_module,
-							 kern_funcname);
+							 "kern_gpuscan_main");
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientFatal(gclient, "failed on cuModuleGetFunction: %s",
@@ -1091,8 +1086,7 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 							 &shmem_sz,
 							 f_kern_gpuscan,
 							 0,
-							 sizeof(kern_gpuscan_suspend_warp),
-							 0);
+							 KERN_WARP_CONTEXT_UNITSZ(0));
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientFatal(gclient, "failed on gpuOptimalBlockSize: %s",
@@ -1108,7 +1102,7 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 //	block_sz = 32;
 //	grid_sz = 1;
 
-	sz = offsetof(kern_gpuscan, suspend_context) + shmem_sz * grid_sz;
+	sz = offsetof(kern_gpuscan, data) + shmem_sz * grid_sz;
 	rc = cuMemAllocManaged(&dptr, sz, CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -1171,7 +1165,8 @@ resume_kernel:
 	kern_args[0] = &gclient->session;
 	kern_args[1] = &kgscan;
 	kern_args[2] = &m_kds_src;
-	kern_args[3] = &kds_dst;
+	kern_args[3] = &kds_extra;
+	kern_args[4] = &kds_dst;
 
 	rc = cuLaunchKernel(f_kern_gpuscan,
 						grid_sz, 1, 1,

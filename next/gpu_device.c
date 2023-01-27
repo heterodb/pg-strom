@@ -471,16 +471,14 @@ gpuClientOpenSession(pgstromTaskState *pts,
  */
 static __thread size_t __dynamic_shmem_per_block;
 static __thread size_t __dynamic_shmem_per_warp;
-static __thread size_t __dynamic_shmem_per_thread;
 
 static size_t
 blocksize_to_shmemsize_helper(int blocksize)
 {
-	size_t	num_warps = (blocksize + WARPSIZE - 1) / WARPSIZE;
+	int		n_warps = (blocksize + WARPSIZE - 1) / WARPSIZE;
 
 	return MAXALIGN(__dynamic_shmem_per_block +
-					__dynamic_shmem_per_warp * num_warps +
-					__dynamic_shmem_per_thread * (size_t)blocksize);
+					__dynamic_shmem_per_warp * n_warps);
 }
 
 CUresult
@@ -489,13 +487,11 @@ gpuOptimalBlockSize(int *p_grid_sz,
 					unsigned int *p_shmem_sz,
 					CUfunction kern_function,
 					size_t dynamic_shmem_per_block,
-					size_t dynamic_shmem_per_warp,
-					size_t dynamic_shmem_per_thread)
+					size_t dynamic_shmem_per_warp)
 {
 	CUresult	rc;
 
-	if (dynamic_shmem_per_warp == 0 &&
-		dynamic_shmem_per_thread == 0)
+	if (dynamic_shmem_per_warp == 0)
 	{
 		rc = cuOccupancyMaxPotentialBlockSize(p_grid_sz,
 											  p_block_sz,
@@ -510,12 +506,11 @@ gpuOptimalBlockSize(int *p_grid_sz,
 	{
 		__dynamic_shmem_per_block  = dynamic_shmem_per_block;
 		__dynamic_shmem_per_warp   = dynamic_shmem_per_warp;
-		__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
 		rc = cuOccupancyMaxPotentialBlockSize(p_grid_sz,
 											  p_block_sz,
 											  kern_function,
 											  blocksize_to_shmemsize_helper,
-											  0,
+											  dynamic_shmem_per_block,
 											  0);
 		if (rc == CUDA_SUCCESS)
 			*p_shmem_sz = blocksize_to_shmemsize_helper(*p_block_sz);

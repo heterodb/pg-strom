@@ -12,13 +12,13 @@
 #include "cuda_common.h"
 
 /*
- * __execProjectionCommon
+ * __execGpuProjectionCommon
  */
 STATIC_FUNCTION(int)
-__execProjectionCommon(kern_context *kcxt,
-					   kern_expression *kexp,
-					   kern_data_store *kds_dst,
-					   uint32_t tupsz)
+__execGpuProjectionCommon(kern_context *kcxt,
+						  kern_expression *kexp,
+						  kern_data_store *kds_dst,
+						  uint32_t tupsz)
 {
 	size_t		offset;
 	uint32_t	mask;
@@ -87,110 +87,83 @@ __execProjectionCommon(kern_context *kcxt,
 	return total_sz;
 }
 
-/*
- * ExecProjectionOuterRow (if outer is KDS_FORMAT_ROW/BLOCK)
- */
 PUBLIC_FUNCTION(int)
-ExecProjectionOuterRow(kern_context *kcxt,
-					   kern_expression *kexp,	/* LoadVars + Projection */
-					   kern_data_store *kds_dst,
-					   bool make_a_valid_tuple,
-					   kern_data_store *kds_outer,
-					   HeapTupleHeaderData *htup_outer,
-					   int num_inners,
-					   kern_data_store **kds_inners,
-					   HeapTupleHeaderData **htup_inners)
+execGpuProjection(kern_context *kcxt,
+				  kern_expression *kexp_scan_proj,
+				  kern_data_store *kds_dst,
+				  bool make_a_valid_tuple,
+				  kern_data_store *kds_outer,
+				  uint32_t outer_row_pos,
+				  int num_inners,
+				  kern_data_store **kds_inners,
+				  HeapTupleHeaderData **htup_inners)
 {
+	HeapTupleHeaderData *htup_outer;
+	xpu_int4_t	__tupsz;
 	uint32_t	tupsz = 0;
 
-	/*
-	 * First, extract the variables from outer/inner tuples, and
-	 * calculate expressions, if any.
-	 */
 	assert(__activemask() == 0xffffffffU);
-	assert(kexp->opcode == FuncOpCode__LoadVars &&
-		   kexp->exptype == TypeOpCode__int4);
-	if (make_a_valid_tuple)
+	assert(kexp_scan_proj->opcode == FuncOpCode__LoadVars &&
+		   kexp_scan_proj->exptype == TypeOpCode__int4);
+	
+	switch (kds_outer->format)
 	{
-		xpu_int4_t	__tupsz;
+		case KDS_FORMAT_ROW:
+		case KDS_FORMAT_BLOCK:
+			if (!make_a_valid_tuple)
+				break;
+			htup_outer = (HeapTupleHeaderData *)
+				((char *)kds_outer + __kds_unpack(outer_row_pos));
+			if (ExecLoadVarsOuterRow(kcxt,
+									 kexp_scan_proj,
+									 (xpu_datum_t *)&__tupsz,
+									 kds_outer,
+									 htup_outer,
+									 num_inners,
+									 kds_inners,
+									 htup_inners))
+			{
+				if (!__tupsz.isnull && __tupsz.value > 0)
+					tupsz = MAXALIGN(__tupsz.value);
+				else
+					STROM_ELOG(kcxt, "wrong calculation of projection tuple size");
+			}
+			else
+			{
+				assert(kcxt->errcode != 0);
+			}
+			break;
 
-		if (!ExecLoadVarsOuterRow(kcxt,
-								  kexp,
-								  (xpu_datum_t *)&__tupsz,
-								  kds_outer,
-								  htup_outer,
-								  num_inners,
-								  kds_inners,
-								  htup_inners))
-		{
-			/* something wrong */
-			assert(kcxt->errcode != 0);
-		}
-		else if (__tupsz.isnull || __tupsz.value <= 0)
-		{
-			STROM_ELOG(kcxt, "wrong calculation of tuple length");
-		}
-		else
-		{
-			tupsz = MAXALIGN(__tupsz.value);
-		}
+		case KDS_FORMAT_ARROW:
+			if (!make_a_valid_tuple)
+				break;
+			if (ExecLoadVarsOuterArrow(kcxt,
+									   kexp_scan_proj,
+									   (xpu_datum_t *)&__tupsz,
+									   kds_outer,
+									   outer_row_pos,
+									   num_inners,
+									   kds_inners,
+									   htup_inners))
+			{
+				if (!__tupsz.isnull && __tupsz.value > 0)
+					tupsz = MAXALIGN(__tupsz.value);
+				else
+					STROM_ELOG(kcxt, "wrong calculation of projection tuple size");
+			}
+			else
+			{
+				assert(kcxt->errcode != 0);
+			}
+			break;
+
+		case KDS_FORMAT_COLUMN:
+		default:
+			STROM_ELOG(kcxt, "Bug? unsupported outer KDS format");
+			return -1;
 	}
 	/* error checks */
-	if (__ballot_sync(__activemask(), kcxt->errcode != 0) != 0)
+	if (__any_sync(__activemask(), kcxt->errcode))
 		return -1;
-	return __execProjectionCommon(kcxt, kexp, kds_dst, tupsz);
-}
-
-/*
- * ExecProjectionOuterArrow (if outer is KDS_FORMAT_ARROW)
- */
-PUBLIC_FUNCTION(int)
-ExecProjectionOuterArrow(kern_context *kcxt,
-						 kern_expression *kexp,	/* LoadVars + Projection */
-						 kern_data_store *kds_dst,
-						 bool make_a_valid_tuple,
-						 kern_data_store *kds_outer,
-						 uint32_t kds_index,
-						 int num_inners,
-						 kern_data_store **kds_inners,
-						 HeapTupleHeaderData **htup_inners)
-{
-	uint32_t	tupsz = 0;
-
-	/*
-	 * First, extract the variables from outer/inner tuples, and
-	 * calculate expressions, if any.
-	 */
-	assert(__activemask() == 0xffffffffU);
-	assert(kexp->opcode == FuncOpCode__LoadVars &&
-		   kexp->exptype == TypeOpCode__int4);
-	if (make_a_valid_tuple)
-	{
-		xpu_int4_t	__tupsz;
-
-		if (!ExecLoadVarsOuterArrow(kcxt,
-									kexp,
-									(xpu_datum_t *)&__tupsz,
-									kds_outer,
-									kds_index,
-									num_inners,
-									kds_inners,
-									htup_inners))
-		{
-			/* something wrong */
-			assert(kcxt->errcode != 0);
-		}
-		else if (__tupsz.isnull || __tupsz.value <= 0)
-		{
-			STROM_ELOG(kcxt, "wrong calculation of tuple length");
-		}
-		else
-		{
-			tupsz = MAXALIGN(__tupsz.value);
-		}
-	}
-	/* error checks */
-	if (__ballot_sync(__activemask(), kcxt->errcode != 0) != 0)
-		return -1;
-	return __execProjectionCommon(kcxt, kexp, kds_dst, tupsz);
+	return __execGpuProjectionCommon(kcxt, kexp_scan_proj, kds_dst, tupsz);
 }
