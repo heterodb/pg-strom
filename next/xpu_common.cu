@@ -382,8 +382,78 @@ pgfn_Projection(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_HashValue(XPU_PGFUNCTION_ARGS)
 {
-	STROM_ELOG(kcxt, "pgfn_HashValue is not implemented yet");
-	return false;
+	const kern_expression *karg;
+	xpu_int4_t	   *result = (xpu_int4_t *)__result;
+	xpu_datum_t	   *datum = (xpu_datum_t *)alloca(64);
+	int				i, datum_sz = 64;
+	uint32_t		hash = 0xffffffffU;
+
+	for (i=0, karg = KEXP_FIRST_ARG(kexp);
+		 i < kexp->nr_args;
+		 i++, karg = KEXP_NEXT_ARG(karg))
+	{
+		const xpu_datum_operators *expr_ops = karg->expr_ops;
+		uint32_t	__hash;
+
+		if (expr_ops->xpu_type_sizeof > datum_sz)
+		{
+			datum_sz = expr_ops->xpu_type_sizeof;
+			datum = (xpu_datum_t *)alloca(datum_sz);
+		}
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, datum))
+			return false;
+		if (!datum->isnull)
+		{
+			if (!expr_ops->xpu_datum_hash(kcxt, &__hash, datum))
+				return false;
+			hash ^= __hash;
+		}
+	}
+	hash ^= 0xffffffffU;
+
+	memset(result, 0, sizeof(xpu_int4_t));
+	result->value = hash;
+	
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+pgfn_JoinQuals(XPU_PGFUNCTION_ARGS)
+{
+	const kern_expression *karg;
+	xpu_int4_t *result = (xpu_int4_t *)__result;
+	int			i, status = 1;
+
+	for (i=0, karg = KEXP_FIRST_ARG(kexp);
+		 i < kexp->nr_args;
+		 i++, karg = KEXP_NEXT_ARG(karg))
+	{
+		xpu_bool_t	datum;
+
+		if (status < 0 && (karg->expflags & KEXP_FLAG__IS_PUSHED_DOWN) != 0)
+			continue;
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
+			return false;
+		if (datum.isnull || !datum.value)
+		{
+			/*
+			 * NOTE: Even if JoinQual returns 'unmatched' status, we need
+			 * to check whether the pure JOIN ... ON clause is satisfied,
+			 * or not, if OUTER JOIN case.
+			 * '-1' means JoinQual is not matched, because of the pushed-
+			 * down qualifiers from WHERE-clause, not JOIN ... ON.
+			 */
+			if ((karg->expflags & KEXP_FLAG__IS_PUSHED_DOWN) == 0)
+			{
+				status = 0;
+				break;
+			}
+			status = -1;
+		}
+	}
+	result->isnull = false;
+	result->value = status;
+	return true;
 }
 
 STATIC_FUNCTION(bool)
@@ -887,112 +957,154 @@ pgfn_LoadVars(XPU_PGFUNCTION_ARGS)
 
 PUBLIC_FUNCTION(bool)
 ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
-					 kern_data_store *kds_outer,
-					 HeapTupleHeaderData *htup_outer,
-					 int num_inners,
-					 kern_data_store **kds_inners,
-					 HeapTupleHeaderData **htup_inners)
+					 kern_data_store *kds,
+					 HeapTupleHeaderData *htup)
 {
 	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 	int			index;
-	int			depth;
 
 	assert(kexp->opcode == FuncOpCode__LoadVars &&
 		   kexp->nr_args == 1 &&
 		   kexp->exptype == karg->exptype);
+	index = kern_extract_heap_tuple(kcxt,
+									kds,
+									htup,
+									0,
+									kexp->u.load.kvars,
+									kexp->u.load.nloads);
+	while (index < kexp->u.load.nloads)
+   	{
+   		const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index++];
+	   	int		slot_id = kvars->var_slot_id;
+
+		assert(slot_id < kcxt->kvars_nslots);
+		kcxt->kvars_cmeta[slot_id] = NULL;
+		kcxt->kvars_addr[slot_id]  = NULL;
+		kcxt->kvars_len[slot_id]   = -1;
+	}
+
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))
+	{
+		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
+                       kern_data_store *kds_outer,
+                       uint32_t kds_index)
+{
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	int			index;
+
+	assert(kexp->opcode == FuncOpCode__LoadVars &&
+		   kexp->nr_args == 1 &&
+		   kexp->exptype == karg->exptype);
+	index = kern_extract_arrow_tuple(kcxt,
+									 kds_outer,
+									 kds_index,
+									 kexp->u.load.kvars,
+									 kexp->u.load.nloads);
+	/* fill-up other slots by NULL */
+	while (index < kexp->u.load.nloads)
+	{
+		const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index++];
+		int		slot_id = kvars->var_slot_id;
+
+		assert(slot_id < kcxt->kvars_nslots);
+		kcxt->kvars_cmeta[slot_id] = NULL;
+		kcxt->kvars_addr[slot_id]  = NULL;
+		kcxt->kvars_len[slot_id]   = -1;
+	}
+
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))
+	{
+		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		return false;
+	}
+	return true;
+}
+
+/*
+ * __ExecLoadVarsCommon
+ */
+INLINE_FUNCTION(bool)
+__ExecLoadVarsCommon(XPU_PGFUNCTION_ARGS,
+					 uint32_t *combuf,
+					 uint32_t comb_last_lv,
+					 kern_data_store *kds_outer,
+					 kern_data_extra *kds_extra,
+					 int num_inners,
+					 kern_data_store **kds_inners)
+{
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	int		index;
+	int		depth;
+
 	/*
 	 * Walking on the outer/inner tuples
 	 */
+	assert(kexp->opcode == FuncOpCode__LoadVars &&
+		   kexp->nr_args == 1 &&
+		   kexp->exptype == karg->exptype);
 	for (depth=0, index=0;
 		 depth <= num_inners && index < kexp->u.load.nloads;
 		 depth++)
 	{
 		kern_data_store *kds;
 		HeapTupleHeaderData *htup;
+		uint32_t	offset;
+		int			count;
 
-		if (depth == 0)
+		offset = (depth == num_inners ? comb_last_lv : combuf[depth]);
+		if (offset == 0)
+			goto skip;		/* all NULL for this relation */
+		if (depth > 0)
 		{
-			kds  = kds_outer;
-			htup = htup_outer;
-		}
-		else
-		{
-			kds  = kds_inners[depth - 1];
-			htup = htup_inners[depth - 1];
-		}
-
-		if (htup)
-		{
-			index += kern_extract_heap_tuple(kcxt,
-											 kds,
-											 htup,
-											 depth,
-											 kexp->u.load.kvars + index,
-											 kexp->u.load.nloads - index);
-		}
-		/* ensure NULL fields, if kvars are not advanced, or htup is NULL */
-		while (index < kexp->u.load.nloads)
-		{
-			const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index];
-			int			slot_id = kvars->var_slot_id;
-
-			assert(slot_id < kcxt->kvars_nslots);
-			if (kvars->var_depth != depth)
-				break;
-			kcxt->kvars_cmeta[slot_id] = NULL;
-			kcxt->kvars_addr[slot_id]  = NULL;
-			kcxt->kvars_len[slot_id]   = -1;
-			index++;
-		}
-	}
-	return EXEC_KERN_EXPRESSION(kcxt, karg, __result);
-}
-
-PUBLIC_FUNCTION(bool)
-ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
-                       kern_data_store *kds_outer,
-                       uint32_t kds_index,
-                       int num_inners,
-                       kern_data_store **kds_inners,
-                       HeapTupleHeaderData **htup_inners)
-{
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
-	int			index;
-	int			depth;
-	int			count;
-
-	assert(kexp->opcode == FuncOpCode__LoadVars &&
-		   kexp->nr_args == 1 &&
-		   kexp->exptype == karg->exptype);
-	/*
-	 * Walking on the outer/inner tuples
-	 */
-	for (depth=0, index=0;
-		 depth <= num_inners && index < kexp->u.load.nloads;
-		 depth++)
-	{
-		if (depth == 0)
-		{
-			count = kern_extract_arrow_tuple(kcxt,
-											 kds_outer,
-											 kds_index,
-											 kexp->u.load.kvars + index,
-											 kexp->u.load.nloads - index);
-		}
-		else
-		{
+			kds = kds_inners[depth - 1];
+			htup = (HeapTupleHeaderData *)((char *)kds + __kds_unpack(offset));
 			count = kern_extract_heap_tuple(kcxt,
-											kds_inners[depth - 1],
-											htup_inners[depth - 1],
+											kds,
+											htup,
 											depth,
 											kexp->u.load.kvars + index,
 											kexp->u.load.nloads - index);
 		}
-		if (count < 0)
+		else if (kds_outer->format == KDS_FORMAT_ARROW)
+		{
+			count = kern_extract_arrow_tuple(kcxt,
+											 kds_outer,
+											 offset,
+											 kexp->u.load.kvars + index,
+											 kexp->u.load.nloads - index);
+		}
+		else if (kds_outer->format == KDS_FORMAT_ROW ||
+				 kds_outer->format == KDS_FORMAT_BLOCK)
+		{
+			htup = (HeapTupleHeaderData *)((char *)kds_outer + __kds_unpack(offset));
+			count = kern_extract_heap_tuple(kcxt,
+											kds_outer,
+											htup,
+											depth,
+											kexp->u.load.kvars + index,
+											kexp->u.load.nloads - index);
+		}
+		else
+		{
+			STROM_ELOG(kcxt, "unknown outer kds format");
 			return false;
+		}
+		if (count < 0)
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			return false;
+		}
 		index += count;
 
 		/* fill up by NULL, if kvars are not assigned. */
+	skip:
 		while (index < kexp->u.load.nloads)
 		{
 			const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index];
@@ -1007,7 +1119,150 @@ ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
 			index++;
 		}
 	}
-	return EXEC_KERN_EXPRESSION(kcxt, karg, __result);
+	/* fill up by NULL, if not loaded (should not happen) */
+	while (index < kexp->u.load.nloads)
+	{
+		const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index++];
+		int		slot_id = kvars->var_slot_id;
+
+		kcxt->kvars_cmeta[slot_id] = NULL;
+		kcxt->kvars_addr[slot_id]  = NULL;
+		kcxt->kvars_len[slot_id]   = -1;
+	}
+	/* runs the argument expression */
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))
+	{
+		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		return false;
+	}
+	return true;
+}
+
+/* helper function of projection */
+EXTERN_FUNCTION(int)
+execGpuProjection(kern_context *kcxt,
+				  kern_expression *kexp,
+				  kern_data_store *kds_dst,
+				  uint32_t tupsz);
+
+/*
+ * ExecKernProjection
+ */
+PUBLIC_FUNCTION(int)
+ExecKernProjection(kern_context *kcxt,
+				   kern_expression *kexp,	/* LoadVars */
+				   kern_data_store *kds_dst,
+				   uint32_t *combuf,
+				   kern_data_store *kds_outer,
+				   kern_data_extra *kds_extra,
+				   int num_inners,
+				   kern_data_store **kds_inners)
+{
+	xpu_int4_t	datum;
+	uint32_t	tupsz = 0;
+
+	assert(kexp->opcode == FuncOpCode__LoadVars &&
+		   kexp->exptype == TypeOpCode__int4);
+	assert(num_inners >= 0);
+	if (combuf &&
+		__ExecLoadVarsCommon(kcxt,
+							 kexp,
+							 (xpu_datum_t *)&datum,
+							 combuf,
+							 combuf[num_inners],
+							 kds_outer,
+							 kds_extra,
+							 num_inners,
+							 kds_inners))
+	{
+		if (!datum.isnull && datum.value > 0)
+			tupsz = MAXALIGN(datum.value);
+		else
+			STROM_ELOG(kcxt, "unable estimate the projection tuple size");
+	}
+	/* error checks */
+	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+		return -1;
+#ifdef __CUDACC__
+	return execGpuProjection(kcxt, kexp, kds_dst, tupsz);
+#else
+	return execDpuProjection(kcxt, kexp, kds_dst, tupsz);
+#endif
+}
+
+/*
+ * ExecKernHashValue
+ */
+PUBLIC_FUNCTION(bool)
+ExecKernHashValue(kern_context *kcxt,
+				  kern_expression *kexp,	/* LoadVars */
+				  uint32_t *p_hash,			/* out */
+				  uint32_t *combuf,
+				  kern_data_store *kds_outer,
+				  kern_data_extra *kds_extra,
+				  int curr_depth,
+				  kern_data_store **kds_inners)
+{
+	xpu_int4_t	datum;
+
+	assert(kexp->exptype == TypeOpCode__int4);
+	assert(curr_depth > 0);
+	if (__ExecLoadVarsCommon(kcxt,
+							 kexp,
+							 (xpu_datum_t *)&datum,
+							 combuf,
+							 0,		/* HashValue don't use the last level */
+							 kds_outer,
+							 kds_extra,
+							 curr_depth,
+							 kds_inners))
+	{
+		if (!datum.isnull)
+		{
+			*p_hash = datum.value;
+			return true;
+		}
+		STROM_ELOG(kcxt, "unable to compute hash-value");
+	}
+	return false;
+}
+
+/*
+ * ExecKernJoinQuals
+ */
+PUBLIC_FUNCTION(bool)
+ExecKernJoinQuals(kern_context *kcxt,
+				  kern_expression *kexp,    /* LoadVars */
+				  int *p_status,
+				  uint32_t *combuf,
+				  uint32_t comb_last_lv,
+				  kern_data_store *kds_outer,
+				  kern_data_extra *kds_extra,
+				  int curr_depth,
+				  kern_data_store **kds_inners)
+{
+	xpu_int4_t	datum;
+
+	assert(kexp->exptype == TypeOpCode__int4);
+	assert(curr_depth > 0);
+	if (__ExecLoadVarsCommon(kcxt,
+							 kexp,
+							 (xpu_datum_t *)&datum,
+							 combuf,
+							 comb_last_lv,
+							 kds_outer,
+							 kds_extra,
+							 curr_depth,
+							 kds_inners))
+	{
+		if (!datum.isnull)
+		{
+			*p_status = datum.value;
+			return true;
+		}
+		STROM_ELOG(kcxt, "unable to evaluate JoinQuals");
+	}
+	return false;
 }
 
 /*
@@ -1047,6 +1302,7 @@ PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
 	{FuncOpCode__Projection,                pgfn_Projection},
 	{FuncOpCode__LoadVars,                  pgfn_LoadVars},
 	{FuncOpCode__HashValue,                 pgfn_HashValue},
+	{FuncOpCode__JoinQuals,                 pgfn_JoinQuals},
 	{FuncOpCode__Packed,                    pgfn_Packed},
 	{FuncOpCode__Invalid, NULL},
 };

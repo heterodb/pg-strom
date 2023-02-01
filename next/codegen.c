@@ -886,6 +886,7 @@ codegen_const_expression(codegen_context *context,
 		kexp = alloca(sz);
 		memset(kexp, 0, sz);
 		kexp->exptype = dtype->type_code;
+		kexp->expflags = context->kexp_flags;
 		kexp->opcode = FuncOpCode__ConstExpr;
 		kexp->u.c.const_type = con->consttype;
 		kexp->u.c.const_isnull = con->constisnull;
@@ -926,6 +927,7 @@ codegen_param_expression(codegen_context *context,
 		memset(&kexp, 0, sizeof(kexp));
 		kexp.opcode = FuncOpCode__ParamExpr;
 		kexp.exptype = dtype->type_code;
+		kexp.expflags = context->kexp_flags;
 		kexp.u.p.param_id = param->paramid;
 		pos = __appendBinaryStringInfo(buf, &kexp,
 									   SizeOfKernExprParam);
@@ -965,6 +967,7 @@ codegen_var_expression(codegen_context *context,
 							 &typalign);
 		memset(&kexp, 0, sizeof(kexp));
 		kexp.exptype = dtype->type_code;
+		kexp.expflags = context->kexp_flags;
 		kexp.opcode = FuncOpCode__VarExpr;
 		kexp.u.v.var_typlen = typlen;
 		kexp.u.v.var_typbyval = typbyval;
@@ -999,6 +1002,7 @@ __codegen_func_expression(codegen_context *context,
 
 	memset(&kexp, 0, sizeof(kexp));
 	kexp.exptype = dtype->type_code;
+	kexp.expflags = context->kexp_flags;
 	kexp.opcode = dfunc->func_code;
 	kexp.nr_args = list_length(func_args);
 	kexp.args_offset = SizeOfKernExpr(0);
@@ -1071,6 +1075,7 @@ codegen_bool_expression(codegen_context *context,
 			__Elog("BoolExpr has unknown bool operation (%d)", (int)b->boolop);
 	}
 	kexp.exptype = TypeOpCode__bool;
+	kexp.expflags = context->kexp_flags;
 	kexp.args_offset = SizeOfKernExpr(0);
 	if (buf)
 		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
@@ -1106,6 +1111,7 @@ codegen_nulltest_expression(codegen_context *context,
 			__Elog("NullTest has unknown NullTestType (%d)", (int)nt->nulltesttype);
 	}
 	kexp.exptype = TypeOpCode__bool;
+	kexp.expflags = context->kexp_flags;
 	kexp.nr_args = 1;
 	kexp.args_offset = SizeOfKernExpr(0);
 	if (buf)
@@ -1150,6 +1156,7 @@ codegen_booleantest_expression(codegen_context *context,
 				   (int)bt->booltesttype);
 	}
 	kexp.exptype = TypeOpCode__bool;
+	kexp.expflags = context->kexp_flags;
 	kexp.nr_args = 1;
 	kexp.args_offset = SizeOfKernExpr(0);
 	if (buf)
@@ -1314,6 +1321,7 @@ attach_varloads_xpucode(codegen_context *context,
 	sz = MAXALIGN(offsetof(kern_expression, u.load.kvars[nloads]));
 	kexp = alloca(sz);
 	kexp->exptype = karg->exptype;
+	kexp->expflags = context->kexp_flags;
 	kexp->opcode  = FuncOpCode__LoadVars;
 	kexp->nr_args = 1;
 
@@ -1401,6 +1409,7 @@ codegen_build_projection(codegen_context *context, List *tlist_dev)
 	int			i, sz;
 	bytea	   *result;
 
+	context->kvars_depth = context->kvars_resno = NIL;
 	initStringInfo(&arg);
 	foreach (lc1, tlist_dev)
 	{
@@ -1456,6 +1465,7 @@ codegen_build_projection(codegen_context *context, List *tlist_dev)
 	enlargeStringInfo(&buf, 0);
 	kexp = (kern_expression *)buf.data;
 	kexp->exptype = TypeOpCode__int4;
+	kexp->expflags = context->kexp_flags;
 	kexp->opcode  = FuncOpCode__Projection;
 	kexp->nr_args = nexprs;
 	kexp->args_offset = sz;
@@ -1490,25 +1500,80 @@ codegen_build_projection(codegen_context *context, List *tlist_dev)
 }
 
 /*
+ * __codegen_build_joinquals
+ */
+static bytea *
+__codegen_build_joinquals(codegen_context *context,
+						  List *join_quals,
+						  List *other_quals)
+{
+	StringInfoData	buf;
+	kern_expression	kexp;
+	ListCell	   *lc;
+	uint32_t		kexp_flags__saved;
+
+	if (join_quals == NIL && other_quals == NIL)
+		return NULL;
+
+	context->kvars_depth = context->kvars_resno = NIL;
+	initStringInfo(&buf);
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.exptype = TypeOpCode__int4;
+	kexp.expflags = context->kexp_flags;
+	kexp.opcode = FuncOpCode__JoinQuals;
+	kexp.nr_args = list_length(join_quals) + list_length(other_quals);
+	kexp.args_offset = SizeOfKernExpr(0);
+	__appendBinaryStringInfo(&buf, &kexp, SizeOfKernExpr(0));
+
+	foreach (lc, join_quals)
+	{
+		Expr   *qual = lfirst(lc);
+
+		if (exprType((Node *)qual) != BOOLOID)
+			elog(ERROR, "Bub? JOIN quals must be boolean");
+		if (codegen_expression_walker(context, &buf, qual) < 0)
+			return NULL;
+	}
+
+	kexp_flags__saved = context->kexp_flags;
+	context->kexp_flags |= KEXP_FLAG__IS_PUSHED_DOWN;
+	foreach (lc, other_quals)
+	{
+		Expr   *qual = lfirst(lc);
+
+		if (exprType((Node *)qual) != BOOLOID)
+			elog(ERROR, "Bub? JOIN quals must be boolean");
+		if (codegen_expression_walker(context, &buf, qual) < 0)
+			return NULL;
+	}
+	context->kexp_flags = kexp_flags__saved;
+	__appendKernExpMagicAndLength(&buf, 0);
+
+	return attach_varloads_xpucode(context, (kern_expression *)buf.data);
+}
+
+/*
  * codegen_build_packed_joinquals
  */
 bytea *
 codegen_build_packed_joinquals(codegen_context *context,
-							   List *stacked_join_quals)
+							   List *stacked_join_quals,
+							   List *stacked_other_quals)
 {
 	kern_expression *kexp;
 	StringInfoData buf;
 	int			i, nrels;
 	size_t		sz;
-	ListCell   *lc;
+	ListCell   *lc1, *lc2;
 	char	   *result = NULL;
 
 	nrels = list_length(stacked_join_quals);
 	sz = MAXALIGN(offsetof(kern_expression,
-						   u.join.subexp_offset[nrels]));
+						   u.pack.subexp_offset[nrels]));
 	kexp = alloca(sz);
 	memset(kexp, 0, sz);
-	kexp->exptype = TypeOpCode__bool;
+	kexp->exptype = TypeOpCode__int4;
+	kexp->expflags = context->kexp_flags;
 	kexp->opcode  = FuncOpCode__Packed;
 	kexp->nr_args = nrels;
 	kexp->args_offset = sz;
@@ -1516,23 +1581,26 @@ codegen_build_packed_joinquals(codegen_context *context,
 	initStringInfo(&buf);
 	buf.len = sz;
 	i = 0;
-	foreach (lc, stacked_join_quals)
+	forboth (lc1, stacked_join_quals,
+			 lc2, stacked_other_quals)
 	{
-		List   *join_quals = lfirst(lc);
+		List   *join_quals = lfirst(lc1);
+		List   *other_quals = lfirst(lc2);
 		bytea  *xpucode;
 
-		xpucode = codegen_build_qualifiers(context, join_quals);
+		xpucode = __codegen_build_joinquals(context,
+											join_quals,
+											other_quals);
 		if (!xpucode)
-			kexp->u.join.subexp_offset[i++] = 0;
+			kexp->u.pack.subexp_offset[i++] = 0;
 		else
 		{
 			kern_expression *karg = (kern_expression *)VARDATA(xpucode);
-
-			Assert(VARHDRSZ + karg->len == VARSIZE(xpucode));
-			if (karg->exptype != TypeOpCode__bool)
-				elog(ERROR, "Bug? join-qualifier should return bool");
-			kexp->u.join.subexp_offset[i++] =
+			
+			Assert(VARSIZE(xpucode) == karg->len + VARHDRSZ);
+			kexp->u.pack.subexp_offset[i++] =
 				__appendBinaryStringInfo(&buf, karg, karg->len);
+			pfree(xpucode);
 		}
 	}
 	Assert(nrels == i);
@@ -1546,7 +1614,6 @@ codegen_build_packed_joinquals(codegen_context *context,
 		SET_VARSIZE(result, VARHDRSZ + buf.len);
 	}
 	pfree(buf.data);
-
 	return (bytea *)result;
 }
 
@@ -1566,9 +1633,11 @@ __codegen_build_hash_value(codegen_context *context,
 	if (hash_keys == NIL)
 		return NULL;
 
+	context->kvars_depth = context->kvars_resno = NIL;
 	kexp = alloca(sz);
 	memset(kexp, 0, sz);
 	kexp->exptype = TypeOpCode__int4;
+	kexp->expflags = context->kexp_flags;
 	kexp->opcode  = FuncOpCode__HashValue;
 	kexp->nr_args = list_length(hash_keys);
 	kexp->args_offset = sz;
@@ -1603,10 +1672,11 @@ codegen_build_packed_hashkeys(codegen_context *context,
 
 	nrels = list_length(stacked_hash_keys);
 	sz = MAXALIGN(offsetof(kern_expression,
-						   u.join.subexp_offset[nrels]));
+						   u.pack.subexp_offset[nrels]));
 	kexp = alloca(sz);
 	memset(kexp, 0, sz);
 	kexp->exptype = TypeOpCode__int4;
+	kexp->expflags = context->kexp_flags;
 	kexp->opcode  = FuncOpCode__Packed;
 	kexp->nr_args = nrels;
 	kexp->args_offset = sz;
@@ -1619,7 +1689,7 @@ codegen_build_packed_hashkeys(codegen_context *context,
 		List   *hash_keys = lfirst(lc);
 
 		if (hash_keys == NIL)
-			kexp->u.join.subexp_offset[i++] = 0;
+			kexp->u.pack.subexp_offset[i++] = 0;
 		else
 		{
 			kern_expression *karg;
@@ -1628,7 +1698,7 @@ codegen_build_packed_hashkeys(codegen_context *context,
 			karg = __codegen_build_hash_value(context, hash_keys);
 			Assert(karg->exptype == TypeOpCode__int4 &&
 				   karg->opcode  == FuncOpCode__HashValue);
-			kexp->u.join.subexp_offset[i++]
+			kexp->u.pack.subexp_offset[i++]
 				= __appendBinaryStringInfo(&buf, karg, karg->len);
 		}
 	}
@@ -1935,6 +2005,21 @@ __xpucode_to_cstring(StringInfo buf,
 		case FuncOpCode__HashValue:
 			appendStringInfo(buf, "{HashValue");
 			break;
+		case FuncOpCode__JoinQuals:
+			appendStringInfo(buf, "{JoinQuals");
+			for (i=0, karg=KEXP_FIRST_ARG(kexp);
+				 i < kexp->nr_args;
+				 i++, karg=KEXP_NEXT_ARG(karg))
+			{
+				if (!__KEXP_IS_VALID(kexp,karg))
+					elog(ERROR, "XpuCode looks corrupted");
+				appendStringInfo(buf, "%s ", i > 0 ? "," : "");
+				if ((karg->expflags & KEXP_FLAG__IS_PUSHED_DOWN) != 0)
+					appendStringInfoString(buf, "[pushdown]");
+				__xpucode_to_cstring(buf, karg, css, es, dcontext);
+			}
+			appendStringInfo(buf, "}");
+			return;
 		case FuncOpCode__Packed:
 			appendStringInfo(buf, "{Packed");
 			for (i=0, karg=KEXP_FIRST_ARG(kexp);
@@ -1943,8 +2028,9 @@ __xpucode_to_cstring(StringInfo buf,
 			{
 				if (!__KEXP_IS_VALID(kexp,karg))
 					elog(ERROR, "XpuCode looks corrupted");
-				appendStringInfo(buf, "%s items[%u]=",
-								 i == 0 ? "" : ",", i);
+				if (i > 0)
+					appendStringInfoChar(buf, ',');
+				appendStringInfo(buf, " items[%u]=", i);
 				__xpucode_to_cstring(buf, karg, css, es, dcontext);
 			}
 			appendStringInfo(buf, "}");

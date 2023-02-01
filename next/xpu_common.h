@@ -1423,6 +1423,7 @@ typedef enum {
 	/* for projection */
 	FuncOpCode__Projection,
 	FuncOpCode__LoadVars,
+	FuncOpCode__JoinQuals,
 	FuncOpCode__HashValue,
 	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
 	FuncOpCode__BuiltInMax,
@@ -1449,11 +1450,15 @@ typedef struct
 } kern_projection_desc;
 
 #define KERN_EXPRESSION_MAGIC	(0x4b657870)	/* 'K' 'e' 'x' 'p' */
+
+#define KEXP_FLAG__IS_PUSHED_DOWN		0x0001U
+
 struct kern_expression
 {
 	uint32_t		len;			/* length of this expression */
 	TypeOpCode		exptype;
 	const xpu_datum_operators *expr_ops;
+	uint32_t		expflags;		/* mask of KEXP_FLAG__* above */
 	FuncOpCode		opcode;
 	xpu_function_t	fn_dptr;		/* to be set by xPU service */
 	uint32_t		nr_args;		/* number of arguments */
@@ -1485,7 +1490,7 @@ struct kern_expression
 		} proj;		/* Projection */
 		struct {
 			uint32_t	subexp_offset[1];	/* sub-expression per depth */
-		} join;		/* Join */
+		} pack;		/* Packed */
 	} u;
 };
 
@@ -1664,7 +1669,7 @@ SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int depth)
 	if (depth < 1 || depth > kexp->nr_args)
 		return NULL;
 	assert(kexp->opcode == FuncOpCode__Packed);
-	subexp_offset = kexp->u.join.subexp_offset[depth-1];
+	subexp_offset = kexp->u.pack.subexp_offset[depth-1];
 	if (subexp_offset == 0)
 		return NULL;
 	return (kern_expression *)((char *)kexp + subexp_offset);
@@ -1682,7 +1687,7 @@ SESSION_KEXP_HASH_VALUE(kern_session_info *session, int depth)
 	if (depth < 1 || depth > kexp->nr_args)
 		return NULL;
 	assert(kexp->opcode == FuncOpCode__Packed);
-	subexp_offset = kexp->u.join.subexp_offset[depth-1];
+	subexp_offset = kexp->u.pack.subexp_offset[depth-1];
 	if (subexp_offset == 0)
 		return NULL;
 	return (kern_expression *)((char *)kexp + subexp_offset);
@@ -1700,7 +1705,7 @@ SESSION_KEXP_GIST_QUALS(kern_session_info *session, int depth)
 	if (depth < 1 || depth > kexp->nr_args)
 		return NULL;
 	assert(kexp->opcode == FuncOpCode__Packed);
-	subexp_offset = kexp->u.join.subexp_offset[depth-1];
+	subexp_offset = kexp->u.pack.subexp_offset[depth-1];
 	if (subexp_offset == 0)
 		return NULL;
 	return (kern_expression *)((char *)kexp + subexp_offset);
@@ -1894,10 +1899,7 @@ kern_form_heaptuple(kern_context *kcxt,
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
 					 kern_data_store *kds_outer,
-					 HeapTupleHeaderData *htup,
-					 int num_inners,
-					 kern_data_store **kds_inners,
-					 HeapTupleHeaderData **htup_inners);
+					 HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterColumn(XPU_PGFUNCTION_ARGS,
 						kern_data_store *kds_outer,
@@ -1908,30 +1910,37 @@ ExecLoadVarsOuterColumn(XPU_PGFUNCTION_ARGS,
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
 					   kern_data_store *kds_outer,
-					   uint32_t kds_index,
-					   int num_inners,
-					   kern_data_store **kds_inners,
-					   HeapTupleHeaderData **htup_inners);
+					   uint32_t kds_index);
+
+EXTERN_FUNCTION(bool)
+ExecKernHashValue(kern_context *kcxt,
+				  kern_expression *kexp,
+				  uint32_t *p_hash,
+				  uint32_t *combuf,
+				  kern_data_store *kds_outer,
+				  kern_data_extra *kds_extra,
+				  int curr_depth,
+				  kern_data_store **kds_inners);
+EXTERN_FUNCTION(bool)
+ExecKernJoinQuals(kern_context *kcxt,
+				  kern_expression *kexp,
+				  int *p_status,
+				  uint32_t *combuf,
+				  uint32_t comb_last_lv,
+				  kern_data_store *kds_outer,
+				  kern_data_extra *kds_extra,
+				  int num_inners,
+				  kern_data_store **kds_inners);
+
 EXTERN_FUNCTION(int)
-ExecProjectionOuterRow(kern_context *kcxt,
-					   kern_expression *kexp,
-					   kern_data_store *kds_dst,
-					   bool make_a_valid_tuple,
-					   kern_data_store *kds_outer,
-					   HeapTupleHeaderData *htup_outer,
-					   int num_inners,
-					   kern_data_store **kds_inners,
-					   HeapTupleHeaderData **htup_inners);
-EXTERN_FUNCTION(int)
-ExecProjectionOuterArrow(kern_context *kcxt,
-						 kern_expression *kexp,
-						 kern_data_store *kds_dst,
-						 bool make_a_valid_tuple,
-						 kern_data_store *kds_outer,
-						 uint32_t kds_index,
-						 int num_inners,
-						 kern_data_store **kds_inners,
-						 HeapTupleHeaderData **htup_inners);
+ExecKernProjection(kern_context *kcxt,
+				   kern_expression *kexp,
+				   kern_data_store *kds_dst,
+				   uint32_t *combuf,
+				   kern_data_store *kds_outer,
+				   kern_data_extra *kds_extra,
+				   int num_inners,
+				   kern_data_store **kds_inners);
 
 /* ----------------------------------------------------------------
  *
@@ -1976,30 +1985,32 @@ typedef struct
 } kern_multirels;
 
 INLINE_FUNCTION(kern_data_store *)
-KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int depth)
-{
-	assert(depth > 0 && depth <= kmrels->num_rels);
-	return (kern_data_store *)
-		((char *)kmrels + kmrels->chunks[depth-1].kds_offset);
-}
-
-INLINE_FUNCTION(bool *)
-KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth)
+KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int dindex)
 {
 	uint64_t	offset;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
-	offset = kmrels->chunks[depth-1].ojmap_offset;
+	assert(dindex >= 0 && dindex < kmrels->num_rels);
+	offset = kmrels->chunks[dindex].kds_offset;
+	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+}
+
+INLINE_FUNCTION(bool *)
+KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int dindex)
+{
+	uint64_t	offset;
+
+	assert(dindex >= 0 && dindex < kmrels->num_rels);
+	offset = kmrels->chunks[dindex].ojmap_offset;
 	return (bool *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
 
 INLINE_FUNCTION(kern_data_store *)
-KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int depth)
+KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int dindex)
 {
 	uint64_t	offset;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
-	offset = kmrels->chunks[depth-1].gist_offset;
+	assert(dindex >= 0 && dindex < kmrels->num_rels);
+	offset = kmrels->chunks[dindex].gist_offset;
 	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
 

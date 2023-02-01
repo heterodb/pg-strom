@@ -30,10 +30,10 @@ GENERATED-HEADERS = $(GPU_DEVATTRS_H)
 # Source of NVIDIA GPU device code
 #
 include $(STROM_BUILD_ROOT)/next/Makefile.cuda
-__CUDA_OBJS = cuda_common cuda_gpuscan cuda_gpujoin \
-              xpu_common xpu_basetype xpu_numeric xpu_timelib xpu_textlib xpu_misclib
-__CUDA_HEADERS = cuda_common.h xpu_common.h xpu_opcodes.h \
-                 xpu_basetype.h xpu_numeric.h xpu_textlib.h xpu_timelib.h xpu_misclib.h
+__CUDA_OBJS = xpu_common cuda_gpuscan cuda_gpujoin \
+              xpu_basetype xpu_numeric xpu_timelib xpu_textlib xpu_misclib
+__CUDA_HEADERS = cuda_common.h xpu_common.h xpu_opcodes.h xpu_basetype.h \
+                 xpu_numeric.h xpu_textlib.h xpu_timelib.h xpu_misclib.h
 __CUDA_OPT_OBJS = $(addsuffix .fatbin,$(__CUDA_OBJS))
 __CUDA_DBG_OBJS = $(addsuffix .debug.fatbin,$(__CUDA_OBJS))
 CUDA_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/next/,$(__CUDA_HEADERS))

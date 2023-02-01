@@ -22,6 +22,7 @@ __gpuscan_load_source_row(kern_context *kcxt,
 						  kern_warp_context *wp,
 						  kern_data_store *kds_src,
 						  kern_expression *kern_scan_quals,
+						  uint32_t *combuf,
 						  uint32_t *p_smx_row_count)
 {
 	HeapTupleHeaderData *htup = NULL;
@@ -37,7 +38,7 @@ __gpuscan_load_source_row(kern_context *kcxt,
 	index = (get_num_groups() * count + get_group_id()) * warpSize;
 	if (index >= kds_src->nitems)
 	{
-		wp->scan_done = true;
+		wp->scan_done = 1;
 		__syncwarp(__activemask());
 		return 1;
 	}
@@ -56,20 +57,16 @@ __gpuscan_load_source_row(kern_context *kcxt,
 								   __kds_unpack(offset));
 		assert((char *)tupitem >= (char *)kds_src &&
 			   (char *)tupitem <  (char *)kds_src + kds_src->length);
-		if (kern_scan_quals == NULL ||
-			ExecLoadVarsOuterRow(kcxt,
-								 kern_scan_quals,
-								 (xpu_datum_t *)&retval,
-								 kds_src,
-								 &tupitem->htup,
-								 0, NULL, NULL))
+		if (kern_scan_quals == NULL)
+			htup = &tupitem->htup;
+		else if (ExecLoadVarsOuterRow(kcxt,
+									  kern_scan_quals,
+									  (xpu_datum_t *)&retval,
+									  kds_src,
+									  &tupitem->htup))
 		{
 			if (!retval.isnull && retval.value)
 				htup = &tupitem->htup;
-		}
-		else
-		{
-			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		}
 	}
 	/* error checks */
@@ -89,7 +86,7 @@ __gpuscan_load_source_row(kern_context *kcxt,
 	wr_pos += __popc(mask);
 	if (htup != NULL)
 	{
-		WARP_COMB_BUF(wp,0)[wr_pos % UNIT_TUPLES_PER_WARP]
+		combuf[wr_pos % UNIT_TUPLES_PER_WARP]
 			= __kds_packed((char *)htup - (char *)kds_src);
 	}
 	/* move to the next depth if more than 32 htuples were fetched */
@@ -104,6 +101,7 @@ __gpuscan_load_source_block(kern_context *kcxt,
 							kern_warp_context *wp,
 							kern_data_store *kds_src,
 							kern_expression *kern_scan_quals,
+							uint32_t *combuf,
 							uint32_t *p_smx_row_count)
 {
 	uint32_t	block_id = __shfl_sync(__activemask(), wp->block_id, 0);
@@ -126,20 +124,15 @@ __gpuscan_load_source_block(kern_context *kcxt,
 		{
 			off = wp->lp_items[rd_pos % UNIT_TUPLES_PER_WARP];
 			htup = (HeapTupleHeaderData *)((char *)kds_src + __kds_unpack(off));
-			if (kern_scan_quals == NULL ||
+			if (kern_scan_quals != NULL &&
 				ExecLoadVarsOuterRow(kcxt,
 									 kern_scan_quals,
 									 (xpu_datum_t *)&retval,
 									 kds_src,
-									 htup,
-									 0, NULL, NULL))
+									 htup))
 			{
 				if (retval.isnull || !retval.value)
 					htup = NULL;
-			}
-			else
-			{
-				assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 			}
 		}
 		/* error checks */
@@ -162,7 +155,7 @@ __gpuscan_load_source_block(kern_context *kcxt,
 		wr_pos += __popc(mask);
 		if (htup != NULL)
 		{
-			WARP_COMB_BUF(wp,0)[wr_pos % UNIT_TUPLES_PER_WARP]
+			combuf[wr_pos % UNIT_TUPLES_PER_WARP]
 				= __kds_packed((char *)htup - (char *)kds_src);
 		}
 		/* end-of-scan checks */
@@ -170,7 +163,7 @@ __gpuscan_load_source_block(kern_context *kcxt,
 			wp->lp_rd_pos >= wp->lp_wr_pos)	/* no more pending tuples  */
 		{
 			if (LaneId() == 0)
-				wp->scan_done = true;
+				wp->scan_done = 1;
 			return 1;
 		}
 		/* move to the next depth if more than 32 htuples were fetched */
@@ -257,6 +250,7 @@ __gpuscan_load_source_arrow(kern_context *kcxt,
 							kern_warp_context *wp,
 							kern_data_store *kds_src,
 							kern_expression *kern_scan_quals,
+							uint32_t *combuf,
 							uint32_t *p_smx_row_count)
 {
 	uint32_t	count;
@@ -272,7 +266,7 @@ __gpuscan_load_source_arrow(kern_context *kcxt,
 	index = (get_num_groups() * count + get_group_id()) * warpSize;
 	if (index >= kds_src->nitems)
 	{
-		wp->scan_done = true;
+		wp->scan_done = 1;
 		__syncwarp(__activemask());
 		return 1;
 	}
@@ -282,20 +276,16 @@ __gpuscan_load_source_arrow(kern_context *kcxt,
 	{
 		xpu_bool_t	retval;
 
-		if (kern_scan_quals == NULL ||
-			ExecLoadVarsOuterArrow(kcxt,
-								   kern_scan_quals,
-								   (xpu_datum_t *)&retval,
-								   kds_src,
-								   index,
-								   0, NULL, NULL))
+		if (!kern_scan_quals)
+			is_valid = true;
+		else if (ExecLoadVarsOuterArrow(kcxt,
+										kern_scan_quals,
+										(xpu_datum_t *)&retval,
+										kds_src,
+										index))
 		{
 			if (!retval.isnull && retval.value)
 				is_valid = true;
-		}
-		else
-		{
-			assert(kcxt->errcode != 0);
 		}
 	}
 	/* error checks */
@@ -314,7 +304,7 @@ __gpuscan_load_source_arrow(kern_context *kcxt,
 	mask &= ((1U << LaneId()) - 1);
 	wr_pos += __popc(mask);
 	if (is_valid)
-		WARP_COMB_BUF(wp,0)[wr_pos % UNIT_TUPLES_PER_WARP] = index;
+		combuf[wr_pos % UNIT_TUPLES_PER_WARP] = index;
 	/* move to the next depth if more than 32 htuples were fetched */
 	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + warpSize ? 1 : 0);
 }
@@ -328,6 +318,7 @@ __gpuscan_load_source_column(kern_context *kcxt,
 							 kern_data_store *kds_src,
 							 kern_data_extra *kds_extra,
 							 kern_expression *kern_scan_quals,
+							 uint32_t *combuf,
 							 uint32_t *p_smx_row_count)
 {
 	STROM_ELOG(kcxt, "KDS_FORMAT_COLUMN not implemented");
@@ -340,6 +331,7 @@ execGpuScanLoadSource(kern_context *kcxt,
 					  kern_data_store *kds_src,
 					  kern_data_extra *kds_extra,
 					  kern_expression *kern_scan_quals,
+					  uint32_t *combuf,		/* depth=0 */
 					  uint32_t *p_smx_row_count)
 {
 	/*
@@ -353,20 +345,29 @@ execGpuScanLoadSource(kern_context *kcxt,
 	switch (kds_src->format)
 	{
 		case KDS_FORMAT_ROW:
-			return __gpuscan_load_source_row(kcxt, wp, kds_src,
+			return __gpuscan_load_source_row(kcxt, wp,
+											 kds_src,
 											 kern_scan_quals,
+											 combuf,
 											 p_smx_row_count);
 		case KDS_FORMAT_BLOCK:
-			return __gpuscan_load_source_block(kcxt, wp, kds_src,
+			return __gpuscan_load_source_block(kcxt, wp,
+											   kds_src,
 											   kern_scan_quals,
+											   combuf,
 											   p_smx_row_count);
 		case KDS_FORMAT_ARROW:
-			return __gpuscan_load_source_arrow(kcxt, wp, kds_src,
+			return __gpuscan_load_source_arrow(kcxt, wp,
+											   kds_src,
 											   kern_scan_quals,
+											   combuf,
 											   p_smx_row_count);
 		case KDS_FORMAT_COLUMN:
-			return __gpuscan_load_source_column(kcxt, wp, kds_src, kds_extra,
+			return __gpuscan_load_source_column(kcxt, wp,
+												kds_src,
+												kds_extra,
 												kern_scan_quals,
+												combuf,
 												p_smx_row_count);
 		default:
 			STROM_ELOG(kcxt, "Bug? Unknown KDS format");
@@ -376,17 +377,84 @@ execGpuScanLoadSource(kern_context *kcxt,
 }
 
 /*
- * kern_gpuscan_main
+ * execGpuProjection
  */
-INLINE_FUNCTION(kern_warp_context *)
-GPUSCAN_LOCAL_WARP_CONTEXT(void)
+PUBLIC_FUNCTION(int)
+execGpuProjection(kern_context *kcxt,
+				  kern_expression *kexp,
+				  kern_data_store *kds_dst,
+				  uint32_t tupsz)
 {
-	uint32_t	unitsz = KERN_WARP_CONTEXT_UNITSZ(0);
+	size_t		offset;
+	uint32_t	mask;
+	uint32_t	nvalids;
+	uint32_t	row_id;
+	uint32_t	total_sz;
+	bool		try_suspend = false;
+	union {
+		struct {
+			uint32_t	nitems;
+			uint32_t	usage;
+		} i;
+		uint64_t		v64;
+	} oldval, curval, newval;
 
-	return (kern_warp_context *)
-		(__pgstrom_dynamic_shared_workmem + unitsz * WarpId());
+	/* allocation of the destination buffer */
+	assert(kds_dst->format == KDS_FORMAT_ROW);
+	mask = __ballot_sync(__activemask(), tupsz > 0);
+	nvalids = __popc(mask);
+	mask &= ((1U << LaneId()) - 1);
+	row_id  = __popc(mask);
+	assert(tupsz == 0 || row_id < nvalids);
+
+	offset = __reduce_stair_add_sync(tupsz, &total_sz);
+	if (LaneId() == 0)
+	{
+		curval.i.nitems = kds_dst->nitems;
+		curval.i.usage  = kds_dst->usage;
+		do {
+			newval = oldval = curval;
+			newval.i.nitems += nvalids;
+			newval.i.usage  += __kds_packed(total_sz);
+
+			if (KDS_HEAD_LENGTH(kds_dst) +
+				MAXALIGN(sizeof(uint32_t) * newval.i.nitems) +
+				__kds_unpack(newval.i.usage) > kds_dst->length)
+			{
+				try_suspend = true;
+				break;
+			}
+		} while ((curval.v64 = atomicCAS((unsigned long long *)&kds_dst->nitems,
+										 oldval.v64,
+										 newval.v64)) != oldval.v64);
+	}
+	oldval.v64 = __shfl_sync(__activemask(), oldval.v64, 0);
+	row_id += oldval.i.nitems;
+	/* data store no space? */
+	if (__any_sync(__activemask(), try_suspend))
+		return 0;
+
+	/* write out the tuple */
+	if (tupsz > 0)
+	{
+		kern_expression *kproj = KEXP_FIRST_ARG(kexp);
+		kern_tupitem *tupitem;
+
+		assert(KEXP_IS_VALID(kproj, int4) &&
+			   kproj->opcode == FuncOpCode__Projection);
+		offset += __kds_unpack(oldval.i.usage);
+		KDS_GET_ROWINDEX(kds_dst)[row_id] = __kds_packed(offset);
+		tupitem = (kern_tupitem *)
+			((char *)kds_dst + kds_dst->length - offset);
+		tupitem->rowid = row_id;
+		tupitem->t_len = kern_form_heaptuple(kcxt, kproj, kds_dst, &tupitem->htup);
+	}
+	return total_sz;
 }
 
+/*
+ * kern_gpuscan_main
+ */
 KERNEL_FUNCTION(void)
 kern_gpuscan_main(kern_session_info *session,
 				  kern_gpuscan *kgscan,
@@ -395,9 +463,11 @@ kern_gpuscan_main(kern_session_info *session,
 				  kern_data_store *kds_dst)
 {
 	kern_context	   *kcxt;
-	kern_warp_context  *wp = GPUSCAN_LOCAL_WARP_CONTEXT();
 	kern_expression	   *kexp_scan_quals = SESSION_KEXP_SCAN_QUALS(session);
 	kern_expression	   *kexp_scan_projs = SESSION_KEXP_SCAN_PROJS(session);
+	kern_warp_context  *wp;
+	uint32_t		   *combuf;
+	uint32_t			unitsz;
 	__shared__ uint32_t	smx_row_count;
 
 	assert(kexp_scan_quals->opcode == FuncOpCode__LoadVars &&
@@ -405,18 +475,20 @@ kern_gpuscan_main(kern_session_info *session,
 	INIT_KERNEL_CONTEXT(kcxt, session);
 
 	/* resume the previous execution context */
-	wp = GPUSCAN_LOCAL_WARP_CONTEXT();
+	unitsz = (KERN_WARP_CONTEXT_UNITSZ(0) +
+			  sizeof(uint32_t) * UNIT_TUPLES_PER_WARP);
+	wp = (kern_warp_context *)SHARED_WORKMEM(unitsz, get_local_id() / warpSize);
 	if (LaneId() == 0)
 	{
-		uint32_t	unitsz = KERN_WARP_CONTEXT_UNITSZ(0);
 		uint32_t	offset = unitsz * (get_global_id() / warpSize);
 
 		memcpy(wp, kgscan->data + offset, unitsz);
 	}
+	combuf = (uint32_t *)((char *)wp + KERN_WARP_CONTEXT_UNITSZ(0));
 	if (get_local_id() == 0)
-		smx_row_count = wp->__saved_smx_row_count;
+		smx_row_count = wp->smx_row_count;
 	__syncthreads();
-	
+
 	for (;;)
 	{
 		uint32_t	write_pos = WARP_WRITE_POS(wp,0);
@@ -428,24 +500,24 @@ kern_gpuscan_main(kern_session_info *session,
 		assert(write_pos >= read_pos);
 		if (wp->scan_done || write_pos >= read_pos + warpSize)
 		{
-			uint32_t	scan_pos = 0;
+			uint32_t   *scan_pos = NULL;
 			uint32_t	mask;
 			int			status;
 
 			kcxt_reset(kcxt);
 			read_pos += LaneId();
 			if (read_pos < write_pos)
-				scan_pos = WARP_COMB_BUF(wp,0)[read_pos % UNIT_TUPLES_PER_WARP];
+				scan_pos = combuf + (read_pos % UNIT_TUPLES_PER_WARP);
 			mask = __ballot_sync(__activemask(), read_pos < write_pos);
 			if (mask)
 			{
-				status = execGpuProjection(kcxt,
-										   kexp_scan_projs,
-										   kds_dst,
-										   read_pos < write_pos,
-										   kds_src,
-										   scan_pos,
-										   0, NULL, NULL);
+				status = ExecKernProjection(kcxt,
+											kexp_scan_projs,
+											kds_dst,
+											scan_pos,
+											kds_src,
+											kds_extra,
+											0, NULL);
 				if (status <= 0)
 				{
 					assert(__activemask() == 0xffffffffU);
@@ -465,6 +537,7 @@ kern_gpuscan_main(kern_session_info *session,
 								  kds_src,
 								  kds_extra,
 								  kexp_scan_quals,
+								  combuf,
 								  &smx_row_count) < 0)
 		{
 			assert(__activemask() == 0xffffffffU);
@@ -476,10 +549,9 @@ kern_gpuscan_main(kern_session_info *session,
 
 	if (LaneId() == 0)
 	{
-		uint32_t    unitsz = KERN_WARP_CONTEXT_UNITSZ(0);
 		uint32_t    offset = unitsz * (get_global_id() / warpSize);
 
-		wp->__saved_smx_row_count = smx_row_count;
+		wp->smx_row_count = smx_row_count;
 		memcpy(wp, kgscan->data + offset, unitsz);
     }
 	STROM_WRITEBACK_ERROR_STATUS(&kgscan->kerror, kcxt);

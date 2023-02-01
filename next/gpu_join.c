@@ -884,6 +884,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	CustomScan *cscan;
 	Bitmapset  *outer_refs = NULL;
 	List	   *join_quals_stacked = NIL;
+	List	   *other_quals_stacked = NIL;
 	List	   *hash_keys_stacked = NIL;
 	List	   *gist_quals_stacked = NIL;
 	List	   *misc_exprs = NIL;
@@ -943,7 +944,12 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		pull_varattnos((Node *)gj_inner->join_quals,
 					   gj_info->scan_relid,
 					   &outer_refs);
+		other_quals_stacked = lappend(other_quals_stacked, gj_inner->other_quals);
+		pull_varattnos((Node *)gj_inner->other_quals,
+					   gj_info->scan_relid,
+					   &outer_refs);
 		misc_exprs = list_concat(misc_exprs, gj_inner->join_quals);
+		misc_exprs = list_concat(misc_exprs, gj_inner->other_quals);
 
 		/* xpu code to evaluate gist qualifiers */
 		if (OidIsValid(gj_inner->gist_index_oid))
@@ -961,8 +967,11 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 										misc_exprs,
 										input_rels_tlist);
 	gj_info->kern_join_projs = codegen_build_projection(&context, tlist_dev);
+	
 	gj_info->kern_join_quals_packed
-		= codegen_build_packed_joinquals(&context, join_quals_stacked);
+		= codegen_build_packed_joinquals(&context,
+										 join_quals_stacked,
+										 other_quals_stacked);
 	gj_info->kern_hash_keys_packed
 		= codegen_build_packed_hashkeys(&context, hash_keys_stacked);
 	gj_info->kern_gist_quals_packed = NULL;
@@ -1939,7 +1948,7 @@ GpuJoinInnerPreload(GpuJoinState *gjs)
 			for (int i=0; i < leader->num_rels; i++)
 			{
 				GpuJoinInnerState *istate = &leader->inners[i];
-                kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(gjs->pts.h_kmrels, i+1);
+                kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(gjs->pts.h_kmrels, i);
                 uint32_t		base_nitems;
 				uint32_t		base_usage;
 

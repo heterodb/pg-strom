@@ -30,22 +30,32 @@
 
 /* Dynamic shared memory entrypoint */
 extern __shared__ char __pgstrom_dynamic_shared_workmem[] __MAXALIGNED__;
-#define SHARED_WORKMEM(TYPE)	((TYPE *) __pgstrom_dynamic_shared_workmem)
-
-INLINE_FUNCTION(uint32_t) WarpId(void)
-{
-	uint32_t	rv;
-
-	asm volatile("mov.u32 %0, %warpid;" : "=r"(rv) );
-
-	return rv;
-}
+#define SHARED_WORKMEM(UNITSZ,INDEX)						\
+	(__pgstrom_dynamic_shared_workmem + (UNITSZ)*(INDEX))
 
 INLINE_FUNCTION(uint32_t) LaneId(void)
 {
 	uint32_t	rv;
 
 	asm volatile("mov.u32 %0, %laneid;" : "=r"(rv) );
+
+	return rv;
+}
+
+INLINE_FUNCTION(uint32_t) DynamicShmemSize(void)
+{
+	uint32_t	rv;
+
+	asm volatile("mov.u32 %0, %dynamic_smem_size;" : "=r"(rv) );
+
+	return rv;
+}
+
+INLINE_FUNCTION(uint32_t) TotalShmemSize(void)
+{
+	uint32_t	rv;
+
+	asm volatile("mov.u32 %0, %total_smem_size;" : "=r"(rv) );
 
 	return rv;
 }
@@ -103,8 +113,8 @@ STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
 #define UNIT_TUPLES_PER_WARP		(2 * WARPSIZE)
 typedef struct
 {
-	uint32_t		__saved_smx_row_count;
-	bool			scan_done;	/* true, if it already reached to the KDS tail */
+	uint32_t		smx_row_count;	/* just for suspend/resume */
+	uint32_t		scan_done;	/* smallest depth that may produce more tuples */
 	int				depth;		/* current depth, if JOIN */
 	uint32_t		nrels;		/* number of inner relations, if JOIN */
 	/* only KDS_FORMAT_BLOCK */
@@ -113,65 +123,21 @@ typedef struct
 	uint32_t		lp_wr_pos;	/* utilization by simultaneous execution of */
 	uint32_t		lp_rd_pos;	/* the kern_scan_quals. */
 	uint32_t		lp_items[UNIT_TUPLES_PER_WARP];
+	/* read/write_pos of the combination buffer for each depth */
+	struct {
+		uint32_t	read;		/* read_pos of depth=X */
+		uint32_t	write;		/* write_pos of depth=X */
+	} pos[1];		/* variable length */
 	/*
-	 * read/write_pos and combination buffer with the layout below
-	 */
-	uint32_t		regs[1];
-	/*
-	 * kern_warp_context    -------------------------------------------------
-	 *                                                                     ^
-	 * |       :                                                           |
-	 * +--- values[] ------------+  ---                                    |
-	 * | read_pos  (depth=0)     |   ^                                     |
-	 * | write_pos (depth=0)     |   | current position to indicate the    |
-	 * +-------------------------+   | GpuJoin combination buffer for      |
-	 * | read_pos  (depth=1)     |   | each depth.                         |
-	 * | write_pos (depth=1)     |   |                                     |
-	 * +-------------------------+   | (2 * (NRELS+1)) items               |
-	 * :        :                :   |                                     |
-	 * :        :                :   |                                     |
-	 * +-------------------------+   |                                     |
-	 * | read_pos  (depth=NRELS) |   |                                     |
-	 * | write_pos (depth=NRELS) |   v                                     |
-	 * +-------------------------+  ---                                    |
-	 * |                         |   ^                                     |
-	 * | GpuJoin combination     |   | GpuJoin combination buffer for      |
-	 * | buffer (depth = 0)      |   | depth=0.                            |
-	 * |  (UNIT_TUPLES_PER_WARP) |   |                                     |
-	 * |  items for depth=0      |   | (1+depth) * UNIT_TUPLES_PER_WARP    |
-	 * |                         |   v   items for each depth              |
-	 * +-------------------------+  ---                                    |
-	 * :        :                :                                         |
-	 * :        :                :                        KERN_WARP_CONTEXT_UNITSZ()
-	 * +-------------------------+  ---                                    |
-	 * |                         |   ^                                     |
-	 * | GpuJoin combination     |   | GpuJoin combination buffer for      |
-	 * | buffer (depth = NRELS)  |   | depth=NRELS.                        |
-	 * |  (UNIT_TUPLES_PER_WARP  |   |                                     |
-	 * |   * NRELS) items        |   | NRELS * UNIT_TUPLES_PER_WARP        |
-	 * |                         |   v    items for the final depth        v
-	 * +-------------------------+  ---                                   ---
+	 * If length of the combination buffer is sufficient enough,
+	 * combuf shall be allocated here.
 	 */
 } kern_warp_context;
 
-INLINE_FUNCTION(uint32_t)
-KERN_WARP_CONTEXT_UNITSZ(int nrels)
-{
-	int		nitems = (2 * (nrels + 1)) +					/* read/write_pos */
-		((nrels+1) * (nrels+2) * (UNIT_TUPLES_PER_WARP/2));	/* combination buffer */
-	return MAXALIGN(offsetof(kern_warp_context, regs[nitems]));
-}
-
-#define WARP_READ_POS(warp,depth)		((warp)->regs[2*(depth)])
-#define WARP_WRITE_POS(warp,depth)		((warp)->regs[2*(depth)+1])
-
-INLINE_FUNCTION(uint32_t *)
-WARP_COMB_BUF(kern_warp_context *warp, int depth)
-{
-	uint32_t   *base = warp->regs + (2 * (warp->nrels + 1));
-
-	return base + warp->nrels * (warp->nrels + 1) * UNIT_TUPLES_PER_WARP;
-}
+#define KERN_WARP_CONTEXT_UNITSZ(nrels)						\
+	MAXALIGN(offsetof(kern_warp_context, pos[(nrels)+1]))
+#define WARP_READ_POS(warp,depth)		((warp)->pos[(depth)].read)
+#define WARP_WRITE_POS(warp,depth)		((warp)->pos[(depth)].write)
 
 /*
  * definitions related to generic device executor routines
@@ -182,18 +148,8 @@ execGpuScanLoadSource(kern_context *kcxt,
 					  kern_data_store *kds_src,
 					  kern_data_extra *kds_extra,
 					  kern_expression *kern_scan_quals,
+					  uint32_t *combuf,
 					  uint32_t *p_smx_row_count);
-
-EXTERN_FUNCTION(int)
-execGpuProjection(kern_context *kcxt,
-				  kern_expression *kexp_projs,
-				  kern_data_store *kds_dst,
-				  bool make_a_valid_tuple,
-				  kern_data_store *kds_outer,
-				  uint32_t outer_row_pos,
-				  int num_inners,
-				  kern_data_store **kds_inners,
-				  HeapTupleHeaderData **htup_inners);
 
 /*
  * Definitions related to GpuScan

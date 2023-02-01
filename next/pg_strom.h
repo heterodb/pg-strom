@@ -358,6 +358,7 @@ typedef struct
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
 	uint32_t	device_cost;
+	uint32_t	kexp_flags;
 	List	   *kvars_depth;
 	List	   *kvars_resno;
 	uint32_t	kvars_nslots;
@@ -374,7 +375,8 @@ extern bytea   *codegen_build_qualifiers(codegen_context *context,
 extern bytea   *codegen_build_projection(codegen_context *context,
 										 List *tlist_dev);
 extern bytea   *codegen_build_packed_joinquals(codegen_context *context,
-											   List *stacked_join_quals);
+											   List *stacked_join_quals,
+											   List *stacked_other_quals);
 extern bytea   *codegen_build_packed_hashkeys(codegen_context *context,
 											  List *stacked_hash_values);
 
