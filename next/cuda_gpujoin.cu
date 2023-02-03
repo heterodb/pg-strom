@@ -435,6 +435,66 @@ execGpuJoinHashJoin(kern_context *kcxt,
 }
 
 /*
+ * GPU Projection
+ */
+STATIC_FUNCTION(int)
+execGpuJoinProjection(kern_context *kcxt,
+					  kern_warp_context *wp,
+					  kern_gpujoin *kgjoin,
+					  kern_multirels *kmrels,
+					  kern_data_store *kds_src,
+					  kern_data_extra *kds_extra,
+					  kern_data_store *kds_dst,
+					  kern_data_store **kds_inners,
+					  int n_rels,
+					  uint32_t *rd_combuf)
+{
+	kern_expression *kexp = SESSION_KEXP_SCAN_PROJS(kcxt->session);
+	uint32_t	read_pos;
+	int			tupsz = 0;
+
+	read_pos = WARP_READ_POS(wp,n_rels) + LaneId();
+	if (read_pos < WARP_WRITE_POS(wp,n_rels))
+	{
+		rd_combuf += (read_pos % UNIT_TUPLES_PER_WARP) * (n_rels + 1);
+		tupsz = ExecKernProjection(kcxt,
+								   kexp,
+								   kds_dst,
+								   rd_combuf,
+								   kds_src,
+								   kds_extra,
+								   n_rels,
+								   kds_inners);
+	}
+	/* error checks */
+	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+		return -1;
+	/* write out to kds_dst */
+	if (execGpuProjection(kcxt, kexp, kds_dst, tupsz) == 0)
+	{
+		/* kds_dst is full, so try suspend/resume */
+		assert(__activemask() == 0xffffffffU);
+		return -2;
+	}
+	/* update the read position */
+	if (LaneId() == 0)
+		WARP_READ_POS(wp,n_rels) = Min(WARP_READ_POS(wp,n_rels) + warpSize,
+									   WARP_WRITE_POS(wp,n_rels));
+	__syncwarp();
+	if (wp->scan_done >= n_rels)
+	{
+		if (WARP_WRITE_POS(wp,n_rels) <= WARP_READ_POS(wp,n_rels))
+			return -1;	/* ok, end of GpuJoin */
+	}
+	else
+	{
+		if (WARP_WRITE_POS(wp,n_rels) < WARP_READ_POS(wp,n_rels) + warpSize)
+			return n_rels;	/* back to the previous depth */
+	}
+	return n_rels + 1;		/* elsewhere, try again? */
+}
+
+/*
  * kern_gpujoin_main
  */
 KERNEL_FUNCTION(void)
@@ -451,17 +511,17 @@ kern_gpujoin_main(kern_session_info *session,
 	uint32_t		  **combufs;
 	uint32_t		   *l_state;
 	bool			   *matched;
+	int					n_rels = kmrels->num_rels;
 	int					depth;
 	__shared__ uint32_t smx_row_count;
 
 	INIT_KERNEL_CONTEXT(kcxt, session);
-	kds_inners = (kern_data_store **)
-		alloca(sizeof(kern_data_store *) * kmrels->num_rels);
+	kds_inners = (kern_data_store **) alloca(sizeof(kern_data_store *) * n_rels);
 	for (int i=0; i < kmrels->num_rels; i++)
 		kds_inners[i] = KERN_MULTIRELS_INNER_KDS(kmrels, i);
-	combufs = (uint32_t **) alloca(sizeof(uint32_t *) * (kmrels->num_rels + 1));
-	l_state = (uint32_t *) alloca(sizeof(uint32_t) * kmrels->num_rels);
-	matched = (bool *) alloca(sizeof(bool) * kmrels->num_rels);
+	combufs = (uint32_t **) alloca(sizeof(uint32_t *) * (n_rels+1));
+	l_state = (uint32_t *) alloca(sizeof(uint32_t) * n_rels);
+	matched = (bool *) alloca(sizeof(bool) * n_rels);
 
 	/* sanity checks */
 	assert(kgjoin->num_rels == kmrels->num_rels);
@@ -469,10 +529,12 @@ kern_gpujoin_main(kern_session_info *session,
 	wp = gpujoin_resume_context(kgjoin, combufs, l_state, matched);
 	if (get_local_id() == 0)
 		smx_row_count = wp->smx_row_count;
+	depth = wp->depth;
 	__syncthreads();
 
 	/* main logic of GpuJoin */
-	while ((depth = __shfl_sync(__activemask(), wp->depth, 0)) >= 0)
+	assert(depth == __shfl_sync(__activemask(), depth, 0));
+	while (depth >= 0)
 	{
 		if (depth == 0)
 		{
@@ -483,16 +545,28 @@ kern_gpujoin_main(kern_session_info *session,
 										  SESSION_KEXP_SCAN_QUALS(session),
 										  combufs[0],
 										  &smx_row_count);
-			if (__any_sync(__activemask(), depth < 0) != 0)
-			{
-				assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
-				depth = -1;		/* bailout */
-			}
 		}
-		else if (depth > kmrels->num_rels)
+		else if (depth > n_rels)
 		{
 			/* PROJECTION */
-
+			assert(depth == n_rels + 1);
+			depth = execGpuJoinProjection(kcxt, wp,
+										   kgjoin,
+										   kmrels,
+										   kds_src,
+										   kds_extra,
+										   kds_dst,
+										   kds_inners,
+										   n_rels,
+										   combufs[n_rels]);
+			/* special case handling if suspend/resume is needed */
+			if (depth == -2)
+			{
+				if (LaneId() == 0)
+					atomicAdd(&kgjoin->suspend_count, 1);
+				depth = n_rels + 1;
+				break;
+			}
 		}
 		else if (kmrels->chunks[depth-1].is_nestloop)
 		{
@@ -531,10 +605,17 @@ kern_gpujoin_main(kern_session_info *session,
 										l_state[depth-1],	/* call by reference */
 										matched[depth-1]);	/* call by reference */
 		}
+		assert(__shfl_sync(__activemask(), depth, 0) == depth);
+		/* bailout if any error status */
+		if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+			break;
 	}
 	__syncthreads();
 	/* suspend the execution context */
 	if (LaneId() == 0)
+	{
+		wp->depth = depth;
 		wp->smx_row_count = smx_row_count;
+	}
 	gpujoin_suspend_context(kgjoin, wp, combufs, l_state, matched);
 }

@@ -1138,20 +1138,12 @@ __ExecLoadVarsCommon(XPU_PGFUNCTION_ARGS,
 	return true;
 }
 
-/* helper function of projection */
-EXTERN_FUNCTION(int)
-execGpuProjection(kern_context *kcxt,
-				  kern_expression *kexp,
-				  kern_data_store *kds_dst,
-				  uint32_t tupsz);
-
 /*
  * ExecKernProjection
  */
 PUBLIC_FUNCTION(int)
 ExecKernProjection(kern_context *kcxt,
 				   kern_expression *kexp,	/* LoadVars */
-				   kern_data_store *kds_dst,
 				   uint32_t *combuf,
 				   kern_data_store *kds_outer,
 				   kern_data_extra *kds_extra,
@@ -1164,8 +1156,7 @@ ExecKernProjection(kern_context *kcxt,
 	assert(kexp->opcode == FuncOpCode__LoadVars &&
 		   kexp->exptype == TypeOpCode__int4);
 	assert(num_inners >= 0);
-	if (combuf &&
-		__ExecLoadVarsCommon(kcxt,
+	if (__ExecLoadVarsCommon(kcxt,
 							 kexp,
 							 (xpu_datum_t *)&datum,
 							 combuf,
@@ -1180,14 +1171,8 @@ ExecKernProjection(kern_context *kcxt,
 		else
 			STROM_ELOG(kcxt, "unable estimate the projection tuple size");
 	}
-	/* error checks */
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
-		return -1;
-#ifdef __CUDACC__
-	return execGpuProjection(kcxt, kexp, kds_dst, tupsz);
-#else
-	return execDpuProjection(kcxt, kexp, kds_dst, tupsz);
-#endif
+	/* varref and exprs are loaded, so caller form them to HeapTuple */
+	return tupsz;
 }
 
 /*

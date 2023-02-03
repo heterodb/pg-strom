@@ -115,7 +115,7 @@ typedef struct
 {
 	uint32_t		smx_row_count;	/* just for suspend/resume */
 	uint32_t		scan_done;	/* smallest depth that may produce more tuples */
-	int				depth;		/* current depth, if JOIN */
+	int				depth;		/* 'depth' when suspended */
 	uint32_t		nrels;		/* number of inner relations, if JOIN */
 	/* only KDS_FORMAT_BLOCK */
 	uint32_t		block_id;	/* BLOCK format needs to keep htuples on the */
@@ -147,9 +147,15 @@ execGpuScanLoadSource(kern_context *kcxt,
 					  kern_warp_context *wp,
 					  kern_data_store *kds_src,
 					  kern_data_extra *kds_extra,
-					  kern_expression *kern_scan_quals,
+					  kern_expression *kexp_quals,
 					  uint32_t *combuf,
 					  uint32_t *p_smx_row_count);
+
+EXTERN_FUNCTION(int)
+execGpuProjection(kern_context *kcxt,
+				  kern_expression *kexp_projs,
+				  kern_data_store *kds_dst,
+				  uint32_t tupsz);
 
 /*
  * Definitions related to GpuScan
@@ -185,6 +191,7 @@ typedef struct
 	uint32_t		nitems_out;
 	uint32_t		num_rels;
 	/* kern_warp_context array */
+	uint32_t		suspend_count;
 	char			data[1]	__MAXALIGNED__;
 } kern_gpujoin;
 
