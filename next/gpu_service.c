@@ -1012,29 +1012,23 @@ __resolveDevicePointers(gpuModule *gmodule,
 						char *emsg, size_t emsg_sz)
 {
 	xpu_encode_info	*encode = SESSION_ENCODE(session);
-	kern_expression *kexp;
+	kern_expression *__kexp[10];
+	int			i, nitems = 0;
 
-	kexp = SESSION_KEXP_SCAN_LOAD_VARS(session);
-	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-		return false;
-	kexp = SESSION_KEXP_SCAN_QUALS(session);
-	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-		return false;
-	kexp = SESSION_KEXP_JOIN_LOAD_VARS(session, -1);
-	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-		return false;
-	kexp = SESSION_KEXP_JOIN_QUALS(session, -1);
-	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-		return false;
-	kexp = SESSION_KEXP_HASH_VALUE(session, -1);
-	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-		return false;
-	kexp = SESSION_KEXP_GIST_QUALS(session, -1);
-	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-		return false;
-	kexp = SESSION_KEXP_PROJECTION(session);
-	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-		return false;
+	__kexp[nitems++] = SESSION_KEXP_SCAN_LOAD_VARS(session);
+	__kexp[nitems++] = SESSION_KEXP_SCAN_QUALS(session);
+	__kexp[nitems++] = SESSION_KEXP_JOIN_LOAD_VARS(session, -1);
+	__kexp[nitems++] = SESSION_KEXP_JOIN_QUALS(session, -1);
+	__kexp[nitems++] = SESSION_KEXP_HASH_VALUE(session, -1);
+	__kexp[nitems++] = SESSION_KEXP_GIST_QUALS(session, -1);
+	__kexp[nitems++] = SESSION_KEXP_PROJECTION(session);
+	for (i=0; i < nitems; i++)
+	{
+		if (__kexp[i] && !__resolveDevicePointersWalker(gmodule,
+														__kexp[i],
+														emsg, emsg_sz))
+			return false;
+	}
 
 	if (encode)
 	{

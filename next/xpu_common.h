@@ -286,8 +286,6 @@ kcxt_alloc(kern_context *kcxt, size_t len)
 INLINE_FUNCTION(void)
 kcxt_reset(kern_context *kcxt)
 {
-	kcxt->kvars_addr = NULL;
-	kcxt->kvars_len = NULL;
 	kcxt->vlpos = kcxt->vlbuf;
 }
 

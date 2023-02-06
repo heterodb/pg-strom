@@ -374,7 +374,7 @@ ExplainDpuScan(CustomScanState *node,
 							"Scan Quals Code",
 							ds_info->kexp_scan_quals);
 	pgstrom_explain_xpucode(&dss->pts.css, es, dcontext,
-							"GPU Projection",
+							"DPU Projection Code",
 							ds_info->kexp_projection);
 
 	pgstromExplainTaskState(&dss->pts, es, dcontext);

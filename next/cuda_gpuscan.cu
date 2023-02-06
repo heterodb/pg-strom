@@ -439,7 +439,6 @@ execGpuProjection(kern_context *kcxt,
 		if (EXEC_KERN_EXPRESSION(kcxt, kexp_scan_projs, &retval) &&
 			!retval.isnull && retval.value > 0)
 			tupsz = retval.value;
-		assert(MAXALIGN(tupsz) == tupsz);
 	}
 	/* allocation of the destination buffer */
 	assert(kds_dst->format == KDS_FORMAT_ROW);
