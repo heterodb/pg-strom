@@ -1014,46 +1014,28 @@ __resolveDevicePointers(gpuModule *gmodule,
 	xpu_encode_info	*encode = SESSION_ENCODE(session);
 	kern_expression *kexp;
 
-	if (session->xpucode_scan_quals)
-	{
-		kexp = (kern_expression *)
-			((char *)session + session->xpucode_scan_quals);
-		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-			return false;
-	}
+	kexp = SESSION_KEXP_SCAN_LOAD_VARS(session);
+	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
+		return false;
+	kexp = SESSION_KEXP_SCAN_QUALS(session);
+	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
+		return false;
+	kexp = SESSION_KEXP_JOIN_LOAD_VARS(session, -1);
+	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
+		return false;
+	kexp = SESSION_KEXP_JOIN_QUALS(session, -1);
+	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
+		return false;
+	kexp = SESSION_KEXP_HASH_VALUE(session, -1);
+	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
+		return false;
+	kexp = SESSION_KEXP_GIST_QUALS(session, -1);
+	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
+		return false;
+	kexp = SESSION_KEXP_PROJECTION(session);
+	if (kexp && !__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
+		return false;
 
-	if (session->xpucode_scan_projs)
-	{
-		kexp = (kern_expression *)
-			((char *)session + session->xpucode_scan_projs);
-		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-			return false;
-	}
-
-	if (session->xpucode_join_quals_packed)
-	{
-		kexp = (kern_expression *)
-			((char *)session + session->xpucode_join_quals_packed);
-		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-			return false;
-	}
-
-	if (session->xpucode_hash_values_packed)
-	{
-		kexp = (kern_expression *)
-			((char *)session + session->xpucode_hash_values_packed);
-		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-			return false;
-	}
-
-	if (session->xpucode_gist_quals_packed)
-	{
-		kexp = (kern_expression *)
-			((char *)session + session->xpucode_gist_quals_packed);
-		if (!__resolveDevicePointersWalker(gmodule, kexp, emsg, emsg_sz))
-			return false;
-	}
-	
 	if (encode)
 	{
 		xpu_encode_info *catalog = gmodule->cuda_encode_catalog;

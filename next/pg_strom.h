@@ -372,13 +372,18 @@ extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 extern void		codegen_context_init(codegen_context *context, uint32_t devkind);
 extern bytea   *codegen_build_qualifiers(codegen_context *context,
 										 List *dev_quals);
-extern bytea   *codegen_build_projection(codegen_context *context,
-										 List *tlist_dev);
+extern bytea   *codegen_build_scan_loadvars(codegen_context *context);
+extern bytea   *codegen_build_scan_quals(codegen_context *context,
+										 List *dev_quals);
+extern bytea   *codegen_build_join_loadvars(codegen_context *context);
 extern bytea   *codegen_build_packed_joinquals(codegen_context *context,
 											   List *stacked_join_quals,
 											   List *stacked_other_quals);
 extern bytea   *codegen_build_packed_hashkeys(codegen_context *context,
 											  List *stacked_hash_values);
+extern bytea   *codegen_build_projection(codegen_context *context,
+										 List *tlist_dev);
+
 
 
 extern void		codegen_build_packed_xpucode(bytea **p_xpucode,
@@ -399,12 +404,11 @@ extern bool		pgstrom_gpu_expression(Expr *expr,
 extern bool		pgstrom_dpu_expression(Expr *expr,
 									   List *input_rels_tlist,
 									   int *p_devcost);
-
-extern void		pgstrom_explain_xpucode(StringInfo buf,
-										bytea *xpu_code,
-										const CustomScanState *css,
+extern void		pgstrom_explain_xpucode(const CustomScanState *css,
 										ExplainState *es,
-										List *dcontext);
+										List *dcontext,
+										const char *label,
+										bytea *xpucode);
 extern char	   *pgstrom_xpucode_to_string(bytea *xpu_code);
 extern void		pgstrom_init_codegen(void);
 
@@ -504,17 +508,19 @@ xpuConnectReceiveCommands(pgsocket sockfd,
 extern void		xpuClientCloseSession(XpuConnection *conn);
 extern void		xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd);
 extern void		xpuClientPutResponse(XpuCommand *xcmd);
-
 extern const XpuCommand *
-pgstromBuildSessionInfo(PlanState *ps,
+pgstromBuildSessionInfo(pgstromTaskState *pts,
 						List *used_params,
-						uint32_t num_cached_kvars,
 						uint32_t kcxt_extra_bufsz,
+						List *kvars_depth_list,
+						List *kvars_resno_list,
+						const bytea *xpucode_scan_load_vars,
 						const bytea *xpucode_scan_quals,
-						const bytea *xpucode_scan_projs,
+						const bytea *xpucode_join_load_vars_packed,
 						const bytea *xpucode_join_quals_packed,
 						const bytea *xpucode_hash_values_packed,
 						const bytea *xpucode_gist_quals_packed,
+						const bytea *xpucode_projection,
 						uint32_t join_inner_handle);
 extern void		pgstromExecInitTaskState(pgstromTaskState *pts,
 										 uint64_t devkind_mask,
@@ -534,13 +540,11 @@ extern void		pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr);
 extern void		pgstromSharedStateShutdownDSM(pgstromTaskState *pts);
 extern void		pgstromExplainScanState(pgstromTaskState *pts,
 										ExplainState *es,
+										List *dcontext,
+										List *tlist_dev,
 										List *dev_quals,
-										bytea *kern_dev_quals,
-										List *dev_projs,
-										bytea *kern_dev_projs,
 										double scan_tuples,
-										double scan_rows,
-										List *dcontext);
+										double scan_rows);
 extern void		pgstromExplainTaskState(pgstromTaskState *pts,
 										ExplainState *es,
 										List *dcontext);
@@ -656,19 +660,21 @@ typedef struct
 	const Bitmapset *gpu_cache_devs;  /* device for GpuCache, if any */
 	const Bitmapset *gpu_direct_devs; /* device for GPU-Direct SQL, if any */
 	const DpuStorageEntry *ds_entry;  /* suitable DPU device, if any */
-	bytea	   *kern_quals;		/* device qualifiers */
-	bytea	   *kern_projs;		/* device projection */
+	bytea	   *kexp_kvars_load;	/* kvars-load at depth-0 */
+	bytea	   *kexp_scan_quals;	/* device scan qualifiers */
+	bytea	   *kexp_projection;	/* device projection */
+	List	   *kvars_depth;		/* list of kvars depth */
+	List	   *kvars_resno;		/* list of kvars resno */
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
-	uint32_t	kvars_nslots;
-	const Bitmapset *outer_refs; /* referenced columns */
-	List	   *used_params;	/* Param list in use */
-	List	   *dev_quals;		/* Device qualifiers */
-	double		scan_tuples;	/* copy of baserel->tuples (input) */
-	double		scan_rows;		/* copy of baserel->rows (output) */
-	Oid			index_oid;		/* OID of BRIN-index, if any */
-	List	   *index_conds;	/* BRIN-index key conditions */
-	List	   *index_quals;	/* Original BRIN-index qualifier*/
+	const Bitmapset *outer_refs;	/* referenced columns */
+	List	   *used_params;		/* Param list in use */
+	List	   *dev_quals;			/* Device qualifiers */
+	double		scan_tuples;		/* copy of baserel->tuples (input) */
+	double		scan_rows;			/* copy of baserel->rows (output) */
+	Oid			index_oid;			/* OID of BRIN-index, if any */
+	List	   *index_conds;		/* BRIN-index key conditions */
+	List	   *index_quals;		/* Original BRIN-index qualifier*/
 } GpuScanInfo;
 extern void		form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info);
 extern void		deform_gpuscan_info(GpuScanInfo *gs_info, CustomScan *cscan);

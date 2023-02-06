@@ -459,7 +459,6 @@ execGpuJoinProjection(kern_context *kcxt,
 		rd_combuf += (read_pos % UNIT_TUPLES_PER_WARP) * (n_rels + 1);
 		tupsz = ExecKernProjection(kcxt,
 								   kexp,
-								   kds_dst,
 								   rd_combuf,
 								   kds_src,
 								   kds_extra,

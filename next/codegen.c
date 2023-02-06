@@ -1362,14 +1362,155 @@ attach_varloads_xpucode(codegen_context *context,
 }
 
 /*
- * codegen_build_qualifiers
+ * codegen_build_loadvars
+ */
+static int
+kern_preload_vars_item_comp(const void *__a, const void *__b)
+{
+	const kern_preload_vars_item *a = __a;
+	const kern_preload_vars_item *b = __b;
+
+	Assert(a->var_depth == b->var_depth);
+	if (a->var_resno < b->var_resno)
+		return -1;
+	if (a->var_resno > b->var_resno)
+		return 1;
+	return 0;
+}
+
+static kern_expression *
+__codegen_build_loadvars_one(codegen_context *context, int depth)
+{
+	kern_expression kexp;
+	StringInfoData buf;
+	int			slot_id = 0;
+	int			nloads = 0;
+	ListCell   *lc1, *lc2;
+
+	initStringInfo(&buf);
+	buf.len = offsetof(kern_expression, u.load.kvars);
+	forboth (lc1, context->kvars_depth,
+			 lc2, context->kvars_resno)
+	{
+		kern_preload_vars_item	vitem;
+
+		vitem.var_depth = lfirst_int(lc1);
+		vitem.var_resno = lfirst_int(lc2);
+		vitem.var_slot_id = slot_id++;
+		if (vitem.var_depth == depth)
+		{
+			appendBinaryStringInfo(&buf, (char *)&vitem,
+								   sizeof(kern_preload_vars_item));
+			nloads++;
+		}
+	}
+	if (nloads == 0)
+	{
+		pfree(buf.data);
+		return NULL;
+	}
+	qsort(buf.data + offsetof(kern_expression, u.load.kvars),
+		  nloads,
+		  sizeof(kern_preload_vars_item),
+		  kern_preload_vars_item_comp);
+
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.exptype  = TypeOpCode__int4;
+	kexp.expflags = context->kexp_flags;
+	kexp.opcode   = FuncOpCode__LoadVars;
+	kexp.args_offset = MAXALIGN(offsetof(kern_expression,
+										 u.load.kvars[nloads]));
+	kexp.u.load.depth = depth;
+	kexp.u.load.nloads = nloads;
+	memcpy(buf.data, &kexp, offsetof(kern_expression, u.load.kvars));
+	__appendKernExpMagicAndLength(&buf, 0);
+
+	return (kern_expression *)buf.data;
+}
+
+bytea *
+codegen_build_scan_loadvars(codegen_context *context)
+{
+	kern_expression *kexp = __codegen_build_loadvars_one(context, 0);
+	char	   *xpucode = NULL;
+
+	if (kexp)
+	{
+		xpucode = palloc(VARHDRSZ + kexp->len);
+		memcpy(xpucode + VARHDRSZ, kexp, kexp->len);
+		SET_VARSIZE(xpucode, VARHDRSZ + kexp->len);
+	}
+	return (bytea *)xpucode;
+}
+
+bytea *
+codegen_build_join_loadvars(codegen_context *context)
+{
+	kern_expression *kexp;
+	StringInfoData buf;
+	int			max_depth = -1;
+	int			num_valid = 0;
+	uint32_t	sz, pos;
+	char	   *xpucode = NULL;
+	ListCell   *lc;
+
+	foreach (lc, context->kvars_depth)
+	{
+		int		depth = lfirst_int(lc);
+
+		if (depth >= 0)
+			max_depth = depth;
+	}
+	if (max_depth < 1)
+		return NULL;
+	sz = MAXALIGN(offsetof(kern_expression,
+						   u.pack.subexp_offset[max_depth+1]));
+	kexp = alloca(sz);
+	memset(kexp, 0, sz);
+	kexp->exptype  = TypeOpCode__int4;
+	kexp->expflags = context->kexp_flags;
+	kexp->opcode   = FuncOpCode__Packed;
+	kexp->nr_args  = max_depth + 1;
+	kexp->args_offset = sz;
+
+	initStringInfo(&buf);
+	buf.len = sz;
+	for (int d=1; d <= max_depth; d++)
+	{
+		kern_expression *karg = __codegen_build_loadvars_one(context, d);
+
+		if (!karg)
+			continue;
+		pos = __appendBinaryStringInfo(&buf, karg, karg->len);
+		kexp->u.pack.subexp_offset[d-1] = pos;
+		pfree(karg);
+		num_valid++;
+	}
+	__appendKernExpMagicAndLength(&buf, 0);
+	if (num_valid == 0)
+	{
+		pfree(buf.data);
+		return NULL;
+	}
+	memcpy(buf.data, kexp, sz);
+
+	xpucode = palloc(VARHDRSZ + buf.len);
+	memcpy(xpucode + VARHDRSZ, buf.data, buf.len);
+	SET_VARSIZE(xpucode, VARHDRSZ + buf.len);
+	pfree(buf.data);
+
+	return (bytea *) xpucode;
+}
+
+/*
+ * codegen_build_scan_quals
  */
 bytea *
-codegen_build_qualifiers(codegen_context *context, List *dev_quals)
+codegen_build_scan_quals(codegen_context *context, List *dev_quals)
 {
 	StringInfoData buf;
 	Expr	   *expr;
-	bytea	   *result = NULL;
+	char	   *result = NULL;
 
 	Assert(context->elevel >= ERROR);
 	if (dev_quals == NIL)
@@ -1382,11 +1523,13 @@ codegen_build_qualifiers(codegen_context *context, List *dev_quals)
 	initStringInfo(&buf);
 	if (codegen_expression_walker(context, &buf, expr) == 0)
 	{
-		result = attach_varloads_xpucode(context, (kern_expression *)buf.data);
+		result = palloc(VARHDRSZ + buf.len);
+		memcpy(result + VARHDRSZ, buf.data, buf.len);
+		SET_VARSIZE(result, VARHDRSZ+buf.len);
 	}
 	pfree(buf.data);
 
-	return result;
+	return (bytea *)result;
 }
 
 /*
@@ -1407,9 +1550,8 @@ codegen_build_projection(codegen_context *context, List *tlist_dev)
 	int			nexprs;
 	int			nattrs;
 	int			i, sz;
-	bytea	   *result;
+	char	   *result;
 
-	context->kvars_depth = context->kvars_resno = NIL;
 	initStringInfo(&arg);
 	foreach (lc1, tlist_dev)
 	{
@@ -1446,7 +1588,7 @@ codegen_build_projection(codegen_context *context, List *tlist_dev)
 			__slot_id = list_length(context->kvars_depth);
 			Assert(__slot_id == list_length(context->kvars_resno));
 			context->kvars_depth = lappend_int(context->kvars_depth, -1);
-			context->kvars_resno = lappend_int(context->kvars_resno, -1);
+			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
 
 			proj_prep_slots = lappend_int(proj_prep_slots, __slot_id);
 			proj_prep_types = lappend_int(proj_prep_types, __type_code);
@@ -1493,10 +1635,12 @@ codegen_build_projection(codegen_context *context, List *tlist_dev)
 	__appendKernExpMagicAndLength(&buf, 0);
 	pfree(arg.data);
 
-	result = attach_varloads_xpucode(context, (kern_expression *)buf.data);
+	result = palloc(VARHDRSZ+buf.len);
+	memcpy(result+VARHDRSZ, buf.data, buf.len);
+	SET_VARSIZE(result, VARHDRSZ+buf.len);
 	pfree(buf.data);
 
-	return result;
+	return (bytea *)result;
 }
 
 /*
@@ -2103,14 +2247,23 @@ __xpucode_to_cstring(StringInfo buf,
 }
 
 void
-pgstrom_explain_xpucode(StringInfo buf,
-						bytea *xpu_code,
-						const CustomScanState *css,
+pgstrom_explain_xpucode(const CustomScanState *css,
 						ExplainState *es,
-						List *dcontext)
+						List *dcontext,
+						const char *label,
+						bytea *xpucode)
 {
-	__xpucode_to_cstring(buf, (const kern_expression *)VARDATA(xpu_code),
-						 css, es, dcontext);
+	StringInfoData	buf;
+
+	if (es->verbose)
+	{
+		const kern_expression *kexp = (const kern_expression *)VARDATA(xpucode);
+
+		initStringInfo(&buf);
+		__xpucode_to_cstring(&buf, kexp, css, es, dcontext);
+		ExplainPropertyText(label, buf.data, es);
+		pfree(buf.data);
+	}
 }
 
 char *

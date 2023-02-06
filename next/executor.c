@@ -290,6 +290,116 @@ xpuclientCleanupConnections(ResourceReleasePhase phase,
  *
  * ----------------------------------------------------------------
  */
+static void
+__update_slot_cmeta_format(kern_data_store *kds,
+						   int index,
+						   char kds_format)
+{
+	kern_colmeta   *cmeta = &kds->colmeta[index];
+
+	cmeta->kds_format = kds_format;
+	if (cmeta->num_subattrs > 0)
+	{
+		for (int j=0; j < cmeta->num_subattrs; j++)
+			__update_slot_cmeta_format(kds, cmeta->idx_subattrs + j, kds_format);
+	}
+}
+
+static uint32_t
+__build_kvars_slot_cmeta(StringInfo buf,
+						 pgstromTaskState *pts,
+						 List *kvars_depth_list,
+						 List *kvars_resno_list)
+{
+	TupleDesc	tupdesc;
+	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
+	List	   *tlist_dev = cscan->custom_scan_tlist;
+	ListCell   *lc1, *lc2;
+	int			n_slots = list_length(kvars_depth_list);
+	int			__slot_id = 0;
+	kern_data_store *kds;
+
+	Assert(list_length(cscan->custom_plans) == list_length(css->custom_ps));
+
+	tupdesc = CreateTemplateTupleDesc(n_slots);
+	forboth (lc1, kvars_depth_list,
+			 lc2, kvars_resno_list)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, __slot_id);
+		int		__depth = lfirst_int(lc1);
+		int		__resno = lfirst_int(lc2);
+
+		memset(attr, 0, sizeof(FormData_pg_attribute));
+		if (__depth == 0)
+		{
+			/* outer variables */
+			TupleDesc	r_desc = RelationGetDescr(pts->css.ss.ss_currentRelation);
+
+			if (__resno < 1 || __resno > r_desc->natts)
+				elog(ERROR, "Bug? kvar referenced out of range: resno=%d", __resno);
+			memcpy(attr, TupleDescAttr(r_desc, __resno-1),
+				   sizeof(FormData_pg_attribute));
+			attr->attnum = __slot_id + 1;
+		}
+		else
+		{
+			TargetEntry *tle;
+
+			if (__depth > 0)
+			{
+				/* inner variables */
+				Plan   *i_plan;
+				List   *i_tlist;
+
+				if (__depth > list_length(cscan->custom_plans))
+					elog(ERROR, "Bug? kvar referenced out of range");
+				i_plan = list_nth(cscan->custom_plans, __depth-1);
+				i_tlist = i_plan->targetlist;
+				if (__resno < 1 || __resno > list_length(i_tlist))
+					elog(ERROR, "Bug? kvar referenced out of range");
+				tle = list_nth(i_tlist, __resno-1);
+			}
+			else
+			{
+				if (__resno < 1 || __resno > list_length(tlist_dev))
+					elog(ERROR, "Bug? kvar referenced out of range");
+				tle = list_nth(tlist_dev, __resno-1);
+			}
+			attr->atttypid = exprType((Node *)tle->expr);
+			attr->atttypmod = exprTypmod((Node *)tle->expr);
+			attr->attcollation = exprCollation((Node *)tle->expr);
+			attr->attnum = __slot_id + 1;
+			get_typlenbyvalalign(attr->atttypid,
+								 &attr->attlen,
+								 &attr->attbyval,
+								 &attr->attalign);
+			if (tle->resname)
+				strncpy(NameStr(attr->attname), tle->resname, NAMEDATALEN);
+		}
+		__slot_id++;
+	}
+	Assert(tupdesc->natts == __slot);
+	kds = alloca(estimate_kern_data_store(tupdesc));
+	setup_kern_data_store(kds, tupdesc, -1, KDS_FORMAT_ROW);
+	pfree(tupdesc);
+
+	/* update kds_format if ARROW or COLUMN */
+	if (pts->arrow_state || pts->gcache_state)
+	{
+		char	format = (pts->arrow_state ? KDS_FORMAT_ARROW : KDS_FORMAT_COLUMN);
+		int		cindex = 0;
+
+		foreach (lc1, kvars_depth_list)
+		{
+			if (lfirst_int(lc1) == 0)
+				__update_slot_cmeta_format(kds, cindex, format);
+			cindex++;
+		}
+	}
+	return __appendBinaryStringInfo(buf, (char *)kds->colmeta,
+									sizeof(kern_colmeta) * kds->nr_colmeta);
+}
+
 static uint32_t
 __build_session_xact_state(StringInfo buf)
 {
@@ -332,18 +442,21 @@ __build_session_encode(StringInfo buf)
 }
 
 const XpuCommand *
-pgstromBuildSessionInfo(PlanState *ps,
+pgstromBuildSessionInfo(pgstromTaskState *pts,
 						List *used_params,
 						uint32_t kcxt_extra_bufsz,
-						uint32_t kcxt_kvars_nslots,
+						List *kvars_depth_list,
+						List *kvars_resno_list,
+						const bytea *xpucode_scan_load_vars,
 						const bytea *xpucode_scan_quals,
-						const bytea *xpucode_scan_projs,
+						const bytea *xpucode_join_load_vars_packed,
 						const bytea *xpucode_join_quals_packed,
 						const bytea *xpucode_hash_values_packed,
 						const bytea *xpucode_gist_quals_packed,
+						const bytea *xpucode_projection,
 						uint32_t join_inner_handle)
 {
-	ExprContext	   *econtext = ps->ps_ExprContext;
+	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
 	uint32_t		nparams = (param_info ? param_info->numParams : 0);
 	uint32_t		session_sz = offsetof(kern_session_info, poffset[nparams]);
@@ -356,46 +469,56 @@ pgstromBuildSessionInfo(PlanState *ps,
 	session = alloca(session_sz);
 	memset(session, 0, session_sz);
 
-	/* put XPU code */
+	if (xpucode_scan_load_vars)
+	{
+		session->xpucode_scan_load_vars =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode_scan_load_vars),
+									 VARSIZE(xpucode_scan_load_vars) - VARHDRSZ);
+	}
 	if (xpucode_scan_quals)
 	{
 		session->xpucode_scan_quals =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA_ANY(xpucode_scan_quals),
-									 VARSIZE_ANY_EXHDR(xpucode_scan_quals));
+									 VARDATA(xpucode_scan_quals),
+									 VARSIZE(xpucode_scan_quals) - VARHDRSZ);
 	}
-	if (xpucode_scan_projs)
+	if (xpucode_join_load_vars_packed)
 	{
-		session->xpucode_scan_projs =
+		session->xpucode_join_load_vars_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA_ANY(xpucode_scan_projs),
-									 VARSIZE_ANY_EXHDR(xpucode_scan_projs));
+									 VARDATA(xpucode_join_load_vars_packed),
+									 VARSIZE(xpucode_join_load_vars_packed) - VARHDRSZ);
 	}
-
 	if (xpucode_join_quals_packed)
 	{
 		session->xpucode_join_quals_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA_ANY(xpucode_join_quals_packed),
-									 VARSIZE_ANY_EXHDR(xpucode_join_quals_packed));
+									 VARDATA(xpucode_join_quals_packed),
+									 VARSIZE(xpucode_join_quals_packed) - VARHDRSZ);
 	}
-
 	if (xpucode_hash_values_packed)
 	{
 		session->xpucode_hash_values_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA_ANY(xpucode_hash_values_packed),
-									 VARSIZE_ANY_EXHDR(xpucode_hash_values_packed));
+									 VARDATA(xpucode_hash_values_packed),
+									 VARSIZE(xpucode_hash_values_packed) - VARHDRSZ);
 	}
-
 	if (xpucode_gist_quals_packed)
 	{
 		session->xpucode_gist_quals_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA_ANY(xpucode_gist_quals_packed),
-									 VARSIZE_ANY_EXHDR(xpucode_gist_quals_packed));
+									 VARDATA(xpucode_gist_quals_packed),
+									 VARSIZE(xpucode_gist_quals_packed) - VARHDRSZ);
 	}
-	
+	if (xpucode_projection)
+	{
+		session->xpucode_projection =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode_projection),
+									 VARSIZE(xpucode_projection) - VARHDRSZ);
+	}
+
 	/* put executor parameters */
 	if (param_info)
 	{
@@ -492,10 +615,14 @@ pgstromBuildSessionInfo(PlanState *ps,
 		}
 	}
 	/* other database session information */
+	Assert(list_length(kvars_depth_list) == list_length(kvars_resno_list));
 	session->query_plan_id = ((uint64_t)MyProcPid << 32) |
 		(uint64_t)pg_atomic_fetch_add_u32(pgstrom_query_plan_id, 1);
 	session->kcxt_extra_bufsz = kcxt_extra_bufsz;
-	session->kcxt_kvars_nslots = kcxt_kvars_nslots;
+	session->kvars_slot_width = list_length(kvars_depth_list);
+	session->kvars_slot_cmeta = __build_kvars_slot_cmeta(&buf, pts,
+														 kvars_depth_list,
+														 kvars_resno_list);
 	session->xpucode_use_debug_code = pgstrom_use_debug_code;
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	session->session_xact_state = __build_session_xact_state(&buf);
@@ -1139,37 +1266,18 @@ pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
 void
 pgstromExplainScanState(pgstromTaskState *pts,
 						ExplainState *es,
-						List *dev_quals,
-						bytea *kern_dev_quals,
+						List *dcontext,
 						List *tlist_dev,
-						bytea *kern_dev_projs,
+						List *dev_quals,
 						double scan_tuples,
-						double scan_rows,
-						List *dcontext)
+						double scan_rows)
 {
-	const char *devkind = DevKindLabel(pts->devkind, false);
 	StringInfoData buf;
 	char		label[100];
 	char	   *str;
 	ListCell   *lc;
 
 	initStringInfo(&buf);
-	if (dev_quals != NIL)
-	{
-		Expr   *expr;
-
-		snprintf(label, sizeof(label), "%s Quals", devkind);
-		if (list_length(dev_quals) > 1)
-			expr = make_andclause(dev_quals);
-		else
-			expr = linitial(dev_quals);
-		str = deparse_expression((Node *)expr, dcontext, false, true);
-		appendStringInfo(&buf, "%s [rows: %.0f -> %.0f]",
-						 str, scan_tuples, scan_rows);
-		ExplainPropertyText(label, buf.data, es);
-	}
-
-	resetStringInfo(&buf);
 	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
@@ -1181,29 +1289,23 @@ pgstromExplainScanState(pgstromTaskState *pts,
 			appendStringInfoString(&buf, ", ");
 		appendStringInfoString(&buf, str);
 	}
-	snprintf(label, sizeof(label), "%s Projection", devkind);
+	snprintf(label, sizeof(label), "%s Projection",
+			 DevKindLabel(pts->devkind, false));
 	ExplainPropertyText(label, buf.data, es);
 
-	if (es->verbose && kern_dev_quals)
+	resetStringInfo(&buf);
+	if (dev_quals != NIL)
 	{
-		resetStringInfo(&buf);
-		pgstrom_explain_xpucode(&buf,
-								kern_dev_quals,
-								&pts->css,
-								es, dcontext);
-		snprintf(label, sizeof(label), "%s Quals Code", devkind);
-		ExplainPropertyText(label, buf.data, es);
-	}
+		Expr   *expr;
 
-	if (es->verbose && kern_dev_projs)
-	{
-		resetStringInfo(&buf);
-		pgstrom_explain_xpucode(&buf,
-								kern_dev_projs,
-								&pts->css,
-								es, dcontext);
-		snprintf(label, sizeof(label), "%s Projection Code", devkind);
-		ExplainPropertyText(label, buf.data, es);
+		if (list_length(dev_quals) > 1)
+			expr = make_andclause(dev_quals);
+		else
+			expr = linitial(dev_quals);
+		str = deparse_expression((Node *)expr, dcontext, false, true);
+		appendStringInfo(&buf, "%s [rows: %.0f -> %.0f]",
+						 str, scan_tuples, scan_rows);
+		ExplainPropertyText("Scan Quals", buf.data, es);
 	}
 }
 

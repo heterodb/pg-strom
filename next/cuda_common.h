@@ -129,13 +129,41 @@ typedef struct
 		uint32_t	write;		/* write_pos of depth=X */
 	} pos[1];		/* variable length */
 	/*
-	 * If length of the combination buffer is sufficient enough,
-	 * combuf shall be allocated here.
+	 * <----- __KERN_WARP_CONTEXT_UNITSZ_BASE ----->
+	 * Above fields are always kept in the device shared memory.
+	 *
+	 * +----------------------------+-------
+	 * | kvars_addr[nslots] (pos-0) |
+	 * | kvars_addr[nslots] (pos-1) |
+	 * |      :                     |
+	 * | kvars_addr[nslots] (pos-63)|
+	 * +----------------------------+ depth=0
+	 * | kvars_len[nslots] (pos-0)  |
+	 * | kvars_len[nslots] (pos-1)  |
+	 * |      :                     |
+	 * | kvars_len[nslots] (pos-63) |
+	 * +----------------------------+-------
+	 * :      :                     :
+	 * +----------------------------+-------
+	 * | kvars_addr[nslots] (pos-0) |
+	 * | kvars_addr[nslots] (pos-1) |
+	 * |      :                     |
+	 * | kvars_addr[nslots] (pos-63)|
+	 * +----------------------------+ depth=0
+	 * | kvars_len[nslots] (pos-0)  |
+	 * | kvars_len[nslots] (pos-1)  |
+	 * |      :                     |
+	 * | kvars_len[nslots] (pos-63) |
+	 * +----------------------------+-------
 	 */
 } kern_warp_context;
 
-#define KERN_WARP_CONTEXT_UNITSZ(nrels)						\
+#define __KERN_WARP_CONTEXT_UNITSZ_BASE(nrels)				\
 	MAXALIGN(offsetof(kern_warp_context, pos[(nrels)+1]))
+#define KERN_WARP_CONTEXT_UNITSZ(nrels, nslots)							\
+	(__KERN_WARP_CONTEXT_UNITSZ_BASE(nrels) +							\
+	 MAXALIGN(sizeof(void *) * (nslots) * GPU_KVARS_UNITSZ +			\
+			  sizeof(int)    * (nslots) * GPU_KVARS_UNITSZ) * ((nrels)+1))
 #define WARP_READ_POS(warp,depth)		((warp)->pos[(depth)].read)
 #define WARP_WRITE_POS(warp,depth)		((warp)->pos[(depth)].write)
 
@@ -168,9 +196,16 @@ typedef struct {
 	uint32_t		nitems_out;
 	uint32_t		extra_sz;
 	/* kern_warp_context array */
+	bool			wp_context_on_shmem;
+	bool			resume_context;
 	uint32_t		suspend_count;
 	char			data[1]	__MAXALIGNED__;
 } kern_gpuscan;
+
+#define KERN_GPUSCAN_WARP_CONTEXT(kgscan,nslots)						\
+	((kern_warp_context *)												\
+	 ((char *)(kgscan) + offsetof(kern_gpuscan, data) +					\
+	  KERN_WARP_CONTEXT_UNITSZ(0,nslots) * (get_global_id()/warpSize)))
 
 KERNEL_FUNCTION(void)
 kern_gpuscan_main(kern_session_info *session,

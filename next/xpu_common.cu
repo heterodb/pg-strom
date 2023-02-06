@@ -43,7 +43,7 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 
 	if (slot_id < kcxt->kvars_nslots)
 	{
-		const kern_colmeta *cmeta = kcxt->kvars_cmeta[slot_id];
+		const kern_colmeta *cmeta = &kcxt->kvars_cmeta[slot_id];
 		void	   *addr = kcxt->kvars_addr[slot_id];
 		int			len  = kcxt->kvars_len[slot_id];
 
@@ -260,7 +260,7 @@ kern_form_heaptuple(kern_context *kcxt,
 	{
 		const kern_projection_desc *desc
 			= &kproj->u.proj.desc[kproj->u.proj.nexprs + j];
-		const kern_colmeta *cmeta = kcxt->kvars_cmeta[desc->slot_id];
+		const kern_colmeta *cmeta = &kcxt->kvars_cmeta[desc->slot_id];
 		void   *addr = kcxt->kvars_addr[desc->slot_id];
 		int		len  = kcxt->kvars_len[desc->slot_id];
 		char   *buffer = NULL;
@@ -363,7 +363,6 @@ pgfn_Projection(XPU_PGFUNCTION_ARGS)
 			return false;
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, datum))
 			return false;
-		kcxt->kvars_cmeta[desc->slot_id] = NULL;
 		kcxt->kvars_addr[desc->slot_id]  = (!datum->isnull ? datum : NULL);
 		kcxt->kvars_len[desc->slot_id]   = -1;
 	}
@@ -375,7 +374,7 @@ pgfn_Projection(XPU_PGFUNCTION_ARGS)
 		return false;
 
 	result->isnull = false;
-	result->value  = offsetof(kern_tupitem, htup) + sz;
+	result->value  = MAXALIGN(offsetof(kern_tupitem, htup) + sz);
 	return true;
 }
 
@@ -508,7 +507,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 			offset  = htup->t_hoff + cmeta->attcacheoff;
 
 			assert(slot_id < kcxt->kvars_nslots);
-			kcxt->kvars_cmeta[slot_id] = cmeta;
+			assert(cmeta->atttypid == kcxt->kvars_cmeta[slot_id].atttypid);
 			kcxt->kvars_addr[slot_id]  = (char *)htup + offset;
 			kcxt->kvars_len[slot_id]   = -1;
 			kvars++;
@@ -549,7 +548,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 				slot_id = kvars->var_slot_id;
 
 				assert(slot_id < kcxt->kvars_nslots);
-				kcxt->kvars_cmeta[slot_id] = cmeta;
+				assert(cmeta->atttypid == kcxt->kvars_cmeta[slot_id].atttypid);
 				kcxt->kvars_addr[slot_id]  = addr;
 				kcxt->kvars_len[slot_id]   = -1;
 				kvars++;
@@ -926,7 +925,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 				STROM_ELOG(kcxt, "Unsupported Apache Arrow type");
 				return -1;
 		}
-		kcxt->kvars_cmeta[slot_id] = cmeta;
+		assert(kcxt->kvars_cmeta[slot_id].atttypid == cmeta->atttypid);
 		kcxt->kvars_addr[slot_id]  = addr;
 		kcxt->kvars_len[slot_id]   = len;
 		kvars++;
@@ -939,7 +938,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 		int		slot_id = kvars->var_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		kcxt->kvars_cmeta[slot_id] = cmeta;
+		assert(kcxt->kvars_cmeta[slot_id].atttypid == cmeta->atttypid);
 		kcxt->kvars_addr[slot_id]  = NULL;
 		kcxt->kvars_len[slot_id]   = -1;
 		kvars++;
@@ -956,72 +955,93 @@ pgfn_LoadVars(XPU_PGFUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(bool)
-ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
+ExecLoadVarsOuterRow(kern_context *kcxt,
+					 kern_expression *kexp_load_vars,
+					 kern_expression *kexp_scan_quals,
 					 kern_data_store *kds,
 					 HeapTupleHeaderData *htup)
 {
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 	int			index;
 
-	assert(kexp->opcode == FuncOpCode__LoadVars &&
-		   kexp->nr_args == 1 &&
-		   kexp->exptype == karg->exptype);
+	assert(kexp_load_vars->opcode == FuncOpCode__LoadVars &&
+		   kexp_load_vars->exptype == TypeOpCode__int4 &&
+		   kexp_load_vars->nr_args == 0);
+	assert(kexp_scan_quals->exptype == TypeOpCode__bool);
 	index = kern_extract_heap_tuple(kcxt,
 									kds,
 									htup,
 									0,
-									kexp->u.load.kvars,
-									kexp->u.load.nloads);
-	while (index < kexp->u.load.nloads)
-   	{
-   		const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index++];
-	   	int		slot_id = kvars->var_slot_id;
+									kexp_load_vars->u.load.kvars,
+									kexp_load_vars->u.load.nloads);
+	while (index < kexp_load_vars->u.load.nloads)
+	{
+		kern_preload_vars_item *kvars = &kexp_load_vars->u.load.kvars[index++];
+		int		slot_id = kvars->var_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		kcxt->kvars_cmeta[slot_id] = NULL;
 		kcxt->kvars_addr[slot_id]  = NULL;
 		kcxt->kvars_len[slot_id]   = -1;
 	}
-
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))
+	/* check scan quals if given */
+	if (kexp_scan_quals)
 	{
-		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		xpu_bool_t	retval;
+
+		if (EXEC_KERN_EXPRESSION(kcxt, kexp_scan_quals, &retval))
+		{
+			if (!retval.isnull && retval.value)
+				return true;
+		}
+		else
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		}
 		return false;
 	}
 	return true;
 }
 
 PUBLIC_FUNCTION(bool)
-ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
-                       kern_data_store *kds_outer,
-                       uint32_t kds_index)
+ExecLoadVarsOuterArrow(kern_context *kcxt,
+					   kern_expression *kexp_load_vars,
+					   kern_expression *kexp_scan_quals,
+					   kern_data_store *kds,
+					   uint32_t kds_index)
 {
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 	int			index;
 
-	assert(kexp->opcode == FuncOpCode__LoadVars &&
-		   kexp->nr_args == 1 &&
-		   kexp->exptype == karg->exptype);
+	assert(kexp_load_vars->opcode == FuncOpCode__LoadVars &&
+		   kexp_load_vars->exptype == TypeOpCode__int4 &&
+		   kexp_load_vars->nr_args == 0);
 	index = kern_extract_arrow_tuple(kcxt,
-									 kds_outer,
+									 kds,
 									 kds_index,
-									 kexp->u.load.kvars,
-									 kexp->u.load.nloads);
+									 kexp_load_vars->u.load.kvars,
+									 kexp_load_vars->u.load.nloads);
 	/* fill-up other slots by NULL */
-	while (index < kexp->u.load.nloads)
+	while (index < kexp_load_vars->u.load.nloads)
 	{
-		const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index++];
+		kern_preload_vars_item *kvars = &kexp_load_vars->u.load.kvars[index++];
 		int		slot_id = kvars->var_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		kcxt->kvars_cmeta[slot_id] = NULL;
 		kcxt->kvars_addr[slot_id]  = NULL;
 		kcxt->kvars_len[slot_id]   = -1;
 	}
-
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))
+	/* check scan quals if given */
+	if (kexp_scan_quals)
 	{
-		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		xpu_bool_t	retval;
+
+		if (EXEC_KERN_EXPRESSION(kcxt, kexp_scan_quals, &retval))
+		{
+			if (!retval.isnull && retval.value)
+				return true;
+		}
+		else
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		}
 		return false;
 	}
 	return true;
@@ -1113,7 +1133,6 @@ __ExecLoadVarsCommon(XPU_PGFUNCTION_ARGS,
 			assert(slot_id < kcxt->kvars_nslots);
 			if (kvars->var_depth != depth)
 				break;
-			kcxt->kvars_cmeta[slot_id] = NULL;
 			kcxt->kvars_addr[slot_id]  = NULL;
 			kcxt->kvars_len[slot_id]   = -1;
 			index++;
@@ -1125,7 +1144,6 @@ __ExecLoadVarsCommon(XPU_PGFUNCTION_ARGS,
 		const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index++];
 		int		slot_id = kvars->var_slot_id;
 
-		kcxt->kvars_cmeta[slot_id] = NULL;
 		kcxt->kvars_addr[slot_id]  = NULL;
 		kcxt->kvars_len[slot_id]   = -1;
 	}
@@ -1138,12 +1156,15 @@ __ExecLoadVarsCommon(XPU_PGFUNCTION_ARGS,
 	return true;
 }
 
+#if 0
 /*
  * ExecKernProjection
  */
 PUBLIC_FUNCTION(int)
 ExecKernProjection(kern_context *kcxt,
-				   kern_expression *kexp,	/* LoadVars */
+				   kern_expression *kexp_scan_proj,
+				   
+				   ,	/* LoadVars */
 				   uint32_t *combuf,
 				   kern_data_store *kds_outer,
 				   kern_data_extra *kds_extra,
@@ -1174,7 +1195,7 @@ ExecKernProjection(kern_context *kcxt,
 	/* varref and exprs are loaded, so caller form them to HeapTuple */
 	return tupsz;
 }
-
+#endif
 /*
  * ExecKernHashValue
  */

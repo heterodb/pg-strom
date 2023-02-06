@@ -1341,6 +1341,7 @@ ExplainGpuJoin(CustomScanState *node,
 										node->ss.ps.plan,
 										ancestors);
 	pgstromExplainScanState(&gjs->pts, es,
+							NULL,
 							gj_info->scan_quals,
 							gj_info->kern_scan_quals,
 							cscan->custom_scan_tlist,

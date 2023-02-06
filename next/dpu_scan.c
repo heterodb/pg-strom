@@ -267,15 +267,18 @@ ExecDpuScan(CustomScanState *node)
 	{
 		const XpuCommand *session;
 
-		session = pgstromBuildSessionInfo(&dss->pts.css.ss.ps,
+		session = pgstromBuildSessionInfo(&dss->pts,
 										  dss->ds_info.used_params,
 										  dss->ds_info.extra_bufsz,
-										  dss->ds_info.kvars_nslots,
-										  dss->ds_info.kern_quals,
-										  dss->ds_info.kern_projs,
-										  NULL,	/* join_quals */
-										  NULL,	/* hash_values */
-										  NULL,	/* gist_quals */
+										  dss->ds_info.kvars_depth,
+										  dss->ds_info.kvars_resno,
+										  dss->ds_info.kexp_kvars_load,
+										  dss->ds_info.kexp_scan_quals,
+										  NULL,	/* join-load-vars */
+										  NULL,	/* join-quals */
+										  NULL,	/* hash-values */
+										  NULL,	/* gist-join */
+										  dss->ds_info.kexp_projection,
 										  0);	/* No join_inner_handle */
 		DpuClientOpenSession(&dss->pts, session);
 	}
@@ -358,13 +361,22 @@ ExplainDpuScan(CustomScanState *node,
 										node->ss.ps.plan,
 										ancestors);
 	pgstromExplainScanState(&dss->pts, es,
-							ds_info->dev_quals,
-							ds_info->kern_quals,
+							dcontext,
 							cscan->custom_scan_tlist,
-							ds_info->kern_projs,
+							ds_info->dev_quals,
 							ds_info->scan_tuples,
-							ds_info->scan_rows,
-							dcontext);
+							ds_info->scan_rows);
+	/* XPU Code (if verbose) */
+	pgstrom_explain_xpucode(&dss->pts.css, es, dcontext,
+							"Scan Var-Loads Code",
+							ds_info->kexp_kvars_load);
+	pgstrom_explain_xpucode(&dss->pts.css, es, dcontext,
+							"Scan Quals Code",
+							ds_info->kexp_scan_quals);
+	pgstrom_explain_xpucode(&dss->pts.css, es, dcontext,
+							"GPU Projection",
+							ds_info->kexp_projection);
+
 	pgstromExplainTaskState(&dss->pts, es, dcontext);
 }
 

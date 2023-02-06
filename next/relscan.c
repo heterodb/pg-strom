@@ -324,6 +324,8 @@ estimate_kern_data_store(TupleDesc tupdesc)
 
 		nr_colmeta += count_num_of_subfields(attr->atttypid);
 	}
+	/* internal system attribute if KDS_FORMAT_COLUMN */
+	nr_colmeta++;
 	return MAXALIGN(offsetof(kern_data_store, colmeta[nr_colmeta]));
 }
 
