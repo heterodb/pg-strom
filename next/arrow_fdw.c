@@ -2026,7 +2026,6 @@ GetOptimalDpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 			ArrowFileState *af_state = lfirst(lc);
 			const DpuStorageEntry *__ds_entry;
 
-			elog(INFO, "af_state->filename = [%s]", af_state->filename);
 			__ds_entry = GetOptimalDpuForFile(af_state->filename, NULL);
 			if (lc == list_head(af_list))
 				ds_entry = __ds_entry;

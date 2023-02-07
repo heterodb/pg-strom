@@ -213,7 +213,7 @@ typedef struct
 	 *     kvars_len[slot_id] is the length of Arrow::Utf8 or Arrow::Binary.
 	 */
 	uint32_t		kvars_nslots;
-	const struct kern_colmeta *kvars_cmeta;
+	struct kern_colmeta **kvars_cmeta;
 	void		  **kvars_addr;
 	int			   *kvars_len;
 	/* variable length buffer */
@@ -224,7 +224,8 @@ typedef struct
 
 #define GPU_KVARS_UNITSZ		64
 #define DPU_KVARS_UNITSZ		1
-#define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
+
+#define INIT_KERNEL_CONTEXT(KCXT,SESSION,KDS_SRC,KMRELS,KDS_DST)		\
 	do {																\
 		uint32_t	__bufsz = Max(1024, (SESSION)->kcxt_extra_bufsz);	\
 		uint32_t	__len = offsetof(kern_context, vlbuf) +	__bufsz;	\
@@ -233,7 +234,9 @@ typedef struct
 		memset(KCXT, 0, __len);											\
 		KCXT->session = (SESSION);										\
 		KCXT->kvars_nslots = (SESSION)->kvars_slot_width;				\
-		KCXT->kvars_cmeta = SESSION_KVARS_SLOT_COLMETA(SESSION);		\
+		KCXT->kvars_cmeta = (kern_colmeta **)							\
+			alloca(sizeof(kern_colmeta *) * (KCXT)->kvars_nslots);		\
+		INIT_KERNEL_VARS_CMETA((KCXT),(KDS_SRC),(KMRELS),(KDS_DST));	\
 		KCXT->kvars_addr = NULL;										\
 		KCXT->kvars_len = NULL;											\
 		KCXT->vlpos = KCXT->vlbuf;										\
@@ -1425,8 +1428,8 @@ typedef struct
 {
 	int16_t			var_depth;
 	int16_t			var_resno;
-	uint32_t		var_slot_id;
-} kern_preload_vars_item;
+	uint16_t		var_slot_id;
+} kern_vars_defitem;
 
 typedef struct
 {
@@ -1468,7 +1471,7 @@ struct kern_expression
 		struct {
 			int			depth;
 			int			nloads;
-			kern_preload_vars_item kvars[1];
+			kern_vars_defitem kvars[1];
 		} load;		/* VarLoads */
 		struct {
 			int			nexprs;
@@ -1555,7 +1558,7 @@ typedef struct kern_session_info
 	uint64_t	query_plan_id;		/* unique-id to use per-query buffer */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	kvars_slot_width;	/* width of kvars slot */
-	uint32_t	kvars_slot_cmeta;	/* cmeta array of kvars */
+	uint32_t	kvars_slot_items;	/* array of kern_vars_defitem[] */
 
 	/* xpucode for this session */
 	bool		xpucode_use_debug_code;
@@ -1631,15 +1634,6 @@ typedef struct
 /*
  * kern_session_info utility functions.
  */
-INLINE_FUNCTION(kern_colmeta *)
-SESSION_KVARS_SLOT_COLMETA(kern_session_info *session)
-{
-	if (session->kvars_slot_cmeta == 0 ||
-		session->kvars_slot_width == 0)
-		return NULL;
-	return (kern_colmeta *)((char *)session + session->kvars_slot_cmeta);
-}
-
 INLINE_FUNCTION(kern_expression *)
 SESSION_KEXP_SCAN_LOAD_VARS(kern_session_info *session)
 {
@@ -1999,7 +1993,7 @@ pg_hash_any(const void *ptr, int sz);
  *
  * ----------------------------------------------------------------
  */
-typedef struct
+struct kern_multirels
 {
 	size_t		length;
 	uint32_t	num_rels;
@@ -2012,7 +2006,8 @@ typedef struct
 		bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
 	} chunks[1];
-} kern_multirels;
+};
+typedef struct kern_multirels	kern_multirels;
 
 INLINE_FUNCTION(kern_data_store *)
 KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int dindex)
@@ -2043,5 +2038,12 @@ KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int dindex)
 	offset = kmrels->chunks[dindex].gist_offset;
 	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
+
+/* init kcxt->kvars_cmeta */
+EXTERN_FUNCTION(void)
+INIT_KERNEL_VARS_CMETA(kern_context *kcxt,
+					   struct kern_data_store *kds_src,
+					   struct kern_multirels *kmrels,
+					   struct kern_data_store *kds_dst);
 
 #endif	/* XPU_COMMON_H */

@@ -290,27 +290,31 @@ xpuclientCleanupConnections(ResourceReleasePhase phase,
  *
  * ----------------------------------------------------------------
  */
-static void
-__update_slot_cmeta_format(kern_data_store *kds,
-						   int index,
-						   char kds_format)
-{
-	kern_colmeta   *cmeta = &kds->colmeta[index];
-
-	cmeta->kds_format = kds_format;
-	if (cmeta->num_subattrs > 0)
-	{
-		for (int j=0; j < cmeta->num_subattrs; j++)
-			__update_slot_cmeta_format(kds, cmeta->idx_subattrs + j, kds_format);
-	}
-}
-
 static uint32_t
 __build_kvars_slot_cmeta(StringInfo buf,
 						 pgstromTaskState *pts,
 						 List *kvars_depth_list,
 						 List *kvars_resno_list)
 {
+	kern_vars_defitem *kvars_defitem;
+	int			nitems = list_length(kvars_depth_list);
+	int			slot_id = 0;
+	ListCell   *lc1, *lc2;
+
+	kvars_defitem = alloca(sizeof(kern_vars_defitem) * nitems);
+	forboth (lc1, kvars_depth_list,
+			 lc2, kvars_resno_list)
+	{
+		kern_vars_defitem *kvar = &kvars_defitem[slot_id];
+
+		kvar->var_depth = lfirst_int(lc1);
+		kvar->var_resno = lfirst_int(lc2);
+		kvar->var_slot_id = slot_id++;
+	}
+	return __appendBinaryStringInfo(buf, kvars_defitem,
+									sizeof(kern_vars_defitem) * nitems);
+
+#if 0
 	TupleDesc	tupdesc;
 	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
 	List	   *tlist_dev = cscan->custom_scan_tlist;
@@ -398,6 +402,7 @@ __build_kvars_slot_cmeta(StringInfo buf,
 	}
 	return __appendBinaryStringInfo(buf, (char *)kds->colmeta,
 									sizeof(kern_colmeta) * kds->nr_colmeta);
+#endif
 }
 
 static uint32_t
@@ -620,7 +625,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		(uint64_t)pg_atomic_fetch_add_u32(pgstrom_query_plan_id, 1);
 	session->kcxt_extra_bufsz = kcxt_extra_bufsz;
 	session->kvars_slot_width = list_length(kvars_depth_list);
-	session->kvars_slot_cmeta = __build_kvars_slot_cmeta(&buf, pts,
+	session->kvars_slot_items = __build_kvars_slot_cmeta(&buf, pts,
 														 kvars_depth_list,
 														 kvars_resno_list);
 	session->xpucode_use_debug_code = pgstrom_use_debug_code;

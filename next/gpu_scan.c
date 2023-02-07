@@ -238,7 +238,6 @@ considerXpuScanPathParams(PlannerInfo *root,
 		default:
 			return false;
 	}
-	elog(INFO, "ok");
 
 	/*
 	 * CPU Parallel parameters

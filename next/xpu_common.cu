@@ -12,6 +12,52 @@
 #include "xpu_common.h"
 
 /*
+ * Setup kcxt->kvars_cmeta
+ */
+PUBLIC_FUNCTION(void)
+INIT_KERNEL_VARS_CMETA(kern_context *kcxt,
+					   struct kern_data_store *kds_src,
+					   struct kern_multirels *kmrels,
+					   struct kern_data_store *kds_dst)
+{
+	kern_session_info  *session = kcxt->session;
+	kern_vars_defitem  *kvars_defs;
+
+	kvars_defs = (kern_vars_defitem *)
+		((char *)session + session->kvars_slot_items);
+	for (int i=0; i < kcxt->kvars_nslots; i++)
+	{
+		kern_vars_defitem  *kvar = &kvars_defs[i];
+
+		if (kvar->var_depth == 0)
+		{
+			assert(kds_src != NULL);
+			assert(kvar->var_resno > 0 &&
+				   kvar->var_resno <= kds_src->ncols);
+			kcxt->kvars_cmeta[i] = &kds_src->colmeta[kvar->var_resno - 1];
+		}
+		else if (kvar->var_depth > 0)
+		{
+			kern_data_store	   *kds_in;
+
+			assert(kmrels != NULL);
+			kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, kvar->var_depth - 1);
+			assert(kds_in != NULL);
+			assert(kvar->var_resno > 0 &&
+				   kvar->var_resno <= kds_in->ncols);
+			kcxt->kvars_cmeta[i] = &kds_in->colmeta[kvar->var_resno - 1];
+		}
+		else
+		{
+			assert(kds_dst != NULL);
+			assert(kvar->var_resno > 0 &&
+				   kvar->var_resno <= kds_dst->ncols);
+			kcxt->kvars_cmeta[i] = &kds_dst->colmeta[kvar->var_resno - 1];
+		}
+	}
+}
+
+/*
  * Const Expression
  */
 STATIC_FUNCTION(bool)
@@ -43,7 +89,7 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 
 	if (slot_id < kcxt->kvars_nslots)
 	{
-		const kern_colmeta *cmeta = &kcxt->kvars_cmeta[slot_id];
+		const kern_colmeta *cmeta = kcxt->kvars_cmeta[slot_id];
 		void	   *addr = kcxt->kvars_addr[slot_id];
 		int			len  = kcxt->kvars_len[slot_id];
 
@@ -260,7 +306,7 @@ kern_form_heaptuple(kern_context *kcxt,
 	{
 		const kern_projection_desc *desc
 			= &kproj->u.proj.desc[kproj->u.proj.nexprs + j];
-		const kern_colmeta *cmeta = &kcxt->kvars_cmeta[desc->slot_id];
+		const kern_colmeta *cmeta = kcxt->kvars_cmeta[desc->slot_id];
 		void   *addr = kcxt->kvars_addr[desc->slot_id];
 		int		len  = kcxt->kvars_len[desc->slot_id];
 		char   *buffer = NULL;
@@ -473,10 +519,10 @@ kern_extract_heap_tuple(kern_context *kcxt,
 						kern_data_store *kds,
 						const HeapTupleHeaderData *htup,
 						int curr_depth,
-						const kern_preload_vars_item *kvars_items,
+						const kern_vars_defitem *kvars_items,
 						int kvars_nloads)
 {
-	const kern_preload_vars_item *kvars = kvars_items;
+	const kern_vars_defitem *kvars = kvars_items;
 	uint32_t	offset;
 	int			kvars_nloads_saved = kvars_nloads;
 	int			resno = 1;
@@ -507,7 +553,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 			offset  = htup->t_hoff + cmeta->attcacheoff;
 
 			assert(slot_id < kcxt->kvars_nslots);
-			assert(cmeta->atttypid == kcxt->kvars_cmeta[slot_id].atttypid);
+			assert(cmeta->atttypid == kcxt->kvars_cmeta[slot_id]->atttypid);
 			kcxt->kvars_addr[slot_id]  = (char *)htup + offset;
 			kcxt->kvars_len[slot_id]   = -1;
 			kvars++;
@@ -548,7 +594,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 				slot_id = kvars->var_slot_id;
 
 				assert(slot_id < kcxt->kvars_nslots);
-				assert(cmeta->atttypid == kcxt->kvars_cmeta[slot_id].atttypid);
+				assert(cmeta->atttypid == kcxt->kvars_cmeta[slot_id]->atttypid);
 				kcxt->kvars_addr[slot_id]  = addr;
 				kcxt->kvars_len[slot_id]   = -1;
 				kvars++;
@@ -812,10 +858,10 @@ STATIC_FUNCTION(int)
 kern_extract_arrow_tuple(kern_context *kcxt,
 						 kern_data_store *kds,
 						 uint32_t kds_index,
-						 const kern_preload_vars_item *kvars_items,
+						 const kern_vars_defitem *kvars_items,
 						 int kvars_nloads)
 {
-	const kern_preload_vars_item *kvars = kvars_items;
+	const kern_vars_defitem *kvars = kvars_items;
 	int		kvars_nloads_saved = kvars_nloads;
 
 	assert(kds->format == KDS_FORMAT_ARROW);
@@ -925,7 +971,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 				STROM_ELOG(kcxt, "Unsupported Apache Arrow type");
 				return -1;
 		}
-		assert(kcxt->kvars_cmeta[slot_id].atttypid == cmeta->atttypid);
+		assert(cmeta->atttypid == kcxt->kvars_cmeta[slot_id]->atttypid);
 		kcxt->kvars_addr[slot_id]  = addr;
 		kcxt->kvars_len[slot_id]   = len;
 		kvars++;
@@ -938,7 +984,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 		int		slot_id = kvars->var_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		assert(kcxt->kvars_cmeta[slot_id].atttypid == cmeta->atttypid);
+		assert(cmeta->atttypid == kcxt->kvars_cmeta[slot_id]->atttypid);
 		kcxt->kvars_addr[slot_id]  = NULL;
 		kcxt->kvars_len[slot_id]   = -1;
 		kvars++;
@@ -975,7 +1021,7 @@ ExecLoadVarsOuterRow(kern_context *kcxt,
 									kexp_load_vars->u.load.nloads);
 	while (index < kexp_load_vars->u.load.nloads)
 	{
-		kern_preload_vars_item *kvars = &kexp_load_vars->u.load.kvars[index++];
+		kern_vars_defitem *kvars = &kexp_load_vars->u.load.kvars[index++];
 		int		slot_id = kvars->var_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
@@ -1021,7 +1067,7 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 	/* fill-up other slots by NULL */
 	while (index < kexp_load_vars->u.load.nloads)
 	{
-		kern_preload_vars_item *kvars = &kexp_load_vars->u.load.kvars[index++];
+		kern_vars_defitem *kvars = &kexp_load_vars->u.load.kvars[index++];
 		int		slot_id = kvars->var_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
@@ -1127,7 +1173,7 @@ __ExecLoadVarsCommon(XPU_PGFUNCTION_ARGS,
 	skip:
 		while (index < kexp->u.load.nloads)
 		{
-			const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index];
+			const kern_vars_defitem *kvars = &kexp->u.load.kvars[index];
 			int		slot_id = kvars->var_slot_id;
 
 			assert(slot_id < kcxt->kvars_nslots);
@@ -1141,7 +1187,7 @@ __ExecLoadVarsCommon(XPU_PGFUNCTION_ARGS,
 	/* fill up by NULL, if not loaded (should not happen) */
 	while (index < kexp->u.load.nloads)
 	{
-		const kern_preload_vars_item *kvars = &kexp->u.load.kvars[index++];
+		const kern_vars_defitem *kvars = &kexp->u.load.kvars[index++];
 		int		slot_id = kvars->var_slot_id;
 
 		kcxt->kvars_addr[slot_id]  = NULL;

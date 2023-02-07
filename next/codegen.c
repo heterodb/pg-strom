@@ -1290,8 +1290,8 @@ codegen_expression_walker(codegen_context *context,
 static int
 kern_preload_vars_comp(const void *__a, const void *__b)
 {
-	const kern_preload_vars_item *a = __a;
-	const kern_preload_vars_item *b = __b;
+	const kern_vars_defitem *a = __a;
+	const kern_vars_defitem *b = __b;
 
 	if (a->var_depth < 0 || a->var_resno < 0)
 		return 1;
@@ -1335,7 +1335,7 @@ attach_varloads_xpucode(codegen_context *context,
 		i++;
 	}
 	pg_qsort(kexp->u.load.kvars, nloads,
-			 sizeof(kern_preload_vars_item),
+			 sizeof(kern_vars_defitem),
 			 kern_preload_vars_comp);
 	for (i=0; i < nloads; i++)
 	{
@@ -1365,10 +1365,10 @@ attach_varloads_xpucode(codegen_context *context,
  * codegen_build_loadvars
  */
 static int
-kern_preload_vars_item_comp(const void *__a, const void *__b)
+kern_vars_defitem_comp(const void *__a, const void *__b)
 {
-	const kern_preload_vars_item *a = __a;
-	const kern_preload_vars_item *b = __b;
+	const kern_vars_defitem *a = __a;
+	const kern_vars_defitem *b = __b;
 
 	Assert(a->var_depth == b->var_depth);
 	if (a->var_resno < b->var_resno)
@@ -1392,7 +1392,7 @@ __codegen_build_loadvars_one(codegen_context *context, int depth)
 	forboth (lc1, context->kvars_depth,
 			 lc2, context->kvars_resno)
 	{
-		kern_preload_vars_item	vitem;
+		kern_vars_defitem	vitem;
 
 		vitem.var_depth = lfirst_int(lc1);
 		vitem.var_resno = lfirst_int(lc2);
@@ -1400,7 +1400,7 @@ __codegen_build_loadvars_one(codegen_context *context, int depth)
 		if (vitem.var_depth == depth)
 		{
 			appendBinaryStringInfo(&buf, (char *)&vitem,
-								   sizeof(kern_preload_vars_item));
+								   sizeof(kern_vars_defitem));
 			nloads++;
 		}
 	}
@@ -1411,8 +1411,8 @@ __codegen_build_loadvars_one(codegen_context *context, int depth)
 	}
 	qsort(buf.data + offsetof(kern_expression, u.load.kvars),
 		  nloads,
-		  sizeof(kern_preload_vars_item),
-		  kern_preload_vars_item_comp);
+		  sizeof(kern_vars_defitem),
+		  kern_vars_defitem_comp);
 
 	memset(&kexp, 0, sizeof(kexp));
 	kexp.exptype  = TypeOpCode__int4;
@@ -2023,7 +2023,7 @@ __xpucode_loadvars_cstring(StringInfo buf,
 
 	for (i=0; i < kexp->u.load.nloads; i++)
 	{
-		const kern_preload_vars_item *vitem = &kexp->u.load.kvars[i];
+		const kern_vars_defitem *vitem = &kexp->u.load.kvars[i];
 
 		if (i > 0)
 			appendStringInfo(buf, ", ");

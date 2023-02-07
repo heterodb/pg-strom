@@ -618,7 +618,7 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 		   kexp_scan_quals->exptype == TypeOpCode__bool &&
 		   kexp_projection->opcode == FuncOpCode__Projection);
 	memset(&kdscan, 0, sizeof(kern_dpuscan));
-	INIT_KERNEL_CONTEXT(kcxt, session);
+	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, NULL, kds_dst_head);
 	kcxt->kvars_addr = alloca(sizeof(void *) * kcxt->kvars_nslots);
 	kcxt->kvars_len  = alloca(sizeof(int)    * kcxt->kvars_nslots);
 	for (block_index = 0; block_index < kds_src->nitems; block_index++)
@@ -741,7 +741,7 @@ __handleDpuScanExecArrow(dpuClient *dclient,
 		   kexp_scan_quals->exptype == TypeOpCode__bool &&
 		   kexp_projection->opcode == FuncOpCode__Projection);
 	memset(&kdscan, 0, sizeof(kern_dpuscan));
-	INIT_KERNEL_CONTEXT(kcxt, session);
+	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, NULL, kds_dst_head);
 	kcxt->kvars_addr = alloca(sizeof(void *) * kcxt->kvars_nslots);
 	kcxt->kvars_len  = alloca(sizeof(int)    * kcxt->kvars_nslots);
 	for (kds_index = 0; kds_index < kds_src->nitems; kds_index++)

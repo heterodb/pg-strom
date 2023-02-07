@@ -514,7 +514,7 @@ kern_gpuscan_main(kern_session_info *session,
 	__shared__ uint32_t	smx_row_count;
 
 	/* setup execution context */
-	INIT_KERNEL_CONTEXT(kcxt, session);
+	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, NULL, kds_dst);
 	wp_unitsz = __KERN_WARP_CONTEXT_UNITSZ_BASE(0);
 	wp = (kern_warp_context *)SHARED_WORKMEM(wp_unitsz, get_local_id() / warpSize);
 	wp_saved = KERN_GPUSCAN_WARP_CONTEXT(kgscan, kcxt->kvars_nslots);
