@@ -737,11 +737,13 @@ __handleDpuScanExecArrow(dpuClient *dclient,
 	XpuCommand			resp;
 
 	assert(kds_src->format == KDS_FORMAT_ARROW &&
-		   kexp_scan_quals->opcode == FuncOpCode__LoadVars &&
-		   kexp_projection->opcode == FuncOpCode__LoadVars);
+		   kexp_load_vars->opcode == FuncOpCode__LoadVars &&
+		   kexp_scan_quals->exptype == TypeOpCode__bool &&
+		   kexp_projection->opcode == FuncOpCode__Projection);
 	memset(&kdscan, 0, sizeof(kern_dpuscan));
 	INIT_KERNEL_CONTEXT(kcxt, session);
-
+	kcxt->kvars_addr = alloca(sizeof(void *) * kcxt->kvars_nslots);
+	kcxt->kvars_len  = alloca(sizeof(int)    * kcxt->kvars_nslots);
 	for (kds_index = 0; kds_index < kds_src->nitems; kds_index++)
 	{
 		int			status;

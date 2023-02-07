@@ -2012,13 +2012,13 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 const DpuStorageEntry *
 GetOptimalDpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 {
-	List	   *priv_list = (List *)baserel->fdw_private;
 	const DpuStorageEntry *ds_entry = NULL;
+	List	   *priv_list = (List *)baserel->fdw_private;
 
 	if (baseRelIsArrowFdw(baserel) &&
 		IsA(priv_list, List) && list_length(priv_list) == 2)
 	{
-		List	   *af_list = lsecond(priv_list);
+		List	   *af_list = linitial(priv_list);
 		ListCell   *lc;
 
 		foreach (lc, af_list)
@@ -2026,6 +2026,7 @@ GetOptimalDpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 			ArrowFileState *af_state = lfirst(lc);
 			const DpuStorageEntry *__ds_entry;
 
+			elog(INFO, "af_state->filename = [%s]", af_state->filename);
 			__ds_entry = GetOptimalDpuForFile(af_state->filename, NULL);
 			if (lc == list_head(af_list))
 				ds_entry = __ds_entry;

@@ -211,6 +211,7 @@ considerXpuScanPathParams(PlannerInfo *root,
 	double			spc_rand_page_cost;
 	double			xpu_ratio = xpuOperatorCostRatio(devkind);
 	double			xpu_tuple_cost = xpuTupleCost(devkind);
+	bool			is_arrow_fdw = false;
 	QualCost		qcost;
 	double			ntuples;
 	double			selectivity;
@@ -229,11 +230,15 @@ considerXpuScanPathParams(PlannerInfo *root,
 			return false;
 		case RELKIND_FOREIGN_TABLE:
 			if (baseRelIsArrowFdw(baserel))
+			{
+				is_arrow_fdw = true;
 				break;
+			}
 			return false;
 		default:
 			return false;
 	}
+	elog(INFO, "ok");
 
 	/*
 	 * CPU Parallel parameters
@@ -282,7 +287,10 @@ considerXpuScanPathParams(PlannerInfo *root,
 		case DEVKIND__NVIDIA_DPU:
 			startup_cost += pgstrom_dpu_setup_cost;
 			/* Is DPU-attached Storage available? */
-			ds_entry = GetOptimalDpuForBaseRel(root, baserel);
+			if (is_arrow_fdw)
+				ds_entry = GetOptimalDpuForArrowFdw(root, baserel);
+			else
+				ds_entry = GetOptimalDpuForBaseRel(root, baserel);
 			if (!ds_entry)
 				return false;
 			avg_seq_page_cost = (spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
