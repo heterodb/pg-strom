@@ -1000,25 +1000,27 @@ pgfn_LoadVars(XPU_PGFUNCTION_ARGS)
 	return false;
 }
 
-PUBLIC_FUNCTION(bool)
-ExecLoadVarsOuterRow(kern_context *kcxt,
-					 kern_expression *kexp_load_vars,
-					 kern_expression *kexp_scan_quals,
-					 kern_data_store *kds,
-					 HeapTupleHeaderData *htup)
+PUBLIC_FUNCTION(void)
+ExecLoadVarsHeapTuple(kern_context *kcxt,
+					  kern_expression *kexp_load_vars,
+					  int depth,
+					  kern_data_store *kds,
+					  HeapTupleHeaderData *htup)	/* htup may be NULL */
 {
-	int			index;
+	int		index = 0;
 
 	assert(kexp_load_vars->opcode == FuncOpCode__LoadVars &&
 		   kexp_load_vars->exptype == TypeOpCode__int4 &&
 		   kexp_load_vars->nr_args == 0);
-	assert(kexp_scan_quals->exptype == TypeOpCode__bool);
-	index = kern_extract_heap_tuple(kcxt,
-									kds,
-									htup,
-									0,
-									kexp_load_vars->u.load.kvars,
-									kexp_load_vars->u.load.nloads);
+	if (htup)
+	{
+		index = kern_extract_heap_tuple(kcxt,
+										kds,
+										htup,
+										depth,
+										kexp_load_vars->u.load.kvars,
+										kexp_load_vars->u.load.nloads);
+	}
 	while (index < kexp_load_vars->u.load.nloads)
 	{
 		kern_vars_defitem *kvars = &kexp_load_vars->u.load.kvars[index++];
@@ -1028,6 +1030,17 @@ ExecLoadVarsOuterRow(kern_context *kcxt,
 		kcxt->kvars_addr[slot_id]  = NULL;
 		kcxt->kvars_len[slot_id]   = -1;
 	}
+}
+
+PUBLIC_FUNCTION(bool)
+ExecLoadVarsOuterRow(kern_context *kcxt,
+					 kern_expression *kexp_load_vars,
+					 kern_expression *kexp_scan_quals,
+					 kern_data_store *kds,
+					 HeapTupleHeaderData *htup)
+{
+	/* load the one tuple */
+	ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, 0, kds, htup);
 	/* check scan quals if given */
 	if (kexp_scan_quals)
 	{

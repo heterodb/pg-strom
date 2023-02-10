@@ -1917,6 +1917,12 @@ kern_form_heaptuple(kern_context *kcxt,
 					const kern_expression *kproj,
 					const kern_data_store *kds_dst,
 					HeapTupleHeaderData *htup);
+EXTERN_FUNCTION(void)
+ExecLoadVarsHeapTuple(kern_context *kcxt,
+					  kern_expression *kexp_load_vars,
+					  int depth,
+					  kern_data_store *kds,
+					  HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterRow(kern_context *kcxt,
 					 kern_expression *kexp_load_vars,

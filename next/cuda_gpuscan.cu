@@ -405,6 +405,7 @@ execGpuScanLoadSource(kern_context *kcxt,
 	return -1;
 }
 
+#if 0
 /*
  * execGpuProjection
  */
@@ -492,6 +493,7 @@ execGpuProjection(kern_context *kcxt,
 	}
 	return total_sz;
 }
+#endif
 
 /*
  * kern_gpuscan_main
@@ -506,7 +508,7 @@ kern_gpuscan_main(kern_session_info *session,
 	kern_context	   *kcxt;
 	kern_expression	   *kexp_load_vars = SESSION_KEXP_SCAN_LOAD_VARS(session);
 	kern_expression	   *kexp_scan_quals = SESSION_KEXP_SCAN_QUALS(session);
-	kern_expression	   *kexp_scan_projs = SESSION_KEXP_PROJECTION(session);
+	kern_expression	   *kexp_projection = SESSION_KEXP_PROJECTION(session);
 	kern_warp_context  *wp, *wp_saved;
 	uint32_t			wp_unitsz;
 	void			  **kvars_addr;		/* only depth-0 */
@@ -540,59 +542,39 @@ kern_gpuscan_main(kern_session_info *session,
 
 	for (;;)
 	{
-		uint32_t	write_pos = WARP_WRITE_POS(wp,0);
-		uint32_t	read_pos = WARP_READ_POS(wp,0);
+		int		status;
 
-		assert(write_pos >= read_pos);
-		/*
-		 * Projection
-		 */
-		if (wp->scan_done || write_pos >= read_pos + warpSize)
+		status = execGpuJoinProjection(kcxt, wp,
+									   0,	/* !!no inner relations!! */
+									   kds_dst,
+									   kexp_projection,
+									   kvars_addr,
+									   kvars_len);
+		if (status < 0)
 		{
-			int		status;
-			int		index;
-
-			if (read_pos < write_pos)
+			if (status == -2)
 			{
-				read_pos += LaneId();
-				if (read_pos < write_pos)
-				{
-					index = (read_pos % GPU_KVARS_UNITSZ);
-					kcxt->kvars_addr = kvars_addr + kcxt->kvars_nslots * index;
-					kcxt->kvars_len  = kvars_len  + kcxt->kvars_nslots * index;
-				}
-				status = execGpuProjection(kcxt,
-										   read_pos < write_pos,
-										   kexp_scan_projs,
-										   kds_dst);
-				if (status <= 0)
-				{
-					assert(__activemask() == 0xffffffffU);
-					if (status == 0 && LaneId() == 0)
-						atomicAdd(&kgscan->suspend_count, 1);
-					break;	/* error or no space */
-				}
+				/* no space, try suspend! */
 				if (LaneId() == 0)
-					WARP_READ_POS(wp,0) = Min(write_pos, read_pos + warpSize);
-				read_pos = __shfl_sync(__activemask(), WARP_READ_POS(wp,0), 0);
+					atomicAdd(&kgscan->suspend_count, 1);
 			}
-			if (wp->scan_done && read_pos >= write_pos)
-				break;
-			kcxt->kvars_addr = NULL;
-			kcxt->kvars_len  = NULL;
-		}
-
-		if (execGpuScanLoadSource(kcxt, wp,
-								  kds_src,
-								  kds_extra,
-								  kexp_load_vars,
-								  kexp_scan_quals,
-								  kvars_addr,
-								  kvars_len,
-								  &smx_row_count) < 0)
-		{
-			assert(__activemask() == 0xffffffffU);
 			break;
+		}
+		else if (status == 0)
+		{
+			/* ok, load the next tuples */
+			if (execGpuScanLoadSource(kcxt, wp,
+									  kds_src,
+									  kds_extra,
+									  kexp_load_vars,
+									  kexp_scan_quals,
+									  kvars_addr,
+									  kvars_len,
+									  &smx_row_count) < 0)
+			{
+				assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+				break;
+			}
 		}
 		__syncwarp();
 	}

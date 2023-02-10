@@ -114,9 +114,9 @@ STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
 typedef struct
 {
 	uint32_t		smx_row_count;	/* just for suspend/resume */
-	uint32_t		scan_done;	/* smallest depth that may produce more tuples */
+	uint32_t		__nrels__deprecated;		/* number of inner relations, if JOIN */
 	int				depth;		/* 'depth' when suspended */
-	uint32_t		nrels;		/* number of inner relations, if JOIN */
+	int				scan_done;	/* smallest depth that may produce more tuples */
 	/* only KDS_FORMAT_BLOCK */
 	uint32_t		block_id;	/* BLOCK format needs to keep htuples on the */
 	uint32_t		lp_count;	/* lp_items array once, to pull maximum GPU */
@@ -175,16 +175,19 @@ execGpuScanLoadSource(kern_context *kcxt,
 					  kern_warp_context *wp,
 					  kern_data_store *kds_src,
 					  kern_data_extra *kds_extra,
-					  kern_expression *kexp_quals,
-					  uint32_t *combuf,
+					  kern_expression *kexp_load_vars,
+					  kern_expression *kexp_scan_quals,
+					  void    **kvars_addr,
+					  int      *kvars_len,
 					  uint32_t *p_smx_row_count);
-
 EXTERN_FUNCTION(int)
-execGpuProjection(kern_context *kcxt,
-				  kern_expression *kexp_projs,
-				  kern_data_store *kds_dst,
-				  uint32_t tupsz);
-
+execGpuJoinProjection(kern_context *kcxt,
+					  kern_warp_context *wp,
+					  int n_rels,
+					  kern_data_store *kds_dst,
+					  kern_expression *kexp_projection,
+					  void **kvars_addr,
+					  int *kvars_len);
 /*
  * Definitions related to GpuScan
  */
@@ -196,15 +199,22 @@ typedef struct {
 	uint32_t		nitems_out;
 	uint32_t		extra_sz;
 	/* kern_warp_context array */
-	bool			wp_context_on_shmem;
 	bool			resume_context;
 	uint32_t		suspend_count;
 	char			data[1]	__MAXALIGNED__;
+	/*
+	 * +---------------------------------+
+	 * | kern_warp_context[0] for warp-0 |
+	 * | kern_warp_context[1] for warp-1 |
+	 * |     :    :            :         |
+	 * | kern_warp_context[nwarps-1]     |
+	 * +---------------------------------+
+	 */
 } kern_gpuscan;
 
 #define KERN_GPUSCAN_WARP_CONTEXT(kgscan,nslots)						\
 	((kern_warp_context *)												\
-	 ((char *)(kgscan) + offsetof(kern_gpuscan, data) +					\
+	 ((kgscan)->data +													\
 	  KERN_WARP_CONTEXT_UNITSZ(0,nslots) * (get_global_id()/warpSize)))
 
 KERNEL_FUNCTION(void)
@@ -226,9 +236,43 @@ typedef struct
 	uint32_t		nitems_out;
 	uint32_t		num_rels;
 	/* kern_warp_context array */
+	bool			resume_context;
 	uint32_t		suspend_count;
 	char			data[1]	__MAXALIGNED__;
+	/*
+	 * +-----------------------------------+
+	 * | kern_warp_context[0] for warp-0   |
+	 * | kern_warp_context[1] for warp-1   |
+	 * |     :    :            :           |
+	 * | kern_warp_context[nwarps-1]       |
+	 * +-----------------------------------+
+	 * | l_state[num_rels] for each thread |
+	 * +-----------------------------------+
+	 * | matched[num_rels] for each thread |
+	 * +-----------------------------------+
+	 */
 } kern_gpujoin;
+
+#define KERN_GPUJOIN_WARP_CONTEXT(kgjoin,nrels,nslots)					\
+	((kern_warp_context *)												\
+	 ((kgjoin)->data +													\
+	  KERN_WARP_CONTEXT_UNITSZ((nrels),(nslots)) * (get_global_id()/warpSize)))
+#define KERN_GPUJOIN_LSTATE_ARRAY(kgjoin,nrels,nslots)					\
+	((uint32_t *)														\
+	 ((kgjoin)->data +													\
+	  KERN_WARP_CONTEXT_UNITSZ((nrels),(nslots)) * (get_global_size()/warpSize) + \
+	  sizeof(uint32_t) * (nrels) * get_global_id()))
+#define KERN_GPUJOIN_MATCHED_ARRAY(kgjoin,nrels,nslots)					\
+	((bool *)															\
+	 ((kgjoin)->data +													\
+	  KERN_WARP_CONTEXT_UNITSZ((nrels),(nslots)) * (get_global_size()/warpSize) + \
+	  sizeof(uint32_t) * (nrels) * get_global_size() +					\
+	  sizeof(bool) * (nrels) * get_global_id()))
+#define KERN_GPUJOIN_LENGTH(nrels,nslots,global_sz)						\
+	MAXALIGN(offsetof(kern_gpujoin, data) +								\
+			 KERN_WARP_CONTEXT_UNITSZ((nrels),(nslots)) * (global_sz/WARPSIZE) + \
+			 sizeof(uint32_t) * (nrels) * global_sz +					\
+			 sizeof(bool)     * (nrels) * global_sz)
 
 KERNEL_FUNCTION(void)
 kern_gpujoin_main(kern_session_info *session,
