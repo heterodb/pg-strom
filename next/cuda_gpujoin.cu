@@ -83,7 +83,7 @@ execGpuJoinNestLoop(kern_context      *kcxt,
 	{
 		uint32_t	index = l_state++;
 
-		read_pos = (read_pos % GPU_KVARS_UNITSZ);
+		read_pos = (read_pos % UNIT_TUPLES_PER_DEPTH);
 		kcxt->kvars_addr = src_kvars_addr + read_pos * kcxt->kvars_nslots;
 		kcxt->kvars_len  = src_kvars_len  + read_pos * kcxt->kvars_nslots;
 		if (index < kds_heap->nitems)
@@ -132,7 +132,7 @@ execGpuJoinNestLoop(kern_context      *kcxt,
 
 	if (tuple_is_valid)
 	{
-		write_pos = (write_pos % GPU_KVARS_UNITSZ);
+		write_pos = (write_pos % UNIT_TUPLES_PER_DEPTH);
 		memcpy(dst_kvars_addr + write_pos * kcxt->kvars_nslots,
 			   kcxt->kvars_addr,
 			   sizeof(void *) * kcxt->kvars_nslots);
@@ -222,7 +222,7 @@ execGpuJoinHashJoin(kern_context      *kcxt,
 	}
 	write_pos = WARP_WRITE_POS(wp,depth-1);
 	read_pos = WARP_READ_POS(wp,depth-1) + LaneId();
-	index = (read_pos % GPU_KVARS_UNITSZ);
+	index = (read_pos % UNIT_TUPLES_PER_DEPTH);
 	kcxt->kvars_addr = src_kvars_addr + index * kcxt->kvars_nslots;
 	kcxt->kvars_len  = src_kvars_len  + index * kcxt->kvars_nslots;
 	if (l_state == 0)
@@ -301,7 +301,7 @@ execGpuJoinHashJoin(kern_context      *kcxt,
 	write_pos += __popc(mask);
 	if (tuple_is_valid)
 	{
-		index = write_pos % UNIT_TUPLES_PER_WARP;
+		index = write_pos % UNIT_TUPLES_PER_DEPTH;
 		dst_kvars_addr += index * kcxt->kvars_nslots;
 		dst_kvars_len  += index * kcxt->kvars_nslots;
 		memcpy(dst_kvars_addr, kcxt->kvars_addr, sizeof(void *) * kcxt->kvars_nslots);
@@ -346,13 +346,13 @@ execGpuJoinProjection(kern_context *kcxt,
 	 * The previous depth still may produce new tuples, and number of
 	 * the current result tuples is not sufficient to run projection.
 	 */
-	if (wp->scan_done <= n_rels && read_pos + warpSize < write_pos)
+	if (wp->scan_done <= n_rels && read_pos + warpSize > write_pos)
 		return n_rels;
 	read_pos += LaneId();
 	if (read_pos < write_pos)
 	{
 		xpu_int4_t	__tupsz;
-		int			index = (read_pos % GPU_KVARS_UNITSZ);
+		int			index = (read_pos % UNIT_TUPLES_PER_DEPTH);
 
 		kcxt->kvars_addr = kvars_addr + kcxt->kvars_nslots * index;
 		kcxt->kvars_len  = kvars_len  + kcxt->kvars_nslots * index;
@@ -361,7 +361,7 @@ execGpuJoinProjection(kern_context *kcxt,
 			if (!__tupsz.isnull && __tupsz.value > 0)
 				tupsz = __tupsz.value;
 			else
-				STROM_ELOG(kcxt, "unable to comput tuple size");
+				STROM_ELOG(kcxt, "unable to compute tuple size");
 		}
 		else
 		{
@@ -402,7 +402,7 @@ execGpuJoinProjection(kern_context *kcxt,
 	}
 	oldval.v64 = __shfl_sync(__activemask(), oldval.v64, 0);
 	row_id += oldval.i.nitems;
-	/* data store has space? */
+	/* data store has no space? */
 	if (__any_sync(__activemask(), try_suspend))
 		return -2;
 	/* write out the tuple */
@@ -427,15 +427,15 @@ execGpuJoinProjection(kern_context *kcxt,
 		assert(WARP_WRITE_POS(wp,n_rels) >= WARP_READ_POS(wp,n_rels));
 	}
 	__syncwarp();
-	if (wp->scan_done >= n_rels)
-	{
-		if (WARP_READ_POS(wp,n_rels) >= WARP_WRITE_POS(wp,n_rels))
-			return -1;	/* ok, end of GpuJoin */
-	}
-	else
+	if (wp->scan_done <= n_rels)
 	{
 		if (WARP_WRITE_POS(wp,n_rels) < WARP_READ_POS(wp,n_rels) + warpSize)
 			return n_rels;	/* back to the previous depth */
+	}
+	else
+	{
+		if (WARP_READ_POS(wp,n_rels) >= WARP_WRITE_POS(wp,n_rels))
+			return -1;		/* ok, end of GpuJoin */
 	}
 	return n_rels + 1;		/* elsewhere, try again? */
 }
@@ -445,7 +445,7 @@ execGpuJoinProjection(kern_context *kcxt,
  */
 KERNEL_FUNCTION(void)
 kern_gpujoin_main(kern_session_info *session,
-				  kern_gpujoin *kgjoin,
+				  kern_gputask *kgtask,
 				  kern_multirels *kmrels,
 				  kern_data_store *kds_src,
 				  kern_data_extra *kds_extra,
@@ -464,20 +464,20 @@ kern_gpujoin_main(kern_session_info *session,
 	int					status;
 	__shared__ uint32_t smx_row_count;
 
+	assert(kgtask->nslots == session->kvars_slot_width &&
+		   kgtask->n_rels == kmrels->num_rels);
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, kmrels, kds_dst);
 	wp_unitsz = __KERN_WARP_CONTEXT_UNITSZ_BASE(n_rels);
 	wp = (kern_warp_context *)SHARED_WORKMEM(wp_unitsz, get_local_id() / warpSize);
-	wp_saved = KERN_GPUJOIN_WARP_CONTEXT(kgjoin,  n_rels, kcxt->kvars_nslots);
-	l_state  = KERN_GPUJOIN_LSTATE_ARRAY(kgjoin,  n_rels, kcxt->kvars_nslots);
-	matched  = KERN_GPUJOIN_MATCHED_ARRAY(kgjoin, n_rels, kcxt->kvars_nslots);
-	kvars_width = GPU_KVARS_UNITSZ * kcxt->kvars_nslots;
+	wp_saved = KERN_GPUTASK_WARP_CONTEXT(kgtask);
+	l_state = KERN_GPUTASK_LSTATE_ARRAY(kgtask);
+	matched = KERN_GPUTASK_MATCHED_ARRAY(kgtask);
+	kvars_width = UNIT_TUPLES_PER_DEPTH * kcxt->kvars_nslots;
 	kvars_addr = (void **)((char *)wp_saved + wp_unitsz);
 	kvars_len = (int *)(kvars_addr + kvars_width * (n_rels+1));
-	assert((char *)(kvars_len + kvars_width * (n_rels+1)) <=
-		   (char *)wp_saved + KERN_WARP_CONTEXT_UNITSZ(n_rels, kcxt->kvars_nslots));
 
-	if (kgjoin->resume_context)
+	if (kgtask->resume_context)
 	{
 		/* resume the warp-context from the previous execution */
 		if (LaneId() == 0)
@@ -530,7 +530,7 @@ kern_gpujoin_main(kern_session_info *session,
 			{
 				/* no space, try suspend! */
 				if (LaneId() == 0)
-					atomicAdd(&kgjoin->suspend_count, 1);
+					atomicAdd(&kgtask->suspend_count, 1);
 				break;
 			}
 			else
@@ -582,5 +582,5 @@ kern_gpujoin_main(kern_session_info *session,
 		wp->smx_row_count = smx_row_count;
 		memcpy(wp_saved, wp, wp_unitsz);
 	}
-	STROM_WRITEBACK_ERROR_STATUS(&kgjoin->kerror, kcxt);
+	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
 }

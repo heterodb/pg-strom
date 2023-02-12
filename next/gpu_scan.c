@@ -1012,7 +1012,7 @@ void
 gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 {
 	kern_session_info *session = gclient->session;
-	kern_gpuscan	*kgscan = NULL;
+	kern_gputask	*kgtask = NULL;
 	const char		*kds_src_pathname = NULL;
 	strom_io_vector *kds_src_iovec = NULL;
 	kern_data_store *kds_src = NULL;
@@ -1031,7 +1031,6 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	int				grid_sz;
 	int				block_sz;
 	unsigned int	shmem_sz;
-	unsigned int	n_warps;
 	size_t			sz;
 	void		   *kern_args[5];
 
@@ -1127,10 +1126,8 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 	grid_sz = Min(grid_sz, (kds_src->nitems + block_sz - 1) / block_sz);
 //	block_sz = 64;
 //	grid_sz = 1;
-	n_warps = grid_sz * (block_sz / WARPSIZE);
 
-	sz = offsetof(kern_gpuscan, data) +
-		KERN_WARP_CONTEXT_UNITSZ(0, n_kvars_slots) * n_warps;
+	sz = KERN_GPUTASK_LENGTH(0, n_kvars_slots, grid_sz * block_sz);
 	rc = cuMemAllocManaged(&dptr, sz, CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -1138,10 +1135,12 @@ gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd)
 					   sz, cuStrError(rc));
 		goto bailout;
 	}
-	kgscan = (kern_gpuscan *)dptr;
-	memset(kgscan, 0, offsetof(kern_gpuscan, data));
-	kgscan->grid_sz  = grid_sz;
-	kgscan->block_sz = block_sz;
+	kgtask = (kern_gputask *)dptr;
+	memset(kgtask, 0, offsetof(kern_gputask, stats[0]));
+	kgtask->grid_sz  = grid_sz;
+	kgtask->block_sz = block_sz;
+	kgtask->nslots = n_kvars_slots;
+	kgtask->n_rels = 0;
 
 	/* prefetch source KDS, if managed memory */
 	if (!chunk)
@@ -1191,7 +1190,7 @@ resume_kernel:
 	 * Launch kernel
 	 */
 	kern_args[0] = &gclient->session;
-	kern_args[1] = &kgscan;
+	kern_args[1] = &kgtask;
 	kern_args[2] = &m_kds_src;
 	kern_args[3] = &kds_extra;
 	kern_args[4] = &kds_dst;
@@ -1225,11 +1224,11 @@ resume_kernel:
 	}
 
 	/* status check */
-	if (kgscan->kerror.errcode == ERRCODE_STROM_SUCCESS)
+	if (kgtask->kerror.errcode == ERRCODE_STROM_SUCCESS)
 	{
 		XpuCommand	resp;
 
-		if (kgscan->suspend_count > 0)
+		if (kgtask->suspend_count > 0)
 		{
 			if (gpuServiceGoingTerminate())
 			{
@@ -1237,8 +1236,8 @@ resume_kernel:
 				goto bailout;
 			}
 			/* restore warp context from the previous state */
-			kgscan->resume_context = true;
-			kgscan->suspend_count = 0;
+			kgtask->resume_context = true;
+			kgtask->suspend_count = 0;
 			fprintf(stderr, "suspend / resume happen\n");
 			goto resume_kernel;
 		}
@@ -1248,13 +1247,13 @@ resume_kernel:
 		resp.tag   = XpuCommandTag__Success;
 		resp.u.results.chunks_nitems = kds_dst_nitems;
 		resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
-		resp.u.results.stats.scan.nitems_in = kgscan->nitems_in;
-		resp.u.results.stats.scan.nitems_out = kgscan->nitems_out;
+		resp.u.results.stats.scan.nitems_in = kgtask->nitems_in;
+		resp.u.results.stats.scan.nitems_out = kgtask->nitems_out;
 		gpuClientWriteBack(gclient,
 						   &resp, resp.u.results.chunks_offset,
 						   kds_dst_nitems, kds_dst_array);
 	}
-	else if (kgscan->kerror.errcode == ERRCODE_CPU_FALLBACK)
+	else if (kgtask->kerror.errcode == ERRCODE_CPU_FALLBACK)
 	{
 		XpuCommand	resp;
 
@@ -1271,12 +1270,12 @@ resume_kernel:
 	else
 	{
 		/* send back error status */
-		__gpuClientELogRaw(gclient, &kgscan->kerror);
+		__gpuClientELogRaw(gclient, &kgtask->kerror);
 	}
 bailout:
-	if (kgscan)
+	if (kgtask)
 	{
-		rc = cuMemFree((CUdeviceptr)kgscan);
+		rc = cuMemFree((CUdeviceptr)kgtask);
 		if (rc != CUDA_SUCCESS)
 			fprintf(stderr, "warning: failed on cuMemFree: %s\n", cuStrError(rc));
 	}

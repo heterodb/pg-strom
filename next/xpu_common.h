@@ -222,9 +222,6 @@ typedef struct
 	char			vlbuf[1];
 } kern_context;
 
-#define GPU_KVARS_UNITSZ		64
-#define DPU_KVARS_UNITSZ		1
-
 #define INIT_KERNEL_CONTEXT(KCXT,SESSION,KDS_SRC,KMRELS,KDS_DST)		\
 	do {																\
 		uint32_t	__bufsz = Max(1024, (SESSION)->kcxt_extra_bufsz);	\
