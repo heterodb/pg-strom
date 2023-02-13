@@ -1482,11 +1482,12 @@ __pwriteFile(int fdesc, const void *buffer, size_t nbytes, off_t f_pos)
  *
  * ----------------------------------------------------------------
  */
+#define IS_POSIX_SHMEM		0x80000000U
 typedef struct
 {
 	uint32_t	shmem_handle;
 	int			shmem_fdesc;
-	char		shmem_name[80];
+	char		shmem_name[MAXPGPATH];
 	ResourceOwner owner;
 } shmemEntry;
 
@@ -1570,12 +1571,13 @@ cleanup_mmap_chunks(ResourceReleasePhase phase,
 }
 
 uint32_t
-__shmemCreate(void)
+__shmemCreate(const char *shmem_dir)
 {
 	static uint	my_random_seed = 0;
-	char		namebuf[80];
 	int			fdesc;
 	uint32_t	handle;
+	char		namebuf[MAXPGPATH];
+	size_t		off = 0;
 
 	if (!shmem_tracker_htab)
 	{
@@ -1584,25 +1586,34 @@ __shmemCreate(void)
 		my_random_seed = (uint)MyProcPid ^ 0xcafebabeU;
 
 		memset(&hctl, 0, sizeof(HASHCTL));
-		hctl.keysize = sizeof(uint32_t);
+		hctl.keysize   = sizeof(uint32_t);
 		hctl.entrysize = sizeof(shmemEntry);
-		hctl.hcxt = CacheMemoryContext;
 		shmem_tracker_htab = hash_create("shmem_tracker_htab",
 										 256,
 										 &hctl,
-										 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+										 HASH_ELEM | HASH_BLOBS);
 		RegisterResourceReleaseCallback(cleanup_shmem_chunks, 0);
 	}
 
+	if (!shmem_dir)
+		shmem_dir = "/dev/shm";		/* POSIX shared memory */
+	off = snprintf(namebuf, sizeof(namebuf), "%s/", shmem_dir);
 	do {
 		handle = rand_r(&my_random_seed);
 		if (handle == 0)
 			continue;
-		snprintf(namebuf, sizeof(namebuf),
-				 ".pgstrom_shmbuf_%u_%d", PostPortNumber, handle);
-		fdesc = shm_open(namebuf, O_RDWR | O_CREAT | O_EXCL, 0600);
+		/* to avoid hash conflict */
+		if (!shmem_dir)
+			handle |= IS_POSIX_SHMEM;
+		else
+			handle &= ~IS_POSIX_SHMEM;
+
+		snprintf(namebuf + off, sizeof(namebuf) - off,
+				 ".pgstrom_shmbuf_%u_%d",
+				 PostPortNumber, handle);
+		fdesc = open(namebuf, O_RDWR | O_CREAT | O_EXCL, 0600);
 		if (fdesc < 0 && errno != EEXIST)
-			elog(ERROR, "failed on shm_open('%s'): %m", namebuf);
+			elog(ERROR, "failed on open('%s'): %m", namebuf);
 	} while (fdesc < 0);
 
 	PG_TRY();
@@ -1625,8 +1636,8 @@ __shmemCreate(void)
 	{
 		if (close(fdesc) != 0)
 			elog(WARNING, "failed on close('%s'): %m", namebuf);
-		if (shm_unlink(namebuf) != 0)
-			elog(WARNING, "failed on shm_unlink('%s'): %m", namebuf);
+		if (unlink(namebuf) != 0)
+			elog(WARNING, "failed on unlink('%s'): %m", namebuf);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -1647,12 +1658,10 @@ __shmemDrop(uint32_t shmem_handle)
 							NULL);
 		if (entry)
 		{
-			if (shm_unlink(entry->shmem_name) != 0)
-				elog(WARNING, "failed on shm_unlink('%s'): %m",
-					 entry->shmem_name);
+			if (unlink(entry->shmem_name) != 0)
+				elog(WARNING, "failed on unlink('%s'): %m", entry->shmem_name);
 			if (close(entry->shmem_fdesc) != 0)
-				elog(WARNING, "failed on close('%s'): %m",
-					 entry->shmem_name);
+				elog(WARNING, "failed on close('%s'): %m", entry->shmem_name);
 			return;
 		}
 	}
@@ -1660,7 +1669,7 @@ __shmemDrop(uint32_t shmem_handle)
 }
 
 void *
-__mmapShmem(uint32_t shmem_handle, size_t length)
+__mmapShmem(uint32_t shmem_handle, size_t length, const char *shmem_dir)
 {
 	void	   *mmap_addr = MAP_FAILED;
 	size_t		mmap_size = TYPEALIGN(PAGE_SIZE, length);
@@ -1672,8 +1681,10 @@ __mmapShmem(uint32_t shmem_handle, size_t length)
 	const char *fname = NULL;
 	struct stat	stat_buf;
 	bool		found;
-	char		namebuf[100];
+	char		namebuf[MAXPGPATH];
 
+	if (!shmem_dir)
+		shmem_dir = "/dev/shm";
 	if (!mmap_tracker_htab)
 	{
 		HASHCTL		hctl;
@@ -1681,11 +1692,10 @@ __mmapShmem(uint32_t shmem_handle, size_t length)
 		memset(&hctl, 0, sizeof(HASHCTL));
 		hctl.keysize = sizeof(void *);
 		hctl.entrysize = sizeof(mmapEntry);
-		hctl.hcxt = CacheMemoryContext;
 		mmap_tracker_htab = hash_create("mmap_tracker_htab",
 										256,
 										&hctl,
-										HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+										HASH_ELEM | HASH_BLOBS);
 		RegisterResourceReleaseCallback(cleanup_mmap_chunks, 0);
 	}
 
@@ -1697,6 +1707,11 @@ __mmapShmem(uint32_t shmem_handle, size_t length)
 								  NULL);
 		if (shmem_entry)
 		{
+			size_t		len = strlen(shmem_dir);
+
+			if (strncmp(shmem_entry->shmem_name, shmem_dir, len) != 0 ||
+				shmem_entry->shmem_name[len] != '/')
+				elog(ERROR, "Bug? shmem_dir mismatch '%s'", shmem_dir);
 			fdesc = shmem_entry->shmem_fdesc;
 			fname = shmem_entry->shmem_name;
 		}
@@ -1704,11 +1719,11 @@ __mmapShmem(uint32_t shmem_handle, size_t length)
 	if (fdesc < 0)
 	{
 		snprintf(namebuf, sizeof(namebuf),
-				 ".pgstrom_shmbuf_%u_%d",
-				 PostPortNumber, shmem_handle);
-		fdesc = shm_open(namebuf, O_RDWR, 0600);
+				 "%s/.pgstrom_shmbuf_%u_%d",
+				 shmem_dir, PostPortNumber, shmem_handle);
+		fdesc = open(namebuf, O_RDWR, 0600);
 		if (fdesc < 0)
-			elog(ERROR, "failed on shm_open('%s'): %m", namebuf);
+			elog(ERROR, "failed on open('%s'): %m", namebuf);
 		fname = namebuf;
 	}
 

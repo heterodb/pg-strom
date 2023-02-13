@@ -20,71 +20,7 @@ static CustomExecMethods	gpuscan_exec_methods;
 static bool					enable_gpuscan;		/* GUC */
 static bool					enable_pullup_outer_scan;	/* GUC */
 
-/*
- * form_gpuscan_info
- *
- * GpuScanInfo --> custom_private/custom_exprs
- */
-void
-form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
-{
-	List	   *privs = NIL;
-	List	   *exprs = NIL;
-
-	privs = lappend(privs, bms_to_pglist(gs_info->gpu_cache_devs));
-	privs = lappend(privs, bms_to_pglist(gs_info->gpu_direct_devs));
-	privs = lappend(privs, __makeByteaConst(gs_info->kexp_kvars_load));
-	privs = lappend(privs, __makeByteaConst(gs_info->kexp_scan_quals));
-	privs = lappend(privs, __makeByteaConst(gs_info->kexp_projection));
-	privs = lappend(privs, gs_info->kvars_depth);
-	privs = lappend(privs, gs_info->kvars_resno);
-	privs = lappend(privs, makeInteger(gs_info->extra_flags));
-	privs = lappend(privs, makeInteger(gs_info->extra_bufsz));
-	privs = lappend(privs, bms_to_pglist(gs_info->outer_refs));
-	exprs = lappend(exprs, gs_info->used_params);
-	exprs = lappend(exprs, gs_info->dev_quals);
-	privs = lappend(privs, __makeFloat(gs_info->scan_tuples));
-	privs = lappend(privs, __makeFloat(gs_info->scan_rows));
-	privs = lappend(privs, makeInteger(gs_info->index_oid));
-	privs = lappend(privs, gs_info->index_conds);
-	exprs = lappend(exprs, gs_info->index_quals);
-
-	cscan->custom_private = privs;
-	cscan->custom_exprs = exprs;
-}
-
-/*
- * deform_gpuscan_info
- *
- * custom_private/custom_exprs -> GpuScanInfo
- */
-void
-deform_gpuscan_info(GpuScanInfo *gs_info, CustomScan *cscan)
-{
-	List	   *privs = cscan->custom_private;
-	List	   *exprs = cscan->custom_exprs;
-	int			pindex = 0;
-	int			eindex = 0;
-
-	gs_info->gpu_cache_devs  = bms_from_pglist(list_nth(privs, pindex++));
-	gs_info->gpu_direct_devs = bms_from_pglist(list_nth(privs, pindex++));
-	gs_info->kexp_kvars_load = __getByteaConst(list_nth(privs, pindex++));
-	gs_info->kexp_scan_quals = __getByteaConst(list_nth(privs, pindex++));
-	gs_info->kexp_projection = __getByteaConst(list_nth(privs, pindex++));
-	gs_info->kvars_depth     = list_nth(privs, pindex++);
-	gs_info->kvars_resno     = list_nth(privs, pindex++);
-	gs_info->extra_flags     = intVal(list_nth(privs, pindex++));
-	gs_info->extra_bufsz     = intVal(list_nth(privs, pindex++));
-	gs_info->outer_refs      = bms_from_pglist(list_nth(privs, pindex++));
-	gs_info->used_params     = list_nth(exprs, eindex++);
-	gs_info->dev_quals       = list_nth(exprs, eindex++);
-	gs_info->scan_tuples     = floatVal(list_nth(privs, pindex++));
-	gs_info->scan_rows       = floatVal(list_nth(privs, pindex++));
-	gs_info->index_oid       = intVal(list_nth(privs, pindex++));
-	gs_info->index_conds     = list_nth(privs, pindex++);
-	gs_info->index_quals     = list_nth(exprs, eindex++);
-}
-
+#if 0
 /*
  * GpuScanSharedState
  */
@@ -115,6 +51,7 @@ typedef struct
 	XpuCommand		   *xcmd_req;	/* request command buffer */
 	size_t				xcmd_len;
 } GpuScanState;
+#endif
 
 /*
  * xpuOperatorCostRatio
@@ -468,8 +405,8 @@ GpuScanAddScanPath(PlannerInfo *root,
 	/* Creation of GpuScan path */
 	for (int try_parallel=0; try_parallel < 2; try_parallel++)
 	{
-		GpuScanInfo		gs_data;
-		GpuScanInfo	   *gs_info;
+		pgstromPlanInfo	pp_data;
+		pgstromPlanInfo	*pp_info;
 		CustomPath	   *cpath;
 		ParamPathInfo  *param_info = NULL;
 		int				parallel_nworkers = 0;
@@ -477,7 +414,7 @@ GpuScanAddScanPath(PlannerInfo *root,
 		Cost			run_cost = 0.0;
 		Cost			final_cost = 0.0;
 
-		memset(&gs_data, 0, sizeof(GpuScanInfo));
+		memset(&pp_data, 0, sizeof(pgstromPlanInfo));
 		if (!considerXpuScanPathParams(root,
 									   baserel,
 									   DEVKIND__NVIDIA_GPU,
@@ -485,19 +422,19 @@ GpuScanAddScanPath(PlannerInfo *root,
 									   dev_quals,
 									   host_quals,
 									   &parallel_nworkers,
-									   &gs_data.index_oid,
-									   &gs_data.index_conds,
-									   &gs_data.index_quals,
+									   &pp_data.brin_index_oid,
+									   &pp_data.brin_index_conds,
+									   &pp_data.brin_index_quals,
 									   &startup_cost,
 									   &run_cost,
 									   &final_cost,
-									   &gs_data.gpu_cache_devs,
-									   &gs_data.gpu_direct_devs,
+									   &pp_data.gpu_cache_devs,
+									   &pp_data.gpu_direct_devs,
 									   NULL))
 			return;
 
 		/* setup GpuScanInfo (Path phase) */
-		gs_info = pmemdup(&gs_data, sizeof(GpuScanInfo));
+		pp_info = pmemdup(&pp_data, sizeof(pgstromPlanInfo));
 		cpath = makeNode(CustomPath);
 		cpath->path.pathtype = T_CustomScan;
 		cpath->path.parent = baserel;
@@ -512,7 +449,7 @@ GpuScanAddScanPath(PlannerInfo *root,
 		cpath->path.pathkeys = NIL; /* unsorted results */
 		cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 		cpath->custom_paths = NIL;
-		cpath->custom_private = list_make1(gs_info);
+		cpath->custom_private = list_make1(pp_info);
 		cpath->methods = &gpuscan_path_methods;
 
 		if (custom_path_remember(root, baserel, (try_parallel > 0), cpath))
@@ -678,7 +615,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 					  CustomPath  *best_path,
 					  List        *tlist,
 					  List        *clauses,
-					  GpuScanInfo *gs_info,
+					  pgstromPlanInfo *pp_info,
 					  const CustomScanMethods *xpuscan_plan_methods)
 {
 	codegen_context context;
@@ -721,24 +658,24 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	/* code generation for WHERE-clause */
 	codegen_context_init(&context, DEVKIND__NVIDIA_GPU);
 	context.input_rels_tlist = input_rels_tlist;
-	gs_info->kexp_scan_quals = codegen_build_scan_quals(&context, dev_quals);
+	pp_info->kexp_scan_quals = codegen_build_scan_quals(&context, dev_quals);
 	/* code generation for the Projection */
 	tlist_dev = gpuscan_build_projection(baserel,
 										 tlist,
 										 host_quals,
 										 dev_quals,
 										 input_rels_tlist);
-	gs_info->kexp_projection = codegen_build_projection(&context, tlist_dev);
-	gs_info->kexp_kvars_load = codegen_build_scan_loadvars(&context);
-	gs_info->kvars_depth = context.kvars_depth;
-	gs_info->kvars_resno = context.kvars_resno;
-	gs_info->extra_flags = context.extra_flags;
-	gs_info->extra_bufsz = context.extra_bufsz;
-	gs_info->used_params = context.used_params;
-	gs_info->dev_quals = dev_quals;
-	gs_info->outer_refs = outer_refs;
-	gs_info->scan_tuples = baserel->tuples;
-	gs_info->scan_rows = baserel->rows;
+	pp_info->kexp_projection = codegen_build_projection(&context, tlist_dev);
+	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(&context);
+	pp_info->kvars_depth = context.kvars_depth;
+	pp_info->kvars_resno = context.kvars_resno;
+	pp_info->extra_flags = context.extra_flags;
+	pp_info->extra_bufsz = context.extra_bufsz;
+	pp_info->used_params = context.used_params;
+	pp_info->scan_quals = dev_quals;
+	pp_info->outer_refs = outer_refs;
+	pp_info->scan_tuples = baserel->tuples;
+	pp_info->scan_rows = baserel->rows;
 
 	/*
 	 * Build CustomScan(GpuScan) node
@@ -766,7 +703,7 @@ PlanGpuScanPath(PlannerInfo *root,
 				List *clauses,
 				List *custom_children)
 {
-	GpuScanInfo	   *gs_info = linitial(best_path->custom_private);
+	pgstromPlanInfo *pp_info = linitial(best_path->custom_private);
 	CustomScan	   *cscan;
 
 	/* sanity checks */
@@ -779,9 +716,9 @@ PlanGpuScanPath(PlannerInfo *root,
 								  best_path,
 								  tlist,
 								  clauses,
-								  gs_info,
+								  pp_info,
 								  &gpuscan_plan_methods);
-	form_gpuscan_info(cscan, gs_info);
+	form_pgstrom_plan_info(cscan, pp_info);
 	return &cscan->scan.plan;
 }
 
@@ -791,18 +728,17 @@ PlanGpuScanPath(PlannerInfo *root,
 static Node *
 CreateGpuScanState(CustomScan *cscan)
 {
-	GpuScanState   *gss = palloc0(sizeof(GpuScanState));
+	pgstromTaskState *pts = palloc0(sizeof(pgstromTaskState));
 
 	Assert(cscan->methods == &gpuscan_plan_methods);
-
 	/* Set tag and executor callbacks */
-	NodeSetTag(gss, T_CustomScanState);
-	gss->pts.devkind = DEVKIND__NVIDIA_GPU;
-	gss->pts.css.flags = cscan->flags;
-	gss->pts.css.methods = &gpuscan_exec_methods;
-	deform_gpuscan_info(&gss->gs_info, cscan);
+	NodeSetTag(pts, T_CustomScanState);
+	pts->devkind = DEVKIND__NVIDIA_GPU;
+	pts->css.flags = cscan->flags;
+	pts->css.methods = &gpuscan_exec_methods;
+	pts->pp_info = deform_pgstrom_plan_info(cscan);
 
-	return (Node *)gss;
+	return (Node *)pts;
 }
 
 /*
@@ -811,27 +747,28 @@ CreateGpuScanState(CustomScan *cscan)
 static void
 ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 {
-	GpuScanState   *gss = (GpuScanState *)node;
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+	pgstromPlanInfo	*pp_info = pts->pp_info;
 
 	/* sanity checks */
 	Assert(node->ss.ss_currentRelation != NULL &&
 		   outerPlanState(node) == NULL &&
 		   innerPlanState(node) == NULL);
-	pgstromExecInitTaskState(&gss->pts,
+	pgstromExecInitTaskState(pts,
 							 DEVKIND__NVIDIA_GPU,
-							 gss->gs_info.dev_quals,
-							 gss->gs_info.outer_refs,
-							 gss->gs_info.index_oid,
-							 gss->gs_info.index_conds,
-							 gss->gs_info.index_quals);
-	gss->pts.cb_cpu_fallback = ExecFallbackCpuScan;
+							 pp_info->scan_quals,
+							 pp_info->outer_refs,
+							 pp_info->brin_index_oid,
+							 pp_info->brin_index_conds,
+							 pp_info->brin_index_quals);
+	pts->cb_cpu_fallback = ExecFallbackCpuScan;
 }
 
 /*
  * GpuScanReCheckTuple
  */
 static bool
-GpuScanReCheckTuple(GpuScanState *gss, TupleTableSlot *epq_slot)
+GpuScanReCheckTuple(pgstromTaskState *pts, TupleTableSlot *epq_slot)
 {
 	/*
 	 * NOTE: Only immutable operators/functions are executable
@@ -846,28 +783,29 @@ GpuScanReCheckTuple(GpuScanState *gss, TupleTableSlot *epq_slot)
 static TupleTableSlot *
 ExecGpuScan(CustomScanState *node)
 {
-	GpuScanState   *gss = (GpuScanState *)node;
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+	pgstromPlanInfo	 *pp_info = pts->pp_info;
 
-	if (!gss->pts.ps_state)
-		pgstromSharedStateInitDSM(&gss->pts, NULL, NULL);
-	if (!gss->pts.conn)
+	if (!pts->ps_state)
+		pgstromSharedStateInitDSM(pts, NULL, NULL);
+	if (!pts->conn)
 	{
 		const XpuCommand *session;
 
-		session = pgstromBuildSessionInfo(&gss->pts,
-										  gss->gs_info.used_params,
-										  gss->gs_info.extra_bufsz,
-										  gss->gs_info.kvars_depth,
-										  gss->gs_info.kvars_resno,
-										  gss->gs_info.kexp_kvars_load,
-										  gss->gs_info.kexp_scan_quals,
+		session = pgstromBuildSessionInfo(pts,
+										  pp_info->used_params,
+										  pp_info->extra_bufsz,
+										  pp_info->kvars_depth,
+										  pp_info->kvars_resno,
+										  pp_info->kexp_scan_kvars_load,
+										  pp_info->kexp_scan_quals,
 										  NULL,		/* join-load-vars */
 										  NULL,		/* join-quals */
 										  NULL,		/* hash-values */
 										  NULL,		/* gist-join */
-										  gss->gs_info.kexp_projection,
+										  pp_info->kexp_projection,
 										  0);
-		gpuClientOpenSession(&gss->pts, gss->pts.optimal_gpus, session);
+		gpuClientOpenSession(pts, pts->optimal_gpus, session);
 	}
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecTaskState,
@@ -880,9 +818,9 @@ ExecGpuScan(CustomScanState *node)
 static void
 ExecEndGpuScan(CustomScanState *node)
 {
-	GpuScanState   *gss = (GpuScanState *)node;
+	pgstromTaskState *pts = (pgstromTaskState *) node;
 
-	pgstromExecEndTaskState(&gss->pts);
+	pgstromExecEndTaskState(pts);
 }
 
 /*
@@ -891,9 +829,9 @@ ExecEndGpuScan(CustomScanState *node)
 static void
 ExecReScanGpuScan(CustomScanState *node)
 {
-	GpuScanState   *gss = (GpuScanState *)node;
+	pgstromTaskState *pts = (pgstromTaskState *) node;
 
-	pgstromExecResetTaskState(&gss->pts);
+	pgstromExecResetTaskState(pts);
 }
 
 /*
@@ -903,7 +841,9 @@ static Size
 EstimateGpuScanDSM(CustomScanState *node,
 				   ParallelContext *pcxt)
 {
-	return pgstromSharedStateEstimateDSM((pgstromTaskState *)node);
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	return pgstromSharedStateEstimateDSM(pts);
 }
 
 /*
@@ -914,7 +854,9 @@ InitializeGpuScanDSM(CustomScanState *node,
 					 ParallelContext *pcxt,
 					 void *dsm_addr)
 {
-	pgstromSharedStateInitDSM((pgstromTaskState *)node, pcxt, dsm_addr);
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	pgstromSharedStateInitDSM(pts, pcxt, dsm_addr);
 }
 
 /*
@@ -923,7 +865,9 @@ InitializeGpuScanDSM(CustomScanState *node,
 static void
 InitGpuScanWorker(CustomScanState *node, shm_toc *toc, void *dsm_addr)
 {
-	pgstromSharedStateAttachDSM((pgstromTaskState *)node, dsm_addr);
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	pgstromSharedStateAttachDSM(pts, dsm_addr);
 }
 
 /*
@@ -932,7 +876,9 @@ InitGpuScanWorker(CustomScanState *node, shm_toc *toc, void *dsm_addr)
 static void
 ExecShutdownGpuScan(CustomScanState *node)
 {
-	pgstromSharedStateShutdownDSM((pgstromTaskState *)node);
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	pgstromSharedStateShutdownDSM(pts);
 }
 
 /*
@@ -943,33 +889,32 @@ ExplainGpuScan(CustomScanState *node,
 			   List *ancestors,
 			   ExplainState *es)
 {
-	GpuScanState   *gss = (GpuScanState *) node;
-	GpuScanInfo	   *gs_info = &gss->gs_info;
-	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
-	List		   *dcontext;
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	CustomScan *cscan = (CustomScan *)node->ss.ps.plan;
+	List	   *dcontext;
 
 	/* setup deparsing context */
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
-										node->ss.ps.plan,
+										(Plan *)cscan,
 										ancestors);
-	pgstromExplainScanState(&gss->pts, es,
+	pgstromExplainScanState(pts, es,
 							dcontext,
 							cscan->custom_scan_tlist,
-							gs_info->dev_quals,
-							gs_info->scan_tuples,
-                            gs_info->scan_rows);
+							pp_info->scan_quals,
+							pp_info->scan_tuples,
+                            pp_info->scan_rows);
 	/* XPU Code (if verbose) */
-	pgstrom_explain_xpucode(&gss->pts.css, es, dcontext,
+	pgstrom_explain_xpucode(&pts->css, es, dcontext,
 							"Scan Var-Loads Code",
-							gs_info->kexp_kvars_load);
-	pgstrom_explain_xpucode(&gss->pts.css, es, dcontext,
+							pp_info->kexp_scan_kvars_load);
+	pgstrom_explain_xpucode(&pts->css, es, dcontext,
 							"Scan Quals Code",
-							gs_info->kexp_scan_quals);
-	pgstrom_explain_xpucode(&gss->pts.css, es, dcontext,
-							"DPU Projection Code",
-							gs_info->kexp_projection);
-
-	pgstromExplainTaskState(&gss->pts, es, dcontext);
+							pp_info->kexp_scan_quals);
+	pgstrom_explain_xpucode(&pts->css, es, dcontext,
+							"GPU Projection Code",
+							pp_info->kexp_projection);
+	pgstromExplainTaskState(pts, es, dcontext);
 }
 
 /*

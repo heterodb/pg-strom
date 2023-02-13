@@ -23,57 +23,63 @@ static bool					enable_gpuhashjoin;		/* GUC */
 static bool					enable_gpugistindex;	/* GUC */
 
 /*
- * form_gpujoin_info
+ * form_pgstrom_plan_info
  *
- * GpuJoinInfo --> custom_private/custom_exprs
+ * pgstromPlanInfo --> custom_private/custom_exprs
  */
-static void
-form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
+void
+form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 {
-	List	   *privs = NIL;
-	List	   *exprs = NIL;
-	int			endpoint_id;
+	List   *privs = NIL;
+	List   *exprs = NIL;
+	int		endpoint_id;
 
-	privs = lappend(privs, bms_to_pglist(gj_info->gpu_cache_devs));
-	privs = lappend(privs, bms_to_pglist(gj_info->gpu_direct_devs));
-	endpoint_id = DpuStorageEntryGetEndpointId(gj_info->ds_entry);
+	privs = lappend(privs, bms_to_pglist(pp_info->gpu_cache_devs));
+	privs = lappend(privs, bms_to_pglist(pp_info->gpu_direct_devs));
+	endpoint_id = DpuStorageEntryGetEndpointId(pp_info->ds_entry);
 	privs = lappend(privs, makeInteger(endpoint_id));
-	privs = lappend(privs, makeInteger(gj_info->extra_flags));
-	privs = lappend(privs, makeInteger(gj_info->extra_bufsz));
-	privs = lappend(privs, makeInteger(gj_info->kvars_nslots));
-	privs = lappend(privs, bms_to_pglist(gj_info->outer_refs));
-	exprs = lappend(exprs, gj_info->used_params);
-	privs = lappend(privs, makeInteger(gj_info->scan_relid));
-	exprs = lappend(exprs, gj_info->scan_quals);
-	privs = lappend(privs, __makeFloat(gj_info->scan_tuples));
-	privs = lappend(privs, __makeFloat(gj_info->scan_rows));
-	privs = lappend(privs, __makeFloat(gj_info->final_cost));
-	privs = lappend(privs, makeInteger(gj_info->brin_index_oid));
-	exprs = lappend(exprs, gj_info->brin_index_conds);
-	exprs = lappend(exprs, gj_info->brin_index_quals);
-	privs = lappend(privs, __makeByteaConst(gj_info->kern_scan_quals));
-	privs = lappend(privs, __makeByteaConst(gj_info->kern_join_quals_packed));
-	privs = lappend(privs, __makeByteaConst(gj_info->kern_hash_keys_packed));
-	privs = lappend(privs, __makeByteaConst(gj_info->kern_gist_quals_packed));
-	privs = lappend(privs, __makeByteaConst(gj_info->kern_join_projs));
-	privs = lappend(privs, makeInteger(gj_info->num_rels));
-
-	for (int i=0; i < gj_info->num_rels; i++)
+	/* plan information */
+	privs = lappend(privs, bms_to_pglist(pp_info->outer_refs));
+	exprs = lappend(exprs, pp_info->used_params);
+	privs = lappend(privs, makeInteger(pp_info->scan_relid));
+	exprs = lappend(exprs, pp_info->scan_quals);
+	privs = lappend(privs, __makeFloat(pp_info->scan_tuples));
+	privs = lappend(privs, __makeFloat(pp_info->scan_rows));
+	privs = lappend(privs, __makeFloat(pp_info->final_cost));
+	/* bin-index support */
+	privs = lappend(privs, makeInteger(pp_info->brin_index_oid));
+	exprs = lappend(exprs, pp_info->brin_index_conds);
+	exprs = lappend(exprs, pp_info->brin_index_quals);
+	/* XPU code */
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_scan_kvars_load));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_scan_quals));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_join_kvars_load_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_join_quals_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_hash_keys_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_gist_quals_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_projection));
+	privs = lappend(privs, pp_info->kvars_depth);
+	privs = lappend(privs, pp_info->kvars_resno);
+	privs = lappend(privs, makeInteger(pp_info->extra_flags));
+	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
+	/* inner relations */
+	privs = lappend(privs, makeInteger(pp_info->num_rels));
+	for (int i=0; i < pp_info->num_rels; i++)
 	{
-		GpuJoinInnerInfo *gj_inner = &gj_info->inners[i];
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 		List   *__privs = NIL;
 		List   *__exprs = NIL;
 
-		__privs = lappend(__privs, makeInteger(gj_inner->join_type));
-		__privs = lappend(__privs, __makeFloat(gj_inner->join_nrows));
-		__exprs = lappend(__exprs, gj_inner->hash_outer_keys);
-		__exprs = lappend(__exprs, gj_inner->hash_inner_keys);
-		__exprs = lappend(__exprs, gj_inner->join_quals);
-		__exprs = lappend(__exprs, gj_inner->other_quals);
-		__privs = lappend(__privs, makeInteger(gj_inner->gist_index_oid));
-		__privs = lappend(__privs, makeInteger(gj_inner->gist_index_col));
-		__exprs = lappend(__exprs, gj_inner->gist_clause);
-		__privs = lappend(__privs, __makeFloat(gj_inner->gist_selectivity));
+		__privs = lappend(__privs, makeInteger(pp_inner->join_type));
+		__privs = lappend(__privs, __makeFloat(pp_inner->join_nrows));
+		__exprs = lappend(__exprs, pp_inner->hash_outer_keys);
+		__exprs = lappend(__exprs, pp_inner->hash_inner_keys);
+		__exprs = lappend(__exprs, pp_inner->join_quals);
+		__exprs = lappend(__exprs, pp_inner->other_quals);
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_oid));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_col));
+		__exprs = lappend(__exprs, pp_inner->gist_clause);
+		__privs = lappend(__privs, __makeFloat(pp_inner->gist_selectivity));
 
 		privs = lappend(privs, __privs);
 		exprs = lappend(exprs, __exprs);
@@ -83,68 +89,73 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 }
 
 /*
- * deform_gpujoin_info
- *
- * custom_private/custom_exprs -> GpuJoinInfo
+ * deform_pgstrom_plan_info
  */
-static GpuJoinInfo *
-deform_gpujoin_info(CustomScan *cscan)
+pgstromPlanInfo *
+deform_pgstrom_plan_info(CustomScan *cscan)
 {
-	GpuJoinInfo	gj_data;
-	GpuJoinInfo *gj_info;
+	pgstromPlanInfo *pp_info;
+	pgstromPlanInfo	pp_data;
 	List	   *privs = cscan->custom_private;
 	List	   *exprs = cscan->custom_exprs;
 	int			pindex = 0;
 	int			eindex = 0;
 	int			endpoint_id;
-
-	memset(&gj_data, 0, sizeof(GpuJoinInfo));
-	gj_data.gpu_cache_devs = bms_from_pglist(list_nth(privs, pindex++));
-	gj_data.gpu_direct_devs = bms_from_pglist(list_nth(privs, pindex++));
+	
+	memset(&pp_data, 0, sizeof(pgstromPlanInfo));
+	/* device identifiers */
+	pp_data.gpu_cache_devs = bms_from_pglist(list_nth(privs, pindex++));
+	pp_data.gpu_direct_devs = bms_from_pglist(list_nth(privs, pindex++));
 	endpoint_id = intVal(list_nth(privs, pindex++));
-	gj_data.ds_entry = DpuStorageEntryByEndpointId(endpoint_id);
-	gj_data.extra_flags = intVal(list_nth(privs, pindex++));
-	gj_data.extra_bufsz = intVal(list_nth(privs, pindex++));
-	gj_data.kvars_nslots = intVal(list_nth(privs, pindex++));
-	gj_data.outer_refs = bms_from_pglist(list_nth(privs, pindex++));
-	gj_data.used_params = list_nth(exprs, eindex++);
-	gj_data.scan_relid = intVal(list_nth(privs, pindex++));
-	gj_data.scan_quals = list_nth(exprs, eindex++);
-	gj_data.scan_tuples = floatVal(list_nth(privs, pindex++));
-	gj_data.scan_rows = floatVal(list_nth(privs, pindex++));
-	gj_data.final_cost = floatVal(list_nth(privs, pindex++));
-	gj_data.brin_index_oid = intVal(list_nth(privs, pindex++));
-	gj_data.brin_index_conds = list_nth(exprs, eindex++);
-	gj_data.brin_index_quals = list_nth(exprs, eindex++);
-	gj_data.kern_scan_quals = __getByteaConst(list_nth(privs, pindex++));
-	gj_data.kern_join_quals_packed = __getByteaConst(list_nth(privs, pindex++));
-	gj_data.kern_hash_keys_packed = __getByteaConst(list_nth(privs, pindex++));
-	gj_data.kern_gist_quals_packed = __getByteaConst(list_nth(privs, pindex++));
-	gj_data.kern_join_projs = __getByteaConst(list_nth(privs, pindex++));
-	gj_data.num_rels = intVal(list_nth(privs, pindex++));
-
-	gj_info = palloc0(offsetof(GpuJoinInfo, inners[gj_data.num_rels]));
-	memcpy(gj_info, &gj_data, offsetof(GpuJoinInfo, inners));
-	for (int i=0; i < gj_info->num_rels; i++)
+	pp_data.ds_entry = DpuStorageEntryByEndpointId(endpoint_id);
+	/* plan information */
+	pp_data.outer_refs = bms_from_pglist(list_nth(privs, pindex++));
+	pp_data.used_params = list_nth(exprs, eindex++);
+	pp_data.scan_relid = intVal(list_nth(privs, pindex++));
+	pp_data.scan_quals = list_nth(exprs, eindex++);
+	pp_data.scan_tuples = floatVal(list_nth(privs, pindex++));
+	pp_data.scan_rows = floatVal(list_nth(privs, pindex++));
+	pp_data.final_cost = floatVal(list_nth(privs, pindex++));
+	/* brin-index support */
+	pp_data.brin_index_oid = intVal(list_nth(privs, pindex++));
+	pp_data.brin_index_conds = list_nth(exprs, eindex++);
+	pp_data.brin_index_quals = list_nth(exprs, eindex++);
+	/* XPU code */
+	pp_data.kexp_scan_kvars_load = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_scan_quals = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_join_kvars_load_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_join_quals_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_hash_keys_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_gist_quals_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_projection = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kvars_depth = list_nth(privs, pindex++);
+	pp_data.kvars_resno = list_nth(privs, pindex++);
+	pp_data.extra_flags = intVal(list_nth(privs, pindex++));
+	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
+	/* inner relations */
+	pp_data.num_rels = intVal(list_nth(privs, pindex++));
+	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_data.num_rels]));
+	memcpy(pp_info, &pp_data, offsetof(pgstromPlanInfo, inners));
+	for (int i=0; i < pp_info->num_rels; i++)
 	{
-		GpuJoinInnerInfo *gj_inner = &gj_info->inners[i];
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 		List   *__privs = list_nth(privs, pindex++);
 		List   *__exprs = list_nth(exprs, eindex++);
 		int		__pindex = 0;
 		int		__eindex = 0;
 
-		gj_inner->join_type = intVal(list_nth(__privs, __pindex++));
-		gj_inner->join_nrows = floatVal(list_nth(__privs, __pindex++));
-		gj_inner->hash_outer_keys = list_nth(__exprs, __eindex++);
-		gj_inner->hash_inner_keys = list_nth(__exprs, __eindex++);
-		gj_inner->join_quals = list_nth(__exprs, __eindex++);
-		gj_inner->other_quals = list_nth(__exprs, __eindex++);
-		gj_inner->gist_index_oid = intVal(list_nth(__privs, __pindex++));
-		gj_inner->gist_index_col = intVal(list_nth(__privs, __pindex++));
-		gj_inner->gist_clause = list_nth(__exprs, __eindex++);
-		gj_inner->gist_selectivity = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->join_type = intVal(list_nth(__privs, __pindex++));
+		pp_inner->join_nrows = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->hash_outer_keys = list_nth(__exprs, __eindex++);
+		pp_inner->hash_inner_keys = list_nth(__exprs, __eindex++);
+		pp_inner->join_quals = list_nth(__exprs, __eindex++);
+		pp_inner->other_quals = list_nth(__exprs, __eindex++);
+		pp_inner->gist_index_oid = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_index_col = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_clause = list_nth(__exprs, __eindex++);
+		pp_inner->gist_selectivity = floatVal(list_nth(__privs, __pindex++));
 	}
-	return gj_info;
+	return pp_info;
 }
 
 /*
@@ -176,7 +187,7 @@ match_clause_to_gist_index(PlannerInfo *root,
  */
 static void
 try_find_gpu_gist_index(PlannerInfo *root,
-						GpuJoinInnerInfo *gj_inner,
+						pgstromPlanInnerInfo *pp_inner,
 						JoinType jointype,
 						Path *inner_path,
 						List *restrict_clauses)
@@ -195,8 +206,8 @@ try_find_gpu_gist_index(PlannerInfo *root,
 	 * Not only GiST, index should be built on normal relations.
 	 * And, IndexOnlyScan may not contain CTID, so not supported.
 	 */
-	Assert(gj_inner->hash_outer_keys == NIL &&
-		   gj_inner->hash_inner_keys == NIL);
+	Assert(pp_inner->hash_outer_keys == NIL &&
+		   pp_inner->hash_inner_keys == NIL);
 	if (!IS_SIMPLE_REL(inner_rel) && inner_path->pathtype != T_IndexOnlyScan)
 		return;
 	/* see the logic in create_index_paths */
@@ -270,15 +281,15 @@ try_find_gpu_gist_index(PlannerInfo *root,
 			new_target->exprs = lappend(new_target->exprs, var);
 			gist_ctid_resno = list_length(new_target->exprs);
 			new_path->pathtarget = new_target;
-			gj_inner->inner_path = new_path;
+			pp_inner->inner_path = new_path;
 		}
 	}
 #endif
-	gj_inner->gist_index_oid = gist_index->indexoid;
-	gj_inner->gist_index_col = gist_index_col;
-//	gj_inner->gist_ctid_resno = SelfItemPointerAttributeNumber;
-	gj_inner->gist_clause = gist_clause;
-	gj_inner->gist_selectivity = gist_selectivity;
+	pp_inner->gist_index_oid = gist_index->indexoid;
+	pp_inner->gist_index_col = gist_index_col;
+//	pp_inner->gist_ctid_resno = SelfItemPointerAttributeNumber;
+	pp_inner->gist_clause = gist_clause;
+	pp_inner->gist_selectivity = gist_selectivity;
 }
 
 /*
@@ -300,9 +311,9 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 	Relids			required_outer;
 	ParamPathInfo  *param_info;
 	CustomPath	   *cpath;
-	GpuJoinInfo	   *gj_prev;
-	GpuJoinInfo	   *gj_info;
-	GpuJoinInnerInfo *gj_inner;
+	pgstromPlanInfo	*pp_prev;
+	pgstromPlanInfo	*pp_info;
+	pgstromPlanInnerInfo *pp_inner;
 	List		   *join_quals = NIL;
 	List		   *other_quals = NIL;
 	List		   *hash_outer_keys = NIL;
@@ -367,8 +378,8 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 		List	   *scan_costs = NIL;
 		int			devcost;
 
-		gj_prev = alloca(offsetof(GpuJoinInfo, inners));
-		memset(gj_prev, 0, offsetof(GpuJoinInfo, inners));
+		pp_prev = alloca(offsetof(pgstromPlanInfo, inners));
+		memset(pp_prev, 0, offsetof(pgstromPlanInfo, inners));
 
 		input_rels_tlist = list_make1(makeInteger(outer_rel->relid));
 		foreach (lc, outer_rel->baserestrictinfo)
@@ -400,25 +411,25 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 			}
 		}
 		sort_device_qualifiers(scan_quals, scan_costs);
-		gj_prev->scan_quals = scan_quals;
-		gj_prev->scan_relid = outer_rel->relid;
-		gj_prev->scan_tuples = outer_rel->tuples;
-		gj_prev->scan_rows = outer_rel->rows;
+		pp_prev->scan_quals = scan_quals;
+		pp_prev->scan_relid = outer_rel->relid;
+		pp_prev->scan_tuples = outer_rel->tuples;
+		pp_prev->scan_rows = outer_rel->rows;
 		if (!considerXpuScanPathParams(root,
 									   outer_rel,
 									   DEVKIND__NVIDIA_GPU,
 									   try_parallel_path,
-									   gj_prev->scan_quals,
+									   pp_prev->scan_quals,
 									   NIL,		/* host_quals */
 									   &parallel_nworkers,
-									   &gj_prev->brin_index_oid,
-									   &gj_prev->brin_index_conds,
-									   &gj_prev->brin_index_quals,
+									   &pp_prev->brin_index_oid,
+									   &pp_prev->brin_index_conds,
+									   &pp_prev->brin_index_quals,
 									   &startup_cost,
 									   &run_cost,
 									   NULL,
-									   &gj_prev->gpu_cache_devs,
-									   &gj_prev->gpu_direct_devs,
+									   &pp_prev->gpu_cache_devs,
+									   &pp_prev->gpu_direct_devs,
 									   NULL))	/* ds_entry (DPU) */
 			return false;
 	}
@@ -426,12 +437,12 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 	{
 		CustomPath	   *__cpath = (CustomPath *)outer_path;
 
-		gj_prev = linitial(__cpath->custom_private);
+		pp_prev = linitial(__cpath->custom_private);
 		startup_cost = __cpath->path.startup_cost;
 		run_cost = (__cpath->path.total_cost -
-					__cpath->path.startup_cost - gj_prev ->final_cost);
+					__cpath->path.startup_cost - pp_prev ->final_cost);
 		inner_paths_list = list_copy(__cpath->custom_paths);
-		input_rels_tlist = list_make1(makeInteger(gj_prev->scan_relid));
+		input_rels_tlist = list_make1(makeInteger(pp_prev->scan_relid));
 		foreach (lc, inner_paths_list)
 		{
 			Path   *__ipath = lfirst(lc);
@@ -445,12 +456,12 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 	input_rels_tlist = lappend(input_rels_tlist, inner_path->pathtarget);
 
 	/*
-	 * Setup GpuJoinInfo
+	 * Setup pgstromPlanInfo
 	 */
-	gj_info = palloc0(offsetof(GpuJoinInfo, inners[gj_prev->num_rels+1]));
-	memcpy(gj_info, gj_prev, offsetof(GpuJoinInfo, inners[gj_prev->num_rels]));
-	gj_info->num_rels = gj_prev->num_rels + 1;
-	gj_inner = &gj_info->inners[gj_prev->num_rels];
+	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_prev->num_rels+1]));
+	memcpy(pp_info, pp_prev, offsetof(pgstromPlanInfo, inners[pp_prev->num_rels]));
+	pp_info->num_rels = pp_prev->num_rels + 1;
+	pp_inner = &pp_info->inners[pp_prev->num_rels];
 
 	/*
 	 * All the join-clauses must be executable on GPU device.
@@ -533,15 +544,15 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 			bms_free(relids2);
 		}
 	}
-	gj_inner->join_type = join_type;
-	gj_inner->join_nrows = joinrel->rows;
-	gj_inner->hash_outer_keys = hash_outer_keys;
-	gj_inner->hash_inner_keys = hash_inner_keys;
-	gj_inner->join_quals = join_quals;
-	gj_inner->other_quals = other_quals;
+	pp_inner->join_type = join_type;
+	pp_inner->join_nrows = joinrel->rows;
+	pp_inner->hash_outer_keys = hash_outer_keys;
+	pp_inner->hash_inner_keys = hash_inner_keys;
+	pp_inner->join_quals = join_quals;
+	pp_inner->other_quals = other_quals;
 	if (hash_outer_keys == NIL && hash_inner_keys == NIL)
 		try_find_gpu_gist_index(root,
-								gj_inner,
+								pp_inner,
 								join_type,
 								inner_path,
 								restrict_clauses);
@@ -571,13 +582,13 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 		/* cost to evaluate join qualifiers */
 		run_cost += join_quals_cost.per_tuple * xpu_ratio * outer_path->rows;
 	}
-	else if (OidIsValid(gj_inner->gist_index_oid))
+	else if (OidIsValid(pp_inner->gist_index_oid))
 	{
 		/*
 		 * GpuNestLoop+GiST-Index
 		 */
-		Node	   *gist_clause = gj_inner->gist_clause;
-		double		gist_selectivity = gj_inner->gist_selectivity;
+		Node	   *gist_clause = pp_inner->gist_clause;
+		double		gist_selectivity = pp_inner->gist_selectivity;
 		QualCost	gist_clause_cost;
 
 		/* cost to preload inner heap tuples by CPU */
@@ -615,7 +626,7 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 	/* cost for host projection */
 	final_cost += joinrel->reltarget->cost.per_tuple * joinrel->rows;
 
-	gj_info->final_cost = final_cost;
+	pp_info->final_cost = final_cost;
 
 	/*
 	 * Build the CustomPath
@@ -635,7 +646,7 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 	cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	cpath->methods = &gpujoin_path_methods;
 	cpath->custom_paths = lappend(inner_paths_list, inner_path);
-	cpath->custom_private = list_make1(gj_info);
+	cpath->custom_private = list_make1(pp_info);
 
 	if (custom_path_remember(root, joinrel, try_parallel_path, cpath))
 	{
@@ -877,7 +888,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 					  CustomPath *cpath,
 					  List *tlist,
 					  List *custom_plans,
-					  GpuJoinInfo *gj_info,
+					  pgstromPlanInfo *pp_info,
 					  const CustomScanMethods *xpujoin_plan_methods)
 {
 	codegen_context context;
@@ -892,9 +903,9 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	List	   *tlist_dev;
 	ListCell   *lc;
 
-	Assert(gj_info->num_rels == list_length(custom_plans));
+	Assert(pp_info->num_rels == list_length(custom_plans));
 	memset(&context, 0, sizeof(codegen_context));
-	input_rels_tlist = list_make1(makeInteger(gj_info->scan_relid));
+	input_rels_tlist = list_make1(makeInteger(pp_info->scan_relid));
 	foreach (lc, cpath->custom_paths)
 	{
 		Path	   *__ipath = lfirst(lc);
@@ -903,60 +914,60 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	context.input_rels_tlist = input_rels_tlist;
 
 	/* codegen for outer scan, if any */
-	if (gj_info->scan_quals)
+	if (pp_info->scan_quals)
 	{
-		gj_info->kern_scan_quals
-			= codegen_build_qualifiers(&context, gj_info->scan_quals);
-		pull_varattnos((Node *)gj_info->scan_quals,
-					   gj_info->scan_relid,
+		pp_info->kexp_scan_quals
+			= codegen_build_scan_quals(&context, pp_info->scan_quals);
+		pull_varattnos((Node *)pp_info->scan_quals,
+					   pp_info->scan_relid,
 					   &outer_refs);
-		misc_exprs = list_concat(misc_exprs, gj_info->scan_quals);
+		misc_exprs = list_concat(misc_exprs, pp_info->scan_quals);
 	}
 
 	/*
 	 * codegen for hashing, join-quals, and gist-quals
 	 */
-	for (int i=0; i < gj_info->num_rels; i++)
+	for (int i=0; i < pp_info->num_rels; i++)
 	{
-		GpuJoinInnerInfo *gj_inner = &gj_info->inners[i];
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
 		/* xpu code to generate outer hash-value */
-		if (gj_inner->hash_outer_keys != NIL &&
-			gj_inner->hash_inner_keys != NIL)
+		if (pp_inner->hash_outer_keys != NIL &&
+			pp_inner->hash_inner_keys != NIL)
 		{
 			hash_keys_stacked = lappend(hash_keys_stacked,
-										gj_inner->hash_outer_keys);
-			pull_varattnos((Node *)gj_inner->hash_outer_keys,
-						   gj_info->scan_relid,
+										pp_inner->hash_outer_keys);
+			pull_varattnos((Node *)pp_inner->hash_outer_keys,
+						   pp_info->scan_relid,
 						   &outer_refs);
-			misc_exprs = list_concat(misc_exprs, gj_inner->hash_outer_keys);
-			misc_exprs = list_concat(misc_exprs, gj_inner->hash_inner_keys);
+			misc_exprs = list_concat(misc_exprs, pp_inner->hash_outer_keys);
+			misc_exprs = list_concat(misc_exprs, pp_inner->hash_inner_keys);
 		}
 		else
 		{
-			Assert(gj_inner->hash_outer_keys == NIL &&
-				   gj_inner->hash_inner_keys == NIL);
+			Assert(pp_inner->hash_outer_keys == NIL &&
+				   pp_inner->hash_inner_keys == NIL);
 			hash_keys_stacked = lappend(hash_keys_stacked, NIL);
 		}
 		
 		/* xpu code to evaluate join qualifiers */
-		join_quals_stacked = lappend(join_quals_stacked, gj_inner->join_quals);
-		pull_varattnos((Node *)gj_inner->join_quals,
-					   gj_info->scan_relid,
+		join_quals_stacked = lappend(join_quals_stacked, pp_inner->join_quals);
+		pull_varattnos((Node *)pp_inner->join_quals,
+					   pp_info->scan_relid,
 					   &outer_refs);
-		other_quals_stacked = lappend(other_quals_stacked, gj_inner->other_quals);
-		pull_varattnos((Node *)gj_inner->other_quals,
-					   gj_info->scan_relid,
+		other_quals_stacked = lappend(other_quals_stacked, pp_inner->other_quals);
+		pull_varattnos((Node *)pp_inner->other_quals,
+					   pp_info->scan_relid,
 					   &outer_refs);
-		misc_exprs = list_concat(misc_exprs, gj_inner->join_quals);
-		misc_exprs = list_concat(misc_exprs, gj_inner->other_quals);
+		misc_exprs = list_concat(misc_exprs, pp_inner->join_quals);
+		misc_exprs = list_concat(misc_exprs, pp_inner->other_quals);
 
 		/* xpu code to evaluate gist qualifiers */
-		if (OidIsValid(gj_inner->gist_index_oid))
+		if (OidIsValid(pp_inner->gist_index_oid))
 		{
-			Assert(gj_inner->gist_clause != NIL);
+			Assert(pp_inner->gist_clause != NIL);
 			//TODO: XPU code generation
-			misc_exprs = lappend(misc_exprs, gj_inner->gist_clause);
+			misc_exprs = lappend(misc_exprs, pp_inner->gist_clause);
 		}
 		gist_quals_stacked = lappend(gist_quals_stacked, NIL);
 	}
@@ -966,24 +977,27 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 										NIL,
 										misc_exprs,
 										input_rels_tlist);
-	gj_info->kern_join_projs = codegen_build_projection(&context, tlist_dev);
-	
-	gj_info->kern_join_quals_packed
+	pp_info->kexp_projection = codegen_build_projection(&context, tlist_dev);
+	pp_info->kexp_join_quals_packed
 		= codegen_build_packed_joinquals(&context,
 										 join_quals_stacked,
 										 other_quals_stacked);
-	gj_info->kern_hash_keys_packed
-		= codegen_build_packed_hashkeys(&context, hash_keys_stacked);
-	gj_info->kern_gist_quals_packed = NULL;
-	gj_info->extra_flags  = context.extra_flags;
-	gj_info->extra_bufsz  = context.extra_bufsz;
-	gj_info->kvars_nslots = context.kvars_nslots;
-	gj_info->used_params  = context.used_params;
-	gj_info->outer_refs   = outer_refs;
+	pp_info->kexp_hash_keys_packed
+		= codegen_build_packed_hashkeys(&context,
+										hash_keys_stacked);
+	pp_info->kexp_gist_quals_packed = NULL;
+	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(&context);
+	pp_info->kexp_join_kvars_load_packed = codegen_build_join_loadvars(&context);
+	pp_info->kvars_depth  = context.kvars_depth;
+	pp_info->kvars_resno  = context.kvars_resno;
+	pp_info->extra_flags  = context.extra_flags;
+	pp_info->extra_bufsz  = context.extra_bufsz;
+	pp_info->used_params  = context.used_params;
+	pp_info->outer_refs   = outer_refs;
 
 	cscan = makeNode(CustomScan);
 	cscan->scan.plan.targetlist = tlist;
-	cscan->scan.scanrelid = gj_info->scan_relid;
+	cscan->scan.scanrelid = pp_info->scan_relid;
 	cscan->flags = cpath->flags;
 	cscan->custom_plans = custom_plans;
 	cscan->custom_scan_tlist = tlist_dev;
@@ -1003,7 +1017,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 				List *clauses,
 				List *custom_plans)
 {
-	GpuJoinInfo	   *gj_info = linitial(cpath->custom_private);
+	pgstromPlanInfo	*pp_info = linitial(cpath->custom_private);
 	CustomScan	   *cscan;
 
 	cscan = PlanXpuJoinPathCommon(root,
@@ -1011,9 +1025,9 @@ PlanGpuJoinPath(PlannerInfo *root,
 								  cpath,
 								  tlist,
 								  custom_plans,
-								  gj_info,
+								  pp_info,
 								  &gpujoin_plan_methods);
-	form_gpujoin_info(cscan, gj_info);
+	form_pgstrom_plan_info(cscan, pp_info);
 	return &cscan->scan.plan;
 }
 
@@ -1023,6 +1037,7 @@ PlanGpuJoinPath(PlannerInfo *root,
  *
  * ----------------------------------------------------------------
  */
+#if 0
 typedef struct
 {
 	PlanState	   *ps;
@@ -1060,15 +1075,16 @@ typedef struct
 typedef struct GpuJoinState
 {
 	pgstromTaskState pts;
-	GpuJoinInfo	   *gj_info;
+	pgstromPlanInfo	*gj_info;
 	XpuCommand	   *xcmd_req;
 	size_t			xcmd_len;
 	/* inner relations */
 	int				num_rels;
 	GpuJoinInnerState inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
+#endif
 
-static uint32_t		GpuJoinInnerPreload(GpuJoinState *gjs);
+static uint32_t		GpuJoinInnerPreload(pgstromTaskState *pts);
 
 /*
  * fixup_inner_varnode
@@ -1137,21 +1153,20 @@ fixup_inner_varnode(List *exprs, CustomScan *cscan, Plan *inner_plan)
 static Node *
 CreateGpuJoinState(CustomScan *cscan)
 {
+	pgstromTaskState *pts;
 	int		num_rels = list_length(cscan->custom_plans);
-	GpuJoinState *gjs = palloc0(offsetof(GpuJoinState,
-										 inners[num_rels]));
 
 	Assert(cscan->methods == &gpujoin_plan_methods);
-	/* Set tag and executor callbacks */
-	NodeSetTag(gjs, T_CustomScanState);
-	gjs->pts.css.flags = cscan->flags;
-	gjs->pts.css.methods = &gpujoin_exec_methods;
-	gjs->pts.devkind = DEVKIND__NVIDIA_GPU;
-	gjs->gj_info = deform_gpujoin_info(cscan);
-	Assert(gjs->gj_info->num_rels == num_rels);
-	gjs->num_rels = num_rels;
+	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
+	NodeSetTag(pts, T_CustomScanState);
+	pts->css.flags = cscan->flags;
+	pts->css.methods = &gpujoin_exec_methods;
+	pts->devkind = DEVKIND__NVIDIA_GPU;
+	pts->pp_info = deform_pgstrom_plan_info(cscan);
+	Assert(pts->pp_info->num_rels == num_rels);
+	pts->num_rels = num_rels;
 
-	return (Node *)gjs;
+	return (Node *)pts;
 }
 
 /*
@@ -1162,17 +1177,17 @@ ExecInitGpuJoin(CustomScanState *node,
 				EState *estate,
 				int eflags)
 {
-	GpuJoinState   *gjs = (GpuJoinState *) node;
-	GpuJoinInfo	   *gj_info = gjs->gj_info;
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+	pgstromPlanInfo	*pp_info = pts->pp_info;
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	ListCell	   *lc;
 	int				depth = 1;
 
-	Assert(gj_info->num_rels == list_length(cscan->custom_plans));
+	Assert(pp_info->num_rels == list_length(cscan->custom_plans));
 	foreach (lc, cscan->custom_plans)
 	{
-		GpuJoinInnerState *istate = &gjs->inners[depth-1];
-		GpuJoinInnerInfo *gj_inner = &gj_info->inners[depth-1];
+		pgstromTaskInnerState *istate = &pts->inners[depth-1];
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[depth-1];
 		Plan	   *plan = lfirst(lc);
 		PlanState  *ps = ExecInitNode(plan, estate, eflags);
 		List	   *hash_inner_keys;
@@ -1182,15 +1197,15 @@ ExecInitGpuJoin(CustomScanState *node,
 		istate->ps = ps;
 		istate->econtext = CreateExprContext(estate);
 		istate->depth = depth;
-		istate->join_type = gj_inner->join_type;
-		istate->join_quals = ExecInitQual(gj_inner->join_quals,
-										  &gjs->pts.css.ss.ps);
-		istate->other_quals = ExecInitQual(gj_inner->other_quals,
-										   &gjs->pts.css.ss.ps);
-		foreach (cell, gj_inner->hash_outer_keys)
+		istate->join_type = pp_inner->join_type;
+		istate->join_quals = ExecInitQual(pp_inner->join_quals,
+										  &pts->css.ss.ps);
+		istate->other_quals = ExecInitQual(pp_inner->other_quals,
+										   &pts->css.ss.ps);
+		foreach (cell, pp_inner->hash_outer_keys)
 		{
 			ExprState  *es = ExecInitExpr((Expr *)lfirst(cell),
-										  &gjs->pts.css.ss.ps);
+										  &pts->css.ss.ps);
 			dtype = pgstrom_devtype_lookup(exprType((Node *)es->expr));
 			if (!dtype)
 				elog(ERROR, "failed on lookup device type of %s",
@@ -1199,12 +1214,12 @@ ExecInitGpuJoin(CustomScanState *node,
 			istate->hash_outer_dtypes = lappend(istate->hash_outer_dtypes, dtype);
 		}
 		/* inner hash-keys references the result of inner-slot */
-		hash_inner_keys = fixup_inner_varnode(gj_inner->hash_inner_keys,
+		hash_inner_keys = fixup_inner_varnode(pp_inner->hash_inner_keys,
 											  cscan, plan);
 		foreach (cell, hash_inner_keys)
 		{
 			ExprState  *es = ExecInitExpr((Expr *)lfirst(cell),
-										  &gjs->pts.css.ss.ps);
+										  &pts->css.ss.ps);
 			dtype = pgstrom_devtype_lookup(exprType((Node *)es->expr));
 			if (!dtype)
 				elog(ERROR, "failed on lookup device type of %s",
@@ -1213,14 +1228,14 @@ ExecInitGpuJoin(CustomScanState *node,
 			istate->hash_inner_dtypes = lappend(istate->hash_inner_dtypes, dtype);
 		}
 
-		if (OidIsValid(gj_inner->gist_index_oid))
+		if (OidIsValid(pp_inner->gist_index_oid))
 		{
-			istate->gist_irel = index_open(gj_inner->gist_index_oid,
+			istate->gist_irel = index_open(pp_inner->gist_index_oid,
 										   AccessShareLock);
-			istate->gist_clause = ExecInitExpr((Expr *)gj_inner->gist_clause,
-											   &gjs->pts.css.ss.ps);
+			istate->gist_clause = ExecInitExpr((Expr *)pp_inner->gist_clause,
+											   &pts->css.ss.ps);
 		}
-		gjs->pts.css.custom_ps = lappend(gjs->pts.css.custom_ps, ps);
+		pts->css.custom_ps = lappend(pts->css.custom_ps, ps);
 		depth++;
 	}
 	
@@ -1232,33 +1247,36 @@ ExecInitGpuJoin(CustomScanState *node,
 static TupleTableSlot *
 ExecGpuJoin(CustomScanState *node)
 {
-	GpuJoinState   *gjs = (GpuJoinState *) node;
-	GpuJoinInfo	   *gj_info = gjs->gj_info;
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+	pgstromPlanInfo	 *pp_info = pts->pp_info;
 
-	if (!gjs->pts.h_kmrels)
+	if (!pts->h_kmrels)
 	{
 		const XpuCommand *session;
 		uint32_t	inner_handle;
 
 		/* attach pgstromSharedState, if none */
-		if (!gjs->pts.ps_state)
-			pgstromSharedStateInitDSM(&gjs->pts, NULL, NULL);
+		if (!pts->ps_state)
+			pgstromSharedStateInitDSM(pts, NULL, NULL);
 		/* preload inner buffer */
-		inner_handle = GpuJoinInnerPreload(gjs);
+		inner_handle = GpuJoinInnerPreload(pts);
 		if (inner_handle == 0)
 			return NULL;
 		/* open the GpuJoin session */
-		session = pgstromBuildSessionInfo(&gjs->pts.css.ss.ps,
-										  gj_info->used_params,
-                                          gj_info->extra_bufsz,
-										  gj_info->kvars_nslots,
-                                          gj_info->kern_scan_quals,
-                                          gj_info->kern_join_projs,
-                                          gj_info->kern_join_quals_packed,
-										  gj_info->kern_hash_keys_packed,
-										  gj_info->kern_gist_quals_packed,
+		session = pgstromBuildSessionInfo(pts,
+										  pp_info->used_params,
+                                          pp_info->extra_bufsz,
+										  pp_info->kvars_depth,
+										  pp_info->kvars_resno,
+										  pp_info->kexp_scan_kvars_load,
+										  pp_info->kexp_scan_quals,
+										  pp_info->kexp_join_kvars_load_packed,
+										  pp_info->kexp_join_quals_packed,
+										  pp_info->kexp_hash_keys_packed,
+										  pp_info->kexp_gist_quals_packed,
+										  pp_info->kexp_projection,
 										  inner_handle);
-		gpuClientOpenSession(&gjs->pts, gjs->pts.optimal_gpus, session);
+		gpuClientOpenSession(pts, pts->optimal_gpus, session);
 	}
 	return NULL;
 }
@@ -1328,8 +1346,9 @@ ExplainGpuJoin(CustomScanState *node,
 			   List *ancestors,
 			   ExplainState *es)
 {
+#if 0
 	GpuJoinState   *gjs = (GpuJoinState *)node;
-	GpuJoinInfo	   *gj_info = gjs->gj_info;
+	pgstromPlanInfo	*pp_info = gjs->gj_info;
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	const char	   *devkind = DevKindLabel(gjs->pts.devkind, true);
 	List		   *dcontext;
@@ -1353,20 +1372,20 @@ ExplainGpuJoin(CustomScanState *node,
 	ntuples = gj_info->scan_rows;
 	for (int depth=1; depth <= gj_info->num_rels; depth++)
 	{
-		GpuJoinInnerInfo *gj_inner = &gj_info->inners[depth-1];
-		JoinType	join_type = gj_inner->join_type;
+		pgstromPlanInfo *pp_inner = &pp_info->inners[depth-1];
+		JoinType	join_type = pp_inner->join_type;
 		Node	   *expr;
 		char	   *str;
 		char		label[100];
 
 		resetStringInfo(&buf);
-		if (list_length(gj_inner->join_quals) > 1)
-			expr = (Node *)make_andclause(gj_inner->join_quals);
+		if (list_length(pp_inner->join_quals) > 1)
+			expr = (Node *)make_andclause(pp_inner->join_quals);
 		else
-			expr = linitial(gj_inner->join_quals);
+			expr = linitial(pp_inner->join_quals);
 
-		if (gj_inner->hash_outer_keys != NIL &&
-			gj_inner->hash_inner_keys != NIL)
+		if (pp_inner->hash_outer_keys != NIL &&
+			pp_inner->hash_inner_keys != NIL)
 		{
 			snprintf(label, sizeof(label), "%sHash%sJoin-%d",
 					 devkind,
@@ -1375,7 +1394,7 @@ ExplainGpuJoin(CustomScanState *node,
 					 join_type == JOIN_RIGHT ? "Right" : "",
 					 depth);
 		}
-		else if (OidIsValid(gj_inner->gist_index_oid))
+		else if (OidIsValid(pp_inner->gist_index_oid))
 		{
 			snprintf(label, sizeof(label), "%sGiST%sJoin-%d",
 					 devkind,
@@ -1395,20 +1414,20 @@ ExplainGpuJoin(CustomScanState *node,
 		}
 		str = deparse_expression(expr, dcontext, false, true);
 		appendStringInfo(&buf, "%s [rows: %.0f -> %.0f]",
-						 str, ntuples, gj_inner->join_nrows);
+						 str, ntuples, pp_inner->join_nrows);
 		ExplainPropertyText(label, buf.data, es);
 
-		if (gj_inner->hash_outer_keys != NIL &&
-			gj_inner->hash_inner_keys != NIL)
+		if (pp_inner->hash_outer_keys != NIL &&
+			pp_inner->hash_inner_keys != NIL)
 		{
 			snprintf(label, sizeof(label), "%sHashKeys-%d", devkind, depth);
 
 			resetStringInfo(&buf);
 			appendStringInfo(&buf, "inner [");
-			foreach (lc, gj_inner->hash_inner_keys)
+			foreach (lc, pp_inner->hash_inner_keys)
 			{
 				expr = lfirst(lc);
-				if (lc != list_head(gj_inner->hash_inner_keys))
+				if (lc != list_head(pp_inner->hash_inner_keys))
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, deparse_expression(expr,
 																dcontext,
@@ -1416,10 +1435,10 @@ ExplainGpuJoin(CustomScanState *node,
 																true));
 			}
 			appendStringInfo(&buf, "], outer [");
-			foreach (lc, gj_inner->hash_outer_keys)
+			foreach (lc, pp_inner->hash_outer_keys)
 			{
 				expr = lfirst(lc);
-				if (lc != list_head(gj_inner->hash_outer_keys))
+				if (lc != list_head(pp_inner->hash_outer_keys))
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, deparse_expression(expr,
 																dcontext,
@@ -1430,22 +1449,22 @@ ExplainGpuJoin(CustomScanState *node,
 
 			ExplainPropertyText(label, buf.data, es);
 		}
-		else if (OidIsValid(gj_inner->gist_index_oid))
+		else if (OidIsValid(pp_inner->gist_index_oid))
 		{
 			snprintf(label, sizeof(label), "%sGiSTIndex-%d", devkind, depth);
 
 			resetStringInfo(&buf);
-			appendStringInfoString(&buf, deparse_expression(gj_inner->gist_clause,
+			appendStringInfoString(&buf, deparse_expression(pp_inner->gist_clause,
 															dcontext,
 															false,
 															true));
 			appendStringInfo(&buf, " on %s (%s)",
-							 get_rel_name(gj_inner->gist_index_oid),
-							 get_attname(gj_inner->gist_index_oid,
-										 gj_inner->gist_index_col, true));
+							 get_rel_name(pp_inner->gist_index_oid),
+							 get_attname(pp_inner->gist_index_oid,
+										 pp_inner->gist_index_col, true));
 			ExplainPropertyText(label, buf.data, es);
 		}
-		ntuples = gj_inner->join_nrows;
+		ntuples = pp_inner->join_nrows;
 	}
 
 	if (es->verbose && gj_info->kern_join_quals_packed)
@@ -1476,6 +1495,7 @@ ExplainGpuJoin(CustomScanState *node,
 		ExplainPropertyText("GiST-Quals-Code", buf.data, es);
 	}
 	pgstromExplainTaskState(&gjs->pts, es, dcontext);
+#endif
 }
 
 /* ---------------------------------------------------------------- *
@@ -1485,7 +1505,7 @@ ExplainGpuJoin(CustomScanState *node,
  * ---------------------------------------------------------------- *
  */
 static uint32_t
-get_tuple_hashvalue(GpuJoinInnerState *istate,
+get_tuple_hashvalue(pgstromTaskInnerState *istate,
 					bool is_inner_hashkeys,
 					TupleTableSlot *slot)
 {
@@ -1531,7 +1551,7 @@ get_tuple_hashvalue(GpuJoinInnerState *istate,
  * execInnerPreloadOneDepth
  */
 static void
-execInnerPreloadOneDepth(GpuJoinInnerState *istate,
+execInnerPreloadOneDepth(pgstromTaskInnerState *istate,
 						 MemoryContext memcxt)
 {
 	PlanState	   *ps = istate->ps;
@@ -1603,9 +1623,9 @@ execInnerPreloadOneDepth(GpuJoinInnerState *istate,
  * NOTE: This function is called with preload_mutex locked
  */
 static void
-innerPreloadAllocHostBuffer(GpuJoinState *gjs)
+innerPreloadAllocHostBuffer(pgstromTaskState *pts)
 {
-	pgstromSharedState *ps_state = gjs->pts.ps_state;
+	pgstromSharedState *ps_state = pts->ps_state;
 	kern_multirels	   *h_kmrels = NULL;
 	kern_data_store	   *kds = NULL;
 	size_t				offset;
@@ -1619,10 +1639,10 @@ innerPreloadAllocHostBuffer(GpuJoinState *gjs)
 	 * 2nd pass: initialization of buffer metadata
 	 */
 again:
-	offset = MAXALIGN(offsetof(kern_multirels, chunks[gjs->num_rels]));
-	for (int i=0; i < gjs->num_rels; i++)
+	offset = MAXALIGN(offsetof(kern_multirels, chunks[pts->num_rels]));
+	for (int i=0; i < pts->num_rels; i++)
 	{
-		GpuJoinInnerState *istate = &gjs->inners[i];
+		pgstromTaskInnerState *istate = &pts->inners[i];
 		TupleDesc	tupdesc = istate->ps->ps_ResultTupleDesc;
 		uint64_t	nrooms;
 		uint64_t	usage;
@@ -1752,15 +1772,15 @@ again:
 
 		Assert(ps_state->preload_shmem_handle != 0);
 		h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
-							   shmem_length);
+							   shmem_length, NULL);
 		memset(h_kmrels, 0, offsetof(kern_multirels,
-									 chunks[gjs->num_rels]));
+									 chunks[pts->num_rels]));
 		h_kmrels->length = offset;
-		h_kmrels->num_rels = gjs->num_rels;
+		h_kmrels->num_rels = pts->num_rels;
 		ps_state->preload_shmem_length = shmem_length;
 		goto again;
 	}
-	gjs->pts.h_kmrels = h_kmrels;
+	pts->h_kmrels = h_kmrels;
 }
 
 /*
@@ -1768,7 +1788,7 @@ again:
  */
 static void
 __innerPreloadSetupHeapBuffer(kern_data_store *kds,
-							  GpuJoinInnerState *istate,
+							  pgstromTaskInnerState *istate,
 							  uint32_t base_nitems,
 							  uint32_t base_usage)
 {
@@ -1801,7 +1821,7 @@ __innerPreloadSetupHeapBuffer(kern_data_store *kds,
  */
 static void
 __innerPreloadSetupHashBuffer(kern_data_store *kds,
-							  GpuJoinInnerState *istate,
+							  pgstromTaskInnerState *istate,
 							  uint32_t base_nitems,
 							  uint32_t base_usage)
 {
@@ -1843,16 +1863,16 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 #define INNER_PHASE__GPUJOIN_EXEC		2
 
 static uint32_t
-GpuJoinInnerPreload(GpuJoinState *gjs)
+GpuJoinInnerPreload(pgstromTaskState *pts)
 {
-	GpuJoinState	   *leader = gjs;
+	pgstromTaskState   *leader = pts;
 	pgstromSharedState *ps_state;
 	MemoryContext		memcxt;
 
 	//pick up leader's ps_state if partitionwise plan
 	//if (sibling is exist)
-	// leader = gjs->sibling->leader;
-	ps_state = leader->pts.ps_state;
+	// leader = pts->sibling->leader;
+	ps_state = leader->ps_state;
 
 	/* memory context for temporary store  */
 	memcxt = AllocSetContextCreate(CurrentMemoryContext,
@@ -1870,9 +1890,9 @@ GpuJoinInnerPreload(GpuJoinState *gjs)
 			/*
 			 * Scan inner relations, often in parallel
 			 */
-			for (int i=0; i < gjs->num_rels; i++)
+			for (int i=0; i < pts->num_rels; i++)
 			{
-				GpuJoinInnerState *istate = &leader->inners[i];
+				pgstromTaskInnerState *istate = &leader->inners[i];
 
 				execInnerPreloadOneDepth(istate, memcxt);
 				pg_atomic_fetch_add_u64(&ps_state->inners[i].inner_nitems,
@@ -1940,16 +1960,17 @@ GpuJoinInnerPreload(GpuJoinState *gjs)
 			/*
 			 * Setup the host inner buffer
 			 */
-			if (!gjs->pts.h_kmrels)
+			if (!pts->h_kmrels)
 			{
-				gjs->pts.h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
-												ps_state->preload_shmem_length);
+				pts->h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
+											ps_state->preload_shmem_length,
+											NULL);
 			}
 
 			for (int i=0; i < leader->num_rels; i++)
 			{
-				GpuJoinInnerState *istate = &leader->inners[i];
-                kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(gjs->pts.h_kmrels, i);
+				pgstromTaskInnerState *istate = &leader->inners[i];
+				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, i);
                 uint32_t		base_nitems;
 				uint32_t		base_usage;
 
@@ -2011,10 +2032,11 @@ GpuJoinInnerPreload(GpuJoinState *gjs)
 			 * is already built. So, all we need to do is just map the host
 			 * inner buffer here.
 			 */
-			if (!gjs->pts.h_kmrels)
+			if (!pts->h_kmrels)
 			{
-				gjs->pts.h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
-												ps_state->preload_shmem_length);
+				pts->h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
+											ps_state->preload_shmem_length,
+											NULL);
 			}
 
 			//TODO: send the shmem handle to the GPU server or DPU server
@@ -2029,7 +2051,7 @@ GpuJoinInnerPreload(GpuJoinState *gjs)
 	SpinLockRelease(&ps_state->preload_mutex);
 	/* release working memory */
 	MemoryContextDelete(memcxt);
-	Assert(gjs->pts.h_kmrels != NULL);
+	Assert(pts->h_kmrels != NULL);
 
 	return ps_state->preload_shmem_handle;
 }

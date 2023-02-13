@@ -1211,7 +1211,7 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts,
 	ConditionVariableInit(&ps_state->preload_cond);
 	SpinLockInit(&ps_state->preload_mutex);
 	if (num_rels > 0)
-		ps_state->preload_shmem_handle = __shmemCreate();	
+		ps_state->preload_shmem_handle = __shmemCreate(NULL);
 	pts->ps_state = ps_state;
 	pts->css.ss.ss_currentScanDesc = scan;
 }

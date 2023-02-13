@@ -19,35 +19,6 @@ static CustomExecMethods	dpuscan_exec_methods;
 static bool					enable_dpuscan;		/* GUC */
 
 /*
- * DpuScanSharedState
- */
-typedef struct
-{
-	/* for arrow_fdw file scan */
-	pg_atomic_uint32	af_rbatch_index;
-	pg_atomic_uint32	af_rbatch_nload;	/* # of loaded record-batches */
-	pg_atomic_uint32	af_rbatch_nskip;	/* # of skipped record-batches */
-	/* for block-based regular table scan */
-	BlockNumber			pbs_nblocks;		/* # blocks in relation at start of scan */
-	slock_t				pbs_mutex;			/* lock of the fields below */
-	BlockNumber			pbs_startblock;		/* starting block number */
-	BlockNumber			pbs_nallocated;		/* # of blocks allocated to workers */
-	/* common parallel table scan descriptor */
-	ParallelTableScanDescData phscan;
-} DpuScanSharedState;
-
-/*
- * DpuScanState
- */
-typedef struct
-{
-	pgstromTaskState	pts;
-	DpuScanInfo			ds_info;
-	XpuCommand		   *xcmd_req;
-	size_t				xcmd_len;
-} DpuScanState;
-
-/*
  * DpuScanAddScanPath
  */
 static void
@@ -113,8 +84,8 @@ DpuScanAddScanPath(PlannerInfo *root,
 	 /* Creation of DpuScan path */
 	for (int try_parallel=0; try_parallel < 2; try_parallel++)
 	{
-		DpuScanInfo		ds_data;
-		DpuScanInfo	   *ds_info;
+		pgstromPlanInfo pp_data;
+		pgstromPlanInfo *pp_info;
 		CustomPath	   *cpath;
 		ParamPathInfo  *param_info = NULL;
 		int				parallel_nworkers = 0;
@@ -122,7 +93,7 @@ DpuScanAddScanPath(PlannerInfo *root,
 		Cost			run_cost = 0.0;
 		Cost			final_cost = 0.0;
 
-		memset(&ds_data, 0, sizeof(GpuScanInfo));
+		memset(&pp_data, 0, sizeof(pgstromPlanInfo));
 		if (!considerXpuScanPathParams(root,
 									   baserel,
 									   DEVKIND__NVIDIA_DPU,
@@ -130,19 +101,19 @@ DpuScanAddScanPath(PlannerInfo *root,
 									   dev_quals,
 									   host_quals,
 									   &parallel_nworkers,
-									   &ds_data.index_oid,
-									   &ds_data.index_conds,
-									   &ds_data.index_quals,
+									   &pp_data.brin_index_oid,
+									   &pp_data.brin_index_conds,
+									   &pp_data.brin_index_quals,
 									   &startup_cost,
 									   &run_cost,
 									   &final_cost,
 									   NULL,
 									   NULL,
-									   &ds_data.ds_entry))
+									   &pp_data.ds_entry))
 			return;
 
 		/* setup DpuScanInfo (Path phase) */
-		ds_info = pmemdup(&ds_data, sizeof(DpuScanInfo));
+		pp_info = pmemdup(&pp_data, sizeof(pgstromPlanInfo));
 		cpath = makeNode(CustomPath);
 		cpath->path.pathtype = T_CustomScan;
 		cpath->path.parent = baserel;
@@ -157,7 +128,7 @@ DpuScanAddScanPath(PlannerInfo *root,
 		cpath->path.pathkeys = NIL; /* unsorted results */
 		cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 		cpath->custom_paths = NIL;
-		cpath->custom_private = list_make1(ds_info);
+		cpath->custom_private = list_make1(pp_info);
 		cpath->methods = &dpuscan_path_methods;
 
 		if (custom_path_remember(root, baserel, (try_parallel > 0), cpath))
@@ -181,8 +152,8 @@ PlanDpuScanPath(PlannerInfo *root,
                 List *clauses,
                 List *custom_children)
 {
-	DpuScanInfo	   *ds_info = linitial(best_path->custom_private);
-	CustomScan	   *cscan;
+	pgstromPlanInfo *pp_info = linitial(best_path->custom_private);
+	CustomScan *cscan;
 
 	/* sanity checks */
 	Assert(baserel->relid > 0 &&
@@ -193,9 +164,9 @@ PlanDpuScanPath(PlannerInfo *root,
 								  best_path,
 								  tlist,
 								  clauses,
-								  ds_info,
+								  pp_info,
 								  &dpuscan_plan_methods);
-	form_gpuscan_info(cscan, ds_info);
+	form_pgstrom_plan_info(cscan, pp_info);
 
 	return &cscan->scan.plan;
 }
@@ -206,16 +177,16 @@ PlanDpuScanPath(PlannerInfo *root,
 static Node *
 CreateDpuScanState(CustomScan *cscan)
 {
-	DpuScanState   *dss = palloc0(sizeof(DpuScanState));
+	pgstromTaskState *pts = palloc0(sizeof(pgstromTaskState));
 
-    Assert(cscan->methods == &dpuscan_plan_methods);
-	NodeSetTag(dss, T_CustomScanState);
-    dss->pts.css.flags = cscan->flags;
-    dss->pts.css.methods = &dpuscan_exec_methods;
-	dss->pts.devkind = DEVKIND__NVIDIA_DPU;
-    deform_dpuscan_info(&dss->ds_info, cscan);
+	Assert(cscan->methods == &dpuscan_plan_methods);
+	NodeSetTag(pts, T_CustomScanState);
+	pts->css.flags = cscan->flags;
+	pts->css.methods = &dpuscan_exec_methods;
+	pts->devkind = DEVKIND__NVIDIA_DPU;
+	pts->pp_info = deform_pgstrom_plan_info(cscan);
 
-	return (Node *)dss;
+	return (Node *)pts;
 }
 
 /*
@@ -224,27 +195,28 @@ CreateDpuScanState(CustomScan *cscan)
 static void
 ExecInitDpuScan(CustomScanState *node, EState *estate, int eflags)
 {
-	DpuScanState   *dss = (DpuScanState *)node;
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+	pgstromPlanInfo	 *pp_info = pts->pp_info;
 
 	 /* sanity checks */
     Assert(relation != NULL &&
            outerPlanState(node) == NULL &&
            innerPlanState(node) == NULL);
-	pgstromExecInitTaskState(&dss->pts,
+	pgstromExecInitTaskState(pts,
 							 DEVKIND__NVIDIA_DPU,
-							 dss->ds_info.dev_quals,
-							 dss->ds_info.outer_refs,
-							 dss->ds_info.index_oid,
-                             dss->ds_info.index_conds,
-                             dss->ds_info.index_quals);
-	dss->pts.cb_cpu_fallback = ExecFallbackCpuScan;
+							 pp_info->scan_quals,
+							 pp_info->outer_refs,
+							 pp_info->brin_index_oid,
+                             pp_info->brin_index_conds,
+                             pp_info->brin_index_quals);
+	pts->cb_cpu_fallback = ExecFallbackCpuScan;
 }
 
 /*
  * DpuScanReCheckTuple
  */
 static bool
-DpuScanReCheckTuple(DpuScanState *dss, TupleTableSlot *epq_slot)
+DpuScanReCheckTuple(pgstromTaskState *pts, TupleTableSlot *epq_slot)
 {
 	/*
 	 * NOTE: Only immutable operators/functions are executable
@@ -259,28 +231,29 @@ DpuScanReCheckTuple(DpuScanState *dss, TupleTableSlot *epq_slot)
 static TupleTableSlot *
 ExecDpuScan(CustomScanState *node)
 {
-	DpuScanState   *dss = (DpuScanState *)node;
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+	pgstromPlanInfo *pp_info = pts->pp_info;
 
-	if (!dss->pts.ps_state)
-		pgstromSharedStateInitDSM(&dss->pts, NULL, NULL);
-	if (!dss->pts.conn)
+	if (!pts->ps_state)
+		pgstromSharedStateInitDSM(pts, NULL, NULL);
+	if (!pts->conn)
 	{
 		const XpuCommand *session;
 
-		session = pgstromBuildSessionInfo(&dss->pts,
-										  dss->ds_info.used_params,
-										  dss->ds_info.extra_bufsz,
-										  dss->ds_info.kvars_depth,
-										  dss->ds_info.kvars_resno,
-										  dss->ds_info.kexp_kvars_load,
-										  dss->ds_info.kexp_scan_quals,
+		session = pgstromBuildSessionInfo(pts,
+										  pp_info->used_params,
+										  pp_info->extra_bufsz,
+										  pp_info->kvars_depth,
+										  pp_info->kvars_resno,
+										  pp_info->kexp_scan_kvars_load,
+										  pp_info->kexp_scan_quals,
 										  NULL,	/* join-load-vars */
 										  NULL,	/* join-quals */
 										  NULL,	/* hash-values */
 										  NULL,	/* gist-join */
-										  dss->ds_info.kexp_projection,
+										  pp_info->kexp_projection,
 										  0);	/* No join_inner_handle */
-		DpuClientOpenSession(&dss->pts, session);
+		DpuClientOpenSession(pts, session);
 	}
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecTaskState,
@@ -293,7 +266,9 @@ ExecDpuScan(CustomScanState *node)
 static void
 ExecEndDpuScan(CustomScanState *node)
 {
-	pgstromExecEndTaskState((pgstromTaskState *)node);
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+
+	pgstromExecEndTaskState(pts);
 }
 
 /*
@@ -302,7 +277,9 @@ ExecEndDpuScan(CustomScanState *node)
 static void
 ExecReScanDpuScan(CustomScanState *node)
 {
-	pgstromExecResetTaskState((pgstromTaskState *)node);
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+
+	pgstromExecResetTaskState(pts);
 }
 
 /*
@@ -312,7 +289,9 @@ static Size
 EstimateDpuScanDSM(CustomScanState *node,
 				   ParallelContext *pcxt)
 {
-	return pgstromSharedStateEstimateDSM((pgstromTaskState *)node);
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+
+	return pgstromSharedStateEstimateDSM(pts);
 }
 
 /*
@@ -323,7 +302,9 @@ InitializeDpuScanDSM(CustomScanState *node,
 					 ParallelContext *pcxt,
 					 void *dsm_addr)
 {
-	pgstromSharedStateInitDSM((pgstromTaskState *)node, pcxt, dsm_addr);
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+
+	pgstromSharedStateInitDSM(pts, pcxt, dsm_addr);
 }
 
 /*
@@ -332,7 +313,9 @@ InitializeDpuScanDSM(CustomScanState *node,
 static void
 InitDpuScanWorker(CustomScanState *node, shm_toc *toc, void *dsm_addr)
 {
-	pgstromSharedStateAttachDSM((pgstromTaskState *)node, dsm_addr);
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+
+	pgstromSharedStateAttachDSM(pts, dsm_addr);
 }
 
 /*
@@ -341,7 +324,9 @@ InitDpuScanWorker(CustomScanState *node, shm_toc *toc, void *dsm_addr)
 static void
 ExecShutdownDpuScan(CustomScanState *node)
 {
-	pgstromSharedStateShutdownDSM((pgstromTaskState *)node);
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+
+	pgstromSharedStateShutdownDSM(pts);
 }
 
 /*
@@ -352,32 +337,31 @@ ExplainDpuScan(CustomScanState *node,
                List *ancestors,
                ExplainState *es)
 {
-	DpuScanState   *dss = (DpuScanState *) node;
-	DpuScanInfo	   *ds_info = &dss->ds_info;
-	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
-	List		   *dcontext;
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	CustomScan *cscan = (CustomScan *)node->ss.ps.plan;
+	List	   *dcontext;
 
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
 										node->ss.ps.plan,
 										ancestors);
-	pgstromExplainScanState(&dss->pts, es,
+	pgstromExplainScanState(pts, es,
 							dcontext,
 							cscan->custom_scan_tlist,
-							ds_info->dev_quals,
-							ds_info->scan_tuples,
-							ds_info->scan_rows);
+							pp_info->scan_quals,
+							pp_info->scan_tuples,
+							pp_info->scan_rows);
 	/* XPU Code (if verbose) */
-	pgstrom_explain_xpucode(&dss->pts.css, es, dcontext,
+	pgstrom_explain_xpucode(&pts->css, es, dcontext,
 							"Scan Var-Loads Code",
-							ds_info->kexp_kvars_load);
-	pgstrom_explain_xpucode(&dss->pts.css, es, dcontext,
+							pp_info->kexp_scan_kvars_load);
+	pgstrom_explain_xpucode(&pts->css, es, dcontext,
 							"Scan Quals Code",
-							ds_info->kexp_scan_quals);
-	pgstrom_explain_xpucode(&dss->pts.css, es, dcontext,
+							pp_info->kexp_scan_quals);
+	pgstrom_explain_xpucode(&pts->css, es, dcontext,
 							"DPU Projection Code",
-							ds_info->kexp_projection);
-
-	pgstromExplainTaskState(&dss->pts, es, dcontext);
+							pp_info->kexp_projection);
+	pgstromExplainTaskState(pts, es, dcontext);
 }
 
 /*
