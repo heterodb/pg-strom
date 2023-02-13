@@ -196,19 +196,12 @@ static void
 ExecInitDpuScan(CustomScanState *node, EState *estate, int eflags)
 {
 	pgstromTaskState *pts = (pgstromTaskState *)node;
-	pgstromPlanInfo	 *pp_info = pts->pp_info;
 
 	 /* sanity checks */
     Assert(relation != NULL &&
            outerPlanState(node) == NULL &&
            innerPlanState(node) == NULL);
-	pgstromExecInitTaskState(pts,
-							 DEVKIND__NVIDIA_DPU,
-							 pp_info->scan_quals,
-							 pp_info->outer_refs,
-							 pp_info->brin_index_oid,
-                             pp_info->brin_index_conds,
-                             pp_info->brin_index_quals);
+	pgstromExecInitTaskState(pts, DEVKIND__NVIDIA_DPU);
 	pts->cb_cpu_fallback = ExecFallbackCpuScan;
 }
 
@@ -232,27 +225,13 @@ static TupleTableSlot *
 ExecDpuScan(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *)node;
-	pgstromPlanInfo *pp_info = pts->pp_info;
 
 	if (!pts->ps_state)
 		pgstromSharedStateInitDSM(pts, NULL, NULL);
 	if (!pts->conn)
 	{
-		const XpuCommand *session;
-
-		session = pgstromBuildSessionInfo(pts,
-										  pp_info->used_params,
-										  pp_info->extra_bufsz,
-										  pp_info->kvars_depth,
-										  pp_info->kvars_resno,
-										  pp_info->kexp_scan_kvars_load,
-										  pp_info->kexp_scan_quals,
-										  NULL,	/* join-load-vars */
-										  NULL,	/* join-quals */
-										  NULL,	/* hash-values */
-										  NULL,	/* gist-join */
-										  pp_info->kexp_projection,
-										  0);	/* No join_inner_handle */
+		const XpuCommand *session
+			= pgstromBuildSessionInfo(pts, 0);
 		DpuClientOpenSession(pts, session);
 	}
 	return ExecScan(&node->ss,

@@ -290,6 +290,112 @@ xpuclientCleanupConnections(ResourceReleasePhase phase,
  *
  * ----------------------------------------------------------------
  */
+static void
+__build_session_param_info(pgstromTaskState *pts,
+						   kern_session_info *session,
+						   StringInfo buf)
+{
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
+	ParamListInfo	param_info = econtext->ecxt_param_list_info;
+	ListCell	   *lc;
+
+	Assert(param_info != NULL);
+	session->nparams = param_info->numParams;
+	foreach (lc, pp_info->used_params)
+	{
+		Param	   *param = lfirst(lc);
+		Datum		param_value;
+		bool		param_isnull;
+		uint32_t	offset;
+
+		Assert(param->paramid >= 0 &&
+			   param->paramid < session->nparams);
+		if (param->paramkind == PARAM_EXEC)
+		{
+			/* See ExecEvalParamExec */
+			ParamExecData  *prm = &(econtext->ecxt_param_exec_vals[param->paramid]);
+
+			if (prm->execPlan)
+			{
+				/* Parameter not evaluated yet, so go do it */
+				ExecSetParamPlan(prm->execPlan, econtext);
+				/* ExecSetParamPlan should have processed this param... */
+				Assert(prm->execPlan == NULL);
+			}
+			param_isnull = prm->isnull;
+			param_value  = prm->value;
+		}
+		else if (param->paramkind == PARAM_EXTERN)
+		{
+			/* See ExecEvalParamExtern */
+			ParamExternData *prm, prmData;
+
+			if (param_info->paramFetch != NULL)
+				prm = param_info->paramFetch(param_info,
+											 param->paramid,
+											 false, &prmData);
+			else
+				prm = &param_info->params[param->paramid - 1];
+			if (!OidIsValid(prm->ptype))
+				elog(ERROR, "no value found for parameter %d", param->paramid);
+			if (prm->ptype != param->paramtype)
+				elog(ERROR, "type of parameter %d (%s) does not match that when preparing the plan (%s)",
+					 param->paramid,
+					 format_type_be(prm->ptype),
+					 format_type_be(param->paramtype));
+			param_isnull = prm->isnull;
+			param_value  = prm->value;
+		}
+		else
+		{
+			elog(ERROR, "Bug? unexpected parameter kind: %d",
+				 (int)param->paramkind);
+		}
+
+		if (param_isnull)
+			offset = 0;
+		else
+		{
+			int16	typlen;
+			bool	typbyval;
+
+			get_typlenbyval(param->paramtype, &typlen, &typbyval);
+			if (typbyval)
+			{
+				offset = __appendBinaryStringInfo(buf,
+												  (char *)&param_value,
+												  typlen);
+			}
+			else if (typlen > 0)
+			{
+				offset = __appendBinaryStringInfo(buf,
+												  DatumGetPointer(param_value),
+												  typlen);
+			}
+			else if (typlen == -1)
+			{
+				struct varlena *temp = PG_DETOAST_DATUM(param_value);
+
+				offset = __appendBinaryStringInfo(buf,
+												  DatumGetPointer(temp),
+												  VARSIZE(temp));
+				if (param_value != PointerGetDatum(temp))
+					pfree(temp);
+			}
+			else
+			{
+				elog(ERROR, "Not a supported data type for kernel parameter: %s",
+					 format_type_be(param->paramtype));
+			}
+		}
+		Assert(param->paramid >= 0 && param->paramid < nparams);
+		session->poffset[param->paramid] = offset;
+	}
+}
+
+
+
 static uint32_t
 __build_kvars_slot_cmeta(StringInfo buf,
 						 pgstromTaskState *pts,
@@ -313,96 +419,6 @@ __build_kvars_slot_cmeta(StringInfo buf,
 	}
 	return __appendBinaryStringInfo(buf, kvars_defitem,
 									sizeof(kern_vars_defitem) * nitems);
-
-#if 0
-	TupleDesc	tupdesc;
-	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
-	List	   *tlist_dev = cscan->custom_scan_tlist;
-	ListCell   *lc1, *lc2;
-	int			n_slots = list_length(kvars_depth_list);
-	int			__slot_id = 0;
-	kern_data_store *kds;
-
-	Assert(list_length(cscan->custom_plans) == list_length(css->custom_ps));
-
-	tupdesc = CreateTemplateTupleDesc(n_slots);
-	forboth (lc1, kvars_depth_list,
-			 lc2, kvars_resno_list)
-	{
-		Form_pg_attribute attr = TupleDescAttr(tupdesc, __slot_id);
-		int		__depth = lfirst_int(lc1);
-		int		__resno = lfirst_int(lc2);
-
-		memset(attr, 0, sizeof(FormData_pg_attribute));
-		if (__depth == 0)
-		{
-			/* outer variables */
-			TupleDesc	r_desc = RelationGetDescr(pts->css.ss.ss_currentRelation);
-
-			if (__resno < 1 || __resno > r_desc->natts)
-				elog(ERROR, "Bug? kvar referenced out of range: resno=%d", __resno);
-			memcpy(attr, TupleDescAttr(r_desc, __resno-1),
-				   sizeof(FormData_pg_attribute));
-			attr->attnum = __slot_id + 1;
-		}
-		else
-		{
-			TargetEntry *tle;
-
-			if (__depth > 0)
-			{
-				/* inner variables */
-				Plan   *i_plan;
-				List   *i_tlist;
-
-				if (__depth > list_length(cscan->custom_plans))
-					elog(ERROR, "Bug? kvar referenced out of range");
-				i_plan = list_nth(cscan->custom_plans, __depth-1);
-				i_tlist = i_plan->targetlist;
-				if (__resno < 1 || __resno > list_length(i_tlist))
-					elog(ERROR, "Bug? kvar referenced out of range");
-				tle = list_nth(i_tlist, __resno-1);
-			}
-			else
-			{
-				if (__resno < 1 || __resno > list_length(tlist_dev))
-					elog(ERROR, "Bug? kvar referenced out of range");
-				tle = list_nth(tlist_dev, __resno-1);
-			}
-			attr->atttypid = exprType((Node *)tle->expr);
-			attr->atttypmod = exprTypmod((Node *)tle->expr);
-			attr->attcollation = exprCollation((Node *)tle->expr);
-			attr->attnum = __slot_id + 1;
-			get_typlenbyvalalign(attr->atttypid,
-								 &attr->attlen,
-								 &attr->attbyval,
-								 &attr->attalign);
-			if (tle->resname)
-				strncpy(NameStr(attr->attname), tle->resname, NAMEDATALEN);
-		}
-		__slot_id++;
-	}
-	Assert(tupdesc->natts == __slot);
-	kds = alloca(estimate_kern_data_store(tupdesc));
-	setup_kern_data_store(kds, tupdesc, -1, KDS_FORMAT_ROW);
-	pfree(tupdesc);
-
-	/* update kds_format if ARROW or COLUMN */
-	if (pts->arrow_state || pts->gcache_state)
-	{
-		char	format = (pts->arrow_state ? KDS_FORMAT_ARROW : KDS_FORMAT_COLUMN);
-		int		cindex = 0;
-
-		foreach (lc1, kvars_depth_list)
-		{
-			if (lfirst_int(lc1) == 0)
-				__update_slot_cmeta_format(kds, cindex, format);
-			cindex++;
-		}
-	}
-	return __appendBinaryStringInfo(buf, (char *)kds->colmeta,
-									sizeof(kern_colmeta) * kds->nr_colmeta);
-#endif
 }
 
 static uint32_t
@@ -448,186 +464,91 @@ __build_session_encode(StringInfo buf)
 
 const XpuCommand *
 pgstromBuildSessionInfo(pgstromTaskState *pts,
-						List *used_params,
-						uint32_t kcxt_extra_bufsz,
-						List *kvars_depth_list,
-						List *kvars_resno_list,
-						const bytea *xpucode_scan_load_vars,
-						const bytea *xpucode_scan_quals,
-						const bytea *xpucode_join_load_vars_packed,
-						const bytea *xpucode_join_quals_packed,
-						const bytea *xpucode_hash_values_packed,
-						const bytea *xpucode_gist_quals_packed,
-						const bytea *xpucode_projection,
 						uint32_t join_inner_handle)
 {
+	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
 	uint32_t		nparams = (param_info ? param_info->numParams : 0);
-	uint32_t		session_sz = offsetof(kern_session_info, poffset[nparams]);
-	StringInfoData	buf;
-	XpuCommand	   *xcmd;
+	uint32_t		session_sz;
 	kern_session_info *session;
+	XpuCommand	   *xcmd;
+	StringInfoData	buf;
+	bytea		   *xpucode;
 
 	initStringInfo(&buf);
-	__appendZeroStringInfo(&buf, session_sz);
+	session_sz = offsetof(kern_session_info, poffset[nparams]);
 	session = alloca(session_sz);
 	memset(session, 0, session_sz);
-
-	if (xpucode_scan_load_vars)
+	__appendZeroStringInfo(&buf, session_sz);
+	if (param_info)
+		__build_session_param_info(pts, session, &buf);
+	if (pp_info->kexp_scan_kvars_load)
 	{
+		xpucode = pp_info->kexp_scan_kvars_load;
 		session->xpucode_scan_load_vars =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA(xpucode_scan_load_vars),
-									 VARSIZE(xpucode_scan_load_vars) - VARHDRSZ);
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-	if (xpucode_scan_quals)
+	if (pp_info->kexp_scan_quals)
 	{
+		xpucode = pp_info->kexp_scan_quals;
 		session->xpucode_scan_quals =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA(xpucode_scan_quals),
-									 VARSIZE(xpucode_scan_quals) - VARHDRSZ);
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-	if (xpucode_join_load_vars_packed)
+	if (pp_info->kexp_join_kvars_load_packed)
 	{
+		xpucode = pp_info->kexp_join_kvars_load_packed;
 		session->xpucode_join_load_vars_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA(xpucode_join_load_vars_packed),
-									 VARSIZE(xpucode_join_load_vars_packed) - VARHDRSZ);
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-	if (xpucode_join_quals_packed)
+	if (pp_info->kexp_join_quals_packed)
 	{
+		xpucode = pp_info->kexp_join_quals_packed;
 		session->xpucode_join_quals_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA(xpucode_join_quals_packed),
-									 VARSIZE(xpucode_join_quals_packed) - VARHDRSZ);
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-	if (xpucode_hash_values_packed)
+	if (pp_info->kexp_hash_keys_packed)
 	{
+		xpucode = pp_info->kexp_hash_keys_packed;
 		session->xpucode_hash_values_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA(xpucode_hash_values_packed),
-									 VARSIZE(xpucode_hash_values_packed) - VARHDRSZ);
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-	if (xpucode_gist_quals_packed)
+	if (pp_info->kexp_gist_quals_packed)
 	{
+		xpucode = pp_info->kexp_gist_quals_packed;
 		session->xpucode_gist_quals_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA(xpucode_gist_quals_packed),
-									 VARSIZE(xpucode_gist_quals_packed) - VARHDRSZ);
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-	if (xpucode_projection)
+	if (pp_info->kexp_projection)
 	{
-		session->xpucode_projection =
+		xpucode = pp_info->kexp_projection;
+		session->xpucode_gist_quals_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA(xpucode_projection),
-									 VARSIZE(xpucode_projection) - VARHDRSZ);
-	}
-
-	/* put executor parameters */
-	if (param_info)
-	{
-		ListCell   *lc;
-
-		session->nparams = nparams;
-		foreach (lc, used_params)
-		{
-			Param  *param = lfirst(lc);
-			Datum	param_value;
-			bool	param_isnull;
-			uint32_t	offset;
-
-			if (param->paramkind == PARAM_EXEC)
-			{
-				/* See ExecEvalParamExec */
-				ParamExecData  *prm = &(econtext->ecxt_param_exec_vals[param->paramid]);
-
-				if (prm->execPlan)
-				{
-					/* Parameter not evaluated yet, so go do it */
-					ExecSetParamPlan(prm->execPlan, econtext);
-					/* ExecSetParamPlan should have processed this param... */
-					Assert(prm->execPlan == NULL);
-				}
-				param_isnull = prm->isnull;
-				param_value  = prm->value;
-			}
-			else if (param->paramkind == PARAM_EXTERN)
-			{
-				/* See ExecEvalParamExtern */
-				ParamExternData *prm, prmData;
-
-				if (param_info->paramFetch != NULL)
-					prm = param_info->paramFetch(param_info,
-												 param->paramid,
-												 false, &prmData);
-				else
-					prm = &param_info->params[param->paramid - 1];
-				if (!OidIsValid(prm->ptype))
-					elog(ERROR, "no value found for parameter %d", param->paramid);
-				if (prm->ptype != param->paramtype)
-					elog(ERROR, "type of parameter %d (%s) does not match that when preparing the plan (%s)",
-						 param->paramid,
-						 format_type_be(prm->ptype),
-						 format_type_be(param->paramtype));
-				param_isnull = prm->isnull;
-				param_value  = prm->value;
-			}
-			else
-			{
-				elog(ERROR, "Bug? unexpected parameter kind: %d",
-					 (int)param->paramkind);
-			}
-
-			if (param_isnull)
-				offset = 0;
-			else
-			{
-				int16	typlen;
-				bool	typbyval;
-
-				get_typlenbyval(param->paramtype, &typlen, &typbyval);
-				if (typbyval)
-				{
-					offset = __appendBinaryStringInfo(&buf,
-													  (char *)&param_value,
-													  typlen);
-				}
-				else if (typlen > 0)
-				{
-					offset = __appendBinaryStringInfo(&buf,
-													  DatumGetPointer(param_value),
-													  typlen);
-				}
-				else if (typlen == -1)
-				{
-					struct varlena *temp = PG_DETOAST_DATUM(param_value);
-
-					offset = __appendBinaryStringInfo(&buf,
-													  DatumGetPointer(temp),
-													  VARSIZE(temp));
-					if (param_value != PointerGetDatum(temp))
-						pfree(temp);
-				}
-				else
-				{
-					elog(ERROR, "Not a supported data type for kernel parameter: %s",
-						 format_type_be(param->paramtype));
-				}
-			}
-			Assert(param->paramid >= 0 && param->paramid < nparams);
-			session->poffset[param->paramid] = offset;
-		}
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
 	}
 	/* other database session information */
 	Assert(list_length(kvars_depth_list) == list_length(kvars_resno_list));
 	session->query_plan_id = ((uint64_t)MyProcPid << 32) |
 		(uint64_t)pg_atomic_fetch_add_u32(pgstrom_query_plan_id, 1);
-	session->kcxt_extra_bufsz = kcxt_extra_bufsz;
-	session->kvars_slot_width = list_length(kvars_depth_list);
+	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
+	session->kvars_slot_width = list_length(pp_info->kvars_depth);
+	Assert(session->kvars_slot_width == list_length(pp_info->kvars_resno));
 	session->kvars_slot_items = __build_kvars_slot_cmeta(&buf, pts,
-														 kvars_depth_list,
-														 kvars_resno_list);
+														 pp_info->kvars_depth,
+														 pp_info->kvars_resno);
 	session->xpucode_use_debug_code = pgstrom_use_debug_code;
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	session->session_xact_state = __build_session_xact_state(&buf);
@@ -918,19 +839,16 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
  */
 void
 pgstromExecInitTaskState(pgstromTaskState *pts,
-						 uint64_t devkind_mask,	/* DEVKIND_* */
-						 List *outer_quals,
-						 const Bitmapset *outer_refs,
-						 Oid   brin_index_oid,
-						 List *brin_index_conds,
-						 List *brin_index_quals)
+						 uint64_t devkind_mask)	/* DEVKIND_* */
 {
+	pgstromPlanInfo	*pp_info = pts->pp_info;
 	EState		   *estate = pts->css.ss.ps.state;
 	CustomScan	   *cscan = (CustomScan *)pts->css.ss.ps.plan;
 	Relation		rel = pts->css.ss.ss_currentRelation;
 	TupleDesc		tupdesc_src = RelationGetDescr(rel);
 	TupleDesc		tupdesc_dst;
 	List		   *tlist_dev = NIL;
+	List		   *base_quals = NIL;
 	ListCell	   *lc;
 
 	/*
@@ -951,9 +869,9 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 
 		/* setup BRIN-index if any */
 		pgstromBrinIndexExecBegin(pts,
-								  brin_index_oid,
-								  brin_index_conds,
-								  brin_index_quals);
+								  pp_info->brin_index_oid,
+								  pp_info->brin_index_conds,
+								  pp_info->brin_index_quals);
 		if ((devkind_mask & DEVKIND__NVIDIA_GPU) != 0)
 			pts->optimal_gpus = GetOptimalGpuForRelation(rel);
 		if ((devkind_mask & DEVKIND__NVIDIA_DPU) != 0)
@@ -964,8 +882,8 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	{
 		if (!pgstromArrowFdwExecInit(pts,
 									 devkind_mask,
-									 outer_quals,
-									 outer_refs))
+									 pp_info->scan_quals,
+									 pp_info->outer_refs))
 			elog(ERROR, "Bug? only arrow_fdw is supported in PG-Strom");
 	}
 	else
@@ -992,10 +910,10 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	/*
 	 * Init resources for CPU fallbacks
 	 */
-	outer_quals = (List *)
-		fixup_varnode_to_origin((Node *)outer_quals,
+	base_quals = (List *)
+		fixup_varnode_to_origin((Node *)pp_info->scan_quals,
 								cscan->custom_scan_tlist);
-	pts->base_quals = ExecInitQual(outer_quals, &pts->css.ss.ps);
+	pts->base_quals = ExecInitQual(base_quals, &pts->css.ss.ps);
 	foreach (lc, cscan->custom_scan_tlist)
 	{
 		TargetEntry *tle = lfirst(lc);

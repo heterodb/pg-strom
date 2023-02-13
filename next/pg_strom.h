@@ -596,27 +596,10 @@ xpuConnectReceiveCommands(pgsocket sockfd,
 extern void		xpuClientCloseSession(XpuConnection *conn);
 extern void		xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd);
 extern void		xpuClientPutResponse(XpuCommand *xcmd);
-extern const XpuCommand *
-pgstromBuildSessionInfo(pgstromTaskState *pts,
-						List *used_params,
-						uint32_t kcxt_extra_bufsz,
-						List *kvars_depth_list,
-						List *kvars_resno_list,
-						const bytea *xpucode_scan_load_vars,
-						const bytea *xpucode_scan_quals,
-						const bytea *xpucode_join_load_vars_packed,
-						const bytea *xpucode_join_quals_packed,
-						const bytea *xpucode_hash_values_packed,
-						const bytea *xpucode_gist_quals_packed,
-						const bytea *xpucode_projection,
-						uint32_t join_inner_handle);
+extern const XpuCommand *pgstromBuildSessionInfo(pgstromTaskState *pts,
+												 uint32_t join_inner_handle);
 extern void		pgstromExecInitTaskState(pgstromTaskState *pts,
-										 uint64_t devkind_mask,
-										 List *outer_quals,
-										 const Bitmapset *outer_refs,
-										 Oid   brin_index_oid,
-										 List *brin_index_conds,
-										 List *brin_index_quals);
+										 uint64_t devkind_mask);
 extern TupleTableSlot  *pgstromExecTaskState(pgstromTaskState *pts);
 extern void		pgstromExecEndTaskState(pgstromTaskState *pts);
 extern void		pgstromExecResetTaskState(pgstromTaskState *pts);

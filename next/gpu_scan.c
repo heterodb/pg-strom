@@ -715,19 +715,12 @@ static void
 ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
-	pgstromPlanInfo	*pp_info = pts->pp_info;
 
 	/* sanity checks */
 	Assert(node->ss.ss_currentRelation != NULL &&
 		   outerPlanState(node) == NULL &&
 		   innerPlanState(node) == NULL);
-	pgstromExecInitTaskState(pts,
-							 DEVKIND__NVIDIA_GPU,
-							 pp_info->scan_quals,
-							 pp_info->outer_refs,
-							 pp_info->brin_index_oid,
-							 pp_info->brin_index_conds,
-							 pp_info->brin_index_quals);
+	pgstromExecInitTaskState(pts, DEVKIND__NVIDIA_GPU);
 	pts->cb_cpu_fallback = ExecFallbackCpuScan;
 }
 
@@ -751,27 +744,13 @@ static TupleTableSlot *
 ExecGpuScan(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
-	pgstromPlanInfo	 *pp_info = pts->pp_info;
 
 	if (!pts->ps_state)
 		pgstromSharedStateInitDSM(pts, NULL, NULL);
 	if (!pts->conn)
 	{
-		const XpuCommand *session;
-
-		session = pgstromBuildSessionInfo(pts,
-										  pp_info->used_params,
-										  pp_info->extra_bufsz,
-										  pp_info->kvars_depth,
-										  pp_info->kvars_resno,
-										  pp_info->kexp_scan_kvars_load,
-										  pp_info->kexp_scan_quals,
-										  NULL,		/* join-load-vars */
-										  NULL,		/* join-quals */
-										  NULL,		/* hash-values */
-										  NULL,		/* gist-join */
-										  pp_info->kexp_projection,
-										  0);
+		const XpuCommand *session
+			= pgstromBuildSessionInfo(pts, 0);
 		gpuClientOpenSession(pts, pts->optimal_gpus, session);
 	}
 	return ExecScan(&node->ss,

@@ -1138,15 +1138,6 @@ fixup_inner_varnode(List *exprs, CustomScan *cscan, Plan *inner_plan)
 	return (List *)__fixup_inner_varnode_walker((Node *)exprs, &con);
 }
 
-
-
-
-
-
-
-
-
-
 /*
  * CreateGpuJoinState
  */
@@ -1183,6 +1174,9 @@ ExecInitGpuJoin(CustomScanState *node,
 	ListCell	   *lc;
 	int				depth = 1;
 
+	Assert(node->ss.ss_currentRelation != NULL &&
+		   outerPlanState(node) == NULL &&
+		   innerPlanState(node) == NULL);
 	Assert(pp_info->num_rels == list_length(cscan->custom_plans));
 	foreach (lc, cscan->custom_plans)
 	{
@@ -1238,7 +1232,21 @@ ExecInitGpuJoin(CustomScanState *node,
 		pts->css.custom_ps = lappend(pts->css.custom_ps, ps);
 		depth++;
 	}
-	
+	pgstromExecInitTaskState(pts, DEVKIND__NVIDIA_GPU);
+	pts->cb_cpu_fallback = ExecFallbackCpuScan;
+}
+
+/*
+ * GpuJoinReCheckTuple
+ */
+static bool
+GpuJoinReCheckTuple(pgstromTaskState *pts, TupleTableSlot *epq_slot)
+{
+	/*
+	 * NOTE: Only immutable operators/functions are executable
+	 * on the GPU devices, so its decision will never changed.
+	 */
+	return true;
 }
 
 /*
@@ -1248,7 +1256,6 @@ static TupleTableSlot *
 ExecGpuJoin(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
-	pgstromPlanInfo	 *pp_info = pts->pp_info;
 
 	if (!pts->h_kmrels)
 	{
@@ -1263,22 +1270,12 @@ ExecGpuJoin(CustomScanState *node)
 		if (inner_handle == 0)
 			return NULL;
 		/* open the GpuJoin session */
-		session = pgstromBuildSessionInfo(pts,
-										  pp_info->used_params,
-                                          pp_info->extra_bufsz,
-										  pp_info->kvars_depth,
-										  pp_info->kvars_resno,
-										  pp_info->kexp_scan_kvars_load,
-										  pp_info->kexp_scan_quals,
-										  pp_info->kexp_join_kvars_load_packed,
-										  pp_info->kexp_join_quals_packed,
-										  pp_info->kexp_hash_keys_packed,
-										  pp_info->kexp_gist_quals_packed,
-										  pp_info->kexp_projection,
-										  inner_handle);
+		session = pgstromBuildSessionInfo(pts, inner_handle);
 		gpuClientOpenSession(pts, pts->optimal_gpus, session);
 	}
-	return NULL;
+	return ExecScan(&node->ss,
+					(ExecScanAccessMtd) pgstromExecTaskState,
+					(ExecScanRecheckMtd) GpuJoinReCheckTuple);
 }
 
 /*
@@ -1287,7 +1284,9 @@ ExecGpuJoin(CustomScanState *node)
 static void
 ExecEndGpuJoin(CustomScanState *node)
 {
-	pgstromExecEndTaskState((pgstromTaskState *)node);
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	pgstromExecEndTaskState(pts);
 }
 
 /*
@@ -1295,7 +1294,11 @@ ExecEndGpuJoin(CustomScanState *node)
  */
 static void
 ExecReScanGpuJoin(CustomScanState *node)
-{}
+{
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	pgstromExecResetTaskState(pts);
+}
 
 /*
  * ExecGpuJoinEstimateDSM
@@ -1304,7 +1307,9 @@ static Size
 ExecGpuJoinEstimateDSM(CustomScanState *node,
 					   ParallelContext *pcxt)
 {
-	return pgstromSharedStateEstimateDSM((pgstromTaskState *)node);
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	return pgstromSharedStateEstimateDSM(pts);
 }
 
 /*
@@ -1315,7 +1320,9 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 				   ParallelContext *pcxt,
 				   void *dsm_addr)
 {
-	pgstromSharedStateInitDSM((pgstromTaskState *)node, pcxt, dsm_addr);
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	pgstromSharedStateInitDSM(pts, pcxt, dsm_addr);
 }
 
 /*
@@ -1326,7 +1333,9 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 					  shm_toc *toc,
 					  void *dsm_addr)
 {
-	pgstromSharedStateAttachDSM((pgstromTaskState *)node, dsm_addr);
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	pgstromSharedStateAttachDSM(pts, dsm_addr);
 }
 
 /*
@@ -1335,7 +1344,9 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 static void
 ExecShutdownGpuJoin(CustomScanState *node)
 {
-	pgstromSharedStateShutdownDSM((pgstromTaskState *)node);
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	pgstromSharedStateShutdownDSM(pts);
 }
 
 /*
