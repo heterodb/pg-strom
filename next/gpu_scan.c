@@ -20,39 +20,6 @@ static CustomExecMethods	gpuscan_exec_methods;
 static bool					enable_gpuscan;		/* GUC */
 static bool					enable_pullup_outer_scan;	/* GUC */
 
-#if 0
-/*
- * GpuScanSharedState
- */
-typedef struct
-{
-	/* for arrow_fdw file scan */
-	pg_atomic_uint32	af_rbatch_index;
-	pg_atomic_uint32	af_rbatch_nload;	/* # of loaded record-batches */
-	pg_atomic_uint32	af_rbatch_nskip;	/* # of skipped record-batches */
-	/* for gpu_cache cache scan */
-	pg_atomic_uint32	gc_fetch_count;
-	/* for block-based regular table scan */
-	BlockNumber			pbs_nblocks;		/* # blocks in relation at start of scan */
-	slock_t				pbs_mutex;			/* lock of the fields below */
-	BlockNumber			pbs_startblock;		/* starting block number */
-	BlockNumber			pbs_nallocated;		/* # of blocks allocated to workers */
-	/* common parallel table scan descriptor */
-	ParallelTableScanDescData phscan;
-} GpuScanSharedState;
-
-/*
- * GpuScanState
- */
-typedef struct
-{
-	pgstromTaskState	pts;
-	GpuScanInfo			gs_info;
-	XpuCommand		   *xcmd_req;	/* request command buffer */
-	size_t				xcmd_len;
-} GpuScanState;
-#endif
-
 /*
  * xpuOperatorCostRatio
  */
@@ -890,31 +857,13 @@ ExplainGpuScan(CustomScanState *node,
 			   ExplainState *es)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
-	pgstromPlanInfo *pp_info = pts->pp_info;
-	CustomScan *cscan = (CustomScan *)node->ss.ps.plan;
 	List	   *dcontext;
 
 	/* setup deparsing context */
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
-										(Plan *)cscan,
+										pts->css.ss.ps.plan,
 										ancestors);
-	pgstromExplainScanState(pts, es,
-							dcontext,
-							cscan->custom_scan_tlist,
-							pp_info->scan_quals,
-							pp_info->scan_tuples,
-                            pp_info->scan_rows);
-	/* XPU Code (if verbose) */
-	pgstrom_explain_xpucode(&pts->css, es, dcontext,
-							"Scan Var-Loads Code",
-							pp_info->kexp_scan_kvars_load);
-	pgstrom_explain_xpucode(&pts->css, es, dcontext,
-							"Scan Quals Code",
-							pp_info->kexp_scan_quals);
-	pgstrom_explain_xpucode(&pts->css, es, dcontext,
-							"GPU Projection Code",
-							pp_info->kexp_projection);
-	pgstromExplainTaskState(pts, es, dcontext);
+	pgstromTaskStateExplain(pts, es, dcontext, "GPU");
 }
 
 /*

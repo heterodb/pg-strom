@@ -2255,7 +2255,7 @@ pgstrom_explain_xpucode(const CustomScanState *css,
 {
 	StringInfoData	buf;
 
-	if (es->verbose)
+	if (xpucode)
 	{
 		const kern_expression *kexp = (const kern_expression *)VARDATA(xpucode);
 

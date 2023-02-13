@@ -626,16 +626,10 @@ extern void		pgstromSharedStateInitDSM(pgstromTaskState *pts,
 										  ParallelContext *pcxt, char *dsm_addr);
 extern void		pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr);
 extern void		pgstromSharedStateShutdownDSM(pgstromTaskState *pts);
-extern void		pgstromExplainScanState(pgstromTaskState *pts,
+extern void		pgstromTaskStateExplain(pgstromTaskState *pts,
 										ExplainState *es,
 										List *dcontext,
-										List *tlist_dev,
-										List *dev_quals,
-										double scan_tuples,
-										double scan_rows);
-extern void		pgstromExplainTaskState(pgstromTaskState *pts,
-										ExplainState *es,
-										List *dcontext);
+										const char *xpu_label);
 extern void		pgstrom_init_executor(void);
 
 /*

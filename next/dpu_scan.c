@@ -338,30 +338,12 @@ ExplainDpuScan(CustomScanState *node,
                ExplainState *es)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
-	pgstromPlanInfo *pp_info = pts->pp_info;
-	CustomScan *cscan = (CustomScan *)node->ss.ps.plan;
 	List	   *dcontext;
 
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
 										node->ss.ps.plan,
 										ancestors);
-	pgstromExplainScanState(pts, es,
-							dcontext,
-							cscan->custom_scan_tlist,
-							pp_info->scan_quals,
-							pp_info->scan_tuples,
-							pp_info->scan_rows);
-	/* XPU Code (if verbose) */
-	pgstrom_explain_xpucode(&pts->css, es, dcontext,
-							"Scan Var-Loads Code",
-							pp_info->kexp_scan_kvars_load);
-	pgstrom_explain_xpucode(&pts->css, es, dcontext,
-							"Scan Quals Code",
-							pp_info->kexp_scan_quals);
-	pgstrom_explain_xpucode(&pts->css, es, dcontext,
-							"DPU Projection Code",
-							pp_info->kexp_projection);
-	pgstromExplainTaskState(pts, es, dcontext);
+	pgstromTaskStateExplain(pts, es, dcontext, "DPU");
 }
 
 /*

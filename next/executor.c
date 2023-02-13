@@ -1266,66 +1266,160 @@ pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
 }
 
 /*
- * pgstromExplainScanState
+ * pgstromTaskStateExplain
  */
 void
-pgstromExplainScanState(pgstromTaskState *pts,
+pgstromTaskStateExplain(pgstromTaskState *pts,
 						ExplainState *es,
 						List *dcontext,
-						List *tlist_dev,
-						List *dev_quals,
-						double scan_tuples,
-						double scan_rows)
+						const char *xpu_label)
 {
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
 	StringInfoData buf;
+	ListCell   *lc;
 	char		label[100];
 	char	   *str;
-	ListCell   *lc;
+	double		ntuples;
 
 	initStringInfo(&buf);
-	foreach (lc, tlist_dev)
+
+	/* xPU Projection */
+	foreach (lc, cscan->custom_scan_tlist)
 	{
-		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry *tle = lfirst(lc);
 
 		if (tle->resjunk)
 			continue;
-	    str = deparse_expression((Node *)tle->expr, dcontext, false, true);
+		str = deparse_expression((Node *)tle->expr, dcontext, false, true);
 		if (buf.len > 0)
 			appendStringInfoString(&buf, ", ");
 		appendStringInfoString(&buf, str);
 	}
-	snprintf(label, sizeof(label), "%s Projection",
-			 DevKindLabel(pts->devkind, false));
+	snprintf(label, sizeof(label),
+			 "%s Projection", xpu_label);
 	ExplainPropertyText(label, buf.data, es);
 
-	resetStringInfo(&buf);
-	if (dev_quals != NIL)
+	/* xPU Scan Quals */
+	if (pp_info->scan_quals)
 	{
+		List   *scan_quals = pp_info->scan_quals;
 		Expr   *expr;
 
-		if (list_length(dev_quals) > 1)
-			expr = make_andclause(dev_quals);
+		resetStringInfo(&buf);
+		if (list_length(scan_quals) > 1)
+			expr = make_andclause(scan_quals);
 		else
-			expr = linitial(dev_quals);
+			expr = linitial(scan_quals);
 		str = deparse_expression((Node *)expr, dcontext, false, true);
 		appendStringInfo(&buf, "%s [rows: %.0f -> %.0f]",
-						 str, scan_tuples, scan_rows);
-		ExplainPropertyText("Scan Quals", buf.data, es);
+						 str,
+						 pp_info->scan_tuples,
+						 pp_info->scan_rows);
+		snprintf(label, sizeof(label), "%s Scan Quals", xpu_label);
+		ExplainPropertyText(label, buf.data, es);
 	}
-}
 
-/*
- * pgstromExplainTaskState
- */
-void
-pgstromExplainTaskState(pgstromTaskState *pts,
-						ExplainState *es,
-						List *dcontext)
-{
-	StringInfoData buf;
-	int		k;
+	/* xPU JOIN */
+	ntuples = pp_info->scan_rows;
+	for (int i=0; i < pp_info->num_rels; i++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
-	initStringInfo(&buf);
+		if (pp_inner->join_quals != NIL || pp_inner->other_quals != NIL)
+		{
+			const char *join_label;
+
+			resetStringInfo(&buf);
+			foreach (lc, pp_inner->join_quals)
+			{
+				Node   *expr = lfirst(lc);
+
+				str = deparse_expression(expr, dcontext, false, true);
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfoString(&buf, str);
+			}
+			if (pp_inner->other_quals != NIL)
+			{
+				Node   *expr = lfirst(lc);
+
+				str = deparse_expression(expr, dcontext, false, true);
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfo(&buf, "[%s]", str);
+			}
+			appendStringInfo(&buf, " ... [nrows: %.0f -> %.0f]",
+							 ntuples, pp_inner->join_nrows);
+			switch (pp_inner->join_type)
+			{
+				case JOIN_INNER: join_label = "Join"; break;
+				case JOIN_LEFT:  join_label = "Left Outer Join"; break;
+				case JOIN_RIGHT: join_label = "Right Outer Join"; break;
+				case JOIN_FULL:  join_label = "Full Outer Join"; break;
+				case JOIN_SEMI:  join_label = "Semi Join"; break;
+				case JOIN_ANTI:  join_label = "Anti Join"; break;
+				default:         join_label = "??? Join"; break;
+			}
+			snprintf(label, sizeof(label),
+					 "%s %s Quals [%d]", xpu_label, join_label, i+1);
+			ExplainPropertyText(label, buf.data, es);
+		}
+		ntuples = pp_inner->join_nrows;
+
+		if (pp_inner->hash_outer_keys != NIL)
+		{
+			resetStringInfo(&buf);
+			foreach (lc, pp_inner->hash_outer_keys)
+			{
+				Node   *expr = lfirst(lc);
+
+				str = deparse_expression(expr, dcontext, true, true);
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfoString(&buf, str);
+			}
+			snprintf(label, sizeof(label),
+					 "%s Outer Hash [%d]", xpu_label, i+1);
+			ExplainPropertyText(label, buf.data, es);
+		}
+		if (pp_inner->hash_inner_keys != NIL)
+		{
+			resetStringInfo(&buf);
+			foreach (lc, pp_inner->hash_inner_keys)
+			{
+				Node   *expr = lfirst(lc);
+
+				str = deparse_expression(expr, dcontext, true, true);
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfoString(&buf, str);
+			}
+			snprintf(label, sizeof(label),
+					 "%s Inner Hash [%d]", xpu_label, i+1);
+			ExplainPropertyText(label, buf.data, es);
+		}
+		if (pp_inner->gist_clause)
+		{
+			char   *idxname = get_rel_name(pp_inner->gist_index_oid);
+			char   *colname = get_attname(pp_inner->gist_index_oid,
+										  pp_inner->gist_index_col, false);
+			resetStringInfo(&buf);
+
+			str = deparse_expression(pp_inner->gist_clause,
+									 dcontext, false, true);
+			appendStringInfoString(&buf, str);
+			if (idxname && colname)
+				appendStringInfo(&buf, " on %s (%s)", idxname, colname);
+			snprintf(label, sizeof(label),
+					 "%s GiST Join [%d]", xpu_label, i+1);
+			ExplainPropertyText(label, buf.data, es);
+		}
+	}
+
+	/*
+	 * Storage related info
+	 */
 	if (pts->arrow_state)
 	{
 		pgstromArrowFdwExplain(pts->arrow_state,
@@ -1343,6 +1437,7 @@ pgstromExplainTaskState(pgstromTaskState *pts,
 		if (!es->analyze)
 		{
 			bool	is_first = true;
+			int		k;
 
 			appendStringInfo(&buf, "enabled (");
 			for (k = bms_next_member(pts->optimal_gpus, -1);
@@ -1383,11 +1478,36 @@ pgstromExplainTaskState(pgstromTaskState *pts,
 	{
 		/* Normal Heap Storage */
 	}
-
 	/* State of BRIN-index */
 	if (pts->br_state)
 		pgstromBrinIndexExplain(pts, dcontext, es);
 
+	/*
+	 * Dump the XPU code (only if verbose)
+	 */
+	if (es->verbose)
+	{
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Scan VarLoads OpCode",
+								pp_info->kexp_scan_kvars_load);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Scan Quals OpCode",
+								pp_info->kexp_scan_quals);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Join VarLoads OpCode",
+								pp_info->kexp_join_kvars_load_packed);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Join HashValue OpCode",
+								pp_info->kexp_hash_keys_packed);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"GiST-Index Join OpCode",
+								pp_info->kexp_gist_quals_packed);
+		snprintf(label, sizeof(label),
+				 "%s Projection OpCode", xpu_label);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								label,
+								pp_info->kexp_projection);
+	}
 	pfree(buf.data);
 }
 
