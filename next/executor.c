@@ -1415,6 +1415,9 @@ pgstromTaskStateExplain(pgstromTaskState *pts,
 								"Join VarLoads OpCode",
 								pp_info->kexp_join_kvars_load_packed);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Join Quals OpCode",
+								pp_info->kexp_join_quals_packed);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Join HashValue OpCode",
 								pp_info->kexp_hash_keys_packed);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,

@@ -988,6 +988,14 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	pp_info->kexp_gist_quals_packed = NULL;
 	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(&context);
 	pp_info->kexp_join_kvars_load_packed = codegen_build_join_loadvars(&context);
+	elog(INFO, "%p %p %p %p %p %p",
+		 pp_info->kexp_projection,
+		 pp_info->kexp_join_quals_packed,
+		 pp_info->kexp_hash_keys_packed,
+		 pp_info->kexp_gist_quals_packed,
+		 pp_info->kexp_scan_kvars_load,
+		 pp_info->kexp_join_kvars_load_packed);
+
 	pp_info->kvars_depth  = context.kvars_depth;
 	pp_info->kvars_resno  = context.kvars_resno;
 	pp_info->extra_flags  = context.extra_flags;

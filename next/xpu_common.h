@@ -1476,7 +1476,10 @@ struct kern_expression
 			kern_projection_desc desc[1];
 		} proj;		/* Projection */
 		struct {
-			uint32_t	subexp_offset[1];	/* sub-expression per depth */
+			uint32_t	npacked;	/* number of packed sub-expressions; including
+									 * logical NULLs (npacked may be larger than
+									 * nr_args) */
+			uint32_t	offset[1];	/* offset to sub-expressions */
 		} pack;		/* Packed */
 	} u;
 };
@@ -1490,14 +1493,23 @@ __KEXP_IS_VALID(const kern_expression *kexp,
 {
 	uint32_t   *magic = (uint32_t *)((char *)karg + karg->len - sizeof(uint32_t));
 
-	if (*magic != (KERN_EXPRESSION_MAGIC
+	if (*magic == (KERN_EXPRESSION_MAGIC
 				   ^ ((uint32_t)karg->exptype << 6)
 				   ^ ((uint32_t)karg->opcode << 14)))
-		return false;
-	if (kexp && ((char *)karg < kexp->u.data ||
-				 (char *)karg + karg->len > (char *)kexp + kexp->len))
-		return false;
-	return true;
+	{
+		if (kexp)
+		{
+			if ((char *)karg >= kexp->u.data &&
+				(char *)karg + karg->len <= (char *)kexp + kexp->len)
+				return true;
+		}
+		else if (!karg)
+		{
+			/* both kexp and karg are NULL */
+			return true;
+		}
+	}
+	return false;
 }
 #define KEXP_IS_VALID(__karg,EXPTYPE)				\
 	(__KEXP_IS_VALID(kexp,(__karg)) &&				\
@@ -1648,22 +1660,20 @@ SESSION_KEXP_SCAN_QUALS(kern_session_info *session)
 }
 
 INLINE_FUNCTION(kern_expression *)
-__PICKUP_PACKED_KEXP(kern_expression *kexp, int dindex,
-					 FuncOpCode karg_opcode,
-					 TypeOpCode karg_exptype)
+__PICKUP_PACKED_KEXP(const kern_expression *kexp, int dindex)
 {
 	kern_expression *karg;
-	uint32_t	subexp_offset;
+	uint32_t	offset;
 
 	assert(kexp->opcode == FuncOpCode__Packed);
-	if (dindex < 0 || dindex >= kexp->nr_args)
+	if (dindex < 0 || dindex >= kexp->u.pack.npacked)
 		return NULL;
-	subexp_offset = kexp->u.pack.subexp_offset[dindex];
-	if (subexp_offset == 0)
+	offset = kexp->u.pack.offset[dindex];
+	if (offset == 0)
 		return NULL;
-	karg = (kern_expression *)((char *)kexp + subexp_offset);
-	assert(karg->opcode == FuncOpCode__Invalid || karg->opcode == karg_opcode);
-	assert(karg->exptype == TypeOpCode__Invalid || karg->exptype == karg_exptype);
+	karg = (kern_expression *)((char *)kexp + offset);
+	assert(karg->u.data < (char *)kexp + kexp->len &&
+		   (char *)karg + karg->len <= (char *)kexp + kexp->len);
 	return karg;
 }
 
@@ -1671,45 +1681,50 @@ INLINE_FUNCTION(kern_expression *)
 SESSION_KEXP_JOIN_LOAD_VARS(kern_session_info *session, int dindex)
 {
 	kern_expression *kexp;
+	kern_expression *karg;
 
 	if (session->xpucode_join_load_vars_packed == 0)
 		return NULL;
 	kexp = (kern_expression *)((char *)session + session->xpucode_join_load_vars_packed);
 	if (dindex < 0)
 		return kexp;
-	return __PICKUP_PACKED_KEXP(kexp, dindex,
-								FuncOpCode__LoadVars,
-								TypeOpCode__int4);
+	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	assert(!karg || (karg->opcode == FuncOpCode__LoadVars &&
+					 karg->exptype == TypeOpCode__int4));
+	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
 SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int dindex)
 {
 	kern_expression *kexp;
+	kern_expression *karg;
 
 	if (session->xpucode_join_quals_packed == 0)
 		return NULL;
 	kexp = (kern_expression *)((char *)session + session->xpucode_join_quals_packed);
 	if (dindex < 0)
 		return kexp;
-	return __PICKUP_PACKED_KEXP(kexp, dindex,
-								FuncOpCode__Invalid,
-								TypeOpCode__bool);
+	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	assert(!karg || karg->exptype == TypeOpCode__bool);
+	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
 SESSION_KEXP_HASH_VALUE(kern_session_info *session, int dindex)
 {
 	kern_expression *kexp;
+	kern_expression *karg;
 
 	if (session->xpucode_hash_values_packed == 0)
 		return NULL;
 	kexp = (kern_expression *)((char *)session + session->xpucode_hash_values_packed);
 	if (dindex < 0)
 		return kexp;
-	return __PICKUP_PACKED_KEXP(kexp, dindex,
-								FuncOpCode__HashValue,
-								TypeOpCode__int4);
+	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	assert(!karg || (karg->opcode == FuncOpCode__HashValue &&
+					 karg->exptype == TypeOpCode__int4));
+	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
