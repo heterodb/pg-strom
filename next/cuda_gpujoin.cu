@@ -95,9 +95,9 @@ execGpuJoinNestLoop(kern_context      *kcxt,
 			tupitem = (kern_tupitem *)((char *)kds_heap +
 									   kds_heap->length -
 									   __kds_unpack(offset));
-			kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth);
+			kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth-1);
 			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, &tupitem->htup);
-			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
+			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth-1);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp, &status))
 			{
 				assert(!status.isnull);
@@ -111,7 +111,7 @@ execGpuJoinNestLoop(kern_context      *kcxt,
 				 index >= kds_heap->nitems && !matched)
 		{
 			/* fill up NULL fields, if FULL/LEFT OUTER JOIN */
-			kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth);
+			kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth-1);
 			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, NULL);
 			tuple_is_valid = true;
 		}
@@ -196,28 +196,28 @@ execGpuJoinHashJoin(kern_context      *kcxt,
 		__syncwarp();
 		l_state = 0;
 		matched = false;
-		if (wp->scan_done >= depth)
+		if (wp->scan_done < depth)
+		{
+			/*
+			 * The previous depth still may generate the source tuple.
+			 */
+			if (WARP_WRITE_POS(wp,depth-1) < WARP_READ_POS(wp,depth-1) + warpSize)
+				return depth-1;
+		}
+		else
 		{
 			assert(wp->scan_done == depth);
 			if (WARP_READ_POS(wp,depth-1) >= WARP_WRITE_POS(wp,depth-1))
 			{
 				if (LaneId() == 0)
-					wp->scan_done = Max(wp->scan_done, depth+1);
+					wp->scan_done = depth+1;
 				return depth+1;
 			}
 			/*
 			 * Elsewhere, remaining tuples in the combination buffer
 			 * shall be wiped-out first, then, we update 'scan_done'
 			 * to mark this depth will never generate results any more.
-			 */			
-		}
-		else
-		{
-			/*
-			 * Back to the previous depth to generate the source tuples.
 			 */
-			if (WARP_READ_POS(wp,depth-1) + warpSize > WARP_WRITE_POS(wp,depth-1))
-				return depth-1;
 		}
 	}
 	write_pos = WARP_WRITE_POS(wp,depth-1);
@@ -232,7 +232,7 @@ execGpuJoinHashJoin(kern_context      *kcxt,
 		{
 			xpu_int4_t	hash;
 
-			kexp = SESSION_KEXP_HASH_VALUE(kcxt->session, depth);
+			kexp = SESSION_KEXP_HASH_VALUE(kcxt->session, depth-1);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp, &hash))
 			{
 				assert(!hash.isnull);
@@ -241,18 +241,21 @@ execGpuJoinHashJoin(kern_context      *kcxt,
 					 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem));
 			}
 		}
+		else
+		{
+			l_state = UINT_MAX;
+		}
 	}
 	else if (l_state != UINT_MAX)
 	{
 		/* pick up the next one if any */
 		uint32_t	hash_value;
 
-		khitem = (kern_hashitem *)((char *)kds_hash
-								   + __kds_unpack(l_state)
-								   - offsetof(kern_hashitem, t.htup));
+		khitem = (kern_hashitem *)((char *)kds_hash + __kds_unpack(l_state));
 		hash_value = khitem->hash;
-		while (khitem != NULL && khitem->hash != hash_value)
-			khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem);
+		for (khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem);
+			 khitem != NULL && khitem->hash != hash_value;
+			 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem));
 	}
 	/* error checks */
 	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
@@ -261,9 +264,9 @@ execGpuJoinHashJoin(kern_context      *kcxt,
 	{
 		xpu_int4_t	status;
 
-		kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth);
+		kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth-1);
 		ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, &khitem->t.htup);
-		kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
+		kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth-1);
 		if (EXEC_KERN_EXPRESSION(kcxt, kexp, &status))
 		{
 			assert(!status.isnull);
@@ -272,7 +275,7 @@ execGpuJoinHashJoin(kern_context      *kcxt,
 			if (status.value != 0)
 				matched = true;
 		}
-		l_state = __kds_packed((char *)&khitem->t.htup - (char *)kds_hash);
+		l_state = __kds_packed((char *)khitem - (char *)kds_hash);
 	}
 	else
 	{
@@ -280,7 +283,7 @@ execGpuJoinHashJoin(kern_context      *kcxt,
 			l_state != UINT_MAX && !matched)
 		{
 			/* load NULL values on the inner portion */
-			 kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth);
+			 kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth-1);
 			 ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, NULL);
 			 tuple_is_valid = true;
 		}
@@ -305,7 +308,7 @@ execGpuJoinHashJoin(kern_context      *kcxt,
 		dst_kvars_addr += index * kcxt->kvars_nslots;
 		dst_kvars_len  += index * kcxt->kvars_nslots;
 		memcpy(dst_kvars_addr, kcxt->kvars_addr, sizeof(void *) * kcxt->kvars_nslots);
-		memcpy(dst_kvars_len,  kcxt->kvars_len,  sizeof(int) * kcxt->kvars_nslots);
+		memcpy(dst_kvars_len,  kcxt->kvars_len,  sizeof(int)    * kcxt->kvars_nslots);
 	}
 	__syncwarp();
 	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
@@ -340,7 +343,7 @@ execGpuJoinProjection(kern_context *kcxt,
 			uint32_t	usage;
 		} i;
 		uint64_t		v64;
-	}	oldval, curval, newval;
+	} oldval, curval, newval;
 
 	/*
 	 * The previous depth still may produce new tuples, and number of
@@ -348,6 +351,7 @@ execGpuJoinProjection(kern_context *kcxt,
 	 */
 	if (wp->scan_done <= n_rels && read_pos + warpSize > write_pos)
 		return n_rels;
+
 	read_pos += LaneId();
 	if (read_pos < write_pos)
 	{

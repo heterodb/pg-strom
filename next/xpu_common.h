@@ -1357,30 +1357,26 @@ typedef struct
  * Definition of device flags
  *
  * ---------------------------------------------------------------- */
-#define DEVKIND__NONE				0x0000UL	/* no accelerator device */
-#define DEVKIND__NVIDIA_GPU			0x0001UL	/* for CUDA-based GPU */
-#define DEVKIND__NVIDIA_DPU			0x0002UL	/* for BlueField-X DPU */
-#define DEVKIND__ANY				0x0003UL	/* Both of GPU and DPU */
-#define DEVFUNC__LOCALE_AWARE		0x0100UL	/* Device function is locale aware,
+#define DEVKIND__NONE				0x00000000U	/* no accelerator device */
+#define DEVKIND__NVIDIA_GPU			0x00000001U	/* for CUDA-based GPU */
+#define DEVKIND__NVIDIA_DPU			0x00000002U	/* for BlueField-X DPU */
+#define DEVKIND__ANY				0x00000003U	/* Both of GPU and DPU */
+#define DEVFUNC__LOCALE_AWARE		0x00000100U	/* Device function is locale aware,
 												 * thus, available only if "C" or
 												 * no locale configuration */
-#define DEVKERN__SESSION_TIMEZONE	0x0200UL	/* Device function needs session
+#define DEVKERN__SESSION_TIMEZONE	0x00000200U	/* Device function needs session
 												 * timezone */
-INLINE_FUNCTION(const char *)
-DevKindLabel(uint32_t devkind, bool cap_only_head)
-{
-	switch (devkind & DEVKIND__ANY)
-	{
-		case DEVKIND__NONE:
-			return (cap_only_head ? "Cpu" : "CPU");
-		case DEVKIND__NVIDIA_GPU:
-			return (cap_only_head ? "Gpu" : "GPU");
-		case DEVKIND__NVIDIA_DPU:
-			return (cap_only_head ? "Dpu" : "DPU");
-		default:
-			return "???";
-	}
-}
+#define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
+#define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
+#define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
+
+#define TASK_KIND__GPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_GPU)
+#define TASK_KIND__GPUJOIN		(DEVTASK__JOIN   | DEVKIND__NVIDIA_GPU)
+#define TASK_KIND__GPUPREAGG	(DEVTASK__PREAGG | DEVKIND__NVIDIA_GPU)
+
+#define TASK_KIND__DPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_DPU)
+#define TASK_KIND__DPUJOIN		(DEVTASK__JOIN   | DEVKIND__NVIDIA_DPU)
+#define TASK_KIND__DPUPREAGG	(DEVTASK__PREAGG | DEVKIND__NVIDIA_DPU)
 
 /* ----------------------------------------------------------------
  *
@@ -1393,7 +1389,6 @@ typedef enum {
 	FuncOpCode__ConstExpr,
 	FuncOpCode__ParamExpr,
 	FuncOpCode__VarExpr,
-	//FuncOpCode__VarAsIsExpr ... only used in projection
 	FuncOpCode__BoolExpr_And,
 	FuncOpCode__BoolExpr_Or,
 	FuncOpCode__BoolExpr_Not,
@@ -1491,23 +1486,26 @@ INLINE_FUNCTION(bool)
 __KEXP_IS_VALID(const kern_expression *kexp,
 				const kern_expression *karg)
 {
-	uint32_t   *magic = (uint32_t *)((char *)karg + karg->len - sizeof(uint32_t));
-
-	if (*magic == (KERN_EXPRESSION_MAGIC
-				   ^ ((uint32_t)karg->exptype << 6)
-				   ^ ((uint32_t)karg->opcode << 14)))
+	if (kexp)
 	{
-		if (kexp)
+		if ((char *)karg >= kexp->u.data &&
+			(char *)karg + karg->len <= (char *)kexp + kexp->len)
 		{
-			if ((char *)karg >= kexp->u.data &&
-				(char *)karg + karg->len <= (char *)kexp + kexp->len)
+			uint32_t   *magic = (uint32_t *)
+				((char *)karg + karg->len - sizeof(uint32_t));
+			if (*magic == (KERN_EXPRESSION_MAGIC
+						   ^ ((uint32_t)karg->exptype << 6)
+						   ^ ((uint32_t)karg->opcode << 14)))
+			{
+				/* ok, it looks valid */
 				return true;
+			}
 		}
-		else if (!karg)
-		{
-			/* both kexp and karg are NULL */
-			return true;
-		}
+	}
+	else if (!karg)
+	{
+		/* both kexp and karg is NULL */
+		return true;
 	}
 	return false;
 }
@@ -1556,6 +1554,8 @@ typedef struct
 #define XpuCommandTag__CPUFallback		2
 #define XpuCommandTag__OpenSession		100
 #define XpuCommandTag__XpuScanExec		200
+#define XpuCommandTag__XpuJoinExec		300
+#define XpuCommandTag__XpuPreAggExec	400
 #define XpuCommandMagicNumber			0xdeadbeafU
 
 /*
@@ -1706,7 +1706,8 @@ SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int dindex)
 	if (dindex < 0)
 		return kexp;
 	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
-	assert(!karg || karg->exptype == TypeOpCode__bool);
+	assert(!karg || (karg->opcode == FuncOpCode__JoinQuals &&
+					 karg->exptype == TypeOpCode__bool));
 	return karg;
 }
 

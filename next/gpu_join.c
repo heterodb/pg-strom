@@ -988,14 +988,6 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	pp_info->kexp_gist_quals_packed = NULL;
 	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(&context);
 	pp_info->kexp_join_kvars_load_packed = codegen_build_join_loadvars(&context);
-	elog(INFO, "%p %p %p %p %p %p",
-		 pp_info->kexp_projection,
-		 pp_info->kexp_join_quals_packed,
-		 pp_info->kexp_hash_keys_packed,
-		 pp_info->kexp_gist_quals_packed,
-		 pp_info->kexp_scan_kvars_load,
-		 pp_info->kexp_join_kvars_load_packed);
-
 	pp_info->kvars_depth  = context.kvars_depth;
 	pp_info->kvars_resno  = context.kvars_resno;
 	pp_info->extra_flags  = context.extra_flags;
@@ -1160,7 +1152,7 @@ CreateGpuJoinState(CustomScan *cscan)
 	NodeSetTag(pts, T_CustomScanState);
 	pts->css.flags = cscan->flags;
 	pts->css.methods = &gpujoin_exec_methods;
-	pts->devkind = DEVKIND__NVIDIA_GPU;
+	pts->task_kind = TASK_KIND__GPUJOIN;
 	pts->pp_info = deform_pgstrom_plan_info(cscan);
 	Assert(pts->pp_info->num_rels == num_rels);
 	pts->num_rels = num_rels;
@@ -1240,7 +1232,7 @@ ExecInitGpuJoin(CustomScanState *node,
 		pts->css.custom_ps = lappend(pts->css.custom_ps, ps);
 		depth++;
 	}
-	pgstromExecInitTaskState(pts, DEVKIND__NVIDIA_GPU);
+	pgstromExecInitTaskState(pts);
 	pts->cb_cpu_fallback = ExecFallbackCpuScan;
 }
 
@@ -1414,9 +1406,7 @@ get_tuple_hashvalue(pgstromTaskInnerState *istate,
 		bool			isnull;
 
 		datum = ExecEvalExpr(es, econtext, &isnull);
-		if (isnull)
-			continue;
-		hash ^= dtype->type_hashfunc(dtype, datum);
+		hash ^= dtype->type_hashfunc(isnull, datum);
 	}
 	hash ^= 0xffffffffU;
 
@@ -1547,6 +1537,7 @@ again:
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
 				kds->hash_nslots = nslots;
+				memset(KDS_GET_HASHSLOT(kds), 0, sizeof(uint32_t) * nslots);
 			}
 			offset += nbytes;
 		}
@@ -1720,7 +1711,7 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 
 		sz = MAXALIGN(offsetof(kern_hashitem, t.htup) + htup->t_len);
 		curr_pos -= sz;
-		self = __kds_packed(tail_pos - curr_pos);
+		self = __kds_packed(curr_pos - (char *)kds);
 		__atomic_exchange(&hash_slot[hindex], &self, &next,
 						  __ATOMIC_SEQ_CST);
 		hitem = (kern_hashitem *)curr_pos;

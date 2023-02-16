@@ -3491,7 +3491,6 @@ __arrowFdwExecInit(ScanState *ss,
  */
 bool
 pgstromArrowFdwExecInit(pgstromTaskState *pts,
-						uint64_t devkind_mask,
 						List *outer_quals,
 						const Bitmapset *outer_refs)
 {
@@ -3503,9 +3502,9 @@ pgstromArrowFdwExecInit(pgstromTaskState *pts,
 		arrow_state = __arrowFdwExecInit(&pts->css.ss,
 										 outer_quals,
 										 outer_refs,
-										 (devkind_mask & DEVKIND__NVIDIA_GPU) != 0
+										 (pts->task_kind & DEVKIND__NVIDIA_GPU) != 0
 											? &pts->optimal_gpus : NULL,
-										 (devkind_mask & DEVKIND__NVIDIA_DPU) != 0
+										 (pts->task_kind & DEVKIND__NVIDIA_DPU) != 0
 											? &pts->ds_entry : NULL);
 	}
 	pts->arrow_state = arrow_state;

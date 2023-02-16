@@ -188,6 +188,7 @@ execGpuJoinProjection(kern_context *kcxt,
 					  kern_expression *kexp_projection,
 					  void **kvars_addr,
 					  int *kvars_len);
+
 /*
  * Definitions related to GpuScan/GpuJoin/GpuPreAgg
  */
@@ -259,6 +260,7 @@ typedef struct {
 KERNEL_FUNCTION(void)
 kern_gpuscan_main(kern_session_info *session,
 				  kern_gputask *kgtask,
+				  kern_multirels *__kmrels,	/* always null */
 				  kern_data_store *kds_src,
 				  kern_data_extra *kds_extra,
 				  kern_data_store *kds_dst);

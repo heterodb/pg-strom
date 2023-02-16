@@ -411,6 +411,7 @@ execGpuScanLoadSource(kern_context *kcxt,
 KERNEL_FUNCTION(void)
 kern_gpuscan_main(kern_session_info *session,
 				  kern_gputask *kgtask,
+				  kern_multirels *__kmrels,		/* should be NULL */
 				  kern_data_store *kds_src,
 				  kern_data_extra *kds_extra,
 				  kern_data_store *kds_dst)
@@ -425,7 +426,8 @@ kern_gpuscan_main(kern_session_info *session,
 	__shared__ uint32_t	smx_row_count;
 
 	assert(kgtask->nslots == session->kvars_slot_width &&
-		   kgtask->n_rels == 0);
+		   kgtask->n_rels == 0 &&
+		   __kmrels == NULL);
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, NULL, kds_dst);
 	wp_unitsz = __KERN_WARP_CONTEXT_UNITSZ_BASE(0);

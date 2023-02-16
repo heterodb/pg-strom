@@ -534,7 +534,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	if (pp_info->kexp_projection)
 	{
 		xpucode = pp_info->kexp_projection;
-		session->xpucode_gist_quals_packed =
+		session->xpucode_projection =
 			__appendBinaryStringInfo(&buf,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
@@ -814,8 +814,15 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
 	memset(xcmd, 0, offsetof(XpuCommand, u.scan.data));
-	xcmd->magic  = XpuCommandMagicNumber;
-	xcmd->tag    = XpuCommandTag__XpuScanExec;
+	xcmd->magic = XpuCommandMagicNumber;
+	if ((pts->task_kind & DEVTASK__SCAN) != 0)
+		xcmd->tag = XpuCommandTag__XpuScanExec;
+	else if ((pts->task_kind & DEVTASK__JOIN) != 0)
+		xcmd->tag = XpuCommandTag__XpuJoinExec;
+	else if ((pts->task_kind & DEVTASK__PREAGG) != 0)
+		xcmd->tag = XpuCommandTag__XpuPreAggExec;
+	else
+		elog(ERROR, "unsupported task kind: %08x", pts->task_kind);
 	xcmd->length = bufsz;
 
 	off = offsetof(XpuCommand, u.scan.data);
@@ -838,8 +845,7 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
  * pgstromExecInitTaskState
  */
 void
-pgstromExecInitTaskState(pgstromTaskState *pts,
-						 uint64_t devkind_mask)	/* DEVKIND_* */
+pgstromExecInitTaskState(pgstromTaskState *pts)
 {
 	pgstromPlanInfo	*pp_info = pts->pp_info;
 	EState		   *estate = pts->css.ss.ps.state;
@@ -872,16 +878,15 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 								  pp_info->brin_index_oid,
 								  pp_info->brin_index_conds,
 								  pp_info->brin_index_quals);
-		if ((devkind_mask & DEVKIND__NVIDIA_GPU) != 0)
+		if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
 			pts->optimal_gpus = GetOptimalGpuForRelation(rel);
-		if ((devkind_mask & DEVKIND__NVIDIA_DPU) != 0)
+		if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
 			pts->ds_entry = GetOptimalDpuForRelation(rel, &kds_pathname);
 		pts->kds_pathname = kds_pathname;
 	}
 	else if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
 	{
 		if (!pgstromArrowFdwExecInit(pts,
-									 devkind_mask,
 									 pp_info->scan_quals,
 									 pp_info->outer_refs))
 			elog(ERROR, "Bug? only arrow_fdw is supported in PG-Strom");

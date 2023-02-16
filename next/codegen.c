@@ -1583,7 +1583,7 @@ __codegen_build_joinquals(codegen_context *context,
 
 	initStringInfo(&buf);
 	memset(&kexp, 0, sizeof(kexp));
-	kexp.exptype = TypeOpCode__int4;
+	kexp.exptype = TypeOpCode__bool;
 	kexp.expflags = context->kexp_flags;
 	kexp.opcode = FuncOpCode__JoinQuals;
 	kexp.nr_args = list_length(join_quals) + list_length(other_quals);
@@ -2060,7 +2060,7 @@ __xpucode_to_cstring(StringInfo buf,
 			appendStringInfo(buf, "{HashValue");
 			break;
 		case FuncOpCode__JoinQuals:
-			appendStringInfo(buf, "{JoinQuals");
+			appendStringInfo(buf, "{JoinQuals: ");
 			for (i=0, karg=KEXP_FIRST_ARG(kexp);
 				 i < kexp->nr_args;
 				 i++, karg=KEXP_NEXT_ARG(karg))

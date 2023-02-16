@@ -10,7 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
-
+#include "cuda_common.h"
 /*
  * gpuContext / gpuModule / gpuMemory
  */
@@ -918,7 +918,7 @@ __gpuClientELog(gpuClient *gclient,
 	/* unable to continue GPU service, so try to restart */
 	if (errcode == ERRCODE_DEVICE_FATAL)
 	{
-		fprintf(stderr, "(%s:%d, %s) GPU faal - %s\n",
+		fprintf(stderr, "(%s:%d, %s) GPU fatal - %s\n",
 				resp.u.error.filename,
 				resp.u.error.lineno,
 				resp.u.error.funcname,
@@ -1091,7 +1091,6 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 			gpuClientELog(gclient, "%s", emsg);
 			return false;
 		}
-		fprintf(stderr, "gclient->gq_kmrels = %p\n", gclient->gq_kmrels);
 	}
 	gclient->session = session;
 	gclient->cuda_module = gmodule->cuda_module;
@@ -1107,6 +1106,308 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	__gpuClientWriteBack(gclient, &iov, 1);
 
 	return true;
+}
+
+/* ----------------------------------------------------------------
+ *
+ * gpuservHandleGpuTaskExec
+ *
+ * ----------------------------------------------------------------
+ */
+static void
+gpuservHandleGpuTaskExec(gpuClient *gclient,
+						 XpuCommand *xcmd,
+						 const char *kern_funcname)
+{
+	kern_session_info *session = gclient->session;
+	kern_gputask	*kgtask = NULL;
+	const char		*kds_src_pathname = NULL;
+	strom_io_vector *kds_src_iovec = NULL;
+	kern_data_store *kds_src = NULL;
+	kern_data_extra	*kds_extra = NULL;
+	kern_data_store *kds_dst = NULL;
+	kern_data_store *kds_dst_head = NULL;
+	kern_data_store **kds_dst_array = NULL;
+	int				kds_dst_nrooms = 0;
+	int				kds_dst_nitems = 0;
+	int				kvars_nslots = session->kvars_slot_width;
+	int				num_inner_rels = 0;
+	CUfunction		f_kern_gpuscan;
+	const gpuMemChunk *chunk = NULL;
+	CUdeviceptr		m_kds_src = 0UL;
+	CUdeviceptr		m_kmrels = 0UL;
+	CUdeviceptr		dptr;
+	CUresult		rc;
+	int				grid_sz;
+	int				block_sz;
+	unsigned int	shmem_sz;
+	size_t			sz;
+	void		   *kern_args[10];
+
+	if (xcmd->u.scan.kds_src_pathname)
+		kds_src_pathname = (char *)xcmd + xcmd->u.scan.kds_src_pathname;
+	if (xcmd->u.scan.kds_src_iovec)
+		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.scan.kds_src_iovec);
+	if (xcmd->u.scan.kds_src_offset)
+		kds_src = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_src_offset);
+	if (xcmd->u.scan.kds_dst_offset)
+		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_dst_offset);
+
+	if (!kds_src)
+	{
+		gpuClientELog(gclient, "KDS_FORMAT_COLUMN is not yet implemented");
+		return;
+	}
+	else if (kds_src->format == KDS_FORMAT_ROW)
+	{
+		m_kds_src = (CUdeviceptr)kds_src;
+	}
+	else if (kds_src->format == KDS_FORMAT_BLOCK)
+	{
+		if (kds_src_pathname && kds_src_iovec)
+		{
+			chunk = gpuservLoadKdsBlock(gclient,
+										kds_src,
+										kds_src_pathname,
+										kds_src_iovec);
+			if (!chunk)
+				return;
+			m_kds_src = chunk->m_devptr;
+		}
+		else
+		{
+			Assert(kds_src->block_nloaded == kds_src->nitems);
+			m_kds_src = (CUdeviceptr)kds_src;
+		}
+	}
+	else if (kds_src->format == KDS_FORMAT_ARROW)
+	{
+		if (kds_src_iovec->nr_chunks == 0)
+			m_kds_src = (CUdeviceptr)kds_src;
+		else
+		{
+			if (!kds_src_pathname)
+			{
+				gpuClientELog(gclient, "GpuScan: arrow file is missing");
+				return;
+			}
+			chunk = gpuservLoadKdsArrow(gclient,
+										kds_src,
+										kds_src_pathname,
+										kds_src_iovec);
+			if (!chunk)
+				return;
+			m_kds_src = chunk->m_devptr;
+		}
+	}
+	else
+	{
+		gpuClientELog(gclient, "unknown GpuScan Source format (%c)",
+					  kds_src->format);
+		return;
+	}
+	/* inner buffer of GpuJoin */
+	if (gclient->gq_kmrels)
+	{
+		gpuQueryBuffer *gq_kmrels = gclient->gq_kmrels;
+
+		m_kmrels = gq_kmrels->m_devptr;
+		num_inner_rels = ((kern_multirels *)gq_kmrels->h_shmptr)->num_rels;
+	}
+
+	rc = cuModuleGetFunction(&f_kern_gpuscan,
+							 gclient->cuda_module,
+							 kern_funcname);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientFatal(gclient, "failed on cuModuleGetFunction: %s",
+					   cuStrError(rc));
+		goto bailout;
+	}
+
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 &shmem_sz,
+							 f_kern_gpuscan,
+							 0,
+							 __KERN_WARP_CONTEXT_UNITSZ_BASE(0));
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientFatal(gclient, "failed on gpuOptimalBlockSize: %s",
+					   cuStrError(rc));
+		goto bailout;
+	}
+	
+	/*
+	 * Allocation of the control structure
+	 */
+	grid_sz = Min(grid_sz, (kds_src->nitems + block_sz - 1) / block_sz);
+//	block_sz = 64;
+//	grid_sz = 1;
+
+	sz = KERN_GPUTASK_LENGTH(num_inner_rels, kvars_nslots, grid_sz * block_sz);
+	rc = cuMemAllocManaged(&dptr, sz, CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientFatal(gclient, "failed on cuMemAllocManaged(%lu): %s",
+					   sz, cuStrError(rc));
+		goto bailout;
+	}
+	kgtask = (kern_gputask *)dptr;
+	memset(kgtask, 0, offsetof(kern_gputask, stats[0]));
+	kgtask->grid_sz  = grid_sz;
+	kgtask->block_sz = block_sz;
+	kgtask->nslots = kvars_nslots;
+	kgtask->n_rels = num_inner_rels;
+
+	/* prefetch source KDS, if managed memory */
+	if (!chunk)
+	{
+		rc = cuMemPrefetchAsync((CUdeviceptr)kds_src,
+								kds_src->length,
+								CU_DEVICE_PER_THREAD,
+								CU_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientFatal(gclient, "failed on cuMemPrefetchAsync: %s",
+						   cuStrError(rc));
+			goto bailout;
+		}
+	}
+
+	/*
+	 * Allocation of the destination buffer
+	 */
+resume_kernel:
+	sz = KDS_HEAD_LENGTH(kds_dst_head) + PGSTROM_CHUNK_SIZE;
+	rc = cuMemAllocManaged(&dptr, sz, CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientFatal(gclient, "failed on cuMemAllocManaged(%lu): %s",
+					   sz, cuStrError(rc));
+		goto bailout;
+	}
+	kds_dst = (kern_data_store *)dptr;
+	memcpy(kds_dst, kds_dst_head, KDS_HEAD_LENGTH(kds_dst_head));
+	kds_dst->length = sz;
+	if (kds_dst_nitems >= kds_dst_nrooms)
+	{
+		kern_data_store **kds_dst_temp;
+
+		kds_dst_nrooms = 2 * kds_dst_nrooms + 10;
+		kds_dst_temp = alloca(sizeof(kern_data_store *) * kds_dst_nrooms);
+		if (kds_dst_nitems > 0)
+			memcpy(kds_dst_temp,
+				   kds_dst_array,
+				   sizeof(kern_data_store *) * kds_dst_nitems);
+		kds_dst_array = kds_dst_temp;
+	}
+	kds_dst_array[kds_dst_nitems++] = kds_dst;
+
+	/*
+	 * Launch kernel
+	 */
+	kern_args[0] = &gclient->session;
+	kern_args[1] = &kgtask;
+	kern_args[2] = &m_kmrels;
+	kern_args[3] = &m_kds_src;
+	kern_args[4] = &kds_extra;
+	kern_args[5] = &kds_dst;
+
+	rc = cuLaunchKernel(f_kern_gpuscan,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						shmem_sz,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientFatal(gclient, "failed on cuLaunchKernel: %s", cuStrError(rc));
+		goto bailout;
+	}
+
+	rc = cuEventRecord(CU_EVENT_PER_THREAD, CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientFatal(gclient, "failed on cuEventRecord: %s", cuStrError(rc));
+		goto bailout;
+	}
+
+	/* point of synchronization */
+	rc = cuEventSynchronize(CU_EVENT_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientFatal(gclient, "failed on cuEventSynchronize: %s", cuStrError(rc));
+		goto bailout;
+	}
+
+	/* status check */
+	if (kgtask->kerror.errcode == ERRCODE_STROM_SUCCESS)
+	{
+		XpuCommand	resp;
+
+		if (kgtask->suspend_count > 0)
+		{
+			if (gpuServiceGoingTerminate())
+			{
+				gpuClientFatal(gclient, "GpuService is going to terminate during GpuScan kernel suspend/resume");
+				goto bailout;
+			}
+			/* restore warp context from the previous state */
+			kgtask->resume_context = true;
+			kgtask->suspend_count = 0;
+			fprintf(stderr, "suspend / resume happen\n");
+			goto resume_kernel;
+		}
+		/* send back status and kds_dst */
+		memset(&resp, 0, offsetof(XpuCommand, u.results));
+		resp.magic = XpuCommandMagicNumber;
+		resp.tag   = XpuCommandTag__Success;
+		resp.u.results.chunks_nitems = kds_dst_nitems;
+		resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
+		resp.u.results.stats.scan.nitems_in = kgtask->nitems_in;
+		resp.u.results.stats.scan.nitems_out = kgtask->nitems_out;
+		gpuClientWriteBack(gclient,
+						   &resp, resp.u.results.chunks_offset,
+						   kds_dst_nitems, kds_dst_array);
+	}
+	else if (kgtask->kerror.errcode == ERRCODE_CPU_FALLBACK)
+	{
+		XpuCommand	resp;
+
+		/* send back kds_src with XpuCommandTag__CPUFallback */
+		memset(&resp, 0, offsetof(XpuCommand, u.results));
+		resp.magic = XpuCommandMagicNumber;
+		resp.tag   = XpuCommandTag__CPUFallback;
+		resp.u.results.chunks_nitems = 1;
+		resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
+		gpuClientWriteBack(gclient,
+						   &resp, resp.u.results.chunks_offset,
+						   1, &kds_src);
+	}
+	else
+	{
+		/* send back error status */
+		__gpuClientELogRaw(gclient, &kgtask->kerror);
+	}
+bailout:
+	if (kgtask)
+	{
+		rc = cuMemFree((CUdeviceptr)kgtask);
+		if (rc != CUDA_SUCCESS)
+			fprintf(stderr, "warning: failed on cuMemFree: %s\n", cuStrError(rc));
+	}
+	if (chunk)
+		gpuMemFree(chunk);
+	while (kds_dst_nitems > 0)
+	{
+		kds_dst = kds_dst_array[--kds_dst_nitems];
+
+		rc = cuMemFree((CUdeviceptr)kds_dst);
+		if (rc != CUDA_SUCCESS)
+			fprintf(stderr, "warning: failed on cuMemFree: %s\n", cuStrError(rc));
+	}
 }
 
 /*
@@ -1162,7 +1463,12 @@ gpuservGpuWorkerMain(void *__arg)
 											 * end of the session. */
 						break;
 					case XpuCommandTag__XpuScanExec:
-						gpuservHandleGpuScanExec(gclient, xcmd);
+						gpuservHandleGpuTaskExec(gclient, xcmd,
+												 "kern_gpuscan_main");
+						break;
+					case XpuCommandTag__XpuJoinExec:
+						gpuservHandleGpuTaskExec(gclient, xcmd,
+												 "kern_gpujoin_main");
 						break;
 					default:
 						gpuClientELog(gclient, "unknown XPU command (%d)",

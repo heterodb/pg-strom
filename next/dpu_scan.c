@@ -183,7 +183,7 @@ CreateDpuScanState(CustomScan *cscan)
 	NodeSetTag(pts, T_CustomScanState);
 	pts->css.flags = cscan->flags;
 	pts->css.methods = &dpuscan_exec_methods;
-	pts->devkind = DEVKIND__NVIDIA_DPU;
+	pts->task_kind = TASK_KIND__DPUSCAN;
 	pts->pp_info = deform_pgstrom_plan_info(cscan);
 
 	return (Node *)pts;
@@ -201,7 +201,7 @@ ExecInitDpuScan(CustomScanState *node, EState *estate, int eflags)
     Assert(relation != NULL &&
            outerPlanState(node) == NULL &&
            innerPlanState(node) == NULL);
-	pgstromExecInitTaskState(pts, DEVKIND__NVIDIA_DPU);
+	pgstromExecInitTaskState(pts);
 	pts->cb_cpu_fallback = ExecFallbackCpuScan;
 }
 

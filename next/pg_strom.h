@@ -350,7 +350,7 @@ typedef struct
 struct pgstromTaskState
 {
 	CustomScanState		css;
-	uint32_t			devkind;		/* one of DEVKIND__* */
+	uint32_t			task_kind;		/* one of TASK_KIND__* */
 	const Bitmapset	   *optimal_gpus;	/* candidate GPUs to connect */
 	const DpuStorageEntry *ds_entry;	/* candidate DPUs to connect */
 	XpuConnection	   *conn;
@@ -598,8 +598,7 @@ extern void		xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd);
 extern void		xpuClientPutResponse(XpuCommand *xcmd);
 extern const XpuCommand *pgstromBuildSessionInfo(pgstromTaskState *pts,
 												 uint32_t join_inner_handle);
-extern void		pgstromExecInitTaskState(pgstromTaskState *pts,
-										 uint64_t devkind_mask);
+extern void		pgstromExecInitTaskState(pgstromTaskState *pts);
 extern TupleTableSlot  *pgstromExecTaskState(pgstromTaskState *pts);
 extern void		pgstromExecEndTaskState(pgstromTaskState *pts);
 extern void		pgstromExecResetTaskState(pgstromTaskState *pts);
@@ -748,7 +747,6 @@ extern const Bitmapset *GetOptimalGpusForArrowFdw(PlannerInfo *root,
 extern const DpuStorageEntry *GetOptimalDpuForArrowFdw(PlannerInfo *root,
 													   RelOptInfo *baserel);
 extern bool		pgstromArrowFdwExecInit(pgstromTaskState *pts,
-										uint64_t devkind_mask,
 										List *outer_quals,
 										const Bitmapset *outer_refs);
 extern XpuCommand *pgstromScanChunkArrowFdw(pgstromTaskState *pts,
