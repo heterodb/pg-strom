@@ -94,22 +94,16 @@ DpuScanAddScanPath(PlannerInfo *root,
 		Cost			final_cost = 0.0;
 
 		memset(&pp_data, 0, sizeof(pgstromPlanInfo));
-		if (!considerXpuScanPathParams(root,
-									   baserel,
-									   DEVKIND__NVIDIA_DPU,
-									   try_parallel > 0,	/* parallel_aware */
-									   dev_quals,
-									   host_quals,
-									   &parallel_nworkers,
-									   &pp_data.brin_index_oid,
-									   &pp_data.brin_index_conds,
-									   &pp_data.brin_index_quals,
-									   &startup_cost,
-									   &run_cost,
-									   &final_cost,
-									   NULL,
-									   NULL,
-									   &pp_data.ds_entry))
+		if (!consider_xpuscan_path_params(root,
+										  baserel,
+										  TASK_KIND__DPUSCAN,
+										  dev_quals,
+										  host_quals,
+										  try_parallel > 0,	/* parallel_aware */
+										  &parallel_nworkers,
+										  &startup_cost,
+										  &run_cost,
+										  &pp_data))
 			return;
 
 		/* setup DpuScanInfo (Path phase) */
@@ -185,6 +179,7 @@ CreateDpuScanState(CustomScan *cscan)
 	pts->css.methods = &dpuscan_exec_methods;
 	pts->task_kind = TASK_KIND__DPUSCAN;
 	pts->pp_info = deform_pgstrom_plan_info(cscan);
+	Assert(pts->task_kind == pts->pp_info->task_kind);
 
 	return (Node *)pts;
 }

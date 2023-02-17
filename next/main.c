@@ -331,7 +331,7 @@ _PG_init(void)
 	if (pgstrom_init_dpu_device())
 	{
 		pgstrom_init_dpu_scan();
-		//pgstrom_init_dpu_join();
+		pgstrom_init_dpu_join();
 		//pgstrom_init_dpu_preagg();
 	}
 	pgstrom_init_pcie();

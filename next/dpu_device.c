@@ -462,6 +462,19 @@ pgstrom_startup_dpu_device(void)
 }
 
 /*
+ * pgstrom_dpu_operator_ratio
+ */
+double
+pgstrom_dpu_operator_ratio(void)
+{
+	if (cpu_operator_cost > 0.0)
+	{
+		return pgstrom_dpu_operator_cost / cpu_operator_cost;
+	}
+	return (pgstrom_dpu_operator_cost == 1.0 ? 0.0 : disable_cost);
+}
+
+/*
  * pgstrom_init_dpu_options
  */
 static void

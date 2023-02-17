@@ -75,25 +75,19 @@ xpuTupleCost(uint32_t devkind)
 }
 
 /*
- * considerXpuScanPathParams
+ * consider_xpuscan_path_params
  */
 bool
-considerXpuScanPathParams(PlannerInfo *root,
-						  RelOptInfo  *baserel,
-						  uint32_t devkind,
-						  bool parallel_aware,
-						  List *dev_quals,
-						  List *host_quals,
-						  int  *p_parallel_nworkers,
-						  Oid  *p_brin_index_oid,
-						  List **p_brin_index_conds,
-						  List **p_brin_index_quals,
-						  Cost *p_startup_cost,
-						  Cost *p_run_cost,
-						  Cost *p_final_cost,
-						  const Bitmapset **p_gpu_cache_devs,
-						  const Bitmapset **p_gpu_direct_devs,
-						  const DpuStorageEntry **p_ds_entry)
+consider_xpuscan_path_params(PlannerInfo *root,
+							 RelOptInfo  *baserel,
+							 uint32_t task_kind,
+							 List *dev_quals,
+							 List *host_quals,
+							 bool parallel_aware,
+							 int *p_parallel_nworkers,
+							 Cost *p_startup_cost,
+							 Cost *p_run_cost,
+							 pgstromPlanInfo *pp_info)
 {
 	RangeTblEntry  *rte = root->simple_rte_array[baserel->relid];
 	IndexOptInfo   *indexOpt = NULL;
@@ -112,9 +106,8 @@ considerXpuScanPathParams(PlannerInfo *root,
 	double			avg_seq_page_cost;
 	double			spc_seq_page_cost;
 	double			spc_rand_page_cost;
-	double			xpu_ratio = xpuOperatorCostRatio(devkind);
-	double			xpu_tuple_cost = xpuTupleCost(devkind);
-	bool			is_arrow_fdw = false;
+	double			xpu_ratio;
+	double			xpu_tuple_cost;
 	QualCost		qcost;
 	double			ntuples;
 	double			selectivity;
@@ -123,7 +116,8 @@ considerXpuScanPathParams(PlannerInfo *root,
 	 * Brief check towards the supplied baserel
 	 */
 	Assert(IS_SIMPLE_REL(baserel));
-	Assert(devkind == DEVKIND__NVIDIA_GPU || devkind == DEVKIND__NVIDIA_DPU);
+	Assert((task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
+		   (task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
 	switch (rte->relkind)
 	{
 		case RELKIND_RELATION:
@@ -133,10 +127,7 @@ considerXpuScanPathParams(PlannerInfo *root,
 			return false;
 		case RELKIND_FOREIGN_TABLE:
 			if (baseRelIsArrowFdw(baserel))
-			{
-				is_arrow_fdw = true;
 				break;
-			}
 			return false;
 		default:
 			return false;
@@ -168,42 +159,44 @@ considerXpuScanPathParams(PlannerInfo *root,
 	 */
 	get_tablespace_page_costs(baserel->reltablespace,
 							  &spc_rand_page_cost,
-							  &spc_seq_page_cost);	
-	switch (devkind)
+							  &spc_seq_page_cost);
+	if ((task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU)
 	{
-		case DEVKIND__NVIDIA_GPU:
-			startup_cost += pgstrom_gpu_setup_cost;
-			/* Is GPU-Cache available? */
-			//gpu_cache_devs = baseRelHasGpuCache(root, baserel);
-			/* Is GPU-Direct SQL available? */
-			gpu_direct_devs = GetOptimalGpuForBaseRel(root, baserel);
-			if (gpu_cache_devs)
-				avg_seq_page_cost = 0;
-			else if (gpu_direct_devs)
-				avg_seq_page_cost = spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
-					pgstrom_gpu_direct_seq_page_cost * baserel->allvisfrac;
-			else
-				avg_seq_page_cost = spc_seq_page_cost;
-			break;
-
-		case DEVKIND__NVIDIA_DPU:
-			startup_cost += pgstrom_dpu_setup_cost;
-			/* Is DPU-attached Storage available? */
-			if (is_arrow_fdw)
-				ds_entry = GetOptimalDpuForArrowFdw(root, baserel);
-			else
-				ds_entry = GetOptimalDpuForBaseRel(root, baserel);
-			if (!ds_entry)
-				return false;
-			avg_seq_page_cost = (spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
-								 pgstrom_dpu_seq_page_cost * baserel->allvisfrac);
-			break;
-
-		default:
-			/* should not happen */
+		xpu_ratio = pgstrom_gpu_operator_ratio();
+		xpu_tuple_cost = pgstrom_gpu_tuple_cost;
+		startup_cost += pgstrom_gpu_setup_cost;
+		/* Is GPU-Cache available? */
+		//gpu_cache_devs = baseRelHasGpuCache(root, baserel);
+		/* Is GPU-Direct SQL available? */
+		gpu_direct_devs = GetOptimalGpuForBaseRel(root, baserel);
+		if (gpu_cache_devs)
+			avg_seq_page_cost = 0;
+		else if (gpu_direct_devs)
+			avg_seq_page_cost = spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
+				pgstrom_gpu_direct_seq_page_cost * baserel->allvisfrac;
+		else
 			avg_seq_page_cost = spc_seq_page_cost;
-			break;
 	}
+	else if ((task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
+	{
+		xpu_ratio = pgstrom_dpu_operator_ratio();
+		xpu_tuple_cost = pgstrom_dpu_tuple_cost;
+		startup_cost += pgstrom_dpu_setup_cost;
+		/* Is DPU-attached Storage available? */
+		if (rte->relkind == RELKIND_FOREIGN_TABLE)
+			ds_entry = GetOptimalDpuForArrowFdw(root, baserel);
+		else
+			ds_entry = GetOptimalDpuForBaseRel(root, baserel);
+		if (!ds_entry)
+			return false;
+		avg_seq_page_cost = (spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
+							 pgstrom_dpu_seq_page_cost * baserel->allvisfrac);
+	}
+	else
+	{
+		elog(ERROR, "Bug? unsupported task_kind: %08x", task_kind);
+	}
+
 	/*
 	 * NOTE: ArrowGetForeignRelSize() already discount baserel->pages according
 	 * to the referenced columns, to adjust total amount of disk i/o.
@@ -280,29 +273,35 @@ considerXpuScanPathParams(PlannerInfo *root,
 	 */
 	startup_cost += baserel->reltarget->cost.startup;
 	final_cost += baserel->reltarget->cost.per_tuple * baserel->rows;
-
+	
 	/* Write back the result */
 	if (p_parallel_nworkers)
 		*p_parallel_nworkers = parallel_nworkers;
-	if (p_brin_index_oid)
-		*p_brin_index_oid = (indexOpt ? indexOpt->indexoid : InvalidOid);
-	if (p_brin_index_conds)
-		*p_brin_index_conds = (indexOpt ? indexConds : NIL);
-	if (p_brin_index_quals)
-		*p_brin_index_quals = (indexOpt ? indexQuals : NIL);
 	if (p_startup_cost)
 		*p_startup_cost = startup_cost;
 	if (p_run_cost)
 		*p_run_cost = run_cost;
-	if (p_final_cost)
-		*p_final_cost = final_cost;
-	if (p_gpu_cache_devs)
-		*p_gpu_cache_devs = gpu_cache_devs;
-	if (p_gpu_direct_devs)
-		*p_gpu_direct_devs = gpu_direct_devs;
-	if (p_ds_entry)
-		*p_ds_entry = ds_entry;
-
+	if (pp_info)
+	{
+		pp_info->task_kind = task_kind;
+		pp_info->gpu_cache_devs = gpu_cache_devs;
+		pp_info->gpu_direct_devs = gpu_direct_devs;
+		pp_info->ds_entry = ds_entry;
+		if (indexOpt)
+		{
+			pp_info->brin_index_oid = indexOpt->indexoid;
+			pp_info->brin_index_conds = indexConds;
+			pp_info->brin_index_quals = indexQuals;
+		}
+		else
+		{
+			pp_info->brin_index_oid = InvalidOid;
+			pp_info->brin_index_conds = NIL;
+			pp_info->brin_index_quals = NIL;
+		}
+		pp_info->parallel_divisor = parallel_divisor;
+		pp_info->final_cost = final_cost;
+	}
 	return true;
 }
 
@@ -378,25 +377,18 @@ GpuScanAddScanPath(PlannerInfo *root,
 		int				parallel_nworkers = 0;
 		Cost			startup_cost = 0.0;
 		Cost			run_cost = 0.0;
-		Cost			final_cost = 0.0;
 
 		memset(&pp_data, 0, sizeof(pgstromPlanInfo));
-		if (!considerXpuScanPathParams(root,
-									   baserel,
-									   DEVKIND__NVIDIA_GPU,
-									   try_parallel > 0,	/* parallel_aware */
-									   dev_quals,
-									   host_quals,
-									   &parallel_nworkers,
-									   &pp_data.brin_index_oid,
-									   &pp_data.brin_index_conds,
-									   &pp_data.brin_index_quals,
-									   &startup_cost,
-									   &run_cost,
-									   &final_cost,
-									   &pp_data.gpu_cache_devs,
-									   &pp_data.gpu_direct_devs,
-									   NULL))
+		if (!consider_xpuscan_path_params(root,
+										  baserel,
+										  TASK_KIND__GPUSCAN,
+										  dev_quals,
+										  host_quals,
+										  try_parallel > 0,
+										  &parallel_nworkers,
+										  &startup_cost,
+										  &run_cost,
+										  &pp_data))
 			return;
 
 		/* setup GpuScanInfo (Path phase) */
@@ -411,7 +403,7 @@ GpuScanAddScanPath(PlannerInfo *root,
 		cpath->path.parallel_workers = parallel_nworkers;
 		cpath->path.rows = (param_info ? param_info->ppi_rows : baserel->rows);
 		cpath->path.startup_cost = startup_cost;
-		cpath->path.total_cost = startup_cost + run_cost + final_cost;
+		cpath->path.total_cost = startup_cost + run_cost + pp_info->final_cost;
 		cpath->path.pathkeys = NIL; /* unsorted results */
 		cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 		cpath->custom_paths = NIL;
@@ -622,7 +614,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	/* pickup referenced attributes */
 	outer_refs = pickup_outer_referenced(root, baserel, outer_refs);
 	/* code generation for WHERE-clause */
-	codegen_context_init(&context, DEVKIND__NVIDIA_GPU);
+	codegen_context_init(&context, pp_info->task_kind);
 	context.input_rels_tlist = input_rels_tlist;
 	pp_info->kexp_scan_quals = codegen_build_scan_quals(&context, dev_quals);
 	/* code generation for the Projection */
@@ -703,6 +695,7 @@ CreateGpuScanState(CustomScan *cscan)
 	pts->css.methods = &gpuscan_exec_methods;
 	pts->task_kind = TASK_KIND__GPUSCAN;
 	pts->pp_info = deform_pgstrom_plan_info(cscan);
+	Assert(pts->task_kind == pts->pp_info->task_kind);
 
 	return (Node *)pts;
 }

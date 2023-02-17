@@ -18,9 +18,9 @@ static set_join_pathlist_hook_type	set_join_pathlist_next = NULL;
 static CustomPathMethods	gpujoin_path_methods;
 static CustomScanMethods	gpujoin_plan_methods;
 static CustomExecMethods	gpujoin_exec_methods;
-static bool					enable_gpunestloop;		/* GUC */
-static bool					enable_gpuhashjoin;		/* GUC */
-static bool					enable_gpugistindex;	/* GUC */
+static bool					pgstrom_enable_gpujoin;			/* GUC */
+static bool					pgstrom_enable_gpuhashjoin;		/* GUC */
+static bool					pgstrom_enable_gpugistindex;	/* GUC */
 
 /*
  * form_pgstrom_plan_info
@@ -34,6 +34,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	List   *exprs = NIL;
 	int		endpoint_id;
 
+	privs = lappend(privs, makeInteger(pp_info->task_kind));
 	privs = lappend(privs, bms_to_pglist(pp_info->gpu_cache_devs));
 	privs = lappend(privs, bms_to_pglist(pp_info->gpu_direct_devs));
 	endpoint_id = DpuStorageEntryGetEndpointId(pp_info->ds_entry);
@@ -45,6 +46,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	exprs = lappend(exprs, pp_info->scan_quals);
 	privs = lappend(privs, __makeFloat(pp_info->scan_tuples));
 	privs = lappend(privs, __makeFloat(pp_info->scan_rows));
+	privs = lappend(privs, __makeFloat(pp_info->parallel_divisor));
 	privs = lappend(privs, __makeFloat(pp_info->final_cost));
 	/* bin-index support */
 	privs = lappend(privs, makeInteger(pp_info->brin_index_oid));
@@ -104,6 +106,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	
 	memset(&pp_data, 0, sizeof(pgstromPlanInfo));
 	/* device identifiers */
+	pp_data.task_kind = intVal(list_nth(privs, pindex++));
 	pp_data.gpu_cache_devs = bms_from_pglist(list_nth(privs, pindex++));
 	pp_data.gpu_direct_devs = bms_from_pglist(list_nth(privs, pindex++));
 	endpoint_id = intVal(list_nth(privs, pindex++));
@@ -115,6 +118,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.scan_quals = list_nth(exprs, eindex++);
 	pp_data.scan_tuples = floatVal(list_nth(privs, pindex++));
 	pp_data.scan_rows = floatVal(list_nth(privs, pindex++));
+	pp_data.parallel_divisor = floatVal(list_nth(privs, pindex++));
 	pp_data.final_cost = floatVal(list_nth(privs, pindex++));
 	/* brin-index support */
 	pp_data.brin_index_oid = intVal(list_nth(privs, pindex++));
@@ -159,13 +163,13 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 }
 
 /*
- * IsGpuJoinPath
+ * IsXpuJoinPath
  */
 static inline bool
-IsGpuJoinPath(const Path *path)
+IsXpuJoinPath(const Path *path, const CustomPathMethods *xpujoin_path_methods)
 {
 	return (IsA(path, CustomPath) &&
-			((CustomPath *)path)->methods == &gpujoin_path_methods);
+			((CustomPath *)path)->methods == xpujoin_path_methods);
 }
 
 /*
@@ -183,10 +187,10 @@ match_clause_to_gist_index(PlannerInfo *root,
 }
 
 /*
- * try_find_gpu_gist_index
+ * try_find_xpu_gist_index
  */
 static void
-try_find_gpu_gist_index(PlannerInfo *root,
+try_find_xpu_gist_index(PlannerInfo *root,
 						pgstromPlanInnerInfo *pp_inner,
 						JoinType jointype,
 						Path *inner_path,
@@ -200,8 +204,6 @@ try_find_gpu_gist_index(PlannerInfo *root,
 	Selectivity		gist_selectivity = 1.0;
 	ListCell	   *lc;
 
-	if (!enable_gpugistindex)
-		return;
 	/*
 	 * Not only GiST, index should be built on normal relations.
 	 * And, IndexOnlyScan may not contain CTID, so not supported.
@@ -293,16 +295,18 @@ try_find_gpu_gist_index(PlannerInfo *root,
 }
 
 /*
- * try_add_simple_gpujoin_path
+ * try_add_simple_xpujoin_path
  */
 static bool
-try_add_simple_gpujoin_path(PlannerInfo *root,
+try_add_simple_xpujoin_path(PlannerInfo *root,
 							RelOptInfo *joinrel,
 							Path *outer_path,
                             Path *inner_path,
                             JoinType join_type,
                             JoinPathExtraData *extra,
-                            bool try_parallel_path)
+							bool try_parallel_path,
+							uint32_t task_kind,
+							const CustomPathMethods *xpujoin_path_methods)
 {
 	RelOptInfo	   *outer_rel = outer_path->parent;
 	RelOptInfo	   *inner_rel = inner_path->parent;
@@ -320,18 +324,49 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 	List		   *hash_inner_keys = NIL;
 	List		   *input_rels_tlist = NIL;
 	int				parallel_nworkers = 0;
+	double			parallel_divisor = 1.0;
+	bool			enable_xpuhashjoin;
+	bool			enable_xpugistindex;
+	double			xpu_ratio;
+	Cost			xpu_tuple_cost;
 	Cost			startup_cost = 0.0;
 	Cost			run_cost = 0.0;
+	Cost			comp_cost = 0.0;
 	Cost			final_cost = 0.0;
 	QualCost		join_quals_cost;
 	IndexOptInfo   *gist_index = NULL;
-	double			xpu_ratio = xpuOperatorCostRatio(DEVKIND__NVIDIA_GPU);
-	Cost			xpu_tuple_cost = xpuTupleCost(DEVKIND__NVIDIA_GPU);
 	ListCell	   *lc;
 
 	/* sanity checks */
 	Assert(join_type == JOIN_INNER || join_type == JOIN_FULL ||
 		   join_type == JOIN_LEFT  || join_type == JOIN_RIGHT);
+
+	/* CPU parallel needs outer/inner paths are parallel_safe */
+	if (try_parallel_path && (!outer_path->parallel_safe ||
+							  !inner_path->parallel_safe))
+		return false;
+	/*
+	 * Parameters related to devices
+	 */
+	if ((task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU)
+	{
+		enable_xpuhashjoin  = pgstrom_enable_gpuhashjoin;
+		enable_xpugistindex = pgstrom_enable_gpugistindex;
+		xpu_tuple_cost      = pgstrom_gpu_tuple_cost;
+		xpu_ratio           = pgstrom_gpu_operator_ratio();
+	}
+	else if ((task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
+	{
+		enable_xpuhashjoin  = pgstrom_enable_dpuhashjoin;
+		enable_xpugistindex = pgstrom_enable_dpugistindex;
+        xpu_tuple_cost      = pgstrom_dpu_tuple_cost;
+		xpu_ratio           = pgstrom_dpu_operator_ratio();
+	}
+	else
+	{
+		elog(ERROR, "Bug? unexpected task_kind: %08x", task_kind);
+	}
+
 	/*
 	 * GpuJoin does not support JOIN in case when either side is parameterized
 	 * by the other side.
@@ -386,15 +421,13 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 		{
 			RestrictInfo *rinfo = lfirst(lc);
 
-			if (pgstrom_gpu_expression(rinfo->clause,
-									   input_rels_tlist,
-									   &devcost))
-			{
-				scan_quals = lappend(scan_quals, rinfo->clause);
-				scan_costs = lappend_int(scan_costs, devcost);
-			}
-			else
-				return false;	/* all qualifiers must be device executable */
+			if (!pgstrom_xpu_expression(rinfo->clause,
+										task_kind,
+										input_rels_tlist,
+										&devcost))
+				return false;
+			scan_quals = lappend(scan_quals, rinfo->clause);
+			scan_costs = lappend_int(scan_costs, devcost);
 		}
 		if (outer_path->param_info)
 		{
@@ -402,12 +435,13 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 			{
 				RestrictInfo *rinfo = lfirst(lc);
 
-				if (pgstrom_gpu_expression(rinfo->clause,
-										   input_rels_tlist,
-										   &devcost))
-					scan_quals = lappend(scan_quals, rinfo->clause);
-				else
+				if (!pgstrom_xpu_expression(rinfo->clause,
+											task_kind,
+											input_rels_tlist,
+											&devcost))
 					return false;
+				scan_quals = lappend(scan_quals, rinfo->clause);
+				scan_costs = lappend_int(scan_costs, devcost);
 			}
 		}
 		sort_device_qualifiers(scan_quals, scan_costs);
@@ -415,25 +449,19 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 		pp_prev->scan_relid = outer_rel->relid;
 		pp_prev->scan_tuples = outer_rel->tuples;
 		pp_prev->scan_rows = outer_rel->rows;
-		if (!considerXpuScanPathParams(root,
-									   outer_rel,
-									   DEVKIND__NVIDIA_GPU,
-									   try_parallel_path,
-									   pp_prev->scan_quals,
-									   NIL,		/* host_quals */
-									   &parallel_nworkers,
-									   &pp_prev->brin_index_oid,
-									   &pp_prev->brin_index_conds,
-									   &pp_prev->brin_index_quals,
-									   &startup_cost,
-									   &run_cost,
-									   NULL,
-									   &pp_prev->gpu_cache_devs,
-									   &pp_prev->gpu_direct_devs,
-									   NULL))	/* ds_entry (DPU) */
+		if (!consider_xpuscan_path_params(root,
+										  outer_rel,
+										  task_kind,
+										  pp_prev->scan_quals,
+										  NIL,	/* host_quals */
+										  try_parallel_path,
+										  &parallel_nworkers,
+										  &startup_cost,
+										  &run_cost,
+										  pp_prev))
 			return false;
 	}
-	else if (IsGpuJoinPath(outer_path))
+	else if (IsXpuJoinPath(outer_path, xpujoin_path_methods))
 	{
 		CustomPath	   *__cpath = (CustomPath *)outer_path;
 
@@ -448,6 +476,7 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 			Path   *__ipath = lfirst(lc);
 			input_rels_tlist = lappend(input_rels_tlist, __ipath->pathtarget);
 		}
+		parallel_divisor = pp_prev->parallel_divisor;
 	}
 	else
 	{
@@ -475,12 +504,11 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
 
-		if (!pgstrom_gpu_expression(rinfo->clause,
+		if (!pgstrom_xpu_expression(rinfo->clause,
+									task_kind,
 									input_rels_tlist,
 									NULL))
-		{
 			return false;
-		}
 
 		/*
 		 * See the logic in extract_actual_join_clauses()
@@ -500,6 +528,9 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 			Assert(!rinfo->pseudoconstant);
 			join_quals = lappend(join_quals, rinfo->clause);
 		}
+		/* Is the hash-join enabled? */
+		if (!enable_xpuhashjoin)
+			continue;
 		/* Is it hash-joinable clause? */
 		if (!rinfo->can_join || !OidIsValid(rinfo->hashjoinoperator))
 			continue;
@@ -550,13 +581,14 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 	pp_inner->hash_inner_keys = hash_inner_keys;
 	pp_inner->join_quals = join_quals;
 	pp_inner->other_quals = other_quals;
-	if (hash_outer_keys == NIL && hash_inner_keys == NIL)
-		try_find_gpu_gist_index(root,
+	if (enable_xpugistindex &&
+		pp_inner->hash_outer_keys == NIL &&
+		pp_inner->hash_inner_keys == NIL)
+		try_find_xpu_gist_index(root,
 								pp_inner,
 								join_type,
 								inner_path,
 								restrict_clauses);
-
 	/*
 	 * Cost estimation
 	 */
@@ -578,9 +610,11 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 		/* cost to compute inner hash value by CPU */
 		startup_cost += cpu_operator_cost * num_hashkeys * inner_path->rows;
 		/* cost to comput hash value by GPU */
-		run_cost += cpu_operator_cost * xpu_ratio * num_hashkeys * outer_path->rows;
+		comp_cost += (cpu_operator_cost * xpu_ratio *
+					  num_hashkeys *
+					  outer_path->rows);
 		/* cost to evaluate join qualifiers */
-		run_cost += join_quals_cost.per_tuple * xpu_ratio * outer_path->rows;
+		comp_cost += join_quals_cost.per_tuple * xpu_ratio * outer_path->rows;
 	}
 	else if (OidIsValid(pp_inner->gist_index_oid))
 	{
@@ -597,12 +631,12 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 		startup_cost += seq_page_cost * (double)gist_index->pages;
 		/* cost to evaluate GiST index by GPU */
 		cost_qual_eval_node(&gist_clause_cost, gist_clause, root);
-		run_cost += gist_clause_cost.per_tuple * xpu_ratio * outer_path->rows;
+		comp_cost += gist_clause_cost.per_tuple * xpu_ratio * outer_path->rows;
 		/* cost to evaluate join qualifiers by GPU */
-		run_cost += (join_quals_cost.per_tuple * xpu_ratio *
-					 outer_path->rows *
-					 gist_selectivity *
-					 inner_path->rows);
+		comp_cost += (join_quals_cost.per_tuple * xpu_ratio *
+					  outer_path->rows *
+					  gist_selectivity *
+					  inner_path->rows);
 	}
 	else
 	{
@@ -620,6 +654,8 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 					 inner_path->rows *
 					 outer_path->rows);
 	}
+	/* discount if CPU parallel is enabled */
+	run_cost += (comp_cost / parallel_divisor);
 	/* cost for DMA receive (xPU --> Host) */
 	final_cost += xpu_tuple_cost * joinrel->rows;
 
@@ -644,12 +680,14 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 	cpath->path.startup_cost = startup_cost;
 	cpath->path.total_cost = startup_cost + run_cost + final_cost;
 	cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
-	cpath->methods = &gpujoin_path_methods;
+	cpath->methods = xpujoin_path_methods;
 	cpath->custom_paths = lappend(inner_paths_list, inner_path);
 	cpath->custom_private = list_make1(pp_info);
 
 	if (custom_path_remember(root, joinrel, try_parallel_path, cpath))
 	{
+		elog(INFO, "cpath = %p parallel=%d cost=%.0f ... %.0f", cpath, try_parallel_path, cpath->path.startup_cost, cpath->path.total_cost);
+		
 		if (!try_parallel_path)
 			add_path(joinrel, &cpath->path);
 		else
@@ -659,32 +697,21 @@ try_add_simple_gpujoin_path(PlannerInfo *root,
 }
 
 /*
- * gpujoin_add_join_path
+ * xpujoin_add_custompath
  */
-static void
-gpujoin_add_join_path(PlannerInfo *root,
-					  RelOptInfo *joinrel,
-					  RelOptInfo *outerrel,
-					  RelOptInfo *innerrel,
-					  JoinType join_type,
-					  JoinPathExtraData *extra)
+void
+xpujoin_add_custompath(PlannerInfo *root,
+                       RelOptInfo *joinrel,
+                       RelOptInfo *outerrel,
+                       RelOptInfo *innerrel,
+                       JoinType join_type,
+                       JoinPathExtraData *extra,
+					   uint32_t task_kind,
+					   const CustomPathMethods *xpujoin_path_methods)
 {
 	List	   *outer_pathlist = outerrel->pathlist;
 	List	   *inner_pathlist = innerrel->pathlist;
 	ListCell   *lc1, *lc2;
-
-	/* calls secondary module if exists */
-	if (set_join_pathlist_next)
-		set_join_pathlist_next(root,
-							   joinrel,
-							   outerrel,
-							   innerrel,
-							   join_type,
-							   extra);
-	/* quick bailout if PG-Strom/GpuJoin is not enabled */
-	if (!pgstrom_enabled || (!enable_gpunestloop &&
-							 !enable_gpuhashjoin))
-		return;
 
 	/* quick bailout if unsupported join type */
 	if (join_type != JOIN_INNER &&
@@ -699,12 +726,14 @@ gpujoin_add_join_path(PlannerInfo *root,
 	{
 		foreach (lc1, outer_pathlist)
 		{
-			Path	   *outer_path = lfirst(lc1);
+			Path   *outer_path = lfirst(lc1);
 
 			if (bms_overlap(PATH_REQ_OUTER(outer_path),
 							innerrel->relids))
 				continue;
-			if (IS_SIMPLE_REL(outerrel) || IsGpuJoinPath(outer_path))
+
+			if (IS_SIMPLE_REL(outerrel) ||
+				IsXpuJoinPath(outer_path, xpujoin_path_methods))
 			{
 				foreach (lc2, inner_pathlist)
 				{
@@ -713,24 +742,57 @@ gpujoin_add_join_path(PlannerInfo *root,
 					if (bms_overlap(PATH_REQ_OUTER(inner_path),
 									outerrel->relids))
 						continue;
-					if (try_add_simple_gpujoin_path(root,
+					if (try_add_simple_xpujoin_path(root,
 													joinrel,
 													outer_path,
 													inner_path,
 													join_type,
 													extra,
-													try_parallel > 0))
+													try_parallel > 0,
+													task_kind,
+													xpujoin_path_methods))
 						break;
 				}
 			}
 			break;
 		}
-
 		if (!joinrel->consider_parallel)
 			break;
 		outer_pathlist = outerrel->partial_pathlist;
-		inner_pathlist = innerrel->partial_pathlist;
 	}
+}
+
+/*
+ * gpujoin_add_custompath
+ */
+static void
+gpujoin_add_custompath(PlannerInfo *root,
+					   RelOptInfo *joinrel,
+					   RelOptInfo *outerrel,
+					   RelOptInfo *innerrel,
+					   JoinType join_type,
+					   JoinPathExtraData *extra)
+{
+	/* calls secondary module if exists */
+	if (set_join_pathlist_next)
+		set_join_pathlist_next(root,
+							   joinrel,
+							   outerrel,
+							   innerrel,
+							   join_type,
+							   extra);
+	/* quick bailout if PG-Strom/GpuJoin is not enabled */
+	if (!pgstrom_enabled || !pgstrom_enable_gpujoin)
+		return;
+	/* common portion to add custom-paths for xPU-Join */
+	xpujoin_add_custompath(root,
+						   joinrel,
+						   outerrel,
+						   innerrel,
+						   join_type,
+						   extra,
+						   TASK_KIND__GPUJOIN,
+						   &gpujoin_path_methods);
 }
 
 /*
@@ -1154,7 +1216,8 @@ CreateGpuJoinState(CustomScan *cscan)
 	pts->css.methods = &gpujoin_exec_methods;
 	pts->task_kind = TASK_KIND__GPUJOIN;
 	pts->pp_info = deform_pgstrom_plan_info(cscan);
-	Assert(pts->pp_info->num_rels == num_rels);
+	Assert(pts->pp_info->task_kind == pts->task_kind &&
+		   pts->pp_info->num_rels == num_rels);
 	pts->num_rels = num_rels;
 
 	return (Node *)pts;
@@ -1929,11 +1992,11 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 void
 pgstrom_init_gpu_join(void)
 {
-	/* turn on/off gpunestloop */
-	DefineCustomBoolVariable("pg_strom.enable_gpunestloop",
-							 "Enables the use of GpuNestLoop logic",
+	/* turn on/off gpujoin */
+	DefineCustomBoolVariable("pg_strom.enable_gpujoin",
+							 "Enables the use of GpuJoin logic",
 							 NULL,
-							 &enable_gpunestloop,
+							 &pgstrom_enable_gpujoin,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -1942,7 +2005,7 @@ pgstrom_init_gpu_join(void)
 	DefineCustomBoolVariable("pg_strom.enable_gpuhashjoin",
 							 "Enables the use of GpuHashJoin logic",
 							 NULL,
-							 &enable_gpuhashjoin,
+							 &pgstrom_enable_gpuhashjoin,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -1951,7 +2014,7 @@ pgstrom_init_gpu_join(void)
 	DefineCustomBoolVariable("pg_strom.enable_gpugistindex",
 							 "Enables the use of GpuGistIndex logic",
 							 NULL,
-							 &enable_gpugistindex,
+							 &pgstrom_enable_gpugistindex,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -1981,5 +2044,5 @@ pgstrom_init_gpu_join(void)
 
 	/* hook registration */
 	set_join_pathlist_next = set_join_pathlist_hook;
-	set_join_pathlist_hook = gpujoin_add_join_path;
+	set_join_pathlist_hook = gpujoin_add_custompath;
 }

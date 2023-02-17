@@ -833,11 +833,11 @@ static int	codegen_expression_walker(codegen_context *context,
 									  StringInfo buf, Expr *expr);
 
 void
-codegen_context_init(codegen_context *context, uint32_t devkind)
+codegen_context_init(codegen_context *context, uint32_t task_kind)
 {
 	memset(context, 0, sizeof(codegen_context));
 	context->elevel = ERROR;
-	context->required_flags = devkind;
+	context->required_flags = (task_kind & DEVKIND__ANY);
 }
 
 static void
@@ -1775,18 +1775,18 @@ codegen_build_packed_hashkeys(codegen_context *context,
  */
 bool
 pgstrom_xpu_expression(Expr *expr,
-					   uint32_t devkind,
+					   uint32_t task_kind,
 					   List *input_rels_tlist,
 					   int *p_devcost)
 {
 	codegen_context context;
 
-	Assert(devkind == DEVKIND__NVIDIA_GPU ||
-		   devkind == DEVKIND__NVIDIA_DPU);
+	Assert((task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
+		   (task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
 	memset(&context, 0, sizeof(context));
 	context.elevel = DEBUG2;
 	context.top_expr = expr;
-	context.required_flags = devkind;
+	context.required_flags = (task_kind & DEVKIND__ANY);
 	context.input_rels_tlist = input_rels_tlist;
 
 	if (!expr)
