@@ -20,12 +20,6 @@ bool		pgstrom_enable_dpujoin;			/* GUC */
 bool		pgstrom_enable_dpuhashjoin;		/* GUC */
 bool		pgstrom_enable_dpugistindex;	/* GUC */
 
-
-
-
-
-
-
 /*
  * dpujoin_add_custompath
  */
@@ -70,7 +64,18 @@ PlanDpuJoinPath(PlannerInfo *root,
 				List *clauses,
 				List *custom_plans)
 {
-	return NULL;
+	pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
+	CustomScan *cscan;
+
+	cscan = PlanXpuJoinPathCommon(root,
+								  joinrel,
+								  cpath,
+								  tlist,
+								  custom_plans,
+								  pp_info,
+								  &dpujoin_plan_methods);
+	form_pgstrom_plan_info(cscan, pp_info);
+	return &cscan->scan.plan;
 }
 
 /* ----------------------------------------------------------------
@@ -82,8 +87,21 @@ PlanDpuJoinPath(PlannerInfo *root,
 static Node *
 CreateDpuJoinState(CustomScan *cscan)
 {
+	pgstromTaskState *pts;
+	int		num_rels = list_length(cscan->custom_plans);
 
-	return NULL;
+	Assert(cscan->methods == &gpujoin_plan_methods);
+	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
+	NodeSetTag(pts, T_CustomScanState);
+	pts->css.flags = cscan->flags;
+	pts->css.methods = &dpujoin_exec_methods;
+	pts->task_kind = TASK_KIND__DPUJOIN;
+	pts->pp_info = deform_pgstrom_plan_info(cscan);
+	Assert(pts->pp_info->task_kind == pts->task_kind &&
+		   pts->pp_info->num_rels == num_rels);
+	pts->num_rels = num_rels;
+
+	return (Node *)pts;
 }
 
 /*
@@ -93,7 +111,12 @@ static void
 ExecInitDpuJoin(CustomScanState *node,
 				EState *estate,
 				int eflags)
-{}
+{
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	pgstromExecInitTaskState(pts, eflags);
+	pts->cb_cpu_fallback = execFallbackCpuJoin;
+}
 
 /*
  * DpuJoinReCheckTuple
@@ -110,7 +133,25 @@ DpuJoinReCheckTuple(pgstromTaskState *pts, TupleTableSlot *epq_slot)
 static TupleTableSlot *
 ExecDpuJoin(CustomScanState *node)
 {
-	return ExecScan(&node->ss,
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	if (!pts->h_kmrels)
+	{
+		const XpuCommand *session;
+		uint32_t	inner_handle;
+
+		/* attach pgstromSharedState, if none */
+		if (!pts->ps_state)
+			pgstromSharedStateInitDSM(pts, NULL, NULL);
+		/* preload inner buffer */
+		inner_handle = GpuJoinInnerPreload(pts);
+		if (inner_handle == 0)
+			return NULL;
+		/* open the DpuJoin session */
+		session = pgstromBuildSessionInfo(pts, inner_handle);
+		DpuClientOpenSession(pts, session);
+	}
+	return ExecScan(&pts->css.ss,
 					(ExecScanAccessMtd) pgstromExecTaskState,
 					(ExecScanRecheckMtd) DpuJoinReCheckTuple);
 }
@@ -194,6 +235,13 @@ ExplainDpuJoin(CustomScanState *node,
 			   List *ancestors,
 			   ExplainState *es)
 {
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+	List	   *dcontext;
+
+	dcontext = set_deparse_context_plan(es->deparse_cxt,
+										node->ss.ps.plan,
+										ancestors);
+	pgstromTaskStateExplain(pts, es, dcontext, "DPU");
 }
 
 /*

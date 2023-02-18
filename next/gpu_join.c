@@ -944,7 +944,7 @@ pgstrom_build_tlist_dev(RelOptInfo *rel,
 /*
  * PlanXpuJoinPathCommon
  */
-static CustomScan *
+CustomScan *
 PlanXpuJoinPathCommon(PlannerInfo *root,
 					  RelOptInfo *joinrel,
 					  CustomPath *cpath,
@@ -1099,106 +1099,6 @@ PlanGpuJoinPath(PlannerInfo *root,
  *
  * ----------------------------------------------------------------
  */
-#if 0
-typedef struct
-{
-	PlanState	   *ps;
-	ExprContext	   *econtext;
-	/*
-	 * inner preload buffer
-	 */
-	List		   *preload_tuples;
-	List		   *preload_hashes;		/* if hash-join or gist-join */
-	size_t			preload_usage;
-
-	/*
-	 * join properties (common)
-	 */
-	int				depth;
-	JoinType		join_type;
-	ExprState	   *join_quals;
-	ExprState	   *other_quals;
-
-	/*
-	 * join properties (hash-join)
-	 */
-	List		   *hash_outer_keys;	/* list of ExprState */
-	List		   *hash_inner_keys;	/* list of ExprState */
-	List		   *hash_outer_dtypes;	/* list of devtype_info */
-	List		   *hash_inner_dtypes;	/* list of devtype_info */
-
-	/*
-	 * join properties (gist-join)
-	 */
-	Relation		gist_irel;
-	ExprState	   *gist_clause;
-} GpuJoinInnerState;
-
-typedef struct GpuJoinState
-{
-	pgstromTaskState pts;
-	pgstromPlanInfo	*gj_info;
-	XpuCommand	   *xcmd_req;
-	size_t			xcmd_len;
-	/* inner relations */
-	int				num_rels;
-	GpuJoinInnerState inners[FLEXIBLE_ARRAY_MEMBER];
-} GpuJoinState;
-#endif
-
-static uint32_t		GpuJoinInnerPreload(pgstromTaskState *pts);
-
-/*
- * fixup_inner_varnode
- *
- * Any var-nodes are rewritten at setrefs.c to indicate a particular item
- * on the cscan->custom_scan_tlist. However, inner expression must reference
- * the inner relation, so we need to fix up it again.
- */
-typedef struct
-{
-	CustomScan *cscan;
-	Plan	   *inner_plan;
-} fixup_inner_varnode_context;
-
-static Node *
-__fixup_inner_varnode_walker(Node *node, void *data)
-{
-	fixup_inner_varnode_context *con = data;
-
-	if (!node)
-		return NULL;
-	if (IsA(node, Var))
-	{
-		Var		   *var = (Var *)node;
-		List	   *tlist_dev = con->cscan->custom_scan_tlist;
-		TargetEntry *tle;
-
-		Assert(var->varno == INDEX_VAR &&
-			   var->varattno >= 1 &&
-			   var->varattno <= list_length(tlist_dev));
-		tle = list_nth(tlist_dev, var->varattno - 1);
-		return (Node *)makeVar(INNER_VAR,
-							   tle->resorigcol,
-							   var->vartype,
-							   var->vartypmod,
-							   var->varcollid,
-							   0);
-	}
-	return expression_tree_mutator(node, __fixup_inner_varnode_walker, con);
-}
-
-static List *
-fixup_inner_varnode(List *exprs, CustomScan *cscan, Plan *inner_plan)
-{
-	fixup_inner_varnode_context con;
-
-	memset(&con, 0, sizeof(con));
-	con.cscan = cscan;
-	con.inner_plan = inner_plan;
-
-	return (List *)__fixup_inner_varnode_walker((Node *)exprs, &con);
-}
 
 /*
  * CreateGpuJoinState
@@ -1227,76 +1127,12 @@ CreateGpuJoinState(CustomScan *cscan)
  * ExecInitGpuJoin
  */
 static void
-ExecInitGpuJoin(CustomScanState *node,
-				EState *estate,
-				int eflags)
+ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
-	pgstromPlanInfo	*pp_info = pts->pp_info;
-	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
-	ListCell	   *lc;
-	int				depth = 1;
 
-	Assert(node->ss.ss_currentRelation != NULL &&
-		   outerPlanState(node) == NULL &&
-		   innerPlanState(node) == NULL);
-	Assert(pp_info->num_rels == list_length(cscan->custom_plans));
-	foreach (lc, cscan->custom_plans)
-	{
-		pgstromTaskInnerState *istate = &pts->inners[depth-1];
-		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[depth-1];
-		Plan	   *plan = lfirst(lc);
-		PlanState  *ps = ExecInitNode(plan, estate, eflags);
-		List	   *hash_inner_keys;
-		ListCell   *cell;
-		devtype_info *dtype;
-
-		istate->ps = ps;
-		istate->econtext = CreateExprContext(estate);
-		istate->depth = depth;
-		istate->join_type = pp_inner->join_type;
-		istate->join_quals = ExecInitQual(pp_inner->join_quals,
-										  &pts->css.ss.ps);
-		istate->other_quals = ExecInitQual(pp_inner->other_quals,
-										   &pts->css.ss.ps);
-		foreach (cell, pp_inner->hash_outer_keys)
-		{
-			ExprState  *es = ExecInitExpr((Expr *)lfirst(cell),
-										  &pts->css.ss.ps);
-			dtype = pgstrom_devtype_lookup(exprType((Node *)es->expr));
-			if (!dtype)
-				elog(ERROR, "failed on lookup device type of %s",
-					 nodeToString(es->expr));
-			istate->hash_outer_keys = lappend(istate->hash_outer_keys, es);
-			istate->hash_outer_dtypes = lappend(istate->hash_outer_dtypes, dtype);
-		}
-		/* inner hash-keys references the result of inner-slot */
-		hash_inner_keys = fixup_inner_varnode(pp_inner->hash_inner_keys,
-											  cscan, plan);
-		foreach (cell, hash_inner_keys)
-		{
-			ExprState  *es = ExecInitExpr((Expr *)lfirst(cell),
-										  &pts->css.ss.ps);
-			dtype = pgstrom_devtype_lookup(exprType((Node *)es->expr));
-			if (!dtype)
-				elog(ERROR, "failed on lookup device type of %s",
-					 nodeToString(es->expr));
-			istate->hash_inner_keys = lappend(istate->hash_inner_keys, es);
-			istate->hash_inner_dtypes = lappend(istate->hash_inner_dtypes, dtype);
-		}
-
-		if (OidIsValid(pp_inner->gist_index_oid))
-		{
-			istate->gist_irel = index_open(pp_inner->gist_index_oid,
-										   AccessShareLock);
-			istate->gist_clause = ExecInitExpr((Expr *)pp_inner->gist_clause,
-											   &pts->css.ss.ps);
-		}
-		pts->css.custom_ps = lappend(pts->css.custom_ps, ps);
-		depth++;
-	}
-	pgstromExecInitTaskState(pts);
-	pts->cb_cpu_fallback = ExecFallbackCpuScan;
+	pgstromExecInitTaskState(pts, eflags);
+	pts->cb_cpu_fallback = execFallbackCpuJoin;
 }
 
 /*
@@ -1792,7 +1628,7 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 #define INNER_PHASE__SETUP_BUFFERS		1
 #define INNER_PHASE__GPUJOIN_EXEC		2
 
-static uint32_t
+uint32_t
 GpuJoinInnerPreload(pgstromTaskState *pts)
 {
 	pgstromTaskState   *leader = pts;
@@ -1984,6 +1820,15 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 	Assert(pts->h_kmrels != NULL);
 
 	return ps_state->preload_shmem_handle;
+}
+
+/*
+ * CPU Fallback for JOIN
+ */
+void
+execFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple)
+{
+	elog(ERROR, "execFallbackCpuJoin to be implemented");
 }
 
 /*

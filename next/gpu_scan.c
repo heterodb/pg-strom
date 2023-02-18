@@ -708,11 +708,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
 
-	/* sanity checks */
-	Assert(node->ss.ss_currentRelation != NULL &&
-		   outerPlanState(node) == NULL &&
-		   innerPlanState(node) == NULL);
-	pgstromExecInitTaskState(pts);
+	pgstromExecInitTaskState(pts, eflags);
 	pts->cb_cpu_fallback = ExecFallbackCpuScan;
 }
 

@@ -579,7 +579,7 @@ extern void		xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd);
 extern void		xpuClientPutResponse(XpuCommand *xcmd);
 extern const XpuCommand *pgstromBuildSessionInfo(pgstromTaskState *pts,
 												 uint32_t join_inner_handle);
-extern void		pgstromExecInitTaskState(pgstromTaskState *pts);
+extern void		pgstromExecInitTaskState(pgstromTaskState *pts, int eflags);
 extern TupleTableSlot  *pgstromExecTaskState(pgstromTaskState *pts);
 extern void		pgstromExecEndTaskState(pgstromTaskState *pts);
 extern void		pgstromExecResetTaskState(pgstromTaskState *pts);
@@ -758,14 +758,20 @@ extern void		xpujoin_add_custompath(PlannerInfo *root,
 									   JoinPathExtraData *extra,
 									   uint32_t task_kind,
 									   const CustomPathMethods *methods);
-
+extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
+										 RelOptInfo *joinrel,
+										 CustomPath *cpath,
+										 List *tlist,
+										 List *custom_plans,
+										 pgstromPlanInfo *pp_info,
+										 const CustomScanMethods *methods);
 extern List	   *pgstrom_build_tlist_dev(RelOptInfo *rel,
 										List *tlist,      /* must be backed to CPU */
 										List *host_quals, /* must be backed to CPU */
 										List *misc_exprs,
 										List *input_rels_tlist);
-
-
+extern uint32_t	GpuJoinInnerPreload(pgstromTaskState *pts);
+extern void		execFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple);
 extern void		pgstrom_init_gpu_join(void);
 
 /*
