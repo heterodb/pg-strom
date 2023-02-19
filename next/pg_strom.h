@@ -457,7 +457,8 @@ extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 											List *func_args,
 											Oid func_collid);
-extern void		codegen_context_init(codegen_context *context, uint32_t devkind);
+extern void		codegen_context_init(codegen_context *context,
+									 uint32_t task_kind);
 extern bytea   *codegen_build_qualifiers(codegen_context *context,
 										 List *dev_quals);
 extern bytea   *codegen_build_scan_loadvars(codegen_context *context);
@@ -483,7 +484,7 @@ extern void		codegen_build_packed_xpucode(bytea **p_xpucode,
 											 uint32_t *p_kvars_nslots,
 											 List **p_used_params);
 extern bool		pgstrom_xpu_expression(Expr *expr,
-									   uint32_t devkind,
+									   uint32_t task_kind,
 									   List *input_rels_tlist,
 									   int *p_devcost);
 extern bool		pgstrom_gpu_expression(Expr *expr,
@@ -533,9 +534,6 @@ extern void		pgstrom_init_brin(void);
 /*
  * relscan.c
  */
-extern double	xpuOperatorCostRatio(uint32_t devkind);
-extern Cost		xpuTupleCost(uint32_t devkind);
-
 extern Bitmapset *pickup_outer_referenced(PlannerInfo *root,
 										  RelOptInfo *base_rel,
 										  Bitmapset *referenced);
@@ -822,6 +820,7 @@ extern const DpuStorageEntry *GetOptimalDpuForBaseRel(PlannerInfo *root,
 													  RelOptInfo *baserel);
 extern const DpuStorageEntry *GetOptimalDpuForRelation(Relation relation,
 													   const char **p_dpu_pathname);
+extern const char *DpuStorageEntryBaseDir(const DpuStorageEntry *ds_entry);
 extern bool		DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
 									   const DpuStorageEntry *ds_entry2);
 extern int		DpuStorageEntryGetEndpointId(const DpuStorageEntry *ds_entry);
@@ -864,10 +863,11 @@ extern ssize_t	__preadFile(int fdesc, void *buffer, size_t nbytes, off_t f_pos);
 extern ssize_t	__writeFile(int fdesc, const void *buffer, size_t nbytes);
 extern ssize_t	__pwriteFile(int fdesc, const void *buffer, size_t nbytes, off_t f_pos);
 
-extern uint32_t	__shmemCreate(const char *shmem_dir);
+extern uint32_t	__shmemCreate(const DpuStorageEntry *ds_entry);
 extern void		__shmemDrop(uint32_t shmem_handle);
-extern void	   *__mmapShmem(uint32_t shmem_handle, size_t length,
-							const char *shmem_dir);
+extern void	   *__mmapShmem(uint32_t shmem_handle,
+							size_t shmem_length,
+							const DpuStorageEntry *ds_entry);
 extern bool		__munmapShmem(void *mmap_addr);
 
 extern Path	   *pgstrom_copy_pathnode(const Path *pathnode);

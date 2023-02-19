@@ -554,6 +554,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->session_xact_state = __build_session_xact_state(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
+	session->pgsql_port_number = PostPortNumber;
 	session->join_inner_handle = join_inner_handle;
 	memcpy(buf.data, session, session_sz);
 
@@ -1251,7 +1252,7 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts,
 	ConditionVariableInit(&ps_state->preload_cond);
 	SpinLockInit(&ps_state->preload_mutex);
 	if (num_rels > 0)
-		ps_state->preload_shmem_handle = __shmemCreate(NULL);
+		ps_state->preload_shmem_handle = __shmemCreate(pts->ds_entry);
 	pts->ps_state = ps_state;
 	pts->css.ss.ss_currentScanDesc = scan;
 }

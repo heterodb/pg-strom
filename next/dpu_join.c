@@ -144,6 +144,7 @@ ExecDpuJoin(CustomScanState *node)
 		if (!pts->ps_state)
 			pgstromSharedStateInitDSM(pts, NULL, NULL);
 		/* preload inner buffer */
+		Assert(pts->ds_entry != NULL);
 		inner_handle = GpuJoinInnerPreload(pts);
 		if (inner_handle == 0)
 			return NULL;

@@ -1345,7 +1345,8 @@ resume_kernel:
 	/* status check */
 	if (kgtask->kerror.errcode == ERRCODE_STROM_SUCCESS)
 	{
-		XpuCommand	resp;
+		XpuCommand *resp;
+		size_t		resp_sz;
 
 		if (kgtask->suspend_count > 0)
 		{
@@ -1361,15 +1362,25 @@ resume_kernel:
 			goto resume_kernel;
 		}
 		/* send back status and kds_dst */
-		memset(&resp, 0, offsetof(XpuCommand, u.results));
-		resp.magic = XpuCommandMagicNumber;
-		resp.tag   = XpuCommandTag__Success;
-		resp.u.results.chunks_nitems = kds_dst_nitems;
-		resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
-		resp.u.results.stats.scan.nitems_in = kgtask->nitems_in;
-		resp.u.results.stats.scan.nitems_out = kgtask->nitems_out;
+		resp_sz = MAXALIGN(offsetof(XpuCommand,
+									u.results.stats[num_inner_rels]));
+		resp = alloca(resp_sz);
+		memset(resp, 0, resp_sz);
+		resp->magic = XpuCommandMagicNumber;
+		resp->tag   = XpuCommandTag__Success;
+		resp->u.results.chunks_nitems = kds_dst_nitems;
+		resp->u.results.chunks_offset = resp_sz;
+		resp->u.results.nitems_raw = kgtask->nitems_raw;
+		resp->u.results.nitems_in  = kgtask->nitems_in;
+		resp->u.results.nitems_out = kgtask->nitems_out;
+		resp->u.results.num_rels = num_inner_rels;
+		for (int i=0; i < num_inner_rels; i++)
+		{
+			resp->u.results.stats[i].nitems_gist = kgtask->stats[i].nitems_gist;
+			resp->u.results.stats[i].nitems_out  = kgtask->stats[i].nitems_out;
+		}
 		gpuClientWriteBack(gclient,
-						   &resp, resp.u.results.chunks_offset,
+						   resp, resp_sz,
 						   kds_dst_nitems, kds_dst_array);
 	}
 	else if (kgtask->kerror.errcode == ERRCODE_CPU_FALLBACK)
@@ -1377,11 +1388,11 @@ resume_kernel:
 		XpuCommand	resp;
 
 		/* send back kds_src with XpuCommandTag__CPUFallback */
-		memset(&resp, 0, offsetof(XpuCommand, u.results));
+		memset(&resp, 0, sizeof(resp));
 		resp.magic = XpuCommandMagicNumber;
 		resp.tag   = XpuCommandTag__CPUFallback;
 		resp.u.results.chunks_nitems = 1;
-		resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
+		resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats);
 		gpuClientWriteBack(gclient,
 						   &resp, resp.u.results.chunks_offset,
 						   1, &kds_src);

@@ -208,7 +208,7 @@ typedef struct {
 	uint32_t		nitems_out;		/* nitems of final results */
 	struct {
 		uint32_t	nitems_gist;	/* nitems picked up by GiST index */
-		uint32_t	nitems;			/* nitems after this depth */
+		uint32_t	nitems_out;		/* nitems after this depth */
 	} stats[1];
 	/*
 	 * variable length fields

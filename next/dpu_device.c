@@ -243,6 +243,17 @@ GetOptimalDpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 }
 
 /*
+ * DpuStorageEntryBaseDir
+ */
+const char *
+DpuStorageEntryBaseDir(const DpuStorageEntry *ds_entry)
+{
+	if (ds_entry)
+		return ds_entry->endpoint_dir;
+	return NULL;
+}
+
+/*
  * DpuStorageEntryIsEqual
  */
 bool

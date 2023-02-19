@@ -1586,6 +1586,7 @@ typedef struct kern_session_info
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
 	/* join inner buffer */
+	uint32_t	pgsql_port_number;	/* =PostPortNumber */
 	uint32_t	join_inner_handle;	/* key of join inner buffer */
 
 	/* executor parameter buffer */
@@ -1602,15 +1603,17 @@ typedef struct {
 } kern_exec_scan;
 
 typedef struct {
-	uint32_t	chunks_nitems;
-	uint32_t	chunks_offset;
-	union {
-		struct {
-			uint32_t	nitems_in;
-			uint32_t	nitems_out;
-			char		data[1];
-		} scan;
-	} stats;
+	uint32_t	chunks_offset;		/* offset of kds_dst array */
+	uint32_t	chunks_nitems;		/* number of kds_dst items */
+	/* statistics */
+	uint32_t	nitems_raw;
+	uint32_t	nitems_in;
+	uint32_t	nitems_out;
+	uint32_t	num_rels;
+	struct {
+		uint32_t	nitems_gist;
+		uint32_t	nitems_out;
+	} stats[1];
 } kern_exec_results;
 
 #ifndef ILIST_H

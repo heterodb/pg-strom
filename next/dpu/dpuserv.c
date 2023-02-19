@@ -16,6 +16,8 @@ typedef struct
 {
 	dlist_node			chain;	/* link to dpu_client_list */
 	kern_session_info  *session;/* per-session information */
+	kern_multirels	   *kmrels;		/* join inner buffer */
+	size_t				kmrels_sz;	/* join inner buffer mmap-sz */
 	volatile bool		in_termination; /* true, if error status */
 	volatile int32_t	refcnt;	/* odd-number as long as socket is active */
 	pthread_mutex_t		mutex;	/* mutex to write the socket */
@@ -39,6 +41,27 @@ static dlist_head		dpu_command_list;
 static volatile bool	got_sigterm = false;
 static xpu_type_hash_table *dpuserv_type_htable = NULL;
 static xpu_func_hash_table *dpuserv_func_htable = NULL;
+
+/*
+ * dpuTaskExecState
+ */
+typedef struct
+{
+	kern_errorbuf	kerror;
+	kern_data_store *kds_dst_head;
+	kern_data_store *kds_dst;
+	kern_data_store **kds_dst_array;
+	uint32_t		kds_dst_nrooms;
+	uint32_t		kds_dst_nitems;
+	uint32_t		nitems_raw;		/* nitems in the raw data chunk */
+	uint32_t		nitems_in;		/* nitems after the scan_quals */
+	uint32_t		nitems_out;		/* nitems of final results */
+	uint32_t		num_rels;		/* >0, if JOIN */
+	struct {
+		uint32_t	nitems_gist;	/* nitems picked up by GiST index */
+		uint32_t	nitems_out;		/* nitems after this depth */
+	} stats[1];
+} dpuTaskExecState;
 
 /*
  * dpuClientWriteBack
@@ -88,22 +111,40 @@ __dpuClientWriteBack(dpuClient *dclient, struct iovec *iov, int iovcnt)
 
 static void
 dpuClientWriteBack(dpuClient *dclient,
-				   XpuCommand *resp,
-				   size_t      resp_sz,
-				   int         kds_nitems,
-				   kern_data_store **kds_array)
+				   dpuTaskExecState *dtes)
 {
+	XpuCommand	   *resp;
 	struct iovec   *iov_array;
 	struct iovec   *iov;
-	int				i, iovcnt = 0;
+	int				iovcnt = 0;
+	int				resp_sz;
 
-	iov_array = alloca(sizeof(struct iovec) * (2 * kds_nitems + 1));
+	/* Xcmd for the response */
+	resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats[dtes->num_rels]));
+	resp = alloca(resp_sz);
+	memset(resp, 0, resp_sz);
+	resp->magic = XpuCommandMagicNumber;
+	resp->tag   = XpuCommandTag__Success;
+	resp->u.results.chunks_offset = resp_sz;
+	resp->u.results.chunks_nitems = dtes->kds_dst_nitems;
+	resp->u.results.nitems_raw = dtes->nitems_raw;
+	resp->u.results.nitems_in  = dtes->nitems_in;
+	resp->u.results.nitems_out = dtes->nitems_out;
+	resp->u.results.num_rels   = dtes->num_rels;
+	for (int i=0; i < dtes->num_rels; i++)
+	{
+		resp->u.results.stats[i].nitems_gist = dtes->stats[i].nitems_gist;
+		resp->u.results.stats[i].nitems_out  = dtes->stats[i].nitems_out;
+	}
+
+	/* Setup iovec */
+	iov_array = alloca(sizeof(struct iovec) * (2 * dtes->kds_dst_nitems + 1));
 	iov = &iov_array[iovcnt++];
 	iov->iov_base = resp;
 	iov->iov_len  = resp_sz;
-	for (i=0; i < kds_nitems; i++)
+	for (int i=0; i < dtes->kds_dst_nitems; i++)
 	{
-		kern_data_store *kds = kds_array[i];
+		kern_data_store *kds = dtes->kds_dst_array[i];
 		size_t		sz1, sz2;
 
 		assert(kds->format == KDS_FORMAT_ROW);
@@ -182,6 +223,59 @@ __dpuClientElog(dpuClient *dclient,
 	__dpuClientElog((dclient), ERRCODE_DEVICE_INTERNAL,	\
 					__FILE__, __LINE__, __FUNCTION__,	\
 					(fmt), ##__VA_ARGS__)
+
+/*
+ * mmap/munmap session buffer
+ */
+static bool
+dpuServMapSessionBuffers(dpuClient *dclient, kern_session_info *session)
+{
+	char		namebuf[100];
+	int			fdesc;
+	struct stat	stat_buf;
+	void	   *mmap_addr;
+	size_t		mmap_sz;
+
+	if (session->join_inner_handle != 0)
+	{
+		snprintf(namebuf, sizeof(namebuf),
+				 ".pgstrom_shmbuf_%u_%d",
+				 session->pgsql_port_number,
+				 session->join_inner_handle);
+		fdesc = open(namebuf, O_RDONLY);
+		if (fdesc < 0)
+			return false;
+		if (fstat(fdesc, &stat_buf) != 0)
+		{
+			close(fdesc);
+			return false;
+		}
+		mmap_sz = PAGE_ALIGN(stat_buf.st_size);
+		mmap_addr = mmap(NULL, mmap_sz, PROT_READ, MAP_SHARED, fdesc, 0);
+		if (mmap_addr == MAP_FAILED)
+		{
+			close(fdesc);
+			return false;
+		}
+		dclient->kmrels = mmap_addr;
+		dclient->kmrels_sz = mmap_sz;
+	}
+	return true;
+}
+
+static void
+dpuServUnmapSessionBuffers(dpuClient *dclient)
+{
+	if (dclient->kmrels)
+	{
+		if (munmap(dclient->kmrels,
+				   dclient->kmrels_sz) != 0)
+			fprintf(stderr, "failed on munmap(%p-%p): %m\n",
+					(char *)dclient->kmrels,
+					(char *)dclient->kmrels + dclient->kmrels_sz - 1);
+	}
+}
+
 /*
  * xPU type/func lookup hash-table
  */
@@ -394,6 +488,11 @@ dpuservHandleOpenSession(dpuClient *dclient, XpuCommand *xcmd)
 		dpuClientElog(dclient, "unable to resolve device pointers");
 		return false;
 	}
+	if (!dpuServMapSessionBuffers(dclient, session))
+	{
+		dpuClientElog(dclient, "unable to map DPU-serv session buffer");
+		return false;
+	}
 	dclient->session = session;
 
 	/* success status */
@@ -538,33 +637,75 @@ dpuservLoadKdsArrow(dpuClient *dclient,
  *
  * DPU Kernel Projection
  *
- * ---------------------------------------------------------------- */
-static int
-execDpuProjection(kern_context *kcxt,
-				  kern_expression *kexp_scan_projs,
-				  kern_data_store *kds_dst)
+ * ----------------------------------------------------------------
+*/
+static bool
+__handleDpuTaskExecProjection(dpuClient *dclient,
+							  dpuTaskExecState *dtes,
+							  kern_context *kcxt)
 {
-	xpu_int4_t	__tupsz;
+	kern_session_info  *session = dclient->session;
+	kern_expression    *kexp_projection = SESSION_KEXP_PROJECTION(session);
+	xpu_int4_t			__tupsz;
 
-	/* calculation of the tuple length */
-	assert(kexp_scan_projs->opcode  == FuncOpCode__Projection &&
-		   kexp_scan_projs->exptype == TypeOpCode__int4);
-	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_scan_projs, &__tupsz))
-		return -1;
+	assert(kexp_projection->opcode  == FuncOpCode__Projection &&
+		   kexp_projection->exptype == TypeOpCode__int4);
+	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_projection, &__tupsz))
+		return false;
 	if (!__tupsz.isnull && __tupsz.value > 0)
 	{
+		kern_data_store *kds_dst = dtes->kds_dst;
 		int32_t		tupsz = MAXALIGN(__tupsz.value);
 		uint32_t	rowid;
 		size_t		offset;
 		size_t		newsz;
 		kern_tupitem *tupitem;
 
+	retry:
+		/* allocate a new kds_dst on the demand */
+		if (!kds_dst)
+		{
+			size_t	sz;
+
+			if (dtes->kds_dst_nitems >= dtes->kds_dst_nrooms)
+			{
+				kern_data_store **kds_dst_array;
+				uint32_t	kds_dst_nrooms = 2 * dtes->kds_dst_nrooms + 12;
+
+				kds_dst_array = realloc(dtes->kds_dst_array,
+										sizeof(kern_data_store *) * kds_dst_nrooms);
+				if (!kds_dst_array)
+				{
+					dpuClientElog(dclient, "out of memory");
+					return false;
+				}
+				dtes->kds_dst_array = kds_dst_array;
+				dtes->kds_dst_nrooms = kds_dst_nrooms;
+			}
+			sz = KDS_HEAD_LENGTH(dtes->kds_dst_head) + PGSTROM_CHUNK_SIZE;
+			kds_dst = malloc(sz);
+			if (!kds_dst)
+			{
+				dpuClientElog(dclient, "out of memory");
+				return false;
+			}
+			memcpy(kds_dst,
+				   dtes->kds_dst_head,
+				   KDS_HEAD_LENGTH(dtes->kds_dst_head));
+			kds_dst->length = sz;
+			dtes->kds_dst_array[dtes->kds_dst_nitems++] = kds_dst;
+			dtes->kds_dst = kds_dst;
+		}
+		/* insert a tuple */
 		offset = __kds_unpack(kds_dst->usage) + tupsz;
 		newsz = (KDS_HEAD_LENGTH(kds_dst) +
 				 MAXALIGN(sizeof(uint32_t) * (kds_dst->nitems + 1)) +
 				 offset);
 		if (newsz > kds_dst->length)
-			return 0;	/* retry with new kds_dst */
+		{
+			dtes->kds_dst = kds_dst = NULL;
+			goto retry;
+		}
 		kds_dst->usage = __kds_packed(offset);
 		rowid = kds_dst->nitems++;
 		KDS_GET_ROWINDEX(kds_dst)[rowid] = kds_dst->usage;
@@ -572,53 +713,198 @@ execDpuProjection(kern_context *kcxt,
 			((char *)kds_dst + kds_dst->length - offset);
 		tupitem->rowid = rowid;
 		tupitem->t_len = kern_form_heaptuple(kcxt,
-											 kexp_scan_projs,
+											 kexp_projection,
 											 kds_dst,
 											 &tupitem->htup);
-		return tupsz;
+		dtes->nitems_out++;
+		return true;
 	}
-	return -1;
+	return false;
 }
 
 /* ----------------------------------------------------------------
  *
- * DPU service SCAN handler
+ * DPU service SCAN/JOIN handler
  *
- * ---------------------------------------------------------------- */
-typedef struct
-{
-	kern_errorbuf	kerror;
-	uint32_t		nitems_in;
-	uint32_t		nitems_out;
-	uint32_t		extra_sz;
-} kern_dpuscan;
+ * ----------------------------------------------------------------
+ */
+static bool
+__handleDpuTaskExecHashJoin(dpuClient *dclient,
+							dpuTaskExecState *dtes,
+							kern_context *kcxt,
+							int depth);
 
-static void
-__handleDpuScanExecBlock(dpuClient *dclient,
-						 kern_data_store *kds_src,
-						 kern_data_store *kds_dst_head)
+static bool
+__handleDpuTaskExecNestLoop(dpuClient *dclient,
+							dpuTaskExecState *dtes,
+							kern_context *kcxt,
+							int depth)
 {
 	kern_session_info  *session = dclient->session;
+	kern_multirels	   *kmrels = dclient->kmrels;
+	kern_data_store	   *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels,depth-1);
+	kern_expression	   *kexp_load_vars = SESSION_KEXP_JOIN_LOAD_VARS(session,depth-1);
+	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth-1);
+	bool				matched = false;
+
+	for (uint32_t rowid=0; rowid <= kds_heap->nitems; rowid++)
+	{
+		kern_tupitem   *tupitem;
+		uint32_t		offset;
+		xpu_int4_t		status;
+
+		if (rowid < kds_heap->nitems)
+		{
+			offset = KDS_GET_ROWINDEX(kds_heap)[rowid];
+			tupitem = (kern_tupitem *)((char *)kds_heap +
+									   kds_heap->length -
+									   __kds_unpack(offset));
+			ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
+								  kds_heap, &tupitem->htup);
+			if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
+				return false;
+			assert(!status.isnull);
+			if (status.value > 0)
+			{
+				if (depth >= kmrels->num_rels)
+				{
+					if (!__handleDpuTaskExecProjection(dclient, dtes, kcxt))
+						return false;
+				}
+				else if (kmrels->chunks[depth].is_nestloop)
+				{
+					if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, depth+1))
+						return false;
+				}
+				else
+				{
+					if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, depth+1))
+						return false;
+				}
+			}
+			if (status.value != 0)
+				matched = true;
+		}
+	}
+	/* LEFT OUTER if needed */
+	if (kmrels->chunks[depth-1].left_outer && !matched)
+	{
+		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
+							  kds_heap, NULL);
+		if (depth >= kmrels->num_rels)
+		{
+			if (!__handleDpuTaskExecProjection(dclient, dtes, kcxt))
+				return false;
+		}
+		else if (kmrels->chunks[depth].is_nestloop)
+		{
+			if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, depth+1))
+				return false;
+		}
+		else
+		{
+			if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, depth+1))
+				return false;
+		}
+	}
+	return true;
+}
+
+static bool
+__handleDpuTaskExecHashJoin(dpuClient *dclient,
+							dpuTaskExecState *dtes,
+							kern_context *kcxt,
+							int depth)
+{
+	kern_session_info  *session = dclient->session;
+	kern_multirels	   *kmrels = dclient->kmrels;
+	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
+	kern_expression	   *kexp_load_vars = SESSION_KEXP_JOIN_LOAD_VARS(session,depth-1);
+	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth-1);
+	kern_expression	   *kexp_hash_value = SESSION_KEXP_HASH_VALUE(session,depth-1);
+	kern_hashitem	   *khitem;
+	xpu_int4_t			hash;
+	xpu_int4_t			status;
+	bool				matched = false;
+
+	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_hash_value, &hash))
+		return false;
+	assert(!hash.isnull);
+	for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hash.value);
+		 khitem != NULL;
+		 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem))
+	{
+		if (khitem->hash != hash.value)
+			continue;
+		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
+							  kds_hash, &khitem->t.htup);
+		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
+			return false;
+		assert(!status.isnull);
+		if (status.value > 0)
+		{
+			if (depth >= kmrels->num_rels)
+			{
+				if (!__handleDpuTaskExecProjection(dclient, dtes, kcxt))
+					return false;
+			}
+			else if (kmrels->chunks[depth].is_nestloop)
+			{
+				if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, depth+1))
+					return false;
+			}
+			else
+			{
+				if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, depth+1))
+					return false;
+			}
+		}
+		if (status.value != 0)
+			matched = true;
+	}
+	/* LEFT OUTER if needed */
+	if (kmrels->chunks[depth-1].left_outer && !matched)
+	{
+		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
+							  kds_hash, NULL);
+		if (depth >= kmrels->num_rels)
+		{
+			if (!__handleDpuTaskExecProjection(dclient, dtes, kcxt))
+				return false;
+		}
+		else if (kmrels->chunks[depth].is_nestloop)
+		{
+			if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, depth+1))
+				return false;
+		}
+		else
+		{
+			if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, depth+1))
+				return false;
+		}
+	}
+	return true;
+}
+
+static bool
+__handleDpuScanExecBlock(dpuClient *dclient,
+						 dpuTaskExecState *dtes,
+						 kern_data_store *kds_src)
+{
+	kern_session_info  *session = dclient->session;
+	kern_multirels	   *kmrels = dclient->kmrels;
 	kern_expression	   *kexp_load_vars = SESSION_KEXP_SCAN_LOAD_VARS(session);
 	kern_expression	   *kexp_scan_quals = SESSION_KEXP_SCAN_QUALS(session);
 	kern_expression	   *kexp_projection = SESSION_KEXP_PROJECTION(session);
 	kern_context	   *kcxt;
-	kern_data_store	   *kds_dst = NULL;
-	kern_data_store	  **kds_dst_array = NULL;
-	uint32_t			kds_dst_nrooms = 0;
-	uint32_t			kds_dst_nitems = 0;
 	uint32_t			block_index;
-	uint32_t			stat_nitems_in = 0;
-	uint32_t			stat_nitems_out = 0;
-	kern_dpuscan		kdscan;
-	XpuCommand			resp;
 
 	assert(kds_src->format == KDS_FORMAT_BLOCK &&
 		   kexp_load_vars->opcode == FuncOpCode__LoadVars &&
 		   kexp_scan_quals->exptype == TypeOpCode__bool &&
 		   kexp_projection->opcode == FuncOpCode__Projection);
-	memset(&kdscan, 0, sizeof(kern_dpuscan));
-	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, NULL, kds_dst_head);
+	assert(!kmrels || kmrels->num_rels > 0);
+	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, kmrels, dtes->kds_dst_head);
 	kcxt->kvars_addr = alloca(sizeof(void *) * kcxt->kvars_nslots);
 	kcxt->kvars_len  = alloca(sizeof(int)    * kcxt->kvars_nslots);
 	for (block_index = 0; block_index < kds_src->nitems; block_index++)
@@ -631,63 +917,38 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 		{
 			ItemIdData	   *lpp = &page->pd_linp[lp_index];
 			HeapTupleHeaderData *htup;
-			size_t			sz;
-			int				status;
 
 			if (!ItemIdIsNormal(lpp))
 				continue;
 			kcxt_reset(kcxt);
 			htup = (HeapTupleHeaderData *) PageGetItem(page, lpp);
-			stat_nitems_in++;
-			if (!ExecLoadVarsOuterRow(kcxt,
-									  kexp_load_vars,
-									  kexp_scan_quals,
-									  kds_src,
-									  htup))
+			dtes->nitems_raw++;
+			if (ExecLoadVarsOuterRow(kcxt,
+									 kexp_load_vars,
+									 kexp_scan_quals,
+									 kds_src,
+									 htup))
 			{
-				if (kcxt->errcode == ERRCODE_STROM_SUCCESS)
-					continue;
-				__dpuClientElog(dclient,
-								kcxt->errcode,
-								kcxt->error_filename,
-								kcxt->error_lineno,
-								kcxt->error_funcname,
-								kcxt->error_message);
-				goto bailout;
-			}
-			stat_nitems_out++;
-
-		retry:
-			if (!kds_dst)
-			{
-				if (kds_dst_nitems >= kds_dst_nrooms)
+				dtes->nitems_in++;
+				if (!kmrels)
 				{
-					kern_data_store	  **__kds_dst_array;
-
-					kds_dst_nrooms = 2 * kds_dst_nrooms + 10;
-					__kds_dst_array = alloca(sizeof(kern_data_store *) * kds_dst_nrooms);
-					memcpy(__kds_dst_array, kds_dst_array,
-						   sizeof(kern_data_store *) * kds_dst_nitems);
-					kds_dst_array = __kds_dst_array;
+					if (!__handleDpuTaskExecProjection(dclient, dtes, kcxt))
+						return false;
 				}
-				sz = KDS_HEAD_LENGTH(kds_dst_head) + PGSTROM_CHUNK_SIZE;
-				kds_dst = malloc(sz);
-				if (!kds_dst)
+				else if (kmrels->chunks[0].is_nestloop)
 				{
-					dpuClientElog(dclient, "out of memory");
-					goto bailout;
+					/* NEST-LOOP */
+					if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, 1))
+						return false;
 				}
-				memcpy(kds_dst, kds_dst_head, KDS_HEAD_LENGTH(kds_dst_head));
-				kds_dst->length = sz;
-				kds_dst_array[kds_dst_nitems++] = kds_dst;
+				else
+				{
+					/* HASH-JOIN */
+					if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, 1))
+						return false;
+				}
 			}
-			status = execDpuProjection(kcxt, kexp_projection, kds_dst);
-			if (status == 0)
-			{
-				 kds_dst = NULL;
-				 goto retry;
-			}
-			else if (status < 0)
+			else if (kcxt->errcode != ERRCODE_STROM_SUCCESS)
 			{
 				__dpuClientElog(dclient,
 								kcxt->errcode,
@@ -695,112 +956,60 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 								kcxt->error_lineno,
 								kcxt->error_funcname,
 								kcxt->error_message);
-				goto bailout;
+				return false;
 			}
 		}
 	}
-	/* write back the results */
-	memset(&resp, 0, offsetof(XpuCommand, u.results));
-	resp.magic = XpuCommandMagicNumber;
-	resp.tag   = XpuCommandTag__Success;
-	resp.u.results.chunks_nitems = kds_dst_nitems;
-	resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
-	resp.u.results.stats.scan.nitems_in = stat_nitems_in;
-	resp.u.results.stats.scan.nitems_out = stat_nitems_out;
-	dpuClientWriteBack(dclient,
-					   &resp, resp.u.results.chunks_offset,
-					   kds_dst_nitems,
-					   kds_dst_array);
-bailout:
-	for (int i=0; i < kds_dst_nitems; i++)
-		free(kds_dst_array[i]);
+	return true;
 }
 
-static void
+static bool
 __handleDpuScanExecArrow(dpuClient *dclient,
-						 kern_data_store *kds_src,
-						 kern_data_store *kds_dst_head)
+						 dpuTaskExecState *dtes,
+						 kern_data_store *kds_src)
 {
 	kern_session_info  *session = dclient->session;
+	kern_multirels	   *kmrels = dclient->kmrels;
 	kern_expression	   *kexp_load_vars = SESSION_KEXP_SCAN_LOAD_VARS(session);
 	kern_expression	   *kexp_scan_quals = SESSION_KEXP_SCAN_QUALS(session);
-	kern_expression	   *kexp_projection = SESSION_KEXP_PROJECTION(session);
 	kern_context	   *kcxt;
-	kern_data_store	   *kds_dst = NULL;
-	kern_data_store	  **kds_dst_array = NULL;
-	uint32_t			kds_dst_nrooms = 0;
-	uint32_t			kds_dst_nitems = 0;
 	uint32_t			kds_index;
-	uint32_t			stat_nitems_in = 0;
-	uint32_t			stat_nitems_out = 0;
-	kern_dpuscan		kdscan;
-	XpuCommand			resp;
 
 	assert(kds_src->format == KDS_FORMAT_ARROW &&
 		   kexp_load_vars->opcode == FuncOpCode__LoadVars &&
-		   kexp_scan_quals->exptype == TypeOpCode__bool &&
-		   kexp_projection->opcode == FuncOpCode__Projection);
-	memset(&kdscan, 0, sizeof(kern_dpuscan));
-	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, NULL, kds_dst_head);
+		   kexp_scan_quals->exptype == TypeOpCode__bool);
+	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, NULL, dtes->kds_dst_head);
 	kcxt->kvars_addr = alloca(sizeof(void *) * kcxt->kvars_nslots);
 	kcxt->kvars_len  = alloca(sizeof(int)    * kcxt->kvars_nslots);
 	for (kds_index = 0; kds_index < kds_src->nitems; kds_index++)
 	{
-		int			status;
-		size_t		sz;
-
 		kcxt_reset(kcxt);
-
-		stat_nitems_in++;
-		if (!ExecLoadVarsOuterArrow(kcxt,
-									kexp_load_vars,
-									kexp_scan_quals,
-									kds_src,
-									kds_index))
+		if (ExecLoadVarsOuterArrow(kcxt,
+								   kexp_load_vars,
+								   kexp_scan_quals,
+								   kds_src,
+								   kds_index))
 		{
-			if (kcxt->errcode == ERRCODE_STROM_SUCCESS)
-				continue;
-			__dpuClientElog(dclient,
-							kcxt->errcode,
-							kcxt->error_filename,
-							kcxt->error_lineno,
-							kcxt->error_funcname,
-							kcxt->error_message);
-			goto bailout;
-		}
-		stat_nitems_out++;
-
-	retry:
-		if (!kds_dst)
-		{
-			if (kds_dst_nitems >= kds_dst_nrooms)
+			dtes->nitems_in++;
+			if (!kmrels)
 			{
-				kern_data_store	  **__kds_dst_array;
-
-				kds_dst_nrooms = 2 * kds_dst_nrooms + 10;
-				__kds_dst_array = alloca(sizeof(kern_data_store *) * kds_dst_nrooms);
-				memcpy(__kds_dst_array, kds_dst_array,
-					   sizeof(kern_data_store *) * kds_dst_nitems);
-				kds_dst_array = __kds_dst_array;
+				if (!__handleDpuTaskExecProjection(dclient, dtes, kcxt))
+					return false;
 			}
-			sz = KDS_HEAD_LENGTH(kds_dst_head) + PGSTROM_CHUNK_SIZE;
-			kds_dst = malloc(sz);
-			if (!kds_dst)
+			else if (kmrels->chunks[0].is_nestloop)
 			{
-				dpuClientElog(dclient, "out of memory");
-				goto bailout;
+				/* NEST-LOOP */
+				if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, 1))
+					return false;
 			}
-			memcpy(kds_dst, kds_dst_head, KDS_HEAD_LENGTH(kds_dst_head));
-			kds_dst->length = sz;
-			kds_dst_array[kds_dst_nitems++] = kds_dst;
+			else
+			{
+				/* HASH-JOIN */
+				if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, 1))
+					return false;
+			}
 		}
-		status = execDpuProjection(kcxt, kexp_projection, kds_dst);
-		if (status == 0)
-		{
-			kds_dst = NULL;
-			goto retry;
-		}
-		else if (status < 0)
+		else if (kcxt->errcode != ERRCODE_STROM_SUCCESS)
 		{
 			__dpuClientElog(dclient,
 							kcxt->errcode,
@@ -808,36 +1017,26 @@ __handleDpuScanExecArrow(dpuClient *dclient,
 							kcxt->error_lineno,
 							kcxt->error_funcname,
 							kcxt->error_message);
-			goto bailout;
+			return false;
 		}
 	}
-
-	/* write back the results */
-	memset(&resp, 0, offsetof(XpuCommand, u.results));
-	resp.magic = XpuCommandMagicNumber;
-	resp.tag   = XpuCommandTag__Success;
-	resp.u.results.chunks_nitems = kds_dst_nitems;
-	resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
-	resp.u.results.stats.scan.nitems_in = stat_nitems_in;
-	resp.u.results.stats.scan.nitems_out = stat_nitems_out;
-	dpuClientWriteBack(dclient,
-					   &resp, resp.u.results.chunks_offset,
-					   kds_dst_nitems,
-					   kds_dst_array);
-bailout:
-	for (int i=0; i < kds_dst_nitems; i++)
-		free(kds_dst_array[i]);
+	dtes->nitems_raw += kds_src->nitems;
+	return true;
 }
 
-
+/*
+ * dpuservHandleDpuTaskExec
+ */
 static void
-dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
+dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 {
+	dpuTaskExecState   *dtes;
 	const char		   *kds_src_pathname = NULL;
 	strom_io_vector	   *kds_src_iovec = NULL;
 	kern_data_store	   *kds_src_head = NULL;
 	kern_data_store	   *kds_dst_head = NULL;
 	kern_data_store	   *kds_src = NULL;
+	int					sz, num_rels = 0;
 
 	if (xcmd->u.scan.kds_src_pathname)
 		kds_src_pathname = (char *)xcmd + xcmd->u.scan.kds_src_pathname;
@@ -852,6 +1051,14 @@ dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
 		dpuClientElog(dclient, "kern_data_store is corrupted");
 		return;
 	}
+	/* setup dpuTaskExecState */
+	if (dclient->kmrels)
+		num_rels = dclient->kmrels->num_rels;
+	sz = offsetof(dpuTaskExecState, stats[num_rels]);
+	dtes = alloca(sz);
+	memset(dtes, 0, sz);
+	dtes->kds_dst_head = kds_dst_head;
+	dtes->num_rels = num_rels;
 
 	if (kds_src_head->format == KDS_FORMAT_BLOCK)
 	{
@@ -864,7 +1071,8 @@ dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
 									  &base_addr);
 		if (kds_src)
 		{
-			__handleDpuScanExecBlock(dclient, kds_src, kds_dst_head);
+			if (__handleDpuScanExecBlock(dclient, dtes, kds_src))
+				dpuClientWriteBack(dclient, dtes);
 			free(base_addr);
 		}
 	}
@@ -879,7 +1087,8 @@ dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
 									  &base_addr);
 		if (kds_src)
 		{
-			__handleDpuScanExecArrow(dclient, kds_src, kds_dst_head);
+			if (__handleDpuScanExecArrow(dclient, dtes, kds_src))
+				dpuClientWriteBack(dclient, dtes);
 			free(base_addr);
 		}
 	}
@@ -888,18 +1097,14 @@ dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
 		dpuClientElog(dclient, "not a supported kern_data_store format");
 		return;
 	}
+	/* cleanup resources */
+	if (dtes->kds_dst_array)
+	{
+		for (int i=0; i < dtes->kds_dst_nitems; i++)
+			free(dtes->kds_dst_array[i]);
+		free(dtes->kds_dst_array);
+	}
 }
-
-
-
-
-
-
-
-
-
-
-
 
 /*
  * getDpuClient
@@ -939,6 +1144,7 @@ putDpuClient(dpuClient *dclient, int count)
 							offsetof(XpuCommand, u.session));
 			free(xcmd);
 		}
+		dpuServUnmapSessionBuffers(dclient);
 		close(dclient->sockfd);
 		free(dclient);
 	}
@@ -984,11 +1190,14 @@ dpuservDpuWorkerMain(void *__priv)
 									(xcmd != NULL ? "failed" : "ok"));
 						break;
 					case XpuCommandTag__XpuScanExec:
-						dpuservHandleDpuScanExec(dclient, xcmd);
+					case XpuCommandTag__XpuJoinExec:
+						dpuservHandleDpuTaskExec(dclient, xcmd);
 						if (verbose)
-							fprintf(stderr, "[DPU-%ld@%s] DpuScanExec\n",
+							fprintf(stderr, "[DPU-%ld@%s] DpuTaskExec\n",
 									worker_id, dclient->peer_addr);
 						break;
+
+					case XpuCommandTag__XpuPreAggExec:
 					default:
 						fprintf(stderr, "[DPU-%ld@%s] unknown xPU command (tag=%u, len=%ld)\n",
 								worker_id, dclient->peer_addr,

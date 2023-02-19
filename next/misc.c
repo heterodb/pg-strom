@@ -1524,8 +1524,8 @@ cleanup_shmem_chunks(ResourceReleasePhase phase,
 			if (isCommit)
 				elog(WARNING, "shared-memory '%s' leaks, and still alive",
 					 entry->shmem_name);
-			if (shm_unlink(entry->shmem_name) != 0)
-				elog(WARNING, "failed on shm_unlink('%s'): %m", entry->shmem_name);
+			if (unlink(entry->shmem_name) != 0)
+				elog(WARNING, "failed on unlink('%s'): %m", entry->shmem_name);
 			if (close(entry->shmem_fdesc) != 0)
 				elog(WARNING, "failed on close('%s'): %m", entry->shmem_name);
 			hash_search(shmem_tracker_htab,
@@ -1571,9 +1571,10 @@ cleanup_mmap_chunks(ResourceReleasePhase phase,
 }
 
 uint32_t
-__shmemCreate(const char *shmem_dir)
+__shmemCreate(const DpuStorageEntry *ds_entry)
 {
 	static uint	my_random_seed = 0;
+	const char *shmem_dir = "/dev/shm";
 	int			fdesc;
 	uint32_t	handle;
 	char		namebuf[MAXPGPATH];
@@ -1595,8 +1596,8 @@ __shmemCreate(const char *shmem_dir)
 		RegisterResourceReleaseCallback(cleanup_shmem_chunks, 0);
 	}
 
-	if (!shmem_dir)
-		shmem_dir = "/dev/shm";		/* POSIX shared memory */
+	if (ds_entry)
+		shmem_dir = DpuStorageEntryBaseDir(ds_entry);
 	off = snprintf(namebuf, sizeof(namebuf), "%s/", shmem_dir);
 	do {
 		handle = rand_r(&my_random_seed);
@@ -1669,22 +1670,25 @@ __shmemDrop(uint32_t shmem_handle)
 }
 
 void *
-__mmapShmem(uint32_t shmem_handle, size_t length, const char *shmem_dir)
+__mmapShmem(uint32_t shmem_handle,
+			size_t   shmem_length,
+			const DpuStorageEntry *ds_entry)
 {
 	void	   *mmap_addr = MAP_FAILED;
-	size_t		mmap_size = TYPEALIGN(PAGE_SIZE, length);
+	size_t		mmap_size = TYPEALIGN(PAGE_SIZE, shmem_length);
 	int			mmap_prot = PROT_READ | PROT_WRITE;
 	int			mmap_flags = MAP_SHARED;
 	mmapEntry  *mmap_entry = NULL;
 	shmemEntry *shmem_entry = NULL;
 	int			fdesc = -1;
+	const char *shmem_dir = "/dev/shm";
 	const char *fname = NULL;
 	struct stat	stat_buf;
 	bool		found;
 	char		namebuf[MAXPGPATH];
 
-	if (!shmem_dir)
-		shmem_dir = "/dev/shm";
+	if (ds_entry)
+		shmem_dir = DpuStorageEntryBaseDir(ds_entry);
 	if (!mmap_tracker_htab)
 	{
 		HASHCTL		hctl;

@@ -686,8 +686,6 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 
 	if (custom_path_remember(root, joinrel, try_parallel_path, cpath))
 	{
-		elog(INFO, "cpath = %p parallel=%d cost=%.0f ... %.0f", cpath, try_parallel_path, cpath->path.startup_cost, cpath->path.total_cost);
-		
 		if (!try_parallel_path)
 			add_path(joinrel, &cpath->path);
 		else
@@ -1538,7 +1536,7 @@ again:
 
 		Assert(ps_state->preload_shmem_handle != 0);
 		h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
-							   shmem_length, NULL);
+							   shmem_length, pts->ds_entry);
 		memset(h_kmrels, 0, offsetof(kern_multirels,
 									 chunks[pts->num_rels]));
 		h_kmrels->length = offset;
@@ -1730,7 +1728,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			{
 				pts->h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
 											ps_state->preload_shmem_length,
-											NULL);
+											pts->ds_entry);
 			}
 
 			for (int i=0; i < leader->num_rels; i++)
@@ -1802,7 +1800,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			{
 				pts->h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
 											ps_state->preload_shmem_length,
-											NULL);
+											pts->ds_entry);
 			}
 
 			//TODO: send the shmem handle to the GPU server or DPU server

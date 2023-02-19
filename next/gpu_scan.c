@@ -20,61 +20,6 @@ static bool					enable_gpuscan;		/* GUC */
 static bool					enable_pullup_outer_scan;	/* GUC */
 
 /*
- * xpuOperatorCostRatio
- */
-double
-xpuOperatorCostRatio(uint32_t devkind)
-{
-	double	xpu_ratio;
-
-	switch (devkind)
-	{
-		case DEVKIND__NVIDIA_GPU:
-			/* GPU computation cost */
-			if (cpu_operator_cost > 0.0)
-				xpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
-			else if (pgstrom_gpu_operator_cost == 0.0)
-				xpu_ratio = 1.0;
-			else
-				xpu_ratio = disable_cost;	/* very large but still finite */
-			break;
-
-		case DEVKIND__NVIDIA_DPU:
-			/* DPU computation cost */
-			if (cpu_operator_cost > 0.0)
-				xpu_ratio = pgstrom_dpu_operator_cost / cpu_operator_cost;
-			else if (pgstrom_dpu_operator_cost == 0.0)
-				xpu_ratio = 1.0;
-			else
-				xpu_ratio = disable_cost;	/* very large but still finite */
-			break;
-
-		default:
-			xpu_ratio = 1.0;
-			break;
-	}
-	return xpu_ratio;
-}
-
-/*
- * xpuTupleCost
- */
-Cost
-xpuTupleCost(uint32_t devkind)
-{
-	switch (devkind)
-	{
-		case DEVKIND__NVIDIA_GPU:
-			return pgstrom_gpu_tuple_cost;
-		case DEVKIND__NVIDIA_DPU:
-			return pgstrom_dpu_tuple_cost;
-		default:
-			break;
-	}
-	return 0.0;		/* CPU don't need xPU-->Host DMA */
-}
-
-/*
  * consider_xpuscan_path_params
  */
 bool
