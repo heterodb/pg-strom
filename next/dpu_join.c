@@ -105,29 +105,6 @@ CreateDpuJoinState(CustomScan *cscan)
 }
 
 /*
- * ExecInitGpuJoin
- */
-static void
-ExecInitDpuJoin(CustomScanState *node,
-				EState *estate,
-				int eflags)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromExecInitTaskState(pts, eflags);
-	pts->cb_cpu_fallback = execFallbackCpuJoin;
-}
-
-/*
- * DpuJoinReCheckTuple
- */
-static bool
-DpuJoinReCheckTuple(pgstromTaskState *pts, TupleTableSlot *epq_slot)
-{
-	return true;
-}
-
-/*
  * ExecDpuJoin
  */
 static TupleTableSlot *
@@ -142,7 +119,7 @@ ExecDpuJoin(CustomScanState *node)
 
 		/* attach pgstromSharedState, if none */
 		if (!pts->ps_state)
-			pgstromSharedStateInitDSM(pts, NULL, NULL);
+			pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
 		/* preload inner buffer */
 		Assert(pts->ds_entry != NULL);
 		inner_handle = GpuJoinInnerPreload(pts);
@@ -152,97 +129,7 @@ ExecDpuJoin(CustomScanState *node)
 		session = pgstromBuildSessionInfo(pts, inner_handle);
 		DpuClientOpenSession(pts, session);
 	}
-	return ExecScan(&pts->css.ss,
-					(ExecScanAccessMtd) pgstromExecTaskState,
-					(ExecScanRecheckMtd) DpuJoinReCheckTuple);
-}
-
-/*
- * ExecEndDpuJoin
- */
-static void
-ExecEndDpuJoin(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromExecEndTaskState(pts);
-}
-
-/*
- * ExecReScanDpuJoin
- */
-static void
-ExecReScanDpuJoin(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromExecResetTaskState(pts);
-}
-
-/*
- * ExecDpuJoinEstimateDSM
- */
-static Size
-ExecDpuJoinEstimateDSM(CustomScanState *node,
-                       ParallelContext *pcxt)
-{
-    pgstromTaskState *pts = (pgstromTaskState *) node;
-
-    return pgstromSharedStateEstimateDSM(pts);
-}
-
-/*
- * ExecDpuJoinInitDSM
- */
-static void
-ExecDpuJoinInitDSM(CustomScanState *node,
-                   ParallelContext *pcxt,
-                   void *dsm_addr)
-{
-    pgstromTaskState *pts = (pgstromTaskState *) node;
-
-    pgstromSharedStateInitDSM(pts, pcxt, dsm_addr);
-}
-
-/*
- * ExecDpuJoinInitWorker
- */
-static void
-ExecDpuJoinInitWorker(CustomScanState *node,
-					  shm_toc *toc,
-					  void *dsm_addr)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromSharedStateAttachDSM(pts, dsm_addr);
-}
-
-/*
- * ExecShutdownDpuJoin
- */
-static void
-ExecShutdownDpuJoin(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromSharedStateShutdownDSM(pts);
-}
-
-/*
- * ExplainDpuJoin
- */
-static void
-ExplainDpuJoin(CustomScanState *node,
-			   List *ancestors,
-			   ExplainState *es)
-{
-	pgstromTaskState *pts = (pgstromTaskState *)node;
-	List	   *dcontext;
-
-	dcontext = set_deparse_context_plan(es->deparse_cxt,
-										node->ss.ps.plan,
-										ancestors);
-	pgstromTaskStateExplain(pts, es, dcontext, "DPU");
+	return pgstromExecTaskState(pts);
 }
 
 /*
@@ -292,17 +179,15 @@ pgstrom_init_dpu_join(void)
 	/* setup exec methods */
 	memset(&dpujoin_exec_methods, 0, sizeof(CustomExecMethods));
 	dpujoin_exec_methods.CustomName             = "DpuJoin";
-	dpujoin_exec_methods.BeginCustomScan        = ExecInitDpuJoin;
+	dpujoin_exec_methods.BeginCustomScan        = pgstromExecInitTaskState;
 	dpujoin_exec_methods.ExecCustomScan         = ExecDpuJoin;
-	dpujoin_exec_methods.EndCustomScan          = ExecEndDpuJoin;
-	dpujoin_exec_methods.ReScanCustomScan       = ExecReScanDpuJoin;
-	dpujoin_exec_methods.MarkPosCustomScan      = NULL;
-	dpujoin_exec_methods.RestrPosCustomScan     = NULL;
-	dpujoin_exec_methods.EstimateDSMCustomScan  = ExecDpuJoinEstimateDSM;
-	dpujoin_exec_methods.InitializeDSMCustomScan = ExecDpuJoinInitDSM;
-	dpujoin_exec_methods.InitializeWorkerCustomScan = ExecDpuJoinInitWorker;
-	dpujoin_exec_methods.ShutdownCustomScan     = ExecShutdownDpuJoin;
-	dpujoin_exec_methods.ExplainCustomScan      = ExplainDpuJoin;
+	dpujoin_exec_methods.EndCustomScan          = pgstromExecEndTaskState;
+	dpujoin_exec_methods.ReScanCustomScan       = pgstromExecResetTaskState;
+	dpujoin_exec_methods.EstimateDSMCustomScan  = pgstromSharedStateEstimateDSM;
+	dpujoin_exec_methods.InitializeDSMCustomScan = pgstromSharedStateInitDSM;
+	dpujoin_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
+	dpujoin_exec_methods.ShutdownCustomScan     = pgstromSharedStateShutdownDSM;
+	dpujoin_exec_methods.ExplainCustomScan      = pgstromExplainTaskState;
 
 	/* hook registration */
 	set_join_pathlist_next = set_join_pathlist_hook;

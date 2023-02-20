@@ -646,31 +646,6 @@ CreateGpuScanState(CustomScan *cscan)
 }
 
 /*
- * ExecInitGpuScan
- */
-static void
-ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromExecInitTaskState(pts, eflags);
-	pts->cb_cpu_fallback = ExecFallbackCpuScan;
-}
-
-/*
- * GpuScanReCheckTuple
- */
-static bool
-GpuScanReCheckTuple(pgstromTaskState *pts, TupleTableSlot *epq_slot)
-{
-	/*
-	 * NOTE: Only immutable operators/functions are executable
-	 * on the GPU devices, so its decision will never changed.
-	 */
-	return true;
-}
-
-/*
  * ExecGpuScan
  */
 static TupleTableSlot *
@@ -679,103 +654,14 @@ ExecGpuScan(CustomScanState *node)
 	pgstromTaskState *pts = (pgstromTaskState *) node;
 
 	if (!pts->ps_state)
-		pgstromSharedStateInitDSM(pts, NULL, NULL);
+		pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
 	if (!pts->conn)
 	{
 		const XpuCommand *session
 			= pgstromBuildSessionInfo(pts, 0);
 		gpuClientOpenSession(pts, pts->optimal_gpus, session);
 	}
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) pgstromExecTaskState,
-					(ExecScanRecheckMtd) GpuScanReCheckTuple);
-}
-
-/*
- * ExecEndGpuScan
- */
-static void
-ExecEndGpuScan(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromExecEndTaskState(pts);
-}
-
-/*
- * ExecReScanGpuScan
- */
-static void
-ExecReScanGpuScan(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromExecResetTaskState(pts);
-}
-
-/*
- * EstimateGpuScanDSM
- */
-static Size
-EstimateGpuScanDSM(CustomScanState *node,
-				   ParallelContext *pcxt)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	return pgstromSharedStateEstimateDSM(pts);
-}
-
-/*
- * InitializeGpuScanDSM
- */
-static void
-InitializeGpuScanDSM(CustomScanState *node,
-					 ParallelContext *pcxt,
-					 void *dsm_addr)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromSharedStateInitDSM(pts, pcxt, dsm_addr);
-}
-
-/*
- * InitGpuScanWorker
- */
-static void
-InitGpuScanWorker(CustomScanState *node, shm_toc *toc, void *dsm_addr)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromSharedStateAttachDSM(pts, dsm_addr);
-}
-
-/*
- * ExecShutdownGpuScan
- */
-static void
-ExecShutdownGpuScan(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromSharedStateShutdownDSM(pts);
-}
-
-/*
- * ExplainGpuScan
- */
-static void
-ExplainGpuScan(CustomScanState *node,
-			   List *ancestors,
-			   ExplainState *es)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-	List	   *dcontext;
-
-	/* setup deparsing context */
-	dcontext = set_deparse_context_plan(es->deparse_cxt,
-										pts->css.ss.ps.plan,
-										ancestors);
-	pgstromTaskStateExplain(pts, es, dcontext, "GPU");
+	return pgstromExecTaskState(pts);
 }
 
 /*
@@ -850,15 +736,15 @@ pgstrom_init_gpu_scan(void)
     /* setup exec methods */
     memset(&gpuscan_exec_methods, 0, sizeof(gpuscan_exec_methods));
     gpuscan_exec_methods.CustomName			= "GpuScan";
-    gpuscan_exec_methods.BeginCustomScan	= ExecInitGpuScan;
+    gpuscan_exec_methods.BeginCustomScan	= pgstromExecInitTaskState;
     gpuscan_exec_methods.ExecCustomScan		= ExecGpuScan;
-    gpuscan_exec_methods.EndCustomScan		= ExecEndGpuScan;
-    gpuscan_exec_methods.ReScanCustomScan	= ExecReScanGpuScan;
-    gpuscan_exec_methods.EstimateDSMCustomScan = EstimateGpuScanDSM;
-    gpuscan_exec_methods.InitializeDSMCustomScan = InitializeGpuScanDSM;
-    gpuscan_exec_methods.InitializeWorkerCustomScan = InitGpuScanWorker;
-    gpuscan_exec_methods.ShutdownCustomScan	= ExecShutdownGpuScan;
-    gpuscan_exec_methods.ExplainCustomScan	= ExplainGpuScan;
+    gpuscan_exec_methods.EndCustomScan		= pgstromExecEndTaskState;
+    gpuscan_exec_methods.ReScanCustomScan	= pgstromExecResetTaskState;
+    gpuscan_exec_methods.EstimateDSMCustomScan = pgstromSharedStateEstimateDSM;
+    gpuscan_exec_methods.InitializeDSMCustomScan = pgstromSharedStateInitDSM;
+    gpuscan_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
+    gpuscan_exec_methods.ShutdownCustomScan	= pgstromSharedStateShutdownDSM;
+    gpuscan_exec_methods.ExplainCustomScan	= pgstromExplainTaskState;
 
 	/* hook registration */
 	set_rel_pathlist_next = set_rel_pathlist_hook;

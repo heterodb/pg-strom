@@ -1368,15 +1368,15 @@ typedef struct
 												 * timezone */
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
-#define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
+#define DEVTASK__GROUPBY			0x40000000U	/* xPU-GroupBy */
 
 #define TASK_KIND__GPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_GPU)
 #define TASK_KIND__GPUJOIN		(DEVTASK__JOIN   | DEVKIND__NVIDIA_GPU)
-#define TASK_KIND__GPUPREAGG	(DEVTASK__PREAGG | DEVKIND__NVIDIA_GPU)
+#define TASK_KIND__GPUGROUPBY	(DEVTASK__GROUPBY| DEVKIND__NVIDIA_GPU)
 
 #define TASK_KIND__DPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_DPU)
 #define TASK_KIND__DPUJOIN		(DEVTASK__JOIN   | DEVKIND__NVIDIA_DPU)
-#define TASK_KIND__DPUPREAGG	(DEVTASK__PREAGG | DEVKIND__NVIDIA_DPU)
+#define TASK_KIND__DPUGROUPBY	(DEVTASK__GROUPBY| DEVKIND__NVIDIA_DPU)
 
 /* ----------------------------------------------------------------
  *
@@ -1555,7 +1555,7 @@ typedef struct
 #define XpuCommandTag__OpenSession		100
 #define XpuCommandTag__XpuScanExec		200
 #define XpuCommandTag__XpuJoinExec		300
-#define XpuCommandTag__XpuPreAggExec	400
+#define XpuCommandTag__XpuGroupByExec	400
 #define XpuCommandMagicNumber			0xdeadbeafU
 
 /*

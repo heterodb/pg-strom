@@ -127,7 +127,7 @@ CREATE VIEW pgstrom.gpucache_info AS
 -- Partial / Alternative aggregate functions for GpuPreAgg
 --
 -- ==================================================================
-/*
+
 -- NROWS()
 CREATE FUNCTION pgstrom.nrows()
   RETURNS bigint
@@ -139,6 +139,7 @@ CREATE FUNCTION pgstrom.nrows(bool)
   AS 'MODULE_PATHNAME','pgstrom_partial_nrows'
   LANGUAGE C STRICT PARALLEL SAFE;
 
+-- SUM()
 CREATE AGGREGATE pgstrom.sum(int8)
 (
   sfunc = pg_catalog.int8pl,
@@ -147,7 +148,7 @@ CREATE AGGREGATE pgstrom.sum(int8)
   parallel = safe
 );
 
--- AVG()
+-- AVG(X)
 CREATE FUNCTION pgstrom.pavg(int8,int8)
   RETURNS int8[]
   AS 'MODULE_PATHNAME','pgstrom_partial_avg_int8'
@@ -163,17 +164,17 @@ CREATE FUNCTION pgstrom.favg_accum(int8[], int8[])
   AS 'MODULE_PATHNAME', 'pgstrom_final_avg_int8_accum'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.favg_final(int8[])
-  RETURNS numeric
-  AS 'MODULE_PATHNAME', 'pgstrom_final_avg_int8_final'
-  LANGUAGE C STRICT PARALLEL SAFE;
-
 CREATE FUNCTION pgstrom.favg_accum(float8[], float8[])
   RETURNS float8[]
   AS 'MODULE_PATHNAME', 'pgstrom_final_avg_float8_accum'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.favg_final(float8[])
+CREATE FUNCTION pgstrom.favg_int_final(int8[])
+  RETURNS numeric
+  AS 'MODULE_PATHNAME', 'pgstrom_final_avg_int8_final'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.favg_float_final(float8[])
   RETURNS float8
   AS 'MODULE_PATHNAME', 'pgstrom_final_avg_float8_final'
   LANGUAGE C STRICT PARALLEL SAFE;
@@ -187,7 +188,7 @@ CREATE AGGREGATE pgstrom.favg(int8[])
 (
   sfunc = pgstrom.favg_accum,
   stype = int8[],
-  finalfunc = pgstrom.favg_final,
+  finalfunc = pgstrom.favg_int_final,
   parallel = safe
 );
 
@@ -195,11 +196,11 @@ CREATE AGGREGATE pgstrom.favg(float8[])
 (
   sfunc = pgstrom.favg_accum,
   stype = float8[],
-  finalfunc = pgstrom.favg_final,
+  finalfunc = pgstrom.favg_float_final,
   parallel = safe
 );
 
-CREATE AGGREGATE pgstrom.favg_numeric(float8[])
+CREATE AGGREGATE pgstrom.favg_nm(float8[])
 (
   sfunc = pgstrom.favg_accum,
   stype = float8[],
@@ -248,6 +249,22 @@ CREATE FUNCTION pgstrom.pmax(float8)
   AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
   LANGUAGE C STRICT PARALLEL SAFE;
 
+CREATE AGGREGATE pgstrom.fmin_int1(int4)
+(
+  sfunc = pg_catalog.int4smaller,
+  stype = int4,
+  finalfunc = pgstrom.int1,
+  parallel = safe
+);
+
+CREATE AGGREGATE pgstrom.fmax_int1(int4)
+(
+  sfunc = pg_catalog.int4larger,
+  stype = int4,
+  finalfunc = pgstrom.int1,
+  parallel = safe
+);
+
 CREATE AGGREGATE pgstrom.fmin_int2(int4)
 (
   sfunc = pg_catalog.int4smaller,
@@ -261,6 +278,22 @@ CREATE AGGREGATE pgstrom.fmax_int2(int4)
   sfunc = pg_catalog.int4larger,
   stype = int4,
   finalfunc = pg_catalog.int2,
+  parallel = safe
+);
+
+CREATE AGGREGATE pgstrom.fmin_float2(float8)
+(
+  sfunc = pg_catalog.float4smaller,
+  stype = float4,
+  finalfunc = pgstrom.float2,
+  parallel = safe
+);
+
+CREATE AGGREGATE pgstrom.fmax_float2(float8)
+(
+  sfunc = pg_catalog.float4larger,
+  stype = float4,
+  finalfunc = pgstrom.float2
   parallel = safe
 );
 
@@ -422,23 +455,7 @@ CREATE FUNCTION pgstrom.float8_var_pop_numeric(float8[])
   AS 'MODULE_PATHNAME','pgstrom_float8_var_pop_numeric'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE AGGREGATE pgstrom.stddev(float8[])
-(
-  sfunc = pg_catalog.float8_combine,
-  stype = float8[],
-  finalfunc = pg_catalog.float8_stddev_samp,
-  parallel = safe
-);
-
-CREATE AGGREGATE pgstrom.stddev_numeric(float8[])
-(
-  sfunc = pg_catalog.float8_combine,
-  stype = float8[],
-  finalfunc = pgstrom.float8_stddev_samp_numeric,
-  parallel = safe
-);
-
-CREATE AGGREGATE pgstrom.stddev_pop(float8[])
+CREATE AGGREGATE pgstrom.stddev_popf(float8[])
 (
   sfunc = pg_catalog.float8_combine,
   stype = float8[],
@@ -447,7 +464,7 @@ CREATE AGGREGATE pgstrom.stddev_pop(float8[])
   parallel = safe
 );
 
-CREATE AGGREGATE pgstrom.stddev_pop_numeric(float8[])
+CREATE AGGREGATE pgstrom.stddev_pop(float8[])
 (
   sfunc = pg_catalog.float8_combine,
   stype = float8[],
@@ -456,7 +473,7 @@ CREATE AGGREGATE pgstrom.stddev_pop_numeric(float8[])
   parallel = safe
 );
 
-CREATE AGGREGATE pgstrom.stddev_samp(float8[])
+CREATE AGGREGATE pgstrom.stddev_sampf(float8[])
 (
   sfunc = pg_catalog.float8_combine,
   stype = float8[],
@@ -465,7 +482,7 @@ CREATE AGGREGATE pgstrom.stddev_samp(float8[])
   parallel = safe
 );
 
-CREATE AGGREGATE pgstrom.stddev_samp_numeric(float8[])
+CREATE AGGREGATE pgstrom.stddev_samp(float8[])
 (
   sfunc = pg_catalog.float8_combine,
   stype = float8[],

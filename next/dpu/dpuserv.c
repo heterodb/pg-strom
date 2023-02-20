@@ -1197,7 +1197,7 @@ dpuservDpuWorkerMain(void *__priv)
 									worker_id, dclient->peer_addr);
 						break;
 
-					case XpuCommandTag__XpuPreAggExec:
+					case XpuCommandTag__XpuGroupByExec:
 					default:
 						fprintf(stderr, "[DPU-%ld@%s] unknown xPU command (tag=%u, len=%ld)\n",
 								worker_id, dclient->peer_addr,

@@ -185,31 +185,6 @@ CreateDpuScanState(CustomScan *cscan)
 }
 
 /*
- * ExecInitDpuScan
- */
-static void
-ExecInitDpuScan(CustomScanState *node, EState *estate, int eflags)
-{
-	pgstromTaskState *pts = (pgstromTaskState *)node;
-
-	pgstromExecInitTaskState(pts, eflags);
-	pts->cb_cpu_fallback = ExecFallbackCpuScan;
-}
-
-/*
- * DpuScanReCheckTuple
- */
-static bool
-DpuScanReCheckTuple(pgstromTaskState *pts, TupleTableSlot *epq_slot)
-{
-	/*
-	 * NOTE: Only immutable operators/functions are executable
-	 * on DPU devices, so its decision will never changed.
-	 */
-	return true;
-}
-
-/*
  * ExecDpuScan
  */
 static TupleTableSlot *
@@ -218,102 +193,14 @@ ExecDpuScan(CustomScanState *node)
 	pgstromTaskState *pts = (pgstromTaskState *)node;
 
 	if (!pts->ps_state)
-		pgstromSharedStateInitDSM(pts, NULL, NULL);
+		pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
 	if (!pts->conn)
 	{
 		const XpuCommand *session
 			= pgstromBuildSessionInfo(pts, 0);
 		DpuClientOpenSession(pts, session);
 	}
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) pgstromExecTaskState,
-					(ExecScanRecheckMtd) DpuScanReCheckTuple);
-}
-
-/*
- * ExecEndDpuScan
- */
-static void
-ExecEndDpuScan(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *)node;
-
-	pgstromExecEndTaskState(pts);
-}
-
-/*
- * ExecReScanDpuScan
- */
-static void
-ExecReScanDpuScan(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *)node;
-
-	pgstromExecResetTaskState(pts);
-}
-
-/*
- * EstimateDpuScanDSM
- */
-static Size
-EstimateDpuScanDSM(CustomScanState *node,
-				   ParallelContext *pcxt)
-{
-	pgstromTaskState *pts = (pgstromTaskState *)node;
-
-	return pgstromSharedStateEstimateDSM(pts);
-}
-
-/*
- * InitializeDpuScanDSM
- */
-static void
-InitializeDpuScanDSM(CustomScanState *node,
-					 ParallelContext *pcxt,
-					 void *dsm_addr)
-{
-	pgstromTaskState *pts = (pgstromTaskState *)node;
-
-	pgstromSharedStateInitDSM(pts, pcxt, dsm_addr);
-}
-
-/*
- * InitDpuScanWorker
- */
-static void
-InitDpuScanWorker(CustomScanState *node, shm_toc *toc, void *dsm_addr)
-{
-	pgstromTaskState *pts = (pgstromTaskState *)node;
-
-	pgstromSharedStateAttachDSM(pts, dsm_addr);
-}
-
-/*
- * ExecShutdownDpuScan
- */
-static void
-ExecShutdownDpuScan(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *)node;
-
-	pgstromSharedStateShutdownDSM(pts);
-}
-
-/*
- * ExplainDpuScan
- */
-static void
-ExplainDpuScan(CustomScanState *node,
-               List *ancestors,
-               ExplainState *es)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-	List	   *dcontext;
-
-	dcontext = set_deparse_context_plan(es->deparse_cxt,
-										node->ss.ps.plan,
-										ancestors);
-	pgstromTaskStateExplain(pts, es, dcontext, "DPU");
+	return pgstromExecTaskState(pts);
 }
 
 /*
@@ -345,15 +232,15 @@ pgstrom_init_dpu_scan(void)
 	/* setup exec methods */
 	memset(&dpuscan_exec_methods, 0, sizeof(dpuscan_exec_methods));
     dpuscan_exec_methods.CustomName			= "DpuScan";
-    dpuscan_exec_methods.BeginCustomScan	= ExecInitDpuScan;
+    dpuscan_exec_methods.BeginCustomScan	= pgstromExecInitTaskState;
     dpuscan_exec_methods.ExecCustomScan		= ExecDpuScan;
-    dpuscan_exec_methods.EndCustomScan		= ExecEndDpuScan;
-    dpuscan_exec_methods.ReScanCustomScan	= ExecReScanDpuScan;
-    dpuscan_exec_methods.EstimateDSMCustomScan = EstimateDpuScanDSM;
-    dpuscan_exec_methods.InitializeDSMCustomScan = InitializeDpuScanDSM;
-    dpuscan_exec_methods.InitializeWorkerCustomScan = InitDpuScanWorker;
-    dpuscan_exec_methods.ShutdownCustomScan = ExecShutdownDpuScan;
-    dpuscan_exec_methods.ExplainCustomScan	= ExplainDpuScan;
+    dpuscan_exec_methods.EndCustomScan		= pgstromExecEndTaskState;
+    dpuscan_exec_methods.ReScanCustomScan	= pgstromExecResetTaskState;
+    dpuscan_exec_methods.EstimateDSMCustomScan = pgstromSharedStateEstimateDSM;
+	dpuscan_exec_methods.InitializeDSMCustomScan = pgstromSharedStateInitDSM;
+    dpuscan_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
+    dpuscan_exec_methods.ShutdownCustomScan = pgstromSharedStateShutdownDSM;
+    dpuscan_exec_methods.ExplainCustomScan	= pgstromExplainTaskState;
 
     /* hook registration */
     set_rel_pathlist_next = set_rel_pathlist_hook;

@@ -872,8 +872,8 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 		xcmd->tag = XpuCommandTag__XpuScanExec;
 	else if ((pts->task_kind & DEVTASK__JOIN) != 0)
 		xcmd->tag = XpuCommandTag__XpuJoinExec;
-	else if ((pts->task_kind & DEVTASK__PREAGG) != 0)
-		xcmd->tag = XpuCommandTag__XpuPreAggExec;
+	else if ((pts->task_kind & DEVTASK__GROUPBY) != 0)
+		xcmd->tag = XpuCommandTag__XpuGroupByExec;
 	else
 		elog(ERROR, "unsupported task kind: %08x", pts->task_kind);
 	xcmd->length = bufsz;
@@ -898,18 +898,18 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
  * pgstromExecInitTaskState
  */
 void
-pgstromExecInitTaskState(pgstromTaskState *pts, int eflags)
+pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 {
+	pgstromTaskState *pts = (pgstromTaskState *)node;
 	pgstromPlanInfo	*pp_info = pts->pp_info;
-	EState		   *estate = pts->css.ss.ps.state;
-	CustomScan	   *cscan = (CustomScan *)pts->css.ss.ps.plan;
-	Relation		rel = pts->css.ss.ss_currentRelation;
-	TupleDesc		tupdesc_src = RelationGetDescr(rel);
-	TupleDesc		tupdesc_dst;
-	int				depth;
-	List		   *tlist_dev = NIL;
-	List		   *base_quals = NIL;
-	ListCell	   *lc;
+	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
+	Relation	rel = pts->css.ss.ss_currentRelation;
+	TupleDesc	tupdesc_src = RelationGetDescr(rel);
+	TupleDesc	tupdesc_dst;
+	int			depth;
+	List	   *tlist_dev = NIL;
+	List	   *base_quals = NIL;
+	ListCell   *lc;
 
 	/* sanity checks */
 	Assert(rel != NULL &&
@@ -1091,15 +1091,24 @@ pgstromExecInitTaskState(pgstromTaskState *pts, int eflags)
 									  tupdesc_dst,
 									  KDS_FORMAT_ROW);
 	}
+	/* CPU fallback routine */
+	if ((pts->task_kind & DEVTASK__SCAN) != 0)
+		pts->cb_cpu_fallback = ExecFallbackCpuScan;
+	else if ((pts->task_kind & DEVTASK__JOIN) != 0)
+		pts->cb_cpu_fallback = ExecFallbackCpuJoin;
+	else if ((pts->task_kind & DEVTASK__GROUPBY) != 0)
+		pts->cb_cpu_fallback = ExecFallbackCpuGroupBy;
+	else
+		elog(ERROR, "Bug? unknown DEVTASK");
 	/* other fields init */
 	pts->curr_vm_buffer = InvalidBuffer;
 }
 
 /*
- * pgstromExecTaskState
+ * pgstromExecScanAccess
  */
-TupleTableSlot *
-pgstromExecTaskState(pgstromTaskState *pts)
+static TupleTableSlot *
+pgstromExecScanAccess(pgstromTaskState *pts)
 {
 	TupleTableSlot *slot = NULL;
 	XpuCommand	   *resp;
@@ -1134,11 +1143,33 @@ pgstromExecTaskState(pgstromTaskState *pts)
 }
 
 /*
+ * pgstromExecScanReCheck
+ */
+static bool
+pgstromExecScanReCheck(pgstromTaskState *pts, TupleTableSlot *epq_slot)
+{
+	/*
+	 * NOTE: Only immutable operators/functions are executable
+	 * on the GPU devices, so its decision will never changed.
+	 */
+	return true;
+}
+
+TupleTableSlot *
+pgstromExecTaskState(pgstromTaskState *pts)
+{
+	return ExecScan(&pts->css.ss,
+					(ExecScanAccessMtd) pgstromExecScanAccess,
+					(ExecScanRecheckMtd) pgstromExecScanReCheck);
+}
+
+/*
  * pgstromExecEndTaskState
  */
 void
-pgstromExecEndTaskState(pgstromTaskState *pts)
+pgstromExecEndTaskState(CustomScanState *node)
 {
+	pgstromTaskState   *pts = (pgstromTaskState *)node;
 	pgstromSharedState *ps_state = pts->ps_state;
 	ListCell   *lc;
 
@@ -1169,8 +1200,10 @@ pgstromExecEndTaskState(pgstromTaskState *pts)
  * pgstromExecResetTaskState
  */
 void
-pgstromExecResetTaskState(pgstromTaskState *pts)
+pgstromExecResetTaskState(CustomScanState *node)
 {
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
 	if (pts->conn)
 	{
 		xpuClientCloseSession(pts->conn);
@@ -1186,12 +1219,14 @@ pgstromExecResetTaskState(pgstromTaskState *pts)
  * pgstromSharedStateEstimateDSM
  */
 Size
-pgstromSharedStateEstimateDSM(pgstromTaskState *pts)
+pgstromSharedStateEstimateDSM(CustomScanState *node,
+							  ParallelContext *pcxt)
 {
-	Relation	relation = pts->css.ss.ss_currentRelation;
-	EState	   *estate = pts->css.ss.ps.state;
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+	Relation	relation = node->ss.ss_currentRelation;
+	EState	   *estate   = node->ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
-	int			num_rels = list_length(pts->css.custom_ps);
+	int			num_rels = list_length(node->custom_ps);
 	Size		len = 0;
 
 	if (pts->br_state)
@@ -1206,14 +1241,17 @@ pgstromSharedStateEstimateDSM(pgstromTaskState *pts)
  * pgstromSharedStateInitDSM
  */
 void
-pgstromSharedStateInitDSM(pgstromTaskState *pts,
-						  ParallelContext *pcxt, char *dsm_addr)
+pgstromSharedStateInitDSM(CustomScanState *node,
+						  ParallelContext *pcxt,
+						  void *coordinate)
 {
-	Relation	relation = pts->css.ss.ss_currentRelation;
-	EState	   *estate = pts->css.ss.ps.state;
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+	Relation	relation = node->ss.ss_currentRelation;
+	EState	   *estate   = node->ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
-	int			num_rels = list_length(pts->css.custom_ps);
+	int			num_rels = list_length(node->custom_ps);
 	size_t		dsm_length = offsetof(pgstromSharedState, inners[num_rels]);
+	char	   *dsm_addr = coordinate;
 	pgstromSharedState *ps_state;
 	TableScanDesc scan = NULL;
 
@@ -1261,9 +1299,13 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts,
  * pgstromSharedStateAttachDSM
  */
 void
-pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr)
+pgstromSharedStateAttachDSM(CustomScanState *node,
+							shm_toc *toc,
+							void *coordinate)
 {
-	int		num_rels = list_length(pts->css.custom_ps);
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+	char	   *dsm_addr = coordinate;
+	int			num_rels = list_length(pts->css.custom_ps);
 
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
@@ -1286,11 +1328,12 @@ pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr)
  * pgstromSharedStateShutdownDSM
  */
 void
-pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
+pgstromSharedStateShutdownDSM(CustomScanState *node)
 {
+	pgstromTaskState   *pts = (pgstromTaskState *) node;
 	pgstromSharedState *src_state = pts->ps_state;
 	pgstromSharedState *dst_state;
-	EState	   *estate = pts->css.ss.ps.state;
+	EState			   *estate = node->ss.ps.state;
 
 	if (pts->br_state)
 		pgstromBrinIndexShutdownDSM(pts);
@@ -1307,25 +1350,37 @@ pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
 }
 
 /*
- * pgstromTaskStateExplain
+ * pgstromExplainTaskState
  */
 void
-pgstromTaskStateExplain(pgstromTaskState *pts,
-						ExplainState *es,
-						List *dcontext,
-						const char *xpu_label)
+pgstromExplainTaskState(CustomScanState *node,
+						List *ancestors,
+						ExplainState *es)
 {
-	pgstromPlanInfo *pp_info = pts->pp_info;
-	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
-	StringInfoData buf;
-	ListCell   *lc;
-	char		label[100];
-	char	   *str;
-	double		ntuples;
+	pgstromTaskState   *pts = (pgstromTaskState *)node;
+	pgstromPlanInfo	   *pp_info = pts->pp_info;
+	CustomScan		   *cscan = (CustomScan *)node->ss.ps.plan;
+	List			   *dcontext;
+	StringInfoData		buf;
+	ListCell		   *lc;
+	const char		   *xpu_label;
+	char				label[100];
+	char			   *str;
+	double				ntuples;
 
-	initStringInfo(&buf);
+	/* setup deparse context */
+	dcontext = set_deparse_context_plan(es->deparse_cxt,
+										node->ss.ps.plan,
+										ancestors);
+	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+		xpu_label = "GPU";
+	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+		xpu_label = "DPU";
+	else
+		xpu_label = "???";
 
 	/* xPU Projection */
+	initStringInfo(&buf);
 	foreach (lc, cscan->custom_scan_tlist)
 	{
 		TargetEntry *tle = lfirst(lc);

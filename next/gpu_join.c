@@ -1122,31 +1122,6 @@ CreateGpuJoinState(CustomScan *cscan)
 }
 
 /*
- * ExecInitGpuJoin
- */
-static void
-ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromExecInitTaskState(pts, eflags);
-	pts->cb_cpu_fallback = execFallbackCpuJoin;
-}
-
-/*
- * GpuJoinReCheckTuple
- */
-static bool
-GpuJoinReCheckTuple(pgstromTaskState *pts, TupleTableSlot *epq_slot)
-{
-	/*
-	 * NOTE: Only immutable operators/functions are executable
-	 * on the GPU devices, so its decision will never changed.
-	 */
-	return true;
-}
-
-/*
  * ExecGpuJoin
  */
 static TupleTableSlot *
@@ -1161,7 +1136,7 @@ ExecGpuJoin(CustomScanState *node)
 
 		/* attach pgstromSharedState, if none */
 		if (!pts->ps_state)
-			pgstromSharedStateInitDSM(pts, NULL, NULL);
+			pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
 		/* preload inner buffer */
 		inner_handle = GpuJoinInnerPreload(pts);
 		if (inner_handle == 0)
@@ -1170,97 +1145,7 @@ ExecGpuJoin(CustomScanState *node)
 		session = pgstromBuildSessionInfo(pts, inner_handle);
 		gpuClientOpenSession(pts, pts->optimal_gpus, session);
 	}
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) pgstromExecTaskState,
-					(ExecScanRecheckMtd) GpuJoinReCheckTuple);
-}
-
-/*
- * ExecEndGpuJoin
- */
-static void
-ExecEndGpuJoin(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromExecEndTaskState(pts);
-}
-
-/*
- * ExecReScanGpuJoin
- */
-static void
-ExecReScanGpuJoin(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromExecResetTaskState(pts);
-}
-
-/*
- * ExecGpuJoinEstimateDSM
- */
-static Size
-ExecGpuJoinEstimateDSM(CustomScanState *node,
-					   ParallelContext *pcxt)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	return pgstromSharedStateEstimateDSM(pts);
-}
-
-/*
- * ExecGpuJoinInitDSM
- */
-static void
-ExecGpuJoinInitDSM(CustomScanState *node,
-				   ParallelContext *pcxt,
-				   void *dsm_addr)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromSharedStateInitDSM(pts, pcxt, dsm_addr);
-}
-
-/*
- * ExecGpuJoinInitWorker
- */
-static void
-ExecGpuJoinInitWorker(CustomScanState *node,
-					  shm_toc *toc,
-					  void *dsm_addr)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromSharedStateAttachDSM(pts, dsm_addr);
-}
-
-/*
- * ExecShutdownGpuJoin
- */
-static void
-ExecShutdownGpuJoin(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	pgstromSharedStateShutdownDSM(pts);
-}
-
-/*
- * ExplainGpuJoin
- */
-static void
-ExplainGpuJoin(CustomScanState *node,
-			   List *ancestors,
-			   ExplainState *es)
-{
-	pgstromTaskState *pts = (pgstromTaskState *)node;
-	List	   *dcontext;
-
-	dcontext = set_deparse_context_plan(es->deparse_cxt,
-										node->ss.ps.plan,
-										ancestors);
-	pgstromTaskStateExplain(pts, es, dcontext, "GPU");
+	return pgstromExecTaskState(pts);
 }
 
 /* ---------------------------------------------------------------- *
@@ -1824,9 +1709,9 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
  * CPU Fallback for JOIN
  */
 void
-execFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple)
+ExecFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple)
 {
-	elog(ERROR, "execFallbackCpuJoin to be implemented");
+	elog(ERROR, "ExecFallbackCpuJoin to be implemented");
 }
 
 /*
@@ -1863,27 +1748,28 @@ pgstrom_init_gpu_join(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* setup path methods */
+	memset(&gpujoin_path_methods, 0, sizeof(CustomPathMethods));
 	gpujoin_path_methods.CustomName				= "GpuJoin";
 	gpujoin_path_methods.PlanCustomPath			= PlanGpuJoinPath;
 
 	/* setup plan methods */
+	memset(&gpujoin_plan_methods, 0, sizeof(CustomScanMethods));
 	gpujoin_plan_methods.CustomName				= "GpuJoin";
 	gpujoin_plan_methods.CreateCustomScanState  = CreateGpuJoinState;
 	RegisterCustomScanMethods(&gpujoin_plan_methods);
 
 	/* setup exec methods */
+	memset(&gpujoin_exec_methods, 0, sizeof(CustomExecMethods));
 	gpujoin_exec_methods.CustomName				= "GpuJoin";
-	gpujoin_exec_methods.BeginCustomScan		= ExecInitGpuJoin;
+	gpujoin_exec_methods.BeginCustomScan		= pgstromExecInitTaskState;
 	gpujoin_exec_methods.ExecCustomScan			= ExecGpuJoin;
-	gpujoin_exec_methods.EndCustomScan			= ExecEndGpuJoin;
-	gpujoin_exec_methods.ReScanCustomScan		= ExecReScanGpuJoin;
-	gpujoin_exec_methods.MarkPosCustomScan		= NULL;
-	gpujoin_exec_methods.RestrPosCustomScan		= NULL;
-	gpujoin_exec_methods.EstimateDSMCustomScan	= ExecGpuJoinEstimateDSM;
-	gpujoin_exec_methods.InitializeDSMCustomScan = ExecGpuJoinInitDSM;
-	gpujoin_exec_methods.InitializeWorkerCustomScan = ExecGpuJoinInitWorker;
-	gpujoin_exec_methods.ShutdownCustomScan		= ExecShutdownGpuJoin;
-	gpujoin_exec_methods.ExplainCustomScan		= ExplainGpuJoin;
+	gpujoin_exec_methods.EndCustomScan			= pgstromExecEndTaskState;
+	gpujoin_exec_methods.ReScanCustomScan		= pgstromExecResetTaskState;
+	gpujoin_exec_methods.EstimateDSMCustomScan	= pgstromSharedStateEstimateDSM;
+	gpujoin_exec_methods.InitializeDSMCustomScan = pgstromSharedStateInitDSM;
+	gpujoin_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
+	gpujoin_exec_methods.ShutdownCustomScan		= pgstromSharedStateShutdownDSM;
+	gpujoin_exec_methods.ExplainCustomScan		= pgstromExplainTaskState;
 
 	/* hook registration */
 	set_join_pathlist_next = set_join_pathlist_hook;

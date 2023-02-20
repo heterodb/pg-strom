@@ -577,20 +577,25 @@ extern void		xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd);
 extern void		xpuClientPutResponse(XpuCommand *xcmd);
 extern const XpuCommand *pgstromBuildSessionInfo(pgstromTaskState *pts,
 												 uint32_t join_inner_handle);
-extern void		pgstromExecInitTaskState(pgstromTaskState *pts, int eflags);
-extern TupleTableSlot  *pgstromExecTaskState(pgstromTaskState *pts);
-extern void		pgstromExecEndTaskState(pgstromTaskState *pts);
-extern void		pgstromExecResetTaskState(pgstromTaskState *pts);
-extern Size		pgstromSharedStateEstimateDSM(pgstromTaskState *pts);
-extern void		pgstromSharedSteteCreate(pgstromTaskState *pts);
-extern void		pgstromSharedStateInitDSM(pgstromTaskState *pts,
-										  ParallelContext *pcxt, char *dsm_addr);
-extern void		pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr);
-extern void		pgstromSharedStateShutdownDSM(pgstromTaskState *pts);
-extern void		pgstromTaskStateExplain(pgstromTaskState *pts,
-										ExplainState *es,
-										List *dcontext,
-										const char *xpu_label);
+
+extern void		pgstromExecInitTaskState(CustomScanState *node,
+										  EState *estate,
+										 int eflags);
+extern TupleTableSlot *pgstromExecTaskState(pgstromTaskState *pts);
+extern void		pgstromExecEndTaskState(CustomScanState *node);
+extern void		pgstromExecResetTaskState(CustomScanState *node);
+extern Size		pgstromSharedStateEstimateDSM(CustomScanState *node,
+											  ParallelContext *pcxt);
+extern void		pgstromSharedStateInitDSM(CustomScanState *node,
+										  ParallelContext *pcxt,
+										  void *coordinate);
+extern void		pgstromSharedStateAttachDSM(CustomScanState *node,
+											shm_toc *toc,
+											void *coordinate);
+extern void		pgstromSharedStateShutdownDSM(CustomScanState *node);
+extern void		pgstromExplainTaskState(CustomScanState *node,
+										List *ancestors,
+										ExplainState *es);
 extern void		pgstrom_init_executor(void);
 
 /*
@@ -769,8 +774,15 @@ extern List	   *pgstrom_build_tlist_dev(RelOptInfo *rel,
 										List *misc_exprs,
 										List *input_rels_tlist);
 extern uint32_t	GpuJoinInnerPreload(pgstromTaskState *pts);
-extern void		execFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple);
+extern void		ExecFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple);
 extern void		pgstrom_init_gpu_join(void);
+
+/*
+ * gpu_groupby.c
+ */
+extern int		pgstrom_hll_register_bits;
+extern void		ExecFallbackCpuGroupBy(pgstromTaskState *pts, HeapTuple tuple);
+extern void		pgstrom_init_gpu_groupby(void);
 
 /*
  * arrow_fdw.c and arrow_read.c
