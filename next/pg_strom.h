@@ -244,6 +244,7 @@ typedef struct
 	/* Plan information */
 	const Bitmapset *outer_refs;	/* referenced columns */
 	List	   *used_params;		/* param list in use */
+	List	   *host_quals;			/* host qualifiers to scan the outer */
 	Index		scan_relid;			/* relid of the outer relation to scan */
 	List	   *scan_quals;			/* device qualifiers to scan the outer */
 	double		scan_tuples;		/* copy of baserel->tuples */
@@ -706,36 +707,12 @@ extern void		pgstrom_init_gpu_service(void);
  */
 extern void		sort_device_qualifiers(List *dev_quals_list,
 									   List *dev_costs_list);
-extern bool		consider_xpuscan_path_params(PlannerInfo *root,
-											 RelOptInfo  *baserel,
-											 uint32_t task_kind,
-											 List *dev_quals,
-											 List *host_quals,
-											 bool parallel_aware,
-											 int *p_parallel_nworkers,
-											 Cost *p_startup_cost,
-											 Cost *p_run_cost,
-											 pgstromPlanInfo *pp_info);
-
-extern bool		considerXpuScanPathParams(PlannerInfo *root,
-										  RelOptInfo  *baserel,
-										  uint32_t devkind,
-										  bool parallel_aware,
-										  List *dev_quals,
-										  List *host_quals,
-										  int  *p_parallel_nworkers,
-										  double *p_parallel_divisor,
-										  Oid  *p_brin_index_oid,
-										  List **p_brin_index_conds,
-										  List **p_brin_index_quals,
-										  Cost *p_startup_cost,
-										  Cost *p_run_cost,
-										  Cost *p_final_cost,
-										  const Bitmapset **p_gpu_cache_devs,
-										  const Bitmapset **p_gpu_direct_devs,
-										  const DpuStorageEntry **p_ds_entry);
-
-
+extern CustomPath *buildXpuScanPath(PlannerInfo *root,
+									RelOptInfo *baserel,
+									bool parallel_path,
+									bool allow_host_quals,
+									bool allow_no_device_quals,
+									uint32_t task_kind);
 extern CustomScan *PlanXpuScanPathCommon(PlannerInfo *root,
 										 RelOptInfo  *baserel,
 										 CustomPath  *best_path,
@@ -846,6 +823,7 @@ extern bool		pgstrom_init_dpu_device(void);
 /*
  * dpu_scan.c
  */
+extern CustomPathMethods	dpuscan_path_methods;
 extern void		pgstrom_init_dpu_scan(void);
 
 /*
@@ -891,13 +869,14 @@ extern bool		pgstrom_enabled;
 extern bool		pgstrom_cpu_fallback_enabled;
 extern bool		pgstrom_regression_test_mode;
 extern int		pgstrom_max_async_tasks;
-extern const CustomPath *custom_path_find_cheapest(PlannerInfo *root,
-												   RelOptInfo *rel,
-												   bool parallel_aware,
-												   const char *custom_name);
+extern CustomPath *custom_path_find_cheapest(PlannerInfo *root,
+											 RelOptInfo *rel,
+											 bool parallel_aware,
+											 uint32_t devkind);
 extern bool		custom_path_remember(PlannerInfo *root,
 									 RelOptInfo *rel,
 									 bool parallel_aware,
+									 uint32_t devkind,
 									 const CustomPath *cpath);
 extern void		_PG_init(void);
 

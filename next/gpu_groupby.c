@@ -911,6 +911,22 @@ gpugroupby_add_custompath(PlannerInfo *root,
 						  void *extra)
 {
 
+	if (create_upper_paths_next)
+		create_upper_paths_next(root,
+								stage,
+								input_rel,
+								output_rel,
+								extra);
+	if (stage != UPPERREL_GROUP_AGG)
+		return;
+	if (!pgstrom_enabled || !pgstrom_enable_gpugroupby)
+		return;
+	
+
+
+
+	
+
 }
 
 /*
@@ -933,7 +949,21 @@ PlanGpuGroupByPath(PlannerInfo *root,
 static Node *
 CreateGpuGroupByScanState(CustomScan *cscan)
 {
-	return NULL;
+	pgstromTaskState *pts;
+	int		num_rels = list_length(cscan->custom_plans);
+
+	Assert(cscan->methods == &gpugroupby_plan_methods);
+	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
+	NodeSetTag(pts, T_CustomScanState);
+	pts->css.flags = cscan->flags;
+	pts->css.methods = &gpugroupby_exec_methods;
+	pts->task_kind = TASK_KIND__GPUGROUPBY;
+	pts->pp_info = deform_pgstrom_plan_info(cscan);
+	Assert(pts->pp_info->task_kind == pts->task_kind &&
+		   pts->pp_info->num_rels == num_rels);
+	pts->num_rels = num_rels;
+
+	return (Node *)pts;
 }
 
 /*

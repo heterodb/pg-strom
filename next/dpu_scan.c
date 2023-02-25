@@ -13,7 +13,7 @@
 
 /* static variables */
 static set_rel_pathlist_hook_type set_rel_pathlist_next = NULL;
-static CustomPathMethods	dpuscan_path_methods;
+	   CustomPathMethods	dpuscan_path_methods;
 static CustomScanMethods	dpuscan_plan_methods;
 static CustomExecMethods	dpuscan_exec_methods;
 static bool					enable_dpuscan;		/* GUC */
@@ -27,12 +27,6 @@ DpuScanAddScanPath(PlannerInfo *root,
 				   Index rtindex,
 				   RangeTblEntry *rte)
 {
-	List	   *input_rels_tlist;
-	List	   *dev_quals = NIL;
-	List	   *host_quals = NIL;
-	ParamPathInfo *param_info;
-	ListCell   *lc;
-
 	/* call the secondary hook */
 	if (set_rel_pathlist_next)
 		set_rel_pathlist_next(root, baserel, rtindex, rte);
@@ -45,87 +39,22 @@ DpuScanAddScanPath(PlannerInfo *root,
 	/* It is the role of built-in Append node */
 	if (rte->inh)
 		return;
-
-	/*
-	 * check whether the qualifier can run on DPU device
-	 */
-	input_rels_tlist = list_make1(makeInteger(baserel->relid));
-	foreach (lc, baserel->baserestrictinfo)
-	{
-		RestrictInfo *rinfo = lfirst(lc);
-
-		if (pgstrom_dpu_expression(rinfo->clause,
-								   input_rels_tlist,
-								   NULL))
-			dev_quals = lappend(dev_quals, rinfo);
-		else
-			host_quals = lappend(host_quals, rinfo);
-	}
-	/*
-	 * check parametalized qualifiers
-	 */
-	param_info = get_baserel_parampathinfo(root, baserel,
-										   baserel->lateral_relids);
-	if (param_info)
-	{
-		foreach (lc, param_info->ppi_clauses)
-		{
-			RestrictInfo *rinfo = lfirst(lc);
-
-			if (pgstrom_gpu_expression(rinfo->clause,
-									   input_rels_tlist,
-									   NULL))
-				dev_quals = lappend(dev_quals, rinfo);
-			else
-				host_quals = lappend(host_quals, rinfo);
-		}
-	}
-
-	 /* Creation of DpuScan path */
+	/* Creation of DpuScan path */
 	for (int try_parallel=0; try_parallel < 2; try_parallel++)
 	{
-		pgstromPlanInfo pp_data;
-		pgstromPlanInfo *pp_info;
-		CustomPath	   *cpath;
-		ParamPathInfo  *param_info = NULL;
-		int				parallel_nworkers = 0;
-		Cost			startup_cost = 0.0;
-		Cost			run_cost = 0.0;
-		Cost			final_cost = 0.0;
+		CustomPath *cpath;
 
-		memset(&pp_data, 0, sizeof(pgstromPlanInfo));
-		if (!consider_xpuscan_path_params(root,
+		cpath = buildXpuScanPath(root,
+								 baserel,
+								 (try_parallel > 0),
+								 true,		/* allow host quals */
+								 false,		/* disallow no device quals */
+								 TASK_KIND__DPUSCAN);
+		if (cpath && custom_path_remember(root,
 										  baserel,
+										  (try_parallel > 0),
 										  TASK_KIND__DPUSCAN,
-										  dev_quals,
-										  host_quals,
-										  try_parallel > 0,	/* parallel_aware */
-										  &parallel_nworkers,
-										  &startup_cost,
-										  &run_cost,
-										  &pp_data))
-			return;
-
-		/* setup DpuScanInfo (Path phase) */
-		pp_info = pmemdup(&pp_data, sizeof(pgstromPlanInfo));
-		cpath = makeNode(CustomPath);
-		cpath->path.pathtype = T_CustomScan;
-		cpath->path.parent = baserel;
-		cpath->path.pathtarget = baserel->reltarget;
-		cpath->path.param_info = param_info;
-		cpath->path.parallel_aware = (try_parallel > 0);
-		cpath->path.parallel_safe = baserel->consider_parallel;
-		cpath->path.parallel_workers = parallel_nworkers;
-		cpath->path.rows = (param_info ? param_info->ppi_rows : baserel->rows);
-		cpath->path.startup_cost = startup_cost;
-		cpath->path.total_cost = startup_cost + run_cost + final_cost;
-		cpath->path.pathkeys = NIL; /* unsorted results */
-		cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
-		cpath->custom_paths = NIL;
-		cpath->custom_private = list_make1(pp_info);
-		cpath->methods = &dpuscan_path_methods;
-
-		if (custom_path_remember(root, baserel, (try_parallel > 0), cpath))
+										  cpath))
 		{
 			if (try_parallel == 0)
 				add_path(baserel, &cpath->path);

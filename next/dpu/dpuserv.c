@@ -650,6 +650,7 @@ __handleDpuTaskExecProjection(dpuClient *dclient,
 
 	assert(kexp_projection->opcode  == FuncOpCode__Projection &&
 		   kexp_projection->exptype == TypeOpCode__int4);
+	kcxt_reset(kcxt);
 	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_projection, &__tupsz))
 		return false;
 	if (!__tupsz.isnull && __tupsz.value > 0)
@@ -747,44 +748,42 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth-1);
 	bool				matched = false;
 
-	for (uint32_t rowid=0; rowid <= kds_heap->nitems; rowid++)
+	for (uint32_t rowid=0; rowid < kds_heap->nitems; rowid++)
 	{
 		kern_tupitem   *tupitem;
 		uint32_t		offset;
 		xpu_int4_t		status;
 
-		if (rowid < kds_heap->nitems)
+		offset = KDS_GET_ROWINDEX(kds_heap)[rowid];
+		tupitem = (kern_tupitem *)((char *)kds_heap +
+								   kds_heap->length -
+								   __kds_unpack(offset));
+		kcxt_reset(kcxt);
+		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
+							  kds_heap, &tupitem->htup);
+		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
+			return false;
+		assert(!status.isnull);
+		if (status.value > 0)
 		{
-			offset = KDS_GET_ROWINDEX(kds_heap)[rowid];
-			tupitem = (kern_tupitem *)((char *)kds_heap +
-									   kds_heap->length -
-									   __kds_unpack(offset));
-			ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
-								  kds_heap, &tupitem->htup);
-			if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
-				return false;
-			assert(!status.isnull);
-			if (status.value > 0)
+			if (depth >= kmrels->num_rels)
 			{
-				if (depth >= kmrels->num_rels)
-				{
-					if (!__handleDpuTaskExecProjection(dclient, dtes, kcxt))
-						return false;
-				}
-				else if (kmrels->chunks[depth].is_nestloop)
-				{
-					if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, depth+1))
-						return false;
-				}
-				else
-				{
-					if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, depth+1))
-						return false;
-				}
+				if (!__handleDpuTaskExecProjection(dclient, dtes, kcxt))
+					return false;
 			}
-			if (status.value != 0)
-				matched = true;
+			else if (kmrels->chunks[depth].is_nestloop)
+			{
+				if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, depth+1))
+					return false;
+			}
+			else
+			{
+				if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, depth+1))
+					return false;
+			}
 		}
+		if (status.value != 0)
+			matched = true;
 	}
 	/* LEFT OUTER if needed */
 	if (kmrels->chunks[depth-1].left_outer && !matched)
@@ -838,6 +837,7 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 			continue;
 		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
 							  kds_hash, &khitem->t.htup);
+		kcxt_reset(kcxt);
 		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
 			return false;
 		assert(!status.isnull);
@@ -920,9 +920,9 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 
 			if (!ItemIdIsNormal(lpp))
 				continue;
-			kcxt_reset(kcxt);
 			htup = (HeapTupleHeaderData *) PageGetItem(page, lpp);
 			dtes->nitems_raw++;
+			kcxt_reset(kcxt);
 			if (ExecLoadVarsOuterRow(kcxt,
 									 kexp_load_vars,
 									 kexp_scan_quals,
@@ -978,7 +978,7 @@ __handleDpuScanExecArrow(dpuClient *dclient,
 	assert(kds_src->format == KDS_FORMAT_ARROW &&
 		   kexp_load_vars->opcode == FuncOpCode__LoadVars &&
 		   kexp_scan_quals->exptype == TypeOpCode__bool);
-	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, NULL, dtes->kds_dst_head);
+	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, kmrels, dtes->kds_dst_head);
 	kcxt->kvars_addr = alloca(sizeof(void *) * kcxt->kvars_nslots);
 	kcxt->kvars_len  = alloca(sizeof(int)    * kcxt->kvars_nslots);
 	for (kds_index = 0; kds_index < kds_src->nitems; kds_index++)

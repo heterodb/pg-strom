@@ -650,7 +650,7 @@ CREATE AGGREGATE pgstrom.regr_syy(float8[])
   finalfunc = pg_catalog.float8_regr_syy,
   parallel = safe
 );
-*/
+
 -- ==================================================================
 --
 -- float2 - half-precision floating point data support
