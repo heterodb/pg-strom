@@ -919,15 +919,9 @@ activate_cuda_workers(GpuContext *gcontext)
 
 	for (i=0; i < gcontext->num_workers; i++)
 	{
-		pthread_attr_t pattr;
 		pthread_t	thread;
 
-		/* tentatively expand the stack size to avoid stack corruption */
-		if ((errno = pthread_attr_init(&pattr)) != 0)
-			elog(ERROR, "failed on pthread_create: %m");
-		if ((errno = pthread_attr_setstacksize(&pattr, (40<<20))) != 0)
-			elog(ERROR, "failed on pthread_attr_setstacksize: %m");
-		errno = pthread_create(&thread, &pattr,
+		errno = pthread_create(&thread, NULL,
 							   GpuContextWorkerMain,
 							   gcontext);
 		if (errno != 0)
