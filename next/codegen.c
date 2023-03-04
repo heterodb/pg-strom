@@ -178,6 +178,8 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	dtype->type_byval = tcache->typbyval;
 	dtype->type_name = "composite";
 	dtype->type_hashfunc = NULL; //devtype_composite_hash;
+	dtype->type_eqfunc = get_opcode(tcache->eq_opr);
+	dtype->type_cmpfunc = tcache->cmp_proc;
 	dtype->comp_nfields = tupdesc->natts;
 	memcpy(dtype->comp_subtypes, subtypes,
 		   sizeof(devtype_info *) * tupdesc->natts);
@@ -808,6 +810,37 @@ devfunc_lookup_by_opcode(FuncOpCode func_code)
 
 		if (dfunc->func_code == func_code)
 			return dfunc;
+	}
+	return NULL;
+}
+
+/*
+ * lookup special purpose devfuncs
+ */
+devfunc_info *
+devtype_lookup_equal_func(devtype_info *dtype, Oid coll_id)
+{
+	if (OidIsValid(dtype->type_eqfunc))
+	{
+		Oid		argtypes[2];
+
+		argtypes[0] = dtype->type_oid;
+		argtypes[1] = dtype->type_oid;
+		return __pgstrom_devfunc_lookup(dtype->type_eqfunc, 2, argtypes, coll_id);
+	}
+	return NULL;
+}
+
+devfunc_info *
+devtype_lookup_compare_func(devtype_info *dtype, Oid coll_id)
+{
+	if (OidIsValid(dtype->type_cmpfunc))
+	{
+		Oid		argtypes[2];
+
+		argtypes[0] = dtype->type_oid;
+		argtypes[1] = dtype->type_oid;
+		return __pgstrom_devfunc_lookup(dtype->type_cmpfunc, 2, argtypes, coll_id);
 	}
 	return NULL;
 }

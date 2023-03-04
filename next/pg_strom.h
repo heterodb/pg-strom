@@ -34,6 +34,7 @@
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
+#include "catalog/pg_aggregate.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_amop.h"
 #include "catalog/pg_cast.h"
@@ -72,6 +73,7 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/plancat.h"
 #include "optimizer/planner.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
@@ -458,6 +460,10 @@ extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 											List *func_args,
 											Oid func_collid);
+
+extern devfunc_info *devtype_lookup_equal_func(devtype_info *dtype, Oid coll_id);
+extern devfunc_info *devtype_lookup_compare_func(devtype_info *dtype, Oid coll_id);
+
 extern void		codegen_context_init(codegen_context *context,
 									 uint32_t task_kind);
 extern bytea   *codegen_build_qualifiers(codegen_context *context,
@@ -730,6 +736,11 @@ extern void		pgstrom_init_gpu_scan(void);
 extern void		form_pgstrom_plan_info(CustomScan *cscan,
 									   pgstromPlanInfo *pp_info);
 extern pgstromPlanInfo *deform_pgstrom_plan_info(CustomScan *cscan);
+extern void		extract_input_path_params(const Path *input_path,
+										  const Path *inner_path,	/* optional */
+										  pgstromPlanInfo **p_pp_info,
+										  List **p_input_paths_tlist,
+										  List **p_inner_paths_list);
 extern void		xpujoin_add_custompath(PlannerInfo *root,
 									   RelOptInfo *joinrel,
 									   RelOptInfo *outerrel,
@@ -758,6 +769,12 @@ extern void		pgstrom_init_gpu_join(void);
  * gpu_groupby.c
  */
 extern int		pgstrom_hll_register_bits;
+extern void		xpugroupby_add_custompath(PlannerInfo *root,
+										  RelOptInfo *input_rel,
+										  RelOptInfo *group_rel,
+										  void *extra,
+										  uint32_t task_kind,
+										  const CustomPathMethods *methods);
 extern void		ExecFallbackCpuGroupBy(pgstromTaskState *pts, HeapTuple tuple);
 extern void		pgstrom_init_gpu_groupby(void);
 

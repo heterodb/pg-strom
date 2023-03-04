@@ -287,6 +287,44 @@ try_find_xpu_gist_index(PlannerInfo *root,
 }
 
 /*
+ * extract_input_path_params
+ *
+ * centralized point to extract the information from the input path 
+ */
+void
+extract_input_path_params(const Path *input_path,
+						  const Path *inner_path,   /* optional */
+						  pgstromPlanInfo **p_pp_info,
+						  List **p_input_rels_tlist,
+						  List **p_inner_paths_list)
+{
+	const CustomPath *input_cpath = (const CustomPath *)input_path;
+	pgstromPlanInfo *pp_info;
+	List	   *input_rels_tlist;
+	List	   *inner_paths_list;
+	ListCell   *lc;
+
+	Assert(IsA(input_cpath, CustomPath));
+	pp_info = linitial(input_cpath->custom_private);
+	input_rels_tlist = list_make1(makeInteger(pp_info->scan_relid));
+	inner_paths_list = list_copy(input_cpath->custom_paths);
+	foreach (lc, inner_paths_list)
+	{
+		Path   *i_path = lfirst(lc);
+		input_rels_tlist = lappend(input_rels_tlist, i_path->pathtarget);
+	}
+	if (inner_path)
+		input_rels_tlist = lappend(input_rels_tlist, inner_path->pathtarget);
+
+	if (p_pp_info)
+		*p_pp_info = pp_info;
+	if (p_input_rels_tlist)
+		*p_input_rels_tlist = input_rels_tlist;
+	if (p_inner_paths_list)
+		*p_inner_paths_list = inner_paths_list;
+}
+
+/*
  * try_add_simple_xpujoin_path
  */
 static bool
@@ -300,7 +338,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 							uint32_t task_kind,
 							const CustomPathMethods *xpujoin_path_methods)
 {
-	CustomPath	   *outer_path;
+	Path		   *outer_path;
 	RelOptInfo	   *inner_rel = inner_path->parent;
 	List		   *inner_paths_list = NIL;
 	List		   *restrict_clauses = extra->restrictlist;
@@ -357,38 +395,35 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	 */
 	if (IS_SIMPLE_REL(outer_rel))
 	{
-		outer_path = buildXpuScanPath(root,
-									  outer_rel,
-									  try_parallel_path,
-									  false,
-									  true,
-									  task_kind);
+		outer_path = (Path *) buildXpuScanPath(root,
+											   outer_rel,
+											   try_parallel_path,
+											   false,
+											   true,
+											   task_kind);
 		if (!outer_path)
 			return false;
 	}
 	else
 	{
-		outer_path = custom_path_find_cheapest(root,
-											   outer_rel,
-											   try_parallel_path,
-											   task_kind);
+		outer_path = (Path *) custom_path_find_cheapest(root,
+														outer_rel,
+														try_parallel_path,
+														task_kind);
 		if (!outer_path)
 			return false;
 	}
-	if (bms_overlap(PATH_REQ_OUTER(&outer_path->path), inner_rel->relids))
+	if (bms_overlap(PATH_REQ_OUTER(outer_path), inner_rel->relids))
 		return false;
-	pp_prev = linitial(outer_path->custom_private);
-	startup_cost = outer_path->path.startup_cost;
-	run_cost = (outer_path->path.total_cost -
-				outer_path->path.startup_cost - pp_prev->final_cost);
-	inner_paths_list = list_copy(outer_path->custom_paths);
-	input_rels_tlist = list_make1(makeInteger(pp_prev->scan_relid));
-	foreach (lc, inner_paths_list)
-	{
-		Path   *i_path = lfirst(lc);
-		input_rels_tlist = lappend(input_rels_tlist, i_path->pathtarget);
-	}
-	input_rels_tlist = lappend(input_rels_tlist, inner_path->pathtarget);
+	/* extract the parameters of outer_path */
+	extract_input_path_params(outer_path,
+							  inner_path,
+							  &pp_prev,
+							  &input_rels_tlist,
+							  &inner_paths_list);
+	startup_cost = outer_path->startup_cost;
+	run_cost = (outer_path->total_cost -
+				outer_path->startup_cost - pp_prev->final_cost);
 
 	/*
 	 * Check to see if proposed path is still parameterized, and reject
@@ -397,7 +432,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	 * only cross-join or non-symmetric join are supported, therefore,
 	 * calc_non_nestloop_required_outer() is sufficient.
 	 */
-	required_outer = calc_non_nestloop_required_outer(&outer_path->path,
+	required_outer = calc_non_nestloop_required_outer(outer_path,
 													  inner_path);
 	if (required_outer && !bms_overlap(required_outer,
 									   extra->param_source_rels))
@@ -411,7 +446,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	 */
 	param_info = get_joinrel_parampathinfo(root,
 										   joinrel,
-										   &outer_path->path,
+										   outer_path,
 										   inner_path,
 										   extra->sjinfo,
 										   required_outer,
@@ -550,9 +585,9 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 		/* cost to comput hash value by GPU */
 		comp_cost += (cpu_operator_cost * xpu_ratio *
 					  num_hashkeys *
-					  outer_path->path.rows);
+					  outer_path->rows);
 		/* cost to evaluate join qualifiers */
-		comp_cost += join_quals_cost.per_tuple * xpu_ratio * outer_path->path.rows;
+		comp_cost += join_quals_cost.per_tuple * xpu_ratio * outer_path->rows;
 	}
 	else if (OidIsValid(pp_inner->gist_index_oid))
 	{
@@ -569,10 +604,10 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 		startup_cost += seq_page_cost * (double)gist_index->pages;
 		/* cost to evaluate GiST index by GPU */
 		cost_qual_eval_node(&gist_clause_cost, gist_clause, root);
-		comp_cost += gist_clause_cost.per_tuple * xpu_ratio * outer_path->path.rows;
+		comp_cost += gist_clause_cost.per_tuple * xpu_ratio * outer_path->rows;
 		/* cost to evaluate join qualifiers by GPU */
 		comp_cost += (join_quals_cost.per_tuple * xpu_ratio *
-					  outer_path->path.rows *
+					  outer_path->rows *
 					  gist_selectivity *
 					  inner_path->rows);
 	}
@@ -590,7 +625,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 		/* cost to evaluate join qualifiers by GPU */
 		run_cost += (join_quals_cost.per_tuple * xpu_ratio *
 					 inner_path->rows *
-					 outer_path->path.rows);
+					 outer_path->rows);
 	}
 	/* discount if CPU parallel is enabled */
 	run_cost += (comp_cost / pp_info->parallel_divisor);
@@ -612,7 +647,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	cpath->path.param_info = param_info;
 	cpath->path.parallel_aware = try_parallel_path;
 	cpath->path.parallel_safe = joinrel->consider_parallel;
-	cpath->path.parallel_workers = outer_path->path.parallel_workers;
+	cpath->path.parallel_workers = outer_path->parallel_workers;
 	cpath->path.pathkeys = NIL;
 	cpath->path.rows = joinrel->rows;
 	cpath->path.startup_cost = startup_cost;
@@ -622,7 +657,6 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	cpath->custom_paths = lappend(inner_paths_list, inner_path);
 	cpath->custom_private = list_make1(pp_info);
 
-	elog(INFO, "join path %p", cpath);
 	if (custom_path_remember(root,
 							 joinrel,
 							 try_parallel_path,
