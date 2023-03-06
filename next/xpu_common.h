@@ -1430,6 +1430,106 @@ typedef struct
 	const xpu_datum_operators *slot_ops;
 } kern_projection_desc;
 
+#define KAGG_ACTION__VREF			101		/* simple var copy */
+#define KAGG_ACTION__NROWS_ANY		201		/* <int8> - increment 1 always */
+#define KAGG_ACTION__NROWS_COND		202		/* <int8> - increment 1 if not NULL */
+#define KAGG_ACTION__PMIN_INT32		301		/* <int4>,<int4> - min value */
+#define KAGG_ACTION__PMIN_INT64		302		/* <int4>,<int8> - min value */
+#define KAGG_ACTION__PMIN_FP32		303		/* <int4>,<float4> - min value */
+#define KAGG_ACTION__PMIN_FP64		304		/* <int4>,<float8> - min value */
+#define KAGG_ACTION__PMAX_INT32		401		/* <int4>,<int4> - max value */
+#define KAGG_ACTION__PMAX_INT64		402		/* <int4>,<int8> - max value */
+#define KAGG_ACTION__PMAX_FP32		403		/* <int4>,<float4> - max value */
+#define KAGG_ACTION__PMAX_FP64		404		/* <int4>,<float8> - max value */
+#define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
+#define KAGG_ACTION__PSUM_FP32		502		/* <float4> - sum of values */
+#define KAGG_ACTION__PSUM_FP64		503		/* <float8> - sum of values */
+#define KAGG_ACTION__PAVG_INT		601		/* <int4>,<int8> - NROWS+PSUM */
+#define KAGG_ACTION__PAVG_FP		602		/* <int4>,<float8> - NROWS+PSUM */
+#define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
+#define KAGG_ACTION__COVAR			801		/* <int4>,<float8>x5 - covariance */
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	int32_t		value;
+} kagg_state__pminmax_int32_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	int64_t		value;
+} kagg_state__pminmax_int64_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	float4_t	value;
+} kagg_state__pminmax_fp32_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	float8_t	value;
+} kagg_state__pminmax_fp64_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	int64_t		sum;
+} kagg_state__pavg_int_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	float8_t	sum;
+} kagg_state__pavg_fp_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	float8_t	sum_x;
+	float8_t	sum_x2;
+} kagg_state__stddev_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	float8_t	sum_x;
+	float8_t	sum_xx;
+	float8_t	sum_y;
+	float8_t	sum_yy;
+	float8_t	sum_xy;
+} kagg_state__covar_packed;
+
+
+
+
+
+
+
+
+struct kern_aggregate_desc
+{
+	/* function below shall be resolved by xPU service */
+	int			  (*action_fn)(kern_context *kcxt,
+							   const struct kern_aggregate_desc *kagg,
+							   char *pos);
+	uint16_t		action;			/* any of KAGG_ACTION__* */
+	int16_t			length;			/* optional length for HLL, or -1 */
+	int16_t			arg0_slot_id;	/* -1, if not used */
+	int16_t			arg1_slot_id;	/* -1, if not used */
+};
+typedef struct kern_aggregate_desc	kern_aggregate_desc;
+
 #define KERN_EXPRESSION_MAGIC	(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
 #define KEXP_FLAG__IS_PUSHED_DOWN		0x0001U
@@ -1465,6 +1565,10 @@ struct kern_expression
 			int			nloads;
 			kern_vars_defitem kvars[1];
 		} load;		/* VarLoads */
+		struct {
+			int			nattrs;
+			kern_aggregate_desc desc[1];
+		} pagg;		/* PreAggs */
 		struct {
 			int			nexprs;
 			int			nattrs;

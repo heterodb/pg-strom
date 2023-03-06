@@ -78,6 +78,7 @@
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
+#include "parser/parse_func.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/postmaster.h"
 #include "storage/bufmgr.h"
@@ -269,6 +270,10 @@ typedef struct
 	List	   *kvars_resno;
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
+	/* group-by parameters */
+	List	   *groupby_keys_resno;		/* grouping keys on the prep_tlist */
+	List	   *groupby_agg_action;		/* group-by/aggregate action */
+	List	   *groupby_prep_tlist;		/* expressions prior to group-by */
 	/* inner relations */
 	int			num_rels;
 	pgstromPlanInnerInfo inners[FLEXIBLE_ARRAY_MEMBER];

@@ -34,13 +34,9 @@ typedef struct
 	 * c: pg_catalog ... the system default
 	 * s: pgstrom    ... PG-Strom's special ones
 	 */
-	const char *finalfn_name;
-	Oid			finalfn_argtype;
-	const char *partfn_name;
-	int			partfn_nargs;
-	Oid			partfn_argtypes[8];
-	int			partfn_argexprs[8];
-	uint32_t	extra_flags;
+	const char *finalfn_signature;
+	const char *partfn_signature;
+	int			partfn_action;	/* any of KAGG_ACTION__* */
 	bool		numeric_aware;	/* ignored, if !enable_numeric_aggfuncs */
 } aggfunc_catalog_t;
 
@@ -58,691 +54,500 @@ typedef struct
 
 static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	/* COUNT(*) = SUM(NROWS()) */
-	{ "count()",
-	  "s:sum", INT8OID,
-	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_NROWS},
-	  0, false,
+	{"count()",
+	 "s:sum(int8)",
+	 "s:nrows()",
+	 KAGG_ACTION__NROWS_ANY, false
 	},
 	/* COUNT(X) = SUM(NROWS(X)) */
-	{ "count(any)",
-	  "s:sum", INT8OID,
-	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_NROWS},
-	  0, false,
-	},
-	/* AVG(X) = EX_AVG(NROWS(X), PSUM(X)) */
-	{ "avg(int1)",
-	  "s:favg", INT8ARRAYOID,
-	  "s:pavg", 2, {INT8OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "avg(int2)",
-	  "s:favg", INT8ARRAYOID,
-	  "s:pavg", 2, {INT8OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "avg(int4)",
-	  "s:favg", INT8ARRAYOID,
-	  "s:pavg", 2, {INT8OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "avg(int8)",
-	  "s:favg", INT8ARRAYOID,
-	  "s:pavg", 2, {INT8OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "avg(float2)",
-	  "s:favg", FLOAT8ARRAYOID,
-	  "s:pavg", 2, {INT8OID, FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "avg(float4)",
-	  "s:favg", FLOAT8ARRAYOID,
-	  "s:pavg", 2, {INT8OID, FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "avg(float8)",
-	  "s:favg", FLOAT8ARRAYOID,
-	  "s:pavg", 2, {INT8OID, FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "avg(numeric)",
-	  "s:favg", FLOAT8ARRAYOID,
-	  "s:pavg", 2, {INT8OID, FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  0, true,
-	},
-	/*
-	 * SUM(X) = SUM(PSUM(X))
-	 */
-	{ "sum(int1)",
-	  "s:sum", INT8OID,
-	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "sum(int2)",
-	  "s:sum", INT8OID,
-	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "sum(int4)",
-	  "s:sum", INT8OID,
-	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "sum(int8)",
-	  "c:sum", INT8OID,
-	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "sum(float2)",
-	  "c:sum", FLOAT4OID,
-	  "varref", 1, {FLOAT4OID},
-	  {ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "sum(float4)",
-	  "c:sum", FLOAT4OID,
-	  "varref", 1, {FLOAT4OID},
-	  {ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "sum(float8)",
-	  "c:sum", FLOAT8OID,
-	  "varref", 1, {FLOAT8OID},
-	  {ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	{ "sum(numeric)",
-	  "s:fsum_numeric", FLOAT8OID,
-	  "varref", 1, {FLOAT8OID},
-	  {ALTFUNC_EXPR_PSUM},
-	  0, true,
- 	},
-	{ "sum(money)",
-	  "c:sum", CASHOID,
-	  "varref", 1, {CASHOID},
-	  {ALTFUNC_EXPR_PSUM},
-	  0, false,
-	},
-	/*
-	 * MAX(X) = MAX(PMAX(X))
-	 */
-	{ "max(int1)",
-	  "s:fmax", INT4OID,
-	  "varref", 1, {INT4OID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
-	},
-	{ "max(int2)",
-	  "s:fmax", INT4OID,
-	  "varref", 1, {INT4OID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
-	},
-	{ "max(int4)",
-	  "s:fmax", INT4OID,
-	  "varref", 1, {INT4OID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
-	},
-	{ "max(int8)",
-	  "s:fmax", INT8OID,
-	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
-	},
-	{ "max(float2)",
-	  "c:max", FLOAT4OID,
-	  "varref", 1, {FLOAT4OID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
-	},
-	{ "max(float4)",
-	  "c:max", FLOAT4OID,
-	  "varref", 1, {FLOAT4OID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
-	},
-	{ "max(float8)",
-	  "c:max", FLOAT8OID,
-	  "varref", 1, {FLOAT8OID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
-	},
-	{ "max(numeric)",
-	  "s:fmax", FLOAT8OID,
-	  "varref", 1, {FLOAT8OID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
-	},
-	{ "max(money)",
-	  "c:max", CASHOID,
-	  "varref", 1, {CASHOID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
-	},
-	{ "max(date)",
-	  "c:max", DATEOID,
-	  "varref", 1, {DATEOID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
-	},
-	{ "max(time)",
-	  "c:max", TIMEOID,
-	  "varref", 1, {TIMEOID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
-	},
-	{ "max(timestamp)",
-	  "c:max", TIMESTAMPOID,
-	  "varref", 1, {TIMESTAMPOID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
-	},
-	{ "max(timestamptz)",
-	  "c:max", TIMESTAMPTZOID,
-	  "varref", 1, {TIMESTAMPTZOID},
-	  {ALTFUNC_EXPR_PMAX},
-	  0, false,
+	{"count(any)",
+	 "s:sum(int8)",
+	 "s:nrows(any)",
+	 KAGG_ACTION__NROWS_COND, false
 	},
 	/*
 	 * MIN(X) = MIN(PMIN(X))
 	 */
-	{ "min(int1)",
-	  "s:fmin", INT4OID,
-	  "varref", 1, {INT4OID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(int1)",
+	 "s:min_i1(bytea)",
+	 "s:pmin(int1)",
+	 KAGG_ACTION__PMIN_INT32, false
 	},
-	{ "min(int2)",
-	  "s:fmin", INT4OID,
-	  "varref", 1, {INT4OID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(int2)",
+	 "s:min_i2(bytea)",
+	 "s:pmin(int2)",
+	 KAGG_ACTION__PMIN_INT32, false
 	},
-	{ "min(int4)",
-	  "s:fmin", INT4OID,
-	  "varref", 1, {INT4OID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(int4)",
+	 "s:min_i4(bytea)",
+	 "s:pmin(int4)",
+	 KAGG_ACTION__PMIN_INT32, false
 	},
-	{ "min(int8)",
-	  "s:fmin", INT8OID,
-	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(int8)",
+	 "s:min_i8(bytea)",
+	 "s:pmin(int8)",
+	 KAGG_ACTION__PMIN_INT64, false
 	},
-	{ "min(float2)",
-	  "c:min", FLOAT4OID,
-	  "varref", 1, {FLOAT4OID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(float2)",
+     "s:min_f2(bytea)",
+	 "s:pmin(float4)",
+	 KAGG_ACTION__PMIN_FP32, false
 	},
-	{ "min(float4)",
-	  "c:min", FLOAT4OID,
-	  "varref", 1, {FLOAT4OID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(float4)",
+     "s:min_f4(bytea)",
+	 "s:pmin(float4)",
+	 KAGG_ACTION__PMIN_FP32, false
 	},
-	{ "min(float8)",
-	  "c:min", FLOAT8OID,
-	  "varref", 1, {FLOAT8OID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(float8)",
+     "s:min_f8(bytea)",
+	 "s:pmin(float8)",
+	 KAGG_ACTION__PMIN_FP64, false
 	},
-	{ "min(numeric)",
-	  "s:fmin", FLOAT8OID,
-	  "varref", 1, {FLOAT8OID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(numeric)",
+	 "s:min_num(bytea)",
+	 "s:pmin(float8)",
+	 KAGG_ACTION__PMIN_FP64, true
 	},
-	{ "min(money)",
-	  "c:min", CASHOID,
-	  "varref", 1, {CASHOID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(money)",
+	 "s:min_cash(bytea)",
+	 "s:pmin(money)",
+	 KAGG_ACTION__PMIN_INT64, false
 	},
-	{ "min(date)",
-	  "c:min", DATEOID,
-	  "varref", 1, {DATEOID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(date)",
+	 "s:min_date(bytea)",
+	 "s:pmin(date)",
+	 KAGG_ACTION__PMIN_INT32, false
 	},
-	{ "min(time)",
-	  "c:min", TIMEOID,
-	  "varref", 1, {TIMEOID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(time)",
+	 "s:min_time(bytea)",
+	 "s:pmin(time)",
+	 KAGG_ACTION__PMIN_INT64, false
 	},
-	{ "min(timestamp)",
-	  "c:min", TIMESTAMPOID,
-	  "varref", 1, {TIMESTAMPOID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(timestamp)",
+	 "s:min_ts(bytea)",
+	 "s:pmin(timestamp)",
+	 KAGG_ACTION__PMIN_INT64, false
 	},
-	{ "min(timestamptz)",
-	  "c:min", TIMESTAMPTZOID,
-	  "varref", 1, {TIMESTAMPTZOID},
-	  {ALTFUNC_EXPR_PMIN},
-	  0, false,
+	{"min(timestamptz)",
+	 "s:min_tstz(bytea)",
+	 "s:pmin(timestamptz)",
+	 KAGG_ACTION__PMIN_INT64, false
+	},
+	/*
+	 * MAX(X) = MAX(PMAX(X))
+	 */
+	{"max(int1)",
+	 "s:max_i1(bytea)",
+	 "s:pmax(int1)",
+	 KAGG_ACTION__PMAX_INT32, false
+	},
+	{"max(int2)",
+	 "s:max_i2(bytea)",
+	 "s:pmax(int2)",
+	 KAGG_ACTION__PMAX_INT32, false
+	},
+	{"max(int4)",
+	 "s:max_i4(bytea)",
+	 "s:pmax(int4)",
+	 KAGG_ACTION__PMAX_INT32, false
+	},
+	{"max(int8)",
+	 "s:max_i8(bytea)",
+	 "s:pmax(int8)",
+	 KAGG_ACTION__PMAX_INT64, false
+	},
+	{"max(float2)",
+     "s:max_f2(bytea)",
+	 "s:pmax(float4)",
+	 KAGG_ACTION__PMAX_FP32, false
+	},
+	{"max(float4)",
+     "s:max_f4(bytea)",
+	 "s:pmax(float4)",
+	 KAGG_ACTION__PMAX_FP32, false
+	},
+	{"max(float8)",
+     "s:max_f8(bytea)",
+	 "s:pmax(float8)",
+	 KAGG_ACTION__PMAX_FP64, false
+	},
+	{"max(numeric)",
+	 "s:max_num(bytea)",
+	 "s:pmax(float8)",
+	 KAGG_ACTION__PMAX_FP64, true
+	},
+	{"max(money)",
+	 "s:max_cash(bytea)",
+	 "s:pmax(money)",
+	 KAGG_ACTION__PMAX_INT64, false
+	},
+	{"max(date)",
+	 "s:max_date(bytea)",
+	 "s:pmax(date)",
+	 KAGG_ACTION__PMAX_INT32, false
+	},
+	{"max(time)",
+	 "s:max_time(bytea)",
+	 "s:pmax(time)",
+	 KAGG_ACTION__PMAX_INT64, false
+	},
+	{"max(timestamp)",
+	 "s:max_ts(bytea)",
+	 "s:pmax(timestamp)",
+	 KAGG_ACTION__PMAX_INT64, false
+	},
+	{"max(timestamptz)",
+	 "s:max_tstz(bytea)",
+	 "s:pmax(timestamptz)",
+	 KAGG_ACTION__PMAX_INT64, false
+	},
+	/*
+	 * SUM(X) = SUM(PSUM(X))
+	 */
+	{"sum(int1)",
+	 "s:sum(int8)",
+     "s:psum(int8)",
+	 KAGG_ACTION__PSUM_INT,  false
+	},
+	{"sum(int2)",
+	 "s:sum(int8)",
+     "s:psum(int8)",
+	 KAGG_ACTION__PSUM_INT,  false
+	},
+	{"sum(int4)",
+	 "s:sum(int8)",
+     "s:psum(int8)",
+	 KAGG_ACTION__PSUM_INT,  false
+	},
+	{"sum(int8)",
+	 "c:sum(int8)",
+     "s:psum(int8)",
+	 KAGG_ACTION__PSUM_INT,  false
+	},
+	{"sum(float2)",
+	 "c:sum(float4)",
+	 "s:psum(float4)",
+	 KAGG_ACTION__PSUM_FP32, false
+	},
+	{"sum(float4)",
+	 "c:sum(float4)",
+	 "s:psum(float4)",
+	 KAGG_ACTION__PSUM_FP32, false
+	},
+	{"sum(float8)",
+	 "c:sum(float8)",
+	 "s:psum(float8)",
+	 KAGG_ACTION__PSUM_FP64, false
+	},
+	{"sum(numeric)",
+	 "s:sum(float8)",
+	 "s:psum(float8)",
+	 KAGG_ACTION__PSUM_FP64, true
+	},
+	{"sum(money)",
+	 "s:sum_cash(int8)",
+	 "s:psum(money)",
+	 KAGG_ACTION__PSUM_INT,  false
+	},
+	/*
+	 * AVG(X) = EX_AVG(NROWS(X), PSUM(X))
+	 */
+	{"avg(int1)",
+	 "s:avg_int(bytea)",
+	 "s:pavg(int8)",
+	 KAGG_ACTION__PAVG_INT, false
+	},
+	{"avg(int2)",
+	 "s:avg_int(bytea)",
+	 "s:pavg(int8)",
+	 KAGG_ACTION__PAVG_INT, false
+	},
+	{"avg(int4)",
+	 "s:avg_int(bytea)",
+	 "s:pavg(int8)",
+	 KAGG_ACTION__PAVG_INT, false
+	},
+	{"avg(int8)",
+	 "s:avg_int(bytea)",
+	 "s:pavg(int8)",
+	 KAGG_ACTION__PAVG_INT, false
+	},
+	{"avg(float2)",
+	 "s:avg_fp(bytea)",
+	 "s:pavg(float8)",
+	 KAGG_ACTION__PAVG_FP, false
+	},
+	{"avg(float4)",
+	 "s:avg_fp(bytea)",
+	 "s:pavg(float8)",
+	 KAGG_ACTION__PAVG_FP, false
+	},
+	{"avg(float8)",
+	 "s:avg_fp(bytea)",
+	 "s:pavg(float8)",
+	 KAGG_ACTION__PAVG_FP, false
+	},
+	{"avg(numeric)",
+	 "s:avg_num(bytea)",
+	 "s:pavg(float8)",
+	 KAGG_ACTION__PAVG_FP, true
 	},
 	/*
 	 * STDDEV(X) = EX_STDDEV_SAMP(NROWS(),PSUM(X),PSUM(X*X))
 	 */
-	{ "stddev(int1)",
-	  "s:stddev_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-       ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev(int1)",
+	 "s:stddev_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev(int2)",
-	  "s:stddev_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-       ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev(int2)",
+	 "s:stddev_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev(int4)",
-	  "s:stddev_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-       ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev(int4)",
+	 "s:stddev_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev(int8)",
-	  "s:stddev_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-       ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev(int8)",
+	 "s:stddev_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev(float2)",
-	  "s:stddev_sampf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev(float2)",
+	 "s:stddev_sampf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev(float4)",
-	  "s:stddev_sampf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev(float4)",
+	 "s:stddev_sampf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev(float8)",
-	  "s:stddev_sampf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev(float8)",
+	 "s:stddev_sampf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev(numeric)",
-	  "s:stddev_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev(numeric)",
+	 "s:stddev_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, true
 	},
-
 	/*
 	 * STDDEV_SAMP(X) = EX_STDDEV_SAMP(NROWS(),PSUM(X),PSUM(X*X))
 	 */
-	{ "stddev_samp(int1)",
-	  "s:stddev_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-       ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_samp(int1)",
+	 "s:stddev_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_samp(int2)",
-	  "s:stddev_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-       ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_samp(int2)",
+	 "s:stddev_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_samp(int4)",
-	  "s:stddev_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-       ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_samp(int4)",
+	 "s:stddev_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_samp(int8)",
-	  "s:stddev_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-       ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_samp(int8)",
+	 "s:stddev_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_samp(float2)",
-	  "s:stddev_sampf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_samp(float2)",
+	 "s:stddev_sampf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_samp(float4)",
-	  "s:stddev_sampf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_samp(float4)",
+	 "s:stddev_sampf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_samp(float8)",
-	  "s:stddev_sampf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_samp(float8)",
+	 "s:stddev_sampf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_samp(numeric)",
-	  "s:stddev_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_samp(numeric)",
+	 "s:stddev_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, true
 	},
 	/*
 	 * STDDEV_POP(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X))
 	 */
-	{ "stddev_pop(int1)",
-	  "s:stddev_pop", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-       ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_pop(int1)",
+	 "s:stddev_pop(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_pop(int2)",
-	  "s:stddev_pop", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-       ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_pop(int2)",
+	 "s:stddev_pop(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_pop(int4)",
-	  "s:stddev_pop", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-       ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_pop(int4)",
+	 "s:stddev_pop(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_pop(int8)",
-	  "s:stddev_pop", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-       ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_pop(int8)",
+	 "s:stddev_pop(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_pop(float2)",
-	  "s:stddev_popf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_pop(float2)",
+	 "s:stddev_popf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_pop(float4)",
-	  "s:stddev_popf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_pop(float4)",
+	 "s:stddev_popf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_pop(float8)",
-	  "s:stddev_popf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_pop(float8)",
+	 "s:stddev_popf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "stddev_pop(numeric)",
-	  "s:stddev_pop", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-	  0, false,
+	{"stddev_pop(numeric)",
+	 "s:stddev_pop(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, true
 	},
 	/*
 	 * VARIANCE(X) = VAR_SAMP(NROWS(), PSUM(X),PSUM(X^2))
 	 */
-	{ "variance(int1)",
-	  "s:var_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"variance(int1)",
+	 "s:var_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "variance(int2)",
-	  "s:var_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"variance(int2)",
+	 "s:var_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "variance(int4)",
-	  "s:var_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"variance(int4)",
+	 "s:var_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "variance(int8)",
-	  "s:var_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"variance(int8)",
+	 "s:var_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "variance(float2)",
-	  "s:var_sampf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"variance(float2)",
+	 "s:var_sampf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "variance(float4)",
-	  "s:var_sampf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"variance(float4)",
+	 "s:var_sampf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "variance(float8)",
-	  "s:var_sampf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"variance(float8)",
+	 "s:var_sampf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "variance(numeric)",
-	  "s:var_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, true,
+	{"variance(numeric)",
+	 "s:var_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, true
 	},
-
 	/*
 	 * VAR_SAMP(X) = VAR_SAMP(NROWS(), PSUM(X),PSUM(X^2))
 	 */
-	{ "var_samp(int1)",
-	  "s:var_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_samp(int1)",
+	 "s:var_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_samp(int2)",
-	  "s:var_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_samp(int2)",
+	 "s:var_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_samp(int4)",
-	  "s:var_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_samp(int4)",
+	 "s:var_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_samp(int8)",
-	  "s:var_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_samp(int8)",
+	 "s:var_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_samp(float2)",
-	  "s:var_sampf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_samp(float2)",
+	 "s:var_sampf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_samp(float4)",
-	  "s:var_sampf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_samp(float4)",
+	 "s:var_sampf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_samp(float8)",
-	  "s:var_sampf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_samp(float8)",
+	 "s:var_sampf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_samp(numeric)",
-	  "s:var_samp", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, true,
+	{"var_samp(numeric)",
+	 "s:var_samp(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, true
 	},
-
 	/*
 	 * VAR_POP(X)  = VAR_POP(NROWS(), PSUM(X),PSUM(X^2))
 	 */
-	{ "var_pop(int1)",
-	  "s:var_pop", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_pop(int1)",
+	 "s:var_pop(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_pop(int2)",
-	  "s:var_pop", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_pop(int2)",
+	 "s:var_pop(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_pop(int4)",
-	  "s:var_pop", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_pop(int4)",
+	 "s:var_pop(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false},
+	{"var_pop(int8)",
+	 "s:var_pop(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_pop(int8)",
-	  "s:var_pop", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_pop(float2)",
+	 "s:var_popf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_pop(float2)",
-	  "s:var_popf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_pop(float4)",
+	 "s:var_popf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_pop(float4)",
-	  "s:var_popf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
+	{"var_pop(float8)",
+	 "s:var_popf(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, false
 	},
-	{ "var_pop(float8)",
-	  "s:var_popf", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, false,
-	},
-	{ "var_pop(numeric)",
-	  "s:var_pop", FLOAT8ARRAYOID,
-	  "s:pvariance", 3, {INT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2},
-      0, true,
+	{"var_pop(numeric)",
+	 "s:var_pop(bytea)",
+	 "s:pvariance(float8)",
+	 KAGG_ACTION__STDDEV, true
 	},
 	/*
 	 * CORR(X,Y) = PGSTROM.CORR(NROWS(X,Y),
@@ -750,38 +555,20 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 *                          PCOV_X2(X,Y), PCOV_Y2(X,Y),
 	 *                          PCOV_XY(X,Y))
 	 */
-	{ "corr(float8,float8)",
-	  "s:covar_samp", FLOAT8ARRAYOID,
-	  "s:pcovar", 6, {INT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_X2,
-	   ALTFUNC_EXPR_PCOV_Y,
-	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY},
-	  0, false,
+	{"corr(float8,float8)",
+	 "s:covar_samp(bytea)",
+	 "s:pcovar(float8,float8)",
+	 KAGG_ACTION__COVAR, false
 	},
-	{ "covar_pop(float8,float8)",
-	  "s:covar_pop", FLOAT8ARRAYOID,
-	  "s:pcovar", 6, {INT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_X2,
-	   ALTFUNC_EXPR_PCOV_Y,
-	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY},
-	  0, false,
+	{"covar_samp(float8,float8)",
+	 "s:covar_samp(bytea)",
+	 "s:pcovar(float8,float8)",
+	 KAGG_ACTION__COVAR, false
 	},
-	{ "covar_samp(float8,float8)",
-	  "s:covar_samp", FLOAT8ARRAYOID,
-	  "s:pcovar", 6, {INT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_X2,
-	   ALTFUNC_EXPR_PCOV_Y,
-	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY},
-	  0, false,
+	{"covar_pop(float8,float8)",
+	 "s:covar_pop(bytea)",
+	 "s:pcovar(float8,float8)",
+	 KAGG_ACTION__COVAR, false
 	},
 	/*
 	 * Aggregation to support least squares method
@@ -789,145 +576,308 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 * That takes PSUM_X, PSUM_Y, PSUM_X2, PSUM_Y2, PSUM_XY according
 	 * to the function
 	 */
-	{ "regr_avgx(float8,float8)",
-	  "s:regr_avgx", FLOAT8ARRAYOID,
-	  "s:pcovar", 6, {INT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_X2,
-	   ALTFUNC_EXPR_PCOV_Y,
-	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY},
-	  0, false,
+	{"regr_avgx(float8,float8)",
+	 "s:regr_avgx(bytea)",
+	 "s:pcovar(float8,float8)",
+	 KAGG_ACTION__COVAR, false
 	},
-	{ "regr_avgy(float8,float8)",
-	  "s:regr_avgy", FLOAT8ARRAYOID,
-	  "s:pcovar", 6, {INT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_X2,
-	   ALTFUNC_EXPR_PCOV_Y,
-	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY},
-	  0, false,
+	{"regr_avgy(float8,float8)",
+	 "s:regr_avgy(bytea)",
+	 "s:pcovar(float8,float8)",
+	 KAGG_ACTION__COVAR, false
 	},
-	{ "regr_count(float8,float8)",
-	  "s:sum", INT8OID,
-	  "varref", 1, {INT8OID},
-	  {ALTFUNC_EXPR_NROWS},
-	  0, false,
+	{"regr_count(float8,float8)",
+	 "s:regr_count(bytea)",
+     "s:pcovar(float8,float8)",
+	 KAGG_ACTION__COVAR, false
 	},
-	{ "regr_intercept(float8,float8)",
-	  "s:regr_intercept", FLOAT8ARRAYOID,
-	  "s:pcovar", 6, {INT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_X2,
-	   ALTFUNC_EXPR_PCOV_Y,
-	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY},
-	  0, false,
+	{"regr_intercept(float8,float8)",
+	 "s:regr_intercept(bytea)",
+	 "s:pcovar(float8,float8)",
+	 KAGG_ACTION__COVAR, false
 	},
-	{ "regr_r2(float8,float8)",
-	  "s:regr_r2", FLOAT8ARRAYOID,
-	  "s:pcovar", 6, {INT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_X2,
-	   ALTFUNC_EXPR_PCOV_Y,
-	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY},
-	  0, false,
+	{"regr_r2(float8,float8)",
+	 "s:regr_r2(bytea)",
+	 "s:pcovar(float8,float8)",
+	 KAGG_ACTION__COVAR, false
 	},
-	{ "regr_slope(float8,float8)",
-	  "s:regr_slope", FLOAT8ARRAYOID,
-	  "s:pcovar", 6, {INT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_X2,
-	   ALTFUNC_EXPR_PCOV_Y,
-	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY},
-	  0, false,
+	{"regr_slope(float8,float8)",
+	 "s:regr_slope(bytea)",
+     "s:pcovar(float8,float8)",
+	 KAGG_ACTION__COVAR, false
 	},
-	{ "regr_sxx(float8,float8)",
-	  "s:regr_sxx", FLOAT8ARRAYOID,
-	  "s:pcovar", 6, {INT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_X2,
-	   ALTFUNC_EXPR_PCOV_Y,
-	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY},
-	  0, false,
+	{"regr_sxx(float8,float8)",
+	 "s:regr_sxx(bytea)",
+	 "s:pcovar(float8,float8)",
+	 KAGG_ACTION__COVAR, false
 	},
-	{ "regr_sxy(float8,float8)",
-	  "s:regr_sxy", FLOAT8ARRAYOID,
-	  "s:pcovar", 6, {INT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_X2,
-	   ALTFUNC_EXPR_PCOV_Y,
-	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY},
-	  0, false,
+	{"regr_sxy(float8,float8)",
+	 "s:regr_sxy(bytea)",
+	 "s:pcovar(float8,float8)",
+	 KAGG_ACTION__COVAR, false
 	},
-	{ "regr_syy(float8,float8)",
-	  "s:regr_syy", FLOAT8ARRAYOID,
-	  "s:pcovar", 6, {INT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID,FLOAT8OID},
-	  {ALTFUNC_EXPR_NROWS,
-	   ALTFUNC_EXPR_PCOV_X,
-	   ALTFUNC_EXPR_PCOV_X2,
-	   ALTFUNC_EXPR_PCOV_Y,
-	   ALTFUNC_EXPR_PCOV_Y2,
-	   ALTFUNC_EXPR_PCOV_XY},
-	  0, false,
+	{"regr_syy(float8,float8)",
+	 "s:regr_syy(bytea)",
+	 "s:pcovar(float8,float8)",
+	 KAGG_ACTION__COVAR, false
 	},
+	{ NULL, NULL, NULL, -1, false },
 };
 
-static const aggfunc_catalog_t *
-aggfunc_lookup_by_oid(Oid aggfn_oid)
+/*
+ * aggfunc_catalog_entry; hashed catalog entry
+ */
+typedef struct
 {
-	Form_pg_proc	proc;
-	HeapTuple		htup;
+	Oid		aggfn_oid;
+	Oid		final_func_oid;
+	Oid		partial_func_oid;
+	Oid		partial_func_rettype;
+	int		partial_func_nargs;
+	int		partial_func_action;
+	bool	numeric_aware;
+	bool	is_valid_entry;
+} aggfunc_catalog_entry;
 
-	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(aggfn_oid));
-	if (!HeapTupleIsValid(htup))
-		elog(ERROR, "cache lookup failed for function %u", aggfn_oid);
-	proc = (Form_pg_proc) GETSTRUCT(htup);
-	if (proc->pronamespace == PG_CATALOG_NAMESPACE &&
-		proc->pronargs <= 2)
+static HTAB	   *aggfunc_catalog_htable = NULL;
+
+static void
+aggfunc_catalog_htable_invalidator(Datum arg, int cacheid, uint32 hashvalue)
+{
+	hash_destroy(aggfunc_catalog_htable);
+	aggfunc_catalog_htable = NULL;
+}
+
+static Oid
+__aggfunc_resolve_func_signature(const char *signature)
+{
+	char	   *fn_name = alloca(strlen(signature));
+	Oid			fn_namespace;
+	oidvector  *fn_argtypes;
+	int			fn_nargs = 0;
+	Oid			fn_oid;
+	Oid			type_oid;
+	char	   *base, *tok, *pos;
+
+	if (strncmp(signature, "c:", 2) == 0)
+		fn_namespace = PG_CATALOG_NAMESPACE;
+	else if (strncmp(signature, "s:", 2) == 0)
+		fn_namespace = get_namespace_oid("pgstrom", false);
+	else
+		elog(ERROR, "wrong function signature: %s", signature);
+
+	strcpy(fn_name, signature + 2);
+	base = strchr(fn_name, '(');
+	if (!base)
+		elog(ERROR, "wrong function signature: %s", signature);
+	*base++ = '\0';
+	pos = strchr(base, ')');
+	if (!pos)
+		elog(ERROR, "wrong function signature: %s", signature);
+	*pos = '\0';
+
+	fn_argtypes = alloca(offsetof(oidvector, values[80]));
+	fn_argtypes->ndim = 1;
+	fn_argtypes->dataoffset = 0;
+	fn_argtypes->elemtype = OIDOID;
+	fn_argtypes->dim1 = 0;
+	fn_argtypes->lbound1 = 0;
+	for (tok = strtok_r(base, ",", &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL, ",", &pos))
 	{
-		char	signature[3 * NAMEDATALEN + 10];
-		int		off;
-
-		off = sprintf(signature, "%s(", NameStr(proc->proname));
-		for (int j=0; j < proc->pronargs; j++)
-		{
-			Oid		type_oid = proc->proargtypes.values[j];
-			char   *type_name = get_type_name(type_oid, false);
-
-			off += sprintf(signature + off, "%s%s", (j>0 ? "," : ""), type_name);
-		}
-		off += sprintf(signature + off, ")");
-		
-		for (int i=0; i < lengthof(aggfunc_catalog_array); i++)
-		{
-			const aggfunc_catalog_t *cat = &aggfunc_catalog_array[i];
-
-			if (strcmp(signature, cat ->aggfn_signature) == 0)
-			{
-				/* Is NUMERIC with xPU GroupBy acceptable? */
-				if (cat->numeric_aware && !pgstrom_enable_numeric_aggfuncs)
-					continue;
-				/* all ok */
-				ReleaseSysCache(htup);
-				return cat;
-			}
-		}
+		type_oid = GetSysCacheOid2(TYPENAMENSP,
+								   Anum_pg_type_oid,
+								   CStringGetDatum(tok),
+								   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+		if (!OidIsValid(type_oid))
+			elog(ERROR, "cache lookup failed for type '%s'", tok);
+		fn_argtypes->values[fn_nargs++] = type_oid;
 	}
+	fn_argtypes->dim1 = fn_nargs;
+	SET_VARSIZE(fn_argtypes, offsetof(oidvector, values[fn_nargs]));
+
+	fn_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
+							 Anum_pg_proc_oid,
+							 CStringGetDatum(fn_name),
+							 PointerGetDatum(fn_argtypes),
+							 ObjectIdGetDatum(fn_namespace));
+	if (!OidIsValid(fn_oid))
+		elog(ERROR, "Catalog corruption? '%s' was not found",
+			 funcname_signature_string(fn_name,
+									   fn_argtypes->dim1,
+									   NIL,
+									   fn_argtypes->values));
+	return fn_oid;
+}
+
+static void
+__aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
+							   const char *partfn_signature,
+							   int partfn_action)
+{
+	Oid		func_oid = __aggfunc_resolve_func_signature(partfn_signature);
+	Oid		type_oid;
+	int		func_nargs = 1;
+
+	switch (partfn_action)
+	{
+		case KAGG_ACTION__NROWS_ANY:
+		case KAGG_ACTION__NROWS_COND:
+		case KAGG_ACTION__PSUM_INT:
+			type_oid = INT8OID;
+			break;
+		case KAGG_ACTION__PSUM_FP32:
+			type_oid = FLOAT4OID;
+			break;
+		case KAGG_ACTION__PSUM_FP64:
+			type_oid = FLOAT8OID;
+			break;
+		case KAGG_ACTION__PMIN_INT32:
+		case KAGG_ACTION__PMIN_INT64:
+		case KAGG_ACTION__PMIN_FP32:
+		case KAGG_ACTION__PMIN_FP64:
+		case KAGG_ACTION__PMAX_INT32:
+		case KAGG_ACTION__PMAX_INT64:
+		case KAGG_ACTION__PMAX_FP32:
+		case KAGG_ACTION__PMAX_FP64:
+		case KAGG_ACTION__PAVG_INT:
+		case KAGG_ACTION__PAVG_FP:
+		case KAGG_ACTION__STDDEV:
+			type_oid = BYTEAOID;
+			break;
+		case KAGG_ACTION__COVAR:
+			func_nargs = 2;
+			type_oid = BYTEAOID;
+			break;
+		default:
+			elog(ERROR, "Catalog corruption? unknown action: %d", partfn_action);
+			break;
+	}
+	entry->partial_func_oid = func_oid;
+	entry->partial_func_rettype = get_func_rettype(func_oid);
+	entry->partial_func_nargs = get_func_nargs(func_oid);
+	entry->partial_func_action = partfn_action;
+
+	if (entry->partial_func_rettype != type_oid ||
+		entry->partial_func_nargs != func_nargs)
+		elog(ERROR, "Catalog curruption? partial function mismatch: %s",
+			 partfn_signature);
+}
+
+static void
+__aggfunc_resolve_final_func(aggfunc_catalog_entry *entry,
+							 const char *finalfn_signature,
+							 Oid agg_rettype)
+{
+	Oid			func_oid = __aggfunc_resolve_func_signature(finalfn_signature);
+	HeapTuple	htup;
+	Form_pg_proc proc;
+
+	if (!SearchSysCacheExists1(AGGFNOID, ObjectIdGetDatum(func_oid)) ||
+		get_func_rettype(func_oid) != agg_rettype)
+		elog(ERROR, "Catalog corruption? final function mismatch: %s",
+			 format_procedure(func_oid));
+	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
+	if (!HeapTupleIsValid(htup))
+		elog(ERROR, "cache lookup failed for function %u", func_oid);
+	proc = (Form_pg_proc) GETSTRUCT(htup);
+	if (proc->pronargs != 1 ||
+		proc->proargtypes.dim1 != 1 ||
+		proc->proargtypes.values[0] != entry->partial_func_rettype)
+		elog(ERROR, "Catalog corruption? final function mismatch: %s",
+			 format_procedure(func_oid));
 	ReleaseSysCache(htup);
-	return NULL;
+
+	entry->final_func_oid = func_oid;
+}
+
+static const aggfunc_catalog_entry *
+aggfunc_catalog_lookup_by_oid(Oid aggfn_oid)
+{
+	aggfunc_catalog_entry *entry;
+	bool		found;
+
+	/* fast path by the hashtable */
+	if (!aggfunc_catalog_htable)
+	{
+		HASHCTL		hctl;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+        hctl.keysize = sizeof(Oid);
+		hctl.entrysize = sizeof(aggfunc_catalog_entry);
+		hctl.hcxt = CacheMemoryContext;
+		aggfunc_catalog_htable = hash_create("XPU GroupBy Catalog Hash",
+											 256,
+											 &hctl,
+											 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+	entry = hash_search(aggfunc_catalog_htable,
+						&aggfn_oid,
+						HASH_ENTER,
+						&found);
+	if (!found)
+	{
+		Form_pg_proc proc;
+		HeapTuple htup;
+
+		entry->is_valid_entry = false;
+		PG_TRY();
+		{
+			htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(aggfn_oid));
+			if (!HeapTupleIsValid(htup))
+				elog(ERROR, "cache lookup failed for function %u", aggfn_oid);
+			proc = (Form_pg_proc) GETSTRUCT(htup);
+			if (proc->pronamespace == PG_CATALOG_NAMESPACE &&
+				proc->pronargs <= 2)
+			{
+				char	buf[3*NAMEDATALEN+100];
+				int		off;
+
+				off = sprintf(buf, "%s(", NameStr(proc->proname));
+				for (int j=0; j < proc->pronargs; j++)
+				{
+					Oid		type_oid = proc->proargtypes.values[j];
+					char   *type_name = get_type_name(type_oid, false);
+
+					off += sprintf(buf + off, "%s%s",
+								   (j>0 ? "," : ""),
+								   type_name);
+				}
+				off += sprintf(buf + off, ")");
+
+				for (int i=0; aggfunc_catalog_array[i].aggfn_signature != NULL; i++)
+				{
+					const aggfunc_catalog_t *cat = &aggfunc_catalog_array[i];
+
+					if (strcmp(buf, cat->aggfn_signature) == 0)
+					{
+						__aggfunc_resolve_partial_func(entry,
+													   cat->partfn_signature,
+													   cat->partfn_action);
+						__aggfunc_resolve_final_func(entry,
+													 cat->finalfn_signature,
+													 proc->prorettype);
+						entry->numeric_aware = cat->numeric_aware;
+						entry->is_valid_entry = true;
+						break;
+					}
+				}
+			}
+			ReleaseSysCache(htup);
+		}
+		PG_CATCH();
+		{
+			hash_search(aggfunc_catalog_htable, &aggfn_oid, HASH_REMOVE, NULL);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+	}
+	if (!entry->is_valid_entry)
+		return NULL;
+	if (entry->numeric_aware && !pgstrom_enable_numeric_aggfuncs)
+		return NULL;
+	return entry;
 }
 
 /*
@@ -1007,234 +957,6 @@ make_expr_typecast(Expr *expr, Oid target_type)
 }
 
 /*
- * make_expr_conditional - constructor of expression conditional
- */
-static Expr *
-make_expr_conditional(Expr *expr, Expr *filter, bool zero_if_unmatched)
-{
-	Oid			expr_typeoid = exprType((Node *)expr);
-	int32		expr_typemod = exprTypmod((Node *)expr);
-	Oid			expr_collid = exprCollation((Node *)expr);
-	CaseWhen   *case_when;
-	CaseExpr   *case_expr;
-	Expr	   *defresult;
-
-	if (!filter)
-		return expr;
-	if (zero_if_unmatched)
-	{
-		int16   typlen;
-		bool    typbyval;
-
-		get_typlenbyval(expr_typeoid, &typlen, &typbyval);
-		defresult = (Expr *) makeConst(expr_typeoid,
-									   expr_typemod,
-									   expr_collid,
-									   (int) typlen,
-									   (Datum) 0,
-									   false,
-									   typbyval);
-	}
-	else
-	{
-		defresult = (Expr *) makeNullConst(expr_typeoid,
-										   expr_typemod,
-										   expr_collid);
-	}
-	/* in case when the 'filter' is matched */
-	case_when = makeNode(CaseWhen);
-	case_when->expr = filter;
-	case_when->result = expr;
-	case_when->location = -1;
-
-	/* case body */
-	case_expr = makeNode(CaseExpr);
-	case_expr->casetype = exprType((Node *) expr);
-	case_expr->arg = NULL;
-	case_expr->args = list_make1(case_when);
-	case_expr->defresult = defresult;
-	case_expr->location = -1;
-
-	return (Expr *) case_expr;
-}
-
-/*
- * make_altfunc_simple_expr - constructor of simple function call
- */
-static FuncExpr *
-make_altfunc_simple_expr(const char *func_name, Expr *func_arg)
-{
-	Oid			namespace_oid = get_namespace_oid("pgstrom", false);
-	oidvector  *func_argtypes;
-	HeapTuple	htup;
-	Form_pg_proc proc;
-	FuncExpr   *fn_expr;
-
-	if (func_arg)
-	{
-		Oid		type_oid = exprType((Node *)func_arg);
-		func_argtypes = buildoidvector(&type_oid, 1);
-	}
-	else
-	{
-		func_argtypes = buildoidvector(NULL, 0);
-	}
-
-	/* find an alternative partial function */
-	htup = SearchSysCache3(PROCNAMEARGSNSP,
-						   PointerGetDatum(func_name),
-                           PointerGetDatum(func_argtypes),
-                           ObjectIdGetDatum(namespace_oid));
-	if (!HeapTupleIsValid(htup))
-		elog(ERROR, "alternative function '%s' not found", func_name);
-	proc = (Form_pg_proc) GETSTRUCT(htup);
-	fn_expr = makeFuncExpr(proc->oid,
-						   proc->prorettype,
-						   func_arg ? list_make1(func_arg) : NIL,
-						   InvalidOid,
-						   InvalidOid,
-						   COERCE_EXPLICIT_CALL);
-	ReleaseSysCache(htup);
-
-	return fn_expr;
-}
-
-/*
- * make_altfunc_nrows_expr - constructor for ALTFUNC_EXPR_NROWS
- */
-static FuncExpr *
-make_altfunc_nrows_expr(Aggref *aggref)
-{
-	List	   *nrows_args = NIL;
-	ListCell   *lc;
-	Expr	   *expr;
-
-	foreach (lc, aggref->args)
-	{
-		TargetEntry *tle = lfirst(lc);
-		NullTest	*ntest = makeNode(NullTest);
-
-		Assert(IsA(tle, TargetEntry));
-		ntest->arg = copyObject(tle->expr);
-		ntest->nulltesttype = IS_NOT_NULL;
-		ntest->argisrow = false;
-
-		nrows_args = lappend(nrows_args, ntest);
-	}
-
-	if (aggref->aggfilter)
-	{
-		Expr   *filter = aggref->aggfilter;
-
-		Assert(exprType((Node *)filter) == BOOLOID);
-		nrows_args = lappend(nrows_args, copyObject(filter));
-	}
-
-	if (nrows_args == NIL)
-		expr = NULL;
-	else if (list_length(nrows_args) == 1)
-		expr = linitial(nrows_args);
-	else
-		expr = make_andclause(nrows_args);
-
-	return make_altfunc_simple_expr("nrows", expr);
-}
-
-/*
- * make_altfunc_minmax_expr - constructor of ALTFUNC_EXPR_PMIN/PMAX
- */
-static FuncExpr *
-make_altfunc_minmax_expr(Aggref *aggref, const char *func_name,
-						 Oid pminmax_typeoid)
-{
-	TargetEntry *tle;
-	Expr   *expr;
-
-	Assert(list_length(aggref->args) == 1);
-	tle = linitial(aggref->args);
-	Assert(IsA(tle, TargetEntry));
-	/* cast to pminmax_typeoid, if mismatch */
-	expr = make_expr_typecast(tle->expr, pminmax_typeoid);
-	/* make conditional if aggref has any filter */
-	expr = make_expr_conditional(expr, aggref->aggfilter, false);
-
-	return make_altfunc_simple_expr(func_name, expr);
-}
-
-/*
- * make_altfunc_psum_expr - constructor of ALTFUNC_EXPR_PSUM/PSUM_X2
- */
-static FuncExpr *
-make_altfunc_psum_expr(Aggref *aggref, const char *func_name,
-					   Oid psum_typeoid)
-{
-	TargetEntry *tle;
-    Expr   *expr;
-
-	Assert(list_length(aggref->args) == 1);
-	tle = linitial(aggref->args);
-	Assert(IsA(tle, TargetEntry));
-	/* cast to psum_typeoid, if mismatch */
-	expr = make_expr_typecast(tle->expr, psum_typeoid);
-	/* make conditional if aggref has any filter */
-	expr = make_expr_conditional(expr, aggref->aggfilter, true);
-
-	return make_altfunc_simple_expr(func_name, expr);
-}
-
-/*
- * make_altfunc_pcov_xy - constructor of a co-variance arguments
- */
-static FuncExpr *
-make_altfunc_pcov_xy(Aggref *aggref, const char *func_name)
-{
-	Oid			namespace_oid = get_namespace_oid("pgstrom", false);
-	oidvector  *func_argtypes;
-    Oid			func_argtypes_oid[3];
-    Oid			func_oid;
-    TargetEntry *tle_x;
-    TargetEntry *tle_y;
-    Expr	   *filter;
-
-	Assert(list_length(aggref->args) == 2);
-	tle_x = linitial(aggref->args);
-	tle_y = lsecond(aggref->args);
-	if (exprType((Node *)tle_x->expr) != FLOAT8OID ||
-		exprType((Node *)tle_y->expr) != FLOAT8OID)
-		elog(ERROR, "Bug? unexpected argument type for co-variance");
-
-	/* lookup pcov_XXX functions */
-	func_argtypes_oid[0] = BOOLOID;
-	func_argtypes_oid[1] = FLOAT8OID;
-	func_argtypes_oid[2] = FLOAT8OID;
-	func_argtypes = buildoidvector(func_argtypes_oid, 3);
-	func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
-							   Anum_pg_proc_oid,
-							   CStringGetDatum(func_name),
-							   PointerGetDatum(func_argtypes),
-							   ObjectIdGetDatum(namespace_oid));
-	if (!OidIsValid(func_oid))
-		elog(ERROR, "cache lookup failed for function '%s'", func_name);
-	/* filter if any */
-	if (aggref->aggfilter)
-	{
-		filter = aggref->aggfilter;
-	}
-    else
-	{
-        filter = (Expr *)makeBoolConst(true, false);
-	}
-	return makeFuncExpr(func_oid,
-						FLOAT8OID,
-						list_make3(filter,
-								   tle_x->expr,
-								   tle_y->expr),
-						InvalidOid,
-						InvalidOid,
-						COERCE_EXPLICIT_CALL);
-}
-
-/*
  * make_alternative_aggref
  *
  * It makes an alternative final aggregate function towards the supplied
@@ -1243,18 +965,16 @@ make_altfunc_pcov_xy(Aggref *aggref, const char *func_name)
 static Node *
 make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 {
-	const aggfunc_catalog_t *aggfn_cat;
+	const aggfunc_catalog_entry *aggfn_cat;
 	List	   *partfn_args = NIL;
 	Expr	   *partfn;
 	Aggref	   *aggref_alt;
-	Oid			namespace_oid;
 	Oid			func_oid;
-	const char *func_name;
-	oidvector  *func_argtypes;
 	HeapTuple	htup;
 	Form_pg_proc proc;
 	Form_pg_aggregate agg;
-
+	ListCell   *lc;
+	int			j;
 
 	if (aggref->aggorder != NIL || aggref->aggdistinct != NIL)
 	{
@@ -1272,7 +992,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 	/*
 	 * Lookup properties of aggregate function
 	 */
-	aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid);
+	aggfn_cat = aggfunc_catalog_lookup_by_oid(aggref->aggfnoid);
 	if (!aggfn_cat)
 	{
 		elog(DEBUG2, "Aggregate function '%s' is not device executable",
@@ -1281,136 +1001,54 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 	}
 	/* sanity checks */
 	Assert(aggref->aggkind == AGGKIND_NORMAL &&
-		   !aggref->aggvariadic &&
-		   list_length(aggref->args) <= 2);
-	/*
-	 * construct arguments list of the partial aggregation
-	 */
-	for (int i=0; i < aggfn_cat->partfn_nargs; i++)
-	{
-		Oid			argtype = aggfn_cat->partfn_argtypes[i];
-		int			action  = aggfn_cat->partfn_argexprs[i];
-		FuncExpr   *pfunc;
-		ListCell   *lc;
+		   !aggref->aggvariadic);
 
-		switch (action)
+	/*
+	 * Build partial-aggregate function
+	 */
+	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(aggfn_cat->partial_func_oid));
+	if (!HeapTupleIsValid(htup))
+		elog(ERROR, "cache lookup failed for function %u",
+			 aggfn_cat->partial_func_oid);
+	proc = (Form_pg_proc) GETSTRUCT(htup);
+	Assert(list_length(aggref->args) == proc->pronargs);
+	j = 0;
+	foreach (lc, aggref->args)
+	{
+		TargetEntry *tle = lfirst(lc);
+		Expr   *expr = tle->expr;
+		Oid		type_oid = exprType((Node *)expr);
+		Oid		dest_oid = proc->proargtypes.values[j++];
+
+		if (type_oid != dest_oid)
+			expr = make_expr_typecast(expr, dest_oid);
+		if (!pgstrom_xpu_expression(expr,
+									con->task_kind,
+									con->input_rels_tlist,
+									NULL))
 		{
-			case ALTFUNC_EXPR_NROWS:
-				pfunc = make_altfunc_nrows_expr(aggref);
-				break;
-			case ALTFUNC_EXPR_PMIN:
-				pfunc = make_altfunc_minmax_expr(aggref, "pmin", argtype);
-				break;
-			case ALTFUNC_EXPR_PMAX:
-				pfunc = make_altfunc_minmax_expr(aggref, "pmax", argtype);
-				break;
-			case ALTFUNC_EXPR_PSUM:
-				pfunc = make_altfunc_psum_expr(aggref, "psum", argtype);
-				break;
-			case ALTFUNC_EXPR_PSUM_X2:
-				pfunc = make_altfunc_psum_expr(aggref, "psum_x2", argtype);
-				break;
-			case ALTFUNC_EXPR_PCOV_X:
-				pfunc = make_altfunc_pcov_xy(aggref, "pcov_x");
-				break;
-			case ALTFUNC_EXPR_PCOV_Y:
-				pfunc = make_altfunc_pcov_xy(aggref, "pcov_y");
-				break;
-			case ALTFUNC_EXPR_PCOV_X2:
-				pfunc = make_altfunc_pcov_xy(aggref, "pcov_x2");
-				break;
-			case ALTFUNC_EXPR_PCOV_Y2:
-				pfunc = make_altfunc_pcov_xy(aggref, "pcov_y2");
-				break;
-			case ALTFUNC_EXPR_PCOV_XY:
-				pfunc = make_altfunc_pcov_xy(aggref, "pcov_xy");
-				break;
-			default:
-				elog(ERROR, "Bug? XPU GroupBy catalog is corrupted?");
-				break;
-		}
-		/* actuall supported? */
-		if (!pfunc)
+			elog(DEBUG2, "Partial aggregate argument is not executable: %s",
+				 nodeToString(expr));
 			return NULL;
-		/* device executable? */
-		foreach (lc, pfunc->args)
-		{
-			Expr   *expr = lfirst(lc);
-
-			if (!pgstrom_xpu_expression(expr,
-										con->task_kind,
-										con->input_rels_tlist,
-										NULL))
-			{
-				elog(DEBUG2, "Partial aggregate argument is not executable: %s",
-					 nodeToString(expr));
-				return NULL;
-			}
 		}
-		/* append to the argument list */
-		partfn_args = lappend(partfn_args, (Expr *)pfunc);
-	}
+		partfn_args = lappend(partfn_args, expr);
 
-	/*
-	 * Lookup the partial function that generate partial state of the aggregate
-	 * function, or varref if internal state of aggregate is identical.
-	 */
-	if (strcmp(aggfn_cat->partfn_name, "varref") == 0)
-	{
-		Assert(list_length(partfn_args) == 1);
-		partfn = linitial(partfn_args);
+		//try add prep_tlist as input
 	}
-	else
-	{
-		if (strncmp(aggfn_cat->partfn_name, "c:", 2) == 0)
-			namespace_oid = PG_CATALOG_NAMESPACE;
-		else if (strncmp(aggfn_cat->partfn_name, "s:", 2) == 0)
-			namespace_oid = get_namespace_oid("pgstrom", false);
-		else
-			elog(ERROR, "Bug? corrupted aggregate function catalog");
+	ReleaseSysCache(htup);
 
-		func_name = aggfn_cat->partfn_name + 2;
-		func_argtypes = buildoidvector(aggfn_cat->partfn_argtypes,
-									   aggfn_cat->partfn_nargs);
-		htup = SearchSysCache3(PROCNAMEARGSNSP,
-							   PointerGetDatum(func_name),
-                               PointerGetDatum(func_argtypes),
-                               ObjectIdGetDatum(namespace_oid));
-		if (!HeapTupleIsValid(htup))
-			elog(ERROR, "cache lookup failed for function %s", func_name);
-		proc = (Form_pg_proc) GETSTRUCT(htup);
-		partfn = (Expr *)makeFuncExpr(proc->oid,
-									  proc->prorettype,
-									  partfn_args,
-									  InvalidOid,
-									  InvalidOid,
-									  COERCE_EXPLICIT_CALL);
-		ReleaseSysCache(htup);
-	}
-	/* add partial function if unique */
+	partfn = (Expr *)makeFuncExpr(aggfn_cat->partial_func_oid,
+								  aggfn_cat->partial_func_rettype,
+								  partfn_args,
+								  aggref->aggcollid,
+								  aggref->inputcollid,
+								  COERCE_EXPLICIT_CALL);
 	add_new_column_to_pathtarget(con->target_partial, partfn);
 
 	/*
-	 * Construction of the final Aggref instead of the original one
+	 * Build final-aggregate function
 	 */
-	if (strncmp(aggfn_cat->finalfn_name, "c:", 2) == 0)
-		namespace_oid = PG_CATALOG_NAMESPACE;
-	else if (strncmp(aggfn_cat->finalfn_name, "s:", 2) == 0)
-		namespace_oid = get_namespace_oid("pgstrom", false);
-	else
-		elog(ERROR, "Bug? corrupted aggregate function catalog");
-
-	func_name = aggfn_cat->finalfn_name + 2;
-	func_argtypes = buildoidvector(&aggfn_cat->finalfn_argtype, 1);
-	func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
-							   Anum_pg_proc_oid,
-							   CStringGetDatum(func_name),
-							   PointerGetDatum(func_argtypes),
-							   ObjectIdGetDatum(namespace_oid));
-	if (!OidIsValid(func_oid))
-		elog(ERROR, "cache lookup failed for function %s", func_name);
-	Assert(aggref->aggtype == get_func_rettype(func_oid));
-
+	func_oid = aggfn_cat->final_func_oid;
 	htup = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(func_oid));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for pg_aggregate %u", func_oid);
@@ -2016,5 +1654,6 @@ pgstrom_init_gpu_groupby(void)
 	/* hook registration */
 	create_upper_paths_next = create_upper_paths_hook;
 	create_upper_paths_hook = gpugroupby_add_custompath;
-}
 
+	CacheRegisterSyscacheCallback(PROCOID, aggfunc_catalog_htable_invalidator, 0);
+}
