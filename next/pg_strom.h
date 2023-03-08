@@ -271,9 +271,7 @@ typedef struct
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
 	/* group-by parameters */
-	List	   *groupby_keys_resno;		/* grouping keys on the prep_tlist */
-	List	   *groupby_agg_action;		/* group-by/aggregate action */
-	List	   *groupby_prep_tlist;		/* expressions prior to group-by */
+	List	   *groupby_key_actions;	/* grouping keys, kagg-actions */
 	/* inner relations */
 	int			num_rels;
 	pgstromPlanInnerInfo inners[FLEXIBLE_ARRAY_MEMBER];
@@ -761,11 +759,6 @@ extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
 										 List *custom_plans,
 										 pgstromPlanInfo *pp_info,
 										 const CustomScanMethods *methods);
-extern List	   *pgstrom_build_tlist_dev(RelOptInfo *rel,
-										List *tlist,      /* must be backed to CPU */
-										List *host_quals, /* must be backed to CPU */
-										List *misc_exprs,
-										List *input_rels_tlist);
 extern uint32_t	GpuJoinInnerPreload(pgstromTaskState *pts);
 extern void		ExecFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple);
 extern void		pgstrom_init_gpu_join(void);

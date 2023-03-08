@@ -894,6 +894,10 @@ typedef struct
 	PathTarget	   *target_partial;
 	PathTarget	   *target_final;
 	AggClauseCosts	final_clause_costs;
+	List		   *groupby_keys;
+	List		   *groupby_keys_refno;
+	List		   *groupby_actions;
+	List		   *groupby_prep_exprs;
 	pgstromPlanInfo *pp_prev;
 	List		   *input_rels_tlist;
 	List		   *inner_paths_list;
@@ -966,6 +970,7 @@ static Node *
 make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 {
 	const aggfunc_catalog_entry *aggfn_cat;
+	PathTarget *target_partial = con->target_partial;
 	List	   *partfn_args = NIL;
 	Expr	   *partfn;
 	Aggref	   *aggref_alt;
@@ -1031,6 +1036,14 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 				 nodeToString(expr));
 			return NULL;
 		}
+
+		if (!IsA(expr, Var))
+		{
+			elog(INFO, "pfunc argument: %s", nodeToString(expr));
+			con->groupby_prep_exprs = lappend(con->groupby_prep_exprs, expr);
+			//if argument is not simple Var-node, must be setup in the kernel
+		}
+
 		partfn_args = lappend(partfn_args, expr);
 
 		//try add prep_tlist as input
@@ -1043,7 +1056,13 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 								  aggref->aggcollid,
 								  aggref->inputcollid,
 								  COERCE_EXPLICIT_CALL);
-	add_new_column_to_pathtarget(con->target_partial, partfn);
+	/* see add_new_column_to_pathtarget */
+	if (!list_member(target_partial->exprs, partfn))
+	{
+		add_column_to_pathtarget(target_partial, partfn, 0);
+		con->groupby_actions = lappend_int(con->groupby_actions,
+										   aggfn_cat->partial_func_action);
+	}
 
 	/*
 	 * Build final-aggregate function
@@ -1096,12 +1115,12 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 static Node *
 replace_expression_by_altfunc(Node *node, xpugroupby_build_path_context *con)
 {
-	PathTarget *target_input = con->input_path->pathtarget;
 	Node	   *aggfn;
 	ListCell   *lc;
 
 	if (!node)
 		return NULL;
+	/* aggregate function? */
 	if (IsA(node, Aggref))
 	{
 		aggfn = make_alternative_aggref(con, (Aggref *)node);
@@ -1109,16 +1128,13 @@ replace_expression_by_altfunc(Node *node, xpugroupby_build_path_context *con)
 			con->device_executable = false;
 		return aggfn;
 	}
-
-	foreach (lc, target_input->exprs)
+	/* grouping key? */
+	foreach (lc, con->groupby_keys)
 	{
-		Expr   *expr = lfirst(lc);
+		Expr   *key = lfirst(lc);
 
-		if (equal(node, expr))
-		{
-			add_new_column_to_pathtarget(con->target_partial, copyObject(expr));
+		if (equal(node, key))
 			return copyObject(node);
-		}
 	}
 	if (IsA(node, Var) || IsA(node, PlaceHolderVar))
 		elog(ERROR, "Bug? referenced variable is grouping-key nor its dependent key: %s",
@@ -1133,17 +1149,17 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 	Query	   *parse = root->parse;
 	PathTarget *target_upper = con->target_upper;
 	Node	   *havingQual = NULL;
-	ListCell   *lc;
-	int			i;
+	ListCell   *lc1, *lc2;
+	int			i = 0;
 
 	/*
-	 * Pick up Grouping-Keys and Aggregate-Functions
+	 * Pick up grouping-keys and aggregate-functions to be replaced by
+	 * a pair of final-aggregate and partial-function.
 	 */
-	i = 0;
-	foreach (lc, target_upper->exprs)
+	foreach (lc1, target_upper->exprs)
 	{
-		Expr   *expr = lfirst(lc);
-		Index	sortgroupref = get_pathtarget_sortgroupref(target_upper, i);
+		Expr   *expr = lfirst(lc1);
+		Index	sortgroupref = get_pathtarget_sortgroupref(target_upper, i++);
 
 		if (sortgroupref && parse->groupClause &&
 			get_sortgroupref_clause_noerr(sortgroupref,
@@ -1170,9 +1186,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 					 nodeToString(expr));
 				return false;
 			}
-			/*
-			 * grouping-key must be device executable.
-			 */
+			/* grouping-key must be device executable. */
 			if (!pgstrom_xpu_expression(expr,
 										con->task_kind,
 										con->input_rels_tlist,
@@ -1182,16 +1196,16 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 					 nodeToString(expr));
 				return false;
 			}
-			/* add grouping-key */
-			add_column_to_pathtarget(con->target_partial, expr, sortgroupref);
 			add_column_to_pathtarget(con->target_final, expr, sortgroupref);
+			/* to be attached to target-partial later */
+			con->groupby_keys = lappend(con->groupby_keys, expr);
+			con->groupby_keys_refno = lappend_int(con->groupby_keys_refno, sortgroupref);
 		}
-		else
+		else if (IsA(expr, Aggref))
 		{
-			/* Aggregation */
 			Expr   *altfn;
 
-			altfn = (Expr *)replace_expression_by_altfunc((Node *)expr, con);
+			altfn = (Expr *)make_alternative_aggref(con, (Aggref *)expr);
 			if (!altfn)
 			{
 				elog(DEBUG2, "No alternative aggregation: %s",
@@ -1206,7 +1220,27 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			}
 			add_column_to_pathtarget(con->target_final, altfn, 0);
 		}
-		i++;
+		else
+		{
+			elog(DEBUG2, "unexpected expression on the upper-tlist: %s",
+				 nodeToString(expr));
+			return false;
+		}
+	}
+	/*
+	 * Due to data alignment on the tuple on the kds_final, grouping-keys must
+	 * be located after the aggregate functions.
+	 */
+	elog(INFO, "groupby_keys => %s", nodeToString(con->groupby_keys));
+	forboth (lc1, con->groupby_keys,
+			 lc2, con->groupby_keys_refno)
+	{
+		Expr   *key = lfirst(lc1);
+		Index	keyref = lfirst_int(lc2);
+
+		Assert(keyref > 0);
+		add_column_to_pathtarget(con->target_partial, key, keyref);
+		con->groupby_actions = lappend_int(con->groupby_actions, -1);
 	}
 
 	/*
@@ -1223,7 +1257,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 		}
 	}
 	con->havingQual = havingQual;
-
+	
 	set_pathtarget_cost_width(root, con->target_final);
 	set_pathtarget_cost_width(root, con->target_partial);
 
@@ -1287,6 +1321,7 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 
 	pp_info = pmemdup(pp_prev, offsetof(pgstromPlanInfo,
 										inners[pp_prev->num_rels]));
+	pp_info->task_kind = con->task_kind;
 	pp_info->final_cost = final_cost;
 
 	cpath->path.pathtype         = T_CustomScan;
@@ -1386,9 +1421,13 @@ __xpugroupby_add_custompath(PlannerInfo *root,
 							  &con.pp_prev,
 							  &con.input_rels_tlist,
 							  &con.inner_paths_list);
+	elog(INFO, "mokeke");
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
 		return;
+	elog(INFO, "groupby_keys = %s", nodeToString(con.groupby_keys));
+	elog(INFO, "groupby_actions = %s", nodeToString(con.groupby_actions));
+	elog(INFO, "groupby_prep_exprs = %s", nodeToString(con.groupby_prep_exprs));
 
 	/* build partial groupby custom-path */
 	part_path = prepend_partial_groupby_custompath(&con);
@@ -1428,33 +1467,15 @@ xpugroupby_add_custompath(PlannerInfo *root,
 {
 	Query	   *parse = root->parse;
 	Path	   *input_path;
-	double		num_groups = 1.0;
-	ListCell   *lc;
 
-	/* fetch num groups from the standard paths */
-	if (parse->groupClause)
+	/* quick bailout if not supported */
+	if (parse->groupingSets != NIL ||
+		!grouping_is_hashable(parse->groupClause))
 	{
-		if (parse->groupingSets != NIL ||
-			!grouping_is_hashable(parse->groupClause))
-		{
-			elog(DEBUG2, "GROUP BY clause is not supported form");
-			return;
-		}
-
-		foreach (lc, group_rel->pathlist)
-		{
-			Path   *i_path = lfirst(lc);
-
-			if (IsA(i_path, Agg))
-			{
-				num_groups = ((AggPath *)i_path)->numGroups;
-				break;
-			}
-		}
-		if (!lc)
-			return;		/* unable to determine the num_groups */
+		elog(DEBUG2, "GROUP BY clause is not supported form");
+		return;
 	}
-	
+
 	for (int try_parallel=0; try_parallel < 2; try_parallel++)
 	{
 		if (IS_SIMPLE_REL(input_rel))
@@ -1475,6 +1496,22 @@ xpugroupby_add_custompath(PlannerInfo *root,
 		}
 
 		if (input_path)
+		{
+			double		num_groups = 1.0;
+
+			/* fetch num groups if GROUP BY exist  */
+			if (parse->groupClause)
+			{
+				GroupPathExtraData *gp_extra = extra;
+				List   *groupExprs;
+
+				/* see get_number_of_groups() */
+				groupExprs = get_sortgrouplist_exprs(parse->groupClause,
+													 gp_extra->targetList);
+				num_groups = estimate_num_groups(root, groupExprs,
+												 input_path->rows,
+												 NULL, NULL);
+			}
 			__xpugroupby_add_custompath(root,
 										input_path,
 										group_rel,
@@ -1483,6 +1520,7 @@ xpugroupby_add_custompath(PlannerInfo *root,
 										(try_parallel > 0),
 										task_kind,
 										custom_path_methods);
+		}
 	}
 }
 

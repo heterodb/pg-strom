@@ -1369,6 +1369,7 @@ typedef struct
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
 #define DEVTASK__GROUPBY			0x40000000U	/* xPU-GroupBy */
+#define DEVTASK__MASK				0x70000000U	/* mask of avove workloads */
 
 #define TASK_KIND__GPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_GPU)
 #define TASK_KIND__GPUJOIN		(DEVTASK__JOIN   | DEVKIND__NVIDIA_GPU)
@@ -1416,6 +1417,7 @@ typedef struct kern_expression	kern_expression;
 								xpu_datum_t *__result
 typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 
+#define GROUPBY_KVARS_DEPTH			SHRT_MAX
 typedef struct
 {
 	int16_t			var_depth;

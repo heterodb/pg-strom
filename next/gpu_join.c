@@ -65,6 +65,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, pp_info->kvars_resno);
 	privs = lappend(privs, makeInteger(pp_info->extra_flags));
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
+	privs = lappend(privs, pp_info->groupby_key_actions);
 	/* inner relations */
 	privs = lappend(privs, makeInteger(pp_info->num_rels));
 	for (int i=0; i < pp_info->num_rels; i++)
@@ -138,6 +139,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.kvars_resno = list_nth(privs, pindex++);
 	pp_data.extra_flags = intVal(list_nth(privs, pindex++));
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
+	pp_data.groupby_key_actions = list_nth(privs, pindex++);
 	/* inner relations */
 	pp_data.num_rels = intVal(list_nth(privs, pindex++));
 	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_data.num_rels]));
@@ -162,6 +164,40 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 		pp_inner->gist_selectivity = floatVal(list_nth(__privs, __pindex++));
 	}
 	return pp_info;
+}
+
+/*
+ * copy_pgstrom_plan_info
+ */
+static pgstromPlanInfo *
+copy_pgstrom_plan_info(pgstromPlanInfo *pp_orig)
+{
+	pgstromPlanInfo *pp_dest;
+
+	/*
+	 * NOTE: we add one pgstromPlanInnerInfo margin to be used for GpuJoin.
+	 */
+	pp_dest = pmemdup(pp_orig, offsetof(pgstromPlanInfo,
+										inners[pp_orig->num_rels+1]));
+	pp_dest->used_params      = list_copy(pp_dest->used_params);
+	pp_dest->host_quals       = copyObject(pp_dest->host_quals);
+	pp_dest->scan_quals       = copyObject(pp_dest->scan_quals);
+	pp_dest->brin_index_conds = copyObject(pp_dest->brin_index_conds);
+	pp_dest->brin_index_quals = copyObject(pp_dest->brin_index_quals);
+	pp_dest->kvars_depth      = list_copy(pp_dest->kvars_depth);
+	pp_dest->kvars_resno      = list_copy(pp_dest->kvars_resno);
+	pp_dest->groupby_key_actions = list_copy(pp_dest->groupby_key_actions);
+	for (int j=0; j < pp_orig->num_rels; j++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_dest->inners[j];
+
+		pp_inner->hash_outer_keys = copyObject(pp_inner->hash_outer_keys);
+		pp_inner->hash_inner_keys = copyObject(pp_inner->hash_inner_keys);
+		pp_inner->join_quals      = copyObject(pp_inner->join_quals);
+		pp_inner->other_quals     = copyObject(pp_inner->other_quals);
+		pp_inner->gist_clause     = copyObject(pp_inner->gist_clause);
+	}
+	return pp_dest;
 }
 
 /*
@@ -317,7 +353,7 @@ extract_input_path_params(const Path *input_path,
 		input_rels_tlist = lappend(input_rels_tlist, inner_path->pathtarget);
 
 	if (p_pp_info)
-		*p_pp_info = pp_info;
+		*p_pp_info = copy_pgstrom_plan_info(pp_info);
 	if (p_input_rels_tlist)
 		*p_input_rels_tlist = input_rels_tlist;
 	if (p_inner_paths_list)
@@ -459,6 +495,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	 */
 	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_prev->num_rels+1]));
 	memcpy(pp_info, pp_prev, offsetof(pgstromPlanInfo, inners[pp_prev->num_rels]));
+	pp_info->task_kind = task_kind;
 	pp_info->num_rels = pp_prev->num_rels + 1;
 	pp_inner = &pp_info->inners[pp_prev->num_rels];
 
@@ -479,7 +516,6 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 									input_rels_tlist,
 									NULL))
 		{
-			elog(INFO, "dame rinfo %s\n%s", nodeToString(rinfo->clause), nodeToString(input_rels_tlist));
 			return false;
 		}
 
@@ -849,8 +885,8 @@ found:
 	return expression_tree_walker(node, __pgstrom_build_tlist_dev_walker, __priv);
 }
 
-List *
-pgstrom_build_tlist_dev(RelOptInfo *rel,
+static List *
+pgstrom_build_tlist_dev(PathTarget *reltarget,
 						List *tlist,		/* must be backed to CPU */
 						List *host_quals,	/* must be backed to CPU */
 						List *misc_exprs,
@@ -861,16 +897,14 @@ pgstrom_build_tlist_dev(RelOptInfo *rel,
 
 	memset(&context, 0, sizeof(build_tlist_dev_context));
 	context.input_rels_tlist = input_rels_tlist;
-
 	if (tlist != NIL)
 	{
 		foreach (lc, tlist)
 		{
 			TargetEntry *tle = lfirst(lc);
 
-			if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
-				continue;
-			__pgstrom_build_tlist_dev_walker((Node *)tle->expr, &context);
+			if (contain_var_clause((Node *)tle->expr))
+				__pgstrom_build_tlist_dev_walker((Node *)tle->expr, &context);
 		}
 	}
 	else
@@ -884,18 +918,39 @@ pgstrom_build_tlist_dev(RelOptInfo *rel,
 		 * Also don't forget all the Var-nodes to be added must exist at
 		 * the custom_scan_tlist because setrefs.c references this list.
 		 */
-		foreach (lc, rel->reltarget->exprs)
+		foreach (lc, reltarget->exprs)
 		{
 			Node   *node = lfirst(lc);
 
-			if (IsA(node, Const) || IsA(node, Param))
-				continue;
-			__pgstrom_build_tlist_dev_walker(node, &context);
+			if (contain_var_clause(node))
+				 __pgstrom_build_tlist_dev_walker(node, &context);
 		}
 	}
 	context.only_vars = true;
 	__pgstrom_build_tlist_dev_walker((Node *)host_quals, &context);
 
+	context.resjunk = true;
+	__pgstrom_build_tlist_dev_walker((Node *)misc_exprs, &context);
+
+	return context.tlist_dev;
+}
+
+/*
+ * pgstrom_build_groupby_dev
+ */
+static List *
+pgstrom_build_groupby_dev(List *tlist,
+						  List *host_quals,
+						  List *misc_exprs,
+						  List *input_rels_tlist)
+{
+	build_tlist_dev_context context;
+
+	memset(&context, 0, sizeof(build_tlist_dev_context));
+	context.input_rels_tlist = input_rels_tlist;
+	context.tlist_dev = copyObject(tlist);
+	context.only_vars = true;
+	__pgstrom_build_tlist_dev_walker((Node *)host_quals, &context);
 	context.resjunk = true;
 	__pgstrom_build_tlist_dev_walker((Node *)misc_exprs, &context);
 
@@ -994,13 +1049,29 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		}
 		gist_quals_stacked = lappend(gist_quals_stacked, NIL);
 	}
-	/* build device projection */
-	tlist_dev = pgstrom_build_tlist_dev(joinrel,
-										tlist,
-										NIL,
-										misc_exprs,
-										input_rels_tlist);
-	pp_info->kexp_projection = codegen_build_projection(&context, tlist_dev);
+	/*
+	 * final depth shall be device projection (Scan/Join) or partial
+	 * aggregation (GroupBy).
+	 */
+	if ((pp_info->task_kind & DEVTASK__MASK) == DEVTASK__GROUPBY)
+	{
+		/* build device groupby */
+		tlist_dev = pgstrom_build_groupby_dev(tlist,
+											  NIL,
+											  misc_exprs,
+											  input_rels_tlist);
+	}
+	else
+	{
+		/* build device projection */
+		tlist_dev = pgstrom_build_tlist_dev(joinrel->reltarget,
+											tlist,
+											NIL,
+											misc_exprs,
+											input_rels_tlist);
+		pp_info->kexp_projection = codegen_build_projection(&context, tlist_dev);
+	}
+
 	pp_info->kexp_join_quals_packed
 		= codegen_build_packed_joinquals(&context,
 										 join_quals_stacked,
