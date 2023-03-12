@@ -1602,7 +1602,7 @@ pgstrom_init_gpu_preagg(void)
 {
 	/* turn on/off gpu_groupby */
 	DefineCustomBoolVariable("pg_strom.enable_gpupreagg",
-							 "Enables the use of GPU PreAgg",
+							 "Enables the use of GPU-PreAgg",
 							 NULL,
 							 &pgstrom_enable_gpupreagg,
 							 true,
@@ -1619,8 +1619,8 @@ pgstrom_init_gpu_preagg(void)
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* pg_strom.enable_partitionwise_gpugroupby */
-	DefineCustomBoolVariable("pg_strom.enable_partitionwise_gpugroupby",
-							 "Enabled Enables partition wise GpuGroupBy",
+	DefineCustomBoolVariable("pg_strom.enable_partitionwise_gpupreagg",
+							 "Enabled Enables partition wise GPU-PreAgg",
 							 NULL,
 							 &pgstrom_enable_partitionwise_gpupreagg,
 							 true,

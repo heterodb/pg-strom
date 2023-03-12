@@ -312,7 +312,7 @@ _PG_init(void)
 	{
 		pgstrom_init_dpu_scan();
 		pgstrom_init_dpu_join();
-		//pgstrom_init_dpu_preagg();
+		pgstrom_init_dpu_preagg();
 	}
 	pgstrom_init_pcie();
 	/* post planner hook */

@@ -859,6 +859,11 @@ extern bool		pgstrom_enable_dpugistindex;
 extern void		pgstrom_init_dpu_join(void);
 
 /*
+ * dpu_preagg.c
+ */
+extern void		pgstrom_init_dpu_preagg(void);
+
+/*
  * misc.c
  */
 extern Node	   *fixup_varnode_to_origin(Node *node, List *cscan_tlist);
