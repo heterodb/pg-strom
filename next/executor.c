@@ -869,6 +869,31 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 }
 
 /*
+ * pgstromPreAggFinalChunk
+ */
+static XpuCommand *
+pgstromPreAggFinalChunk(struct pgstromTaskState *pts,
+						struct iovec *xcmd_iov, int *xcmd_iovcnt)
+{
+	XpuCommand	   *xcmd;
+
+	pts->xcmd_buf.len = sizeof(XpuCommand);
+	enlargeStringInfo(&pts->xcmd_buf, 0);
+
+	xcmd = (XpuCommand *)pts->xcmd_buf.data;
+	memset(xcmd, 0, offsetof(XpuCommand, u));
+	xcmd->magic  = XpuCommandMagicNumber;
+	xcmd->tag    = XpuCommandTag__XpuPreAggFinal;
+	xcmd->length = offsetof(XpuCommand, u);
+
+	xcmd_iov[0].iov_base = xcmd;
+	xcmd_iov[0].iov_len  = offsetof(XpuCommand, u);
+	*xcmd_iovcnt = 1;
+
+	return xcmd;
+}
+
+/*
  * fixup_inner_varnode
  *
  * Any var-nodes are rewritten at setrefs.c to indicate a particular item
@@ -949,8 +974,8 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 		xcmd->tag = XpuCommandTag__XpuScanExec;
 	else if ((pts->task_kind & DEVTASK__JOIN) != 0)
 		xcmd->tag = XpuCommandTag__XpuJoinExec;
-	else if ((pts->task_kind & DEVTASK__GROUPBY) != 0)
-		xcmd->tag = XpuCommandTag__XpuGroupByExec;
+	else if ((pts->task_kind & DEVTASK__PREAGG) != 0)
+		xcmd->tag = XpuCommandTag__XpuPreAggExec;
 	else
 		elog(ERROR, "unsupported task kind: %08x", pts->task_kind);
 	xcmd->length = bufsz;
@@ -1168,13 +1193,19 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  tupdesc_dst,
 									  KDS_FORMAT_ROW);
 	}
-	/* CPU fallback routine */
+
+	/*
+	 * workload specific callback routines
+	 */
 	if ((pts->task_kind & DEVTASK__SCAN) != 0)
 		pts->cb_cpu_fallback = ExecFallbackCpuScan;
 	else if ((pts->task_kind & DEVTASK__JOIN) != 0)
 		pts->cb_cpu_fallback = ExecFallbackCpuJoin;
-	else if ((pts->task_kind & DEVTASK__GROUPBY) != 0)
-		pts->cb_cpu_fallback = ExecFallbackCpuGroupBy;
+	else if ((pts->task_kind & DEVTASK__PREAGG) != 0)
+	{
+		pts->cb_final_chunk = pgstromPreAggFinalChunk;
+		pts->cb_cpu_fallback = ExecFallbackCpuPreAgg;
+	}
 	else
 		elog(ERROR, "Bug? unknown DEVTASK");
 	/* other fields init */

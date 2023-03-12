@@ -13,11 +13,11 @@
 
 /* static variables */
 static create_upper_paths_hook_type	create_upper_paths_next;
-static CustomPathMethods	gpugroupby_path_methods;
-static CustomScanMethods	gpugroupby_plan_methods;
-static CustomExecMethods	gpugroupby_exec_methods;
-static bool		pgstrom_enable_gpugroupby;
-static bool		pgstrom_enable_partitionwise_gpugroupby;
+static CustomPathMethods	gpupreagg_path_methods;
+static CustomScanMethods	gpupreagg_plan_methods;
+static CustomExecMethods	gpupreagg_exec_methods;
+static bool		pgstrom_enable_gpupreagg;
+static bool		pgstrom_enable_partitionwise_gpupreagg;
 static bool		pgstrom_enable_numeric_aggfuncs;
 int				pgstrom_hll_register_bits;
 
@@ -39,18 +39,6 @@ typedef struct
 	int			partfn_action;	/* any of KAGG_ACTION__* */
 	bool		numeric_aware;	/* ignored, if !enable_numeric_aggfuncs */
 } aggfunc_catalog_t;
-
-#define ALTFUNC_EXPR_NROWS			-101	/* NROWS(X) */
-#define ALTFUNC_EXPR_PMIN			-102	/* PMIN(X) */
-#define ALTFUNC_EXPR_PMAX			-103	/* PMAX(X) */
-#define ALTFUNC_EXPR_PSUM			-104	/* PSUM(X) */
-#define ALTFUNC_EXPR_PSUM_X2		-105	/* PSUM_X2(X) = PSUM(X^2) */
-#define ALTFUNC_EXPR_PCOV_X			-106	/* PCOV_X(X,Y) */
-#define ALTFUNC_EXPR_PCOV_Y			-107	/* PCOV_Y(X,Y) */
-#define ALTFUNC_EXPR_PCOV_X2		-108	/* PCOV_X2(X,Y) */
-#define ALTFUNC_EXPR_PCOV_Y2		-109	/* PCOV_Y2(X,Y) */
-#define ALTFUNC_EXPR_PCOV_XY		-110	/* PCOV_XY(X,Y) */
-#define ALTFUNC_EXPR_HLL_HASH		-111	/* HLL_HASH(X) */
 
 static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	/* COUNT(*) = SUM(NROWS()) */
@@ -1380,7 +1368,7 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 }
 
 static void
-__xpugroupby_add_custompath(PlannerInfo *root,
+__xpupreagg_add_custompath(PlannerInfo *root,
 							Path *input_path,
 							RelOptInfo *group_rel,
 							void *extra,
@@ -1443,7 +1431,7 @@ __xpugroupby_add_custompath(PlannerInfo *root,
 }
 
 void
-xpugroupby_add_custompath(PlannerInfo *root,
+xpupreagg_add_custompath(PlannerInfo *root,
 						  RelOptInfo *input_rel,
 						  RelOptInfo *group_rel,
 						  void *extra,
@@ -1497,7 +1485,7 @@ xpugroupby_add_custompath(PlannerInfo *root,
 												 input_path->rows,
 												 NULL, NULL);
 			}
-			__xpugroupby_add_custompath(root,
+			__xpupreagg_add_custompath(root,
 										input_path,
 										group_rel,
 										extra,
@@ -1510,14 +1498,14 @@ xpugroupby_add_custompath(PlannerInfo *root,
 }
 
 /*
- * gpugroupby_add_custompath
+ * gpupreagg_add_custompath
  */
 static void
-gpugroupby_add_custompath(PlannerInfo *root,
-						  UpperRelationKind stage,
-						  RelOptInfo *input_rel,
-						  RelOptInfo *group_rel,
-						  void *extra)
+gpupreagg_add_custompath(PlannerInfo *root,
+						 UpperRelationKind stage,
+						 RelOptInfo *input_rel,
+						 RelOptInfo *group_rel,
+						 void *extra)
 {
 	if (create_upper_paths_next)
 		create_upper_paths_next(root,
@@ -1527,27 +1515,27 @@ gpugroupby_add_custompath(PlannerInfo *root,
 								extra);
 	if (stage != UPPERREL_GROUP_AGG)
 		return;
-	if (!pgstrom_enabled || !pgstrom_enable_gpugroupby)
+	if (!pgstrom_enabled || !pgstrom_enable_gpupreagg)
 		return;
 	/* add custom-paths */
-	xpugroupby_add_custompath(root,
+	xpupreagg_add_custompath(root,
 							  input_rel,
 							  group_rel,
 							  extra,
-							  TASK_KIND__GPUGROUPBY,
-							  &gpugroupby_path_methods);
+							  TASK_KIND__GPUPREAGG,
+							  &gpupreagg_path_methods);
 }
 
 /*
- * PlanGpuGroupByPath
+ * PlanGpuPreAggPath
  */
 static Plan *
-PlanGpuGroupByPath(PlannerInfo *root,
-				   RelOptInfo *joinrel,
-				   CustomPath *cpath,
-				   List *tlist,
-				   List *clauses,
-				   List *custom_plans)
+PlanGpuPreAggPath(PlannerInfo *root,
+				  RelOptInfo *joinrel,
+				  CustomPath *cpath,
+				  List *tlist,
+				  List *clauses,
+				  List *custom_plans)
 {
 	pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
 	CustomScan	   *cscan;
@@ -1558,26 +1546,26 @@ PlanGpuGroupByPath(PlannerInfo *root,
 								  tlist,
 								  custom_plans,
 								  pp_info,
-								  &gpugroupby_plan_methods);
+								  &gpupreagg_plan_methods);
 	form_pgstrom_plan_info(cscan, pp_info);
 	return &cscan->scan.plan;
 }
 
 /*
- * CreateGpuGroupByScanState
+ * CreateGpuPreAggScanState
  */
 static Node *
-CreateGpuGroupByScanState(CustomScan *cscan)
+CreateGpuPreAggScanState(CustomScan *cscan)
 {
 	pgstromTaskState *pts;
 	int		num_rels = list_length(cscan->custom_plans);
 
-	Assert(cscan->methods == &gpugroupby_plan_methods);
+	Assert(cscan->methods == &gpupreagg_plan_methods);
 	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
 	NodeSetTag(pts, T_CustomScanState);
 	pts->css.flags = cscan->flags;
-	pts->css.methods = &gpugroupby_exec_methods;
-	pts->task_kind = TASK_KIND__GPUGROUPBY;
+	pts->css.methods = &gpupreagg_exec_methods;
+	pts->task_kind = TASK_KIND__GPUPREAGG;
 	pts->pp_info = deform_pgstrom_plan_info(cscan);
 	Assert(pts->pp_info->task_kind == pts->task_kind &&
 		   pts->pp_info->num_rels == num_rels);
@@ -1587,10 +1575,10 @@ CreateGpuGroupByScanState(CustomScan *cscan)
 }
 
 /*
- * ExecGpuGroupBy
+ * ExecGpuPreAgg
  */
 static TupleTableSlot *
-ExecGpuGroupBy(CustomScanState *node)
+ExecGpuPreAgg(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *)node;
 
@@ -1598,25 +1586,25 @@ ExecGpuGroupBy(CustomScanState *node)
 }
 
 /*
- * ExecFallbackCpuGroupBy
+ * ExecFallbackCpuPreAgg
  */
 void
-ExecFallbackCpuGroupBy(pgstromTaskState *pts, HeapTuple tuple)
+ExecFallbackCpuPreAgg(pgstromTaskState *pts, HeapTuple tuple)
 {
-	elog(ERROR, "ExecFallbackCpuGroupBy implemented");
+	elog(ERROR, "ExecFallbackCpuPreAgg implemented");
 }
 
 /*
  * Entrypoint of GpuPreAgg
  */
 void
-pgstrom_init_gpu_groupby(void)
+pgstrom_init_gpu_preagg(void)
 {
 	/* turn on/off gpu_groupby */
-	DefineCustomBoolVariable("pg_strom.enable_gpugroupby",
-							 "Enables the use of GPU Group-By",
+	DefineCustomBoolVariable("pg_strom.enable_gpupreagg",
+							 "Enables the use of GPU PreAgg",
 							 NULL,
-							 &pgstrom_enable_gpugroupby,
+							 &pgstrom_enable_gpupreagg,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -1634,7 +1622,7 @@ pgstrom_init_gpu_groupby(void)
 	DefineCustomBoolVariable("pg_strom.enable_partitionwise_gpugroupby",
 							 "Enabled Enables partition wise GpuGroupBy",
 							 NULL,
-							 &pgstrom_enable_partitionwise_gpugroupby,
+							 &pgstrom_enable_partitionwise_gpupreagg,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -1652,31 +1640,31 @@ pgstrom_init_gpu_groupby(void)
 							NULL, NULL, NULL);
 
 	/* initialization of path method table */
-	memset(&gpugroupby_path_methods, 0, sizeof(CustomPathMethods));
-	gpugroupby_path_methods.CustomName          = "GpuGroupBy";
-	gpugroupby_path_methods.PlanCustomPath      = PlanGpuGroupByPath;
+	memset(&gpupreagg_path_methods, 0, sizeof(CustomPathMethods));
+	gpupreagg_path_methods.CustomName          = "GpuPreAgg";
+	gpupreagg_path_methods.PlanCustomPath      = PlanGpuPreAggPath;
 
 	/* initialization of plan method table */
-	memset(&gpugroupby_plan_methods, 0, sizeof(CustomScanMethods));
-	gpugroupby_plan_methods.CustomName          = "GpuGroupBy";
-	gpugroupby_plan_methods.CreateCustomScanState = CreateGpuGroupByScanState;
-	RegisterCustomScanMethods(&gpugroupby_plan_methods);
+	memset(&gpupreagg_plan_methods, 0, sizeof(CustomScanMethods));
+	gpupreagg_plan_methods.CustomName          = "GpuPreAgg";
+	gpupreagg_plan_methods.CreateCustomScanState = CreateGpuPreAggScanState;
+	RegisterCustomScanMethods(&gpupreagg_plan_methods);
 
 	/* initialization of exec method table */
-	memset(&gpugroupby_exec_methods, 0, sizeof(CustomExecMethods));
-	gpugroupby_exec_methods.CustomName          = "GpuGroupBy";
-	gpugroupby_exec_methods.BeginCustomScan     = pgstromExecInitTaskState;
-	gpugroupby_exec_methods.ExecCustomScan      = ExecGpuGroupBy;
-	gpugroupby_exec_methods.EndCustomScan       = pgstromExecEndTaskState;
-	gpugroupby_exec_methods.ReScanCustomScan    = pgstromExecResetTaskState;
-	gpugroupby_exec_methods.EstimateDSMCustomScan = pgstromSharedStateEstimateDSM;
-	gpugroupby_exec_methods.InitializeDSMCustomScan = pgstromSharedStateInitDSM;
-	gpugroupby_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
-	gpugroupby_exec_methods.ShutdownCustomScan  = pgstromSharedStateShutdownDSM;
-	gpugroupby_exec_methods.ExplainCustomScan   = pgstromExplainTaskState;
+	memset(&gpupreagg_exec_methods, 0, sizeof(CustomExecMethods));
+	gpupreagg_exec_methods.CustomName          = "GpuPreAgg";
+	gpupreagg_exec_methods.BeginCustomScan     = pgstromExecInitTaskState;
+	gpupreagg_exec_methods.ExecCustomScan      = ExecGpuPreAgg;
+	gpupreagg_exec_methods.EndCustomScan       = pgstromExecEndTaskState;
+	gpupreagg_exec_methods.ReScanCustomScan    = pgstromExecResetTaskState;
+	gpupreagg_exec_methods.EstimateDSMCustomScan = pgstromSharedStateEstimateDSM;
+	gpupreagg_exec_methods.InitializeDSMCustomScan = pgstromSharedStateInitDSM;
+	gpupreagg_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
+	gpupreagg_exec_methods.ShutdownCustomScan  = pgstromSharedStateShutdownDSM;
+	gpupreagg_exec_methods.ExplainCustomScan   = pgstromExplainTaskState;
 	/* hook registration */
 	create_upper_paths_next = create_upper_paths_hook;
-	create_upper_paths_hook = gpugroupby_add_custompath;
+	create_upper_paths_hook = gpupreagg_add_custompath;
 
 	CacheRegisterSyscacheCallback(PROCOID, aggfunc_catalog_htable_invalidator, 0);
 }

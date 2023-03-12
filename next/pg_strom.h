@@ -776,14 +776,14 @@ extern void		pgstrom_init_gpu_join(void);
  * gpu_groupby.c
  */
 extern int		pgstrom_hll_register_bits;
-extern void		xpugroupby_add_custompath(PlannerInfo *root,
-										  RelOptInfo *input_rel,
-										  RelOptInfo *group_rel,
-										  void *extra,
-										  uint32_t task_kind,
-										  const CustomPathMethods *methods);
-extern void		ExecFallbackCpuGroupBy(pgstromTaskState *pts, HeapTuple tuple);
-extern void		pgstrom_init_gpu_groupby(void);
+extern void		xpupreagg_add_custompath(PlannerInfo *root,
+										 RelOptInfo *input_rel,
+										 RelOptInfo *group_rel,
+										 void *extra,
+										 uint32_t task_kind,
+										 const CustomPathMethods *methods);
+extern void		ExecFallbackCpuPreAgg(pgstromTaskState *pts, HeapTuple tuple);
+extern void		pgstrom_init_gpu_preagg(void);
 
 /*
  * arrow_fdw.c and arrow_read.c

@@ -1084,7 +1084,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	 * final depth shall be device projection (Scan/Join) or partial
 	 * aggregation (GroupBy).
 	 */
-	if ((pp_info->task_kind & DEVTASK__MASK) == DEVTASK__GROUPBY)
+	if ((pp_info->task_kind & DEVTASK__MASK) == DEVTASK__PREAGG)
 	{
 		context.tlist_dev =  pgstrom_build_groupby_dev(tlist,
 													   NIL,

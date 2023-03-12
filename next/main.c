@@ -305,7 +305,7 @@ _PG_init(void)
 		pgstrom_init_gpu_service();
 		pgstrom_init_gpu_scan();
 		pgstrom_init_gpu_join();
-		pgstrom_init_gpu_groupby();
+		pgstrom_init_gpu_preagg();
 	}
 	/* init DPU related stuff */
 	if (pgstrom_init_dpu_device())
