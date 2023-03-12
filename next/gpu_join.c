@@ -1207,6 +1207,9 @@ ExecGpuJoin(CustomScanState *node)
 		inner_handle = GpuJoinInnerPreload(pts);
 		if (inner_handle == 0)
 			return NULL;
+		/* outer scan is already done? */
+		if (!pgstromTaskStateBeginScan(pts))
+			return NULL;
 		/* open the GpuJoin session */
 		session = pgstromBuildSessionInfo(pts, inner_handle);
 		gpuClientOpenSession(pts, pts->optimal_gpus, session);

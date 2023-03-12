@@ -295,6 +295,8 @@ typedef struct
 {
 	dsm_handle			ss_handle;			/* DSM handle of the SharedState */
 	uint32_t			ss_length;			/* length of the SharedState */
+	/* control variable for parallel execution. */
+	pg_atomic_uint32	scan_control;
 	/* statistics */
 	pg_atomic_uint64	source_ntuples;
 	pg_atomic_uint64	source_nvalids;
@@ -380,6 +382,7 @@ struct pgstromTaskState
 	kern_data_store	   *curr_kds;
 	int					curr_chunk;
 	int64_t				curr_index;
+	bool				scan_begin;
 	bool				scan_done;
 	bool				final_done;
 	/* base relation scan, if any */
@@ -576,6 +579,8 @@ extern void		pgstrom_init_relscan(void);
 /*
  * executor.c
  */
+extern bool		pgstromTaskStateBeginScan(pgstromTaskState *pts);
+extern bool		pgstromTaskStateEndScan(pgstromTaskState *pts);
 extern void		__xpuClientOpenSession(pgstromTaskState *pts,
 									   const XpuCommand *session,
 									   pgsocket sockfd,

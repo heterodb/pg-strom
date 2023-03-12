@@ -603,6 +603,45 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 }
 
 /*
+ * pgstromTaskStateBeginScan
+ */
+bool
+pgstromTaskStateBeginScan(pgstromTaskState *pts)
+{
+	pgstromSharedState *ps_state = pts->ps_state;
+	uint32_t	curval, newval;
+
+	Assert(!pts->scan_begin);
+	curval = pg_atomic_read_u32(&ps_state->scan_control);
+	do {
+		if ((curval & 1) != 0)
+			return false;
+		newval = curval + 2;
+	} while (!pg_atomic_compare_exchange_u32(&ps_state->scan_control,
+											 &curval, newval));
+	pts->scan_begin = true;
+	return true;
+}
+
+/*
+ * pgstromTaskStateEndScan
+ */
+bool
+pgstromTaskStateEndScan(pgstromTaskState *pts)
+{
+	pgstromSharedState *ps_state = pts->ps_state;
+	uint32_t	curval, newval;
+
+	Assert(pts->scan_begin);
+	curval = pg_atomic_read_u32(&ps_state->scan_control);
+	do {
+		newval = ((curval - 2) | 1);
+	} while (!pg_atomic_compare_exchange_u32(&ps_state->scan_control,
+											 &curval, newval));
+	return (newval == 1);
+}
+
+/*
  * __pickupNextXpuCommand
  *
  * MEMO: caller must hold 'conn->mutex'
@@ -664,14 +703,20 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 		else
 		{
 			pthreadMutexUnlock(&conn->mutex);
-			if (!try_final_callback)
-				return NULL;
-			if (!pts->cb_final_chunk || pts->final_done)
-				return NULL;
-			xcmd = pts->cb_final_chunk(pts, xcmd_iov, &xcmd_iovcnt);
-			if (!xcmd)
-				return NULL;
-			xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
+			if (!pts->final_done)
+			{
+				pts->final_done = true;
+				if (pgstromTaskStateEndScan(pts) && try_final_callback)
+				{
+					xcmd = pts->cb_final_chunk(pts, xcmd_iov, &xcmd_iovcnt);
+					if (xcmd)
+					{
+						xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
+						continue;
+					}
+				}
+			}
+			return NULL;
 		}
 		CHECK_FOR_INTERRUPTS();
 
@@ -1236,6 +1281,7 @@ pgstromExecResetTaskState(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
 
+	pts->scan_begin = false;
 	if (pts->conn)
 	{
 		xpuClientCloseSession(pts->conn);
