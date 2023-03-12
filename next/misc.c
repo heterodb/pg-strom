@@ -1737,9 +1737,12 @@ __mmapShmem(uint32_t shmem_handle,
 			elog(ERROR, "failed on fstat('%s'): %m", fname);
 		if (stat_buf.st_size < mmap_size)
 		{
-			if (fallocate(fdesc, 0, 0, mmap_size) != 0)
-				elog(ERROR, "failed on fallocate('%s', %lu): %m",
-					 fname, mmap_size);
+			while (fallocate(fdesc, 0, 0, mmap_size) != 0)
+			{
+				if (errno != EINTR)
+					elog(ERROR, "failed on fallocate('%s', %lu): %m",
+						 fname, mmap_size);
+			}
 		}
 		mmap_addr = mmap(NULL, mmap_size, mmap_prot, mmap_flags, fdesc, 0);
 		if (mmap_addr == MAP_FAILED)
