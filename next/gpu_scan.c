@@ -544,12 +544,12 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	context.input_rels_tlist = input_rels_tlist;
 	pp_info->kexp_scan_quals = codegen_build_scan_quals(&context, pp_info->scan_quals);
 	/* code generation for the Projection */
-	tlist_dev = gpuscan_build_projection(baserel,
-										 tlist,
-										 pp_info->host_quals,
-										 pp_info->scan_quals,
-										 input_rels_tlist);
-	pp_info->kexp_projection = codegen_build_projection(&context, tlist_dev);
+	context.tlist_dev = gpuscan_build_projection(baserel,
+												 tlist,
+												 pp_info->host_quals,
+												 pp_info->scan_quals,
+												 input_rels_tlist);
+	pp_info->kexp_projection = codegen_build_projection(&context);
 	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(&context);
 	pp_info->kvars_depth = context.kvars_depth;
 	pp_info->kvars_resno = context.kvars_resno;

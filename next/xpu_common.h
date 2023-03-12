@@ -204,13 +204,9 @@ typedef struct
 	/*
 	 * current slot of the kernel variable references
 	 *
-	 * if (!kvars_cmeta[slot_id])
-	 *     kvars_addr[slot_id] references xpu_datum_t
-	 *     kvars_len[slot_id] is always -1
-	 * else
-	 *     kvars_addr[slot_id] references the item on the KDS; it's format
-	 *       follows the cmeta->kds_format
-	 *     kvars_len[slot_id] is the length of Arrow::Utf8 or Arrow::Binary.
+	 * if kvars_cmeta[slot_id] != NULL, it means kvars_addr/kvars_len
+	 * references KDS with Arrow Format. (Data interpretation needs
+	 * unit size of the values)
 	 */
 	uint32_t		kvars_nslots;
 	struct kern_colmeta **kvars_cmeta;
@@ -222,7 +218,7 @@ typedef struct
 	char			vlbuf[1];
 } kern_context;
 
-#define INIT_KERNEL_CONTEXT(KCXT,SESSION,KDS_SRC,KMRELS,KDS_DST)		\
+#define INIT_KERNEL_CONTEXT(KCXT,SESSION,KDS_SRC)						\
 	do {																\
 		uint32_t	__bufsz = Max(1024, (SESSION)->kcxt_extra_bufsz);	\
 		uint32_t	__len = offsetof(kern_context, vlbuf) +	__bufsz;	\
@@ -233,7 +229,7 @@ typedef struct
 		KCXT->kvars_nslots = (SESSION)->kvars_slot_width;				\
 		KCXT->kvars_cmeta = (kern_colmeta **)							\
 			alloca(sizeof(kern_colmeta *) * (KCXT)->kvars_nslots);		\
-		INIT_KERNEL_VARS_CMETA((KCXT),(KDS_SRC),(KMRELS),(KDS_DST));	\
+		INIT_KERNEL_VARS_CMETA((KCXT),(KDS_SRC));						\
 		KCXT->kvars_addr = NULL;										\
 		KCXT->kvars_len = NULL;											\
 		KCXT->vlpos = KCXT->vlbuf;										\
@@ -1403,10 +1399,12 @@ typedef enum {
 	FuncOpCode__BoolTestExpr_IsNotUnknown,
 #include "xpu_opcodes.h"
 	/* for projection */
-	FuncOpCode__Projection,
+	FuncOpCode__Projection = 9999,
 	FuncOpCode__LoadVars,
 	FuncOpCode__JoinQuals,
 	FuncOpCode__HashValue,
+	FuncOpCode__SaveExpr,
+	FuncOpCode__AggFuncs,
 	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
 	FuncOpCode__BuiltInMax,
 } FuncOpCode;
@@ -1417,7 +1415,6 @@ typedef struct kern_expression	kern_expression;
 								xpu_datum_t *__result
 typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 
-#define GROUPBY_KVARS_DEPTH			SHRT_MAX
 typedef struct
 {
 	int16_t			var_depth;
@@ -1512,23 +1509,15 @@ typedef struct
 	float8_t	sum_xy;
 } kagg_state__covar_packed;
 
-
-
-
-
-
-
-
 struct kern_aggregate_desc
 {
-	/* function below shall be resolved by xPU service */
-	int			  (*action_fn)(kern_context *kcxt,
-							   const struct kern_aggregate_desc *kagg,
-							   char *pos);
-	uint16_t		action;			/* any of KAGG_ACTION__* */
-	int16_t			length;			/* optional length for HLL, or -1 */
-	int16_t			arg0_slot_id;	/* -1, if not used */
-	int16_t			arg1_slot_id;	/* -1, if not used */
+	int		  (*action_fn)(kern_context *kcxt,
+						   const struct kern_aggregate_desc *kagg,
+						   char *pos);
+	uint16_t	action;			/* any of KAGG_ACTION__* */
+	int16_t		arg0_slot_id;	/* -1, if not used */
+	int16_t		arg1_slot_id;	/* -1, if not used */
+	int16_t		__reserved__;
 };
 typedef struct kern_aggregate_desc	kern_aggregate_desc;
 
@@ -1568,11 +1557,15 @@ struct kern_expression
 			kern_vars_defitem kvars[1];
 		} load;		/* VarLoads */
 		struct {
+			int			slot_id;	/* destination slot-id */
+			char		data[1];
+		} save;		/* SaveExpr */
+		struct {
 			int			nattrs;
 			kern_aggregate_desc desc[1];
 		} pagg;		/* PreAggs */
 		struct {
-			int			nexprs;
+			int			datum_sz;
 			int			nattrs;
 			kern_projection_desc desc[1];
 		} proj;		/* Projection */
@@ -1684,6 +1677,10 @@ typedef struct kern_session_info
 	uint32_t	xpucode_hash_values_packed;
 	uint32_t	xpucode_gist_quals_packed;
 	uint32_t	xpucode_projection;
+	uint32_t	xpucode_groupby_keyhash;
+	uint32_t	xpucode_groupby_keyload;
+	uint32_t	xpucode_groupby_keycomp;
+	uint32_t	xpucode_groupby_actions;
 
 	/* database session info */
 	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
@@ -2039,6 +2036,10 @@ kern_form_heaptuple(kern_context *kcxt,
 					const kern_expression *kproj,
 					const kern_data_store *kds_dst,
 					HeapTupleHeaderData *htup);
+EXTERN_FUNCTION(int)
+kern_estimate_heaptuple(kern_context *kcxt,
+						const kern_expression *kproj,
+						const kern_data_store *kds_dst);
 EXTERN_FUNCTION(void)
 ExecLoadVarsHeapTuple(kern_context *kcxt,
 					  kern_expression *kexp_load_vars,
@@ -2170,8 +2171,6 @@ KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int dindex)
 /* init kcxt->kvars_cmeta */
 EXTERN_FUNCTION(void)
 INIT_KERNEL_VARS_CMETA(kern_context *kcxt,
-					   struct kern_data_store *kds_src,
-					   struct kern_multirels *kmrels,
-					   struct kern_data_store *kds_dst);
+					   kern_data_store *kds_src);
 
 #endif	/* XPU_COMMON_H */

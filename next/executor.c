@@ -539,6 +539,38 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
 	}
+	if (pp_info->kexp_groupby_keyhash)
+	{
+		xpucode = pp_info->kexp_groupby_keyhash;
+		session->xpucode_groupby_keyhash =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+	}
+	if (pp_info->kexp_groupby_keyload)
+	{
+		xpucode = pp_info->kexp_groupby_keyload;
+		session->xpucode_groupby_keyload =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+	}
+	if (pp_info->kexp_groupby_keycomp)
+	{
+		xpucode = pp_info->kexp_groupby_keycomp;
+		session->xpucode_groupby_keycomp =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+	}
+	if (pp_info->kexp_groupby_actions)
+	{
+		xpucode = pp_info->kexp_groupby_actions;
+		session->xpucode_groupby_actions =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+	}
 	/* other database session information */
 	Assert(list_length(kvars_depth_list) == list_length(kvars_resno_list));
 	session->query_plan_id = ((uint64_t)MyProcPid << 32) |
@@ -1606,6 +1638,18 @@ pgstromExplainTaskState(CustomScanState *node,
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								label,
 								pp_info->kexp_projection);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Group-By KeyHash OpCode",
+								pp_info->kexp_groupby_keyhash);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Group-By KeyLoad OpCode",
+								pp_info->kexp_groupby_keyload);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Group-By KeyComp OpCode",
+								pp_info->kexp_groupby_keycomp);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Partial Aggregation OpCode",
+								pp_info->kexp_groupby_actions);
 	}
 	pfree(buf.data);
 }

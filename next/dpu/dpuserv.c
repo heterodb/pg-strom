@@ -339,7 +339,7 @@ __resolveDevicePointersWalker(kern_expression *kexp,
 	const xpu_type_hash_entry *dtype_hentry;
 	const xpu_func_hash_entry *dfunc_hentry;
 	kern_expression *karg;
-	uint32_t	i, k, n;
+	uint32_t	i, k;
 
 	/* lookup device function */
 	k = (uint32_t)kexp->opcode % xfunc_htable->nslots;
@@ -378,8 +378,7 @@ __resolveDevicePointersWalker(kern_expression *kexp,
 	/* special handling for Projection */
 	if (kexp->opcode == FuncOpCode__Projection)
 	{
-		n = kexp->u.proj.nexprs + kexp->u.proj.nattrs;
-		for (i=0; i < n; i++)
+		for (i=0; i < kexp->u.proj.nattrs; i++)
 		{
 			kern_projection_desc *desc = &kexp->u.proj.desc[i];
 
@@ -393,14 +392,8 @@ __resolveDevicePointersWalker(kern_expression *kexp,
 			}
 			if (dtype_hentry)
 				desc->slot_ops = dtype_hentry->cat.type_ops;
-			else if (i >= kexp->u.proj.nexprs)
-				desc->slot_ops = NULL;	/* PostgreSQL generic projection */
 			else
-			{
-				fprintf(stderr, "device type pointer for opcode:%u not found.\n",
-						(int)desc->slot_type);
-				return false;
-			}
+				desc->slot_ops = NULL;
 		}
 	}
 
@@ -646,17 +639,15 @@ __handleDpuTaskExecProjection(dpuClient *dclient,
 {
 	kern_session_info  *session = dclient->session;
 	kern_expression    *kexp_projection = SESSION_KEXP_PROJECTION(session);
-	xpu_int4_t			__tupsz;
+	int32_t				tupsz;
 
-	assert(kexp_projection->opcode  == FuncOpCode__Projection &&
-		   kexp_projection->exptype == TypeOpCode__int4);
-	kcxt_reset(kcxt);
-	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_projection, &__tupsz))
-		return false;
-	if (!__tupsz.isnull && __tupsz.value > 0)
+	assert(kexp_projection->opcode  == FuncOpCode__Projection);
+	tupsz = kern_estimate_heaptuple(kcxt,
+									kexp_projection,
+									dtes->kds_dst_head);
+	if (tupsz > 0)
 	{
 		kern_data_store *kds_dst = dtes->kds_dst;
-		int32_t		tupsz = MAXALIGN(__tupsz.value);
 		uint32_t	rowid;
 		size_t		offset;
 		size_t		newsz;
@@ -904,7 +895,7 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 		   kexp_scan_quals->exptype == TypeOpCode__bool &&
 		   kexp_projection->opcode == FuncOpCode__Projection);
 	assert(!kmrels || kmrels->num_rels > 0);
-	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, kmrels, dtes->kds_dst_head);
+	INIT_KERNEL_CONTEXT(kcxt, session, kds_src);
 	kcxt->kvars_addr = alloca(sizeof(void *) * kcxt->kvars_nslots);
 	kcxt->kvars_len  = alloca(sizeof(int)    * kcxt->kvars_nslots);
 	for (block_index = 0; block_index < kds_src->nitems; block_index++)
@@ -978,7 +969,7 @@ __handleDpuScanExecArrow(dpuClient *dclient,
 	assert(kds_src->format == KDS_FORMAT_ARROW &&
 		   kexp_load_vars->opcode == FuncOpCode__LoadVars &&
 		   kexp_scan_quals->exptype == TypeOpCode__bool);
-	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, kmrels, dtes->kds_dst_head);
+	INIT_KERNEL_CONTEXT(kcxt, session, kds_src);
 	kcxt->kvars_addr = alloca(sizeof(void *) * kcxt->kvars_nslots);
 	kcxt->kvars_len  = alloca(sizeof(int)    * kcxt->kvars_nslots);
 	for (kds_index = 0; kds_index < kds_src->nitems; kds_index++)

@@ -61,11 +61,16 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_hash_keys_packed));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_gist_quals_packed));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_projection));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keyhash));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keyload));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keycomp));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_actions));
 	privs = lappend(privs, pp_info->kvars_depth);
 	privs = lappend(privs, pp_info->kvars_resno);
 	privs = lappend(privs, makeInteger(pp_info->extra_flags));
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
-	privs = lappend(privs, pp_info->groupby_key_actions);
+	privs = lappend(privs, pp_info->groupby_actions);
+	privs = lappend(privs, pp_info->groupby_keys);
 	/* inner relations */
 	privs = lappend(privs, makeInteger(pp_info->num_rels));
 	for (int i=0; i < pp_info->num_rels; i++)
@@ -135,11 +140,16 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.kexp_hash_keys_packed = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_gist_quals_packed = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_projection = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_keyhash = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_keyload = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_keycomp = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_actions = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kvars_depth = list_nth(privs, pindex++);
 	pp_data.kvars_resno = list_nth(privs, pindex++);
 	pp_data.extra_flags = intVal(list_nth(privs, pindex++));
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
-	pp_data.groupby_key_actions = list_nth(privs, pindex++);
+	pp_data.groupby_actions = list_nth(privs, pindex++);
+	pp_data.groupby_keys = list_nth(privs, pindex++);
 	/* inner relations */
 	pp_data.num_rels = intVal(list_nth(privs, pindex++));
 	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_data.num_rels]));
@@ -152,15 +162,15 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 		int		__pindex = 0;
 		int		__eindex = 0;
 
-		pp_inner->join_type = intVal(list_nth(__privs, __pindex++));
-		pp_inner->join_nrows = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->join_type       = intVal(list_nth(__privs, __pindex++));
+		pp_inner->join_nrows      = floatVal(list_nth(__privs, __pindex++));
 		pp_inner->hash_outer_keys = list_nth(__exprs, __eindex++);
 		pp_inner->hash_inner_keys = list_nth(__exprs, __eindex++);
-		pp_inner->join_quals = list_nth(__exprs, __eindex++);
-		pp_inner->other_quals = list_nth(__exprs, __eindex++);
-		pp_inner->gist_index_oid = intVal(list_nth(__privs, __pindex++));
-		pp_inner->gist_index_col = intVal(list_nth(__privs, __pindex++));
-		pp_inner->gist_clause = list_nth(__exprs, __eindex++);
+		pp_inner->join_quals      = list_nth(__exprs, __eindex++);
+		pp_inner->other_quals     = list_nth(__exprs, __eindex++);
+		pp_inner->gist_index_oid  = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_index_col  = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_clause     = list_nth(__exprs, __eindex++);
 		pp_inner->gist_selectivity = floatVal(list_nth(__privs, __pindex++));
 	}
 	return pp_info;
@@ -186,7 +196,8 @@ copy_pgstrom_plan_info(pgstromPlanInfo *pp_orig)
 	pp_dest->brin_index_quals = copyObject(pp_dest->brin_index_quals);
 	pp_dest->kvars_depth      = list_copy(pp_dest->kvars_depth);
 	pp_dest->kvars_resno      = list_copy(pp_dest->kvars_resno);
-	pp_dest->groupby_key_actions = list_copy(pp_dest->groupby_key_actions);
+	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
+	pp_dest->groupby_keys     = list_copy(pp_dest->groupby_keys);
 	for (int j=0; j < pp_orig->num_rels; j++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_dest->inners[j];
@@ -945,6 +956,7 @@ pgstrom_build_groupby_dev(List *tlist,
 						  List *input_rels_tlist)
 {
 	build_tlist_dev_context context;
+	ListCell   *lc1, *lc2;
 
 	memset(&context, 0, sizeof(build_tlist_dev_context));
 	context.input_rels_tlist = input_rels_tlist;
@@ -953,7 +965,26 @@ pgstrom_build_groupby_dev(List *tlist,
 	__pgstrom_build_tlist_dev_walker((Node *)host_quals, &context);
 	context.resjunk = true;
 	__pgstrom_build_tlist_dev_walker((Node *)misc_exprs, &context);
+	/* just for explain output */
+	foreach (lc1, tlist)
+	{
+		TargetEntry *tle = lfirst(lc1);
 
+		if (IsA(tle->expr, FuncExpr))
+		{
+			FuncExpr   *f = (FuncExpr *)tle->expr;
+
+			foreach (lc2, f->args)
+			{
+				Expr   *arg = lfirst(lc2);
+				int		resno = list_length(context.tlist_dev) + 1;
+
+				context.tlist_dev =
+					lappend(context.tlist_dev,
+							makeTargetEntry(arg, resno, NULL, true));
+			}
+		}
+	}
 	return context.tlist_dev;
 }
 
@@ -978,7 +1009,6 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	List	   *gist_quals_stacked = NIL;
 	List	   *misc_exprs = NIL;
 	List	   *input_rels_tlist;
-	List	   *tlist_dev;
 	ListCell   *lc;
 
 	Assert(pp_info->num_rels == list_length(custom_plans));
@@ -1049,27 +1079,29 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		}
 		gist_quals_stacked = lappend(gist_quals_stacked, NIL);
 	}
+
 	/*
 	 * final depth shall be device projection (Scan/Join) or partial
 	 * aggregation (GroupBy).
 	 */
 	if ((pp_info->task_kind & DEVTASK__MASK) == DEVTASK__GROUPBY)
 	{
-		/* build device groupby */
-		tlist_dev = pgstrom_build_groupby_dev(tlist,
-											  NIL,
-											  misc_exprs,
-											  input_rels_tlist);
+		context.tlist_dev =  pgstrom_build_groupby_dev(tlist,
+													   NIL,
+													   misc_exprs,
+													   input_rels_tlist);
+		codegen_build_groupby_actions(&context, pp_info);
 	}
 	else
 	{
 		/* build device projection */
-		tlist_dev = pgstrom_build_tlist_dev(joinrel->reltarget,
-											tlist,
-											NIL,
-											misc_exprs,
-											input_rels_tlist);
-		pp_info->kexp_projection = codegen_build_projection(&context, tlist_dev);
+		context.tlist_dev
+			= pgstrom_build_tlist_dev(joinrel->reltarget,
+									  tlist,
+									  NIL,
+									  misc_exprs,
+									  input_rels_tlist);
+		pp_info->kexp_projection = codegen_build_projection(&context);
 	}
 
 	pp_info->kexp_join_quals_packed
@@ -1094,7 +1126,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	cscan->scan.scanrelid = pp_info->scan_relid;
 	cscan->flags = cpath->flags;
 	cscan->custom_plans = custom_plans;
-	cscan->custom_scan_tlist = tlist_dev;
+	cscan->custom_scan_tlist = context.tlist_dev;
 	cscan->methods = xpujoin_plan_methods;
 
 	return cscan;

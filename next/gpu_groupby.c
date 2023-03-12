@@ -894,11 +894,7 @@ typedef struct
 	PathTarget	   *target_partial;
 	PathTarget	   *target_final;
 	AggClauseCosts	final_clause_costs;
-	List		   *groupby_keys;
-	List		   *groupby_keys_refno;
-	List		   *groupby_actions;
-	List		   *groupby_prep_exprs;
-	pgstromPlanInfo *pp_prev;
+	pgstromPlanInfo *pp_info;
 	List		   *input_rels_tlist;
 	List		   *inner_paths_list;
 	Node		   *havingQual;
@@ -971,6 +967,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 {
 	const aggfunc_catalog_entry *aggfn_cat;
 	PathTarget *target_partial = con->target_partial;
+	pgstromPlanInfo *pp_info = con->pp_info;
 	List	   *partfn_args = NIL;
 	Expr	   *partfn;
 	Aggref	   *aggref_alt;
@@ -1036,17 +1033,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 				 nodeToString(expr));
 			return NULL;
 		}
-
-		if (!IsA(expr, Var))
-		{
-			elog(INFO, "pfunc argument: %s", nodeToString(expr));
-			con->groupby_prep_exprs = lappend(con->groupby_prep_exprs, expr);
-			//if argument is not simple Var-node, must be setup in the kernel
-		}
-
 		partfn_args = lappend(partfn_args, expr);
-
-		//try add prep_tlist as input
 	}
 	ReleaseSysCache(htup);
 
@@ -1060,8 +1047,8 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 	if (!list_member(target_partial->exprs, partfn))
 	{
 		add_column_to_pathtarget(target_partial, partfn, 0);
-		con->groupby_actions = lappend_int(con->groupby_actions,
-										   aggfn_cat->partial_func_action);
+		pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
+											   aggfn_cat->partial_func_action);
 	}
 
 	/*
@@ -1115,6 +1102,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 static Node *
 replace_expression_by_altfunc(Node *node, xpugroupby_build_path_context *con)
 {
+	pgstromPlanInfo *pp_info = con->pp_info;
 	Node	   *aggfn;
 	ListCell   *lc;
 
@@ -1129,7 +1117,7 @@ replace_expression_by_altfunc(Node *node, xpugroupby_build_path_context *con)
 		return aggfn;
 	}
 	/* grouping key? */
-	foreach (lc, con->groupby_keys)
+	foreach (lc, pp_info->groupby_keys)
 	{
 		Expr   *key = lfirst(lc);
 
@@ -1145,12 +1133,14 @@ replace_expression_by_altfunc(Node *node, xpugroupby_build_path_context *con)
 static bool
 xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 {
-	PlannerInfo *root = con->root;
-	Query	   *parse = root->parse;
-	PathTarget *target_upper = con->target_upper;
-	Node	   *havingQual = NULL;
-	ListCell   *lc1, *lc2;
-	int			i = 0;
+	PlannerInfo	   *root = con->root;
+	Query		   *parse = root->parse;
+	pgstromPlanInfo *pp_info = con->pp_info;
+	PathTarget	   *target_upper = con->target_upper;
+	Node		   *havingQual = NULL;
+	List		   *groupby_keys_refno = NIL;
+	ListCell	   *lc1, *lc2;
+	int				i = 0;
 
 	/*
 	 * Pick up grouping-keys and aggregate-functions to be replaced by
@@ -1198,8 +1188,8 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			}
 			add_column_to_pathtarget(con->target_final, expr, sortgroupref);
 			/* to be attached to target-partial later */
-			con->groupby_keys = lappend(con->groupby_keys, expr);
-			con->groupby_keys_refno = lappend_int(con->groupby_keys_refno, sortgroupref);
+			pp_info->groupby_keys = lappend(pp_info->groupby_keys, expr);
+			groupby_keys_refno = lappend_int(groupby_keys_refno, sortgroupref);
 		}
 		else if (IsA(expr, Aggref))
 		{
@@ -1231,16 +1221,20 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 	 * Due to data alignment on the tuple on the kds_final, grouping-keys must
 	 * be located after the aggregate functions.
 	 */
-	elog(INFO, "groupby_keys => %s", nodeToString(con->groupby_keys));
-	forboth (lc1, con->groupby_keys,
-			 lc2, con->groupby_keys_refno)
+	elog(INFO, "groupby_keys => %s", nodeToString(pp_info->groupby_keys));
+	forboth (lc1, pp_info->groupby_keys,
+			 lc2, groupby_keys_refno)
 	{
 		Expr   *key = lfirst(lc1);
 		Index	keyref = lfirst_int(lc2);
 
 		Assert(keyref > 0);
 		add_column_to_pathtarget(con->target_partial, key, keyref);
-		con->groupby_actions = lappend_int(con->groupby_actions, -1);
+		pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
+											   KAGG_ACTION__VREF);
+		pp_info->kvars_depth = lappend_int(pp_info->kvars_depth, -1);
+		pp_info->kvars_resno = lappend_int(pp_info->kvars_resno,
+										   list_length(con->target_partial->exprs));
 	}
 
 	/*
@@ -1274,8 +1268,7 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 	CustomPath *cpath = makeNode(CustomPath);
 	Path	   *input_path = con->input_path;
 	PathTarget *target_partial = con->target_partial;
-	pgstromPlanInfo *pp_prev = con->pp_prev;
-	pgstromPlanInfo *pp_info;
+	pgstromPlanInfo *pp_info = con->pp_info;
 	double		num_group_keys;
 	double		xpu_ratio;
 	Cost		xpu_operator_cost;
@@ -1305,7 +1298,7 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 	}
 	startup_cost = input_path->startup_cost;
 	run_cost = (input_path->total_cost -
-				input_path->startup_cost - pp_prev->final_cost);
+				input_path->startup_cost - pp_info->final_cost);
 	/* Cost estimation for grouping */
 	num_group_keys = list_length(parse->groupClause);
 	startup_cost += (xpu_operator_cost *
@@ -1318,11 +1311,6 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 	final_cost = xpu_tuple_cost * con->num_groups;
 	if (input_path->parallel_workers > 0)
 		final_cost *= (0.5 + (double)input_path->parallel_workers);
-
-	pp_info = pmemdup(pp_prev, offsetof(pgstromPlanInfo,
-										inners[pp_prev->num_rels]));
-	pp_info->task_kind = con->task_kind;
-	pp_info->final_cost = final_cost;
 
 	cpath->path.pathtype         = T_CustomScan;
 	cpath->path.parent           = input_path->parent;
@@ -1418,16 +1406,13 @@ __xpugroupby_add_custompath(PlannerInfo *root,
 	con.custom_path_methods = custom_path_methods;
 	extract_input_path_params(input_path,
 							  NULL,
-							  &con.pp_prev,
+							  &con.pp_info,
 							  &con.input_rels_tlist,
 							  &con.inner_paths_list);
-	elog(INFO, "mokeke");
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
 		return;
-	elog(INFO, "groupby_keys = %s", nodeToString(con.groupby_keys));
-	elog(INFO, "groupby_actions = %s", nodeToString(con.groupby_actions));
-	elog(INFO, "groupby_prep_exprs = %s", nodeToString(con.groupby_prep_exprs));
+	con.pp_info->task_kind = task_kind;
 
 	/* build partial groupby custom-path */
 	part_path = prepend_partial_groupby_custompath(&con);

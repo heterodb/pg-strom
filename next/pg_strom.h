@@ -266,12 +266,17 @@ typedef struct
 	bytea	   *kexp_hash_keys_packed;
 	bytea	   *kexp_gist_quals_packed;
 	bytea	   *kexp_projection;
+	bytea	   *kexp_groupby_keyhash;
+	bytea	   *kexp_groupby_keyload;
+	bytea	   *kexp_groupby_keycomp;
+	bytea	   *kexp_groupby_actions;
 	List	   *kvars_depth;
 	List	   *kvars_resno;
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
 	/* group-by parameters */
-	List	   *groupby_key_actions;	/* grouping keys, kagg-actions */
+	List	   *groupby_actions;	/* list of KAGG_ACTION__* on the kds_final */
+	List	   *groupby_keys;		/* resno of grouping keys, if GROUP BY exists */
 	/* inner relations */
 	int			num_rels;
 	pgstromPlanInnerInfo inners[FLEXIBLE_ARRAY_MEMBER];
@@ -455,6 +460,7 @@ typedef struct
 	uint32_t	kexp_flags;
 	List	   *kvars_depth;
 	List	   *kvars_resno;
+	List	   *tlist_dev;
 	uint32_t	kvars_nslots;
 	List	   *input_rels_tlist;
 } codegen_context;
@@ -480,11 +486,9 @@ extern bytea   *codegen_build_packed_joinquals(codegen_context *context,
 											   List *stacked_other_quals);
 extern bytea   *codegen_build_packed_hashkeys(codegen_context *context,
 											  List *stacked_hash_values);
-extern bytea   *codegen_build_projection(codegen_context *context,
-										 List *tlist_dev);
-
-
-
+extern bytea   *codegen_build_projection(codegen_context *context);
+extern void		codegen_build_groupby_actions(codegen_context *context,
+											  pgstromPlanInfo *pp_info);
 extern void		codegen_build_packed_xpucode(bytea **p_xpucode,
 											 List *exprs_list,
 											 bool inject_hash_value,

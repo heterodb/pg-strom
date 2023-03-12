@@ -360,17 +360,11 @@ execGpuJoinProjection(kern_context *kcxt,
 
 		kcxt->kvars_addr = kvars_addr + kcxt->kvars_nslots * index;
 		kcxt->kvars_len  = kvars_len  + kcxt->kvars_nslots * index;
-		if (EXEC_KERN_EXPRESSION(kcxt, kexp_projection, &__tupsz))
-		{
-			if (!__tupsz.isnull && __tupsz.value > 0)
-				tupsz = __tupsz.value;
-			else
-				STROM_ELOG(kcxt, "unable to compute tuple size");
-		}
-		else
-		{
-			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
-		}
+		tupsz = kern_estimate_heaptuple(kcxt,
+										kexp_projection,
+										kds_dst);
+		if (tupsz < 0)
+			STROM_ELOG(kcxt, "unable to compute tuple size");
 	}
 	/* error checks */
 	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
@@ -471,7 +465,7 @@ kern_gpujoin_main(kern_session_info *session,
 	assert(kgtask->nslots == session->kvars_slot_width &&
 		   kgtask->n_rels == kmrels->num_rels);
 	/* setup execution context */
-	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, kmrels, kds_dst);
+	INIT_KERNEL_CONTEXT(kcxt, session, kds_src);
 	wp_unitsz = __KERN_WARP_CONTEXT_UNITSZ_BASE(n_rels);
 	wp = (kern_warp_context *)SHARED_WORKMEM(wp_unitsz, get_local_id() / warpSize);
 	wp_saved = KERN_GPUTASK_WARP_CONTEXT(kgtask);
@@ -506,6 +500,7 @@ kern_gpujoin_main(kern_session_info *session,
 	/* main logic of GpuJoin */
 	while (depth >= 0)
 	{
+		kcxt_reset(kcxt);
 		if (depth == 0)
 		{
 			/* LOAD FROM THE SOURCE */

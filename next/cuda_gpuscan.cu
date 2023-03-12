@@ -124,7 +124,6 @@ __gpuscan_load_source_block(kern_context *kcxt,
 		uint32_t	off;
 		int			index;
 
-		kcxt_reset(kcxt);
 		rd_pos += LaneId();
 		if (rd_pos < wr_pos)
 		{
@@ -429,7 +428,7 @@ kern_gpuscan_main(kern_session_info *session,
 		   kgtask->n_rels == 0 &&
 		   __kmrels == NULL);
 	/* setup execution context */
-	INIT_KERNEL_CONTEXT(kcxt, session, kds_src, NULL, kds_dst);
+	INIT_KERNEL_CONTEXT(kcxt, session, kds_src);
 	wp_unitsz = __KERN_WARP_CONTEXT_UNITSZ_BASE(0);
 	wp = (kern_warp_context *)SHARED_WORKMEM(wp_unitsz, get_local_id() / warpSize);
 	wp_saved = KERN_GPUTASK_WARP_CONTEXT(kgtask);
@@ -457,6 +456,7 @@ kern_gpuscan_main(kern_session_info *session,
 
 	while (depth >= 0)
 	{
+		kcxt_reset(kcxt);
 		if (depth == 0)
 		{
 			/* LOAD FROM THE SOURCE */

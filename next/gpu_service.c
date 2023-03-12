@@ -933,13 +933,14 @@ __gpuClientELog(gpuClient *gclient,
  * gpuservHandleOpenSession
  */
 static bool
-__resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
+__resolveDevicePointersWalker(gpuModule *gmodule,
+							  kern_expression *kexp,
 							  char *emsg, size_t emsg_sz)
 {
 	xpu_function_catalog_entry *xpu_func;
 	xpu_type_catalog_entry *xpu_type;
 	kern_expression *karg;
-	int		i, n;
+	int		i;
 
 	/* lookup device function */
 	xpu_func = hash_search(gmodule->cuda_func_htab,
@@ -969,8 +970,7 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
 
 	if (kexp->opcode == FuncOpCode__Projection)
 	{
-		n = kexp->u.proj.nexprs + kexp->u.proj.nattrs;
-		for (i=0; i < n; i++)
+		for (int i=0; i < kexp->u.proj.nattrs; i++)
 		{
 			kern_projection_desc *desc = &kexp->u.proj.desc[i];
 
@@ -979,25 +979,18 @@ __resolveDevicePointersWalker(gpuModule *gmodule, kern_expression *kexp,
 								   HASH_FIND, NULL);
 			if (xpu_type)
 				desc->slot_ops = xpu_type->type_ops;
-			else if (i >= kexp->u.proj.nexprs)
-				desc->slot_ops = NULL;	/* PostgreSQL generic projection */
 			else
-			{
-				snprintf(emsg, emsg_sz,
-						 "device type pointer for opcode:%u not found.",
-						 (int)desc->slot_type);
-				return false;
-			}
+				desc->slot_ops = NULL;
 		}
 	}
 
-	for (i=0, karg=KEXP_FIRST_ARG(kexp);
+	for (i=0, karg = KEXP_FIRST_ARG(kexp);
 		 i < kexp->nr_args;
-		 i++, karg=KEXP_NEXT_ARG(karg))
+		 i++, karg = KEXP_NEXT_ARG(karg))
 	{
 		if (!__KEXP_IS_VALID(kexp,karg))
 		{
-			snprintf(emsg, emsg_sz, "XPU code corruption at args[%d]", i);
+			snprintf(emsg, emsg_sz, "XPU code corruption at kexp (%d)", kexp->opcode);
 			return false;
 		}
 		if (!__resolveDevicePointersWalker(gmodule, karg, emsg, emsg_sz))
