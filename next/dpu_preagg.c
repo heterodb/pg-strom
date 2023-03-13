@@ -87,7 +87,7 @@ CreateDpuPreAggScanState(CustomScan *cscan)
 	NodeSetTag(pts, T_CustomScanState);
 	pts->css.flags = cscan->flags;
 	pts->css.methods = &dpupreagg_exec_methods;
-	pts->task_kind = TASK_KIND__GPUPREAGG;
+	pts->task_kind = TASK_KIND__DPUPREAGG;
 	pts->pp_info = deform_pgstrom_plan_info(cscan);
 	Assert(pts->pp_info->task_kind == pts->task_kind &&
 		   pts->pp_info->num_rels == num_rels);
@@ -103,6 +103,32 @@ static TupleTableSlot *
 ExecDpuPreAgg(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *)node;
+
+	if (!pts->conn)
+	{
+		const XpuCommand *session;
+		uint32_t	inner_handle = 0;
+
+		/* attach pgstromSharedState, if none */
+		if (!pts->ps_state)
+			pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
+		/* preload inner buffer, if any */
+		if (pts->num_rels > 0)
+		{
+			inner_handle = GpuJoinInnerPreload(pts);
+			if (inner_handle == 0)
+				return NULL;
+		}
+		/* outer scan is already done? */
+		if (!pgstromTaskStateBeginScan(pts))
+			return NULL;
+		/* open the DpuJoin session */
+		Assert(pts->ds_entry != NULL);
+		session = pgstromBuildSessionInfo(pts, inner_handle,
+										  pts->css.ss.ps.scandesc);
+		DpuClientOpenSession(pts, session);
+	}
+	return pgstromExecTaskState(pts);
 
 	return pgstromExecTaskState(pts);
 }

@@ -639,7 +639,7 @@ ExecGpuScan(CustomScanState *node)
 		if (!pgstromTaskStateBeginScan(pts))
 			return NULL;
 		/* open the new session */
-		session = pgstromBuildSessionInfo(pts, 0);
+		session = pgstromBuildSessionInfo(pts, 0, NULL);
 		gpuClientOpenSession(pts, pts->optimal_gpus, session);
 	}
 	return pgstromExecTaskState(pts);

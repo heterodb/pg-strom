@@ -1195,7 +1195,7 @@ ExecGpuJoin(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
 
-	if (!pts->h_kmrels)
+	if (!pts->conn)
 	{
 		const XpuCommand *session;
 		uint32_t	inner_handle;
@@ -1211,7 +1211,7 @@ ExecGpuJoin(CustomScanState *node)
 		if (!pgstromTaskStateBeginScan(pts))
 			return NULL;
 		/* open the GpuJoin session */
-		session = pgstromBuildSessionInfo(pts, inner_handle);
+		session = pgstromBuildSessionInfo(pts, inner_handle, NULL);
 		gpuClientOpenSession(pts, pts->optimal_gpus, session);
 	}
 	return pgstromExecTaskState(pts);

@@ -128,6 +128,8 @@ typedef unsigned int		Oid;
 #define MAXIMUM_ALIGNOF		8
 #define MAXALIGN(LEN)		TYPEALIGN(MAXIMUM_ALIGNOF,LEN)
 #define MAXALIGN_DOWN(LEN)	TYPEALIGN_DOWN(MAXIMUM_ALIGNOF,LEN)
+#define LONGALIGN(LEN)		TYPEALIGN(8,LEN)
+#define INTALIGN(LEN)		TYPEALIGN(4,LEN)
 #endif	/* POSTGRES_H */
 #define __MAXALIGNED__		__attribute__((aligned(MAXIMUM_ALIGNOF)));
 #define MAXIMUM_ALIGNOF_SHIFT 3
@@ -392,6 +394,7 @@ struct kern_data_store {
 	Oid				tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	int32_t			tdtypmod;	/* copy of TupleDesc.tdtypmod */
 	Oid				table_oid;	/* OID of the table (only if GpuScan) */
+	uint32_t		lock;		/* some situation needs lock semantics */
 	/* only KDS_FORMAT_HASH */
 	uint32_t		hash_nslots;	/* width of the hash-slot */
 	/* only KDS_FORMAT_BLOCK */
@@ -1690,8 +1693,12 @@ typedef struct kern_session_info
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
 	/* join inner buffer */
-	uint32_t	pgsql_port_number;	/* =PostPortNumber */
+	uint32_t	pgsql_port_number;	/* = PostPortNumber */
+	uint32_t	pgsql_plan_node_id;	/* = Plan->plan_node_id */
 	uint32_t	join_inner_handle;	/* key of join inner buffer */
+
+	/* group-by final buffer */
+	uint32_t	groupby_kds_final;	/* header portion of kds_final */
 
 	/* executor parameter buffer */
 	uint32_t	nparams;	/* number of parameters */
@@ -1792,7 +1799,8 @@ SESSION_KEXP_JOIN_LOAD_VARS(kern_session_info *session, int dindex)
 
 	if (session->xpucode_join_load_vars_packed == 0)
 		return NULL;
-	kexp = (kern_expression *)((char *)session + session->xpucode_join_load_vars_packed);
+	kexp = (kern_expression *)
+		((char *)session + session->xpucode_join_load_vars_packed);
 	if (dindex < 0)
 		return kexp;
 	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
@@ -1809,7 +1817,8 @@ SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int dindex)
 
 	if (session->xpucode_join_quals_packed == 0)
 		return NULL;
-	kexp = (kern_expression *)((char *)session + session->xpucode_join_quals_packed);
+	kexp = (kern_expression *)
+		((char *)session + session->xpucode_join_quals_packed);
 	if (dindex < 0)
 		return kexp;
 	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
@@ -1826,7 +1835,8 @@ SESSION_KEXP_HASH_VALUE(kern_session_info *session, int dindex)
 
 	if (session->xpucode_hash_values_packed == 0)
 		return NULL;
-	kexp = (kern_expression *)((char *)session + session->xpucode_hash_values_packed);
+	kexp = (kern_expression *)
+		((char *)session + session->xpucode_hash_values_packed);
 	if (dindex < 0)
 		return kexp;
 	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
@@ -1844,13 +1854,74 @@ SESSION_KEXP_GIST_QUALS(kern_session_info *session, int dindex)
 INLINE_FUNCTION(kern_expression *)
 SESSION_KEXP_PROJECTION(kern_session_info *session)
 {
-	kern_expression *kexp;
+	kern_expression *kexp = NULL;
 
-	if (session->xpucode_projection == 0)
-		return NULL;
-	kexp = (kern_expression *)((char *)session + session->xpucode_projection);
-	assert(kexp->opcode == FuncOpCode__Projection &&
-		   kexp->exptype == TypeOpCode__int4);
+	if (session->xpucode_projection)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_projection);
+		assert(kexp->opcode == FuncOpCode__Projection &&
+			   kexp->exptype == TypeOpCode__int4);
+	}
+	return kexp;
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GROUPBY_KEYHASH(kern_session_info *session)
+{
+	kern_expression *kexp = NULL;
+
+	if (session->xpucode_groupby_keyhash)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_groupby_keyhash);
+		assert(kexp->opcode == FuncOpCode__HashValue &&
+			   kexp->exptype == TypeOpCode__int4);
+	}
+	return kexp;
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GROUPBY_KEYLOAD(kern_session_info *session)
+{
+	kern_expression *kexp = NULL;
+
+	if (session->xpucode_groupby_keyload)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_groupby_keyload);
+		assert(kexp->opcode == FuncOpCode__LoadVars &&
+			   kexp->exptype == TypeOpCode__int4);
+	}
+	return kexp;
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GROUPBY_KEYCOMP(kern_session_info *session)
+{
+	kern_expression *kexp = NULL;
+
+	if (session->xpucode_groupby_keycomp)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_groupby_keycomp);
+		assert(kexp->exptype == TypeOpCode__bool);
+	}
+	return kexp;
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GROUPBY_ACTIONS(kern_session_info *session)
+{
+	kern_expression *kexp = NULL;
+
+	if (session->xpucode_groupby_actions)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_groupby_actions);
+		assert(kexp->opcode == FuncOpCode__AggFuncs &&
+			   kexp->exptype == TypeOpCode__int4);
+	}
 	return kexp;
 }
 

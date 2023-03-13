@@ -125,8 +125,12 @@ ExecDpuScan(CustomScanState *node)
 		pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
 	if (!pts->conn)
 	{
-		const XpuCommand *session
-			= pgstromBuildSessionInfo(pts, 0);
+		const XpuCommand *session;
+		/* outer scan is already done? */
+		if (!pgstromTaskStateBeginScan(pts))
+			return NULL;
+		/* open the new session */
+		session = pgstromBuildSessionInfo(pts, 0, NULL);
 		DpuClientOpenSession(pts, session);
 	}
 	return pgstromExecTaskState(pts);

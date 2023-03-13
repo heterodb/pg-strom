@@ -523,6 +523,13 @@ pgfn_Packed(XPU_PGFUNCTION_ARGS)
 	return false;
 }
 
+STATIC_FUNCTION(bool)
+pgfn_AggFuncs(XPU_PGFUNCTION_ARGS)
+{
+	STROM_ELOG(kcxt, "pgfn_AggFuncs should not be called as a normal kernel expression");
+	return false;
+}
+
 /* ----------------------------------------------------------------
  *
  * LoadVars / Projection
@@ -1378,6 +1385,7 @@ PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
 	{FuncOpCode__LoadVars,                  pgfn_LoadVars},
 	{FuncOpCode__HashValue,                 pgfn_HashValue},
 	{FuncOpCode__SaveExpr,                  pgfn_SaveExpr},
+	{FuncOpCode__AggFuncs,                  pgfn_AggFuncs},
 	{FuncOpCode__JoinQuals,                 pgfn_JoinQuals},
 	{FuncOpCode__Packed,                    pgfn_Packed},
 	{FuncOpCode__Invalid, NULL},

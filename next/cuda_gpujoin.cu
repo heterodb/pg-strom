@@ -355,7 +355,6 @@ execGpuJoinProjection(kern_context *kcxt,
 	read_pos += LaneId();
 	if (read_pos < write_pos)
 	{
-		xpu_int4_t	__tupsz;
 		int			index = (read_pos % UNIT_TUPLES_PER_DEPTH);
 
 		kcxt->kvars_addr = kvars_addr + kcxt->kvars_nslots * index;

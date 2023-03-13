@@ -711,6 +711,9 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 	switch (partfn_action)
 	{
 		case KAGG_ACTION__NROWS_ANY:
+			func_nargs = 0;
+			type_oid = INT8OID;
+			break;
 		case KAGG_ACTION__NROWS_COND:
 		case KAGG_ACTION__PSUM_INT:
 			type_oid = INT8OID;
@@ -900,7 +903,8 @@ make_expr_typecast(Expr *expr, Oid target_type)
 	HeapTuple htup;
 	Form_pg_cast cast;
 
-	if (source_type == target_type)
+	if (target_type == source_type ||
+		target_type == ANYOID)
 		return expr;
 
 	htup = SearchSysCache2(CASTSOURCETARGET,
@@ -1209,7 +1213,6 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 	 * Due to data alignment on the tuple on the kds_final, grouping-keys must
 	 * be located after the aggregate functions.
 	 */
-	elog(INFO, "groupby_keys => %s", nodeToString(pp_info->groupby_keys));
 	forboth (lc1, pp_info->groupby_keys,
 			 lc2, groupby_keys_refno)
 	{

@@ -112,7 +112,7 @@ ExecDpuJoin(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
 
-	if (!pts->h_kmrels)
+	if (!pts->conn)
 	{
 		const XpuCommand *session;
 		uint32_t	inner_handle;
@@ -125,8 +125,11 @@ ExecDpuJoin(CustomScanState *node)
 		inner_handle = GpuJoinInnerPreload(pts);
 		if (inner_handle == 0)
 			return NULL;
+		/* outer scan is already done? */
+		if (!pgstromTaskStateBeginScan(pts))
+			return NULL;
 		/* open the DpuJoin session */
-		session = pgstromBuildSessionInfo(pts, inner_handle);
+		session = pgstromBuildSessionInfo(pts, inner_handle, NULL);
 		DpuClientOpenSession(pts, session);
 	}
 	return pgstromExecTaskState(pts);

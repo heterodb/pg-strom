@@ -464,7 +464,8 @@ __build_session_encode(StringInfo buf)
 
 const XpuCommand *
 pgstromBuildSessionInfo(pgstromTaskState *pts,
-						uint32_t join_inner_handle)
+						uint32_t join_inner_handle,
+						TupleDesc groupby_tdesc_final)
 {
 	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
@@ -571,6 +572,24 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
 	}
+	if (groupby_tdesc_final)
+	{
+		size_t		sz = estimate_kern_data_store(groupby_tdesc_final);
+		kern_data_store *kds_temp = (kern_data_store *)alloca(sz);
+		char		format = KDS_FORMAT_ROW;
+		uint32_t	hash_nslots = 0;
+
+		if (pp_info->kexp_groupby_keyhash &&
+			pp_info->kexp_groupby_keyload &&
+			pp_info->kexp_groupby_keycomp)
+		{
+			format = KDS_FORMAT_HASH;
+			hash_nslots = 20000; //to be estimated using num_groups
+		}
+		setup_kern_data_store(kds_temp, groupby_tdesc_final, (1UL<<31), format);
+		kds_temp->hash_nslots = hash_nslots;
+		session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, sz);
+	}
 	/* other database session information */
 	Assert(list_length(kvars_depth_list) == list_length(kvars_resno_list));
 	session->query_plan_id = ((uint64_t)MyProcPid << 32) |
@@ -587,6 +606,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
 	session->pgsql_port_number = PostPortNumber;
+	session->pgsql_plan_node_id = pts->css.ss.ps.plan->plan_node_id;
 	session->join_inner_handle = join_inner_handle;
 	memcpy(buf.data, session, session_sz);
 
@@ -706,7 +726,9 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 			if (!pts->final_done)
 			{
 				pts->final_done = true;
-				if (pgstromTaskStateEndScan(pts) && try_final_callback)
+				if (pgstromTaskStateEndScan(pts) &&
+					try_final_callback &&
+					pts->cb_final_chunk != NULL)
 				{
 					xcmd = pts->cb_final_chunk(pts, xcmd_iov, &xcmd_iovcnt);
 					if (xcmd)
