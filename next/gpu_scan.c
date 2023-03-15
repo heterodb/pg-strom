@@ -536,7 +536,6 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 {
 	codegen_context context;
 	CustomScan	   *cscan;
-	List		   *tlist_dev = NIL;
 	List		   *input_rels_tlist = list_make1(makeInteger(baserel->relid));
 
 	/* code generation for WHERE-clause */
@@ -567,7 +566,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	cscan->flags = best_path->flags;
 	cscan->methods = xpuscan_plan_methods;
 	cscan->custom_plans = NIL;
-	cscan->custom_scan_tlist = tlist_dev;
+	cscan->custom_scan_tlist = context.tlist_dev;
 
 	return cscan;
 }
