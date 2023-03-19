@@ -552,6 +552,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(&context);
 	pp_info->kvars_depth = context.kvars_depth;
 	pp_info->kvars_resno = context.kvars_resno;
+	pp_info->kvars_bufsz = context.kvars_bufsz;
 	pp_info->extra_flags = context.extra_flags;
 	pp_info->extra_bufsz = context.extra_bufsz;
 	pp_info->used_params = context.used_params;

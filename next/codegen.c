@@ -20,14 +20,15 @@ static List	   *devtype_code_slot[DEVTYPE_INFO_NSLOTS];	/* by TypeOpCode */
 static List	   *devfunc_info_slot[DEVFUNC_INFO_NSLOTS];
 static List	   *devfunc_code_slot[DEVFUNC_INFO_NSLOTS];	/* by FuncOpCode */
 
-#define TYPE_OPCODE(NAME,OID,EXTENSION)			\
+#define TYPE_OPCODE(NAME,OID,EXTENSION,FLAGS)							\
 	static uint32_t devtype_##NAME##_hash(bool isnull, Datum value);
 #include "xpu_opcodes.h"
 
-#define TYPE_OPCODE(NAME,OID,EXTENSION)		\
-	{ EXTENSION, #NAME,						\
-	  TypeOpCode__##NAME, DEVKIND__ANY,		\
-	  devtype_##NAME##_hash, sizeof(xpu_##NAME##_t), InvalidOid},
+#define TYPE_OPCODE(NAME,OID,EXTENSION,FLAGS)		\
+	{ EXTENSION, #NAME,	TypeOpCode__##NAME,			\
+	  DEVKIND__ANY | (FLAGS),						\
+	  devtype_##NAME##_hash,						\
+	  sizeof(xpu_##NAME##_t), InvalidOid},
 static struct {
 	const char	   *type_extension;
 	const char	   *type_name;
@@ -172,11 +173,12 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 		dtype->type_extension = pstrdup(ext_name);
 	dtype->type_code = TypeOpCode__composite;
 	dtype->type_oid = tcache->type_id;
-	dtype->type_flags = extra_flags;
+	dtype->type_flags = extra_flags | DEVTYPE__NEED_KVARS_BUF;
 	dtype->type_length = tcache->typlen;
 	dtype->type_align = typealign_get_width(tcache->typalign);
 	dtype->type_byval = tcache->typbyval;
 	dtype->type_name = "composite";
+	dtype->type_sizeof = sizeof(xpu_composite_t);
 	dtype->type_hashfunc = NULL; //devtype_composite_hash;
 	dtype->type_eqfunc = get_opcode(tcache->eq_opr);
 	dtype->type_cmpfunc = tcache->cmp_proc;
@@ -205,11 +207,12 @@ build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 		dtype->type_extension = pstrdup(ext_name);
 	dtype->type_code = TypeOpCode__array;
 	dtype->type_oid = tcache->type_id;
-	dtype->type_flags = elem->type_flags;
+	dtype->type_flags = elem->type_flags | DEVTYPE__NEED_KVARS_BUF;
 	dtype->type_length = tcache->typlen;
 	dtype->type_align = typealign_get_width(tcache->typalign);
 	dtype->type_byval = tcache->typbyval;
 	dtype->type_name = "array";
+	dtype->type_sizeof = sizeof(xpu_array_t);
 	dtype->type_hashfunc = NULL; //devtype_array_hash;
 	/* type equality functions */
 	dtype->type_eqfunc = get_opcode(tcache->eq_opr);
@@ -1205,6 +1208,7 @@ is_expression_equals_tlist(codegen_context *context, Expr *expr)
 	int			depth = 0;
 	int			resno;
 	int			slot_id;
+	devtype_info *dtype = NULL;
 
 	foreach (lc1, context->input_rels_tlist)
 	{
@@ -1218,6 +1222,7 @@ is_expression_equals_tlist(codegen_context *context, Expr *expr)
 			if (IsA(var, Var) && var->varno == varno)
 			{
 				resno = var->varattno;
+				dtype = pgstrom_devtype_lookup(var->vartype);
 				goto found;
 			}
 		}
@@ -1229,7 +1234,10 @@ is_expression_equals_tlist(codegen_context *context, Expr *expr)
 			foreach (lc2, reltarget->exprs)
 			{
 				if (equal(expr, lfirst(lc2)))
+				{
+					dtype = pgstrom_devtype_lookup(exprType((Node *)expr));
 					goto found;
+				}
 				resno++;
 			}
 		}
@@ -1255,6 +1263,12 @@ found:
 	}
 	context->kvars_depth = lappend_int(context->kvars_depth, depth);
 	context->kvars_resno = lappend_int(context->kvars_resno, resno);
+	if (dtype && (dtype->type_flags & DEVTYPE__NEED_KVARS_BUF) != 0)
+		context->kvars_bufsz = lappend_int(context->kvars_bufsz,
+										   MAXALIGN(dtype->type_sizeof));
+	else
+		context->kvars_bufsz = lappend_int(context->kvars_bufsz, 0);
+
 	return slot_id;
 }
 
@@ -1327,24 +1341,30 @@ __codegen_build_loadvars_one(codegen_context *context, int depth)
 	StringInfoData buf;
 	int			slot_id = 0;
 	int			nloads = 0;
-	ListCell   *lc1, *lc2;
+	uint32_t	kvars_offset;
+	ListCell   *lc1, *lc2, *lc3;
 
 	initStringInfo(&buf);
 	buf.len = offsetof(kern_expression, u.load.kvars);
-	forboth (lc1, context->kvars_depth,
-			 lc2, context->kvars_resno)
+	kvars_offset = sizeof(kern_variable) * list_length(context->kvars_depth);
+	forthree (lc1, context->kvars_depth,
+			  lc2, context->kvars_resno,
+			  lc3, context->kvars_bufsz)
 	{
-		kern_vars_defitem	vitem;
+		kern_vars_defitem vitem;
+		int		kvars_bufsz = MAXALIGN(lfirst_int(lc3));
 
 		vitem.var_depth = lfirst_int(lc1);
 		vitem.var_resno = lfirst_int(lc2);
 		vitem.var_slot_id = slot_id++;
+		vitem.var_slot_buf = (kvars_bufsz > 0 ? kvars_offset : 0);
 		if (vitem.var_depth == depth)
 		{
 			appendBinaryStringInfo(&buf, (char *)&vitem,
 								   sizeof(kern_vars_defitem));
 			nloads++;
 		}
+		kvars_offset += kvars_bufsz;
 	}
 	if (nloads == 0)
 	{
@@ -1540,13 +1560,13 @@ __try_inject_projection_expression(codegen_context *context,
 			slot_id = list_length(context->kvars_depth);
 			context->kvars_depth = lappend_int(context->kvars_depth, -1);
 			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
+			context->kvars_bufsz = lappend_int(context->kvars_bufsz, 0);
 
 			type_oid = exprType((Node *)expr);
 			dtype = pgstrom_devtype_lookup(type_oid);
 			if (!dtype)
 				elog(ERROR, "type %s is not device supported",
 					 format_type_be(type_oid));
-
 			memset(&kexp, 0, sizeof(kexp));
 			kexp.exptype = dtype->type_code;
 			kexp.expflags = context->kexp_flags;
@@ -1915,6 +1935,7 @@ __try_inject_groupby_expression(codegen_context *context,
 								  true);
 			context->kvars_depth = lappend_int(context->kvars_depth, -1);
 			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
+			context->kvars_bufsz = lappend_int(context->kvars_bufsz, 0);
 			context->tlist_dev = lappend(context->tlist_dev, tle);
 
 			/* SaveExpr */
@@ -2035,6 +2056,7 @@ codegen_build_groupby_keyload(codegen_context *context,
 			groupby_keys_final_slot = lappend_int(groupby_keys_final_slot, slot_id);
 			context->kvars_depth = lappend_int(context->kvars_depth, -2);
 			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
+			context->kvars_bufsz = lappend_int(context->kvars_bufsz, 0);
 			break;
 		}
 		if (!lc2)
@@ -2439,7 +2461,7 @@ __xpucode_loadvars_cstring(StringInfo buf,
 	bool	verbose = false;
 	int		i;
 
-	Assert(kexp->nr_args == 1);
+	Assert(kexp->nr_args == 0);
 	appendStringInfo(buf, "{LoadVars:");
 	if (kexp->u.load.nloads > 0)
 		appendStringInfo(buf, " kvars=[");

@@ -90,7 +90,7 @@ CreateDpuJoinState(CustomScan *cscan)
 	pgstromTaskState *pts;
 	int		num_rels = list_length(cscan->custom_plans);
 
-	Assert(cscan->methods == &gpujoin_plan_methods);
+	Assert(cscan->methods == &dpujoin_plan_methods);
 	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
 	NodeSetTag(pts, T_CustomScanState);
 	pts->css.flags = cscan->flags;

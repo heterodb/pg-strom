@@ -389,7 +389,7 @@ __build_session_param_info(pgstromTaskState *pts,
 					 format_type_be(param->paramtype));
 			}
 		}
-		Assert(param->paramid >= 0 && param->paramid < nparams);
+		Assert(param->paramid >= 0 && param->paramid < session->nparams);
 		session->poffset[param->paramid] = offset;
 	}
 }
@@ -471,8 +471,11 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
 	uint32_t		nparams = (param_info ? param_info->numParams : 0);
+	uint32_t		kvars_nbytes;
+	uint32_t		kvars_nslots;
 	uint32_t		session_sz;
 	kern_session_info *session;
+	ListCell	   *lc;
 	XpuCommand	   *xcmd;
 	StringInfoData	buf;
 	bytea		   *xpucode;
@@ -591,15 +594,23 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, sz);
 	}
 	/* other database session information */
-	Assert(list_length(kvars_depth_list) == list_length(kvars_resno_list));
+	kvars_nslots = list_length(pp_info->kvars_depth);
+	Assert(kvars_nslots == list_length(pp_info->kvars_resno) &&
+		   kvars_nslots == list_length(pp_info->kvars_bufsz));
+	kvars_nbytes = (MAXALIGN(sizeof(kern_variable) * kvars_nslots) +
+					MAXALIGN(sizeof(int)           * kvars_nslots));
+	foreach (lc, pp_info->kvars_bufsz)
+		kvars_nbytes += lfirst_int(lc);
 	session->query_plan_id = ((uint64_t)MyProcPid << 32) |
 		(uint64_t)pg_atomic_fetch_add_u32(pgstrom_query_plan_id, 1);
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
-	session->kvars_slot_width = list_length(pp_info->kvars_depth);
-	Assert(session->kvars_slot_width == list_length(pp_info->kvars_resno));
+	session->kcxt_kvars_nslots = kvars_nslots;
+	session->kcxt_kvars_nbytes = kvars_nbytes;
+#if 1
 	session->kvars_slot_items = __build_kvars_slot_cmeta(&buf, pts,
 														 pp_info->kvars_depth,
 														 pp_info->kvars_resno);
+#endif
 	session->xpucode_use_debug_code = pgstrom_use_debug_code;
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	session->session_xact_state = __build_session_xact_state(&buf);

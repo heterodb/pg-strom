@@ -192,6 +192,35 @@ typedef struct {
 } kern_errorbuf;
 
 /*
+ * kern_variable
+ */
+#define KVAR_CLASS__NULL		(-1)
+#define KVAR_CLASS__INLINE		(-2)
+#define KVAR_CLASS__POINTER		(-3)
+#define KVAR_CLASS__VARLENA		(-4)
+#define KVAR_CLASS__ARRAY		(-100)
+#define KVAR_CLASS__COMPOSITE	(-101)
+#define KVAR_CLASS__GEOMETRY	(-102)
+typedef union
+{
+	int8_t		i8;
+	uint8_t		u8;
+	int16_t		i16;
+	uint16_t	u16;
+	int32_t		i32;
+	uint32_t	u32;
+	int64_t		i64;
+	uint64_t	u64;
+	float2_t	fp16;
+	float4_t	fp32;
+	float8_t	fp64;
+	void	   *ptr;
+	struct xpu_array_t *array;
+	struct xpu_composite_t *comp;
+	struct xpu_geometry_t *geom;
+} kern_variable;
+
+/*
  * kern_context - a set of run-time information
  */
 typedef struct
@@ -206,14 +235,21 @@ typedef struct
 	/*
 	 * current slot of the kernel variable references
 	 *
-	 * if kvars_cmeta[slot_id] != NULL, it means kvars_addr/kvars_len
-	 * references KDS with Arrow Format. (Data interpretation needs
-	 * unit size of the values)
+	 * if kvars_class[slot_id] < 0, if means kvars_slot[slot_id] has pointer
+	 * or inline value according to KVAR_CLASS__*.
+	 * elsewhere (kvars_class[slot_id] >= 0), kvars_slot[slot_id].ptr points
+	 * variable length datum with this length; used for Arrow::Utf-8 or Binary.
 	 */
 	uint32_t		kvars_nslots;
+	uint32_t		kvars_nbytes;
+	int			   *kvars_class;
+	kern_variable  *kvars_slot;
+#if 1
+	//deprecated
 	struct kern_colmeta **kvars_cmeta;
 	void		  **kvars_addr;
 	int			   *kvars_len;
+#endif
 	/* variable length buffer */
 	char		   *vlpos;
 	char		   *vlend;
@@ -222,13 +258,14 @@ typedef struct
 
 #define INIT_KERNEL_CONTEXT(KCXT,SESSION,KDS_SRC)						\
 	do {																\
-		uint32_t	__bufsz = Max(1024, (SESSION)->kcxt_extra_bufsz);	\
+		uint32_t	__bufsz = Max(512, (SESSION)->kcxt_extra_bufsz);	\
 		uint32_t	__len = offsetof(kern_context, vlbuf) +	__bufsz;	\
 																		\
 		KCXT = (kern_context *)alloca(__len);							\
 		memset(KCXT, 0, __len);											\
 		KCXT->session = (SESSION);										\
-		KCXT->kvars_nslots = (SESSION)->kvars_slot_width;				\
+		KCXT->kvars_nslots = (SESSION)->kcxt_kvars_nslots;				\
+		KCXT->kvars_nbytes = (SESSION)->kcxt_kvars_nbytes;				\
 		KCXT->kvars_cmeta = (kern_colmeta **)							\
 			alloca(sizeof(kern_colmeta *) * (KCXT)->kvars_nslots);		\
 		INIT_KERNEL_VARS_CMETA((KCXT),(KDS_SRC));						\
@@ -1211,7 +1248,7 @@ typedef struct toast_compress_header
  *
  * ----------------------------------------------------------------
  */
-#define TYPE_OPCODE(NAME,a,b)	TypeOpCode__##NAME,
+#define TYPE_OPCODE(NAME,a,b,c)		TypeOpCode__##NAME,
 typedef enum {
 	TypeOpCode__Invalid = 0,
 #include "xpu_opcodes.h"
@@ -1301,13 +1338,14 @@ struct xpu_datum_operators {
  * Elsewhere, @length means number of elements, from @start of the array on
  * the columnar buffer by @smeta.
  */
-typedef struct {
+struct xpu_array_t {
 	XPU_DATUM_COMMON_FIELD;
 	char	   *value;
 	int			length;
 	uint32_t	start;
 	kern_colmeta *smeta;
-} xpu_array_t;
+};
+typedef struct xpu_array_t			xpu_array_t;
 EXTERN_DATA xpu_datum_operators		xpu_array_ops;
 
 /*
@@ -1319,15 +1357,16 @@ EXTERN_DATA xpu_datum_operators		xpu_array_ops;
  * KDS_FORMAT_ARROW chunk. In this case, smeta[0] ... smeta[@nfields-1] describes
  * the values array on the KDS.
  */
-typedef struct {
+struct xpu_composite_t {
 	XPU_DATUM_COMMON_FIELD;
 	int16_t		nfields;
 	uint32_t	rowidx;
 	char	   *value;
-//	Oid			comp_typid;
-//	int			comp_typmod;
+	Oid			comp_typid;
+	int			comp_typmod;
 	kern_colmeta *smeta;
-} xpu_composite_t;
+};
+typedef struct xpu_composite_t	xpu_composite_t;
 EXTERN_DATA xpu_composite_t		xpu_composite_ops;
 
 typedef struct {
@@ -1365,6 +1404,8 @@ typedef struct
 												 * no locale configuration */
 #define DEVKERN__SESSION_TIMEZONE	0x00000200U	/* Device function needs session
 												 * timezone */
+#define DEVTYPE__NEED_KVARS_BUF		0x00000400U	/* Device type needs extra buffer
+												 * at the kvars-slot */
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
 #define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
@@ -1422,7 +1463,10 @@ typedef struct
 {
 	int16_t			var_depth;
 	int16_t			var_resno;
-	uint16_t		var_slot_id;
+	uint32_t		var_slot_id;
+	uint32_t		var_slot_buf;	/* offset of the slot-buffer (some margin at
+									 * the end of kcxt->kvars_slot[] to store several
+									 * special arrow types (array, composite) */
 } kern_vars_defitem;
 
 typedef struct
@@ -1668,10 +1712,14 @@ typedef struct
 typedef struct kern_session_info
 {
 	uint64_t	query_plan_id;		/* unique-id to use per-query buffer */
+	uint32_t	kcxt_kvars_nslots;	/* kcxt->kvars_nslots */
+	uint32_t	kcxt_kvars_nbytes;	/* byte length of kvars_slot[], kvars_class[] and
+									 * kvars-buffer (for xpu_array_t, xpu_composite_t
+									 * and xpu_geometry_t) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
-	uint32_t	kvars_slot_width;	/* width of kvars slot */
+#if 1
 	uint32_t	kvars_slot_items;	/* array of kern_vars_defitem[] */
-
+#endif
 	/* xpucode for this session */
 	bool		xpucode_use_debug_code;
 	uint32_t	xpucode_scan_load_vars;

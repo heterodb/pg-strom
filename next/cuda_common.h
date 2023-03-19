@@ -132,38 +132,37 @@ typedef struct
 	 * <----- __KERN_WARP_CONTEXT_UNITSZ_BASE ----->
 	 * Above fields are always kept in the device shared memory.
 	 *
-	 * +----------------------------+-------
-	 * | kvars_addr[nslots] (pos-0) |
-	 * | kvars_addr[nslots] (pos-1) |
-	 * |      :                     |
-	 * | kvars_addr[nslots] (pos-63)|
-	 * +----------------------------+ depth=0
-	 * | kvars_len[nslots] (pos-0)  |
-	 * | kvars_len[nslots] (pos-1)  |
-	 * |      :                     |
-	 * | kvars_len[nslots] (pos-63) |
-	 * +----------------------------+-------
+	 * +-------------------------------------+--------
+	 * | kvars_slot[nslots] + nbytes (pos-0) |
+	 * | kvars_slot[nslots] + nbytes (pos-1) |
+	 * |      :             :       :        |
+	 * | kvars_slot[nslots] + nbytes (pos-63)|
+	 * +-------------------------------------+ depth=0
+	 * | kvars_class[nslots] (pos-0)         |
+	 * | kvars_class[nslots] (pos-1)         |
+	 * |      :                              |
+	 * | kvars_class[nslots] (pos-63)        |
+	 * +----------------------------+--------+--------
 	 * :      :                     :
-	 * +----------------------------+-------
-	 * | kvars_addr[nslots] (pos-0) |
-	 * | kvars_addr[nslots] (pos-1) |
-	 * |      :                     |
-	 * | kvars_addr[nslots] (pos-63)|
-	 * +----------------------------+ depth=0
-	 * | kvars_len[nslots] (pos-0)  |
-	 * | kvars_len[nslots] (pos-1)  |
-	 * |      :                     |
-	 * | kvars_len[nslots] (pos-63) |
-	 * +----------------------------+-------
+	 * +-------------------------------------+--------
+	 * | kvars_slot[nslots] + nbytes (pos-0) |
+	 * | kvars_slot[nslots] + nbytes (pos-1) |
+	 * |      :             :       :        |
+	 * | kvars_slot[nslots] + nbytes (pos-63)|
+	 * +-------------------------------------+ depth=nrels
+	 * | kvars_class[nslots] (pos-0)         |
+	 * | kvars_class[nslots] (pos-1)         |
+	 * |      :                              |
+	 * | kvars_class[nslots] (pos-63)        |
+	 * +-------------------------------------+--------
 	 */
 } kern_warp_context;
 
-#define __KERN_WARP_CONTEXT_UNITSZ_BASE(n_rels)				\
+#define __KERN_WARP_CONTEXT_BASESZ(n_rels)				\
 	MAXALIGN(offsetof(kern_warp_context, pos[(n_rels)+1]))
-#define KERN_WARP_CONTEXT_UNITSZ(n_rels, nslots)							\
-	(__KERN_WARP_CONTEXT_UNITSZ_BASE(n_rels) +							\
-	 MAXALIGN(sizeof(void *) * (nslots) * UNIT_TUPLES_PER_DEPTH +			\
-			  sizeof(int)    * (nslots) * UNIT_TUPLES_PER_DEPTH) * ((n_rels)+1))
+#define KERN_WARP_CONTEXT_UNITSZ(n_rels,nbytes)			\
+	(__KERN_WARP_CONTEXT_BASESZ(n_rels) +				\
+	 (nbytes) * UNIT_TUPLES_PER_DEPTH * ((n_rels)+1))
 #define WARP_READ_POS(warp,depth)		((warp)->pos[(depth)].read)
 #define WARP_WRITE_POS(warp,depth)		((warp)->pos[(depth)].write)
 
@@ -177,8 +176,7 @@ execGpuScanLoadSource(kern_context *kcxt,
 					  kern_data_extra *kds_extra,
 					  kern_expression *kexp_load_vars,
 					  kern_expression *kexp_scan_quals,
-					  void    **kvars_addr,
-					  int      *kvars_len,
+					  char     *kvars_addr_wp,
 					  uint32_t *p_smx_row_count);
 EXTERN_FUNCTION(int)
 execGpuJoinProjection(kern_context *kcxt,
@@ -186,8 +184,7 @@ execGpuJoinProjection(kern_context *kcxt,
 					  int n_rels,
 					  kern_data_store *kds_dst,
 					  kern_expression *kexp_projection,
-					  void **kvars_addr,
-					  int *kvars_len);
+					  char *kvars_addr_wp);
 
 /*
  * Definitions related to GpuScan/GpuJoin/GpuPreAgg
@@ -197,7 +194,8 @@ typedef struct {
 	uint32_t		grid_sz;
 	uint32_t		block_sz;
 	uint32_t		extra_sz;
-	uint32_t		nslots;			/* width of the kvars slot */
+	uint32_t		kvars_nslots;			/* width of the kvars slot */
+	uint32_t		kvars_nbytes;	/* extra buffer size of kvars-slot */
 	uint32_t		n_rels;			/* >0, if JOIN is involved */
 	/* suspend/resume support */
 	bool			resume_context;
@@ -225,34 +223,36 @@ typedef struct {
 	 */
 } kern_gputask;
 
-#define __KERN_GPUTASK_WARP_OFFSET(n_rels,nslots,gid)		\
-	(MAXALIGN(offsetof(kern_gputask,stats[(n_rels)])) +		\
-	 KERN_WARP_CONTEXT_UNITSZ((n_rels),(nslots)) * ((gid)/WARPSIZE))
+#define __KERN_GPUTASK_WARP_OFFSET(n_rels,nbytes,gid)				\
+	(MAXALIGN(offsetof(kern_gputask,stats[(n_rels)])) +				\
+	 KERN_WARP_CONTEXT_UNITSZ(n_rels,nbytes) * ((gid)/WARPSIZE))
+
 #define KERN_GPUTASK_WARP_CONTEXT(kgtask)								\
 	((kern_warp_context *)												\
 	 ((char *)(kgtask) +												\
 	  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,						\
-								 (kgtask)->nslots,						\
+								 (kgtask)->kvars_nbytes,				\
 								 get_global_id())))
 #define KERN_GPUTASK_LSTATE_ARRAY(kgtask)								\
-	((kgtask)->n_rels == 0 ? NULL :										\
-	 (uint32_t *)((char *)(kgtask) +									\
-				  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,			\
-											 (kgtask)->nslots,			\
-											 get_global_size()) +		\
-				  sizeof(uint32_t) * (kgtask)->n_rels * get_global_id()))
+	((kgtask)->n_rels == 0 ? NULL : (uint32_t *)						\
+	 ((char *)(kgtask) +												\
+	  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,						\
+								 (kgtask)->kvars_nbytes,				\
+								 get_global_size()) +					\
+	  sizeof(uint32_t) * (kgtask)->n_rels * get_global_id()))
 #define KERN_GPUTASK_MATCHED_ARRAY(kgtask)								\
-	((kgtask)->n_rels == 0 ? NULL :										\
-	 (bool *)((char *)(kgtask) +										\
-			  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,				\
-										 (kgtask)->nslots,				\
-										 get_global_size()) +			\
-			  sizeof(uint32_t) * (kgtask)->n_rels * get_global_size() + \
-			  sizeof(bool) *     (kgtask)->n_rels * get_global_id()))
-#define KERN_GPUTASK_LENGTH(n_rels,nslots,n_threads)				\
-	(__KERN_GPUTASK_WARP_OFFSET((n_rels),(nslots),(n_threads)) +	\
-	 sizeof(uint32_t) * (n_rels) * (n_threads) +					\
-	 sizeof(bool) * (n_rels) * (n_threads))
+	((kgtask)->n_rels == 0 ? NULL : (bool *)							\
+	 ((char *)(kgtask) +												\
+	  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,						\
+								 (kgtask)->kvars_nbytes,				\
+								 get_global_size()) +					\
+	  sizeof(uint32_t) * (kgtask)->n_rels * get_global_size() +			\
+	  sizeof(bool) *     (kgtask)->n_rels * get_global_id()))
+
+#define KERN_GPUTASK_LENGTH(n_rels,nbytes,n_threads)					\
+	(__KERN_GPUTASK_WARP_OFFSET((n_rels),(nbytes),(n_threads)) +		\
+	 sizeof(uint32_t) * (n_rels) * (n_threads) +						\
+	 sizeof(bool)     * (n_rels) * (n_threads))
 
 /*
  * GPU Kernel Entrypoint

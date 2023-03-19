@@ -1123,7 +1123,8 @@ gpuservHandleGpuTaskExec(gpuClient *gclient,
 	kern_data_store **kds_dst_array = NULL;
 	int				kds_dst_nrooms = 0;
 	int				kds_dst_nitems = 0;
-	int				kvars_nslots = session->kvars_slot_width;
+	uint32_t		kcxt_kvars_nslots = session->kcxt_kvars_nslots;
+	uint32_t		kcxt_kvars_nbytes = session->kcxt_kvars_nbytes;
 	int				num_inner_rels = 0;
 	CUfunction		f_kern_gpuscan;
 	const gpuMemChunk *chunk = NULL;
@@ -1223,7 +1224,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient,
 							 &shmem_sz,
 							 f_kern_gpuscan,
 							 0,
-							 __KERN_WARP_CONTEXT_UNITSZ_BASE(0));
+							 __KERN_WARP_CONTEXT_BASESZ(num_inner_rels));
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientFatal(gclient, "failed on gpuOptimalBlockSize: %s",
@@ -1238,7 +1239,9 @@ gpuservHandleGpuTaskExec(gpuClient *gclient,
 //	block_sz = 64;
 //	grid_sz = 1;
 
-	sz = KERN_GPUTASK_LENGTH(num_inner_rels, kvars_nslots, grid_sz * block_sz);
+	sz = KERN_GPUTASK_LENGTH(num_inner_rels,
+							 kcxt_kvars_nbytes,
+							 grid_sz * block_sz);
 	rc = cuMemAllocManaged(&dptr, sz, CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -1250,7 +1253,8 @@ gpuservHandleGpuTaskExec(gpuClient *gclient,
 	memset(kgtask, 0, offsetof(kern_gputask, stats[0]));
 	kgtask->grid_sz  = grid_sz;
 	kgtask->block_sz = block_sz;
-	kgtask->nslots = kvars_nslots;
+	kgtask->kvars_nslots = kcxt_kvars_nslots;
+	kgtask->kvars_nbytes = kcxt_kvars_nbytes;
 	kgtask->n_rels = num_inner_rels;
 
 	/* prefetch source KDS, if managed memory */

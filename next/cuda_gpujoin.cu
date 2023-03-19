@@ -16,16 +16,14 @@
  * GPU Nested-Loop
  */
 STATIC_FUNCTION(int)
-execGpuJoinNestLoop(kern_context      *kcxt,
+execGpuJoinNestLoop(kern_context *kcxt,
 					kern_warp_context *wp,
-					kern_multirels    *kmrels,
-					int                depth,
-					void             **src_kvars_addr,
-					int               *src_kvars_len,
-					void             **dst_kvars_addr,
-					int               *dst_kvars_len,
-					uint32_t          &l_state,
-					bool              &matched)
+					kern_multirels *kmrels,
+					int			depth,
+					char	   *src_kvars_addr_wp,
+					char	   *dst_kvars_addr_wp,
+					uint32_t   &l_state,
+					bool	   &matched)
 {
 	kern_data_store *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
 	kern_expression *kexp;
@@ -84,8 +82,8 @@ execGpuJoinNestLoop(kern_context      *kcxt,
 		uint32_t	index = l_state++;
 
 		read_pos = (read_pos % UNIT_TUPLES_PER_DEPTH);
-		kcxt->kvars_addr = src_kvars_addr + read_pos * kcxt->kvars_nslots;
-		kcxt->kvars_len  = src_kvars_len  + read_pos * kcxt->kvars_nslots;
+		kcxt->kvars_addr = (void **)(src_kvars_addr_wp + read_pos * kcxt->kvars_nbytes);
+		kcxt->kvars_len  = (int *)(kcxt->kvars_addr + kcxt->kvars_nslots);
 		if (index < kds_heap->nitems)
 		{
 			kern_tupitem *tupitem;
@@ -133,12 +131,9 @@ execGpuJoinNestLoop(kern_context      *kcxt,
 	if (tuple_is_valid)
 	{
 		write_pos = (write_pos % UNIT_TUPLES_PER_DEPTH);
-		memcpy(dst_kvars_addr + write_pos * kcxt->kvars_nslots,
+		memcpy(dst_kvars_addr_wp + write_pos * kcxt->kvars_nbytes,
 			   kcxt->kvars_addr,
-			   sizeof(void *) * kcxt->kvars_nslots);
-		memcpy(dst_kvars_len + write_pos * kcxt->kvars_nslots,
-			   kcxt->kvars_len,
-			   sizeof(int) * kcxt->kvars_nslots);
+			   kcxt->kvars_nbytes);
 	}
 	__syncwarp();
 	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
@@ -150,16 +145,14 @@ execGpuJoinNestLoop(kern_context      *kcxt,
  * GPU Hash-Join
  */
 STATIC_FUNCTION(int)
-execGpuJoinHashJoin(kern_context      *kcxt,
+execGpuJoinHashJoin(kern_context *kcxt,
 					kern_warp_context *wp,
-					kern_multirels    *kmrels,
-					int                depth,
-					void             **src_kvars_addr,
-					int               *src_kvars_len,
-					void             **dst_kvars_addr,
-					int               *dst_kvars_len,
-					uint32_t          &l_state,
-					bool              &matched)
+					kern_multirels *kmrels,
+					int			depth,
+					char	   *src_kvars_addr_wp,
+					char	   *dst_kvars_addr_wp,
+					uint32_t   &l_state,
+					bool	   &matched)
 {
 	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
 	kern_expression *kexp = NULL;
@@ -223,8 +216,8 @@ execGpuJoinHashJoin(kern_context      *kcxt,
 	write_pos = WARP_WRITE_POS(wp,depth-1);
 	read_pos = WARP_READ_POS(wp,depth-1) + LaneId();
 	index = (read_pos % UNIT_TUPLES_PER_DEPTH);
-	kcxt->kvars_addr = src_kvars_addr + index * kcxt->kvars_nslots;
-	kcxt->kvars_len  = src_kvars_len  + index * kcxt->kvars_nslots;
+	kcxt->kvars_addr = (void **)(src_kvars_addr_wp + index * kcxt->kvars_nbytes);
+	kcxt->kvars_len  = (int *)(kcxt->kvars_addr + kcxt->kvars_nslots);
 	if (l_state == 0)
 	{
 		/* pick up the first item from the hash-slot */
@@ -305,10 +298,9 @@ execGpuJoinHashJoin(kern_context      *kcxt,
 	if (tuple_is_valid)
 	{
 		index = write_pos % UNIT_TUPLES_PER_DEPTH;
-		dst_kvars_addr += index * kcxt->kvars_nslots;
-		dst_kvars_len  += index * kcxt->kvars_nslots;
-		memcpy(dst_kvars_addr, kcxt->kvars_addr, sizeof(void *) * kcxt->kvars_nslots);
-		memcpy(dst_kvars_len,  kcxt->kvars_len,  sizeof(int)    * kcxt->kvars_nslots);
+		memcpy(dst_kvars_addr_wp + index * kcxt->kvars_nbytes,
+			   kcxt->kvars_addr,
+			   kcxt->kvars_nbytes);
 	}
 	__syncwarp();
 	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
@@ -325,8 +317,7 @@ execGpuJoinProjection(kern_context *kcxt,
 					  int n_rels,	/* index of read/write-pos */
 					  kern_data_store *kds_dst,
 					  kern_expression *kexp_projection,
-					  void **kvars_addr,
-					  int *kvars_len)
+					  char *kvars_addr_wp)
 {
 	uint32_t	write_pos = WARP_WRITE_POS(wp,n_rels);
 	uint32_t	read_pos = WARP_READ_POS(wp,n_rels);
@@ -357,8 +348,8 @@ execGpuJoinProjection(kern_context *kcxt,
 	{
 		int			index = (read_pos % UNIT_TUPLES_PER_DEPTH);
 
-		kcxt->kvars_addr = kvars_addr + kcxt->kvars_nslots * index;
-		kcxt->kvars_len  = kvars_len  + kcxt->kvars_nslots * index;
+		kcxt->kvars_addr = (void **)(kvars_addr_wp + index * kcxt->kvars_nbytes);
+		kcxt->kvars_len = (int *)(kcxt->kvars_addr + kcxt->kvars_nslots);
 		tupsz = kern_estimate_heaptuple(kcxt,
 										kexp_projection,
 										kds_dst);
@@ -450,35 +441,49 @@ kern_gpujoin_main(kern_session_info *session,
 {
 	kern_context	   *kcxt;
 	kern_warp_context  *wp, *wp_saved;
-	void			  **kvars_addr;
-	int				   *kvars_len;
-	uint32_t			kvars_width;
+	char			   *kvars_addr_wp;
+	uint32_t			kvars_chunksz;
+//	void			  **kvars_addr;
+//	int				   *kvars_len;
+//	uint32_t			kvars_width;
 	uint32_t		   *l_state;
 	bool			   *matched;
-	uint32_t			wp_unitsz;
+	uint32_t			wp_base_sz;
 	uint32_t			n_rels = kmrels->num_rels;
 	int					depth;
 	int					status;
 	__shared__ uint32_t smx_row_count;
 
-	assert(kgtask->nslots == session->kvars_slot_width &&
-		   kgtask->n_rels == kmrels->num_rels);
+	assert(kgtask->kvars_nslots == session->kcxt_kvars_nslots &&
+		   kgtask->kvars_nbytes == session->kcxt_kvars_nbytes &&
+		   kgtask->n_rels == n_rels);
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session, kds_src);
+	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(n_rels);
+	wp = (kern_warp_context *)SHARED_WORKMEM(wp_base_sz, get_local_id() / warpSize);
+	wp_saved = KERN_GPUTASK_WARP_CONTEXT(kgtask);
+	l_state = KERN_GPUTASK_LSTATE_ARRAY(kgtask);
+	matched = KERN_GPUTASK_MATCHED_ARRAY(kgtask);
+	kvars_chunksz = kcxt->kvars_nbytes * UNIT_TUPLES_PER_DEPTH;
+	kvars_addr_wp = (char *)wp_saved + wp_base_sz;
+
+	
+#if 0	
 	wp_unitsz = __KERN_WARP_CONTEXT_UNITSZ_BASE(n_rels);
 	wp = (kern_warp_context *)SHARED_WORKMEM(wp_unitsz, get_local_id() / warpSize);
 	wp_saved = KERN_GPUTASK_WARP_CONTEXT(kgtask);
 	l_state = KERN_GPUTASK_LSTATE_ARRAY(kgtask);
 	matched = KERN_GPUTASK_MATCHED_ARRAY(kgtask);
 	kvars_width = UNIT_TUPLES_PER_DEPTH * kcxt->kvars_nslots;
+	//!!!!!
 	kvars_addr = (void **)((char *)wp_saved + wp_unitsz);
 	kvars_len = (int *)(kvars_addr + kvars_width * (n_rels+1));
-
+#endif
 	if (kgtask->resume_context)
 	{
 		/* resume the warp-context from the previous execution */
 		if (LaneId() == 0)
-			memcpy(wp, wp_saved, wp_unitsz);
+			memcpy(wp, wp_saved, wp_base_sz);
 		if (get_local_id() == 0)
 			smx_row_count = wp->smx_row_count;
 		depth = __shfl_sync(__activemask(), wp->depth, 0);
@@ -487,7 +492,7 @@ kern_gpujoin_main(kern_session_info *session,
 	{
 		/* zero clear the wp */
 		if (LaneId() == 0)
-			memset(wp, 0, wp_unitsz);
+			memset(wp, 0, wp_base_sz);
 		if (get_local_id() == 0)
 			smx_row_count = 0;
 		depth = 0;
@@ -508,8 +513,7 @@ kern_gpujoin_main(kern_session_info *session,
 										  kds_extra,
 										  SESSION_KEXP_SCAN_LOAD_VARS(session),
 										  SESSION_KEXP_SCAN_QUALS(session),
-										  kvars_addr,	/* depth=0 */
-										  kvars_len,	/* depth=0 */
+										  kvars_addr_wp,	/* depth=0 */
 										  &smx_row_count);
 		}
 		else if (depth > n_rels)
@@ -520,8 +524,7 @@ kern_gpujoin_main(kern_session_info *session,
 										   n_rels,
 										   kds_dst,
 										   SESSION_KEXP_PROJECTION(session),
-										   kvars_addr + kvars_width * n_rels,
-										   kvars_len  + kvars_width * n_rels);
+										   kvars_addr_wp + kvars_chunksz * n_rels);
 			if (status >= 0)
 				depth = status;
 			else if (status == -2)
@@ -540,10 +543,8 @@ kern_gpujoin_main(kern_session_info *session,
 			depth = execGpuJoinNestLoop(kcxt, wp,
 										kmrels,
 										depth,
-										kvars_addr + kvars_width * (depth-1),
-										kvars_len  + kvars_width * (depth-1),
-										kvars_addr + kvars_width * depth,
-										kvars_len  + kvars_width * depth,
+										kvars_addr_wp + kvars_chunksz * (depth-1),
+										kvars_addr_wp + kvars_chunksz * depth,
 										l_state[depth-1],	/* call by reference */
 										matched[depth-1]);	/* call by reference */
 		}
@@ -560,10 +561,8 @@ kern_gpujoin_main(kern_session_info *session,
 			depth = execGpuJoinHashJoin(kcxt, wp,
 										kmrels,
 										depth,
-										kvars_addr + kvars_width * (depth-1),
-										kvars_len  + kvars_width * (depth-1),
-										kvars_addr + kvars_width * depth,
-										kvars_len  + kvars_width * depth,
+										kvars_addr_wp + kvars_chunksz * (depth-1),
+										kvars_addr_wp + kvars_chunksz * depth,
 										l_state[depth-1],	/* call by reference */
 										matched[depth-1]);	/* call by reference */
 		}
@@ -578,7 +577,7 @@ kern_gpujoin_main(kern_session_info *session,
 	{
 		wp->depth = depth;
 		wp->smx_row_count = smx_row_count;
-		memcpy(wp_saved, wp, wp_unitsz);
+		memcpy(wp_saved, wp, wp_base_sz);
 	}
 	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
 }

@@ -185,7 +185,7 @@ typedef struct devtype_info
 	bool		type_is_negative;
 	const char *type_name;
 	const char *type_extension;
-	int			type_sizeof;	/* sizeof(xpu_NAME_t) */
+	int			type_sizeof;
 	devtype_hashfunc_f type_hashfunc;
 	/* oid of type related functions */
 	Oid			type_eqfunc;
@@ -272,6 +272,7 @@ typedef struct
 	bytea	   *kexp_groupby_actions;
 	List	   *kvars_depth;
 	List	   *kvars_resno;
+	List	   *kvars_bufsz;
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
 	/* group-by parameters */
@@ -463,6 +464,7 @@ typedef struct
 	uint32_t	kexp_flags;
 	List	   *kvars_depth;
 	List	   *kvars_resno;
+	List	   *kvars_bufsz;
 	List	   *tlist_dev;
 	uint32_t	kvars_nslots;
 	List	   *input_rels_tlist;
