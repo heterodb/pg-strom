@@ -126,6 +126,7 @@ typedef enum
 {
 	ArrowIntervalUnit__Year_Month	= 0,
 	ArrowIntervalUnit__Day_Time		= 1,
+	ArrowIntervalUnit__Month_Day_Nano = 2,
 } ArrowIntervalUnit;
 
 /*

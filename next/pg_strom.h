@@ -186,6 +186,7 @@ typedef struct devtype_info
 	const char *type_name;
 	const char *type_extension;
 	int			type_sizeof;
+	int			type_alignof;
 	devtype_hashfunc_f type_hashfunc;
 	/* oid of type related functions */
 	Oid			type_eqfunc;
@@ -272,7 +273,7 @@ typedef struct
 	bytea	   *kexp_groupby_actions;
 	List	   *kvars_depth;
 	List	   *kvars_resno;
-	List	   *kvars_bufsz;
+	List	   *kvars_types;	/* type-oid, if it needs extra buffer on kvars-slot */
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
 	/* group-by parameters */
@@ -464,7 +465,7 @@ typedef struct
 	uint32_t	kexp_flags;
 	List	   *kvars_depth;
 	List	   *kvars_resno;
-	List	   *kvars_bufsz;
+	List	   *kvars_types;
 	List	   *tlist_dev;
 	uint32_t	kvars_nslots;
 	List	   *input_rels_tlist;

@@ -31,68 +31,41 @@ xpu_numeric_sign(xpu_numeric_t *num)
 STATIC_FUNCTION(bool)
 xpu_numeric_datum_ref(kern_context *kcxt,
 					  xpu_datum_t *__result,
-					  const void *addr)
+					  int vclass,
+					  const kern_variable *kvar)
 {
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
 	const char	   *errmsg;
 
-	if (!addr)
-		result->isnull = true;
+	if (vclass == KVAR_CLASS__VARLENA)
+	{
+		errmsg = __xpu_numeric_from_varlena(result, (const varlena *)kvar->ptr);
+		if (!errmsg)
+		{
+			result->isnull = false;
+			return true;
+		}
+		STROM_ELOG(kcxt, errmsg);
+	}
 	else
 	{
-		errmsg = __xpu_numeric_from_varlena(result, (const varlena *)addr);
-		if (errmsg)
-		{
-			STROM_ELOG(kcxt, errmsg);
-			return false;
-		}
+		STROM_ELOG(kcxt, "unexpected vclass for device numeric data type.");
 	}
-	return true;
+	return false;
 }
 
-STATIC_FUNCTION(bool)
-xpu_numeric_arrow_ref(kern_context *kcxt,
-					  xpu_datum_t *__result,
-					  const kern_colmeta *cmeta,
-					  const void *addr, int len)
+PUBLIC_FUNCTION(bool)
+xpu_numeric_datum_store(kern_context *kcxt,
+						const xpu_datum_t *arg,
+						int *p_vclass,
+						kern_variable *p_kvar)
 {
-	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-
-	if (cmeta->attopts.tag != ArrowType__Decimal ||
-		cmeta->attopts.decimal.bitWidth != 128)
-	{
-		STROM_ELOG(kcxt, "Not a convertible Arrow::Decimal value");
-		return false;
-	}
-	if (!addr)
-		result->isnull = true;
-	else
-		set_normalized_numeric(result, *((int128_t *)addr),
-							   cmeta->attopts.decimal.scale);
-	return true;
+	STROM_ELOG(kcxt, "xpu_datum_store should not be called for numeric type");
+	return false;
 }
 
 STATIC_FUNCTION(int)
-xpu_numeric_arrow_move(kern_context *kcxt,
-					   char *buffer,
-					   const kern_colmeta *cmeta,
-					   const void *addr, int len)
-{
-	if (cmeta->attopts.tag != ArrowType__Decimal ||
-		cmeta->attopts.decimal.bitWidth != 128)
-	{
-		STROM_ELOG(kcxt, "Not a convertible Arrow::Decimal value");
-		return -1;
-	}
-	if (!addr)
-		return 0;
-	return __xpu_numeric_to_varlena(buffer,
-									cmeta->attopts.decimal.scale,
-									*((int128_t *)addr));
-}
-
-PUBLIC_FUNCTION(int)
-xpu_numeric_datum_store(kern_context *kcxt,
+xpu_numeric_datum_write(kern_context *kcxt,
 						char *buffer,
 						const xpu_datum_t *__arg)
 {

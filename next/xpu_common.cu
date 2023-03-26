@@ -12,45 +12,30 @@
 #include "xpu_common.h"
 
 /*
- * Setup kcxt->kvars_cmeta
- */
-PUBLIC_FUNCTION(void)
-INIT_KERNEL_VARS_CMETA(kern_context *kcxt,
-					   kern_data_store *kds_src)
-{
-	kern_session_info  *session = kcxt->session;
-	kern_vars_defitem  *kvars_defs = (kern_vars_defitem *)
-		((char *)session + session->kvars_slot_items);
-
-	memset(kcxt->kvars_cmeta, 0, sizeof(kern_colmeta *) * kcxt->kvars_nslots);
-	/* only KDS_FORMAT_ARROW needs kvars_cmeta[] */
-	if (kds_src->format == KDS_FORMAT_ARROW)
-	{
-		for (int i=0; i < kcxt->kvars_nslots; i++)
-		{
-			kern_vars_defitem  *kvar = &kvars_defs[i];
-
-			if (kvar->var_depth == 0)
-			{
-				assert(kvar->var_resno > 0 &&
-					   kvar->var_resno <= kds_src->ncols);
-				kcxt->kvars_cmeta[i] = &kds_src->colmeta[kvar->var_resno - 1];
-			}
-		}
-	}
-}
-
-/*
  * Const Expression
  */
 STATIC_FUNCTION(bool)
 pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 {
-	const char *addr = NULL;
-
 	if (!kexp->u.c.const_isnull)
-		addr = kexp->u.c.const_value;
-	return kexp->expr_ops->xpu_datum_ref(kcxt, __result, addr);
+	{
+		const xpu_datum_operators *expr_ops = kexp->expr_ops;
+		int			typlen = expr_ops->xpu_type_length;
+		kern_variable kvar;
+
+		kvar.ptr = (void *)kexp->u.c.const_value;
+		if (typlen >= 0)
+			return expr_ops->xpu_datum_ref(kcxt, __result, typlen, &kvar);
+		else if (typlen == -1)
+			return expr_ops->xpu_datum_ref(kcxt, __result, KVAR_CLASS__VARLENA, &kvar);
+		else
+		{
+			STROM_ELOG(kcxt, "Bug? ConstExpr has unknown type length");
+			return false;
+		}
+	}
+	__result->isnull = true;
+	return true;
 }
 
 STATIC_FUNCTION(bool)
@@ -58,11 +43,26 @@ pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 {
 	kern_session_info *session = kcxt->session;
 	uint32_t	param_id = kexp->u.p.param_id;
-	const char *addr = NULL;
 
 	if (param_id < session->nparams && session->poffset[param_id] != 0)
-		addr = (char *)session + session->poffset[param_id];
-	return kexp->expr_ops->xpu_datum_ref(kcxt, __result, addr);
+	{
+		const xpu_datum_operators *expr_ops = kexp->expr_ops;
+		int			typlen = expr_ops->xpu_type_length;
+		kern_variable kvar;
+
+		kvar.ptr = ((char *)session + session->poffset[param_id]);
+		if (typlen >= 0)
+			return expr_ops->xpu_datum_ref(kcxt, __result, typlen, &kvar);
+		else if (typlen == -1)
+			return expr_ops->xpu_datum_ref(kcxt, __result, KVAR_CLASS__VARLENA, &kvar);
+		else
+		{
+			STROM_ELOG(kcxt, "Bug? ParamExpr has unknown type length");
+			return false;
+		}
+	}
+	__result->isnull = true;
+	return true;
 }
 
 STATIC_FUNCTION(bool)
@@ -72,16 +72,37 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 
 	if (slot_id < kcxt->kvars_nslots)
 	{
-		const kern_colmeta *cmeta = kcxt->kvars_cmeta[slot_id];
-		void	   *addr = kcxt->kvars_addr[slot_id];
-		int			len  = kcxt->kvars_len[slot_id];
+		const xpu_datum_operators *expr_ops = kexp->expr_ops;
+		kern_variable  *kvar = &kcxt->kvars_slot[slot_id];
+		int				vclass = kcxt->kvars_class[slot_id];
+		const char	   *addr;
 
-		/* special case handling if Apache Arrow */
-		if (cmeta && cmeta->kds_format == KDS_FORMAT_ARROW)
-			return kexp->expr_ops->xpu_arrow_ref(kcxt, __result,
-												 cmeta, addr, len);
-		/* elsewhere, PostgreSQL heap format */
-		return kexp->expr_ops->xpu_datum_ref(kcxt, __result, addr);
+		switch (vclass)
+		{
+			case KVAR_CLASS__NULL:
+				__result->isnull = true;
+				return true;
+
+			case KVAR_CLASS__XPU_DATUM:
+				if (kexp->exptype != kvar->xpu.type_code)
+				{
+					STROM_ELOG(kcxt, "Bug? KVAR_CLASS__XPU_DATUM mismatch");
+					return false;
+				}
+				addr = ((const char *)kcxt->kvars_slot + kvar->xpu.offset);
+				memcpy(__result, addr, expr_ops->xpu_type_sizeof);
+				return true;
+
+			default:
+				if (vclass < 0)
+				{
+					STROM_ELOG(kcxt, "Bug? KVAR_CLASS__XPU_DATUM mismatch");
+					return false;
+				}
+			case KVAR_CLASS__INLINE:
+			case KVAR_CLASS__VARLENA:
+				return expr_ops->xpu_datum_ref(kcxt, __result, vclass, kvar);
+		}
 	}
 	STROM_ELOG(kcxt, "Bug? slot_id is out of range");
 	return false;
@@ -251,17 +272,16 @@ kern_form_heaptuple(kern_context *kcxt,
 	uint16_t	t_infomask = 0;
 	bool		t_hasnull = false;
 	int			nattrs = kproj->u.proj.nattrs;
-	int			sz;
 
 	if (kds_dst && kds_dst->ncols < nattrs)
 		nattrs = kds_dst->ncols;
 	/* has any NULL attributes? */
 	for (int j=0; j < nattrs; j++)
 	{
-		const kern_projection_desc *desc = &kproj->u.proj.desc[j];
+		uint32_t	slot_id = kproj->u.proj.desc[j].slot_id;
 
-		assert(desc->slot_id < kcxt->kvars_nslots);
-		if (!kcxt->kvars_addr[desc->slot_id])
+		assert(slot_id < kcxt->kvars_nslots);
+		if (kcxt->kvars_class[slot_id] == KVAR_CLASS__NULL)
 		{
 			t_infomask |= HEAP_HASNULL;
 			t_hasnull = true;
@@ -290,16 +310,15 @@ kern_form_heaptuple(kern_context *kcxt,
 	/* walk on the columns */
 	for (int j=0; j < nattrs; j++)
 	{
-		const kern_projection_desc *desc = &kproj->u.proj.desc[j];
-		const kern_colmeta *cmeta = kcxt->kvars_cmeta[desc->slot_id];
-		void	   *addr = kcxt->kvars_addr[desc->slot_id];
-		int			len  = kcxt->kvars_len[desc->slot_id];
+		const kern_colmeta *cmeta = &kds_dst->colmeta[j];
+		const kern_projection_desc *pdesc = &kproj->u.proj.desc[j];
+		const kern_variable *kvar = &kcxt->kvars_slot[pdesc->slot_id];
+		int			vclass = kcxt->kvars_class[pdesc->slot_id];
+		int			nbytes;
 		char	   *buffer = NULL;
 
-		if (!addr)
+		if (vclass == KVAR_CLASS__NULL)
 			continue;
-		if (!cmeta)
-			cmeta = &kds_dst->colmeta[j];
 		/* adjust alignment */
 		t_next = TYPEALIGN(cmeta->attalign, t_hoff);
 		if (htup)
@@ -308,34 +327,91 @@ kern_form_heaptuple(kern_context *kcxt,
 				memset((char *)htup + t_hoff, 0, t_next - t_hoff);
 			buffer = (char *)htup + t_next;
 		}
-		/* special handling if arrow */
-		if (cmeta->kds_format == KDS_FORMAT_ARROW)
+
+		if (vclass == KVAR_CLASS__XPU_DATUM)
 		{
-			sz = desc->slot_ops->xpu_arrow_move(kcxt, buffer,
-												cmeta, addr, len);
-			if (sz < 0)
+			uint32_t	offset = kcxt->kvars_slot[pdesc->slot_id].xpu.offset;
+			xpu_datum_t *xdatum = (xpu_datum_t *)((char *)kcxt->kvars_slot + offset);
+
+			assert(pdesc->slot_type == kvar->xpu.type_code);
+			if (pdesc->slot_ops)
+			{
+				const xpu_datum_operators *slot_ops = pdesc->slot_ops;
+
+				nbytes = slot_ops->xpu_datum_write(kcxt, buffer, xdatum);
+				if (nbytes < 0)
+					return -1;
+			}
+			else
+			{
+				STROM_ELOG(kcxt, "Bug? unexpected Kvar-class for xPU-Datum");
 				return -1;
-			if (sz > 0 && cmeta->attlen < 0)
-				t_infomask |= HEAP_HASVARWIDTH;
+			}
+		}
+		else if (cmeta->attlen > 0)
+		{
+			if (vclass == KVAR_CLASS__INLINE)
+			{
+				assert(cmeta->attlen <= sizeof(kern_variable));
+				if (buffer)
+					memcpy(buffer, kvar, cmeta->attlen);
+			}
+			else if (vclass >= 0)
+			{
+				int		sz = Min(vclass, cmeta->attlen);
+
+				if (buffer)
+				{
+					if (sz > 0)
+						memcpy(buffer, kvar->ptr, sz);
+					if (sz < cmeta->attlen)
+						memset(buffer + sz, 0, cmeta->attlen - sz);
+				}
+			}
+			else
+			{
+				STROM_ELOG(kcxt, "Bug? unexpected kvar-class for fixed-length datum");
+				return -1;
+			}
+			nbytes = cmeta->attlen;
+		}
+		else if (cmeta->attlen == -1)
+		{
+			if (vclass >= 0)
+			{
+				nbytes = VARHDRSZ + vclass;
+				if (buffer)
+				{
+					if (vclass > 0)
+						memcpy(buffer+VARHDRSZ, kvar->ptr, vclass);
+					SET_VARSIZE(buffer, nbytes);
+				}
+				t_next += nbytes;
+			}
+			else if (vclass == KVAR_CLASS__VARLENA)
+			{
+				nbytes = VARSIZE_ANY(kvar->ptr);
+				if (buffer)
+					memcpy(buffer, kvar->ptr, nbytes);
+				if (VARATT_IS_EXTERNAL(kvar->ptr))
+					t_infomask |= HEAP_HASEXTERNAL;
+			}
+			else
+			{
+				STROM_ELOG(kcxt, "Bug? unexpected kvar-class for varlena datum");
+				return -1;
+			}
+			t_infomask |= HEAP_HASVARWIDTH;
 		}
 		else
 		{
-			if (cmeta->attlen > 0)
-				sz = cmeta->attlen;
-			else
-			{
-				sz = VARSIZE_ANY(addr);
-				t_infomask |= HEAP_HASVARWIDTH;
-				if (VARATT_IS_EXTERNAL(addr))
-					t_infomask |= HEAP_HASEXTERNAL;
-			}
-			if (buffer)
-				memcpy(buffer, addr, sz);
+			STROM_ELOG(kcxt, "Bug? unsupported attribute-length");
+			return -1;
 		}
 		/* set not-null bit, if valid */
 		if (htup && t_hasnull)
 			htup->t_bits[j>>3] |= (1<<(j & 7));
-		t_hoff = t_next + sz;
+		t_hoff = t_next + nbytes;
 	}
 
 	if (htup)
@@ -426,53 +502,43 @@ pgfn_SaveExpr(XPU_PGFUNCTION_ARGS)
 	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 	const xpu_datum_operators *expr_ops = kexp->expr_ops;
 	xpu_datum_t	   *result = __result;
-	int				slot_id = kexp->u.save.slot_id;
+	uint32_t		slot_id = kexp->u.save.slot_id;
+	uint32_t		slot_off = kexp->u.save.slot_off;
+	xpu_datum_t	   *slot_buf = NULL;
 
 	assert(kexp->nr_args == 1 &&
-		   kexp->exptype == karg->exptype &&
-		   kexp->u.save.slot_id < kcxt->kvars_nslots);
+		   kexp->exptype == karg->exptype);
+	assert(slot_id < kcxt->kvars_nslots);
+	/* setup kvar-slot buffer */
+	if (slot_off > 0)
+	{
+		assert(slot_off + expr_ops->xpu_type_sizeof <= kcxt->kvars_nbytes);
+		slot_buf = (xpu_datum_t *)((char *)kcxt->kvars_slot + slot_off);
+		if (!result)
+			result = slot_buf;
+	}
 	if (!result)
 		result = (xpu_datum_t *)alloca(expr_ops->xpu_type_sizeof);
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, result))
 		return false;
-
 	if (result->isnull)
 	{
-		kcxt->kvars_addr[slot_id] = NULL;
-		kcxt->kvars_len[slot_id] = -1;
+		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+	}
+	else if (slot_buf)
+	{
+		if (slot_buf != result)
+			memcpy(slot_buf, result, expr_ops->xpu_type_sizeof);
+		kcxt->kvars_class[slot_id] = KVAR_CLASS__XPU_DATUM;
+		kcxt->kvars_slot[slot_id].xpu.offset = slot_off;
+		kcxt->kvars_slot[slot_id].xpu.type_code = expr_ops->xpu_type_code;
 	}
 	else
 	{
-		int		sz;
-		char   *buf;
-
-		sz = expr_ops->xpu_datum_store(kcxt, NULL, result);
-		if (sz < 0)
-		{
-			STROM_ELOG(kcxt, "unable to determiner the temporary buffer size");
+		if (!expr_ops->xpu_datum_store(kcxt, result,
+									   &kcxt->kvars_class[slot_id],
+									   &kcxt->kvars_slot[slot_id]))
 			return false;
-		}
-		else if (sz > 0)
-		{
-			buf = (char *)kcxt_alloc(kcxt, sz);
-			if (!buf)
-			{
-				STROM_ELOG(kcxt, "out of memory");
-				return false;
-			}
-			if (expr_ops->xpu_datum_store(kcxt, buf, result) < 0)
-			{
-				STROM_ELOG(kcxt, "unable to store the expression on the kvars_slot");
-				return false;
-			}
-			kcxt->kvars_addr[slot_id] = buf;
-			kcxt->kvars_len[slot_id] = -1;
-		}
-		else
-		{
-			kcxt->kvars_addr[slot_id] = NULL;
-			kcxt->kvars_len[slot_id] = -1;
-		}
 	}
 	return true;
 }
@@ -575,8 +641,29 @@ kern_extract_heap_tuple(kern_context *kcxt,
 			offset  = htup->t_hoff + cmeta->attcacheoff;
 
 			assert(slot_id < kcxt->kvars_nslots);
-			kcxt->kvars_addr[slot_id]  = (char *)htup + offset;
-			kcxt->kvars_len[slot_id]   = -1;
+			if (cmeta->attbyval)
+			{
+				assert(cmeta->attlen <= sizeof(kern_variable));
+				kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+				memcpy(&kcxt->kvars_slot[slot_id],
+					   (char *)htup + offset,
+					   cmeta->attlen);
+			}
+			else if (cmeta->attlen > 0)
+			{
+				kcxt->kvars_class[slot_id] = cmeta->attlen;
+				kcxt->kvars_slot[slot_id].ptr = (char *)htup + offset;
+			}
+			else if (cmeta->attlen == -1)
+			{
+				kcxt->kvars_class[slot_id] = KVAR_CLASS__VARLENA;
+				kcxt->kvars_slot[slot_id].ptr = (char *)htup + offset;
+			}
+			else
+			{
+				/* unsupported attribute length */
+				kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+			}
 			kvars++;
 			kvars_nloads--;
 		}
@@ -615,8 +702,31 @@ kern_extract_heap_tuple(kern_context *kcxt,
 				slot_id = kvars->var_slot_id;
 
 				assert(slot_id < kcxt->kvars_nslots);
-				kcxt->kvars_addr[slot_id]  = addr;
-				kcxt->kvars_len[slot_id]   = -1;
+				if (!addr)
+				{
+					kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+				}
+				else if (cmeta->attbyval)
+				{
+					assert(cmeta->attlen <= sizeof(kern_variable));
+					kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+					memcpy(&kcxt->kvars_slot[slot_id], addr, cmeta->attlen);
+				}
+				else if (cmeta->attlen > 0)
+				{
+					kcxt->kvars_class[slot_id] = cmeta->attlen;
+					kcxt->kvars_slot[slot_id].ptr = addr;
+				}
+				else if (cmeta->attlen == -1)
+				{
+					kcxt->kvars_class[slot_id] = KVAR_CLASS__VARLENA;
+					kcxt->kvars_slot[slot_id].ptr = addr;
+				}
+				else
+				{
+					/* unsupported attribute length */
+					kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+				}
 				kvars++;
 				kvars_nloads--;
 				break;
@@ -658,10 +768,6 @@ arrow_fetch_secondary_index(kern_context *kcxt,
 							uint64_t *p_start,
 							uint64_t *p_end)
 {
-	char	   *base = (char *)kds + __kds_unpack(values_offset);
-	//char	   *extra = (char *)kds + __kds_unpack(values_length);
-	uint64_t	start, end;
-
 	if (!values_offset || !values_length)
 	{
 		STROM_ELOG(kcxt, "Arrow variable index/buffer is missing");
@@ -670,26 +776,29 @@ arrow_fetch_secondary_index(kern_context *kcxt,
 
 	if (is_large_offset)
 	{
+		uint64_t   *base = (uint64_t *)((char *)kds + __kds_unpack(values_offset));
+
 		if (sizeof(uint64_t) * (kds_index+2) > __kds_unpack(values_length))
 		{
 			STROM_ELOG(kcxt, "Arrow variable index[64bit] out of range");
 			return false;
 		}
-		start = ((uint64_t *)base)[kds_index];
-		end = ((uint64_t *)base)[kds_index+1];
+		*p_start = base[kds_index];
+		*p_end = base[kds_index+1];
 	}
 	else
 	{
+		uint32_t   *base = (uint32_t *)((char *)kds + __kds_unpack(values_offset));
+
 		if (sizeof(uint32_t) * (kds_index+2) > __kds_unpack(values_length))
 		{
 			STROM_ELOG(kcxt, "Arrow variable index[32bit] out of range");
 			return false;
 		}
-		start = ((uint32_t *)base)[kds_index];
-		end = ((uint32_t *)base)[kds_index+1];
+		*p_start = base[kds_index];
+		*p_end = base[kds_index+1];
+
 	}
-	*p_start = start;
-	*p_end = end;
 	return true;
 }
 
@@ -698,68 +807,446 @@ __arrow_fetch_bool_datum(kern_context *kcxt,
 						 kern_data_store *kds,
 						 kern_colmeta *cmeta,
 						 uint32_t kds_index,
-						 void **p_addr)
+						 kern_variable *kvar,
+						 int *vclass)
 {
-	xpu_bool_t	   *datum;
-
-	assert(cmeta->atttypid == PG_BOOLOID &&
-		   cmeta->extra_offset == 0 &&
+	assert(cmeta->extra_offset == 0 &&
 		   cmeta->extra_length == 0);
-	if (cmeta->nullmap_offset &&
-		!arrow_bitmap_check(kds, kds_index,
-							cmeta->nullmap_offset,
-							cmeta->nullmap_length))
-	{
-		*p_addr = NULL;
-		return true;
-	}
-
-	datum = (xpu_bool_t *)kcxt_alloc(kcxt, sizeof(xpu_bool_t));
-	if (!datum)
-		return false;
-	datum->isnull = false;
-	datum->value = arrow_bitmap_check(kds, kds_index,
-									  cmeta->values_offset,
-									  cmeta->values_length);
-	*p_addr = datum;
+	kvar->i8 = arrow_bitmap_check(kds, kds_index,
+								  cmeta->values_offset,
+								  cmeta->values_length);
+	*vclass = KVAR_CLASS__INLINE;
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-__arrow_fetch_inline_datum(kern_context *kcxt,
-						   kern_data_store *kds,
-						   kern_colmeta *cmeta,
-						   uint32_t kds_index,
-						   void **p_addr,
-						   int *p_len)
+__arrow_fetch_int_datum(kern_context *kcxt,
+						kern_data_store *kds,
+						kern_colmeta *cmeta,
+						uint32_t kds_index,
+						kern_variable *kvar,
+						int *vclass)
 {
-	int		unitsz = cmeta->attopts.unitsz;
+	size_t		values_length = __kds_unpack(cmeta->values_length);
 
-	if (unitsz <= 0)
+	assert(cmeta->extra_offset == 0 &&
+		   cmeta->extra_length == 0);
+	switch (cmeta->attopts.integer.bitWidth)
 	{
-		STROM_ELOG(kcxt, "Apache Arrow incorrect unit size");
-		return false;
+		case 8:
+			if (cmeta->values_offset &&
+				sizeof(uint8_t) * (kds_index+1) <= values_length)
+			{
+				uint8_t	   *base = (uint8_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->u8 = base[kds_index];
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+		case 16:
+			if (cmeta->values_offset &&
+				sizeof(uint16_t) * (kds_index+1) <= values_length)
+			{
+				uint16_t   *base = (uint16_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->u16 = base[kds_index];
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+		case 32:
+			if (cmeta->values_offset &&
+				sizeof(uint32_t) * (kds_index+1) <= values_length)
+			{
+				uint32_t   *base = (uint32_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->u32 = base[kds_index];
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+		case 64:
+			if (cmeta->values_offset &&
+				sizeof(uint64_t) * (kds_index+1) <= values_length)
+			{
+				uint64_t   *base = (uint64_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->u64 = base[kds_index];
+				*vclass = KVAR_CLASS__INLINE;
+			}
+			break;
+		default:
+			STROM_ELOG(kcxt, "Arrow::Int unsupported bitWidth");
+			return false;
 	}
-	if (cmeta->nullmap_offset == 0 ||
-		arrow_bitmap_check(kds, kds_index,
-						   cmeta->nullmap_offset,
-						   cmeta->nullmap_length))
-	{
-		if (cmeta->values_offset &&
-			unitsz * (kds_index+1) <= __kds_unpack(cmeta->values_length))
-		{
-			char   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
+	*vclass = KVAR_CLASS__NULL;
+    return true;
+}
 
-			*p_addr = base + unitsz * kds_index;
-			*p_len  = unitsz;
-			return true;
-		}
+STATIC_FUNCTION(bool)
+__arrow_fetch_float_datum(kern_context *kcxt,
+						  kern_data_store *kds,
+						  kern_colmeta *cmeta,
+						  uint32_t kds_index,
+						  kern_variable *kvar,
+						  int *vclass)
+{
+	size_t		values_length = __kds_unpack(cmeta->values_length);
+
+	assert(cmeta->extra_offset == 0 &&
+		   cmeta->extra_length == 0);
+	switch (cmeta->attopts.floating_point.precision)
+	{
+		case ArrowPrecision__Half:
+			if (cmeta->values_offset &&
+				sizeof(float2_t) * (kds_index+1) <= cmeta->values_length)
+			{
+				float2_t   *base = (float2_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->fp16 = base[kds_index];
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+		case ArrowPrecision__Single:
+			if (cmeta->values_offset &&
+				sizeof(float4_t) * (kds_index+1) <= values_length)
+			{
+				float4_t   *base = (float4_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->fp32 = base[kds_index];
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+		case ArrowPrecision__Double:
+			if (cmeta->values_offset &&
+				sizeof(float8_t) * (kds_index+1) <= values_length)
+			{
+				float8_t   *base = (float8_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->fp64 = base[kds_index];
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+		default:
+			STROM_ELOG(kcxt, "Arrow::FloatingPoint unsupported precision");
+			return false;
 	}
-	/* elsewhere, datum is NULL */
-	*p_addr = NULL;
-	*p_len = -1;
+	*vclass = KVAR_CLASS__NULL;
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+__arrow_fetch_decimal_datum(kern_context *kcxt,
+							kern_data_store *kds,
+							kern_colmeta *cmeta,
+							uint32_t kds_index,
+							uint32_t slot_off,
+							kern_variable *kvar,
+							int *vclass)
+{
+	assert(cmeta->extra_offset == 0 &&
+		   cmeta->extra_length == 0);
+	if (cmeta->attopts.decimal.bitWidth != 128)
+	{
+		STROM_ELOG(kcxt, "Arrow::Decimal unsupported bitWidth");
+		return false;
+	}
+	if (cmeta->values_offset &&
+		sizeof(int128_t) * (kds_index+1) <= __kds_unpack(cmeta->values_length))
+	{
+		xpu_numeric_t  *num = (xpu_numeric_t *)((char *)kcxt->kvars_slot + slot_off);
+		int128_t	   *base = (int128_t *)
+			((char *)kds + __kds_unpack(cmeta->values_offset));
+
+		kvar->xpu.offset = slot_off;
+		kvar->xpu.type_code = TypeOpCode__numeric;
+		set_normalized_numeric(num, base[kds_index],
+							   cmeta->attopts.decimal.scale);
+		*vclass = KVAR_CLASS__XPU_DATUM;
+	}
+	else
+	{
+		*vclass = KVAR_CLASS__NULL;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+__arrow_fetch_date_datum(kern_context *kcxt,
+						 kern_data_store *kds,
+						 kern_colmeta *cmeta,
+						 uint32_t kds_index,
+						 kern_variable *kvar,
+						 int *vclass)
+{
+	size_t		values_length = __kds_unpack(cmeta->values_length);
+
+	assert(cmeta->extra_offset == 0 &&
+		   cmeta->extra_length == 0);
+	switch (cmeta->attopts.date.unit)
+	{
+		case ArrowDateUnit__Day:
+			if (cmeta->values_offset &&
+				sizeof(uint32_t) * (kds_index+1) <= values_length)
+			{
+				uint32_t   *base = (uint32_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->u32 = base[kds_index]
+					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+
+		case ArrowDateUnit__MilliSecond:
+			if (cmeta->values_offset &&
+				sizeof(uint64_t) * (kds_index+1) <= values_length)
+			{
+				uint64_t   *base = (uint64_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->u32 = base[kds_index] / (SECS_PER_DAY * 1000)
+					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+
+		default:
+			STROM_ELOG(kcxt, "unknown unit size of Arrow::Date");
+			return false;
+	}
+	*vclass = KVAR_CLASS__NULL;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+__arrow_fetch_time_datum(kern_context *kcxt,
+						 kern_data_store *kds,
+						 kern_colmeta *cmeta,
+						 uint32_t kds_index,
+						 kern_variable *kvar,
+						 int *vclass)
+{
+	size_t		values_length = __kds_unpack(cmeta->values_length);
+
+	assert(cmeta->extra_offset == 0 &&
+		   cmeta->extra_length == 0);
+	switch (cmeta->attopts.time.unit)
+	{
+		case ArrowTimeUnit__Second:
+			if (cmeta->values_offset &&
+				sizeof(int32_t) * (kds_index+1) <= values_length)
+			{
+				int32_t   *base = (int32_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->i64 = (int64_t)base[kds_index] * 1000000L;
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+			
+		case ArrowTimeUnit__MilliSecond:
+			if (cmeta->values_offset &&
+				sizeof(int32_t) * (kds_index+1) <= values_length)
+			{
+				int32_t	   *base = (int32_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->i64 = (int64_t)base[kds_index] * 1000L;
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+
+		case ArrowTimeUnit__MicroSecond:
+			if (cmeta->values_offset &&
+				sizeof(int64_t) * (kds_index+1) <= values_length)
+			{
+				int64_t	   *base = (int64_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->i64 = base[kds_index];
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+
+		case ArrowTimeUnit__NanoSecond:
+			if (cmeta->values_offset &&
+				sizeof(int64_t) * (kds_index+1) <= values_length)
+			{
+				int64_t	   *base = (int64_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->i64 = base[kds_index] / 1000L;
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+
+		default:
+			STROM_ELOG(kcxt, "unknown unit size of Arrow::Time");
+			return false;
+	}
+	*vclass = KVAR_CLASS__NULL;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+__arrow_fetch_timestamp_datum(kern_context *kcxt,
+							  kern_data_store *kds,
+							  kern_colmeta *cmeta,
+							  uint32_t kds_index,
+							  kern_variable *kvar,
+							  int *vclass)
+
+{
+	size_t		values_length = __kds_unpack(cmeta->values_length);
+
+	assert(cmeta->extra_offset == 0 &&
+		   cmeta->extra_length == 0);
+	switch (cmeta->attopts.time.unit)
+	{
+		case ArrowTimeUnit__Second:
+			if (cmeta->values_offset &&
+				sizeof(uint64_t) * (kds_index+1) <= values_length)
+			{
+				uint64_t   *base = (uint64_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->u64 = base[kds_index] * 1000000L;
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+
+		case ArrowTimeUnit__MilliSecond:
+			if (cmeta->values_offset &&
+				sizeof(uint64_t) * (kds_index+1) <= values_length)
+			{
+				uint64_t   *base = (uint64_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->u64 = base[kds_index] * 1000L;
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+
+		case ArrowTimeUnit__MicroSecond:
+			if (cmeta->values_offset &&
+				sizeof(uint64_t) * (kds_index+1) <= values_length)
+			{
+				uint64_t   *base = (uint64_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->u64 = base[kds_index];
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+
+		case ArrowTimeUnit__NanoSecond:
+			if (cmeta->values_offset &&
+				sizeof(uint64_t) * (kds_index+1) <= values_length)
+			{
+				uint64_t   *base = (uint64_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				kvar->u64 = base[kds_index] / 1000L;
+				*vclass = KVAR_CLASS__INLINE;
+				return true;
+			}
+			break;
+
+		default:
+			STROM_ELOG(kcxt, "unknown unit size of Arrow::Timestamp");
+			return false;
+	}
+	*vclass = KVAR_CLASS__NULL;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+__arrow_fetch_interval_datum(kern_context *kcxt,
+							 kern_data_store *kds,
+							 kern_colmeta *cmeta,
+							 uint32_t kds_index,
+							 uint32_t slot_off,
+							 kern_variable *kvar,
+							 int *vclass)
+{
+	size_t		values_length = __kds_unpack(cmeta->values_length);
+
+	assert(cmeta->extra_offset == 0 &&
+		   cmeta->extra_length == 0);
+	switch (cmeta->attopts.interval.unit)
+	{
+		case ArrowIntervalUnit__Year_Month:
+			if (cmeta->values_offset &&
+				sizeof(uint32_t) * (kds_index+1) <= values_length)
+			{
+				xpu_interval_t *iv = (xpu_interval_t *)
+					((char *)kcxt->kvars_slot + slot_off);
+				uint32_t   *base = (uint32_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				iv->value.month = base[kds_index];
+				iv->value.day   = 0;
+				iv->value.time  = 0;
+				kvar->xpu.offset = slot_off;
+				kvar->xpu.type_code = TypeOpCode__interval;
+				*vclass = KVAR_CLASS__XPU_DATUM;
+				return true;
+			}
+			break;
+		case ArrowIntervalUnit__Day_Time:
+			if (cmeta->values_offset &&
+				sizeof(uint32_t) * 2 * (kds_index+1) <= values_length)
+			{
+				xpu_interval_t *iv = (xpu_interval_t *)
+					((char *)kcxt->kvars_slot + slot_off);
+				uint32_t   *base = (uint32_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
+				iv->value.month = 0;
+				iv->value.day   = base[2*kds_index];
+				iv->value.time  = base[2*kds_index+1];
+				kvar->xpu.offset = slot_off;
+				kvar->xpu.type_code = TypeOpCode__interval;
+				*vclass = KVAR_CLASS__XPU_DATUM;
+				return true;
+			}
+			break;
+		default:
+			STROM_ELOG(kcxt, "unknown unit-size of Arrow::Interval");
+			return false;
+	}
+	*vclass = KVAR_CLASS__NULL;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+__arrow_fetch_fixed_size_binary_datum(kern_context *kcxt,
+									  kern_data_store *kds,
+									  kern_colmeta *cmeta,
+									  uint32_t kds_index,
+									  kern_variable *kvar,
+									  int *vclass)
+{
+	unsigned int	unitsz = cmeta->attopts.fixed_size_binary.byteWidth;
+
+	assert(cmeta->extra_offset == 0 &&
+		   cmeta->extra_length == 0);
+	if (cmeta->values_offset &&
+		unitsz * (kds_index+1) <= __kds_unpack(cmeta->values_length))
+	{
+		char	   *base = ((char *)kds + __kds_unpack(cmeta->values_offset));
+
+		kvar->ptr = base + unitsz * kds_index;
+		*vclass = unitsz;
+		return true;
+	}
+	*vclass = KVAR_CLASS__NULL;
+	return true;
+}
+
+
 
 STATIC_FUNCTION(bool)
 __arrow_fetch_variable_datum(kern_context *kcxt,
@@ -767,23 +1254,18 @@ __arrow_fetch_variable_datum(kern_context *kcxt,
 							 kern_colmeta *cmeta,
 							 uint32_t kds_index,
 							 bool is_large_offset,
-							 void **p_addr,
-							 int *p_len)
+							 kern_variable *kvar,
+							 int *vclass)
 {
-	char	   *extra;
 	uint64_t	start, end;
+	char	   *extra;
 
-	if (cmeta->nullmap_offset == 0 ||
-		arrow_bitmap_check(kds, kds_index,
-						   cmeta->nullmap_offset,
-						   cmeta->nullmap_length))
+	if (arrow_fetch_secondary_index(kcxt, kds, kds_index,
+									cmeta->values_offset,
+									cmeta->values_length,
+									is_large_offset,
+									&start, &end))
 	{
-		if (!arrow_fetch_secondary_index(kcxt, kds, kds_index,
-										 cmeta->values_offset,
-										 cmeta->values_length,
-										 is_large_offset,
-										 &start, &end))
-			return false;
 		/* sanity checks */
 		if (start > end || end - start >= 0x40000000UL ||
 			end > __kds_unpack(cmeta->extra_length))
@@ -792,14 +1274,11 @@ __arrow_fetch_variable_datum(kern_context *kcxt,
 			return false;
 		}
 		extra = (char *)kds + __kds_unpack(cmeta->extra_offset);
-		*p_addr = extra + start;
-		*p_len  = end - start;
+		kvar->ptr = extra + start;
+		*vclass = (end - start);
 		return true;
 	}
-	/* elsewhere, NULL value */
-	*p_addr = NULL;
-	*p_len  = -1;
-	return true;
+	return false;
 }
 
 STATIC_FUNCTION(bool)
@@ -808,43 +1287,39 @@ __arrow_fetch_array_datum(kern_context *kcxt,
 						  kern_colmeta *cmeta,
 						  uint32_t kds_index,
 						  bool is_large_offset,
-						  void **p_addr)
+						  uint32_t slot_off,
+						  kern_variable *kvar,
+						  int *vclass)
 {
-	xpu_array_t	   *datum = NULL;
-	uint64_t		start, end;
+	uint64_t	start, end;
 
-	if (cmeta->nullmap_offset == 0 ||
-		arrow_bitmap_check(kds, kds_index,
-						   cmeta->nullmap_offset,
-						   cmeta->nullmap_length))
+	assert(cmeta->idx_subattrs < kds->nr_colmeta &&
+		   cmeta->num_subattrs == 1);
+	if (arrow_fetch_secondary_index(kcxt, kds, kds_index,
+									cmeta->values_offset,
+									cmeta->values_length,
+									is_large_offset,
+									&start, &end))
 	{
-		assert(cmeta->idx_subattrs < kds->nr_colmeta &&
-			   cmeta->num_subattrs == 1);
-		if (!arrow_fetch_secondary_index(kcxt, kds, kds_index,
-										 cmeta->values_offset,
-										 cmeta->values_length,
-										 is_large_offset,
-										 &start, &end))
-		{
-			return false;
-		}
+		xpu_array_t *array = (xpu_array_t *)
+			((char *)kcxt->kvars_slot + slot_off);
 		/* sanity checks */
 		if (start > end)
 		{
-			STROM_ELOG(kcxt, "Arrow secondary index corruption");
+			STROM_ELOG(kcxt, "Arrow::List secondary index corruption");
 			return false;
 		}
-		datum = (xpu_array_t *)kcxt_alloc(kcxt, sizeof(xpu_array_t));
-		if (!datum)
-			return false;
-		datum->isnull = false;
-		datum->value  = (char *)kds;
-		datum->start  = start;
-		datum->length = end - start;
-		datum->smeta  = &kds->colmeta[cmeta->idx_subattrs];
+		kvar->xpu.offset = slot_off;
+		kvar->xpu.type_code = TypeOpCode__array;
+		array->isnull = false;
+		array->kds    = kds;
+		array->start  = start;
+		array->length = end - start;
+		array->smeta  = &kds->colmeta[cmeta->idx_subattrs];
+		*vclass = KVAR_CLASS__XPU_DATUM;
+		return true;
 	}
-	*p_addr = NULL;
-	return true;
+	return false;
 }
 
 INLINE_FUNCTION(bool)
@@ -852,25 +1327,156 @@ __arrow_fetch_composite_datum(kern_context *kcxt,
 							  kern_data_store *kds,
 							  kern_colmeta *cmeta,
 							  uint32_t kds_index,
-							  void **p_addr)
+							  uint32_t slot_off,
+							  kern_variable *kvar,
+							  int *vclass)
 {
-	xpu_composite_t	*datum = NULL;
+	xpu_composite_t	*comp = (xpu_composite_t *)
+		((char *)kcxt->kvars_slot + slot_off);
 
-	if (cmeta->nullmap_offset == 0 ||
-		arrow_bitmap_check(kds, kds_index,
-						   cmeta->nullmap_offset,
-						   cmeta->nullmap_length))
+	 kvar->xpu.offset = slot_off;
+	 kvar->xpu.type_code = TypeOpCode__composite;
+	 comp->isnull = false;
+	 comp->nfields = cmeta->num_subattrs;
+	 comp->rowidx = kds_index;
+	 comp->value = (char *)kds;
+	 comp->smeta = &kds->colmeta[cmeta->idx_subattrs];
+	 *vclass = KVAR_CLASS__XPU_DATUM;
+	 return true;
+}
+
+INLINE_FUNCTION(bool)
+__kern_extract_arrow_field(kern_context *kcxt,
+						   kern_data_store *kds,
+						   kern_colmeta *cmeta,
+						   uint32_t kds_index,
+						   uint32_t slot_off,
+						   kern_variable *kvar,
+						   int *vclass)
+{
+	switch (cmeta->attopts.tag)
 	{
-		datum = (xpu_composite_t *)kcxt_alloc(kcxt, sizeof(xpu_composite_t));
-		if (!datum)
+		case ArrowType__Bool:
+			assert(slot_off == 0);
+			if (!__arrow_fetch_bool_datum(kcxt, kds, cmeta,
+										  kds_index,
+										  kvar, vclass))
+				return false;
+			break;
+
+		case ArrowType__Int:
+			assert(slot_off == 0);
+			if (!__arrow_fetch_int_datum(kcxt, kds, cmeta,
+										 kds_index,
+										 kvar, vclass))
+				return false;
+			break;
+				
+		case ArrowType__FloatingPoint:
+			assert(slot_off == 0);
+			if (!__arrow_fetch_float_datum(kcxt, kds, cmeta,
+										   kds_index,
+										   kvar, vclass))
+				return false;
+			break;
+
+		case ArrowType__Decimal:
+			if (!__arrow_fetch_decimal_datum(kcxt, kds, cmeta,
+											 kds_index,
+											 slot_off,
+											 kvar, vclass))
+				return false;
+			break;
+
+		case ArrowType__Date:
+			assert(slot_off == 0);
+			if (!__arrow_fetch_date_datum(kcxt, kds, cmeta,
+										  kds_index,
+										  kvar, vclass))
+				return false;
+			break;
+					
+		case ArrowType__Time:
+			assert(slot_off == 0);
+			if (!__arrow_fetch_time_datum(kcxt, kds, cmeta,
+										  kds_index,
+										  kvar, vclass))
+				return false;
+			break;
+
+		case ArrowType__Timestamp:
+			assert(slot_off == 0);
+			if (!__arrow_fetch_timestamp_datum(kcxt, kds, cmeta,
+											   kds_index,
+											   kvar, vclass))
+				return false;
+			break;
+
+		case ArrowType__Interval:
+			if (!__arrow_fetch_interval_datum(kcxt, kds, cmeta,
+											  kds_index,
+											  slot_off,
+											  kvar, vclass))
+				return false;
+			break;
+
+		case ArrowType__FixedSizeBinary:
+			assert(slot_off == 0);
+			if (!__arrow_fetch_fixed_size_binary_datum(kcxt, kds, cmeta,
+													   kds_index,
+													   kvar, vclass))
+				return false;
+			break;
+
+		case ArrowType__Utf8:
+		case ArrowType__Binary:
+			assert(slot_off == 0);
+			if (!__arrow_fetch_variable_datum(kcxt, kds, cmeta,
+											  kds_index,
+											  false,
+											  kvar, vclass))
+				return false;
+			break;
+
+		case ArrowType__LargeUtf8:
+		case ArrowType__LargeBinary:
+			assert(slot_off == 0);
+			if (!__arrow_fetch_variable_datum(kcxt, kds, cmeta,
+											  kds_index,
+											  true,
+											  kvar, vclass))
+				return false;
+			break;
+
+		case ArrowType__List:
+			if (!__arrow_fetch_array_datum(kcxt, kds, cmeta,
+										   kds_index,
+										   false,
+										   slot_off,
+										   kvar, vclass))
+				return false;
+			break;
+
+		case ArrowType__LargeList:
+			if (!__arrow_fetch_array_datum(kcxt, kds, cmeta,
+										   kds_index,
+										   false,
+										   slot_off,
+										   kvar, vclass))
+				return false;
+			break;
+
+		case ArrowType__Struct:
+			if (!__arrow_fetch_composite_datum(kcxt, kds, cmeta,
+											   kds_index,
+											   slot_off,
+											   kvar, vclass))
+				return false;
+			break;
+		default:
+			STROM_ELOG(kcxt, "Unsupported Apache Arrow type");
 			return false;
-		datum->isnull  = false;
-		datum->nfields = cmeta->num_subattrs;
-		datum->rowidx  = kds_index;
-		datum->value   = (char *)kds;
-		datum->smeta   = &kds->colmeta[cmeta->idx_subattrs];
 	}
-	*p_addr = datum;
 	return true;
 }
 
@@ -890,109 +1496,28 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 		   kvars->var_resno <= kds->ncols)
 	{
 		kern_colmeta *cmeta = &kds->colmeta[kvars->var_resno-1];
-		int			slot_id = kvars->var_slot_id;
-		void	   *addr = NULL;
-		int			len = -1;
+		uint32_t	slot_id = kvars->var_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		switch (cmeta->attopts.tag)
+		if (cmeta->nullmap_offset == 0 ||
+			arrow_bitmap_check(kds, kds_index,
+							   cmeta->nullmap_offset,
+							   cmeta->nullmap_length))
 		{
-			case ArrowType__Bool:
-				/* xpu_bool_t */
-				if (!__arrow_fetch_bool_datum(kcxt,
-											  kds,
-											  cmeta,
-											  kds_index,
-											  &addr))
-					return -1;
-				if (addr)
-					cmeta = NULL;	/* mark addr points xpu_datum_t */
-				break;
-
-			case ArrowType__Int:
-			case ArrowType__FloatingPoint:
-			case ArrowType__Decimal:
-			case ArrowType__Date:
-			case ArrowType__Time:
-			case ArrowType__Timestamp:
-			case ArrowType__Interval:
-			case ArrowType__FixedSizeBinary:
-				if (!__arrow_fetch_inline_datum(kcxt,
-												kds,
-												cmeta,
-												kds_index,
-												&addr,
-												&len))
-					return -1;
-				break;
-
-			case ArrowType__Utf8:
-			case ArrowType__Binary:
-				if (!__arrow_fetch_variable_datum(kcxt,
-												  kds,
-												  cmeta,
-												  kds_index,
-												  false,
-												  &addr,
-												  &len))
-					return -1;
-				break;
-			case ArrowType__LargeUtf8:
-			case ArrowType__LargeBinary:
-				if (!__arrow_fetch_variable_datum(kcxt,
-												  kds,
-												  cmeta,
-												  kds_index,
-												  true,
-												  &addr,
-												  &len))
-					return -1;
-				break;
-
-			case ArrowType__List:
-				/* xpu_array_t */
-				if (!__arrow_fetch_array_datum(kcxt,
-											   kds,
-											   cmeta,
-											   kds_index,
-											   false,
-											   &addr))
-					return -1;
-				if (addr)
-					cmeta = NULL;	/* mark addr points xpu_array_t */
-				break;
-
-			case ArrowType__LargeList:
-				/* xpu_array_t */
-				if (!__arrow_fetch_array_datum(kcxt,
-											   kds,
-											   cmeta,
-											   kds_index,
-											   true,
-											   &addr))
-					return -1;
-				if (addr)
-					cmeta = NULL;	/* mark addr points xpu_array_t */
-				break;
-
-			case ArrowType__Struct:	/* composite */
-				/* xpu_composite_t */
-				if (!__arrow_fetch_composite_datum(kcxt,
-												   kds,
-												   cmeta,
-												   kds_index,
-												   &addr))
-					return -1;
-				if (addr)
-					cmeta = NULL;	/* mark addr points xpu_composite_t */
-				break;
-
-			default:
-				STROM_ELOG(kcxt, "Unsupported Apache Arrow type");
+			if (__kern_extract_arrow_field(kcxt,
+										   kds,
+										   cmeta,
+										   kds_index,
+										   kvars->var_slot_off,
+										   &kcxt->kvars_slot[slot_id],
+										   &kcxt->kvars_class[slot_id]))
 				return -1;
 		}
-		kcxt->kvars_addr[slot_id]  = addr;
-		kcxt->kvars_len[slot_id]   = len;
+		else
+		{
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+			kcxt->kvars_slot[slot_id].ptr = NULL;
+		}
 		kvars++;
 		kvars_nloads--;
 	}
@@ -1002,8 +1527,8 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 		int		slot_id = kvars->var_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		kcxt->kvars_addr[slot_id]  = NULL;
-		kcxt->kvars_len[slot_id]   = -1;
+		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+		kcxt->kvars_slot[slot_id].ptr = NULL;
 		kvars++;
 		kvars_nloads--;
 	}
@@ -1017,7 +1542,7 @@ pgfn_LoadVars(XPU_PGFUNCTION_ARGS)
 	return false;
 }
 
-PUBLIC_FUNCTION(void)
+PUBLIC_FUNCTION(bool)
 ExecLoadVarsHeapTuple(kern_context *kcxt,
 					  kern_expression *kexp_load_vars,
 					  int depth,
@@ -1037,6 +1562,8 @@ ExecLoadVarsHeapTuple(kern_context *kcxt,
 										depth,
 										kexp_load_vars->u.load.kvars,
 										kexp_load_vars->u.load.nloads);
+		if (index < 0)
+			return false;
 	}
 	while (index < kexp_load_vars->u.load.nloads)
 	{
@@ -1044,9 +1571,10 @@ ExecLoadVarsHeapTuple(kern_context *kcxt,
 		int		slot_id = kvars->var_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		kcxt->kvars_addr[slot_id]  = NULL;
-		kcxt->kvars_len[slot_id]   = -1;
+		kcxt->kvars_slot[slot_id].ptr = NULL;
+		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
 	}
+	return true;
 }
 
 PUBLIC_FUNCTION(bool)
@@ -1094,6 +1622,8 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 									 kds_index,
 									 kexp_load_vars->u.load.kvars,
 									 kexp_load_vars->u.load.nloads);
+	if (index < 0)
+		return false;
 	/* fill-up other slots by NULL */
 	while (index < kexp_load_vars->u.load.nloads)
 	{
@@ -1101,8 +1631,7 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 		int		slot_id = kvars->var_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		kcxt->kvars_addr[slot_id]  = NULL;
-		kcxt->kvars_len[slot_id]   = -1;
+		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
 	}
 	/* check scan quals if given */
 	if (kexp_scan_quals)
@@ -1167,6 +1696,7 @@ __ExecLoadVarsCommon(XPU_PGFUNCTION_ARGS,
 											depth,
 											kexp->u.load.kvars + index,
 											kexp->u.load.nloads - index);
+			assert(count >= 0);
 		}
 		else if (kds_outer->format == KDS_FORMAT_ARROW)
 		{
@@ -1186,12 +1716,14 @@ __ExecLoadVarsCommon(XPU_PGFUNCTION_ARGS,
 											depth,
 											kexp->u.load.kvars + index,
 											kexp->u.load.nloads - index);
+			assert(count >= 0);
 		}
 		else
 		{
 			STROM_ELOG(kcxt, "unknown outer kds format");
 			return false;
 		}
+
 		if (count < 0)
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
@@ -1209,8 +1741,8 @@ __ExecLoadVarsCommon(XPU_PGFUNCTION_ARGS,
 			assert(slot_id < kcxt->kvars_nslots);
 			if (kvars->var_depth != depth)
 				break;
-			kcxt->kvars_addr[slot_id]  = NULL;
-			kcxt->kvars_len[slot_id]   = -1;
+			kcxt->kvars_slot[slot_id].ptr = NULL;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
 			index++;
 		}
 	}
@@ -1220,8 +1752,8 @@ __ExecLoadVarsCommon(XPU_PGFUNCTION_ARGS,
 		const kern_vars_defitem *kvars = &kexp->u.load.kvars[index++];
 		int		slot_id = kvars->var_slot_id;
 
-		kcxt->kvars_addr[slot_id]  = NULL;
-		kcxt->kvars_len[slot_id]   = -1;
+		kcxt->kvars_slot[slot_id].ptr = NULL;
+		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
 	}
 	/* runs the argument expression */
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))
@@ -1272,6 +1804,7 @@ ExecKernProjection(kern_context *kcxt,
 	return tupsz;
 }
 #endif
+#if 0
 /*
  * ExecKernHashValue
  */
@@ -1346,7 +1879,7 @@ ExecKernJoinQuals(kern_context *kcxt,
 	}
 	return false;
 }
-
+#endif
 /*
  * Catalog of built-in device types
  */

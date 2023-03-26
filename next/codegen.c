@@ -28,7 +28,8 @@ static List	   *devfunc_code_slot[DEVFUNC_INFO_NSLOTS];	/* by FuncOpCode */
 	{ EXTENSION, #NAME,	TypeOpCode__##NAME,			\
 	  DEVKIND__ANY | (FLAGS),						\
 	  devtype_##NAME##_hash,						\
-	  sizeof(xpu_##NAME##_t), InvalidOid},
+	  sizeof(xpu_##NAME##_t),						\
+	  __alignof__(xpu_##NAME##_t), InvalidOid},
 static struct {
 	const char	   *type_extension;
 	const char	   *type_name;
@@ -36,6 +37,7 @@ static struct {
 	uint32_t		type_flags;
 	devtype_hashfunc_f type_hashfunc;
 	int				type_sizeof;
+	int				type_alignof;
 	Oid				type_alias;
 } devtype_catalog[] = {
 #include "xpu_opcodes.h"
@@ -129,6 +131,7 @@ build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 			dtype->type_name = pstrdup(type_name);
 			dtype->type_extension = (ext_name ? pstrdup(ext_name) : NULL);
 			dtype->type_sizeof = devtype_catalog[i].type_sizeof;
+			dtype->type_alignof = devtype_catalog[i].type_alignof;
 			dtype->type_hashfunc = devtype_catalog[i].type_hashfunc;
 			/* type equality functions */
 			dtype->type_eqfunc = get_opcode(tcache->eq_opr);
@@ -173,12 +176,13 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 		dtype->type_extension = pstrdup(ext_name);
 	dtype->type_code = TypeOpCode__composite;
 	dtype->type_oid = tcache->type_id;
-	dtype->type_flags = extra_flags | DEVTYPE__NEED_KVARS_BUF;
+	dtype->type_flags = extra_flags | DEVTYPE__USE_KVARS_SLOTBUF;
 	dtype->type_length = tcache->typlen;
 	dtype->type_align = typealign_get_width(tcache->typalign);
 	dtype->type_byval = tcache->typbyval;
 	dtype->type_name = "composite";
 	dtype->type_sizeof = sizeof(xpu_composite_t);
+	dtype->type_alignof = __alignof__(xpu_composite_t);
 	dtype->type_hashfunc = NULL; //devtype_composite_hash;
 	dtype->type_eqfunc = get_opcode(tcache->eq_opr);
 	dtype->type_cmpfunc = tcache->cmp_proc;
@@ -207,12 +211,13 @@ build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 		dtype->type_extension = pstrdup(ext_name);
 	dtype->type_code = TypeOpCode__array;
 	dtype->type_oid = tcache->type_id;
-	dtype->type_flags = elem->type_flags | DEVTYPE__NEED_KVARS_BUF;
+	dtype->type_flags = elem->type_flags | DEVTYPE__USE_KVARS_SLOTBUF;
 	dtype->type_length = tcache->typlen;
 	dtype->type_align = typealign_get_width(tcache->typalign);
 	dtype->type_byval = tcache->typbyval;
 	dtype->type_name = "array";
 	dtype->type_sizeof = sizeof(xpu_array_t);
+	dtype->type_alignof = __alignof__(xpu_array_t);
 	dtype->type_hashfunc = NULL; //devtype_array_hash;
 	/* type equality functions */
 	dtype->type_eqfunc = get_opcode(tcache->eq_opr);
@@ -1263,11 +1268,10 @@ found:
 	}
 	context->kvars_depth = lappend_int(context->kvars_depth, depth);
 	context->kvars_resno = lappend_int(context->kvars_resno, resno);
-	if (dtype && (dtype->type_flags & DEVTYPE__NEED_KVARS_BUF) != 0)
-		context->kvars_bufsz = lappend_int(context->kvars_bufsz,
-										   MAXALIGN(dtype->type_sizeof));
+	if (dtype && (dtype->type_flags & DEVTYPE__USE_KVARS_SLOTBUF) != 0)
+		context->kvars_types = lappend_oid(context->kvars_types, dtype->type_oid);
 	else
-		context->kvars_bufsz = lappend_int(context->kvars_bufsz, 0);
+		context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
 
 	return slot_id;
 }
@@ -1341,30 +1345,41 @@ __codegen_build_loadvars_one(codegen_context *context, int depth)
 	StringInfoData buf;
 	int			slot_id = 0;
 	int			nloads = 0;
+	int			nslots = list_length(context->kvars_depth);
 	uint32_t	kvars_offset;
 	ListCell   *lc1, *lc2, *lc3;
 
 	initStringInfo(&buf);
 	buf.len = offsetof(kern_expression, u.load.kvars);
-	kvars_offset = sizeof(kern_variable) * list_length(context->kvars_depth);
+	kvars_offset = (sizeof(kern_variable) * nslots +
+					sizeof(int)           * nslots);
 	forthree (lc1, context->kvars_depth,
 			  lc2, context->kvars_resno,
-			  lc3, context->kvars_bufsz)
+			  lc3, context->kvars_types)
 	{
 		kern_vars_defitem vitem;
-		int		kvars_bufsz = MAXALIGN(lfirst_int(lc3));
+		Oid		type_oid = lfirst_oid(lc3);
 
 		vitem.var_depth = lfirst_int(lc1);
 		vitem.var_resno = lfirst_int(lc2);
 		vitem.var_slot_id = slot_id++;
-		vitem.var_slot_buf = (kvars_bufsz > 0 ? kvars_offset : 0);
+		if (!OidIsValid(type_oid))
+			vitem.var_slot_off = 0;
+		else
+		{
+			devtype_info *dtype = pgstrom_devtype_lookup(type_oid);
+
+			Assert(dtype != NULL);
+			kvars_offset = TYPEALIGN(dtype->type_alignof, kvars_offset);
+			vitem.var_slot_off = kvars_offset;
+			kvars_offset += dtype->type_sizeof;
+		}
 		if (vitem.var_depth == depth)
 		{
 			appendBinaryStringInfo(&buf, (char *)&vitem,
 								   sizeof(kern_vars_defitem));
 			nloads++;
 		}
-		kvars_offset += kvars_bufsz;
 	}
 	if (nloads == 0)
 	{
@@ -1560,7 +1575,7 @@ __try_inject_projection_expression(codegen_context *context,
 			slot_id = list_length(context->kvars_depth);
 			context->kvars_depth = lappend_int(context->kvars_depth, -1);
 			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
-			context->kvars_bufsz = lappend_int(context->kvars_bufsz, 0);
+			context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
 
 			type_oid = exprType((Node *)expr);
 			dtype = pgstrom_devtype_lookup(type_oid);
@@ -1935,7 +1950,7 @@ __try_inject_groupby_expression(codegen_context *context,
 								  true);
 			context->kvars_depth = lappend_int(context->kvars_depth, -1);
 			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
-			context->kvars_bufsz = lappend_int(context->kvars_bufsz, 0);
+			context->kvars_types = lappend_int(context->kvars_types, InvalidOid);
 			context->tlist_dev = lappend(context->tlist_dev, tle);
 
 			/* SaveExpr */
@@ -2056,7 +2071,7 @@ codegen_build_groupby_keyload(codegen_context *context,
 			groupby_keys_final_slot = lappend_int(groupby_keys_final_slot, slot_id);
 			context->kvars_depth = lappend_int(context->kvars_depth, -2);
 			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
-			context->kvars_bufsz = lappend_int(context->kvars_bufsz, 0);
+			context->kvars_types = lappend_int(context->kvars_types, InvalidOid);
 			break;
 		}
 		if (!lc2)

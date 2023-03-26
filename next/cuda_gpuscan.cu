@@ -56,8 +56,8 @@ __gpuscan_load_source_row(kern_context *kcxt,
 								   __kds_unpack(offset));
 		assert((char *)tupitem >= (char *)kds_src &&
 			   (char *)tupitem <  (char *)kds_src + kds_src->length);
-		kcxt->kvars_addr = (void **)alloca(kcxt->kvars_nbytes);
-		kcxt->kvars_len  = (int *)(kcxt->kvars_addr + kcxt->kvars_nslots);
+		kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
+		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 		if (!ExecLoadVarsOuterRow(kcxt,
 								  kexp_load_vars,
 								  kexp_scan_quals,
@@ -84,11 +84,11 @@ __gpuscan_load_source_row(kern_context *kcxt,
 	{
 		index = (wr_pos % UNIT_TUPLES_PER_DEPTH);
 		memcpy((char *)kvars_addr_wp + index * kcxt->kvars_nbytes,
-			   kcxt->kvars_addr,
+			   kcxt->kvars_slot,
 			   kcxt->kvars_nbytes);
 	}
-	kcxt->kvars_addr = NULL;
-	kcxt->kvars_len = NULL;
+	kcxt->kvars_slot = NULL;
+	kcxt->kvars_class = NULL;
 	__syncwarp();
 	/* move to the next depth if more than 32 htuples were fetched */
 	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + warpSize ? 1 : 0);
@@ -124,8 +124,8 @@ __gpuscan_load_source_block(kern_context *kcxt,
 		{
 			off = wp->lp_items[rd_pos % UNIT_TUPLES_PER_DEPTH];
 			htup = (HeapTupleHeaderData *)((char *)kds_src + __kds_unpack(off));
-			kcxt->kvars_addr = (void **) alloca(kcxt->kvars_nbytes);
-			kcxt->kvars_len  = (int *)(kcxt->kvars_addr + kcxt->kvars_nslots);
+			kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
+			kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 			if (!ExecLoadVarsOuterRow(kcxt,
 									  kexp_load_vars,
 									  kexp_scan_quals,
@@ -154,11 +154,11 @@ __gpuscan_load_source_block(kern_context *kcxt,
 		{
 			index = (wr_pos % UNIT_TUPLES_PER_DEPTH);
 			memcpy(kvars_addr_wp + index * kcxt->kvars_nbytes,
-				   kcxt->kvars_addr,
+				   kcxt->kvars_slot,
 				   kcxt->kvars_nbytes);
 		}
-		kcxt->kvars_addr = NULL;
-		kcxt->kvars_len = NULL;
+		kcxt->kvars_slot = NULL;
+		kcxt->kvars_class = NULL;
 		__syncwarp();
 		/* end-of-scan checks */
 		if (block_id > kds_src->nitems &&	/* no more blocks to fetch */
@@ -277,8 +277,8 @@ __gpuscan_load_source_arrow(kern_context *kcxt,
 
 	if (kds_index < kds_src->nitems)
 	{
-		kcxt->kvars_addr = (void **) alloca(kcxt->kvars_nbytes);
-		kcxt->kvars_len  = (int *)(kcxt->kvars_addr + kcxt->kvars_nslots);
+		kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
+		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 		if (ExecLoadVarsOuterArrow(kcxt,
 								   kexp_load_vars,
 								   kexp_scan_quals,
@@ -306,11 +306,11 @@ __gpuscan_load_source_arrow(kern_context *kcxt,
 		int		index = (wr_pos % UNIT_TUPLES_PER_DEPTH);
 
 		memcpy(kvars_addr_wp + index * kcxt->kvars_nbytes,
-			   kcxt->kvars_addr,
+			   kcxt->kvars_slot,
 			   kcxt->kvars_nbytes);
 	}
-	kcxt->kvars_addr = NULL;
-	kcxt->kvars_len  = NULL;
+	kcxt->kvars_slot = NULL;
+	kcxt->kvars_class = NULL;
 	/* move to the next depth if more than 32 htuples were fetched */
 	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + warpSize ? 1 : 0);
 }
@@ -411,7 +411,7 @@ kern_gpuscan_main(kern_session_info *session,
 		   kgtask->n_rels == 0 &&
 		   __kmrels == NULL);
 	/* setup execution context */
-	INIT_KERNEL_CONTEXT(kcxt, session, kds_src);
+	INIT_KERNEL_CONTEXT(kcxt, session);
 	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(0);
 	wp = (kern_warp_context *)SHARED_WORKMEM(wp_base_sz, get_local_id() / warpSize);
 	wp_saved = KERN_GPUTASK_WARP_CONTEXT(kgtask);

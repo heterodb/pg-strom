@@ -12,87 +12,6 @@
  */
 #include "xpu_common.h"
 
-/*
- * Misc definitions copied from PostgreSQL
- */
-#ifndef DATE_H
-#define MAX_TIME_PRECISION	6
-
-#define DATEVAL_NOBEGIN		((DateADT)(-0x7fffffff - 1))
-#define DATEVAL_NOEND       ((DateADT)  0x7fffffff)
-
-#define DATE_NOBEGIN(j)		((j) = DATEVAL_NOBEGIN)
-#define DATE_IS_NOBEGIN(j)	((j) == DATEVAL_NOBEGIN)
-#define DATE_NOEND(j)		((j) = DATEVAL_NOEND)
-#define DATE_IS_NOEND(j)	((j) == DATEVAL_NOEND)
-#define DATE_NOT_FINITE(j)	(DATE_IS_NOBEGIN(j) || DATE_IS_NOEND(j))
-#endif	/* DATE_H */
-
-#ifndef DATATYPE_TIMESTAMP_H
-#define DAYS_PER_YEAR		365.25	/* assumes leap year every four years */
-#define MONTHS_PER_YEAR		12
-#define DAYS_PER_MONTH		30		/* assumes exactly 30 days per month */
-#define HOURS_PER_DAY		24		/* assume no daylight savings time changes */
-
-#define SECS_PER_YEAR		(36525 * 864)	/* avoid floating-point computation */
-#define SECS_PER_DAY		86400
-#define SECS_PER_HOUR		3600
-#define SECS_PER_MINUTE		60
-#define MINS_PER_HOUR		60
-
-#define USECS_PER_DAY		86400000000L
-#define USECS_PER_HOUR       3600000000L
-#define USECS_PER_MINUTE       60000000L
-#define USECS_PER_SEC           1000000L
-
-/* -Inf and +Inf */
-#define DT_NOBEGIN			LLONG_MIN
-#define DT_NOEND			LLONG_MAX
-
-#define TIMESTAMP_NOBEGIN(j)		do {(j) = DT_NOBEGIN;} while (0)
-#define TIMESTAMP_IS_NOBEGIN(j)		((j) == DT_NOBEGIN)
-#define TIMESTAMP_NOEND(j)			do {(j) = DT_NOEND;} while (0)
-#define TIMESTAMP_IS_NOEND(j)		((j) == DT_NOEND)
-#define TIMESTAMP_NOT_FINITE(j)		(TIMESTAMP_IS_NOBEGIN(j) ||	\
-									 TIMESTAMP_IS_NOEND(j))
-
-/* Julian date support */
-#define JULIAN_MINYEAR		(-4713)
-#define JULIAN_MINMONTH		(11)
-#define JULIAN_MINDAY		(24)
-#define JULIAN_MAXYEAR		(5874898)
-#define JULIAN_MAXMONTH		(6)
-#define JULIAN_MAXDAY		(3)
-
-#define IS_VALID_JULIAN(y,m,d)								  \
-	(((y) > JULIAN_MINYEAR ||								  \
-	  ((y) == JULIAN_MINYEAR && ((m) >= JULIAN_MINMONTH))) && \
-	 ((y) < JULIAN_MAXYEAR ||								  \
-	  ((y) == JULIAN_MAXYEAR && ((m) < JULIAN_MAXMONTH))))
-
-/* Julian-date equivalents of Day 0 in Unix and Postgres reckoning */
-#define UNIX_EPOCH_JDATE		2440588 /* == date2j(1970, 1, 1) */
-#define POSTGRES_EPOCH_JDATE	2451545 /* == date2j(2000, 1, 1) */
-
-/* First allowed date, and first disallowed date, in Julian-date form */
-#define DATETIME_MIN_JULIAN		(0)
-#define DATE_END_JULIAN			(2147483494)	/* == date2j(JULIAN_MAXYEAR, 1, 1) */
-#define TIMESTAMP_END_JULIAN	(109203528)		/* == date2j(294277, 1, 1) */
-
-/* Timestamp limits */
-#define MIN_TIMESTAMP		(-211813488000000000LL)
-/* == (DATETIME_MIN_JULIAN - POSTGRES_EPOCH_JDATE) * USECS_PER_DAY */
-#define END_TIMESTAMP		(9223371331200000000LL)
-/* == (TIMESTAMP_END_JULIAN - POSTGRES_EPOCH_JDATE) * USECS_PER_DAY */
-
-/* Range-check a date (given in Postgres, not Julian, numbering) */
-#define IS_VALID_DATE(d) \
-	((DATETIME_MIN_JULIAN - POSTGRES_EPOCH_JDATE) <= (d) && \
-	 (d) < (DATE_END_JULIAN - POSTGRES_EPOCH_JDATE))
-#define IS_VALID_TIMESTAMP(t)  (MIN_TIMESTAMP <= (t) && (t) < END_TIMESTAMP)
-
-#endif	/* DATATYPE_TIMESTAMP_H */
-
 /* from timezone/private.h */
 #ifndef PRIVATE_H
 #define YEARSPERREPEAT	400		/* years before a Gregorian repeat */
@@ -144,76 +63,44 @@
 STATIC_FUNCTION(bool)
 xpu_date_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
-				   const void *addr)
+				   int vclass,
+				   const kern_variable *kvar)
 {
 	xpu_date_t *result = (xpu_date_t *)__result;
 
-	if (!addr)
-		result->isnull = true;
+	result->isnull = false;
+	if (vclass == KVAR_CLASS__INLINE)
+		result->value = kvar->i32;
+	else if (vclass >= sizeof(DateADT))
+		result->value = *((const DateADT *)kvar->ptr);
 	else
 	{
-		result->isnull = false;
-		result->value = *((const DateADT *)addr);
+		STROM_ELOG(kcxt, "unexpected vclass for device date data type.");
+		return false;
 	}
 	return true;
-}
-
-STATIC_FUNCTION(int)
-xpu_date_arrow_move(kern_context *kcxt,
-					char *buffer,
-					const kern_colmeta *cmeta,
-					const void *addr, int len)
-{
-	if (cmeta->attopts.tag != ArrowType__Date)
-	{
-		STROM_ELOG(kcxt, "Value is not convertible to date");
-		return -1;
-	}
-	if (!addr)
-		return 0;
-	if (buffer)
-	{
-		DateADT	   *value = (DateADT *)buffer;
-
-		switch (cmeta->attopts.date.unit)
-		{
-			case ArrowDateUnit__Day:
-				assert(len == sizeof(uint32_t));
-				*value = *((uint32_t *)addr)
-					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
-				break;
-			case ArrowDateUnit__MilliSecond:
-				assert(len == sizeof(uint64_t));
-				*value = *((uint64_t *)addr) / (SECS_PER_DAY * 1000)
-					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
-				break;
-			default:
-				STROM_ELOG(kcxt, "unknown unit size of Arrow::Date");
-				return -1;
-		}
-	}
-	return sizeof(DateADT);
 }
 
 STATIC_FUNCTION(bool)
-xpu_date_arrow_ref(kern_context *kcxt,
-				   xpu_datum_t *__result,
-				   const kern_colmeta *cmeta,
-				   const void *addr, int len)
+xpu_date_datum_store(kern_context *kcxt,
+					 const xpu_datum_t *__arg,
+					 int *p_vclass,
+					 kern_variable *p_kvar)
 {
-	xpu_date_t *result = (xpu_date_t *)__result;
-	int		sz;
+	const xpu_date_t *arg = (const xpu_date_t *)__arg;
 
-	sz = xpu_date_arrow_move(kcxt, (char *)&result->value,
-							 cmeta, addr, len);
-	if (sz < 0)
-		return false;
-	result->isnull = (sz == 0);
+	if (arg->isnull)
+		*p_vclass = KVAR_CLASS__NULL;
+	else
+	{
+		p_kvar->u32 = arg->value;
+		*p_vclass = KVAR_CLASS__INLINE;
+	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_date_datum_store(kern_context *kcxt,
+xpu_date_datum_write(kern_context *kcxt,
 					 char *buffer,
 					 const xpu_datum_t *__arg)
 {
@@ -247,82 +134,44 @@ PGSTROM_SQLTYPE_OPERATORS(date, true, 4, sizeof(DateADT));
 STATIC_FUNCTION(bool)
 xpu_time_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
-				   const void *addr)
+				   int vclass,
+				   const kern_variable *kvar)
 {
 	xpu_time_t *result = (xpu_time_t *)__result;
 
-	if (!addr)
-		result->isnull = true;
+	result->isnull = false;
+	if (vclass == KVAR_CLASS__INLINE)
+		result->value = kvar->i64;
+	else if (vclass >= sizeof(TimeADT))
+		result->value = *((const TimeADT *)kvar->ptr);
 	else
 	{
-		result->isnull = false;
-		result->value = *((const TimeADT *)addr);
+		STROM_ELOG(kcxt, "unexpected vclass for device time data type.");
+		return false;
 	}
 	return true;
-}
-
-STATIC_FUNCTION(int)
-xpu_time_arrow_move(kern_context *kcxt,
-					char *buffer,
-					const kern_colmeta *cmeta,
-					const void *addr, int len)
-{
-	if (cmeta->attopts.tag != ArrowType__Time)
-	{
-		STROM_ELOG(kcxt, "value is not convertible to time");
-		return -1;
-	}
-	if (!addr)
-		return 0;
-	if (buffer)
-	{
-		TimeADT	   *value = (TimeADT *)buffer;
-
-		switch (cmeta->attopts.time.unit)
-		{
-			case ArrowTimeUnit__Second:
-				assert(len == sizeof(uint32_t));
-				*value = *((uint32_t *)addr) * 1000000L;
-				break;
-			case ArrowTimeUnit__MilliSecond:
-				assert(len == sizeof(uint32_t));
-				*value = *((uint32_t *)addr) * 1000L;
-				break;
-			case ArrowTimeUnit__MicroSecond:
-				assert(len == sizeof(uint64_t));
-				*value = *((uint32_t *)addr);
-				break;
-			case ArrowTimeUnit__NanoSecond:
-				assert(len == sizeof(uint64_t));
-				*value = *((uint32_t *)addr) / 1000L;
-				break;
-			default:
-				STROM_ELOG(kcxt, "unknown unit size of Arrow::Time");
-				return -1;
-		}
-	}
-	return sizeof(TimeADT);
 }
 
 STATIC_FUNCTION(bool)
-xpu_time_arrow_ref(kern_context *kcxt,
-				   xpu_datum_t *__result,
-				   const kern_colmeta *cmeta,
-				   const void *addr, int len)
+xpu_time_datum_store(kern_context *kcxt,
+					 const xpu_datum_t *__arg,
+					 int *p_vclass,
+					 kern_variable *p_kvar)
 {
-	xpu_time_t *result = (xpu_time_t *)__result;
-	int		sz;
+	const xpu_time_t *arg = (const xpu_time_t *)__arg;
 
-	sz = xpu_time_arrow_move(kcxt, (char *)&result->value,
-							 cmeta, addr, len);
-	if (sz < 0)
-		return false;
-	result->isnull = (sz == 0);
+	if (arg->isnull)
+		*p_vclass = KVAR_CLASS__NULL;
+	else
+	{
+		p_kvar->u64 = arg->value;
+		*p_vclass = KVAR_CLASS__INLINE;
+	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_time_datum_store(kern_context *kcxt,
+xpu_time_datum_write(kern_context *kcxt,
 					 char *buffer,
 					 const xpu_datum_t *__arg)
 {
@@ -356,42 +205,48 @@ PGSTROM_SQLTYPE_OPERATORS(time, true, 8, sizeof(TimeADT));
 STATIC_FUNCTION(bool)
 xpu_timetz_datum_ref(kern_context *kcxt,
 					 xpu_datum_t *__result,
-					 const void *addr)
+					 int vclass,
+					 const kern_variable *kvar)
 {
 	xpu_timetz_t *result = (xpu_timetz_t *)__result;
 
-	if (!addr)
-		result->isnull = true;
+	result->isnull = false;
+	if (vclass >= SizeOfTimeTzADT)
+		memcpy(&result->value, kvar->ptr, SizeOfTimeTzADT);
 	else
 	{
-		result->isnull = false;
-		memcpy(&result->value, addr, SizeOfTimeTzADT);
+		STROM_ELOG(kcxt, "unexpected vclass for device timetz data type.");
+		return false;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_timetz_arrow_ref(kern_context *kcxt,
-					 xpu_datum_t *result,
-					 const kern_colmeta *cmeta,
-					 const void *addr, int len)
-{
-	STROM_ELOG(kcxt, "PostgreSQL 'timetz' has no convertiblae type of Arrow");
-	return false;
-}
-
-STATIC_FUNCTION(int)
-xpu_timetz_arrow_move(kern_context *kcxt,
-					  char *buffer,
-					  const kern_colmeta *cmeta,
-					  const void *addr, int len)
-{
-	STROM_ELOG(kcxt, "PostgreSQL 'timetz' has no convertiblae type of Arrow");
-	return -1;
-}
-
-STATIC_FUNCTION(int)
 xpu_timetz_datum_store(kern_context *kcxt,
+					   const xpu_datum_t *__arg,
+					   int *p_vclass,
+					   kern_variable *p_kvar)
+{
+	xpu_timetz_t *arg = (xpu_timetz_t *)__arg;
+
+	if (arg->isnull)
+		*p_vclass = KVAR_CLASS__NULL;
+    else
+	{
+		TimeTzADT  *buf = (TimeTzADT *)kcxt_alloc(kcxt, SizeOfTimeTzADT);
+
+		if (!buf)
+			return false;
+		buf->time = arg->value.time;
+		buf->zone = arg->value.zone;
+		p_kvar->ptr = buf;
+		*p_vclass = SizeOfTimeTzADT;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(int)
+xpu_timetz_datum_write(kern_context *kcxt,
 					   char *buffer,
 					   const xpu_datum_t *__arg)
 {
@@ -400,8 +255,8 @@ xpu_timetz_datum_store(kern_context *kcxt,
 	if (arg->isnull)
 		return 0;
 	if (buffer)
-		memcpy(buffer, &arg->value, SizeOfTimeTzADT);
-	return SizeOfTimeTzADT;
+		*((TimeTzADT *)buffer) = arg->value;
+	return sizeof(TimeTzADT);
 }
 
 STATIC_FUNCTION(bool)
@@ -425,81 +280,44 @@ PGSTROM_SQLTYPE_OPERATORS(timetz, false, 8, SizeOfTimeTzADT);
 STATIC_FUNCTION(bool)
 xpu_timestamp_datum_ref(kern_context *kcxt,
 						xpu_datum_t *__result,
-						const void *addr)
+						int vclass,
+						const kern_variable *kvar)
 {
 	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
 
-	if (!addr)
-		result->isnull = true;
+	result->isnull = false;
+	if (vclass == KVAR_CLASS__INLINE)
+		result->value = kvar->i64;
+	else if (vclass >= sizeof(Timestamp))
+		result->value = *((const Timestamp *)kvar->ptr);
 	else
 	{
-		result->isnull = false;
-		result->value = *((const Timestamp *)addr);
+		STROM_ELOG(kcxt, "unexpected vclass for device timestamp data type.");
+		return false;
 	}
 	return true;
-}
-
-STATIC_FUNCTION(int)
-xpu_timestamp_arrow_move(kern_context *kcxt,
-						 char *buffer,
-						 const kern_colmeta *cmeta,
-						 const void *addr, int len)
-{
-	if (cmeta->attopts.tag != ArrowType__Timestamp)
-	{
-		STROM_ELOG(kcxt, "Value is not convertible to timestamp");
-		return -1;
-	}
-	if (!addr)
-		return 0;
-	if (buffer)
-	{
-		uint64_t	tval;
-
-		assert(len == sizeof(uint64_t));
-		switch (cmeta->attopts.timestamp.unit)
-		{
-			case ArrowTimeUnit__Second:
-				tval = *((uint64_t *)addr) * 1000000L;
-				break;
-			case ArrowTimeUnit__MilliSecond:
-				tval = *((uint64_t *)addr) * 1000L;
-				break;
-			case ArrowTimeUnit__MicroSecond:
-				tval = *((uint64_t *)addr);
-				break;
-			case ArrowTimeUnit__NanoSecond:
-				tval = *((uint64_t *)addr) / 1000L;
-				break;
-			default:
-				STROM_ELOG(kcxt, "unknown unit size of Arrow::Timestamp");
-				return -1;
-		}
-		*((Timestamp *)buffer) = tval - (POSTGRES_EPOCH_JDATE -
-										 UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-	}
-	return sizeof(Timestamp);
 }
 
 STATIC_FUNCTION(bool)
-xpu_timestamp_arrow_ref(kern_context *kcxt,
-						xpu_datum_t *__result,
-						const kern_colmeta *cmeta,
-						const void *addr, int len)
+xpu_timestamp_datum_store(kern_context *kcxt,
+						  const xpu_datum_t *__arg,
+						  int *p_vclass,
+						  kern_variable *p_kvar)
 {
-	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
-	int		sz;
+	const xpu_timestamp_t *arg = (const xpu_timestamp_t *)__arg;
 
-	sz = xpu_timestamp_arrow_move(kcxt, (char *)&result->value,
-								  cmeta, addr, len);
-	if (sz < 0)
-		return false;
-	result->isnull = (sz == 0);
+	if (arg->isnull)
+		*p_vclass = KVAR_CLASS__NULL;
+	else
+	{
+		p_kvar->i64 = arg->value;
+		*p_vclass = KVAR_CLASS__INLINE;
+	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_timestamp_datum_store(kern_context *kcxt,
+xpu_timestamp_datum_write(kern_context *kcxt,
 						  char *buffer,
 						  const xpu_datum_t *__arg)
 {
@@ -533,81 +351,44 @@ PGSTROM_SQLTYPE_OPERATORS(timestamp, true, 8, sizeof(Timestamp));
 STATIC_FUNCTION(bool)
 xpu_timestamptz_datum_ref(kern_context *kcxt,
 						  xpu_datum_t *__result,
-						  const void *addr)
+						  int vclass,
+						  const kern_variable *kvar)
 {
 	xpu_timestamptz_t *result = (xpu_timestamptz_t *)__result;
 
-	if (!addr)
-		result->isnull = true;
+	result->isnull = false;
+	if (vclass == KVAR_CLASS__INLINE)
+		result->value = kvar->i64;
+	else if (vclass >= sizeof(Timestamp))
+		result->value = *((const TimestampTz *)kvar->ptr);
 	else
 	{
-		result->isnull = false;
-		memcpy(&result->value, addr, sizeof(TimestampTz));
+		STROM_ELOG(kcxt, "unexpected vclass for device timestamp data type.");
+		return false;
 	}
 	return true;
-}
-
-STATIC_FUNCTION(int)
-xpu_timestamptz_arrow_move(kern_context *kcxt,
-						   char *buffer,
-						   const kern_colmeta *cmeta,
-						   const void *addr, int len)
-{
-	if (cmeta->attopts.tag != ArrowType__Timestamp)
-	{
-		STROM_ELOG(kcxt, "Value is not convertible to timestamp");
-		return -1;
-	}
-	if (!addr)
-		return 0;
-	if (buffer)
-	{
-		uint64_t	tval;
-
-		assert(len == sizeof(uint64_t));
-		switch (cmeta->attopts.timestamp.unit)
-		{
-			case ArrowTimeUnit__Second:
-				tval = *((uint64_t *)addr) * 1000000L;
-				break;
-			case ArrowTimeUnit__MilliSecond:
-				tval = *((uint64_t *)addr) * 1000L;
-				break;
-			case ArrowTimeUnit__MicroSecond:
-				tval = *((uint64_t *)addr);
-				break;
-			case ArrowTimeUnit__NanoSecond:
-				tval = *((uint64_t *)addr) / 1000L;
-				break;
-			default:
-				STROM_ELOG(kcxt, "unknown unit size of Arrow::Timestamp");
-				return -1;
-		}
-		*((TimestampTz *)buffer) = tval - (POSTGRES_EPOCH_JDATE -
-										   UNIX_EPOCH_JDATE) * USECS_PER_DAY;
-	}
-	return sizeof(TimestampTz);
 }
 
 STATIC_FUNCTION(bool)
-xpu_timestamptz_arrow_ref(kern_context *kcxt,
-						  xpu_datum_t *__result,
-						  const kern_colmeta *cmeta,
-						  const void *addr, int len)
+xpu_timestamptz_datum_store(kern_context *kcxt,
+							const xpu_datum_t *__arg,
+							int *p_vclass,
+							kern_variable *p_kvar)
 {
-    xpu_timestamptz_t *result = (xpu_timestamptz_t *)__result;
-	int		sz;
+	const xpu_timestamptz_t *arg = (const xpu_timestamptz_t *)__arg;
 
-	sz = xpu_timestamptz_arrow_move(kcxt, (char *)&result->value,
-									cmeta, addr, len);
-	if (sz < 0)
-		return false;
-	result->isnull = (sz == 0);
+	if (arg->isnull)
+		*p_vclass = KVAR_CLASS__NULL;
+	else
+	{
+		p_kvar->i64 = arg->value;
+		*p_vclass = KVAR_CLASS__INLINE;
+	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_timestamptz_datum_store(kern_context *kcxt,
+xpu_timestamptz_datum_write(kern_context *kcxt,
 							char *buffer,
 							const xpu_datum_t *__arg)
 {
@@ -616,7 +397,7 @@ xpu_timestamptz_datum_store(kern_context *kcxt,
 	if (arg->isnull)
 		return 0;
 	if (buffer)
-		memcpy(buffer, &arg->value, sizeof(TimestampTz));
+		*((TimestampTz *)buffer) = arg->value;
 	return sizeof(TimestampTz);
 }
 
@@ -659,77 +440,51 @@ STATIC_DATA const int year_lengths[2] = {
 STATIC_FUNCTION(bool)
 xpu_interval_datum_ref(kern_context *kcxt,
 					   xpu_datum_t *__result,
-					   const void *addr)
+					   int vclass,
+					   const kern_variable *kvar)
 {
 	xpu_interval_t *result = (xpu_interval_t *)__result;
 
-	if (!addr)
-		result->isnull = true;
-	else
+	if (vclass >= sizeof(Interval))
 	{
 		result->isnull = false;
-		memcpy(&result->value, addr, sizeof(Interval));
+		memcpy(&result->value, kvar->ptr, sizeof(Interval));
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "unexpected vclass for device interval data type.");
+		return false;
 	}
 	return true;
-}
-
-STATIC_FUNCTION(int)
-xpu_interval_arrow_move(kern_context *kcxt,
-						char *buffer,
-						const kern_colmeta *cmeta,
-						const void *addr, int len)
-{
-	if (cmeta->attopts.tag != ArrowType__Interval)
-	{
-		STROM_ELOG(kcxt, "value is not convertible to interval");
-		return -1;
-	}
-	if (!addr)
-		return 0;
-	if (buffer)
-	{
-		uint32_t   *ival = (uint32_t *)addr;
-		Interval   *value = (Interval *)buffer;
-
-		switch (cmeta->attopts.interval.unit)
-		{
-			case ArrowIntervalUnit__Year_Month:
-				value->month = *ival;
-				value->day   = 0;
-				value->time  = 0;
-				break;
-			case ArrowIntervalUnit__Day_Time:
-				value->month = 0;
-				value->day   = ival[0];
-				value->time  = ival[1];
-				break;
-			default:
-				STROM_ELOG(kcxt, "unknown unit-size of Arrow::Interval");
-				return -1;
-		}
-	}
-	return sizeof(Interval);
 }
 
 STATIC_FUNCTION(bool)
-xpu_interval_arrow_ref(kern_context *kcxt,
-					   xpu_datum_t *__result,
-					   const kern_colmeta *cmeta,
-					   const void *addr, int len)
+xpu_interval_datum_store(kern_context *kcxt,
+						 const xpu_datum_t *__arg,
+						 int *p_vclass,
+						 kern_variable *p_kvar)
 {
-	xpu_interval_t *result = (xpu_interval_t *)__result;
-	int		sz;
+	xpu_interval_t *arg = (xpu_interval_t *)__arg;
 
-	sz = xpu_interval_arrow_move(kcxt, (char *)&result->value,
-								 cmeta, addr, len);
-	if (sz < 0)
-		return false;
-	result->isnull = (sz == 0);
+	if (arg->isnull)
+		*p_vclass = KVAR_CLASS__NULL;
+	else
+	{
+		Interval   *buf = (Interval *)kcxt_alloc(kcxt, sizeof(Interval));
+
+		if (!buf)
+			return false;
+		buf->time  = arg->value.time;
+		buf->day   = arg->value.day;
+		buf->month = arg->value.month;
+		p_kvar->ptr = buf;
+		*p_vclass = sizeof(Interval);
+	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_interval_datum_store(kern_context *kcxt,
+xpu_interval_datum_write(kern_context *kcxt,
 						 char *buffer,
 						 const xpu_datum_t *__arg)
 {
@@ -1954,3 +1709,17 @@ PG_INTERVAL_COMPARE_TEMPLATE(lt, <)
 PG_INTERVAL_COMPARE_TEMPLATE(le, <=)
 PG_INTERVAL_COMPARE_TEMPLATE(gt, >)
 PG_INTERVAL_COMPARE_TEMPLATE(ge, >=)
+
+PUBLIC_FUNCTION(int)
+xpu_interval_write_heap(kern_context *kcxt,
+						char *buffer,
+						const xpu_datum_t *__arg)
+{
+	const xpu_interval_t *arg = (const xpu_interval_t *)__arg;
+
+	if (arg->isnull)
+		return 0;
+	if (buffer)
+		memcpy(buffer, &arg->value, sizeof(Interval));
+	return sizeof(Interval);
+}

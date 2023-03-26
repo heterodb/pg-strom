@@ -67,7 +67,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_actions));
 	privs = lappend(privs, pp_info->kvars_depth);
 	privs = lappend(privs, pp_info->kvars_resno);
-	privs = lappend(privs, pp_info->kvars_bufsz);
+	privs = lappend(privs, pp_info->kvars_types);
 	privs = lappend(privs, makeInteger(pp_info->extra_flags));
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
 	privs = lappend(privs, pp_info->groupby_actions);
@@ -147,7 +147,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.kexp_groupby_actions = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kvars_depth = list_nth(privs, pindex++);
 	pp_data.kvars_resno = list_nth(privs, pindex++);
-	pp_data.kvars_bufsz = list_nth(privs, pindex++);
+	pp_data.kvars_types = list_nth(privs, pindex++);
 	pp_data.extra_flags = intVal(list_nth(privs, pindex++));
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.groupby_actions = list_nth(privs, pindex++);
@@ -1118,7 +1118,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	pp_info->kexp_join_kvars_load_packed = codegen_build_join_loadvars(&context);
 	pp_info->kvars_depth  = context.kvars_depth;
 	pp_info->kvars_resno  = context.kvars_resno;
-	pp_info->kvars_bufsz  = context.kvars_bufsz;
+	pp_info->kvars_types  = context.kvars_types;
 	pp_info->extra_flags  = context.extra_flags;
 	pp_info->extra_bufsz  = context.extra_bufsz;
 	pp_info->used_params  = context.used_params;

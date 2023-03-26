@@ -19,43 +19,48 @@
 STATIC_FUNCTION(bool)
 xpu_bool_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
-				   const void *addr)
+				   int vclass,
+				   const kern_variable *kvar)
 {
 	xpu_bool_t *result = (xpu_bool_t *)__result;
 
-	if (!addr)
-		result->isnull = true;
+	result->isnull = false;
+	if (vclass == KVAR_CLASS__INLINE)
+		result->value = kvar->i8;
+	else if (vclass >= sizeof(bool))
+		result->value = *((bool *)kvar->ptr);
 	else
 	{
-		result->isnull = false;
-		result->value = *((const bool *)addr);
+		STROM_ELOG(kcxt, "unexpected vclass for device bool data type.");
+		return false;
 	}
 	return true;
 }
+
 STATIC_FUNCTION(bool)
-xpu_bool_arrow_ref(kern_context *kcxt,
-				   xpu_datum_t *result,
-				   const kern_colmeta *cmeta,
-				   const void *addr, int len)
-{
-	STROM_ELOG(kcxt, "Bug? Arrow::Bool shall not be referenced by generic handler");
-	return false;
-}
-STATIC_FUNCTION(int)
-xpu_bool_arrow_move(kern_context *kcxt,
-					char *buffer,
-					const kern_colmeta *cmeta,
-					const void *addr, int len)
-{
-	STROM_ELOG(kcxt, "Bug? Arrow::Bool shall not be moved by generic handler");
-	return false;
-}
-STATIC_FUNCTION(int)
 xpu_bool_datum_store(kern_context *kcxt,
+					 const xpu_datum_t *__arg,
+					 int *p_vclass,
+					 kern_variable *p_kvar)
+{
+	const xpu_bool_t *arg = (const xpu_bool_t *)__arg;
+
+	if (arg->isnull)
+		*p_vclass = KVAR_CLASS__NULL;
+	else
+	{
+		*p_vclass = KVAR_CLASS__INLINE;
+		p_kvar->i8 = (arg->value ? true : false);
+	}
+	return true;
+}
+
+STATIC_FUNCTION(int)
+xpu_bool_datum_write(kern_context *kcxt,
 					 char *buffer,
 					 const xpu_datum_t *__arg)
 {
-	const xpu_bool_t *arg = (const xpu_bool_t *)__arg;
+	const xpu_bool_t   *arg = (const xpu_bool_t *)__arg;
 
 	if (arg->isnull)
 		return 0;
@@ -63,6 +68,7 @@ xpu_bool_datum_store(kern_context *kcxt,
 		*((bool *)buffer) = arg->value;
 	return sizeof(bool);
 }
+
 STATIC_FUNCTION(bool)
 xpu_bool_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
@@ -81,69 +87,45 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 /*
  * Int1/Int2/Int4/Int8 handlers
  */
-#define PGSTROM_SIMPLE_INTEGER_TEMPLATE(NAME,BASETYPE)					\
+#define PGSTROM_SIMPLE_INTEGER_TEMPLATE(NAME,BASETYPE,FIELD)			\
 	STATIC_FUNCTION(bool)												\
 	xpu_##NAME##_datum_ref(kern_context *kcxt,							\
 						   xpu_datum_t *__result,						\
-						   const void *addr)							\
+						   int vclass, const kern_variable *kvar)		\
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
-		if (!addr)														\
-			result->isnull = true;										\
+																		\
+		result->isnull = false;											\
+		if (vclass == KVAR_CLASS__INLINE)								\
+			result->value = kvar->FIELD;								\
+		else if (vclass >= sizeof(BASETYPE))							\
+			result->value = *((const BASETYPE *)kvar->ptr);				\
 		else															\
 		{																\
-			result->isnull = false;										\
-			result->value = *((const BASETYPE *)addr);					\
+			STROM_ELOG(kcxt, "unexpected vclass for device " #NAME " data type."); \
+			return false;												\
 		}																\
 		return true;													\
 	}																	\
 	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_arrow_ref(kern_context *kcxt,							\
-						   xpu_datum_t *__result,						\
-						   const kern_colmeta *cmeta,					\
-						   const void *addr, int len)					\
+	xpu_##NAME##_datum_store(kern_context *kcxt,						\
+							 const xpu_datum_t *__arg,					\
+							 int *p_vclass,								\
+							 kern_variable *p_kvar)						\
 	{																	\
-		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
-		if (cmeta->attopts.tag != ArrowType__Int ||						\
-			cmeta->attopts.integer.bitWidth != 8 * sizeof(BASETYPE))	\
-		{																\
-			STROM_ELOG(kcxt, "value is not compatible Arrow::Int");		\
-			return false;												\
-		}																\
-		if (!addr)														\
-			result->isnull = true;										\
+		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
+																		\
+		if (arg->isnull)												\
+			*p_vclass = KVAR_CLASS__NULL;								\
 		else															\
 		{																\
-			result->isnull = false;										\
-			result->value = *((BASETYPE *)addr);						\
-			if (!cmeta->attopts.integer.is_signed && result->value < 0)	\
-			{															\
-				STROM_ELOG(kcxt, "Arrow::Uint - out of range");			\
-				return false;											\
-			}															\
+			*p_vclass = KVAR_CLASS__INLINE;								\
+			p_kvar->FIELD = arg->value;									\
 		}																\
-		return true;													\
-	}																	\
-	STATIC_FUNCTION(int)												\
-	xpu_##NAME##_arrow_move(kern_context *kcxt,							\
-							char *buffer,								\
-							const kern_colmeta *cmeta,					\
-							const void *addr, int len)					\
-	{																	\
-		if (cmeta->attopts.tag != ArrowType__Int ||						\
-			cmeta->attopts.integer.bitWidth != 8 * sizeof(BASETYPE))	\
-		{																\
-			STROM_ELOG(kcxt, "value is not compatible Arrow::Int");		\
-			return -1;													\
-		}																\
-		if (!addr)														\
-			return 0;													\
-		if (buffer)														\
-			*((BASETYPE *)buffer) = *((BASETYPE *)addr);				\
 		return sizeof(BASETYPE);										\
 	}																	\
 	STATIC_FUNCTION(int)												\
-	xpu_##NAME##_datum_store(kern_context *kcxt,						\
+	xpu_##NAME##_datum_write(kern_context *kcxt,						\
 							 char *buffer,								\
 							 const xpu_datum_t *__arg)					\
 	{																	\
@@ -152,7 +134,7 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 		if (arg->isnull)												\
 			return 0;													\
 		if (buffer)														\
- 			*((BASETYPE *)buffer) = arg->value;							\
+			*((BASETYPE *)buffer) = arg->value;							\
 		return sizeof(BASETYPE);										\
 	}																	\
 	STATIC_FUNCTION(bool)												\
@@ -170,85 +152,62 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 	}																	\
 	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
 
-PGSTROM_SIMPLE_INTEGER_TEMPLATE(int1,int8_t);
-PGSTROM_SIMPLE_INTEGER_TEMPLATE(int2,int16_t);
-PGSTROM_SIMPLE_INTEGER_TEMPLATE(int4,int32_t);
-PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t);
+PGSTROM_SIMPLE_INTEGER_TEMPLATE(int1, int8_t, i8);
+PGSTROM_SIMPLE_INTEGER_TEMPLATE(int2,int16_t,i16);
+PGSTROM_SIMPLE_INTEGER_TEMPLATE(int4,int32_t,i32);
+PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t,i64);
 
 /*
  * FloatingPoint handlers
  */
-#define PGSTROM_SIMPLE_FLOAT_TEMPLATE(NAME,BASETYPE,PRECISION)			\
+#define PGSTROM_SIMPLE_FLOAT_TEMPLATE(NAME,BASETYPE,FIELD,PRECISION)	\
 	STATIC_FUNCTION(bool)												\
 	xpu_##NAME##_datum_ref(kern_context *kcxt,							\
 						   xpu_datum_t *__result,						\
-						   const void *addr)							\
+						   int vclass, const kern_variable *kvar)		\
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
-		if (!addr)														\
-			result->isnull = true;										\
+		result->isnull = false;											\
+		if (vclass == KVAR_CLASS__INLINE)								\
+			result->value = kvar->FIELD;								\
+		else if (vclass >= sizeof(BASETYPE))							\
+			result->value = *((BASETYPE *)kvar->ptr);					\
 		else															\
 		{																\
-			result->isnull = false;										\
-			result->value = *((BASETYPE *)addr);						\
+			STROM_ELOG(kcxt, "unexpected vclass for device " #NAME " data type."); \
+			return false;												\
 		}																\
 		return true;													\
 	}																	\
 	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_arrow_ref(kern_context *kcxt,							\
-						   xpu_datum_t *__result,						\
-						   const kern_colmeta *cmeta,					\
-						   const void *addr, int len)					\
-	{																	\
-		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
-																		\
-		if (cmeta->attopts.tag != ArrowType__FloatingPoint ||			\
-			cmeta->attopts.floating_point.precision != ArrowPrecision__##PRECISION || \
-			len != sizeof(BASETYPE))									\
-		{																\
-			STROM_ELOG(kcxt, "Arrow::FloatingPoint - not a compatible value"); \
-			return false;												\
-		}																\
-		if (!addr)														\
-			result->isnull = true;										\
-		else															\
-		{																\
-			result->isnull = false;										\
-			result->value  = *((BASETYPE *)addr);						\
-		}																\
-		return true;													\
-	}																	\
-	STATIC_FUNCTION(int)												\
-	xpu_##NAME##_arrow_move(kern_context *kcxt,							\
-							char *buffer,								\
-							const kern_colmeta *cmeta,					\
-							const void *addr, int len)					\
-	{																	\
-		if (cmeta->attopts.tag != ArrowType__FloatingPoint ||			\
-			cmeta->attopts.floating_point.precision != ArrowPrecision__##PRECISION || \
-			len != sizeof(BASETYPE))									\
-		{																\
-			STROM_ELOG(kcxt, "Arrow::FloatingPoint - not a compatible value"); \
-			return -1;													\
-		}																\
-		if (!addr)														\
-			return 0;													\
-		if (buffer)														\
-			*((BASETYPE *)buffer) = *((BASETYPE *)addr);				\
-		return sizeof(BASETYPE);										\
-	}																	\
-	STATIC_FUNCTION(int)												\
 	xpu_##NAME##_datum_store(kern_context *kcxt,						\
-							 char *buffer,								\
-							 const xpu_datum_t *__arg)					\
+							 const xpu_datum_t *__arg,					\
+							 int *p_vclass,                             \
+                             kern_variable *p_kvar)						\
 	{																	\
 		const xpu_##NAME##_t *arg = (const xpu_##NAME##_t *)__arg;		\
 																		\
 		if (arg->isnull)												\
+			*p_vclass = KVAR_CLASS__NULL;								\
+		else															\
+		{																\
+			*p_vclass = KVAR_CLASS__INLINE;								\
+			p_kvar->FIELD = arg->value;									\
+		}																\
+		return true;													\
+	}																	\
+	STATIC_FUNCTION(int)												\
+	xpu_##NAME##_datum_write(kern_context *kcxt,						\
+							 char *buffer,								\
+							 const xpu_datum_t *__arg)					\
+	{																	\
+		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
+																		\
+		if (arg->isnull)												\
 			return 0;													\
 		if (buffer)														\
-			memcpy(buffer, &arg->value, sizeof(BASETYPE));				\
+			*((BASETYPE *)buffer) = arg->value;							\
 		return sizeof(BASETYPE);										\
 	}																	\
 	STATIC_FUNCTION(bool)												\
@@ -266,9 +225,9 @@ PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t);
 	}																	\
 	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
 
-PGSTROM_SIMPLE_FLOAT_TEMPLATE(float2, float2_t, Half);
-PGSTROM_SIMPLE_FLOAT_TEMPLATE(float4, float4_t, Single);
-PGSTROM_SIMPLE_FLOAT_TEMPLATE(float8, float8_t, Double);
+PGSTROM_SIMPLE_FLOAT_TEMPLATE(float2, float2_t, fp16, Half);
+PGSTROM_SIMPLE_FLOAT_TEMPLATE(float4, float4_t, fp32, Single);
+PGSTROM_SIMPLE_FLOAT_TEMPLATE(float8, float8_t, fp64, Double);
 
 /* special support functions for float2 */
 INLINE_FUNCTION(bool) isinf(float2_t fval) { return isinf(fp16_to_fp32(fval)); }

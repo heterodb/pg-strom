@@ -170,6 +170,49 @@ __Fetch(const T *ptr)
 #endif
 
 /*
+ * TypeOpCode / FuncOpCode
+ */
+#define TYPE_OPCODE(NAME,a,b,c)		TypeOpCode__##NAME,
+typedef enum {
+	TypeOpCode__Invalid = 0,
+#include "xpu_opcodes.h"
+	TypeOpCode__composite,
+	TypeOpCode__array,
+	TypeOpCode__record,
+	TypeOpCode__unsupported,
+	TypeOpCode__BuiltInMax,
+} TypeOpCode;
+
+#define FUNC_OPCODE(a,b,c,NAME,d,e)		FuncOpCode__##NAME,
+typedef enum {
+	FuncOpCode__Invalid = 0,
+	FuncOpCode__ConstExpr,
+	FuncOpCode__ParamExpr,
+	FuncOpCode__VarExpr,
+	FuncOpCode__BoolExpr_And,
+	FuncOpCode__BoolExpr_Or,
+	FuncOpCode__BoolExpr_Not,
+	FuncOpCode__NullTestExpr_IsNull,
+	FuncOpCode__NullTestExpr_IsNotNull,
+	FuncOpCode__BoolTestExpr_IsTrue,
+	FuncOpCode__BoolTestExpr_IsNotTrue,
+	FuncOpCode__BoolTestExpr_IsFalse,
+	FuncOpCode__BoolTestExpr_IsNotFalse,
+	FuncOpCode__BoolTestExpr_IsUnknown,
+	FuncOpCode__BoolTestExpr_IsNotUnknown,
+#include "xpu_opcodes.h"
+	/* for projection */
+	FuncOpCode__Projection = 9999,
+	FuncOpCode__LoadVars,
+	FuncOpCode__JoinQuals,
+	FuncOpCode__HashValue,
+	FuncOpCode__SaveExpr,
+	FuncOpCode__AggFuncs,
+	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
+	FuncOpCode__BuiltInMax,
+} FuncOpCode;
+
+/*
  * Error status
  */
 #define ERRCODE_STROM_SUCCESS			0
@@ -196,11 +239,9 @@ typedef struct {
  */
 #define KVAR_CLASS__NULL		(-1)
 #define KVAR_CLASS__INLINE		(-2)
-#define KVAR_CLASS__POINTER		(-3)
-#define KVAR_CLASS__VARLENA		(-4)
-#define KVAR_CLASS__ARRAY		(-100)
-#define KVAR_CLASS__COMPOSITE	(-101)
-#define KVAR_CLASS__GEOMETRY	(-102)
+#define KVAR_CLASS__VARLENA		(-3)
+#define KVAR_CLASS__XPU_DATUM	(-4)
+
 typedef union
 {
 	int8_t		i8;
@@ -215,9 +256,10 @@ typedef union
 	float4_t	fp32;
 	float8_t	fp64;
 	void	   *ptr;
-	struct xpu_array_t *array;
-	struct xpu_composite_t *comp;
-	struct xpu_geometry_t *geom;
+	struct {
+		uint32_t	offset;		/* offset from kvars_slot */
+		TypeOpCode	type_code;	/* TypeOpCode of the xpu_datum */
+	} xpu;		/* KVAR_CLASS__XPU_DATUM */
 } kern_variable;
 
 /*
@@ -242,9 +284,9 @@ typedef struct
 	 */
 	uint32_t		kvars_nslots;
 	uint32_t		kvars_nbytes;
-	int			   *kvars_class;
 	kern_variable  *kvars_slot;
-#if 1
+	int			   *kvars_class;
+#if 0
 	//deprecated
 	struct kern_colmeta **kvars_cmeta;
 	void		  **kvars_addr;
@@ -256,7 +298,7 @@ typedef struct
 	char			vlbuf[1];
 } kern_context;
 
-#define INIT_KERNEL_CONTEXT(KCXT,SESSION,KDS_SRC)						\
+#define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
 	do {																\
 		uint32_t	__bufsz = Max(512, (SESSION)->kcxt_extra_bufsz);	\
 		uint32_t	__len = offsetof(kern_context, vlbuf) +	__bufsz;	\
@@ -266,11 +308,8 @@ typedef struct
 		KCXT->session = (SESSION);										\
 		KCXT->kvars_nslots = (SESSION)->kcxt_kvars_nslots;				\
 		KCXT->kvars_nbytes = (SESSION)->kcxt_kvars_nbytes;				\
-		KCXT->kvars_cmeta = (kern_colmeta **)							\
-			alloca(sizeof(kern_colmeta *) * (KCXT)->kvars_nslots);		\
-		INIT_KERNEL_VARS_CMETA((KCXT),(KDS_SRC));						\
-		KCXT->kvars_addr = NULL;										\
-		KCXT->kvars_len = NULL;											\
+		KCXT->kvars_slot = NULL;										\
+		KCXT->kvars_class = NULL;										\
 		KCXT->vlpos = KCXT->vlbuf;										\
 		KCXT->vlend = KCXT->vlbuf + __bufsz;							\
 	} while(0)
@@ -1248,17 +1287,6 @@ typedef struct toast_compress_header
  *
  * ----------------------------------------------------------------
  */
-#define TYPE_OPCODE(NAME,a,b,c)		TypeOpCode__##NAME,
-typedef enum {
-	TypeOpCode__Invalid = 0,
-#include "xpu_opcodes.h"
-	TypeOpCode__composite,
-	TypeOpCode__array,
-	TypeOpCode__record,
-	TypeOpCode__unsupported,
-	TypeOpCode__BuiltInMax,
-} TypeOpCode;
-
 typedef struct xpu_datum_t		xpu_datum_t;
 typedef struct xpu_datum_operators xpu_datum_operators;
 
@@ -1276,20 +1304,18 @@ struct xpu_datum_operators {
 	int16_t		xpu_type_length;	/* = pg_type.typlen */
 	TypeOpCode	xpu_type_code;
 	int			xpu_type_sizeof;	/* =sizeof(xpu_XXXX_t), not PG type! */
+	int			xpu_type_alignof;	/* =__alignof__(xpu_XXX_t), not PG type! */
 	bool	  (*xpu_datum_ref)(kern_context *kcxt,
-							   xpu_datum_t *result,
-							   const void *addr);
-	bool	  (*xpu_arrow_ref)(kern_context *kcxt,
-							   xpu_datum_t *result,
-							   const kern_colmeta *cmeta,
-							   const void *addr, int len);
-	int		  (*xpu_arrow_move)(kern_context *kcxt,
-								char *buffer,
-								const kern_colmeta *cmeta,
-								const void *addr, int len);
-	int		  (*xpu_datum_store)(kern_context *kcxt,
-								 char *buffer,
-								 const xpu_datum_t *arg);
+							   xpu_datum_t *result,			/* out */
+							   int vclass,					/* in */
+							   const kern_variable *kvar);	/* in */
+	bool	  (*xpu_datum_store)(kern_context *kcxt,
+								 const xpu_datum_t *arg,	/* in */
+								 int *p_vclass,				/* out */
+								 kern_variable *p_kvar);	/* out */
+	int		  (*xpu_datum_write)(kern_context *kcxt,
+								 char *buffer,				/* out */
+								 const xpu_datum_t *xdatum);/* in */
 	bool	  (*xpu_datum_hash)(kern_context *kcxt,
 								uint32_t *p_hash,
 								const xpu_datum_t *arg);
@@ -1316,10 +1342,10 @@ struct xpu_datum_operators {
 		.xpu_type_length = TYPLENGTH,								\
 		.xpu_type_code = TypeOpCode__##NAME,						\
 		.xpu_type_sizeof = sizeof(xpu_##NAME##_t),					\
+		.xpu_type_alignof = __alignof__(xpu_##NAME##_t),			\
 		.xpu_datum_ref = xpu_##NAME##_datum_ref,					\
-		.xpu_arrow_ref = xpu_##NAME##_arrow_ref,					\
-		.xpu_arrow_move = xpu_##NAME##_arrow_move,					\
 		.xpu_datum_store = xpu_##NAME##_datum_store,				\
+		.xpu_datum_write = xpu_##NAME##_datum_write,				\
 		.xpu_datum_hash = xpu_##NAME##_datum_hash,					\
 	}
 
@@ -1340,7 +1366,7 @@ struct xpu_datum_operators {
  */
 struct xpu_array_t {
 	XPU_DATUM_COMMON_FIELD;
-	char	   *value;
+	const kern_data_store *kds;
 	int			length;
 	uint32_t	start;
 	kern_colmeta *smeta;
@@ -1404,8 +1430,8 @@ typedef struct
 												 * no locale configuration */
 #define DEVKERN__SESSION_TIMEZONE	0x00000200U	/* Device function needs session
 												 * timezone */
-#define DEVTYPE__NEED_KVARS_BUF		0x00000400U	/* Device type needs extra buffer
-												 * at the kvars-slot */
+#define DEVTYPE__USE_KVARS_SLOTBUF	0x00000400U	/* Device type uses extra buffer on
+												 * the kvars-slot for LoadVars */
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
 #define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
@@ -1424,35 +1450,6 @@ typedef struct
  * Definition of device functions
  *
  * ---------------------------------------------------------------- */
-#define FUNC_OPCODE(a,b,c,NAME,d,e)		FuncOpCode__##NAME,
-typedef enum {
-	FuncOpCode__Invalid = 0,
-	FuncOpCode__ConstExpr,
-	FuncOpCode__ParamExpr,
-	FuncOpCode__VarExpr,
-	FuncOpCode__BoolExpr_And,
-	FuncOpCode__BoolExpr_Or,
-	FuncOpCode__BoolExpr_Not,
-	FuncOpCode__NullTestExpr_IsNull,
-	FuncOpCode__NullTestExpr_IsNotNull,
-	FuncOpCode__BoolTestExpr_IsTrue,
-	FuncOpCode__BoolTestExpr_IsNotTrue,
-	FuncOpCode__BoolTestExpr_IsFalse,
-	FuncOpCode__BoolTestExpr_IsNotFalse,
-	FuncOpCode__BoolTestExpr_IsUnknown,
-	FuncOpCode__BoolTestExpr_IsNotUnknown,
-#include "xpu_opcodes.h"
-	/* for projection */
-	FuncOpCode__Projection = 9999,
-	FuncOpCode__LoadVars,
-	FuncOpCode__JoinQuals,
-	FuncOpCode__HashValue,
-	FuncOpCode__SaveExpr,
-	FuncOpCode__AggFuncs,
-	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
-	FuncOpCode__BuiltInMax,
-} FuncOpCode;
-
 typedef struct kern_expression	kern_expression;
 #define XPU_PGFUNCTION_ARGS		kern_context *kcxt,				\
 								const kern_expression *kexp,	\
@@ -1464,7 +1461,7 @@ typedef struct
 	int16_t			var_depth;
 	int16_t			var_resno;
 	uint32_t		var_slot_id;
-	uint32_t		var_slot_buf;	/* offset of the slot-buffer (some margin at
+	uint32_t		var_slot_off;	/* offset of the slot-buffer (some margin at
 									 * the end of kcxt->kvars_slot[] to store several
 									 * special arrow types (array, composite) */
 } kern_vars_defitem;
@@ -1604,7 +1601,8 @@ struct kern_expression
 			kern_vars_defitem kvars[1];
 		} load;		/* VarLoads */
 		struct {
-			int			slot_id;	/* destination slot-id */
+			uint32_t	slot_id;	/* destination slot-id */
+			uint32_t	slot_off;	/* kvars-slot buffer offset, if needed */
 			char		data[1];
 		} save;		/* SaveExpr */
 		struct {
@@ -1717,9 +1715,7 @@ typedef struct kern_session_info
 									 * kvars-buffer (for xpu_array_t, xpu_composite_t
 									 * and xpu_geometry_t) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
-#if 1
-	uint32_t	kvars_slot_items;	/* array of kern_vars_defitem[] */
-#endif
+
 	/* xpucode for this session */
 	bool		xpucode_use_debug_code;
 	uint32_t	xpucode_scan_load_vars;
@@ -2160,7 +2156,7 @@ EXTERN_FUNCTION(int)
 kern_estimate_heaptuple(kern_context *kcxt,
 						const kern_expression *kproj,
 						const kern_data_store *kds_dst);
-EXTERN_FUNCTION(void)
+EXTERN_FUNCTION(bool)
 ExecLoadVarsHeapTuple(kern_context *kcxt,
 					  kern_expression *kexp_load_vars,
 					  int depth,
@@ -2185,26 +2181,6 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 					   kern_expression *kexp_scan_quals,
 					   kern_data_store *kds_src,
 					   uint32_t kds_index);
-
-EXTERN_FUNCTION(bool)
-ExecKernHashValue(kern_context *kcxt,
-				  kern_expression *kexp,
-				  uint32_t *p_hash,
-				  uint32_t *combuf,
-				  kern_data_store *kds_outer,
-				  kern_data_extra *kds_extra,
-				  int curr_depth,
-				  kern_data_store **kds_inners);
-EXTERN_FUNCTION(bool)
-ExecKernJoinQuals(kern_context *kcxt,
-				  kern_expression *kexp,
-				  int *p_status,
-				  uint32_t *combuf,
-				  uint32_t comb_last_lv,
-				  kern_data_store *kds_outer,
-				  kern_data_extra *kds_extra,
-				  int num_inners,
-				  kern_data_store **kds_inners);
 
 EXTERN_FUNCTION(int)
 ExecKernProjection(kern_context *kcxt,
@@ -2287,10 +2263,4 @@ KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int dindex)
 	offset = kmrels->chunks[dindex].gist_offset;
 	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
-
-/* init kcxt->kvars_cmeta */
-EXTERN_FUNCTION(void)
-INIT_KERNEL_VARS_CMETA(kern_context *kcxt,
-					   kern_data_store *kds_src);
-
 #endif	/* XPU_COMMON_H */

@@ -82,8 +82,9 @@ execGpuJoinNestLoop(kern_context *kcxt,
 		uint32_t	index = l_state++;
 
 		read_pos = (read_pos % UNIT_TUPLES_PER_DEPTH);
-		kcxt->kvars_addr = (void **)(src_kvars_addr_wp + read_pos * kcxt->kvars_nbytes);
-		kcxt->kvars_len  = (int *)(kcxt->kvars_addr + kcxt->kvars_nslots);
+		kcxt->kvars_slot = (kern_variable *)
+			(src_kvars_addr_wp + read_pos * kcxt->kvars_nbytes);
+		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 		if (index < kds_heap->nitems)
 		{
 			kern_tupitem *tupitem;
@@ -132,7 +133,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 	{
 		write_pos = (write_pos % UNIT_TUPLES_PER_DEPTH);
 		memcpy(dst_kvars_addr_wp + write_pos * kcxt->kvars_nbytes,
-			   kcxt->kvars_addr,
+			   kcxt->kvars_slot,
 			   kcxt->kvars_nbytes);
 	}
 	__syncwarp();
@@ -216,8 +217,9 @@ execGpuJoinHashJoin(kern_context *kcxt,
 	write_pos = WARP_WRITE_POS(wp,depth-1);
 	read_pos = WARP_READ_POS(wp,depth-1) + LaneId();
 	index = (read_pos % UNIT_TUPLES_PER_DEPTH);
-	kcxt->kvars_addr = (void **)(src_kvars_addr_wp + index * kcxt->kvars_nbytes);
-	kcxt->kvars_len  = (int *)(kcxt->kvars_addr + kcxt->kvars_nslots);
+	kcxt->kvars_slot = (kern_variable *)
+		(src_kvars_addr_wp + index * kcxt->kvars_nbytes);
+	kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 	if (l_state == 0)
 	{
 		/* pick up the first item from the hash-slot */
@@ -299,7 +301,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 	{
 		index = write_pos % UNIT_TUPLES_PER_DEPTH;
 		memcpy(dst_kvars_addr_wp + index * kcxt->kvars_nbytes,
-			   kcxt->kvars_addr,
+			   kcxt->kvars_slot,
 			   kcxt->kvars_nbytes);
 	}
 	__syncwarp();
@@ -348,8 +350,9 @@ execGpuJoinProjection(kern_context *kcxt,
 	{
 		int			index = (read_pos % UNIT_TUPLES_PER_DEPTH);
 
-		kcxt->kvars_addr = (void **)(kvars_addr_wp + index * kcxt->kvars_nbytes);
-		kcxt->kvars_len = (int *)(kcxt->kvars_addr + kcxt->kvars_nslots);
+		kcxt->kvars_slot = (kern_variable *)
+			(kvars_addr_wp + index * kcxt->kvars_nbytes);
+		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 		tupsz = kern_estimate_heaptuple(kcxt,
 										kexp_projection,
 										kds_dst);
@@ -443,9 +446,6 @@ kern_gpujoin_main(kern_session_info *session,
 	kern_warp_context  *wp, *wp_saved;
 	char			   *kvars_addr_wp;
 	uint32_t			kvars_chunksz;
-//	void			  **kvars_addr;
-//	int				   *kvars_len;
-//	uint32_t			kvars_width;
 	uint32_t		   *l_state;
 	bool			   *matched;
 	uint32_t			wp_base_sz;
@@ -458,7 +458,7 @@ kern_gpujoin_main(kern_session_info *session,
 		   kgtask->kvars_nbytes == session->kcxt_kvars_nbytes &&
 		   kgtask->n_rels == n_rels);
 	/* setup execution context */
-	INIT_KERNEL_CONTEXT(kcxt, session, kds_src);
+	INIT_KERNEL_CONTEXT(kcxt, session);
 	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(n_rels);
 	wp = (kern_warp_context *)SHARED_WORKMEM(wp_base_sz, get_local_id() / warpSize);
 	wp_saved = KERN_GPUTASK_WARP_CONTEXT(kgtask);
@@ -467,18 +467,6 @@ kern_gpujoin_main(kern_session_info *session,
 	kvars_chunksz = kcxt->kvars_nbytes * UNIT_TUPLES_PER_DEPTH;
 	kvars_addr_wp = (char *)wp_saved + wp_base_sz;
 
-	
-#if 0	
-	wp_unitsz = __KERN_WARP_CONTEXT_UNITSZ_BASE(n_rels);
-	wp = (kern_warp_context *)SHARED_WORKMEM(wp_unitsz, get_local_id() / warpSize);
-	wp_saved = KERN_GPUTASK_WARP_CONTEXT(kgtask);
-	l_state = KERN_GPUTASK_LSTATE_ARRAY(kgtask);
-	matched = KERN_GPUTASK_MATCHED_ARRAY(kgtask);
-	kvars_width = UNIT_TUPLES_PER_DEPTH * kcxt->kvars_nslots;
-	//!!!!!
-	kvars_addr = (void **)((char *)wp_saved + wp_unitsz);
-	kvars_len = (int *)(kvars_addr + kvars_width * (n_rels+1));
-#endif
 	if (kgtask->resume_context)
 	{
 		/* resume the warp-context from the previous execution */

@@ -394,33 +394,6 @@ __build_session_param_info(pgstromTaskState *pts,
 	}
 }
 
-
-
-static uint32_t
-__build_kvars_slot_cmeta(StringInfo buf,
-						 pgstromTaskState *pts,
-						 List *kvars_depth_list,
-						 List *kvars_resno_list)
-{
-	kern_vars_defitem *kvars_defitem;
-	int			nitems = list_length(kvars_depth_list);
-	int			slot_id = 0;
-	ListCell   *lc1, *lc2;
-
-	kvars_defitem = alloca(sizeof(kern_vars_defitem) * nitems);
-	forboth (lc1, kvars_depth_list,
-			 lc2, kvars_resno_list)
-	{
-		kern_vars_defitem *kvar = &kvars_defitem[slot_id];
-
-		kvar->var_depth = lfirst_int(lc1);
-		kvar->var_resno = lfirst_int(lc2);
-		kvar->var_slot_id = slot_id++;
-	}
-	return __appendBinaryStringInfo(buf, kvars_defitem,
-									sizeof(kern_vars_defitem) * nitems);
-}
-
 static uint32_t
 __build_session_xact_state(StringInfo buf)
 {
@@ -596,21 +569,28 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	/* other database session information */
 	kvars_nslots = list_length(pp_info->kvars_depth);
 	Assert(kvars_nslots == list_length(pp_info->kvars_resno) &&
-		   kvars_nslots == list_length(pp_info->kvars_bufsz));
-	kvars_nbytes = (MAXALIGN(sizeof(kern_variable) * kvars_nslots) +
-					MAXALIGN(sizeof(int)           * kvars_nslots));
-	foreach (lc, pp_info->kvars_bufsz)
-		kvars_nbytes += lfirst_int(lc);
+		   kvars_nslots == list_length(pp_info->kvars_types));
+	kvars_nbytes = (sizeof(kern_variable) * kvars_nslots +
+					sizeof(int)           * kvars_nslots);
+	foreach (lc, pp_info->kvars_types)
+	{
+		Oid		type_oid = lfirst_oid(lc);
+		devtype_info *dtype;
+
+		if (OidIsValid(type_oid) &&
+			(dtype = pgstrom_devtype_lookup(type_oid)) != NULL)
+		{
+			kvars_nbytes = TYPEALIGN(dtype->type_alignof, kvars_nbytes);
+			kvars_nbytes += dtype->type_sizeof;
+		}
+	}
+	kvars_nbytes = MAXALIGN(kvars_nbytes);
+
 	session->query_plan_id = ((uint64_t)MyProcPid << 32) |
 		(uint64_t)pg_atomic_fetch_add_u32(pgstrom_query_plan_id, 1);
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
 	session->kcxt_kvars_nslots = kvars_nslots;
 	session->kcxt_kvars_nbytes = kvars_nbytes;
-#if 1
-	session->kvars_slot_items = __build_kvars_slot_cmeta(&buf, pts,
-														 pp_info->kvars_depth,
-														 pp_info->kvars_resno);
-#endif
 	session->xpucode_use_debug_code = pgstrom_use_debug_code;
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	session->session_xact_state = __build_session_xact_state(&buf);

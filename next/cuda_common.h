@@ -129,32 +129,24 @@ typedef struct
 		uint32_t	write;		/* write_pos of depth=X */
 	} pos[1];		/* variable length */
 	/*
-	 * <----- __KERN_WARP_CONTEXT_UNITSZ_BASE ----->
+	 * <----- __KERN_WARP_CONTEXT_BASESZ ----->
 	 * Above fields are always kept in the device shared memory.
 	 *
-	 * +-------------------------------------+--------
-	 * | kvars_slot[nslots] + nbytes (pos-0) |
-	 * | kvars_slot[nslots] + nbytes (pos-1) |
-	 * |      :             :       :        |
-	 * | kvars_slot[nslots] + nbytes (pos-63)|
-	 * +-------------------------------------+ depth=0
-	 * | kvars_class[nslots] (pos-0)         |
-	 * | kvars_class[nslots] (pos-1)         |
-	 * |      :                              |
-	 * | kvars_class[nslots] (pos-63)        |
-	 * +----------------------------+--------+--------
-	 * :      :                     :
-	 * +-------------------------------------+--------
-	 * | kvars_slot[nslots] + nbytes (pos-0) |
-	 * | kvars_slot[nslots] + nbytes (pos-1) |
-	 * |      :             :       :        |
-	 * | kvars_slot[nslots] + nbytes (pos-63)|
-	 * +-------------------------------------+ depth=nrels
-	 * | kvars_class[nslots] (pos-0)         |
-	 * | kvars_class[nslots] (pos-1)         |
-	 * |      :                              |
-	 * | kvars_class[nslots] (pos-63)        |
-	 * +-------------------------------------+--------
+	 * +-------------------------------------------------------------+------
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-0) |
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-1) |
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-2) | depth=0
+	 * |      :                    :                     :           |
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-63)|
+	 * +-------------------------------------------------------------+------
+	 *        :                    :                     :
+	 * +-------------------------------------------------------------+------
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-0) |
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-1) |
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-2) | depth=nrels
+	 * |      :                    :                     :           |
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-63)|
+	 * +-------------------------------------------------------------+------
 	 */
 } kern_warp_context;
 
