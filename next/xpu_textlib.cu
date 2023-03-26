@@ -42,88 +42,90 @@ xpu_bpchar_is_valid(kern_context *kcxt, const xpu_bpchar_t *arg)
 STATIC_FUNCTION(bool)
 xpu_bpchar_datum_ref(kern_context *kcxt,
 					 xpu_datum_t *__result,
-					 const void *addr)
+					 int vclass,
+					 const kern_variable *kvar)
 {
-	xpu_bpchar_t *result = (xpu_bpchar_t *)__result;
+	xpu_bpchar_t   *result = (xpu_bpchar_t *)__result;
+	const char	   *addr = (const char *)kvar->ptr;
 
-	if (!addr)
-		result->isnull = true;
-	else if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+	result->isnull = false;
+	if (vclass == KVAR_CLASS__VARLENA)
 	{
-		result->isnull = false;
-		result->value  = (const char *)addr;
-		result->length = -1;
+		if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+		{
+			result->value  = addr;
+			result->length = -1;
+		}
+		else
+		{
+			result->value  = VARDATA_ANY(addr);
+			result->length = bpchar_truelen(result->value, VARSIZE_ANY_EXHDR(addr));
+		}
+	}
+	else if (vclass >= 0)
+	{
+		result->value  = addr;
+		result->length = vclass;
 	}
 	else
 	{
-		result->isnull = false;
-		result->value  = VARDATA_ANY(addr);
-		result->length = bpchar_truelen(result->value, VARSIZE_ANY_EXHDR(addr));
+		STROM_ELOG(kcxt, "unexpected vclass for device bpchar data type.");
+		return false;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_bpchar_arrow_ref(kern_context *kcxt,
-					 xpu_datum_t *__result,
-					 const kern_colmeta *cmeta,
-					 const void *addr, int len)
+xpu_bpchar_datum_store(kern_context *kcxt,
+					   const xpu_datum_t *__arg,
+					   int *p_vclass,
+					   kern_variable *p_kvar)
 {
-	xpu_bpchar_t *result = (xpu_bpchar_t *)__result;
+	const xpu_bpchar_t *arg = (const xpu_bpchar_t *)__arg;
 
-	if (!addr)
-		result->isnull = true;
+	if (arg->isnull)
+	{
+		*p_vclass = KVAR_CLASS__NULL;
+	}
+	else if (arg->length < 0)
+	{
+		*p_vclass   = KVAR_CLASS__VARLENA;
+		p_kvar->ptr = (void *)arg->value;
+	}
 	else
 	{
-		result->isnull = false;
-		result->value  = (const char *)addr;
-		result->length = len;
+		*p_vclass   = arg->length;
+		p_kvar->ptr = (void *)arg->value;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_bpchar_arrow_move(kern_context *kcxt,
-					  char *buffer,
-					  const kern_colmeta *cmeta,
-					  const void *addr, int len)
-{
-	if (!addr)
-		return 0;
-	if (buffer)
-	{
-		memcpy(buffer + VARHDRSZ, addr, len);
-		SET_VARSIZE(buffer, VARHDRSZ + len);
-	}
-	return VARHDRSZ + len;
-}
-
-STATIC_FUNCTION(int)
-xpu_bpchar_datum_store(kern_context *kcxt,
+xpu_bpchar_datum_write(kern_context *kcxt,
 					   char *buffer,
 					   const xpu_datum_t *__arg)
 {
 	const xpu_bpchar_t *arg = (const xpu_bpchar_t *)__arg;
-	int		sz;
+	int		nbytes;
 
 	if (arg->isnull)
 		return 0;
 	if (arg->length < 0)
 	{
-		sz = VARSIZE_ANY(arg->value);
+		nbytes = VARSIZE_ANY(arg->value);
 		if (buffer)
-			memcpy(buffer, arg->value, sz);
+			memcpy(buffer, arg->value, nbytes);
 	}
 	else
 	{
-		sz = VARHDRSZ + arg->length;
+		nbytes = VARHDRSZ + arg->length;
 		if (buffer)
 		{
-			memcpy(buffer + VARHDRSZ, arg->value, arg->length);
-			SET_VARSIZE(buffer, sz);
+			memcpy(buffer+VARHDRSZ, arg->value, arg->length);
+			SET_VARSIZE(buffer, nbytes);
 		}
 	}
-	return sz;
+	return nbytes;
 }
 
 STATIC_FUNCTION(bool)
@@ -160,88 +162,90 @@ xpu_text_is_valid(kern_context *kcxt, const xpu_text_t *arg)
 STATIC_FUNCTION(bool)
 xpu_text_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
-				   const void *addr)
+				   int vclass,
+				   const kern_variable *kvar)
 {
 	xpu_text_t *result = (xpu_text_t *)__result;
+	const char *addr = (const char *)kvar->ptr;
 
-	if (!addr)
-		result->isnull = true;
-	else if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+	result->isnull = false;
+	if (vclass == KVAR_CLASS__VARLENA)
 	{
-		result->isnull = false;
-		result->value  = (const char *)addr;
-		result->length = -1;
+		if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+		{
+			result->value  = addr;
+			result->length = -1;
+		}
+		else
+		{
+			result->value  = VARDATA_ANY(addr);
+			result->length = VARSIZE_ANY(addr);
+		}
+	}
+	else if (vclass >= 0)
+	{
+		result->value = addr;
+		result->length = vclass;
 	}
 	else
 	{
-		result->isnull = false;
-		result->value  = VARDATA_ANY(addr);
-		result->length = VARSIZE_ANY(addr);
+		STROM_ELOG(kcxt, "unexpected vclass for device bpchar data type.");
+		return false;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_text_arrow_ref(kern_context *kcxt,
-				   xpu_datum_t *__result,
-				   const kern_colmeta *cmeta,
-				   const void *addr, int len)
+xpu_text_datum_store(kern_context *kcxt,
+					 const xpu_datum_t *__arg,
+					 int *p_vclass,
+					 kern_variable *p_kvar)
 {
-	xpu_text_t *result = (xpu_text_t *)__result;
+	const xpu_text_t *arg = (const xpu_text_t *)__arg;
 
-	if (!addr)
-		result->isnull = true;
+	if (arg->isnull)
+	{
+		*p_vclass = KVAR_CLASS__NULL;
+	}
+	else if (arg->length < 0)
+	{
+		*p_vclass   = KVAR_CLASS__VARLENA;
+		p_kvar->ptr = (void *)arg->value;
+	}
 	else
 	{
-		result->isnull = false;
-		result->value  = (const char *)addr;
-		result->length = len;
+		*p_vclass   = arg->length;
+		p_kvar->ptr = (void *)arg->value;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_text_arrow_move(kern_context *kcxt,
-					char *buffer,
-					const kern_colmeta *cmeta,
-					const void *addr, int len)
-{
-	if (!addr)
-		return 0;
-	if (buffer)
-	{
-		memcpy(buffer + VARHDRSZ, addr, len);
-		SET_VARSIZE(buffer, VARHDRSZ + len);
-	}
-	return VARHDRSZ + len;
-}
-
-STATIC_FUNCTION(int)
-xpu_text_datum_store(kern_context *kcxt,
+xpu_text_datum_write(kern_context *kcxt,
 					 char *buffer,
 					 const xpu_datum_t *__arg)
 {
 	const xpu_text_t *arg = (const xpu_text_t *)__arg;
-	int		sz;
+	int		nbytes;
 
 	if (arg->isnull)
 		return 0;
 	if (arg->length < 0)
 	{
-		sz = VARSIZE_ANY(arg->value);
+		nbytes = VARSIZE_ANY(arg->value);
 		if (buffer)
-			memcpy(buffer, arg->value, sz);
+			memcpy(buffer, arg->value, nbytes);
 	}
 	else
 	{
-		sz = VARHDRSZ + arg->length;
+		nbytes = VARHDRSZ + arg->length;
 		if (buffer)
 		{
-			memcpy(buffer + VARHDRSZ, arg->value, arg->length);
-			SET_VARSIZE(buffer, sz);
+			memcpy(buffer+VARHDRSZ, arg->value, arg->length);
+			SET_VARSIZE(buffer, nbytes);
 		}
 	}
-	return sz;
+	return nbytes;
 }
 
 STATIC_FUNCTION(bool)
@@ -277,89 +281,82 @@ xpu_bytea_is_valid(kern_context *kcxt, const xpu_bytea_t *arg)
 
 STATIC_FUNCTION(bool)
 xpu_bytea_datum_ref(kern_context *kcxt,
-				   xpu_datum_t *__result,
-					const void *addr)
+					xpu_datum_t *__result,
+					int vclass,
+					const kern_variable *kvar)
 {
 	xpu_bytea_t *result = (xpu_bytea_t *)__result;
+	const char	*addr = (const char *)kvar->ptr;
 
-	if (!addr)
-		result->isnull = true;
-	else if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+	if (vclass == KVAR_CLASS__VARLENA)
 	{
-		result->isnull = false;
-		result->value  = (const char *)addr;
-		result->length = -1;
-	}
-	else
-	{
-		result->isnull = false;
 		result->value  = VARDATA_ANY(addr);
 		result->length = VARSIZE_ANY(addr);
 	}
-	return true;
-}
-
-STATIC_FUNCTION(bool)
-xpu_bytea_arrow_ref(kern_context *kcxt,
-					xpu_datum_t *__result,
-					const kern_colmeta *cmeta,
-					const void *addr, int len)
-{
-	xpu_bytea_t *result = (xpu_bytea_t *)__result;
-
-	if (!addr)
-		result->isnull = true;
+	else if (vclass >= 0)
+	{
+		result->value  = addr;
+		result->length = vclass;
+	}
 	else
 	{
-		result->isnull = false;
-		result->value  = (const char *)addr;
-		result->length = len;
+		STROM_ELOG(kcxt, "unexpected vclass for device bytea data type.");
+		return false;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_bytea_arrow_move(kern_context *kcxt,
-					 char *buffer,
-					 const kern_colmeta *cmeta,
-					 const void *addr, int len)
-{
-	if (!addr)
-		return 0;
-	if (buffer)
-	{
-		memcpy(buffer + VARHDRSZ, addr, len);
-		SET_VARSIZE(buffer, VARHDRSZ + len);
-	}
-	return VARHDRSZ + len;
-}
-
-STATIC_FUNCTION(int)
-xpu_bytea_datum_store(kern_context *kcxt,
+xpu_bytea_datum_write(kern_context *kcxt,
 					  char *buffer,
 					  const xpu_datum_t *__arg)
 {
 	const xpu_bytea_t *arg = (const xpu_bytea_t *)__arg;
-	int		sz;
+	int		nbytes;
 
 	if (arg->isnull)
 		return 0;
 	if (arg->length < 0)
 	{
-		sz = VARSIZE_ANY(arg->value);
+		nbytes = VARSIZE_ANY(arg->value);
 		if (buffer)
-			memcpy(buffer, arg->value, sz);
+			memcpy(buffer, arg->value, nbytes);
 	}
 	else
 	{
-		sz = VARHDRSZ + arg->length;
+		nbytes = VARHDRSZ + arg->length;
 		if (buffer)
 		{
-			memcpy(buffer + VARHDRSZ, arg->value, arg->length);
-			SET_VARSIZE(buffer, sz);
+			memcpy(buffer+VARHDRSZ, arg->value, arg->length);
+			SET_VARSIZE(buffer, nbytes);
 		}
 	}
-	return sz;
+	return nbytes;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bytea_datum_store(kern_context *kcxt,
+					  const xpu_datum_t *__arg,
+					  int *p_vclass,
+					  kern_variable *p_kvar)
+{
+	const xpu_bytea_t *arg = (const xpu_bytea_t *)__arg;
+
+	if (arg->isnull)
+	{
+		*p_vclass = KVAR_CLASS__NULL;
+	}
+	else if (arg->length < 0)
+	{
+		*p_vclass   = KVAR_CLASS__VARLENA;
+		p_kvar->ptr = (void *)arg->value;
+	}
+	else
+	{
+		*p_vclass   = arg->length;
+		p_kvar->ptr = (void *)arg->value;
+	}
+	return true;
 }
 
 STATIC_FUNCTION(bool)

@@ -16,6 +16,9 @@ typedef struct
 {
 	dlist_node			chain;	/* link to dpu_client_list */
 	kern_session_info  *session;/* per-session information */
+	kern_multirels	   *kmrels;		/* join inner buffer */
+	size_t				kmrels_sz;	/* join inner buffer mmap-sz */
+	kern_data_store	   *kds_final;	/* group-by final buffer */
 	volatile bool		in_termination; /* true, if error status */
 	volatile int32_t	refcnt;	/* odd-number as long as socket is active */
 	pthread_mutex_t		mutex;	/* mutex to write the socket */
@@ -39,6 +42,33 @@ static dlist_head		dpu_command_list;
 static volatile bool	got_sigterm = false;
 static xpu_type_hash_table *dpuserv_type_htable = NULL;
 static xpu_func_hash_table *dpuserv_func_htable = NULL;
+
+/*
+ * dpuTaskExecState
+ */
+struct dpuTaskExecState
+{
+	kern_errorbuf	kerror;
+	kern_data_store *kds_dst_head;
+	kern_data_store *kds_dst;
+	kern_data_store **kds_dst_array;
+	bool		   (*handleDpuTaskFinalDepth)(dpuClient *dclient,
+											  struct dpuTaskExecState *dtes,
+											  kern_context *kcxt);
+	uint32_t		kds_dst_nrooms;
+	uint32_t		kds_dst_nitems;
+	uint32_t		nitems_raw;		/* nitems in the raw data chunk */
+	uint32_t		nitems_in;		/* nitems after the scan_quals */
+	uint32_t		nitems_out;		/* nitems of final results */
+	uint32_t		num_rels;		/* >0, if JOIN */
+	struct {
+		uint32_t	nitems_gist;	/* nitems picked up by GiST index */
+		uint32_t	nitems_out;		/* nitems after this depth */
+	} stats[1];
+};
+typedef struct dpuTaskExecState		dpuTaskExecState;
+
+
 
 /*
  * dpuClientWriteBack
@@ -88,22 +118,40 @@ __dpuClientWriteBack(dpuClient *dclient, struct iovec *iov, int iovcnt)
 
 static void
 dpuClientWriteBack(dpuClient *dclient,
-				   XpuCommand *resp,
-				   size_t      resp_sz,
-				   int         kds_nitems,
-				   kern_data_store **kds_array)
+				   dpuTaskExecState *dtes)
 {
+	XpuCommand	   *resp;
 	struct iovec   *iov_array;
 	struct iovec   *iov;
-	int				i, iovcnt = 0;
+	int				iovcnt = 0;
+	int				resp_sz;
 
-	iov_array = alloca(sizeof(struct iovec) * (2 * kds_nitems + 1));
+	/* Xcmd for the response */
+	resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats[dtes->num_rels]));
+	resp = alloca(resp_sz);
+	memset(resp, 0, resp_sz);
+	resp->magic = XpuCommandMagicNumber;
+	resp->tag   = XpuCommandTag__Success;
+	resp->u.results.chunks_offset = resp_sz;
+	resp->u.results.chunks_nitems = dtes->kds_dst_nitems;
+	resp->u.results.nitems_raw = dtes->nitems_raw;
+	resp->u.results.nitems_in  = dtes->nitems_in;
+	resp->u.results.nitems_out = dtes->nitems_out;
+	resp->u.results.num_rels   = dtes->num_rels;
+	for (int i=0; i < dtes->num_rels; i++)
+	{
+		resp->u.results.stats[i].nitems_gist = dtes->stats[i].nitems_gist;
+		resp->u.results.stats[i].nitems_out  = dtes->stats[i].nitems_out;
+	}
+
+	/* Setup iovec */
+	iov_array = alloca(sizeof(struct iovec) * (2 * dtes->kds_dst_nitems + 1));
 	iov = &iov_array[iovcnt++];
 	iov->iov_base = resp;
 	iov->iov_len  = resp_sz;
-	for (i=0; i < kds_nitems; i++)
+	for (int i=0; i < dtes->kds_dst_nitems; i++)
 	{
-		kern_data_store *kds = kds_array[i];
+		kern_data_store *kds = dtes->kds_dst_array[i];
 		size_t		sz1, sz2;
 
 		assert(kds->format == KDS_FORMAT_ROW);
@@ -183,6 +231,155 @@ __dpuClientElog(dpuClient *dclient,
 					__FILE__, __LINE__, __FUNCTION__,	\
 					(fmt), ##__VA_ARGS__)
 /*
+ * Get/Put Group-By Final Buffer
+ */
+typedef struct
+{
+	dlist_node	chain;
+	int			refcnt;
+	uint32_t	pgsql_port_number;
+	uint32_t	pgsql_plan_node_id;
+	uint32_t	pgsql_client_hash;
+	kern_data_store kds_final;	/* variable length */
+} groupby_final_buffer;
+
+static pthread_mutex_t	groupby_final_buffer_lock;
+#define GROUPBY_FINAL_BUFFER_HASHSZ		200
+static dlist_head		groupby_final_buffer_hash[GROUPBY_FINAL_BUFFER_HASHSZ];
+
+static kern_data_store *
+dpuServGetGroupByFinalBuffer(dpuClient *dclient, kern_session_info *session)
+{
+	kern_data_store *kds_final;
+	dlist_head	   *slot;
+	dlist_iter		iter;
+	uint32_t		hash;
+	struct {
+		uint32_t	pgsql_port_number;
+		uint32_t	pgsql_plan_node_id;
+	} hkey;
+	groupby_final_buffer *gf_buf;
+
+	assert(session->groupby_kds_final != 0);
+	hkey.pgsql_port_number  = session->pgsql_port_number;
+	hkey.pgsql_plan_node_id = session->pgsql_plan_node_id;
+	hash = pg_hash_any(dclient->peer_addr, strlen(dclient->peer_addr));
+	hash ^= pg_hash_any(&hkey, sizeof(hkey));
+
+	/* lookup the hash table first */
+	pthreadMutexLock(&groupby_final_buffer_lock);
+	slot = &groupby_final_buffer_hash[hash % GROUPBY_FINAL_BUFFER_HASHSZ];
+	dlist_foreach (iter, slot)
+	{
+		gf_buf = dlist_container(groupby_final_buffer, chain, iter.cur);
+
+		if (gf_buf->pgsql_port_number == session->pgsql_port_number &&
+			gf_buf->pgsql_plan_node_id == session->pgsql_plan_node_id &&
+			gf_buf->pgsql_client_hash == hash)
+		{
+			gf_buf->refcnt++;
+			pthreadMutexUnlock(&groupby_final_buffer_lock);
+			return &gf_buf->kds_final;
+		}
+	}
+	/* not found, so create a new one */
+	kds_final = (kern_data_store *)((char *)session + session->groupby_kds_final);
+	gf_buf = malloc(offsetof(groupby_final_buffer, kds_final) + kds_final->length);
+	if (!gf_buf)
+	{
+		pthreadMutexUnlock(&groupby_final_buffer_lock);
+		return NULL;
+	}
+	gf_buf->refcnt = 1;
+	gf_buf->pgsql_port_number  = session->pgsql_port_number;
+	gf_buf->pgsql_plan_node_id = session->pgsql_plan_node_id;
+	gf_buf->pgsql_client_hash  = hash;
+	memcpy(&gf_buf->kds_final, kds_final, KDS_HEAD_LENGTH(kds_final));
+
+	dlist_push_tail(slot, &gf_buf->chain);
+	pthreadMutexUnlock(&groupby_final_buffer_lock);
+
+	return &gf_buf->kds_final;
+}
+
+static void
+dpuServPutGroupByFinalBuffer(kern_data_store *kds_final)
+{
+	groupby_final_buffer *gf_buf = (groupby_final_buffer *)
+		((char *)kds_final - offsetof(groupby_final_buffer, kds_final));
+
+	pthreadMutexLock(&groupby_final_buffer_lock);
+	Assert(gf_buf->refcnt > 0);
+	if (--gf_buf->refcnt == 0)
+	{
+		dlist_delete(&gf_buf->chain);
+		free(gf_buf);
+	}
+	pthreadMutexUnlock(&groupby_final_buffer_lock);
+}
+
+/*
+ * mmap/munmap session buffer
+ */
+static bool
+dpuServMapSessionBuffers(dpuClient *dclient, kern_session_info *session)
+{
+	char		namebuf[100];
+	int			fdesc;
+	struct stat	stat_buf;
+	void	   *mmap_addr;
+	size_t		mmap_sz;
+
+	if (session->join_inner_handle != 0)
+	{
+		snprintf(namebuf, sizeof(namebuf),
+				 ".pgstrom_shmbuf_%u_%d",
+				 session->pgsql_port_number,
+				 session->join_inner_handle);
+		fdesc = open(namebuf, O_RDONLY);
+		if (fdesc < 0)
+			return false;
+		if (fstat(fdesc, &stat_buf) != 0)
+		{
+			close(fdesc);
+			return false;
+		}
+		mmap_sz = PAGE_ALIGN(stat_buf.st_size);
+		mmap_addr = mmap(NULL, mmap_sz, PROT_READ, MAP_SHARED, fdesc, 0);
+		if (mmap_addr == MAP_FAILED)
+		{
+			close(fdesc);
+			return false;
+		}
+		dclient->kmrels = mmap_addr;
+		dclient->kmrels_sz = mmap_sz;
+	}
+
+	if (session->groupby_kds_final)
+	{
+		dclient->kds_final = dpuServGetGroupByFinalBuffer(dclient, session);
+		if (!dclient->kds_final)
+			return false;
+	}
+	return true;
+}
+
+static void
+dpuServUnmapSessionBuffers(dpuClient *dclient)
+{
+	if (dclient->kmrels)
+	{
+		if (munmap(dclient->kmrels,
+				   dclient->kmrels_sz) != 0)
+			fprintf(stderr, "failed on munmap(%p-%p): %m\n",
+					(char *)dclient->kmrels,
+					(char *)dclient->kmrels + dclient->kmrels_sz - 1);
+	}
+	if (dclient->kds_final)
+		dpuServPutGroupByFinalBuffer(dclient->kds_final);
+}
+
+/*
  * xPU type/func lookup hash-table
  */
 static void
@@ -245,7 +442,7 @@ __resolveDevicePointersWalker(kern_expression *kexp,
 	const xpu_type_hash_entry *dtype_hentry;
 	const xpu_func_hash_entry *dfunc_hentry;
 	kern_expression *karg;
-	uint32_t	i, k, n;
+	uint32_t	i, k;
 
 	/* lookup device function */
 	k = (uint32_t)kexp->opcode % xfunc_htable->nslots;
@@ -284,8 +481,7 @@ __resolveDevicePointersWalker(kern_expression *kexp,
 	/* special handling for Projection */
 	if (kexp->opcode == FuncOpCode__Projection)
 	{
-		n = kexp->u.proj.nexprs + kexp->u.proj.nattrs;
-		for (i=0; i < n; i++)
+		for (i=0; i < kexp->u.proj.nattrs; i++)
 		{
 			kern_projection_desc *desc = &kexp->u.proj.desc[i];
 
@@ -299,14 +495,8 @@ __resolveDevicePointersWalker(kern_expression *kexp,
 			}
 			if (dtype_hentry)
 				desc->slot_ops = dtype_hentry->cat.type_ops;
-			else if (i >= kexp->u.proj.nexprs)
-				desc->slot_ops = NULL;	/* PostgreSQL generic projection */
 			else
-			{
-				fprintf(stderr, "device type pointer for opcode:%u not found.\n",
-						(int)desc->slot_type);
-				return false;
-			}
+				desc->slot_ops = NULL;
 		}
 	}
 
@@ -335,23 +525,25 @@ xpuServResolveDevicePointers(kern_session_info *session,
 							 const xpu_encode_info *xpu_encode_catalog)
 {
 	xpu_encode_info *encode = SESSION_ENCODE(session);
-	kern_expression *kexp;
+	kern_expression *__kexp[20];
+	int		i, nitems = 0;
 
-	if (session->xpucode_scan_quals)
+	__kexp[nitems++] = SESSION_KEXP_SCAN_LOAD_VARS(session);
+	__kexp[nitems++] = SESSION_KEXP_SCAN_QUALS(session);
+	__kexp[nitems++] = SESSION_KEXP_JOIN_LOAD_VARS(session, -1);
+	__kexp[nitems++] = SESSION_KEXP_JOIN_QUALS(session, -1);
+	__kexp[nitems++] = SESSION_KEXP_HASH_VALUE(session, -1);
+	__kexp[nitems++] = SESSION_KEXP_GIST_QUALS(session, -1);
+	__kexp[nitems++] = SESSION_KEXP_PROJECTION(session);
+	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYHASH(session);
+	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYLOAD(session);
+	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYCOMP(session);
+	__kexp[nitems++] = SESSION_KEXP_GROUPBY_ACTIONS(session);
+	for (i=0; i < nitems; i++)
 	{
-		kexp = (kern_expression *)((char *)session + session->xpucode_scan_quals);
-		if (!__resolveDevicePointersWalker(kexp,
-										   xtype_htable,
-										   xfunc_htable))
-			return false;
-	}
-
-	if (session->xpucode_scan_projs)
-	{
-		kexp = (kern_expression *)((char *)session + session->xpucode_scan_projs);
-		if (!__resolveDevicePointersWalker(kexp,
-										   xtype_htable,
-										   xfunc_htable))
+		if (__kexp[i] && !__resolveDevicePointersWalker(__kexp[i],
+														xtype_htable,
+														xfunc_htable))
 			return false;
 	}
 
@@ -396,8 +588,13 @@ dpuservHandleOpenSession(dpuClient *dclient, XpuCommand *xcmd)
 		dpuClientElog(dclient, "unable to resolve device pointers");
 		return false;
 	}
+	if (!dpuServMapSessionBuffers(dclient, session))
+	{
+		dpuClientElog(dclient, "unable to map DPU-serv session buffer");
+		return false;
+	}
 	dclient->session = session;
-
+	
 	/* success status */
 	memset(&resp, 0, sizeof(resp));
 	resp.magic = XpuCommandMagicNumber;
@@ -540,159 +737,951 @@ dpuservLoadKdsArrow(dpuClient *dclient,
  *
  * DPU Kernel Projection
  *
- * ---------------------------------------------------------------- */
-int
-ExecProjectionOuterRow(kern_context *kcxt,
-					   kern_expression *kexp,	/* LoadVars + Projection */
-					   kern_data_store *kds_dst,
-					   bool make_a_valid_tuple,
-					   kern_data_store *kds_outer,
-					   HeapTupleHeaderData *htup_outer,
-					   int num_inners,
-					   kern_data_store **kds_inners,
-					   HeapTupleHeaderData **htup_inners)
+ * ----------------------------------------------------------------
+ */
+static bool
+__handleDpuTaskExecProjection(dpuClient *dclient,
+							  dpuTaskExecState *dtes,
+							  kern_context *kcxt)
 {
-	xpu_int4_t	__tupsz;
+	kern_session_info  *session = dclient->session;
+	kern_expression    *kexp_projection = SESSION_KEXP_PROJECTION(session);
+	int32_t				tupsz;
 
-	/*
-	 * First, extract the variables from outer/inner tuples, and
-	 * calculate expressions, if any.
-	 */
-	assert(kexp->opcode  == FuncOpCode__LoadVars &&
-		   kexp->exptype == TypeOpCode__int4 &&
-		   make_a_valid_tuple);
-	if (!ExecLoadVarsOuterRow(kcxt,
-							  kexp,
-							  (xpu_datum_t *)&__tupsz,
-							  kds_outer,
-							  htup_outer,
-							  num_inners,
-							  kds_inners,
-							  htup_inners))
-		return -1;
-	if (!__tupsz.isnull && __tupsz.value > 0)
+	assert(kexp_projection != NULL &&
+		   kexp_projection->opcode  == FuncOpCode__Projection);
+	tupsz = kern_estimate_heaptuple(kcxt,
+									kexp_projection,
+									dtes->kds_dst_head);
+	if (tupsz > 0)
 	{
-		kern_expression *kproj = KEXP_FIRST_ARG(kexp);
-		int32_t		tupsz = MAXALIGN(__tupsz.value);
+		kern_data_store *kds_dst = dtes->kds_dst;
 		uint32_t	rowid;
 		size_t		offset;
 		size_t		newsz;
 		kern_tupitem *tupitem;
 
+	retry:
+		/* allocate a new kds_dst on the demand */
+		if (!kds_dst)
+		{
+			size_t	sz;
+
+			if (dtes->kds_dst_nitems >= dtes->kds_dst_nrooms)
+			{
+				kern_data_store **kds_dst_array;
+				uint32_t	kds_dst_nrooms = 2 * dtes->kds_dst_nrooms + 12;
+
+				kds_dst_array = realloc(dtes->kds_dst_array,
+										sizeof(kern_data_store *) * kds_dst_nrooms);
+				if (!kds_dst_array)
+				{
+					dpuClientElog(dclient, "out of memory");
+					return false;
+				}
+				dtes->kds_dst_array = kds_dst_array;
+				dtes->kds_dst_nrooms = kds_dst_nrooms;
+			}
+			sz = KDS_HEAD_LENGTH(dtes->kds_dst_head) + PGSTROM_CHUNK_SIZE;
+			kds_dst = malloc(sz);
+			if (!kds_dst)
+			{
+				dpuClientElog(dclient, "out of memory");
+				return false;
+			}
+			memcpy(kds_dst,
+				   dtes->kds_dst_head,
+				   KDS_HEAD_LENGTH(dtes->kds_dst_head));
+			kds_dst->length = sz;
+			dtes->kds_dst_array[dtes->kds_dst_nitems++] = kds_dst;
+			dtes->kds_dst = kds_dst;
+		}
+		/* insert a tuple */
 		offset = __kds_unpack(kds_dst->usage) + tupsz;
 		newsz = (KDS_HEAD_LENGTH(kds_dst) +
 				 MAXALIGN(sizeof(uint32_t) * (kds_dst->nitems + 1)) +
 				 offset);
 		if (newsz > kds_dst->length)
-			return 0;	/* retry with new kds_dst */
+		{
+			dtes->kds_dst = kds_dst = NULL;
+			goto retry;
+		}
 		kds_dst->usage = __kds_packed(offset);
 		rowid = kds_dst->nitems++;
 		KDS_GET_ROWINDEX(kds_dst)[rowid] = kds_dst->usage;
 		tupitem = (kern_tupitem *)
 			((char *)kds_dst + kds_dst->length - offset);
 		tupitem->rowid = rowid;
-		tupitem->t_len = kern_form_heaptuple(kcxt, kproj, kds_dst, &tupitem->htup);
-
-		return tupsz;
+		tupitem->t_len = kern_form_heaptuple(kcxt,
+											 kexp_projection,
+											 kds_dst,
+											 &tupitem->htup);
+		dtes->nitems_out++;
+		return true;
 	}
-	return -1;
-}
-
-int
-ExecProjectionOuterArrow(kern_context *kcxt,
-						 kern_expression *kexp,	/* LoadVars + Projection */
-						 kern_data_store *kds_dst,
-						 bool make_a_valid_tuple,
-						 kern_data_store *kds_outer,
-						 uint32_t kds_index,
-						 int num_inners,
-						 kern_data_store **kds_inners,
-						 HeapTupleHeaderData **htup_inners)
-{
-	xpu_int4_t	__tupsz;
-
-	/*
-	 * First, extract the variables from outer/inner tuples, and
-	 * calculate expressions, if any.
-	 */
-	assert(kexp->opcode  == FuncOpCode__LoadVars &&
-		   kexp->exptype == TypeOpCode__int4 &&
-		   make_a_valid_tuple);
-	if (!ExecLoadVarsOuterArrow(kcxt,
-								kexp,
-								(xpu_datum_t *)&__tupsz,
-								kds_outer,
-								kds_index,
-								num_inners,
-								kds_inners,
-								htup_inners))
-		return -1;
-	if (!__tupsz.isnull && __tupsz.value > 0)
-	{
-		kern_expression *kproj = KEXP_FIRST_ARG(kexp);
-		int32_t		tupsz = MAXALIGN(__tupsz.value);
-		uint32_t	rowid;
-		size_t		offset;
-		size_t		newsz;
-		kern_tupitem *tupitem;
-
-		offset = __kds_unpack(kds_dst->usage) + tupsz;
-		newsz = (KDS_HEAD_LENGTH(kds_dst) +
-				 MAXALIGN(sizeof(uint32_t) * (kds_dst->nitems + 1)) +
-				 offset);
-		if (newsz > kds_dst->length)
-			return 0;	/* retry with new kds_dst */
-		kds_dst->usage = __kds_packed(offset);
-		rowid = kds_dst->nitems++;
-		KDS_GET_ROWINDEX(kds_dst)[rowid] = kds_dst->usage;
-		tupitem = (kern_tupitem *)
-			((char *)kds_dst + kds_dst->length - offset);
-		tupitem->rowid = rowid;
-		tupitem->t_len = kern_form_heaptuple(kcxt, kproj, kds_dst, &tupitem->htup);
-
-		return tupsz;
-	}
-	return -1;
+	return false;
 }
 
 /* ----------------------------------------------------------------
  *
- * DPU service SCAN handler
+ * DPU Kernel PreAgg
  *
- * ---------------------------------------------------------------- */
-typedef struct
+ * ----------------------------------------------------------------
+ */
+static inline void
+__spinlock_acquire(volatile uint32_t *lock)
 {
-	kern_errorbuf	kerror;
-	uint32_t		nitems_in;
-	uint32_t		nitems_out;
-	uint32_t		extra_sz;
-} kern_dpuscan;
+	while (__sync_val_compare_and_swap(lock, 0, 1) != 0)
+	{
+		sched_yield();
+	}
+}
 
-static void
-__handleDpuScanExecBlock(dpuClient *dclient,
-						 kern_data_store *kds_src,
-						 kern_data_store *kds_dst_head)
+static inline void
+__spinlock_release(volatile uint32_t *lock)
+{
+	uint32_t	oldval;
+
+	oldval = __sync_val_compare_and_swap(lock, 1, 0);
+	assert(oldval == 1);
+}
+
+static int
+__writeOutGroupByKey(kern_context *kcxt,
+					 const kern_colmeta *cmeta,
+					 char *buffer,
+					 int vclass,
+					 const kern_variable *kvar)
+{
+	xpu_datum_t *xdatum;
+	int		sz;
+
+	switch (vclass)
+	{
+		case KVAR_CLASS__NULL:
+			return 0;
+
+		case KVAR_CLASS__INLINE:
+			assert(cmeta->attlen >= 0 &&
+				   cmeta->attlen <= sizeof(kern_variable));
+			if (buffer)
+				memcpy(buffer, kvar, cmeta->attlen);
+			return cmeta->attlen;
+
+		case KVAR_CLASS__VARLENA:
+			assert(cmeta->attlen == -1);
+			sz = VARSIZE_ANY(kvar->ptr);
+			if (buffer)
+				memcpy(buffer, kvar->ptr, sz);
+			return sz;
+
+		case KVAR_CLASS__XPU_DATUM:
+			xdatum = (xpu_datum_t *)((char *)kcxt->kvars_slot + kvar->xpu.offset);
+			switch (kvar->xpu.type_code)
+			{
+				case TypeOpCode__numeric:
+					assert(!cmeta->attbyval && cmeta->attlen == -1);
+					return xpu_numeric_write_heap(kcxt, buffer, xdatum);
+
+				case TypeOpCode__interval:
+					assert(!cmeta->attbyval && cmeta->attlen == sizeof(Interval));
+					return xpu_interval_write_heap(kcxt, buffer, xdatum);
+
+				case TypeOpCode__array:
+				case TypeOpCode__composite:
+				default:
+					return -1;
+			}
+			break;
+
+		default:
+			if (vclass < 0)
+				break;
+			if (buffer)
+			{
+				memcpy(buffer + VARHDRSZ, kvar->ptr, vclass);
+				SET_VARSIZE(buffer, VARHDRSZ + vclass);
+			}
+			return VARHDRSZ + vclass;
+	}
+	return -1;
+}
+
+static int32_t
+__estimateGroupByTupleSize(kern_context *kcxt,
+						   kern_data_store *kds_final,
+						   kern_expression *kexp_actions)
+{
+	int			nattrs = Min(kds_final->ncols, kexp_actions->u.pagg.nattrs);
+	int32_t		tupsz;
+
+	/* estimate the tuple length */
+	tupsz = MAXALIGN(offsetof(HeapTupleHeaderData,
+							  t_bits[BITMAPLEN(nattrs)]));
+	for (int j=0; j < nattrs; j++)
+	{
+		kern_aggregate_desc *desc = &kexp_actions->u.pagg.desc[j];
+		kern_colmeta   *cmeta = &kds_final->colmeta[j];
+		int				slot_id;
+		int				sz;
+
+		tupsz = TYPEALIGN(cmeta->attalign, tupsz);
+		switch (desc->action)
+		{
+			case KAGG_ACTION__VREF:
+				slot_id = desc->arg0_slot_id;
+				assert(slot_id >= 0 && slot_id < kcxt->kvars_nslots);
+				sz = __writeOutGroupByKey(kcxt, cmeta, NULL,
+										  kcxt->kvars_class[slot_id],
+										  &kcxt->kvars_slot[slot_id]);
+				if (sz < 0)
+					return -1;
+				tupsz += sz;
+				break;
+			case KAGG_ACTION__NROWS_ANY:
+			case KAGG_ACTION__NROWS_COND:
+				tupsz += sizeof(int64_t);
+				break;
+#if 0
+			case KAGG_ACTION__PMIN_INT32:
+			case KAGG_ACTION__PMAX_INT32:
+				tupsz += sizeof(kagg_state__pminmax_int32_packed);
+				break;
+			case KAGG_ACTION__PMIN_FP32:
+			case KAGG_ACTION__PMAX_FP32:
+				tupsz += sizeof(kagg_state__pminmax_fp32_packed);
+				break;
+			case KAGG_ACTION__PMIN_INT64:
+			case KAGG_ACTION__PMAX_INT64:
+				tupsz += sizeof(kagg_state__pminmax_int64_packed);
+				break;
+			case KAGG_ACTION__PMIN_FP64:
+			case KAGG_ACTION__PMAX_FP64:
+				tupsz += sizeof(kagg_state__pminmax_fp64_packed);
+				break;
+#endif
+			case KAGG_ACTION__PSUM_INT:
+			case KAGG_ACTION__PAVG_INT:
+				tupsz += sizeof(kagg_state__pavg_int_packed);
+				break;
+			case KAGG_ACTION__PSUM_FP32:
+			case KAGG_ACTION__PSUM_FP64:
+			case KAGG_ACTION__PAVG_FP:
+				tupsz += sizeof(kagg_state__pavg_fp_packed);
+				break;
+			case KAGG_ACTION__STDDEV:
+				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__stddev_packed);
+				break;
+			case KAGG_ACTION__COVAR:
+				tupsz += sizeof(kagg_state__covar_packed);
+				break;
+			default:
+				return -1;
+		}
+	}
+	return tupsz;
+}
+
+static int32_t
+__fillupGroupByTupleOne(kern_context *kcxt,
+						kern_data_store *kds_final,
+						HeapTupleHeaderData *htup,
+						kern_expression *kexp_actions)
+{
+	int			nattrs = Min(kds_final->ncols, kexp_actions->u.pagg.nattrs);
+	uint32_t	t_hoff, t_next;
+	uint16_t	t_infomask = HEAP_HASNULL;
+
+	t_hoff = MAXALIGN(offsetof(HeapTupleHeaderData,
+							   t_bits) + BITMAPLEN(nattrs));
+	memset(htup, 0, t_hoff);
+	htup->t_choice.t_datum.datum_typmod = kds_final->tdtypmod;
+	htup->t_choice.t_datum.datum_typeid = kds_final->tdtypeid;
+	htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
+	htup->t_ctid.ip_blkid.bi_lo = 0xffff;
+	htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
+	htup->t_infomask2 = (nattrs & HEAP_NATTS_MASK);
+	htup->t_hoff = t_hoff;
+
+	/* walk on the columns */
+	for (int j=0; j < nattrs; j++)
+	{
+		kern_aggregate_desc *desc = &kexp_actions->u.pagg.desc[j];
+		kern_colmeta   *cmeta = &kds_final->colmeta[j];
+		kern_variable  *kvar;
+		int				vclass;
+		bool			isnull = false;
+		int				sz, slot_id;
+		char		   *pos;
+
+		t_next = TYPEALIGN(cmeta->attalign, t_hoff);
+		if (t_next > t_hoff)
+			memset((char *)htup + t_hoff, 0, t_next - t_hoff);
+		pos = (char *)htup + t_next;
+
+		switch (desc->action)
+		{
+			case KAGG_ACTION__VREF:
+				slot_id = desc->arg0_slot_id;
+				assert(slot_id >= 0 && slot_id < kcxt->kvars_nslots);
+				sz = __writeOutGroupByKey(kcxt, cmeta, pos,
+										  kcxt->kvars_class[slot_id],
+										  &kcxt->kvars_slot[slot_id]);
+				if (sz < 0)
+					return -1;
+				t_hoff = t_next + sz;
+				break;
+			case KAGG_ACTION__NROWS_ANY:
+				*((int64_t *)pos) = 1;
+				t_hoff = t_next + sizeof(int64_t);
+				break;
+
+			case KAGG_ACTION__NROWS_COND:
+				vclass = kcxt->kvars_class[desc->arg0_slot_id];
+				*((int64_t *)pos) = (vclass != KVAR_CLASS__NULL ? 1 : 0);
+				t_hoff = t_next + sizeof(int64_t);
+				break;
+#if 0
+			case KAGG_ACTION__PMIN_INT32:
+			case KAGG_ACTION__PMAX_INT32:
+				{
+					kagg_state__pminmax_int32_packed *r
+						= (kagg_state__pminmax_int32_packed *)pos;
+					r->nitems = 1;
+					r->value = *((int32_t *)addr);
+					SET_VARSIZE(r, sizeof(kagg_state__pminmax_int32_packed));
+					t_hoff = t_next + sizeof(kagg_state__pminmax_int32_packed);
+				}
+				break;
+			case KAGG_ACTION__PMIN_FP32:
+			case KAGG_ACTION__PMAX_FP32:
+				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__pminmax_fp32_packed);
+				break;
+			case KAGG_ACTION__PMIN_INT64:
+			case KAGG_ACTION__PMAX_INT64:
+				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__pminmax_int64_packed);
+				break;
+			case KAGG_ACTION__PMIN_FP64:
+			case KAGG_ACTION__PMAX_FP64:
+				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__pminmax_fp64_packed);
+				break;
+#endif
+			case KAGG_ACTION__PSUM_INT:
+				vclass = kcxt->kvars_class[desc->arg0_slot_id];
+				kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+				if (vclass == KVAR_CLASS__NULL)
+					memset(pos, 0, sizeof(int64_t));
+				else if (vclass == KVAR_CLASS__INLINE)
+					memcpy(pos, &kvar->i64, sizeof(int64_t));
+				else
+					return -1;
+				t_hoff = t_next + sizeof(int64_t);
+				break;
+
+			case KAGG_ACTION__PAVG_INT:
+				{
+					kagg_state__pavg_int_packed *r
+						= (kagg_state__pavg_int_packed *)pos;
+					vclass = kcxt->kvars_class[desc->arg0_slot_id];
+					kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+					if (vclass == KVAR_CLASS__NULL)
+					{
+						r->nitems = 0;
+						r->sum = 0;
+					}
+					else if (vclass == KVAR_CLASS__INLINE)
+					{
+						r->nitems = 1;
+						r->sum = kvar->i64;
+					}
+					else
+					{
+						return -1;
+					}
+					SET_VARSIZE(r, sizeof(kagg_state__pavg_int_packed));
+					t_infomask |= HEAP_HASVARWIDTH;
+					t_hoff = t_next + sizeof(kagg_state__pavg_int_packed);
+				}
+				break;
+
+//			case KAGG_ACTION__PSUM_FP32:
+			case KAGG_ACTION__PSUM_FP64:
+				vclass = kcxt->kvars_class[desc->arg0_slot_id];
+				kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+				if (vclass == KVAR_CLASS__NULL)
+					*((float8_t *)pos) = 0.0;
+				else if (vclass == KVAR_CLASS__INLINE)
+					*((float8_t *)pos) = kvar->fp64;
+				else
+					return -1;
+				t_hoff = t_next + sizeof(float8_t);
+				break;
+
+			case KAGG_ACTION__PAVG_FP:
+				{
+					kagg_state__pavg_fp_packed *r
+						= (kagg_state__pavg_fp_packed *)pos;
+					vclass = kcxt->kvars_class[desc->arg0_slot_id];
+					kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+					if (vclass == KVAR_CLASS__NULL)
+					{
+						r->nitems = 0;
+						r->sum = 0.0;
+					}
+					else if (vclass == KVAR_CLASS__INLINE)
+					{
+						r->nitems = 1;
+						r->sum = kvar->fp64;
+					}
+					else
+					{
+						return -1;
+					}
+					SET_VARSIZE(r, sizeof(kagg_state__pavg_fp_packed));
+					t_infomask |= HEAP_HASVARWIDTH;
+					t_hoff = t_next + sizeof(kagg_state__pavg_fp_packed);
+				}				
+				break;
+#if 0
+			case KAGG_ACTION__STDDEV:
+				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__stddev_packed);
+				break;
+			case KAGG_ACTION__COVAR:
+				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__covar_packed);
+				break;
+#endif
+			default:
+				return -1;
+		}
+
+		if (!isnull)
+			htup->t_bits[j>>3] |= (1<<(j&7));
+	}
+	htup->t_infomask = t_infomask;
+	return 0;
+}
+
+static bool
+__insertOneTupleGroupBy(kern_context *kcxt,
+						kern_data_store *kds_final,
+						kern_expression *kexp_actions)
+{
+	int32_t		tupsz = __estimateGroupByTupleSize(kcxt, kds_final, kexp_actions);
+	int32_t		item_sz;
+	size_t		total_sz;
+	kern_tupitem *tupitem;
+	union {
+		uint64_t		i64;
+		struct {
+			uint32_t	nitems;
+			uint32_t	usage;
+		} kds;
+	} u;
+
+	assert(kds_final->format == KDS_FORMAT_ROW);
+	assert(tupsz > 0);
+	item_sz = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
+	total_sz = (KDS_HEAD_LENGTH(kds_final) +
+				MAXALIGN(sizeof(uint32_t) * (kds_final->nitems+1)) +
+				item_sz + __kds_unpack(kds_final->usage));
+	if (total_sz > kds_final->length)
+		return false;
+	tupitem = (kern_tupitem *)((char *)kds_final
+							   + kds_final->length
+							   - __kds_unpack(kds_final->usage)
+							   - item_sz);
+	__fillupGroupByTupleOne(kcxt, kds_final, &tupitem->htup, kexp_actions);
+	tupitem->t_len = tupsz;
+	tupitem->rowid = kds_final->nitems;
+	u.kds.nitems = kds_final->nitems + 1;
+	u.kds.usage  = kds_final->usage  + __kds_packed(item_sz);
+	KDS_GET_ROWINDEX(kds_final)[kds_final->nitems] = u.kds.usage;
+	/* !!visible to other threads!! */
+	__atomic_store((uint64_t *)&kds_final->nitems, &u.i64, __ATOMIC_SEQ_CST);
+	return true;
+}
+
+static inline void
+__atomic_add_int32(int32_t *ptr, int32_t val)
+{
+	__atomic_add_fetch(ptr, val, __ATOMIC_SEQ_CST);
+}
+
+static inline void
+__atomic_add_uint32(uint32_t *ptr, uint32_t val)
+{
+	__atomic_add_fetch(ptr, val, __ATOMIC_SEQ_CST);
+}
+
+static inline void
+__atomic_add_int64(int64_t *ptr, int64_t val)
+{
+	__atomic_add_fetch(ptr, val, __ATOMIC_SEQ_CST);
+}
+
+static inline void
+__atomic_add_fp64(double *ptr, double addval)
+{
+	union {
+		double		fval;
+		uint64_t	ival;
+	} u;
+	uint64_t		oldval;
+
+	oldval = __atomic_load_n((uint64_t *)ptr, __ATOMIC_SEQ_CST);
+	do {
+		u.ival = oldval;
+		u.fval += addval;
+	} while (!__atomic_compare_exchange_n((uint64_t *)ptr,
+										  &oldval,
+										  u.ival,
+										  false,
+										  __ATOMIC_SEQ_CST,
+										  __ATOMIC_SEQ_CST));
+}
+
+static bool
+__updateOneTupleGroupBy(kern_context *kcxt,
+						kern_data_store *kds_final,
+						HeapTupleHeaderData *htup,
+						kern_expression *kexp_actions)
+{
+	int			j, nattrs = (htup->t_infomask2 & HEAP_NATTS_MASK);
+	uint32_t	t_hoff;
+	bool		heap_hasnull;
+
+	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
+	heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+	if (heap_hasnull)
+		t_hoff += BITMAPLEN(nattrs);
+	t_hoff = MAXALIGN(t_hoff);
+
+	for (j=0; j < nattrs; j++)
+	{
+		kern_aggregate_desc *desc = &kexp_actions->u.pagg.desc[j];
+		kern_colmeta   *cmeta = &kds_final->colmeta[j];
+		kern_variable  *kvar;
+		int				vclass;
+		char		   *pos;
+
+		if (heap_hasnull && att_isnull(j, htup->t_bits))
+			pos = NULL;
+		else
+		{
+			if (cmeta->attlen > 0)
+				t_hoff = TYPEALIGN(cmeta->attalign, t_hoff);
+			else if (!VARATT_NOT_PAD_BYTE((char *)htup + t_hoff))
+				t_hoff = TYPEALIGN(cmeta->attalign, t_hoff);
+			pos = ((char *)htup + t_hoff);
+			if (cmeta->attlen > 0)
+				t_hoff += cmeta->attlen;
+			else
+				t_hoff += VARSIZE_ANY(pos);
+		}
+
+		switch (desc->action)
+		{
+			case KAGG_ACTION__NROWS_ANY:
+				__atomic_add_int64((int64_t *)pos, 1);
+				break;
+
+			case KAGG_ACTION__NROWS_COND:
+				vclass = kcxt->kvars_class[desc->arg0_slot_id];
+				if (vclass != KVAR_CLASS__NULL)
+					__atomic_add_int64((int64_t *)pos, 1);
+				break;
+#if 0
+			case KAGG_ACTION__PMIN_INT32:
+			case KAGG_ACTION__PMAX_INT32:
+				{
+					kagg_state__pminmax_int32_packed *r
+						= (kagg_state__pminmax_int32_packed *)pos;
+					r->nitems = 1;
+					r->value = *((int32_t *)addr);
+					SET_VARSIZE(r, sizeof(kagg_state__pminmax_int32_packed));
+					t_hoff = t_next + sizeof(kagg_state__pminmax_int32_packed);
+				}
+				break;
+			case KAGG_ACTION__PMIN_FP32:
+			case KAGG_ACTION__PMAX_FP32:
+				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__pminmax_fp32_packed);
+				break;
+			case KAGG_ACTION__PMIN_INT64:
+			case KAGG_ACTION__PMAX_INT64:
+				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__pminmax_int64_packed);
+				break;
+			case KAGG_ACTION__PMIN_FP64:
+			case KAGG_ACTION__PMAX_FP64:
+				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__pminmax_fp64_packed);
+				break;
+#endif
+			case KAGG_ACTION__PSUM_INT:
+				vclass = kcxt->kvars_class[desc->arg0_slot_id];
+				kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+				if (vclass == KVAR_CLASS__INLINE)
+					__atomic_add_int64((int64_t *)pos, kvar->i64);
+				else if (vclass != KVAR_CLASS__NULL)
+					return -1;
+				break;
+
+			case KAGG_ACTION__PAVG_INT:
+				{
+					kagg_state__pavg_int_packed *r
+						= (kagg_state__pavg_int_packed *)pos;
+					vclass = kcxt->kvars_class[desc->arg0_slot_id];
+					kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+					if (vclass == KVAR_CLASS__INLINE)
+					{
+						__atomic_add_uint32(&r->nitems, 1);
+                        __atomic_add_int64(&r->sum, kvar->i64);
+					}
+					else if (vclass != KVAR_CLASS__NULL)
+						return -1;
+				}
+				break;
+
+//			case KAGG_ACTION__PSUM_FP32:
+			case KAGG_ACTION__PSUM_FP64:
+				vclass = kcxt->kvars_class[desc->arg0_slot_id];
+				kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+				if (vclass == KVAR_CLASS__INLINE)
+					__atomic_add_fp64((float8_t *)pos, kvar->fp64);
+				else if (vclass != KVAR_CLASS__NULL)
+					return -1;
+				break;
+
+			case KAGG_ACTION__PAVG_FP:
+				{
+					kagg_state__pavg_fp_packed *r
+						= (kagg_state__pavg_fp_packed *)pos;
+					vclass = kcxt->kvars_class[desc->arg0_slot_id];
+					kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+					if (vclass == KVAR_CLASS__INLINE)
+					{
+						__atomic_add_uint32(&r->nitems, 1);
+						__atomic_add_fp64(&r->sum, kvar->fp64);
+					}
+					else if (vclass != KVAR_CLASS__NULL)
+						return -1;
+				}				
+				break;
+#if 0
+			case KAGG_ACTION__STDDEV:
+				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__stddev_packed);
+				break;
+			case KAGG_ACTION__COVAR:
+				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__covar_packed);
+				break;
+#endif
+			default:
+				break;
+		}
+	}
+	return true;
+}
+
+static bool
+__handleDpuTaskExecNoGroupPreAgg(dpuClient *dclient,
+								 dpuTaskExecState *dtes,
+								 kern_context *kcxt)
 {
 	kern_session_info  *session = dclient->session;
+	kern_data_store	   *kds_final = dclient->kds_final;
+	kern_expression	   *kexp_actions = SESSION_KEXP_GROUPBY_ACTIONS(session);
+	kern_expression	   *karg;
+	bool				has_lock = false;
+	bool				retval;
+	int					i;
+
+	assert(kds_final->format == KDS_FORMAT_ROW &&
+		   kexp_actions->opcode == FuncOpCode__AggFuncs);
+	/* fillup kvars_slot if it involves expression */
+	for (i=0, karg = KEXP_FIRST_ARG(kexp_actions);
+		 i < kexp_actions->nr_args;
+		 i++, karg = KEXP_NEXT_ARG(karg))
+	{
+		assert(karg->opcode == FuncOpCode__SaveExpr);
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, NULL))
+			return false;
+	}
+	
+retry:
+	if (kds_final->nitems == 0)
+	{
+		/* try aquire exclusive lock */
+		if (!has_lock)
+		{
+			__spinlock_acquire(&kds_final->lock);
+			has_lock = true;
+			goto retry;
+		}
+		retval = __insertOneTupleGroupBy(kcxt,
+										 kds_final,
+										 kexp_actions);
+	}
+	else
+	{
+		kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds_final, 0);
+
+		retval = __updateOneTupleGroupBy(kcxt,
+										 kds_final,
+										 &tupitem->htup,
+										 kexp_actions);
+	}
+
+	if (has_lock)
+		__spinlock_release(&kds_final->lock);
+	return retval;
+}
+
+
+static bool
+__handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
+								 dpuTaskExecState *dtes,
+								 kern_context *kcxt)
+{
+#if 0
+	kern_session_info  *session = dclient->session;
+	kern_data_store	   *kds_final = dclient->kds_final;
+	kern_expression	   *kexp_groupby_keyhash = SESSION_KEXP_GROUPBY_KEYHASH(session);
+	kern_expression	   *kexp_groupby_keyload = SESSION_KEXP_GROUPBY_KEYLOAD(session);
+	kern_expression	   *kexp_groupby_keycomp = SESSION_KEXP_GROUPBY_KEYCOMP(session);
+	kern_expression	   *kexp_groupby_actions = SESSION_KEXP_GROUPBY_ACTIONS(session);
+	kern_hashitem	   *khitem;
+	xpu_int4_t			hash;
+	xpu_bool_t			status;
+	bool				has_lock = false;
+
+	assert(kds_final->format == KDS_FORMAT_HASH &&
+		   kexp_groupby_keyhash != NULL &&
+		   kexp_groupby_keyload != NULL &&
+		   kexp_groupby_keycomp != NULL &&
+		   kexp_groupby_actions != NULL);
+	/*
+	 * calculation of GROUP BY key hash-value
+	 */
+	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keyhash, &hash))
+		return false;
+	assert(!hash.isnull);
+	/*
+	 * walk of the hash-table
+	 */
+retry:
+	for (khitem = KDS_HASH_FIRST_ITEM(kds_final, hash.value);
+		 khitem != NULL;
+		 khitem = KDS_HASH_NEXT_ITEM(kds_final, khitem))
+	{
+		if (khitem->hash != hash.value)
+			continue;
+		ExecLoadVarsHeapTuple(kcxt, kexp_groupby_keyload, -2,
+							  kds_final, &khitem->t.htup);
+		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keycomp, &status))
+			return false;
+		assert(!status.isnull);
+		if (status.value)
+		{
+			htup = ;
+			goto found;
+		}
+	}
+	/* not found */
+	if (!has_lock)
+	{
+		//get spinlock
+
+
+
+		hash_lock = true;
+		goto retry;
+	}
+	//insert a new tuple
+	return true;
+#endif
+	return false;
+}
+
+/* ----------------------------------------------------------------
+ *
+ * DPU service SCAN/JOIN handler
+ *
+ * ----------------------------------------------------------------
+ */
+static bool
+__handleDpuTaskExecHashJoin(dpuClient *dclient,
+							dpuTaskExecState *dtes,
+							kern_context *kcxt,
+							int depth);
+
+static bool
+__handleDpuTaskExecNestLoop(dpuClient *dclient,
+							dpuTaskExecState *dtes,
+							kern_context *kcxt,
+							int depth)
+{
+	kern_session_info  *session = dclient->session;
+	kern_multirels	   *kmrels = dclient->kmrels;
+	kern_data_store	   *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels,depth-1);
+	kern_expression	   *kexp_load_vars = SESSION_KEXP_JOIN_LOAD_VARS(session,depth-1);
+	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth-1);
+	bool				matched = false;
+
+	for (uint32_t rowid=0; rowid < kds_heap->nitems; rowid++)
+	{
+		kern_tupitem   *tupitem;
+		uint32_t		offset;
+		xpu_int4_t		status;
+
+		offset = KDS_GET_ROWINDEX(kds_heap)[rowid];
+		tupitem = (kern_tupitem *)((char *)kds_heap +
+								   kds_heap->length -
+								   __kds_unpack(offset));
+		kcxt_reset(kcxt);
+		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
+							  kds_heap, &tupitem->htup);
+		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
+			return false;
+		assert(!status.isnull);
+		if (status.value > 0)
+		{
+			if (depth >= kmrels->num_rels)
+			{
+				if (!dtes->handleDpuTaskFinalDepth(dclient, dtes, kcxt))
+					return false;
+			}
+			else if (kmrels->chunks[depth].is_nestloop)
+			{
+				if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, depth+1))
+					return false;
+			}
+			else
+			{
+				if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, depth+1))
+					return false;
+			}
+		}
+		if (status.value != 0)
+			matched = true;
+	}
+	/* LEFT OUTER if needed */
+	if (kmrels->chunks[depth-1].left_outer && !matched)
+	{
+		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
+							  kds_heap, NULL);
+		if (depth >= kmrels->num_rels)
+		{
+			if (!dtes->handleDpuTaskFinalDepth(dclient, dtes, kcxt))
+				return false;
+		}
+		else if (kmrels->chunks[depth].is_nestloop)
+		{
+			if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, depth+1))
+				return false;
+		}
+		else
+		{
+			if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, depth+1))
+				return false;
+		}
+	}
+	return true;
+}
+
+static bool
+__handleDpuTaskExecHashJoin(dpuClient *dclient,
+							dpuTaskExecState *dtes,
+							kern_context *kcxt,
+							int depth)
+{
+	kern_session_info  *session = dclient->session;
+	kern_multirels	   *kmrels = dclient->kmrels;
+	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
+	kern_expression	   *kexp_load_vars = SESSION_KEXP_JOIN_LOAD_VARS(session,depth-1);
+	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth-1);
+	kern_expression	   *kexp_hash_value = SESSION_KEXP_HASH_VALUE(session,depth-1);
+	kern_hashitem	   *khitem;
+	xpu_int4_t			hash;
+	xpu_int4_t			status;
+	bool				matched = false;
+
+	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_hash_value, &hash))
+		return false;
+	assert(!hash.isnull);
+	for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hash.value);
+		 khitem != NULL;
+		 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem))
+	{
+		if (khitem->hash != hash.value)
+			continue;
+		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
+							  kds_hash, &khitem->t.htup);
+		kcxt_reset(kcxt);
+		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
+			return false;
+		assert(!status.isnull);
+		if (status.value > 0)
+		{
+			if (depth >= kmrels->num_rels)
+			{
+				if (!dtes->handleDpuTaskFinalDepth(dclient, dtes, kcxt))
+					return false;
+			}
+			else if (kmrels->chunks[depth].is_nestloop)
+			{
+				if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, depth+1))
+					return false;
+			}
+			else
+			{
+				if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, depth+1))
+					return false;
+			}
+		}
+		if (status.value != 0)
+			matched = true;
+	}
+	/* LEFT OUTER if needed */
+	if (kmrels->chunks[depth-1].left_outer && !matched)
+	{
+		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
+							  kds_hash, NULL);
+		if (depth >= kmrels->num_rels)
+		{
+			if (!dtes->handleDpuTaskFinalDepth(dclient, dtes, kcxt))
+				return false;
+		}
+		else if (kmrels->chunks[depth].is_nestloop)
+		{
+			if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, depth+1))
+				return false;
+		}
+		else
+		{
+			if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, depth+1))
+				return false;
+		}
+	}
+	return true;
+}
+
+static bool
+__handleDpuScanExecBlock(dpuClient *dclient,
+						 dpuTaskExecState *dtes,
+						 kern_data_store *kds_src)
+{
+	kern_session_info  *session = dclient->session;
+	kern_multirels	   *kmrels = dclient->kmrels;
+	kern_expression	   *kexp_load_vars = SESSION_KEXP_SCAN_LOAD_VARS(session);
 	kern_expression	   *kexp_scan_quals = SESSION_KEXP_SCAN_QUALS(session);
-	kern_expression	   *kexp_scan_projs = SESSION_KEXP_SCAN_PROJS(session);
 	kern_context	   *kcxt;
-	kern_data_store	   *kds_dst = NULL;
-	kern_data_store	  **kds_dst_array = NULL;
-	uint32_t			kds_dst_nrooms = 0;
-	uint32_t			kds_dst_nitems = 0;
 	uint32_t			block_index;
-	uint32_t			stat_nitems_in = 0;
-	uint32_t			stat_nitems_out = 0;
-	kern_dpuscan		kdscan;
-	XpuCommand			resp;
 
 	assert(kds_src->format == KDS_FORMAT_BLOCK &&
-		   kexp_scan_quals->opcode == FuncOpCode__LoadVars &&
-		   kexp_scan_projs->opcode == FuncOpCode__LoadVars);
-	memset(&kdscan, 0, sizeof(kern_dpuscan));
+		   kexp_load_vars->opcode == FuncOpCode__LoadVars &&
+		   kexp_scan_quals->exptype == TypeOpCode__bool);
+	assert(!kmrels || kmrels->num_rels > 0);
 	INIT_KERNEL_CONTEXT(kcxt, session);
-
+	kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
+	kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 	for (block_index = 0; block_index < kds_src->nitems; block_index++)
 	{
 		PageHeaderData *page = KDS_BLOCK_PGPAGE(kds_src, block_index);
@@ -703,75 +1692,38 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 		{
 			ItemIdData	   *lpp = &page->pd_linp[lp_index];
 			HeapTupleHeaderData *htup;
-			xpu_bool_t		retval;
-			size_t			sz;
-			int				status;
 
 			if (!ItemIdIsNormal(lpp))
 				continue;
-			kcxt_reset(kcxt);
 			htup = (HeapTupleHeaderData *) PageGetItem(page, lpp);
-			stat_nitems_in++;
-			if (!ExecLoadVarsOuterRow(kcxt,
-									  kexp_scan_quals,
-									  (xpu_datum_t *)&retval,
-									  kds_src,
-									  htup,
-									  0, NULL, NULL))
+			dtes->nitems_raw++;
+			kcxt_reset(kcxt);
+			if (ExecLoadVarsOuterRow(kcxt,
+									 kexp_load_vars,
+									 kexp_scan_quals,
+									 kds_src,
+									 htup))
 			{
-				/* error to abort */
-				__dpuClientElog(dclient,
-								kcxt->errcode,
-								kcxt->error_filename,
-								kcxt->error_lineno,
-								kcxt->error_funcname,
-								kcxt->error_message);
-				goto bailout;
-			}
-			else if (retval.isnull || !retval.value)
-			{
-				/* not matched */
-				continue;
-			}
-			stat_nitems_out++;
-
-		retry:
-			if (!kds_dst)
-			{
-				if (kds_dst_nitems >= kds_dst_nrooms)
+				dtes->nitems_in++;
+				if (!kmrels)
 				{
-					kern_data_store	  **__kds_dst_array;
-
-					kds_dst_nrooms = 2 * kds_dst_nrooms + 10;
-					__kds_dst_array = alloca(sizeof(kern_data_store *) * kds_dst_nrooms);
-					memcpy(__kds_dst_array, kds_dst_array,
-						   sizeof(kern_data_store *) * kds_dst_nitems);
-					kds_dst_array = __kds_dst_array;
+					if (!dtes->handleDpuTaskFinalDepth(dclient, dtes, kcxt))
+						return false;
 				}
-				sz = KDS_HEAD_LENGTH(kds_dst_head) + PGSTROM_CHUNK_SIZE;
-				kds_dst = malloc(sz);
-				if (!kds_dst)
+				else if (kmrels->chunks[0].is_nestloop)
 				{
-					dpuClientElog(dclient, "out of memory");
-					goto bailout;
+					/* NEST-LOOP */
+					if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, 1))
+						return false;
 				}
-				memcpy(kds_dst, kds_dst_head, KDS_HEAD_LENGTH(kds_dst_head));
-				kds_dst->length = sz;
-				kds_dst_array[kds_dst_nitems++] = kds_dst;
+				else
+				{
+					/* HASH-JOIN */
+					if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, 1))
+						return false;
+				}
 			}
-			status = ExecProjectionOuterRow(kcxt,
-											kexp_scan_projs,
-											kds_dst,
-											true,
-											kds_src,
-											htup,
-											0, NULL, NULL);
-			if (status == 0)
-			{
-				kds_dst = NULL;
-				goto retry;
-			}
-			else if (status < 0)
+			else if (kcxt->errcode != ERRCODE_STROM_SUCCESS)
 			{
 				__dpuClientElog(dclient,
 								kcxt->errcode,
@@ -779,67 +1731,60 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 								kcxt->error_lineno,
 								kcxt->error_funcname,
 								kcxt->error_message);
-				goto bailout;
+				return false;
 			}
 		}
 	}
-	/* write back the results */
-	memset(&resp, 0, offsetof(XpuCommand, u.results));
-	resp.magic = XpuCommandMagicNumber;
-	resp.tag   = XpuCommandTag__Success;
-	resp.u.results.chunks_nitems = kds_dst_nitems;
-	resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
-	resp.u.results.stats.scan.nitems_in = stat_nitems_in;
-	resp.u.results.stats.scan.nitems_out = stat_nitems_out;
-	dpuClientWriteBack(dclient,
-					   &resp, resp.u.results.chunks_offset,
-					   kds_dst_nitems,
-					   kds_dst_array);
-bailout:
-	for (int i=0; i < kds_dst_nitems; i++)
-		free(kds_dst_array[i]);
+	return true;
 }
 
-static void
+static bool
 __handleDpuScanExecArrow(dpuClient *dclient,
-						 kern_data_store *kds_src,
-						 kern_data_store *kds_dst_head)
+						 dpuTaskExecState *dtes,
+						 kern_data_store *kds_src)
 {
 	kern_session_info  *session = dclient->session;
+	kern_multirels	   *kmrels = dclient->kmrels;
+	kern_expression	   *kexp_load_vars = SESSION_KEXP_SCAN_LOAD_VARS(session);
 	kern_expression	   *kexp_scan_quals = SESSION_KEXP_SCAN_QUALS(session);
-	kern_expression	   *kexp_scan_projs = SESSION_KEXP_SCAN_PROJS(session);
 	kern_context	   *kcxt;
-	kern_data_store	   *kds_dst = NULL;
-	kern_data_store	  **kds_dst_array = NULL;
-	uint32_t			kds_dst_nrooms = 0;
-	uint32_t			kds_dst_nitems = 0;
 	uint32_t			kds_index;
-	uint32_t			stat_nitems_in = 0;
-	uint32_t			stat_nitems_out = 0;
-	kern_dpuscan		kdscan;
-	XpuCommand			resp;
 
 	assert(kds_src->format == KDS_FORMAT_ARROW &&
-		   kexp_scan_quals->opcode == FuncOpCode__LoadVars &&
-		   kexp_scan_projs->opcode == FuncOpCode__LoadVars);
-	memset(&kdscan, 0, sizeof(kern_dpuscan));
+		   kexp_load_vars->opcode == FuncOpCode__LoadVars &&
+		   kexp_scan_quals->exptype == TypeOpCode__bool);
 	INIT_KERNEL_CONTEXT(kcxt, session);
-
+	kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
+	kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 	for (kds_index = 0; kds_index < kds_src->nitems; kds_index++)
 	{
-		xpu_bool_t	retval;
-		int			status;
-		size_t		sz;
-
 		kcxt_reset(kcxt);
-
-		stat_nitems_in++;
-		if (!ExecLoadVarsOuterArrow(kcxt,
-									kexp_scan_quals,
-									(xpu_datum_t *)&retval,
-									kds_src,
-									kds_index,
-									0, NULL, NULL))
+		if (ExecLoadVarsOuterArrow(kcxt,
+								   kexp_load_vars,
+								   kexp_scan_quals,
+								   kds_src,
+								   kds_index))
+		{
+			dtes->nitems_in++;
+			if (!kmrels)
+			{
+				if (!dtes->handleDpuTaskFinalDepth(dclient, dtes, kcxt))
+					return false;
+			}
+			else if (kmrels->chunks[0].is_nestloop)
+			{
+				/* NEST-LOOP */
+				if (!__handleDpuTaskExecNestLoop(dclient, dtes, kcxt, 1))
+					return false;
+			}
+			else
+			{
+				/* HASH-JOIN */
+				if (!__handleDpuTaskExecHashJoin(dclient, dtes, kcxt, 1))
+					return false;
+			}
+		}
+		else if (kcxt->errcode != ERRCODE_STROM_SUCCESS)
 		{
 			__dpuClientElog(dclient,
 							kcxt->errcode,
@@ -847,89 +1792,26 @@ __handleDpuScanExecArrow(dpuClient *dclient,
 							kcxt->error_lineno,
 							kcxt->error_funcname,
 							kcxt->error_message);
-			goto bailout;
-		}
-		else if (retval.isnull || !retval.value)
-		{
-			/* not matched */
-			continue;
-		}
-		stat_nitems_out++;
-
-	retry:
-		if (!kds_dst)
-		{
-			if (kds_dst_nitems >= kds_dst_nrooms)
-			{
-				kern_data_store	  **__kds_dst_array;
-
-				kds_dst_nrooms = 2 * kds_dst_nrooms + 10;
-				__kds_dst_array = alloca(sizeof(kern_data_store *) * kds_dst_nrooms);
-				memcpy(__kds_dst_array, kds_dst_array,
-					   sizeof(kern_data_store *) * kds_dst_nitems);
-				kds_dst_array = __kds_dst_array;
-			}
-			sz = KDS_HEAD_LENGTH(kds_dst_head) + PGSTROM_CHUNK_SIZE;
-			kds_dst = malloc(sz);
-			if (!kds_dst)
-			{
-				dpuClientElog(dclient, "out of memory");
-				goto bailout;
-			}
-			memcpy(kds_dst, kds_dst_head, KDS_HEAD_LENGTH(kds_dst_head));
-			kds_dst->length = sz;
-			kds_dst_array[kds_dst_nitems++] = kds_dst;
-		}
-		status = ExecProjectionOuterArrow(kcxt,
-										  kexp_scan_projs,
-										  kds_dst,
-										  true,
-										  kds_src,
-										  kds_index,
-										  0, NULL, NULL);
-		if (status == 0)
-		{
-			kds_dst = NULL;
-			goto retry;
-		}
-		else if (status < 0)
-		{
-			__dpuClientElog(dclient,
-							kcxt->errcode,
-							kcxt->error_filename,
-							kcxt->error_lineno,
-							kcxt->error_funcname,
-							kcxt->error_message);
-			goto bailout;
+			return false;
 		}
 	}
-
-	/* write back the results */
-	memset(&resp, 0, offsetof(XpuCommand, u.results));
-	resp.magic = XpuCommandMagicNumber;
-	resp.tag   = XpuCommandTag__Success;
-	resp.u.results.chunks_nitems = kds_dst_nitems;
-	resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats.scan.data);
-	resp.u.results.stats.scan.nitems_in = stat_nitems_in;
-	resp.u.results.stats.scan.nitems_out = stat_nitems_out;
-	dpuClientWriteBack(dclient,
-					   &resp, resp.u.results.chunks_offset,
-					   kds_dst_nitems,
-					   kds_dst_array);
-bailout:
-	for (int i=0; i < kds_dst_nitems; i++)
-		free(kds_dst_array[i]);
+	dtes->nitems_raw += kds_src->nitems;
+	return true;
 }
 
-
+/*
+ * dpuservHandleDpuTaskExec
+ */
 static void
-dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
+dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 {
+	dpuTaskExecState   *dtes;
 	const char		   *kds_src_pathname = NULL;
 	strom_io_vector	   *kds_src_iovec = NULL;
 	kern_data_store	   *kds_src_head = NULL;
 	kern_data_store	   *kds_dst_head = NULL;
 	kern_data_store	   *kds_src = NULL;
+	int					sz, num_rels = 0;
 
 	if (xcmd->u.scan.kds_src_pathname)
 		kds_src_pathname = (char *)xcmd + xcmd->u.scan.kds_src_pathname;
@@ -944,6 +1826,21 @@ dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
 		dpuClientElog(dclient, "kern_data_store is corrupted");
 		return;
 	}
+	/* setup dpuTaskExecState */
+	if (dclient->kmrels)
+		num_rels = dclient->kmrels->num_rels;
+	sz = offsetof(dpuTaskExecState, stats[num_rels]);
+	dtes = alloca(sz);
+	memset(dtes, 0, sz);
+	dtes->kds_dst_head = kds_dst_head;
+	dtes->num_rels = num_rels;
+	if (!dclient->kds_final)
+		dtes->handleDpuTaskFinalDepth = __handleDpuTaskExecProjection;
+//	else if (dclient->kds_final->format == KDS_FORMAT_HASH)
+//		dtes->handleDpuTaskFinalDepth = __handleDpuTaskExecGroupByPreAgg;
+	else
+		dtes->handleDpuTaskFinalDepth = __handleDpuTaskExecNoGroupPreAgg;
+	
 
 	if (kds_src_head->format == KDS_FORMAT_BLOCK)
 	{
@@ -956,7 +1853,8 @@ dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
 									  &base_addr);
 		if (kds_src)
 		{
-			__handleDpuScanExecBlock(dclient, kds_src, kds_dst_head);
+			if (__handleDpuScanExecBlock(dclient, dtes, kds_src))
+				dpuClientWriteBack(dclient, dtes);
 			free(base_addr);
 		}
 	}
@@ -971,7 +1869,8 @@ dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
 									  &base_addr);
 		if (kds_src)
 		{
-			__handleDpuScanExecArrow(dclient, kds_src, kds_dst_head);
+			if (__handleDpuScanExecArrow(dclient, dtes, kds_src))
+				dpuClientWriteBack(dclient, dtes);
 			free(base_addr);
 		}
 	}
@@ -980,18 +1879,70 @@ dpuservHandleDpuScanExec(dpuClient *dclient, XpuCommand *xcmd)
 		dpuClientElog(dclient, "not a supported kern_data_store format");
 		return;
 	}
+	/* cleanup resources */
+	if (dtes->kds_dst_array)
+	{
+		for (int i=0; i < dtes->kds_dst_nitems; i++)
+			free(dtes->kds_dst_array[i]);
+		free(dtes->kds_dst_array);
+	}
 }
 
+/*
+ * dpuservHandleDpuPreAggFinal
+ */
+static void
+dpuservHandleDpuPreAggFinal(dpuClient *dclient, XpuCommand *xcmd)
+{
+	XpuCommand		resp;
+	struct iovec	iovec[5];
+	struct iovec   *iov;
+	int				iovcnt = 0;
+	size_t			sz1, sz2, sz3;
+	size_t			resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
+	kern_data_store *kds_final = dclient->kds_final;
+	kern_data_store *kds_copy;
 
+	/* Xcmd for the response */
+	memset(&resp, 0, sizeof(XpuCommand));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag   = XpuCommandTag__Success;
+	resp.u.results.chunks_offset = resp_sz;
+	resp.u.results.chunks_nitems = 1;
 
+	/* a little bit modified kds_final */
+	sz1 = KDS_HEAD_LENGTH(kds_final);
+	sz2 = MAXALIGN(sizeof(uint32_t) * kds_final->nitems);
+	sz3 = __kds_unpack(kds_final->usage);
+	kds_copy = alloca(sz1);
+	memcpy(kds_copy, kds_final, sz1);
+	kds_copy->format = KDS_FORMAT_ROW;
+	kds_copy->length = sz1 + sz2 + sz3;
+	
+	/* setup iovec */
+	iov = &iovec[iovcnt++];
+	iov->iov_base = &resp;
+	iov->iov_len  = resp_sz;
 
+	iov = &iovec[iovcnt++];
+	iov->iov_base = kds_copy;
+	iov->iov_len  = sz1;
+	if (sz2 > 0)
+	{
+		iov = &iovec[iovcnt++];
+		iov->iov_base = KDS_GET_ROWINDEX(kds_final);
+		iov->iov_len  = sz2;
+	}
+	if (sz3 > 0)
+	{
+		iov = &iovec[iovcnt++];
+		iov->iov_base = (char *)kds_final + kds_final->length - sz3;
+		iov->iov_len  = sz3;
+	}
+	resp.length = resp_sz + sz1 + sz2 + sz3;
 
-
-
-
-
-
-
+	__dpuClientWriteBack(dclient, iovec, iovcnt);
+}
 
 /*
  * getDpuClient
@@ -1031,6 +1982,7 @@ putDpuClient(dpuClient *dclient, int count)
 							offsetof(XpuCommand, u.session));
 			free(xcmd);
 		}
+		dpuServUnmapSessionBuffers(dclient);
 		close(dclient->sockfd);
 		free(dclient);
 	}
@@ -1076,9 +2028,17 @@ dpuservDpuWorkerMain(void *__priv)
 									(xcmd != NULL ? "failed" : "ok"));
 						break;
 					case XpuCommandTag__XpuScanExec:
-						dpuservHandleDpuScanExec(dclient, xcmd);
+					case XpuCommandTag__XpuJoinExec:
+					case XpuCommandTag__XpuPreAggExec:
+						dpuservHandleDpuTaskExec(dclient, xcmd);
 						if (verbose)
-							fprintf(stderr, "[DPU-%ld@%s] DpuScanExec\n",
+							fprintf(stderr, "[DPU-%ld@%s] XpuCommand=%u\n",
+									worker_id, dclient->peer_addr, xcmd->tag);
+						break;
+					case XpuCommandTag__XpuPreAggFinal:
+						dpuservHandleDpuPreAggFinal(dclient, xcmd);
+						if (verbose)
+							fprintf(stderr, "[DPU-%ld@%s] XpuCommand=XpuPreAggFinal\n",
 									worker_id, dclient->peer_addr);
 						break;
 					default:
@@ -1247,15 +2207,19 @@ dpuserv_main(struct sockaddr *addr, socklen_t addr_len)
 			assert(rv == 1);
 			if (epoll_ev.data.fd == serv_fd)
 			{
-				struct sockaddr		peer;
-				socklen_t			peer_sz = sizeof(struct sockaddr);
-				int					client_fd;
+				union {
+					struct sockaddr		addr;
+					struct sockaddr_in	in;
+					struct sockaddr_in6	in6;
+				} peer;
+				socklen_t	peer_sz = sizeof(peer);
+				int			client_fd;
 
 				if ((epoll_ev.events & ~EPOLLIN) != 0)
 					__Elog("listen socket raised unexpected error events (%08x): %m",
 						   epoll_ev.events);
-				
-				client_fd = accept(serv_fd, &peer, &peer_sz);
+
+				client_fd = accept(serv_fd, &peer.addr, &peer_sz);
 				if (client_fd < 0)
 				{
 					if (errno != EINTR)
@@ -1271,20 +2235,25 @@ dpuserv_main(struct sockaddr *addr, socklen_t addr_len)
 					dclient->refcnt = 1;
 					pthreadMutexInit(&dclient->mutex);
 					dclient->sockfd = client_fd;
-					if (peer.sa_family == AF_INET)
-						inet_ntop(peer.sa_family,
-								  (char *)&peer +
-								  offsetof(struct sockaddr_in, sin_addr),
-								  dclient->peer_addr, PEER_ADDR_LEN);
-					else if (peer.sa_family == AF_INET6)
-						inet_ntop(peer.sa_family,
-								  (char *)&peer +
-								  offsetof(struct sockaddr_in6, sin6_addr),
-								  dclient->peer_addr, PEER_ADDR_LEN);
+					if (peer.addr.sa_family == AF_INET)
+					{
+						inet_ntop(peer.in.sin_family,
+								  &peer.in.sin_addr,
+								  dclient->peer_addr,
+								  PEER_ADDR_LEN);
+					}
+					else if (peer.addr.sa_family == AF_INET6)
+					{
+						inet_ntop(peer.in6.sin6_family,
+								  &peer.in6.sin6_addr,
+								  dclient->peer_addr,
+								  PEER_ADDR_LEN);
+					}
 					else
+					{
 						snprintf(dclient->peer_addr, PEER_ADDR_LEN,
 								 "Unknown DpuClient");
-
+					}
 					pthreadMutexLock(&dpu_client_mutex);
 					if ((errno = pthread_create(&dclient->worker, NULL,
 												dpuservMonitorClient,
@@ -1497,6 +2466,10 @@ main(int argc, char *argv[])
 	 */
 	__setupDevTypeLinkageTable(2 * TypeOpCode__BuiltInMax + 20);
 	__setupDevFuncLinkageTable(2 * FuncOpCode__BuiltInMax + 100);
+
+	pthreadMutexInit(&groupby_final_buffer_lock);
+	for (int i=0; i < GROUPBY_FINAL_BUFFER_HASHSZ; i++)
+		dlist_init(&groupby_final_buffer_hash[i]);
 
 	return dpuserv_main(addr, addr_len);
 }

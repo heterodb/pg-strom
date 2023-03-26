@@ -2012,13 +2012,13 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 const DpuStorageEntry *
 GetOptimalDpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 {
-	List	   *priv_list = (List *)baserel->fdw_private;
 	const DpuStorageEntry *ds_entry = NULL;
+	List	   *priv_list = (List *)baserel->fdw_private;
 
 	if (baseRelIsArrowFdw(baserel) &&
 		IsA(priv_list, List) && list_length(priv_list) == 2)
 	{
-		List	   *af_list = lsecond(priv_list);
+		List	   *af_list = linitial(priv_list);
 		ListCell   *lc;
 
 		foreach (lc, af_list)
@@ -3491,7 +3491,6 @@ __arrowFdwExecInit(ScanState *ss,
  */
 bool
 pgstromArrowFdwExecInit(pgstromTaskState *pts,
-						uint64_t devkind_mask,
 						List *outer_quals,
 						const Bitmapset *outer_refs)
 {
@@ -3503,9 +3502,9 @@ pgstromArrowFdwExecInit(pgstromTaskState *pts,
 		arrow_state = __arrowFdwExecInit(&pts->css.ss,
 										 outer_quals,
 										 outer_refs,
-										 (devkind_mask & DEVKIND__NVIDIA_GPU) != 0
+										 (pts->task_kind & DEVKIND__NVIDIA_GPU) != 0
 											? &pts->optimal_gpus : NULL,
-										 (devkind_mask & DEVKIND__NVIDIA_DPU) != 0
+										 (pts->task_kind & DEVKIND__NVIDIA_DPU) != 0
 											? &pts->ds_entry : NULL);
 	}
 	pts->arrow_state = arrow_state;

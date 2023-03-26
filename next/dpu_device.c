@@ -243,6 +243,17 @@ GetOptimalDpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 }
 
 /*
+ * DpuStorageEntryBaseDir
+ */
+const char *
+DpuStorageEntryBaseDir(const DpuStorageEntry *ds_entry)
+{
+	if (ds_entry)
+		return ds_entry->endpoint_dir;
+	return NULL;
+}
+
+/*
  * DpuStorageEntryIsEqual
  */
 bool
@@ -459,6 +470,19 @@ pgstrom_startup_dpu_device(void)
 	{
 		dpu_storage_master_array->entries[i].validated = &validated[i];
 	}
+}
+
+/*
+ * pgstrom_dpu_operator_ratio
+ */
+double
+pgstrom_dpu_operator_ratio(void)
+{
+	if (cpu_operator_cost > 0.0)
+	{
+		return pgstrom_dpu_operator_cost / cpu_operator_cost;
+	}
+	return (pgstrom_dpu_operator_cost == 1.0 ? 0.0 : disable_cost);
 }
 
 /*

@@ -289,5 +289,4 @@ __xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 	}
 	return len;
 }
-
 #endif /* XPU_NUMERIC_H */

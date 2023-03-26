@@ -290,6 +290,110 @@ xpuclientCleanupConnections(ResourceReleasePhase phase,
  *
  * ----------------------------------------------------------------
  */
+static void
+__build_session_param_info(pgstromTaskState *pts,
+						   kern_session_info *session,
+						   StringInfo buf)
+{
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
+	ParamListInfo	param_info = econtext->ecxt_param_list_info;
+	ListCell	   *lc;
+
+	Assert(param_info != NULL);
+	session->nparams = param_info->numParams;
+	foreach (lc, pp_info->used_params)
+	{
+		Param	   *param = lfirst(lc);
+		Datum		param_value;
+		bool		param_isnull;
+		uint32_t	offset;
+
+		Assert(param->paramid >= 0 &&
+			   param->paramid < session->nparams);
+		if (param->paramkind == PARAM_EXEC)
+		{
+			/* See ExecEvalParamExec */
+			ParamExecData  *prm = &(econtext->ecxt_param_exec_vals[param->paramid]);
+
+			if (prm->execPlan)
+			{
+				/* Parameter not evaluated yet, so go do it */
+				ExecSetParamPlan(prm->execPlan, econtext);
+				/* ExecSetParamPlan should have processed this param... */
+				Assert(prm->execPlan == NULL);
+			}
+			param_isnull = prm->isnull;
+			param_value  = prm->value;
+		}
+		else if (param->paramkind == PARAM_EXTERN)
+		{
+			/* See ExecEvalParamExtern */
+			ParamExternData *prm, prmData;
+
+			if (param_info->paramFetch != NULL)
+				prm = param_info->paramFetch(param_info,
+											 param->paramid,
+											 false, &prmData);
+			else
+				prm = &param_info->params[param->paramid - 1];
+			if (!OidIsValid(prm->ptype))
+				elog(ERROR, "no value found for parameter %d", param->paramid);
+			if (prm->ptype != param->paramtype)
+				elog(ERROR, "type of parameter %d (%s) does not match that when preparing the plan (%s)",
+					 param->paramid,
+					 format_type_be(prm->ptype),
+					 format_type_be(param->paramtype));
+			param_isnull = prm->isnull;
+			param_value  = prm->value;
+		}
+		else
+		{
+			elog(ERROR, "Bug? unexpected parameter kind: %d",
+				 (int)param->paramkind);
+		}
+
+		if (param_isnull)
+			offset = 0;
+		else
+		{
+			int16	typlen;
+			bool	typbyval;
+
+			get_typlenbyval(param->paramtype, &typlen, &typbyval);
+			if (typbyval)
+			{
+				offset = __appendBinaryStringInfo(buf,
+												  (char *)&param_value,
+												  typlen);
+			}
+			else if (typlen > 0)
+			{
+				offset = __appendBinaryStringInfo(buf,
+												  DatumGetPointer(param_value),
+												  typlen);
+			}
+			else if (typlen == -1)
+			{
+				struct varlena *temp = PG_DETOAST_DATUM(param_value);
+
+				offset = __appendBinaryStringInfo(buf,
+												  DatumGetPointer(temp),
+												  VARSIZE(temp));
+				if (param_value != PointerGetDatum(temp))
+					pfree(temp);
+			}
+			else
+			{
+				elog(ERROR, "Not a supported data type for kernel parameter: %s",
+					 format_type_be(param->paramtype));
+			}
+		}
+		Assert(param->paramid >= 0 && param->paramid < session->nparams);
+		session->poffset[param->paramid] = offset;
+	}
+}
+
 static uint32_t
 __build_session_xact_state(StringInfo buf)
 {
@@ -332,175 +436,168 @@ __build_session_encode(StringInfo buf)
 }
 
 const XpuCommand *
-pgstromBuildSessionInfo(PlanState *ps,
-						List *used_params,
-						uint32_t kcxt_extra_bufsz,
-						uint32_t kcxt_kvars_nslots,
-						const bytea *xpucode_scan_quals,
-						const bytea *xpucode_scan_projs,
-						const bytea *xpucode_join_quals_packed,
-						const bytea *xpucode_hash_values_packed,
-						const bytea *xpucode_gist_quals_packed,
-						uint32_t join_inner_handle)
+pgstromBuildSessionInfo(pgstromTaskState *pts,
+						uint32_t join_inner_handle,
+						TupleDesc groupby_tdesc_final)
 {
-	ExprContext	   *econtext = ps->ps_ExprContext;
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
 	uint32_t		nparams = (param_info ? param_info->numParams : 0);
-	uint32_t		session_sz = offsetof(kern_session_info, poffset[nparams]);
-	StringInfoData	buf;
-	XpuCommand	   *xcmd;
+	uint32_t		kvars_nbytes;
+	uint32_t		kvars_nslots;
+	uint32_t		session_sz;
 	kern_session_info *session;
+	ListCell	   *lc;
+	XpuCommand	   *xcmd;
+	StringInfoData	buf;
+	bytea		   *xpucode;
 
 	initStringInfo(&buf);
-	__appendZeroStringInfo(&buf, session_sz);
+	session_sz = offsetof(kern_session_info, poffset[nparams]);
 	session = alloca(session_sz);
 	memset(session, 0, session_sz);
-
-	/* put XPU code */
-	if (xpucode_scan_quals)
+	__appendZeroStringInfo(&buf, session_sz);
+	if (param_info)
+		__build_session_param_info(pts, session, &buf);
+	if (pp_info->kexp_scan_kvars_load)
 	{
+		xpucode = pp_info->kexp_scan_kvars_load;
+		session->xpucode_scan_load_vars =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+	}
+	if (pp_info->kexp_scan_quals)
+	{
+		xpucode = pp_info->kexp_scan_quals;
 		session->xpucode_scan_quals =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA_ANY(xpucode_scan_quals),
-									 VARSIZE_ANY_EXHDR(xpucode_scan_quals));
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-	if (xpucode_scan_projs)
+	if (pp_info->kexp_join_kvars_load_packed)
 	{
-		session->xpucode_scan_projs =
+		xpucode = pp_info->kexp_join_kvars_load_packed;
+		session->xpucode_join_load_vars_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA_ANY(xpucode_scan_projs),
-									 VARSIZE_ANY_EXHDR(xpucode_scan_projs));
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-
-	if (xpucode_join_quals_packed)
+	if (pp_info->kexp_join_quals_packed)
 	{
+		xpucode = pp_info->kexp_join_quals_packed;
 		session->xpucode_join_quals_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA_ANY(xpucode_join_quals_packed),
-									 VARSIZE_ANY_EXHDR(xpucode_join_quals_packed));
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-
-	if (xpucode_hash_values_packed)
+	if (pp_info->kexp_hash_keys_packed)
 	{
+		xpucode = pp_info->kexp_hash_keys_packed;
 		session->xpucode_hash_values_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA_ANY(xpucode_hash_values_packed),
-									 VARSIZE_ANY_EXHDR(xpucode_hash_values_packed));
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-
-	if (xpucode_gist_quals_packed)
+	if (pp_info->kexp_gist_quals_packed)
 	{
+		xpucode = pp_info->kexp_gist_quals_packed;
 		session->xpucode_gist_quals_packed =
 			__appendBinaryStringInfo(&buf,
-									 VARDATA_ANY(xpucode_gist_quals_packed),
-									 VARSIZE_ANY_EXHDR(xpucode_gist_quals_packed));
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-	
-	/* put executor parameters */
-	if (param_info)
+	if (pp_info->kexp_projection)
 	{
-		ListCell   *lc;
+		xpucode = pp_info->kexp_projection;
+		session->xpucode_projection =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+	}
+	if (pp_info->kexp_groupby_keyhash)
+	{
+		xpucode = pp_info->kexp_groupby_keyhash;
+		session->xpucode_groupby_keyhash =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+	}
+	if (pp_info->kexp_groupby_keyload)
+	{
+		xpucode = pp_info->kexp_groupby_keyload;
+		session->xpucode_groupby_keyload =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+	}
+	if (pp_info->kexp_groupby_keycomp)
+	{
+		xpucode = pp_info->kexp_groupby_keycomp;
+		session->xpucode_groupby_keycomp =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+	}
+	if (pp_info->kexp_groupby_actions)
+	{
+		xpucode = pp_info->kexp_groupby_actions;
+		session->xpucode_groupby_actions =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+	}
+	if (groupby_tdesc_final)
+	{
+		size_t		sz = estimate_kern_data_store(groupby_tdesc_final);
+		kern_data_store *kds_temp = (kern_data_store *)alloca(sz);
+		char		format = KDS_FORMAT_ROW;
+		uint32_t	hash_nslots = 0;
 
-		session->nparams = nparams;
-		foreach (lc, used_params)
+		if (pp_info->kexp_groupby_keyhash &&
+			pp_info->kexp_groupby_keyload &&
+			pp_info->kexp_groupby_keycomp)
 		{
-			Param  *param = lfirst(lc);
-			Datum	param_value;
-			bool	param_isnull;
-			uint32_t	offset;
-
-			if (param->paramkind == PARAM_EXEC)
-			{
-				/* See ExecEvalParamExec */
-				ParamExecData  *prm = &(econtext->ecxt_param_exec_vals[param->paramid]);
-
-				if (prm->execPlan)
-				{
-					/* Parameter not evaluated yet, so go do it */
-					ExecSetParamPlan(prm->execPlan, econtext);
-					/* ExecSetParamPlan should have processed this param... */
-					Assert(prm->execPlan == NULL);
-				}
-				param_isnull = prm->isnull;
-				param_value  = prm->value;
-			}
-			else if (param->paramkind == PARAM_EXTERN)
-			{
-				/* See ExecEvalParamExtern */
-				ParamExternData *prm, prmData;
-
-				if (param_info->paramFetch != NULL)
-					prm = param_info->paramFetch(param_info,
-												 param->paramid,
-												 false, &prmData);
-				else
-					prm = &param_info->params[param->paramid - 1];
-				if (!OidIsValid(prm->ptype))
-					elog(ERROR, "no value found for parameter %d", param->paramid);
-				if (prm->ptype != param->paramtype)
-					elog(ERROR, "type of parameter %d (%s) does not match that when preparing the plan (%s)",
-						 param->paramid,
-						 format_type_be(prm->ptype),
-						 format_type_be(param->paramtype));
-				param_isnull = prm->isnull;
-				param_value  = prm->value;
-			}
-			else
-			{
-				elog(ERROR, "Bug? unexpected parameter kind: %d",
-					 (int)param->paramkind);
-			}
-
-			if (param_isnull)
-				offset = 0;
-			else
-			{
-				int16	typlen;
-				bool	typbyval;
-
-				get_typlenbyval(param->paramtype, &typlen, &typbyval);
-				if (typbyval)
-				{
-					offset = __appendBinaryStringInfo(&buf,
-													  (char *)&param_value,
-													  typlen);
-				}
-				else if (typlen > 0)
-				{
-					offset = __appendBinaryStringInfo(&buf,
-													  DatumGetPointer(param_value),
-													  typlen);
-				}
-				else if (typlen == -1)
-				{
-					struct varlena *temp = PG_DETOAST_DATUM(param_value);
-
-					offset = __appendBinaryStringInfo(&buf,
-													  DatumGetPointer(temp),
-													  VARSIZE(temp));
-					if (param_value != PointerGetDatum(temp))
-						pfree(temp);
-				}
-				else
-				{
-					elog(ERROR, "Not a supported data type for kernel parameter: %s",
-						 format_type_be(param->paramtype));
-				}
-			}
-			Assert(param->paramid >= 0 && param->paramid < nparams);
-			session->poffset[param->paramid] = offset;
+			format = KDS_FORMAT_HASH;
+			hash_nslots = 20000; //to be estimated using num_groups
 		}
+		setup_kern_data_store(kds_temp, groupby_tdesc_final, (1UL<<31), format);
+		kds_temp->hash_nslots = hash_nslots;
+		session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, sz);
 	}
 	/* other database session information */
+	kvars_nslots = list_length(pp_info->kvars_depth);
+	Assert(kvars_nslots == list_length(pp_info->kvars_resno) &&
+		   kvars_nslots == list_length(pp_info->kvars_types));
+	kvars_nbytes = (sizeof(kern_variable) * kvars_nslots +
+					sizeof(int)           * kvars_nslots);
+	foreach (lc, pp_info->kvars_types)
+	{
+		Oid		type_oid = lfirst_oid(lc);
+		devtype_info *dtype;
+
+		if (OidIsValid(type_oid) &&
+			(dtype = pgstrom_devtype_lookup(type_oid)) != NULL)
+		{
+			kvars_nbytes = TYPEALIGN(dtype->type_alignof, kvars_nbytes);
+			kvars_nbytes += dtype->type_sizeof;
+		}
+	}
+	kvars_nbytes = MAXALIGN(kvars_nbytes);
+
 	session->query_plan_id = ((uint64_t)MyProcPid << 32) |
 		(uint64_t)pg_atomic_fetch_add_u32(pgstrom_query_plan_id, 1);
-	session->kcxt_extra_bufsz = kcxt_extra_bufsz;
-	session->kcxt_kvars_nslots = kcxt_kvars_nslots;
+	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
+	session->kcxt_kvars_nslots = kvars_nslots;
+	session->kcxt_kvars_nbytes = kvars_nbytes;
 	session->xpucode_use_debug_code = pgstrom_use_debug_code;
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	session->session_xact_state = __build_session_xact_state(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
+	session->pgsql_port_number = PostPortNumber;
+	session->pgsql_plan_node_id = pts->css.ss.ps.plan->plan_node_id;
 	session->join_inner_handle = join_inner_handle;
 	memcpy(buf.data, session, session_sz);
 
@@ -514,6 +611,45 @@ pgstromBuildSessionInfo(PlanState *ps,
 	pfree(buf.data);
 
 	return xcmd;
+}
+
+/*
+ * pgstromTaskStateBeginScan
+ */
+bool
+pgstromTaskStateBeginScan(pgstromTaskState *pts)
+{
+	pgstromSharedState *ps_state = pts->ps_state;
+	uint32_t	curval, newval;
+
+	Assert(!pts->scan_begin);
+	curval = pg_atomic_read_u32(&ps_state->scan_control);
+	do {
+		if ((curval & 1) != 0)
+			return false;
+		newval = curval + 2;
+	} while (!pg_atomic_compare_exchange_u32(&ps_state->scan_control,
+											 &curval, newval));
+	pts->scan_begin = true;
+	return true;
+}
+
+/*
+ * pgstromTaskStateEndScan
+ */
+bool
+pgstromTaskStateEndScan(pgstromTaskState *pts)
+{
+	pgstromSharedState *ps_state = pts->ps_state;
+	uint32_t	curval, newval;
+
+	Assert(pts->scan_begin);
+	curval = pg_atomic_read_u32(&ps_state->scan_control);
+	do {
+		newval = ((curval - 2) | 1);
+	} while (!pg_atomic_compare_exchange_u32(&ps_state->scan_control,
+											 &curval, newval));
+	return (newval == 1);
 }
 
 /*
@@ -578,14 +714,22 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 		else
 		{
 			pthreadMutexUnlock(&conn->mutex);
-			if (!try_final_callback)
-				return NULL;
-			if (!pts->cb_final_chunk || pts->final_done)
-				return NULL;
-			xcmd = pts->cb_final_chunk(pts, xcmd_iov, &xcmd_iovcnt);
-			if (!xcmd)
-				return NULL;
-			xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
+			if (!pts->final_done)
+			{
+				pts->final_done = true;
+				if (pgstromTaskStateEndScan(pts) &&
+					try_final_callback &&
+					pts->cb_final_chunk != NULL)
+				{
+					xcmd = pts->cb_final_chunk(pts, xcmd_iov, &xcmd_iovcnt);
+					if (xcmd)
+					{
+						xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
+						continue;
+					}
+				}
+			}
+			return NULL;
 		}
 		CHECK_FOR_INTERRUPTS();
 
@@ -738,6 +882,83 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 }
 
 /*
+ * pgstromPreAggFinalChunk
+ */
+static XpuCommand *
+pgstromPreAggFinalChunk(struct pgstromTaskState *pts,
+						struct iovec *xcmd_iov, int *xcmd_iovcnt)
+{
+	XpuCommand	   *xcmd;
+
+	pts->xcmd_buf.len = sizeof(XpuCommand);
+	enlargeStringInfo(&pts->xcmd_buf, 0);
+
+	xcmd = (XpuCommand *)pts->xcmd_buf.data;
+	memset(xcmd, 0, offsetof(XpuCommand, u));
+	xcmd->magic  = XpuCommandMagicNumber;
+	xcmd->tag    = XpuCommandTag__XpuPreAggFinal;
+	xcmd->length = offsetof(XpuCommand, u);
+
+	xcmd_iov[0].iov_base = xcmd;
+	xcmd_iov[0].iov_len  = offsetof(XpuCommand, u);
+	*xcmd_iovcnt = 1;
+
+	return xcmd;
+}
+
+/*
+ * fixup_inner_varnode
+ *
+ * Any var-nodes are rewritten at setrefs.c to indicate a particular item
+ * on the cscan->custom_scan_tlist. However, inner expression must reference
+ * the inner relation, so we need to fix up it again.
+ */
+typedef struct
+{
+	CustomScan *cscan;
+	Plan	   *inner_plan;
+} fixup_inner_varnode_context;
+
+static Node *
+__fixup_inner_varnode_walker(Node *node, void *data)
+{
+	fixup_inner_varnode_context *con = data;
+
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *)node;
+		List	   *tlist_dev = con->cscan->custom_scan_tlist;
+		TargetEntry *tle;
+
+		Assert(var->varno == INDEX_VAR &&
+			   var->varattno >= 1 &&
+			   var->varattno <= list_length(tlist_dev));
+		tle = list_nth(tlist_dev, var->varattno - 1);
+		return (Node *)makeVar(INNER_VAR,
+							   tle->resorigcol,
+							   var->vartype,
+							   var->vartypmod,
+							   var->varcollid,
+							   0);
+	}
+	return expression_tree_mutator(node, __fixup_inner_varnode_walker, con);
+}
+
+static List *
+fixup_inner_varnode(List *exprs, CustomScan *cscan, Plan *inner_plan)
+{
+	fixup_inner_varnode_context con;
+
+	memset(&con, 0, sizeof(con));
+	con.cscan = cscan;
+	con.inner_plan = inner_plan;
+
+	return (List *)__fixup_inner_varnode_walker((Node *)exprs, &con);
+}
+
+/*
  * __setupTaskStateRequestBuffer
  */
 static void
@@ -761,8 +982,15 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
 	memset(xcmd, 0, offsetof(XpuCommand, u.scan.data));
-	xcmd->magic  = XpuCommandMagicNumber;
-	xcmd->tag    = XpuCommandTag__XpuScanExec;
+	xcmd->magic = XpuCommandMagicNumber;
+	if ((pts->task_kind & DEVTASK__SCAN) != 0)
+		xcmd->tag = XpuCommandTag__XpuScanExec;
+	else if ((pts->task_kind & DEVTASK__JOIN) != 0)
+		xcmd->tag = XpuCommandTag__XpuJoinExec;
+	else if ((pts->task_kind & DEVTASK__PREAGG) != 0)
+		xcmd->tag = XpuCommandTag__XpuPreAggExec;
+	else
+		elog(ERROR, "unsupported task kind: %08x", pts->task_kind);
 	xcmd->length = bufsz;
 
 	off = offsetof(XpuCommand, u.scan.data);
@@ -785,22 +1013,24 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
  * pgstromExecInitTaskState
  */
 void
-pgstromExecInitTaskState(pgstromTaskState *pts,
-						 uint64_t devkind_mask,	/* DEVKIND_* */
-						 List *outer_quals,
-						 const Bitmapset *outer_refs,
-						 Oid   brin_index_oid,
-						 List *brin_index_conds,
-						 List *brin_index_quals)
+pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 {
-	EState		   *estate = pts->css.ss.ps.state;
-	CustomScan	   *cscan = (CustomScan *)pts->css.ss.ps.plan;
-	Relation		rel = pts->css.ss.ss_currentRelation;
-	TupleDesc		tupdesc_src = RelationGetDescr(rel);
-	TupleDesc		tupdesc_dst;
-	List		   *tlist_dev = NIL;
-	ListCell	   *lc;
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+	pgstromPlanInfo	*pp_info = pts->pp_info;
+	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
+	Relation	rel = pts->css.ss.ss_currentRelation;
+	TupleDesc	tupdesc_src = RelationGetDescr(rel);
+	TupleDesc	tupdesc_dst;
+	int			depth;
+	List	   *tlist_dev = NIL;
+	List	   *base_quals = NIL;
+	ListCell   *lc;
 
+	/* sanity checks */
+	Assert(rel != NULL &&
+		   outerPlanState(node) == NULL &&
+		   innerPlanState(node) == NULL &&
+		   pp_info->num_rels == list_length(cscan->custom_plans));
 	/*
 	 * PG-Strom supports:
 	 * - regular relation with 'heap' access method
@@ -819,21 +1049,20 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 
 		/* setup BRIN-index if any */
 		pgstromBrinIndexExecBegin(pts,
-								  brin_index_oid,
-								  brin_index_conds,
-								  brin_index_quals);
-		if ((devkind_mask & DEVKIND__NVIDIA_GPU) != 0)
+								  pp_info->brin_index_oid,
+								  pp_info->brin_index_conds,
+								  pp_info->brin_index_quals);
+		if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
 			pts->optimal_gpus = GetOptimalGpuForRelation(rel);
-		if ((devkind_mask & DEVKIND__NVIDIA_DPU) != 0)
+		if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
 			pts->ds_entry = GetOptimalDpuForRelation(rel, &kds_pathname);
 		pts->kds_pathname = kds_pathname;
 	}
 	else if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
 	{
 		if (!pgstromArrowFdwExecInit(pts,
-									 devkind_mask,
-									 outer_quals,
-									 outer_refs))
+									 pp_info->scan_quals,
+									 pp_info->outer_refs))
 			elog(ERROR, "Bug? only arrow_fdw is supported in PG-Strom");
 	}
 	else
@@ -860,10 +1089,10 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 	/*
 	 * Init resources for CPU fallbacks
 	 */
-	outer_quals = (List *)
-		fixup_varnode_to_origin((Node *)outer_quals,
+	base_quals = (List *)
+		fixup_varnode_to_origin((Node *)pp_info->scan_quals,
 								cscan->custom_scan_tlist);
-	pts->base_quals = ExecInitQual(outer_quals, &pts->css.ss.ps);
+	pts->base_quals = ExecInitQual(base_quals, &pts->css.ss.ps);
 	foreach (lc, cscan->custom_scan_tlist)
 	{
 		TargetEntry *tle = lfirst(lc);
@@ -878,6 +1107,65 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 											 pts->css.ss.ss_ScanTupleSlot,
 											 &pts->css.ss.ps,
 											 RelationGetDescr(rel));
+	/*
+	 * init inner relations
+	 */
+	depth = 1;
+	foreach (lc, cscan->custom_plans)
+	{
+		pgstromTaskInnerState *istate = &pts->inners[depth-1];
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[depth-1];
+		Plan	   *plan = lfirst(lc);
+		PlanState  *ps = ExecInitNode(plan, estate, eflags);
+		List	   *hash_inner_keys;
+		ListCell   *cell;
+		devtype_info *dtype;
+
+		istate->ps = ps;
+		istate->econtext = CreateExprContext(estate);
+		istate->depth = depth;
+		istate->join_type = pp_inner->join_type;
+		istate->join_quals = ExecInitQual(pp_inner->join_quals,
+										  &pts->css.ss.ps);
+		istate->other_quals = ExecInitQual(pp_inner->other_quals,
+										   &pts->css.ss.ps);
+		foreach (cell, pp_inner->hash_outer_keys)
+		{
+			ExprState  *es = ExecInitExpr((Expr *)lfirst(cell),
+										  &pts->css.ss.ps);
+			dtype = pgstrom_devtype_lookup(exprType((Node *)es->expr));
+			if (!dtype)
+				elog(ERROR, "failed on lookup device type of %s",
+					 nodeToString(es->expr));
+			istate->hash_outer_keys = lappend(istate->hash_outer_keys, es);
+			istate->hash_outer_dtypes = lappend(istate->hash_outer_dtypes, dtype);
+		}
+		/* inner hash-keys references the result of inner-slot */
+		hash_inner_keys = fixup_inner_varnode(pp_inner->hash_inner_keys,
+											  cscan, plan);
+		foreach (cell, hash_inner_keys)
+		{
+			ExprState  *es = ExecInitExpr((Expr *)lfirst(cell),
+										  &pts->css.ss.ps);
+			dtype = pgstrom_devtype_lookup(exprType((Node *)es->expr));
+			if (!dtype)
+				elog(ERROR, "failed on lookup device type of %s",
+					 nodeToString(es->expr));
+			istate->hash_inner_keys = lappend(istate->hash_inner_keys, es);
+			istate->hash_inner_dtypes = lappend(istate->hash_inner_dtypes, dtype);
+		}
+
+		if (OidIsValid(pp_inner->gist_index_oid))
+		{
+			istate->gist_irel = index_open(pp_inner->gist_index_oid,
+										   AccessShareLock);
+			istate->gist_clause = ExecInitExpr((Expr *)pp_inner->gist_clause,
+											   &pts->css.ss.ps);
+		}
+		pts->css.custom_ps = lappend(pts->css.custom_ps, ps);
+		depth++;
+	}
+	
 	/*
 	 * Setup request buffer
 	 */
@@ -918,15 +1206,30 @@ pgstromExecInitTaskState(pgstromTaskState *pts,
 									  tupdesc_dst,
 									  KDS_FORMAT_ROW);
 	}
+
+	/*
+	 * workload specific callback routines
+	 */
+	if ((pts->task_kind & DEVTASK__SCAN) != 0)
+		pts->cb_cpu_fallback = ExecFallbackCpuScan;
+	else if ((pts->task_kind & DEVTASK__JOIN) != 0)
+		pts->cb_cpu_fallback = ExecFallbackCpuJoin;
+	else if ((pts->task_kind & DEVTASK__PREAGG) != 0)
+	{
+		pts->cb_final_chunk = pgstromPreAggFinalChunk;
+		pts->cb_cpu_fallback = ExecFallbackCpuPreAgg;
+	}
+	else
+		elog(ERROR, "Bug? unknown DEVTASK");
 	/* other fields init */
 	pts->curr_vm_buffer = InvalidBuffer;
 }
 
 /*
- * pgstromExecTaskState
+ * pgstromExecScanAccess
  */
-TupleTableSlot *
-pgstromExecTaskState(pgstromTaskState *pts)
+static TupleTableSlot *
+pgstromExecScanAccess(pgstromTaskState *pts)
 {
 	TupleTableSlot *slot = NULL;
 	XpuCommand	   *resp;
@@ -961,11 +1264,33 @@ pgstromExecTaskState(pgstromTaskState *pts)
 }
 
 /*
+ * pgstromExecScanReCheck
+ */
+static bool
+pgstromExecScanReCheck(pgstromTaskState *pts, TupleTableSlot *epq_slot)
+{
+	/*
+	 * NOTE: Only immutable operators/functions are executable
+	 * on the GPU devices, so its decision will never changed.
+	 */
+	return true;
+}
+
+TupleTableSlot *
+pgstromExecTaskState(pgstromTaskState *pts)
+{
+	return ExecScan(&pts->css.ss,
+					(ExecScanAccessMtd) pgstromExecScanAccess,
+					(ExecScanRecheckMtd) pgstromExecScanReCheck);
+}
+
+/*
  * pgstromExecEndTaskState
  */
 void
-pgstromExecEndTaskState(pgstromTaskState *pts)
+pgstromExecEndTaskState(CustomScanState *node)
 {
+	pgstromTaskState   *pts = (pgstromTaskState *)node;
 	pgstromSharedState *ps_state = pts->ps_state;
 	ListCell   *lc;
 
@@ -996,8 +1321,11 @@ pgstromExecEndTaskState(pgstromTaskState *pts)
  * pgstromExecResetTaskState
  */
 void
-pgstromExecResetTaskState(pgstromTaskState *pts)
+pgstromExecResetTaskState(CustomScanState *node)
 {
+	pgstromTaskState *pts = (pgstromTaskState *) node;
+
+	pts->scan_begin = false;
 	if (pts->conn)
 	{
 		xpuClientCloseSession(pts->conn);
@@ -1013,12 +1341,14 @@ pgstromExecResetTaskState(pgstromTaskState *pts)
  * pgstromSharedStateEstimateDSM
  */
 Size
-pgstromSharedStateEstimateDSM(pgstromTaskState *pts)
+pgstromSharedStateEstimateDSM(CustomScanState *node,
+							  ParallelContext *pcxt)
 {
-	Relation	relation = pts->css.ss.ss_currentRelation;
-	EState	   *estate = pts->css.ss.ps.state;
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+	Relation	relation = node->ss.ss_currentRelation;
+	EState	   *estate   = node->ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
-	int			num_rels = list_length(pts->css.custom_ps);
+	int			num_rels = list_length(node->custom_ps);
 	Size		len = 0;
 
 	if (pts->br_state)
@@ -1033,14 +1363,17 @@ pgstromSharedStateEstimateDSM(pgstromTaskState *pts)
  * pgstromSharedStateInitDSM
  */
 void
-pgstromSharedStateInitDSM(pgstromTaskState *pts,
-						  ParallelContext *pcxt, char *dsm_addr)
+pgstromSharedStateInitDSM(CustomScanState *node,
+						  ParallelContext *pcxt,
+						  void *coordinate)
 {
-	Relation	relation = pts->css.ss.ss_currentRelation;
-	EState	   *estate = pts->css.ss.ps.state;
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+	Relation	relation = node->ss.ss_currentRelation;
+	EState	   *estate   = node->ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
-	int			num_rels = list_length(pts->css.custom_ps);
+	int			num_rels = list_length(node->custom_ps);
 	size_t		dsm_length = offsetof(pgstromSharedState, inners[num_rels]);
+	char	   *dsm_addr = coordinate;
 	pgstromSharedState *ps_state;
 	TableScanDesc scan = NULL;
 
@@ -1079,7 +1412,7 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts,
 	ConditionVariableInit(&ps_state->preload_cond);
 	SpinLockInit(&ps_state->preload_mutex);
 	if (num_rels > 0)
-		ps_state->preload_shmem_handle = __shmemCreate();	
+		ps_state->preload_shmem_handle = __shmemCreate(pts->ds_entry);
 	pts->ps_state = ps_state;
 	pts->css.ss.ss_currentScanDesc = scan;
 }
@@ -1088,9 +1421,13 @@ pgstromSharedStateInitDSM(pgstromTaskState *pts,
  * pgstromSharedStateAttachDSM
  */
 void
-pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr)
+pgstromSharedStateAttachDSM(CustomScanState *node,
+							shm_toc *toc,
+							void *coordinate)
 {
-	int		num_rels = list_length(pts->css.custom_ps);
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+	char	   *dsm_addr = coordinate;
+	int			num_rels = list_length(pts->css.custom_ps);
 
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
@@ -1113,11 +1450,12 @@ pgstromSharedStateAttachDSM(pgstromTaskState *pts, char *dsm_addr)
  * pgstromSharedStateShutdownDSM
  */
 void
-pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
+pgstromSharedStateShutdownDSM(CustomScanState *node)
 {
+	pgstromTaskState   *pts = (pgstromTaskState *) node;
 	pgstromSharedState *src_state = pts->ps_state;
 	pgstromSharedState *dst_state;
-	EState	   *estate = pts->css.ss.ps.state;
+	EState			   *estate = node->ss.ps.state;
 
 	if (pts->br_state)
 		pgstromBrinIndexShutdownDSM(pts);
@@ -1134,91 +1472,172 @@ pgstromSharedStateShutdownDSM(pgstromTaskState *pts)
 }
 
 /*
- * pgstromExplainScanState
+ * pgstromExplainTaskState
  */
 void
-pgstromExplainScanState(pgstromTaskState *pts,
-						ExplainState *es,
-						List *dev_quals,
-						bytea *kern_dev_quals,
-						List *tlist_dev,
-						bytea *kern_dev_projs,
-						double scan_tuples,
-						double scan_rows,
-						List *dcontext)
+pgstromExplainTaskState(CustomScanState *node,
+						List *ancestors,
+						ExplainState *es)
 {
-	const char *devkind = DevKindLabel(pts->devkind, false);
-	StringInfoData buf;
-	char		label[100];
-	char	   *str;
-	ListCell   *lc;
+	pgstromTaskState   *pts = (pgstromTaskState *)node;
+	pgstromPlanInfo	   *pp_info = pts->pp_info;
+	CustomScan		   *cscan = (CustomScan *)node->ss.ps.plan;
+	List			   *dcontext;
+	StringInfoData		buf;
+	ListCell		   *lc;
+	const char		   *xpu_label;
+	char				label[100];
+	char			   *str;
+	double				ntuples;
 
+	/* setup deparse context */
+	dcontext = set_deparse_context_plan(es->deparse_cxt,
+										node->ss.ps.plan,
+										ancestors);
+	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+		xpu_label = "GPU";
+	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+		xpu_label = "DPU";
+	else
+		xpu_label = "???";
+
+	/* xPU Projection */
 	initStringInfo(&buf);
-	if (dev_quals != NIL)
+	foreach (lc, cscan->custom_scan_tlist)
 	{
-		Expr   *expr;
-
-		snprintf(label, sizeof(label), "%s Quals", devkind);
-		if (list_length(dev_quals) > 1)
-			expr = make_andclause(dev_quals);
-		else
-			expr = linitial(dev_quals);
-		str = deparse_expression((Node *)expr, dcontext, false, true);
-		appendStringInfo(&buf, "%s [rows: %.0f -> %.0f]",
-						 str, scan_tuples, scan_rows);
-		ExplainPropertyText(label, buf.data, es);
-	}
-
-	resetStringInfo(&buf);
-	foreach (lc, tlist_dev)
-	{
-		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry *tle = lfirst(lc);
 
 		if (tle->resjunk)
 			continue;
-	    str = deparse_expression((Node *)tle->expr, dcontext, false, true);
+		str = deparse_expression((Node *)tle->expr, dcontext, false, true);
 		if (buf.len > 0)
 			appendStringInfoString(&buf, ", ");
 		appendStringInfoString(&buf, str);
 	}
-	snprintf(label, sizeof(label), "%s Projection", devkind);
+	snprintf(label, sizeof(label),
+			 "%s Projection", xpu_label);
 	ExplainPropertyText(label, buf.data, es);
 
-	if (es->verbose && kern_dev_quals)
+	/* xPU Scan Quals */
+	if (pp_info->scan_quals)
 	{
+		List   *scan_quals = pp_info->scan_quals;
+		Expr   *expr;
+
 		resetStringInfo(&buf);
-		pgstrom_explain_xpucode(&buf,
-								kern_dev_quals,
-								&pts->css,
-								es, dcontext);
-		snprintf(label, sizeof(label), "%s Quals Code", devkind);
+		if (list_length(scan_quals) > 1)
+			expr = make_andclause(scan_quals);
+		else
+			expr = linitial(scan_quals);
+		str = deparse_expression((Node *)expr, dcontext, false, true);
+		appendStringInfo(&buf, "%s [rows: %.0f -> %.0f]",
+						 str,
+						 pp_info->scan_tuples,
+						 pp_info->scan_rows);
+		snprintf(label, sizeof(label), "%s Scan Quals", xpu_label);
 		ExplainPropertyText(label, buf.data, es);
 	}
 
-	if (es->verbose && kern_dev_projs)
+	/* xPU JOIN */
+	ntuples = pp_info->scan_rows;
+	for (int i=0; i < pp_info->num_rels; i++)
 	{
-		resetStringInfo(&buf);
-		pgstrom_explain_xpucode(&buf,
-								kern_dev_projs,
-								&pts->css,
-								es, dcontext);
-		snprintf(label, sizeof(label), "%s Projection Code", devkind);
-		ExplainPropertyText(label, buf.data, es);
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+
+		if (pp_inner->join_quals != NIL || pp_inner->other_quals != NIL)
+		{
+			const char *join_label;
+
+			resetStringInfo(&buf);
+			foreach (lc, pp_inner->join_quals)
+			{
+				Node   *expr = lfirst(lc);
+
+				str = deparse_expression(expr, dcontext, false, true);
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfoString(&buf, str);
+			}
+			if (pp_inner->other_quals != NIL)
+			{
+				Node   *expr = lfirst(lc);
+
+				str = deparse_expression(expr, dcontext, false, true);
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfo(&buf, "[%s]", str);
+			}
+			appendStringInfo(&buf, " ... [nrows: %.0f -> %.0f]",
+							 ntuples, pp_inner->join_nrows);
+			switch (pp_inner->join_type)
+			{
+				case JOIN_INNER: join_label = "Join"; break;
+				case JOIN_LEFT:  join_label = "Left Outer Join"; break;
+				case JOIN_RIGHT: join_label = "Right Outer Join"; break;
+				case JOIN_FULL:  join_label = "Full Outer Join"; break;
+				case JOIN_SEMI:  join_label = "Semi Join"; break;
+				case JOIN_ANTI:  join_label = "Anti Join"; break;
+				default:         join_label = "??? Join"; break;
+			}
+			snprintf(label, sizeof(label),
+					 "%s %s Quals [%d]", xpu_label, join_label, i+1);
+			ExplainPropertyText(label, buf.data, es);
+		}
+		ntuples = pp_inner->join_nrows;
+
+		if (pp_inner->hash_outer_keys != NIL)
+		{
+			resetStringInfo(&buf);
+			foreach (lc, pp_inner->hash_outer_keys)
+			{
+				Node   *expr = lfirst(lc);
+
+				str = deparse_expression(expr, dcontext, true, true);
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfoString(&buf, str);
+			}
+			snprintf(label, sizeof(label),
+					 "%s Outer Hash [%d]", xpu_label, i+1);
+			ExplainPropertyText(label, buf.data, es);
+		}
+		if (pp_inner->hash_inner_keys != NIL)
+		{
+			resetStringInfo(&buf);
+			foreach (lc, pp_inner->hash_inner_keys)
+			{
+				Node   *expr = lfirst(lc);
+
+				str = deparse_expression(expr, dcontext, true, true);
+				if (buf.len > 0)
+					appendStringInfoString(&buf, ", ");
+				appendStringInfoString(&buf, str);
+			}
+			snprintf(label, sizeof(label),
+					 "%s Inner Hash [%d]", xpu_label, i+1);
+			ExplainPropertyText(label, buf.data, es);
+		}
+		if (pp_inner->gist_clause)
+		{
+			char   *idxname = get_rel_name(pp_inner->gist_index_oid);
+			char   *colname = get_attname(pp_inner->gist_index_oid,
+										  pp_inner->gist_index_col, false);
+			resetStringInfo(&buf);
+
+			str = deparse_expression(pp_inner->gist_clause,
+									 dcontext, false, true);
+			appendStringInfoString(&buf, str);
+			if (idxname && colname)
+				appendStringInfo(&buf, " on %s (%s)", idxname, colname);
+			snprintf(label, sizeof(label),
+					 "%s GiST Join [%d]", xpu_label, i+1);
+			ExplainPropertyText(label, buf.data, es);
+		}
 	}
-}
 
-/*
- * pgstromExplainTaskState
- */
-void
-pgstromExplainTaskState(pgstromTaskState *pts,
-						ExplainState *es,
-						List *dcontext)
-{
-	StringInfoData buf;
-	int		k;
-
-	initStringInfo(&buf);
+	/*
+	 * Storage related info
+	 */
 	if (pts->arrow_state)
 	{
 		pgstromArrowFdwExplain(pts->arrow_state,
@@ -1236,6 +1655,7 @@ pgstromExplainTaskState(pgstromTaskState *pts,
 		if (!es->analyze)
 		{
 			bool	is_first = true;
+			int		k;
 
 			appendStringInfo(&buf, "enabled (");
 			for (k = bms_next_member(pts->optimal_gpus, -1);
@@ -1276,11 +1696,51 @@ pgstromExplainTaskState(pgstromTaskState *pts,
 	{
 		/* Normal Heap Storage */
 	}
-
 	/* State of BRIN-index */
 	if (pts->br_state)
 		pgstromBrinIndexExplain(pts, dcontext, es);
 
+	/*
+	 * Dump the XPU code (only if verbose)
+	 */
+	if (es->verbose)
+	{
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Scan VarLoads OpCode",
+								pp_info->kexp_scan_kvars_load);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Scan Quals OpCode",
+								pp_info->kexp_scan_quals);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Join VarLoads OpCode",
+								pp_info->kexp_join_kvars_load_packed);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Join Quals OpCode",
+								pp_info->kexp_join_quals_packed);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Join HashValue OpCode",
+								pp_info->kexp_hash_keys_packed);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"GiST-Index Join OpCode",
+								pp_info->kexp_gist_quals_packed);
+		snprintf(label, sizeof(label),
+				 "%s Projection OpCode", xpu_label);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								label,
+								pp_info->kexp_projection);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Group-By KeyHash OpCode",
+								pp_info->kexp_groupby_keyhash);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Group-By KeyLoad OpCode",
+								pp_info->kexp_groupby_keyload);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Group-By KeyComp OpCode",
+								pp_info->kexp_groupby_keycomp);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"Partial Aggregation OpCode",
+								pp_info->kexp_groupby_actions);
+	}
 	pfree(buf.data);
 }
 

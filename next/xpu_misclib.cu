@@ -18,57 +18,43 @@
 STATIC_FUNCTION(bool)
 xpu_money_datum_ref(kern_context *kcxt,
 					xpu_datum_t *__result,
-					const void *addr)
+					int vclass,
+					const kern_variable *kvar)
 {
 	xpu_money_t *result = (xpu_money_t *)__result;
 
-	if (!addr)
-		result->isnull = true;
+	if (vclass == KVAR_CLASS__INLINE)
+		result->value = kvar->i64;
+	else if (vclass >= sizeof(Cash))
+		result->value = *((Cash *)kvar->ptr);
 	else
 	{
-		result->isnull = false;
-		result->value  = *((Cash *)addr);
+		STROM_ELOG(kcxt, "unexpected vclass for device money data type.");
+		return false;
 	}
 	return true;
-}
-
-STATIC_FUNCTION(int)
-xpu_money_arrow_move(kern_context *kcxt,
-					 char *buffer,
-					 const kern_colmeta *cmeta,
-					 const void *addr, int len)
-{
-	if (!addr)
-		return 0;
-	if (len != sizeof(Cash))
-	{
-		STROM_ELOG(kcxt, "Arrow value is not convertible to money");
-		return -1;
-	}
-	if (buffer)
-		memcpy(buffer, addr, sizeof(Cash));
-	return sizeof(Cash);
 }
 
 STATIC_FUNCTION(bool)
-xpu_money_arrow_ref(kern_context *kcxt,
-					xpu_datum_t *__result,
-					const kern_colmeta *cmeta,
-					const void *addr, int len)
+xpu_money_datum_store(kern_context *kcxt,
+					  const xpu_datum_t *__arg,
+					  int *p_vclass,
+					  kern_variable *p_kvar)
 {
-	xpu_money_t *result = (xpu_money_t *)__result;
-	int		sz;
+	const xpu_money_t *arg = (const xpu_money_t *)__arg;
 
-	sz = xpu_money_arrow_move(kcxt, (char *)&result->value,
-							  cmeta, addr, len);
-	if (sz < 0)
-		return false;
-	result->isnull = (sz == 0);
+	if (arg->isnull)
+		*p_vclass = KVAR_CLASS__NULL;
+	else
+	{
+		*p_vclass = KVAR_CLASS__INLINE;
+		p_kvar->i64 = arg->value;
+	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_money_datum_store(kern_context *kcxt,
+xpu_money_datum_write(kern_context *kcxt,
 					  char *buffer,
 					  const xpu_datum_t *__arg)
 {
@@ -102,57 +88,49 @@ PG_SIMPLE_COMPARE_TEMPLATE(cash_,money,money,Cash)
 STATIC_FUNCTION(bool)
 xpu_uuid_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
-				   const void *addr)
+				   int vclass,
+				   const kern_variable *kvar)
 {
 	xpu_uuid_t *result = (xpu_uuid_t *)__result;
 
-	if (!addr)
-		result->isnull = true;
+	result->isnull = false;
+	if (vclass >= sizeof(pg_uuid_t))
+	{
+		memcpy(&result->value, kvar->ptr, sizeof(pg_uuid_t));
+	}
 	else
 	{
-		result->isnull = false;
-		memcpy(result->value.data, addr, UUID_LEN);
+		STROM_ELOG(kcxt, "unexpected vclass for device uuid data type.");
+		return false;
 	}
 	return true;
-}
-
-STATIC_FUNCTION(int)
-xpu_uuid_arrow_move(kern_context *kcxt,
-					char *buffer,
-					const kern_colmeta *cmeta,
-					const void *addr, int len)
-{
-	if (len != UUID_LEN)
-	{
-		STROM_ELOG(kcxt, "Arrow value is not convertible to uuid");
-		return -1;
-	}
-	if (!addr)
-		return 0;
-	if (buffer)
-		memcpy(buffer, addr, UUID_LEN);
-	return UUID_LEN;
 }
 
 STATIC_FUNCTION(bool)
-xpu_uuid_arrow_ref(kern_context *kcxt,
-				   xpu_datum_t *__result,
-				   const kern_colmeta *cmeta,
-				   const void *addr, int len)
+xpu_uuid_datum_store(kern_context *kcxt,
+					 const xpu_datum_t *__arg,
+					 int *p_vclass,
+					 kern_variable *p_kvar)
 {
-	xpu_uuid_t *result = (xpu_uuid_t *)__result;
-	int		sz;
+	xpu_uuid_t	   *arg = (xpu_uuid_t *)__arg;
 
-	sz = xpu_uuid_arrow_move(kcxt, (char *)result->value.data,
-							 cmeta, addr, len);
-	if (sz < 0)
-		return false;
-	result->isnull = (sz == 0);
+	if (arg->isnull)
+		*p_vclass = KVAR_CLASS__NULL;
+	else
+	{
+		xpu_uuid_t *buf = (xpu_uuid_t *)kcxt_alloc(kcxt, sizeof(pg_uuid_t));
+
+		if (!buf)
+			return false;
+		memcpy(buf, &arg->value, sizeof(pg_uuid_t));
+		p_kvar->ptr = buf;
+		*p_vclass = sizeof(pg_uuid_t);
+	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_uuid_datum_store(kern_context *kcxt,
+xpu_uuid_datum_write(kern_context *kcxt,
 					 char *buffer,
 					 const xpu_datum_t *__arg)
 {
@@ -161,8 +139,8 @@ xpu_uuid_datum_store(kern_context *kcxt,
 	if (arg->isnull)
 		return 0;
 	if (buffer)
-		memcpy(buffer, arg->value.data, UUID_LEN);
-	return UUID_LEN;
+		memcpy(buffer, &arg->value, sizeof(pg_uuid_t));
+	return sizeof(pg_uuid_t);
 }
 
 STATIC_FUNCTION(bool)
@@ -186,61 +164,51 @@ PGSTROM_SQLTYPE_OPERATORS(uuid, false, 1, UUID_LEN);
 STATIC_FUNCTION(bool)
 xpu_macaddr_datum_ref(kern_context *kcxt,
 					  xpu_datum_t *__result,
-					  const void *addr)
+					  int vclass,
+					  const kern_variable *kvar)
 {
 	xpu_macaddr_t *result = (xpu_macaddr_t *)__result;
 
-	if (!addr)
-		result->isnull = true;
+	result->isnull = false;
+	if (vclass >= sizeof(macaddr))
+		memcpy(&result->value, kvar->ptr, sizeof(macaddr));
 	else
 	{
-		result->isnull = false;
-		memcpy(&result->value, addr, sizeof(macaddr));
+		STROM_ELOG(kcxt, "unexpected vclass for device macaddr data type.");
+		return false;
 	}
 	return true;
-}
-
-STATIC_FUNCTION(int)
-xpu_macaddr_arrow_move(kern_context *kcxt,
-					   char *buffer,
-					   const kern_colmeta *cmeta,
-					   const void *addr, int len)
-{
-	if (!addr)
-		return 0;
-	if (len != sizeof(macaddr))
-	{
-		STROM_ELOG(kcxt, "Arrow value is not convertible to macaddr");
-		return -1;
-	}
-	if (buffer)
-		memcpy(buffer, addr, sizeof(macaddr));
-	return sizeof(macaddr);
 }
 
 STATIC_FUNCTION(bool)
-xpu_macaddr_arrow_ref(kern_context *kcxt,
-					  xpu_datum_t *__result,
-					  const kern_colmeta *cmeta,
-					  const void *addr, int len)
+xpu_macaddr_datum_store(kern_context *kcxt,
+						const xpu_datum_t *__arg,
+						int *p_vclass,
+						kern_variable *p_kvar)
 {
-	xpu_macaddr_t *result = (xpu_macaddr_t *)__result;
-	int		sz;
+	xpu_macaddr_t  *arg = (xpu_macaddr_t *)__arg;
 
-	sz = xpu_macaddr_arrow_move(kcxt, (char *)&result->value,
-								cmeta, addr, len);
-	if (sz < 0)
-		return false;
-	result->isnull = (sz == 0);
+	if (arg->isnull)
+		*p_vclass = KVAR_CLASS__NULL;
+	else
+	{
+		macaddr	   *buf = (macaddr *)kcxt_alloc(kcxt, sizeof(macaddr));
+
+		if (!buf)
+			return false;
+		memcpy(buf, &arg->value, sizeof(macaddr));
+		p_kvar->ptr = buf;
+		*p_vclass = sizeof(macaddr);
+	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_macaddr_datum_store(kern_context *kcxt,
+xpu_macaddr_datum_write(kern_context *kcxt,
 						char *buffer,
 						const xpu_datum_t *__arg)
 {
-	const xpu_macaddr_t *arg = (const xpu_macaddr_t *)__arg;
+	const xpu_macaddr_t  *arg = (xpu_macaddr_t *)__arg;
 
 	if (arg->isnull)
 		return 0;
@@ -270,128 +238,116 @@ PGSTROM_SQLTYPE_OPERATORS(macaddr, false, 4, sizeof(macaddr));
 STATIC_FUNCTION(bool)
 xpu_inet_datum_ref(kern_context *kcxt,
                    xpu_datum_t *__result,
-				   const void *addr)
+				   int vclass,
+				   const kern_variable *kvar)
 {
 	xpu_inet_t *result = (xpu_inet_t *)__result;
 
-	if (!addr)
-		result->isnull = true;
-	else if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+	if (vclass == KVAR_CLASS__VARLENA)
 	{
-		STROM_CPU_FALLBACK(kcxt, "inet value is compressed or toasted");
-		return false;
+		const char *addr = (const char *)kvar->ptr;
+
+		if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+		{
+			STROM_CPU_FALLBACK(kcxt, "inet value is compressed or toasted");
+			return false;
+		}
+		else
+		{
+			int		sz = VARSIZE_ANY_EXHDR(addr);
+
+			if (sz == offsetof(inet_struct, ipaddr[4]))
+			{
+				memcpy(&result->value, VARDATA_ANY(addr), sz);
+				if (result->value.family != PGSQL_AF_INET)
+				{
+					STROM_ELOG(kcxt, "inet (ipv4) value corruption");
+					return false;
+				}
+			}
+			else if (sz == offsetof(inet_struct, ipaddr[16]))
+			{
+				memcpy(&result->value, VARDATA_ANY(addr), sz);
+				if (result->value.family != PGSQL_AF_INET6)
+				{
+					STROM_ELOG(kcxt, "inet (ipv6) value corruption");
+					return false;
+				}
+			}
+			else
+			{
+				STROM_ELOG(kcxt, "Bug? inet value is corrupted");
+				return false;
+			}
+			result->isnull = false;
+		}
 	}
 	else
 	{
-		int		sz = VARSIZE_ANY_EXHDR(addr);
+		STROM_ELOG(kcxt, "unexpected vclass for device inet data type.");
+		return false;
+	}
+	return true;
+}
 
-		if (sz == offsetof(inet_struct, ipaddr[4]))
-		{
-			memcpy(&result->value, VARDATA_ANY(addr), sz);
-			if (result->value.family != PGSQL_AF_INET)
-			{
-				STROM_ELOG(kcxt, "inet (ipv4) value corruption");
-				return false;
-			}
-			result->isnull = false;
-		}
-		else if (sz == offsetof(inet_struct, ipaddr[16]))
-		{
-			memcpy(&result->value, VARDATA_ANY(addr), sz);
-			if (result->value.family != PGSQL_AF_INET6)
-			{
-				STROM_ELOG(kcxt, "inet (ipv6) value corruption");
-				return false;
-			}
-			result->isnull = false;
-		}
+STATIC_FUNCTION(bool)
+xpu_inet_datum_store(kern_context *kcxt,
+					 const xpu_datum_t *__arg,
+					 int *p_vclass,
+					 kern_variable *p_kvar)
+{
+	xpu_inet_t *arg = (xpu_inet_t *)__arg;
+
+	if (arg->isnull)
+		*p_vclass = KVAR_CLASS__NULL;
+	else
+	{
+		inet   *in;
+		int		sz;
+
+		if (arg->value.family == PGSQL_AF_INET)
+			sz = offsetof(inet_struct, ipaddr) + 4;
+		else if (arg->value.family == PGSQL_AF_INET6)
+			sz = offsetof(inet_struct, ipaddr) + 16;
 		else
 		{
 			STROM_ELOG(kcxt, "Bug? inet value is corrupted");
 			return false;
 		}
-	}
-	return true;
-}
-
-STATIC_FUNCTION(int)
-xpu_inet_arrow_move(kern_context *kcxt,
-					char *buffer,
-					const kern_colmeta *cmeta,
-					const void *addr, int len)
-{
-	uint8_t	family;
-	int		sz;
-
-	if (!addr)
-		return 0;
-	if (len == 4)
-		family = PGSQL_AF_INET;
-	else if (len == 16)
-		family = PGSQL_AF_INET6;
-	else
-	{
-		STROM_ELOG(kcxt, "Arrow value is not convertible to inet");
-		return -1;
-	}
-
-	sz = VARHDRSZ + offsetof(inet_struct, ipaddr[len]);
-	if (buffer)
-	{
-		inet   *idata = (inet *)buffer;
-		
-		idata->inet_data.family = family;
-		idata->inet_data.bits   = 8 * len;
-		memcpy(idata->inet_data.ipaddr, addr, len);
-		SET_VARSIZE(&idata, sz);
-		memcpy(buffer, &idata, sz);
-	}
-	return sz;
-}
-
-STATIC_FUNCTION(bool)
-xpu_inet_arrow_ref(kern_context *kcxt,
-				   xpu_datum_t *__result,
-				   const kern_colmeta *cmeta,
-				   const void *addr, int len)
-{
-	xpu_inet_t *result = (xpu_inet_t *)__result;
-
-	if (!addr)
-		result->isnull = true;
-	else
-	{
-		if (len == 4)
-			result->value.family = PGSQL_AF_INET;
-		else if (len == 16)
-			result->value.family = PGSQL_AF_INET6;
-		else
-		{
-			STROM_ELOG(kcxt, "Arrow value is not convertible to inet");
+		in = (inet *)kcxt_alloc(kcxt, offsetof(inet, inet_data) + sz);
+		if (!in)
 			return false;
-		}
-		result->value.bits = (len << 3);
-		memcpy(result->value.ipaddr, addr, len);
+		memcpy(&in->inet_data, &arg->value, sz);
+		SET_VARSIZE(in, VARHDRSZ + sz);
+
+		p_kvar->ptr = in;
+		*p_vclass = KVAR_CLASS__VARLENA;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
-xpu_inet_datum_store(kern_context *kcxt,
+xpu_inet_datum_write(kern_context *kcxt,
 					 char *buffer,
 					 const xpu_datum_t *__arg)
 {
-	const xpu_inet_t *arg = (const xpu_inet_t *)__arg;
+	const xpu_inet_t  *arg = (xpu_inet_t *)__arg;
 	int		sz;
 
 	if (arg->isnull)
 		return 0;
-	sz = (arg->value.family == PGSQL_AF_INET
-		  ? offsetof(inet_struct, ipaddr[4])
-		  : offsetof(inet_struct, ipaddr[16]));
+	if (arg->value.family == PGSQL_AF_INET)
+		sz = offsetof(inet_struct, ipaddr) + 4;
+	else if (arg->value.family == PGSQL_AF_INET6)
+		sz = offsetof(inet_struct, ipaddr) + 16;
+	else
+	{
+		STROM_ELOG(kcxt, "Bug? inet value is corrupted");
+		return -1;
+	}
 	if (buffer)
 	{
-		memcpy(buffer + VARHDRSZ, &arg->value, sz);
+		memcpy(buffer+VARHDRSZ, &arg->value, sz);
 		SET_VARSIZE(buffer, VARHDRSZ + sz);
 	}
 	return VARHDRSZ + sz;

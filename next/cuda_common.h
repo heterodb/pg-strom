@@ -30,22 +30,32 @@
 
 /* Dynamic shared memory entrypoint */
 extern __shared__ char __pgstrom_dynamic_shared_workmem[] __MAXALIGNED__;
-#define SHARED_WORKMEM(TYPE)	((TYPE *) __pgstrom_dynamic_shared_workmem)
-
-INLINE_FUNCTION(uint32_t) WarpId(void)
-{
-	uint32_t	rv;
-
-	asm volatile("mov.u32 %0, %warpid;" : "=r"(rv) );
-
-	return rv;
-}
+#define SHARED_WORKMEM(UNITSZ,INDEX)						\
+	(__pgstrom_dynamic_shared_workmem + (UNITSZ)*(INDEX))
 
 INLINE_FUNCTION(uint32_t) LaneId(void)
 {
 	uint32_t	rv;
 
 	asm volatile("mov.u32 %0, %laneid;" : "=r"(rv) );
+
+	return rv;
+}
+
+INLINE_FUNCTION(uint32_t) DynamicShmemSize(void)
+{
+	uint32_t	rv;
+
+	asm volatile("mov.u32 %0, %dynamic_smem_size;" : "=r"(rv) );
+
+	return rv;
+}
+
+INLINE_FUNCTION(uint32_t) TotalShmemSize(void)
+{
+	uint32_t	rv;
+
+	asm volatile("mov.u32 %0, %total_smem_size;" : "=r"(rv) );
 
 	return rv;
 }
@@ -100,78 +110,53 @@ STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
  *
  * ----------------------------------------------------------------
  */
-#define UNIT_TUPLES_PER_WARP		(2 * WARPSIZE)
+#define UNIT_TUPLES_PER_DEPTH		(2 * WARPSIZE)
 typedef struct
 {
-	uint32_t		__saved_smx_row_count;
-	bool			scan_done;	/* true, if it already reached to the KDS tail */
-	int				depth;		/* current depth, if JOIN */
-	uint32_t		nrels;		/* number of inner relations, if JOIN */
+	uint32_t		smx_row_count;	/* just for suspend/resume */
+	uint32_t		__nrels__deprecated;		/* number of inner relations, if JOIN */
+	int				depth;		/* 'depth' when suspended */
+	int				scan_done;	/* smallest depth that may produce more tuples */
 	/* only KDS_FORMAT_BLOCK */
 	uint32_t		block_id;	/* BLOCK format needs to keep htuples on the */
 	uint32_t		lp_count;	/* lp_items array once, to pull maximum GPU */
 	uint32_t		lp_wr_pos;	/* utilization by simultaneous execution of */
 	uint32_t		lp_rd_pos;	/* the kern_scan_quals. */
-	uint32_t		lp_items[UNIT_TUPLES_PER_WARP];
+	uint32_t		lp_items[UNIT_TUPLES_PER_DEPTH];
+	/* read/write_pos of the combination buffer for each depth */
+	struct {
+		uint32_t	read;		/* read_pos of depth=X */
+		uint32_t	write;		/* write_pos of depth=X */
+	} pos[1];		/* variable length */
 	/*
-	 * read/write_pos and combination buffer with the layout below
-	 */
-	uint32_t		regs[1];
-	/*
-	 * kern_warp_context    -------------------------------------------------
-	 *                                                                     ^
-	 * |       :                                                           |
-	 * +--- values[] ------------+  ---                                    |
-	 * | read_pos  (depth=0)     |   ^                                     |
-	 * | write_pos (depth=0)     |   | current position to indicate the    |
-	 * +-------------------------+   | GpuJoin combination buffer for      |
-	 * | read_pos  (depth=1)     |   | each depth.                         |
-	 * | write_pos (depth=1)     |   |                                     |
-	 * +-------------------------+   | (2 * (NRELS+1)) items               |
-	 * :        :                :   |                                     |
-	 * :        :                :   |                                     |
-	 * +-------------------------+   |                                     |
-	 * | read_pos  (depth=NRELS) |   |                                     |
-	 * | write_pos (depth=NRELS) |   v                                     |
-	 * +-------------------------+  ---                                    |
-	 * |                         |   ^                                     |
-	 * | GpuJoin combination     |   | GpuJoin combination buffer for      |
-	 * | buffer (depth = 0)      |   | depth=0.                            |
-	 * |  (UNIT_TUPLES_PER_WARP) |   |                                     |
-	 * |  items for depth=0      |   | (1+depth) * UNIT_TUPLES_PER_WARP    |
-	 * |                         |   v   items for each depth              |
-	 * +-------------------------+  ---                                    |
-	 * :        :                :                                         |
-	 * :        :                :                        KERN_WARP_CONTEXT_UNITSZ()
-	 * +-------------------------+  ---                                    |
-	 * |                         |   ^                                     |
-	 * | GpuJoin combination     |   | GpuJoin combination buffer for      |
-	 * | buffer (depth = NRELS)  |   | depth=NRELS.                        |
-	 * |  (UNIT_TUPLES_PER_WARP  |   |                                     |
-	 * |   * NRELS) items        |   | NRELS * UNIT_TUPLES_PER_WARP        |
-	 * |                         |   v    items for the final depth        v
-	 * +-------------------------+  ---                                   ---
+	 * <----- __KERN_WARP_CONTEXT_BASESZ ----->
+	 * Above fields are always kept in the device shared memory.
+	 *
+	 * +-------------------------------------------------------------+------
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-0) |
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-1) |
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-2) | depth=0
+	 * |      :                    :                     :           |
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-63)|
+	 * +-------------------------------------------------------------+------
+	 *        :                    :                     :
+	 * +-------------------------------------------------------------+------
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-0) |
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-1) |
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-2) | depth=nrels
+	 * |      :                    :                     :           |
+	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-63)|
+	 * +-------------------------------------------------------------+------
 	 */
 } kern_warp_context;
 
-INLINE_FUNCTION(uint32_t)
-KERN_WARP_CONTEXT_UNITSZ(int nrels)
-{
-	int		nitems = (2 * (nrels + 1)) +					/* read/write_pos */
-		((nrels+1) * (nrels+2) * (UNIT_TUPLES_PER_WARP/2));	/* combination buffer */
-	return MAXALIGN(offsetof(kern_warp_context, regs[nitems]));
-}
-
-#define WARP_READ_POS(warp,depth)		((warp)->regs[2*(depth)])
-#define WARP_WRITE_POS(warp,depth)		((warp)->regs[2*(depth)+1])
-
-INLINE_FUNCTION(uint32_t *)
-WARP_COMB_BUF(kern_warp_context *warp, int depth)
-{
-	uint32_t   *base = warp->regs + (2 * (warp->nrels + 1));
-
-	return base + warp->nrels * (warp->nrels + 1) * UNIT_TUPLES_PER_WARP;
-}
+#define __KERN_WARP_CONTEXT_BASESZ(n_rels)				\
+	MAXALIGN(offsetof(kern_warp_context, pos[(n_rels)+1]))
+#define KERN_WARP_CONTEXT_UNITSZ(n_rels,nbytes)			\
+	(__KERN_WARP_CONTEXT_BASESZ(n_rels) +				\
+	 (nbytes) * UNIT_TUPLES_PER_DEPTH * ((n_rels)+1))
+#define WARP_READ_POS(warp,depth)		((warp)->pos[(depth)].read)
+#define WARP_WRITE_POS(warp,depth)		((warp)->pos[(depth)].write)
 
 /*
  * definitions related to generic device executor routines
@@ -181,60 +166,99 @@ execGpuScanLoadSource(kern_context *kcxt,
 					  kern_warp_context *wp,
 					  kern_data_store *kds_src,
 					  kern_data_extra *kds_extra,
-					  kern_expression *kern_scan_quals,
+					  kern_expression *kexp_load_vars,
+					  kern_expression *kexp_scan_quals,
+					  char     *kvars_addr_wp,
 					  uint32_t *p_smx_row_count);
-
 EXTERN_FUNCTION(int)
-execGpuProjection(kern_context *kcxt,
-				  kern_expression *kexp_projs,
-				  kern_data_store *kds_dst,
-				  bool make_a_valid_tuple,
-				  kern_data_store *kds_outer,
-				  uint32_t outer_row_pos,
-				  int num_inners,
-				  kern_data_store **kds_inners,
-				  HeapTupleHeaderData **htup_inners);
+execGpuJoinProjection(kern_context *kcxt,
+					  kern_warp_context *wp,
+					  int n_rels,
+					  kern_data_store *kds_dst,
+					  kern_expression *kexp_projection,
+					  char *kvars_addr_wp);
 
 /*
- * Definitions related to GpuScan
+ * Definitions related to GpuScan/GpuJoin/GpuPreAgg
  */
 typedef struct {
 	kern_errorbuf	kerror;
 	uint32_t		grid_sz;
 	uint32_t		block_sz;
-	uint32_t		nitems_in;
-	uint32_t		nitems_out;
 	uint32_t		extra_sz;
-	/* kern_warp_context array */
+	uint32_t		kvars_nslots;			/* width of the kvars slot */
+	uint32_t		kvars_nbytes;	/* extra buffer size of kvars-slot */
+	uint32_t		n_rels;			/* >0, if JOIN is involved */
+	/* suspend/resume support */
+	bool			resume_context;
 	uint32_t		suspend_count;
-	char			data[1]	__MAXALIGNED__;
-} kern_gpuscan;
+	/* kernel statistics */
+	uint32_t		nitems_raw;		/* nitems in the raw data chunk */
+	uint32_t		nitems_in;		/* nitems after the scan_quals */
+	uint32_t		nitems_out;		/* nitems of final results */
+	struct {
+		uint32_t	nitems_gist;	/* nitems picked up by GiST index */
+		uint32_t	nitems_out;		/* nitems after this depth */
+	} stats[1];
+	/*
+	 * variable length fields
+	 * +-----------------------------------+
+	 * | kern_warp_context[0] for warp-0   |
+	 * | kern_warp_context[1] for warp-1   |
+	 * |     :    :            :           |
+	 * | kern_warp_context[nwarps-1]       |
+	 * +-----------------------------------+ -----
+	 * | l_state[num_rels] for each thread |  only if JOIN is involved
+	 * +-----------------------------------+  (n_rels > 0)
+	 * | matched[num_rels] for each thread |
+	 * +-----------------------------------+ -----
+	 */
+} kern_gputask;
 
+#define __KERN_GPUTASK_WARP_OFFSET(n_rels,nbytes,gid)				\
+	(MAXALIGN(offsetof(kern_gputask,stats[(n_rels)])) +				\
+	 KERN_WARP_CONTEXT_UNITSZ(n_rels,nbytes) * ((gid)/WARPSIZE))
+
+#define KERN_GPUTASK_WARP_CONTEXT(kgtask)								\
+	((kern_warp_context *)												\
+	 ((char *)(kgtask) +												\
+	  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,						\
+								 (kgtask)->kvars_nbytes,				\
+								 get_global_id())))
+#define KERN_GPUTASK_LSTATE_ARRAY(kgtask)								\
+	((kgtask)->n_rels == 0 ? NULL : (uint32_t *)						\
+	 ((char *)(kgtask) +												\
+	  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,						\
+								 (kgtask)->kvars_nbytes,				\
+								 get_global_size()) +					\
+	  sizeof(uint32_t) * (kgtask)->n_rels * get_global_id()))
+#define KERN_GPUTASK_MATCHED_ARRAY(kgtask)								\
+	((kgtask)->n_rels == 0 ? NULL : (bool *)							\
+	 ((char *)(kgtask) +												\
+	  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,						\
+								 (kgtask)->kvars_nbytes,				\
+								 get_global_size()) +					\
+	  sizeof(uint32_t) * (kgtask)->n_rels * get_global_size() +			\
+	  sizeof(bool) *     (kgtask)->n_rels * get_global_id()))
+
+#define KERN_GPUTASK_LENGTH(n_rels,nbytes,n_threads)					\
+	(__KERN_GPUTASK_WARP_OFFSET((n_rels),(nbytes),(n_threads)) +		\
+	 sizeof(uint32_t) * (n_rels) * (n_threads) +						\
+	 sizeof(bool)     * (n_rels) * (n_threads))
+
+/*
+ * GPU Kernel Entrypoint
+ */
 KERNEL_FUNCTION(void)
 kern_gpuscan_main(kern_session_info *session,
-				  kern_gpuscan *kgscan,
+				  kern_gputask *kgtask,
+				  kern_multirels *__kmrels,	/* always null */
 				  kern_data_store *kds_src,
 				  kern_data_extra *kds_extra,
 				  kern_data_store *kds_dst);
-
-/*
- * Definitions related to GpuJoin
- */
-typedef struct
-{
-	kern_errorbuf	kerror;
-	uint32_t		grid_sz;
-	uint32_t		block_sz;
-	uint32_t		nitems_in;
-	uint32_t		nitems_out;
-	uint32_t		num_rels;
-	/* kern_warp_context array */
-	char			data[1]	__MAXALIGNED__;
-} kern_gpujoin;
-
 KERNEL_FUNCTION(void)
 kern_gpujoin_main(kern_session_info *session,
-				  kern_gpujoin *kgjoin,
+				  kern_gputask *kgtask,
 				  kern_multirels *kmrels,
 				  kern_data_store *kds_src,
 				  kern_data_extra *kds_extra,

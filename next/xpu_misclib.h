@@ -69,4 +69,9 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(uuid, pg_uuid_t);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(macaddr, macaddr);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(inet, inet_struct);
 
+EXTERN_FUNCTION(int)
+xpu_interval_write_heap(kern_context *kcxt,
+						char *buffer,
+						const xpu_datum_t *arg);
+
 #endif	/* XPU_MISCLIB_H */

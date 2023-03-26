@@ -128,6 +128,8 @@ typedef unsigned int		Oid;
 #define MAXIMUM_ALIGNOF		8
 #define MAXALIGN(LEN)		TYPEALIGN(MAXIMUM_ALIGNOF,LEN)
 #define MAXALIGN_DOWN(LEN)	TYPEALIGN_DOWN(MAXIMUM_ALIGNOF,LEN)
+#define LONGALIGN(LEN)		TYPEALIGN(8,LEN)
+#define INTALIGN(LEN)		TYPEALIGN(4,LEN)
 #endif	/* POSTGRES_H */
 #define __MAXALIGNED__		__attribute__((aligned(MAXIMUM_ALIGNOF)));
 #define MAXIMUM_ALIGNOF_SHIFT 3
@@ -168,6 +170,49 @@ __Fetch(const T *ptr)
 #endif
 
 /*
+ * TypeOpCode / FuncOpCode
+ */
+#define TYPE_OPCODE(NAME,a,b,c)		TypeOpCode__##NAME,
+typedef enum {
+	TypeOpCode__Invalid = 0,
+#include "xpu_opcodes.h"
+	TypeOpCode__composite,
+	TypeOpCode__array,
+	TypeOpCode__record,
+	TypeOpCode__unsupported,
+	TypeOpCode__BuiltInMax,
+} TypeOpCode;
+
+#define FUNC_OPCODE(a,b,c,NAME,d,e)		FuncOpCode__##NAME,
+typedef enum {
+	FuncOpCode__Invalid = 0,
+	FuncOpCode__ConstExpr,
+	FuncOpCode__ParamExpr,
+	FuncOpCode__VarExpr,
+	FuncOpCode__BoolExpr_And,
+	FuncOpCode__BoolExpr_Or,
+	FuncOpCode__BoolExpr_Not,
+	FuncOpCode__NullTestExpr_IsNull,
+	FuncOpCode__NullTestExpr_IsNotNull,
+	FuncOpCode__BoolTestExpr_IsTrue,
+	FuncOpCode__BoolTestExpr_IsNotTrue,
+	FuncOpCode__BoolTestExpr_IsFalse,
+	FuncOpCode__BoolTestExpr_IsNotFalse,
+	FuncOpCode__BoolTestExpr_IsUnknown,
+	FuncOpCode__BoolTestExpr_IsNotUnknown,
+#include "xpu_opcodes.h"
+	/* for projection */
+	FuncOpCode__Projection = 9999,
+	FuncOpCode__LoadVars,
+	FuncOpCode__JoinQuals,
+	FuncOpCode__HashValue,
+	FuncOpCode__SaveExpr,
+	FuncOpCode__AggFuncs,
+	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
+	FuncOpCode__BuiltInMax,
+} FuncOpCode;
+
+/*
  * Error status
  */
 #define ERRCODE_STROM_SUCCESS			0
@@ -190,6 +235,34 @@ typedef struct {
 } kern_errorbuf;
 
 /*
+ * kern_variable
+ */
+#define KVAR_CLASS__NULL		(-1)
+#define KVAR_CLASS__INLINE		(-2)
+#define KVAR_CLASS__VARLENA		(-3)
+#define KVAR_CLASS__XPU_DATUM	(-4)
+
+typedef union
+{
+	int8_t		i8;
+	uint8_t		u8;
+	int16_t		i16;
+	uint16_t	u16;
+	int32_t		i32;
+	uint32_t	u32;
+	int64_t		i64;
+	uint64_t	u64;
+	float2_t	fp16;
+	float4_t	fp32;
+	float8_t	fp64;
+	void	   *ptr;
+	struct {
+		uint32_t	offset;		/* offset from kvars_slot */
+		TypeOpCode	type_code;	/* TypeOpCode of the xpu_datum */
+	} xpu;		/* KVAR_CLASS__XPU_DATUM */
+} kern_variable;
+
+/*
  * kern_context - a set of run-time information
  */
 typedef struct
@@ -204,18 +277,21 @@ typedef struct
 	/*
 	 * current slot of the kernel variable references
 	 *
-	 * if (!kvars_cmeta[slot_id])
-	 *     kvars_addr[slot_id] references xpu_datum_t
-	 *     kvars_len[slot_id] is always -1
-	 * else
-	 *     kvars_addr[slot_id] references the item on the KDS; it's format
-	 *       follows the cmeta->kds_format
-	 *     kvars_len[slot_id] is the length of Arrow::Utf8 or Arrow::Binary.
+	 * if kvars_class[slot_id] < 0, if means kvars_slot[slot_id] has pointer
+	 * or inline value according to KVAR_CLASS__*.
+	 * elsewhere (kvars_class[slot_id] >= 0), kvars_slot[slot_id].ptr points
+	 * variable length datum with this length; used for Arrow::Utf-8 or Binary.
 	 */
 	uint32_t		kvars_nslots;
-	const struct kern_colmeta **kvars_cmeta;
+	uint32_t		kvars_nbytes;
+	kern_variable  *kvars_slot;
+	int			   *kvars_class;
+#if 0
+	//deprecated
+	struct kern_colmeta **kvars_cmeta;
 	void		  **kvars_addr;
 	int			   *kvars_len;
+#endif
 	/* variable length buffer */
 	char		   *vlpos;
 	char		   *vlend;
@@ -224,26 +300,16 @@ typedef struct
 
 #define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
 	do {																\
-		uint32_t	__nslots = (SESSION)->kcxt_kvars_nslots;			\
-		uint32_t	__bufsz = Max(1024, (SESSION)->kcxt_extra_bufsz);	\
+		uint32_t	__bufsz = Max(512, (SESSION)->kcxt_extra_bufsz);	\
 		uint32_t	__len = offsetof(kern_context, vlbuf) +	__bufsz;	\
 																		\
-		KCXT = (kern_context *)alloca(__len);\
+		KCXT = (kern_context *)alloca(__len);							\
 		memset(KCXT, 0, __len);											\
 		KCXT->session = (SESSION);										\
-		if (__nslots > 0)												\
-		{																\
-			KCXT->kvars_nslots = __nslots;								\
-			KCXT->kvars_cmeta  = (const struct kern_colmeta **)			\
-				alloca(sizeof(const struct kern_colmeta *) * __nslots);	\
-			KCXT->kvars_addr   = (void **)								\
-				alloca(sizeof(void *) * __nslots);						\
-			KCXT->kvars_len    = (int *)								\
-				alloca(sizeof(int) * __nslots);							\
-			memset(KCXT->kvars_cmeta, 0, sizeof(void *) * __nslots);	\
-			memset(KCXT->kvars_addr, 0, sizeof(void *) * __nslots);		\
-			memset(KCXT->kvars_len, -1, sizeof(int) * __nslots);		\
-		}																\
+		KCXT->kvars_nslots = (SESSION)->kcxt_kvars_nslots;				\
+		KCXT->kvars_nbytes = (SESSION)->kcxt_kvars_nbytes;				\
+		KCXT->kvars_slot = NULL;										\
+		KCXT->kvars_class = NULL;										\
 		KCXT->vlpos = KCXT->vlbuf;										\
 		KCXT->vlend = KCXT->vlbuf + __bufsz;							\
 	} while(0)
@@ -294,12 +360,6 @@ kcxt_alloc(kern_context *kcxt, size_t len)
 INLINE_FUNCTION(void)
 kcxt_reset(kern_context *kcxt)
 {
-	if (kcxt->kvars_nslots > 0)
-	{
-		memset(kcxt->kvars_cmeta, 0, sizeof(void *) * kcxt->kvars_nslots);
-		memset(kcxt->kvars_addr,  0, sizeof(void *) * kcxt->kvars_nslots);
-		memset(kcxt->kvars_len,  -1, sizeof(int)    * kcxt->kvars_nslots);
-	}
 	kcxt->vlpos = kcxt->vlbuf;
 }
 
@@ -410,6 +470,7 @@ struct kern_data_store {
 	Oid				tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	int32_t			tdtypmod;	/* copy of TupleDesc.tdtypmod */
 	Oid				table_oid;	/* OID of the table (only if GpuScan) */
+	uint32_t		lock;		/* some situation needs lock semantics */
 	/* only KDS_FORMAT_HASH */
 	uint32_t		hash_nslots;	/* width of the hash-slot */
 	/* only KDS_FORMAT_BLOCK */
@@ -1226,17 +1287,6 @@ typedef struct toast_compress_header
  *
  * ----------------------------------------------------------------
  */
-#define TYPE_OPCODE(NAME,a,b)	TypeOpCode__##NAME,
-typedef enum {
-	TypeOpCode__Invalid = 0,
-#include "xpu_opcodes.h"
-	TypeOpCode__composite,
-	TypeOpCode__array,
-	TypeOpCode__record,
-	TypeOpCode__unsupported,
-	TypeOpCode__BuiltInMax,
-} TypeOpCode;
-
 typedef struct xpu_datum_t		xpu_datum_t;
 typedef struct xpu_datum_operators xpu_datum_operators;
 
@@ -1254,20 +1304,18 @@ struct xpu_datum_operators {
 	int16_t		xpu_type_length;	/* = pg_type.typlen */
 	TypeOpCode	xpu_type_code;
 	int			xpu_type_sizeof;	/* =sizeof(xpu_XXXX_t), not PG type! */
+	int			xpu_type_alignof;	/* =__alignof__(xpu_XXX_t), not PG type! */
 	bool	  (*xpu_datum_ref)(kern_context *kcxt,
-							   xpu_datum_t *result,
-							   const void *addr);
-	bool	  (*xpu_arrow_ref)(kern_context *kcxt,
-							   xpu_datum_t *result,
-							   const kern_colmeta *cmeta,
-							   const void *addr, int len);
-	int		  (*xpu_arrow_move)(kern_context *kcxt,
-								char *buffer,
-								const kern_colmeta *cmeta,
-								const void *addr, int len);
-	int		  (*xpu_datum_store)(kern_context *kcxt,
-								 char *buffer,
-								 const xpu_datum_t *arg);
+							   xpu_datum_t *result,			/* out */
+							   int vclass,					/* in */
+							   const kern_variable *kvar);	/* in */
+	bool	  (*xpu_datum_store)(kern_context *kcxt,
+								 const xpu_datum_t *arg,	/* in */
+								 int *p_vclass,				/* out */
+								 kern_variable *p_kvar);	/* out */
+	int		  (*xpu_datum_write)(kern_context *kcxt,
+								 char *buffer,				/* out */
+								 const xpu_datum_t *xdatum);/* in */
 	bool	  (*xpu_datum_hash)(kern_context *kcxt,
 								uint32_t *p_hash,
 								const xpu_datum_t *arg);
@@ -1294,10 +1342,10 @@ struct xpu_datum_operators {
 		.xpu_type_length = TYPLENGTH,								\
 		.xpu_type_code = TypeOpCode__##NAME,						\
 		.xpu_type_sizeof = sizeof(xpu_##NAME##_t),					\
+		.xpu_type_alignof = __alignof__(xpu_##NAME##_t),			\
 		.xpu_datum_ref = xpu_##NAME##_datum_ref,					\
-		.xpu_arrow_ref = xpu_##NAME##_arrow_ref,					\
-		.xpu_arrow_move = xpu_##NAME##_arrow_move,					\
 		.xpu_datum_store = xpu_##NAME##_datum_store,				\
+		.xpu_datum_write = xpu_##NAME##_datum_write,				\
 		.xpu_datum_hash = xpu_##NAME##_datum_hash,					\
 	}
 
@@ -1316,13 +1364,14 @@ struct xpu_datum_operators {
  * Elsewhere, @length means number of elements, from @start of the array on
  * the columnar buffer by @smeta.
  */
-typedef struct {
+struct xpu_array_t {
 	XPU_DATUM_COMMON_FIELD;
-	char	   *value;
+	const kern_data_store *kds;
 	int			length;
 	uint32_t	start;
 	kern_colmeta *smeta;
-} xpu_array_t;
+};
+typedef struct xpu_array_t			xpu_array_t;
 EXTERN_DATA xpu_datum_operators		xpu_array_ops;
 
 /*
@@ -1334,15 +1383,16 @@ EXTERN_DATA xpu_datum_operators		xpu_array_ops;
  * KDS_FORMAT_ARROW chunk. In this case, smeta[0] ... smeta[@nfields-1] describes
  * the values array on the KDS.
  */
-typedef struct {
+struct xpu_composite_t {
 	XPU_DATUM_COMMON_FIELD;
 	int16_t		nfields;
 	uint32_t	rowidx;
 	char	   *value;
-//	Oid			comp_typid;
-//	int			comp_typmod;
+	Oid			comp_typid;
+	int			comp_typmod;
 	kern_colmeta *smeta;
-} xpu_composite_t;
+};
+typedef struct xpu_composite_t	xpu_composite_t;
 EXTERN_DATA xpu_composite_t		xpu_composite_ops;
 
 typedef struct {
@@ -1371,63 +1421,35 @@ typedef struct
  * Definition of device flags
  *
  * ---------------------------------------------------------------- */
-#define DEVKIND__NONE				0x0000UL	/* no accelerator device */
-#define DEVKIND__NVIDIA_GPU			0x0001UL	/* for CUDA-based GPU */
-#define DEVKIND__NVIDIA_DPU			0x0002UL	/* for BlueField-X DPU */
-#define DEVKIND__ANY				0x0003UL	/* Both of GPU and DPU */
-#define DEVFUNC__LOCALE_AWARE		0x0100UL	/* Device function is locale aware,
+#define DEVKIND__NONE				0x00000000U	/* no accelerator device */
+#define DEVKIND__NVIDIA_GPU			0x00000001U	/* for CUDA-based GPU */
+#define DEVKIND__NVIDIA_DPU			0x00000002U	/* for BlueField-X DPU */
+#define DEVKIND__ANY				0x00000003U	/* Both of GPU and DPU */
+#define DEVFUNC__LOCALE_AWARE		0x00000100U	/* Device function is locale aware,
 												 * thus, available only if "C" or
 												 * no locale configuration */
-#define DEVKERN__SESSION_TIMEZONE	0x0200UL	/* Device function needs session
+#define DEVKERN__SESSION_TIMEZONE	0x00000200U	/* Device function needs session
 												 * timezone */
-INLINE_FUNCTION(const char *)
-DevKindLabel(uint32_t devkind, bool cap_only_head)
-{
-	switch (devkind & DEVKIND__ANY)
-	{
-		case DEVKIND__NONE:
-			return (cap_only_head ? "Cpu" : "CPU");
-		case DEVKIND__NVIDIA_GPU:
-			return (cap_only_head ? "Gpu" : "GPU");
-		case DEVKIND__NVIDIA_DPU:
-			return (cap_only_head ? "Dpu" : "DPU");
-		default:
-			return "???";
-	}
-}
+#define DEVTYPE__USE_KVARS_SLOTBUF	0x00000400U	/* Device type uses extra buffer on
+												 * the kvars-slot for LoadVars */
+#define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
+#define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
+#define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
+#define DEVTASK__MASK				0x70000000U	/* mask of avove workloads */
+
+#define TASK_KIND__GPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_GPU)
+#define TASK_KIND__GPUJOIN		(DEVTASK__JOIN   | DEVKIND__NVIDIA_GPU)
+#define TASK_KIND__GPUPREAGG	(DEVTASK__PREAGG | DEVKIND__NVIDIA_GPU)
+
+#define TASK_KIND__DPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_DPU)
+#define TASK_KIND__DPUJOIN		(DEVTASK__JOIN   | DEVKIND__NVIDIA_DPU)
+#define TASK_KIND__DPUPREAGG	(DEVTASK__PREAGG | DEVKIND__NVIDIA_DPU)
 
 /* ----------------------------------------------------------------
  *
  * Definition of device functions
  *
  * ---------------------------------------------------------------- */
-#define FUNC_OPCODE(a,b,c,NAME,d,e)		FuncOpCode__##NAME,
-typedef enum {
-	FuncOpCode__Invalid = 0,
-	FuncOpCode__ConstExpr,
-	FuncOpCode__ParamExpr,
-	FuncOpCode__VarExpr,
-	//FuncOpCode__VarAsIsExpr ... only used in projection
-	FuncOpCode__BoolExpr_And,
-	FuncOpCode__BoolExpr_Or,
-	FuncOpCode__BoolExpr_Not,
-	FuncOpCode__NullTestExpr_IsNull,
-	FuncOpCode__NullTestExpr_IsNotNull,
-	FuncOpCode__BoolTestExpr_IsTrue,
-	FuncOpCode__BoolTestExpr_IsNotTrue,
-	FuncOpCode__BoolTestExpr_IsFalse,
-	FuncOpCode__BoolTestExpr_IsNotFalse,
-	FuncOpCode__BoolTestExpr_IsUnknown,
-	FuncOpCode__BoolTestExpr_IsNotUnknown,
-#include "xpu_opcodes.h"
-	/* for projection */
-	FuncOpCode__Projection,
-	FuncOpCode__LoadVars,
-	FuncOpCode__HashValue,
-	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
-	FuncOpCode__BuiltInMax,
-} FuncOpCode;
-
 typedef struct kern_expression	kern_expression;
 #define XPU_PGFUNCTION_ARGS		kern_context *kcxt,				\
 								const kern_expression *kexp,	\
@@ -1439,7 +1461,10 @@ typedef struct
 	int16_t			var_depth;
 	int16_t			var_resno;
 	uint32_t		var_slot_id;
-} kern_preload_vars_item;
+	uint32_t		var_slot_off;	/* offset of the slot-buffer (some margin at
+									 * the end of kcxt->kvars_slot[] to store several
+									 * special arrow types (array, composite) */
+} kern_vars_defitem;
 
 typedef struct
 {
@@ -1448,12 +1473,108 @@ typedef struct
 	const xpu_datum_operators *slot_ops;
 } kern_projection_desc;
 
+#define KAGG_ACTION__VREF			101		/* simple var copy */
+#define KAGG_ACTION__NROWS_ANY		201		/* <int8> - increment 1 always */
+#define KAGG_ACTION__NROWS_COND		202		/* <int8> - increment 1 if not NULL */
+#define KAGG_ACTION__PMIN_INT32		301		/* <int4>,<int4> - min value */
+#define KAGG_ACTION__PMIN_INT64		302		/* <int4>,<int8> - min value */
+#define KAGG_ACTION__PMIN_FP32		303		/* <int4>,<float4> - min value */
+#define KAGG_ACTION__PMIN_FP64		304		/* <int4>,<float8> - min value */
+#define KAGG_ACTION__PMAX_INT32		401		/* <int4>,<int4> - max value */
+#define KAGG_ACTION__PMAX_INT64		402		/* <int4>,<int8> - max value */
+#define KAGG_ACTION__PMAX_FP32		403		/* <int4>,<float4> - max value */
+#define KAGG_ACTION__PMAX_FP64		404		/* <int4>,<float8> - max value */
+#define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
+#define KAGG_ACTION__PSUM_FP32		502		/* <float4> - sum of values */
+#define KAGG_ACTION__PSUM_FP64		503		/* <float8> - sum of values */
+#define KAGG_ACTION__PAVG_INT		601		/* <int4>,<int8> - NROWS+PSUM */
+#define KAGG_ACTION__PAVG_FP		602		/* <int4>,<float8> - NROWS+PSUM */
+#define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
+#define KAGG_ACTION__COVAR			801		/* <int4>,<float8>x5 - covariance */
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	int32_t		value;
+} kagg_state__pminmax_int32_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	int64_t		value;
+} kagg_state__pminmax_int64_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	float4_t	value;
+} kagg_state__pminmax_fp32_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	float8_t	value;
+} kagg_state__pminmax_fp64_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	int64_t		sum;
+} kagg_state__pavg_int_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	float8_t	sum;
+} kagg_state__pavg_fp_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	float8_t	sum_x;
+	float8_t	sum_x2;
+} kagg_state__stddev_packed;
+
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	nitems;
+	float8_t	sum_x;
+	float8_t	sum_xx;
+	float8_t	sum_y;
+	float8_t	sum_yy;
+	float8_t	sum_xy;
+} kagg_state__covar_packed;
+
+struct kern_aggregate_desc
+{
+	int		  (*action_fn)(kern_context *kcxt,
+						   const struct kern_aggregate_desc *kagg,
+						   char *pos);
+	uint16_t	action;			/* any of KAGG_ACTION__* */
+	int16_t		arg0_slot_id;	/* -1, if not used */
+	int16_t		arg1_slot_id;	/* -1, if not used */
+	int16_t		__reserved__;
+};
+typedef struct kern_aggregate_desc	kern_aggregate_desc;
+
 #define KERN_EXPRESSION_MAGIC	(0x4b657870)	/* 'K' 'e' 'x' 'p' */
+
+#define KEXP_FLAG__IS_PUSHED_DOWN		0x0001U
+
 struct kern_expression
 {
 	uint32_t		len;			/* length of this expression */
 	TypeOpCode		exptype;
 	const xpu_datum_operators *expr_ops;
+	uint32_t		expflags;		/* mask of KEXP_FLAG__* above */
 	FuncOpCode		opcode;
 	xpu_function_t	fn_dptr;		/* to be set by xPU service */
 	uint32_t		nr_args;		/* number of arguments */
@@ -1475,17 +1596,30 @@ struct kern_expression
 			uint32_t	var_slot_id;
 		} v;		/* VarExpr */
 		struct {
+			int			depth;
 			int			nloads;
-			kern_preload_vars_item kvars[1];
+			kern_vars_defitem kvars[1];
 		} load;		/* VarLoads */
 		struct {
-			int			nexprs;
+			uint32_t	slot_id;	/* destination slot-id */
+			uint32_t	slot_off;	/* kvars-slot buffer offset, if needed */
+			char		data[1];
+		} save;		/* SaveExpr */
+		struct {
+			int			nattrs;
+			kern_aggregate_desc desc[1];
+		} pagg;		/* PreAggs */
+		struct {
+			int			datum_sz;
 			int			nattrs;
 			kern_projection_desc desc[1];
 		} proj;		/* Projection */
 		struct {
-			uint32_t	subexp_offset[1];	/* sub-expression per depth */
-		} join;		/* Join */
+			uint32_t	npacked;	/* number of packed sub-expressions; including
+									 * logical NULLs (npacked may be larger than
+									 * nr_args) */
+			uint32_t	offset[1];	/* offset to sub-expressions */
+		} pack;		/* Packed */
 	} u;
 };
 
@@ -1496,16 +1630,28 @@ INLINE_FUNCTION(bool)
 __KEXP_IS_VALID(const kern_expression *kexp,
 				const kern_expression *karg)
 {
-	uint32_t   *magic = (uint32_t *)((char *)karg + karg->len - sizeof(uint32_t));
-
-	if (*magic != (KERN_EXPRESSION_MAGIC
-				   ^ ((uint32_t)karg->exptype << 6)
-				   ^ ((uint32_t)karg->opcode << 14)))
-		return false;
-	if (kexp && ((char *)karg < kexp->u.data ||
-				 (char *)karg + karg->len > (char *)kexp + kexp->len))
-		return false;
-	return true;
+	if (kexp)
+	{
+		if ((char *)karg >= kexp->u.data &&
+			(char *)karg + karg->len <= (char *)kexp + kexp->len)
+		{
+			uint32_t   *magic = (uint32_t *)
+				((char *)karg + karg->len - sizeof(uint32_t));
+			if (*magic == (KERN_EXPRESSION_MAGIC
+						   ^ ((uint32_t)karg->exptype << 6)
+						   ^ ((uint32_t)karg->opcode << 14)))
+			{
+				/* ok, it looks valid */
+				return true;
+			}
+		}
+	}
+	else if (!karg)
+	{
+		/* both kexp and karg is NULL */
+		return true;
+	}
+	return false;
 }
 #define KEXP_IS_VALID(__karg,EXPTYPE)				\
 	(__KEXP_IS_VALID(kexp,(__karg)) &&				\
@@ -1552,6 +1698,9 @@ typedef struct
 #define XpuCommandTag__CPUFallback		2
 #define XpuCommandTag__OpenSession		100
 #define XpuCommandTag__XpuScanExec		200
+#define XpuCommandTag__XpuJoinExec		300
+#define XpuCommandTag__XpuPreAggExec	400
+#define XpuCommandTag__XpuPreAggFinal	401
 #define XpuCommandMagicNumber			0xdeadbeafU
 
 /*
@@ -1561,16 +1710,25 @@ typedef struct
 typedef struct kern_session_info
 {
 	uint64_t	query_plan_id;		/* unique-id to use per-query buffer */
+	uint32_t	kcxt_kvars_nslots;	/* kcxt->kvars_nslots */
+	uint32_t	kcxt_kvars_nbytes;	/* byte length of kvars_slot[], kvars_class[] and
+									 * kvars-buffer (for xpu_array_t, xpu_composite_t
+									 * and xpu_geometry_t) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
-	uint32_t	kcxt_kvars_nslots;	/* length of kvars slot */
 
 	/* xpucode for this session */
 	bool		xpucode_use_debug_code;
+	uint32_t	xpucode_scan_load_vars;
 	uint32_t	xpucode_scan_quals;
-	uint32_t	xpucode_scan_projs;
+	uint32_t	xpucode_join_load_vars_packed;
 	uint32_t	xpucode_join_quals_packed;
 	uint32_t	xpucode_hash_values_packed;
 	uint32_t	xpucode_gist_quals_packed;
+	uint32_t	xpucode_projection;
+	uint32_t	xpucode_groupby_keyhash;
+	uint32_t	xpucode_groupby_keyload;
+	uint32_t	xpucode_groupby_keycomp;
+	uint32_t	xpucode_groupby_actions;
 
 	/* database session info */
 	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
@@ -1579,7 +1737,12 @@ typedef struct kern_session_info
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
 	/* join inner buffer */
+	uint32_t	pgsql_port_number;	/* = PostPortNumber */
+	uint32_t	pgsql_plan_node_id;	/* = Plan->plan_node_id */
 	uint32_t	join_inner_handle;	/* key of join inner buffer */
+
+	/* group-by final buffer */
+	uint32_t	groupby_kds_final;	/* header portion of kds_final */
 
 	/* executor parameter buffer */
 	uint32_t	nparams;	/* number of parameters */
@@ -1595,15 +1758,17 @@ typedef struct {
 } kern_exec_scan;
 
 typedef struct {
-	uint32_t	chunks_nitems;
-	uint32_t	chunks_offset;
-	union {
-		struct {
-			uint32_t	nitems_in;
-			uint32_t	nitems_out;
-			char		data[1];
-		} scan;
-	} stats;
+	uint32_t	chunks_offset;		/* offset of kds_dst array */
+	uint32_t	chunks_nitems;		/* number of kds_dst items */
+	/* statistics */
+	uint32_t	nitems_raw;
+	uint32_t	nitems_in;
+	uint32_t	nitems_out;
+	uint32_t	num_rels;
+	struct {
+		uint32_t	nitems_gist;
+		uint32_t	nitems_out;
+	} stats[1];
 } kern_exec_results;
 
 #ifndef ILIST_H
@@ -1637,6 +1802,14 @@ typedef struct
  * kern_session_info utility functions.
  */
 INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_SCAN_LOAD_VARS(kern_session_info *session)
+{
+	if (session->xpucode_scan_load_vars == 0)
+		return NULL;
+	return (kern_expression *)((char *)session + session->xpucode_scan_load_vars);
+}
+
+INLINE_FUNCTION(kern_expression *)
 SESSION_KEXP_SCAN_QUALS(kern_session_info *session)
 {
 	if (session->xpucode_scan_quals == 0)
@@ -1645,68 +1818,156 @@ SESSION_KEXP_SCAN_QUALS(kern_session_info *session)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_SCAN_PROJS(kern_session_info *session)
+__PICKUP_PACKED_KEXP(const kern_expression *kexp, int dindex)
 {
-	if (session->xpucode_scan_projs == 0)
+	kern_expression *karg;
+	uint32_t	offset;
+
+	assert(kexp->opcode == FuncOpCode__Packed);
+	if (dindex < 0 || dindex >= kexp->u.pack.npacked)
 		return NULL;
-	return (kern_expression *)((char *)session + session->xpucode_scan_projs);
+	offset = kexp->u.pack.offset[dindex];
+	if (offset == 0)
+		return NULL;
+	karg = (kern_expression *)((char *)kexp + offset);
+	assert(karg->u.data < (char *)kexp + kexp->len &&
+		   (char *)karg + karg->len <= (char *)kexp + kexp->len);
+	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int depth)
+SESSION_KEXP_JOIN_LOAD_VARS(kern_session_info *session, int dindex)
 {
 	kern_expression *kexp;
-	uint32_t	subexp_offset;
+	kern_expression *karg;
+
+	if (session->xpucode_join_load_vars_packed == 0)
+		return NULL;
+	kexp = (kern_expression *)
+		((char *)session + session->xpucode_join_load_vars_packed);
+	if (dindex < 0)
+		return kexp;
+	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	assert(!karg || (karg->opcode == FuncOpCode__LoadVars &&
+					 karg->exptype == TypeOpCode__int4));
+	return karg;
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int dindex)
+{
+	kern_expression *kexp;
+	kern_expression *karg;
 
 	if (session->xpucode_join_quals_packed == 0)
 		return NULL;
-	kexp = (kern_expression *)((char *)session + session->xpucode_join_quals_packed);
-	if (depth < 1 || depth > kexp->nr_args)
-		return NULL;
-	assert(kexp->opcode == FuncOpCode__Packed);
-	subexp_offset = kexp->u.join.subexp_offset[depth-1];
-	if (subexp_offset == 0)
-		return NULL;
-	return (kern_expression *)((char *)kexp + subexp_offset);
+	kexp = (kern_expression *)
+		((char *)session + session->xpucode_join_quals_packed);
+	if (dindex < 0)
+		return kexp;
+	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	assert(!karg || (karg->opcode == FuncOpCode__JoinQuals &&
+					 karg->exptype == TypeOpCode__bool));
+	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_HASH_VALUE(kern_session_info *session, int depth)
+SESSION_KEXP_HASH_VALUE(kern_session_info *session, int dindex)
 {
 	kern_expression *kexp;
-	uint32_t	subexp_offset;
+	kern_expression *karg;
 
 	if (session->xpucode_hash_values_packed == 0)
 		return NULL;
-	kexp = (kern_expression *)((char *)session + session->xpucode_hash_values_packed);
-	if (depth < 1 || depth > kexp->nr_args)
-		return NULL;
-	assert(kexp->opcode == FuncOpCode__Packed);
-	subexp_offset = kexp->u.join.subexp_offset[depth-1];
-	if (subexp_offset == 0)
-		return NULL;
-	return (kern_expression *)((char *)kexp + subexp_offset);
+	kexp = (kern_expression *)
+		((char *)session + session->xpucode_hash_values_packed);
+	if (dindex < 0)
+		return kexp;
+	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	assert(!karg || (karg->opcode == FuncOpCode__HashValue &&
+					 karg->exptype == TypeOpCode__int4));
+	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GIST_QUALS(kern_session_info *session, int depth)
+SESSION_KEXP_GIST_QUALS(kern_session_info *session, int dindex)
 {
-	kern_expression *kexp;
-	uint32_t	subexp_offset;
-
-	if (session->xpucode_gist_quals_packed == 0)
-		return NULL;
-	kexp = (kern_expression *)((char *)session + session->xpucode_gist_quals_packed);
-	if (depth < 1 || depth > kexp->nr_args)
-		return NULL;
-	assert(kexp->opcode == FuncOpCode__Packed);
-	subexp_offset = kexp->u.join.subexp_offset[depth-1];
-	if (subexp_offset == 0)
-		return NULL;
-	return (kern_expression *)((char *)kexp + subexp_offset);
+	return NULL;
 }
 
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_PROJECTION(kern_session_info *session)
+{
+	kern_expression *kexp = NULL;
 
+	if (session->xpucode_projection)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_projection);
+		assert(kexp->opcode == FuncOpCode__Projection &&
+			   kexp->exptype == TypeOpCode__int4);
+	}
+	return kexp;
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GROUPBY_KEYHASH(kern_session_info *session)
+{
+	kern_expression *kexp = NULL;
+
+	if (session->xpucode_groupby_keyhash)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_groupby_keyhash);
+		assert(kexp->opcode == FuncOpCode__HashValue &&
+			   kexp->exptype == TypeOpCode__int4);
+	}
+	return kexp;
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GROUPBY_KEYLOAD(kern_session_info *session)
+{
+	kern_expression *kexp = NULL;
+
+	if (session->xpucode_groupby_keyload)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_groupby_keyload);
+		assert(kexp->opcode == FuncOpCode__LoadVars &&
+			   kexp->exptype == TypeOpCode__int4);
+	}
+	return kexp;
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GROUPBY_KEYCOMP(kern_session_info *session)
+{
+	kern_expression *kexp = NULL;
+
+	if (session->xpucode_groupby_keycomp)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_groupby_keycomp);
+		assert(kexp->exptype == TypeOpCode__bool);
+	}
+	return kexp;
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GROUPBY_ACTIONS(kern_session_info *session)
+{
+	kern_expression *kexp = NULL;
+
+	if (session->xpucode_groupby_actions)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_groupby_actions);
+		assert(kexp->opcode == FuncOpCode__AggFuncs &&
+			   kexp->exptype == TypeOpCode__int4);
+	}
+	return kexp;
+}
 
 /* see access/transam/xact.c */
 typedef struct
@@ -1891,13 +2152,22 @@ kern_form_heaptuple(kern_context *kcxt,
 					const kern_expression *kproj,
 					const kern_data_store *kds_dst,
 					HeapTupleHeaderData *htup);
+EXTERN_FUNCTION(int)
+kern_estimate_heaptuple(kern_context *kcxt,
+						const kern_expression *kproj,
+						const kern_data_store *kds_dst);
 EXTERN_FUNCTION(bool)
-ExecLoadVarsOuterRow(XPU_PGFUNCTION_ARGS,
-					 kern_data_store *kds_outer,
-					 HeapTupleHeaderData *htup,
-					 int num_inners,
-					 kern_data_store **kds_inners,
-					 HeapTupleHeaderData **htup_inners);
+ExecLoadVarsHeapTuple(kern_context *kcxt,
+					  kern_expression *kexp_load_vars,
+					  int depth,
+					  kern_data_store *kds,
+					  HeapTupleHeaderData *htup);
+EXTERN_FUNCTION(bool)
+ExecLoadVarsOuterRow(kern_context *kcxt,
+					 kern_expression *kexp_load_vars,
+					 kern_expression *kexp_scan_quals,
+					 kern_data_store *kds_src,
+					 HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterColumn(XPU_PGFUNCTION_ARGS,
 						kern_data_store *kds_outer,
@@ -1906,32 +2176,20 @@ ExecLoadVarsOuterColumn(XPU_PGFUNCTION_ARGS,
 						kern_data_store **kds_inners,
 						HeapTupleHeaderData **htup_inners);
 EXTERN_FUNCTION(bool)
-ExecLoadVarsOuterArrow(XPU_PGFUNCTION_ARGS,
-					   kern_data_store *kds_outer,
-					   uint32_t kds_index,
-					   int num_inners,
-					   kern_data_store **kds_inners,
-					   HeapTupleHeaderData **htup_inners);
+ExecLoadVarsOuterArrow(kern_context *kcxt,
+					   kern_expression *kexp_load_vars,
+					   kern_expression *kexp_scan_quals,
+					   kern_data_store *kds_src,
+					   uint32_t kds_index);
+
 EXTERN_FUNCTION(int)
-ExecProjectionOuterRow(kern_context *kcxt,
-					   kern_expression *kexp,
-					   kern_data_store *kds_dst,
-					   bool make_a_valid_tuple,
-					   kern_data_store *kds_outer,
-					   HeapTupleHeaderData *htup_outer,
-					   int num_inners,
-					   kern_data_store **kds_inners,
-					   HeapTupleHeaderData **htup_inners);
-EXTERN_FUNCTION(int)
-ExecProjectionOuterArrow(kern_context *kcxt,
-						 kern_expression *kexp,
-						 kern_data_store *kds_dst,
-						 bool make_a_valid_tuple,
-						 kern_data_store *kds_outer,
-						 uint32_t kds_index,
-						 int num_inners,
-						 kern_data_store **kds_inners,
-						 HeapTupleHeaderData **htup_inners);
+ExecKernProjection(kern_context *kcxt,
+				   kern_expression *kexp,
+				   uint32_t *combuf,
+				   kern_data_store *kds_outer,
+				   kern_data_extra *kds_extra,
+				   int num_inners,
+				   kern_data_store **kds_inners);
 
 /* ----------------------------------------------------------------
  *
@@ -1960,7 +2218,7 @@ pg_hash_any(const void *ptr, int sz);
  *
  * ----------------------------------------------------------------
  */
-typedef struct
+struct kern_multirels
 {
 	size_t		length;
 	uint32_t	num_rels;
@@ -1973,34 +2231,36 @@ typedef struct
 		bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
 	} chunks[1];
-} kern_multirels;
+};
+typedef struct kern_multirels	kern_multirels;
 
 INLINE_FUNCTION(kern_data_store *)
-KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int depth)
-{
-	assert(depth > 0 && depth <= kmrels->num_rels);
-	return (kern_data_store *)
-		((char *)kmrels + kmrels->chunks[depth-1].kds_offset);
-}
-
-INLINE_FUNCTION(bool *)
-KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth)
+KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int dindex)
 {
 	uint64_t	offset;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
-	offset = kmrels->chunks[depth-1].ojmap_offset;
+	assert(dindex >= 0 && dindex < kmrels->num_rels);
+	offset = kmrels->chunks[dindex].kds_offset;
+	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+}
+
+INLINE_FUNCTION(bool *)
+KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int dindex)
+{
+	uint64_t	offset;
+
+	assert(dindex >= 0 && dindex < kmrels->num_rels);
+	offset = kmrels->chunks[dindex].ojmap_offset;
 	return (bool *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
 
 INLINE_FUNCTION(kern_data_store *)
-KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int depth)
+KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int dindex)
 {
 	uint64_t	offset;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
-	offset = kmrels->chunks[depth-1].gist_offset;
+	assert(dindex >= 0 && dindex < kmrels->num_rels);
+	offset = kmrels->chunks[dindex].gist_offset;
 	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
-
 #endif	/* XPU_COMMON_H */

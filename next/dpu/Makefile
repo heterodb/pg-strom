@@ -12,6 +12,9 @@ DPUSERB_HEADS = dpuserv.h arrow_defs.h xpu_common.h xpu_basetype.h \
 CFLAGS  := -Wall -g -O3 -D_GNU_SOURCE \
            -Wno-sign-compare
 LDFLAGS := -lpthread -lm -lstdc++
+ifeq ($(PGSTROM_DEBUG),1)
+CFLAGS += -O0
+endif
 
 dpuserv: $(DPUSERV_OBJS)
 	$(CC) -o $@ $(DPUSERV_OBJS) $(LDFLAGS)

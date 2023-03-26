@@ -138,6 +138,8 @@ pgstrom_license_query(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 (errmsg("only superuser can query commercial license"))));
 	license = __heterodb_license_query();
+	if (!license)
+		PG_RETURN_NULL();
 
 	PG_RETURN_POINTER(DirectFunctionCall1(json_in, PointerGetDatum(license)));
 }

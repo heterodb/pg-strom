@@ -316,6 +316,19 @@ pgstrom_collect_gpu_devices(void)
 }
 
 /*
+ * pgstrom_gpu_operator_ratio
+ */
+double
+pgstrom_gpu_operator_ratio(void)
+{
+	if (cpu_operator_cost > 0.0)
+	{
+		return pgstrom_gpu_operator_cost / cpu_operator_cost;
+	}
+	return (pgstrom_gpu_operator_cost == 0.0 ? 1.0 : disable_cost);
+}
+
+/*
  * pgstrom_init_gpu_options - init GUC options related to GPUs
  */
 static void

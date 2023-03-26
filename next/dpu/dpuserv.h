@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/epoll.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -32,6 +33,7 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include "xpu_common.h"
+#include "float2.h"
 #include "heterodb_extra.h"
 
 #define __Elog(fmt,...)								\
@@ -58,6 +60,18 @@
 #endif
 #define dlist_container(type, field, ptr)				\
 	((type *)((char *)(ptr) - offsetof(type, field)))
+
+typedef struct dlist_iter
+{
+	dlist_node *cur;	/* current element */
+	dlist_node *end;	/* last node we'll iterate to */
+} dlist_iter;
+
+#define dlist_foreach(iter, lhead)										\
+	for ((iter).end = &(lhead)->head,									\
+		 (iter).cur = (iter).end->next ? (iter).end->next : (iter).end;	\
+		 (iter).cur != (iter).end;										\
+		 (iter).cur = (iter).cur->next)
 
 static inline void
 dlist_init(dlist_head *head)

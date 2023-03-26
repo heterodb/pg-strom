@@ -118,9 +118,9 @@ typedef struct
 {
 	PlannerInfo	   *root;
 	Relids			relids;
-	bool			parallel_aware;
-	const char	   *custom_name;
-	const CustomPath *cpath;
+	bool			parallel_path;
+	uint32_t		devkind;		/* one of DEVKIND_* */
+	CustomPath	   *cpath;
 } custom_path_entry;
 
 static HTAB	   *custom_path_htable = NULL;
@@ -129,20 +129,13 @@ static uint32
 custom_path_entry_hashvalue(const void *key, Size keysize)
 {
 	custom_path_entry *cent = (custom_path_entry *)key;
-	const char *custom_name = cent->custom_name;
 	uint32      hash;
 
-	hash = hash_any((unsigned char *)&cent->root, sizeof(PlannerInfo *));
-	if (cent->relids != NULL)
-	{
-		Bitmapset  *relids = cent->relids;
-
-		hash ^= hash_any((unsigned char *)relids,
-						 offsetof(Bitmapset, words[relids->nwords]));
-	}
-	if (cent->parallel_aware)
+	hash = hash_bytes((unsigned char *)&cent->root, sizeof(PlannerInfo *));
+	hash ^= bms_hash_value(cent->relids);
+	if (cent->parallel_path)
 		hash ^= 0x9e3779b9U;
-	hash ^= hash_any((unsigned char *)custom_name, strlen(custom_name));
+	hash ^= hash_uint32(cent->devkind);
 
 	return hash;
 }
@@ -155,32 +148,18 @@ custom_path_entry_compare(const void *key1, const void *key2, Size keysize)
 
 	if (cent1->root == cent2->root &&
 		bms_equal(cent1->relids, cent2->relids) &&
-		cent1->parallel_aware == cent2->parallel_aware &&
-		strcmp(cent1->custom_name, cent2->custom_name) == 0)
+		cent1->parallel_path == cent2->parallel_path &&
+		cent1->devkind == cent2->devkind)
 		return 0;
 	/* not equal */
 	return 1;
 }
 
-static void *
-custom_path_entry_keycopy(void *dest, const void *src, Size keysize)
-{
-	custom_path_entry *dent = (custom_path_entry *)dest;
-	const custom_path_entry *sent = (const custom_path_entry *)src;
-
-	dent->root = sent->root;
-	dent->relids = bms_copy(sent->relids);
-	dent->parallel_aware = sent->parallel_aware;
-	dent->custom_name = pstrdup(sent->custom_name);
-
-	return dest;
-}
-
-const CustomPath *
+CustomPath *
 custom_path_find_cheapest(PlannerInfo *root,
 						  RelOptInfo *rel,
-						  bool parallel_aware,
-						  const char *custom_name)
+						  bool parallel_path,
+						  uint32_t devkind)
 {
 	custom_path_entry  hkey;
 	custom_path_entry *cent;
@@ -188,8 +167,8 @@ custom_path_find_cheapest(PlannerInfo *root,
 	memset(&hkey, 0, sizeof(custom_path_entry));
 	hkey.root = root;
 	hkey.relids = rel->relids;
-	hkey.parallel_aware = (parallel_aware ? true : false);
-	hkey.custom_name = custom_name;
+	hkey.parallel_path = (parallel_path ? true : false);
+	hkey.devkind = (devkind & DEVKIND__ANY);
 
 	cent = hash_search(custom_path_htable, &hkey, HASH_FIND, NULL);
 	if (!cent)
@@ -200,18 +179,21 @@ custom_path_find_cheapest(PlannerInfo *root,
 bool
 custom_path_remember(PlannerInfo *root,
 					 RelOptInfo *rel,
-					 bool parallel_aware,
+					 bool parallel_path,
+					 uint32_t devkind,
 					 const CustomPath *cpath)
 {
 	custom_path_entry  hkey;
 	custom_path_entry *cent;
 	bool		found;
 
+	Assert((devkind & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
+		   (devkind & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
 	memset(&hkey, 0, sizeof(custom_path_entry));
 	hkey.root = root;
 	hkey.relids = rel->relids;
-	hkey.parallel_aware = (parallel_aware ? true : false);
-	hkey.custom_name = cpath->methods->CustomName;
+	hkey.parallel_path = (parallel_path ? true : false);
+	hkey.devkind = (devkind & DEVKIND__ANY);
 
 	cent = hash_search(custom_path_htable, &hkey, HASH_ENTER, &found);
 	if (found)
@@ -220,7 +202,7 @@ custom_path_remember(PlannerInfo *root,
 		if (cent->cpath->path.total_cost <= cpath->path.total_cost)
 			return false;
 	}
-	cent->cpath = (const CustomPath *)pgstrom_copy_pathnode(&cpath->path);
+	cent->cpath = (CustomPath *)pgstrom_copy_pathnode(&cpath->path);
 
 	return true;
 }
@@ -246,15 +228,13 @@ pgstrom_post_planner(Query *parse,
 		hctl.entrysize = sizeof(custom_path_entry);
 		hctl.hash = custom_path_entry_hashvalue;
 		hctl.match = custom_path_entry_compare;
-		hctl.keycopy = custom_path_entry_keycopy;
 		custom_path_htable = hash_create("HTable to preserve Custom-Paths",
 										 512,
 										 &hctl,
 										 HASH_CONTEXT |
 										 HASH_ELEM |
 										 HASH_FUNCTION |
-										 HASH_COMPARE |
-										 HASH_KEYCOPY);
+										 HASH_COMPARE);
 		pstmt = planner_hook_next(parse,
 								  query_string,
 								  cursorOptions,
@@ -325,14 +305,14 @@ _PG_init(void)
 		pgstrom_init_gpu_service();
 		pgstrom_init_gpu_scan();
 		pgstrom_init_gpu_join();
-		//pgstrom_init_gpu_preagg();
+		pgstrom_init_gpu_preagg();
 	}
 	/* init DPU related stuff */
 	if (pgstrom_init_dpu_device())
 	{
 		pgstrom_init_dpu_scan();
-		//pgstrom_init_dpu_join();
-		//pgstrom_init_dpu_preagg();
+		pgstrom_init_dpu_join();
+		pgstrom_init_dpu_preagg();
 	}
 	pgstrom_init_pcie();
 	/* post planner hook */
