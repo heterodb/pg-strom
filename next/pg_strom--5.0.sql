@@ -2331,15 +2331,15 @@ CREATE FUNCTION pgstrom.nrows("any")
 --
 CREATE FUNCTION pgstrom.pmin(int1)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int32'
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmin(int2)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int32'
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmin(int4)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int32'
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmin(int8)
   RETURNS bytea
@@ -2347,11 +2347,11 @@ CREATE FUNCTION pgstrom.pmin(int8)
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmin(float2)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_fp32'
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_fp64'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmin(float4)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_fp32'
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_fp64'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmin(float8)
   RETURNS bytea
@@ -2363,7 +2363,7 @@ CREATE FUNCTION pgstrom.pmin(money)
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmin(date)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int32'
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmin(time)
   RETURNS bytea
@@ -2383,15 +2383,15 @@ CREATE FUNCTION pgstrom.pmin(timestamptz)
 --
 CREATE FUNCTION pgstrom.pmax(int1)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int32'
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmax(int2)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int32'
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmax(int4)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int32'
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmax(int8)
   RETURNS bytea
@@ -2399,11 +2399,11 @@ CREATE FUNCTION pgstrom.pmax(int8)
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmax(float2)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_fp32'
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_fp64'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmax(float4)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_fp32'
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_fp64'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmax(float8)
   RETURNS bytea
@@ -2415,7 +2415,7 @@ CREATE FUNCTION pgstrom.pmax(money)
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmax(date)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int32'
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.pmax(time)
   RETURNS bytea
@@ -2433,19 +2433,9 @@ CREATE FUNCTION pgstrom.pmax(timestamptz)
 ---
 --- Final MIN(X)/MAX(X) functions
 ---
-CREATE FUNCTION pgstrom.fmin_trans_int32(bytea,bytea)
-  RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_fmin_trans_int32'
-  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
-
 CREATE FUNCTION pgstrom.fmin_trans_int64(bytea,bytea)
   RETURNS bytea
   AS 'MODULE_PATHNAME','pgstrom_fmin_trans_int64'
-  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
-
-CREATE FUNCTION pgstrom.fmin_trans_fp32(bytea,bytea)
-  RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_fmin_trans_fp32'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.fmin_trans_fp64(bytea,bytea)
@@ -2453,19 +2443,9 @@ CREATE FUNCTION pgstrom.fmin_trans_fp64(bytea,bytea)
   AS 'MODULE_PATHNAME','pgstrom_fmin_trans_fp64'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.fmax_trans_int32(bytea,bytea)
-  RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_fmax_trans_int32'
-  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
-
 CREATE FUNCTION pgstrom.fmax_trans_int64(bytea,bytea)
   RETURNS bytea
   AS 'MODULE_PATHNAME','pgstrom_fmax_trans_int64'
-  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
-
-CREATE FUNCTION pgstrom.fmax_trans_fp32(bytea,bytea)
-  RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_fmax_trans_fp32'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.fmax_trans_fp64(bytea,bytea)
@@ -2476,11 +2456,11 @@ CREATE FUNCTION pgstrom.fmax_trans_fp64(bytea,bytea)
 
 CREATE FUNCTION pgstrom.fminmax_final_int8(bytea)
   RETURNS int1
-  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_int32'
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_int8'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.fminmax_final_int16(bytea)
   RETURNS int2
-  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_int32'
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_int16'
   LANGUAGE C STRICT PARALLEL SAFE;
 CREATE FUNCTION pgstrom.fminmax_final_int32(bytea)
   RETURNS int4
@@ -2535,7 +2515,7 @@ CREATE FUNCTION pgstrom.fminmax_final_timestamptz(bytea)
 -- alternative MIN(X) for each supported type
 CREATE AGGREGATE pgstrom.min_i1(bytea)
 (
-  sfunc = pgstrom.fmin_trans_int32,
+  sfunc = pgstrom.fmin_trans_int64,
   stype = bytea,
   finalfunc = pgstrom.fminmax_final_int8,
   parallel = safe
@@ -2543,7 +2523,7 @@ CREATE AGGREGATE pgstrom.min_i1(bytea)
 
 CREATE AGGREGATE pgstrom.min_i2(bytea)
 (
-  sfunc = pgstrom.fmin_trans_int32,
+  sfunc = pgstrom.fmin_trans_int64,
   stype = bytea,
   finalfunc = pgstrom.fminmax_final_int16,
   parallel = safe
@@ -2551,7 +2531,7 @@ CREATE AGGREGATE pgstrom.min_i2(bytea)
 
 CREATE AGGREGATE pgstrom.min_i4(bytea)
 (
-  sfunc = pgstrom.fmin_trans_int32,
+  sfunc = pgstrom.fmin_trans_int64,
   stype = bytea,
   finalfunc = pgstrom.fminmax_final_int32,
   parallel = safe
@@ -2567,7 +2547,7 @@ CREATE AGGREGATE pgstrom.min_i8(bytea)
 
 CREATE AGGREGATE pgstrom.min_f2(bytea)
 (
-  sfunc = pgstrom.fmin_trans_fp32,
+  sfunc = pgstrom.fmin_trans_fp64,
   stype = bytea,
   finalfunc = pgstrom.fminmax_final_fp16,
   parallel = safe
@@ -2575,7 +2555,7 @@ CREATE AGGREGATE pgstrom.min_f2(bytea)
 
 CREATE AGGREGATE pgstrom.min_f4(bytea)
 (
-  sfunc = pgstrom.fmin_trans_fp32,
+  sfunc = pgstrom.fmin_trans_fp64,
   stype = bytea,
   finalfunc = pgstrom.fminmax_final_fp32,
   parallel = safe
@@ -2607,7 +2587,7 @@ CREATE AGGREGATE pgstrom.min_cash(bytea)
 
 CREATE AGGREGATE pgstrom.min_date(bytea)
 (
-  sfunc = pgstrom.fmin_trans_int32,
+  sfunc = pgstrom.fmin_trans_int64,
   stype = bytea,
   finalfunc = pgstrom.fminmax_final_date,
   parallel = safe
@@ -2640,7 +2620,7 @@ CREATE AGGREGATE pgstrom.min_tstz(bytea)
 -- alternative MAX(X) for each supported type
 CREATE AGGREGATE pgstrom.max_i1(bytea)
 (
-  sfunc = pgstrom.fmax_trans_int32,
+  sfunc = pgstrom.fmax_trans_int64,
   stype = bytea,
   finalfunc = pgstrom.fminmax_final_int8,
   parallel = safe
@@ -2648,7 +2628,7 @@ CREATE AGGREGATE pgstrom.max_i1(bytea)
 
 CREATE AGGREGATE pgstrom.max_i2(bytea)
 (
-  sfunc = pgstrom.fmax_trans_int32,
+  sfunc = pgstrom.fmax_trans_int64,
   stype = bytea,
   finalfunc = pgstrom.fminmax_final_int16,
   parallel = safe
@@ -2656,7 +2636,7 @@ CREATE AGGREGATE pgstrom.max_i2(bytea)
 
 CREATE AGGREGATE pgstrom.max_i4(bytea)
 (
-  sfunc = pgstrom.fmax_trans_int32,
+  sfunc = pgstrom.fmax_trans_int64,
   stype = bytea,
   finalfunc = pgstrom.fminmax_final_int32,
   parallel = safe
@@ -2672,7 +2652,7 @@ CREATE AGGREGATE pgstrom.max_i8(bytea)
 
 CREATE AGGREGATE pgstrom.max_f2(bytea)
 (
-  sfunc = pgstrom.fmax_trans_fp32,
+  sfunc = pgstrom.fmax_trans_fp64,
   stype = bytea,
   finalfunc = pgstrom.fminmax_final_fp16,
   parallel = safe
@@ -2680,7 +2660,7 @@ CREATE AGGREGATE pgstrom.max_f2(bytea)
 
 CREATE AGGREGATE pgstrom.max_f4(bytea)
 (
-  sfunc = pgstrom.fmax_trans_fp32,
+  sfunc = pgstrom.fmax_trans_fp64,
   stype = bytea,
   finalfunc = pgstrom.fminmax_final_fp32,
   parallel = safe
@@ -2712,7 +2692,7 @@ CREATE AGGREGATE pgstrom.max_cash(bytea)
 
 CREATE AGGREGATE pgstrom.max_date(bytea)
 (
-  sfunc = pgstrom.fmax_trans_int32,
+  sfunc = pgstrom.fmax_trans_int64,
   stype = bytea,
   finalfunc = pgstrom.fminmax_final_date,
   parallel = safe
@@ -2768,8 +2748,18 @@ CREATE AGGREGATE pgstrom.sum(int8)
   initcond = 0,
   parallel = safe
 );
+-- float8 --> float4
+CREATE AGGREGATE pgstrom.sum_f4(float8)
+(
+  sfunc = pg_catalog.float8pl,
+  stype = float8,
+  finalfunc = pg_catalog.float4,
+  initcond = 0.0,
+  parallel = safe
+);
+
 -- float8 --> numeric
-CREATE AGGREGATE pgstrom.sum(float8)
+CREATE AGGREGATE pgstrom.sum_num(float8)
 (
   sfunc = pg_catalog.float8pl,
   stype = float8,

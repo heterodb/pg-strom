@@ -21,14 +21,12 @@ PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_int32);
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_int64);
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_fp32);
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_fp64);
-PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_int32);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_int64);
-PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_fp32);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_fp64);
-PG_FUNCTION_INFO_V1(pgstrom_fmax_trans_int32);
 PG_FUNCTION_INFO_V1(pgstrom_fmax_trans_int64);
-PG_FUNCTION_INFO_V1(pgstrom_fmax_trans_fp32);
 PG_FUNCTION_INFO_V1(pgstrom_fmax_trans_fp64);
+PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_int8);
+PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_int16);
 PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_int32);
 PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_int64);
 PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_fp16);
@@ -108,19 +106,6 @@ pgstrom_partial_nrows(PG_FUNCTION_ARGS)
  * MIN(X) and MAX(X) functions
  */
 Datum
-pgstrom_partial_minmax_int32(PG_FUNCTION_ARGS)
-{
-	kagg_state__pminmax_int32_packed *r;
-
-	r = palloc(sizeof(kagg_state__pminmax_int32_packed));
-	r->nitems = 1;
-	r->value  = PG_GETARG_INT32(0);
-	SET_VARSIZE(r, sizeof(kagg_state__pminmax_int32_packed));
-
-	PG_RETURN_POINTER(r);
-}
-
-Datum
 pgstrom_partial_minmax_int64(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *r;
@@ -129,19 +114,6 @@ pgstrom_partial_minmax_int64(PG_FUNCTION_ARGS)
 	r->nitems = 1;
 	r->value  = PG_GETARG_INT64(0);
 	SET_VARSIZE(r, sizeof(kagg_state__pminmax_int64_packed));
-
-	PG_RETURN_POINTER(r);
-}
-
-Datum
-pgstrom_partial_minmax_fp32(PG_FUNCTION_ARGS)
-{
-	kagg_state__pminmax_fp32_packed *r;
-
-	r = palloc(sizeof(kagg_state__pminmax_fp32_packed));
-	r->nitems = 1;
-	r->value  = PG_GETARG_FLOAT4(0);
-	SET_VARSIZE(r, sizeof(kagg_state__pminmax_fp32_packed));
 
 	PG_RETURN_POINTER(r);
 }
@@ -195,21 +167,9 @@ pgstrom_partial_minmax_fp64(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(state);
 
 Datum
-pgstrom_fmin_trans_int32(PG_FUNCTION_ARGS)
-{
-	__MINMAX_TRANS_TEMPLATE(int32,Min);
-}
-
-Datum
 pgstrom_fmin_trans_int64(PG_FUNCTION_ARGS)
 {
 	__MINMAX_TRANS_TEMPLATE(int64,Min);
-}
-
-Datum
-pgstrom_fmin_trans_fp32(PG_FUNCTION_ARGS)
-{
-	__MINMAX_TRANS_TEMPLATE(fp32,Min);
 }
 
 Datum
@@ -219,19 +179,9 @@ pgstrom_fmin_trans_fp64(PG_FUNCTION_ARGS)
 }
 
 Datum
-pgstrom_fmax_trans_int32(PG_FUNCTION_ARGS)
-{
-	__MINMAX_TRANS_TEMPLATE(int32,Max);
-}
-Datum
 pgstrom_fmax_trans_int64(PG_FUNCTION_ARGS)
 {
 	__MINMAX_TRANS_TEMPLATE(int64,Max);
-}
-Datum
-pgstrom_fmax_trans_fp32(PG_FUNCTION_ARGS)
-{
-	__MINMAX_TRANS_TEMPLATE(fp32,Max);
 }
 
 Datum
@@ -241,12 +191,38 @@ pgstrom_fmax_trans_fp64(PG_FUNCTION_ARGS)
 }
 
 Datum
-pgstrom_fminmax_final_int32(PG_FUNCTION_ARGS)
+pgstrom_fminmax_final_int8(PG_FUNCTION_ARGS)
 {
-	kagg_state__pminmax_int32_packed *state
-		= (kagg_state__pminmax_int32_packed *)PG_GETARG_BYTEA_P(0);
+	kagg_state__pminmax_int64_packed *state
+		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
+	if (state->value < SCHAR_MIN || state->value > SCHAR_MAX)
+		elog(ERROR, "min(int8) out of range");
+	PG_RETURN_INT32(state->value);
+}
+
+Datum
+pgstrom_fminmax_final_int16(PG_FUNCTION_ARGS)
+{
+	kagg_state__pminmax_int64_packed *state
+		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
+	if (state->nitems == 0)
+		PG_RETURN_NULL();
+	if (state->value < SHRT_MIN || state->value > SHRT_MAX)
+		elog(ERROR, "min(int16) out of range");
+	PG_RETURN_INT32(state->value);
+}
+
+Datum
+pgstrom_fminmax_final_int32(PG_FUNCTION_ARGS)
+{
+	kagg_state__pminmax_int64_packed *state
+		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
+	if (state->nitems == 0)
+		PG_RETURN_NULL();
+	if (state->value < INT_MIN || state->value > INT_MAX)
+		elog(ERROR, "min(int32) out of range");
 	PG_RETURN_INT32(state->value);
 }
 
@@ -263,18 +239,18 @@ pgstrom_fminmax_final_int64(PG_FUNCTION_ARGS)
 Datum
 pgstrom_fminmax_final_fp16(PG_FUNCTION_ARGS)
 {
-	kagg_state__pminmax_fp32_packed *state
-		= (kagg_state__pminmax_fp32_packed *)PG_GETARG_BYTEA_P(0);
+	kagg_state__pminmax_fp64_packed *state
+		= (kagg_state__pminmax_fp64_packed *)PG_GETARG_BYTEA_P(0);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
-	PG_RETURN_UINT16(__half_as_short__(fp32_to_fp16(state->value)));
+	PG_RETURN_UINT16(__half_as_short__(fp64_to_fp16(state->value)));
 }
 
 Datum
 pgstrom_fminmax_final_fp32(PG_FUNCTION_ARGS)
 {
-	kagg_state__pminmax_fp32_packed *state
-		= (kagg_state__pminmax_fp32_packed *)PG_GETARG_BYTEA_P(0);
+	kagg_state__pminmax_fp64_packed *state
+		= (kagg_state__pminmax_fp64_packed *)PG_GETARG_BYTEA_P(0);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
 	PG_RETURN_FLOAT4(state->value);

@@ -845,7 +845,7 @@ __spinlock_release(volatile uint32_t *lock)
 	oldval = __sync_val_compare_and_swap(lock, 1, 0);
 	assert(oldval == 1);
 }
-
+#if 0
 static int
 __writeOutGroupByKey(kern_context *kcxt,
 					 const kern_colmeta *cmeta,
@@ -906,7 +906,8 @@ __writeOutGroupByKey(kern_context *kcxt,
 	}
 	return -1;
 }
-
+#endif
+#if 0
 static int32_t
 __estimateGroupByTupleSize(kern_context *kcxt,
 						   kern_data_store *kds_final,
@@ -929,11 +930,11 @@ __estimateGroupByTupleSize(kern_context *kcxt,
 		switch (desc->action)
 		{
 			case KAGG_ACTION__VREF:
-				slot_id = desc->arg0_slot_id;
-				assert(slot_id >= 0 && slot_id < kcxt->kvars_nslots);
+				assert(desc->arg0_slot_id >= 0 &&
+					   desc->arg0_slot_id < kcxt->kvars_nslots);
 				sz = __writeOutGroupByKey(kcxt, cmeta, NULL,
-										  kcxt->kvars_class[slot_id],
-										  &kcxt->kvars_slot[slot_id]);
+										  kcxt->kvars_class[desc->arg0_slot_id],
+										  &kcxt->kvars_slot[desc->arg0_slot_id]);
 				if (sz < 0)
 					return -1;
 				tupsz += sz;
@@ -942,35 +943,28 @@ __estimateGroupByTupleSize(kern_context *kcxt,
 			case KAGG_ACTION__NROWS_COND:
 				tupsz += sizeof(int64_t);
 				break;
-#if 0
-			case KAGG_ACTION__PMIN_INT32:
-			case KAGG_ACTION__PMAX_INT32:
-				tupsz += sizeof(kagg_state__pminmax_int32_packed);
-				break;
-			case KAGG_ACTION__PMIN_FP32:
-			case KAGG_ACTION__PMAX_FP32:
-				tupsz += sizeof(kagg_state__pminmax_fp32_packed);
-				break;
-			case KAGG_ACTION__PMIN_INT64:
-			case KAGG_ACTION__PMAX_INT64:
+			case KAGG_ACTION__PMIN_INT:
+			case KAGG_ACTION__PMAX_INT:
 				tupsz += sizeof(kagg_state__pminmax_int64_packed);
 				break;
-			case KAGG_ACTION__PMIN_FP64:
-			case KAGG_ACTION__PMAX_FP64:
+			case KAGG_ACTION__PMIN_FP:
+			case KAGG_ACTION__PMAX_FP:
 				tupsz += sizeof(kagg_state__pminmax_fp64_packed);
 				break;
-#endif
 			case KAGG_ACTION__PSUM_INT:
+				tupsz += sizeof(int64_t);
+				break;
+			case KAGG_ACTION__PSUM_FP:
+				tupsz += sizeof(float8_t);
+				break;
 			case KAGG_ACTION__PAVG_INT:
 				tupsz += sizeof(kagg_state__pavg_int_packed);
 				break;
-			case KAGG_ACTION__PSUM_FP32:
-			case KAGG_ACTION__PSUM_FP64:
 			case KAGG_ACTION__PAVG_FP:
 				tupsz += sizeof(kagg_state__pavg_fp_packed);
 				break;
 			case KAGG_ACTION__STDDEV:
-				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__stddev_packed);
+				tupsz += sizeof(kagg_state__stddev_packed);
 				break;
 			case KAGG_ACTION__COVAR:
 				tupsz += sizeof(kagg_state__covar_packed);
@@ -981,28 +975,107 @@ __estimateGroupByTupleSize(kern_context *kcxt,
 	}
 	return tupsz;
 }
+#endif
 
 static int32_t
-__fillupGroupByTupleOne(kern_context *kcxt,
-						kern_data_store *kds_final,
-						HeapTupleHeaderData *htup,
-						kern_expression *kexp_actions)
+__xpuPreAggWriteOutGroupKey(kern_context *kcxt,
+							const kern_colmeta *cmeta,
+							char *buffer,
+							const kern_aggregate_desc *pdesc)
+{
+	kern_variable *kvar;
+	int		vclass;
+	int		nbytes;
+
+	assert(pdesc->action == KAGG_ACTION__VREF &&
+		   pdesc->arg0_slot_id >= 0 &&
+		   pdesc->arg0_slot_id < kcxt->kvars_nslots);
+	vclass = kcxt->kvars_class[pdesc->arg0_slot_id];
+	kvar = &kcxt->kvars_slot[pdesc->arg0_slot_id];
+	switch (vclass)
+	{
+		case KVAR_CLASS__NULL:
+			return 0;
+
+		case KVAR_CLASS__INLINE:
+			assert(cmeta->attlen >= 0 &&
+				   cmeta->attlen <= sizeof(kern_variable));
+			if (buffer)
+				memcpy(buffer, kvar, cmeta->attlen);
+			return cmeta->attlen;
+
+		case KVAR_CLASS__VARLENA:
+			assert(cmeta->attlen == -1);
+			nbytes = VARSIZE_ANY(kvar->ptr);
+			if (buffer)
+				memcpy(buffer, kvar->ptr, nbytes);
+			return nbytes;
+#if 0
+		case KVAR_CLASS__XPU_DATUM:
+			{
+				xpu_datum_t *xdatum = (xpu_datum_t *)
+					((char *)kcxt->kvars_slot + kvar->xpu.offset);
+				const xpu_datum_operators *expr_ops = xdatum->expr_ops;
+
+				if (XDATUM_IS_NULL(xdatum))
+					return 0;
+				assert(expr_ops->xpu_type_code == kvar->xpu.type_code);
+				nbytes = expr_ops->xpu_datum_write(kcxt, buffer, xdatum);
+				return nbytes;
+			}
+#endif
+		default:
+			if (vclass < 0)
+				return -1;
+			if (cmeta->attlen >= 0)
+			{
+				if (buffer)
+				{
+					nbytes = Min(vclass, cmeta->attlen);
+					memcpy(buffer, kvar->ptr, nbytes);
+					if (nbytes < cmeta->attlen)
+						memset(buffer + nbytes, 0, cmeta->attlen - nbytes);
+				}
+				return cmeta->attlen;
+			}
+			else if (cmeta->attlen == -1)
+			{
+				nbytes = VARHDRSZ + vclass;
+				if (buffer)
+				{
+					memcpy(buffer+VARHDRSZ, kvar->ptr, vclass);
+					SET_VARSIZE(buffer, nbytes);
+				}
+				return nbytes;
+			}
+	}
+	return -1;
+}
+
+static int32_t
+xpuPreAggWriteOutOneTuple(kern_context *kcxt,
+						  kern_data_store *kds_final,
+						  HeapTupleHeaderData *htup,
+						  kern_expression *kexp_actions)
 {
 	int			nattrs = Min(kds_final->ncols, kexp_actions->u.pagg.nattrs);
 	uint32_t	t_hoff, t_next;
 	uint16_t	t_infomask = HEAP_HASNULL;
+	char	   *buffer = NULL;
 
 	t_hoff = MAXALIGN(offsetof(HeapTupleHeaderData,
 							   t_bits) + BITMAPLEN(nattrs));
-	memset(htup, 0, t_hoff);
-	htup->t_choice.t_datum.datum_typmod = kds_final->tdtypmod;
-	htup->t_choice.t_datum.datum_typeid = kds_final->tdtypeid;
-	htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
-	htup->t_ctid.ip_blkid.bi_lo = 0xffff;
-	htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
-	htup->t_infomask2 = (nattrs & HEAP_NATTS_MASK);
-	htup->t_hoff = t_hoff;
-
+	if (htup)
+	{
+		memset(htup, 0, t_hoff);
+		htup->t_choice.t_datum.datum_typmod = kds_final->tdtypmod;
+		htup->t_choice.t_datum.datum_typeid = kds_final->tdtypeid;
+		htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
+		htup->t_ctid.ip_blkid.bi_lo = 0xffff;
+		htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
+		htup->t_infomask2 = (nattrs & HEAP_NATTS_MASK);
+		htup->t_hoff = t_hoff;
+	}
 	/* walk on the columns */
 	for (int j=0; j < nattrs; j++)
 	{
@@ -1011,77 +1084,131 @@ __fillupGroupByTupleOne(kern_context *kcxt,
 		kern_variable  *kvar;
 		int				vclass;
 		bool			isnull = false;
-		int				sz, slot_id;
-		char		   *pos;
+		int				nbytes;
 
 		t_next = TYPEALIGN(cmeta->attalign, t_hoff);
-		if (t_next > t_hoff)
-			memset((char *)htup + t_hoff, 0, t_next - t_hoff);
-		pos = (char *)htup + t_next;
+		if (htup)
+		{
+			if (t_next > t_hoff)
+				memset((char *)htup + t_hoff, 0, t_next - t_hoff);
+			buffer = (char *)htup + t_next;
+		}
 
 		switch (desc->action)
 		{
 			case KAGG_ACTION__VREF:
-				slot_id = desc->arg0_slot_id;
-				assert(slot_id >= 0 && slot_id < kcxt->kvars_nslots);
-				sz = __writeOutGroupByKey(kcxt, cmeta, pos,
-										  kcxt->kvars_class[slot_id],
-										  &kcxt->kvars_slot[slot_id]);
-				if (sz < 0)
+				nbytes = __xpuPreAggWriteOutGroupKey(kcxt, cmeta, buffer, desc);
+				if (nbytes < 0)
 					return -1;
-				t_hoff = t_next + sz;
 				break;
+
 			case KAGG_ACTION__NROWS_ANY:
-				*((int64_t *)pos) = 1;
-				t_hoff = t_next + sizeof(int64_t);
+				nbytes = sizeof(int64_t);
+				if (buffer)
+				{
+					*((int64_t *)buffer) = 1;
+				}
 				break;
 
 			case KAGG_ACTION__NROWS_COND:
-				vclass = kcxt->kvars_class[desc->arg0_slot_id];
-				*((int64_t *)pos) = (vclass != KVAR_CLASS__NULL ? 1 : 0);
-				t_hoff = t_next + sizeof(int64_t);
-				break;
-#if 0
-			case KAGG_ACTION__PMIN_INT32:
-			case KAGG_ACTION__PMAX_INT32:
+				nbytes = sizeof(int64_t);
+				if (buffer)
 				{
-					kagg_state__pminmax_int32_packed *r
-						= (kagg_state__pminmax_int32_packed *)pos;
-					r->nitems = 1;
-					r->value = *((int32_t *)addr);
-					SET_VARSIZE(r, sizeof(kagg_state__pminmax_int32_packed));
-					t_hoff = t_next + sizeof(kagg_state__pminmax_int32_packed);
+					vclass = kcxt->kvars_class[desc->arg0_slot_id];
+					*((int64_t *)buffer) = (vclass != KVAR_CLASS__NULL ? 1 : 0);
 				}
 				break;
-			case KAGG_ACTION__PMIN_FP32:
-			case KAGG_ACTION__PMAX_FP32:
-				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__pminmax_fp32_packed);
+
+			case KAGG_ACTION__PMIN_INT:
+			case KAGG_ACTION__PMAX_INT:
+				nbytes = sizeof(kagg_state__pminmax_int64_packed);
+				if (buffer)
+				{
+					kagg_state__pminmax_int64_packed *r =
+						(kagg_state__pminmax_int64_packed *)buffer;
+					vclass = kcxt->kvars_class[desc->arg0_slot_id];
+					kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+					if (vclass == KVAR_CLASS__NULL)
+					{
+						memset(r, 0, nbytes);
+					}
+					else if (vclass == KVAR_CLASS__INLINE)
+					{
+						r->nitems = 1;
+						r->value = kvar->i64;
+					}
+					else
+					{
+						return -1;
+					}
+					SET_VARSIZE(r, nbytes);
+				}
+				t_infomask |= HEAP_HASVARWIDTH;
 				break;
-			case KAGG_ACTION__PMIN_INT64:
-			case KAGG_ACTION__PMAX_INT64:
-				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__pminmax_int64_packed);
+
+			case KAGG_ACTION__PMIN_FP:
+			case KAGG_ACTION__PMAX_FP:
+				nbytes = sizeof(kagg_state__pminmax_fp64_packed);
+				if (buffer)
+				{
+					kagg_state__pminmax_fp64_packed *r =
+						(kagg_state__pminmax_fp64_packed *)buffer;
+					vclass = kcxt->kvars_class[desc->arg0_slot_id];
+					kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+					if (vclass == KVAR_CLASS__NULL)
+					{
+						memset(r, 0, nbytes);
+					}
+					else if (vclass == KVAR_CLASS__INLINE)
+					{
+						r->nitems = 1;
+						r->value = kvar->fp64;
+					}
+					else
+					{
+						return -1;
+					}
+					SET_VARSIZE(r, nbytes);
+				}
+				t_infomask |= HEAP_HASVARWIDTH;
 				break;
-			case KAGG_ACTION__PMIN_FP64:
-			case KAGG_ACTION__PMAX_FP64:
-				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__pminmax_fp64_packed);
-				break;
-#endif
+
 			case KAGG_ACTION__PSUM_INT:
-				vclass = kcxt->kvars_class[desc->arg0_slot_id];
-				kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
-				if (vclass == KVAR_CLASS__NULL)
-					memset(pos, 0, sizeof(int64_t));
-				else if (vclass == KVAR_CLASS__INLINE)
-					memcpy(pos, &kvar->i64, sizeof(int64_t));
-				else
-					return -1;
-				t_hoff = t_next + sizeof(int64_t);
+				nbytes = sizeof(int64_t);
+				if (buffer)
+				{
+					vclass = kcxt->kvars_class[desc->arg0_slot_id];
+					kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+					if (vclass == KVAR_CLASS__NULL)
+						*((int64_t *)buffer) = 0;
+					else if (vclass == KVAR_CLASS__INLINE)
+						*((int64_t *)buffer) = kvar->i64;
+					else
+						return -1;
+				}
+				break;
+
+			case KAGG_ACTION__PSUM_FP:
+				nbytes = sizeof(int64_t);
+				if (buffer)
+				{
+					vclass = kcxt->kvars_class[desc->arg0_slot_id];
+					kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+					if (vclass == KVAR_CLASS__NULL)
+						*((float8_t *)buffer) = 0.0;
+					else if (vclass == KVAR_CLASS__INLINE)
+						*((float8_t *)buffer) = kvar->fp64;
+					else
+						return -1;
+				}
 				break;
 
 			case KAGG_ACTION__PAVG_INT:
+				nbytes = sizeof(kagg_state__pavg_int_packed);
+				if (buffer)
 				{
 					kagg_state__pavg_int_packed *r
-						= (kagg_state__pavg_int_packed *)pos;
+						= (kagg_state__pavg_int_packed *)buffer;
 					vclass = kcxt->kvars_class[desc->arg0_slot_id];
 					kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
 					if (vclass == KVAR_CLASS__NULL)
@@ -1098,29 +1225,17 @@ __fillupGroupByTupleOne(kern_context *kcxt,
 					{
 						return -1;
 					}
-					SET_VARSIZE(r, sizeof(kagg_state__pavg_int_packed));
-					t_infomask |= HEAP_HASVARWIDTH;
-					t_hoff = t_next + sizeof(kagg_state__pavg_int_packed);
+					SET_VARSIZE(r, nbytes);
 				}
-				break;
-
-//			case KAGG_ACTION__PSUM_FP32:
-			case KAGG_ACTION__PSUM_FP64:
-				vclass = kcxt->kvars_class[desc->arg0_slot_id];
-				kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
-				if (vclass == KVAR_CLASS__NULL)
-					*((float8_t *)pos) = 0.0;
-				else if (vclass == KVAR_CLASS__INLINE)
-					*((float8_t *)pos) = kvar->fp64;
-				else
-					return -1;
-				t_hoff = t_next + sizeof(float8_t);
+				t_infomask |= HEAP_HASVARWIDTH;
 				break;
 
 			case KAGG_ACTION__PAVG_FP:
+				nbytes = sizeof(kagg_state__pavg_fp_packed);
+				if (buffer)
 				{
 					kagg_state__pavg_fp_packed *r
-						= (kagg_state__pavg_fp_packed *)pos;
+						= (kagg_state__pavg_fp_packed *)buffer;
 					vclass = kcxt->kvars_class[desc->arg0_slot_id];
 					kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
 					if (vclass == KVAR_CLASS__NULL)
@@ -1137,25 +1252,80 @@ __fillupGroupByTupleOne(kern_context *kcxt,
 					{
 						return -1;
 					}
-					SET_VARSIZE(r, sizeof(kagg_state__pavg_fp_packed));
-					t_infomask |= HEAP_HASVARWIDTH;
-					t_hoff = t_next + sizeof(kagg_state__pavg_fp_packed);
-				}				
+					SET_VARSIZE(r, nbytes);
+				}
+				t_infomask |= HEAP_HASVARWIDTH;
 				break;
-#if 0
+
 			case KAGG_ACTION__STDDEV:
-				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__stddev_packed);
+				nbytes = sizeof(kagg_state__stddev_packed);
+				if (buffer)
+				{
+					kagg_state__stddev_packed *r
+						= (kagg_state__stddev_packed *)buffer;
+					vclass = kcxt->kvars_class[desc->arg0_slot_id];
+					kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
+					if (vclass == KVAR_CLASS__NULL)
+					{
+						memset(r, 0, nbytes);
+					}
+					else if (vclass == KVAR_CLASS__INLINE)
+					{
+						r->nitems = 1;
+						r->sum_x  = kvar->fp64;
+						r->sum_x2 = kvar->fp64 * kvar->fp64;
+					}
+					else
+					{
+						return -1;
+					}
+					SET_VARSIZE(r, nbytes);
+				}
+				t_infomask |= HEAP_HASVARWIDTH;
 				break;
+
 			case KAGG_ACTION__COVAR:
-				tupsz = INTALIGN(tupsz) + sizeof(kagg_state__covar_packed);
+				nbytes = sizeof(kagg_state__covar_packed);
+				if (buffer)
+				{
+					kagg_state__covar_packed *r
+						= (kagg_state__covar_packed *)buffer;
+					kern_variable *kvar_x = &kcxt->kvars_slot[desc->arg0_slot_id];
+					kern_variable *kvar_y = &kcxt->kvars_slot[desc->arg1_slot_id];
+					int		vclass_x = kcxt->kvars_class[desc->arg0_slot_id];
+					int		vclass_y = kcxt->kvars_class[desc->arg1_slot_id];
+
+					if (vclass_x == KVAR_CLASS__NULL ||
+						vclass_y == KVAR_CLASS__NULL)
+					{
+						memset(r, 0, nbytes);
+					}
+					else if (vclass_x == KVAR_CLASS__INLINE &&
+							 vclass_y == KVAR_CLASS__INLINE)
+					{
+						r->nitems = 1;
+						r->sum_x  = kvar_x->fp64;
+						r->sum_xx = kvar_x->fp64 * kvar_x->fp64;
+						r->sum_y  = kvar_y->fp64;
+						r->sum_yy = kvar_y->fp64 * kvar_y->fp64;
+						r->sum_xy = kvar_x->fp64 * kvar_y->fp64;
+					}
+					else
+					{
+						return -1;
+					}
+					SET_VARSIZE(r, nbytes);
+				}
+				t_infomask |= HEAP_HASVARWIDTH;
 				break;
-#endif
+
 			default:
 				return -1;
 		}
 
 		if (!isnull)
 			htup->t_bits[j>>3] |= (1<<(j&7));
+		t_hoff = t_next + nbytes;
 	}
 	htup->t_infomask = t_infomask;
 	return 0;
@@ -1166,7 +1336,7 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 						kern_data_store *kds_final,
 						kern_expression *kexp_actions)
 {
-	int32_t		tupsz = __estimateGroupByTupleSize(kcxt, kds_final, kexp_actions);
+	int32_t		tupsz;
 	int32_t		item_sz;
 	size_t		total_sz;
 	kern_tupitem *tupitem;
@@ -1179,6 +1349,7 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 	} u;
 
 	assert(kds_final->format == KDS_FORMAT_ROW);
+	tupsz = xpuPreAggWriteOutOneTuple(kcxt, kds_final, NULL, kexp_actions);
 	assert(tupsz > 0);
 	item_sz = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
 	total_sz = (KDS_HEAD_LENGTH(kds_final) +
@@ -1190,7 +1361,7 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 							   + kds_final->length
 							   - __kds_unpack(kds_final->usage)
 							   - item_sz);
-	__fillupGroupByTupleOne(kcxt, kds_final, &tupitem->htup, kexp_actions);
+	xpuPreAggWriteOutOneTuple(kcxt, kds_final, &tupitem->htup, kexp_actions);
 	tupitem->t_len = tupsz;
 	tupitem->rowid = kds_final->nitems;
 	u.kds.nitems = kds_final->nitems + 1;
@@ -1341,7 +1512,7 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 				break;
 
 //			case KAGG_ACTION__PSUM_FP32:
-			case KAGG_ACTION__PSUM_FP64:
+			case KAGG_ACTION__PSUM_FP:
 				vclass = kcxt->kvars_class[desc->arg0_slot_id];
 				kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
 				if (vclass == KVAR_CLASS__INLINE)

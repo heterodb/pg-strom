@@ -1476,17 +1476,12 @@ typedef struct
 #define KAGG_ACTION__VREF			101		/* simple var copy */
 #define KAGG_ACTION__NROWS_ANY		201		/* <int8> - increment 1 always */
 #define KAGG_ACTION__NROWS_COND		202		/* <int8> - increment 1 if not NULL */
-#define KAGG_ACTION__PMIN_INT32		301		/* <int4>,<int4> - min value */
-#define KAGG_ACTION__PMIN_INT64		302		/* <int4>,<int8> - min value */
-#define KAGG_ACTION__PMIN_FP32		303		/* <int4>,<float4> - min value */
-#define KAGG_ACTION__PMIN_FP64		304		/* <int4>,<float8> - min value */
-#define KAGG_ACTION__PMAX_INT32		401		/* <int4>,<int4> - max value */
-#define KAGG_ACTION__PMAX_INT64		402		/* <int4>,<int8> - max value */
-#define KAGG_ACTION__PMAX_FP32		403		/* <int4>,<float4> - max value */
-#define KAGG_ACTION__PMAX_FP64		404		/* <int4>,<float8> - max value */
+#define KAGG_ACTION__PMIN_INT		302		/* <int4>,<int8> - min value */
+#define KAGG_ACTION__PMIN_FP		304		/* <int4>,<float8> - min value */
+#define KAGG_ACTION__PMAX_INT		402		/* <int4>,<int8> - max value */
+#define KAGG_ACTION__PMAX_FP		404		/* <int4>,<float8> - max value */
 #define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
-#define KAGG_ACTION__PSUM_FP32		502		/* <float4> - sum of values */
-#define KAGG_ACTION__PSUM_FP64		503		/* <float8> - sum of values */
+#define KAGG_ACTION__PSUM_FP		503		/* <float8> - sum of values */
 #define KAGG_ACTION__PAVG_INT		601		/* <int4>,<int8> - NROWS+PSUM */
 #define KAGG_ACTION__PAVG_FP		602		/* <int4>,<float8> - NROWS+PSUM */
 #define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
@@ -1496,22 +1491,8 @@ typedef struct
 {
 	int32_t		vl_len_;
 	uint32_t	nitems;
-	int32_t		value;
-} kagg_state__pminmax_int32_packed;
-
-typedef struct
-{
-	int32_t		vl_len_;
-	uint32_t	nitems;
 	int64_t		value;
 } kagg_state__pminmax_int64_packed;
-
-typedef struct
-{
-	int32_t		vl_len_;
-	uint32_t	nitems;
-	float4_t	value;
-} kagg_state__pminmax_fp32_packed;
 
 typedef struct
 {
@@ -1555,9 +1536,6 @@ typedef struct
 
 struct kern_aggregate_desc
 {
-	int		  (*action_fn)(kern_context *kcxt,
-						   const struct kern_aggregate_desc *kagg,
-						   char *pos);
 	uint16_t	action;			/* any of KAGG_ACTION__* */
 	int16_t		arg0_slot_id;	/* -1, if not used */
 	int16_t		arg1_slot_id;	/* -1, if not used */

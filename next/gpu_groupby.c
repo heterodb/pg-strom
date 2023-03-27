@@ -59,67 +59,67 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"min(int1)",
 	 "s:min_i1(bytea)",
 	 "s:pmin(int1)",
-	 KAGG_ACTION__PMIN_INT32, false
+	 KAGG_ACTION__PMIN_INT, false
 	},
 	{"min(int2)",
 	 "s:min_i2(bytea)",
 	 "s:pmin(int2)",
-	 KAGG_ACTION__PMIN_INT32, false
+	 KAGG_ACTION__PMIN_INT, false
 	},
 	{"min(int4)",
 	 "s:min_i4(bytea)",
 	 "s:pmin(int4)",
-	 KAGG_ACTION__PMIN_INT32, false
+	 KAGG_ACTION__PMIN_INT, false
 	},
 	{"min(int8)",
 	 "s:min_i8(bytea)",
 	 "s:pmin(int8)",
-	 KAGG_ACTION__PMIN_INT64, false
+	 KAGG_ACTION__PMIN_INT, false
 	},
 	{"min(float2)",
      "s:min_f2(bytea)",
 	 "s:pmin(float4)",
-	 KAGG_ACTION__PMIN_FP32, false
+	 KAGG_ACTION__PMIN_FP, false
 	},
 	{"min(float4)",
      "s:min_f4(bytea)",
 	 "s:pmin(float4)",
-	 KAGG_ACTION__PMIN_FP32, false
+	 KAGG_ACTION__PMIN_FP, false
 	},
 	{"min(float8)",
      "s:min_f8(bytea)",
 	 "s:pmin(float8)",
-	 KAGG_ACTION__PMIN_FP64, false
+	 KAGG_ACTION__PMIN_FP, false
 	},
 	{"min(numeric)",
 	 "s:min_num(bytea)",
 	 "s:pmin(float8)",
-	 KAGG_ACTION__PMIN_FP64, true
+	 KAGG_ACTION__PMIN_FP, true
 	},
 	{"min(money)",
 	 "s:min_cash(bytea)",
 	 "s:pmin(money)",
-	 KAGG_ACTION__PMIN_INT64, false
+	 KAGG_ACTION__PMIN_INT, false
 	},
 	{"min(date)",
 	 "s:min_date(bytea)",
 	 "s:pmin(date)",
-	 KAGG_ACTION__PMIN_INT32, false
+	 KAGG_ACTION__PMIN_INT, false
 	},
 	{"min(time)",
 	 "s:min_time(bytea)",
 	 "s:pmin(time)",
-	 KAGG_ACTION__PMIN_INT64, false
+	 KAGG_ACTION__PMIN_INT, false
 	},
 	{"min(timestamp)",
 	 "s:min_ts(bytea)",
 	 "s:pmin(timestamp)",
-	 KAGG_ACTION__PMIN_INT64, false
+	 KAGG_ACTION__PMIN_INT, false
 	},
 	{"min(timestamptz)",
 	 "s:min_tstz(bytea)",
 	 "s:pmin(timestamptz)",
-	 KAGG_ACTION__PMIN_INT64, false
+	 KAGG_ACTION__PMIN_INT, false
 	},
 	/*
 	 * MAX(X) = MAX(PMAX(X))
@@ -127,67 +127,67 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"max(int1)",
 	 "s:max_i1(bytea)",
 	 "s:pmax(int1)",
-	 KAGG_ACTION__PMAX_INT32, false
+	 KAGG_ACTION__PMAX_INT, false
 	},
 	{"max(int2)",
 	 "s:max_i2(bytea)",
 	 "s:pmax(int2)",
-	 KAGG_ACTION__PMAX_INT32, false
+	 KAGG_ACTION__PMAX_INT, false
 	},
 	{"max(int4)",
 	 "s:max_i4(bytea)",
 	 "s:pmax(int4)",
-	 KAGG_ACTION__PMAX_INT32, false
+	 KAGG_ACTION__PMAX_INT, false
 	},
 	{"max(int8)",
 	 "s:max_i8(bytea)",
 	 "s:pmax(int8)",
-	 KAGG_ACTION__PMAX_INT64, false
+	 KAGG_ACTION__PMAX_INT, false
 	},
 	{"max(float2)",
      "s:max_f2(bytea)",
 	 "s:pmax(float4)",
-	 KAGG_ACTION__PMAX_FP32, false
+	 KAGG_ACTION__PMAX_FP, false
 	},
 	{"max(float4)",
      "s:max_f4(bytea)",
 	 "s:pmax(float4)",
-	 KAGG_ACTION__PMAX_FP32, false
+	 KAGG_ACTION__PMAX_FP, false
 	},
 	{"max(float8)",
      "s:max_f8(bytea)",
 	 "s:pmax(float8)",
-	 KAGG_ACTION__PMAX_FP64, false
+	 KAGG_ACTION__PMAX_FP, false
 	},
 	{"max(numeric)",
 	 "s:max_num(bytea)",
 	 "s:pmax(float8)",
-	 KAGG_ACTION__PMAX_FP64, true
+	 KAGG_ACTION__PMAX_FP, true
 	},
 	{"max(money)",
 	 "s:max_cash(bytea)",
 	 "s:pmax(money)",
-	 KAGG_ACTION__PMAX_INT64, false
+	 KAGG_ACTION__PMAX_INT, false
 	},
 	{"max(date)",
 	 "s:max_date(bytea)",
 	 "s:pmax(date)",
-	 KAGG_ACTION__PMAX_INT32, false
+	 KAGG_ACTION__PMAX_INT, false
 	},
 	{"max(time)",
 	 "s:max_time(bytea)",
 	 "s:pmax(time)",
-	 KAGG_ACTION__PMAX_INT64, false
+	 KAGG_ACTION__PMAX_INT, false
 	},
 	{"max(timestamp)",
 	 "s:max_ts(bytea)",
 	 "s:pmax(timestamp)",
-	 KAGG_ACTION__PMAX_INT64, false
+	 KAGG_ACTION__PMAX_INT, false
 	},
 	{"max(timestamptz)",
 	 "s:max_tstz(bytea)",
 	 "s:pmax(timestamptz)",
-	 KAGG_ACTION__PMAX_INT64, false
+	 KAGG_ACTION__PMAX_INT, false
 	},
 	/*
 	 * SUM(X) = SUM(PSUM(X))
@@ -213,24 +213,24 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(float2)",
-	 "c:sum(float4)",
+	 "c:sum(float8)",
 	 "s:psum(float4)",
-	 KAGG_ACTION__PSUM_FP32, false
+	 KAGG_ACTION__PSUM_FP, false
 	},
 	{"sum(float4)",
-	 "c:sum(float4)",
+	 "s:sum_f4(float8)",
 	 "s:psum(float4)",
-	 KAGG_ACTION__PSUM_FP32, false
+	 KAGG_ACTION__PSUM_FP, false
 	},
 	{"sum(float8)",
 	 "c:sum(float8)",
 	 "s:psum(float8)",
-	 KAGG_ACTION__PSUM_FP64, false
+	 KAGG_ACTION__PSUM_FP, false
 	},
 	{"sum(numeric)",
-	 "s:sum(float8)",
+	 "s:sum_num(float8)",
 	 "s:psum(float8)",
-	 KAGG_ACTION__PSUM_FP64, true
+	 KAGG_ACTION__PSUM_FP, true
 	},
 	{"sum(money)",
 	 "s:sum_cash(int8)",
@@ -718,20 +718,13 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 		case KAGG_ACTION__PSUM_INT:
 			type_oid = INT8OID;
 			break;
-		case KAGG_ACTION__PSUM_FP32:
-			type_oid = FLOAT4OID;
-			break;
-		case KAGG_ACTION__PSUM_FP64:
+		case KAGG_ACTION__PSUM_FP:
 			type_oid = FLOAT8OID;
 			break;
-		case KAGG_ACTION__PMIN_INT32:
-		case KAGG_ACTION__PMIN_INT64:
-		case KAGG_ACTION__PMIN_FP32:
-		case KAGG_ACTION__PMIN_FP64:
-		case KAGG_ACTION__PMAX_INT32:
-		case KAGG_ACTION__PMAX_INT64:
-		case KAGG_ACTION__PMAX_FP32:
-		case KAGG_ACTION__PMAX_FP64:
+		case KAGG_ACTION__PMIN_INT:
+		case KAGG_ACTION__PMIN_FP:
+		case KAGG_ACTION__PMAX_INT:
+		case KAGG_ACTION__PMAX_FP:
 		case KAGG_ACTION__PAVG_INT:
 		case KAGG_ACTION__PAVG_FP:
 		case KAGG_ACTION__STDDEV:
