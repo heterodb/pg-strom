@@ -2623,23 +2623,18 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 				appendStringInfo(buf, "nrows[%d]",
 								 desc->arg0_slot_id);
 				break;
-			case KAGG_ACTION__PMIN_INT32:
-			case KAGG_ACTION__PMIN_INT64:
-			case KAGG_ACTION__PMIN_FP32:
-			case KAGG_ACTION__PMIN_FP64:
+			case KAGG_ACTION__PMIN_INT:
+			case KAGG_ACTION__PMIN_FP:
 				appendStringInfo(buf, "pmin[%d]",
 								 desc->arg0_slot_id);
 				break;
-			case KAGG_ACTION__PMAX_INT32:
-			case KAGG_ACTION__PMAX_INT64:
-			case KAGG_ACTION__PMAX_FP32:
-			case KAGG_ACTION__PMAX_FP64:
+			case KAGG_ACTION__PMAX_INT:
+			case KAGG_ACTION__PMAX_FP:
 				appendStringInfo(buf, "pmax[%d]",
 								 desc->arg0_slot_id);
 				break;
 			case KAGG_ACTION__PSUM_INT:
-			case KAGG_ACTION__PSUM_FP32:
-			case KAGG_ACTION__PSUM_FP64:
+			case KAGG_ACTION__PSUM_FP:
 				appendStringInfo(buf, "psum[%d]",
 								 desc->arg0_slot_id);
 				break;
