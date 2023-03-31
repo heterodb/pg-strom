@@ -879,20 +879,19 @@ __xpuPreAggWriteOutGroupKey(kern_context *kcxt,
 			if (buffer)
 				memcpy(buffer, kvar->ptr, nbytes);
 			return nbytes;
-#if 0
+
 		case KVAR_CLASS__XPU_DATUM:
 			{
 				xpu_datum_t *xdatum = (xpu_datum_t *)
 					((char *)kcxt->kvars_slot + kvar->xpu.offset);
 				const xpu_datum_operators *expr_ops = xdatum->expr_ops;
 
-				if (XDATUM_IS_NULL(xdatum))
+				if (XPU_DATUM_ISNULL(xdatum))
 					return 0;
 				assert(expr_ops->xpu_type_code == kvar->xpu.type_code);
-				nbytes = expr_ops->xpu_datum_write(kcxt, buffer, xdatum);
-				return nbytes;
+				return expr_ops->xpu_datum_write(kcxt, buffer, xdatum);
 			}
-#endif
+
 		default:
 			if (vclass < 0)
 				return -1;
@@ -1730,7 +1729,7 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 							  kds_heap, &tupitem->htup);
 		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
 			return false;
-		assert(!status.isnull);
+		assert(!XPU_DATUM_ISNULL(&status));
 		if (status.value > 0)
 		{
 			if (depth >= kmrels->num_rels)
@@ -1795,7 +1794,7 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 
 	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_hash_value, &hash))
 		return false;
-	assert(!hash.isnull);
+	assert(!XPU_DATUM_ISNULL(&hash));
 	for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hash.value);
 		 khitem != NULL;
 		 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem))
@@ -1807,7 +1806,7 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 		kcxt_reset(kcxt);
 		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
 			return false;
-		assert(!status.isnull);
+		assert(!XPU_DATUM_ISNULL(&status));
 		if (status.value > 0)
 		{
 			if (depth >= kmrels->num_rels)

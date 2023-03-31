@@ -99,7 +99,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth-1);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp, &status))
 			{
-				assert(!status.isnull);
+				assert(!XPU_DATUM_ISNULL(&status));
 				if (status.value > 0)
 					tuple_is_valid = true;
 				if (status.value != 0)
@@ -230,7 +230,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			kexp = SESSION_KEXP_HASH_VALUE(kcxt->session, depth-1);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp, &hash))
 			{
-				assert(!hash.isnull);
+				assert(!XPU_DATUM_ISNULL(&hash));
 				for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hash.value);
 					 khitem != NULL && khitem->hash != hash.value;
 					 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem));
@@ -264,7 +264,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 		kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth-1);
 		if (EXEC_KERN_EXPRESSION(kcxt, kexp, &status))
 		{
-			assert(!status.isnull);
+			assert(!XPU_DATUM_ISNULL(&status));
 			if (status.value > 0)
 				tuple_is_valid = true;
 			if (status.value != 0)

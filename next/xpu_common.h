@@ -286,12 +286,7 @@ typedef struct
 	uint32_t		kvars_nbytes;
 	kern_variable  *kvars_slot;
 	int			   *kvars_class;
-#if 0
-	//deprecated
-	struct kern_colmeta **kvars_cmeta;
-	void		  **kvars_addr;
-	int			   *kvars_len;
-#endif
+
 	/* variable length buffer */
 	char		   *vlpos;
 	char		   *vlend;
@@ -1291,11 +1286,14 @@ typedef struct xpu_datum_t		xpu_datum_t;
 typedef struct xpu_datum_operators xpu_datum_operators;
 
 #define XPU_DATUM_COMMON_FIELD			\
-	bool		isnull
+	const struct xpu_datum_operators *expr_ops
 
 struct xpu_datum_t {
 	XPU_DATUM_COMMON_FIELD;
 };
+
+/* if NULL, expr_ops is not set */
+#define XPU_DATUM_ISNULL(xdatum)		(!(xdatum)->expr_ops)
 
 struct xpu_datum_operators {
 	const char *xpu_type_name;
@@ -1358,18 +1356,27 @@ struct xpu_datum_operators {
 /*
  * xpu_array_t - array type support
  *
- * NOTE: pg_array_t is designed to store both of PostgreSQL / Arrow array
+ * NOTE: xpu_array_t is designed to store both of PostgreSQL / Arrow array
  * values. If @length < 0, it means @value points a varlena based PostgreSQL
  * array values; which includes nitems, dimension, nullmap and so on.
  * Elsewhere, @length means number of elements, from @start of the array on
- * the columnar buffer by @smeta.
+ * the columnar buffer by @smeta. @kds can be pulled by @smeta->kds_offset.
  */
 struct xpu_array_t {
 	XPU_DATUM_COMMON_FIELD;
-	const kern_data_store *kds;
-	int			length;
-	uint32_t	start;
-	kern_colmeta *smeta;
+	int32_t				length;
+	union {
+		struct {
+			bool		attbyval;
+			int8_t		attalign;
+			int16_t		attlen;
+			const varlena *value;
+		} heap;
+		struct {
+			uint32_t	start;
+			const kern_colmeta *smeta;
+		} arrow;
+	} u;
 };
 typedef struct xpu_array_t			xpu_array_t;
 EXTERN_DATA xpu_datum_operators		xpu_array_ops;
@@ -1378,22 +1385,23 @@ EXTERN_DATA xpu_datum_operators		xpu_array_ops;
  * xpu_composite_t - composite type support
  *
  * NOTE: xpu_composite_t is designed to store both of PostgreSQL / Arrow composite
- * values. If @nfields < 0, it means @value.htup points a varlena base PostgreSQL
- * composite values. Elsewhere (@nfields >= 0), it points composite values on
- * KDS_FORMAT_ARROW chunk. In this case, smeta[0] ... smeta[@nfields-1] describes
- * the values array on the KDS.
+ * values. If @value != NULL, it means @value points a varlena based PostgreSQL
+ * composite values. Elsewhere (@value == NULL), it points composite values on
+ * KDS_FORMAT_ARROW chunk, identified by the @rowidx.
+ * For both cases, @smeta points the column-metadata of the composite sub-fields,
+ * thus smeta[0] ... smeta[@nfields-1] describes the composite data type definition.
  */
 struct xpu_composite_t {
 	XPU_DATUM_COMMON_FIELD;
-	int16_t		nfields;
-	uint32_t	rowidx;
-	char	   *value;
 	Oid			comp_typid;
-	int			comp_typmod;
-	kern_colmeta *smeta;
+	int32_t		comp_typmod;
+	uint32_t	rowidx;		/* valid only if KDS_FORMAT_ARROW */
+	uint32_t	nfields;	/* length of the smeta[] array */
+	const kern_colmeta *smeta; /* colmeta array of the sub-fields */
+	const varlena *value;	/* composite varlena datum if heap-format */
 };
-typedef struct xpu_composite_t	xpu_composite_t;
-EXTERN_DATA xpu_composite_t		xpu_composite_ops;
+typedef struct xpu_composite_t		xpu_composite_t;
+EXTERN_DATA xpu_datum_operators		xpu_composite_ops;
 
 typedef struct {
 	TypeOpCode		type_opcode;

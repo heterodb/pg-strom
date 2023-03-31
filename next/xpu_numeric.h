@@ -161,7 +161,7 @@ set_normalized_numeric(xpu_numeric_t *result, int128_t value, int16_t weight)
 			weight--;
 		}
 	}
-	result->isnull = false;
+	result->expr_ops = &xpu_numeric_ops;
 	result->kind = XPU_NUMERIC_KIND__VALID;
 	result->weight = weight;
 	result->value = value;

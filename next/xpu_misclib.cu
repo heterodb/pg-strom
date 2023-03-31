@@ -23,6 +23,7 @@ xpu_money_datum_ref(kern_context *kcxt,
 {
 	xpu_money_t *result = (xpu_money_t *)__result;
 
+	result->expr_ops = &xpu_money_ops;
 	if (vclass == KVAR_CLASS__INLINE)
 		result->value = kvar->i64;
 	else if (vclass >= sizeof(Cash))
@@ -43,7 +44,7 @@ xpu_money_datum_store(kern_context *kcxt,
 {
 	const xpu_money_t *arg = (const xpu_money_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_vclass = KVAR_CLASS__NULL;
 	else
 	{
@@ -60,7 +61,7 @@ xpu_money_datum_write(kern_context *kcxt,
 {
 	const xpu_money_t *arg = (const xpu_money_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		return 0;
 	if (buffer)
 		*((Cash *)buffer) = arg->value;
@@ -74,7 +75,7 @@ xpu_money_datum_hash(kern_context *kcxt,
 {
 	const xpu_money_t *arg = (const xpu_money_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(&arg->value, sizeof(Cash));
@@ -93,7 +94,7 @@ xpu_uuid_datum_ref(kern_context *kcxt,
 {
 	xpu_uuid_t *result = (xpu_uuid_t *)__result;
 
-	result->isnull = false;
+	result->expr_ops = &xpu_uuid_ops;
 	if (vclass >= sizeof(pg_uuid_t))
 	{
 		memcpy(&result->value, kvar->ptr, sizeof(pg_uuid_t));
@@ -114,7 +115,7 @@ xpu_uuid_datum_store(kern_context *kcxt,
 {
 	xpu_uuid_t	   *arg = (xpu_uuid_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_vclass = KVAR_CLASS__NULL;
 	else
 	{
@@ -136,7 +137,7 @@ xpu_uuid_datum_write(kern_context *kcxt,
 {
 	const xpu_uuid_t *arg = (const xpu_uuid_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		return 0;
 	if (buffer)
 		memcpy(buffer, &arg->value, sizeof(pg_uuid_t));
@@ -150,7 +151,7 @@ xpu_uuid_datum_hash(kern_context *kcxt,
 {
 	const xpu_uuid_t *arg = (const xpu_uuid_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(arg->value.data, UUID_LEN);
@@ -169,7 +170,7 @@ xpu_macaddr_datum_ref(kern_context *kcxt,
 {
 	xpu_macaddr_t *result = (xpu_macaddr_t *)__result;
 
-	result->isnull = false;
+	result->expr_ops = &xpu_macaddr_ops;
 	if (vclass >= sizeof(macaddr))
 		memcpy(&result->value, kvar->ptr, sizeof(macaddr));
 	else
@@ -188,7 +189,7 @@ xpu_macaddr_datum_store(kern_context *kcxt,
 {
 	xpu_macaddr_t  *arg = (xpu_macaddr_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_vclass = KVAR_CLASS__NULL;
 	else
 	{
@@ -210,7 +211,7 @@ xpu_macaddr_datum_write(kern_context *kcxt,
 {
 	const xpu_macaddr_t  *arg = (xpu_macaddr_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		return 0;
 	if (buffer)
 		memcpy(buffer, &arg->value, sizeof(macaddr));
@@ -224,7 +225,7 @@ xpu_macaddr_datum_hash(kern_context *kcxt,
 {
 	const xpu_macaddr_t *arg = (const xpu_macaddr_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(&arg->value, sizeof(macaddr));
@@ -279,7 +280,7 @@ xpu_inet_datum_ref(kern_context *kcxt,
 				STROM_ELOG(kcxt, "Bug? inet value is corrupted");
 				return false;
 			}
-			result->isnull = false;
+			result->expr_ops = &xpu_inet_ops;
 		}
 	}
 	else
@@ -298,7 +299,7 @@ xpu_inet_datum_store(kern_context *kcxt,
 {
 	xpu_inet_t *arg = (xpu_inet_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_vclass = KVAR_CLASS__NULL;
 	else
 	{
@@ -334,7 +335,7 @@ xpu_inet_datum_write(kern_context *kcxt,
 	const xpu_inet_t  *arg = (xpu_inet_t *)__arg;
 	int		sz;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		return 0;
 	if (arg->value.family == PGSQL_AF_INET)
 		sz = offsetof(inet_struct, ipaddr) + 4;
@@ -360,7 +361,7 @@ xpu_inet_datum_hash(kern_context *kcxt,
 {
 	const xpu_inet_t *arg = (const xpu_inet_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
 	else
 	{

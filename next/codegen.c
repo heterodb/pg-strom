@@ -904,6 +904,15 @@ codegen_const_expression(codegen_context *context,
 						 StringInfo buf, Const *con)
 {
 	devtype_info   *dtype;
+	char			typtype;
+
+	typtype = get_typtype(con->consttype);
+	if (typtype != TYPTYPE_BASE &&
+		typtype != TYPTYPE_ENUM &&
+		typtype != TYPTYPE_RANGE &&
+		typtype != TYPTYPE_DOMAIN)
+		__Elog("unable to use type %s in Const expression (class: %c)",
+			   format_type_be(con->consttype), typtype);
 
 	dtype = pgstrom_devtype_lookup(con->consttype);
 	if (!dtype)
@@ -954,11 +963,21 @@ codegen_param_expression(codegen_context *context,
 {
 	kern_expression	kexp;
 	devtype_info   *dtype;
+	char			typtype;
 	int				pos;
 
 	if (param->paramkind != PARAM_EXTERN)
 		__Elog("Only PARAM_EXTERN is supported on device: %d",
 			   (int)param->paramkind);
+
+	typtype = get_typtype(param->paramtype);
+	if (typtype != TYPTYPE_BASE &&
+		typtype != TYPTYPE_ENUM &&
+		typtype != TYPTYPE_RANGE &&
+		typtype != TYPTYPE_DOMAIN)
+		__Elog("unable to use type %s in Const expression (class: %c)",
+			   format_type_be(param->paramtype), typtype);
+
 	dtype = pgstrom_devtype_lookup(param->paramtype);
 	if (!dtype)
 		__Elog("type %s is not device supported",
@@ -1667,7 +1686,7 @@ codegen_build_projection(codegen_context *context)
 	kexp->opcode  = FuncOpCode__Projection;
 	kexp->nr_args = nexprs;
 	kexp->args_offset = MAXALIGN(offsetof(kern_expression,
-										  u.pagg.desc[nattrs]));
+										  u.proj.desc[nattrs]));
 	kexp->u.proj.nattrs = nattrs;
 	initStringInfo(&buf);
 	pos = __appendBinaryStringInfo(&buf, kexp, kexp->args_offset);
