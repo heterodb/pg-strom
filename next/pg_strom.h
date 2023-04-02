@@ -390,7 +390,6 @@ struct pgstromTaskState
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
-	ProjectionInfo	   *base_proj;	/* base --> custom_tlist projection */
 	/* CPU fallback support */
 	off_t			   *fallback_tuples;
 	size_t				fallback_index;
@@ -399,6 +398,8 @@ struct pgstromTaskState
 	size_t				fallback_usage;
 	size_t				fallback_bufsz;
 	char			   *fallback_buffer;
+	TupleTableSlot	   *fallback_slot;	/* host-side kvars-slot */
+	ProjectionInfo	   *fallback_proj;	/* base or fallback slot -> custom_tlist */
 	/* request command buffer (+ status for table scan) */
 	TBMIterateResult   *curr_tbm;
 	Buffer				curr_vm_buffer;		/* for visibility-map */
@@ -569,8 +570,7 @@ extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
 											 struct iovec *xcmd_iov,
 											 int *xcmd_iovcnt);
 extern void		pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple tuple);
-extern bool		pgstromFetchFallbackTuple(pgstromTaskState *pts,
-										  TupleTableSlot *slot);
+extern TupleTableSlot *pgstromFetchFallbackTuple(pgstromTaskState *pts);
 extern void		pgstrom_init_relscan(void);
 
 /*

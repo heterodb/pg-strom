@@ -1780,10 +1780,101 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 /*
  * CPU Fallback for JOIN
  */
+static void
+__execFallbackCpuJoinProjection(pgstromTaskState *pts)
+{
+
+
+}
+
+static void
+__execFallbackLoadInnerVars(pgstromTaskState *pts,
+							HeapTuple *tuple,
+							const kern_expression *kexp_vloads)
+{
+	
+	
+
+
+
+}
+
+static void
+__execFallbackCpuNestLoop(pgstromTaskState *pts,
+						  kern_data_store *kds_in)
+{
+	Assert(kds_in->format == KDS_FORMAT_ROW);
+	
+
+
+}
+
+static void
+__execFallbackCpuHashJoin(pgstromTaskState *pts,
+						  kern_data_store *kds_in)
+{
+	Assert(kds_in->format == KDS_FORMAT_HASH);
+	//compute hash from var slot
+	//walks on the hash
+	//hit, then load vars, then next depth
+
+}
+
+
+
+
+
+static void
+__execFallbackCpuJoinOneDepth(pgstromTaskState *pts,
+							  TupleTableSlot *base_slot,
+							  int depth)
+{
+	kern_multirels	   *h_kmrels = pts->h_kmrels;
+	kern_data_store	   *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth-1);
+
+	if (h_kmrels->chunks[depth-1].is_nestloop)
+	{}
+	else
+	{}
+
+	
+	
+	
+}
+
 void
 ExecFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple)
 {
-	elog(ERROR, "ExecFallbackCpuJoin to be implemented");
+	TupleTableSlot *slot = pts->base_slot;
+	bool		should_free = false;
+
+	ExecForceStoreHeapTuple(tuple, slot, false);
+	/* check WHERE-clause if any */
+	if (pts->base_quals)
+	{
+		ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
+
+		econtext->ecxt_scantuple = slot;
+		ResetExprContext(econtext);
+		if (!ExecQual(pts->base_quals, econtext))
+			return;
+	}
+
+	/* run JOIN, if any */
+	if (pts->h_kmrels)
+		__execFallbackCpuJoinOneDepth(pts, slot, 1);
+
+	/* apply Projection if any */
+	if (pts->fallback_proj)
+	{
+		TupleTableSlot *proj_slot = ExecProject(pts->fallback_proj);
+
+		tuple = ExecFetchSlotHeapTuple(proj_slot, false, &should_free);
+	}
+	/* save the tuple on the fallback buffer */
+	pgstromStoreFallbackTuple(pts, tuple);
+	if (should_free)
+		pfree(tuple);
 }
 
 /*

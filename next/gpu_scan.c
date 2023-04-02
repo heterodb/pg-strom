@@ -653,8 +653,10 @@ ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 {
 	TupleTableSlot *scan_slot = pts->base_slot;
 	bool			should_free = false;
+	static int count = 0;
 
 	ExecForceStoreHeapTuple(tuple, scan_slot, false);
+
 	/* check WHERE-clause if any */
 	if (pts->base_quals)
 	{
@@ -666,9 +668,9 @@ ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 			return;
 	}
 	/* apply Projection if any */
-	if (pts->base_proj)
+	if (pts->fallback_proj)
 	{
-		TupleTableSlot *proj_slot = ExecProject(pts->base_proj);
+		TupleTableSlot *proj_slot = ExecProject(pts->fallback_proj);
 
 		tuple = ExecFetchSlotHeapTuple(proj_slot, false, &should_free);
 	}
@@ -676,6 +678,10 @@ ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 	pgstromStoreFallbackTuple(pts, tuple);
 	if (should_free)
 		pfree(tuple);
+
+	if (count++ < 100)
+		elog(INFO, "fallback called (usage: %zu, nitems: %zu, index: %zu)",
+			 pts->fallback_usage, pts->fallback_nitems, pts->fallback_index);
 }
 
 /*

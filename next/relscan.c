@@ -377,15 +377,17 @@ pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple htuple)
 	pts->fallback_usage += sz;
 }
 
-bool
-pgstromFetchFallbackTuple(pgstromTaskState *pts, TupleTableSlot *slot)
+TupleTableSlot *
+pgstromFetchFallbackTuple(pgstromTaskState *pts)
 {
 	if (pts->fallback_tuples &&
 		pts->fallback_buffer &&
 		pts->fallback_index < pts->fallback_nitems)
 	{
+		TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
 		HeapTupleData	htuple;
 		HeapTuple		ftuple;
+		static int count=0;
 
 		ftuple = (HeapTuple)(pts->fallback_buffer +
 							 pts->fallback_tuples[pts->fallback_index++]);
@@ -393,6 +395,8 @@ pgstromFetchFallbackTuple(pgstromTaskState *pts, TupleTableSlot *slot)
 		htuple.t_data = (HeapTupleHeader)((char *)ftuple +
 										  offsetof(HeapTupleData, t_data));
 		ExecForceStoreHeapTuple(&htuple, slot, false);
+		if (count++ < 100)
+			elog(INFO, "pgstromFetchFallbackTuple %d", count);
 		/* reset the buffer if last one */
 		if (pts->fallback_index == pts->fallback_nitems)
 		{
@@ -400,9 +404,9 @@ pgstromFetchFallbackTuple(pgstromTaskState *pts, TupleTableSlot *slot)
 			pts->fallback_nitems = 0;
 			pts->fallback_usage = 0;
 		}
-		return true;
+		return slot;
 	}
-	return false;
+	return NULL;
 }
 
 /* ----------------------------------------------------------------
@@ -606,7 +610,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			 * buffer, it makes no sense to handle this page on the
 			 * DPU device.
 			 */
-			if (pts->ds_entry && !pgstrom_dpu_handle_cached_pages)
+//			if (pts->ds_entry && !pgstrom_dpu_handle_cached_pages)
 			{
 				BufferTag	bufTag;
 				uint32		bufHash;
