@@ -602,12 +602,16 @@ __extract_heap_tuple_attr(kern_context *kcxt,
 						  const kern_data_store *kds,
 						  const kern_colmeta *cmeta,
 						  const kern_vars_defitem *kvdef,
-						  const char *buffer)
+						  const char *addr)
 {
 	uint32_t	slot_id = kvdef->var_slot_id;
 
-	assert(slot_id < kcxt->kvars_nslots);
-	if (!buffer)
+	if (slot_id >= kcxt->kvars_nslots)
+	{
+		STROM_ELOG(kcxt, "kvars::slot_id is out of range");
+        return false;
+	}
+  	else if (!addr)
 	{
 		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
 	}
@@ -627,12 +631,12 @@ __extract_heap_tuple_attr(kern_context *kcxt,
 		array->u.heap.attbyval = cmeta->attbyval;
 		array->u.heap.attalign = cmeta->attalign;
 		array->u.heap.attlen   = cmeta->attlen;
-		array->u.heap.value    = (const varlena *)buffer;
+		array->u.heap.value    = (const varlena *)addr;
 	}
 	else if (cmeta->atttypkind == TYPE_KIND__COMPOSITE)
 	{
 		/* special case if xpu_composite_t */
-		xpu_composite_t *comp;
+		xpu_composite_t	   *comp;
 
 		assert(kvdef->var_slot_off > 0 &&
 			   kvdef->var_slot_off + sizeof(xpu_composite_t) <= kcxt->kvars_nbytes);
@@ -645,75 +649,75 @@ __extract_heap_tuple_attr(kern_context *kcxt,
 		comp->rowidx      = 0;
 		comp->nfields     = cmeta->num_subattrs;
 		comp->smeta       = kds->colmeta + cmeta->idx_subattrs;;
-		comp->value       = (const varlena *)buffer;
+		comp->value       = (const varlena *)addr;
 	}
 	else if (cmeta->attbyval)
 	{
 		assert(cmeta->attlen > 0 && cmeta->attlen <= sizeof(kern_variable));
 		kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
-		memcpy(&kcxt->kvars_slot[slot_id], buffer, cmeta->attlen);
+		memcpy(&kcxt->kvars_slot[slot_id], addr, cmeta->attlen);
 	}
 	else if (cmeta->attlen > 0)
 	{
 		kcxt->kvars_class[slot_id] = cmeta->attlen;
-		kcxt->kvars_slot[slot_id].ptr = (void *)buffer;
+		kcxt->kvars_slot[slot_id].ptr = (void *)addr;
 	}
 	else if (cmeta->attlen == -1)
 	{
 		kcxt->kvars_class[slot_id] = KVAR_CLASS__VARLENA;
-		kcxt->kvars_slot[slot_id].ptr = (void *)buffer;
+		kcxt->kvars_slot[slot_id].ptr = (void *)addr;
 	}
 	else
 	{
-		/* unsupported attribute length */
-		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+		STROM_ELOG(kcxt, "not a supported attribute length");
+		return false;
 	}
 	return true;
 }
 
-STATIC_FUNCTION(int)
+STATIC_FUNCTION(bool)
 kern_extract_heap_tuple(kern_context *kcxt,
 						kern_data_store *kds,
 						const HeapTupleHeaderData *htup,
-						int curr_depth,
 						const kern_vars_defitem *kvars_items,
 						int kvars_nloads)
 {
 	const kern_vars_defitem *kvdef = kvars_items;
-	uint32_t	offset;
-	int			resno;
+	uint32_t	offset = htup->t_hoff;
+	int			resno = 1;
 	int			kvars_count = 0;
 	int			ncols = Min(htup->t_infomask2 & HEAP_NATTS_MASK, kds->ncols);
 	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
-	
+
 	/* try attcacheoff shortcut, if available. */
 	if (!heap_hasnull)
 	{
-		while (kvars_count < kvars_nloads &&
-			   kvdef->var_depth == curr_depth &&
-			   kvdef->var_resno > 0 &&
-			   kvdef->var_resno <= ncols)
+		while (kvars_count < kvars_nloads)
 		{
-			const kern_colmeta *cmeta = &kds->colmeta[kvdef->var_resno-1];
-			char   *addr;
+			if (kvdef->var_resno > 0 &&
+				kvdef->var_resno <= ncols)
+			{
+				const kern_colmeta *cmeta = &kds->colmeta[kvdef->var_resno-1];
+				char   *addr;
 
-			if (cmeta->attcacheoff < 0)
-				break;
-
-			addr = (char *)htup + htup->t_hoff + cmeta->attcacheoff;
-			if (!__extract_heap_tuple_attr(kcxt, kds, cmeta, kvdef, addr))
-				return -1;
+				if (cmeta->attcacheoff < 0)
+					break;
+				resno = kvdef->var_resno;
+				offset = htup->t_hoff + cmeta->attcacheoff;
+				addr = (char *)htup + offset;
+				if (cmeta->attlen > 0)
+					offset += cmeta->attlen;
+				else
+					offset += VARSIZE_ANY(addr);
+				if (!__extract_heap_tuple_attr(kcxt, kds, cmeta, kvdef, addr))
+					return false;
+			}
 			kvdef++;
 			kvars_count++;
 		}
 	}
-	/* move to the slow heap-tuple extract */
-	offset = htup->t_hoff;
-	resno = 1;
-	while (kvars_count < kvars_nloads &&
-		   resno <= ncols &&
-		   kvdef->var_depth == curr_depth &&
-		   kvdef->var_resno <= ncols)
+	/* extract slow path */
+	while (kvars_count < kvars_nloads)
 	{
 		const kern_colmeta *cmeta = &kds->colmeta[resno-1];
 		char   *addr;
@@ -743,17 +747,20 @@ kern_extract_heap_tuple(kern_context *kcxt,
 		}
 		resno++;
 	}
-	/* fill-up by NULLs for the current depth */
-	while (kvars_count < kvars_nloads &&
-		   kvdef->var_depth == curr_depth)
+	/* fill-up by NULLs for the remained slot */
+	while (kvars_count < kvars_nloads)
 	{
-		int		slot_id = kvdef->var_slot_id;
+		uint32_t	slot_id = kvdef->var_slot_id;
 
-		assert(slot_id < kcxt->kvars_nslots);
-		kcxt->kvars_slot[slot_id].ptr = NULL;
-		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+		if (slot_id < kcxt->kvars_nslots)
+		{
+			kcxt->kvars_slot[slot_id].ptr = NULL;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+		}
+		kvdef++;
+		kvars_count++;
 	}
-	return kvars_count;
+	return true;
 }
 
 /*
@@ -1514,7 +1521,6 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 
 	assert(kds->format == KDS_FORMAT_ARROW);
 	while (kvars_nloads > 0 &&
-		   kvars->var_depth == 0 &&
 		   kvars->var_resno <= kds->ncols)
 	{
 		kern_colmeta *cmeta = &kds->colmeta[kvars->var_resno-1];
@@ -1544,7 +1550,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 		kvars_nloads--;
 	}
 	/* other fields, which refers out of range, are NULL */
-	while (kvars_nloads > 0 && kvars->var_depth == 0)
+	while (kvars_nloads > 0)
 	{
 		int		slot_id = kvars->var_slot_id;
 
@@ -1571,30 +1577,18 @@ ExecLoadVarsHeapTuple(kern_context *kcxt,
 					  kern_data_store *kds,
 					  HeapTupleHeaderData *htup)	/* htup may be NULL */
 {
-	int		index = 0;
-
 	assert(kexp->opcode == FuncOpCode__LoadVars &&
 		   kexp->exptype == TypeOpCode__int4 &&
-		   kexp->nr_args == 0);
+		   kexp->nr_args == 0 &&
+		   kexp->u.load.depth == depth);
 	if (htup)
 	{
-		index = kern_extract_heap_tuple(kcxt,
-										kds,
-										htup,
-										depth,
-										kexp->u.load.kvars,
-										kexp->u.load.nloads);
-		if (index < 0)
+		if (!kern_extract_heap_tuple(kcxt,
+									 kds,
+									 htup,
+									 kexp->u.load.kvars,
+									 kexp->u.load.nloads))
 			return false;
-	}
-
-	while (index < kexp->u.load.nloads)
-	{
-		const kern_vars_defitem *kvar = &kexp->u.load.kvars[index++];
-		int     slot_id = kvar->var_slot_id;
-
-		kcxt->kvars_slot[slot_id].ptr = NULL;
-		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
 	}
 	return true;
 }
@@ -1638,7 +1632,8 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 
 	assert(kexp_load_vars->opcode == FuncOpCode__LoadVars &&
 		   kexp_load_vars->exptype == TypeOpCode__int4 &&
-		   kexp_load_vars->nr_args == 0);
+		   kexp_load_vars->nr_args == 0 &&
+		   kexp_load_vars->u.load.depth == 0);
 	index = kern_extract_arrow_tuple(kcxt,
 									 kds,
 									 kds_index,
@@ -1669,118 +1664,6 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		}
-		return false;
-	}
-	return true;
-}
-
-/*
- * __ExecLoadVarsCommon
- */
-INLINE_FUNCTION(bool)
-__ExecLoadVarsCommon(XPU_PGFUNCTION_ARGS,
-					 uint32_t *combuf,
-					 uint32_t comb_last_lv,
-					 kern_data_store *kds_outer,
-					 kern_data_extra *kds_extra,
-					 int num_inners,
-					 kern_data_store **kds_inners)
-{
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
-	int		index;
-	int		depth;
-
-	/*
-	 * Walking on the outer/inner tuples
-	 */
-	assert(kexp->opcode == FuncOpCode__LoadVars &&
-		   kexp->nr_args == 1 &&
-		   kexp->exptype == karg->exptype);
-	for (depth=0, index=0;
-		 depth <= num_inners && index < kexp->u.load.nloads;
-		 depth++)
-	{
-		kern_data_store *kds;
-		HeapTupleHeaderData *htup;
-		uint32_t	offset;
-		int			count;
-
-		offset = (depth == num_inners ? comb_last_lv : combuf[depth]);
-		if (offset == 0)
-			goto skip;		/* all NULL for this relation */
-		if (depth > 0)
-		{
-			kds = kds_inners[depth - 1];
-			htup = (HeapTupleHeaderData *)((char *)kds + __kds_unpack(offset));
-			count = kern_extract_heap_tuple(kcxt,
-											kds,
-											htup,
-											depth,
-											kexp->u.load.kvars + index,
-											kexp->u.load.nloads - index);
-			assert(count >= 0);
-		}
-		else if (kds_outer->format == KDS_FORMAT_ARROW)
-		{
-			count = kern_extract_arrow_tuple(kcxt,
-											 kds_outer,
-											 offset,
-											 kexp->u.load.kvars + index,
-											 kexp->u.load.nloads - index);
-		}
-		else if (kds_outer->format == KDS_FORMAT_ROW ||
-				 kds_outer->format == KDS_FORMAT_BLOCK)
-		{
-			htup = (HeapTupleHeaderData *)((char *)kds_outer + __kds_unpack(offset));
-			count = kern_extract_heap_tuple(kcxt,
-											kds_outer,
-											htup,
-											depth,
-											kexp->u.load.kvars + index,
-											kexp->u.load.nloads - index);
-			assert(count >= 0);
-		}
-		else
-		{
-			STROM_ELOG(kcxt, "unknown outer kds format");
-			return false;
-		}
-
-		if (count < 0)
-		{
-			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
-			return false;
-		}
-		index += count;
-
-		/* fill up by NULL, if kvars are not assigned. */
-	skip:
-		while (index < kexp->u.load.nloads)
-		{
-			const kern_vars_defitem *kvdef = &kexp->u.load.kvars[index];
-			int		slot_id = kvdef->var_slot_id;
-
-			assert(slot_id < kcxt->kvars_nslots);
-			if (kvdef->var_depth != depth)
-				break;
-			kcxt->kvars_slot[slot_id].ptr = NULL;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-			index++;
-		}
-	}
-	/* fill up by NULL, if not loaded (should not happen) */
-	while (index < kexp->u.load.nloads)
-	{
-		const kern_vars_defitem *kvdef = &kexp->u.load.kvars[index++];
-		int		slot_id = kvdef->var_slot_id;
-
-		kcxt->kvars_slot[slot_id].ptr = NULL;
-		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-	}
-	/* runs the argument expression */
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))
-	{
-		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		return false;
 	}
 	return true;

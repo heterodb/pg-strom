@@ -1786,7 +1786,6 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts, int depth);
 static void
 __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 						   TupleTableSlot *input_slot,
-						   int curr_depth,
 						   const kern_expression *kexp_vloads)
 {
 	Assert(kexp_vloads->opcode == FuncOpCode__LoadVars);
@@ -1798,8 +1797,7 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 
 		if (slot_id >= 0 && slot_id < fallback_slot->tts_nvalid)
 		{
-			if (curr_depth == kvdef->var_depth &&
-				resno > 0 && resno <= input_slot->tts_nvalid)
+			if (resno > 0 && resno <= input_slot->tts_nvalid)
 			{
 				fallback_slot->tts_isnull[slot_id] = input_slot->tts_isnull[resno-1];
 				fallback_slot->tts_values[slot_id] = input_slot->tts_values[resno-1];
@@ -1851,9 +1849,9 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 			tuple.t_data = &tupitem->htup;
 			ExecForceStoreHeapTuple(&tuple, i_slot, false);
 			slot_getallattrs(i_slot);
+			Assert(kexp_join_kvars_load->u.load.depth == depth);
 			__execFallbackLoadVarsSlot(pts->fallback_slot,
 									   i_slot,
-									   depth,
 									   kexp_join_kvars_load);
 			ExecClearTuple(i_slot);
 		}
@@ -1933,9 +1931,9 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 			tuple.t_data = &hitem->t.htup;
 			ExecForceStoreHeapTuple(&tuple, i_slot, false);
 			slot_getallattrs(i_slot);
+			Assert(kexp_join_kvars_load->u.load.depth == depth);
 			__execFallbackLoadVarsSlot(pts->fallback_slot,
 									   i_slot,
-									   depth,
 									   kexp_join_kvars_load);
 			ExecClearTuple(i_slot);
 		}
@@ -2032,7 +2030,8 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 	if (pp_info->kexp_scan_kvars_load)
 		kexp_scan_kvars_load = (const kern_expression *)
 			VARDATA(pp_info->kexp_scan_kvars_load);
-	__execFallbackLoadVarsSlot(fallback_slot, base_slot, 0, kexp_scan_kvars_load);
+	Assert(kexp_scan_kvars_load->u.load.depth == 0);
+	__execFallbackLoadVarsSlot(fallback_slot, base_slot, kexp_scan_kvars_load);
 	/* Run JOIN, if any */
 	Assert(pts->h_kmrels);
 	__execFallbackCpuJoinOneDepth(pts, 1);

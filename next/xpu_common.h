@@ -1466,8 +1466,7 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 
 typedef struct
 {
-	int16_t			var_depth;
-	int16_t			var_resno;
+	int32_t			var_resno;
 	uint32_t		var_slot_id;
 	uint32_t		var_slot_off;	/* offset of the slot-buffer (some margin at
 									 * the end of kcxt->kvars_slot[] to store several
