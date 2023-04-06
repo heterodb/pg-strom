@@ -649,7 +649,9 @@ ExecGpuScan(CustomScanState *node)
  * ExecFallbackCpuScan
  */
 void
-ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
+ExecFallbackCpuScan(pgstromTaskState *pts,
+					kern_data_store *kds,
+					HeapTuple tuple)
 {
 	TupleTableSlot *scan_slot = pts->base_slot;
 	bool			should_free = false;

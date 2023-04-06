@@ -387,7 +387,6 @@ pgstromFetchFallbackTuple(pgstromTaskState *pts)
 		TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
 		HeapTupleData	htuple;
 		HeapTuple		ftuple;
-		static int count=0;
 
 		ftuple = (HeapTuple)(pts->fallback_buffer +
 							 pts->fallback_tuples[pts->fallback_index++]);
@@ -395,8 +394,6 @@ pgstromFetchFallbackTuple(pgstromTaskState *pts)
 		htuple.t_data = (HeapTupleHeader)((char *)ftuple +
 										  offsetof(HeapTupleData, t_data));
 		ExecForceStoreHeapTuple(&htuple, slot, false);
-		if (count++ < 100)
-			elog(INFO, "pgstromFetchFallbackTuple %d", count);
 		/* reset the buffer if last one */
 		if (pts->fallback_index == pts->fallback_nitems)
 		{
@@ -421,7 +418,9 @@ pgstromFetchFallbackTuple(pgstromTaskState *pts)
 	((kern_data_store *)((buf)->data + __XCMD_KDS_SRC_OFFSET(buf)))
 
 static void
-__relScanDirectFallbackBlock(pgstromTaskState *pts, BlockNumber block_num)
+__relScanDirectFallbackBlock(pgstromTaskState *pts,
+							 kern_data_store *kds,
+							 BlockNumber block_num)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
 	Relation	relation = pts->css.ss.ss_currentRelation;
@@ -463,7 +462,7 @@ __relScanDirectFallbackBlock(pgstromTaskState *pts, BlockNumber block_num)
 		HeapCheckForSerializableConflictOut(valid, relation, &htup,
 											buffer, snapshot);
 		if (valid)
-			pts->cb_cpu_fallback(pts, &htup);
+			pts->cb_cpu_fallback(pts, kds, &htup);
 	}
 	UnlockReleaseBuffer(buffer);
 	pg_atomic_fetch_add_u32(&ps_state->heap_fallback_nblocks, 1);
@@ -610,7 +609,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			 * buffer, it makes no sense to handle this page on the
 			 * DPU device.
 			 */
-//			if (pts->ds_entry && !pgstrom_dpu_handle_cached_pages)
+			if (pts->ds_entry && !pgstrom_dpu_handle_cached_pages)
 			{
 				BufferTag	bufTag;
 				uint32		bufHash;
@@ -627,7 +626,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				if (buf_id >= 0)
 				{
 					LWLockRelease(bufLock);
-					__relScanDirectFallbackBlock(pts, block_num);
+					__relScanDirectFallbackBlock(pts, kds, block_num);
 					pts->curr_block_num++;
 					continue;
 				}
@@ -684,7 +683,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				 * to the (relatively) poor performance devices instead of CPUs.
 				 * So, we run CPU fallback for the tuples in dirty pages.
 				 */
-				__relScanDirectFallbackBlock(pts, block_num);
+				__relScanDirectFallbackBlock(pts, kds, block_num);
 			}
 			else
 			{

@@ -1585,7 +1585,9 @@ ExecGpuPreAgg(CustomScanState *node)
  * ExecFallbackCpuPreAgg
  */
 void
-ExecFallbackCpuPreAgg(pgstromTaskState *pts, HeapTuple tuple)
+ExecFallbackCpuPreAgg(pgstromTaskState *pts,
+					  kern_data_store *kds,
+					  HeapTuple tuple)
 {
 	elog(ERROR, "ExecFallbackCpuPreAgg implemented");
 }

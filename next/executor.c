@@ -1107,7 +1107,7 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 		int			nslots = list_length(pp_info->kvars_depth);
 		int			slot_id = 0;
 		ListCell   *lc1, *lc2;
-
+		
 		fallback_tdesc = CreateTemplateTupleDesc(nslots);
 		forboth (lc1, pp_info->kvars_depth,
 				 lc2, pp_info->kvars_resno)
@@ -1191,8 +1191,6 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 								pts->css.ss.ss_ScanTupleSlot,
 								&pts->css.ss.ps,
 								fallback_tdesc);
-
-
 	return kvars_slot_list;
 }
 
@@ -1305,6 +1303,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			fixup_fallback_varnode((Node *)pp_inner->other_quals,
 								   cscan, kvars_slot_list);
 		istate->other_quals = ExecInitQual(other_quals, &pts->css.ss.ps);
+
 		foreach (cell, pp_inner->hash_outer_keys)
 		{
 			Node	   *outer_key = (Node *)lfirst(cell);

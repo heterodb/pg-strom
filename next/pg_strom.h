@@ -413,6 +413,7 @@ struct pgstromTaskState
 	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts,
 										struct iovec *xcmd_iov, int *xcmd_iovcnt);
 	void			  (*cb_cpu_fallback)(struct pgstromTaskState *pts,
+										 struct kern_data_store *kds,
 										 HeapTuple htuple);
 	/* inner relations state (if JOIN) */
 	int					num_rels;
@@ -741,7 +742,9 @@ extern CustomScan *PlanXpuScanPathCommon(PlannerInfo *root,
 										 List        *clauses,
 										 pgstromPlanInfo *pp_info,
 										 const CustomScanMethods *methods);
-extern void		ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple);
+extern void		ExecFallbackCpuScan(pgstromTaskState *pts,
+									kern_data_store *kds,
+									HeapTuple tuple);
 extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
 extern void		pgstrom_init_gpu_scan(void);
 
@@ -772,7 +775,9 @@ extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
 										 pgstromPlanInfo *pp_info,
 										 const CustomScanMethods *methods);
 extern uint32_t	GpuJoinInnerPreload(pgstromTaskState *pts);
-extern void		ExecFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple);
+extern void		ExecFallbackCpuJoin(pgstromTaskState *pts,
+									kern_data_store *kds,
+									HeapTuple tuple);
 extern void		pgstrom_init_gpu_join(void);
 
 /*
@@ -785,7 +790,9 @@ extern void		xpupreagg_add_custompath(PlannerInfo *root,
 										 void *extra,
 										 uint32_t task_kind,
 										 const CustomPathMethods *methods);
-extern void		ExecFallbackCpuPreAgg(pgstromTaskState *pts, HeapTuple tuple);
+extern void		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
+									  kern_data_store *kds,
+									  HeapTuple tuple);
 extern void		pgstrom_init_gpu_preagg(void);
 
 /*
