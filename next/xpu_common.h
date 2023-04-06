@@ -1477,8 +1477,6 @@ typedef struct
 typedef struct
 {
 	uint32_t		slot_id;
-	TypeOpCode		slot_type;
-	const xpu_datum_operators *slot_ops;
 } kern_projection_desc;
 
 #define KAGG_ACTION__VREF			101		/* simple var copy */

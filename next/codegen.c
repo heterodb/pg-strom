@@ -1679,7 +1679,6 @@ codegen_build_projection(codegen_context *context)
 		
 		desc = &kexp->u.proj.desc[nattrs++];
 		desc->slot_id = slot_id;
-		desc->slot_type = dtype->type_code;
 	}
 	kexp->exptype = TypeOpCode__int4;
 	kexp->expflags = context->kexp_flags;

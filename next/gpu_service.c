@@ -968,22 +968,6 @@ __resolveDevicePointersWalker(gpuModule *gmodule,
 	}
 	kexp->expr_ops = xpu_type->type_ops;
 
-	if (kexp->opcode == FuncOpCode__Projection)
-	{
-		for (int i=0; i < kexp->u.proj.nattrs; i++)
-		{
-			kern_projection_desc *desc = &kexp->u.proj.desc[i];
-
-			xpu_type = hash_search(gmodule->cuda_type_htab,
-								   &desc->slot_type,
-								   HASH_FIND, NULL);
-			if (xpu_type)
-				desc->slot_ops = xpu_type->type_ops;
-			else
-				desc->slot_ops = NULL;
-		}
-	}
-
 	for (i=0, karg = KEXP_FIRST_ARG(kexp);
 		 i < kexp->nr_args;
 		 i++, karg = KEXP_NEXT_ARG(karg))

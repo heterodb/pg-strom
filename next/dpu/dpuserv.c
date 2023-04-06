@@ -478,28 +478,6 @@ __resolveDevicePointersWalker(kern_expression *kexp,
 	}
 	kexp->expr_ops = dtype_hentry->cat.type_ops;
 
-	/* special handling for Projection */
-	if (kexp->opcode == FuncOpCode__Projection)
-	{
-		for (i=0; i < kexp->u.proj.nattrs; i++)
-		{
-			kern_projection_desc *desc = &kexp->u.proj.desc[i];
-
-			k = desc->slot_type % xtype_htable->nslots;
-			for (dtype_hentry = xtype_htable->slots[k];
-				 dtype_hentry != NULL;
-				 dtype_hentry = dtype_hentry->next)
-			{
-				if (dtype_hentry->cat.type_opcode == desc->slot_type)
-					break;
-			}
-			if (dtype_hentry)
-				desc->slot_ops = dtype_hentry->cat.type_ops;
-			else
-				desc->slot_ops = NULL;
-		}
-	}
-
 	/* arguments  */
 	for (i=0, karg=KEXP_FIRST_ARG(kexp);
 		 i < kexp->nr_args;

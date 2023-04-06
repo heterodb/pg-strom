@@ -338,20 +338,10 @@ kern_form_heaptuple(kern_context *kcxt,
 			uint32_t	offset = kcxt->kvars_slot[pdesc->slot_id].xpu.offset;
 			xpu_datum_t *xdatum = (xpu_datum_t *)((char *)kcxt->kvars_slot + offset);
 
-			assert(pdesc->slot_type == kvar->xpu.type_code);
-			if (pdesc->slot_ops)
-			{
-				const xpu_datum_operators *slot_ops = pdesc->slot_ops;
-
-				nbytes = slot_ops->xpu_datum_write(kcxt, buffer, xdatum);
-				if (nbytes < 0)
-					return -1;
-			}
-			else
-			{
-				STROM_ELOG(kcxt, "Bug? unexpected Kvar-class for xPU-Datum");
+			assert(xdatum->expr_ops != NULL);
+			nbytes = xdatum->expr_ops->xpu_datum_write(kcxt, buffer, xdatum);
+			if (nbytes < 0)
 				return -1;
-			}
 		}
 		else if (cmeta->attlen > 0)
 		{
