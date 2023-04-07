@@ -3,8 +3,8 @@
  *
  * A standalone command that handles XpuCommands on DPU devices
  * --------
- * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2021 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -1980,14 +1980,14 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 	kern_data_store	   *kds_src = NULL;
 	int					sz, num_rels = 0;
 
-	if (xcmd->u.scan.kds_src_pathname)
-		kds_src_pathname = (char *)xcmd + xcmd->u.scan.kds_src_pathname;
-	if (xcmd->u.scan.kds_src_iovec)
-		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.scan.kds_src_iovec);
-	if (xcmd->u.scan.kds_src_offset)
-		kds_src_head = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_src_offset);
-	if (xcmd->u.scan.kds_dst_offset)
-		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_dst_offset);
+	if (xcmd->u.task.kds_src_pathname)
+		kds_src_pathname = (char *)xcmd + xcmd->u.task.kds_src_pathname;
+	if (xcmd->u.task.kds_src_iovec)
+		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.task.kds_src_iovec);
+	if (xcmd->u.task.kds_src_offset)
+		kds_src_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_src_offset);
+	if (xcmd->u.task.kds_dst_offset)
+		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_dst_offset);
 	if (!kds_src_pathname || !kds_src_iovec || !kds_src_head || !kds_dst_head)
 	{
 		dpuClientElog(dclient, "kern_data_store is corrupted");

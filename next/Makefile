@@ -17,7 +17,7 @@ PGSTROM_RELEASE := devel
 # Source of PG-Strom host code
 #
 __STROM_OBJS = main.o extra.o codegen.o misc.o executor.o \
-               gpu_device.o gpu_scan.o gpu_join.o gpu_groupby.o \
+               gpu_device.o gpu_scan.o gpu_join.o gpu_preagg.o \
                dpu_device.o dpu_scan.o dpu_join.o dpu_preagg.o \
                relscan.o brin.o gpu_service.o \
                arrow_fdw.o arrow_nodes.o \
