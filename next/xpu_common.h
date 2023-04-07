@@ -1738,7 +1738,7 @@ typedef struct {
 	uint32_t	kds_src_offset;		/* offset to kds_src */
 	uint32_t	kds_dst_offset;		/* offset to kds_dst */
 	char		data[1]				__MAXALIGNED__;
-} kern_exec_scan;
+} kern_exec_task;
 
 typedef struct {
 	uint32_t	chunks_offset;		/* offset of kds_dst array */
@@ -1776,7 +1776,7 @@ typedef struct
 	union {
 		kern_errorbuf		error;
 		kern_session_info	session;
-		kern_exec_scan		scan;
+		kern_exec_task		task;
 		kern_exec_results	results;
 	} u;
 } XpuCommand;

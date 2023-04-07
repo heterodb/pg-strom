@@ -1122,14 +1122,14 @@ gpuservHandleGpuTaskExec(gpuClient *gclient,
 	size_t			sz;
 	void		   *kern_args[10];
 
-	if (xcmd->u.scan.kds_src_pathname)
-		kds_src_pathname = (char *)xcmd + xcmd->u.scan.kds_src_pathname;
-	if (xcmd->u.scan.kds_src_iovec)
-		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.scan.kds_src_iovec);
-	if (xcmd->u.scan.kds_src_offset)
-		kds_src = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_src_offset);
-	if (xcmd->u.scan.kds_dst_offset)
-		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_dst_offset);
+	if (xcmd->u.task.kds_src_pathname)
+		kds_src_pathname = (char *)xcmd + xcmd->u.task.kds_src_pathname;
+	if (xcmd->u.task.kds_src_iovec)
+		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.task.kds_src_iovec);
+	if (xcmd->u.task.kds_src_offset)
+		kds_src = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_src_offset);
+	if (xcmd->u.task.kds_dst_offset)
+		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_dst_offset);
 
 	if (!kds_src)
 	{

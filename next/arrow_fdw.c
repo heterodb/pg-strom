@@ -3608,9 +3608,9 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	/* assign offset of XpuCommand */
 	xcmd = (XpuCommand *)chunk_buffer->data;
 	xcmd->length = chunk_buffer->len;
-	xcmd->u.scan.kds_src_pathname = kds_src_pathname;
-	xcmd->u.scan.kds_src_iovec    = kds_src_iovec;
-	xcmd->u.scan.kds_src_offset   = kds_src_offset;
+	xcmd->u.task.kds_src_pathname = kds_src_pathname;
+	xcmd->u.task.kds_src_iovec    = kds_src_iovec;
+	xcmd->u.task.kds_src_offset   = kds_src_offset;
 
 	xcmd_iov->iov_base = xcmd;
 	xcmd_iov->iov_len  = xcmd->length;

@@ -1033,7 +1033,7 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 	size_t			off;
 
 	initStringInfo(&pts->xcmd_buf);
-	bufsz = MAXALIGN(offsetof(XpuCommand, u.scan.data));
+	bufsz = MAXALIGN(offsetof(XpuCommand, u.task.data));
 	if (tdesc_src)
 		bufsz += estimate_kern_data_store(tdesc_src);
 	if (tdesc_dst)
@@ -1041,7 +1041,7 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 	enlargeStringInfo(&pts->xcmd_buf, bufsz);
 
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
-	memset(xcmd, 0, offsetof(XpuCommand, u.scan.data));
+	memset(xcmd, 0, offsetof(XpuCommand, u.task.data));
 	xcmd->magic = XpuCommandMagicNumber;
 	if ((pts->task_kind & DEVTASK__SCAN) != 0)
 		xcmd->tag = XpuCommandTag__XpuScanExec;
@@ -1053,16 +1053,16 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 		elog(ERROR, "unsupported task kind: %08x", pts->task_kind);
 	xcmd->length = bufsz;
 
-	off = offsetof(XpuCommand, u.scan.data);
+	off = offsetof(XpuCommand, u.task.data);
 	if (tdesc_dst)
 	{
-		xcmd->u.scan.kds_dst_offset = off;
+		xcmd->u.task.kds_dst_offset = off;
 		kds  = (kern_data_store *)((char *)xcmd + off);
 		off += setup_kern_data_store(kds, tdesc_dst, 0, KDS_FORMAT_ROW);
 	}
 	if (tdesc_src)
 	{
-		xcmd->u.scan.kds_src_offset = off;
+		xcmd->u.task.kds_src_offset = off;
 		kds  = (kern_data_store *)((char *)xcmd + off);
 		off += setup_kern_data_store(kds, tdesc_src, 0, format);
 	}

@@ -413,7 +413,7 @@ pgstromFetchFallbackTuple(pgstromTaskState *pts)
  * ----------------------------------------------------------------
  */
 #define __XCMD_KDS_SRC_OFFSET(buf)							\
-	(((XpuCommand *)((buf)->data))->u.scan.kds_src_offset)
+	(((XpuCommand *)((buf)->data))->u.task.kds_src_offset)
 #define __XCMD_GET_KDS_SRC(buf)								\
 	((kern_data_store *)((buf)->data + __XCMD_KDS_SRC_OFFSET(buf)))
 
@@ -787,8 +787,8 @@ out:
 		Assert(segment_id == InvalidBlockNumber);
 	}
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
-	xcmd->u.scan.kds_src_pathname = kds_src_pathname;
-	xcmd->u.scan.kds_src_iovec = kds_src_iovec;
+	xcmd->u.task.kds_src_pathname = kds_src_pathname;
+	xcmd->u.task.kds_src_iovec = kds_src_iovec;
 	xcmd->length = pts->xcmd_buf.len;
 
 	xcmd_iov[0].iov_base = xcmd;
