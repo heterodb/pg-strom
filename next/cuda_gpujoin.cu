@@ -506,13 +506,27 @@ kern_gpujoin_main(kern_session_info *session,
 		}
 		else if (depth > n_rels)
 		{
-			/* PROJECTION */
 			assert(depth == n_rels+1);
-			status = execGpuJoinProjection(kcxt, wp,
-										   n_rels,
-										   kds_dst,
-										   SESSION_KEXP_PROJECTION(session),
-										   kvars_addr_wp + kvars_chunksz * n_rels);
+			if (session->xpucode_projection)
+			{
+				/* PROJECTION */
+				status = execGpuJoinProjection(kcxt, wp,
+											   n_rels,
+											   kds_dst,
+											   SESSION_KEXP_PROJECTION(session),
+											   kvars_addr_wp + kvars_chunksz * n_rels);
+			}
+			else
+			{
+				/* PRE-AGG */
+				status = execGpuPreAggGroupBy(kcxt, wp,
+											  n_rels,
+											  kds_dst,
+											  SESSION_KEXP_GROUPBY_KEYHASH(session),
+											  SESSION_KEXP_GROUPBY_KEYCOMP(session),
+											  SESSION_KEXP_GROUPBY_ACTIONS(session),
+											  kvars_addr_wp + kvars_chunksz * n_rels);
+			}
 			if (status >= 0)
 				depth = status;
 			else if (status == -2)

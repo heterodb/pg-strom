@@ -165,6 +165,14 @@ __Fetch(const T *ptr)
 
 	return temp;
 }
+
+template <typename T>
+INLINE_FUNCTION(T)
+__volatileRead(const volatile T *ptr)
+{
+	return *ptr;
+}
+
 #else
 #define __Fetch(PTR)		(*(PTR))
 #endif
