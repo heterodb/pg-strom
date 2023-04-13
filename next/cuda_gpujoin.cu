@@ -99,7 +99,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth-1);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp, &status))
 			{
-				assert(!status.isnull);
+				assert(!XPU_DATUM_ISNULL(&status));
 				if (status.value > 0)
 					tuple_is_valid = true;
 				if (status.value != 0)
@@ -230,7 +230,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			kexp = SESSION_KEXP_HASH_VALUE(kcxt->session, depth-1);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp, &hash))
 			{
-				assert(!hash.isnull);
+				assert(!XPU_DATUM_ISNULL(&hash));
 				for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hash.value);
 					 khitem != NULL && khitem->hash != hash.value;
 					 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem));
@@ -264,7 +264,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 		kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth-1);
 		if (EXEC_KERN_EXPRESSION(kcxt, kexp, &status))
 		{
-			assert(!status.isnull);
+			assert(!XPU_DATUM_ISNULL(&status));
 			if (status.value > 0)
 				tuple_is_valid = true;
 			if (status.value != 0)
@@ -506,13 +506,27 @@ kern_gpujoin_main(kern_session_info *session,
 		}
 		else if (depth > n_rels)
 		{
-			/* PROJECTION */
 			assert(depth == n_rels+1);
-			status = execGpuJoinProjection(kcxt, wp,
-										   n_rels,
-										   kds_dst,
-										   SESSION_KEXP_PROJECTION(session),
-										   kvars_addr_wp + kvars_chunksz * n_rels);
+			if (session->xpucode_projection)
+			{
+				/* PROJECTION */
+				status = execGpuJoinProjection(kcxt, wp,
+											   n_rels,
+											   kds_dst,
+											   SESSION_KEXP_PROJECTION(session),
+											   kvars_addr_wp + kvars_chunksz * n_rels);
+			}
+			else
+			{
+				/* PRE-AGG */
+				status = execGpuPreAggGroupBy(kcxt, wp,
+											  n_rels,
+											  kds_dst,
+											  SESSION_KEXP_GROUPBY_KEYHASH(session),
+											  SESSION_KEXP_GROUPBY_KEYCOMP(session),
+											  SESSION_KEXP_GROUPBY_ACTIONS(session),
+											  kvars_addr_wp + kvars_chunksz * n_rels);
+			}
 			if (status >= 0)
 				depth = status;
 			else if (status == -2)

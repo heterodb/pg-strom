@@ -3,8 +3,8 @@
  *
  * Definitions of HeteroDB Extra Package
  * --
- * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2017-2021 (C) HeteroDB,Inc
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2017-2023 (C) HeteroDB,Inc
  *
  * This software is an extension of PostgreSQL; You can use, copy,
  * modify or distribute it under the terms of 'LICENSE' included

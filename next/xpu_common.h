@@ -3,8 +3,8 @@
  *
  * Common header portion for both of GPU and DPU device code
  * --
- * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2021 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -165,6 +165,14 @@ __Fetch(const T *ptr)
 
 	return temp;
 }
+
+template <typename T>
+INLINE_FUNCTION(T)
+__volatileRead(const volatile T *ptr)
+{
+	return *ptr;
+}
+
 #else
 #define __Fetch(PTR)		(*(PTR))
 #endif
@@ -286,12 +294,7 @@ typedef struct
 	uint32_t		kvars_nbytes;
 	kern_variable  *kvars_slot;
 	int			   *kvars_class;
-#if 0
-	//deprecated
-	struct kern_colmeta **kvars_cmeta;
-	void		  **kvars_addr;
-	int			   *kvars_len;
-#endif
+
 	/* variable length buffer */
 	char		   *vlpos;
 	char		   *vlend;
@@ -1291,11 +1294,14 @@ typedef struct xpu_datum_t		xpu_datum_t;
 typedef struct xpu_datum_operators xpu_datum_operators;
 
 #define XPU_DATUM_COMMON_FIELD			\
-	bool		isnull
+	const struct xpu_datum_operators *expr_ops
 
 struct xpu_datum_t {
 	XPU_DATUM_COMMON_FIELD;
 };
+
+/* if NULL, expr_ops is not set */
+#define XPU_DATUM_ISNULL(xdatum)		(!(xdatum)->expr_ops)
 
 struct xpu_datum_operators {
 	const char *xpu_type_name;
@@ -1358,18 +1364,27 @@ struct xpu_datum_operators {
 /*
  * xpu_array_t - array type support
  *
- * NOTE: pg_array_t is designed to store both of PostgreSQL / Arrow array
+ * NOTE: xpu_array_t is designed to store both of PostgreSQL / Arrow array
  * values. If @length < 0, it means @value points a varlena based PostgreSQL
  * array values; which includes nitems, dimension, nullmap and so on.
  * Elsewhere, @length means number of elements, from @start of the array on
- * the columnar buffer by @smeta.
+ * the columnar buffer by @smeta. @kds can be pulled by @smeta->kds_offset.
  */
 struct xpu_array_t {
 	XPU_DATUM_COMMON_FIELD;
-	const kern_data_store *kds;
-	int			length;
-	uint32_t	start;
-	kern_colmeta *smeta;
+	int32_t				length;
+	union {
+		struct {
+			bool		attbyval;
+			int8_t		attalign;
+			int16_t		attlen;
+			const varlena *value;
+		} heap;
+		struct {
+			uint32_t	start;
+			const kern_colmeta *smeta;
+		} arrow;
+	} u;
 };
 typedef struct xpu_array_t			xpu_array_t;
 EXTERN_DATA xpu_datum_operators		xpu_array_ops;
@@ -1378,22 +1393,23 @@ EXTERN_DATA xpu_datum_operators		xpu_array_ops;
  * xpu_composite_t - composite type support
  *
  * NOTE: xpu_composite_t is designed to store both of PostgreSQL / Arrow composite
- * values. If @nfields < 0, it means @value.htup points a varlena base PostgreSQL
- * composite values. Elsewhere (@nfields >= 0), it points composite values on
- * KDS_FORMAT_ARROW chunk. In this case, smeta[0] ... smeta[@nfields-1] describes
- * the values array on the KDS.
+ * values. If @value != NULL, it means @value points a varlena based PostgreSQL
+ * composite values. Elsewhere (@value == NULL), it points composite values on
+ * KDS_FORMAT_ARROW chunk, identified by the @rowidx.
+ * For both cases, @smeta points the column-metadata of the composite sub-fields,
+ * thus smeta[0] ... smeta[@nfields-1] describes the composite data type definition.
  */
 struct xpu_composite_t {
 	XPU_DATUM_COMMON_FIELD;
-	int16_t		nfields;
-	uint32_t	rowidx;
-	char	   *value;
 	Oid			comp_typid;
-	int			comp_typmod;
-	kern_colmeta *smeta;
+	int32_t		comp_typmod;
+	uint32_t	rowidx;		/* valid only if KDS_FORMAT_ARROW */
+	uint32_t	nfields;	/* length of the smeta[] array */
+	const kern_colmeta *smeta; /* colmeta array of the sub-fields */
+	const varlena *value;	/* composite varlena datum if heap-format */
 };
-typedef struct xpu_composite_t	xpu_composite_t;
-EXTERN_DATA xpu_composite_t		xpu_composite_ops;
+typedef struct xpu_composite_t		xpu_composite_t;
+EXTERN_DATA xpu_datum_operators		xpu_composite_ops;
 
 typedef struct {
 	TypeOpCode		type_opcode;
@@ -1458,8 +1474,7 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 
 typedef struct
 {
-	int16_t			var_depth;
-	int16_t			var_resno;
+	int32_t			var_resno;
 	uint32_t		var_slot_id;
 	uint32_t		var_slot_off;	/* offset of the slot-buffer (some margin at
 									 * the end of kcxt->kvars_slot[] to store several
@@ -1469,24 +1484,17 @@ typedef struct
 typedef struct
 {
 	uint32_t		slot_id;
-	TypeOpCode		slot_type;
-	const xpu_datum_operators *slot_ops;
 } kern_projection_desc;
 
 #define KAGG_ACTION__VREF			101		/* simple var copy */
 #define KAGG_ACTION__NROWS_ANY		201		/* <int8> - increment 1 always */
 #define KAGG_ACTION__NROWS_COND		202		/* <int8> - increment 1 if not NULL */
-#define KAGG_ACTION__PMIN_INT32		301		/* <int4>,<int4> - min value */
-#define KAGG_ACTION__PMIN_INT64		302		/* <int4>,<int8> - min value */
-#define KAGG_ACTION__PMIN_FP32		303		/* <int4>,<float4> - min value */
-#define KAGG_ACTION__PMIN_FP64		304		/* <int4>,<float8> - min value */
-#define KAGG_ACTION__PMAX_INT32		401		/* <int4>,<int4> - max value */
-#define KAGG_ACTION__PMAX_INT64		402		/* <int4>,<int8> - max value */
-#define KAGG_ACTION__PMAX_FP32		403		/* <int4>,<float4> - max value */
-#define KAGG_ACTION__PMAX_FP64		404		/* <int4>,<float8> - max value */
+#define KAGG_ACTION__PMIN_INT		302		/* <int4>,<int8> - min value */
+#define KAGG_ACTION__PMIN_FP		304		/* <int4>,<float8> - min value */
+#define KAGG_ACTION__PMAX_INT		402		/* <int4>,<int8> - max value */
+#define KAGG_ACTION__PMAX_FP		404		/* <int4>,<float8> - max value */
 #define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
-#define KAGG_ACTION__PSUM_FP32		502		/* <float4> - sum of values */
-#define KAGG_ACTION__PSUM_FP64		503		/* <float8> - sum of values */
+#define KAGG_ACTION__PSUM_FP		503		/* <float8> - sum of values */
 #define KAGG_ACTION__PAVG_INT		601		/* <int4>,<int8> - NROWS+PSUM */
 #define KAGG_ACTION__PAVG_FP		602		/* <int4>,<float8> - NROWS+PSUM */
 #define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
@@ -1496,22 +1504,8 @@ typedef struct
 {
 	int32_t		vl_len_;
 	uint32_t	nitems;
-	int32_t		value;
-} kagg_state__pminmax_int32_packed;
-
-typedef struct
-{
-	int32_t		vl_len_;
-	uint32_t	nitems;
 	int64_t		value;
 } kagg_state__pminmax_int64_packed;
-
-typedef struct
-{
-	int32_t		vl_len_;
-	uint32_t	nitems;
-	float4_t	value;
-} kagg_state__pminmax_fp32_packed;
 
 typedef struct
 {
@@ -1555,9 +1549,6 @@ typedef struct
 
 struct kern_aggregate_desc
 {
-	int		  (*action_fn)(kern_context *kcxt,
-						   const struct kern_aggregate_desc *kagg,
-						   char *pos);
 	uint16_t	action;			/* any of KAGG_ACTION__* */
 	int16_t		arg0_slot_id;	/* -1, if not used */
 	int16_t		arg1_slot_id;	/* -1, if not used */
@@ -1755,7 +1746,7 @@ typedef struct {
 	uint32_t	kds_src_offset;		/* offset to kds_src */
 	uint32_t	kds_dst_offset;		/* offset to kds_dst */
 	char		data[1]				__MAXALIGNED__;
-} kern_exec_scan;
+} kern_exec_task;
 
 typedef struct {
 	uint32_t	chunks_offset;		/* offset of kds_dst array */
@@ -1793,7 +1784,7 @@ typedef struct
 	union {
 		kern_errorbuf		error;
 		kern_session_info	session;
-		kern_exec_scan		scan;
+		kern_exec_task		task;
 		kern_exec_results	results;
 	} u;
 } XpuCommand;

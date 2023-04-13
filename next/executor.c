@@ -3,8 +3,8 @@
  *
  * Common routines related to query execution phase
  * ----
- * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2021 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -856,8 +856,6 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 {
 	TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
 
-	if (pgstromFetchFallbackTuple(pts, slot))
-		return slot;
 	for (;;)
 	{
 		kern_data_store *kds = pts->curr_kds;
@@ -946,8 +944,8 @@ __fixup_inner_varnode_walker(Node *node, void *data)
 	return expression_tree_mutator(node, __fixup_inner_varnode_walker, con);
 }
 
-static List *
-fixup_inner_varnode(List *exprs, CustomScan *cscan, Plan *inner_plan)
+static Node *
+fixup_inner_varnode(Node *expr, CustomScan *cscan, Plan *inner_plan)
 {
 	fixup_inner_varnode_context con;
 
@@ -955,7 +953,69 @@ fixup_inner_varnode(List *exprs, CustomScan *cscan, Plan *inner_plan)
 	con.cscan = cscan;
 	con.inner_plan = inner_plan;
 
-	return (List *)__fixup_inner_varnode_walker((Node *)exprs, &con);
+	return __fixup_inner_varnode_walker(expr, &con);
+}
+
+/*
+ * fixup_fallback_varnode
+ */
+typedef struct
+{
+	CustomScan *cscan;
+	List	   *kvars_slot_list;
+} fixup_fallback_varnode_context;
+
+static Node *
+__fixup_fallback_varnode_walker(Node *node, void *data)
+{
+	fixup_fallback_varnode_context *con = data;
+	ListCell   *lc;
+	int			slot_id = 0;
+
+	if (!node)
+		return NULL;
+	foreach (lc, con->kvars_slot_list)
+	{
+		Node   *curr = lfirst(lc);
+
+		if (equal(node, curr))
+		{
+			return (Node *)makeVar(INDEX_VAR,
+								   slot_id+1,
+								   exprType(node),
+								   exprTypmod(node),
+								   exprCollation(node), 0);
+		}
+		slot_id++;
+	}
+	if (IsA(node, Var))
+	{
+		List   *custom_scan_tlist = con->cscan->custom_scan_tlist;
+		Var	   *var = (Var *)node;
+
+		if (var->varno == INDEX_VAR &&
+			var->varattno > 0 &&
+			var->varattno <= list_length(custom_scan_tlist))
+		{
+			TargetEntry *tle = list_nth(custom_scan_tlist, var->varattno-1);
+
+			return __fixup_fallback_varnode_walker((Node *)tle->expr, data);
+		}
+		elog(ERROR, "Bug? kvars_slot_list lookup failed: (%s)", nodeToString(node));
+	}
+	return expression_tree_mutator(node, __fixup_fallback_varnode_walker, data);
+}
+
+static Node *
+fixup_fallback_varnode(Node *node, CustomScan *cscan, List *kvars_slot_list)
+{
+	fixup_fallback_varnode_context con;
+
+	memset(&con, 0, sizeof(con));
+	con.cscan = cscan;
+	con.kvars_slot_list = kvars_slot_list;
+
+	return __fixup_fallback_varnode_walker(node, &con);
 }
 
 /*
@@ -973,7 +1033,7 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 	size_t			off;
 
 	initStringInfo(&pts->xcmd_buf);
-	bufsz = MAXALIGN(offsetof(XpuCommand, u.scan.data));
+	bufsz = MAXALIGN(offsetof(XpuCommand, u.task.data));
 	if (tdesc_src)
 		bufsz += estimate_kern_data_store(tdesc_src);
 	if (tdesc_dst)
@@ -981,7 +1041,7 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 	enlargeStringInfo(&pts->xcmd_buf, bufsz);
 
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
-	memset(xcmd, 0, offsetof(XpuCommand, u.scan.data));
+	memset(xcmd, 0, offsetof(XpuCommand, u.task.data));
 	xcmd->magic = XpuCommandMagicNumber;
 	if ((pts->task_kind & DEVTASK__SCAN) != 0)
 		xcmd->tag = XpuCommandTag__XpuScanExec;
@@ -993,20 +1053,145 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 		elog(ERROR, "unsupported task kind: %08x", pts->task_kind);
 	xcmd->length = bufsz;
 
-	off = offsetof(XpuCommand, u.scan.data);
+	off = offsetof(XpuCommand, u.task.data);
 	if (tdesc_dst)
 	{
-		xcmd->u.scan.kds_dst_offset = off;
+		xcmd->u.task.kds_dst_offset = off;
 		kds  = (kern_data_store *)((char *)xcmd + off);
 		off += setup_kern_data_store(kds, tdesc_dst, 0, KDS_FORMAT_ROW);
 	}
 	if (tdesc_src)
 	{
-		xcmd->u.scan.kds_src_offset = off;
+		xcmd->u.task.kds_src_offset = off;
 		kds  = (kern_data_store *)((char *)xcmd + off);
 		off += setup_kern_data_store(kds, tdesc_src, 0, format);
 	}
 	pts->xcmd_buf.len = off;
+}
+
+/*
+ * __execInitTaskStateCpuFallback
+ */
+static List *
+__execInitTaskStateCpuFallback(pgstromTaskState *pts)
+{
+	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
+	pgstromPlanInfo	*pp_info = pts->pp_info;
+	Relation	rel = pts->css.ss.ss_currentRelation;
+	TupleDesc	fallback_tdesc = RelationGetDescr(rel);
+	List	   *fallback_tlist = NIL;
+	List	   *kvars_slot_list = NIL;
+	List	   *base_quals;
+	ListCell   *cell;
+
+	/*
+	 * Setup CPU fallback infrastructure for base relation scan (depth-0)
+	 */
+	base_quals = (List *)
+		fixup_varnode_to_origin((Node *)pp_info->scan_quals,
+								cscan->custom_scan_tlist);
+	pts->base_quals = ExecInitQual(base_quals, &pts->css.ss.ps);
+	foreach (cell, cscan->custom_scan_tlist)
+	{
+		TargetEntry *tle = lfirst(cell);
+
+		if (!tle->resjunk)
+			fallback_tlist = lappend(fallback_tlist, tle);
+	}
+	pts->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
+											  table_slot_callbacks(rel));
+	if (pts->num_rels > 0)
+	{
+		TupleDesc	relation_tdesc = RelationGetDescr(rel);
+		List	   *fallback_tlist_fixed = NIL;
+		int			nslots = list_length(pp_info->kvars_depth);
+		int			slot_id = 0;
+		ListCell   *lc1, *lc2;
+		
+		fallback_tdesc = CreateTemplateTupleDesc(nslots);
+		forboth (lc1, pp_info->kvars_depth,
+				 lc2, pp_info->kvars_resno)
+		{
+			int		__depth = lfirst_int(lc1);
+			int		__resno = lfirst_int(lc2);
+
+			if (__depth < 0)
+			{
+				Const  *con = makeNullConst(INT4OID, -1, InvalidOid);
+
+				TupleDescInitEntry(fallback_tdesc,
+								   slot_id+1,
+								   "...null.value...",
+								   INT4OID,
+								   -1,
+								   InvalidOid);
+				kvars_slot_list = lappend(kvars_slot_list, con);
+			}
+			else if (__depth == 0)
+			{
+				Form_pg_attribute attr = TupleDescAttr(relation_tdesc, __resno-1);
+				Var	   *var;
+
+				Assert(__resno > 0 && __resno <= relation_tdesc->natts);
+				TupleDescInitEntry(fallback_tdesc,
+								   slot_id+1,
+								   NameStr(attr->attname),
+								   attr->atttypid,
+								   attr->atttypmod,
+								   attr->attndims);
+				var = makeVar(cscan->scan.scanrelid,
+							  attr->attnum,
+							  attr->atttypid,
+							  attr->atttypmod,
+							  attr->attcollation, 0);
+				kvars_slot_list = lappend(kvars_slot_list, var);
+			}
+			else
+			{
+				Plan	   *i_plan = list_nth(cscan->custom_plans, __depth-1);
+				TargetEntry *tle = list_nth(i_plan->targetlist, __resno-1);
+				Oid			type_oid;
+				int32		type_mod;
+
+				Assert(__depth > 0 && __depth <= pts->num_rels);
+				Assert(__resno > 0 && __resno <= list_length(i_plan->targetlist) &&
+					   __resno == tle->resno);
+				type_oid = exprType((Node *)tle->expr);
+				type_mod = exprTypmod((Node *)tle->expr);
+				TupleDescInitEntry(fallback_tdesc,
+								   slot_id+1,
+								   tle->resname,
+								   type_oid,
+								   type_mod,
+								   type_is_array(type_oid) ? 1 : 0);
+				kvars_slot_list = lappend(kvars_slot_list, tle->expr);
+			}
+			slot_id++;
+		}
+		pts->fallback_slot = MakeSingleTupleTableSlot(fallback_tdesc,
+													  &TTSOpsVirtual);
+		foreach (lc1, fallback_tlist)
+		{
+			TargetEntry *tle_old = lfirst(lc1);
+			TargetEntry *tle_new = flatCopyTargetEntry(tle_old);
+
+			tle_new->expr = (Expr *)
+				fixup_fallback_varnode((Node *)tle_old->expr,
+									   cscan, kvars_slot_list);
+			fallback_tlist_fixed = lappend(fallback_tlist_fixed, tle_new);
+		}
+		fallback_tlist = fallback_tlist_fixed;
+	}
+	/*
+	 * Setup CPU fallback Projection
+	 */
+	pts->fallback_proj =
+		ExecBuildProjectionInfo(fallback_tlist,
+								pts->css.ss.ps.ps_ExprContext,
+								pts->css.ss.ss_ScanTupleSlot,
+								&pts->css.ss.ps,
+								fallback_tdesc);
+	return kvars_slot_list;
 }
 
 /*
@@ -1021,16 +1206,16 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	Relation	rel = pts->css.ss.ss_currentRelation;
 	TupleDesc	tupdesc_src = RelationGetDescr(rel);
 	TupleDesc	tupdesc_dst;
-	int			depth;
-	List	   *tlist_dev = NIL;
-	List	   *base_quals = NIL;
+	int			depth_index = 0;
 	ListCell   *lc;
+	List	   *kvars_slot_list;
 
 	/* sanity checks */
 	Assert(rel != NULL &&
 		   outerPlanState(node) == NULL &&
 		   innerPlanState(node) == NULL &&
-		   pp_info->num_rels == list_length(cscan->custom_plans));
+		   pp_info->num_rels == list_length(cscan->custom_plans) &&
+		   pts->num_rels == list_length(cscan->custom_plans));
 	/*
 	 * PG-Strom supports:
 	 * - regular relation with 'heap' access method
@@ -1089,50 +1274,42 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * Init resources for CPU fallbacks
 	 */
-	base_quals = (List *)
-		fixup_varnode_to_origin((Node *)pp_info->scan_quals,
-								cscan->custom_scan_tlist);
-	pts->base_quals = ExecInitQual(base_quals, &pts->css.ss.ps);
-	foreach (lc, cscan->custom_scan_tlist)
-	{
-		TargetEntry *tle = lfirst(lc);
+	kvars_slot_list = __execInitTaskStateCpuFallback(pts);
 
-		if (!tle->resjunk)
-			tlist_dev = lappend(tlist_dev, tle);
-	}
-	pts->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
-											  table_slot_callbacks(rel));
-	pts->base_proj = ExecBuildProjectionInfo(tlist_dev,
-											 pts->css.ss.ps.ps_ExprContext,
-											 pts->css.ss.ss_ScanTupleSlot,
-											 &pts->css.ss.ps,
-											 RelationGetDescr(rel));
 	/*
 	 * init inner relations
 	 */
-	depth = 1;
 	foreach (lc, cscan->custom_plans)
 	{
-		pgstromTaskInnerState *istate = &pts->inners[depth-1];
-		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[depth-1];
+		pgstromTaskInnerState *istate = &pts->inners[depth_index];
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[depth_index];
 		Plan	   *plan = lfirst(lc);
 		PlanState  *ps = ExecInitNode(plan, estate, eflags);
-		List	   *hash_inner_keys;
+		List	   *join_quals;
+		List	   *other_quals;
 		ListCell   *cell;
+		ExprState  *es;
 		devtype_info *dtype;
 
 		istate->ps = ps;
 		istate->econtext = CreateExprContext(estate);
-		istate->depth = depth;
+		istate->depth = depth_index + 1;
 		istate->join_type = pp_inner->join_type;
-		istate->join_quals = ExecInitQual(pp_inner->join_quals,
-										  &pts->css.ss.ps);
-		istate->other_quals = ExecInitQual(pp_inner->other_quals,
-										   &pts->css.ss.ps);
+		join_quals = (List *)
+			fixup_fallback_varnode((Node *)pp_inner->join_quals,
+								   cscan, kvars_slot_list);
+		istate->join_quals = ExecInitQual(join_quals, &pts->css.ss.ps);
+		other_quals = (List *)
+			fixup_fallback_varnode((Node *)pp_inner->other_quals,
+								   cscan, kvars_slot_list);
+		istate->other_quals = ExecInitQual(other_quals, &pts->css.ss.ps);
+
 		foreach (cell, pp_inner->hash_outer_keys)
 		{
-			ExprState  *es = ExecInitExpr((Expr *)lfirst(cell),
-										  &pts->css.ss.ps);
+			Node	   *outer_key = (Node *)lfirst(cell);
+
+			outer_key = fixup_fallback_varnode(outer_key, cscan, kvars_slot_list);
+			es = ExecInitExpr((Expr *)outer_key, &pts->css.ss.ps);
 			dtype = pgstrom_devtype_lookup(exprType((Node *)es->expr));
 			if (!dtype)
 				elog(ERROR, "failed on lookup device type of %s",
@@ -1141,12 +1318,12 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			istate->hash_outer_dtypes = lappend(istate->hash_outer_dtypes, dtype);
 		}
 		/* inner hash-keys references the result of inner-slot */
-		hash_inner_keys = fixup_inner_varnode(pp_inner->hash_inner_keys,
-											  cscan, plan);
-		foreach (cell, hash_inner_keys)
+		foreach (cell, pp_inner->hash_inner_keys)
 		{
-			ExprState  *es = ExecInitExpr((Expr *)lfirst(cell),
-										  &pts->css.ss.ps);
+			Node	   *inner_key = (Node *)lfirst(cell);
+
+			inner_key = fixup_inner_varnode(inner_key, cscan, plan);
+			es = ExecInitExpr((Expr *)inner_key, &pts->css.ss.ps);
 			dtype = pgstrom_devtype_lookup(exprType((Node *)es->expr));
 			if (!dtype)
 				elog(ERROR, "failed on lookup device type of %s",
@@ -1163,8 +1340,9 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 											   &pts->css.ss.ps);
 		}
 		pts->css.custom_ps = lappend(pts->css.custom_ps, ps);
-		depth++;
+		depth_index++;
 	}
+	Assert(depth_index == pts->num_rels);
 	
 	/*
 	 * Setup request buffer
@@ -1231,9 +1409,13 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 static TupleTableSlot *
 pgstromExecScanAccess(pgstromTaskState *pts)
 {
-	TupleTableSlot *slot = NULL;
+	TupleTableSlot *slot;
 	XpuCommand	   *resp;
 
+	slot = pgstromFetchFallbackTuple(pts);
+	if (slot)
+		return slot;
+	
 	while (!pts->curr_resp || !(slot = pts->cb_next_tuple(pts)))
 	{
 	next_chunks:
@@ -1241,7 +1423,8 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 			xpuClientPutResponse(pts->curr_resp);
 		pts->curr_resp = __fetchNextXpuCommand(pts);
 		if (!pts->curr_resp)
-			return NULL;
+			return pgstromFetchFallbackTuple(pts);
+
 		resp = pts->curr_resp;
 		if (resp->tag == XpuCommandTag__Success)
 		{

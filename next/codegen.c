@@ -3,8 +3,8 @@
  *
  * Routines for xPU code generator
  * ----
- * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2022 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -904,6 +904,15 @@ codegen_const_expression(codegen_context *context,
 						 StringInfo buf, Const *con)
 {
 	devtype_info   *dtype;
+	char			typtype;
+
+	typtype = get_typtype(con->consttype);
+	if (typtype != TYPTYPE_BASE &&
+		typtype != TYPTYPE_ENUM &&
+		typtype != TYPTYPE_RANGE &&
+		typtype != TYPTYPE_DOMAIN)
+		__Elog("unable to use type %s in Const expression (class: %c)",
+			   format_type_be(con->consttype), typtype);
 
 	dtype = pgstrom_devtype_lookup(con->consttype);
 	if (!dtype)
@@ -954,11 +963,21 @@ codegen_param_expression(codegen_context *context,
 {
 	kern_expression	kexp;
 	devtype_info   *dtype;
+	char			typtype;
 	int				pos;
 
 	if (param->paramkind != PARAM_EXTERN)
 		__Elog("Only PARAM_EXTERN is supported on device: %d",
 			   (int)param->paramkind);
+
+	typtype = get_typtype(param->paramtype);
+	if (typtype != TYPTYPE_BASE &&
+		typtype != TYPTYPE_ENUM &&
+		typtype != TYPTYPE_RANGE &&
+		typtype != TYPTYPE_DOMAIN)
+		__Elog("unable to use type %s in Const expression (class: %c)",
+			   format_type_be(param->paramtype), typtype);
+
 	dtype = pgstrom_devtype_lookup(param->paramtype);
 	if (!dtype)
 		__Elog("type %s is not device supported",
@@ -1330,7 +1349,6 @@ kern_vars_defitem_comp(const void *__a, const void *__b)
 	const kern_vars_defitem *a = __a;
 	const kern_vars_defitem *b = __b;
 
-	Assert(a->var_depth == b->var_depth);
 	if (a->var_resno < b->var_resno)
 		return -1;
 	if (a->var_resno > b->var_resno)
@@ -1358,24 +1376,25 @@ __codegen_build_loadvars_one(codegen_context *context, int depth)
 			  lc3, context->kvars_types)
 	{
 		kern_vars_defitem vitem;
-		Oid		type_oid = lfirst_oid(lc3);
+		int		__depth = lfirst_int(lc1);
+		int		__resno = lfirst_int(lc2);
+		Oid		__type_oid = lfirst_oid(lc3);
 
-		vitem.var_depth = lfirst_int(lc1);
-		vitem.var_resno = lfirst_int(lc2);
+		vitem.var_resno   = __resno;
 		vitem.var_slot_id = slot_id++;
-		if (!OidIsValid(type_oid))
-			vitem.var_slot_off = 0;
-		else
+		if (__depth == depth)
 		{
-			devtype_info *dtype = pgstrom_devtype_lookup(type_oid);
+			if (!OidIsValid(__type_oid))
+				vitem.var_slot_off = 0;
+			else
+			{
+				devtype_info *dtype = pgstrom_devtype_lookup(__type_oid);
 
-			Assert(dtype != NULL);
-			kvars_offset = TYPEALIGN(dtype->type_alignof, kvars_offset);
-			vitem.var_slot_off = kvars_offset;
-			kvars_offset += dtype->type_sizeof;
-		}
-		if (vitem.var_depth == depth)
-		{
+				Assert(dtype != NULL);
+				kvars_offset = TYPEALIGN(dtype->type_alignof, kvars_offset);
+				vitem.var_slot_off = kvars_offset;
+				kvars_offset += dtype->type_sizeof;
+			}
 			appendBinaryStringInfo(&buf, (char *)&vitem,
 								   sizeof(kern_vars_defitem));
 			nloads++;
@@ -1660,14 +1679,13 @@ codegen_build_projection(codegen_context *context)
 		
 		desc = &kexp->u.proj.desc[nattrs++];
 		desc->slot_id = slot_id;
-		desc->slot_type = dtype->type_code;
 	}
 	kexp->exptype = TypeOpCode__int4;
 	kexp->expflags = context->kexp_flags;
 	kexp->opcode  = FuncOpCode__Projection;
 	kexp->nr_args = nexprs;
 	kexp->args_offset = MAXALIGN(offsetof(kern_expression,
-										  u.pagg.desc[nattrs]));
+										  u.proj.desc[nattrs]));
 	kexp->u.proj.nattrs = nattrs;
 	initStringInfo(&buf);
 	pos = __appendBinaryStringInfo(&buf, kexp, kexp->args_offset);
@@ -2474,10 +2492,11 @@ __xpucode_loadvars_cstring(StringInfo buf,
 						   List *dcontext)
 {
 	bool	verbose = false;
+	int		depth = kexp->u.load.depth;
 	int		i;
 
 	Assert(kexp->nr_args == 0);
-	appendStringInfo(buf, "{LoadVars:");
+	appendStringInfo(buf, "{LoadVars: depth=%d", depth);
 	if (kexp->u.load.nloads > 0)
 		appendStringInfo(buf, " kvars=[");
 
@@ -2495,12 +2514,11 @@ __xpucode_loadvars_cstring(StringInfo buf,
 			appendStringInfo(buf, ", ");
 		if (!css)
 		{
-			appendStringInfo(buf, "(slot_id=%u, depth=%d, resno=%d)",
+			appendStringInfo(buf, "(slot_id=%u, resno=%d)",
 							 vitem->var_slot_id,
-							 vitem->var_depth,
 							 vitem->var_resno);
 		}
-		else if (vitem->var_depth == 0)
+		else if (depth == 0)
 		{
 			TupleDesc	tupdesc = RelationGetDescr(css->ss.ss_currentRelation);
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, vitem->var_resno - 1);
@@ -2519,7 +2537,7 @@ __xpucode_loadvars_cstring(StringInfo buf,
 												verbose, false));
 			pfree(kvar);
 		}
-		else if (vitem->var_depth < 0)
+		else if (depth < 0)
 		{
 			CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
 
@@ -2545,7 +2563,7 @@ __xpucode_loadvars_cstring(StringInfo buf,
 			Plan	   *plan;
 			TargetEntry *tle;
 
-			plan = list_nth(cscan->custom_plans, vitem->var_depth - 1);
+			plan = list_nth(cscan->custom_plans, depth - 1);
 			tle = list_nth(plan->targetlist, vitem->var_resno - 1);
 			appendStringInfo(buf, "%u:%s",
 							 vitem->var_slot_id,
@@ -2623,23 +2641,18 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 				appendStringInfo(buf, "nrows[%d]",
 								 desc->arg0_slot_id);
 				break;
-			case KAGG_ACTION__PMIN_INT32:
-			case KAGG_ACTION__PMIN_INT64:
-			case KAGG_ACTION__PMIN_FP32:
-			case KAGG_ACTION__PMIN_FP64:
+			case KAGG_ACTION__PMIN_INT:
+			case KAGG_ACTION__PMIN_FP:
 				appendStringInfo(buf, "pmin[%d]",
 								 desc->arg0_slot_id);
 				break;
-			case KAGG_ACTION__PMAX_INT32:
-			case KAGG_ACTION__PMAX_INT64:
-			case KAGG_ACTION__PMAX_FP32:
-			case KAGG_ACTION__PMAX_FP64:
+			case KAGG_ACTION__PMAX_INT:
+			case KAGG_ACTION__PMAX_FP:
 				appendStringInfo(buf, "pmax[%d]",
 								 desc->arg0_slot_id);
 				break;
 			case KAGG_ACTION__PSUM_INT:
-			case KAGG_ACTION__PSUM_FP32:
-			case KAGG_ACTION__PSUM_FP64:
+			case KAGG_ACTION__PSUM_FP:
 				appendStringInfo(buf, "psum[%d]",
 								 desc->arg0_slot_id);
 				break;

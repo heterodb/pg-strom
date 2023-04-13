@@ -3,8 +3,8 @@
  *
  * Routines related to outer relation scan
  * ----
- * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2022 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -377,13 +377,14 @@ pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple htuple)
 	pts->fallback_usage += sz;
 }
 
-bool
-pgstromFetchFallbackTuple(pgstromTaskState *pts, TupleTableSlot *slot)
+TupleTableSlot *
+pgstromFetchFallbackTuple(pgstromTaskState *pts)
 {
 	if (pts->fallback_tuples &&
 		pts->fallback_buffer &&
 		pts->fallback_index < pts->fallback_nitems)
 	{
+		TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
 		HeapTupleData	htuple;
 		HeapTuple		ftuple;
 
@@ -400,9 +401,9 @@ pgstromFetchFallbackTuple(pgstromTaskState *pts, TupleTableSlot *slot)
 			pts->fallback_nitems = 0;
 			pts->fallback_usage = 0;
 		}
-		return true;
+		return slot;
 	}
-	return false;
+	return NULL;
 }
 
 /* ----------------------------------------------------------------
@@ -412,12 +413,14 @@ pgstromFetchFallbackTuple(pgstromTaskState *pts, TupleTableSlot *slot)
  * ----------------------------------------------------------------
  */
 #define __XCMD_KDS_SRC_OFFSET(buf)							\
-	(((XpuCommand *)((buf)->data))->u.scan.kds_src_offset)
+	(((XpuCommand *)((buf)->data))->u.task.kds_src_offset)
 #define __XCMD_GET_KDS_SRC(buf)								\
 	((kern_data_store *)((buf)->data + __XCMD_KDS_SRC_OFFSET(buf)))
 
 static void
-__relScanDirectFallbackBlock(pgstromTaskState *pts, BlockNumber block_num)
+__relScanDirectFallbackBlock(pgstromTaskState *pts,
+							 kern_data_store *kds,
+							 BlockNumber block_num)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
 	Relation	relation = pts->css.ss.ss_currentRelation;
@@ -459,7 +462,7 @@ __relScanDirectFallbackBlock(pgstromTaskState *pts, BlockNumber block_num)
 		HeapCheckForSerializableConflictOut(valid, relation, &htup,
 											buffer, snapshot);
 		if (valid)
-			pts->cb_cpu_fallback(pts, &htup);
+			pts->cb_cpu_fallback(pts, kds, &htup);
 	}
 	UnlockReleaseBuffer(buffer);
 	pg_atomic_fetch_add_u32(&ps_state->heap_fallback_nblocks, 1);
@@ -623,7 +626,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				if (buf_id >= 0)
 				{
 					LWLockRelease(bufLock);
-					__relScanDirectFallbackBlock(pts, block_num);
+					__relScanDirectFallbackBlock(pts, kds, block_num);
 					pts->curr_block_num++;
 					continue;
 				}
@@ -680,7 +683,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				 * to the (relatively) poor performance devices instead of CPUs.
 				 * So, we run CPU fallback for the tuples in dirty pages.
 				 */
-				__relScanDirectFallbackBlock(pts, block_num);
+				__relScanDirectFallbackBlock(pts, kds, block_num);
 			}
 			else
 			{
@@ -784,8 +787,8 @@ out:
 		Assert(segment_id == InvalidBlockNumber);
 	}
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
-	xcmd->u.scan.kds_src_pathname = kds_src_pathname;
-	xcmd->u.scan.kds_src_iovec = kds_src_iovec;
+	xcmd->u.task.kds_src_pathname = kds_src_pathname;
+	xcmd->u.task.kds_src_iovec = kds_src_iovec;
 	xcmd->length = pts->xcmd_buf.len;
 
 	xcmd_iov[0].iov_base = xcmd;

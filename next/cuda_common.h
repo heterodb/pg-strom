@@ -3,8 +3,8 @@
  *
  * Common header for CUDA device code, in addition to xPU common definitions.
  * ----
- * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2022 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -177,7 +177,15 @@ execGpuJoinProjection(kern_context *kcxt,
 					  kern_data_store *kds_dst,
 					  kern_expression *kexp_projection,
 					  char *kvars_addr_wp);
-
+EXTERN_FUNCTION(int)
+execGpuPreAggGroupBy(kern_context *kcxt,
+					 kern_warp_context *wp,
+					 int n_rels,
+					 kern_data_store *kds_final,
+					 kern_expression *kexp_groupby_keyhash,
+					 kern_expression *kexp_groupby_keycomp,
+					 kern_expression *kexp_groupby_actions,
+					 char *kvars_addr_wp);
 /*
  * Definitions related to GpuScan/GpuJoin/GpuPreAgg
  */

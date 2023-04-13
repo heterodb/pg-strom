@@ -3,8 +3,8 @@
  *
  * Definition of half-precision floating-point
  * --
- * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2021 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -48,47 +48,63 @@ typedef double				float8_t;
 
 /* int/float reinterpret functions */
 INLINE_FUNCTION(double)
-__long_as_double__(const uint64_t ival)
+__longlong_as_double__(const uint64_t ival)
 {
+#ifdef __CUDACC__
+	return __longlong_as_double(ival);
+#else
 	union {
 		uint64_t	ival;
 		double		fval;
 	} datum;
 	datum.ival = ival;
 	return datum.fval;
+#endif
 }
 
 INLINE_FUNCTION(uint64_t)
-__double_as_long(const double fval)
+__double_as_longlong__(const double fval)
 {
+#ifdef __CUDACC__
+	return __double_as_longlong(fval);
+#else
 	union {
 		uint64_t	ival;
 		double		fval;
 	} datum;
 	datum.fval = fval;
 	return datum.ival;
+#endif
 }
 
 INLINE_FUNCTION(float)
 __int_as_float__(const uint32_t ival)
 {
+#ifdef __CUDACC__
+	return __uint_as_float(ival);
+#else
 	union {
 		uint32_t	ival;
 		float		fval;
 	} datum;
 	datum.ival = ival;
 	return datum.fval;
+#endif
 }
 
 INLINE_FUNCTION(uint32_t)
 __float_as_int__(const float fval)
 {
+#ifdef __CUDACC__
+	return __float_as_uint(fval);
+#else
 	union {
 		uint32_t	ival;
 		float		fval;
 	} datum;
 	datum.fval = fval;
 	return datum.ival;
+#endif
 }
 
 INLINE_FUNCTION(float2_t)
@@ -259,7 +275,7 @@ fp16_to_fp64(half_t fp16val)
 		expo += FP64_EXPO_BIAS;
 		result = (sign | (expo << FP64_FRAC_BITS) | (frac << 42));
 	}
-	return __long_as_double__(result);
+	return __longlong_as_double__(result);
 #endif
 }
 

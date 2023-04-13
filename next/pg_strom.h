@@ -3,8 +3,8 @@
  *
  * Header file of pg_strom module
  * --
- * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2021 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -390,7 +390,6 @@ struct pgstromTaskState
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
-	ProjectionInfo	   *base_proj;	/* base --> custom_tlist projection */
 	/* CPU fallback support */
 	off_t			   *fallback_tuples;
 	size_t				fallback_index;
@@ -399,6 +398,8 @@ struct pgstromTaskState
 	size_t				fallback_usage;
 	size_t				fallback_bufsz;
 	char			   *fallback_buffer;
+	TupleTableSlot	   *fallback_slot;	/* host-side kvars-slot */
+	ProjectionInfo	   *fallback_proj;	/* base or fallback slot -> custom_tlist */
 	/* request command buffer (+ status for table scan) */
 	TBMIterateResult   *curr_tbm;
 	Buffer				curr_vm_buffer;		/* for visibility-map */
@@ -412,6 +413,7 @@ struct pgstromTaskState
 	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts,
 										struct iovec *xcmd_iov, int *xcmd_iovcnt);
 	void			  (*cb_cpu_fallback)(struct pgstromTaskState *pts,
+										 struct kern_data_store *kds,
 										 HeapTuple htuple);
 	/* inner relations state (if JOIN) */
 	int					num_rels;
@@ -569,8 +571,7 @@ extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
 											 struct iovec *xcmd_iov,
 											 int *xcmd_iovcnt);
 extern void		pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple tuple);
-extern bool		pgstromFetchFallbackTuple(pgstromTaskState *pts,
-										  TupleTableSlot *slot);
+extern TupleTableSlot *pgstromFetchFallbackTuple(pgstromTaskState *pts);
 extern void		pgstrom_init_relscan(void);
 
 /*
@@ -741,7 +742,9 @@ extern CustomScan *PlanXpuScanPathCommon(PlannerInfo *root,
 										 List        *clauses,
 										 pgstromPlanInfo *pp_info,
 										 const CustomScanMethods *methods);
-extern void		ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple);
+extern void		ExecFallbackCpuScan(pgstromTaskState *pts,
+									kern_data_store *kds,
+									HeapTuple tuple);
 extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
 extern void		pgstrom_init_gpu_scan(void);
 
@@ -772,7 +775,9 @@ extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
 										 pgstromPlanInfo *pp_info,
 										 const CustomScanMethods *methods);
 extern uint32_t	GpuJoinInnerPreload(pgstromTaskState *pts);
-extern void		ExecFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple);
+extern void		ExecFallbackCpuJoin(pgstromTaskState *pts,
+									kern_data_store *kds,
+									HeapTuple tuple);
 extern void		pgstrom_init_gpu_join(void);
 
 /*
@@ -785,7 +790,9 @@ extern void		xpupreagg_add_custompath(PlannerInfo *root,
 										 void *extra,
 										 uint32_t task_kind,
 										 const CustomPathMethods *methods);
-extern void		ExecFallbackCpuPreAgg(pgstromTaskState *pts, HeapTuple tuple);
+extern void		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
+									  kern_data_store *kds,
+									  HeapTuple tuple);
 extern void		pgstrom_init_gpu_preagg(void);
 
 /*

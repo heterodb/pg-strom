@@ -3,8 +3,8 @@
  *
  * Collection of the primitive Date/Time type support for both of GPU and DPU
  * ----
- * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2022 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -68,7 +68,7 @@ xpu_date_datum_ref(kern_context *kcxt,
 {
 	xpu_date_t *result = (xpu_date_t *)__result;
 
-	result->isnull = false;
+	result->expr_ops = &xpu_date_ops;
 	if (vclass == KVAR_CLASS__INLINE)
 		result->value = kvar->i32;
 	else if (vclass >= sizeof(DateADT))
@@ -89,7 +89,7 @@ xpu_date_datum_store(kern_context *kcxt,
 {
 	const xpu_date_t *arg = (const xpu_date_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_vclass = KVAR_CLASS__NULL;
 	else
 	{
@@ -106,7 +106,7 @@ xpu_date_datum_write(kern_context *kcxt,
 {
 	const xpu_date_t *arg = (const xpu_date_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		return 0;
 	if (buffer)
 		*((DateADT *)buffer) = arg->value;
@@ -120,7 +120,7 @@ xpu_date_datum_hash(kern_context *kcxt,
 {
 	const xpu_date_t *arg = (const xpu_date_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(&arg->value, sizeof(DateADT));
@@ -139,7 +139,7 @@ xpu_time_datum_ref(kern_context *kcxt,
 {
 	xpu_time_t *result = (xpu_time_t *)__result;
 
-	result->isnull = false;
+	result->expr_ops = &xpu_time_ops;
 	if (vclass == KVAR_CLASS__INLINE)
 		result->value = kvar->i64;
 	else if (vclass >= sizeof(TimeADT))
@@ -160,7 +160,7 @@ xpu_time_datum_store(kern_context *kcxt,
 {
 	const xpu_time_t *arg = (const xpu_time_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_vclass = KVAR_CLASS__NULL;
 	else
 	{
@@ -177,7 +177,7 @@ xpu_time_datum_write(kern_context *kcxt,
 {
 	const xpu_time_t *arg = (const xpu_time_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		return 0;
 	if (buffer)
 		*((TimeADT *)buffer) = arg->value;
@@ -191,7 +191,7 @@ xpu_time_datum_hash(kern_context *kcxt,
 {
 	const xpu_time_t *arg = (const xpu_time_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(&arg->value, sizeof(TimeADT));
@@ -210,7 +210,7 @@ xpu_timetz_datum_ref(kern_context *kcxt,
 {
 	xpu_timetz_t *result = (xpu_timetz_t *)__result;
 
-	result->isnull = false;
+	result->expr_ops = &xpu_timetz_ops;
 	if (vclass >= SizeOfTimeTzADT)
 		memcpy(&result->value, kvar->ptr, SizeOfTimeTzADT);
 	else
@@ -229,7 +229,7 @@ xpu_timetz_datum_store(kern_context *kcxt,
 {
 	xpu_timetz_t *arg = (xpu_timetz_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_vclass = KVAR_CLASS__NULL;
     else
 	{
@@ -252,7 +252,7 @@ xpu_timetz_datum_write(kern_context *kcxt,
 {
 	const xpu_timetz_t *arg = (const xpu_timetz_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		return 0;
 	if (buffer)
 		*((TimeTzADT *)buffer) = arg->value;
@@ -266,7 +266,7 @@ xpu_timetz_datum_hash(kern_context *kcxt,
 {
 	const xpu_timetz_t *arg = (const xpu_timetz_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(&arg->value, SizeOfTimeTzADT);
@@ -285,7 +285,7 @@ xpu_timestamp_datum_ref(kern_context *kcxt,
 {
 	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
 
-	result->isnull = false;
+	result->expr_ops = &xpu_timestamp_ops;
 	if (vclass == KVAR_CLASS__INLINE)
 		result->value = kvar->i64;
 	else if (vclass >= sizeof(Timestamp))
@@ -306,7 +306,7 @@ xpu_timestamp_datum_store(kern_context *kcxt,
 {
 	const xpu_timestamp_t *arg = (const xpu_timestamp_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_vclass = KVAR_CLASS__NULL;
 	else
 	{
@@ -323,7 +323,7 @@ xpu_timestamp_datum_write(kern_context *kcxt,
 {
 	const xpu_timestamp_t *arg = (const xpu_timestamp_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		return 0;
 	if (buffer)
 		*((Timestamp *)buffer) = arg->value;
@@ -337,7 +337,7 @@ xpu_timestamp_datum_hash(kern_context *kcxt,
 {
 	const xpu_timestamp_t *arg = (const xpu_timestamp_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(&arg->value, sizeof(Timestamp));
@@ -356,7 +356,7 @@ xpu_timestamptz_datum_ref(kern_context *kcxt,
 {
 	xpu_timestamptz_t *result = (xpu_timestamptz_t *)__result;
 
-	result->isnull = false;
+	result->expr_ops = &xpu_timestamptz_ops;
 	if (vclass == KVAR_CLASS__INLINE)
 		result->value = kvar->i64;
 	else if (vclass >= sizeof(Timestamp))
@@ -377,7 +377,7 @@ xpu_timestamptz_datum_store(kern_context *kcxt,
 {
 	const xpu_timestamptz_t *arg = (const xpu_timestamptz_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_vclass = KVAR_CLASS__NULL;
 	else
 	{
@@ -394,7 +394,7 @@ xpu_timestamptz_datum_write(kern_context *kcxt,
 {
 	const xpu_timestamptz_t *arg = (const xpu_timestamptz_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		return 0;
 	if (buffer)
 		*((TimestampTz *)buffer) = arg->value;
@@ -408,7 +408,7 @@ xpu_timestamptz_datum_hash(kern_context *kcxt,
 {
 	const xpu_timestamptz_t *arg = (const xpu_timestamptz_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(&arg->value, sizeof(TimestampTz));
@@ -445,9 +445,10 @@ xpu_interval_datum_ref(kern_context *kcxt,
 {
 	xpu_interval_t *result = (xpu_interval_t *)__result;
 
+	result->expr_ops = &xpu_interval_ops;
 	if (vclass >= sizeof(Interval))
 	{
-		result->isnull = false;
+		result->expr_ops = &xpu_interval_ops;
 		memcpy(&result->value, kvar->ptr, sizeof(Interval));
 	}
 	else
@@ -466,7 +467,7 @@ xpu_interval_datum_store(kern_context *kcxt,
 {
 	xpu_interval_t *arg = (xpu_interval_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_vclass = KVAR_CLASS__NULL;
 	else
 	{
@@ -490,7 +491,7 @@ xpu_interval_datum_write(kern_context *kcxt,
 {
 	const xpu_interval_t *arg = (const xpu_interval_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		return 0;
 	if (buffer)
 		memcpy(buffer, &arg->value, sizeof(Interval));
@@ -504,7 +505,7 @@ xpu_interval_datum_hash(kern_context *kcxt,
 {
 	const xpu_interval_t *arg = (const xpu_interval_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(&arg->value, sizeof(Interval));
@@ -1167,9 +1168,12 @@ pgfn_date_to_timestamp(XPU_PGFUNCTION_ARGS)
 		   KEXP_IS_VALID(karg, date));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
-	result->isnull = datum.isnull;
-	if (!datum.isnull)
+	if (XPU_DATUM_ISNULL(&datum))
+		result->expr_ops = NULL;
+	else
 	{
+		result->expr_ops = &xpu_timestamp_ops;
+
 		if (DATE_IS_NOBEGIN(datum.value))
 			TIMESTAMP_NOBEGIN(result->value);
 		else if (DATE_IS_NOEND(datum.value))
@@ -1196,9 +1200,12 @@ pgfn_date_to_timestamptz(XPU_PGFUNCTION_ARGS)
 		   KEXP_IS_VALID(karg, date));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
-	result->isnull = datum.isnull;
-	if (!datum.isnull)
+	if (XPU_DATUM_ISNULL(&datum))
+		result->expr_ops = NULL;
+	else
 	{
+		result->expr_ops = &xpu_timestamptz_ops;
+
 		if (DATE_IS_NOBEGIN(datum.value))
 			TIMESTAMP_NOBEGIN(result->value);
 		else if (DATE_IS_NOEND(datum.value))
@@ -1242,12 +1249,14 @@ pgfn_timestamptz_to_timestamp(XPU_PGFUNCTION_ARGS)
 		   KEXP_IS_VALID(karg, timestamptz));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
-	result->isnull = datum.isnull;
-	if (!datum.isnull)
+	if (XPU_DATUM_ISNULL(&datum))
+		result->expr_ops = NULL;
+	else
 	{
 		struct pg_tm	tm;
 		fsec_t			fsec;
 
+		result->expr_ops = &xpu_timestamp_ops;
 		if (TIMESTAMP_NOT_FINITE(datum.value))
 			result->value = datum.value;
 		else if (!timestamp2tm(datum.value, &tm, &fsec, NULL) ||
@@ -1271,13 +1280,15 @@ pgfn_timestamp_to_timestamptz(XPU_PGFUNCTION_ARGS)
 		   KEXP_IS_VALID(karg, timestamp));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
-	result->isnull = datum.isnull;
-	if (!datum.isnull)
+	if (XPU_DATUM_ISNULL(&datum))
+		result->expr_ops = NULL;
+	else
 	{
 		struct pg_tm	tm;
 		Timestamp		ts = datum.value;
 		fsec_t			fsec;
 
+		result->expr_ops = &xpu_timestamptz_ops;
 		if (TIMESTAMP_NOT_FINITE(datum.value))
 			result->value = datum.value;
 		else if (!timestamp2tm(datum.value, &tm, &fsec,
@@ -1325,9 +1336,11 @@ PG_SIMPLE_COMPARE_TEMPLATE(timestamptz_,timestamptz,timestamptz,TimestampTz)
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
 																		\
-		result->isnull = (datum_a.isnull | datum_b.isnull);				\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+			result->expr_ops = NULL;									\
+		else															\
 		{																\
+			result->expr_ops = &xpu_bool_ops;							\
 			t1 = datum_a.value.time + datum_a.value.zone * USECS_PER_SEC; \
 			t2 = datum_b.value.time + datum_b.value.zone * USECS_PER_SEC; \
 																		\
@@ -1391,10 +1404,11 @@ __compare_date_timestamp(DateADT a, Timestamp b)
 		assert(KEXP_IS_VALID(karg, timestamp));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
-																		\
-		result->isnull = (datum_a.isnull | datum_b.isnull);				\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+			result->expr_ops = NULL;									\
+		else															\
 		{																\
+			result->expr_ops = &xpu_timestamp_ops;						\
 			comp = __compare_date_timestamp(datum_a.value,				\
 											datum_b.value);				\
 			result->value = (comp OPER 0);								\
@@ -1426,10 +1440,11 @@ PG_DATE_TIMESTAMP_COMPARE_TEMPLATE(ge, >=);
 		assert(KEXP_IS_VALID(karg, date));								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
-																		\
-		result->isnull = (datum_a.isnull | datum_b.isnull);				\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+			result->expr_ops = NULL;									\
+		else															\
 		{																\
+			result->expr_ops = &xpu_bool_ops;							\
 			comp = __compare_date_timestamp(datum_b.value,				\
 											datum_a.value);				\
 			result->value = (0 OPER comp);								\
@@ -1499,15 +1514,16 @@ __compare_date_timestamptz(DateADT a, TimestampTz b, const pg_tz *tz_info)
 		assert(KEXP_IS_VALID(karg, timestamptz));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
-																		\
-		result->isnull = (datum_a.isnull | datum_b.isnull);				\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+			result->expr_ops = NULL;									\
+		else															\
 		{																\
 			pg_tz  *tz_info = SESSION_TIMEZONE(kcxt->session);			\
 			comp = __compare_date_timestamptz(datum_a.value,			\
 											  datum_b.value,			\
 											  tz_info);					\
 			result->value = (comp OPER 0);								\
+			result->expr_ops = &xpu_bool_ops;							\
 		}																\
 		return true;													\
 	}
@@ -1536,15 +1552,16 @@ PG_DATE_TIMESTAMPTZ_COMPARE_TEMPLATE(ge, >=);
 		KEXP_IS_VALID(karg, date);										\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
-																		\
-		result->isnull = (datum_a.isnull | datum_b.isnull);				\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+			result->expr_ops = NULL;									\
+		else 															\
 		{																\
 			pg_tz  *tz_info = SESSION_TIMEZONE(kcxt->session);			\
 			comp = __compare_date_timestamptz(datum_b.value,			\
 											  datum_a.value,			\
 											  tz_info);					\
 			result->value = (0 OPER comp);								\
+			result->expr_ops = &xpu_bool_ops;							\
 		}																\
 		return true;													\
 	}
@@ -1603,15 +1620,16 @@ __compare_timestamp_timestamptz(Timestamp a,
 		assert(KEXP_IS_VALID(karg, timestamptz));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;                                               \
-                                                                        \
-		result->isnull = (datum_a.isnull | datum_b.isnull);             \
-        if (!result->isnull)                                            \
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+			result->expr_ops = NULL;									\
+		else															\
         {                                                               \
 			const pg_tz	*tz_info = SESSION_TIMEZONE(kcxt->session);		\
             comp = __compare_timestamp_timestamptz(datum_b.value,		\
 												   datum_a.value,		\
 												   tz_info);			\
 			result->value = (comp OPER 0);                              \
+			result->expr_ops = &xpu_bool_ops;							\
         }                                                               \
         return true;                                                    \
     }
@@ -1640,15 +1658,16 @@ PG_TIMESTAMP_TIMESTAMPTZ_COMPARE_TEMPLATE(ge, >=)
 		assert(KEXP_IS_VALID(karg, timestamptz));						\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))                \
 			return false;                                               \
-                                                                        \
-		result->isnull = (datum_a.isnull | datum_b.isnull);             \
-        if (!result->isnull)                                            \
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+			result->expr_ops = NULL;									\
+        else															\
         {                                                               \
 			const pg_tz *tz_info = SESSION_TIMEZONE(kcxt->session);		\
 			comp = __compare_timestamp_timestamptz(datum_b.value,		\
 												   datum_a.value,		\
 												   tz_info);			\
 			result->value = (0 OPER comp);                              \
+			result->expr_ops = &xpu_bool_ops;							\
         }                                                               \
         return true;                                                    \
     }
@@ -1692,14 +1711,15 @@ interval_cmp_value(const Interval *ival)
 		assert(KEXP_IS_VALID(karg, interval));							\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))                \
 			return false;                                               \
-                                                                        \
-		result->isnull = (datum_a.isnull | datum_b.isnull);             \
-		if (!result->isnull)                                            \
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+			result->expr_ops = NULL;									\
+		else															\
 		{                                                               \
             int128_t	aval = interval_cmp_value(&datum_a.value);		\
             int128_t	bval = interval_cmp_value(&datum_b.value);		\
 																		\
 			result->value = (aval OPER bval);							\
+			result->expr_ops = &xpu_bool_ops;							\
         }                                                               \
         return true;                                                    \
     }
@@ -1709,17 +1729,3 @@ PG_INTERVAL_COMPARE_TEMPLATE(lt, <)
 PG_INTERVAL_COMPARE_TEMPLATE(le, <=)
 PG_INTERVAL_COMPARE_TEMPLATE(gt, >)
 PG_INTERVAL_COMPARE_TEMPLATE(ge, >=)
-
-PUBLIC_FUNCTION(int)
-xpu_interval_write_heap(kern_context *kcxt,
-						char *buffer,
-						const xpu_datum_t *__arg)
-{
-	const xpu_interval_t *arg = (const xpu_interval_t *)__arg;
-
-	if (arg->isnull)
-		return 0;
-	if (buffer)
-		memcpy(buffer, &arg->value, sizeof(Interval));
-	return sizeof(Interval);
-}

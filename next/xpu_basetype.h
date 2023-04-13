@@ -3,8 +3,8 @@
  *
  * Collection of base Int/Float functions for both of GPU and DPU
  * --
- * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2022 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -44,9 +44,13 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float8, float8_t);
 		assert(KEXP_IS_VALID(karg,RNAME));								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &rval))					\
 			return false;												\
-		result->isnull = (lval.isnull | rval.isnull);					\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&lval) || XPU_DATUM_ISNULL(&rval))			\
+			result->expr_ops = NULL;									\
+		else															\
+		{																\
+			result->expr_ops = kexp->expr_ops;							\
 			result->value = ((CAST)lval.value OPER (CAST)rval.value);	\
+		}																\
 		return true;													\
 	}
 

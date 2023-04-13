@@ -3,8 +3,8 @@
  *
  * A background worker process that handles any interactions with GPU
  * ----
- * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2021 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -968,22 +968,6 @@ __resolveDevicePointersWalker(gpuModule *gmodule,
 	}
 	kexp->expr_ops = xpu_type->type_ops;
 
-	if (kexp->opcode == FuncOpCode__Projection)
-	{
-		for (int i=0; i < kexp->u.proj.nattrs; i++)
-		{
-			kern_projection_desc *desc = &kexp->u.proj.desc[i];
-
-			xpu_type = hash_search(gmodule->cuda_type_htab,
-								   &desc->slot_type,
-								   HASH_FIND, NULL);
-			if (xpu_type)
-				desc->slot_ops = xpu_type->type_ops;
-			else
-				desc->slot_ops = NULL;
-		}
-	}
-
 	for (i=0, karg = KEXP_FIRST_ARG(kexp);
 		 i < kexp->nr_args;
 		 i++, karg = KEXP_NEXT_ARG(karg))
@@ -1138,14 +1122,14 @@ gpuservHandleGpuTaskExec(gpuClient *gclient,
 	size_t			sz;
 	void		   *kern_args[10];
 
-	if (xcmd->u.scan.kds_src_pathname)
-		kds_src_pathname = (char *)xcmd + xcmd->u.scan.kds_src_pathname;
-	if (xcmd->u.scan.kds_src_iovec)
-		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.scan.kds_src_iovec);
-	if (xcmd->u.scan.kds_src_offset)
-		kds_src = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_src_offset);
-	if (xcmd->u.scan.kds_dst_offset)
-		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.scan.kds_dst_offset);
+	if (xcmd->u.task.kds_src_pathname)
+		kds_src_pathname = (char *)xcmd + xcmd->u.task.kds_src_pathname;
+	if (xcmd->u.task.kds_src_iovec)
+		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.task.kds_src_iovec);
+	if (xcmd->u.task.kds_src_offset)
+		kds_src = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_src_offset);
+	if (xcmd->u.task.kds_dst_offset)
+		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_dst_offset);
 
 	if (!kds_src)
 	{

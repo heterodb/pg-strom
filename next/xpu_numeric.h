@@ -3,8 +3,8 @@
  *
  * Collection of numeric functions for both of GPU and DPU
  * --
- * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2021 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -161,7 +161,7 @@ set_normalized_numeric(xpu_numeric_t *result, int128_t value, int16_t weight)
 			weight--;
 		}
 	}
-	result->isnull = false;
+	result->expr_ops = &xpu_numeric_ops;
 	result->kind = XPU_NUMERIC_KIND__VALID;
 	result->weight = weight;
 	result->value = value;

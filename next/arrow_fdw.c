@@ -3,8 +3,8 @@
  *
  * Routines to map Apache Arrow files as PG's Foreign-Table.
  * ----
- * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2021 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -3608,9 +3608,9 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	/* assign offset of XpuCommand */
 	xcmd = (XpuCommand *)chunk_buffer->data;
 	xcmd->length = chunk_buffer->len;
-	xcmd->u.scan.kds_src_pathname = kds_src_pathname;
-	xcmd->u.scan.kds_src_iovec    = kds_src_iovec;
-	xcmd->u.scan.kds_src_offset   = kds_src_offset;
+	xcmd->u.task.kds_src_pathname = kds_src_pathname;
+	xcmd->u.task.kds_src_iovec    = kds_src_iovec;
+	xcmd->u.task.kds_src_offset   = kds_src_offset;
 
 	xcmd_iov->iov_base = xcmd;
 	xcmd_iov->iov_len  = xcmd->length;

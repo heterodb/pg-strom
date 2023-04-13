@@ -3,8 +3,8 @@
  *
  * Collection of primitive Int/Float type support for both of GPU and DPU
  * ----
- * Copyright 2011-2022 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2022 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -24,7 +24,7 @@ xpu_bool_datum_ref(kern_context *kcxt,
 {
 	xpu_bool_t *result = (xpu_bool_t *)__result;
 
-	result->isnull = false;
+	result->expr_ops = &xpu_bool_ops;
 	if (vclass == KVAR_CLASS__INLINE)
 		result->value = kvar->i8;
 	else if (vclass >= sizeof(bool))
@@ -45,7 +45,7 @@ xpu_bool_datum_store(kern_context *kcxt,
 {
 	const xpu_bool_t *arg = (const xpu_bool_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_vclass = KVAR_CLASS__NULL;
 	else
 	{
@@ -62,7 +62,7 @@ xpu_bool_datum_write(kern_context *kcxt,
 {
 	const xpu_bool_t   *arg = (const xpu_bool_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		return 0;
 	if (buffer)
 		*((bool *)buffer) = arg->value;
@@ -76,7 +76,7 @@ xpu_bool_datum_hash(kern_context *kcxt,
 {
 	const xpu_bool_t *arg = (const xpu_bool_t *)__arg;
 
-	if (arg->isnull)
+	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(&arg->value, sizeof(bool));
@@ -95,7 +95,7 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
-		result->isnull = false;											\
+		result->expr_ops = &xpu_##NAME##_ops;							\
 		if (vclass == KVAR_CLASS__INLINE)								\
 			result->value = kvar->FIELD;								\
 		else if (vclass >= sizeof(BASETYPE))							\
@@ -115,7 +115,7 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 	{																	\
 		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
 																		\
-		if (arg->isnull)												\
+		if (XPU_DATUM_ISNULL(arg))										\
 			*p_vclass = KVAR_CLASS__NULL;								\
 		else															\
 		{																\
@@ -131,7 +131,7 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 	{																	\
 		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
 																		\
-		if (arg->isnull)												\
+		if (XPU_DATUM_ISNULL(arg))										\
 			return 0;													\
 		if (buffer)														\
 			*((BASETYPE *)buffer) = arg->value;							\
@@ -144,7 +144,7 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 	{																	\
 		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
 																		\
-		if (arg->isnull)												\
+		if (XPU_DATUM_ISNULL(arg))										\
 			*p_hash = 0;												\
 		else															\
 			*p_hash = pg_hash_any(&arg->value, sizeof(BASETYPE));		\
@@ -168,7 +168,7 @@ PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t,i64);
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
-		result->isnull = false;											\
+		result->expr_ops = &xpu_##NAME##_ops;							\
 		if (vclass == KVAR_CLASS__INLINE)								\
 			result->value = kvar->FIELD;								\
 		else if (vclass >= sizeof(BASETYPE))							\
@@ -188,7 +188,7 @@ PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t,i64);
 	{																	\
 		const xpu_##NAME##_t *arg = (const xpu_##NAME##_t *)__arg;		\
 																		\
-		if (arg->isnull)												\
+		if (XPU_DATUM_ISNULL(arg))										\
 			*p_vclass = KVAR_CLASS__NULL;								\
 		else															\
 		{																\
@@ -204,7 +204,7 @@ PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t,i64);
 	{																	\
 		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
 																		\
-		if (arg->isnull)												\
+		if (XPU_DATUM_ISNULL(arg))										\
 			return 0;													\
 		if (buffer)														\
 			*((BASETYPE *)buffer) = arg->value;							\
@@ -217,7 +217,7 @@ PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t,i64);
 	{																	\
 		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
 																		\
-		if (arg->isnull)												\
+		if (XPU_DATUM_ISNULL(arg))										\
 			*p_hash = 0;												\
 		else															\
 			*p_hash = pg_hash_any(&arg->value, sizeof(BASETYPE));		\
@@ -252,14 +252,16 @@ INLINE_FUNCTION(bool) __iszero(float8_t fval) { return fval == 0.0; }
 		assert(KEXP_IS_VALID(karg,SOURCE));								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))					\
 			return false;												\
-		result->isnull = datum.isnull;									\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&datum))									\
+			result->expr_ops = NULL;									\
+		else															\
 		{																\
 			if (!CHECKER(datum.value))									\
 			{															\
 				STROM_ELOG(kcxt, #SOURCE " to " #TARGET ": out of range"); \
 				return false;											\
 			}															\
+			result->expr_ops = kexp->expr_ops;							\
 			result->value = CAST(datum.value);							\
 		}																\
 		return true;													\
@@ -411,8 +413,9 @@ PG_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, float8_t)
 		assert(KEXP_IS_VALID(karg, YTYPE));								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
 			return false;												\
-		result->isnull = (x_val.isnull | y_val.isnull);					\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&x_val) || XPU_DATUM_ISNULL(&y_val))		\
+			result->expr_ops = NULL;									\
+		else															\
 		{																\
 			__TEMP r = (__TEMP)x_val.value OPER (__TEMP)y_val.value;	\
 																		\
@@ -421,6 +424,7 @@ PG_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, float8_t)
 				STROM_ELOG(kcxt, #FNAME ": value out of range");		\
 				return false;											\
 			}															\
+			result->expr_ops = &xpu_##RTYPE##_ops;						\
 			result->value = r;											\
 		}																\
 		return true;													\
@@ -443,9 +447,11 @@ PG_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, float8_t)
 		assert(KEXP_IS_VALID(karg, YTYPE));								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
 			return false;												\
-		result->isnull = (x_val.isnull | y_val.isnull);					\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&x_val) || XPU_DATUM_ISNULL(&y_val))		\
+			result->expr_ops = NULL;									\
+		else															\
 		{																\
+			result->expr_ops = &xpu_##RTYPE##_ops;						\
 			result->value = (__CAST(x_val.value) OPER					\
 							 __CAST(y_val.value));						\
 			if (isinf(result->value) &&									\
@@ -561,8 +567,9 @@ PG_FLOAT_BIN_OPERATOR_TEMPLATE(float8mul, float8,float8,float8,*,)
 		assert(KEXP_IS_VALID(karg,YTYPE));								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
 			return false;												\
-		result->isnull = (x_val.isnull | y_val.isnull);					\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&x_val) || XPU_DATUM_ISNULL(&y_val))		\
+			result->expr_ops = NULL;									\
+		else															\
 		{																\
 			if (y_val.value == 0)										\
 			{															\
@@ -583,6 +590,7 @@ PG_FLOAT_BIN_OPERATOR_TEMPLATE(float8mul, float8,float8,float8,*,)
 			{															\
 				result->value = x_val.value / y_val.value;				\
 			}															\
+			result->expr_ops = &xpu_##RTYPE##_ops;						\
 		}																\
 		return true;													\
 	}
@@ -604,9 +612,10 @@ PG_FLOAT_BIN_OPERATOR_TEMPLATE(float8mul, float8,float8,float8,*,)
 		assert(KEXP_IS_VALID(karg,YTYPE));								\
         if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
             return false;                                               \
-        result->isnull = (x_val.isnull | y_val.isnull);                 \
-        if (!result->isnull)                                            \
-        {                                                               \
+		if (XPU_DATUM_ISNULL(&x_val) || XPU_DATUM_ISNULL(&y_val))		\
+			result->expr_ops = NULL;									\
+		else															\
+		{                                                               \
 			if (__iszero(y_val.value))									\
 			{                                                           \
 				STROM_ELOG(kcxt, #FNAME ": division by zero");          \
@@ -621,6 +630,7 @@ PG_FLOAT_BIN_OPERATOR_TEMPLATE(float8mul, float8,float8,float8,*,)
 				STROM_ELOG(kcxt, #FNAME ": value out of range");		\
 				return false;											\
 			}															\
+			result->expr_ops = &xpu_##RTYPE##_ops;						\
 		}																\
         return true;                                                    \
     }
@@ -671,14 +681,16 @@ PG_FLOAT_DIV_OPERATOR_TEMPLATE(float8div, float8,float8,float8,)
 		assert(KEXP_IS_VALID(karg, TYPE));								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
 			return false;												\
-		result->isnull = (x_val.isnull | y_val.isnull);					\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&x_val) || XPU_DATUM_ISNULL(&y_val))		\
+			result->expr_ops = NULL;									\
+		else															\
 		{																\
 			if (y_val.value == 0)										\
 			{															\
 				STROM_ELOG(kcxt, #TYPE "mod : division by zero");		\
 				return false;											\
 			}															\
+			result->expr_ops = &xpu_##TYPE##_ops;						\
 			result->value = x_val.value % y_val.value;					\
 		}																\
 		return true;													\
@@ -703,9 +715,13 @@ PG_INT_MOD_OPERATOR_TEMPLATE(int8)
 		assert(kexp->nr_args==1 && KEXP_IS_VALID(karg,XTYPE));			\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
 			return false;												\
-		result->isnull = x_val.isnull;									\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&x_val))									\
+			result->expr_ops = NULL;									\
+		else															\
+		{																\
+			result->expr_ops = kexp->expr_ops;							\
 			result->value = OPER(x_val.value);							\
+		}																\
 		return true;													\
 	}
 
@@ -726,9 +742,13 @@ PG_INT_MOD_OPERATOR_TEMPLATE(int8)
 		assert(KEXP_IS_VALID(karg,YTYPE));								\
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
 			return false;												\
-		result->isnull = (x_val.isnull | y_val.isnull);					\
-		if (!result->isnull)											\
+		if (XPU_DATUM_ISNULL(&x_val) || XPU_DATUM_ISNULL(&y_val))		\
+			result->expr_ops = NULL;									\
+		else															\
+		{																\
+			result->expr_ops = &xpu_##RTYPE##_ops;						\
 			result->value = x_val.value OPER y_val.value;				\
+		}																\
 		return true;													\
 	}
 
