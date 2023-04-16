@@ -403,7 +403,6 @@ kern_gpuscan_main(kern_session_info *session,
 	uint32_t			wp_base_sz;
 	char			   *kvars_addr_wp;	/* only depth-0 */
 	int					depth;
-	int					status;
 	__shared__ uint32_t	smx_row_count;
 
 	assert(kgtask->kvars_nslots == session->kcxt_kvars_nslots &&
@@ -452,20 +451,34 @@ kern_gpuscan_main(kern_session_info *session,
 		}
 		else
 		{
-			/* PROJECTION */
+			bool	try_suspend = false;
+
 			assert(depth == 1);
-			status = execGpuJoinProjection(kcxt, wp,
-										   0,	/* no inner relations */
-										   kds_dst,
-										   SESSION_KEXP_PROJECTION(session),
-										   kvars_addr_wp);
-			if (status == -2)
+			if (session->xpucode_projection)
+			{
+				/* PROJECTION */
+				depth = execGpuJoinProjection(kcxt, wp,
+											  0,	/* no inner relations */
+											  kds_dst,
+											  SESSION_KEXP_PROJECTION(session),
+											  kvars_addr_wp,
+											  &try_suspend);
+			}
+			else
+			{
+				/* PRE-AGG */
+				depth = execGpuPreAggGroupBy(kcxt, wp,
+											 0,		/* no inner relations */
+											 kds_dst,
+											 kvars_addr_wp,
+											 &try_suspend);
+			}
+			if (__any_sync(__activemask(), try_suspend))
 			{
 				if (LaneId() == 0)
 					atomicAdd(&kgtask->suspend_count, 1);
-				break;
+				assert(depth < 0);
 			}
-			depth = status;
 		}
 		__syncwarp();
 	}

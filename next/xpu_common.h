@@ -174,7 +174,8 @@ __volatileRead(const volatile T *ptr)
 }
 
 #else
-#define __Fetch(PTR)		(*(PTR))
+#define __Fetch(PTR)			(*(PTR))
+#define __volatileRead(PTR)		(*(PTR))
 #endif
 
 /*
@@ -959,6 +960,7 @@ KDS_FETCH_TUPITEM(kern_data_store *kds,
 		   kds->format == KDS_FORMAT_HASH);
 	if (tuple_offset == 0)
 		return NULL;
+	Assert(tuple_offset < kds->length);
 	tupitem = (kern_tupitem *)((char *)kds
 							   + kds->length
 							   - __kds_unpack(tuple_offset));
@@ -970,22 +972,31 @@ KDS_FETCH_TUPITEM(kern_data_store *kds,
 }
 
 INLINE_FUNCTION(uint32_t *)
-KDS_GET_HASHSLOT(kern_data_store *kds)
+KDS_GET_HASHSLOT_BASE(kern_data_store *kds)
 {
 	Assert(kds->format == KDS_FORMAT_HASH && kds->hash_nslots > 0);
 	return (uint32_t *)(KDS_BODY_ADDR(kds));
 }
 
-INLINE_FUNCTION(kern_hashitem *)
-KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t hash)
+INLINE_FUNCTION(uint32_t *)
+KDS_GET_HASHSLOT(kern_data_store *kds, uint32_t hash)
 {
-    uint32_t   *slot = KDS_GET_HASHSLOT(kds);
-	size_t		offset = __kds_unpack(slot[hash % kds->hash_nslots]);
+	uint32_t   *hslot = KDS_GET_HASHSLOT_BASE(kds);
 
-	if (offset == 0)
+	return hslot + (hash % kds->hash_nslots);
+}
+
+INLINE_FUNCTION(kern_hashitem *)
+KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t *hslot, uint32_t *p_saved)
+{
+	uint32_t	offset = __volatileRead(hslot);
+
+	if (p_saved)
+		*p_saved = offset;
+	if (offset == 0 || offset == UINT_MAX)
 		return NULL;
-	Assert(offset < kds->length);
-	return (kern_hashitem *)((char *)kds + offset);
+	Assert(__kds_unpack(offset) < kds->length);
+	return (kern_hashitem *)((char *)kds + __kds_unpack(offset));
 }
 
 INLINE_FUNCTION(kern_hashitem *)

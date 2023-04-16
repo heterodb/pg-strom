@@ -176,16 +176,15 @@ execGpuJoinProjection(kern_context *kcxt,
 					  int n_rels,
 					  kern_data_store *kds_dst,
 					  kern_expression *kexp_projection,
-					  char *kvars_addr_wp);
+					  char *kvars_addr_wp,
+					  bool *p_try_suspend);
 EXTERN_FUNCTION(int)
 execGpuPreAggGroupBy(kern_context *kcxt,
 					 kern_warp_context *wp,
 					 int n_rels,
 					 kern_data_store *kds_final,
-					 kern_expression *kexp_groupby_keyhash,
-					 kern_expression *kexp_groupby_keycomp,
-					 kern_expression *kexp_groupby_actions,
-					 char *kvars_addr_wp);
+					 char *kvars_addr_wp,
+					 bool *p_try_suspend);
 /*
  * Definitions related to GpuScan/GpuJoin/GpuPreAgg
  */

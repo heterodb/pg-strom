@@ -2089,7 +2089,7 @@ codegen_build_groupby_keyload(codegen_context *context,
 			groupby_keys_final_slot = lappend_int(groupby_keys_final_slot, slot_id);
 			context->kvars_depth = lappend_int(context->kvars_depth, -2);
 			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
-			context->kvars_types = lappend_int(context->kvars_types, InvalidOid);
+			context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
 			break;
 		}
 		if (!lc2)

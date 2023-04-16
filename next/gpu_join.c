@@ -1391,7 +1391,7 @@ again:
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
 				kds->hash_nslots = nslots;
-				memset(KDS_GET_HASHSLOT(kds), 0, sizeof(uint32_t) * nslots);
+				memset(KDS_GET_HASHSLOT_BASE(kds), 0, sizeof(uint32_t) * nslots);
 			}
 			offset += nbytes;
 		}
@@ -1547,7 +1547,7 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 							  uint32_t base_usage)
 {
 	uint32_t   *row_index = KDS_GET_ROWINDEX(kds);
-	uint32_t   *hash_slot = KDS_GET_HASHSLOT(kds);
+	uint32_t   *hash_slot = KDS_GET_HASHSLOT_BASE(kds);
 	uint32_t	rowid = base_nitems;
 	char	   *tail_pos = (char *)kds + kds->length;
 	char	   *curr_pos = tail_pos - __kds_unpack(base_usage);
@@ -1884,6 +1884,7 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	kern_expression *kexp_join_kvars_load = NULL;
 	kern_hashitem  *hitem;
 	uint32_t		hash;
+	uint32_t	   *hslot;
 	ListCell	   *lc1, *lc2;
 
 	if (pp_info->kexp_join_kvars_load_packed)
@@ -1915,7 +1916,8 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	/*
 	 * walks on the hash-join-table
 	 */
-	for (hitem = KDS_HASH_FIRST_ITEM(kds_in, hash);
+	hslot = KDS_GET_HASHSLOT(kds_in, hash);
+	for (hitem = KDS_HASH_FIRST_ITEM(kds_in, hslot, NULL);
 		 hitem != NULL;
 		 hitem = KDS_HASH_NEXT_ITEM(kds_in, hitem))
 	{
