@@ -1571,17 +1571,6 @@ CreateGpuPreAggScanState(CustomScan *cscan)
 }
 
 /*
- * ExecGpuPreAgg
- */
-static TupleTableSlot *
-ExecGpuPreAgg(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *)node;
-
-	return pgstromExecTaskState(pts);
-}
-
-/*
  * ExecFallbackCpuPreAgg
  */
 void
@@ -1652,7 +1641,7 @@ pgstrom_init_gpu_preagg(void)
 	memset(&gpupreagg_exec_methods, 0, sizeof(CustomExecMethods));
 	gpupreagg_exec_methods.CustomName          = "GpuPreAgg";
 	gpupreagg_exec_methods.BeginCustomScan     = pgstromExecInitTaskState;
-	gpupreagg_exec_methods.ExecCustomScan      = ExecGpuPreAgg;
+	gpupreagg_exec_methods.ExecCustomScan      = pgstromExecTaskState;
 	gpupreagg_exec_methods.EndCustomScan       = pgstromExecEndTaskState;
 	gpupreagg_exec_methods.ReScanCustomScan    = pgstromExecResetTaskState;
 	gpupreagg_exec_methods.EstimateDSMCustomScan = pgstromSharedStateEstimateDSM;

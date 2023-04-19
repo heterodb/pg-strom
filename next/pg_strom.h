@@ -604,7 +604,7 @@ extern const XpuCommand *pgstromBuildSessionInfo(pgstromTaskState *pts,
 extern void		pgstromExecInitTaskState(CustomScanState *node,
 										  EState *estate,
 										 int eflags);
-extern TupleTableSlot *pgstromExecTaskState(pgstromTaskState *pts);
+extern TupleTableSlot *pgstromExecTaskState(CustomScanState *node);
 extern void		pgstromExecEndTaskState(CustomScanState *node);
 extern void		pgstromExecResetTaskState(CustomScanState *node);
 extern Size		pgstromSharedStateEstimateDSM(CustomScanState *node,
@@ -639,7 +639,6 @@ extern double	pgstrom_gpu_operator_cost;	/* GUC */
 extern double	pgstrom_gpu_direct_seq_page_cost; /* GUC */
 extern double	pgstrom_gpu_operator_ratio(void);
 extern void		gpuClientOpenSession(pgstromTaskState *pts,
-									 const Bitmapset *gpuset,
 									 const XpuCommand *session);
 extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,
 									int *p_block_sz,
@@ -658,7 +657,7 @@ struct gpuClient
 	dlist_node		chain;		/* gcontext->client_list */
 	CUmodule		cuda_module;/* preload cuda binary */
 	kern_session_info *session;	/* per session info (on cuda managed memory) */
-	struct gpuQueryBuffer *gq_kmrels; /* per query join inner buffer */
+	struct gpuQueryBuffer *gq_buf; /* per query join/preagg device buffer */
 	pg_atomic_uint32 refcnt;	/* odd number, if error status */
 	pthread_mutex_t	mutex;		/* mutex to write the socket */
 	int				sockfd;		/* connection to PG backend */

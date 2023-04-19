@@ -1190,36 +1190,6 @@ CreateGpuJoinState(CustomScan *cscan)
 	return (Node *)pts;
 }
 
-/*
- * ExecGpuJoin
- */
-static TupleTableSlot *
-ExecGpuJoin(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	if (!pts->conn)
-	{
-		const XpuCommand *session;
-		uint32_t	inner_handle;
-
-		/* attach pgstromSharedState, if none */
-		if (!pts->ps_state)
-			pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
-		/* preload inner buffer */
-		inner_handle = GpuJoinInnerPreload(pts);
-		if (inner_handle == 0)
-			return NULL;
-		/* outer scan is already done? */
-		if (!pgstromTaskStateBeginScan(pts))
-			return NULL;
-		/* open the GpuJoin session */
-		session = pgstromBuildSessionInfo(pts, inner_handle, NULL);
-		gpuClientOpenSession(pts, pts->optimal_gpus, session);
-	}
-	return pgstromExecTaskState(pts);
-}
-
 /* ---------------------------------------------------------------- *
  *
  * Routines for inner-preloading
@@ -2087,7 +2057,7 @@ pgstrom_init_gpu_join(void)
 	memset(&gpujoin_exec_methods, 0, sizeof(CustomExecMethods));
 	gpujoin_exec_methods.CustomName				= "GpuJoin";
 	gpujoin_exec_methods.BeginCustomScan		= pgstromExecInitTaskState;
-	gpujoin_exec_methods.ExecCustomScan			= ExecGpuJoin;
+	gpujoin_exec_methods.ExecCustomScan			= pgstromExecTaskState;
 	gpujoin_exec_methods.EndCustomScan			= pgstromExecEndTaskState;
 	gpujoin_exec_methods.ReScanCustomScan		= pgstromExecResetTaskState;
 	gpujoin_exec_methods.EstimateDSMCustomScan	= pgstromSharedStateEstimateDSM;

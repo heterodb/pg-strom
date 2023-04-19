@@ -105,37 +105,6 @@ CreateDpuJoinState(CustomScan *cscan)
 }
 
 /*
- * ExecDpuJoin
- */
-static TupleTableSlot *
-ExecDpuJoin(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	if (!pts->conn)
-	{
-		const XpuCommand *session;
-		uint32_t	inner_handle;
-
-		/* attach pgstromSharedState, if none */
-		if (!pts->ps_state)
-			pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
-		/* preload inner buffer */
-		Assert(pts->ds_entry != NULL);
-		inner_handle = GpuJoinInnerPreload(pts);
-		if (inner_handle == 0)
-			return NULL;
-		/* outer scan is already done? */
-		if (!pgstromTaskStateBeginScan(pts))
-			return NULL;
-		/* open the DpuJoin session */
-		session = pgstromBuildSessionInfo(pts, inner_handle, NULL);
-		DpuClientOpenSession(pts, session);
-	}
-	return pgstromExecTaskState(pts);
-}
-
-/*
  * pgstrom_init_dpu_join
  */
 void
@@ -183,7 +152,7 @@ pgstrom_init_dpu_join(void)
 	memset(&dpujoin_exec_methods, 0, sizeof(CustomExecMethods));
 	dpujoin_exec_methods.CustomName             = "DpuJoin";
 	dpujoin_exec_methods.BeginCustomScan        = pgstromExecInitTaskState;
-	dpujoin_exec_methods.ExecCustomScan         = ExecDpuJoin;
+	dpujoin_exec_methods.ExecCustomScan         = pgstromExecTaskState;
 	dpujoin_exec_methods.EndCustomScan          = pgstromExecEndTaskState;
 	dpujoin_exec_methods.ReScanCustomScan       = pgstromExecResetTaskState;
 	dpujoin_exec_methods.EstimateDSMCustomScan  = pgstromSharedStateEstimateDSM;

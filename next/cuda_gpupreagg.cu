@@ -12,49 +12,6 @@
 #include "cuda_common.h"
 #include "float2.h"
 
-
-
-
-
-
-
-
-
-
-INLINE_FUNCTION(bool)
-__spinlock_try_acquire(unsigned int *lock, uint32_t *p_saved)
-{
-	unsigned int	oldval;
-
-	if (LaneId() == 0)
-	{
-		oldval = __volatileRead(lock);
-		if (oldval != UINT_MAX)
-		{
-			if (atomicCAS(lock, oldval, UINT_MAX) != oldval)
-				oldval = UINT_MAX;	/* failed on lock */
-		}
-	}
-	oldval = __shfl_sync(__activemask(), oldval, 0);
-	if (oldval == UINT_MAX)
-		return false;
-	*p_saved = oldval;
-	return true;
-}
-
-INLINE_FUNCTION(void)
-__spinlock_release(unsigned int *lock, uint32_t *p_saved)
-{
-	unsigned int	oldval;
-
-	if (LaneId() == 0)
-	{
-		oldval = atomicExch(lock, *p_saved);
-	}
-	oldval = __shfl_sync(__activemask(), oldval, 0);
-	assert(oldval == UINT_MAX);
-}
-
 /*
  * Atomic operations
  */

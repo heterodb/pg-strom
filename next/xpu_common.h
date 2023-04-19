@@ -1699,10 +1699,9 @@ typedef struct
 #define XpuCommandTag__Error			1
 #define XpuCommandTag__CPUFallback		2
 #define XpuCommandTag__OpenSession		100
-#define XpuCommandTag__XpuScanExec		200
-#define XpuCommandTag__XpuJoinExec		300
-#define XpuCommandTag__XpuPreAggExec	400
-#define XpuCommandTag__XpuPreAggFinal	401
+#define XpuCommandTag__XpuTaskExec		110
+#define XpuCommandTag__XpuJoinFinal		120
+#define XpuCommandTag__XpuPreAggFinal	121
 #define XpuCommandMagicNumber			0xdeadbeafU
 
 /*

@@ -623,29 +623,6 @@ CreateGpuScanState(CustomScan *cscan)
 }
 
 /*
- * ExecGpuScan
- */
-static TupleTableSlot *
-ExecGpuScan(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	if (!pts->ps_state)
-		pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
-	if (!pts->conn)
-	{
-		const XpuCommand *session;
-		/* outer scan is already done? */
-		if (!pgstromTaskStateBeginScan(pts))
-			return NULL;
-		/* open the new session */
-		session = pgstromBuildSessionInfo(pts, 0, NULL);
-		gpuClientOpenSession(pts, pts->optimal_gpus, session);
-	}
-	return pgstromExecTaskState(pts);
-}
-
-/*
  * ExecFallbackCpuScan
  */
 void
@@ -726,7 +703,7 @@ pgstrom_init_gpu_scan(void)
     memset(&gpuscan_exec_methods, 0, sizeof(gpuscan_exec_methods));
     gpuscan_exec_methods.CustomName			= "GpuScan";
     gpuscan_exec_methods.BeginCustomScan	= pgstromExecInitTaskState;
-    gpuscan_exec_methods.ExecCustomScan		= ExecGpuScan;
+    gpuscan_exec_methods.ExecCustomScan		= pgstromExecTaskState;
     gpuscan_exec_methods.EndCustomScan		= pgstromExecEndTaskState;
     gpuscan_exec_methods.ReScanCustomScan	= pgstromExecResetTaskState;
     gpuscan_exec_methods.EstimateDSMCustomScan = pgstromSharedStateEstimateDSM;

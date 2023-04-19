@@ -220,6 +220,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 	kcxt->kvars_slot = (kern_variable *)
 		(src_kvars_addr_wp + index * kcxt->kvars_nbytes);
 	kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
+
 	if (l_state == 0)
 	{
 		/* pick up the first item from the hash-slot */
@@ -257,6 +258,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 	/* error checks */
 	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
 		return -1;
+
 	if (khitem)
 	{
 		xpu_int4_t	status;
@@ -455,7 +457,7 @@ kern_gpujoin_main(kern_session_info *session,
 	uint32_t		   *l_state;
 	bool			   *matched;
 	uint32_t			wp_base_sz;
-	uint32_t			n_rels = kmrels->num_rels;
+	uint32_t			n_rels = (kmrels ? kmrels->num_rels : 0);
 	int					depth;
 	__shared__ uint32_t smx_row_count;
 
@@ -489,10 +491,15 @@ kern_gpujoin_main(kern_session_info *session,
 		if (get_local_id() == 0)
 			smx_row_count = 0;
 		depth = 0;
-		memset(l_state, 0, sizeof(void *) * kcxt->kvars_nslots);
-		memset(matched, 0, sizeof(bool)   * kcxt->kvars_nslots);
+		if (l_state)
+			memset(l_state, 0, sizeof(void *) * kcxt->kvars_nslots);
+		if (matched)
+			memset(matched, 0, sizeof(bool)   * kcxt->kvars_nslots);
 	}
 	__syncthreads();
+
+	if (get_global_id() == 0)
+		printf("kvars_nbytes = %u, kvars_nslots = %u\n", kcxt->kvars_nbytes, kcxt->kvars_nslots);
 
 	/* main logic of GpuJoin */
 	while (depth >= 0)

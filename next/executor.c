@@ -1043,14 +1043,7 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
 	memset(xcmd, 0, offsetof(XpuCommand, u.task.data));
 	xcmd->magic = XpuCommandMagicNumber;
-	if ((pts->task_kind & DEVTASK__SCAN) != 0)
-		xcmd->tag = XpuCommandTag__XpuScanExec;
-	else if ((pts->task_kind & DEVTASK__JOIN) != 0)
-		xcmd->tag = XpuCommandTag__XpuJoinExec;
-	else if ((pts->task_kind & DEVTASK__PREAGG) != 0)
-		xcmd->tag = XpuCommandTag__XpuPreAggExec;
-	else
-		elog(ERROR, "unsupported task kind: %08x", pts->task_kind);
+	xcmd->tag   = XpuCommandTag__XpuTaskExec;
 	xcmd->length = bufsz;
 
 	off = offsetof(XpuCommand, u.task.data);
@@ -1389,9 +1382,13 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	 * workload specific callback routines
 	 */
 	if ((pts->task_kind & DEVTASK__SCAN) != 0)
+	{
 		pts->cb_cpu_fallback = ExecFallbackCpuScan;
+	}
 	else if ((pts->task_kind & DEVTASK__JOIN) != 0)
+	{
 		pts->cb_cpu_fallback = ExecFallbackCpuJoin;
+	}
 	else if ((pts->task_kind & DEVTASK__PREAGG) != 0)
 	{
 		pts->cb_final_chunk = pgstromPreAggFinalChunk;
@@ -1459,9 +1456,67 @@ pgstromExecScanReCheck(pgstromTaskState *pts, TupleTableSlot *epq_slot)
 	return true;
 }
 
-TupleTableSlot *
-pgstromExecTaskState(pgstromTaskState *pts)
+/*
+ * __pgstromExecTaskOpenConnection
+ */
+static bool
+__pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 {
+	const XpuCommand *session;
+	uint32_t	inner_handle = 0;
+	TupleDesc	tupdesc_kds_final = NULL;
+
+	/* attach pgstromSharedState, if none */
+	if (!pts->ps_state)
+		pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
+	/* preload inner buffer, if any */
+	if (pts->num_rels > 0)
+	{
+		inner_handle = GpuJoinInnerPreload(pts);
+		if (inner_handle == 0)
+			return false;
+	}
+	/* XPU-PreAgg needs tupdesc of kds_final */
+	if ((pts->task_kind & DEVTASK__PREAGG) != 0)
+	{
+		tupdesc_kds_final = pts->css.ss.ps.scandesc;
+	}
+	/* outer scan is already done? */
+	if (!pgstromTaskStateBeginScan(pts))
+		return false;
+	/* build the session information */
+	session = pgstromBuildSessionInfo(pts, inner_handle, tupdesc_kds_final);
+
+	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+	{
+		gpuClientOpenSession(pts, session);
+	}
+	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+	{
+		Assert(pts->ds_entry != NULL);
+		DpuClientOpenSession(pts, session);
+	}
+	else
+	{
+		elog(ERROR, "Bug? unknown PG-Strom task kind: %08x", pts->task_kind);
+	}
+	return true;
+}
+
+/*
+ * pgstromExecTaskState
+ */
+TupleTableSlot *
+pgstromExecTaskState(CustomScanState *node)
+{
+	pgstromTaskState *pts = (pgstromTaskState *)node;
+
+	if (!pts->conn)
+	{
+		if (!__pgstromExecTaskOpenConnection(pts))
+			return NULL;
+		Assert(pts->conn);
+	}
 	return ExecScan(&pts->css.ss,
 					(ExecScanAccessMtd) pgstromExecScanAccess,
 					(ExecScanRecheckMtd) pgstromExecScanReCheck);
