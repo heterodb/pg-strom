@@ -440,6 +440,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 						uint32_t join_inner_handle,
 						TupleDesc groupby_tdesc_final)
 {
+	pgstromSharedState *ps_state = pts->ps_state;
 	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
@@ -554,6 +555,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		kern_data_store *kds_temp = (kern_data_store *)alloca(sz);
 		char		format = KDS_FORMAT_ROW;
 		uint32_t	hash_nslots = 0;
+		size_t		kds_length = (4UL << 20);	/* 4MB */
 
 		if (pp_info->kexp_groupby_keyhash &&
 			pp_info->kexp_groupby_keyload &&
@@ -561,8 +563,9 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		{
 			format = KDS_FORMAT_HASH;
 			hash_nslots = 20000; //to be estimated using num_groups
+			kds_length = (1UL << 30);			/* 1GB */
 		}
-		setup_kern_data_store(kds_temp, groupby_tdesc_final, (1UL<<31), format);
+		setup_kern_data_store(kds_temp, groupby_tdesc_final, kds_length, format);
 		kds_temp->hash_nslots = hash_nslots;
 		session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, sz);
 	}
@@ -585,9 +588,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		}
 	}
 	kvars_nbytes = MAXALIGN(kvars_nbytes);
-
-	session->query_plan_id = ((uint64_t)MyProcPid << 32) |
-		(uint64_t)pg_atomic_fetch_add_u32(pgstrom_query_plan_id, 1);
+	session->query_plan_id = ps_state->query_plan_id;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
 	session->kcxt_kvars_nslots = kvars_nslots;
 	session->kcxt_kvars_nbytes = kvars_nbytes;
@@ -1646,6 +1647,8 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		else
 			scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
 	}
+	ps_state->query_plan_id = ((uint64_t)MyProcPid) << 32 |
+		(uint64_t)pts->css.ss.ps.plan->plan_node_id;	
 	ps_state->num_rels = num_rels;
 	ConditionVariableInit(&ps_state->preload_cond);
 	SpinLockInit(&ps_state->preload_mutex);

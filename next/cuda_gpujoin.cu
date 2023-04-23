@@ -498,9 +498,6 @@ kern_gpujoin_main(kern_session_info *session,
 	}
 	__syncthreads();
 
-	if (get_global_id() == 0)
-		printf("kvars_nbytes = %u, kvars_nslots = %u\n", kcxt->kvars_nbytes, kcxt->kvars_nslots);
-
 	/* main logic of GpuJoin */
 	while (depth >= 0)
 	{

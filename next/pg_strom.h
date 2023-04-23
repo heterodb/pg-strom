@@ -297,6 +297,8 @@ typedef struct
 {
 	dsm_handle			ss_handle;			/* DSM handle of the SharedState */
 	uint32_t			ss_length;			/* length of the SharedState */
+	/* pg-strom's unique plan-id */
+	uint64_t			query_plan_id;
 	/* control variable for parallel execution. */
 	pg_atomic_uint32	scan_control;
 	/* statistics */

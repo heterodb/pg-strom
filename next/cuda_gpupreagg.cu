@@ -123,11 +123,6 @@ __atomic_cas_uint64(uint64_t *ptr, uint64_t comp, uint64_t newval)
 					 (unsigned long long int)newval);
 }
 
-
-
-
-
-
 /*
  * __writeOutOneTuplePreAgg
  */
@@ -234,8 +229,11 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 	{
 		kern_aggregate_desc *desc = &kexp_actions->u.pagg.desc[j];
 		kern_colmeta   *cmeta = &kds_final->colmeta[j];
-		int		nbytes;
+		int				nbytes;
 
+		assert((char *)cmeta > (char *)kds_final &&
+			   (char *)cmeta < (char *)kds_final + kds_final->length);
+		assert(cmeta->attalign > 0 && cmeta->attalign <= 8);
 		t_next = TYPEALIGN(cmeta->attalign, t_hoff);
 		if (htup)
 		{
@@ -255,19 +253,19 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 			case KAGG_ACTION__NROWS_ANY:
 			case KAGG_ACTION__NROWS_COND:
 			case KAGG_ACTION__PSUM_INT:
-				t_next += sizeof(int64_t);
+				nbytes = sizeof(int64_t);
 				if (buffer)
 					*((int64_t *)buffer) = 0;
 				break;
 
 			case KAGG_ACTION__PSUM_FP:
-				t_next += sizeof(float8_t);
+				nbytes = sizeof(float8_t);
 				if (buffer)
 					*((float8_t *)buffer) = 0.0;
 				break;
 
 			case KAGG_ACTION__PMIN_INT:
-				t_next += sizeof(kagg_state__pminmax_int64_packed);
+				nbytes = sizeof(kagg_state__pminmax_int64_packed);
 				if (buffer)
 				{
 					kagg_state__pminmax_int64_packed *r =
@@ -280,7 +278,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__PMAX_INT:
-				t_next += sizeof(kagg_state__pminmax_int64_packed);
+				nbytes = sizeof(kagg_state__pminmax_int64_packed);
 				if (buffer)
 				{
 					kagg_state__pminmax_int64_packed *r =
@@ -293,7 +291,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__PMIN_FP:
-				t_next += sizeof(kagg_state__pminmax_fp64_packed);
+				nbytes = sizeof(kagg_state__pminmax_fp64_packed);
 				if (buffer)
 				{
 					kagg_state__pminmax_fp64_packed *r =
@@ -306,7 +304,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__PMAX_FP:
-				t_next += sizeof(kagg_state__pminmax_fp64_packed);
+				nbytes = sizeof(kagg_state__pminmax_fp64_packed);
 				if (buffer)
 				{
 					kagg_state__pminmax_fp64_packed *r =
@@ -319,7 +317,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__PAVG_INT:
-				t_next += sizeof(kagg_state__pavg_int_packed);
+				nbytes = sizeof(kagg_state__pavg_int_packed);
 				if (buffer)
 				{
 					memset(buffer, 0, sizeof(kagg_state__pavg_int_packed));
@@ -329,7 +327,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__PAVG_FP:
-				t_next += sizeof(kagg_state__pavg_fp_packed);
+				nbytes = sizeof(kagg_state__pavg_fp_packed);
 				if (buffer)
 				{
 					memset(buffer, 0, sizeof(kagg_state__pavg_fp_packed));
@@ -339,7 +337,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__STDDEV:
-				t_next += sizeof(kagg_state__stddev_packed);
+				nbytes = sizeof(kagg_state__stddev_packed);
 				if (buffer)
 				{
 					memset(buffer, 0, sizeof(kagg_state__stddev_packed));
@@ -349,7 +347,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__COVAR:
-				t_next += sizeof(kagg_state__covar_packed);
+				nbytes = sizeof(kagg_state__covar_packed);
 				if (buffer)
 				{
 					memset(buffer, 0, sizeof(kagg_state__covar_packed));
@@ -362,7 +360,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				STROM_ELOG(kcxt, "unknown xpuPreAgg action");
 				return -1;
 		}
-		if (nbytes > 0)
+		if (htup && nbytes > 0)
 			htup->t_bits[j>>3] |= (1<<(j&7));
 		t_hoff = t_next + nbytes;
 	}
@@ -606,7 +604,6 @@ __update_nogroups__psum_int(kern_context *kcxt,
 							bool kvars_is_valid)
 {
 	int64_t		ival = 0;
-	uint32_t	mask;
 
 	if (kvars_is_valid)
 	{
@@ -621,8 +618,7 @@ __update_nogroups__psum_int(kern_context *kcxt,
 			kvars_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
-	if (mask != 0)
+	if (__any_sync(__activemask(), kvars_is_valid))
 	{
 		ival += __shfl_xor_sync(__activemask(), ival, 0x0001);
 		ival += __shfl_xor_sync(__activemask(), ival, 0x0002);
@@ -644,7 +640,6 @@ __update_nogroups__psum_fp(kern_context *kcxt,
 						   bool kvars_is_valid)
 {
 	float8_t	fval = 0.0;
-	uint32_t	mask;
 
 	if (kvars_is_valid)
 	{
@@ -659,8 +654,7 @@ __update_nogroups__psum_fp(kern_context *kcxt,
 			kvars_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
-	if (mask != 0)
+	if (__any_sync(__activemask(), kvars_is_valid))
 	{
 		fval += __shfl_xor_sync(__activemask(), fval, 0x0001);
 		fval += __shfl_xor_sync(__activemask(), fval, 0x0002);
@@ -1033,6 +1027,7 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 									 kexp_groupby_actions);
 	assert(tupsz > 0);
 	required = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
+	assert(required < 1000);
 	total_sz = (KDS_HEAD_LENGTH(kds_final) +
 				MAXALIGN(sizeof(uint32_t)) +
 				required + __kds_unpack(kds_final->usage));
@@ -1041,13 +1036,20 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 	usage = __atomic_add_uint32(&kds_final->usage, __kds_packed(required));
 	tupitem = (kern_tupitem *)((char *)kds_final
 							   + kds_final->length
-							   - __kds_unpack(usage));
+							   - __kds_unpack(usage)
+							   - required);
+	assert((char *)tupitem > (char *)kds_final + 10000 &&
+		   (char *)tupitem < (char *)kds_final + kds_final->length);
+	
 	__writeOutOneTuplePreAgg(kcxt, kds_final,
 							 &tupitem->htup,
 							 kexp_groupby_actions);
 	tupitem->t_len = tupsz;
 	tupitem->rowid = 0;
-
+	__atomic_write_uint32(KDS_GET_ROWINDEX(kds_final),
+						  __kds_packed((char *)kds_final
+									   + kds_final->length
+									   - (char *)tupitem));
 	return tupitem;
 }
 
@@ -1068,26 +1070,39 @@ __execGpuPreAggNoGroups(kern_context *kcxt,
 		if (LaneId() == 0)
 		{
 			uint32_t	nitems = __volatileRead(&kds_final->nitems);
+			uint32_t	oldval;
 
 			if (nitems == 1)
 			{
 				/* normal case; destination tuple already exists */
 				tupitem = KDS_GET_TUPITEM(kds_final, 0);
+				assert(tupitem != NULL);
 			}
 			else if (nitems == 0)
 			{
-				if (__atomic_cas_uint32(&kds_final->nitems, 0, UINT_MAX) == 0)
+				oldval = __atomic_cas_uint32(&kds_final->nitems, 0, UINT_MAX);
+				if (oldval == 0)
 				{
 					/* LOCKED */
 					tupitem = __insertOneTupleNoGroups(kcxt, kds_final,
 													   kexp_groupby_actions);
 					if (!tupitem)
+					{
 						try_suspend = true;
-					/* UNLOCK */
-					__atomic_write_uint32(&kds_final->nitems, 1);
+						/* UNLOCK */
+						oldval = __atomic_write_uint32(&kds_final->nitems, 0);
+						assert(oldval == UINT_MAX);
+					}
+					else
+					{
+						/* UNLOCK */
+						oldval = __atomic_write_uint32(&kds_final->nitems, 1);
+						assert(oldval == UINT_MAX);
+					}
 				}
 				else
 				{
+					assert(oldval == 0 || oldval == UINT_MAX);
 					tupitem = NULL;
 				}
 			}
@@ -1139,7 +1154,6 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 			uint32_t usage;
 		} kds;
 	} oldval, curval, newval;
-	
 
 	assert(kds_final->format == KDS_FORMAT_HASH &&
 		   kds_final->hash_nslots > 0);
@@ -1665,6 +1679,7 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	mask = __ballot_sync(__activemask(), kcxt->kvars_class != NULL);
 	if (mask == 0)
 		goto skip_reduction;
+
 	/*
 	 * fillup the kvars_slot if it involves expressions
 	 */

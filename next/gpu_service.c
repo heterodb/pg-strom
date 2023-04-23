@@ -363,8 +363,8 @@ gpuMemoryPoolMaintenance(gpuContext *gcontext)
 					   chunk->free_chain.next);
 				free(chunk);
 			}
-			fprintf(stderr, "GPU-%d: i/o mapped device memory %lu bytes released",
-					gcontext->cuda_dindex, mseg->segment_sz);
+			//fprintf(stderr, "GPU-%d: i/o mapped device memory %lu bytes released",
+			//		gcontext->cuda_dindex, mseg->segment_sz);
 			Assert(pool->total_sz >= mseg->segment_sz);
 			pool->total_sz -= mseg->segment_sz;
 			free(mseg);
@@ -465,7 +465,10 @@ __setupGpuQueryJoinInnerBuffer(gpuQueryBuffer *gq_buf,
 	struct stat	stat_buf;
 	char		namebuf[100];
 	size_t		mmap_sz;
-	
+
+	if (kmrels_handle == 0)
+		return true;
+
 	snprintf(namebuf, sizeof(namebuf),
 			 ".pgstrom_shmbuf_%u_%d",
 			 PostPortNumber, kmrels_handle);
@@ -546,6 +549,7 @@ __setupGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 							 KDS_HEAD_LENGTH(kds_final_head),
 							 CU_DEVICE_PER_THREAD,
 							 CU_STREAM_PER_THREAD);
+	fprintf(stderr, "m_kds_final = %p len=%zu\n", (void *)m_kds_final, kds_final_head->length);
 	gq_buf->m_kds_final = m_kds_final;
 	return true;
 }
@@ -981,7 +985,7 @@ __resolveDevicePointers(gpuModule *gmodule,
 						char *emsg, size_t emsg_sz)
 {
 	xpu_encode_info	*encode = SESSION_ENCODE(session);
-	kern_expression *__kexp[10];
+	kern_expression *__kexp[20];
 	int			i, nitems = 0;
 
 	__kexp[nitems++] = SESSION_KEXP_SCAN_LOAD_VARS(session);
@@ -991,6 +995,11 @@ __resolveDevicePointers(gpuModule *gmodule,
 	__kexp[nitems++] = SESSION_KEXP_HASH_VALUE(session, -1);
 	__kexp[nitems++] = SESSION_KEXP_GIST_QUALS(session, -1);
 	__kexp[nitems++] = SESSION_KEXP_PROJECTION(session);
+	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYHASH(session);
+	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYLOAD(session);
+	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYCOMP(session);
+	__kexp[nitems++] = SESSION_KEXP_GROUPBY_ACTIONS(session);
+
 	for (i=0; i < nitems; i++)
 	{
 		if (__kexp[i] && !__resolveDevicePointersWalker(gmodule,
@@ -1092,9 +1101,7 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
  * ----------------------------------------------------------------
  */
 static void
-gpuservHandleGpuTaskExec(gpuClient *gclient,
-						 XpuCommand *xcmd,
-						 const char *kern_funcname)
+gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 {
 	kern_session_info *session = gclient->session;
 	kern_gputask	*kgtask = NULL;
@@ -1198,7 +1205,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient,
 
 	rc = cuModuleGetFunction(&f_kern_gpuscan,
 							 gclient->cuda_module,
-							 kern_funcname);
+							 "kern_gpujoin_main");
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientFatal(gclient, "failed on cuModuleGetFunction: %s",
@@ -1223,8 +1230,8 @@ gpuservHandleGpuTaskExec(gpuClient *gclient,
 	 * Allocation of the control structure
 	 */
 	grid_sz = Min(grid_sz, (kds_src->nitems + block_sz - 1) / block_sz);
-	block_sz = 64;
-	grid_sz = 1;
+//	block_sz = 64;
+//	grid_sz = 1;
 
 	sz = KERN_GPUTASK_LENGTH(num_inner_rels,
 							 kcxt_kvars_nbytes,
@@ -1378,7 +1385,7 @@ resume_kernel:
 	else if (kgtask->kerror.errcode == ERRCODE_CPU_FALLBACK)
 	{
 		XpuCommand	resp;
-
+		
 		/* send back kds_src with XpuCommandTag__CPUFallback */
 		memset(&resp, 0, sizeof(resp));
 		resp.magic = XpuCommandMagicNumber;
@@ -1411,6 +1418,81 @@ bailout:
 		if (rc != CUDA_SUCCESS)
 			fprintf(stderr, "warning: failed on cuMemFree: %s\n", cuStrError(rc));
 	}
+}
+
+/* ----------------------------------------------------------------
+ *
+ * gpuservHandleGpuJoinFinal
+ *
+ * ----------------------------------------------------------------
+ */
+static void
+gpuservHandleGpuJoinFinal(gpuClient *gclient, XpuCommand *xcmd)
+{
+	gpuQueryBuffer *gq_buf = gclient->gq_buf;
+	XpuCommand		resp;
+	size_t			resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
+
+	if (gq_buf && gq_buf->m_kmrels != 0UL && gq_buf->h_kmrels != NULL)
+	{
+		kern_multirels *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
+		kern_multirels *h_kmrels = (kern_multirels *)gq_buf->h_kmrels;
+
+		for (int i=0; i < d_kmrels->num_rels; i++)
+		{
+			kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(h_kmrels, i);
+			bool   *d_ojmap = KERN_MULTIRELS_OUTER_JOIN_MAP(d_kmrels, i);
+			bool   *h_ojmap = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, i);
+
+			if (d_ojmap && h_ojmap)
+			{
+				for (uint32_t j=0; j < kds->nitems; j++)
+					h_ojmap[j] |= d_ojmap[j];
+			}
+		}
+	}
+	memset(&resp, 0, sizeof(XpuCommand));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag   = XpuCommandTag__Success;
+
+	gpuClientWriteBack(gclient, &resp, resp_sz, 0, NULL);
+}
+
+/* ----------------------------------------------------------------
+ *
+ * gpuservHandleGpuPreAggFinal
+ *
+ * ----------------------------------------------------------------
+ */
+static void
+gpuservHandleGpuPreAggFinal(gpuClient *gclient, XpuCommand *xcmd)
+{
+	gpuQueryBuffer *gq_buf = gclient->gq_buf;
+	XpuCommand		resp;
+	size_t			resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
+	int				kds_dst_nitems = 0;
+	kern_data_store	*kds_dst_array[1];
+
+	memset(&resp, 0, sizeof(XpuCommand));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag   = XpuCommandTag__Success;
+	if (gq_buf && gq_buf->m_kds_final != 0UL)
+	{
+		kern_data_store *kds_final = (kern_data_store *)gq_buf->m_kds_final;
+		kern_tupitem *tupitem = KDS_GET_TUPITEM(kds_final, 0);
+		HeapTupleHeaderData *htup = &tupitem->htup;
+
+		fprintf(stderr, "value = %lu\n",
+				*((uint64_t *)((char *)htup + htup->t_hoff)));
+		
+		kds_dst_array[0] = kds_final;
+		kds_dst_nitems++;
+	}
+	fprintf(stderr, "gpuservHandleGpuPreAggFinal n=%d\n", kds_dst_nitems);
+	resp.u.results.chunks_nitems = kds_dst_nitems;
+	resp.u.results.chunks_offset = resp_sz;
+	gpuClientWriteBack(gclient, &resp, resp_sz,
+					   kds_dst_nitems, kds_dst_array);
 }
 
 /*
@@ -1466,8 +1548,13 @@ gpuservGpuWorkerMain(void *__arg)
 											 * end of the session. */
 						break;
 					case XpuCommandTag__XpuTaskExec:
-						gpuservHandleGpuTaskExec(gclient, xcmd,
-												 "kern_gpujoin_main");
+						gpuservHandleGpuTaskExec(gclient, xcmd);
+						break;
+					case XpuCommandTag__XpuJoinFinal:
+						gpuservHandleGpuJoinFinal(gclient, xcmd);
+						break;
+					case XpuCommandTag__XpuPreAggFinal:
+						gpuservHandleGpuPreAggFinal(gclient, xcmd);
 						break;
 					default:
 						gpuClientELog(gclient, "unknown XPU command (%d)",

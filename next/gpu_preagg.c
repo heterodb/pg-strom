@@ -1365,13 +1365,13 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 
 static void
 __xpupreagg_add_custompath(PlannerInfo *root,
-							Path *input_path,
-							RelOptInfo *group_rel,
-							void *extra,
-							bool try_parallel,
-							double num_groups,
-							uint32_t task_kind,
-							const CustomPathMethods *custom_path_methods)
+						   Path *input_path,
+						   RelOptInfo *group_rel,
+						   void *extra,
+						   bool try_parallel,
+						   double num_groups,
+						   uint32_t task_kind,
+						   const CustomPathMethods *custom_path_methods)
 {
 	xpugroupby_build_path_context con;
 	Path	   *part_path;
@@ -1482,13 +1482,13 @@ xpupreagg_add_custompath(PlannerInfo *root,
 												 NULL, NULL);
 			}
 			__xpupreagg_add_custompath(root,
-										input_path,
-										group_rel,
-										extra,
-										num_groups,
-										(try_parallel > 0),
-										task_kind,
-										custom_path_methods);
+									   input_path,
+									   group_rel,
+									   extra,
+									   (try_parallel > 0),
+									   num_groups,
+									   task_kind,
+									   custom_path_methods);
 		}
 	}
 }

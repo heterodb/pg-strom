@@ -210,8 +210,7 @@ __setupXpuScanPath(PlannerInfo *root,
 	pp_info->scan_quals = extract_actual_clauses(dev_quals, false);
 	pp_info->scan_tuples = baserel->tuples;
 	pp_info->scan_rows = baserel->rows;
-	if (parallel_nworkers > 0)
-		pp_info->parallel_divisor = parallel_divisor;
+	pp_info->parallel_divisor = parallel_divisor;
 	pp_info->final_cost = final_cost;
 	if (indexOpt)
 	{

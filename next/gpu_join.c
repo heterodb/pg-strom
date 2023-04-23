@@ -678,6 +678,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	}
 	/* discount if CPU parallel is enabled */
 	run_cost += (comp_cost / pp_info->parallel_divisor);
+
 	/* cost for DMA receive (xPU --> Host) */
 	final_cost += xpu_tuple_cost * joinrel->rows;
 
@@ -705,7 +706,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	cpath->methods = xpujoin_path_methods;
 	cpath->custom_paths = lappend(inner_paths_list, inner_path);
 	cpath->custom_private = list_make1(pp_info);
-
+	
 	if (custom_path_remember(root,
 							 joinrel,
 							 try_parallel_path,
@@ -759,6 +760,7 @@ xpujoin_add_custompath(PlannerInfo *root,
 			if (!inner_path || inner_path->total_cost > path->total_cost)
 				inner_path = path;
 		}
+
 		if (inner_path)
 			try_add_simple_xpujoin_path(root,
 										joinrel,
@@ -1913,11 +1915,6 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 		if (istate->join_quals == NULL ||
 			ExecQual(istate->join_quals, econtext))
 		{
-			static int count = 0;
-
-			if (count++ < 0)
-				elog(INFO, "Join matched %d", count);
-			
 			if (istate->other_quals == NULL ||
 				ExecQual(istate->other_quals, econtext))
 			{

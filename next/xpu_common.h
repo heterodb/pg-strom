@@ -474,7 +474,6 @@ struct kern_data_store {
 	Oid				tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	int32_t			tdtypmod;	/* copy of TupleDesc.tdtypmod */
 	Oid				table_oid;	/* OID of the table (only if GpuScan) */
-	uint32_t		lock;		/* some situation needs lock semantics */
 	/* only KDS_FORMAT_HASH */
 	uint32_t		hash_nslots;	/* width of the hash-slot */
 	/* only KDS_FORMAT_BLOCK */
