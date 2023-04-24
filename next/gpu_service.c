@@ -549,7 +549,6 @@ __setupGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 							 KDS_HEAD_LENGTH(kds_final_head),
 							 CU_DEVICE_PER_THREAD,
 							 CU_STREAM_PER_THREAD);
-	fprintf(stderr, "m_kds_final = %p len=%zu\n", (void *)m_kds_final, kds_final_head->length);
 	gq_buf->m_kds_final = m_kds_final;
 	return true;
 }
@@ -1478,17 +1477,9 @@ gpuservHandleGpuPreAggFinal(gpuClient *gclient, XpuCommand *xcmd)
 	resp.tag   = XpuCommandTag__Success;
 	if (gq_buf && gq_buf->m_kds_final != 0UL)
 	{
-		kern_data_store *kds_final = (kern_data_store *)gq_buf->m_kds_final;
-		kern_tupitem *tupitem = KDS_GET_TUPITEM(kds_final, 0);
-		HeapTupleHeaderData *htup = &tupitem->htup;
-
-		fprintf(stderr, "value = %lu\n",
-				*((uint64_t *)((char *)htup + htup->t_hoff)));
-		
-		kds_dst_array[0] = kds_final;
+		kds_dst_array[0] = (kern_data_store *)gq_buf->m_kds_final;
 		kds_dst_nitems++;
 	}
-	fprintf(stderr, "gpuservHandleGpuPreAggFinal n=%d\n", kds_dst_nitems);
 	resp.u.results.chunks_nitems = kds_dst_nitems;
 	resp.u.results.chunks_offset = resp_sz;
 	gpuClientWriteBack(gclient, &resp, resp_sz,

@@ -38,9 +38,6 @@ extern TransactionId   *ParallelCurrentXids;
 /* static variables */
 static dlist_head		xpu_connections_list;
 static bool				pgstrom_use_debug_code;		/* GUC */
-static shmem_request_hook_type shmem_request_next = NULL;
-static shmem_startup_hook_type shmem_startup_next = NULL;
-static pg_atomic_uint32	*pgstrom_query_plan_id = NULL;
 
 /*
  * Worker thread to receive response messages
@@ -2044,42 +2041,12 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 }
 
 /*
- * pgstrom_request_executor
- */
-static void
-pgstrom_request_executor(void)
-{
-	if (shmem_request_next)
-		(*shmem_request_next)();
-	
-	RequestAddinShmemSpace(MAXALIGN(sizeof(pg_atomic_uint32)));
-}
-
-/*
- * pgstrom_startup_executor
- */
-static void
-pgstrom_startup_executor(void)
-{
-	bool	found;
-
-	if (shmem_startup_next)
-		(*shmem_startup_next)();
-
-	pgstrom_query_plan_id = ShmemInitStruct("pgstrom_query_plan_id",
-											MAXALIGN(sizeof(pg_atomic_uint32)),
-											&found);
-	if (!found)
-		pg_atomic_init_u32(pgstrom_query_plan_id, 0);
-}
-
-/*
  * pgstrom_init_executor
  */
 void
 pgstrom_init_executor(void)
 {
-    DefineCustomBoolVariable("pg_strom.use_debug_code",
+	DefineCustomBoolVariable("pg_strom.use_debug_code",
 							 "Use debug-mode enabled device code",
 							 NULL,
 							 &pgstrom_use_debug_code,
@@ -2089,9 +2056,4 @@ pgstrom_init_executor(void)
 							 NULL, NULL, NULL);
 	dlist_init(&xpu_connections_list);
 	RegisterResourceReleaseCallback(xpuclientCleanupConnections, NULL);
-	/* shared memory setup */
-	shmem_request_next = shmem_request_hook;
-	shmem_request_hook = pgstrom_request_executor;
-	shmem_startup_next = shmem_startup_hook;
-	shmem_startup_hook = pgstrom_startup_executor;
 }
