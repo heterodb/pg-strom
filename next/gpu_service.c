@@ -835,37 +835,71 @@ gpuClientWriteBack(gpuClient  *gclient,
 	struct iovec   *iov;
 	int				i, iovcnt = 0;
 
-	iov_array = alloca(sizeof(struct iovec) * (2 * kds_nitems + 1));
+	iov_array = alloca(sizeof(struct iovec) * (3 * kds_nitems + 1));
 	iov = &iov_array[iovcnt++];
 	iov->iov_base = resp;
 	iov->iov_len  = resp_sz;
 	for (i=0; i < kds_nitems; i++)
 	{
 		kern_data_store *kds = kds_array[i];
-		size_t		sz1, sz2;
+		size_t		sz1, sz2, sz3;
 
-		sz1 = KDS_HEAD_LENGTH(kds) + MAXALIGN(sizeof(uint32_t) * kds->nitems);
-		sz2 = __kds_unpack(kds->usage);
-		if (sz1 + sz2 == kds->length)
+		if (kds->format == KDS_FORMAT_HASH)
 		{
-			iov = &iov_array[iovcnt++];
-			iov->iov_base = kds;
-			iov->iov_len  = kds->length;
-		}
-		else
-		{
-			assert(sz1 + sz2 < kds->length);
+			assert(kds->hash_nslots > 0);
+			sz1 = KDS_HEAD_LENGTH(kds);
 			iov = &iov_array[iovcnt++];
 			iov->iov_base = kds;
 			iov->iov_len  = sz1;
 
+			sz2 = MAXALIGN(sizeof(uint32_t) * kds->nitems);
 			if (sz2 > 0)
 			{
 				iov = &iov_array[iovcnt++];
-				iov->iov_base = (char *)kds + kds->length - sz2;
+				iov->iov_base = KDS_GET_ROWINDEX(kds);
 				iov->iov_len  = sz2;
 			}
-			kds->length = (sz1 + sz2);
+
+			sz3 = __kds_unpack(kds->usage);
+			if (sz3 > 0)
+			{
+				iov = &iov_array[iovcnt++];
+				iov->iov_base = (char *)kds + kds->length - sz3;
+				iov->iov_len  = sz3;
+			}
+			/* fixup kds */
+			kds->format = KDS_FORMAT_ROW;
+			kds->hash_nslots = 0;
+			kds->length = (sz1 + sz2 + sz3);
+		}
+		else
+		{
+			assert(kds->format == KDS_FORMAT_ROW &&
+				   kds->hash_nslots == 0);
+			sz1 = (KDS_HEAD_LENGTH(kds) +
+				   MAXALIGN(sizeof(uint32_t) * kds->nitems));
+			sz2 = __kds_unpack(kds->usage);
+			if (sz1 + sz2 == kds->length)
+			{
+				iov = &iov_array[iovcnt++];
+				iov->iov_base = kds;
+				iov->iov_len  = kds->length;
+			}
+			else
+			{
+				assert(sz1 + sz2 < kds->length);
+				iov = &iov_array[iovcnt++];
+				iov->iov_base = kds;
+				iov->iov_len  = sz1;
+
+				if (sz2 > 0)
+				{
+					iov = &iov_array[iovcnt++];
+					iov->iov_base = (char *)kds + kds->length - sz2;
+					iov->iov_len  = sz2;
+				}
+				kds->length = (sz1 + sz2);
+			}
 		}
 		resp_sz += kds->length;
 	}

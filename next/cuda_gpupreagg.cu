@@ -1193,7 +1193,10 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 							 kexp_groupby_actions);
 	hitem->t.t_len = tupsz;
 	hitem->t.rowid = newval.kds.nitems - 1;
-
+	KDS_GET_ROWINDEX(kds_final)[hitem->t.rowid]
+		= __kds_packed((char *)kds_final
+					   + kds_final->length
+					   - (char *)&hitem->t);
 	return hitem;
 }
 
