@@ -69,6 +69,24 @@ static __thread gpuContext *GpuWorkerCurrentContext = NULL;
 static volatile int		gpuserv_bgworker_got_signal = 0;
 static dlist_head		gpuserv_gpucontext_list;
 static int				gpuserv_epoll_fdesc = -1;
+static shmem_request_hook_type shmem_request_next = NULL;
+static shmem_startup_hook_type shmem_startup_next = NULL;
+static bool			   *gpuserv_debug_output = NULL;
+
+#define __GpuServDebug(fmt,...)										\
+	do {															\
+		if (*((volatile bool *)gpuserv_debug_output))				\
+		{															\
+			const char *filename = __FILE__;						\
+			for (const char *pos = filename; *pos != '\0'; pos++)	\
+			{														\
+				if (pos[0] == '/' && pos[1] != '\0')				\
+					filename = pos + 1;								\
+			}														\
+			fprintf(stderr, "GpuServ: " fmt " (%s:%d)\n",			\
+					##__VA_ARGS__, filename, __LINE__);				\
+		}															\
+	} while(0)
 
 void	gpuservBgWorkerMain(Datum arg);
 
@@ -363,8 +381,8 @@ gpuMemoryPoolMaintenance(gpuContext *gcontext)
 					   chunk->free_chain.next);
 				free(chunk);
 			}
-			//fprintf(stderr, "GPU-%d: i/o mapped device memory %lu bytes released",
-			//		gcontext->cuda_dindex, mseg->segment_sz);
+			__GpuServDebug("GPU-%d: i/o mapped device memory %lu bytes released",
+						   gcontext->cuda_dindex, mseg->segment_sz);
 			Assert(pool->total_sz >= mseg->segment_sz);
 			pool->total_sz -= mseg->segment_sz;
 			free(mseg);
@@ -426,19 +444,19 @@ __putGpuQueryBufferNoLock(gpuQueryBuffer *gq_buf)
 		{
 			rc = cuMemFree(gq_buf->m_kmrels);
 			if (rc != CUDA_SUCCESS)
-				fprintf(stderr, "failed on cuMemFree: %s\n", cuStrError(rc));
+				__GpuServDebug("failed on cuMemFree: %s", cuStrError(rc));
 		}
 		if (gq_buf->h_kmrels)
 		{
 			if (munmap(gq_buf->h_kmrels,
 					   gq_buf->kmrels_sz) != 0)
-				fprintf(stderr, "failed on munmap: %m\n");
+				__GpuServDebug("failed on munmap: %m");
 		}
 		if (gq_buf->m_kds_final)
 		{
 			rc = cuMemFree(gq_buf->m_kds_final);
 			if (rc != CUDA_SUCCESS)
-				fprintf(stderr, "failed on cuMemFree: %s\n", cuStrError(rc));
+				__GpuServDebug("failed on cuMemFree: %s", cuStrError(rc));
 		}
 		dlist_delete(&gq_buf->chain);
 		free(gq_buf);
@@ -753,7 +771,7 @@ gpuClientPut(gpuClient *gclient, bool exit_monitor_thread)
 									offsetof(XpuCommand, u.session));
 			rc = cuMemFree(dptr);
 			if (rc != CUDA_SUCCESS)
-				fprintf(stderr, "failed on cuMemFree: %s\n", cuStrError(rc));
+				__GpuServDebug("failed on cuMemFree: %s\n", cuStrError(rc));
 		}
 		free(gclient);
 	}
@@ -913,11 +931,11 @@ __gpuClientELog(gpuClient *gclient,
 	/* unable to continue GPU service, so try to restart */
 	if (errcode == ERRCODE_DEVICE_FATAL)
 	{
-		fprintf(stderr, "(%s:%d, %s) GPU fatal - %s\n",
-				resp.u.error.filename,
-				resp.u.error.lineno,
-				resp.u.error.funcname,
-				resp.u.error.message);
+		__GpuServDebug("(%s:%d, %s) GPU fatal - %s\n",
+					   resp.u.error.filename,
+					   resp.u.error.lineno,
+					   resp.u.error.funcname,
+					   resp.u.error.message);
 		gpuserv_bgworker_got_signal |= (1 << SIGHUP);
 		pg_memory_barrier();
 		SetLatch(MyLatch);
@@ -1355,7 +1373,7 @@ resume_kernel:
 			/* restore warp context from the previous state */
 			kgtask->resume_context = true;
 			kgtask->suspend_count = 0;
-			fprintf(stderr, "suspend / resume happen\n");
+			__GpuServDebug("suspend / resume happen\n");
 			//todo - expand kds_final if GpuPreAgg
 			goto resume_kernel;
 		}
@@ -1405,7 +1423,7 @@ bailout:
 	{
 		rc = cuMemFree((CUdeviceptr)kgtask);
 		if (rc != CUDA_SUCCESS)
-			fprintf(stderr, "warning: failed on cuMemFree: %s\n", cuStrError(rc));
+			__GpuServDebug("failed on cuMemFree: %s\n", cuStrError(rc));
 	}
 	if (chunk)
 		gpuMemFree(chunk);
@@ -1415,7 +1433,7 @@ bailout:
 
 		rc = cuMemFree((CUdeviceptr)kds_dst);
 		if (rc != CUDA_SUCCESS)
-			fprintf(stderr, "warning: failed on cuMemFree: %s\n", cuStrError(rc));
+			__GpuServDebug("failed on cuMemFree: %s\n", cuStrError(rc));
 	}
 }
 
@@ -1617,8 +1635,8 @@ gpuservMonitorClient(void *__priv)
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 	{
-		fprintf(stderr, "[%s; %s:%d] failed on cuCtxSetCurrent: %s\n",
-				elabel, __FILE_NAME__,__LINE__, cuStrError(rc));
+		__GpuServDebug("[%s] failed on cuCtxSetCurrent: %s\n",
+					   elabel, cuStrError(rc));
 		goto out;
 	}
 	GpuWorkerCurrentContext = gcontext;
@@ -1637,8 +1655,7 @@ gpuservMonitorClient(void *__priv)
 		{
 			if (errno == EINTR)
 				continue;
-			fprintf(stderr, "[%s; %s:%d] failed on poll(2): %m\n",
-					elabel, __FILE_NAME__,__LINE__);
+			__GpuServDebug("[%s] failed on poll(2): %m", elabel);
 			break;
 		}
 		if (nevents == 0)
@@ -1651,8 +1668,7 @@ gpuservMonitorClient(void *__priv)
 		}
 		else if (pfd.revents & ~POLLIN)
 		{
-			fprintf(stderr, "[%s; %s:%d] peer socket closed.\n",
-					elabel, __FILE_NAME__,__LINE__);
+			__GpuServDebug("[%s] peer socket closed.", elabel);
 			break;
 		}
 	}
@@ -2207,6 +2223,41 @@ gpuservBgWorkerMain(Datum arg)
 }
 
 /*
+ * pgstrom_request_executor
+ */
+static void
+pgstrom_request_executor(void)
+{
+	if (shmem_request_next)
+		(*shmem_request_next)();
+	RequestAddinShmemSpace(MAXALIGN(sizeof(bool)));
+}
+
+/*
+ * pgstrom_startup_executor
+ */
+static void
+pgstrom_startup_executor(void)
+{
+	bool    found;
+
+	if (shmem_startup_next)
+		(*shmem_startup_next)();
+	gpuserv_debug_output = ShmemInitStruct("pg_strom.gpuserv_debug_output",
+										   MAXALIGN(sizeof(bool)),
+										   &found);
+
+	DefineCustomBoolVariable("pg_strom.gpuserv_debug_output",
+							 "enables to generate debug message of GPU service",
+							 NULL,
+							 gpuserv_debug_output,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
+							 NULL, NULL, NULL);
+}
+
+/*
  * pgstrom_init_gpu_service
  */
 void
@@ -2273,7 +2324,6 @@ pgstrom_init_gpu_service(void)
 							PGC_SIGHUP,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MS | GUC_NO_SHOW_ALL,
 							NULL, NULL, NULL);
-
 	for (int i=0; i < GPU_QUERY_BUFFER_NSLOTS; i++)
 		dlist_init(&gpu_query_buffer_hslot[i]);
 
@@ -2286,4 +2336,9 @@ pgstrom_init_gpu_service(void)
 	snprintf(worker.bgw_function_name, BGW_MAXLEN, "gpuservBgWorkerMain");
 	worker.bgw_main_arg = 0;
 	RegisterBackgroundWorker(&worker);
+	/* shared memory setup */
+	shmem_request_next = shmem_request_hook;
+	shmem_request_hook = pgstrom_request_executor;
+	shmem_startup_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_executor;
 }
