@@ -293,6 +293,15 @@ DpuStorageEntryByEndpointId(int endpoint_id)
 }
 
 /*
+ * DpuStorageEntryCount
+ */
+int
+DpuStorageEntryCount(void)
+{
+	return (dpu_storage_master_array ? dpu_storage_master_array->nitems : 0);
+}
+
+/*
  * DpuClientOpenSession 
  */
 void
@@ -318,7 +327,7 @@ DpuClientOpenSession(pgstromTaskState *pts,
 	}
 	snprintf(namebuf, sizeof(namebuf), "DPU-%u", ds_entry->endpoint_id);
 
-	__xpuClientOpenSession(pts, session, sockfd, namebuf);
+	__xpuClientOpenSession(pts, session, sockfd, namebuf, ds_entry->endpoint_id);
 }
 
 /*

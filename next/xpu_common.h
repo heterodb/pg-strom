@@ -174,7 +174,8 @@ __volatileRead(const volatile T *ptr)
 }
 
 #else
-#define __Fetch(PTR)		(*(PTR))
+#define __Fetch(PTR)			(*(PTR))
+#define __volatileRead(PTR)		(*(PTR))
 #endif
 
 /*
@@ -473,7 +474,6 @@ struct kern_data_store {
 	Oid				tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	int32_t			tdtypmod;	/* copy of TupleDesc.tdtypmod */
 	Oid				table_oid;	/* OID of the table (only if GpuScan) */
-	uint32_t		lock;		/* some situation needs lock semantics */
 	/* only KDS_FORMAT_HASH */
 	uint32_t		hash_nslots;	/* width of the hash-slot */
 	/* only KDS_FORMAT_BLOCK */
@@ -959,6 +959,7 @@ KDS_FETCH_TUPITEM(kern_data_store *kds,
 		   kds->format == KDS_FORMAT_HASH);
 	if (tuple_offset == 0)
 		return NULL;
+	Assert(tuple_offset < kds->length);
 	tupitem = (kern_tupitem *)((char *)kds
 							   + kds->length
 							   - __kds_unpack(tuple_offset));
@@ -970,22 +971,31 @@ KDS_FETCH_TUPITEM(kern_data_store *kds,
 }
 
 INLINE_FUNCTION(uint32_t *)
-KDS_GET_HASHSLOT(kern_data_store *kds)
+KDS_GET_HASHSLOT_BASE(kern_data_store *kds)
 {
 	Assert(kds->format == KDS_FORMAT_HASH && kds->hash_nslots > 0);
 	return (uint32_t *)(KDS_BODY_ADDR(kds));
 }
 
-INLINE_FUNCTION(kern_hashitem *)
-KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t hash)
+INLINE_FUNCTION(uint32_t *)
+KDS_GET_HASHSLOT(kern_data_store *kds, uint32_t hash)
 {
-    uint32_t   *slot = KDS_GET_HASHSLOT(kds);
-	size_t		offset = __kds_unpack(slot[hash % kds->hash_nslots]);
+	uint32_t   *hslot = KDS_GET_HASHSLOT_BASE(kds);
 
-	if (offset == 0)
+	return hslot + (hash % kds->hash_nslots);
+}
+
+INLINE_FUNCTION(kern_hashitem *)
+KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t *hslot, uint32_t *p_saved)
+{
+	uint32_t	offset = __volatileRead(hslot);
+
+	if (p_saved)
+		*p_saved = offset;
+	if (offset == 0 || offset == UINT_MAX)
 		return NULL;
-	Assert(offset < kds->length);
-	return (kern_hashitem *)((char *)kds + offset);
+	Assert(__kds_unpack(offset) < kds->length);
+	return (kern_hashitem *)((char *)kds + __kds_unpack(offset));
 }
 
 INLINE_FUNCTION(kern_hashitem *)
@@ -1684,15 +1694,14 @@ typedef struct
 /*
  * PG-Strom Command Tag
  */
-#define XpuCommandTag__Success			0
-#define XpuCommandTag__Error			1
-#define XpuCommandTag__CPUFallback		2
-#define XpuCommandTag__OpenSession		100
-#define XpuCommandTag__XpuScanExec		200
-#define XpuCommandTag__XpuJoinExec		300
-#define XpuCommandTag__XpuPreAggExec	400
-#define XpuCommandTag__XpuPreAggFinal	401
-#define XpuCommandMagicNumber			0xdeadbeafU
+#define XpuCommandTag__Success				0
+#define XpuCommandTag__Error				1
+#define XpuCommandTag__CPUFallback			2
+#define XpuCommandTag__SuccessAndRightOuter	3
+#define XpuCommandTag__OpenSession			100
+#define XpuCommandTag__XpuTaskExec			110
+#define XpuCommandTag__XpuTaskFinal			119
+#define XpuCommandMagicNumber				0xdeadbeafU
 
 /*
  * kern_session_info - A set of immutable data during query execution
@@ -1749,6 +1758,13 @@ typedef struct {
 } kern_exec_task;
 
 typedef struct {
+	bool		final_plan_node;
+	bool		final_this_device;
+	bool		final_all_devices;
+	char		data[1]				__MAXALIGNED__;
+} kern_final_task;
+
+typedef struct {
 	uint32_t	chunks_offset;		/* offset of kds_dst array */
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
 	/* statistics */
@@ -1785,6 +1801,7 @@ typedef struct
 		kern_errorbuf		error;
 		kern_session_info	session;
 		kern_exec_task		task;
+		kern_final_task		fin;
 		kern_exec_results	results;
 	} u;
 } XpuCommand;

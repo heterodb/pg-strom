@@ -692,32 +692,32 @@ kern_extract_heap_tuple(kern_context *kcxt,
 	/* try attcacheoff shortcut, if available. */
 	if (!heap_hasnull)
 	{
-		while (kvars_count < kvars_nloads)
+		while (kvars_count < kvars_nloads &&
+			   kvdef->var_resno > 0 &&
+			   kvdef->var_resno <= ncols)
 		{
-			if (kvdef->var_resno > 0 &&
-				kvdef->var_resno <= ncols)
-			{
-				const kern_colmeta *cmeta = &kds->colmeta[kvdef->var_resno-1];
-				char   *addr;
+			const kern_colmeta *cmeta = &kds->colmeta[kvdef->var_resno-1];
+			char	   *addr;
 
-				if (cmeta->attcacheoff < 0)
-					break;
-				resno = kvdef->var_resno;
-				offset = htup->t_hoff + cmeta->attcacheoff;
-				addr = (char *)htup + offset;
-				if (cmeta->attlen > 0)
-					offset += cmeta->attlen;
-				else
-					offset += VARSIZE_ANY(addr);
-				if (!__extract_heap_tuple_attr(kcxt, kds, cmeta, kvdef, addr))
-					return false;
-			}
+			if (cmeta->attcacheoff < 0)
+				break;
+			offset = htup->t_hoff + cmeta->attcacheoff;
+			addr = (char *)htup + offset;
+			if (!__extract_heap_tuple_attr(kcxt, kds, cmeta, kvdef, addr))
+				return false;
+			/* next resno */
+			resno = kvdef->var_resno + 1;
+			if (cmeta->attlen > 0)
+				offset += cmeta->attlen;
+			else
+				offset += VARSIZE_ANY(addr);
 			kvdef++;
 			kvars_count++;
 		}
 	}
+
 	/* extract slow path */
-	while (kvars_count < kvars_nloads)
+	while (resno <= ncols && kvars_count < kvars_nloads)
 	{
 		const kern_colmeta *cmeta = &kds->colmeta[resno-1];
 		char   *addr;

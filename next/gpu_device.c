@@ -451,12 +451,11 @@ __gpuClientChooseDevice(const Bitmapset *gpuset)
 
 void
 gpuClientOpenSession(pgstromTaskState *pts,
-					 const Bitmapset *gpuset,
 					 const XpuCommand *session)
 {
 	struct sockaddr_un addr;
 	pgsocket	sockfd;
-	int			cuda_dindex = __gpuClientChooseDevice(gpuset);
+	int			cuda_dindex = __gpuClientChooseDevice(pts->optimal_gpus);
 	char		namebuf[32];
 
 	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -475,7 +474,7 @@ gpuClientOpenSession(pgstromTaskState *pts,
 	}
 	snprintf(namebuf, sizeof(namebuf), "GPU-%d", cuda_dindex);
 
-	__xpuClientOpenSession(pts, session, sockfd, namebuf);
+	__xpuClientOpenSession(pts, session, sockfd, namebuf, cuda_dindex);
 }
 
 /*

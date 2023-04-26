@@ -220,18 +220,21 @@ execGpuJoinHashJoin(kern_context *kcxt,
 	kcxt->kvars_slot = (kern_variable *)
 		(src_kvars_addr_wp + index * kcxt->kvars_nbytes);
 	kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
+
 	if (l_state == 0)
 	{
 		/* pick up the first item from the hash-slot */
 		if (read_pos < write_pos)
 		{
 			xpu_int4_t	hash;
+			uint32_t   *hslot;
 
 			kexp = SESSION_KEXP_HASH_VALUE(kcxt->session, depth-1);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp, &hash))
 			{
 				assert(!XPU_DATUM_ISNULL(&hash));
-				for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hash.value);
+				hslot = KDS_GET_HASHSLOT(kds_hash, hash.value);
+				for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hslot, NULL);
 					 khitem != NULL && khitem->hash != hash.value;
 					 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem));
 			}
@@ -255,6 +258,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 	/* error checks */
 	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
 		return -1;
+
 	if (khitem)
 	{
 		xpu_int4_t	status;
@@ -319,7 +323,8 @@ execGpuJoinProjection(kern_context *kcxt,
 					  int n_rels,	/* index of read/write-pos */
 					  kern_data_store *kds_dst,
 					  kern_expression *kexp_projection,
-					  char *kvars_addr_wp)
+					  char *kvars_addr_wp,
+					  bool *p_try_suspend)
 {
 	uint32_t	write_pos = WARP_WRITE_POS(wp,n_rels);
 	uint32_t	read_pos = WARP_READ_POS(wp,n_rels);
@@ -395,7 +400,10 @@ execGpuJoinProjection(kern_context *kcxt,
 	row_id += oldval.i.nitems;
 	/* data store has no space? */
 	if (__any_sync(__activemask(), try_suspend))
-		return -2;
+	{
+		*p_try_suspend = true;
+		return -1;
+	}
 	/* write out the tuple */
 	if (tupsz > 0)
 	{
@@ -449,9 +457,8 @@ kern_gpujoin_main(kern_session_info *session,
 	uint32_t		   *l_state;
 	bool			   *matched;
 	uint32_t			wp_base_sz;
-	uint32_t			n_rels = kmrels->num_rels;
+	uint32_t			n_rels = (kmrels ? kmrels->num_rels : 0);
 	int					depth;
-	int					status;
 	__shared__ uint32_t smx_row_count;
 
 	assert(kgtask->kvars_nslots == session->kcxt_kvars_nslots &&
@@ -484,8 +491,10 @@ kern_gpujoin_main(kern_session_info *session,
 		if (get_local_id() == 0)
 			smx_row_count = 0;
 		depth = 0;
-		memset(l_state, 0, sizeof(void *) * kcxt->kvars_nslots);
-		memset(matched, 0, sizeof(bool)   * kcxt->kvars_nslots);
+		if (l_state)
+			memset(l_state, 0, sizeof(void *) * kcxt->kvars_nslots);
+		if (matched)
+			memset(matched, 0, sizeof(bool)   * kcxt->kvars_nslots);
 	}
 	__syncthreads();
 
@@ -506,38 +515,34 @@ kern_gpujoin_main(kern_session_info *session,
 		}
 		else if (depth > n_rels)
 		{
+			bool	try_suspend = false;
+
 			assert(depth == n_rels+1);
 			if (session->xpucode_projection)
 			{
 				/* PROJECTION */
-				status = execGpuJoinProjection(kcxt, wp,
-											   n_rels,
-											   kds_dst,
-											   SESSION_KEXP_PROJECTION(session),
-											   kvars_addr_wp + kvars_chunksz * n_rels);
+				depth = execGpuJoinProjection(kcxt, wp,
+											  n_rels,
+											  kds_dst,
+											  SESSION_KEXP_PROJECTION(session),
+											  kvars_addr_wp + kvars_chunksz * n_rels,
+											  &try_suspend);
 			}
 			else
 			{
 				/* PRE-AGG */
-				status = execGpuPreAggGroupBy(kcxt, wp,
-											  n_rels,
-											  kds_dst,
-											  SESSION_KEXP_GROUPBY_KEYHASH(session),
-											  SESSION_KEXP_GROUPBY_KEYCOMP(session),
-											  SESSION_KEXP_GROUPBY_ACTIONS(session),
-											  kvars_addr_wp + kvars_chunksz * n_rels);
+				depth = execGpuPreAggGroupBy(kcxt, wp,
+											 n_rels,
+											 kds_dst,
+											 kvars_addr_wp + kvars_chunksz * n_rels,
+											 &try_suspend);
 			}
-			if (status >= 0)
-				depth = status;
-			else if (status == -2)
+			if (__any_sync(__activemask(), try_suspend))
 			{
-				/* no space, try suspend! */
 				if (LaneId() == 0)
 					atomicAdd(&kgtask->suspend_count, 1);
-				break;
+				assert(depth < 0);
 			}
-			else
-				depth = -1;
 		}
 		else if (kmrels->chunks[depth-1].is_nestloop)
 		{

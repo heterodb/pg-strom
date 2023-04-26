@@ -114,29 +114,6 @@ CreateDpuScanState(CustomScan *cscan)
 }
 
 /*
- * ExecDpuScan
- */
-static TupleTableSlot *
-ExecDpuScan(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *)node;
-
-	if (!pts->ps_state)
-		pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
-	if (!pts->conn)
-	{
-		const XpuCommand *session;
-		/* outer scan is already done? */
-		if (!pgstromTaskStateBeginScan(pts))
-			return NULL;
-		/* open the new session */
-		session = pgstromBuildSessionInfo(pts, 0, NULL);
-		DpuClientOpenSession(pts, session);
-	}
-	return pgstromExecTaskState(pts);
-}
-
-/*
  * pgstrom_init_dpu_scan
  */
 void
@@ -166,7 +143,7 @@ pgstrom_init_dpu_scan(void)
 	memset(&dpuscan_exec_methods, 0, sizeof(dpuscan_exec_methods));
     dpuscan_exec_methods.CustomName			= "DpuScan";
     dpuscan_exec_methods.BeginCustomScan	= pgstromExecInitTaskState;
-    dpuscan_exec_methods.ExecCustomScan		= ExecDpuScan;
+    dpuscan_exec_methods.ExecCustomScan		= pgstromExecTaskState;
     dpuscan_exec_methods.EndCustomScan		= pgstromExecEndTaskState;
     dpuscan_exec_methods.ReScanCustomScan	= pgstromExecResetTaskState;
     dpuscan_exec_methods.EstimateDSMCustomScan = pgstromSharedStateEstimateDSM;

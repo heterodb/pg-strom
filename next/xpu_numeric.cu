@@ -196,12 +196,12 @@ PG_NUMERIC_TO_INT_TEMPLATE(money,LLONG_MIN,LLONG_MAX)
 				{													\
 					while (weight > 0)								\
 					{												\
-						fval *= 10.0;								\
+						fval /= 10.0;								\
 						weight--;									\
 					}												\
 					while (weight < 0)								\
 					{												\
-						fval /= 10.0;								\
+						fval *= 10.0;								\
 						weight++;									\
 					}												\
 					if (isnan(fval) || isinf(fval))					\

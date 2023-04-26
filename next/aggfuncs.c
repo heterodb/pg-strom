@@ -410,7 +410,7 @@ pgstrom_favg_final_num(PG_FUNCTION_ARGS)
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
 	n = DirectFunctionCall1(int4_numeric, Int32GetDatum(state->nitems));
-	sum = DirectFunctionCall1(float8_numeric, Int64GetDatum(state->sum));
+	sum = DirectFunctionCall1(float8_numeric, Float8GetDatum(state->sum));
 
 	PG_RETURN_DATUM(DirectFunctionCall2(numeric_div, sum, n));
 }

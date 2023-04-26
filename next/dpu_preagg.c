@@ -97,43 +97,6 @@ CreateDpuPreAggScanState(CustomScan *cscan)
 }
 
 /*
- * ExecDpuPreAgg
- */
-static TupleTableSlot *
-ExecDpuPreAgg(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *)node;
-
-	if (!pts->conn)
-	{
-		const XpuCommand *session;
-		uint32_t	inner_handle = 0;
-
-		/* attach pgstromSharedState, if none */
-		if (!pts->ps_state)
-			pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
-		/* preload inner buffer, if any */
-		if (pts->num_rels > 0)
-		{
-			inner_handle = GpuJoinInnerPreload(pts);
-			if (inner_handle == 0)
-				return NULL;
-		}
-		/* outer scan is already done? */
-		if (!pgstromTaskStateBeginScan(pts))
-			return NULL;
-		/* open the DpuJoin session */
-		Assert(pts->ds_entry != NULL);
-		session = pgstromBuildSessionInfo(pts, inner_handle,
-										  pts->css.ss.ps.scandesc);
-		DpuClientOpenSession(pts, session);
-	}
-	return pgstromExecTaskState(pts);
-
-	return pgstromExecTaskState(pts);
-}
-
-/*
  * pgstrom_init_dpu_preagg
  */
 void
@@ -172,7 +135,7 @@ pgstrom_init_dpu_preagg(void)
     memset(&dpupreagg_exec_methods, 0, sizeof(CustomExecMethods));
     dpupreagg_exec_methods.CustomName          = "GpuPreAgg";
     dpupreagg_exec_methods.BeginCustomScan     = pgstromExecInitTaskState;
-    dpupreagg_exec_methods.ExecCustomScan      = ExecDpuPreAgg;
+    dpupreagg_exec_methods.ExecCustomScan      = pgstromExecTaskState;
     dpupreagg_exec_methods.EndCustomScan       = pgstromExecEndTaskState;
     dpupreagg_exec_methods.ReScanCustomScan    = pgstromExecResetTaskState;
     dpupreagg_exec_methods.EstimateDSMCustomScan = pgstromSharedStateEstimateDSM;

@@ -678,6 +678,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	}
 	/* discount if CPU parallel is enabled */
 	run_cost += (comp_cost / pp_info->parallel_divisor);
+
 	/* cost for DMA receive (xPU --> Host) */
 	final_cost += xpu_tuple_cost * joinrel->rows;
 
@@ -705,7 +706,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	cpath->methods = xpujoin_path_methods;
 	cpath->custom_paths = lappend(inner_paths_list, inner_path);
 	cpath->custom_private = list_make1(pp_info);
-
+	
 	if (custom_path_remember(root,
 							 joinrel,
 							 try_parallel_path,
@@ -759,6 +760,7 @@ xpujoin_add_custompath(PlannerInfo *root,
 			if (!inner_path || inner_path->total_cost > path->total_cost)
 				inner_path = path;
 		}
+
 		if (inner_path)
 			try_add_simple_xpujoin_path(root,
 										joinrel,
@@ -1190,36 +1192,6 @@ CreateGpuJoinState(CustomScan *cscan)
 	return (Node *)pts;
 }
 
-/*
- * ExecGpuJoin
- */
-static TupleTableSlot *
-ExecGpuJoin(CustomScanState *node)
-{
-	pgstromTaskState *pts = (pgstromTaskState *) node;
-
-	if (!pts->conn)
-	{
-		const XpuCommand *session;
-		uint32_t	inner_handle;
-
-		/* attach pgstromSharedState, if none */
-		if (!pts->ps_state)
-			pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
-		/* preload inner buffer */
-		inner_handle = GpuJoinInnerPreload(pts);
-		if (inner_handle == 0)
-			return NULL;
-		/* outer scan is already done? */
-		if (!pgstromTaskStateBeginScan(pts))
-			return NULL;
-		/* open the GpuJoin session */
-		session = pgstromBuildSessionInfo(pts, inner_handle, NULL);
-		gpuClientOpenSession(pts, pts->optimal_gpus, session);
-	}
-	return pgstromExecTaskState(pts);
-}
-
 /* ---------------------------------------------------------------- *
  *
  * Routines for inner-preloading
@@ -1391,7 +1363,7 @@ again:
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
 				kds->hash_nslots = nslots;
-				memset(KDS_GET_HASHSLOT(kds), 0, sizeof(uint32_t) * nslots);
+				memset(KDS_GET_HASHSLOT_BASE(kds), 0, sizeof(uint32_t) * nslots);
 			}
 			offset += nbytes;
 		}
@@ -1547,7 +1519,7 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 							  uint32_t base_usage)
 {
 	uint32_t   *row_index = KDS_GET_ROWINDEX(kds);
-	uint32_t   *hash_slot = KDS_GET_HASHSLOT(kds);
+	uint32_t   *hash_slot = KDS_GET_HASHSLOT_BASE(kds);
 	uint32_t	rowid = base_nitems;
 	char	   *tail_pos = (char *)kds + kds->length;
 	char	   *curr_pos = tail_pos - __kds_unpack(base_usage);
@@ -1884,6 +1856,7 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	kern_expression *kexp_join_kvars_load = NULL;
 	kern_hashitem  *hitem;
 	uint32_t		hash;
+	uint32_t	   *hslot;
 	ListCell	   *lc1, *lc2;
 
 	if (pp_info->kexp_join_kvars_load_packed)
@@ -1915,7 +1888,8 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	/*
 	 * walks on the hash-join-table
 	 */
-	for (hitem = KDS_HASH_FIRST_ITEM(kds_in, hash);
+	hslot = KDS_GET_HASHSLOT(kds_in, hash);
+	for (hitem = KDS_HASH_FIRST_ITEM(kds_in, hslot, NULL);
 		 hitem != NULL;
 		 hitem = KDS_HASH_NEXT_ITEM(kds_in, hitem))
 	{
@@ -1941,11 +1915,6 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 		if (istate->join_quals == NULL ||
 			ExecQual(istate->join_quals, econtext))
 		{
-			static int count = 0;
-
-			if (count++ < 0)
-				elog(INFO, "Join matched %d", count);
-			
 			if (istate->other_quals == NULL ||
 				ExecQual(istate->other_quals, econtext))
 			{
@@ -2085,7 +2054,7 @@ pgstrom_init_gpu_join(void)
 	memset(&gpujoin_exec_methods, 0, sizeof(CustomExecMethods));
 	gpujoin_exec_methods.CustomName				= "GpuJoin";
 	gpujoin_exec_methods.BeginCustomScan		= pgstromExecInitTaskState;
-	gpujoin_exec_methods.ExecCustomScan			= ExecGpuJoin;
+	gpujoin_exec_methods.ExecCustomScan			= pgstromExecTaskState;
 	gpujoin_exec_methods.EndCustomScan			= pgstromExecEndTaskState;
 	gpujoin_exec_methods.ReScanCustomScan		= pgstromExecResetTaskState;
 	gpujoin_exec_methods.EstimateDSMCustomScan	= pgstromSharedStateEstimateDSM;
