@@ -1473,69 +1473,72 @@ bailout:
 
 /* ----------------------------------------------------------------
  *
- * gpuservHandleGpuJoinFinal
+ * gpuservHandleGpuTaskFinal
  *
  * ----------------------------------------------------------------
  */
 static void
-gpuservHandleGpuJoinFinal(gpuClient *gclient, XpuCommand *xcmd)
+gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 {
+	kern_final_task *kfin = &xcmd->u.fin;
 	gpuQueryBuffer *gq_buf = gclient->gq_buf;
 	XpuCommand		resp;
-	size_t			resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
+	kern_data_store	*kds_final = NULL;
 
-	if (gq_buf && gq_buf->m_kmrels != 0UL && gq_buf->h_kmrels != NULL)
+	fprintf(stderr, "gpuservHandleGpuTaskFinal: final_this_device=%d final_all_devices=%d final_plan_node=%d\n", kfin->final_this_device, kfin->final_all_devices, kfin->final_plan_node);
+	
+	memset(&resp, 0, sizeof(XpuCommand));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag   = XpuCommandTag__Success;
+	resp.u.results.chunks_nitems = 0;
+	resp.u.results.chunks_offset = MAXALIGN(offsetof(XpuCommand, u.results.stats));
+
+	/*
+	 * Is the outer-join-map written back to the host buffer?
+	 */
+	if (kfin->final_this_device)
 	{
-		kern_multirels *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
-		kern_multirels *h_kmrels = (kern_multirels *)gq_buf->h_kmrels;
-
-		for (int i=0; i < d_kmrels->num_rels; i++)
+		if (gq_buf &&
+			gq_buf->m_kmrels != 0UL &&
+			gq_buf->h_kmrels != NULL)
 		{
-			kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(h_kmrels, i);
-			bool   *d_ojmap = KERN_MULTIRELS_OUTER_JOIN_MAP(d_kmrels, i);
-			bool   *h_ojmap = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, i);
+			kern_multirels *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
+			kern_multirels *h_kmrels = (kern_multirels *)gq_buf->h_kmrels;
+			bool		found_right_outer = false;
 
-			if (d_ojmap && h_ojmap)
+			for (int i=0; i < d_kmrels->num_rels; i++)
 			{
-				for (uint32_t j=0; j < kds->nitems; j++)
-					h_ojmap[j] |= d_ojmap[j];
+				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(h_kmrels, i);
+				bool   *d_ojmap = KERN_MULTIRELS_OUTER_JOIN_MAP(d_kmrels, i);
+				bool   *h_ojmap = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, i);
+
+				if (d_ojmap && h_ojmap)
+				{
+					for (uint32_t j=0; j < kds->nitems; j++)
+						h_ojmap[j] |= d_ojmap[j];
+					found_right_outer = false;
+				}
 			}
+			/* host code runs final RIGHT OUTER output? */
+			if (kfin->final_all_devices && found_right_outer)
+				resp.tag = XpuCommandTag__SuccessAndRightOuter;
 		}
 	}
-	memset(&resp, 0, sizeof(XpuCommand));
-	resp.magic = XpuCommandMagicNumber;
-	resp.tag   = XpuCommandTag__Success;
-
-	gpuClientWriteBack(gclient, &resp, resp_sz, 0, NULL);
-}
-
-/* ----------------------------------------------------------------
- *
- * gpuservHandleGpuPreAggFinal
- *
- * ----------------------------------------------------------------
- */
-static void
-gpuservHandleGpuPreAggFinal(gpuClient *gclient, XpuCommand *xcmd)
-{
-	gpuQueryBuffer *gq_buf = gclient->gq_buf;
-	XpuCommand		resp;
-	size_t			resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
-	int				kds_dst_nitems = 0;
-	kern_data_store	*kds_dst_array[1];
-
-	memset(&resp, 0, sizeof(XpuCommand));
-	resp.magic = XpuCommandMagicNumber;
-	resp.tag   = XpuCommandTag__Success;
-	if (gq_buf && gq_buf->m_kds_final != 0UL)
+	/*
+	 * Is the GpuPreAgg final buffer written back?
+	 */
+	if (kfin->final_plan_node)
 	{
-		kds_dst_array[0] = (kern_data_store *)gq_buf->m_kds_final;
-		kds_dst_nitems++;
+		if (gq_buf && gq_buf->m_kds_final != 0UL)
+		{
+			kds_final = (kern_data_store *)gq_buf->m_kds_final;
+			resp.u.results.chunks_nitems = 1;
+		}
 	}
-	resp.u.results.chunks_nitems = kds_dst_nitems;
-	resp.u.results.chunks_offset = resp_sz;
-	gpuClientWriteBack(gclient, &resp, resp_sz,
-					   kds_dst_nitems, kds_dst_array);
+	gpuClientWriteBack(gclient, &resp,
+					   resp.u.results.chunks_offset,
+					   resp.u.results.chunks_nitems,
+					   &kds_final);
 }
 
 /*
@@ -1593,11 +1596,8 @@ gpuservGpuWorkerMain(void *__arg)
 					case XpuCommandTag__XpuTaskExec:
 						gpuservHandleGpuTaskExec(gclient, xcmd);
 						break;
-					case XpuCommandTag__XpuJoinFinal:
-						gpuservHandleGpuJoinFinal(gclient, xcmd);
-						break;
-					case XpuCommandTag__XpuPreAggFinal:
-						gpuservHandleGpuPreAggFinal(gclient, xcmd);
+					case XpuCommandTag__XpuTaskFinal:
+						gpuservHandleGpuTaskFinal(gclient, xcmd);
 						break;
 					default:
 						gpuClientELog(gclient, "unknown XPU command (%d)",

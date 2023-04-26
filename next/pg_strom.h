@@ -299,8 +299,9 @@ typedef struct
 	uint32_t			ss_length;			/* length of the SharedState */
 	/* pg-strom's unique plan-id */
 	uint64_t			query_plan_id;
-	/* control variable for parallel execution. */
-	pg_atomic_uint32	scan_control;
+	/* control variables to detect the last plan-node at parallel execution */
+	pg_atomic_uint32	scan_task_control;
+	slock_t				__rjoin_control_lock;
 	/* statistics */
 	pg_atomic_uint64	source_ntuples;
 	pg_atomic_uint64	source_nvalids;
@@ -386,9 +387,11 @@ struct pgstromTaskState
 	kern_data_store	   *curr_kds;
 	int					curr_chunk;
 	int64_t				curr_index;
-	bool				scan_begin;
 	bool				scan_done;
 	bool				final_done;
+	/* control variables to handle right outer join */
+	slock_t			   *rjoin_control_lock;
+	int				   *rjoin_control_array;	/* per xPU device */
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
@@ -413,6 +416,7 @@ struct pgstromTaskState
 	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts,
 									   struct iovec *xcmd_iov, int *xcmd_iovcnt);
 	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts,
+										kern_final_task *fin,
 										struct iovec *xcmd_iov, int *xcmd_iovcnt);
 	void			  (*cb_cpu_fallback)(struct pgstromTaskState *pts,
 										 struct kern_data_store *kds,
@@ -585,12 +589,11 @@ extern void		pgstrom_init_relscan(void);
 /*
  * executor.c
  */
-extern bool		pgstromTaskStateBeginScan(pgstromTaskState *pts);
-extern bool		pgstromTaskStateEndScan(pgstromTaskState *pts);
 extern void		__xpuClientOpenSession(pgstromTaskState *pts,
 									   const XpuCommand *session,
 									   pgsocket sockfd,
-									   const char *devname);
+									   const char *devname,
+									   int dev_index);
 extern int
 xpuConnectReceiveCommands(pgsocket sockfd,
 						  void *(*alloc_f)(void *priv, size_t sz),
@@ -849,6 +852,7 @@ extern bool		DpuStorageEntryIsEqual(const DpuStorageEntry *ds_entry1,
 									   const DpuStorageEntry *ds_entry2);
 extern int		DpuStorageEntryGetEndpointId(const DpuStorageEntry *ds_entry);
 extern const DpuStorageEntry *DpuStorageEntryByEndpointId(int endpoint_id);
+extern int		DpuStorageEntryCount(void);
 extern void		DpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
 extern void		explainDpuStorageEntry(const DpuStorageEntry *ds_entry,

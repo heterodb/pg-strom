@@ -18,6 +18,7 @@ struct XpuConnection
 {
 	dlist_node		chain;	/* link to gpuserv_connection_slots */
 	char			devname[32];
+	int				dev_index;		/* cuda_dindex or dpu_endpoint_id */
 	volatile pgsocket sockfd;
 	volatile int	terminated;		/* positive: normal exit
 									 * negative: exit by errors */
@@ -69,6 +70,7 @@ __xpuConnectAttachCommand(void *__priv, XpuCommand *xcmd)
 	else
 	{
 		Assert(xcmd->tag == XpuCommandTag__Success ||
+			   xcmd->tag == XpuCommandTag__SuccessAndRightOuter ||
 			   xcmd->tag == XpuCommandTag__CPUFallback);
 		dlist_push_tail(&conn->ready_cmds_list, &xcmd->chain);
 		conn->num_ready_cmds++;
@@ -614,40 +616,87 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 /*
  * pgstromTaskStateBeginScan
  */
-bool
+static bool
 pgstromTaskStateBeginScan(pgstromTaskState *pts)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	uint32_t	curval, newval;
+	XpuConnection  *conn = pts->conn;
+	uint32_t		curval, newval;
 
-	Assert(!pts->scan_begin);
-	curval = pg_atomic_read_u32(&ps_state->scan_control);
+	Assert(conn != NULL);
+	curval = pg_atomic_read_u32(&ps_state->scan_task_control);
 	do {
 		if ((curval & 1) != 0)
 			return false;
 		newval = curval + 2;
-	} while (!pg_atomic_compare_exchange_u32(&ps_state->scan_control,
+	} while (!pg_atomic_compare_exchange_u32(&ps_state->scan_task_control,
 											 &curval, newval));
-	pts->scan_begin = true;
+	SpinLockAcquire(pts->rjoin_control_lock);
+	pts->rjoin_control_array[conn->dev_index]++;
+	SpinLockRelease(pts->rjoin_control_lock);
+
 	return true;
 }
 
 /*
  * pgstromTaskStateEndScan
  */
-bool
-pgstromTaskStateEndScan(pgstromTaskState *pts)
+static bool
+pgstromTaskStateEndScan(pgstromTaskState *pts, kern_final_task *kfin)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	uint32_t	curval, newval;
+	XpuConnection  *conn = pts->conn;
+	uint32_t		curval, newval;
 
-	Assert(pts->scan_begin);
-	curval = pg_atomic_read_u32(&ps_state->scan_control);
+	Assert(conn != NULL);
+	memset(kfin, 0, sizeof(kern_final_task));
+	curval = pg_atomic_read_u32(&ps_state->scan_task_control);
 	do {
+		Assert(curval >= 2);
 		newval = ((curval - 2) | 1);
-	} while (!pg_atomic_compare_exchange_u32(&ps_state->scan_control,
+	} while (!pg_atomic_compare_exchange_u32(&ps_state->scan_task_control,
 											 &curval, newval));
-	return (newval == 1);
+	if (newval == 1)
+		kfin->final_plan_node = true;
+	SpinLockAcquire(pts->rjoin_control_lock);
+	Assert(pts->rjoin_control_array[conn->dev_index] > 0);
+	if (--pts->rjoin_control_array[conn->dev_index] == 0)
+	{
+		bool	final_all_devices = true;
+
+		kfin->final_this_device = true;
+		for (int i=0; pts->rjoin_control_array[i] >= 0; i++)
+		{
+			if (pts->rjoin_control_array[i] > 0)
+			{
+				final_all_devices = false;
+				break;
+			}
+		}
+		kfin->final_all_devices = final_all_devices;
+	}
+	SpinLockRelease(pts->rjoin_control_lock);
+
+	return (kfin->final_plan_node   |
+			kfin->final_this_device |
+			kfin->final_all_devices);
+}
+
+/*
+ * pgstromTaskStateResetScan
+ */
+static void
+pgstromTaskStateResetScan(pgstromTaskState *pts)
+{
+	pgstromSharedState *ps_state = pts->ps_state;
+
+	pg_atomic_write_u32(&ps_state->scan_task_control, 0);
+	pts->rjoin_control_lock = &ps_state->__rjoin_control_lock;
+	pts->rjoin_control_array = (int *)
+		((char *)ps_state + MAXALIGN(offsetof(pgstromSharedState,
+											  inners[pts->num_rels])));
+	for (int i=0; pts->rjoin_control_array[i] >= 0; i++)
+		pts->rjoin_control_array[i] = 0;
 }
 
 /*
@@ -714,12 +763,14 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 			pthreadMutexUnlock(&conn->mutex);
 			if (!pts->final_done)
 			{
+				kern_final_task	kfin;
+
 				pts->final_done = true;
-				if (pgstromTaskStateEndScan(pts) &&
-					try_final_callback &&
+				if (try_final_callback &&
+					pgstromTaskStateEndScan(pts, &kfin) &&
 					pts->cb_final_chunk != NULL)
 				{
-					xcmd = pts->cb_final_chunk(pts, xcmd_iov, &xcmd_iovcnt);
+					xcmd = pts->cb_final_chunk(pts, &kfin, xcmd_iov, &xcmd_iovcnt);
 					if (xcmd)
 					{
 						xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
@@ -878,25 +929,27 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 }
 
 /*
- * pgstromPreAggFinalChunk
+ * pgstromExecFinalChunk
  */
 static XpuCommand *
-pgstromPreAggFinalChunk(struct pgstromTaskState *pts,
-						struct iovec *xcmd_iov, int *xcmd_iovcnt)
+pgstromExecFinalChunk(pgstromTaskState *pts,
+					  kern_final_task *kfin,
+					  struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
 	XpuCommand	   *xcmd;
 
-	pts->xcmd_buf.len = sizeof(XpuCommand);
+	pts->xcmd_buf.len = offsetof(XpuCommand, u.fin.data);
 	enlargeStringInfo(&pts->xcmd_buf, 0);
 
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
-	memset(xcmd, 0, offsetof(XpuCommand, u));
+	memset(xcmd, 0, sizeof(XpuCommand));
 	xcmd->magic  = XpuCommandMagicNumber;
-	xcmd->tag    = XpuCommandTag__XpuPreAggFinal;
-	xcmd->length = offsetof(XpuCommand, u);
+	xcmd->tag    = XpuCommandTag__XpuTaskFinal;
+	xcmd->length = offsetof(XpuCommand, u.fin.data);
+	memcpy(&xcmd->u.fin, kfin, sizeof(kern_final_task));
 
 	xcmd_iov[0].iov_base = xcmd;
-	xcmd_iov[0].iov_len  = offsetof(XpuCommand, u);
+	xcmd_iov[0].iov_len  = offsetof(XpuCommand, u.fin.data);
 	*xcmd_iovcnt = 1;
 
 	return xcmd;
@@ -1198,6 +1251,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	TupleDesc	tupdesc_src = RelationGetDescr(rel);
 	TupleDesc	tupdesc_dst;
 	int			depth_index = 0;
+	bool		has_right_outer = false;
 	ListCell   *lc;
 	List	   *kvars_slot_list;
 
@@ -1294,6 +1348,9 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			fixup_fallback_varnode((Node *)pp_inner->other_quals,
 								   cscan, kvars_slot_list);
 		istate->other_quals = ExecInitQual(other_quals, &pts->css.ss.ps);
+		if (pp_inner->join_type == JOIN_FULL ||
+			pp_inner->join_type == JOIN_RIGHT)
+			has_right_outer = true;
 
 		foreach (cell, pp_inner->hash_outer_keys)
 		{
@@ -1385,11 +1442,13 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	}
 	else if ((pts->task_kind & DEVTASK__JOIN) != 0)
 	{
+		if (has_right_outer)
+			pts->cb_final_chunk = pgstromExecFinalChunk;
 		pts->cb_cpu_fallback = ExecFallbackCpuJoin;
 	}
 	else if ((pts->task_kind & DEVTASK__PREAGG) != 0)
 	{
-		pts->cb_final_chunk = pgstromPreAggFinalChunk;
+		pts->cb_final_chunk = pgstromExecFinalChunk;
 		pts->cb_cpu_fallback = ExecFallbackCpuPreAgg;
 	}
 	else
@@ -1421,7 +1480,8 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 			return pgstromFetchFallbackTuple(pts);
 
 		resp = pts->curr_resp;
-		if (resp->tag == XpuCommandTag__Success)
+		if (resp->tag == XpuCommandTag__Success ||
+			resp->tag == XpuCommandTag__SuccessAndRightOuter)
 		{
 			if (resp->u.results.chunks_nitems == 0)
 				goto next_chunks;
@@ -1429,6 +1489,8 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 				((char *)resp + resp->u.results.chunks_offset);
 			pts->curr_chunk = 0;
 			pts->curr_index = 0;
+			if (resp->tag == XpuCommandTag__SuccessAndRightOuter)
+				elog(ERROR, "RIGHT OUTER is not ready");
 		}
 		else
 		{
@@ -1479,9 +1541,6 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 	{
 		tupdesc_kds_final = pts->css.ss.ps.scandesc;
 	}
-	/* outer scan is already done? */
-	if (!pgstromTaskStateBeginScan(pts))
-		return false;
 	/* build the session information */
 	session = pgstromBuildSessionInfo(pts, inner_handle, tupdesc_kds_final);
 
@@ -1498,6 +1557,10 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 	{
 		elog(ERROR, "Bug? unknown PG-Strom task kind: %08x", pts->task_kind);
 	}
+	/* update the scan/join control variables */
+	if (!pgstromTaskStateBeginScan(pts))
+		return false;
+	
 	return true;
 }
 
@@ -1561,12 +1624,12 @@ pgstromExecResetTaskState(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
 
-	pts->scan_begin = false;
 	if (pts->conn)
 	{
 		xpuClientCloseSession(pts->conn);
 		pts->conn = NULL;
 	}
+	pgstromTaskStateResetScan(pts);
 	if (pts->br_state)
 		pgstromBrinIndexExecReset(pts);
 	if (pts->arrow_state)
@@ -1585,11 +1648,19 @@ pgstromSharedStateEstimateDSM(CustomScanState *node,
 	EState	   *estate   = node->ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
 	int			num_rels = list_length(node->custom_ps);
+	int			num_devs = 0;
 	Size		len = 0;
 
 	if (pts->br_state)
 		len += pgstromBrinIndexEstimateDSM(pts);
 	len += MAXALIGN(offsetof(pgstromSharedState, inners[num_rels]));
+
+	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+		num_devs = numGpuDevAttrs;
+	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+		num_devs = DpuStorageEntryCount();
+	len += MAXALIGN(sizeof(int) * (num_devs+1));
+
 	if (!pts->arrow_state)
 		len += table_parallelscan_estimate(relation, snapshot);
 	return MAXALIGN(len);
@@ -1608,12 +1679,18 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	EState	   *estate   = node->ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
 	int			num_rels = list_length(node->custom_ps);
+	int			num_devs = 0;
 	size_t		dsm_length = offsetof(pgstromSharedState, inners[num_rels]);
 	char	   *dsm_addr = coordinate;
 	pgstromSharedState *ps_state;
 	TableScanDesc scan = NULL;
 
 	Assert(!IsBackgroundWorker);
+	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+		num_devs = numGpuDevAttrs;
+	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+		num_devs = DpuStorageEntryCount();
+
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexInitDSM(pts, dsm_addr);
 	Assert(!pts->css.ss.ss_currentScanDesc);
@@ -1624,6 +1701,17 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		ps_state->ss_handle = dsm_segment_handle(pcxt->seg);
 		ps_state->ss_length = dsm_length;
 		dsm_addr += MAXALIGN(dsm_length);
+
+		/* control variables for scan/rjoin */
+		pg_atomic_init_u32(&ps_state->scan_task_control, 0);
+		SpinLockInit(&ps_state->__rjoin_control_lock);
+		pts->rjoin_control_lock = &ps_state->__rjoin_control_lock;
+		pts->rjoin_control_array = (int *)dsm_addr;
+		memset(pts->rjoin_control_array, 0, sizeof(int) * (num_devs+1));
+		pts->rjoin_control_array[num_devs] = -1;	/* terminator */
+		dsm_addr += MAXALIGN(sizeof(int) * (num_devs+1));
+
+		/* parallel scan descriptor */
 		if (pts->arrow_state)
 			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
 		else
@@ -1639,6 +1727,17 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		ps_state = MemoryContextAllocZero(estate->es_query_cxt, dsm_length);
 		ps_state->ss_handle = DSM_HANDLE_INVALID;
 		ps_state->ss_length = dsm_length;
+
+		/* control variables for scan/rjoin */
+		pg_atomic_init_u32(&ps_state->scan_task_control, 0);
+		SpinLockInit(&ps_state->__rjoin_control_lock);
+		pts->rjoin_control_lock = &ps_state->__rjoin_control_lock;
+		pts->rjoin_control_array = (int *)
+			MemoryContextAllocZero(estate->es_query_cxt,
+								   sizeof(int) * (num_devs+1));
+		pts->rjoin_control_array[num_devs] = -1;	/* terminator */
+
+		/* scan descriptor */
 		if (pts->arrow_state)
 			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
 		else
@@ -1666,12 +1765,22 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 	pgstromTaskState *pts = (pgstromTaskState *)node;
 	char	   *dsm_addr = coordinate;
 	int			num_rels = list_length(pts->css.custom_ps);
+	int			num_devs = 0;
+
+	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+		num_devs = numGpuDevAttrs;
+	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+		num_devs = DpuStorageEntryCount();
 
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
 	pts->ps_state = (pgstromSharedState *)dsm_addr;
 	Assert(pts->ps_state->num_rels == num_rels);
 	dsm_addr += MAXALIGN(offsetof(pgstromSharedState, inners[num_rels]));
+
+	pts->rjoin_control_lock = &pts->ps_state->__rjoin_control_lock;
+	pts->rjoin_control_array = (int *)dsm_addr;
+	dsm_addr += MAXALIGN(sizeof(int) * (num_devs+1));
 
 	if (pts->arrow_state)
 		pgstromArrowFdwAttachDSM(pts->arrow_state, pts->ps_state);
@@ -1989,7 +2098,8 @@ void
 __xpuClientOpenSession(pgstromTaskState *pts,
 					   const XpuCommand *session,
 					   pgsocket sockfd,
-					   const char *devname)
+					   const char *devname,
+					   int dev_index)
 {
 	XpuConnection  *conn;
 	XpuCommand	   *resp;
@@ -2003,6 +2113,7 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 		elog(ERROR, "out of memory");
 	}
 	strncpy(conn->devname, devname, 32);
+	conn->dev_index = dev_index;
 	conn->sockfd = sockfd;
 	conn->resowner = CurrentResourceOwner;
 	conn->worker = pthread_self();	/* to be over-written by worker's-id */

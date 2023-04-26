@@ -474,7 +474,7 @@ gpuClientOpenSession(pgstromTaskState *pts,
 	}
 	snprintf(namebuf, sizeof(namebuf), "GPU-%d", cuda_dindex);
 
-	__xpuClientOpenSession(pts, session, sockfd, namebuf);
+	__xpuClientOpenSession(pts, session, sockfd, namebuf, cuda_dindex);
 }
 
 /*

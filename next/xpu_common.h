@@ -1694,14 +1694,14 @@ typedef struct
 /*
  * PG-Strom Command Tag
  */
-#define XpuCommandTag__Success			0
-#define XpuCommandTag__Error			1
-#define XpuCommandTag__CPUFallback		2
-#define XpuCommandTag__OpenSession		100
-#define XpuCommandTag__XpuTaskExec		110
-#define XpuCommandTag__XpuJoinFinal		120
-#define XpuCommandTag__XpuPreAggFinal	121
-#define XpuCommandMagicNumber			0xdeadbeafU
+#define XpuCommandTag__Success				0
+#define XpuCommandTag__Error				1
+#define XpuCommandTag__CPUFallback			2
+#define XpuCommandTag__SuccessAndRightOuter	3
+#define XpuCommandTag__OpenSession			100
+#define XpuCommandTag__XpuTaskExec			110
+#define XpuCommandTag__XpuTaskFinal			119
+#define XpuCommandMagicNumber				0xdeadbeafU
 
 /*
  * kern_session_info - A set of immutable data during query execution
@@ -1758,6 +1758,13 @@ typedef struct {
 } kern_exec_task;
 
 typedef struct {
+	bool		final_plan_node;
+	bool		final_this_device;
+	bool		final_all_devices;
+	char		data[1]				__MAXALIGNED__;
+} kern_final_task;
+
+typedef struct {
 	uint32_t	chunks_offset;		/* offset of kds_dst array */
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
 	/* statistics */
@@ -1794,6 +1801,7 @@ typedef struct
 		kern_errorbuf		error;
 		kern_session_info	session;
 		kern_exec_task		task;
+		kern_final_task		fin;
 		kern_exec_results	results;
 	} u;
 } XpuCommand;
