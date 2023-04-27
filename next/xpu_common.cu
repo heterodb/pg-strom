@@ -150,7 +150,7 @@ pgfn_BoolExprOr(XPU_PGFUNCTION_ARGS)
 
 	assert(kexp->exptype == TypeOpCode__bool);
 	for (i=0, karg=KEXP_FIRST_ARG(kexp);
-		 i < karg->nr_args;
+		 i < kexp->nr_args;
 		 i++, karg=KEXP_NEXT_ARG(karg))
 	{
 		xpu_bool_t	status;

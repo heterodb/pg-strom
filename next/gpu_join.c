@@ -1444,8 +1444,8 @@ again:
 			{
 				h_kmrels->chunks[i].right_outer = true;
 				h_kmrels->chunks[i].ojmap_offset = offset;
+				memset((char *)h_kmrels + offset, 0, nbytes);
 			}
-			memset((char *)h_kmrels + offset, 0, nbytes);
 			offset += nbytes;
 		}
 		if (istate->join_type == JOIN_LEFT ||

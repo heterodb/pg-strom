@@ -1907,12 +1907,15 @@ pgstromExplainTaskState(CustomScanState *node,
 			}
 			if (pp_inner->other_quals != NIL)
 			{
-				Node   *expr = lfirst(lc);
+				foreach (lc, pp_inner->other_quals)
+				{
+					Node   *expr = lfirst(lc);
 
-				str = deparse_expression(expr, dcontext, false, true);
-				if (buf.len > 0)
-					appendStringInfoString(&buf, ", ");
-				appendStringInfo(&buf, "[%s]", str);
+					str = deparse_expression(expr, dcontext, false, true);
+					if (buf.len > 0)
+						appendStringInfoString(&buf, ", ");
+					appendStringInfo(&buf, "[%s]", str);
+				}
 			}
 			appendStringInfo(&buf, " ... [nrows: %.0f -> %.0f]",
 							 ntuples, pp_inner->join_nrows);

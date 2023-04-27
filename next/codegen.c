@@ -1454,7 +1454,7 @@ codegen_build_join_loadvars(codegen_context *context)
 		int		depth = lfirst_int(lc);
 
 		if (depth >= 0)
-			max_depth = depth;
+			max_depth = Max(max_depth, depth);
 	}
 	if (max_depth < 1)
 		return NULL;
