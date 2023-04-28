@@ -1794,7 +1794,6 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 	TupleTableSlot *i_slot = istate->ps->ps_ResultTupleSlot;
 	kern_expression *kexp_join_kvars_load = NULL;
 
-	econtext->ecxt_scantuple = pts->fallback_slot;
 	if (pp_info->kexp_join_kvars_load_packed)
 	{
 		const kern_expression *temp = (const kern_expression *)
@@ -1870,7 +1869,6 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	/*
 	 * Compute that hash-value
 	 */
-	econtext->ecxt_scantuple = pts->fallback_slot;
 	hash = 0xffffffffU;
 	forboth (lc1, istate->hash_outer_keys,
 			 lc2, istate->hash_outer_dtypes)
@@ -1996,6 +1994,7 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 
 	/* Load the base tuple (depth-0) to the fallback slot */
 	ExecStoreAllNullTuple(fallback_slot);
+	econtext->ecxt_scantuple = fallback_slot;
 	if (pp_info->kexp_scan_kvars_load)
 		kexp_scan_kvars_load = (const kern_expression *)
 			VARDATA(pp_info->kexp_scan_kvars_load);
@@ -2004,6 +2003,69 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 	/* Run JOIN, if any */
 	Assert(pts->h_kmrels);
 	__execFallbackCpuJoinOneDepth(pts, 1);
+}
+
+static void
+__execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
+{
+	pgstromTaskInnerState *istate = &pts->inners[depth-1];
+	pgstromPlanInfo	   *pp_info = pts->pp_info;
+	ExprContext		   *econtext = pts->css.ss.ps.ps_ExprContext;
+	TupleTableSlot	   *fallback_slot = pts->fallback_slot;
+	TupleTableSlot	   *i_slot = istate->ps->ps_ResultTupleSlot;
+	kern_expression	   *kexp_join_kvars_load = NULL;
+	kern_multirels	   *h_kmrels = pts->h_kmrels;
+	kern_data_store	   *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth-1);
+	bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth-1);
+
+	if (pp_info->kexp_join_kvars_load_packed)
+	{
+		const kern_expression *temp = (const kern_expression *)
+			VARDATA(pp_info->kexp_join_kvars_load_packed);
+		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth-1);
+	}
+	Assert(oj_map != NULL);
+
+	ExecStoreAllNullTuple(fallback_slot);
+	econtext->ecxt_scantuple = fallback_slot;
+	for (uint32_t i=0; i < kds_in->nitems; i++)
+	{
+		if (oj_map[i])
+			continue;
+
+		if (kexp_join_kvars_load)
+		{
+			kern_tupitem   *titem = KDS_GET_TUPITEM(kds_in, i);
+			HeapTupleData	tuple;
+
+			if (!titem)
+				continue;
+			tuple.t_len  = titem->t_len;
+			ItemPointerSetInvalid(&tuple.t_self);
+			tuple.t_tableOid = InvalidOid;
+			tuple.t_data = &titem->htup;
+			ExecForceStoreHeapTuple(&tuple, i_slot, false);
+			slot_getallattrs(i_slot);
+			Assert(kexp_join_kvars_load->u.load.depth == depth);
+			__execFallbackLoadVarsSlot(fallback_slot,
+									   i_slot,
+									   kexp_join_kvars_load);
+			ExecClearTuple(i_slot);
+		}
+		__execFallbackCpuJoinOneDepth(pts, depth+1);
+	}
+}
+
+void
+ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts)
+{
+	for (int depth=1; depth <= pts->num_rels; depth++)
+	{
+		JoinType	join_type = pts->inners[depth-1].join_type;
+
+		if (join_type == JOIN_RIGHT || join_type == JOIN_FULL)
+			__execFallbackCpuJoinRightOuterOneDepth(pts, depth);
+	}
 }
 
 /*

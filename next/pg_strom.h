@@ -782,6 +782,7 @@ extern uint32_t	GpuJoinInnerPreload(pgstromTaskState *pts);
 extern void		ExecFallbackCpuJoin(pgstromTaskState *pts,
 									kern_data_store *kds,
 									HeapTuple tuple);
+extern void		ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts);
 extern void		pgstrom_init_gpu_join(void);
 
 /*

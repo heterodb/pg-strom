@@ -1485,8 +1485,6 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 	XpuCommand		resp;
 	kern_data_store	*kds_final = NULL;
 
-	fprintf(stderr, "gpuservHandleGpuTaskFinal: final_this_device=%d final_all_devices=%d final_plan_node=%d\n", kfin->final_this_device, kfin->final_all_devices, kfin->final_plan_node);
-	
 	memset(&resp, 0, sizeof(XpuCommand));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag   = XpuCommandTag__Success;
@@ -1516,7 +1514,7 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 				{
 					for (uint32_t j=0; j < kds->nitems; j++)
 						h_ojmap[j] |= d_ojmap[j];
-					found_right_outer = false;
+					found_right_outer = true;
 				}
 			}
 			/* host code runs final RIGHT OUTER output? */
@@ -1535,6 +1533,9 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 			resp.u.results.chunks_nitems = 1;
 		}
 	}
+
+	fprintf(stderr, "gpuservHandleGpuTaskFinal: final_this_device=%d final_all_devices=%d final_plan_node=%d resp.tag=%u\n", kfin->final_this_device, kfin->final_all_devices, kfin->final_plan_node, resp.tag);
+
 	gpuClientWriteBack(gclient, &resp,
 					   resp.u.results.chunks_offset,
 					   resp.u.results.chunks_nitems,
@@ -2280,15 +2281,15 @@ pgstrom_startup_executor(void)
 	gpuserv_debug_output = ShmemInitStruct("pg_strom.gpuserv_debug_output",
 										   MAXALIGN(sizeof(bool)),
 										   &found);
-
-	DefineCustomBoolVariable("pg_strom.gpuserv_debug_output",
-							 "enables to generate debug message of GPU service",
-							 NULL,
-							 gpuserv_debug_output,
-							 false,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
-							 NULL, NULL, NULL);
+	if (!found)
+		DefineCustomBoolVariable("pg_strom.gpuserv_debug_output",
+								 "enables to generate debug message of GPU service",
+								 NULL,
+								 gpuserv_debug_output,
+								 false,
+								 PGC_SUSET,
+								 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
+								 NULL, NULL, NULL);
 }
 
 /*

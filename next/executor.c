@@ -1144,6 +1144,10 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 	}
 	pts->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
 											  table_slot_callbacks(rel));
+	/*
+	 * If not simple base relation, we have to setup the fallback-slot prior
+	 * to the fallback-projection.
+	 */
 	if (pts->num_rels > 0)
 	{
 		TupleDesc	relation_tdesc = RelationGetDescr(rel);
@@ -1478,26 +1482,28 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 		pts->curr_resp = __fetchNextXpuCommand(pts);
 		if (!pts->curr_resp)
 			return pgstromFetchFallbackTuple(pts);
-
 		resp = pts->curr_resp;
-		if (resp->tag == XpuCommandTag__Success ||
-			resp->tag == XpuCommandTag__SuccessAndRightOuter)
+		switch (resp->tag)
 		{
-			if (resp->u.results.chunks_nitems == 0)
-				goto next_chunks;
-			pts->curr_kds = (kern_data_store *)
-				((char *)resp + resp->u.results.chunks_offset);
-			pts->curr_chunk = 0;
-			pts->curr_index = 0;
-			if (resp->tag == XpuCommandTag__SuccessAndRightOuter)
-				elog(ERROR, "RIGHT OUTER is not ready");
-		}
-		else
-		{
-			Assert(resp->tag == XpuCommandTag__CPUFallback);
-			//run CPU fallback
-			//attach alternative KDS
-			elog(ERROR, "CPU fallback is not ready");
+			case XpuCommandTag__SuccessAndRightOuter:
+				ExecFallbackCpuJoinRightOuter(pts);
+				/* fall through */
+			case XpuCommandTag__Success:
+				if (resp->u.results.chunks_nitems == 0)
+					goto next_chunks;
+				pts->curr_kds = (kern_data_store *)
+					((char *)resp + resp->u.results.chunks_offset);
+				pts->curr_chunk = 0;
+				pts->curr_index = 0;
+				break;
+
+			case XpuCommandTag__CPUFallback:
+				//run CPU fallback
+				break;
+
+			default:
+				elog(ERROR, "unknown response tag: %u", resp->tag);
+				break;
 		}
 	}
 	return slot;

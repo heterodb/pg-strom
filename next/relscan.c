@@ -336,7 +336,7 @@ void
 pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple htuple)
 {
 	MemoryContext memcxt = pts->css.ss.ps.state->es_query_cxt;
-	HeapTuple	dtuple;
+	kern_tupitem *titem;
 	size_t		sz;
 
 	if (!pts->fallback_tuples)
@@ -354,7 +354,7 @@ pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple htuple)
 		pts->fallback_buffer =
 			MemoryContextAlloc(memcxt, pts->fallback_bufsz);
 	}
-	sz = MAXALIGN(offsetof(HeapTupleData, t_data) + htuple->t_len);
+	sz = MAXALIGN(offsetof(kern_tupitem, htup) + htuple->t_len);
 	while (pts->fallback_usage + sz > pts->fallback_bufsz)
 	{
 		pts->fallback_bufsz *= 2 + BLCKSZ;
@@ -367,13 +367,13 @@ pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple htuple)
 		pts->fallback_tuples = repalloc_huge(pts->fallback_tuples,
 											 sizeof(off_t) * pts->fallback_nrooms);
 	}
-	dtuple = (HeapTuple)(pts->fallback_buffer +
-						 pts->fallback_usage);
-	memcpy(dtuple, htuple, offsetof(HeapTupleData, t_data));
-	memcpy((char *)dtuple + offsetof(HeapTupleData, t_data),
-		   htuple->t_data,
-		   htuple->t_len);
-	pts->fallback_tuples[pts->fallback_nitems++] = pts->fallback_usage;
+	titem = (kern_tupitem *)(pts->fallback_buffer +
+							 pts->fallback_usage);
+	titem->t_len = htuple->t_len;
+	titem->rowid = pts->fallback_nitems++;
+	memcpy(&titem->htup, htuple->t_data, htuple->t_len);
+
+	pts->fallback_tuples[titem->rowid] = pts->fallback_usage;
 	pts->fallback_usage += sz;
 }
 
@@ -385,15 +385,14 @@ pgstromFetchFallbackTuple(pgstromTaskState *pts)
 		pts->fallback_index < pts->fallback_nitems)
 	{
 		TupleTableSlot *slot = pts->css.ss.ss_ScanTupleSlot;
-		HeapTupleData	htuple;
-		HeapTuple		ftuple;
+		HeapTuple		htuple = palloc0(sizeof(HeapTupleData));
+		kern_tupitem   *titem;
 
-		ftuple = (HeapTuple)(pts->fallback_buffer +
-							 pts->fallback_tuples[pts->fallback_index++]);
-		memcpy(&htuple, ftuple, offsetof(HeapTupleData, t_data));
-		htuple.t_data = (HeapTupleHeader)((char *)ftuple +
-										  offsetof(HeapTupleData, t_data));
-		ExecForceStoreHeapTuple(&htuple, slot, false);
+		titem = (kern_tupitem *)(pts->fallback_buffer +
+								 pts->fallback_tuples[pts->fallback_index++]);
+		htuple->t_len  = titem->t_len;
+		htuple->t_data = &titem->htup;
+		ExecForceStoreHeapTuple(htuple, slot, true);
 		/* reset the buffer if last one */
 		if (pts->fallback_index == pts->fallback_nitems)
 		{

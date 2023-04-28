@@ -26,6 +26,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 					bool	   &matched)
 {
 	kern_data_store *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
+	bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth-1);
 	kern_expression *kexp;
 	uint32_t	read_pos;
 	uint32_t	write_pos;
@@ -105,6 +106,11 @@ execGpuJoinNestLoop(kern_context *kcxt,
 				if (status.value != 0)
 					matched = true;
 			}
+			if (oj_map && matched)
+			{
+				assert(tupitem->rowid < kds_heap->nitems);
+				oj_map[tupitem->rowid] = true;
+			}
 		}
 		else if (kmrels->chunks[depth-1].left_outer &&
 				 index >= kds_heap->nitems && !matched)
@@ -156,6 +162,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 					bool	   &matched)
 {
 	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
+	bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth-1);
 	kern_expression *kexp = NULL;
 	kern_hashitem *khitem = NULL;
 	uint32_t	read_pos;
@@ -273,6 +280,11 @@ execGpuJoinHashJoin(kern_context *kcxt,
 				tuple_is_valid = true;
 			if (status.value != 0)
 				matched = true;
+		}
+		if (oj_map && matched)
+		{
+			assert(khitem->t.rowid < kds_hash->nitems);
+			oj_map[khitem->t.rowid] = true;
 		}
 		l_state = __kds_packed((char *)khitem - (char *)kds_hash);
 	}
