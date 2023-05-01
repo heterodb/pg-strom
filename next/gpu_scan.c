@@ -541,6 +541,8 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	codegen_context_init(&context, pp_info->task_kind);
 	context.input_rels_tlist = input_rels_tlist;
 	pp_info->kexp_scan_quals = codegen_build_scan_quals(&context, pp_info->scan_quals);
+	pp_info->scan_quals_fallback
+		= build_fallback_exprs_scan(baserel->relid, pp_info->scan_quals);
 	/* code generation for the Projection */
 	context.tlist_dev = gpuscan_build_projection(baserel,
 												 tlist,
@@ -552,6 +554,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	pp_info->kvars_depth = context.kvars_depth;
 	pp_info->kvars_resno = context.kvars_resno;
 	pp_info->kvars_types = context.kvars_types;
+	pp_info->kvars_exprs = context.kvars_exprs;
 	pp_info->extra_flags = context.extra_flags;
 	pp_info->extra_bufsz = context.extra_bufsz;
 	pp_info->used_params = context.used_params;

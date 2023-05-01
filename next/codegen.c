@@ -1291,6 +1291,7 @@ found:
 		context->kvars_types = lappend_oid(context->kvars_types, dtype->type_oid);
 	else
 		context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
+	context->kvars_exprs = lappend(context->kvars_exprs, expr);
 
 	return slot_id;
 }

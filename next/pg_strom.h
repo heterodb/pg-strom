@@ -230,9 +230,13 @@ typedef struct
 	JoinType		join_type;      /* one of JOIN_* */
 	double			join_nrows;     /* estimated nrows in this depth */
 	List		   *hash_outer_keys;/* hash-keys for outer-side */
+	List		   *hash_outer_keys_fallback;
 	List		   *hash_inner_keys;/* hash-keys for inner-side */
+	List		   *hash_inner_keys_fallback;
 	List		   *join_quals;     /* join quals */
+	List		   *join_quals_fallback;
 	List		   *other_quals;    /* other quals */
+	List		   *other_quals_fallback;
 	Oid				gist_index_oid; /* GiST index oid */
 	AttrNumber		gist_index_col; /* GiST index column number */
 	Node		   *gist_clause;    /* GiST index clause */
@@ -251,6 +255,7 @@ typedef struct
 	List	   *host_quals;			/* host qualifiers to scan the outer */
 	Index		scan_relid;			/* relid of the outer relation to scan */
 	List	   *scan_quals;			/* device qualifiers to scan the outer */
+	List	   *scan_quals_fallback;/* 'scan_quals' for CPU fallback */
 	double		scan_tuples;		/* copy of baserel->tuples */
 	double		scan_rows;			/* copy of baserel->rows */
 	double		parallel_divisor;	/* parallel divisor */
@@ -274,8 +279,11 @@ typedef struct
 	List	   *kvars_depth;
 	List	   *kvars_resno;
 	List	   *kvars_types;	/* type-oid, if it needs extra buffer on kvars-slot */
+	List	   *kvars_exprs;
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
+	/* fallback projection */
+	List	   *fallback_tlist;	/* fallback_slot -> custom_scan_tlist if JOIN/PREAGG */
 	/* group-by parameters */
 	List	   *groupby_actions;	/* list of KAGG_ACTION__* on the kds_final */
 	List	   *groupby_keys;		/* resno of grouping keys, if GROUP BY exists */
@@ -474,6 +482,7 @@ typedef struct
 	List	   *kvars_depth;
 	List	   *kvars_resno;
 	List	   *kvars_types;
+	List	   *kvars_exprs;
 	List	   *tlist_dev;
 	uint32_t	kvars_nslots;
 	List	   *input_rels_tlist;
@@ -771,6 +780,9 @@ extern void		xpujoin_add_custompath(PlannerInfo *root,
 									   JoinPathExtraData *extra,
 									   uint32_t task_kind,
 									   const CustomPathMethods *methods);
+extern List *build_fallback_exprs_scan(Index scan_relid, List *scan_exprs);
+extern List *build_fallback_exprs_join(codegen_context *context,
+									   List *join_exprs);
 extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
 										 RelOptInfo *joinrel,
 										 CustomPath *cpath,

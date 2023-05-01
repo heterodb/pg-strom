@@ -588,6 +588,13 @@ pgstrom_copy_pathnode(const Path *pathnode)
 				b->subpath = pgstrom_copy_pathnode(a->subpath);
 				return &b->path;
 			}
+		case T_MemoizePath:
+			{
+				MemoizePath	   *a = (MemoizePath *)pathnode;
+				MemoizePath	   *b = pmemdup(a, sizeof(MemoizePath));
+				b->subpath = pgstrom_copy_pathnode(a->subpath);
+				return &b->path;
+			}
 		case T_UniquePath:
 			{
 				UniquePath	   *a = (UniquePath *)pathnode;
