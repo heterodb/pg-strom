@@ -1323,6 +1323,7 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 {
 	Query	   *parse = con->root->parse;
 	Path	   *agg_path;
+	Path	   *dummy_path;
 	double		hashTableSz;
 
 	if (!parse->groupClause)
@@ -1337,7 +1338,8 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 										   (List *)con->havingQual,
 										   &con->final_clause_costs,
 										   con->num_groups);
-		add_path(con->group_rel, agg_path);
+		dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
+		add_path(con->group_rel, dummy_path);
 	}
 	else
 	{
@@ -1358,6 +1360,7 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 											   (List *)con->havingQual,
 											   &con->final_clause_costs,
 											   con->num_groups);
+			dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
 			add_path(con->group_rel, agg_path);
 		}
 	}

@@ -979,6 +979,7 @@ build_fallback_exprs_inner(codegen_context *context, int depth, List *inner_hash
  */
 typedef struct
 {
+	PlannerInfo *root;
 	List	   *tlist_dev;
 	List	   *input_rels_tlist;
 	uint32_t	devkind;
@@ -1067,8 +1068,110 @@ found:
 	return expression_tree_walker(node, __pgstrom_build_tlist_dev_walker, __priv);
 }
 
+static void
+__build_explain_tlist_junks(build_tlist_dev_context *context)
+{
+	PlannerInfo *root = context->root;
+	ListCell   *cell;
+
+	foreach (cell, context->input_rels_tlist)
+	{
+		Node   *node = lfirst(cell);
+
+		if (IsA(node, Integer))
+		{
+			Index		relid = intVal(node);
+			RelOptInfo *baserel = root->simple_rel_array[relid];
+			RangeTblEntry *rte = root->simple_rte_array[relid];
+
+			Assert(IS_SIMPLE_REL(baserel) && rte->rtekind == RTE_RELATION);
+			for (int j=baserel->min_attr; j <= baserel->max_attr; j++)
+			{
+				Form_pg_attribute attr;
+				HeapTuple	htup;
+				Var		   *var;
+				ListCell   *lc;
+
+				if (bms_is_empty(baserel->attr_needed[j-baserel->min_attr]))
+					continue;
+				htup = SearchSysCache2(ATTNUM,
+									   ObjectIdGetDatum(rte->relid),
+									   Int16GetDatum(j));
+				if (!HeapTupleIsValid(htup))
+					elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+						 j, rte->relid);
+				attr = (Form_pg_attribute) GETSTRUCT(htup);
+				var = makeVar(baserel->relid,
+							  attr->attnum,
+							  attr->atttypid,
+							  attr->atttypmod,
+							  attr->attcollation,
+							  0);
+
+				foreach (lc, context->tlist_dev)
+				{
+					TargetEntry *tle = lfirst(lc);
+
+					if (equal(tle->expr, var))
+						break;
+				}
+				if (lc)
+				{
+					/* found */
+					pfree(var);
+				}
+				else
+				{
+					/* not found, append a junk */
+					TargetEntry *tle
+						= makeTargetEntry((Expr *)var,
+										  list_length(context->tlist_dev)+1,
+										  pstrdup(NameStr(attr->attname)),
+										  true);
+					context->tlist_dev = lappend(context->tlist_dev, tle);
+				}
+				ReleaseSysCache(htup);
+			}
+		}
+		else if (IsA(node, PathTarget))
+		{
+			PathTarget *target = (PathTarget *)node;
+			ListCell   *lc1, *lc2;
+
+			foreach (lc1, target->exprs)
+			{
+				Node   *curr = lfirst(lc1);
+
+				foreach (lc2, context->tlist_dev)
+				{
+					TargetEntry *tle = lfirst(lc2);
+
+					if (equal(tle->expr, curr))
+						break;
+				}
+				if (!lc2)
+				{
+					/* not found, append a junk */
+					TargetEntry *tle
+						=  makeTargetEntry((Expr *)curr,
+										   list_length(context->tlist_dev)+1,
+										   NULL,
+										   true);
+					context->tlist_dev = lappend(context->tlist_dev, tle);
+				}
+			}
+		}
+		else
+		{
+			elog(ERROR, "Bug? invalid item in the input_rels_tlist: %s",
+				 nodeToString(node));
+		}
+	}
+}
+
 static List *
-pgstrom_build_tlist_dev(PathTarget *reltarget,
+pgstrom_build_tlist_dev(PlannerInfo *root,
+						PathTarget *reltarget,
 						List *tlist,		/* must be backed to CPU */
 						List *host_quals,	/* must be backed to CPU */
 						List *misc_exprs,
@@ -1078,6 +1181,7 @@ pgstrom_build_tlist_dev(PathTarget *reltarget,
 	ListCell   *lc;
 
 	memset(&context, 0, sizeof(build_tlist_dev_context));
+	context.root = root;
 	context.input_rels_tlist = input_rels_tlist;
 	if (tlist != NIL)
 	{
@@ -1114,6 +1218,8 @@ pgstrom_build_tlist_dev(PathTarget *reltarget,
 	context.resjunk = true;
 	__pgstrom_build_tlist_dev_walker((Node *)misc_exprs, &context);
 
+	__build_explain_tlist_junks(&context);
+
 	return context.tlist_dev;
 }
 
@@ -1121,7 +1227,8 @@ pgstrom_build_tlist_dev(PathTarget *reltarget,
  * pgstrom_build_groupby_dev
  */
 static List *
-pgstrom_build_groupby_dev(List *tlist,
+pgstrom_build_groupby_dev(PlannerInfo *root,
+						  List *tlist,
 						  List *host_quals,
 						  List *misc_exprs,
 						  List *input_rels_tlist)
@@ -1130,6 +1237,7 @@ pgstrom_build_groupby_dev(List *tlist,
 	ListCell   *lc1, *lc2;
 
 	memset(&context, 0, sizeof(build_tlist_dev_context));
+	context.root = root;
 	context.input_rels_tlist = input_rels_tlist;
 	context.tlist_dev = copyObject(tlist);
 	context.only_vars = true;
@@ -1156,6 +1264,8 @@ pgstrom_build_groupby_dev(List *tlist,
 			}
 		}
 	}
+
+	__build_explain_tlist_junks(&context);
 	return context.tlist_dev;
 }
 
@@ -1261,7 +1371,8 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	 */
 	if ((pp_info->task_kind & DEVTASK__MASK) == DEVTASK__PREAGG)
 	{
-		context.tlist_dev =  pgstrom_build_groupby_dev(tlist,
+		context.tlist_dev =  pgstrom_build_groupby_dev(root,
+													   tlist,
 													   NIL,
 													   misc_exprs,
 													   input_rels_tlist);
@@ -1270,12 +1381,12 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	else
 	{
 		/* build device projection */
-		context.tlist_dev
-			= pgstrom_build_tlist_dev(joinrel->reltarget,
-									  tlist,
-									  NIL,
-									  misc_exprs,
-									  input_rels_tlist);
+		context.tlist_dev = pgstrom_build_tlist_dev(root,
+													joinrel->reltarget,
+													tlist,
+													NIL,
+													misc_exprs,
+													input_rels_tlist);
 		pp_info->kexp_projection = codegen_build_projection(&context);
 	}
 	/* assign remaining PlanInfo members */

@@ -13,8 +13,8 @@
 #define PG_STROM_H
 
 #include "postgres.h"
-#if PG_VERSION_NUM < 140000
-#error Base PostgreSQL version must be v14 or later
+#if PG_VERSION_NUM < 150000
+#error Base PostgreSQL version must be v15 or later
 #endif
 #define PG_MAJOR_VERSION		(PG_VERSION_NUM / 100)
 #define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
@@ -935,6 +935,7 @@ extern bool		custom_path_remember(PlannerInfo *root,
 									 bool parallel_aware,
 									 uint32_t devkind,
 									 const CustomPath *cpath);
+extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);
 extern void		_PG_init(void);
 
 #endif	/* PG_STROM_H */
