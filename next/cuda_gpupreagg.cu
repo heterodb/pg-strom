@@ -1038,8 +1038,6 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 							   + kds_final->length
 							   - __kds_unpack(usage)
 							   - required);
-	assert((char *)tupitem > (char *)kds_final + 10000 &&
-		   (char *)tupitem < (char *)kds_final + kds_final->length);
 	
 	__writeOutOneTuplePreAgg(kcxt, kds_final,
 							 &tupitem->htup,
