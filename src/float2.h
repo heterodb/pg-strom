@@ -46,6 +46,10 @@ typedef double				float8_t;
 #define FP64_EXPO_MAX		(1023)
 #define FP64_EXPO_BIAS		(1023)
 
+#ifndef INLINE_FUNCTION
+#define INLINE_FUNCTION(TYPE)	static inline TYPE
+#endif
+
 /* int/float reinterpret functions */
 INLINE_FUNCTION(double)
 __longlong_as_double__(const uint64_t ival)
