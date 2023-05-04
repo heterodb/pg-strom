@@ -1601,11 +1601,13 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 													kexp_groupby_actions);
 					if (hitem)
 					{
-						uint32_t	offset;
+						size_t		offset;
 
 						hitem->hash = hash.value;
 						hitem->next = saved;
-						offset = (char *)hitem - (char *)kds_final;
+						offset = ((char *)kds_final
+								  + kds_final->length
+								  - (char *)hitem);
 						/* insert and unlock */
 						__atomic_write_uint32(hslot, __kds_packed(offset));
 					}

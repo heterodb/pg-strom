@@ -1837,7 +1837,7 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 
 		sz = MAXALIGN(offsetof(kern_hashitem, t.htup) + htup->t_len);
 		curr_pos -= sz;
-		self = __kds_packed(curr_pos - (char *)kds);
+		self = __kds_packed(tail_pos - curr_pos);
 		__atomic_exchange(&hash_slot[hindex], &self, &next,
 						  __ATOMIC_SEQ_CST);
 		hitem = (kern_hashitem *)curr_pos;

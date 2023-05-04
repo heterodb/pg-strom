@@ -424,6 +424,8 @@ struct gpuQueryBuffer
 	void		   *h_kmrels;		/* GpuJoin inner buffer (host) */
 	size_t			kmrels_sz;		/* GpuJoin inner buffer size */
 	CUdeviceptr		m_kds_final;	/* GpuPreAgg final buffer (device) */
+	int				m_kds_final_revision; /* rev-no of GpuPreAgg final buffer */
+	pthread_rwlock_t m_kds_final_rwlock;  /* RWLock for the final buffer */
 };
 typedef struct gpuQueryBuffer		gpuQueryBuffer;
 
@@ -568,6 +570,9 @@ __setupGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 							 CU_DEVICE_PER_THREAD,
 							 CU_STREAM_PER_THREAD);
 	gq_buf->m_kds_final = m_kds_final;
+	gq_buf->m_kds_final_revision = 1;
+	pthreadRWLockInit(&gq_buf->m_kds_final_rwlock);
+
 	return true;
 }
 
@@ -872,10 +877,9 @@ gpuClientWriteBack(gpuClient  *gclient,
 			kds->hash_nslots = 0;
 			kds->length = (sz1 + sz2 + sz3);
 		}
-		else
+		else if (kds->format == KDS_FORMAT_ROW)
 		{
-			assert(kds->format == KDS_FORMAT_ROW &&
-				   kds->hash_nslots == 0);
+			assert(kds->hash_nslots == 0);
 			sz1 = (KDS_HEAD_LENGTH(kds) +
 				   MAXALIGN(sizeof(uint32_t) * kds->nitems));
 			sz2 = __kds_unpack(kds->usage);
@@ -900,6 +904,16 @@ gpuClientWriteBack(gpuClient  *gclient,
 				}
 				kds->length = (sz1 + sz2);
 			}
+		}
+		else
+		{
+			/*
+			 * KDS_FORMAT_BLOCK and KDS_FORMAT_ARROW may happen if CPU fallback
+			 * tries to send back the source buffer.
+			 */
+			iov = &iov_array[iovcnt++];
+			iov->iov_base = kds;
+			iov->iov_len  = kds->length;
 		}
 		resp_sz += kds->length;
 	}
@@ -1155,6 +1169,7 @@ static void
 gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 {
 	kern_session_info *session = gclient->session;
+	gpuQueryBuffer  *gq_buf = gclient->gq_buf;
 	kern_gputask	*kgtask = NULL;
 	const char		*kds_src_pathname = NULL;
 	strom_io_vector *kds_src_iovec = NULL;
@@ -1172,12 +1187,13 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	const gpuMemChunk *chunk = NULL;
 	CUdeviceptr		m_kds_src = 0UL;
 	CUdeviceptr		m_kmrels = 0UL;
-	CUdeviceptr		m_kds_final = 0UL;
 	CUdeviceptr		dptr;
 	CUresult		rc;
 	int				grid_sz;
 	int				block_sz;
 	unsigned int	shmem_sz;
+	bool			kds_final_locked = false;
+	int				kds_final_revision = 0;
 	size_t			sz;
 	void		   *kern_args[10];
 
@@ -1244,14 +1260,12 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 		return;
 	}
 	/* inner buffer of GpuJoin */
-	if (gclient->gq_buf)
+	if (gq_buf)
 	{
-		gpuQueryBuffer *gq_buf = gclient->gq_buf;
 		kern_multirels *h_kmrels = (kern_multirels *)gq_buf->h_kmrels;
 
 		m_kmrels = gq_buf->m_kmrels;
 		num_inner_rels = h_kmrels->num_rels;
-		m_kds_final = gq_buf->m_kds_final;
 	}
 
 	rc = cuModuleGetFunction(&f_kern_gpuscan,
@@ -1321,9 +1335,60 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	 * Allocation of the destination buffer
 	 */
 resume_kernel:
-	if (m_kds_final)
+	if (gq_buf && gq_buf->m_kds_final)
 	{
-		kds_dst = (kern_data_store *)m_kds_final;
+		/*
+		 * Suspend of GpuPreAgg kernel means the kds_final buffer is
+		 * almost full, thus GPU kernel wants to expand the buffer.
+		 * It must be done under the exclusive lock.
+		 */
+		if (kgtask->resume_context)
+		{
+			kern_data_store	   *kds_old;
+			kern_data_store	   *kds_new;
+
+			assert(kds_final_revision != 0);	/* must be 2nd or more trial */
+			pthreadRWLockWriteLock(&gq_buf->m_kds_final_rwlock);
+			kds_old = (kern_data_store *)gq_buf->m_kds_final;
+			if (gq_buf->m_kds_final_revision == kds_final_revision)
+			{
+				CUdeviceptr	m_devptr;
+				size_t		kds_final_oldsz = kds_old->length;
+				size_t		kds_final_newsz;
+
+				kds_final_newsz = kds_final_oldsz + Min(kds_final_oldsz, 1UL<<30);
+				rc = cuMemAllocManaged(&m_devptr, kds_final_newsz,
+									   CU_MEM_ATTACH_GLOBAL);
+				if (rc != CUDA_SUCCESS)
+				{
+					pthreadRWLockUnlock(&gq_buf->m_kds_final_rwlock);
+					gpuClientFatal(gclient, "failed on cuMemAllocManaged(%lu): %s",
+								   kds_final_newsz, cuStrError(rc));
+					goto bailout;
+				}
+				kds_new = (kern_data_store *)m_devptr;
+				fprintf(stderr, "kds_final expand: %lu => %lu\n",
+						kds_final_oldsz, kds_final_newsz);
+				/* early half */
+				sz = (KDS_HEAD_LENGTH(kds_old) +
+					  MAXALIGN(sizeof(uint32_t) * (kds_old->nitems +
+												   kds_old->hash_nslots)));
+				memcpy(kds_new, kds_old, sz);
+				/* later falf */
+				sz = __kds_unpack(kds_old->usage);
+				memcpy((char *)kds_new + kds_final_newsz - sz,
+					   (char *)kds_old + kds_final_oldsz - sz, sz);
+				/* swap them */
+				cuMemFree(gq_buf->m_kds_final);
+				gq_buf->m_kds_final = m_devptr;
+				gq_buf->m_kds_final_revision++;
+			}
+			pthreadRWLockUnlock(&gq_buf->m_kds_final_rwlock);
+		}
+		pthreadRWLockReadLock(&gq_buf->m_kds_final_rwlock);
+		kds_dst = (kern_data_store *)gq_buf->m_kds_final;
+		kds_final_revision = gq_buf->m_kds_final_revision;
+		kds_final_locked = true;
 	}
 	else
 	{
@@ -1390,6 +1455,12 @@ resume_kernel:
 		gpuClientFatal(gclient, "failed on cuEventSynchronize: %s", cuStrError(rc));
 		goto bailout;
 	}
+	/* unlock kds_final buffer */
+	if (kds_final_locked)
+	{
+		pthreadRWLockUnlock(&gq_buf->m_kds_final_rwlock);
+		kds_final_locked = false;
+	}
 
 	/* status check */
 	if (kgtask->kerror.errcode == ERRCODE_STROM_SUCCESS)
@@ -1453,6 +1524,8 @@ resume_kernel:
 		__gpuClientELogRaw(gclient, &kgtask->kerror);
 	}
 bailout:
+	if (kds_final_locked)
+		pthreadRWLockUnlock(&gq_buf->m_kds_final_rwlock);
 	if (kgtask)
 	{
 		rc = cuMemFree((CUdeviceptr)kgtask);
@@ -1534,7 +1607,7 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 		}
 	}
 
-	fprintf(stderr, "gpuservHandleGpuTaskFinal: final_this_device=%d final_all_devices=%d final_plan_node=%d resp.tag=%u\n", kfin->final_this_device, kfin->final_all_devices, kfin->final_plan_node, resp.tag);
+	//fprintf(stderr, "gpuservHandleGpuTaskFinal: final_this_device=%d final_all_devices=%d final_plan_node=%d resp.tag=%u\n", kfin->final_this_device, kfin->final_all_devices, kfin->final_plan_node, resp.tag);
 
 	gpuClientWriteBack(gclient, &resp,
 					   resp.u.results.chunks_offset,

@@ -985,6 +985,16 @@ KDS_GET_HASHSLOT(kern_data_store *kds, uint32_t hash)
 	return hslot + (hash % kds->hash_nslots);
 }
 
+INLINE_FUNCTION(bool)
+__KDS_HASH_ITEM_CHECK_VALID(kern_data_store *kds, kern_hashitem *hitem)
+{
+	char   *tail = (char *)kds + kds->length;
+	char   *head = (KDS_BODY_ADDR(kds) +
+					sizeof(uint32_t) * (kds->hash_nslots + kds->nitems));
+	return ((char *)hitem >= head &&
+			(char *)&hitem->t.htup + hitem->t.t_len <= tail);
+}
+
 INLINE_FUNCTION(kern_hashitem *)
 KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t *hslot, uint32_t *p_saved)
 {
@@ -992,22 +1002,29 @@ KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t *hslot, uint32_t *p_saved)
 
 	if (p_saved)
 		*p_saved = offset;
-	if (offset == 0 || offset == UINT_MAX)
-		return NULL;
-	Assert(__kds_unpack(offset) < kds->length);
-	return (kern_hashitem *)((char *)kds + __kds_unpack(offset));
+	if (offset != 0 && offset != UINT_MAX)
+	{
+		kern_hashitem *hitem = (kern_hashitem *)((char *)kds
+												 + kds->length
+												 - __kds_unpack(offset));
+		Assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hitem));
+		return hitem;
+	}
+	return NULL;
 }
 
 INLINE_FUNCTION(kern_hashitem *)
-KDS_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
+KDS_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *hitem)
 {
-	size_t      offset;
-
-	if (!khitem || khitem->next == 0)
-		return NULL;
-	offset = __kds_unpack(khitem->next);
-	Assert(offset < kds->length);
-	return (kern_hashitem *)((char *)kds + offset);
+	if (hitem && hitem->next != 0)
+	{
+		kern_hashitem *hnext = (kern_hashitem *)((char *)kds
+												 + kds->length
+												 - __kds_unpack(hitem->next));
+		Assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hnext));
+		return hnext;
+	}
+	return NULL;
 }
 
 /* access macros for KDS_FORMAT_BLOCK */
@@ -1017,7 +1034,6 @@ KDS_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 	((struct PageHeaderData *)((char *)(kds) +			\
 							   (kds)->block_offset +	\
 							   BLCKSZ * (block_id)))
-
 
 INLINE_FUNCTION(HeapTupleHeaderData *)
 KDS_BLOCK_REF_HTUP(kern_data_store *kds,

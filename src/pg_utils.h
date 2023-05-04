@@ -223,6 +223,34 @@ pthreadMutexUnlock(pthread_mutex_t *mutex)
 }
 
 static inline void
+pthreadRWLockInit(pthread_rwlock_t *rwlock)
+{
+	if ((errno = pthread_rwlock_init(rwlock, NULL)) != 0)
+		__FATAL("failed on pthread_rwlock_init: %m");
+}
+
+static inline void
+pthreadRWLockReadLock(pthread_rwlock_t *rwlock)
+{
+	if ((errno = pthread_rwlock_rdlock(rwlock)) != 0)
+        __FATAL("failed on pthread_rwlock_rdlock: %m");
+}
+
+static inline void
+pthreadRWLockWriteLock(pthread_rwlock_t *rwlock)
+{
+	if ((errno = pthread_rwlock_wrlock(rwlock)) != 0)
+		__FATAL("failed on pthread_rwlock_wrlock: %m");
+}
+
+static inline void
+pthreadRWLockUnlock(pthread_rwlock_t *rwlock)
+{
+	if ((errno = pthread_rwlock_unlock(rwlock)) != 0)
+		__FATAL("failed on pthread_rwlock_unlock: %m");
+}
+
+static inline void
 pthreadCondInit(pthread_cond_t *cond)
 {
 	if ((errno = pthread_cond_init(cond, NULL)) != 0)
