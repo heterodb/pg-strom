@@ -4,8 +4,8 @@
  * Routines to handle ArrowNode objects, intermediation of PostgreSQL types
  * and Apache Arrow types.
  * ----
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
@@ -1947,16 +1947,14 @@ readArrowFooter(ArrowFooter *node, const char *pos)
 #define ARROW_FILE_TAIL_SIGNATURE		"ARROW1"
 #define ARROW_FILE_TAIL_SIGNATURE_SZ	(sizeof(ARROW_FILE_TAIL_SIGNATURE) - 1)
 
-#ifndef __PGSTROM_MODULE__
-#define PG_TRY()								\
-	if (true) {									\
-		bool	__dummy__ __attribute__((unused))
-#define PG_FINALLY()							\
-	} else {									\
-		bool __dummy__ __attribute__((unused))
-#define PG_END_TRY()							\
-	}
-#endif
+#ifdef __PGSTROM_MODULE__
+#include "pg_strom.h"
+#define __mmap(a,b,c,d,e,f)		__mmapFile((a),(b),(c),(d),(e),(f))
+#define __munmap(a,b)			__munmapFile((a))
+#else
+#define __mmap(a,b,c,d,e,f)		mmap((a),(b),(c),(d),(e),(f))
+#define __munmap(a,b)			munmap((a),(b))
+#endif /* __PGSTROM_MODULE__ */
 
 void
 readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
@@ -1977,93 +1975,85 @@ readArrowFileDesc(int fdesc, ArrowFileInfo *af_info)
 	if (__PAGE_SIZE == 0)
 		__PAGE_SIZE = sysconf(_SC_PAGESIZE);
 	mmap_sz = ((file_sz + __PAGE_SIZE - 1) & ~(__PAGE_SIZE - 1));
-	mmap_head = mmap(NULL, mmap_sz, PROT_READ, MAP_SHARED, fdesc, 0);
+	mmap_head = __mmap(NULL, mmap_sz, PROT_READ, MAP_SHARED, fdesc, 0);
 	if (mmap_head == MAP_FAILED)
 		Elog("failed on mmap: %m");
 	mmap_tail = mmap_head + file_sz - ARROW_FILE_TAIL_SIGNATURE_SZ;
 
 	/* check signature */
-	PG_TRY();
+	if (memcmp(mmap_head,
+			   ARROW_FILE_HEAD_SIGNATURE,
+			   ARROW_FILE_HEAD_SIGNATURE_SZ) != 0 ||
+		memcmp(mmap_tail,
+			   ARROW_FILE_TAIL_SIGNATURE,
+			   ARROW_FILE_TAIL_SIGNATURE_SZ) != 0)
 	{
-		if (memcmp(mmap_head,
-				   ARROW_FILE_HEAD_SIGNATURE,
-				   ARROW_FILE_HEAD_SIGNATURE_SZ) != 0 ||
-			memcmp(mmap_tail,
-				   ARROW_FILE_TAIL_SIGNATURE,
-				   ARROW_FILE_TAIL_SIGNATURE_SZ) != 0)
-		{
-			Elog("Signature mismatch on Apache Arrow file");
-		}
-
-		/* Read Footer chunk */
-		pos = mmap_tail - sizeof(int32_t);
-		offset = *((int32_t *)pos);
-		pos -= offset;
-		offset = *((int32_t *)pos);
-		readArrowFooter(&af_info->footer, pos + offset);
-
-		/* Read DictionaryBatch chunks */
-		nitems = af_info->footer._num_dictionaries;
-		if (nitems > 0)
-		{
-			af_info->dictionaries = palloc0(nitems * sizeof(ArrowMessage));
-			for (i=0; i < nitems; i++)
-			{
-				ArrowBlock	   *b = &af_info->footer.dictionaries[i];
-				ArrowMessage   *m = &af_info->dictionaries[i];
-				int32_t		   *ival = (int32_t *)(mmap_head + b->offset);
-				int32_t			metaLength	__attribute__((unused));
-				int32_t		   *headOffset;
-
-				if (*ival == 0xffffffff)
-				{
-					metaLength = ival[1];
-					headOffset = ival + 2;
-				}
-				else
-				{
-					/* Older format prior to Arrow v0.15 */
-					metaLength = *ival;
-					headOffset = ival + 1;
-				}
-				pos = (const char *)headOffset + *headOffset;
-				readArrowMessage(m, pos);
-			}
-		}
-
-		/* Read RecordBatch chunks */
-		nitems = af_info->footer._num_recordBatches;
-		if (nitems > 0)
-		{
-			af_info->recordBatches = palloc0(nitems * sizeof(ArrowMessage));
-			for (i=0; i < nitems; i++)
-			{
-				ArrowBlock	   *b = &af_info->footer.recordBatches[i];
-				ArrowMessage   *m = &af_info->recordBatches[i];
-				int32_t		   *ival = (int32_t *)(mmap_head + b->offset);
-				int32_t			metaLength	__attribute__((unused));
-				int32_t		   *headOffset;
-
-				if (*ival == 0xffffffff)
-				{
-					metaLength = ival[1];
-					headOffset = ival + 2;
-				}
-				else
-				{
-					/* Older format prior to Arrow v0.15 */
-					metaLength = *ival;
-					headOffset = ival + 1;
-				}
-				pos = (const char *)headOffset + *headOffset;
-				readArrowMessage(m, pos);
-			}
-		}
-		munmap(mmap_head, mmap_sz);
+		Elog("Signature mismatch on Apache Arrow file");
 	}
-	PG_FINALLY();
+
+	/* Read Footer chunk */
+	pos = mmap_tail - sizeof(int32_t);
+	offset = *((int32_t *)pos);
+	pos -= offset;
+	offset = *((int32_t *)pos);
+	readArrowFooter(&af_info->footer, pos + offset);
+
+	/* Read DictionaryBatch chunks */
+	nitems = af_info->footer._num_dictionaries;
+	if (nitems > 0)
 	{
-		munmap(mmap_head, mmap_sz);
+		af_info->dictionaries = palloc0(nitems * sizeof(ArrowMessage));
+		for (i=0; i < nitems; i++)
+		{
+			ArrowBlock	   *b = &af_info->footer.dictionaries[i];
+			ArrowMessage   *m = &af_info->dictionaries[i];
+			int32_t		   *ival = (int32_t *)(mmap_head + b->offset);
+			int32_t			metaLength	__attribute__((unused));
+			int32_t		   *headOffset;
+
+			if (*ival == 0xffffffff)
+			{
+				metaLength = ival[1];
+				headOffset = ival + 2;
+			}
+			else
+			{
+				/* Older format prior to Arrow v0.15 */
+				metaLength = *ival;
+				headOffset = ival + 1;
+			}
+			pos = (const char *)headOffset + *headOffset;
+			readArrowMessage(m, pos);
+		}
 	}
-	PG_END_TRY();
+
+	/* Read RecordBatch chunks */
+	nitems = af_info->footer._num_recordBatches;
+	if (nitems > 0)
+	{
+		af_info->recordBatches = palloc0(nitems * sizeof(ArrowMessage));
+		for (i=0; i < nitems; i++)
+		{
+			ArrowBlock	   *b = &af_info->footer.recordBatches[i];
+			ArrowMessage   *m = &af_info->recordBatches[i];
+			int32_t		   *ival = (int32_t *)(mmap_head + b->offset);
+			int32_t			metaLength	__attribute__((unused));
+			int32_t		   *headOffset;
+
+			if (*ival == 0xffffffff)
+			{
+				metaLength = ival[1];
+				headOffset = ival + 2;
+			}
+			else
+			{
+				/* Older format prior to Arrow v0.15 */
+				metaLength = *ival;
+				headOffset = ival + 1;
+			}
+			pos = (const char *)headOffset + *headOffset;
+			readArrowMessage(m, pos);
+		}
+	}
+	__munmap(mmap_head, mmap_sz);
 }

@@ -4,13 +4,43 @@
  * miscellaneous and uncategorized routines but usefull for multiple subsystems
  * of PG-Strom.
  * ----
- * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2023 (C) PG-Strom Developers Team
+ * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2021 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+
+/*
+ * make_flat_ands_expr - similar to make_ands_explicit but it pulls up
+ * underlying and-clause
+ */
+Expr *
+make_flat_ands_explicit(List *andclauses)
+{
+	List	   *args = NIL;
+	ListCell   *lc;
+
+	if (andclauses == NIL)
+		return (Expr *) makeBoolConst(true, false);
+	else if (list_length(andclauses) == 1)
+		return (Expr *) linitial(andclauses);
+
+	foreach (lc, andclauses)
+	{
+		Expr   *expr = lfirst(lc);
+
+		Assert(exprType((Node *)expr) == BOOLOID);
+		if (IsA(expr, BoolExpr) &&
+			((BoolExpr *)expr)->boolop == AND_EXPR)
+			args = list_concat(args, ((BoolExpr *) expr)->args);
+		else
+			args = lappend(args, expr);
+	}
+	Assert(list_length(args) > 1);
+	return make_andclause(args);
+}
 
 /*
  * fixup_varnode_to_origin
@@ -39,7 +69,6 @@ fixup_varnode_to_origin(Node *node, List *cscan_tlist)
 								   (void *)cscan_tlist);
 }
 
-#if 0
 /*
  * find_appinfos_by_relids_nofail
  *
@@ -151,40 +180,110 @@ get_parallel_divisor(Path *path)
 	}
 	return parallel_divisor;
 }
-#endif
 
 /*
- * append a binary chunk at the aligned block
+ * Usefulll wrapper routines like lsyscache.c
  */
-int
-__appendBinaryStringInfo(StringInfo buf, const void *data, int datalen)
+#if PG_VERSION_NUM < 110000
+char
+get_func_prokind(Oid funcid)
 {
-	static uint64_t __zero = 0;
-	int		padding = (MAXALIGN(buf->len) - buf->len);
-	int		pos;
+	HeapTuple	tup;
+	Form_pg_proc procForm;
+	char		prokind;
 
-	if (padding > 0)
-		appendBinaryStringInfo(buf, (char *)&__zero, padding);
-	pos = buf->len;
-	appendBinaryStringInfo(buf, data, datalen);
-	return pos;
+	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for function %u", funcid);
+	procForm = (Form_pg_proc) GETSTRUCT(tup);
+	if (procForm->proisagg)
+	{
+		Assert(!procForm->proiswindow);
+		prokind = PROKIND_AGGREGATE;
+	}
+	else if (procForm->proiswindow)
+	{
+		Assert(!procForm->proisagg);
+		prokind = PROKIND_WINDOW;
+	}
+	else
+	{
+		prokind = PROKIND_FUNCTION;
+	}
+	ReleaseSysCache(tup);
+
+	return prokind;
+}
+#endif		/* <PG11 */
+
+int
+get_relnatts(Oid relid)
+{
+	HeapTuple	tup;
+	int			relnatts = -1;
+
+	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (HeapTupleIsValid(tup))
+	{
+        Form_pg_class reltup = (Form_pg_class) GETSTRUCT(tup);
+
+        relnatts = reltup->relnatts;
+        ReleaseSysCache(tup);
+	}
+	return relnatts;
 }
 
-int
-__appendZeroStringInfo(StringInfo buf, int nbytes)
+/*
+ * get_function_oid
+ */
+Oid
+get_function_oid(const char *func_name,
+				 oidvector *func_args,
+				 Oid namespace_oid,
+				 bool missing_ok)
 {
-	static uint64_t __zero = 0;
-	int		padding = (MAXALIGN(buf->len) - buf->len);
-	int		pos;
+	Oid		func_oid;
 
-	if (padding > 0)
-		appendBinaryStringInfo(buf, (char *)&__zero, padding);
-	pos = buf->len;
-	enlargeStringInfo(buf, nbytes);
-	memset(buf->data + pos, 0, nbytes);
-	buf->len += nbytes;
+	func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
+#if PG_VERSION_NUM >= 120000
+							   Anum_pg_proc_oid,
+#endif
+							   CStringGetDatum(func_name),
+							   PointerGetDatum(func_args),
+							   ObjectIdGetDatum(namespace_oid));
+	if (!missing_ok && !OidIsValid(func_oid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_FUNCTION),
+				 errmsg("function %s is not defined",
+						funcname_signature_string(func_name,
+												  func_args->dim1,
+												  NIL,
+												  func_args->values))));
+	return func_oid;
+}
 
-	return pos;
+/*
+ * get_type_oid
+ */
+Oid
+get_type_oid(const char *type_name,
+			 Oid namespace_oid,
+			 bool missing_ok)
+{
+	Oid		type_oid;
+
+	type_oid = GetSysCacheOid2(TYPENAMENSP,
+#if PG_VERSION_NUM >= 120000
+							   Anum_pg_type_oid,
+#endif
+							   CStringGetDatum(type_name),
+							   ObjectIdGetDatum(namespace_oid));
+	if (!missing_ok && !OidIsValid(type_oid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("type %s is not defined", type_name)));
+
+	return type_oid;
 }
 
 /*
@@ -210,25 +309,102 @@ get_type_name(Oid type_oid, bool missing_ok)
 }
 
 /*
- * get_relation_am
+ * get_proc_library
+ */
+char *
+get_proc_library(HeapTuple protup)
+{
+	Form_pg_proc	proc = (Form_pg_proc)GETSTRUCT(protup);
+
+	if (proc->prolang == ClanguageId)
+	{
+		Datum		datum;
+		bool		isnull;
+
+		datum = SysCacheGetAttr(PROCOID, protup,
+								Anum_pg_proc_probin,
+								&isnull);
+		if (!isnull)
+			return TextDatumGetCString(datum);
+	}
+	else if (proc->prolang != INTERNALlanguageId &&
+			 proc->prolang != SQLlanguageId)
+	{
+		return (void *)(~0UL);
+	}
+	return NULL;
+}
+
+/*
+ * get_object_extension_oid
  */
 Oid
-get_relation_am(Oid rel_oid, bool missing_ok)
+get_object_extension_oid(Oid class_id,
+						 Oid object_id,
+						 int32 objsub_id,
+						 bool missing_ok)
 {
+	Relation	drel;
+	ScanKeyData	skeys[3];
+	SysScanDesc	sscan;
 	HeapTuple	tup;
-	Oid			relam;
+	Oid			ext_oid = InvalidOid;
 
-	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(rel_oid));
-	if (!HeapTupleIsValid(tup))
+	drel = table_open(DependRelationId, AccessShareLock);
+
+	ScanKeyInit(&skeys[0],
+				Anum_pg_depend_classid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(class_id));
+	ScanKeyInit(&skeys[1],
+				Anum_pg_depend_objid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(object_id));
+	ScanKeyInit(&skeys[2],
+				Anum_pg_depend_objsubid,
+				BTEqualStrategyNumber, F_INT4EQ,
+				Int32GetDatum(objsub_id));
+	sscan = systable_beginscan(drel, DependDependerIndexId, true,
+							   NULL, 3, skeys);
+	while (HeapTupleIsValid(tup = systable_getnext(sscan)))
 	{
-		if (!missing_ok)
-			elog(ERROR, "cache lookup failed for relation %u", rel_oid);
-		return InvalidOid;
-	}
-	relam = ((Form_pg_class) GETSTRUCT(tup))->relam;
-	ReleaseSysCache(tup);
+		Form_pg_depend	dep = (Form_pg_depend) GETSTRUCT(tup);
 
-	return relam;
+		if (dep->refclassid == ExtensionRelationId &&
+			dep->refobjsubid == 0 &&
+			(dep->deptype == DEPENDENCY_EXTENSION ||
+			 dep->deptype == DEPENDENCY_AUTO_EXTENSION))
+		{
+			ext_oid = dep->refobjid;
+			break;
+		}
+	}
+	systable_endscan(sscan);
+	table_close(drel, AccessShareLock);
+
+	if (!missing_ok && !OidIsValid(ext_oid))
+		elog(ERROR, "couldn't find out references (class:%u, objid:%u, subid:%d) by pg_extension at pg_depend",
+			 class_id, object_id, objsub_id);
+
+	return ext_oid;
+}
+
+/*
+ * bms_to_cstring - human readable Bitmapset
+ */
+char *
+bms_to_cstring(Bitmapset *bms)
+{
+	StringInfoData buf;
+	int			bit = -1;
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "{");
+	while ((bit = bms_next_member(bms, bit)) >= 0)
+		appendStringInfo(&buf, " %d", bit);
+	appendStringInfo(&buf, " }");
+
+	return buf.data;
 }
 
 /*
@@ -262,33 +438,6 @@ bms_from_pglist(List *pglist)
 	return bms;
 }
 
-Float *
-__makeFloat(double fval)
-{
-	return makeFloat(psprintf("%e", fval));
-}
-
-Const *
-__makeByteaConst(bytea *data)
-{
-	return makeConst(BYTEAOID,
-					 -1,
-					 InvalidOid,
-					 -1,
-					 PointerGetDatum(data),
-					 data == NULL,
-					 false);
-}
-
-bytea *
-__getByteaConst(Const *con)
-{
-	Assert(IsA(con, Const) && con->consttype == BYTEAOID);
-
-	return (con->constisnull ? NULL : DatumGetByteaP(con->constvalue));
-}
-
-#if 0
 /*
  * pathnode_tree_walker
  */
@@ -368,18 +517,22 @@ pathnode_tree_walker(Path *node,
 			if (walker(((GatherPath *)node)->subpath, context))
 				return true;
 			break;
+#if PG_VERSION_NUM >= 100000
 		case T_GatherMergePath:
 			if (walker(((GatherMergePath *)node)->subpath, context))
 				return true;
 			break;
+#endif		/* >= PG10 */
 		case T_ProjectionPath:
 			if (walker(((ProjectionPath *)node)->subpath, context))
 				return true;
 			break;
+#if PG_VERSION_NUM >= 100000
 		case T_ProjectSetPath:
 			if (walker(((ProjectSetPath *)node)->subpath, context))
 				return true;
 			break;
+#endif		/* >= PG10 */
 		case T_SortPath:
 			if (walker(((SortPath *)node)->subpath, context))
 				return true;
@@ -475,7 +628,6 @@ pathtree_has_parallel_aware(Path *node)
 {
 	return __pathtree_has_parallel_aware(node, NULL);
 }
-#endif
 
 /*
  * pgstrom_copy_pathnode
@@ -533,17 +685,21 @@ pgstrom_copy_pathnode(const Path *pathnode)
 				return &b->path;
 			}
 		case T_CustomPath:
+			if (pgstrom_path_is_gpuscan(pathnode))
+				return pgstrom_copy_gpuscan_path(pathnode);
+			else if (pgstrom_path_is_gpujoin(pathnode))
+				return pgstrom_copy_gpujoin_path(pathnode);
+			else if (pgstrom_path_is_gpupreagg(pathnode))
+				return pgstrom_copy_gpupreagg_path(pathnode);
+			else
 			{
 				CustomPath	   *a = (CustomPath *)pathnode;
 				CustomPath	   *b = pmemdup(a, sizeof(CustomPath));
 				List		   *subpaths = NIL;
 				ListCell	   *lc;
-
 				foreach (lc, a->custom_paths)
-				{
-					Path	   *sp = pgstrom_copy_pathnode(lfirst(lc));
-					subpaths = lappend(subpaths, sp);
-				}
+					subpaths = lappend(subpaths,
+									   pgstrom_copy_pathnode(lfirst(lc)));
 				b->custom_paths = subpaths;
 				return &b->path;
 			}
@@ -579,19 +735,17 @@ pgstrom_copy_pathnode(const Path *pathnode)
 				b->subpaths = subpaths;
 				return &b->path;
 			}
+#if PG_VERSION_NUM < 120000
+		case T_ResultPath:
+			return pmemdup(pathnode, sizeof(ResultPath));
+#else
 		case T_GroupResultPath:
 			return pmemdup(pathnode, sizeof(GroupResultPath));
+#endif
 		case T_MaterialPath:
 			{
 				MaterialPath   *a = (MaterialPath *)pathnode;
 				MaterialPath   *b = pmemdup(a, sizeof(MaterialPath));
-				b->subpath = pgstrom_copy_pathnode(a->subpath);
-				return &b->path;
-			}
-		case T_MemoizePath:
-			{
-				MemoizePath	   *a = (MemoizePath *)pathnode;
-				MemoizePath	   *b = pmemdup(a, sizeof(MemoizePath));
 				b->subpath = pgstrom_copy_pathnode(a->subpath);
 				return &b->path;
 			}
@@ -700,7 +854,16 @@ pgstrom_copy_pathnode(const Path *pathnode)
 			{
 				ModifyTablePath *a = (ModifyTablePath *)pathnode;
 				ModifyTablePath *b = pmemdup(a, sizeof(ModifyTablePath));
+#if PG_VERSION_NUM < 140000
+				List	   *subpaths = NIL;
+				ListCell   *lc;
+				foreach (lc, a->subpaths)
+					subpaths = lappend(subpaths,
+									   pgstrom_copy_pathnode(lfirst(lc)));
+				b->subpaths = subpaths;
+#else
 				b->subpath = pgstrom_copy_pathnode(a->subpath);
+#endif
 				return &b->path;
 			}
 		case T_LimitPath:
@@ -716,44 +879,30 @@ pgstrom_copy_pathnode(const Path *pathnode)
 	return NULL;
 }
 
-#if 0
 /*
- * pgstrom_define_shell_type - A wrapper for TypeShellMake with a particular OID
+ * errorText - string form of the error code
  */
-PG_FUNCTION_INFO_V1(pgstrom_define_shell_type);
-Datum
-pgstrom_define_shell_type(PG_FUNCTION_ARGS)
+const char *
+errorText(int errcode)
 {
-	char   *type_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	Oid		type_oid = PG_GETARG_OID(1);
-	Oid		type_namespace = PG_GETARG_OID(2);
-	bool	__IsBinaryUpgrade = IsBinaryUpgrade;
-	Oid		__binary_upgrade_next_pg_type_oid = binary_upgrade_next_pg_type_oid;
+	static __thread char buffer[160];
+	const char *error_name;
+	const char *error_desc;
 
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to create a shell type")));
-	PG_TRY();
+	if (errcode >= 0 && errcode <= CUDA_ERROR_UNKNOWN)
 	{
-		IsBinaryUpgrade = true;
-		binary_upgrade_next_pg_type_oid = type_oid;
-
-		TypeShellMake(type_name, type_namespace, GetUserId());
+		if (cuGetErrorName(errcode, &error_name) == CUDA_SUCCESS &&
+			cuGetErrorString(errcode, &error_desc) == CUDA_SUCCESS)
+		{
+			snprintf(buffer, sizeof(buffer), "%s - %s",
+					 error_name, error_desc);
+			return buffer;
+		}
 	}
-	PG_CATCH();
-	{
-		IsBinaryUpgrade = __IsBinaryUpgrade;
-		binary_upgrade_next_pg_type_oid = __binary_upgrade_next_pg_type_oid;
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	IsBinaryUpgrade = __IsBinaryUpgrade;
-	binary_upgrade_next_pg_type_oid = __binary_upgrade_next_pg_type_oid;
-
-	PG_RETURN_OID(type_oid);
+	snprintf(buffer, sizeof(buffer),
+			 "%d - unknown", errcode);
+	return buffer;
 }
-#endif
 
 /*
  * ----------------------------------------------------------------
@@ -797,15 +946,15 @@ pgstrom_random_setseed(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_setseed);
 
-static int64_t
+static cl_long
 __random(void)
 {
 	if (!pgstrom_random_seed_set)
 	{
-		pgstrom_random_seed = (unsigned int)MyProcPid ^ 0xdeadbeafU;
+		pgstrom_random_seed = (unsigned int)MyProcPid ^ 0xdeadbeaf;
 		pgstrom_random_seed_set = true;
 	}
-	return (uint64_t)rand_r(&pgstrom_random_seed);
+	return (cl_ulong)rand_r(&pgstrom_random_seed);
 }
 
 static inline double
@@ -830,7 +979,7 @@ pgstrom_random_int(PG_FUNCTION_ARGS)
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
 	int64		lower = (!PG_ARGISNULL(1) ? PG_GETARG_INT64(1) : 0);
 	int64		upper = (!PG_ARGISNULL(2) ? PG_GETARG_INT64(2) : INT_MAX);
-	uint64_t	v;
+	cl_ulong	v;
 
 	if (upper < lower)
 		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
@@ -868,7 +1017,7 @@ pgstrom_random_date(PG_FUNCTION_ARGS)
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
 	DateADT		lower;
 	DateADT		upper;
-	uint64_t	v;
+	cl_ulong	v;
 
 	if (!PG_ARGISNULL(1))
 		lower = PG_GETARG_DATEADT(1);
@@ -897,7 +1046,7 @@ pgstrom_random_time(PG_FUNCTION_ARGS)
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
 	TimeADT		lower = 0;
 	TimeADT		upper = HOURS_PER_DAY * USECS_PER_HOUR - 1;
-	uint64_t	v;
+	cl_ulong	v;
 
 	if (!PG_ARGISNULL(1))
 		lower = PG_GETARG_TIMEADT(1);
@@ -922,7 +1071,7 @@ pgstrom_random_timetz(PG_FUNCTION_ARGS)
 	TimeADT		lower = 0;
 	TimeADT		upper = HOURS_PER_DAY * USECS_PER_HOUR - 1;
 	TimeTzADT  *temp;
-	uint64_t	v;
+	cl_ulong	v;
 
 	if (!PG_ARGISNULL(1))
 		lower = PG_GETARG_TIMEADT(1);
@@ -951,7 +1100,7 @@ pgstrom_random_timestamp(PG_FUNCTION_ARGS)
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
 	Timestamp	lower;
 	Timestamp	upper;
-	uint64_t	v;
+	cl_ulong	v;
 	struct pg_tm tm;
 
 	if (!PG_ARGISNULL(1))
@@ -990,18 +1139,18 @@ pgstrom_random_macaddr(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
 	macaddr	   *temp;
-	uint64_t	lower;
-	uint64_t	upper;
-	uint64_t	v, x;
+	cl_ulong	lower;
+	cl_ulong	upper;
+	cl_ulong	v, x;
 
 	if (PG_ARGISNULL(1))
 		lower = 0xabcd00000000UL;
 	else
 	{
 		temp = PG_GETARG_MACADDR_P(1);
-		lower = (((uint64_t)temp->a << 40) | ((uint64_t)temp->b << 32) |
-				 ((uint64_t)temp->c << 24) | ((uint64_t)temp->d << 16) |
-				 ((uint64_t)temp->e <<  8) | ((uint64_t)temp->f));
+		lower = (((cl_ulong)temp->a << 40) | ((cl_ulong)temp->b << 32) |
+				 ((cl_ulong)temp->c << 24) | ((cl_ulong)temp->d << 16) |
+				 ((cl_ulong)temp->e <<  8) | ((cl_ulong)temp->f));
 	}
 
 	if (PG_ARGISNULL(2))
@@ -1009,9 +1158,9 @@ pgstrom_random_macaddr(PG_FUNCTION_ARGS)
 	else
 	{
 		temp = PG_GETARG_MACADDR_P(2);
-		upper = (((uint64_t)temp->a << 40) | ((uint64_t)temp->b << 32) |
-				 ((uint64_t)temp->c << 24) | ((uint64_t)temp->d << 16) |
-				 ((uint64_t)temp->e <<  8) | ((uint64_t)temp->f));
+		upper = (((cl_ulong)temp->a << 40) | ((cl_ulong)temp->b << 32) |
+				 ((cl_ulong)temp->c << 24) | ((cl_ulong)temp->d << 16) |
+				 ((cl_ulong)temp->e <<  8) | ((cl_ulong)temp->f));
 	}
 
 	if (upper < lower)
@@ -1042,7 +1191,7 @@ pgstrom_random_inet(PG_FUNCTION_ARGS)
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
 	inet	   *temp;
 	int			i, j, bits;
-	uint64_t	v;
+	cl_ulong	v;
 
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
@@ -1075,7 +1224,7 @@ pgstrom_random_inet(PG_FUNCTION_ARGS)
 			temp->inet_data.ipaddr[i--] = (v & 0xff);
 		else
 		{
-			uint32_t		mask = (1 << bits) - 1;
+			cl_uint		mask = (1 << bits) - 1;
 
 			temp->inet_data.ipaddr[i] &= ~(mask);
 			temp->inet_data.ipaddr[i] |= (v & mask);
@@ -1097,7 +1246,7 @@ pgstrom_random_text(PG_FUNCTION_ARGS)
 	text	   *temp;
 	char	   *pos;
 	int			i, j, n;
-	uint64_t	v;
+	cl_ulong	v;
 
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
@@ -1135,11 +1284,11 @@ pgstrom_random_text_length(PG_FUNCTION_ARGS)
 		"abcdefghijklmnopqrstuvwxyz"
 		"0123456789+/";
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
-	int32_t		maxlen;
+	cl_int		maxlen;
 	text	   *temp;
 	char	   *pos;
 	int			i, j, n;
-	uint64_t	v = 0;
+	cl_ulong	v = 0;
 
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
@@ -1201,12 +1350,7 @@ pgstrom_random_int4range(PG_FUNCTION_ARGS)
 
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   Anum_pg_type_oid,
-							   CStringGetDatum("int4range"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
-	if (!OidIsValid(type_oid))
-		elog(ERROR, "type 'int4range' is not defined");
+	type_oid = get_type_oid("int4range", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
 	x = lower + __random() % (upper - lower);
 	y = lower + __random() % (upper - lower);
@@ -1228,12 +1372,7 @@ pgstrom_random_int8range(PG_FUNCTION_ARGS)
 
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   Anum_pg_type_oid,
-							   CStringGetDatum("int8range"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
-	if (!OidIsValid(type_oid))
-		elog(ERROR, "type 'int8range' is not defined");
+	type_oid = get_type_oid("int8range", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
 	v = (__random() << 31) | __random();
 	x = lower + v % (upper - lower);
@@ -1255,7 +1394,7 @@ pgstrom_random_tsrange(PG_FUNCTION_ARGS)
 	TypeCacheEntry *typcache;
 	Oid			type_oid;
 	Timestamp	x, y;
-	uint64_t	v;
+	cl_ulong	v;
 
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
@@ -1280,12 +1419,8 @@ pgstrom_random_tsrange(PG_FUNCTION_ARGS)
 	}
 	if (upper < lower)
 		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   Anum_pg_type_oid,
-							   CStringGetDatum("tsrange"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
-	if (!OidIsValid(type_oid))
-		elog(ERROR, "type 'tsrange' is not defined");
+
+	type_oid = get_type_oid("tsrange", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
 	v = (__random() << 31) | __random();
 	x = lower + v % (upper - lower);
@@ -1307,7 +1442,7 @@ pgstrom_random_tstzrange(PG_FUNCTION_ARGS)
 	TypeCacheEntry *typcache;
 	Oid			type_oid;
 	Timestamp	x, y;
-	uint64_t	v;
+	cl_ulong	v;
 
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
@@ -1332,12 +1467,8 @@ pgstrom_random_tstzrange(PG_FUNCTION_ARGS)
 	}
 	if (upper < lower)
 		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   Anum_pg_type_oid,
-							   CStringGetDatum("tstzrange"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
-	if (!OidIsValid(type_oid))
-		elog(ERROR, "type 'tstzrange' is not defined");
+
+	type_oid = get_type_oid("tstzrange", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
 	v = (__random() << 31) | __random();
 	x = lower + v % (upper - lower);
@@ -1372,12 +1503,7 @@ pgstrom_random_daterange(PG_FUNCTION_ARGS)
 	if (upper < lower)
 		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
 
-	type_oid = GetSysCacheOid2(TYPENAMENSP,
-							   Anum_pg_type_oid,
-							   CStringGetDatum("daterange"),
-							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
-	if (!OidIsValid(type_oid))
-		elog(ERROR, "type 'daterange' is not defined");
+	type_oid = get_type_oid("daterange", PG_CATALOG_NAMESPACE, false);
 	typcache = range_get_typcache(fcinfo, type_oid);
 	x = lower + __random() % (upper - lower);
 	y = lower + __random() % (upper - lower);
@@ -1483,21 +1609,10 @@ __pwriteFile(int fdesc, const void *buffer, size_t nbytes, off_t f_pos)
 	return count;
 }
 
-/* ----------------------------------------------------------------
- *
- * shared memory and mmap/munmap routines
- *
- * ----------------------------------------------------------------
+/*
+ * mmap/munmap wrapper that is automatically unmapped on regarding to
+ * the resource-owner.
  */
-#define IS_POSIX_SHMEM		0x80000000U
-typedef struct
-{
-	uint32_t	shmem_handle;
-	int			shmem_fdesc;
-	char		shmem_name[MAXPGPATH];
-	ResourceOwner owner;
-} shmemEntry;
-
 typedef struct
 {
 	void	   *mmap_addr;
@@ -1506,42 +1621,7 @@ typedef struct
 	int			mmap_flags;
 	ResourceOwner owner;
 } mmapEntry;
-
-static HTAB	   *shmem_tracker_htab = NULL;
 static HTAB	   *mmap_tracker_htab = NULL;
-
-static void
-cleanup_shmem_chunks(ResourceReleasePhase phase,
-					 bool isCommit,
-					 bool isTopLevel,
-					 void *arg)
-{
-	if (phase == RESOURCE_RELEASE_AFTER_LOCKS &&
-		shmem_tracker_htab &&
-		hash_get_num_entries(shmem_tracker_htab) > 0)
-	{
-		HASH_SEQ_STATUS	seq;
-		shmemEntry	   *entry;
-
-		hash_seq_init(&seq, shmem_tracker_htab);
-		while ((entry = hash_seq_search(&seq)) != NULL)
-		{
-			if (entry->owner != CurrentResourceOwner)
-				continue;
-			if (isCommit)
-				elog(WARNING, "shared-memory '%s' leaks, and still alive",
-					 entry->shmem_name);
-			if (unlink(entry->shmem_name) != 0)
-				elog(WARNING, "failed on unlink('%s'): %m", entry->shmem_name);
-			if (close(entry->shmem_fdesc) != 0)
-				elog(WARNING, "failed on close('%s'): %m", entry->shmem_name);
-			hash_search(shmem_tracker_htab,
-						&entry->shmem_handle,
-						HASH_REMOVE,
-						NULL);
-		}
-	}
-}
 
 static void
 cleanup_mmap_chunks(ResourceReleasePhase phase,
@@ -1549,11 +1629,10 @@ cleanup_mmap_chunks(ResourceReleasePhase phase,
 					bool isTopLevel,
 					void *arg)
 {
-	if (phase == RESOURCE_RELEASE_AFTER_LOCKS &&
-		mmap_tracker_htab &&
+	if (mmap_tracker_htab &&
 		hash_get_num_entries(mmap_tracker_htab) > 0)
 	{
-		HASH_SEQ_STATUS seq;
+		HASH_SEQ_STATUS	seq;
 		mmapEntry	   *entry;
 
 		hash_seq_init(&seq, mmap_tracker_htab);
@@ -1577,125 +1656,15 @@ cleanup_mmap_chunks(ResourceReleasePhase phase,
 	}
 }
 
-uint32_t
-__shmemCreate(const DpuStorageEntry *ds_entry)
-{
-	static uint	my_random_seed = 0;
-	const char *shmem_dir = "/dev/shm";
-	int			fdesc;
-	uint32_t	handle;
-	char		namebuf[MAXPGPATH];
-	size_t		off = 0;
-
-	if (!shmem_tracker_htab)
-	{
-		HASHCTL		hctl;
-
-		my_random_seed = (uint)MyProcPid ^ 0xcafebabeU;
-
-		memset(&hctl, 0, sizeof(HASHCTL));
-		hctl.keysize   = sizeof(uint32_t);
-		hctl.entrysize = sizeof(shmemEntry);
-		shmem_tracker_htab = hash_create("shmem_tracker_htab",
-										 256,
-										 &hctl,
-										 HASH_ELEM | HASH_BLOBS);
-		RegisterResourceReleaseCallback(cleanup_shmem_chunks, 0);
-	}
-
-	if (ds_entry)
-		shmem_dir = DpuStorageEntryBaseDir(ds_entry);
-	off = snprintf(namebuf, sizeof(namebuf), "%s/", shmem_dir);
-	do {
-		handle = rand_r(&my_random_seed);
-		if (handle == 0)
-			continue;
-		/* to avoid hash conflict */
-		if (!shmem_dir)
-			handle |= IS_POSIX_SHMEM;
-		else
-			handle &= ~IS_POSIX_SHMEM;
-
-		snprintf(namebuf + off, sizeof(namebuf) - off,
-				 ".pgstrom_shmbuf_%u_%d",
-				 PostPortNumber, handle);
-		fdesc = open(namebuf, O_RDWR | O_CREAT | O_EXCL, 0600);
-		if (fdesc < 0 && errno != EEXIST)
-			elog(ERROR, "failed on open('%s'): %m", namebuf);
-	} while (fdesc < 0);
-
-	PG_TRY();
-	{
-		shmemEntry *entry;
-		bool		found;
-
-		entry = hash_search(shmem_tracker_htab,
-							&handle,
-							HASH_ENTER,
-							&found);
-		if (found)
-			elog(ERROR, "Bug? duplicated shmem entry");
-		entry->shmem_handle = handle;
-		entry->shmem_fdesc  = fdesc;
-		strcpy(entry->shmem_name, namebuf);
-		entry->owner = CurrentResourceOwner;
-	}
-	PG_CATCH();
-	{
-		if (close(fdesc) != 0)
-			elog(WARNING, "failed on close('%s'): %m", namebuf);
-		if (unlink(namebuf) != 0)
-			elog(WARNING, "failed on unlink('%s'): %m", namebuf);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	return handle;
-}
-
-void
-__shmemDrop(uint32_t shmem_handle)
-{
-	if (shmem_tracker_htab)
-	{
-		shmemEntry *entry;
-
-		entry = hash_search(shmem_tracker_htab,
-							&shmem_handle,
-							HASH_REMOVE,
-							NULL);
-		if (entry)
-		{
-			if (unlink(entry->shmem_name) != 0)
-				elog(WARNING, "failed on unlink('%s'): %m", entry->shmem_name);
-			if (close(entry->shmem_fdesc) != 0)
-				elog(WARNING, "failed on close('%s'): %m", entry->shmem_name);
-			return;
-		}
-	}
-	elog(ERROR, "failed on __shmemDrop - no such segment (%u)", shmem_handle);
-}
-
 void *
-__mmapShmem(uint32_t shmem_handle,
-			size_t   shmem_length,
-			const DpuStorageEntry *ds_entry)
+__mmapFile(void *addr, size_t length,
+		   int prot, int flags, int fdesc, off_t offset)
 {
-	void	   *mmap_addr = MAP_FAILED;
-	size_t		mmap_size = TYPEALIGN(PAGE_SIZE, shmem_length);
-	int			mmap_prot = PROT_READ | PROT_WRITE;
-	int			mmap_flags = MAP_SHARED;
-	mmapEntry  *mmap_entry = NULL;
-	shmemEntry *shmem_entry = NULL;
-	int			fdesc = -1;
-	const char *shmem_dir = "/dev/shm";
-	const char *fname = NULL;
-	struct stat	stat_buf;
+	void	   *mmap_addr;
+	size_t		mmap_size = TYPEALIGN(PAGE_SIZE, length);
+	mmapEntry  *entry;
 	bool		found;
-	char		namebuf[MAXPGPATH];
 
-	if (ds_entry)
-		shmem_dir = DpuStorageEntryBaseDir(ds_entry);
 	if (!mmap_tracker_htab)
 	{
 		HASHCTL		hctl;
@@ -1703,83 +1672,35 @@ __mmapShmem(uint32_t shmem_handle,
 		memset(&hctl, 0, sizeof(HASHCTL));
 		hctl.keysize = sizeof(void *);
 		hctl.entrysize = sizeof(mmapEntry);
+		hctl.hcxt = CacheMemoryContext;
 		mmap_tracker_htab = hash_create("mmap_tracker_htab",
 										256,
 										&hctl,
-										HASH_ELEM | HASH_BLOBS);
+										HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 		RegisterResourceReleaseCallback(cleanup_mmap_chunks, 0);
 	}
-
-	if (shmem_tracker_htab)
-	{
-		shmem_entry = hash_search(shmem_tracker_htab,
-								  &shmem_handle,
-								  HASH_FIND,
-								  NULL);
-		if (shmem_entry)
-		{
-			size_t		len = strlen(shmem_dir);
-
-			if (strncmp(shmem_entry->shmem_name, shmem_dir, len) != 0 ||
-				shmem_entry->shmem_name[len] != '/')
-				elog(ERROR, "Bug? shmem_dir mismatch '%s'", shmem_dir);
-			fdesc = shmem_entry->shmem_fdesc;
-			fname = shmem_entry->shmem_name;
-		}
-	}
-	if (fdesc < 0)
-	{
-		snprintf(namebuf, sizeof(namebuf),
-				 "%s/.pgstrom_shmbuf_%u_%d",
-				 shmem_dir, PostPortNumber, shmem_handle);
-		fdesc = open(namebuf, O_RDWR, 0600);
-		if (fdesc < 0)
-			elog(ERROR, "failed on open('%s'): %m", namebuf);
-		fname = namebuf;
-	}
-
+	mmap_addr = mmap(addr, mmap_size, prot, flags, fdesc, offset);
+	if (mmap_addr == MAP_FAILED)
+		return MAP_FAILED;
 	PG_TRY();
 	{
-		if (fstat(fdesc, &stat_buf) != 0)
-			elog(ERROR, "failed on fstat('%s'): %m", fname);
-		if (stat_buf.st_size < mmap_size)
-		{
-			while (fallocate(fdesc, 0, 0, mmap_size) != 0)
-			{
-				if (errno != EINTR)
-					elog(ERROR, "failed on fallocate('%s', %lu): %m",
-						 fname, mmap_size);
-			}
-		}
-		mmap_addr = mmap(NULL, mmap_size, mmap_prot, mmap_flags, fdesc, 0);
-		if (mmap_addr == MAP_FAILED)
-			elog(ERROR, "failed on mmap(2): %m");
-
-		mmap_entry = hash_search(mmap_tracker_htab,
-								 &mmap_addr,
-								 HASH_ENTER,
-								 &found);
+		entry = hash_search(mmap_tracker_htab,
+							&mmap_addr,
+							HASH_ENTER,
+							&found);
 		if (found)
 			elog(ERROR, "Bug? duplicated mmap entry");
-		Assert(mmap_entry->mmap_addr == mmap_addr);
-		mmap_entry->mmap_size  = mmap_size;
-		mmap_entry->mmap_prot  = mmap_prot;
-		mmap_entry->mmap_flags = mmap_flags;
-		mmap_entry->owner      = CurrentResourceOwner;
-
-		if (!shmem_entry)
-			close(fdesc);
+		Assert(entry->mmap_addr == mmap_addr);
+		entry->mmap_size = mmap_size;
+		entry->mmap_prot = prot;
+		entry->mmap_flags = flags;
+		entry->owner = CurrentResourceOwner;
 	}
 	PG_CATCH();
 	{
-		if (mmap_addr != MAP_FAILED)
-		{
-			if (munmap(mmap_addr, mmap_size) != 0)
-				elog(WARNING, "failed on munmap(%p, %zu) of '%s': %m",
-					 mmap_addr, mmap_size, fname);
-		}
-		if (!shmem_entry && close(fdesc) != 0)
-			elog(WARNING, "failed on close('%s'): %m", fname);
+		if (munmap(mmap_addr, mmap_size) != 0)
+			elog(WARNING, "failed on munmap(%p, %zu): %m",
+				 mmap_addr, mmap_size);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -1787,26 +1708,213 @@ __mmapShmem(uint32_t shmem_handle,
 	return mmap_addr;
 }
 
-bool
-__munmapShmem(void *mmap_addr)
+int
+__munmapFile(void *mmap_addr)
 {
+	mmapEntry  *entry;
+	int			rv;
+
 	if (mmap_tracker_htab)
 	{
-		mmapEntry  *entry
-			= hash_search(mmap_tracker_htab,
-						  &mmap_addr,
-						  HASH_REMOVE,
-						  NULL);
+		entry = hash_search(mmap_tracker_htab,
+							&mmap_addr, HASH_REMOVE, NULL);
 		if (entry)
 		{
-			if (munmap(entry->mmap_addr,
-					   entry->mmap_size) != 0)
+			rv = munmap(entry->mmap_addr,
+						entry->mmap_size);
+			if (rv != 0)
+			{
+				int		errno_saved = errno;
+
 				elog(WARNING, "failed on munmap(%p, %zu): %m",
 					 entry->mmap_addr,
 					 entry->mmap_size);
-			return true;
+				errno = errno_saved;
+			}
+			return rv;
 		}
 	}
-	elog(ERROR, "it looks addr=%p not memory-mapped", mmap_addr);
-	return false;
+	/* mmapEntry not found */
+	errno = EINVAL;
+	return -1;
 }
+
+void *
+__mremapFile(void *mmap_addr, size_t new_size)
+{
+	mmapEntry  *entry = NULL;
+	void	   *addr;
+
+	if (mmap_tracker_htab)
+	{
+		entry = hash_search(mmap_tracker_htab,
+							&mmap_addr, HASH_FIND, NULL);
+	}
+	if (!entry)
+	{
+		errno = EINVAL;
+		return MAP_FAILED;
+	}
+	/* nothing to do */
+	if (new_size <= entry->mmap_size)
+		return entry->mmap_addr;
+	addr = mremap(entry->mmap_addr,
+				  entry->mmap_size,
+				  new_size,
+				  MREMAP_MAYMOVE);
+	if (addr == MAP_FAILED)
+		return MAP_FAILED;
+
+	entry->mmap_addr = addr;
+	entry->mmap_size = new_size;
+	return addr;
+}
+
+/*
+ * dummy entry for deprecated functions
+ */
+static void
+__pg_deprecated_function(PG_FUNCTION_ARGS, const char *cfunc_name)
+{
+	FmgrInfo   *flinfo = fcinfo->flinfo;
+
+	if (OidIsValid(flinfo->fn_oid))
+		elog(ERROR, "'%s' on behalf of %s is already deprecated",
+			 cfunc_name, format_procedure(flinfo->fn_oid));
+	elog(ERROR, "'%s' is already deprecated", cfunc_name);
+}
+
+#define PG_DEPRECATED_FUNCTION(cfunc_name)				\
+	Datum	cfunc_name(PG_FUNCTION_ARGS);				\
+	Datum	cfunc_name(PG_FUNCTION_ARGS)				\
+	{													\
+		__pg_deprecated_function(fcinfo, __FUNCTION__);	\
+		PG_RETURN_NULL();								\
+	}													\
+	PG_FUNCTION_INFO_V1(cfunc_name)
+
+/* deprecated functions */
+/*
+ * SQL functions for GPU attributes (deprecated)
+ */
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_device_name);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_global_memsize);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_max_blocksize);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_warp_size);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_max_shared_memory_perblock);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_num_registers_perblock);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_num_multiptocessors);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_num_cuda_cores);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_cc_major);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_cc_minor);
+PG_DEPRECATED_FUNCTION(pgstrom_gpu_pci_id);
+
+/* deadcode/gstore_(fdw|buf).c */
+PG_DEPRECATED_FUNCTION(pgstrom_reggstore_in);
+PG_DEPRECATED_FUNCTION(pgstrom_reggstore_out);
+PG_DEPRECATED_FUNCTION(pgstrom_reggstore_recv);
+PG_DEPRECATED_FUNCTION(pgstrom_reggstore_send);
+
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_chunk_info);
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_format);
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_nitems);
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_nattrs);
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_fdw_rawsize);
+PG_DEPRECATED_FUNCTION(pgstrom_gstore_export_ipchandle);
+
+/* deadcode/largeobject.c */
+PG_DEPRECATED_FUNCTION(pgstrom_lo_import_gpu);
+PG_DEPRECATED_FUNCTION(pgstrom_lo_export_gpu);
+
+/* deadcode/pl_cuda_v2.c */
+PG_DEPRECATED_FUNCTION(plcuda_function_validator);
+PG_DEPRECATED_FUNCTION(plcuda_function_handler);
+PG_DEPRECATED_FUNCTION(pgsql_table_attr_numbers_by_names);
+PG_DEPRECATED_FUNCTION(pgsql_table_attr_number_by_name);
+PG_DEPRECATED_FUNCTION(pgsql_table_attr_types_by_names);
+PG_DEPRECATED_FUNCTION(pgsql_table_attr_type_by_name);
+PG_DEPRECATED_FUNCTION(pgsql_check_attrs_of_types);
+PG_DEPRECATED_FUNCTION(pgsql_check_attrs_of_type);
+PG_DEPRECATED_FUNCTION(pgsql_check_attr_of_type);
+
+/* arrow_fdw.c */
+PG_DEPRECATED_FUNCTION(pgstrom_arrow_fdw_export_cupy);
+PG_DEPRECATED_FUNCTION(pgstrom_arrow_fdw_export_cupy_pinned);
+PG_DEPRECATED_FUNCTION(pgstrom_arrow_fdw_unpin_gpu_buffer);
+PG_DEPRECATED_FUNCTION(pgstrom_arrow_fdw_put_gpu_buffer);
+
+/* deadcode/matrix.c */
+PG_DEPRECATED_FUNCTION(array_matrix_accum);
+PG_DEPRECATED_FUNCTION(array_matrix_accum_varbit);
+PG_DEPRECATED_FUNCTION(varbit_to_int4_array);
+PG_DEPRECATED_FUNCTION(int4_array_to_varbit);
+PG_DEPRECATED_FUNCTION(array_matrix_final_bool);
+PG_DEPRECATED_FUNCTION(array_matrix_final_int2);
+PG_DEPRECATED_FUNCTION(array_matrix_final_int4);
+PG_DEPRECATED_FUNCTION(array_matrix_final_int8);
+PG_DEPRECATED_FUNCTION(array_matrix_final_float4);
+PG_DEPRECATED_FUNCTION(array_matrix_final_float8);
+PG_DEPRECATED_FUNCTION(array_matrix_unnest);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_bool);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_int2);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_int4);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_int8);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_float4);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_float8);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_boolt);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_boolb);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_int2t);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_int2b);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_int4t);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_int4b);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_int8t);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_int8b);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_float4t);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_float4b);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_float8t);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_scalar_float8b);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_bool);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_int2);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_int4);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_int8);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_float4);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_float8);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_booll);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_boolr);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_int2l);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_int2r);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_int4l);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_int4r);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_int8l);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_int8r);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_float4l);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_float4r);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_float8l);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_scalar_float8r);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_accum);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_final_bool);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_final_int2);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_final_int4);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_final_int8);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_final_float4);
+PG_DEPRECATED_FUNCTION(array_matrix_rbind_final_float8);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_accum);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_final_bool);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_final_int2);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_final_int4);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_final_int8);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_final_float4);
+PG_DEPRECATED_FUNCTION(array_matrix_cbind_final_float8);
+PG_DEPRECATED_FUNCTION(array_matrix_transpose_bool);
+PG_DEPRECATED_FUNCTION(array_matrix_transpose_int2);
+PG_DEPRECATED_FUNCTION(array_matrix_transpose_int4);
+PG_DEPRECATED_FUNCTION(array_matrix_transpose_int8);
+PG_DEPRECATED_FUNCTION(array_matrix_transpose_float4);
+PG_DEPRECATED_FUNCTION(array_matrix_transpose_float8);
+PG_DEPRECATED_FUNCTION(float4_as_int4);		/* duplicated, see float2.c */
+PG_DEPRECATED_FUNCTION(int4_as_float4);		/* duplicated, see float2.c */
+PG_DEPRECATED_FUNCTION(float8_as_int8);		/* duplicated, see float2.c */
+PG_DEPRECATED_FUNCTION(int8_as_float8);		/* duplicated, see float2.c */
+PG_DEPRECATED_FUNCTION(array_matrix_validation);
+PG_DEPRECATED_FUNCTION(array_matrix_height);
+PG_DEPRECATED_FUNCTION(array_matrix_width);
