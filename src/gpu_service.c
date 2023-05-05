@@ -1479,7 +1479,6 @@ resume_kernel:
 			kgtask->resume_context = true;
 			kgtask->suspend_count = 0;
 			__GpuServDebug("suspend / resume happen\n");
-			//todo - expand kds_final if GpuPreAgg
 			goto resume_kernel;
 		}
 		/* send back status and kds_dst */

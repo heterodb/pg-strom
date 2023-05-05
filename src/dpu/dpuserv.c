@@ -1875,6 +1875,7 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 	kern_session_info  *session = dclient->session;
 	kern_multirels	   *kmrels = dclient->kmrels;
 	kern_data_store	   *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels,depth-1);
+	bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels,depth-1);
 	kern_expression	   *kexp_load_vars = SESSION_KEXP_JOIN_LOAD_VARS(session,depth-1);
 	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth-1);
 	bool				matched = false;
@@ -1914,7 +1915,11 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 			}
 		}
 		if (status.value != 0)
+		{
 			matched = true;
+			if (oj_map)
+				oj_map[rowid] = true;
+		}
 	}
 	/* LEFT OUTER if needed */
 	if (kmrels->chunks[depth-1].left_outer && !matched)
@@ -1949,6 +1954,7 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 	kern_session_info  *session = dclient->session;
 	kern_multirels	   *kmrels = dclient->kmrels;
 	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
+	bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth-1);
 	kern_expression	   *kexp_load_vars = SESSION_KEXP_JOIN_LOAD_VARS(session,depth-1);
 	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth-1);
 	kern_expression	   *kexp_hash_value = SESSION_KEXP_HASH_VALUE(session,depth-1);
@@ -1993,7 +1999,11 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 			}
 		}
 		if (status.value != 0)
+		{
 			matched = true;
+			if (oj_map)
+				oj_map[khitem->t.rowid] = true;
+		}
 	}
 	/* LEFT OUTER if needed */
 	if (kmrels->chunks[depth-1].left_outer && !matched)
@@ -2251,78 +2261,118 @@ static void
 dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 {
 	XpuCommand		resp;
-	struct iovec	iovec[5];
+	struct iovec   *iovec_array;
 	struct iovec   *iov;
 	int				iovcnt = 0;
 	size_t			resp_sz;
 	size_t			sz1, sz2, sz3;
+	kern_multirels *kmrels = dclient->kmrels;
 	kern_data_store *kds_final = dclient->kds_final;
 
+	/* iovec allocation */
+	iovec_array = alloca(sizeof(struct iovec) *
+						 (kmrels ? kmrels->num_rels : 0) + 8);
 	/* Xcmd for the response */
 	memset(&resp, 0, sizeof(XpuCommand));
 	resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag   = XpuCommandTag__Success;
-	resp.u.results.chunks_nitems = 1;
-	resp.u.results.chunks_offset = resp_sz;
 
-	iov = &iovec[iovcnt++];
+	iov = &iovec_array[iovcnt++];
     iov->iov_base = &resp;
     iov->iov_len  = resp_sz;
 
-	if (kds_final->format == KDS_FORMAT_HASH)
+	if (kds_final)
 	{
-		assert(kds_final->hash_nslots > 0);
-		sz1 = KDS_HEAD_LENGTH(kds_final);
-		iov = &iovec[iovcnt++];
-		iov->iov_base = kds_final;
-		iov->iov_len  = sz1;
-
-		sz2 = MAXALIGN(sizeof(uint32_t) * kds_final->nitems);
-		if (sz2 > 0)
+		if (kds_final->format == KDS_FORMAT_HASH)
 		{
-			iov = &iovec[iovcnt++];
-			iov->iov_base = KDS_GET_ROWINDEX(kds_final);
-			iov->iov_len  = sz2;
-		}
-
-		sz3 = __kds_unpack(kds_final->usage);
-		if (sz3 > 0)
-		{
-			iov = &iovec[iovcnt++];
-			iov->iov_base = (char *)kds_final + kds_final->length - sz3;
-			iov->iov_len  = sz3;
-		}
-		/* fixup kds */
-		kds_final->format = KDS_FORMAT_ROW;
-		kds_final->hash_nslots = 0;
-		kds_final->length = (sz1 + sz2 + sz3);
-	}
-	else
-	{
-		assert(kds_final->format == KDS_FORMAT_ROW &&
-			   kds_final->hash_nslots == 0);
-		sz1 = (KDS_HEAD_LENGTH(kds_final) +
-			   MAXALIGN(sizeof(uint32_t) * kds_final->nitems));
-		if (sz1 > 0)
-		{
-			iov = &iovec[iovcnt++];
+			assert(kds_final->hash_nslots > 0);
+			sz1 = KDS_HEAD_LENGTH(kds_final);
+			iov = &iovec_array[iovcnt++];
 			iov->iov_base = kds_final;
 			iov->iov_len  = sz1;
-		}
-		sz2 = __kds_unpack(kds_final->usage);
-		if (sz2 > 0)
-		{
-			iov = &iovec[iovcnt++];
-			iov->iov_base = (char *)kds_final + kds_final->length - sz2;
-			iov->iov_len  = sz2;
-		}
-		/* fixup kds */
-		kds_final->length = sz1 + sz2;
-	}
-	resp.length = resp_sz + kds_final->length;
 
-	__dpuClientWriteBack(dclient, iovec, iovcnt);
+			sz2 = MAXALIGN(sizeof(uint32_t) * kds_final->nitems);
+			if (sz2 > 0)
+			{
+				iov = &iovec_array[iovcnt++];
+				iov->iov_base = KDS_GET_ROWINDEX(kds_final);
+				iov->iov_len  = sz2;
+			}
+
+			sz3 = __kds_unpack(kds_final->usage);
+			if (sz3 > 0)
+			{
+				iov = &iovec_array[iovcnt++];
+				iov->iov_base = (char *)kds_final + kds_final->length - sz3;
+				iov->iov_len  = sz3;
+			}
+			/* fixup kds */
+			kds_final->format = KDS_FORMAT_ROW;
+			kds_final->hash_nslots = 0;
+			kds_final->length = (sz1 + sz2 + sz3);
+		}
+		else
+		{
+			assert(kds_final->format == KDS_FORMAT_ROW &&
+				   kds_final->hash_nslots == 0);
+			sz1 = (KDS_HEAD_LENGTH(kds_final) +
+				   MAXALIGN(sizeof(uint32_t) * kds_final->nitems));
+			if (sz1 > 0)
+			{
+				iov = &iovec_array[iovcnt++];
+				iov->iov_base = kds_final;
+				iov->iov_len  = sz1;
+			}
+			sz2 = __kds_unpack(kds_final->usage);
+			if (sz2 > 0)
+			{
+				iov = &iovec_array[iovcnt++];
+				iov->iov_base = (char *)kds_final + kds_final->length - sz2;
+				iov->iov_len  = sz2;
+			}
+			/* fixup kds */
+			kds_final->length = sz1 + sz2;
+		}
+		resp.u.results.chunks_nitems = 1;
+		resp.u.results.chunks_offset = resp_sz;
+		resp_sz += kds_final->length;
+	}
+
+	/*
+	 * Pack outer join map if this is the final call on this device
+	 */
+	if (xcmd->u.fin.final_this_device && kmrels)
+	{
+		uint32_t	ojmap_length = 0;
+
+		for (int i=0; i < kmrels->num_rels; i++)
+		{
+			kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, i);
+			bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, i);
+
+			if (oj_map)
+			{
+				uint32_t	map_sz = MAXALIGN(sizeof(bool) * kds_in->nitems);
+
+				iov = &iovec_array[iovcnt++];
+				iov->iov_base = oj_map;
+				iov->iov_len = map_sz;
+
+				ojmap_length += map_sz;
+			}
+		}
+		if (ojmap_length > 0)
+		{
+			resp.tag = XpuCommandTag__SuccessAndRightOuter;
+			resp.u.results.ojmap_offset = resp_sz;
+			resp.u.results.ojmap_length = ojmap_length;
+			resp_sz += ojmap_length;
+		}
+	}
+	resp.length = resp_sz;
+
+	__dpuClientWriteBack(dclient, iovec_array, iovcnt);
 }
 
 /*

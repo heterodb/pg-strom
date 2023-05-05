@@ -1783,6 +1783,8 @@ typedef struct {
 typedef struct {
 	uint32_t	chunks_offset;		/* offset of kds_dst array */
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
+	uint32_t	ojmap_offset;		/* offset of outer-join-map */
+	uint32_t	ojmap_length;		/* length of outer-join-map */
 	/* statistics */
 	uint32_t	nitems_raw;
 	uint32_t	nitems_in;
