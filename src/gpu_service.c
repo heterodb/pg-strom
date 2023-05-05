@@ -71,7 +71,8 @@ static dlist_head		gpuserv_gpucontext_list;
 static int				gpuserv_epoll_fdesc = -1;
 static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
-static bool			   *gpuserv_debug_output = NULL;
+static pg_atomic_uint32 *gpuserv_debug_output = NULL;
+static bool				__gpuserv_debug_output_dummy;
 
 #define __GpuServDebug(fmt,...)										\
 	do {															\
@@ -88,7 +89,23 @@ static bool			   *gpuserv_debug_output = NULL;
 		}															\
 	} while(0)
 
-void	gpuservBgWorkerMain(Datum arg);
+static void
+gpuserv_debug_output_assign(bool newval, void *extra)
+{
+	if (gpuserv_debug_output)
+		pg_atomic_write_u32(gpuserv_debug_output, newval ? 1 : 0);
+	else
+		__gpuserv_debug_output_dummy = (newval ? 1 : 0);
+}
+
+static const char *
+gpuserv_debug_output_show(void)
+{
+	if (gpuserv_debug_output)
+		return (pg_atomic_read_u32(gpuserv_debug_output) != 0 ? "on" : "off");
+
+	return (__gpuserv_debug_output_dummy ? "on" : "off");
+}
 
 /*
  * cuStrError
@@ -2351,17 +2368,9 @@ pgstrom_startup_executor(void)
 	if (shmem_startup_next)
 		(*shmem_startup_next)();
 	gpuserv_debug_output = ShmemInitStruct("pg_strom.gpuserv_debug_output",
-										   MAXALIGN(sizeof(bool)),
+										   MAXALIGN(sizeof(pg_atomic_uint32)),
 										   &found);
-	if (!found)
-		DefineCustomBoolVariable("pg_strom.gpuserv_debug_output",
-								 "enables to generate debug message of GPU service",
-								 NULL,
-								 gpuserv_debug_output,
-								 false,
-								 PGC_SUSET,
-								 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
-								 NULL, NULL, NULL);
+	pg_atomic_init_u32(gpuserv_debug_output, __gpuserv_debug_output_dummy);
 }
 
 /*
@@ -2431,6 +2440,16 @@ pgstrom_init_gpu_service(void)
 							PGC_SIGHUP,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MS | GUC_NO_SHOW_ALL,
 							NULL, NULL, NULL);
+	DefineCustomBoolVariable("pg_strom.gpuserv_debug_output",
+							 "enables to generate debug message of GPU service",
+							 NULL,
+							 &__gpuserv_debug_output_dummy,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
+							 NULL,
+							 gpuserv_debug_output_assign,
+							 gpuserv_debug_output_show);
 	for (int i=0; i < GPU_QUERY_BUFFER_NSLOTS; i++)
 		dlist_init(&gpu_query_buffer_hslot[i]);
 

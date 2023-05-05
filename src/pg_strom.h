@@ -727,6 +727,7 @@ extern void		gpuClientWriteBack(gpuClient *gclient,
 								   size_t resp_sz,
 								   int kds_nitems,
 								   kern_data_store **kds_array);
+extern void		gpuservBgWorkerMain(Datum arg);
 extern void		pgstrom_init_gpu_service(void);
 
 /*
