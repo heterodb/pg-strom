@@ -2359,12 +2359,43 @@ __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 void
 ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts)
 {
+	uint32_t	count;
+
+	count = pg_atomic_add_fetch_u32(pts->rjoin_exit_count, 1);
+	//TODO: use sibling count if partitioned join
+	if (count == 1)
+	{
+		for (int depth=1; depth <= pts->num_rels; depth++)
+		{
+			JoinType	join_type = pts->inners[depth-1].join_type;
+
+			if (join_type == JOIN_RIGHT || join_type == JOIN_FULL)
+				__execFallbackCpuJoinRightOuterOneDepth(pts, depth);
+		}
+	}
+}
+
+void
+ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts, XpuCommand *resp)
+{
+	kern_multirels *h_kmrels = pts->h_kmrels;
+	bool	   *ojmap_resp = (bool *)((char *)resp + resp->u.results.ojmap_offset);
+
+	Assert(resp->u.results.ojmap_offset +
+		   resp->u.results.ojmap_length <= resp->length);
 	for (int depth=1; depth <= pts->num_rels; depth++)
 	{
-		JoinType	join_type = pts->inners[depth-1].join_type;
+		kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth-1);
+		bool   *ojmap_curr = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth-1);
 
-		if (join_type == JOIN_RIGHT || join_type == JOIN_FULL)
-			__execFallbackCpuJoinRightOuterOneDepth(pts, depth);
+		if (!ojmap_curr)
+			continue;
+
+		for (uint32_t i=0; i < kds_in->nitems; i++)
+		{
+			ojmap_curr[i] |= ojmap_resp[i];
+		}
+		ojmap_resp += MAXALIGN(sizeof(bool) * kds_in->nitems);
 	}
 }
 

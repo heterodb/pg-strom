@@ -308,8 +308,9 @@ typedef struct
 	/* pg-strom's unique plan-id */
 	uint64_t			query_plan_id;
 	/* control variables to detect the last plan-node at parallel execution */
-	pg_atomic_uint32	scan_task_control;
-	slock_t				__rjoin_control_lock;
+	//pg_atomic_uint32	scan_task_control;
+	pg_atomic_uint32	parallel_task_control;
+	pg_atomic_uint32	__rjoin_exit_count;
 	/* statistics */
 	pg_atomic_uint64	source_ntuples;
 	pg_atomic_uint64	source_nvalids;
@@ -397,9 +398,12 @@ struct pgstromTaskState
 	int64_t				curr_index;
 	bool				scan_done;
 	bool				final_done;
-	/* control variables to handle right outer join */
-	slock_t			   *rjoin_control_lock;
-	int				   *rjoin_control_array;	/* per xPU device */
+	/*
+	 * control variables to fire the end-of-task event
+	 * for RIGHT OUTER JOIN and PRE-AGG
+	 */
+	pg_atomic_uint32   *rjoin_devs_count;
+	pg_atomic_uint32   *rjoin_exit_count;
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
@@ -796,6 +800,8 @@ extern void		ExecFallbackCpuJoin(pgstromTaskState *pts,
 									kern_data_store *kds,
 									HeapTuple tuple);
 extern void		ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts);
+extern void		ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts,
+												XpuCommand *resp);
 extern void		pgstrom_init_gpu_join(void);
 
 /*

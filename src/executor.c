@@ -70,7 +70,6 @@ __xpuConnectAttachCommand(void *__priv, XpuCommand *xcmd)
 	else
 	{
 		Assert(xcmd->tag == XpuCommandTag__Success ||
-			   xcmd->tag == XpuCommandTag__SuccessAndRightOuter ||
 			   xcmd->tag == XpuCommandTag__CPUFallback);
 		dlist_push_tail(&conn->ready_cmds_list, &xcmd->chain);
 		conn->num_ready_cmds++;
@@ -624,17 +623,14 @@ pgstromTaskStateBeginScan(pgstromTaskState *pts)
 	uint32_t		curval, newval;
 
 	Assert(conn != NULL);
-	curval = pg_atomic_read_u32(&ps_state->scan_task_control);
+	curval = pg_atomic_read_u32(&ps_state->parallel_task_control);
 	do {
 		if ((curval & 1) != 0)
 			return false;
 		newval = curval + 2;
-	} while (!pg_atomic_compare_exchange_u32(&ps_state->scan_task_control,
+	} while (!pg_atomic_compare_exchange_u32(&ps_state->parallel_task_control,
 											 &curval, newval));
-	SpinLockAcquire(pts->rjoin_control_lock);
-	pts->rjoin_control_array[conn->dev_index]++;
-	SpinLockRelease(pts->rjoin_control_lock);
-
+	pg_atomic_fetch_add_u32(&pts->rjoin_devs_count[conn->dev_index], 1);
 	return true;
 }
 
@@ -650,36 +646,19 @@ pgstromTaskStateEndScan(pgstromTaskState *pts, kern_final_task *kfin)
 
 	Assert(conn != NULL);
 	memset(kfin, 0, sizeof(kern_final_task));
-	curval = pg_atomic_read_u32(&ps_state->scan_task_control);
+	curval = pg_atomic_read_u32(&ps_state->parallel_task_control);
 	do {
 		Assert(curval >= 2);
 		newval = ((curval - 2) | 1);
-	} while (!pg_atomic_compare_exchange_u32(&ps_state->scan_task_control,
+	} while (!pg_atomic_compare_exchange_u32(&ps_state->parallel_task_control,
 											 &curval, newval));
 	if (newval == 1)
 		kfin->final_plan_node = true;
-	SpinLockAcquire(pts->rjoin_control_lock);
-	Assert(pts->rjoin_control_array[conn->dev_index] > 0);
-	if (--pts->rjoin_control_array[conn->dev_index] == 0)
-	{
-		bool	final_all_devices = true;
 
+	if (pg_atomic_sub_fetch_u32(&pts->rjoin_devs_count[conn->dev_index], 1) == 0)
 		kfin->final_this_device = true;
-		for (int i=0; pts->rjoin_control_array[i] >= 0; i++)
-		{
-			if (pts->rjoin_control_array[i] > 0)
-			{
-				final_all_devices = false;
-				break;
-			}
-		}
-		kfin->final_all_devices = final_all_devices;
-	}
-	SpinLockRelease(pts->rjoin_control_lock);
 
-	return (kfin->final_plan_node   |
-			kfin->final_this_device |
-			kfin->final_all_devices);
+	return (kfin->final_plan_node | kfin->final_this_device);
 }
 
 /*
@@ -689,14 +668,20 @@ static void
 pgstromTaskStateResetScan(pgstromTaskState *pts)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
+	int		num_devs = 0;
 
-	pg_atomic_write_u32(&ps_state->scan_task_control, 0);
-	pts->rjoin_control_lock = &ps_state->__rjoin_control_lock;
-	pts->rjoin_control_array = (int *)
+	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+		num_devs = numGpuDevAttrs;
+	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+		num_devs = DpuStorageEntryCount();
+	
+	pg_atomic_write_u32(&ps_state->parallel_task_control, 0);
+	pg_atomic_write_u32(&ps_state->__rjoin_exit_count, 0);
+	pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
+	pts->rjoin_devs_count = (pg_atomic_uint32 *)
 		((char *)ps_state + MAXALIGN(offsetof(pgstromSharedState,
-											  inners[pts->num_rels])));
-	for (int i=0; pts->rjoin_control_array[i] >= 0; i++)
-		pts->rjoin_control_array[i] = 0;
+                                              inners[pts->num_rels])));
+	memset(pts->rjoin_devs_count, 0, sizeof(pg_atomic_uint32) * num_devs);
 }
 
 /*
@@ -956,6 +941,36 @@ pgstromExecFinalChunk(pgstromTaskState *pts,
 }
 
 /*
+ * pgstromExecFinalChunkDummy
+ *
+ * In case of xPU-JOIN without RIGHT OUTER, this handler inject an empty
+ * XpuCommandTag__Success command on the tail of ready list just to increment
+ * pts->rjoin_exit_count.
+ */
+static XpuCommand *
+pgstromExecFinalChunkDummy(pgstromTaskState *pts,
+						   kern_final_task *kfin,
+						   struct iovec *xcmd_iov, int *xcmd_iovcnt)
+{
+	XpuConnection  *conn = pts->conn;
+	XpuCommand	   *xcmd;
+
+	if (kfin->final_plan_node)
+	{
+		xcmd = __xpuConnectAllocCommand(conn, sizeof(XpuCommand));
+		if (!xcmd)
+			elog(ERROR, "out of memory");
+		memset(xcmd, 0, sizeof(XpuCommand));
+		xcmd->magic = XpuCommandMagicNumber;
+		xcmd->tag = XpuCommandTag__Success;
+		xcmd->length = offsetof(XpuCommand, u.results.stats);
+		xcmd->u.results.final_plan_node = true;
+		__xpuConnectAttachCommand(conn, xcmd);
+	}
+	return NULL;
+}
+
+/*
  * __setupTaskStateRequestBuffer
  */
 static void
@@ -1104,6 +1119,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 							   0);
 			slot_id++;
 		}
+		pts->fallback_slot = MakeSingleTupleTableSlot(fallback_tdesc,
+													  &TTSOpsVirtual);
 	}
 	pts->fallback_proj =
 		ExecBuildProjectionInfo(pp_info->fallback_tlist,
@@ -1227,6 +1244,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	{
 		if (has_right_outer)
 			pts->cb_final_chunk = pgstromExecFinalChunk;
+		else
+			pts->cb_final_chunk = pgstromExecFinalChunkDummy;
 		pts->cb_cpu_fallback = ExecFallbackCpuJoin;
 	}
 	else if ((pts->task_kind & DEVTASK__PREAGG) != 0)
@@ -1264,10 +1283,11 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 		resp = pts->curr_resp;
 		switch (resp->tag)
 		{
-			case XpuCommandTag__SuccessAndRightOuter:
-				ExecFallbackCpuJoinRightOuter(pts);
-				/* fall through */
 			case XpuCommandTag__Success:
+				if (resp->u.results.ojmap_offset != 0)
+					ExecFallbackCpuJoinOuterJoinMap(pts, resp);
+				if (resp->u.results.final_plan_node)
+					ExecFallbackCpuJoinRightOuter(pts);
 				if (resp->u.results.chunks_nitems == 0)
 					goto next_chunks;
 				pts->curr_kds = (kern_data_store *)
@@ -1444,7 +1464,7 @@ pgstromSharedStateEstimateDSM(CustomScanState *node,
 		num_devs = numGpuDevAttrs;
 	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
 		num_devs = DpuStorageEntryCount();
-	len += MAXALIGN(sizeof(int) * (num_devs+1));
+	len += MAXALIGN(sizeof(pg_atomic_uint32) * num_devs);
 
 	if (!pts->arrow_state)
 		len += table_parallelscan_estimate(relation, snapshot);
@@ -1488,14 +1508,11 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		ps_state->ss_length = dsm_length;
 		dsm_addr += MAXALIGN(dsm_length);
 
-		/* control variables for scan/rjoin */
-		pg_atomic_init_u32(&ps_state->scan_task_control, 0);
-		SpinLockInit(&ps_state->__rjoin_control_lock);
-		pts->rjoin_control_lock = &ps_state->__rjoin_control_lock;
-		pts->rjoin_control_array = (int *)dsm_addr;
-		memset(pts->rjoin_control_array, 0, sizeof(int) * (num_devs+1));
-		pts->rjoin_control_array[num_devs] = -1;	/* terminator */
-		dsm_addr += MAXALIGN(sizeof(int) * (num_devs+1));
+		/* control variables for parallel tasks */
+		pts->rjoin_devs_count  = (pg_atomic_uint32 *)dsm_addr;
+		memset(dsm_addr, 0, sizeof(pg_atomic_uint32 *) * num_devs);
+		dsm_addr += MAXALIGN(sizeof(pg_atomic_uint32 *) * num_devs);
+		pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
 
 		/* parallel scan descriptor */
 		if (pts->arrow_state)
@@ -1515,13 +1532,10 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		ps_state->ss_length = dsm_length;
 
 		/* control variables for scan/rjoin */
-		pg_atomic_init_u32(&ps_state->scan_task_control, 0);
-		SpinLockInit(&ps_state->__rjoin_control_lock);
-		pts->rjoin_control_lock = &ps_state->__rjoin_control_lock;
-		pts->rjoin_control_array = (int *)
+		pts->rjoin_devs_count = (pg_atomic_uint32 *)
 			MemoryContextAllocZero(estate->es_query_cxt,
-								   sizeof(int) * (num_devs+1));
-		pts->rjoin_control_array[num_devs] = -1;	/* terminator */
+								   sizeof(pg_atomic_uint32 *) * num_devs);
+		pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
 
 		/* scan descriptor */
 		if (pts->arrow_state)
@@ -1549,6 +1563,7 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 							void *coordinate)
 {
 	pgstromTaskState *pts = (pgstromTaskState *)node;
+	pgstromSharedState *ps_state;
 	char	   *dsm_addr = coordinate;
 	int			num_rels = list_length(pts->css.custom_ps);
 	int			num_devs = 0;
@@ -1560,13 +1575,13 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
-	pts->ps_state = (pgstromSharedState *)dsm_addr;
-	Assert(pts->ps_state->num_rels == num_rels);
+	pts->ps_state = ps_state = (pgstromSharedState *)dsm_addr;
+	Assert(ps_state->num_rels == num_rels);
 	dsm_addr += MAXALIGN(offsetof(pgstromSharedState, inners[num_rels]));
 
-	pts->rjoin_control_lock = &pts->ps_state->__rjoin_control_lock;
-	pts->rjoin_control_array = (int *)dsm_addr;
-	dsm_addr += MAXALIGN(sizeof(int) * (num_devs+1));
+	pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
+	pts->rjoin_devs_count = (pg_atomic_uint32 *)dsm_addr;
+	dsm_addr += MAXALIGN(sizeof(pg_atomic_uint32) * num_devs);
 
 	if (pts->arrow_state)
 		pgstromArrowFdwAttachDSM(pts->arrow_state, pts->ps_state);

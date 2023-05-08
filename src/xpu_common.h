@@ -1713,7 +1713,7 @@ typedef struct
 #define XpuCommandTag__Success				0
 #define XpuCommandTag__Error				1
 #define XpuCommandTag__CPUFallback			2
-#define XpuCommandTag__SuccessAndRightOuter	3
+#define XpuCommandTag__SuccessFinal			50
 #define XpuCommandTag__OpenSession			100
 #define XpuCommandTag__XpuTaskExec			110
 #define XpuCommandTag__XpuTaskFinal			119
@@ -1776,7 +1776,6 @@ typedef struct {
 typedef struct {
 	bool		final_plan_node;
 	bool		final_this_device;
-	bool		final_all_devices;
 	char		data[1]				__MAXALIGNED__;
 } kern_final_task;
 
@@ -1785,6 +1784,9 @@ typedef struct {
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
 	uint32_t	ojmap_offset;		/* offset of outer-join-map */
 	uint32_t	ojmap_length;		/* length of outer-join-map */
+	kern_final_task kfin;			/* copy from XpuTaskFinal if any */
+	bool		final_plan_node;
+	bool		final_this_device;
 	/* statistics */
 	uint32_t	nitems_raw;
 	uint32_t	nitems_in;

@@ -1591,7 +1591,6 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 		{
 			kern_multirels *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
 			kern_multirels *h_kmrels = (kern_multirels *)gq_buf->h_kmrels;
-			bool		found_right_outer = false;
 
 			for (int i=0; i < d_kmrels->num_rels; i++)
 			{
@@ -1603,12 +1602,9 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 				{
 					for (uint32_t j=0; j < kds->nitems; j++)
 						h_ojmap[j] |= d_ojmap[j];
-					found_right_outer = true;
+					resp.u.results.final_this_device = true;
 				}
 			}
-			/* host code runs final RIGHT OUTER output? */
-			if (kfin->final_all_devices && found_right_outer)
-				resp.tag = XpuCommandTag__SuccessAndRightOuter;
 		}
 	}
 	/*
@@ -1620,10 +1616,10 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 		{
 			kds_final = (kern_data_store *)gq_buf->m_kds_final;
 			resp.u.results.chunks_nitems = 1;
+			resp.u.results.final_plan_node = true;
 		}
 	}
-
-	//fprintf(stderr, "gpuservHandleGpuTaskFinal: final_this_device=%d final_all_devices=%d final_plan_node=%d resp.tag=%u\n", kfin->final_this_device, kfin->final_all_devices, kfin->final_plan_node, resp.tag);
+	//fprintf(stderr, "gpuservHandleGpuTaskFinal: kfin => {final_this_device=%d final_plan_node=%d} resp => {final_this_device=%d final_plan_node=%d}\n", kfin->final_this_device, kfin->final_plan_node, resp.u.results.final_this_device, resp.u.results.final_plan_node);
 
 	gpuClientWriteBack(gclient, &resp,
 					   resp.u.results.chunks_offset,
