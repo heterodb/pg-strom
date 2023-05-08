@@ -1370,32 +1370,34 @@ resume_kernel:
 			if (gq_buf->m_kds_final_revision == kds_final_revision)
 			{
 				CUdeviceptr	m_devptr;
-				size_t		kds_final_oldsz = kds_old->length;
-				size_t		kds_final_newsz;
+				size_t		length;
 
-				kds_final_newsz = kds_final_oldsz + Min(kds_final_oldsz, 1UL<<30);
-				rc = cuMemAllocManaged(&m_devptr, kds_final_newsz,
+				length = kds_old->length + Min(kds_old->length, 1UL<<30);
+				rc = cuMemAllocManaged(&m_devptr, length,
 									   CU_MEM_ATTACH_GLOBAL);
 				if (rc != CUDA_SUCCESS)
 				{
 					pthreadRWLockUnlock(&gq_buf->m_kds_final_rwlock);
 					gpuClientFatal(gclient, "failed on cuMemAllocManaged(%lu): %s",
-								   kds_final_newsz, cuStrError(rc));
+								   length, cuStrError(rc));
 					goto bailout;
 				}
 				kds_new = (kern_data_store *)m_devptr;
-				fprintf(stderr, "kds_final expand: %lu => %lu\n",
-						kds_final_oldsz, kds_final_newsz);
 				/* early half */
 				sz = (KDS_HEAD_LENGTH(kds_old) +
 					  MAXALIGN(sizeof(uint32_t) * (kds_old->nitems +
 												   kds_old->hash_nslots)));
 				memcpy(kds_new, kds_old, sz);
+				kds_new->length = length;
+
 				/* later falf */
 				sz = __kds_unpack(kds_old->usage);
-				memcpy((char *)kds_new + kds_final_newsz - sz,
-					   (char *)kds_old + kds_final_oldsz - sz, sz);
+				memcpy((char *)kds_new + kds_new->length - sz,
+					   (char *)kds_old + kds_old->length - sz, sz);
+
 				/* swap them */
+				fprintf(stderr, "kds_final expand: %lu => %lu\n",
+						kds_old->length, kds_new->length);
 				cuMemFree(gq_buf->m_kds_final);
 				gq_buf->m_kds_final = m_devptr;
 				gq_buf->m_kds_final_revision++;

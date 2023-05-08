@@ -11,6 +11,8 @@
  */
 #include "dpuserv.h"
 
+struct groupby_final_buffer;
+
 #define PEER_ADDR_LEN	80
 typedef struct
 {
@@ -18,7 +20,7 @@ typedef struct
 	kern_session_info  *session;/* per-session information */
 	kern_multirels	   *kmrels;		/* join inner buffer */
 	size_t				kmrels_sz;	/* join inner buffer mmap-sz */
-	kern_data_store	   *kds_final;	/* group-by final buffer */
+	struct groupby_final_buffer *gf_buf; /* group-by final buffer */
 	volatile bool		in_termination; /* true, if error status */
 	volatile int32_t	refcnt;	/* odd-number as long as socket is active */
 	pthread_mutex_t		mutex;	/* mutex to write the socket */
@@ -233,21 +235,23 @@ __dpuClientElog(dpuClient *dclient,
 /*
  * Get/Put Group-By Final Buffer
  */
-typedef struct
+struct groupby_final_buffer
 {
 	dlist_node	chain;
 	int			refcnt;
 	uint32_t	pgsql_port_number;
 	uint32_t	pgsql_plan_node_id;
 	uint32_t	pgsql_client_hash;
-	kern_data_store kds_final;	/* variable length */
-} groupby_final_buffer;
+	pthread_rwlock_t kds_final_rwlock;
+	kern_data_store *kds_final;
+};
+typedef struct groupby_final_buffer		groupby_final_buffer;
 
 static pthread_mutex_t	groupby_final_buffer_lock;
 #define GROUPBY_FINAL_BUFFER_HASHSZ		200
 static dlist_head		groupby_final_buffer_hash[GROUPBY_FINAL_BUFFER_HASHSZ];
 
-static kern_data_store *
+static bool
 dpuServGetGroupByFinalBuffer(dpuClient *dclient, kern_session_info *session)
 {
 	kern_data_store *kds_final;
@@ -278,41 +282,49 @@ dpuServGetGroupByFinalBuffer(dpuClient *dclient, kern_session_info *session)
 			gf_buf->pgsql_client_hash == hash)
 		{
 			gf_buf->refcnt++;
-			pthreadMutexUnlock(&groupby_final_buffer_lock);
-			return &gf_buf->kds_final;
+			goto found;
 		}
 	}
 	/* not found, so create a new one */
 	kds_final = (kern_data_store *)((char *)session + session->groupby_kds_final);
-	gf_buf = malloc(offsetof(groupby_final_buffer, kds_final) + kds_final->length);
+	gf_buf = calloc(sizeof(groupby_final_buffer), 1);
 	if (!gf_buf)
 	{
 		pthreadMutexUnlock(&groupby_final_buffer_lock);
-		return NULL;
+		fprintf(stderr, "out of memory 1\n");
+		return false;
+	}
+	gf_buf->kds_final = malloc(kds_final->length);
+	if (!gf_buf->kds_final)
+	{
+		pthreadMutexUnlock(&groupby_final_buffer_lock);
+		free(gf_buf);
+		fprintf(stderr, "out of memory 2\n");
+        return false;
 	}
 	gf_buf->refcnt = 1;
 	gf_buf->pgsql_port_number  = session->pgsql_port_number;
 	gf_buf->pgsql_plan_node_id = session->pgsql_plan_node_id;
 	gf_buf->pgsql_client_hash  = hash;
-	memcpy(&gf_buf->kds_final, kds_final, KDS_HEAD_LENGTH(kds_final));
+	pthreadRWLockInit(&gf_buf->kds_final_rwlock);
+	memcpy(gf_buf->kds_final, kds_final, KDS_HEAD_LENGTH(kds_final));
 
 	dlist_push_tail(slot, &gf_buf->chain);
+found:
 	pthreadMutexUnlock(&groupby_final_buffer_lock);
-
-	return &gf_buf->kds_final;
+	dclient->gf_buf = gf_buf;
+	return true;
 }
 
 static void
-dpuServPutGroupByFinalBuffer(kern_data_store *kds_final)
+dpuServPutGroupByFinalBuffer(groupby_final_buffer *gf_buf)
 {
-	groupby_final_buffer *gf_buf = (groupby_final_buffer *)
-		((char *)kds_final - offsetof(groupby_final_buffer, kds_final));
-
 	pthreadMutexLock(&groupby_final_buffer_lock);
 	Assert(gf_buf->refcnt > 0);
 	if (--gf_buf->refcnt == 0)
 	{
 		dlist_delete(&gf_buf->chain);
+		free(gf_buf->kds_final);
 		free(gf_buf);
 	}
 	pthreadMutexUnlock(&groupby_final_buffer_lock);
@@ -336,7 +348,7 @@ dpuServMapSessionBuffers(dpuClient *dclient, kern_session_info *session)
 				 ".pgstrom_shmbuf_%u_%d",
 				 session->pgsql_port_number,
 				 session->join_inner_handle);
-		fdesc = open(namebuf, O_RDONLY);
+		fdesc = open(namebuf, O_RDWR);
 		if (fdesc < 0)
 			return false;
 		if (fstat(fdesc, &stat_buf) != 0)
@@ -360,8 +372,7 @@ dpuServMapSessionBuffers(dpuClient *dclient, kern_session_info *session)
 
 	if (session->groupby_kds_final)
 	{
-		dclient->kds_final = dpuServGetGroupByFinalBuffer(dclient, session);
-		if (!dclient->kds_final)
+		if (!dpuServGetGroupByFinalBuffer(dclient, session))
 			return false;
 	}
 	return true;
@@ -378,8 +389,8 @@ dpuServUnmapSessionBuffers(dpuClient *dclient)
 					(char *)dclient->kmrels,
 					(char *)dclient->kmrels + dclient->kmrels_sz - 1);
 	}
-	if (dclient->kds_final)
-		dpuServPutGroupByFinalBuffer(dclient->kds_final);
+	if (dclient->gf_buf)
+		dpuServPutGroupByFinalBuffer(dclient->gf_buf);
 }
 
 /*
@@ -1221,13 +1232,13 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 	size_t			total_sz;
 
 	assert(kds_final->format == KDS_FORMAT_ROW &&
+		   kds_final->nitems == 0 &&
 		   kds_final->hash_nslots == 0);
 	/* estimate length */
 	tupsz = __writeOutOneTuplePreAgg(kcxt, kds_final, NULL,
 									 kexp_groupby_actions);
 	assert(tupsz > 0);
 	required = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
-	assert(required < 1000);
 	total_sz = (KDS_HEAD_LENGTH(kds_final) +
 				MAXALIGN(sizeof(uint32_t)) +
 				required + __kds_unpack(kds_final->usage));
@@ -1243,10 +1254,10 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 							 kexp_groupby_actions);
 	tupitem->t_len = tupsz;
 	tupitem->rowid = 0;
-	__atomic_write_uint32(KDS_GET_ROWINDEX(kds_final),
-						  __kds_packed((char *)kds_final
-									   + kds_final->length
-									   - (char *)tupitem));
+	KDS_GET_ROWINDEX(kds_final)[kds_final->nitems++]
+		= __kds_packed((char *)kds_final
+					   + kds_final->length
+					   - (char *)tupitem);
 	return tupitem;
 }
 
@@ -1683,6 +1694,41 @@ __updateOneTupleDpuPreAgg(kern_context *kcxt,
 }
 
 /*
+ * expandGroupByFinalBuffer
+ *
+ * NOTE: this function must be called under kds_final_rwlock WRITE-LOCK
+ */
+static bool
+expandGroupByFinalBuffer(groupby_final_buffer *gf_buf)
+{
+	kern_data_store *kds_old = gf_buf->kds_final;
+	kern_data_store *kds_new;
+	size_t		sz, length;
+
+	length = kds_old->length + Min(kds_old->length, 1UL<<30);
+	kds_new = malloc(length);
+	if (!kds_new)
+		return false;
+	/* early half */
+	sz = (KDS_HEAD_LENGTH(kds_old) +
+		  MAXALIGN(sizeof(uint32_t) * (kds_old->nitems +
+									   kds_old->hash_nslots)));
+	memcpy(kds_new, kds_old, sz);
+	kds_new->length = length;
+
+	/* later falf */
+	sz = __kds_unpack(kds_old->usage);
+	memcpy((char *)kds_new + kds_new->length - sz,
+		   (char *)kds_old + kds_old->length - sz, sz);
+
+	/* swap them */
+	gf_buf->kds_final = kds_new;
+	free(kds_old);
+
+	return true;
+}
+
+/*
  * __handleDpuTaskExecNoGroupPreAgg
  */
 static bool
@@ -1690,15 +1736,16 @@ __handleDpuTaskExecNoGroupPreAgg(dpuClient *dclient,
 								 dpuTaskExecState *dtes,
 								 kern_context *kcxt)
 {
+	groupby_final_buffer *gf_buf = dclient->gf_buf;
 	kern_session_info  *session = dclient->session;
-	kern_data_store	   *kds_final = dclient->kds_final;
 	kern_expression	   *kexp_groupby_actions = SESSION_KEXP_GROUPBY_ACTIONS(session);
 	kern_expression	   *karg;
+	kern_data_store	   *kds_final;
 	kern_tupitem	   *tupitem = NULL;
+	bool				has_exclusive = false;
 	int					i;
 
-	assert(kds_final->format == KDS_FORMAT_ROW &&
-		   kexp_groupby_actions->opcode == FuncOpCode__AggFuncs);
+	assert(kexp_groupby_actions->opcode == FuncOpCode__AggFuncs);
 	/* fillup kvars_slot if it involves expression */
 	for (i=0, karg = KEXP_FIRST_ARG(kexp_groupby_actions);
 		 i < kexp_groupby_actions->nr_args;
@@ -1709,54 +1756,43 @@ __handleDpuTaskExecNoGroupPreAgg(dpuClient *dclient,
 			return false;
 	}
 
+	pthreadRWLockReadLock(&gf_buf->kds_final_rwlock);
 	while (!tupitem)
 	{
-		uint32_t	nitems = __volatileRead(&kds_final->nitems);
-		uint32_t	oldval = 0;
+		kds_final = gf_buf->kds_final;
 
-		if (nitems == 1)
+		assert(kds_final->format == KDS_FORMAT_ROW);
+		if (kds_final->nitems == 1)
 		{
 			/* almost case; destination tuple already exists */
 			tupitem = KDS_GET_TUPITEM(kds_final, 0);
 			assert(tupitem != NULL);
 		}
-		else if (nitems == 0)
+		else if (!has_exclusive)
 		{
-			if (__atomic_cas_uint32(&kds_final->nitems, &oldval, UINT_MAX))
-			{
-				/* LOCKED */
-				tupitem = __insertOneTupleNoGroups(kcxt, kds_final,
-												   kexp_groupby_actions);
-				if (!tupitem)
-				{
-					/* UNLOCK with out of memory */
-					oldval = __atomic_write_uint32(&kds_final->nitems, 1);
-					assert(oldval == UINT_MAX);
-					return false;
-				}
-				else
-				{
-					/* UNLOCK with valid tupitem */
-					oldval = __atomic_write_uint32(&kds_final->nitems, 1);
-					assert(oldval == UINT_MAX);
-				}
-			}
-			else
-			{
-				assert(oldval == 1 || oldval == UINT_MAX);
-			}
+			pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
+			pthreadRWLockWriteLock(&gf_buf->kds_final_rwlock);
+			has_exclusive = true;
 		}
 		else
 		{
-			/* works in progress by other threads */
-			assert(nitems == UINT_MAX);
-			sched_yield();
+			assert(kds_final->nitems == 0);
+			tupitem = __insertOneTupleNoGroups(kcxt, kds_final,
+											   kexp_groupby_actions);
+			if (!tupitem &&
+				!expandGroupByFinalBuffer(gf_buf))
+			{
+				/* out of memory */
+				pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
+				return false;
+			}
 		}
 	}
 	/* update the partial aggregation */
 	__updateOneTupleDpuPreAgg(kcxt, kds_final,
 							  &tupitem->htup,
 							  kexp_groupby_actions);
+	pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
 	return true;
 }
 
@@ -1768,19 +1804,20 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 								 dpuTaskExecState *dtes,
 								 kern_context *kcxt)
 {
+	groupby_final_buffer *gf_buf = dclient->gf_buf;
 	kern_session_info  *session = dclient->session;
-	kern_data_store	   *kds_final = dclient->kds_final;
 	kern_expression	   *kexp_groupby_keyhash = SESSION_KEXP_GROUPBY_KEYHASH(session);
 	kern_expression	   *kexp_groupby_keyload = SESSION_KEXP_GROUPBY_KEYLOAD(session);
 	kern_expression	   *kexp_groupby_keycomp = SESSION_KEXP_GROUPBY_KEYCOMP(session);
 	kern_expression	   *kexp_groupby_actions = SESSION_KEXP_GROUPBY_ACTIONS(session);
 	kern_expression	   *karg;
+	kern_data_store	   *kds_final;
 	kern_hashitem	   *hitem;
 	xpu_int4_t			hash;
+	bool				has_exclusive = false;
 	int					i;
 
-	assert(kds_final->format == KDS_FORMAT_HASH &&
-		   kexp_groupby_keyhash != NULL &&
+	assert(kexp_groupby_keyhash != NULL &&
 		   kexp_groupby_keyload != NULL &&
 		   kexp_groupby_keycomp != NULL &&
 		   kexp_groupby_actions != NULL);
@@ -1800,11 +1837,15 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 		return false;
 	assert(!XPU_DATUM_ISNULL(&hash));
 
+	pthreadRWLockReadLock(&gf_buf->kds_final_rwlock);
 	do {
-		uint32_t   *hslot = KDS_GET_HASHSLOT(kds_final, hash.value);
+		uint32_t   *hslot;
 		uint32_t	saved;
 		xpu_bool_t	status;
 
+		kds_final = gf_buf->kds_final;
+		assert(kds_final->format == KDS_FORMAT_HASH);
+		hslot = KDS_GET_HASHSLOT(kds_final, hash.value);
 		for (hitem = KDS_HASH_FIRST_ITEM(kds_final, hslot, &saved);
 			 hitem != NULL;
 			 hitem = KDS_HASH_NEXT_ITEM(kds_final, hitem))
@@ -1824,27 +1865,49 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 			}
 		}
 
-		if (!hitem && saved != UINT_MAX)
+		if (!hitem)
 		{
-			/* try lock */
-			if (__atomic_cas_uint32(hslot, &saved, UINT_MAX))
+			if (saved == UINT_MAX)
 			{
-				hitem = __insertOneTupleGroupBy(kcxt, kds_final, kexp_groupby_actions);
+				/* someone already hold the hslot-lock */
+				sched_yield();
+			}
+			else if (__atomic_cas_uint32(hslot, &saved, UINT_MAX))
+			{
+				/* hslot-lock is now acquired */
+				hitem = __insertOneTupleGroupBy(kcxt, kds_final,
+												kexp_groupby_actions);
 				if (hitem)
 				{
 					uint32_t	offset;
 
 					hitem->hash = hash.value;
 					hitem->next = saved;
-					offset = (char *)hitem - (char *)kds_final;
+					offset = ((char *)kds_final
+							  + kds_final->length
+							  - (char *)hitem);
 					/* insert and unlock */
 					__atomic_write_uint32(hslot, __kds_packed(offset));
 				}
 				else
 				{
-					/* out of the memory */
+					/* unlock; by out of the memory */
 					__atomic_write_uint32(hslot, saved);
-					return false;
+					if (!has_exclusive)
+					{
+						pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
+						pthreadRWLockWriteLock(&gf_buf->kds_final_rwlock);
+						has_exclusive = true;
+					}
+					else
+					{
+						/* expand the kds_final buffer */
+						if (!expandGroupByFinalBuffer(gf_buf))
+						{
+							pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
+							return false;
+						}
+					}
 				}
 			}
 		}
@@ -1854,6 +1917,8 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 	__updateOneTupleDpuPreAgg(kcxt, kds_final,
 							  &hitem->t.htup,
 							  kexp_groupby_actions);
+	pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
+
 	return true;
 }
 
@@ -2173,6 +2238,7 @@ __handleDpuScanExecArrow(dpuClient *dclient,
 static void
 dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 {
+	kern_session_info  *session = dclient->session;
 	dpuTaskExecState   *dtes;
 	const char		   *kds_src_pathname = NULL;
 	strom_io_vector	   *kds_src_iovec = NULL;
@@ -2202,13 +2268,21 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 	memset(dtes, 0, sz);
 	dtes->kds_dst_head = kds_dst_head;
 	dtes->num_rels = num_rels;
-	if (!dclient->kds_final)
+	if (session->xpucode_groupby_actions == 0)
+	{
+		assert(session->xpucode_projection != 0);
 		dtes->handleDpuTaskFinalDepth = __handleDpuTaskExecProjection;
-	else if (dclient->kds_final->format == KDS_FORMAT_HASH)
+	}
+	else if (session->xpucode_groupby_keyhash != 0 &&
+			 session->xpucode_groupby_keyload != 0 &&
+			 session->xpucode_groupby_keycomp != 0)
+	{
 		dtes->handleDpuTaskFinalDepth = __handleDpuTaskExecGroupByPreAgg;
+	}
 	else
+	{
 		dtes->handleDpuTaskFinalDepth = __handleDpuTaskExecNoGroupPreAgg;
-	
+	}
 
 	if (kds_src_head->format == KDS_FORMAT_BLOCK)
 	{
@@ -2262,16 +2336,18 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 static void
 dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 {
+	groupby_final_buffer *gf_buf = dclient->gf_buf;
 	kern_multirels *kmrels = dclient->kmrels;
 	XpuCommand		resp;
 	struct iovec   *iovec_array;
 	struct iovec   *iov;
 	int				iovcnt = 0;
+	bool			gf_buf_locked = false;
 	size_t			resp_sz;
 
 	/* iovec allocation */
 	iovec_array = alloca(sizeof(struct iovec) *
-						 (kmrels ? kmrels->num_rels : 0) + 8);
+						 ((kmrels ? kmrels->num_rels : 0) + 8));
 	/* Xcmd for the response */
 	memset(&resp, 0, sizeof(XpuCommand));
 	resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
@@ -2317,11 +2393,15 @@ dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 	/*
 	 * KDS-Final buffer if DpuPreAgg
 	 */
-	if (xcmd->u.fin.final_plan_node && dclient->kds_final)
+	if (xcmd->u.fin.final_plan_node && gf_buf)
 	{
-		kern_data_store *kds_final = dclient->kds_final;
+		kern_data_store *kds_final;
 		size_t		sz1, sz2, sz3;
 
+		pthreadRWLockReadLock(&gf_buf->kds_final_rwlock);
+		gf_buf_locked = true;
+
+		kds_final = gf_buf->kds_final;
 		if (kds_final->format == KDS_FORMAT_HASH)
 		{
 			assert(kds_final->hash_nslots > 0);
@@ -2378,8 +2458,10 @@ dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 		resp_sz += kds_final->length;
 	}
 	resp.length = resp_sz;
-
 	__dpuClientWriteBack(dclient, iovec_array, iovcnt);
+
+	if (gf_buf_locked)
+		pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
 }
 
 /*
@@ -2601,6 +2683,7 @@ dpuserv_main(struct sockaddr *addr, socklen_t addr_len)
 	/* setup signal handler */
 	signal(SIGTERM, dpuserv_signal_handler);
 	signal(SIGUSR1, dpuserv_signal_handler);
+	signal(SIGPIPE, SIG_IGN);
 
 	/* start worker threads */
 	dpuserv_workers = alloca(sizeof(pthread_t) * dpuserv_num_workers);
