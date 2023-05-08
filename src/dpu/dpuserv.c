@@ -345,7 +345,10 @@ dpuServMapSessionBuffers(dpuClient *dclient, kern_session_info *session)
 			return false;
 		}
 		mmap_sz = PAGE_ALIGN(stat_buf.st_size);
-		mmap_addr = mmap(NULL, mmap_sz, PROT_READ, MAP_SHARED, fdesc, 0);
+		mmap_addr = mmap(NULL, mmap_sz,
+						 PROT_READ | PROT_WRITE,
+						 MAP_SHARED,
+						 fdesc, 0);
 		if (mmap_addr == MAP_FAILED)
 		{
 			close(fdesc);
@@ -2042,8 +2045,7 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 	uint32_t			block_index;
 
 	assert(kds_src->format == KDS_FORMAT_BLOCK &&
-		   kexp_load_vars->opcode == FuncOpCode__LoadVars &&
-		   kexp_scan_quals->exptype == TypeOpCode__bool);
+		   kexp_load_vars->opcode == FuncOpCode__LoadVars);
 	assert(!kmrels || kmrels->num_rels > 0);
 	INIT_KERNEL_CONTEXT(kcxt, session);
 	kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
@@ -2260,14 +2262,12 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 static void
 dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 {
+	kern_multirels *kmrels = dclient->kmrels;
 	XpuCommand		resp;
 	struct iovec   *iovec_array;
 	struct iovec   *iov;
 	int				iovcnt = 0;
 	size_t			resp_sz;
-	size_t			sz1, sz2, sz3;
-	kern_multirels *kmrels = dclient->kmrels;
-	kern_data_store *kds_final = dclient->kds_final;
 
 	/* iovec allocation */
 	iovec_array = alloca(sizeof(struct iovec) *
@@ -2282,8 +2282,46 @@ dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
     iov->iov_base = &resp;
     iov->iov_len  = resp_sz;
 
-	if (kds_final)
+	/*
+	 * Pack outer join map if this is the final call on this device
+	 */
+	if (xcmd->u.fin.final_this_device && kmrels)
 	{
+		uint32_t	ojmap_length = 0;
+
+		for (int i=0; i < kmrels->num_rels; i++)
+		{
+			kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, i);
+			bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, i);
+
+			if (oj_map)
+			{
+				uint32_t	map_sz = MAXALIGN(sizeof(bool) * kds_in->nitems);
+
+				iov = &iovec_array[iovcnt++];
+				iov->iov_base = oj_map;
+				iov->iov_len = map_sz;
+
+				ojmap_length += map_sz;
+			}
+		}
+		if (ojmap_length > 0)
+		{
+			resp.u.results.final_this_device = true;
+			resp.u.results.ojmap_offset = resp_sz;
+			resp.u.results.ojmap_length = ojmap_length;
+			resp_sz += ojmap_length;
+		}
+	}
+
+	/*
+	 * KDS-Final buffer if DpuPreAgg
+	 */
+	if (xcmd->u.fin.final_plan_node && dclient->kds_final)
+	{
+		kern_data_store *kds_final = dclient->kds_final;
+		size_t		sz1, sz2, sz3;
+
 		if (kds_final->format == KDS_FORMAT_HASH)
 		{
 			assert(kds_final->hash_nslots > 0);
@@ -2334,41 +2372,10 @@ dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 			/* fixup kds */
 			kds_final->length = sz1 + sz2;
 		}
+		resp.u.results.final_plan_node = true;
 		resp.u.results.chunks_nitems = 1;
 		resp.u.results.chunks_offset = resp_sz;
 		resp_sz += kds_final->length;
-	}
-
-	/*
-	 * Pack outer join map if this is the final call on this device
-	 */
-	if (xcmd->u.fin.final_this_device && kmrels)
-	{
-		uint32_t	ojmap_length = 0;
-
-		for (int i=0; i < kmrels->num_rels; i++)
-		{
-			kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, i);
-			bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, i);
-
-			if (oj_map)
-			{
-				uint32_t	map_sz = MAXALIGN(sizeof(bool) * kds_in->nitems);
-
-				iov = &iovec_array[iovcnt++];
-				iov->iov_base = oj_map;
-				iov->iov_len = map_sz;
-
-				ojmap_length += map_sz;
-			}
-		}
-		if (ojmap_length > 0)
-		{
-			resp.tag = XpuCommandTag__SuccessAndRightOuter;
-			resp.u.results.ojmap_offset = resp_sz;
-			resp.u.results.ojmap_length = ojmap_length;
-			resp_sz += ojmap_length;
-		}
 	}
 	resp.length = resp_sz;
 
