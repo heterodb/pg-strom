@@ -674,7 +674,6 @@ struct gpuClient
 {
 	struct gpuContext *gcontext;/* per-device status */
 	dlist_node		chain;		/* gcontext->client_list */
-	CUmodule		cuda_module;/* preload cuda binary */
 	kern_session_info *session;	/* per session info (on cuda managed memory) */
 	struct gpuQueryBuffer *gq_buf; /* per query join/preagg device buffer */
 	pg_atomic_uint32 refcnt;	/* odd number, if error status */

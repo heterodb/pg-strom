@@ -36,12 +36,9 @@ __CUDA_OBJS = xpu_common cuda_gpuscan cuda_gpujoin cuda_gpupreagg \
 __CUDA_HEADERS = cuda_common.h xpu_common.h xpu_opcodes.h xpu_basetype.h \
                  xpu_numeric.h xpu_textlib.h xpu_timelib.h xpu_misclib.h
 __CUDA_OPT_OBJS = $(addsuffix .fatbin,$(__CUDA_OBJS))
-__CUDA_DBG_OBJS = $(addsuffix .debug.fatbin,$(__CUDA_OBJS))
 CUDA_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/,$(__CUDA_HEADERS))
 CUDA_OPT_OBJS = $(addprefix $(STROM_BUILD_ROOT)/,$(__CUDA_OPT_OBJS))
-CUDA_DBG_OBJS = $(addprefix $(STROM_BUILD_ROOT)/,$(__CUDA_DBG_OBJS))
 CUDA_OPT_MODULE = $(STROM_BUILD_ROOT)/pgstrom-core.fatbin
-CUDA_DBG_MODULE = $(STROM_BUILD_ROOT)/pgstrom-core.debug.fatbin
 
 
 #
@@ -79,7 +76,7 @@ PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM)
 PGSTROM_FLAGS += -D__PGSTROM_MODULE__=1
 PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""
 
-PGSTROM_DEBUG = 1
+#PGSTROM_DEBUG = 1
 ifeq ($(PGSTROM_DEBUG),1)
 PGSTROM_FLAGS += -g -O0 -DPGSTROM_DEBUG_BUILD=1
 endif
@@ -102,7 +99,7 @@ MODULE_big = pg_strom
 MODULEDIR  = pg_strom
 DATA = $(STROM_SQL)
 OBJS = $(STROM_OBJS)
-DATA_built = $(CUDA_OPT_OBJS) $(CUDA_DBG_OBJS)
+DATA_built = $(CUDA_OPT_OBJS)
 EXTRA_CLEAN = $(DATA_built) $(GENERATED-HEADERS)
 EXTENSION = pg_strom
 
@@ -128,5 +125,3 @@ $(GPU_DEVATTRS_H): $(CUDA_IPATH)/cuda.h
 #
 %.fatbin: %.cu $(CUDA_HEADERS)
 	$(NVCC) $(NVCC_FLAGS) -o $@ $<
-%.debug.fatbin: %.cu $(CUDA_HEADERS)
-	$(NVCC) $(NVCC_DEBUG_FLAGS) -o $@ $<

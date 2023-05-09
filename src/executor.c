@@ -38,7 +38,6 @@ extern TransactionId   *ParallelCurrentXids;
 
 /* static variables */
 static dlist_head		xpu_connections_list;
-static bool				pgstrom_use_debug_code;		/* GUC */
 
 /*
  * Worker thread to receive response messages
@@ -591,7 +590,6 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->kcxt_kvars_nslots = kvars_nslots;
 	session->kcxt_kvars_nbytes = kvars_nbytes;
 	session->xpu_task_flags = pts->xpu_task_flags;
-	session->xpucode_use_debug_code = pgstrom_use_debug_code;
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	session->session_xact_state = __build_session_xact_state(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
@@ -1962,14 +1960,6 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 void
 pgstrom_init_executor(void)
 {
-	DefineCustomBoolVariable("pg_strom.use_debug_code",
-							 "Use debug-mode enabled device code",
-							 NULL,
-							 &pgstrom_use_debug_code,
-							 false,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
-							 NULL, NULL, NULL);
 	dlist_init(&xpu_connections_list);
 	RegisterResourceReleaseCallback(xpuclientCleanupConnections, NULL);
 }

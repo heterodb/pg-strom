@@ -1736,7 +1736,6 @@ typedef struct kern_session_info
 
 	uint32_t	xpu_task_flags;		/* mask of device flags */
 	/* xpucode for this session */
-	bool		xpucode_use_debug_code;
 	uint32_t	xpucode_scan_load_vars;
 	uint32_t	xpucode_scan_quals;
 	uint32_t	xpucode_join_load_vars_packed;

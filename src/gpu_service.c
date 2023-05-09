@@ -12,16 +12,8 @@
 #include "pg_strom.h"
 #include "cuda_common.h"
 /*
- * gpuContext / gpuModule / gpuMemory
+ * gpuContext / gpuMemory
  */
-typedef struct
-{
-	CUmodule		cuda_module;
-	HTAB		   *cuda_type_htab;
-	HTAB		   *cuda_func_htab;
-	xpu_encode_info *cuda_encode_catalog;
-} gpuModule;
-
 typedef struct
 {
 	pthread_mutex_t	lock;
@@ -38,8 +30,10 @@ struct gpuContext
 	int				cuda_dindex;
 	CUdevice		cuda_device;
 	CUcontext		cuda_context;
-	gpuModule		normal;			/* optimized kernel */
-	gpuModule		debug;			/* non-optimized debug kernel */
+	CUmodule		cuda_module;
+	HTAB		   *cuda_type_htab;
+	HTAB		   *cuda_func_htab;
+	xpu_encode_info *cuda_encode_catalog;
 	gpuMemoryPool	pool;
 	/* GPU client */
 	pthread_mutex_t	client_lock;
@@ -60,7 +54,6 @@ typedef struct gpuContext	gpuContext;
  * variables
  */
 int		pgstrom_max_async_gpu_tasks;	/* GUC */
-bool	pgstrom_load_gpu_debug_module;	/* GUC */
 __thread int		CU_DINDEX_PER_THREAD = -1;
 __thread CUdevice	CU_DEVICE_PER_THREAD = -1;
 __thread CUcontext	CU_CONTEXT_PER_THREAD = NULL;
@@ -1063,7 +1056,7 @@ __gpuClientELog(gpuClient *gclient,
  * gpuservHandleOpenSession
  */
 static bool
-__resolveDevicePointersWalker(gpuModule *gmodule,
+__resolveDevicePointersWalker(gpuContext *gcontext,
 							  kern_expression *kexp,
 							  char *emsg, size_t emsg_sz)
 {
@@ -1073,7 +1066,7 @@ __resolveDevicePointersWalker(gpuModule *gmodule,
 	int		i;
 
 	/* lookup device function */
-	xpu_func = hash_search(gmodule->cuda_func_htab,
+	xpu_func = hash_search(gcontext->cuda_func_htab,
 						   &kexp->opcode,
 						   HASH_FIND, NULL);
 	if (!xpu_func)
@@ -1086,7 +1079,7 @@ __resolveDevicePointersWalker(gpuModule *gmodule,
 	kexp->fn_dptr = xpu_func->func_dptr;
 
 	/* lookup device type operator */
-	xpu_type = hash_search(gmodule->cuda_type_htab,
+	xpu_type = hash_search(gcontext->cuda_type_htab,
 						   &kexp->exptype,
 						   HASH_FIND, NULL);
 	if (!xpu_type)
@@ -1107,14 +1100,14 @@ __resolveDevicePointersWalker(gpuModule *gmodule,
 			snprintf(emsg, emsg_sz, "XPU code corruption at kexp (%d)", kexp->opcode);
 			return false;
 		}
-		if (!__resolveDevicePointersWalker(gmodule, karg, emsg, emsg_sz))
+		if (!__resolveDevicePointersWalker(gcontext, karg, emsg, emsg_sz))
 			return false;
 	}
 	return true;
 }
 
 static bool
-__resolveDevicePointers(gpuModule *gmodule,
+__resolveDevicePointers(gpuContext *gcontext,
 						kern_session_info *session,
 						char *emsg, size_t emsg_sz)
 {
@@ -1136,7 +1129,7 @@ __resolveDevicePointers(gpuModule *gmodule,
 
 	for (i=0; i < nitems; i++)
 	{
-		if (__kexp[i] && !__resolveDevicePointersWalker(gmodule,
+		if (__kexp[i] && !__resolveDevicePointersWalker(gcontext,
 														__kexp[i],
 														emsg, emsg_sz))
 			return false;
@@ -1144,7 +1137,7 @@ __resolveDevicePointers(gpuModule *gmodule,
 
 	if (encode)
 	{
-		xpu_encode_info *catalog = gmodule->cuda_encode_catalog;
+		xpu_encode_info *catalog = gcontext->cuda_encode_catalog;
 		int		i;
 
 		for (i=0; ; i++)
@@ -1170,7 +1163,6 @@ static bool
 gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 {
 	gpuContext	   *gcontext = gclient->gcontext;
-	gpuModule	   *gmodule;
 	kern_session_info *session = &xcmd->u.session;
 	XpuCommand		resp;
 	char			emsg[512];
@@ -1183,11 +1175,7 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	}
 
 	/* resolve device pointers */
-	if (session->xpucode_use_debug_code && pgstrom_load_gpu_debug_module)
-		gmodule = &gcontext->debug;
-	else
-		gmodule = &gcontext->normal;
-	if (!__resolveDevicePointers(gmodule, session, emsg, sizeof(emsg)))
+	if (!__resolveDevicePointers(gcontext, session, emsg, sizeof(emsg)))
 	{
 		gpuClientELog(gclient, "%s", emsg);
 		return false;
@@ -1213,7 +1201,6 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 		}
 	}
 	gclient->session = session;
-	gclient->cuda_module = gmodule->cuda_module;
 
 	/* success status */
 	memset(&resp, 0, sizeof(resp));
@@ -1237,6 +1224,7 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 static void
 gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 {
+	gpuContext		*gcontext = gclient->gcontext;
 	kern_session_info *session = gclient->session;
 	gpuQueryBuffer  *gq_buf = gclient->gq_buf;
 	kern_gputask	*kgtask = NULL;
@@ -1263,7 +1251,6 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	unsigned int	shmem_sz;
 	size_t			kds_final_length = 0;
 	bool			kds_final_locked = false;
-//	int				kds_final_revision = 0;
 	size_t			sz;
 	void		   *kern_args[10];
 
@@ -1339,7 +1326,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	}
 
 	rc = cuModuleGetFunction(&f_kern_gpuscan,
-							 gclient->cuda_module,
+							 gcontext->cuda_module,
 							 "kern_gpujoin_main");
 	if (rc != CUDA_SUCCESS)
 	{
@@ -1868,7 +1855,7 @@ gpuservAcceptClient(gpuContext *gcontext)
  * __setupDevTypeLinkageTable
  */
 static HTAB *
-__setupDevTypeLinkageTable(gpuModule *gmodule)
+__setupDevTypeLinkageTable(CUmodule cuda_module)
 {
 	xpu_type_catalog_entry *xpu_types_catalog;
 	HASHCTL		hctl;
@@ -1888,7 +1875,7 @@ __setupDevTypeLinkageTable(gpuModule *gmodule)
 					   &hctl,
 					   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
-	rc = cuModuleGetGlobal(&dptr, &nbytes, gmodule->cuda_module,
+	rc = cuModuleGetGlobal(&dptr, &nbytes, cuda_module,
 						   "builtin_xpu_types_catalog");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetGlobal: %s", cuStrError(rc));
@@ -1916,7 +1903,7 @@ __setupDevTypeLinkageTable(gpuModule *gmodule)
  * __setupDevFuncLinkageTable
  */
 static HTAB *
-__setupDevFuncLinkageTable(gpuModule *gmodule)
+__setupDevFuncLinkageTable(CUmodule cuda_module)
 {
 	xpu_function_catalog_entry *xpu_funcs_catalog;
 	HASHCTL		hctl;
@@ -1935,7 +1922,7 @@ __setupDevFuncLinkageTable(gpuModule *gmodule)
 					   &hctl,
 					   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
-	rc = cuModuleGetGlobal(&dptr, &nbytes, gmodule->cuda_module,
+	rc = cuModuleGetGlobal(&dptr, &nbytes, cuda_module,
 						   "builtin_xpu_functions_catalog");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetGlobal: %s", cuStrError(rc));
@@ -1962,14 +1949,14 @@ __setupDevFuncLinkageTable(gpuModule *gmodule)
  * __setupDevEncodeLinkageCatalog
  */
 static xpu_encode_info *
-__setupDevEncodeLinkageCatalog(gpuModule *gmodule)
+__setupDevEncodeLinkageCatalog(CUmodule cuda_module)
 {
 	xpu_encode_info *xpu_encode_catalog;
 	CUdeviceptr	dptr;
 	CUresult	rc;
 	size_t		nbytes;
 
-	rc = cuModuleGetGlobal(&dptr, &nbytes, gmodule->cuda_module,
+	rc = cuModuleGetGlobal(&dptr, &nbytes, cuda_module,
                            "xpu_encode_catalog");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetGlobal: %s", cuStrError(rc));
@@ -1985,8 +1972,9 @@ __setupDevEncodeLinkageCatalog(gpuModule *gmodule)
  * gpuservSetupGpuModule
  */
 static void
-gpuservSetupGpuModule(gpuModule *gmodule, bool debug_module)
+gpuservSetupGpuModule(gpuContext *gcontext)
 {
+	CUmodule	cuda_module;
 	CUlinkState	lstate;
 	CUjit_option jit_options[16];
 	void	   *jit_option_values[16];
@@ -2013,20 +2001,10 @@ gpuservSetupGpuModule(gpuModule *gmodule, bool debug_module)
 	jit_option_values[jit_index] = (void *)CU_JIT_CACHE_OPTION_CA;
 	jit_index++;
 
-	if (debug_module)
-	{
-		jit_options[jit_index] = CU_JIT_GENERATE_DEBUG_INFO;
-		jit_option_values[jit_index] = (void *)1UL;
-		jit_index++;
+	jit_options[jit_index] = CU_JIT_GENERATE_LINE_INFO;
+	jit_option_values[jit_index] = (void *)1UL;
+	jit_index++;
 
-		jit_options[jit_index] = CU_JIT_GENERATE_LINE_INFO;
-		jit_option_values[jit_index] = (void *)1UL;
-		jit_index++;
-
-		jit_options[jit_index] = CU_JIT_OPTIMIZATION_LEVEL;
-		jit_option_values[jit_index] = (void *)0UL;
-		jit_index++;
-	}
 	/* Link log buffer */
 	jit_options[jit_index] = CU_JIT_ERROR_LOG_BUFFER;
 	jit_option_values[jit_index] = (void *)log_buffer;
@@ -2050,9 +2028,8 @@ gpuservSetupGpuModule(gpuModule *gmodule, bool debug_module)
 		char	pathname[MAXPGPATH];
 
 		snprintf(pathname, MAXPGPATH,
-				 PGSHAREDIR "/pg_strom/%s%s.fatbin",
-				 __trim(tok), 
-				 debug_module ? ".debug" : "");
+				 PGSHAREDIR "/pg_strom/%s.fatbin",
+				 __trim(tok));
 		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
 						   pathname, 0, NULL, NULL);
 		if (rc != CUDA_SUCCESS)
@@ -2067,7 +2044,7 @@ gpuservSetupGpuModule(gpuModule *gmodule, bool debug_module)
 		elog(ERROR, "failed on cuLinkComplete: %s\n%s",
 			 cuStrError(rc), log_buffer);
 
-	rc = cuModuleLoadData(&gmodule->cuda_module, bin_image);
+	rc = cuModuleLoadData(&cuda_module, bin_image);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleLoadData: %s", cuStrError(rc));
 
@@ -2076,9 +2053,10 @@ gpuservSetupGpuModule(gpuModule *gmodule, bool debug_module)
 		elog(ERROR, "failed on cuLinkDestroy: %s", cuStrError(rc));
 
 	/* setup XPU linkage hash tables */
-	gmodule->cuda_type_htab = __setupDevTypeLinkageTable(gmodule);
-	gmodule->cuda_func_htab = __setupDevFuncLinkageTable(gmodule);
-	gmodule->cuda_encode_catalog = __setupDevEncodeLinkageCatalog(gmodule);
+	gcontext->cuda_type_htab = __setupDevTypeLinkageTable(cuda_module);
+	gcontext->cuda_func_htab = __setupDevFuncLinkageTable(cuda_module);
+	gcontext->cuda_encode_catalog = __setupDevEncodeLinkageCatalog(cuda_module);
+	gcontext->cuda_module = cuda_module;
 }
 
 /*
@@ -2169,9 +2147,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuCtxSetLimit: %s", cuStrError(rc));
 
-		gpuservSetupGpuModule(&gcontext->normal, false);
-		if (pgstrom_load_gpu_debug_module)
-			gpuservSetupGpuModule(&gcontext->debug, true);
+		gpuservSetupGpuModule(gcontext);
 
 		/* launch worker threads */
 		for (i=0; i < pgstrom_max_async_gpu_tasks; i++)
@@ -2409,14 +2385,6 @@ pgstrom_init_gpu_service(void)
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
-	DefineCustomBoolVariable("pg_strom.load_gpu_debug_module",
-							 "Loads GPU debug module",
-							 NULL,
-							 &pgstrom_load_gpu_debug_module,
-							 true,
-							 PGC_POSTMASTER,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.gpu_mempool_segment_sz",
 							"Segment size of GPU memory pool",
 							NULL,
