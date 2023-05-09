@@ -882,7 +882,7 @@ typedef struct
 	List		   *input_rels_tlist;
 	List		   *inner_paths_list;
 	Node		   *havingQual;
-	uint32_t		task_kind;
+	uint32_t		xpu_task_flags;
 	const CustomPathMethods *custom_path_methods;
 } xpugroupby_build_path_context;
 
@@ -1010,7 +1010,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 		if (type_oid != dest_oid)
 			expr = make_expr_typecast(expr, dest_oid);
 		if (!pgstrom_xpu_expression(expr,
-									con->task_kind,
+									con->xpu_task_flags,
 									con->input_rels_tlist,
 									NULL))
 		{
@@ -1163,7 +1163,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			}
 			/* grouping-key must be device executable. */
 			if (!pgstrom_xpu_expression(expr,
-										con->task_kind,
+										con->xpu_task_flags,
 										con->input_rels_tlist,
 										NULL))
 			{
@@ -1264,13 +1264,13 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 	/*
 	 * Parameters related to devices
 	 */
-	if ((con->task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU)
+	if ((con->xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU)
 	{
 		xpu_operator_cost = pgstrom_gpu_operator_cost;
 		xpu_tuple_cost    = pgstrom_gpu_tuple_cost;
 		xpu_ratio         = pgstrom_gpu_operator_ratio();
 	}
-	else if ((con->task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
+	else if ((con->xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
 	{
 		xpu_operator_cost = pgstrom_dpu_operator_cost;
         xpu_tuple_cost    = pgstrom_dpu_tuple_cost;
@@ -1278,7 +1278,7 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 	}
 	else
 	{
-		elog(ERROR, "Bug? unexpected task_kind: %08x", con->task_kind);
+		elog(ERROR, "Bug? unexpected task_kind: %08x", con->xpu_task_flags);
 	}
 	startup_cost = input_path->startup_cost;
 	run_cost = (input_path->total_cost -
@@ -1373,7 +1373,7 @@ __xpupreagg_add_custompath(PlannerInfo *root,
 						   void *extra,
 						   bool try_parallel,
 						   double num_groups,
-						   uint32_t task_kind,
+						   uint32_t xpu_task_flags,
 						   const CustomPathMethods *custom_path_methods)
 {
 	xpugroupby_build_path_context con;
@@ -1389,7 +1389,7 @@ __xpupreagg_add_custompath(PlannerInfo *root,
 	con.target_upper   = root->upper_targets[UPPERREL_GROUP_AGG];
 	con.target_partial = create_empty_pathtarget();
     con.target_final   = create_empty_pathtarget();
-	con.task_kind      = task_kind;
+	con.xpu_task_flags = xpu_task_flags;
 	con.custom_path_methods = custom_path_methods;
 	extract_input_path_params(input_path,
 							  NULL,
@@ -1399,7 +1399,7 @@ __xpupreagg_add_custompath(PlannerInfo *root,
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
 		return;
-	con.pp_info->task_kind = task_kind;
+	con.pp_info->xpu_task_flags = xpu_task_flags;
 
 	/* build partial groupby custom-path */
 	part_path = prepend_partial_groupby_custompath(&con);
@@ -1434,7 +1434,7 @@ xpupreagg_add_custompath(PlannerInfo *root,
 						  RelOptInfo *input_rel,
 						  RelOptInfo *group_rel,
 						  void *extra,
-						  uint32_t task_kind,
+						  uint32_t xpu_task_flags,
 						  const CustomPathMethods *custom_path_methods)
 {
 	Query	   *parse = root->parse;
@@ -1457,14 +1457,14 @@ xpupreagg_add_custompath(PlannerInfo *root,
 												  (try_parallel > 0),
 												  false,
 												  true,
-												  task_kind);
+												  xpu_task_flags);
 		}
 		else
 		{
 			input_path = (Path *)custom_path_find_cheapest(root,
 														   input_rel,
 														   (try_parallel > 0),
-														   task_kind);
+														   xpu_task_flags);
 		}
 
 		if (input_path)
@@ -1490,7 +1490,7 @@ xpupreagg_add_custompath(PlannerInfo *root,
 									   extra,
 									   (try_parallel > 0),
 									   num_groups,
-									   task_kind,
+									   xpu_task_flags,
 									   custom_path_methods);
 		}
 	}
@@ -1557,6 +1557,7 @@ static Node *
 CreateGpuPreAggScanState(CustomScan *cscan)
 {
 	pgstromTaskState *pts;
+	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
 	int		num_rels = list_length(cscan->custom_plans);
 
 	Assert(cscan->methods == &gpupreagg_plan_methods);
@@ -1564,10 +1565,10 @@ CreateGpuPreAggScanState(CustomScan *cscan)
 	NodeSetTag(pts, T_CustomScanState);
 	pts->css.flags = cscan->flags;
 	pts->css.methods = &gpupreagg_exec_methods;
-	pts->task_kind = TASK_KIND__GPUPREAGG;
-	pts->pp_info = deform_pgstrom_plan_info(cscan);
-	Assert(pts->pp_info->task_kind == pts->task_kind &&
-		   pts->pp_info->num_rels == num_rels);
+	pts->xpu_task_flags = pp_info->xpu_task_flags;
+	pts->pp_info = pp_info;
+	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__GPUPREAGG &&
+		   pp_info->num_rels == num_rels);
 	pts->num_rels = num_rels;
 
 	return (Node *)pts;

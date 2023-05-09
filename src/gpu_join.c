@@ -34,7 +34,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	List   *exprs = NIL;
 	int		endpoint_id;
 
-	privs = lappend(privs, makeInteger(pp_info->task_kind));
+	privs = lappend(privs, makeInteger(pp_info->xpu_task_flags));
 	privs = lappend(privs, bms_to_pglist(pp_info->gpu_cache_devs));
 	privs = lappend(privs, bms_to_pglist(pp_info->gpu_direct_devs));
 	endpoint_id = DpuStorageEntryGetEndpointId(pp_info->ds_entry);
@@ -121,7 +121,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 
 	memset(&pp_data, 0, sizeof(pgstromPlanInfo));
 	/* device identifiers */
-	pp_data.task_kind = intVal(list_nth(privs, pindex++));
+	pp_data.xpu_task_flags = intVal(list_nth(privs, pindex++));
 	pp_data.gpu_cache_devs = bms_from_pglist(list_nth(privs, pindex++));
 	pp_data.gpu_direct_devs = bms_from_pglist(list_nth(privs, pindex++));
 	endpoint_id = intVal(list_nth(privs, pindex++));
@@ -408,7 +408,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
                             JoinType join_type,
                             JoinPathExtraData *extra,
 							bool try_parallel_path,
-							uint32_t task_kind,
+							uint32_t xpu_task_flags,
 							const CustomPathMethods *xpujoin_path_methods)
 {
 	Path		   *outer_path;
@@ -444,14 +444,14 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	/*
 	 * Parameters related to devices
 	 */
-	if ((task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU)
+	if ((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU)
 	{
 		enable_xpuhashjoin  = pgstrom_enable_gpuhashjoin;
 		enable_xpugistindex = pgstrom_enable_gpugistindex;
 		xpu_tuple_cost      = pgstrom_gpu_tuple_cost;
 		xpu_ratio           = pgstrom_gpu_operator_ratio();
 	}
-	else if ((task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
+	else if ((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
 	{
 		enable_xpuhashjoin  = pgstrom_enable_dpuhashjoin;
 		enable_xpugistindex = pgstrom_enable_dpugistindex;
@@ -460,7 +460,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	}
 	else
 	{
-		elog(ERROR, "Bug? unexpected task_kind: %08x", task_kind);
+		elog(ERROR, "Bug? unexpected xpu_task_flags: %08x", xpu_task_flags);
 	}
 
 	/*
@@ -473,7 +473,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 											   try_parallel_path,
 											   false,
 											   true,
-											   task_kind);
+											   xpu_task_flags);
 		if (!outer_path)
 			return false;
 	}
@@ -482,7 +482,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 		outer_path = (Path *) custom_path_find_cheapest(root,
 														outer_rel,
 														try_parallel_path,
-														task_kind);
+														xpu_task_flags);
 		if (!outer_path)
 			return false;
 	}
@@ -532,7 +532,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	 */
 	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_prev->num_rels+1]));
 	memcpy(pp_info, pp_prev, offsetof(pgstromPlanInfo, inners[pp_prev->num_rels]));
-	pp_info->task_kind = task_kind;
+	pp_info->xpu_task_flags = xpu_task_flags;
 	pp_info->num_rels = pp_prev->num_rels + 1;
 	pp_inner = &pp_info->inners[pp_prev->num_rels];
 
@@ -549,7 +549,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 		RestrictInfo   *rinfo = lfirst(lc);
 
 		if (!pgstrom_xpu_expression(rinfo->clause,
-									task_kind,
+									xpu_task_flags,
 									input_rels_tlist,
 									NULL))
 		{
@@ -734,7 +734,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	if (custom_path_remember(root,
 							 joinrel,
 							 try_parallel_path,
-							 task_kind,
+							 xpu_task_flags,
 							 cpath))
 	{
 		if (!try_parallel_path)
@@ -755,7 +755,7 @@ xpujoin_add_custompath(PlannerInfo *root,
                        RelOptInfo *innerrel,
                        JoinType join_type,
                        JoinPathExtraData *extra,
-					   uint32_t task_kind,
+					   uint32_t xpu_task_flags,
 					   const CustomPathMethods *xpujoin_path_methods)
 {
 	List	   *inner_pathlist;
@@ -795,7 +795,7 @@ xpujoin_add_custompath(PlannerInfo *root,
 										join_type,
 										extra,
 										try_parallel > 0,
-										task_kind,
+										xpu_task_flags,
 										xpujoin_path_methods);
 		/* 2nd trial uses the partial paths */
 		inner_pathlist = innerrel->partial_pathlist;
@@ -982,7 +982,7 @@ typedef struct
 	PlannerInfo *root;
 	List	   *tlist_dev;
 	List	   *input_rels_tlist;
-	uint32_t	devkind;
+	uint32_t	xpu_task_flags;
 	bool		only_vars;
 	bool		resjunk;
 } build_tlist_dev_context;
@@ -1049,7 +1049,7 @@ found:
 	if (IsA(node, Var) ||
 		(!context->only_vars &&
 		 pgstrom_xpu_expression((Expr *)node,
-								context->devkind,
+								context->xpu_task_flags,
 								context->input_rels_tlist,
 								NULL)))
 	{
@@ -1172,6 +1172,7 @@ __build_explain_tlist_junks(build_tlist_dev_context *context)
 static List *
 pgstrom_build_tlist_dev(PlannerInfo *root,
 						PathTarget *reltarget,
+						uint32_t xpu_task_flags,
 						List *tlist,		/* must be backed to CPU */
 						List *host_quals,	/* must be backed to CPU */
 						List *misc_exprs,
@@ -1183,6 +1184,7 @@ pgstrom_build_tlist_dev(PlannerInfo *root,
 	memset(&context, 0, sizeof(build_tlist_dev_context));
 	context.root = root;
 	context.input_rels_tlist = input_rels_tlist;
+	context.xpu_task_flags = xpu_task_flags;
 	if (tlist != NIL)
 	{
 		foreach (lc, tlist)
@@ -1294,7 +1296,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	ListCell   *lc;
 	
 	Assert(pp_info->num_rels == list_length(custom_plans));
-	codegen_context_init(&context, pp_info->task_kind);
+	codegen_context_init(&context, pp_info->xpu_task_flags);
 	input_rels_tlist = list_make1(makeInteger(pp_info->scan_relid));
 	foreach (lc, cpath->custom_paths)
 	{
@@ -1369,7 +1371,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	 * final depth shall be device projection (Scan/Join) or partial
 	 * aggregation (GroupBy).
 	 */
-	if ((pp_info->task_kind & DEVTASK__MASK) == DEVTASK__PREAGG)
+	if ((pp_info->xpu_task_flags & DEVTASK__MASK) == DEVTASK__PREAGG)
 	{
 		context.tlist_dev =  pgstrom_build_groupby_dev(root,
 													   tlist,
@@ -1383,6 +1385,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		/* build device projection */
 		context.tlist_dev = pgstrom_build_tlist_dev(root,
 													joinrel->reltarget,
+													pp_info->xpu_task_flags,
 													tlist,
 													NIL,
 													misc_exprs,
@@ -1491,17 +1494,18 @@ static Node *
 CreateGpuJoinState(CustomScan *cscan)
 {
 	pgstromTaskState *pts;
-	int		num_rels = list_length(cscan->custom_plans);
+	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
+	int			num_rels = list_length(cscan->custom_plans);
 
 	Assert(cscan->methods == &gpujoin_plan_methods);
 	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
 	NodeSetTag(pts, T_CustomScanState);
 	pts->css.flags = cscan->flags;
 	pts->css.methods = &gpujoin_exec_methods;
-	pts->task_kind = TASK_KIND__GPUJOIN;
-	pts->pp_info = deform_pgstrom_plan_info(cscan);
-	Assert(pts->pp_info->task_kind == pts->task_kind &&
-		   pts->pp_info->num_rels == num_rels);
+	pts->xpu_task_flags = pp_info->xpu_task_flags;
+	pts->pp_info = pp_info;
+	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__GPUJOIN &&
+		   pp_info->num_rels == num_rels);
 	pts->num_rels = num_rels;
 
 	return (Node *)pts;

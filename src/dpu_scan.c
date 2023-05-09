@@ -101,14 +101,15 @@ static Node *
 CreateDpuScanState(CustomScan *cscan)
 {
 	pgstromTaskState *pts = palloc0(sizeof(pgstromTaskState));
+	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
 
 	Assert(cscan->methods == &dpuscan_plan_methods);
 	NodeSetTag(pts, T_CustomScanState);
 	pts->css.flags = cscan->flags;
 	pts->css.methods = &dpuscan_exec_methods;
-	pts->task_kind = TASK_KIND__DPUSCAN;
-	pts->pp_info = deform_pgstrom_plan_info(cscan);
-	Assert(pts->task_kind == pts->pp_info->task_kind);
+	pts->xpu_task_flags = pp_info->xpu_task_flags;
+	pts->pp_info = pp_info;
+	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__DPUSCAN);
 
 	return (Node *)pts;
 }

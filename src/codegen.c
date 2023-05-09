@@ -874,11 +874,11 @@ static int	codegen_expression_walker(codegen_context *context,
 									  StringInfo buf, Expr *expr);
 
 void
-codegen_context_init(codegen_context *context, uint32_t task_kind)
+codegen_context_init(codegen_context *context, uint32_t xpu_required_flags)
 {
 	memset(context, 0, sizeof(codegen_context));
 	context->elevel = ERROR;
-	context->required_flags = (task_kind & DEVKIND__ANY);
+	context->required_flags = (xpu_required_flags & DEVKIND__ANY);
 }
 
 static void
@@ -2350,18 +2350,18 @@ codegen_build_groupby_actions(codegen_context *context,
  */
 bool
 pgstrom_xpu_expression(Expr *expr,
-					   uint32_t task_kind,
+					   uint32_t required_xpu_flags,
 					   List *input_rels_tlist,
 					   int *p_devcost)
 {
 	codegen_context context;
 
-	Assert((task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
-		   (task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
+	Assert((required_xpu_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
+		   (required_xpu_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
 	memset(&context, 0, sizeof(context));
 	context.elevel = DEBUG2;
 	context.top_expr = expr;
-	context.required_flags = (task_kind & DEVKIND__ANY);
+	context.required_flags = (required_xpu_flags & DEVKIND__ANY);
 	context.input_rels_tlist = input_rels_tlist;
 
 	if (!expr)

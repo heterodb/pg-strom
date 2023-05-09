@@ -27,7 +27,7 @@ __setupXpuScanPath(PlannerInfo *root,
 				   RelOptInfo *baserel,
 				   ParamPathInfo *param_info,
 				   bool parallel_path,
-				   uint32_t task_kind,
+				   uint32_t xpu_task_flags,
 				   List *dev_quals,
 				   List *host_quals)
 {
@@ -84,7 +84,7 @@ __setupXpuScanPath(PlannerInfo *root,
 	get_tablespace_page_costs(baserel->reltablespace,
 							  &spc_rand_page_cost,
 							  &spc_seq_page_cost);
-	if ((task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU)
+	if ((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU)
 	{
 		xpu_ratio = pgstrom_gpu_operator_ratio();
 		xpu_tuple_cost = pgstrom_gpu_tuple_cost;
@@ -102,7 +102,7 @@ __setupXpuScanPath(PlannerInfo *root,
 			avg_seq_page_cost = spc_seq_page_cost;
 		cpath->methods = &gpuscan_path_methods;
 	}
-	else if ((task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
+	else if ((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
 	{
 		xpu_ratio = pgstrom_dpu_operator_ratio();
 		xpu_tuple_cost = pgstrom_dpu_tuple_cost;
@@ -120,7 +120,7 @@ __setupXpuScanPath(PlannerInfo *root,
 	}
 	else
 	{
-		elog(ERROR, "Bug? unsupported task_kind: %08x", task_kind);
+		elog(ERROR, "Bug? unsupported xpu_task_flags: %08x", xpu_task_flags);
 	}
 
 	/*
@@ -201,7 +201,7 @@ __setupXpuScanPath(PlannerInfo *root,
 	final_cost += baserel->reltarget->cost.per_tuple * baserel->rows;
 
 	/* Setup the result */
-	pp_info->task_kind = task_kind;
+	pp_info->xpu_task_flags = xpu_task_flags;
 	pp_info->gpu_cache_devs = gpu_cache_devs;
 	pp_info->gpu_direct_devs = gpu_direct_devs;
 	pp_info->ds_entry = ds_entry;
@@ -298,7 +298,7 @@ buildXpuScanPath(PlannerInfo *root,
 				 bool parallel_path,
 				 bool allow_host_quals,
 				 bool allow_no_device_quals,
-				 uint32_t task_kind)
+				 uint32_t xpu_task_flags)
 {
 	RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
 	List	   *input_rels_tlist = list_make1(makeInteger(baserel->relid));
@@ -309,8 +309,8 @@ buildXpuScanPath(PlannerInfo *root,
 	ListCell   *lc;
 
 	Assert(IS_SIMPLE_REL(baserel));
-	Assert((task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
-		   (task_kind & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
+	Assert((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
+		   (xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
 	/* brief check towards the supplied baserel */
 	switch (rte->relkind)
 	{
@@ -374,7 +374,7 @@ buildXpuScanPath(PlannerInfo *root,
 							  baserel,
 							  param_info,
 							  parallel_path,
-							  task_kind,
+							  xpu_task_flags,
 							  dev_quals,
 							  host_quals);
 }
@@ -538,7 +538,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	List		   *input_rels_tlist = list_make1(makeInteger(baserel->relid));
 
 	/* code generation for WHERE-clause */
-	codegen_context_init(&context, pp_info->task_kind);
+	codegen_context_init(&context, pp_info->xpu_task_flags);
 	context.input_rels_tlist = input_rels_tlist;
 	pp_info->kexp_scan_quals = codegen_build_scan_quals(&context, pp_info->scan_quals);
 	pp_info->scan_quals_fallback
@@ -611,15 +611,16 @@ static Node *
 CreateGpuScanState(CustomScan *cscan)
 {
 	pgstromTaskState *pts = palloc0(sizeof(pgstromTaskState));
+	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
 
 	Assert(cscan->methods == &gpuscan_plan_methods);
 	/* Set tag and executor callbacks */
 	NodeSetTag(pts, T_CustomScanState);
 	pts->css.flags = cscan->flags;
 	pts->css.methods = &gpuscan_exec_methods;
-	pts->task_kind = TASK_KIND__GPUSCAN;
-	pts->pp_info = deform_pgstrom_plan_info(cscan);
-	Assert(pts->task_kind == pts->pp_info->task_kind);
+	pts->xpu_task_flags = pp_info->xpu_task_flags;
+	pts->pp_info = pp_info;
+	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__GPUSCAN);
 
 	return (Node *)pts;
 }

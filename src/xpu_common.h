@@ -1487,6 +1487,8 @@ typedef struct
 #define TASK_KIND__DPUJOIN		(DEVTASK__JOIN   | DEVKIND__NVIDIA_DPU)
 #define TASK_KIND__DPUPREAGG	(DEVTASK__PREAGG | DEVKIND__NVIDIA_DPU)
 
+#define TASK_KIND__MASK			(DEVTASK__MASK   | DEVKIND__ANY)
+
 /* ----------------------------------------------------------------
  *
  * Definition of device functions
@@ -1732,6 +1734,7 @@ typedef struct kern_session_info
 									 * and xpu_geometry_t) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 
+	uint32_t	xpu_task_flags;		/* mask of device flags */
 	/* xpucode for this session */
 	bool		xpucode_use_debug_code;
 	uint32_t	xpucode_scan_load_vars;

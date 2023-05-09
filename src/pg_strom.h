@@ -245,7 +245,7 @@ typedef struct
 
 typedef struct
 {
-	uint32_t	task_kind;			/* one of TASK_KIND__* */
+	uint32_t	xpu_task_flags;		/* mask of device flags */
 	const Bitmapset *gpu_cache_devs;	/* device for GpuCache, if any */
 	const Bitmapset *gpu_direct_devs;	/* device for GPU-Direct SQL, if any */
 	const DpuStorageEntry *ds_entry;	/* target DPU if DpuJoin */
@@ -379,7 +379,8 @@ typedef struct
 struct pgstromTaskState
 {
 	CustomScanState		css;
-	uint32_t			task_kind;		/* one of TASK_KIND__* */
+//	uint32_t			task_kind;		/* one of TASK_KIND__* */
+	uint32_t			xpu_task_flags;	/* mask of device flags */
 	const Bitmapset	   *optimal_gpus;	/* candidate GPUs to connect */
 	const DpuStorageEntry *ds_entry;	/* candidate DPUs to connect */
 	XpuConnection	   *conn;
@@ -501,7 +502,7 @@ extern devfunc_info *devtype_lookup_equal_func(devtype_info *dtype, Oid coll_id)
 extern devfunc_info *devtype_lookup_compare_func(devtype_info *dtype, Oid coll_id);
 
 extern void		codegen_context_init(codegen_context *context,
-									 uint32_t task_kind);
+									 uint32_t xpu_task_flags);
 extern bytea   *codegen_build_qualifiers(codegen_context *context,
 										 List *dev_quals);
 extern bytea   *codegen_build_scan_loadvars(codegen_context *context);
@@ -525,7 +526,7 @@ extern void		codegen_build_packed_xpucode(bytea **p_xpucode,
 											 uint32_t *p_kvars_nslots,
 											 List **p_used_params);
 extern bool		pgstrom_xpu_expression(Expr *expr,
-									   uint32_t task_kind,
+									   uint32_t required_xpu_flags,
 									   List *input_rels_tlist,
 									   int *p_devcost);
 extern bool		pgstrom_gpu_expression(Expr *expr,

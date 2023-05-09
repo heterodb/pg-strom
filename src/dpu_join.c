@@ -88,17 +88,18 @@ static Node *
 CreateDpuJoinState(CustomScan *cscan)
 {
 	pgstromTaskState *pts;
-	int		num_rels = list_length(cscan->custom_plans);
+	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
+	int			num_rels = list_length(cscan->custom_plans);
 
 	Assert(cscan->methods == &dpujoin_plan_methods);
 	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
 	NodeSetTag(pts, T_CustomScanState);
 	pts->css.flags = cscan->flags;
 	pts->css.methods = &dpujoin_exec_methods;
-	pts->task_kind = TASK_KIND__DPUJOIN;
-	pts->pp_info = deform_pgstrom_plan_info(cscan);
-	Assert(pts->pp_info->task_kind == pts->task_kind &&
-		   pts->pp_info->num_rels == num_rels);
+	pts->xpu_task_flags = pp_info->xpu_task_flags;
+	pts->pp_info = pp_info;
+	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__DPUJOIN &&
+		   pp_info->num_rels == num_rels);
 	pts->num_rels = num_rels;
 
 	return (Node *)pts;

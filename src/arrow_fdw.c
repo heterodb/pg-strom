@@ -3502,9 +3502,9 @@ pgstromArrowFdwExecInit(pgstromTaskState *pts,
 		arrow_state = __arrowFdwExecInit(&pts->css.ss,
 										 outer_quals,
 										 outer_refs,
-										 (pts->task_kind & DEVKIND__NVIDIA_GPU) != 0
+										 (pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0
 											? &pts->optimal_gpus : NULL,
-										 (pts->task_kind & DEVKIND__NVIDIA_DPU) != 0
+										 (pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0
 											? &pts->ds_entry : NULL);
 	}
 	pts->arrow_state = arrow_state;

@@ -590,6 +590,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
 	session->kcxt_kvars_nslots = kvars_nslots;
 	session->kcxt_kvars_nbytes = kvars_nbytes;
+	session->xpu_task_flags = pts->xpu_task_flags;
 	session->xpucode_use_debug_code = pgstrom_use_debug_code;
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	session->session_xact_state = __build_session_xact_state(&buf);
@@ -670,9 +671,9 @@ pgstromTaskStateResetScan(pgstromTaskState *pts)
 	pgstromSharedState *ps_state = pts->ps_state;
 	int		num_devs = 0;
 
-	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 		num_devs = numGpuDevAttrs;
-	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 		num_devs = DpuStorageEntryCount();
 	
 	pg_atomic_write_u32(&ps_state->parallel_task_control, 0);
@@ -1058,9 +1059,9 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 								  pp_info->brin_index_oid,
 								  pp_info->brin_index_conds,
 								  pp_info->brin_index_quals);
-		if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+		if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 			pts->optimal_gpus = GetOptimalGpuForRelation(rel);
-		if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+		if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 			pts->ds_entry = GetOptimalDpuForRelation(rel, &kds_pathname);
 		pts->kds_pathname = kds_pathname;
 	}
@@ -1236,11 +1237,11 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * workload specific callback routines
 	 */
-	if ((pts->task_kind & DEVTASK__SCAN) != 0)
+	if ((pts->xpu_task_flags & DEVTASK__SCAN) != 0)
 	{
 		pts->cb_cpu_fallback = ExecFallbackCpuScan;
 	}
-	else if ((pts->task_kind & DEVTASK__JOIN) != 0)
+	else if ((pts->xpu_task_flags & DEVTASK__JOIN) != 0)
 	{
 		if (has_right_outer)
 			pts->cb_final_chunk = pgstromExecFinalChunk;
@@ -1248,7 +1249,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			pts->cb_final_chunk = pgstromExecFinalChunkDummy;
 		pts->cb_cpu_fallback = ExecFallbackCpuJoin;
 	}
-	else if ((pts->task_kind & DEVTASK__PREAGG) != 0)
+	else if ((pts->xpu_task_flags & DEVTASK__PREAGG) != 0)
 	{
 		pts->cb_final_chunk = pgstromExecFinalChunk;
 		pts->cb_cpu_fallback = ExecFallbackCpuPreAgg;
@@ -1342,25 +1343,25 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 			return false;
 	}
 	/* XPU-PreAgg needs tupdesc of kds_final */
-	if ((pts->task_kind & DEVTASK__PREAGG) != 0)
+	if ((pts->xpu_task_flags & DEVTASK__PREAGG) != 0)
 	{
 		tupdesc_kds_final = pts->css.ss.ps.scandesc;
 	}
 	/* build the session information */
 	session = pgstromBuildSessionInfo(pts, inner_handle, tupdesc_kds_final);
 
-	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 	{
 		gpuClientOpenSession(pts, session);
 	}
-	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 	{
 		Assert(pts->ds_entry != NULL);
 		DpuClientOpenSession(pts, session);
 	}
 	else
 	{
-		elog(ERROR, "Bug? unknown PG-Strom task kind: %08x", pts->task_kind);
+		elog(ERROR, "Bug? unknown PG-Strom task kind: %08x", pts->xpu_task_flags);
 	}
 	/* update the scan/join control variables */
 	if (!pgstromTaskStateBeginScan(pts))
@@ -1460,9 +1461,9 @@ pgstromSharedStateEstimateDSM(CustomScanState *node,
 		len += pgstromBrinIndexEstimateDSM(pts);
 	len += MAXALIGN(offsetof(pgstromSharedState, inners[num_rels]));
 
-	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 		num_devs = numGpuDevAttrs;
-	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 		num_devs = DpuStorageEntryCount();
 	len += MAXALIGN(sizeof(pg_atomic_uint32) * num_devs);
 
@@ -1492,9 +1493,9 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	TableScanDesc scan = NULL;
 
 	Assert(!IsBackgroundWorker);
-	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 		num_devs = numGpuDevAttrs;
-	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 		num_devs = DpuStorageEntryCount();
 
 	if (pts->br_state)
@@ -1568,9 +1569,9 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 	int			num_rels = list_length(pts->css.custom_ps);
 	int			num_devs = 0;
 
-	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 		num_devs = numGpuDevAttrs;
-	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 		num_devs = DpuStorageEntryCount();
 
 	if (pts->br_state)
@@ -1642,9 +1643,9 @@ pgstromExplainTaskState(CustomScanState *node,
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
 										node->ss.ps.plan,
 										ancestors);
-	if ((pts->task_kind & DEVKIND__NVIDIA_GPU) != 0)
+	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 		xpu_label = "GPU";
-	else if ((pts->task_kind & DEVKIND__NVIDIA_DPU) != 0)
+	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 		xpu_label = "DPU";
 	else
 		xpu_label = "???";
