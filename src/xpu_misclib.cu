@@ -119,7 +119,7 @@ xpu_uuid_datum_store(kern_context *kcxt,
 		*p_vclass = KVAR_CLASS__NULL;
 	else
 	{
-		xpu_uuid_t *buf = (xpu_uuid_t *)kcxt_alloc(kcxt, sizeof(pg_uuid_t));
+		pg_uuid_t  *buf = (pg_uuid_t *)kcxt_alloc(kcxt, sizeof(pg_uuid_t));
 
 		if (!buf)
 			return false;
