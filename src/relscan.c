@@ -313,6 +313,13 @@ setup_kern_data_store(kern_data_store *kds,
 	return MAXALIGN(offsetof(kern_data_store, colmeta[kds->nr_colmeta]));
 }
 
+/*
+ * estimate_kern_data_store
+ *
+ * NOTE: This function estimates required buffer size for the KDS that
+ *       follows the given TupleDesc, but may not be exact size.
+ *       setup_kern_data_store() shall return exact header size.
+ */
 size_t
 estimate_kern_data_store(TupleDesc tupdesc)
 {
