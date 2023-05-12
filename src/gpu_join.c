@@ -1266,7 +1266,6 @@ pgstrom_build_groupby_dev(PlannerInfo *root,
 			}
 		}
 	}
-
 	__build_explain_tlist_junks(&context);
 	return context.tlist_dev;
 }
@@ -1392,6 +1391,9 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 													input_rels_tlist);
 		pp_info->kexp_projection = codegen_build_projection(&context);
 	}
+	pull_varattnos((Node *)context.tlist_dev,
+				   pp_info->scan_relid,
+				   &outer_refs);
 	/* assign remaining PlanInfo members */
 	pp_info->kexp_join_quals_packed
 		= codegen_build_packed_joinquals(&context,

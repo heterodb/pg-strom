@@ -2306,15 +2306,17 @@ arrowFdwSetupIOvector(RecordBatchState *rb_state,
 {
 	arrowFdwSetupIOContext *con;
 	strom_io_vector *iovec;
+	unsigned int	nr_chunks = 0;
 
-	Assert(kds->ncols <= kds->nr_colmeta &&
+	Assert(kds->format == KDS_FORMAT_ARROW &&
+		   kds->ncols <= kds->nr_colmeta &&
 		   kds->ncols == rb_state->nfields);
 	con = alloca(offsetof(arrowFdwSetupIOContext,
 						  ioc[3 * kds->nr_colmeta]));
 	con->rb_offset = rb_state->rb_offset;
 	con->f_offset  = ~0UL;	/* invalid offset */
 	con->m_offset  = 0;
-	con->kds_head_sz = KDS_HEAD_LENGTH(kds);
+	con->kds_head_sz = TYPEALIGN(64, KDS_HEAD_LENGTH(kds));
 	con->depth = 0;
 	con->io_index = -1;		/* invalid index */
 	for (int j=0; j < kds->ncols; j++)
@@ -2336,12 +2338,13 @@ arrowFdwSetupIOvector(RecordBatchState *rb_state,
 
 		ioc->nr_pages = (TYPEALIGN(PAGE_SIZE, con->f_offset) / PAGE_SIZE -
 						 ioc->fchunk_id);
-		con->m_offset = ioc->m_offset + PAGE_SIZE * ioc->nr_pages;
+		con->m_offset += PAGE_SIZE * ioc->nr_pages;
+		nr_chunks = con->io_index;
 	}
-	kds->length = con->m_offset;
+	kds->length = con->kds_head_sz + con->m_offset;
 
-	iovec = palloc0(offsetof(strom_io_vector, ioc[con->io_index]));
-	iovec->nr_chunks = con->io_index;
+	iovec = palloc0(offsetof(strom_io_vector, ioc[nr_chunks]));
+	iovec->nr_chunks = nr_chunks;
 	if (iovec->nr_chunks > 0)
 		memcpy(iovec->ioc, con->ioc, sizeof(strom_io_chunk) * con->io_index);
 #if 0
@@ -2432,7 +2435,6 @@ arrowFdwLoadRecordBatch(Relation relation,
 	setup_kern_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW);
 	kds->nitems = rb_state->rb_nitems;
 	kds->table_oid = RelationGetRelid(relation);
-	Assert(head_sz == KDS_HEAD_LENGTH(kds));
 	Assert(kds->ncols == rb_state->nfields);
 	for (int j=0; j < kds->ncols; j++)
 		__arrowKdsAssignAttrOptions(kds,
@@ -3579,7 +3581,10 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 
 	rb_state = __arrowFdwNextRecordBatch(arrow_state);
 	if (!rb_state)
+	{
+		pts->scan_done = true;
 		return NULL;
+	}
 	af_state = rb_state->af_state;
 
 	/* XpuCommand header */

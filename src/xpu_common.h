@@ -106,6 +106,19 @@
 #define DBL_MAX         __longlong_as_double__(0x7fefffffffffffffULL)
 #endif
 
+#ifndef BITS_PER_BYTE
+#define BITS_PER_BYTE	8
+#endif
+#ifndef SHRT_NBITS
+#define SHRT_NBITS	(sizeof(int16_t) * BITS_PER_BYTE)
+#endif
+#ifndef INT_NBITS
+#define INT_NBITS	(sizeof(int32_t) * BITS_PER_BYTE)
+#endif
+#ifndef LONG_NBITS
+#define LONG_NBITS	(sizeof(int64_t) * BITS_PER_BYTE)
+#endif
+
 /*
  * Several fundamental data types and macros
  */
@@ -1386,6 +1399,7 @@ struct xpu_datum_operators {
 #include "xpu_textlib.h"
 #include "xpu_timelib.h"
 #include "xpu_misclib.h"
+#include "xpu_postgis.h"
 
 /*
  * xpu_array_t - array type support

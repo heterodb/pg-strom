@@ -566,6 +566,18 @@ devtype_inet_hash(bool isnull, Datum value)
 	return 0;
 }
 
+static uint32_t
+devtype_geometry_hash(bool isnull, Datum value)
+{
+	elog(ERROR, "geometry type has no device hash function");
+}
+
+static uint32_t
+devtype_box2df_hash(bool isnull, Datum value)
+{
+	elog(ERROR, "box2df type has no device hash function");
+}
+
 /*
  * Built-in device functions/operators
  */
@@ -1401,16 +1413,13 @@ __codegen_build_loadvars_one(codegen_context *context, int depth)
 			nloads++;
 		}
 	}
-	if (nloads == 0)
+	if (nloads > 0)
 	{
-		pfree(buf.data);
-		return NULL;
+		qsort(buf.data + offsetof(kern_expression, u.load.kvars),
+			  nloads,
+			  sizeof(kern_vars_defitem),
+			  kern_vars_defitem_comp);
 	}
-	qsort(buf.data + offsetof(kern_expression, u.load.kvars),
-		  nloads,
-		  sizeof(kern_vars_defitem),
-		  kern_vars_defitem_comp);
-
 	memset(&kexp, 0, sizeof(kexp));
 	kexp.exptype  = TypeOpCode__int4;
 	kexp.expflags = context->kexp_flags;

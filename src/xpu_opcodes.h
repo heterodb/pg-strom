@@ -40,7 +40,8 @@ TYPE_OPCODE(uuid, UUIDOID, NULL, 0)
 TYPE_OPCODE(macaddr, MACADDROID, NULL, 0)
 TYPE_OPCODE(inet, INETOID, NULL, 0)
 //TYPE_OPCODE(cidr, CIDROID, NULL)
-
+TYPE_OPCODE(geometry, __GEOMETRYOID__, "postgis3", DEVTYPE__USE_KVARS_SLOTBUF)
+TYPE_OPCODE(box2df, __BOX2DFOID__, "postgis3", 0)
 /*
  * PostgreSQL Device Functions / Operators
  */

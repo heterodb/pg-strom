@@ -1317,7 +1317,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 		return;
 	}
 	/* inner buffer of GpuJoin */
-	if (gq_buf)
+	if (gq_buf && gq_buf->m_kmrels)
 	{
 		kern_multirels *h_kmrels = (kern_multirels *)gq_buf->h_kmrels;
 

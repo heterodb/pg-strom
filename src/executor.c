@@ -1636,6 +1636,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	char				label[100];
 	char			   *str;
 	double				ntuples;
+	devtype_info	   *dtype;
 
 	/* setup deparse context */
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
@@ -1855,6 +1856,26 @@ pgstromExplainTaskState(CustomScanState *node,
 	 */
 	if (es->verbose)
 	{
+		int		kvars_nslots = list_length(pp_info->kvars_depth);
+		size_t	kvars_nbytes = (sizeof(kern_variable) * kvars_nslots +
+								sizeof(int)           * kvars_nslots);
+		foreach (lc, pp_info->kvars_types)
+		{
+			Oid		type_oid = lfirst_oid(lc);
+
+			if (OidIsValid(type_oid) &&
+				(dtype = pgstrom_devtype_lookup(type_oid)) != NULL)
+			{
+				kvars_nbytes = TYPEALIGN(dtype->type_alignof, kvars_nbytes);
+				kvars_nbytes += dtype->type_sizeof;
+			}
+		}
+		resetStringInfo(&buf);
+		appendStringInfo(&buf, "nslots: %u, nbytes: %zu",
+						 kvars_nslots,
+						 kvars_nbytes);
+		ExplainPropertyText("KVars", buf.data, es);
+
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Scan VarLoads OpCode",
 								pp_info->kexp_scan_kvars_load);
