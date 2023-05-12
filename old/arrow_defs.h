@@ -126,7 +126,6 @@ typedef enum
 {
 	ArrowIntervalUnit__Year_Month	= 0,
 	ArrowIntervalUnit__Day_Time		= 1,
-	ArrowIntervalUnit__Month_Day_Nano = 2,
 } ArrowIntervalUnit;
 
 /*
@@ -193,39 +192,50 @@ typedef enum
 /*
  * ArrowTypeOptions - our own definition
  */
-typedef struct ArrowTypeOptions
+#define ARROW_TYPE_OPTIONS_COMMON_FIELDS		\
+	ArrowTypeTag			tag;				\
+	unsigned short			unitsz
+
+typedef union		ArrowTypeOptions
 {
-	ArrowTypeTag				tag;
-	short						unitsz;
-	union {
-		struct {
-			unsigned short		bitWidth;
-			__boolean			is_signed;
-		} integer;
-		struct {
-			ArrowPrecision		precision;
-		} floating_point;
-		struct {
-			unsigned short		precision;
-			unsigned short		scale;
-			unsigned short		bitWidth;
-		} decimal;
-		struct {
-			ArrowDateUnit		unit;
-		} date;
-		struct {
-			ArrowTimeUnit		unit;
-		} time;
-		struct {
-			ArrowTimeUnit		unit;
-		} timestamp;
-		struct {
-			ArrowIntervalUnit	unit;
-		} interval;
-		struct {
-			unsigned int		byteWidth;
-		} fixed_size_binary;
-	};
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+	} common;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		unsigned short		bitWidth;
+		__boolean			is_signed;
+	} integer;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowPrecision		precision;
+	} floating_point;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		unsigned short		precision;
+		unsigned short		scale;
+		unsigned short		bitWidth;
+	} decimal;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowDateUnit		unit;
+	} date;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowTimeUnit		unit;
+	} time;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowTimeUnit		unit;
+	} timestamp;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		ArrowIntervalUnit	unit;
+	} interval;
+	struct {
+		ARROW_TYPE_OPTIONS_COMMON_FIELDS;
+		int					byteWidth;
+	} fixed_size_binary;
 } ArrowTypeOptions;
 
 #undef ARROW_TYPE_OPTIONS_COMMON_FIELDS

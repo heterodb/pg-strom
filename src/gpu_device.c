@@ -3,19 +3,22 @@
  *
  * Routines to collect GPU device information.
  * ----
- * Copyright 2011-2021 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2021 (C) PG-Strom Developers Team
+ * Copyright 2011-2023 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2023 (C) PG-Strom Developers Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include "cuda_common.h"
 
 /* variable declarations */
-DevAttributes	   *devAttrs = NULL;
-cl_int				numDevAttrs = 0;
-cl_uint				devBaselineMaxThreadsPerBlock = UINT_MAX;
-
+GpuDevAttributes *gpuDevAttrs = NULL;
+int			numGpuDevAttrs = 0;
+double		pgstrom_gpu_setup_cost;			/* GUC */
+double		pgstrom_gpu_tuple_cost;			/* GUC */
+double		pgstrom_gpu_operator_cost;		/* GUC */
+double		pgstrom_gpu_direct_seq_page_cost; /* GUC */
 /* catalog of device attributes */
 typedef enum {
 	DEVATTRKIND__INT,
@@ -29,312 +32,361 @@ typedef enum {
 
 static struct {
 	CUdevice_attribute	attr_id;
-	DevAttrKind	attr_kind;
 	size_t		attr_offset;
+	const char *attr_label;
 	const char *attr_desc;
-} DevAttrCatalog[] = {
-#define DEV_ATTR(LABEL,KIND,a,DESC)				\
+} GpuDevAttrCatalog[] = {
+#define DEV_ATTR(LABEL,DESC)					\
 	{ CU_DEVICE_ATTRIBUTE_##LABEL,				\
-	  DEVATTRKIND__##KIND,						\
-	  offsetof(struct DevAttributes, LABEL),	\
-	  DESC },
-#include "device_attrs.h"
+	  offsetof(struct GpuDevAttributes, LABEL),	\
+	  #LABEL, DESC },
+#include "gpu_devattrs.h"
 #undef DEV_ATTR
 };
 
 /* declaration */
-Datum pgstrom_device_info(PG_FUNCTION_ARGS);
-Datum pgstrom_gpu_device_name(PG_FUNCTION_ARGS);
-Datum pgstrom_gpu_global_memsize(PG_FUNCTION_ARGS);
-Datum pgstrom_gpu_max_blocksize(PG_FUNCTION_ARGS);
-Datum pgstrom_gpu_warp_size(PG_FUNCTION_ARGS);
-Datum pgstrom_gpu_max_shared_memory_perblock(PG_FUNCTION_ARGS);
-Datum pgstrom_gpu_num_registers_perblock(PG_FUNCTION_ARGS);
-Datum pgstrom_gpu_num_multiptocessors(PG_FUNCTION_ARGS);
-Datum pgstrom_gpu_num_cuda_cores(PG_FUNCTION_ARGS);
-Datum pgstrom_gpu_cc_major(PG_FUNCTION_ARGS);
-Datum pgstrom_gpu_cc_minor(PG_FUNCTION_ARGS);
-Datum pgstrom_gpu_pci_id(PG_FUNCTION_ARGS);
-
-/* static variables */
-static bool		gpudirect_driver_is_initialized = false;
-static bool		__pgstrom_gpudirect_enabled;	/* GUC */
-static int		__pgstrom_gpudirect_threshold;	/* GUC */
+Datum pgstrom_gpu_device_info(PG_FUNCTION_ARGS);
 
 /*
- * pgstrom_gpudirect_enabled
+ * collectGpuDevAttrs
  */
-bool
-pgstrom_gpudirect_enabled(void)
+static void
+__collectGpuDevAttrs(GpuDevAttributes *dattrs, CUdevice cuda_device)
 {
-	return __pgstrom_gpudirect_enabled;
-}
-
-/*
- * pgstrom_gpudirect_enabled_checker
- */
-static bool
-pgstrom_gpudirect_enabled_checker(bool *p_newval, void **extra, GucSource source)
-{
-	bool	newval = *p_newval;
-
-	if (newval && !gpudirect_driver_is_initialized)
-		elog(ERROR, "cannot enable GPUDirectSQL without driver module loaded");
-	return true;
-}
-
-/*
- * pgstrom_gpudirect_threshold
- */
-Size
-pgstrom_gpudirect_threshold(void)
-{
-	return (Size)__pgstrom_gpudirect_threshold << 10;
-}
-
-/*
- * pgstrom_collect_gpu_device
- */
-static bool
-pgstrom_collect_gpu_device(void)
-{
-	StringInfoData str;
-	const char *cmdline = (CMD_GPUINFO_PATH " -md");
-	char		linebuf[2048];
+	CUresult	rc;
+	char		path[1024];
+	char		linebuf[1024];
 	FILE	   *filp;
-	char	   *tok_attr;
-	char	   *tok_val;
-	char	   *pos;
-	char	   *cuda_runtime_version = NULL;
-	char	   *nvidia_driver_version = NULL;
-	int			num_devices = -1;	/* total num of GPUs; incl legacy models */
-	int			i, cuda_dindex;
+	struct stat	stat_buf;
 
-	Assert(numDevAttrs == 0);
-	filp = OpenPipeStream(cmdline, PG_BINARY_R);
-	if (!filp)
-		return false;
-
-	initStringInfo(&str);
-	while (fgets(linebuf, sizeof(linebuf), filp) != NULL)
-	{
-		/* trim '\n' on the tail */
-		pos = linebuf + strlen(linebuf);
-		while (pos > linebuf && isspace(*--pos))
-			*pos = '\0';
-		/* empty line? */
-		if (linebuf[0] == '\0')
-			continue;
-
-		tok_attr = strchr(linebuf, ':');
-		if (!tok_attr)
-			elog(ERROR, "unexpected gpuinfo -md format");
-		*tok_attr++ = '\0';
-
-		tok_val = strchr(tok_attr, '=');
-		if (!tok_val)
-			elog(ERROR, "incorrect gpuinfo -md format");
-		*tok_val++ = '\0';
-
-		if (strcmp(linebuf, "PLATFORM") == 0)
-		{
-			if (strcmp(tok_attr, "CUDA_RUNTIME_VERSION") == 0)
-				cuda_runtime_version = pstrdup(tok_val);
-			else if (strcmp(tok_attr, "NVIDIA_DRIVER_VERSION") == 0)
-				nvidia_driver_version = pstrdup(tok_val);
-			else if (strcmp(tok_attr, "NUMBER_OF_DEVICES") == 0)
-			{
-				num_devices = atoi(tok_val);
-				if (num_devices < 0)
-					elog(ERROR, "NUMBER_OF_DEVICES is not correct");
-			}
-			else
-				elog(ERROR, "unknown PLATFORM attribute");
-		}
-		else if (strncmp(linebuf, "DEVICE", 6) == 0)
-		{
-			int		dindex = atoi(linebuf + 6);
-
-			if (!devAttrs)
-			{
-				if (!cuda_runtime_version ||
-					!nvidia_driver_version ||
-					num_devices < 0)
-					elog(ERROR, "incorrect gpuinfo -md format");
-				Assert(num_devices > 0);
-				devAttrs = MemoryContextAllocZero(TopMemoryContext,
-												  sizeof(DevAttributes) *
-												  num_devices);
-			}
-
-			if (dindex < 0 || dindex >= num_devices)
-				elog(ERROR, "device index out of range");
-
-#define DEV_ATTR(LABEL,a,b,c)						\
-			else if (strcmp(tok_attr, #LABEL) == 0)	\
-				devAttrs[dindex].LABEL = atoi(tok_val);
-
-			if (strcmp(tok_attr, "DEVICE_ID") == 0)
-			{
-				devAttrs[dindex].DEV_ID = atoi(tok_val);
-			}
-			else if (strcmp(tok_attr, "DEVICE_NAME") == 0)
-			{
-				strncpy(devAttrs[dindex].DEV_NAME, tok_val,
-						sizeof(devAttrs[dindex].DEV_NAME));
-			}
-			else if (strcmp(tok_attr, "DEVICE_BRAND") == 0)
-			{
-				strncpy(devAttrs[dindex].DEV_BRAND, tok_val,
-						sizeof(devAttrs[dindex].DEV_BRAND));
-			}
-			else if (strcmp(tok_attr, "DEVICE_UUID") == 0)
-			{
-				strncpy(devAttrs[dindex].DEV_UUID, tok_val,
-						sizeof(devAttrs[dindex].DEV_UUID));
-			}
-			else if (strcmp(tok_attr, "GLOBAL_MEMORY_SIZE") == 0)
-				devAttrs[dindex].DEV_TOTAL_MEMSZ = atol(tok_val);
-			else if (strcmp(tok_attr, "PCI_BAR1_MEMORY_SIZE") == 0)
-				devAttrs[dindex].DEV_BAR1_MEMSZ = atol(tok_val);
-#include "device_attrs.h"
-			else
-				elog(ERROR, "incorrect gpuinfo -md format");
+	rc = cuDeviceGetName(dattrs->DEV_NAME, sizeof(dattrs->DEV_NAME), cuda_device);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuDeviceGetName: %s", cuStrError(rc));
+	rc = cuDeviceGetUuid((CUuuid *)dattrs->DEV_UUID, cuda_device);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuDeviceGetUuid: %s", cuStrError(rc));
+	rc = cuDeviceTotalMem(&dattrs->DEV_TOTAL_MEMSZ, cuda_device);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuDeviceTotalMem: %s", cuStrError(rc));
+#define DEV_ATTR(LABEL,DESC)										\
+	rc = cuDeviceGetAttribute(&dattrs->LABEL,						\
+							  CU_DEVICE_ATTRIBUTE_##LABEL,			\
+							  cuda_device);							\
+	if (rc != CUDA_SUCCESS)											\
+		__FATAL("failed on cuDeviceGetAttribute(" #LABEL "): %s",	\
+				cuStrError(rc));
+#include "gpu_devattrs.h"
 #undef DEV_ATTR
-		}
-		else
-			elog(ERROR, "unexpected gpuinfo -md input:\n%s", linebuf);
-	}
-	ClosePipeStream(filp);
-
-	for (i=0, cuda_dindex=0; i < num_devices; i++)
+	/*
+	 * Some other fields to be fetched from Sysfs
+	 */
+	snprintf(path, sizeof(path),
+			 "/sys/bus/pci/devices/%04x:%02x:%02x.0/numa_node",
+			 dattrs->PCI_DOMAIN_ID,
+			 dattrs->PCI_BUS_ID,
+			 dattrs->PCI_DEVICE_ID);
+	filp = fopen(path, "r");
+	if (!filp)
+		dattrs->NUMA_NODE_ID = -1;	/* unknown */
+	else
 	{
-		DevAttributes  *dattrs = &devAttrs[i];
-		char			path[MAXPGPATH];
-		char			linebuf[2048];
-		FILE		   *filp;
+		if (!fgets(linebuf, sizeof(linebuf), filp))
+			dattrs->NUMA_NODE_ID = -1;	/* unknown */
+		else
+			dattrs->NUMA_NODE_ID = atoi(linebuf);
+		fclose(filp);
+	}
 
-		/* Recommend to use Pascal or later */
-		if (dattrs->COMPUTE_CAPABILITY_MAJOR < 6)
+	snprintf(path, sizeof(path),
+			 "/sys/bus/pci/devices/%04x:%02x:%02x.0/resource1",
+			 dattrs->PCI_DOMAIN_ID,
+			 dattrs->PCI_BUS_ID,
+			 dattrs->PCI_DEVICE_ID);
+	if (stat(path, &stat_buf) == 0)
+		dattrs->DEV_BAR1_MEMSZ = stat_buf.st_size;
+	else
+		dattrs->DEV_BAR1_MEMSZ = 0;		/* unknown */
+
+	/*
+	 * GPU-Direct SQL is supported?
+	 */
+	if (dattrs->GPU_DIRECT_RDMA_SUPPORTED)
+	{
+		if (dattrs->DEV_BAR1_MEMSZ == 0 /* unknown */ ||
+			dattrs->DEV_BAR1_MEMSZ > (256UL << 20))
+			dattrs->DEV_SUPPORT_GPUDIRECTSQL = true;
+	}
+}
+
+static int
+collectGpuDevAttrs(int fdesc)
+{
+	GpuDevAttributes dattrs;
+	CUdevice	cuda_device;
+	CUresult	rc;
+	int			i, nr_gpus;
+
+	rc = cuInit(0);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuInit: %s", cuStrError(rc));
+	rc = cuDeviceGetCount(&nr_gpus);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuDeviceGetCount: %s", cuStrError(rc));
+
+	for (i=0; i < nr_gpus; i++)
+	{
+		ssize_t		offset, nbytes;
+
+		rc = cuDeviceGet(&cuda_device, i);
+		if (rc != CUDA_SUCCESS)
+			__FATAL("failed on cuDeviceGet: %s", cuStrError(rc));
+		memset(&dattrs, 0, sizeof(GpuDevAttributes));
+		dattrs.DEV_ID = i;
+		__collectGpuDevAttrs(&dattrs, cuda_device);
+
+		for (offset=0; offset < sizeof(GpuDevAttributes); offset += nbytes)
+		{
+			nbytes = write(fdesc, ((char *)&dattrs) + offset,
+						   sizeof(GpuDevAttributes) - offset);
+			if (nbytes == 0)
+				break;
+			if (nbytes < 0)
+				__FATAL("failed on write(pipefd): %m");
+		}
+	}
+	return 0;
+}
+
+/*
+ * receiveGpuDevAttrs
+ */
+static void
+receiveGpuDevAttrs(int fdesc)
+{
+	GpuDevAttributes *__devAttrs = NULL;
+	GpuDevAttributes dattrs_saved;
+	int			nitems = 0;
+	int			nrooms = 0;
+	bool		is_saved = false;
+
+	for (;;)
+	{
+		GpuDevAttributes dtemp;
+		ssize_t		nbytes;
+
+		nbytes = __readFile(fdesc, &dtemp, sizeof(GpuDevAttributes));
+		if (nbytes == 0)
+			break;	/* end */
+		if (nbytes != sizeof(GpuDevAttributes))
+			elog(ERROR, "failed on collect GPU device attributes");
+		if (dtemp.COMPUTE_CAPABILITY_MAJOR < 6)
 		{
 			elog(LOG, "PG-Strom: GPU%d %s - CC %d.%d is not supported",
-				 dattrs->DEV_ID,
-				 dattrs->DEV_NAME,
-				 dattrs->COMPUTE_CAPABILITY_MAJOR,
-				 dattrs->COMPUTE_CAPABILITY_MINOR);
+				 dtemp.DEV_ID,
+				 dtemp.DEV_NAME,
+				 dtemp.COMPUTE_CAPABILITY_MAJOR,
+				 dtemp.COMPUTE_CAPABILITY_MINOR);
 			continue;
 		}
-
-		/* Update the baseline device capability */
-		devBaselineMaxThreadsPerBlock = Min(devBaselineMaxThreadsPerBlock,
-											dattrs->MAX_THREADS_PER_BLOCK);
-
-		/*
-		 * Only Tesla or Quadro which have PCI Bar1 more than 256MB
-		 * supports GPUDirectSQL
-		 */
-		dattrs->DEV_SUPPORT_GPUDIRECTSQL = false;
-		if (dattrs->DEV_BAR1_MEMSZ > (256UL << 20))
+		if (heterodbValidateDevice(dtemp.DEV_ID,
+								   dtemp.DEV_NAME,
+								   dtemp.DEV_UUID))
 		{
-#if CUDA_VERSION < 11030
-			if (strcmp(dattrs->DEV_BRAND, "TESLA") == 0 ||
-				strcmp(dattrs->DEV_BRAND, "QUADRO") == 0 ||
-				strcmp(dattrs->DEV_BRAND, "NVIDIA") == 0)
-				dattrs->DEV_SUPPORT_GPUDIRECTSQL = true;
-#else
-			if (dattrs->GPU_DIRECT_RDMA_SUPPORTED)
-				dattrs->DEV_SUPPORT_GPUDIRECTSQL = true;
-#endif
+			if (nitems >= nrooms)
+			{
+				nrooms += 10;
+				__devAttrs = realloc(__devAttrs, sizeof(GpuDevAttributes) * nrooms);
+				if (!__devAttrs)
+					elog(ERROR, "out of memory");
+			}
+			memcpy(&__devAttrs[nitems++], &dtemp, sizeof(GpuDevAttributes));
 		}
-
-		/*
-		 * read the numa node-id from the sysfs entry
-		 *
-		 * Note that we assume device function-id is 0, because it is
-		 * uncertain whether MULTI_GPU_BOARD_GROUP_ID is an adequate value
-		 * to query, and these sibling devices obviously belongs to same
-		 * numa-node, even if function-id is not identical.
-		 */
-		snprintf(path, sizeof(path),
-				 "/sys/bus/pci/devices/%04x:%02x:%02x.0/numa_node",
-				 dattrs->PCI_DOMAIN_ID,
-				 dattrs->PCI_BUS_ID,
-				 dattrs->PCI_DEVICE_ID);
-		filp = fopen(path, "r");
-		if (!filp)
-			dattrs->NUMA_NODE_ID = -1;              /* unknown */
-		else
+		else if (!is_saved)
 		{
-			if (!fgets(linebuf, sizeof(linebuf), filp))
-				dattrs->NUMA_NODE_ID = -1;      /* unknown */
-			else
-				dattrs->NUMA_NODE_ID = atoi(linebuf);
-			fclose(filp);
+			memcpy(&dattrs_saved, &dtemp, sizeof(GpuDevAttributes));
+			is_saved = true;
 		}
+	}
 
-		/* Log brief CUDA device properties */
-		resetStringInfo(&str);
-		appendStringInfo(&str, "GPU%d %s (%d SMs; %dMHz, L2 %dkB)",
+	if (nitems == 0 && is_saved)
+	{
+		__devAttrs = malloc(sizeof(GpuDevAttributes));
+		if (!__devAttrs)
+			elog(ERROR, "out of memory");
+		memcpy(&__devAttrs[nitems++], &dattrs_saved, sizeof(GpuDevAttributes));
+	}
+	numGpuDevAttrs = nitems;
+	gpuDevAttrs = __devAttrs;
+}
+
+/*
+ * pgstrom_collect_gpu_devices
+ */
+static void
+pgstrom_collect_gpu_devices(void)
+{
+	int		i, pipefd[2];
+	pid_t	child;
+	StringInfoData buf;
+
+	if (pipe(pipefd) != 0)
+		elog(ERROR, "failed on pipe(2): %m");
+	child = fork();
+	if (child == 0)
+	{
+		close(pipefd[0]);
+		_exit(collectGpuDevAttrs(pipefd[1]));
+	}
+	else if (child > 0)
+	{
+		int		status;
+
+		close(pipefd[1]);
+		PG_TRY();
+		{
+			receiveGpuDevAttrs(pipefd[0]);
+		}
+		PG_CATCH();
+		{
+			/* cleanup */
+			kill(child, SIGKILL);
+			close(pipefd[0]);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		close(pipefd[0]);
+
+		while (waitpid(child, &status, 0) < 0)
+		{
+			if (errno != EINTR)
+			{
+				kill(child, SIGKILL);
+				elog(ERROR, "failed on waitpid: %m");
+			}
+		}
+		if (WEXITSTATUS(status) != 0)
+			elog(ERROR, "GPU device attribute collector exited with %d",
+				 WEXITSTATUS(status));
+	}
+	else
+	{
+		close(pipefd[0]);
+		close(pipefd[1]);
+		elog(ERROR, "failed on fork(2): %m");
+	}
+	initStringInfo(&buf);
+	for (i=0; i < numGpuDevAttrs; i++)
+	{
+		GpuDevAttributes *dattrs = &gpuDevAttrs[i];
+
+		resetStringInfo(&buf);
+		appendStringInfo(&buf, "GPU%d %s (%d SMs; %dMHz, L2 %dkB)",
 						 dattrs->DEV_ID, dattrs->DEV_NAME,
 						 dattrs->MULTIPROCESSOR_COUNT,
 						 dattrs->CLOCK_RATE / 1000,
 						 dattrs->L2_CACHE_SIZE >> 10);
 		if (dattrs->DEV_TOTAL_MEMSZ > (4UL << 30))
-			appendStringInfo(&str, ", RAM %.2fGB",
+			appendStringInfo(&buf, ", RAM %.2fGB",
 							 ((double)dattrs->DEV_TOTAL_MEMSZ /
 							  (double)(1UL << 30)));
 		else
-			appendStringInfo(&str, ", RAM %zuMB",
+			appendStringInfo(&buf, ", RAM %zuMB",
 							 dattrs->DEV_TOTAL_MEMSZ >> 20);
 		if (dattrs->MEMORY_CLOCK_RATE > (1UL << 20))
-			appendStringInfo(&str, " (%dbits, %.2fGHz)",
+			appendStringInfo(&buf, " (%dbits, %.2fGHz)",
 							 dattrs->GLOBAL_MEMORY_BUS_WIDTH,
 							 ((double)dattrs->MEMORY_CLOCK_RATE /
 							  (double)(1UL << 20)));
 		else
-			appendStringInfo(&str, " (%dbits, %dMHz)",
+			appendStringInfo(&buf, " (%dbits, %dMHz)",
 							 dattrs->GLOBAL_MEMORY_BUS_WIDTH,
 							 dattrs->MEMORY_CLOCK_RATE >> 10);
-
 		if (dattrs->DEV_BAR1_MEMSZ > (1UL << 30))
-			appendStringInfo(&str, ", PCI-E Bar1 %luGB",
+			appendStringInfo(&buf, ", PCI-E Bar1 %luGB",
 							 dattrs->DEV_BAR1_MEMSZ >> 30);
 		else if (dattrs->DEV_BAR1_MEMSZ > (1UL << 20))
-			appendStringInfo(&str, ", PCI-E Bar1 %luMB",
+			appendStringInfo(&buf, ", PCI-E Bar1 %luMB",
 							 dattrs->DEV_BAR1_MEMSZ >> 30);
-
-		appendStringInfo(&str, ", CC %d.%d",
+		appendStringInfo(&buf, ", CC %d.%d",
 						 dattrs->COMPUTE_CAPABILITY_MAJOR,
 						 dattrs->COMPUTE_CAPABILITY_MINOR);
-		elog(LOG, "PG-Strom: %s", str.data);
-
-		if (i != cuda_dindex)
-			memcpy(&devAttrs[cuda_dindex],
-				   &devAttrs[i], sizeof(DevAttributes));
-		cuda_dindex++;
+        elog(LOG, "PG-Strom: %s", buf.data);
 	}
+	pfree(buf.data);
+}
 
-	if (num_devices > 0)
+/*
+ * pgstrom_gpu_operator_ratio
+ */
+double
+pgstrom_gpu_operator_ratio(void)
+{
+	if (cpu_operator_cost > 0.0)
 	{
-		if (cuda_dindex == 0)
-			elog(ERROR, "PG-Strom: no supported GPU devices found");
-		numDevAttrs = cuda_dindex;
-		return true;
+		return pgstrom_gpu_operator_cost / cpu_operator_cost;
 	}
-	return false;
+	return (pgstrom_gpu_operator_cost == 0.0 ? 1.0 : disable_cost);
+}
+
+/*
+ * pgstrom_init_gpu_options - init GUC options related to GPUs
+ */
+static void
+pgstrom_init_gpu_options(void)
+{
+	/* cost factor for GPU setup */
+	DefineCustomRealVariable("pg_strom.gpu_setup_cost",
+							 "Cost to setup GPU device to run",
+							 NULL,
+							 &pgstrom_gpu_setup_cost,
+							 100 * DEFAULT_SEQ_PAGE_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for each Gpu task */
+	DefineCustomRealVariable("pg_strom.gpu_tuple_cost",
+							 "Default cost to transfer GPU<->Host per tuple",
+							 NULL,
+							 &pgstrom_gpu_tuple_cost,
+							 DEFAULT_CPU_TUPLE_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for GPU operator */
+	DefineCustomRealVariable("pg_strom.gpu_operator_cost",
+							 "Cost of processing each operators by GPU",
+							 NULL,
+							 &pgstrom_gpu_operator_cost,
+							 DEFAULT_CPU_OPERATOR_COST / 16.0,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* cost factor for GPU-Direct SQL */
+	DefineCustomRealVariable("pg_strom.gpu_direct_seq_page_cost",
+							 "Cost for sequential page read by GPU-Direct SQL",
+							 NULL,
+							 &pgstrom_gpu_direct_seq_page_cost,
+							 DEFAULT_SEQ_PAGE_COST / 4.0,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 }
 
 /*
  * pgstrom_init_gpu_device
  */
-void
+bool
 pgstrom_init_gpu_device(void)
 {
 	static char	*cuda_visible_devices = NULL;
-	bool		default_gpudirect_enabled = false;
-	size_t		default_threshold = 0;
-	size_t		shared_buffer_size = (size_t)NBuffers * (size_t)BLCKSZ;
-	int			i;
 
 	/*
 	 * Set CUDA_VISIBLE_DEVICES environment variable prior to CUDA
@@ -353,52 +405,76 @@ pgstrom_init_gpu_device(void)
 		if (setenv("CUDA_VISIBLE_DEVICES", cuda_visible_devices, 1) != 0)
 			elog(ERROR, "failed to set CUDA_VISIBLE_DEVICES");
 	}
-	/* collect device properties by gpuinfo command */
-	if (!pgstrom_collect_gpu_device())
-		return;		/* cpu_only_mode */
-
-	/* pgstrom.gpudirect_enabled */
-	if (gpuDirectInitDriver() == 0)
+	/* collect device attributes using child process */
+	pgstrom_collect_gpu_devices();
+	if (numGpuDevAttrs > 0)
 	{
-		for (i=0; i < numDevAttrs; i++)
-		{
-			if (devAttrs[i].DEV_SUPPORT_GPUDIRECTSQL)
-				default_gpudirect_enabled = true;
-		}
-		gpudirect_driver_is_initialized = true;
+		pgstrom_init_gpu_options();
+		return true;
 	}
-	DefineCustomBoolVariable("pg_strom.gpudirect_enabled",
-							 "enables GPUDirect SQL",
-							 NULL,
-							 &__pgstrom_gpudirect_enabled,
-							 default_gpudirect_enabled,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE,
-							 pgstrom_gpudirect_enabled_checker, NULL, NULL);
+	return false;
+}
 
-	/*
-	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
-	 *   ((System RAM size) -
-	 *    (shared_buffer size)) * 0.5 + (shared_buffer size)
-	 *
-	 * If table size is enough large to issue real i/o, NVMe-Strom will
-	 * make advantage by higher i/o performance.
-	 */
-	if (PAGE_SIZE * PHYS_PAGES > shared_buffer_size / 2)
-		default_threshold = (PAGE_SIZE * PHYS_PAGES - shared_buffer_size / 2);
-	default_threshold += shared_buffer_size;
+/*
+ * gpuClientOpenSession
+ */
+static int
+__gpuClientChooseDevice(const Bitmapset *gpuset)
+{
+	static bool		rr_initialized = false;
+	static uint32	rr_counter = 0;
 
-	DefineCustomIntVariable("pg_strom.gpudirect_threshold",
-							"Tablesize threshold to use GPUDirect SQL",
-							NULL,
-							&__pgstrom_gpudirect_threshold,
-							default_threshold >> 10,
-							262144,	/* 256MB */
-							INT_MAX,
-							PGC_SUSET,
-							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-							NULL, NULL, NULL);
+	if (!rr_initialized)
+	{
+		rr_counter = (uint32)getpid();
+		rr_initialized = true;
+	}
 
+	if (!bms_is_empty(gpuset))
+	{
+		int		num = bms_num_members(gpuset);
+		int	   *dindex = alloca(sizeof(int) * num);
+		int		i, k;
+
+		for (i=0, k=bms_next_member(gpuset, -1);
+			 k >= 0;
+			 i++, k=bms_next_member(gpuset, k))
+		{
+			dindex[i] = k;
+		}
+		Assert(i == num);
+		return dindex[rr_counter++ % num];
+	}
+	/* a simple round-robin if no GPUs preference */
+	return (rr_counter++ % numGpuDevAttrs);
+}
+
+void
+gpuClientOpenSession(pgstromTaskState *pts,
+					 const XpuCommand *session)
+{
+	struct sockaddr_un addr;
+	pgsocket	sockfd;
+	int			cuda_dindex = __gpuClientChooseDevice(pts->optimal_gpus);
+	char		namebuf[32];
+
+	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (sockfd < 0)
+		elog(ERROR, "failed on socket(2): %m");
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	snprintf(addr.sun_path, sizeof(addr.sun_path),
+			 ".pg_strom.%u.gpu%u.sock",
+			 PostmasterPid, cuda_dindex);
+	if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+	{
+		close(sockfd);
+		elog(ERROR, "failed on connect('%s'): %m", addr.sun_path);
+	}
+	snprintf(namebuf, sizeof(namebuf), "GPU-%d", cuda_dindex);
+
+	__xpuClientOpenSession(pts, session, sockfd, namebuf, cuda_dindex);
 }
 
 /*
@@ -406,155 +482,72 @@ pgstrom_init_gpu_device(void)
  * according to the function and device attributes
  */
 static __thread size_t __dynamic_shmem_per_block;
-static __thread size_t __dynamic_shmem_per_thread;
+static __thread size_t __dynamic_shmem_per_warp;
 
 static size_t
 blocksize_to_shmemsize_helper(int blocksize)
 {
-	return (__dynamic_shmem_per_block +
-			__dynamic_shmem_per_thread * (size_t)blocksize);
-}
+	int		n_warps = (blocksize + WARPSIZE - 1) / WARPSIZE;
 
-/*
- * gpuOccupancyMaxPotentialBlockSize
- */
-CUresult
-gpuOccupancyMaxPotentialBlockSize(int *p_min_grid_sz,
-								  int *p_max_block_sz,
-								  CUfunction kern_function,
-								  size_t dynamic_shmem_per_block,
-								  size_t dynamic_shmem_per_thread)
-{
-	cl_int		min_grid_sz;
-	cl_int		max_block_sz;
-	CUresult	rc;
-
-	if (dynamic_shmem_per_thread > 0)
-	{
-		__dynamic_shmem_per_block = dynamic_shmem_per_block;
-		__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
-		rc = cuOccupancyMaxPotentialBlockSize(&min_grid_sz,
-											  &max_block_sz,
-											  kern_function,
-											  blocksize_to_shmemsize_helper,
-											  0,
-											  0);
-	}
-	else
-	{
-		rc = cuOccupancyMaxPotentialBlockSize(&min_grid_sz,
-											  &max_block_sz,
-											  kern_function,
-											  0,
-											  dynamic_shmem_per_block,
-											  0);
-	}
-	if (p_min_grid_sz)
-		*p_min_grid_sz = min_grid_sz;
-	if (p_max_block_sz)
-		*p_max_block_sz = max_block_sz;
-	return rc;
+	return MAXALIGN(__dynamic_shmem_per_block +
+					__dynamic_shmem_per_warp * n_warps);
 }
 
 CUresult
 gpuOptimalBlockSize(int *p_grid_sz,
 					int *p_block_sz,
+					unsigned int *p_shmem_sz,
 					CUfunction kern_function,
-					CUdevice cuda_device,
 					size_t dynamic_shmem_per_block,
-					size_t dynamic_shmem_per_thread)
+					size_t dynamic_shmem_per_warp)
 {
-	cl_int		mp_count;
-	cl_int		min_grid_sz;
-	cl_int		max_block_sz;
-	cl_int		max_multiplicity;
-	size_t		dynamic_shmem_sz;
 	CUresult	rc;
 
-	rc = cuDeviceGetAttribute(&mp_count,
-							  CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
-							  cuda_device);
-	if (rc != CUDA_SUCCESS)
-		return rc;
-
-	rc = gpuOccupancyMaxPotentialBlockSize(&min_grid_sz,
-										   &max_block_sz,
-										   kern_function,
-										   dynamic_shmem_per_block,
-										   dynamic_shmem_per_thread);
-	if (rc != CUDA_SUCCESS)
-		return rc;
-
-	dynamic_shmem_sz = (dynamic_shmem_per_block +
-						dynamic_shmem_per_thread * max_block_sz);
-	rc = cuOccupancyMaxActiveBlocksPerMultiprocessor(&max_multiplicity,
-													 kern_function,
-													 max_block_sz,
-													 dynamic_shmem_sz);
-	if (rc != CUDA_SUCCESS)
-		return rc;
-
-	*p_grid_sz = Min(GPUKERNEL_MAX_SM_MULTIPLICITY,
-					 max_multiplicity) * mp_count;
-	*p_block_sz = max_block_sz;
-
-	return CUDA_SUCCESS;
-}
-
-CUresult
-__gpuOptimalBlockSize(int *p_grid_sz,
-					  int *p_block_sz,
-					  CUfunction kern_function,
-					  int cuda_dindex,
-					  size_t dynamic_shmem_per_block,
-					  size_t dynamic_shmem_per_thread)
-{
-	cl_int		mp_count = devAttrs[cuda_dindex].MULTIPROCESSOR_COUNT;
-	cl_int		min_grid_sz;
-	cl_int		max_block_sz;
-	cl_int		max_multiplicity;
-	size_t		dynamic_shmem_sz;
-	CUresult	rc;
-
-	rc = gpuOccupancyMaxPotentialBlockSize(&min_grid_sz,
-										   &max_block_sz,
-										   kern_function,
-										   dynamic_shmem_per_block,
-										   dynamic_shmem_per_thread);
-	if (rc != CUDA_SUCCESS)
-		return rc;
-
-	dynamic_shmem_sz = (dynamic_shmem_per_block +
-						dynamic_shmem_per_thread * max_block_sz);
-	rc = cuOccupancyMaxActiveBlocksPerMultiprocessor(&max_multiplicity,
-													 kern_function,
-													 max_block_sz,
-													 dynamic_shmem_sz);
-	if (rc != CUDA_SUCCESS)
-		return rc;
-
-	*p_grid_sz = Min(GPUKERNEL_MAX_SM_MULTIPLICITY,
-					 max_multiplicity) * mp_count;
-	*p_block_sz = max_block_sz;
-
-	return CUDA_SUCCESS;
+	if (dynamic_shmem_per_warp == 0)
+	{
+		rc = cuOccupancyMaxPotentialBlockSize(p_grid_sz,
+											  p_block_sz,
+											  kern_function,
+											  NULL,
+											  dynamic_shmem_per_block,
+											  0);
+		if (rc == CUDA_SUCCESS)
+			*p_shmem_sz = dynamic_shmem_per_block;
+	}
+	else
+	{
+		__dynamic_shmem_per_block  = dynamic_shmem_per_block;
+		__dynamic_shmem_per_warp   = dynamic_shmem_per_warp;
+		rc = cuOccupancyMaxPotentialBlockSize(p_grid_sz,
+											  p_block_sz,
+											  kern_function,
+											  blocksize_to_shmemsize_helper,
+											  dynamic_shmem_per_block,
+											  0);
+		if (rc == CUDA_SUCCESS)
+			*p_shmem_sz = blocksize_to_shmemsize_helper(*p_block_sz);
+	}
+	return rc;
 }
 
 /*
- * pgstrom_device_info - SQL function to dump device info
+ * pgstrom_gpu_device_info - SQL function to dump device info
  */
+PG_FUNCTION_INFO_V1(pgstrom_gpu_device_info);
 Datum
-pgstrom_device_info(PG_FUNCTION_ARGS)
+pgstrom_gpu_device_info(PG_FUNCTION_ARGS)
 {
 	FuncCallContext *fncxt;
-	DevAttributes  *dattrs;
-	int				dindex;
-	int				aindex;
-	const char	   *att_name;
-	const char	   *att_value;
-	Datum			values[4];
-	bool			isnull[4];
-	HeapTuple		tuple;
+	GpuDevAttributes *dattrs;
+	int			dindex;
+	int			aindex;
+	int			i, val;
+	const char *att_name;
+	const char *att_value;
+	const char *att_desc;
+	Datum		values[4];
+	bool		isnull[4];
+	HeapTuple	tuple;
 
 	if (SRF_IS_FIRSTCALL())
 	{
@@ -565,13 +558,13 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
 
 		tupdesc = CreateTemplateTupleDesc(4);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "device_nr",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "gpu_id",
 						   INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "aindex",
-						   INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "attribute",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "att_name",
 						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "value",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "att_value",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "att_desc",
 						   TEXTOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
@@ -581,105 +574,125 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 	}
 	fncxt = SRF_PERCALL_SETUP();
 
-	dindex = fncxt->call_cntr / (lengthof(DevAttrCatalog) + 5);
-	aindex = fncxt->call_cntr % (lengthof(DevAttrCatalog) + 5);
-
-	if (dindex >= numDevAttrs)
+	dindex = fncxt->call_cntr / (lengthof(GpuDevAttrCatalog) + 5);
+	aindex = fncxt->call_cntr % (lengthof(GpuDevAttrCatalog) + 5);
+	if (dindex >= numGpuDevAttrs)
 		SRF_RETURN_DONE(fncxt);
-	dattrs = &devAttrs[dindex];
+	dattrs = &gpuDevAttrs[dindex];
+	switch (aindex)
+	{
+		case 0:
+			att_name = "DEV_NAME";
+			att_desc = "GPU Device Name";
+			att_value = dattrs->DEV_NAME;
+			break;
+		case 1:
+			att_name = "DEV_ID";
+			att_desc = "GPU Device ID";
+			att_value = psprintf("%d", dattrs->DEV_ID);
+			break;
+		case 2:
+			att_name = "DEV_UUID";
+			att_desc = "GPU Device UUID";
+			att_value = psprintf("GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-"
+								 "%02x%02x-%02x%02x%02x%02x%02x%02x",
+								 (uint8_t)dattrs->DEV_UUID[0],
+								 (uint8_t)dattrs->DEV_UUID[1],
+								 (uint8_t)dattrs->DEV_UUID[2],
+								 (uint8_t)dattrs->DEV_UUID[3],
+								 (uint8_t)dattrs->DEV_UUID[4],
+								 (uint8_t)dattrs->DEV_UUID[5],
+								 (uint8_t)dattrs->DEV_UUID[6],
+								 (uint8_t)dattrs->DEV_UUID[7],
+								 (uint8_t)dattrs->DEV_UUID[8],
+								 (uint8_t)dattrs->DEV_UUID[9],
+								 (uint8_t)dattrs->DEV_UUID[10],
+								 (uint8_t)dattrs->DEV_UUID[11],
+								 (uint8_t)dattrs->DEV_UUID[12],
+								 (uint8_t)dattrs->DEV_UUID[13],
+								 (uint8_t)dattrs->DEV_UUID[14],
+								 (uint8_t)dattrs->DEV_UUID[15]);
+			break;
+		case 3:
+			att_name = "DEV_TOTAL_MEMSZ";
+			att_desc = "GPU Total RAM Size";
+			att_value = format_bytesz(dattrs->DEV_TOTAL_MEMSZ);
+			break;
+		case 4:
+			att_name = "DEV_BAR1_MEMSZ";
+			att_desc = "GPU PCI Bar1 Size";
+			att_value = format_bytesz(dattrs->DEV_BAR1_MEMSZ);
+			break;
+		case 5:
+			att_name = "NUMA_NODE_ID";
+			att_desc = "GPU NUMA Node Id";
+			att_value = psprintf("%d", dattrs->NUMA_NODE_ID);
+			break;
+		default:
+			i = aindex - 6;
+			val = *((int *)((char *)dattrs +
+							GpuDevAttrCatalog[i].attr_offset));
+			att_name = GpuDevAttrCatalog[i].attr_label;
+			att_desc = GpuDevAttrCatalog[i].attr_desc;
+			switch (GpuDevAttrCatalog[i].attr_id)
+			{
+				case CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK:
+				case CU_DEVICE_ATTRIBUTE_TOTAL_CONSTANT_MEMORY:
+				case CU_DEVICE_ATTRIBUTE_MAX_PITCH:
+				case CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE:
+				case CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR:
+					/* bytes */
+					att_value = format_bytesz((size_t)val);
+					break;
 
-	if (aindex == 0)
-	{
-		att_name = "GPU Device Name";
-		att_value = dattrs->DEV_NAME;
-	}
-	else if (aindex == 1)
-	{
-		att_name = "GPU Device Brand";
-		att_value = dattrs->DEV_BRAND;
-	}
-	else if (aindex == 2)
-	{
-		att_name = "GPU Device UUID";
-		att_value = dattrs->DEV_UUID;
-	}
-	else if (aindex == 3)
-	{
-		att_name = "GPU Total RAM Size";
-		att_value = format_bytesz(dattrs->DEV_TOTAL_MEMSZ);
-	}
-	else if (aindex == 4)
-	{
-		att_name = "GPU PCI Bar1 Size";
-		att_value = format_bytesz(dattrs->DEV_BAR1_MEMSZ);
-	}
-	else
-	{
-		int		i = aindex - 5;
-		int		value = *((int *)((char *)dattrs +
-								  DevAttrCatalog[i].attr_offset));
+				case CU_DEVICE_ATTRIBUTE_CLOCK_RATE:
+				case CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE:
+					/* clock */
+					if (val > 4000000)
+						att_value = psprintf("%.2f GHz", (double)val/1000000.0);
+					else if (val > 4000)
+						att_value = psprintf("%d MHz", val / 1000);
+					else
+						att_value = psprintf("%d kHz", val);
+					break;
 
-		att_name = DevAttrCatalog[i].attr_desc;
-		switch (DevAttrCatalog[i].attr_kind)
-		{
-			case DEVATTRKIND__INT:
-				att_value = psprintf("%d", value);
-				break;
-			case DEVATTRKIND__BYTES:
-				att_value = format_bytesz((size_t)value);
-				break;
-			case DEVATTRKIND__KB:
-				att_value = format_bytesz((size_t)value * 1024);
-				break;
-			case DEVATTRKIND__KHZ:
-				if (value > 4000000)
-					att_value = psprintf("%.2f GHz", (double)value/1000000.0);
-				else if (value > 4000)
-					att_value = psprintf("%d MHz", value / 1000);
-				else
-					att_value = psprintf("%d kHz", value);
-				break;
-			case DEVATTRKIND__COMPUTEMODE:
-				switch (value)
-				{
-					case CU_COMPUTEMODE_DEFAULT:
-						att_value = "Default";
-						break;
-#if CUDA_VERSION < 8000
-					case CU_COMPUTEMODE_EXCLUSIVE:
-						att_value = "Exclusive";
-						break;
-#endif
-					case CU_COMPUTEMODE_PROHIBITED:
-						att_value = "Prohibited";
-						break;
-					case CU_COMPUTEMODE_EXCLUSIVE_PROCESS:
-						att_value = "Exclusive Process";
-						break;
-					default:
-						att_value = "Unknown";
-						break;
-				}
-				break;
-			case DEVATTRKIND__BOOL:
-				att_value = psprintf("%s", value != 0 ? "True" : "False");
-				break;
-			case DEVATTRKIND__BITS:
-				att_value = psprintf("%dbits", value);
-				break;
-			default:
-				elog(ERROR, "Bug? unknown DevAttrKind: %d",
-					 (int)DevAttrCatalog[i].attr_kind);
-		}
+				case CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH:
+					/* bits */
+					att_value = psprintf("%s", val != 0 ? "True" : "False");
+					break;
+
+				case CU_DEVICE_ATTRIBUTE_COMPUTE_MODE:
+					/* compute mode */
+					switch (val)
+					{
+						case CU_COMPUTEMODE_DEFAULT:
+							att_value = "Default";
+							break;
+						case CU_COMPUTEMODE_PROHIBITED:
+							att_value = "Prohibited";
+							break;
+						case CU_COMPUTEMODE_EXCLUSIVE_PROCESS:
+							att_value = "Exclusive Process";
+							break;
+						default:
+							att_value = "Unknown";
+							break;
+					}
+					break;
+
+				default:
+					att_value = psprintf("%d", val);
+					break;
+			}
+			break;
 	}
 	memset(isnull, 0, sizeof(isnull));
 	values[0] = Int32GetDatum(dattrs->DEV_ID);
-	values[1] = Int32GetDatum(aindex);
-	values[2] = CStringGetTextDatum(att_name);
-	values[3] = CStringGetTextDatum(att_value);
+	values[1] = CStringGetTextDatum(att_name);
+	values[2] = CStringGetTextDatum(att_value);
+	values[3] = CStringGetTextDatum(att_desc);
 
 	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
 
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
-PG_FUNCTION_INFO_V1(pgstrom_device_info);
