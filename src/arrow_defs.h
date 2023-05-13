@@ -197,6 +197,7 @@ typedef struct ArrowTypeOptions
 {
 	ArrowTypeTag				tag;
 	short						unitsz;
+	unsigned short				align;	/* alignment of the values */
 	union {
 		struct {
 			unsigned short		bitWidth;
