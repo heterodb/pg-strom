@@ -2161,7 +2161,6 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	kern_expression *kexp_join_kvars_load = NULL;
 	kern_hashitem  *hitem;
 	uint32_t		hash;
-	uint32_t	   *hslot;
 	ListCell	   *lc1, *lc2;
 
 	if (pp_info->kexp_join_kvars_load_packed)
@@ -2192,10 +2191,9 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	/*
 	 * walks on the hash-join-table
 	 */
-	hslot = KDS_GET_HASHSLOT(kds_in, hash);
-	for (hitem = KDS_HASH_FIRST_ITEM(kds_in, hslot, NULL);
+	for (hitem = KDS_HASH_FIRST_ITEM(kds_in, hash);
 		 hitem != NULL;
-		 hitem = KDS_HASH_NEXT_ITEM(kds_in, hitem))
+		 hitem = KDS_HASH_NEXT_ITEM(kds_in, hitem->next))
 	{
 		if (hitem->hash != hash)
 			continue;

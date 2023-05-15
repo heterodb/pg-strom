@@ -253,18 +253,21 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 			case KAGG_ACTION__NROWS_ANY:
 			case KAGG_ACTION__NROWS_COND:
 			case KAGG_ACTION__PSUM_INT:
+				assert(cmeta->attlen == sizeof(int64_t));
 				nbytes = sizeof(int64_t);
 				if (buffer)
 					*((int64_t *)buffer) = 0;
 				break;
 
 			case KAGG_ACTION__PSUM_FP:
+				assert(cmeta->attlen == sizeof(float8_t));
 				nbytes = sizeof(float8_t);
 				if (buffer)
 					*((float8_t *)buffer) = 0.0;
 				break;
 
 			case KAGG_ACTION__PMIN_INT:
+				assert(cmeta->attlen == sizeof(kagg_state__pminmax_int64_packed));
 				nbytes = sizeof(kagg_state__pminmax_int64_packed);
 				if (buffer)
 				{
@@ -278,6 +281,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__PMAX_INT:
+				assert(cmeta->attlen == sizeof(kagg_state__pminmax_int64_packed));
 				nbytes = sizeof(kagg_state__pminmax_int64_packed);
 				if (buffer)
 				{
@@ -291,6 +295,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__PMIN_FP:
+				assert(cmeta->attlen == sizeof(kagg_state__pminmax_fp64_packed));
 				nbytes = sizeof(kagg_state__pminmax_fp64_packed);
 				if (buffer)
 				{
@@ -304,6 +309,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__PMAX_FP:
+				assert(cmeta->attlen == sizeof(kagg_state__pminmax_fp64_packed));
 				nbytes = sizeof(kagg_state__pminmax_fp64_packed);
 				if (buffer)
 				{
@@ -317,6 +323,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__PAVG_INT:
+				assert(cmeta->attlen == sizeof(kagg_state__pavg_int_packed));
 				nbytes = sizeof(kagg_state__pavg_int_packed);
 				if (buffer)
 				{
@@ -327,6 +334,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__PAVG_FP:
+				assert(cmeta->attlen == sizeof(kagg_state__pavg_fp_packed));
 				nbytes = sizeof(kagg_state__pavg_fp_packed);
 				if (buffer)
 				{
@@ -337,6 +345,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__STDDEV:
+				assert(cmeta->attlen == sizeof(kagg_state__stddev_packed));
 				nbytes = sizeof(kagg_state__stddev_packed);
 				if (buffer)
 				{
@@ -347,6 +356,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__COVAR:
+				assert(cmeta->attlen == sizeof(kagg_state__covar_packed));
 				nbytes = sizeof(kagg_state__covar_packed);
 				if (buffer)
 				{
@@ -1159,21 +1169,39 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 	tupsz = __writeOutOneTuplePreAgg(kcxt, kds_final, NULL,
 									 kexp_groupby_actions);
 	assert(tupsz > 0);
-	required = MAXALIGN(offsetof(kern_hashitem, t.htup) + tupsz);
 
 	/* expand kds_final */
-	curval.kds.nitems = __volatileRead(&kds_final->nitems);
-	curval.kds.usage  = __volatileRead(&kds_final->usage);
+	curval.u64 = __volatileRead((uint64_t *)&kds_final->nitems);
 	for (;;)
 	{
+		uintptr_t	tup_addr;
 		size_t		total_sz;
 
+		/*
+		 * NOTE: A L1 Cache Line should not be shared by multiple tuples.
+		 *
+		 * When we try to add a new tuple on the same L1 cache line that is
+		 * partially used by other tuples, this cache line may be already
+		 * loaded to other SMs L1 cache.
+		 * At CUDA 12.1, we observed the newer tuple that is written in this
+		 * L1 cache line is not visible to other SMs. To avoid the problem,
+		 * we ensure one L1 cache line (128B) will never store the multiple
+		 * tuples. Only kds_final of GpuPreAgg will refer the tuple once
+		 * written by other threads.
+		 */
+		tup_addr = TYPEALIGN_DOWN(CUDA_L1_CACHELINE_SZ,
+								  (uintptr_t)kds_final
+								  + kds_final->length
+								  - __kds_unpack(curval.kds.usage)
+								  - (offsetof(kern_hashitem, t.htup) + tupsz));
 		newval.kds.nitems = curval.kds.nitems + 1;
-		newval.kds.usage  = curval.kds.usage  + __kds_packed(required);
+		newval.kds.usage  = __kds_packed((uintptr_t)kds_final
+										 + kds_final->length
+										 - tup_addr);
 		total_sz = (KDS_HEAD_LENGTH(kds_final) +
 					MAXALIGN(sizeof(uint32_t) * (kds_final->hash_nslots +
 												 newval.kds.nitems)) +
-					__kds_unpack(curval.kds.usage));
+					__kds_unpack(newval.kds.usage));
 		if (total_sz > kds_final->length)
 			return NULL;	/* out of memory */
 		oldval.u64 = __atomic_cas_uint64((uint64_t *)&kds_final->nitems,
@@ -1571,12 +1599,16 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 		if (!XPU_DATUM_ISNULL(&hash) && !hitem)
 		{
 			uint32_t   *hslot = KDS_GET_HASHSLOT(kds_final, hash.value);
+			uint32_t	hoffset;
 			uint32_t	saved;
+			bool		has_lock = false;
 			xpu_bool_t	status;
 
-			for (hitem = KDS_HASH_FIRST_ITEM(kds_final, hslot, &saved);
+			hoffset = __volatileRead(hslot);
+		try_again:
+			for (hitem = KDS_HASH_NEXT_ITEM(kds_final, hoffset);
 				 hitem != NULL;
-				 hitem = KDS_HASH_NEXT_ITEM(kds_final, hitem))
+				 hitem = KDS_HASH_NEXT_ITEM(kds_final, hitem->next))
 			{
 				if (hitem->hash != hash.value)
 					continue;
@@ -1592,32 +1624,50 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 				}
 			}
 
-			if (!hitem && saved != UINT_MAX)
+			if (!hitem)
 			{
-				/* try lock */
-				if (__atomic_cas_uint32(hslot, saved, UINT_MAX) == saved)
+				if (!has_lock)
+				{
+					/* try lock */
+					saved = __volatileRead(hslot);
+					if (saved != UINT_MAX &&
+						__atomic_cas_uint32(hslot, saved, UINT_MAX) == saved)
+					{
+						has_lock = true;
+						hoffset = saved;
+						goto try_again;
+					}
+				}
+				else
 				{
 					hitem = __insertOneTupleGroupBy(kcxt, kds_final,
 													kexp_groupby_actions);
 					if (hitem)
 					{
-						size_t		offset;
+						/* insert and unlock */
+						size_t		__offset;
 
 						hitem->hash = hash.value;
 						hitem->next = saved;
-						offset = ((char *)kds_final
-								  + kds_final->length
-								  - (char *)hitem);
-						/* insert and unlock */
-						__atomic_write_uint32(hslot, __kds_packed(offset));
+						__threadfence();
+						__offset = ((char *)kds_final
+									+ kds_final->length
+									- (char *)hitem);
+						__atomic_write_uint32(hslot, __kds_packed(__offset));
 					}
 					else
 					{
-						/* out of the memory */
+						/* out of the memory, and unlcok */
 						__atomic_write_uint32(hslot, saved);
 						*p_try_suspend = true;
 					}
+					has_lock = false;
 				}
+			}
+			else if (has_lock)
+			{
+				/* unlock */
+				__atomic_write_uint32(hslot, saved);
 			}
 		}
 		/* suspend the kernel? */

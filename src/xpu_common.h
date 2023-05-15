@@ -1009,12 +1009,11 @@ __KDS_HASH_ITEM_CHECK_VALID(kern_data_store *kds, kern_hashitem *hitem)
 }
 
 INLINE_FUNCTION(kern_hashitem *)
-KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t *hslot, uint32_t *p_saved)
+KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t hash)
 {
+	uint32_t   *hslot = KDS_GET_HASHSLOT(kds, hash);
 	uint32_t	offset = __volatileRead(hslot);
 
-	if (p_saved)
-		*p_saved = offset;
 	if (offset != 0 && offset != UINT_MAX)
 	{
 		kern_hashitem *hitem = (kern_hashitem *)((char *)kds
@@ -1027,13 +1026,12 @@ KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t *hslot, uint32_t *p_saved)
 }
 
 INLINE_FUNCTION(kern_hashitem *)
-KDS_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *hitem)
+KDS_HASH_NEXT_ITEM(kern_data_store *kds, uint32_t hnext_offset)
 {
-	if (hitem && hitem->next != 0)
+	if (hnext_offset != 0 && hnext_offset != UINT_MAX)
 	{
-		kern_hashitem *hnext = (kern_hashitem *)((char *)kds
-												 + kds->length
-												 - __kds_unpack(hitem->next));
+		kern_hashitem *hnext = (kern_hashitem *)
+			((char *)kds + kds->length - __kds_unpack(hnext_offset));
 		Assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hnext));
 		return hnext;
 	}
