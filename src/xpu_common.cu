@@ -381,7 +381,6 @@ kern_form_heaptuple(kern_context *kcxt,
 						memcpy(buffer+VARHDRSZ, kvar->ptr, vclass);
 					SET_VARSIZE(buffer, nbytes);
 				}
-				t_next += nbytes;
 			}
 			else if (vclass == KVAR_CLASS__VARLENA)
 			{
