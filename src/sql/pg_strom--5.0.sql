@@ -2802,18 +2802,13 @@ CREATE FUNCTION pgstrom.favg_trans_fp(bytea, bytea)
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.favg_final_int(bytea)
-  RETURNS int8
+  RETURNS numeric
   AS 'MODULE_PATHNAME','pgstrom_favg_final_int'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.favg_final_fp(bytea)
   RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_favg_final_fp'
-  LANGUAGE C STRICT PARALLEL SAFE;
-
-CREATE FUNCTION pgstrom.favg_final_num(bytea)
-  RETURNS numeric
-  AS 'MODULE_PATHNAME','pgstrom_favg_final_num'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE AGGREGATE pgstrom.avg_int(bytea)
@@ -2829,14 +2824,6 @@ CREATE AGGREGATE pgstrom.avg_fp(bytea)
   sfunc = pgstrom.favg_trans_fp,
   stype = bytea,
   finalfunc = pgstrom.favg_final_fp,
-  parallel = safe
-);
-
-CREATE AGGREGATE pgstrom.avg_num(bytea)
-(
-  sfunc = pgstrom.favg_trans_fp,
-  stype = bytea,
-  finalfunc = pgstrom.favg_final_num,
   parallel = safe
 );
 
