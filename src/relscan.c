@@ -500,7 +500,7 @@ __relScanDirectCachedBlock(pgstromTaskState *pts, BlockNumber block_num)
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	spage = (Page) BufferGetPage(buffer);
 	appendBinaryStringInfo(&pts->xcmd_buf, (const char *)spage, BLCKSZ);
-	UnlockReleaseBuffer(buffer);
+
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
 	dpage = (Page) KDS_BLOCK_PGPAGE(kds, kds->block_nloaded);
 	Assert(dpage >= pts->xcmd_buf.data &&
@@ -512,14 +512,14 @@ __relScanDirectCachedBlock(pgstromTaskState *pts, BlockNumber block_num)
 	 * We have to invalidate tuples prior to GPU kernel
 	 * execution, if not all-visible.
 	 */
-	if (!PageIsAllVisible(dpage) || snapshot->takenDuringRecovery)
+	if (!PageIsAllVisible(spage) || snapshot->takenDuringRecovery)
 	{
-		int		lines = PageGetMaxOffsetNumber(dpage);
+		int		lines = PageGetMaxOffsetNumber(spage);
 		ItemId	lpp;
 		OffsetNumber lineoff;
 
-
-		for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(dpage, lineoff);
+		Assert(lines == PageGetMaxOffsetNumber(dpage));
+		for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(spage, lineoff);
 			 lineoff <= lines;
 			 lineoff++, lpp++)
 		{
@@ -529,8 +529,8 @@ __relScanDirectCachedBlock(pgstromTaskState *pts, BlockNumber block_num)
 			if (!ItemIdIsNormal(lpp))
 				continue;
 			htup.t_tableOid = RelationGetRelid(relation);
-			htup.t_data = (HeapTupleHeader) PageGetItem((Page) dpage, lpp);
-			Assert((((uintptr_t)htup.t_data - (uintptr_t)dpage) & 7) == 0);
+			htup.t_data = (HeapTupleHeader) PageGetItem((Page) spage, lpp);
+			Assert((((uintptr_t)htup.t_data - (uintptr_t)spage) & 7) == 0);
 			htup.t_len = ItemIdGetLength(lpp);
 			ItemPointerSet(&htup.t_self, block_num, lineoff);
 
@@ -540,20 +540,24 @@ __relScanDirectCachedBlock(pgstromTaskState *pts, BlockNumber block_num)
 			if (valid)
 				has_valid_tuples = true;
 			else
-				ItemIdSetUnused(lpp);
+			{
+				/* also invalidate the duplicated page */
+				ItemIdSetUnused(PageGetItemId(dpage, lineoff));
+			}
 		}
 	}
 	else
 	{
 		has_valid_tuples = true;
 	}
+	UnlockReleaseBuffer(buffer);
 
 	/*
 	 * If no tuples in this block are visible, we don't need to load
 	 * them to xPU device (just wast of memory and bandwidth),
 	 * so it shall be reverted from the xcmd-buffer.
 	 */
-	if (has_valid_tuples)
+	if (!has_valid_tuples)
 	{
 		pts->xcmd_buf.len -= BLCKSZ;
 		return;
@@ -595,7 +599,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	kds->block_nloaded = 0;
 	pts->xcmd_buf.len = __XCMD_KDS_SRC_OFFSET(&pts->xcmd_buf) + kds->block_offset;
 	Assert(pts->xcmd_buf.len == MAXALIGN(pts->xcmd_buf.len));
-	enlargeStringInfo(&pts->xcmd_buf, 0);
+	enlargeStringInfo(&pts->xcmd_buf, BLCKSZ * kds_nrooms);
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
 
 	strom_iovec = alloca(offsetof(strom_io_vector, ioc[kds_nrooms]));
