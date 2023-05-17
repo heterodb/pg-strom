@@ -459,7 +459,7 @@ extern void		pgstrom_init_extra(void);
 extern bool		heterodbValidateDevice(int gpu_device_id,
 									   const char *gpu_device_name,
 									   const char *gpu_device_uuid);
-extern bool		gpuDirectOpenDriver(void);
+extern void		gpuDirectOpenDriver(void);
 extern void		gpuDirectCloseDriver(void);
 extern bool		gpuDirectMapGpuMemory(CUdeviceptr m_segment,
 									  size_t segment_sz);
