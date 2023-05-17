@@ -381,7 +381,6 @@ kern_form_heaptuple(kern_context *kcxt,
 						memcpy(buffer+VARHDRSZ, kvar->ptr, vclass);
 					SET_VARSIZE(buffer, nbytes);
 				}
-				t_next += nbytes;
 			}
 			else if (vclass == KVAR_CLASS__VARLENA)
 			{
@@ -989,10 +988,10 @@ __arrow_fetch_decimal_datum(kern_context *kcxt,
 		int128_t	   *base = (int128_t *)
 			((char *)kds + __kds_unpack(cmeta->values_offset));
 
-		assert((((uintptr_t)num) & 15) == 0);
+		assert((((uintptr_t)base) & (sizeof(int128_t)-1)) == 0);
 		kvar->xpu.offset = slot_off;
 		kvar->xpu.type_code = TypeOpCode__numeric;
-		set_normalized_numeric(num, __Fetch(base + kds_index),
+		set_normalized_numeric(num, base[kds_index],
 							   cmeta->attopts.decimal.scale);
 		*vclass = KVAR_CLASS__XPU_DATUM;
 	}

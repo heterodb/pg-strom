@@ -151,15 +151,14 @@ gpuDirectInitDriver(void)
  */
 static int	  (*p_cufile__driver_open_v2)() = NULL;
 
-bool
+void
 gpuDirectOpenDriver(void)
 {
-	if (!p_cufile__driver_open_v2)
+	if (p_cufile__driver_open_v2)
 	{
-		elog(ERROR, "heterodb_extra: p_cufile__driver_open_v2 is missing");
-		return false;
+		if (p_cufile__driver_open_v2() != 0)
+			heterodbExtraEreport(ERROR);
 	}
-	return (p_cufile__driver_open_v2() == 0);
 }
 
 /*
@@ -186,9 +185,12 @@ bool
 gpuDirectMapGpuMemory(CUdeviceptr m_segment,
 					  size_t segment_sz)
 {
-	if (!p_cufile__map_gpu_memory_v2)
-		return false;
-	return (p_cufile__map_gpu_memory_v2(m_segment, segment_sz) == 0);
+	if (p_cufile__map_gpu_memory_v2)
+	{
+		if (p_cufile__map_gpu_memory_v2(m_segment, segment_sz) != 0)
+			return false;
+	}
+	return true;
 }
 
 /*
@@ -199,9 +201,96 @@ static int	(*p_cufile__unmap_gpu_memory_v2)(CUdeviceptr m_segment) = NULL;
 bool
 gpuDirectUnmapGpuMemory(CUdeviceptr m_segment)
 {
-	if (!p_cufile__unmap_gpu_memory_v2)
-		return false;
-	return (p_cufile__unmap_gpu_memory_v2(m_segment) == 0);
+	if (p_cufile__unmap_gpu_memory_v2)
+	{
+		if (p_cufile__unmap_gpu_memory_v2(m_segment) != 0)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * __fallbackFileReadIOV
+ */
+static bool
+__fallbackFileReadIOV(const char *pathname,
+					  CUdeviceptr m_segment,
+					  off_t m_offset,
+					  const strom_io_vector *iovec)
+{
+	size_t	io_unitsz = (16UL << 20);	/* 16MB */
+	char   *buffer;
+	int		fdesc;
+	struct stat	stat_buf;
+
+	fdesc = open(pathname, O_RDONLY);
+	if (fdesc < 0)
+	{
+		fprintf(stderr, "failed on open('%s'): %m\n", pathname);
+		goto error_0;
+	}
+
+	if (fstat(fdesc, &stat_buf) != 0)
+	{
+		fprintf(stderr, "failed on fstat('%s'): %m\n", pathname);
+		goto error_1;
+	}
+
+	buffer = malloc(io_unitsz);
+	if (!buffer)
+	{
+		fprintf(stderr, "out of memory: %m\n");
+		goto error_1;
+	}
+
+	for (int i=0; i < iovec->nr_chunks; i++)
+	{
+		const strom_io_chunk *ioc = &iovec->ioc[i];
+		size_t		remained = ioc->nr_pages * PAGE_SIZE;
+		off_t		file_pos = ioc->fchunk_id * PAGE_SIZE;
+		off_t		dest_pos = m_offset + ioc->m_offset;
+		ssize_t		sz, nbytes;
+		CUresult	rc;
+
+		/* cut off the file tail */
+		if (file_pos >= stat_buf.st_size)
+			continue;
+		if (file_pos + remained > stat_buf.st_size)
+			remained = stat_buf.st_size - file_pos;
+
+		while (remained > 0)
+		{
+			sz = Min(remained, io_unitsz);
+			nbytes = pread(fdesc, buffer, sz, file_pos);
+			if (nbytes <= 0)
+			{
+				fprintf(stderr, "failed on pread: %m\n");
+				goto error_2;
+			}
+			rc = cuMemcpyHtoD(m_segment + dest_pos, buffer, nbytes);
+			if (rc != CUDA_SUCCESS)
+			{
+				fprintf(stderr, "failed on cuMemcpyHtoD\n");
+				goto error_2;
+			}
+			file_pos += nbytes;
+			dest_pos += nbytes;
+			remained -= nbytes;
+		}
+	}
+	free(buffer);
+	close(fdesc);
+
+	fprintf(stderr, "fallback on '%s'\n", pathname);
+
+	return true;
+
+error_2:
+	free(buffer);
+error_1:
+	close(fdesc);
+error_0:
+	return false;
 }
 
 /*
@@ -219,12 +308,16 @@ gpuDirectFileReadIOV(const char *pathname,
 					 off_t m_offset,
 					 const strom_io_vector *iovec)
 {
-	if (!p_cufile__read_file_iov_v2)
-		return false;
-	return (p_cufile__read_file_iov_v2(pathname,
-									   m_segment,
-									   m_offset,
-									   iovec) == 0);
+	if (p_cufile__read_file_iov_v2)
+		return (p_cufile__read_file_iov_v2(pathname,
+										   m_segment,
+										   m_offset,
+										   iovec) == 0);
+	/* fallback by the regular filesystem */
+	return __fallbackFileReadIOV(pathname,
+								 m_segment,
+								 m_offset,
+								 iovec);
 }
 
 /*

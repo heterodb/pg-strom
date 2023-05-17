@@ -449,6 +449,7 @@ extern int		PAGE_SHIFT;
 extern long		PHYS_PAGES;
 extern long		PAGES_PER_BLOCK;	/* (BLCKSZ / PAGE_SIZE) */
 #define PAGE_ALIGN(x)			TYPEALIGN(PAGE_SIZE,(x))
+#define PAGE_ALIGN_DOWN(x)		TYPEALIGN_DOWN(PAGE_SIZE,(x))
 #define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
 
 /*
@@ -458,7 +459,7 @@ extern void		pgstrom_init_extra(void);
 extern bool		heterodbValidateDevice(int gpu_device_id,
 									   const char *gpu_device_name,
 									   const char *gpu_device_uuid);
-extern bool		gpuDirectOpenDriver(void);
+extern void		gpuDirectOpenDriver(void);
 extern void		gpuDirectCloseDriver(void);
 extern bool		gpuDirectMapGpuMemory(CUdeviceptr m_segment,
 									  size_t segment_sz);

@@ -2651,24 +2651,44 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 				appendStringInfo(buf, "nrows[%d]",
 								 desc->arg0_slot_id);
 				break;
-			case KAGG_ACTION__PMIN_INT:
-			case KAGG_ACTION__PMIN_FP:
-				appendStringInfo(buf, "pmin[%d]",
+			case KAGG_ACTION__PMIN_INT32:
+				appendStringInfo(buf, "pmin::int32[%d]",
 								 desc->arg0_slot_id);
 				break;
-			case KAGG_ACTION__PMAX_INT:
-			case KAGG_ACTION__PMAX_FP:
-				appendStringInfo(buf, "pmax[%d]",
+			case KAGG_ACTION__PMIN_INT64:
+				appendStringInfo(buf, "pmin::int64[%d]",
+								 desc->arg0_slot_id);
+				break;
+			case KAGG_ACTION__PMIN_FP64:
+				appendStringInfo(buf, "pmin::fp64[%d]",
+								 desc->arg0_slot_id);
+				break;
+			case KAGG_ACTION__PMAX_INT32:
+				appendStringInfo(buf, "pmax::int32[%d]",
+								 desc->arg0_slot_id);
+				break;
+			case KAGG_ACTION__PMAX_INT64:
+				appendStringInfo(buf, "pmax::int64[%d]",
+								 desc->arg0_slot_id);
+				break;
+			case KAGG_ACTION__PMAX_FP64:
+				appendStringInfo(buf, "pmax::fp64[%d]",
 								 desc->arg0_slot_id);
 				break;
 			case KAGG_ACTION__PSUM_INT:
+				appendStringInfo(buf, "psum::int[%d]",
+								 desc->arg0_slot_id);
+				break;
 			case KAGG_ACTION__PSUM_FP:
-				appendStringInfo(buf, "psum[%d]",
+				appendStringInfo(buf, "psum::fp[%d]",
 								 desc->arg0_slot_id);
 				break;
 			case KAGG_ACTION__PAVG_INT:
+				appendStringInfo(buf, "pavg::int[%d]",
+								 desc->arg0_slot_id);
+				break;
 			case KAGG_ACTION__PAVG_FP:
-				appendStringInfo(buf, "pavg[%d]",
+				appendStringInfo(buf, "pavg::fp[%d]",
 								 desc->arg0_slot_id);
 				break;
 			case KAGG_ACTION__STDDEV:

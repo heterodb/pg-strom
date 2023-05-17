@@ -234,16 +234,14 @@ execGpuJoinHashJoin(kern_context *kcxt,
 		if (read_pos < write_pos)
 		{
 			xpu_int4_t	hash;
-			uint32_t   *hslot;
 
 			kexp = SESSION_KEXP_HASH_VALUE(kcxt->session, depth-1);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp, &hash))
 			{
 				assert(!XPU_DATUM_ISNULL(&hash));
-				hslot = KDS_GET_HASHSLOT(kds_hash, hash.value);
-				for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hslot, NULL);
+				for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hash.value);
 					 khitem != NULL && khitem->hash != hash.value;
-					 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem));
+					 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next));
 			}
 		}
 		else
@@ -258,9 +256,9 @@ execGpuJoinHashJoin(kern_context *kcxt,
 
 		khitem = (kern_hashitem *)((char *)kds_hash + __kds_unpack(l_state));
 		hash_value = khitem->hash;
-		for (khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem);
+		for (khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next);
 			 khitem != NULL && khitem->hash != hash_value;
-			 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem));
+			 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next));
 	}
 	/* error checks */
 	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))

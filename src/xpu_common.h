@@ -1009,12 +1009,11 @@ __KDS_HASH_ITEM_CHECK_VALID(kern_data_store *kds, kern_hashitem *hitem)
 }
 
 INLINE_FUNCTION(kern_hashitem *)
-KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t *hslot, uint32_t *p_saved)
+KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t hash)
 {
+	uint32_t   *hslot = KDS_GET_HASHSLOT(kds, hash);
 	uint32_t	offset = __volatileRead(hslot);
 
-	if (p_saved)
-		*p_saved = offset;
 	if (offset != 0 && offset != UINT_MAX)
 	{
 		kern_hashitem *hitem = (kern_hashitem *)((char *)kds
@@ -1027,13 +1026,12 @@ KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t *hslot, uint32_t *p_saved)
 }
 
 INLINE_FUNCTION(kern_hashitem *)
-KDS_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *hitem)
+KDS_HASH_NEXT_ITEM(kern_data_store *kds, uint32_t hnext_offset)
 {
-	if (hitem && hitem->next != 0)
+	if (hnext_offset != 0 && hnext_offset != UINT_MAX)
 	{
-		kern_hashitem *hnext = (kern_hashitem *)((char *)kds
-												 + kds->length
-												 - __kds_unpack(hitem->next));
+		kern_hashitem *hnext = (kern_hashitem *)
+			((char *)kds + kds->length - __kds_unpack(hnext_offset));
 		Assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hnext));
 		return hnext;
 	}
@@ -1531,10 +1529,12 @@ typedef struct
 #define KAGG_ACTION__VREF			101		/* simple var copy */
 #define KAGG_ACTION__NROWS_ANY		201		/* <int8> - increment 1 always */
 #define KAGG_ACTION__NROWS_COND		202		/* <int8> - increment 1 if not NULL */
-#define KAGG_ACTION__PMIN_INT		302		/* <int4>,<int8> - min value */
-#define KAGG_ACTION__PMIN_FP		304		/* <int4>,<float8> - min value */
-#define KAGG_ACTION__PMAX_INT		402		/* <int4>,<int8> - max value */
-#define KAGG_ACTION__PMAX_FP		404		/* <int4>,<float8> - max value */
+#define KAGG_ACTION__PMIN_INT32		302		/* <int4>,<int8> - min value */
+#define KAGG_ACTION__PMIN_INT64		303		/* <int4>,<int8> - min value */
+#define KAGG_ACTION__PMIN_FP64		304		/* <int4>,<float8> - min value */
+#define KAGG_ACTION__PMAX_INT32		402		/* <int4>,<int8> - max value */
+#define KAGG_ACTION__PMAX_INT64		403		/* <int4>,<int8> - max value */
+#define KAGG_ACTION__PMAX_FP64		404		/* <int4>,<float8> - max value */
 #define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
 #define KAGG_ACTION__PSUM_FP		503		/* <float8> - sum of values */
 #define KAGG_ACTION__PAVG_INT		601		/* <int4>,<int8> - NROWS+PSUM */
