@@ -1363,7 +1363,7 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 											   &con->final_clause_costs,
 											   con->num_groups);
 			dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
-			add_path(con->group_rel, agg_path);
+			add_path(con->group_rel, dummy_path);
 		}
 	}
 }
@@ -1401,6 +1401,7 @@ __xpupreagg_add_custompath(PlannerInfo *root,
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
 		return;
+
 	con.pp_info->xpu_task_flags = xpu_task_flags;
 
 	/* build partial groupby custom-path */

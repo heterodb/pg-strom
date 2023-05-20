@@ -789,9 +789,18 @@ __pgstrom_devfunc_lookup(Oid func_oid,
 found:
 	if (dfunc->func_is_negative)
 		return NULL;
-	if (OidIsValid(func_collid) && !lc_collate_is_c(func_collid) &&
+	if (OidIsValid(func_collid) &&
 		(dfunc->func_flags & DEVFUNC__LOCALE_AWARE) != 0)
-		return NULL;
+	{
+		/* see texteq, bpchareq */
+		if (!lc_collate_is_c(func_collid))
+		{
+			pg_locale_t	mylocate = pg_newlocale_from_collation(func_collid);
+
+			if (mylocate && !mylocate->deterministic)
+				return NULL;	/* not supported */
+		}
+	}
 	return dfunc;
 }
 
@@ -846,6 +855,7 @@ devtype_lookup_equal_func(devtype_info *dtype, Oid coll_id)
 
 		argtypes[0] = dtype->type_oid;
 		argtypes[1] = dtype->type_oid;
+
 		return __pgstrom_devfunc_lookup(dtype->type_eqfunc, 2, argtypes, coll_id);
 	}
 	return NULL;
