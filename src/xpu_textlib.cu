@@ -178,7 +178,7 @@ xpu_text_datum_ref(kern_context *kcxt,
 		else
 		{
 			result->value  = VARDATA_ANY(addr);
-			result->length = VARSIZE_ANY(addr);
+			result->length = VARSIZE_ANY_EXHDR(addr);
 		}
 	}
 	else if (vclass >= 0)
@@ -257,7 +257,7 @@ xpu_text_datum_hash(kern_context *kcxt,
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
-	else if (!xpu_text_is_valid(kcxt, arg))
+	else if (xpu_text_is_valid(kcxt, arg))
 		*p_hash = pg_hash_any(arg->value, arg->length);
 	else
 		return false;
@@ -291,7 +291,7 @@ xpu_bytea_datum_ref(kern_context *kcxt,
 	if (vclass == KVAR_CLASS__VARLENA)
 	{
 		result->value  = VARDATA_ANY(addr);
-		result->length = VARSIZE_ANY(addr);
+		result->length = VARSIZE_ANY_EXHDR(addr);
 	}
 	else if (vclass >= 0)
 	{
@@ -369,7 +369,7 @@ xpu_bytea_datum_hash(kern_context *kcxt,
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
-	else if (!xpu_bytea_is_valid(kcxt, arg))
+	else if (xpu_bytea_is_valid(kcxt, arg))
 		*p_hash = pg_hash_any(arg->value, arg->length);
 	else
 		return false;
@@ -513,11 +513,16 @@ __text_compare(kern_context *kcxt,
 			*p_status = 1;
 			return true;
 		}
+		s1++;
+		s2++;
+		len--;
 	}
-	if (str1->length != str2->length)
-		*p_status = (str1->length > str2->length ? 1 : -1);
-	else
+	if (str1->length == str2->length)
 		*p_status = 0;
+	else if (str1->length > str2->length)
+		*p_status = 1;
+	else
+		*p_status = -1;
 	return true;
 }
 

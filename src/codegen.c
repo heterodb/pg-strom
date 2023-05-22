@@ -20,16 +20,16 @@ static List	   *devtype_code_slot[DEVTYPE_INFO_NSLOTS];	/* by TypeOpCode */
 static List	   *devfunc_info_slot[DEVFUNC_INFO_NSLOTS];
 static List	   *devfunc_code_slot[DEVFUNC_INFO_NSLOTS];	/* by FuncOpCode */
 
-#define TYPE_OPCODE(NAME,OID,EXTENSION,FLAGS)							\
+#define TYPE_OPCODE(NAME,EXTENSION,FLAGS)			\
 	static uint32_t devtype_##NAME##_hash(bool isnull, Datum value);
 #include "xpu_opcodes.h"
 
-#define TYPE_OPCODE(NAME,OID,EXTENSION,FLAGS)		\
+#define TYPE_OPCODE(NAME,EXTENSION,FLAGS)			\
 	{ EXTENSION, #NAME,	TypeOpCode__##NAME,			\
 	  DEVKIND__ANY | (FLAGS),						\
 	  devtype_##NAME##_hash,						\
 	  sizeof(xpu_##NAME##_t),						\
-	  __alignof__(xpu_##NAME##_t), InvalidOid},
+	  __alignof__(xpu_##NAME##_t) },
 static struct {
 	const char	   *type_extension;
 	const char	   *type_name;
@@ -38,15 +38,22 @@ static struct {
 	devtype_hashfunc_f type_hashfunc;
 	int				type_sizeof;
 	int				type_alignof;
-	Oid				type_alias;
 } devtype_catalog[] = {
 #include "xpu_opcodes.h"
 	/* alias device data types */
-	{NULL, "varchar", TypeOpCode__text, DEVKIND__ANY,
-	 devtype_text_hash, sizeof(xpu_text_t), TEXTOID},
-	{NULL, "cidr",    TypeOpCode__inet, DEVKIND__ANY,
-	 devtype_inet_hash, sizeof(xpu_inet_t), INETOID},
-	{NULL, NULL, TypeOpCode__Invalid, 0, NULL, 0, InvalidOid}
+	{NULL, NULL, TypeOpCode__Invalid, 0, NULL, 0}
+};
+
+static struct {
+	const char *type_name;
+	const char *type_extension;
+	const char *base_name;
+	const char *base_extension;
+} devtype_alias_catalog[] = {
+#define TYPE_ALIAS(NAME,EXTENSION,BASE,BASE_EXTENSION)	\
+	{#NAME, EXTENSION, #BASE, BASE_EXTENSION},
+#include "xpu_opcodes.h"
+	{NULL,NULL,NULL,NULL}
 };
 
 static const char *
@@ -89,36 +96,8 @@ build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 			 : (__ext_name == NULL)) &&
 			strcmp(type_name, __type_name) == 0)
 		{
-			MemoryContext oldcxt;
-			Oid		__type_alias = devtype_catalog[i].type_alias;
+			MemoryContext oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 
-			/* check feasibility of type alias */
-			if (OidIsValid(__type_alias))
-			{
-				char		castmethod;
-
-				htup = SearchSysCache2(CASTSOURCETARGET,
-									   ObjectIdGetDatum(tcache->type_id),
-									   ObjectIdGetDatum(__type_alias));
-				if (!HeapTupleIsValid(htup))
-					elog(ERROR, "binary type cast %s to %s is not defined",
-						 format_type_be(tcache->type_id),
-						 format_type_be(__type_alias));
-				castmethod = ((Form_pg_cast)GETSTRUCT(htup))->castmethod;
-				if (castmethod != COERCION_METHOD_BINARY)
-					elog(ERROR, "type cast %s to %s is not binary compatible (%c)",
-						 format_type_be(tcache->type_id),
-						 format_type_be(__type_alias), castmethod);
-				ReleaseSysCache(htup);
-				/* use type name of the alias */
-				htup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(__type_alias));
-				if (!HeapTupleIsValid(htup))
-					elog(ERROR, "cache lookup failed for type %u", __type_alias);
-				__type = (Form_pg_type) GETSTRUCT(htup);
-				strcpy(type_name, NameStr(__type->typname));
-				ReleaseSysCache(htup);
-			}
-			oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 			dtype = palloc0(offsetof(devtype_info, comp_subtypes[0]));
 			if (ext_name)
 				dtype->type_extension = pstrdup(ext_name);
@@ -228,6 +207,84 @@ build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	return dtype;
 }
 
+static Oid
+get_typeoid_by_name(const char *type_name, const char *type_extension)
+{
+	CatCList   *typelist;
+	Oid			type_oid;
+
+	typelist = SearchSysCacheList1(TYPENAMENSP,
+								   CStringGetDatum(type_name));
+	for (int i=0; i < typelist->n_members; i++)
+	{
+		HeapTuple		tuple = &typelist->members[i]->tuple;
+		Form_pg_type	typeForm = (Form_pg_type) GETSTRUCT(tuple);
+		const char	   *ext_name;
+
+		type_oid = typeForm->oid;
+		ext_name = get_extension_name_by_object(TypeRelationId, type_oid);
+		if (type_extension)
+		{
+			if (ext_name && strcmp(type_extension, ext_name) == 0)
+				goto found;
+		}
+		else
+		{
+			if (!ext_name && typeForm->typnamespace == PG_CATALOG_NAMESPACE)
+				goto found;
+		}
+	}
+	/* not found */
+	type_oid = InvalidOid;
+found:
+	ReleaseCatCacheList(typelist);
+
+	return type_oid;
+}
+
+static TypeCacheEntry *
+__devtype_resolve_alias(TypeCacheEntry *tcache)
+{
+	const char	   *type_name;
+	const char	   *ext_name;
+
+	/* check alias list */
+	type_name = get_type_name(tcache->type_id, false);
+	ext_name = get_extension_name_by_object(TypeRelationId,
+											tcache->type_id);
+	for (int i=0; devtype_alias_catalog[i].type_name != NULL; i++)
+	{
+		Oid			__type_oid;
+		const char *__type_name = devtype_alias_catalog[i].type_name;
+		const char *__ext_name = devtype_alias_catalog[i].type_extension;
+
+		if (strcmp(type_name, __type_name) != 0)
+			continue;
+		if (__ext_name != NULL)
+		{
+			if (!ext_name || strcmp(ext_name, __ext_name) != 0)
+				continue;
+		}
+		else
+		{
+			Oid		namespace_oid = get_type_namespace(tcache->type_id);
+
+			if (namespace_oid != PG_CATALOG_NAMESPACE)
+				continue;
+		}
+		/* Hmm... it looks this type is alias of the base */
+		__type_oid = get_typeoid_by_name(devtype_alias_catalog[i].base_name,
+										 devtype_alias_catalog[i].base_extension);
+		if (!OidIsValid(__type_oid))
+			return NULL;
+		tcache = lookup_type_cache(__type_oid,
+								   TYPECACHE_EQ_OPR |
+								   TYPECACHE_CMP_PROC);
+		return __devtype_resolve_alias(tcache);
+	}
+	return tcache;
+}
+
 devtype_info *
 pgstrom_devtype_lookup(Oid type_oid)
 {
@@ -258,6 +315,8 @@ pgstrom_devtype_lookup(Oid type_oid)
 	/* if domain, move to the base type */
 	while (tcache->nextDomain)
 		tcache = tcache->nextDomain;
+	/* if aliased device type, resolve this one */
+	tcache = __devtype_resolve_alias(tcache);
 
 	if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
 	{

@@ -1765,7 +1765,7 @@ PGSTROM_SQLTYPE_OPERATORS(composite,false,8,-1);
 /*
  * Built-in SQL type / function catalog
  */
-#define TYPE_OPCODE(NAME,a,b,c)					\
+#define TYPE_OPCODE(NAME,a,b)					\
 	{ TypeOpCode__##NAME, &xpu_##NAME##_ops },
 PUBLIC_DATA xpu_type_catalog_entry builtin_xpu_types_catalog[] = {
 #include "xpu_opcodes.h"

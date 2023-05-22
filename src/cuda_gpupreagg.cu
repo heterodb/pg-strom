@@ -1808,8 +1808,7 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 									  &hitem->t.htup);
 				if (EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keycomp, &status))
 				{
-					assert(!XPU_DATUM_ISNULL(&status));
-					if (status.value)
+					if (!XPU_DATUM_ISNULL(&status) && status.value)
 						break;
 				}
 			}
