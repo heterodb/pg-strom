@@ -583,8 +583,8 @@ __FUNC_LOCALE_OPCODE(bpchargt, bpchar/bpchar, 99, NULL)
 __FUNC_LOCALE_OPCODE(bpcharge, bpchar/bpchar, 99, NULL)
 FUNC_OPCODE(length, bpchar, DEVFUNC__LOCALE_AWARE|DEVKIND__ANY, bpcharlen, 2, NULL)
 
-__FUNC_OPCODE(texteq, text/text, 99, NULL)
-__FUNC_OPCODE(textne, text/text, 99, NULL)
+FUNC_OPCODE(texteq, text/text, DEVKIND__ANY, text_eq, 99, NULL)
+FUNC_OPCODE(textne, text/text, DEVKIND__ANY, text_ne, 99, NULL)
 __FUNC_LOCALE_OPCODE(text_lt, text/text, 99, NULL)
 __FUNC_LOCALE_OPCODE(text_le, text/text, 99, NULL)
 __FUNC_LOCALE_OPCODE(text_gt, text/text, 99, NULL)
@@ -606,6 +606,41 @@ __FUNC_OPCODE(bpcharicnlike, bpchar/text, 800, NULL)
 /* String operations */
 //__FUNC_OPCODE(textcat, text/text, NULL)
 //__FUNC_OPCODE(concat, __text__, NULL)
+
+/* currency comparison */
+__FUNC_OPCODE(cash_eq, money/money, 2, NULL)
+__FUNC_OPCODE(cash_ne, money/money, 2, NULL)
+__FUNC_OPCODE(cash_lt, money/money, 2, NULL)
+__FUNC_OPCODE(cash_le, money/money, 2, NULL)
+__FUNC_OPCODE(cash_gt, money/money, 2, NULL)
+__FUNC_OPCODE(cash_ge, money/money, 2, NULL)
+/* uuid comparison */
+__FUNC_OPCODE(uuid_eq, uuid/uuid, 5, NULL)
+__FUNC_OPCODE(uuid_ne, uuid/uuid, 5, NULL)
+__FUNC_OPCODE(uuid_lt, uuid/uuid, 5, NULL)
+__FUNC_OPCODE(uuid_le, uuid/uuid, 5, NULL)
+__FUNC_OPCODE(uuid_gt, uuid/uuid, 5, NULL)
+__FUNC_OPCODE(uuid_ge, uuid/uuid, 5, NULL)
+/* macaddr comparison */
+__FUNC_OPCODE(macaddr_eq, macaddr/macaddr, 5, NULL)
+__FUNC_OPCODE(macaddr_ne, macaddr/macaddr, 5, NULL)
+__FUNC_OPCODE(macaddr_lt, macaddr/macaddr, 5, NULL)
+__FUNC_OPCODE(macaddr_le, macaddr/macaddr, 5, NULL)
+__FUNC_OPCODE(macaddr_gt, macaddr/macaddr, 5, NULL)
+__FUNC_OPCODE(macaddr_ge, macaddr/macaddr, 5, NULL)
+FUNC_OPCODE(trunc, macaddr, DEVKIND__ANY, macaddr_trunc, 10, NULL)
+/* inet comparison */
+__FUNC_OPCODE(network_eq, inet/inet, 5, NULL)
+__FUNC_OPCODE(network_ne, inet/inet, 5, NULL)
+__FUNC_OPCODE(network_lt, inet/inet, 5, NULL)
+__FUNC_OPCODE(network_le, inet/inet, 5, NULL)
+__FUNC_OPCODE(network_gt, inet/inet, 5, NULL)
+__FUNC_OPCODE(network_ge, inet/inet, 5, NULL)
+__FUNC_OPCODE(network_sub,     inet/inet, 10, NULL)
+__FUNC_OPCODE(network_subeq,   inet/inet, 10, NULL)
+__FUNC_OPCODE(network_sup,     inet/inet, 10, NULL)
+__FUNC_OPCODE(network_supeq,   inet/inet, 10, NULL)
+__FUNC_OPCODE(network_overlap, inet/inet, 10, NULL)
 
 #undef TYPE_OPCODE
 #undef TYPE_ALIAS

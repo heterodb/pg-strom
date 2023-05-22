@@ -528,9 +528,9 @@ __text_compare(kern_context *kcxt,
 	return true;
 }
 
-#define PG_TEXT_COMPARE_TEMPLATE(NAME,OPER,__NULLCOMP)					\
+#define PG_TEXT_COMPARE_TEMPLATE(NAME,OPER)								\
 	PUBLIC_FUNCTION(bool)												\
-	pgfn_text##NAME(XPU_PGFUNCTION_ARGS)								\
+	pgfn_text_##NAME(XPU_PGFUNCTION_ARGS)								\
 	{																	\
 		xpu_bool_t	   *result = (xpu_bool_t *)__result;				\
 		xpu_text_t		datum_a;										\
@@ -547,7 +547,7 @@ __text_compare(kern_context *kcxt,
 			return false;												\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
 		{																\
-			__NULLCOMP(&datum_a, &datum_b);								\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
 		}																\
 		else															\
 		{																\
@@ -562,12 +562,12 @@ __text_compare(kern_context *kcxt,
 		}																\
 		return true;													\
 	}
-PG_TEXT_COMPARE_TEMPLATE(eq, ==,  __pg_simple_nullcomp_eq)
-PG_TEXT_COMPARE_TEMPLATE(ne, !=,  __pg_simple_nullcomp_ne)
-PG_TEXT_COMPARE_TEMPLATE(_lt, <,  __pg_simple_nullcomp_lt)
-PG_TEXT_COMPARE_TEMPLATE(_le, <=, __pg_simple_nullcomp_le)
-PG_TEXT_COMPARE_TEMPLATE(_gt, >,  __pg_simple_nullcomp_gt)
-PG_TEXT_COMPARE_TEMPLATE(_ge, >=, __pg_simple_nullcomp_ge)
+PG_TEXT_COMPARE_TEMPLATE(eq, ==)
+PG_TEXT_COMPARE_TEMPLATE(ne, !=)
+PG_TEXT_COMPARE_TEMPLATE(lt, <)
+PG_TEXT_COMPARE_TEMPLATE(le, <=)
+PG_TEXT_COMPARE_TEMPLATE(gt, >)
+PG_TEXT_COMPARE_TEMPLATE(ge, >=)
 
 PUBLIC_FUNCTION(bool)
 pgfn_textlen(XPU_PGFUNCTION_ARGS)
