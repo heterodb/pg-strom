@@ -354,6 +354,31 @@ PG_MACADDR_COMPARE_TEMPLATE(le, <=)
 PG_MACADDR_COMPARE_TEMPLATE(gt, > )
 PG_MACADDR_COMPARE_TEMPLATE(ge, >=)
 
+PUBLIC_FUNCTION(bool)
+pgfn_macaddr_trunc(XPU_PGFUNCTION_ARGS)
+{
+	xpu_macaddr_t  *result = (xpu_macaddr_t *)__result;
+	xpu_macaddr_t	datum;
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+
+	assert(kexp->nr_args == 1 && KEXP_IS_VALID(karg, macaddr));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
+		return false;
+	if (XPU_DATUM_ISNULL(&datum))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_macaddr_ops;
+		result->value.a = datum.value.a;
+		result->value.b = datum.value.b;
+		result->value.c = datum.value.c;
+		result->value.d = 0;
+		result->value.e = 0;
+		result->value.f = 0;
+	}
+	return true;
+}
+
 /*
  * Inet data type (xpu_iner_t), functions and operators
  */
@@ -637,7 +662,6 @@ PG_NETWORK_SUBSUP_TEMPLATE(sub, <)
 PG_NETWORK_SUBSUP_TEMPLATE(subeq, <=)
 PG_NETWORK_SUBSUP_TEMPLATE(sup, >)
 PG_NETWORK_SUBSUP_TEMPLATE(supeq, >=)
-
 
 PUBLIC_FUNCTION(bool)
 pgfn_network_overlap(XPU_PGFUNCTION_ARGS)
