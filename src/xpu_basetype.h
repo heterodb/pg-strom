@@ -28,6 +28,43 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float8, float8_t);
 /*
  * Template for simple comparison
  */
+#define __pg_simple_nullcomp_eq(a,b)						\
+	do {													\
+		if (kcxt->kmode_compare_nulls)						\
+		{													\
+			result->expr_ops = &xpu_bool_ops;				\
+			if (XPU_DATUM_ISNULL(a) && XPU_DATUM_ISNULL(b))	\
+				result->value = true;						\
+			else											\
+				result->value = false;						\
+		}													\
+		else												\
+		{													\
+			result->expr_ops = NULL;						\
+		}													\
+	} while(0)
+
+#define __pg_simple_nullcomp_ne(a,b)						\
+	do {													\
+		if (kcxt->kmode_compare_nulls)						\
+		{													\
+			result->expr_ops = &xpu_bool_ops;				\
+			if (XPU_DATUM_ISNULL(a) && XPU_DATUM_ISNULL(b))	\
+				result->value = false;						\
+			else											\
+				result->value = true;						\
+		}													\
+		else												\
+		{													\
+			result->expr_ops = NULL;						\
+		}													\
+	} while(0)
+
+#define __pg_simple_nullcomp_lt(a,b)	result->expr_ops = NULL
+#define __pg_simple_nullcomp_le(a,b)	result->expr_ops = NULL
+#define __pg_simple_nullcomp_gt(a,b)	result->expr_ops = NULL
+#define __pg_simple_nullcomp_ge(a,b)	result->expr_ops = NULL
+
 #define __PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,OPER,EXTRA)	\
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##FNAME##EXTRA(XPU_PGFUNCTION_ARGS)							\
@@ -45,7 +82,9 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float8, float8_t);
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &rval))					\
 			return false;												\
 		if (XPU_DATUM_ISNULL(&lval) || XPU_DATUM_ISNULL(&rval))			\
-			result->expr_ops = NULL;									\
+		{																\
+			__pg_simple_nullcomp_##EXTRA(&lval,&rval);					\
+		}																\
 		else															\
 		{																\
 			result->expr_ops = kexp->expr_ops;							\

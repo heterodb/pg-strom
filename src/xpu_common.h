@@ -309,6 +309,13 @@ typedef struct
 	kern_variable  *kvars_slot;
 	int			   *kvars_class;
 
+	/*
+	 * mode control flags
+	 *
+	 * kmode_compare_nulls - if true, equal/not-equal operators compare NULLs.
+	 */
+	bool			kmode_compare_nulls;
+
 	/* variable length buffer */
 	char		   *vlpos;
 	char		   *vlend;
