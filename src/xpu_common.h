@@ -194,7 +194,7 @@ __volatileRead(const volatile T *ptr)
 /*
  * TypeOpCode / FuncOpCode
  */
-#define TYPE_OPCODE(NAME,a,b,c)		TypeOpCode__##NAME,
+#define TYPE_OPCODE(NAME,a,b)		TypeOpCode__##NAME,
 typedef enum {
 	TypeOpCode__Invalid = 0,
 #include "xpu_opcodes.h"
@@ -308,6 +308,13 @@ typedef struct
 	uint32_t		kvars_nbytes;
 	kern_variable  *kvars_slot;
 	int			   *kvars_class;
+
+	/*
+	 * mode control flags
+	 *
+	 * kmode_compare_nulls - if true, equal/not-equal operators compare NULLs.
+	 */
+	bool			kmode_compare_nulls;
 
 	/* variable length buffer */
 	char		   *vlpos;

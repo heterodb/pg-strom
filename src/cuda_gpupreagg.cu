@@ -1800,18 +1800,23 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 				 hitem != NULL;
 				 hitem = KDS_HASH_NEXT_ITEM(kds_final, hitem->next))
 			{
+				bool	saved_compare_nulls = kcxt->kmode_compare_nulls;
+
 				if (hitem->hash != hash.value)
 					continue;
+
+				kcxt->kmode_compare_nulls = true;
 				ExecLoadVarsHeapTuple(kcxt, kexp_groupby_keyload,
 									  -2,
 									  kds_final,
 									  &hitem->t.htup);
 				if (EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keycomp, &status))
 				{
-					assert(!XPU_DATUM_ISNULL(&status));
-					if (status.value)
+					kcxt->kmode_compare_nulls = saved_compare_nulls;
+					if (!XPU_DATUM_ISNULL(&status) && status.value)
 						break;
 				}
+				kcxt->kmode_compare_nulls = saved_compare_nulls;
 			}
 
 			if (!hitem)

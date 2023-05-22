@@ -1337,7 +1337,9 @@ PG_SIMPLE_COMPARE_TEMPLATE(timestamptz_,timestamptz,timestamptz,TimestampTz)
 			return false;												\
 																		\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-			result->expr_ops = NULL;									\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
 		else															\
 		{																\
 			result->expr_ops = &xpu_bool_ops;							\
@@ -1405,10 +1407,12 @@ __compare_date_timestamp(DateADT a, Timestamp b)
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-			result->expr_ops = NULL;									\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
 		else															\
 		{																\
-			result->expr_ops = &xpu_timestamp_ops;						\
+			result->expr_ops = &xpu_bool_ops;							\
 			comp = __compare_date_timestamp(datum_a.value,				\
 											datum_b.value);				\
 			result->value = (comp OPER 0);								\
@@ -1441,7 +1445,9 @@ PG_DATE_TIMESTAMP_COMPARE_TEMPLATE(ge, >=);
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-			result->expr_ops = NULL;									\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
 		else															\
 		{																\
 			result->expr_ops = &xpu_bool_ops;							\
@@ -1515,7 +1521,9 @@ __compare_date_timestamptz(DateADT a, TimestampTz b, const pg_tz *tz_info)
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-			result->expr_ops = NULL;									\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
 		else															\
 		{																\
 			pg_tz  *tz_info = SESSION_TIMEZONE(kcxt->session);			\
@@ -1553,8 +1561,10 @@ PG_DATE_TIMESTAMPTZ_COMPARE_TEMPLATE(ge, >=);
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-			result->expr_ops = NULL;									\
-		else 															\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
+		else															\
 		{																\
 			pg_tz  *tz_info = SESSION_TIMEZONE(kcxt->session);			\
 			comp = __compare_date_timestamptz(datum_b.value,			\
@@ -1621,7 +1631,9 @@ __compare_timestamp_timestamptz(Timestamp a,
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;                                               \
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-			result->expr_ops = NULL;									\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
 		else															\
         {                                                               \
 			const pg_tz	*tz_info = SESSION_TIMEZONE(kcxt->session);		\
@@ -1659,7 +1671,9 @@ PG_TIMESTAMP_TIMESTAMPTZ_COMPARE_TEMPLATE(ge, >=)
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))                \
 			return false;                                               \
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-			result->expr_ops = NULL;									\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
         else															\
         {                                                               \
 			const pg_tz *tz_info = SESSION_TIMEZONE(kcxt->session);		\
@@ -1712,7 +1726,9 @@ interval_cmp_value(const Interval *ival)
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))                \
 			return false;                                               \
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-			result->expr_ops = NULL;									\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
 		else															\
 		{                                                               \
             int128_t	aval = interval_cmp_value(&datum_a.value);		\

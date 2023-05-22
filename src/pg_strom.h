@@ -907,6 +907,7 @@ extern int		__appendBinaryStringInfo(StringInfo buf,
 										 const void *data, int datalen);
 extern int		__appendZeroStringInfo(StringInfo buf, int nbytes);
 extern char	   *get_type_name(Oid type_oid, bool missing_ok);
+extern Oid		get_type_namespace(Oid type_oid);
 extern Oid		get_relation_am(Oid rel_oid, bool missing_ok);
 extern List	   *bms_to_pglist(const Bitmapset *bms);
 extern Bitmapset *bms_from_pglist(List *pglist);

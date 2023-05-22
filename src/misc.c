@@ -210,6 +210,24 @@ get_type_name(Oid type_oid, bool missing_ok)
 }
 
 /*
+ * get_type_namespace
+ */
+Oid
+get_type_namespace(Oid type_oid)
+{
+	HeapTuple	tup;
+	Oid			namespace_oid = InvalidOid;
+
+	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+	if (HeapTupleIsValid(tup))
+	{
+		namespace_oid = ((Form_pg_type) GETSTRUCT(tup))->typnamespace;
+		ReleaseSysCache(tup);
+	}
+	return namespace_oid;
+}
+
+/*
  * get_relation_am
  */
 Oid

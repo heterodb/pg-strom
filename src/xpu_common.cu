@@ -1141,7 +1141,8 @@ __arrow_fetch_timestamp_datum(kern_context *kcxt,
 			{
 				uint64_t   *base = (uint64_t *)
 					((char *)kds + __kds_unpack(cmeta->values_offset));
-				kvar->u64 = base[kds_index] * 1000000L;
+				kvar->u64 = base[kds_index] * 1000000L -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 				*vclass = KVAR_CLASS__INLINE;
 				return true;
 			}
@@ -1153,7 +1154,8 @@ __arrow_fetch_timestamp_datum(kern_context *kcxt,
 			{
 				uint64_t   *base = (uint64_t *)
 					((char *)kds + __kds_unpack(cmeta->values_offset));
-				kvar->u64 = base[kds_index] * 1000L;
+				kvar->u64 = base[kds_index] * 1000L -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 				*vclass = KVAR_CLASS__INLINE;
 				return true;
 			}
@@ -1165,7 +1167,8 @@ __arrow_fetch_timestamp_datum(kern_context *kcxt,
 			{
 				uint64_t   *base = (uint64_t *)
 					((char *)kds + __kds_unpack(cmeta->values_offset));
-				kvar->u64 = base[kds_index];
+				kvar->u64 = base[kds_index] -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 				*vclass = KVAR_CLASS__INLINE;
 				return true;
 			}
@@ -1177,7 +1180,8 @@ __arrow_fetch_timestamp_datum(kern_context *kcxt,
 			{
 				uint64_t   *base = (uint64_t *)
 					((char *)kds + __kds_unpack(cmeta->values_offset));
-				kvar->u64 = base[kds_index] / 1000L;
+				kvar->u64 = base[kds_index] / 1000L -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 				*vclass = KVAR_CLASS__INLINE;
 				return true;
 			}
@@ -1761,7 +1765,7 @@ PGSTROM_SQLTYPE_OPERATORS(composite,false,8,-1);
 /*
  * Built-in SQL type / function catalog
  */
-#define TYPE_OPCODE(NAME,a,b,c)					\
+#define TYPE_OPCODE(NAME,a,b)					\
 	{ TypeOpCode__##NAME, &xpu_##NAME##_ops },
 PUBLIC_DATA xpu_type_catalog_entry builtin_xpu_types_catalog[] = {
 #include "xpu_opcodes.h"

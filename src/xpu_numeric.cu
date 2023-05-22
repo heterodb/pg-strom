@@ -363,32 +363,33 @@ __numeric_compare(const xpu_numeric_t *a, const xpu_numeric_t *b)
 	return 0;
 }
 
-#define PG_NUMERIC_COMPARE_TEMPLATE(NAME,OPER)						\
-	PUBLIC_FUNCTION(bool)											\
-	pgfn_numeric_##NAME(XPU_PGFUNCTION_ARGS)						\
-	{																\
-		xpu_bool_t	   *result = (xpu_bool_t *)__result;			\
-		xpu_numeric_t	datum_a, datum_b;							\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
-																	\
-		assert(kexp->nr_args == 2 &&								\
-			   KEXP_IS_VALID(karg,numeric));						\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))			\
-			return false;											\
-		karg = KEXP_NEXT_ARG(karg);									\
-		assert(KEXP_IS_VALID(karg, numeric));						\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))			\
-			return false;											\
-		if (XPU_DATUM_ISNULL(&datum_a) ||							\
-			XPU_DATUM_ISNULL(&datum_b))								\
-			result->expr_ops = NULL;								\
-		else														\
-		{															\
-			result->expr_ops = &xpu_numeric_ops;					\
-			result->value = (__numeric_compare(&datum_a,			\
-											   &datum_b) OPER 0);	\
-		}															\
-		return true;												\
+#define PG_NUMERIC_COMPARE_TEMPLATE(NAME,OPER)							\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_numeric_##NAME(XPU_PGFUNCTION_ARGS)							\
+	{																	\
+		xpu_bool_t	   *result = (xpu_bool_t *)__result;				\
+		xpu_numeric_t	datum_a, datum_b;								\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+																		\
+		assert(kexp->nr_args == 2 &&									\
+			   KEXP_IS_VALID(karg,numeric));							\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
+			return false;												\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, numeric));							\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
+			return false;												\
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
+		else															\
+		{																\
+			result->expr_ops = &xpu_numeric_ops;						\
+			result->value = (__numeric_compare(&datum_a,				\
+											   &datum_b) OPER 0);		\
+		}																\
+		return true;													\
 	}
 PG_NUMERIC_COMPARE_TEMPLATE(eq, ==)
 PG_NUMERIC_COMPARE_TEMPLATE(ne, !=)

@@ -445,42 +445,55 @@ CREATE OPERATOR pg_catalog.= (
   PROCEDURE = pgstrom.float2eq,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = =, NEGATOR = <>
+  COMMUTATOR = =, NEGATOR = <>,
+  RESTRICT = pg_catalog.eqsel,
+  JOIN = pg_catalog.eqjoinsel,
+  HASHES, MERGES
 );
 
 CREATE OPERATOR pg_catalog.<> (
   PROCEDURE = pgstrom.float2ne,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = <>, NEGATOR = =
+  COMMUTATOR = <>, NEGATOR = =,
+  RESTRICT = pg_catalog.neqsel,
+  JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR pg_catalog.< (
   PROCEDURE = pgstrom.float2lt,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = >, NEGATOR = >=
+  COMMUTATOR = >, NEGATOR = >=,
+  RESTRICT = pg_catalog.scalarltsel,
+  JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR pg_catalog.<= (
   PROCEDURE = pgstrom.float2le,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = >=, NEGATOR = >
+  COMMUTATOR = >=, NEGATOR = >,
+  RESTRICT = pg_catalog.scalarlesel,
+  JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR pg_catalog.> (
   PROCEDURE = pgstrom.float2gt,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = <, NEGATOR = <=
+  COMMUTATOR = <, NEGATOR = <=,
+  RESTRICT = pg_catalog.scalargtsel,
+  JOIN = pg_catalog.scalargtjoinsel
 );
 
 CREATE OPERATOR pg_catalog.>= (
   PROCEDURE = pgstrom.float2ge,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = <=, NEGATOR = <
+  COMMUTATOR = <=, NEGATOR = <,
+  RESTRICT = pg_catalog.scalargesel,
+  JOIN = pg_catalog.scalargejoinsel
 );
 
 
@@ -488,42 +501,55 @@ CREATE OPERATOR pg_catalog.= (
   PROCEDURE = pgstrom.float42eq,
   LEFTARG = pg_catalog.float4,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = =, NEGATOR = <>
+  COMMUTATOR = =, NEGATOR = <>,
+  RESTRICT = pg_catalog.eqsel,
+  JOIN = pg_catalog.eqjoinsel,
+  HASHES, MERGES
 );
 
 CREATE OPERATOR pg_catalog.<> (
   PROCEDURE = pgstrom.float42ne,
   LEFTARG = pg_catalog.float4,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = <>, NEGATOR = =
+  COMMUTATOR = <>, NEGATOR = =,
+  RESTRICT = pg_catalog.neqsel,
+  JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR pg_catalog.< (
   PROCEDURE = pgstrom.float42lt,
   LEFTARG = pg_catalog.float4,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = >, NEGATOR = >=
+  COMMUTATOR = >, NEGATOR = >=,
+  RESTRICT = pg_catalog.scalarltsel,
+  JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR pg_catalog.<= (
   PROCEDURE = pgstrom.float42le,
   LEFTARG = pg_catalog.float4,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = >=, NEGATOR = >
+  COMMUTATOR = >=, NEGATOR = >,
+  RESTRICT = pg_catalog.scalarlesel,
+  JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR pg_catalog.> (
   PROCEDURE = pgstrom.float42gt,
   LEFTARG = pg_catalog.float4,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = <, NEGATOR = <=
+  COMMUTATOR = <, NEGATOR = <=,
+  RESTRICT = pg_catalog.scalargtsel,
+  JOIN = pg_catalog.scalargtjoinsel
 );
 
 CREATE OPERATOR pg_catalog.>= (
   PROCEDURE = pgstrom.float42ge,
   LEFTARG = pg_catalog.float4,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = <=, NEGATOR = <
+  COMMUTATOR = <=, NEGATOR = <,
+  RESTRICT = pg_catalog.scalargesel,
+  JOIN = pg_catalog.scalargejoinsel
 );
 
 
@@ -531,84 +557,110 @@ CREATE OPERATOR pg_catalog.= (
   PROCEDURE = pgstrom.float82eq,
   LEFTARG = pg_catalog.float8,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = =, NEGATOR = <>
+  COMMUTATOR = =, NEGATOR = <>,
+  RESTRICT = pg_catalog.eqsel,
+  JOIN = pg_catalog.eqjoinsel,
+  HASHES, MERGES
 );
 
 CREATE OPERATOR pg_catalog.<> (
   PROCEDURE = pgstrom.float82ne,
   LEFTARG = pg_catalog.float8,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = <>, NEGATOR = =
+  COMMUTATOR = <>, NEGATOR = =,
+  RESTRICT = pg_catalog.neqsel,
+  JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR pg_catalog.< (
   PROCEDURE = pgstrom.float82lt,
   LEFTARG = pg_catalog.float8,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = >, NEGATOR = >=
+  COMMUTATOR = >, NEGATOR = >=,
+  RESTRICT = pg_catalog.scalarltsel,
+  JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR pg_catalog.<= (
   PROCEDURE = pgstrom.float82le,
   LEFTARG = pg_catalog.float8,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = >=, NEGATOR = >
+  COMMUTATOR = >=, NEGATOR = >,
+  RESTRICT = pg_catalog.scalarlesel,
+  JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR pg_catalog.> (
   PROCEDURE = pgstrom.float82gt,
   LEFTARG = pg_catalog.float8,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = <, NEGATOR = <=
+  COMMUTATOR = <, NEGATOR = <=,
+  RESTRICT = pg_catalog.scalargtsel,
+  JOIN = pg_catalog.scalargtjoinsel
 );
 
 CREATE OPERATOR pg_catalog.>= (
   PROCEDURE = pgstrom.float82ge,
   LEFTARG = pg_catalog.float8,
   RIGHTARG = pg_catalog.float2,
-  COMMUTATOR = <=, NEGATOR = <
+  COMMUTATOR = <=, NEGATOR = <,
+  RESTRICT = pg_catalog.scalargesel,
+  JOIN = pg_catalog.scalargejoinsel
 );
 
 CREATE OPERATOR pg_catalog.= (
   PROCEDURE = pgstrom.float24eq,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float4,
-  COMMUTATOR = =, NEGATOR = <>
+  COMMUTATOR = =, NEGATOR = <>,
+  RESTRICT = pg_catalog.eqsel,
+  JOIN = pg_catalog.eqjoinsel,
+  HASHES, MERGES
 );
 
 CREATE OPERATOR pg_catalog.<> (
   PROCEDURE = pgstrom.float24ne,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float4,
-  COMMUTATOR = <>, NEGATOR = =
+  COMMUTATOR = <>, NEGATOR = =,
+  RESTRICT = pg_catalog.neqsel,
+  JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR pg_catalog.< (
   PROCEDURE = pgstrom.float24lt,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float4,
-  COMMUTATOR = >, NEGATOR = >=
+  COMMUTATOR = >, NEGATOR = >=,
+  RESTRICT = pg_catalog.scalarltsel,
+  JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR pg_catalog.<= (
   PROCEDURE = pgstrom.float24le,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float4,
-  COMMUTATOR = >=, NEGATOR = >
+  COMMUTATOR = >=, NEGATOR = >,
+  RESTRICT = pg_catalog.scalarlesel,
+  JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR pg_catalog.> (
   PROCEDURE = pgstrom.float24gt,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float4,
-  COMMUTATOR = <, NEGATOR = <=
+  COMMUTATOR = <, NEGATOR = <=,
+  RESTRICT = pg_catalog.scalargtsel,
+  JOIN = pg_catalog.scalargtjoinsel
 );
 
 CREATE OPERATOR pg_catalog.>= (
   PROCEDURE = pgstrom.float24ge,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float4,
-  COMMUTATOR = <=, NEGATOR = <
+  COMMUTATOR = <=, NEGATOR = <,
+  RESTRICT = pg_catalog.scalargesel,
+  JOIN = pg_catalog.scalargejoinsel
 );
 
 
@@ -616,42 +668,55 @@ CREATE OPERATOR pg_catalog.= (
   PROCEDURE = pgstrom.float28eq,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float8,
-  COMMUTATOR = =, NEGATOR = <>
+  COMMUTATOR = =, NEGATOR = <>,
+  RESTRICT = pg_catalog.eqsel,
+  JOIN = pg_catalog.eqjoinsel,
+  HASHES, MERGES
 );
 
 CREATE OPERATOR pg_catalog.<> (
   PROCEDURE = pgstrom.float28ne,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float8,
-  COMMUTATOR = <>, NEGATOR = =
+  COMMUTATOR = <>, NEGATOR = =,
+  RESTRICT = pg_catalog.neqsel,
+  JOIN = pg_catalog.neqjoinsel
 );
 
 CREATE OPERATOR pg_catalog.< (
   PROCEDURE = pgstrom.float28lt,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float8,
-  COMMUTATOR = >, NEGATOR = >=
+  COMMUTATOR = >, NEGATOR = >=,
+  RESTRICT = pg_catalog.scalarltsel,
+  JOIN = pg_catalog.scalarltjoinsel
 );
 
 CREATE OPERATOR pg_catalog.<= (
   PROCEDURE = pgstrom.float28le,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float8,
-  COMMUTATOR = >=, NEGATOR = >
+  COMMUTATOR = >=, NEGATOR = >,
+  RESTRICT = pg_catalog.scalarlesel,
+  JOIN = pg_catalog.scalarlejoinsel
 );
 
 CREATE OPERATOR pg_catalog.> (
   PROCEDURE = pgstrom.float28gt,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float8,
-  COMMUTATOR = <, NEGATOR = <=
+  COMMUTATOR = <, NEGATOR = <=,
+  RESTRICT = pg_catalog.scalargtsel,
+  JOIN = pg_catalog.scalargtjoinsel
 );
 
 CREATE OPERATOR pg_catalog.>= (
   PROCEDURE = pgstrom.float28ge,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.float8,
-  COMMUTATOR = <=, NEGATOR = <
+  COMMUTATOR = <=, NEGATOR = <,
+  RESTRICT = pg_catalog.scalargesel,
+  JOIN = pg_catalog.scalargejoinsel
 );
 
 --
@@ -1031,6 +1096,7 @@ CREATE OPERATOR CLASS pg_catalog.float2_ops
 CREATE OPERATOR CLASS pg_catalog.float2_ops
   default for type pg_catalog.float2
   using hash family pg_catalog.float_ops as
+  operator 1 = (float2, float2) for search,
   function 1 (float2) pgstrom.float2hash(float2);
 
 -- ==================================================================
@@ -1461,37 +1527,50 @@ CREATE OPERATOR pg_catalog.= (
   PROCEDURE = pgstrom.int1eq,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = =, NEGATOR = <>
+  COMMUTATOR = =, NEGATOR = <>,
+  RESTRICT = pg_catalog.eqsel,
+  JOIN = pg_catalog.eqjoinsel,
+  HASHES, MERGES
 );
 CREATE OPERATOR pg_catalog.<> (
   PROCEDURE = pgstrom.int1ne,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = <>, NEGATOR = =
+  COMMUTATOR = <>, NEGATOR = =,
+  RESTRICT = pg_catalog.neqsel,
+  JOIN = pg_catalog.neqjoinsel
 );
 CREATE OPERATOR pg_catalog.< (
   PROCEDURE = pgstrom.int1lt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = >, NEGATOR = >=
+  COMMUTATOR = >, NEGATOR = >=,
+  RESTRICT = pg_catalog.scalarltsel,
+  JOIN = pg_catalog.scalarltjoinsel
 );
 CREATE OPERATOR pg_catalog.<= (
   PROCEDURE = pgstrom.int1le,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = >=, NEGATOR = >
+  COMMUTATOR = >=, NEGATOR = >,
+  RESTRICT = pg_catalog.scalarlesel,
+  JOIN = pg_catalog.scalarlejoinsel
 );
 CREATE OPERATOR pg_catalog.> (
   PROCEDURE = pgstrom.int1gt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = <, NEGATOR = <=
+  COMMUTATOR = <, NEGATOR = <=,
+  RESTRICT = pg_catalog.scalargtsel,
+  JOIN = pg_catalog.scalargtjoinsel
 );
 CREATE OPERATOR pg_catalog.>= (
   PROCEDURE = pgstrom.int1ge,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = <=, NEGATOR = <
+  COMMUTATOR = <=, NEGATOR = <,
+  RESTRICT = pg_catalog.scalargesel,
+  JOIN = pg_catalog.scalargejoinsel
 );
 
 -- <int1> OPER <smallint>
@@ -1499,37 +1578,50 @@ CREATE OPERATOR pg_catalog.= (
   PROCEDURE = pgstrom.int12eq,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint,
-  COMMUTATOR = =, NEGATOR = <>
+  COMMUTATOR = =, NEGATOR = <>,
+  RESTRICT = pg_catalog.eqsel,
+  JOIN = pg_catalog.eqjoinsel,
+  HASHES, MERGES
 );
 CREATE OPERATOR pg_catalog.<> (
   PROCEDURE = pgstrom.int12ne,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint,
-  COMMUTATOR = <>, NEGATOR = =
+  COMMUTATOR = <>, NEGATOR = =,
+  RESTRICT = pg_catalog.neqsel,
+  JOIN = pg_catalog.neqjoinsel
 );
 CREATE OPERATOR pg_catalog.< (
   PROCEDURE = pgstrom.int12lt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint,
-  COMMUTATOR = >, NEGATOR = >=
+  COMMUTATOR = >, NEGATOR = >=,
+  RESTRICT = pg_catalog.scalarltsel,
+  JOIN = pg_catalog.scalarltjoinsel
 );
 CREATE OPERATOR pg_catalog.<= (
   PROCEDURE = pgstrom.int12le,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint,
-  COMMUTATOR = >=, NEGATOR = >
+  COMMUTATOR = >=, NEGATOR = >,
+  RESTRICT = pg_catalog.scalarlesel,
+  JOIN = pg_catalog.scalarlejoinsel
 );
 CREATE OPERATOR pg_catalog.> (
   PROCEDURE = pgstrom.int12gt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint,
-  COMMUTATOR = <, NEGATOR = <=
+  COMMUTATOR = <, NEGATOR = <=,
+  RESTRICT = pg_catalog.scalargtsel,
+  JOIN = pg_catalog.scalargtjoinsel
 );
 CREATE OPERATOR pg_catalog.>= (
   PROCEDURE = pgstrom.int12ge,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = smallint,
-  COMMUTATOR = <=, NEGATOR = <
+  COMMUTATOR = <=, NEGATOR = <,
+  RESTRICT = pg_catalog.scalargesel,
+  JOIN = pg_catalog.scalargejoinsel
 );
 
 -- <int1> OPER <int>
@@ -1537,37 +1629,50 @@ CREATE OPERATOR pg_catalog.= (
   PROCEDURE = pgstrom.int14eq,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer,
-  COMMUTATOR = =, NEGATOR = <>
+  COMMUTATOR = =, NEGATOR = <>,
+  RESTRICT = pg_catalog.eqsel,
+  JOIN = pg_catalog.eqjoinsel,
+  HASHES, MERGES
 );
 CREATE OPERATOR pg_catalog.<> (
   PROCEDURE = pgstrom.int14ne,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer,
-  COMMUTATOR = <>, NEGATOR = =
+  COMMUTATOR = <>, NEGATOR = =,
+  RESTRICT = pg_catalog.neqsel,
+  JOIN = pg_catalog.neqjoinsel
 );
 CREATE OPERATOR pg_catalog.< (
   PROCEDURE = pgstrom.int14lt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer,
-  COMMUTATOR = >, NEGATOR = >=
+  COMMUTATOR = >, NEGATOR = >=,
+  RESTRICT = pg_catalog.scalarltsel,
+  JOIN = pg_catalog.scalarltjoinsel
 );
 CREATE OPERATOR pg_catalog.<= (
   PROCEDURE = pgstrom.int14le,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer,
-  COMMUTATOR = >=, NEGATOR = >
+  COMMUTATOR = >=, NEGATOR = >,
+  RESTRICT = pg_catalog.scalarlesel,
+  JOIN = pg_catalog.scalarlejoinsel
 );
 CREATE OPERATOR pg_catalog.> (
   PROCEDURE = pgstrom.int14gt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer,
-  COMMUTATOR = <, NEGATOR = <=
+  COMMUTATOR = <, NEGATOR = <=,
+  RESTRICT = pg_catalog.scalargtsel,
+  JOIN = pg_catalog.scalargtjoinsel
 );
 CREATE OPERATOR pg_catalog.>= (
   PROCEDURE = pgstrom.int14ge,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = integer,
-  COMMUTATOR = <=, NEGATOR = <
+  COMMUTATOR = <=, NEGATOR = <,
+  RESTRICT = pg_catalog.scalargesel,
+  JOIN = pg_catalog.scalargejoinsel
 );
 
 -- <int1> OPER <bigint>
@@ -1575,37 +1680,50 @@ CREATE OPERATOR pg_catalog.= (
   PROCEDURE = pgstrom.int18eq,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint,
-  COMMUTATOR = =, NEGATOR = <>
+  COMMUTATOR = =, NEGATOR = <>,
+  RESTRICT = pg_catalog.eqsel,
+  JOIN = pg_catalog.eqjoinsel,
+  HASHES, MERGES
 );
 CREATE OPERATOR pg_catalog.<> (
   PROCEDURE = pgstrom.int18ne,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint,
-  COMMUTATOR = <>, NEGATOR = =
+  COMMUTATOR = <>, NEGATOR = =,
+  RESTRICT = pg_catalog.neqsel,
+  JOIN = pg_catalog.neqjoinsel
 );
 CREATE OPERATOR pg_catalog.< (
   PROCEDURE = pgstrom.int18lt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint,
-  COMMUTATOR = >, NEGATOR = >=
+  COMMUTATOR = >, NEGATOR = >=,
+  RESTRICT = pg_catalog.scalarltsel,
+  JOIN = pg_catalog.scalarltjoinsel
 );
 CREATE OPERATOR pg_catalog.<= (
   PROCEDURE = pgstrom.int18le,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint,
-  COMMUTATOR = >=, NEGATOR = >
+  COMMUTATOR = >=, NEGATOR = >,
+  RESTRICT = pg_catalog.scalarlesel,
+  JOIN = pg_catalog.scalarlejoinsel
 );
 CREATE OPERATOR pg_catalog.> (
   PROCEDURE = pgstrom.int18gt,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint,
-  COMMUTATOR = <, NEGATOR = <=
+  COMMUTATOR = <, NEGATOR = <=,
+  RESTRICT = pg_catalog.scalargtsel,
+  JOIN = pg_catalog.scalargtjoinsel
 );
 CREATE OPERATOR pg_catalog.>= (
   PROCEDURE = pgstrom.int18ge,
   LEFTARG = pg_catalog.int1,
   RIGHTARG = bigint,
-  COMMUTATOR = <=, NEGATOR = <
+  COMMUTATOR = <=, NEGATOR = <,
+  RESTRICT = pg_catalog.scalargesel,
+  JOIN = pg_catalog.scalargejoinsel
 );
 
 -- <smallint> OPER <int1>
@@ -1613,37 +1731,50 @@ CREATE OPERATOR pg_catalog.= (
   PROCEDURE = pgstrom.int21eq,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = =, NEGATOR = <>
+  COMMUTATOR = =, NEGATOR = <>,
+  RESTRICT = pg_catalog.eqsel,
+  JOIN = pg_catalog.eqjoinsel,
+  HASHES, MERGES
 );
 CREATE OPERATOR pg_catalog.<> (
   PROCEDURE = pgstrom.int21ne,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = <>, NEGATOR = =
+  COMMUTATOR = <>, NEGATOR = =,
+  RESTRICT = pg_catalog.neqsel,
+  JOIN = pg_catalog.neqjoinsel
 );
 CREATE OPERATOR pg_catalog.< (
   PROCEDURE = pgstrom.int21lt,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = >, NEGATOR = >=
+  COMMUTATOR = >, NEGATOR = >=,
+  RESTRICT = pg_catalog.scalarltsel,
+  JOIN = pg_catalog.scalarltjoinsel
 );
 CREATE OPERATOR pg_catalog.<= (
   PROCEDURE = pgstrom.int21le,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = >=, NEGATOR = >
+  COMMUTATOR = >=, NEGATOR = >,
+  RESTRICT = pg_catalog.scalarlesel,
+  JOIN = pg_catalog.scalarlejoinsel
 );
 CREATE OPERATOR pg_catalog.> (
   PROCEDURE = pgstrom.int21gt,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = <, NEGATOR = <=
+  COMMUTATOR = <, NEGATOR = <=,
+  RESTRICT = pg_catalog.scalargtsel,
+  JOIN = pg_catalog.scalargtjoinsel
 );
 CREATE OPERATOR pg_catalog.>= (
   PROCEDURE = pgstrom.int21ge,
   LEFTARG = smallint,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = <=, NEGATOR = <
+  COMMUTATOR = <=, NEGATOR = <,
+  RESTRICT = pg_catalog.scalargesel,
+  JOIN = pg_catalog.scalargejoinsel
 );
 
 -- <int> OPER <int1>
@@ -1651,37 +1782,50 @@ CREATE OPERATOR pg_catalog.= (
   PROCEDURE = pgstrom.int41eq,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = =, NEGATOR = <>
+  COMMUTATOR = =, NEGATOR = <>,
+  RESTRICT = pg_catalog.eqsel,
+  JOIN = pg_catalog.eqjoinsel,
+  HASHES, MERGES
 );
 CREATE OPERATOR pg_catalog.<> (
   PROCEDURE = pgstrom.int41ne,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = <>, NEGATOR = =
+  COMMUTATOR = <>, NEGATOR = =,
+  RESTRICT = pg_catalog.neqsel,
+  JOIN = pg_catalog.neqjoinsel
 );
 CREATE OPERATOR pg_catalog.< (
   PROCEDURE = pgstrom.int41lt,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = >, NEGATOR = >=
+  COMMUTATOR = >, NEGATOR = >=,
+  RESTRICT = pg_catalog.scalarltsel,
+  JOIN = pg_catalog.scalarltjoinsel
 );
 CREATE OPERATOR pg_catalog.<= (
   PROCEDURE = pgstrom.int41le,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = >=, NEGATOR = >
+  COMMUTATOR = >=, NEGATOR = >,
+  RESTRICT = pg_catalog.scalarlesel,
+  JOIN = pg_catalog.scalarlejoinsel
 );
 CREATE OPERATOR pg_catalog.> (
   PROCEDURE = pgstrom.int41gt,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = <, NEGATOR = <=
+  COMMUTATOR = <, NEGATOR = <=,
+  RESTRICT = pg_catalog.scalargtsel,
+  JOIN = pg_catalog.scalargtjoinsel
 );
 CREATE OPERATOR pg_catalog.>= (
   PROCEDURE = pgstrom.int41ge,
   LEFTARG = integer,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = <=, NEGATOR = <
+  COMMUTATOR = <=, NEGATOR = <,
+  RESTRICT = pg_catalog.scalargesel,
+  JOIN = pg_catalog.scalargejoinsel
 );
 
 -- <bigint> OPER <int1>
@@ -1689,37 +1833,50 @@ CREATE OPERATOR pg_catalog.= (
   PROCEDURE = pgstrom.int81eq,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = =, NEGATOR = <>
+  COMMUTATOR = =, NEGATOR = <>,
+  RESTRICT = pg_catalog.eqsel,
+  JOIN = pg_catalog.eqjoinsel,
+  HASHES, MERGES
 );
 CREATE OPERATOR pg_catalog.<> (
   PROCEDURE = pgstrom.int81ne,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = <>, NEGATOR = =
+  COMMUTATOR = <>, NEGATOR = =,
+  RESTRICT = pg_catalog.neqsel,
+  JOIN = pg_catalog.neqjoinsel
 );
 CREATE OPERATOR pg_catalog.< (
   PROCEDURE = pgstrom.int81lt,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = >, NEGATOR = >=
+  COMMUTATOR = >, NEGATOR = >=,
+  RESTRICT = pg_catalog.scalarltsel,
+  JOIN = pg_catalog.scalarltjoinsel
 );
 CREATE OPERATOR pg_catalog.<= (
   PROCEDURE = pgstrom.int81le,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = >=, NEGATOR = >
+  COMMUTATOR = >=, NEGATOR = >,
+  RESTRICT = pg_catalog.scalarlesel,
+  JOIN = pg_catalog.scalarlejoinsel
 );
 CREATE OPERATOR pg_catalog.> (
   PROCEDURE = pgstrom.int81gt,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = <, NEGATOR = <=
+  COMMUTATOR = <, NEGATOR = <=,
+  RESTRICT = pg_catalog.scalargtsel,
+  JOIN = pg_catalog.scalargtjoinsel
 );
 CREATE OPERATOR pg_catalog.>= (
   PROCEDURE = pgstrom.int81ge,
   LEFTARG = bigint,
   RIGHTARG = pg_catalog.int1,
-  COMMUTATOR = <=, NEGATOR = <
+  COMMUTATOR = <=, NEGATOR = <,
+  RESTRICT = pg_catalog.scalargesel,
+  JOIN = pg_catalog.scalargejoinsel
 );
 
 --
@@ -2305,6 +2462,7 @@ CREATE OPERATOR CLASS pg_catalog.int1_ops
 CREATE OPERATOR CLASS pg_catalog.int1_ops
   default for type pg_catalog.int1
   using hash family pg_catalog.integer_ops as
+  operator 1 = (int1,int1) for search,
   function 1 (int1) pgstrom.int1hash(int1);
 
 -- ==================================================================

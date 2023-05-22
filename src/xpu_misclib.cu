@@ -159,6 +159,60 @@ xpu_uuid_datum_hash(kern_context *kcxt,
 }
 PGSTROM_SQLTYPE_OPERATORS(uuid, false, 1, UUID_LEN);
 
+
+INLINE_FUNCTION(int)
+uuid_cmp_internal(const xpu_uuid_t *datum_a,
+				  const xpu_uuid_t *datum_b)
+{
+	const uint8_t  *s1 = datum_a->value.data;
+	const uint8_t  *s2 = datum_b->value.data;
+
+	for (int i=0; i < UUID_LEN; i++, s1++, s2++)
+	{
+		if (*s1 < *s2)
+			return -1;
+		if (*s1 > *s2)
+			return 1;
+	}
+	return 0;
+}
+
+#define PG_UUID_COMPARE_TEMPLATE(NAME,OPER)								\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_uuid_##NAME(XPU_PGFUNCTION_ARGS)								\
+	{																	\
+		xpu_bool_t *result = (xpu_bool_t *)__result;					\
+		xpu_uuid_t	datum_a;											\
+		xpu_uuid_t	datum_b;											\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+																		\
+		assert(kexp->nr_args == 2 && KEXP_IS_VALID(karg, uuid));		\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
+			return false;												\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, uuid));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
+			return false;												\
+																		\
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
+		else															\
+		{																\
+			result->expr_ops = &xpu_bool_ops;							\
+			result->value = (uuid_cmp_internal(&datum_a,				\
+											   &datum_b) OPER 0);		\
+		}																\
+		return true;													\
+	}
+PG_UUID_COMPARE_TEMPLATE(eq, ==)
+PG_UUID_COMPARE_TEMPLATE(ne, != )
+PG_UUID_COMPARE_TEMPLATE(lt, < )
+PG_UUID_COMPARE_TEMPLATE(le, <=)
+PG_UUID_COMPARE_TEMPLATE(gt, > )
+PG_UUID_COMPARE_TEMPLATE(ge, >=)
+
 /*
  * Macaddr data type (xpu_macaddr_t), functions and operators
  */
@@ -232,6 +286,73 @@ xpu_macaddr_datum_hash(kern_context *kcxt,
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(macaddr, false, 4, sizeof(macaddr));
+
+INLINE_FUNCTION(int)
+macaddr_cmp_internal(xpu_macaddr_t *datum_a, xpu_macaddr_t *datum_b)
+{
+	uint32_t	bits_a;
+	uint32_t	bits_b;
+
+	/* high-bits */
+	bits_a = ((uint32_t)datum_a->value.a << 16 |
+			  (uint32_t)datum_a->value.b << 8  |
+			  (uint32_t)datum_a->value.c);
+	bits_b = ((uint32_t)datum_b->value.a << 16 |
+			  (uint32_t)datum_b->value.b << 8  |
+			  (uint32_t)datum_b->value.c);
+	if (bits_a < bits_b)
+		return -1;
+	if (bits_a > bits_b)
+		return 1;
+	/* low-bits  */
+	bits_a = ((uint32_t)datum_a->value.d << 16 |
+			  (uint32_t)datum_a->value.e << 8  |
+			  (uint32_t)datum_a->value.f);
+	bits_b = ((uint32_t)datum_b->value.d << 16 |
+			  (uint32_t)datum_b->value.e << 8  |
+			  (uint32_t)datum_b->value.f);
+	if (bits_a < bits_b)
+		return -1;
+	if (bits_a > bits_b)
+		return 1;
+	return 0;
+}
+
+#define PG_MACADDR_COMPARE_TEMPLATE(NAME,OPER)							\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_macaddr_##NAME(XPU_PGFUNCTION_ARGS)							\
+	{																	\
+		xpu_bool_t	   *result = (xpu_bool_t *)__result;				\
+		xpu_macaddr_t	datum_a;										\
+		xpu_macaddr_t	datum_b;										\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+																		\
+		assert(kexp->nr_args == 2 && KEXP_IS_VALID(karg, macaddr));		\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
+			return false;												\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, macaddr));							\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
+			return false;												\
+																		\
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
+		else															\
+		{																\
+			result->expr_ops = &xpu_bool_ops;							\
+			result->value = (macaddr_cmp_internal(&datum_a,				\
+												  &datum_b) OPER 0);	\
+		}																\
+		return true;													\
+	}
+PG_MACADDR_COMPARE_TEMPLATE(eq, ==)
+PG_MACADDR_COMPARE_TEMPLATE(ne, !=)
+PG_MACADDR_COMPARE_TEMPLATE(lt, < )
+PG_MACADDR_COMPARE_TEMPLATE(le, <=)
+PG_MACADDR_COMPARE_TEMPLATE(gt, > )
+PG_MACADDR_COMPARE_TEMPLATE(ge, >=)
 
 /*
  * Inet data type (xpu_iner_t), functions and operators
@@ -381,3 +502,175 @@ xpu_inet_datum_hash(kern_context *kcxt,
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(inet, false, 4, -1);
+
+/* see utils/adt/network.c */
+INLINE_FUNCTION(int)
+bitncmp(const unsigned char *l, const unsigned char *r, int n)
+{
+	unsigned int lb, rb;
+	int		b = n / 8;
+
+	for (int i=0; i < b; i++)
+	{
+		if (l[i] < r[i])
+			return -1;
+		if (l[i] > r[i])
+			return 1;
+	}
+	if ((n % 8) == 0)
+		return 0;
+
+	lb = l[b];
+	rb = r[b];
+	for (b = n % 8; b > 0; b--)
+	{
+		if ((lb & 0x80) != (rb & 0x80))
+		{
+			if ((lb & 0x80) != 0)
+				return 1;
+			return -1;
+		}
+		lb <<= 1;
+		rb <<= 1;
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+inet_cmp_internal(const xpu_inet_t *datum_a,
+				  const xpu_inet_t *datum_b)
+{
+	if (datum_a->value.family == datum_b->value.family)
+	{
+		int		order;
+
+		order = bitncmp(datum_a->value.ipaddr,
+						datum_b->value.ipaddr,
+						Min(datum_a->value.bits,
+							datum_a->value.bits));
+		if (order != 0)
+			return order;
+		order = (int)datum_a->value.bits - (int)datum_a->value.bits;
+		if (order != 0)
+			return order;
+		return bitncmp(datum_a->value.ipaddr,
+					   datum_b->value.ipaddr,
+					   datum_a->value.family == PGSQL_AF_INET ? 32 : 128);
+	}
+	return ((int)datum_a->value.family - (int)datum_b->value.family);
+}
+
+#define PG_NETWORK_COMPARE_TEMPLATE(NAME,OPER)							\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_network_##NAME(XPU_PGFUNCTION_ARGS)							\
+	{																	\
+		xpu_bool_t *result = (xpu_bool_t *)__result;					\
+		xpu_inet_t	datum_a;											\
+		xpu_inet_t	datum_b;											\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+																		\
+		assert(kexp->nr_args == 2 && KEXP_IS_VALID(karg, inet));		\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
+			return false;												\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, inet));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
+			return false;												\
+																		\
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
+		else															\
+		{																\
+			result->expr_ops = &xpu_bool_ops;							\
+			result->value = (inet_cmp_internal(&datum_a,				\
+											   &datum_b) OPER 0);		\
+		}																\
+		return true;													\
+	}
+PG_NETWORK_COMPARE_TEMPLATE(eq, ==)
+PG_NETWORK_COMPARE_TEMPLATE(ne, !=)
+PG_NETWORK_COMPARE_TEMPLATE(lt, < )
+PG_NETWORK_COMPARE_TEMPLATE(le, <=)
+PG_NETWORK_COMPARE_TEMPLATE(gt, > )
+PG_NETWORK_COMPARE_TEMPLATE(ge, >=)
+
+#define PG_NETWORK_SUBSUP_TEMPLATE(NAME,OPER)							\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_network_##NAME(XPU_PGFUNCTION_ARGS)							\
+	{																	\
+		xpu_bool_t *result = (xpu_bool_t *)__result;					\
+		xpu_inet_t	datum_a;											\
+		xpu_inet_t	datum_b;											\
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+																		\
+		assert(kexp->nr_args == 2 && KEXP_IS_VALID(karg, inet));		\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
+			return false;												\
+		karg = KEXP_NEXT_ARG(karg);										\
+		assert(KEXP_IS_VALID(karg, inet));								\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
+			return false;												\
+																		\
+		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
+		{																\
+			result->expr_ops = NULL;									\
+		}																\
+		else if (datum_a.value.family == datum_b.value.family &&		\
+				 datum_a.value.bits OPER datum_b.value.bits)			\
+		{																\
+			result->expr_ops = &xpu_bool_ops;							\
+			result->value = (bitncmp(datum_a.value.ipaddr,				\
+									 datum_b.value.ipaddr,				\
+									 datum_a.value.bits) == 0);			\
+		}																\
+		else															\
+		{																\
+			result->expr_ops = &xpu_bool_ops;							\
+			result->value = false;										\
+		}																\
+		return true;													\
+	}
+
+PG_NETWORK_SUBSUP_TEMPLATE(sub, <)
+PG_NETWORK_SUBSUP_TEMPLATE(subeq, <=)
+PG_NETWORK_SUBSUP_TEMPLATE(sup, >)
+PG_NETWORK_SUBSUP_TEMPLATE(supeq, >=)
+
+
+PUBLIC_FUNCTION(bool)
+pgfn_network_overlap(XPU_PGFUNCTION_ARGS)
+{
+	xpu_bool_t *result = (xpu_bool_t *)__result;
+	xpu_inet_t	datum_a;
+	xpu_inet_t	datum_b;
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+
+	assert(kexp->nr_args == 2 && KEXP_IS_VALID(karg, inet));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))
+		return false;
+	karg = KEXP_NEXT_ARG(karg);
+	assert(KEXP_IS_VALID(karg, inet));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))
+		return false;
+
+	if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))
+	{
+		result->expr_ops = NULL;
+	}
+	else if (datum_a.value.family == datum_b.value.family)
+	{
+		result->expr_ops = &xpu_bool_ops;
+        result->value = (bitncmp(datum_a.value.ipaddr,
+								 datum_b.value.ipaddr,
+								 Min(datum_a.value.bits,
+									 datum_b.value.bits)) == 0);
+	}
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = false;
+	}
+	return true;
+}

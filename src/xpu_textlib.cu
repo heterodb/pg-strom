@@ -178,7 +178,7 @@ xpu_text_datum_ref(kern_context *kcxt,
 		else
 		{
 			result->value  = VARDATA_ANY(addr);
-			result->length = VARSIZE_ANY(addr);
+			result->length = VARSIZE_ANY_EXHDR(addr);
 		}
 	}
 	else if (vclass >= 0)
@@ -257,7 +257,7 @@ xpu_text_datum_hash(kern_context *kcxt,
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
-	else if (!xpu_text_is_valid(kcxt, arg))
+	else if (xpu_text_is_valid(kcxt, arg))
 		*p_hash = pg_hash_any(arg->value, arg->length);
 	else
 		return false;
@@ -291,7 +291,7 @@ xpu_bytea_datum_ref(kern_context *kcxt,
 	if (vclass == KVAR_CLASS__VARLENA)
 	{
 		result->value  = VARDATA_ANY(addr);
-		result->length = VARSIZE_ANY(addr);
+		result->length = VARSIZE_ANY_EXHDR(addr);
 	}
 	else if (vclass >= 0)
 	{
@@ -369,7 +369,7 @@ xpu_bytea_datum_hash(kern_context *kcxt,
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
-	else if (!xpu_bytea_is_valid(kcxt, arg))
+	else if (xpu_bytea_is_valid(kcxt, arg))
 		*p_hash = pg_hash_any(arg->value, arg->length);
 	else
 		return false;
@@ -440,7 +440,9 @@ __bpchar_compare(kern_context *kcxt,
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-			result->expr_ops = NULL;									\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
 		else															\
 		{																\
 			int		status;												\
@@ -513,17 +515,22 @@ __text_compare(kern_context *kcxt,
 			*p_status = 1;
 			return true;
 		}
+		s1++;
+		s2++;
+		len--;
 	}
-	if (str1->length != str2->length)
-		*p_status = (str1->length > str2->length ? 1 : -1);
-	else
+	if (str1->length == str2->length)
 		*p_status = 0;
+	else if (str1->length > str2->length)
+		*p_status = 1;
+	else
+		*p_status = -1;
 	return true;
 }
 
 #define PG_TEXT_COMPARE_TEMPLATE(NAME,OPER)								\
 	PUBLIC_FUNCTION(bool)												\
-	pgfn_text##NAME(XPU_PGFUNCTION_ARGS)								\
+	pgfn_text_##NAME(XPU_PGFUNCTION_ARGS)								\
 	{																	\
 		xpu_bool_t	   *result = (xpu_bool_t *)__result;				\
 		xpu_text_t		datum_a;										\
@@ -539,7 +546,9 @@ __text_compare(kern_context *kcxt,
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
 			return false;												\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-			result->expr_ops = NULL;									\
+		{																\
+			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
+		}																\
 		else															\
 		{																\
 			int		status;												\
@@ -555,10 +564,10 @@ __text_compare(kern_context *kcxt,
 	}
 PG_TEXT_COMPARE_TEMPLATE(eq, ==)
 PG_TEXT_COMPARE_TEMPLATE(ne, !=)
-PG_TEXT_COMPARE_TEMPLATE(_lt, <)
-PG_TEXT_COMPARE_TEMPLATE(_le, <=)
-PG_TEXT_COMPARE_TEMPLATE(_gt, >)
-PG_TEXT_COMPARE_TEMPLATE(_ge, >=)
+PG_TEXT_COMPARE_TEMPLATE(lt, <)
+PG_TEXT_COMPARE_TEMPLATE(le, <=)
+PG_TEXT_COMPARE_TEMPLATE(gt, >)
+PG_TEXT_COMPARE_TEMPLATE(ge, >=)
 
 PUBLIC_FUNCTION(bool)
 pgfn_textlen(XPU_PGFUNCTION_ARGS)
