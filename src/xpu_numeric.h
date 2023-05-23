@@ -289,4 +289,20 @@ __xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 	}
 	return len;
 }
+
+EXTERN_FUNCTION(int)
+pg_numeric_to_cstring(kern_context *kcxt,
+					  varlena *numeric,
+					  char *buf, char *endp);
+EXTERN_FUNCTION(bool)
+__xpu_numeric_to_int64(kern_context *kcxt,
+					   int64_t *p_ival,
+					   const xpu_numeric_t *num,
+					   int64_t min_value,
+					   int64_t max_value);
+EXTERN_FUNCTION(bool)
+__xpu_numeric_to_fp64(kern_context *kcxt,
+					  float8_t *p_ival,
+					  const xpu_numeric_t *num);
+
 #endif /* XPU_NUMERIC_H */

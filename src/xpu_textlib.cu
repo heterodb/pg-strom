@@ -28,17 +28,6 @@ bpchar_truelen(const char *s, int len)
 	return i + 1;
 }
 
-INLINE_FUNCTION(bool)
-xpu_bpchar_is_valid(kern_context *kcxt, const xpu_bpchar_t *arg)
-{
-	if (arg->length < 0)
-	{
-		STROM_CPU_FALLBACK(kcxt, "bpchar datum is compressed or external");
-		return false;
-	}
-	return true;
-}
-
 STATIC_FUNCTION(bool)
 xpu_bpchar_datum_ref(kern_context *kcxt,
 					 xpu_datum_t *__result,
@@ -148,17 +137,6 @@ PGSTROM_SQLTYPE_OPERATORS(bpchar, false, 4, -1);
 /*
  * xpu_text_t device type handler
  */
-INLINE_FUNCTION(bool)
-xpu_text_is_valid(kern_context *kcxt, const xpu_text_t *arg)
-{
-	if (arg->length < 0)
-	{
-		STROM_CPU_FALLBACK(kcxt, "text datum is compressed or external");
-		return false;
-	}
-	return true;
-}
-
 STATIC_FUNCTION(bool)
 xpu_text_datum_ref(kern_context *kcxt,
 				   xpu_datum_t *__result,
@@ -268,17 +246,6 @@ PGSTROM_SQLTYPE_OPERATORS(text, false, 4, -1);
 /*
  * xpu_bytea_t device type handler
  */
-INLINE_FUNCTION(bool)
-xpu_bytea_is_valid(kern_context *kcxt, const xpu_bytea_t *arg)
-{
-	if (arg->length < 0)
-	{
-		STROM_CPU_FALLBACK(kcxt, "bytea datum is compressed or external");
-		return false;
-	}
-	return true;
-}
-
 STATIC_FUNCTION(bool)
 xpu_bytea_datum_ref(kern_context *kcxt,
 					xpu_datum_t *__result,

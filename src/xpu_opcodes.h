@@ -38,6 +38,7 @@ TYPE_OPCODE(money, NULL, 0)
 TYPE_OPCODE(uuid, NULL, 0)
 TYPE_OPCODE(macaddr, NULL, 0)
 TYPE_OPCODE(inet, NULL, 0)
+TYPE_OPCODE(jsonb, NULL, 0)
 TYPE_OPCODE(geometry, "postgis3", DEVTYPE__USE_KVARS_SLOTBUF)
 TYPE_OPCODE(box2df, "postgis3", 0)
 
@@ -641,6 +642,14 @@ __FUNC_OPCODE(network_subeq,   inet/inet, 10, NULL)
 __FUNC_OPCODE(network_sup,     inet/inet, 10, NULL)
 __FUNC_OPCODE(network_supeq,   inet/inet, 10, NULL)
 __FUNC_OPCODE(network_overlap, inet/inet, 10, NULL)
+
+/* jsonb type support */
+__FUNC_OPCODE(jsonb_object_field, jsonb/text, 35, NULL)
+__FUNC_OPCODE(jsonb_object_field_text, jsonb/text, 35, NULL)
+__FUNC_OPCODE(jsonb_array_element, jsonb/int4, 30, NULL)
+__FUNC_OPCODE(jsonb_array_element_text, jsonb/int4, 30, NULL)
+__FUNC_OPCODE(jsonb_exists, jsonb/int4, 20, NULL)
+
 
 #undef TYPE_OPCODE
 #undef TYPE_ALIAS

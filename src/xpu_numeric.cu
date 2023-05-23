@@ -110,58 +110,75 @@ xpu_numeric_datum_hash(kern_context *kcxt,
 }
 PGSTROM_SQLTYPE_OPERATORS(numeric, false, 4, -1);
 
+PUBLIC_FUNCTION(bool)
+__xpu_numeric_to_int64(kern_context *kcxt,
+					   int64_t *p_ival,
+					   const xpu_numeric_t *num,
+					   int64_t min_value,
+					   int64_t max_value)
+{
+	int128_t	ival;
+	int16_t		weight;
+
+	assert(num->expr_ops == &xpu_numeric_ops);
+
+	if (num->kind != XPU_NUMERIC_KIND__VALID)
+	{
+		STROM_ELOG(kcxt, "cannot convert NaN/Inf to integer");
+		return false;
+	}
+
+	ival = num->value;
+	weight = num->weight;
+	if (ival != 0)
+	{
+		while (weight > 0)
+		{
+			/* round of 0.x digit */
+			if (weight == 1)
+				ival += (ival > 0 ? 5 : -5);
+			ival /= 10;
+			weight--;
+		}
+		while (weight < 0)
+		{
+			ival *= 10;
+			weight++;
+			if (ival < min_value || ival > max_value)
+				break;
+		}
+		if (ival < min_value || ival > max_value)
+		{
+			STROM_ELOG(kcxt, "integer out of range");
+			return false;
+		}
+	}
+	*p_ival = ival;
+	return true;
+}
+
 #define PG_NUMERIC_TO_INT_TEMPLATE(TARGET,MIN_VALUE,MAX_VALUE)		\
 	PUBLIC_FUNCTION(bool)											\
 	pgfn_numeric_to_##TARGET(XPU_PGFUNCTION_ARGS)					\
 	{																\
 		xpu_##TARGET##_t *result = (xpu_##TARGET##_t *)__result;	\
-		xpu_numeric_t	datum;										\
+		xpu_numeric_t	num;										\
+		int64_t			ival;										\
 		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
 		assert(kexp->nr_args == 1 &&								\
 			   KEXP_IS_VALID(karg, numeric));						\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))				\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &num))				\
 			return false;											\
-		if (XPU_DATUM_ISNULL(&datum))								\
+		if (XPU_DATUM_ISNULL(&num))									\
 		{															\
 			result->expr_ops = NULL;								\
 		}															\
-		if (datum.kind != XPU_NUMERIC_KIND__VALID)					\
-		{															\
-			STROM_ELOG(kcxt, "cannot convert NaN/Inf to integer");	\
+		if (!__xpu_numeric_to_int64(kcxt, &ival, &num,				\
+									MIN_VALUE, MAX_VALUE))			\
 			return false;											\
-		}															\
-		else														\
-		{															\
-			int128_t	ival = datum.value;							\
-			int16_t		weight = datum.weight;						\
-																	\
-			if (ival != 0)											\
-			{														\
-				while (weight > 0)									\
-				{													\
-					/* round of 0.x digit */						\
-					if (weight == 1)								\
-						ival += (ival > 0 ? 5 : -5);				\
-					ival /= 10;										\
-					weight--;										\
-				}													\
-				while (weight < 0)									\
-				{													\
-					ival *= 10;										\
-					weight++;										\
-					if (ival < MIN_VALUE || ival > MAX_VALUE)		\
-						break;										\
-				}													\
-				if (ival < MIN_VALUE || ival > MAX_VALUE)			\
-				{													\
-					STROM_ELOG(kcxt, "integer out of range");		\
-					return false;									\
-				}													\
-			}														\
-			result->value  = ival;									\
-			result->expr_ops = &xpu_##TARGET##_ops;					\
-		}															\
+		result->value = ival;										\
+		result->expr_ops = &xpu_##TARGET##_ops;						\
 		return true;												\
 	}
 PG_NUMERIC_TO_INT_TEMPLATE(int1,SCHAR_MIN,SCHAR_MAX)
@@ -170,60 +187,74 @@ PG_NUMERIC_TO_INT_TEMPLATE(int4,INT_MIN,INT_MAX)
 PG_NUMERIC_TO_INT_TEMPLATE(int8,LLONG_MIN,LLONG_MAX)
 PG_NUMERIC_TO_INT_TEMPLATE(money,LLONG_MIN,LLONG_MAX)
 
-#define PG_NUMERIC_TO_FLOAT_TEMPLATE(TARGET,__TEMP,__CAST)			\
+PUBLIC_FUNCTION(bool)
+__xpu_numeric_to_fp64(kern_context *kcxt,
+					  float8_t *p_fval,
+					  const xpu_numeric_t *num)
+{
+	if (num->kind == XPU_NUMERIC_KIND__VALID)
+	{
+		float8_t	fval = num->value;
+		int16_t		weight = num->weight;
+
+		if (fval != 0.0)
+		{
+			while (weight > 0)
+			{
+				fval /= 10.0;
+				weight--;
+			}
+			while (weight < 0)
+			{
+				fval *= 10.0;
+				weight++;
+			}
+			if (isnan(fval) || isinf(fval))
+			{
+				STROM_ELOG(kcxt,"float out of range");
+				return false;
+			}
+		}
+		*p_fval = fval;
+	}
+	else if (num->kind == XPU_NUMERIC_KIND__POS_INF)
+		*p_fval = INFINITY;
+	else if (num->kind == XPU_NUMERIC_KIND__NEG_INF)
+		*p_fval = -INFINITY;
+	else
+		*p_fval = NAN;
+
+	return true;
+}
+
+#define PG_NUMERIC_TO_FLOAT_TEMPLATE(TARGET,__CAST)					\
 	PUBLIC_FUNCTION(bool)											\
 	pgfn_numeric_to_##TARGET(XPU_PGFUNCTION_ARGS)					\
 	{																\
 		xpu_##TARGET##_t *result = (xpu_##TARGET##_t *)__result;	\
-		xpu_numeric_t	datum;										\
+		xpu_numeric_t	num;										\
 		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
 		assert(kexp->nr_args == 1 &&								\
 			   KEXP_IS_VALID(karg, numeric));						\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))				\
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &num))				\
 			return false;											\
-		if (XPU_DATUM_ISNULL(&datum))								\
+		if (XPU_DATUM_ISNULL(&num))									\
 			result->expr_ops = NULL;								\
 		else														\
 		{															\
-			result->expr_ops = &xpu_numeric_ops;					\
-			if (datum.kind == XPU_NUMERIC_KIND__VALID)				\
-			{														\
-				__TEMP		fval = datum.value;						\
-				int16_t		weight = datum.weight;					\
+			float8_t	fval;										\
 																	\
-				if (fval != 0.0)									\
-				{													\
-					while (weight > 0)								\
-					{												\
-						fval /= 10.0;								\
-						weight--;									\
-					}												\
-					while (weight < 0)								\
-					{												\
-						fval *= 10.0;								\
-						weight++;									\
-					}												\
-					if (isnan(fval) || isinf(fval))					\
-					{												\
-						STROM_ELOG(kcxt,"integer out of range");	\
-						return false;								\
-					}												\
-				}													\
-				result->value = __CAST(fval);						\
-			}														\
-			else if (datum.kind == XPU_NUMERIC_KIND__POS_INF)		\
-				result->value = __CAST(INFINITY);					\
-			else if (datum.kind == XPU_NUMERIC_KIND__NEG_INF)		\
-				result->value = __CAST(-INFINITY);					\
-			else													\
-				result->value = __CAST(NAN);						\
+			if (!__xpu_numeric_to_fp64(kcxt, &fval, &num))			\
+				return false;										\
+			result->expr_ops = &xpu_##TARGET##_ops;					\
+			result->value = __CAST(fval);							\
 		}															\
 		return true;												\
 	}
-PG_NUMERIC_TO_FLOAT_TEMPLATE(float2, float,__to_fp16)
-PG_NUMERIC_TO_FLOAT_TEMPLATE(float4, float,__to_fp32)
-PG_NUMERIC_TO_FLOAT_TEMPLATE(float8,double,__to_fp64)
+PG_NUMERIC_TO_FLOAT_TEMPLATE(float2, __to_fp16)
+PG_NUMERIC_TO_FLOAT_TEMPLATE(float4, __to_fp32)
+PG_NUMERIC_TO_FLOAT_TEMPLATE(float8, __to_fp64)
 
 #define PG_INT_TO_NUMERIC_TEMPLATE(SOURCE)							\
 	PUBLIC_FUNCTION(bool)											\
@@ -852,4 +883,145 @@ pgfn_numeric_abs(XPU_PGFUNCTION_ARGS)
 			result->value = -result->value;
 	}
 	return true;
+}
+
+PUBLIC_FUNCTION(int)
+pg_numeric_to_cstring(kern_context *kcxt,
+					  varlena *numeric,
+					  char *buf, char *endp)
+{
+	NumericChoice *nc = (NumericChoice *)VARDATA_ANY(numeric);
+	uint32_t	nc_len = VARSIZE_ANY_EXHDR(numeric);
+	uint16_t	n_head = __Fetch(&nc->n_header);
+	int			ndigits = NUMERIC_NDIGITS(n_head, nc_len);
+	int			weight = NUMERIC_WEIGHT(nc, n_head);
+	int			sign = NUMERIC_SIGN(n_head);
+	int			dscale = NUMERIC_DSCALE(nc, n_head);
+	int			d;
+	char	   *cp = buf;
+	NumericDigit *n_data = NUMERIC_DIGITS(nc, n_head);
+	NumericDigit  dig, d1 __attribute__ ((unused));
+
+	if (sign == NUMERIC_NEG)
+	{
+		if (cp >= endp)
+			return -1;
+		*cp++ = '-';
+	}
+	/* Output all digits before the decimal point */
+	if (weight < 0)
+	{
+		d = weight + 1;
+		if (cp >= endp)
+			return -1;
+		*cp++ = '0';
+	}
+	else
+	{
+		for (d = 0; d <= weight; d++)
+		{
+			bool		putit __attribute__ ((unused)) = (d > 0);
+
+			if (d < ndigits)
+				dig = __Fetch(n_data + d);
+			else
+				dig = 0;
+#if PG_DEC_DIGITS == 4
+			d1 = dig / 1000;
+			dig -= d1 * 1000;
+			putit |= (d1 > 0);
+			if (putit)
+			{
+				if (cp >= endp)
+					return -1;
+				*cp++ = d1 + '0';
+			}
+			d1 = dig / 100;
+			dig -= d1 * 100;
+			putit |= (d1 > 0);
+			if (putit)
+			{
+				if (cp >= endp)
+					return -1;
+				*cp++ = d1 + '0';
+			}
+			d1 = dig / 10;
+			dig -= d1 * 10;
+			putit |= (d1 > 0);
+			if (putit)
+			{
+				if (cp >= endp)
+					return -1;
+				*cp++ = d1 + '0';
+			}
+			*cp++ = dig + '0';
+#elif PG_DEC_DIGITS == 2
+			d1 = dig / 10;
+			dig -= d1 * 10;
+			if (d1 > 0 || d > 0)
+			{
+				if (cp >= endp)
+					return -1;
+				*cp++ = d1 + '0';
+			}
+			if (cp >= endp)
+				return -1;
+			*cp++ = dig + '0';
+#elif PG_DEC_DIGITS == 1
+			if (cp >= endp)
+				return -1;
+			*cp++ = dig + '0';
+#else
+#error unsupported NBASE
+#endif
+		}
+	}
+
+	if (dscale > 0)
+	{
+		char   *lastp = cp;
+
+		if (cp >= endp)
+			return -1;
+		*cp++ = '.';
+		lastp = cp + dscale;
+		for (int i = 0; i < dscale; d++, i += PG_DEC_DIGITS)
+		{
+			if (d >= 0 && d < ndigits)
+				dig = __Fetch(n_data + d);
+			else
+				dig = 0;
+#if PG_DEC_DIGITS == 4
+			if (cp + 4 > endp)
+				return -1;
+			d1 = dig / 1000;
+			dig -= d1 * 1000;
+			*cp++ = d1 + '0';
+			d1 = dig / 100;
+			dig -= d1 * 100;
+			*cp++ = d1 + '0';
+			d1 = dig / 10;
+			dig -= d1 * 10;
+			*cp++ = d1 + '0';
+			*cp++ = dig + '0';
+			if (dig != 0)
+				lastp = cp;
+#elif PG_DEC_DIGITS == 2
+			if (cp + 2 > endp)
+				return -1;
+			d1 = dig / 10;
+			dig -= d1 * 10;
+			*cp++ = d1 + '0';
+			*cp++ = dig + '0';
+#elif PG_DEC_DIGITS == 1
+			if (cp >= endp)
+				return -1;
+			*cp++ = dig + '0';
+#else
+#error unsupported NBASE
+#endif
+			cp = lastp;
+		}
+	}
+	return (int)(cp - buf);
 }

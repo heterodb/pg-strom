@@ -1404,6 +1404,7 @@ struct xpu_datum_operators {
 #include "xpu_textlib.h"
 #include "xpu_timelib.h"
 #include "xpu_misclib.h"
+#include "xpu_jsonlib.h"
 #include "xpu_postgis.h"
 
 /*

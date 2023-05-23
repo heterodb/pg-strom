@@ -1292,7 +1292,6 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 {
 	kern_hashitem  *hitem;
 	int32_t			tupsz;
-	uint32_t		required;
 	union {
 		uint64_t	u64;
 		struct {
