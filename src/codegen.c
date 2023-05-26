@@ -1658,6 +1658,102 @@ codegen_relabel_expression(codegen_context *context,
 }
 
 /*
+ * codegen_casewhen_expression
+ */
+static int
+codegen_casewhen_expression(codegen_context *context,
+							StringInfo buf, CaseExpr *caseexpr)
+{
+	kern_expression	kexp;
+	devtype_info   *rtype;
+	devtype_info   *dtype;
+	TypeOpCode		cond_type_code = TypeOpCode__bool;
+	ListCell	   *lc;
+	int				pos = -1;
+
+	/* check result type */
+	rtype = pgstrom_devtype_lookup(caseexpr->casetype);
+	if (!rtype)
+		__Elog("device type '%s' is not supported",
+			   format_type_be(caseexpr->casetype));
+	/* setup kexp */
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.exptype = rtype->type_code;
+	kexp.expflags = context->kexp_flags;
+	kexp.opcode = FuncOpCode__CaseWhenExpr;
+	kexp.nr_args = 2 * list_length(caseexpr->args);
+	kexp.args_offset = offsetof(kern_expression, u.casewhen.data);
+	if (buf)
+		pos = __appendZeroStringInfo(buf, kexp.args_offset);
+
+	/* CASE expr WHEN */
+	if (caseexpr->arg)
+	{
+		Oid		type_oid = exprType((Node *)caseexpr->arg);
+
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			__Elog("device type '%s' is not supported",
+				   format_type_be(type_oid));
+		if ((dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
+			__Elog("device type '%s' has no comparison function",
+				   dtype->type_name);
+		cond_type_code = dtype->type_code;
+	}
+
+	/* WHEN ... THEN ... */
+	foreach (lc, caseexpr->args)
+	{
+		CaseWhen   *casewhen = (CaseWhen *)lfirst(lc);
+		Oid			type_oid;
+
+		/* check case cond */
+		type_oid = exprType((Node *)casewhen->expr);
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			__Elog("device type '%s' is not supported",
+				   format_type_be(type_oid));
+		if (dtype->type_code != cond_type_code)
+			__Elog("CaseWhen condition has unexpected data type: %s",
+				   nodeToString(caseexpr));
+		/* check case value */
+		type_oid = exprType((Node *)casewhen->result);
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			__Elog("device type '%s' is not supported",
+				   format_type_be(type_oid));
+		if (dtype->type_code != rtype->type_code)
+			__Elog("CaseWhen result has unexpected data type: %s",
+				   nodeToString(caseexpr));
+		/* write out CaseWhen */
+		if (codegen_expression_walker(context, buf, casewhen->expr) < 0)
+			return -1;
+		if (codegen_expression_walker(context, buf, casewhen->result) < 0)
+			return -1;
+	}
+	/* CASE <expression> */
+	if (buf && caseexpr->arg)
+	{
+		kexp.u.casewhen.case_comp = (__appendZeroStringInfo(buf, 0) - pos);
+		if (codegen_expression_walker(context, buf, caseexpr->arg) < 0)
+			return -1;
+	}
+	/* ELSE <expression> */
+	if (buf && caseexpr->defresult)
+	{
+		kexp.u.casewhen.case_else = (__appendZeroStringInfo(buf, 0) - pos);
+		if (codegen_expression_walker(context, buf, caseexpr->defresult) < 0)
+			return -1;
+	}
+	if (buf)
+	{
+		memcpy(buf->data + pos, &kexp, kexp.args_offset);
+		__appendKernExpMagicAndLength(buf, pos);
+	}
+	return 0;
+}
+
+/*
  * is_expression_equals_tlist
  *
  * It checks whether the supplied expression exactly matches any entry of
@@ -1772,9 +1868,10 @@ codegen_expression_walker(codegen_context *context,
 			return codegen_minmax_expression(context, buf, (MinMaxExpr *)expr);
 		case T_RelabelType:
 			return codegen_relabel_expression(context, buf, (RelabelType *)expr);
-		case T_CoerceToDomain:
 		case T_CaseExpr:
-		case T_CaseTestExpr:
+			return codegen_casewhen_expression(context, buf, (CaseExpr *)expr);
+//		case T_CaseTestExpr:
+		case T_CoerceToDomain:
 		case T_ScalarArrayOpExpr:
 		default:
 			__Elog("not a supported expression type: %s", nodeToString(expr));
@@ -3261,6 +3358,50 @@ __xpucode_to_cstring(StringInfo buf,
 		case FuncOpCode__GreatestExpr:
 			appendStringInfo(buf, "{Greatest");
 			break;
+		case FuncOpCode__CaseWhenExpr:
+			appendStringInfo(buf, "{Case:");
+			Assert((kexp->nr_args % 2) == 0);
+			if (kexp->u.casewhen.case_comp != 0)
+			{
+				karg = (kern_expression *)
+					((char *)kexp + kexp->u.casewhen.case_comp);
+				if (!__KEXP_IS_VALID(kexp,karg))
+					elog(ERROR, "XpuCode looks corrupted");
+				appendStringInfo(buf, " <key=");
+				__xpucode_to_cstring(buf, karg, css, es, dcontext);
+				appendStringInfo(buf, ">");
+			}
+
+			for (i = 0, karg = KEXP_FIRST_ARG(kexp);
+				 i < kexp->nr_args;
+				 i += 2, karg = KEXP_NEXT_ARG(karg))
+			{
+				if (!__KEXP_IS_VALID(kexp, karg))
+					elog(ERROR, "XpuCode looks corrupted");
+				appendStringInfo(buf, "%s <when=", (i > 0 ? "," : ""));
+				__xpucode_to_cstring(buf, karg, css, es, dcontext);
+				appendStringInfo(buf, ", then=");
+
+				karg = KEXP_NEXT_ARG(karg);
+				if (!__KEXP_IS_VALID(kexp, karg))
+                    elog(ERROR, "XpuCode looks corrupted");
+				__xpucode_to_cstring(buf, karg, css, es, dcontext);
+				appendStringInfo(buf, ">");
+			}
+
+			if (kexp->u.casewhen.case_else != 0)
+			{
+				karg = (kern_expression *)
+					((char *)kexp + kexp->u.casewhen.case_else);
+				if (!__KEXP_IS_VALID(kexp, karg))
+                    elog(ERROR, "XpuCode looks corrupted");
+				appendStringInfo(buf, " <else=");
+				__xpucode_to_cstring(buf, karg, css, es, dcontext);
+				appendStringInfo(buf, ">");
+			}
+			appendStringInfo(buf, "}");
+			return;
+
 		default:
 			{
 				static struct {

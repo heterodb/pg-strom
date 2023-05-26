@@ -180,10 +180,12 @@ __appendZeroStringInfo(StringInfo buf, int nbytes)
 	if (padding > 0)
 		appendBinaryStringInfo(buf, (char *)&__zero, padding);
 	pos = buf->len;
-	enlargeStringInfo(buf, nbytes);
-	memset(buf->data + pos, 0, nbytes);
-	buf->len += nbytes;
-
+	if (nbytes > 0)
+	{
+		enlargeStringInfo(buf, nbytes);
+		memset(buf->data + pos, 0, nbytes);
+		buf->len += nbytes;
+	}
 	return pos;
 }
 

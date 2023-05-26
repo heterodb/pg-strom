@@ -354,6 +354,86 @@ pgfn_GreatestExpr(XPU_PGFUNCTION_ARGS)
 	return true;
 }
 
+STATIC_FUNCTION(bool)
+pgfn_CaseWhenExpr(XPU_PGFUNCTION_ARGS)
+{
+	const kern_expression *karg;
+	xpu_datum_t	   *comp = NULL;
+	xpu_datum_t	   *temp = NULL;
+	int				i, temp_sz = 0;
+
+	/* CASE <key> expression, if any */
+	if (kexp->u.casewhen.case_comp)
+	{
+		karg = (const kern_expression *)
+			((char *)kexp + kexp->u.casewhen.case_comp);
+		assert(__KEXP_IS_VALID(kexp, karg));
+		comp = (xpu_datum_t *)alloca(karg->expr_ops->xpu_type_sizeof);
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, comp))
+			return false;
+	}
+
+	/* evaluate each WHEN-clauses */
+	assert((kexp->nr_args % 2) == 0);
+	for (i = 0, karg=KEXP_FIRST_ARG(kexp);
+		 i < kexp->nr_args;
+		 i += 2, karg=KEXP_NEXT_ARG(karg))
+	{
+		bool		matched = false;
+
+		assert(__KEXP_IS_VALID(kexp, karg));
+		if (comp)
+		{
+			int			status;
+
+			if (temp_sz < karg->expr_ops->xpu_type_sizeof)
+			{
+				temp_sz = karg->expr_ops->xpu_type_sizeof + 32;
+				temp = (xpu_datum_t *)alloca(temp_sz);
+			}
+			if (!EXEC_KERN_EXPRESSION(kcxt, karg, temp))
+				return false;
+			if (!karg->expr_ops->xpu_datum_comp(kcxt, &status, comp, temp))
+				return false;
+			if (status == 0)
+				matched = true;
+		}
+		else
+		{
+			xpu_bool_t	status;
+
+			if (!EXEC_KERN_EXPRESSION(kcxt, karg, &status))
+				return false;
+			if (!XPU_DATUM_ISNULL(&status) && status.value)
+				matched = true;
+		}
+
+		karg = KEXP_NEXT_ARG(karg);
+		assert(__KEXP_IS_VALID(kexp, karg));
+		if (matched)
+		{
+			assert(kexp->exptype == karg->exptype);
+			if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))
+				return false;
+			/* OK */
+			return true;
+		}
+	}
+
+	/* ELSE clause, if any */
+	if (kexp->u.casewhen.case_else == 0)
+		__result->expr_ops = NULL;
+	else
+	{
+		karg = (const kern_expression *)
+			((char *)kexp + kexp->u.casewhen.case_else);
+		assert(__KEXP_IS_VALID(kexp, karg) && kexp->exptype == karg->exptype);
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))
+			return false;
+	}
+	return true;
+}
+
 /* ----------------------------------------------------------------
  *
  * Routines to support Projection
@@ -1909,6 +1989,7 @@ PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
 	{FuncOpCode__CoalesceExpr,				pgfn_CoalesceExpr},
 	{FuncOpCode__LeastExpr,					pgfn_LeastExpr},
 	{FuncOpCode__GreatestExpr,				pgfn_GreatestExpr},
+	{FuncOpCode__CaseWhenExpr,				pgfn_CaseWhenExpr},
 #include "xpu_opcodes.h"
 	{FuncOpCode__Projection,                pgfn_Projection},
 	{FuncOpCode__LoadVars,                  pgfn_LoadVars},

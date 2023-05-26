@@ -1091,6 +1091,36 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 	}
 	kexp->expr_ops = xpu_type->type_ops;
 
+	/* special case if CASE ... WHEN */
+	if (kexp->opcode == FuncOpCode__CaseWhenExpr)
+	{
+		if (kexp->u.casewhen.case_comp)
+		{
+			karg = (kern_expression *)((char *)kexp + kexp->u.casewhen.case_comp);
+			if (!__KEXP_IS_VALID(kexp,karg))
+			{
+				snprintf(emsg, emsg_sz,
+						 "XPU code corruption at kexp (%d)", kexp->opcode);
+				return false;
+			}
+			if (!__resolveDevicePointersWalker(gcontext, karg, emsg, emsg_sz))
+				return false;
+
+		}
+		if (kexp->u.casewhen.case_else)
+		{
+			karg = (kern_expression *)((char *)kexp + kexp->u.casewhen.case_else);
+			if (!__KEXP_IS_VALID(kexp,karg))
+			{
+				snprintf(emsg, emsg_sz,
+						 "XPU code corruption at kexp (%d)", kexp->opcode);
+				return false;
+			}
+			if (!__resolveDevicePointersWalker(gcontext, karg, emsg, emsg_sz))
+				return false;
+		}
+	}
+
 	for (i=0, karg = KEXP_FIRST_ARG(kexp);
 		 i < kexp->nr_args;
 		 i++, karg = KEXP_NEXT_ARG(karg))

@@ -249,6 +249,7 @@ typedef enum {
 	FuncOpCode__CoalesceExpr,
 	FuncOpCode__LeastExpr,
 	FuncOpCode__GreatestExpr,
+	FuncOpCode__CaseWhenExpr,
 #include "xpu_opcodes.h"
 	/* for projection */
 	FuncOpCode__Projection = 9999,
@@ -1669,6 +1670,11 @@ struct kern_expression
 			uint8_t		var_typalign;
 			uint32_t	var_slot_id;
 		} v;		/* VarExpr */
+		struct {
+			uint32_t	case_comp;		/* key value to be compared, if any */
+			uint32_t	case_else;		/* ELSE clause, if any */
+			char		data[1]			__MAXALIGNED__;
+		} casewhen;
 		struct {
 			int			depth;
 			int			nloads;
