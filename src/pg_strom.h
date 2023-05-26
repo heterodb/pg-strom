@@ -183,8 +183,9 @@ typedef struct devtype_info
 	int16		type_align;
 	bool		type_byval;
 	bool		type_is_negative;
-	const char *type_name;
 	const char *type_extension;
+	const char *type_name;
+	Oid			type_namespace;
 	int			type_sizeof;
 	int			type_alignof;
 	devtype_hashfunc_f type_hashfunc;

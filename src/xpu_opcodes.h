@@ -38,6 +38,7 @@ TYPE_OPCODE(money, NULL, 0)
 TYPE_OPCODE(uuid, NULL, 0)
 TYPE_OPCODE(macaddr, NULL, 0)
 TYPE_OPCODE(inet, NULL, 0)
+TYPE_OPCODE(jsonb, NULL, 0)
 TYPE_OPCODE(geometry, "postgis3", DEVTYPE__USE_KVARS_SLOTBUF)
 TYPE_OPCODE(box2df, "postgis3", 0)
 
@@ -52,6 +53,9 @@ TYPE_ALIAS(cidr,    NULL, inet, NULL)
  */
 #ifndef FUNC_OPCODE
 #define FUNC_OPCODE(SQL_NAME,FUNC_ARGS,FUNC_FLAGS,DEV_NAME,FUNC_COST,EXTENSION)
+#endif
+#ifndef DEVONLY_FUNC_OPCODE
+#define DEVONLY_FUNC_OPCODE(RET_TYPE,DEV_NAME,FUNC_ARGS,FUNC_FLAGS,FUNC_COST)
 #endif
 /* most device functions are sufficient with __FUNC_OPCODE */
 #define __FUNC_OPCODE(FUNC_NAME,FUNC_ARGS,FUNC_COST,EXTENSION)			\
@@ -642,6 +646,32 @@ __FUNC_OPCODE(network_sup,     inet/inet, 10, NULL)
 __FUNC_OPCODE(network_supeq,   inet/inet, 10, NULL)
 __FUNC_OPCODE(network_overlap, inet/inet, 10, NULL)
 
+/* jsonb type support */
+__FUNC_OPCODE(jsonb_object_field, jsonb/text, 35, NULL)
+__FUNC_OPCODE(jsonb_object_field_text, jsonb/text, 35, NULL)
+__FUNC_OPCODE(jsonb_array_element, jsonb/int4, 30, NULL)
+__FUNC_OPCODE(jsonb_array_element_text, jsonb/int4, 30, NULL)
+__FUNC_OPCODE(jsonb_exists, jsonb/int4, 20, NULL)
+
+DEVONLY_FUNC_OPCODE(numeric,jsonb_object_field_as_numeric,jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(int1,   jsonb_object_field_as_int1,   jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(int2,   jsonb_object_field_as_int2,   jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(int4,   jsonb_object_field_as_int4,   jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(int8,   jsonb_object_field_as_int8,   jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(float2, jsonb_object_field_as_float2, jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(float4, jsonb_object_field_as_float4, jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(float8, jsonb_object_field_as_float8, jsonb/text, DEVKIND__ANY, 10)
+
+DEVONLY_FUNC_OPCODE(numeric,jsonb_array_element_as_numeric, jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(int1,   jsonb_array_element_as_int1,    jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(int2,   jsonb_array_element_as_int2,    jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(int4,   jsonb_array_element_as_int4,    jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(int8,   jsonb_array_element_as_int8,    jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(float2, jsonb_array_element_as_float2,  jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(float4, jsonb_array_element_as_float4,  jsonb/text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(float8, jsonb_array_element_as_float8,  jsonb/text, DEVKIND__ANY, 10)
+
 #undef TYPE_OPCODE
 #undef TYPE_ALIAS
 #undef FUNC_OPCODE
+#undef DEVONLY_FUNC_OPCODE

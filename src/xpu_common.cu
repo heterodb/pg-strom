@@ -1775,7 +1775,9 @@ PUBLIC_DATA xpu_type_catalog_entry builtin_xpu_types_catalog[] = {
 /*
  * Catalog of built-in device functions
  */
-#define FUNC_OPCODE(a,b,c,NAME,d,e)				\
+#define FUNC_OPCODE(a,b,c,NAME,d,e)			\
+	{FuncOpCode__##NAME, pgfn_##NAME},
+#define DEVONLY_FUNC_OPCODE(a,NAME,b,c,d)	\
 	{FuncOpCode__##NAME, pgfn_##NAME},
 PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
 	{FuncOpCode__ConstExpr, 				pgfn_ConstExpr },

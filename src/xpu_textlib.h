@@ -34,5 +34,40 @@ typedef struct xpu_encode_info	xpu_encode_info;
 
 EXTERN_DATA xpu_encode_info		xpu_encode_catalog[];
 
+/*
+ * validation checkers
+ */
+INLINE_FUNCTION(bool)
+xpu_bpchar_is_valid(kern_context *kcxt, const xpu_bpchar_t *arg)
+{
+	if (arg->length < 0)
+	{
+		STROM_CPU_FALLBACK(kcxt, "bpchar datum is compressed or external");
+		return false;
+	}
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+xpu_text_is_valid(kern_context *kcxt, const xpu_text_t *arg)
+{
+	if (arg->length < 0)
+	{
+		STROM_CPU_FALLBACK(kcxt, "text datum is compressed or external");
+		return false;
+	}
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+xpu_bytea_is_valid(kern_context *kcxt, const xpu_bytea_t *arg)
+{
+	if (arg->length < 0)
+	{
+		STROM_CPU_FALLBACK(kcxt, "bytea datum is compressed or external");
+		return false;
+	}
+	return true;
+}
 
 #endif  /* XPU_TEXTLIB_H */

@@ -205,7 +205,10 @@ typedef enum {
 	TypeOpCode__BuiltInMax,
 } TypeOpCode;
 
-#define FUNC_OPCODE(a,b,c,NAME,d,e)		FuncOpCode__##NAME,
+#define FUNC_OPCODE(a,b,c,NAME,d,e)			FuncOpCode__##NAME,
+#define DEVONLY_FUNC_OPCODE(a,NAME,b,c,d)	FuncOpCode__##NAME,
+
+#define WITH_DEVICE_ONLY_FUNCTIONS		1
 typedef enum {
 	FuncOpCode__Invalid = 0,
 	FuncOpCode__ConstExpr,
@@ -1404,6 +1407,7 @@ struct xpu_datum_operators {
 #include "xpu_textlib.h"
 #include "xpu_timelib.h"
 #include "xpu_misclib.h"
+#include "xpu_jsonlib.h"
 #include "xpu_postgis.h"
 
 /*
@@ -2249,6 +2253,8 @@ ExecKernProjection(kern_context *kcxt,
  * ----------------------------------------------------------------
  */
 #define FUNC_OPCODE(a,b,c,NAME,d,e)			\
+	EXTERN_DATA bool pgfn_##NAME(XPU_PGFUNCTION_ARGS);
+#define DEVONLY_FUNC_OPCODE(a,NAME,b,c,d)	\
 	EXTERN_DATA bool pgfn_##NAME(XPU_PGFUNCTION_ARGS);
 #include "xpu_opcodes.h"
 

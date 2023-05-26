@@ -108,6 +108,7 @@ build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 			dtype->type_align = typealign_get_width(tcache->typalign);
 			dtype->type_byval = tcache->typbyval;
 			dtype->type_name = pstrdup(type_name);
+			dtype->type_namespace = get_type_namespace(tcache->type_id);
 			dtype->type_extension = (ext_name ? pstrdup(ext_name) : NULL);
 			dtype->type_sizeof = devtype_catalog[i].type_sizeof;
 			dtype->type_alignof = devtype_catalog[i].type_alignof;
@@ -159,7 +160,9 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	dtype->type_length = tcache->typlen;
 	dtype->type_align = typealign_get_width(tcache->typalign);
 	dtype->type_byval = tcache->typbyval;
+	dtype->type_extension = NULL;
 	dtype->type_name = "composite";
+	dtype->type_namespace = get_type_namespace(tcache->type_id);
 	dtype->type_sizeof = sizeof(xpu_composite_t);
 	dtype->type_alignof = __alignof__(xpu_composite_t);
 	dtype->type_hashfunc = NULL; //devtype_composite_hash;
@@ -195,6 +198,7 @@ build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	dtype->type_align = typealign_get_width(tcache->typalign);
 	dtype->type_byval = tcache->typbyval;
 	dtype->type_name = "array";
+	dtype->type_namespace = get_type_namespace(tcache->type_id);
 	dtype->type_sizeof = sizeof(xpu_array_t);
 	dtype->type_alignof = __alignof__(xpu_array_t);
 	dtype->type_hashfunc = NULL; //devtype_array_hash;
@@ -621,6 +625,91 @@ devtype_inet_hash(bool isnull, Datum value)
 		else
 			elog(ERROR, "corrupted inet data");
 		return hash_any((unsigned char *)&in->inet_data, sz);
+	}
+	return 0;
+}
+
+static uint32_t
+__devtype_jsonb_hash(JsonbContainer *jc)
+{
+	uint32_t	hash = 0;
+	uint32_t	nitems = JsonContainerSize(jc);
+	char	   *base = NULL;
+	char	   *data;
+	uint32_t	datalen;
+
+	if (!JsonContainerIsScalar(jc))
+	{
+		if (JsonContainerIsObject(jc))
+		{
+			base = (char *)(jc->children + 2 * nitems);
+			hash ^= JB_FOBJECT;
+		}
+		else
+		{
+			base = (char *)(jc->children + nitems);
+			hash ^= JB_FARRAY;
+		}
+	}
+
+	for (int j=0; j < nitems; j++)
+	{
+		uint32_t	index = j;
+		uint32_t	temp;
+		JEntry		entry;
+
+		/* hash value for key */
+		if (JsonContainerIsObject(jc))
+		{
+			entry = jc->children[index];
+			if (!JBE_ISSTRING(entry))
+				elog(ERROR, "jsonb key value is not STRING");
+			data = base + getJsonbOffset(jc, index);
+			datalen = getJsonbLength(jc, index);
+			temp = hash_any((unsigned char *)data, datalen);
+			hash = ((hash << 1) | (hash >> 31)) ^ temp;
+
+			index += nitems;
+		}
+		/* hash value for element */
+		entry = jc->children[index];
+		if (JBE_ISNULL(entry))
+			temp = 0x01;
+		else if (JBE_ISSTRING(entry))
+		{
+			data = base + getJsonbOffset(jc, index);
+			datalen = getJsonbLength(jc, index);
+			temp = hash_any((unsigned char *)data, datalen);
+		}
+		else if (JBE_ISNUMERIC(entry))
+		{
+			data = base + INTALIGN(getJsonbOffset(jc, index));
+			temp = devtype_numeric_hash(false, PointerGetDatum(data));
+		}
+		else if (JBE_ISBOOL_TRUE(entry))
+			temp = 0x02;
+		else if (JBE_ISBOOL_FALSE(entry))
+			temp = 0x04;
+		else if (JBE_ISCONTAINER(entry))
+		{
+			data = base + INTALIGN(getJsonbOffset(jc, index));
+			temp = __devtype_jsonb_hash((JsonbContainer *)data);
+		}
+		else
+			elog(ERROR, "Unexpected jsonb entry (%08x)", entry);
+        hash = ((hash << 1) | (hash >> 31)) ^ temp;
+	}
+	return hash;
+}
+
+static uint32_t
+devtype_jsonb_hash(bool isnull, Datum value)
+{
+	if (!isnull)
+	{
+		JsonbContainer *jc = (JsonbContainer *) VARDATA_ANY(value);
+
+		return __devtype_jsonb_hash(jc);
 	}
 	return 0;
 }
@@ -1301,6 +1390,154 @@ codegen_booleantest_expression(codegen_context *context,
 }
 
 /*
+ * Special case handling if (jsonb->>FIELD)::numeric is given, because it is
+ * usually extracted as a text representation once then converted to numeric,
+ * it is fundamentally waste of the memory in the xPU kernel space.
+ * So, we add a special optimization for the numeric jsonb key references.
+ */
+static int
+codegen_coerceviaio_expression(codegen_context *context,
+							   StringInfo buf, CoerceViaIO *cvio)
+{
+	static struct {
+		Oid			func_oid;
+		const char *type_name;
+		const char *type_extension;
+		FuncOpCode	opcode;
+	} jsonref_catalog[] = {
+		/* JSONB->>KEY */
+		{F_JSONB_OBJECT_FIELD_TEXT,
+		 "numeric", NULL,
+		 FuncOpCode__jsonb_object_field_as_numeric},
+		{F_JSONB_OBJECT_FIELD_TEXT,
+		 "int1",    "pg_strom",
+		 FuncOpCode__jsonb_object_field_as_int1},
+		{F_JSONB_OBJECT_FIELD_TEXT,
+		 "int2",    NULL,
+		 FuncOpCode__jsonb_object_field_as_int2},
+		{F_JSONB_OBJECT_FIELD_TEXT,
+		 "int4",    NULL,
+		 FuncOpCode__jsonb_object_field_as_int4},
+		{F_JSONB_OBJECT_FIELD_TEXT,
+		 "int8",    NULL,
+		 FuncOpCode__jsonb_object_field_as_int8},
+		{F_JSONB_OBJECT_FIELD_TEXT,
+		 "float2",  "pg_strom",
+		 FuncOpCode__jsonb_object_field_as_float2},
+		{F_JSONB_OBJECT_FIELD_TEXT,
+		 "float4",  NULL,
+		 FuncOpCode__jsonb_object_field_as_float4},
+		{F_JSONB_OBJECT_FIELD_TEXT,
+		 "float8",  NULL,
+		 FuncOpCode__jsonb_object_field_as_float8},
+		/* JSONB->>NUM */
+		{F_JSONB_ARRAY_ELEMENT_TEXT,
+		 "numeric", NULL,
+		 FuncOpCode__jsonb_array_element_as_numeric},
+		{F_JSONB_ARRAY_ELEMENT_TEXT,
+		 "int1",    "pg_strom",
+		 FuncOpCode__jsonb_array_element_as_int1},
+		{F_JSONB_ARRAY_ELEMENT_TEXT,
+		 "int2",    NULL,
+		 FuncOpCode__jsonb_array_element_as_int2},
+		{F_JSONB_ARRAY_ELEMENT_TEXT,
+		 "int4",    NULL,
+		 FuncOpCode__jsonb_array_element_as_int4},
+		{F_JSONB_ARRAY_ELEMENT_TEXT,
+		 "int8",    NULL,
+		 FuncOpCode__jsonb_array_element_as_int8},
+		{F_JSONB_ARRAY_ELEMENT_TEXT,
+		 "float2",  "pg_strom",
+		 FuncOpCode__jsonb_array_element_as_float2},
+		{F_JSONB_ARRAY_ELEMENT_TEXT,
+		 "float4",  NULL,
+		 FuncOpCode__jsonb_array_element_as_float4},
+		{F_JSONB_ARRAY_ELEMENT_TEXT,
+		 "float8",  NULL,
+		 FuncOpCode__jsonb_array_element_as_float8},
+		{InvalidOid, NULL, InvalidOid, FuncOpCode__Invalid},
+	};
+	Oid			func_oid = InvalidOid;
+	List	   *func_args = NIL;
+	devtype_info *dtype;
+	kern_expression kexp;
+
+	/* check special case if jsonb key reference */
+	if (IsA(cvio->arg, FuncExpr))
+	{
+		FuncExpr   *func = (FuncExpr *)cvio->arg;
+
+		func_oid  = func->funcid;
+		func_args = func->args;
+	}
+	else if (IsA(cvio->arg, OpExpr) || IsA(cvio->arg, DistinctExpr))
+	{
+		OpExpr	   *op = (OpExpr *)cvio->arg;
+
+		func_oid  = get_opcode(op->opno);
+		func_args = op->args;
+	}
+	if (func_oid == F_JSONB_OBJECT_FIELD_TEXT)
+	{
+		/* sanity checks */
+		if (list_length(func_args) != 2 ||
+			exprType(linitial(func_args)) != JSONBOID ||
+			exprType(lsecond(func_args))  != TEXTOID)
+			__Elog("Not expected arguments of %s", format_procedure(func_oid));
+	}
+	else if (func_oid == F_JSONB_ARRAY_ELEMENT_TEXT)
+	{
+		/* sanity checks */
+		if (list_length(func_args) != 2 ||
+			exprType(linitial(func_args)) != JSONBOID ||
+			exprType(lsecond(func_args))  != INT4OID)
+			__Elog("Not expected arguments of %s", format_procedure(func_oid));
+	}
+	else
+		__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+
+	dtype = pgstrom_devtype_lookup(cvio->resulttype);
+	if (!dtype)
+		__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+
+	memset(&kexp, 0, sizeof(kexp));
+	for (int i=0; jsonref_catalog[i].type_name != NULL; i++)
+	{
+		if (func_oid == jsonref_catalog[i].func_oid &&
+			strcmp(dtype->type_name, jsonref_catalog[i].type_name) == 0 &&
+			(jsonref_catalog[i].type_extension != NULL
+			 ? (dtype->type_extension != NULL &&
+				strcmp(dtype->type_extension, jsonref_catalog[i].type_extension) == 0)
+			 : (dtype->type_extension == NULL &&
+				dtype->type_namespace == PG_CATALOG_NAMESPACE)))
+		{
+			ListCell   *lc;
+			int			pos = -1;
+
+			kexp.opcode = jsonref_catalog[i].opcode;
+			kexp.exptype = dtype->type_code;
+			kexp.expflags = context->kexp_flags;
+			kexp.nr_args = 2;
+			kexp.args_offset = SizeOfKernExpr(0);
+			if (buf)
+				pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+			foreach (lc, func_args)
+			{
+				Expr   *arg = lfirst(lc);
+
+				if (codegen_expression_walker(context, buf, arg) < 0)
+					return -1;
+			}
+			if (buf)
+				__appendKernExpMagicAndLength(buf, pos);
+			return 0;
+		}
+	}
+	__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+	return -1;
+}
+
+/*
  * is_expression_equals_tlist
  *
  * It checks whether the supplied expression exactly matches any entry of
@@ -1407,10 +1644,11 @@ codegen_expression_walker(codegen_context *context,
 			return codegen_nulltest_expression(context, buf, (NullTest *)expr);
 		case T_BooleanTest:
 			return codegen_booleantest_expression(context, buf, (BooleanTest *)expr);
+		case T_CoerceViaIO:
+			return codegen_coerceviaio_expression(context, buf, (CoerceViaIO *)expr);
 		case T_CoalesceExpr:
 		case T_MinMaxExpr:
 		case T_RelabelType:
-		case T_CoerceViaIO:
 		case T_CoerceToDomain:
 		case T_CaseExpr:
 		case T_CaseTestExpr:
@@ -2893,12 +3131,46 @@ __xpucode_to_cstring(StringInfo buf,
 			break;
 		default:
 			{
-				devtype_info *dtype = devtype_lookup_by_opcode(kexp->exptype);
+				static struct {
+					FuncOpCode	func_code;
+					const char *func_name;
+					const char *rettype_name;
+				} devonly_funcs_catalog[] = {
+#define DEVONLY_FUNC_OPCODE(RET_TYPE,DEV_NAME,a,b,c)	\
+				{FuncOpCode__##DEV_NAME, #DEV_NAME, #RET_TYPE},
+#include "xpu_opcodes.h"
+					{FuncOpCode__Invalid,NULL,NULL}
+				};
 				devfunc_info *dfunc = devfunc_lookup_by_opcode(kexp->opcode);
-			
-				appendStringInfo(buf, "{Func::%s(%s)",
-								 dfunc->func_name,
-								 dtype->type_name);
+				devtype_info *dtype;
+
+				if (dfunc)
+				{
+					dtype = devtype_lookup_by_opcode(kexp->exptype);
+					appendStringInfo(buf, "{Func::%s(%s)",
+                                     dfunc->func_name,
+                                     dtype->type_name);
+				}
+				else
+				{
+					const char *func_name = NULL;
+					const char *rettype_name = NULL;
+
+					for (int i=0; devonly_funcs_catalog[i].func_code; i++)
+					{
+						if (devonly_funcs_catalog[i].func_code == kexp->opcode)
+						{
+							func_name = devonly_funcs_catalog[i].func_name;
+							rettype_name = devonly_funcs_catalog[i].rettype_name;
+							break;
+						}
+					}
+					if (!func_name || !rettype_name)
+						elog(ERROR, "unknown device only function: %u", kexp->opcode);
+					appendStringInfo(buf, "{DevOnlyFunc::%s(%s)",
+									 func_name,
+									 rettype_name);
+				}
 			}
 			break;
 	}
