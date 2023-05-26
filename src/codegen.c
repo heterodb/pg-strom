@@ -1629,6 +1629,35 @@ codegen_minmax_expression(codegen_context *context,
 }
 
 /*
+ * codegen_relabel_expression
+ */
+static int
+codegen_relabel_expression(codegen_context *context,
+						   StringInfo buf, RelabelType *relabel)
+{
+	devtype_info *dtype;
+	Oid			type_oid;
+	TypeOpCode	type_code;
+
+	dtype = pgstrom_devtype_lookup(relabel->resulttype);
+	if (!dtype)
+		__Elog("device type '%s' is not supported",
+			   format_type_be(relabel->resulttype));
+	type_code = dtype->type_code;
+
+	type_oid = exprType((Node *)relabel->arg);
+	dtype = pgstrom_devtype_lookup(type_oid);
+	if (!dtype)
+		__Elog("device type '%s' is not supported",
+			   format_type_be(type_oid));
+	if (dtype->type_code != type_code)
+		__Elog("device type '%s' -> '%s' is not binary convertible",
+			   format_type_be(relabel->resulttype),
+			   format_type_be(type_oid));
+	return codegen_expression_walker(context, buf, relabel->arg);
+}
+
+/*
  * is_expression_equals_tlist
  *
  * It checks whether the supplied expression exactly matches any entry of
@@ -1742,6 +1771,7 @@ codegen_expression_walker(codegen_context *context,
 		case T_MinMaxExpr:
 			return codegen_minmax_expression(context, buf, (MinMaxExpr *)expr);
 		case T_RelabelType:
+			return codegen_relabel_expression(context, buf, (RelabelType *)expr);
 		case T_CoerceToDomain:
 		case T_CaseExpr:
 		case T_CaseTestExpr:
