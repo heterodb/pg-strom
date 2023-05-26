@@ -126,6 +126,25 @@ xpu_date_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(DateADT));
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_date_datum_comp(kern_context *kcxt,
+					int *p_comp,
+					const xpu_datum_t *__a,
+					const xpu_datum_t *__b)
+{
+	const xpu_date_t *a = (const xpu_date_t *)__a;
+	const xpu_date_t *b = (const xpu_date_t *)__b;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	if (a->value > b->value)
+		*p_comp = 1;
+	else if (a->value < b->value)
+		*p_comp = -1;
+	else
+		*p_comp = 0;
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(date, true, 4, sizeof(DateADT));
 
 /*
@@ -195,6 +214,25 @@ xpu_time_datum_hash(kern_context *kcxt,
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(&arg->value, sizeof(TimeADT));
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_time_datum_comp(kern_context *kcxt,
+					int *p_comp,
+					const xpu_datum_t *__a,
+					const xpu_datum_t *__b)
+{
+	const xpu_time_t *a = (const xpu_time_t *)__a;
+	const xpu_time_t *b = (const xpu_time_t *)__b;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	if (a->value > b->value)
+		*p_comp = 1;
+	else if (a->value < b->value)
+		*p_comp = -1;
+	else
+		*p_comp = 0;
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(time, true, 8, sizeof(TimeADT));
@@ -272,6 +310,16 @@ xpu_timetz_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, SizeOfTimeTzADT);
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_timetz_datum_comp(kern_context *kcxt,
+					  int *p_comp,
+					  const xpu_datum_t *__a,
+					const xpu_datum_t *__b)
+{
+	STROM_ELOG(kcxt, "timetz has no compare handler");
+	return false;
+}
 PGSTROM_SQLTYPE_OPERATORS(timetz, false, 8, SizeOfTimeTzADT);
 
 /*
@@ -343,6 +391,25 @@ xpu_timestamp_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(Timestamp));
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_timestamp_datum_comp(kern_context *kcxt,
+						 int *p_comp,
+						 const xpu_datum_t *__a,
+						 const xpu_datum_t *__b)
+{
+	const xpu_timestamp_t *a = (const xpu_timestamp_t *)__a;
+	const xpu_timestamp_t *b = (const xpu_timestamp_t *)__b;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	if (a->value > b->value)
+		*p_comp = 1;
+	else if (a->value < b->value)
+		*p_comp = -1;
+	else
+		*p_comp = 0;
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(timestamp, true, 8, sizeof(Timestamp));
 
 /*
@@ -412,6 +479,25 @@ xpu_timestamptz_datum_hash(kern_context *kcxt,
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(&arg->value, sizeof(TimestampTz));
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_timestamptz_datum_comp(kern_context *kcxt,
+						   int *p_comp,
+						   const xpu_datum_t *__a,
+						   const xpu_datum_t *__b)
+{
+	const xpu_timestamptz_t *a = (const xpu_timestamptz_t *)__a;
+	const xpu_timestamptz_t *b = (const xpu_timestamptz_t *)__b;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	if (a->value > b->value)
+		*p_comp = 1;
+	else if (a->value < b->value)
+		*p_comp = -1;
+	else
+		*p_comp = 0;
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(timestamptz, true, 8, sizeof(TimestampTz));
@@ -509,6 +595,40 @@ xpu_interval_datum_hash(kern_context *kcxt,
 		*p_hash = 0;
 	else
 		*p_hash = pg_hash_any(&arg->value, sizeof(Interval));
+	return true;
+}
+
+INLINE_FUNCTION(int128_t)
+interval_cmp_value(const Interval *ival)
+{
+	int128_t	span;
+	int64_t		days;
+
+	span = ival->time % USECS_PER_DAY;
+	days = ival->time / USECS_PER_DAY;
+	days += ival->month * 30;
+	days += ival->day;
+
+	span += (int128_t)days * USECS_PER_DAY;
+
+	return span;
+}
+
+STATIC_FUNCTION(bool)
+xpu_interval_datum_comp(kern_context *kcxt,
+						 int *p_comp,
+						 const xpu_datum_t *__a,
+						 const xpu_datum_t *__b)
+{
+	const xpu_interval_t *a = (const xpu_interval_t *)__a;
+	const xpu_interval_t *b = (const xpu_interval_t *)__b;
+	int128_t	aval;
+	int128_t	bval;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	aval = interval_cmp_value(&a->value);
+	bval = interval_cmp_value(&b->value);
+	*p_comp = (aval - bval);
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(interval, false, 8, sizeof(Interval));
@@ -1691,22 +1811,6 @@ PG_TIMESTAMPTZ_TIMESTAMP_COMPARE_TEMPLATE(lt, <)
 PG_TIMESTAMPTZ_TIMESTAMP_COMPARE_TEMPLATE(le, <=)
 PG_TIMESTAMPTZ_TIMESTAMP_COMPARE_TEMPLATE(gt, >)
 PG_TIMESTAMPTZ_TIMESTAMP_COMPARE_TEMPLATE(ge, >=)
-
-INLINE_FUNCTION(int128_t)
-interval_cmp_value(const Interval *ival)
-{
-	int128_t	span;
-	int64_t		days;
-
-	span = ival->time % USECS_PER_DAY;
-	days = ival->time / USECS_PER_DAY;
-	days += ival->month * 30;
-	days += ival->day;
-
-	span += (int128_t)days * USECS_PER_DAY;
-
-	return span;
-}
 
 #define PG_INTERVAL_COMPARE_TEMPLATE(NAME,OPER)							\
 	PUBLIC_FUNCTION(bool)                                               \

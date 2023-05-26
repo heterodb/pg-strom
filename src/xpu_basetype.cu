@@ -82,6 +82,20 @@ xpu_bool_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(bool));
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_bool_datum_comp(kern_context *kcxt,
+					int *p_comp,
+					const xpu_datum_t *__a,
+					const xpu_datum_t *__b)
+{
+	const xpu_bool_t   *a = (const xpu_bool_t *)__a;
+	const xpu_bool_t   *b = (const xpu_bool_t *)__b;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	*p_comp = ((int)a->value - (int)b->value);
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 
 /*
@@ -148,6 +162,24 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 			*p_hash = 0;												\
 		else															\
 			*p_hash = pg_hash_any(&arg->value, sizeof(BASETYPE));		\
+		return true;													\
+	}																	\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_datum_comp(kern_context *kcxt,							\
+						int *p_comp,									\
+						const xpu_datum_t *__a,							\
+						const xpu_datum_t *__b)							\
+	{																	\
+		const xpu_##NAME##_t *a = (const xpu_##NAME##_t *)__a;			\
+		const xpu_##NAME##_t *b = (const xpu_##NAME##_t *)__b;			\
+																		\
+		assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));			\
+		if (a->value > b->value)										\
+			*p_comp = 1;												\
+		else if (a->value < b->value)									\
+			*p_comp = -1;												\
+		else															\
+			*p_comp = 0;												\
 		return true;													\
 	}																	\
 	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
@@ -221,6 +253,24 @@ PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t,i64);
 			*p_hash = 0;												\
 		else															\
 			*p_hash = pg_hash_any(&arg->value, sizeof(BASETYPE));		\
+		return true;													\
+	}																	\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_datum_comp(kern_context *kcxt,							\
+						int *p_comp,									\
+						const xpu_datum_t *__a,							\
+						const xpu_datum_t *__b)							\
+	{																	\
+		const xpu_##NAME##_t *a = (const xpu_##NAME##_t *)__a;			\
+		const xpu_##NAME##_t *b = (const xpu_##NAME##_t *)__b;			\
+																		\
+		assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));			\
+		if (a->value > b->value)										\
+			*p_comp = 1;												\
+		else if (a->value < b->value)									\
+			*p_comp = -1;												\
+		else															\
+			*p_comp = 0;												\
 		return true;													\
 	}																	\
 	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))

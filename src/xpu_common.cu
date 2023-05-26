@@ -260,6 +260,100 @@ pgfn_BoolTestExpr(XPU_PGFUNCTION_ARGS)
 	return true;
 }
 
+STATIC_FUNCTION(bool)
+pgfn_CoalesceExpr(XPU_PGFUNCTION_ARGS)
+{
+	const kern_expression *karg;
+	int		i;
+
+	for (i=0, karg = KEXP_FIRST_ARG(kexp);
+		 i < kexp->nr_args;
+		 i++, karg = KEXP_NEXT_ARG(karg))
+	{
+		assert(__KEXP_IS_VALID(kexp, karg) && kexp->exptype == karg->exptype);
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))
+			return false;
+		if (!XPU_DATUM_ISNULL(__result))
+			return true;
+	}
+	__result->expr_ops = NULL;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+pgfn_LeastExpr(XPU_PGFUNCTION_ARGS)
+{
+	const xpu_datum_operators *kexp_ops = kexp->expr_ops;
+	const kern_expression *karg;
+	xpu_datum_t	   *temp;
+	int				comp;
+	int				i, sz = kexp_ops->xpu_type_sizeof;
+
+	temp = (xpu_datum_t *)alloca(sz);
+	memset(temp, 0, sz);
+	__result->expr_ops = NULL;
+	for (i=0,  karg = KEXP_FIRST_ARG(kexp);
+		 i < kexp->nr_args;
+		 i++, karg = KEXP_NEXT_ARG(karg))
+	{
+		assert(__KEXP_IS_VALID(kexp, karg) && kexp->exptype == karg->exptype);
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, temp))
+			return false;
+		if (XPU_DATUM_ISNULL(temp))
+			continue;
+
+		if (XPU_DATUM_ISNULL(__result))
+		{
+			memcpy(__result, temp, sz);
+		}
+		else
+		{
+			if (!kexp_ops->xpu_datum_comp(kcxt, &comp, __result, temp))
+				return false;
+			if (comp > 0)
+				memcpy(__result, temp, sz);
+		}
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+pgfn_GreatestExpr(XPU_PGFUNCTION_ARGS)
+{
+	const xpu_datum_operators *kexp_ops = kexp->expr_ops;
+	const kern_expression *karg;
+	xpu_datum_t	   *temp;
+	int				comp;
+	int				i, sz = kexp_ops->xpu_type_sizeof;
+
+	temp = (xpu_datum_t *)alloca(sz);
+	memset(temp, 0, sz);
+	__result->expr_ops = NULL;
+	for (i=0,  karg = KEXP_FIRST_ARG(kexp);
+		 i < kexp->nr_args;
+		 i++, karg = KEXP_NEXT_ARG(karg))
+	{
+		assert(__KEXP_IS_VALID(kexp, karg) && kexp->exptype == karg->exptype);
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, temp))
+			return false;
+		if (XPU_DATUM_ISNULL(temp))
+			continue;
+
+		if (XPU_DATUM_ISNULL(__result))
+		{
+			memcpy(__result, temp, sz);
+		}
+		else
+		{
+			if (!kexp_ops->xpu_datum_comp(kcxt, &comp, __result, temp))
+				return false;
+			if (comp < 0)
+				memcpy(__result, temp, sz);
+		}
+	}
+	return true;
+}
+
 /* ----------------------------------------------------------------
  *
  * Routines to support Projection
@@ -1714,6 +1808,15 @@ xpu_array_datum_hash(kern_context *kcxt,
 	return false;
 }
 
+STATIC_FUNCTION(bool)
+xpu_array_datum_comp(kern_context *kcxt,
+					 int *p_comp,
+					 const xpu_datum_t *__a,
+					 const xpu_datum_t *__b)
+{
+	STROM_ELOG(kcxt, "xpu_array_datum_comp is not implemented");
+	return false;
+}
 //MEMO: some array type uses typalign=4. is it ok?
 PGSTROM_SQLTYPE_OPERATORS(array,false,4,-1);
 
@@ -1757,6 +1860,15 @@ xpu_composite_datum_hash(kern_context *kcxt,
 	STROM_ELOG(kcxt, "xpu_composite_datum_hash is not implemented");
 	return false;
 }
+STATIC_FUNCTION(bool)
+xpu_composite_datum_comp(kern_context *kcxt,
+						 int *p_comp,
+						 const xpu_datum_t *__a,
+						 const xpu_datum_t *__b)
+{
+	STROM_ELOG(kcxt, "xpu_composite_datum_comp is not implemented");
+	return false;
+}
 PGSTROM_SQLTYPE_OPERATORS(composite,false,8,-1);
 
 /*
@@ -1794,6 +1906,9 @@ PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
     {FuncOpCode__BoolTestExpr_IsNotFalse,	pgfn_BoolTestExpr},
     {FuncOpCode__BoolTestExpr_IsUnknown,	pgfn_BoolTestExpr},
     {FuncOpCode__BoolTestExpr_IsNotUnknown,	pgfn_BoolTestExpr},
+	{FuncOpCode__CoalesceExpr,				pgfn_CoalesceExpr},
+	{FuncOpCode__LeastExpr,					pgfn_LeastExpr},
+	{FuncOpCode__GreatestExpr,				pgfn_GreatestExpr},
 #include "xpu_opcodes.h"
 	{FuncOpCode__Projection,                pgfn_Projection},
 	{FuncOpCode__LoadVars,                  pgfn_LoadVars},

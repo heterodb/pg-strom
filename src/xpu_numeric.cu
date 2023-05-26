@@ -108,6 +108,23 @@ xpu_numeric_datum_hash(kern_context *kcxt,
 				   pg_hash_any(&arg->value, sizeof(int128_t)));
 	return true;
 }
+
+STATIC_FUNCTION(int)
+__numeric_compare(const xpu_numeric_t *a, const xpu_numeric_t *b);
+
+STATIC_FUNCTION(bool)
+xpu_numeric_datum_comp(kern_context *kcxt,
+					   int *p_comp,
+					   const xpu_datum_t *__a,
+					   const xpu_datum_t *__b)
+{
+	const xpu_numeric_t *a = (const xpu_numeric_t *)__a;
+	const xpu_numeric_t *b = (const xpu_numeric_t *)__b;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	*p_comp = __numeric_compare(a, b);
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(numeric, false, 4, -1);
 
 PUBLIC_FUNCTION(bool)

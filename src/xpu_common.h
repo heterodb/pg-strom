@@ -191,6 +191,27 @@ __volatileRead(const volatile T *ptr)
 #define __volatileRead(PTR)		(*(PTR))
 #endif
 
+INLINE_FUNCTION(int)
+__memcmp(const void *__s1, const void *__s2, size_t n)
+{
+	const unsigned char	*s1 = (const unsigned char *)__s1;
+	const unsigned char *s2 = (const unsigned char *)__s2;
+
+	for (size_t i=0; i < n; i++)
+	{
+		if (s1[i] < s2[i])
+			return -1;
+		if (s1[i] > s2[i])
+			return 1;
+	}
+	return 0;
+}
+
+
+
+
+
+
 /*
  * TypeOpCode / FuncOpCode
  */
@@ -225,6 +246,9 @@ typedef enum {
 	FuncOpCode__BoolTestExpr_IsNotFalse,
 	FuncOpCode__BoolTestExpr_IsUnknown,
 	FuncOpCode__BoolTestExpr_IsNotUnknown,
+	FuncOpCode__CoalesceExpr,
+	FuncOpCode__LeastExpr,
+	FuncOpCode__GreatestExpr,
 #include "xpu_opcodes.h"
 	/* for projection */
 	FuncOpCode__Projection = 9999,
@@ -1372,6 +1396,10 @@ struct xpu_datum_operators {
 	bool	  (*xpu_datum_hash)(kern_context *kcxt,
 								uint32_t *p_hash,
 								const xpu_datum_t *arg);
+	bool	  (*xpu_datum_comp)(kern_context *kcxt,
+								int *p_comp,				/* out */
+								const xpu_datum_t *a,		/* in */
+								const xpu_datum_t *b);		/* in */
 };
 
 #define PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\
@@ -1400,6 +1428,7 @@ struct xpu_datum_operators {
 		.xpu_datum_store = xpu_##NAME##_datum_store,				\
 		.xpu_datum_write = xpu_##NAME##_datum_write,				\
 		.xpu_datum_hash = xpu_##NAME##_datum_hash,					\
+		.xpu_datum_comp = xpu_##NAME##_datum_comp,					\
 	}
 
 #include "xpu_basetype.h"
@@ -1497,6 +1526,7 @@ typedef struct
 												 * timezone */
 #define DEVTYPE__USE_KVARS_SLOTBUF	0x00000400U	/* Device type uses extra buffer on
 												 * the kvars-slot for LoadVars */
+#define DEVTYPE__HAS_COMPARE		0x00000800U	/* Device type has compare handler */
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
 #define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */

@@ -132,6 +132,35 @@ xpu_bpchar_datum_hash(kern_context*kcxt,
 		return false;
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_bpchar_datum_comp(kern_context *kcxt,
+					  int *p_comp,
+					  const xpu_datum_t *__str1,
+					  const xpu_datum_t *__str2)
+{
+	const xpu_bpchar_t *str1 = (const xpu_bpchar_t *)__str1;
+	const xpu_bpchar_t *str2 = (const xpu_bpchar_t *)__str2;
+	int			sz1, sz2;
+	int			comp;
+
+	if (!xpu_bpchar_is_valid(kcxt, str1) ||
+		!xpu_bpchar_is_valid(kcxt, str2))
+		return false;
+
+	sz1 = bpchar_truelen(str1->value, str1->length);
+	sz2 = bpchar_truelen(str2->value, str2->length);
+	comp = __memcmp(str1->value, str2->value, Min(sz1, sz2));
+	if (comp == 0)
+	{
+		if (sz1 < sz2)
+			comp = -1;
+		else if (sz1 > sz2)
+			comp = 1;
+	}
+	*p_comp = comp;
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(bpchar, false, 4, -1);
 
 /*
@@ -241,6 +270,32 @@ xpu_text_datum_hash(kern_context *kcxt,
 		return false;
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_text_datum_comp(kern_context *kcxt,
+					int *p_comp,
+					const xpu_datum_t *__str1,
+					const xpu_datum_t *__str2)
+{
+	const xpu_text_t *str1 = (const xpu_text_t *)__str1;
+	const xpu_text_t *str2 = (const xpu_text_t *)__str2;
+	int			comp;
+
+	if (!xpu_text_is_valid(kcxt, str1) ||
+		!xpu_text_is_valid(kcxt, str2))
+		return false;
+	comp = __memcmp(str1->value, str2->value,
+					Min(str1->length, str2->length));
+	if (comp == 0)
+	{
+		if (str1->length < str2->length)
+			comp = -1;
+		if (str1->length > str2->length)
+			comp = 1;
+	}
+	*p_comp = comp;
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(text, false, 4, -1);
 
 /*
@@ -342,53 +397,38 @@ xpu_bytea_datum_hash(kern_context *kcxt,
 		return false;
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_bytea_datum_comp(kern_context *kcxt,
+					 int *p_comp,
+					 const xpu_datum_t *__a,
+					 const xpu_datum_t *__b)
+{
+	const xpu_bytea_t *a = (const xpu_bytea_t *)__a;
+	const xpu_bytea_t *b = (const xpu_bytea_t *)__b;
+	int			comp;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	if (!xpu_bytea_is_valid(kcxt, a) || !xpu_bytea_is_valid(kcxt, b))
+		return false;
+
+	comp = __memcmp(a->value, b->value,
+					Min(a->length, b->length));
+	if (comp == 0)
+	{
+		if (a->length < b->length)
+			comp = -1;
+		else if (a->length > b->length)
+			comp = 1;
+	}
+	*p_comp = comp;
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(bytea, false, 4, -1);
 
 /*
  * Bpchar functions
  */
-STATIC_FUNCTION(bool)
-__bpchar_compare(kern_context *kcxt,
-				 int *p_status,
-				 const xpu_bpchar_t *str1,
-				 const xpu_bpchar_t *str2)
-{
-	const char *s1 = str1->value;
-	const char *s2 = str2->value;
-	int		len, sz1, sz2;
-
-	if (!xpu_bpchar_is_valid(kcxt, str1) ||
-		!xpu_bpchar_is_valid(kcxt, str2))
-	  return false;
-
-	sz1 = bpchar_truelen(s1, str1->length);
-	sz2 = bpchar_truelen(s2, str2->length);
-	len = Min(sz1, sz2);
-	while (len > 0)
-	{
-		if (*s1 < *s2)
-		{
-			*p_status = -1;
-			return true;
-		}
-		if (*s1 > *s2)
-		{
-			*p_status = 1;
-			return true;
-		}
-		s1++;
-		s2++;
-		len--;
-	}
-	if (sz1 == sz2)
-		*p_status = 0;
-	else if (sz1 > sz2)
-		*p_status = 1;
-	else
-		*p_status = -1;
-	return true;
-}
-
 #define PG_BPCHAR_COMPARE_TEMPLATE(NAME,OPER)							\
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_bpchar##NAME(XPU_PGFUNCTION_ARGS)								\
@@ -412,13 +452,13 @@ __bpchar_compare(kern_context *kcxt,
 		}																\
 		else															\
 		{																\
-			int		status;												\
+			int		comp;												\
 																		\
-			if (!__bpchar_compare(kcxt, &status,						\
-								  &datum_a,								\
-								  &datum_b))							\
+			if (!xpu_bpchar_datum_comp(kcxt, &comp,						\
+									   (const xpu_datum_t *)&datum_a,	\
+									   (const xpu_datum_t *)&datum_b))	\
 				return false;											\
-			result->value = (status OPER 0);							\
+			result->value = (comp OPER 0);								\
 			result->expr_ops = &xpu_bool_ops;							\
 		}																\
 		return true;													\
@@ -437,7 +477,7 @@ pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
 	xpu_bpchar_t	datum;
 	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
-	assert(karg->nr_args == 1 &&
+	assert(kexp->nr_args == 1 &&
 		   KEXP_IS_VALID(karg, bpchar));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
@@ -456,45 +496,6 @@ pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
 /*
  * Text functions
  */
-STATIC_FUNCTION(bool)
-__text_compare(kern_context *kcxt,
-			   int *p_status,
-			   const xpu_text_t *str1,
-			   const xpu_text_t *str2)
-{
-	const char *s1 = str1->value;
-	const char *s2 = str2->value;
-	int		len;
-
-	if (!xpu_text_is_valid(kcxt, str1) ||
-		!xpu_text_is_valid(kcxt, str2))
-		return false;
-	len = Min(str1->length, str2->length);
-	while (len > 0)
-	{
-		if (*s1 < *s2)
-		{
-			*p_status = -1;
-			return true;
-		}
-		if (*s1 > *s2)
-		{
-			*p_status = 1;
-			return true;
-		}
-		s1++;
-		s2++;
-		len--;
-	}
-	if (str1->length == str2->length)
-		*p_status = 0;
-	else if (str1->length > str2->length)
-		*p_status = 1;
-	else
-		*p_status = -1;
-	return true;
-}
-
 #define PG_TEXT_COMPARE_TEMPLATE(NAME,OPER)								\
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_text_##NAME(XPU_PGFUNCTION_ARGS)								\
@@ -518,13 +519,13 @@ __text_compare(kern_context *kcxt,
 		}																\
 		else															\
 		{																\
-			int		status;												\
+			int		comp;												\
 																		\
-			if (!__text_compare(kcxt, &status,							\
-								&datum_a,								\
-								&datum_b))								\
+			if (!xpu_text_datum_comp(kcxt, &comp,						\
+									 (const xpu_datum_t *)&datum_a,		\
+									 (const xpu_datum_t *)&datum_b))	\
 				return false;											\
-			result->value = (status OPER 0);							\
+			result->value = (comp OPER 0);								\
 			result->expr_ops = &xpu_bool_ops;							\
 		}																\
 		return true;													\

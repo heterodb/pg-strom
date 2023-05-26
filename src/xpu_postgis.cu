@@ -498,6 +498,15 @@ xpu_geometry_datum_hash(kern_context *kcxt,
 	return false;
 }
 
+STATIC_FUNCTION(bool)
+xpu_geometry_datum_comp(kern_context *kcxt,
+						int *p_comp,
+						const xpu_datum_t *__a,
+						const xpu_datum_t *__b)
+{
+	STROM_ELOG(kcxt, "geometry type has no compare function");
+	return false;
+}
 PGSTROM_SQLTYPE_OPERATORS(geometry,false,4,-1);
 
 /* ================================================================
@@ -568,6 +577,15 @@ xpu_box2df_datum_hash(kern_context *kcxt,
 	return false;
 }
 
+STATIC_FUNCTION(bool)
+xpu_box2df_datum_comp(kern_context *kcxt,
+					  int *p_comp,
+					  const xpu_datum_t *__a,
+					  const xpu_datum_t *__b)
+{
+	STROM_ELOG(kcxt, "box2df type has no compare function");
+	return false;
+}
 PGSTROM_SQLTYPE_OPERATORS(box2df,false,1,sizeof(geom_bbox_2d));
 
 /* ================================================================

@@ -298,7 +298,6 @@ __xpu_jsonb_comp_hash(kern_context *kcxt, JsonbContainer *jc)
 	return hash;
 }
 
-
 STATIC_FUNCTION(bool)
 xpu_jsonb_datum_hash(kern_context*kcxt,
 					 uint32_t *p_hash,
@@ -314,6 +313,16 @@ xpu_jsonb_datum_hash(kern_context*kcxt,
 		return false;
 
 	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_jsonb_datum_comp(kern_context*kcxt,
+					 int *p_comp,
+					 const xpu_datum_t *__a,
+					 const xpu_datum_t *__b)
+{
+	STROM_ELOG(kcxt, "device jsonb type has no compare handler");
+	return false;
 }
 PGSTROM_SQLTYPE_OPERATORS(jsonb,false,4,-1);
 

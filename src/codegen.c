@@ -1538,6 +1538,97 @@ codegen_coerceviaio_expression(codegen_context *context,
 }
 
 /*
+ * codegen_coalesce_expression
+ */
+static int
+codegen_coalesce_expression(codegen_context *context,
+							StringInfo buf, CoalesceExpr *cl)
+{
+	devtype_info   *dtype, *__dtype;
+	kern_expression	kexp;
+	int				pos = -1;
+	ListCell	   *lc;
+
+	dtype = pgstrom_devtype_lookup(cl->coalescetype);
+	if (!dtype)
+		__Elog("Coalesce with type '%s' is not supported",
+			   format_type_be(cl->coalescetype));
+
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.exptype = dtype->type_code;
+	kexp.expflags = context->kexp_flags;
+	kexp.opcode = FuncOpCode__CoalesceExpr;
+	kexp.nr_args = list_length(cl->args);
+	kexp.args_offset = SizeOfKernExpr(0);
+	if (buf)
+		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+
+	foreach (lc, cl->args)
+	{
+		Expr	   *expr = lfirst(lc);
+		Oid			type_oid = exprType((Node *)expr);
+
+		__dtype = pgstrom_devtype_lookup(type_oid);
+		if (!__dtype || dtype->type_code != __dtype->type_code)
+			__Elog("Coalesce argument has incompatible type: %s",
+				   nodeToString(cl));
+		if (codegen_expression_walker(context, buf, expr) < 0)
+			return -1;
+	}
+	if (buf)
+		__appendKernExpMagicAndLength(buf, pos);
+	return 0;
+}
+
+/*
+ * codegen_minmax_expression
+ */
+static int
+codegen_minmax_expression(codegen_context *context,
+						  StringInfo buf, MinMaxExpr *mm)
+{
+	devtype_info   *dtype, *__dtype;
+	kern_expression	kexp;
+	int				pos = -1;
+	ListCell	   *lc;
+
+	dtype = pgstrom_devtype_lookup(mm->minmaxtype);
+	if (!dtype || (dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
+		__Elog("Least/Greatest with type '%s' is not supported",
+			   format_type_be(mm->minmaxtype));
+
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.exptype = dtype->type_code;
+	kexp.expflags = context->kexp_flags;
+	if (mm->op == IS_GREATEST)
+		kexp.opcode = FuncOpCode__GreatestExpr;
+	else if (mm->op == IS_LEAST)
+		kexp.opcode = FuncOpCode__LeastExpr;
+	else
+		__Elog("unknown MinMaxExpr operator: %s", nodeToString(mm));
+	kexp.nr_args = list_length(mm->args);
+	kexp.args_offset = SizeOfKernExpr(0);
+	if (buf)
+		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+
+	foreach (lc, mm->args)
+	{
+		Expr	   *expr = lfirst(lc);
+		Oid			type_oid = exprType((Node *)expr);
+
+		__dtype = pgstrom_devtype_lookup(type_oid);
+		if (!__dtype || dtype->type_code != __dtype->type_code)
+			__Elog("Least/Greatest argument has incompatible type: %s",
+				   nodeToString(mm));
+		if (codegen_expression_walker(context, buf, expr) < 0)
+			return -1;
+	}
+	if (buf)
+		__appendKernExpMagicAndLength(buf, pos);
+	return 0;
+}
+
+/*
  * is_expression_equals_tlist
  *
  * It checks whether the supplied expression exactly matches any entry of
@@ -1647,7 +1738,9 @@ codegen_expression_walker(codegen_context *context,
 		case T_CoerceViaIO:
 			return codegen_coerceviaio_expression(context, buf, (CoerceViaIO *)expr);
 		case T_CoalesceExpr:
+			return codegen_coalesce_expression(context, buf, (CoalesceExpr *)expr);
 		case T_MinMaxExpr:
+			return codegen_minmax_expression(context, buf, (MinMaxExpr *)expr);
 		case T_RelabelType:
 		case T_CoerceToDomain:
 		case T_CaseExpr:
@@ -3128,6 +3221,15 @@ __xpucode_to_cstring(StringInfo buf,
 			break;
 		case FuncOpCode__BoolTestExpr_IsNotUnknown:
 			appendStringInfo(buf, "{BoolTest::IsNotUnknown");
+			break;
+		case FuncOpCode__CoalesceExpr:
+			appendStringInfo(buf, "{Coalesce");
+			break;
+		case FuncOpCode__LeastExpr:
+			appendStringInfo(buf, "{Least");
+			break;
+		case FuncOpCode__GreatestExpr:
+			appendStringInfo(buf, "{Greatest");
 			break;
 		default:
 			{

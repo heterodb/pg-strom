@@ -81,6 +81,25 @@ xpu_money_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(Cash));
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_money_datum_comp(kern_context *kcxt,
+					 int *p_comp,
+					 const xpu_datum_t *__a,
+					 const xpu_datum_t *__b)
+{
+	const xpu_money_t *a = (const xpu_money_t *)__a;
+	const xpu_money_t *b = (const xpu_money_t *)__b;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	if (a->value < b->value)
+		*p_comp = -1;
+	else if (a->value > b->value)
+		*p_comp = 1;
+	else
+		*p_comp = 0;
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(money, true, 8, sizeof(Cash));
 PG_SIMPLE_COMPARE_TEMPLATE(cash_,money,money,Cash)
 /*
@@ -157,8 +176,6 @@ xpu_uuid_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(arg->value.data, UUID_LEN);
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(uuid, false, 1, UUID_LEN);
-
 
 INLINE_FUNCTION(int)
 uuid_cmp_internal(const xpu_uuid_t *datum_a,
@@ -176,6 +193,26 @@ uuid_cmp_internal(const xpu_uuid_t *datum_a,
 	}
 	return 0;
 }
+
+
+
+
+STATIC_FUNCTION(bool)
+xpu_uuid_datum_comp(kern_context *kcxt,
+					int *p_comp,
+					const xpu_datum_t *__a,
+					const xpu_datum_t *__b)
+{
+	const xpu_uuid_t *a = (const xpu_uuid_t *)__a;
+	const xpu_uuid_t *b = (const xpu_uuid_t *)__b;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	*p_comp = __memcmp(a->value.data,
+					   b->value.data,
+					   UUID_LEN);
+	return true;
+}
+PGSTROM_SQLTYPE_OPERATORS(uuid, false, 1, UUID_LEN);
 
 #define PG_UUID_COMPARE_TEMPLATE(NAME,OPER)								\
 	PUBLIC_FUNCTION(bool)												\
@@ -201,8 +238,9 @@ uuid_cmp_internal(const xpu_uuid_t *datum_a,
 		else															\
 		{																\
 			result->expr_ops = &xpu_bool_ops;							\
-			result->value = (uuid_cmp_internal(&datum_a,				\
-											   &datum_b) OPER 0);		\
+			result->value = (__memcmp(datum_a.value.data,				\
+									  datum_b.value.data,				\
+									  UUID_LEN) OPER 0);				\
 		}																\
 		return true;													\
 	}
@@ -285,10 +323,9 @@ xpu_macaddr_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(macaddr));
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(macaddr, false, 4, sizeof(macaddr));
 
 INLINE_FUNCTION(int)
-macaddr_cmp_internal(xpu_macaddr_t *datum_a, xpu_macaddr_t *datum_b)
+macaddr_cmp_internal(const xpu_macaddr_t *datum_a, const xpu_macaddr_t *datum_b)
 {
 	uint32_t	bits_a;
 	uint32_t	bits_b;
@@ -317,6 +354,21 @@ macaddr_cmp_internal(xpu_macaddr_t *datum_a, xpu_macaddr_t *datum_b)
 		return 1;
 	return 0;
 }
+
+STATIC_FUNCTION(bool)
+xpu_macaddr_datum_comp(kern_context *kcxt,
+					   int *p_comp,
+					   const xpu_datum_t *__a,
+					   const xpu_datum_t *__b)
+{
+	const xpu_macaddr_t *a = (const xpu_macaddr_t *)__a;
+	const xpu_macaddr_t *b = (const xpu_macaddr_t *)__b;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	*p_comp = macaddr_cmp_internal(a, b);
+	return true;
+}
+PGSTROM_SQLTYPE_OPERATORS(macaddr, false, 4, sizeof(macaddr));
 
 #define PG_MACADDR_COMPARE_TEMPLATE(NAME,OPER)							\
 	PUBLIC_FUNCTION(bool)												\
@@ -526,8 +578,6 @@ xpu_inet_datum_hash(kern_context *kcxt,
 	}
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(inet, false, 4, -1);
-
 /* see utils/adt/network.c */
 INLINE_FUNCTION(int)
 bitncmp(const unsigned char *l, const unsigned char *r, int n)
@@ -584,6 +634,21 @@ inet_cmp_internal(const xpu_inet_t *datum_a,
 	}
 	return ((int)datum_a->value.family - (int)datum_b->value.family);
 }
+
+STATIC_FUNCTION(bool)
+xpu_inet_datum_comp(kern_context *kcxt,
+					int *p_comp,
+					const xpu_datum_t *__a,
+					const xpu_datum_t *__b)
+{
+	const xpu_inet_t *a = (const xpu_inet_t *)__a;
+	const xpu_inet_t *b = (const xpu_inet_t *)__b;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	*p_comp = inet_cmp_internal(a, b);
+	return true;
+}
+PGSTROM_SQLTYPE_OPERATORS(inet, false, 4, -1);
 
 #define PG_NETWORK_COMPARE_TEMPLATE(NAME,OPER)							\
 	PUBLIC_FUNCTION(bool)												\
