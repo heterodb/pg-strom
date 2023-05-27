@@ -1098,8 +1098,6 @@ GetOptimalGpuForRelation(Relation relation)
 	/* only heap relation */
 	Assert(RelationGetForm(relation)->relam == HEAP_TABLE_AM_OID);
 	tablespace_oid = RelationGetForm(relation)->reltablespace;
-	if (!OidIsValid(tablespace_oid))
-		tablespace_oid = DEFAULTTABLESPACE_OID;
 
 	return GetOptimalGpuForTablespace(tablespace_oid);
 }
