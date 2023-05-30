@@ -309,7 +309,9 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 	Plan	   *plan = *p_plan;
 	ListCell   *lc;
 
-	Assert(plan != NULL);
+	if (!plan)
+		return;
+
 	switch (nodeTag(plan))
 	{
 		case T_Append:
