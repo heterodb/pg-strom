@@ -129,6 +129,8 @@ __setupXpuScanPath(PlannerInfo *root,
 	 * So, we have nothing special to do here.
 	 */
 	disk_cost = avg_seq_page_cost * baserel->pages;
+	if (parallel_path)
+		disk_cost /= parallel_divisor;
 	ntuples =  baserel->tuples;
 
 	/*
@@ -317,15 +319,19 @@ buildXpuScanPath(PlannerInfo *root,
 		case RELKIND_RELATION:
 		case RELKIND_MATVIEW:
 			if (get_relation_am(rte->relid, true) != HEAP_TABLE_AM_OID)
-				return false;
+				return NULL;
 			break;
 		case RELKIND_FOREIGN_TABLE:
 			if (baseRelIsArrowFdw(baserel))
 				break;
-			return false;
+			return NULL;
 		default:
-			return false;
+			return NULL;
 	}
+	/* does the base relation want parallel scan? */
+	if (parallel_path && !baserel->consider_parallel)
+		return NULL;
+	
 	/* fetch device/host qualifiers */
 	foreach (lc, baserel->baserestrictinfo)
 	{

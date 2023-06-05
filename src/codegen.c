@@ -2446,6 +2446,169 @@ codegen_build_packed_hashkeys(codegen_context *context,
 }
 
 /*
+ * codegen_build_packed_gistevals
+ */
+static uint32_t
+__codegen_build_one_gistquals(codegen_context *context,
+							  StringInfo buf,
+							  int   depth,
+							  Oid	gist_func_oid,
+							  Oid	gist_index_oid,
+							  int	gist_index_col,
+							  Expr *gist_func_arg)
+{
+	kern_expression	kexp;
+	devtype_info   *dtype;
+	devfunc_info   *dfunc;
+	Oid				argtypes[2];
+	uint32_t		gist_slot_id;
+	uint32_t		off;
+	uint32_t		__pos1;
+	uint32_t		__pos2;
+
+	/* device GiST evaluation operator */
+	argtypes[0] = get_atttype(gist_index_oid,
+							  gist_index_col + 1);
+	argtypes[1] = exprType((Node *)gist_func_arg);
+	dfunc = __pgstrom_devfunc_lookup(gist_func_oid,
+									 2, argtypes,
+									 InvalidOid);
+	if (!dfunc)
+		elog(ERROR, "Bug? cache lookup failed for device function: %u", gist_func_oid);
+
+	/* allocation of kvars slot */
+	gist_slot_id = list_length(context->kvars_depth);
+	context->kvars_depth = lappend_int(context->kvars_depth,
+									   SPECIAL_DEPTH__GIST_INDEX);
+	context->kvars_resno = lappend_int(context->kvars_resno,
+									   gist_index_col + 1);
+	context->kvars_types = lappend_oid(context->kvars_types,
+									   InvalidOid);
+	context->kvars_exprs = lappend(context->kvars_exprs,	/* dummy */
+								   makeNullConst(argtypes[0], -1, InvalidOid));
+	/* setup GiSTEval expression */
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.exptype = dfunc->func_rettype->type_code;
+	kexp.expflags = context->kexp_flags;
+	kexp.opcode   = FuncOpCode__GiSTEval;
+	kexp.nr_args  = 1;
+	kexp.args_offset = offsetof(kern_expression, u.gist.data);
+	kexp.u.gist.depth = depth;
+	kexp.u.gist.gist_oid = gist_index_oid;
+	kexp.u.gist.ivar.var_resno = gist_index_col + 1;
+	kexp.u.gist.ivar.var_slot_id = gist_slot_id;
+	kexp.u.gist.ivar.var_slot_off = 0;
+	off = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
+
+	/* setup binary operator to evaluate GiST index */
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.exptype  = dfunc->func_rettype->type_code;
+	kexp.expflags = context->kexp_flags;
+	kexp.opcode   = dfunc->func_code;
+	kexp.nr_args  = 2;
+	kexp.args_offset = offsetof(kern_expression, u.data);
+	__pos1 = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
+
+	/* 1st argument - index reference */
+	dtype = dfunc->func_argtypes[0];
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.exptype  = dtype->type_code;
+	kexp.expflags = context->kexp_flags;
+	kexp.opcode   = FuncOpCode__VarExpr;
+	kexp.u.v.var_typlen   = dtype->type_length;
+	kexp.u.v.var_typbyval = dtype->type_byval;
+	kexp.u.v.var_typalign = dtype->type_align;
+	kexp.u.v.var_slot_id = gist_slot_id;
+	__pos2 = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExprVar);
+	__appendKernExpMagicAndLength(buf, __pos2);
+
+	/* 2nd argument - outer reference */
+	codegen_expression_walker(context, buf, gist_func_arg);
+
+	__appendKernExpMagicAndLength(buf, __pos1);
+	__appendKernExpMagicAndLength(buf, off);
+
+	return off;
+}
+
+void
+codegen_build_packed_gistevals(codegen_context *context,
+							   pgstromPlanInfo *pp_info)
+{
+	StringInfoData	buf;
+	kern_expression	*kexp;
+	size_t			head_sz;
+	bytea		   *result = NULL;
+
+	head_sz = MAXALIGN(offsetof(kern_expression,
+								u.pack.offset[pp_info->num_rels]));
+	kexp = alloca(head_sz);
+	memset(kexp, 0, head_sz);
+	kexp->exptype  = TypeOpCode__int4;
+    kexp->expflags = context->kexp_flags;
+    kexp->opcode   = FuncOpCode__Packed;
+    kexp->args_offset = head_sz;
+    kexp->u.pack.npacked = pp_info->num_rels;
+
+	initStringInfo(&buf);
+	buf.len = head_sz;
+	for (int i=0; i < pp_info->num_rels; i++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+		Expr	   *gist_clause = pp_inner->gist_clause;
+		Expr	   *gist_func_arg = NULL;
+		uint32_t	off;
+
+		if (!gist_clause)
+			continue;
+		if (IsA(gist_clause, OpExpr))
+		{
+			OpExpr	   *op = (OpExpr *)gist_clause;
+
+			if (op->opresulttype != BOOLOID ||
+				list_length(op->args) != 2)
+				elog(ERROR, "Bug? gist_clause is not binary operator: %s",
+					 nodeToString(op));
+			gist_func_arg = lsecond(op->args);
+		}
+		else if (IsA(gist_clause, FuncExpr))
+		{
+			FuncExpr   *func = (FuncExpr *)gist_clause;
+
+			if (func->funcresulttype != BOOLOID ||
+				list_length(func->args) != 2)
+				elog(ERROR, "Bug? gist_clause is not binary function: %s",
+					 nodeToString(func));
+			gist_func_arg = lsecond(func->args);
+		}
+		else
+			elog(ERROR, "Bug? gist_clause is neigher OpExpr nor FuncExpr: %s",
+				 nodeToString(gist_clause));
+
+		off = __codegen_build_one_gistquals(context,
+											&buf,
+											i+1,
+											pp_inner->gist_func_oid,
+											pp_inner->gist_index_oid,
+											pp_inner->gist_index_col,
+											gist_func_arg);
+		kexp->u.pack.offset[i] = off;
+	}
+
+	if (buf.len > head_sz)
+	{
+		memcpy(buf.data, kexp, head_sz);
+		__appendKernExpMagicAndLength(&buf, 0);
+
+		result = palloc(VARHDRSZ + buf.len);
+		memcpy(result->vl_dat, buf.data, buf.len);
+		SET_VARSIZE(result, VARHDRSZ + buf.len);
+	}
+	pfree(buf.data);
+	pp_info->kexp_gist_evals_packed = result;
+}
+
+/*
  * __try_inject_groupby_expression
  */
 static int
@@ -2624,7 +2787,8 @@ codegen_build_groupby_keyload(codegen_context *context,
 				continue;
 			slot_id = list_length(context->kvars_depth);
 			groupby_keys_final_slot = lappend_int(groupby_keys_final_slot, slot_id);
-			context->kvars_depth = lappend_int(context->kvars_depth, -2);
+			context->kvars_depth = lappend_int(context->kvars_depth,
+											   SPECIAL_DEPTH__PREAGG_FINAL);
 			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
 			context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
 			break;
@@ -2632,7 +2796,7 @@ codegen_build_groupby_keyload(codegen_context *context,
 		if (!lc2)
 			elog(ERROR, "Bug? group-by key is missing on the tlist_dev");
 	}
-	kexp = __codegen_build_loadvars_one(context, -2);
+	kexp = __codegen_build_loadvars_one(context, SPECIAL_DEPTH__PREAGG_FINAL);
 	if (kexp)
 	{
 		xpucode = palloc(VARHDRSZ + kexp->len);
@@ -3113,44 +3277,34 @@ __xpucode_loadvars_cstring(StringInfo buf,
 		appendStringInfo(buf, "]");
 }
 
-#if 0
 static void
-__xpucode_projection_cstring(StringInfo buf,
-							 const kern_expression *kexp,
-							 const CustomScanState *css,	/* optional */
-							 ExplainState *es,				/* optional */
-							 List *dcontext)
+__xpucode_gisteval_cstring(StringInfo buf,
+                           const kern_expression *kexp,
+                           const CustomScanState *css,
+                           ExplainState *es,
+                           List *dcontext)
 {
-	int		i, nexprs = kexp->u.proj.nexprs;
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	devtype_info   *dtype;
+	Oid				type_oid;
 
+	Assert(kexp->nr_args == 1 &&
+		   kexp->exptype == karg->exptype);
+	type_oid = get_atttype(kexp->u.gist.gist_oid,
+						   kexp->u.gist.ivar.var_resno);
+	dtype = pgstrom_devtype_lookup(type_oid);
+	if (!dtype)
+		elog(ERROR, "device type lookup failed for %u", type_oid);
 
-	if (kexp->nr_args > 0)
-	{
-		const kern_expression *karg;
-
-		if (kexp->nr_args == 1)
-			appendStringInfo(buf, " arg=");
-		else
-			appendStringInfo(buf, " args=[");
-		for (i=0, karg = KEXP_FIRST_ARG(kexp);
-			 i < kexp->nr_args;
-			 i++, karg = KEXP_NEXT_ARG(karg))
-		{
-			const kern_projection_desc *desc = &kexp->u.proj.desc[i];
-
-			if (!__KEXP_IS_VALID(kexp, karg))
-				elog(ERROR, "XpuCode looks corrupted");
-			if (i > 0)
-				appendStringInfo(buf, ", ");
-			appendStringInfo(buf, "%d:", desc->slot_id);
-			__xpucode_to_cstring(buf, karg, css, es, dcontext);
-		}
-		if (kexp->nr_args > 1)
-			appendStringInfoChar(buf, ']');
-	}
-	appendStringInfoChar(buf, '}');
+	appendStringInfo(buf, "{GiSTEval: ivar=<slot_id=%u, col=%s.%s(%s)>, arg=",
+					 kexp->u.gist.ivar.var_slot_id,
+					 get_rel_name(kexp->u.gist.gist_oid),
+					 get_attname(kexp->u.gist.gist_oid,
+								 kexp->u.gist.ivar.var_resno, false),
+					 dtype->type_name);
+	__xpucode_to_cstring(buf, karg, css, es, dcontext);
+	appendStringInfo(buf, "}");
 }
-#endif
 
 static void
 __xpucode_aggfuncs_cstring(StringInfo buf,
@@ -3271,6 +3425,9 @@ __xpucode_to_cstring(StringInfo buf,
 			break;
 		case FuncOpCode__LoadVars:
 			__xpucode_loadvars_cstring(buf, kexp, css, es, dcontext);
+			break;
+		case FuncOpCode__GiSTEval:
+			__xpucode_gisteval_cstring(buf, kexp, css, es, dcontext);
 			break;
 		case FuncOpCode__HashValue:
 			appendStringInfo(buf, "{HashValue");

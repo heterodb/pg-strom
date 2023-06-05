@@ -181,6 +181,48 @@ pmemdup(const void *src, Size sz)
 }
 
 /*
+ * buildoidvector
+ */
+static inline oidvector *
+__buildoidvector1(Oid a)
+{
+	return buildoidvector(&a, 1);
+}
+
+static inline oidvector *
+__buildoidvector2(Oid a, Oid b)
+{
+	Oid		oids[2];
+
+	oids[0] = a;
+	oids[1] = b;
+	return buildoidvector(oids, 2);
+}
+
+static inline oidvector *
+__buildoidvector3(Oid a, Oid b, Oid c)
+{
+	Oid		oids[3];
+
+	oids[0] = a;
+	oids[1] = b;
+	oids[2] = c;
+	return buildoidvector(oids, 3);
+}
+
+static inline oidvector *
+__buildoidvector4(Oid a, Oid b, Oid c, Oid d)
+{
+	Oid		oids[4];
+
+	oids[0] = a;
+	oids[1] = b;
+	oids[2] = c;
+	oids[3] = d;
+	return buildoidvector(oids, 4);
+}
+
+/*
  * Macros for worker threads
  */
 #define __FATAL(fmt,...)                        \

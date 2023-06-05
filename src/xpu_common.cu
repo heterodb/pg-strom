@@ -751,6 +751,13 @@ pgfn_JoinQuals(XPU_PGFUNCTION_ARGS)
 }
 
 STATIC_FUNCTION(bool)
+pgfn_GiSTEval(XPU_PGFUNCTION_ARGS)
+{
+	STROM_ELOG(kcxt, "pgfn_GiSTEval should not be called as a normal kernel expression");
+	return false;
+}
+
+STATIC_FUNCTION(bool)
 pgfn_Packed(XPU_PGFUNCTION_ARGS)
 {
 	STROM_ELOG(kcxt, "pgfn_Packed should not be called as a normal kernel expression");
@@ -1994,6 +2001,7 @@ PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
 	{FuncOpCode__Projection,                pgfn_Projection},
 	{FuncOpCode__LoadVars,                  pgfn_LoadVars},
 	{FuncOpCode__HashValue,                 pgfn_HashValue},
+	{FuncOpCode__GiSTEval,                  pgfn_GiSTEval},
 	{FuncOpCode__SaveExpr,                  pgfn_SaveExpr},
 	{FuncOpCode__AggFuncs,                  pgfn_AggFuncs},
 	{FuncOpCode__JoinQuals,                 pgfn_JoinQuals},

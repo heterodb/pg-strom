@@ -498,10 +498,10 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-	if (pp_info->kexp_gist_quals_packed)
+	if (pp_info->kexp_gist_evals_packed)
 	{
-		xpucode = pp_info->kexp_gist_quals_packed;
-		session->xpucode_gist_quals_packed =
+		xpucode = pp_info->kexp_gist_evals_packed;
+		session->xpucode_gist_evals_packed =
 			__appendBinaryStringInfo(&buf,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
@@ -1409,6 +1409,13 @@ pgstromExecEndTaskState(CustomScanState *node)
 		ExecDropSingleTupleTableSlot(pts->base_slot);
 	if (pts->css.ss.ss_currentScanDesc)
 		table_endscan(pts->css.ss.ss_currentScanDesc);
+	for (int i=0; i < pts->num_rels; i++)
+	{
+		pgstromTaskInnerState *istate = &pts->inners[i];
+
+		if (istate->gist_irel)
+			index_close(istate->gist_irel, AccessShareLock);
+	}
 	if (pts->h_kmrels)
 		__munmapShmem(pts->h_kmrels);
 	if (!IsParallelWorker())
@@ -1772,10 +1779,10 @@ pgstromExplainTaskState(CustomScanState *node,
 		{
 			char   *idxname = get_rel_name(pp_inner->gist_index_oid);
 			char   *colname = get_attname(pp_inner->gist_index_oid,
-										  pp_inner->gist_index_col, false);
+										  pp_inner->gist_index_col+1, false);
 			resetStringInfo(&buf);
 
-			str = deparse_expression(pp_inner->gist_clause,
+			str = deparse_expression((Node *)pp_inner->gist_clause,
 									 dcontext, false, true);
 			appendStringInfoString(&buf, str);
 			if (idxname && colname)
@@ -1893,7 +1900,7 @@ pgstromExplainTaskState(CustomScanState *node,
 								pp_info->kexp_hash_keys_packed);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"GiST-Index Join OpCode",
-								pp_info->kexp_gist_quals_packed);
+								pp_info->kexp_gist_evals_packed);
 		snprintf(label, sizeof(label),
 				 "%s Projection OpCode", xpu_label);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,

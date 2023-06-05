@@ -238,10 +238,15 @@ typedef struct
 	List		   *join_quals_fallback;
 	List		   *other_quals;    /* other quals */
 	List		   *other_quals_fallback;
+	/* gist index properties */
 	Oid				gist_index_oid; /* GiST index oid */
-	AttrNumber		gist_index_col; /* GiST index column number */
-	Node		   *gist_clause;    /* GiST index clause */
+	int				gist_index_col; /* GiST index column number */
+	Oid				gist_func_oid;	/* device function to evaluate GiST clause */
+	int				gist_slot_id;	/* slot-id to store the index key */
+	Expr		   *gist_clause;    /* GiST index clause */
 	Selectivity		gist_selectivity; /* GiST selectivity */
+	double			gist_npages;	/* number of disk pages */
+	int				gist_height;	/* index tree height, or -1 if unknown */
 } pgstromPlanInnerInfo;
 
 typedef struct
@@ -271,7 +276,7 @@ typedef struct
 	bytea	   *kexp_join_kvars_load_packed; /* VarLoads at depth>0 */
 	bytea	   *kexp_join_quals_packed;
 	bytea	   *kexp_hash_keys_packed;
-	bytea	   *kexp_gist_quals_packed;
+	bytea	   *kexp_gist_evals_packed;
 	bytea	   *kexp_projection;
 	bytea	   *kexp_groupby_keyhash;
 	bytea	   *kexp_groupby_keyload;
@@ -516,6 +521,8 @@ extern bytea   *codegen_build_packed_joinquals(codegen_context *context,
 											   List *stacked_other_quals);
 extern bytea   *codegen_build_packed_hashkeys(codegen_context *context,
 											  List *stacked_hash_values);
+extern void		codegen_build_packed_gistevals(codegen_context *context,
+											   pgstromPlanInfo *pp_info);
 extern bytea   *codegen_build_projection(codegen_context *context);
 extern void		codegen_build_groupby_actions(codegen_context *context,
 											  pgstromPlanInfo *pp_info);
@@ -574,6 +581,16 @@ extern void		pgstromBrinIndexExplain(pgstromTaskState *pts,
 										List *dcontext,
 										ExplainState *es);
 extern void		pgstrom_init_brin(void);
+
+/*
+ * gist.c
+ */
+extern void		pgstromTryFindGistIndex(PlannerInfo *root,
+										Path *inner_path,
+										List *restrict_clauses,
+										uint32_t xpu_task_flags,
+										List *input_rels_tlist,
+										pgstromPlanInnerInfo *pp_inner);
 
 /*
  * relscan.c
@@ -909,6 +926,8 @@ extern int		__appendBinaryStringInfo(StringInfo buf,
 extern int		__appendZeroStringInfo(StringInfo buf, int nbytes);
 extern char	   *get_type_name(Oid type_oid, bool missing_ok);
 extern Oid		get_type_namespace(Oid type_oid);
+extern char	   *get_type_extension_name(Oid type_oid);
+extern char	   *get_func_extension_name(Oid func_oid);
 extern Oid		get_relation_am(Oid rel_oid, bool missing_ok);
 extern List	   *bms_to_pglist(const Bitmapset *bms);
 extern Bitmapset *bms_from_pglist(List *pglist);

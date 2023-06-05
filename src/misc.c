@@ -230,6 +230,32 @@ get_type_namespace(Oid type_oid)
 }
 
 /*
+ * get_type_extension_name
+ */
+char *
+get_type_extension_name(Oid type_oid)
+{
+	Oid		ext_oid = getExtensionOfObject(TypeRelationId, type_oid);
+
+	if (OidIsValid(ext_oid))
+		return get_extension_name(ext_oid);
+	return NULL;
+}
+
+/*
+ * get_func_extension_name
+ */
+char *
+get_func_extension_name(Oid func_oid)
+{
+	Oid		ext_oid = getExtensionOfObject(ProcedureRelationId, func_oid);
+
+	if (OidIsValid(ext_oid))
+		return get_extension_name(ext_oid);
+	return NULL;
+}
+
+/*
  * get_relation_am
  */
 Oid

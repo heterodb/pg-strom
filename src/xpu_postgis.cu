@@ -627,6 +627,12 @@ pgfn_st_setsrid(XPU_PGFUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(bool)
+pgfn_st_point(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_st_makepoint2(kcxt, kexp, __result);
+}
+
+PUBLIC_FUNCTION(bool)
 pgfn_st_makepoint2(XPU_PGFUNCTION_ARGS)
 {
 	xpu_geometry_t *geom = (xpu_geometry_t *)__result;

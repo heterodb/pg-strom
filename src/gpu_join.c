@@ -60,7 +60,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_join_kvars_load_packed));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_join_quals_packed));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_hash_keys_packed));
-	privs = lappend(privs, __makeByteaConst(pp_info->kexp_gist_quals_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_gist_evals_packed));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_projection));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keyhash));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keyload));
@@ -95,8 +95,12 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 		__privs = lappend(__privs, pp_inner->other_quals_fallback);
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_oid));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_col));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_func_oid));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_slot_id));
 		__exprs = lappend(__exprs, pp_inner->gist_clause);
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_selectivity));
+		__privs = lappend(__privs, __makeFloat(pp_inner->gist_npages));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_height));
 
 		privs = lappend(privs, __privs);
 		exprs = lappend(exprs, __exprs);
@@ -147,7 +151,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.kexp_join_kvars_load_packed = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_join_quals_packed = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_hash_keys_packed = __getByteaConst(list_nth(privs, pindex++));
-	pp_data.kexp_gist_quals_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_gist_evals_packed = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_projection = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_groupby_keyhash = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_groupby_keyload = __getByteaConst(list_nth(privs, pindex++));
@@ -186,8 +190,12 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 		pp_inner->other_quals_fallback = list_nth(__privs, __pindex++);
 		pp_inner->gist_index_oid  = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_index_col  = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_func_oid   = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_slot_id    = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_clause     = list_nth(__exprs, __eindex++);
 		pp_inner->gist_selectivity = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_npages     = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_height     = intVal(list_nth(__privs, __pindex++));
 	}
 	return pp_info;
 }
@@ -235,128 +243,6 @@ copy_pgstrom_plan_info(pgstromPlanInfo *pp_orig)
 #undef __COPY
 	}
 	return pp_dest;
-}
-
-/*
- * match_clause_to_gist_index
- */
-static Node *
-match_clause_to_gist_index(PlannerInfo *root,
-						   IndexOptInfo *index,
-						   AttrNumber indexcol,
-						   List *restrict_clauses,
-						   Selectivity *p_selectivity)
-{
-	//to be implemented later
-	return NULL;
-}
-
-/*
- * try_find_xpu_gist_index
- */
-static void
-try_find_xpu_gist_index(PlannerInfo *root,
-						pgstromPlanInnerInfo *pp_inner,
-						JoinType jointype,
-						Path *inner_path,
-						List *restrict_clauses)
-{
-	RelOptInfo	   *inner_rel = inner_path->parent;
-	//AttrNumber	gist_ctid_resno = SelfItemPointerAttributeNumber;
-	IndexOptInfo   *gist_index = NULL;
-	AttrNumber		gist_index_col = InvalidAttrNumber;
-	Node		   *gist_clause = NULL;
-	Selectivity		gist_selectivity = 1.0;
-	ListCell	   *lc;
-
-	/*
-	 * Not only GiST, index should be built on normal relations.
-	 * And, IndexOnlyScan may not contain CTID, so not supported.
-	 */
-	Assert(pp_inner->hash_outer_keys == NIL &&
-		   pp_inner->hash_inner_keys == NIL);
-	if (!IS_SIMPLE_REL(inner_rel) && inner_path->pathtype != T_IndexOnlyScan)
-		return;
-	/* see the logic in create_index_paths */
-	foreach (lc, inner_rel->indexlist)
-	{
-		IndexOptInfo *curr_index = (IndexOptInfo *) lfirst(lc);
-		int		nkeycolumns = curr_index->nkeycolumns;
-
-		Assert(curr_index->rel == inner_rel);
-		/* only GiST index is supported  */
-		if (curr_index->relam != GIST_AM_OID)
-			continue;
-		/* ignore partial indexes that do not match the query. */
-		if (curr_index->indpred != NIL && !curr_index->predOK)
-			continue;
-		for (int indexcol=0; indexcol < nkeycolumns; indexcol++)
-		{
-			Selectivity curr_selectivity = 1.0;
-			Node	   *clause;
-
-			clause = match_clause_to_gist_index(root,
-												curr_index,
-												indexcol,
-												restrict_clauses,
-												&curr_selectivity);
-			if (clause && (!gist_index || gist_selectivity > curr_selectivity))
-			{
-				gist_index       = curr_index;
-				gist_index_col   = indexcol;
-				gist_clause      = clause;
-				gist_selectivity = curr_selectivity;
-			}
-		}
-	}
-#if 0
-	// MEMO: InnerPreload stores inner-tuples as Heap format
-	// Is the gist_ctid_resno always SelfItemPointerAttributeNumber, isn't it?
-	//
-	if (gist_index)
-	{
-		AttrNumber	resno = 1;
-
-		foreach (lc, inner_path->pathtarget->exprs)
-		{
-			Var	   *var = (Var *) lfirst(lc);
-
-			if (IsA(var, Var) &&
-				var->varno == inner_rel->relid &&
-				var->varattno == SelfItemPointerAttributeNumber)
-			{
-				Assert(var->vartype == TIDOID &&
-					   var->vartypmod == -1 &&
-					   var->varcollid == InvalidOid);
-				gist_ctid_resno = resno;
-				break;
-			}
-			resno++;
-		}
-		/*
-		 * Add projection for the ctid
-		 */
-		if (!lc)
-		{
-			Path	   *new_path = pgstrom_copy_pathnode(inner_path);
-			PathTarget *new_target = copy_pathtarget(inner_path->pathtarget);
-			Var		   *var;
-
-			var = makeVar(inner_rel->relid,
-						  SelfItemPointerAttributeNumber,
-						  TIDOID, -1, InvalidOid, 0);
-			new_target->exprs = lappend(new_target->exprs, var);
-			gist_ctid_resno = list_length(new_target->exprs);
-			new_path->pathtarget = new_target;
-			pp_inner->inner_path = new_path;
-		}
-	}
-#endif
-	pp_inner->gist_index_oid = gist_index->indexoid;
-	pp_inner->gist_index_col = gist_index_col;
-//	pp_inner->gist_ctid_resno = SelfItemPointerAttributeNumber;
-	pp_inner->gist_clause = gist_clause;
-	pp_inner->gist_selectivity = gist_selectivity;
 }
 
 /*
@@ -435,7 +321,6 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	Cost			comp_cost = 0.0;
 	Cost			final_cost = 0.0;
 	QualCost		join_quals_cost;
-	IndexOptInfo   *gist_index = NULL;
 	ListCell	   *lc;
 
 	/* sanity checks */
@@ -630,11 +515,12 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	if (enable_xpugistindex &&
 		pp_inner->hash_outer_keys == NIL &&
 		pp_inner->hash_inner_keys == NIL)
-		try_find_xpu_gist_index(root,
-								pp_inner,
-								join_type,
+		pgstromTryFindGistIndex(root,
 								inner_path,
-								restrict_clauses);
+								restrict_clauses,
+								xpu_task_flags,
+								input_rels_tlist,
+								pp_inner);
 	/*
 	 * Cost estimation
 	 */
@@ -667,16 +553,16 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 		/*
 		 * GpuNestLoop+GiST-Index
 		 */
-		Node	   *gist_clause = pp_inner->gist_clause;
+		Expr	   *gist_clause = pp_inner->gist_clause;
 		double		gist_selectivity = pp_inner->gist_selectivity;
 		QualCost	gist_clause_cost;
 
 		/* cost to preload inner heap tuples by CPU */
 		startup_cost += cpu_tuple_cost * inner_path->rows;
 		/* cost to preload the entire index pages once */
-		startup_cost += seq_page_cost * (double)gist_index->pages;
+		startup_cost += seq_page_cost * pp_inner->gist_npages;
 		/* cost to evaluate GiST index by GPU */
-		cost_qual_eval_node(&gist_clause_cost, gist_clause, root);
+		cost_qual_eval_node(&gist_clause_cost, (Node *)gist_clause, root);
 		comp_cost += gist_clause_cost.per_tuple * xpu_ratio * outer_path->rows;
 		/* cost to evaluate join qualifiers by GPU */
 		comp_cost += (join_quals_cost.per_tuple * xpu_ratio *
@@ -1357,13 +1243,11 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		misc_exprs = list_concat(misc_exprs, pp_inner->other_quals);
 
 		/* xpu code to evaluate gist qualifiers */
-		if (OidIsValid(pp_inner->gist_index_oid))
-		{
-			Assert(pp_inner->gist_clause != NULL);
-			//TODO: XPU code generation
-			misc_exprs = lappend(misc_exprs, pp_inner->gist_clause);
-		}
-		gist_quals_stacked = lappend(gist_quals_stacked, NIL);
+		gist_quals_stacked = lappend(gist_quals_stacked, pp_inner->gist_clause);
+		pull_varattnos((Node *)pp_inner->gist_clause,
+					   pp_info->scan_relid,
+					   &outer_refs);
+		misc_exprs = lappend(misc_exprs, pp_inner->gist_clause);
 	}
 
 	/*
@@ -1402,9 +1286,9 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	pp_info->kexp_hash_keys_packed
 		= codegen_build_packed_hashkeys(&context,
 										hash_keys_stacked);
-	pp_info->kexp_gist_quals_packed = NULL;
 	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(&context);
 	pp_info->kexp_join_kvars_load_packed = codegen_build_join_loadvars(&context);
+	codegen_build_packed_gistevals(&context, pp_info);
 	pp_info->kvars_depth  = context.kvars_depth;
 	pp_info->kvars_resno  = context.kvars_resno;
 	pp_info->kvars_types  = context.kvars_types;

@@ -256,6 +256,7 @@ typedef enum {
 	FuncOpCode__LoadVars,
 	FuncOpCode__JoinQuals,
 	FuncOpCode__HashValue,
+	FuncOpCode__GiSTEval,
 	FuncOpCode__SaveExpr,
 	FuncOpCode__AggFuncs,
 	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
@@ -1644,6 +1645,9 @@ typedef struct kern_aggregate_desc	kern_aggregate_desc;
 
 #define KEXP_FLAG__IS_PUSHED_DOWN		0x0001U
 
+#define SPECIAL_DEPTH__PREAGG_FINAL		(-2)
+#define SPECIAL_DEPTH__GIST_INDEX		(-3)
+
 struct kern_expression
 {
 	uint32_t		len;			/* length of this expression */
@@ -1680,6 +1684,12 @@ struct kern_expression
 			int			nloads;
 			kern_vars_defitem kvars[1];
 		} load;		/* VarLoads */
+		struct {
+			int			depth;			/* depth of the JOIN */
+			uint32_t	gist_oid;		/* OID of GiST index (for EXPLAIN) */
+			kern_vars_defitem ivar;		/* index item reference */
+			char		data[1]			__MAXALIGNED__;
+		} gist;		/* GiSTEval */
 		struct {
 			uint32_t	slot_id;	/* destination slot-id */
 			uint32_t	slot_off;	/* kvars-slot buffer offset, if needed */
@@ -1802,7 +1812,7 @@ typedef struct kern_session_info
 	uint32_t	xpucode_join_load_vars_packed;
 	uint32_t	xpucode_join_quals_packed;
 	uint32_t	xpucode_hash_values_packed;
-	uint32_t	xpucode_gist_quals_packed;
+	uint32_t	xpucode_gist_evals_packed;
 	uint32_t	xpucode_projection;
 	uint32_t	xpucode_groupby_keyhash;
 	uint32_t	xpucode_groupby_keyload;
