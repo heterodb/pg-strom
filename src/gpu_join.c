@@ -1061,7 +1061,6 @@ pgstrom_build_tlist_dev(PlannerInfo *root,
 						uint32_t xpu_task_flags,
 						List *tlist,		/* must be backed to CPU */
 						List *host_quals,	/* must be backed to CPU */
-						List *misc_exprs,
 						List *input_rels_tlist)
 {
 	build_tlist_dev_context context;
@@ -1104,10 +1103,7 @@ pgstrom_build_tlist_dev(PlannerInfo *root,
 	__pgstrom_build_tlist_dev_walker((Node *)host_quals, &context);
 
 	context.resjunk = true;
-	__pgstrom_build_tlist_dev_walker((Node *)misc_exprs, &context);
-
 	__build_explain_tlist_junks(&context);
-
 	return context.tlist_dev;
 }
 
@@ -1118,7 +1114,6 @@ static List *
 pgstrom_build_groupby_dev(PlannerInfo *root,
 						  List *tlist,
 						  List *host_quals,
-						  List *misc_exprs,
 						  List *input_rels_tlist)
 {
 	build_tlist_dev_context context;
@@ -1130,9 +1125,8 @@ pgstrom_build_groupby_dev(PlannerInfo *root,
 	context.tlist_dev = copyObject(tlist);
 	context.only_vars = true;
 	__pgstrom_build_tlist_dev_walker((Node *)host_quals, &context);
-	context.resjunk = true;
-	__pgstrom_build_tlist_dev_walker((Node *)misc_exprs, &context);
 	/* just for explain output */
+	context.resjunk = true;
 	foreach (lc1, tlist)
 	{
 		TargetEntry *tle = lfirst(lc1);
@@ -1175,7 +1169,6 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	List	   *other_quals_stacked = NIL;
 	List	   *hash_keys_stacked = NIL;
 	List	   *gist_quals_stacked = NIL;
-	List	   *misc_exprs = NIL;
 	List	   *input_rels_tlist;
 	List	   *fallback_tlist = NIL;
 	ListCell   *lc;
@@ -1201,7 +1194,6 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		pull_varattnos((Node *)pp_info->scan_quals,
 					   pp_info->scan_relid,
 					   &outer_refs);
-		misc_exprs = list_concat(misc_exprs, pp_info->scan_quals);
 	}
 
 	/*
@@ -1220,8 +1212,6 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 			pull_varattnos((Node *)pp_inner->hash_outer_keys,
 						   pp_info->scan_relid,
 						   &outer_refs);
-			misc_exprs = list_concat(misc_exprs, pp_inner->hash_outer_keys);
-			misc_exprs = list_concat(misc_exprs, pp_inner->hash_inner_keys);
 		}
 		else
 		{
@@ -1239,15 +1229,12 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		pull_varattnos((Node *)pp_inner->other_quals,
 					   pp_info->scan_relid,
 					   &outer_refs);
-		misc_exprs = list_concat(misc_exprs, pp_inner->join_quals);
-		misc_exprs = list_concat(misc_exprs, pp_inner->other_quals);
 
 		/* xpu code to evaluate gist qualifiers */
 		gist_quals_stacked = lappend(gist_quals_stacked, pp_inner->gist_clause);
 		pull_varattnos((Node *)pp_inner->gist_clause,
 					   pp_info->scan_relid,
 					   &outer_refs);
-		misc_exprs = lappend(misc_exprs, pp_inner->gist_clause);
 	}
 
 	/*
@@ -1259,7 +1246,6 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		context.tlist_dev =  pgstrom_build_groupby_dev(root,
 													   tlist,
 													   NIL,
-													   misc_exprs,
 													   input_rels_tlist);
 		codegen_build_groupby_actions(&context, pp_info);
 	}
@@ -1271,7 +1257,6 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 													pp_info->xpu_task_flags,
 													tlist,
 													NIL,
-													misc_exprs,
 													input_rels_tlist);
 		pp_info->kexp_projection = codegen_build_projection(&context);
 	}

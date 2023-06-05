@@ -470,14 +470,10 @@ match_clause_to_gist_index(PlannerInfo *root,
 										 indexcol,
 										 iclause,
 										 &__clause,
-										 &__func_oid)
-#if 1
-			&&
+										 &__func_oid) &&
 			pgstrom_xpu_expression(__clause,
 								   xpu_task_flags,
-								   input_rels_tlist, NULL)
-#endif
-			)
+								   input_rels_tlist, NULL))
 		{
 			__selectivity = clauselist_selectivity(root,
 												   iclause->indexquals,
