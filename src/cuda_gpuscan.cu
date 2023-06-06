@@ -195,8 +195,9 @@ __gpuscan_load_source_block(kern_context *kcxt,
 	}
 	if (block_id <= kds_src->nitems)
 	{
-		PageHeaderData *pg_page = KDS_BLOCK_PGPAGE(kds_src, block_id-1);
 		HeapTupleHeaderData *htup = NULL;
+		PageHeaderData *pg_page = KDS_BLOCK_PGPAGE(kds_src, block_id-1);
+		BlockNumber		block_nr = KDS_BLOCK_BLCKNR(kds_src, block_id-1);
 
 		count = __shfl_sync(__activemask(), wp->lp_count, 0);
 		if (count < PageGetMaxOffsetNumber(pg_page))
@@ -208,7 +209,13 @@ __gpuscan_load_source_block(kern_context *kcxt,
 
 				assert((char *)lpp < (char *)pg_page + BLCKSZ);
 				if (ItemIdIsNormal(lpp))
+				{
 					htup = (HeapTupleHeaderData *)PageGetItem(pg_page, lpp);
+					/* for ctid system column reference */
+					htup->t_ctid.ip_blkid.bi_hi = (uint16_t)(block_nr >> 16);
+					htup->t_ctid.ip_blkid.bi_lo = (uint16_t)(block_nr & 0xffffU);
+					htup->t_ctid.ip_posid = count + 1;
+				}
 				else
 					htup = NULL;
 			}

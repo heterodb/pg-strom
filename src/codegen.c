@@ -2185,8 +2185,6 @@ codegen_build_projection(codegen_context *context)
 		TargetEntry	*tle = lfirst(lc);
 		int			slot_id;
 		bool		inject_new;
-		Oid			type_oid;
-		devtype_info *dtype;
 		kern_projection_desc *desc;
 
 		if (tle->resjunk)
@@ -2208,12 +2206,6 @@ codegen_build_projection(codegen_context *context)
 		if (inject_new)
 			nexprs++;
 
-		type_oid = exprType((Node *)tle->expr);
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			elog(ERROR, "type %s is not device supported",
-				 format_type_be(type_oid));
-		
 		desc = &kexp->u.proj.desc[nattrs++];
 		desc->slot_id = slot_id;
 	}
@@ -3221,16 +3213,31 @@ __xpucode_loadvars_cstring(StringInfo buf,
 		}
 		else if (depth == 0)
 		{
-			TupleDesc	tupdesc = RelationGetDescr(css->ss.ss_currentRelation);
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, vitem->var_resno - 1);
 			CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
+			TupleDesc	tupdesc = RelationGetDescr(css->ss.ss_currentRelation);
+			const FormData_pg_attribute *attr;
 			Var		   *kvar;
 
-			kvar = makeVar(cscan->scan.scanrelid,
-						   attr->attnum,
-						   attr->atttypid,
-						   attr->atttypmod,
-						   attr->attcollation, 0);
+			if (vitem->var_resno == 0)
+			{
+				kvar = makeVar(cscan->scan.scanrelid,
+							   0,
+							   tupdesc->tdtypeid,
+							   tupdesc->tdtypmod,
+							   InvalidOid, 0);
+			}
+			else
+			{
+				if (vitem->var_resno > 0)
+					attr = TupleDescAttr(tupdesc, vitem->var_resno - 1);
+				else if (vitem->var_resno < 0)
+					attr = SystemAttributeDefinition(vitem->var_resno);
+				kvar = makeVar(cscan->scan.scanrelid,
+							   attr->attnum,
+							   attr->atttypid,
+							   attr->atttypmod,
+							   attr->attcollation, 0);
+			}
 			appendStringInfo(buf, "%u:%s",
 							 vitem->var_slot_id,
 							 deparse_expression((Node *)kvar,

@@ -855,6 +855,47 @@ __extract_heap_tuple_attr(kern_context *kcxt,
 	return true;
 }
 
+INLINE_FUNCTION(bool)
+__extract_heap_tuple_sysattr(kern_context *kcxt,
+							 const kern_data_store *kds,
+							 const HeapTupleHeaderData *htup,
+							 const kern_vars_defitem *kvdef)
+{
+	uint32_t	slot_id = kvdef->var_slot_id;
+
+	/* out of range? */
+	if (slot_id >= kcxt->kvars_nslots)
+		return true;
+	switch (kvdef->var_resno)
+	{
+		case SelfItemPointerAttributeNumber:
+			kcxt->kvars_slot[slot_id].ptr = (void *)&htup->t_ctid;
+			kcxt->kvars_class[slot_id] = sizeof(ItemPointerData);
+			break;
+		case MinTransactionIdAttributeNumber:
+			kcxt->kvars_slot[slot_id].u32 = htup->t_choice.t_heap.t_xmin;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			break;
+		case MaxTransactionIdAttributeNumber:
+			kcxt->kvars_slot[slot_id].u32 = htup->t_choice.t_heap.t_xmax;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			break;
+		case MinCommandIdAttributeNumber:
+		case MaxCommandIdAttributeNumber:
+			kcxt->kvars_slot[slot_id].u32 = htup->t_choice.t_heap.t_field3.t_cid;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			break;
+		case TableOidAttributeNumber:
+			kcxt->kvars_slot[slot_id].u32 = kds->table_oid;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			break;
+		default:
+			STROM_ELOG(kcxt, "not a supported system attribute reference");
+			return false;
+	}
+	return true;
+}
+
 STATIC_FUNCTION(bool)
 kern_extract_heap_tuple(kern_context *kcxt,
 						kern_data_store *kds,
@@ -869,6 +910,15 @@ kern_extract_heap_tuple(kern_context *kcxt,
 	int			ncols = Min(htup->t_infomask2 & HEAP_NATTS_MASK, kds->ncols);
 	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
 
+	/* extract system attributes, if rquired */
+	while (kvars_count < kvars_nloads &&
+		   kvdef->var_resno < 0)
+	{
+		if (!__extract_heap_tuple_sysattr(kcxt, kds, htup, kvdef))
+			return;
+		kvdef++;
+		kvars_count++;
+	}
 	/* try attcacheoff shortcut, if available. */
 	if (!heap_hasnull)
 	{
@@ -1694,22 +1744,74 @@ __kern_extract_arrow_field(kern_context *kcxt,
 	return true;
 }
 
-STATIC_FUNCTION(int)
+INLINE_FUNCTION(bool)
+__extract_arrow_tuple_sysattr(kern_context *kcxt,
+							  const kern_data_store *kds,
+							  uint32_t kds_index,
+							  const kern_vars_defitem *kvdef)
+{
+	static ItemPointerData __invalid_ctid__ = {{0,0},0};
+	uint32_t		slot_id = kvdef->var_slot_id;
+
+	/* out of range? */
+	if (slot_id >= kcxt->kvars_nslots)
+		return true;
+	switch (kvdef->var_resno)
+	{
+		case SelfItemPointerAttributeNumber:
+			kcxt->kvars_slot[slot_id].ptr = (void *)&__invalid_ctid__;
+			kcxt->kvars_class[slot_id] = sizeof(ItemPointerData);
+			break;
+		case MinTransactionIdAttributeNumber:
+			kcxt->kvars_slot[slot_id].u32 = FrozenTransactionId;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			break;
+		case MaxTransactionIdAttributeNumber:
+			kcxt->kvars_slot[slot_id].u32 = InvalidTransactionId;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			break;
+		case MinCommandIdAttributeNumber:
+		case MaxCommandIdAttributeNumber:
+			kcxt->kvars_slot[slot_id].u32 = FirstCommandId;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			break;
+		case TableOidAttributeNumber:
+			kcxt->kvars_slot[slot_id].u32 = kds->table_oid;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			break;
+		default:
+			STROM_ELOG(kcxt, "not a supported system attribute reference");
+			return false;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
 kern_extract_arrow_tuple(kern_context *kcxt,
 						 kern_data_store *kds,
 						 uint32_t kds_index,
 						 const kern_vars_defitem *kvars_items,
 						 int kvars_nloads)
 {
-	const kern_vars_defitem *kvars = kvars_items;
-	int		kvars_nloads_saved = kvars_nloads;
+	const kern_vars_defitem *kvdef = kvars_items;
+	int		kvars_count = 0;
 
 	assert(kds->format == KDS_FORMAT_ARROW);
-	while (kvars_nloads > 0 &&
-		   kvars->var_resno <= kds->ncols)
+	/* fillup invalid values for system attribute, if any */
+	while (kvars_count < kvars_nloads &&
+		   kvdef->var_resno < 0)
 	{
-		kern_colmeta *cmeta = &kds->colmeta[kvars->var_resno-1];
-		uint32_t	slot_id = kvars->var_slot_id;
+		if (!__extract_arrow_tuple_sysattr(kcxt, kds, kds_index, kvdef))
+			return false;
+		kvdef++;
+		kvars_count++;
+	}
+
+	while (kvars_count < kvars_nloads &&
+		   kvdef->var_resno <= kds->ncols)
+	{
+		kern_colmeta *cmeta = &kds->colmeta[kvdef->var_resno-1];
+		uint32_t	slot_id = kvdef->var_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
 		if (cmeta->nullmap_offset == 0 ||
@@ -1721,31 +1823,33 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 											kds,
 											cmeta,
 											kds_index,
-											kvars->var_slot_off,
+											kvdef->var_slot_off,
 											&kcxt->kvars_slot[slot_id],
 											&kcxt->kvars_class[slot_id]))
-				return -1;
+				return false;
 		}
 		else
 		{
 			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
 			kcxt->kvars_slot[slot_id].ptr = NULL;
 		}
-		kvars++;
-		kvars_nloads--;
+		kvdef++;
+		kvars_count++;
 	}
 	/* other fields, which refers out of range, are NULL */
-	while (kvars_nloads > 0)
+	while (kvars_count < kvars_nloads)
 	{
-		int		slot_id = kvars->var_slot_id;
+		uint32_t	slot_id = kvdef->var_slot_id;
 
-		assert(slot_id < kcxt->kvars_nslots);
-		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-		kcxt->kvars_slot[slot_id].ptr = NULL;
-		kvars++;
-		kvars_nloads--;
+		if (slot_id < kcxt->kvars_nslots)
+		{
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+			kcxt->kvars_slot[slot_id].ptr = NULL;
+		}
+		kvdef++;
+		kvars_count++;
 	}
-	return (kvars_nloads_saved - kvars_nloads);
+	return true;
 }
 
 STATIC_FUNCTION(bool)
@@ -1813,28 +1917,17 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 					   kern_data_store *kds,
 					   uint32_t kds_index)
 {
-	int			index;
-
 	assert(kexp_load_vars->opcode == FuncOpCode__LoadVars &&
 		   kexp_load_vars->exptype == TypeOpCode__int4 &&
 		   kexp_load_vars->nr_args == 0 &&
 		   kexp_load_vars->u.load.depth == 0);
-	index = kern_extract_arrow_tuple(kcxt,
-									 kds,
-									 kds_index,
-									 kexp_load_vars->u.load.kvars,
-									 kexp_load_vars->u.load.nloads);
-	if (index < 0)
+	if (!kern_extract_arrow_tuple(kcxt,
+								  kds,
+								  kds_index,
+								  kexp_load_vars->u.load.kvars,
+								  kexp_load_vars->u.load.nloads))
 		return false;
-	/* fill-up other slots by NULL */
-	while (index < kexp_load_vars->u.load.nloads)
-	{
-		kern_vars_defitem *kvars = &kexp_load_vars->u.load.kvars[index++];
-		int		slot_id = kvars->var_slot_id;
 
-		assert(slot_id < kcxt->kvars_nslots);
-		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-	}
 	/* check scan quals if given */
 	if (kexp_scan_quals)
 	{

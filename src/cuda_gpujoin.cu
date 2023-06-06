@@ -325,6 +325,92 @@ execGpuJoinHashJoin(kern_context *kcxt,
 }
 
 /*
+ * gpujoin_prep_gistindex
+ */
+KERNEL_FUNCTION(void)
+gpujoin_prep_gistindex(kern_multirels *kmrels, int depth)
+{
+	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
+	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth-1);
+	BlockNumber		block_nr;
+	OffsetNumber	i, maxoff;
+	__shared__ int count1, count2;
+
+	if (get_local_id() == 0)
+		count1 = count2 = 0;
+	__syncthreads();
+
+	assert(kds_hash && kds_hash->format == KDS_FORMAT_HASH &&
+		   kds_gist && kds_gist->format == KDS_FORMAT_BLOCK);
+	for (block_nr = get_group_id();
+		 block_nr < kds_gist->nitems;
+		 block_nr += get_num_groups())
+	{
+		PageHeaderData *gist_page;
+		ItemIdData	   *lpp;
+		IndexTupleData *itup;
+		kern_hashitem  *khitem;
+		uint32_t		hash, t_off;
+
+		gist_page = KDS_BLOCK_PGPAGE(kds_gist, block_nr);
+		if (!GistPageIsLeaf(gist_page))
+			continue;
+		maxoff = PageGetMaxOffsetNumber(gist_page);
+		for (i = get_local_id(); i < maxoff; i += get_local_size())
+		{
+			lpp = PageGetItemId(gist_page, i+1);
+			if (ItemIdIsDead(lpp))
+				continue;
+			itup = (IndexTupleData *)PageGetItem(gist_page, lpp);
+
+			/* lookup kds_hash */
+			hash = pg_hash_any(&itup->t_tid, sizeof(ItemPointerData));
+			for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hash);
+				 khitem != NULL;
+				 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next))
+			{
+				if (ItemPointerEquals(&khitem->t.htup.t_ctid, &itup->t_tid))
+				{
+					t_off = __kds_packed((char *)&khitem->t.htup -
+										 (char *)kds_hash);
+					itup->t_tid.ip_blkid.bi_hi = (t_off >> 16);
+					itup->t_tid.ip_blkid.bi_lo = (t_off & 0x0000ffffU);
+					itup->t_tid.ip_posid = USHRT_MAX;
+					break;
+				}
+			}
+			/* invalidate this leaf item, if not exist on kds_hash */
+			if (!khitem)
+			{
+				atomicAdd(&count1, 1);
+				lpp->lp_flags = LP_DEAD;
+			}
+			else
+				atomicAdd(&count2, 1);
+		}
+	}
+	__syncthreads();
+	if (get_local_id() == 0)
+		printf("live index: %d, dead index: %d, nblocks=%u\n", count2, count1, kds_gist->nitems);
+}
+
+/*
+ * GiST-INDEX-JOIN
+ */
+STATIC_FUNCTION(int)
+execGpuJoinGiSTJoin(kern_context *kcxt,
+					kern_warp_context *wp,
+					kern_multirels *kmrels,
+					int         depth,
+					char       *src_kvars_addr_wp,
+					char       *dst_kvars_addr_wp,
+					uint32_t   &l_state,
+					bool       &matched)
+{
+	return -1;
+}
+
+/*
  * GPU Projection
  */
 PUBLIC_FUNCTION(int)
@@ -565,13 +651,17 @@ kern_gpujoin_main(kern_session_info *session,
 										l_state[depth-1],	/* call by reference */
 										matched[depth-1]);	/* call by reference */
 		}
-#if 0
 		else if (kmrels->chunks[depth-1].gist_offset != 0)
 		{
 			/* GiST-INDEX-JOIN */
-			depth = execGpuJoinGiSTJoin(kcxt, wp, ...);
+			depth = execGpuJoinGiSTJoin(kcxt, wp,
+										kmrels,
+										depth,
+										kvars_addr_wp + kvars_chunksz * (depth-1),
+										kvars_addr_wp + kvars_chunksz * depth,
+										l_state[depth-1],	/* call by reference */
+										matched[depth-1]);	/* call by reference */
 		}
-#endif
 		else
 		{
 			/* HASH-JOIN */

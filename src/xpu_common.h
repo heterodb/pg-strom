@@ -651,13 +651,12 @@ __kds_unpack(uint32_t offset)
  * Attribute numbers for the system-defined attributes
  */
 #define SelfItemPointerAttributeNumber			(-1)
-#define ObjectIdAttributeNumber					(-2)
-#define MinTransactionIdAttributeNumber			(-3)
-#define MinCommandIdAttributeNumber				(-4)
-#define MaxTransactionIdAttributeNumber			(-5)
-#define MaxCommandIdAttributeNumber				(-6)
-#define TableOidAttributeNumber					(-7)
-#define FirstLowInvalidHeapAttributeNumber		(-8)
+#define MinTransactionIdAttributeNumber			(-2)
+#define MinCommandIdAttributeNumber				(-3)
+#define MaxTransactionIdAttributeNumber			(-4)
+#define MaxCommandIdAttributeNumber				(-5)
+#define TableOidAttributeNumber					(-6)
+#define FirstLowInvalidHeapAttributeNumber		(-7)
 
 /*
  * ItemPointer:
@@ -670,6 +669,14 @@ typedef struct
 	} ip_blkid;
 	uint16_t		ip_posid;
 } ItemPointerData;
+
+INLINE_FUNCTION(bool)
+ItemPointerEquals(const ItemPointerData *ip1, const ItemPointerData *ip2)
+{
+	return (ip1->ip_blkid.bi_hi == ip2->ip_blkid.bi_hi &&
+			ip1->ip_blkid.bi_lo == ip2->ip_blkid.bi_lo &&
+			ip1->ip_posid       == ip2->ip_posid);
+}
 
 /*
  * HeapTupleHeaderData

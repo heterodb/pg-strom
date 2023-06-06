@@ -484,7 +484,88 @@ putGpuQueryBuffer(gpuQueryBuffer *gq_buf)
 }
 
 static bool
-__setupGpuQueryJoinInnerBuffer(gpuQueryBuffer *gq_buf,
+__setupGpuQueryJoinGiSTIndexBuffer(gpuContext *gcontext,
+								   gpuQueryBuffer *gq_buf,
+								   char *errmsg, size_t errmsg_sz)
+{
+	kern_multirels *h_kmrels = gq_buf->h_kmrels;
+	CUfunction	f_prep_gist = NULL;
+	CUresult	rc;
+	int			grid_sz;
+	int			block_sz;
+	unsigned int shmem_sz;
+	void	   *kern_args[10];
+	bool		has_gist = false;
+
+	for (int depth=1; depth <= h_kmrels->num_rels; depth++)
+	{
+		if (h_kmrels->chunks[depth-1].gist_offset == 0)
+			continue;
+		if (!f_prep_gist)
+		{
+			rc = cuModuleGetFunction(&f_prep_gist,
+									 gcontext->cuda_module,
+									 "gpujoin_prep_gistindex");
+			if (rc != CUDA_SUCCESS)
+			{
+				snprintf(errmsg, errmsg_sz,
+						 "failed on cuModuleGetFunction: %s", cuStrError(rc));
+				return false;
+			}
+			rc = gpuOptimalBlockSize(&grid_sz,
+									 &block_sz,
+									 &shmem_sz,
+									 f_prep_gist,
+									 0, 0);
+			if (rc != CUDA_SUCCESS)
+			{
+				snprintf(errmsg, errmsg_sz,
+						 "failed on gpuOptimalBlockSize: %s", cuStrError(rc));
+				return false;
+			}
+			grid_sz = 1;
+		}
+		kern_args[0] = &gq_buf->m_kmrels;
+		kern_args[1] = &depth;
+		rc = cuLaunchKernel(f_prep_gist,
+							grid_sz, 1, 1,
+							block_sz, 1, 1,
+							shmem_sz,
+							CU_STREAM_PER_THREAD,
+							kern_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+		{
+			snprintf(errmsg, errmsg_sz,
+					 "failed on cuLaunchKernel: %s", cuStrError(rc));
+			return false;
+		}
+		has_gist = true;
+	}
+
+	if (has_gist)
+	{
+		rc = cuEventRecord(CU_EVENT_PER_THREAD, CU_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			snprintf(errmsg, errmsg_sz,
+					 "failed on cuEventRecord: %s", cuStrError(rc));
+			return false;
+		}
+		rc = cuEventSynchronize(CU_EVENT_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			snprintf(errmsg, errmsg_sz,
+					 "failed on cuEventSynchronize: %s", cuStrError(rc));
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+__setupGpuQueryJoinInnerBuffer(gpuContext *gcontext,
+							   gpuQueryBuffer *gq_buf,
 							   uint32_t kmrels_handle,
 							   char *errmsg, size_t errmsg_sz)
 {
@@ -547,11 +628,20 @@ __setupGpuQueryJoinInnerBuffer(gpuQueryBuffer *gq_buf,
 	gq_buf->h_kmrels = h_kmrels;
 	gq_buf->kmrels_sz = mmap_sz;
 
+	/* preparation of GiST-index buffer, if any */
+	if (!__setupGpuQueryJoinGiSTIndexBuffer(gcontext, gq_buf,
+											errmsg, errmsg_sz))
+	{
+		cuMemFree(m_kmrels);
+		munmap(h_kmrels, mmap_sz);
+		return false;
+	}
 	return true;
 }
 
 static bool
-__setupGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
+__setupGpuQueryGroupByBuffer(gpuContext *gcontext,
+							 gpuQueryBuffer *gq_buf,
 							 kern_data_store *kds_final_head,
 							 char *errmsg, size_t errmsg_sz)
 {
@@ -639,7 +729,8 @@ __expandGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 }
 
 static gpuQueryBuffer *
-getGpuQueryBuffer(uint64_t buffer_id,
+getGpuQueryBuffer(gpuContext *gcontext,
+				  uint64_t buffer_id,
 				  uint32_t kmrels_handle,
 				  kern_data_store *kds_final_head,
 				  char *errmsg, size_t errmsg_sz)
@@ -699,10 +790,12 @@ getGpuQueryBuffer(uint64_t buffer_id,
 	pthreadMutexUnlock(&gpu_query_buffer_mutex);
 
 	if ((kmrels_handle == 0 ||
-		 __setupGpuQueryJoinInnerBuffer(gq_buf, kmrels_handle,
+		 __setupGpuQueryJoinInnerBuffer(gcontext,
+										gq_buf, kmrels_handle,
 										errmsg, errmsg_sz)) &&
 		(kds_final_head == NULL ||
-		 __setupGpuQueryGroupByBuffer(gq_buf, kds_final_head,
+		 __setupGpuQueryGroupByBuffer(gcontext,
+									  gq_buf, kds_final_head,
 									  errmsg, errmsg_sz)))
 	{
 		/* ok, buffer is now ready */
@@ -1220,7 +1313,8 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 			kds_final_head = (kern_data_store *)
 				((char *)session + session->groupby_kds_final);
 		}
-		gclient->gq_buf = getGpuQueryBuffer(session->query_plan_id,
+		gclient->gq_buf = getGpuQueryBuffer(gcontext,
+											session->query_plan_id,
 											session->join_inner_handle,
 											kds_final_head,
 											emsg, sizeof(emsg));

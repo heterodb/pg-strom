@@ -50,6 +50,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, __makeFloat(pp_info->scan_rows));
 	privs = lappend(privs, __makeFloat(pp_info->parallel_divisor));
 	privs = lappend(privs, __makeFloat(pp_info->final_cost));
+	privs = lappend(privs, makeBoolean(pp_info->scan_needs_ctid));
 	/* bin-index support */
 	privs = lappend(privs, makeInteger(pp_info->brin_index_oid));
 	exprs = lappend(exprs, pp_info->brin_index_conds);
@@ -95,6 +96,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 		__privs = lappend(__privs, pp_inner->other_quals_fallback);
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_oid));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_col));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_ctid_resno));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_func_oid));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_slot_id));
 		__exprs = lappend(__exprs, pp_inner->gist_clause);
@@ -141,6 +143,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.scan_rows = floatVal(list_nth(privs, pindex++));
 	pp_data.parallel_divisor = floatVal(list_nth(privs, pindex++));
 	pp_data.final_cost = floatVal(list_nth(privs, pindex++));
+	pp_data.scan_needs_ctid = boolVal(list_nth(privs, pindex++));
 	/* brin-index support */
 	pp_data.brin_index_oid = intVal(list_nth(privs, pindex++));
 	pp_data.brin_index_conds = list_nth(exprs, eindex++);
@@ -190,6 +193,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 		pp_inner->other_quals_fallback = list_nth(__privs, __pindex++);
 		pp_inner->gist_index_oid  = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_index_col  = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_ctid_resno = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_func_oid   = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_slot_id    = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_clause     = list_nth(__exprs, __eindex++);
@@ -515,12 +519,14 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 	if (enable_xpugistindex &&
 		pp_inner->hash_outer_keys == NIL &&
 		pp_inner->hash_inner_keys == NIL)
-		pgstromTryFindGistIndex(root,
-								inner_path,
-								restrict_clauses,
-								xpu_task_flags,
-								input_rels_tlist,
-								pp_inner);
+	{
+		inner_path = pgstromTryFindGistIndex(root,
+											 inner_path,
+											 restrict_clauses,
+											 xpu_task_flags,
+											 input_rels_tlist,
+											 pp_inner);
+	}
 	/*
 	 * Cost estimation
 	 */
@@ -1466,9 +1472,16 @@ execInnerPreloadOneDepth(pgstromTaskInnerState *istate,
 		}
 		else if (istate->gist_irel)
 		{
+			ItemPointer	ctid;
 			uint32_t	hash;
+			bool		isnull;
 
-			hash = hash_any((unsigned char *)&slot->tts_tid, sizeof(ItemPointerData));
+			ctid = (ItemPointer)
+				slot_getattr(slot, istate->gist_ctid_resno, &isnull);
+			if (isnull)
+				elog(ERROR, "Unable to build GiST-index buffer with NULL-ctid");
+			ItemPointerCopy(ctid, &htup->t_self);
+			hash = hash_any((unsigned char *)ctid, sizeof(ItemPointerData));
 			istate->preload_tuples = lappend(istate->preload_tuples, htup);
 			istate->preload_hashes = lappend_int(istate->preload_hashes, hash);
 			istate->preload_usage += MAXALIGN(offsetof(kern_hashitem,
@@ -1593,6 +1606,7 @@ again:
 
 					UnlockReleaseBuffer(buffer);
 				}
+				kds->nitems = nblocks;
 				kds->block_nloaded = nblocks;
 			}
 			offset += (block_offset + BLCKSZ * nblocks);
@@ -1679,6 +1693,7 @@ __innerPreloadSetupHeapBuffer(kern_data_store *kds,
 		titem->t_len = htup->t_len;
 		titem->rowid = rowid;
 		memcpy(&titem->htup, htup->t_data, htup->t_len);
+		ItemPointerCopy(&htup->t_self, &titem->htup.t_ctid);
 
 		row_index[rowid++] = __kds_packed(tail_pos - curr_pos);
 	}
@@ -1721,6 +1736,7 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 		hitem->t.t_len = htup->t_len;
 		hitem->t.rowid = rowid;
 		memcpy(&hitem->t.htup, htup->t_data, htup->t_len);
+		ItemPointerCopy(&htup->t_self, &hitem->t.htup.t_ctid);
 
 		row_index[rowid++] = __kds_packed(tail_pos - (char *)&hitem->t);
 	}

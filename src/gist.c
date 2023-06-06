@@ -503,7 +503,7 @@ match_clause_to_gist_index(PlannerInfo *root,
  *
  * its logic is almost equivalent to match_join_clauses_to_index()
  */
-void
+Path *
 pgstromTryFindGistIndex(PlannerInfo *root,
 						Path *inner_path,
 						List *restrict_clauses,
@@ -513,12 +513,14 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 {
 
 	RelOptInfo	   *inner_rel = inner_path->parent;
+	PathTarget	   *inner_target = inner_path->pathtarget;
 	IndexOptInfo   *gist_index = NULL;
 	AttrNumber		gist_index_col = InvalidAttrNumber;
 	Oid				gist_func_oid = InvalidOid;
 	Expr		   *gist_clause = NULL;
-	Expr		   *gist_clause_fallback = NULL;
 	Selectivity		gist_selectivity = 1.0;
+	int				gist_ctid_resno = -1;
+	int				resno;
 	ListCell	   *lc;
 
 	/*
@@ -528,7 +530,7 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 	Assert(pp_inner->hash_outer_keys == NIL &&
 		   pp_inner->hash_inner_keys == NIL);
 	if (!IS_SIMPLE_REL(inner_rel) || inner_path->pathtype == T_IndexOnlyScan)
-		return;
+		goto bailout;
 	/* see the logic in create_index_paths */
 	foreach (lc, inner_rel->indexlist)
 	{
@@ -569,20 +571,61 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 		}
 	}
 	if (!gist_index)
-		return;
-	
-	elog(DEBUG2, "GiST Index (oid: %u, col: %d, sel: %.4f), CLAUSE => %s, FALLBACK => %s",
-		 gist_index->indexoid, gist_index_col, gist_selectivity,
-		 nodeToString(gist_clause),
-		 nodeToString(gist_clause_fallback));
-	
+		goto bailout;
+
+	/* append ProjectionPath if ctid is not given */
+	resno = 1;
+	foreach (lc, inner_target->exprs)
+	{
+		Var	   *var = lfirst(lc);
+
+		if (IsA(var, Var) &&
+			var->varno == inner_rel->relid &&
+			var->varattno == SelfItemPointerAttributeNumber)
+		{
+			gist_ctid_resno = resno;
+			break;
+		}
+		resno++;
+	}
+
+	if (gist_ctid_resno < 0)
+	{
+		PathTarget *proj_target = copy_pathtarget(inner_target);
+		Var		   *ctid_var;
+		pgstromPlanInfo *pp_info;
+
+		ctid_var = makeVar(inner_rel->relid,
+						   SelfItemPointerAttributeNumber,
+						   TIDOID,
+						   -1,
+						   InvalidOid,
+						   0);
+		proj_target->exprs = lappend(proj_target->exprs, ctid_var);
+		gist_ctid_resno = list_length(proj_target->exprs);
+		/*
+		 * FIXME: if inner-path is GpuScan or DpuScan, it must return ctid
+		 * even if it is not informed at the path construction phase.
+		 */
+		pp_info = try_fetch_xpuscan_planinfo(inner_path);
+		if (pp_info)
+			pp_info->scan_needs_ctid = true;
+
+		inner_path = (Path *)create_projection_path(root,
+													inner_rel,
+													inner_path,
+													proj_target);
+	}
 	/* store the result if any */
 	pp_inner->gist_index_oid       = gist_index->indexoid;
 	pp_inner->gist_index_col       = gist_index_col;
+	pp_inner->gist_ctid_resno      = gist_ctid_resno;
 	pp_inner->gist_func_oid        = gist_func_oid;
 	pp_inner->gist_slot_id         = -1;	/* to be set later */
 	pp_inner->gist_clause          = gist_clause;
 	pp_inner->gist_selectivity     = gist_selectivity;
 	pp_inner->gist_npages          = gist_index->pages;
 	pp_inner->gist_height          = gist_index->tree_height;
+bailout:
+	return inner_path;
 }

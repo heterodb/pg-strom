@@ -31,6 +31,7 @@
 #include "access/xact.h"
 #include "catalog/binary_upgrade.h"
 #include "catalog/dependency.h"
+#include "catalog/heap.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
@@ -241,6 +242,7 @@ typedef struct
 	/* gist index properties */
 	Oid				gist_index_oid; /* GiST index oid */
 	int				gist_index_col; /* GiST index column number */
+	int				gist_ctid_resno;/* resno to reference ctid */
 	Oid				gist_func_oid;	/* device function to evaluate GiST clause */
 	int				gist_slot_id;	/* slot-id to store the index key */
 	Expr		   *gist_clause;    /* GiST index clause */
@@ -266,6 +268,7 @@ typedef struct
 	double		scan_rows;			/* copy of baserel->rows */
 	double		parallel_divisor;	/* parallel divisor */
 	Cost		final_cost;			/* cost for sendback and host-side tasks */
+	bool		scan_needs_ctid;	/* FIXME: true, if ctid is referenced */
 	/* BRIN-index support */
 	Oid			brin_index_oid;		/* OID of BRIN-index, if any */
 	List	   *brin_index_conds;	/* BRIN-index key conditions */
@@ -380,6 +383,7 @@ typedef struct
 	 */
 	Relation		gist_irel;
 	ExprState	   *gist_clause;
+	AttrNumber		gist_ctid_resno;
 } pgstromTaskInnerState;
 
 struct pgstromTaskState
@@ -585,7 +589,7 @@ extern void		pgstrom_init_brin(void);
 /*
  * gist.c
  */
-extern void		pgstromTryFindGistIndex(PlannerInfo *root,
+extern Path	   *pgstromTryFindGistIndex(PlannerInfo *root,
 										Path *inner_path,
 										List *restrict_clauses,
 										uint32_t xpu_task_flags,
@@ -766,6 +770,7 @@ extern void		pgstrom_init_gpu_service(void);
  */
 extern void		sort_device_qualifiers(List *dev_quals_list,
 									   List *dev_costs_list);
+extern pgstromPlanInfo *try_fetch_xpuscan_planinfo(const Path *path);
 extern CustomPath *buildXpuScanPath(PlannerInfo *root,
 									RelOptInfo *baserel,
 									bool parallel_path,

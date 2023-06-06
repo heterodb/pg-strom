@@ -778,6 +778,14 @@ out:
 	kds->length = kds->block_offset + BLCKSZ * kds->nitems;
 	if (kds->nitems == 0)
 		return NULL;
+	if (strom_nblocks > 0)
+	{
+		memcpy(&KDS_BLOCK_BLCKNR(kds, kds->block_nloaded),
+			   strom_blknums,
+			   sizeof(BlockNumber) * strom_nblocks);
+	}
+	Assert(kds->nitems == kds->block_nloaded + strom_nblocks);
+
 	if (strom_iovec->nr_chunks > 0)
 	{
 		size_t		sz;

@@ -1185,6 +1185,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 										   AccessShareLock);
 			istate->gist_clause = ExecInitExpr((Expr *)pp_inner->gist_clause,
 											   &pts->css.ss.ps);
+			istate->gist_ctid_resno = pp_inner->gist_ctid_resno;
 		}
 		pts->css.custom_ps = lappend(pts->css.custom_ps, istate->ps);
 		depth_index++;
