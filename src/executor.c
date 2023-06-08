@@ -444,9 +444,10 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	uint32_t		nparams = (param_info ? param_info->numParams : 0);
 	uint32_t		kvars_nbytes;
 	uint32_t		kvars_nslots;
+	uint32_t		kvars_ndims;
 	uint32_t		session_sz;
 	kern_session_info *session;
-	ListCell	   *lc;
+	ListCell	   *lc1, *lc2;
 	XpuCommand	   *xcmd;
 	StringInfoData	buf;
 	bytea		   *xpucode;
@@ -572,10 +573,16 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		   kvars_nslots == list_length(pp_info->kvars_types));
 	kvars_nbytes = (sizeof(kern_variable) * kvars_nslots +
 					sizeof(int)           * kvars_nslots);
-	foreach (lc, pp_info->kvars_types)
+	kvars_ndims  = pts->num_rels + 1;
+	forboth (lc1, pp_info->kvars_depth,
+			 lc2, pp_info->kvars_types)
 	{
-		Oid		type_oid = lfirst_oid(lc);
+		int		depth = lfirst_int(lc1);
+		Oid		type_oid = lfirst_oid(lc2);
 		devtype_info *dtype;
+
+		if (depth >= 0 && kvars_ndims <= depth)
+			kvars_ndims = depth + 1;
 
 		if (OidIsValid(type_oid) &&
 			(dtype = pgstrom_devtype_lookup(type_oid)) != NULL)
@@ -589,6 +596,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
 	session->kcxt_kvars_nslots = kvars_nslots;
 	session->kcxt_kvars_nbytes = kvars_nbytes;
+	session->kcxt_kvars_ndims  = kvars_ndims;
 	session->xpu_task_flags = pts->xpu_task_flags;
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	session->session_xact_state = __build_session_xact_state(&buf);

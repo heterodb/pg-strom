@@ -1361,8 +1361,8 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	kern_data_store **kds_dst_array = NULL;
 	int				kds_dst_nrooms = 0;
 	int				kds_dst_nitems = 0;
-	uint32_t		kcxt_kvars_nslots = session->kcxt_kvars_nslots;
-	uint32_t		kcxt_kvars_nbytes = session->kcxt_kvars_nbytes;
+//	uint32_t		kcxt_kvars_nslots = session->kcxt_kvars_nslots;
+//	uint32_t		kcxt_kvars_nbytes = session->kcxt_kvars_nbytes;
 	int				num_inner_rels = 0;
 	CUfunction		f_kern_gpuscan;
 	const gpuMemChunk *chunk = NULL;
@@ -1480,7 +1480,8 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 //	grid_sz = 1;
 
 	sz = KERN_GPUTASK_LENGTH(num_inner_rels,
-							 kcxt_kvars_nbytes,
+							 session->kcxt_kvars_ndims,
+							 session->kcxt_kvars_nbytes,
 							 grid_sz * block_sz);
 	rc = cuMemAllocManaged(&dptr, sz, CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
@@ -1493,9 +1494,10 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	memset(kgtask, 0, offsetof(kern_gputask, stats[0]));
 	kgtask->grid_sz  = grid_sz;
 	kgtask->block_sz = block_sz;
-	kgtask->kvars_nslots = kcxt_kvars_nslots;
-	kgtask->kvars_nbytes = kcxt_kvars_nbytes;
-	kgtask->n_rels = num_inner_rels;
+	kgtask->kvars_nslots = session->kcxt_kvars_nslots;
+	kgtask->kvars_nbytes = session->kcxt_kvars_nbytes;
+	kgtask->kvars_ndims  = session->kcxt_kvars_ndims;
+	kgtask->n_rels       = num_inner_rels;
 
 	/* prefetch source KDS, if managed memory */
 	if (!chunk)

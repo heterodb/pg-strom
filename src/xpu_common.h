@@ -1653,7 +1653,6 @@ typedef struct kern_aggregate_desc	kern_aggregate_desc;
 #define KEXP_FLAG__IS_PUSHED_DOWN		0x0001U
 
 #define SPECIAL_DEPTH__PREAGG_FINAL		(-2)
-#define SPECIAL_DEPTH__GIST_INDEX		(-3)
 
 struct kern_expression
 {
@@ -1692,7 +1691,7 @@ struct kern_expression
 			kern_vars_defitem kvars[1];
 		} load;		/* VarLoads */
 		struct {
-			int			depth;			/* depth of the JOIN */
+			int			gist_depth;		/* special depth for GiST index */
 			uint32_t	gist_oid;		/* OID of GiST index (for EXPLAIN) */
 			kern_vars_defitem ivar;		/* index item reference */
 			char		data[1]			__MAXALIGNED__;
@@ -1810,6 +1809,10 @@ typedef struct kern_session_info
 	uint32_t	kcxt_kvars_nbytes;	/* byte length of kvars_slot[], kvars_class[] and
 									 * kvars-buffer (for xpu_array_t, xpu_composite_t
 									 * and xpu_geometry_t) */
+	uint32_t	kcxt_kvars_ndims;	/* number of kvars_slot for each warp; it is
+									 * usually equivalent to (nrels+1), however,
+									 * GiST-index support may consume more slots.
+									 */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 
 	uint32_t	xpu_task_flags;		/* mask of device flags */

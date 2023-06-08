@@ -151,11 +151,11 @@ typedef struct
 	 */
 } kern_warp_context;
 
-#define __KERN_WARP_CONTEXT_BASESZ(n_rels)				\
-	MAXALIGN(offsetof(kern_warp_context, pos[(n_rels)+1]))
-#define KERN_WARP_CONTEXT_UNITSZ(n_rels,nbytes)			\
-	(__KERN_WARP_CONTEXT_BASESZ(n_rels) +				\
-	 (nbytes) * UNIT_TUPLES_PER_DEPTH * ((n_rels)+1))
+#define __KERN_WARP_CONTEXT_BASESZ(n_dims)				\
+	MAXALIGN(offsetof(kern_warp_context, pos[(n_dims)]))
+#define KERN_WARP_CONTEXT_UNITSZ(n_dims,nbytes)			\
+	(__KERN_WARP_CONTEXT_BASESZ(n_dims) +				\
+	 (nbytes) * UNIT_TUPLES_PER_DEPTH * (n_dims))
 #define WARP_READ_POS(warp,depth)		((warp)->pos[(depth)].read)
 #define WARP_WRITE_POS(warp,depth)		((warp)->pos[(depth)].write)
 
@@ -194,8 +194,11 @@ typedef struct {
 	uint32_t		grid_sz;
 	uint32_t		block_sz;
 	uint32_t		extra_sz;
-	uint32_t		kvars_nslots;			/* width of the kvars slot */
+	uint32_t		kvars_nslots;	/* width of the kvars slot */
 	uint32_t		kvars_nbytes;	/* extra buffer size of kvars-slot */
+	uint32_t		kvars_ndims;	/* # of kvars_slot for each warp; usually,
+									 * it is equivalend to n_rels+1, however,
+									 * GiST index support may consume more slots */
 	uint32_t		n_rels;			/* >0, if JOIN is involved */
 	/* suspend/resume support */
 	bool			resume_context;
@@ -207,7 +210,7 @@ typedef struct {
 	struct {
 		uint32_t	nitems_gist;	/* nitems picked up by GiST index */
 		uint32_t	nitems_out;		/* nitems after this depth */
-	} stats[1];
+	} stats[1];		/* 'n_rels' items */
 	/*
 	 * variable length fields
 	 * +-----------------------------------+
@@ -223,20 +226,22 @@ typedef struct {
 	 */
 } kern_gputask;
 
-#define __KERN_GPUTASK_WARP_OFFSET(n_rels,nbytes,gid)				\
-	(MAXALIGN(offsetof(kern_gputask,stats[(n_rels)])) +				\
-	 KERN_WARP_CONTEXT_UNITSZ(n_rels,nbytes) * ((gid)/WARPSIZE))
+#define __KERN_GPUTASK_WARP_OFFSET(n_rels,n_dims,nbytes,gid)			\
+	(MAXALIGN(offsetof(kern_gputask,stats[(n_rels)])) +					\
+	 KERN_WARP_CONTEXT_UNITSZ(n_dims,nbytes) * ((gid)/WARPSIZE))
 
 #define KERN_GPUTASK_WARP_CONTEXT(kgtask)								\
 	((kern_warp_context *)												\
 	 ((char *)(kgtask) +												\
 	  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,						\
+								 (kgtask)->kvars_ndims,					\
 								 (kgtask)->kvars_nbytes,				\
 								 get_global_id())))
 #define KERN_GPUTASK_LSTATE_ARRAY(kgtask)								\
 	((kgtask)->n_rels == 0 ? NULL : (uint32_t *)						\
 	 ((char *)(kgtask) +												\
 	  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,						\
+								 (kgtask)->kvars_ndims,					\
 								 (kgtask)->kvars_nbytes,				\
 								 get_global_size()) +					\
 	  sizeof(uint32_t) * (kgtask)->n_rels * get_global_id()))
@@ -244,15 +249,19 @@ typedef struct {
 	((kgtask)->n_rels == 0 ? NULL : (bool *)							\
 	 ((char *)(kgtask) +												\
 	  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,						\
+								 (kgtask)->kvars_ndims,					\
 								 (kgtask)->kvars_nbytes,				\
 								 get_global_size()) +					\
-	  sizeof(uint32_t) * (kgtask)->n_rels * get_global_size() +			\
-	  sizeof(bool) *     (kgtask)->n_rels * get_global_id()))
+	  sizeof(uint32_t) * (kgtask)->n_dims * get_global_size() +			\
+	  sizeof(bool) *     (kgtask)->n_dims * get_global_id()))
 
-#define KERN_GPUTASK_LENGTH(n_rels,nbytes,n_threads)					\
-	(__KERN_GPUTASK_WARP_OFFSET((n_rels),(nbytes),(n_threads)) +		\
-	 sizeof(uint32_t) * (n_rels) * (n_threads) +						\
-	 sizeof(bool)     * (n_rels) * (n_threads))
+#define KERN_GPUTASK_LENGTH(n_rels,n_dims,nbytes,n_threads)				\
+	(__KERN_GPUTASK_WARP_OFFSET((n_rels),								\
+								(n_dims),								\
+								(nbytes),								\
+								(n_threads)) +							\
+	 sizeof(uint32_t) * (n_dims) * (n_threads) +						\
+	 sizeof(bool)     * (n_dims) * (n_threads))
 
 /*
  * GPU Kernel Entrypoint

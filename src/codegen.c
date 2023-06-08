@@ -2443,7 +2443,7 @@ codegen_build_packed_hashkeys(codegen_context *context,
 static uint32_t
 __codegen_build_one_gistquals(codegen_context *context,
 							  StringInfo buf,
-							  int   depth,
+							  int   gist_depth,
 							  Oid	gist_func_oid,
 							  Oid	gist_index_oid,
 							  int	gist_index_col,
@@ -2471,7 +2471,7 @@ __codegen_build_one_gistquals(codegen_context *context,
 	/* allocation of kvars slot */
 	gist_slot_id = list_length(context->kvars_depth);
 	context->kvars_depth = lappend_int(context->kvars_depth,
-									   SPECIAL_DEPTH__GIST_INDEX);
+									   gist_depth);
 	context->kvars_resno = lappend_int(context->kvars_resno,
 									   gist_index_col + 1);
 	context->kvars_types = lappend_oid(context->kvars_types,
@@ -2485,7 +2485,7 @@ __codegen_build_one_gistquals(codegen_context *context,
 	kexp.opcode   = FuncOpCode__GiSTEval;
 	kexp.nr_args  = 1;
 	kexp.args_offset = offsetof(kern_expression, u.gist.data);
-	kexp.u.gist.depth = depth;
+	kexp.u.gist.gist_depth = gist_depth;
 	kexp.u.gist.gist_oid = gist_index_oid;
 	kexp.u.gist.ivar.var_resno = gist_index_col + 1;
 	kexp.u.gist.ivar.var_slot_id = gist_slot_id;
@@ -2529,6 +2529,7 @@ codegen_build_packed_gistevals(codegen_context *context,
 {
 	StringInfoData	buf;
 	kern_expression	*kexp;
+	int				gist_depth;
 	size_t			head_sz;
 	bytea		   *result = NULL;
 
@@ -2544,6 +2545,7 @@ codegen_build_packed_gistevals(codegen_context *context,
 
 	initStringInfo(&buf);
 	buf.len = head_sz;
+	gist_depth = pp_info->num_rels;
 	for (int i=0; i < pp_info->num_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
@@ -2579,7 +2581,7 @@ codegen_build_packed_gistevals(codegen_context *context,
 
 		off = __codegen_build_one_gistquals(context,
 											&buf,
-											i+1,
+											++gist_depth,
 											pp_inner->gist_func_oid,
 											pp_inner->gist_index_oid,
 											pp_inner->gist_index_col,
@@ -3303,7 +3305,8 @@ __xpucode_gisteval_cstring(StringInfo buf,
 	if (!dtype)
 		elog(ERROR, "device type lookup failed for %u", type_oid);
 
-	appendStringInfo(buf, "{GiSTEval: ivar=<slot_id=%u, col=%s.%s(%s)>, arg=",
+	appendStringInfo(buf, "{GiSTEval: ivar=<depth=%u, slot_id=%u, col=%s.%s(%s)>, arg=",
+					 kexp->u.gist.gist_depth,
 					 kexp->u.gist.ivar.var_slot_id,
 					 get_rel_name(kexp->u.gist.gist_oid),
 					 get_attname(kexp->u.gist.gist_oid,

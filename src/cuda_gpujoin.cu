@@ -334,11 +334,6 @@ gpujoin_prep_gistindex(kern_multirels *kmrels, int depth)
 	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth-1);
 	BlockNumber		block_nr;
 	OffsetNumber	i, maxoff;
-	__shared__ int count1, count2;
-
-	if (get_local_id() == 0)
-		count1 = count2 = 0;
-	__syncthreads();
 
 	assert(kds_hash && kds_hash->format == KDS_FORMAT_HASH &&
 		   kds_gist && kds_gist->format == KDS_FORMAT_BLOCK);
@@ -381,17 +376,9 @@ gpujoin_prep_gistindex(kern_multirels *kmrels, int depth)
 			}
 			/* invalidate this leaf item, if not exist on kds_hash */
 			if (!khitem)
-			{
-				atomicAdd(&count1, 1);
 				lpp->lp_flags = LP_DEAD;
-			}
-			else
-				atomicAdd(&count2, 1);
 		}
 	}
-	__syncthreads();
-	if (get_local_id() == 0)
-		printf("live index: %d, dead index: %d, nblocks=%u\n", count2, count1, kds_gist->nitems);
 }
 
 /*
@@ -559,6 +546,7 @@ kern_gpujoin_main(kern_session_info *session,
 
 	assert(kgtask->kvars_nslots == session->kcxt_kvars_nslots &&
 		   kgtask->kvars_nbytes == session->kcxt_kvars_nbytes &&
+		   kgtask->kvars_ndims > n_rels &&
 		   kgtask->n_rels == n_rels);
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session);
