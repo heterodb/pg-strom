@@ -391,10 +391,185 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 					int         depth,
 					char       *src_kvars_addr_wp,
 					char       *dst_kvars_addr_wp,
+					const kern_expression *kexp_gist,
+					char	   *gist_kvars_addr_wp,
 					uint32_t   &l_state,
 					bool       &matched)
 {
-	return -1;
+	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
+	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth-1);
+	int				gist_depth = kexp_gist->u.gist.gist_depth;
+	uint32_t		mask, index;
+	uint32_t		read_pos;
+	uint32_t		write_pos;
+
+	assert(kds_hash && kds_hash->format == KDS_FORMAT_HASH &&
+		   kds_gist && kds_gist->format == KDS_FORMAT_BLOCK);
+
+	if (wp->scan_done > depth)
+	{
+		/*
+		 * This depth will not generate any more tuples, so we move to
+		 * the next level.
+		 */
+		return depth+1;
+	}
+
+	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
+	{
+		/*
+		 * Next depth already have warpSize or more pending tuples,
+		 * so wipe out these tuples first.
+		 */
+		return depth+1;
+	}
+		
+
+	if (WARP_WRITE_POS(wp,gist_depth) >= WARP_READ_POS(wp,gist_depth) + warpSize ||
+		(wp->scan_done >= depth &&
+		 WARP_WRITE_POS(wp,gist_depth) >= WARP_READ_POS(wp,gist_depth) &&
+		 WARP_WRITE_POS(wp,depth-1)    >= WARP_READ_POS(wp,depth-1)))
+	{
+		/*
+		 * We already have 32 or more pending tuples; that is fetched by
+		 * the GiST-index. So, try to fetch Join-Quals for these tuples.
+		 */
+		bool	join_is_valid = false;
+
+		read_pos = WARP_READ_POS(wp,gist_depth) + LaneId();
+		if (read_pos < WARP_WRITE_POS(wp,gist_depth))
+		{
+			const kern_expression *kexp_load
+				= SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth-1);
+			const kern_expression *kexp_join
+				= SESSION_KEXP_JOIN_QUALS(kcxt->session, depth-1);
+
+			index = (read_pos % UNIT_TUPLES_PER_DEPTH);
+			kcxt->kvars_slot = (kern_variable *)
+				(gist_kvars_addr_wp + index * kcxt->kvars_nbytes);
+			kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
+
+			join_is_valid = ExecGiSTIndexPostQuals(kcxt, depth,
+												   kds_hash,
+												   kexp_gist,
+												   kexp_load,
+												   kexp_join);
+		}
+		/* error checks */
+		if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+			return -1;
+		if (LaneId() == 0)
+			WARP_READ_POS(wp,gist_depth) = Max(WARP_READ_POS(wp,gist_depth) + warpSize,
+											   WARP_WRITE_POS(wp,gist_depth));
+
+		mask = __ballot_sync(__activemask(), join_is_valid);
+		if (LaneId() == 0)
+		{
+			write_pos = WARP_WRITE_POS(wp,depth);
+			WARP_WRITE_POS(wp,depth) += __popc(mask);
+		}
+		write_pos = __shfl_sync(__activemask(), write_pos, 0);
+		mask &= ((1U << LaneId()) - 1);
+		write_pos += __popc(mask);
+		if (join_is_valid)
+		{
+			index = write_pos % UNIT_TUPLES_PER_DEPTH;
+			memcpy(dst_kvars_addr_wp + index * kcxt->kvars_nbytes,
+				   kcxt->kvars_slot,
+				   kcxt->kvars_nbytes);
+		}
+		__syncwarp();
+		/* termination checks */
+		if (LaneId() == 0 &&
+			wp->scan_done >= depth &&
+			WARP_WRITE_POS(wp,gist_depth) >= WARP_READ_POS(wp,gist_depth) &&
+			WARP_WRITE_POS(wp,depth-1)    >= WARP_READ_POS(wp,depth-1))
+		{
+			assert(wp->scan_done == depth);
+			wp->scan_done++;
+		}
+		return depth;
+	}
+
+	if (__all_sync(__activemask(), l_state == UINT_MAX))
+	{
+		/*
+		 * OK, all the threads in this warp reached to the end of the GiST
+		 * index tree. Due to the above checks, the next depth has enough
+		 * space to store the result in this depth.
+		 */
+		if (LaneId() == 0)
+			WARP_READ_POS(wp,depth-1) = Min(WARP_READ_POS(wp,depth-1) + warpSize,
+											WARP_WRITE_POS(wp,depth-1));
+		__syncwarp();
+		l_state = 0;
+		matched = false;
+		if (wp->scan_done < depth)
+		{
+			/* back to the previous depth; that still may generate source tuples */
+			if (WARP_WRITE_POS(wp,depth-1) < WARP_READ_POS(wp,depth-1) + warpSize)
+				return depth-1;
+		}
+		else
+		{
+			assert(wp->scan_done == depth);
+			if (WARP_WRITE_POS(wp,depth-1) <= WARP_READ_POS(wp,depth-1))
+			{
+				/* wipe out the remaining tuples */
+				return depth;
+			}
+			/*
+			 * Elsewhere, the pending source tuples should be processed
+			 * first, then, we update the 'scan_done' to mark this depth
+			 * will never generate any results.
+			 */
+		}
+	}
+
+	/*
+	 * Restart GiST-index scan from the head, or the previous position
+	 */
+	read_pos = WARP_READ_POS(wp,depth-1) + LaneId();
+	if (read_pos < WARP_WRITE_POS(wp,depth-1))
+	{
+		index = (read_pos % UNIT_TUPLES_PER_DEPTH);
+		kcxt->kvars_slot = (kern_variable *)
+			(src_kvars_addr_wp + index * kcxt->kvars_nbytes);
+		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
+
+		l_state = ExecGiSTIndexGetNext(kcxt,
+									   kds_hash,
+									   kds_gist,
+									   kexp_gist,
+									   l_state);
+	}
+	else
+	{
+		l_state = UINT_MAX;
+	}
+	/* error checks */
+	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+		return -1;
+	/* save the result on the destination buffer */
+	mask = __ballot_sync(__activemask(), l_state != UINT_MAX);
+	if (LaneId() == 0)
+	{
+		write_pos = WARP_WRITE_POS(wp,gist_depth);
+		WARP_WRITE_POS(wp,gist_depth) += __popc(mask);
+	}
+	write_pos = __shfl_sync(__activemask(), write_pos, 0);
+	mask &= ((1U << LaneId()) - 1);
+	write_pos += __popc(mask);
+	if (l_state != UINT_MAX)
+	{
+		index = write_pos % UNIT_TUPLES_PER_DEPTH;
+
+		memcpy(gist_kvars_addr_wp + index * kcxt->kvars_nbytes,
+			   kcxt->kvars_slot,
+			   kcxt->kvars_nbytes);
+	}
+	__syncwarp();
+	return depth;
 }
 
 /*
@@ -642,11 +817,19 @@ kern_gpujoin_main(kern_session_info *session,
 		else if (kmrels->chunks[depth-1].gist_offset != 0)
 		{
 			/* GiST-INDEX-JOIN */
+			const kern_expression *kexp_gist
+				= SESSION_KEXP_GIST_EVALS(kcxt->session, depth-1);
+
+			assert(kexp_gist != NULL &&
+				   kexp_gist->opcode == FuncOpCode__GiSTEval &&
+				   kexp_gist->u.gist.gist_depth < kgtask->kvars_ndims);
 			depth = execGpuJoinGiSTJoin(kcxt, wp,
 										kmrels,
 										depth,
 										kvars_addr_wp + kvars_chunksz * (depth-1),
 										kvars_addr_wp + kvars_chunksz * depth,
+										kexp_gist,
+										kvars_addr_wp + kvars_chunksz * kexp_gist->u.gist.gist_depth,
 										l_state[depth-1],	/* call by reference */
 										matched[depth-1]);	/* call by reference */
 		}

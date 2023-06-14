@@ -3305,7 +3305,8 @@ __xpucode_gisteval_cstring(StringInfo buf,
 	if (!dtype)
 		elog(ERROR, "device type lookup failed for %u", type_oid);
 
-	appendStringInfo(buf, "{GiSTEval: ivar=<depth=%u, slot_id=%u, col=%s.%s(%s)>, arg=",
+	appendStringInfo(buf, "{GiSTEval(%s): ivar=<depth=%u, slot_id=%u, col=%s.%s(%s)>, arg=",
+					 dtype->type_name,
 					 kexp->u.gist.gist_depth,
 					 kexp->u.gist.ivar.var_slot_id,
 					 get_rel_name(kexp->u.gist.gist_oid),

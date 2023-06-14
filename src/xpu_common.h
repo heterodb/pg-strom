@@ -775,9 +775,22 @@ typedef struct IndexTupleData
 	char				data[1];	/* data or IndexAttributeBitMapData */
 } IndexTupleData;
 
+#define INDEX_MAX_KEYS		32		/* pg_config_manual.h */
+typedef struct IndexAttributeBitMapData
+{
+	uint8_t				bits[BITMAPLEN(INDEX_MAX_KEYS)];
+} IndexAttributeBitMapData;
+
 #define INDEX_SIZE_MASK     0x1fff
 #define INDEX_VAR_MASK      0x4000
 #define INDEX_NULL_MASK     0x8000
+
+#define IndexTupleSize(itup)						\
+	((size_t)((itup)->t_info & INDEX_SIZE_MASK))
+#define IndexTupleHasNulls(itup)					\
+	((((IndexTupleData *)(itup))->t_info & INDEX_NULL_MASK))
+#define IndexTupleHasVarwidths(itup)				\
+	((((IndexTupleData *)(itup))->t_info & INDEX_VAR_MASK))
 #endif	/* POSTGRES_H */
 
 /* ----------------------------------------------------------------
@@ -923,6 +936,15 @@ GistPageGetOpaque(PageHeaderData *page)
 }
 
 INLINE_FUNCTION(bool)
+GistPageIsRoot(PageHeaderData *page)
+{
+	/* See, __innerPreloadSetupGiSTIndexWalker */
+	/* This logic is valid only on the kds_gist, not host buffer */
+	return (page->pd_parent_blkno == InvalidBlockNumber &&
+			page->pd_parent_item  == InvalidOffsetNumber);
+}
+
+INLINE_FUNCTION(bool)
 GistPageIsLeaf(PageHeaderData *page)
 {
 	return (GistPageGetOpaque(page)->flags & F_LEAF) != 0;
@@ -1027,14 +1049,14 @@ KDS_FETCH_TUPITEM(kern_data_store *kds,
 }
 
 INLINE_FUNCTION(uint32_t *)
-KDS_GET_HASHSLOT_BASE(kern_data_store *kds)
+KDS_GET_HASHSLOT_BASE(const kern_data_store *kds)
 {
 	Assert(kds->format == KDS_FORMAT_HASH && kds->hash_nslots > 0);
 	return (uint32_t *)(KDS_BODY_ADDR(kds));
 }
 
 INLINE_FUNCTION(uint32_t *)
-KDS_GET_HASHSLOT(kern_data_store *kds, uint32_t hash)
+KDS_GET_HASHSLOT(const kern_data_store *kds, uint32_t hash)
 {
 	uint32_t   *hslot = KDS_GET_HASHSLOT_BASE(kds);
 
@@ -1042,7 +1064,7 @@ KDS_GET_HASHSLOT(kern_data_store *kds, uint32_t hash)
 }
 
 INLINE_FUNCTION(bool)
-__KDS_HASH_ITEM_CHECK_VALID(kern_data_store *kds, kern_hashitem *hitem)
+__KDS_HASH_ITEM_CHECK_VALID(const kern_data_store *kds, kern_hashitem *hitem)
 {
 	char   *tail = (char *)kds + kds->length;
 	char   *head = (KDS_BODY_ADDR(kds) +
@@ -1052,7 +1074,7 @@ __KDS_HASH_ITEM_CHECK_VALID(kern_data_store *kds, kern_hashitem *hitem)
 }
 
 INLINE_FUNCTION(kern_hashitem *)
-KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t hash)
+KDS_HASH_FIRST_ITEM(const kern_data_store *kds, uint32_t hash)
 {
 	uint32_t   *hslot = KDS_GET_HASHSLOT(kds, hash);
 	uint32_t	offset = __volatileRead(hslot);
@@ -1069,7 +1091,7 @@ KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t hash)
 }
 
 INLINE_FUNCTION(kern_hashitem *)
-KDS_HASH_NEXT_ITEM(kern_data_store *kds, uint32_t hnext_offset)
+KDS_HASH_NEXT_ITEM(const kern_data_store *kds, uint32_t hnext_offset)
 {
 	if (hnext_offset != 0 && hnext_offset != UINT_MAX)
 	{
@@ -2001,9 +2023,20 @@ SESSION_KEXP_HASH_VALUE(kern_session_info *session, int dindex)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GIST_QUALS(kern_session_info *session, int dindex)
+SESSION_KEXP_GIST_EVALS(kern_session_info *session, int dindex)
 {
-	return NULL;
+	kern_expression *kexp;
+	kern_expression *karg;
+
+	if (session->xpucode_gist_evals_packed == 0)
+		return NULL;
+	kexp = (kern_expression *)
+		((char *)session + session->xpucode_gist_evals_packed);
+	if (dindex < 0)
+		return kexp;
+	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	assert(!karg || karg->opcode == FuncOpCode__GiSTEval);
+	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
@@ -2269,10 +2302,10 @@ kern_estimate_heaptuple(kern_context *kcxt,
 						const kern_data_store *kds_dst);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsHeapTuple(kern_context *kcxt,
-					  kern_expression *kexp_load_vars,
+					  const kern_expression *kexp_load_vars,
 					  int depth,
-					  kern_data_store *kds,
-					  HeapTupleHeaderData *htup);
+					  const kern_data_store *kds,
+					  const HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterRow(kern_context *kcxt,
 					 kern_expression *kexp_load_vars,
@@ -2292,7 +2325,19 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 					   kern_expression *kexp_scan_quals,
 					   kern_data_store *kds_src,
 					   uint32_t kds_index);
-
+EXTERN_FUNCTION(uint32_t)
+ExecGiSTIndexGetNext(kern_context *kcxt,
+					 const kern_data_store *kds_hash,
+					 const kern_data_store *kds_gist,
+					 const kern_expression *kexp_gist,
+					 uint32_t l_state);
+EXTERN_FUNCTION(bool)
+ExecGiSTIndexPostQuals(kern_context *kcxt,
+					   int depth,
+					   const kern_data_store *kds_hash,
+					   const kern_expression *kexp_gist,
+					   const kern_expression *kexp_load,
+					   const kern_expression *kexp_join);
 EXTERN_FUNCTION(int)
 ExecKernProjection(kern_context *kcxt,
 				   kern_expression *kexp,

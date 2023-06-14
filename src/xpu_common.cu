@@ -898,7 +898,7 @@ __extract_heap_tuple_sysattr(kern_context *kcxt,
 
 STATIC_FUNCTION(bool)
 kern_extract_heap_tuple(kern_context *kcxt,
-						kern_data_store *kds,
+						const kern_data_store *kds,
 						const HeapTupleHeaderData *htup,
 						const kern_vars_defitem *kvars_items,
 						int kvars_nloads)
@@ -1861,10 +1861,10 @@ pgfn_LoadVars(XPU_PGFUNCTION_ARGS)
 
 PUBLIC_FUNCTION(bool)
 ExecLoadVarsHeapTuple(kern_context *kcxt,
-					  kern_expression *kexp,
+					  const kern_expression *kexp,
 					  int depth,
-					  kern_data_store *kds,
-					  HeapTupleHeaderData *htup)	/* htup may be NULL */
+					  const kern_data_store *kds,
+					  const HeapTupleHeaderData *htup)	/* htup may be NULL */
 {
 	assert(kexp->opcode == FuncOpCode__LoadVars &&
 		   kexp->exptype == TypeOpCode__int4 &&
@@ -1945,6 +1945,231 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 		return false;
 	}
 	return true;
+}
+
+/* ------------------------------------------------------------
+ *
+ * Routines to support GiST-Index
+ *
+ * ------------------------------------------------------------
+ */
+STATIC_FUNCTION(bool)
+kern_extract_gist_tuple(kern_context *kcxt,
+						const kern_data_store *kds_gist,
+						const IndexTupleData *itup,
+						const kern_vars_defitem *kvdef)
+{
+	char	   *nullmap = NULL;
+	uint32_t	i_off;
+	uint32_t	slot_id;
+
+	assert(kvdef->var_resno > 0 &&
+		   kvdef->var_resno <= kds_gist->ncols);
+	if (IndexTupleHasNulls(itup))
+	{
+		nullmap = (char *)itup + sizeof(IndexTupleData);
+		i_off =  MAXALIGN(sizeof(IndexTupleData) +
+						  sizeof(IndexAttributeBitMapData));
+	}
+	else
+	{
+		const kern_colmeta *cmeta = &kds_gist->colmeta[kvdef->var_resno-1];
+
+		i_off = MAXALIGN(sizeof(IndexTupleData));
+		if (cmeta->attcacheoff >= 0)
+		{
+			char   *addr = (char *)itup + i_off + cmeta->attcacheoff;
+			return __extract_heap_tuple_attr(kcxt, kds_gist, cmeta, kvdef, addr);
+		}
+	}
+	/* extract the index-tuple by the slow path */
+	for (int resno=1; resno <= kds_gist->ncols; resno++)
+	{
+		const kern_colmeta *cmeta = &kds_gist->colmeta[resno-1];
+		char	   *addr;
+
+		if (nullmap && att_isnull(resno-1, nullmap))
+			addr = NULL;
+		else
+		{
+			if (cmeta->attlen > 0)
+				i_off = TYPEALIGN(cmeta->attalign, i_off);
+			else if (!VARATT_NOT_PAD_BYTE((char *)itup + i_off))
+				i_off = TYPEALIGN(cmeta->attalign, i_off);
+
+			addr = (char *)itup + i_off;
+			if (cmeta->attlen > 0)
+				i_off += cmeta->attlen;
+			else
+				i_off += VARSIZE_ANY(addr);
+		}
+		if (kvdef->var_resno == resno)
+			return __extract_heap_tuple_attr(kcxt, kds_gist, cmeta, kvdef, addr);
+	}
+	/* fill-up by NULL, if not found */
+	slot_id = kvdef->var_slot_id;
+	if (slot_id < kcxt->kvars_nslots)
+	{
+		kcxt->kvars_slot[slot_id].ptr = NULL;
+	    kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(uint32_t)
+ExecGiSTIndexGetNext(kern_context *kcxt,
+					 const kern_data_store *kds_hash,
+					 const kern_data_store *kds_gist,
+					 const kern_expression *kexp_gist,
+					 uint32_t l_state)
+{
+	PageHeaderData *gist_page;
+	ItemIdData	   *lpp;
+	IndexTupleData *itup;
+	OffsetNumber	start;
+	OffsetNumber	index;
+	OffsetNumber	maxoff;
+	const kern_expression *karg_gist;
+	const kern_vars_defitem *kvdef;
+
+	assert(kds_hash->format == KDS_FORMAT_HASH &&
+		   kds_gist->format == KDS_FORMAT_BLOCK);
+	assert(kexp_gist->opcode == FuncOpCode__GiSTEval &&
+		   kexp_gist->exptype == TypeOpCode__bool);
+	kvdef = &kexp_gist->u.gist.ivar;
+	karg_gist = KEXP_FIRST_ARG(kexp_gist);
+	assert(karg_gist->exptype ==  TypeOpCode__bool);
+
+	if (l_state == 0)
+	{
+		gist_page = KDS_BLOCK_PGPAGE(kds_gist, GIST_ROOT_BLKNO);
+		start = FirstOffsetNumber;
+	}
+	else
+	{
+		size_t		l_off = sizeof(ItemIdData) * l_state;
+		size_t		diff;
+
+		assert(l_off >= kds_gist->block_offset &&
+			   l_off <  kds_gist->length);
+		lpp = (ItemIdData *)((char *)kds_gist + l_off);
+		diff = ((l_off - kds_gist->block_offset) & (BLCKSZ-1));
+		gist_page = (PageHeaderData *)((char *)lpp - diff);
+		assert((char *)lpp >= (char *)gist_page->pd_linp &&
+			   (char *)lpp <  (char *)gist_page + BLCKSZ);
+		start = (lpp - gist_page->pd_linp) + 1;
+	}
+restart:
+	assert((((uintptr_t)gist_page - kds_gist->block_offset) & (BLCKSZ-1)) == 0);
+
+	if (GistPageIsDeleted(gist_page))
+		maxoff = InvalidOffsetNumber;	/* skip any entries */
+	else
+		maxoff = PageGetMaxOffsetNumber(gist_page);
+
+	for (index=start; index <= maxoff; index++)
+	{
+		xpu_bool_t	status;
+
+		lpp = PageGetItemId(gist_page, index);
+		if (ItemIdIsDead(lpp))
+			continue;
+		/* extract the index tuple */
+		itup = (IndexTupleData *)PageGetItem(gist_page, lpp);
+		if (!kern_extract_gist_tuple(kcxt, kds_gist, itup, kvdef))
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			return UINT_MAX;
+		}
+		/* runs index-qualifier */
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg_gist, &status))
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			return UINT_MAX;
+		}
+		/* check result */
+		if (!XPU_DATUM_ISNULL(&status) && status.value)
+		{
+			BlockNumber		block_nr;
+
+			if (GistPageIsLeaf(gist_page))
+			{
+				kern_hashitem *hitem;
+				uint32_t	hash;
+
+				hash = pg_hash_any(&itup->t_tid, sizeof(ItemPointerData));
+				for (hitem = KDS_HASH_FIRST_ITEM(kds_hash, hash);
+					 hitem != NULL;
+					 hitem = KDS_HASH_NEXT_ITEM(kds_hash, hitem->next))
+				{
+					if (hitem->hash == hash &&
+						ItemPointerEquals(&itup->t_tid, &hitem->t.htup.t_ctid))
+					{
+						uint32_t	slot_id = kvdef->var_slot_id;
+
+						kcxt->kvars_slot[slot_id].ptr = &hitem->t;
+						kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+						return ((char *)lpp - (char *)gist_page) / sizeof(ItemIdData);
+					}
+				}
+				STROM_ELOG(kcxt, "Bug? GiST-index entry with no heap tuple");
+				return UINT_MAX;
+			}
+			block_nr = ((BlockNumber)itup->t_tid.ip_blkid.bi_hi << 16 |
+						(BlockNumber)itup->t_tid.ip_blkid.bi_lo);
+			assert(block_nr < kds_gist->nitems);
+			gist_page = KDS_BLOCK_PGPAGE(kds_gist, block_nr);
+			start = FirstOffsetNumber;
+			goto restart;
+		}
+	}
+
+	if (!GistPageIsRoot(gist_page))
+	{
+		/* pop to the parent page if not found */
+		start = gist_page->pd_parent_item + 1;
+		gist_page = KDS_BLOCK_PGPAGE(kds_gist, gist_page->pd_parent_blkno);
+		goto restart;
+	}
+	return UINT_MAX;	/* no more chance for this outer */
+}
+
+PUBLIC_FUNCTION(bool)
+ExecGiSTIndexPostQuals(kern_context *kcxt,
+					   int depth,
+					   const kern_data_store *kds_hash,
+					   const kern_expression *kexp_gist,
+					   const kern_expression *kexp_load,
+					   const kern_expression *kexp_join)
+{
+	const kern_expression *karg_gist;
+	HeapTupleHeaderData *htup;
+	xpu_bool_t		status;
+	uint32_t		slot_id;
+
+	assert(kexp_gist->opcode == FuncOpCode__GiSTEval);
+	karg_gist = KEXP_FIRST_ARG(kexp_gist);
+    assert(karg_gist->exptype ==  TypeOpCode__bool);
+	/* load the inner heap tuple */
+	slot_id = kexp_gist->u.gist.ivar.var_slot_id;
+	if (slot_id >= kcxt->kvars_nslots ||
+		kcxt->kvars_class[slot_id] != KVAR_CLASS__INLINE)
+	{
+		STROM_ELOG(kcxt, "Bug? GiST-Index prep fetched invalid tuple");
+		return false;
+	}
+	htup = (HeapTupleHeaderData *)kcxt->kvars_slot[slot_id].ptr;
+	if (!ExecLoadVarsHeapTuple(kcxt, kexp_load, depth, kds_hash, htup))
+	{
+		STROM_ELOG(kcxt, "Bug? GiST-Index prep fetched corrupted tuple");
+		return false;
+	}
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg_gist, &status))
+	{
+		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		return false;
+	}
+	return (!XPU_DATUM_ISNULL(&status) && status.value);
 }
 
 /*

@@ -1498,6 +1498,52 @@ execInnerPreloadOneDepth(pgstromTaskInnerState *istate,
 }
 
 /*
+ * innerPreloadSetupGiSTIndex
+ */
+static void
+__innerPreloadSetupGiSTIndexWalker(char *base,
+								   BlockNumber blkno,
+								   BlockNumber nblocks,
+								   BlockNumber parent_blkno,
+								   OffsetNumber parent_offno)
+{
+	Page			page = (Page)(base + BLCKSZ * blkno);
+	PageHeader		hpage = (PageHeader) page;
+	GISTPageOpaque	op = GistPageGetOpaque(page);
+	OffsetNumber	i, maxoff;
+
+	Assert(hpage->pd_lsn.xlogid == InvalidBlockNumber &&
+		   hpage->pd_lsn.xrecoff == InvalidOffsetNumber);
+	hpage->pd_lsn.xlogid = parent_blkno;
+	hpage->pd_lsn.xrecoff = parent_offno;
+	if ((op->flags & F_LEAF) != 0)
+		return;
+	maxoff = PageGetMaxOffsetNumber(page);
+	for (i=FirstOffsetNumber; i <= maxoff; i = OffsetNumberNext(i))
+    {
+		ItemId		iid = PageGetItemId(page, i);
+		IndexTuple	it;
+		BlockNumber	child;
+
+		if (ItemIdIsDead(iid))
+			continue;
+		it = (IndexTuple) PageGetItem(page, iid);
+		child = BlockIdGetBlockNumber(&it->t_tid.ip_blkid);
+		if (child < nblocks)
+			__innerPreloadSetupGiSTIndexWalker(base, child, nblocks, blkno, i);
+	}
+}
+
+static void
+innerPreloadSetupGiSTIndex(kern_data_store *kds_gist)
+{
+	__innerPreloadSetupGiSTIndexWalker((char *)KDS_BLOCK_PGPAGE(kds_gist, 0),
+									   0, kds_gist->nitems,
+									   InvalidBlockNumber,
+									   InvalidOffsetNumber);
+}
+
+/*
  * innerPreloadAllocHostBuffer
  *
  * NOTE: This function is called with preload_mutex locked
@@ -1608,6 +1654,7 @@ again:
 				}
 				kds->nitems = nblocks;
 				kds->block_nloaded = nblocks;
+				innerPreloadSetupGiSTIndex(kds);
 			}
 			offset += (block_offset + BLCKSZ * nblocks);
 		}

@@ -1243,7 +1243,7 @@ __resolveDevicePointers(gpuContext *gcontext,
 	__kexp[nitems++] = SESSION_KEXP_JOIN_LOAD_VARS(session, -1);
 	__kexp[nitems++] = SESSION_KEXP_JOIN_QUALS(session, -1);
 	__kexp[nitems++] = SESSION_KEXP_HASH_VALUE(session, -1);
-	__kexp[nitems++] = SESSION_KEXP_GIST_QUALS(session, -1);
+	__kexp[nitems++] = SESSION_KEXP_GIST_EVALS(session, -1);
 	__kexp[nitems++] = SESSION_KEXP_PROJECTION(session);
 	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYHASH(session);
 	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYLOAD(session);
