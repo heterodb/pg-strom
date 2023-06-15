@@ -972,7 +972,13 @@ pgstromExecFinalChunkDummy(pgstromTaskState *pts,
 		xcmd->tag = XpuCommandTag__Success;
 		xcmd->length = offsetof(XpuCommand, u.results.stats);
 		xcmd->u.results.final_plan_node = true;
-		__xpuConnectAttachCommand(conn, xcmd);
+
+		/* attach dummy xcmd at the tail of ready list */
+		pthreadMutexLock(&conn->mutex);
+		dlist_push_tail(&conn->ready_cmds_list, &xcmd->chain);
+		conn->num_ready_cmds++;
+		SetLatch(MyLatch);
+		pthreadMutexUnlock(&conn->mutex);
 	}
 	return NULL;
 }

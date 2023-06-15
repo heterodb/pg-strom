@@ -61,7 +61,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 			if (WARP_READ_POS(wp,depth-1) >= WARP_WRITE_POS(wp,depth-1))
 			{
 				if (LaneId() == 0)
-					wp->scan_done = Max(wp->scan_done, depth+1);
+					wp->scan_done = depth + 1;
 				return depth+1;
 			}
 			/*
@@ -77,6 +77,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 				return depth-1;
 		}
 	}
+
 	read_pos = WARP_READ_POS(wp,depth-1) + LaneId();
 	if (read_pos < WARP_WRITE_POS(wp,depth-1))
 	{
@@ -120,6 +121,10 @@ execGpuJoinNestLoop(kern_context *kcxt,
 			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, NULL);
 			tuple_is_valid = true;
 		}
+	}
+	else
+	{
+		l_state = UINT_MAX;
 	}
 	/* error checks */
 	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
