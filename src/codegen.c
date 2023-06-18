@@ -2587,6 +2587,7 @@ codegen_build_packed_gistevals(codegen_context *context,
 											pp_inner->gist_index_col,
 											gist_func_arg);
 		kexp->u.pack.offset[i] = off;
+		kexp->nr_args++;
 	}
 
 	if (buf.len > head_sz)

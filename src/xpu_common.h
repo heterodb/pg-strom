@@ -1150,6 +1150,17 @@ KDS_BLOCK_REF_HTUP(kern_data_store *kds,
 	return (HeapTupleHeaderData *)PageGetItem(pg_page, lpp);
 }
 
+INLINE_FUNCTION(bool)
+KDS_BLOCK_CHECK_VALID(const kern_data_store *kds,
+					  const struct PageHeaderData *page)
+{
+	const char *base = (const char *)kds + kds->block_offset;
+
+	return ((const char *)page          >= base &&
+			(const char *)page + BLCKSZ <= (const char *)kds + kds->length &&
+			(((const char *)page - base) & (BLCKSZ-1)) == 0);
+}
+
 /* access functions for apache arrow format */
 INLINE_FUNCTION(void *)
 KDS_ARROW_REF_SIMPLE_DATUM(kern_data_store *kds,

@@ -375,7 +375,7 @@ gpujoin_prep_gistindex(kern_multirels *kmrels, int depth)
 										 (char *)kds_hash);
 					itup->t_tid.ip_blkid.bi_hi = (t_off >> 16);
 					itup->t_tid.ip_blkid.bi_lo = (t_off & 0x0000ffffU);
-					itup->t_tid.ip_posid = USHRT_MAX;
+					itup->t_tid.ip_posid = InvalidOffsetNumber;
 					break;
 				}
 			}
@@ -428,12 +428,11 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		 */
 		return depth+1;
 	}
-		
 
-	if (WARP_WRITE_POS(wp,gist_depth) >= WARP_READ_POS(wp,gist_depth) + warpSize ||
-		(wp->scan_done >= depth &&
-		 WARP_WRITE_POS(wp,gist_depth) >= WARP_READ_POS(wp,gist_depth) &&
-		 WARP_WRITE_POS(wp,depth-1)    >= WARP_READ_POS(wp,depth-1)))
+	if (WARP_WRITE_POS(wp,gist_depth)  >= WARP_READ_POS(wp,gist_depth) + warpSize ||
+		(wp->scan_done >= depth &&		/* is terminal case? */
+		 WARP_WRITE_POS(wp,depth-1) == WARP_READ_POS(wp,depth-1) &&
+		 __all_sync(__activemask(), l_state == UINT_MAX)))
 	{
 		/*
 		 * We already have 32 or more pending tuples; that is fetched by
@@ -487,13 +486,15 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		/* termination checks */
 		if (LaneId() == 0 &&
 			wp->scan_done >= depth &&
-			WARP_WRITE_POS(wp,gist_depth) >= WARP_READ_POS(wp,gist_depth) &&
-			WARP_WRITE_POS(wp,depth-1)    >= WARP_READ_POS(wp,depth-1))
+			WARP_WRITE_POS(wp,depth-1) == WARP_READ_POS(wp,depth-1) &&
+			WARP_WRITE_POS(wp,gist_depth) <= WARP_READ_POS(wp,gist_depth) &&
+			__all_sync(__activemask(), l_state == UINT_MAX))
 		{
 			assert(wp->scan_done == depth);
 			wp->scan_done++;
+			depth++;
 		}
-		return depth;
+		return __shfl_sync(__activemask(), depth, 0);
 	}
 
 	if (__all_sync(__activemask(), l_state == UINT_MAX))
@@ -537,16 +538,19 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 	read_pos = WARP_READ_POS(wp,depth-1) + LaneId();
 	if (read_pos < WARP_WRITE_POS(wp,depth-1))
 	{
-		index = (read_pos % UNIT_TUPLES_PER_DEPTH);
-		kcxt->kvars_slot = (kern_variable *)
-			(src_kvars_addr_wp + index * kcxt->kvars_nbytes);
-		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
+		if (l_state != UINT_MAX)
+		{
+			index = (read_pos % UNIT_TUPLES_PER_DEPTH);
+			kcxt->kvars_slot = (kern_variable *)
+				(src_kvars_addr_wp + index * kcxt->kvars_nbytes);
+			kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 
-		l_state = ExecGiSTIndexGetNext(kcxt,
-									   kds_hash,
-									   kds_gist,
-									   kexp_gist,
-									   l_state);
+			l_state = ExecGiSTIndexGetNext(kcxt,
+										   kds_hash,
+										   kds_gist,
+										   kexp_gist,
+										   l_state);
+		}
 	}
 	else
 	{
@@ -726,11 +730,11 @@ kern_gpujoin_main(kern_session_info *session,
 
 	assert(kgtask->kvars_nslots == session->kcxt_kvars_nslots &&
 		   kgtask->kvars_nbytes == session->kcxt_kvars_nbytes &&
-		   kgtask->kvars_ndims > n_rels &&
+		   kgtask->kvars_ndims >= n_rels &&
 		   kgtask->n_rels == n_rels);
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session);
-	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(n_rels);
+	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(kgtask->kvars_ndims);
 	wp = (kern_warp_context *)SHARED_WORKMEM(wp_base_sz, get_local_id() / warpSize);
 	wp_saved = KERN_GPUTASK_WARP_CONTEXT(kgtask);
 	l_state = KERN_GPUTASK_LSTATE_ARRAY(kgtask);
@@ -861,6 +865,8 @@ kern_gpujoin_main(kern_session_info *session,
 		wp->depth = depth;
 		wp->smx_row_count = smx_row_count;
 		memcpy(wp_saved, wp, wp_base_sz);
+
+		//printf("wp gid=%u {scan_done=%d depth=%d of %d pos[%u %u] [%u %u] [%u %u]}\n", get_global_id(), wp->scan_done, depth, n_rels, wp->pos[0].read, wp->pos[0].write, wp->pos[1].read, wp->pos[1].write, wp->pos[2].read, wp->pos[2].write);
 	}
 	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
 }

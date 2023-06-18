@@ -342,4 +342,52 @@ pthreadCondSignal(pthread_cond_t *cond)
 		__FATAL("failed on pthread_cond_signal: %m");
 }
 
+/*
+ * Misc debug functions
+ */
+
+/*
+ * print_kern_data_store
+ */
+INLINE_FUNCTION(void)
+dump_kern_data_store(const kern_data_store *kds)
+{
+	fprintf(stderr, "kds %p { length=%lu, nitems=%u, usage=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
+			kds,
+			kds->length,
+			kds->nitems,
+			kds->usage,
+			kds->ncols,
+			kds->format,
+			kds->has_varlena ? 't' : 'f',
+			kds->tdhasoid ? 't' : 'f',
+			kds->tdtypeid,
+			kds->tdtypmod,
+			kds->table_oid,
+			kds->hash_nslots,
+			kds->block_offset,
+			kds->block_nloaded,
+			kds->nr_colmeta);
+	for (int j=0; j < kds->nr_colmeta; j++)
+	{
+		const kern_colmeta *cmeta = &kds->colmeta[j];
+
+		fprintf(stderr, "cmeta[%d] { attbyval=%c, attalign=%d, attlen=%d, attnum=%d, attcacheoff=%d, atttypid=%u, atttypmod=%d, atttypkind=%c, kds_format=%c, kds_offset=%u, idx_subattrs=%u, num_subattrs=%u, attname='%s' }\n",
+				j,
+				cmeta->attbyval ? 't' : 'f',
+				(int)cmeta->attalign,
+				(int)cmeta->attlen,
+				(int)cmeta->attnum,
+				(int)cmeta->attcacheoff,
+				cmeta->atttypid,
+				cmeta->atttypmod,
+				cmeta->atttypkind,
+				cmeta->kds_format,
+				cmeta->kds_offset,
+				(unsigned int)cmeta->idx_subattrs,
+				(unsigned int)cmeta->num_subattrs,
+				cmeta->attname);
+	}
+}
+
 #endif	/* PG_UTILS_H */

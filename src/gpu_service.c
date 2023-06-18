@@ -523,7 +523,6 @@ __setupGpuQueryJoinGiSTIndexBuffer(gpuContext *gcontext,
 						 "failed on gpuOptimalBlockSize: %s", cuStrError(rc));
 				return false;
 			}
-			grid_sz = 1;
 		}
 		kern_args[0] = &gq_buf->m_kmrels;
 		kern_args[1] = &depth;
@@ -1476,7 +1475,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	 * Allocation of the control structure
 	 */
 	grid_sz = Min(grid_sz, (kds_src->nitems + block_sz - 1) / block_sz);
-//	block_sz = 64;
+//	block_sz = 128;
 //	grid_sz = 1;
 
 	sz = KERN_GPUTASK_LENGTH(num_inner_rels,

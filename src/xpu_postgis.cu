@@ -652,6 +652,11 @@ pgfn_st_makepoint2(XPU_PGFUNCTION_ARGS)
 	{
 		double	   *rawdata = (double *)kcxt_alloc(kcxt, 2 * sizeof(double));
 
+		if (!rawdata)
+		{
+			STROM_ELOG(kcxt, "out of memory");
+			return false;
+		}
 		rawdata[0] = x.value;
 		rawdata[1] = y.value;
 
@@ -662,6 +667,7 @@ pgfn_st_makepoint2(XPU_PGFUNCTION_ARGS)
 		geom->nitems = 1;
 		geom->rawsize = 2 * sizeof(double);
 		geom->rawdata = (char *)rawdata;
+		geom->bbox = NULL;
 	}
 	return true;
 }
@@ -690,6 +696,11 @@ pgfn_st_makepoint3(XPU_PGFUNCTION_ARGS)
 	{
 		double	   *rawdata = (double *)kcxt_alloc(kcxt, 3 * sizeof(double));
 
+		if (!rawdata)
+		{
+			STROM_ELOG(kcxt, "out of memory");
+			return false;
+		}
 		rawdata[0] = x.value;
 		rawdata[1] = y.value;
 		rawdata[2] = z.value;
@@ -701,6 +712,7 @@ pgfn_st_makepoint3(XPU_PGFUNCTION_ARGS)
 		geom->nitems = 1;
 		geom->rawsize = 3 * sizeof(double);
 		geom->rawdata = (char *)rawdata;
+		geom->bbox = NULL;
 	}
 	return true;
 }
@@ -736,6 +748,11 @@ pgfn_st_makepoint4(XPU_PGFUNCTION_ARGS)
 	{
 		double	   *rawdata = (double *)kcxt_alloc(kcxt, 4 * sizeof(double));
 
+		if (!rawdata)
+		{
+			STROM_ELOG(kcxt, "out of memory");
+			return false;
+		}
 		rawdata[0] = x.value;
 		rawdata[1] = y.value;
 		rawdata[2] = z.value;
@@ -748,6 +765,7 @@ pgfn_st_makepoint4(XPU_PGFUNCTION_ARGS)
 		geom->nitems = 1;
 		geom->rawsize = 4 * sizeof(double);
 		geom->rawdata = (char *)rawdata;
+		geom->bbox = NULL;
 	}
 	return true;
 }
@@ -1034,6 +1052,7 @@ __geom_contains_bbox2d(const geom_bbox_2d *bbox1,
 	if (!__geom_bbox_2d_is_empty(bbox1) &&
 		__geom_bbox_2d_is_empty(bbox2))
 		return true;
+
 	if (bbox1->xmin <= bbox2->xmin &&
 		bbox1->xmax >= bbox2->xmax &&
 		bbox1->ymin <= bbox2->ymin &&
@@ -1090,12 +1109,16 @@ pgfn_box2df_geometry_contains(XPU_PGFUNCTION_ARGS)
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
 		return false;
 	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&geom2))
+	{
 		result->expr_ops = NULL;
+	}
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
 		if (__geometry_get_bbox2d(kcxt, &geom2, &bbox2))
+		{
 			result->value = __geom_contains_bbox2d(&bbox1.value, &bbox2);
+		}
 		else
 			result->value = false;
 	}
@@ -6036,7 +6059,6 @@ pgfn_st_contains(XPU_PGFUNCTION_ARGS)
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
 		return false;
 
-	result->expr_ops = NULL;
 	if (!XPU_DATUM_ISNULL(&geom1)  && !XPU_DATUM_ISNULL(&geom2) &&
 		!geometry_is_empty(&geom1) && !geometry_is_empty(&geom2))
 	{
@@ -6088,6 +6110,10 @@ pgfn_st_contains(XPU_PGFUNCTION_ARGS)
 			result->value = ((status & IM__INTER_INTER_2D) != 0 &&
 							 (status & IM__EXTER_INTER_2D) == 0 &&
 							 (status & IM__EXTER_BOUND_2D) == 0);
+		}
+		else
+		{
+			result->expr_ops = NULL;
 		}
 	}
 	return true;

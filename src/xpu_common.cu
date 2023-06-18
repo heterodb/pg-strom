@@ -1968,14 +1968,14 @@ kern_extract_gist_tuple(kern_context *kcxt,
 	if (IndexTupleHasNulls(itup))
 	{
 		nullmap = (char *)itup + sizeof(IndexTupleData);
-		i_off =  MAXALIGN(sizeof(IndexTupleData) +
+		i_off =  MAXALIGN(offsetof(IndexTupleData, data) +
 						  sizeof(IndexAttributeBitMapData));
 	}
 	else
 	{
 		const kern_colmeta *cmeta = &kds_gist->colmeta[kvdef->var_resno-1];
 
-		i_off = MAXALIGN(sizeof(IndexTupleData));
+		i_off = MAXALIGN(offsetof(IndexTupleData, data));
 		if (cmeta->attcacheoff >= 0)
 		{
 			char   *addr = (char *)itup + i_off + cmeta->attcacheoff;
@@ -2057,10 +2057,10 @@ ExecGiSTIndexGetNext(kern_context *kcxt,
 		gist_page = (PageHeaderData *)((char *)lpp - diff);
 		assert((char *)lpp >= (char *)gist_page->pd_linp &&
 			   (char *)lpp <  (char *)gist_page + BLCKSZ);
-		start = (lpp - gist_page->pd_linp) + 1;
+		start = (lpp - gist_page->pd_linp) + FirstOffsetNumber;
 	}
 restart:
-	assert((((uintptr_t)gist_page - kds_gist->block_offset) & (BLCKSZ-1)) == 0);
+	assert(KDS_BLOCK_CHECK_VALID(kds_gist, gist_page));
 
 	if (GistPageIsDeleted(gist_page))
 		maxoff = InvalidOffsetNumber;	/* skip any entries */
@@ -2072,8 +2072,10 @@ restart:
 		xpu_bool_t	status;
 
 		lpp = PageGetItemId(gist_page, index);
-		if (ItemIdIsDead(lpp))
+		if (!ItemIdIsNormal(lpp))
 			continue;
+
+		kcxt_reset(kcxt);
 		/* extract the index tuple */
 		itup = (IndexTupleData *)PageGetItem(gist_page, lpp);
 		if (!kern_extract_gist_tuple(kcxt, kds_gist, itup, kvdef))
@@ -2090,30 +2092,22 @@ restart:
 		/* check result */
 		if (!XPU_DATUM_ISNULL(&status) && status.value)
 		{
+			PageHeaderData *gist_next;
 			BlockNumber		block_nr;
 
 			if (GistPageIsLeaf(gist_page))
 			{
-				kern_hashitem *hitem;
-				uint32_t	hash;
+				uint32_t	slot_id = kvdef->var_slot_id;
+				uint32_t	t_off;
 
-				hash = pg_hash_any(&itup->t_tid, sizeof(ItemPointerData));
-				for (hitem = KDS_HASH_FIRST_ITEM(kds_hash, hash);
-					 hitem != NULL;
-					 hitem = KDS_HASH_NEXT_ITEM(kds_hash, hitem->next))
-				{
-					if (hitem->hash == hash &&
-						ItemPointerEquals(&itup->t_tid, &hitem->t.htup.t_ctid))
-					{
-						uint32_t	slot_id = kvdef->var_slot_id;
-
-						kcxt->kvars_slot[slot_id].ptr = &hitem->t;
-						kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
-						return ((char *)lpp - (char *)gist_page) / sizeof(ItemIdData);
-					}
-				}
-				STROM_ELOG(kcxt, "Bug? GiST-index entry with no heap tuple");
-				return UINT_MAX;
+				assert(itup->t_tid.ip_posid == InvalidOffsetNumber);
+				t_off = ((uint32_t)itup->t_tid.ip_blkid.bi_hi << 16 |
+						 (uint32_t)itup->t_tid.ip_blkid.bi_lo);
+				kcxt->kvars_slot[slot_id].ptr = (char *)kds_hash + __kds_unpack(t_off);
+				kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+				/* returns the offset of the next line item pointer */
+				assert((((uintptr_t)lpp) & (sizeof(ItemIdData)-1)) == 0);
+				return ((char *)(lpp+1) - (char *)(kds_gist)) / sizeof(ItemIdData);
 			}
 			block_nr = ((BlockNumber)itup->t_tid.ip_blkid.bi_hi << 16 |
 						(BlockNumber)itup->t_tid.ip_blkid.bi_lo);
@@ -2142,15 +2136,12 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 					   const kern_expression *kexp_load,
 					   const kern_expression *kexp_join)
 {
-	const kern_expression *karg_gist;
 	HeapTupleHeaderData *htup;
 	xpu_bool_t		status;
 	uint32_t		slot_id;
 
+	/* fetch the inner heap tuple */
 	assert(kexp_gist->opcode == FuncOpCode__GiSTEval);
-	karg_gist = KEXP_FIRST_ARG(kexp_gist);
-    assert(karg_gist->exptype ==  TypeOpCode__bool);
-	/* load the inner heap tuple */
 	slot_id = kexp_gist->u.gist.ivar.var_slot_id;
 	if (slot_id >= kcxt->kvars_nslots ||
 		kcxt->kvars_class[slot_id] != KVAR_CLASS__INLINE)
@@ -2158,13 +2149,16 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 		STROM_ELOG(kcxt, "Bug? GiST-Index prep fetched invalid tuple");
 		return false;
 	}
+	/* load the inner heap tuple */
 	htup = (HeapTupleHeaderData *)kcxt->kvars_slot[slot_id].ptr;
 	if (!ExecLoadVarsHeapTuple(kcxt, kexp_load, depth, kds_hash, htup))
 	{
 		STROM_ELOG(kcxt, "Bug? GiST-Index prep fetched corrupted tuple");
 		return false;
 	}
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg_gist, &status))
+	/* run the join quals */
+	kcxt_reset(kcxt);
+	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join, &status))
 	{
 		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		return false;
