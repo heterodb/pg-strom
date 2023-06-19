@@ -1455,7 +1455,7 @@ codegen_coerceviaio_expression(codegen_context *context,
 		{F_JSONB_ARRAY_ELEMENT_TEXT,
 		 "float8",  NULL,
 		 FuncOpCode__jsonb_array_element_as_float8},
-		{InvalidOid, NULL, InvalidOid, FuncOpCode__Invalid},
+		{InvalidOid, NULL, NULL, FuncOpCode__Invalid},
 	};
 	Oid			func_oid = InvalidOid;
 	List	   *func_args = NIL;
