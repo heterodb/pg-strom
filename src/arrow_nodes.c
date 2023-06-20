@@ -442,7 +442,8 @@ __dumpArrowMessage(SQLbuffer *buf, ArrowNode *node)
 		m->version == ArrowMetadataVersion__V1 ? "V1" :
 		m->version == ArrowMetadataVersion__V2 ? "V2" :
 		m->version == ArrowMetadataVersion__V3 ? "V3" :
-		m->version == ArrowMetadataVersion__V4 ? "V4" : "???");
+		m->version == ArrowMetadataVersion__V4 ? "V4" :
+		m->version == ArrowMetadataVersion__V5 ? "V5" : "???");
 	__dumpArrowNode(buf, (ArrowNode *)&m->body);
 	sql_buffer_printf(buf, ", bodyLength=%lu}", m->bodyLength);
 }
