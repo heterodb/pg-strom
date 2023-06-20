@@ -308,6 +308,8 @@ typedef struct
 {
 	pg_atomic_uint64	inner_nitems;
 	pg_atomic_uint64	inner_usage;
+	pg_atomic_uint64	stats_gist;			/* only GiST-index */
+	pg_atomic_uint64	stats_join;			/* # of tuples by this join */
 } pgstromSharedInnerState;
 
 typedef struct
@@ -321,9 +323,9 @@ typedef struct
 	pg_atomic_uint32	parallel_task_control;
 	pg_atomic_uint32	__rjoin_exit_count;
 	/* statistics */
-	pg_atomic_uint64	source_ntuples;
-	pg_atomic_uint64	source_nvalids;
-	pg_atomic_uint32	source_nblocks;		/* only KDS_FORMAT_BLOCK */
+	pg_atomic_uint64	source_ntuples;		/* only KDS_FORMAT_BLOCK */
+	pg_atomic_uint64	source_nvalids;		/* # of tuples scan'ed */
+	pg_atomic_uint64	result_ntuples;		/* # of tuples generated */
 	/* for arrow_fdw */
 	pg_atomic_uint32	arrow_rbatch_index;
 	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */

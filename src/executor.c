@@ -692,6 +692,30 @@ pgstromTaskStateResetScan(pgstromTaskState *pts)
 }
 
 /*
+ * __updateStatsXpuCommand
+ */
+static void
+__updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
+{
+	if (xcmd->tag == XpuCommandTag__Success)
+	{
+		pgstromSharedState *ps_state = pts->ps_state;
+		int		n_rels = Min(pts->num_rels, xcmd->u.results.num_rels);
+
+		pg_atomic_fetch_add_u64(&ps_state->source_ntuples, xcmd->u.results.nitems_raw);
+		pg_atomic_fetch_add_u64(&ps_state->source_nvalids, xcmd->u.results.nitems_in);
+		for (int i=0; i < n_rels; i++)
+		{
+			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_gist,
+									xcmd->u.results.stats[i].nitems_gist);
+			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_join,
+									xcmd->u.results.stats[i].nitems_out);
+		}
+		pg_atomic_fetch_add_u64(&ps_state->result_ntuples, xcmd->u.results.nitems_out);
+	}
+}
+
+/*
  * __pickupNextXpuCommand
  *
  * MEMO: caller must hold 'conn->mutex'
@@ -788,7 +812,7 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 	}
 	xcmd = __pickupNextXpuCommand(conn);
 	pthreadMutexUnlock(&conn->mutex);
-
+	__updateStatsXpuCommand(pts, xcmd);
 	return xcmd;
 }
 
@@ -845,7 +869,7 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 		{
 			xcmd = __pickupNextXpuCommand(conn);
 			pthreadMutexUnlock(&conn->mutex);
-
+			__updateStatsXpuCommand(pts, xcmd);
 			return xcmd;
 		}
 		else if (conn->num_running_cmds > 0)
@@ -1649,6 +1673,7 @@ pgstromExplainTaskState(CustomScanState *node,
 						ExplainState *es)
 {
 	pgstromTaskState   *pts = (pgstromTaskState *)node;
+	pgstromSharedState *ps_state = pts->ps_state;
 	pgstromPlanInfo	   *pp_info = pts->pp_info;
 	CustomScan		   *cscan = (CustomScan *)node->ss.ps.plan;
 	List			   *dcontext;
@@ -1658,6 +1683,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	char				label[100];
 	char			   *str;
 	double				ntuples;
+	uint64_t			stat_ntuples = 0;
 	devtype_info	   *dtype;
 
 	/* setup deparse context */
@@ -1689,6 +1715,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	ExplainPropertyText(label, buf.data, es);
 
 	/* xPU Scan Quals */
+	stat_ntuples = pg_atomic_read_u64(&ps_state->source_nvalids);
 	if (pp_info->scan_quals)
 	{
 		List   *scan_quals = pp_info->scan_quals;
@@ -1700,10 +1727,21 @@ pgstromExplainTaskState(CustomScanState *node,
 		else
 			expr = linitial(scan_quals);
 		str = deparse_expression((Node *)expr, dcontext, false, true);
-		appendStringInfo(&buf, "%s [rows: %.0f -> %.0f]",
-						 str,
-						 pp_info->scan_tuples,
-						 pp_info->scan_rows);
+		appendStringInfoString(&buf, str);
+		if (!es->analyze)
+		{
+			appendStringInfo(&buf, " [rows: %.0f -> %.0f]",
+							 pp_info->scan_tuples,
+							 pp_info->scan_rows);
+		}
+		else
+		{
+			appendStringInfo(&buf, " [plan: %.0f -> %.0f, exec: %lu -> %lu]",
+							 pp_info->scan_tuples,
+							 pp_info->scan_rows,
+							 pg_atomic_read_u64(&ps_state->source_ntuples),
+							 stat_ntuples);
+		}
 		snprintf(label, sizeof(label), "%s Scan Quals", xpu_label);
 		ExplainPropertyText(label, buf.data, es);
 	}
@@ -1740,8 +1778,22 @@ pgstromExplainTaskState(CustomScanState *node,
 					appendStringInfo(&buf, "[%s]", str);
 				}
 			}
-			appendStringInfo(&buf, " ... [nrows: %.0f -> %.0f]",
-							 ntuples, pp_inner->join_nrows);
+			if (!es->analyze)
+			{
+				appendStringInfo(&buf, " ... [nrows: %.0f -> %.0f]",
+								 ntuples, pp_inner->join_nrows);
+			}
+			else
+			{
+				uint64_t	next_ntuples;
+
+				next_ntuples = pg_atomic_read_u64(&ps_state->inners[i].stats_join);
+				appendStringInfo(&buf, " ... [plan: %.0f -> %.0f, exec: %lu -> %lu]",
+								 ntuples, pp_inner->join_nrows,
+								 stat_ntuples,
+								 next_ntuples);
+				stat_ntuples = next_ntuples;
+			}
 			switch (pp_inner->join_type)
 			{
 				case JOIN_INNER: join_label = "Join"; break;
@@ -1802,6 +1854,11 @@ pgstromExplainTaskState(CustomScanState *node,
 			appendStringInfoString(&buf, str);
 			if (idxname && colname)
 				appendStringInfo(&buf, " on %s (%s)", idxname, colname);
+			if (es->analyze)
+			{
+				appendStringInfo(&buf, " [fetched: %lu]",
+								 pg_atomic_read_u64(&ps_state->inners[i].stats_gist));
+			}
 			snprintf(label, sizeof(label),
 					 "%s GiST Join [%d]", xpu_label, i+1);
 			ExplainPropertyText(label, buf.data, es);
@@ -1844,18 +1901,20 @@ pgstromExplainTaskState(CustomScanState *node,
 		}
 		else
 		{
-			pgstromSharedState *ps_state = pts->ps_state;
 			XpuConnection  *conn = pts->conn;
-			uint32			count;
+			uint64			count;
 
 			count = pg_atomic_read_u32(&ps_state->heap_direct_nblocks);
-			appendStringInfo(&buf, "enabled (%s; direct=%u", conn->devname, count);
+			appendStringInfo(&buf, "enabled (%s; direct=%lu", conn->devname, count);
 			count = pg_atomic_read_u32(&ps_state->heap_normal_nblocks);
 			if (count > 0)
-				appendStringInfo(&buf, ", buffer=%u", count);
+				appendStringInfo(&buf, ", buffer=%lu", count);
 			count = pg_atomic_read_u32(&ps_state->heap_fallback_nblocks);
 			if (count > 0)
-				appendStringInfo(&buf, ", fallback=%u", count);
+				appendStringInfo(&buf, ", fallback=%lu", count);
+			count = pg_atomic_read_u64(&ps_state->source_ntuples);
+			if (count > 0)
+				appendStringInfo(&buf, ", ntuples=%lu", count);
 			appendStringInfo(&buf, ")");
 		}
 		ExplainPropertyText("GPU-Direct SQL", buf.data, es);

@@ -394,6 +394,7 @@ execGpuScanLoadSource(kern_context *kcxt,
 	return -1;
 }
 
+#if 0
 /*
  * kern_gpuscan_main
  */
@@ -499,3 +500,4 @@ kern_gpuscan_main(kern_session_info *session,
 	}
 	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
 }
+#endif

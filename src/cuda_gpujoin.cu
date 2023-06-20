@@ -859,14 +859,37 @@ kern_gpujoin_main(kern_session_info *session,
 			break;
 	}
 	__syncthreads();
-	/* suspend the execution context */
+
 	if (LaneId() == 0)
 	{
+		/* update the statistics */
+		if (depth < 0 && WARP_READ_POS(wp,n_rels) >= WARP_WRITE_POS(wp,n_rels))
+		{
+			/* number of raw-tuples fetched from the heap block */
+			atomicAdd(&kgtask->nitems_raw, wp->lp_wr_pos);
+			atomicAdd(&kgtask->nitems_in, WARP_WRITE_POS(wp, 0));
+			for (int i=0; i < n_rels; i++)
+			{
+				const kern_expression *kexp_gist
+					= SESSION_KEXP_GIST_EVALS(session, i);
+				if (kexp_gist)
+				{
+					int		gist_depth = kexp_gist->u.gist.gist_depth;
+
+					assert(gist_depth > n_rels &&
+						   gist_depth < kgtask->kvars_ndims);
+					atomicAdd(&kgtask->stats[i].nitems_gist,
+							  WARP_WRITE_POS(wp, gist_depth));
+				}
+				atomicAdd(&kgtask->stats[i].nitems_out,
+						  WARP_WRITE_POS(wp,i+1));
+			}
+			atomicAdd(&kgtask->nitems_out, WARP_WRITE_POS(wp, n_rels));
+		}
+		/* suspend the execution context */
 		wp->depth = depth;
 		wp->smx_row_count = smx_row_count;
 		memcpy(wp_saved, wp, wp_base_sz);
-
-		//printf("wp gid=%u {scan_done=%d depth=%d of %d pos[%u %u] [%u %u] [%u %u]}\n", get_global_id(), wp->scan_done, depth, n_rels, wp->pos[0].read, wp->pos[0].write, wp->pos[1].read, wp->pos[1].write, wp->pos[2].read, wp->pos[2].write);
 	}
 	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
 }

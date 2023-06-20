@@ -1753,7 +1753,6 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 		}
 	}
 	//fprintf(stderr, "gpuservHandleGpuTaskFinal: kfin => {final_this_device=%d final_plan_node=%d} resp => {final_this_device=%d final_plan_node=%d}\n", kfin->final_this_device, kfin->final_plan_node, resp.u.results.final_this_device, resp.u.results.final_plan_node);
-
 	gpuClientWriteBack(gclient, &resp,
 					   resp.u.results.chunks_offset,
 					   resp.u.results.chunks_nitems,
