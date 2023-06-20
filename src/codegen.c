@@ -1922,19 +1922,18 @@ __codegen_build_loadvars_one(codegen_context *context, int depth)
 
 		vitem.var_resno   = __resno;
 		vitem.var_slot_id = slot_id++;
+		vitem.var_slot_off = 0;
+		if (OidIsValid(__type_oid))
+		{
+			devtype_info *dtype = pgstrom_devtype_lookup(__type_oid);
+
+			Assert(dtype != NULL);
+			kvars_offset = TYPEALIGN(dtype->type_alignof, kvars_offset);
+			vitem.var_slot_off = kvars_offset;
+			kvars_offset += dtype->type_sizeof;
+		}
 		if (__depth == depth)
 		{
-			if (!OidIsValid(__type_oid))
-				vitem.var_slot_off = 0;
-			else
-			{
-				devtype_info *dtype = pgstrom_devtype_lookup(__type_oid);
-
-				Assert(dtype != NULL);
-				kvars_offset = TYPEALIGN(dtype->type_alignof, kvars_offset);
-				vitem.var_slot_off = kvars_offset;
-				kvars_offset += dtype->type_sizeof;
-			}
 			appendBinaryStringInfo(&buf, (char *)&vitem,
 								   sizeof(kern_vars_defitem));
 			nloads++;

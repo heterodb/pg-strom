@@ -2266,8 +2266,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 		rc = cuCtxGetLimit(&stack_sz, CU_LIMIT_STACK_SIZE);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuCtxGetLimit: %s", cuStrError(rc));
-		//stack_sz += 6144;	// 6kB extra stack
-		stack_sz += 2048;
+		stack_sz += 4096;
 		rc = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, stack_sz);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuCtxSetLimit: %s", cuStrError(rc));

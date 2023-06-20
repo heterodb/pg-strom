@@ -162,13 +162,12 @@ __writeOutOneTupleGroupKey(kern_context *kcxt,
 
 		case KVAR_CLASS__XPU_DATUM:
 			{
-				xpu_datum_t *xdatum = (xpu_datum_t *)
-					((char *)kcxt->kvars_slot + kvar->xpu.offset);
+				xpu_datum_t *xdatum = (xpu_datum_t *)kvar->ptr;
 				const xpu_datum_operators *expr_ops = xdatum->expr_ops;
 
 				if (XPU_DATUM_ISNULL(xdatum))
 					return 0;
-				assert(expr_ops->xpu_type_code == kvar->xpu.type_code);
+				assert(xdatum->expr_ops == expr_ops);
 				return expr_ops->xpu_datum_write(kcxt, buffer, xdatum);
 			}
 

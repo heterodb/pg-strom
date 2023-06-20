@@ -75,7 +75,6 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 		const xpu_datum_operators *expr_ops = kexp->expr_ops;
 		kern_variable  *kvar = &kcxt->kvars_slot[slot_id];
 		int				vclass = kcxt->kvars_class[slot_id];
-		const char	   *addr;
 
 		switch (vclass)
 		{
@@ -84,19 +83,14 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 				return true;
 
 			case KVAR_CLASS__XPU_DATUM:
-				if (kexp->exptype != kvar->xpu.type_code)
-				{
-					STROM_ELOG(kcxt, "Bug? KVAR_CLASS__XPU_DATUM mismatch");
-					return false;
-				}
-				addr = ((const char *)kcxt->kvars_slot + kvar->xpu.offset);
-				memcpy(__result, addr, expr_ops->xpu_type_sizeof);
+				assert(((const xpu_datum_t *)kvar->ptr)->expr_ops == expr_ops);
+				memcpy(__result, kvar->ptr, expr_ops->xpu_type_sizeof);
 				return true;
 
 			default:
 				if (vclass < 0)
 				{
-					STROM_ELOG(kcxt, "Bug? KVAR_CLASS__XPU_DATUM mismatch");
+					STROM_ELOG(kcxt, "Bug? KVAR_CLASS__* mismatch");
 					return false;
 				}
 			case KVAR_CLASS__INLINE:
@@ -509,8 +503,7 @@ kern_form_heaptuple(kern_context *kcxt,
 
 		if (vclass == KVAR_CLASS__XPU_DATUM)
 		{
-			uint32_t	offset = kcxt->kvars_slot[pdesc->slot_id].xpu.offset;
-			xpu_datum_t *xdatum = (xpu_datum_t *)((char *)kcxt->kvars_slot + offset);
+			const xpu_datum_t *xdatum = (const xpu_datum_t *)kvar->ptr;
 
 			assert(xdatum->expr_ops != NULL);
 			nbytes = xdatum->expr_ops->xpu_datum_write(kcxt, buffer, xdatum);
@@ -604,7 +597,6 @@ kern_estimate_heaptuple(kern_context *kcxt,
 	{
 		assert(__KEXP_IS_VALID(kproj, karg) &&
 			   karg->opcode == FuncOpCode__SaveExpr);
-		/* !!Only SaveExpr can handle the case if result buffer is NULL!! */
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, NULL))
 			return -1;
 	}
@@ -673,19 +665,23 @@ pgfn_SaveExpr(XPU_PGFUNCTION_ARGS)
 	uint32_t		slot_off = kexp->u.save.slot_off;
 	xpu_datum_t	   *slot_buf = NULL;
 
+	assert(slot_id < kcxt->kvars_nslots);
 	assert(kexp->nr_args == 1 &&
 		   kexp->exptype == karg->exptype);
-	assert(slot_id < kcxt->kvars_nslots);
-	/* setup kvar-slot buffer */
 	if (slot_off > 0)
 	{
 		assert(slot_off + expr_ops->xpu_type_sizeof <= kcxt->kvars_nbytes);
 		slot_buf = (xpu_datum_t *)((char *)kcxt->kvars_slot + slot_off);
-		if (!result)
-			result = slot_buf;
 	}
+	/* SaveExpr accept NULL result buffer! */
 	if (!result)
-		result = (xpu_datum_t *)alloca(expr_ops->xpu_type_sizeof);
+	{
+		if (slot_buf)
+			result = slot_buf;
+		else
+			result = (xpu_datum_t *)alloca(expr_ops->xpu_type_sizeof);
+	}
+	/* Run the expression */
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, result))
 		return false;
 	if (XPU_DATUM_ISNULL(result))
@@ -697,8 +693,7 @@ pgfn_SaveExpr(XPU_PGFUNCTION_ARGS)
 		if (slot_buf != result)
 			memcpy(slot_buf, result, expr_ops->xpu_type_sizeof);
 		kcxt->kvars_class[slot_id] = KVAR_CLASS__XPU_DATUM;
-		kcxt->kvars_slot[slot_id].xpu.offset = slot_off;
-		kcxt->kvars_slot[slot_id].xpu.type_code = expr_ops->xpu_type_code;
+		kcxt->kvars_slot[slot_id].ptr = slot_buf;
 	}
 	else
 	{
@@ -1220,11 +1215,10 @@ __arrow_fetch_decimal_datum(kern_context *kcxt,
 			((char *)kds + __kds_unpack(cmeta->values_offset));
 
 		assert((((uintptr_t)base) & (sizeof(int128_t)-1)) == 0);
-		kvar->xpu.offset = slot_off;
-		kvar->xpu.type_code = TypeOpCode__numeric;
 		set_normalized_numeric(num, base[kds_index],
 							   cmeta->attopts.decimal.scale);
 		*vclass = KVAR_CLASS__XPU_DATUM;
+		kvar->ptr = num;
 	}
 	else
 	{
@@ -1452,9 +1446,8 @@ __arrow_fetch_interval_datum(kern_context *kcxt,
 				iv->value.month = base[kds_index];
 				iv->value.day   = 0;
 				iv->value.time  = 0;
-				kvar->xpu.offset = slot_off;
-				kvar->xpu.type_code = TypeOpCode__interval;
 				*vclass = KVAR_CLASS__XPU_DATUM;
+				kvar->ptr = iv;
 				return true;
 			}
 			break;
@@ -1469,9 +1462,8 @@ __arrow_fetch_interval_datum(kern_context *kcxt,
 				iv->value.month = 0;
 				iv->value.day   = base[2*kds_index];
 				iv->value.time  = base[2*kds_index+1];
-				kvar->xpu.offset = slot_off;
-				kvar->xpu.type_code = TypeOpCode__interval;
 				*vclass = KVAR_CLASS__XPU_DATUM;
+				kvar->ptr = iv;
 				return true;
 			}
 			break;
@@ -1571,14 +1563,13 @@ __arrow_fetch_array_datum(kern_context *kcxt,
 			STROM_ELOG(kcxt, "Arrow::List secondary index corruption");
 			return false;
 		}
-		kvar->xpu.offset = slot_off;
-		kvar->xpu.type_code  = TypeOpCode__array;
 		array->expr_ops      = &xpu_array_ops;
 		array->length        = end - start;
 		array->u.arrow.start = start;
 		array->u.arrow.smeta = &kds->colmeta[cmeta->idx_subattrs];
 		assert(cmeta->num_subattrs == 1);
 		*vclass = KVAR_CLASS__XPU_DATUM;
+		kvar->ptr = array;
 		return true;
 	}
 	return false;
@@ -1596,8 +1587,6 @@ __arrow_fetch_composite_datum(kern_context *kcxt,
 	xpu_composite_t	*comp = (xpu_composite_t *)
 		((char *)kcxt->kvars_slot + slot_off);
 
-	kvar->xpu.offset    = slot_off;
-	kvar->xpu.type_code = TypeOpCode__composite;
 	comp->expr_ops      = &xpu_composite_ops;
 	comp->comp_typid    = cmeta->atttypid;
 	comp->comp_typmod   = cmeta->atttypmod;
@@ -1606,6 +1595,7 @@ __arrow_fetch_composite_datum(kern_context *kcxt,
 	comp->smeta         = &kds->colmeta[cmeta->idx_subattrs];
 	comp->value         = NULL;
 	*vclass = KVAR_CLASS__XPU_DATUM;
+	kvar->ptr = comp;
 	return true;
 }
 
@@ -2092,7 +2082,6 @@ restart:
 		/* check result */
 		if (!XPU_DATUM_ISNULL(&status) && status.value)
 		{
-			PageHeaderData *gist_next;
 			BlockNumber		block_nr;
 
 			if (GistPageIsLeaf(gist_page))

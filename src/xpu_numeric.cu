@@ -54,12 +54,21 @@ xpu_numeric_datum_ref(kern_context *kcxt,
 
 PUBLIC_FUNCTION(bool)
 xpu_numeric_datum_store(kern_context *kcxt,
-						const xpu_datum_t *arg,
+						const xpu_datum_t *xdatum,
 						int *p_vclass,
 						kern_variable *p_kvar)
 {
-	STROM_ELOG(kcxt, "xpu_datum_store should not be called for numeric type");
-	return false;
+	xpu_numeric_t  *num;
+
+	num = (xpu_numeric_t *)kcxt_alloc(kcxt, sizeof(xpu_numeric_t));
+	if (!num)
+		return false;
+	memcpy(num, xdatum, sizeof(xpu_geometry_t));
+	assert(num->expr_ops == &xpu_numeric_ops);
+
+	*p_vclass = KVAR_CLASS__XPU_DATUM;
+	p_kvar->ptr = (void *)num;
+	return true;
 }
 
 STATIC_FUNCTION(int)

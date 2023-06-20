@@ -307,10 +307,6 @@ typedef union
 	float4_t	fp32;
 	float8_t	fp64;
 	void	   *ptr;
-	struct {
-		uint32_t	offset;		/* offset from kvars_slot */
-		TypeOpCode	type_code;	/* TypeOpCode of the xpu_datum */
-	} xpu;		/* KVAR_CLASS__XPU_DATUM */
 } kern_variable;
 
 /*

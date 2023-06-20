@@ -415,8 +415,17 @@ xpu_geometry_datum_store(kern_context *kcxt,
 						 int *p_vclass,
 						 kern_variable *p_kvar)
 {
-	STROM_ELOG(kcxt, "xpu_datum_store should not be called for geometry type");
-	return false;
+	xpu_geometry_t *geom;
+
+	geom = (xpu_geometry_t *)kcxt_alloc(kcxt, sizeof(xpu_geometry_t));
+	if (!geom)
+		return false;
+	memcpy(geom, xdatum, sizeof(xpu_geometry_t));
+	assert(geom->expr_ops == &xpu_geometry_ops);
+
+	*p_vclass = KVAR_CLASS__XPU_DATUM;
+	p_kvar->ptr = (void *)geom;
+	return true;
 }
 
 STATIC_FUNCTION(int)
@@ -597,31 +606,29 @@ PGSTROM_SQLTYPE_OPERATORS(box2df,false,1,sizeof(geom_bbox_2d));
 PUBLIC_FUNCTION(bool)
 pgfn_st_setsrid(XPU_PGFUNCTION_ARGS)
 {
-	xpu_geometry_t *result = (xpu_geometry_t *)__result;
-	xpu_geometry_t	geom;
+	xpu_geometry_t *geom = (xpu_geometry_t *)__result;
 	xpu_int4_t		srid;
 	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
 	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom))
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, (xpu_datum_t *)geom))
 		return false;
 	karg = KEXP_NEXT_ARG(karg);
 	assert(KEXP_IS_VALID(karg,int4));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &srid))
 		return false;
-	if (XPU_DATUM_ISNULL(&geom) || XPU_DATUM_ISNULL(&srid))
-		result->expr_ops = NULL;
+	if (XPU_DATUM_ISNULL(geom) || XPU_DATUM_ISNULL(&srid))
+		geom->expr_ops = NULL;
 	else
 	{
+		assert(geom->expr_ops == &xpu_geometry_ops);
 		if (srid.value <= 0)
-			geom.srid = SRID_UNKNOWN;
+			geom->srid = SRID_UNKNOWN;
 		else if (srid.value > SRID_MAXIMUM)
-			geom.srid = SRID_USER_MAXIMUM + 1 +
+			geom->srid = SRID_USER_MAXIMUM + 1 +
 				(srid.value % (SRID_MAXIMUM - SRID_USER_MAXIMUM - 1));
 		else
-			geom.srid = srid.value;
-
-		memcpy(result, &geom, sizeof(xpu_geometry_t));
+			geom->srid = srid.value;
 	}
 	return true;
 }
