@@ -1715,7 +1715,8 @@ pgstromExplainTaskState(CustomScanState *node,
 	ExplainPropertyText(label, buf.data, es);
 
 	/* xPU Scan Quals */
-	stat_ntuples = pg_atomic_read_u64(&ps_state->source_nvalids);
+	if (ps_state)
+		stat_ntuples = pg_atomic_read_u64(&ps_state->source_nvalids);
 	if (pp_info->scan_quals)
 	{
 		List   *scan_quals = pp_info->scan_quals;
@@ -1736,10 +1737,14 @@ pgstromExplainTaskState(CustomScanState *node,
 		}
 		else
 		{
+			uint64_t		prev_ntuples = 0;
+
+			if (ps_state)
+				prev_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples);
 			appendStringInfo(&buf, " [plan: %.0f -> %.0f, exec: %lu -> %lu]",
 							 pp_info->scan_tuples,
 							 pp_info->scan_rows,
-							 pg_atomic_read_u64(&ps_state->source_ntuples),
+							 prev_ntuples,
 							 stat_ntuples);
 		}
 		snprintf(label, sizeof(label), "%s Scan Quals", xpu_label);
@@ -1778,7 +1783,7 @@ pgstromExplainTaskState(CustomScanState *node,
 					appendStringInfo(&buf, "[%s]", str);
 				}
 			}
-			if (!es->analyze)
+			if (!es->analyze || !ps_state)
 			{
 				appendStringInfo(&buf, " ... [nrows: %.0f -> %.0f]",
 								 ntuples, pp_inner->join_nrows);
@@ -1854,7 +1859,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			appendStringInfoString(&buf, str);
 			if (idxname && colname)
 				appendStringInfo(&buf, " on %s (%s)", idxname, colname);
-			if (es->analyze)
+			if (es->analyze && ps_state)
 			{
 				appendStringInfo(&buf, " [fetched: %lu]",
 								 pg_atomic_read_u64(&ps_state->inners[i].stats_gist));
