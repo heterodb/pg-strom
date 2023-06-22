@@ -1463,7 +1463,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 							 &shmem_sz,
 							 f_kern_gpuscan,
 							 0,
-							 __KERN_WARP_CONTEXT_BASESZ(num_inner_rels));
+							 __KERN_WARP_CONTEXT_BASESZ(session->kcxt_kvars_ndims));
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientFatal(gclient, "failed on gpuOptimalBlockSize: %s",
