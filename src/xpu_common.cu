@@ -1842,6 +1842,180 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 	return true;
 }
 
+/* ------------------------------------------------------------
+ *
+ * Extract GpuCache tuples
+ *
+ * ------------------------------------------------------------
+ */
+INLINE_FUNCTION(bool)
+__gpucache_bitmap_check(const kern_data_store *kds,
+						uint32_t kds_index,
+						uint32_t bitmap_offset,
+						uint32_t bitmap_length)
+{
+	uint8_t	   *bitmap;
+	uint8_t		mask =  (1 << (kds_index & 7));
+	uint32_t	idx = (kds_index >> 3);
+
+	if (bitmap_offset == 0 ||	/* no bitmap */
+		bitmap_length == 0 ||	/* no bitmap */
+		idx >= __kds_unpack(bitmap_length))
+		return false;
+	bitmap = (uint8_t *)kds + __kds_unpack(bitmap_offset);
+
+	return (bitmap[idx] & mask) != 0;
+}
+
+INLINE_FUNCTION(bool)
+__extract_gpucache_tuple_sysattr(kern_context *kcxt,
+								 const kern_data_store *kds,
+								 uint32_t kds_index,
+								 const kern_vars_defitem *kvdef)
+{
+	const kern_colmeta *cmeta = &kds->colmeta[kds->nr_colmeta - 1];
+	GpuCacheSysattr	   *sysatt;
+	uint32_t			slot_id = kvdef->var_slot_id;
+
+	assert(!cmeta->attbyval &&
+		   cmeta->attlen == sizeof(GpuCacheSysattr) &&
+		   cmeta->nullmap_offset == 0);		/* NOT NULL */
+	/* out of range? */
+	if (slot_id >= kcxt->kvars_nslots)
+		return true;
+	sysatt = (GpuCacheSysattr *)
+		((char *)kds + __kds_unpack(cmeta->values_offset));
+	switch (kvdef->var_resno)
+	{
+		case SelfItemPointerAttributeNumber:
+			kcxt->kvars_slot[slot_id].ptr = &sysatt[kds_index].ctid;
+			kcxt->kvars_class[slot_id] = sizeof(ItemPointerData);
+			break;
+		case MinTransactionIdAttributeNumber:
+			kcxt->kvars_slot[slot_id].u32 = sysatt[kds_index].xmin;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			break;
+		case MaxTransactionIdAttributeNumber:
+			kcxt->kvars_slot[slot_id].u32 = sysatt[kds_index].xmax;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			break;
+		case MinCommandIdAttributeNumber:
+		case MaxCommandIdAttributeNumber:
+			kcxt->kvars_slot[slot_id].u32 = FirstCommandId;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			break;
+		case TableOidAttributeNumber:
+			kcxt->kvars_slot[slot_id].u32 = kds->table_oid;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			break;
+		default:
+			STROM_ELOG(kcxt, "not a supported system attribute reference");
+			return false;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+kern_extract_gpucache_tuple(kern_context *kcxt,
+							const kern_data_store *kds,
+							const kern_data_extra *extra,
+							uint32_t kds_index,
+							const kern_vars_defitem *kvars_items,
+							int kvars_nloads)
+{
+	const kern_vars_defitem *kvdef = kvars_items;
+	int		kvars_count = 0;
+
+	assert(kds->format == KDS_FORMAT_COLUMN);
+	/* fillup values for system attribute, if any */
+	while (kvars_count < kvars_nloads &&
+		   kvdef->var_resno < 0)
+	{
+		if (!__extract_gpucache_tuple_sysattr(kcxt, kds, kds_index, kvdef))
+			return false;
+		kvdef++;
+		kvars_count++;
+	}
+
+	while (kvars_count < kvars_nloads &&
+		   kvdef->var_resno <= kds->ncols)
+	{
+		const kern_colmeta *cmeta = &kds->colmeta[kvdef->var_resno-1];
+		uint32_t	slot_id = kvdef->var_slot_id;
+
+		assert(slot_id < kcxt->kvars_nslots);
+		if (__gpucache_bitmap_check(kds, kds_index,
+									cmeta->nullmap_offset,
+									cmeta->nullmap_length))
+		{
+			const char *base = ((const char *)kds +
+								__kds_unpack(cmeta->values_offset));
+
+			if (cmeta->attlen > 0)
+			{
+				base += cmeta->attlen * kds_index;
+				if (cmeta->attbyval)
+				{
+					kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+					switch (cmeta->attlen)
+					{
+						case sizeof(uint8_t):
+							kcxt->kvars_slot[slot_id].u8 = *((uint8_t *)base);
+							break;
+						case sizeof(uint16_t):
+							kcxt->kvars_slot[slot_id].u16 = *((uint16_t *)base);
+							break;
+						case sizeof(uint32_t):
+							kcxt->kvars_slot[slot_id].u32 = *((uint32_t *)base);
+							break;
+						case sizeof(uint64_t):
+							kcxt->kvars_slot[slot_id].u64 = *((uint64_t *)base);
+							break;
+						default:
+							STROM_ELOG(kcxt, "invalid inline attlen");
+							return false;
+					}
+				}
+				else
+				{
+					kcxt->kvars_class[slot_id] = cmeta->attlen;
+					kcxt->kvars_slot[slot_id].ptr = (char *)base;
+				}
+			}
+			else
+			{
+				size_t		offset;
+
+				assert(cmeta->attlen == -1);
+				offset = __kds_unpack(((uint32_t *)base)[kds_index]);
+				kcxt->kvars_class[slot_id] = KVAR_CLASS__VARLENA;
+				kcxt->kvars_slot[slot_id].ptr = ((char *)extra + offset);
+			}
+		}
+		else
+		{
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+			kcxt->kvars_slot[slot_id].ptr = NULL;
+		}
+		kvdef++;
+		kvars_count++;
+	}
+	/* other fields, which refers out of range, are NULL */
+	while (kvars_count < kvars_nloads)
+	{
+		uint32_t	slot_id = kvdef->var_slot_id;
+
+		if (slot_id < kcxt->kvars_nslots)
+		{
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+			kcxt->kvars_slot[slot_id].ptr = NULL;
+		}
+		kvdef++;
+		kvars_count++;
+	}
+	return true;
+}
+
 STATIC_FUNCTION(bool)
 pgfn_LoadVars(XPU_PGFUNCTION_ARGS)
 {
@@ -1916,6 +2090,45 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 								  kds_index,
 								  kexp_load_vars->u.load.kvars,
 								  kexp_load_vars->u.load.nloads))
+		return false;
+
+	/* check scan quals if given */
+	if (kexp_scan_quals)
+	{
+		xpu_bool_t	retval;
+
+		if (EXEC_KERN_EXPRESSION(kcxt, kexp_scan_quals, &retval))
+		{
+			if (!XPU_DATUM_ISNULL(&retval) && retval.value)
+				return true;
+		}
+		else
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		}
+		return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+ExecLoadVarsOuterColumn(kern_context *kcxt,
+						kern_expression *kexp_load_vars,
+						kern_expression *kexp_scan_quals,
+						kern_data_store *kds,
+						kern_data_extra *extra,
+						uint32_t kds_index)
+{
+	assert(kexp_load_vars->opcode == FuncOpCode__LoadVars &&
+		   kexp_load_vars->exptype == TypeOpCode__int4 &&
+		   kexp_load_vars->nr_args == 0 &&
+		   kexp_load_vars->u.load.depth == 0);
+	if (!kern_extract_gpucache_tuple(kcxt,
+									 kds,
+									 extra,
+									 kds_index,
+									 kexp_load_vars->u.load.kvars,
+									 kexp_load_vars->u.load.nloads))
 		return false;
 
 	/* check scan quals if given */

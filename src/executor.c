@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include "cuda_common.h"
 
 /*
  * XpuConnection
@@ -1023,6 +1024,8 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 
 	initStringInfo(&pts->xcmd_buf);
 	bufsz = MAXALIGN(offsetof(XpuCommand, u.task.data));
+	if (format == KDS_FORMAT_COLUMN)
+		bufsz += MAXALIGN(sizeof(GpuCacheIdent));
 	if (tdesc_src)
 		bufsz += estimate_kern_data_store(tdesc_src);
 	if (tdesc_dst)
@@ -1036,6 +1039,8 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 	xcmd->length = bufsz;
 
 	off = offsetof(XpuCommand, u.task.data);
+	if (format == KDS_FORMAT_COLUMN)
+		off += MAXALIGN(sizeof(GpuCacheIdent));		/* to be set later */
 	if (tdesc_dst)
 	{
 		xcmd->u.task.kds_dst_offset = off;
@@ -1089,7 +1094,9 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		if (am_oid != HEAP_TABLE_AM_OID)
 			elog(ERROR, "PG-Strom does not support table access method: %s",
 				 get_am_name(am_oid));
-
+		/* setup GpuCache if any */
+		if (pp_info->gpu_cache_dindex >= 0)
+			pts->gcache_desc = pgstromGpuCacheExecInit(pts);
 		/* setup BRIN-index if any */
 		pgstromBrinIndexExecBegin(pts,
 								  pp_info->brin_index_oid,
@@ -1242,7 +1249,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  tupdesc_dst,
 									  KDS_FORMAT_ARROW);
 	}
-	else if (pts->gcache_state)		/* GPU-Cache */
+	else if (pts->gcache_desc)		/* GPU-Cache */
 	{
 		pts->cb_next_chunk = pgstromScanChunkGpuCache;
 		pts->cb_next_tuple = pgstromScanNextTuple;
@@ -1442,6 +1449,8 @@ pgstromExecEndTaskState(CustomScanState *node)
 		xpuClientCloseSession(pts->conn);
 	if (pts->br_state)
 		pgstromBrinIndexExecEnd(pts);
+	if (pts->gcache_desc)
+		pgstromGpuCacheExecEnd(pts);
 	if (pts->arrow_state)
 		pgstromArrowFdwExecEnd(pts->arrow_state);
 	if (pts->base_slot)
@@ -1560,6 +1569,8 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
 
 		/* parallel scan descriptor */
+		if (pts->gcache_desc)
+			pgstromGpuCacheInitDSM(pts, ps_state);
 		if (pts->arrow_state)
 			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
 		else
@@ -1583,6 +1594,8 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
 
 		/* scan descriptor */
+		if (pts->gcache_desc)
+			pgstromGpuCacheInitDSM(pts, ps_state);
 		if (pts->arrow_state)
 			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
 		else
@@ -1628,6 +1641,8 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 	pts->rjoin_devs_count = (pg_atomic_uint32 *)dsm_addr;
 	dsm_addr += MAXALIGN(sizeof(pg_atomic_uint32) * num_devs);
 
+	if (pts->gcache_desc)
+		pgstromGpuCacheAttachDSM(pts, pts->ps_state);
 	if (pts->arrow_state)
 		pgstromArrowFdwAttachDSM(pts->arrow_state, pts->ps_state);
 	else
@@ -1652,6 +1667,8 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 
 	if (pts->br_state)
 		pgstromBrinIndexShutdownDSM(pts);
+	if (pts->gcache_desc)
+		pgstromGpuCacheShutdown(pts);
 	if (pts->arrow_state)
 		pgstromArrowFdwShutdown(pts->arrow_state);
 	if (src_state)
@@ -1879,9 +1896,10 @@ pgstromExplainTaskState(CustomScanState *node,
 							   pts->css.ss.ss_currentRelation,
 							   es, dcontext);
 	}
-	else if (pts->gcache_state)
+	else if (pts->gcache_desc)
 	{
 		/* GPU-Cache */
+		pgstromGpuCacheExplain(pts, es, dcontext);
 	}
 	else if (!bms_is_empty(pts->optimal_gpus))
 	{

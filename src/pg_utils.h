@@ -125,6 +125,17 @@ lappend_cxt(MemoryContext memcxt, List *list, void *datum)
 	return r;
 }
 
+/* initStringInfo on the specified memory-context */
+static inline void
+initStringInfoCxt(MemoryContext memcxt, StringInfo buf)
+{
+	MemoryContext	oldcxt;
+
+	oldcxt = MemoryContextSwitchTo(memcxt);
+	initStringInfo(buf);
+	MemoryContextSwitchTo(oldcxt);
+}
+
 /*
  * formater of numeric/bytesz/millisec
  */
@@ -241,6 +252,21 @@ pthreadMutexInit(pthread_mutex_t *mutex)
 }
 
 static inline void
+pthreadMutexInitShared(pthread_mutex_t *mutex)
+{
+	pthread_mutexattr_t mattr;
+
+	if ((errno = pthread_mutexattr_init(&mattr)) != 0)
+		__FATAL("failed on pthread_mutexattr_init: %m");
+	if ((errno = pthread_mutexattr_setpshared(&mattr, 1)) != 0)
+		__FATAL("failed on pthread_mutexattr_setpshared: %m");
+	if ((errno = pthread_mutex_init(mutex, &mattr)) != 0)
+        __FATAL("failed on pthread_mutex_init: %m");
+    if ((errno = pthread_mutexattr_destroy(&mattr)) != 0)
+        __FATAL("failed on pthread_mutexattr_destroy: %m");
+}
+
+static inline void
 pthreadMutexLock(pthread_mutex_t *mutex)
 {
 	if ((errno = pthread_mutex_lock(mutex)) != 0)
@@ -272,6 +298,19 @@ pthreadRWLockInit(pthread_rwlock_t *rwlock)
 }
 
 static inline void
+pthreadRWLockInitShared(pthread_rwlock_t *rwlock)
+{
+	pthread_rwlockattr_t rwattr;
+
+	if ((errno = pthread_rwlockattr_init(&rwattr)) != 0)
+		__FATAL("failed on pthread_rwlockattr_init: %m");
+    if ((errno = pthread_rwlockattr_setpshared(&rwattr, 1)) != 0)
+		__FATAL("failed on pthread_rwlockattr_setpshared: %m");
+    if ((errno = pthread_rwlock_init(rwlock, &rwattr)) != 0)
+		__FATAL("failed on pthread_rwlock_init: %m");
+}
+
+static inline void
 pthreadRWLockReadLock(pthread_rwlock_t *rwlock)
 {
 	if ((errno = pthread_rwlock_rdlock(rwlock)) != 0)
@@ -297,6 +336,21 @@ pthreadCondInit(pthread_cond_t *cond)
 {
 	if ((errno = pthread_cond_init(cond, NULL)) != 0)
 		__FATAL("failed on pthread_cond_init: %m");
+}
+
+static inline void
+pthreadCondInitShared(pthread_cond_t *cond)
+{
+	pthread_condattr_t condattr;
+
+	if ((errno = pthread_condattr_init(&condattr)) != 0)
+		__FATAL("failed on pthread_condattr_init: %m");
+	if ((errno = pthread_condattr_setpshared(&condattr, 1)) != 0)
+		__FATAL("failed on pthread_condattr_setpshared: %m");
+	if ((errno = pthread_cond_init(cond, &condattr)) != 0)
+		__FATAL("failed on pthread_cond_init: %m");
+	if ((errno = pthread_condattr_destroy(&condattr)) != 0)
+		__FATAL("failed on pthread_condattr_destroy: %m");
 }
 
 static inline void

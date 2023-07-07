@@ -264,6 +264,73 @@ typedef struct {
 	 sizeof(bool)     * (n_dims) * (n_threads))
 
 /*
+ * Definitions related to GpuCache
+ */
+typedef struct {
+	uint32_t	database_oid;
+	uint32_t	table_oid;
+	uint64_t	signature;
+} GpuCacheIdent;
+
+INLINE_FUNCTION(bool)
+GpuCacheIdentEqual(const GpuCacheIdent *a, const GpuCacheIdent *b)
+{
+	return (a->database_oid == b->database_oid &&
+			a->table_oid    == b->table_oid &&
+			a->signature    == b->signature);
+}
+
+#define GCACHE_TX_LOG__MAGIC		0xEBAD7C00
+#define GCACHE_TX_LOG__INSERT		(GCACHE_TX_LOG__MAGIC | 'I')
+#define GCACHE_TX_LOG__DELETE		(GCACHE_TX_LOG__MAGIC | 'D')
+#define GCACHE_TX_LOG__COMMIT_INS	(GCACHE_TX_LOG__MAGIC | 'C')
+#define GCACHE_TX_LOG__COMMIT_DEL	(GCACHE_TX_LOG__MAGIC | 'c')
+#define GCACHE_TX_LOG__ABORT_INS	(GCACHE_TX_LOG__MAGIC | 'A')
+#define GCACHE_TX_LOG__ABORT_DEL	(GCACHE_TX_LOG__MAGIC | 'a')
+
+typedef struct {
+    uint32_t	type;
+    uint32_t	length;
+	char		data[1];		/* variable length */
+} GCacheTxLogCommon;
+
+typedef struct {
+	uint32_t	type;
+	uint32_t	length;
+	uint32_t	xid;
+	uint32_t	rowid;
+	HeapTupleHeaderData htup;
+} GCacheTxLogInsert;
+
+typedef struct {
+	uint32_t	type;
+	uint32_t	length;
+	uint32_t	xid;
+	uint32_t	rowid;
+	ItemPointerData ctid;
+} GCacheTxLogDelete;
+
+/*
+ * COMMIT/ABORT
+ */
+typedef struct {
+	uint32_t	type;
+	uint32_t	length;
+	uint32_t	rowid;
+} GCacheTxLogXact;
+
+/*
+ * REDO Log Buffer
+ */
+typedef struct {
+	kern_errorbuf	kerror;
+	size_t			length;
+	uint32_t		nrooms;
+	uint32_t		nitems;
+	uint32_t		redo_items[1];
+} kern_gpucache_redolog;
+
+/*
  * GPU Kernel Entrypoint
  */
 KERNEL_FUNCTION(void)
@@ -280,6 +347,271 @@ kern_gpujoin_main(kern_session_info *session,
 				  kern_data_store *kds_src,
 				  kern_data_extra *kds_extra,
 				  kern_data_store *kds_dst);
+
+/*
+ * Atomic function wrappers
+ */
+INLINE_FUNCTION(uint32_t)
+__atomic_write_uint32(uint32_t *ptr, uint32_t ival)
+{
+#ifdef __CUDACC__
+	return atomicExch((unsigned int *)ptr, ival);
+#else
+	return __atomic_exchange_n(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint64_t)
+__atomic_write_uint64(uint64_t *ptr, uint64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicExch((unsigned long long int *)ptr, ival);
+#else
+	return __atomic_exchange_n(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_add_uint32(uint32_t *ptr, uint32_t ival)
+{
+#ifdef __CUDACC__
+	return atomicAdd((unsigned int *)ptr, (unsigned int)ival);
+#else
+	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint64_t)
+__atomic_add_uint64(uint64_t *ptr, uint64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicAdd((unsigned long long *)ptr, (unsigned long long)ival);
+#else
+	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(int64_t)
+__atomic_add_int64(int64_t *ptr, int64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicAdd((unsigned long long int *)ptr, (unsigned long long int)ival);
+#else
+	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(float8_t)
+__atomic_add_fp64(float8_t *ptr, float8_t fval)
+{
+#ifdef __CUDACC__
+	return atomicAdd((double *)ptr, (double)fval);
+#else
+	union {
+		uint64_t	ival;
+		float8_t	fval;
+	} oldval, newval;
+
+	oldval.fval = __volatileRead(ptr);
+	do {
+		newval.fval = oldval.fval + fval;
+	} while (!__atomic_compare_exchange_n((uint64_t *)ptr,
+										  &oldval.ival,
+										  newval.ival,
+										  false,
+										  __ATOMIC_SEQ_CST,
+										  __ATOMIC_SEQ_CST));
+	return oldval.fval;
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_max_uint32(uint32_t *ptr, uint32_t ival)
+{
+#ifdef __CUDACC__
+	return atomicMin((unsigned int *)ptr, (unsigned int)ival);
+#else
+	uint32_t	oldval = __volatileRead(ptr);
+
+	while (oldval > ival)
+	{
+		if (__atomic_compare_exchange_n(ptr,
+										&oldval,
+										ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval;
+#endif
+}
+
+INLINE_FUNCTION(int64_t)
+__atomic_min_int64(int64_t *ptr, int64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicMin((long long int *)ptr, (long long int)ival);
+#else
+	int64_t		oldval = __volatileRead(ptr);
+
+	while (oldval > ival)
+	{
+		if (__atomic_compare_exchange_n(ptr,
+										&oldval,
+										ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval;
+#endif
+}
+
+INLINE_FUNCTION(int64_t)
+__atomic_max_int64(int64_t *ptr, int64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicMax((long long int *)ptr, (long long int)ival);
+#else
+	int64_t		oldval = __volatileRead(ptr);
+
+	while (oldval < ival)
+	{
+		if (__atomic_compare_exchange_n(ptr,
+										&oldval,
+										ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval;
+#endif
+}
+
+INLINE_FUNCTION(float8_t)
+__atomic_min_fp64(float8_t *ptr, float8_t fval)
+{
+#ifdef __CUDACC__
+	union {
+		unsigned long long ival;
+		float8_t	fval;
+	} oldval, curval, newval;
+
+	newval.fval = fval;
+	curval.fval = __volatileRead(ptr);
+	while (newval.fval < curval.fval)
+	{
+		oldval = curval;
+		curval.ival = atomicCAS((unsigned long long *)ptr,
+								oldval.ival,
+								newval.ival);
+		if (curval.ival == oldval.ival)
+			break;
+	}
+	return curval.fval;
+#else
+	union {
+		uint64_t	ival;
+		float8_t	fval;
+	} oldval, newval;
+
+	newval.fval = fval;
+	oldval.fval = __volatileRead(ptr);
+	while (oldval.fval > newval.fval)
+	{
+		if (__atomic_compare_exchange_n((uint64_t *)ptr,
+										&oldval.ival,
+										newval.ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval.fval;
+#endif
+}
+
+INLINE_FUNCTION(float8_t)
+__atomic_max_fp64(float8_t *ptr, float8_t fval)
+{
+#ifdef __CUDACC__
+	union {
+		unsigned long long ival;
+		float8_t	fval;
+	} oldval, curval, newval;
+
+	newval.fval = fval;
+	curval.fval = __volatileRead(ptr);
+	while (newval.fval > curval.fval)
+	{
+		oldval = curval;
+		curval.ival = atomicCAS((unsigned long long *)ptr,
+								oldval.ival,
+								newval.ival);
+		if (curval.ival == oldval.ival)
+			break;
+	}
+	return curval.fval;
+#else
+	union {
+		uint64_t	ival;
+		float8_t	fval;
+	} oldval, newval;
+
+	newval.fval = fval;
+	oldval.fval = __volatileRead(ptr);
+	while (oldval.fval > newval.fval)
+	{
+		if (__atomic_compare_exchange_n((uint64_t *)ptr,
+										&oldval.ival,
+										newval.ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval.fval;
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_cas_uint32(uint32_t *ptr, uint32_t comp, uint32_t newval)
+{
+#ifdef __CUDACC__
+	return atomicCAS((unsigned int *)ptr,
+					 (unsigned int)comp,
+					 (unsigned int)newval);
+#else
+	__atomic_compare_exchange_n(ptr,
+								&comp,
+								newval,
+								false,
+								__ATOMIC_SEQ_CST,
+								__ATOMIC_SEQ_CST);
+	return comp;
+#endif
+}
+
+INLINE_FUNCTION(uint64_t)
+__atomic_cas_uint64(uint64_t *ptr, uint64_t comp, uint64_t newval)
+{
+#ifdef __CUDACC__
+	return atomicCAS((unsigned long long int *)ptr,
+					 (unsigned long long int)comp,
+					 (unsigned long long int)newval);
+#else
+	__atomic_compare_exchange_n(ptr,
+								&comp,
+								newval,
+								false,
+								__ATOMIC_SEQ_CST,
+								__ATOMIC_SEQ_CST);
+	return comp;
+#endif
+}
 
 /*
  * Misc functions

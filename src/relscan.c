@@ -300,7 +300,7 @@ setup_kern_data_store(kern_data_store *kds,
 		kern_colmeta *cmeta = &kds->colmeta[kds->nr_colmeta++];
 
 		memset(cmeta, 0, sizeof(kern_colmeta));
-		cmeta->attbyval = true;
+		cmeta->attbyval = false;
 		cmeta->attalign = sizeof(int32_t);
 		cmeta->attlen = sizeof(GpuCacheSysattr);
 		cmeta->attnum = -1;

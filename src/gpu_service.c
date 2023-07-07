@@ -47,8 +47,6 @@ struct gpuContext
 	pthread_t		workers[1];
 };
 typedef struct gpuContext	gpuContext;
-#define SizeOfGpuContext	\
-	offsetof(gpuContext, workers[pgstrom_max_async_gpu_tasks])
 
 /*
  * variables
@@ -1693,6 +1691,35 @@ bailout:
 	}
 }
 
+/* ------------------------------------------------------------
+ *
+ * gpuservGpuCacheManager - GpuCache worker
+ *
+ * ------------------------------------------------------------
+ */
+static void *
+gpuservGpuCacheManager(void *__arg)
+{
+	gpuContext *gcontext = (gpuContext *)__arg;
+	CUresult	rc;
+
+	rc = cuCtxSetCurrent(gcontext->cuda_context);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuCtxSetCurrent: %s", cuStrError(rc));
+
+	GpuWorkerCurrentContext = gcontext;
+	CU_DINDEX_PER_THREAD  = gcontext->cuda_dindex;
+	CU_DEVICE_PER_THREAD  = gcontext->cuda_device;
+	CU_CONTEXT_PER_THREAD = gcontext->cuda_context;
+	CU_EVENT_PER_THREAD   = NULL;
+	pg_memory_barrier();
+
+	gpucacheManagerEventLoop(gcontext->cuda_dindex,
+							 gcontext->cuda_context,
+							 gcontext->cuda_module);
+	return NULL;
+}
+
 /* ----------------------------------------------------------------
  *
  * gpuservHandleGpuTaskFinal
@@ -2199,6 +2226,7 @@ __gpuContextTerminateWorkers(gpuContext *gcontext)
 	pg_memory_barrier();
 
 	pthreadCondBroadcast(&gcontext->cond);
+	gpucacheManagerWakeUp(gcontext->cuda_dindex);
 	for (i=0; i < gcontext->n_workers; i++)
 		pthread_join(gcontext->workers[i], NULL);
 }
@@ -2218,7 +2246,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 	struct epoll_event ev;
 
 	/* gpuContext allocation */
-	gcontext = calloc(1, SizeOfGpuContext);
+	gcontext = calloc(1, offsetof(gpuContext, workers[pgstrom_max_async_gpu_tasks+1]));
 	if (!gcontext)
 		elog(ERROR, "out of memory");
 	gcontext->serv_fd = -1;
@@ -2283,6 +2311,16 @@ gpuservSetupGpuContext(int cuda_dindex)
 			}
 			gcontext->n_workers++;
 		}
+		/* also, GpuCache worker */
+		if ((status = pthread_create(&gcontext->workers[gcontext->n_workers],
+									 NULL,
+									 gpuservGpuCacheManager,
+									 gcontext)) != 0)
+		{
+			__gpuContextTerminateWorkers(gcontext);
+			elog(ERROR, "failed on pthread_create: %s", strerror(status));
+		}
+		gcontext->n_workers++;
 	}
 	PG_CATCH();
 	{

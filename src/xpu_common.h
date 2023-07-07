@@ -271,6 +271,7 @@ typedef enum {
 #define ERRCODE_WRONG_XPU_CODE			3
 #define ERRCODE_VARLENA_UNSUPPORTED		4
 #define ERRCODE_RECURSION_TOO_DEEP		5
+#define ERRCODE_BUFFER_NO_SPACE			6
 #define ERRCODE_DEVICE_INTERNAL			99
 #define ERRCODE_DEVICE_FATAL			999
 
@@ -524,6 +525,8 @@ struct kern_data_store {
 	/* only KDS_FORMAT_BLOCK */
 	uint32_t		block_offset;	/* offset of blocks array */
 	uint32_t		block_nloaded;	/* number of blocks already loaded by CPU */
+	/* only KDS_FORMAT_COLUMN */
+	uint32_t		column_nrooms;	/* = max_num_rows parameter */
 	/* column definition */
 	uint32_t		nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */
@@ -1886,6 +1889,17 @@ typedef struct {
 } kern_exec_task;
 
 typedef struct {
+	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
+	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
+	uint32_t	kds_src_offset;		/* offset to kds_src */
+	uint32_t	kds_dst_offset;		/* offset to kds_dst */
+	uint32_t	database_oid;		/* GpuCache identifier */
+	uint32_t	table_oid;			/* GpuCache identifier */
+	uint64_t	signature;			/* GpuCache identifier */
+	char		data[1]				__MAXALIGNED__;
+} kern_exec_task_gpucache;
+
+typedef struct {
 	bool		final_plan_node;
 	bool		final_this_device;
 	char		data[1]				__MAXALIGNED__;
@@ -1933,6 +1947,7 @@ typedef struct
 		kern_errorbuf		error;
 		kern_session_info	session;
 		kern_exec_task		task;
+		kern_exec_task_gpucache task_gc;
 		kern_final_task		fin;
 		kern_exec_results	results;
 	} u;
@@ -2320,18 +2335,18 @@ ExecLoadVarsOuterRow(kern_context *kcxt,
 					 kern_data_store *kds_src,
 					 HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
-ExecLoadVarsOuterColumn(XPU_PGFUNCTION_ARGS,
-						kern_data_store *kds_outer,
-						uint32_t kds_index,
-						int num_inners,
-						kern_data_store **kds_inners,
-						HeapTupleHeaderData **htup_inners);
-EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterArrow(kern_context *kcxt,
 					   kern_expression *kexp_load_vars,
 					   kern_expression *kexp_scan_quals,
 					   kern_data_store *kds_src,
 					   uint32_t kds_index);
+PUBLIC_FUNCTION(bool)
+ExecLoadVarsOuterColumn(kern_context *kcxt,
+						kern_expression *kexp_load_vars,
+						kern_expression *kexp_scan_quals,
+						kern_data_store *kds,
+						kern_data_extra *extra,
+						uint32_t kds_index);
 EXTERN_FUNCTION(uint32_t)
 ExecGiSTIndexGetNext(kern_context *kcxt,
 					 const kern_data_store *kds_hash,

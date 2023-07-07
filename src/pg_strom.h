@@ -39,6 +39,7 @@
 #include "catalog/pg_am.h"
 #include "catalog/pg_amop.h"
 #include "catalog/pg_cast.h"
+#include "catalog/pg_database.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_foreign_data_wrapper.h"
@@ -49,12 +50,15 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_tablespace_d.h"
+#include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
+#include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/event_trigger.h"
 #include "commands/extension.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"
+#include "commands/trigger.h"
 #include "commands/typecmds.h"
 #include "common/hashfn.h"
 #include "common/int.h"
@@ -88,6 +92,7 @@
 #include "storage/fd.h"
 #include "storage/latch.h"
 #include "storage/pmsignal.h"
+#include "storage/procarray.h"
 #include "storage/shmem.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
@@ -219,7 +224,7 @@ typedef struct devfunc_info
 } devfunc_info;
 
 typedef struct XpuConnection	XpuConnection;
-typedef struct GpuCacheState	GpuCacheState;
+typedef struct GpuCacheDesc		GpuCacheDesc;
 typedef struct DpuStorageEntry	DpuStorageEntry;
 typedef struct ArrowFdwState	ArrowFdwState;
 typedef struct BrinIndexState	BrinIndexState;
@@ -254,7 +259,7 @@ typedef struct
 typedef struct
 {
 	uint32_t	xpu_task_flags;		/* mask of device flags */
-	const Bitmapset *gpu_cache_devs;	/* device for GpuCache, if any */
+	int			gpu_cache_dindex;	/* device for GpuCache, if any */
 	const Bitmapset *gpu_direct_devs;	/* device for GPU-Direct SQL, if any */
 	const DpuStorageEntry *ds_entry;	/* target DPU if DpuJoin */
 	/* Plan information */
@@ -331,7 +336,7 @@ typedef struct
 	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */
 	pg_atomic_uint32	arrow_rbatch_nskip;	/* # of skipped record-batches */
 	/* for gpu-cache */
-	pg_atomic_uint32	gcache_fetch_count;
+	pg_atomic_uint32	__gcache_fetch_count_data;
 	/* for gpu/dpu-direct */
 	pg_atomic_uint32	heap_normal_nblocks;
 	pg_atomic_uint32	heap_direct_nblocks;
@@ -398,9 +403,10 @@ struct pgstromTaskState
 	XpuConnection	   *conn;
 	pgstromSharedState *ps_state;		/* on the shared-memory segment */
 	pgstromPlanInfo	   *pp_info;
-	GpuCacheState	   *gcache_state;
 	ArrowFdwState	   *arrow_state;
 	BrinIndexState	   *br_state;
+	GpuCacheDesc	   *gcache_desc;
+	pg_atomic_uint32   *gcache_fetch_count;
 	kern_multirels	   *h_kmrels;		/* host inner buffer (if JOIN) */
 	const char		   *kds_pathname;	/* pathname to be used for KDS setup */
 	/* current chunk (already processed by the device) */
@@ -762,9 +768,28 @@ extern void		pgstrom_init_gpu_service(void);
 /*
  * gpu_cache.c
  */
-
-
-
+extern void		pgstrom_init_gpu_cache(void);
+extern int		baseRelHasGpuCache(PlannerInfo *root,
+								   RelOptInfo *baserel);
+extern bool		RelationHasGpuCache(Relation rel);
+extern GpuCacheDesc *pgstromGpuCacheExecInit(pgstromTaskState *pts);
+extern XpuCommand *pgstromGpuCacheNextChunk(pgstromTaskState *pts,
+											struct iovec *xcmd_iov,
+											int *xcmd_iovcnt);
+extern void		pgstromGpuCacheExecEnd(pgstromTaskState *pts);
+extern void		pgstromGpuCacheExecReset(pgstromTaskState *pts);
+extern void		pgstromGpuCacheInitDSM(pgstromTaskState *pts,
+									   pgstromSharedState *ps_state);
+extern void		pgstromGpuCacheAttachDSM(pgstromTaskState *pts,
+										 pgstromSharedState *ps_state);
+extern void		pgstromGpuCacheShutdown(pgstromTaskState *pts);
+extern void		pgstromGpuCacheExplain(pgstromTaskState *pts,
+									   ExplainState *es,
+									   List *dcontext);
+extern void		gpucacheManagerEventLoop(int cuda_dindex,
+										 CUcontext cuda_context,
+										 CUmodule cuda_module);
+extern void		gpucacheManagerWakeUp(int cuda_dindex);
 
 
 /*
