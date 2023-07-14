@@ -1849,25 +1849,6 @@ kern_extract_arrow_tuple(kern_context *kcxt,
  * ------------------------------------------------------------
  */
 INLINE_FUNCTION(bool)
-__gpucache_bitmap_check(const kern_data_store *kds,
-						uint32_t kds_index,
-						uint32_t bitmap_offset,
-						uint32_t bitmap_length)
-{
-	uint8_t	   *bitmap;
-	uint8_t		mask =  (1 << (kds_index & 7));
-	uint32_t	idx = (kds_index >> 3);
-
-	if (bitmap_offset == 0 ||	/* no bitmap */
-		bitmap_length == 0 ||	/* no bitmap */
-		idx >= __kds_unpack(bitmap_length))
-		return false;
-	bitmap = (uint8_t *)kds + __kds_unpack(bitmap_offset);
-
-	return (bitmap[idx] & mask) != 0;
-}
-
-INLINE_FUNCTION(bool)
 __extract_gpucache_tuple_sysattr(kern_context *kcxt,
 								 const kern_data_store *kds,
 								 uint32_t kds_index,
@@ -1944,9 +1925,7 @@ kern_extract_gpucache_tuple(kern_context *kcxt,
 		uint32_t	slot_id = kvdef->var_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		if (__gpucache_bitmap_check(kds, kds_index,
-									cmeta->nullmap_offset,
-									cmeta->nullmap_length))
+		if (!KDS_COLUMN_ITEM_ISNULL(kds, cmeta, kds_index))
 		{
 			const char *base = ((const char *)kds +
 								__kds_unpack(cmeta->values_offset));

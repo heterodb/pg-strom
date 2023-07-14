@@ -611,6 +611,7 @@ struct kern_data_extra
 {
 	uint64_t	length;
 	uint64_t	usage;
+	uint64_t	deadspace;
 	char		data[1];
 };
 typedef struct kern_data_extra		kern_data_extra;
@@ -1214,6 +1215,23 @@ KDS_ARROW_REF_VARLENA_DATUM(kern_data_store *kds,
 		   offset[rowidx+1] <= __kds_unpack(cmeta->extra_length));
 	*p_length = offset[rowidx+1] - offset[rowidx];
 	return (extra + offset[rowidx]);	
+}
+
+INLINE_FUNCTION(bool)
+KDS_COLUMN_ITEM_ISNULL(const kern_data_store *kds,
+					   const kern_colmeta *cmeta,
+					   uint32_t rowid)
+{
+	uint8_t	   *bitmap;
+	uint8_t		mask = (1 << (rowid & 7));
+	uint8_t		idx = (rowid >> 3);
+
+	if (cmeta->nullmap_offset != 0 &&
+		idx >= __kds_unpack(cmeta->nullmap_length))
+		return false;	/* NOT NULL */
+	bitmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
+
+	return (bitmap[idx] & mask) != 0;
 }
 
 /*
@@ -1827,6 +1845,7 @@ typedef struct
 #define XpuCommandTag__SuccessFinal			50
 #define XpuCommandTag__OpenSession			100
 #define XpuCommandTag__XpuTaskExec			110
+#define XpuCommandTag__XpuTaskExecGpuCache	111
 #define XpuCommandTag__XpuTaskFinal			119
 #define XpuCommandMagicNumber				0xdeadbeafU
 
@@ -1889,17 +1908,6 @@ typedef struct {
 } kern_exec_task;
 
 typedef struct {
-	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
-	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
-	uint32_t	kds_src_offset;		/* offset to kds_src */
-	uint32_t	kds_dst_offset;		/* offset to kds_dst */
-	uint32_t	database_oid;		/* GpuCache identifier */
-	uint32_t	table_oid;			/* GpuCache identifier */
-	uint64_t	signature;			/* GpuCache identifier */
-	char		data[1]				__MAXALIGNED__;
-} kern_exec_task_gpucache;
-
-typedef struct {
 	bool		final_plan_node;
 	bool		final_this_device;
 	char		data[1]				__MAXALIGNED__;
@@ -1947,7 +1955,6 @@ typedef struct
 		kern_errorbuf		error;
 		kern_session_info	session;
 		kern_exec_task		task;
-		kern_exec_task_gpucache task_gc;
 		kern_final_task		fin;
 		kern_exec_results	results;
 	} u;

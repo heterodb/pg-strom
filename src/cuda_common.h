@@ -297,8 +297,8 @@ typedef struct {
 typedef struct {
 	uint32_t	type;
 	uint32_t	length;
-	uint32_t	xid;
 	uint32_t	rowid;
+	uint32_t	__padding__;
 	HeapTupleHeaderData htup;
 } GCacheTxLogInsert;
 
@@ -317,6 +317,7 @@ typedef struct {
 	uint32_t	type;
 	uint32_t	length;
 	uint32_t	rowid;
+	uint32_t	__padding__;
 } GCacheTxLogXact;
 
 /*
@@ -426,10 +427,30 @@ __atomic_add_fp64(float8_t *ptr, float8_t fval)
 }
 
 INLINE_FUNCTION(uint32_t)
+__atomic_and_uint32(uint32_t *ptr, uint32_t mask)
+{
+#ifdef __CUDACC__
+	return atomicAnd((unsigned int *)ptr, (unsigned int)mask);
+#else
+	return __atomic_fetch_and(ptr, mask, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_or_uint32(uint32_t *ptr, uint32_t mask)
+{
+#ifdef __CUDACC__
+	return atomicOr((unsigned int *)ptr, (unsigned int)mask);
+#else
+	return __atomic_fetch_or(ptr, mask, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
 __atomic_max_uint32(uint32_t *ptr, uint32_t ival)
 {
 #ifdef __CUDACC__
-	return atomicMin((unsigned int *)ptr, (unsigned int)ival);
+	return atomicMax((unsigned int *)ptr, (unsigned int)ival);
 #else
 	uint32_t	oldval = __volatileRead(ptr);
 

@@ -1024,7 +1024,7 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 
 	initStringInfo(&pts->xcmd_buf);
 	bufsz = MAXALIGN(offsetof(XpuCommand, u.task.data));
-	if (format == KDS_FORMAT_COLUMN)
+	if (pts->gcache_desc)
 		bufsz += MAXALIGN(sizeof(GpuCacheIdent));
 	if (tdesc_src)
 		bufsz += estimate_kern_data_store(tdesc_src);
@@ -1035,12 +1035,19 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
 	memset(xcmd, 0, offsetof(XpuCommand, u.task.data));
 	xcmd->magic = XpuCommandMagicNumber;
-	xcmd->tag   = XpuCommandTag__XpuTaskExec;
+	xcmd->tag   = (!pts->gcache_desc
+				   ? XpuCommandTag__XpuTaskExec
+				   : XpuCommandTag__XpuTaskExecGpuCache);
 	xcmd->length = bufsz;
 
 	off = offsetof(XpuCommand, u.task.data);
-	if (format == KDS_FORMAT_COLUMN)
-		off += MAXALIGN(sizeof(GpuCacheIdent));		/* to be set later */
+	if (pts->gcache_desc)
+	{
+		const GpuCacheIdent *ident = getGpuCacheDescIdent(pts->gcache_desc);
+
+		memcpy((char *)xcmd + off, ident, sizeof(GpuCacheIdent));
+		off += MAXALIGN(sizeof(GpuCacheIdent));
+	}
 	if (tdesc_dst)
 	{
 		xcmd->u.task.kds_dst_offset = off;

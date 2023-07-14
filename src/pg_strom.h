@@ -142,6 +142,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "xpu_common.h"
+#include "cuda_common.h"
 #include "pg_utils.h"
 #include "heterodb_extra.h"
 
@@ -772,6 +773,7 @@ extern void		pgstrom_init_gpu_cache(void);
 extern int		baseRelHasGpuCache(PlannerInfo *root,
 								   RelOptInfo *baserel);
 extern bool		RelationHasGpuCache(Relation rel);
+extern const GpuCacheIdent *getGpuCacheDescIdent(const GpuCacheDesc *gc_desc);
 extern GpuCacheDesc *pgstromGpuCacheExecInit(pgstromTaskState *pts);
 extern XpuCommand *pgstromGpuCacheNextChunk(pgstromTaskState *pts,
 											struct iovec *xcmd_iov,
@@ -791,6 +793,11 @@ extern void		gpucacheManagerEventLoop(int cuda_dindex,
 										 CUmodule cuda_module);
 extern void		gpucacheManagerWakeUp(int cuda_dindex);
 
+extern void	   *gpuCacheGetDeviceBuffer(const GpuCacheIdent *ident,
+										CUdeviceptr *p_gcache_main_devptr,
+										CUdeviceptr *p_gcache_extra_devptr,
+										char *errbuf, size_t errbuf_sz);
+extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
 
 /*
  * gpu_scan.c

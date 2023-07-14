@@ -81,47 +81,56 @@ CREATE FUNCTION pgstrom.arrow_fdw_import_file(text,	    -- relname
 -- GPU Cache Functions
 --
 -- ================================================================
-/*
+
 CREATE FUNCTION pgstrom.gpucache_sync_trigger()
   RETURNS trigger
   AS 'MODULE_PATHNAME','pgstrom_gpucache_sync_trigger'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pgstrom.gpucache_apply_redo(regclass)
-  RETURNS bigint
+  RETURNS void
   AS 'MODULE_PATHNAME','pgstrom_gpucache_apply_redo'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pgstrom.gpucache_compaction(regclass)
-  RETURNS bigint
+  RETURNS void
   AS 'MODULE_PATHNAME','pgstrom_gpucache_compaction'
   LANGUAGE C STRICT;
 
+CREATE FUNCTION pgstrom.gpucache_recovery(regclass)
+  RETURNS void
+  AS 'MODULE_PATHNAME','pgstrom_gpucache_recovery'
+  LANGUAGE C STRICT;
+
 CREATE TYPE pgstrom.__pgstrom_gpucache_info_t AS (
-  database_oid			oid,
-  database_name			text,
-  table_oid				oid,
-  table_name			text,
-  signature				int8,
-  refcnt				int4,
-  corrupted				bool,
-  gpu_main_sz			int8,
-  gpu_extra_sz			int8,
-  redo_write_ts			timestamptz,
-  redo_write_nitems		int8,
-  redo_write_pos		int8,
-  redo_read_nitems		int8,
-  redo_read_pos			int8,
-  redo_sync_pos			int8,
-  config_options		text
+    database_oid        oid,
+    database_name       text,
+    table_oid           oid,
+    table_name          text,
+    signature           int8,
+    phase               text,
+    rowid_num_used      int8,
+    rowid_num_free      int8,
+    gpu_main_sz         int8,
+	gpu_main_nitems     int8,
+    gpu_extra_sz        int8,
+	gpu_extra_usage     int8,
+	gpu_extra_dead      int8,
+    redo_write_ts       timestamptz,
+    redo_write_nitems   int8,
+    redo_write_pos      int8,
+    redo_read_nitems    int8,
+    redo_read_pos       int8,
+    redo_sync_pos       int8,
+    config_options      text
 );
+
 CREATE FUNCTION pgstrom.__pgstrom_gpucache_info()
   RETURNS SETOF pgstrom.__pgstrom_gpucache_info_t
   AS 'MODULE_PATHNAME','pgstrom_gpucache_info'
   LANGUAGE C STRICT;
 CREATE VIEW pgstrom.gpucache_info AS
   SELECT * FROM pgstrom.__pgstrom_gpucache_info();
-*/
 
 -- ==================================================================
 --

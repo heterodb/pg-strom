@@ -323,8 +323,59 @@ __gpuscan_load_source_arrow(kern_context *kcxt,
 }
 
 /*
- * __gpuscan_load_source_column
+ * __gpuscan_load_source_column (KDS_FORMAT_COLUMN)
  */
+INLINE_FUNCTION(GpuCacheSysattr *)
+kds_column_get_sysattr(const kern_data_store *kds, uint32_t rowid)
+{
+	const kern_colmeta *cmeta = &kds->colmeta[kds->nr_colmeta - 1];
+	GpuCacheSysattr	   *base;
+
+	assert(!cmeta->attbyval &&
+		   cmeta->attalign == sizeof(uint32_t) &&
+		   cmeta->attlen == sizeof(GpuCacheSysattr) &&
+		   cmeta->nullmap_offset == 0);
+	base = (GpuCacheSysattr *)
+		((char *)kds + __kds_unpack(cmeta->values_offset));
+	if (rowid < kds->column_nrooms)
+		return &base[rowid];
+	return NULL;
+}
+
+STATIC_FUNCTION(bool)
+kds_column_check_visibility(kern_context *kcxt,
+							const kern_data_store *kds,
+							uint32_t rowid)
+{
+	SerializedTransactionState *xstate = SESSION_XACT_STATE(kcxt->session);
+	GpuCacheSysattr *sysattr = kds_column_get_sysattr(kds, rowid);
+
+	assert(xstate != NULL && sysattr != NULL);
+
+	if (sysattr->xmin == InvalidTransactionId)
+		return false;
+	if (sysattr->xmin != FrozenTransactionId)
+	{
+		for (int i=0; i < xstate->nParallelCurrentXids; i++)
+		{
+			if (sysattr->xmin == xstate->parallelCurrentXids[i])
+				goto xmin_is_visible;
+		}
+		return false;
+	}
+xmin_is_visible:
+	if (sysattr->xmax == InvalidTransactionId)
+		return true;
+	if (sysattr->xmax == FrozenTransactionId)
+		return false;
+	for (int i=0; i < xstate->nParallelCurrentXids; i++)
+	{
+		if (sysattr->xmax == xstate->parallelCurrentXids[i])
+			return false;
+	}
+	return true;
+}
+
 STATIC_FUNCTION(int)
 __gpuscan_load_source_column(kern_context *kcxt,
 							 kern_warp_context *wp,
@@ -355,7 +406,8 @@ __gpuscan_load_source_column(kern_context *kcxt,
 	}
 	index += LaneId();
 
-	if (index < kds_src->nitems)
+	if (index < kds_src->nitems &&
+		kds_column_check_visibility(kcxt, kds_src, index))
 	{
 		kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
 		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
@@ -457,23 +509,6 @@ execGpuScanLoadSource(kern_context *kcxt,
  *
  * ------------------------------------------------------------
  */
-INLINE_FUNCTION(GpuCacheSysattr *)
-kds_column_get_sysattr(kern_data_store *kds, uint32_t rowid)
-{
-	const kern_colmeta *cmeta = &kds->colmeta[kds->nr_colmeta - 1];
-	GpuCacheSysattr	   *base;
-
-	assert(!cmeta->attbyval &&
-		   cmeta->attalign == sizeof(uint32_t) &&
-		   cmeta->attlen == sizeof(GpuCacheSysattr) &&
-		   cmeta->nullmap_offset == 0);
-	base = (GpuCacheSysattr *)
-		((char *)kds + __kds_unpack(cmeta->values_offset));
-	if (rowid < kds->column_nrooms)
-		return &base[rowid];
-	return NULL;
-}
-
 STATIC_FUNCTION(void)
 gpucache_cleanup_row_owner(kern_context *kcxt,
 						   kern_gpucache_redolog *redo,
@@ -492,25 +527,23 @@ gpucache_cleanup_row_owner(kern_context *kcxt,
 
 		tx_log = (GCacheTxLogCommon *)
 			((char *)redo + __kds_unpack(offset));
-		if (tx_log->type == GCACHE_TX_LOG__MAGIC)
+		switch (tx_log->type)
 		{
-			rowid = ((GCacheTxLogInsert *)tx_log)->rowid;
-		}
-		else if (tx_log->type == GCACHE_TX_LOG__DELETE)
-		{
-			rowid = ((GCacheTxLogDelete *)tx_log)->rowid;
-		}
-		else if (tx_log->type == GCACHE_TX_LOG__COMMIT_INS ||
-				 tx_log->type == GCACHE_TX_LOG__COMMIT_DEL ||
-				 tx_log->type == GCACHE_TX_LOG__ABORT_INS ||
-				 tx_log->type == GCACHE_TX_LOG__ABORT_DEL)
-		{
-			rowid = ((GCacheTxLogXact *)tx_log)->rowid;
-		}
-		else
-		{
-			STROM_ELOG(kcxt, "unknown GCacheTxLog type");
-			break;
+			case GCACHE_TX_LOG__INSERT:
+				rowid = ((GCacheTxLogInsert *)tx_log)->rowid;
+				break;
+			case GCACHE_TX_LOG__DELETE:
+				rowid = ((GCacheTxLogDelete *)tx_log)->rowid;
+				break;
+			case GCACHE_TX_LOG__COMMIT_INS:
+			case GCACHE_TX_LOG__COMMIT_DEL:
+			case GCACHE_TX_LOG__ABORT_INS:
+			case GCACHE_TX_LOG__ABORT_DEL:
+				rowid = ((GCacheTxLogXact *)tx_log)->rowid;
+				break;
+			default:
+				STROM_ELOG(kcxt, "unknown GCacheTxLog type");
+				return;
 		}
 		assert(rowid < kds->column_nrooms);
 		sysattr = kds_column_get_sysattr(kds, rowid);
@@ -536,7 +569,7 @@ gpucache_assign_update_owner(kern_context *kcxt,
 
 		tx_log = (GCacheTxLogCommon *)
 			((char *)redo + __kds_unpack(offset));
-		if (tx_log->type == GCACHE_TX_LOG__MAGIC)
+		if (tx_log->type == GCACHE_TX_LOG__INSERT)
 		{
 			rowid = ((GCacheTxLogInsert *)tx_log)->rowid;
 			sysattr = kds_column_get_sysattr(kds, rowid);
@@ -551,12 +584,143 @@ gpucache_assign_update_owner(kern_context *kcxt,
 	}
 }
 
+STATIC_FUNCTION(bool)
+__gpucache_apply_insert_log(kern_context *kcxt,
+							kern_data_store *kds,
+							kern_data_extra *extra,
+							GpuCacheSysattr *sysattr,
+							const GCacheTxLogInsert *i_log)
+{
+	const HeapTupleHeaderData *htup = &i_log->htup;
+	uint32_t	rowid = i_log->rowid;
+	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+	uint32_t	offset = htup->t_hoff;
+	int			j, ncols = Min(kds->ncols, (htup->t_infomask2 & HEAP_NATTS_MASK));
+
+	for (j=0; j < ncols; j++)
+	{
+		const kern_colmeta *cmeta = &kds->colmeta[j];
+		char	   *base;
+
+		if (cmeta->nullmap_offset != 0)
+		{
+			uint32_t   *nullmap = (uint32_t *)
+				((char *)kds + __kds_unpack(cmeta->nullmap_offset));
+
+			if (heap_hasnull && att_isnull(j, htup->t_bits))
+			{
+				__atomic_and_uint32(&nullmap[rowid>>5], ~(1U<<(rowid&31)));
+				continue;
+			}
+			else
+			{
+				__atomic_or_uint32(&nullmap[rowid>>5], (1U<<(rowid&31)));
+			}
+		}
+		else
+		{
+			if (heap_hasnull && att_isnull(j, htup->t_bits))
+			{
+				STROM_ELOG(kcxt, "NULL appeared at not-null column");
+				return false;
+			}
+		}
+
+		assert(cmeta->values_offset != 0);
+		base = (char *)kds + __kds_unpack(cmeta->values_offset);
+		if (cmeta->attlen > 0)
+		{
+			offset = TYPEALIGN(cmeta->attalign, offset);
+			memcpy(base + cmeta->attlen * rowid,
+				   (char *)htup + offset,
+				   cmeta->attlen);
+			offset += cmeta->attlen;
+		}
+		else
+		{
+			char	   *vl_pos;
+			uint32_t	vl_len;
+			uint32_t	vl_off;
+
+			if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
+				offset = TYPEALIGN(cmeta->attalign, offset);
+			vl_pos = (char *)htup + offset;
+			vl_len = VARSIZE_ANY(vl_pos);
+			vl_off = __atomic_add_uint64(&extra->usage, MAXALIGN(vl_len));
+			if (vl_off + vl_len > extra->length)
+			{
+				STROM_EREPORT(kcxt, ERRCODE_BUFFER_NO_SPACE,
+							  "gpucache: extra buffer has no space");
+				return false;
+			}
+			memcpy((char *)extra + vl_off,
+				   (char *)htup + offset,
+				   vl_len);
+			((uint32_t *)base)[rowid] = __kds_packed(vl_off);
+			offset += vl_len;
+		}
+	}
+	sysattr->xmin = htup->t_choice.t_heap.t_xmin;
+	sysattr->xmax = htup->t_choice.t_heap.t_xmax;
+	
+	return true;
+}
+
 STATIC_FUNCTION(void)
 gpucache_apply_update_logs(kern_context *kcxt,
 						   kern_gpucache_redolog *redo,
 						   kern_data_store *kds,
 						   kern_data_extra *extra)
-{}
+{
+	__shared__ uint32_t smx_rowid_max;
+	uint32_t	rowid_max = UINT_MAX;
+	uint32_t	owner_id;
+
+	if (get_local_id() == 0)
+		smx_rowid_max = 0;
+	__syncthreads();
+
+	for (owner_id = get_global_id();
+		 owner_id < redo->nitems;
+		 owner_id += get_global_size())
+	{
+		GCacheTxLogCommon *tx_log;
+		GpuCacheSysattr *sysattr;
+		uint32_t		offset = redo->redo_items[owner_id];
+
+		tx_log = (GCacheTxLogCommon *)
+			((char *)redo + __kds_unpack(offset));
+		if (tx_log->type == GCACHE_TX_LOG__INSERT)
+		{
+			GCacheTxLogInsert  *i_log = (GCacheTxLogInsert *)tx_log;
+
+			sysattr = kds_column_get_sysattr(kds, i_log->rowid);
+			if (sysattr->owner == owner_id)
+			{
+				__gpucache_apply_insert_log(kcxt, kds, extra, sysattr, i_log);
+				if (rowid_max == UINT_MAX || rowid_max < i_log->rowid)
+					rowid_max = i_log->rowid;
+			}
+		}
+		else if (tx_log->type == GCACHE_TX_LOG__DELETE)
+		{
+			GCacheTxLogDelete  *d_log = (GCacheTxLogDelete *)tx_log;
+
+			sysattr = kds_column_get_sysattr(kds, d_log->rowid);
+			if (sysattr->owner == owner_id)
+			{
+				sysattr->xmax = d_log->xid;
+				if (rowid_max == UINT_MAX || rowid_max < d_log->rowid)
+					rowid_max = d_log->rowid;
+			}
+		}
+	}
+	/* update kds->nitems */
+	if (rowid_max != UINT_MAX)
+		__atomic_max_uint32(&smx_rowid_max, rowid_max);
+	if (__syncthreads_count(rowid_max != UINT_MAX) > 0 && get_local_id() == 0)
+		__atomic_max_uint32(&kds->nitems, smx_rowid_max+1);
+}
 
 STATIC_FUNCTION(void)
 gpucache_assign_xact_owner(kern_context *kcxt,
@@ -588,13 +752,54 @@ gpucache_assign_xact_owner(kern_context *kcxt,
 	}
 }
 
+STATIC_FUNCTION(uint64_t)
+__gpucache_count_deadspace(kern_data_store *kds,
+						   kern_data_extra *extra,
+						   uint32_t rowid)
+{
+	uint64_t	retval = 0;
+
+	if (kds->has_varlena)
+	{
+		assert(rowid < kds->column_nrooms);
+		for (int j=0; j < kds->ncols; j++)
+		{
+			const kern_colmeta *cmeta = &kds->colmeta[j];
+
+			if (cmeta->attlen > 0)
+				continue;
+			assert(cmeta->attlen == -1);
+			if (!KDS_COLUMN_ITEM_ISNULL(kds, cmeta, rowid))
+			{
+				uint32_t   *base = (uint32_t *)((char *)kds + cmeta->values_offset);
+				char	   *vl = (char *)extra + __kds_unpack(base[rowid]);
+
+				retval += MAXALIGN(VARSIZE_ANY(vl));
+			}
+		}
+	}
+	return retval;
+}
+
+
 STATIC_FUNCTION(void)
 gpucache_apply_xact_logs(kern_context *kcxt,
 						 kern_gpucache_redolog *redo,
 						 kern_data_store *kds,
 						 kern_data_extra *extra)
 {
+	__shared__ uint32_t smx_rowid_max;
+	__shared__ uint64_t smx_deadspace;
+	uint32_t	rowid_max = UINT_MAX;
 	uint32_t	owner_id;
+	uint64_t	sz;
+
+	if (get_local_id() == 0)
+	{
+		smx_rowid_max = 0;
+		smx_deadspace = 0;
+	}
+	__syncthreads();
 
 	for (owner_id = get_global_id();
 		 owner_id < redo->nitems;
@@ -603,7 +808,6 @@ gpucache_apply_xact_logs(kern_context *kcxt,
 		GCacheTxLogXact *tx_log;
 		GpuCacheSysattr *sysattr;
 		uint32_t		offset = redo->redo_items[owner_id];
-		uint32_t		rowid;
 
 		tx_log = (GCacheTxLogXact *)
 			((char *)redo + __kds_unpack(offset));
@@ -611,25 +815,60 @@ gpucache_apply_xact_logs(kern_context *kcxt,
 		{
 			case GCACHE_TX_LOG__COMMIT_INS:
 				sysattr = kds_column_get_sysattr(kds, tx_log->rowid);
-				//do commit insert
+				if (sysattr->owner == owner_id)
+				{
+					sysattr->xmin = FrozenTransactionId;
+					if (rowid_max == UINT_MAX || rowid_max < tx_log->rowid)
+						rowid_max = tx_log->rowid;
+				}
 				break;
 			case GCACHE_TX_LOG__COMMIT_DEL:
 				sysattr = kds_column_get_sysattr(kds, tx_log->rowid);
-				//do commit delete
+				if (sysattr->owner == owner_id)
+				{
+					sysattr->xmax = FrozenTransactionId;
+					if (rowid_max == UINT_MAX || rowid_max < tx_log->rowid)
+						rowid_max = tx_log->rowid;
+					sz = __gpucache_count_deadspace(kds, extra, tx_log->rowid);
+					if (sz > 0)
+						__atomic_add_uint64(&smx_deadspace, sz);
+				}
 				break;
 			case GCACHE_TX_LOG__ABORT_INS:
 				sysattr = kds_column_get_sysattr(kds, tx_log->rowid);
-				//do abort insert
+				if (sysattr->owner == owner_id)
+				{
+					sysattr->xmin = InvalidTransactionId;
+					if (rowid_max == UINT_MAX || rowid_max < tx_log->rowid)
+						rowid_max = tx_log->rowid;
+					sz = __gpucache_count_deadspace(kds, extra, tx_log->rowid);
+					if (sz > 0)
+						__atomic_add_uint64(&smx_deadspace, sz);
+				}
 				break;
 			case GCACHE_TX_LOG__ABORT_DEL:
 				sysattr = kds_column_get_sysattr(kds, tx_log->rowid);
-//				if (sysattr->owner_id == owner_id)
-//					sysattr->xmax = tx_log->xid;
-				//do abort delete
+				if (sysattr->owner == owner_id)
+				{
+					sysattr->xmax = InvalidTransactionId;
+					if (rowid_max == UINT_MAX || rowid_max < tx_log->rowid)
+						rowid_max = tx_log->rowid;
+				}
 				break;
 			default:
 				break;
 		}
+	}
+	/* update kds->nitems */
+	if (rowid_max != UINT_MAX)
+		__atomic_max_uint32(&smx_rowid_max, rowid_max);
+	if (__syncthreads_count(rowid_max != UINT_MAX) > 0 && get_local_id() == 0)
+		__atomic_max_uint32(&kds->nitems, smx_rowid_max+1);
+	/* update extra->deadspace */
+	if (get_local_id() == 0 && smx_deadspace > 0)
+	{
+		assert(extra != NULL);
+		__atomic_add_uint64(&extra->deadspace, smx_deadspace);
 	}
 }
 
@@ -671,6 +910,8 @@ kern_gpucache_apply_redo(kern_gpucache_redolog *gcache_redo,
 			break;
 	}
 	STROM_WRITEBACK_ERROR_STATUS(&gcache_redo->kerror, &kcxt);
+	if (get_global_id() == 0)
+		printf("phase %u done\n", phase);
 }
 
 KERNEL_FUNCTION(void)

@@ -18,6 +18,7 @@
 #define GCACHE_CONTROL_CMD__APPLY_REDO		'A'
 #define GCACHE_CONTROL_CMD__COMPACTION		'C'
 #define GCACHE_CONTROL_CMD__DROP_UNLOAD		'D'
+#define GCACHE_CONTROL_CMD__ERRORBUF_SIZE	120
 
 typedef struct
 {
@@ -26,7 +27,8 @@ typedef struct
 	Latch	   *backend;
 	int			command;	/* one of GCACHE_CONTROL_CMD__* */
 	uint64_t	end_pos;	/* for APPLY_REDO */
-	CUresult	retval;
+	int			errcode;
+	char		errbuf[GCACHE_CONTROL_CMD__ERRORBUF_SIZE];
 } GpuCacheControlCommand;
 
 /*
@@ -42,7 +44,7 @@ typedef struct
 	/* IPC to GpuService background workers */
 	pthread_mutex_t	gcache_cmd_mutex;
 	dlist_head		gcache_free_cmds;
-	GpuCacheControlCommand __gcache_control_cmds[400];
+	GpuCacheControlCommand __gcache_control_cmds[100];
 	struct {
 		pthread_cond_t	cond;
 		dlist_head		queue;
@@ -88,12 +90,6 @@ typedef struct
 
 	/* GpuCache configuration parameters */
 	GpuCacheOptions	gc_options;
-	int64_t			max_num_rows;
-	int64_t			rowid_hash_nslots;
-	int32_t			cuda_dindex;
-	size_t			redo_buffer_size;
-	size_t			gpu_sync_threshold;
-	int32_t			gpu_sync_interval;
 
 	/* current status */
 #define GCACHE_PHASE__NOT_BUILT			0	/* not built yet */
@@ -104,7 +100,10 @@ typedef struct
 
 	/* device memory allocation (just for information) */
 	pg_atomic_uint64 gcache_main_size;
+	pg_atomic_uint64 gcache_main_nitems;
     pg_atomic_uint64 gcache_extra_size;
+	pg_atomic_uint64 gcache_extra_usage;	/* used in extra buffer (incl dead space) */
+	pg_atomic_uint64 gcache_extra_dead;		/* dead space in extra buffer */
 
 	/* rowid-map propertoes */
 	pthread_mutex_t	rowid_mutex;
@@ -156,7 +155,7 @@ INLINE_FUNCTION(GpuCacheRowIdItem *)
 gpuCacheRowIdItemArray(GpuCacheSharedState *gc_sstate)
 {
 	return (GpuCacheRowIdItem *)
-		(gpuCacheRowIdHashSlot(gc_sstate) + gc_sstate->rowid_hash_nslots);
+		(gpuCacheRowIdHashSlot(gc_sstate) + gc_sstate->gc_options.rowid_hash_nslots);
 }
 
 /*
@@ -212,13 +211,7 @@ static object_access_hook_type object_access_next = NULL;
 /* --- function declarations --- */
 static bool		__gpuCacheAppendLog(GpuCacheDesc *gc_desc,
 									GCacheTxLogCommon *tx_log);
-
-static CUresult gpuCacheInvokeApplyRedo(const GpuCacheDesc *gc_desc,
-										uint64 end_pos,
-										bool is_async);
-static CUresult gpuCacheInvokeCompaction(const GpuCacheDesc *gc_desc,
-										 bool is_async);
-static CUresult gpuCacheInvokeDropUnload(const GpuCacheDesc *gc_desc,
+static void		gpuCacheInvokeDropUnload(const GpuCacheDesc *gc_desc,
 										 bool is_async);
 void	gpuCacheStartupPreloader(Datum arg);
 PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
@@ -895,6 +888,8 @@ __setup_kern_data_store_column(kern_data_store *kds_head,
 
 /*
  * __openGpuCacheSharedState
+ *
+ * NOTE: caller must hold gcache_shared_mapping_lock
  */
 static GpuCacheLocalMapping *
 __openGpuCacheSharedState(Oid database_oid,
@@ -907,10 +902,9 @@ __openGpuCacheSharedState(Oid database_oid,
 	char		namebuf[MAXPGPATH];
 	size_t		off;
 	dlist_head *hslot;
-	dlist_iter	iter;
 	GpuCacheSharedState *gc_sstate = MAP_FAILED;
 	GpuCacheLocalMapping *gc_lmap;
-
+	
 	GpuCacheSharedStateName(namebuf, MAXPGPATH,
 							database_oid,
 							table_oid,
@@ -941,7 +935,7 @@ __openGpuCacheSharedState(Oid database_oid,
 	gc_sstate = mmap(NULL, stat_buf.st_size,
 					 PROT_READ | PROT_WRITE,
 					 MAP_SHARED,
-					 fdesc, stat_buf.st_size);
+					 fdesc, 0);
 	if (gc_sstate == MAP_FAILED)
 	{
 		snprintf(errbuf, errbuf_sz,
@@ -989,14 +983,14 @@ __openGpuCacheSharedState(Oid database_oid,
 				 "GpuCacheSharedState validation error");
 		goto bailout;
 	}
-	off += PAGE_ALIGN(sizeof(uint32_t) * gc_sstate->rowid_hash_nslots +
-					  sizeof(GpuCacheRowIdItem) * gc_sstate->max_num_rows);
+	off += PAGE_ALIGN(sizeof(uint32_t) * gc_sstate->gc_options.rowid_hash_nslots +
+					  sizeof(GpuCacheRowIdItem) * gc_sstate->gc_options.max_num_rows);
 	if (off != gc_sstate->redo_buffer_offset)
 	{
 		snprintf(errbuf, errbuf_sz, "GpuCacheSharedState validation error");
 		goto bailout;
 	}
-	off += gc_sstate->redo_buffer_size;
+	off += gc_sstate->gc_options.redo_buffer_size;
 	if (off != stat_buf.st_size)
 	{
 		snprintf(errbuf, errbuf_sz,
@@ -1006,28 +1000,11 @@ __openGpuCacheSharedState(Oid database_oid,
 
 	/*
 	 * Append to the hash-slot
+	 * (note: caller already holds gcache_shared_mapping_lock)
 	 */
-	hslot = __gpuCacheSharedMappingHashSlot(database_oid,
-											table_oid,
-											signature);
-	pthreadMutexLock(&gcache_shared_mapping_lock);
-	dlist_foreach (iter, hslot)
-	{
-		gc_lmap = dlist_container(GpuCacheLocalMapping,
-								  chain, iter.cur);
-		if (gc_lmap->ident.database_oid == database_oid &&
-            gc_lmap->ident.table_oid    == table_oid    &&
-            gc_lmap->ident.signature    == signature)
-        {
-			gc_lmap->refcnt += 2;
-			munmap(gc_sstate, stat_buf.st_size);
-			goto found;
-		}
-	}
 	gc_lmap = calloc(1, sizeof(GpuCacheLocalMapping));
 	if (!gc_lmap)
 	{
-		pthreadMutexUnlock(&gcache_shared_mapping_lock);
 		snprintf(errbuf, errbuf_sz, "out of memory");
 		goto bailout;
 	}
@@ -1039,9 +1016,10 @@ __openGpuCacheSharedState(Oid database_oid,
 	gc_lmap->gc_sstate = gc_sstate;
 	gc_lmap->mmap_sz = stat_buf.st_size;
 	pthreadRWLockInit(&gc_lmap->gcache_rwlock);
-found:
+	hslot = __gpuCacheSharedMappingHashSlot(database_oid,
+											table_oid,
+											signature);
 	dlist_push_tail(hslot, &gc_lmap->chain);
-	pthreadMutexUnlock(&gcache_shared_mapping_lock);
 
 	close(fdesc);
 
@@ -1176,10 +1154,10 @@ __createGpuCacheSharedState(Relation rel,
 		gc_lmap->mmap_sz      = mmap_sz;
 		pthreadRWLockInit(&gc_lmap->gcache_rwlock);
 
-		pthreadMutexLock(&gcache_shared_mapping_lock);
 		hslot = __gpuCacheSharedMappingHashSlot(MyDatabaseId,
 												RelationGetRelid(rel),
 												signature);
+		pthreadMutexLock(&gcache_shared_mapping_lock);
 		dlist_push_tail(hslot, &gc_lmap->chain);
 		pthreadMutexUnlock(&gcache_shared_mapping_lock);
 	}
@@ -1230,11 +1208,12 @@ getGpuCacheLocalMappingIfExist(Oid database_oid,
 			return gc_lmap;
 		}
 	}
-	pthreadMutexUnlock(&gcache_shared_mapping_lock);
 	gc_lmap = __openGpuCacheSharedState(database_oid,
 										table_oid,
 										signature,
 										errbuf, sizeof(errbuf));
+
+	pthreadMutexUnlock(&gcache_shared_mapping_lock);
 	if (!gc_lmap)
 		elog(ERROR, "%s: %s", __FUNCTION__, errbuf);
 	return (gc_lmap != MAP_FAILED ? gc_lmap : NULL);
@@ -1298,6 +1277,12 @@ __removeGpuCacheLocalMapping(GpuCacheLocalMapping *gc_lmap)
 		if (rc != CUDA_SUCCESS)
 			fprintf(stderr, "failed on cuMemFree: %s\n", cuStrError(rc));
 	}
+
+	if (gc_lmap->gcache_main_devptr != 0UL)
+		fprintf(stderr, "%s: main %llu, extra %llu\n",
+				__FUNCTION__,
+				gc_lmap->gcache_main_devptr,
+				gc_lmap->gcache_extra_devptr);
 	free(gc_lmap);
 }
 
@@ -1349,6 +1334,15 @@ unmapGpuCacheLocalMapping(Oid table_oid)
 	pthreadMutexUnlock(&gcache_shared_mapping_lock);
 }
 
+/*
+ * getGpuCacheDescIdent
+ */
+const GpuCacheIdent *
+getGpuCacheDescIdent(const GpuCacheDesc *gc_desc)
+{
+	return &gc_desc->ident;
+}
+
 /* ------------------------------------------------------------
  *
  * Routines to manage RowId
@@ -1365,11 +1359,11 @@ __allocGpuCacheRowId(GpuCacheLocalMapping *gc_lmap, const ItemPointer ctid)
 	uint32_t	rowid;
 
 	hash = hash_bytes((unsigned char *)ctid, sizeof(ItemPointerData));
-	hindex = (hash % gc_sstate->rowid_hash_nslots);
+	hindex = (hash % gc_sstate->gc_options.rowid_hash_nslots);
 
 	pthreadMutexLock(&gc_sstate->rowid_mutex);
 	rowid = gc_sstate->rowid_next_free;
-	if (rowid < gc_sstate->max_num_rows)
+	if (rowid < gc_sstate->gc_options.max_num_rows)
 	{
 		GpuCacheRowIdItem *ritem = &rowitems[rowid];
 
@@ -1400,8 +1394,8 @@ __lookupGpuCacheRowId(GpuCacheLocalMapping *gc_lmap, const ItemPointer ctid)
 	hash = hash_bytes((unsigned char *)ctid, sizeof(ItemPointerData));
 
 	pthreadMutexLock(&gc_sstate->rowid_mutex);
-	rowid = hslot[hash % gc_sstate->rowid_hash_nslots];
-	while (rowid < gc_sstate->max_num_rows)
+	rowid = hslot[hash % gc_sstate->gc_options.rowid_hash_nslots];
+	while (rowid < gc_sstate->gc_options.max_num_rows)
 	{
 		GpuCacheRowIdItem *ritem = &rowitems[rowid];
 
@@ -1427,9 +1421,9 @@ __removeGpuCacheRowId(GpuCacheLocalMapping *gc_lmap, const ItemPointer ctid)
 	hash = hash_bytes((unsigned char *)ctid, sizeof(ItemPointerData));
 
 	pthreadMutexLock(&gc_sstate->rowid_mutex);
-	prev = &hslot[hash % gc_sstate->rowid_hash_nslots];
+	prev = &hslot[hash % gc_sstate->gc_options.rowid_hash_nslots];
 	for (rowid = *prev;
-		 rowid < gc_sstate->max_num_rows;
+		 rowid < gc_sstate->gc_options.max_num_rows;
 		 rowid = *prev)
 	{
 		GpuCacheRowIdItem *ritem = &rowitems[rowid];
@@ -1539,7 +1533,7 @@ lookupGpuCacheDesc(Relation rel)
     hkey.ident.database_oid = MyDatabaseId;
 	hkey.ident.table_oid = RelationGetRelid(rel);
 	hkey.ident.signature = signature;
-	hkey.xid = GetCurrentTransactionIdIfAny();
+	hkey.xid = GetCurrentTransactionId();
 	Assert(TransactionIdIsValid(hkey.xid));
 
 	gc_desc = hash_search(gcache_descriptors_htab,
@@ -1629,7 +1623,7 @@ releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool normal_commit)
 			}
 			if (!__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)&tx_log))
 				elog(WARNING, "Bug? unable to write out GpuCache Log");
-			pos += tx_log.length;
+			pos += sizeof(PendingCtidItem);
 		}
 		putGpuCacheLocalMapping(gc_desc->gc_lmap);
 	}
@@ -2036,7 +2030,7 @@ initialLoadGpuCache(GpuCacheDesc *gc_desc, Relation rel)
 /*
  * __gpuCacheInvokeBackgroundCommand
  */
-static CUresult
+static void
 __gpuCacheInvokeBackgroundCommand(const GpuCacheIdent *ident,
 								  int cuda_dindex,
 								  bool is_async,
@@ -2045,11 +2039,10 @@ __gpuCacheInvokeBackgroundCommand(const GpuCacheIdent *ident,
 {
 	GpuCacheControlCommand *cmd = NULL;
 	dlist_node	   *dnode;
-	CUresult		retval = CUDA_SUCCESS;
 
 	Assert(cuda_dindex >= 0 && cuda_dindex < numGpuDevAttrs);
 	pthreadMutexLock(&gcache_shared_head->gcache_cmd_mutex);
-	while (!dlist_is_empty(&gcache_shared_head->gcache_free_cmds))
+	while (dlist_is_empty(&gcache_shared_head->gcache_free_cmds))
 	{
 		pthreadMutexUnlock(&gcache_shared_head->gcache_cmd_mutex);
 		CHECK_FOR_INTERRUPTS();
@@ -2066,7 +2059,7 @@ __gpuCacheInvokeBackgroundCommand(const GpuCacheIdent *ident,
 	cmd->backend = (is_async ? NULL : MyLatch);
 	cmd->command = command;
 	cmd->end_pos = end_pos;
-	cmd->retval = (CUresult) UINT_MAX;
+	cmd->errcode = -1;
 
 	pthreadMutexLock(&gcache_shared_head->gcache_cmd_mutex);
 	dlist_push_tail(&gcache_shared_head->gpus[cuda_dindex].queue,
@@ -2076,8 +2069,11 @@ __gpuCacheInvokeBackgroundCommand(const GpuCacheIdent *ident,
 
 	if (!is_async)
 	{
+		int		errcode;
+		char	errbuf[GCACHE_CONTROL_CMD__ERRORBUF_SIZE];
+
 		pthreadMutexLock(&gcache_shared_head->gcache_cmd_mutex);
-		while (cmd->retval == (CUresult) UINT_MAX)
+		while (cmd->errcode < 0)
 		{
 			pthreadMutexUnlock(&gcache_shared_head->gcache_cmd_mutex);
 			PG_TRY();
@@ -2098,7 +2094,7 @@ __gpuCacheInvokeBackgroundCommand(const GpuCacheIdent *ident,
 			PG_CATCH();
 			{
 				pthreadMutexLock(&gcache_shared_head->gcache_cmd_mutex);
-				if (cmd->retval == (CUresult) UINT_MAX)
+				if (cmd->errcode < 0)
 				{
 					/*
 					 * If not completed yet, the command is switched to
@@ -2119,53 +2115,56 @@ __gpuCacheInvokeBackgroundCommand(const GpuCacheIdent *ident,
 			PG_END_TRY();
 			pthreadMutexLock(&gcache_shared_head->gcache_cmd_mutex);
 		}
-		retval = cmd->retval;
+		errcode = cmd->errcode;
+		if (errcode)
+			strcpy(errbuf, cmd->errbuf);
 		dlist_push_tail(&gcache_shared_head->gcache_free_cmds,
 						&cmd->chain);
 		pthreadMutexUnlock(&gcache_shared_head->gcache_cmd_mutex);
+		if (errcode)
+			elog(ERROR, "gpucache: %s (cmd='%c')", errbuf, command);
 	}
-	return retval;
 }
 
 /*
  * GCACHE_BGWORKER_CMD__APPLY_REDO
  */
-static CUresult
+static void
 gpuCacheInvokeApplyRedo(const GpuCacheDesc *gc_desc,
 						uint64 sync_pos,
 						bool is_async)
 {
-	return __gpuCacheInvokeBackgroundCommand(&gc_desc->ident,
-											 gc_desc->gc_options.cuda_dindex,
-											 is_async,
-											 GCACHE_CONTROL_CMD__APPLY_REDO,
-											 sync_pos);
+	__gpuCacheInvokeBackgroundCommand(&gc_desc->ident,
+									  gc_desc->gc_options.cuda_dindex,
+									  is_async,
+									  GCACHE_CONTROL_CMD__APPLY_REDO,
+									  sync_pos);
 }
 
 /*
  * GCACHE_BGWORKER_CMD__COMPACTION
  */
-static CUresult
+static void
 gpuCacheInvokeCompaction(const GpuCacheDesc *gc_desc, bool is_async)
 {
-	return __gpuCacheInvokeBackgroundCommand(&gc_desc->ident,
-											 gc_desc->gc_options.cuda_dindex,
-											 is_async,
-											 GCACHE_CONTROL_CMD__COMPACTION,
-											 0);
+	__gpuCacheInvokeBackgroundCommand(&gc_desc->ident,
+									  gc_desc->gc_options.cuda_dindex,
+									  is_async,
+									  GCACHE_CONTROL_CMD__COMPACTION,
+									  0);
 }
 
 /*
  * GCACHE_BGWORKER_CMD__DROP_UNLOAD
  */
-static CUresult
+static void
 gpuCacheInvokeDropUnload(const GpuCacheDesc *gc_desc, bool is_async)
 {
-	return __gpuCacheInvokeBackgroundCommand(&gc_desc->ident,
-											 gc_desc->gc_options.cuda_dindex,
-											 is_async,
-											 GCACHE_CONTROL_CMD__DROP_UNLOAD,
-											 0);
+	__gpuCacheInvokeBackgroundCommand(&gc_desc->ident,
+									  gc_desc->gc_options.cuda_dindex,
+									  is_async,
+									  GCACHE_CONTROL_CMD__DROP_UNLOAD,
+									  0);
 }
 
 /*
@@ -2176,7 +2175,7 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 {
 	GpuCacheSharedState *gc_sstate = gc_desc->gc_lmap->gc_sstate;
 	char	   *redo_buffer = gpuCacheRedoLogBuffer(gc_sstate);
-	size_t		buffer_sz = gc_sstate->redo_buffer_size;
+	size_t		buffer_sz = gc_sstate->gc_options.redo_buffer_size;
 	bool		append_done = false;
 
 	Assert(tx_log->length == MAXALIGN(tx_log->length));
@@ -2193,7 +2192,8 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 		phase = pg_atomic_read_u32(&gc_sstate->phase);
 		if (phase == GCACHE_PHASE__IS_CORRUPTED)
 			return false;
-		Assert(phase == GCACHE_PHASE__IS_READY);
+		Assert(phase == UINT_MAX ||		/* during initial-loading */
+			   phase == GCACHE_PHASE__IS_READY);
 
 		pthreadMutexLock(&gc_sstate->redo_mutex);
 		Assert(gc_sstate->redo_write_pos >= gc_sstate->redo_read_pos &&
@@ -2231,7 +2231,7 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 		 * the synchronization.
 		 */
 		if (gc_sstate->redo_write_pos >= (gc_sstate->redo_sync_pos +
-										  gc_sstate->gpu_sync_threshold))
+										  gc_sstate->gc_options.gpu_sync_threshold))
 		{
 			sync_pos = gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
 			pthreadMutexUnlock(&gc_sstate->redo_mutex);
@@ -2277,7 +2277,6 @@ __gpuCacheInsertLog(HeapTuple tuple, GpuCacheDesc *gc_desc)
 		item = alloca(sz);
 		item->type = GCACHE_TX_LOG__INSERT;
 		item->length = sz;
-		item->xid = GetCurrentTransactionId();
 		item->rowid = rowid;
 		memcpy(&item->htup, tuple->t_data, tuple->t_len);
 		HeapTupleHeaderSetXmin(&item->htup, GetCurrentTransactionId());
@@ -2432,7 +2431,6 @@ pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 	Oid			table_oid = PG_GETARG_OID(0);
 	Relation	rel;
 	GpuCacheDesc *gc_desc;
-	CUresult	rc = CUDA_ERROR_INVALID_VALUE;
 
 	rel = table_open(table_oid, RowExclusiveLock);
 	gc_desc = lookupGpuCacheDesc(rel);
@@ -2446,11 +2444,11 @@ pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 		sync_pos = gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
 		pthreadMutexUnlock(&gc_sstate->redo_mutex);
 
-		rc = gpuCacheInvokeApplyRedo(gc_desc, sync_pos, false);
+		gpuCacheInvokeApplyRedo(gc_desc, sync_pos, false);
 	}
 	table_close(rel, RowExclusiveLock);
 
-	PG_RETURN_INT32(rc);
+	PG_RETURN_VOID();
 }
 
 /*
@@ -2462,18 +2460,17 @@ pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 	Oid			table_oid = PG_GETARG_OID(0);
 	Relation	rel;
 	GpuCacheDesc *gc_desc;
-	CUresult	rc = CUDA_ERROR_INVALID_VALUE;
 
 	rel = table_open(table_oid, RowExclusiveLock);
 	gc_desc = lookupGpuCacheDesc(rel);
 	if (gc_desc)
 	{
 		initialLoadGpuCache(gc_desc, rel);
-		rc = gpuCacheInvokeCompaction(gc_desc, false);
+		gpuCacheInvokeCompaction(gc_desc, false);
 	}
-	table_close(rel, AccessShareLock);
+	table_close(rel, RowExclusiveLock);
 
-	PG_RETURN_INT32(rc);
+	PG_RETURN_VOID();
 }
 
 /*
@@ -2492,11 +2489,8 @@ pgstrom_gpucache_recovery(PG_FUNCTION_ARGS)
 	{
 		GpuCacheSharedState *gc_sstate = gc_desc->gc_lmap->gc_sstate;
 		uint32_t	phase = GCACHE_PHASE__IS_CORRUPTED;
-		CUresult	rc;
 
-		rc = gpuCacheInvokeDropUnload(gc_desc, false);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "GpuCache: failed on DROP_UNLOAD (%s)", cuStrError(rc));
+		gpuCacheInvokeDropUnload(gc_desc, false);
 		for (;;)
 		{
 			if (pg_atomic_compare_exchange_u32(&gc_sstate->phase,
@@ -2595,16 +2589,13 @@ pgstromGpuCacheNextChunk(pgstromTaskState *pts,
 		if (sync_pos != ULONG_MAX)
 		{
 			/*
-			 * If REDO logs could not be applied correctly, we give up mapping
-			 * the GPU cache for execution of this query, because it is likely
-			 * in the 'corrupted' state.
-			 * In this case, we try to build alternative PDS buffers using
-			 * PostgreSQL scan as usual.
+			 * If REDO logs could not be applied correctly, GpuCache shall be
+			 * moved to 'corrupted' state during execution. This execution will
+			 * fail because no data-store is kept in the GPU devices.
+			 * However, next execution (by retry) will use heap storage like
+			 * as a fallback.
 			 */
-			if (!gpuCacheInvokeApplyRedo(gc_desc, sync_pos, true))
-			{
-				return NULL;
-			}
+			gpuCacheInvokeApplyRedo(gc_desc, sync_pos, true);
 		}
 		/* build a XpuCommand with KDS_FORMAT_COLUMN */
 		xcmd = pmemdup(pts->xcmd_buf.data,
@@ -3049,8 +3040,9 @@ gpuCacheSubXactCallback(SubXactEvent event,
  *
  * NOTE: must be called under the exclusive lock of gcache_rwlock
  */
-static bool
-__gpucacheAllocDeviceMemory(GpuCacheLocalMapping *gc_lmap)
+static int
+__gpucacheAllocDeviceMemory(GpuCacheLocalMapping *gc_lmap,
+							char *errbuf, int errbuf_sz)
 {
 
 	GpuCacheSharedState *gc_sstate = gc_lmap->gc_sstate;
@@ -3065,8 +3057,9 @@ __gpucacheAllocDeviceMemory(GpuCacheLocalMapping *gc_lmap)
 						   CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
-		fprintf(stderr, "failed on cuMemAllocManaged: %s\n", cuStrError(rc));
-		return rc;
+		snprintf(errbuf, errbuf_sz,
+				 "failed on cuMemAllocManaged: %s", cuStrError(rc));
+		return ENOMEM;
 	}
 	memcpy((void *)gcache_main_devptr,
 		   &gc_sstate->kds_head,
@@ -3082,8 +3075,9 @@ __gpucacheAllocDeviceMemory(GpuCacheLocalMapping *gc_lmap)
 		if (rc != CUDA_SUCCESS)
 		{
 			cuMemFree(gcache_main_devptr);
-			fprintf(stderr, "failed on cuMemAllocManaged: %s\n", cuStrError(rc));
-			return rc;
+			snprintf(errbuf, errbuf_sz,
+					 "failed on cuMemAllocManaged: %s", cuStrError(rc));
+			return ENOMEM;
 		}
 		kds_extra = (kern_data_extra *)gcache_extra_devptr;
 		kds_extra->length = gcache_extra_size;
@@ -3095,14 +3089,55 @@ __gpucacheAllocDeviceMemory(GpuCacheLocalMapping *gc_lmap)
 	gc_lmap->gcache_extra_size = gcache_extra_size;
 	pg_atomic_write_u64(&gc_sstate->gcache_main_size, gcache_main_size);
 	pg_atomic_write_u64(&gc_sstate->gcache_extra_size, gcache_extra_size);
+#if 1
+	fprintf(stderr, "%s: main %p (%lu), extra %p (%lu)\n",
+			__FUNCTION__,
+			(void *)gc_lmap->gcache_main_devptr,
+			gc_lmap->gcache_main_size,
+			(void *)gc_lmap->gcache_extra_devptr,
+			gc_lmap->gcache_extra_size);
+#endif
+	return 0;
+}
 
-	return CUDA_SUCCESS;
+/*
+ * __gpucacheMarkAsCorrupted
+ */
+static void
+__gpucacheMarkAsCorrupted(GpuCacheLocalMapping *gc_lmap)
+{
+	GpuCacheSharedState *gc_sstate = gc_lmap->gc_sstate;
+
+	pg_atomic_write_u32(&gc_sstate->phase, GCACHE_PHASE__IS_CORRUPTED);
+	if (gc_lmap->gcache_main_devptr != 0)
+	{
+		cuMemFree(gc_lmap->gcache_main_devptr);
+		gc_lmap->gcache_main_devptr = 0;
+		gc_lmap->gcache_main_size = 0;
+	}
+	if (gc_lmap->gcache_extra_devptr != 0UL)
+	{
+		cuMemFree(gc_lmap->gcache_extra_devptr);
+		gc_lmap->gcache_extra_devptr = 0;
+		gc_lmap->gcache_extra_size = 0;
+	}
+	/* clear the preserving flag */
+	pthreadMutexLock(&gcache_shared_mapping_lock);
+	gc_lmap->refcnt &= 0xfffffffeU;
+	Assert(gc_lmap->refcnt >= 2);
+	pthreadMutexUnlock(&gcache_shared_mapping_lock);
+
+	pg_atomic_write_u64(&gc_sstate->gcache_main_size, 0);
+	pg_atomic_write_u64(&gc_sstate->gcache_main_nitems, 0);
+	pg_atomic_write_u64(&gc_sstate->gcache_extra_size, 0);
+	pg_atomic_write_u64(&gc_sstate->gcache_extra_usage, 0);
+	pg_atomic_write_u64(&gc_sstate->gcache_extra_dead, 0);
 }
 
 /*
  * GCACHE_CONTROL_CMD__COMPACTION
  */
-static CUresult
+static int
 __gpucacheExecCompactionKernel(GpuCacheControlCommand *cmd,
 							   GpuCacheLocalMapping *gc_lmap,
 							   CUfunction f_gcache_compaction,
@@ -3124,8 +3159,9 @@ retry:
 						   CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
-		fprintf(stderr, "failed on cuMemAllocManaged: %s\n", cuStrError(rc));
-		return rc;
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "failed on cuMemAllocManaged: %s", cuStrError(rc));
+		return ENOMEM;
 	}
 	kds_extra = (kern_data_extra *)m_kds_extra;
 	kds_extra->length = gcache_extra_size;
@@ -3138,7 +3174,8 @@ retry:
 							 0, 0);
 	if (rc != CUDA_SUCCESS)
 	{
-		fprintf(stderr, "failed on gpuOptimalBlockSize: %s\n", cuStrError(rc));
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "failed on gpuOptimalBlockSize: %s", cuStrError(rc));
 		goto bailout;
 	}
 	kern_args[0] = &gc_lmap->gcache_main_devptr;
@@ -3153,13 +3190,15 @@ retry:
 						NULL);
 	if (rc != CUDA_SUCCESS)
 	{
-		fprintf(stderr, "failed on cuLaunchKernel: %s\n", cuStrError(rc));
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "failed on cuLaunchKernel: %s", cuStrError(rc));
 		goto bailout;
 	}
 	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 	{
-		fprintf(stderr, "failed on cuStreamSynchronize: %s\n", cuStrError(rc));
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "failed on cuStreamSynchronize: %s", cuStrError(rc));
 		goto bailout;
 	}
 	if (kds_extra->usage > kds_extra->length)
@@ -3169,50 +3208,64 @@ retry:
 		m_kds_extra = 0UL;
 		goto retry;
 	}
+#if 1
+	fprintf(stderr, "%s: extra %p (%lu) --> %p (%lu)\n",
+			__FUNCTION__,
+			(void *)gc_lmap->gcache_extra_devptr,
+			gc_lmap->gcache_extra_size,
+			(void *)m_kds_extra,
+			gcache_extra_size);
+#endif
 	/* swap extra buffers */
 	cuMemFree(gc_lmap->gcache_extra_devptr);
 	gc_lmap->gcache_extra_devptr = m_kds_extra;
 	gc_lmap->gcache_extra_size   = gcache_extra_size;
 	pg_atomic_write_u64(&gc_sstate->gcache_extra_size, gcache_extra_size);
-
-	return CUDA_SUCCESS;
+	return 0;
 
 bailout:
 	if (m_kds_extra != 0)
 		cuMemFree(m_kds_extra);
-	return rc;
+	return EIO;
 }
 
-static CUresult
+static int
 __gpucacheExecCompaction(GpuCacheControlCommand *cmd,
 						 CUfunction f_gcache_compaction)
 {
 	GpuCacheLocalMapping *gc_lmap;
-	CUresult	retval = CUDA_SUCCESS;
+	int		status = 0;
 
 	gc_lmap = getGpuCacheLocalMappingIfExist(cmd->ident.database_oid,
 											 cmd->ident.table_oid,
 											 cmd->ident.signature);
 	if (!gc_lmap)
-		return CUDA_ERROR_FILE_NOT_FOUND;
+	{
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "shared memory segment (dat=%u,rel=%u,sig=%09lx) not found",
+				 cmd->ident.database_oid,
+				 cmd->ident.table_oid,
+				 cmd->ident.signature);
+		return EEXIST;
+	}
 	pthreadRWLockWriteLock(&gc_lmap->gcache_rwlock);
 	if (gc_lmap->gcache_main_devptr != 0UL)
 	{
-		retval = __gpucacheExecCompactionKernel(cmd, gc_lmap,
+		status = __gpucacheExecCompactionKernel(cmd,
+												gc_lmap,
 												f_gcache_compaction,
 												gc_lmap->gcache_extra_size);
 	}
 	pthreadRWLockUnlock(&gc_lmap->gcache_rwlock);
-	return retval;
+	return status;
 }
 
 /*
  * GCACHE_CONTROL_CMD__APPLY_REDO
  */
-static CUresult
+static int
 __gpucacheExecApplyRedoKernel(GpuCacheControlCommand *cmd,
 							  GpuCacheLocalMapping *gc_lmap,
-							  int cuda_dindex,
 							  CUfunction f_gcache_apply_redo,
 							  CUfunction f_gcache_compaction)
 {
@@ -3230,6 +3283,7 @@ __gpucacheExecApplyRedoKernel(GpuCacheControlCommand *cmd,
 	kern_gpucache_redolog *gcache_redo;
 	CUdeviceptr	m_gcache_redo = 0UL;
 	CUresult	rc;
+	int			status = EIO;
 
 	pthreadMutexLock(&gc_sstate->redo_mutex);
 	Assert(gc_sstate->redo_write_pos    >= gc_sstate->redo_read_pos &&
@@ -3248,8 +3302,9 @@ __gpucacheExecApplyRedoKernel(GpuCacheControlCommand *cmd,
 						   CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
-		fprintf(stderr, "failed on cuMemAllocManaged: %s\n", cuStrError(rc));
-		return rc;
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "failed on cuMemAllocManaged: %s\n", cuStrError(rc));
+		return EIO;
 	}
 	gcache_redo = (kern_gpucache_redolog *)m_gcache_redo;
 	memset(gcache_redo, 0, offsetof(kern_gpucache_redolog, redo_items));
@@ -3301,7 +3356,8 @@ __gpucacheExecApplyRedoKernel(GpuCacheControlCommand *cmd,
 							 0, 0);
 	if (rc != CUDA_SUCCESS)
 	{
-		fprintf(stderr, "failed on __gpuOptimalBlockSize: %s\n", cuStrError(rc));
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "failed on __gpuOptimalBlockSize: %s\n", cuStrError(rc));
 		goto bailout;
 	}
 retry:
@@ -3321,82 +3377,122 @@ retry:
 							NULL);
 		if (rc != CUDA_SUCCESS)
 		{
-			fprintf(stderr, "failed on cuLaunchKernel: %s\n", cuStrError(rc));
+			snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+					 "failed on cuLaunchKernel: %s\n", cuStrError(rc));
 			goto bailout;
 		}
 	}
 	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
     if (rc != CUDA_SUCCESS)
     {
-		fprintf(stderr, "failed on cuStreamSynchronize: %s\n", cuStrError(rc));
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "failed on cuStreamSynchronize: %s\n", cuStrError(rc));
 		goto bailout;
 	}
 
 	if (gcache_redo->kerror.errcode == ERRCODE_BUFFER_NO_SPACE)
 	{
-		//TODO: call compaction kernel
+		kern_data_extra *extra = (kern_data_extra *)gc_lmap->gcache_extra_devptr;
+		size_t		gcache_extra_size;
+		int			__status;
 
-		goto retry;
+		/* expand the extra buffer with 25% larger virtual space */
+		gcache_extra_size = PAGE_ALIGN((extra->length * 5) / 4);
+		__status = __gpucacheExecCompactionKernel(cmd,
+												  gc_lmap,
+												  f_gcache_compaction,
+												  gcache_extra_size);
+		if (__status == 0)
+			goto retry;
+		/* abort */
+		status = __status;
 	}
 	else if (gcache_redo->kerror.errcode != ERRCODE_STROM_SUCCESS)
 	{
-		fprintf(stderr, "gpucache: %s (%s:%d) %s (errcode=%d)\n",
-				gcache_redo->kerror.funcname,
-				gcache_redo->kerror.filename,
-				gcache_redo->kerror.lineno,
-				gcache_redo->kerror.message,
-				gcache_redo->kerror.errcode);
-		rc = CUDA_ERROR_UNKNOWN;
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "gpucache: %s (%s:%d) %s (errcode=%d)\n",
+				 gcache_redo->kerror.funcname,
+				 gcache_redo->kerror.filename,
+				 gcache_redo->kerror.lineno,
+				 gcache_redo->kerror.message,
+				 gcache_redo->kerror.errcode);
 	}
 	else
 	{
+		kern_data_store	   *kds = (kern_data_store *)gc_lmap->gcache_main_devptr;
+		kern_data_extra	   *extra = (kern_data_extra *)gc_lmap->gcache_extra_devptr;
+
+		pg_atomic_write_u64(&gc_sstate->gcache_main_nitems, kds->nitems);
+		if (extra)
+		{
+			pg_atomic_write_u64(&gc_sstate->gcache_extra_usage, extra->usage);
+			pg_atomic_write_u64(&gc_sstate->gcache_extra_dead, extra->deadspace);
+		}
+#if 1
 		fprintf(stderr, "gpucache: redo log applied (nitems=%lu, %lu bytes)\n",
 				nitems, length);
+		fprintf(stderr, "stats: gcache_main_size=%lu, gcache_main_nitems=%lu, gcache_extra_size=%lu, gcache_extra_usage=%lu, gcache_extra_dead=%lu\n",
+				pg_atomic_read_u64(&gc_sstate->gcache_main_size),
+				pg_atomic_read_u64(&gc_sstate->gcache_main_nitems),
+				pg_atomic_read_u64(&gc_sstate->gcache_extra_size),
+				pg_atomic_read_u64(&gc_sstate->gcache_extra_usage),
+				pg_atomic_read_u64(&gc_sstate->gcache_extra_dead));
+#endif
+		status = 0;		/* success */
 	}
 bailout:
 	if (m_gcache_redo != 0UL)
 		cuMemFree(m_gcache_redo);
-	return rc;
+	if (status)
+		__gpucacheMarkAsCorrupted(gc_lmap);
+	return status;
 }
 
-static CUresult
+static int
 __gpucacheExecApplyRedo(GpuCacheControlCommand *cmd,
-						int cuda_dindex,
 						CUfunction f_gcache_apply_redo,
 						CUfunction f_gcache_compaction)
 {
 	GpuCacheLocalMapping *gc_lmap;
-	CUresult		retval = CUDA_SUCCESS;
+	int		status = 0;
 
 	gc_lmap = getGpuCacheLocalMappingIfExist(cmd->ident.database_oid,
 											 cmd->ident.table_oid,
 											 cmd->ident.signature);
 	if (!gc_lmap)
-		return CUDA_ERROR_FILE_NOT_FOUND;
+	{
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "shared memory segment (dat=%u,rel=%u,sig=%09lx) not found",
+				 cmd->ident.database_oid,
+				 cmd->ident.table_oid,
+				 cmd->ident.signature);
+		return EEXIST;
+	}
 
 	pthreadRWLockWriteLock(&gc_lmap->gcache_rwlock);
 	if (gc_lmap->gcache_main_devptr == 0UL)
 	{
-		retval = __gpucacheAllocDeviceMemory(gc_lmap);
-		if (retval != CUDA_SUCCESS)
+		status = __gpucacheAllocDeviceMemory(gc_lmap,
+											 cmd->errbuf,
+											 sizeof(cmd->errbuf));
+		if (status)
 			goto bailout;
 	}
-	retval = __gpucacheExecApplyRedoKernel(cmd, gc_lmap,
-										   cuda_dindex,
+	status = __gpucacheExecApplyRedoKernel(cmd, gc_lmap,
 										   f_gcache_apply_redo,
 										   f_gcache_compaction);
 bailout:
+	if (status)
+		__gpucacheMarkAsCorrupted(gc_lmap);
 	pthreadRWLockUnlock(&gc_lmap->gcache_rwlock);
-
 	putGpuCacheLocalMapping(gc_lmap);
-
-	return CUDA_ERROR_UNKNOWN;
+	return status;
 }
 
 /*
  * GCACHE_CONTROL_CMD__DROP_UNLOAD
  */
-static CUresult
+static int
 __gpucacheExecDropUnload(GpuCacheControlCommand *cmd)
 {
 	GpuCacheLocalMapping *gc_lmap;
@@ -3405,14 +3501,19 @@ __gpucacheExecDropUnload(GpuCacheControlCommand *cmd)
 											 cmd->ident.table_oid,
 											 cmd->ident.signature);
 	if (!gc_lmap)
-		return CUDA_ERROR_FILE_NOT_FOUND;
-
+	{
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "shared memory segment (dat=%u,rel=%u,sig=%09lx) not found",
+				 cmd->ident.database_oid,
+				 cmd->ident.table_oid,
+				 cmd->ident.signature);
+		return EEXIST;
+	}
 	pthreadMutexLock(&gcache_shared_mapping_lock);
 	gc_lmap->refcnt &= 0xfffffffeU;
 	__putGpuCacheLocalMappingNoLock(gc_lmap);
 	pthreadMutexUnlock(&gcache_shared_mapping_lock);
-
-	return CUDA_SUCCESS;
+	return 0;
 }
 
 /*
@@ -3451,47 +3552,49 @@ gpucacheManagerEventLoop(int cuda_dindex,
 	pthreadMutexLock(cmd_mutex);
 	while (!gpuServiceGoingTerminate())
 	{
+		int		status;
+
 		if (dlist_is_empty(cmd_queue))
 		{
 			if (!pthreadCondWaitTimeout(cmd_cond, cmd_mutex, 5000L))
 			{
 				/* timeout -> add some maintenance work here*/
 			}
+			continue;
 		}
-		else
+		/* fetch a command */
+		cmd = dlist_container(GpuCacheControlCommand, chain,
+							  dlist_pop_head_node(cmd_queue));
+		dlist_delete(&cmd->chain);
+		memset(&cmd->chain, 0, sizeof(dlist_node));
+		pthreadMutexUnlock(cmd_mutex);
+
+		switch (cmd->command)
 		{
-			cmd = dlist_container(GpuCacheControlCommand, chain,
-								  dlist_pop_head_node(cmd_queue));
-			dlist_delete(&cmd->chain);
-			memset(&cmd->chain, 0, sizeof(dlist_node));
-			pthreadMutexUnlock(cmd_mutex);
-
-			switch (cmd->command)
-			{
-				case GCACHE_CONTROL_CMD__APPLY_REDO:
-					cmd->retval = __gpucacheExecApplyRedo(cmd, cuda_dindex,
-														  f_gcache_apply_redo,
-														  f_gcache_compaction);
-					break;
-
-				case GCACHE_CONTROL_CMD__COMPACTION:
-					cmd->retval = __gpucacheExecCompaction(cmd, f_gcache_compaction);
-					break;
-
-				case GCACHE_CONTROL_CMD__DROP_UNLOAD:
-					cmd->retval = __gpucacheExecDropUnload(cmd);
-					break;
-
-				default:
-					cmd->retval = CUDA_ERROR_UNKNOWN;
-					break;
-			}
-			pthreadMutexLock(cmd_mutex);
-			if (cmd->backend)
-				SetLatch(cmd->backend);
-			else
-				dlist_push_head(&gcache_shared_head->gcache_free_cmds, &cmd->chain);
+			case GCACHE_CONTROL_CMD__APPLY_REDO:
+				status = __gpucacheExecApplyRedo(cmd,
+												 f_gcache_apply_redo,
+												 f_gcache_compaction);
+				break;
+			case GCACHE_CONTROL_CMD__COMPACTION:
+				status = __gpucacheExecCompaction(cmd, f_gcache_compaction);
+				break;
+			case GCACHE_CONTROL_CMD__DROP_UNLOAD:
+				status = __gpucacheExecDropUnload(cmd);
+				break;
+			default:
+				status = EINVAL;
+				snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+						 "gpucache: unknown command ('%c')",
+						 cmd->command);
+				break;
 		}
+		pthreadMutexLock(cmd_mutex);
+		cmd->errcode = status;
+		if (cmd->backend)
+			SetLatch(cmd->backend);
+		else
+			dlist_push_head(&gcache_shared_head->gcache_free_cmds, &cmd->chain);
 	}
 	/* returns the pending commands immediately */
 	while (!dlist_is_empty(cmd_queue))
@@ -3500,7 +3603,9 @@ gpucacheManagerEventLoop(int cuda_dindex,
 							  dlist_pop_head_node(cmd_queue));
 		dlist_delete(&cmd->chain);
 		memset(&cmd->chain, 0, sizeof(dlist_node));
-		cmd->retval = CUDA_ERROR_UNKNOWN;
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "GpuService is now shutting down...");
+		cmd->errcode = EBUSY;
 		if (cmd->backend)
 			SetLatch(cmd->backend);
 		else
@@ -3525,6 +3630,57 @@ gpucacheManagerWakeUp(int cuda_dindex)
 		for (int i=0; i < cuda_dindex; i++)
 			pthreadCondBroadcast(&gcache_shared_head->gpus[i].cond);
 	}
+}
+
+/*
+ * gpuCacheGetDeviceBuffer
+ */
+void *
+gpuCacheGetDeviceBuffer(const GpuCacheIdent *ident,
+						CUdeviceptr *p_gcache_main_devptr,
+						CUdeviceptr *p_gcache_extra_devptr,
+						char *errbuf, size_t errbuf_sz)
+{
+	GpuCacheLocalMapping *gc_lmap;
+	bool		has_exclusive = false;
+
+	gc_lmap = getGpuCacheLocalMappingIfExist(ident->database_oid,
+											 ident->table_oid,
+											 ident->signature);
+	if (!gc_lmap)
+		return NULL;
+	pthreadRWLockReadLock(&gc_lmap->gcache_rwlock);
+retry:
+	if (gc_lmap->gcache_main_devptr == 0UL)
+	{
+		if (!has_exclusive)
+		{
+			pthreadRWLockUnlock(&gc_lmap->gcache_rwlock);
+			has_exclusive = true;
+			pthreadRWLockWriteLock(&gc_lmap->gcache_rwlock);
+			goto retry;
+		}
+		if (__gpucacheAllocDeviceMemory(gc_lmap,
+										errbuf, errbuf_sz) != 0)
+		{
+			pthreadRWLockUnlock(&gc_lmap->gcache_rwlock);
+			putGpuCacheLocalMapping(gc_lmap);
+			return NULL;
+		}
+	}
+	/* ok, valid result */
+	*p_gcache_main_devptr  = gc_lmap->gcache_main_devptr;
+	*p_gcache_extra_devptr = gc_lmap->gcache_extra_devptr;
+	return gc_lmap;
+}
+
+/*
+ * gpuCachePutDeviceBuffer
+ */
+void
+gpuCachePutDeviceBuffer(void *gc_lmap)
+{
+	putGpuCacheLocalMapping((GpuCacheLocalMapping *)gc_lmap);
 }
 
 /* ------------------------------------------------------------
@@ -3909,8 +4065,8 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 	GpuCacheSharedState *gc_sstate;
 	FuncCallContext *fncxt;
 	List	   *info_list;
-	Datum		values[17];
-	bool		isnull[17];
+	Datum		values[20];
+	bool		isnull[20];
 	HeapTuple	tuple;
 	uint32_t	phase;
 	char	   *str;
@@ -3922,7 +4078,7 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 
 		fncxt = SRF_FIRSTCALL_INIT();
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
-		tupdesc = CreateTemplateTupleDesc(17);
+		tupdesc = CreateTemplateTupleDesc(20);
 		TupleDescInitEntry(tupdesc,  1, "database_oid",
 						   OIDOID, -1, 0);
 		TupleDescInitEntry(tupdesc,  2, "database_name",
@@ -3941,21 +4097,27 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 						   INT8OID, -1, 0);
 		TupleDescInitEntry(tupdesc,  9, "gpu_main_sz",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, 10, "gpu_extra_sz",
+		TupleDescInitEntry(tupdesc, 10, "gpu_main_nitems",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, 11, "redo_write_ts",
+		TupleDescInitEntry(tupdesc, 11, "gpu_extra_sz",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, 12, "gpu_extra_usage",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, 13, "gpu_extra_dead",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, 14, "redo_write_ts",
 						   TIMESTAMPTZOID, -1, 0);
-		TupleDescInitEntry(tupdesc, 12, "redo_write_nitems",
+		TupleDescInitEntry(tupdesc, 15, "redo_write_nitems",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, 13, "redo_write_pos",
+		TupleDescInitEntry(tupdesc, 16, "redo_write_pos",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, 14, "redo_read_nitems",
+		TupleDescInitEntry(tupdesc, 17, "redo_read_nitems",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, 15, "redo_read_pos",
+		TupleDescInitEntry(tupdesc, 18, "redo_read_pos",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, 16, "redo_sync_pos",
+		TupleDescInitEntry(tupdesc, 19, "redo_sync_pos",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, 17, "config_options",
+		TupleDescInitEntry(tupdesc, 20, "config_options",
 						   TEXTOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 		fncxt->user_fctx = __pgstrom_gpucache_info();
@@ -3988,35 +4150,38 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 	else
 		str = psprintf("unknown-%u", phase);
 	values[5] = CStringGetTextDatum(str);
-	values[6] = Int64GetDatum(gc_sstate->max_num_rows -
+	values[6] = Int64GetDatum(gc_sstate->gc_options.max_num_rows -
 							  gc_sstate->rowid_num_free);
 	values[7] = Int64GetDatum(gc_sstate->rowid_num_free);
 	values[8] = Int64GetDatum(pg_atomic_read_u64(&gc_sstate->gcache_main_size));
-	values[9] = Int64GetDatum(pg_atomic_read_u64(&gc_sstate->gcache_extra_size));
-	values[10] = TimestampGetDatum(gc_sstate->redo_write_timestamp);
-	values[11] = Int64GetDatum(gc_sstate->redo_write_nitems);
-	values[12] = Int64GetDatum(gc_sstate->redo_write_pos);
-	values[13] = Int64GetDatum(gc_sstate->redo_read_nitems);
-	values[14] = Int64GetDatum(gc_sstate->redo_read_pos);
-	values[15] = Int64GetDatum(gc_sstate->redo_sync_pos);
-	if (gc_sstate->cuda_dindex >= 0 &&
-		gc_sstate->cuda_dindex < numGpuDevAttrs)
+	values[9] = Int64GetDatum(pg_atomic_read_u64(&gc_sstate->gcache_main_nitems));
+	values[10] = Int64GetDatum(pg_atomic_read_u64(&gc_sstate->gcache_extra_size));
+	values[11] = Int64GetDatum(pg_atomic_read_u64(&gc_sstate->gcache_extra_usage));
+	values[12] = Int64GetDatum(pg_atomic_read_u64(&gc_sstate->gcache_extra_dead));
+	values[13] = TimestampGetDatum(gc_sstate->redo_write_timestamp);
+	values[14] = Int64GetDatum(gc_sstate->redo_write_nitems);
+	values[15] = Int64GetDatum(gc_sstate->redo_write_pos);
+	values[16] = Int64GetDatum(gc_sstate->redo_read_nitems);
+	values[17] = Int64GetDatum(gc_sstate->redo_read_pos);
+	values[18] = Int64GetDatum(gc_sstate->redo_sync_pos);
+	if (gc_sstate->gc_options.cuda_dindex >= 0 &&
+		gc_sstate->gc_options.cuda_dindex < numGpuDevAttrs)
 	{
 		str = psprintf("gpu_device_id=%d,"
 					   "max_num_rows=%ld,"
 					   "redo_buffer_size=%zu,"
 					   "gpu_sync_interval=%d,"
 					   "gpu_sync_threshold=%zu",
-					   gpuDevAttrs[gc_sstate->cuda_dindex].DEV_ID,
-					   gc_sstate->max_num_rows,
-					   gc_sstate->redo_buffer_size,
-					   gc_sstate->gpu_sync_interval,
-					   gc_sstate->gpu_sync_threshold);
-		values[16] = CStringGetTextDatum(str);
+					   gpuDevAttrs[gc_sstate->gc_options.cuda_dindex].DEV_ID,
+					   gc_sstate->gc_options.max_num_rows,
+					   gc_sstate->gc_options.redo_buffer_size,
+					   gc_sstate->gc_options.gpu_sync_interval,
+					   gc_sstate->gc_options.gpu_sync_threshold);
+		values[19] = CStringGetTextDatum(str);
 	}
 	else
 	{
-		isnull[16] = true;
+		isnull[19] = true;
 	}
 	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
@@ -4133,9 +4298,6 @@ pgstrom_init_gpu_cache(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* setup local hash tables */
-	for (int i=0; i < GCACHE_SHARED_MAPPING_NSLOTS; i++)
-		dlist_init(&gcache_shared_mapping_slot[i]);
-	
 	memset(&hctl, 0, sizeof(HASHCTL));
 	hctl.keysize = offsetof(GpuCacheDesc, xid) + sizeof(TransactionId);
 	hctl.entrysize = sizeof(GpuCacheDesc);

@@ -1352,18 +1352,17 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	const char		*kds_src_pathname = NULL;
 	strom_io_vector *kds_src_iovec = NULL;
 	kern_data_store *kds_src = NULL;
-	kern_data_extra	*kds_extra = NULL;
 	kern_data_store *kds_dst = NULL;
 	kern_data_store *kds_dst_head = NULL;
 	kern_data_store **kds_dst_array = NULL;
 	int				kds_dst_nrooms = 0;
 	int				kds_dst_nitems = 0;
-//	uint32_t		kcxt_kvars_nslots = session->kcxt_kvars_nslots;
-//	uint32_t		kcxt_kvars_nbytes = session->kcxt_kvars_nbytes;
 	int				num_inner_rels = 0;
 	CUfunction		f_kern_gpuscan;
+	void		   *gc_lmap = NULL;
 	const gpuMemChunk *chunk = NULL;
 	CUdeviceptr		m_kds_src = 0UL;
+	CUdeviceptr		m_kds_extra = 0UL;
 	CUdeviceptr		m_kmrels = 0UL;
 	CUdeviceptr		dptr;
 	CUresult		rc;
@@ -1383,11 +1382,25 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 		kds_src = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_src_offset);
 	if (xcmd->u.task.kds_dst_offset)
 		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_dst_offset);
-
 	if (!kds_src)
 	{
-		gpuClientELog(gclient, "KDS_FORMAT_COLUMN is not yet implemented");
-		return;
+		const GpuCacheIdent *ident = (GpuCacheIdent *)xcmd->u.task.data;
+		char		errbuf[120];
+
+		Assert(xcmd->tag == XpuCommandTag__XpuTaskExecGpuCache);
+		gc_lmap = gpuCacheGetDeviceBuffer(ident,
+										  &m_kds_src,
+										  &m_kds_extra,
+										  errbuf, sizeof(errbuf));
+		if (!gc_lmap)
+		{
+			gpuClientELog(gclient, "no GpuCache (dat=%u,rel=%u,sig=%09lx) found - %s",
+						  errbuf,
+						  ident->database_oid,
+						  ident->table_oid,
+						  ident->signature);
+			return;
+		}
 	}
 	else if (kds_src->format == KDS_FORMAT_ROW)
 	{
@@ -1570,7 +1583,7 @@ resume_kernel:
 	kern_args[1] = &kgtask;
 	kern_args[2] = &m_kmrels;
 	kern_args[3] = &m_kds_src;
-	kern_args[4] = &kds_extra;
+	kern_args[4] = &m_kds_extra;
 	kern_args[5] = &kds_dst;
 
 	rc = cuLaunchKernel(f_kern_gpuscan,
@@ -1681,6 +1694,8 @@ bailout:
 	}
 	if (chunk)
 		gpuMemFree(chunk);
+	if (gc_lmap)
+		gpuCachePutDeviceBuffer(gc_lmap);
 	while (kds_dst_nitems > 0)
 	{
 		kds_dst = kds_dst_array[--kds_dst_nitems];
@@ -1839,6 +1854,7 @@ gpuservGpuWorkerMain(void *__arg)
 											 * end of the session. */
 						break;
 					case XpuCommandTag__XpuTaskExec:
+					case XpuCommandTag__XpuTaskExecGpuCache:
 						gpuservHandleGpuTaskExec(gclient, xcmd);
 						break;
 					case XpuCommandTag__XpuTaskFinal:
