@@ -906,14 +906,6 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 	return __waitAndFetchNextXpuCommand(pts, true);
 }
 
-static XpuCommand *
-pgstromScanChunkGpuCache(pgstromTaskState *pts,
-						 struct iovec *xcmd_iov, int *xcmd_iovcnt)
-{
-	elog(ERROR, "not implemented yet");
-	return NULL;
-}
-
 /*
  * pgstromScanNextTuple
  */
@@ -1034,12 +1026,6 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
 	memset(xcmd, 0, offsetof(XpuCommand, u.task.data));
-	xcmd->magic = XpuCommandMagicNumber;
-	xcmd->tag   = (!pts->gcache_desc
-				   ? XpuCommandTag__XpuTaskExec
-				   : XpuCommandTag__XpuTaskExecGpuCache);
-	xcmd->length = bufsz;
-
 	off = offsetof(XpuCommand, u.task.data);
 	if (pts->gcache_desc)
 	{
@@ -1060,6 +1046,12 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 		kds  = (kern_data_store *)((char *)xcmd + off);
 		off += setup_kern_data_store(kds, tdesc_src, 0, format);
 	}
+	Assert(off <= bufsz);
+	xcmd->magic = XpuCommandMagicNumber;
+	xcmd->tag   = (!pts->gcache_desc
+				   ? XpuCommandTag__XpuTaskExec
+				   : XpuCommandTag__XpuTaskExecGpuCache);
+	xcmd->length = off;
 	pts->xcmd_buf.len = off;
 }
 

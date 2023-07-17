@@ -1481,14 +1481,12 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 					   cuStrError(rc));
 		goto bailout;
 	}
-	
-	/*
-	 * Allocation of the control structure
-	 */
-	grid_sz = Min(grid_sz, (kds_src->nitems + block_sz - 1) / block_sz);
 //	block_sz = 128;
 //	grid_sz = 1;
 
+	/*
+	 * Allocation of the control structure
+	 */
 	sz = KERN_GPUTASK_LENGTH(num_inner_rels,
 							 session->kcxt_kvars_ndims,
 							 session->kcxt_kvars_nbytes,
@@ -1510,7 +1508,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	kgtask->n_rels       = num_inner_rels;
 
 	/* prefetch source KDS, if managed memory */
-	if (!chunk)
+	if (!chunk && !gc_lmap)
 	{
 		rc = cuMemPrefetchAsync((CUdeviceptr)kds_src,
 								kds_src->length,

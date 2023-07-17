@@ -2545,6 +2545,9 @@ pgstromGpuCacheExecInit(pgstromTaskState *pts)
 		elog(DEBUG2, "gpucache: not valid in serializable/repeatable-read transaction");
 		return NULL;
 	}
+	/* check pg_strom.enable_gpucache */
+	if (!pgstrom_enable_gpucache)
+		return NULL;
 	/* table must be configured for GpuCache */
 	signature = gpuCacheTableSignature(rel, &gc_options);
 	if (signature == 0UL)
@@ -2557,7 +2560,7 @@ pgstromGpuCacheExecInit(pgstromTaskState *pts)
 }
 
 XpuCommand *
-pgstromGpuCacheNextChunk(pgstromTaskState *pts,
+pgstromScanChunkGpuCache(pgstromTaskState *pts,
 						 struct iovec *xcmd_iov,
 						 int *xcmd_iovcnt)
 {
@@ -2572,7 +2575,6 @@ pgstromGpuCacheNextChunk(pgstromTaskState *pts,
 	if (pg_atomic_fetch_add_u32(pts->gcache_fetch_count, 1) == 0)
 	{
 		GpuCacheSharedState *gc_sstate = gc_desc->gc_lmap->gc_sstate;
-		GpuCacheIdent *gc_ident;
 		uint64_t	write_pos;
 		uint64_t	sync_pos = ULONG_MAX;
 
@@ -2584,7 +2586,10 @@ pgstromGpuCacheNextChunk(pgstromTaskState *pts,
 
 		/* is the target table empty? */
 		if (write_pos == 0)
+		{
+			pts->scan_done = true;
 			return NULL;
+		}
 		/* force to apply pending REDO logs, if any */
 		if (sync_pos != ULONG_MAX)
 		{
@@ -2597,11 +2602,15 @@ pgstromGpuCacheNextChunk(pgstromTaskState *pts,
 			 */
 			gpuCacheInvokeApplyRedo(gc_desc, sync_pos, true);
 		}
-		/* build a XpuCommand with KDS_FORMAT_COLUMN */
-		xcmd = pmemdup(pts->xcmd_buf.data,
-					   pts->xcmd_buf.len);
-		gc_ident = (GpuCacheIdent *)xcmd->u.task.data;
-		memcpy(gc_ident, &gc_desc->ident, sizeof(GpuCacheIdent));
+		xcmd = (XpuCommand *)pts->xcmd_buf.data;
+		Assert(xcmd->length == pts->xcmd_buf.len);
+		xcmd_iov->iov_base = pts->xcmd_buf.data;
+		xcmd_iov->iov_len  = pts->xcmd_buf.len;
+		*xcmd_iovcnt = 1;
+	}
+	else
+	{
+		pts->scan_done = true;
 	}
 	return xcmd;
 }
@@ -2646,51 +2655,67 @@ pgstromGpuCacheExplain(pgstromTaskState *pts,
 					   ExplainState *es,
 					   List *dcontext)
 {
-#if 0
-	GpuCacheDesc   *gc_desc = pts->gcache_desc;
-	GpuCacheLocalMapping *gc_lmap = gc_desc->gc_lmap;
-	GpuCacheSharedState *gc_sstate = gc_lmap->gc_sstate;
+	GpuCacheDesc *gc_desc = pts->gcache_desc;
+	GpuCacheLocalMapping *gc_lmap;
+	GpuCacheSharedState *gc_sstate;
+	GpuCacheOptions *gc_options;
+	char		temp[2048];
 
-	//GPU memory usage and configuration parameters
-	
-
-
-	GpuCacheOptions *gc_options = &gcache_state->gc_options;
-	char		temp[1024];
-	size_t		gpu_main_size = 0UL;
-	size_t		gpu_extra_size = 0UL;
-
-	/* GPU memory usage */
-	if (gcache_state->gc_sstate)
-	{
-		GpuCacheSharedState *gc_sstate = gcache_state->gc_sstate;
-
-		SpinLockAcquire(&gcache_shared_head->gcache_sstate_lock);
-		gpu_main_size = gc_sstate->gpu_main_size;
-		gpu_extra_size = gc_sstate->gpu_extra_size;
-		SpinLockRelease(&gcache_shared_head->gcache_sstate_lock);
-	}
+	if (!gc_desc)
+		return;
+	gc_lmap = gc_desc->gc_lmap;
+	gc_sstate = gc_lmap->gc_sstate;
+	gc_options = &gc_desc->gc_options;
 
 	/* config options */
 	if (gc_options->cuda_dindex >= 0 &&
 		gc_options->cuda_dindex < numGpuDevAttrs)
 	{
+		size_t	gpu_main_size;
+		size_t	gpu_extra_size;
+		const char *phase;
+
+		switch (pg_atomic_read_u32(&gc_sstate->phase))
+		{
+			case GCACHE_PHASE__NOT_BUILT:
+				phase = "not built";
+				break;
+			case GCACHE_PHASE__IS_EMPTY:
+				phase = "empty";
+				break;
+			case GCACHE_PHASE__IS_READY:
+				phase = "ready";
+				break;
+			case GCACHE_PHASE__IS_CORRUPTED:
+				phase = "corrupted";
+				break;
+			default:
+				phase = "unknown-phase";
+				break;
+		}
+
 		if (!pgstrom_regression_test_mode)
 		{
-			sprintf(temp, "%s [max_num_rows: %ld, main: %s, extra: %s]",
-					gpuDevAttrs[gc_options->cuda_dindex].DEV_NAME,
-					gc_options->max_num_rows,
-					format_numeric(gpu_main_size),
-					format_numeric(gpu_extra_size));
-			ExplainPropertyText("GPU Cache", temp, es);			
+			gpu_main_size = pg_atomic_read_u64(&gc_sstate->gcache_main_size);
+			gpu_extra_size = pg_atomic_read_u64(&gc_sstate->gcache_extra_size);
+
+			snprintf(temp, sizeof(temp),
+					 "%s [phase: %s, max_num_rows: %ld, main: %s, extra: %s]",
+					 gpuDevAttrs[gc_options->cuda_dindex].DEV_NAME,
+					 phase,
+					 gc_options->max_num_rows,
+					 format_numeric(gpu_main_size),
+					 format_numeric(gpu_extra_size));
 		}
-		else if (!es->verbose)
+		else
 		{
-			sprintf(temp, "GPU%d [max_num_rows: %ld]",
-					gc_options->cuda_dindex,
-					gc_options->max_num_rows);
-			ExplainPropertyText("GPU Cache", temp, es);
+			snprintf(temp, sizeof(temp),
+                     "GPU%d [phase: %s, max_num_rows: %ld]",
+					 gc_options->cuda_dindex,
+					 phase,
+					 gc_options->max_num_rows);
 		}
+		ExplainPropertyText("GPU Cache", temp, es);
 	}
 	else
 	{
@@ -2705,38 +2730,19 @@ pgstromGpuCacheExplain(pgstromTaskState *pts,
 			gc_options->cuda_dindex < numGpuDevAttrs)
 			gpu_device_id = gpuDevAttrs[gc_options->cuda_dindex].DEV_ID;
 
-		if (es->format == EXPLAIN_FORMAT_TEXT)
-		{
-			snprintf(temp, sizeof(temp),
-					 "gpu_device_id=%d,"
-					 "max_num_rows=%ld,"
-					 "redo_buffer_size=%zu,"
-					 "gpu_sync_interval=%d,"
-					 "gpu_sync_threshold=%zu",
-					 gpu_device_id,
-					 gc_options->max_num_rows,
-					 gc_options->redo_buffer_size,
-					 gc_options->gpu_sync_interval,
-					 gc_options->gpu_sync_threshold);
-			ExplainPropertyText("GPU Cache Options", temp, es);
-		}
-		else
-		{
-			ExplainPropertyInteger("GPU Cache Options:gpu_device_id", NULL,
-								   gpu_device_id, es);
-			ExplainPropertyInteger("GPU Cache Options:max_num_rows", NULL,
-								   gc_options->max_num_rows, es);
-			ExplainPropertyInteger("GPU Cache Options:redo_buffer_size", NULL,
-								   gc_options->redo_buffer_size, es);
-			ExplainPropertyInteger("GPU Cache Options:gpu_sync_threshold", NULL,
-								   gc_options->gpu_sync_threshold, es);
-			ExplainPropertyInteger("GPU Cache Options:gpu_sync_interval", "s",
-								   gc_options->gpu_sync_interval, es);
-		}
+		snprintf(temp, sizeof(temp),
+				 "gpu_device_id=%d,"
+				 "max_num_rows=%ld,"
+				 "redo_buffer_size=%zu,"
+				 "gpu_sync_interval=%d,"
+				 "gpu_sync_threshold=%zu",
+				 gpu_device_id,
+				 gc_options->max_num_rows,
+				 gc_options->redo_buffer_size,
+				 gc_options->gpu_sync_interval,
+				 gc_options->gpu_sync_threshold);
+		ExplainPropertyText("GPU Cache Options", temp, es);
 	}
-#endif
-
-
 }
 
 /* ------------------------------------------------------------

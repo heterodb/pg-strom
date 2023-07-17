@@ -411,12 +411,12 @@ __gpuscan_load_source_column(kern_context *kcxt,
 	{
 		kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
 		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
-		if (!ExecLoadVarsOuterColumn(kcxt,
-									 kexp_load_vars,
-									 kexp_scan_quals,
-									 kds_src,
-									 kds_extra,
-									 index))
+		if (ExecLoadVarsOuterColumn(kcxt,
+									kexp_load_vars,
+									kexp_scan_quals,
+									kds_src,
+									kds_extra,
+									index))
 			row_is_valid = true;
 	}
 	/* error checks */
@@ -642,6 +642,7 @@ __gpucache_apply_insert_log(kern_context *kcxt,
 			uint32_t	vl_len;
 			uint32_t	vl_off;
 
+			assert(cmeta->attlen == -1);
 			if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
 				offset = TYPEALIGN(cmeta->attalign, offset);
 			vl_pos = (char *)htup + offset;

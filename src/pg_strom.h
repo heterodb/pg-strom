@@ -775,7 +775,7 @@ extern int		baseRelHasGpuCache(PlannerInfo *root,
 extern bool		RelationHasGpuCache(Relation rel);
 extern const GpuCacheIdent *getGpuCacheDescIdent(const GpuCacheDesc *gc_desc);
 extern GpuCacheDesc *pgstromGpuCacheExecInit(pgstromTaskState *pts);
-extern XpuCommand *pgstromGpuCacheNextChunk(pgstromTaskState *pts,
+extern XpuCommand *pgstromScanChunkGpuCache(pgstromTaskState *pts,
 											struct iovec *xcmd_iov,
 											int *xcmd_iovcnt);
 extern void		pgstromGpuCacheExecEnd(pgstromTaskState *pts);

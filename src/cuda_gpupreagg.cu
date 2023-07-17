@@ -1834,6 +1834,7 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	}
 	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
 		return -1;
+
 	/*
 	 * main logic of GpuPreAgg
 	 */
