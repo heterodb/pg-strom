@@ -948,7 +948,9 @@ kern_extract_heap_tuple(kern_context *kcxt,
 		char   *addr;
 
 		if (heap_hasnull && att_isnull(resno-1, htup->t_bits))
+		{
 			addr = NULL;
+		}
 		else
 		{
 			if (cmeta->attlen > 0)

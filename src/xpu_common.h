@@ -1226,8 +1226,9 @@ KDS_COLUMN_ITEM_ISNULL(const kern_data_store *kds,
 	uint8_t		mask = (1 << (rowid & 7));
 	uint8_t		idx = (rowid >> 3);
 
-	if (cmeta->nullmap_offset != 0 &&
-		idx >= __kds_unpack(cmeta->nullmap_length))
+	if (cmeta->nullmap_offset == 0)
+		return false;	/* NOT NULL */
+	if (idx >= __kds_unpack(cmeta->nullmap_length))
 		return false;	/* NOT NULL */
 	bitmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
 
