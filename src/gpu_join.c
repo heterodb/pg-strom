@@ -1740,7 +1740,7 @@ __innerPreloadSetupHeapBuffer(kern_data_store *kds,
 		titem->t_len = htup->t_len;
 		titem->rowid = rowid;
 		memcpy(&titem->htup, htup->t_data, htup->t_len);
-		ItemPointerCopy(&htup->t_self, &titem->htup.t_ctid);
+		memcpy(&titem->htup.t_ctid, &htup->t_self, sizeof(ItemPointerData));
 
 		row_index[rowid++] = __kds_packed(tail_pos - curr_pos);
 	}
@@ -1783,7 +1783,7 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 		hitem->t.t_len = htup->t_len;
 		hitem->t.rowid = rowid;
 		memcpy(&hitem->t.htup, htup->t_data, htup->t_len);
-		ItemPointerCopy(&htup->t_self, &hitem->t.htup.t_ctid);
+		memcpy(&hitem->t.htup.t_ctid, &htup->t_self, sizeof(ItemPointerData));
 
 		row_index[rowid++] = __kds_packed(tail_pos - (char *)&hitem->t);
 	}

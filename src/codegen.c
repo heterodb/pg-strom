@@ -2170,6 +2170,7 @@ codegen_build_projection(codegen_context *context)
 	ListCell   *lc;
 	int			nexprs = 0;
 	int			nattrs = 0;
+	int			ctid_slot = -1;
 	int			n, sz, pos;
 	char	   *result;
 
@@ -2207,6 +2208,22 @@ codegen_build_projection(codegen_context *context)
 
 		desc = &kexp->u.proj.desc[nattrs++];
 		desc->slot_id = slot_id;
+
+		if (IsA(tle->expr, Var) && ctid_slot < 0)
+		{
+			Node   *relid = linitial(context->input_rels_tlist);
+			Var	   *var = (Var *)tle->expr;
+
+			Assert(IsA(relid, Integer));
+			if (var->varno == intVal(relid) &&
+				var->varattno == SelfItemPointerAttributeNumber)
+			{
+				Assert(var->vartype == TIDOID &&
+					   var->vartypmod == -1 &&
+					   !OidIsValid(var->varcollid));
+				ctid_slot = slot_id;
+			}
+		}
 	}
 	kexp->exptype = TypeOpCode__int4;
 	kexp->expflags = context->kexp_flags;
@@ -2215,6 +2232,7 @@ codegen_build_projection(codegen_context *context)
 	kexp->args_offset = MAXALIGN(offsetof(kern_expression,
 										  u.proj.desc[nattrs]));
 	kexp->u.proj.nattrs = nattrs;
+	kexp->u.proj.ctid_slot = ctid_slot;
 	initStringInfo(&buf);
 	pos = __appendBinaryStringInfo(&buf, kexp, kexp->args_offset);
 	if (nexprs > 0)

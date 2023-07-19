@@ -837,6 +837,7 @@ __kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 	titem->t_len = tuple->t_len;
 	titem->rowid = kds->nitems;
 	memcpy(&titem->htup, tuple->t_data, tuple->t_len);
+	memcpy(&titem->htup.t_ctid, &tuple->t_self, sizeof(ItemPointerData));
 	kds->usage = rowindex[kds->nitems++] = __kds_packed(__usage);
 
 	if (should_free)

@@ -663,6 +663,7 @@ __gpucache_apply_insert_log(kern_context *kcxt,
 	}
 	sysattr->xmin = htup->t_choice.t_heap.t_xmin;
 	sysattr->xmax = htup->t_choice.t_heap.t_xmax;
+	memcpy(&sysattr->ctid, &htup->t_ctid, sizeof(ItemPointerData));
 	
 	return true;
 }

@@ -1949,6 +1949,7 @@ __initialLoadGpuCache(GpuCacheDesc *gc_desc, Relation rel)
 			item->length = sz;
 			item->rowid = rowid;
 			memcpy(&item->htup, tuple->t_data, tuple->t_len);
+			memcpy(&item->htup.t_ctid, &tuple->t_self, sizeof(ItemPointerData));
 			HeapTupleHeaderSetXmin(&item->htup, gcache_xmin);
 			HeapTupleHeaderSetXmax(&item->htup, gcache_xmax);
 			HeapTupleHeaderSetCmin(&item->htup, InvalidCommandId);

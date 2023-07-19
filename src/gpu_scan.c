@@ -530,6 +530,7 @@ gpuscan_build_projection(RelOptInfo *baserel,
 				continue;
 			__gpuscan_build_projection_walker(node, &context);
 		}
+
 		/*
 		 * FIXME: GiST-GpuJoin (but not limited to this case) requires
 		 * ctid system column of the inner relation.
@@ -562,6 +563,65 @@ gpuscan_build_projection(RelOptInfo *baserel,
 		__gpuscan_build_projection_walker((Node *)lfirst(lc), &context);
 
 	return context.tlist_dev;
+}
+
+/*
+ * __build_explain_tlist_junks
+ */
+static void
+__build_explain_tlist_junks(PlannerInfo *root,
+							RelOptInfo *baserel,
+							codegen_context *context)
+{
+	RangeTblEntry  *rte = root->simple_rte_array[baserel->relid];
+
+	Assert(IS_SIMPLE_REL(baserel) && rte->rtekind == RTE_RELATION);
+	for (int j=baserel->min_attr; j <= baserel->max_attr; j++)
+	{
+		Form_pg_attribute attr;
+		HeapTuple	htup;
+		Var		   *var;
+		ListCell   *lc;
+		TargetEntry *tle;
+
+		if (bms_is_empty(baserel->attr_needed[j-baserel->min_attr]))
+			continue;
+		htup = SearchSysCache2(ATTNUM,
+							   ObjectIdGetDatum(rte->relid),
+							   Int16GetDatum(j));
+		if (!HeapTupleIsValid(htup))
+			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+				 j, rte->relid);
+		attr = (Form_pg_attribute) GETSTRUCT(htup);
+		var = makeVar(baserel->relid,
+					  attr->attnum,
+					  attr->atttypid,
+					  attr->atttypmod,
+					  attr->attcollation,
+					  0);
+		foreach (lc, context->tlist_dev)
+		{
+			TargetEntry *tle = lfirst(lc);
+
+			if (equal(tle->expr, var))
+				break;
+		}
+		if (lc)
+		{
+			/* found */
+			pfree(var);
+		}
+		else
+		{
+			/* not found, append a junk */
+			tle = makeTargetEntry((Expr *)var,
+								  list_length(context->tlist_dev)+1,
+								  pstrdup(NameStr(attr->attname)),
+								  true);
+			context->tlist_dev = lappend(context->tlist_dev, tle);
+		}
+		ReleaseSysCache(htup);
+	}
 }
 
 /*
@@ -603,6 +663,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	pp_info->extra_bufsz = context.extra_bufsz;
 	pp_info->used_params = context.used_params;
 
+	__build_explain_tlist_junks(root, baserel, &context);
 	/*
 	 * Build CustomScan(GpuScan) node
 	 */

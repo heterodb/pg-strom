@@ -678,6 +678,14 @@ ItemPointerEquals(const ItemPointerData *ip1, const ItemPointerData *ip2)
 			ip1->ip_posid       == ip2->ip_posid);
 }
 
+INLINE_FUNCTION(void)
+ItemPointerSetInvalid(ItemPointerData *ip)
+{
+	ip->ip_blkid.bi_hi = 0xffffU;
+	ip->ip_blkid.bi_lo = 0xffffU;
+	ip->ip_posid = 0;
+}
+
 /*
  * HeapTupleHeaderData
  */
@@ -1759,6 +1767,7 @@ struct kern_expression
 		struct {
 			int			datum_sz;
 			int			nattrs;
+			int			ctid_slot;	/* slot_id of ctid system column, if any */
 			kern_projection_desc desc[1];
 		} proj;		/* Projection */
 		struct {

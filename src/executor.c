@@ -924,6 +924,9 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 			kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds, index);
 
 			pts->curr_htup.t_len = tupitem->t_len;
+			memcpy(&pts->curr_htup.t_self,
+				   &tupitem->htup.t_ctid,
+				   sizeof(ItemPointerData));
 			pts->curr_htup.t_data = &tupitem->htup;
 			return ExecStoreHeapTuple(&pts->curr_htup, slot, false);
 		}

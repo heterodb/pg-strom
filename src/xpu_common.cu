@@ -574,9 +574,23 @@ kern_form_heaptuple(kern_context *kcxt,
 			htup->t_bits[j>>3] |= (1<<(j & 7));
 		t_hoff = t_next + nbytes;
 	}
-
 	if (htup)
 	{
+		int		ctid_slot = kproj->u.proj.ctid_slot;
+
+		/* assign ctid, if any */
+		if (ctid_slot >= 0 &&
+			ctid_slot < kcxt->kvars_nslots &&
+			kcxt->kvars_class[ctid_slot] == sizeof(ItemPointerData))
+		{
+			memcpy(&htup->t_ctid,
+				   kcxt->kvars_slot[ctid_slot].ptr,
+				   sizeof(ItemPointerData));
+		}
+		else
+		{
+			ItemPointerSetInvalid(&htup->t_ctid);
+		}
 		htup->t_infomask = t_infomask;
 		SET_VARSIZE(&htup->t_choice.t_datum, t_hoff);
 	}
