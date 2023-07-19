@@ -2950,7 +2950,7 @@ gpuCacheObjectAccess(ObjectAccessType access,
 static void
 gpuCacheRelcacheCallback(Datum arg, Oid relid)
 {
-	elog(LOG, "pid=%u: gpuCacheRelcacheCallback (table_oid=%u)", getpid(), relid);
+//	elog(LOG, "pid=%u: gpuCacheRelcacheCallback (table_oid=%u)", getpid(), relid);
 	gpuCacheTableSignatureInvalidation(relid);
 	unmapGpuCacheLocalMapping(relid);
 }
@@ -2958,7 +2958,7 @@ gpuCacheRelcacheCallback(Datum arg, Oid relid)
 static void
 gpuCacheSyscacheCallback(Datum arg, int cacheid, uint32 hashvalue)
 {
-	elog(LOG, "pid=%u: gpuCacheSyscacheCallback (cacheid=%u)", getpid(), cacheid);
+//	elog(LOG, "pid=%u: gpuCacheSyscacheCallback (cacheid=%u)", getpid(), cacheid);
 	__gpucache_sync_trigger_function_oid = InvalidOid;
 }
 
