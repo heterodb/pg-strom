@@ -2111,6 +2111,7 @@ __try_inject_projection_expression(codegen_context *context,
 				return slot_id;
 			}
 		}
+		slot_id++;
 	}
 
 	/*
