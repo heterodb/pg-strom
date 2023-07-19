@@ -773,7 +773,8 @@ __gpucache_count_deadspace(kern_data_store *kds,
 			assert(cmeta->attlen == -1);
 			if (!KDS_COLUMN_ITEM_ISNULL(kds, cmeta, rowid))
 			{
-				uint32_t   *base = (uint32_t *)((char *)kds + cmeta->values_offset);
+				uint32_t   *base = (uint32_t *)
+					((char *)kds + __kds_unpack(cmeta->values_offset));
 				char	   *vl = (char *)extra + __kds_unpack(base[rowid]);
 
 				retval += MAXALIGN(VARSIZE_ANY(vl));
@@ -912,8 +913,6 @@ kern_gpucache_apply_redo(kern_gpucache_redolog *gcache_redo,
 			break;
 	}
 	STROM_WRITEBACK_ERROR_STATUS(&gcache_redo->kerror, &kcxt);
-	if (get_global_id() == 0)
-		printf("phase %u done\n", phase);
 }
 
 KERNEL_FUNCTION(void)

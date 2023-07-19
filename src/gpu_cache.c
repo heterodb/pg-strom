@@ -3350,6 +3350,7 @@ __gpucacheExecApplyRedoKernel(GpuCacheControlCommand *cmd,
 	{
 		GCacheTxLogCommon *tx_log = (GCacheTxLogCommon *)pos;
 
+		Assert((uintptr_t)pos == MAXALIGN((uintptr_t)pos));
 		gcache_redo->redo_items[gcache_redo->nitems++]
 			= __kds_packed((char *)pos - (char *)gcache_redo);
 		pos += tx_log->length;
@@ -3436,9 +3437,8 @@ retry:
 			pg_atomic_write_u64(&gc_sstate->gcache_extra_dead, extra->deadspace);
 		}
 #if 1
-		fprintf(stderr, "gpucache: redo log applied (nitems=%lu, %lu bytes)\n",
-				nitems, length);
-		fprintf(stderr, "stats: gcache_main_size=%lu, gcache_main_nitems=%lu, gcache_extra_size=%lu, gcache_extra_usage=%lu, gcache_extra_dead=%lu\n",
+		fprintf(stderr, "gpucache: redo log applied (nitems=%lu, %lu bytes) stats [gcache_main_size=%lu, gcache_main_nitems=%lu, gcache_extra_size=%lu, gcache_extra_usage=%lu, gcache_extra_dead=%lu]\n",
+				nitems, length,
 				pg_atomic_read_u64(&gc_sstate->gcache_main_size),
 				pg_atomic_read_u64(&gc_sstate->gcache_main_nitems),
 				pg_atomic_read_u64(&gc_sstate->gcache_extra_size),
@@ -3685,9 +3685,12 @@ retry:
  * gpuCachePutDeviceBuffer
  */
 void
-gpuCachePutDeviceBuffer(void *gc_lmap)
+gpuCachePutDeviceBuffer(void *__gc_lmap)
 {
-	putGpuCacheLocalMapping((GpuCacheLocalMapping *)gc_lmap);
+	GpuCacheLocalMapping *gc_lmap = (GpuCacheLocalMapping *)__gc_lmap;
+
+	pthreadRWLockUnlock(&gc_lmap->gcache_rwlock);
+	putGpuCacheLocalMapping(gc_lmap);
 }
 
 /* ------------------------------------------------------------
