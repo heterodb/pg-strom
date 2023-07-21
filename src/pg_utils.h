@@ -399,9 +399,35 @@ pthreadCondSignal(pthread_cond_t *cond)
 /*
  * Misc debug functions
  */
+INLINE_FUNCTION(void)
+dump_tuple_desc(const TupleDesc tdesc)
+{
+	fprintf(stderr, "tupdesc %p { natts=%d, tdtypeid=%u, tdtypmod=%d, tdrefcount=%d }\n",
+			tdesc,
+			tdesc->natts,
+			tdesc->tdtypeid,
+			tdesc->tdtypmod,
+			tdesc->tdrefcount);
+	for (int j=0; j < tdesc->natts; j++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tdesc, j);
+
+		fprintf(stderr, "attr[%d] { attname='%s', atttypid=%u, attlen=%d, attnum=%d, atttypmod=%d, attbyval=%c, attalign=%c, attnotnull=%c attisdropped=%c }\n",
+				j,
+				NameStr(attr->attname),
+				attr->atttypid,
+				(int)attr->attlen,
+				(int)attr->attnum,
+				(int)attr->atttypmod,
+				attr->attbyval ? 't' : 'f',
+				attr->attalign,
+				attr->attnotnull ? 't' : 'f',
+				attr->attisdropped ? 't' : 'f');
+	}
+}
 
 /*
- * print_kern_data_store
+ * dump_kern_data_store
  */
 INLINE_FUNCTION(void)
 dump_kern_data_store(const kern_data_store *kds)

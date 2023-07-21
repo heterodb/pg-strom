@@ -336,7 +336,6 @@ pgstrom_favg_trans_int(PG_FUNCTION_ARGS)
 		if (!PG_ARGISNULL(1))
 		{
 			arg = (kagg_state__pavg_int_packed *)PG_GETARG_BYTEA_P(1);
-
 			state->nitems += arg->nitems;
 			state->sum    += arg->sum;
 		}
@@ -367,7 +366,6 @@ pgstrom_favg_trans_fp(PG_FUNCTION_ARGS)
 		if (!PG_ARGISNULL(1))
 		{
 			arg = (kagg_state__pavg_fp_packed *)PG_GETARG_BYTEA_P(1);
-
 			state->nitems += arg->nitems;
 			state->sum    += arg->sum;
 		}

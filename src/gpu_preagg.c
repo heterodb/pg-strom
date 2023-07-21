@@ -77,17 +77,17 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 KAGG_ACTION__PMIN_INT64, false
 	},
 	{"min(float2)",
-     "s:min_f2(bytea)",
+	 "s:min_f2(bytea)",
 	 "s:pmin(float8)",
 	 KAGG_ACTION__PMIN_FP64, false
 	},
 	{"min(float4)",
-     "s:min_f4(bytea)",
+	 "s:min_f4(bytea)",
 	 "s:pmin(float8)",
 	 KAGG_ACTION__PMIN_FP64, false
 	},
 	{"min(float8)",
-     "s:min_f8(bytea)",
+	 "s:min_f8(bytea)",
 	 "s:pmin(float8)",
 	 KAGG_ACTION__PMIN_FP64, false
 	},
@@ -145,17 +145,17 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 KAGG_ACTION__PMAX_INT64, false
 	},
 	{"max(float2)",
-     "s:max_f2(bytea)",
+	 "s:max_f2(bytea)",
 	 "s:pmax(float8)",
 	 KAGG_ACTION__PMAX_FP64, false
 	},
 	{"max(float4)",
-     "s:max_f4(bytea)",
+	 "s:max_f4(bytea)",
 	 "s:pmax(float8)",
 	 KAGG_ACTION__PMAX_FP64, false
 	},
 	{"max(float8)",
-     "s:max_f8(bytea)",
+	 "s:max_f8(bytea)",
 	 "s:pmax(float8)",
 	 KAGG_ACTION__PMAX_FP64, false
 	},
@@ -194,22 +194,22 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 */
 	{"sum(int1)",
 	 "s:sum(int8)",
-     "s:psum(int8)",
+	 "s:psum(int8)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(int2)",
 	 "s:sum(int8)",
-     "s:psum(int8)",
+	 "s:psum(int8)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(int4)",
 	 "s:sum(int8)",
-     "s:psum(int8)",
+	 "s:psum(int8)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(int8)",
-	 "c:sum(int8)",
-     "s:psum(int8)",
+	 "s:sum_num(int8)",
+	 "s:psum(int8)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(float2)",
@@ -576,7 +576,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	},
 	{"regr_count(float8,float8)",
 	 "s:regr_count(bytea)",
-     "s:pcovar(float8,float8)",
+	 "s:pcovar(float8,float8)",
 	 KAGG_ACTION__COVAR, false
 	},
 	{"regr_intercept(float8,float8)",
@@ -591,7 +591,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	},
 	{"regr_slope(float8,float8)",
 	 "s:regr_slope(bytea)",
-     "s:pcovar(float8,float8)",
+	 "s:pcovar(float8,float8)",
 	 KAGG_ACTION__COVAR, false
 	},
 	{"regr_sxx(float8,float8)",
@@ -790,7 +790,7 @@ aggfunc_catalog_lookup_by_oid(Oid aggfn_oid)
 		HASHCTL		hctl;
 
 		memset(&hctl, 0, sizeof(HASHCTL));
-        hctl.keysize = sizeof(Oid);
+		hctl.keysize = sizeof(Oid);
 		hctl.entrysize = sizeof(aggfunc_catalog_entry);
 		hctl.hcxt = CacheMemoryContext;
 		aggfunc_catalog_htable = hash_create("XPU GroupBy Catalog Hash",
@@ -926,7 +926,7 @@ make_expr_typecast(Expr *expr, Oid target_type)
 	else if (cast->castmethod == COERCION_METHOD_FUNCTION)
 	{
 		Assert(OidIsValid(cast->castfunc));
-        expr = (Expr *)makeFuncExpr(cast->castfunc,
+		expr = (Expr *)makeFuncExpr(cast->castfunc,
 									target_type,
 									list_make1(expr),
 									InvalidOid,		/* always right? */
@@ -1057,16 +1057,27 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 	aggref_alt->aggdirectargs = NIL;	/* see sanity checks */
 	aggref_alt->args          = list_make1(makeTargetEntry(partfn, 1, NULL, false));
 	aggref_alt->aggorder      = NIL;  /* see sanity check */
-    aggref_alt->aggdistinct   = NIL;  /* see sanity check */
-    aggref_alt->aggfilter     = NULL; /* processed in partial-function */
+	aggref_alt->aggdistinct   = NIL;  /* see sanity check */
+	aggref_alt->aggfilter     = NULL; /* processed in partial-function */
 	aggref_alt->aggstar       = false;
 	aggref_alt->aggvariadic   = false;
 	aggref_alt->aggkind       = AGGKIND_NORMAL;   /* see sanity check */
 	aggref_alt->agglevelsup   = 0;
 	aggref_alt->aggsplit      = AGGSPLIT_SIMPLE;
 	aggref_alt->aggno         = aggref->aggno;
-	aggref_alt->aggtransno    = aggref->aggtransno;
+	aggref_alt->aggtransno    = aggref->aggno;
 	aggref_alt->location      = aggref->location;
+	/*
+	 * MEMO: nodeAgg.c creates AggStatePerTransData for each aggtransno (that is
+	 * unique ID of transition state in the Agg). This is a kind of optimization
+	 * for the case when multiple aggregate function has identical transition state.
+	 * However, its impact is not large for GpuPreAgg because most of reduction
+	 * works are already executed at the xPU device side.
+	 * So, we simply assign aggref->aggno (unique ID within the Agg node) to
+	 * construct transition state for each alternative aggregate function.
+	 *
+	 * See the issue #614 to reproduce the problem in the future version.
+	 */
 
 	/*
 	 * Update the cost factor
@@ -1275,7 +1286,7 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 	else if ((con->xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
 	{
 		xpu_operator_cost = pgstrom_dpu_operator_cost;
-        xpu_tuple_cost    = pgstrom_dpu_tuple_cost;
+		xpu_tuple_cost    = pgstrom_dpu_tuple_cost;
 		xpu_ratio         = pgstrom_dpu_operator_ratio();
 	}
 	else
@@ -1390,7 +1401,7 @@ __xpupreagg_add_custompath(PlannerInfo *root,
 	con.input_path     = input_path;
 	con.target_upper   = root->upper_targets[UPPERREL_GROUP_AGG];
 	con.target_partial = create_empty_pathtarget();
-    con.target_final   = create_empty_pathtarget();
+	con.target_final   = create_empty_pathtarget();
 	con.xpu_task_flags = xpu_task_flags;
 	con.custom_path_methods = custom_path_methods;
 	extract_input_path_params(input_path,

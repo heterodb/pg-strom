@@ -2915,6 +2915,15 @@ CREATE AGGREGATE pgstrom.sum(int8)
   initcond = 0,
   parallel = safe
 );
+-- bigint --> numeric
+CREATE AGGREGATE pgstrom.sum_num(int8)
+(
+  sfunc = pg_catalog.int8_sum,
+  stype = numeric,
+  initcond = 0,
+  parallel = safe
+);
+
 -- float8 --> float4
 CREATE AGGREGATE pgstrom.sum_f4(float8)
 (
