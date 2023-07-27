@@ -2898,9 +2898,9 @@ CREATE FUNCTION pgstrom.psum(int8)
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.psum(float4)
-  RETURNS float4
-  AS 'MODULE_PATHNAME','pgstrom_partial_sum_asis'
-  LANGUAGE C STRICT PARALLEL SAFE;
+  RETURNS float8
+  AS 'ftod'
+  LANGUAGE internal STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.psum(float8)
   RETURNS float8

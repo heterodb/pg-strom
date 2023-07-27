@@ -214,12 +214,12 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	},
 	{"sum(float2)",
 	 "c:sum(float8)",
-	 "s:psum(float4)",
+	 "s:psum(float8)",
 	 KAGG_ACTION__PSUM_FP, false
 	},
 	{"sum(float4)",
 	 "s:sum_f4(float8)",
-	 "s:psum(float4)",
+	 "s:psum(float8)",
 	 KAGG_ACTION__PSUM_FP, false
 	},
 	{"sum(float8)",
