@@ -107,108 +107,6 @@ pgstrom_init_gucs(void)
 							NULL, NULL, NULL);
 }
 
-/*
- * xPU-aware path tracker
- *
- * motivation: add_path() and add_partial_path() keeps only cheapest paths.
- * Once some other dominates GpuXXX paths, it shall be wiped out, even if
- * it potentially has a chance for more optimization (e.g, GpuJoin outer
- * pull-up, GpuPreAgg + GpuJoin combined mode).
- * So, we preserve PG-Strom related Path-nodes for the later referenced.
- */
-typedef struct
-{
-	PlannerInfo	   *root;
-	Relids			relids;
-	bool			parallel_path;
-	uint32_t		devkind;		/* one of DEVKIND_* */
-	CustomPath	   *cpath;
-} custom_path_entry;
-
-static HTAB	   *custom_path_htable = NULL;
-
-static uint32
-custom_path_entry_hashvalue(const void *key, Size keysize)
-{
-	custom_path_entry *cent = (custom_path_entry *)key;
-	uint32      hash;
-
-	hash = hash_bytes((unsigned char *)&cent->root, sizeof(PlannerInfo *));
-	hash ^= bms_hash_value(cent->relids);
-	if (cent->parallel_path)
-		hash ^= 0x9e3779b9U;
-	hash ^= hash_uint32(cent->devkind);
-
-	return hash;
-}
-
-static int
-custom_path_entry_compare(const void *key1, const void *key2, Size keysize)
-{
-	custom_path_entry *cent1 = (custom_path_entry *)key1;
-	custom_path_entry *cent2 = (custom_path_entry *)key2;
-
-	if (cent1->root == cent2->root &&
-		bms_equal(cent1->relids, cent2->relids) &&
-		cent1->parallel_path == cent2->parallel_path &&
-		cent1->devkind == cent2->devkind)
-		return 0;
-	/* not equal */
-	return 1;
-}
-
-CustomPath *
-custom_path_find_cheapest(PlannerInfo *root,
-						  RelOptInfo *rel,
-						  bool parallel_path,
-						  uint32_t devkind)
-{
-	custom_path_entry  hkey;
-	custom_path_entry *cent;
-
-	memset(&hkey, 0, sizeof(custom_path_entry));
-	hkey.root = root;
-	hkey.relids = rel->relids;
-	hkey.parallel_path = (parallel_path ? true : false);
-	hkey.devkind = (devkind & DEVKIND__ANY);
-
-	cent = hash_search(custom_path_htable, &hkey, HASH_FIND, NULL);
-	if (!cent)
-		return NULL;
-	return cent->cpath;
-}
-
-bool
-custom_path_remember(PlannerInfo *root,
-					 RelOptInfo *rel,
-					 bool parallel_path,
-					 uint32_t devkind,
-					 const CustomPath *cpath)
-{
-	custom_path_entry  hkey;
-	custom_path_entry *cent;
-	bool		found;
-
-	Assert((devkind & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
-		   (devkind & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
-	memset(&hkey, 0, sizeof(custom_path_entry));
-	hkey.root = root;
-	hkey.relids = rel->relids;
-	hkey.parallel_path = (parallel_path ? true : false);
-	hkey.devkind = (devkind & DEVKIND__ANY);
-
-	cent = hash_search(custom_path_htable, &hkey, HASH_ENTER, &found);
-	if (found)
-	{
-		/* new path is more expensive than prior one! */
-		if (cent->cpath->path.total_cost <= cpath->path.total_cost)
-			return false;
-	}
-	cent->cpath = (CustomPath *)pgstrom_copy_pathnode(&cpath->path);
-
-	return true;
-}
-
 /* --------------------------------------------------------------------------------
  *
  * add/remove dummy plan node
@@ -413,41 +311,13 @@ pgstrom_post_planner(Query *parse,
 					 int cursorOptions,
 					 ParamListInfo boundParams)
 {
-	HTAB	   *custom_path_htable_saved = custom_path_htable;
-	HASHCTL		hctl;
 	PlannedStmt *pstmt;
 	ListCell   *lc;
 
-	PG_TRY();
-	{
-		memset(&hctl, 0, sizeof(HASHCTL));
-		hctl.hcxt = CurrentMemoryContext;
-		hctl.keysize = offsetof(custom_path_entry, cpath);
-		hctl.entrysize = sizeof(custom_path_entry);
-		hctl.hash = custom_path_entry_hashvalue;
-		hctl.match = custom_path_entry_compare;
-		custom_path_htable = hash_create("HTable to preserve Custom-Paths",
-										 512,
-										 &hctl,
-										 HASH_CONTEXT |
-										 HASH_ELEM |
-										 HASH_FUNCTION |
-										 HASH_COMPARE);
-		pstmt = planner_hook_next(parse,
-								  query_string,
-								  cursorOptions,
-								  boundParams);
-	}
-	PG_CATCH();
-	{
-		hash_destroy(custom_path_htable);
-		custom_path_htable = custom_path_htable_saved;
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	hash_destroy(custom_path_htable);
-	custom_path_htable = custom_path_htable_saved;
-
+	pstmt = planner_hook_next(parse,
+							  query_string,
+							  cursorOptions,
+							  boundParams);
 	/* remove dummy plan */
 	pgstrom_removal_dummy_plans(pstmt, &pstmt->planTree);
 	foreach (lc, pstmt->subplans)

@@ -871,11 +871,13 @@ aggfunc_catalog_lookup_by_oid(Oid aggfn_oid)
  */
 typedef struct
 {
-	bool		device_executable;
+	bool			device_executable;
 	PlannerInfo	   *root;
 	RelOptInfo	   *group_rel;
+	RelOptInfo	   *input_rel;
+	ParamPathInfo  *param_info;
 	double			num_groups;
-	Path		   *input_path;
+	bool			try_parallel;
 	PathTarget	   *target_upper;
 	PathTarget	   *target_partial;
 	PathTarget	   *target_final;
@@ -884,7 +886,6 @@ typedef struct
 	List		   *input_rels_tlist;
 	List		   *inner_paths_list;
 	Node		   *havingQual;
-	uint32_t		xpu_task_flags;
 	const CustomPathMethods *custom_path_methods;
 } xpugroupby_build_path_context;
 
@@ -1012,7 +1013,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 		if (type_oid != dest_oid)
 			expr = make_expr_typecast(expr, dest_oid);
 		if (!pgstrom_xpu_expression(expr,
-									con->xpu_task_flags,
+									pp_info->xpu_task_flags,
 									con->input_rels_tlist,
 									NULL))
 		{
@@ -1176,7 +1177,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			}
 			/* grouping-key must be device executable. */
 			if (!pgstrom_xpu_expression(expr,
-										con->xpu_task_flags,
+										pp_info->xpu_task_flags,
 										con->input_rels_tlist,
 										NULL))
 			{
@@ -1263,27 +1264,27 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 {
 	Query	   *parse = con->root->parse;
 	CustomPath *cpath = makeNode(CustomPath);
-	Path	   *input_path = con->input_path;
 	PathTarget *target_partial = con->target_partial;
 	pgstromPlanInfo *pp_info = con->pp_info;
+	double		input_nrows = PP_INFO_NUM_ROWS(pp_info);
 	double		num_group_keys;
 	double		xpu_ratio;
 	Cost		xpu_operator_cost;
 	Cost		xpu_tuple_cost;
-	Cost		startup_cost = 0.0;
-	Cost		run_cost = 0.0;
-	Cost		final_cost = 0.0;
+	Cost		startup_cost = PP_INFO_STARTUP_COST(pp_info);
+	Cost		run_cost = PP_INFO_RUN_COST(pp_info) - pp_info->final_cost;
+	Cost		final_cost;
 
 	/*
 	 * Parameters related to devices
 	 */
-	if ((con->xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU)
+	if ((pp_info->xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU)
 	{
 		xpu_operator_cost = pgstrom_gpu_operator_cost;
 		xpu_tuple_cost    = pgstrom_gpu_tuple_cost;
 		xpu_ratio         = pgstrom_gpu_operator_ratio();
 	}
-	else if ((con->xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
+	else if ((pp_info->xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
 	{
 		xpu_operator_cost = pgstrom_dpu_operator_cost;
 		xpu_tuple_cost    = pgstrom_dpu_tuple_cost;
@@ -1291,31 +1292,26 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 	}
 	else
 	{
-		elog(ERROR, "Bug? unexpected task_kind: %08x", con->xpu_task_flags);
+		elog(ERROR, "Bug? unexpected task_kind: %08x", pp_info->xpu_task_flags);
 	}
-	startup_cost = input_path->startup_cost;
-	run_cost = (input_path->total_cost -
-				input_path->startup_cost - pp_info->final_cost);
 	/* Cost estimation for grouping */
 	num_group_keys = list_length(parse->groupClause);
 	startup_cost += (xpu_operator_cost *
 					 num_group_keys *
-					 input_path->rows);
+					 input_nrows);
 	/* Cost estimation for aggregate function */
-	startup_cost += (target_partial->cost.per_tuple * input_path->rows +
+	startup_cost += (target_partial->cost.per_tuple * input_nrows +
 					 target_partial->cost.startup) * xpu_ratio;
 	/* Cost estimation to fetch results */
 	final_cost = xpu_tuple_cost * con->num_groups;
-	if (input_path->parallel_workers > 0)
-		final_cost *= (0.5 + (double)input_path->parallel_workers);
 
 	cpath->path.pathtype         = T_CustomScan;
-	cpath->path.parent           = input_path->parent;
+	cpath->path.parent           = con->input_rel;
 	cpath->path.pathtarget       = con->target_partial;
-	cpath->path.param_info       = input_path->param_info;
-	cpath->path.parallel_safe    = input_path->parallel_safe;
-	cpath->path.parallel_aware   = input_path->parallel_aware;
-	cpath->path.parallel_workers = input_path->parallel_workers;
+	cpath->path.param_info       = con->param_info;
+	cpath->path.parallel_aware   = con->try_parallel;
+	cpath->path.parallel_safe    = con->input_rel->consider_parallel;
+	cpath->path.parallel_workers = pp_info->parallel_nworkers;
 	cpath->path.rows             = con->num_groups;
 	cpath->path.startup_cost     = startup_cost;
 	cpath->path.total_cost       = startup_cost + run_cost + final_cost;
@@ -1381,40 +1377,47 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 
 static void
 __xpupreagg_add_custompath(PlannerInfo *root,
-						   Path *input_path,
 						   RelOptInfo *group_rel,
+						   RelOptInfo *input_rel,
+						   pgstromPlanInfo *pp_info,
+						   ParamPathInfo *param_info,
+						   List *inner_paths_list,
 						   void *extra,
 						   bool try_parallel,
 						   double num_groups,
-						   uint32_t xpu_task_flags,
 						   const CustomPathMethods *custom_path_methods)
 {
 	xpugroupby_build_path_context con;
 	Path	   *part_path;
+	List	   *inner_rels_tlist;
+	ListCell   *lc;
 
+	inner_rels_tlist = list_make1(makeInteger(pp_info->scan_relid));
+	foreach (lc, inner_paths_list)
+	{
+		Path   *i_path = (Path *)lfirst(lc);
+
+		inner_rels_tlist = lappend(inner_rels_tlist, i_path->pathtarget);
+	}
 	/* setup context */
 	memset(&con, 0, sizeof(con));
 	con.device_executable = true;
 	con.root           = root;
 	con.group_rel      = group_rel;
+	con.input_rel      = input_rel;
+	con.param_info     = param_info;
 	con.num_groups     = num_groups;
-	con.input_path     = input_path;
+	con.try_parallel   = try_parallel;
 	con.target_upper   = root->upper_targets[UPPERREL_GROUP_AGG];
 	con.target_partial = create_empty_pathtarget();
 	con.target_final   = create_empty_pathtarget();
-	con.xpu_task_flags = xpu_task_flags;
+	con.pp_info        = pp_info;
+	con.input_rels_tlist = inner_rels_tlist;
+	con.inner_paths_list = inner_paths_list;
 	con.custom_path_methods = custom_path_methods;
-	extract_input_path_params(input_path,
-							  NULL,
-							  &con.pp_info,
-							  &con.input_rels_tlist,
-							  &con.inner_paths_list);
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
 		return;
-
-	con.pp_info->xpu_task_flags = xpu_task_flags;
-
 	/* build partial groupby custom-path */
 	part_path = prepend_partial_groupby_custompath(&con);
 
@@ -1445,14 +1448,13 @@ __xpupreagg_add_custompath(PlannerInfo *root,
 
 void
 xpupreagg_add_custompath(PlannerInfo *root,
-						  RelOptInfo *input_rel,
-						  RelOptInfo *group_rel,
-						  void *extra,
-						  uint32_t xpu_task_flags,
-						  const CustomPathMethods *custom_path_methods)
+						 RelOptInfo *input_rel,
+						 RelOptInfo *group_rel,
+						 void *extra,
+						 uint32_t xpu_task_flags,
+						 const CustomPathMethods *custom_path_methods)
 {
 	Query	   *parse = root->parse;
-	Path	   *input_path;
 
 	/* quick bailout if not supported */
 	if (parse->groupingSets != NIL ||
@@ -1464,24 +1466,17 @@ xpupreagg_add_custompath(PlannerInfo *root,
 
 	for (int try_parallel=0; try_parallel < 2; try_parallel++)
 	{
-		if (IS_SIMPLE_REL(input_rel))
-		{
-			input_path = (Path *)buildXpuScanPath(root,
-												  input_rel,
-												  (try_parallel > 0),
-												  false,
-												  true,
-												  xpu_task_flags);
-		}
-		else
-		{
-			input_path = (Path *)custom_path_find_cheapest(root,
-														   input_rel,
-														   (try_parallel > 0),
-														   xpu_task_flags);
-		}
+		pgstromPlanInfo *pp_info;
+		ParamPathInfo  *param_info = NULL;
+		List		   *inner_paths_list = NIL;
 
-		if (input_path)
+		pp_info = buildOuterJoinPlanInfo(root,
+										 input_rel,
+										 xpu_task_flags,
+										 (try_parallel > 0),
+										 &param_info,
+										 &inner_paths_list);
+		if (pp_info)
 		{
 			double		num_groups = 1.0;
 
@@ -1490,22 +1485,26 @@ xpupreagg_add_custompath(PlannerInfo *root,
 			{
 				GroupPathExtraData *gp_extra = extra;
 				List   *groupExprs;
+				double	input_nrows = PP_INFO_NUM_ROWS(pp_info);
 
 				/* see get_number_of_groups() */
 				groupExprs = get_sortgrouplist_exprs(parse->groupClause,
 													 gp_extra->targetList);
 				num_groups = estimate_num_groups(root, groupExprs,
-												 input_path->rows,
+												 input_nrows,
 												 NULL, NULL);
 			}
 			__xpupreagg_add_custompath(root,
-									   input_path,
 									   group_rel,
+									   input_rel,
+									   pp_info,
+									   param_info,
+									   inner_paths_list,
 									   extra,
 									   (try_parallel > 0),
 									   num_groups,
-									   xpu_task_flags,
 									   custom_path_methods);
+
 		}
 	}
 }
@@ -1532,11 +1531,11 @@ gpupreagg_add_custompath(PlannerInfo *root,
 		return;
 	/* add custom-paths */
 	xpupreagg_add_custompath(root,
-							  input_rel,
-							  group_rel,
-							  extra,
-							  TASK_KIND__GPUPREAGG,
-							  &gpupreagg_path_methods);
+							 input_rel,
+							 group_rel,
+							 extra,
+							 TASK_KIND__GPUPREAGG,
+							 &gpupreagg_path_methods);
 }
 
 /*

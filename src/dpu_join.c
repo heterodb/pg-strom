@@ -13,7 +13,7 @@
 
 /* static variables */
 static set_join_pathlist_hook_type set_join_pathlist_next = NULL;
-static CustomPathMethods	dpujoin_path_methods;
+       CustomPathMethods	dpujoin_path_methods;
 static CustomScanMethods	dpujoin_plan_methods;
 static CustomExecMethods	dpujoin_exec_methods;
 bool		pgstrom_enable_dpujoin;			/* GUC */

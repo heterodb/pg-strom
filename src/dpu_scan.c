@@ -46,15 +46,12 @@ DpuScanAddScanPath(PlannerInfo *root,
 
 		cpath = buildXpuScanPath(root,
 								 baserel,
+								 TASK_KIND__DPUSCAN,
 								 (try_parallel > 0),
 								 true,		/* allow host quals */
 								 false,		/* disallow no device quals */
-								 TASK_KIND__DPUSCAN);
-		if (cpath && custom_path_remember(root,
-										  baserel,
-										  (try_parallel > 0),
-										  TASK_KIND__DPUSCAN,
-										  cpath))
+								 &dpuscan_path_methods);
+		if (cpath)
 		{
 			if (try_parallel == 0)
 				add_path(baserel, &cpath->path);

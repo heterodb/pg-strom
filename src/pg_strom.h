@@ -237,6 +237,8 @@ typedef struct
 {
 	JoinType		join_type;      /* one of JOIN_* */
 	double			join_nrows;     /* estimated nrows in this depth */
+	Cost			join_startup_cost; /* estimated startup cost */
+	Cost			join_run_cost;	/* estimated run cost (incl final_cost) */
 	List		   *hash_outer_keys;/* hash-keys for outer-side */
 	List		   *hash_outer_keys_fallback;
 	List		   *hash_inner_keys;/* hash-keys for inner-side */
@@ -272,6 +274,9 @@ typedef struct
 	List	   *scan_quals_fallback;/* 'scan_quals' for CPU fallback */
 	double		scan_tuples;		/* copy of baserel->tuples */
 	double		scan_rows;			/* copy of baserel->rows */
+	Cost		scan_startup_cost;	/* estimated startup cost to scan baserel */
+	Cost		scan_run_cost;		/* estimated run cost to scan baserel */
+	int			parallel_nworkers;	/* # of parallel workers */
 	double		parallel_divisor;	/* parallel divisor */
 	Cost		final_cost;			/* cost for sendback and host-side tasks */
 	bool		scan_needs_ctid;	/* FIXME: true, if ctid is referenced */
@@ -306,6 +311,19 @@ typedef struct
 	int			num_rels;
 	pgstromPlanInnerInfo inners[FLEXIBLE_ARRAY_MEMBER];
 } pgstromPlanInfo;
+
+#define PP_INFO_NUM_ROWS(pp_info)								\
+	((pp_info)->num_rels == 0									\
+	 ? (pp_info)->scan_rows										\
+	 : (pp_info)->inners[(pp_info)->num_rels - 1].join_nrows)
+#define PP_INFO_STARTUP_COST(pp_info)								\
+	((pp_info)->num_rels == 0										\
+	 ? (pp_info)->scan_startup_cost									\
+	 : (pp_info)->inners[(pp_info)->num_rels - 1].join_startup_cost)
+#define PP_INFO_RUN_COST(pp_info)									\
+	((pp_info)->num_rels == 0										\
+	 ? (pp_info)->scan_run_cost										\
+	 : (pp_info)->inners[(pp_info)->num_rels - 1].join_run_cost)
 
 /*
  * pgstromSharedState
@@ -805,12 +823,20 @@ extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
 extern void		sort_device_qualifiers(List *dev_quals_list,
 									   List *dev_costs_list);
 extern pgstromPlanInfo *try_fetch_xpuscan_planinfo(const Path *path);
+extern pgstromPlanInfo *buildOuterScanPlanInfo(PlannerInfo *root,
+											   RelOptInfo *baserel,
+											   uint32_t xpu_task_flags,
+											   bool parallel_path,
+											   bool allow_host_quals,
+											   bool allow_no_device_quals,
+											   ParamPathInfo **p_param_info);
 extern CustomPath *buildXpuScanPath(PlannerInfo *root,
 									RelOptInfo *baserel,
+									uint32_t task_kind,
 									bool parallel_path,
 									bool allow_host_quals,
 									bool allow_no_device_quals,
-									uint32_t task_kind);
+									const CustomPathMethods *methods);
 extern CustomScan *PlanXpuScanPathCommon(PlannerInfo *root,
 										 RelOptInfo  *baserel,
 										 CustomPath  *best_path,
@@ -830,11 +856,13 @@ extern void		pgstrom_init_gpu_scan(void);
 extern void		form_pgstrom_plan_info(CustomScan *cscan,
 									   pgstromPlanInfo *pp_info);
 extern pgstromPlanInfo *deform_pgstrom_plan_info(CustomScan *cscan);
-extern void		extract_input_path_params(const Path *input_path,
-										  const Path *inner_path,	/* optional */
-										  pgstromPlanInfo **p_pp_info,
-										  List **p_input_paths_tlist,
-										  List **p_inner_paths_list);
+extern pgstromPlanInfo *try_fetch_xpujoin_planinfo(const Path *path);
+extern pgstromPlanInfo *buildOuterJoinPlanInfo(PlannerInfo *root,
+											   RelOptInfo *outer_rel,
+											   uint32_t xpu_task_flags,
+											   bool try_parallel_path,
+											   ParamPathInfo **p_param_info,
+											   List **p_inner_paths_list);
 extern void		xpujoin_add_custompath(PlannerInfo *root,
 									   RelOptInfo *joinrel,
 									   RelOptInfo *outerrel,
@@ -946,6 +974,7 @@ extern void		pgstrom_init_dpu_scan(void);
 /*
  * dpu_join.c
  */
+extern CustomPathMethods	dpujoin_path_methods;
 extern bool		pgstrom_enable_dpujoin;
 extern bool		pgstrom_enable_dpuhashjoin;
 extern bool		pgstrom_enable_dpugistindex;
@@ -994,15 +1023,6 @@ extern bool		pgstrom_enabled;
 extern bool		pgstrom_cpu_fallback_enabled;
 extern bool		pgstrom_regression_test_mode;
 extern int		pgstrom_max_async_tasks;
-extern CustomPath *custom_path_find_cheapest(PlannerInfo *root,
-											 RelOptInfo *rel,
-											 bool parallel_aware,
-											 uint32_t devkind);
-extern bool		custom_path_remember(PlannerInfo *root,
-									 RelOptInfo *rel,
-									 bool parallel_aware,
-									 uint32_t devkind,
-									 const CustomPath *cpath);
 extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);
 extern void		_PG_init(void);
 
