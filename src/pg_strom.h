@@ -830,25 +830,12 @@ extern pgstromPlanInfo *buildOuterScanPlanInfo(PlannerInfo *root,
 											   bool allow_host_quals,
 											   bool allow_no_device_quals,
 											   ParamPathInfo **p_param_info);
-extern CustomPath *buildXpuScanPath(PlannerInfo *root,
-									RelOptInfo *baserel,
-									uint32_t task_kind,
-									bool parallel_path,
-									bool allow_host_quals,
-									bool allow_no_device_quals,
-									const CustomPathMethods *methods);
-extern CustomScan *PlanXpuScanPathCommon(PlannerInfo *root,
-										 RelOptInfo  *baserel,
-										 CustomPath  *best_path,
-										 List        *tlist,
-										 List        *clauses,
-										 pgstromPlanInfo *pp_info,
-										 const CustomScanMethods *methods);
 extern void		ExecFallbackCpuScan(pgstromTaskState *pts,
 									kern_data_store *kds,
 									HeapTuple tuple);
 extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
 extern void		pgstrom_init_gpu_scan(void);
+extern void		pgstrom_init_dpu_scan(void);
 
 /*
  * gpu_join.c
@@ -863,14 +850,6 @@ extern pgstromPlanInfo *buildOuterJoinPlanInfo(PlannerInfo *root,
 											   bool try_parallel_path,
 											   ParamPathInfo **p_param_info,
 											   List **p_inner_paths_list);
-extern void		xpujoin_add_custompath(PlannerInfo *root,
-									   RelOptInfo *joinrel,
-									   RelOptInfo *outerrel,
-									   RelOptInfo *innerrel,
-									   JoinType join_type,
-									   JoinPathExtraData *extra,
-									   uint32_t task_kind,
-									   const CustomPathMethods *methods);
 extern List *build_fallback_exprs_scan(Index scan_relid, List *scan_exprs);
 extern List *build_fallback_exprs_join(codegen_context *context,
 									   List *join_exprs);
@@ -889,9 +868,10 @@ extern void		ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts);
 extern void		ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts,
 												XpuCommand *resp);
 extern void		pgstrom_init_gpu_join(void);
+extern void		pgstrom_init_dpu_join(void);
 
 /*
- * gpu_groupby.c
+ * gpu_preagg.c
  */
 extern int		pgstrom_hll_register_bits;
 extern void		xpupreagg_add_custompath(PlannerInfo *root,
@@ -904,6 +884,7 @@ extern void		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
 									  kern_data_store *kds,
 									  HeapTuple tuple);
 extern void		pgstrom_init_gpu_preagg(void);
+extern void		pgstrom_init_dpu_preagg(void);
 
 /*
  * arrow_fdw.c and arrow_read.c
@@ -964,26 +945,6 @@ extern void		DpuClientOpenSession(pgstromTaskState *pts,
 extern void		explainDpuStorageEntry(const DpuStorageEntry *ds_entry,
 									   ExplainState *es);
 extern bool		pgstrom_init_dpu_device(void);
-
-/*
- * dpu_scan.c
- */
-extern CustomPathMethods	dpuscan_path_methods;
-extern void		pgstrom_init_dpu_scan(void);
-
-/*
- * dpu_join.c
- */
-extern CustomPathMethods	dpujoin_path_methods;
-extern bool		pgstrom_enable_dpujoin;
-extern bool		pgstrom_enable_dpuhashjoin;
-extern bool		pgstrom_enable_dpugistindex;
-extern void		pgstrom_init_dpu_join(void);
-
-/*
- * dpu_preagg.c
- */
-extern void		pgstrom_init_dpu_preagg(void);
 
 /*
  * misc.c
