@@ -126,6 +126,7 @@ __setup_kern_colmeta(kern_data_store *kds,
 					 int *p_attcacheoff)
 {
 	kern_colmeta   *cmeta = &kds->colmeta[column_index];
+	devtype_info   *dtype = pgstrom_devtype_lookup(atttypid);
 	TypeCacheEntry *tcache;
 
 	memset(cmeta, 0, sizeof(kern_colmeta));
@@ -250,6 +251,7 @@ __setup_kern_colmeta(kern_data_store *kds,
 	/*
 	 * for the reverse references to KDS
 	 */
+	cmeta->dtype_sizeof = (dtype ? dtype->type_sizeof : 0);
 	cmeta->kds_format = kds->format;
 	cmeta->kds_offset = (char *)cmeta - (char *)kds;
 }
@@ -308,6 +310,8 @@ setup_kern_data_store(kern_data_store *kds,
 		cmeta->atttypid = InvalidOid;
 		cmeta->atttypmod = -1;
 		cmeta->atttypkind = TYPE_KIND__BASE;
+		cmeta->kds_format = kds->format;
+		cmeta->kds_offset = (uint32_t)((char *)cmeta - (char *)kds);
 		strcpy(cmeta->attname, "__gcache_sysattr__");
 	}
 	return MAXALIGN(offsetof(kern_data_store, colmeta[kds->nr_colmeta]));

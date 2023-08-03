@@ -250,6 +250,8 @@ typedef enum {
 	FuncOpCode__LeastExpr,
 	FuncOpCode__GreatestExpr,
 	FuncOpCode__CaseWhenExpr,
+	FuncOpCode__ScalarArrayOpAny,
+	FuncOpCode__ScalarArrayOpAll,
 #include "xpu_opcodes.h"
 	/* for projection */
 	FuncOpCode__Projection = 9999,
@@ -413,6 +415,17 @@ kcxt_reset(kern_context *kcxt)
 	kcxt->vlpos = kcxt->vlbuf;
 }
 
+INLINE_FUNCTION(char *)
+kcxt_slot_buf(kern_context *kcxt, uint32_t slot_off)
+{
+	if (slot_off == 0)
+		return NULL;
+	assert(slot_off >= (sizeof(kern_variable) * kcxt->kvars_nslots +
+						sizeof(int)           * kcxt->kvars_nslots) &&
+		   slot_off <  kcxt->kvars_nbytes);
+	return ((char *)kcxt->kvars_slot + slot_off);
+}
+
 INLINE_FUNCTION(void)
 __strncpy(char *d, const char *s, uint32_t n)
 {
@@ -460,6 +473,8 @@ struct kern_colmeta {
 	int8_t			atttypkind;
 	/* copy of kds->format */
 	char			kds_format;
+	/* copy of sizeof(xpu_xxxx_t) if any */
+	int16_t			dtype_sizeof;
 	/*
 	 * offset from kds for the reverse reference.
 	 * kds = (kern_data_store *)((char *)cmeta - cmeta->kds_offset)
@@ -1521,9 +1536,6 @@ struct xpu_array_t {
 	int32_t				length;
 	union {
 		struct {
-			bool		attbyval;
-			int8_t		attalign;
-			int16_t		attlen;
 			const varlena *value;
 		} heap;
 		struct {
@@ -1534,6 +1546,64 @@ struct xpu_array_t {
 };
 typedef struct xpu_array_t			xpu_array_t;
 EXTERN_DATA xpu_datum_operators		xpu_array_ops;
+
+/* access macros for heap array */
+typedef struct
+{
+	int32_t		ndim;			/* # of dimensions */
+	int32_t		dataoffset;		/* offset to data, or 0 if no bitmap */
+	Oid			elemtype;		/* element type OID */
+	uint32_t	data[1];
+} __ArrayTypeData;				/* payload of ArrayType */
+
+INLINE_FUNCTION(int32_t)
+__pg_array_ndim(const __ArrayTypeData *ar)
+{
+	return __Fetch(&ar->ndim);
+}
+INLINE_FUNCTION(int32_t)
+__pg_array_dataoff(const __ArrayTypeData *ar)
+{
+	return __Fetch(&ar->dataoffset);
+}
+INLINE_FUNCTION(bool)
+__pg_array_hasnull(const __ArrayTypeData *ar)
+{
+	return (__pg_array_dataoff(ar) != 0);
+}
+INLINE_FUNCTION(int32_t)
+__pg_array_dim(const __ArrayTypeData *ar, int k)
+{
+	return __Fetch(&ar->data[k]);
+}
+INLINE_FUNCTION(uint8_t *)
+__pg_array_nullmap(const __ArrayTypeData *ar)
+{
+	uint32_t	dataoff = __pg_array_dataoff(ar);
+
+	if (dataoff > 0)
+	{
+		int32_t	ndim = __pg_array_ndim(ar);
+
+		return (uint8_t *)((char *)&ar->data[2 * ndim]);
+	}
+	return NULL;
+}
+INLINE_FUNCTION(char *)
+__pg_array_dataptr(const __ArrayTypeData *ar)
+{
+	uint32_t	dataoff = __pg_array_dataoff(ar);
+
+	if (dataoff == 0)
+	{
+		int32_t	ndim = __pg_array_ndim(ar);
+
+		dataoff = MAXALIGN(VARHDRSZ + offsetof(__ArrayTypeData,
+											   data[2 * ndim]));
+	}
+	assert(dataoff >= VARHDRSZ + offsetof(__ArrayTypeData, data));
+	return (char *)ar + dataoff - VARHDRSZ;
+}
 
 /*
  * xpu_composite_t - composite type support
@@ -1743,22 +1813,30 @@ struct kern_expression
 			uint32_t	case_comp;		/* key value to be compared, if any */
 			uint32_t	case_else;		/* ELSE clause, if any */
 			char		data[1]			__MAXALIGNED__;
-		} casewhen;
+		} casewhen;	/* Case-When */
+		struct {
+			uint32_t	slot_id;		/* temporary slot-id */
+			uint32_t	slot_bufsz;		/* if >0, alloca(slot_bufsz) */
+			bool		elem_byval;		/* attbyval of the element type */
+			int8_t		elem_align;		/* attalign of the element type */
+			int16_t		elem_len;		/* attlen of the element type */
+			char		data[1]			__MAXALIGNED__;
+		} saop;		/* ScalarArrayOp */
 		struct {
 			int			depth;
 			int			nloads;
 			kern_vars_defitem kvars[1];
 		} load;		/* VarLoads */
 		struct {
-			int			gist_depth;		/* special depth for GiST index */
-			uint32_t	gist_oid;		/* OID of GiST index (for EXPLAIN) */
-			kern_vars_defitem ivar;		/* index item reference */
-			char		data[1]			__MAXALIGNED__;
+			int			gist_depth;	/* special depth for GiST index */
+			uint32_t	gist_oid;	/* OID of GiST index (for EXPLAIN) */
+			kern_vars_defitem ivar;	/* index item reference */
+			char		data[1]		__MAXALIGNED__;
 		} gist;		/* GiSTEval */
 		struct {
 			uint32_t	slot_id;	/* destination slot-id */
 			uint32_t	slot_off;	/* kvars-slot buffer offset, if needed */
-			char		data[1];
+			char		data[1]		__MAXALIGNED__;
 		} save;		/* SaveExpr */
 		struct {
 			int			nattrs;

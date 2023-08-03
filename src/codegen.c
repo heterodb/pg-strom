@@ -202,6 +202,7 @@ build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	dtype->type_sizeof = sizeof(xpu_array_t);
 	dtype->type_alignof = __alignof__(xpu_array_t);
 	dtype->type_hashfunc = NULL; //devtype_array_hash;
+	dtype->type_element = elem;
 	/* type equality functions */
 	dtype->type_eqfunc = get_opcode(tcache->eq_opr);
 	dtype->type_cmpfunc = tcache->cmp_proc;
@@ -1754,6 +1755,147 @@ codegen_casewhen_expression(codegen_context *context,
 }
 
 /*
+ * codegen_scalar_array_op_expression
+ */
+static int
+codegen_scalar_array_op_expression(codegen_context *context,
+								   StringInfo buf,
+								   ScalarArrayOpExpr *sa_op)
+{
+	Expr		   *expr_a, *expr_s;
+	devtype_info   *dtype_a, *dtype_s, *dtype_e;
+	devfunc_info   *dfunc;
+	Oid				type_oid;
+	Oid				func_oid;
+	Oid				argtypes[2];
+	int				pos = -1, __pos = -1;
+	uint32_t		slot_id;
+	kern_expression	kexp;
+
+	if (list_length(sa_op->args) != 2)
+	{
+		__Elog("ScalarArrayOpExpr is not binary operator, not supported");
+		return -1;
+	}
+	expr_a = linitial(sa_op->args);
+	type_oid = exprType((Node *)expr_a);
+	dtype_a = pgstrom_devtype_lookup(type_oid);
+	if (!dtype_a)
+		__Elog("type %s is not device supported", format_type_be(type_oid));
+
+	expr_s = lsecond(sa_op->args);
+	type_oid = exprType((Node *)expr_s);
+	dtype_s = pgstrom_devtype_lookup(type_oid);
+	if (!dtype_s)
+		__Elog("type %s is not device supported", format_type_be(type_oid));
+
+	if (dtype_s->type_element == NULL &&
+		dtype_a->type_element != NULL)
+	{
+		func_oid = get_opcode(sa_op->opno);
+	}
+	else if (dtype_s->type_element != NULL &&
+			 dtype_a->type_element == NULL)
+	{
+		/* swap arguments */
+		Expr		   *expr_temp  = expr_a;
+		devtype_info   *dtype_temp = dtype_a;
+		Oid				opcode;
+
+		expr_a  = expr_s;
+		dtype_a = dtype_s;
+		expr_s  = expr_temp;
+		dtype_s = dtype_temp;
+		opcode = get_commutator(sa_op->opno);
+		func_oid = get_opcode(opcode);
+	}
+	else
+	{
+		__Elog("ScalarArrayOpExpr must be 'SCALAR = %s ARRAY' form",
+			   sa_op->useOr ? "ANY" : "ALL");
+	}
+	dtype_e = dtype_a->type_element;
+	argtypes[0] = dtype_s->type_oid;
+	argtypes[1] = dtype_e->type_oid;
+	dfunc = __pgstrom_devfunc_lookup(func_oid,
+									 2, argtypes,
+									 sa_op->inputcollid);
+	if (!dfunc)
+		__Elog("function %s is not device supported",
+			   format_procedure(func_oid));
+	if (dfunc->func_rettype->type_oid != BOOLOID ||
+		dfunc->func_nargs != 2)
+		__Elog("function %s is not a binary boolean function",
+			   format_procedure(func_oid));
+	/* allocation of kvars slot */
+	slot_id = list_length(context->kvars_depth);
+	context->kvars_depth = lappend_int(context->kvars_depth, -1);
+	context->kvars_resno = lappend_int(context->kvars_resno, -1);
+	context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
+	context->kvars_exprs = lappend(context->kvars_exprs,	/* dummy */
+								   makeNullConst(argtypes[0], -1, InvalidOid));
+	
+	if (buf)
+		pos = __appendZeroStringInfo(buf, offsetof(kern_expression,
+												   u.saop.data));
+	/* 1st arg - array-expression to be walked on */
+	if (codegen_expression_walker(context, buf, expr_a) < 0)
+		return -1;
+	/* 2nd arg - expression to be saved */
+	if (buf)
+	{
+		devtype_info *dtype_e = dtype_a->type_element;
+		int		__off;
+
+		memset(&kexp, 0, sizeof(kexp));
+		kexp.exptype = dfunc->func_rettype->type_code;
+		kexp.expflags = context->kexp_flags;
+		kexp.opcode = dfunc->func_code;
+		kexp.nr_args = 2;
+		kexp.args_offset = offsetof(kern_expression, u.data);
+		__pos = __appendBinaryStringInfo(buf, &kexp,
+										 offsetof(kern_expression, u.data));
+
+		/* 1st arg of the 2nd arg (comparator function) */
+		memset(&kexp, 0, sizeof(kexp));
+		kexp.exptype = dtype_e->type_code;
+		kexp.expflags = context->kexp_flags;
+		kexp.opcode = FuncOpCode__VarExpr;
+		kexp.nr_args = 0;
+		kexp.u.v.var_typlen   = dtype_e->type_length;
+		kexp.u.v.var_typbyval = dtype_e->type_byval;
+		kexp.u.v.var_typalign = dtype_e->type_align;
+		kexp.u.v.var_slot_id  = slot_id;
+		__off = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExprVar);
+		__appendKernExpMagicAndLength(buf, __off);
+	}
+	/* 2nd arg of the 2nd arg (comparator function) */
+	if (codegen_expression_walker(context, buf, expr_s) < 0)
+		return -1;
+	if (buf)
+	{
+		memset(&kexp, 0, sizeof(kexp));
+		kexp.exptype = TypeOpCode__bool;
+		kexp.expflags = context->kexp_flags;
+		kexp.opcode = (sa_op->useOr
+					   ? FuncOpCode__ScalarArrayOpAny
+					   : FuncOpCode__ScalarArrayOpAll);
+		kexp.nr_args = 2;
+		kexp.args_offset = offsetof(kern_expression, u.saop.data);
+		kexp.u.saop.slot_id = slot_id;
+		kexp.u.saop.slot_bufsz = dtype_e->type_sizeof;
+		kexp.u.saop.elem_byval = dtype_e->type_byval;
+		kexp.u.saop.elem_align = dtype_e->type_align;
+		kexp.u.saop.elem_len   = dtype_e->type_length;
+		memcpy(buf->data + pos, &kexp, offsetof(kern_expression,
+												u.saop.data));
+		__appendKernExpMagicAndLength(buf, __pos);
+		__appendKernExpMagicAndLength(buf, pos);
+	}
+	return 0;
+}
+
+/*
  * is_expression_equals_tlist
  *
  * It checks whether the supplied expression exactly matches any entry of
@@ -1870,9 +2012,10 @@ codegen_expression_walker(codegen_context *context,
 			return codegen_relabel_expression(context, buf, (RelabelType *)expr);
 		case T_CaseExpr:
 			return codegen_casewhen_expression(context, buf, (CaseExpr *)expr);
-//		case T_CaseTestExpr:
-		case T_CoerceToDomain:
 		case T_ScalarArrayOpExpr:
+			return codegen_scalar_array_op_expression(context, buf,
+													  (ScalarArrayOpExpr *)expr);
+		case T_CoerceToDomain:
 		default:
 			__Elog("not a supported expression type: %s", nodeToString(expr));
 	}
@@ -3429,7 +3572,10 @@ __xpucode_to_cstring(StringInfo buf,
 					 List *dcontext)				/* optionsl */
 {
 	const kern_expression *karg;
-	int		i, pos;
+	devfunc_info *dfunc;
+	devtype_info *dtype;
+	const char *label;
+	int			i, pos;
 
 	switch (kexp->opcode)
 	{
@@ -3589,6 +3735,17 @@ __xpucode_to_cstring(StringInfo buf,
 			appendStringInfo(buf, "}");
 			return;
 
+		case FuncOpCode__ScalarArrayOpAny:
+		case FuncOpCode__ScalarArrayOpAll:
+			Assert(kexp->nr_args == 2);
+			if (kexp->opcode == FuncOpCode__ScalarArrayOpAny)
+				label = "Any";
+			else
+				label = "All";
+			appendStringInfo(buf, "{ScalarArrayOp%s slot=%d:",
+							 label, kexp->u.saop.slot_id);
+			break;
+
 		default:
 			{
 				static struct {
@@ -3601,9 +3758,8 @@ __xpucode_to_cstring(StringInfo buf,
 #include "xpu_opcodes.h"
 					{FuncOpCode__Invalid,NULL,NULL}
 				};
-				devfunc_info *dfunc = devfunc_lookup_by_opcode(kexp->opcode);
-				devtype_info *dtype;
 
+				dfunc = devfunc_lookup_by_opcode(kexp->opcode);
 				if (dfunc)
 				{
 					dtype = devtype_lookup_by_opcode(kexp->exptype);
