@@ -608,6 +608,10 @@ __FUNC_OPCODE(texticnlike, text/text, 800, NULL)
 __FUNC_OPCODE(bpcharicnlike, bpchar/text, 800, NULL)
 
 /* String operations */
+FUNC_OPCODE(substr,    text/int4/int4, DEVKIND__ANY, substr,    20, NULL)
+FUNC_OPCODE(substring, text/int4/int4, DEVKIND__ANY, substring, 20, NULL)
+FUNC_OPCODE(substr,    text/int4,      DEVKIND__ANY, substr_nolen, 20, NULL)
+FUNC_OPCODE(substring, text/int4,      DEVKIND__ANY, substring_nolen, 20, NULL)
 //__FUNC_OPCODE(textcat, text/text, NULL)
 //__FUNC_OPCODE(concat, __text__, NULL)
 

@@ -1058,13 +1058,202 @@ PG_BPCHARLIKE_TEMPLATE(bpcharnlike, GenericMatchText, !=)
 PG_BPCHARLIKE_TEMPLATE(bpchariclike, GenericCaseMatchText, ==)
 PG_BPCHARLIKE_TEMPLATE(bpcharicnlike, GenericCaseMatchText, !=)
 
+/*
+ * Sub-string
+ */
+STATIC_FUNCTION(bool)
+__substring_common(kern_context *kcxt,
+				   xpu_text_t *result,
+				   const char *str,
+				   int32_t length,
+				   int32_t start,
+				   int32_t count)
+{
+	const xpu_encode_info *encode = SESSION_ENCODE(kcxt->session);
+	const char *pos;
 
+	if (!encode)
+	{
+		STROM_ELOG(kcxt, "No encoding info was supplied");
+		return false;
+	}
 
+	result->expr_ops = &xpu_text_ops;
+	if (encode->enc_maxlen == 1)
+	{
+		if (start >= length ||
+			count == 0 ||
+			(count > 0 && start + count <= 0))
+		{
+			/* empty */
+			result->length = 0;
+			result->value = str;
+		}
+		else if (start < 0)
+		{
+			if (count < 0 || start + count >= length)
+			{
+				/* same string */
+				result->length = length;
+				result->value = str;
+			}
+			else
+			{
+				/* sub-string from the head */
+				result->length = Min(start + count, length);
+				result->value = str;
+			}
+		}
+		else	/* start >= 0 && start < length */
+		{
+			/* sub-string */
+			result->length = Min(start + count, length) - start;
+			result->value = str + start;
+		}
+	}
+	else
+	{
+		const char *pos = str;
+		const char *end = str + length;
 
+		if (start < 0)
+		{
+			if (count < 0)
+			{
+				/* same string */
+				result->length = length;
+				result->value = str;
+				return true;
+			}
+			count = start + count;
+			if (count < 0)
+			{
+				/* empty string */
+				result->length = 0;
+				result->value = str;
+				return true;
+			}
+			start = 0;
+		}
+		assert(start >= 0);
 
+		result->value = NULL;
+		if (pos < end)
+		{
+			for (int i=0; ; i++)
+			{
+				int		w = encode->enc_mblen(pos);
 
+				if (pos + w >= end)
+					break;
+				if (i == start)
+					result->value = pos;
+				if (count >= 0 && i == start + count)
+					break;
+				pos += w;
+			}
+		}
+		if (result->value)
+			result->length = (pos - result->value);
+		else
+		{
+			result->length = 0;
+			result->value = str;
+		}
+	}
+	return true;
+}
 
+PUBLIC_FUNCTION(bool)
+pgfn_substring(XPU_PGFUNCTION_ARGS)
+{
+	const kern_expression *karg;
+	xpu_text_t	str;
+	xpu_int4_t	start;
+	xpu_int4_t	count;
 
+	assert(kexp->nr_args == 3 &&
+		   kexp->exptype == TypeOpCode__text);
+	__result->expr_ops = NULL;
 
+	karg = KEXP_FIRST_ARG(kexp);
+	assert(KEXP_IS_VALID(karg, text));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &str))
+		return false;
+	if (XPU_DATUM_ISNULL(&str))
+		return true;	/* NULL */
+	if (!xpu_text_is_valid(kcxt, &str))
+		return false;	/* compressed or external */
 
-	
+	karg = KEXP_NEXT_ARG(karg);
+	assert(KEXP_IS_VALID(karg, int4));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &start))
+		return false;
+	if (XPU_DATUM_ISNULL(&start))
+		return true;	/* NULL */
+
+	karg = KEXP_NEXT_ARG(karg);
+	assert(KEXP_IS_VALID(karg, int4));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &count))
+		return false;
+	if (XPU_DATUM_ISNULL(&count))
+		return true;
+	if (count.value < 0)
+	{
+		STROM_ELOG(kcxt, "negative substring length not allowed");
+		return false;
+	}
+	return __substring_common(kcxt,
+							  (xpu_text_t *)__result,
+							  str.value,
+							  str.length,
+							  start.value - 1,	/* 0-origin */
+							  count.value);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_substr(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_substring(kcxt, kexp, __result);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_substring_nolen(XPU_PGFUNCTION_ARGS)
+{
+	const kern_expression *karg;
+	xpu_text_t	str;
+	xpu_int4_t	start;
+
+	assert(kexp->nr_args == 2 &&
+		   kexp->exptype == TypeOpCode__text);
+	__result->expr_ops = NULL;
+
+	karg = KEXP_FIRST_ARG(kexp);
+	assert(KEXP_IS_VALID(karg, text));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &str))
+		return false;
+	if (XPU_DATUM_ISNULL(&str))
+		return true;	/* NULL */
+	if (!xpu_text_is_valid(kcxt, &str))
+		return false;	/* compressed or external */
+
+	karg = KEXP_NEXT_ARG(karg);
+	assert(KEXP_IS_VALID(karg, int4));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &start))
+		return false;
+	if (XPU_DATUM_ISNULL(&start))
+		return true;	/* NULL */
+
+	return __substring_common(kcxt,
+							  (xpu_text_t *)__result,
+							  str.value,
+							  str.length,
+							  start.value - 1,	/* 0-origin */
+							  -1);		/* open end */
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_substr_nolen(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_substring_nolen(kcxt, kexp, __result);
+}
