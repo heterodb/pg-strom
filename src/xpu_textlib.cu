@@ -1070,7 +1070,6 @@ __substring_common(kern_context *kcxt,
 				   int32_t count)
 {
 	const xpu_encode_info *encode = SESSION_ENCODE(kcxt->session);
-	const char *pos;
 
 	if (!encode)
 	{

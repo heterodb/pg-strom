@@ -120,7 +120,8 @@ $(GPU_DEVATTRS_H): $(CUDA_IPATH)/cuda.h
 	grep -v 'Deprecated[,\.]' | \
 	sed -e 's|[ ]*CU_DEVICE_ATTRIBUTE_|DEV_ATTR(|g' \
 	    -e 's| =.*/\*\*<[ ]*|, "|g' \
-	    -e 's|[ ]*\*/|")|g' > $@
+	    -e 's|[ ]*\*/|")|g' \
+        -e 's| =.*$$|, NULL)|g' > $@
 
 #
 # GPU Device Code
