@@ -2429,10 +2429,6 @@ gpuservBgWorkerMain(Datum arg)
 	pqsignal(SIGHUP,  gpuservBgWorkerSignal);
 	BackgroundWorkerUnblockSignals();
 
-	/* Disable MPS */
-	if (setenv("CUDA_MPS_PIPE_DIRECTORY", "/dev/null", 1) != 0)
-		elog(ERROR, "failed on setenv: %m");
-
 	/* Registration of resource cleanup handler */
 	dlist_init(&gpuserv_gpucontext_list);
 	before_shmem_exit(gpuservCleanupOnProcExit, 0);
