@@ -977,9 +977,9 @@ increment_overflow(int *ip, int x)
 
 	ival += x;
 	if (ival < INT_MIN || ival > INT_MAX)
-		return false;
+		return true;
 	*ip = ival;
-	return true;
+	return false;
 }
 
 INLINE_FUNCTION(int)
@@ -1373,13 +1373,14 @@ pgfn_timestamptz_to_timestamp(XPU_PGFUNCTION_ARGS)
 		result->expr_ops = NULL;
 	else
 	{
+		const pg_tz	   *tz_info = SESSION_TIMEZONE(kcxt->session);
 		struct pg_tm	tm;
 		fsec_t			fsec;
 
 		result->expr_ops = &xpu_timestamp_ops;
 		if (TIMESTAMP_NOT_FINITE(datum.value))
 			result->value = datum.value;
-		else if (!timestamp2tm(datum.value, &tm, &fsec, NULL) ||
+		else if (!timestamp2tm(datum.value, &tm, &fsec, tz_info) ||
 				 !tm2timestamp(&result->value, &tm, fsec, NULL))
 		{
 			STROM_ELOG(kcxt, "timestamp out of range");
@@ -1404,6 +1405,7 @@ pgfn_timestamp_to_timestamptz(XPU_PGFUNCTION_ARGS)
 		result->expr_ops = NULL;
 	else
 	{
+		const pg_tz	   *tz_info = SESSION_TIMEZONE(kcxt->session);
 		struct pg_tm	tm;
 		Timestamp		ts = datum.value;
 		fsec_t			fsec;
@@ -1411,8 +1413,7 @@ pgfn_timestamp_to_timestamptz(XPU_PGFUNCTION_ARGS)
 		result->expr_ops = &xpu_timestamptz_ops;
 		if (TIMESTAMP_NOT_FINITE(datum.value))
 			result->value = datum.value;
-		else if (!timestamp2tm(datum.value, &tm, &fsec,
-							   SESSION_TIMEZONE(kcxt->session)))
+		else if (!timestamp2tm(datum.value, &tm, &fsec, tz_info))
 		{
 			STROM_ELOG(kcxt, "timestamp out of range");
 			return false;
@@ -1430,6 +1431,161 @@ pgfn_timestamp_to_timestamptz(XPU_PGFUNCTION_ARGS)
 	return true;
 }
 
+PUBLIC_FUNCTION(bool)
+pgfn_timestamp_date(XPU_PGFUNCTION_ARGS)
+{
+	xpu_date_t	   *result = (xpu_date_t *)__result;
+	xpu_timestamp_t	datum;
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	struct pg_tm	tm;
+	fsec_t			fsec;
+
+	assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, timestamp));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
+		return false;
+	if (XPU_DATUM_ISNULL(&datum))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_date_ops;
+		if (TIMESTAMP_IS_NOBEGIN(datum.value))
+			DATE_NOBEGIN(result->value);
+		else if (TIMESTAMP_IS_NOEND(datum.value))
+			DATE_NOEND(result->value);
+		else if (timestamp2tm(datum.value, &tm, &fsec, NULL))
+		{
+			result->value = date2j(tm.tm_year,
+								   tm.tm_mon,
+								   tm.tm_mday) - POSTGRES_EPOCH_JDATE;
+		}
+		else
+		{
+			STROM_ELOG(kcxt, "timestamp out of range");
+			return false;
+		}
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_timestamptz_date(XPU_PGFUNCTION_ARGS)
+{
+	xpu_date_t	   *result = (xpu_date_t *)__result;
+	xpu_timestamptz_t datum;
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	const pg_tz	   *tz_info = SESSION_TIMEZONE(kcxt->session);
+	struct pg_tm	tm;
+	fsec_t			fsec;
+
+	assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, timestamptz));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
+		return false;
+	if (XPU_DATUM_ISNULL(&datum))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_date_ops;
+		if (TIMESTAMP_IS_NOBEGIN(datum.value))
+			DATE_NOBEGIN(result->value);
+		else if (TIMESTAMP_IS_NOEND(datum.value))
+			DATE_NOEND(result->value);
+		else if (timestamp2tm(datum.value, &tm, &fsec, tz_info))
+			result->value = date2j(tm.tm_year,
+								   tm.tm_mon,
+								   tm.tm_mday) - POSTGRES_EPOCH_JDATE;
+		else
+		{
+			STROM_ELOG(kcxt, "timestamp with timezone out of range");
+			return false;
+		}
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_timetz_time(XPU_PGFUNCTION_ARGS)
+{
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	xpu_time_t	   *result = (xpu_time_t *)__result;
+	xpu_timetz_t	datum;
+
+	assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, timetz));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
+		return false;
+	if (XPU_DATUM_ISNULL(&datum))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_time_ops;
+		result->value = datum.value.time;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_timestamp_time(XPU_PGFUNCTION_ARGS)
+{
+	xpu_time_t	   *result = (xpu_time_t *)__result;
+	xpu_timestamp_t	datum;
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	struct pg_tm	tm;
+	fsec_t			fsec;
+
+	assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, timestamp));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
+		return false;
+	if (XPU_DATUM_ISNULL(&datum) || TIMESTAMP_NOT_FINITE(datum.value))
+		result->expr_ops = NULL;
+	else if (timestamp2tm(datum.value, &tm, &fsec, NULL))
+	{
+		result->expr_ops = &xpu_time_ops;
+		result->value = ((((tm.tm_hour * MINS_PER_HOUR
+						  + tm.tm_min) * SECS_PER_MINUTE)
+						  + tm.tm_sec) * USECS_PER_SEC) + fsec;
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "timestamp out of range");
+		return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_timestamptz_time(XPU_PGFUNCTION_ARGS)
+{
+	const pg_tz	   *tz_info = SESSION_TIMEZONE(kcxt->session);
+	xpu_time_t	   *result = (xpu_time_t *)__result;
+	xpu_timestamptz_t datum;
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	struct pg_tm	tm;
+	fsec_t			fsec;
+
+	assert(kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, timestamptz));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
+		return false;
+
+	if (XPU_DATUM_ISNULL(&datum) || TIMESTAMP_NOT_FINITE(datum.value))
+		result->expr_ops = NULL;
+	else if (timestamp2tm(datum.value, &tm, &fsec, tz_info))
+	{
+		result->expr_ops = &xpu_time_ops;
+		result->value = ((((tm.tm_hour * MINS_PER_HOUR
+						  + tm.tm_min) * SECS_PER_MINUTE)
+						  + tm.tm_sec) * USECS_PER_SEC) + fsec;
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "timestamp out of range");
+		return false;
+	}
+	return true;
+}
 
 PG_SIMPLE_COMPARE_TEMPLATE(date_,date,date,DateADT)
 PG_SIMPLE_COMPARE_TEMPLATE(time_,time,time,TimeADT)
@@ -1646,7 +1802,7 @@ __compare_date_timestamptz(DateADT a, TimestampTz b, const pg_tz *tz_info)
 		}																\
 		else															\
 		{																\
-			pg_tz  *tz_info = SESSION_TIMEZONE(kcxt->session);			\
+			const pg_tz *tz_info = SESSION_TIMEZONE(kcxt->session);		\
 			comp = __compare_date_timestamptz(datum_a.value,			\
 											  datum_b.value,			\
 											  tz_info);					\
@@ -1686,7 +1842,7 @@ PG_DATE_TIMESTAMPTZ_COMPARE_TEMPLATE(ge, >=);
 		}																\
 		else															\
 		{																\
-			pg_tz  *tz_info = SESSION_TIMEZONE(kcxt->session);			\
+			const pg_tz  *tz_info = SESSION_TIMEZONE(kcxt->session);	\
 			comp = __compare_date_timestamptz(datum_b.value,			\
 											  datum_a.value,			\
 											  tz_info);					\

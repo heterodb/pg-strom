@@ -491,6 +491,11 @@ FUNC_OPCODE(timestamp, date, DEVKIND__ANY, date_to_timestamp, 5, NULL)
 FUNC_OPCODE(timestamp, timestamptz, DEVKIND__ANY, timestamptz_to_timestamp, 5, NULL)
 FUNC_OPCODE(timestamptz, date, DEVKIND__ANY|DEVKERN__SESSION_TIMEZONE, date_to_timestamptz, 5, NULL)
 FUNC_OPCODE(timestamptz, timestamp, DEVKIND__ANY, timestamp_to_timestamptz, 5, NULL)
+FUNC_OPCODE(date, timestamp, DEVKIND__ANY, timestamp_date, 5, NULL)
+FUNC_OPCODE(date, timestamptz, DEVKIND__ANY, timestamptz_date, 5, NULL)
+FUNC_OPCODE(time, timetz, DEVKIND__ANY, timetz_time, 5, NULL)
+FUNC_OPCODE(time, timestamp, DEVKIND__ANY, timestamp_time, 5, NULL)
+FUNC_OPCODE(time, timestamptz, DEVKIND__ANY, timestamptz_time, 5, NULL)
 
 __FUNC_OPCODE(date_eq, date/date, 1, NULL)
 __FUNC_OPCODE(date_ne, date/date, 1, NULL)
@@ -575,6 +580,11 @@ __FUNC_OPCODE(interval_lt, interval/interval, 5, NULL)
 __FUNC_OPCODE(interval_le, interval/interval, 5, NULL)
 __FUNC_OPCODE(interval_gt, interval/interval, 5, NULL)
 __FUNC_OPCODE(interval_ge, interval/interval, 5, NULL)
+
+/* overlaps */
+//TODO...
+/* extract */
+//TODO...
 
 /*
  * Text functions/operators
