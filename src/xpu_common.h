@@ -1691,6 +1691,34 @@ typedef struct kern_expression	kern_expression;
 								xpu_datum_t *__result
 typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 
+#define KEXP_PROCESS_ARGS1(RETTYPE,ARGTYPE1,ARGNAME1)			\
+	xpu_##RETTYPE##_t *result = (xpu_##RETTYPE##_t *)__result;	\
+	xpu_##ARGTYPE1##_t ARGNAME1;								\
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
+																\
+	assert(kexp->exptype == TypeOpCode__##RETTYPE &&			\
+		   kexp->nr_args == 1 &&								\
+		   KEXP_IS_VALID(karg,ARGTYPE1));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME1))			\
+		return false
+
+#define KEXP_PROCESS_ARGS2(RETTYPE,ARGTYPE1,ARGNAME1,			\
+								   ARGTYPE2,ARGNAME2)			\
+	xpu_##RETTYPE##_t *result = (xpu_##RETTYPE##_t *)__result;	\
+	xpu_##ARGTYPE1##_t ARGNAME1;								\
+	xpu_##ARGTYPE2##_t ARGNAME2;								\
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
+																\
+	assert(kexp->exptype == TypeOpCode__##RETTYPE &&			\
+		   kexp->nr_args == 2 &&								\
+		   KEXP_IS_VALID(karg,ARGTYPE1));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME1))			\
+		return false;											\
+	karg = KEXP_NEXT_ARG(karg);									\
+	assert(KEXP_IS_VALID(karg, ARGTYPE2));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME2))			\
+		return false
+
 typedef struct
 {
 	int32_t			var_resno;

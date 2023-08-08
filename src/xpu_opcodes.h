@@ -581,6 +581,27 @@ __FUNC_OPCODE(interval_le, interval/interval, 5, NULL)
 __FUNC_OPCODE(interval_gt, interval/interval, 5, NULL)
 __FUNC_OPCODE(interval_ge, interval/interval, 5, NULL)
 
+/* operators */
+__FUNC_OPCODE(date_pli, date/int4, 5, NULL)
+__FUNC_OPCODE(date_mii, date/int4, 5, NULL)
+__FUNC_OPCODE(date_mi, date/date, 5, NULL)
+__FUNC_OPCODE(datetime_pl, date/time, 5, NULL)
+__FUNC_OPCODE(integer_pl_date, int4/date, 5, NULL)
+__FUNC_OPCODE(timedate_pl, time/date, 5, NULL)
+__FUNC_OPCODE(time_mi_time, time/time, 5, NULL)
+__FUNC_OPCODE(timestamp_mi, timestamp/timestamp, 5, NULL)
+__FUNC_OPCODE(time_pl_interval, time/interval, 10, NULL)
+__FUNC_OPCODE(time_mi_interval, time/interval, 10, NULL)
+__FUNC_OPCODE(timetz_pl_interval, timetz/interval, 10, NULL)
+__FUNC_OPCODE(timetz_mi_interval, timetz/interval, 10, NULL)
+__FUNC_OPCODE(timestamp_pl_interval, timestamp/interval, 10, NULL)
+__FUNC_OPCODE(timestamp_mi_interval, timestamp/interval, 10, NULL)
+__FUNC_OPCODE(timestamptz_pl_interval, timestamptz/interval, 10, NULL)
+__FUNC_OPCODE(timestamptz_mi_interval, timestamptz/interval, 10, NULL)
+__FUNC_OPCODE(interval_um, interval, 4, NULL)
+__FUNC_OPCODE(interval_pl, interval/interval, 4, NULL)
+__FUNC_OPCODE(interval_mi, interval/interval, 4, NULL)
+
 /* overlaps */
 //TODO...
 /* extract */

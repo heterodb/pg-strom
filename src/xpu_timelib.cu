@@ -1280,14 +1280,8 @@ tm2timestamp(Timestamp *result, const struct pg_tm *tm, fsec_t fsec,
 PUBLIC_FUNCTION(bool)
 pgfn_date_to_timestamp(XPU_PGFUNCTION_ARGS)
 {
-	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
-	xpu_date_t	datum;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS1(timestamp, date, datum);
 
-	assert(kexp->nr_args == 1 &&
-		   KEXP_IS_VALID(karg, date));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum))
 		result->expr_ops = NULL;
 	else
@@ -1312,14 +1306,8 @@ pgfn_date_to_timestamp(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_date_to_timestamptz(XPU_PGFUNCTION_ARGS)
 {
-	xpu_timestamptz_t *result = (xpu_timestamptz_t *)__result;
-	xpu_date_t	datum;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS1(timestamptz, date, datum);
 
-	assert(kexp->nr_args == 1 &&
-		   KEXP_IS_VALID(karg, date));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum))
 		result->expr_ops = NULL;
 	else
@@ -1361,14 +1349,8 @@ pgfn_date_to_timestamptz(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_timestamptz_to_timestamp(XPU_PGFUNCTION_ARGS)
 {
-	xpu_timestamp_t	   *result = (xpu_timestamp_t *)__result;
-	xpu_timestamptz_t	datum;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS1(timestamp, timestamptz, datum);
 
-	assert(kexp->nr_args == 1 &&
-		   KEXP_IS_VALID(karg, timestamptz));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum))
 		result->expr_ops = NULL;
 	else
@@ -1393,14 +1375,8 @@ pgfn_timestamptz_to_timestamp(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_timestamp_to_timestamptz(XPU_PGFUNCTION_ARGS)
 {
-	xpu_timestamptz_t  *result = (xpu_timestamptz_t *)__result;
-	xpu_timestamp_t		datum;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS1(timestamptz, timestamp, datum);
 
-	assert(kexp->nr_args == 1 &&
-		   KEXP_IS_VALID(karg, timestamp));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum))
 		result->expr_ops = NULL;
 	else
@@ -1434,20 +1410,15 @@ pgfn_timestamp_to_timestamptz(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_timestamp_date(XPU_PGFUNCTION_ARGS)
 {
-	xpu_date_t	   *result = (xpu_date_t *)__result;
-	xpu_timestamp_t	datum;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
-	struct pg_tm	tm;
-	fsec_t			fsec;
+	KEXP_PROCESS_ARGS1(date, timestamp, datum);
 
-	assert(kexp->nr_args == 1 &&
-		   KEXP_IS_VALID(karg, timestamp));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum))
 		result->expr_ops = NULL;
 	else
 	{
+		struct pg_tm	tm;
+		fsec_t			fsec;
+
 		result->expr_ops = &xpu_date_ops;
 		if (TIMESTAMP_IS_NOBEGIN(datum.value))
 			DATE_NOBEGIN(result->value);
@@ -1471,21 +1442,16 @@ pgfn_timestamp_date(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_timestamptz_date(XPU_PGFUNCTION_ARGS)
 {
-	xpu_date_t	   *result = (xpu_date_t *)__result;
-	xpu_timestamptz_t datum;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
-	const pg_tz	   *tz_info = SESSION_TIMEZONE(kcxt->session);
-	struct pg_tm	tm;
-	fsec_t			fsec;
+	KEXP_PROCESS_ARGS1(date, timestamptz, datum);
 
-	assert(kexp->nr_args == 1 &&
-		   KEXP_IS_VALID(karg, timestamptz));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum))
 		result->expr_ops = NULL;
 	else
 	{
+		const pg_tz	   *tz_info = SESSION_TIMEZONE(kcxt->session);
+		struct pg_tm	tm;
+		fsec_t			fsec;
+
 		result->expr_ops = &xpu_date_ops;
 		if (TIMESTAMP_IS_NOBEGIN(datum.value))
 			DATE_NOBEGIN(result->value);
@@ -1507,14 +1473,8 @@ pgfn_timestamptz_date(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_timetz_time(XPU_PGFUNCTION_ARGS)
 {
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
-	xpu_time_t	   *result = (xpu_time_t *)__result;
-	xpu_timetz_t	datum;
+	KEXP_PROCESS_ARGS1(time, timetz, datum);
 
-	assert(kexp->nr_args == 1 &&
-		   KEXP_IS_VALID(karg, timetz));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum))
 		result->expr_ops = NULL;
 	else
@@ -1528,29 +1488,27 @@ pgfn_timetz_time(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_timestamp_time(XPU_PGFUNCTION_ARGS)
 {
-	xpu_time_t	   *result = (xpu_time_t *)__result;
-	xpu_timestamp_t	datum;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
-	struct pg_tm	tm;
-	fsec_t			fsec;
+	KEXP_PROCESS_ARGS1(time, timestamp, datum);
 
-	assert(kexp->nr_args == 1 &&
-		   KEXP_IS_VALID(karg, timestamp));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum) || TIMESTAMP_NOT_FINITE(datum.value))
 		result->expr_ops = NULL;
-	else if (timestamp2tm(datum.value, &tm, &fsec, NULL))
-	{
-		result->expr_ops = &xpu_time_ops;
-		result->value = ((((tm.tm_hour * MINS_PER_HOUR
-						  + tm.tm_min) * SECS_PER_MINUTE)
-						  + tm.tm_sec) * USECS_PER_SEC) + fsec;
-	}
 	else
 	{
-		STROM_ELOG(kcxt, "timestamp out of range");
-		return false;
+		struct pg_tm	tm;
+		fsec_t			fsec;
+
+		if (timestamp2tm(datum.value, &tm, &fsec, NULL))
+		{
+			result->expr_ops = &xpu_time_ops;
+			result->value = ((((tm.tm_hour * MINS_PER_HOUR
+								+ tm.tm_min) * SECS_PER_MINUTE)
+								+ tm.tm_sec) * USECS_PER_SEC) + fsec;
+		}
+		else
+		{
+			STROM_ELOG(kcxt, "timestamp out of range");
+			return false;
+		}
 	}
 	return true;
 }
@@ -1558,31 +1516,28 @@ pgfn_timestamp_time(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_timestamptz_time(XPU_PGFUNCTION_ARGS)
 {
-	const pg_tz	   *tz_info = SESSION_TIMEZONE(kcxt->session);
-	xpu_time_t	   *result = (xpu_time_t *)__result;
-	xpu_timestamptz_t datum;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
-	struct pg_tm	tm;
-	fsec_t			fsec;
-
-	assert(kexp->nr_args == 1 &&
-		   KEXP_IS_VALID(karg, timestamptz));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
-		return false;
+	KEXP_PROCESS_ARGS1(time, timestamptz, datum);
 
 	if (XPU_DATUM_ISNULL(&datum) || TIMESTAMP_NOT_FINITE(datum.value))
 		result->expr_ops = NULL;
-	else if (timestamp2tm(datum.value, &tm, &fsec, tz_info))
-	{
-		result->expr_ops = &xpu_time_ops;
-		result->value = ((((tm.tm_hour * MINS_PER_HOUR
-						  + tm.tm_min) * SECS_PER_MINUTE)
-						  + tm.tm_sec) * USECS_PER_SEC) + fsec;
-	}
 	else
 	{
-		STROM_ELOG(kcxt, "timestamp out of range");
-		return false;
+		const pg_tz	   *tz_info = SESSION_TIMEZONE(kcxt->session);
+		struct pg_tm	tm;
+		fsec_t			fsec;
+		
+		if (timestamp2tm(datum.value, &tm, &fsec, tz_info))
+		{
+			result->expr_ops = &xpu_time_ops;
+			result->value = ((((tm.tm_hour * MINS_PER_HOUR
+								+ tm.tm_min) * SECS_PER_MINUTE)
+								+ tm.tm_sec) * USECS_PER_SEC) + fsec;
+		}
+		else
+		{
+			STROM_ELOG(kcxt, "timestamp out of range");
+			return false;
+		}
 	}
 	return true;
 }
@@ -2005,3 +1960,585 @@ PG_INTERVAL_COMPARE_TEMPLATE(lt, <)
 PG_INTERVAL_COMPARE_TEMPLATE(le, <=)
 PG_INTERVAL_COMPARE_TEMPLATE(gt, >)
 PG_INTERVAL_COMPARE_TEMPLATE(ge, >=)
+
+/* ----------------------------------------------------------------
+ *
+ * Date and Time operator functions
+ *
+ * ----------------------------------------------------------------
+ */
+PUBLIC_FUNCTION(bool)
+pgfn_date_pli(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(date, date, dval, int4, ival);
+
+	if (XPU_DATUM_ISNULL(&dval) || XPU_DATUM_ISNULL(&ival))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_date_ops;
+		if (DATE_NOT_FINITE(dval.value))
+			result->value = dval.value;		/* can't change infinity */
+		else
+			result->value = dval.value + ival.value;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_date_mii(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(date, date, dval, int4, ival);
+
+	if (XPU_DATUM_ISNULL(&dval) || XPU_DATUM_ISNULL(&ival))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_date_ops;
+		if (DATE_NOT_FINITE(dval.value))
+			result->value = dval.value;		/* can't change infinity */
+		else
+			result->value = dval.value - ival.value;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_date_mi(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(int4, date, dval1, date, dval2);
+
+	if (XPU_DATUM_ISNULL(&dval1) || XPU_DATUM_ISNULL(&dval2))
+		result->expr_ops = NULL;
+	else if (!DATE_NOT_FINITE(dval1.value) &&
+			 !DATE_NOT_FINITE(dval2.value))
+	{
+		result->expr_ops = &xpu_int4_ops;
+		result->value = (int32_t)(dval1.value - dval2.value);
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "cannot subtract infinite dates");
+		return false;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+__pg_datetime_pl(kern_context *kcxt,
+				 xpu_timestamp_t *result,
+				 const xpu_date_t *dval,
+				 const xpu_time_t *tval)
+{
+	if (XPU_DATUM_ISNULL(dval) || XPU_DATUM_ISNULL(tval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_timestamp_ops;
+
+		/* transform date -> timestamp */
+		if (DATE_IS_NOBEGIN(dval->value))
+			TIMESTAMP_NOBEGIN(result->value);
+		else if (DATE_IS_NOEND(dval->value))
+			TIMESTAMP_NOEND(result->value);
+		else if (dval->value < (TIMESTAMP_END_JULIAN - POSTGRES_EPOCH_JDATE))
+		{
+			/* timestamp += time */
+			result->value = (dval->value * USECS_PER_DAY + tval->value);
+		}
+		else
+		{
+			STROM_ELOG(kcxt, "date out of range for timestamp");
+			return false;
+		}
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_datetime_pl(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(timestamp, date, dval, time, tval);
+	return __pg_datetime_pl(kcxt, result, &dval, &tval);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_integer_pl_date(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(date, int4, ival, date, dval);
+
+	if (XPU_DATUM_ISNULL(&ival) || XPU_DATUM_ISNULL(&dval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_date_ops;
+		if (DATE_NOT_FINITE(dval.value))
+			result->value = dval.value;		/* can't change infinity */
+		else
+			result->value = dval.value + ival.value;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_timedate_pl(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(timestamp, time, tval, date, dval);
+	return __pg_datetime_pl(kcxt, result, &dval, &tval);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_time_mi_time(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(interval, time, tval1, time, tval2);
+	
+	if (XPU_DATUM_ISNULL(&tval1) || XPU_DATUM_ISNULL(&tval2))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_interval_ops;
+		result->value.time  = tval1.value - tval2.value;
+		result->value.day   = 0;
+		result->value.month = 0;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_timestamp_mi(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(interval, timestamp, tval1, timestamp, tval2);
+
+	if (XPU_DATUM_ISNULL(&tval1) || XPU_DATUM_ISNULL(&tval2))
+        result->expr_ops = NULL;
+	else if (TIMESTAMP_NOT_FINITE(tval1.value) ||
+			 TIMESTAMP_NOT_FINITE(tval2.value))
+	{
+		STROM_ELOG(kcxt, "cannot subtract infinite timestamps");
+		return false;
+	}
+	else
+	{
+		TimeOffset		t;
+
+		result->expr_ops = &xpu_interval_ops;
+		result->value.month = 0;
+		result->value.day   = 0;
+		/*----------
+		 *  This is wrong, but removing it breaks a lot of regression tests.
+		 *  For example:
+		 *
+		 *  test=> SET timezone = 'EST5EDT';
+		 *  test=> SELECT
+		 *  test-> ('2005-10-30 13:22:00-05'::timestamptz -
+		 *  test(>  '2005-10-29 13:22:00-04'::timestamptz);
+		 *  ?column?
+		 *  ----------------
+		 *   1 day 01:00:00
+		 *   (1 row)
+		 *
+		 *  so adding that to the first timestamp gets:
+		 *
+		 *   test=> SELECT
+		 *   test-> ('2005-10-29 13:22:00-04'::timestamptz +
+		 *   test(> ('2005-10-30 13:22:00-05'::timestamptz -
+		 *   test(>  '2005-10-29 13:22:00-04'::timestamptz)) at time zone 'EST';
+		 *      timezone
+		 *  --------------------
+		 *  2005-10-30 14:22:00
+		 *  (1 row)
+		 *----------
+		 *
+		 * See, the original at interval_justify_hours()
+		 */
+		t = tval1.value - tval2.value;
+		if (t >= USECS_PER_DAY)
+		{
+			TimeOffset	d = t / USECS_PER_DAY;
+			result->value.day += d;
+			t -= d * USECS_PER_DAY;
+		}
+		result->value.time = t;
+
+		if (result->value.day > 0 && result->value.time < 0)
+		{
+			result->value.time += USECS_PER_DAY;
+			result->value.day--;
+		}
+		else if (result->value.day < 0 && result->value.time > 0)
+		{
+			result->value.time -= USECS_PER_DAY;
+			result->value.day++;
+		}
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_time_pl_interval(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(time, time, tval, interval, ival);
+
+	if (XPU_DATUM_ISNULL(&tval) || XPU_DATUM_ISNULL(&ival))
+		result->expr_ops = NULL;
+	else
+	{
+		TimeADT		t;
+
+		t = tval.value + ival.value.time;
+		t -= (t / USECS_PER_DAY) * USECS_PER_DAY;
+		if (t < 0)
+			t += USECS_PER_DAY;
+		result->expr_ops = &xpu_time_ops;
+		result->value = t;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_time_mi_interval(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(time, time, tval, interval, ival);
+
+	if (XPU_DATUM_ISNULL(&tval) || XPU_DATUM_ISNULL(&ival))
+		result->expr_ops = NULL;
+	else
+	{
+		TimeADT		t;
+
+		t = tval.value - ival.value.time;
+		t -= (t / USECS_PER_DAY) * USECS_PER_DAY;
+		if (t < 0)
+			t += USECS_PER_DAY;
+		result->expr_ops = &xpu_time_ops;
+		result->value = t;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_timetz_pl_interval(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(timetz, timetz, tval, interval, ival);
+
+	if (XPU_DATUM_ISNULL(&tval) || XPU_DATUM_ISNULL(&ival))
+		result->expr_ops = NULL;
+	else
+	{
+		TimeADT		t;
+
+		t = tval.value.time + ival.value.time;
+		t -= (t / USECS_PER_DAY) * USECS_PER_DAY;
+		if (t < 0)
+			t += USECS_PER_DAY;
+		result->expr_ops = &xpu_time_ops;
+		result->value.time = t;
+		result->value.zone = tval.value.zone;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_timetz_mi_interval(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(timetz, timetz, tval, interval, ival);
+
+	if (XPU_DATUM_ISNULL(&tval) || XPU_DATUM_ISNULL(&ival))
+		result->expr_ops = NULL;
+	else
+	{
+		TimeADT		t;
+
+		t = tval.value.time - ival.value.time;
+		t -= (t / USECS_PER_DAY) * USECS_PER_DAY;
+		if (t < 0)
+			t += USECS_PER_DAY;
+		result->expr_ops = &xpu_time_ops;
+		result->value.time = t;
+		result->value.zone = tval.value.zone;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+__pg_timestamp_pl_interval(kern_context *kcxt,
+						   xpu_timestamp_t *result,
+						   const xpu_timestamp_t *tval,
+						   const xpu_interval_t *ival)
+{
+	if (XPU_DATUM_ISNULL(tval) || XPU_DATUM_ISNULL(ival))
+		result->expr_ops = NULL;
+	else if (TIMESTAMP_NOT_FINITE(tval->value))
+	{
+		result->expr_ops = &xpu_timestamp_ops;
+		result->value = tval->value;
+	}
+	else
+	{
+		Timestamp	ts = tval->value;
+
+		if (ival->value.month != 0)
+		{
+			struct pg_tm	tm;
+			fsec_t			fsec;
+
+			if (!timestamp2tm(ts, &tm, &fsec, NULL))
+			{
+				STROM_ELOG(kcxt, "timestamp out of range");
+				return false;
+			}
+			tm.tm_mon += ival->value.month;
+			if (tm.tm_mon > MONTHS_PER_YEAR)
+			{
+				tm.tm_year += (tm.tm_mon - 1) / MONTHS_PER_YEAR;
+				tm.tm_mon  = (tm.tm_mon - 1) % MONTHS_PER_YEAR + 1;
+			}
+			else if (tm.tm_mon < 1)
+			{
+				tm.tm_year += tm.tm_mon / MONTHS_PER_YEAR - 1;
+				tm.tm_mon  = tm.tm_mon % MONTHS_PER_YEAR + MONTHS_PER_YEAR;
+			}
+			/* adjust for end of month boundary problems... */
+			if (tm.tm_mday > day_tab[isleap(tm.tm_year)][tm.tm_mon - 1])
+				tm.tm_mday = day_tab[isleap(tm.tm_year)][tm.tm_mon - 1];
+			if (!tm2timestamp(&ts, &tm, fsec, NULL))
+			{
+				STROM_ELOG(kcxt, "timestamp out of range");
+				return false;
+			}
+		}
+
+		if (ival->value.day != 0)
+		{
+			struct pg_tm	tm;
+			fsec_t			fsec;
+			int				julian;
+
+			if (!timestamp2tm(ts, &tm, &fsec, NULL))
+			{
+				STROM_ELOG(kcxt, "timestamp out of range");
+				return false;
+			}
+			/* add days by converting to and from Julian */
+            julian = date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) + ival->value.day;
+			j2date(julian, &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
+			if (!tm2timestamp(&ts, &tm, fsec, NULL))
+			{
+				STROM_ELOG(kcxt, "timestamp out of range");
+				return false;
+			}
+		}
+		ts += ival->value.time;
+		if (!IS_VALID_TIMESTAMP(ts))
+		{
+			STROM_ELOG(kcxt, "timestamp out of range");
+			return false;
+		}
+		result->expr_ops = &xpu_timestamp_ops;
+		result->value    = ts;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_timestamp_pl_interval(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(timestamp, timestamp, tval, interval, ival);
+	return __pg_timestamp_pl_interval(kcxt, result, &tval, &ival);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_timestamp_mi_interval(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(timestamp, timestamp, tval, interval, ival);
+	ival.value.month = -ival.value.month;
+	ival.value.day   = -ival.value.day;
+	ival.value.time  = -ival.value.time;
+	return __pg_timestamp_pl_interval(kcxt, result, &tval, &ival);
+}
+
+STATIC_FUNCTION(bool)
+__pg_timestamptz_pl_interval(kern_context *kcxt,
+							 xpu_timestamptz_t *result,
+							 const xpu_timestamptz_t *tval,
+							 const xpu_interval_t *ival)
+{
+	if (XPU_DATUM_ISNULL(tval) || XPU_DATUM_ISNULL(ival))
+		result->expr_ops = NULL;
+	else if (TIMESTAMP_NOT_FINITE(tval->value))
+	{
+		result->expr_ops = &xpu_timestamp_ops;
+		result->value = tval->value;
+	}
+	else
+	{
+		Timestamp	ts = tval->value;
+		const pg_tz *tz_info = SESSION_TIMEZONE(kcxt->session);
+		int			tz;
+
+		if (ival->value.month != 0)
+		{
+			struct pg_tm tm;
+			fsec_t	fsec;
+
+			if (!timestamp2tm(ts, &tm, &fsec, NULL))
+			{
+				STROM_ELOG(kcxt, "timestamp out of range");
+				return false;
+			}
+			tm.tm_mon += ival->value.month;
+			if (tm.tm_mon > MONTHS_PER_YEAR)
+			{
+				tm.tm_year += (tm.tm_mon - 1) / MONTHS_PER_YEAR;
+				tm.tm_mon  = (tm.tm_mon - 1) % MONTHS_PER_YEAR + 1;
+			}
+			else if (tm.tm_mon < 1)
+			{
+				tm.tm_year += tm.tm_mon / MONTHS_PER_YEAR - 1;
+				tm.tm_mon  = tm.tm_mon % MONTHS_PER_YEAR + MONTHS_PER_YEAR;
+			}
+			/* adjust for end of month boundary problems... */
+			if (tm.tm_mday > day_tab[isleap(tm.tm_year)][tm.tm_mon - 1])
+				tm.tm_mday = day_tab[isleap(tm.tm_year)][tm.tm_mon - 1];
+
+			tz = DetermineTimeZoneOffset(&tm, tz_info);
+			if (!tm2timestamp(&ts, &tm, fsec, NULL))
+			{
+				STROM_ELOG(kcxt, "timestamp out of range");
+				return false;
+			}
+			ts += tz * USECS_PER_SEC;
+		}
+
+		if (ival->value.day != 0)
+		{
+			struct pg_tm tm;
+			fsec_t	fsec;
+			int		julian;
+
+			if (!timestamp2tm(ts, &tm, &fsec, NULL))
+			{
+				STROM_ELOG(kcxt, "timestamp out of range");
+				return false;
+			}
+            /* add days by converting to and from Julian */
+            julian = date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) + ival->value.day;
+            j2date(julian, &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
+
+            tz = DetermineTimeZoneOffset(&tm, tz_info);
+			if (!tm2timestamp(&ts, &tm, fsec, NULL))
+			{
+				STROM_ELOG(kcxt, "timestamp out of range");
+				return false;
+			}
+			ts += tz * USECS_PER_SEC;
+		}
+		ts += ival->value.time;
+		if (!IS_VALID_TIMESTAMP(ts))
+		{
+			STROM_ELOG(kcxt, "timestamp out of range");
+			return false;
+		}
+		result->expr_ops = &xpu_timestamp_ops;
+		result->value    = ts;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_timestamptz_pl_interval(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(timestamptz, timestamptz, tval, interval, ival);
+	return __pg_timestamptz_pl_interval(kcxt, result, &tval, &ival);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_timestamptz_mi_interval(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(timestamptz, timestamptz, tval, interval, ival);
+	ival.value.month = -ival.value.month;
+	ival.value.day   = -ival.value.day;
+	ival.value.time  = -ival.value.time;
+	return __pg_timestamptz_pl_interval(kcxt, result, &tval, &ival);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_interval_um(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(interval, interval, ival);
+
+	if (XPU_DATUM_ISNULL(&ival))
+		result->expr_ops = NULL;
+	else
+	{
+		if (ival.value.month   == -1 ||
+			ival.value.day     == -1 ||
+			result->value.time == -1L)
+		{
+			STROM_ELOG(kcxt, "interval out of range");
+			return false;
+		}
+		result->value.month = -ival.value.month;
+		result->value.day   = -ival.value.day;
+		result->value.time  = -ival.value.time;
+		result->expr_ops    = &xpu_interval_ops;
+	}
+	return true;
+}
+
+#define SAMESIGN(a,b)		(((a) < 0) == ((b) < 0))
+
+PUBLIC_FUNCTION(bool)
+pgfn_interval_pl(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(interval, interval, ival1, interval, ival2);
+
+	if (XPU_DATUM_ISNULL(&ival1) || XPU_DATUM_ISNULL(&ival2))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_interval_ops;
+		result->value.month = ival1.value.month + ival2.value.month;
+		result->value.day   = ival1.value.day   + ival2.value.day;
+		result->value.time  = ival1.value.time  + ival2.value.time;
+		if ((SAMESIGN(ival1.value.month, ival2.value.month) &&
+			 !SAMESIGN(result->value.month, ival1.value.month)) ||
+			(SAMESIGN(ival1.value.day, ival2.value.day) &&
+			 !SAMESIGN(result->value.day, ival1.value.day)) ||
+			(SAMESIGN(ival1.value.time, ival2.value.time) &&
+			 !SAMESIGN(result->value.time, ival1.value.time)))
+		{
+			STROM_ELOG(kcxt, "interval out of range");
+			return false;
+		}
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_interval_mi(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(interval, interval, ival1, interval, ival2);
+
+	if (XPU_DATUM_ISNULL(&ival1) || XPU_DATUM_ISNULL(&ival2))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_interval_ops;
+		result->value.month = ival1.value.month - ival2.value.month;
+		result->value.day   = ival1.value.day   - ival2.value.day;
+		result->value.time  = ival1.value.time  - ival2.value.time;
+		if ((SAMESIGN(ival1.value.month, ival2.value.month) &&
+			 !SAMESIGN(result->value.month, ival1.value.month)) ||
+			(SAMESIGN(ival1.value.day, ival2.value.day) &&
+			 !SAMESIGN(result->value.day, ival1.value.day)) ||
+			(SAMESIGN(ival1.value.time, ival2.value.time) &&
+			 !SAMESIGN(result->value.time, ival1.value.time)))
+		{
+			STROM_ELOG(kcxt, "interval out of range");
+			return false;
+		}
+	}
+}
+
+#undef SAMESIGN
