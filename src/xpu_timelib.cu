@@ -2278,20 +2278,159 @@ pgfn_interval_mi(XPU_PGFUNCTION_ARGS)
  *
  * ----------------------------------------------------------------
  */
+#define OVERLAPS_TEMPLATE(TYPE,COMP_FN)								\
+	STATIC_FUNCTION(bool)											\
+	__pg_overlaps_##TYPE(kern_context *kcxt,						\
+						 xpu_bool_t *result,						\
+						 const xpu_##TYPE##_t *ts1,					\
+						 const xpu_##TYPE##_t *te1,					\
+						 const xpu_##TYPE##_t *ts2,					\
+						 const xpu_##TYPE##_t *te2)					\
+	{																\
+		int		comp;												\
+																	\
+		if (XPU_DATUM_ISNULL(ts1))									\
+		{															\
+			if (XPU_DATUM_ISNULL(te1))								\
+			{														\
+				result->expr_ops = NULL;							\
+				return true;										\
+			}														\
+			ts1 = te1;												\
+		}															\
+		else if (!XPU_DATUM_ISNULL(te1))							\
+		{															\
+			if (COMP_FN(kcxt, ts1->value, te1->value) > 0)			\
+			{														\
+				const xpu_##TYPE##_t *tmp = ts1;					\
+				ts1 = te1;											\
+				te1 = tmp;											\
+			}														\
+		}															\
+																	\
+		if (XPU_DATUM_ISNULL(ts2))									\
+		{															\
+			if (XPU_DATUM_ISNULL(te2))								\
+			{														\
+				result->expr_ops = NULL;							\
+				return true;										\
+			}														\
+			ts2 = te2;												\
+		}															\
+		else if (!XPU_DATUM_ISNULL(te2))							\
+		{															\
+			if (COMP_FN(kcxt, ts2->value, te2->value) > 0)			\
+			{														\
+				const xpu_##TYPE##_t *tmp = ts2;					\
+				ts2 = te2;											\
+				te2 = tmp;											\
+			}														\
+		}															\
+																	\
+		comp = COMP_FN(kcxt, ts1->value, ts2->value);				\
+		if (comp > 0)												\
+		{															\
+			if (XPU_DATUM_ISNULL(te2))								\
+			{														\
+				result->expr_ops = NULL;							\
+			}														\
+			else if (COMP_FN(kcxt, ts1->value, te2->value) < 0)		\
+			{														\
+				result->expr_ops = &xpu_bool_ops;					\
+				result->value = true;								\
+			}														\
+			else if (XPU_DATUM_ISNULL(te1))							\
+			{														\
+				result->expr_ops = NULL;							\
+			}														\
+			else													\
+			{														\
+				result->expr_ops = &xpu_bool_ops;					\
+				result->value = false;								\
+			}														\
+		}															\
+		else if (comp < 0)											\
+		{															\
+			if (XPU_DATUM_ISNULL(te1))								\
+			{														\
+				result->expr_ops = NULL;							\
+			}														\
+			else if (COMP_FN(kcxt, ts2->value, te1->value) < 0)		\
+			{														\
+				result->expr_ops = &xpu_bool_ops;					\
+				result->value = true;								\
+			}														\
+			else if (XPU_DATUM_ISNULL(te2))							\
+			{														\
+				result->expr_ops = NULL;							\
+			}														\
+			else													\
+			{														\
+				result->expr_ops = &xpu_bool_ops;					\
+				result->value = false;								\
+			}														\
+		}															\
+		else														\
+		{															\
+			if (XPU_DATUM_ISNULL(te1) || XPU_DATUM_ISNULL(te2))		\
+			{														\
+				result->expr_ops = NULL;							\
+			}														\
+			else													\
+			{														\
+				result->expr_ops = &xpu_bool_ops;					\
+				result->value = true;								\
+			}														\
+		}															\
+		return true;												\
+	}
 
+#define __SIMPLE_COMP(a,b,c)		((b) - (c))
+OVERLAPS_TEMPLATE(time, __SIMPLE_COMP)
+OVERLAPS_TEMPLATE(timetz, __compare_timetz)
+OVERLAPS_TEMPLATE(timestamp, __SIMPLE_COMP)
+OVERLAPS_TEMPLATE(timestamptz, __SIMPLE_COMP)
 
 PUBLIC_FUNCTION(bool)
 pgfn_overlaps_time(XPU_PGFUNCTION_ARGS)
-{}
+{
+	KEXP_PROCESS_ARGS4(bool,
+					   time, arg1,
+					   time, arg2,
+					   time, arg3,
+					   time, arg4);
+	return __pg_overlaps_time(kcxt, result, &arg1, &arg2, &arg3, &arg4);
+}
 
 PUBLIC_FUNCTION(bool)
 pgfn_overlaps_timetz(XPU_PGFUNCTION_ARGS)
-{}
+{
+	KEXP_PROCESS_ARGS4(bool,
+					   timetz, arg1,
+					   timetz, arg2,
+					   timetz, arg3,
+					   timetz, arg4);
+	return __pg_overlaps_timetz(kcxt, result, &arg1, &arg2, &arg3, &arg4);
+}
 
 PUBLIC_FUNCTION(bool)
 pgfn_overlaps_timestamp(XPU_PGFUNCTION_ARGS)
-{}
+{
+	KEXP_PROCESS_ARGS4(bool,
+					   timestamp, arg1,
+					   timestamp, arg2,
+					   timestamp, arg3,
+					   timestamp, arg4);
+	return __pg_overlaps_timestamp(kcxt, result, &arg1, &arg2, &arg3, &arg4);
+}
 
 PUBLIC_FUNCTION(bool)
 pgfn_overlaps_timestamptz(XPU_PGFUNCTION_ARGS)
-{}
+{
+	KEXP_PROCESS_ARGS4(bool,
+					   timestamptz, arg1,
+					   timestamptz, arg2,
+					   timestamptz, arg3,
+					   timestamptz, arg4);
+	return __pg_overlaps_timestamptz(kcxt, result, &arg1, &arg2, &arg3, &arg4);
+}
