@@ -101,7 +101,7 @@ xpu_money_datum_comp(kern_context *kcxt,
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(money, true, 8, sizeof(Cash));
-PG_SIMPLE_COMPARE_TEMPLATE(cash_,money,money,Cash)
+PG_SIMPLE_COMPARE_TEMPLATE(cash_,money,money,)
 /*
  * UUID data type (xpu_uuid_t), functions and operators
  */

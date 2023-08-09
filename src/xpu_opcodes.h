@@ -603,7 +603,11 @@ __FUNC_OPCODE(interval_pl, interval/interval, 4, NULL)
 __FUNC_OPCODE(interval_mi, interval/interval, 4, NULL)
 
 /* overlaps */
-//TODO...
+FUNC_OPCODE(overlap, time/time/time/time, DEVKIND__ANY, overlaps_time, 50, NULL)
+FUNC_OPCODE(overlap, timetz/timetz/timetz/timetz, DEVKIND__ANY, overlaps_timetz, 50, NULL)
+FUNC_OPCODE(overlap, timestamp/timestamp/timestamp/timestamp, DEVKIND__ANY, overlaps_timestamp, 50, NULL)
+FUNC_OPCODE(overlap, timestamptz/timestamptz/timestamptz/timestamptz, DEVKIND__ANY, overlaps_timestamptz, 50, NULL)
+
 /* extract */
 //TODO...
 

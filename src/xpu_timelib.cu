@@ -1542,162 +1542,62 @@ pgfn_timestamptz_time(XPU_PGFUNCTION_ARGS)
 	return true;
 }
 
-PG_SIMPLE_COMPARE_TEMPLATE(date_,date,date,DateADT)
-PG_SIMPLE_COMPARE_TEMPLATE(time_,time,time,TimeADT)
-PG_SIMPLE_COMPARE_TEMPLATE(timestamp_,timestamp,timestamp,Timestamp)
-PG_SIMPLE_COMPARE_TEMPLATE(timestamptz_,timestamptz,timestamptz,TimestampTz)
-
-#define PG_TIMETZ_COMPARE_TEMPLATE(NAME,OPER)							\
-	PUBLIC_FUNCTION(bool)												\
-	pgfn_timetz_##NAME(XPU_PGFUNCTION_ARGS)								\
-	{																	\
-		xpu_bool_t	   *result = (xpu_bool_t *)__result;				\
-		xpu_timetz_t	datum_a;										\
-		xpu_timetz_t	datum_b;										\
-		TimeOffset		t1, t2;											\
-		int				comp;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
-																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg,timetz));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, timetz));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
-			return false;												\
-																		\
-		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-		{																\
-			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
-		}																\
-		else															\
-		{																\
-			result->expr_ops = &xpu_bool_ops;							\
-			t1 = datum_a.value.time + datum_a.value.zone * USECS_PER_SEC; \
-			t2 = datum_b.value.time + datum_b.value.zone * USECS_PER_SEC; \
-																		\
-			if (t1 > t2)												\
-				comp = 1;												\
-			else if (t1 < t2)											\
-				comp = -1;												\
-			else if (datum_a.value.zone > datum_b.value.zone)			\
-				comp = 1;												\
-			else if (datum_a.value.zone < datum_b.value.zone)			\
-				comp = -1;												\
-			else														\
-				comp = 0;												\
-																		\
-			result->value = (comp OPER 0);								\
-		}																\
-		return true;													\
-	}
-PG_TIMETZ_COMPARE_TEMPLATE(eq, ==)
-PG_TIMETZ_COMPARE_TEMPLATE(ne, !=)
-PG_TIMETZ_COMPARE_TEMPLATE(lt, <)
-PG_TIMETZ_COMPARE_TEMPLATE(le, <=)
-PG_TIMETZ_COMPARE_TEMPLATE(gt, >)
-PG_TIMETZ_COMPARE_TEMPLATE(ge, >=)
+PG_SIMPLE_COMPARE_TEMPLATE(date_,date,date,)
+PG_SIMPLE_COMPARE_TEMPLATE(time_,time,time,)
+PG_SIMPLE_COMPARE_TEMPLATE(timestamp_,timestamp,timestamp,)
+PG_SIMPLE_COMPARE_TEMPLATE(timestamptz_,timestamptz,timestamptz,)
 
 INLINE_FUNCTION(int)
-__compare_date_timestamp(DateADT a, Timestamp b)
+__compare_timetz(kern_context *kcxt, const TimeTzADT &lval, const TimeTzADT &rval)
 {
-	Timestamp	ts;
+	TimeOffset	t1 = lval.time + lval.zone * USECS_PER_SEC;
+	TimeOffset	t2 = rval.time + rval.zone * USECS_PER_SEC;
 
-	if (DATE_IS_NOBEGIN(a))
-		ts = DT_NOBEGIN;
-	else if (DATE_IS_NOEND(a) || a >= (TIMESTAMP_END_JULIAN -
-									   POSTGRES_EPOCH_JDATE))
-		ts = DT_NOEND;
-	else
-		ts = a * USECS_PER_DAY;
-
-	if (ts < b)
+	if (t1 < t2)
 		return -1;
-	if (ts > b)
+	if (t1 > t2)
+		return 1;
+	if (lval.zone < rval.zone)
+		return -1;
+	if (lval.zone > rval.zone)
 		return 1;
 	return 0;
 }
-
-#define PG_DATE_TIMESTAMP_COMPARE_TEMPLATE(NAME,OPER)					\
-	PUBLIC_FUNCTION(bool)												\
-	pgfn_date_##NAME##_timestamp(XPU_PGFUNCTION_ARGS)					\
-	{																	\
-		xpu_bool_t	   *result = (xpu_bool_t *)__result;				\
-		xpu_date_t		datum_a;										\
-		xpu_timestamp_t	datum_b;										\
-		int				comp;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
-																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg,date));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, timestamp));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
-			return false;												\
-		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-		{																\
-			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
-		}																\
-		else															\
-		{																\
-			result->expr_ops = &xpu_bool_ops;							\
-			comp = __compare_date_timestamp(datum_a.value,				\
-											datum_b.value);				\
-			result->value = (comp OPER 0);								\
-		}																\
-		return true;													\
-	}
-PG_DATE_TIMESTAMP_COMPARE_TEMPLATE(eq, ==);
-PG_DATE_TIMESTAMP_COMPARE_TEMPLATE(ne, !=);
-PG_DATE_TIMESTAMP_COMPARE_TEMPLATE(lt, <);
-PG_DATE_TIMESTAMP_COMPARE_TEMPLATE(le, <=);
-PG_DATE_TIMESTAMP_COMPARE_TEMPLATE(gt, >);
-PG_DATE_TIMESTAMP_COMPARE_TEMPLATE(ge, >=);
-
-#define PG_TIMESTAMP_DATE_COMPARE_TEMPLATE(NAME,OPER)					\
-	PUBLIC_FUNCTION(bool)												\
-	pgfn_timestamp_##NAME##_date(XPU_PGFUNCTION_ARGS)					\
-	{																	\
-		xpu_bool_t	   *result = (xpu_bool_t *)__result;				\
-		xpu_timestamp_t	datum_a;										\
-		xpu_date_t		datum_b;										\
-		int				comp;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
-																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg, timestamp));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, date));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
-			return false;												\
-		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-		{																\
-			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
-		}																\
-		else															\
-		{																\
-			result->expr_ops = &xpu_bool_ops;							\
-			comp = __compare_date_timestamp(datum_b.value,				\
-											datum_a.value);				\
-			result->value = (0 OPER comp);								\
-		}																\
-		return true;													\
-	}
-PG_TIMESTAMP_DATE_COMPARE_TEMPLATE(eq, ==)
-PG_TIMESTAMP_DATE_COMPARE_TEMPLATE(ne, !=)
-PG_TIMESTAMP_DATE_COMPARE_TEMPLATE(lt, <)
-PG_TIMESTAMP_DATE_COMPARE_TEMPLATE(le, <=)
-PG_TIMESTAMP_DATE_COMPARE_TEMPLATE(gt, >)
-PG_TIMESTAMP_DATE_COMPARE_TEMPLATE(ge, >=)
+PG_FLEXIBLE1_COMPARE_TEMPLATE(timetz, __compare_timetz)
 
 INLINE_FUNCTION(int)
-__compare_date_timestamptz(DateADT a, TimestampTz b, const pg_tz *tz_info)
+__compare_date_timestamp(kern_context *kcxt,
+						 DateADT lval, Timestamp rval)
 {
+	Timestamp	ts;
+
+	if (DATE_IS_NOBEGIN(lval))
+		ts = DT_NOBEGIN;
+	else if (DATE_IS_NOEND(lval) || lval >= (TIMESTAMP_END_JULIAN -
+											 POSTGRES_EPOCH_JDATE))
+		ts = DT_NOEND;
+	else
+		ts = lval * USECS_PER_DAY;
+
+	if (ts < rval)
+		return -1;
+	if (ts > rval)
+		return 1;
+	return 0;
+}
+INLINE_FUNCTION(int)
+__compare_timestamp_date(kern_context *kcxt,
+						 Timestamp lval, DateADT rval)
+{
+	return -__compare_date_timestamp(kcxt, rval, lval);
+}
+PG_FLEXIBLE2_COMPARE_TEMPLATE(date, timestamp, __compare_date_timestamp)
+PG_FLEXIBLE2_COMPARE_TEMPLATE(timestamp, date, __compare_timestamp_date)
+
+INLINE_FUNCTION(int)
+__compare_date_timestamptz(kern_context *kcxt, DateADT a, TimestampTz b)
+{
+	const pg_tz	   *tz_info = SESSION_TIMEZONE(kcxt->session);
 	Timestamp		ts;
 	struct pg_tm	tm;
 	int				tz;
@@ -1732,92 +1632,20 @@ __compare_date_timestamptz(DateADT a, TimestampTz b, const pg_tz *tz_info)
 		return 1;
 	return 0;
 }
-
-#define PG_DATE_TIMESTAMPTZ_COMPARE_TEMPLATE(NAME,OPER)					\
-	PUBLIC_FUNCTION(bool)												\
-	pgfn_date_##NAME##_timestamptz(XPU_PGFUNCTION_ARGS)					\
-	{																	\
-		xpu_bool_t *result = (xpu_bool_t *)__result;					\
-		xpu_date_t	datum_a;											\
-		xpu_timestamptz_t datum_b;										\
-		int			comp;												\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
-																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg, date));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, timestamptz));						\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
-			return false;												\
-		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-		{																\
-			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
-		}																\
-		else															\
-		{																\
-			const pg_tz *tz_info = SESSION_TIMEZONE(kcxt->session);		\
-			comp = __compare_date_timestamptz(datum_a.value,			\
-											  datum_b.value,			\
-											  tz_info);					\
-			result->value = (comp OPER 0);								\
-			result->expr_ops = &xpu_bool_ops;							\
-		}																\
-		return true;													\
-	}
-PG_DATE_TIMESTAMPTZ_COMPARE_TEMPLATE(eq, ==);
-PG_DATE_TIMESTAMPTZ_COMPARE_TEMPLATE(ne, !=);
-PG_DATE_TIMESTAMPTZ_COMPARE_TEMPLATE(lt, <);
-PG_DATE_TIMESTAMPTZ_COMPARE_TEMPLATE(le, <=);
-PG_DATE_TIMESTAMPTZ_COMPARE_TEMPLATE(gt, >);
-PG_DATE_TIMESTAMPTZ_COMPARE_TEMPLATE(ge, >=);
-
-#define PG_TIMESTAMPTZ_DATE_COMPARE_TEMPLATE(NAME,OPER)					\
-	PUBLIC_FUNCTION(bool)												\
-	pgfn_timestamptz_##NAME##_date(XPU_PGFUNCTION_ARGS)					\
-	{																	\
-		xpu_bool_t *result = (xpu_bool_t *)__result;					\
-		xpu_timestamptz_t datum_a;										\
-		xpu_date_t	datum_b;											\
-		int			comp;												\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
-																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg, timestamptz));						\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		KEXP_IS_VALID(karg, date);										\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
-			return false;												\
-		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-		{																\
-			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
-		}																\
-		else															\
-		{																\
-			const pg_tz  *tz_info = SESSION_TIMEZONE(kcxt->session);	\
-			comp = __compare_date_timestamptz(datum_b.value,			\
-											  datum_a.value,			\
-											  tz_info);					\
-			result->value = (0 OPER comp);								\
-			result->expr_ops = &xpu_bool_ops;							\
-		}																\
-		return true;													\
-	}
-PG_TIMESTAMPTZ_DATE_COMPARE_TEMPLATE(eq, ==);
-PG_TIMESTAMPTZ_DATE_COMPARE_TEMPLATE(ne, !=);
-PG_TIMESTAMPTZ_DATE_COMPARE_TEMPLATE(lt, <);
-PG_TIMESTAMPTZ_DATE_COMPARE_TEMPLATE(le, <=);
-PG_TIMESTAMPTZ_DATE_COMPARE_TEMPLATE(gt, >);
-PG_TIMESTAMPTZ_DATE_COMPARE_TEMPLATE(ge, >=);
+INLINE_FUNCTION(int)
+__compare_timestamptz_date(kern_context *kcxt, DateADT a, TimestampTz b)
+{
+	return __compare_date_timestamptz(kcxt, b, a);
+}
+PG_FLEXIBLE2_COMPARE_TEMPLATE(date, timestamptz, __compare_date_timestamptz)
+PG_FLEXIBLE2_COMPARE_TEMPLATE(timestamptz, date, __compare_timestamptz_date)
 
 INLINE_FUNCTION(int)
-__compare_timestamp_timestamptz(Timestamp a,
-								TimestampTz b,
-								const pg_tz *tz_info)
+__compare_timestamp_timestamptz(kern_context *kcxt,
+								Timestamp a,
+								TimestampTz b)
 {
+	const pg_tz	   *tz_info = SESSION_TIMEZONE(kcxt->session);
 	TimestampTz		ts;
 	struct pg_tm	tm;
 	fsec_t			fsec;
@@ -1842,124 +1670,25 @@ __compare_timestamp_timestamptz(Timestamp a,
 		return 1;
 	return 0;
 }
+INLINE_FUNCTION(int)
+__compare_timestamptz_timestamp(kern_context *kcxt,
+								TimestampTz a,
+								Timestamp b)	
+{
+	return -__compare_timestamp_timestamptz(kcxt, b, a);
+}
+PG_FLEXIBLE2_COMPARE_TEMPLATE(timestamp, timestamptz, __compare_timestamp_timestamptz)
+PG_FLEXIBLE2_COMPARE_TEMPLATE(timestamptz, timestamp, __compare_timestamptz_timestamp)
 
-#define PG_TIMESTAMP_TIMESTAMPTZ_COMPARE_TEMPLATE(NAME,OPER)			\
-	PUBLIC_FUNCTION(bool)                                               \
-	pgfn_timestamp_##NAME##_timestamptz(XPU_PGFUNCTION_ARGS)			\
-	{                                                                   \
-		xpu_bool_t *result = (xpu_bool_t *)__result;                    \
-        xpu_timestamp_t		datum_a;									\
-        xpu_timestamptz_t	datum_b;									\
-        int			comp;												\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
-																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg, timestamp));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))                \
-			return false;                                               \
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, timestamptz));						\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
-			return false;                                               \
-		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-		{																\
-			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
-		}																\
-		else															\
-        {                                                               \
-			const pg_tz	*tz_info = SESSION_TIMEZONE(kcxt->session);		\
-            comp = __compare_timestamp_timestamptz(datum_b.value,		\
-												   datum_a.value,		\
-												   tz_info);			\
-			result->value = (comp OPER 0);                              \
-			result->expr_ops = &xpu_bool_ops;							\
-        }                                                               \
-        return true;                                                    \
-    }
-PG_TIMESTAMP_TIMESTAMPTZ_COMPARE_TEMPLATE(eq, ==)
-PG_TIMESTAMP_TIMESTAMPTZ_COMPARE_TEMPLATE(ne, !=)
-PG_TIMESTAMP_TIMESTAMPTZ_COMPARE_TEMPLATE(lt, <)
-PG_TIMESTAMP_TIMESTAMPTZ_COMPARE_TEMPLATE(le, <=)
-PG_TIMESTAMP_TIMESTAMPTZ_COMPARE_TEMPLATE(gt, >)
-PG_TIMESTAMP_TIMESTAMPTZ_COMPARE_TEMPLATE(ge, >=)
+INLINE_FUNCTION(int)	
+__compare_interval(kern_context *kcxt, const Interval &lval, const Interval &rval)
+{
+	int128_t	lcmp = interval_cmp_value(&lval);
+	int128_t	rcmp = interval_cmp_value(&rval);
 
-#define PG_TIMESTAMPTZ_TIMESTAMP_COMPARE_TEMPLATE(NAME,OPER)			\
-	PUBLIC_FUNCTION(bool)                                               \
-	pgfn_timestamptz_##NAME##_timestamp(XPU_PGFUNCTION_ARGS)			\
-	{                                                                   \
-		xpu_bool_t *result = (xpu_bool_t *)__result;                    \
-        xpu_timestamp_t		datum_a;									\
-        xpu_timestamptz_t	datum_b;									\
-        int			comp;												\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
-																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg, timestamp));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))                \
-			return false;                                               \
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, timestamptz));						\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))                \
-			return false;                                               \
-		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-		{																\
-			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
-		}																\
-        else															\
-        {                                                               \
-			const pg_tz *tz_info = SESSION_TIMEZONE(kcxt->session);		\
-			comp = __compare_timestamp_timestamptz(datum_b.value,		\
-												   datum_a.value,		\
-												   tz_info);			\
-			result->value = (0 OPER comp);                              \
-			result->expr_ops = &xpu_bool_ops;							\
-        }                                                               \
-        return true;                                                    \
-    }
-PG_TIMESTAMPTZ_TIMESTAMP_COMPARE_TEMPLATE(eq, ==)
-PG_TIMESTAMPTZ_TIMESTAMP_COMPARE_TEMPLATE(ne, !=)
-PG_TIMESTAMPTZ_TIMESTAMP_COMPARE_TEMPLATE(lt, <)
-PG_TIMESTAMPTZ_TIMESTAMP_COMPARE_TEMPLATE(le, <=)
-PG_TIMESTAMPTZ_TIMESTAMP_COMPARE_TEMPLATE(gt, >)
-PG_TIMESTAMPTZ_TIMESTAMP_COMPARE_TEMPLATE(ge, >=)
-
-#define PG_INTERVAL_COMPARE_TEMPLATE(NAME,OPER)							\
-	PUBLIC_FUNCTION(bool)                                               \
-	pgfn_interval_##NAME(XPU_PGFUNCTION_ARGS)							\
-	{                                                                   \
-		xpu_bool_t *result = (xpu_bool_t *)__result;                    \
-        xpu_interval_t	datum_a;										\
-        xpu_interval_t	datum_b;										\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
-																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg, interval));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))                \
-			return false;                                               \
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, interval));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))                \
-			return false;                                               \
-		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
-		{																\
-			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
-		}																\
-		else															\
-		{                                                               \
-            int128_t	aval = interval_cmp_value(&datum_a.value);		\
-            int128_t	bval = interval_cmp_value(&datum_b.value);		\
-																		\
-			result->value = (aval OPER bval);							\
-			result->expr_ops = &xpu_bool_ops;							\
-        }                                                               \
-        return true;                                                    \
-    }
-PG_INTERVAL_COMPARE_TEMPLATE(eq, ==)
-PG_INTERVAL_COMPARE_TEMPLATE(ne, !=)
-PG_INTERVAL_COMPARE_TEMPLATE(lt, <)
-PG_INTERVAL_COMPARE_TEMPLATE(le, <=)
-PG_INTERVAL_COMPARE_TEMPLATE(gt, >)
-PG_INTERVAL_COMPARE_TEMPLATE(ge, >=)
+	return (lcmp - rcmp);
+}
+PG_FLEXIBLE1_COMPARE_TEMPLATE(interval, __compare_interval)
 
 /* ----------------------------------------------------------------
  *
@@ -2542,3 +2271,27 @@ pgfn_interval_mi(XPU_PGFUNCTION_ARGS)
 }
 
 #undef SAMESIGN
+
+/* ----------------------------------------------------------------
+ *
+ * OVERLAP() function
+ *
+ * ----------------------------------------------------------------
+ */
+
+
+PUBLIC_FUNCTION(bool)
+pgfn_overlaps_time(XPU_PGFUNCTION_ARGS)
+{}
+
+PUBLIC_FUNCTION(bool)
+pgfn_overlaps_timetz(XPU_PGFUNCTION_ARGS)
+{}
+
+PUBLIC_FUNCTION(bool)
+pgfn_overlaps_timestamp(XPU_PGFUNCTION_ARGS)
+{}
+
+PUBLIC_FUNCTION(bool)
+pgfn_overlaps_timestamptz(XPU_PGFUNCTION_ARGS)
+{}
