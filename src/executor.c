@@ -599,6 +599,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->kcxt_kvars_nbytes = kvars_nbytes;
 	session->kcxt_kvars_ndims  = kvars_ndims;
 	session->xpu_task_flags = pts->xpu_task_flags;
+	session->hostEpochTimestamp = SetEpochTimestamp();
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	session->session_xact_state = __build_session_xact_state(&buf);
 	session->session_timezone = __build_session_timezone(&buf);

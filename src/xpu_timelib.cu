@@ -706,6 +706,112 @@ dt2time(Timestamp jd, int *hour, int *min, int *sec, int *fsec)
 	*fsec = time - (*sec * USECS_PER_SEC);
 }
 
+STATIC_FUNCTION(int)
+date2isoweek(int year, int mon, int mday)
+{
+	double	result;
+    int		day0;
+	int		day4;
+	int		dayn;
+
+	/* current day */
+	dayn = date2j(year, mon, mday);
+
+	/* fourth day of current year */
+	day4 = date2j(year, 1, 4);
+
+	/* day0 == offset to first day of week (Monday) */
+	day0 = j2day(day4 - 1);
+
+	/*
+	 * We need the first week containing a Thursday, otherwise this day falls
+	 * into the previous year for purposes of counting weeks
+	 */
+	if (dayn < day4 - day0)
+	{
+		day4 = date2j(year - 1, 1, 4);
+
+		/* day0 == offset to first day of week (Monday) */
+		day0 = j2day(day4 - 1);
+	}
+	result = (dayn - (day4 - day0)) / 7 + 1;
+
+	/*
+	 * Sometimes the last few days in a year will fall into the first week of
+	 * the next year, so check for this.
+	 */
+	if (result >= 52)
+	{
+		day4 = date2j(year + 1, 1, 4);
+
+		/* day0 == offset to first day of week (Monday) */
+		day0 = j2day(day4 - 1);
+
+		if (dayn >= day4 - day0)
+			result = (dayn - (day4 - day0)) / 7 + 1;
+	}
+	return (int) result;
+}
+
+STATIC_FUNCTION(int)
+date2isoyear(int year, int mon, int mday)
+{
+	double	result;
+    int		day0;
+    int		day4;
+    int		dayn;
+
+	/* current day */
+	dayn = date2j(year, mon, mday);
+
+	/* fourth day of current year */
+	day4 = date2j(year, 1, 4);
+
+	/* day0 == offset to first day of week (Monday) */
+	day0 = j2day(day4 - 1);
+
+	/*
+	 * We need the first week containing a Thursday, otherwise this day falls
+	 * into the previous year for purposes of counting weeks
+	 */
+	if (dayn < day4 - day0)
+	{
+		day4 = date2j(year - 1, 1, 4);
+
+		/* day0 == offset to first day of week (Monday) */
+		day0 = j2day(day4 - 1);
+
+		year--;
+	}
+	result = (dayn - (day4 - day0)) / 7 + 1;
+
+	/*
+	 * Sometimes the last few days in a year will fall into the first week of
+	 * the next year, so check for this.
+	 */
+	if (result >= 52)
+	{
+		day4 = date2j(year + 1, 1, 4);
+
+		/* day0 == offset to first day of week (Monday) */
+		day0 = j2day(day4 - 1);
+
+		if (dayn >= day4 - day0)
+			year++;
+	}
+	return year;
+}
+
+
+
+
+
+
+
+
+
+
+
 INLINE_FUNCTION(TimeOffset)
 time2t(const int hour, const int min, const int sec, const fsec_t fsec)
 {
@@ -1186,6 +1292,34 @@ pg_localtime(struct pg_tm *tx, pg_time_t t, const pg_tz *tz)
 		tx->tm_isdst = ttisp->tt_isdst;
 	tx->tm_zone = NULL;
 	return rv;
+}
+
+STATIC_FUNCTION(void)
+time2tm(TimeADT t, struct pg_tm *tm, fsec_t *fsec)
+{
+	tm->tm_hour = t / USECS_PER_HOUR;
+	t -= tm->tm_hour * USECS_PER_HOUR;
+	tm->tm_min = t / USECS_PER_MINUTE;
+	t -= tm->tm_min * USECS_PER_MINUTE;
+	tm->tm_sec = t / USECS_PER_SEC;
+	t -= tm->tm_sec * USECS_PER_SEC;
+	*fsec = t;
+}
+
+STATIC_FUNCTION(void)
+timetz2tm(const TimeTzADT *time, struct pg_tm *tm, fsec_t *fsec, int *tzp)
+{
+	TimeOffset  trem = time->time;
+
+	tm->tm_hour = trem / USECS_PER_HOUR;
+	trem -= tm->tm_hour * USECS_PER_HOUR;
+	tm->tm_min = trem / USECS_PER_MINUTE;
+	trem -= tm->tm_min * USECS_PER_MINUTE;
+	tm->tm_sec = trem / USECS_PER_SEC;
+	*fsec = trem - tm->tm_sec * USECS_PER_SEC;
+
+	if (tzp != NULL)
+		*tzp = time->zone;
 }
 
 STATIC_FUNCTION(bool)
@@ -2433,4 +2567,911 @@ pgfn_overlaps_timestamptz(XPU_PGFUNCTION_ARGS)
 					   timestamptz, arg3,
 					   timestamptz, arg4);
 	return __pg_overlaps_timestamptz(kcxt, result, &arg1, &arg2, &arg3, &arg4);
+}
+
+/* ----------------------------------------------------------------
+ *
+ * EXTRACT(text,date/time) function
+ *
+ * ----------------------------------------------------------------
+ */
+/* 'type' field definition */
+#define RESERV			0
+#define MONTH			1
+#define YEAR			2
+#define DAY				3
+#define JULIAN			4
+#define TZ				5	/* fixed-offset timezone abbreviation */
+#define DTZ				6	/* fixed-offset timezone abbrev, DST */
+#define DYNTZ			7	/* dynamic timezone abbreviation */
+#define IGNORE_DTF		8
+#define AMPM			9
+#define HOUR			10
+#define MINUTE			11
+#define SECOND			12
+#define MILLISECOND		13
+#define MICROSECOND		14
+#define DOY				15
+#define DOW				16
+#define UNITS			17
+#define ADBC			18
+/* these are only for relative dates */
+#define AGO				19
+#define ABS_BEFORE		20
+#define ABS_AFTER		21
+/* generic fields to help with parsing */
+#define ISODATE			22
+#define ISOTIME			23
+/* these are only for parsing intervals */
+#define WEEK			24
+#define DECADE			25
+#define CENTURY			26
+#define MILLENNIUM		27
+/* hack for parsing two-word timezone specs "MET DST" etc */
+#define DTZMOD			28		/* "DST" as a separate word */
+#define UNKNOWN_FIELD	31		/* reserved for unrecognized string values */
+
+/* 'token' field definition */
+#define DTK_NUMBER		0
+#define DTK_STRING		1
+#define DTK_DATE		2
+#define DTK_TIME		3
+#define DTK_TZ			4
+#define DTK_AGO			5
+#define DTK_SPECIAL		6
+#define DTK_INVALID		7
+#define DTK_CURRENT		8
+#define DTK_EARLY		9
+#define DTK_LATE		10
+#define DTK_EPOCH		11
+#define DTK_NOW			12
+#define DTK_YESTERDAY	13
+#define DTK_TODAY		14
+#define DTK_TOMORROW	15
+#define DTK_ZULU		16
+#define DTK_DELTA		17
+#define DTK_SECOND		18
+#define DTK_MINUTE		19
+#define DTK_HOUR		20
+#define DTK_DAY			21
+#define DTK_WEEK		22
+#define DTK_MONTH		23
+#define DTK_QUARTER		24
+#define DTK_YEAR		25
+#define DTK_DECADE		26
+#define DTK_CENTURY		27
+#define DTK_MILLENNIUM	28
+#define DTK_MILLISEC	29
+#define DTK_MICROSEC	30
+#define DTK_JULIAN		31
+#define DTK_DOW			32
+#define DTK_DOY			33
+#define DTK_TZ_HOUR		34
+#define DTK_TZ_MINUTE	35
+#define DTK_ISOYEAR		36
+#define DTK_ISODOW		37
+
+/* keep this struct small; it gets used a lot */
+typedef struct
+{
+	const char *token;		/* always NUL-terminated */
+	char		type;		/* see field type codes above */
+	int			value;		/* meaning depends on type */
+} datetkn;
+#define TOKMAXLEN		10
+
+static __device__ const datetkn deltatktbl[] = {
+	/* token, type, value */
+	{"@",		IGNORE_DTF, 0},		/* postgres relative prefix */
+	{"ago",		AGO, 0},			/* "ago" indicates negative time offset */
+	{"c",		UNITS, DTK_CENTURY},	/* "century" relative */
+	{"cent",	UNITS, DTK_CENTURY},	/* "century" relative */
+	{"centuries", UNITS, DTK_CENTURY},	/* "centuries" relative */
+	{"century",	UNITS, DTK_CENTURY},	/* "century" relative */
+	{"d",		UNITS, DTK_DAY},		/* "day" relative */
+	{"day",		UNITS, DTK_DAY},		/* "day" relative */
+	{"days",	UNITS, DTK_DAY},		/* "days" relative */
+	{"dec",		UNITS, DTK_DECADE},		/* "decade" relative */
+	{"decade",	UNITS, DTK_DECADE},		/* "decade" relative */
+	{"decades",	UNITS, DTK_DECADE},		/* "decades" relative */
+	{"decs",	UNITS, DTK_DECADE},		/* "decades" relative */
+	{"h",		UNITS, DTK_HOUR},		/* "hour" relative */
+	{"hour",	UNITS, DTK_HOUR},		/* "hour" relative */
+	{"hours",	UNITS, DTK_HOUR},		/* "hours" relative */
+	{"hr",		UNITS, DTK_HOUR},		/* "hour" relative */
+	{"hrs",		UNITS, DTK_HOUR},		/* "hours" relative */
+	{"invalid",	RESERV, DTK_INVALID},		/* reserved for invalid time */
+	{"m",		UNITS, DTK_MINUTE},			/* "minute" relative */
+	{"microsecon", UNITS, DTK_MICROSEC},	/* "microsecond" relative */
+	{"mil",		UNITS, DTK_MILLENNIUM},		/* "millennium" relative */
+	{"millennia", UNITS, DTK_MILLENNIUM},	/* "millennia" relative */
+	{"millennium", UNITS, DTK_MILLENNIUM},	/* "millennium" relative */
+	{"millisecon", UNITS, DTK_MILLISEC},/* relative */
+	{"mils",	UNITS, DTK_MILLENNIUM},	/* "millennia" relative */
+	{"min",		UNITS, DTK_MINUTE},		/* "minute" relative */
+	{"mins",	UNITS, DTK_MINUTE},		/* "minutes" relative */
+	{"minute",	UNITS, DTK_MINUTE},		/* "minute" relative */
+	{"minutes",	UNITS, DTK_MINUTE},		/* "minutes" relative */
+	{"mon",		UNITS, DTK_MONTH},		/* "months" relative */
+	{"mons",	UNITS, DTK_MONTH},		/* "months" relative */
+	{"month",	UNITS, DTK_MONTH},		/* "month" relative */
+	{"months",	UNITS, DTK_MONTH},
+	{"ms",		UNITS, DTK_MILLISEC},
+	{"msec",	UNITS, DTK_MILLISEC},
+	{"msecond",	UNITS, DTK_MILLISEC},
+	{"mseconds", UNITS, DTK_MILLISEC},
+	{"msecs",	UNITS, DTK_MILLISEC},
+	{"qtr",		UNITS, DTK_QUARTER},	/* "quarter" relative */
+	{"quarter",	UNITS, DTK_QUARTER},	/* "quarter" relative */
+	{"s",		UNITS, DTK_SECOND},
+	{"sec",		UNITS, DTK_SECOND},
+	{"second",	UNITS, DTK_SECOND},
+	{"seconds", UNITS, DTK_SECOND},
+	{"secs",	UNITS, DTK_SECOND},
+	{"timezone", UNITS, DTK_TZ},		/* "timezone" time offset */
+	{"timezone_h", UNITS, DTK_TZ_HOUR},	/* timezone hour units */
+	{"timezone_m", UNITS, DTK_TZ_MINUTE}, /* timezone minutes units */
+	{"undefined", RESERV, DTK_INVALID},	/* pre-v6.1 invalid time */
+	{"us",		UNITS, DTK_MICROSEC},	/* "microsecond" relative */
+	{"usec",	UNITS, DTK_MICROSEC},	/* "microsecond" relative */
+	{"usecond",	UNITS, DTK_MICROSEC},	/* "microsecond" relative */
+	{"useconds", UNITS, DTK_MICROSEC},	/* "microseconds" relative */
+	{"usecs",	UNITS, DTK_MICROSEC},	/* "microseconds" relative */
+	{"w",		UNITS, DTK_WEEK},		/* "week" relative */
+	{"week",	UNITS, DTK_WEEK},		/* "week" relative */
+	{"weeks",	UNITS, DTK_WEEK},		/* "weeks" relative */
+	{"y",		UNITS, DTK_YEAR},		/* "year" relative */
+	{"year",	UNITS, DTK_YEAR},		/* "year" relative */
+	{"years",	UNITS, DTK_YEAR},		/* "years" relative */
+	{"yr",		UNITS, DTK_YEAR},		/* "year" relative */
+	{"yrs",		UNITS, DTK_YEAR},		/* "years" relative */
+};
+
+/* misc definitions */
+#define AM      0
+#define PM      1
+#define HR24    2
+
+#define AD      0
+#define BC      1
+
+static __device__ const datetkn datetktbl[] = {
+    /* token, type, value */
+	{"-infinity",	RESERV, DTK_EARLY},
+	{"ad",			ADBC, AD},           /* "ad" for years > 0 */
+	{"allballs",	RESERV, DTK_ZULU},     /* 00:00:00 */
+	{"am",			AMPM, AM},
+	{"apr",			MONTH, 4},
+	{"april",		MONTH, 4},
+	{"at",			IGNORE_DTF, 0},      /* "at" (throwaway) */
+	{"aug",			MONTH, 8},
+	{"august",		MONTH, 8},
+	{"bc",			ADBC, BC},           /* "bc" for years <= 0 */
+	{"current",		RESERV, DTK_CURRENT},    /* "current" is always now */
+	{"d",			UNITS, DTK_DAY},      /* "day of month" for ISO input */
+	{"dec",			MONTH, 12},
+	{"december",	MONTH, 12},
+	{"dow",			UNITS, DTK_DOW},    /* day of week */
+	{"doy",			UNITS, DTK_DOY},    /* day of year */
+	{"dst",			DTZMOD, SECS_PER_HOUR},
+	{"epoch",		RESERV, DTK_EPOCH}, /* "epoch" reserved for system epoch time */
+	{"feb",			MONTH, 2},
+	{"february",	MONTH, 2},
+	{"fri",			DOW, 5},
+	{"friday",		DOW, 5},
+	{"h",			UNITS, DTK_HOUR},	/* "hour" */
+	{"infinity",	RESERV, DTK_LATE},
+	{"invalid",		RESERV, DTK_INVALID},
+	{"isodow",		UNITS, DTK_ISODOW},
+	{"isoyear",		UNITS, DTK_ISOYEAR},
+	{"j",			UNITS, DTK_JULIAN},
+	{"jan",			MONTH, 1},
+	{"january",		MONTH, 1},
+	{"jd",			UNITS, DTK_JULIAN},
+	{"jul",			MONTH, 7},
+	{"julian",		UNITS, DTK_JULIAN},
+	{"july",		MONTH, 7},
+	{"jun",			MONTH, 6},
+	{"june",		MONTH, 6},
+	{"m",			UNITS, DTK_MONTH},    /* "month" for ISO input */
+	{"mar",			MONTH, 3},
+	{"march",		MONTH, 3},
+	{"may",			MONTH, 5},
+	{"mm",			UNITS, DTK_MINUTE},  /* "minute" for ISO input */
+	{"mon",			DOW, 1},
+	{"monday",		DOW, 1},
+	{"nov",			MONTH, 11},
+	{"november",	MONTH, 11},
+	{"now",			RESERV, DTK_NOW},     /* current transaction time */
+	{"oct",			MONTH, 10},
+	{"october",		MONTH, 10},
+	{"on",			IGNORE_DTF, 0},      /* "on" (throwaway) */
+	{"pm",			AMPM, PM},
+	{"s",			UNITS, DTK_SECOND},   /* "seconds" for ISO input */
+	{"sat",			DOW, 6},
+	{"saturday",	DOW, 6},
+	{"sep",			MONTH, 9},
+	{"sept",		MONTH, 9},
+	{"september",	MONTH, 9},
+	{"sun",			DOW, 0},
+	{"sunday",		DOW, 0},
+	{"t",			ISOTIME, DTK_TIME},   /* Filler for ISO time fields */
+	{"thu",			DOW, 4},
+	{"thur",		DOW, 4},
+	{"thurs",		DOW, 4},
+	{"thursday",	DOW, 4},
+	{"today",		RESERV, DTK_TODAY}, /* midnight */
+	{"tomorrow",	RESERV, DTK_TOMORROW},   /* tomorrow midnight */
+	{"tue",			DOW, 2},
+	{"tues",		DOW, 2},
+	{"tuesday",		DOW, 2},
+	{"undefined",	RESERV, DTK_INVALID}, /* pre-v6.1 invalid time */
+	{"wed",			DOW, 3},
+	{"wednesday",	DOW, 3},
+	{"weds",		DOW, 3},
+	{"y",			UNITS, DTK_YEAR},     /* "year" for ISO input */
+	{"yesterday",	RESERV, DTK_YESTERDAY}  /* yesterday midnight */
+};
+
+/*
+ * datebsearch - search the keyword array
+ */
+STATIC_FUNCTION(const datetkn *)
+datebsearch(const char *key, const datetkn *datetkntbl, int nitems)
+{
+	const datetkn  *base = datetkntbl;
+	const datetkn  *last = datetkntbl + nitems - 1;
+	const datetkn  *position;
+	int				comp;
+
+	while (last >= base)
+	{
+		position = base + ((last - base) >> 1);
+		comp = (int) key[0] - (int) position->token[0];
+		if (comp == 0)
+		{
+			comp = __strcmp(key, position->token);
+			if (comp == 0)
+				return position;
+		}
+		if (comp < 0)
+			last = position - 1;
+		else
+			base = position + 1;
+	}
+	return NULL;
+}
+
+STATIC_FUNCTION(bool)
+extract_decode_unit(kern_context *kcxt,
+					const xpu_text_t *key,
+					int *p_type, int *p_value)
+{
+	const datetkn *dtoken;
+	char	namebuf[24];
+	int		i;
+
+	assert(key->length >= 0);
+	for (i=0; i < key->length; i++)
+	{
+		char	ch = key->value[i];
+
+		if (ch >= 'A' && ch <= 'Z')
+			ch += ('a' - 'A');
+		namebuf[i] = ch;
+	}
+	namebuf[i] = '\0';
+
+	/* DecodeUnits() / DecodeSpecial() */
+	dtoken = datebsearch(namebuf, deltatktbl, lengthof(deltatktbl));
+    if (!dtoken)
+	{
+        dtoken = datebsearch(namebuf, datetktbl, lengthof(datetktbl));
+		if (!dtoken)
+		{
+			STROM_ELOG(kcxt, "not a recognized unit name");
+			return false;
+		}
+	}
+	*p_type  = dtoken->type;
+	*p_value = dtoken->value;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+NonFiniteTimestampTzPart(kern_context *kcxt,
+						 xpu_numeric_t *result,
+						 int type, int unit, bool is_negative)
+{
+	if (type != UNITS && type != RESERV)
+	{
+		STROM_ELOG(kcxt, "not recognized timestamp units");
+		return false;
+	}
+
+	memset(result, 0, sizeof(xpu_numeric_t));
+	switch (unit)
+	{
+        /* Oscillating units */
+        case DTK_MICROSEC:
+        case DTK_MILLISEC:
+        case DTK_SECOND:
+        case DTK_MINUTE:
+        case DTK_HOUR:
+        case DTK_DAY:
+        case DTK_MONTH:
+        case DTK_QUARTER:
+        case DTK_WEEK:
+        case DTK_DOW:
+        case DTK_ISODOW:
+        case DTK_DOY:
+        case DTK_TZ:
+        case DTK_TZ_MINUTE:
+        case DTK_TZ_HOUR:
+			break;
+			/* Monotonically-increasing units */
+		case DTK_YEAR:
+        case DTK_DECADE:
+        case DTK_CENTURY:
+        case DTK_MILLENNIUM:
+        case DTK_JULIAN:
+        case DTK_ISOYEAR:
+        case DTK_EPOCH:
+			result->kind = (is_negative
+							? XPU_NUMERIC_KIND__NEG_INF
+							: XPU_NUMERIC_KIND__POS_INF);
+			break;
+		default:
+			STROM_ELOG(kcxt, "unsupported timestamp unit");
+			return false;
+	}
+	result->expr_ops = &xpu_numeric_ops;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+__pg_extract_timestamp_common(kern_context *kcxt,
+							  xpu_numeric_t *result,
+							  int type, int value,
+							  Timestamp ts,
+							  const pg_tz *tz_info)
+{
+	if (TIMESTAMP_NOT_FINITE(ts))
+		return NonFiniteTimestampTzPart(kcxt, result, type, value,
+										TIMESTAMP_IS_NOBEGIN(ts));
+	if (type == UNITS)
+	{
+		struct pg_tm tm;
+		fsec_t		fsec;
+
+		if (!timestamp2tm(ts, &tm, &fsec, tz_info))
+		{
+			STROM_ELOG(kcxt, "timestamp out of range");
+			return false;
+		}
+		memset(result, 0, sizeof(xpu_numeric_t));
+
+		switch (value)
+		{
+			case DTK_MICROSEC:
+				result->value = tm.tm_sec * 1000000 + fsec;
+				result->weight = 6;
+				break;
+			case DTK_MILLISEC:
+				result->value = tm.tm_sec * 1000 + fsec / 1000.0;
+				result->weight = 3;
+				break;
+			case DTK_SECOND:
+				result->value = tm.tm_sec;
+				break;
+			case DTK_MINUTE:
+				result->value = tm.tm_min;
+				break;
+			case DTK_HOUR:
+				result->value = tm.tm_hour;
+				break;
+			case DTK_DAY:
+				result->value = tm.tm_mday;
+				break;
+			case DTK_MONTH:
+				result->value = tm.tm_mon;
+				break;
+			case DTK_QUARTER:
+				result->value = (tm.tm_mon - 1) / 3 + 1;
+				break;
+			case DTK_WEEK:
+				result->value = date2isoweek(tm.tm_year,
+											 tm.tm_mon,
+											 tm.tm_mday);
+				break;
+			case DTK_YEAR:
+				/* there is no year 0, just 1 BC and 1 AD */
+				if (tm.tm_year > 0)
+					result->value = tm.tm_year;
+				else
+					result->value = tm.tm_year - 1;
+				break;
+			case DTK_DECADE:
+				if (tm.tm_year >= 0)
+					result->value = tm.tm_year / 10;
+				else
+					result->value = -((8 - (tm.tm_year - 1)) / 10);
+				break;
+			case DTK_CENTURY:
+				if (tm.tm_year > 0)
+					result->value = (tm.tm_year + 99) / 100;
+				else
+					result->value = -((99 - (tm.tm_year - 1)) / 100);
+				break;
+			case DTK_MILLENNIUM:
+				if (tm.tm_year > 0)
+					result->value = (tm.tm_year + 999) / 1000;
+				else
+					result->value = -((999 - (tm.tm_year - 1)) / 1000);
+				break;
+			case DTK_JULIAN:
+				result->value = date2j(tm.tm_year,
+									   tm.tm_mon,
+									   tm.tm_mday) * 1000000L +
+					(double)(tm.tm_hour * SECS_PER_HOUR +
+							 tm.tm_min  * SECS_PER_MINUTE +
+							 tm.tm_sec) * 1000000.0 / (double)SECS_PER_DAY;
+				result->weight = 6;
+				break;
+			case DTK_ISOYEAR:
+				result->value = date2isoyear(tm.tm_year,
+											 tm.tm_mon,
+											 tm.tm_mday);
+				break;
+			case DTK_DOW:
+			case DTK_ISODOW:
+				result->value = j2day(date2j(tm.tm_year,
+											 tm.tm_mon,
+											 tm.tm_mday));
+				if (value == DTK_ISODOW && result->value == 0)
+					result->value = 7;
+				break;
+			case DTK_DOY:
+				result->value = (date2j(tm.tm_year,
+										tm.tm_mon,
+										tm.tm_mday) -
+								 date2j(tm.tm_year, 1, 1) + 1);
+				break;
+			case DTK_TZ:
+			case DTK_TZ_MINUTE:
+			case DTK_TZ_HOUR:
+			default:
+				STROM_ELOG(kcxt, "unsupported unit of timestamp");
+				return false;
+		}
+		result->expr_ops = &xpu_numeric_ops;
+	}
+	else if (type == RESERV)
+	{
+		memset(result, 0, sizeof(xpu_numeric_t));
+		if (value == DTK_EPOCH)
+		{
+			Timestamp	epoch = kcxt->session->hostEpochTimestamp;
+
+			result->value = (ts - epoch);
+			result->weight = 6;
+		}
+		else
+		{
+			STROM_ELOG(kcxt, "unsupported unit of timestamp");
+			return false;
+		}
+		result->expr_ops = &xpu_numeric_ops;
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "not recognized unit of timestamp");
+		return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_extract_timestamp(XPU_PGFUNCTION_ARGS)
+{
+	int		type, value;
+	KEXP_PROCESS_ARGS2(numeric, text, key, timestamp, tval);
+
+	if (XPU_DATUM_ISNULL(&key) || XPU_DATUM_ISNULL(&tval))
+		result->expr_ops = NULL;
+	else if (!xpu_text_is_valid(kcxt, &key) ||
+			 !extract_decode_unit(kcxt, &key, &type, &value) ||
+			 !__pg_extract_timestamp_common(kcxt, result,
+											type, value,
+											tval.value, NULL))
+	{
+		assert(kcxt->errcode != 0);
+		return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_extract_timestamptz(XPU_PGFUNCTION_ARGS)
+{
+	int		type, value;
+	KEXP_PROCESS_ARGS2(numeric, text, key, timestamptz, tval);
+
+	if (XPU_DATUM_ISNULL(&key) || XPU_DATUM_ISNULL(&tval))
+		result->expr_ops = NULL;
+	else if (!xpu_text_is_valid(kcxt, &key) ||
+			 !extract_decode_unit(kcxt, &key, &type, &value) ||
+			 !__pg_extract_timestamp_common(kcxt, result,
+											type, value, tval.value,
+											SESSION_TIMEZONE(kcxt->session)))
+	{
+		assert(kcxt->errcode != 0);
+		return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_extract_date(XPU_PGFUNCTION_ARGS)
+{
+	int		type, value;
+	KEXP_PROCESS_ARGS2(numeric, text, key, date, dval);
+
+	if (XPU_DATUM_ISNULL(&key) || XPU_DATUM_ISNULL(&dval))
+		result->expr_ops = NULL;
+	else if (!xpu_text_is_valid(kcxt, &key) ||
+			 !extract_decode_unit(kcxt, &key, &type, &value))
+	{
+		assert(kcxt->errcode != 0);
+		return false;
+	}
+	else if (DATE_NOT_FINITE(dval.value) && (type == UNITS || type == RESERV))
+	{
+		memset(result, 0, sizeof(xpu_numeric_t));
+		switch (value)
+		{
+			/* Oscillating units */
+			case DTK_DAY:
+			case DTK_MONTH:
+			case DTK_QUARTER:
+			case DTK_WEEK:
+			case DTK_DOW:
+			case DTK_ISODOW:
+			case DTK_DOY:
+				break;
+			/* Monotonically-increasing units */
+			case DTK_YEAR:
+			case DTK_DECADE:
+			case DTK_CENTURY:
+			case DTK_MILLENNIUM:
+			case DTK_JULIAN:
+			case DTK_ISOYEAR:
+			case DTK_EPOCH:
+				if (DATE_IS_NOBEGIN(dval.value))
+					result->kind = XPU_NUMERIC_KIND__NEG_INF;
+				else
+					result->kind = XPU_NUMERIC_KIND__POS_INF;
+				result->expr_ops = &xpu_numeric_ops;
+				break;
+			default:
+				STROM_ELOG(kcxt, "not a supported unit of date");
+				return false;
+		}
+	}
+	else if (type == UNITS)
+	{
+		int		year, mon, mday;
+
+		j2date(dval.value + POSTGRES_EPOCH_JDATE, &year, &mon, &mday);
+		memset(result, 0, sizeof(xpu_numeric_t));
+		switch (value)
+		{
+			case DTK_DAY:
+				result->value = mday;
+				break;
+			case DTK_MONTH:
+				result->value = mon;
+				break;
+			case DTK_QUARTER:
+				result->value = (mon - 1) / 3 + 1;
+				break;
+			case DTK_WEEK:
+				result->value = date2isoweek(year, mon, mday);
+				break;
+			case DTK_YEAR:
+				result->value = (year > 0 ? year : year - 1);
+				break;
+			case DTK_DECADE:
+				if (year >= 0)
+					result->value = year / 10;
+				else
+					result->value = -((8 - (year - 1)) / 10);
+				break;
+			case DTK_CENTURY:
+				/* see comments in timestamp_part */
+				if (year > 0)
+					result->value = (year + 99) / 100;
+				else
+					result->value = -((99 - (year - 1)) / 100);
+				break;
+			case DTK_MILLENNIUM:
+				/* see comments in timestamp_part */
+				if (year > 0)
+					result->value = (year + 999) / 1000;
+				else
+					result->value = -((999 - (year - 1)) / 1000);
+				break;
+			case DTK_JULIAN:
+                result->value = dval.value + POSTGRES_EPOCH_JDATE;
+                break;
+			case DTK_ISOYEAR:
+                result->value = date2isoyear(year, mon, mday);
+                /* Adjust BC years */
+				if (result->value <= 0)
+					result->value -= 1;
+				break;
+			case DTK_DOW:
+			case DTK_ISODOW:
+				result->value = j2day(dval.value + POSTGRES_EPOCH_JDATE);
+				if (value == DTK_ISODOW && result->value == 0)
+					result->value = 7;
+                break;
+			case DTK_DOY:
+                result->value = date2j(year, mon, mday) - date2j(year, 1, 1) + 1;
+                break;
+            default:
+				STROM_ELOG(kcxt, "not a not supported for date");
+				return false;
+		}
+		result->expr_ops = &xpu_numeric_ops;
+	}
+	else if (type == RESERV && value == DTK_EPOCH)
+	{
+		result->value = ((int64_t)dval.value
+						 + POSTGRES_EPOCH_JDATE 
+						 - UNIX_EPOCH_JDATE) * SECS_PER_DAY;
+		result->expr_ops = &xpu_numeric_ops;
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "not a recognized unit of time");
+		return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_extract_time(XPU_PGFUNCTION_ARGS)
+{
+	int		type, value;
+	KEXP_PROCESS_ARGS2(numeric, text, key, time, tval);
+
+	if (XPU_DATUM_ISNULL(&key) || XPU_DATUM_ISNULL(&tval))
+		result->expr_ops = NULL;
+	else if (!xpu_text_is_valid(kcxt, &key) ||
+			 !extract_decode_unit(kcxt, &key, &type, &value))
+	{
+		assert(kcxt->errcode != 0);
+		return false;
+	}
+	else if (type == UNITS)
+	{
+		struct pg_tm tm;
+		fsec_t		fsec;
+
+		memset(result, 0, sizeof(xpu_numeric_t));
+		time2tm(tval.value, &tm, &fsec);
+		switch (value)
+		{
+			case DTK_MICROSEC:
+				result->value = tm.tm_sec * 1000000L + fsec;
+				break;
+			case DTK_MILLISEC:
+				result->value = tm.tm_sec * 1000000L + fsec;
+				result->weight = 3;
+				break;
+			case DTK_SECOND:
+				result->value = tm.tm_sec * 1000000L + fsec;
+				result->weight = 6;
+				break;
+			case DTK_MINUTE:
+				result->value = tm.tm_min;
+				break;
+			case DTK_HOUR:
+				result->value = tm.tm_hour;
+				break;
+			default:
+				STROM_ELOG(kcxt, "unsupported unit of time");
+				return false;
+		}
+		result->expr_ops = &xpu_numeric_ops;
+	}
+	else if (type == RESERV && value == DTK_EPOCH)
+	{
+		memset(result, 0, sizeof(xpu_numeric_t));
+		result->value = tval.value / 1000000;
+		result->expr_ops = &xpu_numeric_ops;
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "not a recognized unit of time");
+		return false;
+	}
+	return true;
+}
+
+	
+PUBLIC_FUNCTION(bool)
+pgfn_extract_timetz(XPU_PGFUNCTION_ARGS)
+{
+	int		type, value;
+	KEXP_PROCESS_ARGS2(numeric, text, key, timetz, tval);
+
+	if (XPU_DATUM_ISNULL(&key) || XPU_DATUM_ISNULL(&tval))
+		result->expr_ops = NULL;
+	else if (!xpu_text_is_valid(kcxt, &key) ||
+			 !extract_decode_unit(kcxt, &key, &type, &value))
+	{
+		assert(kcxt->errcode != 0);
+		return false;
+	}
+	else if (type == UNITS)
+	{
+		struct pg_tm tm;
+		fsec_t		fsec;
+		int			tz;
+
+		memset(result, 0, sizeof(xpu_numeric_t));
+		timetz2tm(&tval.value, &tm, &fsec, &tz);
+		switch (value)
+		{
+			case DTK_TZ:
+				result->value = -tz;
+                break;
+            case DTK_TZ_MINUTE:
+                result->value = (-tz / SECS_PER_MINUTE) % MINS_PER_HOUR;
+                break;
+			case DTK_TZ_HOUR:
+                result->value  = -tz / SECS_PER_HOUR;
+                break;
+			case DTK_MICROSEC:
+                result->value = tm.tm_sec * 1000000L + fsec;
+                break;
+            case DTK_MILLISEC:
+				result->value = tm.tm_sec * 1000000L + fsec;
+				result->weight = 3;
+				break;
+            case DTK_SECOND:
+				result->value = tm.tm_sec * 1000000L + fsec;
+				result->weight = 6;
+				break;
+            case DTK_MINUTE:
+                result->value = tm.tm_min;
+                break;
+			case DTK_HOUR:
+                result->value = tm.tm_hour;
+                break;
+			default:
+				STROM_ELOG(kcxt, "unsupported unit of time");
+				return false;
+		}
+		result->expr_ops = &xpu_numeric_ops;
+	}
+	else if (type == RESERV && value == DTK_EPOCH)
+	{
+		memset(result, 0, sizeof(xpu_numeric_ops));
+		result->value = tval.value.time / 1000000L + tval.value.zone;
+		result->expr_ops = &xpu_numeric_ops;
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "not a recognized unit of time");
+		return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_extract_interval(XPU_PGFUNCTION_ARGS)
+{
+	int		type, value;
+	KEXP_PROCESS_ARGS2(numeric, text, key, interval, ival);
+
+	if (XPU_DATUM_ISNULL(&key) || XPU_DATUM_ISNULL(&ival))
+		result->expr_ops = NULL;
+	else if (!xpu_text_is_valid(kcxt, &key) ||
+			 !extract_decode_unit(kcxt, &key, &type, &value))
+	{
+		assert(kcxt->errcode != 0);
+		return false;
+	}
+	else if (type == UNITS)
+	{
+		/* see interval2itm */
+		TimeOffset	time;
+		TimeOffset	tfrac;
+		int64_t		tm_year, tm_mon, tm_mday;
+		int64_t		tm_hour, tm_min, tm_sec, tm_usec;
+
+		tm_year = ival.value.month / MONTHS_PER_YEAR;
+		tm_mon  = ival.value.month % MONTHS_PER_YEAR;
+		tm_mday = ival.value.day;
+
+		time    = ival.value.time;
+		tfrac   = time / USECS_PER_HOUR;
+		time   -= tfrac * USECS_PER_HOUR;
+		tm_hour = tfrac;
+		tfrac   = time / USECS_PER_MINUTE;
+		time   -= tfrac * USECS_PER_MINUTE;
+		tm_min  = tfrac;
+		tfrac   = time / USECS_PER_SEC;
+		time   -= tfrac * USECS_PER_SEC;
+		tm_sec  = tfrac;
+		tm_usec = time;
+
+		switch (value)
+		{
+			case DTK_MICROSEC:
+				result->value = tm_sec * 1000000L + tm_usec;
+				break;
+			case DTK_MILLISEC:
+				result->value = tm_sec * 1000000L + tm_usec;
+				result->weight = 3;
+				break;
+            case DTK_SECOND:
+				result->value = tm_sec * 1000000L + tm_usec;
+				result->weight = 6;
+				break;
+            case DTK_MINUTE:
+                result->value = tm_min;
+                break;
+			case DTK_HOUR:
+                result->value = tm_hour;
+                break;
+            case DTK_DAY:
+                result->value = tm_mday;
+                break;
+            case DTK_MONTH:
+                result->value = tm_mon;
+                break;
+            case DTK_QUARTER:
+                result->value = (tm_mon / 3) + 1;
+                break;
+            case DTK_YEAR:
+                result->value = tm_year;
+                break;
+			case DTK_DECADE:
+				/* caution: C division may have negative remainder */
+				result->value = tm_year / 10;
+				break;
+			case DTK_CENTURY:
+                /* caution: C division may have negative remainder */
+                result->value = tm_year / 100;
+                break;
+			case DTK_MILLENNIUM:
+				/* caution: C division may have negative remainder */
+				result->value = tm_year / 1000;
+				break;
+			default:
+				STROM_ELOG(kcxt, "not a supported for interval type");
+				return false;
+		}
+	}
+	else if (type == RESERV && value == DTK_EPOCH)
+	{
+		memset(result, 0, sizeof(xpu_numeric_t));
+		result->value =
+			(((int64_t)ival.value.month / MONTHS_PER_YEAR) * SECS_PER_YEAR +
+			 ((int64_t)ival.value.month % MONTHS_PER_YEAR) * SECS_PER_MONTH +
+			 (int64_t)ival.value.day * SECS_PER_DAY) * 1000000L +
+			(int64_t)ival.value.time;
+		result->weight = 6;
+		result->expr_ops = &xpu_numeric_ops;
+	}
+    else
+	{
+		STROM_ELOG(kcxt, "not a recognized unit for interval");
+		return false;
+	}
+	return true;
 }

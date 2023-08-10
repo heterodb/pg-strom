@@ -609,7 +609,12 @@ FUNC_OPCODE(overlap, timestamp/timestamp/timestamp/timestamp, DEVKIND__ANY, over
 FUNC_OPCODE(overlap, timestamptz/timestamptz/timestamptz/timestamptz, DEVKIND__ANY, overlaps_timestamptz, 50, NULL)
 
 /* extract */
-//TODO...
+FUNC_OPCODE(extract, text/timestamp,   DEVKIND__ANY, extract_timestamp,   50, NULL)
+FUNC_OPCODE(extract, text/timestamptz, DEVKIND__ANY, extract_timestamptz, 50, NULL)
+FUNC_OPCODE(extract, text/date,        DEVKIND__ANY, extract_date,        50, NULL)
+FUNC_OPCODE(extract, text/time,        DEVKIND__ANY, extract_time,        50, NULL)
+FUNC_OPCODE(extract, text/timetz,      DEVKIND__ANY, extract_timetz,      50, NULL)
+FUNC_OPCODE(extract, text/interval,    DEVKIND__ANY, extract_interval,    50, NULL)
 
 /*
  * Text functions/operators

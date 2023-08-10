@@ -132,6 +132,9 @@ typedef unsigned int		Oid;
 #define NAMEDATALEN			64		/* must follow the host configuration */
 #define BLCKSZ				8192	/* must follow the host configuration */
 
+#ifndef lengthof
+#define lengthof(array)		(sizeof (array) / sizeof ((array)[0]))
+#endif
 #define PointerGetDatum(X)	((Datum)(X))
 #define DatumGetPointer(X)	((char *)(X))
 #define TYPEALIGN(ALIGNVAL,LEN)         \
@@ -207,10 +210,21 @@ __memcmp(const void *__s1, const void *__s2, size_t n)
 	return 0;
 }
 
+INLINE_FUNCTION(int)
+__strcmp(const char *s1, const char *s2)
+{
+	unsigned char	c1, c2;
 
+	do {
+		c1 = (unsigned char) *s1++;
+		c2 = (unsigned char) *s2++;
 
+		if (c1 == '\0')
+			return c1 - c2;
+	} while (c1 == c2);
 
-
+	return c1 - c2;
+}
 
 /*
  * TypeOpCode / FuncOpCode
@@ -2049,6 +2063,7 @@ typedef struct kern_session_info
 	uint32_t	xpucode_groupby_actions;
 
 	/* database session info */
+	int64_t		hostEpochTimestamp;	/* = SetEpochTimestamp() */
 	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
 	uint32_t	session_xact_state;	/* offset to SerializedTransactionState */
 	uint32_t	session_timezone;	/* offset to pg_tz */
