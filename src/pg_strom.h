@@ -736,45 +736,6 @@ typedef struct gpuClient	gpuClient;
 extern int		pgstrom_max_async_gpu_tasks;	/* GUC */
 extern bool		pgstrom_load_gpu_debug_module;	/* GUC */
 extern const char *cuStrError(CUresult rc);
-extern void		__gpuClientELogRaw(gpuClient *gclient,
-								   kern_errorbuf *errorbuf);
-extern void		__gpuClientELog(gpuClient *gclient,
-								int errcode,
-								const char *filename, int lineno,
-								const char *funcname,
-								const char *fmt, ...);
-#define gpuClientELog(gclient,fmt,...)						\
-	__gpuClientELog((gclient), ERRCODE_DEVICE_INTERNAL,		\
-					__FILE__, __LINE__, __FUNCTION__,		\
-					(fmt), ##__VA_ARGS__)
-#define gpuClientFatal(gclient,fmt,...)						\
-	__gpuClientELog((gclient), ERRCODE_DEVICE_FATAL,		\
-					__FILE__, __LINE__, __FUNCTION__,		\
-					(fmt), ##__VA_ARGS__)
-
-extern __thread int			CU_DINDEX_PER_THREAD;
-extern __thread CUdevice	CU_DEVICE_PER_THREAD;
-extern __thread CUcontext	CU_CONTEXT_PER_THREAD;
-extern __thread CUevent		CU_EVENT_PER_THREAD;
-
-typedef struct
-{
-	CUdeviceptr	__base__;
-	size_t		__offset__;
-	size_t		__length__;
-	CUdeviceptr	m_devptr;
-} gpuMemChunk;
-
-extern const gpuMemChunk *gpuMemAlloc(size_t bytesize);
-extern void		gpuMemFree(const gpuMemChunk *chunk);
-extern const gpuMemChunk *gpuservLoadKdsBlock(gpuClient *gclient,
-											  kern_data_store *kds,
-											  const char *pathname,
-											  strom_io_vector *kds_iovec);
-extern const gpuMemChunk *gpuservLoadKdsArrow(gpuClient *gclient,
-											  kern_data_store *kds,
-											  const char *pathname,
-											  strom_io_vector *kds_iovec);
 extern bool		gpuServiceGoingTerminate(void);
 extern void		gpuClientWriteBack(gpuClient *gclient,
 								   XpuCommand *resp,

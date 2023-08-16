@@ -17,6 +17,7 @@
 typedef struct
 {
 	pthread_mutex_t	lock;
+	bool			is_managed;	/* true, if managed memory pool */
 	size_t			total_sz;	/* total pool size */
 	size_t			hard_limit;
 	size_t			keep_limit;
@@ -34,7 +35,8 @@ struct gpuContext
 	HTAB		   *cuda_type_htab;
 	HTAB		   *cuda_func_htab;
 	xpu_encode_info *cuda_encode_catalog;
-	gpuMemoryPool	pool;
+	gpuMemoryPool	pool_raw;
+	gpuMemoryPool	pool_managed;
 	/* GPU client */
 	pthread_mutex_t	client_lock;
 	dlist_head		client_list;
@@ -52,10 +54,10 @@ typedef struct gpuContext	gpuContext;
  * variables
  */
 int		pgstrom_max_async_gpu_tasks;	/* GUC */
-__thread int		CU_DINDEX_PER_THREAD = -1;
-__thread CUdevice	CU_DEVICE_PER_THREAD = -1;
-__thread CUcontext	CU_CONTEXT_PER_THREAD = NULL;
-__thread CUevent	CU_EVENT_PER_THREAD = NULL;
+static __thread int		CU_DINDEX_PER_THREAD = -1;
+static __thread CUdevice CU_DEVICE_PER_THREAD = -1;
+static __thread CUcontext CU_CONTEXT_PER_THREAD = NULL;
+static __thread CUevent	CU_EVENT_PER_THREAD = NULL;
 static __thread gpuContext *GpuWorkerCurrentContext = NULL;
 static volatile int		gpuserv_bgworker_got_signal = 0;
 static dlist_head		gpuserv_gpucontext_list;
@@ -136,6 +138,14 @@ typedef struct
 	dlist_head		addr_chunks;	/* list of ordered chunks */
 	struct timeval	tval;
 } gpuMemorySegment;
+
+typedef struct
+{
+	CUdeviceptr	__base__;
+	size_t		__offset__;
+	size_t		__length__;
+	CUdeviceptr	m_devptr;
+} gpuMemChunk;
 
 typedef struct
 {
@@ -237,9 +247,9 @@ error:
 }
 
 static gpuMemChunk *
-__gpuMemAlloc(size_t bytesize)
+gpuMemAlloc(size_t bytesize)
 {
-	gpuMemoryPool  *pool = &GpuWorkerCurrentContext->pool;
+	gpuMemoryPool  *pool = &GpuWorkerCurrentContext->pool_raw;
 	dlist_iter		iter;
 	size_t			segment_sz;
 	gpuMemoryChunkInternal *chunk = NULL;
@@ -273,16 +283,10 @@ out_unlock:
 	return (chunk ? &chunk->c : NULL);
 }
 
-const gpuMemChunk *
-gpuMemAlloc(size_t bytesize)
-{
-	return __gpuMemAlloc(bytesize);
-}
-
-void
+static void
 gpuMemFree(const gpuMemChunk *__chunk)
 {
-	gpuMemoryPool  *pool = &GpuWorkerCurrentContext->pool;
+	gpuMemoryPool  *pool = &GpuWorkerCurrentContext->pool_raw;
 	gpuMemorySegment *mseg;
 	gpuMemoryChunkInternal *chunk;
 	gpuMemoryChunkInternal *buddy;
@@ -345,7 +349,7 @@ gpuMemFree(const gpuMemChunk *__chunk)
 static void
 gpuMemoryPoolMaintenance(gpuContext *gcontext)
 {
-	gpuMemoryPool  *pool = &gcontext->pool;
+	gpuMemoryPool  *pool = &gcontext->pool_raw;
 	dlist_iter		iter;
 	struct timeval	tval;
 	int64			tdiff;
@@ -401,9 +405,12 @@ gpuMemoryPoolMaintenance(gpuContext *gcontext)
 }
 
 static void
-gpuMemoryPoolInit(gpuMemoryPool *pool, size_t dev_total_memsz)
+gpuMemoryPoolInit(gpuMemoryPool *pool,
+				  bool is_managed,
+				  size_t dev_total_memsz)
 {
 	pthreadMutexInit(&pool->lock);
+	pool->is_managed = is_managed;
 	pool->total_sz = 0;
 	pool->hard_limit = pgstrom_gpu_mempool_max_ratio * (double)dev_total_memsz;
 	pool->keep_limit = pgstrom_gpu_mempool_min_ratio * (double)dev_total_memsz;
@@ -812,86 +819,6 @@ getGpuQueryBuffer(gpuContext *gcontext,
 }
 
 /*
- * __gpuservLoadKdsCommon
- */
-static const gpuMemChunk *
-__gpuservLoadKdsCommon(gpuClient *gclient,
-					   kern_data_store *kds,
-					   size_t base_offset,
-					   const char *pathname,
-					   strom_io_vector *kds_iovec)
-{
-	gpuMemChunk *chunk;
-	CUresult	rc;
-	off_t		off = PAGE_ALIGN(base_offset);
-	size_t		gap = off - base_offset;
-
-	chunk = __gpuMemAlloc(gap + kds->length);
-	if (!chunk)
-	{
-		gpuClientELog(gclient, "failed on gpuMemAlloc(%zu)", kds->length);
-		return NULL;
-	}
-	chunk->m_devptr = chunk->__base__ + chunk->__offset__ + gap;
-
-	rc = cuMemcpyHtoD(chunk->m_devptr, kds, base_offset);
-	if (rc != CUDA_SUCCESS)
-	{
-		gpuClientELog(gclient, "failed on cuMemcpyHtoD: %s", cuStrError(rc));
-		goto error;
-	}
-	if (!gpuDirectFileReadIOV(pathname,
-							  chunk->__base__,
-							  chunk->__offset__ + off,
-							  kds_iovec))
-	{
-		gpuClientELog(gclient, "failed on gpuDirectFileReadIOV");
-		goto error;
-	}
-	return chunk;
-
-error:
-	gpuMemFree(chunk);
-	return NULL;
-}
-
-/*
- * gpuservLoadKdsBlock
- *
- * fill up KDS_FORMAT_BLOCK using GPU-Direct
- */
-const gpuMemChunk *
-gpuservLoadKdsBlock(gpuClient *gclient,
-					kern_data_store *kds,
-					const char *pathname,
-					strom_io_vector *kds_iovec)
-{
-	size_t		base_offset;
-
-	Assert(kds->format == KDS_FORMAT_BLOCK);
-	base_offset = kds->block_offset + kds->block_nloaded * BLCKSZ;
-	return __gpuservLoadKdsCommon(gclient, kds, base_offset, pathname, kds_iovec);
-}
-
-/*
- * gpuservLoadKdsArrow
- *
- * fill up KDS_FORMAT_ARROW using GPU-Direct
- */
-const gpuMemChunk *
-gpuservLoadKdsArrow(gpuClient *gclient,
-					kern_data_store *kds,
-					const char *pathname,
-					strom_io_vector *kds_iovec)
-{
-	size_t		base_offset;
-
-	Assert(kds->format == KDS_FORMAT_ARROW);
-	base_offset = KDS_HEAD_LENGTH(kds);
-	return __gpuservLoadKdsCommon(gclient, kds, base_offset, pathname, kds_iovec);
-}
-
-/*
  * gpuServiceGoingTerminate
  */
 bool
@@ -1073,10 +1000,21 @@ gpuClientWriteBack(gpuClient  *gclient,
 	__gpuClientWriteBack(gclient, iov_array, iovcnt);
 }
 
-/*
+/* ----------------------------------------------------------------
+ *
  * gpuClientELog
+ *
+ * ----------------------------------------------------------------
  */
-void
+#define gpuClientELog(gclient,fmt,...)						\
+	__gpuClientELog((gclient), ERRCODE_DEVICE_INTERNAL,		\
+					__FILE__, __LINE__, __FUNCTION__,		\
+					(fmt), ##__VA_ARGS__)
+#define gpuClientFatal(gclient,fmt,...)						\
+	__gpuClientELog((gclient), ERRCODE_DEVICE_FATAL,		\
+					__FILE__, __LINE__, __FUNCTION__,		\
+					(fmt), ##__VA_ARGS__)
+static void
 __gpuClientELogRaw(gpuClient *gclient, kern_errorbuf *errorbuf)
 {
 	XpuCommand		resp;
@@ -1093,7 +1031,7 @@ __gpuClientELogRaw(gpuClient *gclient, kern_errorbuf *errorbuf)
 	__gpuClientWriteBack(gclient, &iov, 1);
 }
 
-void
+static void
 __gpuClientELog(gpuClient *gclient,
 				int errcode,
 				const char *filename, int lineno,
@@ -1334,6 +1272,89 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	__gpuClientWriteBack(gclient, &iov, 1);
 
 	return true;
+}
+
+/* ----------------------------------------------------------------
+ *
+ * gpuservLoadKdsXXXX - Load data chunks using GPU-Direct SQL
+ *
+ * ----------------------------------------------------------------
+ */
+static const gpuMemChunk *
+__gpuservLoadKdsCommon(gpuClient *gclient,
+					   kern_data_store *kds,
+					   size_t base_offset,
+					   const char *pathname,
+					   strom_io_vector *kds_iovec)
+{
+	gpuMemChunk *chunk;
+	CUresult	rc;
+	off_t		off = PAGE_ALIGN(base_offset);
+	size_t		gap = off - base_offset;
+
+	chunk = gpuMemAlloc(gap + kds->length);
+	if (!chunk)
+	{
+		gpuClientELog(gclient, "failed on gpuMemAlloc(%zu)", kds->length);
+		return NULL;
+	}
+	chunk->m_devptr = chunk->__base__ + chunk->__offset__ + gap;
+
+	rc = cuMemcpyHtoD(chunk->m_devptr, kds, base_offset);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuMemcpyHtoD: %s", cuStrError(rc));
+		goto error;
+	}
+	if (!gpuDirectFileReadIOV(pathname,
+							  chunk->__base__,
+							  chunk->__offset__ + off,
+							  kds_iovec))
+	{
+		gpuClientELog(gclient, "failed on gpuDirectFileReadIOV");
+		goto error;
+	}
+	return chunk;
+
+error:
+	gpuMemFree(chunk);
+	return NULL;
+}
+
+/*
+ * gpuservLoadKdsBlock
+ *
+ * fill up KDS_FORMAT_BLOCK using GPU-Direct
+ */
+static const gpuMemChunk *
+gpuservLoadKdsBlock(gpuClient *gclient,
+					kern_data_store *kds,
+					const char *pathname,
+					strom_io_vector *kds_iovec)
+{
+	size_t		base_offset;
+
+	Assert(kds->format == KDS_FORMAT_BLOCK);
+	base_offset = kds->block_offset + kds->block_nloaded * BLCKSZ;
+	return __gpuservLoadKdsCommon(gclient, kds, base_offset, pathname, kds_iovec);
+}
+
+/*
+ * gpuservLoadKdsArrow
+ *
+ * fill up KDS_FORMAT_ARROW using GPU-Direct
+ */
+static const gpuMemChunk *
+gpuservLoadKdsArrow(gpuClient *gclient,
+					kern_data_store *kds,
+					const char *pathname,
+					strom_io_vector *kds_iovec)
+{
+	size_t		base_offset;
+
+	Assert(kds->format == KDS_FORMAT_ARROW);
+	base_offset = KDS_HEAD_LENGTH(kds);
+	return __gpuservLoadKdsCommon(gclient, kds, base_offset, pathname, kds_iovec);
 }
 
 /* ----------------------------------------------------------------
@@ -2265,7 +2286,8 @@ gpuservSetupGpuContext(int cuda_dindex)
 		elog(ERROR, "out of memory");
 	gcontext->serv_fd = -1;
 	gcontext->cuda_dindex = cuda_dindex;
-	gpuMemoryPoolInit(&gcontext->pool, dattrs->DEV_TOTAL_MEMSZ);
+	gpuMemoryPoolInit(&gcontext->pool_raw, false, dattrs->DEV_TOTAL_MEMSZ);
+	gpuMemoryPoolInit(&gcontext->pool_managed, true, dattrs->DEV_TOTAL_MEMSZ);
 	pthreadMutexInit(&gcontext->client_lock);
 	dlist_init(&gcontext->client_list);
 
