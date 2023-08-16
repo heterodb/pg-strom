@@ -142,57 +142,52 @@ typedef struct
 
 typedef struct
 {
-	CUdeviceptr	__base__;
-	size_t		__offset__;
-	size_t		__length__;
-	CUdeviceptr	m_devptr;
+	dlist_node	free_chain;
+	dlist_node	addr_chain;
+	gpuMemorySegment *mseg;
+	CUdeviceptr	__base;		/* base pointer of the segment */
+	size_t		__offset;	/* offset from the base */
+	size_t		__length;	/* length of the chunk */
+	CUdeviceptr	m_devptr;	/* __base + __offset */
 } gpuMemChunk;
 
-typedef struct
-{
-	dlist_node		free_chain;
-	dlist_node		addr_chain;
-	gpuMemorySegment *mseg;
-	gpuMemChunk		c;
-} gpuMemoryChunkInternal;
-
-static gpuMemoryChunkInternal *
+static gpuMemChunk *
 __gpuMemAllocFromSegment(gpuMemoryPool *pool,
 						 gpuMemorySegment *mseg,
 						 size_t bytesize)
 {
-	gpuMemoryChunkInternal *chunk;
-	gpuMemoryChunkInternal *buddy;
+	gpuMemChunk	   *chunk;
+	gpuMemChunk	   *buddy;
 	dlist_iter		iter;
 
 	dlist_foreach(iter, &mseg->free_chunks)
 	{
-		chunk = dlist_container(gpuMemoryChunkInternal,
-								free_chain, iter.cur);
-		if (bytesize <= chunk->c.__length__)
+		chunk = dlist_container(gpuMemChunk, free_chain, iter.cur);
+
+		if (bytesize <= chunk->__length)
 		{
-			size_t	surplus = chunk->c.__length__ - bytesize;
+			size_t	surplus = chunk->__length - bytesize;
 
 			/* try to split, if free chunk is enough large (>4MB) */
 			if (surplus > (4UL << 20))
 			{
-				buddy = calloc(1, sizeof(gpuMemoryChunkInternal));
+				buddy = calloc(1, sizeof(gpuMemChunk));
 				if (!buddy)
 					return NULL;	/* out of memory */
-				chunk->c.__length__ -= surplus;
+				chunk->__length -= surplus;
 
 				buddy->mseg   = mseg;
-				buddy->c.__base__ = mseg->devptr;
-				buddy->c.__offset__ = chunk->c.__offset__ + chunk->c.__length__;
-				buddy->c.__length__ = surplus;
-				buddy->c.m_devptr = (buddy->c.__base__ + buddy->c.__offset__);
+				buddy->__base = mseg->devptr;
+				buddy->__offset = chunk->__offset + chunk->__length;
+				buddy->__length = surplus;
+				buddy->m_devptr = (buddy->__base + buddy->__offset);
 				dlist_insert_after(&chunk->free_chain, &buddy->free_chain);
 				dlist_insert_after(&chunk->addr_chain, &buddy->addr_chain);
 			}
 			/* mark it as an active chunk */
 			dlist_delete(&chunk->free_chain);
 			memset(&chunk->free_chain, 0, sizeof(dlist_node));
-			mseg->active_sz += chunk->c.__length__;
+			mseg->active_sz += chunk->__length;
 
 			/* update the LRU ordered segment list and timestamp */
 			gettimeofday(&mseg->tval, NULL);
@@ -208,8 +203,8 @@ static gpuMemorySegment *
 __gpuMemAllocNewSegment(gpuMemoryPool *pool, size_t segment_sz)
 {
 	gpuMemorySegment *mseg = calloc(1, sizeof(gpuMemorySegment));
-	gpuMemoryChunkInternal *chunk = calloc(1, sizeof(gpuMemoryChunkInternal));
-	CUresult	rc;
+	gpuMemChunk	   *chunk = calloc(1, sizeof(gpuMemChunk));
+	CUresult		rc;
 
 	if (!mseg || !chunk)
 		goto error;
@@ -237,10 +232,10 @@ __gpuMemAllocNewSegment(gpuMemoryPool *pool, size_t segment_sz)
 			goto error;
 	}
 	chunk->mseg   = mseg;
-	chunk->c.__base__ = mseg->devptr;
-	chunk->c.__offset__ = 0;
-	chunk->c.__length__ = segment_sz;
-	chunk->c.m_devptr = (chunk->c.__base__ + chunk->c.__offset__);
+	chunk->__base = mseg->devptr;
+	chunk->__offset = 0;
+	chunk->__length = segment_sz;
+	chunk->m_devptr = (chunk->__base + chunk->__offset);
 	dlist_push_head(&mseg->free_chunks, &chunk->free_chain);
 	dlist_push_head(&mseg->addr_chunks, &chunk->addr_chain);
 
@@ -261,9 +256,9 @@ error:
 static gpuMemChunk *
 __gpuMemAllocCommon(gpuMemoryPool *pool, size_t bytesize)
 {
-	dlist_iter		iter;
-	size_t			segment_sz;
-	gpuMemoryChunkInternal *chunk = NULL;
+	dlist_iter	iter;
+	size_t		segment_sz;
+	gpuMemChunk *chunk = NULL;
 
 	bytesize = PAGE_ALIGN(bytesize);
 	pthreadMutexLock(&pool->lock);
@@ -291,7 +286,7 @@ __gpuMemAllocCommon(gpuMemoryPool *pool, size_t bytesize)
 out_unlock:	
 	pthreadMutexUnlock(&pool->lock);
 
-	return (chunk ? &chunk->c : NULL);
+	return (chunk ? chunk : NULL);
 }
 
 static gpuMemChunk *
@@ -307,23 +302,20 @@ gpuMemAllocManaged(size_t bytesize)
 }
 
 static void
-gpuMemFree(const gpuMemChunk *__chunk)
+gpuMemFree(gpuMemChunk *chunk)
 {
 	gpuMemoryPool  *pool;
 	gpuMemorySegment *mseg;
-	gpuMemoryChunkInternal *chunk;
-	gpuMemoryChunkInternal *buddy;
-	dlist_node	   *dnode;
+	gpuMemChunk	*buddy;
+	dlist_node	*dnode;
 
-	chunk = (gpuMemoryChunkInternal *)
-		((char *)__chunk - offsetof(gpuMemoryChunkInternal, c));
 	Assert(!chunk->free_chain.prev && !chunk->free_chain.next);
 	mseg = chunk->mseg;
 	pool = mseg->pool;
 
 	pthreadMutexLock(&pool->lock);
 	/* revert this chunk state to 'free' */
-	mseg->active_sz -= chunk->c.__length__;
+	mseg->active_sz -= chunk->__length;
 	dlist_push_head(&mseg->free_chunks,
 					&chunk->free_chain);
 
@@ -333,15 +325,15 @@ gpuMemFree(const gpuMemChunk *__chunk)
 	{
 		dnode = dlist_next_node(&mseg->addr_chunks,
 								&chunk->addr_chain);
-		buddy = dlist_container(gpuMemoryChunkInternal,
+		buddy = dlist_container(gpuMemChunk,
 								addr_chain, dnode);
 		if (buddy->free_chain.prev && buddy->addr_chain.next)
 		{
-			Assert(chunk->c.__offset__ +
-				   chunk->c.__length__ == buddy->c.__offset__);
+			Assert(chunk->__offset +
+				   chunk->__length == buddy->__offset);
 			dlist_delete(&buddy->free_chain);
 			dlist_delete(&buddy->addr_chain);
-			chunk->c.__length__ += buddy->c.__length__;
+			chunk->__length += buddy->__length;
 			free(buddy);
 		}
 	}
@@ -351,16 +343,16 @@ gpuMemFree(const gpuMemChunk *__chunk)
 	{
 		dnode = dlist_prev_node(&mseg->addr_chunks,
 								&chunk->addr_chain);
-		buddy = dlist_container(gpuMemoryChunkInternal,
+		buddy = dlist_container(gpuMemChunk,
 								addr_chain, dnode);
 		/* merge if prev chunk is also free */
 		if (buddy->free_chain.prev && buddy->addr_chain.next)
 		{
-			Assert(buddy->c.__offset__ +
-				   buddy->c.__length__ == chunk->c.__offset__);
+			Assert(buddy->__offset +
+				   buddy->__length == chunk->__offset);
 			dlist_delete(&chunk->free_chain);
 			dlist_delete(&chunk->addr_chain);
-			buddy->c.__length__ += chunk->c.__length__;
+			buddy->__length += chunk->__length;
 			free(chunk);
 		}
 	}
@@ -411,10 +403,8 @@ __gpuMemoryPoolMaintenanceTask(gpuContext *gcontext, gpuMemoryPool *pool)
 			while (!dlist_is_empty(&mseg->addr_chunks))
 			{
 				dlist_node	   *dnode = dlist_pop_head_node(&mseg->addr_chunks);
-				gpuMemoryChunkInternal *chunk;
-
-				chunk = dlist_container(gpuMemoryChunkInternal,
-										addr_chain, dnode);
+				gpuMemChunk	   *chunk = dlist_container(gpuMemChunk,
+														addr_chain, dnode);
 				Assert(chunk->free_chain.prev &&
 					   chunk->free_chain.next);
 				free(chunk);
@@ -989,7 +979,7 @@ __gpuClientWriteBack(gpuClient *gclient, struct iovec *iov, int iovcnt)
 	pthreadMutexUnlock(&gclient->mutex);
 }
 
-void
+static void
 gpuClientWriteBack(gpuClient  *gclient,
 				   XpuCommand *resp,
 				   size_t      resp_sz,
@@ -1379,7 +1369,7 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 		gpuClientELog(gclient, "failed on gpuMemAlloc(%zu)", kds->length);
 		return NULL;
 	}
-	chunk->m_devptr = chunk->__base__ + chunk->__offset__ + gap;
+	chunk->m_devptr = chunk->__base + chunk->__offset + gap;
 
 	rc = cuMemcpyHtoD(chunk->m_devptr, kds, base_offset);
 	if (rc != CUDA_SUCCESS)
@@ -1388,8 +1378,8 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 		goto error;
 	}
 	if (!gpuDirectFileReadIOV(pathname,
-							  chunk->__base__,
-							  chunk->__offset__ + off,
+							  chunk->__base,
+							  chunk->__offset + off,
 							  kds_iovec))
 	{
 		gpuClientELog(gclient, "failed on gpuDirectFileReadIOV");

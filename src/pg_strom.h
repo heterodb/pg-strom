@@ -737,11 +737,6 @@ extern int		pgstrom_max_async_gpu_tasks;	/* GUC */
 extern bool		pgstrom_load_gpu_debug_module;	/* GUC */
 extern const char *cuStrError(CUresult rc);
 extern bool		gpuServiceGoingTerminate(void);
-extern void		gpuClientWriteBack(gpuClient *gclient,
-								   XpuCommand *resp,
-								   size_t resp_sz,
-								   int kds_nitems,
-								   kern_data_store **kds_array);
 extern void		gpuservBgWorkerMain(Datum arg);
 extern void		pgstrom_init_gpu_service(void);
 
