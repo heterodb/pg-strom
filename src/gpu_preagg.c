@@ -1276,9 +1276,8 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 	double		xpu_ratio;
 	Cost		xpu_operator_cost;
 	Cost		xpu_tuple_cost;
-	Cost		startup_cost = PP_INFO_STARTUP_COST(pp_info);
-	Cost		run_cost = PP_INFO_RUN_COST(pp_info) - pp_info->final_cost;
-	Cost		final_cost;
+	Cost		startup_cost = 0.0;
+	Cost		run_cost = 0.0;
 
 	/*
 	 * Parameters related to devices
@@ -1299,6 +1298,9 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 	{
 		elog(ERROR, "Bug? unexpected task_kind: %08x", pp_info->xpu_task_flags);
 	}
+	/* No tuples shall be generated until child JOIN/SCAN path completion */
+	startup_cost = (PP_INFO_STARTUP_COST(pp_info) +
+					PP_INFO_RUN_COST(pp_info));
 	/* Cost estimation for grouping */
 	num_group_keys = list_length(parse->groupClause);
 	startup_cost += (xpu_operator_cost *
@@ -1308,7 +1310,7 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 	startup_cost += (target_partial->cost.per_tuple * input_nrows +
 					 target_partial->cost.startup) * xpu_ratio;
 	/* Cost estimation to fetch results */
-	final_cost = xpu_tuple_cost * con->num_groups;
+	run_cost = xpu_tuple_cost * con->num_groups;
 
 	cpath->path.pathtype         = T_CustomScan;
 	cpath->path.parent           = con->input_rel;
@@ -1319,7 +1321,7 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 	cpath->path.parallel_workers = pp_info->parallel_nworkers;
 	cpath->path.rows             = con->num_groups;
 	cpath->path.startup_cost     = startup_cost;
-	cpath->path.total_cost       = startup_cost + run_cost + final_cost;
+	cpath->path.total_cost       = startup_cost + run_cost;
 	cpath->path.pathkeys         = NIL;
 	cpath->custom_paths          = con->inner_paths_list;
 	cpath->custom_private        = list_make1(pp_info);

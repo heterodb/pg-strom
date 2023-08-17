@@ -532,6 +532,7 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 
 no_gpu_cache:
 	memset(&entry->gc_options, 0, sizeof(GpuCacheOptions));
+	entry->gc_options.cuda_dindex = -1;
 	entry->signature = 0;
 }
 
