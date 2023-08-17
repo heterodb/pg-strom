@@ -51,6 +51,15 @@ struct gpuContext
 typedef struct gpuContext	gpuContext;
 
 /*
+ * GPU service shared GPU variable
+ */
+typedef struct
+{
+	pg_atomic_uint32	gpuserv_num_workers;
+	pg_atomic_uint32	gpuserv_debug_output;
+} gpuServSharedState;
+
+/*
  * variables
  */
 int		pgstrom_max_async_gpu_tasks;	/* GUC */
@@ -64,40 +73,69 @@ static dlist_head		gpuserv_gpucontext_list;
 static int				gpuserv_epoll_fdesc = -1;
 static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
-static pg_atomic_uint32 *gpuserv_debug_output = NULL;
+static gpuServSharedState *gpuserv_shared_state = NULL;
+static int				__gpuserv_num_workers_dummy;
 static bool				__gpuserv_debug_output_dummy;
 
-#define __GpuServDebug(fmt,...)										\
-	do {															\
-		if (*((volatile bool *)gpuserv_debug_output))				\
-		{															\
-			const char *filename = __FILE__;						\
-			for (const char *pos = filename; *pos != '\0'; pos++)	\
-			{														\
-				if (pos[0] == '/' && pos[1] != '\0')				\
-					filename = pos + 1;								\
-			}														\
-			fprintf(stderr, "GpuServ: " fmt " (%s:%d)\n",			\
-					##__VA_ARGS__, filename, __LINE__);				\
-		}															\
+#define __GpuServDebug(fmt,...)											\
+	do {																\
+		if (gpuserv_shared_state &&										\
+			pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0) \
+		{																\
+			const char *filename = __FILE__;							\
+			for (const char *pos = filename; *pos != '\0'; pos++)		\
+			{															\
+				if (pos[0] == '/' && pos[1] != '\0')					\
+					filename = pos + 1;									\
+			}															\
+			fprintf(stderr, "GpuServ: " fmt " (%s:%d)\n",				\
+					##__VA_ARGS__, filename, __LINE__);					\
+		}																\
 	} while(0)
 
 static void
 gpuserv_debug_output_assign(bool newval, void *extra)
 {
-	if (gpuserv_debug_output)
-		pg_atomic_write_u32(gpuserv_debug_output, newval ? 1 : 0);
+	uint32_t	ival = (newval ? 1 : 0);
+
+	if (gpuserv_shared_state)
+		pg_atomic_write_u32(&gpuserv_shared_state->gpuserv_debug_output, ival);
 	else
-		__gpuserv_debug_output_dummy = (newval ? 1 : 0);
+		__gpuserv_debug_output_dummy = ival;
 }
 
 static const char *
 gpuserv_debug_output_show(void)
 {
-	if (gpuserv_debug_output)
-		return (pg_atomic_read_u32(gpuserv_debug_output) != 0 ? "on" : "off");
-
+	if (gpuserv_shared_state)
+	{
+		if (pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0)
+			return "on";
+		else
+			return "off";
+	}
 	return (__gpuserv_debug_output_dummy ? "on" : "off");
+}
+
+static void
+gpuserv_num_workers_assign(int newval, void *extra)
+{
+	if (gpuserv_shared_state)
+		pg_atomic_write_u32(&gpuserv_shared_state->gpuserv_num_workers, newval);
+	else
+		__gpuserv_num_workers_dummy = newval;
+}
+
+static const char *
+gpuserv_num_workers_show(void)
+{
+	uint32_t	count;
+
+	if (gpuserv_shared_state)
+		count = pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_num_workers);
+	else
+		count = __gpuserv_num_workers_dummy;
+	return psprintf("%u", count);
 }
 
 /*
@@ -2580,7 +2618,7 @@ pgstrom_request_executor(void)
 {
 	if (shmem_request_next)
 		(*shmem_request_next)();
-	RequestAddinShmemSpace(MAXALIGN(sizeof(bool)));
+	RequestAddinShmemSpace(MAXALIGN(sizeof(gpuServSharedState)));
 }
 
 /*
@@ -2593,10 +2631,13 @@ pgstrom_startup_executor(void)
 
 	if (shmem_startup_next)
 		(*shmem_startup_next)();
-	gpuserv_debug_output = ShmemInitStruct("pg_strom.gpuserv_debug_output",
-										   MAXALIGN(sizeof(pg_atomic_uint32)),
+	gpuserv_shared_state = ShmemInitStruct("gpuServSharedState",
+										   MAXALIGN(sizeof(gpuServSharedState)),
 										   &found);
-	pg_atomic_init_u32(gpuserv_debug_output, __gpuserv_debug_output_dummy);
+	pg_atomic_init_u32(&gpuserv_shared_state->gpuserv_num_workers,
+					   __gpuserv_num_workers_dummy);
+	pg_atomic_init_u32(&gpuserv_shared_state->gpuserv_debug_output,
+					   __gpuserv_debug_output_dummy);
 }
 
 /*
@@ -2642,7 +2683,7 @@ pgstrom_init_gpu_service(void)
 							 "GPU memory pool: minimum preserved ratio memory pool",
 							 NULL,
 							 &pgstrom_gpu_mempool_min_ratio,
-							 0.05,		/*  8% */
+							 0.05,		/*  5% */
 							 0.0,		/*  0% */
 							 pgstrom_gpu_mempool_max_ratio,
 							 PGC_SIGHUP,
@@ -2658,6 +2699,18 @@ pgstrom_init_gpu_service(void)
 							PGC_SIGHUP,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MS | GUC_NO_SHOW_ALL,
 							NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_strom.gpuserv_num_workers",
+							"number of GPU service worker threads per GPU device",
+							NULL,
+							&__gpuserv_num_workers_dummy,
+							12,
+							1,
+							256,
+							PGC_SUSET,
+							GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
+							NULL,
+							gpuserv_num_workers_assign,
+							gpuserv_num_workers_show);
 	DefineCustomBoolVariable("pg_strom.gpuserv_debug_output",
 							 "enables to generate debug message of GPU service",
 							 NULL,
