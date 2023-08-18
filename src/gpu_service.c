@@ -40,21 +40,37 @@ struct gpuContext
 	/* GPU client */
 	pthread_mutex_t	client_lock;
 	dlist_head		client_list;
+	/* GPU workers */
+	pthread_mutex_t	worker_lock;
+	dlist_head		worker_list;
 	/* XPU commands */
 	pthread_cond_t	cond;
 	pthread_mutex_t	lock;
 	dlist_head		command_list;
-	/* GPU task workers */
-	int				n_workers;
-	pthread_t		workers[1];
 };
 typedef struct gpuContext	gpuContext;
+
+#define GPUSERV_WORKER_KIND__GPUTASK		't'
+#define GPUSERV_WORKER_KIND__GPUCACHE		'c'
+
+typedef struct
+{
+	dlist_node		chain;
+	gpuContext	   *gcontext;
+	pthread_t		worker;
+	char			kind;	/* one of GPUSERV_WORKER_KIND__* */
+	volatile bool	termination;
+} gpuWorker;
 
 /*
  * GPU service shared GPU variable
  */
+//#define __SIGWAKEUP		(__SIGRTMIN + 3)
+#define __SIGWAKEUP		SIGUSR2
+
 typedef struct
 {
+	volatile pid_t		gpuserv_pid;
 	pg_atomic_uint32	gpuserv_num_workers;
 	pg_atomic_uint32	gpuserv_debug_output;
 } gpuServSharedState;
@@ -120,22 +136,30 @@ gpuserv_debug_output_show(void)
 static void
 gpuserv_num_workers_assign(int newval, void *extra)
 {
+	uint32_t	nworkers = ((newval << 1) | 1U);
+
 	if (gpuserv_shared_state)
-		pg_atomic_write_u32(&gpuserv_shared_state->gpuserv_num_workers, newval);
+	{
+		pid_t	gpuserv_pid = gpuserv_shared_state->gpuserv_pid;
+
+		pg_atomic_write_u32(&gpuserv_shared_state->gpuserv_num_workers, nworkers);
+		if (gpuserv_pid != 0)
+			kill(gpuserv_pid, SIGUSR2);
+	}
 	else
-		__gpuserv_num_workers_dummy = newval;
+		__gpuserv_num_workers_dummy = nworkers;
 }
 
 static const char *
 gpuserv_num_workers_show(void)
 {
-	uint32_t	count;
+	uint32_t	nworkers;
 
 	if (gpuserv_shared_state)
-		count = pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_num_workers);
+		nworkers = pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_num_workers);
 	else
-		count = __gpuserv_num_workers_dummy;
-	return psprintf("%u", count);
+		nworkers = __gpuserv_num_workers_dummy;
+	return psprintf("%u", (nworkers>>1));
 }
 
 /*
@@ -1842,7 +1866,8 @@ bailout:
 static void *
 gpuservGpuCacheManager(void *__arg)
 {
-	gpuContext *gcontext = (gpuContext *)__arg;
+	gpuWorker  *gworker = (gpuWorker *)__arg;
+	gpuContext *gcontext = gworker->gcontext;
 	CUresult	rc;
 
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
@@ -1856,9 +1881,21 @@ gpuservGpuCacheManager(void *__arg)
 	CU_EVENT_PER_THREAD   = NULL;
 	pg_memory_barrier();
 
+	__GpuServDebug("GPU-%d GpuCache manager thread launched.",
+				   CU_DINDEX_PER_THREAD);
+	
 	gpucacheManagerEventLoop(gcontext->cuda_dindex,
 							 gcontext->cuda_context,
 							 gcontext->cuda_module);
+
+	/* delete gpuWorker from the gpuContext */
+	pthreadMutexLock(&gcontext->worker_lock);
+	dlist_delete(&gworker->chain);
+	pthreadMutexUnlock(&gcontext->worker_lock);
+	free(gworker);
+
+	__GpuServDebug("GPU-%d GpuCache manager terminated.",
+				   CU_DINDEX_PER_THREAD);
 	return NULL;
 }
 
@@ -1934,7 +1971,8 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 static void *
 gpuservGpuWorkerMain(void *__arg)
 {
-	gpuContext *gcontext = (gpuContext *)__arg;
+	gpuWorker  *gworker = (gpuWorker *)__arg;
+	gpuContext *gcontext = gworker->gcontext;
 	gpuClient  *gclient;
 	CUevent		cuda_event;
 	CUresult	rc;
@@ -1953,8 +1991,10 @@ gpuservGpuWorkerMain(void *__arg)
 	CU_EVENT_PER_THREAD = cuda_event;
 	pg_memory_barrier();
 
+	__GpuServDebug("GPU-%d worker thread launched\n", CU_DINDEX_PER_THREAD);
+	
 	pthreadMutexLock(&gcontext->lock);
-	while (!gpuServiceGoingTerminate())
+	while (!gpuServiceGoingTerminate() && !gworker->termination)
 	{
 		XpuCommand *xcmd;
 		dlist_node *dnode;
@@ -2010,6 +2050,15 @@ gpuservGpuWorkerMain(void *__arg)
 		}
 	}
 	pthreadMutexUnlock(&gcontext->lock);
+
+	/* detach from the gpuContext */
+	pthreadMutexLock(&gcontext->worker_lock);
+	dlist_delete(&gworker->chain);
+	pthreadMutexUnlock(&gcontext->worker_lock);
+	free(gworker);
+
+	__GpuServDebug("GPU-%d worker thread launched\n", CU_DINDEX_PER_THREAD);
+
 	return NULL;
 }
 
@@ -2324,6 +2373,123 @@ gpuservSetupGpuModule(gpuContext *gcontext)
 }
 
 /*
+ * __gpuContextAdjustWorkers
+ */
+static void
+__gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
+{
+	pthread_attr_t th_attr;
+	bool		has_gpucache = false;
+	bool		needs_wakeup = false;
+	uint32_t	count = 0;
+	dlist_iter	__iter;
+
+	pthreadMutexLock(&gcontext->worker_lock);
+	dlist_foreach(__iter, &gcontext->worker_list)
+	{
+		gpuWorker *gworker = dlist_container(gpuWorker, chain, __iter.cur);
+
+		if (gworker->kind == GPUSERV_WORKER_KIND__GPUCACHE)
+		{
+			if (!gworker->termination)
+				has_gpucache = true;
+		}
+		else if (count < nworkers)
+		{
+			if (!gworker->termination)
+				count++;
+			else
+				needs_wakeup = true;
+		}
+		else
+		{
+			gworker->termination = true;
+			needs_wakeup = true;
+		}
+	}
+	pthreadMutexUnlock(&gcontext->worker_lock);
+	if (needs_wakeup)
+		pthreadCondBroadcast(&gcontext->cond);
+	if (count >= nworkers && has_gpucache)
+		return;
+
+	/* launch workers */
+	if (pthread_attr_init(&th_attr) != 0)
+		__FATAL("failed on pthread_attr_init");
+	if (pthread_attr_setdetachstate(&th_attr, PTHREAD_CREATE_DETACHED) != 0)
+		__FATAL("failed on pthread_attr_setdetachstate");
+	while (count < nworkers)
+	{
+		gpuWorker  *gworker = calloc(1, sizeof(gpuWorker));
+
+		if (!gworker)
+		{
+			elog(LOG, "out of memory");
+			break;
+		}
+		gworker->gcontext = gcontext;
+		gworker->kind = GPUSERV_WORKER_KIND__GPUTASK;
+		if ((errno = pthread_create(&gworker->worker,
+									&th_attr,
+									gpuservGpuWorkerMain,
+									gworker)) != 0)
+		{
+			elog(LOG, "failed on pthread_create: %m");
+			free(gworker);
+			break;
+		}
+		pthreadMutexLock(&gcontext->worker_lock);
+		dlist_push_tail(&gcontext->worker_list, &gworker->chain);
+		pthreadMutexUnlock(&gcontext->worker_lock);
+		count++;
+	}
+	if (!has_gpucache)
+	{
+		gpuWorker  *gworker = calloc(1, sizeof(gpuWorker));
+
+		if (!gworker)
+		{
+			elog(LOG, "out of memory");
+			return;
+		}
+		gworker->gcontext = gcontext;
+		gworker->kind = GPUSERV_WORKER_KIND__GPUCACHE;
+		if ((errno = pthread_create(&gworker->worker,
+									&th_attr,
+									gpuservGpuCacheManager,
+									gworker)) != 0)
+		{
+			elog(LOG, "failed on pthread_create: %m");
+			free(gworker);
+			return;
+		}
+		pthreadMutexLock(&gcontext->worker_lock);
+		dlist_push_tail(&gcontext->worker_list, &gworker->chain);
+		pthreadMutexUnlock(&gcontext->worker_lock);
+	}
+}
+
+static void
+__gpuContextAdjustWorkers(void)
+{
+	uint32_t    nworkers;
+	dlist_iter  iter;
+
+	nworkers = pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_num_workers);
+	if ((nworkers & 1) == 0)
+		return;		/* not updated */
+	nworkers >>= 1;
+
+	dlist_foreach(iter, &gpuserv_gpucontext_list)
+	{
+		gpuContext *gcontext = dlist_container(gpuContext, chain, iter.cur);
+
+		__gpuContextAdjustWorkersOne(gcontext, nworkers);
+	}
+	pg_atomic_fetch_and_u32(&gpuserv_shared_state->gpuserv_num_workers, ~1U);
+}
+
+/*
  * __gpuContextTerminateWorkers
  *
  * Wake up all the worker threads, and terminate them.
@@ -2333,15 +2499,24 @@ gpuservSetupGpuModule(gpuContext *gcontext)
 static void
 __gpuContextTerminateWorkers(gpuContext *gcontext)
 {
-	int		i;
-
 	gpuserv_bgworker_got_signal |= (1 << SIGHUP);
 	pg_memory_barrier();
 
-	pthreadCondBroadcast(&gcontext->cond);
-	gpucacheManagerWakeUp(gcontext->cuda_dindex);
-	for (i=0; i < gcontext->n_workers; i++)
-		pthread_join(gcontext->workers[i], NULL);
+	for (;;)
+	{
+		pthreadCondBroadcast(&gcontext->cond);
+		gpucacheManagerWakeUp(gcontext->cuda_dindex);
+
+		pthreadMutexLock(&gcontext->worker_lock);
+		if (dlist_is_empty(&gcontext->worker_list))
+		{
+			pthreadMutexUnlock(&gcontext->worker_lock);
+			break;
+		}
+		pthreadMutexUnlock(&gcontext->worker_lock);
+		/* wait 2ms */
+		pg_usleep(2000L);
+	}
 }
 
 /*
@@ -2354,12 +2529,11 @@ gpuservSetupGpuContext(int cuda_dindex)
 	gpuContext *gcontext = NULL;
 	CUresult	rc;
 	size_t		stack_sz;
-	int			i, status;
 	struct sockaddr_un addr;
 	struct epoll_event ev;
 
 	/* gpuContext allocation */
-	gcontext = calloc(1, offsetof(gpuContext, workers[pgstrom_max_async_gpu_tasks+1]));
+	gcontext = calloc(1, sizeof(gpuContext));
 	if (!gcontext)
 		elog(ERROR, "out of memory");
 	gcontext->serv_fd = -1;
@@ -2368,6 +2542,8 @@ gpuservSetupGpuContext(int cuda_dindex)
 	gpuMemoryPoolInit(&gcontext->pool_managed, true,  dattrs->DEV_TOTAL_MEMSZ);
 	pthreadMutexInit(&gcontext->client_lock);
 	dlist_init(&gcontext->client_list);
+	pthreadMutexInit(&gcontext->worker_lock);
+	dlist_init(&gcontext->worker_list);
 
 	pthreadCondInit(&gcontext->cond);
 	pthreadMutexInit(&gcontext->lock);
@@ -2413,28 +2589,8 @@ gpuservSetupGpuContext(int cuda_dindex)
 			elog(ERROR, "failed on cuCtxSetLimit: %s", cuStrError(rc));
 
 		gpuservSetupGpuModule(gcontext);
-
 		/* launch worker threads */
-		for (i=0; i < pgstrom_max_async_gpu_tasks; i++)
-		{
-			if ((status = pthread_create(&gcontext->workers[i], NULL,
-										 gpuservGpuWorkerMain, gcontext)) != 0)
-			{
-				__gpuContextTerminateWorkers(gcontext);
-				elog(ERROR, "failed on pthread_create: %s", strerror(status));
-			}
-			gcontext->n_workers++;
-		}
-		/* also, GpuCache worker */
-		if ((status = pthread_create(&gcontext->workers[gcontext->n_workers],
-									 NULL,
-									 gpuservGpuCacheManager,
-									 gcontext)) != 0)
-		{
-			__gpuContextTerminateWorkers(gcontext);
-			elog(ERROR, "failed on pthread_create: %s", strerror(status));
-		}
-		gcontext->n_workers++;
+		pg_atomic_fetch_or_u32(&gpuserv_shared_state->gpuserv_num_workers, 1);
 	}
 	PG_CATCH();
 	{
@@ -2491,6 +2647,12 @@ gpuservBgWorkerSignal(SIGNAL_ARGS)
 	errno = saved_errno;
 }
 
+static void
+gpuservBgWorkerWakeUp(SIGNAL_ARGS)
+{
+	fprintf(stderr, "signal %u received\n", postgres_signal_arg);
+}
+
 /*
  * gpuservClenupListenSocket
  */
@@ -2525,8 +2687,10 @@ gpuservBgWorkerMain(Datum arg)
 	CUresult	rc;
 	int			dindex;
 
-	pqsignal(SIGTERM, gpuservBgWorkerSignal);
-	pqsignal(SIGHUP,  gpuservBgWorkerSignal);
+	gpuserv_shared_state->gpuserv_pid = getpid();
+	pqsignal(SIGTERM, gpuservBgWorkerSignal);	/* terminate GpuServ */
+	pqsignal(SIGHUP,  gpuservBgWorkerSignal);	/* restart GpuServ */
+	pqsignal(SIGUSR2, gpuservBgWorkerWakeUp);	/* interrupt epoll_wait(2) */
 	BackgroundWorkerUnblockSignals();
 
 	/* Registration of resource cleanup handler */
@@ -2559,6 +2723,8 @@ gpuservBgWorkerMain(Datum arg)
 			if (!PostmasterIsAlive())
 				elog(FATAL, "unexpected postmaster dead");
 			CHECK_FOR_INTERRUPTS();
+			/* launch/eliminate worker threads */
+			__gpuContextAdjustWorkers();
 
 			status = epoll_wait(gpuserv_epoll_fdesc, &ep_ev, 1, 4000);
 			if (status < 0)
@@ -2568,6 +2734,8 @@ gpuservBgWorkerMain(Datum arg)
 					elog(LOG, "failed on epoll_wait: %m");
 					break;
 				}
+				else
+					elog(LOG, "EINTR");
 			}
 			else if (status > 0)
 			{
@@ -2582,6 +2750,7 @@ gpuservBgWorkerMain(Datum arg)
 	}
 	PG_CATCH();
 	{
+		gpuserv_shared_state->gpuserv_pid = 0;
 		while (!dlist_is_empty(&gpuserv_gpucontext_list))
 		{
 			dlist_node *dnode = dlist_pop_head_node(&gpuserv_gpucontext_list);
@@ -2594,6 +2763,7 @@ gpuservBgWorkerMain(Datum arg)
 	PG_END_TRY();
 
 	/* cleanup */
+	gpuserv_shared_state->gpuserv_pid = 0;
 	while (!dlist_is_empty(&gpuserv_gpucontext_list))
 	{
 		dlist_node *dnode = dlist_pop_head_node(&gpuserv_gpucontext_list);
@@ -2634,6 +2804,7 @@ pgstrom_startup_executor(void)
 	gpuserv_shared_state = ShmemInitStruct("gpuServSharedState",
 										   MAXALIGN(sizeof(gpuServSharedState)),
 										   &found);
+	memset(gpuserv_shared_state, 0, sizeof(gpuServSharedState));
 	pg_atomic_init_u32(&gpuserv_shared_state->gpuserv_num_workers,
 					   __gpuserv_num_workers_dummy);
 	pg_atomic_init_u32(&gpuserv_shared_state->gpuserv_debug_output,

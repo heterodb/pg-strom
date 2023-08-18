@@ -67,6 +67,7 @@
 #include "foreign/foreign.h"
 #include "funcapi.h"
 #include "libpq/pqformat.h"
+#include "libpq/pqsignal.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/extensible.h"
