@@ -721,21 +721,10 @@ extern bool		pgstrom_init_gpu_device(void);
 /*
  * gpu_service.c
  */
-struct gpuClient
-{
-	struct gpuContext *gcontext;/* per-device status */
-	dlist_node		chain;		/* gcontext->client_list */
-	kern_session_info *session;	/* per session info (on cuda managed memory) */
-	struct gpuQueryBuffer *gq_buf; /* per query join/preagg device buffer */
-	pg_atomic_uint32 refcnt;	/* odd number, if error status */
-	pthread_mutex_t	mutex;		/* mutex to write the socket */
-	int				sockfd;		/* connection to PG backend */
-	pthread_t		worker;		/* receiver thread */
-};
+typedef struct gpuContext	gpuContext;
 typedef struct gpuClient	gpuClient;
 
-extern int		pgstrom_max_async_gpu_tasks;	/* GUC */
-extern bool		pgstrom_load_gpu_debug_module;	/* GUC */
+extern int		pgstrom_max_async_tasks(void);
 extern const char *cuStrError(CUresult rc);
 extern bool		gpuServiceGoingTerminate(void);
 extern void		gpuservBgWorkerMain(Datum arg);
@@ -940,7 +929,6 @@ extern Path	   *pgstrom_copy_pathnode(const Path *pathnode);
 extern bool		pgstrom_enabled;
 extern bool		pgstrom_cpu_fallback_enabled;
 extern bool		pgstrom_regression_test_mode;
-extern int		pgstrom_max_async_tasks;
 extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);
 extern void		_PG_init(void);
 

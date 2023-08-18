@@ -17,7 +17,6 @@ PG_MODULE_MAGIC;
 bool		pgstrom_enabled;				/* GUC */
 bool		pgstrom_cpu_fallback_enabled;	/* GUC */
 bool		pgstrom_regression_test_mode;	/* GUC */
-int			pgstrom_max_async_tasks;		/* GUC */
 long		PAGE_SIZE;
 long		PAGE_MASK;
 int			PAGE_SHIFT;
@@ -95,16 +94,6 @@ pgstrom_init_gucs(void)
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.max_async_tasks",
-							"Limit of conccurent execution at the xPU devices",
-							NULL,
-							&pgstrom_max_async_tasks,
-							7,
-							1,
-							255,
-							PGC_SUSET,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
 }
 
 /* --------------------------------------------------------------------------------

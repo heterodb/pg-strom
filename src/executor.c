@@ -826,6 +826,7 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 	struct iovec	xcmd_iov[10];
 	int				xcmd_iovcnt;
 	int				ev;
+	int				max_async_tasks = pgstrom_max_async_tasks();
 
 	while (!pts->scan_done)
 	{
@@ -847,10 +848,9 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 							 conn->errorbuf.funcname)));
 		}
 
-		if ((conn->num_running_cmds +
-			 conn->num_ready_cmds) < pgstrom_max_async_tasks &&
+		if ((conn->num_running_cmds + conn->num_ready_cmds) < max_async_tasks &&
 			(dlist_is_empty(&conn->ready_cmds_list) ||
-			 conn->num_running_cmds < pgstrom_max_async_tasks / 2))
+			 conn->num_running_cmds < max_async_tasks / 2))
 		{
 			/*
 			 * xPU service still has margin to enqueue new commands.

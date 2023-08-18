@@ -48,7 +48,18 @@ struct gpuContext
 	pthread_mutex_t	lock;
 	dlist_head		command_list;
 };
-typedef struct gpuContext	gpuContext;
+
+struct gpuClient
+{
+	struct gpuContext *gcontext;/* per-device status */
+	dlist_node		chain;		/* gcontext->client_list */
+	kern_session_info *session;	/* per session info (on cuda managed memory) */
+	struct gpuQueryBuffer *gq_buf; /* per query join/preagg device buffer */
+	pg_atomic_uint32 refcnt;	/* odd number, if error status */
+	pthread_mutex_t	mutex;		/* mutex to write the socket */
+	int				sockfd;		/* connection to PG backend */
+	pthread_t		worker;		/* receiver thread */
+};
 
 #define GPUSERV_WORKER_KIND__GPUTASK		't'
 #define GPUSERV_WORKER_KIND__GPUCACHE		'c'
@@ -71,7 +82,7 @@ typedef struct
 typedef struct
 {
 	volatile pid_t		gpuserv_pid;
-	pg_atomic_uint32	gpuserv_num_workers;
+	pg_atomic_uint32	max_async_tasks;
 	pg_atomic_uint32	gpuserv_debug_output;
 } gpuServSharedState;
 
@@ -90,7 +101,7 @@ static int				gpuserv_epoll_fdesc = -1;
 static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static gpuServSharedState *gpuserv_shared_state = NULL;
-static int				__gpuserv_num_workers_dummy;
+static int				__pgstrom_max_async_tasks_dummy;
 static bool				__gpuserv_debug_output_dummy;
 
 #define __GpuServDebug(fmt,...)											\
@@ -134,32 +145,39 @@ gpuserv_debug_output_show(void)
 }
 
 static void
-gpuserv_num_workers_assign(int newval, void *extra)
+pgstrom_max_async_tasks_assign(int newval, void *extra)
 {
-	uint32_t	nworkers = ((newval << 1) | 1U);
+	uint32_t	max_async_tasks = ((newval << 1) | 1U);
 
 	if (gpuserv_shared_state)
 	{
 		pid_t	gpuserv_pid = gpuserv_shared_state->gpuserv_pid;
 
-		pg_atomic_write_u32(&gpuserv_shared_state->gpuserv_num_workers, nworkers);
+		pg_atomic_write_u32(&gpuserv_shared_state->max_async_tasks, max_async_tasks);
 		if (gpuserv_pid != 0)
 			kill(gpuserv_pid, SIGUSR2);
 	}
 	else
-		__gpuserv_num_workers_dummy = nworkers;
+		__pgstrom_max_async_tasks_dummy = max_async_tasks;
+}
+
+int
+pgstrom_max_async_tasks(void)
+{
+	uint32_t	max_async_tasks;
+
+	if (gpuserv_shared_state)
+		max_async_tasks = pg_atomic_read_u32(&gpuserv_shared_state->max_async_tasks);
+	else
+		max_async_tasks = __pgstrom_max_async_tasks_dummy;
+
+	return (max_async_tasks >> 1);
 }
 
 static const char *
-gpuserv_num_workers_show(void)
+pgstrom_max_async_tasks_show(void)
 {
-	uint32_t	nworkers;
-
-	if (gpuserv_shared_state)
-		nworkers = pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_num_workers);
-	else
-		nworkers = __gpuserv_num_workers_dummy;
-	return psprintf("%u", (nworkers>>1));
+	return psprintf("%u", pgstrom_max_async_tasks());
 }
 
 /*
@@ -2472,13 +2490,14 @@ __gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
 static void
 __gpuContextAdjustWorkers(void)
 {
-	uint32_t    nworkers;
+	uint32_t	max_async_tasks;
+	uint32_t	nworkers;
 	dlist_iter  iter;
 
-	nworkers = pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_num_workers);
-	if ((nworkers & 1) == 0)
+	max_async_tasks = pg_atomic_read_u32(&gpuserv_shared_state->max_async_tasks);
+	if ((max_async_tasks & 1) == 0)
 		return;		/* not updated */
-	nworkers >>= 1;
+	nworkers = (max_async_tasks >> 1) * 3;
 
 	dlist_foreach(iter, &gpuserv_gpucontext_list)
 	{
@@ -2486,7 +2505,7 @@ __gpuContextAdjustWorkers(void)
 
 		__gpuContextAdjustWorkersOne(gcontext, nworkers);
 	}
-	pg_atomic_fetch_and_u32(&gpuserv_shared_state->gpuserv_num_workers, ~1U);
+	pg_atomic_fetch_and_u32(&gpuserv_shared_state->max_async_tasks, ~1U);
 }
 
 /*
@@ -2590,7 +2609,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 
 		gpuservSetupGpuModule(gcontext);
 		/* launch worker threads */
-		pg_atomic_fetch_or_u32(&gpuserv_shared_state->gpuserv_num_workers, 1);
+		pg_atomic_fetch_or_u32(&gpuserv_shared_state->max_async_tasks, 1);
 	}
 	PG_CATCH();
 	{
@@ -2734,8 +2753,6 @@ gpuservBgWorkerMain(Datum arg)
 					elog(LOG, "failed on epoll_wait: %m");
 					break;
 				}
-				else
-					elog(LOG, "EINTR");
 			}
 			else if (status > 0)
 			{
@@ -2805,8 +2822,8 @@ pgstrom_startup_executor(void)
 										   MAXALIGN(sizeof(gpuServSharedState)),
 										   &found);
 	memset(gpuserv_shared_state, 0, sizeof(gpuServSharedState));
-	pg_atomic_init_u32(&gpuserv_shared_state->gpuserv_num_workers,
-					   __gpuserv_num_workers_dummy);
+	pg_atomic_init_u32(&gpuserv_shared_state->max_async_tasks,
+					   __pgstrom_max_async_tasks_dummy);
 	pg_atomic_init_u32(&gpuserv_shared_state->gpuserv_debug_output,
 					   __gpuserv_debug_output_dummy);
 }
@@ -2870,18 +2887,18 @@ pgstrom_init_gpu_service(void)
 							PGC_SIGHUP,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MS | GUC_NO_SHOW_ALL,
 							NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.gpuserv_num_workers",
-							"number of GPU service worker threads per GPU device",
+	DefineCustomIntVariable("pg_strom.max_async_tasks",
+							"Limit of concurrent xPU task execution",
 							NULL,
-							&__gpuserv_num_workers_dummy,
+							&__pgstrom_max_async_tasks_dummy,
 							12,
 							1,
 							256,
 							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
 							NULL,
-							gpuserv_num_workers_assign,
-							gpuserv_num_workers_show);
+							pgstrom_max_async_tasks_assign,
+							pgstrom_max_async_tasks_show);
 	DefineCustomBoolVariable("pg_strom.gpuserv_debug_output",
 							 "enables to generate debug message of GPU service",
 							 NULL,
