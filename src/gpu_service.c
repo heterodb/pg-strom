@@ -2669,7 +2669,7 @@ gpuservBgWorkerSignal(SIGNAL_ARGS)
 static void
 gpuservBgWorkerWakeUp(SIGNAL_ARGS)
 {
-	fprintf(stderr, "signal %u received\n", postgres_signal_arg);
+	/* nothing to do */
 }
 
 /*
