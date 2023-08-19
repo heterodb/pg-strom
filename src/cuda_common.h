@@ -244,7 +244,7 @@ typedef struct {
 								 (kgtask)->kvars_ndims,					\
 								 (kgtask)->kvars_nbytes,				\
 								 get_global_size()) +					\
-	  sizeof(uint32_t) * (kgtask)->n_rels * get_global_id()))
+	  sizeof(uint32_t) * (kgtask)->kvars_ndims * get_global_id()))
 #define KERN_GPUTASK_MATCHED_ARRAY(kgtask)								\
 	((kgtask)->n_rels == 0 ? NULL : (bool *)							\
 	 ((char *)(kgtask) +												\
