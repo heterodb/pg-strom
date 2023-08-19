@@ -1298,6 +1298,9 @@ prepend_partial_groupby_custompath(xpugroupby_build_path_context *con)
 	{
 		elog(ERROR, "Bug? unexpected task_kind: %08x", pp_info->xpu_task_flags);
 	}
+	pp_info->xpu_task_flags &= ~DEVTASK__MASK;
+	pp_info->xpu_task_flags |= DEVTASK__PREAGG;
+
 	/* No tuples shall be generated until child JOIN/SCAN path completion */
 	startup_cost = (PP_INFO_STARTUP_COST(pp_info) +
 					PP_INFO_RUN_COST(pp_info));
