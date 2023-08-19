@@ -84,7 +84,6 @@ typedef struct
 	volatile pid_t		gpuserv_pid;
 	pg_atomic_uint32	max_async_tasks;
 	pg_atomic_uint32	gpuserv_debug_output;
-	pg_atomic_uint32	enable_coredump;
 } gpuServSharedState;
 
 /*
@@ -104,7 +103,6 @@ static shmem_startup_hook_type shmem_startup_next = NULL;
 static gpuServSharedState *gpuserv_shared_state = NULL;
 static int				__pgstrom_max_async_tasks_dummy;
 static bool				__gpuserv_debug_output_dummy;
-static bool				__gpuserv_enable_coredump;
 
 #define __GpuServDebug(fmt,...)											\
 	do {																\
@@ -180,64 +178,6 @@ static const char *
 pgstrom_max_async_tasks_show(void)
 {
 	return psprintf("%u", pgstrom_max_async_tasks());
-}
-
-static void
-gpuserv_enable_coredump_assign(bool newval, void *extra)
-{
-	if (gpuserv_shared_state)
-	{
-		pid_t	gpuserv_pid = gpuserv_shared_state->gpuserv_pid;
-
-		pg_atomic_write_u32(&gpuserv_shared_state->enable_coredump, !newval ? 0 : 1);
-		if (gpuserv_pid != 0)
-			kill(gpuserv_pid, SIGUSR2);
-	}
-	else
-	{
-		__gpuserv_enable_coredump = newval;
-	}
-}
-
-static const char *
-gpuserv_enable_coredump_show(void)
-{
-	bool	bval;
-
-	if (gpuserv_shared_state)
-		bval = (pg_atomic_read_u32(&gpuserv_shared_state->enable_coredump) != 0);
-	else
-		bval = __gpuserv_enable_coredump;
-	return (bval ? "on" : "off");
-}
-
-static void
-gpuserv_enable_coredump_setenv(void)
-{
-	static int		last_enable_coredump = -1;
-	uint32_t		curr_enable_coredump;
-	const char	   *envname = "CUDA_ENABLE_COREDUMP_ON_EXCEPTION";
-
-	curr_enable_coredump = pg_atomic_read_u32(&gpuserv_shared_state->enable_coredump);
-	if (last_enable_coredump < 0 ||
-		last_enable_coredump != curr_enable_coredump)
-	{
-		if (curr_enable_coredump == 0)
-		{
-			if (unsetenv(envname) != 0)
-				elog(LOG, "failed on unsetenv('%s'): %m", envname);
-			else if (last_enable_coredump >= 0)
-				elog(LOG, "gpuserv: unset('%s')", envname);
-		}
-		else
-		{
-			if (setenv(envname, "1", 1) != 0)
-				elog(LOG, "failed on setenv('%s'): %m", envname);
-			else
-				elog(LOG, "gpuserv: setenv('%s=1')", envname);
-		}
-	}
-	last_enable_coredump = curr_enable_coredump;
 }
 
 /*
@@ -2802,11 +2742,8 @@ gpuservBgWorkerMain(Datum arg)
 			if (!PostmasterIsAlive())
 				elog(FATAL, "unexpected postmaster dead");
 			CHECK_FOR_INTERRUPTS();
-			/*
-			 * some maintenance works
-			 */
+			/* launch/eliminate worker threads */
 			__gpuContextAdjustWorkers();
-			gpuserv_enable_coredump_setenv();
 
 			status = epoll_wait(gpuserv_epoll_fdesc, &ep_ev, 1, 4000);
 			if (status < 0)
@@ -2889,8 +2826,6 @@ pgstrom_startup_executor(void)
 					   __pgstrom_max_async_tasks_dummy);
 	pg_atomic_init_u32(&gpuserv_shared_state->gpuserv_debug_output,
 					   __gpuserv_debug_output_dummy);
-	pg_atomic_init_u32(&gpuserv_shared_state->enable_coredump,
-					   __gpuserv_enable_coredump ? 1 : 0);
 }
 
 /*
@@ -2965,26 +2900,15 @@ pgstrom_init_gpu_service(void)
 							pgstrom_max_async_tasks_assign,
 							pgstrom_max_async_tasks_show);
 	DefineCustomBoolVariable("pg_strom.gpuserv_debug_output",
-							 "(DEBUG) enables to generate debug message of GPU service",
+							 "enables to generate debug message of GPU service",
 							 NULL,
 							 &__gpuserv_debug_output_dummy,
 							 false,
 							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY,
+							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
 							 NULL,
 							 gpuserv_debug_output_assign,
 							 gpuserv_debug_output_show);
-	DefineCustomBoolVariable("pg_strom.gpuserv_enable_coredump",
-							 "(DEBUG) enables CUDA_ENABLE_COREDUMP_ON_EXCEPTION",
-							 NULL,
-							 &__gpuserv_enable_coredump,
-							 false,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY,
-							 NULL,
-							 gpuserv_enable_coredump_assign,
-							 gpuserv_enable_coredump_show);
-
 	for (int i=0; i < GPU_QUERY_BUFFER_NSLOTS; i++)
 		dlist_init(&gpu_query_buffer_hslot[i]);
 
