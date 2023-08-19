@@ -597,6 +597,15 @@ buildOuterJoinPlanInfo(PlannerInfo *root,
 		{
 			Path   *path = lfirst(lc);
 
+			if (IsA(path, ProjectionPath))
+			{
+				Assert(path->pathtype == T_Result);
+				path = ((ProjectionPath *)path)->subpath;
+			}
+			//
+			// TODO: Put AppendPath check to support partition-wise
+			// GpuJoin.
+			//
 			if ((pp_prev = try_fetch_xpuscan_planinfo(path)) != NULL ||
 				(pp_prev = try_fetch_xpujoin_planinfo(path)) != NULL)
 			{
