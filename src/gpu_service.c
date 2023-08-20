@@ -11,6 +11,7 @@
  */
 #include "pg_strom.h"
 #include "cuda_common.h"
+#include <cudaProfiler.h>
 /*
  * gpuContext / gpuMemory
  */
@@ -37,6 +38,7 @@ struct gpuContext
 	xpu_encode_info *cuda_encode_catalog;
 	gpuMemoryPool	pool_raw;
 	gpuMemoryPool	pool_managed;
+	bool			cuda_profiler_started;
 	/* GPU client */
 	pthread_mutex_t	client_lock;
 	dlist_head		client_list;
@@ -2608,6 +2610,15 @@ gpuservSetupGpuContext(int cuda_dindex)
 			elog(ERROR, "failed on cuCtxSetLimit: %s", cuStrError(rc));
 
 		gpuservSetupGpuModule(gcontext);
+		/* enable kernel profiling if captured */
+		if (getenv("NSYS_PROFILING_SESSION_ID") != NULL)
+		{
+			rc = cuProfilerStart();
+			if (rc != CUDA_SUCCESS)
+				elog(LOG, "failed on cuProfilerStart: %s", cuStrError(rc));
+			else
+				gcontext->cuda_profiler_started = true;
+		}
 		/* launch worker threads */
 		pg_atomic_fetch_or_u32(&gpuserv_shared_state->max_async_tasks, 1);
 	}
@@ -2644,6 +2655,12 @@ gpuservCleanupGpuContext(gpuContext *gcontext)
 	}
 	if (close(gcontext->serv_fd) != 0)
 		elog(LOG, "failed on close(serv_fd): %m");
+	if (gcontext->cuda_profiler_started)
+	{
+		rc = cuProfilerStop();
+		if (rc != CUDA_SUCCESS)
+			elog(LOG, "failed on cuProfilerStop: %s", cuStrError(rc));
+	}
 	rc = cuCtxDestroy(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 		elog(LOG, "failed on cuCtxDestroy: %s", cuStrError(rc));
