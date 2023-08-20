@@ -760,9 +760,9 @@ kern_gpujoin_main(kern_session_info *session,
 			smx_row_count = 0;
 		depth = 0;
 		if (l_state)
-			memset(l_state, 0, sizeof(void *) * kcxt->kvars_nslots);
+			memset(l_state, 0, sizeof(uint32_t) * kgtask->kvars_ndims);
 		if (matched)
-			memset(matched, 0, sizeof(bool)   * kcxt->kvars_nslots);
+			memset(matched, 0, sizeof(bool)     * kgtask->kvars_ndims);
 	}
 	__syncthreads();
 
