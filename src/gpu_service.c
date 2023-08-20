@@ -1673,7 +1673,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 		goto bailout;
 	}
 	kgtask = (kern_gputask *)t_chunk->m_devptr;
-	memset(kgtask, 0, offsetof(kern_gputask, stats[0]));
+	memset(kgtask, 0, offsetof(kern_gputask, stats[num_inner_rels]));
 	kgtask->grid_sz  = grid_sz;
 	kgtask->block_sz = block_sz;
 	kgtask->kvars_nslots = session->kcxt_kvars_nslots;
