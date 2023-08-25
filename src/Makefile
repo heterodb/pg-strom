@@ -10,8 +10,14 @@ endif
 #
 # PG-Strom version
 #
-PGSTROM_VERSION := 5.0
-PGSTROM_RELEASE := devel
+VERSION ?= 5.0
+RELEASE ?= devel
+ifeq ($(shell echo $(RELEASE) | grep -E '^[0-9]+$$'),)
+__PGSTROM_TGZ := pg_strom-$(VERSION)$(RELEASE)
+else
+__PGSTROM_TGZ := pg_strom-$(VERSION).$(RELEASE)
+endif
+PGSTROM_TGZ := $(__PGSTROM_TGZ).tgz
 
 #
 # Source of PG-Strom host code
@@ -52,21 +58,11 @@ STROM_SQL = $(addprefix $(STROM_BUILD_ROOT)/sql/,$(__STROM_SQL))
 #
 # GitHash to build
 #
-ifdef PGSTROM_GITHASH
-ifeq ($(PGSTROM_GITHASH),HEAD)
-PGSTROM_GITHASH = $(shell git rev-parse HEAD)
-endif
-else
-ifeq ($(shell test -e $(STROM_BUILD_ROOT)/.git/config && echo -n 1),1)
-PGSTROM_GITHASH = $(shell git rev-parse HEAD)
+ifeq ($(PGSTROM_GITHASH),)
+PGSTROM_GITHASH := $(shell git rev-parse HEAD 2>/dev/null)
+ifneq ($(PGSTROM_GITHASH),)
 ifneq ($(shell git diff | wc -l),0)
-PGSTROM_GITHASH_SUFFIX = ::local_changes
-endif
-else
-ifeq ($(shell test -e $(STROM_BUILD_ROOT)/GITHASH && echo -n 1),1)
-PGSTROM_GITHASH = $(shell cat $(STROM_BUILD_ROOT)/GITHASH)
-else
-PGSTROM_GITHASH = HEAD
+PGSTROM_GITHASH := $(PGSTROM_GITHASH)::local_changes
 endif
 endif
 endif
@@ -86,7 +82,9 @@ PGSTROM_FLAGS += -D__STROM_HOST__=1
 ifeq ($(shell uname -m),aarch64)
 PGSTROM_FLAGS += -DHAVE_FLOAT2 -mfp16-format=ieee
 endif
-PGSTROM_FLAGS += -DPGSTROM_GITHASH=\"$(PGSTROM_GITHASH)$(PGSTROM_GITHASH_SUFFIX)\"
+ifneq ($(PGSTROM_GITHASH),)
+PGSTROM_FLAGS += -DPGSTROM_GITHASH=\"$(PGSTROM_GITHASH)\"
+endif
 PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"
 PGSTROM_FLAGS += -DCUDA_MAXREGCOUNT=$(MAXREGCOUNT)
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
@@ -102,7 +100,7 @@ MODULEDIR  = pg_strom
 DATA = $(STROM_SQL)
 OBJS = $(STROM_OBJS)
 DATA_built = $(CUDA_OPT_OBJS)
-EXTRA_CLEAN = $(DATA_built) $(GENERATED-HEADERS)
+EXTRA_CLEAN = $(DATA_built) $(GENERATED-HEADERS) ../$(PGSTROM_TGZ)
 EXTENSION = pg_strom
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -128,3 +126,11 @@ $(GPU_DEVATTRS_H): $(CUDA_IPATH)/cuda.h
 #
 %.fatbin: %.cu $(CUDA_HEADERS)
 	$(NVCC) $(NVCC_FLAGS) -o $@ $<
+
+#
+# Tarball
+#
+tarball:
+	cd .. && git archive --format=tar.gz \
+	                     --prefix=$(__PGSTROM_TGZ)/ \
+	                      -o $(PGSTROM_TGZ) HEAD src
