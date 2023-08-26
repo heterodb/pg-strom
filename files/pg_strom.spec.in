@@ -1,5 +1,3 @@
-%define PGSQL_PKGVER	%(echo @@PGSQL_VERSION@@ | sed 's/[^0-9]//g')
-
 Name: pg_strom-PG@@PGSQL_VERSION@@
 Version: @@STROM_VERSION@@
 Release: @@STROM_RELEASE@@%{?dist}

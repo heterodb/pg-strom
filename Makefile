@@ -3,7 +3,7 @@
 # Makefile for packaging
 #
 # ----------------------------------------
-include VERSION
+include Makefile.common
 
 __PGSTROM_TGZ := pg_strom-$(PGSTROM_VERSION)
 PGSTROM_TGZ   := $(__PGSTROM_TGZ).tar.gz
@@ -17,7 +17,8 @@ all: rpm
 tarball:
 	git archive --format=tar.gz \
 	            --prefix=$(__PGSTROM_TGZ)/ \
-	            -o $(PGSTROM_TGZ) HEAD src
+	            -o $(PGSTROM_TGZ) $(GITHASH) \
+	            src arrow-tools LICENSE VERSION
 
 rpm: tarball
 	cp -f $(PGSTROM_TGZ) $(__SOURCEDIR) || exit 1
