@@ -6,18 +6,7 @@ PG_CONFIG ?= pg_config
 ifndef STROM_BUILD_ROOT
 STROM_BUILD_ROOT=.
 endif
-
-#
-# PG-Strom version
-#
-VERSION ?= 5.0
-RELEASE ?= devel
-ifeq ($(shell echo $(RELEASE) | grep -E '^[0-9]+$$'),)
-__PGSTROM_TGZ := pg_strom-$(VERSION)$(RELEASE)
-else
-__PGSTROM_TGZ := pg_strom-$(VERSION).$(RELEASE)
-endif
-PGSTROM_TGZ := $(__PGSTROM_TGZ).tgz
+include VERSION
 
 #
 # Source of PG-Strom host code
@@ -54,18 +43,6 @@ CUDA_OPT_MODULE = $(STROM_BUILD_ROOT)/pgstrom-core.fatbin
 #
 __STROM_SQL = pg_strom--5.0.sql
 STROM_SQL = $(addprefix $(STROM_BUILD_ROOT)/sql/,$(__STROM_SQL))
-
-#
-# GitHash to build
-#
-ifeq ($(PGSTROM_GITHASH),)
-PGSTROM_GITHASH := $(shell git rev-parse HEAD 2>/dev/null)
-ifneq ($(PGSTROM_GITHASH),)
-ifneq ($(shell git diff | wc -l),0)
-PGSTROM_GITHASH := $(PGSTROM_GITHASH)::local_changes
-endif
-endif
-endif
 
 #
 # Flags to build
@@ -126,11 +103,3 @@ $(GPU_DEVATTRS_H): $(CUDA_IPATH)/cuda.h
 #
 %.fatbin: %.cu $(CUDA_HEADERS)
 	$(NVCC) $(NVCC_FLAGS) -o $@ $<
-
-#
-# Tarball
-#
-tarball:
-	cd .. && git archive --format=tar.gz \
-	                     --prefix=$(__PGSTROM_TGZ)/ \
-	                      -o $(PGSTROM_TGZ) HEAD src

@@ -357,10 +357,16 @@ _PG_init(void)
 	pgstrom_init_arrow_fdw();
 	pgstrom_init_executor();
 	/* dump version number */
-	elog(LOG, "PG-Strom version %s built for PostgreSQL %s (git: %s)",
-		 PGSTROM_VERSION,
-		 PG_MAJORVERSION,
-		 PGSTROM_GITHASH);
+	elog(LOG, "PG-Strom version %s built for PostgreSQL %s"
+#ifdef PGSTROM_GITHASH
+		 " (githash: %s)"
+#endif
+		 ,PGSTROM_VERSION
+		 ,PG_MAJORVERSION
+#ifdef PGSTROM_GITHASH
+		 ,PGSTROM_GITHASH
+#endif
+		);
 	/* init GPU related stuff */
 	if (pgstrom_init_gpu_device())
 	{
