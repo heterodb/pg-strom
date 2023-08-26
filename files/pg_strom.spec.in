@@ -24,6 +24,7 @@ AutoReqProv: no
 %define __pkgsharedir   %(%{__pg_config} --sharedir)
 %define __cuda_path     /usr/local/cuda
 %define __systemd_conf  %{_sysconfdir}/systemd/system/postgresql-@@PGSQL_VERSION@@.service.d/pg_strom.conf
+%define __githash		@@PGSTROM_GITHASH@@
 
 %description
 PG-Strom is an extension for PostgreSQL, to accelerate large data processing
@@ -35,7 +36,7 @@ This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
 
 %build
 rm -rf %{buildroot}
-%{__make} -j 8 CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config}
+%{__make} -j 12 CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} GITHASH=%{__githash}
 
 %install
 rm -rf %{buildroot}
@@ -45,21 +46,9 @@ rm -rf %{buildroot}
 %clean
 rm -rf %{buildroot}
 
-%post
-ldconfig
-%{_sbindir}/update-alternatives --install %{_bindir}/gpuinfo    pgsql-gpuinfo    %{__pkgbindir}/gpuinfo  @@PGSQL_VERSION@@0
-%{_sbindir}/update-alternatives --install %{_bindir}/dbgen-ssbm pgsql-dbgen-ssbm %{__pkgbindir}/dbgen-ssbm @@PGSQL_VERSION@@0
-
-%postun
-ldconfig
-if [ "$1" -eq 0 ]; then
-    %{_sbindir}/update-alternatives --remove pgsql-gpuinfo    %{__pkgbindir}/gpuinfo
-    %{_sbindir}/update-alternatives --remove pgsql-dbgen-ssbm %{__pkgbindir}/dbgen-ssbm
-fi
-
 %files
 %defattr(-,root,root,-)
-%doc LICENSE README.md
+%doc LICENSE
 %{__pkglibdir}/pg_strom.so
 %{__pkgbindir}/gpuinfo
 %{__pkgbindir}/dbgen-ssbm

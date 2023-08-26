@@ -26,7 +26,7 @@ rpm: tarball
 	git show --format=raw $(GITHASH):files/pg_strom.spec.in | \
 		sed -e "s/@@STROM_VERSION@@/$(VERSION)/g"			\
 		    -e "s/@@STROM_RELEASE@@/$(RELEASE)/g"			\
-		    -e "s/@@STROM_TARBALL@@/$(PGSTROM_TGZ)/g"		\
+		    -e "s/@@STROM_TARBALL@@/$(__PGSTROM_TGZ)/g"		\
 		    -e "s/@@PGSTROM_GITHASH@@/$(GITHASH)/g"			\
 		    -e "s/@@PGSQL_VERSION@@/$(PG_MAJORVERSION)/g" >	\
 		$(__SPECDIR)/pg_strom-PG$(PG_MAJORVERSION).spec
