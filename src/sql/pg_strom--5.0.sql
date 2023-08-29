@@ -2907,6 +2907,16 @@ CREATE FUNCTION pgstrom.psum(float8)
   AS 'MODULE_PATHNAME','pgstrom_partial_sum_asis'
   LANGUAGE C STRICT PARALLEL SAFE;
 
+CREATE FUNCTION pgstrom.psum(money)
+  RETURNS int8
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_asis'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.int8_as_money(int8)
+  RETURNS money
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_asis'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
 -- bigint --> bigint
 CREATE AGGREGATE pgstrom.sum(int8)
 (
@@ -2949,7 +2959,7 @@ CREATE AGGREGATE pgstrom.sum_cash(int8)
 (
   sfunc = pg_catalog.int8pl,
   stype = int8,
-  finalfunc = pg_catalog.money,
+  finalfunc = pgstrom.int8_as_money,
   initcond = 0,
   parallel = safe
 );

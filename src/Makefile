@@ -30,7 +30,8 @@ CUDA_OBJS = $(addsuffix .fatbin,$(__CUDA_OBJS))
 #
 # Installation Scripts
 #
-STROM_SQL = pg_strom--5.0.sql
+__STROM_SQL = pg_strom--5.0.sql
+STROM_SQL = $(addprefix sql/,$(__STROM_SQL))
 
 #
 # Flags to build
