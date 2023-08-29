@@ -94,8 +94,9 @@ typedef struct
 	/* current status */
 #define GCACHE_PHASE__NOT_BUILT			0	/* not built yet */
 #define GCACHE_PHASE__IS_EMPTY			1	/* not initial loaded */
-#define GCACHE_PHASE__IS_READY			2	/* now ready */
-#define GCACHE_PHASE__IS_CORRUPTED		3	/* corrupted */
+#define GCACHE_PHASE__IS_LOADING		2	/* now initial loading */
+#define GCACHE_PHASE__IS_READY			3	/* now ready */
+#define GCACHE_PHASE__IS_CORRUPTED		4	/* corrupted */
 	pg_atomic_uint32 phase;
 
 	/* device memory allocation (just for information) */
@@ -730,59 +731,6 @@ gpuCacheTableSignatureInvalidation(Oid table_oid)
 				&table_oid, HASH_REMOVE, NULL);
 }
 
-/*
- * baseRelHasGpuCache
- */
-int
-baseRelHasGpuCache(PlannerInfo *root, RelOptInfo *baserel)
-{
-	RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
-	int		cuda_dindex = -1;
-
-	if (rte->rtekind == RTE_RELATION &&
-		(baserel->reloptkind == RELOPT_BASEREL ||
-		 baserel->reloptkind == RELOPT_OTHER_MEMBER_REL))
-	{
-		GpuCacheTableSignatureCache *entry;
-		Relation	rel;
-		bool		found;
-
-		entry = hash_search(gcache_signatures_htab,
-							&rte->relid, HASH_ENTER, &found);
-		if (!found)
-		{
-			PG_TRY();
-			{
-				rel = table_open(rte->relid, NoLock);
-				__gpuCacheTableSignature(rel, entry);
-				table_close(rel, NoLock);
-			}
-			PG_CATCH();
-			{
-				hash_search(gcache_signatures_htab,
-							&rte->relid, HASH_REMOVE, NULL);
-				PG_RE_THROW();
-			}
-			PG_END_TRY();
-		}
-		Assert(entry->table_oid == rte->relid);
-
-		cuda_dindex = entry->gc_options.cuda_dindex;
-	}
-	return (pgstrom_enable_gpucache ? cuda_dindex : -1);
-}
-
-/*
- * RelationHasGpuCache
- */
-bool
-RelationHasGpuCache(Relation rel)
-{
-	if (pgstrom_enable_gpucache)
-		return (gpuCacheTableSignature(rel,NULL) != 0UL);
-	return false;
-}
-
 /* ------------------------------------------------------------
  *
  * Routines to manage GpuCacheSharedState
@@ -952,6 +900,7 @@ __openGpuCacheSharedState(Oid database_oid,
 		uint32_t	phase = pg_atomic_read_u32(&gc_sstate->phase);
 
 		if (phase == GCACHE_PHASE__IS_EMPTY ||
+			phase == GCACHE_PHASE__IS_LOADING ||
 			phase == GCACHE_PHASE__IS_READY)
 			break;
 		else if (phase == GCACHE_PHASE__IS_CORRUPTED)
@@ -1213,7 +1162,6 @@ getGpuCacheLocalMappingIfExist(Oid database_oid,
 										table_oid,
 										signature,
 										errbuf, sizeof(errbuf));
-
 	pthreadMutexUnlock(&gcache_shared_mapping_lock);
 	if (!gc_lmap)
 		elog(ERROR, "%s: %s", __FUNCTION__, errbuf);
@@ -1377,7 +1325,14 @@ __allocGpuCacheRowId(GpuCacheLocalMapping *gc_lmap, const ItemPointer ctid)
 	}
 	else
 	{
+		uint32_t	phase;
+
 		Assert(rowid == UINT_MAX);
+		phase = pg_atomic_exchange_u32(&gc_sstate->phase,
+									   GCACHE_PHASE__IS_CORRUPTED);
+		if (phase != GCACHE_PHASE__IS_CORRUPTED)
+			elog(WARNING, "gpucache: rowid exceeds max_num_rows (%lu), so it is now switched to 'corrupted' state",
+				 gc_sstate->gc_options.max_num_rows);
 	}
 	pthreadMutexUnlock(&gc_sstate->rowid_mutex);
 
@@ -1391,9 +1346,14 @@ __lookupGpuCacheRowId(GpuCacheLocalMapping *gc_lmap, const ItemPointer ctid)
 	uint32_t   *hslot = gpuCacheRowIdHashSlot(gc_sstate);
 	GpuCacheRowIdItem *rowitems = gpuCacheRowIdItemArray(gc_sstate);
 	uint32_t	hash, rowid;
+	uint32_t	phase;
 
+	phase = pg_atomic_read_u32(&gc_sstate->phase);
+	if (phase == GCACHE_PHASE__IS_CORRUPTED)
+		return UINT_MAX;
+
+	/* Lookup the hash slot */
 	hash = hash_bytes((unsigned char *)ctid, sizeof(ItemPointerData));
-
 	pthreadMutexLock(&gc_sstate->rowid_mutex);
 	rowid = hslot[hash % gc_sstate->gc_options.rowid_hash_nslots];
 	while (rowid < gc_sstate->gc_options.max_num_rows)
@@ -1401,15 +1361,25 @@ __lookupGpuCacheRowId(GpuCacheLocalMapping *gc_lmap, const ItemPointer ctid)
 		GpuCacheRowIdItem *ritem = &rowitems[rowid];
 
 		if (ItemPointerEquals(&ritem->ctid, ctid))
-			break;
+		{
+			pthreadMutexUnlock(&gc_sstate->rowid_mutex);
+			return rowid;
+		}
 		rowid = ritem->next;
 	}
 	pthreadMutexUnlock(&gc_sstate->rowid_mutex);
-
-	return rowid;
+	/* not found */
+	phase = pg_atomic_exchange_u32(&gc_sstate->phase,
+								   GCACHE_PHASE__IS_CORRUPTED);
+	if (phase != GCACHE_PHASE__IS_CORRUPTED)
+		elog(WARNING, "gpucache: no rowid was assigned to ctid(%u,%u), so it is now switched to 'corrupted' state",
+			 (uint32_t)ctid->ip_blkid.bi_hi << 16 |
+			 (uint32_t)ctid->ip_blkid.bi_lo,
+			 (uint32_t)ctid->ip_posid);
+	return UINT_MAX;
 }
 
-static bool
+static void
 __removeGpuCacheRowId(GpuCacheLocalMapping *gc_lmap, const ItemPointer ctid)
 {
 	GpuCacheSharedState *gc_sstate = gc_lmap->gc_sstate;
@@ -1417,7 +1387,7 @@ __removeGpuCacheRowId(GpuCacheLocalMapping *gc_lmap, const ItemPointer ctid)
 	GpuCacheRowIdItem *rowitems = gpuCacheRowIdItemArray(gc_sstate);
 	uint32_t	hash, rowid;
 	uint32_t   *prev;
-	bool		removal = false;
+	bool		found = false;
 
 	hash = hash_bytes((unsigned char *)ctid, sizeof(ItemPointerData));
 
@@ -1437,14 +1407,18 @@ __removeGpuCacheRowId(GpuCacheLocalMapping *gc_lmap, const ItemPointer ctid)
 			gc_sstate->rowid_next_free = rowid;
 			ItemPointerSetInvalid(&ritem->ctid);
 			gc_sstate->rowid_num_free++;
-			removal = true;
+			found = true;
 			break;
 		}
 		prev = &ritem->next;
 	}
 	pthreadMutexUnlock(&gc_sstate->rowid_mutex);
 
-	return removal;
+	if (!found)
+		elog(WARNING, "Bug? no rowid for ctid(%u,%u) is not assigned yet",
+			 (uint32_t)ctid->ip_blkid.bi_hi << 16 |
+			 (uint32_t)ctid->ip_blkid.bi_lo,
+			 (uint32_t)ctid->ip_posid);
 }
 
 /* ------------------------------------------------------------
@@ -1935,8 +1909,9 @@ __initialLoadGpuCache(GpuCacheDesc *gc_desc, Relation rel)
 			item_sz = 2 * sz + 1024;
 			item = alloca(item_sz);
 		}
-
 		rowid = __allocGpuCacheRowId(gc_desc->gc_lmap, &tuple->t_self);
+		if (rowid == UINT_MAX)
+			break;
 		PG_TRY();
 		{
 			if (TransactionIdIsNormal(gcache_xmin))
@@ -1987,7 +1962,8 @@ initialLoadGpuCache(GpuCacheDesc *gc_desc, Relation rel)
 		uint32_t	phase = GCACHE_PHASE__IS_EMPTY;
 
 		if (pg_atomic_compare_exchange_u32(&gc_sstate->phase,
-										   &phase, UINT_MAX))
+										   &phase,
+										   GCACHE_PHASE__IS_LOADING))
 		{
 			PG_TRY();
 			{
@@ -2000,9 +1976,16 @@ initialLoadGpuCache(GpuCacheDesc *gc_desc, Relation rel)
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
-			phase = pg_atomic_exchange_u32(&gc_sstate->phase,
-										   GCACHE_PHASE__IS_READY);
-			Assert(phase == UINT_MAX);
+
+			phase = GCACHE_PHASE__IS_LOADING;
+			if (!pg_atomic_compare_exchange_u32(&gc_sstate->phase,
+												&phase,
+												GCACHE_PHASE__IS_READY))
+			{
+				Assert(phase == GCACHE_PHASE__IS_CORRUPTED);
+				return false;
+			}
+			return true;
 		}
 		else if (phase == GCACHE_PHASE__IS_READY)
 		{
@@ -2012,14 +1995,66 @@ initialLoadGpuCache(GpuCacheDesc *gc_desc, Relation rel)
 		{
 			return false;
 		}
-		else if (phase != UINT_MAX)
+		else if (phase != GCACHE_PHASE__IS_LOADING)
 		{
 			elog(ERROR, "Bug? GpuCache has uncertain state (phase=%u)", phase);
 		}
 		/* wait for completion of the initial loading by another backend */
 		CHECK_FOR_INTERRUPTS();
-		pg_usleep(4000L);
+		pg_usleep(1000L);
 	}
+}
+
+/* ------------------------------------------------------------
+ *
+ * Routines for query optimization
+ *
+ * ------------------------------------------------------------
+ */
+int
+baseRelHasGpuCache(PlannerInfo *root, RelOptInfo *baserel)
+{
+	RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
+	int		cuda_dindex = -1;
+
+	if (rte->rtekind == RTE_RELATION &&
+		(baserel->reloptkind == RELOPT_BASEREL ||
+		 baserel->reloptkind == RELOPT_OTHER_MEMBER_REL))
+	{
+		GpuCacheOptions gc_options;
+		Relation	rel;
+		uint64_t	signature;
+
+		rel = table_open(rte->relid, NoLock);
+		signature = gpuCacheTableSignature(rel, &gc_options);
+		if (signature != 0UL)
+		{
+			GpuCacheLocalMapping *gc_lmap;
+			uint32_t	phase;
+
+			gc_lmap = getGpuCacheLocalMapping(rel, signature, &gc_options);
+			phase = pg_atomic_read_u32(&gc_lmap->gc_sstate->phase);
+			if (phase == GCACHE_PHASE__IS_EMPTY ||
+				phase == GCACHE_PHASE__IS_LOADING ||
+				phase == GCACHE_PHASE__IS_READY)
+			{
+				cuda_dindex = gc_options.cuda_dindex;
+			}
+		}
+		table_close(rel, NoLock);
+	}
+	return (pgstrom_enable_gpucache ? cuda_dindex : -1);
+}
+
+/*
+ * RelationHasGpuCache
+ */
+bool
+RelationHasGpuCache(Relation rel)
+{
+	if (pgstrom_enable_gpucache)
+		return (gpuCacheTableSignature(rel,NULL) != 0UL);
+	return false;
 }
 
 /* ------------------------------------------------------------
@@ -2194,13 +2229,13 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 		phase = pg_atomic_read_u32(&gc_sstate->phase);
 		if (phase == GCACHE_PHASE__IS_CORRUPTED)
 			return false;
-		Assert(phase == UINT_MAX ||		/* during initial-loading */
+		Assert(phase == GCACHE_PHASE__IS_LOADING ||
 			   phase == GCACHE_PHASE__IS_READY);
 
 		pthreadMutexLock(&gc_sstate->redo_mutex);
 		Assert(gc_sstate->redo_write_pos >= gc_sstate->redo_read_pos &&
 			   gc_sstate->redo_write_pos <= gc_sstate->redo_read_pos + buffer_sz &&
-			   gc_sstate->redo_sync_pos >= gc_sstate->redo_read_pos &&
+//			   gc_sstate->redo_sync_pos >= gc_sstate->redo_read_pos &&
 			   gc_sstate->redo_sync_pos <= gc_sstate->redo_write_pos);
 		usage = gc_sstate->redo_write_pos - gc_sstate->redo_read_pos;
 
@@ -2243,6 +2278,9 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 		{
 			pthreadMutexUnlock(&gc_sstate->redo_mutex);
 		}
+
+		if (!append_done)
+			pg_usleep(2000L);	/* 2ms */
 	}
 	return append_done;
 }
@@ -2260,7 +2298,7 @@ __gpuCacheInsertLog(HeapTuple tuple, GpuCacheDesc *gc_desc)
 		elog(ERROR, "Bug? unable to add GpuCacheLog");
 	rowid = __allocGpuCacheRowId(gc_desc->gc_lmap, &tuple->t_self);
 	if (rowid == UINT_MAX)
-		elog(ERROR, "No rowid of GpuCache is available right now");
+		return;
 	PG_TRY();
 	{
 		GCacheTxLogInsert  *item;
@@ -2310,11 +2348,7 @@ __gpuCacheDeleteLog(HeapTuple tuple, GpuCacheDesc *gc_desc)
 
 	rowid = __lookupGpuCacheRowId(gc_desc->gc_lmap, &tuple->t_self);
 	if (rowid == UINT_MAX)
-		elog(ERROR, "No rowid of GpuCache is assigned to ctid(%u,%u)",
-			 (uint32_t)tuple->t_self.ip_blkid.bi_hi << 16 |
-			 (uint32_t)tuple->t_self.ip_blkid.bi_lo,
-			 (uint32_t)tuple->t_self.ip_posid);
-
+		return;
 	/* track rowid to be released */
 	pitem.rowid = rowid;
 	pitem.tag = 'D';
@@ -2385,7 +2419,8 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 		if (!gc_desc)
 			elog(ERROR, "gpucache is not configured for %s",
 				 RelationGetRelationName(trigdata->tg_relation));
-		initialLoadGpuCache(gc_desc, trigdata->tg_relation);
+		if (!initialLoadGpuCache(gc_desc, trigdata->tg_relation))
+			goto bailout;
 		if (gc_desc->buf.data == NULL)
 			initStringInfoCxt(CacheMemoryContext, &gc_desc->buf);
 
@@ -2421,6 +2456,7 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 		elog(ERROR, "gpucache: unexpected trigger event type (%u)",
 			 trigdata->tg_event);
 	}
+bailout:
 	PG_RETURN_POINTER(trigdata->tg_trigtuple);
 }
 
@@ -2436,12 +2472,11 @@ pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 
 	rel = table_open(table_oid, RowExclusiveLock);
 	gc_desc = lookupGpuCacheDesc(rel);
-	if (gc_desc)
+	if (gc_desc && initialLoadGpuCache(gc_desc, rel))
 	{
 		GpuCacheSharedState *gc_sstate = gc_desc->gc_lmap->gc_sstate;
 		uint64_t	sync_pos;
 
-		initialLoadGpuCache(gc_desc, rel);
 		pthreadMutexLock(&gc_sstate->redo_mutex);
 		sync_pos = gc_sstate->redo_sync_pos = gc_sstate->redo_write_pos;
 		pthreadMutexUnlock(&gc_sstate->redo_mutex);
@@ -2465,9 +2500,8 @@ pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 
 	rel = table_open(table_oid, RowExclusiveLock);
 	gc_desc = lookupGpuCacheDesc(rel);
-	if (gc_desc)
+	if (gc_desc && initialLoadGpuCache(gc_desc, rel))
 	{
-		initialLoadGpuCache(gc_desc, rel);
 		gpuCacheInvokeCompaction(gc_desc, false);
 	}
 	table_close(rel, RowExclusiveLock);
@@ -2507,10 +2541,10 @@ pgstrom_gpucache_recovery(PG_FUNCTION_ARGS)
 				/* nothing to do */
 				break;
 			}
-			else if (phase == UINT_MAX)
+			else if (phase == GCACHE_PHASE__IS_LOADING)
 			{
-				/* someone is working now */
-				pg_usleep(4000L);
+				/* someone is working for initial-loading now */
+				pg_usleep(2000L);
 				phase = GCACHE_PHASE__IS_CORRUPTED;
 			}
 		}
@@ -2573,7 +2607,7 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 	if (!gc_desc)
 		elog(ERROR, "Bug? no GpuCacheDesc is assigned");
 	if (!initialLoadGpuCache(gc_desc, rel))
-		elog(ERROR, "GpuCache is now corrupted (fallback should be used)");
+		elog(ERROR, "GpuCache is now corrupted, try the query again");
 	if (pg_atomic_fetch_add_u32(pts->gcache_fetch_count, 1) == 0)
 	{
 		GpuCacheSharedState *gc_sstate = gc_desc->gc_lmap->gc_sstate;
@@ -2684,6 +2718,9 @@ pgstromGpuCacheExplain(pgstromTaskState *pts,
 				break;
 			case GCACHE_PHASE__IS_EMPTY:
 				phase = "empty";
+				break;
+			case GCACHE_PHASE__IS_LOADING:
+				phase = "initial-loading";
 				break;
 			case GCACHE_PHASE__IS_READY:
 				phase = "ready";
@@ -4154,6 +4191,8 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 		str = "not_built";
 	else if (phase == GCACHE_PHASE__IS_EMPTY)
 		str = "is_empty";
+	else if (phase == GCACHE_PHASE__IS_LOADING)
+		str = "is_loading";
 	else if (phase == GCACHE_PHASE__IS_READY)
 		str = "is_ready";
 	else if (phase == GCACHE_PHASE__IS_CORRUPTED)
