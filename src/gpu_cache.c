@@ -2235,7 +2235,6 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 		pthreadMutexLock(&gc_sstate->redo_mutex);
 		Assert(gc_sstate->redo_write_pos >= gc_sstate->redo_read_pos &&
 			   gc_sstate->redo_write_pos <= gc_sstate->redo_read_pos + buffer_sz &&
-//			   gc_sstate->redo_sync_pos >= gc_sstate->redo_read_pos &&
 			   gc_sstate->redo_sync_pos <= gc_sstate->redo_write_pos);
 		usage = gc_sstate->redo_write_pos - gc_sstate->redo_read_pos;
 
