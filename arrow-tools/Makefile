@@ -33,6 +33,7 @@ CFLAGS += $(shell $(MYSQL_CONFIG) --include)
 endif
 
 PREFIX		?= /usr/local
+BINDIR		?= $(PREFIX)/bin
 
 all: $(ALL_PROGS)
 
@@ -46,8 +47,8 @@ pg2arrow: $(PG2ARROW_OBJS)
 	-L $(shell $(PG_CONFIG) --libdir)
 
 install-pg2arrow: pg2arrow
-	mkdir -p $(DESTDIR)$(PREFIX)/bin && \
-	install -m 0755 pg2arrow $(DESTDIR)$(PREFIX)/bin
+	mkdir -p $(DESTDIR)$(BINDIR) && \
+	install -m 0755 pg2arrow $(DESTDIR)$(BINDIR)
 
 __pgsql2arrow.o: sql2arrow.c
 	$(CC) $(CFLAGS) -D__PG2ARROW__ -c -o $@ $<
@@ -63,8 +64,8 @@ mysql2arrow: $(MYSQL2ARROW_OBJS)
 	-Wl,-rpath,$(shell $(MYSQL_CONFIG) --variable=pkglibdir)
 
 install-mysql2arrow: mysql2arrow
-	mkdir -p $(DESTDIR)$(PREFIX)/bin && \
-	install -m 0755 mysql2arrow $(DESTDIR)$(PREFIX)/bin
+	mkdir -p $(DESTDIR)$(BINDIR) && \
+	install -m 0755 mysql2arrow $(DESTDIR)$(BINDIR)
 
 __mysql2arrow.o: sql2arrow.c
 	$(CC) $(CFLAGS) -D__MYSQL2ARROW__ -c -o $@ $<
@@ -77,15 +78,15 @@ pcap2arrow: $(PCAP2ARROW_OBJS)
 	$(CC) -o $@ $(PCAP2ARROW_OBJS) -lpthread -lpfring -lpcap
 
 install-pcap2arrow: pcap2arrow
-	mkdir -p $(DESTDIR)$(PREFIX)/bin && \
-	install -m 0755 pcap2arrow $(DESTDIR)$(PREFIX)/bin
+	mkdir -p $(DESTDIR)$(BINDIR) && \
+	install -m 0755 pcap2arrow $(DESTDIR)$(BINDIR)
 
 #
 # Arrow2CSV
 #
 install-arrow2csv: arrow2csv
-	mkdir -p $(DESTDIR)$(PREFIX)/bin && \
-	install -m 0755 arrow2csv $(DESTDIR)$(PREFIX)/bin
+	mkdir -p $(DESTDIR)$(BINDIR) && \
+	install -m 0755 arrow2csv $(DESTDIR)$(BINDIR)
 
 arrow2csv: $(ARROW2CSV_OBJS)
 	$(CC) -o $@ $(ARROW2CSV_OBJS)
