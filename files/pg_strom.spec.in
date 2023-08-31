@@ -49,19 +49,25 @@ rm -rf %{buildroot}
 rm -rf %{buildroot}
 
 %post
-echo "this is post-install script"
+if [ "$1" -eq 1 ]; then
+    /usr/sbin/update-alternatives --add-slave pgsql-psql %{__pkgbindir}/psql \
+                                  /usr/bin/pg2arrow pgsql-pg2arrow %{__pkgbindir}/pg2arrow || exit 0
+    /usr/sbin/update-alternatives --add-slave pgsql-psql %{__pkgbindir}/psql \
+                                  /usr/bin/arrow2csv pgsql-arrow2csv %{__pkgbindir}/arrow2csv || exit 0
+fi
 
 %postun
 if [ "$1" -eq 0 ]; then
-    echo "this is post-uninstall script"
+    /usr/sbin/update-alternatives --remove-slave pgsql-psql %{__pkgbindir}/psql pgsql-pg2arrow
+    /usr/sbin/update-alternatives --remove-slave pgsql-psql %{__pkgbindir}/psql pgsql-arrow2csv
 fi
-
 
 %files
 %defattr(-,root,root,-)
 %doc LICENSE
 %{__pkglibdir}/pg_strom.so
 %{__pkgbindir}/pg2arrow
+%{__pkgbindir}/arrow2csv
 %{__pkgsharedir}/extension/pg_strom.control
 %{__pkgsharedir}/pg_strom/*
 %config %{__systemd_conf}
