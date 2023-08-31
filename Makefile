@@ -18,7 +18,8 @@ tarball:
 	git archive --format=tar.gz \
 	            --prefix=$(__PGSTROM_TGZ)/ \
 	            -o $(PGSTROM_TGZ) $(GITHASH) \
-	            src arrow-tools LICENSE VERSION
+	            LICENSE Makefile Makefile.common \
+	            src arrow-tools
 
 rpm: tarball
 	cp -f $(PGSTROM_TGZ) $(__SOURCEDIR) || exit 1

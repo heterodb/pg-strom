@@ -22,7 +22,7 @@ AutoReqProv: no
 %define __pkgsharedir   %(%{__pg_config} --sharedir)
 %define __cuda_path     /usr/local/cuda
 %define __systemd_conf  %{_sysconfdir}/systemd/system/postgresql-@@PGSQL_VERSION@@.service.d/pg_strom.conf
-%define __githash		@@PGSTROM_GITHASH@@
+%define __githash	@@PGSTROM_GITHASH@@
 
 %description
 PG-Strom is an extension for PostgreSQL, to accelerate large data processing
@@ -30,7 +30,7 @@ queries using the capability of GPU and NVME devices.
 This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
 
 %prep
-%setup -q -n @@STROM_TARBALL@@
+%setup -q -n @@STROM_TARBALL@@/src
 
 %build
 rm -rf %{buildroot}
