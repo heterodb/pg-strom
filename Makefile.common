@@ -31,6 +31,4 @@ else
 PGSTROM_GITHASH := $(GITHASH)::local_changes
 endif
 endif
-else
-GITHASH := HEAD
 endif
