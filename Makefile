@@ -44,6 +44,9 @@ rpm-mysql2arrow: tarball
 		    -e "s/@@STROM_TARBALL@@/$(__PGSTROM_TGZ)/g"		\
 		    -e "s/@@PGSTROM_GITHASH@@/$(GITHASH)/g" >		\
 		$(__SPECDIR)/mysql2arrow.spec
+	git show --format=raw $(GITHASH):files/pg_strom.spec.in |	\
+		awk 'BEGIN {flag=0;} /^%changelog$/{flag=1; next;} { if (flag>0) print; }' >> \
+		$(__SPECDIR)/mysql2arrow.spec
 	rpmbuild -ba $(__SPECDIR)/mysql2arrow.spec			\
 		--undefine=_debugsource_packages
 
@@ -55,5 +58,8 @@ rpm-pcap2arrow: tarball
 		    -e "s/@@STROM_TARBALL@@/$(__PGSTROM_TGZ)/g"		\
 		    -e "s/@@PGSTROM_GITHASH@@/$(GITHASH)/g" >		\
 		$(__SPECDIR)/pcap2arrow.spec
+	git show --format=raw $(GITHASH):files/pg_strom.spec.in |	\
+		awk 'BEGIN {flag=0;} /^%changelog$/{flag=1; next;} { if (flag>0) print; }' >> \
+		$(__SPECDIR)/mysql2arrow.spec
 	rpmbuild -ba $(__SPECDIR)/pcap2arrow.spec			\
 		--undefine=_debugsource_packages

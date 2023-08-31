@@ -34,16 +34,16 @@ This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
 
 %build
 rm -rf %{buildroot}
-%{__make} -C src -j 12   PG_CONFIG=%{__pg_config} VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} CUDA_PATH=%{__cuda_path}
-%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} pg2arrow
-%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} arrow2csv
+%{__make} -C src -j 12   PG_CONFIG=%{__pg_config} VERSION=@@STROM_VERSION@@ RELEASE=@@STROM_RELEASE@@ GITHASH=%{__githash} CUDA_PATH=%{__cuda_path}
+%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} VERSION=@@STROM_VERSION@@ RELEASE=@@STROM_RELEASE@@ GITHASH=%{__githash} pg2arrow
+%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} VERSION=@@STROM_VERSION@@ RELEASE=@@STROM_RELEASE@@ GITHASH=%{__githash} arrow2csv
 %{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir}
 
 %install
 rm -rf %{buildroot}
-%{__make} -C src -j 12   PG_CONFIG=%{__pg_config} VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot} CUDA_PATH=%{__cuda_path} install
-%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot} BINDIR=%{__pkgbindir} install-pg2arrow
-%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot} BINDIR=%{__pkgbindir} install-arrow2csv
+%{__make} -C src -j 12   PG_CONFIG=%{__pg_config} VERSION=@@STROM_VERSION@@ RELEASE=@@STROM_RELEASE@@ GITHASH=%{__githash} DESTDIR=%{buildroot} CUDA_PATH=%{__cuda_path} install
+%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} VERSION=@@STROM_VERSION@@ RELEASE=@@STROM_RELEASE@@ GITHASH=%{__githash} DESTDIR=%{buildroot} BINDIR=%{__pkgbindir} install-pg2arrow
+%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} VERSION=@@STROM_VERSION@@ RELEASE=@@STROM_RELEASE@@ GITHASH=%{__githash} DESTDIR=%{buildroot} BINDIR=%{__pkgbindir} install-arrow2csv
 %{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir} install
 %{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf}
 
