@@ -107,6 +107,8 @@ count_num_of_subfields(Oid type_oid)
 		{
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
 
+			if (attr->attisdropped)
+				continue;
 			count += count_num_of_subfields(attr->atttypid);
 		}
 	}
@@ -126,7 +128,7 @@ __setup_kern_colmeta(kern_data_store *kds,
 					 int *p_attcacheoff)
 {
 	kern_colmeta   *cmeta = &kds->colmeta[column_index];
-	devtype_info   *dtype = pgstrom_devtype_lookup(atttypid);
+	devtype_info   *dtype;
 	TypeCacheEntry *tcache;
 
 	memset(cmeta, 0, sizeof(kern_colmeta));
@@ -169,10 +171,15 @@ __setup_kern_colmeta(kern_data_store *kds,
 	cmeta->atttypmod = atttypmod;
 	strncpy(cmeta->attname, attname, NAMEDATALEN);
 
-	/* array? composite type? */
-	tcache = lookup_type_cache(atttypid, TYPECACHE_TUPDESC);
-	if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+	if (!OidIsValid(atttypid) ||
+		!(tcache = lookup_type_cache(atttypid, TYPECACHE_TUPDESC)))
 	{
+		/* corner case: column might be already dropped */
+		cmeta->atttypkind = TYPE_KIND__NULL;
+	}
+	else if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+	{
+		/* array type */
 		char		elem_name[NAMEDATALEN+10];
 		int16		elem_len;
 		bool		elem_byval;
@@ -200,6 +207,7 @@ __setup_kern_colmeta(kern_data_store *kds,
 	}
 	else if (tcache->tupDesc)
 	{
+		/* composite type */
 		TupleDesc	tupdesc = tcache->tupDesc;
 		int			j, attcacheoff = -1;
 
@@ -251,7 +259,9 @@ __setup_kern_colmeta(kern_data_store *kds,
 	/*
 	 * for the reverse references to KDS
 	 */
-	cmeta->dtype_sizeof = (dtype ? dtype->type_sizeof : 0);
+	dtype = pgstrom_devtype_lookup(atttypid);
+	if (dtype)
+		cmeta->dtype_sizeof = dtype->type_sizeof;
 	cmeta->kds_format = kds->format;
 	cmeta->kds_offset = (char *)cmeta - (char *)kds;
 }
@@ -333,6 +343,8 @@ estimate_kern_data_store(TupleDesc tupdesc)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
 
+		if (attr->attisdropped)
+			continue;
 		nr_colmeta += count_num_of_subfields(attr->atttypid);
 	}
 	/* internal system attribute if KDS_FORMAT_COLUMN */

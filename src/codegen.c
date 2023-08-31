@@ -300,6 +300,9 @@ pgstrom_devtype_lookup(Oid type_oid)
 	const char	   *ext_name;
 	TypeCacheEntry *tcache;
 
+	if (!OidIsValid(type_oid))
+		return NULL;	/* InvalidOid should never has device-type */
+
 	hash = hash_any((unsigned char *)&type_oid, sizeof(Oid));
 	index = hash % DEVTYPE_INFO_NSLOTS;
 	foreach (lc, devtype_info_slot[index])
