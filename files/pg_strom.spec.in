@@ -30,15 +30,15 @@ queries using the capability of GPU and NVME devices.
 This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
 
 %prep
-%setup -q -n @@STROM_TARBALL@@/src
+%setup -q -n @@STROM_TARBALL@@
 
 %build
 rm -rf %{buildroot}
-%{__make} -j 12 CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} GITHASH=%{__githash}
+%{__make} -C src -j 12 CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} GITHASH=%{__githash}
 
 %install
 rm -rf %{buildroot}
-%{__make} CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} DESTDIR=%{buildroot} install
+%{__make} -C src CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} DESTDIR=%{buildroot} install
 %{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf}
 
 %clean
@@ -56,6 +56,12 @@ rm -rf %{buildroot}
 %{__pkglibdir}/bitcode/pg_strom*
 
 %changelog
+* Thu Aug 31 2023 KaiGai Kohei <kaigai@heterodb.com> - 5.0-1
+- Fundamentally, re-designed the software architecture.
+- Unified GPU Service using multi-threading for the better resource management.
+- Pseudo expressions instead of the native binary, to eliminate JIT compilation steps.
+- and, various bug fixes
+
 * Sat Dec 11 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.3-2
 - Rebuild for CUDA11.5 Update 1; contains compiler optimization bugfix
 - A critical bug fix on nogroup_reduction
