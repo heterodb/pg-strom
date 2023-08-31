@@ -73,7 +73,7 @@ fi
 %{__pkglibdir}/pg_strom.so
 %{__pkgbindir}/pg2arrow
 %{__pkgbindir}/arrow2csv
-%{__pkgbindir}/ssbm-dbgen
+%{__pkgbindir}/dbgen-ssbm
 %{__pkgsharedir}/extension/pg_strom.control
 %{__pkgsharedir}/pg_strom/*
 %config %{__systemd_conf}
