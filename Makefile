@@ -19,7 +19,7 @@ tarball:
 	            --prefix=$(__PGSTROM_TGZ)/ \
 	            -o $(PGSTROM_TGZ) $(GITHASH) \
 	            LICENSE Makefile Makefile.common \
-	            src arrow-tools
+	            src arrow-tools test/ssbm
 
 rpm: tarball
 	cp -f $(PGSTROM_TGZ) $(__SOURCEDIR) || exit 1
