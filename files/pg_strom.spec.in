@@ -34,22 +34,30 @@ This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
 
 %build
 rm -rf %{buildroot}
-%{__make} -C src -j 12 CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} GITHASH=%{__githash}
+%{__make} -C src -j 12 PG_CONFIG=%{__pg_config} GITHASH=%{__githash} CUDA_PATH=%{__cuda_path}
 
 %install
 rm -rf %{buildroot}
-%{__make} -C src CUDA_PATH=%{__cuda_path} PG_CONFIG=%{__pg_config} DESTDIR=%{buildroot} install
+%{__make} -C src -j 12 PG_CONFIG=%{__pg_config} GITHASH=%{__githash} CUDA_PATH=%{__cuda_path} DESTDIR=%{buildroot} install
 %{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf}
 
 %clean
 rm -rf %{buildroot}
 
+%post
+echo "this is post-install script"
+
+%postun
+if [ "$1" -eq 0 ]; then
+    echo "this is post-uninstall script"
+fi
+
+
 %files
 %defattr(-,root,root,-)
 %doc LICENSE
 %{__pkglibdir}/pg_strom.so
-%{__pkgbindir}/gpuinfo
-%{__pkgbindir}/dbgen-ssbm
+#%{__pkgbindir}/dbgen-ssbm
 %{__pkgsharedir}/extension/pg_strom.control
 %{__pkgsharedir}/pg_strom/*
 %config %{__systemd_conf}
