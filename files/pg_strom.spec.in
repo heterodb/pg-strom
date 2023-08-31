@@ -36,11 +36,13 @@ This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
 rm -rf %{buildroot}
 %{__make} -C src -j 12 PG_CONFIG=%{__pg_config} GITHASH=%{__githash} CUDA_PATH=%{__cuda_path}
 %{__make} -C arrow-tools PG_CONFIG=%{__pg_config} GITHASH=%{__githash} pg2arrow
+%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} GITHASH=%{__githash} arrow2csv
 
 %install
 rm -rf %{buildroot}
 %{__make} -C src -j 12 PG_CONFIG=%{__pg_config} GITHASH=%{__githash} CUDA_PATH=%{__cuda_path} DESTDIR=%{buildroot} install
 %{__make} -C arrow-tools PG_CONFIG=%{__pg_config} GITHASH=%{__githash} DESTDIR=%{buildroot} install-pg2arrow
+%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} GITHASH=%{__githash} DESTDIR=%{buildroot} install-arrow2csv
 %{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf}
 
 %clean
