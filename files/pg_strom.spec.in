@@ -57,7 +57,6 @@ fi
 %defattr(-,root,root,-)
 %doc LICENSE
 %{__pkglibdir}/pg_strom.so
-#%{__pkgbindir}/dbgen-ssbm
 %{__pkgsharedir}/extension/pg_strom.control
 %{__pkgsharedir}/pg_strom/*
 %config %{__systemd_conf}
