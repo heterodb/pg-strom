@@ -11,7 +11,7 @@ PGSTROM_TGZ   := $(__PGSTROM_TGZ).tar.gz
 __SOURCEDIR = $(shell rpmbuild -E %{_sourcedir})
 __SPECDIR = $(shell rpmbuild -E %{_specdir})
 
-default: rpm-pg_strom
+rpm: rpm-pg_strom
 
 all: rpm-pg_strom rpm-mysql2arrow rpm-pcap2arrow
 
