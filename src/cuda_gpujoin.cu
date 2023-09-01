@@ -31,6 +31,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 	uint32_t	read_pos;
 	uint32_t	write_pos;
 	uint32_t	mask;
+	bool		left_outer = kmrels->chunks[depth-1].left_outer;
 	bool		tuple_is_valid = false;
 
 	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
@@ -42,7 +43,8 @@ execGpuJoinNestLoop(kern_context *kcxt,
 		return depth+1;
 	}
 
-	if (__all_sync(__activemask(), l_state >= kds_heap->nitems))
+	if (__all_sync(__activemask(), l_state >= kds_heap->nitems) &&
+		(!left_outer || __all_sync(__activemask(), l_state == UINT_MAX)))
 	{
 		/*
 		 * OK, all the threads in this warp reached to the end of hash-slot
@@ -113,13 +115,17 @@ execGpuJoinNestLoop(kern_context *kcxt,
 				oj_map[tupitem->rowid] = true;
 			}
 		}
-		else if (kmrels->chunks[depth-1].left_outer &&
-				 index >= kds_heap->nitems && !matched)
+		else if (left_outer && index >= kds_heap->nitems && !matched)
 		{
 			/* fill up NULL fields, if FULL/LEFT OUTER JOIN */
 			kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth-1);
 			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, NULL);
 			tuple_is_valid = true;
+			l_state = UINT_MAX;
+		}
+		else
+		{
+			l_state = UINT_MAX;
 		}
 	}
 	else

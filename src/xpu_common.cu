@@ -17,6 +17,25 @@
  *
  * ----------------------------------------------------------------
  */
+STATIC_FUNCTION(void)
+__extract_null_values(kern_context *kcxt,
+					  const kern_vars_defitem *kvdef,
+					  int kvdef_nitems)
+{
+	while (kvdef_nitems > 0)
+	{
+		uint32_t	slot_id = kvdef->var_slot_id;
+
+		if (slot_id < kcxt->kvars_nslots)
+		{
+			kcxt->kvars_slot[slot_id].ptr = NULL;
+			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+		}
+		kvdef++;
+		kvdef_nitems--;
+	}
+}
+
 STATIC_FUNCTION(bool)
 __extract_heap_tuple_attr(kern_context *kcxt,
 						  const kern_data_store *kds,
@@ -216,19 +235,9 @@ kern_extract_heap_tuple(kern_context *kcxt,
 		}
 		resno++;
 	}
-	/* fill-up by NULLs for the remained slot */
-	while (kvars_count < kvars_nloads)
-	{
-		uint32_t	slot_id = kvdef->var_slot_id;
-
-		if (slot_id < kcxt->kvars_nslots)
-		{
-			kcxt->kvars_slot[slot_id].ptr = NULL;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-		}
-		kvdef++;
-		kvars_count++;
-	}
+	/* fill-up with NULLs for the remained slot */
+	if (kvars_count < kvars_nloads)
+		__extract_null_values(kcxt, kvdef, kvars_nloads - kvars_count);
 	return true;
 }
 
@@ -1060,18 +1069,8 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 		kvars_count++;
 	}
 	/* other fields, which refers out of range, are NULL */
-	while (kvars_count < kvars_nloads)
-	{
-		uint32_t	slot_id = kvdef->var_slot_id;
-
-		if (slot_id < kcxt->kvars_nslots)
-		{
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-			kcxt->kvars_slot[slot_id].ptr = NULL;
-		}
-		kvdef++;
-		kvars_count++;
-	}
+	if (kvars_count < kvars_nloads)
+		__extract_null_values(kcxt, kvdef, kvars_nloads - kvars_count);
 	return true;
 }
 
@@ -2152,6 +2151,9 @@ kern_extract_gpucache_tuple(kern_context *kcxt,
 	int		kvars_count = 0;
 
 	assert(kds->format == KDS_FORMAT_COLUMN);
+	/* out of range? */
+	if (kds_index >= kds->nitems)
+		goto bailout;
 	/* fillup values for system attribute, if any */
 	while (kvars_count < kvars_nloads &&
 		   kvdef->var_resno < 0)
@@ -2223,19 +2225,10 @@ kern_extract_gpucache_tuple(kern_context *kcxt,
 		kvdef++;
 		kvars_count++;
 	}
+bailout:
 	/* other fields, which refers out of range, are NULL */
-	while (kvars_count < kvars_nloads)
-	{
-		uint32_t	slot_id = kvdef->var_slot_id;
-
-		if (slot_id < kcxt->kvars_nslots)
-		{
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-			kcxt->kvars_slot[slot_id].ptr = NULL;
-		}
-		kvdef++;
-		kvars_count++;
-	}
+	if (kvars_count < kvars_nloads)
+		__extract_null_values(kcxt, kvdef, kvars_nloads - kvars_count);
 	return true;
 }
 
@@ -2259,12 +2252,21 @@ ExecLoadVarsHeapTuple(kern_context *kcxt,
 			   kexp->exptype == TypeOpCode__int4 &&
 			   kexp->nr_args == 0 &&
 			   kexp->u.load.depth == depth);
-		if (htup && !kern_extract_heap_tuple(kcxt,
-											 kds,
-											 htup,
-											 kexp->u.load.kvars,
-											 kexp->u.load.nloads))
-			return false;
+		if (htup)
+		{
+			if (!kern_extract_heap_tuple(kcxt,
+										 kds,
+										 htup,
+										 kexp->u.load.kvars,
+										 kexp->u.load.nloads))
+				return false;
+		}
+		else
+		{
+			__extract_null_values(kcxt,
+								  kexp->u.load.kvars,
+								  kexp->u.load.nloads);
+		}
 	}
 	return true;
 }
