@@ -2253,17 +2253,17 @@ ExecLoadVarsHeapTuple(kern_context *kcxt,
 					  const kern_data_store *kds,
 					  const HeapTupleHeaderData *htup)	/* htup may be NULL */
 {
-	assert(kexp->opcode == FuncOpCode__LoadVars &&
-		   kexp->exptype == TypeOpCode__int4 &&
-		   kexp->nr_args == 0 &&
-		   kexp->u.load.depth == depth);
-	if (htup)
+	if (kexp)
 	{
-		if (!kern_extract_heap_tuple(kcxt,
-									 kds,
-									 htup,
-									 kexp->u.load.kvars,
-									 kexp->u.load.nloads))
+		assert(kexp->opcode == FuncOpCode__LoadVars &&
+			   kexp->exptype == TypeOpCode__int4 &&
+			   kexp->nr_args == 0 &&
+			   kexp->u.load.depth == depth);
+		if (htup && !kern_extract_heap_tuple(kcxt,
+											 kds,
+											 htup,
+											 kexp->u.load.kvars,
+											 kexp->u.load.nloads))
 			return false;
 	}
 	return true;
@@ -2304,17 +2304,19 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 					   kern_data_store *kds,
 					   uint32_t kds_index)
 {
-	assert(kexp_load_vars->opcode == FuncOpCode__LoadVars &&
-		   kexp_load_vars->exptype == TypeOpCode__int4 &&
-		   kexp_load_vars->nr_args == 0 &&
-		   kexp_load_vars->u.load.depth == 0);
-	if (!kern_extract_arrow_tuple(kcxt,
-								  kds,
-								  kds_index,
-								  kexp_load_vars->u.load.kvars,
-								  kexp_load_vars->u.load.nloads))
-		return false;
-
+	if (kexp_load_vars)
+	{
+		assert(kexp_load_vars->opcode == FuncOpCode__LoadVars &&
+			   kexp_load_vars->exptype == TypeOpCode__int4 &&
+			   kexp_load_vars->nr_args == 0 &&
+			   kexp_load_vars->u.load.depth == 0);
+		if (!kern_extract_arrow_tuple(kcxt,
+									  kds,
+									  kds_index,
+									  kexp_load_vars->u.load.kvars,
+									  kexp_load_vars->u.load.nloads))
+			return false;
+	}
 	/* check scan quals if given */
 	if (kexp_scan_quals)
 	{
@@ -2342,18 +2344,20 @@ ExecLoadVarsOuterColumn(kern_context *kcxt,
 						kern_data_extra *extra,
 						uint32_t kds_index)
 {
-	assert(kexp_load_vars->opcode == FuncOpCode__LoadVars &&
-		   kexp_load_vars->exptype == TypeOpCode__int4 &&
-		   kexp_load_vars->nr_args == 0 &&
-		   kexp_load_vars->u.load.depth == 0);
-	if (!kern_extract_gpucache_tuple(kcxt,
-									 kds,
-									 extra,
-									 kds_index,
-									 kexp_load_vars->u.load.kvars,
-									 kexp_load_vars->u.load.nloads))
-		return false;
-
+	if (kexp_load_vars)
+	{
+		assert(kexp_load_vars->opcode == FuncOpCode__LoadVars &&
+			   kexp_load_vars->exptype == TypeOpCode__int4 &&
+			   kexp_load_vars->nr_args == 0 &&
+			   kexp_load_vars->u.load.depth == 0);
+		if (!kern_extract_gpucache_tuple(kcxt,
+										 kds,
+										 extra,
+										 kds_index,
+										 kexp_load_vars->u.load.kvars,
+										 kexp_load_vars->u.load.nloads))
+			return false;
+	}
 	/* check scan quals if given */
 	if (kexp_scan_quals)
 	{

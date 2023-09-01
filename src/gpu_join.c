@@ -314,9 +314,11 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	List	   *hash_inner_keys = NIL;
 	List	   *input_rels_tlist = NIL;
 	ListCell   *lc;
+	bool		clauses_are_immutable = true;
 
+	/* cross join is not welcome */
 	if (!restrict_clauses)
-		return NULL;		/* cross join is not welcome */
+		return NULL;
 
 	/*
 	 * device specific parameters
@@ -363,6 +365,18 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
 
+		/*
+		 * In case when neither outer-vars nor inner-vars are not referenced,
+		 * this join always works as a cross-join or an empty-join.
+		 * They are not welcome for xPU-Join workloads regardless of the cost
+		 * estimation.
+		 */
+		if (contain_var_clause((Node *)rinfo->clause))
+			clauses_are_immutable = false;
+
+		/*
+		 * Is the JOIN-clause executable on the target device?
+		 */
 		if (!pgstrom_xpu_expression(rinfo->clause,
 									pp_prev->xpu_task_flags,
 									input_rels_tlist,
@@ -436,6 +450,14 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 			bms_free(relids2);
 		}
 	}
+
+	if (clauses_are_immutable)
+	{
+		elog(DEBUG2, "immutable join-clause is not supported: %s",
+			 nodeToString(restrict_clauses));
+		return NULL;
+	}
+
 	/*
 	 * Setup pgstromPlanInfo
 	 */

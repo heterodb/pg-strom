@@ -1908,7 +1908,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	{
 		/* GPU-Direct */
 		resetStringInfo(&buf);
-		if (!es->analyze)
+		if (!es->analyze || !ps_state)
 		{
 			bool	is_first = true;
 			int		k;
