@@ -1172,48 +1172,49 @@ __build_explain_tlist_junks(codegen_context *context,
 				 j >= 0;
 				 j = bms_next_member(outer_refs, j))
 			{
-				Form_pg_attribute attr;
-				HeapTuple	htup;
 				Var		   *var;
-				ListCell   *lc;
+				char	   *attname;
 
 				k = j + FirstLowInvalidHeapAttributeNumber;
-				htup = SearchSysCache2(ATTNUM,
-									   ObjectIdGetDatum(rte->relid),
-									   Int16GetDatum(k));
-				if (!HeapTupleIsValid(htup))
-					elog(ERROR, "cache lookup failed for attribute %d of relation %u",
-						 k, rte->relid);
-				attr = (Form_pg_attribute) GETSTRUCT(htup);
-				var = makeVar(baserel->relid,
-							  attr->attnum,
-							  attr->atttypid,
-							  attr->atttypmod,
-							  attr->attcollation,
-							  0);
-				foreach (lc, context->tlist_dev)
+				if (k != InvalidAttrNumber)
 				{
-					TargetEntry *tle = lfirst(lc);
+					HeapTuple	htup;
+					Form_pg_attribute attr;
 
-					if (equal(tle->expr, var))
-						break;
-				}
-				if (lc)
-				{
-					/* found */
-					pfree(var);
+					htup = SearchSysCache2(ATTNUM,
+										   ObjectIdGetDatum(rte->relid),
+										   Int16GetDatum(k));
+					if (!HeapTupleIsValid(htup))
+						elog(ERROR,"cache lookup failed for attriubte %d of relation %u",
+							 k, rte->relid);
+					attr = (Form_pg_attribute) GETSTRUCT(htup);
+					var = makeVar(baserel->relid,
+								  attr->attnum,
+								  attr->atttypid,
+								  attr->atttypmod,
+								  attr->attcollation,
+								  0);
+					attname = pstrdup(NameStr(attr->attname));
+					ReleaseSysCache(htup);
 				}
 				else
 				{
-					/* not found, append a junk */
+					/* special case handling if whole row reference */
+					var = makeWholeRowVar(rte,
+										  baserel->relid,
+										  0, false);
+					attname = get_rel_name(rte->relid);
+				}
+
+				if (tlist_member((Expr *)var, context->tlist_dev) == NULL)
+				{
 					TargetEntry *tle
 						= makeTargetEntry((Expr *)var,
 										  list_length(context->tlist_dev)+1,
-										  pstrdup(NameStr(attr->attname)),
+										  attname,
 										  true);
 					context->tlist_dev = lappend(context->tlist_dev, tle);
 				}
-				ReleaseSysCache(htup);
 			}
 		}
 		else if (IsA(node, PathTarget))
