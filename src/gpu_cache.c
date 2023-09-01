@@ -2809,9 +2809,10 @@ __gpuCacheCallbackOnAlterTable(Oid table_oid)
 												   &options_old);
 	signature_new = gpuCacheTableSignatureSnapshot(table_oid, SnapshotSelf,
 												   &options_new);
+#ifdef PGSTROM_DEBUG_BUILD
 	elog(LOG, "__gpuCacheCallbackOnAlterTable(table_oid=%u): signature %lx -> %lx",
 		 table_oid, signature_old, signature_new);
-
+#endif
 	if (signature_old != 0UL &&
 		signature_old != signature_new)
 	{
@@ -2941,13 +2942,17 @@ gpuCacheObjectAccess(ObjectAccessType access,
 		if (classId == RelationRelationId && subId > 0)
 		{
 			/* ALTER TABLE ... ADD COLUMN */
-			//elog(LOG, "pid=%u OAT_POST_CREATE (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
+#ifdef PGSTROM_DEBUG_BUILD
+			elog(LOG, "pid=%u OAT_POST_CREATE (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
+#endif
 			__gpuCacheCallbackOnAlterTable(objectId);
 		}
 		else if (classId == TriggerRelationId)
 		{
 			/* CREATE OR REPLACE TRIGGER */
-			//elog(LOG, "pid=%u OAT_POST_CREATE (pg_trigger, objectId=%u)", getpid(), objectId);
+#ifdef PGSTROM_DEBUG_BUILD
+			elog(LOG, "pid=%u OAT_POST_CREATE (pg_trigger, objectId=%u)", getpid(), objectId);
+#endif
 			__gpuCacheCallbackOnAlterTrigger(objectId);
 		}
 	}
@@ -2955,12 +2960,16 @@ gpuCacheObjectAccess(ObjectAccessType access,
 	{
 		if (classId == RelationRelationId)
 		{
-			//elog(LOG, "pid=%u OAT_POST_ALTER (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
+#ifdef PGSTROM_DEBUG_BUILD
+			elog(LOG, "pid=%u OAT_POST_ALTER (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
+#endif
 			__gpuCacheCallbackOnAlterTable(objectId);
 		}
 		else if (classId == TriggerRelationId)
 		{
-			//elog(LOG, "pid=%u OAT_POST_ALTER (pg_trigger, objectId=%u)", getpid(), objectId);
+#ifdef PGSTROM_DEBUG_BUILD
+			elog(LOG, "pid=%u OAT_POST_ALTER (pg_trigger, objectId=%u)", getpid(), objectId);
+#endif
 			__gpuCacheCallbackOnAlterTrigger(objectId);
 		}
 	}
@@ -2968,18 +2977,24 @@ gpuCacheObjectAccess(ObjectAccessType access,
 	{
 		if (classId == RelationRelationId)
 		{
-			//elog(LOG, "pid=%u OAT_DROP (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
+#ifdef PGSTROM_DEBUG_BUILD
+			elog(LOG, "pid=%u OAT_DROP (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
+#endif
 			__gpuCacheOnDropRelation(objectId);
 		}
 		else if (classId == TriggerRelationId)
 		{
-			//elog(LOG, "pid=%u OAT_DROP (pg_trigger, objectId=%u)", getpid(), objectId);
+#ifdef PGSTROM_DEBUG_BUILD
+			elog(LOG, "pid=%u OAT_DROP (pg_trigger, objectId=%u)", getpid(), objectId);
+#endif
 			__gpuCacheOnDropTrigger(objectId);
 		}
 	}
 	else if (access == OAT_TRUNCATE)
 	{
-		//elog(LOG, "pid=%u OAT_TRUNCATE (objectId=%u)", getpid(), objectId);
+#ifdef PGSTROM_DEBUG_BUILD
+		elog(LOG, "pid=%u OAT_TRUNCATE (objectId=%u)", getpid(), objectId);
+#endif
 		__gpuCacheTruncateLog(objectId);
 	}
 }
@@ -2987,7 +3002,9 @@ gpuCacheObjectAccess(ObjectAccessType access,
 static void
 gpuCacheRelcacheCallback(Datum arg, Oid relid)
 {
-//	elog(LOG, "pid=%u: gpuCacheRelcacheCallback (table_oid=%u)", getpid(), relid);
+#ifdef PGSTROM_DEBUG_BUILD
+	elog(LOG, "pid=%u: gpuCacheRelcacheCallback (table_oid=%u)", getpid(), relid);
+#endif
 	gpuCacheTableSignatureInvalidation(relid);
 	unmapGpuCacheLocalMapping(relid);
 }
@@ -2995,7 +3012,9 @@ gpuCacheRelcacheCallback(Datum arg, Oid relid)
 static void
 gpuCacheSyscacheCallback(Datum arg, int cacheid, uint32 hashvalue)
 {
-//	elog(LOG, "pid=%u: gpuCacheSyscacheCallback (cacheid=%u)", getpid(), cacheid);
+#ifdef PGSTROM_DEBUG_BUILD
+	elog(LOG, "pid=%u: gpuCacheSyscacheCallback (cacheid=%u)", getpid(), cacheid);
+#endif
 	__gpucache_sync_trigger_function_oid = InvalidOid;
 }
 
