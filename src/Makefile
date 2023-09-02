@@ -15,6 +15,11 @@ STROM_OBJS = main.o githash.o extra.o codegen.o misc.o executor.o \
 GENERATED-HEADERS = gpu_devattrs.h githash.c
 
 #
+# Githash.c checker
+#
+GITHASH_CHECKS := $(shell grep -q \"$(PGSTROM_GITHASH)\" githash.c 2>/dev/null || rm -f githash.c)
+
+#
 # Source of NVIDIA GPU device code
 #
 include Makefile.cuda
@@ -86,7 +91,6 @@ gpu_devattrs.h: $(CUDA_IPATH)/cuda.h
         -e 's| =.*$$|, NULL)|g' > $@
 
 githash.c:
-	grep -q \"$(PGSTROM_GITHASH)\" githash.c 2>/dev/null || \
 	echo "const char *pgstrom_githash_cstring = \"$(PGSTROM_GITHASH)\";" > githash.c
 
 #
