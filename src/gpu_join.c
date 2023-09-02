@@ -1896,6 +1896,7 @@ again:
 
 					UnlockReleaseBuffer(buffer);
 				}
+				kds->length = block_offset + BLCKSZ * nblocks;
 				kds->nitems = nblocks;
 				kds->block_nloaded = nblocks;
 				innerPreloadSetupGiSTIndex(kds);

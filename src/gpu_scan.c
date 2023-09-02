@@ -686,7 +686,6 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	pp_info->scan_quals_fallback
 		= build_fallback_exprs_scan(baserel->relid, pp_info->scan_quals);
 	/* code generation for the Projection */
-	elog(INFO, "tlist = %s", nodeToString(tlist));
 	context.tlist_dev = gpuscan_build_projection(baserel,
 												 tlist,
 												 pp_info->host_quals,
