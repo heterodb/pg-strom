@@ -6,14 +6,13 @@ include ../Makefile.common
 #
 # Source of PG-Strom host code
 #
-STROM_OBJS = main.o extra.o codegen.o misc.o executor.o \
+STROM_OBJS = main.o githash.o extra.o codegen.o misc.o executor.o \
              gpu_device.o gpu_service.o dpu_device.o \
              gpu_scan.o gpu_join.o gpu_preagg.o \
              relscan.o brin.o gist.o gpu_cache.o \
              arrow_fdw.o arrow_nodes.o \
              pcie.o float2.o tinyint.o aggfuncs.o
-GPU_DEVATTRS_H = gpu_devattrs.h
-GENERATED-HEADERS = $(GPU_DEVATTRS_H)
+GENERATED-HEADERS = gpu_devattrs.h githash.c
 
 #
 # Source of NVIDIA GPU device code
@@ -76,7 +75,7 @@ include $(PGXS)
 #
 submake-generated-headers: $(GENERATED-HEADERS)
 
-$(GPU_DEVATTRS_H): $(CUDA_IPATH)/cuda.h
+gpu_devattrs.h: $(CUDA_IPATH)/cuda.h
 	cat $(CUDA_IPATH)/cuda.h | \
 	grep -E '^[ ]+CU_DEVICE_ATTRIBUTE_' | \
 	grep -v -E 'CU_DEVICE_ATTRIBUTE_MAX$$' | \
@@ -85,6 +84,10 @@ $(GPU_DEVATTRS_H): $(CUDA_IPATH)/cuda.h
 	    -e 's| =.*/\*\*<[ ]*|, "|g' \
 	    -e 's|[ ]*\*/|")|g' \
         -e 's| =.*$$|, NULL)|g' > $@
+
+githash.c:
+	grep -q \"$(PGSTROM_GITHASH)\" githash.c 2>/dev/null || \
+	echo "const char *pgstrom_githash_cstring = \"$(PGSTROM_GITHASH)\";" > githash.c
 
 #
 # GPU Device Code

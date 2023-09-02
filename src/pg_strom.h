@@ -923,6 +923,11 @@ extern bool		__munmapShmem(void *mmap_addr);
 extern Path	   *pgstrom_copy_pathnode(const Path *pathnode);
 
 /*
+ * githash.c (auto-generated)
+ */
+extern const char *pgstrom_githash_cstring;
+
+/*
  * main.c
  */
 extern bool		pgstrom_enabled;

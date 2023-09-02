@@ -32,11 +32,7 @@ PG_FUNCTION_INFO_V1(pgstrom_githash);
 Datum
 pgstrom_githash(PG_FUNCTION_ARGS)
 {
-#ifdef PGSTROM_GITHASH
-	PG_RETURN_TEXT_P(cstring_to_text(PGSTROM_GITHASH));
-#else
-	PG_RETURN_NULL();
-#endif
+	PG_RETURN_TEXT_P(cstring_to_text(pgstrom_githash_cstring));
 }
 
 /*
@@ -357,16 +353,10 @@ _PG_init(void)
 	pgstrom_init_arrow_fdw();
 	pgstrom_init_executor();
 	/* dump version number */
-	elog(LOG, "PG-Strom version %s built for PostgreSQL %s"
-#ifdef PGSTROM_GITHASH
-		 " (githash: %s)"
-#endif
-		 ,PGSTROM_VERSION
-		 ,PG_MAJORVERSION
-#ifdef PGSTROM_GITHASH
-		 ,PGSTROM_GITHASH
-#endif
-		);
+	elog(LOG, "PG-Strom version %s built for PostgreSQL %s (githash: %s)",
+		 PGSTROM_VERSION,
+		 PG_MAJORVERSION,
+		 pgstrom_githash_cstring);
 	/* init GPU related stuff */
 	if (pgstrom_init_gpu_device())
 	{
