@@ -280,7 +280,6 @@ typedef struct
 	int			parallel_nworkers;	/* # of parallel workers */
 	double		parallel_divisor;	/* parallel divisor */
 	Cost		final_cost;			/* cost for sendback and host-side tasks */
-	bool		scan_needs_ctid;	/* FIXME: true, if ctid is referenced */
 	/* BRIN-index support */
 	Oid			brin_index_oid;		/* OID of BRIN-index, if any */
 	List	   *brin_index_conds;	/* BRIN-index key conditions */

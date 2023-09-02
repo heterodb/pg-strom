@@ -530,7 +530,7 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 	Assert(pp_inner->hash_outer_keys == NIL &&
 		   pp_inner->hash_inner_keys == NIL);
 	if (!IS_SIMPLE_REL(inner_rel) || inner_path->pathtype == T_IndexOnlyScan)
-		goto bailout;
+		return NULL;
 	/* see the logic in create_index_paths */
 	foreach (lc, inner_rel->indexlist)
 	{
@@ -571,7 +571,7 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 		}
 	}
 	if (!gist_index)
-		goto bailout;
+		return NULL;
 
 	/* append ProjectionPath if ctid is not given */
 	resno = 1;
@@ -591,30 +591,34 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 
 	if (gist_ctid_resno < 0)
 	{
-		PathTarget *proj_target = copy_pathtarget(inner_target);
-		Var		   *ctid_var;
-		pgstromPlanInfo *pp_info;
+		pgstromPlanInfo *pp_info = try_fetch_xpuscan_planinfo(inner_path);
+		PathTarget *path_target = copy_pathtarget(inner_path->pathtarget);
 
-		ctid_var = makeVar(inner_rel->relid,
-						   SelfItemPointerAttributeNumber,
-						   TIDOID,
-						   -1,
-						   InvalidOid,
-						   0);
-		proj_target->exprs = lappend(proj_target->exprs, ctid_var);
-		gist_ctid_resno = list_length(proj_target->exprs);
-		/*
-		 * FIXME: if inner-path is GpuScan or DpuScan, it must return ctid
-		 * even if it is not informed at the path construction phase.
-		 */
-		pp_info = try_fetch_xpuscan_planinfo(inner_path);
+		path_target->exprs = lappend(path_target->exprs,
+									 makeVar(inner_rel->relid,
+											 SelfItemPointerAttributeNumber,
+											 TIDOID,
+											 -1,
+											 InvalidOid,
+											 0));
+		gist_ctid_resno = list_length(path_target->exprs);
 		if (pp_info)
-			pp_info->scan_needs_ctid = true;
+		{
+			CustomPath *cpath = makeNode(CustomPath);
 
-		inner_path = (Path *)create_projection_path(root,
-													inner_rel,
-													inner_path,
-													proj_target);
+			memcpy(cpath, inner_path, sizeof(CustomPath));
+			cpath->path.pathtarget = path_target;
+			cpath->custom_private = list_make1(pp_info);
+			inner_path = (Path *)cpath;
+		}
+		else
+		{
+			inner_path = (Path *)
+				create_projection_path(root,
+									   inner_rel,
+									   inner_path,
+									   path_target);
+		}
 	}
 	/* store the result if any */
 	pp_inner->gist_index_oid       = gist_index->indexoid;
@@ -626,6 +630,5 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 	pp_inner->gist_selectivity     = gist_selectivity;
 	pp_inner->gist_npages          = gist_index->pages;
 	pp_inner->gist_height          = gist_index->tree_height;
-bailout:
 	return inner_path;
 }

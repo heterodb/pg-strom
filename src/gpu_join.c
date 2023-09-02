@@ -61,7 +61,6 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, makeInteger(pp_info->parallel_nworkers));
 	privs = lappend(privs, __makeFloat(pp_info->parallel_divisor));
 	privs = lappend(privs, __makeFloat(pp_info->final_cost));
-	privs = lappend(privs, makeBoolean(pp_info->scan_needs_ctid));
 	/* bin-index support */
 	privs = lappend(privs, makeInteger(pp_info->brin_index_oid));
 	exprs = lappend(exprs, pp_info->brin_index_conds);
@@ -159,7 +158,6 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.parallel_nworkers = intVal(list_nth(privs, pindex++));
 	pp_data.parallel_divisor = floatVal(list_nth(privs, pindex++));
 	pp_data.final_cost = floatVal(list_nth(privs, pindex++));
-	pp_data.scan_needs_ctid = boolVal(list_nth(privs, pindex++));
 	/* brin-index support */
 	pp_data.brin_index_oid = intVal(list_nth(privs, pindex++));
 	pp_data.brin_index_conds = list_nth(exprs, eindex++);
@@ -474,12 +472,18 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		pp_inner->hash_outer_keys == NIL &&
 		pp_inner->hash_inner_keys == NIL)
 	{
-		inner_path = pgstromTryFindGistIndex(root,
-											 inner_path,
-											 restrict_clauses,
-											 pp_info->xpu_task_flags,
-											 input_rels_tlist,
-											 pp_inner);
+		Path   *gist_inner_path
+			= pgstromTryFindGistIndex(root,
+									  inner_path,
+									  restrict_clauses,
+									  pp_info->xpu_task_flags,
+									  input_rels_tlist,
+									  pp_inner);
+		if (gist_inner_path)
+		{
+			llast(inner_paths_list) = gist_inner_path;
+			inner_path = gist_inner_path;
+		}
 	}
 	/*
 	 * Cost estimation

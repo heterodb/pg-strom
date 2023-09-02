@@ -552,7 +552,6 @@ gpuscan_build_projection(RelOptInfo *baserel,
 						 List *tlist,
 						 List *host_quals,
 						 List *dev_quals,
-						 bool  scan_needs_ctid,
 						 List *input_rels_tlist)
 {
 	build_projection_context context;
@@ -591,28 +590,6 @@ gpuscan_build_projection(RelOptInfo *baserel,
 			if (IsA(node, Const) || IsA(node, Param))
 				continue;
 			__gpuscan_build_projection_walker(node, &context);
-		}
-
-		/*
-		 * FIXME: GiST-GpuJoin (but not limited to this case) requires
-		 * ctid system column of the inner relation.
-		 * We have no way to knowWe have no way to know which column is
-		 * referenced. Maybe, we have to move to the logic into executor
-		 * phase, but we put a workaround here.
-		 */
-		if (scan_needs_ctid)
-		{
-			TargetEntry	*tle;
-
-			tle = makeTargetEntry((Expr *)makeVar(baserel->relid,
-												  SelfItemPointerAttributeNumber,
-												  TIDOID,
-												  -1,
-												  InvalidOid, 0),
-								  list_length(context.tlist_dev) + 1,
-								  "ctid",
-								  false);
-			context.tlist_dev = lappend(context.tlist_dev, tle);
 		}
 	}
 	vars_list = pull_vars_of_level((Node *)host_quals, 0);
@@ -709,11 +686,11 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	pp_info->scan_quals_fallback
 		= build_fallback_exprs_scan(baserel->relid, pp_info->scan_quals);
 	/* code generation for the Projection */
+	elog(INFO, "tlist = %s", nodeToString(tlist));
 	context.tlist_dev = gpuscan_build_projection(baserel,
 												 tlist,
 												 pp_info->host_quals,
 												 pp_info->scan_quals,
-												 pp_info->scan_needs_ctid,
 												 input_rels_tlist);
 	pp_info->kexp_projection = codegen_build_projection(&context);
 	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(&context);
