@@ -780,8 +780,8 @@ __setup_kern_data_store_column(kern_data_store *kds_head,
 	for (int j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
-		kern_colmeta   *cmeta = &kds_head->colmeta[j];
 
+		cmeta = &kds_head->colmeta[j];
 		if (!attr->attnotnull)
 		{
 			sz = MAXALIGN(BITMAPLEN(nrooms));

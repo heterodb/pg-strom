@@ -111,14 +111,14 @@ static bool				__gpuserv_debug_output_dummy;
 		if (gpuserv_shared_state &&										\
 			pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0) \
 		{																\
-			const char *filename = __FILE__;							\
-			for (const char *pos = filename; *pos != '\0'; pos++)		\
+			const char *__fname = __FILE__;								\
+			for (const char *__pos = __fname; *__pos != '\0'; __pos++)	\
 			{															\
-				if (pos[0] == '/' && pos[1] != '\0')					\
-					filename = pos + 1;									\
+				if (__pos[0] == '/' && __pos[1] != '\0')				\
+					__fname = __pos + 1;								\
 			}															\
 			fprintf(stderr, "GpuServ: " fmt " (%s:%d)\n",				\
-					##__VA_ARGS__, filename, __LINE__);					\
+					##__VA_ARGS__, __fname, __LINE__);					\
 		}																\
 	} while(0)
 
@@ -1159,6 +1159,13 @@ gpuClientWriteBack(gpuClient  *gclient,
  *
  * ----------------------------------------------------------------
  */
+static void
+__gpuClientELog(gpuClient *gclient,
+				int errcode,
+				const char *filename, int lineno,
+				const char *funcname,
+				const char *fmt, ...)	pg_attribute_printf(6,7);
+
 #define gpuClientELog(gclient,fmt,...)						\
 	__gpuClientELog((gclient), ERRCODE_DEVICE_INTERNAL,		\
 					__FILE__, __LINE__, __FUNCTION__,		\
@@ -1244,7 +1251,7 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 	xpu_function_catalog_entry *xpu_func;
 	xpu_type_catalog_entry *xpu_type;
 	kern_expression *karg;
-	int		i;
+	int			i;
 
 	/* lookup device function */
 	xpu_func = hash_search(gcontext->cuda_func_htab,
@@ -1349,7 +1356,6 @@ __resolveDevicePointers(gpuContext *gcontext,
 	if (encode)
 	{
 		xpu_encode_info *catalog = gcontext->cuda_encode_catalog;
-		int		i;
 
 		for (i=0; ; i++)
 		{
@@ -1570,10 +1576,10 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 		if (!gc_lmap)
 		{
 			gpuClientELog(gclient, "no GpuCache (dat=%u,rel=%u,sig=%09lx) found - %s",
-						  errbuf,
 						  ident->database_oid,
 						  ident->table_oid,
-						  ident->signature);
+						  ident->signature,
+						  errbuf);
 			return;
 		}
 	}

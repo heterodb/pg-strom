@@ -197,7 +197,7 @@ GetOptimalDpuForRelation(Relation relation, const char **p_dpu_pathname)
 	{
 		const DpuStorageEntry *ds_entry;
 		SMgrRelation smgr = RelationGetSmgr(relation);
-		char	   *rel_pathname = relpath(smgr->smgr_rnode, MAIN_FORKNUM);
+		char	   *rel_pathname = smgr_relpath(smgr, MAIN_FORKNUM);
 		const char *dpu_pathname;
 
 		ds_entry = GetOptimalDpuForFile(rel_pathname, &dpu_pathname);

@@ -122,10 +122,19 @@
 /*
  * Several fundamental data types and macros
  */
-#ifndef POSTGRES_H
+#ifndef Assert
 #define Assert(cond)		assert(cond)
+#endif
+#ifndef Max
 #define Max(a,b)			((a) > (b) ? (a) : (b))
+#endif
+#ifndef Min
 #define Min(a,b)			((a) < (b) ? (a) : (b))
+#endif
+#ifndef Abs
+#define Abs(x)				((x) >= 0 ? (x) : -(x))
+#endif
+#ifndef POSTGRES_H
 typedef uint64_t			Datum;
 typedef unsigned int		Oid;
 
@@ -905,7 +914,8 @@ typedef uint16_t			OffsetNumber;
 	((OffsetNumber) (-1 + (offsetNumber)))
 
 /* definitions in storage/bufpage.h */
-typedef struct PageHeaderData
+typedef char   *Page;
+typedef struct	PageHeaderData
 {
 #if 0
 	/*
@@ -1175,7 +1185,7 @@ KDS_BLOCK_REF_HTUP(kern_data_store *kds,
 	pg_page = KDS_BLOCK_PGPAGE(kds, block_id);
 
 	Assert(lpp >= pg_page->pd_linp &&
-		   lpp -  pg_page->pd_linp < PageGetMaxOffsetNumber(pg_page));
+		   lpp -  pg_page->pd_linp < PageGetMaxOffsetNumber((Page)pg_page));
 	if (p_self)
 	{
 		p_self->ip_blkid.bi_hi  = block_nr >> 16;
@@ -1184,7 +1194,7 @@ KDS_BLOCK_REF_HTUP(kern_data_store *kds,
 	}
 	if (p_len)
 		*p_len = ItemIdGetLength(lpp);
-	return (HeapTupleHeaderData *)PageGetItem(pg_page, lpp);
+	return (HeapTupleHeaderData *)PageGetItem((Page)pg_page, lpp);
 }
 
 INLINE_FUNCTION(bool)

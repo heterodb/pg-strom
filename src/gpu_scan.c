@@ -640,8 +640,7 @@ __build_explain_tlist_junks(PlannerInfo *root,
 					  0);
 		foreach (lc, context->tlist_dev)
 		{
-			TargetEntry *tle = lfirst(lc);
-
+			tle = lfirst(lc);
 			if (equal(tle->expr, var))
 				break;
 		}

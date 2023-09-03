@@ -591,8 +591,10 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	pgstromSharedState *ps_state = pts->ps_state;
 	Relation		relation = pts->css.ss.ss_currentRelation;
 	HeapScanDesc    h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
-	/* NOTE: 'smgr_rnode' always locates on the head of SMgrRelationData */
-	RelFileNodeBackend *smgr_rnode = (RelFileNodeBackend *)RelationGetSmgr(relation);
+	SMgrRelation	smgr = RelationGetSmgr(relation);
+	
+//	/* NOTE: 'smgr_rnode' always locates on the head of SMgrRelationData */
+//	RelFileNodeBackend *smgr_rnode = (RelFileNodeBackend *)RelationGetSmgr(relation);
 	XpuCommand	   *xcmd;
 	kern_data_store *kds;
 	unsigned long	m_offset = 0UL;
@@ -642,7 +644,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				LWLock	   *bufLock;
 				int			buf_id;
 
-				INIT_BUFFERTAG(bufTag, smgr_rnode->node, MAIN_FORKNUM, block_num);
+				smgr_init_buffer_tag(&bufTag, smgr, MAIN_FORKNUM, block_num);
 				bufHash = BufTableHashCode(&bufTag);
 				bufLock = BufMappingPartitionLock(bufHash);
 

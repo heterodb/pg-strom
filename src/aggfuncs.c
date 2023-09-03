@@ -483,7 +483,7 @@ pgstrom_var_samp_final(PG_FUNCTION_ARGS)
 
 	if (fcinfo->isnull)
 		PG_RETURN_NULL();
-	PG_RETURN_NUMERIC(DirectFunctionCall1(float8_numeric, datum));
+	PG_RETURN_DATUM(DirectFunctionCall1(float8_numeric, datum));
 }
 
 Datum
@@ -508,7 +508,7 @@ pgstrom_var_pop_final(PG_FUNCTION_ARGS)
 
 	if (fcinfo->isnull)
 		PG_RETURN_NULL();
-	PG_RETURN_NUMERIC(DirectFunctionCall1(float8_numeric, datum));
+	PG_RETURN_DATUM(DirectFunctionCall1(float8_numeric, datum));
 }
 
 Datum
@@ -528,7 +528,7 @@ pgstrom_stddev_samp_final(PG_FUNCTION_ARGS)
 
 	if (fcinfo->isnull)
 		PG_RETURN_NULL();
-	PG_RETURN_NUMERIC(DirectFunctionCall1(float8_numeric, datum));
+	PG_RETURN_DATUM(DirectFunctionCall1(float8_numeric, datum));
 }
 
 Datum
@@ -548,7 +548,7 @@ pgstrom_stddev_pop_final(PG_FUNCTION_ARGS)
 
 	if (fcinfo->isnull)
 		PG_RETURN_NULL();
-	PG_RETURN_NUMERIC(DirectFunctionCall1(float8_numeric, datum));
+	PG_RETURN_DATUM(DirectFunctionCall1(float8_numeric, datum));
 }
 
 /*

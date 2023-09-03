@@ -145,6 +145,7 @@
 #include "xpu_common.h"
 #include "cuda_common.h"
 #include "pg_utils.h"
+#include "pg_compat.h"
 #include "heterodb_extra.h"
 
 /* ------------------------------------------------

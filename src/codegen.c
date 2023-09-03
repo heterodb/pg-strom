@@ -1847,7 +1847,7 @@ codegen_scalar_array_op_expression(codegen_context *context,
 	/* 2nd arg - expression to be saved */
 	if (buf)
 	{
-		devtype_info *dtype_e = dtype_a->type_element;
+		devtype_info *__dtype_e = dtype_a->type_element;
 		int		__off;
 
 		memset(&kexp, 0, sizeof(kexp));
@@ -1860,14 +1860,15 @@ codegen_scalar_array_op_expression(codegen_context *context,
 										 offsetof(kern_expression, u.data));
 
 		/* 1st arg of the 2nd arg (comparator function) */
+		__dtype_e = dtype_a->type_element;
 		memset(&kexp, 0, sizeof(kexp));
-		kexp.exptype = dtype_e->type_code;
+		kexp.exptype = __dtype_e->type_code;
 		kexp.expflags = context->kexp_flags;
 		kexp.opcode = FuncOpCode__VarExpr;
 		kexp.nr_args = 0;
-		kexp.u.v.var_typlen   = dtype_e->type_length;
-		kexp.u.v.var_typbyval = dtype_e->type_byval;
-		kexp.u.v.var_typalign = dtype_e->type_align;
+		kexp.u.v.var_typlen   = __dtype_e->type_length;
+		kexp.u.v.var_typbyval = __dtype_e->type_byval;
+		kexp.u.v.var_typalign = __dtype_e->type_align;
 		kexp.u.v.var_slot_id  = slot_id;
 		__off = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExprVar);
 		__appendKernExpMagicAndLength(buf, __off);
@@ -3775,7 +3776,7 @@ __xpucode_to_cstring(StringInfo buf,
 					const char *func_name = NULL;
 					const char *rettype_name = NULL;
 
-					for (int i=0; devonly_funcs_catalog[i].func_code; i++)
+					for (i=0; devonly_funcs_catalog[i].func_code; i++)
 					{
 						if (devonly_funcs_catalog[i].func_code == kexp->opcode)
 						{

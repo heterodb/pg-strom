@@ -130,7 +130,7 @@ pgstrom_license_query(PG_FUNCTION_ARGS)
 	if (!license)
 		PG_RETURN_NULL();
 
-	PG_RETURN_POINTER(DirectFunctionCall1(json_in, PointerGetDatum(license)));
+	PG_RETURN_DATUM(DirectFunctionCall1(json_in, PointerGetDatum(license)));
 }
 
 /*

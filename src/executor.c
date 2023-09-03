@@ -375,9 +375,7 @@ __build_session_param_info(pgstromTaskState *pts,
 			{
 				struct varlena *temp = PG_DETOAST_DATUM(param_value);
 
-				offset = __appendBinaryStringInfo(buf,
-												  DatumGetPointer(temp),
-												  VARSIZE(temp));
+				offset = __appendBinaryStringInfo(buf, temp, VARSIZE(temp));
 				if (param_value != PointerGetDatum(temp))
 					pfree(temp);
 			}
@@ -1092,7 +1090,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	{
 		SMgrRelation smgr = RelationGetSmgr(rel);
 		Oid			am_oid = RelationGetForm(rel)->relam;
-		const char *kds_pathname = relpath(smgr->smgr_rnode, MAIN_FORKNUM);
+		const char *kds_pathname = smgr_relpath(smgr, MAIN_FORKNUM);
 
 		if (am_oid != HEAP_TABLE_AM_OID)
 			elog(ERROR, "PG-Strom does not support table access method: %s",
