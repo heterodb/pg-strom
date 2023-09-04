@@ -592,9 +592,6 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	Relation		relation = pts->css.ss.ss_currentRelation;
 	HeapScanDesc    h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
 	SMgrRelation	smgr = RelationGetSmgr(relation);
-	
-//	/* NOTE: 'smgr_rnode' always locates on the head of SMgrRelationData */
-//	RelFileNodeBackend *smgr_rnode = (RelFileNodeBackend *)RelationGetSmgr(relation);
 	XpuCommand	   *xcmd;
 	kern_data_store *kds;
 	unsigned long	m_offset = 0UL;

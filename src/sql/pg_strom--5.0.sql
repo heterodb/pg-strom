@@ -2893,74 +2893,106 @@ CREATE AGGREGATE pgstrom.max_tstz(bytea)
 --- SUM(X)
 ---
 CREATE FUNCTION pgstrom.psum(int8)
-  RETURNS int8
-  AS 'MODULE_PATHNAME','pgstrom_partial_sum_asis'
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_int'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.psum(float4)
-  RETURNS float8
-  AS 'ftod'
-  LANGUAGE internal STRICT PARALLEL SAFE;
-
 CREATE FUNCTION pgstrom.psum(float8)
-  RETURNS float8
-  AS 'MODULE_PATHNAME','pgstrom_partial_sum_asis'
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_fp'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.psum(money)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_cash'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.fsum_trans_int(bytea, bytea)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_fsum_trans_int'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.fsum_trans_fp(bytea, bytea)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_fsum_trans_fp'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.fsum_final_int(bytea)
   RETURNS int8
-  AS 'MODULE_PATHNAME','pgstrom_partial_sum_asis'
+  AS 'MODULE_PATHNAME','pgstrom_fsum_final_int'
   LANGUAGE C STRICT PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.int8_as_money(int8)
+CREATE FUNCTION pgstrom.fsum_final_int_as_numeric(bytea)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME','pgstrom_fsum_final_int_as_numeric'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.fsum_final_int_as_cash(bytea)
   RETURNS money
-  AS 'MODULE_PATHNAME','pgstrom_partial_sum_asis'
+  AS 'MODULE_PATHNAME','pgstrom_fsum_final_int_as_cash'
   LANGUAGE C STRICT PARALLEL SAFE;
 
--- bigint --> bigint
-CREATE AGGREGATE pgstrom.sum(int8)
-(
-  sfunc = pg_catalog.int8pl,
-  stype = int8,
-  initcond = 0,
-  parallel = safe
-);
--- bigint --> numeric
-CREATE AGGREGATE pgstrom.sum_num(int8)
-(
-  sfunc = pg_catalog.int8_sum,
-  stype = numeric,
-  initcond = 0,
-  parallel = safe
-);
+CREATE FUNCTION pgstrom.fsum_final_fp32(bytea)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_fsum_final_fp32'
+  LANGUAGE C STRICT PARALLEL SAFE;
 
--- float8 --> float4
-CREATE AGGREGATE pgstrom.sum_f4(float8)
+CREATE FUNCTION pgstrom.fsum_final_fp64(bytea)
+  RETURNS float8
+  AS 'MODULE_PATHNAME','pgstrom_fsum_final_fp64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.fsum_final_fp_as_numeric(bytea)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME','pgstrom_fsum_final_fp64_as_numeric'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+-- SUM(int1/int2/int4) --> bigint
+CREATE AGGREGATE pgstrom.sum_int(bytea)
 (
-  sfunc = pg_catalog.float8pl,
-  stype = float8,
-  finalfunc = pg_catalog.float4,
-  initcond = 0.0,
+  sfunc = pgstrom.fsum_trans_int,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_int,
   parallel = safe
 );
-
--- float8 --> numeric
-CREATE AGGREGATE pgstrom.sum_num(float8)
+-- SUM(int8) --> numeric
+CREATE AGGREGATE pgstrom.sum_int_num(bytea)
 (
-  sfunc = pg_catalog.float8pl,
-  stype = float8,
-  finalfunc = pg_catalog.numeric,
-  initcond = 0.0,
+  sfunc = pgstrom.fsum_trans_int,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_int_as_numeric,
   parallel = safe
 );
-
--- bigint --> money
-CREATE AGGREGATE pgstrom.sum_cash(int8)
+-- SUM(float2/float4) --> float4
+CREATE AGGREGATE pgstrom.sum_fp32(bytea)
 (
-  sfunc = pg_catalog.int8pl,
-  stype = int8,
-  finalfunc = pgstrom.int8_as_money,
-  initcond = 0,
+  sfunc = pgstrom.fsum_trans_fp,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_fp32,
+  parallel = safe
+);
+-- SUM(float8) --> float8
+CREATE AGGREGATE pgstrom.sum_fp64(bytea)
+(
+  sfunc = pgstrom.fsum_trans_fp,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_fp64,
+  parallel = safe
+);
+-- SUM(numeric) --> numeric
+CREATE AGGREGATE pgstrom.sum_fp_num(bytea)
+(
+  sfunc = pgstrom.fsum_trans_fp,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_fp_as_numeric,
+  parallel = safe
+);
+-- SUM(money) --> money
+CREATE AGGREGATE pgstrom.sum_cash(bytea)
+(
+  sfunc = pgstrom.fsum_trans_int,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_int_as_cash,
   parallel = safe
 );
 
@@ -2969,22 +3001,22 @@ CREATE AGGREGATE pgstrom.sum_cash(int8)
 ---
 CREATE FUNCTION pgstrom.pavg(int8)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_avg_int'
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_int'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.pavg(float8)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_avg_fp'
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_fp'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.favg_trans_int(bytea, bytea)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_favg_trans_int'
+  AS 'MODULE_PATHNAME','pgstrom_fsum_trans_int'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.favg_trans_fp(bytea, bytea)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_favg_trans_fp'
+  AS 'MODULE_PATHNAME','pgstrom_fsum_trans_fp'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.favg_final_int(bytea)
@@ -2995,6 +3027,11 @@ CREATE FUNCTION pgstrom.favg_final_int(bytea)
 CREATE FUNCTION pgstrom.favg_final_fp(bytea)
   RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_favg_final_fp'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.favg_final_num(bytea)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME','pgstrom_favg_final_num'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE AGGREGATE pgstrom.avg_int(bytea)
@@ -3010,6 +3047,14 @@ CREATE AGGREGATE pgstrom.avg_fp(bytea)
   sfunc = pgstrom.favg_trans_fp,
   stype = bytea,
   finalfunc = pgstrom.favg_final_fp,
+  parallel = safe
+);
+
+CREATE AGGREGATE pgstrom.avg_num(bytea)
+(
+  sfunc = pgstrom.favg_trans_fp,
+  stype = bytea,
+  finalfunc = pgstrom.favg_final_num,
   parallel = safe
 );
 

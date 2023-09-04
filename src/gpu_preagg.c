@@ -198,47 +198,47 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 * SUM(X) = SUM(PSUM(X))
 	 */
 	{"sum(int1)",
-	 "s:sum(int8)",
+	 "s:sum_int(bytea)",
 	 "s:psum(int8)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(int2)",
-	 "s:sum(int8)",
+	 "s:sum_int(bytea)",
 	 "s:psum(int8)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(int4)",
-	 "s:sum(int8)",
+	 "s:sum_int(bytea)",
 	 "s:psum(int8)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(int8)",
-	 "s:sum_num(int8)",
+	 "s:sum_int_num(bytea)",
 	 "s:psum(int8)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(float2)",
-	 "c:sum(float8)",
+	 "s:sum_fp64(bytea)",
 	 "s:psum(float8)",
 	 KAGG_ACTION__PSUM_FP, false
 	},
 	{"sum(float4)",
-	 "s:sum_f4(float8)",
+	 "s:sum_fp32(bytea)",
 	 "s:psum(float8)",
 	 KAGG_ACTION__PSUM_FP, false
 	},
 	{"sum(float8)",
-	 "c:sum(float8)",
+	 "s:sum_fp64(bytea)",
 	 "s:psum(float8)",
 	 KAGG_ACTION__PSUM_FP, false
 	},
 	{"sum(numeric)",
-	 "s:sum_num(float8)",
+	 "s:sum_fp_num(bytea)",
 	 "s:psum(float8)",
 	 KAGG_ACTION__PSUM_FP, true
 	},
 	{"sum(money)",
-	 "s:sum_cash(int8)",
+	 "s:sum_cash(bytea)",
 	 "s:psum(money)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
@@ -711,7 +711,7 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 {
 	Oid		func_oid = __aggfunc_resolve_func_signature(partfn_signature);
 	Oid		type_oid;
-	int		func_nargs = 1;
+	int		func_nargs;
 
 	switch (partfn_action)
 	{
@@ -720,11 +720,8 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 			type_oid = INT8OID;
 			break;
 		case KAGG_ACTION__NROWS_COND:
-		case KAGG_ACTION__PSUM_INT:
+			func_nargs = 1;
 			type_oid = INT8OID;
-			break;
-		case KAGG_ACTION__PSUM_FP:
-			type_oid = FLOAT8OID;
 			break;
 		case KAGG_ACTION__PMIN_INT32:
 		case KAGG_ACTION__PMIN_INT64:
@@ -733,8 +730,11 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 		case KAGG_ACTION__PMAX_INT64:
 		case KAGG_ACTION__PMAX_FP64:
 		case KAGG_ACTION__PAVG_INT:
+		case KAGG_ACTION__PSUM_INT:
 		case KAGG_ACTION__PAVG_FP:
+		case KAGG_ACTION__PSUM_FP:
 		case KAGG_ACTION__STDDEV:
+			func_nargs = 1;
 			type_oid = BYTEAOID;
 			break;
 		case KAGG_ACTION__COVAR:

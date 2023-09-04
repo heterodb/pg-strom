@@ -1100,17 +1100,10 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 
 			case KAGG_ACTION__NROWS_ANY:
 			case KAGG_ACTION__NROWS_COND:
-			case KAGG_ACTION__PSUM_INT:
 				nbytes = sizeof(int64_t);
 				if (buffer)
 					*((int64_t *)buffer) = 0;
 				break;
-
-			case KAGG_ACTION__PSUM_FP:
-				nbytes = sizeof(float8_t);
-				if (buffer)
-					*((float8_t *)buffer) = 0.0;
-                break;
 
 			case KAGG_ACTION__PMIN_INT:
 				nbytes = sizeof(kagg_state__pminmax_int64_packed);
@@ -1164,22 +1157,24 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
 
+			case KAGG_ACTION__PSUM_INT
 			case KAGG_ACTION__PAVG_INT:
-				nbytes = sizeof(kagg_state__pavg_int_packed);
+				nbytes = sizeof(kagg_state__psum_int_packed);
 				if (buffer)
 				{
-					memset(buffer, 0, sizeof(kagg_state__pavg_int_packed));
-					SET_VARSIZE(buffer, sizeof(kagg_state__pavg_int_packed));
+					memset(buffer, 0, sizeof(kagg_state__psum_int_packed));
+					SET_VARSIZE(buffer, sizeof(kagg_state__psum_int_packed));
 				}
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
 
+			case KAGG_ACTION__PSUM_FP:
 			case KAGG_ACTION__PAVG_FP:
-				nbytes = sizeof(kagg_state__pavg_fp_packed);
+				nbytes = sizeof(kagg_state__psum_fp_packed);
 				if (buffer)
 				{
-					memset(buffer, 0, sizeof(kagg_state__pavg_fp_packed));
-					SET_VARSIZE(buffer, sizeof(kagg_state__pavg_fp_packed));
+					memset(buffer, 0, sizeof(kagg_state__psum_fp_packed));
+					SET_VARSIZE(buffer, sizeof(kagg_state__psum_fp_packed));
 				}
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
@@ -1496,10 +1491,10 @@ __update_preagg__psum_fp(kern_context *kcxt,
 }
 
 /*
- * __update_preagg__pavg_int
+ * __update_preagg__psum_int
  */
 static inline void
-__update_preagg__pavg_int(kern_context *kcxt,
+__update_preagg__psum_int(kern_context *kcxt,
 						  char *buffer,
 						  kern_colmeta *cmeta,
 						  kern_aggregate_desc *desc)
@@ -1508,8 +1503,8 @@ __update_preagg__pavg_int(kern_context *kcxt,
 
 	if (kcxt->kvars_class[slot_id] == KVAR_CLASS__INLINE)
     {
-		kagg_state__pavg_int_packed *r =
-			(kagg_state__pavg_int_packed *)buffer;
+		kagg_state__psum_int_packed *r =
+			(kagg_state__psum_int_packed *)buffer;
 		int64_t		ival = kcxt->kvars_slot[slot_id].i64;
 
 		__atomic_add_uint32(&r->nitems, 1);
@@ -1522,10 +1517,10 @@ __update_preagg__pavg_int(kern_context *kcxt,
 }
 
 /*
- * __update_preagg__pavg_fp
+ * __update_preagg__psum_fp
  */
 static inline void
-__update_preagg__pavg_fp(kern_context *kcxt,
+__update_preagg__psum_fp(kern_context *kcxt,
 						 char *buffer,
 						 kern_colmeta *cmeta,
 						 kern_aggregate_desc *desc)
@@ -1534,8 +1529,8 @@ __update_preagg__pavg_fp(kern_context *kcxt,
 
 	if (kcxt->kvars_class[slot_id] == KVAR_CLASS__INLINE)
     {
-		kagg_state__pavg_fp_packed *r =
-			(kagg_state__pavg_fp_packed *)buffer;
+		kagg_state__psum_fp_packed *r =
+			(kagg_state__psum_fp_packed *)buffer;
 		float8_t	fval = kcxt->kvars_slot[slot_id].fp64;
 
 		__atomic_add_uint32(&r->nitems, 1);
@@ -1666,17 +1661,16 @@ __updateOneTupleDpuPreAgg(kern_context *kcxt,
             case KAGG_ACTION__PMAX_FP:
                 __update_preagg__pmax_fp(kcxt, buffer, cmeta, desc);
                 break;
-            case KAGG_ACTION__PSUM_INT:
-                __update_preagg__psum_int(kcxt, buffer, cmeta, desc);
-                break;
             case KAGG_ACTION__PSUM_FP:
                 __update_preagg__psum_fp(kcxt, buffer, cmeta, desc);
                 break;
+			case KAGG_ACTION__PSUM_INT:
             case KAGG_ACTION__PAVG_INT:
-                __update_preagg__pavg_int(kcxt, buffer, cmeta, desc);
+                __update_preagg__psum_int(kcxt, buffer, cmeta, desc);
                 break;
+			case KAGG_ACTION__PSUM_FP:
             case KAGG_ACTION__PAVG_FP:
-                __update_preagg__pavg_fp(kcxt, buffer, cmeta, desc);
+                __update_preagg__psum_fp(kcxt, buffer, cmeta, desc);
                 break;
             case KAGG_ACTION__STDDEV:
                 __update_preagg__pstddev(kcxt, buffer, cmeta, desc);

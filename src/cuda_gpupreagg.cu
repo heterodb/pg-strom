@@ -140,18 +140,10 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 
 			case KAGG_ACTION__NROWS_ANY:
 			case KAGG_ACTION__NROWS_COND:
-			case KAGG_ACTION__PSUM_INT:
 				assert(cmeta->attlen == sizeof(int64_t));
 				nbytes = sizeof(int64_t);
 				if (buffer)
 					*((int64_t *)buffer) = 0;
-				break;
-
-			case KAGG_ACTION__PSUM_FP:
-				assert(cmeta->attlen == sizeof(float8_t));
-				nbytes = sizeof(float8_t);
-				if (buffer)
-					*((float8_t *)buffer) = 0.0;
 				break;
 
 			case KAGG_ACTION__PMIN_INT32:
@@ -208,22 +200,24 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
 
+			case KAGG_ACTION__PSUM_INT:
 			case KAGG_ACTION__PAVG_INT:
-				nbytes = sizeof(kagg_state__pavg_int_packed);
+				nbytes = sizeof(kagg_state__psum_int_packed);
 				if (buffer)
 				{
-					memset(buffer, 0, sizeof(kagg_state__pavg_int_packed));
-					SET_VARSIZE(buffer, sizeof(kagg_state__pavg_int_packed));
+					memset(buffer, 0, sizeof(kagg_state__psum_int_packed));
+					SET_VARSIZE(buffer, sizeof(kagg_state__psum_int_packed));
 				}
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
 
+			case KAGG_ACTION__PSUM_FP:
 			case KAGG_ACTION__PAVG_FP:
-				nbytes = sizeof(kagg_state__pavg_fp_packed);
+				nbytes = sizeof(kagg_state__psum_fp_packed);
 				if (buffer)
 				{
-					memset(buffer, 0, sizeof(kagg_state__pavg_fp_packed));
-					SET_VARSIZE(buffer, sizeof(kagg_state__pavg_fp_packed));
+					memset(buffer, 0, sizeof(kagg_state__psum_fp_packed));
+					SET_VARSIZE(buffer, sizeof(kagg_state__psum_fp_packed));
 				}
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
@@ -630,79 +624,6 @@ __update_nogroups__psum_int(kern_context *kcxt,
 							bool kvars_is_valid)
 {
 	int64_t		ival = 0;
-
-	if (kvars_is_valid)
-	{
-		int		slot_id = desc->arg0_slot_id;
-		int		vclass = kcxt->kvars_class[slot_id];
-
-		if (vclass == KVAR_CLASS__INLINE)
-			ival = kcxt->kvars_slot[slot_id].i64;
-		else
-		{
-			assert(vclass == KVAR_CLASS__NULL);
-			kvars_is_valid = false;
-		}
-	}
-	if (__any_sync(__activemask(), kvars_is_valid))
-	{
-		ival += __shfl_xor_sync(__activemask(), ival, 0x0001);
-		ival += __shfl_xor_sync(__activemask(), ival, 0x0002);
-		ival += __shfl_xor_sync(__activemask(), ival, 0x0004);
-		ival += __shfl_xor_sync(__activemask(), ival, 0x0008);
-		ival += __shfl_xor_sync(__activemask(), ival, 0x0010);
-		if (LaneId() == 0)
-			__atomic_add_int64((int64_t *)buffer, ival);
-	}
-}
-/*
- * __update_nogroups__psum_fp
- */
-INLINE_FUNCTION(void)
-__update_nogroups__psum_fp(kern_context *kcxt,
-						   char *buffer,
-						   kern_colmeta *cmeta,
-						   kern_aggregate_desc *desc,
-						   bool kvars_is_valid)
-{
-	float8_t	fval = 0.0;
-
-	if (kvars_is_valid)
-	{
-		int		slot_id = desc->arg0_slot_id;
-		int		vclass = kcxt->kvars_class[slot_id];
-
-		if (vclass == KVAR_CLASS__INLINE)
-			fval = kcxt->kvars_slot[slot_id].fp64;
-		else
-		{
-			assert(vclass == KVAR_CLASS__NULL);
-			kvars_is_valid = false;
-		}
-	}
-	if (__any_sync(__activemask(), kvars_is_valid))
-	{
-		fval += __shfl_xor_sync(__activemask(), fval, 0x0001);
-		fval += __shfl_xor_sync(__activemask(), fval, 0x0002);
-		fval += __shfl_xor_sync(__activemask(), fval, 0x0004);
-		fval += __shfl_xor_sync(__activemask(), fval, 0x0008);
-		fval += __shfl_xor_sync(__activemask(), fval, 0x0010);
-		if (LaneId() == 0)
-			__atomic_add_fp64((float8_t *)buffer, fval);
-	}
-}
-
-/*
- * __update_nogroups__pavg_int
- */
-INLINE_FUNCTION(void)
-__update_nogroups__pavg_int(kern_context *kcxt,
-							char *buffer,
-							kern_colmeta *cmeta,
-							kern_aggregate_desc *desc,
-							bool kvars_is_valid)
-{
-	int64_t		ival = 0;
 	uint32_t	mask;
 
 	if (kvars_is_valid)
@@ -728,8 +649,8 @@ __update_nogroups__pavg_int(kern_context *kcxt,
 		ival += __shfl_xor_sync(__activemask(), ival, 0x0010);
 		if (LaneId() == 0)
 		{
-			kagg_state__pavg_int_packed *r =
-				(kagg_state__pavg_int_packed *)buffer;
+			kagg_state__psum_int_packed *r =
+				(kagg_state__psum_int_packed *)buffer;
 			__atomic_add_uint32(&r->nitems, __popc(mask));
 			__atomic_add_int64(&r->sum, ival);
 		}
@@ -737,10 +658,10 @@ __update_nogroups__pavg_int(kern_context *kcxt,
 }
 
 /*
- * __update_nogroups__pavg_fp
+ * __update_nogroups__psum_fp
  */
 INLINE_FUNCTION(void)
-__update_nogroups__pavg_fp(kern_context *kcxt,
+__update_nogroups__psum_fp(kern_context *kcxt,
 						   char *buffer,
 						   kern_colmeta *cmeta,
 						   kern_aggregate_desc *desc,
@@ -772,8 +693,8 @@ __update_nogroups__pavg_fp(kern_context *kcxt,
 		fval += __shfl_xor_sync(__activemask(), fval, 0x0010);
 		if (LaneId() == 0)
 		{
-			kagg_state__pavg_fp_packed *r =
-				(kagg_state__pavg_fp_packed *)buffer;
+			kagg_state__psum_fp_packed *r =
+				(kagg_state__psum_fp_packed *)buffer;
 			__atomic_add_uint32(&r->nitems, __popc(mask));
 			__atomic_add_fp64(&r->sum, fval);
 		}
@@ -1004,22 +925,14 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 											 kvars_is_valid);
 				break;
 			case KAGG_ACTION__PSUM_INT:
+			case KAGG_ACTION__PAVG_INT:
 				__update_nogroups__psum_int(kcxt, buffer,
 											cmeta, desc,
 											kvars_is_valid);
 				break;
+			case KAGG_ACTION__PAVG_FP:
 			case KAGG_ACTION__PSUM_FP:
 				__update_nogroups__psum_fp(kcxt, buffer,
-										   cmeta, desc,
-										   kvars_is_valid);
-				break;
-			case KAGG_ACTION__PAVG_INT:
-				__update_nogroups__pavg_int(kcxt, buffer,
-											cmeta, desc,
-											kvars_is_valid);
-				break;
-			case KAGG_ACTION__PAVG_FP:
-				__update_nogroups__pavg_fp(kcxt, buffer,
 										   cmeta, desc,
 										   kvars_is_valid);
 				break;
@@ -1421,9 +1334,12 @@ __update_groupby__psum_int(kern_context *kcxt,
 
 	if (vclass == KVAR_CLASS__INLINE)
 	{
+		kagg_state__psum_int_packed *r =
+			(kagg_state__psum_int_packed *)buffer;
 		int64_t		ival = kcxt->kvars_slot[desc->arg0_slot_id].i64;
 
-		__atomic_add_int64((int64_t *)buffer, ival);
+		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_add_int64(&r->sum, ival);
 	}
 	else
 	{
@@ -1441,51 +1357,8 @@ __update_groupby__psum_fp(kern_context *kcxt,
 
 	if (vclass == KVAR_CLASS__INLINE)
 	{
-		float8_t	fval = kcxt->kvars_slot[desc->arg0_slot_id].fp64;
-
-		__atomic_add_fp64((float8_t *)buffer, fval);
-	}
-	else
-	{
-		assert(vclass == KVAR_CLASS__NULL);
-	}
-}
-
-INLINE_FUNCTION(void)
-__update_groupby__pavg_int(kern_context *kcxt,
-						   char *buffer,
-						   kern_colmeta *cmeta,
-						   kern_aggregate_desc *desc)
-{
-	int		vclass = kcxt->kvars_class[desc->arg0_slot_id];
-
-	if (vclass == KVAR_CLASS__INLINE)
-	{
-		kagg_state__pavg_int_packed *r =
-			(kagg_state__pavg_int_packed *)buffer;
-		int64_t		ival = kcxt->kvars_slot[desc->arg0_slot_id].i64;
-
-		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_int64(&r->sum, ival);
-	}
-	else
-	{
-		 assert(vclass == KVAR_CLASS__NULL);
-	}
-}
-
-INLINE_FUNCTION(void)
-__update_groupby__pavg_fp(kern_context *kcxt,
-						  char *buffer,
-						  kern_colmeta *cmeta,
-						  kern_aggregate_desc *desc)
-{
-	int		vclass = kcxt->kvars_class[desc->arg0_slot_id];
-
-	if (vclass == KVAR_CLASS__INLINE)
-	{
-		kagg_state__pavg_fp_packed *r =
-			(kagg_state__pavg_fp_packed *)buffer;
+		kagg_state__psum_fp_packed *r =
+			(kagg_state__psum_fp_packed *)buffer;
 		float8_t	fval = kcxt->kvars_slot[desc->arg0_slot_id].fp64;
 
 		__atomic_add_uint32(&r->nitems, 1);
@@ -1616,17 +1489,13 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 			case KAGG_ACTION__PMAX_FP64:
 				__update_groupby__pmax_fp64(kcxt, buffer, cmeta, desc);
 				break;
+			case KAGG_ACTION__PAVG_INT:
 			case KAGG_ACTION__PSUM_INT:
 				__update_groupby__psum_int(kcxt, buffer, cmeta, desc);
 				break;
+			case KAGG_ACTION__PAVG_FP:
 			case KAGG_ACTION__PSUM_FP:
 				__update_groupby__psum_fp(kcxt, buffer, cmeta, desc);
-				break;
-			case KAGG_ACTION__PAVG_INT:
-				__update_groupby__pavg_int(kcxt, buffer, cmeta, desc);
-				break;
-			case KAGG_ACTION__PAVG_FP:
-				__update_groupby__pavg_fp(kcxt, buffer, cmeta, desc);
 				break;
 			case KAGG_ACTION__STDDEV:
 				__update_groupby__pstddev(kcxt, buffer, cmeta, desc);

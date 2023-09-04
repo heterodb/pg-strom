@@ -1317,7 +1317,7 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 	slot = pgstromFetchFallbackTuple(pts);
 	if (slot)
 		return slot;
-	
+
 	while (!pts->curr_resp || !(slot = pts->cb_next_tuple(pts)))
 	{
 	next_chunks:

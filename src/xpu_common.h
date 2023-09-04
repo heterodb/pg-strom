@@ -1844,14 +1844,14 @@ typedef struct
 	int32_t		vl_len_;
 	uint32_t	nitems;
 	int64_t		sum;
-} kagg_state__pavg_int_packed;
+} kagg_state__psum_int_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
 	uint32_t	nitems;
 	float8_t	sum;
-} kagg_state__pavg_fp_packed;
+} kagg_state__psum_fp_packed;
 
 typedef struct
 {

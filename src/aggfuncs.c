@@ -34,12 +34,17 @@ PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_fp32);
 PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_fp64);
 PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_numeric);
 
-PG_FUNCTION_INFO_V1(pgstrom_partial_sum_asis);
-
-PG_FUNCTION_INFO_V1(pgstrom_partial_avg_int);
-PG_FUNCTION_INFO_V1(pgstrom_partial_avg_fp);
-PG_FUNCTION_INFO_V1(pgstrom_favg_trans_int);
-PG_FUNCTION_INFO_V1(pgstrom_favg_trans_fp);
+PG_FUNCTION_INFO_V1(pgstrom_partial_sum_int);
+PG_FUNCTION_INFO_V1(pgstrom_partial_sum_fp);
+PG_FUNCTION_INFO_V1(pgstrom_partial_sum_cash);
+PG_FUNCTION_INFO_V1(pgstrom_fsum_trans_int);
+PG_FUNCTION_INFO_V1(pgstrom_fsum_trans_fp);
+PG_FUNCTION_INFO_V1(pgstrom_fsum_final_int);
+PG_FUNCTION_INFO_V1(pgstrom_fsum_final_int_as_numeric);
+PG_FUNCTION_INFO_V1(pgstrom_fsum_final_int_as_cash);
+PG_FUNCTION_INFO_V1(pgstrom_fsum_final_fp32);
+PG_FUNCTION_INFO_V1(pgstrom_fsum_final_fp64);
+PG_FUNCTION_INFO_V1(pgstrom_fsum_final_fp64_as_numeric);
 PG_FUNCTION_INFO_V1(pgstrom_favg_final_int);
 PG_FUNCTION_INFO_V1(pgstrom_favg_final_fp);
 PG_FUNCTION_INFO_V1(pgstrom_favg_final_num);
@@ -278,46 +283,49 @@ pgstrom_fminmax_final_numeric(PG_FUNCTION_ARGS)
 }
 
 /*
- * SUM(X) functions
+ * SUM(X),AVG(X) functions
  */
 Datum
-pgstrom_partial_sum_asis(PG_FUNCTION_ARGS)
+pgstrom_partial_sum_int(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
-}
-
-/*
- * AVG(X) functions
- */
-Datum
-pgstrom_partial_avg_int(PG_FUNCTION_ARGS)
-{
-	kagg_state__pavg_int_packed *r = palloc(sizeof(kagg_state__pavg_int_packed));
+	kagg_state__psum_int_packed *r = palloc(sizeof(kagg_state__psum_int_packed));
 
 	r->nitems = 1;
 	r->sum = PG_GETARG_INT64(0);
-	SET_VARSIZE(r, sizeof(kagg_state__pavg_int_packed));
+	SET_VARSIZE(r, sizeof(kagg_state__psum_int_packed));
 
 	PG_RETURN_POINTER(r);
 }
 
 Datum
-pgstrom_partial_avg_fp(PG_FUNCTION_ARGS)
+pgstrom_partial_sum_fp(PG_FUNCTION_ARGS)
 {
-	kagg_state__pavg_fp_packed *r = palloc(sizeof(kagg_state__pavg_fp_packed));
+	kagg_state__psum_fp_packed *r = palloc(sizeof(kagg_state__psum_fp_packed));
 
 	r->nitems = 1;
 	r->sum = PG_GETARG_FLOAT8(0);
-	SET_VARSIZE(r, sizeof(kagg_state__pavg_fp_packed));
+	SET_VARSIZE(r, sizeof(kagg_state__psum_fp_packed));
 
 	PG_RETURN_POINTER(r);
 }
 
 Datum
-pgstrom_favg_trans_int(PG_FUNCTION_ARGS)
+pgstrom_partial_sum_cash(PG_FUNCTION_ARGS)
 {
-	kagg_state__pavg_int_packed *state;
-	kagg_state__pavg_int_packed *arg;
+	kagg_state__psum_int_packed *r = palloc(sizeof(kagg_state__psum_int_packed));
+
+	r->nitems = 1;
+	r->sum = PG_GETARG_CASH(0);
+	SET_VARSIZE(r, sizeof(kagg_state__psum_int_packed));
+
+	PG_RETURN_POINTER(r);
+}
+
+Datum
+pgstrom_fsum_trans_int(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_int_packed *state;
+	kagg_state__psum_int_packed *arg;
 	MemoryContext	aggcxt;
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
@@ -326,16 +334,16 @@ pgstrom_favg_trans_int(PG_FUNCTION_ARGS)
 	{
 		if (PG_ARGISNULL(1))
 			PG_RETURN_NULL();
-		arg = (kagg_state__pavg_int_packed *)PG_GETARG_BYTEA_P(1);
+		arg = (kagg_state__psum_int_packed *)PG_GETARG_BYTEA_P(1);
 		state = MemoryContextAlloc(aggcxt, sizeof(*state));
 		memcpy(state, arg, sizeof(*state));
 	}
 	else
 	{
-		state = (kagg_state__pavg_int_packed *)PG_GETARG_BYTEA_P(0);
+		state = (kagg_state__psum_int_packed *)PG_GETARG_BYTEA_P(0);
 		if (!PG_ARGISNULL(1))
 		{
-			arg = (kagg_state__pavg_int_packed *)PG_GETARG_BYTEA_P(1);
+			arg = (kagg_state__psum_int_packed *)PG_GETARG_BYTEA_P(1);
 			state->nitems += arg->nitems;
 			state->sum    += arg->sum;
 		}
@@ -344,10 +352,10 @@ pgstrom_favg_trans_int(PG_FUNCTION_ARGS)
 }
 
 Datum
-pgstrom_favg_trans_fp(PG_FUNCTION_ARGS)
+pgstrom_fsum_trans_fp(PG_FUNCTION_ARGS)
 {
-	kagg_state__pavg_fp_packed *state;
-	kagg_state__pavg_fp_packed *arg;
+	kagg_state__psum_fp_packed *state;
+	kagg_state__psum_fp_packed *arg;
 	MemoryContext	aggcxt;
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
@@ -356,30 +364,95 @@ pgstrom_favg_trans_fp(PG_FUNCTION_ARGS)
 	{
 		if (PG_ARGISNULL(1))
 			PG_RETURN_NULL();
-		arg = (kagg_state__pavg_fp_packed *)PG_GETARG_BYTEA_P(1);
+		arg = (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(1);
 		state = MemoryContextAlloc(aggcxt, sizeof(*state));
 		memcpy(state, arg, sizeof(*state));
 	}
 	else
 	{
-		state = (kagg_state__pavg_fp_packed *)PG_GETARG_BYTEA_P(0);
+		state = (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(0);
 		if (!PG_ARGISNULL(1))
 		{
-			arg = (kagg_state__pavg_fp_packed *)PG_GETARG_BYTEA_P(1);
+			arg = (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(1);
 			state->nitems += arg->nitems;
 			state->sum    += arg->sum;
 		}
 	}
 	PG_RETURN_POINTER(state);
+}
+
+Datum
+pgstrom_fsum_final_int(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_int_packed *state;
+
+	state = (kagg_state__psum_int_packed *)PG_GETARG_BYTEA_P(0);
+	if (state->nitems == 0)
+		PG_RETURN_NULL();
+	PG_RETURN_INT64(state->sum);
+}
+
+Datum
+pgstrom_fsum_final_int_as_numeric(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_int_packed *state;
+
+	state = (kagg_state__psum_int_packed *)PG_GETARG_BYTEA_P(0);
+	if (state->nitems == 0)
+		PG_RETURN_NULL();
+	PG_RETURN_DATUM(DirectFunctionCall1(int8_numeric,
+										Int64GetDatum(state->sum)));
+}
+
+Datum
+pgstrom_fsum_final_int_as_cash(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_int_packed *state;
+
+	state = (kagg_state__psum_int_packed *)PG_GETARG_BYTEA_P(0);
+	if (state->nitems == 0)
+		PG_RETURN_NULL();
+	PG_RETURN_CASH(state->sum);
+}
+
+Datum
+pgstrom_fsum_final_fp32(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_fp_packed *state
+		= (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(0);
+	if (state->nitems == 0)
+		PG_RETURN_NULL();
+	PG_RETURN_FLOAT4(state->sum);
+}
+
+Datum
+pgstrom_fsum_final_fp64(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_fp_packed *state
+		= (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(0);
+	if (state->nitems == 0)
+		PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(state->sum);
+}
+
+Datum
+pgstrom_fsum_final_fp64_as_numeric(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_fp_packed *state
+		= (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(0);
+	if (state->nitems == 0)
+		PG_RETURN_NULL();
+	PG_RETURN_DATUM(DirectFunctionCall1(float8_numeric,
+										Float8GetDatum(state->sum)));
 }
 
 Datum
 pgstrom_favg_final_int(PG_FUNCTION_ARGS)
 {
-	kagg_state__pavg_int_packed *state;
+	kagg_state__psum_int_packed *state;
 	Datum	n, sum;
 
-	state = (kagg_state__pavg_int_packed *)PG_GETARG_BYTEA_P(0);
+	state = (kagg_state__psum_int_packed *)PG_GETARG_BYTEA_P(0);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
 	n = DirectFunctionCall1(int4_numeric, Int32GetDatum(state->nitems));
@@ -391,8 +464,9 @@ pgstrom_favg_final_int(PG_FUNCTION_ARGS)
 Datum
 pgstrom_favg_final_fp(PG_FUNCTION_ARGS)
 {
-	kagg_state__pavg_fp_packed *state
-		= (kagg_state__pavg_fp_packed *)PG_GETARG_BYTEA_P(0);
+	kagg_state__psum_fp_packed *state;
+
+	state = (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(0);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8((double)state->sum / (double)state->nitems);
@@ -401,10 +475,10 @@ pgstrom_favg_final_fp(PG_FUNCTION_ARGS)
 Datum
 pgstrom_favg_final_num(PG_FUNCTION_ARGS)
 {
-	kagg_state__pavg_fp_packed *state;
+	kagg_state__psum_fp_packed *state;
 	Datum	n, sum;
 
-	state = (kagg_state__pavg_fp_packed *)PG_GETARG_BYTEA_P(0);
+	state = (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(0);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
 	n = DirectFunctionCall1(int4_numeric, Int32GetDatum(state->nitems));
