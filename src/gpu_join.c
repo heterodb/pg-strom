@@ -2240,29 +2240,123 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts, int depth);
 
 static void
 __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
-						   TupleTableSlot *input_slot,
-						   const kern_expression *kexp_vloads)
+						   const kern_expression *kexp_vloads,
+						   const kern_data_store *kds,
+						   const ItemPointer t_self,
+						   const HeapTupleHeaderData *htup)
 {
-	Assert(kexp_vloads->opcode == FuncOpCode__LoadVars);
-	for (int i=0; i < kexp_vloads->u.load.nloads; i++)
-	{
-		const kern_vars_defitem *kvdef = &kexp_vloads->u.load.kvars[i];
-		int		resno = kvdef->var_resno;
-		int		slot_id = kvdef->var_slot_id;
+	const kern_vars_defitem *kvdef = kexp_vloads->u.load.kvars;
+	uint32_t	offset = htup->t_hoff;
+	uint32_t	kvcnt = 0;
+	uint32_t	resno;
+	uint32_t	ncols = Min(htup->t_infomask2 & HEAP_NATTS_MASK, kds->ncols);
+	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
 
-		if (slot_id >= 0 && slot_id < fallback_slot->tts_nvalid)
+	Assert(kexp_vloads->opcode == FuncOpCode__LoadVars);
+	/* extract system attributes, if rquired */
+	while (kvcnt < kexp_vloads->u.load.nloads &&
+		   kvdef->var_resno < 0)
+	{
+		int		slot_id = kvdef->var_slot_id;
+		Datum	datum;
+
+		switch (kvdef->var_resno)
 		{
-			if (resno > 0 && resno <= input_slot->tts_nvalid)
+			case SelfItemPointerAttributeNumber:
+				datum = PointerGetDatum(t_self);
+				break;
+			case MinTransactionIdAttributeNumber:
+				datum = TransactionIdGetDatum(HeapTupleHeaderGetRawXmin(htup));
+				break;
+			case MaxTransactionIdAttributeNumber:
+				datum = TransactionIdGetDatum(HeapTupleHeaderGetRawXmax(htup));
+				break;
+			case MinCommandIdAttributeNumber:
+			case MaxCommandIdAttributeNumber:
+				datum = CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(htup));
+				break;
+			case TableOidAttributeNumber:
+				datum = ObjectIdGetDatum(kds->table_oid);
+				break;
+			default:
+				elog(ERROR, "invalid attnum: %d", kvdef->var_resno);
+		}
+		fallback_slot->tts_isnull[slot_id] = false;
+		fallback_slot->tts_values[slot_id] = datum;
+		kvdef++;
+		kvcnt++;
+	}
+	/* extract the user data */
+	resno = 1;
+	while (kvcnt < kexp_vloads->u.load.nloads && resno <= ncols)
+	{
+		const kern_colmeta *cmeta = &kds->colmeta[resno-1];
+		const char	   *addr;
+
+		if (heap_hasnull && att_isnull(resno-1, htup->t_bits))
+		{
+			addr = NULL;
+		}
+		else
+		{
+			if (cmeta->attlen > 0)
+				offset = TYPEALIGN(cmeta->attalign, offset);
+			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
+				offset = TYPEALIGN(cmeta->attalign, offset);
+			addr = ((char *)htup + offset);
+			if (cmeta->attlen > 0)
+				offset += cmeta->attlen;
+			else
+				offset += VARSIZE_ANY(addr);
+		}
+
+		if (kvdef->var_resno == resno)
+		{
+			int		slot_id = kvdef->var_slot_id;
+			Datum	datum;
+
+			if (!addr)
+				datum = 0;
+			else if (cmeta->attbyval)
 			{
-				fallback_slot->tts_isnull[slot_id] = input_slot->tts_isnull[resno-1];
-				fallback_slot->tts_values[slot_id] = input_slot->tts_values[resno-1];
+				switch (cmeta->attlen)
+				{
+					case 1:
+						datum = *((uint8_t *)addr);
+						break;
+					case 2:
+						datum = *((uint16_t *)addr);
+						break;
+					case 4:
+						datum = *((uint32_t *)addr);
+						break;
+					case 8:
+						datum = *((uint64_t *)addr);
+						break;
+					default:
+						elog(ERROR, "invalid attlen: %d", cmeta->attlen);
+				}
 			}
 			else
 			{
-				fallback_slot->tts_isnull[slot_id] = true;
-				fallback_slot->tts_values[slot_id] = 0;
+				datum = PointerGetDatum(addr);
 			}
+			fallback_slot->tts_isnull[slot_id] = !addr;
+			fallback_slot->tts_values[slot_id] = datum;
+			kvdef++;
+			kvcnt++;
 		}
+		resno++;
+	}
+	/* fill-up by NULL for the remaining fields */
+	while (kvcnt < kexp_vloads->u.load.nloads)
+	{
+		int		slot_id = kvdef->var_slot_id;
+
+		fallback_slot->tts_isnull[slot_id] = true;
+		fallback_slot->tts_values[slot_id] = 0;
+		kvdef++;
+		kvcnt++;
 	}
 }
 
@@ -2274,7 +2368,6 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 	pgstromTaskInnerState *istate = &pts->inners[depth-1];
 	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
-	TupleTableSlot *i_slot = istate->ps->ps_ResultTupleSlot;
 	kern_expression *kexp_join_kvars_load = NULL;
 
 	if (pp_info->kexp_join_kvars_load_packed)
@@ -2295,19 +2388,15 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 		/* load inner variable */
 		if (kexp_join_kvars_load)
 		{
-			HeapTupleData	tuple;
+			ItemPointerData	t_self;
 
-			tuple.t_len = tupitem->t_len;
-			ItemPointerSetInvalid(&tuple.t_self);
-			tuple.t_tableOid = InvalidOid;
-			tuple.t_data = &tupitem->htup;
-			ExecForceStoreHeapTuple(&tuple, i_slot, false);
-			slot_getallattrs(i_slot);
+			ItemPointerSetInvalid(&t_self);
 			Assert(kexp_join_kvars_load->u.load.depth == depth);
 			__execFallbackLoadVarsSlot(pts->fallback_slot,
-									   i_slot,
-									   kexp_join_kvars_load);
-			ExecClearTuple(i_slot);
+									   kexp_join_kvars_load,
+									   kds_in,
+									   &t_self,
+									   &tupitem->htup);
 		}
 		/* check JOIN-clause */
 		if (istate->join_quals != NULL ||
@@ -2334,7 +2423,6 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	pgstromTaskInnerState *istate = &pts->inners[depth-1];
 	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
-	TupleTableSlot *i_slot = istate->ps->ps_ResultTupleSlot;
 	kern_expression *kexp_join_kvars_load = NULL;
 	kern_hashitem  *hitem;
 	uint32_t		hash;
@@ -2376,19 +2464,14 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 			continue;
 		if (kexp_join_kvars_load)
 		{
-			HeapTupleData	tuple;
+			ItemPointerData	t_self;
 
-			tuple.t_len  = hitem->t.t_len;
-			ItemPointerSetInvalid(&tuple.t_self);
-			tuple.t_tableOid = InvalidOid;
-			tuple.t_data = &hitem->t.htup;
-			ExecForceStoreHeapTuple(&tuple, i_slot, false);
-			slot_getallattrs(i_slot);
-			Assert(kexp_join_kvars_load->u.load.depth == depth);
+			ItemPointerSetInvalid(&t_self);
 			__execFallbackLoadVarsSlot(pts->fallback_slot,
-									   i_slot,
-									   kexp_join_kvars_load);
-			ExecClearTuple(i_slot);
+									   kexp_join_kvars_load,
+									   kds_in,
+									   &t_self,
+									   &hitem->t.htup);
 		}
 		/* check JOIN-clause */
 		if (istate->join_quals == NULL ||
@@ -2464,6 +2547,7 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 
 	ExecForceStoreHeapTuple(tuple, base_slot, false);
 	/* check WHERE-clause if any */
+	//TODO: base_quals based on the fallback-slot layout
 	if (pts->base_quals)
 	{
 		econtext->ecxt_scantuple = base_slot;
@@ -2471,7 +2555,6 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 		if (!ExecQual(pts->base_quals, econtext))
 			return;
 	}
-	slot_getallattrs(base_slot);
 
 	/* Load the base tuple (depth-0) to the fallback slot */
 	ExecStoreAllNullTuple(fallback_slot);
@@ -2480,7 +2563,11 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 		kexp_scan_kvars_load = (const kern_expression *)
 			VARDATA(pp_info->kexp_scan_kvars_load);
 	Assert(kexp_scan_kvars_load->u.load.depth == 0);
-	__execFallbackLoadVarsSlot(fallback_slot, base_slot, kexp_scan_kvars_load);
+	__execFallbackLoadVarsSlot(fallback_slot,
+							   kexp_scan_kvars_load,
+							   kds,
+							   &tuple->t_self,
+							   tuple->t_data);
 	/* Run JOIN, if any */
 	Assert(pts->h_kmrels);
 	__execFallbackCpuJoinOneDepth(pts, 1);
@@ -2493,7 +2580,6 @@ __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 	pgstromPlanInfo	   *pp_info = pts->pp_info;
 	ExprContext		   *econtext = pts->css.ss.ps.ps_ExprContext;
 	TupleTableSlot	   *fallback_slot = pts->fallback_slot;
-	TupleTableSlot	   *i_slot = istate->ps->ps_ResultTupleSlot;
 	kern_expression	   *kexp_join_kvars_load = NULL;
 	kern_multirels	   *h_kmrels = pts->h_kmrels;
 	kern_data_store	   *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth-1);
@@ -2517,22 +2603,19 @@ __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 		if (kexp_join_kvars_load)
 		{
 			kern_tupitem   *titem = KDS_GET_TUPITEM(kds_in, i);
-			HeapTupleData	tuple;
+			ItemPointerData	t_self;
 
 			if (!titem)
 				continue;
-			tuple.t_len  = titem->t_len;
-			ItemPointerSetInvalid(&tuple.t_self);
-			tuple.t_tableOid = InvalidOid;
-			tuple.t_data = &titem->htup;
-			ExecForceStoreHeapTuple(&tuple, i_slot, false);
-			slot_getallattrs(i_slot);
-			Assert(kexp_join_kvars_load->u.load.depth == depth);
+			ItemPointerSetInvalid(&t_self);
 			__execFallbackLoadVarsSlot(fallback_slot,
-									   i_slot,
-									   kexp_join_kvars_load);
-			ExecClearTuple(i_slot);
+									   kexp_join_kvars_load,
+									   kds_in,
+									   &t_self,
+									   &titem->htup);
 		}
+		if (istate->other_quals && !ExecQual(istate->other_quals, econtext))
+			continue;
 		__execFallbackCpuJoinOneDepth(pts, depth+1);
 	}
 }
