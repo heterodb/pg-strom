@@ -423,6 +423,7 @@ pgstromFetchFallbackTuple(pgstromTaskState *pts)
 			pts->fallback_nitems = 0;
 			pts->fallback_usage = 0;
 		}
+		slot_getallattrs(slot);
 		return slot;
 	}
 	return NULL;

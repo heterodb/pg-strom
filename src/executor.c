@@ -1351,6 +1351,7 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 				break;
 		}
 	}
+	slot_getallattrs(slot);
 	return slot;
 }
 
