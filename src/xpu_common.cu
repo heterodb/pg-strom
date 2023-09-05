@@ -1325,6 +1325,55 @@ pgfn_BoolTestExpr(XPU_PGFUNCTION_ARGS)
 }
 
 STATIC_FUNCTION(bool)
+pgfn_DistinctFrom(XPU_PGFUNCTION_ARGS)
+{
+	xpu_bool_t	   *result = (xpu_bool_t *)__result;
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	const kern_expression *subarg1;
+	const kern_expression *subarg2;
+	xpu_datum_t	   *subbuf1;
+	xpu_datum_t	   *subbuf2;
+
+	assert(kexp->exptype == TypeOpCode__bool &&
+		   kexp->nr_args == 1 &&
+		   KEXP_IS_VALID(karg, bool) &&
+		   karg->nr_args == 2);
+	subarg1 = KEXP_FIRST_ARG(karg);
+	assert(__KEXP_IS_VALID(karg, subarg1));
+	subbuf1 = (xpu_datum_t *)alloca(subarg1->expr_ops->xpu_type_sizeof);
+	if (!EXEC_KERN_EXPRESSION(kcxt, subarg1, subbuf1))
+		return false;
+
+	subarg2 = KEXP_NEXT_ARG(subarg1);
+	assert(__KEXP_IS_VALID(karg, subarg2));
+	subbuf2 = (xpu_datum_t *)alloca(subarg2->expr_ops->xpu_type_sizeof);
+	if (!EXEC_KERN_EXPRESSION(kcxt, subarg2, subbuf2))
+		return false;
+
+	if (XPU_DATUM_ISNULL(subbuf1) && XPU_DATUM_ISNULL(subbuf2))
+	{
+		/* Both NULL? Then is not distinct... */
+		result->expr_ops = &xpu_bool_ops;
+		result->value = false;
+	}
+	else if (XPU_DATUM_ISNULL(subbuf1) || XPU_DATUM_ISNULL(subbuf2))
+	{
+		/* Only one is NULL? Then is distinct... */
+		result->expr_ops = &xpu_bool_ops;
+		result->value = true;
+	}
+	else if (EXEC_KERN_EXPRESSION(kcxt, karg, __result))
+	{
+		result->value = !result->value;
+	}
+	else
+	{
+		return false;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
 pgfn_CoalesceExpr(XPU_PGFUNCTION_ARGS)
 {
 	const kern_expression *karg;
@@ -2850,18 +2899,19 @@ PUBLIC_DATA xpu_type_catalog_entry builtin_xpu_types_catalog[] = {
 PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
 	{FuncOpCode__ConstExpr, 				pgfn_ConstExpr },
 	{FuncOpCode__ParamExpr, 				pgfn_ParamExpr },
-    {FuncOpCode__VarExpr,					pgfn_VarExpr },
-    {FuncOpCode__BoolExpr_And,				pgfn_BoolExprAnd },
-    {FuncOpCode__BoolExpr_Or,				pgfn_BoolExprOr },
-    {FuncOpCode__BoolExpr_Not,				pgfn_BoolExprNot },
-    {FuncOpCode__NullTestExpr_IsNull,		pgfn_NullTestExpr },
-    {FuncOpCode__NullTestExpr_IsNotNull,	pgfn_NullTestExpr },
-    {FuncOpCode__BoolTestExpr_IsTrue,		pgfn_BoolTestExpr},
-    {FuncOpCode__BoolTestExpr_IsNotTrue,	pgfn_BoolTestExpr},
-    {FuncOpCode__BoolTestExpr_IsFalse,		pgfn_BoolTestExpr},
-    {FuncOpCode__BoolTestExpr_IsNotFalse,	pgfn_BoolTestExpr},
-    {FuncOpCode__BoolTestExpr_IsUnknown,	pgfn_BoolTestExpr},
-    {FuncOpCode__BoolTestExpr_IsNotUnknown,	pgfn_BoolTestExpr},
+	{FuncOpCode__VarExpr,					pgfn_VarExpr },
+	{FuncOpCode__BoolExpr_And,				pgfn_BoolExprAnd },
+	{FuncOpCode__BoolExpr_Or,				pgfn_BoolExprOr },
+	{FuncOpCode__BoolExpr_Not,				pgfn_BoolExprNot },
+	{FuncOpCode__NullTestExpr_IsNull,		pgfn_NullTestExpr },
+	{FuncOpCode__NullTestExpr_IsNotNull,	pgfn_NullTestExpr },
+	{FuncOpCode__BoolTestExpr_IsTrue,		pgfn_BoolTestExpr},
+	{FuncOpCode__BoolTestExpr_IsNotTrue,	pgfn_BoolTestExpr},
+	{FuncOpCode__BoolTestExpr_IsFalse,		pgfn_BoolTestExpr},
+	{FuncOpCode__BoolTestExpr_IsNotFalse,	pgfn_BoolTestExpr},
+	{FuncOpCode__BoolTestExpr_IsUnknown,	pgfn_BoolTestExpr},
+	{FuncOpCode__BoolTestExpr_IsNotUnknown,	pgfn_BoolTestExpr},
+	{FuncOpCode__DistinctFrom,              pgfn_DistinctFrom},
 	{FuncOpCode__CoalesceExpr,				pgfn_CoalesceExpr},
 	{FuncOpCode__LeastExpr,					pgfn_LeastExpr},
 	{FuncOpCode__GreatestExpr,				pgfn_GreatestExpr},

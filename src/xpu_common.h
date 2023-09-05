@@ -269,6 +269,7 @@ typedef enum {
 	FuncOpCode__BoolTestExpr_IsNotFalse,
 	FuncOpCode__BoolTestExpr_IsUnknown,
 	FuncOpCode__BoolTestExpr_IsNotUnknown,
+	FuncOpCode__DistinctFrom,
 	FuncOpCode__CoalesceExpr,
 	FuncOpCode__LeastExpr,
 	FuncOpCode__GreatestExpr,

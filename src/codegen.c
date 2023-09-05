@@ -1268,6 +1268,29 @@ codegen_oper_expression(codegen_context *context,
 }
 
 static int
+codegen_distinct_expression(codegen_context *context,
+							StringInfo buf, DistinctExpr *expr)
+{
+	kern_expression	kexp;
+	int		pos = -1;
+
+	Assert(exprType((Node *)expr) == BOOLOID);
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.exptype = TypeOpCode__bool;
+	kexp.expflags = context->kexp_flags;
+	kexp.opcode = FuncOpCode__DistinctFrom;
+	kexp.nr_args = 1;
+	kexp.args_offset = SizeOfKernExpr(0);
+	if (buf)
+		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+	if (codegen_oper_expression(context, buf, expr) < 0)
+		return -1;
+	if (buf)
+		__appendKernExpMagicAndLength(buf, pos);
+	return 0;
+}
+
+static int
 codegen_bool_expression(codegen_context *context,
 						StringInfo buf, BoolExpr *b)
 {
@@ -1998,8 +2021,9 @@ codegen_expression_walker(codegen_context *context,
 		case T_FuncExpr:
 			return codegen_func_expression(context, buf, (FuncExpr *)expr);
 		case T_OpExpr:
-		case T_DistinctExpr:
 			return codegen_oper_expression(context, buf, (OpExpr *)expr);
+		case T_DistinctExpr:
+			return codegen_distinct_expression(context, buf, (DistinctExpr *)expr);
 		case T_BoolExpr:
 			return codegen_bool_expression(context, buf, (BoolExpr *)expr);
 		case T_NullTest:
@@ -3685,6 +3709,9 @@ __xpucode_to_cstring(StringInfo buf,
 			break;
 		case FuncOpCode__BoolTestExpr_IsNotUnknown:
 			appendStringInfo(buf, "{BoolTest::IsNotUnknown");
+			break;
+		case FuncOpCode__DistinctFrom:
+			appendStringInfo(buf, "{DistinctFrom");
 			break;
 		case FuncOpCode__CoalesceExpr:
 			appendStringInfo(buf, "{Coalesce");
