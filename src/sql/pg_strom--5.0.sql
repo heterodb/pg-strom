@@ -2493,6 +2493,15 @@ CREATE FUNCTION pgstrom.nrows("any")
   AS 'MODULE_PATHNAME','pgstrom_partial_nrows'
   LANGUAGE C STRICT PARALLEL SAFE;
 
+
+CREATE AGGREGATE pgstrom.fcount(bigint)
+(
+  sfunc = pg_catalog.int8pl,
+  stype = bigint,
+  initcond = "0",
+  parallel = safe
+);
+
 --
 -- PMIN(X)
 --

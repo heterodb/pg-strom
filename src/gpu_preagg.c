@@ -48,13 +48,13 @@ typedef struct
 static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	/* COUNT(*) = SUM(NROWS()) */
 	{"count()",
-	 "s:sum(int8)",
+	 "s:fcount(int8)",
 	 "s:nrows()",
 	 KAGG_ACTION__NROWS_ANY, false
 	},
 	/* COUNT(X) = SUM(NROWS(X)) */
 	{"count(any)",
-	 "s:sum(int8)",
+	 "s:fcount(int8)",
 	 "s:nrows(any)",
 	 KAGG_ACTION__NROWS_COND, false
 	},
