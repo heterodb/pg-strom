@@ -130,6 +130,7 @@
 #include <float.h>
 #include <libgen.h>
 #include <limits.h>
+#include <math.h>
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>

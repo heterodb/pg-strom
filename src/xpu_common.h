@@ -105,6 +105,15 @@
 #ifndef DBL_MAX
 #define DBL_MAX         __longlong_as_double__(0x7fefffffffffffffULL)
 #endif
+#ifndef DBL_MIN
+#define DBL_MIN			__longlong_as_double__(0x0010000000000000ULL)
+#endif
+#ifndef DBL_INF
+#define DBL_INF			__longlong_as_double__(0x7ff0000000000000ULL)
+#endif
+#ifndef DBL_NAN
+#define DBL_NAN			__longlong_as_double__(0x7fffffffffffffffULL)
+#endif
 
 #ifndef BITS_PER_BYTE
 #define BITS_PER_BYTE	8
@@ -1715,6 +1724,13 @@ typedef struct kern_expression	kern_expression;
 								const kern_expression *kexp,	\
 								xpu_datum_t *__result
 typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
+
+#define KEXP_PROCESS_ARGS0(RETTYPE)								\
+	xpu_##RETTYPE##_t *result = (xpu_##RETTYPE##_t *)__result;	\
+																\
+	assert(kexp->exptype == TypeOpCode__##RETTYPE &&			\
+		   kexp->nr_args == 0)
+
 
 #define KEXP_PROCESS_ARGS1(RETTYPE,ARGTYPE1,ARGNAME1)			\
 	xpu_##RETTYPE##_t *result = (xpu_##RETTYPE##_t *)__result;	\

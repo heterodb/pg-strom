@@ -13,6 +13,532 @@
 #include "xpu_common.h"
 
 /*
+ * Mathmatical functions
+ */
+#define CHECKFLOATVAL(kcxt, fp_value, inf_is_valid, zero_is_valid)	\
+	do {															\
+		if (!(inf_is_valid) && isinf(fp_value))						\
+		{															\
+			STROM_ELOG(kcxt, "value out of range: overflow");		\
+			return false;											\
+		}															\
+		if (!(zero_is_valid) && (fp_value) == 0.0)					\
+		{															\
+			STROM_ELOG(kcxt, "value out of range: underflow");		\
+			return false;											\
+		}															\
+	} while(0)
+
+PUBLIC_FUNCTION(bool)
+pgfn_cbrt(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		result->value = cbrt(fval.value);
+		CHECKFLOATVAL(kcxt, result->value,
+					  isinf(fval.value),
+					  fval.value == 0.0);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_dcbrt(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_cbrt(kcxt, kexp, __result);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_ceil(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+        result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		result->value = ceil(fval.value);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_ceiling(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_ceil(kcxt, kexp, __result);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_exp(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		if (isnan(fval.value))
+			result->value = fval.value;
+		else if (isinf(fval.value))
+			result->value = (fval.value > 0.0 ? fval.value : 0.0);
+		else
+		{
+			result->value = exp(fval.value);
+			CHECKFLOATVAL(kcxt, result->value, false, false);
+		}
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_dexp(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_exp(kcxt, kexp, __result);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_floor(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		result->value = floor(fval.value);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_ln(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else if (fval.value <= 0.0)
+	{
+		STROM_ELOG(kcxt, "cannot take logarithm of zero or negative number");
+		return false;
+	}
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		result->value = log(fval.value);
+		CHECKFLOATVAL(kcxt, result->value,
+					  isinf(fval.value),
+					  fval.value == 1.0);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_dlog1(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else if (fval.value == 0.0)
+	{
+		STROM_ELOG(kcxt, "cannot take logarithm of zero");
+		return false;
+	}
+	else if (fval.value < 0.0)
+	{
+		STROM_ELOG(kcxt, "cannot take logarithm of a negative number");
+		return false;
+	}
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		result->value = log(fval.value);
+		CHECKFLOATVAL(kcxt, result->value,
+					  isinf(fval.value),
+					  fval.value != 1.0);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_log(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_dlog1(kcxt, kexp, __result);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_dlog10(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_dlog1(kcxt, kexp, __result);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_pi(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS0(float8);
+
+	result->expr_ops = &xpu_float8_ops;
+	result->value = M_PI;
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_power(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(float8, float8, fval, float8, pval);
+
+	if (XPU_DATUM_ISNULL(&fval) || XPU_DATUM_ISNULL(&pval))
+		result->expr_ops = NULL;
+	else if (fval.value == 0.0 && pval.value < 0.0)
+	{
+		STROM_ELOG(kcxt, "zero raised to a negative power is undefined");
+		return false;
+	}
+	else if (fval.value < 0.0 && floor(pval.value) != pval.value)
+	{
+		STROM_ELOG(kcxt, "a negative number raised to a non-integer power yields a complex result");
+		return false;
+	}
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		result->value = pow(fval.value, pval.value);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_pow(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_power(kcxt,kexp,__result);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_dpow(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_power(kcxt,kexp,__result);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_round(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		result->value = rint(fval.value);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_dround(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_round(kcxt, kexp, __result);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_sign(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		if (fval.value > 0.0)
+			result->value = 1.0;
+		else if (fval.value < 0.0)
+			result->value = -1.0;
+		else
+			result->value = 0;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_sqrt(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else if (fval.value < 0.0)
+	{
+		STROM_ELOG(kcxt, "cannot take square root of a negative number");
+		return false;
+	}
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		result->value = sqrt(fval.value);
+		CHECKFLOATVAL(kcxt, result->value,
+					  isinf(fval.value),
+					  fval.value == 0.0);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_dsqrt(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_sqrt(kcxt, kexp, __result);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_trunc(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		if (fval.value >= 0)
+			result->value = floor(fval.value);
+		else
+			result->value = -floor(-fval.value);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_dtrunc(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_trunc(kcxt, kexp, __result);
+}
+
+/*
+ * Trigonometric function
+ */
+#define RADIANS_PER_DEGREE		0.0174532925199432957692
+
+PUBLIC_FUNCTION(bool)
+pgfn_degrees(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		result->value = fval.value / 0.0174532925199432957692;
+		CHECKFLOATVAL(kcxt, result->value,
+					  isinf(fval.value),
+					  fval.value == 0.0);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_radians(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		result->value = fval.value * 0.0174532925199432957692;
+		CHECKFLOATVAL(kcxt, result->value,
+					  isinf(fval.value),
+					  fval.value == 0.0);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_acos(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		if (isnan(fval.value))
+			result->value = fval.value;
+		else if (fval.value < -1.0 || fval.value > 1.0)
+		{
+			STROM_ELOG(kcxt, "input is out of range");
+			return false;
+		}
+		else
+		{
+			result->value = acos(fval.value);
+			CHECKFLOATVAL(kcxt, result->value, false, true);
+		}
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_asin(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		if (isnan(fval.value))
+			result->value = fval.value;
+		else if (fval.value < -1.0 || fval.value > 1.0)
+		{
+			STROM_ELOG(kcxt, "input is out of range");
+			return false;
+		}
+		else
+		{
+			result->value = asin(fval.value);
+			CHECKFLOATVAL(kcxt, result->value, false, true);
+		}
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_atan(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		if (isnan(fval.value))
+			result->value = DBL_NAN;
+		else
+		{
+			result->value = atan(fval.value);
+			CHECKFLOATVAL(kcxt, result->value, false, true);
+		}
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_atan2(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(float8, float8, fval, float8, pval);
+
+	if (XPU_DATUM_ISNULL(&fval) || XPU_DATUM_ISNULL(&pval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		if (isnan(fval.value) || isnan(pval.value))
+			result->value = DBL_NAN;
+		else
+		{
+			result->value = atan2(fval.value, pval.value);
+			CHECKFLOATVAL(kcxt, result->value, false, true);
+		}
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_cos(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		if (isnan(fval.value))
+			result->value = DBL_NAN;
+		else
+		{
+			result->value = cos(fval.value);
+			CHECKFLOATVAL(kcxt, result->value, false, true);
+		}
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_cot(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		CHECKFLOATVAL(kcxt, fval.value, false, true);
+
+		result->expr_ops = &xpu_float8_ops;
+		result->value = 1.0 / tan(fval.value);
+		CHECKFLOATVAL(kcxt, result->value, true, true);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_sin(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		if (isnan(fval.value))
+			result->value = DBL_NAN;
+		else
+		{
+			result->value = cos(fval.value);
+			CHECKFLOATVAL(kcxt, result->value, false, true);
+		}
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_tan(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		if (isnan(fval.value))
+			result->value = DBL_NAN;
+		else
+		{
+			result->value = tan(fval.value);
+			CHECKFLOATVAL(kcxt, result->value, true, true);
+		}
+	}
+	return true;
+}
+
+/*
  * Currency data type (xpu_money_t), functions and operators
  */
 STATIC_FUNCTION(bool)
