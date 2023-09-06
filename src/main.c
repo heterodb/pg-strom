@@ -265,8 +265,13 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 							elog(ERROR, "Bug? dummy TLE type mismatch [%s] [%s]",
 								 nodeToString(tle1),
 								 nodeToString(tle2));
-						/* assign resource name */
+						/*
+						 * assign resource name and 'junk' state (grouping-keys that
+						 * don't appear in the final result).
+						 * See, apply_tlist_labeling()
+						 */
 						tle2->resname = tle1->resname;
+						tle2->resjunk = tle1->resjunk;
 					}
 					*p_plan = subplan;
 					pgstrom_removal_dummy_plans(pstmt, p_plan);
