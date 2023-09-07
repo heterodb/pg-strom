@@ -1246,7 +1246,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 	if (parse->havingQual)
 	{
 		havingQual = replace_expression_by_altfunc(parse->havingQual, con);
-		if (!havingQual)
+		if (!con->device_executable)
 		{
 			elog(DEBUG2, "unable to replace HAVING to alternative aggregation: %s",
 				 nodeToString(parse->havingQual));
