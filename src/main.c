@@ -273,6 +273,7 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 						tle2->resname = tle1->resname;
 						tle2->resjunk = tle1->resjunk;
 					}
+					subplan->initPlan = cscan->scan.plan.initPlan;
 					*p_plan = subplan;
 					pgstrom_removal_dummy_plans(pstmt, p_plan);
 					return;
