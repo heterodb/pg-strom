@@ -85,7 +85,6 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
 	privs = lappend(privs, pp_info->fallback_tlist);
 	privs = lappend(privs, pp_info->groupby_actions);
-	privs = lappend(privs, pp_info->groupby_keys);
 	/* inner relations */
 	privs = lappend(privs, makeInteger(pp_info->num_rels));
 	for (int i=0; i < pp_info->num_rels; i++)
@@ -182,7 +181,6 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.fallback_tlist = list_nth(privs, pindex++);
 	pp_data.groupby_actions = list_nth(privs, pindex++);
-	pp_data.groupby_keys = list_nth(privs, pindex++);
 	/* inner relations */
 	pp_data.num_rels = intVal(list_nth(privs, pindex++));
 	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_data.num_rels]));
@@ -246,7 +244,6 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 	pp_dest->kvars_exprs      = copyObject(pp_dest->kvars_exprs);
 	pp_dest->fallback_tlist   = copyObject(pp_dest->fallback_tlist);
 	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
-	pp_dest->groupby_keys     = list_copy(pp_dest->groupby_keys);
 	for (int j=0; j < pp_orig->num_rels; j++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_dest->inners[j];
@@ -1340,9 +1337,12 @@ pgstrom_build_groupby_dev(PlannerInfo *root,
 				Expr   *arg = lfirst(lc2);
 				int		resno = list_length(context.tlist_dev) + 1;
 
-				context.tlist_dev =
-					lappend(context.tlist_dev,
-							makeTargetEntry(arg, resno, NULL, true));
+				if (!tlist_member(arg, context.tlist_dev))
+				{
+					context.tlist_dev =
+						lappend(context.tlist_dev,
+								makeTargetEntry(arg, resno, NULL, true));
+				}
 			}
 		}
 	}

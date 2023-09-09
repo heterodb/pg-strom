@@ -1827,6 +1827,9 @@ typedef struct
 } kern_projection_desc;
 
 #define KAGG_ACTION__VREF			101		/* simple var copy */
+#define KAGG_ACTION__VREF_NOKEY		102		/* simple var copy; but not a grouping-
+											 * key, if GROUP-BY primary key.
+											 * (only code generator internal use) */
 #define KAGG_ACTION__NROWS_ANY		201		/* <int8> - increment 1 always */
 #define KAGG_ACTION__NROWS_COND		202		/* <int8> - increment 1 if not NULL */
 #define KAGG_ACTION__PMIN_INT32		302		/* <int4>,<int8> - min value */

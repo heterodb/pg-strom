@@ -2911,9 +2911,7 @@ codegen_build_groupby_keyhash(codegen_context *context,
 	List		   *groupby_keys_input_slot = NIL;
 	kern_expression	kexp;
 	char		   *xpucode;
-	ListCell	   *cell;
-
-	Assert(pp_info->groupby_keys != NIL);
+	ListCell	   *lc1, *lc2;
 
 	/*
 	 * Add variable slots to reference grouping-keys from the input and
@@ -2924,23 +2922,34 @@ codegen_build_groupby_keyhash(codegen_context *context,
 	kexp.exptype = TypeOpCode__int4;
 	kexp.expflags = context->kexp_flags;
 	kexp.opcode = FuncOpCode__HashValue;
-	kexp.nr_args = list_length(pp_info->groupby_keys);
+	kexp.nr_args = 0;
 	kexp.args_offset = MAXALIGN(SizeOfKernExpr(0));
-	__appendBinaryStringInfo(&buf, &kexp, kexp.args_offset);
-	foreach (cell, pp_info->groupby_keys)
+	buf.len = kexp.args_offset;
+	forboth (lc1, context->tlist_dev,
+			 lc2, pp_info->groupby_actions)
 	{
-		Expr   *key = lfirst(cell);
-		int		slot_id = __codegen_groupby_expression(context, &buf, key);
+		TargetEntry *tle = lfirst(lc1);
+		int		action = lfirst_int(lc2);
+		int		slot_id;
 
-		groupby_keys_input_slot = lappend_int(groupby_keys_input_slot, slot_id);
+		if (action == KAGG_ACTION__VREF)
+		{
+			slot_id = __codegen_groupby_expression(context, &buf, tle->expr);
+			groupby_keys_input_slot = lappend_int(groupby_keys_input_slot, slot_id);
+			kexp.nr_args++;
+		}
 	}
+	if (kexp.nr_args == 0)
+		goto bailout;
+	memcpy(buf.data, &kexp, SizeOfKernExpr(0));
 	__appendKernExpMagicAndLength(&buf, 0);
 
 	xpucode = palloc(VARHDRSZ + buf.len);
 	memcpy(xpucode + VARHDRSZ, buf.data, buf.len);
 	SET_VARSIZE(xpucode, VARHDRSZ + buf.len);
 	pp_info->kexp_groupby_keyhash = (bytea *)xpucode;
-
+bailout:
+	pfree(buf.data);
 	return groupby_keys_input_slot;
 }
 
@@ -2956,40 +2965,38 @@ codegen_build_groupby_keyload(codegen_context *context,
 	char	   *xpucode = NULL;
 	ListCell   *lc1, *lc2;
 
-	Assert(pp_info->groupby_keys != NIL);
-
-	foreach (lc1, pp_info->groupby_keys)
+	forboth (lc1, context->tlist_dev,
+			 lc2, pp_info->groupby_actions)
 	{
-		Expr   *key = lfirst(lc1);
+		TargetEntry *tle = lfirst(lc1);
+		int		action = lfirst_int(lc2);
+		int		slot_id;
 
-		foreach (lc2, context->tlist_dev)
+		if (tle->resjunk)
+			continue;
+		if (action == KAGG_ACTION__VREF)
 		{
-			TargetEntry *tle = lfirst(lc2);
-			int		slot_id;
-
-			if (tle->resjunk || !equal(key, tle->expr))
-				continue;
 			slot_id = list_length(context->kvars_depth);
 			groupby_keys_final_slot = lappend_int(groupby_keys_final_slot, slot_id);
 			context->kvars_depth = lappend_int(context->kvars_depth,
 											   SPECIAL_DEPTH__PREAGG_FINAL);
 			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
 			context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
-			break;
 		}
-		if (!lc2)
-			elog(ERROR, "Bug? group-by key is missing on the tlist_dev");
 	}
-	kexp = __codegen_build_loadvars_one(context, SPECIAL_DEPTH__PREAGG_FINAL);
-	if (kexp)
-	{
-		xpucode = palloc(VARHDRSZ + kexp->len);
-		memcpy(xpucode + VARHDRSZ, kexp, kexp->len);
-		SET_VARSIZE(xpucode, VARHDRSZ + kexp->len);
-		pfree(kexp);
-	}
-	pp_info->kexp_groupby_keyload = (bytea *)xpucode;
 
+	if (groupby_keys_final_slot != NIL)
+	{
+		kexp = __codegen_build_loadvars_one(context, SPECIAL_DEPTH__PREAGG_FINAL);
+		if (kexp)
+		{
+			xpucode = palloc(VARHDRSZ + kexp->len);
+			memcpy(xpucode + VARHDRSZ, kexp, kexp->len);
+			SET_VARSIZE(xpucode, VARHDRSZ + kexp->len);
+			pfree(kexp);
+		}
+		pp_info->kexp_groupby_keyload = (bytea *)xpucode;
+	}
 	return groupby_keys_final_slot;
 }
 
@@ -3006,20 +3013,21 @@ codegen_build_groupby_keycomp(codegen_context *context,
 	kern_expression kexp;
 	size_t			sz;
 	char		   *xpucode;
-	ListCell	   *lc1, *lc2, *lc3;
+	ListCell	   *lc1, *lc2;
 
-	Assert(pp_info->groupby_keys != NIL);
-
+	Assert(pp_info->groupby_actions != NIL &&
+		   list_length(groupby_keys_input_slot) ==
+		   list_length(groupby_keys_final_slot));
 	initStringInfo(&buf);
-	forthree (lc1, pp_info->groupby_keys,
-			  lc2, groupby_keys_input_slot,
-			  lc3, groupby_keys_final_slot)
+
+	forboth (lc1, groupby_keys_input_slot,
+			 lc2, groupby_keys_final_slot)
 	{
-		Expr	   *key = lfirst(lc1);
-		int			i_slot_id = lfirst_int(lc2);
-		int			f_slot_id = lfirst_int(lc3);
-		Oid			type_oid = exprType((Node *)key);
-		Oid			coll_oid = exprCollation((Node *)key);
+		int			i_slot_id = lfirst_int(lc1);
+		int			f_slot_id = lfirst_int(lc2);
+		Expr	   *expr = list_nth(context->kvars_exprs, i_slot_id);
+		Oid			type_oid = exprType((Node *)expr);
+		Oid			coll_oid = exprCollation((Node *)expr);
 		int			pos, __pos;
 		devtype_info *dtype;
 		devfunc_info *dfunc;
@@ -3032,6 +3040,7 @@ codegen_build_groupby_keycomp(codegen_context *context,
 		if (!dfunc)
 			elog(ERROR, "type %s has no device executable equal function",
 				 format_type_be(type_oid));
+
 		Assert(dfunc->func_rettype->type_code == TypeOpCode__bool &&
 			   dfunc->func_nargs == 2 &&
 			   dfunc->func_argtypes[0]->type_oid == type_oid &&
@@ -3071,17 +3080,18 @@ codegen_build_groupby_keycomp(codegen_context *context,
 		__appendKernExpMagicAndLength(&buf, pos);	/* end of FuncExpr */
 	}
 
-	if (list_length(pp_info->groupby_keys) > 1)
+	if (list_length(groupby_keys_input_slot) > 1)
 	{
 		kern_expression *payload = (kern_expression *)buf.data;
-		int			payload_sz = buf.len;
+		int		nr_args = list_length(groupby_keys_input_slot);
+		int		payload_sz = buf.len;
 
 		initStringInfo(&buf);
 		memset(&kexp, 0, sizeof(kexp));
 		kexp.exptype = TypeOpCode__bool;
 		kexp.expflags = context->kexp_flags;
 		kexp.opcode = FuncOpCode__BoolExpr_And;
-		kexp.nr_args = list_length(pp_info->groupby_keys);
+		kexp.nr_args = nr_args;
 		kexp.args_offset = SizeOfKernExpr(0);
 		__appendBinaryStringInfo(&buf, &kexp, SizeOfKernExpr(0));
 		__appendBinaryStringInfo(&buf, payload, payload_sz);
@@ -3137,8 +3147,8 @@ __codegen_build_groupby_actions(codegen_context *context,
 
 		Assert(!tle->resjunk);
 		desc = &kexp->u.pagg.desc[index++];
-		desc->action = action;
-		if (action == KAGG_ACTION__VREF)
+		if (action == KAGG_ACTION__VREF ||
+			action == KAGG_ACTION__VREF_NOKEY)
 		{
 			slot_id = __try_inject_projection_expression(context,
 														 &buf,
@@ -3149,6 +3159,7 @@ __codegen_build_groupby_actions(codegen_context *context,
 				elog(ERROR, "Bug? grouping-key is not on the kvars-slot");
 			if (inject_new)
 				nexprs++;
+			desc->action = KAGG_ACTION__VREF;
 			desc->arg0_slot_id = slot_id;
 		}
 		else
@@ -3157,6 +3168,7 @@ __codegen_build_groupby_actions(codegen_context *context,
 			int			count = 0;
 
 			Assert(IsA(func, FuncExpr) && list_length(func->args) <= 2);
+			desc->action = action;
 			foreach (lc2, func->args)
 			{
 				Expr   *fn_arg = lfirst(lc2);
@@ -3215,17 +3227,18 @@ void
 codegen_build_groupby_actions(codegen_context *context,
 							  pgstromPlanInfo *pp_info)
 {
-	List   *groupby_keys_input_slot = NIL;
-	List   *groupby_keys_final_slot = NIL;
+	List   *groupby_keys_input_slot;
+	List   *groupby_keys_final_slot;
 
-	if (pp_info->groupby_keys != NIL)
-	{
-		groupby_keys_input_slot = codegen_build_groupby_keyhash(context, pp_info);
-		groupby_keys_final_slot = codegen_build_groupby_keyload(context, pp_info);
+	Assert(pp_info->groupby_actions != NIL &&
+		   list_length(pp_info->groupby_actions) <= list_length(context->tlist_dev));
+	groupby_keys_input_slot = codegen_build_groupby_keyhash(context, pp_info);
+	groupby_keys_final_slot = codegen_build_groupby_keyload(context, pp_info);
+	if (groupby_keys_input_slot != NIL &&
+		groupby_keys_final_slot != NIL)
 		codegen_build_groupby_keycomp(context, pp_info,
 									  groupby_keys_input_slot,
 									  groupby_keys_final_slot);
-	}
 	__codegen_build_groupby_actions(context, pp_info);
 }
 

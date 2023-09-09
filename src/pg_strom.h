@@ -308,7 +308,6 @@ typedef struct
 	List	   *fallback_tlist;	/* fallback_slot -> custom_scan_tlist if JOIN/PREAGG */
 	/* group-by parameters */
 	List	   *groupby_actions;	/* list of KAGG_ACTION__* on the kds_final */
-	List	   *groupby_keys;		/* resno of grouping keys, if GROUP BY exists */
 	/* inner relations */
 	int			num_rels;
 	pgstromPlanInnerInfo inners[FLEXIBLE_ARRAY_MEMBER];

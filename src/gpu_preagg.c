@@ -890,6 +890,8 @@ typedef struct
 	pgstromPlanInfo *pp_info;
 	List		   *input_rels_tlist;
 	List		   *inner_paths_list;
+	List		   *groupby_keys;
+	List		   *groupby_keys_refno;
 	Node		   *havingQual;
 	const CustomPathMethods *custom_path_methods;
 } xpugroupby_build_path_context;
@@ -1106,7 +1108,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 static Node *
 replace_expression_by_altfunc(Node *node, xpugroupby_build_path_context *con)
 {
-	pgstromPlanInfo *pp_info = con->pp_info;
+	PathTarget *target_input = con->input_rel->reltarget;
 	Node	   *aggfn;
 	ListCell   *lc;
 
@@ -1121,16 +1123,42 @@ replace_expression_by_altfunc(Node *node, xpugroupby_build_path_context *con)
 		return aggfn;
 	}
 	/* grouping key? */
-	foreach (lc, pp_info->groupby_keys)
+	foreach (lc, con->groupby_keys)
 	{
 		Expr   *key = lfirst(lc);
 
 		if (equal(node, key))
 			return copyObject(node);
 	}
+	/*
+	 * Elsewhere, non-grouping-key columns if GROUP BY <primary key> is used,
+	 * because it is equivalent to GROUP BY <all the columns>.
+	 * Also, the device code don't need to understand its data type, so we
+	 * have no device type checks here.
+	 */
+	foreach (lc, target_input->exprs)
+	{
+		Expr   *expr = lfirst(lc);
+
+		if (equal(node, expr))
+		{
+			/*
+			 * this expression shall be attached onto the target-partial later,
+			 * however, it don't need to be added to the target-final, because
+			 * this expression is consumed within HAVING quals, thus not exists
+			 * on the final Aggregate results.
+			 */
+			con->groupby_keys = lappend(con->groupby_keys, expr);
+			con->groupby_keys_refno = lappend_int(con->groupby_keys_refno, 0);
+			return copyObject(node);
+		}
+	}
+
 	if (IsA(node, Var) || IsA(node, PlaceHolderVar))
+	{
 		elog(ERROR, "Bug? referenced variable is grouping-key nor its dependent key: %s",
 			 nodeToString(node));
+	}
 	return expression_tree_mutator(node, replace_expression_by_altfunc, con);
 }
 
@@ -1142,7 +1170,6 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 	pgstromPlanInfo *pp_info = con->pp_info;
 	PathTarget	   *target_upper = con->target_upper;
 	Node		   *havingQual = NULL;
-	List		   *groupby_keys_refno = NIL;
 	ListCell	   *lc1, *lc2;
 	int				i = 0;
 
@@ -1192,8 +1219,9 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			}
 			add_column_to_pathtarget(con->target_final, expr, sortgroupref);
 			/* to be attached to target-partial later */
-			pp_info->groupby_keys = lappend(pp_info->groupby_keys, expr);
-			groupby_keys_refno = lappend_int(groupby_keys_refno, sortgroupref);
+			con->groupby_keys = lappend(con->groupby_keys, expr);
+			con->groupby_keys_refno = lappend_int(con->groupby_keys_refno,
+												  sortgroupref);
 		}
 		else if (IsA(expr, Aggref))
 		{
@@ -1221,24 +1249,6 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			return false;
 		}
 	}
-	/*
-	 * Due to data alignment on the tuple on the kds_final, grouping-keys must
-	 * be located after the aggregate functions.
-	 */
-	forboth (lc1, pp_info->groupby_keys,
-			 lc2, groupby_keys_refno)
-	{
-		Expr   *key = lfirst(lc1);
-		Index	keyref = lfirst_int(lc2);
-
-		Assert(keyref > 0);
-		add_column_to_pathtarget(con->target_partial, key, keyref);
-		pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
-											   KAGG_ACTION__VREF);
-		pp_info->kvars_depth = lappend_int(pp_info->kvars_depth, -1);
-		pp_info->kvars_resno = lappend_int(pp_info->kvars_resno,
-										   list_length(con->target_partial->exprs));
-	}
 
 	/*
 	 * HAVING clause
@@ -1254,7 +1264,27 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 		}
 	}
 	con->havingQual = havingQual;
-	
+
+	/*
+	 * Due to data alignment on the tuple on the kds_final, grouping-keys must
+	 * be located after the aggregate functions.
+	 */
+	forboth (lc1, con->groupby_keys,
+			 lc2, con->groupby_keys_refno)
+	{
+		Expr   *key = lfirst(lc1);
+		Index	keyref = lfirst_int(lc2);
+
+		add_column_to_pathtarget(con->target_partial, key, keyref);
+//		pp_info->groupby_keys = lappend(pp_info->groupby_keys, key);
+		pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
+											   keyref == 0
+											   ? KAGG_ACTION__VREF_NOKEY
+											   : KAGG_ACTION__VREF);
+		pp_info->kvars_depth = lappend_int(pp_info->kvars_depth, -1);
+		pp_info->kvars_resno = lappend_int(pp_info->kvars_resno,
+										   list_length(con->target_partial->exprs));
+	}
 	set_pathtarget_cost_width(root, con->target_final);
 	set_pathtarget_cost_width(root, con->target_partial);
 
