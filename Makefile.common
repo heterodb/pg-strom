@@ -32,3 +32,8 @@ PGSTROM_GITHASH := $(GITHASH)::local_changes
 endif
 endif
 endif
+
+#
+# PostgreSQL Commands
+#
+PSQL=$(shell $(PG_CONFIG) --bindir)/psql

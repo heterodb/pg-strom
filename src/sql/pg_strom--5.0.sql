@@ -3351,8 +3351,8 @@ CREATE AGGREGATE pgstrom.regr_syy(bytea)
 -- without valid configuration.
 CREATE OR REPLACE FUNCTION
 pgstrom.regression_testdb_revision()
-RETURNS int
-AS 'SELECT 0'
+RETURNS text
+AS 'SELECT ''unknown'''
 LANGUAGE 'sql';
 
 
