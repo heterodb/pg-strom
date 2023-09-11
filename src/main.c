@@ -15,7 +15,7 @@ PG_MODULE_MAGIC;
 
 /* misc variables */
 bool		pgstrom_enabled;				/* GUC */
-bool		pgstrom_cpu_fallback_enabled;	/* GUC */
+int			pgstrom_cpu_fallback_elevel;	/* GUC */
 bool		pgstrom_regression_test_mode;	/* GUC */
 long		PAGE_SIZE;
 long		PAGE_MASK;
@@ -63,6 +63,18 @@ pg_hash_any(const void *ptr, int sz)
 static void
 pgstrom_init_gucs(void)
 {
+	static struct config_enum_entry	__cpu_fallback_options[] = {
+		{"notice",	NOTICE,	false},
+		{"on",		DEBUG2,	false},
+		{"off",		ERROR,	false},
+		{"true",	DEBUG2,	true},
+		{"false",	ERROR,	true},
+		{"yes",		DEBUG2,	true},
+		{"no",		ERROR,	true},
+		{"1",		DEBUG2,	true},
+		{"0",		ERROR,	true},
+		{NULL, 0, false}
+	};
 	/* Disables PG-Strom features at all */
 	DefineCustomBoolVariable("pg_strom.enabled",
 							 "Enables the planner's use of PG-Strom",
@@ -73,11 +85,12 @@ pgstrom_init_gucs(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* turn on/off CPU fallback if GPU could not execute the query */
-	DefineCustomBoolVariable("pg_strom.cpu_fallback",
-							 "Enables CPU fallback if GPU required re-run",
+	DefineCustomEnumVariable("pg_strom.cpu_fallback",
+							 "Enables CPU fallback if xPU required re-run",
 							 NULL,
-							 &pgstrom_cpu_fallback_enabled,
-							 false,
+							 &pgstrom_cpu_fallback_elevel,
+							 NOTICE,
+							 __cpu_fallback_options,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);

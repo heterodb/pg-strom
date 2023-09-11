@@ -2547,10 +2547,9 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 
 	ExecForceStoreHeapTuple(tuple, base_slot, false);
 	/* check WHERE-clause if any */
-	//TODO: base_quals based on the fallback-slot layout
 	if (pts->base_quals)
 	{
-		econtext->ecxt_scantuple = base_slot;
+		econtext->ecxt_outertuple = base_slot;
 		ResetExprContext(econtext);
 		if (!ExecQual(pts->base_quals, econtext))
 			return;

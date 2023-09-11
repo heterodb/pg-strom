@@ -2145,6 +2145,12 @@ typedef struct {
 	} stats[1];
 } kern_exec_results;
 
+typedef struct
+{
+	kern_errorbuf		error;		/* original error in kernel space */
+	kern_data_store		kds_src;
+} kern_cpu_fallback;
+
 #ifndef ILIST_H
 typedef struct dlist_node
 {
@@ -2170,6 +2176,7 @@ typedef struct
 		kern_exec_task		task;
 		kern_final_task		fin;
 		kern_exec_results	results;
+		kern_cpu_fallback	fallback;
 	} u;
 } XpuCommand;
 

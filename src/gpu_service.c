@@ -1853,17 +1853,48 @@ resume_kernel:
 	else if (kgtask->kerror.errcode == ERRCODE_CPU_FALLBACK &&
 			 (session->xpu_task_flags & DEVTASK__MASK) != DEVTASK__PREAGG)
 	{
+		kern_data_store *__kds_src = kds_src;
 		XpuCommand	resp;
-		
-		/* send back kds_src with XpuCommandTag__CPUFallback */
+
+		/*
+		 * Send back the source buffer with XpuCommandTag__CPUFallback
+		 *
+		 * KDS_FORMAT_BLOCK and KDS_FORMAT_ARROW must be send back the
+		 * backend process from the GPU device buffer, because the original
+		 * kds_src does not have data contents itself.
+		 * For KDS_FORMAT_COLUMN, it is equivalent to the kernel buffer,
+		 * and its size tends to be large. So, CPU fallback uses regular
+		 * heap-scan instead.
+		 */
+		if (s_chunk)
+		{
+			__kds_src = malloc(s_chunk->__length);
+			if (!__kds_src)
+			{
+				gpuClientELog(gclient, "out of memory for CPU fallback (sz=%lu)",
+							  s_chunk->__length);
+				goto bailout;
+			}
+			rc = cuMemcpyDtoH(__kds_src, s_chunk->m_devptr, s_chunk->__length);
+			if (rc != CUDA_SUCCESS)
+			{
+				free(__kds_src);
+				gpuClientELog(gclient, "failed on cuMemcpyDtoH: %s", cuStrError(rc));
+				goto bailout;
+			}
+		}
 		memset(&resp, 0, sizeof(resp));
 		resp.magic = XpuCommandMagicNumber;
 		resp.tag   = XpuCommandTag__CPUFallback;
-		resp.u.results.chunks_nitems = 1;
-		resp.u.results.chunks_offset = offsetof(XpuCommand, u.results.stats);
+		memcpy(&resp.u.fallback.error,
+			   &kgtask->kerror,
+			   sizeof(kern_errorbuf));
 		gpuClientWriteBack(gclient,
-						   &resp, resp.u.results.chunks_offset,
-						   1, &kds_src);
+						   &resp,
+						   offsetof(XpuCommand, u.fallback.kds_src),
+						   1, &__kds_src);
+		if (kds_src != __kds_src)
+			free(__kds_src);
 	}
 	else
 	{

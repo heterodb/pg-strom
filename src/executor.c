@@ -1003,6 +1003,101 @@ pgstromExecFinalChunkDummy(pgstromTaskState *pts,
 }
 
 /*
+ * CPU Fallback Routines
+ */
+static void
+ExecFallbackRowDataStore(pgstromTaskState *pts,
+						 kern_data_store *kds)
+{
+	for (uint32_t i=0; i < kds->nitems; i++)
+	{
+		kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds, i);
+		HeapTupleData	tuple;
+
+		tuple.t_len = tupitem->t_len;
+		ItemPointerCopy(&tupitem->htup.t_ctid, &tuple.t_self);
+		tuple.t_tableOid = kds->table_oid;
+		tuple.t_data = &tupitem->htup;
+		pts->cb_cpu_fallback(pts, kds, &tuple);
+	}
+}
+
+static void
+ExecFallbackBlockDataStore(pgstromTaskState *pts,
+						   kern_data_store *kds)
+{
+	for (uint32_t i=0; i < kds->nitems; i++)
+	{
+		PageHeaderData *pg_page = KDS_BLOCK_PGPAGE(kds, i);
+		BlockNumber		block_nr = KDS_BLOCK_BLCKNR(kds, i);
+		uint32_t		ntuples = PageGetMaxOffsetNumber(pg_page);
+
+		for (uint32_t k=0; k < ntuples; k++)
+		{
+			ItemIdData	   *lpp = &pg_page->pd_linp[k];
+			HeapTupleData	tuple;
+
+			if (ItemIdIsNormal(lpp))
+			{
+				tuple.t_len = ItemIdGetLength(lpp);
+				tuple.t_self.ip_blkid.bi_hi = (uint16_t)(block_nr >> 16);
+				tuple.t_self.ip_blkid.bi_lo = (uint16_t)(block_nr & 0xffffU);
+				tuple.t_self.ip_posid = k+1;
+				tuple.t_tableOid = kds->table_oid;
+				tuple.t_data = (HeapTupleHeader)PageGetItem(pg_page, lpp);
+
+				pts->cb_cpu_fallback(pts, kds, &tuple);
+			}
+		}
+	}
+}
+
+static void
+ExecFallbackColumnDataStore(pgstromTaskState *pts,
+							kern_data_store *kds)
+{
+	Relation		rel = pts->css.ss.ss_currentRelation;
+	EState		   *estate = pts->css.ss.ps.state;
+	TableScanDesc	scan;
+
+	scan = table_beginscan(rel, estate->es_snapshot, 0, NULL);
+	while (table_scan_getnextslot(scan, ForwardScanDirection, pts->base_slot))
+	{
+		HeapTuple	tuple;
+		bool		should_free;
+
+		tuple = ExecFetchSlotHeapTuple(pts->base_slot, false, &should_free);
+		pts->cb_cpu_fallback(pts, kds, tuple);
+		if (should_free)
+			pfree(tuple);
+	}
+	table_endscan(scan);
+}
+
+static void
+ExecFallbackArrowDataStore(pgstromTaskState *pts,
+						   kern_data_store *kds)
+{
+	pgstromPlanInfo *pp_info = pts->pp_info;
+
+	for (uint32_t index=0; index < kds->nitems; index++)
+	{
+		HeapTuple	tuple;
+		bool		should_free;
+
+		if (!kds_arrow_fetch_tuple(pts->base_slot,
+								   kds, index,
+								   pp_info->outer_refs))
+			break;
+
+		tuple = ExecFetchSlotHeapTuple(pts->base_slot, false, &should_free);
+		pts->cb_cpu_fallback(pts, kds, tuple);
+		if (should_free)
+			pfree(tuple);
+	}
+}
+
+/*
  * __setupTaskStateRequestBuffer
  */
 static void
@@ -1343,8 +1438,32 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 				break;
 
 			case XpuCommandTag__CPUFallback:
-				//run CPU fallback
-				break;
+				elog(pgstrom_cpu_fallback_elevel,
+					 "(%s:%d) CPU fallback due to %s [%s]",
+					 resp->u.fallback.error.filename,
+					 resp->u.fallback.error.lineno,
+					 resp->u.fallback.error.message,
+					 resp->u.fallback.error.funcname);
+				switch (resp->u.fallback.kds_src.format)
+				{
+					case KDS_FORMAT_ROW:
+						ExecFallbackRowDataStore(pts, &resp->u.fallback.kds_src);
+						break;
+					case KDS_FORMAT_BLOCK:
+						ExecFallbackBlockDataStore(pts, &resp->u.fallback.kds_src);
+						break;
+					case KDS_FORMAT_COLUMN:
+						ExecFallbackColumnDataStore(pts, &resp->u.fallback.kds_src);
+						break;
+					case KDS_FORMAT_ARROW:
+						ExecFallbackArrowDataStore(pts, &resp->u.fallback.kds_src);
+						break;
+					default:
+						elog(ERROR, "CPU fallback received unknown KDS format (%c)",
+							 resp->u.fallback.kds_src.format);
+						break;
+				}
+				goto next_chunks;
 
 			default:
 				elog(ERROR, "unknown response tag: %u", resp->tag);

@@ -835,7 +835,7 @@ ExecFallbackCpuScan(pgstromTaskState *pts,
 	{
 		ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
 
-		econtext->ecxt_scantuple = scan_slot;
+		econtext->ecxt_outertuple = scan_slot;
 		ResetExprContext(econtext);
 		if (!ExecQual(pts->base_quals, econtext))
 			return;
