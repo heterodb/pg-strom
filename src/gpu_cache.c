@@ -12,6 +12,7 @@
 #include "pg_strom.h"
 #include "cuda_common.h"
 
+//#define GPUCACHE_DEBUG_MESSAGE		1
 /*
  * GpuCacheControlCommand
  */
@@ -2809,7 +2810,7 @@ __gpuCacheCallbackOnAlterTable(Oid table_oid)
 												   &options_old);
 	signature_new = gpuCacheTableSignatureSnapshot(table_oid, SnapshotSelf,
 												   &options_new);
-#ifdef PGSTROM_DEBUG_BUILD
+#ifdef GPUCACHE_DEBUG_MESSAGE
 	elog(LOG, "__gpuCacheCallbackOnAlterTable(table_oid=%u): signature %lx -> %lx",
 		 table_oid, signature_old, signature_new);
 #endif
@@ -2942,7 +2943,7 @@ gpuCacheObjectAccess(ObjectAccessType access,
 		if (classId == RelationRelationId && subId > 0)
 		{
 			/* ALTER TABLE ... ADD COLUMN */
-#ifdef PGSTROM_DEBUG_BUILD
+#ifdef GPUCACHE_DEBUG_MESSAGE
 			elog(LOG, "pid=%u OAT_POST_CREATE (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
 #endif
 			__gpuCacheCallbackOnAlterTable(objectId);
@@ -2950,7 +2951,7 @@ gpuCacheObjectAccess(ObjectAccessType access,
 		else if (classId == TriggerRelationId)
 		{
 			/* CREATE OR REPLACE TRIGGER */
-#ifdef PGSTROM_DEBUG_BUILD
+#ifdef GPUCACHE_DEBUG_MESSAGE
 			elog(LOG, "pid=%u OAT_POST_CREATE (pg_trigger, objectId=%u)", getpid(), objectId);
 #endif
 			__gpuCacheCallbackOnAlterTrigger(objectId);
@@ -2960,14 +2961,14 @@ gpuCacheObjectAccess(ObjectAccessType access,
 	{
 		if (classId == RelationRelationId)
 		{
-#ifdef PGSTROM_DEBUG_BUILD
+#ifdef GPUCACHE_DEBUG_MESSAGE
 			elog(LOG, "pid=%u OAT_POST_ALTER (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
 #endif
 			__gpuCacheCallbackOnAlterTable(objectId);
 		}
 		else if (classId == TriggerRelationId)
 		{
-#ifdef PGSTROM_DEBUG_BUILD
+#ifdef GPUCACHE_DEBUG_MESSAGE
 			elog(LOG, "pid=%u OAT_POST_ALTER (pg_trigger, objectId=%u)", getpid(), objectId);
 #endif
 			__gpuCacheCallbackOnAlterTrigger(objectId);
@@ -2977,14 +2978,14 @@ gpuCacheObjectAccess(ObjectAccessType access,
 	{
 		if (classId == RelationRelationId)
 		{
-#ifdef PGSTROM_DEBUG_BUILD
+#ifdef GPUCACHE_DEBUG_MESSAGE
 			elog(LOG, "pid=%u OAT_DROP (pg_class, objectId=%u, subId=%d)", getpid(), objectId, subId);
 #endif
 			__gpuCacheOnDropRelation(objectId);
 		}
 		else if (classId == TriggerRelationId)
 		{
-#ifdef PGSTROM_DEBUG_BUILD
+#ifdef GPUCACHE_DEBUG_MESSAGE
 			elog(LOG, "pid=%u OAT_DROP (pg_trigger, objectId=%u)", getpid(), objectId);
 #endif
 			__gpuCacheOnDropTrigger(objectId);
@@ -2992,7 +2993,7 @@ gpuCacheObjectAccess(ObjectAccessType access,
 	}
 	else if (access == OAT_TRUNCATE)
 	{
-#ifdef PGSTROM_DEBUG_BUILD
+#ifdef GPUCACHE_DEBUG_MESSAGE
 		elog(LOG, "pid=%u OAT_TRUNCATE (objectId=%u)", getpid(), objectId);
 #endif
 		__gpuCacheTruncateLog(objectId);
@@ -3002,7 +3003,7 @@ gpuCacheObjectAccess(ObjectAccessType access,
 static void
 gpuCacheRelcacheCallback(Datum arg, Oid relid)
 {
-#ifdef PGSTROM_DEBUG_BUILD
+#ifdef GPUCACHE_DEBUG_MESSAGE
 	elog(LOG, "pid=%u: gpuCacheRelcacheCallback (table_oid=%u)", getpid(), relid);
 #endif
 	gpuCacheTableSignatureInvalidation(relid);
@@ -3012,7 +3013,7 @@ gpuCacheRelcacheCallback(Datum arg, Oid relid)
 static void
 gpuCacheSyscacheCallback(Datum arg, int cacheid, uint32 hashvalue)
 {
-#ifdef PGSTROM_DEBUG_BUILD
+#ifdef GPUCACHE_DEBUG_MESSAGE
 	elog(LOG, "pid=%u: gpuCacheSyscacheCallback (cacheid=%u)", getpid(), cacheid);
 #endif
 	__gpucache_sync_trigger_function_oid = InvalidOid;
@@ -3031,7 +3032,7 @@ gpuCacheSyscacheCallback(Datum arg, int cacheid, uint32 hashvalue)
 static void
 gpuCacheXactCallback(XactEvent event, void *arg)
 {
-#if 0
+#ifdef GPUCACHE_DEBUG_MESSAGE
 	elog(INFO, "XactCallback: ev=%s xid=%u top-xid=%u",
 		 event == XACT_EVENT_COMMIT  ? "XACT_EVENT_COMMIT" :
 		 event == XACT_EVENT_ABORT   ? "XACT_EVENT_ABORT"  :
@@ -3066,7 +3067,7 @@ gpuCacheSubXactCallback(SubXactEvent event,
 						SubTransactionId mySubid,
 						SubTransactionId parentSubid, void *arg)
 {
-#if 0
+#ifdef GPUCACHE_DEBUG_MESSAGE
 	elog(INFO, "SubXactCallback: ev=%s xid=%u top-xid=%u",
 		 event == SUBXACT_EVENT_START_SUB ? "SUBXACT_EVENT_START_SUB" :
 		 event == SUBXACT_EVENT_COMMIT_SUB ? "SUBXACT_EVENT_COMMIT_SUB" :
