@@ -80,7 +80,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, pp_info->kvars_depth);
 	privs = lappend(privs, pp_info->kvars_resno);
 	privs = lappend(privs, pp_info->kvars_types);
-	exprs = lappend(exprs, pp_info->kvars_exprs);
+	privs = lappend(privs, pp_info->kvars_exprs);
 	privs = lappend(privs, makeInteger(pp_info->extra_flags));
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
 	privs = lappend(privs, pp_info->fallback_tlist);
@@ -176,7 +176,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.kvars_depth = list_nth(privs, pindex++);
 	pp_data.kvars_resno = list_nth(privs, pindex++);
 	pp_data.kvars_types = list_nth(privs, pindex++);
-	pp_data.kvars_exprs = list_nth(exprs, eindex++);
+	pp_data.kvars_exprs = list_nth(privs, pindex++);
 	pp_data.extra_flags = intVal(list_nth(privs, pindex++));
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.fallback_tlist = list_nth(privs, pindex++);
@@ -1385,11 +1385,9 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	/* codegen for outer scan, if any */
 	if (pp_info->scan_quals)
 	{
+		pp_info->scan_quals_fallback = pp_info->scan_quals;
 		pp_info->kexp_scan_quals
 			= codegen_build_scan_quals(&context, pp_info->scan_quals);
-		pp_info->scan_quals_fallback
-			= build_fallback_exprs_scan(pp_info->scan_relid,
-										pp_info->scan_quals);
 		pull_varattnos((Node *)pp_info->scan_quals,
 					   pp_info->scan_relid,
 					   &outer_refs);
@@ -2543,30 +2541,36 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
 	TupleTableSlot *base_slot = pts->base_slot;
 	TupleTableSlot *fallback_slot = pts->fallback_slot;
-	const kern_expression *kexp_scan_kvars_load = NULL;
+	int				slot_id = 0;
+	ListCell	   *lc1, *lc2;
 
 	ExecForceStoreHeapTuple(tuple, base_slot, false);
+	econtext->ecxt_scantuple = base_slot;
 	/* check WHERE-clause if any */
 	if (pts->base_quals)
 	{
-		econtext->ecxt_outertuple = base_slot;
 		ResetExprContext(econtext);
 		if (!ExecQual(pts->base_quals, econtext))
 			return;
 	}
-
+	slot_getallattrs(base_slot);
 	/* Load the base tuple (depth-0) to the fallback slot */
-	ExecStoreAllNullTuple(fallback_slot);
+	Assert(fallback_slot != NULL);
+    ExecStoreAllNullTuple(fallback_slot);
+	forboth (lc1, pp_info->kvars_depth,
+			 lc2, pp_info->kvars_resno)
+	{
+		int		depth = lfirst_int(lc1);
+		int		resno = lfirst_int(lc2);
+
+		if (depth == 0 && resno >= 1 && resno <= base_slot->tts_nvalid)
+		{
+			fallback_slot->tts_isnull[slot_id] = base_slot->tts_isnull[resno-1];
+			fallback_slot->tts_values[slot_id] = base_slot->tts_isnull[resno-1];
+		}
+		slot_id++;
+	}
 	econtext->ecxt_scantuple = fallback_slot;
-	if (pp_info->kexp_scan_kvars_load)
-		kexp_scan_kvars_load = (const kern_expression *)
-			VARDATA(pp_info->kexp_scan_kvars_load);
-	Assert(kexp_scan_kvars_load->u.load.depth == 0);
-	__execFallbackLoadVarsSlot(fallback_slot,
-							   kexp_scan_kvars_load,
-							   kds,
-							   &tuple->t_self,
-							   tuple->t_data);
 	/* Run JOIN, if any */
 	Assert(pts->h_kmrels);
 	__execFallbackCpuJoinOneDepth(pts, 1);

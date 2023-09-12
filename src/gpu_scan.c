@@ -682,8 +682,8 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	codegen_context_init(&context, pp_info->xpu_task_flags);
 	context.input_rels_tlist = input_rels_tlist;
 	pp_info->kexp_scan_quals = codegen_build_scan_quals(&context, pp_info->scan_quals);
-	pp_info->scan_quals_fallback
-		= build_fallback_exprs_scan(baserel->relid, pp_info->scan_quals);
+	pp_info->scan_quals_fallback = pp_info->scan_quals;
+		//= build_fallback_exprs_scan(baserel->relid, pp_info->scan_quals);
 	/* code generation for the Projection */
 	context.tlist_dev = gpuscan_build_projection(baserel,
 												 tlist,
@@ -824,22 +824,22 @@ ExecFallbackCpuScan(pgstromTaskState *pts,
 					kern_data_store *kds,
 					HeapTuple tuple)
 {
-	TupleTableSlot *scan_slot = pts->base_slot;
-	bool			should_free = false;
-	static int count = 0;
+	ExprContext	*econtext = pts->css.ss.ps.ps_ExprContext;
+	ListCell   *lc;
+	bool		should_free;
 
-	ExecForceStoreHeapTuple(tuple, scan_slot, false);
+	ExecForceStoreHeapTuple(tuple, pts->base_slot, false);
+	econtext->ecxt_scantuple = pts->base_slot;
 
 	/* check WHERE-clause if any */
 	if (pts->base_quals)
 	{
-		ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
-
-		econtext->ecxt_outertuple = scan_slot;
 		ResetExprContext(econtext);
 		if (!ExecQual(pts->base_quals, econtext))
 			return;
 	}
+	Assert(!pts->fallback_slot);
+	
 	/* apply Projection if any */
 	if (pts->fallback_proj)
 	{
@@ -847,14 +847,14 @@ ExecFallbackCpuScan(pgstromTaskState *pts,
 
 		tuple = ExecFetchSlotHeapTuple(proj_slot, false, &should_free);
 	}
+	else
+	{
+		tuple = ExecFetchSlotHeapTuple(pts->base_slot, false, &should_free);
+	}
 	/* save the tuple on the fallback buffer */
 	pgstromStoreFallbackTuple(pts, tuple);
 	if (should_free)
 		pfree(tuple);
-
-	if (count++ < 100)
-		elog(INFO, "fallback called (usage: %zu, nitems: %zu, index: %zu)",
-			 pts->fallback_usage, pts->fallback_nitems, pts->fallback_index);
 }
 
 /*

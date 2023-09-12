@@ -1152,6 +1152,152 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 	pts->xcmd_buf.len = off;
 }
 
+
+
+/*
+ * __execInitTaskStateCpuFallback
+ *
+ * CPU fallback process moves the tuple as follows
+ *
+ * <Base Relation> (can be both of heap and arrow)
+ *      |
+ *      v
+ * [Base Slot]  ... equivalent to the base relation
+ *      |
+ *      v
+ * (Base Quals) ... WHERE-clause
+ *      |
+ *      +-----------+
+ *      |           |
+ *      |           v
+ *      |    [Fallback Slot]
+ *      |           |
+ *      |           v
+ *      |      ((GPU-Join)) ... Join for each depth
+ *      |           |
+ *      |           v
+ *      |     [Fallback Slot]
+ *      |           |
+ *      v           v
+ * (Fallback Projection)  ... pts->fallback_proj
+ *          |
+ *          v
+ *  [ CustomScan Slot ]   ... Equivalent to GpuProj/GpuPreAgg results
+ */
+static Node *
+__fixup_fallback_projection(Node *node, void *__data)
+{
+	pgstromPlanInfo *pp_info = __data;
+	ListCell   *lc;
+	int			slot_id = 0;
+
+	if (!node)
+		return NULL;
+	foreach (lc, pp_info->kvars_exprs)
+	{
+		Node   *curr = lfirst(lc);
+
+		if (equal(node, curr))
+		{
+			return (Node *)makeVar(INDEX_VAR,
+								   slot_id+1,
+								   exprType(node),
+								   exprTypmod(node),
+								   exprCollation(node),
+								   0);
+		}
+		slot_id++;
+	}
+
+	if (IsA(node, Var))
+	{
+		Var	   *var = (Var *)node;
+
+		return (Node *)makeNullConst(var->vartype,
+									 var->vartypmod,
+									 var->varcollid);
+	}
+	return expression_tree_mutator(node, __fixup_fallback_projection, pp_info);
+}
+
+static void
+__execInitTaskStateCpuFallback(pgstromTaskState *pts)
+{
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
+	Relation	rel = pts->css.ss.ss_currentRelation;
+	TupleDesc	fallback_tdesc;
+	List	   *cscan_tlist = NIL;
+	ListCell   *lc;
+
+	/*
+	 * Init scan-quals for the base relation
+	 */
+	pts->base_quals = ExecInitQual(pp_info->scan_quals_fallback,
+								   &pts->css.ss.ps);
+	pts->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
+											  table_slot_callbacks(rel));
+	if (pts->num_rels == 0)
+	{
+		/*
+		 * GpuScan can bypass fallback_slot, so fallback_proj directly
+		 * transform the base_slot to ss_ScanTupleSlot.
+		 */
+		cscan_tlist = cscan->custom_scan_tlist;
+		fallback_tdesc = RelationGetDescr(rel);
+	}
+	else
+	{
+		/*
+		 * CpuJoin runs its multi-level join on the fallback-slot that
+		 * follows the kvars_slot layout.
+		 * Then, it works as a source of fallback_proj.
+		 */
+		int		nslots = list_length(pp_info->kvars_exprs);
+		int		slot_id = 0;
+		bool	meet_junk = false;
+
+		Assert(nslots == list_length(pp_info->kvars_depth) &&
+			   nslots == list_length(pp_info->kvars_resno));
+		fallback_tdesc = CreateTemplateTupleDesc(nslots);
+		foreach (lc, pp_info->kvars_exprs)
+		{
+			Node	   *expr = lfirst(lc);
+
+			TupleDescInitEntry(fallback_tdesc,
+							   slot_id + 1,
+							   psprintf("KVAR_%u", slot_id),
+							   exprType(expr),
+							   exprTypmod(expr),
+							   0);
+			slot_id++;
+		}
+		pts->fallback_slot = MakeSingleTupleTableSlot(fallback_tdesc,
+													  &TTSOpsVirtual);
+		foreach (lc, cscan->custom_scan_tlist)
+		{
+			TargetEntry *tle = lfirst(lc);
+
+			if (tle->resjunk)
+				meet_junk = true;
+			else if (meet_junk)
+				elog(ERROR, "Bug? custom_scan_tlist has valid attribute after junk");
+			else
+			{
+				TargetEntry	*__tle = (TargetEntry *)
+					__fixup_fallback_projection((Node *)tle, pp_info);
+				cscan_tlist = lappend(cscan_tlist, __tle);
+			}
+		}
+	}
+	pts->fallback_proj =
+		ExecBuildProjectionInfo(cscan_tlist,
+								pts->css.ss.ps.ps_ExprContext,
+								pts->css.ss.ss_ScanTupleSlot,
+								&pts->css.ss.ps,
+								fallback_tdesc);
+}
+
 /*
  * pgstromExecInitTaskState
  */
@@ -1164,7 +1310,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	Relation	rel = pts->css.ss.ss_currentRelation;
 	TupleDesc	tupdesc_src = RelationGetDescr(rel);
 	TupleDesc	tupdesc_dst;
-	TupleDesc	fallback_tdesc;
 	int			depth_index = 0;
 	bool		has_right_outer = false;
 	ListCell   *lc;
@@ -1233,44 +1378,14 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	ExecAssignScanProjectionInfoWithVarno(&pts->css.ss, INDEX_VAR);
 
 	/*
-	 * Init scan-quals for the base relation
+	 * Initialize the CPU Fallback stuff
 	 */
-	pts->base_quals = ExecInitQual(pp_info->scan_quals_fallback,
-								   &pts->css.ss.ps);
-	pts->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
-											  table_slot_callbacks(rel));
-	if (cscan->custom_plans == NIL)
-		fallback_tdesc = RelationGetDescr(rel);
-	else
-	{
-		int		nslots = list_length(pp_info->kvars_exprs);
-		int		slot_id = 0;
-
-		fallback_tdesc = CreateTemplateTupleDesc(nslots);
-		foreach (lc, pp_info->kvars_exprs)
-		{
-			Node   *expr = lfirst(lc);
-
-			TupleDescInitEntry(fallback_tdesc,
-							   slot_id+1,
-							   psprintf("kvars_slot_%d", slot_id),
-							   exprType(expr),
-							   exprTypmod(expr),
-							   0);
-			slot_id++;
-		}
-		pts->fallback_slot = MakeSingleTupleTableSlot(fallback_tdesc,
-													  &TTSOpsVirtual);
-	}
-	pts->fallback_proj =
-		ExecBuildProjectionInfo(pp_info->fallback_tlist,
-								pts->css.ss.ps.ps_ExprContext,
-								pts->css.ss.ss_ScanTupleSlot,
-								&pts->css.ss.ps,
-								fallback_tdesc);
+	__execInitTaskStateCpuFallback(pts);
+	
 	/*
 	 * init inner relations
 	 */
+	depth_index = 0;
 	foreach (lc, cscan->custom_plans)
 	{
 		pgstromTaskInnerState *istate = &pts->inners[depth_index];

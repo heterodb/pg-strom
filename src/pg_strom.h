@@ -416,7 +416,6 @@ typedef struct
 struct pgstromTaskState
 {
 	CustomScanState		css;
-//	uint32_t			task_kind;		/* one of TASK_KIND__* */
 	uint32_t			xpu_task_flags;	/* mask of device flags */
 	const Bitmapset	   *optimal_gpus;	/* candidate GPUs to connect */
 	const DpuStorageEntry *ds_entry;	/* candidate DPUs to connect */

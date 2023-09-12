@@ -2303,6 +2303,7 @@ __try_inject_projection_expression(codegen_context *context,
 			context->kvars_depth = lappend_int(context->kvars_depth, -1);
 			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
 			context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
+			context->kvars_exprs = lappend(context->kvars_exprs, expr);
 
 			type_oid = exprType((Node *)expr);
 			dtype = pgstrom_devtype_lookup(type_oid);
@@ -2853,6 +2854,7 @@ __try_inject_groupby_expression(codegen_context *context,
 			context->kvars_depth = lappend_int(context->kvars_depth, -1);
 			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
 			context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
+			context->kvars_exprs = lappend(context->kvars_exprs, expr);
 			context->tlist_dev = lappend(context->tlist_dev, tle);
 
 			/* SaveExpr */
@@ -2982,6 +2984,7 @@ codegen_build_groupby_keyload(codegen_context *context,
 											   SPECIAL_DEPTH__PREAGG_FINAL);
 			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
 			context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
+			context->kvars_exprs = lappend(context->kvars_exprs, tle->expr);
 		}
 	}
 
