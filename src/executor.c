@@ -1243,7 +1243,19 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 		 * GpuScan can bypass fallback_slot, so fallback_proj directly
 		 * transform the base_slot to ss_ScanTupleSlot.
 		 */
-		cscan_tlist = cscan->custom_scan_tlist;
+		bool	meet_junk = false;
+
+		foreach (lc, cscan->custom_scan_tlist)
+		{
+			TargetEntry *tle = lfirst(lc);
+
+			if (tle->resjunk)
+				meet_junk = true;
+			else if (meet_junk)
+				elog(ERROR, "Bug? custom_scan_tlist has valid attribute after junk");
+			else
+				cscan_tlist = lappend(cscan_tlist, tle);
+		}
 		fallback_tdesc = RelationGetDescr(rel);
 	}
 	else

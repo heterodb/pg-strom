@@ -1692,7 +1692,11 @@ ExecFallbackCpuPreAgg(pgstromTaskState *pts,
 					  kern_data_store *kds,
 					  HeapTuple tuple)
 {
-	elog(ERROR, "ExecFallbackCpuPreAgg implemented");
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("CPU Fallback of GpuPreAgg is not implemented yet"),
+			 errhint("'pg_strom.enable_gpupreagg' configuration can turn off GpuPreAgg only"),
+			 errdetail("GpuPreAgg often detects uncontinuable errors during update of the final aggregation buffer. Even if we re-run the source data chunk, the final aggregation buffer is already polluted, so we have no reasonable way to recover right now.")));
 }
 
 /*

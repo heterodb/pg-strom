@@ -2553,8 +2553,29 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 		if (!ExecQual(pts->base_quals, econtext))
 			return;
 	}
-	slot_getallattrs(base_slot);
+
+	/*
+	 * Shortcut, if GpuJoin is not involved. (GpuScan or GpuPreAgg + GpuScan).
+	 * This case does not have fallback_slot, and the fallback_proj directly
+	 * transforms the base-tuple to the ss_ScanTupleSlot.
+	 */
+	if (pts->num_rels == 0)
+	{
+		TupleTableSlot *proj_slot;
+		HeapTuple	tuple;
+		bool		should_free;
+
+		Assert(pts->fallback_slot == 0);
+		proj_slot = ExecProject(pts->fallback_proj);
+		tuple = ExecFetchSlotHeapTuple(proj_slot, false, &should_free);
+		pgstromStoreFallbackTuple(pts, tuple);
+		if (should_free)
+			pfree(tuple);
+		return;
+	}
+
 	/* Load the base tuple (depth-0) to the fallback slot */
+	slot_getallattrs(base_slot);
 	Assert(fallback_slot != NULL);
     ExecStoreAllNullTuple(fallback_slot);
 	forboth (lc1, pp_info->kvars_depth,

@@ -1850,8 +1850,7 @@ resume_kernel:
 						   resp, resp_sz,
 						   kds_dst_nitems, kds_dst_array);
 	}
-	else if (kgtask->kerror.errcode == ERRCODE_CPU_FALLBACK &&
-			 (session->xpu_task_flags & DEVTASK__MASK) != DEVTASK__PREAGG)
+	else if (kgtask->kerror.errcode == ERRCODE_CPU_FALLBACK)
 	{
 		kern_data_store *__kds_src = kds_src;
 		XpuCommand	resp;
