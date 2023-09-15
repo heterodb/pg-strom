@@ -509,6 +509,11 @@ extern char	   *gpuDirectGetProperty(void);
 extern void		gpuDirectSetProperty(const char *key, const char *value);
 extern bool		gpuDirectIsAvailable(void);
 
+extern int		heterodbExtraGetError(const char **p_filename,
+									  unsigned int *p_lineno,
+									  const char **p_funcname,
+									  char *buffer, size_t buffer_sz);
+
 /*
  * codegen.c
  */

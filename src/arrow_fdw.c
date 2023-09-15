@@ -2177,8 +2177,13 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 	off_t		m_offset;
 	strom_io_chunk *ioc;
 
-	if (chunk_length != MAXALIGN(chunk_length))
-		elog(ERROR, "Arrow format corruption? chunk length is not aligned to 64bit");
+	/*
+	 * Round up chunk_length to 64bit boundary.
+	 * Apache Arrow does not require the chunk_length is aligned to 64bit boundary,
+	 * chunk_offset must be aligned to 64bit (512bit recommended).
+	 * So, some extra bytes (up to -7bytes) may improve the potency of i/o chunk
+	 * consolication.
+	 */
 
 	if (f_pos >= con->f_offset &&
 		(f_pos & ~PAGE_MASK) == (con->f_offset & ~PAGE_MASK))
@@ -2201,7 +2206,7 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 			}
 			*p_cmeta_offset = __kds_packed(con->kds_head_sz +
 										   con->m_offset);
-			*p_cmeta_length = __kds_packed(chunk_length);
+			*p_cmeta_length = __kds_packed(MAXALIGN(chunk_length));
 			con->m_offset += chunk_length;
 			con->f_offset += chunk_length;
 			return;
@@ -2231,7 +2236,7 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 	ioc->fchunk_id = f_base / PAGE_SIZE;
 
 	*p_cmeta_offset = __kds_packed(con->kds_head_sz + m_offset);
-	*p_cmeta_length = __kds_packed(chunk_length);
+	*p_cmeta_length = __kds_packed(MAXALIGN(chunk_length));
 	con->m_offset = m_offset + chunk_length;
 	con->f_offset = f_pos + chunk_length;
 }

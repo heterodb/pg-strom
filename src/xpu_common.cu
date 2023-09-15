@@ -379,6 +379,7 @@ __arrow_fetch_int_datum(kern_context *kcxt,
 					((char *)kds + __kds_unpack(cmeta->values_offset));
 				kvar->u64 = base[kds_index];
 				*vclass = KVAR_CLASS__INLINE;
+				return true;
 			}
 			break;
 		default:

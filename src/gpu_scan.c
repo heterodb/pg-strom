@@ -825,7 +825,6 @@ ExecFallbackCpuScan(pgstromTaskState *pts,
 					HeapTuple tuple)
 {
 	ExprContext	*econtext = pts->css.ss.ps.ps_ExprContext;
-	ListCell   *lc;
 	bool		should_free;
 
 	ExecForceStoreHeapTuple(tuple, pts->base_slot, false);

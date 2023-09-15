@@ -1240,6 +1240,29 @@ __gpuClientELog(gpuClient *gclient,
 	}
 }
 
+static void
+gpuClientELogByExtraModule(gpuClient *gclient)
+{
+	int				errcode;
+	const char	   *filename;
+	unsigned int	lineno;
+	const char	   *funcname;
+	char			buffer[2000];
+
+	errcode = heterodbExtraGetError(&filename,
+									&lineno,
+									&funcname,
+									buffer, sizeof(buffer));
+	if (errcode == 0)
+		gpuClientELog(gclient,"Bug? %s is called but no error status", __FUNCTION__);
+	else
+		__gpuClientELog(gclient,
+						errcode,
+						filename, lineno,
+						funcname,
+						"extra-module: %s", buffer);
+}
+
 /*
  * gpuservHandleOpenSession
  */
@@ -1470,7 +1493,7 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 							  chunk->__offset + off,
 							  kds_iovec))
 	{
-		gpuClientELog(gclient, "failed on gpuDirectFileReadIOV");
+		gpuClientELogByExtraModule(gclient);
 		goto error;
 	}
 	return chunk;
