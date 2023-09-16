@@ -1993,29 +1993,28 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 										? "disabled"
 										: "enabled"));
 		if (!pgstrom_regression_test_mode)
-			appendStringInfo(&buf, "%s", conn->devname);
+			appendStringInfo(&buf, "%s; ", conn->devname);
 		pos = buf.len;
 
 		count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
 		if (count)
-			appendStringInfo(&buf, "%c buffer=%lu",
-							 (pos > 0 ? ';' : ','),
+			appendStringInfo(&buf, "%sbuffer=%lu",
+							 (buf.len > pos ? ", " : ""),
 							 count / PAGES_PER_BLOCK);
 		count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
 		if (count)
-			appendStringInfo(&buf, "%c vfs=%lu",
-							 (pos > 0 ? ';' : ','),
+			appendStringInfo(&buf, "%svfs=%lu",
+							 (buf.len > pos ? ", " : ""),
 							 count / PAGES_PER_BLOCK);
 		count = pg_atomic_read_u64(&ps_state->npages_direct_read);
 		if (count)
-			appendStringInfo(&buf, "%c direct=%lu",
-							 (pos > 0 ? ';' : ','),
+			appendStringInfo(&buf, "%sdirect=%lu",
+							 (buf.len > pos ? ", " : ""),
 							 count / PAGES_PER_BLOCK);
 		count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
-		if (count)
-			appendStringInfo(&buf, "%c ntuples=%lu",
-							 (pos > 0 ? ';' : ','),
-							 count);
+		appendStringInfo(&buf, "%sntuples=%lu",
+						 (buf.len > pos ? ", " : ""),
+						 count);
 		appendStringInfo(&buf, ")");
 	}
 	ExplainPropertyText("GPU-Direct SQL", buf.data, es);

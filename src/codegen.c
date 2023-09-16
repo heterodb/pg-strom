@@ -3247,6 +3247,8 @@ codegen_build_groupby_actions(codegen_context *context,
 
 /*
  * pgstrom_xpu_expression
+ *
+ * checks whether the expression is executable on GPU/DPU devices.
  */
 bool
 pgstrom_xpu_expression(Expr *expr,
@@ -3264,54 +3266,13 @@ pgstrom_xpu_expression(Expr *expr,
 	context.required_flags = (required_xpu_flags & DEVKIND__ANY);
 	context.input_rels_tlist = input_rels_tlist;
 
-	if (!expr)
+	if (!expr || IsA(expr, List))
 		return false;
-	if (IsA(expr, List))
-	{
-		List   *l = (List *)expr;
-
-		if (list_length(l) == 1)
-			expr = linitial(l);
-		else
-			expr = make_andclause(l);
-	}
 	if (codegen_expression_walker(&context, NULL, expr) < 0)
 		return false;
 	if (p_devcost)
 		*p_devcost = context.device_cost;
 	return true;
-}
-
-/*
- * pgstrom_gpu_expression
- *
- * checks whether the expression is executable on GPU devices.
- */
-bool
-pgstrom_gpu_expression(Expr *expr,
-					   List *input_rels_tlist,
-					   int *p_devcost)
-{
-	return pgstrom_xpu_expression(expr,
-								  DEVKIND__NVIDIA_GPU,
-								  input_rels_tlist,
-								  p_devcost);
-}
-
-/*
- * pgstrom_dpu_expression
- *
- * checks whether the expression is executable on DPU devices.
- */
-bool
-pgstrom_dpu_expression(Expr *expr,
-					   List *input_rels_tlist,
-					   int *p_devcost)
-{
-	return pgstrom_xpu_expression(expr,
-								  DEVKIND__NVIDIA_DPU,
-								  input_rels_tlist,
-								  p_devcost);
 }
 
 /*

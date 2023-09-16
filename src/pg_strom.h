@@ -575,12 +575,6 @@ extern bool		pgstrom_xpu_expression(Expr *expr,
 									   uint32_t required_xpu_flags,
 									   List *input_rels_tlist,
 									   int *p_devcost);
-extern bool		pgstrom_gpu_expression(Expr *expr,
-									   List *input_rels_tlist,
-									   int *p_devcost);
-extern bool		pgstrom_dpu_expression(Expr *expr,
-									   List *input_rels_tlist,
-									   int *p_devcost);
 extern void		pgstrom_explain_xpucode(const CustomScanState *css,
 										ExplainState *es,
 										List *dcontext,
@@ -801,9 +795,6 @@ extern pgstromPlanInfo *buildOuterJoinPlanInfo(PlannerInfo *root,
 											   bool try_parallel_path,
 											   ParamPathInfo **p_param_info,
 											   List **p_inner_paths_list);
-extern List *build_fallback_exprs_scan(Index scan_relid, List *scan_exprs);
-extern List *build_fallback_exprs_join(codegen_context *context,
-									   List *join_exprs);
 extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
 										 RelOptInfo *joinrel,
 										 CustomPath *cpath,

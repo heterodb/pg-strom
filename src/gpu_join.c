@@ -949,7 +949,7 @@ __build_fallback_exprs_scan_walker(Node *node, void *data)
 	return expression_tree_mutator(node, __build_fallback_exprs_scan_walker, data);
 }
 
-List *
+static List *
 build_fallback_exprs_scan(Index scan_relid, List *scan_exprs)
 {
 	build_fallback_exprs_context con;
@@ -993,7 +993,7 @@ __build_fallback_exprs_join_walker(Node *node, void *data)
 	return expression_tree_mutator(node, __build_fallback_exprs_join_walker, con);
 }
 
-List *
+static List *
 build_fallback_exprs_join(codegen_context *context, List *join_exprs)
 {
 	build_fallback_exprs_context con;
@@ -1004,7 +1004,6 @@ build_fallback_exprs_join(codegen_context *context, List *join_exprs)
 	con.kvars_exprs = context->kvars_exprs;
 	return (List *)__build_fallback_exprs_join_walker((Node *)join_exprs, &con);
 }
-
 
 /*
  * build_fallback_exprs_inner

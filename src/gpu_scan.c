@@ -327,7 +327,8 @@ buildOuterScanPlanInfo(PlannerInfo *root,
 		RestrictInfo *rinfo = lfirst(lc);
 		int		devcost;
 
-		if (pgstrom_gpu_expression(rinfo->clause,
+		if (pgstrom_xpu_expression(rinfo->clause,
+								   xpu_task_flags,
 								   input_rels_tlist,
 								   &devcost))
 		{
@@ -353,7 +354,8 @@ buildOuterScanPlanInfo(PlannerInfo *root,
 			RestrictInfo *rinfo = lfirst(lc);
 			int		devcost;
 
-			if (pgstrom_gpu_expression(rinfo->clause,
+			if (pgstrom_xpu_expression(rinfo->clause,
+									   xpu_task_flags,
 									   input_rels_tlist,
 									   &devcost))
 			{
@@ -513,6 +515,7 @@ try_fetch_xpuscan_planinfo(const Path *__path)
  */
 typedef struct
 {
+	uint32_t	xpu_task_flags;
 	List	   *tlist_dev;
 	List	   *input_rels_tlist;
 	bool		resjunk;
@@ -534,7 +537,10 @@ __gpuscan_build_projection_walker(Node *node, void *__priv)
 			return false;
 	}
 	if (IsA(node, Var) ||
-		pgstrom_gpu_expression((Expr *)node, context->input_rels_tlist, NULL))
+		pgstrom_xpu_expression((Expr *)node,
+							   context->xpu_task_flags,
+							   context->input_rels_tlist,
+							   NULL))
 	{
 		AttrNumber		resno = list_length(context->tlist_dev) + 1;
 		TargetEntry	   *tle = makeTargetEntry((Expr *)node,
@@ -549,17 +555,16 @@ __gpuscan_build_projection_walker(Node *node, void *__priv)
 
 static List *
 gpuscan_build_projection(RelOptInfo *baserel,
-						 List *tlist,
-						 List *host_quals,
-						 List *dev_quals,
-						 List *input_rels_tlist)
+						 pgstromPlanInfo *pp_info,
+						 List *tlist)
 {
 	build_projection_context context;
 	List	   *vars_list;
 	ListCell   *lc;
 
 	memset(&context, 0, sizeof(build_projection_context));
-	context.input_rels_tlist = input_rels_tlist;
+	context.xpu_task_flags = pp_info->xpu_task_flags;
+	context.input_rels_tlist = list_make1(makeInteger(baserel->relid));
 
 	if (tlist != NIL)
 	{
@@ -592,12 +597,12 @@ gpuscan_build_projection(RelOptInfo *baserel,
 			__gpuscan_build_projection_walker(node, &context);
 		}
 	}
-	vars_list = pull_vars_of_level((Node *)host_quals, 0);
+	vars_list = pull_vars_of_level((Node *)pp_info->host_quals, 0);
 	foreach (lc, vars_list)
 		__gpuscan_build_projection_walker((Node *)lfirst(lc), &context);
 
 	context.resjunk = true;
-	vars_list = pull_vars_of_level((Node *)dev_quals, 0);
+	vars_list = pull_vars_of_level((Node *)pp_info->scan_quals, 0);
 	foreach (lc, vars_list)
 		__gpuscan_build_projection_walker((Node *)lfirst(lc), &context);
 
@@ -683,13 +688,8 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	context.input_rels_tlist = input_rels_tlist;
 	pp_info->kexp_scan_quals = codegen_build_scan_quals(&context, pp_info->scan_quals);
 	pp_info->scan_quals_fallback = pp_info->scan_quals;
-		//= build_fallback_exprs_scan(baserel->relid, pp_info->scan_quals);
 	/* code generation for the Projection */
-	context.tlist_dev = gpuscan_build_projection(baserel,
-												 tlist,
-												 pp_info->host_quals,
-												 pp_info->scan_quals,
-												 input_rels_tlist);
+	context.tlist_dev = gpuscan_build_projection(baserel, pp_info, tlist);
 	pp_info->kexp_projection = codegen_build_projection(&context);
 	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(&context);
 	pp_info->kvars_depth = context.kvars_depth;
