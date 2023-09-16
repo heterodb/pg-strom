@@ -1930,6 +1930,77 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 }
 
 /*
+ * pgstromGpuDirectExplain
+ */
+static void
+pgstromGpuDirectExplain(pgstromTaskState *pts,
+						ExplainState *es, List *dcontext)
+{
+	pgstromSharedState *ps_state = pts->ps_state;
+	StringInfoData		buf;
+
+	initStringInfo(&buf);
+	if (!es->analyze || !ps_state)
+	{
+		if (bms_is_empty(pts->optimal_gpus))
+		{
+			appendStringInfo(&buf, "disabled");
+		}
+		else if (pgstrom_regression_test_mode)
+		{
+			appendStringInfo(&buf, "enabled");
+		}
+		else
+		{
+			bool	is_first = true;
+			int		k;
+
+			appendStringInfo(&buf, "enabled (");
+			for (k = bms_next_member(pts->optimal_gpus, -1);
+				 k >= 0;
+				 k = bms_next_member(pts->optimal_gpus, k))
+			{
+				if (!is_first)
+					appendStringInfo(&buf, ", ");
+				appendStringInfo(&buf, "GPU-%d", k);
+				is_first = false;
+			}
+			appendStringInfo(&buf, ")");
+		}
+	}
+	else
+	{
+		XpuConnection  *conn = pts->conn;
+		uint64			count;
+		int				pos;
+
+		appendStringInfo(&buf, "%s (", (bms_is_empty(pts->optimal_gpus)
+										? "disabled"
+										: "enabled"));
+		if (!pgstrom_regression_test_mode)
+			appendStringInfo(&buf, "%s", conn->devname);
+		pos = buf.len;
+
+		count = pg_atomic_read_u32(&ps_state->heap_direct_nblocks);
+		if (count > 0)
+			appendStringInfo(&buf, "%c direct=%lu",   (pos > 0 ? ';' : ','), count);
+		count = pg_atomic_read_u32(&ps_state->heap_normal_nblocks);
+		if (count > 0)
+			appendStringInfo(&buf, "%c buffer=%lu",   (pos > 0 ? ';' : ','), count);
+		count = pg_atomic_read_u32(&ps_state->heap_fallback_nblocks);
+		if (count > 0)
+			appendStringInfo(&buf, "%c fallback=%lu", (pos > 0 ? ';' : ','), count);
+		count = pg_atomic_read_u64(&ps_state->source_ntuples);
+		if (count > 0)
+			appendStringInfo(&buf, "%c ntuples=%lu",  (pos > 0 ? ';' : ','), count);
+		appendStringInfo(&buf, ")");
+	}
+	ExplainPropertyText("GPU-Direct SQL", buf.data, es);
+
+	pfree(buf.data);
+}
+
+/*
  * pgstromExplainTaskState
  */
 void
@@ -2143,6 +2214,7 @@ pgstromExplainTaskState(CustomScanState *node,
 		pgstromArrowFdwExplain(pts->arrow_state,
 							   pts->css.ss.ss_currentRelation,
 							   es, dcontext);
+		pgstromGpuDirectExplain(pts, es, dcontext);
 	}
 	else if (pts->gcache_desc)
 	{
@@ -2152,43 +2224,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	else if (!bms_is_empty(pts->optimal_gpus))
 	{
 		/* GPU-Direct */
-		resetStringInfo(&buf);
-		if (!es->analyze || !ps_state)
-		{
-			bool	is_first = true;
-			int		k;
-
-			appendStringInfo(&buf, "enabled (");
-			for (k = bms_next_member(pts->optimal_gpus, -1);
-				 k >= 0;
-				 k = bms_next_member(pts->optimal_gpus, k))
-			{
-				if (!is_first)
-					appendStringInfo(&buf, ", ");
-				appendStringInfo(&buf, "GPU-%d", k);
-				is_first = false;
-			}
-			appendStringInfo(&buf, ")");
-		}
-		else
-		{
-			XpuConnection  *conn = pts->conn;
-			uint64			count;
-
-			count = pg_atomic_read_u32(&ps_state->heap_direct_nblocks);
-			appendStringInfo(&buf, "enabled (%s; direct=%lu", conn->devname, count);
-			count = pg_atomic_read_u32(&ps_state->heap_normal_nblocks);
-			if (count > 0)
-				appendStringInfo(&buf, ", buffer=%lu", count);
-			count = pg_atomic_read_u32(&ps_state->heap_fallback_nblocks);
-			if (count > 0)
-				appendStringInfo(&buf, ", fallback=%lu", count);
-			count = pg_atomic_read_u64(&ps_state->source_ntuples);
-			if (count > 0)
-				appendStringInfo(&buf, ", ntuples=%lu", count);
-			appendStringInfo(&buf, ")");
-		}
-		ExplainPropertyText("GPU-Direct SQL", buf.data, es);
+		pgstromGpuDirectExplain(pts, es, dcontext);
 	}
 	else if (pts->ds_entry)
 	{

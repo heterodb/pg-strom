@@ -872,7 +872,10 @@ kern_gpujoin_main(kern_session_info *session,
 		if (depth < 0 && WARP_READ_POS(wp,n_rels) >= WARP_WRITE_POS(wp,n_rels))
 		{
 			/* number of raw-tuples fetched from the heap block */
-			atomicAdd(&kgtask->nitems_raw, wp->lp_wr_pos);
+			if (kds_src->format == KDS_FORMAT_BLOCK)
+				atomicAdd(&kgtask->nitems_raw, wp->lp_wr_pos);
+			else if (get_global_id() == 0)
+				atomicAdd(&kgtask->nitems_raw, kds_src->nitems);
 			atomicAdd(&kgtask->nitems_in, WARP_WRITE_POS(wp, 0));
 			for (int i=0; i < n_rels; i++)
 			{

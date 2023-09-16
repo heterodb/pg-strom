@@ -1990,7 +1990,7 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 	if (baseRelIsArrowFdw(baserel) &&
 		IsA(priv_list, List) && list_length(priv_list) == 2)
 	{
-		List	   *af_list = lsecond(priv_list);
+		List	   *af_list = linitial(priv_list);
 		ListCell   *lc;
 
 		foreach (lc, af_list)
