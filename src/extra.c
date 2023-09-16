@@ -264,11 +264,14 @@ static bool
 __fallbackFileReadIOV(const char *pathname,
 					  CUdeviceptr m_segment,
 					  off_t m_offset,
-					  const strom_io_vector *iovec)
+					  const strom_io_vector *iovec,
+					  uint32_t *p_npages_direct_read,
+					  uint32_t *p_npages_vfs_read)
 {
-	size_t	io_unitsz = (16UL << 20);	/* 16MB */
-	char   *buffer;
-	int		fdesc;
+	size_t		io_unitsz = (16UL << 20);	/* 16MB */
+	char	   *buffer;
+	int			fdesc;
+	uint32_t	nr_pages = 0;
 	struct stat	stat_buf;
 
 	fdesc = open(pathname, O_RDONLY);
@@ -325,9 +328,15 @@ __fallbackFileReadIOV(const char *pathname,
 			dest_pos += nbytes;
 			remained -= nbytes;
 		}
+		nr_pages += ioc->nr_pages;
 	}
 	free(buffer);
 	close(fdesc);
+	/* update statistics */
+	if (p_npages_direct_read)
+		*p_npages_direct_read = 0;
+	if (p_npages_vfs_read)
+		*p_npages_vfs_read = nr_pages;
 
 	return true;
 error_2:
@@ -341,28 +350,36 @@ error_0:
 /*
  * gpuDirectFileReadIOV
  */
-static int	(*p_cufile__read_file_iov_v2)(
+static int	(*p_cufile__read_file_iov_v3)(
 	const char *pathname,
 	CUdeviceptr m_segment,
 	off_t m_offset,
-	const strom_io_vector *iovec) = NULL;
+	const strom_io_vector *iovec,
+	uint32_t *p_npages_direct_read,
+	uint32_t *p_npages_vfs_read) = NULL;
 
 bool
 gpuDirectFileReadIOV(const char *pathname,
 					 CUdeviceptr m_segment,
 					 off_t m_offset,
-					 const strom_io_vector *iovec)
+					 const strom_io_vector *iovec,
+					 uint32_t *p_npages_direct_read,
+					 uint32_t *p_npages_vfs_read)
 {
-	if (p_cufile__read_file_iov_v2)
-		return (p_cufile__read_file_iov_v2(pathname,
+	if (p_cufile__read_file_iov_v3)
+		return (p_cufile__read_file_iov_v3(pathname,
 										   m_segment,
 										   m_offset,
-										   iovec) == 0);
+										   iovec,
+										   p_npages_direct_read,
+										   p_npages_vfs_read) == 0);
 	/* fallback by the regular filesystem */
 	return __fallbackFileReadIOV(pathname,
 								 m_segment,
 								 m_offset,
-								 iovec);
+								 iovec,
+								 p_npages_direct_read,
+								 p_npages_vfs_read);
 }
 
 /*
@@ -409,7 +426,7 @@ gpuDirectIsAvailable(void)
 		p_cufile__driver_close_v2 &&
 		p_cufile__map_gpu_memory_v2 &&
 		p_cufile__unmap_gpu_memory_v2 &&
-		p_cufile__read_file_iov_v2 &&
+		p_cufile__read_file_iov_v3 &&
 		p_cufile__get_property_v2 &&
 		p_cufile__set_property_v2)
 	{
@@ -523,7 +540,7 @@ pgstrom_init_extra(void)
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__driver_close_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__map_gpu_memory_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__unmap_gpu_memory_v2);
-			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__read_file_iov_v2);
+			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__read_file_iov_v3);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__get_property_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__set_property_v2);
 
@@ -542,7 +559,7 @@ pgstrom_init_extra(void)
 		p_cufile__driver_close_v2 = NULL;
 		p_cufile__map_gpu_memory_v2 = NULL;
 		p_cufile__unmap_gpu_memory_v2 = NULL;
-		p_cufile__read_file_iov_v2 = NULL;
+		p_cufile__read_file_iov_v3 = NULL;
 		p_cufile__get_property_v2 = NULL;
 		p_cufile__set_property_v2 = NULL;
 		p_heterodb_license_reload = NULL;

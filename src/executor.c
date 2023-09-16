@@ -702,8 +702,14 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 		pgstromSharedState *ps_state = pts->ps_state;
 		int		n_rels = Min(pts->num_rels, xcmd->u.results.num_rels);
 
-		pg_atomic_fetch_add_u64(&ps_state->source_ntuples, xcmd->u.results.nitems_raw);
-		pg_atomic_fetch_add_u64(&ps_state->source_nvalids, xcmd->u.results.nitems_in);
+		pg_atomic_fetch_add_u64(&ps_state->npages_direct_read,
+								xcmd->u.results.npages_direct_read);
+		pg_atomic_fetch_add_u64(&ps_state->npages_vfs_read,
+								xcmd->u.results.npages_vfs_read);
+		pg_atomic_fetch_add_u64(&ps_state->source_ntuples_raw,
+								xcmd->u.results.nitems_raw);
+		pg_atomic_fetch_add_u64(&ps_state->source_ntuples_in,
+								xcmd->u.results.nitems_in);
 		for (int i=0; i < n_rels; i++)
 		{
 			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_gist,
@@ -712,6 +718,15 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 									xcmd->u.results.stats[i].nitems_out);
 		}
 		pg_atomic_fetch_add_u64(&ps_state->result_ntuples, xcmd->u.results.nitems_out);
+	}
+	else if (xcmd->tag == XpuCommandTag__CPUFallback)
+	{
+		pgstromSharedState *ps_state = pts->ps_state;
+
+		pg_atomic_fetch_add_u64(&ps_state->npages_direct_read,
+								xcmd->u.fallback.npages_direct_read);
+		pg_atomic_fetch_add_u64(&ps_state->npages_vfs_read,
+								xcmd->u.fallback.npages_vfs_read);
 	}
 }
 
@@ -1981,18 +1996,26 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 			appendStringInfo(&buf, "%s", conn->devname);
 		pos = buf.len;
 
-		count = pg_atomic_read_u32(&ps_state->heap_direct_nblocks);
-		if (count > 0)
-			appendStringInfo(&buf, "%c direct=%lu",   (pos > 0 ? ';' : ','), count);
-		count = pg_atomic_read_u32(&ps_state->heap_normal_nblocks);
-		if (count > 0)
-			appendStringInfo(&buf, "%c buffer=%lu",   (pos > 0 ? ';' : ','), count);
-		count = pg_atomic_read_u32(&ps_state->heap_fallback_nblocks);
-		if (count > 0)
-			appendStringInfo(&buf, "%c fallback=%lu", (pos > 0 ? ';' : ','), count);
-		count = pg_atomic_read_u64(&ps_state->source_ntuples);
-		if (count > 0)
-			appendStringInfo(&buf, "%c ntuples=%lu",  (pos > 0 ? ';' : ','), count);
+		count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
+		if (count)
+			appendStringInfo(&buf, "%c buffer=%lu",
+							 (pos > 0 ? ';' : ','),
+							 count / PAGES_PER_BLOCK);
+		count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
+		if (count)
+			appendStringInfo(&buf, "%c vfs=%lu",
+							 (pos > 0 ? ';' : ','),
+							 count / PAGES_PER_BLOCK);
+		count = pg_atomic_read_u64(&ps_state->npages_direct_read);
+		if (count)
+			appendStringInfo(&buf, "%c direct=%lu",
+							 (pos > 0 ? ';' : ','),
+							 count / PAGES_PER_BLOCK);
+		count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
+		if (count)
+			appendStringInfo(&buf, "%c ntuples=%lu",
+							 (pos > 0 ? ';' : ','),
+							 count);
 		appendStringInfo(&buf, ")");
 	}
 	ExplainPropertyText("GPU-Direct SQL", buf.data, es);
@@ -2052,7 +2075,7 @@ pgstromExplainTaskState(CustomScanState *node,
 
 	/* xPU Scan Quals */
 	if (ps_state)
-		stat_ntuples = pg_atomic_read_u64(&ps_state->source_nvalids);
+		stat_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_in);
 	if (pp_info->scan_quals)
 	{
 		List   *scan_quals = pp_info->scan_quals;
@@ -2076,7 +2099,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			uint64_t		prev_ntuples = 0;
 
 			if (ps_state)
-				prev_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples);
+				prev_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
 			appendStringInfo(&buf, " [plan: %.0f -> %.0f, exec: %lu -> %lu]",
 							 pp_info->scan_tuples,
 							 pp_info->scan_rows,

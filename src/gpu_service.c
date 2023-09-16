@@ -1467,7 +1467,9 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 					   kern_data_store *kds,
 					   size_t base_offset,
 					   const char *pathname,
-					   strom_io_vector *kds_iovec)
+					   strom_io_vector *kds_iovec,
+					   uint32_t *p_npages_direct_read,
+					   uint32_t *p_npages_vfs_read)
 {
 	gpuMemChunk *chunk;
 	CUresult	rc;
@@ -1491,7 +1493,9 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 	if (!gpuDirectFileReadIOV(pathname,
 							  chunk->__base,
 							  chunk->__offset + off,
-							  kds_iovec))
+							  kds_iovec,
+							  p_npages_direct_read,
+							  p_npages_vfs_read))
 	{
 		gpuClientELogByExtraModule(gclient);
 		goto error;
@@ -1512,13 +1516,21 @@ static gpuMemChunk *
 gpuservLoadKdsBlock(gpuClient *gclient,
 					kern_data_store *kds,
 					const char *pathname,
-					strom_io_vector *kds_iovec)
+					strom_io_vector *kds_iovec,
+					uint32_t *p_npages_direct_read,
+					uint32_t *p_npages_vfs_read)
 {
 	size_t		base_offset;
 
 	Assert(kds->format == KDS_FORMAT_BLOCK);
 	base_offset = kds->block_offset + kds->block_nloaded * BLCKSZ;
-	return __gpuservLoadKdsCommon(gclient, kds, base_offset, pathname, kds_iovec);
+	return __gpuservLoadKdsCommon(gclient,
+								  kds,
+								  base_offset,
+								  pathname,
+								  kds_iovec,
+								  p_npages_direct_read,
+								  p_npages_vfs_read);
 }
 
 /*
@@ -1530,13 +1542,21 @@ static gpuMemChunk *
 gpuservLoadKdsArrow(gpuClient *gclient,
 					kern_data_store *kds,
 					const char *pathname,
-					strom_io_vector *kds_iovec)
+					strom_io_vector *kds_iovec,
+					uint32_t *p_npages_direct_read,
+					uint32_t *p_npages_vfs_read)
 {
 	size_t		base_offset;
 
 	Assert(kds->format == KDS_FORMAT_ARROW);
 	base_offset = KDS_HEAD_LENGTH(kds);
-	return __gpuservLoadKdsCommon(gclient, kds, base_offset, pathname, kds_iovec);
+	return __gpuservLoadKdsCommon(gclient,
+								  kds,
+								  base_offset,
+								  pathname,
+								  kds_iovec,
+								  p_npages_direct_read,
+								  p_npages_vfs_read);
 }
 
 /* ----------------------------------------------------------------
@@ -1561,6 +1581,8 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	int				kds_dst_nrooms = 0;
 	int				kds_dst_nitems = 0;
 	int				num_inner_rels = 0;
+	uint32_t		npages_direct_read = 0;
+	uint32_t		npages_vfs_read = 0;
 	CUfunction		f_kern_gpuscan;
 	void		   *gc_lmap = NULL;
 	gpuMemChunk	   *s_chunk = NULL;		/* for kds_src */
@@ -1617,7 +1639,9 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 			s_chunk = gpuservLoadKdsBlock(gclient,
 										  kds_src,
 										  kds_src_pathname,
-										  kds_src_iovec);
+										  kds_src_iovec,
+										  &npages_direct_read,
+										  &npages_vfs_read);
 			if (!s_chunk)
 				return;
 			m_kds_src = s_chunk->m_devptr;
@@ -1642,7 +1666,9 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 			s_chunk = gpuservLoadKdsArrow(gclient,
 										  kds_src,
 										  kds_src_pathname,
-										  kds_src_iovec);
+										  kds_src_iovec,
+										  &npages_direct_read,
+										  &npages_vfs_read);
 			if (!s_chunk)
 				return;
 			m_kds_src = s_chunk->m_devptr;
@@ -1860,6 +1886,8 @@ resume_kernel:
 		resp->tag   = XpuCommandTag__Success;
 		resp->u.results.chunks_nitems = kds_dst_nitems;
 		resp->u.results.chunks_offset = resp_sz;
+		resp->u.results.npages_direct_read = npages_direct_read;
+		resp->u.results.npages_vfs_read = npages_vfs_read;
 		resp->u.results.nitems_raw = kgtask->nitems_raw;
 		resp->u.results.nitems_in  = kgtask->nitems_in;
 		resp->u.results.nitems_out = kgtask->nitems_out;
@@ -1911,6 +1939,8 @@ resume_kernel:
 		memcpy(&resp.u.fallback.error,
 			   &kgtask->kerror,
 			   sizeof(kern_errorbuf));
+		resp.u.fallback.npages_direct_read = npages_direct_read;
+		resp.u.fallback.npages_vfs_read = npages_vfs_read;
 		gpuClientWriteBack(gclient,
 						   &resp,
 						   offsetof(XpuCommand, u.fallback.kds_src),

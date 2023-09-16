@@ -2135,19 +2135,24 @@ typedef struct {
 	bool		final_plan_node;
 	bool		final_this_device;
 	/* statistics */
-	uint32_t	nitems_raw;
-	uint32_t	nitems_in;
-	uint32_t	nitems_out;
+	uint32_t	npages_direct_read;	/* # of pages read by GPU-Direct Storage */
+	uint32_t	npages_vfs_read;	/* # of pages read by VFS (fallback) */
+	uint32_t	nitems_raw;		/* # of visible rows kept in the relation */
+	uint32_t	nitems_in;		/* # of result rows in depth-0 after WHERE-clause */
+	uint32_t	nitems_out;		/* # of result rows in final depth before host quals */
 	uint32_t	num_rels;
 	struct {
-		uint32_t	nitems_gist;
-		uint32_t	nitems_out;
+		uint32_t	nitems_gist;/* # of results rows by GiST index (if any) */
+		uint32_t	nitems_out;	/* # of results rows by JOIN in this depth */
 	} stats[1];
 } kern_exec_results;
 
 typedef struct
 {
 	kern_errorbuf		error;		/* original error in kernel space */
+	/* statistics */
+	uint32_t			npages_direct_read;
+	uint32_t			npages_vfs_read;
 	kern_data_store		kds_src;
 } kern_cpu_fallback;
 

@@ -348,19 +348,18 @@ typedef struct
 	pg_atomic_uint32	parallel_task_control;
 	pg_atomic_uint32	__rjoin_exit_count;
 	/* statistics */
-	pg_atomic_uint64	source_ntuples;		/* only KDS_FORMAT_BLOCK */
-	pg_atomic_uint64	source_nvalids;		/* # of tuples scan'ed */
-	pg_atomic_uint64	result_ntuples;		/* # of tuples generated */
+	pg_atomic_uint64	npages_direct_read;	/* read by GPU-Direct Storage */
+	pg_atomic_uint64	npages_vfs_read;	/* read from VFS layer */
+	pg_atomic_uint64	npages_buffer_read;	/* read from PG buffer */
+	pg_atomic_uint64	source_ntuples_raw;	/* # of raw tuples in the base relation */
+	pg_atomic_uint64	source_ntuples_in;	/* # of tuples survived from WHERE-quals */
+	pg_atomic_uint64	result_ntuples;		/* # of tuples returned from xPU */
 	/* for arrow_fdw */
 	pg_atomic_uint32	arrow_rbatch_index;
 	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */
 	pg_atomic_uint32	arrow_rbatch_nskip;	/* # of skipped record-batches */
 	/* for gpu-cache */
 	pg_atomic_uint32	__gcache_fetch_count_data;
-	/* for gpu/dpu-direct */
-	pg_atomic_uint32	heap_normal_nblocks;
-	pg_atomic_uint32	heap_direct_nblocks;
-	pg_atomic_uint32	heap_fallback_nblocks;
 	/* for brin-index */
 	pg_atomic_uint32	brin_index_fetched;
 	pg_atomic_uint32	brin_index_skipped;
@@ -504,7 +503,9 @@ extern bool		gpuDirectUnmapGpuMemory(CUdeviceptr m_segment);
 extern bool		gpuDirectFileReadIOV(const char *pathname,
 									 CUdeviceptr m_segment,
 									 off_t m_offset,
-									 const strom_io_vector *iovec);
+									 const strom_io_vector *iovec,
+									 uint32_t *p_npages_direct_read,
+									 uint32_t *p_npages_vfs_read);
 extern char	   *gpuDirectGetProperty(void);
 extern void		gpuDirectSetProperty(const char *key, const char *value);
 extern bool		gpuDirectIsAvailable(void);

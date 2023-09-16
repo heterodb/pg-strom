@@ -488,7 +488,7 @@ __relScanDirectFallbackBlock(pgstromTaskState *pts,
 			pts->cb_cpu_fallback(pts, kds, &htup);
 	}
 	UnlockReleaseBuffer(buffer);
-	pg_atomic_fetch_add_u32(&ps_state->heap_fallback_nblocks, 1);
+	pg_atomic_fetch_add_u64(&ps_state->npages_buffer_read, PAGES_PER_BLOCK);
 }
 
 static void
@@ -789,8 +789,8 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	}
 out:
 	Assert(kds->nitems == kds->block_nloaded + strom_nblocks);
-	pg_atomic_fetch_add_u32(&ps_state->heap_normal_nblocks, kds->block_nloaded);
-	pg_atomic_fetch_add_u32(&ps_state->heap_direct_nblocks, strom_nblocks);
+	pg_atomic_fetch_add_u64(&ps_state->npages_buffer_read,
+							kds->block_nloaded * PAGES_PER_BLOCK);
 	kds->length = kds->block_offset + BLCKSZ * kds->nitems;
 	if (kds->nitems == 0)
 		return NULL;
