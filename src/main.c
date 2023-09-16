@@ -14,7 +14,8 @@
 PG_MODULE_MAGIC;
 
 /* misc variables */
-bool		pgstrom_enabled;				/* GUC */
+static Oid	__pgstrom_namespace_oid = UINT_MAX;
+static bool	__pgstrom_enabled_guc;			/* GUC */
 int			pgstrom_cpu_fallback_elevel;	/* GUC */
 bool		pgstrom_regression_test_mode;	/* GUC */
 long		PAGE_SIZE;
@@ -33,6 +34,26 @@ Datum
 pgstrom_githash(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_TEXT_P(cstring_to_text(pgstrom_githash_cstring));
+}
+
+/*
+ * pgstrom_enabled()
+ */
+static void
+pgstrom_extension_checker_callback(Datum arg, int cacheid, uint32 hashvalue)
+{
+	Assert(cacheid == NAMESPACEOID);
+	__pgstrom_namespace_oid = UINT_MAX;
+}
+
+bool
+pgstrom_enabled(void)
+{
+	if (__pgstrom_namespace_oid == UINT_MAX)
+		__pgstrom_namespace_oid = get_namespace_oid("pgstrom", true);
+	if (OidIsValid(__pgstrom_namespace_oid))
+		return __pgstrom_enabled_guc;
+	return false;
 }
 
 /*
@@ -79,7 +100,7 @@ pgstrom_init_gucs(void)
 	DefineCustomBoolVariable("pg_strom.enabled",
 							 "Enables the planner's use of PG-Strom",
 							 NULL,
-							 &pgstrom_enabled,
+							 &__pgstrom_enabled_guc,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -393,6 +414,8 @@ _PG_init(void)
 		pgstrom_init_dpu_preagg();
 	}
 	pgstrom_init_pcie();
+	/* callback for the extension checker */
+	CacheRegisterSyscacheCallback(NAMESPACEOID, pgstrom_extension_checker_callback, 0);
 	/* dummy custom-scan node */
 	memset(&pgstrom_dummy_path_methods, 0, sizeof(CustomPathMethods));
 	pgstrom_dummy_path_methods.CustomName   = "Dummy";

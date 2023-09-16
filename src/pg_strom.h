@@ -936,7 +936,7 @@ extern const char *pgstrom_githash_cstring;
 /*
  * main.c
  */
-extern bool		pgstrom_enabled;
+extern bool		pgstrom_enabled(void);
 extern int		pgstrom_cpu_fallback_elevel;
 extern bool		pgstrom_regression_test_mode;
 extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);

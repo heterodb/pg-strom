@@ -480,7 +480,7 @@ XpuScanAddScanPath(PlannerInfo *root,
 	if (set_rel_pathlist_next)
 		set_rel_pathlist_next(root, baserel, rtindex, rte);
 
-	if (pgstrom_enabled)
+	if (pgstrom_enabled())
 	{
 		if (enable_gpuscan)
 			__xpuScanAddScanPathCommon(root, baserel, rtindex, rte,

@@ -888,7 +888,7 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 							   join_type,
 							   extra);
 	/* quick bailout if PG-Strom is not enabled */
-	if (pgstrom_enabled)
+	if (pgstrom_enabled())
 	{
 		if (pgstrom_enable_gpujoin)
 			__xpuJoinAddCustomPathCommon(root,
