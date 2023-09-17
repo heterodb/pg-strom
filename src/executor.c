@@ -2034,6 +2034,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	pgstromSharedState *ps_state = pts->ps_state;
 	pgstromPlanInfo	   *pp_info = pts->pp_info;
 	CustomScan		   *cscan = (CustomScan *)node->ss.ps.plan;
+	bool				verbose = (cscan->custom_plans != NIL);
 	List			   *dcontext;
 	StringInfoData		buf;
 	ListCell		   *lc;
@@ -2063,7 +2064,7 @@ pgstromExplainTaskState(CustomScanState *node,
 
 		if (tle->resjunk)
 			continue;
-		str = deparse_expression((Node *)tle->expr, dcontext, false, true);
+		str = deparse_expression((Node *)tle->expr, dcontext, verbose, true);
 		if (buf.len > 0)
 			appendStringInfoString(&buf, ", ");
 		appendStringInfoString(&buf, str);
@@ -2085,7 +2086,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			expr = make_andclause(scan_quals);
 		else
 			expr = linitial(scan_quals);
-		str = deparse_expression((Node *)expr, dcontext, false, true);
+		str = deparse_expression((Node *)expr, dcontext, verbose, true);
 		appendStringInfoString(&buf, str);
 		if (!es->analyze)
 		{
@@ -2124,7 +2125,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			{
 				Node   *expr = lfirst(lc);
 
-				str = deparse_expression(expr, dcontext, false, true);
+				str = deparse_expression(expr, dcontext, verbose, true);
 				if (buf.len > 0)
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, str);
@@ -2135,7 +2136,7 @@ pgstromExplainTaskState(CustomScanState *node,
 				{
 					Node   *expr = lfirst(lc);
 
-					str = deparse_expression(expr, dcontext, false, true);
+					str = deparse_expression(expr, dcontext, verbose, true);
 					if (buf.len > 0)
 						appendStringInfoString(&buf, ", ");
 					appendStringInfo(&buf, "[%s]", str);
@@ -2180,7 +2181,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			{
 				Node   *expr = lfirst(lc);
 
-				str = deparse_expression(expr, dcontext, true, true);
+				str = deparse_expression(expr, dcontext, verbose, true);
 				if (buf.len > 0)
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, str);
@@ -2196,7 +2197,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			{
 				Node   *expr = lfirst(lc);
 
-				str = deparse_expression(expr, dcontext, true, true);
+				str = deparse_expression(expr, dcontext, verbose, true);
 				if (buf.len > 0)
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, str);
@@ -2213,7 +2214,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			resetStringInfo(&buf);
 
 			str = deparse_expression((Node *)pp_inner->gist_clause,
-									 dcontext, false, true);
+									 dcontext, verbose, true);
 			appendStringInfoString(&buf, str);
 			if (idxname && colname)
 				appendStringInfo(&buf, " on %s (%s)", idxname, colname);

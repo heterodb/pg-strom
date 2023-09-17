@@ -3437,14 +3437,17 @@ __xpucode_loadvars_cstring(StringInfo buf,
 		else
 		{
 			CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
-			Plan	   *plan;
-			TargetEntry *tle;
+			TargetEntry *tle = list_nth(cscan->custom_scan_tlist, vitem->var_slot_id);
+			Var	   *var;
 
-			plan = list_nth(cscan->custom_plans, depth - 1);
-			tle = list_nth(plan->targetlist, vitem->var_resno - 1);
+			var = makeVar(INDEX_VAR,
+						  vitem->var_slot_id + 1,
+						  exprType((Node *)tle->expr),
+						  exprTypmod((Node *)tle->expr),
+						  exprCollation((Node *)tle->expr), 0);
 			appendStringInfo(buf, "%u:%s",
 							 vitem->var_slot_id,
-							 deparse_expression((Node *)tle->expr,
+							 deparse_expression((Node *)var,
 												dcontext,
 												verbose, false));
 		}

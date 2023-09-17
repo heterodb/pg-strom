@@ -205,8 +205,11 @@ __xpu_numeric_to_int64(kern_context *kcxt,
 		{															\
 			return false;											\
 		}															\
-		result->value = ival;										\
-		result->expr_ops = &xpu_##TARGET##_ops;						\
+		else														\
+		{															\
+			result->value = ival;									\
+			result->expr_ops = &xpu_##TARGET##_ops;					\
+		}															\
 		return true;												\
 	}
 PG_NUMERIC_TO_INT_TEMPLATE(int1,SCHAR_MIN,SCHAR_MAX)
