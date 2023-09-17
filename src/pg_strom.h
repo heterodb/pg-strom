@@ -157,6 +157,9 @@
  */
 typedef struct GpuDevAttributes
 {
+	uint32_t	NVIDIA_KMOD_VERSION;
+	uint32_t	NVIDIA_FS_KMOD_VERSION;
+	int			CUDA_DRIVER_VERSION;
 	int32		NUMA_NODE_ID;
 	int32		DEV_ID;
 	char		DEV_NAME[256];
@@ -697,7 +700,8 @@ extern const Bitmapset *GetOptimalGpuForFile(const char *pathname);
 extern const Bitmapset *GetOptimalGpuForRelation(Relation relation);
 extern const Bitmapset *GetOptimalGpuForBaseRel(PlannerInfo *root,
 												RelOptInfo *baserel);
-extern void		pgstrom_init_pcie(void);
+extern const char  *sysfs_read_line(const char *path);
+extern void			pgstrom_init_pcie(void);
 
 /*
  * gpu_device.c

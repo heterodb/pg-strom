@@ -57,8 +57,19 @@ __collectGpuDevAttrs(GpuDevAttributes *dattrs, CUdevice cuda_device)
 	char		path[1024];
 	char		linebuf[1024];
 	FILE	   *filp;
+	int			x, y, z;
+	const char *str;
 	struct stat	stat_buf;
 
+	str = sysfs_read_line("/sys/module/nvidia/version");
+	if (str && sscanf(str, "%u.%u.%u", &x, &y, &z) == 3)
+		dattrs->NVIDIA_KMOD_VERSION = x * 100000 + y * 100 + z;
+	str = sysfs_read_line("/sys/module/nvidia_fs/version");
+	if (str && sscanf(str, "%u.%u.%u", &x, &y, &z) == 3)
+		dattrs->NVIDIA_FS_KMOD_VERSION = x * 100000 + y * 100 + z;
+	rc = cuDriverGetVersion(&dattrs->CUDA_DRIVER_VERSION);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuDriverGetVersion: %s", cuStrError(rc));
 	rc = cuDeviceGetName(dattrs->DEV_NAME, sizeof(dattrs->DEV_NAME), cuda_device);
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuDeviceGetName: %s", cuStrError(rc));
@@ -280,6 +291,36 @@ pgstrom_collect_gpu_devices(void)
 		GpuDevAttributes *dattrs = &gpuDevAttrs[i];
 
 		resetStringInfo(&buf);
+		if (i == 0)
+		{
+			appendStringInfo(&buf, "PG-Strom binary built for CUDA %u.%u",
+							 (CUDA_VERSION / 1000),
+							 (CUDA_VERSION % 1000) / 10);
+			appendStringInfo(&buf, " (CUDA runtime %u.%u",
+							 (dattrs->CUDA_DRIVER_VERSION / 1000),
+							 (dattrs->CUDA_DRIVER_VERSION % 1000) / 10);
+			if (dattrs->NVIDIA_KMOD_VERSION != 0)
+				appendStringInfo(&buf, ", nvidia kmod: %u.%u.%u",
+								 (dattrs->NVIDIA_KMOD_VERSION / 100000),
+								 (dattrs->NVIDIA_KMOD_VERSION % 100000) / 100,
+								 (dattrs->NVIDIA_KMOD_VERSION % 100));
+			if (dattrs->NVIDIA_FS_KMOD_VERSION != 0)
+				appendStringInfo(&buf, ", nvidia-fs kmod: %u.%u.%u",
+								 (dattrs->NVIDIA_FS_KMOD_VERSION / 100000),
+								 (dattrs->NVIDIA_FS_KMOD_VERSION % 100000) / 100,
+								 (dattrs->NVIDIA_FS_KMOD_VERSION % 100));
+			appendStringInfo(&buf, ")");
+			elog(LOG, "%s", buf.data);
+
+			if (CUDA_VERSION < dattrs->CUDA_DRIVER_VERSION)
+				elog(WARNING, "The CUDA version where this PG-Strom module binary was built for (%u.%u) is newer than the CUDA runtime version on this platform (%u.%u). It may lead unexpected behavior, and upgrade of CUDA toolkit is recommended.",
+					 (CUDA_VERSION / 1000),
+					 (CUDA_VERSION % 1000) / 10,
+					 (dattrs->CUDA_DRIVER_VERSION / 1000),
+					 (dattrs->CUDA_DRIVER_VERSION % 1000) / 10);
+
+			resetStringInfo(&buf);
+		}
 		appendStringInfo(&buf, "GPU%d %s (%d SMs; %dMHz, L2 %dkB)",
 						 dattrs->DEV_ID, dattrs->DEV_NAME,
 						 dattrs->MULTIPROCESSOR_COUNT,

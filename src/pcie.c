@@ -104,10 +104,10 @@ __sysfs_read_line(const char *path, char *buffer, size_t buflen)
 	return __trim(buffer);
 }
 
-static const char *
+const char *
 sysfs_read_line(const char *path)
 {
-	static char linebuf[2048];
+	static __thread char linebuf[2048];
 
 	return __sysfs_read_line(path, linebuf, sizeof(linebuf));
 }
