@@ -200,9 +200,11 @@ __xpu_numeric_to_int64(kern_context *kcxt,
 		{															\
 			result->expr_ops = NULL;								\
 		}															\
-		if (!__xpu_numeric_to_int64(kcxt, &ival, &num,				\
-									MIN_VALUE, MAX_VALUE))			\
+		else if (!__xpu_numeric_to_int64(kcxt, &ival, &num,			\
+										 MIN_VALUE, MAX_VALUE))		\
+		{															\
 			return false;											\
+		}															\
 		result->value = ival;										\
 		result->expr_ops = &xpu_##TARGET##_ops;						\
 		return true;												\
