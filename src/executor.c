@@ -1055,7 +1055,7 @@ ExecFallbackBlockDataStore(pgstromTaskState *pts,
 	{
 		PageHeaderData *pg_page = KDS_BLOCK_PGPAGE(kds, i);
 		BlockNumber		block_nr = KDS_BLOCK_BLCKNR(kds, i);
-		uint32_t		ntuples = PageGetMaxOffsetNumber(pg_page);
+		uint32_t		ntuples = PageGetMaxOffsetNumber((Page)pg_page);
 
 		for (uint32_t k=0; k < ntuples; k++)
 		{
@@ -1069,7 +1069,7 @@ ExecFallbackBlockDataStore(pgstromTaskState *pts,
 				tuple.t_self.ip_blkid.bi_lo = (uint16_t)(block_nr & 0xffffU);
 				tuple.t_self.ip_posid = k+1;
 				tuple.t_tableOid = kds->table_oid;
-				tuple.t_data = (HeapTupleHeader)PageGetItem(pg_page, lpp);
+				tuple.t_data = (HeapTupleHeader)PageGetItem((Page)pg_page, lpp);
 
 				pts->cb_cpu_fallback(pts, kds, &tuple);
 			}

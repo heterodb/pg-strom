@@ -2561,15 +2561,15 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 	if (pts->num_rels == 0)
 	{
 		TupleTableSlot *proj_slot;
-		HeapTuple	tuple;
+		HeapTuple	proj_htup;
 		bool		should_free;
 
 		Assert(pts->fallback_slot == 0);
 		proj_slot = ExecProject(pts->fallback_proj);
-		tuple = ExecFetchSlotHeapTuple(proj_slot, false, &should_free);
-		pgstromStoreFallbackTuple(pts, tuple);
+		proj_htup = ExecFetchSlotHeapTuple(proj_slot, false, &should_free);
+		pgstromStoreFallbackTuple(pts, proj_htup);
 		if (should_free)
-			pfree(tuple);
+			pfree(proj_htup);
 		return;
 	}
 
