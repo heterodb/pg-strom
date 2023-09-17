@@ -1240,20 +1240,14 @@ pgfn_BoolExprOr(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_BoolExprNot(XPU_PGFUNCTION_ARGS)
 {
-	xpu_bool_t *result = (xpu_bool_t *)__result;
-	xpu_bool_t	status;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS1(bool, bool, status);
 
-	assert(kexp->exptype == TypeOpCode__bool &&
-		   kexp->nr_args == 1 && KEXP_IS_VALID(karg, bool));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &status))
-		return false;
 	if (XPU_DATUM_ISNULL(&status))
 		result->expr_ops = NULL;
 	else
 	{
 		result->expr_ops = kexp->expr_ops;
-		result->value = !result->value;
+		result->value = !status.value;
 	}
 	return true;
 }
@@ -1261,23 +1255,16 @@ pgfn_BoolExprNot(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_NullTestExpr(XPU_PGFUNCTION_ARGS)
 {
-	xpu_bool_t	   *result = (xpu_bool_t *)__result;
-	xpu_datum_t	   *status;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS1(bool, bool, status);
 
-	assert(kexp->exptype == TypeOpCode__bool &&
-		   kexp->nr_args == 1 && __KEXP_IS_VALID(kexp, karg));
-	status = (xpu_datum_t *)alloca(karg->expr_ops->xpu_type_sizeof);
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, status))
-		return false;
-	result->expr_ops = kexp->expr_ops;
+	result->expr_ops = &xpu_bool_ops;
 	switch (kexp->opcode)
 	{
 		case FuncOpCode__NullTestExpr_IsNull:
-			result->value = XPU_DATUM_ISNULL(status);
+			result->value = XPU_DATUM_ISNULL(&status);
 			break;
 		case FuncOpCode__NullTestExpr_IsNotNull:
-			result->value = !XPU_DATUM_ISNULL(status);
+			result->value = !XPU_DATUM_ISNULL(&status);
 			break;
 		default:
 			STROM_ELOG(kcxt, "corrupted kernel expression");
@@ -1289,14 +1276,8 @@ pgfn_NullTestExpr(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_BoolTestExpr(XPU_PGFUNCTION_ARGS)
 {
-	xpu_bool_t	   *result = (xpu_bool_t *)__result;
-	xpu_bool_t		status;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS1(bool, bool, status);
 
-	assert(kexp->exptype == TypeOpCode__bool &&
-		   kexp->nr_args == 1 && KEXP_IS_VALID(karg, bool));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &status))
-		return false;
 	result->expr_ops = kexp->expr_ops;
 	switch (kexp->opcode)
 	{
@@ -1365,6 +1346,7 @@ pgfn_DistinctFrom(XPU_PGFUNCTION_ARGS)
 	}
 	else if (EXEC_KERN_EXPRESSION(kcxt, karg, __result))
 	{
+		assert(result->expr_ops == &xpu_bool_ops);
 		result->value = !result->value;
 	}
 	else
