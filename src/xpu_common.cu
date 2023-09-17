@@ -1181,7 +1181,8 @@ pgfn_BoolExprAnd(XPU_PGFUNCTION_ARGS)
 	bool		anynull = false;
 	const kern_expression *karg;
 
-	assert(kexp->exptype == TypeOpCode__bool);
+	assert(kexp->exptype == TypeOpCode__bool &&
+		   kexp->nr_args >= 2);
 	for (i=0, karg=KEXP_FIRST_ARG(kexp);
 		 i < kexp->nr_args;
 		 i++, karg=KEXP_NEXT_ARG(karg))
@@ -1195,12 +1196,12 @@ pgfn_BoolExprAnd(XPU_PGFUNCTION_ARGS)
 			anynull = true;
 		else if (!status.value)
 		{
-			result->expr_ops = kexp->expr_ops;
+			result->expr_ops = &xpu_bool_ops;
 			result->value  = false;
 			return true;
 		}
 	}
-	result->expr_ops = (anynull ? NULL : kexp->expr_ops);
+	result->expr_ops = (anynull ? NULL : &xpu_bool_ops);
 	result->value  = true;
 	return true;
 }
@@ -1213,7 +1214,8 @@ pgfn_BoolExprOr(XPU_PGFUNCTION_ARGS)
 	bool		anynull = false;
 	const kern_expression *karg;
 
-	assert(kexp->exptype == TypeOpCode__bool);
+	assert(kexp->exptype == TypeOpCode__bool &&
+		   kexp->nr_args >= 2);
 	for (i=0, karg=KEXP_FIRST_ARG(kexp);
 		 i < kexp->nr_args;
 		 i++, karg=KEXP_NEXT_ARG(karg))
@@ -1227,12 +1229,12 @@ pgfn_BoolExprOr(XPU_PGFUNCTION_ARGS)
 			anynull = true;
 		else if (status.value)
 		{
-			result->expr_ops = kexp->expr_ops;
+			result->expr_ops = &xpu_bool_ops;
 			result->value = true;
 			return true;
 		}
 	}
-	result->expr_ops = (anynull ? NULL : kexp->expr_ops);
+	result->expr_ops = (anynull ? NULL : &xpu_bool_ops);
 	result->value  = false;
 	return true;
 }

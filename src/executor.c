@@ -431,6 +431,15 @@ __build_session_encode(StringInfo buf)
 	return __appendBinaryStringInfo(buf, &encode, sizeof(xpu_encode_info));
 }
 
+static void
+__build_session_lconvert(kern_session_info *session)
+{
+	struct lconv *lconvert = PGLC_localeconv();
+
+	/* see comments about frac_digits in cash_in() */
+	session->session_currency_frac_digits = lconvert->frac_digits;
+}
+
 const XpuCommand *
 pgstromBuildSessionInfo(pgstromTaskState *pts,
 						uint32_t join_inner_handle,
@@ -602,6 +611,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->session_xact_state = __build_session_xact_state(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
+	__build_session_lconvert(session);
 	session->pgsql_port_number = PostPortNumber;
 	session->pgsql_plan_node_id = pts->css.ss.ps.plan->plan_node_id;
 	session->join_inner_handle = join_inner_handle;
