@@ -12,6 +12,289 @@
  */
 #include "pg_strom.h"
 
+/* ----------------------------------------------------------------
+ *
+ * form/deform/copy pgstromPlanInfo
+ *
+ * ----------------------------------------------------------------
+ */
+void
+form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
+{
+	List	   *privs = NIL;
+	List	   *exprs = NIL;
+	List	   *kvars_deflist = NIL;
+	ListCell   *lc;
+	int			endpoint_id;
+
+	privs = lappend(privs, makeInteger(pp_info->xpu_task_flags));
+	privs = lappend(privs, makeInteger(pp_info->gpu_cache_dindex));
+	privs = lappend(privs, bms_to_pglist(pp_info->gpu_direct_devs));
+	endpoint_id = DpuStorageEntryGetEndpointId(pp_info->ds_entry);
+	privs = lappend(privs, makeInteger(endpoint_id));
+	/* plan information */
+	privs = lappend(privs, bms_to_pglist(pp_info->outer_refs));
+	exprs = lappend(exprs, pp_info->used_params);
+	exprs = lappend(exprs, pp_info->host_quals);
+	privs = lappend(privs, makeInteger(pp_info->scan_relid));
+	exprs = lappend(exprs, pp_info->scan_quals);
+	privs = lappend(privs, pp_info->scan_quals_fallback);
+	privs = lappend(privs, __makeFloat(pp_info->scan_tuples));
+	privs = lappend(privs, __makeFloat(pp_info->scan_rows));
+	privs = lappend(privs, __makeFloat(pp_info->scan_startup_cost));
+	privs = lappend(privs, __makeFloat(pp_info->scan_run_cost));
+	privs = lappend(privs, makeInteger(pp_info->parallel_nworkers));
+	privs = lappend(privs, __makeFloat(pp_info->parallel_divisor));
+	privs = lappend(privs, __makeFloat(pp_info->final_cost));
+	/* bin-index support */
+	privs = lappend(privs, makeInteger(pp_info->brin_index_oid));
+	exprs = lappend(exprs, pp_info->brin_index_conds);
+	exprs = lappend(exprs, pp_info->brin_index_quals);
+	/* XPU code */
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_scan_kvars_load));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_scan_quals));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_join_kvars_load_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_join_quals_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_hash_keys_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_gist_evals_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_projection));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keyhash));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keyload));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keycomp));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_actions));
+	/* Kvars definitions */
+	foreach (lc, pp_info->kvars_deflist)
+	{
+		kvar_defitem   *kvdef = lfirst(lc);
+		List		   *sublist = NIL;
+
+		sublist = lappend(sublist, makeInteger(kvdef->kv_depth));
+		sublist = lappend(sublist, makeInteger(kvdef->kv_resno));
+		sublist = lappend(sublist, makeInteger((int)kvdef->kv_type));
+		sublist = lappend(sublist, kvdef->kv_expr);
+		sublist = lappend(sublist, makeString(kvdef->kv_resname));
+		sublist = lappend(sublist, makeBoolean(kvdef->kv_resjunk));
+
+		kvars_deflist = lappend(kvars_deflist, sublist);
+	}
+	privs = lappend(privs, kvars_deflist);
+	privs = lappend(privs, pp_info->kvars_depth);	//deprecated
+	privs = lappend(privs, pp_info->kvars_resno);	//deprecated
+	privs = lappend(privs, pp_info->kvars_types);	//deprecated
+	privs = lappend(privs, pp_info->kvars_exprs);	//deprecated
+	/* other planner fields */
+	privs = lappend(privs, makeInteger(pp_info->extra_flags));
+	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
+	privs = lappend(privs, pp_info->fallback_tlist);
+	privs = lappend(privs, pp_info->groupby_actions);
+	/* inner relations */
+	privs = lappend(privs, makeInteger(pp_info->num_rels));
+	for (int i=0; i < pp_info->num_rels; i++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+		List   *__privs = NIL;
+		List   *__exprs = NIL;
+
+		__privs = lappend(__privs, makeInteger(pp_inner->join_type));
+		__privs = lappend(__privs, __makeFloat(pp_inner->join_nrows));
+		__privs = lappend(__privs, __makeFloat(pp_inner->join_startup_cost));
+		__privs = lappend(__privs, __makeFloat(pp_inner->join_run_cost));
+		__exprs = lappend(__exprs, pp_inner->hash_outer_keys);
+		__privs = lappend(__privs, pp_inner->hash_outer_keys_fallback);
+		__exprs = lappend(__exprs, pp_inner->hash_inner_keys);
+		__privs = lappend(__privs, pp_inner->hash_inner_keys_fallback);
+		__exprs = lappend(__exprs, pp_inner->join_quals);
+		__privs = lappend(__privs, pp_inner->join_quals_fallback);
+		__exprs = lappend(__exprs, pp_inner->other_quals);
+		__privs = lappend(__privs, pp_inner->other_quals_fallback);
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_oid));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_col));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_ctid_resno));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_func_oid));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_slot_id));
+		__exprs = lappend(__exprs, pp_inner->gist_clause);
+		__privs = lappend(__privs, __makeFloat(pp_inner->gist_selectivity));
+		__privs = lappend(__privs, __makeFloat(pp_inner->gist_npages));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_height));
+
+		privs = lappend(privs, __privs);
+		exprs = lappend(exprs, __exprs);
+	}
+	cscan->custom_exprs = exprs;
+	cscan->custom_private = privs;
+}
+
+/*
+ * deform_pgstrom_plan_info
+ */
+pgstromPlanInfo *
+deform_pgstrom_plan_info(CustomScan *cscan)
+{
+	pgstromPlanInfo *pp_info;
+	pgstromPlanInfo	pp_data;
+	List	   *privs = cscan->custom_private;
+	List	   *exprs = cscan->custom_exprs;
+	int			pindex = 0;
+	int			eindex = 0;
+	List	   *kvars_deflist;
+	ListCell   *lc;
+	int			endpoint_id;
+
+	memset(&pp_data, 0, sizeof(pgstromPlanInfo));
+	/* device identifiers */
+	pp_data.xpu_task_flags = intVal(list_nth(privs, pindex++));
+	pp_data.gpu_cache_dindex = intVal(list_nth(privs, pindex++));
+	pp_data.gpu_direct_devs = bms_from_pglist(list_nth(privs, pindex++));
+	endpoint_id = intVal(list_nth(privs, pindex++));
+	pp_data.ds_entry = DpuStorageEntryByEndpointId(endpoint_id);
+	/* plan information */
+	pp_data.outer_refs = bms_from_pglist(list_nth(privs, pindex++));
+	pp_data.used_params = list_nth(exprs, eindex++);
+	pp_data.host_quals = list_nth(exprs, eindex++);
+	pp_data.scan_relid = intVal(list_nth(privs, pindex++));
+	pp_data.scan_quals = list_nth(exprs, eindex++);
+	pp_data.scan_quals_fallback = list_nth(privs, pindex++);
+	pp_data.scan_tuples = floatVal(list_nth(privs, pindex++));
+	pp_data.scan_rows = floatVal(list_nth(privs, pindex++));
+	pp_data.scan_startup_cost = floatVal(list_nth(privs, pindex++));
+	pp_data.scan_run_cost = floatVal(list_nth(privs, pindex++));
+	pp_data.parallel_nworkers = intVal(list_nth(privs, pindex++));
+	pp_data.parallel_divisor = floatVal(list_nth(privs, pindex++));
+	pp_data.final_cost = floatVal(list_nth(privs, pindex++));
+	/* brin-index support */
+	pp_data.brin_index_oid = intVal(list_nth(privs, pindex++));
+	pp_data.brin_index_conds = list_nth(exprs, eindex++);
+	pp_data.brin_index_quals = list_nth(exprs, eindex++);
+	/* XPU code */
+	pp_data.kexp_scan_kvars_load = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_scan_quals = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_join_kvars_load_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_join_quals_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_hash_keys_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_gist_evals_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_projection = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_keyhash = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_keyload = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_keycomp = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_actions = __getByteaConst(list_nth(privs, pindex++));
+	/* Kvars definitions */
+	kvars_deflist = list_nth(privs, pindex++);
+	foreach (lc, kvars_deflist)
+	{
+		kvar_defitem *kvdef = palloc0(sizeof(kvar_defitem));
+		List	   *sublist = (List *)lfirst(lc);
+		int			kvindex = 0;
+
+		Assert(IsA(sublist, List));
+		kvdef->kv_depth = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_resno = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_type = (Oid)intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_expr = (Expr *)list_nth(sublist, kvindex++);
+		kvdef->kv_resname = strVal(list_nth(sublist, kvindex++));
+		kvdef->kv_resjunk = boolVal(list_nth(sublist, kvindex++));
+
+		pp_data.kvars_deflist = lappend(pp_data.kvars_deflist, kvdef);
+	}
+	pp_data.kvars_depth = list_nth(privs, pindex++);	//deprecated
+	pp_data.kvars_resno = list_nth(privs, pindex++);	//deprecated
+	pp_data.kvars_types = list_nth(privs, pindex++);	//deprecated
+	pp_data.kvars_exprs = list_nth(privs, pindex++);	//deprecated
+	pp_data.extra_flags = intVal(list_nth(privs, pindex++));
+	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
+	pp_data.fallback_tlist = list_nth(privs, pindex++);
+	pp_data.groupby_actions = list_nth(privs, pindex++);
+	/* inner relations */
+	pp_data.num_rels = intVal(list_nth(privs, pindex++));
+	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_data.num_rels]));
+	memcpy(pp_info, &pp_data, offsetof(pgstromPlanInfo, inners));
+	for (int i=0; i < pp_info->num_rels; i++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+		List   *__privs = list_nth(privs, pindex++);
+		List   *__exprs = list_nth(exprs, eindex++);
+		int		__pindex = 0;
+		int		__eindex = 0;
+
+		pp_inner->join_type       = intVal(list_nth(__privs, __pindex++));
+		pp_inner->join_nrows      = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->join_startup_cost = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->join_run_cost   = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->hash_outer_keys = list_nth(__exprs, __eindex++);
+		pp_inner->hash_outer_keys_fallback = list_nth(__privs, __pindex++);
+		pp_inner->hash_inner_keys = list_nth(__exprs, __eindex++);
+		pp_inner->hash_inner_keys_fallback = list_nth(__privs, __pindex++);
+		pp_inner->join_quals      = list_nth(__exprs, __eindex++);
+		pp_inner->join_quals_fallback = list_nth(__privs, __pindex++);
+		pp_inner->other_quals     = list_nth(__exprs, __eindex++);
+		pp_inner->other_quals_fallback = list_nth(__privs, __pindex++);
+		pp_inner->gist_index_oid  = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_index_col  = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_ctid_resno = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_func_oid   = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_slot_id    = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_clause     = list_nth(__exprs, __eindex++);
+		pp_inner->gist_selectivity = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_npages     = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_height     = intVal(list_nth(__privs, __pindex++));
+	}
+	return pp_info;
+}
+
+/*
+ * copy_pgstrom_plan_info
+ */
+pgstromPlanInfo *
+copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
+{
+	pgstromPlanInfo *pp_dest;
+	ListCell   *lc;
+
+	/*
+	 * NOTE: we add one pgstromPlanInnerInfo margin to be used for GpuJoin.
+	 */
+	pp_dest = palloc0(offsetof(pgstromPlanInfo, inners[pp_orig->num_rels+1]));
+	memcpy(pp_dest, pp_orig, offsetof(pgstromPlanInfo,
+									  inners[pp_orig->num_rels]));
+	pp_dest->used_params      = list_copy(pp_dest->used_params);
+	pp_dest->host_quals       = copyObject(pp_dest->host_quals);
+	pp_dest->scan_quals       = copyObject(pp_dest->scan_quals);
+	pp_dest->scan_quals_fallback = copyObject(pp_dest->scan_quals_fallback);
+	pp_dest->brin_index_conds = copyObject(pp_dest->brin_index_conds);
+	pp_dest->brin_index_quals = copyObject(pp_dest->brin_index_quals);
+	foreach (lc, pp_orig->kvars_deflist)
+	{
+		kvar_defitem   *kvdef_orig = lfirst(lc);
+		kvar_defitem   *kvdef_dest;
+
+		kvdef_dest = pmemdup(kvdef_orig, sizeof(kvar_defitem));
+		if (kvdef_dest->kv_resname)
+			kvdef_dest->kv_resname = pstrdup(kvdef_dest->kv_resname);
+		pp_dest->kvars_deflist = lappend(pp_dest->kvars_deflist, kvdef_dest);
+	}
+	pp_dest->kvars_depth      = list_copy(pp_dest->kvars_depth);	//deprecated
+	pp_dest->kvars_resno      = list_copy(pp_dest->kvars_resno);	//deprecated
+	pp_dest->kvars_types      = list_copy(pp_dest->kvars_types);	//deprecated
+	pp_dest->kvars_exprs      = copyObject(pp_dest->kvars_exprs);	//deprecated
+	pp_dest->fallback_tlist   = copyObject(pp_dest->fallback_tlist);
+	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
+	for (int j=0; j < pp_orig->num_rels; j++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_dest->inners[j];
+#define __COPY(FIELD)	pp_inner->FIELD = copyObject(pp_inner->FIELD)
+		__COPY(hash_outer_keys);
+		__COPY(hash_outer_keys_fallback);
+		__COPY(hash_inner_keys);
+		__COPY(hash_inner_keys_fallback);
+		__COPY(join_quals);
+		__COPY(join_quals_fallback);
+		__COPY(other_quals);
+		__COPY(other_quals_fallback);
+		__COPY(gist_clause);
+#undef __COPY
+	}
+	return pp_dest;
+}
+
 /*
  * fixup_varnode_to_origin
  */

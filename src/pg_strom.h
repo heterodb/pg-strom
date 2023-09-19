@@ -302,10 +302,11 @@ typedef struct
 	bytea	   *kexp_groupby_keyload;
 	bytea	   *kexp_groupby_keycomp;
 	bytea	   *kexp_groupby_actions;
-	List	   *kvars_depth;
-	List	   *kvars_resno;
+	List	   *kvars_deflist;
+	List	   *kvars_depth;	//deprecated
+	List	   *kvars_resno;	//deprecated
 	List	   *kvars_types;	/* type-oid, if it needs extra buffer on kvars-slot */
-	List	   *kvars_exprs;
+	List	   *kvars_exprs;	//deprecated
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
 	/* fallback projection */
@@ -524,6 +525,16 @@ extern int		heterodbExtraGetError(const char **p_filename,
  */
 typedef struct
 {
+	int		kv_depth;
+	int		kv_resno;
+	Oid		kv_type;
+	Expr   *kv_expr;
+	char   *kv_resname;		/* optional */
+	bool	kv_resjunk;		/* true, if only EXPLAIN */
+} kvar_defitem;
+
+typedef struct
+{
 	int			elevel;			/* ERROR or DEBUG2 */
 	Expr	   *top_expr;
 	List	   *used_params;
@@ -532,10 +543,11 @@ typedef struct
 	uint32_t	extra_bufsz;
 	uint32_t	device_cost;
 	uint32_t	kexp_flags;
-	List	   *kvars_depth;
-	List	   *kvars_resno;
-	List	   *kvars_types;
-	List	   *kvars_exprs;
+	List	   *kvars_deflist;
+	List	   *kvars_depth;	//deprecated
+	List	   *kvars_resno;	//deprecated
+	List	   *kvars_types;	//deprecated
+	List	   *kvars_exprs;	//deprecated
 	List	   *tlist_dev;
 	uint32_t	kvars_nslots;
 	List	   *input_rels_tlist;
@@ -647,12 +659,6 @@ extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
 extern void		pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple tuple);
 extern TupleTableSlot *pgstromFetchFallbackTuple(pgstromTaskState *pts);
 extern void		pgstrom_init_relscan(void);
-
-/*
- * optimizer.c
- */
-
-
 
 /*
  * executor.c
@@ -790,9 +796,6 @@ extern void		pgstrom_init_dpu_scan(void);
 /*
  * gpu_join.c
  */
-extern void		form_pgstrom_plan_info(CustomScan *cscan,
-									   pgstromPlanInfo *pp_info);
-extern pgstromPlanInfo *deform_pgstrom_plan_info(CustomScan *cscan);
 extern pgstromPlanInfo *try_fetch_xpujoin_planinfo(const Path *path);
 extern pgstromPlanInfo *buildOuterJoinPlanInfo(PlannerInfo *root,
 											   RelOptInfo *outer_rel,
@@ -896,6 +899,10 @@ extern bool		pgstrom_init_dpu_device(void);
 /*
  * misc.c
  */
+extern void		form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info);
+extern pgstromPlanInfo *deform_pgstrom_plan_info(CustomScan *cscan);
+extern pgstromPlanInfo *copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig);
+
 extern Node	   *fixup_varnode_to_origin(Node *node, List *cscan_tlist);
 extern int		__appendBinaryStringInfo(StringInfo buf,
 										 const void *data, int datalen);
