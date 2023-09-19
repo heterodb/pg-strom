@@ -134,6 +134,28 @@ xpu_numeric_datum_comp(kern_context *kcxt,
 	*p_comp = __numeric_compare(a, b);
 	return true;
 }
+
+
+STATIC_FUNCTION(bool)
+xpu_numeric_datum_load_heap(kern_context *kcxt,
+							kvec_datum_t *__result,
+							int kvec_id,
+							const char *addr)
+{
+	kvec_numeric_t *result = (kvec_numeric_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+	{
+		xpu_numeric_t	num;
+
+		__xpu_numeric_from_varlena(&num, (const varlena *)addr);
+		result->kinds[kvec_id] = num.kind;
+		result->weights[kvec_id] = num.weight;
+		result->values[kvec_id] = num.value;
+	}
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(numeric, false, 4, -1);
 
 PUBLIC_FUNCTION(bool)

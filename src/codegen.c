@@ -29,7 +29,8 @@ static List	   *devfunc_code_slot[DEVFUNC_INFO_NSLOTS];	/* by FuncOpCode */
 	  DEVKIND__ANY | (FLAGS),						\
 	  devtype_##NAME##_hash,						\
 	  sizeof(xpu_##NAME##_t),						\
-	  __alignof__(xpu_##NAME##_t) },
+	  __alignof__(xpu_##NAME##_t),					\
+	  sizeof(kvec_##NAME##_t) },
 static struct {
 	const char	   *type_extension;
 	const char	   *type_name;
@@ -38,10 +39,11 @@ static struct {
 	devtype_hashfunc_f type_hashfunc;
 	int				type_sizeof;
 	int				type_alignof;
+	int				kvec_sizeof;
 } devtype_catalog[] = {
 #include "xpu_opcodes.h"
 	/* alias device data types */
-	{NULL, NULL, TypeOpCode__Invalid, 0, NULL, 0}
+	{NULL, NULL, TypeOpCode__Invalid, 0, NULL, 0, 0}
 };
 
 static struct {
@@ -112,6 +114,7 @@ build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 			dtype->type_extension = (ext_name ? pstrdup(ext_name) : NULL);
 			dtype->type_sizeof = devtype_catalog[i].type_sizeof;
 			dtype->type_alignof = devtype_catalog[i].type_alignof;
+			dtype->kvec_sizeof = devtype_catalog[i].kvec_sizeof;
 			dtype->type_hashfunc = devtype_catalog[i].type_hashfunc;
 			/* type equality functions */
 			dtype->type_eqfunc = get_opcode(tcache->eq_opr);

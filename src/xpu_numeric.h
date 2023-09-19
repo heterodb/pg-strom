@@ -13,6 +13,13 @@
 #define XPU_NUMERIC_H
 
 typedef struct {
+	KVEC_DATUM_COMMON_FIELD;
+	uint8_t		kinds[KVEC_UNITSZ];
+	int16_t		weights[KVEC_UNITSZ];
+	int128_t	values[KVEC_UNITSZ];
+} kvec_numeric_t;
+
+typedef struct {
 	XPU_DATUM_COMMON_FIELD;
 	uint8_t		kind;		/* one of XPU_NUMERIC_KIND__* below */
 	int16_t		weight;

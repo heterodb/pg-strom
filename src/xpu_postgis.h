@@ -66,6 +66,7 @@ typedef struct
 #define GEOM_TRIANGLETYPE			14
 #define GEOM_TINTYPE				15
 #define GEOM_NUMTYPES				16
+#define GEOM_INVALID_VARLENA		255
 #define GEOM_TYPE_IS_VALID(gs_type)	((gs_type) >= 1 && (gs_type) <= GEOM_NUMTYPES)
 
 /* see LWFLAG_* in CPU code; at liblwgeom.h */
@@ -118,7 +119,14 @@ typedef union
 	geom_bbox_4d	d4;
 } geom_bbox;
 
-PGSTROM_SQLTYPE_SIMPLE_DECLARATION(box2df, geom_bbox_2d);
+typedef struct {
+	KVEC_DATUM_COMMON_FIELD;
+	float4_t		xmin[KVEC_UNITSZ];
+	float4_t		xmax[KVEC_UNITSZ];
+	float4_t		ymin[KVEC_UNITSZ];
+	float4_t		ymax[KVEC_UNITSZ];
+} kvec_box2df_t;
+__PGSTROM_SQLTYPE_SIMPLE_DECLARATION(box2df, geom_bbox_2d);
 
 INLINE_FUNCTION(size_t)
 geometry_bbox_size(uint32_t geom_flags)
@@ -133,6 +141,18 @@ geometry_bbox_size(uint32_t geom_flags)
 #define SRID_UNKNOWN		0
 #define SRID_MAXIMUM		999999
 #define SRID_USER_MAXIMUM	998999
+
+typedef struct
+{
+	KVEC_DATUM_COMMON_FIELD;
+	uint8_t			type[KVEC_UNITSZ];
+	uint16_t		flags[KVEC_UNITSZ];
+	int32_t			srid[KVEC_UNITSZ];
+	uint32_t		nitems[KVEC_UNITSZ];
+	uint32_t		rawsize[KVEC_UNITSZ];
+	const char	   *rawdata[KVEC_UNITSZ];
+	const geom_bbox *bbox[KVEC_UNITSZ];
+} kvec_geometry_t;
 
 typedef struct
 {
@@ -177,122 +197,5 @@ typedef struct
 {
 	double	x, y, z, m;
 } POINT4D;
-
-#if 0
-/* for DATUM_CLASS__GEOMETRY */
-DEVICE_FUNCTION(cl_uint)
-pg_geometry_datum_length(kern_context *kcxt, Datum datum);
-DEVICE_FUNCTION(cl_uint)
-pg_geometry_datum_write(kern_context *kcxt, char *dest, Datum datum);
-
-/*
- * box2df operators & functions
- */
-DEVICE_FUNCTION(pg_bool_t)
-pgfn_geometry_overlaps(kern_context *kcxt,
-					   const pg_geometry_t &arg1,
-					   const pg_geometry_t &arg2);
-DEVICE_FUNCTION(pg_bool_t)
-pgfn_box2df_geometry_overlaps(kern_context *kcxt,
-							  const pg_box2df_t &arg1,
-							  const pg_geometry_t &arg2);
-DEVICE_FUNCTION(pg_bool_t)
-pgfn_geometry_contains(kern_context *kcxt,
-					   const pg_geometry_t &arg1,
-					   const pg_geometry_t &arg2);
-DEVICE_FUNCTION(pg_bool_t)
-pgfn_box2df_geometry_contains(kern_context *kcxt,
-							  const pg_box2df_t &arg1,
-							  const pg_geometry_t &arg2);
-DEVICE_FUNCTION(pg_bool_t)
-pgfn_geometry_within(kern_context *kcxt,
-					 const pg_geometry_t &arg1,
-					 const pg_geometry_t &arg2);
-DEVICE_FUNCTION(pg_bool_t)
-pgfn_box2df_geometry_within(kern_context *kcxt,
-							const pg_box2df_t &arg1,
-							const pg_geometry_t &arg2);
-
-DEVICE_FUNCTION(pg_geometry_t)
-pgfn_st_expand(kern_context *kcxt,
-			   const pg_geometry_t &arg1, pg_float8_t arg2);
-
-/*
- * GiST index handlers
- */
-DEVICE_FUNCTION(cl_bool)
-pgindex_gist_geometry_overlap(kern_context *kcxt,
-							  PageHeaderData *i_page,
-							  const pg_box2df_t &i_var,
-							  const pg_geometry_t &i_arg);
-DEVICE_FUNCTION(cl_bool)
-pgindex_gist_box2df_overlap(kern_context *kcxt,
-							PageHeaderData *i_page,
-							const pg_box2df_t &i_var,
-							const pg_box2df_t &i_arg);
-DEVICE_FUNCTION(cl_bool)
-pgindex_gist_geometry_contains(kern_context *kcxt,
-							   PageHeaderData *i_page,
-							   const pg_box2df_t &i_var,
-							   const pg_geometry_t &i_arg);
-DEVICE_FUNCTION(cl_bool)
-pgindex_gist_box2df_contains(kern_context *kcxt,
-							 PageHeaderData *i_page,
-							 const pg_box2df_t &i_var,
-							 const pg_box2df_t &i_arg);
-DEVICE_FUNCTION(cl_bool)
-pgindex_gist_geometry_contained(kern_context *kcxt,
-								PageHeaderData *i_page,
-								const pg_box2df_t &i_var,
-								const pg_geometry_t &i_arg);
-DEVICE_FUNCTION(cl_bool)
-pgindex_gist_box2df_contained(kern_context *kcxt,
-							  PageHeaderData *i_page,
-							  const pg_box2df_t &i_var,
-							  const pg_box2df_t &i_arg);
-
-/*
- * PostGIS functions
- */
-DEVICE_FUNCTION(pg_geometry_t)
-pgfn_st_setsrid(kern_context *kcxt,
-				const pg_geometry_t &arg1, pg_int4_t arg2);
-DEVICE_FUNCTION(pg_geometry_t)
-pgfn_st_makepoint2(kern_context *kcxt,
-				   pg_float8_t x, pg_float8_t y);
-DEVICE_FUNCTION(pg_geometry_t)
-pgfn_st_makepoint3(kern_context *kcxt,
-				   pg_float8_t x, pg_float8_t y, pg_float8_t z);
-DEVICE_FUNCTION(pg_geometry_t)
-pgfn_st_makepoint4(kern_context *kcxt,
-				   pg_float8_t x, pg_float8_t y,
-				   pg_float8_t z, pg_float8_t m);
-DEVICE_FUNCTION(pg_float8_t)
-pgfn_st_distance(kern_context *kcxt,
-				 const pg_geometry_t &arg1,
-				 const pg_geometry_t &arg2);
-DEVICE_FUNCTION(pg_bool_t)
-pgfn_st_dwithin(kern_context *kcxt,
-				const pg_geometry_t &arg1,
-				const pg_geometry_t &arg2,
-				pg_float8_t arg3);
-DEVICE_FUNCTION(pg_int4_t)
-pgfn_st_linecrossingdirection(kern_context *kcxt,
-							  const pg_geometry_t &arg1,
-							  const pg_geometry_t &arg2);
-DEVICE_FUNCTION(pg_text_t)
-pgfn_st_relate(kern_context *kcxt,
-			   const pg_geometry_t &arg1,
-			   const pg_geometry_t &arg2);
-DEVICE_FUNCTION(pg_bool_t)
-pgfn_st_contains(kern_context *kcxt,
-				 const pg_geometry_t &arg1,
-				 const pg_geometry_t &arg2);
-DEVICE_FUNCTION(pg_bool_t)
-pgfn_st_crosses(kern_context *kcxt,
-				const pg_geometry_t &arg1,
-				const pg_geometry_t &arg2);
-
-#endif
 
 #endif /* XPU_POSTGIS_H */

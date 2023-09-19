@@ -516,6 +516,51 @@ xpu_geometry_datum_comp(kern_context *kcxt,
 	STROM_ELOG(kcxt, "geometry type has no compare function");
 	return false;
 }
+
+STATIC_FUNCTION(bool)
+xpu_geometry_datum_load_heap(kern_context *kcxt,
+							 kvec_datum_t *__result,
+							 int kvec_id,
+							 const char *addr)
+{
+	kvec_geometry_t *result = (kvec_geometry_t *)__result;
+
+    kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+    if (addr)
+    {
+		if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+		{
+			result->type[kvec_id] = GEOM_INVALID_VARLENA;
+			result->rawdata[kvec_id] = addr;
+		}
+		else
+		{
+			__GSERIALIZED  *g = (__GSERIALIZED *)VARDATA_ANY(addr);
+			int32_t			sz = VARSIZE_ANY_EXHDR(addr);
+			xpu_geometry_t	geom;
+
+			if ((g->gflags & G2FLAG_VER_0) != 0)
+			{
+				if (!__geometry_datum_ref_v2(kcxt, &geom, g, sz))
+					return false;
+			}
+			else
+			{
+				if (!__geometry_datum_ref_v1(kcxt, &geom, g, sz))
+					return false;
+			}
+			assert(!XPU_DATUM_ISNULL(&geom));
+			result->type[kvec_id]    = geom.type;
+			result->type[kvec_id]    = geom.flags;
+			result->srid[kvec_id]    = geom.srid;
+			result->nitems[kvec_id]  = geom.nitems;
+			result->rawsize[kvec_id] = geom.rawsize;
+			result->rawdata[kvec_id] = geom.rawdata;
+			result->bbox[kvec_id]    = geom.bbox;
+		}
+	}
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(geometry,false,4,-1);
 
 /* ================================================================
@@ -594,6 +639,27 @@ xpu_box2df_datum_comp(kern_context *kcxt,
 {
 	STROM_ELOG(kcxt, "box2df type has no compare function");
 	return false;
+}
+
+STATIC_FUNCTION(bool)
+xpu_box2df_datum_load_heap(kern_context *kcxt,
+						   kvec_datum_t *__result,
+						   int kvec_id,
+						   const char *addr)
+{
+	kvec_box2df_t *result = (kvec_box2df_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+    if (addr)
+    {
+		const geom_bbox_2d *bbox = (const geom_bbox_2d *)addr;
+
+		result->xmin[kvec_id] = bbox->xmin;
+		result->xmax[kvec_id] = bbox->xmax;
+		result->ymin[kvec_id] = bbox->ymin;
+		result->ymax[kvec_id] = bbox->ymax;
+	}
+	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(box2df,false,1,sizeof(geom_bbox_2d));
 

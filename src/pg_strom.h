@@ -199,8 +199,9 @@ typedef struct devtype_info
 	const char *type_extension;
 	const char *type_name;
 	Oid			type_namespace;
-	int			type_sizeof;
+	int			type_sizeof;		/* sizeof(xpu_NAME_t) */
 	int			type_alignof;
+	int			kvec_sizeof;		/* sizeof(kvec_NAME_t) */
 	devtype_hashfunc_f type_hashfunc;
 	/* oid of type related functions */
 	Oid			type_eqfunc;

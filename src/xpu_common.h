@@ -244,6 +244,60 @@ __strcmp(const char *s1, const char *s2)
 	return c1 - c2;
 }
 
+/* ----------------------------------------------------------------
+ *
+ * Fundamental CUDA definitions
+ *
+ * ----------------------------------------------------------------
+ */
+#define WARPSIZE				32
+#define MAXTHREADS_PER_BLOCK	1024
+#define MAXWARPS_PER_BLOCK		(MAXTHREADS_PER_BLOCK / WARPSIZE)
+#define CUDA_L1_CACHELINE_SZ	128
+
+#if defined(__CUDACC__)
+/* Thread index at CUDA C++ */
+#define get_group_id()			(blockIdx.x)
+#define get_num_groups()		(gridDim.x)
+#define get_local_id()			(threadIdx.x)
+#define get_local_size()		(blockDim.x)
+#define get_global_id()			(threadIdx.x + blockIdx.x * blockDim.x)
+#define get_global_size()		(blockDim.x * gridDim.x)
+
+/* Dynamic shared memory entrypoint */
+extern __shared__ char __pgstrom_dynamic_shared_workmem[] __MAXALIGNED__;
+#define SHARED_WORKMEM(UNITSZ,INDEX)						\
+	(__pgstrom_dynamic_shared_workmem + (UNITSZ)*(INDEX))
+
+/* Reference to the special registers */
+INLINE_FUNCTION(uint32_t) LaneId(void)
+{
+	uint32_t	rv;
+
+	asm volatile("mov.u32 %0, %laneid;" : "=r"(rv) );
+
+	return rv;
+}
+
+INLINE_FUNCTION(uint32_t) DynamicShmemSize(void)
+{
+	uint32_t	rv;
+
+	asm volatile("mov.u32 %0, %dynamic_smem_size;" : "=r"(rv) );
+
+	return rv;
+}
+
+INLINE_FUNCTION(uint32_t) TotalShmemSize(void)
+{
+	uint32_t	rv;
+
+	asm volatile("mov.u32 %0, %total_smem_size;" : "=r"(rv) );
+
+	return rv;
+}
+#endif		/* __CUDACC__ */
+
 /*
  * TypeOpCode / FuncOpCode
  */
@@ -1474,6 +1528,58 @@ typedef struct toast_compress_header
 
 /* ----------------------------------------------------------------
  *
+ * Definition of vectorized xPU device data types
+ *
+ * ----------------------------------------------------------------
+ */
+#define KVEC_UNITSZ			64
+#define KVEC_ALIGN(x)		TYPEALIGN(16,(x))	/* 128bit alignment */
+
+#define KVEC_DATUM_COMMON_FIELD		\
+	uint64_t		nullmask
+
+typedef struct kvec_datum_t {
+	KVEC_DATUM_COMMON_FIELD;
+} kvec_datum_t;
+
+INLINE_FUNCTION(void)
+kvec_update_nullmask(uint64_t *p_nullmask, int kvec_id, const char *addr)
+{
+	uint64_t	bits	= (1UL << kvec_id);
+	uint64_t	mask	__attribute__ ((unused));
+
+	assert(kvec_id >= 0 && kvec_id < KVEC_UNITSZ);
+#ifdef __CUDACC__
+	if (LaneId() == 0)
+		mask = *p_nullmask;
+	mask = __shfl_sync(__activemask(), mask, 0);
+	if (!addr)
+	{
+		if ((mask & bits) == 0)
+			bits = 0;	/* no change */
+	}
+	else
+	{
+		if ((mask & bits) != 0)
+			bits = 0;	/* no change */
+	}
+	bits |= __shfl_xor_sync(__activemask(), bits, 0x01);
+	bits |= __shfl_xor_sync(__activemask(), bits, 0x02);
+	bits |= __shfl_xor_sync(__activemask(), bits, 0x04);
+	bits |= __shfl_xor_sync(__activemask(), bits, 0x08);
+	bits |= __shfl_xor_sync(__activemask(), bits, 0x10);
+	if (LaneId() == 0)
+		*p_nullmask = (mask ^ bits);
+#else
+	if (!addr)
+		*p_nullmask &= ~bits;
+	else
+		*p_nullmask |=  bits;
+#endif
+}
+
+/* ----------------------------------------------------------------
+ *
  * Definitions for XPU device data types
  *
  * ----------------------------------------------------------------
@@ -1517,21 +1623,51 @@ struct xpu_datum_operators {
 								int *p_comp,				/* out */
 								const xpu_datum_t *a,		/* in */
 								const xpu_datum_t *b);		/* in */
+	//added for kvec support
+	bool	  (*xpu_datum_load_heap)(kern_context *kcxt,
+									 kvec_datum_t *result,
+									 int kvec_id,
+									 const char *addr);
+	//how to handle arrow format?
 };
 
-#define PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\
+#define __PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\
 	typedef struct {										\
 		XPU_DATUM_COMMON_FIELD;								\
 		BASETYPE	value;									\
 	} xpu_##NAME##_t;										\
 	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
-#define PGSTROM_SQLTYPE_VARLENA_DECLARATION(NAME)			\
+#define PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\
+	typedef struct {										\
+		KVEC_DATUM_COMMON_FIELD;							\
+		BASETYPE	values[KVEC_UNITSZ];					\
+	} kvec_##NAME##_t;										\
+	typedef struct {										\
+		XPU_DATUM_COMMON_FIELD;								\
+		BASETYPE	value;									\
+	} xpu_##NAME##_t;										\
+	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
+
+#define __PGSTROM_SQLTYPE_VARLENA_DECLARATION(NAME)			\
 	typedef struct {										\
 		XPU_DATUM_COMMON_FIELD;								\
 		int			length;		/* -1, if PG verlena */		\
 		const char *value;									\
 	} xpu_##NAME##_t;										\
 	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
+#define PGSTROM_SQLTYPE_VARLENA_DECLARATION(NAME)			\
+	typedef struct {										\
+		KVEC_DATUM_COMMON_FIELD;							\
+		int			length[KVEC_UNITSZ];					\
+		const char *values[KVEC_UNITSZ];					\
+	} kvec_##NAME##_t;										\
+	typedef struct {										\
+		XPU_DATUM_COMMON_FIELD;								\
+		int			length;		/* -1, if PG verlena */		\
+		const char *value;									\
+	} xpu_##NAME##_t;										\
+	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
+
 #define PGSTROM_SQLTYPE_OPERATORS(NAME,TYPBYVAL,TYPALIGN,TYPLENGTH) \
 	PUBLIC_DATA xpu_datum_operators xpu_##NAME##_ops = {			\
 		.xpu_type_name = #NAME,										\
@@ -1546,6 +1682,7 @@ struct xpu_datum_operators {
 		.xpu_datum_write = xpu_##NAME##_datum_write,				\
 		.xpu_datum_hash = xpu_##NAME##_datum_hash,					\
 		.xpu_datum_comp = xpu_##NAME##_datum_comp,					\
+		.xpu_datum_load_heap = xpu_##NAME##_datum_load_heap,		\
 	}
 
 #include "xpu_basetype.h"
@@ -2676,5 +2813,340 @@ KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int dindex)
 	assert(dindex >= 0 && dindex < kmrels->num_rels);
 	offset = kmrels->chunks[dindex].gist_offset;
 	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+}
+
+/* ----------------------------------------------------------------
+ *
+ * Atomic Operations
+ *
+ * ----------------------------------------------------------------
+ */
+INLINE_FUNCTION(uint32_t)
+__atomic_write_uint32(uint32_t *ptr, uint32_t ival)
+{
+#ifdef __CUDACC__
+	return atomicExch((unsigned int *)ptr, ival);
+#else
+	return __atomic_exchange_n(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint64_t)
+__atomic_write_uint64(uint64_t *ptr, uint64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicExch((unsigned long long int *)ptr, ival);
+#else
+	return __atomic_exchange_n(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_add_uint32(uint32_t *ptr, uint32_t ival)
+{
+#ifdef __CUDACC__
+	return atomicAdd((unsigned int *)ptr, (unsigned int)ival);
+#else
+	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint64_t)
+__atomic_add_uint64(uint64_t *ptr, uint64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicAdd((unsigned long long *)ptr, (unsigned long long)ival);
+#else
+	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(int64_t)
+__atomic_add_int64(int64_t *ptr, int64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicAdd((unsigned long long int *)ptr, (unsigned long long int)ival);
+#else
+	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(float8_t)
+__atomic_add_fp64(float8_t *ptr, float8_t fval)
+{
+#ifdef __CUDACC__
+	return atomicAdd((double *)ptr, (double)fval);
+#else
+	union {
+		uint64_t	ival;
+		float8_t	fval;
+	} oldval, newval;
+
+	oldval.fval = __volatileRead(ptr);
+	do {
+		newval.fval = oldval.fval + fval;
+	} while (!__atomic_compare_exchange_n((uint64_t *)ptr,
+										  &oldval.ival,
+										  newval.ival,
+										  false,
+										  __ATOMIC_SEQ_CST,
+										  __ATOMIC_SEQ_CST));
+	return oldval.fval;
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_and_uint32(uint32_t *ptr, uint32_t mask)
+{
+#ifdef __CUDACC__
+	return atomicAnd((unsigned int *)ptr, (unsigned int)mask);
+#else
+	return __atomic_fetch_and(ptr, mask, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_or_uint32(uint32_t *ptr, uint32_t mask)
+{
+#ifdef __CUDACC__
+	return atomicOr((unsigned int *)ptr, (unsigned int)mask);
+#else
+	return __atomic_fetch_or(ptr, mask, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_max_uint32(uint32_t *ptr, uint32_t ival)
+{
+#ifdef __CUDACC__
+	return atomicMax((unsigned int *)ptr, (unsigned int)ival);
+#else
+	uint32_t	oldval = __volatileRead(ptr);
+
+	while (oldval > ival)
+	{
+		if (__atomic_compare_exchange_n(ptr,
+										&oldval,
+										ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval;
+#endif
+}
+
+INLINE_FUNCTION(int64_t)
+__atomic_min_int64(int64_t *ptr, int64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicMin((long long int *)ptr, (long long int)ival);
+#else
+	int64_t		oldval = __volatileRead(ptr);
+
+	while (oldval > ival)
+	{
+		if (__atomic_compare_exchange_n(ptr,
+										&oldval,
+										ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval;
+#endif
+}
+
+INLINE_FUNCTION(int64_t)
+__atomic_max_int64(int64_t *ptr, int64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicMax((long long int *)ptr, (long long int)ival);
+#else
+	int64_t		oldval = __volatileRead(ptr);
+
+	while (oldval < ival)
+	{
+		if (__atomic_compare_exchange_n(ptr,
+										&oldval,
+										ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval;
+#endif
+}
+
+INLINE_FUNCTION(float8_t)
+__atomic_min_fp64(float8_t *ptr, float8_t fval)
+{
+#ifdef __CUDACC__
+	union {
+		unsigned long long ival;
+		float8_t	fval;
+	} oldval, curval, newval;
+
+	newval.fval = fval;
+	curval.fval = __volatileRead(ptr);
+	while (newval.fval < curval.fval)
+	{
+		oldval = curval;
+		curval.ival = atomicCAS((unsigned long long *)ptr,
+								oldval.ival,
+								newval.ival);
+		if (curval.ival == oldval.ival)
+			break;
+	}
+	return curval.fval;
+#else
+	union {
+		uint64_t	ival;
+		float8_t	fval;
+	} oldval, newval;
+
+	newval.fval = fval;
+	oldval.fval = __volatileRead(ptr);
+	while (oldval.fval > newval.fval)
+	{
+		if (__atomic_compare_exchange_n((uint64_t *)ptr,
+										&oldval.ival,
+										newval.ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval.fval;
+#endif
+}
+
+INLINE_FUNCTION(float8_t)
+__atomic_max_fp64(float8_t *ptr, float8_t fval)
+{
+#ifdef __CUDACC__
+	union {
+		unsigned long long ival;
+		float8_t	fval;
+	} oldval, curval, newval;
+
+	newval.fval = fval;
+	curval.fval = __volatileRead(ptr);
+	while (newval.fval > curval.fval)
+	{
+		oldval = curval;
+		curval.ival = atomicCAS((unsigned long long *)ptr,
+								oldval.ival,
+								newval.ival);
+		if (curval.ival == oldval.ival)
+			break;
+	}
+	return curval.fval;
+#else
+	union {
+		uint64_t	ival;
+		float8_t	fval;
+	} oldval, newval;
+
+	newval.fval = fval;
+	oldval.fval = __volatileRead(ptr);
+	while (oldval.fval > newval.fval)
+	{
+		if (__atomic_compare_exchange_n((uint64_t *)ptr,
+										&oldval.ival,
+										newval.ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval.fval;
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_cas_uint32(uint32_t *ptr, uint32_t comp, uint32_t newval)
+{
+#ifdef __CUDACC__
+	return atomicCAS((unsigned int *)ptr,
+					 (unsigned int)comp,
+					 (unsigned int)newval);
+#else
+	__atomic_compare_exchange_n(ptr,
+								&comp,
+								newval,
+								false,
+								__ATOMIC_SEQ_CST,
+								__ATOMIC_SEQ_CST);
+	return comp;
+#endif
+}
+
+INLINE_FUNCTION(uint64_t)
+__atomic_cas_uint64(uint64_t *ptr, uint64_t comp, uint64_t newval)
+{
+#ifdef __CUDACC__
+	return atomicCAS((unsigned long long int *)ptr,
+					 (unsigned long long int)comp,
+					 (unsigned long long int)newval);
+#else
+	__atomic_compare_exchange_n(ptr,
+								&comp,
+								newval,
+								false,
+								__ATOMIC_SEQ_CST,
+								__ATOMIC_SEQ_CST);
+	return comp;
+#endif
+}
+
+/* ----------------------------------------------------------------
+ *
+ * Misc functions
+ *
+ * ----------------------------------------------------------------
+ */
+INLINE_FUNCTION(void)
+print_kern_data_store(const kern_data_store *kds)
+{
+	printf("kds %p { length=%lu, nitems=%u, usage=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
+		   kds,
+		   kds->length,
+		   kds->nitems,
+		   kds->usage,
+		   kds->ncols,
+		   kds->format,
+		   kds->has_varlena ? 't' : 'f',
+		   kds->tdhasoid ? 't' : 'f',
+		   kds->tdtypeid,
+		   kds->tdtypmod,
+		   kds->table_oid,
+		   kds->hash_nslots,
+		   kds->block_offset,
+		   kds->block_nloaded,
+		   kds->nr_colmeta);
+	for (int j=0; j < kds->nr_colmeta; j++)
+	{
+		const kern_colmeta *cmeta = &kds->colmeta[j];
+
+		printf("cmeta[%d] { attbyval=%c, attalign=%d, attlen=%d, attnum=%d, attcacheoff=%d, atttypid=%u, atttypmod=%d, atttypkind=%c, kds_format=%c, kds_offset=%u, idx_subattrs=%u, num_subattrs=%u, attname='%s' }\n",
+			   j,
+			   cmeta->attbyval ? 't' : 'f',
+			   (int)cmeta->attalign,
+			   (int)cmeta->attlen,
+			   (int)cmeta->attnum,
+			   (int)cmeta->attcacheoff,
+			   cmeta->atttypid,
+			   cmeta->atttypmod,
+			   cmeta->atttypkind,
+			   cmeta->kds_format,
+			   cmeta->kds_offset,
+			   (unsigned int)cmeta->idx_subattrs,
+			   (unsigned int)cmeta->num_subattrs,
+			   cmeta->attname);
+	}
 }
 #endif	/* XPU_COMMON_H */

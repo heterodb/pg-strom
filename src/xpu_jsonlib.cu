@@ -324,6 +324,31 @@ xpu_jsonb_datum_comp(kern_context*kcxt,
 	STROM_ELOG(kcxt, "device jsonb type has no compare handler");
 	return false;
 }
+
+STATIC_FUNCTION(bool)
+xpu_jsonb_datum_load_heap(kern_context *kcxt,
+						  kvec_datum_t *__result,
+						  int kvec_id,
+						  const char *addr)
+{
+	kvec_jsonb_t *result = (kvec_jsonb_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+	{
+		if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+		{
+			result->values[kvec_id] = addr;
+			result->length[kvec_id] = -1;
+		}
+		else
+		{
+			result->values[kvec_id] = VARDATA_ANY(addr);
+			result->length[kvec_id] = VARSIZE_ANY_EXHDR(addr);
+		}
+	}
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(jsonb,false,4,-1);
 
 /* ----------------------------------------------------------------

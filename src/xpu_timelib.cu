@@ -145,6 +145,20 @@ xpu_date_datum_comp(kern_context *kcxt,
 		*p_comp = 0;
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_date_datum_load_heap(kern_context *kcxt,
+						 kvec_datum_t *__result,
+						 int kvec_id,
+						 const char *addr)
+{
+	kvec_date_t *result = (kvec_date_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+		result->values[kvec_id] = *((const DateADT *)addr);
+    return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(date, true, 4, sizeof(DateADT));
 
 /*
@@ -235,6 +249,20 @@ xpu_time_datum_comp(kern_context *kcxt,
 		*p_comp = 0;
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_time_datum_load_heap(kern_context *kcxt,
+						 kvec_datum_t *__result,
+						 int kvec_id,
+						 const char *addr)
+{
+	kvec_time_t *result = (kvec_time_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+		result->values[kvec_id] = *((const TimeADT *)addr);
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(time, true, 8, sizeof(TimeADT));
 
 /*
@@ -315,10 +343,24 @@ STATIC_FUNCTION(bool)
 xpu_timetz_datum_comp(kern_context *kcxt,
 					  int *p_comp,
 					  const xpu_datum_t *__a,
-					const xpu_datum_t *__b)
+					  const xpu_datum_t *__b)
 {
 	STROM_ELOG(kcxt, "timetz has no compare handler");
 	return false;
+}
+
+STATIC_FUNCTION(bool)
+xpu_timetz_datum_load_heap(kern_context *kcxt,
+						   kvec_datum_t *__result,
+						   int kvec_id,
+						   const char *addr)
+{
+	kvec_timetz_t *result = (kvec_timetz_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+		memcpy(&result->values[kvec_id], addr, SizeOfTimeTzADT);
+	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(timetz, false, 8, SizeOfTimeTzADT);
 
@@ -410,6 +452,20 @@ xpu_timestamp_datum_comp(kern_context *kcxt,
 		*p_comp = 0;
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_timestamp_datum_load_heap(kern_context *kcxt,
+							  kvec_datum_t *__result,
+							  int kvec_id,
+							  const char *addr)
+{
+	kvec_timestamp_t *result = (kvec_timestamp_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+		result->values[kvec_id] = *((const Timestamp *)addr);
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(timestamp, true, 8, sizeof(Timestamp));
 
 /*
@@ -498,6 +554,20 @@ xpu_timestamptz_datum_comp(kern_context *kcxt,
 		*p_comp = -1;
 	else
 		*p_comp = 0;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_timestamptz_datum_load_heap(kern_context *kcxt,
+								kvec_datum_t *__result,
+								int kvec_id,
+								const char *addr)
+{
+	kvec_timestamptz_t *result = (kvec_timestamptz_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+		result->values[kvec_id] = *((const TimestampTz *)addr);
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(timestamptz, true, 8, sizeof(TimestampTz));
@@ -631,8 +701,21 @@ xpu_interval_datum_comp(kern_context *kcxt,
 	*p_comp = (aval - bval);
 	return true;
 }
-PGSTROM_SQLTYPE_OPERATORS(interval, false, 8, sizeof(Interval));
 
+STATIC_FUNCTION(bool)
+xpu_interval_datum_load_heap(kern_context *kcxt,
+							 kvec_datum_t *__result,
+							 int kvec_id,
+							 const char *addr)
+{
+	kvec_interval_t *result = (kvec_interval_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+		memcpy(&result->values[kvec_id], addr, sizeof(Interval));
+	return true;
+}
+PGSTROM_SQLTYPE_OPERATORS(interval, false, 8, sizeof(Interval));
 
 STATIC_FUNCTION(int)
 date2j(int y, int m, int d)

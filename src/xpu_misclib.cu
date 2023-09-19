@@ -626,6 +626,20 @@ xpu_money_datum_comp(kern_context *kcxt,
 		*p_comp = 0;
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_money_datum_load_heap(kern_context *kcxt,
+						  kvec_datum_t *__result,
+						  int kvec_id,
+						  const char *addr)
+{
+	kvec_money_t *result = (kvec_money_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+		result->values[kvec_id] = *((const Cash *)addr);
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(money, true, 8, sizeof(Cash));
 PG_SIMPLE_COMPARE_TEMPLATE(cash_,money,money,)
 /*
@@ -720,9 +734,6 @@ uuid_cmp_internal(const xpu_uuid_t *datum_a,
 	return 0;
 }
 
-
-
-
 STATIC_FUNCTION(bool)
 xpu_uuid_datum_comp(kern_context *kcxt,
 					int *p_comp,
@@ -736,6 +747,20 @@ xpu_uuid_datum_comp(kern_context *kcxt,
 	*p_comp = __memcmp(a->value.data,
 					   b->value.data,
 					   UUID_LEN);
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_uuid_datum_load_heap(kern_context *kcxt,
+						 kvec_datum_t *__result,
+						 int kvec_id,
+						 const char *addr)
+{
+	kvec_uuid_t *result = (kvec_uuid_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+		memcpy(&result->values[kvec_id], addr, UUID_LEN);
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(uuid, false, 1, UUID_LEN);
@@ -892,6 +917,20 @@ xpu_macaddr_datum_comp(kern_context *kcxt,
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	*p_comp = macaddr_cmp_internal(a, b);
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_macaddr_datum_load_heap(kern_context *kcxt,
+							kvec_datum_t *__result,
+							int kvec_id,
+							const char *addr)
+{
+	kvec_macaddr_t *result = (kvec_macaddr_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+		memcpy(&result->values[kvec_id], addr, sizeof(macaddr));
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(macaddr, false, 4, sizeof(macaddr));
@@ -1172,6 +1211,58 @@ xpu_inet_datum_comp(kern_context *kcxt,
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	*p_comp = inet_cmp_internal(a, b);
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_inet_datum_load_heap(kern_context *kcxt,
+						 kvec_datum_t *__result,
+						 int kvec_id,
+						 const char *addr)
+{
+	kvec_inet_t *result = (kvec_inet_t *)__result;
+	const inet_struct *in;
+	int		sz;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+	{
+		if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+		{
+			STROM_CPU_FALLBACK(kcxt, "inet value is compressed or toasted");
+			return false;
+		}
+		in = (const inet_struct *)VARDATA_ANY(addr);
+		sz = VARSIZE_ANY_EXHDR(addr);
+
+		if (sz == offsetof(inet_struct, ipaddr[4]))
+		{
+			if (in->family != PGSQL_AF_INET)
+			{
+				STROM_ELOG(kcxt, "inet (ipv4) value corruption");
+				return false;
+			}
+			result->family[kvec_id] = in->family;
+			result->bits[kvec_id] = in->bits;
+			memcpy(&result->ipaddr[16 * kvec_id], in->ipaddr, 4);
+		}
+		else if (sz == offsetof(inet_struct, ipaddr[16]))
+		{
+			if (in->family != PGSQL_AF_INET6)
+			{
+				STROM_ELOG(kcxt, "inet (ipv6) value corruption");
+				return false;
+			}
+			result->family[kvec_id] = in->family;
+			result->bits[kvec_id] = in->bits;
+			memcpy(&result->ipaddr[16 * kvec_id], in->ipaddr, 16);
+		}
+		else
+		{
+			STROM_ELOG(kcxt, "Bug? inet value is corrupted");
+			return false;
+		}
+	}
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(inet, false, 4, -1);

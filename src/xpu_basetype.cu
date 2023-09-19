@@ -96,6 +96,19 @@ xpu_bool_datum_comp(kern_context *kcxt,
 	*p_comp = ((int)a->value - (int)b->value);
 	return true;
 }
+STATIC_FUNCTION(bool)
+xpu_bool_datum_load_heap(kern_context *kcxt,
+						 kvec_datum_t *__result,
+						 int kvec_id,
+						 const char *addr)
+{
+	kvec_bool_t *result = (kvec_bool_t *)__result;
+
+	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
+	if (addr)
+		result->values[kvec_id] = *((const bool *)addr);
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 
 /*
@@ -180,6 +193,19 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 			*p_comp = -1;												\
 		else															\
 			*p_comp = 0;												\
+		return true;													\
+	}																	\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_datum_load_heap(kern_context *kcxt,					\
+								 kvec_datum_t *__result,				\
+								 int kvec_id,							\
+								 const char *addr)						\
+	{																	\
+		kvec_##NAME##_t *result = (kvec_##NAME##_t *)__result;			\
+																		\
+		kvec_update_nullmask(&result->nullmask, kvec_id, addr);			\
+		if (addr)														\
+			result->values[kvec_id] = *((const BASETYPE *)addr);		\
 		return true;													\
 	}																	\
 	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
@@ -271,6 +297,19 @@ PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t,i64);
 			*p_comp = -1;												\
 		else															\
 			*p_comp = 0;												\
+		return true;													\
+	}																	\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_datum_load_heap(kern_context *kcxt,					\
+								 kvec_datum_t *__result,				\
+								 int kvec_id,							\
+								 const char *addr)						\
+	{																	\
+		kvec_##NAME##_t *result = (kvec_##NAME##_t *)__result;			\
+																		\
+		kvec_update_nullmask(&result->nullmask, kvec_id, addr);			\
+		if (addr)														\
+			result->values[kvec_id] = *((const BASETYPE *)addr);		\
 		return true;													\
 	}																	\
 	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))

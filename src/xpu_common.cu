@@ -2805,6 +2805,15 @@ xpu_array_datum_comp(kern_context *kcxt,
 	STROM_ELOG(kcxt, "xpu_array_datum_comp is not implemented");
 	return false;
 }
+STATIC_FUNCTION(bool)
+xpu_array_datum_load_heap(kern_context *kcxt,
+						  kvec_datum_t *__result,
+						  int kvec_id,
+						  const char *addr)
+{
+	STROM_ELOG(kcxt, "xpu_composite_datum_heap_load is not implemented");
+	return false;
+}
 //MEMO: some array type uses typalign=4. is it ok?
 PGSTROM_SQLTYPE_OPERATORS(array,false,4,-1);
 
@@ -2855,6 +2864,15 @@ xpu_composite_datum_comp(kern_context *kcxt,
 						 const xpu_datum_t *__b)
 {
 	STROM_ELOG(kcxt, "xpu_composite_datum_comp is not implemented");
+	return false;
+}
+STATIC_FUNCTION(bool)
+xpu_composite_datum_load_heap(kern_context *kcxt,
+							  kvec_datum_t *__result,
+							  int kvec_id,
+							  const char *addr)
+{
+	STROM_ELOG(kcxt, "xpu_composite_datum_heap_load is not implemented");
 	return false;
 }
 PGSTROM_SQLTYPE_OPERATORS(composite,false,8,-1);

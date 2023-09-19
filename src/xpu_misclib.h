@@ -67,7 +67,14 @@ typedef struct
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(money, int64_t);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(uuid, pg_uuid_t);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(macaddr, macaddr);
-PGSTROM_SQLTYPE_SIMPLE_DECLARATION(inet, inet_struct);
+
+typedef struct {
+	KVEC_DATUM_COMMON_FIELD;
+	uint8_t		family[KVEC_UNITSZ];
+	uint8_t		bits[KVEC_UNITSZ];
+	uint8_t		ipaddr[16 * KVEC_UNITSZ];
+} kvec_inet_t;
+__PGSTROM_SQLTYPE_SIMPLE_DECLARATION(inet, inet_struct);
 
 EXTERN_FUNCTION(int)
 xpu_interval_write_heap(kern_context *kcxt,
