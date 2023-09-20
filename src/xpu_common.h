@@ -1951,16 +1951,32 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 
 typedef struct
 {
-	int32_t			var_resno;
-	uint32_t		var_slot_id;
-	uint32_t		var_slot_off;	/* offset of the slot-buffer (some margin at
-									 * the end of kcxt->kvars_slot[] to store several
-									 * special arrow types (array, composite) */
+	int32_t			var_resno;		//deprecated
+	uint32_t		var_slot_id;	//deprecated
+	uint32_t		var_slot_off;	//deprecated
+	/* ----------------------------- */
+	int32_t			kv_resno;		/* source/destination resno */
+	uint32_t		kv_offset;		/* offset of kvec-buffer */
+	TypeOpCode		kv_type;
+	bool			kv_byval;
+	int8_t			kv_align;
+	int16_t			kv_length;
+	const struct xpu_datum_operators *kv_ops;
 } kern_vars_defitem;
 
 typedef struct
 {
-	uint32_t		slot_id;
+	uint32_t		slot_id;		//deprecated
+
+
+	//kern_projection_desc can be replaced by kern_vars_desc?
+	int32_t			kv_resno;
+	uint32_t		kv_offset;
+	TypeOpCode		kv_type;
+	bool			kv_byval;
+	int8_t			kv_align;
+	int16_t			kv_length;
+	const struct xpu_datum_operators *kv_ops;
 } kern_projection_desc;
 
 #define KAGG_ACTION__VREF			101		/* simple var copy */
@@ -2068,7 +2084,10 @@ struct kern_expression
 			int16_t		var_typlen;
 			bool		var_typbyval;
 			uint8_t		var_typalign;
-			uint32_t	var_slot_id;
+			uint32_t	var_slot_id;	/* deprecated */
+			/* ------------------------ */
+			int32_t		var_depth;
+			uint32_t	var_offset;
 		} v;		/* VarExpr */
 		struct {
 			uint32_t	case_comp;		/* key value to be compared, if any */
@@ -2081,6 +2100,8 @@ struct kern_expression
 			bool		elem_byval;		/* attbyval of the element type */
 			int8_t		elem_align;		/* attalign of the element type */
 			int16_t		elem_len;		/* attlen of the element type */
+			/* ------------------------------------------------------ */
+			kern_vars_defitem evar;		/* working buffer of element */
 			char		data[1]			__MAXALIGNED__;
 		} saop;		/* ScalarArrayOp */
 		struct {
@@ -2097,6 +2118,8 @@ struct kern_expression
 		struct {
 			uint32_t	slot_id;	/* destination slot-id */
 			uint32_t	slot_off;	/* kvars-slot buffer offset, if needed */
+
+			kern_vars_defitem svar;		/* temporary storage */
 			char		data[1]		__MAXALIGNED__;
 		} save;		/* SaveExpr */
 		struct {
@@ -2104,9 +2127,10 @@ struct kern_expression
 			kern_aggregate_desc desc[1];
 		} pagg;		/* PreAggs */
 		struct {
-			int			datum_sz;
+			int			datum_sz;	//???
 			int			nattrs;
-			int			ctid_slot;	/* slot_id of ctid system column, if any */
+			int			ctid_slot;	//deprecated
+			kern_vars_defitem ctid;	/* source of ctid system column, if any */
 			kern_projection_desc desc[1];
 		} proj;		/* Projection */
 		struct {

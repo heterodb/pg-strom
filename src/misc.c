@@ -65,15 +65,15 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	/* Kvars definitions */
 	foreach (lc, pp_info->kvars_deflist)
 	{
-		kvar_defitem   *kvdef = lfirst(lc);
+		codegen_kvar_defitem *kvdef = lfirst(lc);
 		List		   *sublist = NIL;
 
+		sublist = lappend(sublist, makeInteger(kvdef->fb_slot_id));
 		sublist = lappend(sublist, makeInteger(kvdef->kv_depth));
 		sublist = lappend(sublist, makeInteger(kvdef->kv_resno));
 		sublist = lappend(sublist, makeInteger((int)kvdef->kv_type));
+		sublist = lappend(sublist, makeInteger(kvdef->kv_offset));
 		sublist = lappend(sublist, kvdef->kv_expr);
-		sublist = lappend(sublist, makeString(kvdef->kv_resname));
-		sublist = lappend(sublist, makeBoolean(kvdef->kv_resjunk));
 
 		kvars_deflist = lappend(kvars_deflist, sublist);
 	}
@@ -181,17 +181,17 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	kvars_deflist = list_nth(privs, pindex++);
 	foreach (lc, kvars_deflist)
 	{
-		kvar_defitem *kvdef = palloc0(sizeof(kvar_defitem));
+		codegen_kvar_defitem *kvdef = palloc0(sizeof(codegen_kvar_defitem));
 		List	   *sublist = (List *)lfirst(lc);
 		int			kvindex = 0;
 
 		Assert(IsA(sublist, List));
-		kvdef->kv_depth = intVal(list_nth(sublist, kvindex++));
-		kvdef->kv_resno = intVal(list_nth(sublist, kvindex++));
-		kvdef->kv_type = (Oid)intVal(list_nth(sublist, kvindex++));
-		kvdef->kv_expr = (Expr *)list_nth(sublist, kvindex++);
-		kvdef->kv_resname = strVal(list_nth(sublist, kvindex++));
-		kvdef->kv_resjunk = boolVal(list_nth(sublist, kvindex++));
+		kvdef->fb_slot_id = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_depth   = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_resno   = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_type    = (Oid)intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_offset  = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_expr    = (Expr *)list_nth(sublist, kvindex++);
 
 		pp_data.kvars_deflist = lappend(pp_data.kvars_deflist, kvdef);
 	}
@@ -263,12 +263,11 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 	pp_dest->brin_index_quals = copyObject(pp_dest->brin_index_quals);
 	foreach (lc, pp_orig->kvars_deflist)
 	{
-		kvar_defitem   *kvdef_orig = lfirst(lc);
-		kvar_defitem   *kvdef_dest;
+		codegen_kvar_defitem *kvdef_orig = lfirst(lc);
+		codegen_kvar_defitem *kvdef_dest;
 
-		kvdef_dest = pmemdup(kvdef_orig, sizeof(kvar_defitem));
-		if (kvdef_dest->kv_resname)
-			kvdef_dest->kv_resname = pstrdup(kvdef_dest->kv_resname);
+		kvdef_dest = pmemdup(kvdef_orig, sizeof(codegen_kvar_defitem));
+		kvdef_dest->kv_expr = copyObject(kvdef_dest->kv_expr);
 		pp_dest->kvars_deflist = lappend(pp_dest->kvars_deflist, kvdef_dest);
 	}
 	pp_dest->kvars_depth      = list_copy(pp_dest->kvars_depth);	//deprecated

@@ -525,13 +525,13 @@ extern int		heterodbExtraGetError(const char **p_filename,
  */
 typedef struct
 {
-	int		kv_depth;
-	int		kv_resno;
-	Oid		kv_type;
-	Expr   *kv_expr;
-	char   *kv_resname;		/* optional */
-	bool	kv_resjunk;		/* true, if only EXPLAIN */
-} kvar_defitem;
+	int			fb_slot_id;		/* slot-id of the CPU fallback tuple-slot */
+	int			kv_depth;		/* source depth */
+	int			kv_resno;		/* source resno, or -1 if working variable */
+	Oid			kv_type;		/* Type OID */
+	int			kv_offset;		/* offset from the head of vectorized buffer */
+	Expr	   *kv_expr;		/* original expression */
+} codegen_kvar_defitem;
 
 typedef struct
 {
