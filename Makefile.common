@@ -1,0 +1,39 @@
+PG_CONFIG ?= pg_config
+VERSION ?= 5.0
+RELEASE ?= devel
+
+#
+# PostgreSQL major version
+#
+PG_MAJORVERSION := $(shell $(PG_CONFIG) --version | sed 's/\./ /g' | awk '{print $$2}')
+PG_MINORVERSION := $(shell $(PG_CONFIG) --version | sed 's/\./ /g' | awk '{print $$3}')
+
+#
+# PG-Strom version signature
+#
+ifeq ($(shell echo $(RELEASE) | grep -E '^[0-9]+$$'),)
+PGSTROM_VERSION := $(VERSION)$(RELEASE)
+else
+PGSTROM_VERSION := $(VERSION).$(RELEASE)
+endif
+
+#
+# GitHash to build
+#
+ifeq ($(GITHASH),)
+GITHASH := $(shell git rev-parse HEAD 2>/dev/null)
+ifeq ($(GITHASH),)
+GITHASH := HEAD
+else
+ifeq ($(shell git diff | wc -l),0)
+PGSTROM_GITHASH := $(GITHASH)
+else
+PGSTROM_GITHASH := $(GITHASH)::local_changes
+endif
+endif
+endif
+
+#
+# PostgreSQL Commands
+#
+PSQL=$(shell $(PG_CONFIG) --bindir)/psql

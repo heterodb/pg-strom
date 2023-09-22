@@ -125,6 +125,17 @@ lappend_cxt(MemoryContext memcxt, List *list, void *datum)
 	return r;
 }
 
+/* initStringInfo on the specified memory-context */
+static inline void
+initStringInfoCxt(MemoryContext memcxt, StringInfo buf)
+{
+	MemoryContext	oldcxt;
+
+	oldcxt = MemoryContextSwitchTo(memcxt);
+	initStringInfo(buf);
+	MemoryContextSwitchTo(oldcxt);
+}
+
 /*
  * formater of numeric/bytesz/millisec
  */
@@ -181,6 +192,48 @@ pmemdup(const void *src, Size sz)
 }
 
 /*
+ * buildoidvector
+ */
+static inline oidvector *
+__buildoidvector1(Oid a)
+{
+	return buildoidvector(&a, 1);
+}
+
+static inline oidvector *
+__buildoidvector2(Oid a, Oid b)
+{
+	Oid		oids[2];
+
+	oids[0] = a;
+	oids[1] = b;
+	return buildoidvector(oids, 2);
+}
+
+static inline oidvector *
+__buildoidvector3(Oid a, Oid b, Oid c)
+{
+	Oid		oids[3];
+
+	oids[0] = a;
+	oids[1] = b;
+	oids[2] = c;
+	return buildoidvector(oids, 3);
+}
+
+static inline oidvector *
+__buildoidvector4(Oid a, Oid b, Oid c, Oid d)
+{
+	Oid		oids[4];
+
+	oids[0] = a;
+	oids[1] = b;
+	oids[2] = c;
+	oids[3] = d;
+	return buildoidvector(oids, 4);
+}
+
+/*
  * Macros for worker threads
  */
 #define __FATAL(fmt,...)                        \
@@ -196,6 +249,21 @@ pthreadMutexInit(pthread_mutex_t *mutex)
 {
 	if ((errno = pthread_mutex_init(mutex, NULL)) != 0)
 		__FATAL("failed on pthread_mutex_init: %m");
+}
+
+static inline void
+pthreadMutexInitShared(pthread_mutex_t *mutex)
+{
+	pthread_mutexattr_t mattr;
+
+	if ((errno = pthread_mutexattr_init(&mattr)) != 0)
+		__FATAL("failed on pthread_mutexattr_init: %m");
+	if ((errno = pthread_mutexattr_setpshared(&mattr, 1)) != 0)
+		__FATAL("failed on pthread_mutexattr_setpshared: %m");
+	if ((errno = pthread_mutex_init(mutex, &mattr)) != 0)
+        __FATAL("failed on pthread_mutex_init: %m");
+    if ((errno = pthread_mutexattr_destroy(&mattr)) != 0)
+        __FATAL("failed on pthread_mutexattr_destroy: %m");
 }
 
 static inline void
@@ -230,6 +298,19 @@ pthreadRWLockInit(pthread_rwlock_t *rwlock)
 }
 
 static inline void
+pthreadRWLockInitShared(pthread_rwlock_t *rwlock)
+{
+	pthread_rwlockattr_t rwattr;
+
+	if ((errno = pthread_rwlockattr_init(&rwattr)) != 0)
+		__FATAL("failed on pthread_rwlockattr_init: %m");
+    if ((errno = pthread_rwlockattr_setpshared(&rwattr, 1)) != 0)
+		__FATAL("failed on pthread_rwlockattr_setpshared: %m");
+    if ((errno = pthread_rwlock_init(rwlock, &rwattr)) != 0)
+		__FATAL("failed on pthread_rwlock_init: %m");
+}
+
+static inline void
 pthreadRWLockReadLock(pthread_rwlock_t *rwlock)
 {
 	if ((errno = pthread_rwlock_rdlock(rwlock)) != 0)
@@ -255,6 +336,21 @@ pthreadCondInit(pthread_cond_t *cond)
 {
 	if ((errno = pthread_cond_init(cond, NULL)) != 0)
 		__FATAL("failed on pthread_cond_init: %m");
+}
+
+static inline void
+pthreadCondInitShared(pthread_cond_t *cond)
+{
+	pthread_condattr_t condattr;
+
+	if ((errno = pthread_condattr_init(&condattr)) != 0)
+		__FATAL("failed on pthread_condattr_init: %m");
+	if ((errno = pthread_condattr_setpshared(&condattr, 1)) != 0)
+		__FATAL("failed on pthread_condattr_setpshared: %m");
+	if ((errno = pthread_cond_init(cond, &condattr)) != 0)
+		__FATAL("failed on pthread_cond_init: %m");
+	if ((errno = pthread_condattr_destroy(&condattr)) != 0)
+		__FATAL("failed on pthread_condattr_destroy: %m");
 }
 
 static inline void
@@ -298,6 +394,80 @@ pthreadCondSignal(pthread_cond_t *cond)
 {
 	if ((errno = pthread_cond_signal(cond)) != 0)
 		__FATAL("failed on pthread_cond_signal: %m");
+}
+
+/*
+ * Misc debug functions
+ */
+INLINE_FUNCTION(void)
+dump_tuple_desc(const TupleDesc tdesc)
+{
+	fprintf(stderr, "tupdesc %p { natts=%d, tdtypeid=%u, tdtypmod=%d, tdrefcount=%d }\n",
+			tdesc,
+			tdesc->natts,
+			tdesc->tdtypeid,
+			tdesc->tdtypmod,
+			tdesc->tdrefcount);
+	for (int j=0; j < tdesc->natts; j++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tdesc, j);
+
+		fprintf(stderr, "attr[%d] { attname='%s', atttypid=%u, attlen=%d, attnum=%d, atttypmod=%d, attbyval=%c, attalign=%c, attnotnull=%c attisdropped=%c }\n",
+				j,
+				NameStr(attr->attname),
+				attr->atttypid,
+				(int)attr->attlen,
+				(int)attr->attnum,
+				(int)attr->atttypmod,
+				attr->attbyval ? 't' : 'f',
+				attr->attalign,
+				attr->attnotnull ? 't' : 'f',
+				attr->attisdropped ? 't' : 'f');
+	}
+}
+
+/*
+ * dump_kern_data_store
+ */
+INLINE_FUNCTION(void)
+dump_kern_data_store(const kern_data_store *kds)
+{
+	fprintf(stderr, "kds %p { length=%lu, nitems=%u, usage=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
+			kds,
+			kds->length,
+			kds->nitems,
+			kds->usage,
+			kds->ncols,
+			kds->format,
+			kds->has_varlena ? 't' : 'f',
+			kds->tdhasoid ? 't' : 'f',
+			kds->tdtypeid,
+			kds->tdtypmod,
+			kds->table_oid,
+			kds->hash_nslots,
+			kds->block_offset,
+			kds->block_nloaded,
+			kds->nr_colmeta);
+	for (int j=0; j < kds->nr_colmeta; j++)
+	{
+		const kern_colmeta *cmeta = &kds->colmeta[j];
+
+		fprintf(stderr, "cmeta[%d] { attbyval=%c, attalign=%d, attlen=%d, attnum=%d, attcacheoff=%d, atttypid=%u, atttypmod=%d, atttypkind=%c, kds_format=%c, kds_offset=%u, idx_subattrs=%u, num_subattrs=%u, attname='%s' }\n",
+				j,
+				cmeta->attbyval ? 't' : 'f',
+				(int)cmeta->attalign,
+				(int)cmeta->attlen,
+				(int)cmeta->attnum,
+				(int)cmeta->attcacheoff,
+				cmeta->atttypid,
+				cmeta->atttypmod,
+				cmeta->atttypkind,
+				cmeta->kds_format,
+				cmeta->kds_offset,
+				(unsigned int)cmeta->idx_subattrs,
+				(unsigned int)cmeta->num_subattrs,
+				cmeta->attname);
+	}
 }
 
 #endif	/* PG_UTILS_H */

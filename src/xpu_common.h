@@ -105,6 +105,15 @@
 #ifndef DBL_MAX
 #define DBL_MAX         __longlong_as_double__(0x7fefffffffffffffULL)
 #endif
+#ifndef DBL_MIN
+#define DBL_MIN			__longlong_as_double__(0x0010000000000000ULL)
+#endif
+#ifndef DBL_INF
+#define DBL_INF			__longlong_as_double__(0x7ff0000000000000ULL)
+#endif
+#ifndef DBL_NAN
+#define DBL_NAN			__longlong_as_double__(0x7fffffffffffffffULL)
+#endif
 
 #ifndef BITS_PER_BYTE
 #define BITS_PER_BYTE	8
@@ -122,16 +131,28 @@
 /*
  * Several fundamental data types and macros
  */
-#ifndef POSTGRES_H
+#ifndef Assert
 #define Assert(cond)		assert(cond)
+#endif
+#ifndef Max
 #define Max(a,b)			((a) > (b) ? (a) : (b))
+#endif
+#ifndef Min
 #define Min(a,b)			((a) < (b) ? (a) : (b))
+#endif
+#ifndef Abs
+#define Abs(x)				((x) >= 0 ? (x) : -(x))
+#endif
+#ifndef POSTGRES_H
 typedef uint64_t			Datum;
 typedef unsigned int		Oid;
 
 #define NAMEDATALEN			64		/* must follow the host configuration */
 #define BLCKSZ				8192	/* must follow the host configuration */
 
+#ifndef lengthof
+#define lengthof(array)		(sizeof (array) / sizeof ((array)[0]))
+#endif
 #define PointerGetDatum(X)	((Datum)(X))
 #define DatumGetPointer(X)	((char *)(X))
 #define TYPEALIGN(ALIGNVAL,LEN)         \
@@ -191,6 +212,38 @@ __volatileRead(const volatile T *ptr)
 #define __volatileRead(PTR)		(*(PTR))
 #endif
 
+INLINE_FUNCTION(int)
+__memcmp(const void *__s1, const void *__s2, size_t n)
+{
+	const unsigned char	*s1 = (const unsigned char *)__s1;
+	const unsigned char *s2 = (const unsigned char *)__s2;
+
+	for (size_t i=0; i < n; i++)
+	{
+		if (s1[i] < s2[i])
+			return -1;
+		if (s1[i] > s2[i])
+			return 1;
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__strcmp(const char *s1, const char *s2)
+{
+	unsigned char	c1, c2;
+
+	do {
+		c1 = (unsigned char) *s1++;
+		c2 = (unsigned char) *s2++;
+
+		if (c1 == '\0')
+			return c1 - c2;
+	} while (c1 == c2);
+
+	return c1 - c2;
+}
+
 /*
  * TypeOpCode / FuncOpCode
  */
@@ -225,12 +278,20 @@ typedef enum {
 	FuncOpCode__BoolTestExpr_IsNotFalse,
 	FuncOpCode__BoolTestExpr_IsUnknown,
 	FuncOpCode__BoolTestExpr_IsNotUnknown,
+	FuncOpCode__DistinctFrom,
+	FuncOpCode__CoalesceExpr,
+	FuncOpCode__LeastExpr,
+	FuncOpCode__GreatestExpr,
+	FuncOpCode__CaseWhenExpr,
+	FuncOpCode__ScalarArrayOpAny,
+	FuncOpCode__ScalarArrayOpAll,
 #include "xpu_opcodes.h"
 	/* for projection */
 	FuncOpCode__Projection = 9999,
 	FuncOpCode__LoadVars,
 	FuncOpCode__JoinQuals,
 	FuncOpCode__HashValue,
+	FuncOpCode__GiSTEval,
 	FuncOpCode__SaveExpr,
 	FuncOpCode__AggFuncs,
 	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
@@ -245,6 +306,7 @@ typedef enum {
 #define ERRCODE_WRONG_XPU_CODE			3
 #define ERRCODE_VARLENA_UNSUPPORTED		4
 #define ERRCODE_RECURSION_TOO_DEEP		5
+#define ERRCODE_BUFFER_NO_SPACE			6
 #define ERRCODE_DEVICE_INTERNAL			99
 #define ERRCODE_DEVICE_FATAL			999
 
@@ -281,10 +343,6 @@ typedef union
 	float4_t	fp32;
 	float8_t	fp64;
 	void	   *ptr;
-	struct {
-		uint32_t	offset;		/* offset from kvars_slot */
-		TypeOpCode	type_code;	/* TypeOpCode of the xpu_datum */
-	} xpu;		/* KVAR_CLASS__XPU_DATUM */
 } kern_variable;
 
 /*
@@ -390,6 +448,17 @@ kcxt_reset(kern_context *kcxt)
 	kcxt->vlpos = kcxt->vlbuf;
 }
 
+INLINE_FUNCTION(char *)
+kcxt_slot_buf(kern_context *kcxt, uint32_t slot_off)
+{
+	if (slot_off == 0)
+		return NULL;
+	assert(slot_off >= (sizeof(kern_variable) * kcxt->kvars_nslots +
+						sizeof(int)           * kcxt->kvars_nslots) &&
+		   slot_off <  kcxt->kvars_nbytes);
+	return ((char *)kcxt->kvars_slot + slot_off);
+}
+
 INLINE_FUNCTION(void)
 __strncpy(char *d, const char *s, uint32_t n)
 {
@@ -437,6 +506,8 @@ struct kern_colmeta {
 	int8_t			atttypkind;
 	/* copy of kds->format */
 	char			kds_format;
+	/* copy of sizeof(xpu_xxxx_t) if any */
+	int16_t			dtype_sizeof;
 	/*
 	 * offset from kds for the reverse reference.
 	 * kds = (kern_data_store *)((char *)cmeta - cmeta->kds_offset)
@@ -502,6 +573,8 @@ struct kern_data_store {
 	/* only KDS_FORMAT_BLOCK */
 	uint32_t		block_offset;	/* offset of blocks array */
 	uint32_t		block_nloaded;	/* number of blocks already loaded by CPU */
+	/* only KDS_FORMAT_COLUMN */
+	uint32_t		column_nrooms;	/* = max_num_rows parameter */
 	/* column definition */
 	uint32_t		nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */
@@ -586,6 +659,7 @@ struct kern_data_extra
 {
 	uint64_t	length;
 	uint64_t	usage;
+	uint64_t	deadspace;
 	char		data[1];
 };
 typedef struct kern_data_extra		kern_data_extra;
@@ -625,13 +699,12 @@ __kds_unpack(uint32_t offset)
  * Attribute numbers for the system-defined attributes
  */
 #define SelfItemPointerAttributeNumber			(-1)
-#define ObjectIdAttributeNumber					(-2)
-#define MinTransactionIdAttributeNumber			(-3)
-#define MinCommandIdAttributeNumber				(-4)
-#define MaxTransactionIdAttributeNumber			(-5)
-#define MaxCommandIdAttributeNumber				(-6)
-#define TableOidAttributeNumber					(-7)
-#define FirstLowInvalidHeapAttributeNumber		(-8)
+#define MinTransactionIdAttributeNumber			(-2)
+#define MinCommandIdAttributeNumber				(-3)
+#define MaxTransactionIdAttributeNumber			(-4)
+#define MaxCommandIdAttributeNumber				(-5)
+#define TableOidAttributeNumber					(-6)
+#define FirstLowInvalidHeapAttributeNumber		(-7)
 
 /*
  * ItemPointer:
@@ -644,6 +717,22 @@ typedef struct
 	} ip_blkid;
 	uint16_t		ip_posid;
 } ItemPointerData;
+
+INLINE_FUNCTION(bool)
+ItemPointerEquals(const ItemPointerData *ip1, const ItemPointerData *ip2)
+{
+	return (ip1->ip_blkid.bi_hi == ip2->ip_blkid.bi_hi &&
+			ip1->ip_blkid.bi_lo == ip2->ip_blkid.bi_lo &&
+			ip1->ip_posid       == ip2->ip_posid);
+}
+
+INLINE_FUNCTION(void)
+ItemPointerSetInvalid(ItemPointerData *ip)
+{
+	ip->ip_blkid.bi_hi = 0xffffU;
+	ip->ip_blkid.bi_lo = 0xffffU;
+	ip->ip_posid = 0;
+}
 
 /*
  * HeapTupleHeaderData
@@ -742,9 +831,22 @@ typedef struct IndexTupleData
 	char				data[1];	/* data or IndexAttributeBitMapData */
 } IndexTupleData;
 
+#define INDEX_MAX_KEYS		32		/* pg_config_manual.h */
+typedef struct IndexAttributeBitMapData
+{
+	uint8_t				bits[BITMAPLEN(INDEX_MAX_KEYS)];
+} IndexAttributeBitMapData;
+
 #define INDEX_SIZE_MASK     0x1fff
 #define INDEX_VAR_MASK      0x4000
 #define INDEX_NULL_MASK     0x8000
+
+#define IndexTupleSize(itup)						\
+	((size_t)((itup)->t_info & INDEX_SIZE_MASK))
+#define IndexTupleHasNulls(itup)					\
+	((((IndexTupleData *)(itup))->t_info & INDEX_NULL_MASK))
+#define IndexTupleHasVarwidths(itup)				\
+	((((IndexTupleData *)(itup))->t_info & INDEX_VAR_MASK))
 #endif	/* POSTGRES_H */
 
 /* ----------------------------------------------------------------
@@ -822,7 +924,8 @@ typedef uint16_t			OffsetNumber;
 	((OffsetNumber) (-1 + (offsetNumber)))
 
 /* definitions in storage/bufpage.h */
-typedef struct PageHeaderData
+typedef char   *Page;
+typedef struct	PageHeaderData
 {
 #if 0
 	/*
@@ -887,6 +990,15 @@ INLINE_FUNCTION(GISTPageOpaqueData *)
 GistPageGetOpaque(PageHeaderData *page)
 {
 	return (GISTPageOpaqueData *)((char *)page + page->pd_special);
+}
+
+INLINE_FUNCTION(bool)
+GistPageIsRoot(PageHeaderData *page)
+{
+	/* See, __innerPreloadSetupGiSTIndexWalker */
+	/* This logic is valid only on the kds_gist, not host buffer */
+	return (page->pd_parent_blkno == InvalidBlockNumber &&
+			page->pd_parent_item  == InvalidOffsetNumber);
 }
 
 INLINE_FUNCTION(bool)
@@ -994,14 +1106,14 @@ KDS_FETCH_TUPITEM(kern_data_store *kds,
 }
 
 INLINE_FUNCTION(uint32_t *)
-KDS_GET_HASHSLOT_BASE(kern_data_store *kds)
+KDS_GET_HASHSLOT_BASE(const kern_data_store *kds)
 {
 	Assert(kds->format == KDS_FORMAT_HASH && kds->hash_nslots > 0);
 	return (uint32_t *)(KDS_BODY_ADDR(kds));
 }
 
 INLINE_FUNCTION(uint32_t *)
-KDS_GET_HASHSLOT(kern_data_store *kds, uint32_t hash)
+KDS_GET_HASHSLOT(const kern_data_store *kds, uint32_t hash)
 {
 	uint32_t   *hslot = KDS_GET_HASHSLOT_BASE(kds);
 
@@ -1009,7 +1121,7 @@ KDS_GET_HASHSLOT(kern_data_store *kds, uint32_t hash)
 }
 
 INLINE_FUNCTION(bool)
-__KDS_HASH_ITEM_CHECK_VALID(kern_data_store *kds, kern_hashitem *hitem)
+__KDS_HASH_ITEM_CHECK_VALID(const kern_data_store *kds, kern_hashitem *hitem)
 {
 	char   *tail = (char *)kds + kds->length;
 	char   *head = (KDS_BODY_ADDR(kds) +
@@ -1019,7 +1131,7 @@ __KDS_HASH_ITEM_CHECK_VALID(kern_data_store *kds, kern_hashitem *hitem)
 }
 
 INLINE_FUNCTION(kern_hashitem *)
-KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t hash)
+KDS_HASH_FIRST_ITEM(const kern_data_store *kds, uint32_t hash)
 {
 	uint32_t   *hslot = KDS_GET_HASHSLOT(kds, hash);
 	uint32_t	offset = __volatileRead(hslot);
@@ -1036,7 +1148,7 @@ KDS_HASH_FIRST_ITEM(kern_data_store *kds, uint32_t hash)
 }
 
 INLINE_FUNCTION(kern_hashitem *)
-KDS_HASH_NEXT_ITEM(kern_data_store *kds, uint32_t hnext_offset)
+KDS_HASH_NEXT_ITEM(const kern_data_store *kds, uint32_t hnext_offset)
 {
 	if (hnext_offset != 0 && hnext_offset != UINT_MAX)
 	{
@@ -1083,7 +1195,7 @@ KDS_BLOCK_REF_HTUP(kern_data_store *kds,
 	pg_page = KDS_BLOCK_PGPAGE(kds, block_id);
 
 	Assert(lpp >= pg_page->pd_linp &&
-		   lpp -  pg_page->pd_linp < PageGetMaxOffsetNumber(pg_page));
+		   lpp -  pg_page->pd_linp < PageGetMaxOffsetNumber((Page)pg_page));
 	if (p_self)
 	{
 		p_self->ip_blkid.bi_hi  = block_nr >> 16;
@@ -1092,7 +1204,18 @@ KDS_BLOCK_REF_HTUP(kern_data_store *kds,
 	}
 	if (p_len)
 		*p_len = ItemIdGetLength(lpp);
-	return (HeapTupleHeaderData *)PageGetItem(pg_page, lpp);
+	return (HeapTupleHeaderData *)PageGetItem((Page)pg_page, lpp);
+}
+
+INLINE_FUNCTION(bool)
+KDS_BLOCK_CHECK_VALID(const kern_data_store *kds,
+					  const struct PageHeaderData *page)
+{
+	const char *base = (const char *)kds + kds->block_offset;
+
+	return ((const char *)page          >= base &&
+			(const char *)page + BLCKSZ <= (const char *)kds + kds->length &&
+			(((const char *)page - base) & (BLCKSZ-1)) == 0);
 }
 
 /* access functions for apache arrow format */
@@ -1149,6 +1272,24 @@ KDS_ARROW_REF_VARLENA_DATUM(kern_data_store *kds,
 		   offset[rowidx+1] <= __kds_unpack(cmeta->extra_length));
 	*p_length = offset[rowidx+1] - offset[rowidx];
 	return (extra + offset[rowidx]);	
+}
+
+INLINE_FUNCTION(bool)
+KDS_COLUMN_ITEM_ISNULL(const kern_data_store *kds,
+					   const kern_colmeta *cmeta,
+					   uint32_t rowid)
+{
+	uint8_t	   *bitmap;
+	uint8_t		mask = (1 << (rowid & 7));
+	uint8_t		idx = (rowid >> 3);
+
+	if (cmeta->nullmap_offset == 0)
+		return false;	/* NOT NULL */
+	if (idx >= __kds_unpack(cmeta->nullmap_length))
+		return false;	/* NOT NULL */
+	bitmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
+
+	return (bitmap[idx] & mask) == 0;
 }
 
 /*
@@ -1372,6 +1513,10 @@ struct xpu_datum_operators {
 	bool	  (*xpu_datum_hash)(kern_context *kcxt,
 								uint32_t *p_hash,
 								const xpu_datum_t *arg);
+	bool	  (*xpu_datum_comp)(kern_context *kcxt,
+								int *p_comp,				/* out */
+								const xpu_datum_t *a,		/* in */
+								const xpu_datum_t *b);		/* in */
 };
 
 #define PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\
@@ -1400,6 +1545,7 @@ struct xpu_datum_operators {
 		.xpu_datum_store = xpu_##NAME##_datum_store,				\
 		.xpu_datum_write = xpu_##NAME##_datum_write,				\
 		.xpu_datum_hash = xpu_##NAME##_datum_hash,					\
+		.xpu_datum_comp = xpu_##NAME##_datum_comp,					\
 	}
 
 #include "xpu_basetype.h"
@@ -1424,9 +1570,6 @@ struct xpu_array_t {
 	int32_t				length;
 	union {
 		struct {
-			bool		attbyval;
-			int8_t		attalign;
-			int16_t		attlen;
 			const varlena *value;
 		} heap;
 		struct {
@@ -1437,6 +1580,64 @@ struct xpu_array_t {
 };
 typedef struct xpu_array_t			xpu_array_t;
 EXTERN_DATA xpu_datum_operators		xpu_array_ops;
+
+/* access macros for heap array */
+typedef struct
+{
+	int32_t		ndim;			/* # of dimensions */
+	int32_t		dataoffset;		/* offset to data, or 0 if no bitmap */
+	Oid			elemtype;		/* element type OID */
+	uint32_t	data[1];
+} __ArrayTypeData;				/* payload of ArrayType */
+
+INLINE_FUNCTION(int32_t)
+__pg_array_ndim(const __ArrayTypeData *ar)
+{
+	return __Fetch(&ar->ndim);
+}
+INLINE_FUNCTION(int32_t)
+__pg_array_dataoff(const __ArrayTypeData *ar)
+{
+	return __Fetch(&ar->dataoffset);
+}
+INLINE_FUNCTION(bool)
+__pg_array_hasnull(const __ArrayTypeData *ar)
+{
+	return (__pg_array_dataoff(ar) != 0);
+}
+INLINE_FUNCTION(int32_t)
+__pg_array_dim(const __ArrayTypeData *ar, int k)
+{
+	return __Fetch(&ar->data[k]);
+}
+INLINE_FUNCTION(uint8_t *)
+__pg_array_nullmap(const __ArrayTypeData *ar)
+{
+	uint32_t	dataoff = __pg_array_dataoff(ar);
+
+	if (dataoff > 0)
+	{
+		int32_t	ndim = __pg_array_ndim(ar);
+
+		return (uint8_t *)((char *)&ar->data[2 * ndim]);
+	}
+	return NULL;
+}
+INLINE_FUNCTION(char *)
+__pg_array_dataptr(const __ArrayTypeData *ar)
+{
+	uint32_t	dataoff = __pg_array_dataoff(ar);
+
+	if (dataoff == 0)
+	{
+		int32_t	ndim = __pg_array_ndim(ar);
+
+		dataoff = MAXALIGN(VARHDRSZ + offsetof(__ArrayTypeData,
+											   data[2 * ndim]));
+	}
+	assert(dataoff >= VARHDRSZ + offsetof(__ArrayTypeData, data));
+	return (char *)ar + dataoff - VARHDRSZ;
+}
 
 /*
  * xpu_composite_t - composite type support
@@ -1497,6 +1698,7 @@ typedef struct
 												 * timezone */
 #define DEVTYPE__USE_KVARS_SLOTBUF	0x00000400U	/* Device type uses extra buffer on
 												 * the kvars-slot for LoadVars */
+#define DEVTYPE__HAS_COMPARE		0x00000800U	/* Device type has compare handler */
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
 #define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
@@ -1523,6 +1725,93 @@ typedef struct kern_expression	kern_expression;
 								xpu_datum_t *__result
 typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 
+#define KEXP_PROCESS_ARGS0(RETTYPE)								\
+	xpu_##RETTYPE##_t *result = (xpu_##RETTYPE##_t *)__result;	\
+																\
+	assert(kexp->exptype == TypeOpCode__##RETTYPE &&			\
+		   kexp->nr_args == 0)
+
+
+#define KEXP_PROCESS_ARGS1(RETTYPE,ARGTYPE1,ARGNAME1)			\
+	xpu_##RETTYPE##_t *result = (xpu_##RETTYPE##_t *)__result;	\
+	xpu_##ARGTYPE1##_t ARGNAME1;								\
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
+																\
+	assert(kexp->exptype == TypeOpCode__##RETTYPE &&			\
+		   kexp->nr_args == 1 &&								\
+		   KEXP_IS_VALID(karg,ARGTYPE1));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME1))			\
+		return false
+
+#define KEXP_PROCESS_ARGS2(RETTYPE,ARGTYPE1,ARGNAME1,			\
+								   ARGTYPE2,ARGNAME2)			\
+	xpu_##RETTYPE##_t *result = (xpu_##RETTYPE##_t *)__result;	\
+	xpu_##ARGTYPE1##_t ARGNAME1;								\
+	xpu_##ARGTYPE2##_t ARGNAME2;								\
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
+																\
+	assert(kexp->exptype == TypeOpCode__##RETTYPE &&			\
+		   kexp->nr_args == 2 &&								\
+		   KEXP_IS_VALID(karg,ARGTYPE1));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME1))			\
+		return false;											\
+	karg = KEXP_NEXT_ARG(karg);									\
+	assert(KEXP_IS_VALID(karg, ARGTYPE2));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME2))			\
+		return false
+
+#define KEXP_PROCESS_ARGS3(RETTYPE,ARGTYPE1,ARGNAME1,			\
+								   ARGTYPE2,ARGNAME2,			\
+								   ARGTYPE3,ARGNAME3)			\
+	xpu_##RETTYPE##_t *result = (xpu_##RETTYPE##_t *)__result;	\
+	xpu_##ARGTYPE1##_t ARGNAME1;								\
+	xpu_##ARGTYPE2##_t ARGNAME2;								\
+	xpu_##ARGTYPE3##_t ARGNAME3;								\
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
+																\
+	assert(kexp->exptype == TypeOpCode__##RETTYPE &&			\
+		   kexp->nr_args == 3);									\
+	assert(KEXP_IS_VALID(karg, ARGTYPE1));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME1))			\
+		return false;											\
+	karg = KEXP_NEXT_ARG(karg);									\
+	assert(KEXP_IS_VALID(karg, ARGTYPE2));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME2))			\
+		return false;											\
+	karg = KEXP_NEXT_ARG(karg);									\
+	assert(KEXP_IS_VALID(karg, ARGTYPE3));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME3))			\
+		return false
+
+#define KEXP_PROCESS_ARGS4(RETTYPE,ARGTYPE1,ARGNAME1,			\
+								   ARGTYPE2,ARGNAME2,			\
+								   ARGTYPE3,ARGNAME3,			\
+								   ARGTYPE4,ARGNAME4)			\
+	xpu_##RETTYPE##_t *result = (xpu_##RETTYPE##_t *)__result;	\
+	xpu_##ARGTYPE1##_t ARGNAME1;								\
+	xpu_##ARGTYPE2##_t ARGNAME2;								\
+	xpu_##ARGTYPE3##_t ARGNAME3;								\
+	xpu_##ARGTYPE4##_t ARGNAME4;								\
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
+																\
+	assert(kexp->exptype == TypeOpCode__##RETTYPE &&			\
+		   kexp->nr_args == 4);									\
+	assert(KEXP_IS_VALID(karg, ARGTYPE1));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME1))			\
+		return false;											\
+	karg = KEXP_NEXT_ARG(karg);									\
+	assert(KEXP_IS_VALID(karg, ARGTYPE2));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME2))			\
+		return false;											\
+	karg = KEXP_NEXT_ARG(karg);									\
+	assert(KEXP_IS_VALID(karg, ARGTYPE3));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME3))			\
+		return false;											\
+	karg = KEXP_NEXT_ARG(karg);									\
+	assert(KEXP_IS_VALID(karg, ARGTYPE4));						\
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME4))			\
+		return false
+
 typedef struct
 {
 	int32_t			var_resno;
@@ -1538,6 +1827,9 @@ typedef struct
 } kern_projection_desc;
 
 #define KAGG_ACTION__VREF			101		/* simple var copy */
+#define KAGG_ACTION__VREF_NOKEY		102		/* simple var copy; but not a grouping-
+											 * key, if GROUP-BY primary key.
+											 * (only code generator internal use) */
 #define KAGG_ACTION__NROWS_ANY		201		/* <int8> - increment 1 always */
 #define KAGG_ACTION__NROWS_COND		202		/* <int8> - increment 1 if not NULL */
 #define KAGG_ACTION__PMIN_INT32		302		/* <int4>,<int8> - min value */
@@ -1572,14 +1864,14 @@ typedef struct
 	int32_t		vl_len_;
 	uint32_t	nitems;
 	int64_t		sum;
-} kagg_state__pavg_int_packed;
+} kagg_state__psum_int_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
 	uint32_t	nitems;
 	float8_t	sum;
-} kagg_state__pavg_fp_packed;
+} kagg_state__psum_fp_packed;
 
 typedef struct
 {
@@ -1613,6 +1905,8 @@ typedef struct kern_aggregate_desc	kern_aggregate_desc;
 
 #define KEXP_FLAG__IS_PUSHED_DOWN		0x0001U
 
+#define SPECIAL_DEPTH__PREAGG_FINAL		(-2)
+
 struct kern_expression
 {
 	uint32_t		len;			/* length of this expression */
@@ -1640,14 +1934,33 @@ struct kern_expression
 			uint32_t	var_slot_id;
 		} v;		/* VarExpr */
 		struct {
+			uint32_t	case_comp;		/* key value to be compared, if any */
+			uint32_t	case_else;		/* ELSE clause, if any */
+			char		data[1]			__MAXALIGNED__;
+		} casewhen;	/* Case-When */
+		struct {
+			uint32_t	slot_id;		/* temporary slot-id */
+			uint32_t	slot_bufsz;		/* if >0, alloca(slot_bufsz) */
+			bool		elem_byval;		/* attbyval of the element type */
+			int8_t		elem_align;		/* attalign of the element type */
+			int16_t		elem_len;		/* attlen of the element type */
+			char		data[1]			__MAXALIGNED__;
+		} saop;		/* ScalarArrayOp */
+		struct {
 			int			depth;
 			int			nloads;
 			kern_vars_defitem kvars[1];
 		} load;		/* VarLoads */
 		struct {
+			int			gist_depth;	/* special depth for GiST index */
+			uint32_t	gist_oid;	/* OID of GiST index (for EXPLAIN) */
+			kern_vars_defitem ivar;	/* index item reference */
+			char		data[1]		__MAXALIGNED__;
+		} gist;		/* GiSTEval */
+		struct {
 			uint32_t	slot_id;	/* destination slot-id */
 			uint32_t	slot_off;	/* kvars-slot buffer offset, if needed */
-			char		data[1];
+			char		data[1]		__MAXALIGNED__;
 		} save;		/* SaveExpr */
 		struct {
 			int			nattrs;
@@ -1656,6 +1969,7 @@ struct kern_expression
 		struct {
 			int			datum_sz;
 			int			nattrs;
+			int			ctid_slot;	/* slot_id of ctid system column, if any */
 			kern_projection_desc desc[1];
 		} proj;		/* Projection */
 		struct {
@@ -1743,6 +2057,7 @@ typedef struct
 #define XpuCommandTag__SuccessFinal			50
 #define XpuCommandTag__OpenSession			100
 #define XpuCommandTag__XpuTaskExec			110
+#define XpuCommandTag__XpuTaskExecGpuCache	111
 #define XpuCommandTag__XpuTaskFinal			119
 #define XpuCommandMagicNumber				0xdeadbeafU
 
@@ -1757,6 +2072,10 @@ typedef struct kern_session_info
 	uint32_t	kcxt_kvars_nbytes;	/* byte length of kvars_slot[], kvars_class[] and
 									 * kvars-buffer (for xpu_array_t, xpu_composite_t
 									 * and xpu_geometry_t) */
+	uint32_t	kcxt_kvars_ndims;	/* number of kvars_slot for each warp; it is
+									 * usually equivalent to (nrels+1), however,
+									 * GiST-index support may consume more slots.
+									 */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 
 	uint32_t	xpu_task_flags;		/* mask of device flags */
@@ -1766,7 +2085,7 @@ typedef struct kern_session_info
 	uint32_t	xpucode_join_load_vars_packed;
 	uint32_t	xpucode_join_quals_packed;
 	uint32_t	xpucode_hash_values_packed;
-	uint32_t	xpucode_gist_quals_packed;
+	uint32_t	xpucode_gist_evals_packed;
 	uint32_t	xpucode_projection;
 	uint32_t	xpucode_groupby_keyhash;
 	uint32_t	xpucode_groupby_keyload;
@@ -1774,11 +2093,14 @@ typedef struct kern_session_info
 	uint32_t	xpucode_groupby_actions;
 
 	/* database session info */
+	int64_t		hostEpochTimestamp;	/* = SetEpochTimestamp() */
 	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
 	uint32_t	session_xact_state;	/* offset to SerializedTransactionState */
 	uint32_t	session_timezone;	/* offset to pg_tz */
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
+	int32_t		session_currency_frac_digits;	/* copy of lconv::frac_digits */
+
 	/* join inner buffer */
 	uint32_t	pgsql_port_number;	/* = PostPortNumber */
 	uint32_t	pgsql_plan_node_id;	/* = Plan->plan_node_id */
@@ -1815,15 +2137,26 @@ typedef struct {
 	bool		final_plan_node;
 	bool		final_this_device;
 	/* statistics */
-	uint32_t	nitems_raw;
-	uint32_t	nitems_in;
-	uint32_t	nitems_out;
+	uint32_t	npages_direct_read;	/* # of pages read by GPU-Direct Storage */
+	uint32_t	npages_vfs_read;	/* # of pages read by VFS (fallback) */
+	uint32_t	nitems_raw;		/* # of visible rows kept in the relation */
+	uint32_t	nitems_in;		/* # of result rows in depth-0 after WHERE-clause */
+	uint32_t	nitems_out;		/* # of result rows in final depth before host quals */
 	uint32_t	num_rels;
 	struct {
-		uint32_t	nitems_gist;
-		uint32_t	nitems_out;
+		uint32_t	nitems_gist;/* # of results rows by GiST index (if any) */
+		uint32_t	nitems_out;	/* # of results rows by JOIN in this depth */
 	} stats[1];
 } kern_exec_results;
+
+typedef struct
+{
+	kern_errorbuf		error;		/* original error in kernel space */
+	/* statistics */
+	uint32_t			npages_direct_read;
+	uint32_t			npages_vfs_read;
+	kern_data_store		kds_src;
+} kern_cpu_fallback;
 
 #ifndef ILIST_H
 typedef struct dlist_node
@@ -1850,6 +2183,7 @@ typedef struct
 		kern_exec_task		task;
 		kern_final_task		fin;
 		kern_exec_results	results;
+		kern_cpu_fallback	fallback;
 	} u;
 } XpuCommand;
 
@@ -1945,9 +2279,20 @@ SESSION_KEXP_HASH_VALUE(kern_session_info *session, int dindex)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GIST_QUALS(kern_session_info *session, int dindex)
+SESSION_KEXP_GIST_EVALS(kern_session_info *session, int dindex)
 {
-	return NULL;
+	kern_expression *kexp;
+	kern_expression *karg;
+
+	if (session->xpucode_gist_evals_packed == 0)
+		return NULL;
+	kexp = (kern_expression *)
+		((char *)session + session->xpucode_gist_evals_packed);
+	if (dindex < 0)
+		return kexp;
+	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	assert(!karg || karg->opcode == FuncOpCode__GiSTEval);
+	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
@@ -2213,10 +2558,10 @@ kern_estimate_heaptuple(kern_context *kcxt,
 						const kern_data_store *kds_dst);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsHeapTuple(kern_context *kcxt,
-					  kern_expression *kexp_load_vars,
+					  const kern_expression *kexp_load_vars,
 					  int depth,
-					  kern_data_store *kds,
-					  HeapTupleHeaderData *htup);
+					  const kern_data_store *kds,
+					  const HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterRow(kern_context *kcxt,
 					 kern_expression *kexp_load_vars,
@@ -2224,19 +2569,31 @@ ExecLoadVarsOuterRow(kern_context *kcxt,
 					 kern_data_store *kds_src,
 					 HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
-ExecLoadVarsOuterColumn(XPU_PGFUNCTION_ARGS,
-						kern_data_store *kds_outer,
-						uint32_t kds_index,
-						int num_inners,
-						kern_data_store **kds_inners,
-						HeapTupleHeaderData **htup_inners);
-EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterArrow(kern_context *kcxt,
 					   kern_expression *kexp_load_vars,
 					   kern_expression *kexp_scan_quals,
 					   kern_data_store *kds_src,
 					   uint32_t kds_index);
-
+PUBLIC_FUNCTION(bool)
+ExecLoadVarsOuterColumn(kern_context *kcxt,
+						kern_expression *kexp_load_vars,
+						kern_expression *kexp_scan_quals,
+						kern_data_store *kds,
+						kern_data_extra *extra,
+						uint32_t kds_index);
+EXTERN_FUNCTION(uint32_t)
+ExecGiSTIndexGetNext(kern_context *kcxt,
+					 const kern_data_store *kds_hash,
+					 const kern_data_store *kds_gist,
+					 const kern_expression *kexp_gist,
+					 uint32_t l_state);
+EXTERN_FUNCTION(bool)
+ExecGiSTIndexPostQuals(kern_context *kcxt,
+					   int depth,
+					   const kern_data_store *kds_hash,
+					   const kern_expression *kexp_gist,
+					   const kern_expression *kexp_load,
+					   const kern_expression *kexp_join);
 EXTERN_FUNCTION(int)
 ExecKernProjection(kern_context *kcxt,
 				   kern_expression *kexp,

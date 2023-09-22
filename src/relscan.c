@@ -107,6 +107,8 @@ count_num_of_subfields(Oid type_oid)
 		{
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
 
+			if (attr->attisdropped)
+				continue;
 			count += count_num_of_subfields(attr->atttypid);
 		}
 	}
@@ -126,6 +128,7 @@ __setup_kern_colmeta(kern_data_store *kds,
 					 int *p_attcacheoff)
 {
 	kern_colmeta   *cmeta = &kds->colmeta[column_index];
+	devtype_info   *dtype;
 	TypeCacheEntry *tcache;
 
 	memset(cmeta, 0, sizeof(kern_colmeta));
@@ -168,10 +171,15 @@ __setup_kern_colmeta(kern_data_store *kds,
 	cmeta->atttypmod = atttypmod;
 	strncpy(cmeta->attname, attname, NAMEDATALEN);
 
-	/* array? composite type? */
-	tcache = lookup_type_cache(atttypid, TYPECACHE_TUPDESC);
-	if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+	if (!OidIsValid(atttypid) ||
+		!(tcache = lookup_type_cache(atttypid, TYPECACHE_TUPDESC)))
 	{
+		/* corner case: column might be already dropped */
+		cmeta->atttypkind = TYPE_KIND__NULL;
+	}
+	else if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+	{
+		/* array type */
 		char		elem_name[NAMEDATALEN+10];
 		int16		elem_len;
 		bool		elem_byval;
@@ -199,6 +207,7 @@ __setup_kern_colmeta(kern_data_store *kds,
 	}
 	else if (tcache->tupDesc)
 	{
+		/* composite type */
 		TupleDesc	tupdesc = tcache->tupDesc;
 		int			j, attcacheoff = -1;
 
@@ -250,6 +259,9 @@ __setup_kern_colmeta(kern_data_store *kds,
 	/*
 	 * for the reverse references to KDS
 	 */
+	dtype = pgstrom_devtype_lookup(atttypid);
+	if (dtype)
+		cmeta->dtype_sizeof = dtype->type_sizeof;
 	cmeta->kds_format = kds->format;
 	cmeta->kds_offset = (char *)cmeta - (char *)kds;
 }
@@ -300,7 +312,7 @@ setup_kern_data_store(kern_data_store *kds,
 		kern_colmeta *cmeta = &kds->colmeta[kds->nr_colmeta++];
 
 		memset(cmeta, 0, sizeof(kern_colmeta));
-		cmeta->attbyval = true;
+		cmeta->attbyval = false;
 		cmeta->attalign = sizeof(int32_t);
 		cmeta->attlen = sizeof(GpuCacheSysattr);
 		cmeta->attnum = -1;
@@ -308,6 +320,8 @@ setup_kern_data_store(kern_data_store *kds,
 		cmeta->atttypid = InvalidOid;
 		cmeta->atttypmod = -1;
 		cmeta->atttypkind = TYPE_KIND__BASE;
+		cmeta->kds_format = kds->format;
+		cmeta->kds_offset = (uint32_t)((char *)cmeta - (char *)kds);
 		strcpy(cmeta->attname, "__gcache_sysattr__");
 	}
 	return MAXALIGN(offsetof(kern_data_store, colmeta[kds->nr_colmeta]));
@@ -329,6 +343,8 @@ estimate_kern_data_store(TupleDesc tupdesc)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
 
+		if (attr->attisdropped)
+			continue;
 		nr_colmeta += count_num_of_subfields(attr->atttypid);
 	}
 	/* internal system attribute if KDS_FORMAT_COLUMN */
@@ -407,6 +423,7 @@ pgstromFetchFallbackTuple(pgstromTaskState *pts)
 			pts->fallback_nitems = 0;
 			pts->fallback_usage = 0;
 		}
+		slot_getallattrs(slot);
 		return slot;
 	}
 	return NULL;
@@ -471,7 +488,7 @@ __relScanDirectFallbackBlock(pgstromTaskState *pts,
 			pts->cb_cpu_fallback(pts, kds, &htup);
 	}
 	UnlockReleaseBuffer(buffer);
-	pg_atomic_fetch_add_u32(&ps_state->heap_fallback_nblocks, 1);
+	pg_atomic_fetch_add_u64(&ps_state->npages_buffer_read, PAGES_PER_BLOCK);
 }
 
 static void
@@ -575,8 +592,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	pgstromSharedState *ps_state = pts->ps_state;
 	Relation		relation = pts->css.ss.ss_currentRelation;
 	HeapScanDesc    h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
-	/* NOTE: 'smgr_rnode' always locates on the head of SMgrRelationData */
-	RelFileNodeBackend *smgr_rnode = (RelFileNodeBackend *)RelationGetSmgr(relation);
+	SMgrRelation	smgr = RelationGetSmgr(relation);
 	XpuCommand	   *xcmd;
 	kern_data_store *kds;
 	unsigned long	m_offset = 0UL;
@@ -626,7 +642,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				LWLock	   *bufLock;
 				int			buf_id;
 
-				INIT_BUFFERTAG(bufTag, smgr_rnode->node, MAIN_FORKNUM, block_num);
+				smgr_init_buffer_tag(&bufTag, smgr, MAIN_FORKNUM, block_num);
 				bufHash = BufTableHashCode(&bufTag);
 				bufLock = BufMappingPartitionLock(bufHash);
 
@@ -773,11 +789,19 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	}
 out:
 	Assert(kds->nitems == kds->block_nloaded + strom_nblocks);
-	pg_atomic_fetch_add_u32(&ps_state->heap_normal_nblocks, kds->block_nloaded);
-	pg_atomic_fetch_add_u32(&ps_state->heap_direct_nblocks, strom_nblocks);
+	pg_atomic_fetch_add_u64(&ps_state->npages_buffer_read,
+							kds->block_nloaded * PAGES_PER_BLOCK);
 	kds->length = kds->block_offset + BLCKSZ * kds->nitems;
 	if (kds->nitems == 0)
 		return NULL;
+	if (strom_nblocks > 0)
+	{
+		memcpy(&KDS_BLOCK_BLCKNR(kds, kds->block_nloaded),
+			   strom_blknums,
+			   sizeof(BlockNumber) * strom_nblocks);
+	}
+	Assert(kds->nitems == kds->block_nloaded + strom_nblocks);
+
 	if (strom_iovec->nr_chunks > 0)
 	{
 		size_t		sz;
@@ -829,6 +853,7 @@ __kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 	titem->t_len = tuple->t_len;
 	titem->rowid = kds->nitems;
 	memcpy(&titem->htup, tuple->t_data, tuple->t_len);
+	memcpy(&titem->htup.t_ctid, &tuple->t_self, sizeof(ItemPointerData));
 	kds->usage = rowindex[kds->nitems++] = __kds_packed(__usage);
 
 	if (should_free)

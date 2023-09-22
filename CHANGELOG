@@ -1,3 +1,16 @@
+* Sun Sep 17 2023 KaiGai Kohei <kaigai@heterodb.com> - 5.0-beta
+- The code base is re-designed entirely.
+- GPU code generator now generates 'kexp' pseudo code, instead of
+  CUDA C++ native code. (and, run-time compile stuff by NVRTC was
+  removed.)
+- Now only GPU-Direct Storage is supported, and our nvme_strom.ko
+  became obsolete.
+- Process model was revised, unlike v3.x, 5.x series launches
+  a background worker that handles all the GPU requests under
+  multi-threading model. It saves device memory consumption.
+- GPU-Cache is now built based on CUDA managed memory that allows
+  memory overcommit.
+
 * Sat Dec 11 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.3-2
 - Rebuild for CUDA11.5 Update 1; contains compiler optimization bugfix
 - A critical bug fix on nogroup_reduction

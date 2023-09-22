@@ -415,8 +415,17 @@ xpu_geometry_datum_store(kern_context *kcxt,
 						 int *p_vclass,
 						 kern_variable *p_kvar)
 {
-	STROM_ELOG(kcxt, "xpu_datum_store should not be called for geometry type");
-	return false;
+	xpu_geometry_t *geom;
+
+	geom = (xpu_geometry_t *)kcxt_alloc(kcxt, sizeof(xpu_geometry_t));
+	if (!geom)
+		return false;
+	memcpy(geom, xdatum, sizeof(xpu_geometry_t));
+	assert(geom->expr_ops == &xpu_geometry_ops);
+
+	*p_vclass = KVAR_CLASS__XPU_DATUM;
+	p_kvar->ptr = (void *)geom;
+	return true;
 }
 
 STATIC_FUNCTION(int)
@@ -498,6 +507,15 @@ xpu_geometry_datum_hash(kern_context *kcxt,
 	return false;
 }
 
+STATIC_FUNCTION(bool)
+xpu_geometry_datum_comp(kern_context *kcxt,
+						int *p_comp,
+						const xpu_datum_t *__a,
+						const xpu_datum_t *__b)
+{
+	STROM_ELOG(kcxt, "geometry type has no compare function");
+	return false;
+}
 PGSTROM_SQLTYPE_OPERATORS(geometry,false,4,-1);
 
 /* ================================================================
@@ -568,6 +586,15 @@ xpu_box2df_datum_hash(kern_context *kcxt,
 	return false;
 }
 
+STATIC_FUNCTION(bool)
+xpu_box2df_datum_comp(kern_context *kcxt,
+					  int *p_comp,
+					  const xpu_datum_t *__a,
+					  const xpu_datum_t *__b)
+{
+	STROM_ELOG(kcxt, "box2df type has no compare function");
+	return false;
+}
 PGSTROM_SQLTYPE_OPERATORS(box2df,false,1,sizeof(geom_bbox_2d));
 
 /* ================================================================
@@ -579,33 +606,37 @@ PGSTROM_SQLTYPE_OPERATORS(box2df,false,1,sizeof(geom_bbox_2d));
 PUBLIC_FUNCTION(bool)
 pgfn_st_setsrid(XPU_PGFUNCTION_ARGS)
 {
-	xpu_geometry_t *result = (xpu_geometry_t *)__result;
-	xpu_geometry_t	geom;
+	xpu_geometry_t *geom = (xpu_geometry_t *)__result;
 	xpu_int4_t		srid;
 	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
 	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom))
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, (xpu_datum_t *)geom))
 		return false;
 	karg = KEXP_NEXT_ARG(karg);
 	assert(KEXP_IS_VALID(karg,int4));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &srid))
 		return false;
-	if (XPU_DATUM_ISNULL(&geom) || XPU_DATUM_ISNULL(&srid))
-		result->expr_ops = NULL;
+	if (XPU_DATUM_ISNULL(geom) || XPU_DATUM_ISNULL(&srid))
+		geom->expr_ops = NULL;
 	else
 	{
+		assert(geom->expr_ops == &xpu_geometry_ops);
 		if (srid.value <= 0)
-			geom.srid = SRID_UNKNOWN;
+			geom->srid = SRID_UNKNOWN;
 		else if (srid.value > SRID_MAXIMUM)
-			geom.srid = SRID_USER_MAXIMUM + 1 +
+			geom->srid = SRID_USER_MAXIMUM + 1 +
 				(srid.value % (SRID_MAXIMUM - SRID_USER_MAXIMUM - 1));
 		else
-			geom.srid = srid.value;
-
-		memcpy(result, &geom, sizeof(xpu_geometry_t));
+			geom->srid = srid.value;
 	}
 	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_st_point(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_st_makepoint2(kcxt, kexp, __result);
 }
 
 PUBLIC_FUNCTION(bool)
@@ -628,6 +659,11 @@ pgfn_st_makepoint2(XPU_PGFUNCTION_ARGS)
 	{
 		double	   *rawdata = (double *)kcxt_alloc(kcxt, 2 * sizeof(double));
 
+		if (!rawdata)
+		{
+			STROM_ELOG(kcxt, "out of memory");
+			return false;
+		}
 		rawdata[0] = x.value;
 		rawdata[1] = y.value;
 
@@ -638,6 +674,7 @@ pgfn_st_makepoint2(XPU_PGFUNCTION_ARGS)
 		geom->nitems = 1;
 		geom->rawsize = 2 * sizeof(double);
 		geom->rawdata = (char *)rawdata;
+		geom->bbox = NULL;
 	}
 	return true;
 }
@@ -666,6 +703,11 @@ pgfn_st_makepoint3(XPU_PGFUNCTION_ARGS)
 	{
 		double	   *rawdata = (double *)kcxt_alloc(kcxt, 3 * sizeof(double));
 
+		if (!rawdata)
+		{
+			STROM_ELOG(kcxt, "out of memory");
+			return false;
+		}
 		rawdata[0] = x.value;
 		rawdata[1] = y.value;
 		rawdata[2] = z.value;
@@ -677,6 +719,7 @@ pgfn_st_makepoint3(XPU_PGFUNCTION_ARGS)
 		geom->nitems = 1;
 		geom->rawsize = 3 * sizeof(double);
 		geom->rawdata = (char *)rawdata;
+		geom->bbox = NULL;
 	}
 	return true;
 }
@@ -712,6 +755,11 @@ pgfn_st_makepoint4(XPU_PGFUNCTION_ARGS)
 	{
 		double	   *rawdata = (double *)kcxt_alloc(kcxt, 4 * sizeof(double));
 
+		if (!rawdata)
+		{
+			STROM_ELOG(kcxt, "out of memory");
+			return false;
+		}
 		rawdata[0] = x.value;
 		rawdata[1] = y.value;
 		rawdata[2] = z.value;
@@ -724,6 +772,7 @@ pgfn_st_makepoint4(XPU_PGFUNCTION_ARGS)
 		geom->nitems = 1;
 		geom->rawsize = 4 * sizeof(double);
 		geom->rawdata = (char *)rawdata;
+		geom->bbox = NULL;
 	}
 	return true;
 }
@@ -1010,6 +1059,7 @@ __geom_contains_bbox2d(const geom_bbox_2d *bbox1,
 	if (!__geom_bbox_2d_is_empty(bbox1) &&
 		__geom_bbox_2d_is_empty(bbox2))
 		return true;
+
 	if (bbox1->xmin <= bbox2->xmin &&
 		bbox1->xmax >= bbox2->xmax &&
 		bbox1->ymin <= bbox2->ymin &&
@@ -1066,12 +1116,16 @@ pgfn_box2df_geometry_contains(XPU_PGFUNCTION_ARGS)
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
 		return false;
 	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&geom2))
+	{
 		result->expr_ops = NULL;
+	}
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
 		if (__geometry_get_bbox2d(kcxt, &geom2, &bbox2))
+		{
 			result->value = __geom_contains_bbox2d(&bbox1.value, &bbox2);
+		}
 		else
 			result->value = false;
 	}
@@ -6012,7 +6066,6 @@ pgfn_st_contains(XPU_PGFUNCTION_ARGS)
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
 		return false;
 
-	result->expr_ops = NULL;
 	if (!XPU_DATUM_ISNULL(&geom1)  && !XPU_DATUM_ISNULL(&geom2) &&
 		!geometry_is_empty(&geom1) && !geometry_is_empty(&geom2))
 	{
@@ -6064,6 +6117,10 @@ pgfn_st_contains(XPU_PGFUNCTION_ARGS)
 			result->value = ((status & IM__INTER_INTER_2D) != 0 &&
 							 (status & IM__EXTER_INTER_2D) == 0 &&
 							 (status & IM__EXTER_BOUND_2D) == 0);
+		}
+		else
+		{
+			result->expr_ops = NULL;
 		}
 	}
 	return true;

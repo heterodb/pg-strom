@@ -70,6 +70,7 @@ typedef struct
 #define HOURS_PER_DAY		24		/* assume no daylight savings time changes */
 
 #define SECS_PER_YEAR		(36525 * 864)	/* avoid floating-point computation */
+#define SECS_PER_MONTH		(30 * 86400)
 #define SECS_PER_DAY		86400
 #define SECS_PER_HOUR		3600
 #define SECS_PER_MINUTE		60

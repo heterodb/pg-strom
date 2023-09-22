@@ -82,6 +82,20 @@ xpu_bool_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(bool));
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_bool_datum_comp(kern_context *kcxt,
+					int *p_comp,
+					const xpu_datum_t *__a,
+					const xpu_datum_t *__b)
+{
+	const xpu_bool_t   *a = (const xpu_bool_t *)__a;
+	const xpu_bool_t   *b = (const xpu_bool_t *)__b;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	*p_comp = ((int)a->value - (int)b->value);
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 
 /*
@@ -148,6 +162,24 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 			*p_hash = 0;												\
 		else															\
 			*p_hash = pg_hash_any(&arg->value, sizeof(BASETYPE));		\
+		return true;													\
+	}																	\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_datum_comp(kern_context *kcxt,							\
+						int *p_comp,									\
+						const xpu_datum_t *__a,							\
+						const xpu_datum_t *__b)							\
+	{																	\
+		const xpu_##NAME##_t *a = (const xpu_##NAME##_t *)__a;			\
+		const xpu_##NAME##_t *b = (const xpu_##NAME##_t *)__b;			\
+																		\
+		assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));			\
+		if (a->value > b->value)										\
+			*p_comp = 1;												\
+		else if (a->value < b->value)									\
+			*p_comp = -1;												\
+		else															\
+			*p_comp = 0;												\
 		return true;													\
 	}																	\
 	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
@@ -221,6 +253,24 @@ PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t,i64);
 			*p_hash = 0;												\
 		else															\
 			*p_hash = pg_hash_any(&arg->value, sizeof(BASETYPE));		\
+		return true;													\
+	}																	\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_datum_comp(kern_context *kcxt,							\
+						int *p_comp,									\
+						const xpu_datum_t *__a,							\
+						const xpu_datum_t *__b)							\
+	{																	\
+		const xpu_##NAME##_t *a = (const xpu_##NAME##_t *)__a;			\
+		const xpu_##NAME##_t *b = (const xpu_##NAME##_t *)__b;			\
+																		\
+		assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));			\
+		if (a->value > b->value)										\
+			*p_comp = 1;												\
+		else if (a->value < b->value)									\
+			*p_comp = -1;												\
+		else															\
+			*p_comp = 0;												\
 		return true;													\
 	}																	\
 	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
@@ -360,37 +410,37 @@ PG_SIMPLE_TYPECAST_TEMPLATE(float8,float2,fp16_to_fp64, __TYPECAST_NOCHECK)
 PG_SIMPLE_TYPECAST_TEMPLATE(float8,float4,(double), __TYPECAST_NOCHECK)
 #undef PG_SIMPLE_TYPECAST_TEMPLATE
 
-__PG_SIMPLE_COMPARE_TEMPLATE(bool,bool,bool,bool,==,eq)
+__PG_SIMPLE_COMPARE_TEMPLATE(bool,bool,bool,,==,eq)
 
-PG_SIMPLE_COMPARE_TEMPLATE(int1,  int1, int1, int8_t)
-PG_SIMPLE_COMPARE_TEMPLATE(int12, int1, int2, int16_t)
-PG_SIMPLE_COMPARE_TEMPLATE(int14, int1, int4, int32_t)
-PG_SIMPLE_COMPARE_TEMPLATE(int18, int1, int8, int64_t)
+PG_SIMPLE_COMPARE_TEMPLATE(int1,  int1, int1, )
+PG_SIMPLE_COMPARE_TEMPLATE(int12, int1, int2, (int16_t))
+PG_SIMPLE_COMPARE_TEMPLATE(int14, int1, int4, (int32_t))
+PG_SIMPLE_COMPARE_TEMPLATE(int18, int1, int8, (int64_t))
 
-PG_SIMPLE_COMPARE_TEMPLATE(int21, int2, int1, int16_t)
-PG_SIMPLE_COMPARE_TEMPLATE(int2,  int2, int2, int16_t)
-PG_SIMPLE_COMPARE_TEMPLATE(int24, int2, int4, int32_t)
-PG_SIMPLE_COMPARE_TEMPLATE(int28, int2, int8, int64_t)
+PG_SIMPLE_COMPARE_TEMPLATE(int21, int2, int1, (int16_t))
+PG_SIMPLE_COMPARE_TEMPLATE(int2,  int2, int2, )
+PG_SIMPLE_COMPARE_TEMPLATE(int24, int2, int4, (int32_t))
+PG_SIMPLE_COMPARE_TEMPLATE(int28, int2, int8, (int64_t))
 
-PG_SIMPLE_COMPARE_TEMPLATE(int41, int4, int1, int32_t)
-PG_SIMPLE_COMPARE_TEMPLATE(int42, int4, int2, int32_t)
-PG_SIMPLE_COMPARE_TEMPLATE(int4,  int4, int4, int32_t)
-PG_SIMPLE_COMPARE_TEMPLATE(int48, int4, int8, int64_t)
+PG_SIMPLE_COMPARE_TEMPLATE(int41, int4, int1, (int32_t))
+PG_SIMPLE_COMPARE_TEMPLATE(int42, int4, int2, (int32_t))
+PG_SIMPLE_COMPARE_TEMPLATE(int4,  int4, int4, )
+PG_SIMPLE_COMPARE_TEMPLATE(int48, int4, int8, (int64_t))
 
-PG_SIMPLE_COMPARE_TEMPLATE(int81, int8, int1, int64_t)
-PG_SIMPLE_COMPARE_TEMPLATE(int82, int8, int2, int64_t)
-PG_SIMPLE_COMPARE_TEMPLATE(int84, int8, int4, int64_t)
-PG_SIMPLE_COMPARE_TEMPLATE(int8,  int8, int8, int64_t)
+PG_SIMPLE_COMPARE_TEMPLATE(int81, int8, int1, (int64_t))
+PG_SIMPLE_COMPARE_TEMPLATE(int82, int8, int2, (int64_t))
+PG_SIMPLE_COMPARE_TEMPLATE(int84, int8, int4, (int64_t))
+PG_SIMPLE_COMPARE_TEMPLATE(int8,  int8, int8, )
 
-PG_SIMPLE_COMPARE_TEMPLATE(float2,  float2, float2, float2_t)
-PG_SIMPLE_COMPARE_TEMPLATE(float24, float2, float4, float4_t)
-PG_SIMPLE_COMPARE_TEMPLATE(float28, float2, float8, float8_t)
-PG_SIMPLE_COMPARE_TEMPLATE(float42, float4, float2, float4_t)
-PG_SIMPLE_COMPARE_TEMPLATE(float4,  float4, float4, float4_t)
-PG_SIMPLE_COMPARE_TEMPLATE(float48, float4, float8, float8_t)
-PG_SIMPLE_COMPARE_TEMPLATE(float82, float8, float2, float8_t)
-PG_SIMPLE_COMPARE_TEMPLATE(float84, float8, float4, float8_t)
-PG_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, float8_t)
+PG_SIMPLE_COMPARE_TEMPLATE(float2,  float2, float2, )
+PG_SIMPLE_COMPARE_TEMPLATE(float24, float2, float4, (float4_t))
+PG_SIMPLE_COMPARE_TEMPLATE(float28, float2, float8, (float8_t))
+PG_SIMPLE_COMPARE_TEMPLATE(float42, float4, float2, (float4_t))
+PG_SIMPLE_COMPARE_TEMPLATE(float4,  float4, float4, )
+PG_SIMPLE_COMPARE_TEMPLATE(float48, float4, float8, (float8_t))
+PG_SIMPLE_COMPARE_TEMPLATE(float82, float8, float2, (float8_t))
+PG_SIMPLE_COMPARE_TEMPLATE(float84, float8, float4, (float8_t))
+PG_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, )
 
 /*
  * Binary operator template

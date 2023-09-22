@@ -242,7 +242,7 @@ fp16_to_fp32(float2_t fp16val)
 }
 
 INLINE_FUNCTION(float8_t)
-fp16_to_fp64(half_t fp16val)
+fp16_to_fp64(float2_t fp16val)
 {
 #ifndef EMULATE_FLOAT2
 	return (float8_t)fp16val;

@@ -69,18 +69,7 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float8, float8_t);
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##FNAME##EXTRA(XPU_PGFUNCTION_ARGS)							\
 	{																	\
-		xpu_bool_t *result = (xpu_bool_t *)__result;					\
-		xpu_##LNAME##_t lval;											\
-		xpu_##RNAME##_t rval;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
-																		\
-		assert(KEXP_IS_VALID(karg,LNAME));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &lval))					\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg,RNAME));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &rval))					\
-			return false;												\
+		KEXP_PROCESS_ARGS2(bool,LNAME,lval,RNAME,rval);					\
 		if (XPU_DATUM_ISNULL(&lval) || XPU_DATUM_ISNULL(&rval))			\
 		{																\
 			__pg_simple_nullcomp_##EXTRA(&lval,&rval);					\
@@ -88,7 +77,7 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float8, float8_t);
 		else															\
 		{																\
 			result->expr_ops = kexp->expr_ops;							\
-			result->value = ((CAST)lval.value OPER (CAST)rval.value);	\
+			result->value = ((CAST lval.value) OPER (CAST rval.value));	\
 		}																\
 		return true;													\
 	}
@@ -96,9 +85,58 @@ PGSTROM_SQLTYPE_SIMPLE_DECLARATION(float8, float8_t);
 #define PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST)		\
 	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,==,eq)	\
 	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,!=,ne)	\
-	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,<,lt)	\
+	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,< ,lt)	\
 	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,<=,le)	\
-	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,>,gt)	\
+	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,> ,gt)	\
 	__PG_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,>=,ge)
+
+#define __PG_FLEXIBLE1_COMPARE_TEMPLATE(TNAME,COMP,COND,EXTRA)			\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_##TNAME##_##EXTRA(XPU_PGFUNCTION_ARGS)							\
+	{																	\
+		KEXP_PROCESS_ARGS2(bool,TNAME,lval,TNAME,rval);					\
+		if (XPU_DATUM_ISNULL(&lval) || XPU_DATUM_ISNULL(&rval))         \
+		{                                                               \
+			__pg_simple_nullcomp_##EXTRA(&lval,&rval);                  \
+		}                                                               \
+		else                                                            \
+		{                                                               \
+			result->value = (COMP(kcxt, lval.value, rval.value) COND 0); \
+			result->expr_ops = kexp->expr_ops;							\
+        }                                                               \
+        return true;                                                    \
+    }
+#define PG_FLEXIBLE1_COMPARE_TEMPLATE(TNAME,COMP)		\
+	__PG_FLEXIBLE1_COMPARE_TEMPLATE(TNAME,COMP,==,eq)	\
+	__PG_FLEXIBLE1_COMPARE_TEMPLATE(TNAME,COMP,!=,ne)	\
+	__PG_FLEXIBLE1_COMPARE_TEMPLATE(TNAME,COMP,< ,lt)	\
+	__PG_FLEXIBLE1_COMPARE_TEMPLATE(TNAME,COMP,<=,le)	\
+	__PG_FLEXIBLE1_COMPARE_TEMPLATE(TNAME,COMP,> ,gt)	\
+	__PG_FLEXIBLE1_COMPARE_TEMPLATE(TNAME,COMP,>=,ge)
+
+#define __PG_FLEXIBLE2_COMPARE_TEMPLATE(LNAME,RNAME,COMP,COND,EXTRA)	\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_##LNAME##_##EXTRA##_##RNAME(XPU_PGFUNCTION_ARGS)				\
+	{																	\
+		KEXP_PROCESS_ARGS2(bool,LNAME,lval,RNAME,rval);					\
+		if (XPU_DATUM_ISNULL(&lval) || XPU_DATUM_ISNULL(&rval))         \
+		{                                                               \
+			__pg_simple_nullcomp_##EXTRA(&lval,&rval);                  \
+		}                                                               \
+		else                                                            \
+		{                                                               \
+			result->value = (COMP(kcxt, lval.value, rval.value) COND 0); \
+			result->expr_ops = kexp->expr_ops;							\
+        }                                                               \
+        return true;                                                    \
+    }
+
+#define PG_FLEXIBLE2_COMPARE_TEMPLATE(LNAME,RNAME,COMP)		\
+	__PG_FLEXIBLE2_COMPARE_TEMPLATE(LNAME,RNAME,COMP,==,eq)	\
+	__PG_FLEXIBLE2_COMPARE_TEMPLATE(LNAME,RNAME,COMP,!=,ne)	\
+	__PG_FLEXIBLE2_COMPARE_TEMPLATE(LNAME,RNAME,COMP,< ,lt)	\
+	__PG_FLEXIBLE2_COMPARE_TEMPLATE(LNAME,RNAME,COMP,<=,le)	\
+	__PG_FLEXIBLE2_COMPARE_TEMPLATE(LNAME,RNAME,COMP,> ,gt)	\
+	__PG_FLEXIBLE2_COMPARE_TEMPLATE(LNAME,RNAME,COMP,>=,ge)
 
 #endif	/* XPU_BASETYPE_H */

@@ -690,7 +690,10 @@ pgstrom_gpu_device_info(PG_FUNCTION_ARGS)
 	values[0] = Int32GetDatum(dattrs->DEV_ID);
 	values[1] = CStringGetTextDatum(att_name);
 	values[2] = CStringGetTextDatum(att_value);
-	values[3] = CStringGetTextDatum(att_desc);
+	if (att_desc)
+		values[3] = CStringGetTextDatum(att_desc);
+	else
+		isnull[3] = true;
 
 	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
 

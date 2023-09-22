@@ -54,12 +54,21 @@ xpu_numeric_datum_ref(kern_context *kcxt,
 
 PUBLIC_FUNCTION(bool)
 xpu_numeric_datum_store(kern_context *kcxt,
-						const xpu_datum_t *arg,
+						const xpu_datum_t *xdatum,
 						int *p_vclass,
 						kern_variable *p_kvar)
 {
-	STROM_ELOG(kcxt, "xpu_datum_store should not be called for numeric type");
-	return false;
+	xpu_numeric_t  *num;
+
+	num = (xpu_numeric_t *)kcxt_alloc(kcxt, sizeof(xpu_numeric_t));
+	if (!num)
+		return false;
+	memcpy(num, xdatum, sizeof(xpu_geometry_t));
+	assert(num->expr_ops == &xpu_numeric_ops);
+
+	*p_vclass = KVAR_CLASS__XPU_DATUM;
+	p_kvar->ptr = (void *)num;
+	return true;
 }
 
 STATIC_FUNCTION(int)
@@ -106,6 +115,23 @@ xpu_numeric_datum_hash(kern_context *kcxt,
 	else
 		*p_hash = (pg_hash_any(&arg->weight, sizeof(int16_t)) ^
 				   pg_hash_any(&arg->value, sizeof(int128_t)));
+	return true;
+}
+
+STATIC_FUNCTION(int)
+__numeric_compare(const xpu_numeric_t *a, const xpu_numeric_t *b);
+
+STATIC_FUNCTION(bool)
+xpu_numeric_datum_comp(kern_context *kcxt,
+					   int *p_comp,
+					   const xpu_datum_t *__a,
+					   const xpu_datum_t *__b)
+{
+	const xpu_numeric_t *a = (const xpu_numeric_t *)__a;
+	const xpu_numeric_t *b = (const xpu_numeric_t *)__b;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	*p_comp = __numeric_compare(a, b);
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(numeric, false, 4, -1);
@@ -161,31 +187,54 @@ __xpu_numeric_to_int64(kern_context *kcxt,
 	PUBLIC_FUNCTION(bool)											\
 	pgfn_numeric_to_##TARGET(XPU_PGFUNCTION_ARGS)					\
 	{																\
-		xpu_##TARGET##_t *result = (xpu_##TARGET##_t *)__result;	\
-		xpu_numeric_t	num;										\
-		int64_t			ival;										\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
+		int64_t		ival;											\
+		KEXP_PROCESS_ARGS1(TARGET, numeric, num);					\
 																	\
-		assert(kexp->nr_args == 1 &&								\
-			   KEXP_IS_VALID(karg, numeric));						\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &num))				\
-			return false;											\
 		if (XPU_DATUM_ISNULL(&num))									\
 		{															\
 			result->expr_ops = NULL;								\
 		}															\
-		if (!__xpu_numeric_to_int64(kcxt, &ival, &num,				\
-									MIN_VALUE, MAX_VALUE))			\
+		else if (!__xpu_numeric_to_int64(kcxt, &ival, &num,			\
+										 MIN_VALUE, MAX_VALUE))		\
+		{															\
 			return false;											\
-		result->value = ival;										\
-		result->expr_ops = &xpu_##TARGET##_ops;						\
+		}															\
+		else														\
+		{															\
+			result->value = ival;									\
+			result->expr_ops = &xpu_##TARGET##_ops;					\
+		}															\
 		return true;												\
 	}
 PG_NUMERIC_TO_INT_TEMPLATE(int1,SCHAR_MIN,SCHAR_MAX)
 PG_NUMERIC_TO_INT_TEMPLATE(int2,SHRT_MIN,SHRT_MAX)
 PG_NUMERIC_TO_INT_TEMPLATE(int4,INT_MIN,INT_MAX)
 PG_NUMERIC_TO_INT_TEMPLATE(int8,LLONG_MIN,LLONG_MAX)
-PG_NUMERIC_TO_INT_TEMPLATE(money,LLONG_MIN,LLONG_MAX)
+
+PUBLIC_FUNCTION(bool)
+pgfn_numeric_to_money(XPU_PGFUNCTION_ARGS)
+{
+	int64_t		ival;
+	KEXP_PROCESS_ARGS1(money, numeric, num);
+
+	if (XPU_DATUM_ISNULL(&num))
+		result->expr_ops = NULL;
+	else
+	{
+		const kern_session_info *session = kcxt->session;
+		int		fpoint = session->session_currency_frac_digits;
+
+		if (fpoint < 0 || fpoint > 10)
+			fpoint = 2;
+		num.weight -= fpoint;
+		if (!__xpu_numeric_to_int64(kcxt, &ival, &num,
+									LLONG_MIN,LLONG_MAX))
+			return false;
+		result->expr_ops = &xpu_money_ops;
+		result->value = ival;
+	}
+	return true;
+}
 
 PUBLIC_FUNCTION(bool)
 __xpu_numeric_to_fp64(kern_context *kcxt,
@@ -231,22 +280,15 @@ __xpu_numeric_to_fp64(kern_context *kcxt,
 	PUBLIC_FUNCTION(bool)											\
 	pgfn_numeric_to_##TARGET(XPU_PGFUNCTION_ARGS)					\
 	{																\
-		xpu_##TARGET##_t *result = (xpu_##TARGET##_t *)__result;	\
-		xpu_numeric_t	num;										\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
+		float8_t		fval;										\
+		KEXP_PROCESS_ARGS1(money, numeric, num);					\
 																	\
-		assert(kexp->nr_args == 1 &&								\
-			   KEXP_IS_VALID(karg, numeric));						\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &num))				\
-			return false;											\
 		if (XPU_DATUM_ISNULL(&num))									\
 			result->expr_ops = NULL;								\
+		else if (!__xpu_numeric_to_fp64(kcxt, &fval, &num))			\
+			return false;											\
 		else														\
 		{															\
-			float8_t	fval;										\
-																	\
-			if (!__xpu_numeric_to_fp64(kcxt, &fval, &num))			\
-				return false;										\
 			result->expr_ops = &xpu_##TARGET##_ops;					\
 			result->value = __CAST(fval);							\
 		}															\
@@ -260,20 +302,14 @@ PG_NUMERIC_TO_FLOAT_TEMPLATE(float8, __to_fp64)
 	PUBLIC_FUNCTION(bool)											\
 	pgfn_##SOURCE##_to_numeric(XPU_PGFUNCTION_ARGS)					\
 	{																\
-		xpu_numeric_t	   *result = (xpu_numeric_t *)__result;		\
-		xpu_##SOURCE##_t	datum;									\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
+		KEXP_PROCESS_ARGS1(numeric, SOURCE, ival);					\
 																	\
-		assert(kexp->nr_args == 1 &&								\
-			   KEXP_IS_VALID(karg,SOURCE));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))				\
-			return false;											\
-		if (XPU_DATUM_ISNULL(&datum))								\
+		if (XPU_DATUM_ISNULL(&ival))								\
 			result->expr_ops = NULL;								\
 		else														\
 		{															\
 			result->expr_ops = &xpu_numeric_ops;					\
-			set_normalized_numeric(result, datum.value, 0);			\
+			set_normalized_numeric(result, ival.value, 0);			\
 		}															\
 		return true;												\
 	}
@@ -281,7 +317,27 @@ PG_INT_TO_NUMERIC_TEMPLATE(int1)
 PG_INT_TO_NUMERIC_TEMPLATE(int2)
 PG_INT_TO_NUMERIC_TEMPLATE(int4)
 PG_INT_TO_NUMERIC_TEMPLATE(int8)
-PG_INT_TO_NUMERIC_TEMPLATE(money)
+
+PUBLIC_FUNCTION(bool)
+pgfn_money_to_numeric(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(numeric, money, ival);
+	if (XPU_DATUM_ISNULL(&ival))
+		result->expr_ops = NULL;
+	else
+	{
+		const kern_session_info *session = kcxt->session;
+		int		fpoint = session->session_currency_frac_digits;
+
+		if (fpoint < 0 || fpoint > 10)
+			fpoint = 2;
+
+		result->expr_ops = &xpu_numeric_ops;
+		set_normalized_numeric(result, ival.value, 0);
+		result->weight += fpoint;
+	}
+	return true;
+}
 
 #define PG_FLOAT_TO_NUMERIC_TEMPLATE(SOURCE,__TYPE,__CAST,			\
 									 __MODF,__RINTL)				\

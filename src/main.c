@@ -14,10 +14,10 @@
 PG_MODULE_MAGIC;
 
 /* misc variables */
-bool		pgstrom_enabled;				/* GUC */
-bool		pgstrom_cpu_fallback_enabled;	/* GUC */
+static Oid	__pgstrom_namespace_oid = UINT_MAX;
+static bool	__pgstrom_enabled_guc;			/* GUC */
+int			pgstrom_cpu_fallback_elevel;	/* GUC */
 bool		pgstrom_regression_test_mode;	/* GUC */
-int			pgstrom_max_async_tasks;		/* GUC */
 long		PAGE_SIZE;
 long		PAGE_MASK;
 int			PAGE_SHIFT;
@@ -33,11 +33,27 @@ PG_FUNCTION_INFO_V1(pgstrom_githash);
 Datum
 pgstrom_githash(PG_FUNCTION_ARGS)
 {
-#ifdef PGSTROM_GITHASH
-	PG_RETURN_TEXT_P(cstring_to_text(PGSTROM_GITHASH));
-#else
-	PG_RETURN_NULL();
-#endif
+	PG_RETURN_TEXT_P(cstring_to_text(pgstrom_githash_cstring));
+}
+
+/*
+ * pgstrom_enabled()
+ */
+static void
+pgstrom_extension_checker_callback(Datum arg, int cacheid, uint32 hashvalue)
+{
+	Assert(cacheid == NAMESPACEOID);
+	__pgstrom_namespace_oid = UINT_MAX;
+}
+
+bool
+pgstrom_enabled(void)
+{
+	if (__pgstrom_namespace_oid == UINT_MAX)
+		__pgstrom_namespace_oid = get_namespace_oid("pgstrom", true);
+	if (OidIsValid(__pgstrom_namespace_oid))
+		return __pgstrom_enabled_guc;
+	return false;
 }
 
 /*
@@ -68,21 +84,34 @@ pg_hash_any(const void *ptr, int sz)
 static void
 pgstrom_init_gucs(void)
 {
+	static struct config_enum_entry	__cpu_fallback_options[] = {
+		{"notice",	NOTICE,	false},
+		{"on",		DEBUG2,	false},
+		{"off",		ERROR,	false},
+		{"true",	DEBUG2,	true},
+		{"false",	ERROR,	true},
+		{"yes",		DEBUG2,	true},
+		{"no",		ERROR,	true},
+		{"1",		DEBUG2,	true},
+		{"0",		ERROR,	true},
+		{NULL, 0, false}
+	};
 	/* Disables PG-Strom features at all */
 	DefineCustomBoolVariable("pg_strom.enabled",
 							 "Enables the planner's use of PG-Strom",
 							 NULL,
-							 &pgstrom_enabled,
+							 &__pgstrom_enabled_guc,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* turn on/off CPU fallback if GPU could not execute the query */
-	DefineCustomBoolVariable("pg_strom.cpu_fallback",
-							 "Enables CPU fallback if GPU required re-run",
+	DefineCustomEnumVariable("pg_strom.cpu_fallback",
+							 "Enables CPU fallback if xPU required re-run",
 							 NULL,
-							 &pgstrom_cpu_fallback_enabled,
-							 false,
+							 &pgstrom_cpu_fallback_elevel,
+							 NOTICE,
+							 __cpu_fallback_options,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
@@ -95,118 +124,6 @@ pgstrom_init_gucs(void)
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.max_async_tasks",
-							"Limit of conccurent execution at the xPU devices",
-							NULL,
-							&pgstrom_max_async_tasks,
-							7,
-							1,
-							255,
-							PGC_SUSET,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
-}
-
-/*
- * xPU-aware path tracker
- *
- * motivation: add_path() and add_partial_path() keeps only cheapest paths.
- * Once some other dominates GpuXXX paths, it shall be wiped out, even if
- * it potentially has a chance for more optimization (e.g, GpuJoin outer
- * pull-up, GpuPreAgg + GpuJoin combined mode).
- * So, we preserve PG-Strom related Path-nodes for the later referenced.
- */
-typedef struct
-{
-	PlannerInfo	   *root;
-	Relids			relids;
-	bool			parallel_path;
-	uint32_t		devkind;		/* one of DEVKIND_* */
-	CustomPath	   *cpath;
-} custom_path_entry;
-
-static HTAB	   *custom_path_htable = NULL;
-
-static uint32
-custom_path_entry_hashvalue(const void *key, Size keysize)
-{
-	custom_path_entry *cent = (custom_path_entry *)key;
-	uint32      hash;
-
-	hash = hash_bytes((unsigned char *)&cent->root, sizeof(PlannerInfo *));
-	hash ^= bms_hash_value(cent->relids);
-	if (cent->parallel_path)
-		hash ^= 0x9e3779b9U;
-	hash ^= hash_uint32(cent->devkind);
-
-	return hash;
-}
-
-static int
-custom_path_entry_compare(const void *key1, const void *key2, Size keysize)
-{
-	custom_path_entry *cent1 = (custom_path_entry *)key1;
-	custom_path_entry *cent2 = (custom_path_entry *)key2;
-
-	if (cent1->root == cent2->root &&
-		bms_equal(cent1->relids, cent2->relids) &&
-		cent1->parallel_path == cent2->parallel_path &&
-		cent1->devkind == cent2->devkind)
-		return 0;
-	/* not equal */
-	return 1;
-}
-
-CustomPath *
-custom_path_find_cheapest(PlannerInfo *root,
-						  RelOptInfo *rel,
-						  bool parallel_path,
-						  uint32_t devkind)
-{
-	custom_path_entry  hkey;
-	custom_path_entry *cent;
-
-	memset(&hkey, 0, sizeof(custom_path_entry));
-	hkey.root = root;
-	hkey.relids = rel->relids;
-	hkey.parallel_path = (parallel_path ? true : false);
-	hkey.devkind = (devkind & DEVKIND__ANY);
-
-	cent = hash_search(custom_path_htable, &hkey, HASH_FIND, NULL);
-	if (!cent)
-		return NULL;
-	return cent->cpath;
-}
-
-bool
-custom_path_remember(PlannerInfo *root,
-					 RelOptInfo *rel,
-					 bool parallel_path,
-					 uint32_t devkind,
-					 const CustomPath *cpath)
-{
-	custom_path_entry  hkey;
-	custom_path_entry *cent;
-	bool		found;
-
-	Assert((devkind & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
-		   (devkind & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
-	memset(&hkey, 0, sizeof(custom_path_entry));
-	hkey.root = root;
-	hkey.relids = rel->relids;
-	hkey.parallel_path = (parallel_path ? true : false);
-	hkey.devkind = (devkind & DEVKIND__ANY);
-
-	cent = hash_search(custom_path_htable, &hkey, HASH_ENTER, &found);
-	if (found)
-	{
-		/* new path is more expensive than prior one! */
-		if (cent->cpath->path.total_cost <= cpath->path.total_cost)
-			return false;
-	}
-	cent->cpath = (CustomPath *)pgstrom_copy_pathnode(&cpath->path);
-
-	return true;
 }
 
 /* --------------------------------------------------------------------------------
@@ -309,7 +226,9 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 	Plan	   *plan = *p_plan;
 	ListCell   *lc;
 
-	Assert(plan != NULL);
+	if (!plan)
+		return;
+
 	switch (nodeTag(plan))
 	{
 		case T_Append:
@@ -380,9 +299,15 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 							elog(ERROR, "Bug? dummy TLE type mismatch [%s] [%s]",
 								 nodeToString(tle1),
 								 nodeToString(tle2));
-						/* assign resource name */
+						/*
+						 * assign resource name and 'junk' state (grouping-keys that
+						 * don't appear in the final result).
+						 * See, apply_tlist_labeling()
+						 */
 						tle2->resname = tle1->resname;
+						tle2->resjunk = tle1->resjunk;
 					}
+					subplan->initPlan = cscan->scan.plan.initPlan;
 					*p_plan = subplan;
 					pgstrom_removal_dummy_plans(pstmt, p_plan);
 					return;
@@ -411,41 +336,13 @@ pgstrom_post_planner(Query *parse,
 					 int cursorOptions,
 					 ParamListInfo boundParams)
 {
-	HTAB	   *custom_path_htable_saved = custom_path_htable;
-	HASHCTL		hctl;
 	PlannedStmt *pstmt;
 	ListCell   *lc;
 
-	PG_TRY();
-	{
-		memset(&hctl, 0, sizeof(HASHCTL));
-		hctl.hcxt = CurrentMemoryContext;
-		hctl.keysize = offsetof(custom_path_entry, cpath);
-		hctl.entrysize = sizeof(custom_path_entry);
-		hctl.hash = custom_path_entry_hashvalue;
-		hctl.match = custom_path_entry_compare;
-		custom_path_htable = hash_create("HTable to preserve Custom-Paths",
-										 512,
-										 &hctl,
-										 HASH_CONTEXT |
-										 HASH_ELEM |
-										 HASH_FUNCTION |
-										 HASH_COMPARE);
-		pstmt = planner_hook_next(parse,
-								  query_string,
-								  cursorOptions,
-								  boundParams);
-	}
-	PG_CATCH();
-	{
-		hash_destroy(custom_path_htable);
-		custom_path_htable = custom_path_htable_saved;
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	hash_destroy(custom_path_htable);
-	custom_path_htable = custom_path_htable_saved;
-
+	pstmt = planner_hook_next(parse,
+							  query_string,
+							  cursorOptions,
+							  boundParams);
 	/* remove dummy plan */
 	pgstrom_removal_dummy_plans(pstmt, &pstmt->planTree);
 	foreach (lc, pstmt->subplans)
@@ -496,10 +393,10 @@ _PG_init(void)
 	pgstrom_init_arrow_fdw();
 	pgstrom_init_executor();
 	/* dump version number */
-	elog(LOG, "PG-Strom version %s built for PostgreSQL %s (git: %s)",
+	elog(LOG, "PG-Strom version %s built for PostgreSQL %s (githash: %s)",
 		 PGSTROM_VERSION,
 		 PG_MAJORVERSION,
-		 PGSTROM_GITHASH);
+		 pgstrom_githash_cstring);
 	/* init GPU related stuff */
 	if (pgstrom_init_gpu_device())
 	{
@@ -507,6 +404,7 @@ _PG_init(void)
 		pgstrom_init_gpu_scan();
 		pgstrom_init_gpu_join();
 		pgstrom_init_gpu_preagg();
+		pgstrom_init_gpu_cache();
 	}
 	/* init DPU related stuff */
 	if (pgstrom_init_dpu_device())
@@ -516,6 +414,8 @@ _PG_init(void)
 		pgstrom_init_dpu_preagg();
 	}
 	pgstrom_init_pcie();
+	/* callback for the extension checker */
+	CacheRegisterSyscacheCallback(NAMESPACEOID, pgstrom_extension_checker_callback, 0);
 	/* dummy custom-scan node */
 	memset(&pgstrom_dummy_path_methods, 0, sizeof(CustomPathMethods));
 	pgstrom_dummy_path_methods.CustomName   = "Dummy";

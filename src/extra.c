@@ -35,16 +35,64 @@ heterodbExtraModuleInit(void)
 /*
  * heterodbExtraEreport
  */
-static heterodb_extra_error_info   *p_heterodb_extra_error_data = NULL;
+static int (*p_heterodb_extra_get_error)(const char **p_filename,
+                                         unsigned int *p_lineno,
+                                         const char **p_funcname,
+                                         char *buffer, size_t buffer_sz) = NULL;
+int
+heterodbExtraGetError(const char **p_filename,
+					  unsigned int *p_lineno,
+					  const char **p_funcname,
+					  char *buffer, size_t buffer_sz)
+{
+	int		errcode = 0;
 
-static inline void
+	if (p_heterodb_extra_get_error)
+	{
+		const char *filename;
+		unsigned int lineno;
+		const char *funcname;
+
+		errcode = p_heterodb_extra_get_error(&filename,
+											 &lineno,
+											 &funcname,
+											 buffer, buffer_sz);
+		if (errcode != 0)
+		{
+			if (p_filename)
+				*p_filename = filename;
+			if (p_lineno)
+				*p_lineno = lineno;
+			if (p_funcname)
+				*p_funcname = funcname;
+		}
+	}
+	return errcode;
+}
+
+static void
 heterodbExtraEreport(int elevel)
 {
-	elog(elevel, "(%s; %s:%d) %s",
-		 p_heterodb_extra_error_data->funcname,
-		 p_heterodb_extra_error_data->filename,
-		 p_heterodb_extra_error_data->lineno,
-		 p_heterodb_extra_error_data->message);
+	int			errcode;
+	const char *filename;
+	unsigned int lineno;
+	const char *funcname;
+	char		buffer[2000];
+
+	errcode = heterodbExtraGetError(&filename,
+									&lineno,
+									&funcname,
+									buffer, sizeof(buffer));
+	if (errcode)
+	{
+		elog(elevel, "(%s:%u) %s [%s]",
+			 filename,
+			 lineno,
+			 buffer,
+			 funcname);
+	}
+	else if (elevel >= ERROR)
+		elog(ERROR, "something failed around heterodbExtraEreport");
 }
 
 /*
@@ -130,7 +178,7 @@ pgstrom_license_query(PG_FUNCTION_ARGS)
 	if (!license)
 		PG_RETURN_NULL();
 
-	PG_RETURN_POINTER(DirectFunctionCall1(json_in, PointerGetDatum(license)));
+	PG_RETURN_DATUM(DirectFunctionCall1(json_in, PointerGetDatum(license)));
 }
 
 /*
@@ -216,11 +264,14 @@ static bool
 __fallbackFileReadIOV(const char *pathname,
 					  CUdeviceptr m_segment,
 					  off_t m_offset,
-					  const strom_io_vector *iovec)
+					  const strom_io_vector *iovec,
+					  uint32_t *p_npages_direct_read,
+					  uint32_t *p_npages_vfs_read)
 {
-	size_t	io_unitsz = (16UL << 20);	/* 16MB */
-	char   *buffer;
-	int		fdesc;
+	size_t		io_unitsz = (16UL << 20);	/* 16MB */
+	char	   *buffer;
+	int			fdesc;
+	uint32_t	nr_pages = 0;
 	struct stat	stat_buf;
 
 	fdesc = open(pathname, O_RDONLY);
@@ -277,14 +328,17 @@ __fallbackFileReadIOV(const char *pathname,
 			dest_pos += nbytes;
 			remained -= nbytes;
 		}
+		nr_pages += ioc->nr_pages;
 	}
 	free(buffer);
 	close(fdesc);
-
-	fprintf(stderr, "fallback on '%s'\n", pathname);
+	/* update statistics */
+	if (p_npages_direct_read)
+		*p_npages_direct_read = 0;
+	if (p_npages_vfs_read)
+		*p_npages_vfs_read = nr_pages;
 
 	return true;
-
 error_2:
 	free(buffer);
 error_1:
@@ -296,28 +350,36 @@ error_0:
 /*
  * gpuDirectFileReadIOV
  */
-static int	(*p_cufile__read_file_iov_v2)(
+static int	(*p_cufile__read_file_iov_v3)(
 	const char *pathname,
 	CUdeviceptr m_segment,
 	off_t m_offset,
-	const strom_io_vector *iovec) = NULL;
+	const strom_io_vector *iovec,
+	uint32_t *p_npages_direct_read,
+	uint32_t *p_npages_vfs_read) = NULL;
 
 bool
 gpuDirectFileReadIOV(const char *pathname,
 					 CUdeviceptr m_segment,
 					 off_t m_offset,
-					 const strom_io_vector *iovec)
+					 const strom_io_vector *iovec,
+					 uint32_t *p_npages_direct_read,
+					 uint32_t *p_npages_vfs_read)
 {
-	if (p_cufile__read_file_iov_v2)
-		return (p_cufile__read_file_iov_v2(pathname,
+	if (p_cufile__read_file_iov_v3)
+		return (p_cufile__read_file_iov_v3(pathname,
 										   m_segment,
 										   m_offset,
-										   iovec) == 0);
+										   iovec,
+										   p_npages_direct_read,
+										   p_npages_vfs_read) == 0);
 	/* fallback by the regular filesystem */
 	return __fallbackFileReadIOV(pathname,
 								 m_segment,
 								 m_offset,
-								 iovec);
+								 iovec,
+								 p_npages_direct_read,
+								 p_npages_vfs_read);
 }
 
 /*
@@ -364,7 +426,7 @@ gpuDirectIsAvailable(void)
 		p_cufile__driver_close_v2 &&
 		p_cufile__map_gpu_memory_v2 &&
 		p_cufile__unmap_gpu_memory_v2 &&
-		p_cufile__read_file_iov_v2 &&
+		p_cufile__read_file_iov_v3 &&
 		p_cufile__get_property_v2 &&
 		p_cufile__set_property_v2)
 	{
@@ -465,8 +527,8 @@ pgstrom_init_extra(void)
 		uint32		api_version = 0;
 		bool		has_cufile = false;
 
-		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_error_data);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_module_init);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_get_error);
 		extra_module_info = heterodbExtraModuleInit();
 		parse_heterodb_extra_module_info(extra_module_info,
 										 &api_version,
@@ -478,7 +540,7 @@ pgstrom_init_extra(void)
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__driver_close_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__map_gpu_memory_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__unmap_gpu_memory_v2);
-			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__read_file_iov_v2);
+			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__read_file_iov_v3);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__get_property_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__set_property_v2);
 
@@ -490,14 +552,14 @@ pgstrom_init_extra(void)
 	}
 	PG_CATCH();
     {
-		p_heterodb_extra_error_data = NULL;
 		p_heterodb_extra_module_init = NULL;
+		p_heterodb_extra_get_error = NULL;
 		p_cufile__driver_init_v2 = NULL;
 		p_cufile__driver_open_v2 = NULL;
 		p_cufile__driver_close_v2 = NULL;
 		p_cufile__map_gpu_memory_v2 = NULL;
 		p_cufile__unmap_gpu_memory_v2 = NULL;
-		p_cufile__read_file_iov_v2 = NULL;
+		p_cufile__read_file_iov_v3 = NULL;
 		p_cufile__get_property_v2 = NULL;
 		p_cufile__set_property_v2 = NULL;
 		p_heterodb_license_reload = NULL;

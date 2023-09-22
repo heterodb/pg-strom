@@ -132,6 +132,35 @@ xpu_bpchar_datum_hash(kern_context*kcxt,
 		return false;
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_bpchar_datum_comp(kern_context *kcxt,
+					  int *p_comp,
+					  const xpu_datum_t *__str1,
+					  const xpu_datum_t *__str2)
+{
+	const xpu_bpchar_t *str1 = (const xpu_bpchar_t *)__str1;
+	const xpu_bpchar_t *str2 = (const xpu_bpchar_t *)__str2;
+	int			sz1, sz2;
+	int			comp;
+
+	if (!xpu_bpchar_is_valid(kcxt, str1) ||
+		!xpu_bpchar_is_valid(kcxt, str2))
+		return false;
+
+	sz1 = bpchar_truelen(str1->value, str1->length);
+	sz2 = bpchar_truelen(str2->value, str2->length);
+	comp = __memcmp(str1->value, str2->value, Min(sz1, sz2));
+	if (comp == 0)
+	{
+		if (sz1 < sz2)
+			comp = -1;
+		else if (sz1 > sz2)
+			comp = 1;
+	}
+	*p_comp = comp;
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(bpchar, false, 4, -1);
 
 /*
@@ -241,6 +270,32 @@ xpu_text_datum_hash(kern_context *kcxt,
 		return false;
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_text_datum_comp(kern_context *kcxt,
+					int *p_comp,
+					const xpu_datum_t *__str1,
+					const xpu_datum_t *__str2)
+{
+	const xpu_text_t *str1 = (const xpu_text_t *)__str1;
+	const xpu_text_t *str2 = (const xpu_text_t *)__str2;
+	int			comp;
+
+	if (!xpu_text_is_valid(kcxt, str1) ||
+		!xpu_text_is_valid(kcxt, str2))
+		return false;
+	comp = __memcmp(str1->value, str2->value,
+					Min(str1->length, str2->length));
+	if (comp == 0)
+	{
+		if (str1->length < str2->length)
+			comp = -1;
+		if (str1->length > str2->length)
+			comp = 1;
+	}
+	*p_comp = comp;
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(text, false, 4, -1);
 
 /*
@@ -342,53 +397,38 @@ xpu_bytea_datum_hash(kern_context *kcxt,
 		return false;
 	return true;
 }
+
+STATIC_FUNCTION(bool)
+xpu_bytea_datum_comp(kern_context *kcxt,
+					 int *p_comp,
+					 const xpu_datum_t *__a,
+					 const xpu_datum_t *__b)
+{
+	const xpu_bytea_t *a = (const xpu_bytea_t *)__a;
+	const xpu_bytea_t *b = (const xpu_bytea_t *)__b;
+	int			comp;
+
+	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	if (!xpu_bytea_is_valid(kcxt, a) || !xpu_bytea_is_valid(kcxt, b))
+		return false;
+
+	comp = __memcmp(a->value, b->value,
+					Min(a->length, b->length));
+	if (comp == 0)
+	{
+		if (a->length < b->length)
+			comp = -1;
+		else if (a->length > b->length)
+			comp = 1;
+	}
+	*p_comp = comp;
+	return true;
+}
 PGSTROM_SQLTYPE_OPERATORS(bytea, false, 4, -1);
 
 /*
  * Bpchar functions
  */
-STATIC_FUNCTION(bool)
-__bpchar_compare(kern_context *kcxt,
-				 int *p_status,
-				 const xpu_bpchar_t *str1,
-				 const xpu_bpchar_t *str2)
-{
-	const char *s1 = str1->value;
-	const char *s2 = str2->value;
-	int		len, sz1, sz2;
-
-	if (!xpu_bpchar_is_valid(kcxt, str1) ||
-		!xpu_bpchar_is_valid(kcxt, str2))
-	  return false;
-
-	sz1 = bpchar_truelen(s1, str1->length);
-	sz2 = bpchar_truelen(s2, str2->length);
-	len = Min(sz1, sz2);
-	while (len > 0)
-	{
-		if (*s1 < *s2)
-		{
-			*p_status = -1;
-			return true;
-		}
-		if (*s1 > *s2)
-		{
-			*p_status = 1;
-			return true;
-		}
-		s1++;
-		s2++;
-		len--;
-	}
-	if (sz1 == sz2)
-		*p_status = 0;
-	else if (sz1 > sz2)
-		*p_status = 1;
-	else
-		*p_status = -1;
-	return true;
-}
-
 #define PG_BPCHAR_COMPARE_TEMPLATE(NAME,OPER)							\
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_bpchar##NAME(XPU_PGFUNCTION_ARGS)								\
@@ -412,13 +452,13 @@ __bpchar_compare(kern_context *kcxt,
 		}																\
 		else															\
 		{																\
-			int		status;												\
+			int		comp;												\
 																		\
-			if (!__bpchar_compare(kcxt, &status,						\
-								  &datum_a,								\
-								  &datum_b))							\
+			if (!xpu_bpchar_datum_comp(kcxt, &comp,						\
+									   (const xpu_datum_t *)&datum_a,	\
+									   (const xpu_datum_t *)&datum_b))	\
 				return false;											\
-			result->value = (status OPER 0);							\
+			result->value = (comp OPER 0);								\
 			result->expr_ops = &xpu_bool_ops;							\
 		}																\
 		return true;													\
@@ -437,7 +477,7 @@ pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
 	xpu_bpchar_t	datum;
 	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
-	assert(karg->nr_args == 1 &&
+	assert(kexp->nr_args == 1 &&
 		   KEXP_IS_VALID(karg, bpchar));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
 		return false;
@@ -456,45 +496,6 @@ pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
 /*
  * Text functions
  */
-STATIC_FUNCTION(bool)
-__text_compare(kern_context *kcxt,
-			   int *p_status,
-			   const xpu_text_t *str1,
-			   const xpu_text_t *str2)
-{
-	const char *s1 = str1->value;
-	const char *s2 = str2->value;
-	int		len;
-
-	if (!xpu_text_is_valid(kcxt, str1) ||
-		!xpu_text_is_valid(kcxt, str2))
-		return false;
-	len = Min(str1->length, str2->length);
-	while (len > 0)
-	{
-		if (*s1 < *s2)
-		{
-			*p_status = -1;
-			return true;
-		}
-		if (*s1 > *s2)
-		{
-			*p_status = 1;
-			return true;
-		}
-		s1++;
-		s2++;
-		len--;
-	}
-	if (str1->length == str2->length)
-		*p_status = 0;
-	else if (str1->length > str2->length)
-		*p_status = 1;
-	else
-		*p_status = -1;
-	return true;
-}
-
 #define PG_TEXT_COMPARE_TEMPLATE(NAME,OPER)								\
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_text_##NAME(XPU_PGFUNCTION_ARGS)								\
@@ -518,13 +519,13 @@ __text_compare(kern_context *kcxt,
 		}																\
 		else															\
 		{																\
-			int		status;												\
+			int		comp;												\
 																		\
-			if (!__text_compare(kcxt, &status,							\
-								&datum_a,								\
-								&datum_b))								\
+			if (!xpu_text_datum_comp(kcxt, &comp,						\
+									 (const xpu_datum_t *)&datum_a,		\
+									 (const xpu_datum_t *)&datum_b))	\
 				return false;											\
-			result->value = (status OPER 0);							\
+			result->value = (comp OPER 0);								\
 			result->expr_ops = &xpu_bool_ops;							\
 		}																\
 		return true;													\
@@ -1057,13 +1058,201 @@ PG_BPCHARLIKE_TEMPLATE(bpcharnlike, GenericMatchText, !=)
 PG_BPCHARLIKE_TEMPLATE(bpchariclike, GenericCaseMatchText, ==)
 PG_BPCHARLIKE_TEMPLATE(bpcharicnlike, GenericCaseMatchText, !=)
 
+/*
+ * Sub-string
+ */
+STATIC_FUNCTION(bool)
+__substring_common(kern_context *kcxt,
+				   xpu_text_t *result,
+				   const char *str,
+				   int32_t length,
+				   int32_t start,
+				   int32_t count)
+{
+	const xpu_encode_info *encode = SESSION_ENCODE(kcxt->session);
 
+	if (!encode)
+	{
+		STROM_ELOG(kcxt, "No encoding info was supplied");
+		return false;
+	}
 
+	result->expr_ops = &xpu_text_ops;
+	if (encode->enc_maxlen == 1)
+	{
+		if (start >= length ||
+			count == 0 ||
+			(count > 0 && start + count <= 0))
+		{
+			/* empty */
+			result->length = 0;
+			result->value = str;
+		}
+		else if (start < 0)
+		{
+			if (count < 0 || start + count >= length)
+			{
+				/* same string */
+				result->length = length;
+				result->value = str;
+			}
+			else
+			{
+				/* sub-string from the head */
+				result->length = Min(start + count, length);
+				result->value = str;
+			}
+		}
+		else	/* start >= 0 && start < length */
+		{
+			/* sub-string */
+			result->length = Min(start + count, length) - start;
+			result->value = str + start;
+		}
+	}
+	else
+	{
+		const char *pos = str;
+		const char *end = str + length;
 
+		if (start < 0)
+		{
+			if (count < 0)
+			{
+				/* same string */
+				result->length = length;
+				result->value = str;
+				return true;
+			}
+			count = start + count;
+			if (count < 0)
+			{
+				/* empty string */
+				result->length = 0;
+				result->value = str;
+				return true;
+			}
+			start = 0;
+		}
+		assert(start >= 0);
 
+		result->value = NULL;
+		if (pos < end)
+		{
+			for (int i=0; ; i++)
+			{
+				int		w = encode->enc_mblen(pos);
 
+				if (pos + w >= end)
+					break;
+				if (i == start)
+					result->value = pos;
+				if (count >= 0 && i == start + count)
+					break;
+				pos += w;
+			}
+		}
+		if (result->value)
+			result->length = (pos - result->value);
+		else
+		{
+			result->length = 0;
+			result->value = str;
+		}
+	}
+	return true;
+}
 
+PUBLIC_FUNCTION(bool)
+pgfn_substring(XPU_PGFUNCTION_ARGS)
+{
+	const kern_expression *karg;
+	xpu_text_t	str;
+	xpu_int4_t	start;
+	xpu_int4_t	count;
 
+	assert(kexp->nr_args == 3 &&
+		   kexp->exptype == TypeOpCode__text);
+	__result->expr_ops = NULL;
 
+	karg = KEXP_FIRST_ARG(kexp);
+	assert(KEXP_IS_VALID(karg, text));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &str))
+		return false;
+	if (XPU_DATUM_ISNULL(&str))
+		return true;	/* NULL */
+	if (!xpu_text_is_valid(kcxt, &str))
+		return false;	/* compressed or external */
 
-	
+	karg = KEXP_NEXT_ARG(karg);
+	assert(KEXP_IS_VALID(karg, int4));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &start))
+		return false;
+	if (XPU_DATUM_ISNULL(&start))
+		return true;	/* NULL */
+
+	karg = KEXP_NEXT_ARG(karg);
+	assert(KEXP_IS_VALID(karg, int4));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &count))
+		return false;
+	if (XPU_DATUM_ISNULL(&count))
+		return true;
+	if (count.value < 0)
+	{
+		STROM_ELOG(kcxt, "negative substring length not allowed");
+		return false;
+	}
+	return __substring_common(kcxt,
+							  (xpu_text_t *)__result,
+							  str.value,
+							  str.length,
+							  start.value - 1,	/* 0-origin */
+							  count.value);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_substr(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_substring(kcxt, kexp, __result);
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_substring_nolen(XPU_PGFUNCTION_ARGS)
+{
+	const kern_expression *karg;
+	xpu_text_t	str;
+	xpu_int4_t	start;
+
+	assert(kexp->nr_args == 2 &&
+		   kexp->exptype == TypeOpCode__text);
+	__result->expr_ops = NULL;
+
+	karg = KEXP_FIRST_ARG(kexp);
+	assert(KEXP_IS_VALID(karg, text));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &str))
+		return false;
+	if (XPU_DATUM_ISNULL(&str))
+		return true;	/* NULL */
+	if (!xpu_text_is_valid(kcxt, &str))
+		return false;	/* compressed or external */
+
+	karg = KEXP_NEXT_ARG(karg);
+	assert(KEXP_IS_VALID(karg, int4));
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &start))
+		return false;
+	if (XPU_DATUM_ISNULL(&start))
+		return true;	/* NULL */
+
+	return __substring_common(kcxt,
+							  (xpu_text_t *)__result,
+							  str.value,
+							  str.length,
+							  start.value - 1,	/* 0-origin */
+							  -1);		/* open end */
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_substr_nolen(XPU_PGFUNCTION_ARGS)
+{
+	return pgfn_substring_nolen(kcxt, kexp, __result);
+}

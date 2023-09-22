@@ -81,47 +81,56 @@ CREATE FUNCTION pgstrom.arrow_fdw_import_file(text,	    -- relname
 -- GPU Cache Functions
 --
 -- ================================================================
-/*
+
 CREATE FUNCTION pgstrom.gpucache_sync_trigger()
   RETURNS trigger
   AS 'MODULE_PATHNAME','pgstrom_gpucache_sync_trigger'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pgstrom.gpucache_apply_redo(regclass)
-  RETURNS bigint
+  RETURNS void
   AS 'MODULE_PATHNAME','pgstrom_gpucache_apply_redo'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pgstrom.gpucache_compaction(regclass)
-  RETURNS bigint
+  RETURNS void
   AS 'MODULE_PATHNAME','pgstrom_gpucache_compaction'
   LANGUAGE C STRICT;
 
+CREATE FUNCTION pgstrom.gpucache_recovery(regclass)
+  RETURNS void
+  AS 'MODULE_PATHNAME','pgstrom_gpucache_recovery'
+  LANGUAGE C STRICT;
+
 CREATE TYPE pgstrom.__pgstrom_gpucache_info_t AS (
-  database_oid			oid,
-  database_name			text,
-  table_oid				oid,
-  table_name			text,
-  signature				int8,
-  refcnt				int4,
-  corrupted				bool,
-  gpu_main_sz			int8,
-  gpu_extra_sz			int8,
-  redo_write_ts			timestamptz,
-  redo_write_nitems		int8,
-  redo_write_pos		int8,
-  redo_read_nitems		int8,
-  redo_read_pos			int8,
-  redo_sync_pos			int8,
-  config_options		text
+    database_oid        oid,
+    database_name       text,
+    table_oid           oid,
+    table_name          text,
+    signature           int8,
+    phase               text,
+    rowid_num_used      int8,
+    rowid_num_free      int8,
+    gpu_main_sz         int8,
+	gpu_main_nitems     int8,
+    gpu_extra_sz        int8,
+	gpu_extra_usage     int8,
+	gpu_extra_dead      int8,
+    redo_write_ts       timestamptz,
+    redo_write_nitems   int8,
+    redo_write_pos      int8,
+    redo_read_nitems    int8,
+    redo_read_pos       int8,
+    redo_sync_pos       int8,
+    config_options      text
 );
+
 CREATE FUNCTION pgstrom.__pgstrom_gpucache_info()
   RETURNS SETOF pgstrom.__pgstrom_gpucache_info_t
   AS 'MODULE_PATHNAME','pgstrom_gpucache_info'
   LANGUAGE C STRICT;
 CREATE VIEW pgstrom.gpucache_info AS
   SELECT * FROM pgstrom.__pgstrom_gpucache_info();
-*/
 
 -- ==================================================================
 --
@@ -2484,6 +2493,15 @@ CREATE FUNCTION pgstrom.nrows("any")
   AS 'MODULE_PATHNAME','pgstrom_partial_nrows'
   LANGUAGE C STRICT PARALLEL SAFE;
 
+
+CREATE AGGREGATE pgstrom.fcount(bigint)
+(
+  sfunc = pg_catalog.int8pl,
+  stype = bigint,
+  initcond = "0",
+  parallel = safe
+);
+
 --
 -- PMIN(X)
 --
@@ -2884,55 +2902,106 @@ CREATE AGGREGATE pgstrom.max_tstz(bytea)
 --- SUM(X)
 ---
 CREATE FUNCTION pgstrom.psum(int8)
-  RETURNS int8
-  AS 'MODULE_PATHNAME','pgstrom_partial_sum_asis'
-  LANGUAGE C STRICT PARALLEL SAFE;
-
-CREATE FUNCTION pgstrom.psum(float4)
-  RETURNS float4
-  AS 'MODULE_PATHNAME','pgstrom_partial_sum_asis'
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_int'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.psum(float8)
-  RETURNS float8
-  AS 'MODULE_PATHNAME','pgstrom_partial_sum_asis'
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_fp'
   LANGUAGE C STRICT PARALLEL SAFE;
 
--- bigint --> bigint
-CREATE AGGREGATE pgstrom.sum(int8)
-(
-  sfunc = pg_catalog.int8pl,
-  stype = int8,
-  initcond = 0,
-  parallel = safe
-);
--- float8 --> float4
-CREATE AGGREGATE pgstrom.sum_f4(float8)
-(
-  sfunc = pg_catalog.float8pl,
-  stype = float8,
-  finalfunc = pg_catalog.float4,
-  initcond = 0.0,
-  parallel = safe
-);
+CREATE FUNCTION pgstrom.psum(money)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_cash'
+  LANGUAGE C STRICT PARALLEL SAFE;
 
--- float8 --> numeric
-CREATE AGGREGATE pgstrom.sum_num(float8)
+CREATE FUNCTION pgstrom.fsum_trans_int(bytea, bytea)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_fsum_trans_int'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.fsum_trans_fp(bytea, bytea)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_fsum_trans_fp'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.fsum_final_int(bytea)
+  RETURNS int8
+  AS 'MODULE_PATHNAME','pgstrom_fsum_final_int'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.fsum_final_int_as_numeric(bytea)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME','pgstrom_fsum_final_int_as_numeric'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.fsum_final_int_as_cash(bytea)
+  RETURNS money
+  AS 'MODULE_PATHNAME','pgstrom_fsum_final_int_as_cash'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.fsum_final_fp32(bytea)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_fsum_final_fp32'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.fsum_final_fp64(bytea)
+  RETURNS float8
+  AS 'MODULE_PATHNAME','pgstrom_fsum_final_fp64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.fsum_final_fp_as_numeric(bytea)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME','pgstrom_fsum_final_fp64_as_numeric'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+-- SUM(int1/int2/int4) --> bigint
+CREATE AGGREGATE pgstrom.sum_int(bytea)
 (
-  sfunc = pg_catalog.float8pl,
-  stype = float8,
-  finalfunc = pg_catalog.numeric,
-  initcond = 0.0,
+  sfunc = pgstrom.fsum_trans_int,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_int,
   parallel = safe
 );
-
--- bigint --> money
-CREATE AGGREGATE pgstrom.sum_cash(int8)
+-- SUM(int8) --> numeric
+CREATE AGGREGATE pgstrom.sum_int_num(bytea)
 (
-  sfunc = pg_catalog.int8pl,
-  stype = int8,
-  finalfunc = pg_catalog.money,
-  initcond = 0,
+  sfunc = pgstrom.fsum_trans_int,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_int_as_numeric,
+  parallel = safe
+);
+-- SUM(float2/float4) --> float4
+CREATE AGGREGATE pgstrom.sum_fp32(bytea)
+(
+  sfunc = pgstrom.fsum_trans_fp,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_fp32,
+  parallel = safe
+);
+-- SUM(float8) --> float8
+CREATE AGGREGATE pgstrom.sum_fp64(bytea)
+(
+  sfunc = pgstrom.fsum_trans_fp,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_fp64,
+  parallel = safe
+);
+-- SUM(numeric) --> numeric
+CREATE AGGREGATE pgstrom.sum_fp_num(bytea)
+(
+  sfunc = pgstrom.fsum_trans_fp,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_fp_as_numeric,
+  parallel = safe
+);
+-- SUM(money) --> money
+CREATE AGGREGATE pgstrom.sum_cash(bytea)
+(
+  sfunc = pgstrom.fsum_trans_int,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_int_as_cash,
   parallel = safe
 );
 
@@ -2941,22 +3010,22 @@ CREATE AGGREGATE pgstrom.sum_cash(int8)
 ---
 CREATE FUNCTION pgstrom.pavg(int8)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_avg_int'
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_int'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.pavg(float8)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_partial_avg_fp'
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_fp'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.favg_trans_int(bytea, bytea)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_favg_trans_int'
+  AS 'MODULE_PATHNAME','pgstrom_fsum_trans_int'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.favg_trans_fp(bytea, bytea)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_favg_trans_fp'
+  AS 'MODULE_PATHNAME','pgstrom_fsum_trans_fp'
   LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.favg_final_int(bytea)
@@ -2967,6 +3036,11 @@ CREATE FUNCTION pgstrom.favg_final_int(bytea)
 CREATE FUNCTION pgstrom.favg_final_fp(bytea)
   RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_favg_final_fp'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.favg_final_num(bytea)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME','pgstrom_favg_final_num'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE AGGREGATE pgstrom.avg_int(bytea)
@@ -2982,6 +3056,14 @@ CREATE AGGREGATE pgstrom.avg_fp(bytea)
   sfunc = pgstrom.favg_trans_fp,
   stype = bytea,
   finalfunc = pgstrom.favg_final_fp,
+  parallel = safe
+);
+
+CREATE AGGREGATE pgstrom.avg_num(bytea)
+(
+  sfunc = pgstrom.favg_trans_fp,
+  stype = bytea,
+  finalfunc = pgstrom.favg_final_num,
   parallel = safe
 );
 
@@ -3269,8 +3351,8 @@ CREATE AGGREGATE pgstrom.regr_syy(bytea)
 -- without valid configuration.
 CREATE OR REPLACE FUNCTION
 pgstrom.regression_testdb_revision()
-RETURNS int
-AS 'SELECT 0'
+RETURNS text
+AS 'SELECT ''unknown'''
 LANGUAGE 'sql';
 
 

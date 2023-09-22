@@ -180,10 +180,12 @@ __appendZeroStringInfo(StringInfo buf, int nbytes)
 	if (padding > 0)
 		appendBinaryStringInfo(buf, (char *)&__zero, padding);
 	pos = buf->len;
-	enlargeStringInfo(buf, nbytes);
-	memset(buf->data + pos, 0, nbytes);
-	buf->len += nbytes;
-
+	if (nbytes > 0)
+	{
+		enlargeStringInfo(buf, nbytes);
+		memset(buf->data + pos, 0, nbytes);
+		buf->len += nbytes;
+	}
 	return pos;
 }
 
@@ -225,6 +227,32 @@ get_type_namespace(Oid type_oid)
 		ReleaseSysCache(tup);
 	}
 	return namespace_oid;
+}
+
+/*
+ * get_type_extension_name
+ */
+char *
+get_type_extension_name(Oid type_oid)
+{
+	Oid		ext_oid = getExtensionOfObject(TypeRelationId, type_oid);
+
+	if (OidIsValid(ext_oid))
+		return get_extension_name(ext_oid);
+	return NULL;
+}
+
+/*
+ * get_func_extension_name
+ */
+char *
+get_func_extension_name(Oid func_oid)
+{
+	Oid		ext_oid = getExtensionOfObject(ProcedureRelationId, func_oid);
+
+	if (OidIsValid(ext_oid))
+		return get_extension_name(ext_oid);
+	return NULL;
 }
 
 /*
@@ -1185,7 +1213,8 @@ pgstrom_random_text_length(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_random_text_length);
 
 static Datum
-simple_make_range(TypeCacheEntry *typcache, Datum x_val, Datum y_val)
+simple_make_range(PG_FUNCTION_ARGS,
+				  TypeCacheEntry *typcache, Datum x_val, Datum y_val)
 {
 	RangeBound	x, y;
 	RangeType  *range;
@@ -1202,8 +1231,8 @@ simple_make_range(TypeCacheEntry *typcache, Datum x_val, Datum y_val)
 	y.inclusive = generate_null(25.0);
 	y.lower = false;
 
-	range = make_range(typcache, &x, &y, false);
-
+	range = make_range(typcache, &x, &y, false,
+					   fcinfo->context);
 	return PointerGetDatum(range);
 }
 
@@ -1228,7 +1257,7 @@ pgstrom_random_int4range(PG_FUNCTION_ARGS)
 	typcache = range_get_typcache(fcinfo, type_oid);
 	x = lower + __random() % (upper - lower);
 	y = lower + __random() % (upper - lower);
-	return simple_make_range(typcache,
+	return simple_make_range(fcinfo, typcache,
 							 Int32GetDatum(Min(x,y)),
 							 Int32GetDatum(Max(x,y)));
 }
@@ -1257,7 +1286,7 @@ pgstrom_random_int8range(PG_FUNCTION_ARGS)
 	x = lower + v % (upper - lower);
 	v = (__random() << 31) | __random();
 	y = lower + v % (upper - lower);
-	return simple_make_range(typcache,
+	return simple_make_range(fcinfo, typcache,
 							 Int64GetDatum(Min(x,y)),
 							 Int64GetDatum(Max(x,y)));
 }
@@ -1309,7 +1338,7 @@ pgstrom_random_tsrange(PG_FUNCTION_ARGS)
 	x = lower + v % (upper - lower);
 	v = (__random() << 31) | __random();
 	y = lower + v % (upper - lower);
-	return simple_make_range(typcache,
+	return simple_make_range(fcinfo, typcache,
 							 TimestampGetDatum(Min(x,y)),
 							 TimestampGetDatum(Max(x,y)));	
 }
@@ -1361,7 +1390,7 @@ pgstrom_random_tstzrange(PG_FUNCTION_ARGS)
 	x = lower + v % (upper - lower);
 	v = (__random() << 31) | __random();
 	y = lower + v % (upper - lower);
-	return simple_make_range(typcache,
+	return simple_make_range(fcinfo, typcache,
 							 TimestampTzGetDatum(Min(x,y)),
 							 TimestampTzGetDatum(Max(x,y)));	
 }
@@ -1399,7 +1428,7 @@ pgstrom_random_daterange(PG_FUNCTION_ARGS)
 	typcache = range_get_typcache(fcinfo, type_oid);
 	x = lower + __random() % (upper - lower);
 	y = lower + __random() % (upper - lower);
-	return simple_make_range(typcache,
+	return simple_make_range(fcinfo, typcache,
 							 DateADTGetDatum(Min(x,y)),
 							 DateADTGetDatum(Max(x,y)));
 }
