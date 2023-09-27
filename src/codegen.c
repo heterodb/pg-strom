@@ -1050,12 +1050,32 @@ devtype_lookup_compare_func(devtype_info *dtype, Oid coll_id)
 static int	codegen_expression_walker(codegen_context *context,
 									  StringInfo buf, Expr *expr);
 
-void
-codegen_context_init(codegen_context *context, uint32_t xpu_required_flags)
+codegen_context *
+create_codegen_context(CustomPath *cpath, pgstromPlanInfo *pp_info)
 {
-	memset(context, 0, sizeof(codegen_context));
+	codegen_context *context;
+	int			max_depth = pp_info->num_rels + 1;
+	int			depth = 1;
+	ListCell   *lc;
+
+	context = palloc0(offsetof(codegen_context, pd[max_depth+1]));
 	context->elevel = ERROR;
-	context->required_flags = (xpu_required_flags & DEVKIND__ANY);
+	context->required_flags = (pp_info->xpu_task_flags & DEVKIND__ANY);
+	context->scan_relid = pp_info->scan_relid;
+	context->max_depth = max_depth;
+	Assert(max_depth == list_length(cpath->custom_paths) + 1);
+	foreach (lc, cpath->custom_paths)
+	{
+		Path   *ipath = lfirst(lc);
+
+		context->pd[depth].inner_target = ipath->pathtarget;
+		context->pd[depth].kvec_usage = sizeof(CUdeviceptr) * KVEC_UNITSZ * depth;
+		depth++;
+	}
+	/* for PROJECTION/GROUP-BY */
+	context->pd[depth].kvec_usage = sizeof(CUdeviceptr) * KVEC_UNITSZ * depth;
+
+	return context;
 }
 
 static void
@@ -1178,29 +1198,19 @@ codegen_param_expression(codegen_context *context,
 static int
 codegen_var_expression(codegen_context *context,
 					   StringInfo buf,
-					   Expr *expr,
-					   int kvar_slot_id)
+					   const codegen_kvar_defitem *kvdef)
 {
-	Oid		type_oid = exprType((Node *)expr);
-	devtype_info *dtype;
-
-	dtype = pgstrom_devtype_lookup(type_oid);
-	if (!dtype)
-		__Elog("type %s is not device supported", format_type_be(type_oid));
-
 	if (buf)
 	{
 		kern_expression kexp;
 		int			pos;
 
 		memset(&kexp, 0, sizeof(kexp));
-		kexp.exptype = dtype->type_code;
-		kexp.expflags = context->kexp_flags;
-		kexp.opcode = FuncOpCode__VarExpr;
-		kexp.u.v.var_typlen   = dtype->type_length;
-		kexp.u.v.var_typbyval = dtype->type_byval;
-		kexp.u.v.var_typalign = dtype->type_align;
-		kexp.u.v.var_slot_id  = kvar_slot_id;
+		kexp.exptype        = kvdef->kv_type_code;
+		kexp.expflags       = context->kexp_flags;
+		kexp.opcode         = FuncOpCode__VarExpr;
+		kexp.u.v.var_depth  = kvdef->kv_depth;
+		kexp.u.v.var_offset = kvdef->kv_offset;
 		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExprVar);
 		__appendKernExpMagicAndLength(buf, pos);
 	}
@@ -1931,89 +1941,153 @@ codegen_scalar_array_op_expression(codegen_context *context,
  * It checks whether the supplied expression exactly matches any entry of
  * the target-list. If found, it returns its depth and resno.
  */
-static int
-is_expression_equals_tlist(codegen_context *context, Expr *expr)
+static codegen_kvar_defitem *
+is_expression_equals_tlist(codegen_context *context, Expr *expr,
+						   bool allows_host_only_vars)
 {
-	ListCell   *lc1, *lc2;
-	int			depth = 0;
-	int			resno;
-	int			slot_id;
-	devtype_info *dtype = NULL;
+	codegen_kvar_defitem *kvdef;
+	ListCell   *lc;
+	int			depth, resno;
+	Oid			type_oid;
+	bool		typbyval;
+	int8_t		typalign;
+	int16_t		typlen;
+	TypeOpCode	type_code;
+	uint32_t	kvec_sizeof;
+	devtype_info *dtype;
 
-	foreach (lc1, context->input_rels_tlist)
+	if (context->max_depth >= 0 && IsA(expr, Var))
 	{
-		Node   *node = lfirst(lc1);
+		Var	   *var = (Var *)expr;
 
-		if (IsA(node, Integer))
+		if (var->varno == context->scan_relid)
 		{
-			Index	varno = intVal(node);
-			Var	   *var = (Var *)expr;
+			depth = 0;
+			resno = var->varattno;
+			goto found;
+		}
+	}
 
-			if (IsA(var, Var) && var->varno == varno)
-			{
-				resno = var->varattno;
-				dtype = pgstrom_devtype_lookup(var->vartype);
+	for (depth = 1; depth < context->max_depth; depth++)
+	{
+		PathTarget *target = context->pd[depth].inner_target;
+
+		resno = 1;
+		foreach (lc, target->exprs)
+		{
+			if (equal(expr, lfirst(lc)))
 				goto found;
+			resno++;
+		}
+	}
+	return NULL;	/* not found */
+found:
+	foreach (lc, context->kvars_deflist)
+	{
+		kvdef = lfirst(lc);
+
+		if (kvdef->kv_depth == depth &&
+			kvdef->kv_resno == resno)
+		{
+			Assert(equal(expr, kvdef->kv_expr));
+			return kvdef;
+		}
+	}
+	/* identify kvec length */
+	type_oid = exprType((Node *)expr);
+	dtype = pgstrom_devtype_lookup(type_oid);
+	if (dtype)
+	{
+		typbyval = dtype->type_byval;
+		typalign = dtype->type_align;
+		typlen   = dtype->type_length;
+		type_code = dtype->type_code;
+		kvec_sizeof = dtype->kvec_sizeof;
+	}
+	else if (allows_host_only_vars)
+	{
+		/* assign generic type */
+		/* only non-key of group-by or top-level projection */
+		char	__typalign;
+
+		get_typlenbyvalalign(type_oid, &typlen, &typbyval, &__typalign);
+		if (typbyval)
+		{
+			switch (typlen)
+			{
+				case 1:
+					type_code = TypeOpCode__int1;
+					kvec_sizeof = sizeof(kvec_int1_t);
+					break;
+				case 2:
+					type_code = TypeOpCode__int2;
+					kvec_sizeof = sizeof(kvec_int2_t);
+					break;
+				case 4:
+					type_code = TypeOpCode__int4;
+					kvec_sizeof = sizeof(kvec_int4_t);
+					break;
+				case 8:
+					type_code = TypeOpCode__int8;
+					kvec_sizeof = sizeof(kvec_int8_t);
+					break;
+				default:
+					elog(ERROR, "unexpected inline type length: %d", (int)typlen);
+					break;
 			}
 		}
-		else if (IsA(node, PathTarget))
+		else if (typlen > 0)
 		{
-			PathTarget *reltarget = (PathTarget *)node;
-
-			resno = 1;
-			foreach (lc2, reltarget->exprs)
-			{
-				if (equal(expr, lfirst(lc2)))
-				{
-					dtype = pgstrom_devtype_lookup(exprType((Node *)expr));
-					goto found;
-				}
-				resno++;
-			}
+			type_code = TypeOpCode__unsupported_fixed_length;
+			kvec_sizeof = sizeof(kvec_unsupported_fixed_length_t);
+		}
+		else if (typlen == -1)
+		{
+			type_code = TypeOpCode__bytea;
+			kvec_sizeof = sizeof(kvec_bytea_t);
 		}
 		else
 		{
-			elog(ERROR, "Bug? unexpected input_rels_tlist");
+			elog(ERROR, "unknown type length: %d", (int)typlen);
 		}
-		depth++;
+		typalign = typealign_get_width(__typalign);
 	}
-	return -1;		/* not found */
-
-found:
-	slot_id = 0;
-	forboth (lc1, context->kvars_depth,
-			 lc2, context->kvars_resno)
-	{
-		if (depth == lfirst_int(lc1) &&
-			resno == lfirst_int(lc2))
-		{
-			return slot_id;
-		}
-		slot_id++;
-	}
-	context->kvars_depth = lappend_int(context->kvars_depth, depth);
-	context->kvars_resno = lappend_int(context->kvars_resno, resno);
-	if (dtype && (dtype->type_flags & DEVTYPE__USE_KVARS_SLOTBUF) != 0)
-		context->kvars_types = lappend_oid(context->kvars_types, dtype->type_oid);
 	else
-		context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
-	context->kvars_exprs = lappend(context->kvars_exprs, expr);
+	{
+		/* not supported */
+		return NULL;
+	}
+	/* attach new one */
+	kvdef = palloc0(sizeof(codegen_kvar_defitem));
+	kvdef->fb_slot_id   = list_length(context->kvars_deflist);
+	kvdef->kv_depth     = depth;
+	kvdef->kv_resno     = resno;
+	kvdef->kv_type_oid  = type_oid;
+	kvdef->kv_typbyval  = typbyval;
+	kvdef->kv_typalign  = typalign;
+	kvdef->kv_typlen    = typlen;
+	kvdef->kv_type_code = type_code;
+	kvdef->kv_expr      = expr;
+	kvdef->kv_offset    = context->pd[depth].kvec_usage;
+	context->pd[depth].kvec_usage += KVEC_ALIGN(kvec_sizeof);
 
-	return slot_id;
+	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
+
+	return kvdef;
 }
 
 static int
 codegen_expression_walker(codegen_context *context,
 						  StringInfo buf, Expr *expr)
 {
-	int		slot_id;
+    const codegen_kvar_defitem *kvdef;
 
 	if (!expr)
 		return 0;
 	/* check simple var references */
-	slot_id = is_expression_equals_tlist(context, expr);
-	if (slot_id >= 0)
-		return codegen_var_expression(context, buf, expr, slot_id);
+	kvdef = is_expression_equals_tlist(context, expr, false);
+	if (kvdef)
+		return codegen_var_expression(context, buf, kvdef);
 
 	switch (nodeTag(expr))
 	{
@@ -2057,6 +2131,18 @@ codegen_expression_walker(codegen_context *context,
 /*
  * codegen_build_loadvars
  */
+static inline void
+__assign_kern_vars_defitem(kern_vars_defitem *desc, const codegen_kvar_defitem *kvdef)
+{
+	memset(desc, 0, sizeof(kern_vars_defitem));
+	desc->kv_resno     = kvdef->kv_resno;
+	desc->kv_offset    = kvdef->kv_offset;
+	desc->kv_type_code = kvdef->kv_type_code;
+	desc->kv_typbyval  = kvdef->kv_typbyval;
+	desc->kv_typalign  = kvdef->kv_typalign;
+	desc->kv_typlen    = kvdef->kv_typlen;
+}
+
 static int
 kern_vars_defitem_comp(const void *__a, const void *__b)
 {
@@ -2071,64 +2157,40 @@ kern_vars_defitem_comp(const void *__a, const void *__b)
 }
 
 static kern_expression *
-__codegen_build_loadvars_one(codegen_context *context, int depth)
+__codegen_build_loadvars_one(codegen_context *context,
+							 List *kvars_deflist, int depth)
 {
-	kern_expression kexp;
+	kern_expression *kexp;
 	StringInfoData buf;
-	int			slot_id = 0;
 	int			nloads = 0;
-	int			nslots = list_length(context->kvars_depth);
-	uint32_t	kvars_offset;
-	ListCell   *lc1, *lc2, *lc3;
+	int			nrooms = list_length(context->kvars_deflist);
+	ListCell   *lc;
+
+	kexp = alloca(offsetof(kern_expression, u.load.kvars[nrooms+1]));
+	memset(kexp, 0, offsetof(kern_expression, u.load.kvars));
+	foreach (lc, kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+
+		if (kvdef->kv_depth == depth)
+			__assign_kern_vars_defitem(&kexp->u.load.kvars[nloads++], kvdef);
+	}
+	if (nloads == 0)
+		return NULL;
+	kexp->exptype  = TypeOpCode__int4;
+	kexp->expflags = context->kexp_flags;
+	kexp->opcode   = FuncOpCode__LoadVars;
+	kexp->args_offset = MAXALIGN(offsetof(kern_expression,
+										  u.load.kvars[nloads]));
+	kexp->u.load.depth = depth;
+	kexp->u.load.nloads = nloads;
+	qsort(kexp->u.load.kvars,
+		  nloads,
+		  sizeof(kern_vars_defitem),
+		  kern_vars_defitem_comp);
 
 	initStringInfo(&buf);
-	buf.len = offsetof(kern_expression, u.load.kvars);
-	kvars_offset = (sizeof(kern_variable) * nslots +
-					sizeof(int)           * nslots);
-	forthree (lc1, context->kvars_depth,
-			  lc2, context->kvars_resno,
-			  lc3, context->kvars_types)
-	{
-		kern_vars_defitem vitem;
-		int		__depth = lfirst_int(lc1);
-		int		__resno = lfirst_int(lc2);
-		Oid		__type_oid = lfirst_oid(lc3);
-
-		vitem.var_resno   = __resno;
-		vitem.var_slot_id = slot_id++;
-		vitem.var_slot_off = 0;
-		if (OidIsValid(__type_oid))
-		{
-			devtype_info *dtype = pgstrom_devtype_lookup(__type_oid);
-
-			Assert(dtype != NULL);
-			kvars_offset = TYPEALIGN(dtype->type_alignof, kvars_offset);
-			vitem.var_slot_off = kvars_offset;
-			kvars_offset += dtype->type_sizeof;
-		}
-		if (__depth == depth)
-		{
-			appendBinaryStringInfo(&buf, (char *)&vitem,
-								   sizeof(kern_vars_defitem));
-			nloads++;
-		}
-	}
-	if (nloads > 0)
-	{
-		qsort(buf.data + offsetof(kern_expression, u.load.kvars),
-			  nloads,
-			  sizeof(kern_vars_defitem),
-			  kern_vars_defitem_comp);
-	}
-	memset(&kexp, 0, sizeof(kexp));
-	kexp.exptype  = TypeOpCode__int4;
-	kexp.expflags = context->kexp_flags;
-	kexp.opcode   = FuncOpCode__LoadVars;
-	kexp.args_offset = MAXALIGN(offsetof(kern_expression,
-										 u.load.kvars[nloads]));
-	kexp.u.load.depth = depth;
-	kexp.u.load.nloads = nloads;
-	memcpy(buf.data, &kexp, offsetof(kern_expression, u.load.kvars));
+	appendBinaryStringInfo(&buf, (char *)kexp, kexp->args_offset);
 	__appendKernExpMagicAndLength(&buf, 0);
 
 	return (kern_expression *)buf.data;
@@ -2137,9 +2199,10 @@ __codegen_build_loadvars_one(codegen_context *context, int depth)
 bytea *
 codegen_build_scan_loadvars(codegen_context *context)
 {
-	kern_expression *kexp = __codegen_build_loadvars_one(context, 0);
-	char	   *xpucode = NULL;
+	kern_expression *kexp;
+	char   *xpucode = NULL;
 
+	kexp = __codegen_build_loadvars_one(context, context->kvars_deflist, 0);
 	if (kexp)
 	{
 		xpucode = palloc(VARHDRSZ + kexp->len);
@@ -2153,55 +2216,48 @@ bytea *
 codegen_build_join_loadvars(codegen_context *context)
 {
 	kern_expression *kexp;
+	kern_expression *karg;
 	StringInfoData buf;
-	int			max_depth = -1;
+	int			num_rels = context->max_depth-1;
+	int			nvalids = 0;
 	uint32_t	sz;
-	char	   *result = NULL;
-	ListCell   *lc;
+	bytea	   *xpucode = NULL;
 
-	foreach (lc, context->kvars_depth)
-	{
-		int		depth = lfirst_int(lc);
-
-		if (depth >= 0)
-			max_depth = Max(max_depth, depth);
-	}
-	if (max_depth < 1)
-		return NULL;
-	sz = MAXALIGN(offsetof(kern_expression, u.pack.offset[max_depth+1]));
+	sz = MAXALIGN(offsetof(kern_expression, u.pack.offset[num_rels]));
 	kexp = alloca(sz);
 	memset(kexp, 0, sz);
 	kexp->exptype  = TypeOpCode__int4;
 	kexp->expflags = context->kexp_flags;
 	kexp->opcode   = FuncOpCode__Packed;
 	kexp->args_offset = sz;
-	kexp->u.pack.npacked = max_depth;
+	kexp->u.pack.npacked = num_rels;
 
 	initStringInfo(&buf);
 	buf.len = sz;
-	for (int i=0; i < max_depth; i++)
+	for (int depth=1; depth <= num_rels; depth++)
 	{
-		kern_expression *karg = __codegen_build_loadvars_one(context, i+1);
-
+		karg = __codegen_build_loadvars_one(context,
+											context->kvars_deflist,
+											depth);
 		if (karg)
 		{
-			kexp->u.pack.offset[i]
+			kexp->u.pack.offset[depth-1]
 				= __appendBinaryStringInfo(&buf, karg, karg->len);
-			kexp->nr_args++;
 			pfree(karg);
+			nvalids++;
 		}
 	}
-
-	if (kexp->nr_args > 0)
+	if (nvalids > 0)
 	{
 		memcpy(buf.data, kexp, sz);
 		__appendKernExpMagicAndLength(&buf, 0);
-		result = palloc(VARHDRSZ + buf.len);
-		memcpy(result + VARHDRSZ, buf.data, buf.len);
-		SET_VARSIZE(result, VARHDRSZ + buf.len);
+
+		xpucode = palloc(VARHDRSZ + buf.len);
+		memcpy((char *)xpucode + VARHDRSZ, buf.data, buf.len);
+		SET_VARSIZE(xpucode, VARHDRSZ + buf.len);
 	}
 	pfree(buf.data);
-	return (bytea *)result;
+	return xpucode;
 }
 
 /*
@@ -2237,100 +2293,87 @@ codegen_build_scan_quals(codegen_context *context, List *dev_quals)
 /*
  * __try_inject_projection_expression
  */
-static int
+static codegen_kvar_defitem *
 __try_inject_projection_expression(codegen_context *context,
 								   StringInfo buf,
 								   Expr *expr,
-								   bool write_kexp_if_exists,
-								   bool *p_inject_new)
+								   bool *p_found)
 {
-	ListCell   *lc1, *lc2;
-	int			slot_id;
+	codegen_kvar_defitem *kvdef;
+	kern_expression	kexp;
+	devtype_info   *dtype;
+	ListCell	   *lc;
+	Oid				type_oid;
+	int				pos;
 
 	/*
 	 * When 'expr' is simple Var-reference on the input relations,
 	 * we don't need to inject expression node here.
 	 */
-	slot_id = is_expression_equals_tlist(context, expr);
-	if (slot_id >= 0)
+	kvdef = is_expression_equals_tlist(context, expr, true);
+	if (kvdef)
 	{
-		if (write_kexp_if_exists)
-			codegen_var_expression(context, buf, expr, slot_id);
-		*p_inject_new = false;
-		return slot_id;
+		*p_found = true;
+		return kvdef;
 	}
 
 	/*
-	 * Try to find out the expression which already has kvars-slot.
-	 * If exists, we can reuse it.
+	 * Try to find out the expression which already injected to the
+	 * last level kvec buffer. If exists, we can reuse it.
 	 */
-	slot_id = 0;
-	forboth (lc1, context->kvars_depth,
-			 lc2, context->kvars_resno)
+	foreach (lc, context->kvars_deflist)
 	{
-		int		depth = lfirst_int(lc1);
-		int		resno = lfirst_int(lc2);
+		kvdef = lfirst(lc);
 
-		if (depth < 0 &&
-			resno > 0 &&
-			resno <= list_length(context->tlist_dev))
+		if (equal(expr, kvdef->kv_expr))
 		{
-			TargetEntry *tle = list_nth(context->tlist_dev, resno-1);
-
-			if (equal(tle->expr, expr))
-			{
-				if (write_kexp_if_exists)
-					codegen_var_expression(context, buf, expr, slot_id);
-				*p_inject_new = false;
-				return slot_id;
-			}
+			*p_found = true;
+			return kvdef;
 		}
-		slot_id++;
 	}
 
 	/*
-	 * Try to assign a new kvars-slot, if 'expr' exists on tlist_dev.
+	 * Try to allocate a new kvec-buffer, if an expression (not a simple
+	 * var-reference) is required.
 	 */
-	foreach (lc1, context->tlist_dev)
-	{
-		TargetEntry *tle = lfirst(lc1);
+	type_oid = exprType((Node *)expr);
+	dtype = pgstrom_devtype_lookup(type_oid);
+	if (!dtype)
+		elog(ERROR, "type %s is not device supported",
+			 format_type_be(type_oid));
 
-		if (equal(tle->expr, expr))
-		{
-			kern_expression kexp;
-			devtype_info   *dtype;
-			Oid				type_oid;
-			int				pos;
+	kvdef = palloc0(sizeof(codegen_kvar_defitem));
+	kvdef->fb_slot_id   = -1;
+	kvdef->kv_depth     = context->max_depth;
+	kvdef->kv_resno     = -1;
+	kvdef->kv_type_oid  = dtype->type_oid;
+	kvdef->kv_typbyval  = dtype->type_byval;
+	kvdef->kv_typalign  = dtype->type_align;
+	kvdef->kv_typlen    = dtype->type_length;
+	kvdef->kv_type_code = dtype->type_code;
+	kvdef->kv_offset    = context->pd[context->max_depth].kvec_usage;
+	context->pd[context->max_depth].kvec_usage += dtype->kvec_sizeof;
+	kvdef->kv_expr = expr;
+	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
 
-			slot_id = list_length(context->kvars_depth);
-			context->kvars_depth = lappend_int(context->kvars_depth, -1);
-			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
-			context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
-			context->kvars_exprs = lappend(context->kvars_exprs, expr);
+	/*
+	 * Setup SaveVar expression
+	 */
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.exptype = dtype->type_code;
+	kexp.expflags = context->kexp_flags;
+	kexp.opcode = FuncOpCode__SaveExpr;
+	kexp.nr_args = 1;
+	kexp.args_offset = MAXALIGN(offsetof(kern_expression,
+										 u.save.data));
+	__assign_kern_vars_defitem(&kexp.u.save.svar, kvdef);
+	pos = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
+	codegen_expression_walker(context, buf, expr);
+	__appendKernExpMagicAndLength(buf, pos);
 
-			type_oid = exprType((Node *)expr);
-			dtype = pgstrom_devtype_lookup(type_oid);
-			if (!dtype)
-				elog(ERROR, "type %s is not device supported",
-					 format_type_be(type_oid));
-			memset(&kexp, 0, sizeof(kexp));
-			kexp.exptype = dtype->type_code;
-			kexp.expflags = context->kexp_flags;
-			kexp.opcode = FuncOpCode__SaveExpr;
-			kexp.nr_args = 1;
-			kexp.args_offset = MAXALIGN(offsetof(kern_expression,
-												 u.save.data));
-			kexp.u.save.slot_id = slot_id;
-			pos = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
-			codegen_expression_walker(context, buf, expr);
-			__appendKernExpMagicAndLength(buf, pos);
+	*p_found = false;
 
-			*p_inject_new = true;
-
-			return slot_id;
-		}
-	}
-	return -1;		/* not found */
+	return kvdef;
 }
 
 /*
@@ -2346,7 +2389,6 @@ codegen_build_projection(codegen_context *context)
 	ListCell   *lc;
 	int			nexprs = 0;
 	int			nattrs = 0;
-	int			ctid_slot = -1;
 	int			n, sz, pos;
 	char	   *result;
 
@@ -2359,9 +2401,8 @@ codegen_build_projection(codegen_context *context)
 	foreach (lc, context->tlist_dev)
 	{
 		TargetEntry	*tle = lfirst(lc);
-		int			slot_id;
-		bool		inject_new;
-		kern_projection_desc *desc;
+		codegen_kvar_defitem *kvdef;
+		bool	found;
 
 		if (tle->resjunk)
 		{
@@ -2371,34 +2412,23 @@ codegen_build_projection(codegen_context *context)
 		else if (meet_resjunk)
 			elog(ERROR, "Bug? a valid TLE after junk TLEs");
 
-		slot_id = __try_inject_projection_expression(context,
-													 &arg,
-													 tle->expr,
-													 false,
-													 &inject_new);
-		if (slot_id < 0)
-			elog(ERROR, "Bug? expression is missing on tlist_dev: %s",
-				 nodeToString(tle->expr));
-		if (inject_new)
+		kvdef = __try_inject_projection_expression(context,
+												   &arg,
+												   tle->expr,
+												   &found);
+		if (!found)
 			nexprs++;
-
-		desc = &kexp->u.proj.desc[nattrs++];
-		desc->slot_id = slot_id;
-
-		if (IsA(tle->expr, Var) && ctid_slot < 0)
+		if (IsA(tle->expr, Var) &&
+			((Var *)tle->expr)->varno == context->scan_relid &&
+			((Var *)tle->expr)->varattno == SelfItemPointerAttributeNumber)
 		{
-			Node   *relid = linitial(context->input_rels_tlist);
-			Var	   *var = (Var *)tle->expr;
-
-			Assert(IsA(relid, Integer));
-			if (var->varno == intVal(relid) &&
-				var->varattno == SelfItemPointerAttributeNumber)
-			{
-				Assert(var->vartype == TIDOID &&
-					   var->vartypmod == -1 &&
-					   !OidIsValid(var->varcollid));
-				ctid_slot = slot_id;
-			}
+			kexp->u.proj.ctid_is_valid = true;
+			__assign_kern_vars_defitem(&kexp->u.proj.ctid, kvdef);
+		}
+		else
+		{
+			kern_vars_defitem  *desc = &kexp->u.proj.desc[nattrs++];
+			__assign_kern_vars_defitem(desc, kvdef);
 		}
 	}
 	kexp->exptype = TypeOpCode__int4;
@@ -2408,7 +2438,6 @@ codegen_build_projection(codegen_context *context)
 	kexp->args_offset = MAXALIGN(offsetof(kern_expression,
 										  u.proj.desc[nattrs]));
 	kexp->u.proj.nattrs = nattrs;
-	kexp->u.proj.ctid_slot = ctid_slot;
 	initStringInfo(&buf);
 	pos = __appendBinaryStringInfo(&buf, kexp, kexp->args_offset);
 	if (nexprs > 0)
@@ -2797,115 +2826,6 @@ codegen_build_packed_gistevals(codegen_context *context,
 }
 
 /*
- * __try_inject_groupby_expression
- */
-static int
-__try_inject_groupby_expression(codegen_context *context,
-								StringInfo buf,
-								Expr *expr,
-								bool *p_found)
-{
-	int		slot_id;
-	bool	found = false;
-
-	slot_id = is_expression_equals_tlist(context, expr);
-	if (slot_id >= 0)
-	{
-		found = true;
-	}
-	else
-	{
-		ListCell   *lc1, *lc2;
-
-		slot_id = 0;
-		forboth (lc1, context->kvars_depth,
-				 lc2, context->kvars_resno)
-		{
-			int		depth = lfirst_int(lc1);
-			int		resno = lfirst_int(lc2);
-
-			if (depth >= 0)
-				continue;
-			if (resno > 0 &&
-				resno <= list_length(context->tlist_dev))
-			{
-				TargetEntry *tle = list_nth(context->tlist_dev, resno-1);
-
-				if (equal(expr, tle->expr))
-				{
-					found = true;
-					break;
-				}
-			}
-			slot_id++;
-		}
-
-		if (!found)
-		{
-			TargetEntry *tle;
-			kern_expression kexp;
-			StringInfoData temp;
-			devtype_info *dtype;
-			Oid			type_oid;
-
-			/* inject expression */
-			slot_id = list_length(context->kvars_depth);
-			tle = makeTargetEntry(copyObject(expr),
-								  list_length(context->tlist_dev) + 1,
-								  psprintf("slot_%u", slot_id),
-								  true);
-			context->kvars_depth = lappend_int(context->kvars_depth, -1);
-			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
-			context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
-			context->kvars_exprs = lappend(context->kvars_exprs, expr);
-			context->tlist_dev = lappend(context->tlist_dev, tle);
-
-			/* SaveExpr */
-			type_oid = exprType((Node *)expr);
-			dtype = pgstrom_devtype_lookup(type_oid);
-			if (!dtype)
-				elog(ERROR, "type %s is not device supported",
-					 format_type_be(type_oid));
-
-			initStringInfo(&temp);
-			memset(&kexp, 0, sizeof(kexp));
-			kexp.exptype = dtype->type_code;
-			kexp.expflags = context->kexp_flags;
-			kexp.opcode = FuncOpCode__SaveExpr;
-			kexp.nr_args = 1;
-			kexp.args_offset = MAXALIGN(offsetof(kern_expression,
-												 u.save.data));
-			kexp.u.save.slot_id = slot_id;
-			__appendBinaryStringInfo(&temp, &kexp, kexp.args_offset);
-			codegen_expression_walker(context, &temp, expr);
-			__appendKernExpMagicAndLength(&temp, 0);
-			__appendBinaryStringInfo(buf, temp.data, temp.len);
-			pfree(temp.data);
-		}
-	}
-	*p_found = found;
-
-	return slot_id;
-}
-
-/*
- * __codegen_groupby_expression
- */
-static int
-__codegen_groupby_expression(codegen_context *context,
-							 StringInfo buf,
-							 Expr *expr)
-{
-	int		slot_id;
-	bool	found;
-
-	slot_id = __try_inject_groupby_expression(context, buf, expr, &found);
-	if (found)
-		codegen_var_expression(context, buf, expr, slot_id);
-	return slot_id;
-}
-
-/*
  * codegen_build_groupby_keyhash
  */
 static List *
@@ -2913,7 +2833,7 @@ codegen_build_groupby_keyhash(codegen_context *context,
                               pgstromPlanInfo *pp_info)
 {
 	StringInfoData buf;
-	List		   *groupby_keys_input_slot = NIL;
+	List		   *groupby_key_items = NIL;
 	kern_expression	kexp;
 	char		   *xpucode;
 	ListCell	   *lc1, *lc2;
@@ -2935,13 +2855,18 @@ codegen_build_groupby_keyhash(codegen_context *context,
 	{
 		TargetEntry *tle = lfirst(lc1);
 		int		action = lfirst_int(lc2);
-		int		slot_id;
 
 		if (action == KAGG_ACTION__VREF)
 		{
-			slot_id = __codegen_groupby_expression(context, &buf, tle->expr);
-			groupby_keys_input_slot = lappend_int(groupby_keys_input_slot, slot_id);
-			kexp.nr_args++;
+			codegen_kvar_defitem *kvdef;
+			bool	found;
+
+			kvdef = __try_inject_projection_expression(context, &buf,
+													   tle->expr,
+													   &found);
+			groupby_key_items = lappend(groupby_key_items, kvdef);
+			if (found)
+				kexp.nr_args++;
 		}
 	}
 	if (kexp.nr_args == 0)
@@ -2955,7 +2880,7 @@ codegen_build_groupby_keyhash(codegen_context *context,
 	pp_info->kexp_groupby_keyhash = (bytea *)xpucode;
 bailout:
 	pfree(buf.data);
-	return groupby_keys_input_slot;
+	return groupby_key_items;
 }
 
 /*
@@ -2965,9 +2890,7 @@ static List *
 codegen_build_groupby_keyload(codegen_context *context,
 							  pgstromPlanInfo *pp_info)
 {
-	kern_expression	*kexp;
-	List	   *groupby_keys_final_slot = NIL;
-	char	   *xpucode = NULL;
+	List	   *groupby_key_items = NIL;
 	ListCell   *lc1, *lc2;
 
 	forboth (lc1, context->tlist_dev,
@@ -2975,25 +2898,42 @@ codegen_build_groupby_keyload(codegen_context *context,
 	{
 		TargetEntry *tle = lfirst(lc1);
 		int		action = lfirst_int(lc2);
-		int		slot_id;
 
-		if (tle->resjunk)
-			continue;
-		if (action == KAGG_ACTION__VREF)
+		if (!tle->resjunk && action == KAGG_ACTION__VREF)
 		{
-			slot_id = list_length(context->kvars_depth);
-			groupby_keys_final_slot = lappend_int(groupby_keys_final_slot, slot_id);
-			context->kvars_depth = lappend_int(context->kvars_depth,
-											   SPECIAL_DEPTH__PREAGG_FINAL);
-			context->kvars_resno = lappend_int(context->kvars_resno, tle->resno);
-			context->kvars_types = lappend_oid(context->kvars_types, InvalidOid);
-			context->kvars_exprs = lappend(context->kvars_exprs, tle->expr);
+			codegen_kvar_defitem *kvdef = palloc0(sizeof(codegen_kvar_defitem));
+			Oid				type_oid = exprType((Node *)tle->expr);
+			devtype_info   *dtype;
+
+			dtype = pgstrom_devtype_lookup(type_oid);
+			if (!dtype)
+				elog(ERROR, "type %s is not device supported",
+					 format_type_be(type_oid));
+
+			kvdef->fb_slot_id   = -1;
+			kvdef->kv_depth     = context->max_depth;
+			kvdef->kv_resno     = tle->resno;
+			kvdef->kv_type_oid  = dtype->type_oid;
+			kvdef->kv_typbyval  = dtype->type_byval;
+			kvdef->kv_typalign  = dtype->type_align;
+			kvdef->kv_typlen    = dtype->type_length;
+			kvdef->kv_type_code = dtype->type_code;
+			kvdef->kv_offset    = context->pd[context->max_depth].kvec_usage;
+			context->pd[context->max_depth].kvec_usage += dtype->kvec_sizeof;
+			kvdef->kv_expr      = tle->expr;
+
+			groupby_key_items = lappend(groupby_key_items, kvdef);
 		}
 	}
 
-	if (groupby_keys_final_slot != NIL)
+	if (groupby_key_items)
 	{
-		kexp = __codegen_build_loadvars_one(context, SPECIAL_DEPTH__PREAGG_FINAL);
+		kern_expression	*kexp;
+		char	   *xpucode = NULL;
+
+		kexp = __codegen_build_loadvars_one(context,
+											groupby_key_items,
+											context->max_depth);
 		if (kexp)
 		{
 			xpucode = palloc(VARHDRSZ + kexp->len);
@@ -3003,7 +2943,7 @@ codegen_build_groupby_keyload(codegen_context *context,
 		}
 		pp_info->kexp_groupby_keyload = (bytea *)xpucode;
 	}
-	return groupby_keys_final_slot;
+	return groupby_key_items;
 }
 
 /*
@@ -3147,31 +3087,28 @@ __codegen_build_groupby_actions(codegen_context *context,
 		 */
 		TargetEntry *tle = list_nth(context->tlist_dev, index);
 		int			action = lfirst_int(lc1);
-		int			slot_id;
-		bool		inject_new;
-		kern_aggregate_desc *desc;
+		kern_aggregate_desc *desc = &kexp->u.pagg.desc[index++];
+		codegen_kvar_defitem *kvdef;
+		bool		found;
 
 		Assert(!tle->resjunk);
-		desc = &kexp->u.pagg.desc[index++];
 		if (action == KAGG_ACTION__VREF ||
 			action == KAGG_ACTION__VREF_NOKEY)
 		{
-			slot_id = __try_inject_projection_expression(context,
-														 &buf,
-														 tle->expr,
-														 false,
-														 &inject_new);
-			if (slot_id < 0)
-				elog(ERROR, "Bug? grouping-key is not on the kvars-slot");
-			if (inject_new)
+			kvdef = __try_inject_projection_expression(context,
+													   &buf,
+													   tle->expr,
+													   &found);
+			if (!found)
 				nexprs++;
 			desc->action = KAGG_ACTION__VREF;
-			desc->arg0_slot_id = slot_id;
+			desc->arg0_depth  = kvdef->kv_depth;
+			desc->arg0_offset = kvdef->kv_offset;
 		}
 		else
 		{
+			/* other KAGG_ACTION__* */
 			FuncExpr   *func = (FuncExpr *)tle->expr;
-			int			count = 0;
 
 			Assert(IsA(func, FuncExpr) && list_length(func->args) <= 2);
 			desc->action = action;
@@ -3179,22 +3116,22 @@ __codegen_build_groupby_actions(codegen_context *context,
 			{
 				Expr   *fn_arg = lfirst(lc2);
 
-				slot_id = __try_inject_projection_expression(context,
-															 &buf,
-															 fn_arg,
-															 false,
-															 &inject_new);
-				if (slot_id < 0)
-					elog(ERROR, "Bug? partial-aggregate-function argument is missing");
-				if (inject_new)
+				kvdef = __try_inject_projection_expression(context,
+														   &buf,
+														   fn_arg,
+														   &found);
+				if (!found)
 					nexprs++;
-				if (count == 0)
-					desc->arg0_slot_id = slot_id;
-				else if (count == 1)
-					desc->arg1_slot_id = slot_id;
+				if (lc2 == list_head(func->args))
+				{
+					desc->arg0_depth  = kvdef->kv_depth;
+					desc->arg0_offset = kvdef->kv_offset;
+				}
 				else
-					elog(ERROR, "Bug? too much partial function arguments");
-				count++;
+				{
+					desc->arg1_depth  = kvdef->kv_depth;
+					desc->arg1_offset = kvdef->kv_offset;
+				}
 			}
 		}
 	}
@@ -3233,18 +3170,18 @@ void
 codegen_build_groupby_actions(codegen_context *context,
 							  pgstromPlanInfo *pp_info)
 {
-	List   *groupby_keys_input_slot;
-	List   *groupby_keys_final_slot;
+	List   *groupby_keys_input;
+	List   *groupby_keys_final;
 
 	Assert(pp_info->groupby_actions != NIL &&
 		   list_length(pp_info->groupby_actions) <= list_length(context->tlist_dev));
-	groupby_keys_input_slot = codegen_build_groupby_keyhash(context, pp_info);
-	groupby_keys_final_slot = codegen_build_groupby_keyload(context, pp_info);
-	if (groupby_keys_input_slot != NIL &&
-		groupby_keys_final_slot != NIL)
+	groupby_keys_input = codegen_build_groupby_keyhash(context, pp_info);
+	groupby_keys_final = codegen_build_groupby_keyload(context, pp_info);
+	if (groupby_keys_input != NIL &&
+		groupby_keys_final != NIL)
 		codegen_build_groupby_keycomp(context, pp_info,
-									  groupby_keys_input_slot,
-									  groupby_keys_final_slot);
+									  groupby_keys_input,
+									  groupby_keys_final);
 	__codegen_build_groupby_actions(context, pp_info);
 }
 
@@ -3256,25 +3193,34 @@ codegen_build_groupby_actions(codegen_context *context,
 bool
 pgstrom_xpu_expression(Expr *expr,
 					   uint32_t required_xpu_flags,
-					   List *input_rels_tlist,
+					   Index scan_relid,
+					   List *inner_target_list,
 					   int *p_devcost)
 {
-	codegen_context context;
+	codegen_context *context;
+	int			num_inners = list_length(inner_target_list);
+	int			sz = offsetof(codegen_context, pd[num_inners+2]);
+	int			depth;
+	ListCell   *lc;
 
 	Assert((required_xpu_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
 		   (required_xpu_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
-	memset(&context, 0, sizeof(context));
-	context.elevel = DEBUG2;
-	context.top_expr = expr;
-	context.required_flags = (required_xpu_flags & DEVKIND__ANY);
-	context.input_rels_tlist = input_rels_tlist;
-
+	context = alloca(sz);
+	memset(context, 0, sz);
+	context->elevel = DEBUG2;
+	context->top_expr = expr;
+	context->required_flags = (required_xpu_flags & DEVKIND__ANY);
+	context->max_depth = num_inners + 1;
+	context->scan_relid = scan_relid;
+	depth = 1;
+	foreach (lc, inner_target_list)
+		context->pd[depth++].inner_target = (PathTarget *)lfirst(lc);
 	if (!expr || IsA(expr, List))
 		return false;
-	if (codegen_expression_walker(&context, NULL, expr) < 0)
+	if (codegen_expression_walker(context, NULL, expr) < 0)
 		return false;
 	if (p_devcost)
-		*p_devcost = context.device_cost;
+		*p_devcost = context->device_cost;
 	return true;
 }
 
@@ -3600,13 +3546,17 @@ __xpucode_to_cstring(StringInfo buf,
 			__xpucode_var_cstring(buf, kexp);
 			return;
 		case FuncOpCode__Projection:
-			appendStringInfo(buf, "{Projection <");
+			appendStringInfo(buf, "{Projection ");
+			if (kexp->u.proj.ctid_is_valid)
+				appendStringInfo(buf, "ctid(%d) ",
+								 kexp->u.proj.ctid.kv_offset);
+			appendStringInfo(buf, "<");
 			for (int j=0; j < kexp->u.proj.nattrs; j++)
 			{
-				const kern_projection_desc *desc = &kexp->u.proj.desc[j];
+				const kern_vars_defitem *desc = &kexp->u.proj.desc[j];
 				if (j > 0)
 					appendStringInfoChar(buf, ',');
-				appendStringInfo(buf, "%d", desc->slot_id);
+				appendStringInfo(buf, "%d", desc->kv_offset);
 			}
 			appendStringInfo(buf, ">");
 			break;

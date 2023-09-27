@@ -71,8 +71,12 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 		sublist = lappend(sublist, makeInteger(kvdef->fb_slot_id));
 		sublist = lappend(sublist, makeInteger(kvdef->kv_depth));
 		sublist = lappend(sublist, makeInteger(kvdef->kv_resno));
-		sublist = lappend(sublist, makeInteger((int)kvdef->kv_type));
+		sublist = lappend(sublist, makeInteger(kvdef->kv_type_oid));
+		sublist = lappend(sublist, makeBoolean(kvdef->kv_typbyval));
+		sublist = lappend(sublist, makeInteger(kvdef->kv_typalign));
+		sublist = lappend(sublist, makeInteger(kvdef->kv_typlen));
 		sublist = lappend(sublist, makeInteger(kvdef->kv_offset));
+		sublist = lappend(sublist, makeInteger(kvdef->kv_type_code));
 		sublist = lappend(sublist, kvdef->kv_expr);
 
 		kvars_deflist = lappend(kvars_deflist, sublist);
@@ -181,17 +185,22 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	kvars_deflist = list_nth(privs, pindex++);
 	foreach (lc, kvars_deflist)
 	{
-		codegen_kvar_defitem *kvdef = palloc0(sizeof(codegen_kvar_defitem));
 		List	   *sublist = (List *)lfirst(lc);
 		int			kvindex = 0;
+		codegen_kvar_defitem *kvdef;
 
 		Assert(IsA(sublist, List));
-		kvdef->fb_slot_id = intVal(list_nth(sublist, kvindex++));
-		kvdef->kv_depth   = intVal(list_nth(sublist, kvindex++));
-		kvdef->kv_resno   = intVal(list_nth(sublist, kvindex++));
-		kvdef->kv_type    = (Oid)intVal(list_nth(sublist, kvindex++));
-		kvdef->kv_offset  = intVal(list_nth(sublist, kvindex++));
-		kvdef->kv_expr    = (Expr *)list_nth(sublist, kvindex++);
+		kvdef = palloc0(sizeof(codegen_kvar_defitem));
+		kvdef->fb_slot_id  = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_depth    = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_resno    = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_type_oid = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_typbyval = boolVal(list_nth(sublist, kvindex++));
+		kvdef->kv_typalign = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_typlen   = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_offset   = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_type_code = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_expr      = list_nth(sublist, kvindex++);
 
 		pp_data.kvars_deflist = lappend(pp_data.kvars_deflist, kvdef);
 	}

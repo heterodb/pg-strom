@@ -308,7 +308,7 @@ typedef enum {
 	TypeOpCode__composite,
 	TypeOpCode__array,
 	TypeOpCode__record,
-	TypeOpCode__unsupported,
+	TypeOpCode__unsupported_fixed_length,
 	TypeOpCode__BuiltInMax,
 } TypeOpCode;
 
@@ -1798,6 +1798,22 @@ struct xpu_composite_t {
 typedef struct xpu_composite_t		xpu_composite_t;
 EXTERN_DATA xpu_datum_operators		xpu_composite_ops;
 
+/*
+ * xpu_unsupported_fixed_length_t - generic pgsql fixed-length indirect datum
+ *
+ * NOTE: xpu_unsupported_fixed_length_t is only used for projection or dependent
+ * key in GROUP-BY to carry unsupported fixed-length values. For inline values,
+ * xpu_intX_t is used, and bytea is used for varlena data types.
+ */
+typedef struct {
+	const char	   *value;
+} xpu_unsupported_fixed_length_t;
+typedef struct {
+	KVEC_DATUM_COMMON_FIELD;
+	const char	   *values[KVEC_UNITSZ];
+} kvec_unsupported_fixed_length_t;
+
+
 typedef struct {
 	TypeOpCode		type_opcode;
 	xpu_datum_operators *type_ops;
@@ -1954,30 +1970,16 @@ typedef struct
 	int32_t			var_resno;		//deprecated
 	uint32_t		var_slot_id;	//deprecated
 	uint32_t		var_slot_off;	//deprecated
+	int32_t			slot_id;		//deprecated
 	/* ----------------------------- */
 	int32_t			kv_resno;		/* source/destination resno */
 	uint32_t		kv_offset;		/* offset of kvec-buffer */
-	TypeOpCode		kv_type;
-	bool			kv_byval;
-	int8_t			kv_align;
-	int16_t			kv_length;
+	TypeOpCode		kv_type_code;
+	bool			kv_typbyval;
+	int8_t			kv_typalign;
+	int16_t			kv_typlen;
 	const struct xpu_datum_operators *kv_ops;
 } kern_vars_defitem;
-
-typedef struct
-{
-	uint32_t		slot_id;		//deprecated
-
-
-	//kern_projection_desc can be replaced by kern_vars_desc?
-	int32_t			kv_resno;
-	uint32_t		kv_offset;
-	TypeOpCode		kv_type;
-	bool			kv_byval;
-	int8_t			kv_align;
-	int16_t			kv_length;
-	const struct xpu_datum_operators *kv_ops;
-} kern_projection_desc;
 
 #define KAGG_ACTION__VREF			101		/* simple var copy */
 #define KAGG_ACTION__VREF_NOKEY		102		/* simple var copy; but not a grouping-
@@ -2047,10 +2049,14 @@ typedef struct
 
 struct kern_aggregate_desc
 {
-	uint16_t	action;			/* any of KAGG_ACTION__* */
-	int16_t		arg0_slot_id;	/* -1, if not used */
-	int16_t		arg1_slot_id;	/* -1, if not used */
-	int16_t		__reserved__;
+	uint32_t	action;			/* any of KAGG_ACTION__* */
+	int32_t		arg0_depth;
+	uint32_t	arg0_offset;
+	int32_t		arg1_depth;
+	uint32_t	arg1_offset;
+	/* --deprecated-- */
+	int16_t		arg0_slot_id;	//deprecated
+	int16_t		arg1_slot_id;	//deprecated
 };
 typedef struct kern_aggregate_desc	kern_aggregate_desc;
 
@@ -2081,9 +2087,9 @@ struct kern_expression
 			uint32_t	param_id;
 		} p;		/* ParamExpr */
 		struct {
-			int16_t		var_typlen;
-			bool		var_typbyval;
-			uint8_t		var_typalign;
+			int16_t		var_typlen;		//deprecated
+			bool		var_typbyval;	//deprecated
+			uint8_t		var_typalign;	//deprecated
 			uint32_t	var_slot_id;	/* deprecated */
 			/* ------------------------ */
 			int32_t		var_depth;
@@ -2116,8 +2122,8 @@ struct kern_expression
 			char		data[1]		__MAXALIGNED__;
 		} gist;		/* GiSTEval */
 		struct {
-			uint32_t	slot_id;	/* destination slot-id */
-			uint32_t	slot_off;	/* kvars-slot buffer offset, if needed */
+			uint32_t	slot_id;	//deprecated
+			uint32_t	slot_off;	//deprecated
 
 			kern_vars_defitem svar;		/* temporary storage */
 			char		data[1]		__MAXALIGNED__;
@@ -2127,11 +2133,10 @@ struct kern_expression
 			kern_aggregate_desc desc[1];
 		} pagg;		/* PreAggs */
 		struct {
-			int			datum_sz;	//???
 			int			nattrs;
-			int			ctid_slot;	//deprecated
+			bool		ctid_is_valid;
 			kern_vars_defitem ctid;	/* source of ctid system column, if any */
-			kern_projection_desc desc[1];
+			kern_vars_defitem desc[1];
 		} proj;		/* Projection */
 		struct {
 			uint32_t	npacked;	/* number of packed sub-expressions; including

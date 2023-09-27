@@ -888,8 +888,8 @@ typedef struct
 	PathTarget	   *target_final;
 	AggClauseCosts	final_clause_costs;
 	pgstromPlanInfo *pp_info;
-	List		   *input_rels_tlist;
 	List		   *inner_paths_list;
+	List		   *inner_target_list;
 	List		   *groupby_keys;
 	List		   *groupby_keys_refno;
 	Node		   *havingQual;
@@ -1021,7 +1021,8 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 			expr = make_expr_typecast(expr, dest_oid);
 		if (!pgstrom_xpu_expression(expr,
 									pp_info->xpu_task_flags,
-									con->input_rels_tlist,
+									pp_info->scan_relid,
+									con->inner_target_list,
 									NULL))
 		{
 			elog(DEBUG2, "Partial aggregate argument is not executable: %s",
@@ -1210,7 +1211,8 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			/* grouping-key must be device executable. */
 			if (!pgstrom_xpu_expression(expr,
 										pp_info->xpu_task_flags,
-										con->input_rels_tlist,
+										pp_info->scan_relid,
+										con->inner_target_list,
 										NULL))
 			{
 				elog(DEBUG2, "Grouping-key must be device executable: %s",
@@ -1429,15 +1431,14 @@ __xpupreagg_add_custompath(PlannerInfo *root,
 {
 	xpugroupby_build_path_context con;
 	Path	   *part_path;
-	List	   *inner_rels_tlist;
+	List	   *inner_target_list = NIL;
 	ListCell   *lc;
 
-	inner_rels_tlist = list_make1(makeInteger(pp_info->scan_relid));
 	foreach (lc, inner_paths_list)
 	{
 		Path   *i_path = (Path *)lfirst(lc);
 
-		inner_rels_tlist = lappend(inner_rels_tlist, i_path->pathtarget);
+		inner_target_list = lappend(inner_target_list, i_path->pathtarget);
 	}
 	/* setup context */
 	memset(&con, 0, sizeof(con));
@@ -1452,8 +1453,8 @@ __xpupreagg_add_custompath(PlannerInfo *root,
 	con.target_partial = create_empty_pathtarget();
 	con.target_final   = create_empty_pathtarget();
 	con.pp_info        = pp_info;
-	con.input_rels_tlist = inner_rels_tlist;
 	con.inner_paths_list = inner_paths_list;
+	con.inner_target_list = inner_target_list;
 	con.custom_path_methods = custom_path_methods;
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))

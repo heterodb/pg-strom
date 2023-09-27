@@ -528,7 +528,11 @@ typedef struct
 	int			fb_slot_id;		/* slot-id of the CPU fallback tuple-slot */
 	int			kv_depth;		/* source depth */
 	int			kv_resno;		/* source resno, or -1 if working variable */
-	Oid			kv_type;		/* Type OID */
+	Oid			kv_type_oid;	/* Type OID */
+	bool		kv_typbyval;	/* typbyval from the catalog */
+	int8_t		kv_typalign;	/* typalign from the catalog */
+	int16_t		kv_typlen;		/* typlen from the catalog */
+	TypeOpCode	kv_type_code;	/* device type opcode */
 	int			kv_offset;		/* offset from the head of vectorized buffer */
 	Expr	   *kv_expr;		/* original expression */
 } codegen_kvar_defitem;
@@ -549,8 +553,15 @@ typedef struct
 	List	   *kvars_types;	//deprecated
 	List	   *kvars_exprs;	//deprecated
 	List	   *tlist_dev;
-	uint32_t	kvars_nslots;
-	List	   *input_rels_tlist;
+	uint32_t	kvars_nslots;		//deprecated
+	List	   *input_rels_tlist;	//deprecated
+
+	int			max_depth;		/* <-- (num_rels+1) */
+	Index		scan_relid;		/* depth==0 */
+	struct {
+		PathTarget *inner_target;
+		uint32_t	kvec_usage;
+	} pd[1];
 } codegen_context;
 
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
@@ -561,8 +572,8 @@ extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 extern devfunc_info *devtype_lookup_equal_func(devtype_info *dtype, Oid coll_id);
 extern devfunc_info *devtype_lookup_compare_func(devtype_info *dtype, Oid coll_id);
 
-extern void		codegen_context_init(codegen_context *context,
-									 uint32_t xpu_task_flags);
+extern codegen_context *create_codegen_context(CustomPath *cpath,
+											   pgstromPlanInfo *pp_info);
 extern bytea   *codegen_build_qualifiers(codegen_context *context,
 										 List *dev_quals);
 extern bytea   *codegen_build_scan_loadvars(codegen_context *context);
@@ -589,7 +600,8 @@ extern void		codegen_build_packed_xpucode(bytea **p_xpucode,
 											 List **p_used_params);
 extern bool		pgstrom_xpu_expression(Expr *expr,
 									   uint32_t required_xpu_flags,
-									   List *input_rels_tlist,
+									   Index scan_relid,
+									   List *inner_target_list,
 									   int *p_devcost);
 extern void		pgstrom_explain_xpucode(const CustomScanState *css,
 										ExplainState *es,
@@ -636,7 +648,8 @@ extern Path	   *pgstromTryFindGistIndex(PlannerInfo *root,
 										Path *inner_path,
 										List *restrict_clauses,
 										uint32_t xpu_task_flags,
-										List *input_rels_tlist,
+										Index base_scan_relid,
+										List *inner_target_list,
 										pgstromPlanInnerInfo *pp_inner);
 
 /*

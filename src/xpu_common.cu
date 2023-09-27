@@ -1823,7 +1823,7 @@ kern_form_heaptuple(kern_context *kcxt,
 	for (int j=0; j < nattrs; j++)
 	{
 		const kern_colmeta *cmeta = &kds_dst->colmeta[j];
-		const kern_projection_desc *pdesc = &kproj->u.proj.desc[j];
+		const kern_vars_defitem *pdesc = &kproj->u.proj.desc[j];
 		const kern_variable *kvar = &kcxt->kvars_slot[pdesc->slot_id];
 		int			vclass = kcxt->kvars_class[pdesc->slot_id];
 		int			nbytes;
@@ -1915,7 +1915,7 @@ kern_form_heaptuple(kern_context *kcxt,
 	}
 	if (htup)
 	{
-		int		ctid_slot = kproj->u.proj.ctid_slot;
+		int		ctid_slot = 9999; //kproj->u.proj.ctid_slot;
 
 		/* assign ctid, if any */
 		if (ctid_slot >= 0 &&
