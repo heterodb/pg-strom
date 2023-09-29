@@ -896,7 +896,7 @@ __build_explain_tlist_junks(codegen_context *context,
 		}
 	}
 	/* depth > 0 */
-	for (int depth=1; depth < context->max_depth; depth++)
+	for (int depth=1; depth <= context->num_rels; depth++)
 	{
 		PathTarget *target = context->pd[depth].inner_target;
 		ListCell   *lc;
@@ -931,7 +931,7 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 	__context.root = root;
 	__context.xpu_task_flags = context->required_flags;
 	__context.scan_relid = context->scan_relid;
-	for (int depth=1; depth < context->max_depth; depth++)
+	for (int depth=1; depth <= context->num_rels; depth++)
 	{
 		PathTarget *target = context->pd[depth].inner_target;
 
@@ -1035,6 +1035,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	List	   *hash_keys_stacked = NIL;
 	List	   *gist_quals_stacked = NIL;
 	List	   *fallback_tlist = NIL;
+	uint32_t	kvecs_bufsz;
 	ListCell   *lc;
 
 	Assert(pp_info->num_rels == list_length(custom_plans));
@@ -1123,10 +1124,11 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(context);
 	pp_info->kexp_join_kvars_load_packed = codegen_build_join_loadvars(context);
 	codegen_build_packed_gistevals(context, pp_info);
-	pp_info->kvars_depth  = context->kvars_depth;
-	pp_info->kvars_resno  = context->kvars_resno;
-	pp_info->kvars_types  = context->kvars_types;
-	pp_info->kvars_exprs  = context->kvars_exprs;
+	pp_info->kvars_deflist = context->kvars_deflist;
+	kvecs_bufsz = context->pd[0].kvec_usage;
+	for (int i=0; i <= context->num_rels; i++)
+		kvecs_bufsz = Max(kvecs_bufsz, context->pd[i+1].kvec_usage);
+	pp_info->kvecs_bufsz = KVEC_ALIGN(kvecs_bufsz);
 	pp_info->extra_flags  = context->extra_flags;
 	pp_info->extra_bufsz  = context->extra_bufsz;
 	pp_info->used_params  = context->used_params;
@@ -2191,8 +2193,7 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
 	TupleTableSlot *base_slot = pts->base_slot;
 	TupleTableSlot *fallback_slot = pts->fallback_slot;
-	int				slot_id = 0;
-	ListCell	   *lc1, *lc2;
+	ListCell	   *lc;
 
 	ExecForceStoreHeapTuple(tuple, base_slot, false);
 	econtext->ecxt_scantuple = base_slot;
@@ -2228,18 +2229,20 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 	slot_getallattrs(base_slot);
 	Assert(fallback_slot != NULL);
     ExecStoreAllNullTuple(fallback_slot);
-	forboth (lc1, pp_info->kvars_depth,
-			 lc2, pp_info->kvars_resno)
+	foreach (lc, pp_info->kvars_deflist)
 	{
-		int		depth = lfirst_int(lc1);
-		int		resno = lfirst_int(lc2);
+		codegen_kvar_defitem *kvdef = lfirst(lc);
 
-		if (depth == 0 && resno >= 1 && resno <= base_slot->tts_nvalid)
+		if (kvdef->kv_depth == 0 &&
+			kvdef->kv_resno >= 1 &&
+			kvdef->kv_resno <= base_slot->tts_nvalid)
 		{
-			fallback_slot->tts_isnull[slot_id] = base_slot->tts_isnull[resno-1];
-			fallback_slot->tts_values[slot_id] = base_slot->tts_isnull[resno-1];
+			int		dst = kvdef->fb_slot_id;
+			int		src = kvdef->kv_resno - 1;
+
+			fallback_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
+			fallback_slot->tts_values[dst] = base_slot->tts_values[src];
 		}
-		slot_id++;
 	}
 	econtext->ecxt_scantuple = fallback_slot;
 	/* Run JOIN, if any */

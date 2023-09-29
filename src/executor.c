@@ -450,12 +450,8 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
 	uint32_t		nparams = (param_info ? param_info->numParams : 0);
-	uint32_t		kvars_nbytes;
-	uint32_t		kvars_nslots;
-	uint32_t		kvars_ndims;
 	uint32_t		session_sz;
 	kern_session_info *session;
-	ListCell	   *lc1, *lc2;
 	XpuCommand	   *xcmd;
 	StringInfoData	buf;
 	bytea		   *xpucode;
@@ -576,35 +572,10 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, sz);
 	}
 	/* other database session information */
-	kvars_nslots = list_length(pp_info->kvars_depth);
-	Assert(kvars_nslots == list_length(pp_info->kvars_resno) &&
-		   kvars_nslots == list_length(pp_info->kvars_types));
-	kvars_nbytes = (sizeof(kern_variable) * kvars_nslots +
-					sizeof(int)           * kvars_nslots);
-	kvars_ndims  = pts->num_rels + 1;
-	forboth (lc1, pp_info->kvars_depth,
-			 lc2, pp_info->kvars_types)
-	{
-		int		depth = lfirst_int(lc1);
-		Oid		type_oid = lfirst_oid(lc2);
-		devtype_info *dtype;
-
-		if (depth >= 0 && kvars_ndims <= depth)
-			kvars_ndims = depth + 1;
-
-		if (OidIsValid(type_oid) &&
-			(dtype = pgstrom_devtype_lookup(type_oid)) != NULL)
-		{
-			kvars_nbytes = TYPEALIGN(dtype->type_alignof, kvars_nbytes);
-			kvars_nbytes += dtype->type_sizeof;
-		}
-	}
-	kvars_nbytes = MAXALIGN(kvars_nbytes);
 	session->query_plan_id = ps_state->query_plan_id;
+	session->kcxt_kvecs_bufsz = pp_info->kvecs_bufsz;
+	session->kcxt_kvecs_ndims = pp_info->num_rels + 2;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
-	session->kcxt_kvars_nslots = kvars_nslots;
-	session->kcxt_kvars_nbytes = kvars_nbytes;
-	session->kcxt_kvars_ndims  = kvars_ndims;
 	session->xpu_task_flags = pts->xpu_task_flags;
 	session->hostEpochTimestamp = SetEpochTimestamp();
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
@@ -1214,24 +1185,22 @@ __fixup_fallback_projection(Node *node, void *__data)
 {
 	pgstromPlanInfo *pp_info = __data;
 	ListCell   *lc;
-	int			slot_id = 0;
 
 	if (!node)
 		return NULL;
-	foreach (lc, pp_info->kvars_exprs)
+	foreach (lc, pp_info->kvars_deflist)
 	{
-		Node   *curr = lfirst(lc);
+		codegen_kvar_defitem *kvdef = lfirst(lc);
 
-		if (equal(node, curr))
+		if (equal(kvdef->kv_expr, node))
 		{
 			return (Node *)makeVar(INDEX_VAR,
-								   slot_id+1,
+								   kvdef->fb_slot_id,
 								   exprType(node),
 								   exprTypmod(node),
 								   exprCollation(node),
 								   0);
 		}
-		slot_id++;
 	}
 
 	if (IsA(node, Var))
@@ -1290,24 +1259,20 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 		 * follows the kvars_slot layout.
 		 * Then, it works as a source of fallback_proj.
 		 */
-		int		nslots = list_length(pp_info->kvars_exprs);
-		int		slot_id = 0;
+		int		nslots = list_length(pp_info->kvars_deflist);
 		bool	meet_junk = false;
 
-		Assert(nslots == list_length(pp_info->kvars_depth) &&
-			   nslots == list_length(pp_info->kvars_resno));
 		fallback_tdesc = CreateTemplateTupleDesc(nslots);
-		foreach (lc, pp_info->kvars_exprs)
+		foreach (lc, pp_info->kvars_deflist)
 		{
-			Node	   *expr = lfirst(lc);
+			codegen_kvar_defitem *kvdef = lfirst(lc);
 
 			TupleDescInitEntry(fallback_tdesc,
-							   slot_id + 1,
-							   psprintf("KVAR_%u", slot_id),
-							   exprType(expr),
-							   exprTypmod(expr),
+							   kvdef->fb_slot_id + 1,
+							   psprintf("KVAR_%u", kvdef->fb_slot_id),
+							   exprType((Node *)kvdef->kv_expr),
+							   exprTypmod((Node *)kvdef->kv_expr),
 							   0);
-			slot_id++;
 		}
 		pts->fallback_slot = MakeSingleTupleTableSlot(fallback_tdesc,
 													  &TTSOpsVirtual);
@@ -2053,7 +2018,6 @@ pgstromExplainTaskState(CustomScanState *node,
 	char			   *str;
 	double				ntuples;
 	uint64_t			stat_ntuples = 0;
-	devtype_info	   *dtype;
 
 	/* setup deparse context */
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
@@ -2277,25 +2241,11 @@ pgstromExplainTaskState(CustomScanState *node,
 	 */
 	if (es->verbose)
 	{
-		int		kvars_nslots = list_length(pp_info->kvars_depth);
-		size_t	kvars_nbytes = (sizeof(kern_variable) * kvars_nslots +
-								sizeof(int)           * kvars_nslots);
-		foreach (lc, pp_info->kvars_types)
-		{
-			Oid		type_oid = lfirst_oid(lc);
-
-			if (OidIsValid(type_oid) &&
-				(dtype = pgstrom_devtype_lookup(type_oid)) != NULL)
-			{
-				kvars_nbytes = TYPEALIGN(dtype->type_alignof, kvars_nbytes);
-				kvars_nbytes += dtype->type_sizeof;
-			}
-		}
 		resetStringInfo(&buf);
-		appendStringInfo(&buf, "nslots: %u, nbytes: %zu",
-						 kvars_nslots,
-						 kvars_nbytes);
-		ExplainPropertyText("KVars", buf.data, es);
+		appendStringInfo(&buf, "nbytes: %u, ndims: %d",
+						 pp_info->kvecs_bufsz,
+						 pp_info->num_rels + 2);
+		ExplainPropertyText("Kvecs Buffer", buf.data, es);
 
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Scan VarLoads OpCode",

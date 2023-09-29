@@ -81,12 +81,9 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 
 		kvars_deflist = lappend(kvars_deflist, sublist);
 	}
-	privs = lappend(privs, kvars_deflist);
-	privs = lappend(privs, pp_info->kvars_depth);	//deprecated
-	privs = lappend(privs, pp_info->kvars_resno);	//deprecated
-	privs = lappend(privs, pp_info->kvars_types);	//deprecated
-	privs = lappend(privs, pp_info->kvars_exprs);	//deprecated
 	/* other planner fields */
+	privs = lappend(privs, kvars_deflist);
+	privs = lappend(privs, makeInteger(pp_info->kvecs_bufsz));
 	privs = lappend(privs, makeInteger(pp_info->extra_flags));
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
 	privs = lappend(privs, pp_info->fallback_tlist);
@@ -204,10 +201,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 
 		pp_data.kvars_deflist = lappend(pp_data.kvars_deflist, kvdef);
 	}
-	pp_data.kvars_depth = list_nth(privs, pindex++);	//deprecated
-	pp_data.kvars_resno = list_nth(privs, pindex++);	//deprecated
-	pp_data.kvars_types = list_nth(privs, pindex++);	//deprecated
-	pp_data.kvars_exprs = list_nth(privs, pindex++);	//deprecated
+	pp_data.kvecs_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.extra_flags = intVal(list_nth(privs, pindex++));
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.fallback_tlist = list_nth(privs, pindex++);
@@ -279,10 +273,6 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 		kvdef_dest->kv_expr = copyObject(kvdef_dest->kv_expr);
 		pp_dest->kvars_deflist = lappend(pp_dest->kvars_deflist, kvdef_dest);
 	}
-	pp_dest->kvars_depth      = list_copy(pp_dest->kvars_depth);	//deprecated
-	pp_dest->kvars_resno      = list_copy(pp_dest->kvars_resno);	//deprecated
-	pp_dest->kvars_types      = list_copy(pp_dest->kvars_types);	//deprecated
-	pp_dest->kvars_exprs      = copyObject(pp_dest->kvars_exprs);	//deprecated
 	pp_dest->fallback_tlist   = copyObject(pp_dest->fallback_tlist);
 	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
 	for (int j=0; j < pp_orig->num_rels; j++)

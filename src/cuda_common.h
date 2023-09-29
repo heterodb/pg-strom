@@ -146,6 +146,7 @@ typedef struct {
 	kern_errorbuf	kerror;
 	uint32_t		grid_sz;
 	uint32_t		block_sz;
+	uint32_t		kvecs_bufsz;
 	uint32_t		extra_sz;
 	uint32_t		kvars_nslots;	/* width of the kvars slot */
 	uint32_t		kvars_nbytes;	/* extra buffer size of kvars-slot */

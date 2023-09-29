@@ -303,10 +303,7 @@ typedef struct
 	bytea	   *kexp_groupby_keycomp;
 	bytea	   *kexp_groupby_actions;
 	List	   *kvars_deflist;
-	List	   *kvars_depth;	//deprecated
-	List	   *kvars_resno;	//deprecated
-	List	   *kvars_types;	/* type-oid, if it needs extra buffer on kvars-slot */
-	List	   *kvars_exprs;	//deprecated
+	uint32_t	kvecs_bufsz;	/* unit size of vectorized kernel values */
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
 	/* fallback projection */
@@ -519,7 +516,6 @@ extern int		heterodbExtraGetError(const char **p_filename,
 									  unsigned int *p_lineno,
 									  const char **p_funcname,
 									  char *buffer, size_t buffer_sz);
-
 /*
  * codegen.c
  */
@@ -540,6 +536,7 @@ typedef struct
 typedef struct
 {
 	int			elevel;			/* ERROR or DEBUG2 */
+	int			curr_depth;
 	Expr	   *top_expr;
 	List	   *used_params;
 	uint32_t	required_flags;
@@ -548,16 +545,9 @@ typedef struct
 	uint32_t	device_cost;
 	uint32_t	kexp_flags;
 	List	   *kvars_deflist;
-	List	   *kvars_depth;	//deprecated
-	List	   *kvars_resno;	//deprecated
-	List	   *kvars_types;	//deprecated
-	List	   *kvars_exprs;	//deprecated
 	List	   *tlist_dev;
-	uint32_t	kvars_nslots;		//deprecated
-	List	   *input_rels_tlist;	//deprecated
-
-	int			max_depth;		/* <-- (num_rels+1) */
 	Index		scan_relid;		/* depth==0 */
+	int			num_rels;
 	struct {
 		PathTarget *inner_target;
 		uint32_t	kvec_usage;
@@ -651,7 +641,6 @@ extern Path	   *pgstromTryFindGistIndex(PlannerInfo *root,
 										Index base_scan_relid,
 										List *inner_target_list,
 										pgstromPlanInnerInfo *pp_inner);
-
 /*
  * relscan.c
  */

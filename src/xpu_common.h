@@ -2060,6 +2060,21 @@ struct kern_aggregate_desc
 };
 typedef struct kern_aggregate_desc	kern_aggregate_desc;
 
+struct kern_varload_desc
+{
+	int32_t		kv_resno;
+	uint32_t	kv_offset;
+	TypeOpCode	kv_type_code;
+	bool		kv_typbyval;
+	int8_t		kv_typalign;
+	int16_t		kv_typlen;
+	const struct xpu_datum_operators *kv_ops;
+};
+typedef struct kern_varload_desc	kern_varload_desc;
+
+
+
+
 #define KERN_EXPRESSION_MAGIC	(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
 #define KEXP_FLAG__IS_PUSHED_DOWN		0x0001U
@@ -2085,6 +2100,7 @@ struct kern_expression
 		} c;		/* ConstExpr */
 		struct {
 			uint32_t	param_id;
+			char		__data[1];
 		} p;		/* ParamExpr */
 		struct {
 			int16_t		var_typlen;		//deprecated
@@ -2094,6 +2110,7 @@ struct kern_expression
 			/* ------------------------ */
 			int32_t		var_depth;
 			uint32_t	var_offset;
+			char		__data[1];
 		} v;		/* VarExpr */
 		struct {
 			uint32_t	case_comp;		/* key value to be compared, if any */
@@ -2101,31 +2118,50 @@ struct kern_expression
 			char		data[1]			__MAXALIGNED__;
 		} casewhen;	/* Case-When */
 		struct {
-			uint32_t	slot_id;		/* temporary slot-id */
-			uint32_t	slot_bufsz;		/* if >0, alloca(slot_bufsz) */
-			bool		elem_byval;		/* attbyval of the element type */
-			int8_t		elem_align;		/* attalign of the element type */
-			int16_t		elem_len;		/* attlen of the element type */
+			uint32_t	slot_id;		//deprecated
+			uint32_t	slot_bufsz;		//deprecated
+			bool		elem_byval;		//deprecated
+			int8_t		elem_align;		//deprecated
+			int16_t		elem_len;		//deprecated
 			/* ------------------------------------------------------ */
-			kern_vars_defitem evar;		/* working buffer of element */
+			int32_t		elem_depth;
+			uint32_t	elem_offset;
+			TypeOpCode	elem_type_code;
+			bool		elem_typbyval;
+			int8_t		elem_typalign;
+			int16_t		elem_typlen;
+			const struct xpu_datum_operators *elem_ops;
 			char		data[1]			__MAXALIGNED__;
 		} saop;		/* ScalarArrayOp */
 		struct {
 			int			depth;
 			int			nloads;
 			kern_vars_defitem kvars[1];
+//			kern_varload_desc desc[1];
 		} load;		/* VarLoads */
 		struct {
-			int			gist_depth;	/* special depth for GiST index */
 			uint32_t	gist_oid;	/* OID of GiST index (for EXPLAIN) */
-			kern_vars_defitem ivar;	/* index item reference */
-			char		data[1]		__MAXALIGNED__;
+			int32_t		gist_depth;
+			int32_t		gist_resno;
+			uint32_t	gist_offset;
+			TypeOpCode	gist_type_code;
+			bool		gist_typbyval;
+			int8_t		gist_typalign;
+			int16_t		gist_typlen;
+			const struct xpu_datum_operators *gist_ops;
+			kern_vars_defitem ivar;	//deprecated
+			char		data[1]			__MAXALIGNED__;
 		} gist;		/* GiSTEval */
 		struct {
 			uint32_t	slot_id;	//deprecated
 			uint32_t	slot_off;	//deprecated
-
-			kern_vars_defitem svar;		/* temporary storage */
+			/*----------------------*/
+			int32_t		sv_depth;
+			uint32_t	sv_offset;
+			TypeOpCode	sv_type_code;
+			bool		sv_typbyval;
+			int8_t		sv_typalign;
+			int16_t		sv_typlen;
 			char		data[1]		__MAXALIGNED__;
 		} save;		/* SaveExpr */
 		struct {
@@ -2190,9 +2226,9 @@ __KEXP_IS_VALID(const kern_expression *kexp,
 #define SizeOfKernExpr(__PAYLOAD_SZ)						\
 	(offsetof(kern_expression, u.data) + (__PAYLOAD_SZ))
 #define SizeOfKernExprParam					\
-	(offsetof(kern_expression, u.p.param_id) + sizeof(uint32_t))
+	(offsetof(kern_expression, u.p.__data))
 #define SizeOfKernExprVar					\
-	(offsetof(kern_expression, u.v.var_slot_id) + sizeof(int))
+	(offsetof(kern_expression, u.v.__data))
 typedef struct {
 	FuncOpCode		func_opcode;
 	xpu_function_t	func_dptr;
@@ -2234,16 +2270,14 @@ typedef struct
 typedef struct kern_session_info
 {
 	uint64_t	query_plan_id;		/* unique-id to use per-query buffer */
-	uint32_t	kcxt_kvars_nslots;	/* kcxt->kvars_nslots */
-	uint32_t	kcxt_kvars_nbytes;	/* byte length of kvars_slot[], kvars_class[] and
-									 * kvars-buffer (for xpu_array_t, xpu_composite_t
-									 * and xpu_geometry_t) */
-	uint32_t	kcxt_kvars_ndims;	/* number of kvars_slot for each warp; it is
-									 * usually equivalent to (nrels+1), however,
-									 * GiST-index support may consume more slots.
-									 */
+#if 1
+	uint32_t	kcxt_kvars_nslots;	//deprecated
+	uint32_t	kcxt_kvars_nbytes;	//deprecated
+	uint32_t	kcxt_kvars_ndims;	//deprecated
+#endif
+	uint32_t	kcxt_kvecs_bufsz;	/* length of kvecs buffer */
+	uint32_t	kcxt_kvecs_ndims;	/* =(num_rels + 2) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
-
 	uint32_t	xpu_task_flags;		/* mask of device flags */
 	/* xpucode for this session */
 	uint32_t	xpucode_scan_load_vars;

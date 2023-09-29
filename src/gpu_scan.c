@@ -683,6 +683,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 {
 	codegen_context *context;
 	CustomScan	   *cscan;
+	uint32_t		kvecs_bufsz;
 
 	context = create_codegen_context(best_path, pp_info);
 	/* code generation for WHERE-clause */
@@ -693,15 +694,18 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	pp_info->kexp_projection = codegen_build_projection(context);
 	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(context);
 	pp_info->kvars_deflist = context->kvars_deflist;
-	pp_info->kvars_depth = context->kvars_depth;
-	pp_info->kvars_resno = context->kvars_resno;
-	pp_info->kvars_types = context->kvars_types;
-	pp_info->kvars_exprs = context->kvars_exprs;
 	pp_info->extra_flags = context->extra_flags;
 	pp_info->extra_bufsz = context->extra_bufsz;
 	pp_info->used_params = context->used_params;
-
 	__build_explain_tlist_junks(root, baserel, context);
+
+	/* assign kvec buffer size for this scan */
+	pp_info->kvars_deflist = context->kvars_deflist;
+	kvecs_bufsz = context->pd[0].kvec_usage;
+	for (int i=0; i <= context->num_rels; i++)
+		kvecs_bufsz = Max(kvecs_bufsz, context->pd[i+1].kvec_usage);
+	pp_info->kvecs_bufsz = KVEC_ALIGN(kvecs_bufsz);
+
 	/*
 	 * Build CustomScan(GpuScan) node
 	 */

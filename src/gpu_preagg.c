@@ -1278,14 +1278,6 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 		Index	keyref = lfirst_int(lc2);
 
 		add_column_to_pathtarget(con->target_partial, key, keyref);
-//		pp_info->groupby_keys = lappend(pp_info->groupby_keys, key);
-		pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
-											   keyref == 0
-											   ? KAGG_ACTION__VREF_NOKEY
-											   : KAGG_ACTION__VREF);
-		pp_info->kvars_depth = lappend_int(pp_info->kvars_depth, -1);
-		pp_info->kvars_resno = lappend_int(pp_info->kvars_resno,
-										   list_length(con->target_partial->exprs));
 	}
 	set_pathtarget_cost_width(root, con->target_final);
 	set_pathtarget_cost_width(root, con->target_partial);
