@@ -1790,7 +1790,7 @@ kern_form_heaptuple(kern_context *kcxt,
 	/* has any NULL attributes? */
 	for (int j=0; j < nattrs; j++)
 	{
-		uint32_t	slot_id = kproj->u.proj.desc[j].slot_id;
+		uint32_t	slot_id = kproj->u.proj.desc[j].proj_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
 		if (kcxt->kvars_class[slot_id] == KVAR_CLASS__NULL)
@@ -1823,7 +1823,7 @@ kern_form_heaptuple(kern_context *kcxt,
 	for (int j=0; j < nattrs; j++)
 	{
 		const kern_colmeta *cmeta = &kds_dst->colmeta[j];
-		const kern_vars_defitem *pdesc = &kproj->u.proj.desc[j];
+		const kern_vars_defitem *pdesc = &kproj->u.proj.__kvars[j];
 		const kern_variable *kvar = &kcxt->kvars_slot[pdesc->slot_id];
 		int			vclass = kcxt->kvars_class[pdesc->slot_id];
 		int			nbytes;

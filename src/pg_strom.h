@@ -291,9 +291,9 @@ typedef struct
 	List	   *brin_index_conds;	/* BRIN-index key conditions */
 	List	   *brin_index_quals;	/* Original BRIN-index qualifier */
 	/* XPU code for JOIN */
-	bytea	   *kexp_scan_kvars_load;	/* VarLoads at depth=0 */
+	bytea	   *kexp_load_vars_packed;	/* LoadVars[] */
+	bytea	   *kexp_move_vars_packed;	/* MoveVars[] */
 	bytea	   *kexp_scan_quals;
-	bytea	   *kexp_join_kvars_load_packed; /* VarLoads at depth>0 */
 	bytea	   *kexp_join_quals_packed;
 	bytea	   *kexp_hash_keys_packed;
 	bytea	   *kexp_gist_evals_packed;
@@ -521,15 +521,16 @@ extern int		heterodbExtraGetError(const char **p_filename,
  */
 typedef struct
 {
-	int			fb_slot_id;		/* slot-id of the CPU fallback tuple-slot */
+	int			kv_slot_id;		/* slot-id of kernel varslot / CPU fallback */
 	int			kv_depth;		/* source depth */
-	int			kv_resno;		/* source resno, or -1 if working variable */
+	int			kv_resno;		/* source resno, if exist */
+	int			kv_maxref;		/* max depth that references this column */
+	int			kv_offset;		/* offset of the vectorized buffer, if any */
 	Oid			kv_type_oid;	/* Type OID */
+	TypeOpCode	kv_type_code;	/* device type opcode */
 	bool		kv_typbyval;	/* typbyval from the catalog */
 	int8_t		kv_typalign;	/* typalign from the catalog */
 	int16_t		kv_typlen;		/* typlen from the catalog */
-	TypeOpCode	kv_type_code;	/* device type opcode */
-	int			kv_offset;		/* offset from the head of vectorized buffer */
 	Expr	   *kv_expr;		/* original expression */
 } codegen_kvar_defitem;
 
@@ -546,11 +547,12 @@ typedef struct
 	uint32_t	kexp_flags;
 	List	   *kvars_deflist;
 	List	   *tlist_dev;
+	int			kvecs_ndims;
+	uint32_t	kvecs_usage;
 	Index		scan_relid;		/* depth==0 */
 	int			num_rels;
 	struct {
 		PathTarget *inner_target;
-		uint32_t	kvec_usage;
 	} pd[1];
 } codegen_context;
 
@@ -564,12 +566,8 @@ extern devfunc_info *devtype_lookup_compare_func(devtype_info *dtype, Oid coll_i
 
 extern codegen_context *create_codegen_context(CustomPath *cpath,
 											   pgstromPlanInfo *pp_info);
-extern bytea   *codegen_build_qualifiers(codegen_context *context,
-										 List *dev_quals);
-extern bytea   *codegen_build_scan_loadvars(codegen_context *context);
 extern bytea   *codegen_build_scan_quals(codegen_context *context,
 										 List *dev_quals);
-extern bytea   *codegen_build_join_loadvars(codegen_context *context);
 extern bytea   *codegen_build_packed_joinquals(codegen_context *context,
 											   List *stacked_join_quals,
 											   List *stacked_other_quals);
@@ -580,6 +578,12 @@ extern void		codegen_build_packed_gistevals(codegen_context *context,
 extern bytea   *codegen_build_projection(codegen_context *context);
 extern void		codegen_build_groupby_actions(codegen_context *context,
 											  pgstromPlanInfo *pp_info);
+
+extern void		codegen_build_packed_kvars_load(codegen_context *context,
+												pgstromPlanInfo *pp_info);
+extern void		codegen_build_packed_kvars_move(codegen_context *context,
+												pgstromPlanInfo *pp_info);
+
 extern void		codegen_build_packed_xpucode(bytea **p_xpucode,
 											 List *exprs_list,
 											 bool inject_hash_value,
@@ -593,6 +597,9 @@ extern bool		pgstrom_xpu_expression(Expr *expr,
 									   Index scan_relid,
 									   List *inner_target_list,
 									   int *p_devcost);
+extern void		pgstrom_explain_kvars_slot(const CustomScanState *css,
+										   ExplainState *es,
+										   List *dcontext);
 extern void		pgstrom_explain_xpucode(const CustomScanState *css,
 										ExplainState *es,
 										List *dcontext,

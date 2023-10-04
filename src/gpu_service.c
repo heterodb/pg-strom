@@ -1267,84 +1267,180 @@ gpuClientELogByExtraModule(gpuClient *gclient)
  * gpuservHandleOpenSession
  */
 static bool
-__resolveDevicePointersWalker(gpuContext *gcontext,
-							  kern_expression *kexp,
-							  char *emsg, size_t emsg_sz)
+__lookupDeviceTypeOper(gpuContext *gcontext,
+					   const xpu_datum_operators **p_expr_ops,
+					   TypeOpCode type_code,
+					   char *emsg, size_t emsg_sz)
 {
-	xpu_function_catalog_entry *xpu_func;
 	xpu_type_catalog_entry *xpu_type;
-	kern_expression *karg;
-	int			i;
 
-	/* lookup device function */
-	xpu_func = hash_search(gcontext->cuda_func_htab,
-						   &kexp->opcode,
-						   HASH_FIND, NULL);
-	if (!xpu_func)
-	{
-		snprintf(emsg, emsg_sz,
-				 "device function pointer for opcode:%u not found.",
-				 (int)kexp->opcode);
-		return false;
-	}
-	kexp->fn_dptr = xpu_func->func_dptr;
-
-	/* lookup device type operator */
 	xpu_type = hash_search(gcontext->cuda_type_htab,
-						   &kexp->exptype,
+						   &type_code,
 						   HASH_FIND, NULL);
 	if (!xpu_type)
 	{
 		snprintf(emsg, emsg_sz,
 				 "device type pointer for opcode:%u not found.",
-				 (int)kexp->exptype);
+				 (int)type_code);
 		return false;
 	}
-	kexp->expr_ops = xpu_type->type_ops;
+	*p_expr_ops = xpu_type->type_ops;
+	return true;
+}
 
-	/* special case if CASE ... WHEN */
-	if (kexp->opcode == FuncOpCode__CaseWhenExpr)
+static bool
+__lookupDeviceFuncDptr(gpuContext *gcontext,
+					   xpu_function_t *p_func_dptr,
+					   FuncOpCode func_code,
+					   char *emsg, size_t emsg_sz)
+{
+	xpu_function_catalog_entry *xpu_func;
+
+	xpu_func = hash_search(gcontext->cuda_func_htab,
+						   &func_code,
+						   HASH_FIND, NULL);
+	if (!xpu_func)
 	{
-		if (kexp->u.casewhen.case_comp)
-		{
-			karg = (kern_expression *)((char *)kexp + kexp->u.casewhen.case_comp);
-			if (!__KEXP_IS_VALID(kexp,karg))
-			{
-				snprintf(emsg, emsg_sz,
-						 "XPU code corruption at kexp (%d)", kexp->opcode);
-				return false;
-			}
-			if (!__resolveDevicePointersWalker(gcontext, karg, emsg, emsg_sz))
-				return false;
-
-		}
-		if (kexp->u.casewhen.case_else)
-		{
-			karg = (kern_expression *)((char *)kexp + kexp->u.casewhen.case_else);
-			if (!__KEXP_IS_VALID(kexp,karg))
-			{
-				snprintf(emsg, emsg_sz,
-						 "XPU code corruption at kexp (%d)", kexp->opcode);
-				return false;
-			}
-			if (!__resolveDevicePointersWalker(gcontext, karg, emsg, emsg_sz))
-				return false;
-		}
+		snprintf(emsg, emsg_sz,
+				 "device function pointer for opcode:%u not found.",
+				 (int)func_code);
+		return false;
 	}
+	*p_func_dptr = xpu_func->func_dptr;
+	return true;
+}
 
+static bool
+__resolveDevicePointersWalker(gpuContext *gcontext,
+							  kern_expression *kexp,
+							  char *emsg, size_t emsg_sz)
+{
+	kern_expression *karg;
+	int		i;
+
+	if (!__lookupDeviceFuncDptr(gcontext,
+								&kexp->fn_dptr,
+								kexp->opcode,
+								emsg, emsg_sz))
+		return false;
+
+	if (!__lookupDeviceTypeOper(gcontext,
+								&kexp->expr_ops,
+								kexp->exptype,
+								emsg, emsg_sz))
+		return false;
+
+	/* some special cases */
+	switch (kexp->opcode)
+	{
+		case FuncOpCode__CaseWhenExpr:
+			if (kexp->u.casewhen.case_comp)
+			{
+				karg = (kern_expression *)
+					((char *)kexp + kexp->u.casewhen.case_comp);
+				if (!__KEXP_IS_VALID(kexp,karg))
+					goto corruption;
+				if (!__resolveDevicePointersWalker(gcontext, karg,
+												   emsg, emsg_sz))
+					return false;
+			}
+			if (kexp->u.casewhen.case_else)
+			{
+				karg = (kern_expression *)
+					((char *)kexp + kexp->u.casewhen.case_else);
+				if (!__KEXP_IS_VALID(kexp,karg))
+					goto corruption;
+				if (!__resolveDevicePointersWalker(gcontext, karg,
+												   emsg, emsg_sz))
+					return false;
+			}
+			break;
+
+		case FuncOpCode__ScalarArrayOpAny:
+		case FuncOpCode__ScalarArrayOpAll:
+			if (!__lookupDeviceTypeOper(gcontext,
+										&kexp->u.saop.elem_ops,
+										kexp->u.saop.elem_type_code,
+										emsg, emsg_sz))
+				return false;
+			break;
+			
+		case FuncOpCode__LoadVars:
+			for (i=0; i < kexp->u.load.nitems; i++)
+			{
+				if (!__lookupDeviceTypeOper(gcontext,
+											&kexp->u.load.desc[i].kv_ops,
+											kexp->u.load.desc[i].kv_type_code,
+											emsg, emsg_sz))
+					return false;
+			}
+			break;
+
+		case FuncOpCode__MoveVars:
+			for (i=0; i < kexp->u.move.nitems; i++)
+			{
+				if (!__lookupDeviceTypeOper(gcontext,
+											&kexp->u.move.desc[i].kv_ops,
+											kexp->u.move.desc[i].kv_type_code,
+											emsg, emsg_sz))
+					return false;
+			}
+			break;
+
+		case FuncOpCode__GiSTEval:
+			if (!__lookupDeviceTypeOper(gcontext,
+										&kexp->u.gist.gist_ops,
+										kexp->u.gist.gist_type_code,
+										emsg, emsg_sz))
+				return false;
+			break;
+			
+		case FuncOpCode__SaveExpr:
+			if (!__lookupDeviceTypeOper(gcontext,
+										&kexp->u.save.sv_ops,
+										kexp->u.save.sv_type_code,
+										emsg, emsg_sz))
+				return false;
+			break;
+
+		case FuncOpCode__Projection:
+			if (kexp->u.proj.ctid_is_valid)
+			{
+				if (!__lookupDeviceTypeOper(gcontext,
+											&kexp->u.proj.ctid.proj_ops,
+											kexp->u.proj.ctid.proj_type_code,
+											emsg, emsg_sz))
+					return false;
+			}
+			
+			for (i=0; i < kexp->u.proj.nattrs; i++)
+			{
+				if (!__lookupDeviceTypeOper(gcontext,
+											&kexp->u.proj.desc[i].proj_ops,
+											kexp->u.proj.desc[i].proj_type_code,
+											emsg, emsg_sz))
+					return false;
+			}
+			break;
+
+		default:
+			break;
+	}
+	/* walk on the arguments */
 	for (i=0, karg = KEXP_FIRST_ARG(kexp);
 		 i < kexp->nr_args;
 		 i++, karg = KEXP_NEXT_ARG(karg))
 	{
 		if (!__KEXP_IS_VALID(kexp,karg))
-		{
-			snprintf(emsg, emsg_sz, "XPU code corruption at kexp (%d)", kexp->opcode);
-			return false;
-		}
+			goto corruption;
 		if (!__resolveDevicePointersWalker(gcontext, karg, emsg, emsg_sz))
 			return false;
 	}
 	return true;
+
+corruption:
+	snprintf(emsg, emsg_sz, "XPU code corruption at kexp (%d)", kexp->opcode);
+	return false;
 }
 
 static bool
@@ -1352,13 +1448,14 @@ __resolveDevicePointers(gpuContext *gcontext,
 						kern_session_info *session,
 						char *emsg, size_t emsg_sz)
 {
-	xpu_encode_info	*encode = SESSION_ENCODE(session);
+	kern_varslot_desc *kvslot_desc = SESSION_KVARS_SLOT_DESC(session);
+	xpu_encode_info *encode = SESSION_ENCODE(session);
 	kern_expression *__kexp[20];
-	int			i, nitems = 0;
+	int		nitems = 0;
 
-	__kexp[nitems++] = SESSION_KEXP_SCAN_LOAD_VARS(session);
+	__kexp[nitems++] = SESSION_KEXP_LOAD_VARS(session, -1);
+	__kexp[nitems++] = SESSION_KEXP_MOVE_VARS(session, -1);
 	__kexp[nitems++] = SESSION_KEXP_SCAN_QUALS(session);
-	__kexp[nitems++] = SESSION_KEXP_JOIN_LOAD_VARS(session, -1);
 	__kexp[nitems++] = SESSION_KEXP_JOIN_QUALS(session, -1);
 	__kexp[nitems++] = SESSION_KEXP_HASH_VALUE(session, -1);
 	__kexp[nitems++] = SESSION_KEXP_GIST_EVALS(session, -1);
@@ -1368,7 +1465,7 @@ __resolveDevicePointers(gpuContext *gcontext,
 	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYCOMP(session);
 	__kexp[nitems++] = SESSION_KEXP_GROUPBY_ACTIONS(session);
 
-	for (i=0; i < nitems; i++)
+	for (int i=0; i < nitems; i++)
 	{
 		if (__kexp[i] && !__resolveDevicePointersWalker(gcontext,
 														__kexp[i],
@@ -1376,11 +1473,22 @@ __resolveDevicePointers(gpuContext *gcontext,
 			return false;
 	}
 
+	/* fixup kern_varslot_desc also */
+	for (int i=0; i < session->kcxt_kvars_nslots; i++)
+	{
+		if (!__lookupDeviceTypeOper(gcontext,
+									&kvslot_desc[i].kv_ops,
+									kvslot_desc[i].kv_type_code,
+									emsg, emsg_sz))
+			return false;
+	}
+
+	/**/
 	if (encode)
 	{
 		xpu_encode_info *catalog = gcontext->cuda_encode_catalog;
 
-		for (i=0; ; i++)
+		for (int i=0; ; i++)
 		{
 			if (!catalog[i].enc_mblen || catalog[i].enc_maxlen < 1)
 			{

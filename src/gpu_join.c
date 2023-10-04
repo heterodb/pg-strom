@@ -732,7 +732,7 @@ __build_fallback_exprs_join_walker(Node *node, void *data)
 		if (equal(node, kvar->kv_expr))
 		{
 			return (Node *)makeVar(INDEX_VAR,
-								   kvar->fb_slot_id,
+								   kvar->kv_slot_id,
 								   exprType(node),
 								   exprTypmod(node),
 								   exprCollation(node),
@@ -1035,7 +1035,6 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	List	   *hash_keys_stacked = NIL;
 	List	   *gist_quals_stacked = NIL;
 	List	   *fallback_tlist = NIL;
-	uint32_t	kvecs_bufsz;
 	ListCell   *lc;
 
 	Assert(pp_info->num_rels == list_length(custom_plans));
@@ -1121,14 +1120,12 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	pp_info->kexp_hash_keys_packed
 		= codegen_build_packed_hashkeys(context,
 										hash_keys_stacked);
-	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(context);
-	pp_info->kexp_join_kvars_load_packed = codegen_build_join_loadvars(context);
 	codegen_build_packed_gistevals(context, pp_info);
+	codegen_build_packed_kvars_load(context, pp_info);
+	codegen_build_packed_kvars_move(context, pp_info);
+
 	pp_info->kvars_deflist = context->kvars_deflist;
-	kvecs_bufsz = context->pd[0].kvec_usage;
-	for (int i=0; i <= context->num_rels; i++)
-		kvecs_bufsz = Max(kvecs_bufsz, context->pd[i+1].kvec_usage);
-	pp_info->kvecs_bufsz = KVEC_ALIGN(kvecs_bufsz);
+	pp_info->kvecs_bufsz = KVEC_ALIGN(context->kvecs_usage);
 	pp_info->extra_flags  = context->extra_flags;
 	pp_info->extra_bufsz  = context->extra_bufsz;
 	pp_info->used_params  = context->used_params;
@@ -2020,11 +2017,11 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
 	kern_expression *kexp_join_kvars_load = NULL;
 
-	if (pp_info->kexp_join_kvars_load_packed)
+	if (pp_info->kexp_load_vars_packed)
 	{
 		const kern_expression *temp = (const kern_expression *)
-			VARDATA(pp_info->kexp_join_kvars_load_packed);
-		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth-1);
+			VARDATA(pp_info->kexp_load_vars_packed);
+		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth);
 	}
 	Assert(kds_in->format == KDS_FORMAT_ROW);
 
@@ -2078,11 +2075,11 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	uint32_t		hash;
 	ListCell	   *lc1, *lc2;
 
-	if (pp_info->kexp_join_kvars_load_packed)
+	if (pp_info->kexp_load_vars_packed)
 	{
 		const kern_expression *temp = (const kern_expression *)
-			VARDATA(pp_info->kexp_join_kvars_load_packed);
-		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth-1);
+			VARDATA(pp_info->kexp_load_vars_packed);
+		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth);
 	}
 	Assert(kds_in->format == KDS_FORMAT_HASH);
 
@@ -2237,7 +2234,7 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 			kvdef->kv_resno >= 1 &&
 			kvdef->kv_resno <= base_slot->tts_nvalid)
 		{
-			int		dst = kvdef->fb_slot_id;
+			int		dst = kvdef->kv_slot_id;
 			int		src = kvdef->kv_resno - 1;
 
 			fallback_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
@@ -2262,11 +2259,11 @@ __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 	kern_data_store	   *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth-1);
 	bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth-1);
 
-	if (pp_info->kexp_join_kvars_load_packed)
+	if (pp_info->kexp_load_vars_packed)
 	{
 		const kern_expression *temp = (const kern_expression *)
-			VARDATA(pp_info->kexp_join_kvars_load_packed);
-		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth-1);
+			VARDATA(pp_info->kexp_load_vars_packed);
+		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth);
 	}
 	Assert(oj_map != NULL);
 

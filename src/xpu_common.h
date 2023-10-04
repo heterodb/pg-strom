@@ -343,6 +343,7 @@ typedef enum {
 	/* for projection */
 	FuncOpCode__Projection = 9999,
 	FuncOpCode__LoadVars,
+	FuncOpCode__MoveVars,
 	FuncOpCode__JoinQuals,
 	FuncOpCode__HashValue,
 	FuncOpCode__GiSTEval,
@@ -1965,6 +1966,8 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME4))			\
 		return false
 
+#if 1
+//deprecated
 typedef struct
 {
 	int32_t			var_resno;		//deprecated
@@ -1980,6 +1983,7 @@ typedef struct
 	int16_t			kv_typlen;
 	const struct xpu_datum_operators *kv_ops;
 } kern_vars_defitem;
+#endif
 
 #define KAGG_ACTION__VREF			101		/* simple var copy */
 #define KAGG_ACTION__VREF_NOKEY		102		/* simple var copy; but not a grouping-
@@ -2050,20 +2054,26 @@ typedef struct
 struct kern_aggregate_desc
 {
 	uint32_t	action;			/* any of KAGG_ACTION__* */
-	int32_t		arg0_depth;
-	uint32_t	arg0_offset;
-	int32_t		arg1_depth;
-	uint32_t	arg1_offset;
-	/* --deprecated-- */
-	int16_t		arg0_slot_id;	//deprecated
-	int16_t		arg1_slot_id;	//deprecated
+	int32_t		arg0_slot_id;
+	int32_t		arg1_slot_id;
 };
 typedef struct kern_aggregate_desc	kern_aggregate_desc;
 
+struct kern_projection_desc
+{
+	int32_t		proj_slot_id;
+	TypeOpCode	proj_type_code;
+	bool		proj_typbyval;
+	int8_t		proj_typalign;
+	int16_t		proj_typlen;
+	const struct xpu_datum_operators *proj_ops;
+};
+typedef struct kern_projection_desc	kern_projection_desc;
+
 struct kern_varload_desc
 {
-	int32_t		kv_resno;
-	uint32_t	kv_offset;
+	int16_t		kv_resno;		/* resno of the source */
+	int16_t		kv_slot_id;		/* slot-id to load the datum  */
 	TypeOpCode	kv_type_code;
 	bool		kv_typbyval;
 	int8_t		kv_typalign;
@@ -2072,8 +2082,31 @@ struct kern_varload_desc
 };
 typedef struct kern_varload_desc	kern_varload_desc;
 
+struct kern_varmove_desc
+{
+	int32_t		kv_offset;		/* source & destination kvecs-offset */
+	int16_t		kv_slot_id;		/* source slot-id. */
+	bool		kv_from_xdatum; /* true, if variable is originated from the current
+								 * depth, so values must be copied from the xdatum,
+								 * not kvecs-buffer.
+								 */
+	TypeOpCode	kv_type_code;
+	bool		kv_typbyval;
+	int8_t		kv_typalign;
+	int16_t		kv_typlen;
+	const struct xpu_datum_operators *kv_ops;
+};
+typedef struct kern_varmove_desc	kern_varmove_desc;
 
-
+struct kern_varslot_desc
+{
+	TypeOpCode	kv_type_code;
+	bool		kv_typbyval;
+	int8_t		kv_typalign;
+	int16_t		kv_typlen;
+	const struct xpu_datum_operators *kv_ops;
+};
+typedef struct kern_varslot_desc	kern_varslot_desc;
 
 #define KERN_EXPRESSION_MAGIC	(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
@@ -2106,10 +2139,9 @@ struct kern_expression
 			int16_t		var_typlen;		//deprecated
 			bool		var_typbyval;	//deprecated
 			uint8_t		var_typalign;	//deprecated
-			uint32_t	var_slot_id;	/* deprecated */
 			/* ------------------------ */
-			int32_t		var_depth;
-			uint32_t	var_offset;
+			int16_t		var_slot_id;
+			int32_t		var_offset;		/* valid, if load from the kvec-buffer */
 			char		__data[1];
 		} v;		/* VarExpr */
 		struct {
@@ -2124,8 +2156,7 @@ struct kern_expression
 			int8_t		elem_align;		//deprecated
 			int16_t		elem_len;		//deprecated
 			/* ------------------------------------------------------ */
-			int32_t		elem_depth;
-			uint32_t	elem_offset;
+			int16_t		elem_slot_id;
 			TypeOpCode	elem_type_code;
 			bool		elem_typbyval;
 			int8_t		elem_typalign;
@@ -2135,15 +2166,21 @@ struct kern_expression
 		} saop;		/* ScalarArrayOp */
 		struct {
 			int			depth;
-			int			nloads;
-			kern_vars_defitem kvars[1];
-//			kern_varload_desc desc[1];
+			int			nloads;			//deprecated
+			int			nitems;
+			kern_vars_defitem kvars[1];		//deprecated
+			kern_varload_desc desc[1];
 		} load;		/* VarLoads */
 		struct {
+			int			depth;		/* kvecs-buffer to write-out */
+			int			nitems;
+			kern_varmove_desc desc[1];
+		} move;
+		struct {
 			uint32_t	gist_oid;	/* OID of GiST index (for EXPLAIN) */
-			int32_t		gist_depth;
-			int32_t		gist_resno;
-			uint32_t	gist_offset;
+			int16_t		gist_depth;
+			int16_t		gist_resno;
+			int32_t		gist_slot_id;
 			TypeOpCode	gist_type_code;
 			bool		gist_typbyval;
 			int8_t		gist_typalign;
@@ -2156,12 +2193,12 @@ struct kern_expression
 			uint32_t	slot_id;	//deprecated
 			uint32_t	slot_off;	//deprecated
 			/*----------------------*/
-			int32_t		sv_depth;
-			uint32_t	sv_offset;
+			int32_t		sv_slot_id;
 			TypeOpCode	sv_type_code;
 			bool		sv_typbyval;
 			int8_t		sv_typalign;
 			int16_t		sv_typlen;
+			const struct xpu_datum_operators *sv_ops;
 			char		data[1]		__MAXALIGNED__;
 		} save;		/* SaveExpr */
 		struct {
@@ -2171,8 +2208,9 @@ struct kern_expression
 		struct {
 			int			nattrs;
 			bool		ctid_is_valid;
-			kern_vars_defitem ctid;	/* source of ctid system column, if any */
-			kern_vars_defitem desc[1];
+			kern_projection_desc ctid;	/* source of ctid system column, if any */
+			kern_projection_desc desc[1];
+			kern_vars_defitem  __kvars[1]; //deprecated
 		} proj;		/* Projection */
 		struct {
 			uint32_t	npacked;	/* number of packed sub-expressions; including
@@ -2271,18 +2309,21 @@ typedef struct kern_session_info
 {
 	uint64_t	query_plan_id;		/* unique-id to use per-query buffer */
 #if 1
-	uint32_t	kcxt_kvars_nslots;	//deprecated
 	uint32_t	kcxt_kvars_nbytes;	//deprecated
 	uint32_t	kcxt_kvars_ndims;	//deprecated
 #endif
+	uint32_t	kcxt_kvars_nslots;	/* number of kvars slot */
+	uint32_t	kcxt_kvars_defs;	/* offset of kvars_slot_desc[] array */
 	uint32_t	kcxt_kvecs_bufsz;	/* length of kvecs buffer */
 	uint32_t	kcxt_kvecs_ndims;	/* =(num_rels + 2) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
 	/* xpucode for this session */
-	uint32_t	xpucode_scan_load_vars;
+	uint32_t	xpucode_load_vars_packed;
+	uint32_t	xpucode_move_vars_packed;
+	uint32_t	xpucode_scan_load_vars;			//deprecated
 	uint32_t	xpucode_scan_quals;
-	uint32_t	xpucode_join_load_vars_packed;
+	uint32_t	xpucode_join_load_vars_packed;	//deprecated
 	uint32_t	xpucode_join_quals_packed;
 	uint32_t	xpucode_hash_values_packed;
 	uint32_t	xpucode_gist_evals_packed;
@@ -2390,20 +2431,14 @@ typedef struct
 /*
  * kern_session_info utility functions.
  */
-INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_SCAN_LOAD_VARS(kern_session_info *session)
+INLINE_FUNCTION(kern_varslot_desc *)
+SESSION_KVARS_SLOT_DESC(const kern_session_info *session)
 {
-	if (session->xpucode_scan_load_vars == 0)
+	if (session->kcxt_kvars_nslots == 0 ||
+		session->kcxt_kvars_defs == 0)
 		return NULL;
-	return (kern_expression *)((char *)session + session->xpucode_scan_load_vars);
-}
 
-INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_SCAN_QUALS(kern_session_info *session)
-{
-	if (session->xpucode_scan_quals == 0)
-		return NULL;
-	return (kern_expression *)((char *)session + session->xpucode_scan_quals);
+	return (kern_varslot_desc *)((char *)session + session->kcxt_kvars_defs);
 }
 
 INLINE_FUNCTION(kern_expression *)
@@ -2425,25 +2460,51 @@ __PICKUP_PACKED_KEXP(const kern_expression *kexp, int dindex)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_JOIN_LOAD_VARS(kern_session_info *session, int dindex)
+SESSION_KEXP_LOAD_VARS(kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
 
-	if (session->xpucode_join_load_vars_packed == 0)
+	if (session->xpucode_load_vars_packed == 0)
 		return NULL;
 	kexp = (kern_expression *)
-		((char *)session + session->xpucode_join_load_vars_packed);
-	if (dindex < 0)
+		((char *)session + session->xpucode_load_vars_packed);
+	if (depth < 0)
 		return kexp;
-	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	karg = __PICKUP_PACKED_KEXP(kexp, depth);
 	assert(!karg || (karg->opcode == FuncOpCode__LoadVars &&
 					 karg->exptype == TypeOpCode__int4));
 	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int dindex)
+SESSION_KEXP_MOVE_VARS(kern_session_info *session, int depth)
+{
+	kern_expression *kexp;
+	kern_expression *karg;
+
+	if (session->xpucode_move_vars_packed == 0)
+		return NULL;
+	kexp = (kern_expression *)
+		((char *)session + session->xpucode_move_vars_packed);
+	if (depth < 0)
+		return kexp;
+	karg = __PICKUP_PACKED_KEXP(kexp, depth);
+	assert(!karg || (karg->opcode == FuncOpCode__LoadVars &&
+					 karg->exptype == TypeOpCode__int4));
+	return karg;
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_SCAN_QUALS(kern_session_info *session)
+{
+	if (session->xpucode_scan_quals == 0)
+		return NULL;
+	return (kern_expression *)((char *)session + session->xpucode_scan_quals);
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
@@ -2452,16 +2513,16 @@ SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int dindex)
 		return NULL;
 	kexp = (kern_expression *)
 		((char *)session + session->xpucode_join_quals_packed);
-	if (dindex < 0)
+	if (depth < 0)
 		return kexp;
-	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	karg = __PICKUP_PACKED_KEXP(kexp, depth);
 	assert(!karg || (karg->opcode == FuncOpCode__JoinQuals &&
 					 karg->exptype == TypeOpCode__bool));
 	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_HASH_VALUE(kern_session_info *session, int dindex)
+SESSION_KEXP_HASH_VALUE(kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
@@ -2470,16 +2531,16 @@ SESSION_KEXP_HASH_VALUE(kern_session_info *session, int dindex)
 		return NULL;
 	kexp = (kern_expression *)
 		((char *)session + session->xpucode_hash_values_packed);
-	if (dindex < 0)
+	if (depth < 0)
 		return kexp;
-	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	karg = __PICKUP_PACKED_KEXP(kexp, depth);
 	assert(!karg || (karg->opcode == FuncOpCode__HashValue &&
 					 karg->exptype == TypeOpCode__int4));
 	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GIST_EVALS(kern_session_info *session, int dindex)
+SESSION_KEXP_GIST_EVALS(kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
@@ -2488,9 +2549,9 @@ SESSION_KEXP_GIST_EVALS(kern_session_info *session, int dindex)
 		return NULL;
 	kexp = (kern_expression *)
 		((char *)session + session->xpucode_gist_evals_packed);
-	if (dindex < 0)
+	if (depth < 0)
 		return kexp;
-	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	karg = __PICKUP_PACKED_KEXP(kexp, depth);
 	assert(!karg || karg->opcode == FuncOpCode__GiSTEval);
 	return karg;
 }

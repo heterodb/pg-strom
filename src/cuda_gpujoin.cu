@@ -98,9 +98,9 @@ execGpuJoinNestLoop(kern_context *kcxt,
 			tupitem = (kern_tupitem *)((char *)kds_heap +
 									   kds_heap->length -
 									   __kds_unpack(offset));
-			kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth-1);
+			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, &tupitem->htup);
-			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth-1);
+			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp, &status))
 			{
 				assert(!XPU_DATUM_ISNULL(&status));
@@ -118,7 +118,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 		else if (left_outer && index >= kds_heap->nitems && !matched)
 		{
 			/* fill up NULL fields, if FULL/LEFT OUTER JOIN */
-			kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth-1);
+			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, NULL);
 			tuple_is_valid = true;
 			l_state = UINT_MAX;
@@ -246,7 +246,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 		{
 			xpu_int4_t	hash;
 
-			kexp = SESSION_KEXP_HASH_VALUE(kcxt->session, depth-1);
+			kexp = SESSION_KEXP_HASH_VALUE(kcxt->session, depth);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp, &hash))
 			{
 				assert(!XPU_DATUM_ISNULL(&hash));
@@ -279,9 +279,9 @@ execGpuJoinHashJoin(kern_context *kcxt,
 	{
 		xpu_int4_t	status;
 
-		kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth-1);
+		kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 		ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, &khitem->t.htup);
-		kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth-1);
+		kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
 		if (EXEC_KERN_EXPRESSION(kcxt, kexp, &status))
 		{
 			assert(!XPU_DATUM_ISNULL(&status));
@@ -303,7 +303,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			l_state != UINT_MAX && !matched)
 		{
 			/* load NULL values on the inner portion */
-			 kexp = SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth-1);
+			 kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 			 ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, NULL);
 			 tuple_is_valid = true;
 		}
@@ -450,9 +450,9 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		if (read_pos < WARP_WRITE_POS(wp,gist_depth))
 		{
 			const kern_expression *kexp_load
-				= SESSION_KEXP_JOIN_LOAD_VARS(kcxt->session, depth-1);
+				= SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 			const kern_expression *kexp_join
-				= SESSION_KEXP_JOIN_QUALS(kcxt->session, depth-1);
+				= SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
 
 			index = (read_pos % UNIT_TUPLES_PER_DEPTH);
 			kcxt->kvars_slot = (kern_variable *)
@@ -782,7 +782,7 @@ kern_gpujoin_main(kern_session_info *session,
 			depth = execGpuScanLoadSource(kcxt, wp,
 										  kds_src,
 										  kds_extra,
-										  SESSION_KEXP_SCAN_LOAD_VARS(session),
+										  SESSION_KEXP_LOAD_VARS(session, 0),
 										  SESSION_KEXP_SCAN_QUALS(session),
 										  kvars_addr_wp,	/* depth=0 */
 										  &smx_row_count);
@@ -833,7 +833,7 @@ kern_gpujoin_main(kern_session_info *session,
 		{
 			/* GiST-INDEX-JOIN */
 			const kern_expression *kexp_gist
-				= SESSION_KEXP_GIST_EVALS(kcxt->session, depth-1);
+				= SESSION_KEXP_GIST_EVALS(kcxt->session, depth);
 
 			assert(kexp_gist != NULL &&
 				   kexp_gist->opcode == FuncOpCode__GiSTEval &&
@@ -880,7 +880,7 @@ kern_gpujoin_main(kern_session_info *session,
 			for (int i=0; i < n_rels; i++)
 			{
 				const kern_expression *kexp_gist
-					= SESSION_KEXP_GIST_EVALS(session, i);
+					= SESSION_KEXP_GIST_EVALS(session, i+1);
 				if (kexp_gist)
 				{
 					int		gist_depth = kexp_gist->u.gist.gist_depth;

@@ -390,6 +390,34 @@ __build_session_param_info(pgstromTaskState *pts,
 	}
 }
 
+static void
+__buils_session_kvars_defs(pgstromTaskState *pts,
+						   kern_session_info *session,
+						   StringInfo buf)
+{
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	kern_varslot_desc *kvars_defs;
+	uint32_t	nitems = list_length(pp_info->kvars_deflist);
+	uint32_t	sz = sizeof(kern_varslot_desc) * nitems;
+	uint32_t	i = 0;
+	ListCell   *lc;
+
+	kvars_defs = alloca(sz);
+	memset(kvars_defs, 0, sz);
+	foreach (lc, pp_info->kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+		kern_varslot_desc *desc = &kvars_defs[i++];
+
+		desc->kv_type_code = kvdef->kv_type_code;
+		desc->kv_typbyval  = kvdef->kv_typbyval;
+		desc->kv_typalign  = kvdef->kv_typalign;
+		desc->kv_typlen    = kvdef->kv_typlen;
+	}
+	session->kcxt_kvars_nslots = nitems;
+	session->kcxt_kvars_defs = __appendBinaryStringInfo(buf, kvars_defs, sz);
+}
+
 static uint32_t
 __build_session_xact_state(StringInfo buf)
 {
@@ -463,10 +491,20 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	__appendZeroStringInfo(&buf, session_sz);
 	if (param_info)
 		__build_session_param_info(pts, session, &buf);
-	if (pp_info->kexp_scan_kvars_load)
+	if (pp_info->kvars_deflist != NIL)
+		__buils_session_kvars_defs(pts, session, &buf);
+	if (pp_info->kexp_load_vars_packed)
 	{
-		xpucode = pp_info->kexp_scan_kvars_load;
-		session->xpucode_scan_load_vars =
+		xpucode = pp_info->kexp_load_vars_packed;
+		session->xpucode_load_vars_packed =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+	}
+	if (pp_info->kexp_move_vars_packed)
+	{
+		xpucode = pp_info->kexp_move_vars_packed;
+		session->xpucode_move_vars_packed =
 			__appendBinaryStringInfo(&buf,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
@@ -475,14 +513,6 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	{
 		xpucode = pp_info->kexp_scan_quals;
 		session->xpucode_scan_quals =
-			__appendBinaryStringInfo(&buf,
-									 VARDATA(xpucode),
-									 VARSIZE(xpucode) - VARHDRSZ);
-	}
-	if (pp_info->kexp_join_kvars_load_packed)
-	{
-		xpucode = pp_info->kexp_join_kvars_load_packed;
-		session->xpucode_join_load_vars_packed =
 			__appendBinaryStringInfo(&buf,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
@@ -1195,7 +1225,7 @@ __fixup_fallback_projection(Node *node, void *__data)
 		if (equal(kvdef->kv_expr, node))
 		{
 			return (Node *)makeVar(INDEX_VAR,
-								   kvdef->fb_slot_id,
+								   kvdef->kv_slot_id,
 								   exprType(node),
 								   exprTypmod(node),
 								   exprCollation(node),
@@ -1268,8 +1298,8 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 			codegen_kvar_defitem *kvdef = lfirst(lc);
 
 			TupleDescInitEntry(fallback_tdesc,
-							   kvdef->fb_slot_id + 1,
-							   psprintf("KVAR_%u", kvdef->fb_slot_id),
+							   kvdef->kv_slot_id + 1,
+							   psprintf("KVAR_%u", kvdef->kv_slot_id),
 							   exprType((Node *)kvdef->kv_expr),
 							   exprTypmod((Node *)kvdef->kv_expr),
 							   0);
@@ -2246,16 +2276,16 @@ pgstromExplainTaskState(CustomScanState *node,
 						 pp_info->kvecs_bufsz,
 						 pp_info->num_rels + 2);
 		ExplainPropertyText("Kvecs Buffer", buf.data, es);
-
+		pgstrom_explain_kvars_slot(&pts->css, es, dcontext);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
-								"Scan VarLoads OpCode",
-								pp_info->kexp_scan_kvars_load);
+								"LoadVars OpCode",
+								pp_info->kexp_load_vars_packed);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"MoveVars OpCode",
+								pp_info->kexp_move_vars_packed);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Scan Quals OpCode",
 								pp_info->kexp_scan_quals);
-		pgstrom_explain_xpucode(&pts->css, es, dcontext,
-								"Join VarLoads OpCode",
-								pp_info->kexp_join_kvars_load_packed);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Join Quals OpCode",
 								pp_info->kexp_join_quals_packed);
@@ -2265,10 +2295,8 @@ pgstromExplainTaskState(CustomScanState *node,
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"GiST-Index Join OpCode",
 								pp_info->kexp_gist_evals_packed);
-		snprintf(label, sizeof(label),
-				 "%s Projection OpCode", xpu_label);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
-								label,
+								"Projection OpCode",
 								pp_info->kexp_projection);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Group-By KeyHash OpCode",

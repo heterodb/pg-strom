@@ -83,24 +83,16 @@ typedef struct
 		uint32_t	write;		/* write_pos of depth=X */
 	} pos[1];		/* variable length */
 	/*
+	 * above fields are always kept in the device shared memory.
 	 * <----- __KERN_WARP_CONTEXT_BASESZ ----->
-	 * Above fields are always kept in the device shared memory.
-	 *
-	 * +-------------------------------------------------------------+------
-	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-0) |
-	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-1) |
-	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-2) | depth=0
-	 * |      :                    :                     :           |
-	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-63)|
-	 * +-------------------------------------------------------------+------
-	 *        :                    :                     :
-	 * +-------------------------------------------------------------+------
-	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-0) |
-	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-1) |
-	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-2) | depth=nrels
-	 * |      :                    :                     :           |
-	 * | kvars_slot[nslots] + kvars_class[nslots] + extra_sz (pos-63)|
-	 * +-------------------------------------------------------------+------
+	 * +-------------------------------------------------------+---------
+	 * | kernel vectorized variable buffer (depth-0)           |     ^
+	 * | kernel vectorized variable buffer (depth-1)           |     |
+	 * |                  :                                    | kvec_ndims
+	 * | kernel vectorized variable buffer (depth-[n_rels])    |  buffer
+	 * |                  :                                    |     |
+	 * | kernel vectorized variable buffer (depth-[n_dims-1])  |     V
+	 * +-------------------------------------------------------+---------
 	 */
 } kern_warp_context;
 

@@ -51,9 +51,9 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	exprs = lappend(exprs, pp_info->brin_index_conds);
 	exprs = lappend(exprs, pp_info->brin_index_quals);
 	/* XPU code */
-	privs = lappend(privs, __makeByteaConst(pp_info->kexp_scan_kvars_load));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_load_vars_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_move_vars_packed));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_scan_quals));
-	privs = lappend(privs, __makeByteaConst(pp_info->kexp_join_kvars_load_packed));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_join_quals_packed));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_hash_keys_packed));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_gist_evals_packed));
@@ -68,15 +68,17 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 		codegen_kvar_defitem *kvdef = lfirst(lc);
 		List		   *sublist = NIL;
 
-		sublist = lappend(sublist, makeInteger(kvdef->fb_slot_id));
+		sublist = lappend(sublist, makeInteger(kvdef->kv_slot_id));
 		sublist = lappend(sublist, makeInteger(kvdef->kv_depth));
 		sublist = lappend(sublist, makeInteger(kvdef->kv_resno));
+		sublist = lappend(sublist, makeInteger(kvdef->kv_maxref));
+		sublist = lappend(sublist, makeInteger(kvdef->kv_offset));
+
 		sublist = lappend(sublist, makeInteger(kvdef->kv_type_oid));
+		sublist = lappend(sublist, makeInteger(kvdef->kv_type_code));
 		sublist = lappend(sublist, makeBoolean(kvdef->kv_typbyval));
 		sublist = lappend(sublist, makeInteger(kvdef->kv_typalign));
 		sublist = lappend(sublist, makeInteger(kvdef->kv_typlen));
-		sublist = lappend(sublist, makeInteger(kvdef->kv_offset));
-		sublist = lappend(sublist, makeInteger(kvdef->kv_type_code));
 		sublist = lappend(sublist, kvdef->kv_expr);
 
 		kvars_deflist = lappend(kvars_deflist, sublist);
@@ -167,17 +169,17 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.brin_index_conds = list_nth(exprs, eindex++);
 	pp_data.brin_index_quals = list_nth(exprs, eindex++);
 	/* XPU code */
-	pp_data.kexp_scan_kvars_load = __getByteaConst(list_nth(privs, pindex++));
-	pp_data.kexp_scan_quals = __getByteaConst(list_nth(privs, pindex++));
-	pp_data.kexp_join_kvars_load_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_load_vars_packed  = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_move_vars_packed  = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_scan_quals        = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_join_quals_packed = __getByteaConst(list_nth(privs, pindex++));
-	pp_data.kexp_hash_keys_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_hash_keys_packed  = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_gist_evals_packed = __getByteaConst(list_nth(privs, pindex++));
-	pp_data.kexp_projection = __getByteaConst(list_nth(privs, pindex++));
-	pp_data.kexp_groupby_keyhash = __getByteaConst(list_nth(privs, pindex++));
-	pp_data.kexp_groupby_keyload = __getByteaConst(list_nth(privs, pindex++));
-	pp_data.kexp_groupby_keycomp = __getByteaConst(list_nth(privs, pindex++));
-	pp_data.kexp_groupby_actions = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_projection        = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_keyhash   = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_keyload   = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_keycomp   = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_actions   = __getByteaConst(list_nth(privs, pindex++));
 	/* Kvars definitions */
 	kvars_deflist = list_nth(privs, pindex++);
 	foreach (lc, kvars_deflist)
@@ -188,16 +190,17 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 
 		Assert(IsA(sublist, List));
 		kvdef = palloc0(sizeof(codegen_kvar_defitem));
-		kvdef->fb_slot_id  = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_slot_id  = intVal(list_nth(sublist, kvindex++));
 		kvdef->kv_depth    = intVal(list_nth(sublist, kvindex++));
 		kvdef->kv_resno    = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_maxref   = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_offset   = intVal(list_nth(sublist, kvindex++));
 		kvdef->kv_type_oid = intVal(list_nth(sublist, kvindex++));
+		kvdef->kv_type_code = intVal(list_nth(sublist, kvindex++));
 		kvdef->kv_typbyval = boolVal(list_nth(sublist, kvindex++));
 		kvdef->kv_typalign = intVal(list_nth(sublist, kvindex++));
 		kvdef->kv_typlen   = intVal(list_nth(sublist, kvindex++));
-		kvdef->kv_offset   = intVal(list_nth(sublist, kvindex++));
-		kvdef->kv_type_code = intVal(list_nth(sublist, kvindex++));
-		kvdef->kv_expr      = list_nth(sublist, kvindex++);
+		kvdef->kv_expr     = list_nth(sublist, kvindex++);
 
 		pp_data.kvars_deflist = lappend(pp_data.kvars_deflist, kvdef);
 	}
