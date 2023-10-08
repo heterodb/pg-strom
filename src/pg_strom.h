@@ -304,6 +304,7 @@ typedef struct
 	bytea	   *kexp_groupby_actions;
 	List	   *kvars_deflist;
 	uint32_t	kvecs_bufsz;	/* unit size of vectorized kernel values */
+	uint32_t	kvecs_ndims;
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
 	/* fallback projection */

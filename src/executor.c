@@ -604,7 +604,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	/* other database session information */
 	session->query_plan_id = ps_state->query_plan_id;
 	session->kcxt_kvecs_bufsz = pp_info->kvecs_bufsz;
-	session->kcxt_kvecs_ndims = pp_info->num_rels + 2;
+	session->kcxt_kvecs_ndims = pp_info->kvecs_ndims;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
 	session->xpu_task_flags = pts->xpu_task_flags;
 	session->hostEpochTimestamp = SetEpochTimestamp();

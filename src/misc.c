@@ -86,6 +86,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	/* other planner fields */
 	privs = lappend(privs, kvars_deflist);
 	privs = lappend(privs, makeInteger(pp_info->kvecs_bufsz));
+	privs = lappend(privs, makeInteger(pp_info->kvecs_ndims));
 	privs = lappend(privs, makeInteger(pp_info->extra_flags));
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
 	privs = lappend(privs, pp_info->fallback_tlist);
@@ -205,6 +206,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 		pp_data.kvars_deflist = lappend(pp_data.kvars_deflist, kvdef);
 	}
 	pp_data.kvecs_bufsz = intVal(list_nth(privs, pindex++));
+	pp_data.kvecs_ndims = intVal(list_nth(privs, pindex++));
 	pp_data.extra_flags = intVal(list_nth(privs, pindex++));
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.fallback_tlist = list_nth(privs, pindex++);

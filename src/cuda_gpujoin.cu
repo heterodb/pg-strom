@@ -725,8 +725,8 @@ kern_gpujoin_main(kern_session_info *session,
 {
 	kern_context	   *kcxt;
 	kern_warp_context  *wp, *wp_saved;
-	char			   *kvars_addr_wp;
-	uint32_t			kvars_chunksz;
+	char			   *kvec_buffer_base;
+	uint32_t			kvec_buffer_size;
 	uint32_t		   *l_state;
 	bool			   *matched;
 	uint32_t			wp_base_sz;
@@ -735,18 +735,21 @@ kern_gpujoin_main(kern_session_info *session,
 	__shared__ uint32_t smx_row_count;
 
 	assert(kgtask->kvars_nslots == session->kcxt_kvars_nslots &&
-		   kgtask->kvars_nbytes == session->kcxt_kvars_nbytes &&
-		   kgtask->kvars_ndims >= n_rels &&
-		   kgtask->n_rels == n_rels);
+		   kgtask->kvecs_bufsz  == session->kcxt_kvecs_bufsz &&
+		   kgtask->kvecs_ndims  >= n_rels &&
+		   kgtask->n_rels       == n_rels);
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session);
 	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(kgtask->kvars_ndims);
 	wp = (kern_warp_context *)SHARED_WORKMEM(wp_base_sz, get_local_id() / warpSize);
-	wp_saved = KERN_GPUTASK_WARP_CONTEXT(kgtask);
-	l_state = KERN_GPUTASK_LSTATE_ARRAY(kgtask);
-	matched = KERN_GPUTASK_MATCHED_ARRAY(kgtask);
-	kvars_chunksz = kcxt->kvars_nbytes * UNIT_TUPLES_PER_DEPTH;
-	kvars_addr_wp = (char *)wp_saved + wp_base_sz;
+	INIT_KERN_GPUTASK_SUBFIELDS(kgtask,
+								&wp_saved,
+								&l_state,
+								&matched);
+	kvec_buffer_base = (char *)wp_saved + wp_base_sz;
+	kvec_buffer_size = TYPEALIGN(CUDA_L1_CACHELINE_SZ, kcxt->kvecs_bufsz);
+#define KVEC_BUFFER(__depth)							\
+	(kvec_buffer_base + kvec_buffer_size * (__depth))
 
 	if (kgtask->resume_context)
 	{
@@ -764,11 +767,11 @@ kern_gpujoin_main(kern_session_info *session,
 			memset(wp, 0, wp_base_sz);
 		if (get_local_id() == 0)
 			smx_row_count = 0;
-		depth = 0;
-		if (l_state)
-			memset(l_state, 0, sizeof(uint32_t) * kgtask->kvars_ndims);
-		if (matched)
-			memset(matched, 0, sizeof(bool)     * kgtask->kvars_ndims);
+		for (depth=0; depth < kgtask->kvars_ndims; depth++)
+		{
+			l_state[depth * get_global_size() + get_global_id()] = 0;
+			matched[depth * get_global_size() + get_global_id()] = false;
+		}
 	}
 	__syncthreads();
 
@@ -784,7 +787,7 @@ kern_gpujoin_main(kern_session_info *session,
 										  kds_extra,
 										  SESSION_KEXP_LOAD_VARS(session, 0),
 										  SESSION_KEXP_SCAN_QUALS(session),
-										  kvars_addr_wp,	/* depth=0 */
+										  kvec_buffer_base,	/* depth=0 */
 										  &smx_row_count);
 		}
 		else if (depth > n_rels)
@@ -799,7 +802,8 @@ kern_gpujoin_main(kern_session_info *session,
 											  n_rels,
 											  kds_dst,
 											  SESSION_KEXP_PROJECTION(session),
-											  kvars_addr_wp + kvars_chunksz * n_rels,
+											  (kvec_buffer_base +
+											   kvec_buffer_size * n_rels),
 											  &try_suspend);
 			}
 			else
@@ -808,7 +812,8 @@ kern_gpujoin_main(kern_session_info *session,
 				depth = execGpuPreAggGroupBy(kcxt, wp,
 											 n_rels,
 											 kds_dst,
-											 kvars_addr_wp + kvars_chunksz * n_rels,
+											 (kvec_buffer_base +
+											  kvec_buffer_size * n_rels),
 											 &try_suspend);
 			}
 			if (__any_sync(__activemask(), try_suspend))
@@ -824,29 +829,41 @@ kern_gpujoin_main(kern_session_info *session,
 			depth = execGpuJoinNestLoop(kcxt, wp,
 										kmrels,
 										depth,
-										kvars_addr_wp + kvars_chunksz * (depth-1),
-										kvars_addr_wp + kvars_chunksz * depth,
-										l_state[depth-1],	/* call by reference */
-										matched[depth-1]);	/* call by reference */
+										(kvec_buffer_base +
+										 kvec_buffer_size * (depth-1)),
+										(kvec_buffer_base +
+										 kvec_buffer_size * depth),
+										l_state[get_global_size() * (depth-1) +
+												get_global_id()],	/* call by ref */
+										matched[get_global_size() * (depth-1) +
+												get_global_id()]);	/* call by ref */
 		}
 		else if (kmrels->chunks[depth-1].gist_offset != 0)
 		{
 			/* GiST-INDEX-JOIN */
 			const kern_expression *kexp_gist
 				= SESSION_KEXP_GIST_EVALS(kcxt->session, depth);
+			uint32_t		gist_depth;
 
 			assert(kexp_gist != NULL &&
 				   kexp_gist->opcode == FuncOpCode__GiSTEval &&
 				   kexp_gist->u.gist.gist_depth < kgtask->kvars_ndims);
+			gist_depth = kexp_gist->u.gist.gist_depth;
+
 			depth = execGpuJoinGiSTJoin(kcxt, wp,
 										kmrels,
 										depth,
-										kvars_addr_wp + kvars_chunksz * (depth-1),
-										kvars_addr_wp + kvars_chunksz * depth,
+										(kvec_buffer_base +
+										 kvec_buffer_size * (depth-1)),
+										(kvec_buffer_base +
+										 kvec_buffer_size * depth),
 										kexp_gist,
-										kvars_addr_wp + kvars_chunksz * kexp_gist->u.gist.gist_depth,
-										l_state[depth-1],	/* call by reference */
-										matched[depth-1]);	/* call by reference */
+										(kvec_buffer_base +
+										 kvec_buffer_size * gist_depth),
+										l_state[get_global_size() * (depth-1) +
+												get_global_id()],	/* call by ref */
+										matched[get_global_size() * (depth-1) +
+												get_global_id()]);	/* call by ref */
 		}
 		else
 		{
@@ -854,10 +871,14 @@ kern_gpujoin_main(kern_session_info *session,
 			depth = execGpuJoinHashJoin(kcxt, wp,
 										kmrels,
 										depth,
-										kvars_addr_wp + kvars_chunksz * (depth-1),
-										kvars_addr_wp + kvars_chunksz * depth,
-										l_state[depth-1],	/* call by reference */
-										matched[depth-1]);	/* call by reference */
+										(kvec_buffer_base +
+										 kvec_buffer_size * (depth-1)),
+										(kvec_buffer_base +
+										 kvec_buffer_size * depth),
+										l_state[get_global_size() * (depth-1) +
+												get_global_id()],	/* call by ref */
+										matched[get_global_size() * (depth-1) +
+												get_global_id()]);	/* call by ref */
 		}
 		assert(__shfl_sync(__activemask(), depth, 0) == depth);
 		/* bailout if any error status */

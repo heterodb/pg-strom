@@ -702,6 +702,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	/* assign kvec buffer size for this scan */
 	pp_info->kvars_deflist = context->kvars_deflist;
 	pp_info->kvecs_bufsz = KVEC_ALIGN(context->kvecs_usage);
+	pp_info->kvecs_ndims = context->kvecs_ndims;
 
 	/*
 	 * Build CustomScan(GpuScan) node

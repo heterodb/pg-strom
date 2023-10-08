@@ -96,41 +96,15 @@ typedef struct
 	 */
 } kern_warp_context;
 
-#define __KERN_WARP_CONTEXT_BASESZ(n_dims)				\
-	MAXALIGN(offsetof(kern_warp_context, pos[(n_dims)]))
-#define KERN_WARP_CONTEXT_UNITSZ(n_dims,nbytes)			\
-	(__KERN_WARP_CONTEXT_BASESZ(n_dims) +				\
-	 (nbytes) * UNIT_TUPLES_PER_DEPTH * (n_dims))
 #define WARP_READ_POS(warp,depth)		((warp)->pos[(depth)].read)
 #define WARP_WRITE_POS(warp,depth)		((warp)->pos[(depth)].write)
+#define __KERN_WARP_CONTEXT_BASESZ(kvecs_ndims)					\
+	TYPEALIGN(CUDA_L1_CACHELINE_SZ,								\
+			  offsetof(kern_warp_context, pos[(kvecs_ndims)]))
+#define KERN_WARP_CONTEXT_LENGTH(kvecs_ndims,kvecs_bufsz)		\
+	(__KERN_WARP_CONTEXT_BASESZ(kvecs_ndims) +					\
+	 (kvecs_ndims) * TYPEALIGN(CUDA_L1_CACHELINE_SZ,(kvecs_bufsz)))
 
-/*
- * definitions related to generic device executor routines
- */
-EXTERN_FUNCTION(int)
-execGpuScanLoadSource(kern_context *kcxt,
-					  kern_warp_context *wp,
-					  kern_data_store *kds_src,
-					  kern_data_extra *kds_extra,
-					  kern_expression *kexp_load_vars,
-					  kern_expression *kexp_scan_quals,
-					  char     *kvars_addr_wp,
-					  uint32_t *p_smx_row_count);
-EXTERN_FUNCTION(int)
-execGpuJoinProjection(kern_context *kcxt,
-					  kern_warp_context *wp,
-					  int n_rels,
-					  kern_data_store *kds_dst,
-					  kern_expression *kexp_projection,
-					  char *kvars_addr_wp,
-					  bool *p_try_suspend);
-EXTERN_FUNCTION(int)
-execGpuPreAggGroupBy(kern_context *kcxt,
-					 kern_warp_context *wp,
-					 int n_rels,
-					 kern_data_store *kds_final,
-					 char *kvars_addr_wp,
-					 bool *p_try_suspend);
 /*
  * Definitions related to GpuScan/GpuJoin/GpuPreAgg
  */
@@ -138,13 +112,13 @@ typedef struct {
 	kern_errorbuf	kerror;
 	uint32_t		grid_sz;
 	uint32_t		block_sz;
-	uint32_t		kvecs_bufsz;
+	uint32_t		kvars_nslots;	/* width of the kvars slot (scalar values) */
+	uint32_t		kvecs_bufsz;	/* length of the kvecs buffer (vectorized values) */
+	uint32_t		kvecs_ndims;	/* number of kvecs buffers for each warp */
 	uint32_t		extra_sz;
-	uint32_t		kvars_nslots;	/* width of the kvars slot */
-	uint32_t		kvars_nbytes;	/* extra buffer size of kvars-slot */
-	uint32_t		kvars_ndims;	/* # of kvars_slot for each warp; usually,
-									 * it is equivalend to n_rels+1, however,
-									 * GiST index support may consume more slots */
+
+	uint32_t		kvars_nbytes;	//deprecated
+	uint32_t		kvars_ndims;	//deprecated
 	uint32_t		n_rels;			/* >0, if JOIN is involved */
 	/* suspend/resume support */
 	bool			resume_context;
@@ -172,42 +146,70 @@ typedef struct {
 	 */
 } kern_gputask;
 
-#define __KERN_GPUTASK_WARP_OFFSET(n_rels,n_dims,nbytes,gid)			\
-	(MAXALIGN(offsetof(kern_gputask,stats[(n_rels)])) +					\
-	 KERN_WARP_CONTEXT_UNITSZ(n_dims,nbytes) * ((gid)/WARPSIZE))
+#define __KERN_GPUTASK_WARP_OFFSET(kvecs_ndims,kvecs_bufsz)				\
+	TYPEALIGN(CUDA_L1_CACHELINE_SZ, offsetof(kern_gputask, stats[(kvecs_ndims)]))
+#define KERN_GPUTASK_LENGTH(kvecs_ndims,kvecs_bufsz,n_threads)			\
+	(__KERN_GPUTASK_WARP_OFFSET((kvecs_ndims),(kvecs_bufsz)) +			\
+	 KERN_WARP_CONTEXT_LENGTH((kvecs_ndims),							\
+							  (kvecs_bufsz)) * (((n_threads) + WARPSIZE - 1) / WARPSIZE) + \
+	 MAXALIGN(sizeof(uint32_t) * (n_threads) * (kvecs_ndims)) +			\
+	 MAXALIGN(sizeof(bool)     * (n_threads) * (kvecs_ndims)))
 
-#define KERN_GPUTASK_WARP_CONTEXT(kgtask)								\
-	((kern_warp_context *)												\
-	 ((char *)(kgtask) +												\
-	  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,						\
-								 (kgtask)->kvars_ndims,					\
-								 (kgtask)->kvars_nbytes,				\
-								 get_global_id())))
-#define KERN_GPUTASK_LSTATE_ARRAY(kgtask)								\
-	((kgtask)->n_rels == 0 ? NULL : (uint32_t *)						\
-	 ((char *)(kgtask) +												\
-	  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,						\
-								 (kgtask)->kvars_ndims,					\
-								 (kgtask)->kvars_nbytes,				\
-								 get_global_size()) +					\
-	  sizeof(uint32_t) * (kgtask)->kvars_ndims * get_global_id()))
-#define KERN_GPUTASK_MATCHED_ARRAY(kgtask)								\
-	((kgtask)->n_rels == 0 ? NULL : (bool *)							\
-	 ((char *)(kgtask) +												\
-	  __KERN_GPUTASK_WARP_OFFSET((kgtask)->n_rels,						\
-								 (kgtask)->kvars_ndims,					\
-								 (kgtask)->kvars_nbytes,				\
-								 get_global_size()) +					\
-	  sizeof(uint32_t) * (kgtask)->kvars_ndims * get_global_size() +	\
-	  sizeof(bool)     * (kgtask)->kvars_ndims * get_global_id()))
+#if defined(__CUDACC__)
+INLINE_FUNCTION(void)
+INIT_KERN_GPUTASK_SUBFIELDS(kern_gputask *kgtask,
+							kern_warp_context **p_wp_context,
+							uint32_t **p_lstate_array,
+							bool **p_matched_array)
+{
+	uint32_t	wp_unitsz;
+	uint32_t	off;
+	char	   *pos;
 
-#define KERN_GPUTASK_LENGTH(n_rels,n_dims,nbytes,n_threads)				\
-	(__KERN_GPUTASK_WARP_OFFSET((n_rels),								\
-								(n_dims),								\
-								(nbytes),								\
-								(n_threads)) +							\
-	 sizeof(uint32_t) * (n_dims) * (n_threads) +						\
-	 sizeof(bool)     * (n_dims) * (n_threads))
+	wp_unitsz = KERN_WARP_CONTEXT_LENGTH(kgtask->kvecs_ndims,
+										 kgtask->kvecs_bufsz);
+	off = __KERN_GPUTASK_WARP_OFFSET(kgtask->kvecs_ndims,
+									 kgtask->kvecs_bufsz);
+	pos = (char *)kgtask + off;
+	off = wp_unitsz * (get_global_id() / warpSize);
+	*p_wp_context = (kern_warp_context *)(pos + off);
+	pos += wp_unitsz * (get_global_size() / warpSize);
+
+	*p_lstate_array  = (uint32_t *)pos;
+	pos += MAXALIGN(sizeof(uint32_t) * get_global_size() * kgtask->n_rels);
+
+	*p_matched_array = (bool *)pos;
+	pos += MAXALIGN(sizeof(bool)     * get_global_size() * kgtask->n_rels);
+}
+#endif
+
+/*
+ * Declarations related to generic device executor routines
+ */
+EXTERN_FUNCTION(int)
+execGpuScanLoadSource(kern_context *kcxt,
+					  kern_warp_context *wp,
+					  kern_data_store *kds_src,
+					  kern_data_extra *kds_extra,
+					  kern_expression *kexp_load_vars,
+					  kern_expression *kexp_scan_quals,
+					  char     *kvars_addr_wp,
+					  uint32_t *p_smx_row_count);
+EXTERN_FUNCTION(int)
+execGpuJoinProjection(kern_context *kcxt,
+					  kern_warp_context *wp,
+					  int n_rels,
+					  kern_data_store *kds_dst,
+					  kern_expression *kexp_projection,
+					  char *kvars_addr_wp,
+					  bool *p_try_suspend);
+EXTERN_FUNCTION(int)
+execGpuPreAggGroupBy(kern_context *kcxt,
+					 kern_warp_context *wp,
+					 int n_rels,
+					 kern_data_store *kds_final,
+					 char *kvars_addr_wp,
+					 bool *p_try_suspend);
 
 /*
  * Definitions related to GpuCache

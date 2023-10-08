@@ -340,15 +340,14 @@ typedef enum {
 	FuncOpCode__ScalarArrayOpAny,
 	FuncOpCode__ScalarArrayOpAll,
 #include "xpu_opcodes.h"
-	/* for projection */
-	FuncOpCode__Projection = 9999,
-	FuncOpCode__LoadVars,
+	FuncOpCode__LoadVars = 9999,
 	FuncOpCode__MoveVars,
 	FuncOpCode__JoinQuals,
 	FuncOpCode__HashValue,
 	FuncOpCode__GiSTEval,
 	FuncOpCode__SaveExpr,
 	FuncOpCode__AggFuncs,
+	FuncOpCode__Projection,
 	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
 	FuncOpCode__BuiltInMax,
 } FuncOpCode;
@@ -420,11 +419,15 @@ typedef struct
 	 * elsewhere (kvars_class[slot_id] >= 0), kvars_slot[slot_id].ptr points
 	 * variable length datum with this length; used for Arrow::Utf-8 or Binary.
 	 */
+	struct xpu_datum_t **kvars_values;
 	uint32_t		kvars_nslots;
-	uint32_t		kvars_nbytes;
-	kern_variable  *kvars_slot;
-	int			   *kvars_class;
-
+	uint32_t		kvecs_bufsz;
+	uint32_t		kvecs_ndims;
+#if 1
+	uint32_t		kvars_nbytes;	//deprecated
+	kern_variable  *kvars_slot;		//deprecated
+	int			   *kvars_class;	//deprecated
+#endif
 	/*
 	 * mode control flags
 	 *
@@ -440,6 +443,7 @@ typedef struct
 
 #define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
 	do {																\
+		const kern_varslot_desc *__kvdesc;								\
 		uint32_t	__bufsz = Max(512, (SESSION)->kcxt_extra_bufsz);	\
 		uint32_t	__len = offsetof(kern_context, vlbuf) +	__bufsz;	\
 																		\
@@ -447,9 +451,17 @@ typedef struct
 		memset(KCXT, 0, __len);											\
 		KCXT->session = (SESSION);										\
 		KCXT->kvars_nslots = (SESSION)->kcxt_kvars_nslots;				\
-		KCXT->kvars_nbytes = (SESSION)->kcxt_kvars_nbytes;				\
-		KCXT->kvars_slot = NULL;										\
-		KCXT->kvars_class = NULL;										\
+		KCXT->kvecs_bufsz  = (SESSION)->kcxt_kvecs_bufsz;				\
+		KCXT->kvecs_ndims  = (SESSION)->kcxt_kvecs_ndims;				\
+		KCXT->kvars_values = (struct xpu_datum_t **)					\
+			alloca(sizeof(struct xpu_datum_t *) * KCXT->kvars_nslots);	\
+		__kvdesc = SESSION_KVARS_SLOT_DESC(SESSION);					\
+		for (int __i=0; __i < KCXT->kvars_nslots; __i++)				\
+		{																\
+			const xpu_datum_operators *kv_ops =	__kvdesc[__i].kv_ops;	\
+			KCXT->kvars_values[__i] = (struct xpu_datum_t *)			\
+				alloca(kv_ops->xpu_type_sizeof);						\
+		}													   			\
 		KCXT->vlpos = KCXT->vlbuf;										\
 		KCXT->vlend = KCXT->vlbuf + __bufsz;							\
 	} while(0)
@@ -1614,17 +1626,74 @@ struct xpu_datum_operators {
 								 const xpu_datum_t *arg,	/* in */
 								 int *p_vclass,				/* out */
 								 kern_variable *p_kvar);	/* out */
+
+	/*
+	 * xpu_datum_heap_ref: called by LoadVars to load heap datum
+	 * to the xpu_datum slot, prior to execution of the kexp in
+	 * the current depth.
+	 * also, it is used to reference const and param.
+	 */
+	bool	  (*xpu_datum_heap_ref)(kern_context *kcxt,
+									int32_t attlen,			/* in */
+									int32_t atttypmod,		/* in */
+									const void *addr,		/* in */
+									xpu_datum_t *result);	/* out */
+	/*
+	 * xpu_datum_kvec_ref: called by VarExpr if it references the
+	 * preliminary loaded datum (e.g, outer values referenced by join
+	 * quals in depth > 0).
+	 * also, it is used to load values at the final depth (projection
+	 * and gpupreagg).
+	 */
+	bool	  (*xpu_datum_kvec_ref)(kern_context *kcxt,
+									const kvec_datum_t *kvec,	/* in */
+									int kvec_id,				/* in */
+									xpu_datum_t *result);		/* out */
+	/*
+	 * xpu_datum_kvec_store: called by MoveVars to save the xdatum,
+	 * which is newly loaded in this depth, to the vectorized kernel
+	 * values buffer.
+	 * The vectorized format intends utilization of memory coalescing
+	 * to save the amount of memory transactions onto the global memory.
+	 */
+	bool	  (*xpu_datum_kvec_store)(kern_context *kcxt,
+									  const xpu_datum_t *xdatum, /* in */
+									  kvec_datum_t *kvec,		/* out */
+									  int kvec_id);				/* out */
+	/*
+	 * xpu_datum_kvec_copy: called by MoveVars to copy the vectorized
+	 * kernel values from the previous depth to the next depth, without
+	 * transformation to xpu_datum format.
+	 * The vectorized format intends utilization of memory coalescing
+	 * to save the amount of memory transactions onto the global memory.
+	 */
+	bool	  (*xpu_datum_kvec_copy)(kern_context *kcxt,
+									 const kvec_datum_t *kvec_src,	/* in */
+									 int kvec_src_id,			/* in */
+									 kvec_datum_t *kvec_dst,	/* out */
+									 int kvec_dst_id);			/* out */
+	/*
+	 * xpu_datum_write: called by Projection or GpuPreAgg to write out
+	 * xdatum onto the destination/final buffer.
+	 */
 	int		  (*xpu_datum_write)(kern_context *kcxt,
-								 char *buffer,				/* out */
-								 const xpu_datum_t *xdatum);/* in */
+								 char *buffer,					/* out */
+								 const xpu_datum_t *xdatum);	/* in */
+	/*
+	 * xpu_datum_hash: calculation of hash value using pg_hash_any()
+	 */
 	bool	  (*xpu_datum_hash)(kern_context *kcxt,
 								uint32_t *p_hash,
 								const xpu_datum_t *arg);
+	/*
+	 * xpu_datum_comp: compares two xpu_datum values
+	 */
 	bool	  (*xpu_datum_comp)(kern_context *kcxt,
 								int *p_comp,				/* out */
 								const xpu_datum_t *a,		/* in */
 								const xpu_datum_t *b);		/* in */
-	//added for kvec support
+
+	//deprecated
 	bool	  (*xpu_datum_load_heap)(kern_context *kcxt,
 									 kvec_datum_t *result,
 									 int kvec_id,
@@ -2308,10 +2377,6 @@ typedef struct
 typedef struct kern_session_info
 {
 	uint64_t	query_plan_id;		/* unique-id to use per-query buffer */
-#if 1
-	uint32_t	kcxt_kvars_nbytes;	//deprecated
-	uint32_t	kcxt_kvars_ndims;	//deprecated
-#endif
 	uint32_t	kcxt_kvars_nslots;	/* number of kvars slot */
 	uint32_t	kcxt_kvars_defs;	/* offset of kvars_slot_desc[] array */
 	uint32_t	kcxt_kvecs_bufsz;	/* length of kvecs buffer */
@@ -2319,6 +2384,7 @@ typedef struct kern_session_info
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
 	/* xpucode for this session */
+	uint32_t	xpucode_slot_vars_definitivarslot_defs;
 	uint32_t	xpucode_load_vars_packed;
 	uint32_t	xpucode_move_vars_packed;
 	uint32_t	xpucode_scan_load_vars;			//deprecated
