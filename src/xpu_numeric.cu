@@ -303,7 +303,7 @@ __xpu_numeric_to_fp64(kern_context *kcxt,
 	pgfn_numeric_to_##TARGET(XPU_PGFUNCTION_ARGS)					\
 	{																\
 		float8_t		fval;										\
-		KEXP_PROCESS_ARGS1(money, numeric, num);					\
+		KEXP_PROCESS_ARGS1(TARGET, numeric, num);					\
 																	\
 		if (XPU_DATUM_ISNULL(&num))									\
 			result->expr_ops = NULL;								\
