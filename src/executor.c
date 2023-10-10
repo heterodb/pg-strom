@@ -390,30 +390,84 @@ __build_session_param_info(pgstromTaskState *pts,
 	}
 }
 
+/*
+ * __build_session_kvars_defs
+ */
+static int
+__count_session_kvars_defs_subfields(codegen_kvar_defitem *kvdef)
+{
+	int		count = list_length(kvdef->kv_subfields);
+	ListCell *lc;
+
+	foreach (lc, kvdef->kv_subfields)
+	{
+		codegen_kvar_defitem *__kvdef = lfirst(lc);
+
+		count += __count_session_kvars_defs_subfields(__kvdef);
+	}
+	return count;
+}
+
+static int
+__setup_session_kvars_defs_array(kern_varslot_desc *kvars_defs_base,
+								 List *kvars_deflist)
+{
+	kern_varslot_desc *kv_desc = kvars_defs_base;
+	int			nitems = list_length(kvars_deflist);
+	int			count;
+	ListCell   *lc;
+
+	kvars_defs_base += nitems;
+	foreach (lc, kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+
+		kv_desc->kv_type_code = kvdef->kv_type_code;
+		kv_desc->kv_typbyval  = kvdef->kv_typbyval;
+        kv_desc->kv_typalign  = kvdef->kv_typalign;
+        kv_desc->kv_typlen    = kvdef->kv_typlen;
+		kv_desc->kv_typmod    = exprTypmod((Node *)kvdef->kv_expr);
+
+		if (kvdef->kv_subfields != NIL)
+		{
+			count = __setup_session_kvars_defs_array(kvars_defs_base,
+													 kvdef->kv_subfields);
+			kv_desc->off_subfield = (kvars_defs_base - kv_desc);	/* offset */
+			kv_desc->num_subfield = count;
+
+			kvars_defs_base += count;
+			nitems += count;
+		}
+		kv_desc++;
+	}
+	return nitems;
+}
+
 static void
-__buils_session_kvars_defs(pgstromTaskState *pts,
+__build_session_kvars_defs(pgstromTaskState *pts,
 						   kern_session_info *session,
 						   StringInfo buf)
 {
 	pgstromPlanInfo *pp_info = pts->pp_info;
 	kern_varslot_desc *kvars_defs;
-	uint32_t	nitems = list_length(pp_info->kvars_deflist);
-	uint32_t	sz = sizeof(kern_varslot_desc) * nitems;
-	uint32_t	i = 0;
+	uint32_t	nrooms = list_length(pp_info->kvars_deflist);
+	uint32_t	nitems = nrooms;
+	uint32_t	sz;
 	ListCell   *lc;
 
-	kvars_defs = alloca(sz);
-	memset(kvars_defs, 0, sz);
 	foreach (lc, pp_info->kvars_deflist)
 	{
 		codegen_kvar_defitem *kvdef = lfirst(lc);
-		kern_varslot_desc *desc = &kvars_defs[i++];
 
-		desc->kv_type_code = kvdef->kv_type_code;
-		desc->kv_typbyval  = kvdef->kv_typbyval;
-		desc->kv_typalign  = kvdef->kv_typalign;
-		desc->kv_typlen    = kvdef->kv_typlen;
+		nrooms += __count_session_kvars_defs_subfields(kvdef);
 	}
+	sz = sizeof(kern_varslot_desc) * nrooms;
+	
+	kvars_defs = alloca(sz);
+	memset(kvars_defs, 0, sz);
+	nrooms = __setup_session_kvars_defs_array(kvars_defs, pp_info->kvars_deflist);
+
+	session->kcxt_kvars_nrooms = nrooms;
 	session->kcxt_kvars_nslots = nitems;
 	session->kcxt_kvars_defs = __appendBinaryStringInfo(buf, kvars_defs, sz);
 }
@@ -492,7 +546,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	if (param_info)
 		__build_session_param_info(pts, session, &buf);
 	if (pp_info->kvars_deflist != NIL)
-		__buils_session_kvars_defs(pts, session, &buf);
+		__build_session_kvars_defs(pts, session, &buf);
 	if (pp_info->kexp_load_vars_packed)
 	{
 		xpucode = pp_info->kexp_load_vars_packed;

@@ -420,7 +420,9 @@ typedef struct
 	 * variable length datum with this length; used for Arrow::Utf-8 or Binary.
 	 */
 	struct xpu_datum_t **kvars_values;
+	const struct kern_varslot_desc *kvars_desc;
 	uint32_t		kvars_nslots;
+	uint32_t		kvars_nrooms;	/* length of kvars_desc (incl. subfields) */
 	uint32_t		kvecs_bufsz;
 	uint32_t		kvecs_ndims;
 #if 1
@@ -459,9 +461,12 @@ typedef struct
 		for (int __i=0; __i < KCXT->kvars_nslots; __i++)				\
 		{																\
 			const xpu_datum_operators *kv_ops =	__kvdesc[__i].kv_ops;	\
+			/* alloca() guarantees 16bytes-aligned */					\
+			assert(kv_ops->xpu_type_alignof <= 16);						\
 			KCXT->kvars_values[__i] = (struct xpu_datum_t *)			\
 				alloca(kv_ops->xpu_type_sizeof);						\
 		}													   			\
+		KCXT->kvars_desc = __kvdesc;									\
 		KCXT->vlpos = KCXT->vlbuf;										\
 		KCXT->vlend = KCXT->vlbuf + __bufsz;							\
 	} while(0)
@@ -1597,8 +1602,9 @@ kvec_update_nullmask(uint64_t *p_nullmask, int kvec_id, const char *addr)
  *
  * ----------------------------------------------------------------
  */
-typedef struct xpu_datum_t		xpu_datum_t;
-typedef struct xpu_datum_operators xpu_datum_operators;
+typedef struct xpu_datum_t			xpu_datum_t;
+typedef struct xpu_datum_operators	xpu_datum_operators;
+typedef struct kern_varslot_desc	kern_varslot_desc;
 
 #define XPU_DATUM_COMMON_FIELD			\
 	const struct xpu_datum_operators *expr_ops
@@ -1616,8 +1622,10 @@ struct xpu_datum_operators {
 	int8_t		xpu_type_align;		/* = pg_type.typalign */
 	int16_t		xpu_type_length;	/* = pg_type.typlen */
 	TypeOpCode	xpu_type_code;
-	int			xpu_type_sizeof;	/* =sizeof(xpu_XXXX_t), not PG type! */
-	int			xpu_type_alignof;	/* =__alignof__(xpu_XXX_t), not PG type! */
+	int			xpu_type_sizeof;	/* = sizeof(xpu_XXXX_t), not PG type! */
+	int			xpu_type_alignof;	/* = __alignof__(xpu_XXX_t), not PG type! */
+	int			xpu_kvec_sizeof;	/* = sizeof(kvec_XXXX_t), not PG type! */
+	int			xpu_kvec_alignof;	/* = __alignof__(kvec_XXX_t), not PG type! */
 	bool	  (*xpu_datum_ref)(kern_context *kcxt,
 							   xpu_datum_t *result,			/* out */
 							   int vclass,					/* in */
@@ -1634,10 +1642,22 @@ struct xpu_datum_operators {
 	 * also, it is used to reference const and param.
 	 */
 	bool	  (*xpu_datum_heap_ref)(kern_context *kcxt,
-									int32_t attlen,			/* in */
-									int32_t atttypmod,		/* in */
+									const kern_varslot_desc *kvdesc, /* in */
 									const void *addr,		/* in */
 									xpu_datum_t *result);	/* out */
+
+	/*
+	 * xpu_datum_arrow_ref: called by LoadVars to load arrow datum
+	 * to the xpu_datum slot, prior to execution of the kexp in the
+	 * current depth.
+	 */
+	bool	  (*xpu_datum_arrow_ref)(kern_context *kcxt,
+									 const kern_data_store *kds,	/* in */
+									 const kern_colmeta *cmeta,		/* in */
+									 uint32_t kds_index,			/* in */
+									 const kern_varslot_desc *kvdesc, /* in */
+									 xpu_datum_t *result);			/* out */
+
 	/*
 	 * xpu_datum_kvec_ref: called by VarExpr if it references the
 	 * preliminary loaded datum (e.g, outer values referenced by join
@@ -1747,6 +1767,8 @@ struct xpu_datum_operators {
 		.xpu_type_code = TypeOpCode__##NAME,						\
 		.xpu_type_sizeof = sizeof(xpu_##NAME##_t),					\
 		.xpu_type_alignof = __alignof__(xpu_##NAME##_t),			\
+		.xpu_kvec_sizeof = sizeof(kvec_##NAME##_t),					\
+		.xpu_kvec_alignof = __alignof__(kvec_##NAME##_t),			\
 		.xpu_datum_ref = xpu_##NAME##_datum_ref,					\
 		.xpu_datum_store = xpu_##NAME##_datum_store,				\
 		.xpu_datum_write = xpu_##NAME##_datum_write,				\
@@ -1772,9 +1794,9 @@ struct xpu_datum_operators {
  * Elsewhere, @length means number of elements, from @start of the array on
  * the columnar buffer by @smeta. @kds can be pulled by @smeta->kds_offset.
  */
-struct xpu_array_t {
+typedef struct {
 	XPU_DATUM_COMMON_FIELD;
-	int32_t				length;
+	int32_t			length;
 	union {
 		struct {
 			const varlena *value;
@@ -1784,8 +1806,21 @@ struct xpu_array_t {
 			const kern_colmeta *smeta;
 		} arrow;
 	} u;
-};
-typedef struct xpu_array_t			xpu_array_t;
+} xpu_array_t;
+
+typedef struct {
+	KVEC_DATUM_COMMON_FIELD;
+	const kern_colmeta *smeta;		/* common in kvec */
+	int32_t		length[KVEC_UNITSZ];
+	union {
+		struct {
+			const varlena  *value[KVEC_UNITSZ];
+		} heap;		/* length < 0 */
+		struct {
+			uint32_t		start[KVEC_UNITSZ];
+		} arrow;	/* length >= 0 */
+	} u;
+} kvec_array_t;
 EXTERN_DATA xpu_datum_operators		xpu_array_ops;
 
 /* access macros for heap array */
@@ -1856,16 +1891,41 @@ __pg_array_dataptr(const __ArrayTypeData *ar)
  * For both cases, @smeta points the column-metadata of the composite sub-fields,
  * thus smeta[0] ... smeta[@nfields-1] describes the composite data type definition.
  */
-struct xpu_composite_t {
+typedef struct {
 	XPU_DATUM_COMMON_FIELD;
-	Oid			comp_typid;
-	int32_t		comp_typmod;
-	uint32_t	rowidx;		/* valid only if KDS_FORMAT_ARROW */
-	uint32_t	nfields;	/* length of the smeta[] array */
-	const kern_colmeta *smeta; /* colmeta array of the sub-fields */
-	const varlena *value;	/* composite varlena datum if heap-format */
-};
-typedef struct xpu_composite_t		xpu_composite_t;
+	uint32_t		comp_typid;	/* type OID of the PG composite type */
+	int32_t			comp_typmod;/* type modifier of the PG composite type */
+	const kern_colmeta *smeta;	/* colmeta array of the sub-fields */
+	uint32_t		nfields;	/* length of the smeta[] array */
+	bool			is_arrow;	/* heap or arrow selector */
+	union {
+		struct {
+			const varlena *value;	/* composite varlena in heap-format */
+		} heap;
+		struct {
+			uint32_t	rowidx;		/* composite row-index in arrow-format */
+		} arrow;
+	} u;
+} xpu_composite_t;
+
+typedef struct
+{
+	KVEC_DATUM_COMMON_FIELD;
+	uint32_t	comp_typid;		/* to be identical in kvec */
+	uint32_t	comp_typmod;	/* to be identical in kvec */
+	const kern_colmeta *smeta;	/* to be identical in kvec */
+	uint32_t	nfields;		/* to be identical in kvec */
+	bool		is_arrow;		/* to be identical in kvec */
+	union {
+		struct {
+			const varlena *values[KVEC_UNITSZ];
+		} heap;
+		struct {
+			uint32_t	rowidx[KVEC_UNITSZ];
+		} arrow;
+	} u;
+} kvec_composite_t;
+
 EXTERN_DATA xpu_datum_operators		xpu_composite_ops;
 
 /*
@@ -2173,9 +2233,11 @@ struct kern_varslot_desc
 	bool		kv_typbyval;
 	int8_t		kv_typalign;
 	int16_t		kv_typlen;
+	int32_t		kv_typmod;
+	uint16_t	off_subfield;	/* offset to the subfield descriptor */
+	uint16_t	num_subfield;	/* number of the subfield (array or composite) */
 	const struct xpu_datum_operators *kv_ops;
 };
-typedef struct kern_varslot_desc	kern_varslot_desc;
 
 #define KERN_EXPRESSION_MAGIC	(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
@@ -2377,6 +2439,7 @@ typedef struct
 typedef struct kern_session_info
 {
 	uint64_t	query_plan_id;		/* unique-id to use per-query buffer */
+	uint32_t	kcxt_kvars_nrooms;	/* length of kvars_slot_desc[] array*/
 	uint32_t	kcxt_kvars_nslots;	/* number of kvars slot */
 	uint32_t	kcxt_kvars_defs;	/* offset of kvars_slot_desc[] array */
 	uint32_t	kcxt_kvecs_bufsz;	/* length of kvecs buffer */
@@ -2901,13 +2964,21 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 					   kern_expression *kexp_scan_quals,
 					   kern_data_store *kds_src,
 					   uint32_t kds_index);
-PUBLIC_FUNCTION(bool)
+EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterColumn(kern_context *kcxt,
 						kern_expression *kexp_load_vars,
 						kern_expression *kexp_scan_quals,
 						kern_data_store *kds,
 						kern_data_extra *extra,
 						uint32_t kds_index);
+EXTERN_FUNCTION(bool)
+ExecMoveKernelVariables(kern_context *kcxt,
+                        const kern_expression *kexp_move_vars,
+                        int curr_depth,
+						const char *src_kvec_buffer,	/* NULL, if depth=0 */
+                        int src_kvec_id,
+                        char *dst_kvec_buffer,
+                        int dst_kvec_id);
 EXTERN_FUNCTION(uint32_t)
 ExecGiSTIndexGetNext(kern_context *kcxt,
 					 const kern_data_store *kds_hash,

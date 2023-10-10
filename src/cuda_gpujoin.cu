@@ -748,7 +748,7 @@ kern_gpujoin_main(kern_session_info *session,
 								&matched);
 	kvec_buffer_base = (char *)wp_saved + wp_base_sz;
 	kvec_buffer_size = TYPEALIGN(CUDA_L1_CACHELINE_SZ, kcxt->kvecs_bufsz);
-#define KVEC_BUFFER(__depth)							\
+#define __KVEC_BUFFER(__depth)							\
 	(kvec_buffer_base + kvec_buffer_size * (__depth))
 
 	if (kgtask->resume_context)
@@ -774,7 +774,11 @@ kern_gpujoin_main(kern_session_info *session,
 		}
 	}
 	__syncthreads();
-
+#define __L_STATE(__depth)						\
+	l_state[get_global_size() * ((__depth)-1) + get_global_id()]
+#define __MATCHED(__depth)						\
+	matched[get_global_size() * ((__depth)-1) + get_global_id()]
+	
 	/* main logic of GpuJoin */
 	while (depth >= 0)
 	{
@@ -787,7 +791,7 @@ kern_gpujoin_main(kern_session_info *session,
 										  kds_extra,
 										  SESSION_KEXP_LOAD_VARS(session, 0),
 										  SESSION_KEXP_SCAN_QUALS(session),
-										  kvec_buffer_base,	/* depth=0 */
+										  __KVEC_BUFFER(0),
 										  &smx_row_count);
 		}
 		else if (depth > n_rels)
@@ -802,8 +806,7 @@ kern_gpujoin_main(kern_session_info *session,
 											  n_rels,
 											  kds_dst,
 											  SESSION_KEXP_PROJECTION(session),
-											  (kvec_buffer_base +
-											   kvec_buffer_size * n_rels),
+											  __KVEC_BUFFER(n_rels),
 											  &try_suspend);
 			}
 			else
@@ -812,8 +815,7 @@ kern_gpujoin_main(kern_session_info *session,
 				depth = execGpuPreAggGroupBy(kcxt, wp,
 											 n_rels,
 											 kds_dst,
-											 (kvec_buffer_base +
-											  kvec_buffer_size * n_rels),
+											 __KVEC_BUFFER(n_rels),
 											 &try_suspend);
 			}
 			if (__any_sync(__activemask(), try_suspend))
@@ -829,14 +831,10 @@ kern_gpujoin_main(kern_session_info *session,
 			depth = execGpuJoinNestLoop(kcxt, wp,
 										kmrels,
 										depth,
-										(kvec_buffer_base +
-										 kvec_buffer_size * (depth-1)),
-										(kvec_buffer_base +
-										 kvec_buffer_size * depth),
-										l_state[get_global_size() * (depth-1) +
-												get_global_id()],	/* call by ref */
-										matched[get_global_size() * (depth-1) +
-												get_global_id()]);	/* call by ref */
+										__KVEC_BUFFER(depth-1),
+										__KVEC_BUFFER(depth),
+										__L_STATE(depth),	/* call by reference */
+										__MATCHED(depth));	/* call by reference */
 		}
 		else if (kmrels->chunks[depth-1].gist_offset != 0)
 		{
@@ -853,17 +851,12 @@ kern_gpujoin_main(kern_session_info *session,
 			depth = execGpuJoinGiSTJoin(kcxt, wp,
 										kmrels,
 										depth,
-										(kvec_buffer_base +
-										 kvec_buffer_size * (depth-1)),
-										(kvec_buffer_base +
-										 kvec_buffer_size * depth),
+										__KVEC_BUFFER(depth-1),
+										__KVEC_BUFFER(depth),
 										kexp_gist,
-										(kvec_buffer_base +
-										 kvec_buffer_size * gist_depth),
-										l_state[get_global_size() * (depth-1) +
-												get_global_id()],	/* call by ref */
-										matched[get_global_size() * (depth-1) +
-												get_global_id()]);	/* call by ref */
+										__KVEC_BUFFER(gist_depth),
+										__L_STATE(depth),	/* call by reference */
+										__MATCHED(depth));	/* call by reference */
 		}
 		else
 		{
@@ -871,14 +864,10 @@ kern_gpujoin_main(kern_session_info *session,
 			depth = execGpuJoinHashJoin(kcxt, wp,
 										kmrels,
 										depth,
-										(kvec_buffer_base +
-										 kvec_buffer_size * (depth-1)),
-										(kvec_buffer_base +
-										 kvec_buffer_size * depth),
-										l_state[get_global_size() * (depth-1) +
-												get_global_id()],	/* call by ref */
-										matched[get_global_size() * (depth-1) +
-												get_global_id()]);	/* call by ref */
+										__KVEC_BUFFER(depth-1),
+										__KVEC_BUFFER(depth),
+										__L_STATE(depth),	/* call by reference */
+										__MATCHED(depth));	/* call by reference */
 		}
 		assert(__shfl_sync(__activemask(), depth, 0) == depth);
 		/* bailout if any error status */
@@ -886,6 +875,9 @@ kern_gpujoin_main(kern_session_info *session,
 			break;
 	}
 	__syncthreads();
+#undef __KVEC_BUFFER
+#undef __L_STATE
+#undef __MATCHED
 
 	if (LaneId() == 0)
 	{

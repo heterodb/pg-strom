@@ -532,7 +532,9 @@ typedef struct
 	bool		kv_typbyval;	/* typbyval from the catalog */
 	int8_t		kv_typalign;	/* typalign from the catalog */
 	int16_t		kv_typlen;		/* typlen from the catalog */
+	int			kv_kvec_sizeof;	/* =sizeof(kvec_XXXX_t) */
 	Expr	   *kv_expr;		/* original expression */
+	List	   *kv_subfields;	/* subfields definition, if array or composite */
 } codegen_kvar_defitem;
 
 typedef struct

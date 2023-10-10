@@ -82,10 +82,10 @@ __extract_heap_tuple_attr(kern_context *kcxt,
 		comp->expr_ops    = &xpu_composite_ops;
 		comp->comp_typid  = cmeta->atttypid;
 		comp->comp_typmod = cmeta->atttypmod;
-		comp->rowidx      = 0;
+		comp->smeta       = kds->colmeta + cmeta->idx_subattrs;
 		comp->nfields     = cmeta->num_subattrs;
-		comp->smeta       = kds->colmeta + cmeta->idx_subattrs;;
-		comp->value       = (const varlena *)addr;
+		comp->is_arrow    = false;
+		comp->u.heap.value = (const varlena *)addr;
 	}
 	else if (cmeta->attbyval)
 	{
@@ -842,10 +842,10 @@ __arrow_fetch_composite_datum(kern_context *kcxt,
 	comp->expr_ops      = &xpu_composite_ops;
 	comp->comp_typid    = cmeta->atttypid;
 	comp->comp_typmod   = cmeta->atttypmod;
-	comp->rowidx        = kds_index;
-	comp->nfields       = cmeta->num_subattrs;
 	comp->smeta         = &kds->colmeta[cmeta->idx_subattrs];
-	comp->value         = NULL;
+	comp->nfields       = cmeta->num_subattrs;
+	comp->is_arrow      = true;
+	comp->u.arrow.rowidx = kds_index;
 	*vclass = KVAR_CLASS__XPU_DATUM;
 	kvar->ptr = comp;
 	return true;
@@ -2413,6 +2413,89 @@ ExecLoadVarsOuterColumn(kern_context *kcxt,
 	return true;
 }
 
+
+
+
+
+
+
+
+
+
+/* ------------------------------------------------------------
+ *
+ * MoveVars - that moves values in kvars-slot or vectorized kernel variables buffer
+ *
+ * ------------------------------------------------------------
+ */
+STATIC_FUNCTION(bool)
+pgfn_MoveVars(XPU_PGFUNCTION_ARGS)
+{
+	STROM_ELOG(kcxt, "Bug? MoveVars shall not be called as a part of expression");
+	return false;
+}
+
+PUBLIC_FUNCTION(bool)
+ExecMoveKernelVariables(kern_context *kcxt,
+						const kern_expression *kexp_move_vars,
+						int curr_depth,   /* just for assertion checks */
+						const char *src_kvec_buffer,  /* NULL, if depth==0 */
+						int src_kvec_id,
+						char *dst_kvec_buffer,
+						int dst_kvec_id)
+{
+	if (!kexp_move_vars)
+		return true;		/* nothing to move */
+	assert(kexp_move_vars->opcode == FuncOpCode__MoveVars &&
+		   kexp_move_vars->exptype == TypeOpCode__int4 &&
+		   kexp_move_vars->nr_args == 0 &&
+		   kexp_move_vars->u.move.depth == curr_depth);
+	for (int i=0; i < kexp_move_vars->u.move.nitems; i++)
+	{
+		const kern_varmove_desc *desc = &kexp_move_vars->u.move.desc[i];
+		const xpu_datum_operators *kv_ops = desc->kv_ops;
+
+		if (desc->kv_from_xdatum)
+		{
+			/* xdatum -> kvec-buffer */
+			xpu_datum_t	   *xdatum;
+			kvec_datum_t   *dst_kvec;
+
+			assert(desc->kv_slot_id >= 0 &&
+				   desc->kv_slot_id <  kcxt->kvars_nslots);
+			xdatum = kcxt->kvars_values[desc->kv_slot_id];
+			dst_kvec = (kvec_datum_t *)(dst_kvec_buffer + desc->kv_offset);
+			assert((char *)dst_kvec + kv_ops->xpu_kvec_sizeof <= (dst_kvec_buffer +
+																  kcxt->kvecs_bufsz));
+			assert(XPU_DATUM_ISNULL(xdatum) || xdatum->expr_ops == kv_ops);
+			if (!kv_ops->xpu_datum_kvec_store(kcxt,
+											  xdatum,
+											  dst_kvec,
+											  dst_kvec_id))
+				return false;
+		}
+		else
+		{
+			/* kvec-buffer -> kvec-buffer */
+			const kvec_datum_t *src_kvec;
+			kvec_datum_t	   *dst_kvec;
+
+			assert(src_kvec_buffer != NULL);
+			src_kvec = (const kvec_datum_t *)(src_kvec_buffer + desc->kv_offset);
+			assert((char *)src_kvec + kv_ops->xpu_kvec_sizeof <= (src_kvec_buffer +
+																  kcxt->kvecs_bufsz));
+			dst_kvec = (kvec_datum_t *)(dst_kvec_buffer + desc->kv_offset);
+			assert((char *)dst_kvec + kv_ops->xpu_kvec_sizeof <= (dst_kvec_buffer +
+																  kcxt->kvecs_bufsz));
+			if (!kv_ops->xpu_datum_kvec_copy(kcxt,
+											 src_kvec, src_kvec_id,
+											 dst_kvec, dst_kvec_id))
+				return false;
+		}
+	}
+	return true;
+}
+
 /* ------------------------------------------------------------
  *
  * Routines to support GiST-Index
@@ -2924,6 +3007,7 @@ PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
 #include "xpu_opcodes.h"
 	{FuncOpCode__Projection,                pgfn_Projection},
 	{FuncOpCode__LoadVars,                  pgfn_LoadVars},
+	{FuncOpCode__MoveVars,					pgfn_MoveVars},
 	{FuncOpCode__HashValue,                 pgfn_HashValue},
 	{FuncOpCode__GiSTEval,                  pgfn_GiSTEval},
 	{FuncOpCode__SaveExpr,                  pgfn_SaveExpr},

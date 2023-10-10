@@ -20,7 +20,8 @@ static List	   *devtype_code_slot[DEVTYPE_INFO_NSLOTS];	/* by TypeOpCode */
 static List	   *devfunc_info_slot[DEVFUNC_INFO_NSLOTS];
 static List	   *devfunc_code_slot[DEVFUNC_INFO_NSLOTS];	/* by FuncOpCode */
 
-#define TYPE_OPCODE(NAME,EXTENSION,FLAGS)			\
+/* -------- static declarations -------- */
+#define TYPE_OPCODE(NAME,EXTENSION,FLAGS)								\
 	static uint32_t devtype_##NAME##_hash(bool isnull, Datum value);
 #include "xpu_opcodes.h"
 
@@ -1030,6 +1031,155 @@ devtype_lookup_compare_func(devtype_info *dtype, Oid coll_id)
 	return NULL;
 }
 
+/*
+ * __assign_codegen_kvar_defitem_type_params
+ */
+static bool
+__assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
+										  TypeOpCode *p_kv_type_code,
+										  bool *p_kv_type_byval,
+										  int8_t *p_kv_type_align,
+										  int16_t *p_kv_type_length,
+										  int32_t *p_kv_kvec_sizeof,	/* optional */
+										  bool allows_host_only_vars)
+{
+	devtype_info   *dtype = pgstrom_devtype_lookup(kv_type_oid);
+
+	if (dtype)
+	{
+		*p_kv_type_code = dtype->type_code;
+		*p_kv_type_byval = dtype->type_byval;
+		*p_kv_type_align = dtype->type_align;
+		*p_kv_type_length = dtype->type_length;
+		if (p_kv_kvec_sizeof)
+			*p_kv_kvec_sizeof = dtype->kvec_sizeof;
+
+		return true;
+	}
+
+	if (allows_host_only_vars)
+	{
+		/* assign generic type if no device type defined */
+		TypeOpCode	type_code;
+		bool		typbyval;
+		char		typalign;
+		int16_t		typlen;
+		int32_t		kvec_sizeof;
+
+		get_typlenbyvalalign(kv_type_oid, &typlen, &typbyval, &typalign);
+		if (typbyval)
+		{
+			switch (typlen)
+			{
+				case 1:
+					type_code   = TypeOpCode__int1;
+					kvec_sizeof = sizeof(kvec_int1_t);
+					break;
+				case 2:
+					type_code   = TypeOpCode__int2;
+					kvec_sizeof = sizeof(kvec_int2_t);
+					break;
+                case 4:
+					type_code   = TypeOpCode__int4;
+					kvec_sizeof = sizeof(kvec_int4_t);
+                    break;
+                case 8:
+					type_code   = TypeOpCode__int8;
+					kvec_sizeof = sizeof(kvec_int8_t);
+					break;
+				default:
+					elog(ERROR, "unexpected inline type length: %d", (int)typlen);
+					break;
+			}
+		}
+		else if (typlen > 0)
+		{
+			type_code   = TypeOpCode__unsupported_fixed_length;
+			kvec_sizeof = sizeof(kvec_unsupported_fixed_length_t);
+		}
+		else if (typlen == -1)
+		{
+			type_code   = TypeOpCode__bytea;
+			kvec_sizeof = sizeof(kvec_bytea_t);
+		}
+		else
+		{
+			elog(ERROR, "unknown type length: %d", (int)typlen);
+		}
+		*p_kv_type_code = type_code;
+		*p_kv_type_byval = typbyval;
+		*p_kv_type_align = typealign_get_width(typalign);
+		*p_kv_type_length = typlen;
+		if (p_kv_kvec_sizeof)
+			*p_kv_kvec_sizeof = kvec_sizeof;
+
+		return true;
+	}
+	/* not supported device type */
+	return false;
+}
+
+/*
+ * __assign_codegen_kvar_defitem_subfields
+ */
+static void
+__assign_codegen_kvar_defitem_subfields(codegen_kvar_defitem *kvdef)
+{
+	codegen_kvar_defitem *__kvdef;
+	TypeCacheEntry *tcache;
+
+	tcache = lookup_type_cache(kvdef->kv_type_oid, TYPECACHE_TUPDESC);
+	if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+	{
+		/* array type element */
+		__kvdef = palloc0(sizeof(codegen_kvar_defitem));
+		__kvdef->kv_slot_id = -1;
+		__kvdef->kv_depth = kvdef->kv_depth;
+		__kvdef->kv_resno = kvdef->kv_resno;
+		__kvdef->kv_maxref = kvdef->kv_maxref;
+		__kvdef->kv_offset = -1;
+		__kvdef->kv_type_oid = tcache->typelem;
+		__assign_codegen_kvar_defitem_type_params(tcache->typelem,
+												  &__kvdef->kv_type_code,
+												  &__kvdef->kv_typbyval,
+												  &__kvdef->kv_typalign,
+												  &__kvdef->kv_typlen,
+												  &__kvdef->kv_kvec_sizeof,
+												  true);
+		__kvdef->kv_expr = (Expr *)makeNullConst(tcache->typelem, -1, InvalidOid);
+		__assign_codegen_kvar_defitem_subfields(__kvdef);
+		kvdef->kv_subfields = list_make1(__kvdef);
+	}
+	else if (tcache->tupDesc)
+	{
+		/* composite type element */
+		TupleDesc	tdesc = tcache->tupDesc;
+
+		for (int j=0; j < tdesc->natts; j++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tdesc, j);
+
+			__kvdef = palloc0(sizeof(codegen_kvar_defitem));
+			__kvdef->kv_slot_id = -1;
+			__kvdef->kv_depth = kvdef->kv_depth;
+			__kvdef->kv_resno = kvdef->kv_resno;
+			__kvdef->kv_maxref = kvdef->kv_maxref;
+			__kvdef->kv_offset = -1;
+			__kvdef->kv_type_oid = attr->atttypid;
+			__assign_codegen_kvar_defitem_type_params(attr->atttypid,
+													  &__kvdef->kv_type_code,
+													  &__kvdef->kv_typbyval,
+													  &__kvdef->kv_typalign,
+													  &__kvdef->kv_typlen,
+													  &__kvdef->kv_kvec_sizeof,
+													  true);
+			__kvdef->kv_expr = (Expr *)makeNullConst(attr->atttypid, -1, InvalidOid);
+			__assign_codegen_kvar_defitem_subfields(__kvdef);
+			kvdef->kv_subfields = lappend(kvdef->kv_subfields, __kvdef);
+		}
+	}
+}
+
 /* ----------------------------------------------------------------
  *
  * xPU pseudo code generator
@@ -1902,6 +2052,7 @@ codegen_scalar_array_op_expression(codegen_context *context,
 	kvdef->kv_typalign = dtype_e->type_align;
 	kvdef->kv_typlen = dtype_e->type_length;
 	kvdef->kv_expr = (Expr *)makeNullConst(dtype_e->type_oid, -1, InvalidOid);
+	__assign_codegen_kvar_defitem_subfields(kvdef);
 	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
 
 	/* allocation of saop kep */
@@ -1976,13 +2127,12 @@ is_expression_equals_tlist(codegen_context *context, Expr *expr,
 	codegen_kvar_defitem *kvdef;
 	ListCell   *lc;
 	int			depth, resno;
-	Oid			type_oid;
-	bool		typbyval;
-	int8_t		typalign;
-	int16_t		typlen;
-	TypeOpCode	type_code;
-	uint32_t	kvec_sizeof;
-	devtype_info *dtype;
+	Oid			kv_type_oid;
+	TypeOpCode	kv_type_code;
+	bool		kv_type_byval;
+	int8_t		kv_type_align;
+	int16_t		kv_type_length;
+	int32_t		kv_kvec_sizeof;
 
 	if (IsA(expr, Var))
 	{
@@ -2023,85 +2173,33 @@ found:
 			return kvdef;
 		}
 	}
-	/* identify kvec length */
-	type_oid = exprType((Node *)expr);
-	dtype = pgstrom_devtype_lookup(type_oid);
-	if (dtype)
-	{
-		typbyval = dtype->type_byval;
-		typalign = dtype->type_align;
-		typlen   = dtype->type_length;
-		type_code = dtype->type_code;
-		kvec_sizeof = dtype->kvec_sizeof;
-	}
-	else if (allows_host_only_vars)
-	{
-		/* assign generic type */
-		/* only non-key of group-by or top-level projection */
-		char	__typalign;
 
-		get_typlenbyvalalign(type_oid, &typlen, &typbyval, &__typalign);
-		if (typbyval)
-		{
-			switch (typlen)
-			{
-				case 1:
-					type_code = TypeOpCode__int1;
-					kvec_sizeof = sizeof(kvec_int1_t);
-					break;
-				case 2:
-					type_code = TypeOpCode__int2;
-					kvec_sizeof = sizeof(kvec_int2_t);
-					break;
-				case 4:
-					type_code = TypeOpCode__int4;
-					kvec_sizeof = sizeof(kvec_int4_t);
-					break;
-				case 8:
-					type_code = TypeOpCode__int8;
-					kvec_sizeof = sizeof(kvec_int8_t);
-					break;
-				default:
-					elog(ERROR, "unexpected inline type length: %d", (int)typlen);
-					break;
-			}
-		}
-		else if (typlen > 0)
-		{
-			type_code = TypeOpCode__unsupported_fixed_length;
-			kvec_sizeof = sizeof(kvec_unsupported_fixed_length_t);
-		}
-		else if (typlen == -1)
-		{
-			type_code = TypeOpCode__bytea;
-			kvec_sizeof = sizeof(kvec_bytea_t);
-		}
-		else
-		{
-			elog(ERROR, "unknown type length: %d", (int)typlen);
-		}
-		typalign = typealign_get_width(__typalign);
-	}
-	else
-	{
-		/* not supported */
+	kv_type_oid = exprType((Node *)expr);
+	if (!__assign_codegen_kvar_defitem_type_params(kv_type_oid,
+												   &kv_type_code,
+												   &kv_type_byval,
+												   &kv_type_align,
+												   &kv_type_length,
+												   &kv_kvec_sizeof,
+												   allows_host_only_vars))
 		return NULL;
-	}
+
 	/* attach new one */
 	kvdef = palloc0(sizeof(codegen_kvar_defitem));
-	kvdef->kv_slot_id   = list_length(context->kvars_deflist);
-	kvdef->kv_depth     = depth;
-	kvdef->kv_resno     = resno;
-	kvdef->kv_maxref    = curr_depth;
-	kvdef->kv_type_oid  = type_oid;
-	kvdef->kv_typbyval  = typbyval;
-	kvdef->kv_typalign  = typalign;
-	kvdef->kv_typlen    = typlen;
-	kvdef->kv_type_code = type_code;
-	kvdef->kv_expr      = expr;
-	kvdef->kv_offset    = context->kvecs_usage;
-	context->kvecs_usage += KVEC_ALIGN(kvec_sizeof);
-
+	kvdef->kv_slot_id     = list_length(context->kvars_deflist);
+	kvdef->kv_depth       = depth;
+	kvdef->kv_resno       = resno;
+	kvdef->kv_maxref      = curr_depth;
+	kvdef->kv_offset      = context->kvecs_usage;
+	kvdef->kv_type_oid    = kv_type_oid;
+	kvdef->kv_type_code   = kv_type_code;
+	kvdef->kv_typbyval    = kv_type_byval;
+	kvdef->kv_typalign    = kv_type_align;
+	kvdef->kv_typlen      = kv_type_length;
+	kvdef->kv_kvec_sizeof = kv_kvec_sizeof;
+	kvdef->kv_expr        = expr;
+	__assign_codegen_kvar_defitem_subfields(kvdef);
+	context->kvecs_usage += KVEC_ALIGN(kvdef->kv_kvec_sizeof);
 	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
 
 	return kvdef;
@@ -2437,9 +2535,8 @@ __try_inject_projection_expression(codegen_context *context,
 {
 	codegen_kvar_defitem *kvdef;
 	kern_expression	kexp;
-	devtype_info   *dtype;
 	ListCell	   *lc;
-	Oid				type_oid;
+	Oid				kv_type_oid;
 	int				pos;
 	int				proj_depth = context->num_rels + 1;
 
@@ -2473,33 +2570,36 @@ __try_inject_projection_expression(codegen_context *context,
 	 * Try to allocate a new kvec-buffer, if an expression (not a simple
 	 * var-reference) is required.
 	 */
-	type_oid = exprType((Node *)expr);
-	dtype = pgstrom_devtype_lookup(type_oid);
-	if (!dtype)
-		elog(ERROR, "type %s is not device supported",
-			 format_type_be(type_oid));
+	kv_type_oid = exprType((Node *)expr);
 	kvdef = palloc0(sizeof(codegen_kvar_defitem));
 	kvdef->kv_slot_id   = list_length(context->kvars_deflist);
 	kvdef->kv_depth     = -1;					/* no source */
 	kvdef->kv_resno     = InvalidAttrNumber;	/* no source */
 	kvdef->kv_maxref    = proj_depth;
 	kvdef->kv_offset    = -1;					/* never use vectorized buffer */
-	kvdef->kv_type_oid  = dtype->type_oid;
-	kvdef->kv_type_code = dtype->type_code;
-	kvdef->kv_typbyval  = dtype->type_byval;
-	kvdef->kv_typalign  = dtype->type_align;
-	kvdef->kv_typlen    = dtype->type_length;
+	kvdef->kv_type_oid  = kv_type_oid;
+	if (!__assign_codegen_kvar_defitem_type_params(kv_type_oid,
+												   &kvdef->kv_type_code,
+												   &kvdef->kv_typbyval,
+												   &kvdef->kv_typalign,
+												   &kvdef->kv_typlen,
+												   NULL,	/* no kvec-buffer */
+												   false))
+	{
+		elog(ERROR, "type %s is not device supported", format_type_be(kv_type_oid));
+	}
 	kvdef->kv_expr      = expr;
+	__assign_codegen_kvar_defitem_subfields(kvdef);
 	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
 
 	/*
 	 * Setup SaveVar expression
 	 */
 	memset(&kexp, 0, sizeof(kexp));
-	kexp.exptype = dtype->type_code;
+	kexp.exptype  = kvdef->kv_type_code;
 	kexp.expflags = context->kexp_flags;
-	kexp.opcode = FuncOpCode__SaveExpr;
-	kexp.nr_args = 1;
+	kexp.opcode   = FuncOpCode__SaveExpr;
+	kexp.nr_args  = 1;
 	kexp.args_offset = MAXALIGN(offsetof(kern_expression,
 										 u.save.data));
 	kexp.u.save.sv_slot_id   = kvdef->kv_slot_id;
@@ -2857,6 +2957,7 @@ __codegen_build_one_gistquals(codegen_context *context,
 	kvdef->kv_typalign  = dtype->type_align;
 	kvdef->kv_typlen    = dtype->type_length;
 	kvdef->kv_expr      = (Expr *)makeNullConst(dtype->type_oid, -1, InvalidOid);
+	__assign_codegen_kvar_defitem_subfields(kvdef);
 	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
 
 	/* setup GiSTEval expression */
@@ -3083,7 +3184,7 @@ codegen_build_groupby_keyload(codegen_context *context,
 			kvdef->kv_typalign  = dtype->type_align;
 			kvdef->kv_typlen    = dtype->type_length;
 			kvdef->kv_expr      = tle->expr;
-
+			__assign_codegen_kvar_defitem_subfields(kvdef);
 			context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
 			groupby_key_items = lappend(groupby_key_items, kvdef);
 		}
@@ -3989,6 +4090,31 @@ __xpucode_to_cstring(StringInfo buf,
 /*
  * pgstrom_explain_kvars_slot
  */
+static void
+__explain_kvars_slot_subfield_types(StringInfo buf, List *subfields_list)
+{
+	ListCell   *lc;
+
+	foreach (lc, subfields_list)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+		devtype_info   *dtype;
+
+		dtype = devtype_lookup_by_opcode(kvdef->kv_type_code);
+		if (!dtype)
+			elog(ERROR, "device type lookup failed for code:%u", kvdef->kv_type_code);
+		if (lc != list_head(subfields_list))
+			appendStringInfo(buf, ", ");
+		appendStringInfo(buf, "%s", dtype->type_name);
+		if (kvdef->kv_subfields != NIL)
+		{
+			appendStringInfoChar(buf, '(');
+			__explain_kvars_slot_subfield_types(buf, kvdef->kv_subfields);
+			appendStringInfoChar(buf, ')');
+		}
+	}
+}
+
 void
 pgstrom_explain_kvars_slot(const CustomScanState *css,
 						   ExplainState *es,
@@ -4018,13 +4144,16 @@ pgstrom_explain_kvars_slot(const CustomScanState *css,
 						 kvdef->kv_depth,
 						 kvdef->kv_resno);
 #endif	
+		appendStringInfo(&buf, ", type='%s", dtype->type_name);
 		if (dtype->type_code == TypeOpCode__unsupported_fixed_length)
-			appendStringInfo(&buf, ", type='%s[%d]'",
-							 dtype->type_name, kvdef->kv_typlen);
-		else
-			appendStringInfo(&buf, ", type='%s'",
-							 dtype->type_name);
-		appendStringInfo(&buf, ", expr='%s'>",
+			appendStringInfo(&buf, "[%d]", kvdef->kv_typlen);
+		else if (kvdef->kv_subfields)
+		{
+			appendStringInfoChar(&buf, '(');
+			__explain_kvars_slot_subfield_types(&buf, kvdef->kv_subfields);
+			appendStringInfoChar(&buf, ')');
+		}
+		appendStringInfo(&buf, "', expr='%s'>",
 						 deparse_expression((Node *)kvdef->kv_expr,
 											dcontext,
 											(cscan->custom_plans != NIL),
