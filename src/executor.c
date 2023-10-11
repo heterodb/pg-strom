@@ -409,36 +409,36 @@ __count_session_kvars_defs_subfields(codegen_kvar_defitem *kvdef)
 }
 
 static int
-__setup_session_kvars_defs_array(kern_varslot_desc *kvars_defs_base,
+__setup_session_kvars_defs_array(kern_varslot_desc *vslot_desc_base,
 								 List *kvars_deflist)
 {
-	kern_varslot_desc *kv_desc = kvars_defs_base;
+	kern_varslot_desc *vs_desc = vslot_desc_base;
 	int			nitems = list_length(kvars_deflist);
 	int			count;
 	ListCell   *lc;
 
-	kvars_defs_base += nitems;
+	vslot_desc_base += nitems;
 	foreach (lc, kvars_deflist)
 	{
 		codegen_kvar_defitem *kvdef = lfirst(lc);
 
-		kv_desc->kv_type_code = kvdef->kv_type_code;
-		kv_desc->kv_typbyval  = kvdef->kv_typbyval;
-        kv_desc->kv_typalign  = kvdef->kv_typalign;
-        kv_desc->kv_typlen    = kvdef->kv_typlen;
-		kv_desc->kv_typmod    = exprTypmod((Node *)kvdef->kv_expr);
+		vs_desc->vs_type_code = kvdef->kv_type_code;
+		vs_desc->vs_typbyval  = kvdef->kv_typbyval;
+        vs_desc->vs_typalign  = kvdef->kv_typalign;
+        vs_desc->vs_typlen    = kvdef->kv_typlen;
+		vs_desc->vs_typmod    = exprTypmod((Node *)kvdef->kv_expr);
 
 		if (kvdef->kv_subfields != NIL)
 		{
-			count = __setup_session_kvars_defs_array(kvars_defs_base,
+			count = __setup_session_kvars_defs_array(vslot_desc_base,
 													 kvdef->kv_subfields);
-			kv_desc->off_subfield = (kvars_defs_base - kv_desc);	/* offset */
-			kv_desc->num_subfield = count;
+			vs_desc->off_subfield = (vslot_desc_base - vs_desc);	/* offset */
+			vs_desc->num_subfield = count;
 
-			kvars_defs_base += count;
+			vslot_desc_base += count;
 			nitems += count;
 		}
-		kv_desc++;
+		vs_desc++;
 	}
 	return nitems;
 }

@@ -1369,8 +1369,8 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 			for (i=0; i < kexp->u.load.nitems; i++)
 			{
 				if (!__lookupDeviceTypeOper(gcontext,
-											&kexp->u.load.desc[i].kv_ops,
-											kexp->u.load.desc[i].kv_type_code,
+											&kexp->u.load.desc[i].vl_ops,
+											kexp->u.load.desc[i].vl_type_code,
 											emsg, emsg_sz))
 					return false;
 			}
@@ -1380,8 +1380,8 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 			for (i=0; i < kexp->u.move.nitems; i++)
 			{
 				if (!__lookupDeviceTypeOper(gcontext,
-											&kexp->u.move.desc[i].kv_ops,
-											kexp->u.move.desc[i].kv_type_code,
+											&kexp->u.move.desc[i].vm_ops,
+											kexp->u.move.desc[i].vm_type_code,
 											emsg, emsg_sz))
 					return false;
 			}
@@ -1389,8 +1389,8 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 
 		case FuncOpCode__GiSTEval:
 			if (!__lookupDeviceTypeOper(gcontext,
-										&kexp->u.gist.gist_ops,
-										kexp->u.gist.gist_type_code,
+										&kexp->u.gist.idesc.vl_ops,
+										kexp->u.gist.idesc.vl_type_code,
 										emsg, emsg_sz))
 				return false;
 			break;
@@ -1477,8 +1477,8 @@ __resolveDevicePointers(gpuContext *gcontext,
 	for (int i=0; i < session->kcxt_kvars_nslots; i++)
 	{
 		if (!__lookupDeviceTypeOper(gcontext,
-									&kvslot_desc[i].kv_ops,
-									kvslot_desc[i].kv_type_code,
+									&kvslot_desc[i].vs_ops,
+									kvslot_desc[i].vs_type_code,
 									emsg, emsg_sz))
 			return false;
 	}

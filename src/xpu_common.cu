@@ -17,42 +17,67 @@
  *
  * ----------------------------------------------------------------
  */
-STATIC_FUNCTION(void)
-__extract_null_values(kern_context *kcxt,
-					  const kern_vars_defitem *kvdef,
-					  int kvdef_nitems)
+INLINE_FUNCTION(bool)
+__extract_heap_tuple_attr(kern_context *kcxt,
+						  uint32_t slot_id,
+						  const char *addr)
 {
-	while (kvdef_nitems > 0)
-	{
-		uint32_t	slot_id = kvdef->var_slot_id;
+	const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[slot_id];
 
-		if (slot_id < kcxt->kvars_nslots)
-		{
-			kcxt->kvars_slot[slot_id].ptr = NULL;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-		}
-		kvdef++;
-		kvdef_nitems--;
+	if (slot_id < kcxt->kvars_nslots)
+	{
+		xpu_datum_t	   *xdatum = kcxt->kvars_values[slot_id];
+
+		return vs_desc->vs_ops->xpu_datum_heap_ref(kcxt,
+												   vs_desc,
+												   addr,
+												   xdatum);
+	}
+	STROM_ELOG(kcxt, "kvars::slot_id is out of range");
+	return false;
+}
+
+INLINE_FUNCTION(void)
+__extract_null_values(kern_context *kcxt,
+					  const kern_varload_desc *vl_desc,
+					  int kvload_nitems)
+{
+	while (kvload_nitems > 0)
+	{
+		__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, NULL);
+		vl_desc++;
+		kvload_nitems--;
 	}
 }
 
-STATIC_FUNCTION(bool)
-__extract_heap_tuple_attr(kern_context *kcxt,
-						  const kern_data_store *kds,
-						  const kern_colmeta *cmeta,
-						  const kern_vars_defitem *kvdef,
+#if 0
+INLINE_FUNCTION(bool)
+__varload_heap_tuple_attr(kern_context *kcxt,
+						  const kern_varload_desc *kv_desc,
 						  const char *addr)
 {
-	uint32_t	slot_id = kvdef->var_slot_id;
+	uint32_t	slot_id = kv_desc->kv_slot_id;
 
+	if (slot_id < kcxt->kvars_nslots)
+	{
+		return kv_desc->kv_ops->xpu_datum_heap_ref(kcxt,
+												   &kcxt->kvars_desc[slot_id],
+												   addr,
+												   kcxt->kvars_values[slot_id]);
+	}
+	STROM_ELOG(kcxt, "kvars::slot_id is out of range");
+	return false;
+	
 	if (slot_id >= kcxt->kvars_nslots)
 	{
 		STROM_ELOG(kcxt, "kvars::slot_id is out of range");
         return false;
 	}
-  	else if (!addr)
+	xdatum =  kcxt->kvars_values[slot_id];
+
+	if (!addr)
 	{
-		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
+		xdatum->expr_ops = NULL;
 	}
 	else if (cmeta->atttypkind == TYPE_KIND__ARRAY)
 	{
@@ -110,100 +135,99 @@ __extract_heap_tuple_attr(kern_context *kcxt,
 	}
 	return true;
 }
+#endif
 
 INLINE_FUNCTION(bool)
 __extract_heap_tuple_sysattr(kern_context *kcxt,
 							 const kern_data_store *kds,
 							 const HeapTupleHeaderData *htup,
-							 const kern_vars_defitem *kvdef)
+							 const kern_varload_desc *vl_desc)
 {
-	uint32_t	slot_id = kvdef->var_slot_id;
+	uint32_t	slot_id = vl_desc->vl_slot_id;
+	const void *addr;
 
 	/* out of range? */
 	if (slot_id >= kcxt->kvars_nslots)
 		return true;
-	switch (kvdef->var_resno)
+	switch (vl_desc->vl_resno)
 	{
 		case SelfItemPointerAttributeNumber:
-			kcxt->kvars_slot[slot_id].ptr = (void *)&htup->t_ctid;
-			kcxt->kvars_class[slot_id] = sizeof(ItemPointerData);
+			addr = &htup->t_ctid;
 			break;
 		case MinTransactionIdAttributeNumber:
-			kcxt->kvars_slot[slot_id].u32 = htup->t_choice.t_heap.t_xmin;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			addr = &htup->t_choice.t_heap.t_xmin;
 			break;
 		case MaxTransactionIdAttributeNumber:
-			kcxt->kvars_slot[slot_id].u32 = htup->t_choice.t_heap.t_xmax;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			addr = &htup->t_choice.t_heap.t_xmax;
 			break;
 		case MinCommandIdAttributeNumber:
 		case MaxCommandIdAttributeNumber:
-			kcxt->kvars_slot[slot_id].u32 = htup->t_choice.t_heap.t_field3.t_cid;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			addr = &htup->t_choice.t_heap.t_field3.t_cid;
 			break;
 		case TableOidAttributeNumber:
-			kcxt->kvars_slot[slot_id].u32 = kds->table_oid;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			addr = &kds->table_oid;
 			break;
 		default:
 			STROM_ELOG(kcxt, "not a supported system attribute reference");
 			return false;
 	}
-	return true;
+	return vl_desc->vl_ops->xpu_datum_heap_ref(kcxt,
+											   &kcxt->kvars_desc[slot_id],
+											   addr,
+											   kcxt->kvars_values[slot_id]);
 }
 
 STATIC_FUNCTION(bool)
 kern_extract_heap_tuple(kern_context *kcxt,
 						const kern_data_store *kds,
 						const HeapTupleHeaderData *htup,
-						const kern_vars_defitem *kvars_items,
-						int kvars_nloads)
+						const kern_varload_desc *vl_desc,
+						int kvload_nitems)
 {
-	const kern_vars_defitem *kvdef = kvars_items;
 	uint32_t	offset = htup->t_hoff;
 	int			resno = 1;
-	int			kvars_count = 0;
+	int			kvload_count = 0;
 	int			ncols = Min(htup->t_infomask2 & HEAP_NATTS_MASK, kds->ncols);
 	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
 
 	/* extract system attributes, if rquired */
-	while (kvars_count < kvars_nloads &&
-		   kvdef->var_resno < 0)
+	while (kvload_count < kvload_nitems &&
+		   vl_desc->vl_resno < 0)
 	{
-		if (!__extract_heap_tuple_sysattr(kcxt, kds, htup, kvdef))
+		if (!__extract_heap_tuple_sysattr(kcxt, kds, htup, vl_desc))
 			return;
-		kvdef++;
-		kvars_count++;
+		vl_desc++;
+		kvload_count++;
 	}
 	/* try attcacheoff shortcut, if available. */
 	if (!heap_hasnull)
 	{
-		while (kvars_count < kvars_nloads &&
-			   kvdef->var_resno > 0 &&
-			   kvdef->var_resno <= ncols)
+		while (kvload_count < kvload_nitems &&
+			   vl_desc->vl_resno > 0 &&
+			   vl_desc->vl_resno <= ncols)
 		{
-			const kern_colmeta *cmeta = &kds->colmeta[kvdef->var_resno-1];
+			const kern_colmeta *cmeta = &kds->colmeta[vl_desc->vl_resno-1];
 			char	   *addr;
 
 			if (cmeta->attcacheoff < 0)
 				break;
 			offset = htup->t_hoff + cmeta->attcacheoff;
 			addr = (char *)htup + offset;
-			if (!__extract_heap_tuple_attr(kcxt, kds, cmeta, kvdef, addr))
+			if (!__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr))
 				return false;
 			/* next resno */
-			resno = kvdef->var_resno + 1;
+			resno = vl_desc->vl_resno + 1;
 			if (cmeta->attlen > 0)
 				offset += cmeta->attlen;
 			else
 				offset += VARSIZE_ANY(addr);
-			kvdef++;
-			kvars_count++;
+			vl_desc++;
+			kvload_count++;
 		}
 	}
 
 	/* extract slow path */
-	while (resno <= ncols && kvars_count < kvars_nloads)
+	while (resno <= ncols && kvload_count < kvload_nitems)
 	{
 		const kern_colmeta *cmeta = &kds->colmeta[resno-1];
 		char   *addr;
@@ -226,18 +250,17 @@ kern_extract_heap_tuple(kern_context *kcxt,
 				offset += VARSIZE_ANY(addr);
 		}
 
-		if (kvdef->var_resno == resno)
+		if (vl_desc->vl_resno == resno)
 		{
-			if (!__extract_heap_tuple_attr(kcxt, kds, cmeta, kvdef, addr))
+			if (!__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr))
 				return false;
-			kvdef++;
-			kvars_count++;
+			vl_desc++;
+			kvload_count++;
 		}
 		resno++;
 	}
 	/* fill-up with NULLs for the remained slot */
-	if (kvars_count < kvars_nloads)
-		__extract_null_values(kcxt, kvdef, kvars_nloads - kvars_count);
+	__extract_null_values(kcxt, vl_desc, kvload_nitems - kvload_count);
 	return true;
 }
 
@@ -981,71 +1004,61 @@ INLINE_FUNCTION(bool)
 __extract_arrow_tuple_sysattr(kern_context *kcxt,
 							  const kern_data_store *kds,
 							  uint32_t kds_index,
-							  const kern_vars_defitem *kvdef)
+							  const kern_varload_desc *vl_desc)
 {
-	static ItemPointerData __invalid_ctid__ = {{0,0},0};
-	uint32_t		slot_id = kvdef->var_slot_id;
+	uint32_t	slot_id = vl_desc->vl_slot_id;
+	uint64_t	dummy;
 
-	/* out of range? */
-	if (slot_id >= kcxt->kvars_nslots)
-		return true;
-	switch (kvdef->var_resno)
+	switch (vl_desc->vl_resno)
 	{
 		case SelfItemPointerAttributeNumber:
-			kcxt->kvars_slot[slot_id].ptr = (void *)&__invalid_ctid__;
-			kcxt->kvars_class[slot_id] = sizeof(ItemPointerData);
+			dummy = 0;
 			break;
 		case MinTransactionIdAttributeNumber:
-			kcxt->kvars_slot[slot_id].u32 = FrozenTransactionId;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			dummy = FrozenTransactionId;
 			break;
 		case MaxTransactionIdAttributeNumber:
-			kcxt->kvars_slot[slot_id].u32 = InvalidTransactionId;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			dummy = InvalidTransactionId;
 			break;
-		case MinCommandIdAttributeNumber:
+		case  MinCommandIdAttributeNumber:
 		case MaxCommandIdAttributeNumber:
-			kcxt->kvars_slot[slot_id].u32 = FirstCommandId;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			dummy = FirstCommandId;
 			break;
 		case TableOidAttributeNumber:
-			kcxt->kvars_slot[slot_id].u32 = kds->table_oid;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			dummy = kds->table_oid;
 			break;
 		default:
 			STROM_ELOG(kcxt, "not a supported system attribute reference");
 			return false;
 	}
-	return true;
+	return __extract_heap_tuple_attr(kcxt, slot_id, (char *)&dummy);
 }
 
 STATIC_FUNCTION(bool)
 kern_extract_arrow_tuple(kern_context *kcxt,
 						 kern_data_store *kds,
 						 uint32_t kds_index,
-						 const kern_vars_defitem *kvars_items,
-						 int kvars_nloads)
+						 const kern_varload_desc *vl_desc,
+						 int vload_nitems)
 {
-	const kern_vars_defitem *kvdef = kvars_items;
-	int		kvars_count = 0;
+	int		vload_count = 0;
 
 	assert(kds->format == KDS_FORMAT_ARROW);
 	/* fillup invalid values for system attribute, if any */
-	while (kvars_count < kvars_nloads &&
-		   kvdef->var_resno < 0)
+	while (vload_count < vload_nitems &&
+		   vl_desc->vl_resno < 0)
 	{
-		if (!__extract_arrow_tuple_sysattr(kcxt, kds, kds_index, kvdef))
+		if (!__extract_arrow_tuple_sysattr(kcxt, kds, kds_index, vl_desc))
 			return false;
-		kvdef++;
-		kvars_count++;
+		vl_desc++;
+		vload_count++;
 	}
 
-	while (kvars_count < kvars_nloads &&
-		   kvdef->var_resno <= kds->ncols)
+	while (vload_count < vload_nitems &&
+		   vl_desc->vl_resno <= kds->ncols)
 	{
-		kern_colmeta *cmeta = &kds->colmeta[kvdef->var_resno-1];
-		uint32_t	slot_id = kvdef->var_slot_id;
-		char	   *slot_buf = kcxt_slot_buf(kcxt, kvdef->var_slot_off);
+		kern_colmeta *cmeta = &kds->colmeta[vl_desc->vl_resno-1];
+		uint32_t	slot_id = vl_desc->vl_slot_id;
 
 		if (cmeta->nullmap_offset == 0 ||
 			arrow_bitmap_check(kds, kds_index,
@@ -1058,20 +1071,19 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 											kds_index,
 											&kcxt->kvars_slot[slot_id],
 											&kcxt->kvars_class[slot_id],
-											slot_buf))
+											NULL)) //slot_buf))
 				return false;
 		}
 		else
 		{
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-			kcxt->kvars_slot[slot_id].ptr = NULL;
+			if (!__extract_heap_tuple_attr(kcxt, slot_id, NULL))
+				return false;
 		}
-		kvdef++;
-		kvars_count++;
+		vl_desc++;
+		vload_count++;
 	}
 	/* other fields, which refers out of range, are NULL */
-	if (kvars_count < kvars_nloads)
-		__extract_null_values(kcxt, kvdef, kvars_nloads - kvars_count);
+	__extract_null_values(kcxt, vl_desc, vload_nitems - vload_count);
 	return true;
 }
 
@@ -1088,9 +1100,19 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 {
+	const xpu_datum_operators *expr_ops = kexp->expr_ops;
+#if 0
+	const char	   *addr;
+
+	if (!kexp->u.c.const_isnull)
+		addr = NULL;
+	else
+		addr = kexp->u.c.const_value;
+
+	return expr_ops->xpu_datum_heap_ref(kcxt, vs_desc, addr, __result);
+#endif
 	if (!kexp->u.c.const_isnull)
 	{
-		const xpu_datum_operators *expr_ops = kexp->expr_ops;
 		int			typlen = expr_ops->xpu_type_length;
 		kern_variable kvar;
 
@@ -1139,11 +1161,12 @@ pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 {
-	uint32_t	slot_id = kexp->u.v.var_slot_id;
-
+	const xpu_datum_operators *expr_ops = kexp->expr_ops;
+	uint16_t	slot_id = kexp->u.v.var_slot_id;
+	
 	if (slot_id < kcxt->kvars_nslots)
 	{
-		const xpu_datum_operators *expr_ops = kexp->expr_ops;
+
 		kern_variable  *kvar = &kcxt->kvars_slot[slot_id];
 		int				vclass = kcxt->kvars_class[slot_id];
 
@@ -2129,48 +2152,44 @@ INLINE_FUNCTION(bool)
 __extract_gpucache_tuple_sysattr(kern_context *kcxt,
 								 const kern_data_store *kds,
 								 uint32_t kds_index,
-								 const kern_vars_defitem *kvdef)
+								 const kern_varload_desc *vl_desc)
 {
 	const kern_colmeta *cmeta = &kds->colmeta[kds->nr_colmeta - 1];
 	GpuCacheSysattr	   *sysatt;
-	uint32_t			slot_id = kvdef->var_slot_id;
+	const char		   *addr;
+	uint32_t			slot_id = vl_desc->vl_slot_id;
+	uint32_t			temp;
 
 	assert(!cmeta->attbyval &&
 		   cmeta->attlen == sizeof(GpuCacheSysattr) &&
 		   cmeta->nullmap_offset == 0);		/* NOT NULL */
-	/* out of range? */
-	if (slot_id >= kcxt->kvars_nslots)
-		return true;
 	sysatt = (GpuCacheSysattr *)
 		((char *)kds + __kds_unpack(cmeta->values_offset));
-	switch (kvdef->var_resno)
+	switch (vl_desc->vl_resno)
 	{
 		case SelfItemPointerAttributeNumber:
-			kcxt->kvars_slot[slot_id].ptr = &sysatt[kds_index].ctid;
-			kcxt->kvars_class[slot_id] = sizeof(ItemPointerData);
+			addr = (const char *)&sysatt[kds_index].ctid;
 			break;
 		case MinTransactionIdAttributeNumber:
-			kcxt->kvars_slot[slot_id].u32 = sysatt[kds_index].xmin;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			addr = (const char *)&sysatt[kds_index].xmin;
 			break;
 		case MaxTransactionIdAttributeNumber:
-			kcxt->kvars_slot[slot_id].u32 = sysatt[kds_index].xmax;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			addr = (const char *)&sysatt[kds_index].xmax;
 			break;
 		case MinCommandIdAttributeNumber:
 		case MaxCommandIdAttributeNumber:
-			kcxt->kvars_slot[slot_id].u32 = FirstCommandId;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+			temp = FirstCommandId;
+			addr = (const char *)&temp;
 			break;
 		case TableOidAttributeNumber:
-			kcxt->kvars_slot[slot_id].u32 = kds->table_oid;
+			addr = (const char *)&kds->table_oid;
 			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
 			break;
 		default:
 			STROM_ELOG(kcxt, "not a supported system attribute reference");
 			return false;
 	}
-	return true;
+	return __extract_heap_tuple_attr(kcxt, slot_id, addr);
 }
 
 STATIC_FUNCTION(bool)
@@ -2178,91 +2197,61 @@ kern_extract_gpucache_tuple(kern_context *kcxt,
 							const kern_data_store *kds,
 							const kern_data_extra *extra,
 							uint32_t kds_index,
-							const kern_vars_defitem *kvars_items,
-							int kvars_nloads)
+							const kern_varload_desc *vl_desc,
+							int vload_nitems)
 {
-	const kern_vars_defitem *kvdef = kvars_items;
-	int		kvars_count = 0;
+	int		vload_count = 0;
 
 	assert(kds->format == KDS_FORMAT_COLUMN);
 	/* out of range? */
 	if (kds_index >= kds->nitems)
 		goto bailout;
 	/* fillup values for system attribute, if any */
-	while (kvars_count < kvars_nloads &&
-		   kvdef->var_resno < 0)
+	while (vload_count < vload_nitems &&
+		   vl_desc->vl_resno < 0)
 	{
-		if (!__extract_gpucache_tuple_sysattr(kcxt, kds, kds_index, kvdef))
+		if (!__extract_gpucache_tuple_sysattr(kcxt, kds, kds_index, vl_desc))
 			return false;
-		kvdef++;
-		kvars_count++;
+		vl_desc++;
+		vload_count++;
 	}
 
-	while (kvars_count < kvars_nloads &&
-		   kvdef->var_resno <= kds->ncols)
+	while (vload_count < vload_nitems &&
+		   vl_desc->vl_resno <= kds->ncols)
 	{
-		const kern_colmeta *cmeta = &kds->colmeta[kvdef->var_resno-1];
-		uint32_t	slot_id = kvdef->var_slot_id;
+		const kern_colmeta *cmeta = &kds->colmeta[vl_desc->vl_resno-1];
+		const char *addr;
+		uint32_t	slot_id = vl_desc->vl_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
 		if (!KDS_COLUMN_ITEM_ISNULL(kds, cmeta, kds_index))
 		{
-			const char *base = ((const char *)kds +
-								__kds_unpack(cmeta->values_offset));
+			/* base pointer */
+			addr = ((const char *)kds + __kds_unpack(cmeta->values_offset));
 
 			if (cmeta->attlen > 0)
 			{
-				base += cmeta->attlen * kds_index;
-				if (cmeta->attbyval)
-				{
-					kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
-					switch (cmeta->attlen)
-					{
-						case sizeof(uint8_t):
-							kcxt->kvars_slot[slot_id].u8 = *((uint8_t *)base);
-							break;
-						case sizeof(uint16_t):
-							kcxt->kvars_slot[slot_id].u16 = *((uint16_t *)base);
-							break;
-						case sizeof(uint32_t):
-							kcxt->kvars_slot[slot_id].u32 = *((uint32_t *)base);
-							break;
-						case sizeof(uint64_t):
-							kcxt->kvars_slot[slot_id].u64 = *((uint64_t *)base);
-							break;
-						default:
-							STROM_ELOG(kcxt, "invalid inline attlen");
-							return false;
-					}
-				}
-				else
-				{
-					kcxt->kvars_class[slot_id] = cmeta->attlen;
-					kcxt->kvars_slot[slot_id].ptr = (char *)base;
-				}
+				addr += cmeta->attlen * kds_index;
 			}
 			else
 			{
-				size_t		offset;
-
-				assert(cmeta->attlen == -1);
-				offset = __kds_unpack(((uint32_t *)base)[kds_index]);
-				kcxt->kvars_class[slot_id] = KVAR_CLASS__VARLENA;
-				kcxt->kvars_slot[slot_id].ptr = ((char *)extra + offset);
+				addr = ((char *)extra +
+						__kds_unpack(((uint32_t *)addr)[kds_index]));
 			}
 		}
 		else
 		{
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-			kcxt->kvars_slot[slot_id].ptr = NULL;
+			addr = NULL;
 		}
-		kvdef++;
-		kvars_count++;
+
+		if (!__extract_heap_tuple_attr(kcxt, slot_id, addr))
+			return false;
+		vl_desc++;
+		vload_count++;
 	}
 bailout:
 	/* other fields, which refers out of range, are NULL */
-	if (kvars_count < kvars_nloads)
-		__extract_null_values(kcxt, kvdef, kvars_nloads - kvars_count);
+	__extract_null_values(kcxt, vl_desc, vload_nitems - vload_count);
 	return true;
 }
 
@@ -2291,15 +2280,15 @@ ExecLoadVarsHeapTuple(kern_context *kcxt,
 			if (!kern_extract_heap_tuple(kcxt,
 										 kds,
 										 htup,
-										 kexp->u.load.kvars,
-										 kexp->u.load.nloads))
+										 kexp->u.load.desc,
+										 kexp->u.load.nitems))
 				return false;
 		}
 		else
 		{
 			__extract_null_values(kcxt,
-								  kexp->u.load.kvars,
-								  kexp->u.load.nloads);
+								  kexp->u.load.desc,
+								  kexp->u.load.nitems);
 		}
 	}
 	return true;
@@ -2349,8 +2338,8 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 		if (!kern_extract_arrow_tuple(kcxt,
 									  kds,
 									  kds_index,
-									  kexp_load_vars->u.load.kvars,
-									  kexp_load_vars->u.load.nloads))
+									  kexp_load_vars->u.load.desc,
+									  kexp_load_vars->u.load.nitems))
 			return false;
 	}
 	/* check scan quals if given */
@@ -2390,8 +2379,8 @@ ExecLoadVarsOuterColumn(kern_context *kcxt,
 										 kds,
 										 extra,
 										 kds_index,
-										 kexp_load_vars->u.load.kvars,
-										 kexp_load_vars->u.load.nloads))
+										 kexp_load_vars->u.load.desc,
+										 kexp_load_vars->u.load.nitems))
 			return false;
 	}
 	/* check scan quals if given */
@@ -2412,15 +2401,6 @@ ExecLoadVarsOuterColumn(kern_context *kcxt,
 	}
 	return true;
 }
-
-
-
-
-
-
-
-
-
 
 /* ------------------------------------------------------------
  *
@@ -2452,23 +2432,23 @@ ExecMoveKernelVariables(kern_context *kcxt,
 		   kexp_move_vars->u.move.depth == curr_depth);
 	for (int i=0; i < kexp_move_vars->u.move.nitems; i++)
 	{
-		const kern_varmove_desc *desc = &kexp_move_vars->u.move.desc[i];
-		const xpu_datum_operators *kv_ops = desc->kv_ops;
+		const kern_varmove_desc *vm_desc = &kexp_move_vars->u.move.desc[i];
+		const xpu_datum_operators *vm_ops = vm_desc->vm_ops;
 
-		if (desc->kv_from_xdatum)
+		if (vm_desc->vm_from_xdatum)
 		{
 			/* xdatum -> kvec-buffer */
 			xpu_datum_t	   *xdatum;
 			kvec_datum_t   *dst_kvec;
 
-			assert(desc->kv_slot_id >= 0 &&
-				   desc->kv_slot_id <  kcxt->kvars_nslots);
-			xdatum = kcxt->kvars_values[desc->kv_slot_id];
-			dst_kvec = (kvec_datum_t *)(dst_kvec_buffer + desc->kv_offset);
-			assert((char *)dst_kvec + kv_ops->xpu_kvec_sizeof <= (dst_kvec_buffer +
-																  kcxt->kvecs_bufsz));
-			assert(XPU_DATUM_ISNULL(xdatum) || xdatum->expr_ops == kv_ops);
-			if (!kv_ops->xpu_datum_kvec_store(kcxt,
+			assert(vm_desc->vm_slot_id >= 0 &&
+				   vm_desc->vm_slot_id <  kcxt->kvars_nslots);
+			xdatum = kcxt->kvars_values[vm_desc->vm_slot_id];
+			dst_kvec = (kvec_datum_t *)(dst_kvec_buffer + vm_desc->vm_offset);
+			assert((char *)dst_kvec +
+				   vm_ops->xpu_kvec_sizeof <= (dst_kvec_buffer + kcxt->kvecs_bufsz));
+			assert(XPU_DATUM_ISNULL(xdatum) || xdatum->expr_ops == vm_ops);
+			if (!vm_ops->xpu_datum_kvec_store(kcxt,
 											  xdatum,
 											  dst_kvec,
 											  dst_kvec_id))
@@ -2481,13 +2461,15 @@ ExecMoveKernelVariables(kern_context *kcxt,
 			kvec_datum_t	   *dst_kvec;
 
 			assert(src_kvec_buffer != NULL);
-			src_kvec = (const kvec_datum_t *)(src_kvec_buffer + desc->kv_offset);
-			assert((char *)src_kvec + kv_ops->xpu_kvec_sizeof <= (src_kvec_buffer +
-																  kcxt->kvecs_bufsz));
-			dst_kvec = (kvec_datum_t *)(dst_kvec_buffer + desc->kv_offset);
-			assert((char *)dst_kvec + kv_ops->xpu_kvec_sizeof <= (dst_kvec_buffer +
-																  kcxt->kvecs_bufsz));
-			if (!kv_ops->xpu_datum_kvec_copy(kcxt,
+			src_kvec = (const kvec_datum_t *)(src_kvec_buffer +
+											  vm_desc->vm_offset);
+			assert((char *)src_kvec +
+				   vm_ops->xpu_kvec_sizeof <= (src_kvec_buffer + kcxt->kvecs_bufsz));
+			dst_kvec = (kvec_datum_t *)(dst_kvec_buffer +
+										vm_desc->vm_offset);
+			assert((char *)dst_kvec +
+				   vm_ops->xpu_kvec_sizeof <= (dst_kvec_buffer + kcxt->kvecs_bufsz));
+			if (!vm_ops->xpu_datum_kvec_copy(kcxt,
 											 src_kvec, src_kvec_id,
 											 dst_kvec, dst_kvec_id))
 				return false;
@@ -2506,14 +2488,13 @@ STATIC_FUNCTION(bool)
 kern_extract_gist_tuple(kern_context *kcxt,
 						const kern_data_store *kds_gist,
 						const IndexTupleData *itup,
-						const kern_vars_defitem *kvdef)
+						const kern_varload_desc *vl_desc)
 {
 	char	   *nullmap = NULL;
 	uint32_t	i_off;
-	uint32_t	slot_id;
 
-	assert(kvdef->var_resno > 0 &&
-		   kvdef->var_resno <= kds_gist->ncols);
+	assert(vl_desc->vl_resno > 0 &&
+		   vl_desc->vl_resno <= kds_gist->ncols);
 	if (IndexTupleHasNulls(itup))
 	{
 		nullmap = (char *)itup + sizeof(IndexTupleData);
@@ -2522,13 +2503,13 @@ kern_extract_gist_tuple(kern_context *kcxt,
 	}
 	else
 	{
-		const kern_colmeta *cmeta = &kds_gist->colmeta[kvdef->var_resno-1];
+		const kern_colmeta *cmeta = &kds_gist->colmeta[vl_desc->vl_resno-1];
 
 		i_off = MAXALIGN(offsetof(IndexTupleData, data));
 		if (cmeta->attcacheoff >= 0)
 		{
 			char   *addr = (char *)itup + i_off + cmeta->attcacheoff;
-			return __extract_heap_tuple_attr(kcxt, kds_gist, cmeta, kvdef, addr);
+			return __extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr);
 		}
 	}
 	/* extract the index-tuple by the slow path */
@@ -2552,17 +2533,11 @@ kern_extract_gist_tuple(kern_context *kcxt,
 			else
 				i_off += VARSIZE_ANY(addr);
 		}
-		if (kvdef->var_resno == resno)
-			return __extract_heap_tuple_attr(kcxt, kds_gist, cmeta, kvdef, addr);
+		if (vl_desc->vl_resno == resno)
+			return __extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr);
 	}
 	/* fill-up by NULL, if not found */
-	slot_id = kvdef->var_slot_id;
-	if (slot_id < kcxt->kvars_nslots)
-	{
-		kcxt->kvars_slot[slot_id].ptr = NULL;
-	    kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-	}
-	return true;
+	return __extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, NULL);
 }
 
 PUBLIC_FUNCTION(uint32_t)
@@ -2579,13 +2554,13 @@ ExecGiSTIndexGetNext(kern_context *kcxt,
 	OffsetNumber	index;
 	OffsetNumber	maxoff;
 	const kern_expression *karg_gist;
-	const kern_vars_defitem *kvdef;
+	const kern_varload_desc *kv_desc;
 
 	assert(kds_hash->format == KDS_FORMAT_HASH &&
 		   kds_gist->format == KDS_FORMAT_BLOCK);
 	assert(kexp_gist->opcode == FuncOpCode__GiSTEval &&
 		   kexp_gist->exptype == TypeOpCode__bool);
-	kvdef = &kexp_gist->u.gist.ivar;
+	kv_desc = &kexp_gist->u.gist.idesc;
 	karg_gist = KEXP_FIRST_ARG(kexp_gist);
 	assert(karg_gist->exptype ==  TypeOpCode__bool);
 
@@ -2627,7 +2602,7 @@ restart:
 		kcxt_reset(kcxt);
 		/* extract the index tuple */
 		itup = (IndexTupleData *)PageGetItem(gist_page, lpp);
-		if (!kern_extract_gist_tuple(kcxt, kds_gist, itup, kvdef))
+		if (!kern_extract_gist_tuple(kcxt, kds_gist, itup, kv_desc))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 			return UINT_MAX;
@@ -2645,14 +2620,26 @@ restart:
 
 			if (GistPageIsLeaf(gist_page))
 			{
-				uint32_t	slot_id = kvdef->var_slot_id;
+				const kern_varslot_desc *vs_desc;
+				uint32_t	slot_id = kexp_gist->u.gist.htup_slot_id;
 				uint32_t	t_off;
+				const char *addr;
 
 				assert(itup->t_tid.ip_posid == InvalidOffsetNumber);
 				t_off = ((uint32_t)itup->t_tid.ip_blkid.bi_hi << 16 |
 						 (uint32_t)itup->t_tid.ip_blkid.bi_lo);
-				kcxt->kvars_slot[slot_id].ptr = (char *)kds_hash + __kds_unpack(t_off);
-				kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
+				addr = (const char *)kds_hash + __kds_unpack(t_off);
+				assert(slot_id < kcxt->kvars_nslots);
+				vs_desc = &kcxt->kvars_desc[slot_id];
+				assert(vs_desc->vs_type_code == TypeOpCode__internal);
+				if (!vs_desc->vs_ops->xpu_datum_heap_ref(kcxt,
+														 vs_desc,
+														 addr,
+														 kcxt->kvars_values[slot_id]))
+				{
+					assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+					return UINT_MAX;
+				}
 				/* returns the offset of the next line item pointer */
 				assert((((uintptr_t)lpp) & (sizeof(ItemIdData)-1)) == 0);
 				return ((char *)(lpp+1) - (char *)(kds_gist)) / sizeof(ItemIdData);
@@ -2685,20 +2672,21 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 					   const kern_expression *kexp_join)
 {
 	HeapTupleHeaderData *htup;
+	xpu_internal_t *xdatum;
 	xpu_bool_t		status;
 	uint32_t		slot_id;
 
 	/* fetch the inner heap tuple */
 	assert(kexp_gist->opcode == FuncOpCode__GiSTEval);
-	slot_id = kexp_gist->u.gist.ivar.var_slot_id;
-	if (slot_id >= kcxt->kvars_nslots ||
-		kcxt->kvars_class[slot_id] != KVAR_CLASS__INLINE)
-	{
-		STROM_ELOG(kcxt, "Bug? GiST-Index prep fetched invalid tuple");
-		return false;
-	}
+	slot_id = kexp_gist->u.gist.htup_slot_id;
+	assert(slot_id < kcxt->kvars_nslots &&
+		   kcxt->kvars_desc[slot_id].vs_type_code == TypeOpCode__internal);
 	/* load the inner heap tuple */
-	htup = (HeapTupleHeaderData *)kcxt->kvars_slot[slot_id].ptr;
+	xdatum = (xpu_internal_t *)kcxt->kvars_values[slot_id];
+	assert(!XPU_DATUM_ISNULL(xdatum) &&
+		   xdatum->value >= (char *)kds_hash &&
+		   xdatum->value <  (char *)kds_hash + kds_hash->length);
+	htup = (HeapTupleHeaderData *)xdatum->value;
 	if (!ExecLoadVarsHeapTuple(kcxt, kexp_load, depth, kds_hash, htup))
 	{
 		STROM_ELOG(kcxt, "Bug? GiST-Index prep fetched corrupted tuple");

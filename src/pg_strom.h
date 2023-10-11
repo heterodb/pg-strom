@@ -525,7 +525,7 @@ typedef struct
 	int			kv_slot_id;		/* slot-id of kernel varslot / CPU fallback */
 	int			kv_depth;		/* source depth */
 	int			kv_resno;		/* source resno, if exist */
-	int			kv_maxref;		/* max depth that references this column */
+	int			kv_maxref;		/* max depth that references this column. */
 	int			kv_offset;		/* offset of the vectorized buffer, if any */
 	Oid			kv_type_oid;	/* Type OID */
 	TypeOpCode	kv_type_code;	/* device type opcode */

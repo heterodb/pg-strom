@@ -458,7 +458,7 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 			kcxt->kvars_slot = (kern_variable *)
 				(gist_kvars_addr_wp + index * kcxt->kvars_nbytes);
 			kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
-
+			//Run LoadVar from the GiST-depth
 			join_is_valid = ExecGiSTIndexPostQuals(kcxt, depth,
 												   kds_hash,
 												   kexp_gist,

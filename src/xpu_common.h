@@ -307,8 +307,7 @@ typedef enum {
 #include "xpu_opcodes.h"
 	TypeOpCode__composite,
 	TypeOpCode__array,
-	TypeOpCode__record,
-	TypeOpCode__unsupported_fixed_length,
+	TypeOpCode__internal,
 	TypeOpCode__BuiltInMax,
 } TypeOpCode;
 
@@ -445,7 +444,7 @@ typedef struct
 
 #define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
 	do {																\
-		const kern_varslot_desc *__kvdesc;								\
+		const kern_varslot_desc *__vs_desc;								\
 		uint32_t	__bufsz = Max(512, (SESSION)->kcxt_extra_bufsz);	\
 		uint32_t	__len = offsetof(kern_context, vlbuf) +	__bufsz;	\
 																		\
@@ -457,16 +456,16 @@ typedef struct
 		KCXT->kvecs_ndims  = (SESSION)->kcxt_kvecs_ndims;				\
 		KCXT->kvars_values = (struct xpu_datum_t **)					\
 			alloca(sizeof(struct xpu_datum_t *) * KCXT->kvars_nslots);	\
-		__kvdesc = SESSION_KVARS_SLOT_DESC(SESSION);					\
+		__vs_desc = SESSION_KVARS_SLOT_DESC(SESSION);					\
 		for (int __i=0; __i < KCXT->kvars_nslots; __i++)				\
 		{																\
-			const xpu_datum_operators *kv_ops =	__kvdesc[__i].kv_ops;	\
+			const xpu_datum_operators *vs_ops =	__vs_desc[__i].vs_ops;	\
 			/* alloca() guarantees 16bytes-aligned */					\
-			assert(kv_ops->xpu_type_alignof <= 16);						\
+			assert(vs_ops->xpu_type_alignof <= 16);						\
 			KCXT->kvars_values[__i] = (struct xpu_datum_t *)			\
-				alloca(kv_ops->xpu_type_sizeof);						\
+				alloca(vs_ops->xpu_type_sizeof);						\
 		}													   			\
-		KCXT->kvars_desc = __kvdesc;									\
+		KCXT->kvars_desc = __vs_desc;									\
 		KCXT->vlpos = KCXT->vlbuf;										\
 		KCXT->vlend = KCXT->vlbuf + __bufsz;							\
 	} while(0)
@@ -1563,11 +1562,12 @@ typedef struct kvec_datum_t {
 INLINE_FUNCTION(void)
 kvec_update_nullmask(uint64_t *p_nullmask, int kvec_id, const char *addr)
 {
-	uint64_t	bits	= (1UL << kvec_id);
-	uint64_t	mask	__attribute__ ((unused));
+	uint64_t	bits = (1UL << kvec_id);
+	uint64_t	mask	__attribute__((unused));
 
 	assert(kvec_id >= 0 && kvec_id < KVEC_UNITSZ);
-#ifdef __CUDACC__
+#if defined(__CUDACC__)
+	assert(__activemask() == 0xffffffffU);
 	if (LaneId() == 0)
 		mask = *p_nullmask;
 	mask = __shfl_sync(__activemask(), mask, 0);
@@ -1589,10 +1589,10 @@ kvec_update_nullmask(uint64_t *p_nullmask, int kvec_id, const char *addr)
 	if (LaneId() == 0)
 		*p_nullmask = (mask ^ bits);
 #else
-	if (!addr)
-		*p_nullmask &= ~bits;
+	if (addr)
+		*p_nullmask |= bits;
 	else
-		*p_nullmask |=  bits;
+		*p_nullmask &= ~bits;
 #endif
 }
 
@@ -1642,7 +1642,7 @@ struct xpu_datum_operators {
 	 * also, it is used to reference const and param.
 	 */
 	bool	  (*xpu_datum_heap_ref)(kern_context *kcxt,
-									const kern_varslot_desc *kvdesc, /* in */
+									const kern_varslot_desc *vs_desc, /* in */
 									const void *addr,		/* in */
 									xpu_datum_t *result);	/* out */
 
@@ -1655,7 +1655,7 @@ struct xpu_datum_operators {
 									 const kern_data_store *kds,	/* in */
 									 const kern_colmeta *cmeta,		/* in */
 									 uint32_t kds_index,			/* in */
-									 const kern_varslot_desc *kvdesc, /* in */
+									 const kern_varslot_desc *vs_desc, /* in */
 									 xpu_datum_t *result);			/* out */
 
 	/*
@@ -1929,21 +1929,28 @@ typedef struct
 EXTERN_DATA xpu_datum_operators		xpu_composite_ops;
 
 /*
- * xpu_unsupported_fixed_length_t - generic pgsql fixed-length indirect datum
+ * xpu_internal_t - utility data type for internal usage such as:
  *
- * NOTE: xpu_unsupported_fixed_length_t is only used for projection or dependent
- * key in GROUP-BY to carry unsupported fixed-length values. For inline values,
- * xpu_intX_t is used, and bytea is used for varlena data types.
+ * - to carry fixed-length datum for device projection
+ * - to carry GiST-index pointer to the next depth
  */
 typedef struct {
-	const char	   *value;
-} xpu_unsupported_fixed_length_t;
+	XPU_DATUM_COMMON_FIELD;
+	int32_t		length;
+	const void *value;
+} xpu_internal_t;
+
 typedef struct {
 	KVEC_DATUM_COMMON_FIELD;
-	const char	   *values[KVEC_UNITSZ];
-} kvec_unsupported_fixed_length_t;
+	int32_t		length;			/* to be identical in kvec */
+	const void *values[KVEC_UNITSZ];
+} kvec_internal_t;
 
+EXTERN_DATA xpu_datum_operators		xpu_internal_ops;
 
+/*
+ * device type catalogs
+ */
 typedef struct {
 	TypeOpCode		type_opcode;
 	xpu_datum_operators *type_ops;
@@ -2201,42 +2208,42 @@ typedef struct kern_projection_desc	kern_projection_desc;
 
 struct kern_varload_desc
 {
-	int16_t		kv_resno;		/* resno of the source */
-	int16_t		kv_slot_id;		/* slot-id to load the datum  */
-	TypeOpCode	kv_type_code;
-	bool		kv_typbyval;
-	int8_t		kv_typalign;
-	int16_t		kv_typlen;
-	const struct xpu_datum_operators *kv_ops;
+	int16_t		vl_resno;		/* resno of the source */
+	int16_t		vl_slot_id;		/* slot-id to load the datum  */
+	TypeOpCode	vl_type_code;
+	bool		vl_typbyval;
+	int8_t		vl_typalign;
+	int16_t		vl_typlen;
+	const struct xpu_datum_operators *vl_ops;
 };
 typedef struct kern_varload_desc	kern_varload_desc;
 
 struct kern_varmove_desc
 {
-	int32_t		kv_offset;		/* source & destination kvecs-offset */
-	int16_t		kv_slot_id;		/* source slot-id. */
-	bool		kv_from_xdatum; /* true, if variable is originated from the current
+	int32_t		vm_offset;		/* source & destination kvecs-offset */
+	int16_t		vm_slot_id;		/* source slot-id. */
+	bool		vm_from_xdatum; /* true, if variable is originated from the current
 								 * depth, so values must be copied from the xdatum,
 								 * not kvecs-buffer.
 								 */
-	TypeOpCode	kv_type_code;
-	bool		kv_typbyval;
-	int8_t		kv_typalign;
-	int16_t		kv_typlen;
-	const struct xpu_datum_operators *kv_ops;
+	TypeOpCode	vm_type_code;
+	bool		vm_typbyval;
+	int8_t		vm_typalign;
+	int16_t		vm_typlen;
+	const struct xpu_datum_operators *vm_ops;
 };
 typedef struct kern_varmove_desc	kern_varmove_desc;
 
 struct kern_varslot_desc
 {
-	TypeOpCode	kv_type_code;
-	bool		kv_typbyval;
-	int8_t		kv_typalign;
-	int16_t		kv_typlen;
-	int32_t		kv_typmod;
+	TypeOpCode	vs_type_code;
+	bool		vs_typbyval;
+	int8_t		vs_typalign;
+	int16_t		vs_typlen;
+	int32_t		vs_typmod;
 	uint16_t	off_subfield;	/* offset to the subfield descriptor */
 	uint16_t	num_subfield;	/* number of the subfield (array or composite) */
-	const struct xpu_datum_operators *kv_ops;
+	const struct xpu_datum_operators *vs_ops;
 };
 
 #define KERN_EXPRESSION_MAGIC	(0x4b657870)	/* 'K' 'e' 'x' 'p' */
@@ -2297,9 +2304,7 @@ struct kern_expression
 		} saop;		/* ScalarArrayOp */
 		struct {
 			int			depth;
-			int			nloads;			//deprecated
 			int			nitems;
-			kern_vars_defitem kvars[1];		//deprecated
 			kern_varload_desc desc[1];
 		} load;		/* VarLoads */
 		struct {
@@ -2308,16 +2313,10 @@ struct kern_expression
 			kern_varmove_desc desc[1];
 		} move;
 		struct {
-			uint32_t	gist_oid;	/* OID of GiST index (for EXPLAIN) */
-			int16_t		gist_depth;
-			int16_t		gist_resno;
-			int32_t		gist_slot_id;
-			TypeOpCode	gist_type_code;
-			bool		gist_typbyval;
-			int8_t		gist_typalign;
-			int16_t		gist_typlen;
-			const struct xpu_datum_operators *gist_ops;
-			kern_vars_defitem ivar;	//deprecated
+			uint32_t	gist_oid;		/* OID of GiST index (for EXPLAIN) */
+			int16_t		gist_depth;		/* depth of index tuple */
+			int16_t		htup_slot_id;	/* slot_id to save htup pointer */
+			kern_varload_desc idesc;	/* index-var load descriptor */
 			char		data[1]			__MAXALIGNED__;
 		} gist;		/* GiSTEval */
 		struct {

@@ -1094,8 +1094,8 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 		}
 		else if (typlen > 0)
 		{
-			type_code   = TypeOpCode__unsupported_fixed_length;
-			kvec_sizeof = sizeof(kvec_unsupported_fixed_length_t);
+			type_code   = TypeOpCode__internal;
+			kvec_sizeof = sizeof(kvec_internal_t);
 		}
 		else if (typlen == -1)
 		{
@@ -2280,9 +2280,9 @@ kern_varload_desc_comp(const void *__a, const void *__b)
 	const kern_varload_desc *a = __a;
 	const kern_varload_desc *b = __b;
 
-	if (a->kv_resno < b->kv_resno)
+	if (a->vl_resno < b->vl_resno)
 		return -1;
-	if (a->kv_resno > b->kv_resno)
+	if (a->vl_resno > b->vl_resno)
 		return 1;
 	return 0;
 }
@@ -2296,23 +2296,23 @@ __codegen_build_loadvars_one(codegen_context *context, int depth)
 	int			nitems = 0;
 	ListCell   *lc;
 
-	kexp = alloca(offsetof(kern_expression, u.load.kvars[nrooms+1]));
-	memset(kexp, 0, offsetof(kern_expression, u.load.kvars));
+	kexp = alloca(offsetof(kern_expression, u.load.desc[nrooms+1]));
+	memset(kexp, 0, offsetof(kern_expression, u.load.desc));
 	foreach (lc, context->kvars_deflist)
 	{
 		codegen_kvar_defitem *kvdef = lfirst(lc);
 
 		if (kvdef->kv_depth == depth)
 		{
-			kern_varload_desc  *desc = &kexp->u.load.desc[nitems++];
+			kern_varload_desc  *vl_desc = &kexp->u.load.desc[nitems++];
 
-			memset(desc, 0, sizeof(kern_varload_desc));
-			desc->kv_resno = kvdef->kv_resno;
-			desc->kv_slot_id = kvdef->kv_slot_id;
-			desc->kv_type_code = kvdef->kv_type_code;
-			desc->kv_typbyval = kvdef->kv_typbyval;
-			desc->kv_typalign = kvdef->kv_typalign;
-			desc->kv_typlen = kvdef->kv_typlen;
+			memset(vl_desc, 0, sizeof(kern_varload_desc));
+			vl_desc->vl_resno     = kvdef->kv_resno;
+			vl_desc->vl_slot_id   = kvdef->kv_slot_id;
+			vl_desc->vl_type_code = kvdef->kv_type_code;
+			vl_desc->vl_typbyval  = kvdef->kv_typbyval;
+			vl_desc->vl_typalign  = kvdef->kv_typalign;
+			vl_desc->vl_typlen    = kvdef->kv_typlen;
 		}
 	}
 	if (nitems == 0)
@@ -2383,7 +2383,7 @@ codegen_build_packed_kvars_load(codegen_context *context, pgstromPlanInfo *pp_in
 }
 
 static kern_expression *
-__codegen_build_movevars_one(codegen_context *context, int depth, bool for_gist_index)
+__codegen_build_movevars_one(codegen_context *context, int depth, int gist_depth)
 {
 	kern_expression *kexp;
 	StringInfoData buf;
@@ -2405,20 +2405,24 @@ __codegen_build_movevars_one(codegen_context *context, int depth, bool for_gist_
 	{
 		const codegen_kvar_defitem *kvdef = lfirst(lc);
 
-		if (kvdef->kv_depth >= 0 &&
-			kvdef->kv_depth <= depth &&
-			kvdef->kv_maxref > depth)
+		if ((kvdef->kv_depth >= 0 &&
+			 kvdef->kv_depth <= depth &&
+			 kvdef->kv_maxref > depth) ||
+			(kvdef->kv_depth == gist_depth &&
+			 kvdef->kv_maxref == depth+1))
 		{
-			kern_varmove_desc  *desc = &kexp->u.move.desc[nitems++];
+			kern_varmove_desc  *vm_desc = &kexp->u.move.desc[nitems++];
 
-			memset(desc, 0, sizeof(kern_varmove_desc));
-			desc->kv_offset    = kvdef->kv_offset;
-			desc->kv_slot_id   = kvdef->kv_slot_id;
-			desc->kv_from_xdatum = (!for_gist_index && kvdef->kv_depth == depth);
-			desc->kv_type_code = kvdef->kv_type_code;
-			desc->kv_typbyval  = kvdef->kv_typbyval;
-			desc->kv_typalign  = kvdef->kv_typalign;
-			desc->kv_typlen    = kvdef->kv_typlen;
+			memset(vm_desc, 0, sizeof(kern_varmove_desc));
+			vm_desc->vm_offset    = kvdef->kv_offset;
+			vm_desc->vm_slot_id   = kvdef->kv_slot_id;
+			vm_desc->vm_from_xdatum = (gist_depth < 0
+									   ? kvdef->kv_depth == depth
+									   : kvdef->kv_depth == gist_depth);
+			vm_desc->vm_type_code = kvdef->kv_type_code;
+			vm_desc->vm_typbyval  = kvdef->kv_typbyval;
+			vm_desc->vm_typalign  = kvdef->kv_typalign;
+			vm_desc->vm_typlen    = kvdef->kv_typlen;
 		}
 	}
 	if (nitems == 0)
@@ -2456,7 +2460,7 @@ codegen_build_packed_kvars_move(codegen_context *context, pgstromPlanInfo *pp_in
 	buf.len = sz;
 	for (int depth=0; depth <= context->num_rels; depth++)
 	{
-		karg = __codegen_build_movevars_one(context, depth, false);
+		karg = __codegen_build_movevars_one(context, depth, -1);
 		if (karg)
 		{
 			kexp->u.pack.offset[depth]
@@ -2466,7 +2470,7 @@ codegen_build_packed_kvars_move(codegen_context *context, pgstromPlanInfo *pp_in
 		}
 		if (depth > 0 && pp_info->inners[depth-1].gist_clause != NULL)
 		{
-			karg = __codegen_build_movevars_one(context, depth-1, true);
+			karg = __codegen_build_movevars_one(context, depth-1, gist_depth);
 			if (karg)
 			{
 				kexp->u.pack.offset[gist_depth]
@@ -2931,6 +2935,7 @@ __codegen_build_one_gistquals(codegen_context *context,
 	uint32_t		__pos1;
 	uint32_t		__pos2;
 	uint32_t		gist_depth;
+	uint32_t		htup_slot_id;
 
 	/* device GiST evaluation operator */
 	argtypes[0] = get_atttype(gist_index_oid,
@@ -2943,8 +2948,30 @@ __codegen_build_one_gistquals(codegen_context *context,
 		elog(ERROR, "Bug? cache lookup failed for device function: %u", gist_func_oid);
 	dtype = dfunc->func_argtypes[0];
 	gist_depth = context->kvecs_ndims++;
+	/*
+	 * allocation of the special pointer for reference of the index'ed
+	 * heap-tuple (to be used in the post-processing)
+	 */
+	kvdef = palloc0(sizeof(codegen_kvar_defitem));
+	kvdef->kv_slot_id   = list_length(context->kvars_deflist);
+	kvdef->kv_depth     = gist_depth;
+	kvdef->kv_resno     = InvalidAttrNumber;
+	kvdef->kv_maxref    = curr_depth;
+	kvdef->kv_offset    = context->kvecs_usage;
+	kvdef->kv_type_oid  = INTERNALOID;
+	kvdef->kv_type_code = TypeOpCode__internal;
+	kvdef->kv_typbyval  = false;
+	kvdef->kv_typalign  = sizeof(int64_t);
+	kvdef->kv_typlen    = sizeof(CUdeviceptr);
+	kvdef->kv_expr      = (Expr *)makeNullConst(INTERNALOID, -1, InvalidOid);
+	__assign_codegen_kvar_defitem_subfields(kvdef);
+	context->kvecs_usage += KVEC_ALIGN(sizeof(kvec_internal_t));
+	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
+	htup_slot_id = kvdef->kv_slot_id;
 
-	/* allocation of index-variable reference */
+	/*
+	 * allocation of the index-variable reference
+	 */
 	kvdef = palloc0(sizeof(codegen_kvar_defitem));
 	kvdef->kv_slot_id   = list_length(context->kvars_deflist);
 	kvdef->kv_depth     = gist_depth;
@@ -2967,13 +2994,15 @@ __codegen_build_one_gistquals(codegen_context *context,
 	kexp.opcode   = FuncOpCode__GiSTEval;
 	kexp.nr_args  = 1;
 	kexp.args_offset = offsetof(kern_expression, u.gist.data);
-	kexp.u.gist.gist_oid       = gist_index_oid;
-	kexp.u.gist.gist_depth     = kvdef->kv_depth;
-	kexp.u.gist.gist_resno     = kvdef->kv_resno;
-	kexp.u.gist.gist_slot_id   = kvdef->kv_slot_id;
-	kexp.u.gist.gist_typbyval  = kvdef->kv_typbyval;
-	kexp.u.gist.gist_typalign  = kvdef->kv_typalign;
-	kexp.u.gist.gist_typlen    = kvdef->kv_typlen;
+	kexp.u.gist.gist_oid = gist_index_oid;
+	kexp.u.gist.gist_depth = kvdef->kv_depth;
+	kexp.u.gist.htup_slot_id = htup_slot_id;
+	kexp.u.gist.idesc.vl_resno     = kvdef->kv_resno;
+	kexp.u.gist.idesc.vl_slot_id   = kvdef->kv_slot_id;
+	kexp.u.gist.idesc.vl_type_code = kvdef->kv_type_code;
+	kexp.u.gist.idesc.vl_typbyval  = kvdef->kv_typbyval;
+	kexp.u.gist.idesc.vl_typalign  = kvdef->kv_typalign;
+	kexp.u.gist.idesc.vl_typlen    = kvdef->kv_typlen;
 	off = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
 
 	/* setup binary operator to evaluate GiST index */
@@ -3605,21 +3634,21 @@ __xpucode_loadvars_cstring(StringInfo buf,
 		appendStringInfo(buf, "kvars=(n=%d)[", nitems);
 	for (int i=0; i < nitems; i++)
 	{
-		const kern_varload_desc *desc = &kexp->u.load.desc[i];
+		const kern_varload_desc *vl_desc = &kexp->u.load.desc[i];
 		devtype_info   *dtype;
 
-		dtype = devtype_lookup_by_opcode(desc->kv_type_code);
+		dtype = devtype_lookup_by_opcode(vl_desc->vl_type_code);
 		if (!dtype)
 			elog(ERROR, "failed on devtype_lookup_by_opcode(%u)",
-				 desc->kv_type_code);
+				 vl_desc->vl_type_code);
 		if (i > 0)
 			appendStringInfo(buf, ", ");
 		appendStringInfo(buf, "<slot=%d, type='%s' resno=%d(%s)>",
-						 desc->kv_slot_id,
+						 vl_desc->vl_slot_id,
 						 dtype->type_name,
-						 desc->kv_resno,
+						 vl_desc->vl_resno,
 						 __get_expression_cstring(css, dcontext,
-												  desc->kv_slot_id));
+												  vl_desc->vl_slot_id));
 	}
 	if (kexp->u.load.nitems > 0)
 		appendStringInfo(buf, "]");
@@ -3638,23 +3667,23 @@ __xpucode_movevars_cstring(StringInfo buf,
 
 	for (int i=0; i < kexp->u.move.nitems; i++)
 	{
-		const kern_varmove_desc *desc = &kexp->u.move.desc[i];
+		const kern_varmove_desc *vm_desc = &kexp->u.move.desc[i];
 		devtype_info   *dtype;
 
-		dtype = devtype_lookup_by_opcode(desc->kv_type_code);
+		dtype = devtype_lookup_by_opcode(vm_desc->vm_type_code);
 		if (!dtype)
 			elog(ERROR, "failed on devtype_lookup_by_opcode(%u)",
-				 desc->kv_type_code);
+				 vm_desc->vm_type_code);
 		if (i > 0)
 			appendStringInfo(buf, ", ");
 		appendStringInfo(buf, "<");
-		if (desc->kv_from_xdatum)
-			appendStringInfo(buf, "slot=%d, ", desc->kv_slot_id);
+		if (vm_desc->vm_from_xdatum)
+			appendStringInfo(buf, "slot=%d, ", vm_desc->vm_slot_id);
 		appendStringInfo(buf, "offset=%u, type='%s', expr='%s'>",
-						 desc->kv_offset,
+						 vm_desc->vm_offset,
 						 dtype->type_name,
 						 __get_expression_cstring(css, dcontext,
-												  desc->kv_slot_id));
+												  vm_desc->vm_slot_id));
 	}
 	appendStringInfo(buf, "]}");
 }
@@ -3676,14 +3705,15 @@ __xpucode_gisteval_cstring(StringInfo buf,
 		elog(ERROR, "device type lookup failed for code:%u", kexp->exptype);
 	appendStringInfo(buf, "{GiSTEval(%s): ", dtype->type_name);
 
-	dtype = devtype_lookup_by_opcode(kexp->u.gist.gist_type_code);
+	dtype = devtype_lookup_by_opcode(kexp->u.gist.idesc.vl_type_code);
 	if (!dtype)
-		elog(ERROR, "device type lookup failed for code:%u", kexp->u.gist.gist_type_code);
+		elog(ERROR, "device type lookup failed for code:%u",
+			 kexp->u.gist.idesc.vl_type_code);
 	appendStringInfo(buf, "<slot=%d, idxname%d='%s', type='%s'>, arg=",
-					 kexp->u.gist.gist_slot_id,
-					 kexp->u.gist.gist_resno,
+					 kexp->u.gist.idesc.vl_slot_id,
+					 kexp->u.gist.idesc.vl_resno,
 					 get_attname(kexp->u.gist.gist_oid,
-								 kexp->u.gist.gist_resno, false),
+								 kexp->u.gist.idesc.vl_resno, false),
 					 dtype->type_name);
 	__xpucode_to_cstring(buf, karg, css, es, dcontext);
 	appendStringInfo(buf, "}");
@@ -4145,7 +4175,7 @@ pgstrom_explain_kvars_slot(const CustomScanState *css,
 						 kvdef->kv_resno);
 #endif	
 		appendStringInfo(&buf, ", type='%s", dtype->type_name);
-		if (dtype->type_code == TypeOpCode__unsupported_fixed_length)
+		if (dtype->type_code == TypeOpCode__internal)
 			appendStringInfo(&buf, "[%d]", kvdef->kv_typlen);
 		else if (kvdef->kv_subfields)
 		{

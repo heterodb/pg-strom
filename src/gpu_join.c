@@ -1893,7 +1893,7 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 						   const ItemPointer t_self,
 						   const HeapTupleHeaderData *htup)
 {
-	const kern_vars_defitem *kvdef = kexp_vloads->u.load.kvars;
+	const kern_varload_desc *vl_desc = kexp_vloads->u.load.desc;
 	uint32_t	offset = htup->t_hoff;
 	uint32_t	kvcnt = 0;
 	uint32_t	resno;
@@ -1902,13 +1902,13 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 
 	Assert(kexp_vloads->opcode == FuncOpCode__LoadVars);
 	/* extract system attributes, if rquired */
-	while (kvcnt < kexp_vloads->u.load.nloads &&
-		   kvdef->var_resno < 0)
+	while (kvcnt < kexp_vloads->u.load.nitems &&
+		   vl_desc->vl_resno < 0)
 	{
-		int		slot_id = kvdef->var_slot_id;
+		int		slot_id = vl_desc->vl_slot_id;
 		Datum	datum;
 
-		switch (kvdef->var_resno)
+		switch (vl_desc->vl_resno)
 		{
 			case SelfItemPointerAttributeNumber:
 				datum = PointerGetDatum(t_self);
@@ -1927,16 +1927,16 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 				datum = ObjectIdGetDatum(kds->table_oid);
 				break;
 			default:
-				elog(ERROR, "invalid attnum: %d", kvdef->var_resno);
+				elog(ERROR, "invalid attnum: %d", vl_desc->vl_resno);
 		}
 		fallback_slot->tts_isnull[slot_id] = false;
 		fallback_slot->tts_values[slot_id] = datum;
-		kvdef++;
+		vl_desc++;
 		kvcnt++;
 	}
 	/* extract the user data */
 	resno = 1;
-	while (kvcnt < kexp_vloads->u.load.nloads && resno <= ncols)
+	while (kvcnt < kexp_vloads->u.load.nitems && resno <= ncols)
 	{
 		const kern_colmeta *cmeta = &kds->colmeta[resno-1];
 		const char	   *addr;
@@ -1958,9 +1958,9 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 				offset += VARSIZE_ANY(addr);
 		}
 
-		if (kvdef->var_resno == resno)
+		if (vl_desc->vl_resno == resno)
 		{
-			int		slot_id = kvdef->var_slot_id;
+			int		slot_id = vl_desc->vl_slot_id;
 			Datum	datum;
 
 			if (!addr)
@@ -1991,19 +1991,19 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 			}
 			fallback_slot->tts_isnull[slot_id] = !addr;
 			fallback_slot->tts_values[slot_id] = datum;
-			kvdef++;
+			vl_desc++;
 			kvcnt++;
 		}
 		resno++;
 	}
 	/* fill-up by NULL for the remaining fields */
-	while (kvcnt < kexp_vloads->u.load.nloads)
+	while (kvcnt < kexp_vloads->u.load.nitems)
 	{
-		int		slot_id = kvdef->var_slot_id;
+		int		slot_id = vl_desc->vl_slot_id;
 
 		fallback_slot->tts_isnull[slot_id] = true;
 		fallback_slot->tts_values[slot_id] = 0;
-		kvdef++;
+		vl_desc++;
 		kvcnt++;
 	}
 }
