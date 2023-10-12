@@ -20,8 +20,8 @@ execGpuJoinNestLoop(kern_context *kcxt,
 					kern_warp_context *wp,
 					kern_multirels *kmrels,
 					int			depth,
-					char	   *src_kvars_addr_wp,
-					char	   *dst_kvars_addr_wp,
+					char	   *src_kvecs_buffer,
+					char	   *dst_kvars_addr_wp, //FIXME
 					uint32_t   &l_state,
 					bool	   &matched)
 {
@@ -85,10 +85,8 @@ execGpuJoinNestLoop(kern_context *kcxt,
 	{
 		uint32_t	index = l_state++;
 
-		read_pos = (read_pos % UNIT_TUPLES_PER_DEPTH);
-		kcxt->kvars_slot = (kern_variable *)
-			(src_kvars_addr_wp + read_pos * kcxt->kvars_nbytes);
-		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
+		kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+		kcxt->kvecs_curr_buffer = src_kvecs_buffer;
 		if (index < kds_heap->nitems)
 		{
 			kern_tupitem *tupitem;
@@ -167,7 +165,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 					kern_warp_context *wp,
 					kern_multirels *kmrels,
 					int			depth,
-					char	   *src_kvars_addr_wp,
+					char	   *src_kvecs_buffer,
 					char	   *dst_kvars_addr_wp,
 					uint32_t   &l_state,
 					bool	   &matched)
@@ -234,10 +232,8 @@ execGpuJoinHashJoin(kern_context *kcxt,
 	}
 	write_pos = WARP_WRITE_POS(wp,depth-1);
 	read_pos = WARP_READ_POS(wp,depth-1) + LaneId();
-	index = (read_pos % UNIT_TUPLES_PER_DEPTH);
-	kcxt->kvars_slot = (kern_variable *)
-		(src_kvars_addr_wp + index * kcxt->kvars_nbytes);
-	kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
+	kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
 
 	if (l_state == 0)
 	{
@@ -400,8 +396,8 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 					kern_warp_context *wp,
 					kern_multirels *kmrels,
 					int         depth,
-					char       *src_kvars_addr_wp,
-					char       *dst_kvars_addr_wp,
+					char       *src_kvars_addr_wp,	//FIXME
+					char       *dst_kvars_addr_wp,	//FIXME
 					const kern_expression *kexp_gist,
 					char	   *gist_kvars_addr_wp,
 					uint32_t   &l_state,

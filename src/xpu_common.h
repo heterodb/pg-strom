@@ -420,10 +420,12 @@ typedef struct
 	 */
 	struct xpu_datum_t **kvars_values;
 	const struct kern_varslot_desc *kvars_desc;
-	uint32_t		kvars_nslots;
-	uint32_t		kvars_nrooms;	/* length of kvars_desc (incl. subfields) */
+	uint32_t		kvars_nslots;		/* length of kvars_values / desc */
+	uint32_t		kvars_nrooms;		/* length of kvars_desc (incl. subfields) */
 	uint32_t		kvecs_bufsz;
 	uint32_t		kvecs_ndims;
+	char		   *kvecs_curr_buffer;	/* current kvecs-buffer */
+	uint32_t		kvecs_curr_id;		/* current kvecs-id */
 #if 1
 	uint32_t		kvars_nbytes;	//deprecated
 	kern_variable  *kvars_slot;		//deprecated
@@ -454,6 +456,8 @@ typedef struct
 		KCXT->kvars_nslots = (SESSION)->kcxt_kvars_nslots;				\
 		KCXT->kvecs_bufsz  = (SESSION)->kcxt_kvecs_bufsz;				\
 		KCXT->kvecs_ndims  = (SESSION)->kcxt_kvecs_ndims;				\
+		KCXT->kvecs_curr_buffer = NULL;									\
+		KCXT->kvecs_curr_id = 0;										\
 		KCXT->kvars_values = (struct xpu_datum_t **)					\
 			alloca(sizeof(struct xpu_datum_t *) * KCXT->kvars_nslots);	\
 		__vs_desc = SESSION_KVARS_SLOT_DESC(SESSION);					\
@@ -1621,7 +1625,7 @@ struct xpu_datum_operators {
 	bool		xpu_type_byval;		/* = pg_type.typbyval */
 	int8_t		xpu_type_align;		/* = pg_type.typalign */
 	int16_t		xpu_type_length;	/* = pg_type.typlen */
-	TypeOpCode	xpu_type_code;
+	TypeOpCode	xpu_type_code;		/* = TypeOpCode__XXXX */
 	int			xpu_type_sizeof;	/* = sizeof(xpu_XXXX_t), not PG type! */
 	int			xpu_type_alignof;	/* = __alignof__(xpu_XXX_t), not PG type! */
 	int			xpu_kvec_sizeof;	/* = sizeof(kvec_XXXX_t), not PG type! */
@@ -1666,8 +1670,8 @@ struct xpu_datum_operators {
 	 * and gpupreagg).
 	 */
 	bool	  (*xpu_datum_kvec_ref)(kern_context *kcxt,
-									const kvec_datum_t *kvec,	/* in */
-									int kvec_id,				/* in */
+									const kvec_datum_t *kvecs,	/* in */
+									int kvecs_id,				/* in */
 									xpu_datum_t *result);		/* out */
 	/*
 	 * xpu_datum_kvec_store: called by MoveVars to save the xdatum,
@@ -1678,8 +1682,8 @@ struct xpu_datum_operators {
 	 */
 	bool	  (*xpu_datum_kvec_store)(kern_context *kcxt,
 									  const xpu_datum_t *xdatum, /* in */
-									  kvec_datum_t *kvec,		/* out */
-									  int kvec_id);				/* out */
+									  kvec_datum_t *kvecs,		/* out */
+									  int kvecs_id);			/* out */
 	/*
 	 * xpu_datum_kvec_copy: called by MoveVars to copy the vectorized
 	 * kernel values from the previous depth to the next depth, without
@@ -1688,10 +1692,10 @@ struct xpu_datum_operators {
 	 * to save the amount of memory transactions onto the global memory.
 	 */
 	bool	  (*xpu_datum_kvec_copy)(kern_context *kcxt,
-									 const kvec_datum_t *kvec_src,	/* in */
-									 int kvec_src_id,			/* in */
-									 kvec_datum_t *kvec_dst,	/* out */
-									 int kvec_dst_id);			/* out */
+									 const kvec_datum_t *kvecs_src,	/* in */
+									 int kvecs_src_id,			/* in */
+									 kvec_datum_t *kvecs_dst,	/* out */
+									 int kvecs_dst_id);			/* out */
 	/*
 	 * xpu_datum_write: called by Projection or GpuPreAgg to write out
 	 * xdatum onto the destination/final buffer.
@@ -2266,20 +2270,22 @@ struct kern_expression
 		char			data[1]			__MAXALIGNED__;
 		struct {
 			Oid			const_type;
-			bool		const_isnull;
-			char		const_value[1]	__MAXALIGNED__;
+			int32_t		const_value;	/* -1, if NULL */
+			kern_varslot_desc const_desc;	/* descriptot to load const */
 		} c;		/* ConstExpr */
 		struct {
 			uint32_t	param_id;
-			char		__data[1];
+			kern_varslot_desc param_desc;	/* descriptor to load param */
 		} p;		/* ParamExpr */
 		struct {
-			int16_t		var_typlen;		//deprecated
-			bool		var_typbyval;	//deprecated
-			uint8_t		var_typalign;	//deprecated
-			/* ------------------------ */
-			int16_t		var_slot_id;
-			int32_t		var_offset;		/* valid, if load from the kvec-buffer */
+			/* if var_offset < 0, it means variables should be loaded from
+			 * the kcxt->kvars_values[] entries, used for the new values
+			 * loaded in this depth, or temporary variables.
+			 * elsewhere, 'var_offset' points particular region on the
+			 * kernel vectorized values buffer (kvecs).
+			 */
+			int32_t		var_offset;		/* kvec's buffer offset */
+			uint16_t	var_slot_id;	/* kvar's slot-id */
 			char		__data[1];
 		} v;		/* VarExpr */
 		struct {
@@ -2300,6 +2306,7 @@ struct kern_expression
 			int8_t		elem_typalign;
 			int16_t		elem_typlen;
 			const struct xpu_datum_operators *elem_ops;
+			kern_varslot_desc elem_desc; //to do
 			char		data[1]			__MAXALIGNED__;
 		} saop;		/* ScalarArrayOp */
 		struct {
@@ -2329,6 +2336,7 @@ struct kern_expression
 			int8_t		sv_typalign;
 			int16_t		sv_typlen;
 			const struct xpu_datum_operators *sv_ops;
+			kern_varslot_desc sv_desc;
 			char		data[1]		__MAXALIGNED__;
 		} save;		/* SaveExpr */
 		struct {
@@ -2393,8 +2401,6 @@ __KEXP_IS_VALID(const kern_expression *kexp,
 
 #define SizeOfKernExpr(__PAYLOAD_SZ)						\
 	(offsetof(kern_expression, u.data) + (__PAYLOAD_SZ))
-#define SizeOfKernExprParam					\
-	(offsetof(kern_expression, u.p.__data))
 #define SizeOfKernExprVar					\
 	(offsetof(kern_expression, u.v.__data))
 typedef struct {

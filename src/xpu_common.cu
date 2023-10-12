@@ -1101,99 +1101,59 @@ STATIC_FUNCTION(bool)
 pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 {
 	const xpu_datum_operators *expr_ops = kexp->expr_ops;
-#if 0
 	const char	   *addr;
 
-	if (!kexp->u.c.const_isnull)
+	if (kexp->u.c.const_value < 0)
 		addr = NULL;
 	else
-		addr = kexp->u.c.const_value;
+		addr = (char *)kexp + kexp->u.c.const_value;
 
-	return expr_ops->xpu_datum_heap_ref(kcxt, vs_desc, addr, __result);
-#endif
-	if (!kexp->u.c.const_isnull)
-	{
-		int			typlen = expr_ops->xpu_type_length;
-		kern_variable kvar;
-
-		kvar.ptr = (void *)kexp->u.c.const_value;
-		if (typlen >= 0)
-			return expr_ops->xpu_datum_ref(kcxt, __result, typlen, &kvar);
-		else if (typlen == -1)
-			return expr_ops->xpu_datum_ref(kcxt, __result, KVAR_CLASS__VARLENA, &kvar);
-		else
-		{
-			STROM_ELOG(kcxt, "Bug? ConstExpr has unknown type length");
-			return false;
-		}
-	}
-	__result->expr_ops = NULL;
-	return true;
+	return expr_ops->xpu_datum_heap_ref(kcxt, &kexp->u.c.const_desc, addr, __result);
 }
 
 STATIC_FUNCTION(bool)
 pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 {
+	const xpu_datum_operators *expr_ops = kexp->expr_ops;
 	kern_session_info *session = kcxt->session;
-	uint32_t	param_id = kexp->u.p.param_id;
+	uint32_t		param_id = kexp->u.p.param_id;
+	const char	   *addr;
 
 	if (param_id < session->nparams && session->poffset[param_id] != 0)
-	{
-		const xpu_datum_operators *expr_ops = kexp->expr_ops;
-		int			typlen = expr_ops->xpu_type_length;
-		kern_variable kvar;
+		addr = ((char *)session + session->poffset[param_id]);
+	else
+		addr = NULL;
 
-		kvar.ptr = ((char *)session + session->poffset[param_id]);
-		if (typlen >= 0)
-			return expr_ops->xpu_datum_ref(kcxt, __result, typlen, &kvar);
-		else if (typlen == -1)
-			return expr_ops->xpu_datum_ref(kcxt, __result, KVAR_CLASS__VARLENA, &kvar);
-		else
-		{
-			STROM_ELOG(kcxt, "Bug? ParamExpr has unknown type length");
-			return false;
-		}
-	}
-	__result->expr_ops = NULL;
-	return true;
+	return expr_ops->xpu_datum_heap_ref(kcxt, &kexp->u.p.param_desc, addr, __result);
 }
 
 STATIC_FUNCTION(bool)
 pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 {
 	const xpu_datum_operators *expr_ops = kexp->expr_ops;
-	uint16_t	slot_id = kexp->u.v.var_slot_id;
-	
-	if (slot_id < kcxt->kvars_nslots)
+
+	if (kexp->u.v.var_offset < 0)
 	{
+		uint16_t		slot_id = kexp->u.v.var_slot_id;
+		xpu_datum_t	   *__xdatum = kcxt->kvars_values[slot_id];
 
-		kern_variable  *kvar = &kcxt->kvars_slot[slot_id];
-		int				vclass = kcxt->kvars_class[slot_id];
-
-		switch (vclass)
+		if (slot_id >= kcxt->kvars_nslots)
 		{
-			case KVAR_CLASS__NULL:
-				__result->expr_ops = NULL;
-				return true;
-
-			case KVAR_CLASS__XPU_DATUM:
-				assert(((const xpu_datum_t *)kvar->ptr)->expr_ops == expr_ops);
-				memcpy(__result, kvar->ptr, expr_ops->xpu_type_sizeof);
-				return true;
-
-			default:
-				if (vclass < 0)
-				{
-					STROM_ELOG(kcxt, "Bug? KVAR_CLASS__* mismatch");
-					return false;
-				}
-			case KVAR_CLASS__INLINE:
-			case KVAR_CLASS__VARLENA:
-				return expr_ops->xpu_datum_ref(kcxt, __result, vclass, kvar);
+			STROM_ELOG(kcxt, "Bug? slot_id is out of range");
+			return false;
 		}
+		memcpy(__result, __xdatum, expr_ops->xpu_type_sizeof);
+		assert(XPU_DATUM_ISNULL(__result) || __result->expr_ops == expr_ops);
 	}
-	STROM_ELOG(kcxt, "Bug? slot_id is out of range");
-	return false;
+	else
+	{
+		const kvec_datum_t *kvecs = (kvec_datum_t *)(kcxt->kvecs_curr_buffer +
+													 kexp->u.v.var_offset);
+		return expr_ops->xpu_datum_kvec_ref(kcxt, kvecs,
+											kcxt->kvecs_curr_id,
+											__result);
+	}
+	return true;
 }
 
 STATIC_FUNCTION(bool)

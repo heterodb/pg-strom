@@ -450,8 +450,8 @@ __build_session_kvars_defs(pgstromTaskState *pts,
 {
 	pgstromPlanInfo *pp_info = pts->pp_info;
 	kern_varslot_desc *kvars_defs;
-	uint32_t	nrooms = list_length(pp_info->kvars_deflist);
-	uint32_t	nitems = nrooms;
+	uint32_t	nitems = list_length(pp_info->kvars_deflist);
+	uint32_t	nrooms = nitems;
 	uint32_t	sz;
 	ListCell   *lc;
 
@@ -465,11 +465,31 @@ __build_session_kvars_defs(pgstromTaskState *pts,
 	
 	kvars_defs = alloca(sz);
 	memset(kvars_defs, 0, sz);
-	nrooms = __setup_session_kvars_defs_array(kvars_defs, pp_info->kvars_deflist);
+	__setup_session_kvars_defs_array(kvars_defs, pp_info->kvars_deflist);
 
 	session->kcxt_kvars_nrooms = nrooms;
 	session->kcxt_kvars_nslots = nitems;
 	session->kcxt_kvars_defs = __appendBinaryStringInfo(buf, kvars_defs, sz);
+}
+
+/*
+ * inject_kern_varslot_desc
+ */
+size_t
+inject_kern_varslot_desc(StringInfo buf,
+						 codegen_kvar_defitem *kvdef)
+{
+	uint32_t	nrooms = 1 + __count_session_kvars_defs_subfields(kvdef);
+	size_t		sz = sizeof(kern_varslot_desc) * nrooms;
+	kern_varslot_desc *vs_desc_array;
+
+	vs_desc_array = alloca(sz);
+	memset(vs_desc_array, 0, sz);
+	__setup_session_kvars_defs_array(vs_desc_array, list_make1(kvdef));
+
+	appendBinaryStringInfo(buf, (char *)vs_desc_array, sz);
+
+	return sz;
 }
 
 static uint32_t

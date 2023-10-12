@@ -1268,38 +1268,49 @@ codegen_const_expression(codegen_context *context,
 			   format_type_be(con->consttype));
 	if (buf)
 	{
-		kern_expression *kexp;
-		int		pos, sz = 0;
+		codegen_kvar_defitem kvdef;
+		kern_expression	*kexp;
+		int			pos, off = -1;
 
-		sz = offsetof(kern_expression, u.c.const_value);
+		memset(&kvdef, 0, sizeof(kvdef));
+		kvdef.kv_slot_id = -1;
+		kvdef.kv_depth = -1;
+		kvdef.kv_resno = InvalidAttrNumber;
+		kvdef.kv_maxref = -1;
+		kvdef.kv_offset = -1;
+		kvdef.kv_type_oid = dtype->type_oid;
+		kvdef.kv_type_code = dtype->type_code;
+		kvdef.kv_typbyval = dtype->type_byval;
+		kvdef.kv_typalign = dtype->type_align;
+		kvdef.kv_typlen = dtype->type_length;
+		kvdef.kv_expr = (Expr *)con;
+		__assign_codegen_kvar_defitem_subfields(&kvdef);
+
+		pos = __appendZeroStringInfo(buf, offsetof(kern_expression, u.c.const_desc));
+		inject_kern_varslot_desc(buf, &kvdef);
 		if (!con->constisnull)
 		{
 			if (con->constbyval)
-				sz += con->constlen;
+				off = __appendBinaryStringInfo(buf,
+											   &con->constvalue,
+											   con->constlen);
+			else if (con->constlen > 0)
+				off = __appendBinaryStringInfo(buf,
+											   DatumGetPointer(con->constvalue),
+											   con->constlen);
 			else if (con->constlen == -1)
-				sz += VARSIZE_ANY(con->constvalue);
+				off = __appendBinaryStringInfo(buf,
+											   DatumGetPointer(con->constvalue),
+											   VARSIZE_ANY(con->constvalue));
 			else
 				elog(ERROR, "unsupported type length: %d", con->constlen);
 		}
-		kexp = alloca(sz);
-		memset(kexp, 0, sz);
+		kexp = (kern_expression *)(buf->data + pos);
 		kexp->exptype = dtype->type_code;
 		kexp->expflags = context->kexp_flags;
 		kexp->opcode = FuncOpCode__ConstExpr;
 		kexp->u.c.const_type = con->consttype;
-		kexp->u.c.const_isnull = con->constisnull;
-		if (!con->constisnull)
-		{
-			if (con->constbyval)
-				memcpy(kexp->u.c.const_value,
-					   &con->constvalue,
-					   con->constlen);
-			else
-				memcpy(kexp->u.c.const_value,
-					   DatumGetPointer(con->constvalue),
-					   VARSIZE_ANY(con->constvalue));
-		}
-		pos = __appendBinaryStringInfo(buf, kexp, sz);
+		kexp->u.c.const_value = (off > pos ? off - pos : -1);
 		__appendKernExpMagicAndLength(buf, pos);
 	}
 	return 0;
@@ -1310,10 +1321,8 @@ codegen_param_expression(codegen_context *context,
 						 StringInfo buf, int curr_depth,
 						 Param *param)
 {
-	kern_expression	kexp;
 	devtype_info   *dtype;
 	char			typtype;
-	int				pos;
 
 	if (param->paramkind != PARAM_EXTERN)
 		__Elog("Only PARAM_EXTERN is supported on device: %d",
@@ -1324,7 +1333,7 @@ codegen_param_expression(codegen_context *context,
 		typtype != TYPTYPE_ENUM &&
 		typtype != TYPTYPE_RANGE &&
 		typtype != TYPTYPE_DOMAIN)
-		__Elog("unable to use type %s in Const expression (class: %c)",
+		__Elog("unable to use type %s in Param expression (class: %c)",
 			   format_type_be(param->paramtype), typtype);
 
 	dtype = pgstrom_devtype_lookup(param->paramtype);
@@ -1333,13 +1342,32 @@ codegen_param_expression(codegen_context *context,
 			   format_type_be(param->paramtype));
 	if (buf)
 	{
+		codegen_kvar_defitem kvdef;
+		kern_expression	kexp;
+		int		pos;
+
 		memset(&kexp, 0, sizeof(kexp));
 		kexp.opcode = FuncOpCode__ParamExpr;
 		kexp.exptype = dtype->type_code;
 		kexp.expflags = context->kexp_flags;
 		kexp.u.p.param_id = param->paramid;
-		pos = __appendBinaryStringInfo(buf, &kexp,
-									   SizeOfKernExprParam);
+        pos = __appendBinaryStringInfo(buf, &kexp,
+									   offsetof(kern_expression, u.p.param_desc));
+		/* put kern_varslot_desc */
+		memset(&kvdef, 0, sizeof(kvdef));
+		kvdef.kv_slot_id = -1;
+		kvdef.kv_depth = -1;
+		kvdef.kv_resno = InvalidAttrNumber;
+		kvdef.kv_maxref = -1;
+		kvdef.kv_offset = -1;
+		kvdef.kv_type_oid = dtype->type_oid;
+		kvdef.kv_type_code = dtype->type_code;
+		kvdef.kv_typbyval = dtype->type_byval;
+		kvdef.kv_typalign = dtype->type_align;
+		kvdef.kv_typlen = dtype->type_length;
+		kvdef.kv_expr = (Expr *)param;
+		__assign_codegen_kvar_defitem_subfields(&kvdef);
+		inject_kern_varslot_desc(buf, &kvdef);
 		__appendKernExpMagicAndLength(buf, pos);
 	}
 	context->used_params = list_append_unique(context->used_params, param);
@@ -1350,6 +1378,7 @@ codegen_param_expression(codegen_context *context,
 static int
 codegen_var_expression(codegen_context *context,
 					   StringInfo buf,
+					   int curr_depth,
 					   const codegen_kvar_defitem *kvdef)
 {
 	if (buf)
@@ -1362,6 +1391,11 @@ codegen_var_expression(codegen_context *context,
 		kexp.expflags        = context->kexp_flags;
 		kexp.opcode          = FuncOpCode__VarExpr;
 		kexp.u.v.var_slot_id = kvdef->kv_slot_id;
+		if (kvdef->kv_offset >= 0 &&
+			kvdef->kv_depth == curr_depth)
+			kexp.u.v.var_offset = kvdef->kv_offset;
+		else
+			kexp.u.v.var_offset = -1;
 		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExprVar);
 		__appendKernExpMagicAndLength(buf, pos);
 	}
@@ -2084,6 +2118,7 @@ codegen_scalar_array_op_expression(codegen_context *context,
 		kexp.opcode   = FuncOpCode__VarExpr;
 		kexp.nr_args  = 0;
 		kexp.u.v.var_slot_id = kvdef->kv_slot_id;
+		kexp.u.v.var_offset = -1;
 		__off = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExprVar);
 		__appendKernExpMagicAndLength(buf, __off);
 	}
@@ -2217,7 +2252,7 @@ codegen_expression_walker(codegen_context *context,
 	/* check simple var references */
 	kvdef = is_expression_equals_tlist(context, expr, curr_depth, false);
 	if (kvdef)
-		return codegen_var_expression(context, buf, kvdef);
+		return codegen_var_expression(context, buf, curr_depth, kvdef);
 
 	switch (nodeTag(expr))
 	{
@@ -3021,10 +3056,12 @@ __codegen_build_one_gistquals(codegen_context *context,
 	kexp.expflags = context->kexp_flags;
 	kexp.opcode   = FuncOpCode__VarExpr;
 	kexp.u.v.var_slot_id = kvdef->kv_slot_id;
+	kexp.u.v.var_offset = -1;
 	__pos2 = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExprVar);
 	__appendKernExpMagicAndLength(buf, __pos2);
 
 	/* 2nd argument - outer reference */
+	//check 'curr_depth' is suitable here. gist_depth?
 	codegen_expression_walker(context, buf, curr_depth, gist_func_arg);
 
 	__appendKernExpMagicAndLength(buf, __pos1);
@@ -3300,6 +3337,7 @@ codegen_build_groupby_keycomp(codegen_context *context,
 		kexp.expflags = context->kexp_flags;
 		kexp.opcode = FuncOpCode__VarExpr;
 		kexp.u.v.var_slot_id = kvdef_i->kv_slot_id;
+		kexp.u.v.var_offset = -1; //FIXME: how to handle SaveExpr
 		__pos = __appendBinaryStringInfo(&buf, &kexp, SizeOfKernExprVar);
 		__appendKernExpMagicAndLength(&buf, __pos);	/* end of FuncExpr */
 
@@ -3309,6 +3347,7 @@ codegen_build_groupby_keycomp(codegen_context *context,
 		kexp.expflags = context->kexp_flags;
 		kexp.opcode = FuncOpCode__VarExpr;
 		kexp.u.v.var_slot_id = kvdef_f->kv_slot_id;
+		kexp.u.v.var_offset = -1;
 		__pos = __appendBinaryStringInfo(&buf, &kexp, SizeOfKernExprVar);
 		__appendKernExpMagicAndLength(&buf, __pos);	/* end of VarExpr */
 
@@ -3557,12 +3596,13 @@ __xpucode_const_cstring(StringInfo buf, const kern_expression *kexp)
 {
 	devtype_info   *dtype = devtype_lookup_by_opcode(kexp->exptype);
 
-	if (kexp->u.c.const_isnull)
+	if (kexp->u.c.const_value < 0)
 	{
 		appendStringInfo(buf, "{Const(%s): value=NULL}", dtype->type_name);
 	}
 	else
 	{
+		const char *addr;
 		int16	type_len;
 		bool	type_byval;
 		char	type_align;
@@ -3580,10 +3620,11 @@ __xpucode_const_cstring(StringInfo buf, const kern_expression *kexp)
 						 &type_delim,
 						 &type_ioparam,
 						 &type_outfunc);
+		addr = ((const char *)kexp + kexp->u.c.const_value);
 		if (type_byval)
-			memcpy(&datum, kexp->u.c.const_value, type_len);
+			memcpy(&datum, addr, type_len);
 		else
-			datum = PointerGetDatum(kexp->u.c.const_value);
+			datum = PointerGetDatum(addr);
 		label = OidFunctionCall1(type_outfunc, datum);
 		appendStringInfo(buf, "{Const(%s): value='%s'}",
 						 dtype->type_name,
@@ -3611,11 +3652,22 @@ __xpucode_var_cstring(StringInfo buf,
 	devtype_info   *dtype = devtype_lookup_by_opcode(kexp->exptype);
 	const char	   *label = __get_expression_cstring(css, dcontext,
 													 kexp->u.v.var_slot_id);
-
-	appendStringInfo(buf, "{Var(%s): slot=%d, expr='%s'}",
-					 dtype->type_name,
-					 kexp->u.v.var_slot_id,
-					 label);
+	appendStringInfo(buf, "{Var(%s):", dtype->type_name);
+	if (kexp->u.v.var_offset < 0)
+		appendStringInfo(buf, " slot=%u", kexp->u.v.var_slot_id);
+	else if (kexp->u.v.var_offset + dtype->kvec_sizeof < 0x10000)
+		appendStringInfo(buf, " kvec=0x%04x-0x%04x",
+						 kexp->u.v.var_offset,
+						 kexp->u.v.var_offset + dtype->kvec_sizeof - 1);
+	else if (kexp->u.v.var_offset + dtype->kvec_sizeof < 0x1000000)
+		appendStringInfo(buf, " kvec=0x%06x-0x%06x",
+						 kexp->u.v.var_offset,
+						 kexp->u.v.var_offset + dtype->kvec_sizeof - 1);
+	else
+		appendStringInfo(buf, " kvec=0x%08x-0x%08x",
+						 kexp->u.v.var_offset,
+						 kexp->u.v.var_offset + dtype->kvec_sizeof - 1);
+	appendStringInfo(buf, ", expr='%s'}", label);
 }
 
 static void
@@ -3630,8 +3682,9 @@ __xpucode_loadvars_cstring(StringInfo buf,
 	Assert(kexp->nr_args == 0);
 
 	appendStringInfo(buf, "{LoadVars(depth=%d): ", kexp->u.load.depth);
+	appendStringInfo(buf, "kvars=");
 	if (kexp->u.load.nitems > 0)
-		appendStringInfo(buf, "kvars=(n=%d)[", nitems);
+		appendStringInfoChar(buf, '[');
 	for (int i=0; i < nitems; i++)
 	{
 		const kern_varload_desc *vl_desc = &kexp->u.load.desc[i];
@@ -3651,7 +3704,7 @@ __xpucode_loadvars_cstring(StringInfo buf,
 												  vl_desc->vl_slot_id));
 	}
 	if (kexp->u.load.nitems > 0)
-		appendStringInfo(buf, "]");
+		appendStringInfoChar(buf, ']');
 }
 
 static void
