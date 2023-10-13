@@ -1882,47 +1882,25 @@ pgfn_SaveExpr(XPU_PGFUNCTION_ARGS)
 {
 	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 	const xpu_datum_operators *expr_ops = kexp->expr_ops;
-	xpu_datum_t	   *result = __result;
-	uint32_t		slot_id = kexp->u.save.slot_id;
-	uint32_t		slot_off = kexp->u.save.slot_off;
-	xpu_datum_t	   *slot_buf = NULL;
+	uint16_t		slot_id = kexp->u.save.sv_slot_id;
+	xpu_datum_t	   *xdatum = kcxt->kvars_values[slot_id];
 
-	assert(slot_id < kcxt->kvars_nslots);
 	assert(kexp->nr_args == 1 &&
-		   kexp->exptype == karg->exptype);
-	if (slot_off > 0)
-	{
-		assert(slot_off + expr_ops->xpu_type_sizeof <= kcxt->kvars_nbytes);
-		slot_buf = (xpu_datum_t *)((char *)kcxt->kvars_slot + slot_off);
-	}
-	/* SaveExpr accept NULL result buffer! */
-	if (!result)
-	{
-		if (slot_buf)
-			result = slot_buf;
-		else
-			result = (xpu_datum_t *)alloca(expr_ops->xpu_type_sizeof);
-	}
+		   kexp->exptype == karg->exptype &&
+		   slot_id < kcxt->kvars_nslots);
 	/* Run the expression */
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, result))
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, xdatum))
 		return false;
-	if (XPU_DATUM_ISNULL(result))
+	/*
+	 * NOTE: SaveExpr accepts NULL result buffer, if caller just wants to fill-up
+	 * the kvars-slot at the time.
+	 */
+	if (__result)
 	{
-		kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-	}
-	else if (slot_buf)
-	{
-		if (slot_buf != result)
-			memcpy(slot_buf, result, expr_ops->xpu_type_sizeof);
-		kcxt->kvars_class[slot_id] = KVAR_CLASS__XPU_DATUM;
-		kcxt->kvars_slot[slot_id].ptr = slot_buf;
-	}
-	else
-	{
-		if (!expr_ops->xpu_datum_store(kcxt, result,
-									   &kcxt->kvars_class[slot_id],
-									   &kcxt->kvars_slot[slot_id]))
-			return false;
+		if (XPU_DATUM_ISNULL(xdatum))
+			__result->expr_ops = NULL;
+		else if (xdatum != __result)
+			memcpy(__result, xdatum, expr_ops->xpu_type_sizeof);
 	}
 	return true;
 }

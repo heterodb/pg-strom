@@ -2313,17 +2313,8 @@ struct kern_expression
 			char		data[1]			__MAXALIGNED__;
 		} gist;		/* GiSTEval */
 		struct {
-			uint32_t	slot_id;	//deprecated
-			uint32_t	slot_off;	//deprecated
-			/*----------------------*/
-			int32_t		sv_slot_id;
-			TypeOpCode	sv_type_code;
-			bool		sv_typbyval;
-			int8_t		sv_typalign;
-			int16_t		sv_typlen;
-			const struct xpu_datum_operators *sv_ops;
-			kern_varslot_desc sv_desc;
-			char		data[1]		__MAXALIGNED__;
+			uint16_t	sv_slot_id;
+			char		data[1]			__MAXALIGNED__;
 		} save;		/* SaveExpr */
 		struct {
 			int			nattrs;

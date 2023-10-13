@@ -2613,11 +2613,6 @@ __try_inject_projection_expression(codegen_context *context,
 	kexp.args_offset = MAXALIGN(offsetof(kern_expression,
 										 u.save.data));
 	kexp.u.save.sv_slot_id   = kvdef->kv_slot_id;
-	kexp.u.save.sv_type_code = kvdef->kv_type_code;
-	kexp.u.save.sv_typbyval  = kvdef->kv_typbyval;
-	kexp.u.save.sv_typalign  = kvdef->kv_typalign;
-	kexp.u.save.sv_typlen    = kvdef->kv_typlen;
-
 	pos = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
 	codegen_expression_walker(context, buf, context->num_rels+1, expr);
 	__appendKernExpMagicAndLength(buf, pos);
@@ -3937,10 +3932,10 @@ __xpucode_to_cstring(StringInfo buf,
 			appendStringInfo(buf, "}");
 			return;
 		case FuncOpCode__SaveExpr:
-			dtype = devtype_lookup_by_opcode(kexp->u.save.sv_type_code);
+			dtype = devtype_lookup_by_opcode(kexp->exptype);
 			if (!dtype)
 				elog(ERROR, "device type lookup failed for code:%u",
-					 kexp->u.save.sv_type_code);
+					 kexp->exptype);
 			appendStringInfo(buf, "{SaveExpr: <slot=%d, type='%s'>",
 							 kexp->u.save.sv_slot_id,
 							 dtype->type_name);
