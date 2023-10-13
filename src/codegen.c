@@ -2061,40 +2061,6 @@ codegen_scalar_array_op_expression(codegen_context *context,
 	/* allocation of saop kep */
 	memset(&kexp, 0, sizeof(kexp));
 	if (buf)
-		pos = __appendZeroStringInfo(buf, offsetof(kern_expression,
-												   u.saop.data));
-	/* 1st arg - array-expression to be walked on */
-	if (codegen_expression_walker(context, buf, curr_depth, expr_a) < 0)
-		return -1;
-	/* 2nd arg - expression to be saved */
-	if (buf)
-	{
-		int		__off;
-
-		memset(&kexp, 0, sizeof(kexp));
-		kexp.exptype = dfunc->func_rettype->type_code;
-		kexp.expflags = context->kexp_flags;
-		kexp.opcode = dfunc->func_code;
-		kexp.nr_args = 2;
-		kexp.args_offset = offsetof(kern_expression, u.data);
-		__pos = __appendBinaryStringInfo(buf, &kexp,
-										 offsetof(kern_expression, u.data));
-
-		/* 1st arg of the 2nd arg (comparator function) */
-		memset(&kexp, 0, sizeof(kexp));
-		kexp.exptype  = dtype_e->type_code;
-		kexp.expflags = context->kexp_flags;
-		kexp.opcode   = FuncOpCode__VarExpr;
-		kexp.nr_args  = 0;
-		kexp.u.v.var_slot_id = kvdef->kv_slot_id;
-		kexp.u.v.var_offset = -1;
-		__off = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExprVar);
-		__appendKernExpMagicAndLength(buf, __off);
-	}
-	/* 2nd arg of the 2nd arg (comparator function) */
-	if (codegen_expression_walker(context, buf, curr_depth, expr_s) < 0)
-		return -1;
-	if (buf)
 	{
 		memset(&kexp, 0, sizeof(kexp));
 		kexp.exptype     = TypeOpCode__bool;
@@ -2104,13 +2070,49 @@ codegen_scalar_array_op_expression(codegen_context *context,
 							: FuncOpCode__ScalarArrayOpAll);
 		kexp.nr_args     = 2;
 		kexp.args_offset = offsetof(kern_expression, u.saop.data);
-		kexp.u.saop.elem_slot_id   = kvdef->kv_slot_id;
-		kexp.u.saop.elem_type_code = dtype_e->type_code;
-		kexp.u.saop.elem_typbyval  = dtype_e->type_byval;
-		kexp.u.saop.elem_typalign  = dtype_e->type_align;
-		kexp.u.saop.elem_typlen    = dtype_e->type_length;
-		memcpy(buf->data + pos, &kexp, offsetof(kern_expression,
-												u.saop.data));
+		kexp.u.saop.elem_desc.vl_resno     = -1;
+		kexp.u.saop.elem_desc.vl_slot_id   = kvdef->kv_slot_id;
+		kexp.u.saop.elem_desc.vl_type_code = dtype_e->type_code;
+		kexp.u.saop.elem_desc.vl_typbyval  = dtype_e->type_byval;
+		kexp.u.saop.elem_desc.vl_typalign  = dtype_e->type_align;
+		kexp.u.saop.elem_desc.vl_typlen    = dtype_e->type_length;
+		pos = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
+	}
+	/* 1st arg - array-expression to be walked on */
+	if (codegen_expression_walker(context, buf, curr_depth, expr_a) < 0)
+		return -1;
+	/* 2nd arg - comparator function */
+	if (buf)
+	{
+		memset(&kexp, 0, sizeof(kexp));
+		kexp.exptype = dfunc->func_rettype->type_code;
+		kexp.expflags = context->kexp_flags;
+		kexp.opcode = dfunc->func_code;
+		kexp.nr_args = 2;
+		kexp.args_offset = offsetof(kern_expression, u.data);
+		__pos = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
+	}
+	/* 1st arg (scalar expression) of the comparator function */
+	if (codegen_expression_walker(context, buf, curr_depth, expr_s) < 0)
+		return -1;
+	/* 2nd arg (element reference) of the comparator function */
+	if (buf)
+	{
+		int		elem_pos;
+
+		memset(&kexp, 0, sizeof(kexp));
+		kexp.exptype  = dtype_e->type_code;
+		kexp.expflags = context->kexp_flags;
+		kexp.opcode   = FuncOpCode__VarExpr;
+		kexp.nr_args  = 0;
+		kexp.u.v.var_slot_id = kvdef->kv_slot_id;
+		kexp.u.v.var_offset = -1;
+		elem_pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExprVar);
+		__appendKernExpMagicAndLength(buf, elem_pos);
+	}
+	/* terminate the epression */
+	if (buf)
+	{
 		__appendKernExpMagicAndLength(buf, __pos);
 		__appendKernExpMagicAndLength(buf, pos);
 	}
@@ -4061,12 +4063,12 @@ __xpucode_to_cstring(StringInfo buf,
 				label = "All";
 			appendStringInfo(buf, "{ScalarArrayOp%s: ", label);
 
-			dtype = devtype_lookup_by_opcode(kexp->u.saop.elem_type_code);
+			dtype = devtype_lookup_by_opcode(kexp->u.saop.elem_desc.vl_type_code);
 			if (!dtype)
 				elog(ERROR, "device type lookup failed for code:%u",
-					 kexp->u.saop.elem_type_code);
+					 kexp->u.saop.elem_desc.vl_type_code);
 			appendStringInfo(buf, " elem=<slot=%d, type='%s'>",
-							 kexp->u.saop.elem_slot_id,
+							 kexp->u.saop.elem_desc.vl_slot_id,
 							 dtype->type_name);
 			break;
 

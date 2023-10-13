@@ -2292,19 +2292,7 @@ struct kern_expression
 			char		data[1]			__MAXALIGNED__;
 		} casewhen;	/* Case-When */
 		struct {
-			uint32_t	slot_id;		//deprecated
-			uint32_t	slot_bufsz;		//deprecated
-			bool		elem_byval;		//deprecated
-			int8_t		elem_align;		//deprecated
-			int16_t		elem_len;		//deprecated
-			/* ------------------------------------------------------ */
-			int16_t		elem_slot_id;
-			TypeOpCode	elem_type_code;
-			bool		elem_typbyval;
-			int8_t		elem_typalign;
-			int16_t		elem_typlen;
-			const struct xpu_datum_operators *elem_ops;
-			kern_varslot_desc elem_desc; //to do
+			kern_varload_desc elem_desc;
 			char		data[1]			__MAXALIGNED__;
 		} saop;		/* ScalarArrayOp */
 		struct {
@@ -2320,7 +2308,7 @@ struct kern_expression
 		struct {
 			uint32_t	gist_oid;		/* OID of GiST index (for EXPLAIN) */
 			int16_t		gist_depth;		/* depth of index tuple */
-			int16_t		htup_slot_id;	/* slot_id to save htup pointer */
+			uint16_t	htup_slot_id;	/* slot_id to save htup pointer */
 			kern_varload_desc ivar_desc; /* index-var load descriptor */
 			char		data[1]			__MAXALIGNED__;
 		} gist;		/* GiSTEval */

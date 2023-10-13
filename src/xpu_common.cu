@@ -1434,14 +1434,12 @@ __ScalarArrayOpHeap(kern_context *kcxt,
 					xpu_array_t *aval)
 {
 	const __ArrayTypeData *ar = (const __ArrayTypeData *)VARDATA_ANY(aval->u.heap.value);
+	const kern_varload_desc *vl_desc = &kexp->u.saop.elem_desc;
 	uint8_t	   *nullmap = __pg_array_nullmap(ar);
 	char	   *base = __pg_array_dataptr(ar);
 	int			ndim = __pg_array_ndim(ar);
 	uint32_t	nitems = 0;
 	uint32_t	offset = 0;
-	uint32_t	slot_id = kexp->u.saop.slot_id;
-	kern_variable *kvar = &kcxt->kvars_slot[slot_id];
-	int		   *vclass = &kcxt->kvars_class[slot_id];
 	bool		use_any = (kexp->opcode == FuncOpCode__ScalarArrayOpAny);
 	bool		meet_nulls = false;
 
@@ -1456,48 +1454,34 @@ __ScalarArrayOpHeap(kern_context *kcxt,
 	for (uint32_t i=0; i < nitems; i++)
 	{
 		xpu_bool_t	status;
-		char	   *addr;
+		const char *addr;
 
 		/* datum reference */
 		if (nullmap && att_isnull(i, nullmap))
 		{
-			*vclass = KVAR_CLASS__NULL;
-			kvar->ptr = NULL;
+			addr = NULL;
 		}
 		else
 		{
-			if (kexp->u.saop.elem_len > 0)
-				offset = TYPEALIGN(kexp->u.saop.elem_align, offset);
+			if (vl_desc->vl_typlen > 0)
+				offset = TYPEALIGN(vl_desc->vl_typalign, offset);
 			else if (!VARATT_NOT_PAD_BYTE(base + offset))
-				offset = TYPEALIGN(kexp->u.saop.elem_align, offset);
+				offset = TYPEALIGN(vl_desc->vl_typalign, offset);
 			addr = base + offset;
 
-			if (kexp->u.saop.elem_byval)
-			{
-				assert(kexp->u.saop.elem_len > 0 &&
-					   kexp->u.saop.elem_len <= sizeof(kern_variable));
-				*vclass = KVAR_CLASS__INLINE;
-				memcpy(kvar, addr, kexp->u.saop.elem_len);
-				offset += kexp->u.saop.elem_len;
-			}
-			else if (kexp->u.saop.elem_len > 0)
-			{
-				*vclass = kexp->u.saop.elem_len;
-				kvar->ptr = (void *)addr;
-				offset += kexp->u.saop.elem_len;
-			}
-			else if (kexp->u.saop.elem_len == -1)
-			{
-				*vclass = KVAR_CLASS__VARLENA;
-				kvar->ptr = (void *)addr;
+			if (vl_desc->vl_typlen > 0)
+				offset += vl_desc->vl_typlen;
+			else if (vl_desc->vl_typlen == -1)
 				offset += VARSIZE_ANY(addr);
-			}
 			else
 			{
 				STROM_ELOG(kcxt, "not a supported attribute length");
 				return false;
 			}
 		}
+		/* load the array element */
+		if (!__extract_heap_tuple_attr(kcxt, vl_desc, addr))
+			return false;
 		/* call the comparator */
 		if (!EXEC_KERN_EXPRESSION(kcxt, kcmp, &status))
 			return false;
@@ -1545,23 +1529,21 @@ __ScalarArrayOpArrow(kern_context *kcxt,
 					 const kern_expression *kcmp,
 					 xpu_array_t *aval)
 {
+	const kern_varload_desc *vl_desc = &kexp->u.saop.elem_desc;
 	const kern_colmeta *smeta = aval->u.arrow.smeta;
 	const kern_data_store *kds;
-	uint32_t	slot_id = kexp->u.saop.slot_id;
-	char	   *slot_buf = NULL;
 	bool		use_any = (kexp->opcode == FuncOpCode__ScalarArrayOpAny);
 	bool		meet_nulls = false;
 
 	result->value = !use_any;
 	kds = (const kern_data_store *)
 		((char *)smeta - smeta->kds_offset);
-	if (kexp->u.saop.slot_bufsz > 0)
-		slot_buf = (char *)alloca(kexp->u.saop.slot_bufsz);
 	for (int k=0; k < aval->length; k++)
 	{
 		uint32_t	index = aval->u.arrow.start + k;
 		xpu_bool_t	status;
 
+		/* load the element */
 		if (smeta->nullmap_offset == 0 ||
 			arrow_bitmap_check(kds, index,
 							   smeta->nullmap_offset,
@@ -1571,15 +1553,15 @@ __ScalarArrayOpArrow(kern_context *kcxt,
 											kds,
 											smeta,
 											index,
-											&kcxt->kvars_slot[slot_id],
-											&kcxt->kvars_class[slot_id],
-											slot_buf))
+											&kcxt->kvars_slot[12345], //FIXME
+											&kcxt->kvars_class[12345], //FIXME
+											NULL))
 				return false;
 		}
 		else
 		{
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-			kcxt->kvars_slot[slot_id].ptr = NULL;
+			if (!__extract_heap_tuple_attr(kcxt, vl_desc, NULL))
+				return false;
 		}
 		/* call the comparator */
 		if (!EXEC_KERN_EXPRESSION(kcxt, kcmp, &status))
@@ -1626,12 +1608,11 @@ pgfn_ScalarArrayOp(XPU_PGFUNCTION_ARGS)
 {
 	xpu_bool_t	   *result = (xpu_bool_t *)__result;
 	xpu_array_t		aval;
-	uint32_t		slot_id = kexp->u.saop.slot_id;
 	const kern_expression *karg;
 
 	assert(kexp->exptype == TypeOpCode__bool &&
 		   kexp->nr_args == 2 &&
-		   slot_id < kcxt->kvars_nslots);
+		   kexp->u.saop.elem_desc.vl_slot_id < kcxt->kvars_nslots);
 	memset(result, 0, sizeof(xpu_bool_t));
 
 	/* fetch array value */
@@ -1652,9 +1633,6 @@ pgfn_ScalarArrayOp(XPU_PGFUNCTION_ARGS)
 		if (!__ScalarArrayOpArrow(kcxt, result, kexp, karg, &aval))
 			return false;
 	}
-	/* cleanup the slot */
-	kcxt->kvars_class[slot_id] = KVAR_CLASS__NULL;
-	kcxt->kvars_slot[slot_id].ptr = NULL;
 	return true;
 }
 

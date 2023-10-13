@@ -1359,8 +1359,8 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 		case FuncOpCode__ScalarArrayOpAny:
 		case FuncOpCode__ScalarArrayOpAll:
 			if (!__lookupDeviceTypeOper(gcontext,
-										&kexp->u.saop.elem_ops,
-										kexp->u.saop.elem_type_code,
+										&kexp->u.saop.elem_desc.vl_ops,
+										kexp->u.saop.elem_desc.vl_type_code,
 										emsg, emsg_sz))
 				return false;
 			break;
