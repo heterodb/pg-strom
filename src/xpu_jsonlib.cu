@@ -139,6 +139,7 @@ xpu_jsonb_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_jsonb_datum_write(kern_context *kcxt,
 					  char *buffer,
+					  const kern_colmeta *cmeta,
 					  const xpu_datum_t *__arg)
 {
 	const xpu_jsonb_t  *arg = (const xpu_jsonb_t *)__arg;

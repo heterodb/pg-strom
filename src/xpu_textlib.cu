@@ -92,6 +92,7 @@ xpu_bpchar_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_bpchar_datum_write(kern_context *kcxt,
 					   char *buffer,
+					   const kern_colmeta *cmeta,
 					   const xpu_datum_t *__arg)
 {
 	const xpu_bpchar_t *arg = (const xpu_bpchar_t *)__arg;
@@ -257,6 +258,7 @@ xpu_text_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_text_datum_write(kern_context *kcxt,
 					 char *buffer,
+					 const kern_colmeta *cmeta,
 					 const xpu_datum_t *__arg)
 {
 	const xpu_text_t *arg = (const xpu_text_t *)__arg;
@@ -384,6 +386,7 @@ xpu_bytea_datum_ref(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_bytea_datum_write(kern_context *kcxt,
 					  char *buffer,
+					  const kern_colmeta *cmeta,
 					  const xpu_datum_t *__arg)
 {
 	const xpu_bytea_t *arg = (const xpu_bytea_t *)__arg;

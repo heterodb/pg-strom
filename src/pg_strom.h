@@ -675,8 +675,6 @@ extern void		pgstrom_init_relscan(void);
 /*
  * executor.c
  */
-extern size_t	inject_kern_varslot_desc(StringInfo buf, codegen_kvar_defitem *kvdef);
-
 extern void		__xpuClientOpenSession(pgstromTaskState *pts,
 									   const XpuCommand *session,
 									   pgsocket sockfd,

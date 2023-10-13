@@ -1311,31 +1311,6 @@ __lookupDeviceFuncDptr(gpuContext *gcontext,
 }
 
 static bool
-__resolveKernVarSlotDesc(gpuContext *gcontext,
-						 kern_varslot_desc *vs_desc,
-						 char *emsg, size_t emsg_sz)
-{
-	if (!__lookupDeviceTypeOper(gcontext,
-								&vs_desc->vs_ops,
-								vs_desc->vs_type_code,
-								emsg, emsg_sz))
-		return false;
-	if (vs_desc->num_subfield > 0)
-	{
-		kern_varslot_desc  *__vs_desc = vs_desc + vs_desc->off_subfield;
-
-		for (int k=0; k < vs_desc->num_subfield; k++)
-		{
-			if (!__resolveKernVarSlotDesc(gcontext,
-										  __vs_desc + k,
-										  emsg, emsg_sz))
-				return false;
-		}
-	}
-	return true;
-}
-
-static bool
 __resolveDevicePointersWalker(gpuContext *gcontext,
 							  kern_expression *kexp,
 							  char *emsg, size_t emsg_sz)
@@ -1358,20 +1333,6 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 	/* some special cases */
 	switch (kexp->opcode)
 	{
-		case FuncOpCode__ConstExpr:
-			if (!__resolveKernVarSlotDesc(gcontext,
-										  &kexp->u.c.const_desc,
-										  emsg, emsg_sz))
-				return false;
-			break;
-
-		case FuncOpCode__ParamExpr:
-			if (!__resolveKernVarSlotDesc(gcontext,
-										  &kexp->u.p.param_desc,
-										  emsg, emsg_sz))
-				return false;
-			break;
-
 		case FuncOpCode__CaseWhenExpr:
 			if (kexp->u.casewhen.case_comp)
 			{
@@ -1428,8 +1389,8 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 
 		case FuncOpCode__GiSTEval:
 			if (!__lookupDeviceTypeOper(gcontext,
-										&kexp->u.gist.idesc.vl_ops,
-										kexp->u.gist.idesc.vl_type_code,
+										&kexp->u.gist.ivar_desc.vl_ops,
+										kexp->u.gist.ivar_desc.vl_type_code,
 										emsg, emsg_sz))
 				return false;
 			break;

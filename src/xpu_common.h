@@ -1646,7 +1646,6 @@ struct xpu_datum_operators {
 	 * also, it is used to reference const and param.
 	 */
 	bool	  (*xpu_datum_heap_ref)(kern_context *kcxt,
-									const kern_varslot_desc *vs_desc, /* in */
 									const void *addr,		/* in */
 									xpu_datum_t *result);	/* out */
 
@@ -1702,6 +1701,7 @@ struct xpu_datum_operators {
 	 */
 	int		  (*xpu_datum_write)(kern_context *kcxt,
 								 char *buffer,					/* out */
+								 const kern_colmeta *cmeta,		/* in */
 								 const xpu_datum_t *xdatum);	/* in */
 	/*
 	 * xpu_datum_hash: calculation of hash value using pg_hash_any()
@@ -1940,13 +1940,11 @@ EXTERN_DATA xpu_datum_operators		xpu_composite_ops;
  */
 typedef struct {
 	XPU_DATUM_COMMON_FIELD;
-	int32_t		length;
 	const void *value;
 } xpu_internal_t;
 
 typedef struct {
 	KVEC_DATUM_COMMON_FIELD;
-	int32_t		length;			/* to be identical in kvec */
 	const void *values[KVEC_UNITSZ];
 } kvec_internal_t;
 
@@ -2270,12 +2268,12 @@ struct kern_expression
 		char			data[1]			__MAXALIGNED__;
 		struct {
 			Oid			const_type;
-			int32_t		const_value;	/* -1, if NULL */
-			kern_varslot_desc const_desc;	/* descriptot to load const */
+			bool		const_isnull;
+			char		const_value[1]	__MAXALIGNED__;
 		} c;		/* ConstExpr */
 		struct {
 			uint32_t	param_id;
-			kern_varslot_desc param_desc;	/* descriptor to load param */
+			char		__data[1];
 		} p;		/* ParamExpr */
 		struct {
 			/* if var_offset < 0, it means variables should be loaded from
@@ -2323,7 +2321,7 @@ struct kern_expression
 			uint32_t	gist_oid;		/* OID of GiST index (for EXPLAIN) */
 			int16_t		gist_depth;		/* depth of index tuple */
 			int16_t		htup_slot_id;	/* slot_id to save htup pointer */
-			kern_varload_desc idesc;	/* index-var load descriptor */
+			kern_varload_desc ivar_desc; /* index-var load descriptor */
 			char		data[1]			__MAXALIGNED__;
 		} gist;		/* GiSTEval */
 		struct {

@@ -102,6 +102,7 @@ xpu_date_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_date_datum_write(kern_context *kcxt,
 					 char *buffer,
+					 const kern_colmeta *cmeta,
 					 const xpu_datum_t *__arg)
 {
 	const xpu_date_t *arg = (const xpu_date_t *)__arg;
@@ -206,6 +207,7 @@ xpu_time_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_time_datum_write(kern_context *kcxt,
 					 char *buffer,
+					 const kern_colmeta *cmeta,
 					 const xpu_datum_t *__arg)
 {
 	const xpu_time_t *arg = (const xpu_time_t *)__arg;
@@ -314,6 +316,7 @@ xpu_timetz_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_timetz_datum_write(kern_context *kcxt,
 					   char *buffer,
+					   const kern_colmeta *cmeta,
 					   const xpu_datum_t *__arg)
 {
 	const xpu_timetz_t *arg = (const xpu_timetz_t *)__arg;
@@ -409,6 +412,7 @@ xpu_timestamp_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_timestamp_datum_write(kern_context *kcxt,
 						  char *buffer,
+						  const kern_colmeta *cmeta,
 						  const xpu_datum_t *__arg)
 {
 	const xpu_timestamp_t *arg = (const xpu_timestamp_t *)__arg;
@@ -513,6 +517,7 @@ xpu_timestamptz_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_timestamptz_datum_write(kern_context *kcxt,
 							char *buffer,
+							const kern_colmeta *cmeta,
 							const xpu_datum_t *__arg)
 {
 	const xpu_timestamptz_t *arg = (const xpu_timestamptz_t *)__arg;
@@ -643,6 +648,7 @@ xpu_interval_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_interval_datum_write(kern_context *kcxt,
 						 char *buffer,
+						 const kern_colmeta *cmeta,
 						 const xpu_datum_t *__arg)
 {
 	const xpu_interval_t *arg = (const xpu_interval_t *)__arg;

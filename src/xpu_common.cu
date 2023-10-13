@@ -19,123 +19,36 @@
  */
 INLINE_FUNCTION(bool)
 __extract_heap_tuple_attr(kern_context *kcxt,
-						  uint32_t slot_id,
+						  const kern_varload_desc *vl_desc,
 						  const char *addr)
 {
-	const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[slot_id];
+	uint16_t	slot_id = vl_desc->vl_slot_id;
 
 	if (slot_id < kcxt->kvars_nslots)
 	{
 		xpu_datum_t	   *xdatum = kcxt->kvars_values[slot_id];
 
-		return vs_desc->vs_ops->xpu_datum_heap_ref(kcxt,
-												   vs_desc,
-												   addr,
-												   xdatum);
+		assert(vl_desc->vl_type_code == kcxt->kvars_desc[slot_id].vs_type_code);
+		return vl_desc->vl_ops->xpu_datum_heap_ref(kcxt, addr, xdatum);
 	}
-	STROM_ELOG(kcxt, "kvars::slot_id is out of range");
+	STROM_ELOG(kcxt, "vl_desc::slot_id is out of range");
 	return false;
 }
 
-INLINE_FUNCTION(void)
-__extract_null_values(kern_context *kcxt,
-					  const kern_varload_desc *vl_desc,
-					  int kvload_nitems)
+INLINE_FUNCTION(bool)
+__fillup_by_null_values(kern_context *kcxt,
+						const kern_varload_desc *vl_desc,
+						int kvload_nitems)
 {
 	while (kvload_nitems > 0)
 	{
-		__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, NULL);
+		if (!__extract_heap_tuple_attr(kcxt, vl_desc, NULL))
+			return false;
 		vl_desc++;
 		kvload_nitems--;
 	}
-}
-
-#if 0
-INLINE_FUNCTION(bool)
-__varload_heap_tuple_attr(kern_context *kcxt,
-						  const kern_varload_desc *kv_desc,
-						  const char *addr)
-{
-	uint32_t	slot_id = kv_desc->kv_slot_id;
-
-	if (slot_id < kcxt->kvars_nslots)
-	{
-		return kv_desc->kv_ops->xpu_datum_heap_ref(kcxt,
-												   &kcxt->kvars_desc[slot_id],
-												   addr,
-												   kcxt->kvars_values[slot_id]);
-	}
-	STROM_ELOG(kcxt, "kvars::slot_id is out of range");
-	return false;
-	
-	if (slot_id >= kcxt->kvars_nslots)
-	{
-		STROM_ELOG(kcxt, "kvars::slot_id is out of range");
-        return false;
-	}
-	xdatum =  kcxt->kvars_values[slot_id];
-
-	if (!addr)
-	{
-		xdatum->expr_ops = NULL;
-	}
-	else if (cmeta->atttypkind == TYPE_KIND__ARRAY)
-	{
-		/* special case if xpu_array_t */
-		xpu_array_t	   *array;
-
-		assert(kvdef->var_slot_off > 0 &&
-			   kvdef->var_slot_off + sizeof(xpu_array_t) <= kcxt->kvars_nbytes);
-		assert((char *)kds + cmeta->kds_offset == (char *)cmeta);
-		array = (xpu_array_t *)
-			((char *)kcxt->kvars_slot + kvdef->var_slot_off);
-		memset(array, 0, sizeof(xpu_array_t));
-		array->expr_ops      = &xpu_array_ops;
-		array->length        = -1;
-		array->u.heap.value  = (const varlena *)addr;
-	}
-	else if (cmeta->atttypkind == TYPE_KIND__COMPOSITE)
-	{
-		/* special case if xpu_composite_t */
-		xpu_composite_t	   *comp;
-
-		assert(kvdef->var_slot_off > 0 &&
-			   kvdef->var_slot_off + sizeof(xpu_composite_t) <= kcxt->kvars_nbytes);
-		assert((char *)kds + cmeta->kds_offset == (char *)cmeta);
-		comp = (xpu_composite_t *)
-			((char *)kcxt->kvars_slot + kvdef->var_slot_off);
-		comp->expr_ops    = &xpu_composite_ops;
-		comp->comp_typid  = cmeta->atttypid;
-		comp->comp_typmod = cmeta->atttypmod;
-		comp->smeta       = kds->colmeta + cmeta->idx_subattrs;
-		comp->nfields     = cmeta->num_subattrs;
-		comp->is_arrow    = false;
-		comp->u.heap.value = (const varlena *)addr;
-	}
-	else if (cmeta->attbyval)
-	{
-		assert(cmeta->attlen > 0 && cmeta->attlen <= sizeof(kern_variable));
-		kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
-		memcpy(&kcxt->kvars_slot[slot_id], addr, cmeta->attlen);
-	}
-	else if (cmeta->attlen > 0)
-	{
-		kcxt->kvars_class[slot_id] = cmeta->attlen;
-		kcxt->kvars_slot[slot_id].ptr = (void *)addr;
-	}
-	else if (cmeta->attlen == -1)
-	{
-		kcxt->kvars_class[slot_id] = KVAR_CLASS__VARLENA;
-		kcxt->kvars_slot[slot_id].ptr = (void *)addr;
-	}
-	else
-	{
-		STROM_ELOG(kcxt, "not a supported attribute length");
-		return false;
-	}
 	return true;
 }
-#endif
 
 INLINE_FUNCTION(bool)
 __extract_heap_tuple_sysattr(kern_context *kcxt,
@@ -143,38 +56,39 @@ __extract_heap_tuple_sysattr(kern_context *kcxt,
 							 const HeapTupleHeaderData *htup,
 							 const kern_varload_desc *vl_desc)
 {
-	uint32_t	slot_id = vl_desc->vl_slot_id;
-	const void *addr;
+	uint16_t	slot_id = vl_desc->vl_slot_id;
 
-	/* out of range? */
-	if (slot_id >= kcxt->kvars_nslots)
-		return true;
-	switch (vl_desc->vl_resno)
+	if (slot_id < kcxt->kvars_nslots)
 	{
-		case SelfItemPointerAttributeNumber:
-			addr = &htup->t_ctid;
-			break;
-		case MinTransactionIdAttributeNumber:
-			addr = &htup->t_choice.t_heap.t_xmin;
-			break;
-		case MaxTransactionIdAttributeNumber:
-			addr = &htup->t_choice.t_heap.t_xmax;
-			break;
-		case MinCommandIdAttributeNumber:
-		case MaxCommandIdAttributeNumber:
-			addr = &htup->t_choice.t_heap.t_field3.t_cid;
-			break;
-		case TableOidAttributeNumber:
-			addr = &kds->table_oid;
-			break;
-		default:
-			STROM_ELOG(kcxt, "not a supported system attribute reference");
-			return false;
+		xpu_datum_t	   *xdatum = kcxt->kvars_values[slot_id];
+		const void	   *addr;
+
+		switch (vl_desc->vl_resno)
+		{
+			case SelfItemPointerAttributeNumber:
+				addr = &htup->t_ctid;
+				break;
+			case MinTransactionIdAttributeNumber:
+				addr = &htup->t_choice.t_heap.t_xmin;
+				break;
+			case MaxTransactionIdAttributeNumber:
+				addr = &htup->t_choice.t_heap.t_xmax;
+				break;
+			case MinCommandIdAttributeNumber:
+			case MaxCommandIdAttributeNumber:
+				addr = &htup->t_choice.t_heap.t_field3.t_cid;
+				break;
+			case TableOidAttributeNumber:
+				addr = &kds->table_oid;
+				break;
+			default:
+				STROM_ELOG(kcxt, "not a supported system attribute reference");
+				return false;
+		}
+		return vl_desc->vl_ops->xpu_datum_heap_ref(kcxt, addr, xdatum);
 	}
-	return vl_desc->vl_ops->xpu_datum_heap_ref(kcxt,
-											   &kcxt->kvars_desc[slot_id],
-											   addr,
-											   kcxt->kvars_values[slot_id]);
+	STROM_ELOG(kcxt, "kvars slot-id: out of range");
+	return false;
 }
 
 STATIC_FUNCTION(bool)
@@ -213,7 +127,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 				break;
 			offset = htup->t_hoff + cmeta->attcacheoff;
 			addr = (char *)htup + offset;
-			if (!__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr))
+			if (!__extract_heap_tuple_attr(kcxt, vl_desc, addr))
 				return false;
 			/* next resno */
 			resno = vl_desc->vl_resno + 1;
@@ -252,7 +166,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 
 		if (vl_desc->vl_resno == resno)
 		{
-			if (!__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr))
+			if (!__extract_heap_tuple_attr(kcxt, vl_desc, addr))
 				return false;
 			vl_desc++;
 			kvload_count++;
@@ -260,8 +174,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 		resno++;
 	}
 	/* fill-up with NULLs for the remained slot */
-	__extract_null_values(kcxt, vl_desc, kvload_nitems - kvload_count);
-	return true;
+	return __fillup_by_null_values(kcxt, vl_desc, kvload_nitems - kvload_count);
 }
 
 /*
@@ -1006,7 +919,6 @@ __extract_arrow_tuple_sysattr(kern_context *kcxt,
 							  uint32_t kds_index,
 							  const kern_varload_desc *vl_desc)
 {
-	uint32_t	slot_id = vl_desc->vl_slot_id;
 	uint64_t	dummy;
 
 	switch (vl_desc->vl_resno)
@@ -1031,7 +943,7 @@ __extract_arrow_tuple_sysattr(kern_context *kcxt,
 			STROM_ELOG(kcxt, "not a supported system attribute reference");
 			return false;
 	}
-	return __extract_heap_tuple_attr(kcxt, slot_id, (char *)&dummy);
+	return __extract_heap_tuple_attr(kcxt, vl_desc, (char *)&dummy);
 }
 
 STATIC_FUNCTION(bool)
@@ -1076,15 +988,14 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 		}
 		else
 		{
-			if (!__extract_heap_tuple_attr(kcxt, slot_id, NULL))
+			if (!__extract_heap_tuple_attr(kcxt, vl_desc, NULL))
 				return false;
 		}
 		vl_desc++;
 		vload_count++;
 	}
 	/* other fields, which refers out of range, are NULL */
-	__extract_null_values(kcxt, vl_desc, vload_nitems - vload_count);
-	return true;
+	return __fillup_by_null_values(kcxt, vl_desc, vload_nitems - vload_count);
 }
 
 /* ----------------------------------------------------------------
@@ -1103,12 +1014,9 @@ pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 	const xpu_datum_operators *expr_ops = kexp->expr_ops;
 	const char	   *addr;
 
-	if (kexp->u.c.const_value < 0)
-		addr = NULL;
-	else
-		addr = (char *)kexp + kexp->u.c.const_value;
+	addr = (kexp->u.c.const_isnull ? NULL : kexp->u.c.const_value);
 
-	return expr_ops->xpu_datum_heap_ref(kcxt, &kexp->u.c.const_desc, addr, __result);
+	return expr_ops->xpu_datum_heap_ref(kcxt, addr, __result);
 }
 
 STATIC_FUNCTION(bool)
@@ -1124,7 +1032,7 @@ pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 	else
 		addr = NULL;
 
-	return expr_ops->xpu_datum_heap_ref(kcxt, &kexp->u.p.param_desc, addr, __result);
+	return expr_ops->xpu_datum_heap_ref(kcxt, addr, __result);
 }
 
 STATIC_FUNCTION(bool)
@@ -1828,7 +1736,7 @@ kern_form_heaptuple(kern_context *kcxt,
 			const xpu_datum_t *xdatum = (const xpu_datum_t *)kvar->ptr;
 
 			assert(xdatum->expr_ops != NULL);
-			nbytes = xdatum->expr_ops->xpu_datum_write(kcxt, buffer, xdatum);
+			nbytes = xdatum->expr_ops->xpu_datum_write(kcxt, buffer, cmeta, xdatum);
 			if (nbytes < 0)
 				return -1;
 		}
@@ -2149,7 +2057,7 @@ __extract_gpucache_tuple_sysattr(kern_context *kcxt,
 			STROM_ELOG(kcxt, "not a supported system attribute reference");
 			return false;
 	}
-	return __extract_heap_tuple_attr(kcxt, slot_id, addr);
+	return __extract_heap_tuple_attr(kcxt, vl_desc, addr);
 }
 
 STATIC_FUNCTION(bool)
@@ -2204,15 +2112,14 @@ kern_extract_gpucache_tuple(kern_context *kcxt,
 			addr = NULL;
 		}
 
-		if (!__extract_heap_tuple_attr(kcxt, slot_id, addr))
+		if (!__extract_heap_tuple_attr(kcxt, vl_desc, addr))
 			return false;
 		vl_desc++;
 		vload_count++;
 	}
 bailout:
 	/* other fields, which refers out of range, are NULL */
-	__extract_null_values(kcxt, vl_desc, vload_nitems - vload_count);
-	return true;
+	return __fillup_by_null_values(kcxt, vl_desc, vload_nitems - vload_count);
 }
 
 STATIC_FUNCTION(bool)
@@ -2246,9 +2153,10 @@ ExecLoadVarsHeapTuple(kern_context *kcxt,
 		}
 		else
 		{
-			__extract_null_values(kcxt,
-								  kexp->u.load.desc,
-								  kexp->u.load.nitems);
+			if (!__fillup_by_null_values(kcxt,
+										 kexp->u.load.desc,
+										 kexp->u.load.nitems))
+				return false;
 		}
 	}
 	return true;
@@ -2469,7 +2377,7 @@ kern_extract_gist_tuple(kern_context *kcxt,
 		if (cmeta->attcacheoff >= 0)
 		{
 			char   *addr = (char *)itup + i_off + cmeta->attcacheoff;
-			return __extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr);
+			return __extract_heap_tuple_attr(kcxt, vl_desc, addr);
 		}
 	}
 	/* extract the index-tuple by the slow path */
@@ -2494,10 +2402,10 @@ kern_extract_gist_tuple(kern_context *kcxt,
 				i_off += VARSIZE_ANY(addr);
 		}
 		if (vl_desc->vl_resno == resno)
-			return __extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr);
+			return __extract_heap_tuple_attr(kcxt, vl_desc, addr);
 	}
 	/* fill-up by NULL, if not found */
-	return __extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, NULL);
+	return __extract_heap_tuple_attr(kcxt, vl_desc, NULL);
 }
 
 PUBLIC_FUNCTION(uint32_t)
@@ -2514,13 +2422,13 @@ ExecGiSTIndexGetNext(kern_context *kcxt,
 	OffsetNumber	index;
 	OffsetNumber	maxoff;
 	const kern_expression *karg_gist;
-	const kern_varload_desc *kv_desc;
+	const kern_varload_desc *vl_desc;
 
 	assert(kds_hash->format == KDS_FORMAT_HASH &&
 		   kds_gist->format == KDS_FORMAT_BLOCK);
 	assert(kexp_gist->opcode == FuncOpCode__GiSTEval &&
 		   kexp_gist->exptype == TypeOpCode__bool);
-	kv_desc = &kexp_gist->u.gist.idesc;
+	vl_desc = &kexp_gist->u.gist.ivar_desc;
 	karg_gist = KEXP_FIRST_ARG(kexp_gist);
 	assert(karg_gist->exptype ==  TypeOpCode__bool);
 
@@ -2562,7 +2470,7 @@ restart:
 		kcxt_reset(kcxt);
 		/* extract the index tuple */
 		itup = (IndexTupleData *)PageGetItem(gist_page, lpp);
-		if (!kern_extract_gist_tuple(kcxt, kds_gist, itup, kv_desc))
+		if (!kern_extract_gist_tuple(kcxt, kds_gist, itup, vl_desc))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 			return UINT_MAX;
@@ -2591,10 +2499,8 @@ restart:
 				addr = (const char *)kds_hash + __kds_unpack(t_off);
 				assert(slot_id < kcxt->kvars_nslots);
 				vs_desc = &kcxt->kvars_desc[slot_id];
-				assert(vs_desc->vs_type_code == TypeOpCode__internal);
-				if (!vs_desc->vs_ops->xpu_datum_heap_ref(kcxt,
-														 vs_desc,
-														 addr,
+				assert(vs_desc->vs_type_code == TypeOpCode__internal);				
+				if (!vs_desc->vs_ops->xpu_datum_heap_ref(kcxt, addr,
 														 kcxt->kvars_values[slot_id]))
 				{
 					assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
@@ -2714,6 +2620,7 @@ xpu_array_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_array_datum_write(kern_context *kcxt,
 					  char *buffer,
+					  const kern_colmeta *cmeta,
 					  const xpu_datum_t *__arg)
 {
 	const xpu_array_t *arg = (const xpu_array_t *)__arg;
@@ -2799,7 +2706,7 @@ xpu_array_datum_write(kern_context *kcxt,
 					char   *dst = (buffer ? buffer + nbytes : NULL);
 					int		sz;
 
-					sz = xdatum->expr_ops->xpu_datum_write(kcxt, dst, xdatum);
+					sz = xdatum->expr_ops->xpu_datum_write(kcxt, dst, smeta, xdatum);
 					if (sz < 0)
 						return false;
 					nbytes += sz;
@@ -2874,6 +2781,7 @@ xpu_composite_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_composite_datum_write(kern_context *kcxt,
 						  char *buffer,
+						  const kern_colmeta *cmeta,
 						  const xpu_datum_t *xdatum)
 {
 	STROM_ELOG(kcxt, "xpu_composite_datum_write is not implemented");

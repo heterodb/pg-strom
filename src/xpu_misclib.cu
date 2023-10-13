@@ -583,6 +583,7 @@ xpu_money_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_money_datum_write(kern_context *kcxt,
 					  char *buffer,
+					  const kern_colmeta *cmeta,
 					  const xpu_datum_t *__arg)
 {
 	const xpu_money_t *arg = (const xpu_money_t *)__arg;
@@ -692,6 +693,7 @@ xpu_uuid_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_uuid_datum_write(kern_context *kcxt,
 					 char *buffer,
+					 const kern_colmeta *cmeta,
 					 const xpu_datum_t *__arg)
 {
 	const xpu_uuid_t *arg = (const xpu_uuid_t *)__arg;
@@ -850,6 +852,7 @@ xpu_macaddr_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_macaddr_datum_write(kern_context *kcxt,
 						char *buffer,
+						const kern_colmeta *cmeta,
 						const xpu_datum_t *__arg)
 {
 	const xpu_macaddr_t  *arg = (xpu_macaddr_t *)__arg;
@@ -1093,6 +1096,7 @@ xpu_inet_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_inet_datum_write(kern_context *kcxt,
 					 char *buffer,
+					 const kern_colmeta *cmeta,
 					 const xpu_datum_t *__arg)
 {
 	const xpu_inet_t  *arg = (xpu_inet_t *)__arg;

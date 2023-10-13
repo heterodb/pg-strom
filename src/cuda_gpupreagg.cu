@@ -57,7 +57,7 @@ __writeOutOneTupleGroupKey(kern_context *kcxt,
 				if (XPU_DATUM_ISNULL(xdatum))
 					return 0;
 				assert(xdatum->expr_ops == expr_ops);
-				return expr_ops->xpu_datum_write(kcxt, buffer, xdatum);
+				return expr_ops->xpu_datum_write(kcxt, buffer, cmeta, xdatum);
 			}
 
 		default:

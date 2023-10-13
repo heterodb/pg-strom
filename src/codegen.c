@@ -1268,49 +1268,34 @@ codegen_const_expression(codegen_context *context,
 			   format_type_be(con->consttype));
 	if (buf)
 	{
-		codegen_kvar_defitem kvdef;
-		kern_expression	*kexp;
-		int			pos, off = -1;
+		kern_expression kexp;
+		int		pos;
 
-		memset(&kvdef, 0, sizeof(kvdef));
-		kvdef.kv_slot_id = -1;
-		kvdef.kv_depth = -1;
-		kvdef.kv_resno = InvalidAttrNumber;
-		kvdef.kv_maxref = -1;
-		kvdef.kv_offset = -1;
-		kvdef.kv_type_oid = dtype->type_oid;
-		kvdef.kv_type_code = dtype->type_code;
-		kvdef.kv_typbyval = dtype->type_byval;
-		kvdef.kv_typalign = dtype->type_align;
-		kvdef.kv_typlen = dtype->type_length;
-		kvdef.kv_expr = (Expr *)con;
-		__assign_codegen_kvar_defitem_subfields(&kvdef);
-
-		pos = __appendZeroStringInfo(buf, offsetof(kern_expression, u.c.const_desc));
-		inject_kern_varslot_desc(buf, &kvdef);
+		memset(&kexp, 0, sizeof(kexp));
+		kexp.exptype = dtype->type_code;
+        kexp.expflags = context->kexp_flags;
+        kexp.opcode = FuncOpCode__ConstExpr;
+        kexp.u.c.const_type = con->consttype;
+        kexp.u.c.const_isnull = con->constisnull;
+		pos = __appendBinaryStringInfo(buf, &kexp, offsetof(kern_expression,
+															u.c.const_value));
 		if (!con->constisnull)
 		{
 			if (con->constbyval)
-				off = __appendBinaryStringInfo(buf,
-											   &con->constvalue,
-											   con->constlen);
+				appendBinaryStringInfo(buf,
+									   (char *)&con->constvalue,
+									   con->constlen);
 			else if (con->constlen > 0)
-				off = __appendBinaryStringInfo(buf,
-											   DatumGetPointer(con->constvalue),
-											   con->constlen);
+				appendBinaryStringInfo(buf,
+									   DatumGetPointer(con->constvalue),
+									   con->constlen);
 			else if (con->constlen == -1)
-				off = __appendBinaryStringInfo(buf,
-											   DatumGetPointer(con->constvalue),
-											   VARSIZE_ANY(con->constvalue));
+				appendBinaryStringInfo(buf,
+									   DatumGetPointer(con->constvalue),
+									   VARSIZE_ANY(con->constvalue));
 			else
 				elog(ERROR, "unsupported type length: %d", con->constlen);
 		}
-		kexp = (kern_expression *)(buf->data + pos);
-		kexp->exptype = dtype->type_code;
-		kexp->expflags = context->kexp_flags;
-		kexp->opcode = FuncOpCode__ConstExpr;
-		kexp->u.c.const_type = con->consttype;
-		kexp->u.c.const_value = (off > pos ? off - pos : -1);
 		__appendKernExpMagicAndLength(buf, pos);
 	}
 	return 0;
@@ -1342,7 +1327,6 @@ codegen_param_expression(codegen_context *context,
 			   format_type_be(param->paramtype));
 	if (buf)
 	{
-		codegen_kvar_defitem kvdef;
 		kern_expression	kexp;
 		int		pos;
 
@@ -1351,23 +1335,8 @@ codegen_param_expression(codegen_context *context,
 		kexp.exptype = dtype->type_code;
 		kexp.expflags = context->kexp_flags;
 		kexp.u.p.param_id = param->paramid;
-        pos = __appendBinaryStringInfo(buf, &kexp,
-									   offsetof(kern_expression, u.p.param_desc));
-		/* put kern_varslot_desc */
-		memset(&kvdef, 0, sizeof(kvdef));
-		kvdef.kv_slot_id = -1;
-		kvdef.kv_depth = -1;
-		kvdef.kv_resno = InvalidAttrNumber;
-		kvdef.kv_maxref = -1;
-		kvdef.kv_offset = -1;
-		kvdef.kv_type_oid = dtype->type_oid;
-		kvdef.kv_type_code = dtype->type_code;
-		kvdef.kv_typbyval = dtype->type_byval;
-		kvdef.kv_typalign = dtype->type_align;
-		kvdef.kv_typlen = dtype->type_length;
-		kvdef.kv_expr = (Expr *)param;
-		__assign_codegen_kvar_defitem_subfields(&kvdef);
-		inject_kern_varslot_desc(buf, &kvdef);
+		pos = __appendBinaryStringInfo(buf, &kexp, offsetof(kern_expression,
+															u.p.__data));
 		__appendKernExpMagicAndLength(buf, pos);
 	}
 	context->used_params = list_append_unique(context->used_params, param);
@@ -3032,12 +3001,12 @@ __codegen_build_one_gistquals(codegen_context *context,
 	kexp.u.gist.gist_oid = gist_index_oid;
 	kexp.u.gist.gist_depth = kvdef->kv_depth;
 	kexp.u.gist.htup_slot_id = htup_slot_id;
-	kexp.u.gist.idesc.vl_resno     = kvdef->kv_resno;
-	kexp.u.gist.idesc.vl_slot_id   = kvdef->kv_slot_id;
-	kexp.u.gist.idesc.vl_type_code = kvdef->kv_type_code;
-	kexp.u.gist.idesc.vl_typbyval  = kvdef->kv_typbyval;
-	kexp.u.gist.idesc.vl_typalign  = kvdef->kv_typalign;
-	kexp.u.gist.idesc.vl_typlen    = kvdef->kv_typlen;
+	kexp.u.gist.ivar_desc.vl_resno     = kvdef->kv_resno;
+	kexp.u.gist.ivar_desc.vl_slot_id   = kvdef->kv_slot_id;
+	kexp.u.gist.ivar_desc.vl_type_code = kvdef->kv_type_code;
+	kexp.u.gist.ivar_desc.vl_typbyval  = kvdef->kv_typbyval;
+	kexp.u.gist.ivar_desc.vl_typalign  = kvdef->kv_typalign;
+	kexp.u.gist.ivar_desc.vl_typlen    = kvdef->kv_typlen;
 	off = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
 
 	/* setup binary operator to evaluate GiST index */
@@ -3596,13 +3565,12 @@ __xpucode_const_cstring(StringInfo buf, const kern_expression *kexp)
 {
 	devtype_info   *dtype = devtype_lookup_by_opcode(kexp->exptype);
 
-	if (kexp->u.c.const_value < 0)
+	if (kexp->u.c.const_isnull)
 	{
 		appendStringInfo(buf, "{Const(%s): value=NULL}", dtype->type_name);
 	}
 	else
 	{
-		const char *addr;
 		int16	type_len;
 		bool	type_byval;
 		char	type_align;
@@ -3620,11 +3588,10 @@ __xpucode_const_cstring(StringInfo buf, const kern_expression *kexp)
 						 &type_delim,
 						 &type_ioparam,
 						 &type_outfunc);
-		addr = ((const char *)kexp + kexp->u.c.const_value);
 		if (type_byval)
-			memcpy(&datum, addr, type_len);
+			memcpy(&datum, kexp->u.c.const_value, type_len);
 		else
-			datum = PointerGetDatum(addr);
+			datum = PointerGetDatum(kexp->u.c.const_value);
 		label = OidFunctionCall1(type_outfunc, datum);
 		appendStringInfo(buf, "{Const(%s): value='%s'}",
 						 dtype->type_name,
@@ -3758,15 +3725,15 @@ __xpucode_gisteval_cstring(StringInfo buf,
 		elog(ERROR, "device type lookup failed for code:%u", kexp->exptype);
 	appendStringInfo(buf, "{GiSTEval(%s): ", dtype->type_name);
 
-	dtype = devtype_lookup_by_opcode(kexp->u.gist.idesc.vl_type_code);
+	dtype = devtype_lookup_by_opcode(kexp->u.gist.ivar_desc.vl_type_code);
 	if (!dtype)
 		elog(ERROR, "device type lookup failed for code:%u",
-			 kexp->u.gist.idesc.vl_type_code);
+			 kexp->u.gist.ivar_desc.vl_type_code);
 	appendStringInfo(buf, "<slot=%d, idxname%d='%s', type='%s'>, arg=",
-					 kexp->u.gist.idesc.vl_slot_id,
-					 kexp->u.gist.idesc.vl_resno,
+					 kexp->u.gist.ivar_desc.vl_slot_id,
+					 kexp->u.gist.ivar_desc.vl_resno,
 					 get_attname(kexp->u.gist.gist_oid,
-								 kexp->u.gist.idesc.vl_resno, false),
+								 kexp->u.gist.ivar_desc.vl_resno, false),
 					 dtype->type_name);
 	__xpucode_to_cstring(buf, karg, css, es, dcontext);
 	appendStringInfo(buf, "}");

@@ -58,6 +58,7 @@ xpu_bool_datum_store(kern_context *kcxt,
 STATIC_FUNCTION(int)
 xpu_bool_datum_write(kern_context *kcxt,
 					 char *buffer,
+					 const kern_colmeta *cmeta,
 					 const xpu_datum_t *__arg)
 {
 	const xpu_bool_t   *arg = (const xpu_bool_t *)__arg;
@@ -154,6 +155,7 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 	STATIC_FUNCTION(int)												\
 	xpu_##NAME##_datum_write(kern_context *kcxt,						\
 							 char *buffer,								\
+							 const kern_colmeta *cmeta,					\
 							 const xpu_datum_t *__arg)					\
 	{																	\
 		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
@@ -258,6 +260,7 @@ PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t,i64);
 	STATIC_FUNCTION(int)												\
 	xpu_##NAME##_datum_write(kern_context *kcxt,						\
 							 char *buffer,								\
+							 const kern_colmeta *cmeta,					\
 							 const xpu_datum_t *__arg)					\
 	{																	\
 		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\

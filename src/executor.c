@@ -472,26 +472,6 @@ __build_session_kvars_defs(pgstromTaskState *pts,
 	session->kcxt_kvars_defs = __appendBinaryStringInfo(buf, kvars_defs, sz);
 }
 
-/*
- * inject_kern_varslot_desc
- */
-size_t
-inject_kern_varslot_desc(StringInfo buf,
-						 codegen_kvar_defitem *kvdef)
-{
-	uint32_t	nrooms = 1 + __count_session_kvars_defs_subfields(kvdef);
-	size_t		sz = sizeof(kern_varslot_desc) * nrooms;
-	kern_varslot_desc *vs_desc_array;
-
-	vs_desc_array = alloca(sz);
-	memset(vs_desc_array, 0, sz);
-	__setup_session_kvars_defs_array(vs_desc_array, list_make1(kvdef));
-
-	appendBinaryStringInfo(buf, (char *)vs_desc_array, sz);
-
-	return sz;
-}
-
 static uint32_t
 __build_session_xact_state(StringInfo buf)
 {
