@@ -603,6 +603,9 @@ extern bool		pgstrom_xpu_expression(Expr *expr,
 extern void		pgstrom_explain_kvars_slot(const CustomScanState *css,
 										   ExplainState *es,
 										   List *dcontext);
+extern void		pgstrom_explain_kvecs_buffer(const CustomScanState *css,
+											 ExplainState *es,
+											 List *dcontext);
 extern void		pgstrom_explain_xpucode(const CustomScanState *css,
 										ExplainState *es,
 										List *dcontext,

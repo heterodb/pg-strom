@@ -2104,25 +2104,6 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME4))			\
 		return false
 
-#if 1
-//deprecated
-typedef struct
-{
-	int32_t			var_resno;		//deprecated
-	uint32_t		var_slot_id;	//deprecated
-	uint32_t		var_slot_off;	//deprecated
-	int32_t			slot_id;		//deprecated
-	/* ----------------------------- */
-	int32_t			kv_resno;		/* source/destination resno */
-	uint32_t		kv_offset;		/* offset of kvec-buffer */
-	TypeOpCode		kv_type_code;
-	bool			kv_typbyval;
-	int8_t			kv_typalign;
-	int16_t			kv_typlen;
-	const struct xpu_datum_operators *kv_ops;
-} kern_vars_defitem;
-#endif
-
 #define KAGG_ACTION__VREF			101		/* simple var copy */
 #define KAGG_ACTION__VREF_NOKEY		102		/* simple var copy; but not a grouping-
 											 * key, if GROUP-BY primary key.
@@ -2199,7 +2180,10 @@ typedef struct kern_aggregate_desc	kern_aggregate_desc;
 
 struct kern_projection_desc
 {
-	int32_t		proj_slot_id;
+	uint16_t	proj_slot_id;
+	bool		proj_is_simple;
+	uint32_t	proj_offset;		/* offset on the kvecs-buffer if proj_is_simple.
+									 * elsewhere, it is offset to karg expression */
 	TypeOpCode	proj_type_code;
 	bool		proj_typbyval;
 	int8_t		proj_typalign;
@@ -2322,10 +2306,7 @@ struct kern_expression
 		} pagg;		/* PreAggs */
 		struct {
 			int			nattrs;
-			bool		ctid_is_valid;
-			kern_projection_desc ctid;	/* source of ctid system column, if any */
 			kern_projection_desc desc[1];
-			kern_vars_defitem  __kvars[1]; //deprecated
 		} proj;		/* Projection */
 		struct {
 			uint32_t	npacked;	/* number of packed sub-expressions; including

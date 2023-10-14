@@ -1645,7 +1645,7 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 					 kern_warp_context *wp,
 					 int n_rels,
 					 kern_data_store *kds_final,
-					 char *kvars_addr_wp,
+					 char *src_kvecs_buffer,
 					 bool *p_try_suspend)
 {
 	kern_session_info *session = kcxt->session;
@@ -1669,16 +1669,8 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	read_pos += LaneId();
 	if (read_pos < write_pos)
 	{
-		int		index = (read_pos % UNIT_TUPLES_PER_DEPTH);
-
-		kcxt->kvars_slot = (kern_variable *)
-			(kvars_addr_wp + index * kcxt->kvars_nbytes);
-		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
-	}
-	else
-	{
-		kcxt->kvars_slot = NULL;
-		kcxt->kvars_class = NULL;
+		kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+		kcxt->kvecs_curr_buffer = src_kvecs_buffer;
 	}
 	mask = __ballot_sync(__activemask(), kcxt->kvars_class != NULL);
 	if (mask == 0)
@@ -1687,7 +1679,7 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	/*
 	 * fillup the kvars_slot if it involves expressions
 	 */
-	if (kcxt->kvars_slot != NULL)
+	if (read_pos < write_pos)
 	{
 		for (i=0, karg = KEXP_FIRST_ARG(kexp_groupby_actions);
 			 i < kexp_groupby_actions->nr_args;

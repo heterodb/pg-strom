@@ -1396,15 +1396,6 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 			break;
 
 		case FuncOpCode__Projection:
-			if (kexp->u.proj.ctid_is_valid)
-			{
-				if (!__lookupDeviceTypeOper(gcontext,
-											&kexp->u.proj.ctid.proj_ops,
-											kexp->u.proj.ctid.proj_type_code,
-											emsg, emsg_sz))
-					return false;
-			}
-			
 			for (i=0; i < kexp->u.proj.nattrs; i++)
 			{
 				if (!__lookupDeviceTypeOper(gcontext,

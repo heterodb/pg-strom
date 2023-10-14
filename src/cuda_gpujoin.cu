@@ -592,7 +592,7 @@ execGpuJoinProjection(kern_context *kcxt,
 					  int n_rels,	/* index of read/write-pos */
 					  kern_data_store *kds_dst,
 					  kern_expression *kexp_projection,
-					  char *kvars_addr_wp,
+					  char *src_kvecs_buffer,
 					  bool *p_try_suspend)
 {
 	uint32_t	write_pos = WARP_WRITE_POS(wp,n_rels);
@@ -622,11 +622,9 @@ execGpuJoinProjection(kern_context *kcxt,
 	read_pos += LaneId();
 	if (read_pos < write_pos)
 	{
-		int			index = (read_pos % UNIT_TUPLES_PER_DEPTH);
+		kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+		kcxt->kvecs_curr_buffer = src_kvecs_buffer;
 
-		kcxt->kvars_slot = (kern_variable *)
-			(kvars_addr_wp + index * kcxt->kvars_nbytes);
-		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 		tupsz = kern_estimate_heaptuple(kcxt,
 										kexp_projection,
 										kds_dst);

@@ -1644,25 +1644,29 @@ pgfn_ScalarArrayOp(XPU_PGFUNCTION_ARGS)
  */
 PUBLIC_FUNCTION(int)
 kern_form_heaptuple(kern_context *kcxt,
-					const kern_expression *kproj,
+					const kern_expression *kexp_proj,
 					const kern_data_store *kds_dst,
 					HeapTupleHeaderData *htup)
 {
+	/*
+	 * NOTE: the caller must call kern_estimate_heaptuple() preliminary to ensure
+	 *       kcxt->kvars_values[] are filled-up by the scalar values to be written.
+	 */
 	uint32_t	t_hoff;
 	uint32_t	t_next;
 	uint16_t	t_infomask = 0;
 	bool		t_hasnull = false;
-	int			nattrs = kproj->u.proj.nattrs;
+	int			nattrs = kexp_proj->u.proj.nattrs;
 
 	if (kds_dst && kds_dst->ncols < nattrs)
 		nattrs = kds_dst->ncols;
 	/* has any NULL attributes? */
 	for (int j=0; j < nattrs; j++)
 	{
-		uint32_t	slot_id = kproj->u.proj.desc[j].proj_slot_id;
+		uint32_t	slot_id = kexp_proj->u.proj.desc[j].proj_slot_id;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		if (kcxt->kvars_class[slot_id] == KVAR_CLASS__NULL)
+		if (XPU_DATUM_ISNULL(kcxt->kvars_values[slot_id]))
 		{
 			t_infomask |= HEAP_HASNULL;
 			t_hasnull = true;
@@ -1692,13 +1696,14 @@ kern_form_heaptuple(kern_context *kcxt,
 	for (int j=0; j < nattrs; j++)
 	{
 		const kern_colmeta *cmeta = &kds_dst->colmeta[j];
-		const kern_vars_defitem *pdesc = &kproj->u.proj.__kvars[j];
-		const kern_variable *kvar = &kcxt->kvars_slot[pdesc->slot_id];
-		int			vclass = kcxt->kvars_class[pdesc->slot_id];
-		int			nbytes;
-		char	   *buffer = NULL;
+		const kern_projection_desc *pj_desc = &kexp_proj->u.proj.desc[j];
+		xpu_datum_t	   *xdatum;
+		int				nbytes;
+		char		   *buffer = NULL;
 
-		if (vclass == KVAR_CLASS__NULL)
+		assert(pj_desc->proj_slot_id < kcxt->kvars_nslots);
+		xdatum = kcxt->kvars_values[pj_desc->proj_slot_id];
+		if (XPU_DATUM_ISNULL(xdatum))
 			continue;
 		/* adjust alignment */
 		t_next = TYPEALIGN(cmeta->attalign, t_hoff);
@@ -1708,97 +1713,28 @@ kern_form_heaptuple(kern_context *kcxt,
 				memset((char *)htup + t_hoff, 0, t_next - t_hoff);
 			buffer = (char *)htup + t_next;
 		}
-
-		if (vclass == KVAR_CLASS__XPU_DATUM)
-		{
-			const xpu_datum_t *xdatum = (const xpu_datum_t *)kvar->ptr;
-
-			assert(xdatum->expr_ops != NULL);
-			nbytes = xdatum->expr_ops->xpu_datum_write(kcxt, buffer, cmeta, xdatum);
-			if (nbytes < 0)
-				return -1;
-		}
-		else if (cmeta->attlen > 0)
-		{
-			if (vclass == KVAR_CLASS__INLINE)
-			{
-				assert(cmeta->attlen <= sizeof(kern_variable));
-				if (buffer)
-					memcpy(buffer, kvar, cmeta->attlen);
-			}
-			else if (vclass >= 0)
-			{
-				int		sz = Min(vclass, cmeta->attlen);
-
-				if (buffer)
-				{
-					if (sz > 0)
-						memcpy(buffer, kvar->ptr, sz);
-					if (sz < cmeta->attlen)
-						memset(buffer + sz, 0, cmeta->attlen - sz);
-				}
-			}
-			else
-			{
-				STROM_ELOG(kcxt, "Bug? unexpected kvar-class for fixed-length datum");
-				return -1;
-			}
-			nbytes = cmeta->attlen;
-		}
-		else if (cmeta->attlen == -1)
-		{
-			if (vclass >= 0)
-			{
-				nbytes = VARHDRSZ + vclass;
-				if (buffer)
-				{
-					if (vclass > 0)
-						memcpy(buffer+VARHDRSZ, kvar->ptr, vclass);
-					SET_VARSIZE(buffer, nbytes);
-				}
-			}
-			else if (vclass == KVAR_CLASS__VARLENA)
-			{
-				nbytes = VARSIZE_ANY(kvar->ptr);
-				if (buffer)
-					memcpy(buffer, kvar->ptr, nbytes);
-				if (VARATT_IS_EXTERNAL(kvar->ptr))
-					t_infomask |= HEAP_HASEXTERNAL;
-			}
-			else
-			{
-				STROM_ELOG(kcxt, "Bug? unexpected kvar-class for varlena datum");
-				return -1;
-			}
-			t_infomask |= HEAP_HASVARWIDTH;
-		}
-		else
-		{
-			STROM_ELOG(kcxt, "Bug? unsupported attribute-length");
+		/* write-out or estimate length */
+		nbytes = xdatum->expr_ops->xpu_datum_write(kcxt,
+												   buffer,
+												   cmeta,
+												   xdatum);
+		if (nbytes < 0)
 			return -1;
+		/* update t_infomask if varlena */
+		if (cmeta->attlen == -1)
+		{
+			if (buffer && VARATT_IS_EXTERNAL(buffer))
+				t_infomask |= HEAP_HASEXTERNAL;
+			t_infomask |= HEAP_HASVARWIDTH;
 		}
 		/* set not-null bit, if valid */
 		if (htup && t_hasnull)
 			htup->t_bits[j>>3] |= (1<<(j & 7));
 		t_hoff = t_next + nbytes;
 	}
+
 	if (htup)
 	{
-		int		ctid_slot = 9999; //kproj->u.proj.ctid_slot;
-
-		/* assign ctid, if any */
-		if (ctid_slot >= 0 &&
-			ctid_slot < kcxt->kvars_nslots &&
-			kcxt->kvars_class[ctid_slot] == sizeof(ItemPointerData))
-		{
-			memcpy(&htup->t_ctid,
-				   kcxt->kvars_slot[ctid_slot].ptr,
-				   sizeof(ItemPointerData));
-		}
-		else
-		{
-			ItemPointerSetInvalid(&htup->t_ctid);
-		}
 		htup->t_infomask = t_infomask;
 		SET_VARSIZE(&htup->t_choice.t_datum, t_hoff);
 	}
@@ -1807,23 +1743,28 @@ kern_form_heaptuple(kern_context *kcxt,
 
 EXTERN_FUNCTION(int)
 kern_estimate_heaptuple(kern_context *kcxt,
-                        const kern_expression *kproj,
+                        const kern_expression *kexp_proj,
                         const kern_data_store *kds_dst)
 {
 	const kern_expression *karg;
-	int			i, sz;
+	int		i, sz;
 
-	for (i=0, karg = KEXP_FIRST_ARG(kproj);
-		 i < kproj->nr_args;
-		 i++, karg = KEXP_NEXT_ARG(karg))
+	/* Run SaveExpr expressions to warm up kcxt->kvars_values[] */
+	for (i=0, karg=KEXP_FIRST_ARG(kexp_proj);
+		 i < kexp_proj->nr_args;
+		 i++, karg=KEXP_NEXT_ARG(karg))
 	{
-		assert(__KEXP_IS_VALID(kproj, karg) &&
-			   karg->opcode == FuncOpCode__SaveExpr);
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, NULL))
+		xpu_datum_t	   *xdatum;
+
+		assert(__KEXP_IS_VALID(kexp_proj, karg) &&
+			   karg->opcode == FuncOpCode__SaveExpr &&
+			   karg->u.save.sv_slot_id < kcxt->kvars_nslots);
+		xdatum = kcxt->kvars_values[karg->u.save.sv_slot_id];
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, xdatum))
 			return -1;
 	}
 	/* then, estimate the length */
-	sz = kern_form_heaptuple(kcxt, kproj, kds_dst, NULL);
+	sz = kern_form_heaptuple(kcxt, kexp_proj, kds_dst, NULL);
 	if (sz < 0)
 		return -1;
 	return MAXALIGN(offsetof(kern_tupitem, htup) + sz);

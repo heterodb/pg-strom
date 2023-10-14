@@ -2325,12 +2325,8 @@ pgstromExplainTaskState(CustomScanState *node,
 	 */
 	if (es->verbose)
 	{
-		resetStringInfo(&buf);
-		appendStringInfo(&buf, "nbytes: %u, ndims: %d",
-						 pp_info->kvecs_bufsz,
-						 pp_info->num_rels + 2);
-		ExplainPropertyText("Kvecs Buffer", buf.data, es);
 		pgstrom_explain_kvars_slot(&pts->css, es, dcontext);
+		pgstrom_explain_kvecs_buffer(&pts->css, es, dcontext);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"LoadVars OpCode",
 								pp_info->kexp_load_vars_packed);

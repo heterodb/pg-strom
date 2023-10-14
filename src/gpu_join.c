@@ -742,6 +742,7 @@ __build_fallback_exprs_join_walker(Node *node, void *data)
 	if (IsA(node, Var))
 		elog(ERROR, "Bug? Var-node (%s) is missing at the kvars_exprs list",
 			 nodeToString(node));
+
 	return expression_tree_mutator(node, __build_fallback_exprs_join_walker, context);
 }
 
@@ -973,7 +974,7 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 		}
 	}
 	//add junk?
-
+	context->tlist_dev = __context.tlist_dev;
 }
 
 /*
