@@ -374,6 +374,7 @@ typedef struct {
 	char		message[KERN_ERRORBUF_MESSAGE_LEN+1];
 } kern_errorbuf;
 
+#if 1
 /*
  * kern_variable
  */
@@ -397,6 +398,7 @@ typedef union
 	float8_t	fp64;
 	void	   *ptr;
 } kern_variable;
+#endif
 
 /*
  * kern_context - a set of run-time information
@@ -1648,7 +1650,6 @@ struct xpu_datum_operators {
 	bool	  (*xpu_datum_heap_ref)(kern_context *kcxt,
 									const void *addr,		/* in */
 									xpu_datum_t *result);	/* out */
-
 	/*
 	 * xpu_datum_arrow_ref: called by LoadVars to load arrow datum
 	 * to the xpu_datum slot, prior to execution of the kexp in the
@@ -1658,7 +1659,6 @@ struct xpu_datum_operators {
 									 const kern_data_store *kds,	/* in */
 									 const kern_colmeta *cmeta,		/* in */
 									 uint32_t kds_index,			/* in */
-									 const kern_varslot_desc *vs_desc, /* in */
 									 xpu_datum_t *result);			/* out */
 
 	/*
@@ -1701,7 +1701,7 @@ struct xpu_datum_operators {
 	 */
 	int		  (*xpu_datum_write)(kern_context *kcxt,
 								 char *buffer,					/* out */
-								 const kern_colmeta *cmeta,		/* in */
+								 const kern_colmeta *cmeta_dst,	/* in */
 								 const xpu_datum_t *xdatum);	/* in */
 	/*
 	 * xpu_datum_hash: calculation of hash value using pg_hash_any()
@@ -1800,14 +1800,15 @@ struct xpu_datum_operators {
  */
 typedef struct {
 	XPU_DATUM_COMMON_FIELD;
-	int32_t			length;
+	int32_t		length;
 	union {
 		struct {
 			const varlena *value;
 		} heap;
 		struct {
+			const kern_colmeta *cmeta;
 			uint32_t	start;
-			const kern_colmeta *smeta;
+			uint32_t	slot_id;
 		} arrow;
 	} u;
 } xpu_array_t;
@@ -1815,6 +1816,7 @@ typedef struct {
 typedef struct {
 	KVEC_DATUM_COMMON_FIELD;
 	const kern_colmeta *smeta;		/* common in kvec */
+	uint32_t	slot_id;			/* common in kvec */	
 	int32_t		length[KVEC_UNITSZ];
 	union {
 		struct {
@@ -1889,25 +1891,20 @@ __pg_array_dataptr(const __ArrayTypeData *ar)
  * xpu_composite_t - composite type support
  *
  * NOTE: xpu_composite_t is designed to store both of PostgreSQL / Arrow composite
- * values. If @value != NULL, it means @value points a varlena based PostgreSQL
- * composite values. Elsewhere (@value == NULL), it points composite values on
- * KDS_FORMAT_ARROW chunk, identified by the @rowidx.
- * For both cases, @smeta points the column-metadata of the composite sub-fields,
- * thus smeta[0] ... smeta[@nfields-1] describes the composite data type definition.
+ * values. If @cmeta is NULL, it means @heap.value points a varlena based PostgreSQL
+ * composite datum. Elsewhere, @arrow.value points the composite value on the
+ * KDS_FORMAT_ARROW chunk,identified by the @rowidx.
  */
 typedef struct {
 	XPU_DATUM_COMMON_FIELD;
-	uint32_t		comp_typid;	/* type OID of the PG composite type */
-	int32_t			comp_typmod;/* type modifier of the PG composite type */
-	const kern_colmeta *smeta;	/* colmeta array of the sub-fields */
-	uint32_t		nfields;	/* length of the smeta[] array */
-	bool			is_arrow;	/* heap or arrow selector */
+	const kern_colmeta *cmeta;		/* reference to the composite datume metadata */
 	union {
 		struct {
 			const varlena *value;	/* composite varlena in heap-format */
 		} heap;
 		struct {
 			uint32_t	rowidx;		/* composite row-index in arrow-format */
+			uint32_t	slot_id;	/* vs_desc slot-id that stored in */
 		} arrow;
 	} u;
 } xpu_composite_t;
@@ -1915,10 +1912,7 @@ typedef struct {
 typedef struct
 {
 	KVEC_DATUM_COMMON_FIELD;
-	uint32_t	comp_typid;		/* to be identical in kvec */
-	uint32_t	comp_typmod;	/* to be identical in kvec */
-	const kern_colmeta *smeta;	/* to be identical in kvec */
-	uint32_t	nfields;		/* to be identical in kvec */
+	const kern_colmeta *cmeta;	/* to be identical in kvec */
 	bool		is_arrow;		/* to be identical in kvec */
 	union {
 		struct {
@@ -2227,7 +2221,7 @@ struct kern_varslot_desc
 	int8_t		vs_typalign;
 	int16_t		vs_typlen;
 	int32_t		vs_typmod;
-	uint16_t	off_subfield;	/* offset to the subfield descriptor */
+	uint16_t	idx_subfield;	/* offset to the subfield descriptor */
 	uint16_t	num_subfield;	/* number of the subfield (array or composite) */
 	const struct xpu_datum_operators *vs_ops;
 };
@@ -2276,7 +2270,7 @@ struct kern_expression
 			char		data[1]			__MAXALIGNED__;
 		} casewhen;	/* Case-When */
 		struct {
-			kern_varload_desc elem_desc;
+			uint16_t	elem_slot_id;	/* slot-id of temporary array element */
 			char		data[1]			__MAXALIGNED__;
 		} saop;		/* ScalarArrayOp */
 		struct {

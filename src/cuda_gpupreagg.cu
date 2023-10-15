@@ -15,19 +15,22 @@
 /*
  * __writeOutOneTuplePreAgg
  */
+#if 0
 STATIC_FUNCTION(int32_t)
 __writeOutOneTupleGroupKey(kern_context *kcxt,
 						   kern_colmeta *cmeta,
 						   kern_aggregate_desc *desc,
 						   char *buffer)
 {
-	kern_variable *kvar;
-	int			vclass;
+	const kern_varslot_desc *vs_desc;
 	int32_t		nbytes;
 
 	assert(desc->action == KAGG_ACTION__VREF &&
 		   desc->arg0_slot_id >= 0 &&
 		   desc->arg0_slot_id < kcxt->kvars_nslots);
+	re
+
+	
 	vclass = kcxt->kvars_class[desc->arg0_slot_id];
 	kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
 	switch (vclass)
@@ -87,6 +90,7 @@ __writeOutOneTupleGroupKey(kern_context *kcxt,
 	}
 	return -1;
 }
+#endif
 
 STATIC_FUNCTION(int32_t)
 __writeOutOneTuplePreAgg(kern_context *kcxt,
@@ -117,6 +121,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 	{
 		kern_aggregate_desc *desc = &kexp_actions->u.pagg.desc[j];
 		kern_colmeta   *cmeta = &kds_final->colmeta[j];
+		xpu_datum_t	   *xdatum;
 		int				nbytes;
 
 		assert((char *)cmeta > (char *)kds_final &&
@@ -133,9 +138,20 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 		switch (desc->action)
 		{
 			case KAGG_ACTION__VREF:
-				nbytes = __writeOutOneTupleGroupKey(kcxt, cmeta, desc, buffer);
-				if (nbytes < 0)
-					return -1;
+				assert(desc->arg0_slot_id >= 0 &&
+					   desc->arg0_slot_id < kcxt->kvars_nslots);
+				xdatum = kcxt->kvars_values[desc->arg0_slot_id];
+				if (XPU_DATUM_ISNULL(xdatum))
+					nbytes = 0;
+				else
+				{
+					nbytes = xdatum->expr_ops->xpu_datum_write(kcxt,
+															   buffer,
+															   cmeta,
+															   xdatum);
+					if (nbytes < 0)
+						return -1;
+				}
 				break;
 
 			case KAGG_ACTION__NROWS_ANY:

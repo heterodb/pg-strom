@@ -1355,15 +1355,6 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 					return false;
 			}
 			break;
-
-		case FuncOpCode__ScalarArrayOpAny:
-		case FuncOpCode__ScalarArrayOpAll:
-			if (!__lookupDeviceTypeOper(gcontext,
-										&kexp->u.saop.elem_desc.vl_ops,
-										kexp->u.saop.elem_desc.vl_type_code,
-										emsg, emsg_sz))
-				return false;
-			break;
 			
 		case FuncOpCode__LoadVars:
 			for (i=0; i < kexp->u.load.nitems; i++)

@@ -409,7 +409,8 @@ __count_session_kvars_defs_subfields(codegen_kvar_defitem *kvdef)
 }
 
 static int
-__setup_session_kvars_defs_array(kern_varslot_desc *vslot_desc_base,
+__setup_session_kvars_defs_array(kern_varslot_desc *vslot_desc_root,
+								 kern_varslot_desc *vslot_desc_base,
 								 List *kvars_deflist)
 {
 	kern_varslot_desc *vs_desc = vslot_desc_base;
@@ -430,9 +431,10 @@ __setup_session_kvars_defs_array(kern_varslot_desc *vslot_desc_base,
 
 		if (kvdef->kv_subfields != NIL)
 		{
-			count = __setup_session_kvars_defs_array(vslot_desc_base,
+			count = __setup_session_kvars_defs_array(vslot_desc_root,
+													 vslot_desc_base,
 													 kvdef->kv_subfields);
-			vs_desc->off_subfield = (vslot_desc_base - vs_desc);	/* offset */
+			vs_desc->idx_subfield = (vslot_desc_base - vslot_desc_root);
 			vs_desc->num_subfield = count;
 
 			vslot_desc_base += count;
@@ -465,8 +467,9 @@ __build_session_kvars_defs(pgstromTaskState *pts,
 	
 	kvars_defs = alloca(sz);
 	memset(kvars_defs, 0, sz);
-	__setup_session_kvars_defs_array(kvars_defs, pp_info->kvars_deflist);
-
+	__setup_session_kvars_defs_array(kvars_defs,
+									 kvars_defs,
+									 pp_info->kvars_deflist);
 	session->kcxt_kvars_nrooms = nrooms;
 	session->kcxt_kvars_nslots = nitems;
 	session->kcxt_kvars_defs = __appendBinaryStringInfo(buf, kvars_defs, sz);

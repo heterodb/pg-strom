@@ -2070,12 +2070,7 @@ codegen_scalar_array_op_expression(codegen_context *context,
 							: FuncOpCode__ScalarArrayOpAll);
 		kexp.nr_args     = 2;
 		kexp.args_offset = offsetof(kern_expression, u.saop.data);
-		kexp.u.saop.elem_desc.vl_resno     = -1;
-		kexp.u.saop.elem_desc.vl_slot_id   = kvdef->kv_slot_id;
-		kexp.u.saop.elem_desc.vl_type_code = dtype_e->type_code;
-		kexp.u.saop.elem_desc.vl_typbyval  = dtype_e->type_byval;
-		kexp.u.saop.elem_desc.vl_typalign  = dtype_e->type_align;
-		kexp.u.saop.elem_desc.vl_typlen    = dtype_e->type_length;
+		kexp.u.saop.elem_slot_id = kvdef->kv_slot_id;
 		pos = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
 	}
 	/* 1st arg - array-expression to be walked on */
@@ -3535,32 +3530,40 @@ __xpucode_to_cstring(StringInfo buf,
 					 ExplainState *es,				/* optional */
 					 List *dcontext);				/* optionsl */
 
+static const codegen_kvar_defitem *
+__lookup_kvar_defitem_by_slot_id(const CustomScanState *css, int slot_id)
+{
+	pgstromTaskState *pts = (pgstromTaskState *)css;
+
+	if (pts)
+	{
+		pgstromPlanInfo *pp_info = pts->pp_info;
+
+		if (slot_id >= 0 &&
+			slot_id < list_length(pp_info->kvars_deflist))
+		{
+			return (const codegen_kvar_defitem *)
+				list_nth(pp_info->kvars_deflist, slot_id);
+		}
+	}
+	return NULL;
+}
+
 static const char *
 __get_expression_cstring(const CustomScanState *css,
 						 List *dcontext,
 						 int32_t slot_id)
 {
-	pgstromTaskState *pts = (pgstromTaskState *)css;
-	const char	   *label = "";
+	const codegen_kvar_defitem *kvdef;
+	const char *label = "???";
 
-	if (pts)
+	kvdef = __lookup_kvar_defitem_by_slot_id(css, slot_id);
+	if (kvdef)
 	{
-		pgstromPlanInfo *pp_info = pts->pp_info;
-		codegen_kvar_defitem *kvdef;
-
-		if (slot_id >= 0 &&
-			slot_id < list_length(pp_info->kvars_deflist))
-		{
-			kvdef = list_nth(pp_info->kvars_deflist, slot_id);
-			label = deparse_expression((Node *)kvdef->kv_expr,
-									   dcontext,
-									   false,
-									   false);
-		}
-		else
-		{
-			label = "???";
-		}
+		label = deparse_expression((Node *)kvdef->kv_expr,
+								   dcontext,
+								   false,
+								   false);
 	}
 	return label;
 }
@@ -3733,8 +3736,9 @@ __xpucode_movevars_cstring(StringInfo buf,
 		appendStringInfo(buf, "<");
 		if (vm_desc->vm_from_xdatum)
 			appendStringInfo(buf, "slot=%d, ", vm_desc->vm_slot_id);
-		appendStringInfo(buf, "offset=%u, type='%s', expr='%s'>",
+		appendStringInfo(buf, "offset=0x%04x+%u, type='%s', expr='%s'>",
 						 vm_desc->vm_offset,
+						 dtype->kvec_sizeof,
 						 dtype->type_name,
 						 __get_expression_cstring(css, dcontext,
 												  vm_desc->vm_slot_id));
@@ -3901,6 +3905,7 @@ __xpucode_to_cstring(StringInfo buf,
 					 List *dcontext)				/* optionsl */
 {
 	const kern_expression *karg;
+	const codegen_kvar_defitem *kvdef;
 	devfunc_info *dfunc;
 	devtype_info *dtype;
 	const char *label;
@@ -4076,13 +4081,15 @@ __xpucode_to_cstring(StringInfo buf,
 				label = "All";
 			appendStringInfo(buf, "{ScalarArrayOp%s: ", label);
 
-			dtype = devtype_lookup_by_opcode(kexp->u.saop.elem_desc.vl_type_code);
-			if (!dtype)
-				elog(ERROR, "device type lookup failed for code:%u",
-					 kexp->u.saop.elem_desc.vl_type_code);
-			appendStringInfo(buf, " elem=<slot=%d, type='%s'>",
-							 kexp->u.saop.elem_desc.vl_slot_id,
-							 dtype->type_name);
+			kvdef = __lookup_kvar_defitem_by_slot_id(css, kexp->u.saop.elem_slot_id);
+			if (kvdef)
+				dtype = devtype_lookup_by_opcode(kvdef->kv_type_code);
+			else
+				dtype = NULL;
+			appendStringInfo(buf, " elem=<slot=%d", kexp->u.saop.elem_slot_id);
+			if (dtype)
+				appendStringInfo(buf, ", type='%s'", dtype->type_name);
+			appendStringInfoChar(buf, '>');
 			break;
 
 		default:

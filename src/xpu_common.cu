@@ -19,17 +19,15 @@
  */
 INLINE_FUNCTION(bool)
 __extract_heap_tuple_attr(kern_context *kcxt,
-						  const kern_varload_desc *vl_desc,
+						  uint32_t slot_id,
 						  const char *addr)
 {
-	uint16_t	slot_id = vl_desc->vl_slot_id;
-
 	if (slot_id < kcxt->kvars_nslots)
 	{
+		const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[slot_id];
 		xpu_datum_t	   *xdatum = kcxt->kvars_values[slot_id];
 
-		assert(vl_desc->vl_type_code == kcxt->kvars_desc[slot_id].vs_type_code);
-		return vl_desc->vl_ops->xpu_datum_heap_ref(kcxt, addr, xdatum);
+		return vs_desc->vs_ops->xpu_datum_heap_ref(kcxt, addr, xdatum);
 	}
 	STROM_ELOG(kcxt, "vl_desc::slot_id is out of range");
 	return false;
@@ -42,8 +40,9 @@ __fillup_by_null_values(kern_context *kcxt,
 {
 	while (kvload_nitems > 0)
 	{
-		if (!__extract_heap_tuple_attr(kcxt, vl_desc, NULL))
-			return false;
+		uint16_t	slot_id = vl_desc->vl_slot_id;
+
+		kcxt->kvars_values[slot_id]->expr_ops = NULL;
 		vl_desc++;
 		kvload_nitems--;
 	}
@@ -127,7 +126,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 				break;
 			offset = htup->t_hoff + cmeta->attcacheoff;
 			addr = (char *)htup + offset;
-			if (!__extract_heap_tuple_attr(kcxt, vl_desc, addr))
+			if (!__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr))
 				return false;
 			/* next resno */
 			resno = vl_desc->vl_resno + 1;
@@ -166,7 +165,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 
 		if (vl_desc->vl_resno == resno)
 		{
-			if (!__extract_heap_tuple_attr(kcxt, vl_desc, addr))
+			if (!__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr))
 				return false;
 			vl_desc++;
 			kvload_count++;
@@ -199,6 +198,7 @@ arrow_bitmap_check(const kern_data_store *kds,
 	return (bitmap[idx] & mask) != 0;
 }
 
+#if 0
 STATIC_FUNCTION(bool)
 arrow_fetch_secondary_index(kern_context *kcxt,
 							const kern_data_store *kds,
@@ -242,22 +242,28 @@ arrow_fetch_secondary_index(kern_context *kcxt,
 	}
 	return true;
 }
-
+#endif
+#if 0
 STATIC_FUNCTION(bool)
 __arrow_fetch_bool_datum(kern_context *kcxt,
 						 const kern_data_store *kds,
 						 const kern_colmeta *cmeta,
 						 uint32_t kds_index,
-						 kern_variable *kvar,
-						 int *vclass)
+						 const kern_varslot_desc *vs_desc,
+						 xpu_datum_t *__result)
 {
+	int8_t		bval;
+
 	assert(cmeta->extra_offset == 0 &&
 		   cmeta->extra_length == 0);
-	kvar->i8 = arrow_bitmap_check(kds, kds_index,
-								  cmeta->values_offset,
-								  cmeta->values_length);
-	*vclass = KVAR_CLASS__INLINE;
-	return true;
+	bval = arrow_bitmap_check(kds, kds_index,
+							  cmeta->values_offset,
+							  cmeta->values_length);
+	return vs_desc->vs_ops->xpu_datum_arrow_ref(kcxt,
+												cmeta,
+												&bval,
+												sizeof(int8_t),
+												xdatum);
 }
 
 STATIC_FUNCTION(bool)
@@ -265,8 +271,8 @@ __arrow_fetch_int_datum(kern_context *kcxt,
 						const kern_data_store *kds,
 						const kern_colmeta *cmeta,
 						uint32_t kds_index,
-						kern_variable *kvar,
-						int *vclass)
+						const kern_varslot_desc *vs_desc,
+						xpu_datum_t *xdatum)
 {
 	size_t		values_length = __kds_unpack(cmeta->values_length);
 
@@ -280,9 +286,11 @@ __arrow_fetch_int_datum(kern_context *kcxt,
 			{
 				uint8_t	   *base = (uint8_t *)
 					((char *)kds + __kds_unpack(cmeta->values_offset));
-				kvar->u8 = base[kds_index];
-				*vclass = KVAR_CLASS__INLINE;
-				return true;
+				return vs_desc->vs_ops->xpu_datum_arrow_ref(kcxt,
+															cmeta,
+															(char *)(base + kds_index),
+															sizeof(uint8_t)
+															xdatum);
 			}
 			break;
 		case 16:
@@ -291,9 +299,11 @@ __arrow_fetch_int_datum(kern_context *kcxt,
 			{
 				uint16_t   *base = (uint16_t *)
 					((char *)kds + __kds_unpack(cmeta->values_offset));
-				kvar->u16 = base[kds_index];
-				*vclass = KVAR_CLASS__INLINE;
-				return true;
+				return vs_desc->vs_ops->xpu_datum_arrow_ref(kcxt,
+															cmeta,
+															(char *)(base + kds_index),
+															sizeof(uint16_t),
+															xdatum);
 			}
 			break;
 		case 32:
@@ -302,9 +312,11 @@ __arrow_fetch_int_datum(kern_context *kcxt,
 			{
 				uint32_t   *base = (uint32_t *)
 					((char *)kds + __kds_unpack(cmeta->values_offset));
-				kvar->u32 = base[kds_index];
-				*vclass = KVAR_CLASS__INLINE;
-				return true;
+				return vs_desc->vs_ops->xpu_datum_arrow_ref(kcxt,
+															cmeta,
+															(char *)(base + kds_index),
+															sizeof(uint32_t),
+															xdatum);
 			}
 			break;
 		case 64:
@@ -313,16 +325,18 @@ __arrow_fetch_int_datum(kern_context *kcxt,
 			{
 				uint64_t   *base = (uint64_t *)
 					((char *)kds + __kds_unpack(cmeta->values_offset));
-				kvar->u64 = base[kds_index];
-				*vclass = KVAR_CLASS__INLINE;
-				return true;
+				return vs_desc->vs_ops->xpu_datum_arrow_ref(kcxt,
+															cmeta,
+															(char *)(base + kds_index),
+															sizeof(uint64_t),
+															xdatum);
 			}
 			break;
 		default:
 			STROM_ELOG(kcxt, "Arrow::Int unsupported bitWidth");
 			return false;
 	}
-	*vclass = KVAR_CLASS__NULL;
+	xdatum->expr_ops = NULL;
     return true;
 }
 
@@ -729,9 +743,7 @@ __arrow_fetch_array_datum(kern_context *kcxt,
 						  const kern_colmeta *cmeta,
 						  uint32_t kds_index,
 						  bool is_large_offset,
-						  kern_variable *kvar,
-						  int *vclass,
-						  char *slot_buf)
+						  xpu_datum_t *xdatum)
 {
 	uint64_t	start, end;
 
@@ -744,7 +756,7 @@ __arrow_fetch_array_datum(kern_context *kcxt,
 									is_large_offset,
 									&start, &end))
 	{
-		xpu_array_t *array = (xpu_array_t *)slot_buf;
+		xpu_array_t *array = (xpu_array_t *)xdatum;
 
 		/* sanity checks */
 		if (start > end)
@@ -755,10 +767,8 @@ __arrow_fetch_array_datum(kern_context *kcxt,
 		array->expr_ops      = &xpu_array_ops;
 		array->length        = end - start;
 		array->u.arrow.start = start;
-		array->u.arrow.smeta = &kds->colmeta[cmeta->idx_subattrs];
+		array->u.arrow.cmeta = cmeta;
 		assert(cmeta->num_subattrs == 1);
-		*vclass = KVAR_CLASS__XPU_DATUM;
-		kvar->ptr = array;
 		return true;
 	}
 	return false;
@@ -775,33 +785,65 @@ __arrow_fetch_composite_datum(kern_context *kcxt,
 {
 	xpu_composite_t	*comp = (xpu_composite_t *)slot_buf;
 
-	comp->expr_ops      = &xpu_composite_ops;
-	comp->comp_typid    = cmeta->atttypid;
-	comp->comp_typmod   = cmeta->atttypmod;
-	comp->smeta         = &kds->colmeta[cmeta->idx_subattrs];
-	comp->nfields       = cmeta->num_subattrs;
-	comp->is_arrow      = true;
+	comp->expr_ops	= &xpu_composite_ops;
+	comp->cmeta		= cmeta;
+	comp->is_arrow	= true;
 	comp->u.arrow.rowidx = kds_index;
-	*vclass = KVAR_CLASS__XPU_DATUM;
-	kvar->ptr = comp;
 	return true;
 }
+#endif
 
 STATIC_FUNCTION(bool)
 __kern_extract_arrow_field(kern_context *kcxt,
 						   const kern_data_store *kds,
 						   const kern_colmeta *cmeta,
 						   uint32_t kds_index,
-						   kern_variable *kvar,
-						   int *vclass,
-						   char *slot_buf)
+						   const kern_varslot_desc *vs_desc,
+						   xpu_datum_t *result)
 {
+	if (cmeta->nullmap_offset == 0 ||
+		arrow_bitmap_check(kds, kds_index,
+						   cmeta->nullmap_offset,
+						   cmeta->nullmap_length))
+	{
+		if (!vs_desc->vs_ops->xpu_datum_arrow_ref(kcxt,
+												  kds,
+												  cmeta,
+												  kds_index,
+												  result))
+			return false;
+		if (result->expr_ops == &xpu_array_ops)
+		{
+			uint32_t	slot_id = (vs_desc - kcxt->kvars_desc);
+			assert(slot_id < kcxt->kvars_nrooms);
+			((xpu_array_t *)result)->u.arrow.slot_id = slot_id;
+		}
+		else if (result->expr_ops == &xpu_composite_ops)
+		{
+			uint32_t	slot_id = (vs_desc - kcxt->kvars_desc);
+			assert(slot_id < kcxt->kvars_nrooms);
+			((xpu_composite_t *)result)->u.arrow.slot_id = slot_id;
+		}
+	}
+	else
+	{
+		result->expr_ops = NULL;
+	}
+	return true;
+
+
+
+
+#if 0
 	switch (cmeta->attopts.tag)
 	{
 		case ArrowType__Bool:
-			if (!__arrow_fetch_bool_datum(kcxt, kds, cmeta,
+			if (!__arrow_fetch_bool_datum(kcxt,
+										  kds,
+										  cmeta,
 										  kds_index,
-										  kvar, vclass))
+										  vs_desc,
+										  result))
 				return false;
 			break;
 
@@ -911,6 +953,7 @@ __kern_extract_arrow_field(kern_context *kcxt,
 			return false;
 	}
 	return true;
+#endif
 }
 
 INLINE_FUNCTION(bool)
@@ -943,7 +986,7 @@ __extract_arrow_tuple_sysattr(kern_context *kcxt,
 			STROM_ELOG(kcxt, "not a supported system attribute reference");
 			return false;
 	}
-	return __extract_heap_tuple_attr(kcxt, vl_desc, (char *)&dummy);
+	return __extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, (char *)&dummy);
 }
 
 STATIC_FUNCTION(bool)
@@ -969,28 +1012,17 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 	while (vload_count < vload_nitems &&
 		   vl_desc->vl_resno <= kds->ncols)
 	{
-		kern_colmeta *cmeta = &kds->colmeta[vl_desc->vl_resno-1];
-		uint32_t	slot_id = vl_desc->vl_slot_id;
+		kern_colmeta   *cmeta = &kds->colmeta[vl_desc->vl_resno-1];
+		uint16_t		slot_id = vl_desc->vl_slot_id;
 
-		if (cmeta->nullmap_offset == 0 ||
-			arrow_bitmap_check(kds, kds_index,
-							   cmeta->nullmap_offset,
-							   cmeta->nullmap_length))
-		{
-			if (!__kern_extract_arrow_field(kcxt,
-											kds,
-											cmeta,
-											kds_index,
-											&kcxt->kvars_slot[slot_id],
-											&kcxt->kvars_class[slot_id],
-											NULL)) //slot_buf))
-				return false;
-		}
-		else
-		{
-			if (!__extract_heap_tuple_attr(kcxt, vl_desc, NULL))
-				return false;
-		}
+		if (!__kern_extract_arrow_field(kcxt,
+										kds,
+										cmeta,
+										kds_index,
+										&kcxt->kvars_desc[slot_id],
+										kcxt->kvars_values[slot_id]))
+			return false;
+
 		vl_desc++;
 		vload_count++;
 	}
@@ -1434,7 +1466,7 @@ __ScalarArrayOpHeap(kern_context *kcxt,
 					xpu_array_t *aval)
 {
 	const __ArrayTypeData *ar = (const __ArrayTypeData *)VARDATA_ANY(aval->u.heap.value);
-	const kern_varload_desc *vl_desc = &kexp->u.saop.elem_desc;
+	const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[kexp->u.saop.elem_slot_id];
 	uint8_t	   *nullmap = __pg_array_nullmap(ar);
 	char	   *base = __pg_array_dataptr(ar);
 	int			ndim = __pg_array_ndim(ar);
@@ -1463,15 +1495,15 @@ __ScalarArrayOpHeap(kern_context *kcxt,
 		}
 		else
 		{
-			if (vl_desc->vl_typlen > 0)
-				offset = TYPEALIGN(vl_desc->vl_typalign, offset);
+			if (vs_desc->vs_typlen > 0)
+				offset = TYPEALIGN(vs_desc->vs_typalign, offset);
 			else if (!VARATT_NOT_PAD_BYTE(base + offset))
-				offset = TYPEALIGN(vl_desc->vl_typalign, offset);
+				offset = TYPEALIGN(vs_desc->vs_typalign, offset);
 			addr = base + offset;
 
-			if (vl_desc->vl_typlen > 0)
-				offset += vl_desc->vl_typlen;
-			else if (vl_desc->vl_typlen == -1)
+			if (vs_desc->vs_typlen > 0)
+				offset += vs_desc->vs_typlen;
+			else if (vs_desc->vs_typlen == -1)
 				offset += VARSIZE_ANY(addr);
 			else
 			{
@@ -1480,7 +1512,7 @@ __ScalarArrayOpHeap(kern_context *kcxt,
 			}
 		}
 		/* load the array element */
-		if (!__extract_heap_tuple_attr(kcxt, vl_desc, addr))
+		if (!__extract_heap_tuple_attr(kcxt, kexp->u.saop.elem_slot_id, addr))
 			return false;
 		/* call the comparator */
 		if (!EXEC_KERN_EXPRESSION(kcxt, kcmp, &status))
@@ -1529,40 +1561,29 @@ __ScalarArrayOpArrow(kern_context *kcxt,
 					 const kern_expression *kcmp,
 					 xpu_array_t *aval)
 {
-	const kern_varload_desc *vl_desc = &kexp->u.saop.elem_desc;
-	const kern_colmeta *smeta = aval->u.arrow.smeta;
+	const kern_colmeta *cmeta = aval->u.arrow.cmeta;
+	const kern_colmeta *smeta;
 	const kern_data_store *kds;
+	uint32_t	slot_id = kexp->u.saop.elem_slot_id;
 	bool		use_any = (kexp->opcode == FuncOpCode__ScalarArrayOpAny);
 	bool		meet_nulls = false;
 
 	result->value = !use_any;
 	kds = (const kern_data_store *)
-		((char *)smeta - smeta->kds_offset);
+		((char *)cmeta - cmeta->kds_offset);
+	smeta = &kds->colmeta[cmeta->idx_subattrs];
+	assert(cmeta->num_subattrs == 1);
+	assert(slot_id < kcxt->kvars_nslots);
 	for (int k=0; k < aval->length; k++)
 	{
 		uint32_t	index = aval->u.arrow.start + k;
 		xpu_bool_t	status;
 
 		/* load the element */
-		if (smeta->nullmap_offset == 0 ||
-			arrow_bitmap_check(kds, index,
-							   smeta->nullmap_offset,
-							   smeta->nullmap_length))
-		{
-			if (!__kern_extract_arrow_field(kcxt,
-											kds,
-											smeta,
-											index,
-											&kcxt->kvars_slot[12345], //FIXME
-											&kcxt->kvars_class[12345], //FIXME
-											NULL))
-				return false;
-		}
-		else
-		{
-			if (!__extract_heap_tuple_attr(kcxt, vl_desc, NULL))
-				return false;
-		}
+		if (!__kern_extract_arrow_field(kcxt, kds, smeta, index,
+										&kcxt->kvars_desc[slot_id],
+										kcxt->kvars_values[slot_id]))
+			return false;
 		/* call the comparator */
 		if (!EXEC_KERN_EXPRESSION(kcxt, kcmp, &status))
 			return false;
@@ -1612,7 +1633,7 @@ pgfn_ScalarArrayOp(XPU_PGFUNCTION_ARGS)
 
 	assert(kexp->exptype == TypeOpCode__bool &&
 		   kexp->nr_args == 2 &&
-		   kexp->u.saop.elem_desc.vl_slot_id < kcxt->kvars_nslots);
+		   kexp->u.saop.elem_slot_id < kcxt->kvars_nslots);
 	memset(result, 0, sizeof(xpu_bool_t));
 
 	/* fetch array value */
@@ -1652,11 +1673,11 @@ kern_form_heaptuple(kern_context *kcxt,
 	 * NOTE: the caller must call kern_estimate_heaptuple() preliminary to ensure
 	 *       kcxt->kvars_values[] are filled-up by the scalar values to be written.
 	 */
+	int			nattrs = kexp_proj->u.proj.nattrs;
 	uint32_t	t_hoff;
 	uint32_t	t_next;
 	uint16_t	t_infomask = 0;
 	bool		t_hasnull = false;
-	int			nattrs = kexp_proj->u.proj.nattrs;
 
 	if (kds_dst && kds_dst->ncols < nattrs)
 		nattrs = kds_dst->ncols;
@@ -1695,18 +1716,18 @@ kern_form_heaptuple(kern_context *kcxt,
 	/* walk on the columns */
 	for (int j=0; j < nattrs; j++)
 	{
-		const kern_colmeta *cmeta = &kds_dst->colmeta[j];
-		const kern_projection_desc *pj_desc = &kexp_proj->u.proj.desc[j];
+		const kern_colmeta *cmeta_dst = &kds_dst->colmeta[j];
+		uint32_t		slot_id = kexp_proj->u.proj.desc[j].proj_slot_id;
 		xpu_datum_t	   *xdatum;
 		int				nbytes;
 		char		   *buffer = NULL;
 
-		assert(pj_desc->proj_slot_id < kcxt->kvars_nslots);
-		xdatum = kcxt->kvars_values[pj_desc->proj_slot_id];
+		assert(slot_id < kcxt->kvars_nslots);
+		xdatum = kcxt->kvars_values[slot_id];
 		if (XPU_DATUM_ISNULL(xdatum))
 			continue;
 		/* adjust alignment */
-		t_next = TYPEALIGN(cmeta->attalign, t_hoff);
+		t_next = TYPEALIGN(cmeta_dst->attalign, t_hoff);
 		if (htup)
 		{
 			if (t_next > t_hoff)
@@ -1716,12 +1737,12 @@ kern_form_heaptuple(kern_context *kcxt,
 		/* write-out or estimate length */
 		nbytes = xdatum->expr_ops->xpu_datum_write(kcxt,
 												   buffer,
-												   cmeta,
+												   cmeta_dst,
 												   xdatum);
 		if (nbytes < 0)
 			return -1;
 		/* update t_infomask if varlena */
-		if (cmeta->attlen == -1)
+		if (cmeta_dst->attlen == -1)
 		{
 			if (buffer && VARATT_IS_EXTERNAL(buffer))
 				t_infomask |= HEAP_HASEXTERNAL;
@@ -1954,7 +1975,7 @@ __extract_gpucache_tuple_sysattr(kern_context *kcxt,
 			STROM_ELOG(kcxt, "not a supported system attribute reference");
 			return false;
 	}
-	return __extract_heap_tuple_attr(kcxt, vl_desc, addr);
+	return __extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr);
 }
 
 STATIC_FUNCTION(bool)
@@ -2009,7 +2030,7 @@ kern_extract_gpucache_tuple(kern_context *kcxt,
 			addr = NULL;
 		}
 
-		if (!__extract_heap_tuple_attr(kcxt, vl_desc, addr))
+		if (!__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr))
 			return false;
 		vl_desc++;
 		vload_count++;
@@ -2274,7 +2295,7 @@ kern_extract_gist_tuple(kern_context *kcxt,
 		if (cmeta->attcacheoff >= 0)
 		{
 			char   *addr = (char *)itup + i_off + cmeta->attcacheoff;
-			return __extract_heap_tuple_attr(kcxt, vl_desc, addr);
+			return __extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr);
 		}
 	}
 	/* extract the index-tuple by the slow path */
@@ -2299,10 +2320,10 @@ kern_extract_gist_tuple(kern_context *kcxt,
 				i_off += VARSIZE_ANY(addr);
 		}
 		if (vl_desc->vl_resno == resno)
-			return __extract_heap_tuple_attr(kcxt, vl_desc, addr);
+			return __extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr);
 	}
 	/* fill-up by NULL, if not found */
-	return __extract_heap_tuple_attr(kcxt, vl_desc, NULL);
+	return __extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, NULL);
 }
 
 PUBLIC_FUNCTION(uint32_t)
@@ -2515,9 +2536,87 @@ xpu_array_datum_store(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(int)
+__xpu_array_arrow_write(kern_context *kcxt,
+						char *buffer,
+						const kern_colmeta *__cmeta_dst,	/* unused */
+						const xpu_array_t *arg)
+{
+	const kern_varslot_desc *vs_desc;
+	const kern_colmeta *cmeta = arg->u.arrow.cmeta;
+	const kern_colmeta *emeta;	/* array element (source) */
+	const kern_data_store *kds;
+	xpu_datum_t	   *xdatum;
+	uint8_t		   *nullmap = NULL;
+	int32_t			sz, nbytes;
+
+	/* setup source emeta/vs_desc */
+	kds = (const kern_data_store *)
+		((const char *)cmeta - cmeta->kds_offset);
+	assert(cmeta->num_subattrs == 1);
+	emeta = &kds->colmeta[cmeta->idx_subattrs];
+	vs_desc = &kcxt->kvars_desc[arg->u.arrow.slot_id];
+	assert(vs_desc->num_subfield == 1);
+	vs_desc = &kcxt->kvars_desc[vs_desc->idx_subfield];
+	xdatum = (xpu_datum_t *)alloca(vs_desc->vs_ops->xpu_type_sizeof);
+
+	nbytes = (VARHDRSZ +
+			  offsetof(__ArrayTypeData, data[2]) +
+			  MAXALIGN(BITMAPLEN(arg->length)));
+	if (buffer)
+	{
+		__ArrayTypeData *arr = (__ArrayTypeData *)(buffer + VARHDRSZ);
+
+		memset(arr, 0, nbytes - VARHDRSZ);
+		arr->ndim = 1;
+		arr->elemtype = emeta->atttypid;
+		arr->data[0] = arg->length;
+		arr->data[1] = 1;
+		if (emeta->nullmap_offset != 0)
+			nullmap = (uint8_t *)&arr->data[2];
+	}
+
+	for (int k=0; k < arg->length; k++)
+	{
+		uint32_t	index = arg->u.arrow.start + k;
+
+		if (!__kern_extract_arrow_field(kcxt,
+										kds,
+										emeta,
+										index,
+										vs_desc,
+										xdatum))
+			return false;
+		if (!XPU_DATUM_ISNULL(xdatum))
+		{
+			int		__nbytes = nbytes;
+			char   *pos;
+
+			if (nullmap)
+				nullmap[k>>3] |= (1<<(k & 7));
+			/* alignment */
+			nbytes = TYPEALIGN(emeta->attalign, nbytes);
+			if (nbytes > __nbytes)
+			{
+				if (buffer)
+					memset(buffer + __nbytes, 0, (nbytes - __nbytes));
+			}
+			pos = (buffer ? buffer + nbytes : NULL);
+			sz = xdatum->expr_ops->xpu_datum_write(kcxt,
+												   pos,
+												   emeta,
+												   xdatum);
+			if (sz < 0)
+				return -1;
+			nbytes += sz;
+		}
+	}
+	return nbytes;
+}
+
+STATIC_FUNCTION(int)
 xpu_array_datum_write(kern_context *kcxt,
 					  char *buffer,
-					  const kern_colmeta *cmeta,
+					  const kern_colmeta *cmeta_dst,
 					  const xpu_datum_t *__arg)
 {
 	const xpu_array_t *arg = (const xpu_array_t *)__arg;
@@ -2530,96 +2629,9 @@ xpu_array_datum_write(kern_context *kcxt,
 		nbytes = VARSIZE_ANY(arg->u.heap.value);
 		if (buffer)
 			memcpy(buffer, arg->u.heap.value, nbytes);
+		return nbytes;
 	}
-	else
-	{
-		const kern_colmeta *smeta = arg->u.arrow.smeta;
-		const kern_data_store *kds;
-		uint8_t		   *nullmap = NULL;
-		kern_variable	kvar;
-		int				vclass;
-		char		   *slot_buf = NULL;
-
-		kds = (const kern_data_store *)
-			((char *)smeta - smeta->kds_offset);
-		if (smeta->dtype_sizeof > 0)
-			slot_buf = (char *)alloca(smeta->dtype_sizeof);
-		nbytes = (VARHDRSZ +
-				  offsetof(__ArrayTypeData, data[2]) +
-				  MAXALIGN(BITMAPLEN(arg->length)));
-		if (buffer)
-		{
-			__ArrayTypeData *arr = (__ArrayTypeData *)(buffer + VARHDRSZ);
-
-			memset(arr, 0, nbytes - VARHDRSZ);
-			arr->ndim = 1;
-			arr->elemtype = smeta->atttypid;
-			arr->data[0] = arg->length;
-			arr->data[1] = 1;
-			if (smeta->nullmap_offset != 0)
-				nullmap = (uint8_t *)&arr->data[2];
-		}
-
-		for (int k=0; k < arg->length; k++)
-		{
-			uint32_t	index = arg->u.arrow.start + k;
-
-			if (smeta->nullmap_offset != 0 &&
-				!arrow_bitmap_check(kds, index,
-									smeta->nullmap_offset,
-									smeta->nullmap_length))
-				continue;
-			if (!__kern_extract_arrow_field(kcxt,
-											kds,
-											smeta,
-											index,
-											&kvar,
-											&vclass,
-											slot_buf))
-				return false;
-			if (vclass != KVAR_CLASS__NULL)
-			{
-				if (nullmap)
-					nullmap[k>>3] |= (1<<(k & 7));
-
-				nbytes = TYPEALIGN(smeta->attalign, nbytes);
-				if (vclass == KVAR_CLASS__INLINE)
-				{
-					if (buffer)
-						memcpy(buffer + nbytes, &kvar, smeta->attlen);
-					nbytes += smeta->attlen;
-				}
-				else if (vclass == KVAR_CLASS__VARLENA)
-				{
-					int		sz = VARSIZE_ANY(kvar.ptr);
-
-					if (buffer)
-						memcpy(buffer + nbytes, kvar.ptr, sz);
-					nbytes += sz;
-				}
-				else if (vclass == KVAR_CLASS__XPU_DATUM)
-				{
-					xpu_datum_t	*xdatum = (xpu_datum_t *)kvar.ptr;
-					char   *dst = (buffer ? buffer + nbytes : NULL);
-					int		sz;
-
-					sz = xdatum->expr_ops->xpu_datum_write(kcxt, dst, smeta, xdatum);
-					if (sz < 0)
-						return false;
-					nbytes += sz;
-				}
-				else
-				{
-					assert(vclass > 0);
-
-					if (buffer)
-						memcpy(buffer + nbytes, kvar.ptr, vclass);
-					nbytes += vclass;
-				}
-			}
-		}
-	}
-	return nbytes;
+	return __xpu_array_arrow_write(kcxt, buffer, cmeta_dst, arg);
 }
 
 STATIC_FUNCTION(bool)
@@ -2676,13 +2688,124 @@ xpu_composite_datum_store(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(int)
+__xpu_composite_arrow_write(kern_context *kcxt,
+							char *buffer,
+							const kern_colmeta *cmeta_dst,
+							const xpu_composite_t *arg)
+{
+	HeapTupleHeaderData *htup = (HeapTupleHeaderData *)buffer;
+	const kern_colmeta *cmeta_src = arg->cmeta;
+	const kern_colmeta *smeta_src;
+	const kern_colmeta *smeta_dst;
+	const kern_data_store *kds;
+	const kern_varslot_desc *vs_desc;
+	uint32_t		nattrs = cmeta_src->num_subattrs;
+	uint32_t		row_index = arg->u.arrow.rowidx;
+	uint32_t		t_hoff;
+	uint16_t		t_infomask = HEAP_HASNULL;
+	uint32_t		xdatum_sz = 0;
+	xpu_datum_t	   *xdatum = NULL;
+	uint8_t		   *nullmap = NULL;
+
+	/* setup destination cmeta */
+	kds = (const kern_data_store *)
+		((const char *)cmeta_dst - cmeta_dst->kds_offset);
+	smeta_dst = &kds->colmeta[cmeta_dst->idx_subattrs];
+	/* setup source cmeta/vs_desc */
+	kds = (const kern_data_store *)
+		((const char *)cmeta_src - cmeta_src->kds_offset);
+	smeta_src = &kds->colmeta[cmeta_src->idx_subattrs];
+	vs_desc = &kcxt->kvars_desc[arg->u.arrow.slot_id];
+	assert(vs_desc->idx_subfield < kcxt->kvars_nrooms);
+	vs_desc = &kcxt->kvars_desc[vs_desc->idx_subfield];
+	
+	t_hoff = MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
+					  BITMAPLEN(nattrs));
+	if (htup)
+	{
+		memset(htup, 0, t_hoff);
+		htup->t_choice.t_datum.datum_typmod = cmeta_src->atttypid;
+		htup->t_choice.t_datum.datum_typeid = cmeta_src->atttypmod;
+		htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
+		htup->t_ctid.ip_blkid.bi_lo = 0xffff;
+		htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
+		htup->t_infomask2 = (nattrs & HEAP_NATTS_MASK);
+		htup->t_hoff = t_hoff;
+		nullmap = htup->t_bits;
+	}
+
+	for (int j=0; j < nattrs; j++, smeta_dst++, smeta_src++, vs_desc++)
+	{
+		uint32_t	t_next;
+		int32_t		nbytes;
+
+		if (vs_desc->vs_ops->xpu_type_sizeof > xdatum_sz)
+		{
+			xdatum_sz = vs_desc->vs_ops->xpu_type_sizeof + 32;
+			xdatum = (xpu_datum_t *)alloca(xdatum_sz);
+		}
+		if (!__kern_extract_arrow_field(kcxt,
+										kds,
+										smeta_src,
+										row_index,
+										vs_desc, xdatum))
+			return -1;
+
+		if (!XPU_DATUM_ISNULL(xdatum))
+		{
+			if (nullmap)
+				nullmap[j>>3] |= (1<<(j & 7));
+			/* alignment */
+			t_next = TYPEALIGN(smeta_dst->attalign, t_hoff);
+			if (htup)
+			{
+				if (t_next > t_hoff)
+					memset((char *)htup + t_hoff, 0, t_next - t_hoff);
+				buffer = (char *)htup + t_next;
+			}
+			nbytes =  xdatum->expr_ops->xpu_datum_write(kcxt,
+														buffer,
+														smeta_dst,
+														xdatum);
+			if (nbytes < 0)
+				return -1;
+			if (smeta_dst->attlen == -1)
+			{
+				if (buffer && VARATT_IS_EXTERNAL(buffer))
+					t_infomask |= HEAP_HASEXTERNAL;
+				t_infomask |= HEAP_HASVARWIDTH;
+			}
+			t_hoff = t_next + nbytes;
+		}
+	}
+
+	if (htup)
+	{
+		htup->t_infomask = t_infomask;
+		SET_VARSIZE(&htup->t_choice.t_datum, t_hoff);
+	}
+	return t_hoff;
+}
+
+STATIC_FUNCTION(int)
 xpu_composite_datum_write(kern_context *kcxt,
 						  char *buffer,
-						  const kern_colmeta *cmeta,
-						  const xpu_datum_t *xdatum)
+						  const kern_colmeta *cmeta_dst,	/* destination */
+						  const xpu_datum_t *__arg)
 {
-	STROM_ELOG(kcxt, "xpu_composite_datum_write is not implemented");
-	return false;
+	const xpu_composite_t *arg = (const xpu_composite_t *)__arg;
+	int		nbytes;
+
+	if (XPU_DATUM_ISNULL(arg))
+		return 0;
+	if (!arg->cmeta)
+	{
+		nbytes = VARSIZE_ANY(arg->u.heap.value);
+		if (buffer)
+			memcpy(buffer, arg->u.heap.value, nbytes);
+		return nbytes;
+	}
+	return __xpu_composite_arrow_write(kcxt, buffer, cmeta_dst, arg);
 }
 
 STATIC_FUNCTION(bool)
