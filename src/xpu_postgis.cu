@@ -380,19 +380,13 @@ __geometry_datum_ref_v2(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_geometry_datum_ref(kern_context *kcxt,
-					   xpu_datum_t *result,
-					   int vclass,
-					   const kern_variable *kvar)
+xpu_geometry_datum_heap_ref(kern_context *kcxt,
+                         const void *addr,
+                         xpu_datum_t *__result)
 {
-	xpu_geometry_t *geom = (xpu_geometry_t *)result;
-	void	   *addr = kvar->ptr;
+	xpu_geometry_t *geom = (xpu_geometry_t *)__result;
 
-	if (vclass != KVAR_CLASS__VARLENA)
-	{
-		STROM_ELOG(kcxt, "unexpected vclass for device geometry data type.");
-	}
-	else if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+	if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
 	{
 		STROM_CPU_FALLBACK(kcxt, "geometry datum is compressed or external");
 	}
@@ -410,21 +404,72 @@ xpu_geometry_datum_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_geometry_datum_store(kern_context *kcxt,
-						 const xpu_datum_t *xdatum,
-						 int *p_vclass,
-						 kern_variable *p_kvar)
+xpu_geometry_datum_arrow_ref(kern_context *kcxt,
+                          const kern_data_store *kds,
+                          const kern_colmeta *cmeta,
+                          uint32_t kds_index,
+                          xpu_datum_t *__result)
 {
-	xpu_geometry_t *geom;
+	STROM_ELOG(kcxt, "xpu_geometry_t does not support Arrow type mapping");
+	return false;
+}
 
-	geom = (xpu_geometry_t *)kcxt_alloc(kcxt, sizeof(xpu_geometry_t));
-	if (!geom)
-		return false;
-	memcpy(geom, xdatum, sizeof(xpu_geometry_t));
-	assert(geom->expr_ops == &xpu_geometry_ops);
+STATIC_FUNCTION(bool)
+xpu_geometry_datum_kvec_ref(kern_context *kcxt,
+                         const kvec_datum_t *__kvecs,
+                         uint32_t kvecs_id,
+                         xpu_datum_t *__result)
+{
+	const kvec_geometry_t *kvecs = (const kvec_geometry_t *)__kvecs;
+	xpu_geometry_t *result = (xpu_geometry_t *)__result;
 
-	*p_vclass = KVAR_CLASS__XPU_DATUM;
-	p_kvar->ptr = (void *)geom;
+	result->expr_ops = &xpu_geometry_ops;
+	result->type     = kvecs->type[kvecs_id];
+	result->flags    = kvecs->flags[kvecs_id];
+	result->srid     = kvecs->srid[kvecs_id];
+	result->nitems   = kvecs->nitems[kvecs_id];
+	result->rawsize  = kvecs->rawsize[kvecs_id];
+	result->rawdata  = kvecs->rawdata[kvecs_id];
+	result->bbox     = kvecs->bbox[kvecs_id];
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_geometry_datum_kvec_store(kern_context *kcxt,
+							  const xpu_datum_t *__xdatum,
+							  kvec_datum_t *__kvecs,
+							  uint32_t kvecs_id)
+{
+	const xpu_geometry_t *xdatum = (const xpu_geometry_t *)__xdatum;
+	kvec_geometry_t *kvecs = (kvec_geometry_t *)__kvecs;
+
+	kvecs->type[kvecs_id]    = xdatum->type;
+	kvecs->flags[kvecs_id]   = xdatum->flags;
+	kvecs->srid[kvecs_id]    = xdatum->srid;
+	kvecs->nitems[kvecs_id]  = xdatum->nitems;
+	kvecs->rawsize[kvecs_id] = xdatum->rawsize;
+	kvecs->rawdata[kvecs_id] = xdatum->rawdata;
+	kvecs->bbox[kvecs_id]    = xdatum->bbox;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_geometry_datum_kvec_copy(kern_context *kcxt,
+							 const kvec_datum_t *__kvecs_src,
+							 uint32_t kvecs_src_id,
+							 kvec_datum_t *__kvecs_dst,
+							 uint32_t kvecs_dst_id)
+{
+	const kvec_geometry_t *kvecs_src = (const kvec_geometry_t *)__kvecs_src;
+	kvec_geometry_t *kvecs_dst = (kvec_geometry_t *)__kvecs_dst;
+
+	kvecs_dst->type[kvecs_dst_id]    = kvecs_src->type[kvecs_src_id];
+    kvecs_dst->flags[kvecs_dst_id]   = kvecs_src->flags[kvecs_src_id];
+    kvecs_dst->srid[kvecs_dst_id]    = kvecs_src->srid[kvecs_src_id];
+    kvecs_dst->nitems[kvecs_dst_id]  = kvecs_src->nitems[kvecs_src_id];
+    kvecs_dst->rawsize[kvecs_dst_id] = kvecs_src->rawsize[kvecs_src_id];
+    kvecs_dst->rawdata[kvecs_dst_id] = kvecs_src->rawdata[kvecs_src_id];
+    kvecs_dst->bbox[kvecs_dst_id]    = kvecs_src->bbox[kvecs_src_id];
 	return true;
 }
 
@@ -517,51 +562,6 @@ xpu_geometry_datum_comp(kern_context *kcxt,
 	STROM_ELOG(kcxt, "geometry type has no compare function");
 	return false;
 }
-
-STATIC_FUNCTION(bool)
-xpu_geometry_datum_load_heap(kern_context *kcxt,
-							 kvec_datum_t *__result,
-							 int kvec_id,
-							 const char *addr)
-{
-	kvec_geometry_t *result = (kvec_geometry_t *)__result;
-
-    kvec_update_nullmask(&result->nullmask, kvec_id, addr);
-    if (addr)
-    {
-		if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
-		{
-			result->type[kvec_id] = GEOM_INVALID_VARLENA;
-			result->rawdata[kvec_id] = addr;
-		}
-		else
-		{
-			__GSERIALIZED  *g = (__GSERIALIZED *)VARDATA_ANY(addr);
-			int32_t			sz = VARSIZE_ANY_EXHDR(addr);
-			xpu_geometry_t	geom;
-
-			if ((g->gflags & G2FLAG_VER_0) != 0)
-			{
-				if (!__geometry_datum_ref_v2(kcxt, &geom, g, sz))
-					return false;
-			}
-			else
-			{
-				if (!__geometry_datum_ref_v1(kcxt, &geom, g, sz))
-					return false;
-			}
-			assert(!XPU_DATUM_ISNULL(&geom));
-			result->type[kvec_id]    = geom.type;
-			result->type[kvec_id]    = geom.flags;
-			result->srid[kvec_id]    = geom.srid;
-			result->nitems[kvec_id]  = geom.nitems;
-			result->rawsize[kvec_id] = geom.rawsize;
-			result->rawdata[kvec_id] = geom.rawdata;
-			result->bbox[kvec_id]    = geom.bbox;
-		}
-	}
-	return true;
-}
 PGSTROM_SQLTYPE_OPERATORS(geometry,false,4,-1);
 
 /* ================================================================
@@ -571,43 +571,75 @@ PGSTROM_SQLTYPE_OPERATORS(geometry,false,4,-1);
  * ================================================================
  */
 STATIC_FUNCTION(bool)
-xpu_box2df_datum_ref(kern_context *kcxt,
-					 xpu_datum_t *__result,
-					 int vclass,
-					 const kern_variable *kvar)
+xpu_box2df_datum_heap_ref(kern_context *kcxt,
+                         const void *addr,
+                         xpu_datum_t *__result)
 {
 	xpu_box2df_t   *result = (xpu_box2df_t *)__result;
 
-	if (vclass != sizeof(geom_bbox_2d))
-	{
-		STROM_ELOG(kcxt, "wrong variable length at box2df");
-		return false;
-	}
 	result->expr_ops = &xpu_box2df_ops;
-	memcpy(&result->value, kvar->ptr, sizeof(geom_bbox_2d));
+	memcpy(&result->value, addr, sizeof(geom_bbox_2d));
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_box2df_datum_store(kern_context *kcxt,
-					   const xpu_datum_t *xdatum,
-					   int *p_vclass,
-					   kern_variable *p_kvar)
+xpu_box2df_datum_arrow_ref(kern_context *kcxt,
+                          const kern_data_store *kds,
+                          const kern_colmeta *cmeta,
+                          uint32_t kds_index,
+                          xpu_datum_t *__result)
 {
-	xpu_box2df_t   *bbox = (xpu_box2df_t *)xdatum;
+	STROM_ELOG(kcxt, "xpu_box2df_t does not support Arrow type mapping");
+	return false;
+}
 
-	if (XPU_DATUM_ISNULL(bbox))
-		*p_vclass = KVAR_CLASS__NULL;
-	else
-	{
-		geom_bbox_2d   *buf = (geom_bbox_2d *)kcxt_alloc(kcxt, sizeof(geom_bbox_2d));
+STATIC_FUNCTION(bool)
+xpu_box2df_datum_kvec_ref(kern_context *kcxt,
+						  const kvec_datum_t *__kvecs,
+						  uint32_t kvecs_id,
+						  xpu_datum_t *__result)
+{
+	const kvec_box2df_t *kvecs = (const kvec_box2df_t *)__kvecs;
+	xpu_box2df_t *result = (xpu_box2df_t *)__result;
 
-		if (!buf)
-			return false;
-		memcpy(buf, &bbox->value, sizeof(geom_bbox_2d));
-		p_kvar->ptr = buf;
-		*p_vclass = sizeof(geom_bbox_2d);
-	}
+	result->expr_ops   = &xpu_box2df_ops;
+	result->value.xmin = kvecs->xmin[kvecs_id];
+	result->value.xmax = kvecs->xmax[kvecs_id];
+	result->value.ymin = kvecs->ymin[kvecs_id];
+	result->value.ymax = kvecs->ymax[kvecs_id];
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_box2df_datum_kvec_store(kern_context *kcxt,
+                           const xpu_datum_t *__xdatum,
+                           kvec_datum_t *__kvecs,
+                           uint32_t kvecs_id)
+{
+	const xpu_box2df_t *xdatum = (const xpu_box2df_t *)__xdatum;
+	kvec_box2df_t *kvecs = (kvec_box2df_t *)__kvecs;
+
+	kvecs->xmin[kvecs_id] = xdatum->value.xmin;
+	kvecs->xmax[kvecs_id] = xdatum->value.xmax;
+	kvecs->ymin[kvecs_id] = xdatum->value.ymin;
+	kvecs->ymax[kvecs_id] = xdatum->value.ymax;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_box2df_datum_kvec_copy(kern_context *kcxt,
+                          const kvec_datum_t *__kvecs_src,
+                          uint32_t kvecs_src_id,
+                          kvec_datum_t *__kvecs_dst,
+                          uint32_t kvecs_dst_id)
+{
+	const kvec_box2df_t *kvecs_src = (const kvec_box2df_t *)__kvecs_src;
+	kvec_box2df_t *kvecs_dst = (kvec_box2df_t *)__kvecs_dst;
+
+	kvecs_dst->xmin[kvecs_dst_id] = kvecs_src->xmin[kvecs_src_id];
+	kvecs_dst->xmax[kvecs_dst_id] = kvecs_src->xmax[kvecs_src_id];
+	kvecs_dst->ymin[kvecs_dst_id] = kvecs_src->ymin[kvecs_src_id];
+	kvecs_dst->ymax[kvecs_dst_id] = kvecs_src->ymax[kvecs_src_id];
 	return true;
 }
 
@@ -641,27 +673,6 @@ xpu_box2df_datum_comp(kern_context *kcxt,
 {
 	STROM_ELOG(kcxt, "box2df type has no compare function");
 	return false;
-}
-
-STATIC_FUNCTION(bool)
-xpu_box2df_datum_load_heap(kern_context *kcxt,
-						   kvec_datum_t *__result,
-						   int kvec_id,
-						   const char *addr)
-{
-	kvec_box2df_t *result = (kvec_box2df_t *)__result;
-
-	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
-    if (addr)
-    {
-		const geom_bbox_2d *bbox = (const geom_bbox_2d *)addr;
-
-		result->xmin[kvec_id] = bbox->xmin;
-		result->xmax[kvec_id] = bbox->xmax;
-		result->ymin[kvec_id] = bbox->ymin;
-		result->ymax[kvec_id] = bbox->ymax;
-	}
-	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(box2df,false,1,sizeof(geom_bbox_2d));
 

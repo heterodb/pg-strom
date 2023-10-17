@@ -28,29 +28,6 @@ xpu_numeric_sign(xpu_numeric_t *num)
 	return 0;
 }
 
-STATIC_FUNCTION(bool)
-xpu_numeric_datum_ref(kern_context *kcxt,
-					  xpu_datum_t *__result,
-					  int vclass,
-					  const kern_variable *kvar)
-{
-	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-	const char	   *errmsg;
-
-	if (vclass == KVAR_CLASS__VARLENA)
-	{
-		errmsg = __xpu_numeric_from_varlena(result, (const varlena *)kvar->ptr);
-		if (!errmsg)
-			return true;
-		result->expr_ops = NULL;
-		STROM_ELOG(kcxt, errmsg);
-	}
-	else
-	{
-		STROM_ELOG(kcxt, "unexpected vclass for device numeric data type.");
-	}
-	return false;
-}
 
 PUBLIC_FUNCTION(bool)
 xpu_numeric_datum_store(kern_context *kcxt,
@@ -71,6 +48,106 @@ xpu_numeric_datum_store(kern_context *kcxt,
 	return true;
 }
 
+
+
+
+
+
+STATIC_FUNCTION(bool)
+xpu_numeric_datum_heap_ref(kern_context *kcxt,
+                         const void *addr,
+                         xpu_datum_t *__result)
+{
+	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
+	const char	   *errmsg;
+
+	errmsg = __xpu_numeric_from_varlena(result, (const varlena *)addr);
+	if (!errmsg)
+		return true;
+	result->expr_ops = NULL;
+	STROM_ELOG(kcxt, errmsg);
+	return false;
+}
+
+STATIC_FUNCTION(bool)
+xpu_numeric_datum_arrow_ref(kern_context *kcxt,
+                          const kern_data_store *kds,
+                          const kern_colmeta *cmeta,
+                          uint32_t kds_index,
+                          xpu_datum_t *__result)
+{
+	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
+	const int128_t *addr;
+
+	if (cmeta->attopts.tag != ArrowType__Decimal)
+	{
+		STROM_ELOG(kcxt, "xpu_numeric_t must be mapped on Arrow::Decimal");
+		return false;
+	}
+	if (cmeta->attopts.decimal.bitWidth != 128)
+	{
+		STROM_ELOG(kcxt, "Arrow::Decimal unsupported bitWidth");
+		return false;
+	}
+	addr = (const int128_t *)KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
+														kds_index,
+														sizeof(int128_t));
+	if (addr)
+		set_normalized_numeric(result, *addr,
+							   cmeta->attopts.decimal.scale);
+	else
+		result->expr_ops = NULL;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_numeric_datum_kvec_ref(kern_context *kcxt,
+                         const kvec_datum_t *__kvecs,
+                         uint32_t kvecs_id,
+                         xpu_datum_t *__result)
+{
+	const kvec_numeric_t *kvecs = (const kvec_numeric_t *)__kvecs;
+	xpu_numeric_t *result = (xpu_numeric_t *)__result;
+
+	result->expr_ops = &xpu_numeric_ops;
+	result->kind     = kvecs->kinds[kvecs_id];
+	result->weight   = kvecs->kinds[kvecs_id];
+	result->value    = kvecs->values[kvecs_id];
+
+    return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_numeric_datum_kvec_store(kern_context *kcxt,
+                           const xpu_datum_t *__xdatum,
+                           kvec_datum_t *__kvecs,
+                           uint32_t kvecs_id)
+{
+	const xpu_numeric_t *xdatum = (const xpu_numeric_t *)__xdatum;
+	kvec_numeric_t *kvecs = (kvec_numeric_t *)__kvecs;
+
+	kvecs->kinds[kvecs_id]   = xdatum->kind;
+	kvecs->weights[kvecs_id] = xdatum->weight;
+	kvecs->values[kvecs_id]  = xdatum->value;
+    return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_numeric_datum_kvec_copy(kern_context *kcxt,
+                          const kvec_datum_t *__kvecs_src,
+                          uint32_t kvecs_src_id,
+                          kvec_datum_t *__kvecs_dst,
+                          uint32_t kvecs_dst_id)
+{
+	const kvec_numeric_t *kvecs_src = (const kvec_numeric_t *)__kvecs_src;
+	kvec_numeric_t *kvecs_dst = (kvec_numeric_t *)__kvecs_dst;
+
+	kvecs_dst->kinds[kvecs_dst_id]   = kvecs_src->kinds[kvecs_src_id];
+	kvecs_dst->weights[kvecs_dst_id] = kvecs_src->weights[kvecs_src_id];
+	kvecs_dst->values[kvecs_dst_id]  = kvecs_src->values[kvecs_src_id];
+	return true;
+}
+
 STATIC_FUNCTION(int)
 xpu_numeric_datum_write(kern_context *kcxt,
 						char *buffer,
@@ -79,8 +156,6 @@ xpu_numeric_datum_write(kern_context *kcxt,
 {
 	const xpu_numeric_t *arg = (const xpu_numeric_t *)__arg;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (arg->kind != XPU_NUMERIC_KIND__VALID)
 	{
 		int		sz = offsetof(NumericData, choice.n_header) + sizeof(uint16_t);
@@ -133,28 +208,6 @@ xpu_numeric_datum_comp(kern_context *kcxt,
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	*p_comp = __numeric_compare(a, b);
-	return true;
-}
-
-
-STATIC_FUNCTION(bool)
-xpu_numeric_datum_load_heap(kern_context *kcxt,
-							kvec_datum_t *__result,
-							int kvec_id,
-							const char *addr)
-{
-	kvec_numeric_t *result = (kvec_numeric_t *)__result;
-
-	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
-	if (addr)
-	{
-		xpu_numeric_t	num;
-
-		__xpu_numeric_from_varlena(&num, (const varlena *)addr);
-		result->kinds[kvec_id] = num.kind;
-		result->weights[kvec_id] = num.weight;
-		result->values[kvec_id] = num.value;
-	}
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(numeric, false, 4, -1);

@@ -1089,9 +1089,12 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 	{
 		const kvec_datum_t *kvecs = (kvec_datum_t *)(kcxt->kvecs_curr_buffer +
 													 kexp->u.v.var_offset);
-		return expr_ops->xpu_datum_kvec_ref(kcxt, kvecs,
-											kcxt->kvecs_curr_id,
-											__result);
+		if (KVEC_DATUM_ISNULL(kvecs, kcxt->kvecs_curr_id))
+			__result->expr_ops = NULL;
+		else if (!expr_ops->xpu_datum_kvec_ref(kcxt, kvecs,
+											   kcxt->kvecs_curr_id,
+											   __result))
+			return false;
 	}
 	return true;
 }
@@ -1724,34 +1727,35 @@ kern_form_heaptuple(kern_context *kcxt,
 
 		assert(slot_id < kcxt->kvars_nslots);
 		xdatum = kcxt->kvars_values[slot_id];
-		if (XPU_DATUM_ISNULL(xdatum))
-			continue;
-		/* adjust alignment */
-		t_next = TYPEALIGN(cmeta_dst->attalign, t_hoff);
-		if (htup)
+		if (!XPU_DATUM_ISNULL(xdatum))
 		{
-			if (t_next > t_hoff)
-				memset((char *)htup + t_hoff, 0, t_next - t_hoff);
-			buffer = (char *)htup + t_next;
+			/* adjust alignment */
+			t_next = TYPEALIGN(cmeta_dst->attalign, t_hoff);
+			if (htup)
+			{
+				if (t_next > t_hoff)
+					memset((char *)htup + t_hoff, 0, t_next - t_hoff);
+				buffer = (char *)htup + t_next;
+			}
+			/* write-out or estimate length */
+			nbytes = xdatum->expr_ops->xpu_datum_write(kcxt,
+													   buffer,
+													   cmeta_dst,
+													   xdatum);
+			if (nbytes < 0)
+				return -1;
+			/* update t_infomask if varlena */
+			if (cmeta_dst->attlen == -1)
+			{
+				if (buffer && VARATT_IS_EXTERNAL(buffer))
+					t_infomask |= HEAP_HASEXTERNAL;
+				t_infomask |= HEAP_HASVARWIDTH;
+			}
+			/* set not-null bit, if valid */
+			if (htup && t_hasnull)
+				htup->t_bits[j>>3] |= (1<<(j & 7));
+			t_hoff = t_next + nbytes;
 		}
-		/* write-out or estimate length */
-		nbytes = xdatum->expr_ops->xpu_datum_write(kcxt,
-												   buffer,
-												   cmeta_dst,
-												   xdatum);
-		if (nbytes < 0)
-			return -1;
-		/* update t_infomask if varlena */
-		if (cmeta_dst->attlen == -1)
-		{
-			if (buffer && VARATT_IS_EXTERNAL(buffer))
-				t_infomask |= HEAP_HASEXTERNAL;
-			t_infomask |= HEAP_HASVARWIDTH;
-		}
-		/* set not-null bit, if valid */
-		if (htup && t_hasnull)
-			htup->t_bits[j>>3] |= (1<<(j & 7));
-		t_hoff = t_next + nbytes;
 	}
 
 	if (htup)
@@ -2201,14 +2205,69 @@ pgfn_MoveVars(XPU_PGFUNCTION_ARGS)
 	return false;
 }
 
+INLINE_FUNCTION(bool)
+__kvec_update_nullmask(kvec_datum_t *kvec, uint32_t kvec_id, int isnull_or_valid)
+{
+	uint64_t	bits = (1UL << kvec_id);
+
+#if defined(__CUDACC__)
+	assert(__activemask() == 0xffffffffU);
+	if (isnull_or_valid < 0)
+		bits = 0;	/* tuple is not valid */
+	else
+	{
+		assert(kvec_id < KVEC_UNITSZ);
+		if (isnull_or_valid == 0
+			? ((kvec->nullmask & bits) != 0)	/* already NOT NULL */
+			: ((kvec->nullmask & bits) == 0))	/* already NULL */
+		{
+			bits = 0;
+		}
+	}
+	bits |= __shfl_xor_sync(__activemask(), bits, 0x01);
+	bits |= __shfl_xor_sync(__activemask(), bits, 0x02);
+	bits |= __shfl_xor_sync(__activemask(), bits, 0x04);
+	bits |= __shfl_xor_sync(__activemask(), bits, 0x08);
+	bits |= __shfl_xor_sync(__activemask(), bits, 0x10);
+	/* update nullmask if needed */
+	if (LaneId() == 0 && bits != 0)
+		kvec->nullmask ^= bits;
+	__syncwarp();
+#else
+	if (isnull_or_valid >= 0 && bits != 0)
+	{
+		if (isnull_or_valid == 0)
+			kvec->nullmask |= bits;		/* NOT NULL */
+		else
+			kvec->nullmask &= ~bits;	/* NULL */
+	}
+#endif
+	return (isnull_or_valid == 0);
+}
+
+INLINE_FUNCTION(bool)
+__kvec_copy_nullmask(const kvec_datum_t *src_kvec, uint32_t src_kvec_id,
+					 kvec_datum_t       *dst_kvec, uint32_t dst_kvec_id,
+					 bool tuple_is_valid)
+{
+	int		isnull;
+
+	if (tuple_is_valid)
+		isnull = ((src_kvec->nullmask & (1UL << src_kvec_id)) != 0 ? 1 : 0);
+	else
+		isnull = -1;
+	return __kvec_update_nullmask(dst_kvec, dst_kvec_id, isnull);
+}
+
 PUBLIC_FUNCTION(bool)
 ExecMoveKernelVariables(kern_context *kcxt,
 						const kern_expression *kexp_move_vars,
-						int curr_depth,   /* just for assertion checks */
+						int curr_depth,			/* for assertion checks */
 						const char *src_kvec_buffer,  /* NULL, if depth==0 */
 						int src_kvec_id,
 						char *dst_kvec_buffer,
-						int dst_kvec_id)
+						int dst_kvec_id,
+						bool tuple_is_valid)
 {
 	if (!kexp_move_vars)
 		return true;		/* nothing to move */
@@ -2233,12 +2292,19 @@ ExecMoveKernelVariables(kern_context *kcxt,
 			dst_kvec = (kvec_datum_t *)(dst_kvec_buffer + vm_desc->vm_offset);
 			assert((char *)dst_kvec +
 				   vm_ops->xpu_kvec_sizeof <= (dst_kvec_buffer + kcxt->kvecs_bufsz));
-			assert(XPU_DATUM_ISNULL(xdatum) || xdatum->expr_ops == vm_ops);
-			if (!vm_ops->xpu_datum_kvec_store(kcxt,
-											  xdatum,
-											  dst_kvec,
-											  dst_kvec_id))
+				
+			
+			if (__kvec_update_nullmask(dst_kvec, dst_kvec_id,
+									   tuple_is_valid
+									   ? (XPU_DATUM_ISNULL(xdatum) ? 1 : 0)
+									   : -1) &&
+				!xdatum->expr_ops->xpu_datum_kvec_store(kcxt,
+														xdatum,
+														dst_kvec,
+														dst_kvec_id))
+			{
 				return false;
+			}
 		}
 		else
 		{
@@ -2255,10 +2321,15 @@ ExecMoveKernelVariables(kern_context *kcxt,
 										vm_desc->vm_offset);
 			assert((char *)dst_kvec +
 				   vm_ops->xpu_kvec_sizeof <= (dst_kvec_buffer + kcxt->kvecs_bufsz));
-			if (!vm_ops->xpu_datum_kvec_copy(kcxt,
+			if (__kvec_copy_nullmask(src_kvec, src_kvec_id,
+									 dst_kvec, dst_kvec_id,
+									 tuple_is_valid) &&
+				!vm_ops->xpu_datum_kvec_copy(kcxt,
 											 src_kvec, src_kvec_id,
 											 dst_kvec, dst_kvec_id))
+			{
 				return false;
+			}
 		}
 	}
 	return true;
@@ -2486,51 +2557,156 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 	return (!XPU_DATUM_ISNULL(&status) && status.value);
 }
 
-/*
- * xpu_arrow_t type support routine
+/* ----------------------------------------------------------------
+ *
+ * xpu_arrow_t device type support routine
+ *
+ * ----------------------------------------------------------------
  */
 STATIC_FUNCTION(bool)
-xpu_array_datum_ref(kern_context *kcxt,
-					xpu_datum_t *__result,
-					int vclass,
-					const kern_variable *kvar)
+xpu_array_datum_heap_ref(kern_context *kcxt,
+						 const void *addr,
+						 xpu_datum_t *__result)
 {
-	xpu_array_t	   *result = (xpu_array_t *)__result;
+	xpu_array_t *result = (xpu_array_t *)__result;
 
-	if (vclass == KVAR_CLASS__VARLENA)
+	result->expr_ops = &xpu_array_ops;
+	result->length = -1;
+	result->u.heap.value = (const varlena *)addr;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_array_datum_arrow_ref(kern_context *kcxt,
+						  const kern_data_store *kds,
+						  const kern_colmeta *cmeta,
+						  uint32_t kds_index,
+						  xpu_datum_t *__result)
+{
+	xpu_array_t *result = (xpu_array_t *)__result;
+	uint32_t	start;
+	uint32_t	length;
+
+	switch (cmeta->attopts.tag)
 	{
-		result->expr_ops = &xpu_array_ops;
-		result->length = -1;
-		result->u.heap.value = (const varlena *)kvar->ptr;
+		case ArrowType__List:
+			{
+				const uint32_t *base = (const uint32_t *)
+					((const char *)kds + __kds_unpack(cmeta->values_offset));
+				if (sizeof(uint32_t) * (kds_index+2) > __kds_unpack(cmeta->values_length))
+				{
+					STROM_ELOG(kcxt, "Arrow::List reference out of range");
+					return false;
+				}
+				if (base[kds_index] > base[kds_index+1])
+				{
+					STROM_ELOG(kcxt, "Arrow::List looks corrupted");
+					return false;
+				}
+				start  = base[kds_index];
+				length = base[kds_index+1] - start;
+			}
+			break;
+		case ArrowType__LargeList:
+			{
+				const uint64_t   *base = (const uint64_t *)
+					((const char *)kds + __kds_unpack(cmeta->values_offset));
+				if (sizeof(uint64_t) * (kds_index+2) > __kds_unpack(cmeta->values_length))
+				{
+					STROM_ELOG(kcxt, "Arrow::LargeList reference out of range");
+					return false;
+				}
+				if (base[kds_index] > base[kds_index+1] ||
+					base[kds_index+1] > INT_MAX)
+				{
+					STROM_ELOG(kcxt, "Arrow::LargeList looks corrupted");
+					return false;
+				}
+				start  = base[kds_index];
+				length = base[kds_index+1] - start;
+			}
+			break;
+		default:
+			STROM_ELOG(kcxt, "xpu_array_t must be mapped on Arrow::List or LargeList");
+			return false;
 	}
+	result->expr_ops = &xpu_array_ops;
+	result->length = length;
+	result->u.arrow.cmeta = cmeta;
+	result->u.arrow.start = start;
+	result->u.arrow.slot_id = UINT_MAX;	/* should be set by the caller */
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_array_datum_kvec_ref(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id,
+						 xpu_datum_t *__result)
+{
+	const kvec_array_t *kvecs = (const kvec_array_t *)__kvecs;
+	xpu_array_t *result = (xpu_array_t *)__result;
+
+	result->expr_ops = &xpu_array_ops;
+	result->length = kvecs->length[kvecs_id];
+	if (result->length < 0)
+		result->u.heap.value = kvecs->u.heap.values[kvecs_id];
 	else
 	{
-		 STROM_ELOG(kcxt, "unexpected vclass for device numeric data type.");
+		result->u.arrow.cmeta  = kvecs->cmeta;
+		result->u.arrow.start  = kvecs->u.arrow.start[kvecs_id];
+		result->u.arrow.slot_id = kvecs->slot_id;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_array_datum_store(kern_context *kcxt,
-					  const xpu_datum_t *__arg,
-					  int *p_vclass,
-					  kern_variable *p_kvar)
+xpu_array_datum_kvec_store(kern_context *kcxt,
+						   const xpu_datum_t *__xdatum,
+						   kvec_datum_t *__kvecs,
+						   uint32_t kvecs_id)
 {
-	const xpu_array_t *arg = (const xpu_array_t *)__arg;
+	const xpu_array_t *xdatum = (const xpu_array_t *)__xdatum;
+	kvec_array_t *kvecs = (kvec_array_t *)__kvecs;
 
-	if (XPU_DATUM_ISNULL(arg))
+	if (xdatum->length < 0)
 	{
-		*p_vclass = KVAR_CLASS__NULL;
-	}
-	else if (arg->length < 0)
-	{
-		*p_vclass   = KVAR_CLASS__VARLENA;
-		p_kvar->ptr = (void *)arg->u.heap.value;
+		kvecs->length[kvecs_id] = xdatum->length;
+		kvecs->u.heap.values[kvecs_id] = xdatum->u.heap.value;
 	}
 	else
 	{
-		STROM_ELOG(kcxt, "unable to use intermediation results of xpu_array_t");
-		return false;
+		kvecs->length[kvecs_id]        = xdatum->length;
+		kvecs->u.arrow.start[kvecs_id] = xdatum->u.arrow.start;
+		kvecs->cmeta                   = xdatum->u.arrow.cmeta;
+		kvecs->slot_id                 = xdatum->u.arrow.slot_id;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_array_datum_kvec_copy(kern_context *kcxt,
+						  const kvec_datum_t *__kvecs_src,
+						  uint32_t kvecs_src_id,
+						  kvec_datum_t *__kvecs_dst,
+						  uint32_t kvecs_dst_id)
+{
+	const kvec_array_t *kvecs_src = (const kvec_array_t *)__kvecs_src;
+	kvec_array_t *kvecs_dst = (kvec_array_t *)__kvecs_dst;
+	int32_t		length;
+
+	length = kvecs_src->length[kvecs_src_id];
+	if (length < 0)
+	{
+		kvecs_dst->length[kvecs_dst_id] = length;
+		kvecs_dst->u.heap.values[kvecs_dst_id] = kvecs_src->u.heap.values[kvecs_src_id];
+	}
+	else
+	{
+		kvecs_dst->cmeta = kvecs_src->cmeta;
+		kvecs_dst->slot_id = kvecs_src->slot_id;
+		kvecs_dst->length[kvecs_dst_id] = length;
+		kvecs_dst->u.arrow.start[kvecs_dst_id] = kvecs_src->u.arrow.start[kvecs_src_id];
 	}
 	return true;
 }
@@ -2652,39 +2828,114 @@ xpu_array_datum_comp(kern_context *kcxt,
 	STROM_ELOG(kcxt, "xpu_array_datum_comp is not implemented");
 	return false;
 }
-STATIC_FUNCTION(bool)
-xpu_array_datum_load_heap(kern_context *kcxt,
-						  kvec_datum_t *__result,
-						  int kvec_id,
-						  const char *addr)
-{
-	STROM_ELOG(kcxt, "xpu_composite_datum_heap_load is not implemented");
-	return false;
-}
 //MEMO: some array type uses typalign=4. is it ok?
 PGSTROM_SQLTYPE_OPERATORS(array,false,4,-1);
 
-/*
+/* ----------------------------------------------------------------
+ *
  * xpu_composite_t type support routine
+ *
+ * ----------------------------------------------------------------
  */
 STATIC_FUNCTION(bool)
-xpu_composite_datum_ref(kern_context *kcxt,
-						xpu_datum_t *result,
-						int vclass,
-						const kern_variable *kvar)
+xpu_composite_datum_heap_ref(kern_context *kcxt,
+							 const void *addr,
+							 xpu_datum_t *__result)
 {
-	STROM_ELOG(kcxt, "xpu_composite_datum_ref is not implemented");
-	return false;
+	xpu_composite_t *result = (xpu_composite_t *)__result;
+
+	result->expr_ops = &xpu_composite_ops;
+	result->cmeta = NULL;
+	result->u.heap.value = (const varlena *)addr;
+	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_composite_datum_store(kern_context *kcxt,
-						  const xpu_datum_t *arg,
-						  int *p_vclass,
-						  kern_variable *p_kvar)
+xpu_composite_datum_arrow_ref(kern_context *kcxt,
+                          const kern_data_store *kds,
+                          const kern_colmeta *cmeta,
+                          uint32_t kds_index,
+                          xpu_datum_t *__result)
 {
-	STROM_ELOG(kcxt, "xpu_composite_datum_store is not implemented");
-	return false;
+	xpu_composite_t *result = (xpu_composite_t *)__result;
+
+	result->expr_ops = &xpu_composite_ops;
+	result->cmeta = cmeta;
+	result->u.arrow.rowidx = kds_index;
+	result->u.arrow.slot_id = UINT_MAX;
+
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_composite_datum_kvec_ref(kern_context *kcxt,
+							 const kvec_datum_t *__kvecs,
+							 uint32_t kvecs_id,
+							 xpu_datum_t *__result)
+{
+	const kvec_composite_t *kvecs = (const kvec_composite_t *)__kvecs;
+	xpu_composite_t *result = (xpu_composite_t *)__result;
+
+	result->expr_ops = &xpu_composite_ops;
+	if (!kvecs->cmeta)
+	{
+		result->cmeta = NULL;
+		result->u.heap.value = kvecs->u.heap.values[kvecs_id];
+	}
+	else
+	{
+		result->cmeta = kvecs->cmeta;
+		result->u.arrow.rowidx = kvecs->u.arrow.rowidx[kvecs_id];
+		result->u.arrow.slot_id = kvecs->u.arrow.slot_id;
+	}
+    return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_composite_datum_kvec_store(kern_context *kcxt,
+							   const xpu_datum_t *__xdatum,
+							   kvec_datum_t *__kvecs,
+							   uint32_t kvecs_id)
+{
+	const xpu_composite_t *xdatum = (const xpu_composite_t *)__xdatum;
+	kvec_composite_t *kvecs = (kvec_composite_t *)__kvecs;
+
+	if (!xdatum->cmeta)
+	{
+		kvecs->cmeta = NULL;
+		kvecs->u.heap.values[kvecs_id] = xdatum->u.heap.value;
+	}
+	else
+	{
+		kvecs->cmeta = xdatum->cmeta;
+		kvecs->u.arrow.slot_id = xdatum->u.arrow.slot_id;
+		kvecs->u.arrow.rowidx[kvecs_id] = xdatum->u.arrow.rowidx;
+	}
+    return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_composite_datum_kvec_copy(kern_context *kcxt,
+                          const kvec_datum_t *__kvecs_src,
+                          uint32_t kvecs_src_id,
+                          kvec_datum_t *__kvecs_dst,
+                          uint32_t kvecs_dst_id)
+{
+	const kvec_composite_t *kvecs_src = (const kvec_composite_t *)__kvecs_src;
+	kvec_composite_t *kvecs_dst = (kvec_composite_t *)__kvecs_dst;
+
+	if (!kvecs_src->cmeta)
+	{
+		kvecs_dst->cmeta = NULL;
+		kvecs_dst->u.heap.values[kvecs_dst_id] = kvecs_src->u.heap.values[kvecs_src_id];
+	}
+	else
+	{
+		kvecs_dst->cmeta = kvecs_src->cmeta;
+		kvecs_dst->u.arrow.slot_id = kvecs_src->u.arrow.slot_id;
+		kvecs_dst->u.arrow.rowidx[kvecs_dst_id] = kvecs_src->u.arrow.rowidx[kvecs_src_id];
+	}
+	return true;
 }
 
 STATIC_FUNCTION(int)
@@ -2825,16 +3076,113 @@ xpu_composite_datum_comp(kern_context *kcxt,
 	STROM_ELOG(kcxt, "xpu_composite_datum_comp is not implemented");
 	return false;
 }
+PGSTROM_SQLTYPE_OPERATORS(composite,false,8,-1);
+
+/* ----------------------------------------------------------------
+ *
+ * xpu_internal_t type support routine
+ *
+ * ----------------------------------------------------------------
+ */
 STATIC_FUNCTION(bool)
-xpu_composite_datum_load_heap(kern_context *kcxt,
-							  kvec_datum_t *__result,
-							  int kvec_id,
-							  const char *addr)
+xpu_internal_datum_heap_ref(kern_context *kcxt,
+                         const void *addr,
+                         xpu_datum_t *__result)
 {
-	STROM_ELOG(kcxt, "xpu_composite_datum_heap_load is not implemented");
+	xpu_internal_t *result = (xpu_internal_t *)__result;
+
+	result->expr_ops = &xpu_internal_ops;
+	result->value = addr;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_internal_datum_arrow_ref(kern_context *kcxt,
+                          const kern_data_store *kds,
+                          const kern_colmeta *cmeta,
+                          uint32_t kds_index,
+                          xpu_datum_t *__result)
+{
+	STROM_ELOG(kcxt, "xpu_internal_t cannot map any Apache Arrow type");
 	return false;
 }
-PGSTROM_SQLTYPE_OPERATORS(composite,false,8,-1);
+
+STATIC_FUNCTION(bool)
+xpu_internal_datum_kvec_ref(kern_context *kcxt,
+							const kvec_datum_t *__kvecs,
+							uint32_t kvecs_id,
+							xpu_datum_t *__result)
+{
+	const kvec_internal_t *kvecs = (const kvec_internal_t *)__kvecs;
+	xpu_internal_t *result = (xpu_internal_t *)__result;
+
+	result->value = kvecs->values[kvecs_id];
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_internal_datum_kvec_store(kern_context *kcxt,
+							  const xpu_datum_t *__xdatum,
+							  kvec_datum_t *__kvecs,
+							  uint32_t kvecs_id)
+{
+	const xpu_internal_t *xdatum = (const xpu_internal_t *)__xdatum;
+	kvec_internal_t *kvecs = (kvec_internal_t *)__kvecs;
+
+	kvecs->values[kvecs_id] = xdatum->value;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_internal_datum_kvec_copy(kern_context *kcxt,
+							 const kvec_datum_t *__kvecs_src,
+							 uint32_t kvecs_src_id,
+							 kvec_datum_t *__kvecs_dst,
+							 uint32_t kvecs_dst_id)
+{
+    const kvec_internal_t *kvecs_src = (const kvec_internal_t *)__kvecs_src;
+    kvec_internal_t *kvecs_dst = (kvec_internal_t *)__kvecs_dst;
+
+	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
+	return true;
+}
+
+STATIC_FUNCTION(int)
+xpu_internal_datum_write(kern_context *kcxt,
+						  char *buffer,
+						  const kern_colmeta *cmeta_dst,	/* destination */
+						  const xpu_datum_t *__arg)
+{
+	const xpu_internal_t *arg = (const xpu_internal_t *)__arg;
+
+	if (cmeta_dst->attlen < 0)
+	{
+		STROM_ELOG(kcxt, "unable to write out xpu_internal_t with negative attlen");
+		return false;
+	}
+	if (buffer && cmeta_dst->attlen > 0)
+		memcpy(buffer, arg->value, cmeta_dst->attlen);
+	return cmeta_dst->attlen;
+}
+
+STATIC_FUNCTION(bool)
+xpu_internal_datum_hash(kern_context *kcxt,
+					    uint32_t *p_hash,
+					    const xpu_datum_t *arg)
+{
+	STROM_ELOG(kcxt, "xpu_internal_datum_hash is not supported");
+	return false;
+}
+STATIC_FUNCTION(bool)
+xpu_internal_datum_comp(kern_context *kcxt,
+						int *p_comp,
+						const xpu_datum_t *__a,
+						const xpu_datum_t *__b)
+{
+	STROM_ELOG(kcxt, "xpu_internal_datum_comp is not supported");
+	return false;
+}
+PGSTROM_SQLTYPE_OPERATORS(internal,true,8,8);
 
 /*
  * Catalog of built-in device types

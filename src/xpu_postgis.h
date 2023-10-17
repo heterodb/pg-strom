@@ -165,7 +165,7 @@ typedef struct
 	uint32_t	rawsize;	/* length of the rawdata buffer */
 	const char *rawdata;	/* pointer to the raw-data; it may not be aligned,
 							 * so needs to copy local buffer once */
-	geom_bbox  *bbox;		/* boundary box if any */
+	const geom_bbox *bbox;	/* boundary box if any */
 } xpu_geometry_t;
 
 EXTERN_DATA xpu_datum_operators	xpu_geometry_ops;

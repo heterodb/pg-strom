@@ -1296,59 +1296,95 @@ KDS_BLOCK_CHECK_VALID(const kern_data_store *kds,
 }
 
 /* access functions for apache arrow format */
-INLINE_FUNCTION(void *)
-KDS_ARROW_REF_SIMPLE_DATUM(kern_data_store *kds,
-						   kern_colmeta *cmeta,
-						   uint32_t index,
-						   uint32_t unitsz)
+INLINE_FUNCTION(bool)
+KDS_ARROW_CHECK_ISNULL(const kern_data_store *kds,
+					   const kern_colmeta *cmeta,
+					   uint32_t index)
 {
 	uint8_t	   *nullmap;
-	char	   *values;
 
-	Assert(cmeta >= &kds->colmeta[0] &&
-		   cmeta <= &kds->colmeta[kds->nr_colmeta - 1]);
+	Assert(cmeta >= kds->colmeta &&
+		   cmeta <  kds->colmeta + kds->nr_colmeta);
 	if (cmeta->nullmap_offset)
 	{
 		nullmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
 		if (att_isnull(index, nullmap))
-			return NULL;
+			return true;
 	}
-	Assert(cmeta->values_offset > 0);
-	Assert(cmeta->extra_offset == 0);
-	Assert(cmeta->extra_length == 0);
-	Assert(unitsz * (index+1) <= __kds_unpack(cmeta->values_length));
-	values = (char *)kds + __kds_unpack(cmeta->values_offset);
-	return values + unitsz * index;
+	return false;
 }
 
-INLINE_FUNCTION(void *)
-KDS_ARROW_REF_VARLENA_DATUM(kern_data_store *kds,
-							kern_colmeta *cmeta,
-							uint32_t rowidx,
-							uint32_t *p_length)
+INLINE_FUNCTION(const void *)
+KDS_ARROW_REF_SIMPLE_DATUM(const kern_data_store *kds,
+						   const kern_colmeta *cmeta,
+						   uint32_t index,
+						   uint32_t unitsz)
 {
-	uint8_t	   *nullmap;
-	uint32_t   *offset;
-	char	   *extra;
-
-	Assert(cmeta >= &kds->colmeta[0] &&
-		   cmeta <= &kds->colmeta[kds->nr_colmeta - 1]);
-	if (cmeta->nullmap_offset)
-	{
-		nullmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
-		if (att_isnull(rowidx, nullmap))
-			return NULL;
-	}
 	Assert(cmeta->values_offset > 0 &&
-		   cmeta->extra_offset > 0 &&
-		   sizeof(uint32_t) * (rowidx+1) <= __kds_unpack(cmeta->values_length));
-	offset = (uint32_t *)(kds + __kds_unpack(cmeta->values_length));
-	extra = (char *)kds + __kds_unpack(cmeta->extra_offset);
+		   cmeta->extra_offset == 0 &&
+		   cmeta->extra_length == 0);
+	if (!KDS_ARROW_CHECK_ISNULL(kds, cmeta, index) &&
+		unitsz * (index + 1) <= __kds_unpack(cmeta->values_length))
+	{
+		const char *values = ((const char *)kds +
+							  __kds_unpack(cmeta->values_offset));
+		return values + unitsz * index;
+	}
+	return NULL;
+}
 
-	Assert(offset[rowidx]   <= offset[rowidx+1] &&
-		   offset[rowidx+1] <= __kds_unpack(cmeta->extra_length));
-	*p_length = offset[rowidx+1] - offset[rowidx];
-	return (extra + offset[rowidx]);	
+#define VARATT_MAX		0x4ffffff8U
+
+INLINE_FUNCTION(const void *)
+KDS_ARROW_REF_VARLENA32_DATUM(const kern_data_store *kds,
+							  const kern_colmeta *cmeta,
+							  uint32_t index,
+							  int *p_length)
+{
+	Assert(cmeta->values_offset > 0 &&
+		   cmeta->extra_offset  > 0);
+	if (!KDS_ARROW_CHECK_ISNULL(kds, cmeta, index) &&
+		sizeof(uint32_t) * (index+1) <= __kds_unpack(cmeta->values_length))
+	{
+		const uint32_t *offset = (const uint32_t *)
+			((const char *)kds + __kds_unpack(cmeta->values_length));
+		const char	   *extra  = (const char *)
+			((const char *)kds + __kds_unpack(cmeta->extra_offset));
+		if (offset[index] <= offset[index+1] &&
+			offset[index+1] <= __kds_unpack(cmeta->extra_length) &&
+			offset[index+1] - offset[index] <= VARATT_MAX)
+		{
+			*p_length = (int)(offset[index+1] - offset[index]);
+			return (extra + offset[index]);
+		}
+	}
+	return NULL;
+}
+
+INLINE_FUNCTION(const void *)
+KDS_ARROW_REF_VARLENA64_DATUM(const kern_data_store *kds,
+							  const kern_colmeta *cmeta,
+							  uint32_t index,
+							  int *p_length)
+{
+	Assert(cmeta->values_offset > 0 &&
+		   cmeta->extra_offset  > 0);
+	if (!KDS_ARROW_CHECK_ISNULL(kds, cmeta, index) &&
+		sizeof(uint32_t) * (index+1) <= __kds_unpack(cmeta->values_length))
+	{
+		const uint64_t *offset = (const uint64_t *)
+			((const char *)kds + __kds_unpack(cmeta->values_length));
+		const char	   *extra  = (const char *)
+			((const char *)kds + __kds_unpack(cmeta->extra_offset));
+		if (offset[index] <= offset[index+1] &&
+			offset[index+1] <= __kds_unpack(cmeta->extra_length) &&
+			offset[index+1] - offset[index] <= VARATT_MAX)
+		{
+			*p_length = (int)(offset[index+1] - offset[index]);
+			return (extra + offset[index]);
+		}
+	}
+	return NULL;
 }
 
 INLINE_FUNCTION(bool)
@@ -1558,48 +1594,18 @@ typedef struct toast_compress_header
 #define KVEC_UNITSZ			64
 #define KVEC_ALIGN(x)		TYPEALIGN(16,(x))	/* 128bit alignment */
 
-#define KVEC_DATUM_COMMON_FIELD		\
+#define KVEC_DATUM_COMMON_FIELD					\
 	uint64_t		nullmask
 
 typedef struct kvec_datum_t {
 	KVEC_DATUM_COMMON_FIELD;
 } kvec_datum_t;
 
-INLINE_FUNCTION(void)
-kvec_update_nullmask(uint64_t *p_nullmask, int kvec_id, const char *addr)
+INLINE_FUNCTION(bool)
+KVEC_DATUM_ISNULL(const kvec_datum_t *kvec_datum, uint32_t kvec_id)
 {
-	uint64_t	bits = (1UL << kvec_id);
-	uint64_t	mask	__attribute__((unused));
-
-	assert(kvec_id >= 0 && kvec_id < KVEC_UNITSZ);
-#if defined(__CUDACC__)
-	assert(__activemask() == 0xffffffffU);
-	if (LaneId() == 0)
-		mask = *p_nullmask;
-	mask = __shfl_sync(__activemask(), mask, 0);
-	if (!addr)
-	{
-		if ((mask & bits) == 0)
-			bits = 0;	/* no change */
-	}
-	else
-	{
-		if ((mask & bits) != 0)
-			bits = 0;	/* no change */
-	}
-	bits |= __shfl_xor_sync(__activemask(), bits, 0x01);
-	bits |= __shfl_xor_sync(__activemask(), bits, 0x02);
-	bits |= __shfl_xor_sync(__activemask(), bits, 0x04);
-	bits |= __shfl_xor_sync(__activemask(), bits, 0x08);
-	bits |= __shfl_xor_sync(__activemask(), bits, 0x10);
-	if (LaneId() == 0)
-		*p_nullmask = (mask ^ bits);
-#else
-	if (addr)
-		*p_nullmask |= bits;
-	else
-		*p_nullmask &= ~bits;
-#endif
+	assert(kvec_id < KVEC_UNITSZ);
+	return (kvec_datum->nullmask & (1UL << kvec_id)) != 0;
 }
 
 /* ----------------------------------------------------------------
@@ -1632,14 +1638,6 @@ struct xpu_datum_operators {
 	int			xpu_type_alignof;	/* = __alignof__(xpu_XXX_t), not PG type! */
 	int			xpu_kvec_sizeof;	/* = sizeof(kvec_XXXX_t), not PG type! */
 	int			xpu_kvec_alignof;	/* = __alignof__(kvec_XXX_t), not PG type! */
-	bool	  (*xpu_datum_ref)(kern_context *kcxt,
-							   xpu_datum_t *result,			/* out */
-							   int vclass,					/* in */
-							   const kern_variable *kvar);	/* in */
-	bool	  (*xpu_datum_store)(kern_context *kcxt,
-								 const xpu_datum_t *arg,	/* in */
-								 int *p_vclass,				/* out */
-								 kern_variable *p_kvar);	/* out */
 
 	/*
 	 * xpu_datum_heap_ref: called by LoadVars to load heap datum
@@ -1670,7 +1668,7 @@ struct xpu_datum_operators {
 	 */
 	bool	  (*xpu_datum_kvec_ref)(kern_context *kcxt,
 									const kvec_datum_t *kvecs,	/* in */
-									int kvecs_id,				/* in */
+									uint32_t kvecs_id,			/* in */
 									xpu_datum_t *result);		/* out */
 	/*
 	 * xpu_datum_kvec_store: called by MoveVars to save the xdatum,
@@ -1682,7 +1680,7 @@ struct xpu_datum_operators {
 	bool	  (*xpu_datum_kvec_store)(kern_context *kcxt,
 									  const xpu_datum_t *xdatum, /* in */
 									  kvec_datum_t *kvecs,		/* out */
-									  int kvecs_id);			/* out */
+									  uint32_t kvecs_id);		/* out */
 	/*
 	 * xpu_datum_kvec_copy: called by MoveVars to copy the vectorized
 	 * kernel values from the previous depth to the next depth, without
@@ -1692,9 +1690,9 @@ struct xpu_datum_operators {
 	 */
 	bool	  (*xpu_datum_kvec_copy)(kern_context *kcxt,
 									 const kvec_datum_t *kvecs_src,	/* in */
-									 int kvecs_src_id,			/* in */
-									 kvec_datum_t *kvecs_dst,	/* out */
-									 int kvecs_dst_id);			/* out */
+									 uint32_t kvecs_src_id,			/* in */
+									 kvec_datum_t *kvecs_dst,		/* out */
+									 uint32_t kvecs_dst_id);		/* out */
 	/*
 	 * xpu_datum_write: called by Projection or GpuPreAgg to write out
 	 * xdatum onto the destination/final buffer.
@@ -1716,13 +1714,6 @@ struct xpu_datum_operators {
 								int *p_comp,				/* out */
 								const xpu_datum_t *a,		/* in */
 								const xpu_datum_t *b);		/* in */
-
-	//deprecated
-	bool	  (*xpu_datum_load_heap)(kern_context *kcxt,
-									 kvec_datum_t *result,
-									 int kvec_id,
-									 const char *addr);
-	//how to handle arrow format?
 };
 
 #define __PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\
@@ -1773,12 +1764,14 @@ struct xpu_datum_operators {
 		.xpu_type_alignof = __alignof__(xpu_##NAME##_t),			\
 		.xpu_kvec_sizeof = sizeof(kvec_##NAME##_t),					\
 		.xpu_kvec_alignof = __alignof__(kvec_##NAME##_t),			\
-		.xpu_datum_ref = xpu_##NAME##_datum_ref,					\
-		.xpu_datum_store = xpu_##NAME##_datum_store,				\
+		.xpu_datum_heap_ref = xpu_##NAME##_datum_heap_ref,			\
+		.xpu_datum_arrow_ref = xpu_##NAME##_datum_arrow_ref,		\
+		.xpu_datum_kvec_ref = xpu_##NAME##_datum_kvec_ref,			\
+		.xpu_datum_kvec_store = xpu_##NAME##_datum_kvec_store,		\
+		.xpu_datum_kvec_copy = xpu_##NAME##_datum_kvec_copy,		\
 		.xpu_datum_write = xpu_##NAME##_datum_write,				\
 		.xpu_datum_hash = xpu_##NAME##_datum_hash,					\
 		.xpu_datum_comp = xpu_##NAME##_datum_comp,					\
-		.xpu_datum_load_heap = xpu_##NAME##_datum_load_heap,		\
 	}
 
 #include "xpu_basetype.h"
@@ -1815,12 +1808,12 @@ typedef struct {
 
 typedef struct {
 	KVEC_DATUM_COMMON_FIELD;
-	const kern_colmeta *smeta;		/* common in kvec */
+	const kern_colmeta *cmeta;		/* common in kvec */
 	uint32_t	slot_id;			/* common in kvec */	
 	int32_t		length[KVEC_UNITSZ];
 	union {
 		struct {
-			const varlena  *value[KVEC_UNITSZ];
+			const varlena  *values[KVEC_UNITSZ];
 		} heap;		/* length < 0 */
 		struct {
 			uint32_t		start[KVEC_UNITSZ];
@@ -1897,7 +1890,9 @@ __pg_array_dataptr(const __ArrayTypeData *ar)
  */
 typedef struct {
 	XPU_DATUM_COMMON_FIELD;
-	const kern_colmeta *cmeta;		/* reference to the composite datume metadata */
+	const kern_colmeta *cmeta;		/* if Arrow::Composite type, it reference to the composite
+									 * metadata to walk on the subfields. Elsewhere, @cmeta is
+									 * NULL, and @u.heap.value points PostgreSQL record. */
 	union {
 		struct {
 			const varlena *value;	/* composite varlena in heap-format */
@@ -1912,13 +1907,13 @@ typedef struct {
 typedef struct
 {
 	KVEC_DATUM_COMMON_FIELD;
-	const kern_colmeta *cmeta;	/* to be identical in kvec */
-	bool		is_arrow;		/* to be identical in kvec */
+	const kern_colmeta *cmeta;		/* to be identical in kvec */
 	union {
 		struct {
 			const varlena *values[KVEC_UNITSZ];
 		} heap;
 		struct {
+			uint32_t	slot_id;	/* to be identical in kvec */
 			uint32_t	rowidx[KVEC_UNITSZ];
 		} arrow;
 	} u;
@@ -2935,7 +2930,8 @@ ExecMoveKernelVariables(kern_context *kcxt,
 						const char *src_kvec_buffer,	/* NULL, if depth=0 */
                         int src_kvec_id,
                         char *dst_kvec_buffer,
-                        int dst_kvec_id);
+                        int dst_kvec_id,
+						bool tuple_is_valid);
 EXTERN_FUNCTION(uint32_t)
 ExecGiSTIndexGetNext(kern_context *kcxt,
 					 const kern_data_store *kds_hash,

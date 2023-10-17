@@ -17,42 +17,79 @@
  * Bool type handlers
  */
 STATIC_FUNCTION(bool)
-xpu_bool_datum_ref(kern_context *kcxt,
-				   xpu_datum_t *__result,
-				   int vclass,
-				   const kern_variable *kvar)
+xpu_bool_datum_heap_ref(kern_context *kcxt,
+						const void *addr,
+						xpu_datum_t *__result)
 {
 	xpu_bool_t *result = (xpu_bool_t *)__result;
 
-	result->expr_ops = &xpu_bool_ops;
-	if (vclass == KVAR_CLASS__INLINE)
-		result->value = kvar->i8;
-	else if (vclass >= sizeof(bool))
-		result->value = *((bool *)kvar->ptr);
+	if (!addr)
+		result->expr_ops = NULL;
 	else
 	{
-		STROM_ELOG(kcxt, "unexpected vclass for device bool data type.");
-		return false;
+		result->expr_ops = &xpu_bool_ops;
+		result->value = *((const bool *)addr);
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_bool_datum_store(kern_context *kcxt,
-					 const xpu_datum_t *__arg,
-					 int *p_vclass,
-					 kern_variable *p_kvar)
+xpu_bool_datum_arrow_ref(kern_context *kcxt,
+						 const kern_data_store *kds,
+						 const kern_colmeta *cmeta,
+						 uint32_t kds_index,
+						 xpu_datum_t *__result)
 {
-	const xpu_bool_t *arg = (const xpu_bool_t *)__arg;
+	xpu_bool_t *result = (xpu_bool_t *)__result;
+	const uint8_t  *bitmap = (const uint8_t *)
+		((const char *)kds + __kds_unpack(cmeta->values_offset));
 
-	if (XPU_DATUM_ISNULL(arg))
-		*p_vclass = KVAR_CLASS__NULL;
-	else
-	{
-		*p_vclass = KVAR_CLASS__INLINE;
-		p_kvar->i8 = (arg->value ? true : false);
-	}
+	result->expr_ops = &xpu_bool_ops;
+	result->value    = ((bitmap[kds_index>>3] & (1<<(kds_index & 7))) != 0);
 	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bool_datum_kvec_ref(kern_context *kcxt,
+						const kvec_datum_t *__kvecs,
+						uint32_t kvecs_id,
+						xpu_datum_t *__result)
+{
+	const kvec_bool_t *kvecs = (const kvec_bool_t *)__kvecs;
+	xpu_bool_t *result = (xpu_bool_t *)__result;
+
+	result->expr_ops = &xpu_bool_ops;
+	result->value = kvecs->values[kvecs_id];
+
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bool_datum_kvec_store(kern_context *kcxt,
+						  const xpu_datum_t *__xdatum,
+						  kvec_datum_t *__kvec_dst,
+						  uint32_t kvec_dst_id)
+{
+	const xpu_bool_t *xdatum = (const xpu_bool_t *)__xdatum;
+	kvec_bool_t *kvecs_dst = (kvec_bool_t *)__kvec_dst;
+
+	assert(!XPU_DATUM_ISNULL(xdatum));
+	kvecs_dst->values[kvec_dst_id] = xdatum->value;
+
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bool_datum_kvec_copy(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs_src,
+						 uint32_t kvecs_src_id,
+						 kvec_datum_t *__kvecs_dst,
+						 uint32_t kvecs_dst_id)
+{
+	const kvec_bool_t *kvecs_src = (const kvec_bool_t *)__kvecs_src;
+	kvec_bool_t *kvecs_dst = (kvec_bool_t *)__kvecs_dst;
+
+	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
 }
 
 STATIC_FUNCTION(int)
@@ -63,8 +100,6 @@ xpu_bool_datum_write(kern_context *kcxt,
 {
 	const xpu_bool_t   *arg = (const xpu_bool_t *)__arg;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (buffer)
 		*((bool *)buffer) = arg->value;
 	return sizeof(bool);
@@ -97,60 +132,60 @@ xpu_bool_datum_comp(kern_context *kcxt,
 	*p_comp = ((int)a->value - (int)b->value);
 	return true;
 }
-STATIC_FUNCTION(bool)
-xpu_bool_datum_load_heap(kern_context *kcxt,
-						 kvec_datum_t *__result,
-						 int kvec_id,
-						 const char *addr)
-{
-	kvec_bool_t *result = (kvec_bool_t *)__result;
-
-	kvec_update_nullmask(&result->nullmask, kvec_id, addr);
-	if (addr)
-		result->values[kvec_id] = *((const bool *)addr);
-	return true;
-}
 PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 
 /*
- * Int1/Int2/Int4/Int8 handlers
+ * Int1/Int2/Int4/Int8 and Float2/Float4/Float8 handlers
  */
-#define PGSTROM_SIMPLE_INTEGER_TEMPLATE(NAME,BASETYPE,FIELD)			\
+#define __PGSTROM_SIMPLE_INT_FLOAT_TEMPLATE(NAME,BASETYPE)				\
 	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_ref(kern_context *kcxt,							\
-						   xpu_datum_t *__result,						\
-						   int vclass, const kern_variable *kvar)		\
+	xpu_##NAME##_datum_heap_ref(kern_context *kcxt,						\
+								const void *addr,						\
+								xpu_datum_t *__result)					\
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
 		result->expr_ops = &xpu_##NAME##_ops;							\
-		if (vclass == KVAR_CLASS__INLINE)								\
-			result->value = kvar->FIELD;								\
-		else if (vclass >= sizeof(BASETYPE))							\
-			result->value = *((const BASETYPE *)kvar->ptr);				\
-		else															\
-		{																\
-			STROM_ELOG(kcxt, "unexpected vclass for device " #NAME " data type."); \
-			return false;												\
-		}																\
+		result->value = *((const BASETYPE *)addr);						\
 		return true;													\
 	}																	\
 	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_store(kern_context *kcxt,						\
-							 const xpu_datum_t *__arg,					\
-							 int *p_vclass,								\
-							 kern_variable *p_kvar)						\
+	xpu_##NAME##_datum_kvec_ref(kern_context *kcxt,						\
+								const kvec_datum_t *__kvecs,			\
+								uint32_t kvecs_id,						\
+								xpu_datum_t *__result)					\
 	{																	\
-		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
+		const kvec_##NAME##_t *kvecs = (const kvec_##NAME##_t *)__kvecs; \
+		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
-		if (XPU_DATUM_ISNULL(arg))										\
-			*p_vclass = KVAR_CLASS__NULL;								\
-		else															\
-		{																\
-			*p_vclass = KVAR_CLASS__INLINE;								\
-			p_kvar->FIELD = arg->value;									\
-		}																\
-		return sizeof(BASETYPE);										\
+		result->expr_ops = &xpu_##NAME##_ops;							\
+		result->value = kvecs->values[kvecs_id];						\
+		return true;													\
+	}																	\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_datum_kvec_store(kern_context *kcxt,					\
+								  const xpu_datum_t *__xdatum,			\
+								  kvec_datum_t *__kvecs,				\
+								  uint32_t kvecs_id)					\
+	{																	\
+		const xpu_##NAME##_t *xdatum = (const xpu_##NAME##_t *)__xdatum; \
+		kvec_##NAME##_t *kvecs = (kvec_##NAME##_t *)__kvecs;			\
+																		\
+		kvecs->values[kvecs_id] = xdatum->value;						\
+		return true;													\
+	}																	\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_datum_kvec_copy(kern_context *kcxt,					\
+								 const kvec_datum_t *__kvecs_src,		\
+								 uint32_t kvecs_src_id,					\
+								 kvec_datum_t *__kvecs_dst,				\
+								 uint32_t kvecs_dst_id)					\
+	{																	\
+		const kvec_##NAME##_t *kvecs_src = (const kvec_##NAME##_t *)__kvecs_src; \
+		kvec_##NAME##_t *kvecs_dst = (kvec_##NAME##_t *)__kvecs_dst;	\
+																		\
+		kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id]; \
+		return true;													\
 	}																	\
 	STATIC_FUNCTION(int)												\
 	xpu_##NAME##_datum_write(kern_context *kcxt,						\
@@ -160,8 +195,6 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 	{																	\
 		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
 																		\
-		if (XPU_DATUM_ISNULL(arg))										\
-			return 0;													\
 		if (buffer)														\
 			*((BASETYPE *)buffer) = arg->value;							\
 		return sizeof(BASETYPE);										\
@@ -197,129 +230,73 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 			*p_comp = 0;												\
 		return true;													\
 	}																	\
-	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_load_heap(kern_context *kcxt,					\
-								 kvec_datum_t *__result,				\
-								 int kvec_id,							\
-								 const char *addr)						\
-	{																	\
-		kvec_##NAME##_t *result = (kvec_##NAME##_t *)__result;			\
-																		\
-		kvec_update_nullmask(&result->nullmask, kvec_id, addr);			\
-		if (addr)														\
-			result->values[kvec_id] = *((const BASETYPE *)addr);		\
-		return true;													\
-	}																	\
 	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
 
-PGSTROM_SIMPLE_INTEGER_TEMPLATE(int1, int8_t, i8);
-PGSTROM_SIMPLE_INTEGER_TEMPLATE(int2,int16_t,i16);
-PGSTROM_SIMPLE_INTEGER_TEMPLATE(int4,int32_t,i32);
-PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8,int64_t,i64);
-
-/*
- * FloatingPoint handlers
- */
-#define PGSTROM_SIMPLE_FLOAT_TEMPLATE(NAME,BASETYPE,FIELD,PRECISION)	\
+#define PGSTROM_SIMPLE_INTEGER_TEMPLATE(NAME,BASETYPE)					\
 	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_ref(kern_context *kcxt,							\
-						   xpu_datum_t *__result,						\
-						   int vclass, const kern_variable *kvar)		\
+	xpu_##NAME##_datum_arrow_ref(kern_context *kcxt,					\
+								 const kern_data_store *kds,			\
+								 const kern_colmeta *cmeta,				\
+								 uint32_t index,						\
+								 xpu_datum_t *__result)					\
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
-		result->expr_ops = &xpu_##NAME##_ops;							\
-		if (vclass == KVAR_CLASS__INLINE)								\
-			result->value = kvar->FIELD;								\
-		else if (vclass >= sizeof(BASETYPE))							\
-			result->value = *((BASETYPE *)kvar->ptr);					\
+		if (cmeta->attopts.tag != ArrowType__Int ||						\
+			cmeta->attopts.integer.bitWidth != sizeof(BASETYPE) * 8)	\
+		{																\
+			STROM_ELOG(kcxt, "xpu_" #NAME "_t must be mapped on Arrow::Int"); \
+		}																\
 		else															\
 		{																\
-			STROM_ELOG(kcxt, "unexpected vclass for device " #NAME " data type."); \
-			return false;												\
+			const BASETYPE *addr = (const BASETYPE *)					\
+				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, index, sizeof(BASETYPE)); \
+			if (addr && (cmeta->attopts.integer.is_signed || *addr >= 0)) \
+			{															\
+				result->expr_ops = &xpu_##NAME##_ops;					\
+				result->value = *addr;									\
+				return true;											\
+			}															\
+			STROM_ELOG(kcxt, "Arrow::Int is out of range");				\
 		}																\
-		return true;													\
+		return false;													\
 	}																	\
-	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_store(kern_context *kcxt,						\
-							 const xpu_datum_t *__arg,					\
-							 int *p_vclass,                             \
-                             kern_variable *p_kvar)						\
-	{																	\
-		const xpu_##NAME##_t *arg = (const xpu_##NAME##_t *)__arg;		\
-																		\
-		if (XPU_DATUM_ISNULL(arg))										\
-			*p_vclass = KVAR_CLASS__NULL;								\
-		else															\
-		{																\
-			*p_vclass = KVAR_CLASS__INLINE;								\
-			p_kvar->FIELD = arg->value;									\
-		}																\
-		return true;													\
-	}																	\
-	STATIC_FUNCTION(int)												\
-	xpu_##NAME##_datum_write(kern_context *kcxt,						\
-							 char *buffer,								\
-							 const kern_colmeta *cmeta,					\
-							 const xpu_datum_t *__arg)					\
-	{																	\
-		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
-																		\
-		if (XPU_DATUM_ISNULL(arg))										\
-			return 0;													\
-		if (buffer)														\
-			*((BASETYPE *)buffer) = arg->value;							\
-		return sizeof(BASETYPE);										\
-	}																	\
-	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_hash(kern_context *kcxt,							\
-							uint32_t *p_hash,							\
-							const xpu_datum_t *__arg)					\
-	{																	\
-		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
-																		\
-		if (XPU_DATUM_ISNULL(arg))										\
-			*p_hash = 0;												\
-		else															\
-			*p_hash = pg_hash_any(&arg->value, sizeof(BASETYPE));		\
-		return true;													\
-	}																	\
-	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_comp(kern_context *kcxt,							\
-						int *p_comp,									\
-						const xpu_datum_t *__a,							\
-						const xpu_datum_t *__b)							\
-	{																	\
-		const xpu_##NAME##_t *a = (const xpu_##NAME##_t *)__a;			\
-		const xpu_##NAME##_t *b = (const xpu_##NAME##_t *)__b;			\
-																		\
-		assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));			\
-		if (a->value > b->value)										\
-			*p_comp = 1;												\
-		else if (a->value < b->value)									\
-			*p_comp = -1;												\
-		else															\
-			*p_comp = 0;												\
-		return true;													\
-	}																	\
-	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_load_heap(kern_context *kcxt,					\
-								 kvec_datum_t *__result,				\
-								 int kvec_id,							\
-								 const char *addr)						\
-	{																	\
-		kvec_##NAME##_t *result = (kvec_##NAME##_t *)__result;			\
-																		\
-		kvec_update_nullmask(&result->nullmask, kvec_id, addr);			\
-		if (addr)														\
-			result->values[kvec_id] = *((const BASETYPE *)addr);		\
-		return true;													\
-	}																	\
-	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
+	__PGSTROM_SIMPLE_INT_FLOAT_TEMPLATE(NAME,BASETYPE)
 
-PGSTROM_SIMPLE_FLOAT_TEMPLATE(float2, float2_t, fp16, Half);
-PGSTROM_SIMPLE_FLOAT_TEMPLATE(float4, float4_t, fp32, Single);
-PGSTROM_SIMPLE_FLOAT_TEMPLATE(float8, float8_t, fp64, Double);
+#define PGSTROM_SIMPLE_FLOAT_TEMPLATE(NAME,BASETYPE,PREC)				\
+	STATIC_FUNCTION(bool)												\
+	xpu_##NAME##_datum_arrow_ref(kern_context *kcxt,					\
+								 const kern_data_store *kds,			\
+								 const kern_colmeta *cmeta,             \
+                                 uint32_t index,                        \
+                                 xpu_datum_t *__result)                 \
+	{																	\
+		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
+																		\
+		if (cmeta->attopts.tag != ArrowType__FloatingPoint ||			\
+			cmeta->attopts.floating_point.precision != ArrowPrecision__##PREC) \
+		{																\
+			STROM_ELOG(kcxt, "xpu_" #NAME "_t must be mapped on Arrow::FloatingPoint<" #PREC ">"); \
+		}																\
+		else															\
+		{																\
+			const BASETYPE *addr = (const BASETYPE *)					\
+				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, index, sizeof(BASETYPE)); \
+			result->expr_ops = &xpu_##NAME##_ops;						\
+			result->value = *addr;										\
+			return true;												\
+		}																\
+		return false;													\
+	}																	\
+	__PGSTROM_SIMPLE_INT_FLOAT_TEMPLATE(NAME,BASETYPE)
+	
+PGSTROM_SIMPLE_INTEGER_TEMPLATE(int1,  int8_t);
+PGSTROM_SIMPLE_INTEGER_TEMPLATE(int2, int16_t);
+PGSTROM_SIMPLE_INTEGER_TEMPLATE(int4, int32_t);
+PGSTROM_SIMPLE_INTEGER_TEMPLATE(int8, int64_t);
+PGSTROM_SIMPLE_FLOAT_TEMPLATE(float2, float2_t, Half);
+PGSTROM_SIMPLE_FLOAT_TEMPLATE(float4, float4_t, Single);
+PGSTROM_SIMPLE_FLOAT_TEMPLATE(float8, float8_t, Double);
 
 /* special support functions for float2 */
 INLINE_FUNCTION(bool) isinf(float2_t fval) { return isinf(fp16_to_fp32(fval)); }
