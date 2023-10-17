@@ -17,9 +17,9 @@
  * Bool type handlers
  */
 STATIC_FUNCTION(bool)
-xpu_bool_datum_heap_ref(kern_context *kcxt,
-						const void *addr,
-						xpu_datum_t *__result)
+xpu_bool_datum_heap_read(kern_context *kcxt,
+						 const void *addr,
+						 xpu_datum_t *__result)
 {
 	xpu_bool_t *result = (xpu_bool_t *)__result;
 
@@ -34,11 +34,11 @@ xpu_bool_datum_heap_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_bool_datum_arrow_ref(kern_context *kcxt,
-						 const kern_data_store *kds,
-						 const kern_colmeta *cmeta,
-						 uint32_t kds_index,
-						 xpu_datum_t *__result)
+xpu_bool_datum_arrow_read(kern_context *kcxt,
+						  const kern_data_store *kds,
+						  const kern_colmeta *cmeta,
+						  uint32_t kds_index,
+						  xpu_datum_t *__result)
 {
 	xpu_bool_t *result = (xpu_bool_t *)__result;
 	const uint8_t  *bitmap = (const uint8_t *)
@@ -50,10 +50,10 @@ xpu_bool_datum_arrow_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_bool_datum_kvec_ref(kern_context *kcxt,
-						const kvec_datum_t *__kvecs,
-						uint32_t kvecs_id,
-						xpu_datum_t *__result)
+xpu_bool_datum_kvec_load(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id,
+						 xpu_datum_t *__result)
 {
 	const kvec_bool_t *kvecs = (const kvec_bool_t *)__kvecs;
 	xpu_bool_t *result = (xpu_bool_t *)__result;
@@ -65,10 +65,10 @@ xpu_bool_datum_kvec_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_bool_datum_kvec_store(kern_context *kcxt,
-						  const xpu_datum_t *__xdatum,
-						  kvec_datum_t *__kvec_dst,
-						  uint32_t kvec_dst_id)
+xpu_bool_datum_kvec_save(kern_context *kcxt,
+						 const xpu_datum_t *__xdatum,
+						 kvec_datum_t *__kvec_dst,
+						 uint32_t kvec_dst_id)
 {
 	const xpu_bool_t *xdatum = (const xpu_bool_t *)__xdatum;
 	kvec_bool_t *kvecs_dst = (kvec_bool_t *)__kvec_dst;
@@ -139,9 +139,9 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
  */
 #define __PGSTROM_SIMPLE_INT_FLOAT_TEMPLATE(NAME,BASETYPE)				\
 	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_heap_ref(kern_context *kcxt,						\
-								const void *addr,						\
-								xpu_datum_t *__result)					\
+	xpu_##NAME##_datum_heap_read(kern_context *kcxt,					\
+								 const void *addr,						\
+								 xpu_datum_t *__result)					\
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
@@ -150,10 +150,10 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 		return true;													\
 	}																	\
 	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_kvec_ref(kern_context *kcxt,						\
-								const kvec_datum_t *__kvecs,			\
-								uint32_t kvecs_id,						\
-								xpu_datum_t *__result)					\
+	xpu_##NAME##_datum_kvec_load(kern_context *kcxt,					\
+								 const kvec_datum_t *__kvecs,			\
+								 uint32_t kvecs_id,						\
+								 xpu_datum_t *__result)					\
 	{																	\
 		const kvec_##NAME##_t *kvecs = (const kvec_##NAME##_t *)__kvecs; \
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
@@ -163,10 +163,10 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 		return true;													\
 	}																	\
 	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_kvec_store(kern_context *kcxt,					\
-								  const xpu_datum_t *__xdatum,			\
-								  kvec_datum_t *__kvecs,				\
-								  uint32_t kvecs_id)					\
+	xpu_##NAME##_datum_kvec_save(kern_context *kcxt,					\
+								 const xpu_datum_t *__xdatum,			\
+								 kvec_datum_t *__kvecs,					\
+								 uint32_t kvecs_id)						\
 	{																	\
 		const xpu_##NAME##_t *xdatum = (const xpu_##NAME##_t *)__xdatum; \
 		kvec_##NAME##_t *kvecs = (kvec_##NAME##_t *)__kvecs;			\
@@ -234,11 +234,11 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 
 #define PGSTROM_SIMPLE_INTEGER_TEMPLATE(NAME,BASETYPE)					\
 	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_arrow_ref(kern_context *kcxt,					\
-								 const kern_data_store *kds,			\
-								 const kern_colmeta *cmeta,				\
-								 uint32_t index,						\
-								 xpu_datum_t *__result)					\
+	xpu_##NAME##_datum_arrow_read(kern_context *kcxt,					\
+								  const kern_data_store *kds,			\
+								  const kern_colmeta *cmeta,			\
+								  uint32_t index,						\
+								  xpu_datum_t *__result)				\
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
@@ -265,11 +265,11 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 
 #define PGSTROM_SIMPLE_FLOAT_TEMPLATE(NAME,BASETYPE,PREC)				\
 	STATIC_FUNCTION(bool)												\
-	xpu_##NAME##_datum_arrow_ref(kern_context *kcxt,					\
-								 const kern_data_store *kds,			\
-								 const kern_colmeta *cmeta,             \
-                                 uint32_t index,                        \
-                                 xpu_datum_t *__result)                 \
+	xpu_##NAME##_datum_arrow_read(kern_context *kcxt,					\
+								  const kern_data_store *kds,			\
+								  const kern_colmeta *cmeta,			\
+								  uint32_t index,						\
+								  xpu_datum_t *__result)				\
 	{																	\
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\

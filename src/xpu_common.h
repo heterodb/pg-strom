@@ -1640,53 +1640,44 @@ struct xpu_datum_operators {
 	int			xpu_kvec_alignof;	/* = __alignof__(kvec_XXX_t), not PG type! */
 
 	/*
-	 * xpu_datum_heap_ref: called by LoadVars to load heap datum
+	 * xpu_datum_heap_read: called by LoadVars to load heap datum
 	 * to the xpu_datum slot, prior to execution of the kexp in
 	 * the current depth.
 	 * also, it is used to reference const and param.
 	 */
-	bool	  (*xpu_datum_heap_ref)(kern_context *kcxt,
-									const void *addr,		/* in */
-									xpu_datum_t *result);	/* out */
+	bool	  (*xpu_datum_heap_read)(kern_context *kcxt,
+									 const void *addr,		/* in */
+									 xpu_datum_t *result);	/* out */
 	/*
 	 * xpu_datum_arrow_ref: called by LoadVars to load arrow datum
 	 * to the xpu_datum slot, prior to execution of the kexp in the
 	 * current depth.
 	 */
-	bool	  (*xpu_datum_arrow_ref)(kern_context *kcxt,
-									 const kern_data_store *kds,	/* in */
-									 const kern_colmeta *cmeta,		/* in */
-									 uint32_t kds_index,			/* in */
-									 xpu_datum_t *result);			/* out */
+	bool	  (*xpu_datum_arrow_read)(kern_context *kcxt,
+									  const kern_data_store *kds,	/* in */
+									  const kern_colmeta *cmeta,	/* in */
+									  uint32_t kds_index,			/* in */
+									  xpu_datum_t *result);			/* out */
 
 	/*
-	 * xpu_datum_kvec_ref: called by VarExpr if it references the
-	 * preliminary loaded datum (e.g, outer values referenced by join
-	 * quals in depth > 0).
-	 * also, it is used to load values at the final depth (projection
-	 * and gpupreagg).
+	 * xpu_datum_kvec_load: it loads the xpu_datum_t (scalar value)
+	 * from the vectorized buffer.
 	 */
-	bool	  (*xpu_datum_kvec_ref)(kern_context *kcxt,
-									const kvec_datum_t *kvecs,	/* in */
-									uint32_t kvecs_id,			/* in */
-									xpu_datum_t *result);		/* out */
+	bool	  (*xpu_datum_kvec_load)(kern_context *kcxt,
+									 const kvec_datum_t *kvecs,	/* in */
+									 uint32_t kvecs_id,			/* in */
+									 xpu_datum_t *result);		/* out */
 	/*
-	 * xpu_datum_kvec_store: called by MoveVars to save the xdatum,
-	 * which is newly loaded in this depth, to the vectorized kernel
-	 * values buffer.
-	 * The vectorized format intends utilization of memory coalescing
-	 * to save the amount of memory transactions onto the global memory.
+	 * xpu_datum_kvec_save: it saves the xpu_datum_t (scalar value)
+	 * onto the vectorized buffer.
 	 */
-	bool	  (*xpu_datum_kvec_store)(kern_context *kcxt,
-									  const xpu_datum_t *xdatum, /* in */
-									  kvec_datum_t *kvecs,		/* out */
-									  uint32_t kvecs_id);		/* out */
+	bool	  (*xpu_datum_kvec_save)(kern_context *kcxt,
+									 const xpu_datum_t *xdatum, /* in */
+									 kvec_datum_t *kvecs,		/* out */
+									 uint32_t kvecs_id);		/* out */
 	/*
-	 * xpu_datum_kvec_copy: called by MoveVars to copy the vectorized
-	 * kernel values from the previous depth to the next depth, without
-	 * transformation to xpu_datum format.
-	 * The vectorized format intends utilization of memory coalescing
-	 * to save the amount of memory transactions onto the global memory.
+	 * xpu_datum_kvec_copy: it moves a vectorized buffer entry from the
+	 * source to the destination.
 	 */
 	bool	  (*xpu_datum_kvec_copy)(kern_context *kcxt,
 									 const kvec_datum_t *kvecs_src,	/* in */
@@ -1755,23 +1746,23 @@ struct xpu_datum_operators {
 
 #define PGSTROM_SQLTYPE_OPERATORS(NAME,TYPBYVAL,TYPALIGN,TYPLENGTH) \
 	PUBLIC_DATA xpu_datum_operators xpu_##NAME##_ops = {			\
-		.xpu_type_name = #NAME,										\
-		.xpu_type_byval = TYPBYVAL,									\
-		.xpu_type_align = TYPALIGN,									\
-		.xpu_type_length = TYPLENGTH,								\
-		.xpu_type_code = TypeOpCode__##NAME,						\
-		.xpu_type_sizeof = sizeof(xpu_##NAME##_t),					\
-		.xpu_type_alignof = __alignof__(xpu_##NAME##_t),			\
-		.xpu_kvec_sizeof = sizeof(kvec_##NAME##_t),					\
-		.xpu_kvec_alignof = __alignof__(kvec_##NAME##_t),			\
-		.xpu_datum_heap_ref = xpu_##NAME##_datum_heap_ref,			\
-		.xpu_datum_arrow_ref = xpu_##NAME##_datum_arrow_ref,		\
-		.xpu_datum_kvec_ref = xpu_##NAME##_datum_kvec_ref,			\
-		.xpu_datum_kvec_store = xpu_##NAME##_datum_kvec_store,		\
-		.xpu_datum_kvec_copy = xpu_##NAME##_datum_kvec_copy,		\
-		.xpu_datum_write = xpu_##NAME##_datum_write,				\
-		.xpu_datum_hash = xpu_##NAME##_datum_hash,					\
-		.xpu_datum_comp = xpu_##NAME##_datum_comp,					\
+		.xpu_type_name        = #NAME,								\
+		.xpu_type_byval       = TYPBYVAL,							\
+		.xpu_type_align       = TYPALIGN,							\
+		.xpu_type_length      = TYPLENGTH,							\
+		.xpu_type_code        = TypeOpCode__##NAME,					\
+		.xpu_type_sizeof      = sizeof(xpu_##NAME##_t),				\
+		.xpu_type_alignof     = __alignof__(xpu_##NAME##_t),		\
+		.xpu_kvec_sizeof      = sizeof(kvec_##NAME##_t),			\
+		.xpu_kvec_alignof     = __alignof__(kvec_##NAME##_t),		\
+		.xpu_datum_heap_read  = xpu_##NAME##_datum_heap_read,		\
+		.xpu_datum_arrow_read = xpu_##NAME##_datum_arrow_read,		\
+		.xpu_datum_kvec_load  = xpu_##NAME##_datum_kvec_load,		\
+		.xpu_datum_kvec_save  = xpu_##NAME##_datum_kvec_save,		\
+		.xpu_datum_kvec_copy  = xpu_##NAME##_datum_kvec_copy,		\
+		.xpu_datum_write      = xpu_##NAME##_datum_write,			\
+		.xpu_datum_hash       = xpu_##NAME##_datum_hash,			\
+		.xpu_datum_comp       = xpu_##NAME##_datum_comp,			\
 	}
 
 #include "xpu_basetype.h"

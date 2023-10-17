@@ -61,7 +61,7 @@
  * xpu_date_t device type handlers
  */
 STATIC_FUNCTION(bool)
-xpu_date_datum_heap_ref(kern_context *kcxt,
+xpu_date_datum_heap_read(kern_context *kcxt,
                          const void *addr,
                          xpu_datum_t *__result)
 {
@@ -73,9 +73,9 @@ xpu_date_datum_heap_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_date_datum_arrow_ref(kern_context *kcxt,
+xpu_date_datum_arrow_read(kern_context *kcxt,
                           const kern_data_store *kds,
-                          const kern_colmeta *cmeta,
+						  const kern_colmeta *cmeta,
                           uint32_t kds_index,
                           xpu_datum_t *__result)
 {
@@ -126,10 +126,10 @@ xpu_date_datum_arrow_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_date_datum_kvec_ref(kern_context *kcxt,
-						const kvec_datum_t *__kvecs,
-						uint32_t kvecs_id,
-						xpu_datum_t *__result)
+xpu_date_datum_kvec_load(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id,
+						 xpu_datum_t *__result)
 {
 	const kvec_date_t *kvecs = (const kvec_date_t *)__kvecs;
 	xpu_date_t *result = (xpu_date_t *)__result;
@@ -140,10 +140,10 @@ xpu_date_datum_kvec_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_date_datum_kvec_store(kern_context *kcxt,
-						  const xpu_datum_t *__xdatum,
-						  kvec_datum_t *__kvecs,
-						  uint32_t kvecs_id)
+xpu_date_datum_kvec_save(kern_context *kcxt,
+						 const xpu_datum_t *__xdatum,
+						 kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id)
 {
 	const xpu_date_t *xdatum = (const xpu_date_t *)__xdatum;
 	kvec_date_t *kvecs = (kvec_date_t *)__kvecs;
@@ -217,9 +217,9 @@ PGSTROM_SQLTYPE_OPERATORS(date, true, 4, sizeof(DateADT));
  * xpu_time_t device type handlers
  */
 STATIC_FUNCTION(bool)
-xpu_time_datum_heap_ref(kern_context *kcxt,
-                         const void *addr,
-                         xpu_datum_t *__result)
+xpu_time_datum_heap_read(kern_context *kcxt,
+						 const void *addr,
+						 xpu_datum_t *__result)
 {
 	xpu_time_t *result = (xpu_time_t *)__result;
 
@@ -229,7 +229,7 @@ xpu_time_datum_heap_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_time_datum_arrow_ref(kern_context *kcxt,
+xpu_time_datum_arrow_read(kern_context *kcxt,
                           const kern_data_store *kds,
                           const kern_colmeta *cmeta,
                           uint32_t kds_index,
@@ -306,10 +306,10 @@ xpu_time_datum_arrow_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_time_datum_kvec_ref(kern_context *kcxt,
-                         const kvec_datum_t *__kvecs,
-                         uint32_t kvecs_id,
-                         xpu_datum_t *__result)
+xpu_time_datum_kvec_load(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id,
+						 xpu_datum_t *__result)
 {
 	const kvec_time_t *kvecs = (const kvec_time_t *)__kvecs;
 	xpu_time_t *result = (xpu_time_t *)__result;
@@ -320,10 +320,10 @@ xpu_time_datum_kvec_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_time_datum_kvec_store(kern_context *kcxt,
-                          const xpu_datum_t *__xdatum,
-						  kvec_datum_t *__kvecs,
-						  uint32_t kvecs_id)
+xpu_time_datum_kvec_save(kern_context *kcxt,
+						 const xpu_datum_t *__xdatum,
+						 kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id)
 {
 	const xpu_time_t *xdatum = (const xpu_time_t *)__xdatum;
 	kvec_time_t *kvecs = (kvec_time_t *)__kvecs;
@@ -397,9 +397,9 @@ PGSTROM_SQLTYPE_OPERATORS(time, true, 8, sizeof(TimeADT));
  * xpu_timetz_t device type handlers
  */
 STATIC_FUNCTION(bool)
-xpu_timetz_datum_heap_ref(kern_context *kcxt,
-                         const void *addr,
-                         xpu_datum_t *__result)
+xpu_timetz_datum_heap_read(kern_context *kcxt,
+						   const void *addr,
+						   xpu_datum_t *__result)
 {
 	xpu_timetz_t *result = (xpu_timetz_t *)__result;
 
@@ -409,21 +409,21 @@ xpu_timetz_datum_heap_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_timetz_datum_arrow_ref(kern_context *kcxt,
-                          const kern_data_store *kds,
-                          const kern_colmeta *cmeta,
-                          uint32_t kds_index,
-                          xpu_datum_t *__result)
+xpu_timetz_datum_arrow_read(kern_context *kcxt,
+							const kern_data_store *kds,
+							const kern_colmeta *cmeta,
+							uint32_t kds_index,
+							xpu_datum_t *__result)
 {
 	STROM_ELOG(kcxt, "xpu_timetz_t cannot be mapped on any Arrow type");
 	return false;
 }
 
 STATIC_FUNCTION(bool)
-xpu_timetz_datum_kvec_ref(kern_context *kcxt,
-                         const kvec_datum_t *__kvecs,
-                         uint32_t kvecs_id,
-                         xpu_datum_t *__result)
+xpu_timetz_datum_kvec_load(kern_context *kcxt,
+						   const kvec_datum_t *__kvecs,
+						   uint32_t kvecs_id,
+						   xpu_datum_t *__result)
 {
 	const kvec_timetz_t *kvecs = (const kvec_timetz_t *)__kvecs;
 	xpu_timetz_t *result = (xpu_timetz_t *)__result;
@@ -435,7 +435,7 @@ xpu_timetz_datum_kvec_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_timetz_datum_kvec_store(kern_context *kcxt,
+xpu_timetz_datum_kvec_save(kern_context *kcxt,
                            const xpu_datum_t *__xdatum,
                            kvec_datum_t *__kvecs,
                            uint32_t kvecs_id)
@@ -450,10 +450,10 @@ xpu_timetz_datum_kvec_store(kern_context *kcxt,
 
 STATIC_FUNCTION(bool)
 xpu_timetz_datum_kvec_copy(kern_context *kcxt,
-                          const kvec_datum_t *__kvecs_src,
-                          uint32_t kvecs_src_id,
-                          kvec_datum_t *__kvecs_dst,
-                          uint32_t kvecs_dst_id)
+						   const kvec_datum_t *__kvecs_src,
+						   uint32_t kvecs_src_id,
+						   kvec_datum_t *__kvecs_dst,
+						   uint32_t kvecs_dst_id)
 {
 	const kvec_timetz_t *kvecs_src = (const kvec_timetz_t *)__kvecs_src;
 	kvec_timetz_t *kvecs_dst = (kvec_timetz_t *)__kvecs_dst;
@@ -510,9 +510,9 @@ PGSTROM_SQLTYPE_OPERATORS(timetz, false, 8, SizeOfTimeTzADT);
  * xpu_timestamp_t device type handlers
  */
 STATIC_FUNCTION(bool)
-xpu_timestamp_datum_heap_ref(kern_context *kcxt,
-							 const void *addr,
-							 xpu_datum_t *__result)
+xpu_timestamp_datum_heap_read(kern_context *kcxt,
+							  const void *addr,
+							  xpu_datum_t *__result)
 {
 	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
 
@@ -522,11 +522,11 @@ xpu_timestamp_datum_heap_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_timestamp_datum_arrow_ref(kern_context *kcxt,
-							  const kern_data_store *kds,
-							  const kern_colmeta *cmeta,
-							  uint32_t kds_index,
-							  xpu_datum_t *__result)
+xpu_timestamp_datum_arrow_read(kern_context *kcxt,
+							   const kern_data_store *kds,
+							   const kern_colmeta *cmeta,
+							   uint32_t kds_index,
+							   xpu_datum_t *__result)
 {
 	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
 	const uint64_t	*addr;
@@ -599,10 +599,10 @@ xpu_timestamp_datum_arrow_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_timestamp_datum_kvec_ref(kern_context *kcxt,
-                         const kvec_datum_t *__kvecs,
-                         uint32_t kvecs_id,
-                         xpu_datum_t *__result)
+xpu_timestamp_datum_kvec_load(kern_context *kcxt,
+							  const kvec_datum_t *__kvecs,
+							  uint32_t kvecs_id,
+							  xpu_datum_t *__result)
 {
 	const kvec_timestamp_t *kvecs = (const kvec_timestamp_t *)__kvecs;
 	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
@@ -613,10 +613,10 @@ xpu_timestamp_datum_kvec_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_timestamp_datum_kvec_store(kern_context *kcxt,
-                           const xpu_datum_t *__xdatum,
-                           kvec_datum_t *__kvecs,
-                           uint32_t kvecs_id)
+xpu_timestamp_datum_kvec_save(kern_context *kcxt,
+							  const xpu_datum_t *__xdatum,
+							  kvec_datum_t *__kvecs,
+							  uint32_t kvecs_id)
 {
 	const xpu_timestamp_t *xdatum = (const xpu_timestamp_t *)__xdatum;
 	kvec_timestamp_t *kvecs = (kvec_timestamp_t *)__kvecs;
@@ -690,9 +690,9 @@ PGSTROM_SQLTYPE_OPERATORS(timestamp, true, 8, sizeof(Timestamp));
  * xpu_timestamptz_t device type handlers
  */
 STATIC_FUNCTION(bool)
-xpu_timestamptz_datum_heap_ref(kern_context *kcxt,
-                         const void *addr,
-                         xpu_datum_t *__result)
+xpu_timestamptz_datum_heap_read(kern_context *kcxt,
+								const void *addr,
+								xpu_datum_t *__result)
 {
 	xpu_timestamptz_t *result = (xpu_timestamptz_t *)__result;
 
@@ -702,21 +702,21 @@ xpu_timestamptz_datum_heap_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_timestamptz_datum_arrow_ref(kern_context *kcxt,
-								const kern_data_store *kds,
-								const kern_colmeta *cmeta,
-								uint32_t kds_index,
-								xpu_datum_t *__result)
+xpu_timestamptz_datum_arrow_read(kern_context *kcxt,
+								 const kern_data_store *kds,
+								 const kern_colmeta *cmeta,
+								 uint32_t kds_index,
+								 xpu_datum_t *__result)
 {
 	STROM_ELOG(kcxt, "xpu_timestamptz_t cannot be mapped on any Arrow type");
 	return false;
 }
 
 STATIC_FUNCTION(bool)
-xpu_timestamptz_datum_kvec_ref(kern_context *kcxt,
-							   const kvec_datum_t *__kvecs,
-							   uint32_t kvecs_id,
-							   xpu_datum_t *__result)
+xpu_timestamptz_datum_kvec_load(kern_context *kcxt,
+								const kvec_datum_t *__kvecs,
+								uint32_t kvecs_id,
+								xpu_datum_t *__result)
 {
 	const kvec_timestamptz_t *kvecs = (const kvec_timestamptz_t *)__kvecs;
 	xpu_timestamptz_t *result = (xpu_timestamptz_t *)__result;
@@ -727,10 +727,10 @@ xpu_timestamptz_datum_kvec_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_timestamptz_datum_kvec_store(kern_context *kcxt,
-								 const xpu_datum_t *__xdatum,
-								 kvec_datum_t *__kvecs,
-								 uint32_t kvecs_id)
+xpu_timestamptz_datum_kvec_save(kern_context *kcxt,
+								const xpu_datum_t *__xdatum,
+								kvec_datum_t *__kvecs,
+								uint32_t kvecs_id)
 {
 	const xpu_timestamptz_t *xdatum = (const xpu_timestamptz_t *)__xdatum;
 	kvec_timestamptz_t *kvecs = (kvec_timestamptz_t *)__kvecs;
@@ -822,9 +822,9 @@ STATIC_DATA const int year_lengths[2] = {
 };
 
 STATIC_FUNCTION(bool)
-xpu_interval_datum_heap_ref(kern_context *kcxt,
-							const void *addr,
-							xpu_datum_t *__result)
+xpu_interval_datum_heap_read(kern_context *kcxt,
+							 const void *addr,
+							 xpu_datum_t *__result)
 {
 	xpu_interval_t *result = (xpu_interval_t *)__result;
 
@@ -834,11 +834,11 @@ xpu_interval_datum_heap_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_interval_datum_arrow_ref(kern_context *kcxt,
-                          const kern_data_store *kds,
-                          const kern_colmeta *cmeta,
-                          uint32_t kds_index,
-                          xpu_datum_t *__result)
+xpu_interval_datum_arrow_read(kern_context *kcxt,
+							  const kern_data_store *kds,
+							  const kern_colmeta *cmeta,
+							  uint32_t kds_index,
+							  xpu_datum_t *__result)
 {
 	xpu_interval_t *result = (xpu_interval_t *)__result;
 	const void	   *addr;
@@ -888,10 +888,10 @@ xpu_interval_datum_arrow_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_interval_datum_kvec_ref(kern_context *kcxt,
-                         const kvec_datum_t *__kvecs,
-                         uint32_t kvecs_id,
-                         xpu_datum_t *__result)
+xpu_interval_datum_kvec_load(kern_context *kcxt,
+							 const kvec_datum_t *__kvecs,
+							 uint32_t kvecs_id,
+							 xpu_datum_t *__result)
 {
 	const kvec_interval_t *kvecs = (const kvec_interval_t *)__kvecs;
 	xpu_interval_t *result = (xpu_interval_t *)__result;
@@ -903,10 +903,10 @@ xpu_interval_datum_kvec_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_interval_datum_kvec_store(kern_context *kcxt,
-							  const xpu_datum_t *__xdatum,
-							  kvec_datum_t *__kvecs,
-							  uint32_t kvecs_id)
+xpu_interval_datum_kvec_save(kern_context *kcxt,
+							 const xpu_datum_t *__xdatum,
+							 kvec_datum_t *__kvecs,
+							 uint32_t kvecs_id)
 {
 	const xpu_interval_t *xdatum = (const xpu_interval_t *)__xdatum;
 	kvec_interval_t *kvecs = (kvec_interval_t *)__kvecs;
@@ -919,10 +919,10 @@ xpu_interval_datum_kvec_store(kern_context *kcxt,
 
 STATIC_FUNCTION(bool)
 xpu_interval_datum_kvec_copy(kern_context *kcxt,
-                          const kvec_datum_t *__kvecs_src,
-                          uint32_t kvecs_src_id,
-                          kvec_datum_t *__kvecs_dst,
-                          uint32_t kvecs_dst_id)
+							 const kvec_datum_t *__kvecs_src,
+							 uint32_t kvecs_src_id,
+							 kvec_datum_t *__kvecs_dst,
+							 uint32_t kvecs_dst_id)
 {
 	const kvec_interval_t *kvecs_src = (const kvec_interval_t *)__kvecs_src;
 	kvec_interval_t *kvecs_dst = (kvec_interval_t *)__kvecs_dst;

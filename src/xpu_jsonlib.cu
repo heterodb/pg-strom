@@ -76,9 +76,9 @@ xpu_jsonb_is_valid(kern_context *kcxt, const xpu_jsonb_t *arg)
 }
 
 STATIC_FUNCTION(bool)
-xpu_jsonb_datum_heap_ref(kern_context *kcxt,
-						 const void *addr,
-						 xpu_datum_t *__result)
+xpu_jsonb_datum_heap_read(kern_context *kcxt,
+						  const void *addr,
+						  xpu_datum_t *__result)
 {
 	xpu_jsonb_t *result = (xpu_jsonb_t *)__result;
 
@@ -97,21 +97,21 @@ xpu_jsonb_datum_heap_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_jsonb_datum_arrow_ref(kern_context *kcxt,
-                          const kern_data_store *kds,
-                          const kern_colmeta *cmeta,
-                          uint32_t kds_index,
-                          xpu_datum_t *__result)
+xpu_jsonb_datum_arrow_read(kern_context *kcxt,
+						   const kern_data_store *kds,
+						   const kern_colmeta *cmeta,
+						   uint32_t kds_index,
+						   xpu_datum_t *__result)
 {
 	STROM_ELOG(kcxt, "xpu_jsonb_t does not support Apache Arrow mapping");
 	return false;
 }
 
 STATIC_FUNCTION(bool)
-xpu_jsonb_datum_kvec_ref(kern_context *kcxt,
-                         const kvec_datum_t *__kvecs,
-                         uint32_t kvecs_id,
-                         xpu_datum_t *__result)
+xpu_jsonb_datum_kvec_load(kern_context *kcxt,
+						  const kvec_datum_t *__kvecs,
+						  uint32_t kvecs_id,
+						  xpu_datum_t *__result)
 {
 	const kvec_jsonb_t *kvecs = (const kvec_jsonb_t *)__kvecs;
 	xpu_jsonb_t *result = (xpu_jsonb_t *)__result;
@@ -123,10 +123,10 @@ xpu_jsonb_datum_kvec_ref(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_jsonb_datum_kvec_store(kern_context *kcxt,
-                           const xpu_datum_t *__xdatum,
-                           kvec_datum_t *__kvecs,
-                           uint32_t kvecs_id)
+xpu_jsonb_datum_kvec_save(kern_context *kcxt,
+						  const xpu_datum_t *__xdatum,
+						  kvec_datum_t *__kvecs,
+						  uint32_t kvecs_id)
 {
 	const xpu_jsonb_t *xdatum = (const xpu_jsonb_t *)__xdatum;
 	kvec_jsonb_t *kvecs = (kvec_jsonb_t *)__kvecs;
