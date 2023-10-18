@@ -2150,41 +2150,20 @@ typedef struct
 	float8_t	sum_xy;
 } kagg_state__covar_packed;
 
-struct kern_aggregate_desc
+typedef struct
 {
 	uint32_t	action;			/* any of KAGG_ACTION__* */
 	int32_t		arg0_slot_id;
 	int32_t		arg1_slot_id;
-};
-typedef struct kern_aggregate_desc	kern_aggregate_desc;
+} kern_aggregate_desc;
 
-struct kern_projection_desc
-{
-	uint16_t	proj_slot_id;
-	bool		proj_is_simple;
-	uint32_t	proj_offset;		/* offset on the kvecs-buffer if proj_is_simple.
-									 * elsewhere, it is offset to karg expression */
-	TypeOpCode	proj_type_code;
-	bool		proj_typbyval;
-	int8_t		proj_typalign;
-	int16_t		proj_typlen;
-	const struct xpu_datum_operators *proj_ops;
-};
-typedef struct kern_projection_desc	kern_projection_desc;
-
-struct kern_varload_desc
+typedef struct
 {
 	int16_t		vl_resno;		/* resno of the source */
 	int16_t		vl_slot_id;		/* slot-id to load the datum  */
-	TypeOpCode	vl_type_code;
-	bool		vl_typbyval;
-	int8_t		vl_typalign;
-	int16_t		vl_typlen;
-	const struct xpu_datum_operators *vl_ops;
-};
-typedef struct kern_varload_desc	kern_varload_desc;
+} kern_varload_desc;
 
-struct kern_varmove_desc
+typedef struct
 {
 	int32_t		vm_offset;		/* source & destination kvecs-offset */
 	int16_t		vm_slot_id;		/* source slot-id. */
@@ -2192,13 +2171,7 @@ struct kern_varmove_desc
 								 * depth, so values must be copied from the xdatum,
 								 * not kvecs-buffer.
 								 */
-	TypeOpCode	vm_type_code;
-	bool		vm_typbyval;
-	int8_t		vm_typalign;
-	int16_t		vm_typlen;
-	const struct xpu_datum_operators *vm_ops;
-};
-typedef struct kern_varmove_desc	kern_varmove_desc;
+} kern_varmove_desc;
 
 struct kern_varslot_desc
 {
@@ -2286,7 +2259,7 @@ struct kern_expression
 		} pagg;		/* PreAggs */
 		struct {
 			int			nattrs;
-			kern_projection_desc desc[1];
+			uint16_t	slot_id[1];
 		} proj;		/* Projection */
 		struct {
 			uint32_t	npacked;	/* number of packed sub-expressions; including

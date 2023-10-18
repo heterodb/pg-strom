@@ -1355,47 +1355,6 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 					return false;
 			}
 			break;
-			
-		case FuncOpCode__LoadVars:
-			for (i=0; i < kexp->u.load.nitems; i++)
-			{
-				if (!__lookupDeviceTypeOper(gcontext,
-											&kexp->u.load.desc[i].vl_ops,
-											kexp->u.load.desc[i].vl_type_code,
-											emsg, emsg_sz))
-					return false;
-			}
-			break;
-
-		case FuncOpCode__MoveVars:
-			for (i=0; i < kexp->u.move.nitems; i++)
-			{
-				if (!__lookupDeviceTypeOper(gcontext,
-											&kexp->u.move.desc[i].vm_ops,
-											kexp->u.move.desc[i].vm_type_code,
-											emsg, emsg_sz))
-					return false;
-			}
-			break;
-
-		case FuncOpCode__GiSTEval:
-			if (!__lookupDeviceTypeOper(gcontext,
-										&kexp->u.gist.ivar_desc.vl_ops,
-										kexp->u.gist.ivar_desc.vl_type_code,
-										emsg, emsg_sz))
-				return false;
-			break;
-
-		case FuncOpCode__Projection:
-			for (i=0; i < kexp->u.proj.nattrs; i++)
-			{
-				if (!__lookupDeviceTypeOper(gcontext,
-											&kexp->u.proj.desc[i].proj_ops,
-											kexp->u.proj.desc[i].proj_type_code,
-											emsg, emsg_sz))
-					return false;
-			}
-			break;
 
 		default:
 			break;

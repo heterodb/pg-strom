@@ -2310,10 +2310,6 @@ __codegen_build_loadvars_one(codegen_context *context, int depth)
 			memset(vl_desc, 0, sizeof(kern_varload_desc));
 			vl_desc->vl_resno     = kvdef->kv_resno;
 			vl_desc->vl_slot_id   = kvdef->kv_slot_id;
-			vl_desc->vl_type_code = kvdef->kv_type_code;
-			vl_desc->vl_typbyval  = kvdef->kv_typbyval;
-			vl_desc->vl_typalign  = kvdef->kv_typalign;
-			vl_desc->vl_typlen    = kvdef->kv_typlen;
 		}
 	}
 	if (nitems == 0)
@@ -2420,10 +2416,6 @@ __codegen_build_movevars_one(codegen_context *context, int depth, int gist_depth
 			vm_desc->vm_from_xdatum = (gist_depth < 0
 									   ? kvdef->kv_depth == depth
 									   : kvdef->kv_depth == gist_depth);
-			vm_desc->vm_type_code = kvdef->kv_type_code;
-			vm_desc->vm_typbyval  = kvdef->kv_typbyval;
-			vm_desc->vm_typalign  = kvdef->kv_typalign;
-			vm_desc->vm_typlen    = kvdef->kv_typlen;
 		}
 	}
 	if (nitems == 0)
@@ -2591,7 +2583,7 @@ __try_inject_projection_expression(codegen_context *context,
 	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
 
 	/*
-	 * Setup SaveVar expression
+	 * Setup VarExpr / SaveExpr expression
 	 */
 found:
 	memset(&kexp, 0, sizeof(kexp));
@@ -2621,10 +2613,10 @@ try_inject_projection_expression(codegen_context *context,
 	kvdef = __try_inject_projection_expression(context, buf, expr);
 	for (int i=0; i < kexp_proj->u.proj.nattrs; i++)
 	{
-		const kern_projection_desc *desc = &kexp_proj->u.proj.desc[i];
+		uint16_t	proj_slot_id = kexp_proj->u.proj.slot_id[i];
 
 		/* revert expression if already loaded */
-		if (kvdef->kv_slot_id == desc->proj_slot_id)
+		if (kvdef->kv_slot_id == proj_slot_id)
 		{
 			buf->len = pos;
 			goto bailout;
@@ -2645,7 +2637,6 @@ codegen_build_projection(codegen_context *context)
 	StringInfoData buf;
 	bytea	   *xpucode;
 	bool		meet_resjunk = false;
-	int			nitems = 0;
 	int			nattrs = 0;
 	int			sz;
 	ListCell   *lc;
@@ -2665,7 +2656,7 @@ codegen_build_projection(codegen_context *context)
 		else
 			nattrs++;
 	}
-	sz = MAXALIGN(offsetof(kern_expression, u.proj.desc[nattrs]));
+	sz = MAXALIGN(offsetof(kern_expression, u.proj.slot_id[nattrs]));
 	kexp = alloca(sz);
 	memset(kexp, 0, sz);
 
@@ -2675,7 +2666,6 @@ codegen_build_projection(codegen_context *context)
 	{
 		TargetEntry	*tle = lfirst(lc);
 		codegen_kvar_defitem *kvdef;
-		kern_projection_desc *desc;
 
 		if (tle->resjunk)
 			break;
@@ -2683,15 +2673,9 @@ codegen_build_projection(codegen_context *context)
 												 kexp,
 												 &buf,
 												 tle->expr);
-		desc = &kexp->u.proj.desc[nitems++];
-		desc->proj_slot_id   = kvdef->kv_slot_id;
-		desc->proj_type_code = kvdef->kv_type_code;
-		desc->proj_typbyval  = kvdef->kv_typbyval;
-		desc->proj_typalign  = kvdef->kv_typalign;
-		desc->proj_typlen    = kvdef->kv_typlen;
+		kexp->u.proj.slot_id[kexp->u.proj.nattrs++] = kvdef->kv_slot_id;
 	}
-	Assert(nitems == nattrs);
-
+	Assert(nattrs == kexp->u.proj.nattrs);
 	kexp->exptype = TypeOpCode__int4;
 	kexp->expflags = context->kexp_flags;
 	kexp->opcode  = FuncOpCode__Projection;
@@ -3004,10 +2988,6 @@ __codegen_build_one_gistquals(codegen_context *context,
 	kexp.u.gist.htup_slot_id = htup_slot_id;
 	kexp.u.gist.ivar_desc.vl_resno     = kvdef->kv_resno;
 	kexp.u.gist.ivar_desc.vl_slot_id   = kvdef->kv_slot_id;
-	kexp.u.gist.ivar_desc.vl_type_code = kvdef->kv_type_code;
-	kexp.u.gist.ivar_desc.vl_typbyval  = kvdef->kv_typbyval;
-	kexp.u.gist.ivar_desc.vl_typalign  = kvdef->kv_typalign;
-	kexp.u.gist.ivar_desc.vl_typlen    = kvdef->kv_typlen;
 	off = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
 
 	/* setup binary operator to evaluate GiST index */
@@ -3637,44 +3617,6 @@ __xpucode_var_cstring(StringInfo buf,
 }
 
 static void
-__xpucode_projection_cstring(StringInfo buf,
-							 const kern_expression *kexp,
-							 const CustomScanState *css,
-							 ExplainState *es,
-							 List *dcontext)
-{
-	devtype_info   *dtype;
-
-	appendStringInfo(buf, "{Projection:");
-	for (int j=0; j < kexp->u.proj.nattrs; j++)
-	{
-		const kern_projection_desc *desc = &kexp->u.proj.desc[j];
-
-		if (j > 0)
-			appendStringInfoChar(buf, ',');
-		dtype = devtype_lookup_by_opcode(desc->proj_type_code);
-		if (!dtype)
-			elog(ERROR, "device type lookup failed for code:%u",
-				 desc->proj_type_code);
-		appendStringInfo(buf, " att%d=<slot=%d",
-						 j+1,
-						 desc->proj_slot_id);
-		if (desc->proj_is_simple)
-			appendStringInfo(buf, ", kvecs=0x%04x+%d",
-							 desc->proj_offset,
-							 dtype->kvec_sizeof);
-		else
-			appendStringInfo(buf, ", karg=%d",
-							 desc->proj_offset);
-
-		appendStringInfo(buf, ", type='%s', expr='%s'>",
-						 dtype->type_name,
-						 __get_expression_cstring(css, dcontext,
-												  desc->proj_slot_id));
-	}
-}
-
-static void
 __xpucode_loadvars_cstring(StringInfo buf,
 						   const kern_expression *kexp,
 						   const CustomScanState *css,
@@ -3692,12 +3634,17 @@ __xpucode_loadvars_cstring(StringInfo buf,
 	for (int i=0; i < nitems; i++)
 	{
 		const kern_varload_desc *vl_desc = &kexp->u.load.desc[i];
+		const codegen_kvar_defitem *kvdef;
 		devtype_info   *dtype;
 
-		dtype = devtype_lookup_by_opcode(vl_desc->vl_type_code);
+		kvdef = __lookup_kvar_defitem_by_slot_id(css, vl_desc->vl_slot_id);
+		if (!kvdef)
+			elog(ERROR, "failed on kernel variable with slot_id=%d",
+				vl_desc->vl_slot_id);
+		dtype = devtype_lookup_by_opcode(kvdef->kv_type_code);
 		if (!dtype)
 			elog(ERROR, "failed on devtype_lookup_by_opcode(%u)",
-				 vl_desc->vl_type_code);
+				 kvdef->kv_type_code);
 		if (i > 0)
 			appendStringInfo(buf, ", ");
 		appendStringInfo(buf, "<slot=%d, type='%s' resno=%d(%s)>",
@@ -3719,26 +3666,31 @@ __xpucode_movevars_cstring(StringInfo buf,
 						   List *dcontext)
 {
 	Assert(kexp->nr_args == 0);
-	appendStringInfo(buf, "{MoveVars(depth=%d): kvars=[",
+	appendStringInfo(buf, "{MoveVars(depth=%d): items=[",
 					 kexp->u.move.depth);
 
 	for (int i=0; i < kexp->u.move.nitems; i++)
 	{
 		const kern_varmove_desc *vm_desc = &kexp->u.move.desc[i];
+		const codegen_kvar_defitem *kvdef;
 		devtype_info   *dtype;
 
-		dtype = devtype_lookup_by_opcode(vm_desc->vm_type_code);
+		kvdef = __lookup_kvar_defitem_by_slot_id(css, vm_desc->vm_slot_id);
+		if (!kvdef)
+			elog(ERROR, "failed on kernel variable with slot_id=%d",
+				 vm_desc->vm_slot_id);
+		dtype = devtype_lookup_by_opcode(kvdef->kv_type_code);
 		if (!dtype)
 			elog(ERROR, "failed on devtype_lookup_by_opcode(%u)",
-				 vm_desc->vm_type_code);
+				 kvdef->kv_type_code);
 		if (i > 0)
 			appendStringInfo(buf, ", ");
 		appendStringInfo(buf, "<");
 		if (vm_desc->vm_from_xdatum)
 			appendStringInfo(buf, "slot=%d, ", vm_desc->vm_slot_id);
-		appendStringInfo(buf, "offset=0x%04x+%u, type='%s', expr='%s'>",
+		appendStringInfo(buf, "offset=0x%04x-%04x, type='%s', expr='%s'>",
 						 vm_desc->vm_offset,
-						 dtype->kvec_sizeof,
+						 vm_desc->vm_offset + dtype->kvec_sizeof - 1,
 						 dtype->type_name,
 						 __get_expression_cstring(css, dcontext,
 												  vm_desc->vm_slot_id));
@@ -3754,6 +3706,7 @@ __xpucode_gisteval_cstring(StringInfo buf,
                            List *dcontext)
 {
 	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	const codegen_kvar_defitem *kvdef;
 	devtype_info   *dtype;
 
 	Assert(kexp->nr_args == 1 &&
@@ -3763,10 +3716,14 @@ __xpucode_gisteval_cstring(StringInfo buf,
 		elog(ERROR, "device type lookup failed for code:%u", kexp->exptype);
 	appendStringInfo(buf, "{GiSTEval(%s): ", dtype->type_name);
 
-	dtype = devtype_lookup_by_opcode(kexp->u.gist.ivar_desc.vl_type_code);
+	kvdef = __lookup_kvar_defitem_by_slot_id(css, kexp->u.gist.ivar_desc.vl_slot_id);
+	if (!kvdef)
+		elog(ERROR, "failed on kernel variable with slot_id=%d",
+			 kexp->u.gist.ivar_desc.vl_slot_id);
+	dtype = devtype_lookup_by_opcode(kvdef->kv_type_code);
 	if (!dtype)
 		elog(ERROR, "device type lookup failed for code:%u",
-			 kexp->u.gist.ivar_desc.vl_type_code);
+			 kvdef->kv_type_code);
 	appendStringInfo(buf, "<slot=%d, idxname%d='%s', type='%s'>, arg=",
 					 kexp->u.gist.ivar_desc.vl_slot_id,
 					 kexp->u.gist.ivar_desc.vl_resno,
@@ -3923,7 +3880,16 @@ __xpucode_to_cstring(StringInfo buf,
 			__xpucode_var_cstring(buf, kexp, css, es, dcontext);
 			return;
 		case FuncOpCode__Projection:
-			__xpucode_projection_cstring(buf, kexp, css, es, dcontext);
+			appendStringInfo(buf, "{Projection: layout=<");
+			for (int j=0; j < kexp->u.proj.nattrs; j++)
+			{
+				uint16_t	proj_slot_id = kexp->u.proj.slot_id[j];
+
+				if (j > 0)
+					appendStringInfo(buf, ",");
+				appendStringInfo(buf, "%d", proj_slot_id);
+			}
+			appendStringInfo(buf, ">");
 			break;
 		case FuncOpCode__LoadVars:
 			__xpucode_loadvars_cstring(buf, kexp, css, es, dcontext);
@@ -4277,11 +4243,13 @@ pgstrom_explain_kvecs_buffer(const CustomScanState *css,
 		  __sort_kvar_defitem_by_kvecs_offset);
 
 	initStringInfo(&buf);
-	appendStringInfo(&buf, "nbytes: %u, ndims: %d, kvecs=",
+	appendStringInfo(&buf, "nbytes: %u, ndims: %d",
 					 pp_info->kvecs_bufsz,
 					 pp_info->num_rels + 2);
 	if (nitems > 1)
-		appendStringInfoChar(&buf, '[');
+		appendStringInfo(&buf, ", items=[");
+	else if (nitems > 0)
+		appendStringInfo(&buf, ", item=");
 	for (int i=0; i < nitems; i++)
 	{
 		const codegen_kvar_defitem *kvdef = kvdef_array[i];
@@ -4294,9 +4262,10 @@ pgstrom_explain_kvecs_buffer(const CustomScanState *css,
 		if (i > 0)
 			appendStringInfo(&buf, ", ");
 
-		appendStringInfo(&buf, "kvecs%d=<0x%04x+%d, type='%s', expr='%s'>",
-						 i, kvdef->kv_offset,
-						 dtype->kvec_sizeof,
+		appendStringInfo(&buf, "kvec%d=<0x%04x-%04x, type='%s', expr='%s'>",
+						 i,
+						 kvdef->kv_offset,
+						 kvdef->kv_offset + dtype->kvec_sizeof - 1,
 						 dtype->type_name,
 						 deparse_expression((Node *)kvdef->kv_expr,
 											dcontext,

@@ -59,6 +59,7 @@ __extract_heap_tuple_sysattr(kern_context *kcxt,
 
 	if (slot_id < kcxt->kvars_nslots)
 	{
+		const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[slot_id];
 		xpu_datum_t	   *xdatum = kcxt->kvars_values[slot_id];
 		const void	   *addr;
 
@@ -84,7 +85,7 @@ __extract_heap_tuple_sysattr(kern_context *kcxt,
 				STROM_ELOG(kcxt, "not a supported system attribute reference");
 				return false;
 		}
-		return vl_desc->vl_ops->xpu_datum_heap_read(kcxt, addr, xdatum);
+		return vs_desc->vs_ops->xpu_datum_heap_read(kcxt, addr, xdatum);
 	}
 	STROM_ELOG(kcxt, "kvars slot-id: out of range");
 	return false;
@@ -1083,7 +1084,6 @@ kern_form_heaptuple(kern_context *kcxt,
 	 */
 	int			nattrs = kexp_proj->u.proj.nattrs;
 	uint32_t	t_hoff;
-	uint32_t	t_next;
 	uint16_t	t_infomask = 0;
 	bool		t_hasnull = false;
 
@@ -1092,17 +1092,18 @@ kern_form_heaptuple(kern_context *kcxt,
 	/* has any NULL attributes? */
 	for (int j=0; j < nattrs; j++)
 	{
-		uint32_t	slot_id = kexp_proj->u.proj.desc[j].proj_slot_id;
+		uint16_t		slot_id = kexp_proj->u.proj.slot_id[j];
+		xpu_datum_t	   *xdatum;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		if (XPU_DATUM_ISNULL(kcxt->kvars_values[slot_id]))
+		xdatum = kcxt->kvars_values[slot_id];
+		if (XPU_DATUM_ISNULL(xdatum))
 		{
 			t_infomask |= HEAP_HASNULL;
 			t_hasnull = true;
 			break;
 		}
 	}
-
 	/* set up headers */
 	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
 	if (t_hasnull)
@@ -1121,13 +1122,13 @@ kern_form_heaptuple(kern_context *kcxt,
 		htup->t_hoff = t_hoff;
 	}
 
-	/* walk on the columns */
+	/* walks on the source attributes */
 	for (int j=0; j < nattrs; j++)
 	{
 		const kern_colmeta *cmeta_dst = &kds_dst->colmeta[j];
-		uint32_t		slot_id = kexp_proj->u.proj.desc[j].proj_slot_id;
+		uint16_t		slot_id = kexp_proj->u.proj.slot_id[j];
 		xpu_datum_t	   *xdatum;
-		int				nbytes;
+		int				sz, t_next;
 		char		   *buffer = NULL;
 
 		assert(slot_id < kcxt->kvars_nslots);
@@ -1143,11 +1144,11 @@ kern_form_heaptuple(kern_context *kcxt,
 				buffer = (char *)htup + t_next;
 			}
 			/* write-out or estimate length */
-			nbytes = xdatum->expr_ops->xpu_datum_write(kcxt,
-													   buffer,
-													   cmeta_dst,
-													   xdatum);
-			if (nbytes < 0)
+			sz = xdatum->expr_ops->xpu_datum_write(kcxt,
+												   buffer,
+												   cmeta_dst,
+												   xdatum);
+			if (sz < 0)
 				return -1;
 			/* update t_infomask if varlena */
 			if (cmeta_dst->attlen == -1)
@@ -1159,7 +1160,7 @@ kern_form_heaptuple(kern_context *kcxt,
 			/* set not-null bit, if valid */
 			if (htup && t_hasnull)
 				htup->t_bits[j>>3] |= (1<<(j & 7));
-			t_hoff = t_next + nbytes;
+			t_hoff = t_next + sz;
 		}
 	}
 
@@ -1185,11 +1186,18 @@ kern_estimate_heaptuple(kern_context *kcxt,
 		 i++, karg=KEXP_NEXT_ARG(karg))
 	{
 		xpu_datum_t	   *xdatum;
+		uint16_t		slot_id;
 
-		assert(__KEXP_IS_VALID(kexp_proj, karg) &&
-			   karg->opcode == FuncOpCode__SaveExpr &&
-			   karg->u.save.sv_slot_id < kcxt->kvars_nslots);
-		xdatum = kcxt->kvars_values[karg->u.save.sv_slot_id];
+		assert(__KEXP_IS_VALID(kexp_proj, karg));
+		if (karg->opcode == FuncOpCode__VarExpr)
+			slot_id = karg->u.v.var_slot_id;
+		else
+		{
+			assert(karg->opcode == FuncOpCode__SaveExpr);
+			slot_id = karg->u.save.sv_slot_id;
+		}
+		assert(slot_id < kcxt->kvars_nslots);
+		xdatum = kcxt->kvars_values[slot_id];
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, xdatum))
 			return -1;
 	}
@@ -1683,22 +1691,18 @@ ExecMoveKernelVariables(kern_context *kcxt,
 	for (int i=0; i < kexp_move_vars->u.move.nitems; i++)
 	{
 		const kern_varmove_desc *vm_desc = &kexp_move_vars->u.move.desc[i];
-		const xpu_datum_operators *vm_ops = vm_desc->vm_ops;
+		const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[vm_desc->vm_slot_id];
 
+		assert(vm_desc->vm_slot_id >= 0 &&
+			   vm_desc->vm_slot_id <  kcxt->kvars_nslots);
+		assert(vm_desc->vm_offset + vs_desc->vs_ops->xpu_kvec_sizeof <= kcxt->kvecs_bufsz);
 		if (vm_desc->vm_from_xdatum)
 		{
 			/* xdatum -> kvec-buffer */
-			xpu_datum_t	   *xdatum;
-			kvec_datum_t   *dst_kvec;
-
-			assert(vm_desc->vm_slot_id >= 0 &&
-				   vm_desc->vm_slot_id <  kcxt->kvars_nslots);
-			xdatum = kcxt->kvars_values[vm_desc->vm_slot_id];
-			dst_kvec = (kvec_datum_t *)(dst_kvec_buffer + vm_desc->vm_offset);
-			assert((char *)dst_kvec +
-				   vm_ops->xpu_kvec_sizeof <= (dst_kvec_buffer + kcxt->kvecs_bufsz));
-				
-			
+			xpu_datum_t	   *xdatum = kcxt->kvars_values[vm_desc->vm_slot_id];
+			kvec_datum_t   *dst_kvec = (kvec_datum_t *)(dst_kvec_buffer +
+														vm_desc->vm_offset);
+			assert(xdatum->expr_ops == NULL || xdatum->expr_ops == vs_desc->vs_ops);
 			if (__kvec_update_nullmask(dst_kvec, dst_kvec_id,
 									   tuple_is_valid
 									   ? (XPU_DATUM_ISNULL(xdatum) ? 1 : 0)
@@ -1720,18 +1724,14 @@ ExecMoveKernelVariables(kern_context *kcxt,
 			assert(src_kvec_buffer != NULL);
 			src_kvec = (const kvec_datum_t *)(src_kvec_buffer +
 											  vm_desc->vm_offset);
-			assert((char *)src_kvec +
-				   vm_ops->xpu_kvec_sizeof <= (src_kvec_buffer + kcxt->kvecs_bufsz));
 			dst_kvec = (kvec_datum_t *)(dst_kvec_buffer +
 										vm_desc->vm_offset);
-			assert((char *)dst_kvec +
-				   vm_ops->xpu_kvec_sizeof <= (dst_kvec_buffer + kcxt->kvecs_bufsz));
 			if (__kvec_copy_nullmask(src_kvec, src_kvec_id,
 									 dst_kvec, dst_kvec_id,
 									 tuple_is_valid) &&
-				!vm_ops->xpu_datum_kvec_copy(kcxt,
-											 src_kvec, src_kvec_id,
-											 dst_kvec, dst_kvec_id))
+				!vs_desc->vs_ops->xpu_datum_kvec_copy(kcxt,
+													  src_kvec, src_kvec_id,
+													  dst_kvec, dst_kvec_id))
 			{
 				return false;
 			}
