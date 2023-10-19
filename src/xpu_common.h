@@ -412,26 +412,16 @@ typedef struct
 	const char	   *error_message;
 	struct kern_session_info *session;
 
-	/*
-	 * current slot of the kernel variable references
-	 *
-	 * if kvars_class[slot_id] < 0, if means kvars_slot[slot_id] has pointer
-	 * or inline value according to KVAR_CLASS__*.
-	 * elsewhere (kvars_class[slot_id] >= 0), kvars_slot[slot_id].ptr points
-	 * variable length datum with this length; used for Arrow::Utf-8 or Binary.
-	 */
+	/* the kernel variables slot */
 	struct xpu_datum_t **kvars_values;
 	const struct kern_varslot_desc *kvars_desc;
 	uint32_t		kvars_nslots;		/* length of kvars_values / desc */
 	uint32_t		kvars_nrooms;		/* length of kvars_desc (incl. subfields) */
-	uint32_t		kvecs_bufsz;
-	uint32_t		kvecs_ndims;
+	uint32_t		kvecs_bufsz;		/* kvecs-buffer size per depth */
+	uint32_t		kvecs_ndims;		/* number of kvecs-buffer per warp */
 	char		   *kvecs_curr_buffer;	/* current kvecs-buffer */
 	uint32_t		kvecs_curr_id;		/* current kvecs-id */
-#if 1
-	kern_variable  *kvars_slot;		//deprecated
-	int			   *kvars_class;	//deprecated
-#endif
+
 	/*
 	 * mode control flags
 	 *
@@ -454,6 +444,7 @@ typedef struct
 		KCXT = (kern_context *)alloca(__len);							\
 		memset(KCXT, 0, __len);											\
 		KCXT->session = (SESSION);										\
+		KCXT->kvars_nrooms = (SESSION)->kcxt_kvars_nrooms;				\
 		KCXT->kvars_nslots = (SESSION)->kcxt_kvars_nslots;				\
 		KCXT->kvecs_bufsz  = (SESSION)->kcxt_kvecs_bufsz;				\
 		KCXT->kvecs_ndims  = (SESSION)->kcxt_kvecs_ndims;				\

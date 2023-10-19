@@ -3414,7 +3414,7 @@ __codegen_build_groupby_actions(codegen_context *context,
 				Expr   *fn_arg = lfirst(cell);
 
 				kvdef = try_inject_groupby_expression(context, kexp, &buf, fn_arg);
-				if (lc2 == list_head(func->args))
+				if (cell == list_head(func->args))
 				{
 					desc->arg0_slot_id = kvdef->kv_slot_id;
 				}

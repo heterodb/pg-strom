@@ -15,83 +15,6 @@
 /*
  * __writeOutOneTuplePreAgg
  */
-#if 0
-STATIC_FUNCTION(int32_t)
-__writeOutOneTupleGroupKey(kern_context *kcxt,
-						   kern_colmeta *cmeta,
-						   kern_aggregate_desc *desc,
-						   char *buffer)
-{
-	const kern_varslot_desc *vs_desc;
-	int32_t		nbytes;
-
-	assert(desc->action == KAGG_ACTION__VREF &&
-		   desc->arg0_slot_id >= 0 &&
-		   desc->arg0_slot_id < kcxt->kvars_nslots);
-	re
-
-	
-	vclass = kcxt->kvars_class[desc->arg0_slot_id];
-	kvar = &kcxt->kvars_slot[desc->arg0_slot_id];
-	switch (vclass)
-	{
-		case KVAR_CLASS__NULL:
-			return 0;
-
-		case KVAR_CLASS__INLINE:
-			assert(cmeta->attlen >= 0 &&
-				   cmeta->attlen <= sizeof(kern_variable));
-			if (buffer)
-				memcpy(buffer, kvar, cmeta->attlen);
-			return cmeta->attlen;
-
-		case KVAR_CLASS__VARLENA:
-			assert(cmeta->attlen == -1);
-			nbytes = VARSIZE_ANY(kvar->ptr);
-			if (buffer)
-				memcpy(buffer, kvar->ptr, nbytes);
-			return nbytes;
-
-		case KVAR_CLASS__XPU_DATUM:
-			{
-				xpu_datum_t *xdatum = (xpu_datum_t *)kvar->ptr;
-				const xpu_datum_operators *expr_ops = xdatum->expr_ops;
-
-				if (XPU_DATUM_ISNULL(xdatum))
-					return 0;
-				assert(xdatum->expr_ops == expr_ops);
-				return expr_ops->xpu_datum_write(kcxt, buffer, cmeta, xdatum);
-			}
-
-		default:
-			if (vclass < 0)
-				return -1;
-			if (cmeta->attlen >= 0)
-			{
-				if (buffer)
-				{
-					nbytes = Min(vclass, cmeta->attlen);
-					memcpy(buffer, kvar->ptr, nbytes);
-					if (nbytes < cmeta->attlen)
-						memset(buffer + nbytes, 0, cmeta->attlen - nbytes);
-				}
-				return cmeta->attlen;
-            }
-            else if (cmeta->attlen == -1)
-            {
-				nbytes = VARHDRSZ + vclass;
-				if (buffer)
-				{
-					memcpy(buffer+VARHDRSZ, kvar->ptr, vclass);
-					SET_VARSIZE(buffer, nbytes);
-				}
-				return nbytes;
-			}
-	}
-	return -1;
-}
-#endif
-
 STATIC_FUNCTION(int32_t)
 __writeOutOneTuplePreAgg(kern_context *kcxt,
 						 kern_data_store *kds_final,
@@ -280,11 +203,11 @@ __update_nogroups__nrows_any(kern_context *kcxt,
 							 char *buffer,
 							 kern_colmeta *cmeta,
 							 kern_aggregate_desc *desc,
-							 bool kvars_is_valid)
+							 bool source_is_valid)
 {
 	uint32_t	mask;
 
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
+	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (LaneId() == 0)
 		__atomic_add_uint64((uint64_t *)buffer, __popc(mask));
 }
@@ -297,16 +220,18 @@ __update_nogroups__nrows_cond(kern_context *kcxt,
 							  char *buffer,
 							  kern_colmeta *cmeta,
 							  kern_aggregate_desc *desc,
-							  bool kvars_is_valid)
+							  bool source_is_valid)
 {
 	uint32_t	mask;
 
-	if (kvars_is_valid)
+	if (source_is_valid)
 	{
-		if (kcxt->kvars_class[desc->arg0_slot_id] == KVAR_CLASS__NULL)
-			kvars_is_valid = false;
+		xpu_datum_t	   *xdatum = kcxt->kvars_values[desc->arg0_slot_id];
+
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
+	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (LaneId() == 0)
 		__atomic_add_uint64((uint64_t *)buffer, __popc(mask));
 }
@@ -323,26 +248,28 @@ __update_nogroups__pmin_int32(kern_context *kcxt,
 							  char *buffer,
 							  kern_colmeta *cmeta,
 							  kern_aggregate_desc *desc,
-							  bool kvars_is_valid)
+							  bool source_is_valid)
 {
 	int32_t		ival = INT_MAX;
 	int32_t		temp;
 	uint32_t	mask;
 
-	if (kvars_is_valid)
+	if (source_is_valid)
 	{
-		int		slot_id = desc->arg0_slot_id;
-		int		vclass = kcxt->kvars_class[slot_id];
+		xpu_int4_t	   *xdatum = (xpu_int4_t *)
+			kcxt->kvars_values[desc->arg0_slot_id];
 
-		if (vclass == KVAR_CLASS__INLINE)
-			ival = kcxt->kvars_slot[slot_id].i32;
+		if (!XPU_DATUM_ISNULL(xdatum))
+		{
+			assert(xdatum->expr_ops == &xpu_int4_ops);
+			ival = xdatum->value;
+		}
 		else
 		{
-			assert(vclass == KVAR_CLASS__NULL);
-			kvars_is_valid = false;
+			source_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
+	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (mask != 0)
 	{
 		kagg_state__pminmax_int64_packed *r =
@@ -374,26 +301,28 @@ __update_nogroups__pmin_int64(kern_context *kcxt,
 							  char *buffer,
 							  kern_colmeta *cmeta,
 							  kern_aggregate_desc *desc,
-							  bool kvars_is_valid)
+							  bool source_is_valid)
 {
 	int64_t		ival = LONG_MAX;
 	int64_t		temp;
 	uint32_t	mask;
 
-	if (kvars_is_valid)
+	if (source_is_valid)
 	{
-		int		slot_id = desc->arg0_slot_id;
-		int		vclass = kcxt->kvars_class[slot_id];
+		xpu_int8_t	   *xdatum = (xpu_int8_t *)
+			kcxt->kvars_values[desc->arg0_slot_id];
 
-		if (vclass == KVAR_CLASS__INLINE)
-			ival = kcxt->kvars_slot[slot_id].i64;
+		if (!XPU_DATUM_ISNULL(xdatum))
+		{
+			assert(xdatum->expr_ops == &xpu_int8_ops);
+			ival = xdatum->value;
+		}
 		else
 		{
-			assert(vclass == KVAR_CLASS__NULL);
-			kvars_is_valid = false;
+			source_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
+	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (mask != 0)
 	{
 		kagg_state__pminmax_int64_packed *r =
@@ -425,28 +354,27 @@ __update_nogroups__pmax_int32(kern_context *kcxt,
 							  char *buffer,
 							  kern_colmeta *cmeta,
 							  kern_aggregate_desc *desc,
-							  bool kvars_is_valid)
+							  bool source_is_valid)
 {
 	int32_t		ival = INT_MIN;
 	int32_t		temp;
 	uint32_t	mask;
 
-	if (kvars_is_valid)
+	if (source_is_valid)
 	{
-		int		slot_id = desc->arg0_slot_id;
-		int		vclass = kcxt->kvars_class[slot_id];
-
-		if (vclass == KVAR_CLASS__INLINE)
+		xpu_int4_t	   *xdatum = (xpu_int4_t *)
+			kcxt->kvars_values[desc->arg0_slot_id];
+		if (!XPU_DATUM_ISNULL(xdatum))
 		{
-			ival = kcxt->kvars_slot[slot_id].i32;
+			assert(xdatum->expr_ops == &xpu_int4_ops);
+			ival = xdatum->value;
 		}
 		else
 		{
-			assert(vclass == KVAR_CLASS__NULL);
-			kvars_is_valid = false;
+			source_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
+	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (mask != 0)
 	{
 		kagg_state__pminmax_int64_packed *r =
@@ -479,28 +407,28 @@ __update_nogroups__pmax_int64(kern_context *kcxt,
 							  char *buffer,
 							  kern_colmeta *cmeta,
 							  kern_aggregate_desc *desc,
-							  bool kvars_is_valid)
+							  bool source_is_valid)
 {
 	int64_t		ival = LONG_MIN;
 	int64_t		temp;
 	uint32_t	mask;
 
-	if (kvars_is_valid)
+	if (source_is_valid)
 	{
-		int		slot_id = desc->arg0_slot_id;
-		int		vclass = kcxt->kvars_class[slot_id];
+		xpu_int8_t	   *xdatum = (xpu_int8_t *)
+			kcxt->kvars_values[desc->arg0_slot_id];
 
-		if (vclass == KVAR_CLASS__INLINE)
+		if (!XPU_DATUM_ISNULL(xdatum))
 		{
-			ival = kcxt->kvars_slot[slot_id].i64;
+			assert(xdatum->expr_ops == &xpu_int8_ops);
+			ival = xdatum->value;
 		}
 		else
 		{
-			assert(vclass == KVAR_CLASS__NULL);
-			kvars_is_valid = false;
+			source_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
+	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (mask != 0)
 	{
 		kagg_state__pminmax_int64_packed *r =
@@ -533,26 +461,27 @@ __update_nogroups__pmin_fp64(kern_context *kcxt,
 							 char *buffer,
 							 kern_colmeta *cmeta,
 							 kern_aggregate_desc *desc,
-							 bool kvars_is_valid)
+							 bool source_is_valid)
 {
 	float8_t	fval = DBL_MAX;
 	float8_t	temp;
 	uint32_t	mask;
 
-	if (kvars_is_valid)
+	if (source_is_valid)
 	{
-		int		slot_id = desc->arg0_slot_id;
-		int		vclass = kcxt->kvars_class[slot_id];
-
-		if (vclass == KVAR_CLASS__INLINE)
-			fval = kcxt->kvars_slot[slot_id].fp64;
+		xpu_float8_t   *xdatum = (xpu_float8_t *)
+			kcxt->kvars_values[desc->arg0_slot_id];
+		if (!XPU_DATUM_ISNULL(xdatum))
+		{
+			assert(xdatum->expr_ops == &xpu_float8_ops);
+			fval = xdatum->value;
+		}
 		else
 		{
-			assert(vclass == KVAR_CLASS__NULL);
-			kvars_is_valid = false;
+			source_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
+	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (mask != 0)
 	{
 		kagg_state__pminmax_fp64_packed *r =
@@ -585,26 +514,28 @@ __update_nogroups__pmax_fp64(kern_context *kcxt,
 							 char *buffer,
 							 kern_colmeta *cmeta,
 							 kern_aggregate_desc *desc,
-							 bool kvars_is_valid)
+							 bool source_is_valid)
 {
 	float8_t	fval = -DBL_MAX;
 	float8_t	temp;
 	uint32_t	mask;
 
-	if (kvars_is_valid)
+	if (source_is_valid)
 	{
-		int		slot_id = desc->arg0_slot_id;
-		int		vclass = kcxt->kvars_class[slot_id];
+		xpu_float8_t   *xdatum = (xpu_float8_t *)
+			kcxt->kvars_values[desc->arg0_slot_id];
 
-		if (vclass == KVAR_CLASS__INLINE)
-			fval = kcxt->kvars_slot[slot_id].fp64;
+		if (!XPU_DATUM_ISNULL(xdatum))
+		{
+			assert(xdatum->expr_ops == &xpu_float8_ops);
+			fval = xdatum->value;
+		}
 		else
 		{
-			assert(vclass == KVAR_CLASS__NULL);
-			kvars_is_valid = false;
+			source_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
+	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (mask != 0)
 	{
 		kagg_state__pminmax_fp64_packed *r =
@@ -637,25 +568,27 @@ __update_nogroups__psum_int(kern_context *kcxt,
 							char *buffer,
 							kern_colmeta *cmeta,
 							kern_aggregate_desc *desc,
-							bool kvars_is_valid)
+							bool source_is_valid)
 {
 	int64_t		ival = 0;
 	uint32_t	mask;
 
-	if (kvars_is_valid)
+	if (source_is_valid)
 	{
-		int		slot_id = desc->arg0_slot_id;
-		int		vclass = kcxt->kvars_class[slot_id];
+		xpu_int8_t *xdatum = (xpu_int8_t *)
+			kcxt->kvars_values[desc->arg0_slot_id];
 
-		if (vclass == KVAR_CLASS__INLINE)
-			ival = kcxt->kvars_slot[slot_id].i64;
+		if (!XPU_DATUM_ISNULL(xdatum))
+		{
+			assert(xdatum->expr_ops == &xpu_int8_ops);
+			ival = xdatum->value;
+		}
 		else
 		{
-			assert(vclass == KVAR_CLASS__NULL);
-			kvars_is_valid = false;
+			source_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
+	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (mask != 0)
 	{
 		ival += __shfl_xor_sync(__activemask(), ival, 0x0001);
@@ -681,25 +614,27 @@ __update_nogroups__psum_fp(kern_context *kcxt,
 						   char *buffer,
 						   kern_colmeta *cmeta,
 						   kern_aggregate_desc *desc,
-						   bool kvars_is_valid)
+						   bool source_is_valid)
 {
 	float8_t	fval = 0;
 	uint32_t	mask;
 
-	if (kvars_is_valid)
+	if (source_is_valid)
 	{
-		int		slot_id = desc->arg0_slot_id;
-		int		vclass = kcxt->kvars_class[slot_id];
+		xpu_float8_t   *xdatum = (xpu_float8_t *)
+			kcxt->kvars_values[desc->arg0_slot_id];
 
-		if (vclass == KVAR_CLASS__INLINE)
-			fval = kcxt->kvars_slot[slot_id].fp64;
+		if (!XPU_DATUM_ISNULL(xdatum))
+		{
+			assert(xdatum->expr_ops == &xpu_float8_ops);
+			fval = xdatum->value;
+		}
 		else
 		{
-			assert(vclass == KVAR_CLASS__NULL);
-			kvars_is_valid = false;
+			source_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
+	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (mask != 0)
 	{
 		fval += __shfl_xor_sync(__activemask(), fval, 0x0001);
@@ -724,25 +659,27 @@ __update_nogroups__pstddev(kern_context *kcxt,
 						   char *buffer,
 						   kern_colmeta *cmeta,
 						   kern_aggregate_desc *desc,
-						   bool kvars_is_valid)
+						   bool source_is_valid)
 {
 	float8_t	sum_x = 0.0;
 	uint32_t	mask;
 
-	if (kvars_is_valid)
+	if (source_is_valid)
 	{
-		int		slot_id = desc->arg0_slot_id;
-		int		vclass = kcxt->kvars_class[slot_id];
+		xpu_float8_t   *xdatum = (xpu_float8_t *)
+			kcxt->kvars_values[desc->arg0_slot_id];
 
-		if (vclass == KVAR_CLASS__INLINE)
-			sum_x = kcxt->kvars_slot[slot_id].fp64;
+		if (!XPU_DATUM_ISNULL(xdatum))
+		{
+			assert(xdatum->expr_ops == &xpu_float8_ops);
+			sum_x = xdatum->value;
+		}
 		else
 		{
-			assert(vclass == KVAR_CLASS__NULL);
-			kvars_is_valid = false;
+			source_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
+	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (mask != 0)
 	{
 		float8_t	sum_x2 = sum_x * sum_x;
@@ -779,28 +716,32 @@ __update_nogroups__pcovar(kern_context *kcxt,
 						  char *buffer,
 						  kern_colmeta *cmeta,
 						  kern_aggregate_desc *desc,
-						  bool kvars_is_valid)
+						  bool source_is_valid)
 {
 	float8_t	sum_x = 0.0;
 	float8_t	sum_y = 0.0;
 	uint32_t	mask;
 
-	if (kvars_is_valid)
+	if (source_is_valid)
 	{
-		if (kcxt->kvars_class[desc->arg0_slot_id] == KVAR_CLASS__INLINE &&
-			kcxt->kvars_class[desc->arg1_slot_id] == KVAR_CLASS__INLINE)
+		xpu_float8_t   *xdatum = (xpu_float8_t *)
+			kcxt->kvars_values[desc->arg0_slot_id];
+		xpu_float8_t   *ydatum = (xpu_float8_t *)
+			kcxt->kvars_values[desc->arg1_slot_id];
+
+		if (!XPU_DATUM_ISNULL(xdatum) && !XPU_DATUM_ISNULL(ydatum))
 		{
-			sum_x = kcxt->kvars_slot[desc->arg0_slot_id].fp64;
-			sum_y = kcxt->kvars_slot[desc->arg0_slot_id].fp64;
+			assert(xdatum->expr_ops == &xpu_float8_ops &&
+				   ydatum->expr_ops == &xpu_float8_ops);
+			sum_x = xdatum->value;
+			sum_y = ydatum->value;
 		}
 		else
 		{
-			assert(kcxt->kvars_class[desc->arg0_slot_id] == KVAR_CLASS__NULL ||
-				   kcxt->kvars_class[desc->arg1_slot_id] == KVAR_CLASS__NULL);
-			kvars_is_valid = false;
+			source_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), kvars_is_valid);
+	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (mask != 0)
 	{
 		float8_t	sum_xx = sum_x * sum_x;
@@ -862,7 +803,7 @@ __update_nogroups__pcovar(kern_context *kcxt,
 STATIC_FUNCTION(void)
 __updateOneTupleNoGroups(kern_context *kcxt,
 						 kern_data_store *kds_final,
-						 bool kvars_is_valid,
+						 bool source_is_valid,
 						 HeapTupleHeaderData *htup,
 						 kern_expression *kexp_groupby_actions)
 {
@@ -903,64 +844,64 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 			case KAGG_ACTION__NROWS_ANY:
 				__update_nogroups__nrows_any(kcxt, buffer,
 											 cmeta, desc,
-											 kvars_is_valid);
+											 source_is_valid);
 				break;
 			case KAGG_ACTION__NROWS_COND:
 				__update_nogroups__nrows_cond(kcxt, buffer,
 											  cmeta, desc,
-											  kvars_is_valid);
+											  source_is_valid);
 				break;
 			case KAGG_ACTION__PMIN_INT32:
 				__update_nogroups__pmin_int32(kcxt, buffer,
 											  cmeta, desc,
-											  kvars_is_valid);
+											  source_is_valid);
 				break;
 			case KAGG_ACTION__PMIN_INT64:
 				__update_nogroups__pmin_int64(kcxt, buffer,
 											  cmeta, desc,
-											  kvars_is_valid);
+											  source_is_valid);
 				break;
 			case KAGG_ACTION__PMAX_INT32:
 				__update_nogroups__pmax_int32(kcxt, buffer,
 											  cmeta, desc,
-											  kvars_is_valid);
+											  source_is_valid);
 				break;
 			case KAGG_ACTION__PMAX_INT64:
 				__update_nogroups__pmax_int64(kcxt, buffer,
 											  cmeta, desc,
-											  kvars_is_valid);
+											  source_is_valid);
 				break;
 			case KAGG_ACTION__PMIN_FP64:
 				__update_nogroups__pmin_fp64(kcxt, buffer,
 											 cmeta, desc,
-											 kvars_is_valid);
+											 source_is_valid);
 				break;
 			case KAGG_ACTION__PMAX_FP64:
 				__update_nogroups__pmax_fp64(kcxt, buffer,
 											 cmeta, desc,
-											 kvars_is_valid);
+											 source_is_valid);
 				break;
 			case KAGG_ACTION__PSUM_INT:
 			case KAGG_ACTION__PAVG_INT:
 				__update_nogroups__psum_int(kcxt, buffer,
 											cmeta, desc,
-											kvars_is_valid);
+											source_is_valid);
 				break;
 			case KAGG_ACTION__PAVG_FP:
 			case KAGG_ACTION__PSUM_FP:
 				__update_nogroups__psum_fp(kcxt, buffer,
 										   cmeta, desc,
-										   kvars_is_valid);
+										   source_is_valid);
 				break;
 			case KAGG_ACTION__STDDEV:
 				__update_nogroups__pstddev(kcxt, buffer,
 										   cmeta, desc,
-										   kvars_is_valid);
+										   source_is_valid);
 				break;
 			case KAGG_ACTION__COVAR:
 				__update_nogroups__pcovar(kcxt, buffer,
 										  cmeta, desc,
-										  kvars_is_valid);
+										  source_is_valid);
 				break;
 			default:
 				/*
@@ -1019,7 +960,7 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 __execGpuPreAggNoGroups(kern_context *kcxt,
 						kern_data_store *kds_final,
-						bool kvars_is_valid,
+						bool source_is_valid,
 						kern_expression *kexp_groupby_actions,
 						bool *p_try_suspend)
 {
@@ -1090,7 +1031,7 @@ __execGpuPreAggNoGroups(kern_context *kcxt,
 	}
 	/* update partial aggregation */
 	__updateOneTupleNoGroups(kcxt, kds_final,
-							 kvars_is_valid,
+							 source_is_valid,
 							 &tupitem->htup,
 							 kexp_groupby_actions);
 	return true;
@@ -1198,7 +1139,9 @@ __update_groupby__nrows_cond(kern_context *kcxt,
 							 kern_colmeta *cmeta,
 							 kern_aggregate_desc *desc)
 {
-	if (kcxt->kvars_class[desc->arg0_slot_id] != KVAR_CLASS__NULL)
+	xpu_datum_t	   *xdatum = kcxt->kvars_values[desc->arg0_slot_id];
+
+	if (!XPU_DATUM_ISNULL(xdatum))
 		__atomic_add_uint64((uint64_t *)buffer, 1);
 }
 
@@ -1208,20 +1151,17 @@ __update_groupby__pmin_int32(kern_context *kcxt,
 							 kern_colmeta *cmeta,
 							 kern_aggregate_desc *desc)
 {
-	int		vclass = kcxt->kvars_class[desc->arg0_slot_id];
+	xpu_int4_t	   *xdatum = (xpu_int4_t *)
+		kcxt->kvars_values[desc->arg0_slot_id];
 
-	if (vclass == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
-		int32_t		ival = kcxt->kvars_slot[desc->arg0_slot_id].i32;
 
+		assert(xdatum->expr_ops == &xpu_int4_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_min_int64(&r->value, ival);
-	}
-	else
-	{
-		assert(vclass == KVAR_CLASS__NULL);
+		__atomic_min_int64(&r->value, xdatum->value);
 	}
 }
 
@@ -1231,20 +1171,17 @@ __update_groupby__pmin_int64(kern_context *kcxt,
 							 kern_colmeta *cmeta,
 							 kern_aggregate_desc *desc)
 {
-	int		vclass = kcxt->kvars_class[desc->arg0_slot_id];
+	xpu_int8_t	   *xdatum = (xpu_int8_t *)
+		kcxt->kvars_values[desc->arg0_slot_id];
 
-	if (vclass == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
-		int64_t		ival = kcxt->kvars_slot[desc->arg0_slot_id].i64;
 
+		assert(xdatum->expr_ops == &xpu_int8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_min_int64(&r->value, ival);
-	}
-	else
-	{
-		assert(vclass == KVAR_CLASS__NULL);
+		__atomic_min_int64(&r->value, xdatum->value);
 	}
 }
 
@@ -1254,20 +1191,17 @@ __update_groupby__pmax_int32(kern_context *kcxt,
 							 kern_colmeta *cmeta,
 							 kern_aggregate_desc *desc)
 {
-	int		vclass = kcxt->kvars_class[desc->arg0_slot_id];
+	xpu_int4_t	   *xdatum = (xpu_int4_t *)
+		kcxt->kvars_values[desc->arg0_slot_id];
 
-	if (vclass == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
-		int32_t		ival = kcxt->kvars_slot[desc->arg0_slot_id].i32;
 
+		assert(xdatum->expr_ops == &xpu_int4_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_max_int64(&r->value, ival);
-	}
-	else
-	{
-		assert(vclass == KVAR_CLASS__NULL);
+		__atomic_max_int64(&r->value, xdatum->value);
 	}
 }
 
@@ -1277,20 +1211,17 @@ __update_groupby__pmax_int64(kern_context *kcxt,
 							 kern_colmeta *cmeta,
 							 kern_aggregate_desc *desc)
 {
-	int		vclass = kcxt->kvars_class[desc->arg0_slot_id];
+	xpu_int8_t	   *xdatum = (xpu_int8_t *)
+		kcxt->kvars_values[desc->arg0_slot_id];
 
-	if (vclass == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
-		int64_t		ival = kcxt->kvars_slot[desc->arg0_slot_id].i64;
 
+		assert(xdatum->expr_ops == &xpu_int8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_max_int64(&r->value, ival);
-	}
-	else
-	{
-		assert(vclass == KVAR_CLASS__NULL);
+		__atomic_max_int64(&r->value, xdatum->value);
 	}
 }
 
@@ -1300,20 +1231,17 @@ __update_groupby__pmin_fp64(kern_context *kcxt,
 							kern_colmeta *cmeta,
 							kern_aggregate_desc *desc)
 {
-	int		vclass = kcxt->kvars_class[desc->arg0_slot_id];
+	xpu_float8_t   *xdatum = (xpu_float8_t *)
+		kcxt->kvars_values[desc->arg0_slot_id];
 
-	if (vclass == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__pminmax_fp64_packed *r =
 			(kagg_state__pminmax_fp64_packed *)buffer;
-		float8_t	fval = kcxt->kvars_slot[desc->arg0_slot_id].fp64;
 
+		assert(xdatum->expr_ops == &xpu_float8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_min_fp64(&r->value, fval);
-	}
-	else
-	{
-		assert(vclass == KVAR_CLASS__NULL);
+		__atomic_min_fp64(&r->value, xdatum->value);
 	}
 }
 
@@ -1323,20 +1251,17 @@ __update_groupby__pmax_fp64(kern_context *kcxt,
 							kern_colmeta *cmeta,
 							kern_aggregate_desc *desc)
 {
-	int		vclass = kcxt->kvars_class[desc->arg0_slot_id];
+	xpu_float8_t   *xdatum = (xpu_float8_t *)
+		kcxt->kvars_values[desc->arg0_slot_id];
 
-	if (vclass == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__pminmax_fp64_packed *r =
 			(kagg_state__pminmax_fp64_packed *)buffer;
-		float8_t	fval = kcxt->kvars_slot[desc->arg0_slot_id].fp64;
 
+		assert(xdatum->expr_ops == &xpu_float8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_max_fp64(&r->value, fval);
-	}
-	else
-	{
-		assert(vclass == KVAR_CLASS__NULL);
+        __atomic_max_fp64(&r->value, xdatum->value);
 	}
 }
 
@@ -1346,20 +1271,17 @@ __update_groupby__psum_int(kern_context *kcxt,
 						   kern_colmeta *cmeta,
 						   kern_aggregate_desc *desc)
 {
-	int		vclass = kcxt->kvars_class[desc->arg0_slot_id];
+	xpu_int8_t	   *xdatum = (xpu_int8_t *)
+		kcxt->kvars_values[desc->arg0_slot_id];
 
-	if (vclass == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__psum_int_packed *r =
 			(kagg_state__psum_int_packed *)buffer;
-		int64_t		ival = kcxt->kvars_slot[desc->arg0_slot_id].i64;
 
+		assert(xdatum->expr_ops == &xpu_int8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_int64(&r->sum, ival);
-	}
-	else
-	{
-		 assert(vclass == KVAR_CLASS__NULL);
+		__atomic_add_int64(&r->sum, xdatum->value);
 	}
 }
 
@@ -1369,20 +1291,17 @@ __update_groupby__psum_fp(kern_context *kcxt,
 						  kern_colmeta *cmeta,
 						  kern_aggregate_desc *desc)
 {
-	int		vclass = kcxt->kvars_class[desc->arg0_slot_id];
+	xpu_float8_t   *xdatum = (xpu_float8_t *)
+		kcxt->kvars_values[desc->arg0_slot_id];
 
-	if (vclass == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__psum_fp_packed *r =
 			(kagg_state__psum_fp_packed *)buffer;
-		float8_t	fval = kcxt->kvars_slot[desc->arg0_slot_id].fp64;
 
+		assert(xdatum->expr_ops == &xpu_float8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_fp64(&r->sum, fval);
-	}
-	else
-	{
-		assert(vclass == KVAR_CLASS__NULL);
+		__atomic_add_fp64(&r->sum, xdatum->value);
 	}
 }
 
@@ -1392,21 +1311,18 @@ __update_groupby__pstddev(kern_context *kcxt,
 						  kern_colmeta *cmeta,
 						  kern_aggregate_desc *desc)
 {
-	int		vclass = kcxt->kvars_class[desc->arg0_slot_id];
+	xpu_float8_t   *xdatum = (xpu_float8_t *)
+		kcxt->kvars_values[desc->arg0_slot_id];
 
-	if (vclass == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__stddev_packed *r =
 			(kagg_state__stddev_packed *)buffer;
-		float8_t	fval = kcxt->kvars_slot[desc->arg0_slot_id].fp64;
 
+		assert(xdatum->expr_ops == &xpu_float8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_fp64(&r->sum_x,  fval);
-		__atomic_add_fp64(&r->sum_x2, fval * fval);
-	}
-	else
-	{
-		assert(vclass == KVAR_CLASS__NULL);
+		__atomic_add_fp64(&r->sum_x,  xdatum->value);
+		__atomic_add_fp64(&r->sum_x2, xdatum->value * xdatum->value);
 	}
 }
 
@@ -1416,25 +1332,24 @@ __update_groupby__pcovar(kern_context *kcxt,
 						 kern_colmeta *cmeta,
 						 kern_aggregate_desc *desc)
 {
-	if (kcxt->kvars_class[desc->arg0_slot_id] == KVAR_CLASS__INLINE &&
-		kcxt->kvars_class[desc->arg1_slot_id] == KVAR_CLASS__INLINE)
+	xpu_float8_t   *xdatum = (xpu_float8_t *)
+		kcxt->kvars_values[desc->arg0_slot_id];
+	xpu_float8_t   *ydatum = (xpu_float8_t *)
+		kcxt->kvars_values[desc->arg1_slot_id];
+
+	if (!XPU_DATUM_ISNULL(xdatum) && !XPU_DATUM_ISNULL(ydatum))
 	{
 		kagg_state__covar_packed *r =
 			(kagg_state__covar_packed *)buffer;
-		float8_t	xval = kcxt->kvars_slot[desc->arg0_slot_id].fp64;
-		float8_t	yval = kcxt->kvars_slot[desc->arg0_slot_id].fp64;
 
+		assert(xdatum->expr_ops == &xpu_float8_ops &&
+			   ydatum->expr_ops == &xpu_float8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_fp64(&r->sum_x,  xval);
-		__atomic_add_fp64(&r->sum_xx, xval * xval);
-		__atomic_add_fp64(&r->sum_y,  yval);
-		__atomic_add_fp64(&r->sum_yy, yval * yval);
-		__atomic_add_fp64(&r->sum_xy, xval * yval);
-	}
-	else
-	{
-		assert(kcxt->kvars_class[desc->arg0_slot_id] == KVAR_CLASS__NULL ||
-			   kcxt->kvars_class[desc->arg1_slot_id] == KVAR_CLASS__NULL);
+		__atomic_add_fp64(&r->sum_x,  xdatum->value);
+		__atomic_add_fp64(&r->sum_xx, xdatum->value * xdatum->value);
+		__atomic_add_fp64(&r->sum_y,  ydatum->value);
+		__atomic_add_fp64(&r->sum_yy, ydatum->value * ydatum->value);
+		__atomic_add_fp64(&r->sum_xy, xdatum->value * ydatum->value);
 	}
 }
 
@@ -1531,7 +1446,7 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 STATIC_FUNCTION(int)
 __execGpuPreAggGroupBy(kern_context *kcxt,
 					   kern_data_store *kds_final,
-					   bool kvars_is_valid,
+					   bool source_is_valid,
 					   kern_expression *kexp_groupby_keyhash,
 					   kern_expression *kexp_groupby_keyload,
 					   kern_expression *kexp_groupby_keycomp,
@@ -1546,7 +1461,7 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 	 * compute hash value of the grouping keys
 	 */
 	memset(&hash, 0, sizeof(hash));
-	if (kvars_is_valid)
+	if (source_is_valid)
 	{
 		if (EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keyhash, &hash))
 			assert(!XPU_DATUM_ISNULL(&hash));
@@ -1685,7 +1600,7 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	read_pos += LaneId();
 	kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
 	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
-	mask = __ballot_sync(__activemask(), read_pos < write_pos);
+	mask = __ballot_sync(__activemask(), (read_pos < write_pos));
 	if (mask == 0)
 		goto skip_reduction;
 
@@ -1718,7 +1633,7 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 		kexp_groupby_keycomp)
 	{
 		status = __execGpuPreAggGroupBy(kcxt, kds_final,
-										kcxt->kvars_slot != NULL,
+										(read_pos < write_pos),
 										kexp_groupby_keyhash,
 										kexp_groupby_keyload,
 										kexp_groupby_keycomp,
@@ -1728,7 +1643,7 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	else
 	{
 		status = __execGpuPreAggNoGroups(kcxt, kds_final,
-										 kcxt->kvars_slot != NULL,
+										 (read_pos < write_pos),
 										 kexp_groupby_actions,
 										 p_try_suspend);
 	}

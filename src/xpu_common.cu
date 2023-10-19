@@ -404,7 +404,7 @@ __extract_arrow_tuple_sysattr(kern_context *kcxt,
 
 STATIC_FUNCTION(bool)
 kern_extract_arrow_tuple(kern_context *kcxt,
-						 kern_data_store *kds,
+						 const kern_data_store *kds,
 						 uint32_t kds_index,
 						 const kern_varload_desc *vl_desc,
 						 int vload_nitems)
@@ -425,8 +425,8 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 	while (vload_count < vload_nitems &&
 		   vl_desc->vl_resno <= kds->ncols)
 	{
-		kern_colmeta   *cmeta = &kds->colmeta[vl_desc->vl_resno-1];
-		uint16_t		slot_id = vl_desc->vl_slot_id;
+		const kern_colmeta *cmeta = &kds->colmeta[vl_desc->vl_resno-1];
+		uint16_t	slot_id = vl_desc->vl_slot_id;
 
 		if (!__kern_extract_arrow_field(kcxt,
 										kds,
@@ -1367,7 +1367,6 @@ __extract_gpucache_tuple_sysattr(kern_context *kcxt,
 	const kern_colmeta *cmeta = &kds->colmeta[kds->nr_colmeta - 1];
 	GpuCacheSysattr	   *sysatt;
 	const char		   *addr;
-	uint32_t			slot_id = vl_desc->vl_slot_id;
 	uint32_t			temp;
 
 	assert(!cmeta->attbyval &&
@@ -1393,7 +1392,6 @@ __extract_gpucache_tuple_sysattr(kern_context *kcxt,
 			break;
 		case TableOidAttributeNumber:
 			addr = (const char *)&kds->table_oid;
-			kcxt->kvars_class[slot_id] = KVAR_CLASS__INLINE;
 			break;
 		default:
 			STROM_ELOG(kcxt, "not a supported system attribute reference");
@@ -1506,10 +1504,10 @@ ExecLoadVarsHeapTuple(kern_context *kcxt,
 
 PUBLIC_FUNCTION(bool)
 ExecLoadVarsOuterRow(kern_context *kcxt,
-					 kern_expression *kexp_load_vars,
-					 kern_expression *kexp_scan_quals,
-					 kern_data_store *kds,
-					 HeapTupleHeaderData *htup)
+					 const kern_expression *kexp_load_vars,
+					 const kern_expression *kexp_scan_quals,
+					 const kern_data_store *kds,
+					 const HeapTupleHeaderData *htup)
 {
 	/* load the one tuple */
 	ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, 0, kds, htup);
@@ -1534,9 +1532,9 @@ ExecLoadVarsOuterRow(kern_context *kcxt,
 
 PUBLIC_FUNCTION(bool)
 ExecLoadVarsOuterArrow(kern_context *kcxt,
-					   kern_expression *kexp_load_vars,
-					   kern_expression *kexp_scan_quals,
-					   kern_data_store *kds,
+					   const kern_expression *kexp_load_vars,
+					   const kern_expression *kexp_scan_quals,
+					   const kern_data_store *kds,
 					   uint32_t kds_index)
 {
 	if (kexp_load_vars)
@@ -1573,10 +1571,10 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 
 PUBLIC_FUNCTION(bool)
 ExecLoadVarsOuterColumn(kern_context *kcxt,
-						kern_expression *kexp_load_vars,
-						kern_expression *kexp_scan_quals,
-						kern_data_store *kds,
-						kern_data_extra *extra,
+						const kern_expression *kexp_load_vars,
+						const kern_expression *kexp_scan_quals,
+						const kern_data_store *kds,
+						const kern_data_extra *extra,
 						uint32_t kds_index)
 {
 	if (kexp_load_vars)

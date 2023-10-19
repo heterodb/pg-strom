@@ -188,11 +188,11 @@ INIT_KERN_GPUTASK_SUBFIELDS(kern_gputask *kgtask,
 EXTERN_FUNCTION(int)
 execGpuScanLoadSource(kern_context *kcxt,
 					  kern_warp_context *wp,
-					  kern_data_store *kds_src,
-					  kern_data_extra *kds_extra,
-					  kern_expression *kexp_load_vars,
-					  kern_expression *kexp_scan_quals,
-					  kern_expression *kexp_move_vars,
+					  const kern_data_store *kds_src,
+					  const kern_data_extra *kds_extra,
+					  const kern_expression *kexp_load_vars,
+					  const kern_expression *kexp_scan_quals,
+					  const kern_expression *kexp_move_vars,
 					  char     *dst_kvecs_buffer,
 					  uint32_t *p_smx_row_count);
 EXTERN_FUNCTION(int)
