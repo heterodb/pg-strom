@@ -21,13 +21,13 @@ execGpuJoinNestLoop(kern_context *kcxt,
 					kern_multirels *kmrels,
 					int			depth,
 					char	   *src_kvecs_buffer,
-					char	   *dst_kvars_addr_wp, //FIXME
+					char	   *dst_kvecs_buffer,
 					uint32_t   &l_state,
 					bool	   &matched)
 {
+	const kern_expression *kexp;
 	kern_data_store *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
 	bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth-1);
-	kern_expression *kexp;
 	uint32_t	read_pos;
 	uint32_t	write_pos;
 	uint32_t	mask;
@@ -81,12 +81,12 @@ execGpuJoinNestLoop(kern_context *kcxt,
 	}
 
 	read_pos = WARP_READ_POS(wp,depth-1) + LaneId();
+	kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
 	if (read_pos < WARP_WRITE_POS(wp,depth-1))
 	{
 		uint32_t	index = l_state++;
 
-		kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
-		kcxt->kvecs_curr_buffer = src_kvecs_buffer;
 		if (index < kds_heap->nitems)
 		{
 			kern_tupitem *tupitem;
@@ -146,12 +146,19 @@ execGpuJoinNestLoop(kern_context *kcxt,
 
 	if (tuple_is_valid)
 	{
-		write_pos = (write_pos % UNIT_TUPLES_PER_DEPTH);
-		memcpy(dst_kvars_addr_wp + write_pos * kcxt->kvars_nbytes,
-			   kcxt->kvars_slot,
-			   kcxt->kvars_nbytes);
+		const kern_expression  *kexp_move
+			= SESSION_KEXP_MOVE_VARS(kcxt->session, depth);
+		if (!ExecMoveKernelVariables(kcxt,
+									 kexp_move,
+									 dst_kvecs_buffer,
+									 (write_pos % KVEC_UNITSZ)))
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		}
 	}
-	__syncwarp();
+	/* error checks */
+	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+		return -1;
 	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
 		return depth+1;
 	return depth;
@@ -166,7 +173,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 					kern_multirels *kmrels,
 					int			depth,
 					char	   *src_kvecs_buffer,
-					char	   *dst_kvars_addr_wp,
+					char	   *dst_kvecs_buffer,
 					uint32_t   &l_state,
 					bool	   &matched)
 {
@@ -176,7 +183,6 @@ execGpuJoinHashJoin(kern_context *kcxt,
 	kern_hashitem *khitem = NULL;
 	uint32_t	read_pos;
 	uint32_t	write_pos;
-	uint32_t	index;
 	uint32_t	mask;
 	bool		tuple_is_valid = false;
 
@@ -320,12 +326,19 @@ execGpuJoinHashJoin(kern_context *kcxt,
 	write_pos += __popc(mask);
 	if (tuple_is_valid)
 	{
-		index = write_pos % UNIT_TUPLES_PER_DEPTH;
-		memcpy(dst_kvars_addr_wp + index * kcxt->kvars_nbytes,
-			   kcxt->kvars_slot,
-			   kcxt->kvars_nbytes);
+		const kern_expression  *kexp_move
+			= SESSION_KEXP_MOVE_VARS(kcxt->session, depth);
+		if (!ExecMoveKernelVariables(kcxt,
+									 kexp_move,
+									 dst_kvecs_buffer,
+									 (write_pos % KVEC_UNITSZ)))
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		}
 	}
-	__syncwarp();
+	/* error checks */
+	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+		return -1;
 	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
 		return depth+1;
 	return depth;
@@ -396,17 +409,17 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 					kern_warp_context *wp,
 					kern_multirels *kmrels,
 					int         depth,
-					char       *src_kvars_addr_wp,	//FIXME
-					char       *dst_kvars_addr_wp,	//FIXME
+					char	   *src_kvecs_buffer,
+					char	   *dst_kvecs_buffer,
 					const kern_expression *kexp_gist,
-					char	   *gist_kvars_addr_wp,
+					char	   *gist_kvecs_buffer,
 					uint32_t   &l_state,
 					bool       &matched)
 {
 	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
 	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth-1);
 	int				gist_depth = kexp_gist->u.gist.gist_depth;
-	uint32_t		mask, index;
+	uint32_t		mask;
 	uint32_t		read_pos;
 	uint32_t		write_pos;
 
@@ -450,11 +463,8 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 			const kern_expression *kexp_join
 				= SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
 
-			index = (read_pos % UNIT_TUPLES_PER_DEPTH);
-			kcxt->kvars_slot = (kern_variable *)
-				(gist_kvars_addr_wp + index * kcxt->kvars_nbytes);
-			kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
-			//Run LoadVar from the GiST-depth
+			kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+			kcxt->kvecs_curr_buffer = gist_kvecs_buffer;
 			join_is_valid = ExecGiSTIndexPostQuals(kcxt, depth,
 												   kds_hash,
 												   kexp_gist,
@@ -479,12 +489,19 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		write_pos += __popc(mask);
 		if (join_is_valid)
 		{
-			index = write_pos % UNIT_TUPLES_PER_DEPTH;
-			memcpy(dst_kvars_addr_wp + index * kcxt->kvars_nbytes,
-				   kcxt->kvars_slot,
-				   kcxt->kvars_nbytes);
+			const kern_expression *kexp_move
+				= SESSION_KEXP_MOVE_VARS(kcxt->session, depth);
+			if (!ExecMoveKernelVariables(kcxt,
+										 kexp_move,
+										 dst_kvecs_buffer,
+										 (write_pos % KVEC_UNITSZ)))
+			{
+				assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			}
 		}
-		__syncwarp();
+		/* error checks */
+		if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+			return -1;
 		/* termination checks */
 		if (LaneId() == 0 &&
 			wp->scan_done >= depth &&
@@ -542,11 +559,8 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 	{
 		if (l_state != UINT_MAX)
 		{
-			index = (read_pos % UNIT_TUPLES_PER_DEPTH);
-			kcxt->kvars_slot = (kern_variable *)
-				(src_kvars_addr_wp + index * kcxt->kvars_nbytes);
-			kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
-
+			kcxt->kvecs_curr_buffer = src_kvecs_buffer;
+			kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
 			l_state = ExecGiSTIndexGetNext(kcxt,
 										   kds_hash,
 										   kds_gist,
@@ -573,13 +587,19 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 	write_pos += __popc(mask);
 	if (l_state != UINT_MAX)
 	{
-		index = write_pos % UNIT_TUPLES_PER_DEPTH;
-
-		memcpy(gist_kvars_addr_wp + index * kcxt->kvars_nbytes,
-			   kcxt->kvars_slot,
-			   kcxt->kvars_nbytes);
+		const kern_expression  *kexp_move
+			= SESSION_KEXP_MOVE_VARS(kcxt->session, gist_depth);
+		if (!ExecMoveKernelVariables(kcxt,
+									 kexp_move,
+									 gist_kvecs_buffer,
+									 (write_pos % KVEC_UNITSZ)))
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		}
 	}
-	__syncwarp();
+	/* error checks */
+	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+		return -1;
 	return depth;
 }
 
@@ -620,11 +640,10 @@ execGpuJoinProjection(kern_context *kcxt,
 		return n_rels;
 
 	read_pos += LaneId();
+	kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
 	if (read_pos < write_pos)
 	{
-		kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
-		kcxt->kvecs_curr_buffer = src_kvecs_buffer;
-
 		tupsz = kern_estimate_heaptuple(kcxt,
 										kexp_projection,
 										kds_dst);
@@ -785,6 +804,7 @@ kern_gpujoin_main(kern_session_info *session,
 										  kds_extra,
 										  SESSION_KEXP_LOAD_VARS(session, 0),
 										  SESSION_KEXP_SCAN_QUALS(session),
+										  SESSION_KEXP_MOVE_VARS(session, 0),
 										  __KVEC_BUFFER(0),
 										  &smx_row_count);
 		}

@@ -429,7 +429,6 @@ typedef struct
 	char		   *kvecs_curr_buffer;	/* current kvecs-buffer */
 	uint32_t		kvecs_curr_id;		/* current kvecs-id */
 #if 1
-	uint32_t		kvars_nbytes;	//deprecated
 	kern_variable  *kvars_slot;		//deprecated
 	int			   *kvars_class;	//deprecated
 #endif
@@ -523,17 +522,6 @@ INLINE_FUNCTION(void)
 kcxt_reset(kern_context *kcxt)
 {
 	kcxt->vlpos = kcxt->vlbuf;
-}
-
-INLINE_FUNCTION(char *)
-kcxt_slot_buf(kern_context *kcxt, uint32_t slot_off)
-{
-	if (slot_off == 0)
-		return NULL;
-	assert(slot_off >= (sizeof(kern_variable) * kcxt->kvars_nslots +
-						sizeof(int)           * kcxt->kvars_nslots) &&
-		   slot_off <  kcxt->kvars_nbytes);
-	return ((char *)kcxt->kvars_slot + slot_off);
 }
 
 INLINE_FUNCTION(void)
@@ -1138,7 +1126,7 @@ KDS_BODY_ADDR(const kern_data_store *kds)
 
 /* access functions for KDS_FORMAT_ROW/HASH */
 INLINE_FUNCTION(uint32_t *)
-KDS_GET_ROWINDEX(kern_data_store *kds)
+KDS_GET_ROWINDEX(const kern_data_store *kds)
 {
 	Assert(kds->format == KDS_FORMAT_ROW ||
 		   kds->format == KDS_FORMAT_HASH);
@@ -1602,10 +1590,10 @@ typedef struct kvec_datum_t {
 } kvec_datum_t;
 
 INLINE_FUNCTION(bool)
-KVEC_DATUM_ISNULL(const kvec_datum_t *kvec_datum, uint32_t kvec_id)
+KVEC_DATUM_ISNULL(const kvec_datum_t *kvec, uint32_t kvec_id)
 {
 	assert(kvec_id < KVEC_UNITSZ);
-	return (kvec_datum->nullmask & (1UL << kvec_id)) != 0;
+	return (kvec->nullmask & (1UL << kvec_id)) != 0;
 }
 
 /* ----------------------------------------------------------------
@@ -2185,7 +2173,7 @@ struct kern_varslot_desc
 	const struct xpu_datum_operators *vs_ops;
 };
 
-#define KERN_EXPRESSION_MAGIC	(0x4b657870)	/* 'K' 'e' 'x' 'p' */
+#define KERN_EXPRESSION_MAGIC			(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
 #define KEXP_FLAG__IS_PUSHED_DOWN		0x0001U
 
@@ -2870,32 +2858,28 @@ ExecLoadVarsHeapTuple(kern_context *kcxt,
 					  const HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterRow(kern_context *kcxt,
-					 kern_expression *kexp_load_vars,
-					 kern_expression *kexp_scan_quals,
-					 kern_data_store *kds_src,
-					 HeapTupleHeaderData *htup);
+					 const kern_expression *kexp_load_vars,
+					 const kern_expression *kexp_scan_quals,
+					 const kern_data_store *kds_src,
+					 const HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterArrow(kern_context *kcxt,
-					   kern_expression *kexp_load_vars,
-					   kern_expression *kexp_scan_quals,
-					   kern_data_store *kds_src,
+					   const kern_expression *kexp_load_vars,
+					   const kern_expression *kexp_scan_quals,
+					   const kern_data_store *kds_src,
 					   uint32_t kds_index);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterColumn(kern_context *kcxt,
-						kern_expression *kexp_load_vars,
-						kern_expression *kexp_scan_quals,
-						kern_data_store *kds,
-						kern_data_extra *extra,
+						const kern_expression *kexp_load_vars,
+						const kern_expression *kexp_scan_quals,
+						const kern_data_store *kds,
+						const kern_data_extra *extra,
 						uint32_t kds_index);
 EXTERN_FUNCTION(bool)
 ExecMoveKernelVariables(kern_context *kcxt,
-                        const kern_expression *kexp_move_vars,
-                        int curr_depth,
-						const char *src_kvec_buffer,	/* NULL, if depth=0 */
-                        int src_kvec_id,
+						const kern_expression *kexp_move_vars,
                         char *dst_kvec_buffer,
-                        int dst_kvec_id,
-						bool tuple_is_valid);
+                        int dst_kvec_id);
 EXTERN_FUNCTION(uint32_t)
 ExecGiSTIndexGetNext(kern_context *kcxt,
 					 const kern_data_store *kds_hash,

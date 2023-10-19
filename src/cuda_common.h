@@ -117,7 +117,6 @@ typedef struct {
 	uint32_t		kvecs_ndims;	/* number of kvecs buffers for each warp */
 	uint32_t		extra_sz;
 
-	uint32_t		kvars_nbytes;	//deprecated
 	uint32_t		kvars_ndims;	//deprecated
 	uint32_t		n_rels;			/* >0, if JOIN is involved */
 	/* suspend/resume support */
@@ -193,7 +192,8 @@ execGpuScanLoadSource(kern_context *kcxt,
 					  kern_data_extra *kds_extra,
 					  kern_expression *kexp_load_vars,
 					  kern_expression *kexp_scan_quals,
-					  char     *kvars_addr_wp,
+					  kern_expression *kexp_move_vars,
+					  char     *dst_kvecs_buffer,
 					  uint32_t *p_smx_row_count);
 EXTERN_FUNCTION(int)
 execGpuJoinProjection(kern_context *kcxt,

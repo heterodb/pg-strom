@@ -1683,12 +1683,9 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 		return n_rels;
 
 	read_pos += LaneId();
-	if (read_pos < write_pos)
-	{
-		kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
-		kcxt->kvecs_curr_buffer = src_kvecs_buffer;
-	}
-	mask = __ballot_sync(__activemask(), kcxt->kvars_class != NULL);
+	kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
+	mask = __ballot_sync(__activemask(), read_pos < write_pos);
 	if (mask == 0)
 		goto skip_reduction;
 

@@ -27,9 +27,16 @@ __extract_heap_tuple_attr(kern_context *kcxt,
 		const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[slot_id];
 		xpu_datum_t	   *xdatum = kcxt->kvars_values[slot_id];
 
-		return vs_desc->vs_ops->xpu_datum_heap_read(kcxt, addr, xdatum);
+		if (vs_desc->vs_ops->xpu_datum_heap_read(kcxt, addr, xdatum))
+		{
+			assert(XPU_DATUM_ISNULL(xdatum) || xdatum->expr_ops == vs_desc->vs_ops);
+			return true;
+		}
 	}
-	STROM_ELOG(kcxt, "vl_desc::slot_id is out of range");
+	else
+	{
+		STROM_ELOG(kcxt, "vl_desc::slot_id is out of range");
+	}
 	return false;
 }
 
@@ -1619,75 +1626,70 @@ pgfn_MoveVars(XPU_PGFUNCTION_ARGS)
 }
 
 INLINE_FUNCTION(bool)
-__kvec_update_nullmask(kvec_datum_t *kvec, uint32_t kvec_id, int isnull_or_valid)
+__kvec_update_nullmask(kvec_datum_t *kvec, uint32_t kvec_id, bool isnull)
 {
 	uint64_t	bits = (1UL << kvec_id);
-
 #if defined(__CUDACC__)
-	assert(__activemask() == 0xffffffffU);
-	if (isnull_or_valid < 0)
-		bits = 0;	/* tuple is not valid */
-	else
-	{
-		assert(kvec_id < KVEC_UNITSZ);
-		if (isnull_or_valid == 0
-			? ((kvec->nullmask & bits) != 0)	/* already NOT NULL */
-			: ((kvec->nullmask & bits) == 0))	/* already NULL */
-		{
-			bits = 0;
-		}
-	}
-	bits |= __shfl_xor_sync(__activemask(), bits, 0x01);
-	bits |= __shfl_xor_sync(__activemask(), bits, 0x02);
-	bits |= __shfl_xor_sync(__activemask(), bits, 0x04);
-	bits |= __shfl_xor_sync(__activemask(), bits, 0x08);
-	bits |= __shfl_xor_sync(__activemask(), bits, 0x10);
-	/* update nullmask if needed */
-	if (LaneId() == 0 && bits != 0)
+	uint32_t	mask = (1UL << LaneId());
+	uint64_t	temp;
+
+	if (isnull ? (kvec->nullmask & bits) == 0
+			   : (kvec->nullmask & bits) != 0)
+		bits = 0;	/* no need to update */
+
+	/*
+	 * NOTE: __shfl_xor_sync() returns undefined result if buddy thread
+	 * is inactive. So, we merge 
+	 */
+	temp = __shfl_xor_sync(__activemask(), bits, 0x01);
+	if ((__activemask() & (mask ^ 0x01)) != 0)
+		bits |= temp;
+	temp = __shfl_xor_sync(__activemask(), bits, 0x02);
+	if ((__activemask() & (mask ^ 0x02)) != 0)
+		bits |= temp;
+	temp = __shfl_xor_sync(__activemask(), bits, 0x04);
+	if ((__activemask() & (mask ^ 0x04)) != 0)
+		bits |= temp;
+	temp = __shfl_xor_sync(__activemask(), bits, 0x08);
+	if ((__activemask() & (mask ^ 0x08)) != 0)
+		bits |= temp;
+	temp = __shfl_xor_sync(__activemask(), bits, 0x10);
+	if ((__activemask() & (mask ^ 0x10)) != 0)
+		bits |= temp;
+
+	/* update nullmask by the leader thread */
+	if (bits != 0 && __ffs(__activemask()) == LaneId() + 1)
 		kvec->nullmask ^= bits;
-	__syncwarp();
+	__syncwarp(__activemask());
 #else
-	if (isnull_or_valid >= 0 && bits != 0)
-	{
-		if (isnull_or_valid == 0)
-			kvec->nullmask |= bits;		/* NOT NULL */
-		else
-			kvec->nullmask &= ~bits;	/* NULL */
-	}
+	if (isnull)
+		kvec->nullmask &= ~bits;	/* NULL */
+	else
+		kvec->nullmask |=  bits;	/* NOT NULL */
 #endif
-	return (isnull_or_valid == 0);
+	return !isnull;
 }
 
 INLINE_FUNCTION(bool)
 __kvec_copy_nullmask(const kvec_datum_t *src_kvec, uint32_t src_kvec_id,
-					 kvec_datum_t       *dst_kvec, uint32_t dst_kvec_id,
-					 bool tuple_is_valid)
+					 kvec_datum_t       *dst_kvec, uint32_t dst_kvec_id)
 {
-	int		isnull;
+	int		isnull = ((src_kvec->nullmask & (1UL<<src_kvec_id)) == 0);
 
-	if (tuple_is_valid)
-		isnull = ((src_kvec->nullmask & (1UL << src_kvec_id)) != 0 ? 1 : 0);
-	else
-		isnull = -1;
 	return __kvec_update_nullmask(dst_kvec, dst_kvec_id, isnull);
 }
 
 PUBLIC_FUNCTION(bool)
 ExecMoveKernelVariables(kern_context *kcxt,
 						const kern_expression *kexp_move_vars,
-						int curr_depth,			/* for assertion checks */
-						const char *src_kvec_buffer,  /* NULL, if depth==0 */
-						int src_kvec_id,
 						char *dst_kvec_buffer,
-						int dst_kvec_id,
-						bool tuple_is_valid)
+						int dst_kvec_id)
 {
 	if (!kexp_move_vars)
 		return true;		/* nothing to move */
 	assert(kexp_move_vars->opcode == FuncOpCode__MoveVars &&
 		   kexp_move_vars->exptype == TypeOpCode__int4 &&
-		   kexp_move_vars->nr_args == 0 &&
-		   kexp_move_vars->u.move.depth == curr_depth);
+		   kexp_move_vars->nr_args == 0);
 	for (int i=0; i < kexp_move_vars->u.move.nitems; i++)
 	{
 		const kern_varmove_desc *vm_desc = &kexp_move_vars->u.move.desc[i];
@@ -1702,11 +1704,9 @@ ExecMoveKernelVariables(kern_context *kcxt,
 			xpu_datum_t	   *xdatum = kcxt->kvars_values[vm_desc->vm_slot_id];
 			kvec_datum_t   *dst_kvec = (kvec_datum_t *)(dst_kvec_buffer +
 														vm_desc->vm_offset);
-			assert(xdatum->expr_ops == NULL || xdatum->expr_ops == vs_desc->vs_ops);
+			assert(XPU_DATUM_ISNULL(xdatum) || xdatum->expr_ops == vs_desc->vs_ops);
 			if (__kvec_update_nullmask(dst_kvec, dst_kvec_id,
-									   tuple_is_valid
-									   ? (XPU_DATUM_ISNULL(xdatum) ? 1 : 0)
-									   : -1) &&
+									   XPU_DATUM_ISNULL(xdatum)) &&
 				!xdatum->expr_ops->xpu_datum_kvec_save(kcxt,
 													   xdatum,
 													   dst_kvec,
@@ -1721,16 +1721,16 @@ ExecMoveKernelVariables(kern_context *kcxt,
 			const kvec_datum_t *src_kvec;
 			kvec_datum_t	   *dst_kvec;
 
-			assert(src_kvec_buffer != NULL);
-			src_kvec = (const kvec_datum_t *)(src_kvec_buffer +
+			assert(kcxt->kvecs_curr_buffer != NULL);
+			assert(kcxt->kvecs_curr_id < KVEC_UNITSZ);
+			src_kvec = (const kvec_datum_t *)(kcxt->kvecs_curr_buffer +
 											  vm_desc->vm_offset);
 			dst_kvec = (kvec_datum_t *)(dst_kvec_buffer +
 										vm_desc->vm_offset);
-			if (__kvec_copy_nullmask(src_kvec, src_kvec_id,
-									 dst_kvec, dst_kvec_id,
-									 tuple_is_valid) &&
+			if (__kvec_copy_nullmask(src_kvec, kcxt->kvecs_curr_id,
+									 dst_kvec, dst_kvec_id) &&
 				!vs_desc->vs_ops->xpu_datum_kvec_copy(kcxt,
-													  src_kvec, src_kvec_id,
+													  src_kvec, kcxt->kvecs_curr_id,
 													  dst_kvec, dst_kvec_id))
 			{
 				return false;
