@@ -1606,6 +1606,60 @@ gpuservLoadKdsArrow(gpuClient *gclient,
  *
  * ----------------------------------------------------------------
  */
+static unsigned int
+__expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
+								   int grid_sz, int block_sz,
+								   unsigned int shmem_base_sz,
+								   unsigned int *p_groupby_prefunc_bufsz,
+								   unsigned int *p_groupby_prefunc_nbufs)
+{
+	GpuDevAttributes *dattrs = &gpuDevAttrs[CU_DINDEX_PER_THREAD];
+	unsigned int	shmem_total_sz = TYPEALIGN(1024, shmem_base_sz);
+	unsigned int	shmem_hw_limit = dattrs->MAX_SHARED_MEMORY_PER_BLOCK_OPTIN - 8192;
+	unsigned int	num_buffers;
+
+	if (session->groupby_prefunc_bufsz == 0 ||
+		shmem_total_sz >= shmem_hw_limit)
+		goto no_prepfunc_buffer;
+
+	if (session->xpucode_groupby_keyhash &&
+		session->xpucode_groupby_keyload &&
+		session->xpucode_groupby_keycomp)
+	{
+		/* GROUP-BY */
+		unsigned int	usage;
+
+		num_buffers = 2 * session->groupby_ngroups_estimation + 100;
+		usage = session->groupby_prefunc_bufsz * num_buffers;
+		if (shmem_total_sz + usage > shmem_hw_limit)
+		{
+			/* adjust num_buffers, if too large */
+			num_buffers = (shmem_hw_limit -
+						   shmem_total_sz) / session->groupby_prefunc_bufsz;
+			usage = session->groupby_prefunc_bufsz * num_buffers;
+		}
+		shmem_total_sz += usage;
+		if (shmem_total_sz > shmem_hw_limit || num_buffers < 32)
+			goto no_prepfunc_buffer;
+	}
+	else
+	{
+		/* NO-GROUPS */
+		num_buffers = (block_sz + WARPSIZE - 1) / WARPSIZE;
+		shmem_total_sz += session->groupby_prefunc_bufsz * num_buffers;
+		if (shmem_total_sz > shmem_hw_limit)
+			goto no_prepfunc_buffer;
+	}
+	*p_groupby_prefunc_bufsz = session->groupby_prefunc_bufsz;
+	*p_groupby_prefunc_nbufs = num_buffers;
+	return shmem_total_sz;
+
+no_prepfunc_buffer:
+	*p_groupby_prefunc_bufsz = 0;
+	*p_groupby_prefunc_nbufs = 0;
+	return shmem_base_sz;
+}
+
 static void
 gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 {
@@ -1636,6 +1690,8 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	int				grid_sz;
 	int				block_sz;
 	unsigned int	shmem_sz;
+	unsigned int	groupby_prefunc_bufsz = 0;
+	unsigned int	groupby_prefunc_nbufs = 0;
 	size_t			kds_final_length = 0;
 	bool			kds_final_locked = false;
 	size_t			sz;
@@ -1755,6 +1811,12 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 //	block_sz = 128;
 //	grid_sz = 1;
 
+	/* allocation of extra shared memory for GpuPreAgg (if any) */
+	shmem_sz = __expand_gpupreagg_prepfunc_buffer(session,
+												  grid_sz, block_sz,
+												  shmem_sz,
+												  &groupby_prefunc_bufsz,
+												  &groupby_prefunc_nbufs);
 	/*
 	 * Allocation of the control structure
 	 */
@@ -1775,6 +1837,8 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	kgtask->kvecs_bufsz  = session->kcxt_kvecs_bufsz;
 	kgtask->kvecs_ndims  = session->kcxt_kvecs_ndims;
 	kgtask->n_rels       = num_inner_rels;
+	kgtask->groupby_prefunc_bufsz = groupby_prefunc_bufsz;
+	kgtask->groupby_prefunc_nbufs = groupby_prefunc_nbufs;
 
 	/* prefetch source KDS, if managed memory */
 	if (!s_chunk && !gc_lmap)

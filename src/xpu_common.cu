@@ -25,7 +25,7 @@ __extract_heap_tuple_attr(kern_context *kcxt,
 	if (slot_id < kcxt->kvars_nslots)
 	{
 		const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[slot_id];
-		xpu_datum_t	   *xdatum = kcxt->kvars_values[slot_id];
+		xpu_datum_t	   *xdatum = kcxt->kvars_slot[slot_id];
 
 		if (vs_desc->vs_ops->xpu_datum_heap_read(kcxt, addr, xdatum))
 		{
@@ -49,7 +49,7 @@ __fillup_by_null_values(kern_context *kcxt,
 	{
 		uint16_t	slot_id = vl_desc->vl_slot_id;
 
-		kcxt->kvars_values[slot_id]->expr_ops = NULL;
+		kcxt->kvars_slot[slot_id]->expr_ops = NULL;
 		vl_desc++;
 		kvload_nitems--;
 	}
@@ -67,7 +67,7 @@ __extract_heap_tuple_sysattr(kern_context *kcxt,
 	if (slot_id < kcxt->kvars_nslots)
 	{
 		const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[slot_id];
-		xpu_datum_t	   *xdatum = kcxt->kvars_values[slot_id];
+		xpu_datum_t	   *xdatum = kcxt->kvars_slot[slot_id];
 		const void	   *addr;
 
 		switch (vl_desc->vl_resno)
@@ -92,7 +92,12 @@ __extract_heap_tuple_sysattr(kern_context *kcxt,
 				STROM_ELOG(kcxt, "not a supported system attribute reference");
 				return false;
 		}
-		return vs_desc->vs_ops->xpu_datum_heap_read(kcxt, addr, xdatum);
+		if (vs_desc->vs_ops->xpu_datum_heap_read(kcxt, addr, xdatum))
+		{
+			assert(XPU_DATUM_ISNULL(xdatum) || xdatum->expr_ops == vs_desc->vs_ops);
+			return true;
+		}
+		return false;
 	}
 	STROM_ELOG(kcxt, "kvars slot-id: out of range");
 	return false;
@@ -225,6 +230,7 @@ __kern_extract_arrow_field(kern_context *kcxt,
 												   kds_index,
 												   result))
 			return false;
+		assert(vs_desc->vs_ops == result->expr_ops);
 		if (result->expr_ops == &xpu_array_ops)
 		{
 			uint32_t	slot_id = (vs_desc - kcxt->kvars_desc);
@@ -243,130 +249,6 @@ __kern_extract_arrow_field(kern_context *kcxt,
 		result->expr_ops = NULL;
 	}
 	return true;
-
-
-
-
-#if 0
-	switch (cmeta->attopts.tag)
-	{
-		case ArrowType__Bool:
-			if (!__arrow_fetch_bool_datum(kcxt,
-										  kds,
-										  cmeta,
-										  kds_index,
-										  vs_desc,
-										  result))
-				return false;
-			break;
-
-		case ArrowType__Int:
-			if (!__arrow_fetch_int_datum(kcxt, kds, cmeta,
-										 kds_index,
-										 kvar, vclass))
-				return false;
-			break;
-				
-		case ArrowType__FloatingPoint:
-			if (!__arrow_fetch_float_datum(kcxt, kds, cmeta,
-										   kds_index,
-										   kvar, vclass))
-				return false;
-			break;
-
-		case ArrowType__Decimal:
-			if (!__arrow_fetch_decimal_datum(kcxt, kds, cmeta,
-											 kds_index,
-											 kvar, vclass,
-											 slot_buf))
-				return false;
-			break;
-
-		case ArrowType__Date:
-			if (!__arrow_fetch_date_datum(kcxt, kds, cmeta,
-										  kds_index,
-										  kvar, vclass))
-				return false;
-			break;
-					
-		case ArrowType__Time:
-			if (!__arrow_fetch_time_datum(kcxt, kds, cmeta,
-										  kds_index,
-										  kvar, vclass))
-				return false;
-			break;
-
-		case ArrowType__Timestamp:
-			if (!__arrow_fetch_timestamp_datum(kcxt, kds, cmeta,
-											   kds_index,
-											   kvar, vclass))
-				return false;
-			break;
-
-		case ArrowType__Interval:
-			if (!__arrow_fetch_interval_datum(kcxt, kds, cmeta,
-											  kds_index,
-											  kvar, vclass,
-											  slot_buf))
-				return false;
-			break;
-
-		case ArrowType__FixedSizeBinary:
-			if (!__arrow_fetch_fixed_size_binary_datum(kcxt, kds, cmeta,
-													   kds_index,
-													   kvar, vclass))
-				return false;
-			break;
-
-		case ArrowType__Utf8:
-		case ArrowType__Binary:
-			if (!__arrow_fetch_variable_datum(kcxt, kds, cmeta,
-											  kds_index,
-											  false,
-											  kvar, vclass))
-				return false;
-			break;
-
-		case ArrowType__LargeUtf8:
-		case ArrowType__LargeBinary:
-			if (!__arrow_fetch_variable_datum(kcxt, kds, cmeta,
-											  kds_index,
-											  true,
-											  kvar, vclass))
-				return false;
-			break;
-
-		case ArrowType__List:
-			if (!__arrow_fetch_array_datum(kcxt, kds, cmeta,
-										   kds_index,
-										   false,
-										   kvar, vclass,
-										   slot_buf))
-				return false;
-			break;
-
-		case ArrowType__LargeList:
-			if (!__arrow_fetch_array_datum(kcxt, kds, cmeta,
-										   kds_index,
-										   true,
-										   kvar, vclass,
-										   slot_buf))
-				return false;
-			break;
-
-		case ArrowType__Struct:
-			if (!__arrow_fetch_composite_datum(kcxt, kds, cmeta,
-											   kds_index,
-											   kvar, vclass,
-											   slot_buf))
-				return false;
-			break;
-		default:
-			STROM_ELOG(kcxt, "Unsupported Apache Arrow type");
-			return false;
-	}
-	return true;
-#endif
 }
 
 INLINE_FUNCTION(bool)
@@ -433,7 +315,7 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 										cmeta,
 										kds_index,
 										&kcxt->kvars_desc[slot_id],
-										kcxt->kvars_values[slot_id]))
+										kcxt->kvars_slot[slot_id]))
 			return false;
 
 		vl_desc++;
@@ -457,11 +339,16 @@ STATIC_FUNCTION(bool)
 pgfn_ConstExpr(XPU_PGFUNCTION_ARGS)
 {
 	const xpu_datum_operators *expr_ops = kexp->expr_ops;
-	const char	   *addr;
 
-	addr = (kexp->u.c.const_isnull ? NULL : kexp->u.c.const_value);
-
-	return expr_ops->xpu_datum_heap_read(kcxt, addr, __result);
+	if (kexp->u.c.const_isnull)
+		__result->expr_ops = NULL;
+	else
+	{
+		if (!expr_ops->xpu_datum_heap_read(kcxt, kexp->u.c.const_value, __result))
+			return false;
+		assert(expr_ops == __result->expr_ops);
+	}
+	return true;
 }
 
 STATIC_FUNCTION(bool)
@@ -470,14 +357,20 @@ pgfn_ParamExpr(XPU_PGFUNCTION_ARGS)
 	const xpu_datum_operators *expr_ops = kexp->expr_ops;
 	kern_session_info *session = kcxt->session;
 	uint32_t		param_id = kexp->u.p.param_id;
-	const char	   *addr;
 
 	if (param_id < session->nparams && session->poffset[param_id] != 0)
-		addr = ((char *)session + session->poffset[param_id]);
-	else
-		addr = NULL;
+	{
+		const char *addr = ((char *)session + session->poffset[param_id]);
 
-	return expr_ops->xpu_datum_heap_read(kcxt, addr, __result);
+		if (!expr_ops->xpu_datum_heap_read(kcxt, addr, __result))
+			return false;
+		assert(expr_ops == __result->expr_ops);
+	}
+	else
+	{
+		__result->expr_ops = NULL;
+	}
+	return true;
 }
 
 STATIC_FUNCTION(bool)
@@ -488,7 +381,7 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 	if (kexp->u.v.var_offset < 0)
 	{
 		uint16_t		slot_id = kexp->u.v.var_slot_id;
-		xpu_datum_t	   *__xdatum = kcxt->kvars_values[slot_id];
+		xpu_datum_t	   *__xdatum = kcxt->kvars_slot[slot_id];
 
 		if (slot_id >= kcxt->kvars_nslots)
 		{
@@ -998,7 +891,7 @@ __ScalarArrayOpArrow(kern_context *kcxt,
 		/* load the element */
 		if (!__kern_extract_arrow_field(kcxt, kds, smeta, index,
 										&kcxt->kvars_desc[slot_id],
-										kcxt->kvars_values[slot_id]))
+										kcxt->kvars_slot[slot_id]))
 			return false;
 		/* call the comparator */
 		if (!EXEC_KERN_EXPRESSION(kcxt, kcmp, &status))
@@ -1087,7 +980,7 @@ kern_form_heaptuple(kern_context *kcxt,
 {
 	/*
 	 * NOTE: the caller must call kern_estimate_heaptuple() preliminary to ensure
-	 *       kcxt->kvars_values[] are filled-up by the scalar values to be written.
+	 *       kcxt->kvars_slot[] are filled-up by the scalar values to be written.
 	 */
 	int			nattrs = kexp_proj->u.proj.nattrs;
 	uint32_t	t_hoff;
@@ -1103,7 +996,7 @@ kern_form_heaptuple(kern_context *kcxt,
 		xpu_datum_t	   *xdatum;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		xdatum = kcxt->kvars_values[slot_id];
+		xdatum = kcxt->kvars_slot[slot_id];
 		if (XPU_DATUM_ISNULL(xdatum))
 		{
 			t_infomask |= HEAP_HASNULL;
@@ -1139,7 +1032,7 @@ kern_form_heaptuple(kern_context *kcxt,
 		char		   *buffer = NULL;
 
 		assert(slot_id < kcxt->kvars_nslots);
-		xdatum = kcxt->kvars_values[slot_id];
+		xdatum = kcxt->kvars_slot[slot_id];
 		if (!XPU_DATUM_ISNULL(xdatum))
 		{
 			/* adjust alignment */
@@ -1187,7 +1080,7 @@ kern_estimate_heaptuple(kern_context *kcxt,
 	const kern_expression *karg;
 	int		i, sz;
 
-	/* Run SaveExpr expressions to warm up kcxt->kvars_values[] */
+	/* Run SaveExpr expressions to warm up kcxt->kvars_slot[] */
 	for (i=0, karg=KEXP_FIRST_ARG(kexp_proj);
 		 i < kexp_proj->nr_args;
 		 i++, karg=KEXP_NEXT_ARG(karg))
@@ -1204,7 +1097,7 @@ kern_estimate_heaptuple(kern_context *kcxt,
 			slot_id = karg->u.save.sv_slot_id;
 		}
 		assert(slot_id < kcxt->kvars_nslots);
-		xdatum = kcxt->kvars_values[slot_id];
+		xdatum = kcxt->kvars_slot[slot_id];
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, xdatum))
 			return -1;
 	}
@@ -1269,7 +1162,7 @@ pgfn_SaveExpr(XPU_PGFUNCTION_ARGS)
 	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 	const xpu_datum_operators *expr_ops = kexp->expr_ops;
 	uint16_t		slot_id = kexp->u.save.sv_slot_id;
-	xpu_datum_t	   *xdatum = kcxt->kvars_values[slot_id];
+	xpu_datum_t	   *xdatum = kcxt->kvars_slot[slot_id];
 
 	assert(kexp->nr_args == 1 &&
 		   kexp->exptype == karg->exptype &&
@@ -1699,7 +1592,7 @@ ExecMoveKernelVariables(kern_context *kcxt,
 		if (vm_desc->vm_from_xdatum)
 		{
 			/* xdatum -> kvec-buffer */
-			xpu_datum_t	   *xdatum = kcxt->kvars_values[vm_desc->vm_slot_id];
+			xpu_datum_t	   *xdatum = kcxt->kvars_slot[vm_desc->vm_slot_id];
 			kvec_datum_t   *dst_kvec = (kvec_datum_t *)(dst_kvec_buffer +
 														vm_desc->vm_offset);
 			assert(XPU_DATUM_ISNULL(xdatum) || xdatum->expr_ops == vs_desc->vs_ops);
@@ -1891,9 +1784,9 @@ restart:
 				addr = (const char *)kds_hash + __kds_unpack(t_off);
 				assert(slot_id < kcxt->kvars_nslots);
 				vs_desc = &kcxt->kvars_desc[slot_id];
-				assert(vs_desc->vs_type_code == TypeOpCode__internal);				
+				assert(vs_desc->vs_ops == &xpu_internal_ops);
 				if (!vs_desc->vs_ops->xpu_datum_heap_read(kcxt, addr,
-														  kcxt->kvars_values[slot_id]))
+														  kcxt->kvars_slot[slot_id]))
 				{
 					assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 					return UINT_MAX;
@@ -1940,7 +1833,7 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 	assert(slot_id < kcxt->kvars_nslots &&
 		   kcxt->kvars_desc[slot_id].vs_type_code == TypeOpCode__internal);
 	/* load the inner heap tuple */
-	xdatum = (xpu_internal_t *)kcxt->kvars_values[slot_id];
+	xdatum = (xpu_internal_t *)kcxt->kvars_slot[slot_id];
 	assert(!XPU_DATUM_ISNULL(xdatum) &&
 		   xdatum->value >= (char *)kds_hash &&
 		   xdatum->value <  (char *)kds_hash + kds_hash->length);
@@ -2402,7 +2295,8 @@ __xpu_composite_arrow_write(kern_context *kcxt,
 										kds,
 										smeta_src,
 										row_index,
-										vs_desc, xdatum))
+										vs_desc,
+										xdatum))
 			return -1;
 
 		if (!XPU_DATUM_ISNULL(xdatum))

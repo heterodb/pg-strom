@@ -413,7 +413,7 @@ typedef struct
 	struct kern_session_info *session;
 
 	/* the kernel variables slot */
-	struct xpu_datum_t **kvars_values;
+	struct xpu_datum_t **kvars_slot;
 	const struct kern_varslot_desc *kvars_desc;
 	uint32_t		kvars_nslots;		/* length of kvars_values / desc */
 	uint32_t		kvars_nrooms;		/* length of kvars_desc (incl. subfields) */
@@ -450,7 +450,7 @@ typedef struct
 		KCXT->kvecs_ndims  = (SESSION)->kcxt_kvecs_ndims;				\
 		KCXT->kvecs_curr_buffer = NULL;									\
 		KCXT->kvecs_curr_id = 0;										\
-		KCXT->kvars_values = (struct xpu_datum_t **)					\
+		KCXT->kvars_slot = (struct xpu_datum_t **)						\
 			alloca(sizeof(struct xpu_datum_t *) * KCXT->kvars_nslots);	\
 		__vs_desc = SESSION_KVARS_SLOT_DESC(SESSION);					\
 		for (int __i=0; __i < KCXT->kvars_nslots; __i++)				\
@@ -458,7 +458,7 @@ typedef struct
 			const xpu_datum_operators *vs_ops =	__vs_desc[__i].vs_ops;	\
 			/* alloca() guarantees 16bytes-aligned */					\
 			assert(vs_ops->xpu_type_alignof <= 16);						\
-			KCXT->kvars_values[__i] = (struct xpu_datum_t *)			\
+			KCXT->kvars_slot[__i] = (struct xpu_datum_t *)				\
 				alloca(vs_ops->xpu_type_sizeof);						\
 		}													   			\
 		KCXT->kvars_desc = __vs_desc;									\
@@ -2342,12 +2342,9 @@ typedef struct kern_session_info
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
 	/* xpucode for this session */
-	uint32_t	xpucode_slot_vars_definitivarslot_defs;
 	uint32_t	xpucode_load_vars_packed;
 	uint32_t	xpucode_move_vars_packed;
-	uint32_t	xpucode_scan_load_vars;			//deprecated
 	uint32_t	xpucode_scan_quals;
-	uint32_t	xpucode_join_load_vars_packed;	//deprecated
 	uint32_t	xpucode_join_quals_packed;
 	uint32_t	xpucode_hash_values_packed;
 	uint32_t	xpucode_gist_evals_packed;
@@ -2373,7 +2370,8 @@ typedef struct kern_session_info
 
 	/* group-by final buffer */
 	uint32_t	groupby_kds_final;	/* header portion of kds_final */
-
+	uint32_t	groupby_prefunc_bufsz; /* buffer size for preagg functions */
+	float4_t	groupby_ngroups_estimation; /* planne's estimation of ngroups */
 	/* executor parameter buffer */
 	uint32_t	nparams;	/* number of parameters */
 	uint32_t	poffset[1];	/* offset of params */

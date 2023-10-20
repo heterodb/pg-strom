@@ -628,6 +628,7 @@ typedef struct
 	Oid		partial_func_rettype;
 	int		partial_func_nargs;
 	int		partial_func_action;
+	int		partial_func_bufsz;
 	bool	numeric_aware;
 	bool	is_valid_entry;
 } aggfunc_catalog_entry;
@@ -712,34 +713,59 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 	Oid		func_oid = __aggfunc_resolve_func_signature(partfn_signature);
 	Oid		type_oid;
 	int		func_nargs;
+	int		partfn_bufsz;
 
 	switch (partfn_action)
 	{
 		case KAGG_ACTION__NROWS_ANY:
 			func_nargs = 0;
 			type_oid = INT8OID;
+			partfn_bufsz = sizeof(int64_t);
 			break;
 		case KAGG_ACTION__NROWS_COND:
 			func_nargs = 1;
 			type_oid = INT8OID;
+			partfn_bufsz = sizeof(int64_t);
 			break;
 		case KAGG_ACTION__PMIN_INT32:
 		case KAGG_ACTION__PMIN_INT64:
-		case KAGG_ACTION__PMIN_FP64:
 		case KAGG_ACTION__PMAX_INT32:
 		case KAGG_ACTION__PMAX_INT64:
+			func_nargs = 1;
+            type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__pminmax_int64_packed);
+			break;
+
+		case KAGG_ACTION__PMIN_FP64:
 		case KAGG_ACTION__PMAX_FP64:
+			func_nargs = 1;
+			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__pminmax_fp64_packed);
+			break;
+
 		case KAGG_ACTION__PAVG_INT:
 		case KAGG_ACTION__PSUM_INT:
+			func_nargs = 1;
+			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__psum_int_packed);
+			break;
+
 		case KAGG_ACTION__PAVG_FP:
 		case KAGG_ACTION__PSUM_FP:
+			func_nargs = 1;
+			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__psum_fp_packed);
+			break;
+			
 		case KAGG_ACTION__STDDEV:
 			func_nargs = 1;
 			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__stddev_packed);
 			break;
 		case KAGG_ACTION__COVAR:
 			func_nargs = 2;
 			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__covar_packed);
 			break;
 		default:
 			elog(ERROR, "Catalog corruption? unknown action: %d", partfn_action);
@@ -749,9 +775,11 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 	entry->partial_func_rettype = get_func_rettype(func_oid);
 	entry->partial_func_nargs = get_func_nargs(func_oid);
 	entry->partial_func_action = partfn_action;
+	entry->partial_func_bufsz  = partfn_bufsz;
 
 	if (entry->partial_func_rettype != type_oid ||
-		entry->partial_func_nargs != func_nargs)
+		entry->partial_func_nargs != func_nargs ||
+		entry->partial_func_bufsz != MAXALIGN(partfn_bufsz))
 		elog(ERROR, "Catalog curruption? partial function mismatch: %s",
 			 partfn_signature);
 }
@@ -1045,6 +1073,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 		add_column_to_pathtarget(target_partial, partfn, 0);
 		pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
 											   aggfn_cat->partial_func_action);
+		pp_info->groupby_prefunc_bufsz += aggfn_cat->partial_func_bufsz;
 	}
 
 	/*

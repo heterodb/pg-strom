@@ -753,7 +753,7 @@ kern_gpujoin_main(kern_session_info *session,
 		   kgtask->n_rels       == n_rels);
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session);
-	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(kgtask->kvars_ndims);
+	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(kgtask->kvecs_ndims);
 	wp = (kern_warp_context *)SHARED_WORKMEM(wp_base_sz, get_local_id() / warpSize);
 	INIT_KERN_GPUTASK_SUBFIELDS(kgtask,
 								&wp_saved,
@@ -780,7 +780,7 @@ kern_gpujoin_main(kern_session_info *session,
 			memset(wp, 0, wp_base_sz);
 		if (get_local_id() == 0)
 			smx_row_count = 0;
-		for (depth=0; depth < kgtask->kvars_ndims; depth++)
+		for (depth=0; depth < kgtask->n_rels; depth++)
 		{
 			l_state[depth * get_global_size() + get_global_id()] = 0;
 			matched[depth * get_global_size() + get_global_id()] = false;
@@ -859,7 +859,7 @@ kern_gpujoin_main(kern_session_info *session,
 
 			assert(kexp_gist != NULL &&
 				   kexp_gist->opcode == FuncOpCode__GiSTEval &&
-				   kexp_gist->u.gist.gist_depth < kgtask->kvars_ndims);
+				   kexp_gist->u.gist.gist_depth < kgtask->kvecs_ndims);
 			gist_depth = kexp_gist->u.gist.gist_depth;
 
 			depth = execGpuJoinGiSTJoin(kcxt, wp,
@@ -913,7 +913,7 @@ kern_gpujoin_main(kern_session_info *session,
 					int		gist_depth = kexp_gist->u.gist.gist_depth;
 
 					assert(gist_depth > n_rels &&
-						   gist_depth < kgtask->kvars_ndims);
+						   gist_depth < kgtask->kvecs_ndims);
 					atomicAdd(&kgtask->stats[i].nitems_gist,
 							  WARP_WRITE_POS(wp, gist_depth));
 				}

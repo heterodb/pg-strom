@@ -63,7 +63,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 			case KAGG_ACTION__VREF:
 				assert(desc->arg0_slot_id >= 0 &&
 					   desc->arg0_slot_id < kcxt->kvars_nslots);
-				xdatum = kcxt->kvars_values[desc->arg0_slot_id];
+				xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
 				if (XPU_DATUM_ISNULL(xdatum))
 					nbytes = 0;
 				else
@@ -226,7 +226,7 @@ __update_nogroups__nrows_cond(kern_context *kcxt,
 
 	if (source_is_valid)
 	{
-		xpu_datum_t	   *xdatum = kcxt->kvars_values[desc->arg0_slot_id];
+		xpu_datum_t	   *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
 
 		if (XPU_DATUM_ISNULL(xdatum))
 			source_is_valid = false;
@@ -257,7 +257,7 @@ __update_nogroups__pmin_int32(kern_context *kcxt,
 	if (source_is_valid)
 	{
 		xpu_int4_t	   *xdatum = (xpu_int4_t *)
-			kcxt->kvars_values[desc->arg0_slot_id];
+			kcxt->kvars_slot[desc->arg0_slot_id];
 
 		if (!XPU_DATUM_ISNULL(xdatum))
 		{
@@ -310,7 +310,7 @@ __update_nogroups__pmin_int64(kern_context *kcxt,
 	if (source_is_valid)
 	{
 		xpu_int8_t	   *xdatum = (xpu_int8_t *)
-			kcxt->kvars_values[desc->arg0_slot_id];
+			kcxt->kvars_slot[desc->arg0_slot_id];
 
 		if (!XPU_DATUM_ISNULL(xdatum))
 		{
@@ -363,7 +363,8 @@ __update_nogroups__pmax_int32(kern_context *kcxt,
 	if (source_is_valid)
 	{
 		xpu_int4_t	   *xdatum = (xpu_int4_t *)
-			kcxt->kvars_values[desc->arg0_slot_id];
+			kcxt->kvars_slot[desc->arg0_slot_id];
+
 		if (!XPU_DATUM_ISNULL(xdatum))
 		{
 			assert(xdatum->expr_ops == &xpu_int4_ops);
@@ -416,7 +417,7 @@ __update_nogroups__pmax_int64(kern_context *kcxt,
 	if (source_is_valid)
 	{
 		xpu_int8_t	   *xdatum = (xpu_int8_t *)
-			kcxt->kvars_values[desc->arg0_slot_id];
+			kcxt->kvars_slot[desc->arg0_slot_id];
 
 		if (!XPU_DATUM_ISNULL(xdatum))
 		{
@@ -470,7 +471,8 @@ __update_nogroups__pmin_fp64(kern_context *kcxt,
 	if (source_is_valid)
 	{
 		xpu_float8_t   *xdatum = (xpu_float8_t *)
-			kcxt->kvars_values[desc->arg0_slot_id];
+			kcxt->kvars_slot[desc->arg0_slot_id];
+
 		if (!XPU_DATUM_ISNULL(xdatum))
 		{
 			assert(xdatum->expr_ops == &xpu_float8_ops);
@@ -523,7 +525,7 @@ __update_nogroups__pmax_fp64(kern_context *kcxt,
 	if (source_is_valid)
 	{
 		xpu_float8_t   *xdatum = (xpu_float8_t *)
-			kcxt->kvars_values[desc->arg0_slot_id];
+			kcxt->kvars_slot[desc->arg0_slot_id];
 
 		if (!XPU_DATUM_ISNULL(xdatum))
 		{
@@ -576,7 +578,7 @@ __update_nogroups__psum_int(kern_context *kcxt,
 	if (source_is_valid)
 	{
 		xpu_int8_t *xdatum = (xpu_int8_t *)
-			kcxt->kvars_values[desc->arg0_slot_id];
+			kcxt->kvars_slot[desc->arg0_slot_id];
 
 		if (!XPU_DATUM_ISNULL(xdatum))
 		{
@@ -622,7 +624,7 @@ __update_nogroups__psum_fp(kern_context *kcxt,
 	if (source_is_valid)
 	{
 		xpu_float8_t   *xdatum = (xpu_float8_t *)
-			kcxt->kvars_values[desc->arg0_slot_id];
+			kcxt->kvars_slot[desc->arg0_slot_id];
 
 		if (!XPU_DATUM_ISNULL(xdatum))
 		{
@@ -667,7 +669,7 @@ __update_nogroups__pstddev(kern_context *kcxt,
 	if (source_is_valid)
 	{
 		xpu_float8_t   *xdatum = (xpu_float8_t *)
-			kcxt->kvars_values[desc->arg0_slot_id];
+			kcxt->kvars_slot[desc->arg0_slot_id];
 
 		if (!XPU_DATUM_ISNULL(xdatum))
 		{
@@ -725,9 +727,9 @@ __update_nogroups__pcovar(kern_context *kcxt,
 	if (source_is_valid)
 	{
 		xpu_float8_t   *xdatum = (xpu_float8_t *)
-			kcxt->kvars_values[desc->arg0_slot_id];
+			kcxt->kvars_slot[desc->arg0_slot_id];
 		xpu_float8_t   *ydatum = (xpu_float8_t *)
-			kcxt->kvars_values[desc->arg1_slot_id];
+			kcxt->kvars_slot[desc->arg1_slot_id];
 
 		if (!XPU_DATUM_ISNULL(xdatum) && !XPU_DATUM_ISNULL(ydatum))
 		{
@@ -1139,7 +1141,7 @@ __update_groupby__nrows_cond(kern_context *kcxt,
 							 kern_colmeta *cmeta,
 							 kern_aggregate_desc *desc)
 {
-	xpu_datum_t	   *xdatum = kcxt->kvars_values[desc->arg0_slot_id];
+	xpu_datum_t	   *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 		__atomic_add_uint64((uint64_t *)buffer, 1);
@@ -1152,7 +1154,7 @@ __update_groupby__pmin_int32(kern_context *kcxt,
 							 kern_aggregate_desc *desc)
 {
 	xpu_int4_t	   *xdatum = (xpu_int4_t *)
-		kcxt->kvars_values[desc->arg0_slot_id];
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 	{
@@ -1172,7 +1174,7 @@ __update_groupby__pmin_int64(kern_context *kcxt,
 							 kern_aggregate_desc *desc)
 {
 	xpu_int8_t	   *xdatum = (xpu_int8_t *)
-		kcxt->kvars_values[desc->arg0_slot_id];
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 	{
@@ -1192,7 +1194,7 @@ __update_groupby__pmax_int32(kern_context *kcxt,
 							 kern_aggregate_desc *desc)
 {
 	xpu_int4_t	   *xdatum = (xpu_int4_t *)
-		kcxt->kvars_values[desc->arg0_slot_id];
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 	{
@@ -1212,7 +1214,7 @@ __update_groupby__pmax_int64(kern_context *kcxt,
 							 kern_aggregate_desc *desc)
 {
 	xpu_int8_t	   *xdatum = (xpu_int8_t *)
-		kcxt->kvars_values[desc->arg0_slot_id];
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 	{
@@ -1232,7 +1234,7 @@ __update_groupby__pmin_fp64(kern_context *kcxt,
 							kern_aggregate_desc *desc)
 {
 	xpu_float8_t   *xdatum = (xpu_float8_t *)
-		kcxt->kvars_values[desc->arg0_slot_id];
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 	{
@@ -1252,7 +1254,7 @@ __update_groupby__pmax_fp64(kern_context *kcxt,
 							kern_aggregate_desc *desc)
 {
 	xpu_float8_t   *xdatum = (xpu_float8_t *)
-		kcxt->kvars_values[desc->arg0_slot_id];
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 	{
@@ -1272,7 +1274,7 @@ __update_groupby__psum_int(kern_context *kcxt,
 						   kern_aggregate_desc *desc)
 {
 	xpu_int8_t	   *xdatum = (xpu_int8_t *)
-		kcxt->kvars_values[desc->arg0_slot_id];
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 	{
@@ -1292,7 +1294,7 @@ __update_groupby__psum_fp(kern_context *kcxt,
 						  kern_aggregate_desc *desc)
 {
 	xpu_float8_t   *xdatum = (xpu_float8_t *)
-		kcxt->kvars_values[desc->arg0_slot_id];
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 	{
@@ -1312,7 +1314,7 @@ __update_groupby__pstddev(kern_context *kcxt,
 						  kern_aggregate_desc *desc)
 {
 	xpu_float8_t   *xdatum = (xpu_float8_t *)
-		kcxt->kvars_values[desc->arg0_slot_id];
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 	{
@@ -1333,9 +1335,9 @@ __update_groupby__pcovar(kern_context *kcxt,
 						 kern_aggregate_desc *desc)
 {
 	xpu_float8_t   *xdatum = (xpu_float8_t *)
-		kcxt->kvars_values[desc->arg0_slot_id];
+		kcxt->kvars_slot[desc->arg0_slot_id];
 	xpu_float8_t   *ydatum = (xpu_float8_t *)
-		kcxt->kvars_values[desc->arg1_slot_id];
+		kcxt->kvars_slot[desc->arg1_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum) && !XPU_DATUM_ISNULL(ydatum))
 	{
