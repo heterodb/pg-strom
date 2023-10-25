@@ -1303,6 +1303,53 @@ __fixup_fallback_projection(Node *node, void *__data)
 	return expression_tree_mutator(node, __fixup_fallback_projection, pp_info);
 }
 
+/*
+ * fixup_fallback_join_inner_keys
+ */
+typedef struct
+{
+	List   *kvars_deflist;
+	int		inner_depth;
+} fixup_fallback_join_inner_keys_context;
+
+static Node *
+__fixup_fallback_join_inner_keys_walker(Node *node, void *__data)
+{
+	fixup_fallback_join_inner_keys_context *con = __data;
+
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		codegen_kvar_defitem *kvdef;
+		Var	   *var = (Var *)node;
+
+		Assert(var->varno == INDEX_VAR &&
+			   var->varattno >= 0 &&
+			   var->varattno < list_length(con->kvars_deflist));
+		kvdef = list_nth(con->kvars_deflist, var->varattno);
+		Assert(kvdef->kv_depth == con->inner_depth);
+		return (Node *)makeVar(INNER_VAR,
+							   kvdef->kv_resno,
+							   exprType(node),
+							   exprTypmod(node),
+							   exprCollation(node),
+							   0);
+	}
+	return expression_tree_mutator(node, __fixup_fallback_join_inner_keys_walker, __data);
+}
+
+static Node *
+fixup_fallback_join_inner_keys(Node *inner_key, pgstromPlanInfo *pp_info, int inner_depth)
+{
+	fixup_fallback_join_inner_keys_context con;
+
+	memset(&con, 0, sizeof(con));
+	con.kvars_deflist = pp_info->kvars_deflist;
+	con.inner_depth   = inner_depth;
+	return __fixup_fallback_join_inner_keys_walker(inner_key, &con);
+}
+
 static void
 __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 {
@@ -1521,6 +1568,9 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			if (!dtype)
 				elog(ERROR, "failed on lookup device type of %s",
 					 nodeToString(inner_key));
+			inner_key = fixup_fallback_join_inner_keys(inner_key,
+													   pp_info,
+													   istate->depth);
 			es = ExecInitExpr((Expr *)inner_key, &pts->css.ss.ps);
 			istate->hash_inner_keys = lappend(istate->hash_inner_keys, es);
 			istate->hash_inner_dtypes = lappend(istate->hash_inner_dtypes, dtype);
