@@ -246,6 +246,7 @@ __xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 
 	if (is_negative)
 		value = -value;
+
 	switch (weight % PG_DEC_DIGITS)
 	{
 		case 3:

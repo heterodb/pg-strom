@@ -27,16 +27,17 @@ __extract_heap_tuple_attr(kern_context *kcxt,
 		const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[slot_id];
 		xpu_datum_t	   *xdatum = kcxt->kvars_slot[slot_id];
 
-		if (vs_desc->vs_ops->xpu_datum_heap_read(kcxt, addr, xdatum))
+		if (!addr)
+			xdatum->expr_ops = NULL;
+		else
 		{
-			assert(XPU_DATUM_ISNULL(xdatum) || xdatum->expr_ops == vs_desc->vs_ops);
-			return true;
+			if (!vs_desc->vs_ops->xpu_datum_heap_read(kcxt, addr, xdatum))
+				return false;
+			assert(xdatum->expr_ops == vs_desc->vs_ops);
 		}
+		return true;
 	}
-	else
-	{
-		STROM_ELOG(kcxt, "vl_desc::slot_id is out of range");
-	}
+	STROM_ELOG(kcxt, "vl_desc::slot_id is out of range");
 	return false;
 }
 
@@ -388,19 +389,24 @@ pgfn_VarExpr(XPU_PGFUNCTION_ARGS)
 			STROM_ELOG(kcxt, "Bug? slot_id is out of range");
 			return false;
 		}
-		memcpy(__result, __xdatum, expr_ops->xpu_type_sizeof);
+		if (__result != __xdatum)
+			memcpy(__result, __xdatum, expr_ops->xpu_type_sizeof);
 		assert(XPU_DATUM_ISNULL(__result) || __result->expr_ops == expr_ops);
 	}
 	else
 	{
 		const kvec_datum_t *kvecs = (kvec_datum_t *)(kcxt->kvecs_curr_buffer +
 													 kexp->u.v.var_offset);
-		if (KVEC_DATUM_ISNULL(kvecs, kcxt->kvecs_curr_id))
+		assert(kcxt->kvecs_curr_id < KVEC_UNITSZ);
+		if (kvecs->isnull[kcxt->kvecs_curr_id])
 			__result->expr_ops = NULL;
 		else if (!expr_ops->xpu_datum_kvec_load(kcxt, kvecs,
 												kcxt->kvecs_curr_id,
 												__result))
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 			return false;
+		}
 	}
 	return true;
 }
@@ -1516,60 +1522,6 @@ pgfn_MoveVars(XPU_PGFUNCTION_ARGS)
 	return false;
 }
 
-INLINE_FUNCTION(bool)
-__kvec_update_nullmask(kvec_datum_t *kvec, uint32_t kvec_id, bool isnull)
-{
-	uint64_t	bits = (1UL << kvec_id);
-#if defined(__CUDACC__)
-	uint32_t	mask = (1UL << LaneId());
-	uint64_t	temp;
-
-	if (isnull ? (kvec->nullmask & bits) == 0
-			   : (kvec->nullmask & bits) != 0)
-		bits = 0;	/* no need to update */
-
-	/*
-	 * NOTE: __shfl_xor_sync() returns undefined result if buddy thread
-	 * is inactive. So, we merge 
-	 */
-	temp = __shfl_xor_sync(__activemask(), bits, 0x01);
-	if ((__activemask() & (mask ^ 0x01)) != 0)
-		bits |= temp;
-	temp = __shfl_xor_sync(__activemask(), bits, 0x02);
-	if ((__activemask() & (mask ^ 0x02)) != 0)
-		bits |= temp;
-	temp = __shfl_xor_sync(__activemask(), bits, 0x04);
-	if ((__activemask() & (mask ^ 0x04)) != 0)
-		bits |= temp;
-	temp = __shfl_xor_sync(__activemask(), bits, 0x08);
-	if ((__activemask() & (mask ^ 0x08)) != 0)
-		bits |= temp;
-	temp = __shfl_xor_sync(__activemask(), bits, 0x10);
-	if ((__activemask() & (mask ^ 0x10)) != 0)
-		bits |= temp;
-
-	/* update nullmask by the leader thread */
-	if (bits != 0 && __ffs(__activemask()) == LaneId() + 1)
-		kvec->nullmask ^= bits;
-	__syncwarp(__activemask());
-#else
-	if (isnull)
-		kvec->nullmask &= ~bits;	/* NULL */
-	else
-		kvec->nullmask |=  bits;	/* NOT NULL */
-#endif
-	return !isnull;
-}
-
-INLINE_FUNCTION(bool)
-__kvec_copy_nullmask(const kvec_datum_t *src_kvec, uint32_t src_kvec_id,
-					 kvec_datum_t       *dst_kvec, uint32_t dst_kvec_id)
-{
-	int		isnull = ((src_kvec->nullmask & (1UL<<src_kvec_id)) == 0);
-
-	return __kvec_update_nullmask(dst_kvec, dst_kvec_id, isnull);
-}
-
 PUBLIC_FUNCTION(bool)
 ExecMoveKernelVariables(kern_context *kcxt,
 						const kern_expression *kexp_move_vars,
@@ -1581,6 +1533,7 @@ ExecMoveKernelVariables(kern_context *kcxt,
 	assert(kexp_move_vars->opcode == FuncOpCode__MoveVars &&
 		   kexp_move_vars->exptype == TypeOpCode__int4 &&
 		   kexp_move_vars->nr_args == 0);
+	assert(dst_kvec_id >= 0 && dst_kvec_id < KVEC_UNITSZ);
 	for (int i=0; i < kexp_move_vars->u.move.nitems; i++)
 	{
 		const kern_varmove_desc *vm_desc = &kexp_move_vars->u.move.desc[i];
@@ -1588,22 +1541,28 @@ ExecMoveKernelVariables(kern_context *kcxt,
 
 		assert(vm_desc->vm_slot_id >= 0 &&
 			   vm_desc->vm_slot_id <  kcxt->kvars_nslots);
-		assert(vm_desc->vm_offset + vs_desc->vs_ops->xpu_kvec_sizeof <= kcxt->kvecs_bufsz);
+		assert(vm_desc->vm_offset +
+			   vs_desc->vs_ops->xpu_kvec_sizeof <= kcxt->kvecs_bufsz);
 		if (vm_desc->vm_from_xdatum)
 		{
 			/* xdatum -> kvec-buffer */
 			xpu_datum_t	   *xdatum = kcxt->kvars_slot[vm_desc->vm_slot_id];
 			kvec_datum_t   *dst_kvec = (kvec_datum_t *)(dst_kvec_buffer +
 														vm_desc->vm_offset);
-			assert(XPU_DATUM_ISNULL(xdatum) || xdatum->expr_ops == vs_desc->vs_ops);
-			if (__kvec_update_nullmask(dst_kvec, dst_kvec_id,
-									   XPU_DATUM_ISNULL(xdatum)) &&
-				!xdatum->expr_ops->xpu_datum_kvec_save(kcxt,
-													   xdatum,
-													   dst_kvec,
-													   dst_kvec_id))
+			if (XPU_DATUM_ISNULL(xdatum))
+				dst_kvec->isnull[dst_kvec_id] = true;
+			else
 			{
-				return false;
+				dst_kvec->isnull[dst_kvec_id] = false;
+				assert(xdatum->expr_ops == vs_desc->vs_ops);
+				if (!xdatum->expr_ops->xpu_datum_kvec_save(kcxt,
+														   xdatum,
+														   dst_kvec,
+														   dst_kvec_id))
+				{
+					assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+					return false;
+				}
 			}
 		}
 		else
@@ -1611,6 +1570,7 @@ ExecMoveKernelVariables(kern_context *kcxt,
 			/* kvec-buffer -> kvec-buffer */
 			const kvec_datum_t *src_kvec;
 			kvec_datum_t	   *dst_kvec;
+			uint32_t			src_kvec_id = kcxt->kvecs_curr_id;
 
 			assert(kcxt->kvecs_curr_buffer != NULL);
 			assert(kcxt->kvecs_curr_id < KVEC_UNITSZ);
@@ -1618,13 +1578,18 @@ ExecMoveKernelVariables(kern_context *kcxt,
 											  vm_desc->vm_offset);
 			dst_kvec = (kvec_datum_t *)(dst_kvec_buffer +
 										vm_desc->vm_offset);
-			if (__kvec_copy_nullmask(src_kvec, kcxt->kvecs_curr_id,
-									 dst_kvec, dst_kvec_id) &&
-				!vs_desc->vs_ops->xpu_datum_kvec_copy(kcxt,
-													  src_kvec, kcxt->kvecs_curr_id,
-													  dst_kvec, dst_kvec_id))
+			if (src_kvec->isnull[src_kvec_id])
+				dst_kvec->isnull[dst_kvec_id] = true;
+			else
 			{
-				return false;
+				dst_kvec->isnull[dst_kvec_id] = false;
+				if (!vs_desc->vs_ops->xpu_datum_kvec_copy(kcxt,
+														  src_kvec, src_kvec_id,
+														  dst_kvec, dst_kvec_id))
+				{
+					assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+					return false;
+				}
 			}
 		}
 	}

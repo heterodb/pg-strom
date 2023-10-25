@@ -1039,9 +1039,6 @@ __execGpuPreAggNoGroups(kern_context *kcxt,
 	return true;
 }
 
-
-
-
 /*
  * __insertOneTupleGroupBy
  */

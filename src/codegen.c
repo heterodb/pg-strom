@@ -1361,7 +1361,7 @@ codegen_var_expression(codegen_context *context,
 		kexp.opcode          = FuncOpCode__VarExpr;
 		kexp.u.v.var_slot_id = kvdef->kv_slot_id;
 		if (kvdef->kv_offset >= 0 &&
-			kvdef->kv_depth == curr_depth)
+			kvdef->kv_depth != curr_depth)
 			kexp.u.v.var_offset = kvdef->kv_offset;
 		else
 			kexp.u.v.var_offset = -1;
@@ -2500,6 +2500,7 @@ codegen_build_scan_quals(codegen_context *context, List *dev_quals)
 	StringInfoData buf;
 	bytea	   *xpucode = NULL;
 	Expr	   *expr;
+	int			saved_depth = context->curr_depth;
 
 	Assert(context->elevel >= ERROR);
 	if (dev_quals == NIL)
@@ -2510,6 +2511,7 @@ codegen_build_scan_quals(codegen_context *context, List *dev_quals)
 		expr = make_andclause(dev_quals);
 
 	initStringInfo(&buf);
+	context->curr_depth = 0;
 	if (codegen_expression_walker(context, &buf, 0, expr) == 0)
 	{
 		xpucode = palloc(VARHDRSZ+buf.len);
@@ -2517,6 +2519,7 @@ codegen_build_scan_quals(codegen_context *context, List *dev_quals)
 		SET_VARSIZE(xpucode, VARHDRSZ+buf.len);
 	}
 	pfree(buf.data);
+	context->curr_depth = saved_depth;
 
 	return xpucode;
 }
@@ -3611,8 +3614,9 @@ __xpucode_var_cstring(StringInfo buf,
 	if (kexp->u.v.var_offset < 0)
 		appendStringInfo(buf, " slot=%u", kexp->u.v.var_slot_id);
 	else
-		appendStringInfo(buf, " kvec=0x%04x+%d",
-						 kexp->u.v.var_offset, dtype->kvec_sizeof);
+		appendStringInfo(buf, " kvec=0x%04x-%04x",
+						 kexp->u.v.var_offset,
+						 kexp->u.v.var_offset + dtype->kvec_sizeof);
 	appendStringInfo(buf, ", expr='%s'}", label);
 }
 

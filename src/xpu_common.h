@@ -1574,18 +1574,10 @@ typedef struct toast_compress_header
 #define KVEC_ALIGN(x)		TYPEALIGN(16,(x))	/* 128bit alignment */
 
 #define KVEC_DATUM_COMMON_FIELD					\
-	uint64_t		nullmask
-
+	bool			isnull[KVEC_UNITSZ]
 typedef struct kvec_datum_t {
 	KVEC_DATUM_COMMON_FIELD;
 } kvec_datum_t;
-
-INLINE_FUNCTION(bool)
-KVEC_DATUM_ISNULL(const kvec_datum_t *kvec, uint32_t kvec_id)
-{
-	assert(kvec_id < KVEC_UNITSZ);
-	return (kvec->nullmask & (1UL << kvec_id)) != 0;
-}
 
 /* ----------------------------------------------------------------
  *
@@ -2512,7 +2504,7 @@ SESSION_KEXP_MOVE_VARS(kern_session_info *session, int depth)
 	if (depth < 0)
 		return kexp;
 	karg = __PICKUP_PACKED_KEXP(kexp, depth);
-	assert(!karg || (karg->opcode == FuncOpCode__LoadVars &&
+	assert(!karg || (karg->opcode == FuncOpCode__MoveVars &&
 					 karg->exptype == TypeOpCode__int4));
 	return karg;
 }

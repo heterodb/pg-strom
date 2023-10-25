@@ -86,7 +86,7 @@ xpu_numeric_datum_kvec_load(kern_context *kcxt,
 
 	result->expr_ops = &xpu_numeric_ops;
 	result->kind     = kvecs->kinds[kvecs_id];
-	result->weight   = kvecs->kinds[kvecs_id];
+	result->weight   = kvecs->weights[kvecs_id];
 	result->value    = kvecs->values[kvecs_id];
 
     return true;
