@@ -39,6 +39,7 @@ struct gpuContext
 	gpuMemoryPool	pool_raw;
 	gpuMemoryPool	pool_managed;
 	bool			cuda_profiler_started;
+	int				gpumain_shmem_sz_dynamic;
 	/* GPU client */
 	pthread_mutex_t	client_lock;
 	dlist_head		client_list;
@@ -1610,16 +1611,15 @@ static unsigned int
 __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 								   int grid_sz, int block_sz,
 								   unsigned int shmem_base_sz,
+								   unsigned int shmem_dynamic_sz,
 								   unsigned int *p_groupby_prefunc_bufsz,
 								   unsigned int *p_groupby_prefunc_nbufs)
 {
-	GpuDevAttributes *dattrs = &gpuDevAttrs[CU_DINDEX_PER_THREAD];
-	unsigned int	shmem_total_sz = TYPEALIGN(1024, shmem_base_sz);
-	unsigned int	shmem_hw_limit = dattrs->MAX_SHARED_MEMORY_PER_BLOCK_OPTIN - 8192;
+	unsigned int	prepfn_usage;
 	unsigned int	num_buffers;
 
-	if (session->groupby_prefunc_bufsz == 0 ||
-		shmem_total_sz >= shmem_hw_limit)
+	shmem_base_sz = TYPEALIGN(1024, shmem_base_sz);
+	if (session->groupby_prefunc_bufsz == 0 || shmem_base_sz >= shmem_dynamic_sz)
 		goto no_prepfunc_buffer;
 
 	if (session->xpucode_groupby_keyhash &&
@@ -1627,32 +1627,30 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 		session->xpucode_groupby_keycomp)
 	{
 		/* GROUP-BY */
-		unsigned int	usage;
-
 		num_buffers = 2 * session->groupby_ngroups_estimation + 100;
-		usage = session->groupby_prefunc_bufsz * num_buffers;
-		if (shmem_total_sz + usage > shmem_hw_limit)
+		prepfn_usage = session->groupby_prefunc_bufsz * num_buffers;
+		if (shmem_base_sz + prepfn_usage > shmem_dynamic_sz)
 		{
 			/* adjust num_buffers, if too large */
-			num_buffers = (shmem_hw_limit -
-						   shmem_total_sz) / session->groupby_prefunc_bufsz;
-			usage = session->groupby_prefunc_bufsz * num_buffers;
+			num_buffers = (shmem_dynamic_sz -
+						   shmem_base_sz) / session->groupby_prefunc_bufsz;;
+			prepfn_usage = session->groupby_prefunc_bufsz * num_buffers;
 		}
-		shmem_total_sz += usage;
-		if (shmem_total_sz > shmem_hw_limit || num_buffers < 32)
+		Assert(shmem_base_sz + prepfn_usage <= shmem_dynamic_sz);
+		if (num_buffers < 32)
 			goto no_prepfunc_buffer;
 	}
 	else
 	{
 		/* NO-GROUPS */
 		num_buffers = (block_sz + WARPSIZE - 1) / WARPSIZE;
-		shmem_total_sz += session->groupby_prefunc_bufsz * num_buffers;
-		if (shmem_total_sz > shmem_hw_limit)
+		prepfn_usage = session->groupby_prefunc_bufsz * num_buffers;
+		if (shmem_base_sz + prepfn_usage > shmem_dynamic_sz)
 			goto no_prepfunc_buffer;
 	}
 	*p_groupby_prefunc_bufsz = session->groupby_prefunc_bufsz;
 	*p_groupby_prefunc_nbufs = num_buffers;
-	return shmem_total_sz;
+	return shmem_base_sz + prepfn_usage;
 
 no_prepfunc_buffer:
 	*p_groupby_prefunc_bufsz = 0;
@@ -1815,6 +1813,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	shmem_sz = __expand_gpupreagg_prepfunc_buffer(session,
 												  grid_sz, block_sz,
 												  shmem_sz,
+												  gcontext->gpumain_shmem_sz_dynamic,
 												  &groupby_prefunc_bufsz,
 												  &groupby_prefunc_nbufs);
 	/*
@@ -1935,7 +1934,9 @@ resume_kernel:
 						NULL);
 	if (rc != CUDA_SUCCESS)
 	{
-		gpuClientFatal(gclient, "failed on cuLaunchKernel: %s", cuStrError(rc));
+		gpuClientFatal(gclient, "failed on cuLaunchKernel(grid_sz=%u, block_sz=%u, shmem_sz=%u): %s",
+					   grid_sz, block_sz, shmem_sz,
+					   cuStrError(rc));
 		goto bailout;
 	}
 
@@ -2495,6 +2496,47 @@ __setupDevEncodeLinkageCatalog(CUmodule cuda_module)
 }
 
 /*
+ * __setupGpuKernelsSharedMemoryConfig
+ */
+static void
+__setupGpuKernelsSharedMemoryConfig(gpuContext *gcontext)
+{
+	GpuDevAttributes *dattrs = &gpuDevAttrs[gcontext->cuda_dindex];
+	CUmodule	cuda_module = gcontext->cuda_module;
+	CUfunction	cuda_function;
+	CUresult	rc;
+	int			shmem_sz_static;
+	int			shmem_sz_dynamic;
+	const char *fname = "kern_gpujoin_main";
+
+	Assert(gcontext->cuda_dindex < numGpuDevAttrs);
+	rc = cuModuleGetFunction(&cuda_function, cuda_module, fname);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
+			 fname, cuStrError(rc));
+
+	rc = cuFuncGetAttribute(&shmem_sz_static,
+							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+							cuda_function);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuFuncGetAttribute(SHARED_SIZE_BYTES): %s",
+			 cuStrError(rc));
+
+	shmem_sz_dynamic = (dattrs->MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
+						- TYPEALIGN(1024, shmem_sz_static)
+						- 8192);	/* margin for L1-cache */
+
+	rc = cuFuncSetAttribute(cuda_function,
+							CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+							shmem_sz_dynamic);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES, %d): %s",
+			 shmem_sz_dynamic, cuStrError(rc));
+
+	gcontext->gpumain_shmem_sz_dynamic = shmem_sz_dynamic;
+}
+
+/*
  * gpuservSetupGpuModule
  */
 static void
@@ -2583,6 +2625,9 @@ gpuservSetupGpuModule(gpuContext *gcontext)
 	gcontext->cuda_func_htab = __setupDevFuncLinkageTable(cuda_module);
 	gcontext->cuda_encode_catalog = __setupDevEncodeLinkageCatalog(cuda_module);
 	gcontext->cuda_module = cuda_module;
+
+	/* adjust shared memory configuration */
+	__setupGpuKernelsSharedMemoryConfig(gcontext);
 }
 
 /*
