@@ -1,6 +1,6 @@
 PG_CONFIG ?= pg_config
 VERSION ?= 5.0
-RELEASE ?= devel
+RELEASE ?= beta
 
 #
 # PostgreSQL major version
