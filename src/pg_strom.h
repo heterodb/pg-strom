@@ -311,7 +311,7 @@ typedef struct
 	List	   *fallback_tlist;	/* fallback_slot -> custom_scan_tlist if JOIN/PREAGG */
 	/* group-by parameters */
 	List	   *groupby_actions;		/* list of KAGG_ACTION__* on the kds_final */
-	int			groupby_prefunc_bufsz;	/* buffer-size for lightweight atomic operations */
+	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */
 	/* inner relations */
 	int			num_rels;
 	pgstromPlanInnerInfo inners[FLEXIBLE_ARRAY_MEMBER];

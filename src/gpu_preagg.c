@@ -1073,7 +1073,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 		add_column_to_pathtarget(target_partial, partfn, 0);
 		pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
 											   aggfn_cat->partial_func_action);
-		pp_info->groupby_prefunc_bufsz += aggfn_cat->partial_func_bufsz;
+		pp_info->groupby_prepfn_bufsz += aggfn_cat->partial_func_bufsz;
 	}
 
 	/*

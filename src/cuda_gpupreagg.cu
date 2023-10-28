@@ -912,9 +912,9 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 {
 	char	   *buffer;
 
-	if (kcxt->groupby_prefunc_buffer)
+	if (kcxt->groupby_prepfn_buffer)
 	{
-		buffer = kcxt->groupby_prefunc_buffer;
+		buffer = kcxt->groupby_prepfn_buffer;
 	}
 	else
 	{
@@ -1560,7 +1560,7 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 		}
 	}
 bailout:
-	assert(curr == groupby_prepfn_buffer + kcxt->groupby_prefunc_bufsz);
+	assert(curr == groupby_prepfn_buffer + kcxt->groupby_prepfn_bufsz);
 }
 
 STATIC_FUNCTION(int)
@@ -1686,17 +1686,17 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 	 */
 	if (hitem)
 	{
-		char   *prefunc_buffer = NULL;
+		char   *prepfn_buffer = NULL;
 
-		if (kcxt->groupby_prefunc_buffer &&
-			hitem->t.rowid < kcxt->groupby_prefunc_nbufs)
+		if (kcxt->groupby_prepfn_buffer &&
+			hitem->t.rowid < kcxt->groupby_prepfn_nbufs)
 		{
-			prefunc_buffer = kcxt->groupby_prefunc_buffer
-				+ hitem->t.rowid * kcxt->groupby_prefunc_bufsz;
+			prepfn_buffer = kcxt->groupby_prepfn_buffer
+				+ hitem->t.rowid * kcxt->groupby_prepfn_bufsz;
 		}
 		__updateOneTupleGroupBy(kcxt, kds_final,
 								&hitem->t.htup,
-								prefunc_buffer,
+								prepfn_buffer,
 								kexp_groupby_actions);
 	}
 	return true;
@@ -1802,50 +1802,50 @@ __setupGpuPreAggGroupByBufferOne(kern_context *kcxt,
 		}
 	}
 bailout:
-	assert(pos == prepfn_buffer + kcxt->groupby_prefunc_bufsz);
+	assert(pos == prepfn_buffer + kcxt->groupby_prepfn_bufsz);
 }
 
 PUBLIC_FUNCTION(void)
 setupGpuPreAggGroupByBuffer(kern_context *kcxt,
 							kern_gputask *kgtask,
-							char *groupby_prefunc_buffer)
+							char *groupby_prepfn_buffer)
 {
 	const kern_session_info *session = kcxt->session;
 	const kern_expression	*kexp_actions = SESSION_KEXP_GROUPBY_ACTIONS(session);
 
 	if (kexp_actions != NULL &&
-		kgtask->groupby_prefunc_bufsz > 0 &&
-		kgtask->groupby_prefunc_nbufs > 0)
+		kgtask->groupby_prepfn_bufsz > 0 &&
+		kgtask->groupby_prepfn_nbufs > 0)
 	{
-		assert(kgtask->groupby_prefunc_bufsz == session->groupby_prefunc_bufsz);
+		assert(kgtask->groupby_prepfn_bufsz == session->groupby_prepfn_bufsz);
 		if (SESSION_KEXP_GROUPBY_KEYHASH(session) &&
 			SESSION_KEXP_GROUPBY_KEYLOAD(session) &&
 			SESSION_KEXP_GROUPBY_KEYCOMP(session))
 		{
 			uint32_t		index;
 
-			kcxt->groupby_prefunc_bufsz = kgtask->groupby_prefunc_bufsz;
-			kcxt->groupby_prefunc_nbufs = kgtask->groupby_prefunc_nbufs;
-			kcxt->groupby_prefunc_buffer = groupby_prefunc_buffer;
+			kcxt->groupby_prepfn_bufsz = kgtask->groupby_prepfn_bufsz;
+			kcxt->groupby_prepfn_nbufs = kgtask->groupby_prepfn_nbufs;
+			kcxt->groupby_prepfn_buffer = groupby_prepfn_buffer;
 
 			for (index = get_local_id();
-				 index < kgtask->groupby_prefunc_nbufs;
+				 index < kgtask->groupby_prepfn_nbufs;
 				 index += get_local_size())
 			{
-				char   *pos = (kcxt->groupby_prefunc_buffer +
-							   kcxt->groupby_prefunc_bufsz * index);
+				char   *pos = (kcxt->groupby_prepfn_buffer +
+							   kcxt->groupby_prepfn_bufsz * index);
 				__setupGpuPreAggGroupByBufferOne(kcxt, kexp_actions, pos);
 			}
 		}
 		else
 		{
-			assert(kgtask->groupby_prefunc_nbufs >= get_local_size() / warpSize);
-			kcxt->groupby_prefunc_bufsz = kgtask->groupby_prefunc_bufsz;
-			kcxt->groupby_prefunc_nbufs = 1;
-			kcxt->groupby_prefunc_buffer = groupby_prefunc_buffer
-				+ kgtask->groupby_prefunc_bufsz * (get_local_id() / warpSize);
+			assert(kgtask->groupby_prepfn_nbufs >= get_local_size() / warpSize);
+			kcxt->groupby_prepfn_bufsz = kgtask->groupby_prepfn_bufsz;
+			kcxt->groupby_prepfn_nbufs = 1;
+			kcxt->groupby_prepfn_buffer = groupby_prepfn_buffer
+				+ kgtask->groupby_prepfn_bufsz * (get_local_id() / warpSize);
 			__setupGpuPreAggGroupByBufferOne(kcxt, kexp_actions,
-											 kcxt->groupby_prefunc_buffer);
+											 kcxt->groupby_prepfn_buffer);
 		}
 	}
 }
@@ -2022,7 +2022,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 		pos += nbytes;
 	}
 bailout:
-	assert(pos == prepfn_buffer + kcxt->groupby_prefunc_bufsz);
+	assert(pos == prepfn_buffer + kcxt->groupby_prepfn_bufsz);
 }
 
 PUBLIC_FUNCTION(void)
@@ -2032,7 +2032,7 @@ mergeGpuPreAggGroupByBuffer(kern_context *kcxt,
 	const kern_session_info *session = kcxt->session;
 	const kern_expression *kexp_groupby_actions = SESSION_KEXP_GROUPBY_ACTIONS(session);
 
-	if (!kcxt->groupby_prefunc_buffer ||
+	if (!kcxt->groupby_prepfn_buffer ||
 		!kexp_groupby_actions)
 		return;		/* nothing to do */
 
@@ -2068,14 +2068,14 @@ mergeGpuPreAggGroupByBuffer(kern_context *kcxt,
 		uint32_t	nitems = __volatileRead(&kds_final->nitems);
 		uint32_t	index;
 
-		nitems = Min(nitems, kcxt->groupby_prefunc_nbufs);
+		nitems = Min(nitems, kcxt->groupby_prepfn_nbufs);
 		for (index = get_local_id();
 			 index < nitems;
 			 index += get_local_size())
 		{
 			kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds_final, index);
-			char		   *pos = (kcxt->groupby_prefunc_buffer +
-								   kcxt->groupby_prefunc_bufsz * index);
+			char		   *pos = (kcxt->groupby_prepfn_buffer +
+								   kcxt->groupby_prepfn_bufsz * index);
 			if (!tupitem)
 				continue;
 			__mergeGpuPreAggGroupByBufferOne(kcxt, kds_final,
@@ -2096,7 +2096,7 @@ mergeGpuPreAggGroupByBuffer(kern_context *kcxt,
 			__mergeGpuPreAggGroupByBufferOne(kcxt, kds_final,
 											 &tupitem->htup,
 											 kexp_groupby_actions,
-											 kcxt->groupby_prefunc_buffer);
+											 kcxt->groupby_prepfn_buffer);
 		}
 	}
 }

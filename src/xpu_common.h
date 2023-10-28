@@ -425,9 +425,9 @@ typedef struct
 	/*
 	 * GPU shared memory buffer for GPU-PreAgg boosting.
 	 */
-	uint32_t		groupby_prefunc_bufsz;
-	uint32_t		groupby_prefunc_nbufs;
-	char		   *groupby_prefunc_buffer;
+	uint32_t		groupby_prepfn_bufsz;
+	uint32_t		groupby_prepfn_nbufs;
+	char		   *groupby_prepfn_buffer;
 
 	/*
 	 * mode control flags
@@ -2369,7 +2369,7 @@ typedef struct kern_session_info
 
 	/* group-by final buffer */
 	uint32_t	groupby_kds_final;	/* header portion of kds_final */
-	uint32_t	groupby_prefunc_bufsz; /* buffer size for preagg functions */
+	uint32_t	groupby_prepfn_bufsz; /* buffer size for preagg functions */
 	float4_t	groupby_ngroups_estimation; /* planne's estimation of ngroups */
 	/* executor parameter buffer */
 	uint32_t	nparams;	/* number of parameters */

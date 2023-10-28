@@ -657,7 +657,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		setup_kern_data_store(kds_temp, groupby_tdesc_final, kds_length, format);
 		kds_temp->hash_nslots = hash_nslots;
 		session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, sz);
-		session->groupby_prefunc_bufsz = pp_info->groupby_prefunc_bufsz;
+		session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
 		session->groupby_ngroups_estimation = pts->css.ss.ps.plan->plan_rows;
 	}
 	/* other database session information */
@@ -2415,9 +2415,9 @@ pgstromExplainTaskState(CustomScanState *node,
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Partial Aggregation OpCode",
 								pp_info->kexp_groupby_actions);
-		if (pp_info->groupby_prefunc_bufsz > 0)
+		if (pp_info->groupby_prepfn_bufsz > 0)
 			ExplainPropertyInteger("Partial Function BufSz", NULL,
-								   pp_info->groupby_prefunc_bufsz, es);
+								   pp_info->groupby_prepfn_bufsz, es);
 	}
 	pfree(buf.data);
 }
