@@ -19,7 +19,7 @@ STATIC_FUNCTION(int32_t)
 __writeOutOneTuplePreAgg(kern_context *kcxt,
 						 kern_data_store *kds_final,
 						 HeapTupleHeaderData *htup,
-						 kern_expression *kexp_actions)
+						 const kern_expression *kexp_actions)
 {
 	int			nattrs = Min(kds_final->ncols, kexp_actions->u.pagg.nattrs);
 	uint32_t	t_hoff, t_next;
@@ -42,7 +42,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 	/* walk on the columns */
 	for (int j=0; j < nattrs; j++)
 	{
-		kern_aggregate_desc *desc = &kexp_actions->u.pagg.desc[j];
+		const kern_aggregate_desc *desc = &kexp_actions->u.pagg.desc[j];
 		kern_colmeta   *cmeta = &kds_final->colmeta[j];
 		xpu_datum_t	   *xdatum;
 		int				nbytes;
@@ -209,7 +209,12 @@ __update_nogroups__nrows_any(kern_context *kcxt,
 
 	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (LaneId() == 0)
-		__atomic_add_uint64((uint64_t *)buffer, __popc(mask));
+	{
+		if (__isShared(buffer))
+			*((uint64_t *)buffer) += __popc(mask);
+		else
+			__atomic_add_uint64((uint64_t *)buffer, __popc(mask));
+	}
 }
 
 /*
@@ -233,7 +238,12 @@ __update_nogroups__nrows_cond(kern_context *kcxt,
 	}
 	mask = __ballot_sync(__activemask(), source_is_valid);
 	if (LaneId() == 0)
-		__atomic_add_uint64((uint64_t *)buffer, __popc(mask));
+	{
+		if (__isShared(buffer))
+			*((uint64_t *)buffer) += __popc(mask);
+		else
+			__atomic_add_uint64((uint64_t *)buffer, __popc(mask));
+	}
 }
 
 /*
@@ -287,8 +297,17 @@ __update_nogroups__pmin_int32(kern_context *kcxt,
 		ival = Min(ival, temp);
 		if (LaneId() == 0)
 		{
-			__atomic_add_uint32(&r->nitems, __popc(mask));
-			__atomic_min_int64(&r->value, (int64_t)ival);
+			if (__isShared(r))
+			{
+				r->nitems += __popc(mask);
+				if (r->value > ival)
+					r->value = ival;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_min_int64(&r->value, (int64_t)ival);
+			}
 		}
 	}
 }
@@ -340,8 +359,17 @@ __update_nogroups__pmin_int64(kern_context *kcxt,
 		ival = Min(ival, temp);
 		if (LaneId() == 0)
 		{
-			__atomic_add_uint32(&r->nitems, __popc(mask));
-			__atomic_min_int64(&r->value, ival);
+			if (__isShared(r))
+			{
+				r->nitems += __popc(mask);
+				if (r->value > ival)
+					r->value = ival;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_min_int64(&r->value, ival);
+			}
 		}
 	}
 }
@@ -394,8 +422,17 @@ __update_nogroups__pmax_int32(kern_context *kcxt,
 
 		if (LaneId() == 0)
 		{
-			__atomic_add_uint32(&r->nitems, __popc(mask));
-			__atomic_max_int64(&r->value,  (int64_t)ival);
+			if (__isShared(r))
+			{
+				r->nitems += __popc(mask);
+				if (r->value < ival)
+					r->value = ival;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_max_int64(&r->value,  (int64_t)ival);
+			}
 		}
 	}
 }
@@ -448,8 +485,17 @@ __update_nogroups__pmax_int64(kern_context *kcxt,
 
 		if (LaneId() == 0)
 		{
-			__atomic_add_uint32(&r->nitems, __popc(mask));
-			__atomic_max_int64(&r->value,  ival);
+			if (__isShared(r))
+			{
+				r->nitems += __popc(mask);
+				if (r->value < ival)
+					r->value = ival;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_max_int64(&r->value,  ival);
+			}
 		}
 	}
 }
@@ -502,8 +548,17 @@ __update_nogroups__pmin_fp64(kern_context *kcxt,
 
 		if (LaneId() == 0)
 		{
-			__atomic_add_uint32(&r->nitems, __popc(mask));
-			__atomic_min_fp64(&r->value, fval);
+			if (__isShared(r))
+			{
+				r->nitems += __popc(mask);
+				if (r->value > fval)
+					r->value = fval;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_min_fp64(&r->value, fval);
+			}
 		}
 	}
 }
@@ -556,8 +611,17 @@ __update_nogroups__pmax_fp64(kern_context *kcxt,
 
 		if (LaneId() == 0)
 		{
-			__atomic_add_uint32(&r->nitems, __popc(mask));
-			__atomic_max_fp64(&r->value, fval);
+			if (__isShared(r))
+			{
+				r->nitems += __popc(mask);
+				if (r->value < fval)
+					r->value = fval;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_max_fp64(&r->value, fval);
+			}
 		}
 	}
 }
@@ -602,8 +666,16 @@ __update_nogroups__psum_int(kern_context *kcxt,
 		{
 			kagg_state__psum_int_packed *r =
 				(kagg_state__psum_int_packed *)buffer;
-			__atomic_add_uint32(&r->nitems, __popc(mask));
-			__atomic_add_int64(&r->sum, ival);
+			if (__isShared(r))
+			{
+				r->nitems += __popc(mask);
+				r->sum    += ival;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_add_int64(&r->sum, ival);
+			}
 		}
 	}
 }
@@ -648,8 +720,16 @@ __update_nogroups__psum_fp(kern_context *kcxt,
 		{
 			kagg_state__psum_fp_packed *r =
 				(kagg_state__psum_fp_packed *)buffer;
-			__atomic_add_uint32(&r->nitems, __popc(mask));
-			__atomic_add_fp64(&r->sum, fval);
+			if (__isShared(r))
+			{
+				r->nitems += __popc(mask);
+				r->sum    += fval;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_add_fp64(&r->sum, fval);
+			}
 		}
 	}
 }
@@ -703,9 +783,18 @@ __update_nogroups__pstddev(kern_context *kcxt,
 		{
 			kagg_state__stddev_packed *r =
 				(kagg_state__stddev_packed *)buffer;
-			__atomic_add_uint32(&r->nitems, __popc(mask));
-			__atomic_add_fp64(&r->sum_x,  sum_x);
-			__atomic_add_fp64(&r->sum_x2, sum_x2);
+			if (__isShared(r))
+			{
+				r->nitems += __popc(mask);
+				r->sum_x  += sum_x;
+				r->sum_x2 += sum_x2;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_add_fp64(&r->sum_x,  sum_x);
+				__atomic_add_fp64(&r->sum_x2, sum_x2);
+			}
 		}
 	}
 }
@@ -789,12 +878,24 @@ __update_nogroups__pcovar(kern_context *kcxt,
 		{
 			kagg_state__covar_packed *r =
 				(kagg_state__covar_packed *)buffer;
-			__atomic_add_uint32(&r->nitems, __popc(mask));
-			__atomic_add_fp64(&r->sum_x,  sum_x);
-			__atomic_add_fp64(&r->sum_xx, sum_xx);
-			__atomic_add_fp64(&r->sum_y,  sum_y);
-			__atomic_add_fp64(&r->sum_yy, sum_yy);
-			__atomic_add_fp64(&r->sum_xy, sum_xy);
+			if (__isShared(r))
+			{
+				r->nitems += __popc(mask);
+				r->sum_x  += sum_x;
+				r->sum_xx += sum_xx;
+				r->sum_y  += sum_y;
+				r->sum_yy += sum_yy;
+				r->sum_xy += sum_xy;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_add_fp64(&r->sum_x,  sum_x);
+				__atomic_add_fp64(&r->sum_xx, sum_xx);
+				__atomic_add_fp64(&r->sum_y,  sum_y);
+				__atomic_add_fp64(&r->sum_yy, sum_yy);
+				__atomic_add_fp64(&r->sum_xy, sum_xy);
+			}
 		}
 	}
 }
@@ -809,37 +910,37 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 						 HeapTupleHeaderData *htup,
 						 kern_expression *kexp_groupby_actions)
 {
-	int			nattrs = (htup->t_infomask2 & HEAP_NATTS_MASK);
-	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
-	uint32_t	t_hoff;
-	char	   *buffer = NULL;
+	char	   *buffer;
 
-	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
-	if (heap_hasnull)
-		t_hoff += BITMAPLEN(nattrs);
-	t_hoff = MAXALIGN(t_hoff);
+	if (kcxt->groupby_prefunc_buffer)
+	{
+		buffer = kcxt->groupby_prefunc_buffer;
+	}
+	else
+	{
+		int			nattrs = (htup->t_infomask2 & HEAP_NATTS_MASK);
+		bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+		uint32_t	t_hoff;
 
-	for (int j=0; j < nattrs; j++)
+		t_hoff = offsetof(HeapTupleHeaderData, t_bits);
+		if (heap_hasnull)
+			t_hoff += BITMAPLEN(nattrs);
+		t_hoff = MAXALIGN(t_hoff);
+
+		buffer = ((char *)htup + t_hoff);
+	}
+	assert((uintptr_t)buffer == MAXALIGN((uintptr_t)buffer));
+
+	for (int j=0; j < kexp_groupby_actions->u.pagg.nattrs; j++)
 	{
 		kern_aggregate_desc *desc = &kexp_groupby_actions->u.pagg.desc[j];
 		kern_colmeta   *cmeta = &kds_final->colmeta[j];
 
-		if (heap_hasnull && att_isnull(j, htup->t_bits))
-		{
-			/* only grouping-key may have NULL */
-			assert(desc->action == KAGG_ACTION__VREF);
-			continue;
-		}
-
+		/* usually, 'buffer' shall never be mis-aligned */
 		if (cmeta->attlen > 0)
-			t_hoff = TYPEALIGN(cmeta->attalign, t_hoff);
-		else if (!VARATT_NOT_PAD_BYTE((char *)htup + t_hoff))
-			t_hoff = TYPEALIGN(cmeta->attalign, t_hoff);
-		buffer = ((char *)htup + t_hoff);
-		if (cmeta->attlen > 0)
-			t_hoff += cmeta->attlen;
-		else
-			t_hoff += VARSIZE_ANY(buffer);
+			buffer = (char *)TYPEALIGN(cmeta->attalign, buffer);
+		else if (!VARATT_NOT_PAD_BYTE(buffer))
+			buffer = (char *)TYPEALIGN(cmeta->attalign, buffer);
 
 		switch (desc->action)
 		{
@@ -911,6 +1012,11 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 				 */
 				return;
 		}
+		/* move to the next */
+		if (cmeta->attlen > 0)
+			buffer += cmeta->attlen;
+        else
+			buffer += VARSIZE_ANY(buffer);
 	}
 }
 
@@ -920,7 +1026,7 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 STATIC_FUNCTION(kern_tupitem *)
 __insertOneTupleNoGroups(kern_context *kcxt,
 						 kern_data_store *kds_final,
-						 kern_expression *kexp_groupby_actions)
+						 const kern_expression *kexp_groupby_actions)
 {
 	kern_tupitem   *tupitem;
 	int32_t			tupsz;
@@ -946,7 +1052,7 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 							   + kds_final->length
 							   - __kds_unpack(usage)
 							   - required);
-	
+
 	__writeOutOneTuplePreAgg(kcxt, kds_final,
 							 &tupitem->htup,
 							 kexp_groupby_actions);
@@ -1113,6 +1219,11 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 							 kexp_groupby_actions);
 	hitem->t.t_len = tupsz;
 	hitem->t.rowid = newval.kds.nitems - 1;
+	/*
+	 * all setup stuff must be completed before its row-index is visible
+	 * to other threads in the device.
+	 */
+	__threadfence();
 	KDS_GET_ROWINDEX(kds_final)[hitem->t.rowid]
 		= __kds_packed((char *)kds_final
 					   + kds_final->length
@@ -1123,32 +1234,34 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 /*
  * __update_groupby__nrows_any
  */
-INLINE_FUNCTION(void)
+INLINE_FUNCTION(int)
 __update_groupby__nrows_any(kern_context *kcxt,
 							char *buffer,
-							kern_colmeta *cmeta,
-							kern_aggregate_desc *desc)
+							const kern_colmeta *cmeta,
+							const kern_aggregate_desc *desc)
 {
 	__atomic_add_uint64((uint64_t *)buffer, 1);
+	return sizeof(uint64_t);
 }
 
-INLINE_FUNCTION(void)
+INLINE_FUNCTION(int)
 __update_groupby__nrows_cond(kern_context *kcxt,
 							 char *buffer,
-							 kern_colmeta *cmeta,
-							 kern_aggregate_desc *desc)
+							 const kern_colmeta *cmeta,
+							 const kern_aggregate_desc *desc)
 {
 	xpu_datum_t	   *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 		__atomic_add_uint64((uint64_t *)buffer, 1);
+	return sizeof(uint64_t);
 }
 
-INLINE_FUNCTION(void)
+INLINE_FUNCTION(int)
 __update_groupby__pmin_int32(kern_context *kcxt,
 							 char *buffer,
-							 kern_colmeta *cmeta,
-							 kern_aggregate_desc *desc)
+							 const kern_colmeta *cmeta,
+							 const kern_aggregate_desc *desc)
 {
 	xpu_int4_t	   *xdatum = (xpu_int4_t *)
 		kcxt->kvars_slot[desc->arg0_slot_id];
@@ -1162,13 +1275,14 @@ __update_groupby__pmin_int32(kern_context *kcxt,
 		__atomic_add_uint32(&r->nitems, 1);
 		__atomic_min_int64(&r->value, xdatum->value);
 	}
+	return sizeof(kagg_state__pminmax_int64_packed);
 }
 
-INLINE_FUNCTION(void)
+INLINE_FUNCTION(int)
 __update_groupby__pmin_int64(kern_context *kcxt,
 							 char *buffer,
-							 kern_colmeta *cmeta,
-							 kern_aggregate_desc *desc)
+							 const kern_colmeta *cmeta,
+							 const kern_aggregate_desc *desc)
 {
 	xpu_int8_t	   *xdatum = (xpu_int8_t *)
 		kcxt->kvars_slot[desc->arg0_slot_id];
@@ -1182,13 +1296,14 @@ __update_groupby__pmin_int64(kern_context *kcxt,
 		__atomic_add_uint32(&r->nitems, 1);
 		__atomic_min_int64(&r->value, xdatum->value);
 	}
+	return sizeof(kagg_state__pminmax_int64_packed);
 }
 
-INLINE_FUNCTION(void)
+INLINE_FUNCTION(int)
 __update_groupby__pmax_int32(kern_context *kcxt,
 							 char *buffer,
-							 kern_colmeta *cmeta,
-							 kern_aggregate_desc *desc)
+							 const kern_colmeta *cmeta,
+							 const kern_aggregate_desc *desc)
 {
 	xpu_int4_t	   *xdatum = (xpu_int4_t *)
 		kcxt->kvars_slot[desc->arg0_slot_id];
@@ -1202,13 +1317,14 @@ __update_groupby__pmax_int32(kern_context *kcxt,
 		__atomic_add_uint32(&r->nitems, 1);
 		__atomic_max_int64(&r->value, xdatum->value);
 	}
+	return sizeof(kagg_state__pminmax_int64_packed);
 }
 
-INLINE_FUNCTION(void)
+INLINE_FUNCTION(int)
 __update_groupby__pmax_int64(kern_context *kcxt,
 							 char *buffer,
-							 kern_colmeta *cmeta,
-							 kern_aggregate_desc *desc)
+							 const kern_colmeta *cmeta,
+							 const kern_aggregate_desc *desc)
 {
 	xpu_int8_t	   *xdatum = (xpu_int8_t *)
 		kcxt->kvars_slot[desc->arg0_slot_id];
@@ -1222,13 +1338,14 @@ __update_groupby__pmax_int64(kern_context *kcxt,
 		__atomic_add_uint32(&r->nitems, 1);
 		__atomic_max_int64(&r->value, xdatum->value);
 	}
+	return sizeof(kagg_state__pminmax_int64_packed);
 }
 
-INLINE_FUNCTION(void)
+INLINE_FUNCTION(int)
 __update_groupby__pmin_fp64(kern_context *kcxt,
 							char *buffer,
-							kern_colmeta *cmeta,
-							kern_aggregate_desc *desc)
+							const kern_colmeta *cmeta,
+							const kern_aggregate_desc *desc)
 {
 	xpu_float8_t   *xdatum = (xpu_float8_t *)
 		kcxt->kvars_slot[desc->arg0_slot_id];
@@ -1242,13 +1359,14 @@ __update_groupby__pmin_fp64(kern_context *kcxt,
 		__atomic_add_uint32(&r->nitems, 1);
 		__atomic_min_fp64(&r->value, xdatum->value);
 	}
+	return sizeof(kagg_state__pminmax_fp64_packed);
 }
 
-INLINE_FUNCTION(void)
+INLINE_FUNCTION(int)
 __update_groupby__pmax_fp64(kern_context *kcxt,
 							char *buffer,
-							kern_colmeta *cmeta,
-							kern_aggregate_desc *desc)
+							const kern_colmeta *cmeta,
+							const kern_aggregate_desc *desc)
 {
 	xpu_float8_t   *xdatum = (xpu_float8_t *)
 		kcxt->kvars_slot[desc->arg0_slot_id];
@@ -1262,13 +1380,14 @@ __update_groupby__pmax_fp64(kern_context *kcxt,
 		__atomic_add_uint32(&r->nitems, 1);
         __atomic_max_fp64(&r->value, xdatum->value);
 	}
+	return sizeof(kagg_state__pminmax_fp64_packed);
 }
 
-INLINE_FUNCTION(void)
+INLINE_FUNCTION(int)
 __update_groupby__psum_int(kern_context *kcxt,
 						   char *buffer,
-						   kern_colmeta *cmeta,
-						   kern_aggregate_desc *desc)
+						   const kern_colmeta *cmeta,
+						   const kern_aggregate_desc *desc)
 {
 	xpu_int8_t	   *xdatum = (xpu_int8_t *)
 		kcxt->kvars_slot[desc->arg0_slot_id];
@@ -1282,13 +1401,14 @@ __update_groupby__psum_int(kern_context *kcxt,
 		__atomic_add_uint32(&r->nitems, 1);
 		__atomic_add_int64(&r->sum, xdatum->value);
 	}
+	return sizeof(kagg_state__psum_int_packed);
 }
 
-INLINE_FUNCTION(void)
+INLINE_FUNCTION(int)
 __update_groupby__psum_fp(kern_context *kcxt,
 						  char *buffer,
-						  kern_colmeta *cmeta,
-						  kern_aggregate_desc *desc)
+						  const kern_colmeta *cmeta,
+						  const kern_aggregate_desc *desc)
 {
 	xpu_float8_t   *xdatum = (xpu_float8_t *)
 		kcxt->kvars_slot[desc->arg0_slot_id];
@@ -1302,13 +1422,14 @@ __update_groupby__psum_fp(kern_context *kcxt,
 		__atomic_add_uint32(&r->nitems, 1);
 		__atomic_add_fp64(&r->sum, xdatum->value);
 	}
+	return sizeof(kagg_state__psum_fp_packed);
 }
 
-INLINE_FUNCTION(void)
+INLINE_FUNCTION(int)
 __update_groupby__pstddev(kern_context *kcxt,
 						  char *buffer,
-						  kern_colmeta *cmeta,
-						  kern_aggregate_desc *desc)
+						  const kern_colmeta *cmeta,
+						  const kern_aggregate_desc *desc)
 {
 	xpu_float8_t   *xdatum = (xpu_float8_t *)
 		kcxt->kvars_slot[desc->arg0_slot_id];
@@ -1323,13 +1444,14 @@ __update_groupby__pstddev(kern_context *kcxt,
 		__atomic_add_fp64(&r->sum_x,  xdatum->value);
 		__atomic_add_fp64(&r->sum_x2, xdatum->value * xdatum->value);
 	}
+	return sizeof(kagg_state__stddev_packed);
 }
 
-INLINE_FUNCTION(void)
+INLINE_FUNCTION(int)
 __update_groupby__pcovar(kern_context *kcxt,
 						 char *buffer,
-						 kern_colmeta *cmeta,
-						 kern_aggregate_desc *desc)
+						 const kern_colmeta *cmeta,
+						 const kern_aggregate_desc *desc)
 {
 	xpu_float8_t   *xdatum = (xpu_float8_t *)
 		kcxt->kvars_slot[desc->arg0_slot_id];
@@ -1350,6 +1472,7 @@ __update_groupby__pcovar(kern_context *kcxt,
 		__atomic_add_fp64(&r->sum_yy, ydatum->value * ydatum->value);
 		__atomic_add_fp64(&r->sum_xy, xdatum->value * ydatum->value);
 	}
+	return sizeof(kagg_state__covar_packed);
 }
 
 /*
@@ -1359,87 +1482,85 @@ STATIC_FUNCTION(void)
 __updateOneTupleGroupBy(kern_context *kcxt,
 						kern_data_store *kds_final,
 						HeapTupleHeaderData *htup,
-						kern_expression *kexp_groupby_actions)
+						char *groupby_prepfn_buffer,
+						const kern_expression *kexp_groupby_actions)
 {
-	int			nattrs = (htup->t_infomask2 & HEAP_NATTS_MASK);
-	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
-	uint32_t	t_hoff;
-	char	   *buffer;
+	char	   *curr;
 
-	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
-	if (heap_hasnull)
-		t_hoff += BITMAPLEN(nattrs);
-	t_hoff = MAXALIGN(t_hoff);
-
-	for (int j=0; j < nattrs; j++)
+	if (!groupby_prepfn_buffer)
 	{
-		kern_aggregate_desc *desc = &kexp_groupby_actions->u.pagg.desc[j];
-		kern_colmeta   *cmeta = &kds_final->colmeta[j];
+		int			nattrs = (htup->t_infomask2 & HEAP_NATTS_MASK);
+		bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+		uint32_t	t_hoff;
 
-		if (heap_hasnull && att_isnull(j, htup->t_bits))
-		{
-			/* only grouping-key may have NULL */
-			assert(desc->action == KAGG_ACTION__VREF);
-			continue;
-		}
+		t_hoff = offsetof(HeapTupleHeaderData, t_bits);
+		if (heap_hasnull)
+			t_hoff += BITMAPLEN(nattrs);
+		t_hoff = MAXALIGN(t_hoff);
+		groupby_prepfn_buffer = (char *)htup + t_hoff;
+	}
+	assert((uintptr_t)groupby_prepfn_buffer == MAXALIGN(groupby_prepfn_buffer));
+
+	curr = groupby_prepfn_buffer;
+	for (int j=0; j < kexp_groupby_actions->u.pagg.nattrs; j++)
+	{
+		const kern_aggregate_desc *desc = &kexp_groupby_actions->u.pagg.desc[j];
+		const kern_colmeta *cmeta = &kds_final->colmeta[j];
 
 		if (cmeta->attlen > 0)
-			t_hoff = TYPEALIGN(cmeta->attalign, t_hoff);
-		else if (!VARATT_NOT_PAD_BYTE((char *)htup + t_hoff))
-			t_hoff = TYPEALIGN(cmeta->attalign, t_hoff);
-		buffer = ((char *)htup + t_hoff);
-		if (cmeta->attlen > 0)
-			t_hoff += cmeta->attlen;
-		else
-			t_hoff += VARSIZE_ANY(buffer);
+			curr = (char *)TYPEALIGN(cmeta->attalign, curr);
+		else if (!VARATT_NOT_PAD_BYTE(curr))
+			curr = (char *)TYPEALIGN(cmeta->attalign, curr);
 
 		switch (desc->action)
-        {
+		{
 			case KAGG_ACTION__NROWS_ANY:
-				__update_groupby__nrows_any(kcxt, buffer, cmeta, desc);
+				curr += __update_groupby__nrows_any(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__NROWS_COND:
-				__update_groupby__nrows_cond(kcxt, buffer, cmeta, desc);
+				curr += __update_groupby__nrows_cond(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__PMIN_INT32:
-				__update_groupby__pmin_int32(kcxt, buffer, cmeta, desc);
+				curr += __update_groupby__pmin_int32(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__PMIN_INT64:
-				__update_groupby__pmin_int64(kcxt, buffer, cmeta, desc);
+				curr += __update_groupby__pmin_int64(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__PMAX_INT32:
-				__update_groupby__pmax_int32(kcxt, buffer, cmeta, desc);
+				curr += __update_groupby__pmax_int32(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__PMAX_INT64:
-				__update_groupby__pmax_int64(kcxt, buffer, cmeta, desc);
+				curr += __update_groupby__pmax_int64(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__PMIN_FP64:
-				__update_groupby__pmin_fp64(kcxt, buffer, cmeta, desc);
+				curr += __update_groupby__pmin_fp64(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__PMAX_FP64:
-				__update_groupby__pmax_fp64(kcxt, buffer, cmeta, desc);
+				curr += __update_groupby__pmax_fp64(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__PAVG_INT:
 			case KAGG_ACTION__PSUM_INT:
-				__update_groupby__psum_int(kcxt, buffer, cmeta, desc);
+				curr += __update_groupby__psum_int(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__PAVG_FP:
 			case KAGG_ACTION__PSUM_FP:
-				__update_groupby__psum_fp(kcxt, buffer, cmeta, desc);
+				curr += __update_groupby__psum_fp(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__STDDEV:
-				__update_groupby__pstddev(kcxt, buffer, cmeta, desc);
+				curr += __update_groupby__pstddev(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__COVAR:
-				__update_groupby__pcovar(kcxt, buffer, cmeta, desc);
+				curr += __update_groupby__pcovar(kcxt, curr, cmeta, desc);
 				break;
 			default:
 				/*
 				 * No more partial aggregation exists after grouping-keys
 				 */
-				return;
+				goto bailout;
 		}
 	}
+bailout:
+	assert(curr == groupby_prepfn_buffer + kcxt->groupby_prefunc_bufsz);
 }
 
 STATIC_FUNCTION(int)
@@ -1564,10 +1685,420 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 	 * update the partial aggregation
 	 */
 	if (hitem)
+	{
+		char   *prefunc_buffer = NULL;
+
+		if (kcxt->groupby_prefunc_buffer &&
+			hitem->t.rowid < kcxt->groupby_prefunc_nbufs)
+		{
+			prefunc_buffer = kcxt->groupby_prefunc_buffer
+				+ hitem->t.rowid * kcxt->groupby_prefunc_bufsz;
+		}
 		__updateOneTupleGroupBy(kcxt, kds_final,
 								&hitem->t.htup,
+								prefunc_buffer,
 								kexp_groupby_actions);
+	}
 	return true;
+}
+
+/*
+ * setupGpuPreAggGroupByBuffer
+ */
+STATIC_FUNCTION(void)
+__setupGpuPreAggGroupByBufferOne(kern_context *kcxt,
+								 const kern_expression *kexp_actions,
+								 char *prepfn_buffer)
+{
+	char   *pos = prepfn_buffer;
+
+	for (int j=0; j < kexp_actions->u.pagg.nattrs; j++)
+	{
+		const kern_aggregate_desc *desc = &kexp_actions->u.pagg.desc[j];
+
+		switch (desc->action)
+		{
+			case KAGG_ACTION__NROWS_ANY:
+			case KAGG_ACTION__NROWS_COND:
+				*((int64_t *)pos) = 0;
+				pos += sizeof(int64_t);
+				break;
+
+			case KAGG_ACTION__PMIN_INT32:
+			case KAGG_ACTION__PMIN_INT64:
+				{
+					kagg_state__pminmax_int64_packed *r =
+						(kagg_state__pminmax_int64_packed *)pos;
+					r->nitems = 0;
+					r->value  = LONG_MAX;
+					SET_VARSIZE(r, sizeof(kagg_state__pminmax_int64_packed));
+					pos += sizeof(kagg_state__pminmax_int64_packed);
+				}
+				break;
+
+			case KAGG_ACTION__PMAX_INT32:
+			case KAGG_ACTION__PMAX_INT64:
+				{
+					kagg_state__pminmax_int64_packed *r =
+						(kagg_state__pminmax_int64_packed *)pos;
+					r->nitems = 0;
+					r->value = LONG_MIN;
+					SET_VARSIZE(r, sizeof(kagg_state__pminmax_int64_packed));
+					pos += sizeof(kagg_state__pminmax_int64_packed);
+				}
+				break;
+
+			case KAGG_ACTION__PMIN_FP64:
+				{
+					kagg_state__pminmax_fp64_packed *r =
+						(kagg_state__pminmax_fp64_packed *)pos;
+					r->nitems = 0;
+					r->value = DBL_MAX;
+					SET_VARSIZE(r, sizeof(kagg_state__pminmax_fp64_packed));
+					pos += sizeof(kagg_state__pminmax_fp64_packed);
+				}
+				break;
+
+			case KAGG_ACTION__PMAX_FP64:
+				{
+					kagg_state__pminmax_fp64_packed *r =
+                        (kagg_state__pminmax_fp64_packed *)pos;
+                    r->nitems = 0;
+                    r->value = -DBL_MAX;
+                    SET_VARSIZE(r, sizeof(kagg_state__pminmax_fp64_packed));
+					pos += sizeof(kagg_state__pminmax_fp64_packed);
+				}
+				break;
+
+			case KAGG_ACTION__PSUM_INT:
+			case KAGG_ACTION__PAVG_INT:
+				memset(pos, 0, sizeof(kagg_state__psum_int_packed));
+				SET_VARSIZE(pos, sizeof(kagg_state__psum_int_packed));
+				pos += sizeof(kagg_state__psum_int_packed);
+				break;
+
+			case KAGG_ACTION__PSUM_FP:
+			case KAGG_ACTION__PAVG_FP:
+				memset(pos, 0, sizeof(kagg_state__psum_fp_packed));
+				SET_VARSIZE(pos, sizeof(kagg_state__psum_fp_packed));
+				pos += sizeof(kagg_state__psum_fp_packed);
+				break;
+
+			case KAGG_ACTION__STDDEV:
+				memset(pos, 0, sizeof(kagg_state__stddev_packed));
+				SET_VARSIZE(pos, sizeof(kagg_state__stddev_packed));
+				pos += sizeof(kagg_state__stddev_packed);
+				break;
+
+			case KAGG_ACTION__COVAR:
+				memset(pos, 0, sizeof(kagg_state__covar_packed));
+				SET_VARSIZE(pos, sizeof(kagg_state__covar_packed));
+				pos += sizeof(kagg_state__covar_packed);
+				break;
+
+			default:
+				/* no more prep-function should exist after the keyref */
+				goto bailout;
+		}
+	}
+bailout:
+	assert(pos == prepfn_buffer + kcxt->groupby_prefunc_bufsz);
+}
+
+PUBLIC_FUNCTION(void)
+setupGpuPreAggGroupByBuffer(kern_context *kcxt,
+							kern_gputask *kgtask,
+							char *groupby_prefunc_buffer)
+{
+	const kern_session_info *session = kcxt->session;
+	const kern_expression	*kexp_actions = SESSION_KEXP_GROUPBY_ACTIONS(session);
+
+	if (kexp_actions != NULL &&
+		kgtask->groupby_prefunc_bufsz > 0 &&
+		kgtask->groupby_prefunc_nbufs > 0)
+	{
+		assert(kgtask->groupby_prefunc_bufsz == session->groupby_prefunc_bufsz);
+		if (SESSION_KEXP_GROUPBY_KEYHASH(session) &&
+			SESSION_KEXP_GROUPBY_KEYLOAD(session) &&
+			SESSION_KEXP_GROUPBY_KEYCOMP(session))
+		{
+			uint32_t		index;
+
+			kcxt->groupby_prefunc_bufsz = kgtask->groupby_prefunc_bufsz;
+			kcxt->groupby_prefunc_nbufs = kgtask->groupby_prefunc_nbufs;
+			kcxt->groupby_prefunc_buffer = groupby_prefunc_buffer;
+
+			for (index = get_local_id();
+				 index < kgtask->groupby_prefunc_nbufs;
+				 index += get_local_size())
+			{
+				char   *pos = (kcxt->groupby_prefunc_buffer +
+							   kcxt->groupby_prefunc_bufsz * index);
+				__setupGpuPreAggGroupByBufferOne(kcxt, kexp_actions, pos);
+			}
+		}
+		else
+		{
+			assert(kgtask->groupby_prefunc_nbufs >= get_local_size() / warpSize);
+			kcxt->groupby_prefunc_bufsz = kgtask->groupby_prefunc_bufsz;
+			kcxt->groupby_prefunc_nbufs = 1;
+			kcxt->groupby_prefunc_buffer = groupby_prefunc_buffer
+				+ kgtask->groupby_prefunc_bufsz * (get_local_id() / warpSize);
+			__setupGpuPreAggGroupByBufferOne(kcxt, kexp_actions,
+											 kcxt->groupby_prefunc_buffer);
+		}
+	}
+}
+
+/*
+ * mergeGpuPreAggGroupByBuffer
+ */
+STATIC_FUNCTION(void)
+__mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
+								 kern_data_store *kds_final,
+								 HeapTupleHeaderData *htup,
+								 const kern_expression *kexp_actions,
+								 const char *prepfn_buffer)
+{
+	int			nattrs = kds_final->ncols;
+	uint32_t	t_hoff, nbytes;
+	const char *pos = prepfn_buffer;
+
+	t_hoff = MAXALIGN(offsetof(HeapTupleHeaderData,
+							   t_bits) + BITMAPLEN(nattrs));
+	/* walk on the columns */
+	for (int j=0; j < nattrs; j++)
+	{
+		const kern_aggregate_desc *desc = &kexp_actions->u.pagg.desc[j];
+		const kern_colmeta *cmeta = &kds_final->colmeta[j];
+
+		assert(t_hoff == TYPEALIGN(cmeta->attalign, t_hoff));
+		switch (desc->action)
+		{
+			case KAGG_ACTION__NROWS_ANY:
+			case KAGG_ACTION__NROWS_COND:
+				{
+					uint64_t	ival = *((const uint64_t *)pos);
+
+					if (ival > 0)
+						__atomic_add_uint64((uint64_t *)((char *)htup + t_hoff), ival);
+					nbytes = sizeof(int64_t);
+				}
+				break;
+
+			case KAGG_ACTION__PMIN_INT32:
+			case KAGG_ACTION__PMIN_INT64:
+				{
+					const kagg_state__pminmax_int64_packed *s =
+						(const kagg_state__pminmax_int64_packed *)pos;
+					kagg_state__pminmax_int64_packed *r =
+						(kagg_state__pminmax_int64_packed *)((char *)htup + t_hoff);
+					if (s->nitems > 0)
+					{
+						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_min_int64(&r->value, s->value);
+					}
+					nbytes = sizeof(kagg_state__pminmax_int64_packed);
+				}
+				break;
+
+			case KAGG_ACTION__PMAX_INT32:
+			case KAGG_ACTION__PMAX_INT64:
+				{
+					const kagg_state__pminmax_int64_packed *s =
+						(const kagg_state__pminmax_int64_packed *)pos;
+					kagg_state__pminmax_int64_packed *r =
+						(kagg_state__pminmax_int64_packed *)((char *)htup + t_hoff);
+					if (s->nitems > 0)
+					{
+						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_max_int64(&r->value, s->value);
+					}
+					nbytes = sizeof(kagg_state__pminmax_int64_packed);
+				}
+				break;
+
+			case KAGG_ACTION__PMIN_FP64:
+				{
+					const kagg_state__pminmax_fp64_packed *s =
+						(const kagg_state__pminmax_fp64_packed *)pos;
+					kagg_state__pminmax_fp64_packed *r =
+						(kagg_state__pminmax_fp64_packed *)((char *)htup + t_hoff);
+					if (s->nitems > 0)
+					{
+						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_min_fp64(&r->value, s->value);
+					}
+					nbytes = sizeof(kagg_state__pminmax_fp64_packed);
+				}
+				break;
+
+			case KAGG_ACTION__PMAX_FP64:
+				{
+					const kagg_state__pminmax_fp64_packed *s =
+						(const kagg_state__pminmax_fp64_packed *)pos;
+					kagg_state__pminmax_fp64_packed *r =
+						(kagg_state__pminmax_fp64_packed *)((char *)htup + t_hoff);
+					if (s->nitems > 0)
+					{
+						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_max_fp64(&r->value, s->value);
+					}
+					nbytes = sizeof(kagg_state__pminmax_fp64_packed);
+				}
+				break;
+
+			case KAGG_ACTION__PSUM_INT:
+			case KAGG_ACTION__PAVG_INT:
+				{
+					const kagg_state__psum_int_packed *s =
+						(const kagg_state__psum_int_packed *)pos;
+					kagg_state__psum_int_packed *r =
+						(kagg_state__psum_int_packed *)((char *)htup + t_hoff);
+					if (s->nitems > 0)
+					{
+						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_add_int64(&r->sum, s->sum);
+					}
+					nbytes = sizeof(kagg_state__psum_int_packed);
+				}
+				break;
+
+			case KAGG_ACTION__PSUM_FP:
+			case KAGG_ACTION__PAVG_FP:
+				{
+					const kagg_state__psum_fp_packed *s =
+						(const kagg_state__psum_fp_packed *)pos;
+					kagg_state__psum_fp_packed *r =
+						(kagg_state__psum_fp_packed *)((char *)htup + t_hoff);
+					if (s->nitems > 0)
+					{
+						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_add_fp64(&r->sum, s->sum);
+					}
+					nbytes = sizeof(kagg_state__psum_fp_packed);
+				}
+				break;
+
+			case KAGG_ACTION__STDDEV:
+				{
+					const kagg_state__stddev_packed *s =
+						(const kagg_state__stddev_packed *)pos;
+					kagg_state__stddev_packed *r =
+						(kagg_state__stddev_packed *)((char *)htup + t_hoff);
+					if (s->nitems > 0)
+					{
+						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_add_fp64(&r->sum_x,  s->sum_x);
+						__atomic_add_fp64(&r->sum_x2, s->sum_x2);
+					}
+					nbytes = sizeof(kagg_state__stddev_packed);
+				}
+				break;
+
+			case KAGG_ACTION__COVAR:
+				{
+					const kagg_state__covar_packed *s =
+						(const kagg_state__covar_packed *)pos;
+					kagg_state__covar_packed *r =
+						(kagg_state__covar_packed *)((char *)htup + t_hoff);
+					if (s->nitems > 0)
+					{
+						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_add_fp64(&r->sum_x,  s->sum_x);
+						__atomic_add_fp64(&r->sum_xx, s->sum_xx);
+						__atomic_add_fp64(&r->sum_y,  s->sum_y);
+						__atomic_add_fp64(&r->sum_yy, s->sum_yy);
+						__atomic_add_fp64(&r->sum_xy, s->sum_xy);
+					}
+					nbytes = sizeof(kagg_state__covar_packed);
+				}
+				break;
+
+			default:
+				goto bailout;
+		}
+		t_hoff += nbytes;
+		pos += nbytes;
+	}
+bailout:
+	assert(pos == prepfn_buffer + kcxt->groupby_prefunc_bufsz);
+}
+
+PUBLIC_FUNCTION(void)
+mergeGpuPreAggGroupByBuffer(kern_context *kcxt,
+							kern_data_store *kds_final)
+{
+	const kern_session_info *session = kcxt->session;
+	const kern_expression *kexp_groupby_actions = SESSION_KEXP_GROUPBY_ACTIONS(session);
+
+	if (!kcxt->groupby_prefunc_buffer ||
+		!kexp_groupby_actions)
+		return;		/* nothing to do */
+
+	if (SESSION_KEXP_GROUPBY_KEYHASH(session) &&
+		SESSION_KEXP_GROUPBY_KEYLOAD(session) &&
+		SESSION_KEXP_GROUPBY_KEYCOMP(session))
+	{
+		/*
+		 * merge the group-by results
+		 *
+		 * NOTE: about availability of the tuples on kds_final.
+		 *
+		 * __execGpuPreAggGroupBy() builds result tuples on the kds_final
+		 * as follows:
+		 * 1. acquires the exclusive lock on the hash-slot.
+		 * 2. expand nitems/usage of kds_final by atomicCAS
+		 *   (at this timing, result tuple is not built yet)
+		 * 3. set up an empty tuple using __writeOutOneTuplePreAgg()
+		 * 4. injection of memory-barrier
+		 * 5. assign row offset on the row-index of the kds_final.
+		 *
+		 * It means that @kds_final->nitems does not guarantee the existence of
+		 * the result tuple, however, valid row-index of the kds_final guarantees
+		 * existence of the result tuple successfully built.
+		 * So, in case when row-index is less than @kds_final->nitem, and its
+		 * @tupitem is valid, we can consider the result tuple has been already
+		 * successfully built.
+		 *
+		 * In addition, merge operation touches the kds_final, only if buffered
+		 * prep-function state has been updated by at least one row. It means
+		 * this row is already built on the kds_final, thus ready to update.
+		 */
+		uint32_t	nitems = __volatileRead(&kds_final->nitems);
+		uint32_t	index;
+
+		nitems = Min(nitems, kcxt->groupby_prefunc_nbufs);
+		for (index = get_local_id();
+			 index < nitems;
+			 index += get_local_size())
+		{
+			kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds_final, index);
+			char		   *pos = (kcxt->groupby_prefunc_buffer +
+								   kcxt->groupby_prefunc_bufsz * index);
+			if (!tupitem)
+				continue;
+			__mergeGpuPreAggGroupByBufferOne(kcxt, kds_final,
+											 &tupitem->htup,
+											 kexp_groupby_actions,
+											 pos);
+		}
+	}
+	else
+	{
+		/* merge the no-group results */
+		uint32_t	nitems = __volatileRead(&kds_final->nitems);
+
+		if (LaneId() == 0 && nitems > 0)
+		{
+			kern_tupitem *tupitem = KDS_GET_TUPITEM(kds_final, 0);
+
+			__mergeGpuPreAggGroupByBufferOne(kcxt, kds_final,
+											 &tupitem->htup,
+											 kexp_groupby_actions,
+											 kcxt->groupby_prefunc_buffer);
+		}
+	}
 }
 
 PUBLIC_FUNCTION(int)

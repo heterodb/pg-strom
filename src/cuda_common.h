@@ -211,6 +211,13 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 					 kern_data_store *kds_final,
 					 char *kvars_addr_wp,
 					 bool *p_try_suspend);
+EXTERN_FUNCTION(void)
+setupGpuPreAggGroupByBuffer(kern_context *kcxt,
+							kern_gputask *kgtask,
+							char *groupby_prepfn_buffer);
+EXTERN_FUNCTION(void)
+mergeGpuPreAggGroupByBuffer(kern_context *kcxt,
+							kern_data_store *kds_final);
 
 /*
  * Definitions related to GpuCache

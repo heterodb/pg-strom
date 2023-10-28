@@ -423,6 +423,13 @@ typedef struct
 	uint32_t		kvecs_curr_id;		/* current kvecs-id */
 
 	/*
+	 * GPU shared memory buffer for GPU-PreAgg boosting.
+	 */
+	uint32_t		groupby_prefunc_bufsz;
+	uint32_t		groupby_prefunc_nbufs;
+	char		   *groupby_prefunc_buffer;
+
+	/*
 	 * mode control flags
 	 *
 	 * kmode_compare_nulls - if true, equal/not-equal operators compare NULLs.
@@ -2474,7 +2481,7 @@ __PICKUP_PACKED_KEXP(const kern_expression *kexp, int dindex)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_LOAD_VARS(kern_session_info *session, int depth)
+SESSION_KEXP_LOAD_VARS(const kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
@@ -2492,7 +2499,7 @@ SESSION_KEXP_LOAD_VARS(kern_session_info *session, int depth)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_MOVE_VARS(kern_session_info *session, int depth)
+SESSION_KEXP_MOVE_VARS(const kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
@@ -2510,7 +2517,7 @@ SESSION_KEXP_MOVE_VARS(kern_session_info *session, int depth)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_SCAN_QUALS(kern_session_info *session)
+SESSION_KEXP_SCAN_QUALS(const kern_session_info *session)
 {
 	if (session->xpucode_scan_quals == 0)
 		return NULL;
@@ -2518,7 +2525,7 @@ SESSION_KEXP_SCAN_QUALS(kern_session_info *session)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int depth)
+SESSION_KEXP_JOIN_QUALS(const kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
@@ -2536,7 +2543,7 @@ SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int depth)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_HASH_VALUE(kern_session_info *session, int depth)
+SESSION_KEXP_HASH_VALUE(const kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
@@ -2554,7 +2561,7 @@ SESSION_KEXP_HASH_VALUE(kern_session_info *session, int depth)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GIST_EVALS(kern_session_info *session, int depth)
+SESSION_KEXP_GIST_EVALS(const kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
@@ -2571,7 +2578,7 @@ SESSION_KEXP_GIST_EVALS(kern_session_info *session, int depth)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_PROJECTION(kern_session_info *session)
+SESSION_KEXP_PROJECTION(const kern_session_info *session)
 {
 	kern_expression *kexp = NULL;
 
@@ -2586,7 +2593,7 @@ SESSION_KEXP_PROJECTION(kern_session_info *session)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GROUPBY_KEYHASH(kern_session_info *session)
+SESSION_KEXP_GROUPBY_KEYHASH(const kern_session_info *session)
 {
 	kern_expression *kexp = NULL;
 
@@ -2601,7 +2608,7 @@ SESSION_KEXP_GROUPBY_KEYHASH(kern_session_info *session)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GROUPBY_KEYLOAD(kern_session_info *session)
+SESSION_KEXP_GROUPBY_KEYLOAD(const kern_session_info *session)
 {
 	kern_expression *kexp = NULL;
 
@@ -2616,7 +2623,7 @@ SESSION_KEXP_GROUPBY_KEYLOAD(kern_session_info *session)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GROUPBY_KEYCOMP(kern_session_info *session)
+SESSION_KEXP_GROUPBY_KEYCOMP(const kern_session_info *session)
 {
 	kern_expression *kexp = NULL;
 
@@ -2630,7 +2637,7 @@ SESSION_KEXP_GROUPBY_KEYCOMP(kern_session_info *session)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GROUPBY_ACTIONS(kern_session_info *session)
+SESSION_KEXP_GROUPBY_ACTIONS(const kern_session_info *session)
 {
 	kern_expression *kexp = NULL;
 

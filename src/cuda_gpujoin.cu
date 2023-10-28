@@ -759,6 +759,8 @@ kern_gpujoin_main(kern_session_info *session,
 								&wp_saved,
 								&l_state,
 								&matched);
+	setupGpuPreAggGroupByBuffer(kcxt, kgtask,
+								SHARED_WORKMEM(wp_base_sz, get_local_size() / warpSize));
 	kvec_buffer_base = (char *)wp_saved + wp_base_sz;
 	kvec_buffer_size = TYPEALIGN(CUDA_L1_CACHELINE_SZ, kcxt->kvecs_bufsz);
 #define __KVEC_BUFFER(__depth)							\
@@ -892,6 +894,8 @@ kern_gpujoin_main(kern_session_info *session,
 #undef __KVEC_BUFFER
 #undef __L_STATE
 #undef __MATCHED
+	/* merge the group-by buffer to the kds_final, if any */
+	mergeGpuPreAggGroupByBuffer(kcxt, kds_dst);
 
 	if (LaneId() == 0)
 	{

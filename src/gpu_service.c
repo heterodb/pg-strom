@@ -1934,9 +1934,7 @@ resume_kernel:
 						NULL);
 	if (rc != CUDA_SUCCESS)
 	{
-		gpuClientFatal(gclient, "failed on cuLaunchKernel(grid_sz=%u, block_sz=%u, shmem_sz=%u): %s",
-					   grid_sz, block_sz, shmem_sz,
-					   cuStrError(rc));
+		gpuClientFatal(gclient, "failed on cuLaunchKernel: %s", cuStrError(rc));
 		goto bailout;
 	}
 
