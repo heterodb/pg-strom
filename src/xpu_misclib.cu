@@ -661,9 +661,9 @@ xpu_money_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_money_datum_hash(kern_context *kcxt,
 					 uint32_t *p_hash,
-					 const xpu_datum_t *__arg)
+					 xpu_datum_t *__arg)
 {
-	const xpu_money_t *arg = (const xpu_money_t *)__arg;
+	xpu_money_t *arg = (xpu_money_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -675,11 +675,11 @@ xpu_money_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_money_datum_comp(kern_context *kcxt,
 					 int *p_comp,
-					 const xpu_datum_t *__a,
-					 const xpu_datum_t *__b)
+					 xpu_datum_t *__a,
+					 xpu_datum_t *__b)
 {
-	const xpu_money_t *a = (const xpu_money_t *)__a;
-	const xpu_money_t *b = (const xpu_money_t *)__b;
+	xpu_money_t *a = (xpu_money_t *)__a;
+	xpu_money_t *b = (xpu_money_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	if (a->value < b->value)
@@ -793,9 +793,9 @@ xpu_uuid_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_uuid_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					const xpu_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	const xpu_uuid_t *arg = (const xpu_uuid_t *)__arg;
+	xpu_uuid_t *arg = (xpu_uuid_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -824,11 +824,11 @@ uuid_cmp_internal(const xpu_uuid_t *datum_a,
 STATIC_FUNCTION(bool)
 xpu_uuid_datum_comp(kern_context *kcxt,
 					int *p_comp,
-					const xpu_datum_t *__a,
-					const xpu_datum_t *__b)
+					xpu_datum_t *__a,
+					xpu_datum_t *__b)
 {
-	const xpu_uuid_t *a = (const xpu_uuid_t *)__a;
-	const xpu_uuid_t *b = (const xpu_uuid_t *)__b;
+	xpu_uuid_t *a = (xpu_uuid_t *)__a;
+	xpu_uuid_t *b = (xpu_uuid_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	*p_comp = __memcmp(a->value.data,
@@ -975,9 +975,9 @@ xpu_macaddr_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_macaddr_datum_hash(kern_context *kcxt,
 					   uint32_t *p_hash,
-					   const xpu_datum_t *__arg)
+					   xpu_datum_t *__arg)
 {
-	const xpu_macaddr_t *arg = (const xpu_macaddr_t *)__arg;
+	xpu_macaddr_t *arg = (xpu_macaddr_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -1020,11 +1020,11 @@ macaddr_cmp_internal(const xpu_macaddr_t *datum_a, const xpu_macaddr_t *datum_b)
 STATIC_FUNCTION(bool)
 xpu_macaddr_datum_comp(kern_context *kcxt,
 					   int *p_comp,
-					   const xpu_datum_t *__a,
-					   const xpu_datum_t *__b)
+					   xpu_datum_t *__a,
+					   xpu_datum_t *__b)
 {
-	const xpu_macaddr_t *a = (const xpu_macaddr_t *)__a;
-	const xpu_macaddr_t *b = (const xpu_macaddr_t *)__b;
+	xpu_macaddr_t *a = (xpu_macaddr_t *)__a;
+	xpu_macaddr_t *b = (xpu_macaddr_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	*p_comp = macaddr_cmp_internal(a, b);
@@ -1274,9 +1274,9 @@ xpu_inet_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_inet_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					const xpu_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	const xpu_inet_t *arg = (const xpu_inet_t *)__arg;
+	xpu_inet_t *arg = (xpu_inet_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -1357,11 +1357,11 @@ inet_cmp_internal(const xpu_inet_t *datum_a,
 STATIC_FUNCTION(bool)
 xpu_inet_datum_comp(kern_context *kcxt,
 					int *p_comp,
-					const xpu_datum_t *__a,
-					const xpu_datum_t *__b)
+					xpu_datum_t *__a,
+					xpu_datum_t *__b)
 {
-	const xpu_inet_t *a = (const xpu_inet_t *)__a;
-	const xpu_inet_t *b = (const xpu_inet_t *)__b;
+	xpu_inet_t *a = (xpu_inet_t *)__a;
+	xpu_inet_t *b = (xpu_inet_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	*p_comp = inet_cmp_internal(a, b);

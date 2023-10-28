@@ -196,9 +196,9 @@ xpu_bpchar_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_bpchar_datum_hash(kern_context*kcxt,
 					  uint32_t *p_hash,
-					  const xpu_datum_t *__arg)
+					  xpu_datum_t *__arg)
 {
-	const xpu_bpchar_t *arg = (const xpu_bpchar_t *)__arg;
+	xpu_bpchar_t *arg = (xpu_bpchar_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -212,11 +212,11 @@ xpu_bpchar_datum_hash(kern_context*kcxt,
 STATIC_FUNCTION(bool)
 xpu_bpchar_datum_comp(kern_context *kcxt,
 					  int *p_comp,
-					  const xpu_datum_t *__str1,
-					  const xpu_datum_t *__str2)
+					  xpu_datum_t *__str1,
+					  xpu_datum_t *__str2)
 {
-	const xpu_bpchar_t *str1 = (const xpu_bpchar_t *)__str1;
-	const xpu_bpchar_t *str2 = (const xpu_bpchar_t *)__str2;
+	xpu_bpchar_t *str1 = (xpu_bpchar_t *)__str1;
+	xpu_bpchar_t *str2 = (xpu_bpchar_t *)__str2;
 	int			sz1, sz2;
 	int			comp;
 
@@ -353,9 +353,9 @@ xpu_text_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_text_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					const xpu_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	const xpu_text_t *arg = (const xpu_text_t *)__arg;
+	xpu_text_t *arg = (xpu_text_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -369,11 +369,11 @@ xpu_text_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_text_datum_comp(kern_context *kcxt,
 					int *p_comp,
-					const xpu_datum_t *__str1,
-					const xpu_datum_t *__str2)
+					xpu_datum_t *__str1,
+					xpu_datum_t *__str2)
 {
-	const xpu_text_t *str1 = (const xpu_text_t *)__str1;
-	const xpu_text_t *str2 = (const xpu_text_t *)__str2;
+	xpu_text_t *str1 = (xpu_text_t *)__str1;
+	xpu_text_t *str2 = (xpu_text_t *)__str2;
 	int			comp;
 
 	if (!xpu_text_is_valid(kcxt, str1) ||
@@ -509,9 +509,9 @@ xpu_bytea_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_bytea_datum_hash(kern_context *kcxt,
 					 uint32_t *p_hash,
-					 const xpu_datum_t *__arg)
+					 xpu_datum_t *__arg)
 {
-	const xpu_bytea_t *arg = (const xpu_bytea_t *)__arg;
+	xpu_bytea_t *arg = (xpu_bytea_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -525,11 +525,11 @@ xpu_bytea_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_bytea_datum_comp(kern_context *kcxt,
 					 int *p_comp,
-					 const xpu_datum_t *__a,
-					 const xpu_datum_t *__b)
+					 xpu_datum_t *__a,
+					 xpu_datum_t *__b)
 {
-	const xpu_bytea_t *a = (const xpu_bytea_t *)__a;
-	const xpu_bytea_t *b = (const xpu_bytea_t *)__b;
+	xpu_bytea_t *a = (xpu_bytea_t *)__a;
+	xpu_bytea_t *b = (xpu_bytea_t *)__b;
 	int			comp;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
@@ -579,8 +579,8 @@ PGSTROM_SQLTYPE_OPERATORS(bytea, false, 4, -1);
 			int		comp;												\
 																		\
 			if (!xpu_bpchar_datum_comp(kcxt, &comp,						\
-									   (const xpu_datum_t *)&datum_a,	\
-									   (const xpu_datum_t *)&datum_b))	\
+									   (xpu_datum_t *)&datum_a,			\
+									   (xpu_datum_t *)&datum_b))		\
 				return false;											\
 			result->value = (comp OPER 0);								\
 			result->expr_ops = &xpu_bool_ops;							\
@@ -646,8 +646,8 @@ pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
 			int		comp;												\
 																		\
 			if (!xpu_text_datum_comp(kcxt, &comp,						\
-									 (const xpu_datum_t *)&datum_a,		\
-									 (const xpu_datum_t *)&datum_b))	\
+									 (xpu_datum_t *)&datum_a,			\
+									 (xpu_datum_t *)&datum_b))			\
 				return false;											\
 			result->value = (comp OPER 0);								\
 			result->expr_ops = &xpu_bool_ops;							\

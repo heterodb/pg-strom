@@ -547,7 +547,7 @@ xpu_geometry_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_geometry_datum_hash(kern_context *kcxt,
 						uint32_t *p_hash,
-						const xpu_datum_t *arg)
+						xpu_datum_t *arg)
 {
 	STROM_ELOG(kcxt, "geometry type has no hash function");
 	return false;
@@ -556,8 +556,8 @@ xpu_geometry_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_geometry_datum_comp(kern_context *kcxt,
 						int *p_comp,
-						const xpu_datum_t *__a,
-						const xpu_datum_t *__b)
+						xpu_datum_t *__a,
+						xpu_datum_t *__b)
 {
 	STROM_ELOG(kcxt, "geometry type has no compare function");
 	return false;
@@ -659,7 +659,7 @@ xpu_box2df_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_box2df_datum_hash(kern_context *kcxt,
 					  uint32_t *p_hash,
-					  const xpu_datum_t *xdatum)
+					  xpu_datum_t *xdatum)
 {
 	STROM_ELOG(kcxt, "box2df supports no hash function");
 	return false;
@@ -668,8 +668,8 @@ xpu_box2df_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_box2df_datum_comp(kern_context *kcxt,
 					  int *p_comp,
-					  const xpu_datum_t *__a,
-					  const xpu_datum_t *__b)
+					  xpu_datum_t *__a,
+					  xpu_datum_t *__b)
 {
 	STROM_ELOG(kcxt, "box2df type has no compare function");
 	return false;

@@ -1674,15 +1674,15 @@ struct xpu_datum_operators {
 	 * xpu_datum_hash: calculation of hash value using pg_hash_any()
 	 */
 	bool	  (*xpu_datum_hash)(kern_context *kcxt,
-								uint32_t *p_hash,
-								const xpu_datum_t *arg);
+								uint32_t *p_hash,		/* out */
+								xpu_datum_t *arg);		/* in */
 	/*
 	 * xpu_datum_comp: compares two xpu_datum values
 	 */
 	bool	  (*xpu_datum_comp)(kern_context *kcxt,
-								int *p_comp,				/* out */
-								const xpu_datum_t *a,		/* in */
-								const xpu_datum_t *b);		/* in */
+								int *p_comp,			/* out */
+								xpu_datum_t *a,			/* in */
+								xpu_datum_t *b);		/* in */
 };
 
 #define __PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\

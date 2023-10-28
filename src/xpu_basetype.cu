@@ -108,9 +108,9 @@ xpu_bool_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_bool_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					const xpu_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	const xpu_bool_t *arg = (const xpu_bool_t *)__arg;
+	xpu_bool_t *arg = (xpu_bool_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -122,11 +122,11 @@ xpu_bool_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_bool_datum_comp(kern_context *kcxt,
 					int *p_comp,
-					const xpu_datum_t *__a,
-					const xpu_datum_t *__b)
+					xpu_datum_t *__a,
+					xpu_datum_t *__b)
 {
-	const xpu_bool_t   *a = (const xpu_bool_t *)__a;
-	const xpu_bool_t   *b = (const xpu_bool_t *)__b;
+	xpu_bool_t *a = (xpu_bool_t *)__a;
+	xpu_bool_t *b = (xpu_bool_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	*p_comp = ((int)a->value - (int)b->value);
@@ -202,7 +202,7 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 	STATIC_FUNCTION(bool)												\
 	xpu_##NAME##_datum_hash(kern_context *kcxt,							\
 							uint32_t *p_hash,							\
-							const xpu_datum_t *__arg)					\
+							xpu_datum_t *__arg)							\
 	{																	\
 		xpu_##NAME##_t *arg = (xpu_##NAME##_t *)__arg;					\
 																		\
@@ -215,11 +215,11 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 	STATIC_FUNCTION(bool)												\
 	xpu_##NAME##_datum_comp(kern_context *kcxt,							\
 						int *p_comp,									\
-						const xpu_datum_t *__a,							\
-						const xpu_datum_t *__b)							\
+						xpu_datum_t *__a,								\
+						xpu_datum_t *__b)								\
 	{																	\
-		const xpu_##NAME##_t *a = (const xpu_##NAME##_t *)__a;			\
-		const xpu_##NAME##_t *b = (const xpu_##NAME##_t *)__b;			\
+		xpu_##NAME##_t *a = (xpu_##NAME##_t *)__a;						\
+		xpu_##NAME##_t *b = (xpu_##NAME##_t *)__b;						\
 																		\
 		assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));			\
 		if (a->value > b->value)										\

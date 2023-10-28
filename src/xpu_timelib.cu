@@ -182,9 +182,9 @@ xpu_date_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_date_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					const xpu_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	const xpu_date_t *arg = (const xpu_date_t *)__arg;
+	xpu_date_t *arg = (xpu_date_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -196,11 +196,11 @@ xpu_date_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_date_datum_comp(kern_context *kcxt,
 					int *p_comp,
-					const xpu_datum_t *__a,
-					const xpu_datum_t *__b)
+					xpu_datum_t *__a,
+					xpu_datum_t *__b)
 {
-	const xpu_date_t *a = (const xpu_date_t *)__a;
-	const xpu_date_t *b = (const xpu_date_t *)__b;
+	xpu_date_t *a = (xpu_date_t *)__a;
+	xpu_date_t *b = (xpu_date_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	if (a->value > b->value)
@@ -362,9 +362,9 @@ xpu_time_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_time_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					const xpu_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	const xpu_time_t *arg = (const xpu_time_t *)__arg;
+	xpu_time_t *arg = (xpu_time_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -376,11 +376,11 @@ xpu_time_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_time_datum_comp(kern_context *kcxt,
 					int *p_comp,
-					const xpu_datum_t *__a,
-					const xpu_datum_t *__b)
+					xpu_datum_t *__a,
+					xpu_datum_t *__b)
 {
-	const xpu_time_t *a = (const xpu_time_t *)__a;
-	const xpu_time_t *b = (const xpu_time_t *)__b;
+	xpu_time_t *a = (xpu_time_t *)__a;
+	xpu_time_t *b = (xpu_time_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	if (a->value > b->value)
@@ -484,9 +484,9 @@ xpu_timetz_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_timetz_datum_hash(kern_context *kcxt,
 					  uint32_t *p_hash,
-					  const xpu_datum_t *__arg)
+					  xpu_datum_t *__arg)
 {
-	const xpu_timetz_t *arg = (const xpu_timetz_t *)__arg;
+	xpu_timetz_t *arg = (xpu_timetz_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -498,8 +498,8 @@ xpu_timetz_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_timetz_datum_comp(kern_context *kcxt,
 					  int *p_comp,
-					  const xpu_datum_t *__a,
-					  const xpu_datum_t *__b)
+					  xpu_datum_t *__a,
+					  xpu_datum_t *__b)
 {
 	STROM_ELOG(kcxt, "timetz has no compare handler");
 	return false;
@@ -655,9 +655,9 @@ xpu_timestamp_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_timestamp_datum_hash(kern_context *kcxt,
 						 uint32_t *p_hash,
-						 const xpu_datum_t *__arg)
+						 xpu_datum_t *__arg)
 {
-	const xpu_timestamp_t *arg = (const xpu_timestamp_t *)__arg;
+	xpu_timestamp_t *arg = (xpu_timestamp_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -669,11 +669,11 @@ xpu_timestamp_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_timestamp_datum_comp(kern_context *kcxt,
 						 int *p_comp,
-						 const xpu_datum_t *__a,
-						 const xpu_datum_t *__b)
+						 xpu_datum_t *__a,
+						 xpu_datum_t *__b)
 {
-	const xpu_timestamp_t *a = (const xpu_timestamp_t *)__a;
-	const xpu_timestamp_t *b = (const xpu_timestamp_t *)__b;
+	xpu_timestamp_t *a = (xpu_timestamp_t *)__a;
+	xpu_timestamp_t *b = (xpu_timestamp_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	if (a->value > b->value)
@@ -769,9 +769,9 @@ xpu_timestamptz_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_timestamptz_datum_hash(kern_context *kcxt,
 						   uint32_t *p_hash,
-						   const xpu_datum_t *__arg)
+						   xpu_datum_t *__arg)
 {
-	const xpu_timestamptz_t *arg = (const xpu_timestamptz_t *)__arg;
+	xpu_timestamptz_t *arg = (xpu_timestamptz_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -783,11 +783,11 @@ xpu_timestamptz_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_timestamptz_datum_comp(kern_context *kcxt,
 						   int *p_comp,
-						   const xpu_datum_t *__a,
-						   const xpu_datum_t *__b)
+						   xpu_datum_t *__a,
+						   xpu_datum_t *__b)
 {
-	const xpu_timestamptz_t *a = (const xpu_timestamptz_t *)__a;
-	const xpu_timestamptz_t *b = (const xpu_timestamptz_t *)__b;
+	xpu_timestamptz_t *a = (xpu_timestamptz_t *)__a;
+	xpu_timestamptz_t *b = (xpu_timestamptz_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	if (a->value > b->value)
@@ -949,9 +949,9 @@ xpu_interval_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_interval_datum_hash(kern_context *kcxt,
 						uint32_t *p_hash,
-						const xpu_datum_t *__arg)
+						xpu_datum_t *__arg)
 {
-	const xpu_interval_t *arg = (const xpu_interval_t *)__arg;
+	xpu_interval_t *arg = (xpu_interval_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -978,12 +978,12 @@ interval_cmp_value(const Interval *ival)
 
 STATIC_FUNCTION(bool)
 xpu_interval_datum_comp(kern_context *kcxt,
-						 int *p_comp,
-						 const xpu_datum_t *__a,
-						 const xpu_datum_t *__b)
+						int *p_comp,
+						xpu_datum_t *__a,
+						xpu_datum_t *__b)
 {
-	const xpu_interval_t *a = (const xpu_interval_t *)__a;
-	const xpu_interval_t *b = (const xpu_interval_t *)__b;
+	xpu_interval_t *a = (xpu_interval_t *)__a;
+	xpu_interval_t *b = (xpu_interval_t *)__b;
 	int128_t	aval;
 	int128_t	bval;
 
@@ -3311,92 +3311,93 @@ __pg_extract_timestamp_common(kern_context *kcxt,
 			return false;
 		}
 		memset(result, 0, sizeof(xpu_numeric_t));
-
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
 		switch (value)
 		{
 			case DTK_MICROSEC:
-				result->value = tm.tm_sec * 1000000 + fsec;
+				result->u.value = tm.tm_sec * 1000000 + fsec;
 				result->weight = 6;
 				break;
 			case DTK_MILLISEC:
-				result->value = tm.tm_sec * 1000 + fsec / 1000.0;
+				result->u.value = tm.tm_sec * 1000 + fsec / 1000.0;
 				result->weight = 3;
 				break;
 			case DTK_SECOND:
-				result->value = tm.tm_sec;
+				result->u.value = tm.tm_sec;
 				break;
 			case DTK_MINUTE:
-				result->value = tm.tm_min;
+				result->u.value = tm.tm_min;
 				break;
 			case DTK_HOUR:
-				result->value = tm.tm_hour;
+				result->u.value = tm.tm_hour;
 				break;
 			case DTK_DAY:
-				result->value = tm.tm_mday;
+				result->u.value = tm.tm_mday;
 				break;
 			case DTK_MONTH:
-				result->value = tm.tm_mon;
+				result->u.value = tm.tm_mon;
 				break;
 			case DTK_QUARTER:
-				result->value = (tm.tm_mon - 1) / 3 + 1;
+				result->u.value = (tm.tm_mon - 1) / 3 + 1;
 				break;
 			case DTK_WEEK:
-				result->value = date2isoweek(tm.tm_year,
-											 tm.tm_mon,
-											 tm.tm_mday);
+				result->u.value = date2isoweek(tm.tm_year,
+											   tm.tm_mon,
+											   tm.tm_mday);
 				break;
 			case DTK_YEAR:
 				/* there is no year 0, just 1 BC and 1 AD */
 				if (tm.tm_year > 0)
-					result->value = tm.tm_year;
+					result->u.value = tm.tm_year;
 				else
-					result->value = tm.tm_year - 1;
+					result->u.value = tm.tm_year - 1;
 				break;
 			case DTK_DECADE:
 				if (tm.tm_year >= 0)
-					result->value = tm.tm_year / 10;
+					result->u.value = tm.tm_year / 10;
 				else
-					result->value = -((8 - (tm.tm_year - 1)) / 10);
+					result->u.value = -((8 - (tm.tm_year - 1)) / 10);
 				break;
 			case DTK_CENTURY:
 				if (tm.tm_year > 0)
-					result->value = (tm.tm_year + 99) / 100;
+					result->u.value = (tm.tm_year + 99) / 100;
 				else
-					result->value = -((99 - (tm.tm_year - 1)) / 100);
+					result->u.value = -((99 - (tm.tm_year - 1)) / 100);
 				break;
 			case DTK_MILLENNIUM:
 				if (tm.tm_year > 0)
-					result->value = (tm.tm_year + 999) / 1000;
+					result->u.value = (tm.tm_year + 999) / 1000;
 				else
-					result->value = -((999 - (tm.tm_year - 1)) / 1000);
+					result->u.value = -((999 - (tm.tm_year - 1)) / 1000);
 				break;
 			case DTK_JULIAN:
-				result->value = date2j(tm.tm_year,
-									   tm.tm_mon,
-									   tm.tm_mday) * 1000000L +
+				result->u.value = date2j(tm.tm_year,
+										 tm.tm_mon,
+										 tm.tm_mday) * 1000000L +
 					(double)(tm.tm_hour * SECS_PER_HOUR +
 							 tm.tm_min  * SECS_PER_MINUTE +
 							 tm.tm_sec) * 1000000.0 / (double)SECS_PER_DAY;
 				result->weight = 6;
 				break;
 			case DTK_ISOYEAR:
-				result->value = date2isoyear(tm.tm_year,
-											 tm.tm_mon,
-											 tm.tm_mday);
+				result->u.value = date2isoyear(tm.tm_year,
+											   tm.tm_mon,
+											   tm.tm_mday);
 				break;
 			case DTK_DOW:
 			case DTK_ISODOW:
-				result->value = j2day(date2j(tm.tm_year,
-											 tm.tm_mon,
-											 tm.tm_mday));
-				if (value == DTK_ISODOW && result->value == 0)
-					result->value = 7;
+				result->u.value = j2day(date2j(tm.tm_year,
+											   tm.tm_mon,
+											   tm.tm_mday));
+				if (value == DTK_ISODOW && result->u.value == 0)
+					result->u.value = 7;
 				break;
 			case DTK_DOY:
-				result->value = (date2j(tm.tm_year,
-										tm.tm_mon,
-										tm.tm_mday) -
-								 date2j(tm.tm_year, 1, 1) + 1);
+				result->u.value = (date2j(tm.tm_year,
+										  tm.tm_mon,
+										  tm.tm_mday) -
+								   date2j(tm.tm_year, 1, 1) + 1);
 				break;
 			case DTK_TZ:
 			case DTK_TZ_MINUTE:
@@ -3405,16 +3406,17 @@ __pg_extract_timestamp_common(kern_context *kcxt,
 				STROM_ELOG(kcxt, "unsupported unit of timestamp");
 				return false;
 		}
-		result->expr_ops = &xpu_numeric_ops;
 	}
 	else if (type == RESERV)
 	{
 		memset(result, 0, sizeof(xpu_numeric_t));
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
 		if (value == DTK_EPOCH)
 		{
 			Timestamp	epoch = kcxt->session->hostEpochTimestamp;
 
-			result->value = (ts - epoch);
+			result->u.value = (ts - epoch);
 			result->weight = 6;
 		}
 		else
@@ -3422,7 +3424,6 @@ __pg_extract_timestamp_common(kern_context *kcxt,
 			STROM_ELOG(kcxt, "unsupported unit of timestamp");
 			return false;
 		}
-		result->expr_ops = &xpu_numeric_ops;
 	}
 	else
 	{
@@ -3499,6 +3500,7 @@ pgfn_extract_date(XPU_PGFUNCTION_ARGS)
 			case DTK_DOW:
 			case DTK_ISODOW:
 			case DTK_DOY:
+				/* returns NULL */
 				break;
 			/* Monotonically-increasing units */
 			case DTK_YEAR:
@@ -3508,11 +3510,11 @@ pgfn_extract_date(XPU_PGFUNCTION_ARGS)
 			case DTK_JULIAN:
 			case DTK_ISOYEAR:
 			case DTK_EPOCH:
+				result->expr_ops = &xpu_numeric_ops;
 				if (DATE_IS_NOBEGIN(dval.value))
 					result->kind = XPU_NUMERIC_KIND__NEG_INF;
 				else
 					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				result->expr_ops = &xpu_numeric_ops;
 				break;
 			default:
 				STROM_ELOG(kcxt, "not a supported unit of date");
@@ -3525,73 +3527,77 @@ pgfn_extract_date(XPU_PGFUNCTION_ARGS)
 
 		j2date(dval.value + POSTGRES_EPOCH_JDATE, &year, &mon, &mday);
 		memset(result, 0, sizeof(xpu_numeric_t));
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
 		switch (value)
 		{
 			case DTK_DAY:
-				result->value = mday;
+				result->u.value = mday;
 				break;
 			case DTK_MONTH:
-				result->value = mon;
+				result->u.value = mon;
 				break;
 			case DTK_QUARTER:
-				result->value = (mon - 1) / 3 + 1;
+				result->u.value = (mon - 1) / 3 + 1;
 				break;
 			case DTK_WEEK:
-				result->value = date2isoweek(year, mon, mday);
+				result->u.value = date2isoweek(year, mon, mday);
 				break;
 			case DTK_YEAR:
-				result->value = (year > 0 ? year : year - 1);
+				result->u.value = (year > 0 ? year : year - 1);
 				break;
 			case DTK_DECADE:
 				if (year >= 0)
-					result->value = year / 10;
+					result->u.value = year / 10;
 				else
-					result->value = -((8 - (year - 1)) / 10);
+					result->u.value = -((8 - (year - 1)) / 10);
 				break;
 			case DTK_CENTURY:
 				/* see comments in timestamp_part */
 				if (year > 0)
-					result->value = (year + 99) / 100;
+					result->u.value = (year + 99) / 100;
 				else
-					result->value = -((99 - (year - 1)) / 100);
+					result->u.value = -((99 - (year - 1)) / 100);
 				break;
 			case DTK_MILLENNIUM:
 				/* see comments in timestamp_part */
 				if (year > 0)
-					result->value = (year + 999) / 1000;
+					result->u.value = (year + 999) / 1000;
 				else
-					result->value = -((999 - (year - 1)) / 1000);
+					result->u.value = -((999 - (year - 1)) / 1000);
 				break;
 			case DTK_JULIAN:
-                result->value = dval.value + POSTGRES_EPOCH_JDATE;
+                result->u.value = dval.value + POSTGRES_EPOCH_JDATE;
                 break;
 			case DTK_ISOYEAR:
-                result->value = date2isoyear(year, mon, mday);
+                result->u.value = date2isoyear(year, mon, mday);
                 /* Adjust BC years */
-				if (result->value <= 0)
-					result->value -= 1;
+				if (result->u.value <= 0)
+					result->u.value -= 1;
 				break;
 			case DTK_DOW:
 			case DTK_ISODOW:
-				result->value = j2day(dval.value + POSTGRES_EPOCH_JDATE);
-				if (value == DTK_ISODOW && result->value == 0)
-					result->value = 7;
+				result->u.value = j2day(dval.value + POSTGRES_EPOCH_JDATE);
+				if (value == DTK_ISODOW && result->u.value == 0)
+					result->u.value = 7;
                 break;
 			case DTK_DOY:
-                result->value = date2j(year, mon, mday) - date2j(year, 1, 1) + 1;
+				result->u.value = (date2j(year, mon, mday) -
+								   date2j(year, 1, 1) + 1);
                 break;
-            default:
+			default:
 				STROM_ELOG(kcxt, "not a not supported for date");
 				return false;
 		}
-		result->expr_ops = &xpu_numeric_ops;
 	}
 	else if (type == RESERV && value == DTK_EPOCH)
 	{
-		result->value = ((int64_t)dval.value
-						 + POSTGRES_EPOCH_JDATE 
-						 - UNIX_EPOCH_JDATE) * SECS_PER_DAY;
+		memset(result, 0, sizeof(xpu_numeric_t));
 		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
+		result->u.value = ((int64_t)dval.value
+						   + POSTGRES_EPOCH_JDATE 
+						   - UNIX_EPOCH_JDATE) * SECS_PER_DAY;
 	}
 	else
 	{
@@ -3620,38 +3626,41 @@ pgfn_extract_time(XPU_PGFUNCTION_ARGS)
 		struct pg_tm tm;
 		fsec_t		fsec;
 
-		memset(result, 0, sizeof(xpu_numeric_t));
 		time2tm(tval.value, &tm, &fsec);
+
+		memset(result, 0, sizeof(xpu_numeric_t));
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
 		switch (value)
 		{
 			case DTK_MICROSEC:
-				result->value = tm.tm_sec * 1000000L + fsec;
+				result->u.value = tm.tm_sec * 1000000L + fsec;
 				break;
 			case DTK_MILLISEC:
-				result->value = tm.tm_sec * 1000000L + fsec;
+				result->u.value = tm.tm_sec * 1000000L + fsec;
 				result->weight = 3;
 				break;
 			case DTK_SECOND:
-				result->value = tm.tm_sec * 1000000L + fsec;
+				result->u.value = tm.tm_sec * 1000000L + fsec;
 				result->weight = 6;
 				break;
 			case DTK_MINUTE:
-				result->value = tm.tm_min;
+				result->u.value = tm.tm_min;
 				break;
 			case DTK_HOUR:
-				result->value = tm.tm_hour;
+				result->u.value = tm.tm_hour;
 				break;
 			default:
 				STROM_ELOG(kcxt, "unsupported unit of time");
 				return false;
 		}
-		result->expr_ops = &xpu_numeric_ops;
 	}
 	else if (type == RESERV && value == DTK_EPOCH)
 	{
 		memset(result, 0, sizeof(xpu_numeric_t));
-		result->value = tval.value / 1000000;
 		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
+		result->u.value = tval.value / 1000000;
 	}
 	else
 	{
@@ -3684,45 +3693,47 @@ pgfn_extract_timetz(XPU_PGFUNCTION_ARGS)
 
 		memset(result, 0, sizeof(xpu_numeric_t));
 		timetz2tm(&tval.value, &tm, &fsec, &tz);
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
 		switch (value)
 		{
 			case DTK_TZ:
-				result->value = -tz;
+				result->u.value = -tz;
                 break;
             case DTK_TZ_MINUTE:
-                result->value = (-tz / SECS_PER_MINUTE) % MINS_PER_HOUR;
+                result->u.value = (-tz / SECS_PER_MINUTE) % MINS_PER_HOUR;
                 break;
 			case DTK_TZ_HOUR:
-                result->value  = -tz / SECS_PER_HOUR;
+                result->u.value  = -tz / SECS_PER_HOUR;
                 break;
 			case DTK_MICROSEC:
-                result->value = tm.tm_sec * 1000000L + fsec;
+                result->u.value = tm.tm_sec * 1000000L + fsec;
                 break;
             case DTK_MILLISEC:
-				result->value = tm.tm_sec * 1000000L + fsec;
+				result->u.value = tm.tm_sec * 1000000L + fsec;
 				result->weight = 3;
 				break;
             case DTK_SECOND:
-				result->value = tm.tm_sec * 1000000L + fsec;
+				result->u.value = tm.tm_sec * 1000000L + fsec;
 				result->weight = 6;
 				break;
             case DTK_MINUTE:
-                result->value = tm.tm_min;
+                result->u.value = tm.tm_min;
                 break;
 			case DTK_HOUR:
-                result->value = tm.tm_hour;
+                result->u.value = tm.tm_hour;
                 break;
 			default:
 				STROM_ELOG(kcxt, "unsupported unit of time");
 				return false;
 		}
-		result->expr_ops = &xpu_numeric_ops;
 	}
 	else if (type == RESERV && value == DTK_EPOCH)
 	{
 		memset(result, 0, sizeof(xpu_numeric_ops));
-		result->value = tval.value.time / 1000000L + tval.value.zone;
 		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
+		result->u.value = tval.value.time / 1000000L + tval.value.zone;
 	}
 	else
 	{
@@ -3770,48 +3781,51 @@ pgfn_extract_interval(XPU_PGFUNCTION_ARGS)
 		tm_sec  = tfrac;
 		tm_usec = time;
 
+		memset(result, 0, sizeof(xpu_numeric_t));
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
 		switch (value)
 		{
 			case DTK_MICROSEC:
-				result->value = tm_sec * 1000000L + tm_usec;
+				result->u.value = tm_sec * 1000000L + tm_usec;
 				break;
 			case DTK_MILLISEC:
-				result->value = tm_sec * 1000000L + tm_usec;
+				result->u.value = tm_sec * 1000000L + tm_usec;
 				result->weight = 3;
 				break;
             case DTK_SECOND:
-				result->value = tm_sec * 1000000L + tm_usec;
+				result->u.value = tm_sec * 1000000L + tm_usec;
 				result->weight = 6;
 				break;
             case DTK_MINUTE:
-                result->value = tm_min;
+                result->u.value = tm_min;
                 break;
 			case DTK_HOUR:
-                result->value = tm_hour;
+                result->u.value = tm_hour;
                 break;
             case DTK_DAY:
-                result->value = tm_mday;
+                result->u.value = tm_mday;
                 break;
             case DTK_MONTH:
-                result->value = tm_mon;
+                result->u.value = tm_mon;
                 break;
             case DTK_QUARTER:
-                result->value = (tm_mon / 3) + 1;
+                result->u.value = (tm_mon / 3) + 1;
                 break;
             case DTK_YEAR:
-                result->value = tm_year;
+                result->u.value = tm_year;
                 break;
 			case DTK_DECADE:
 				/* caution: C division may have negative remainder */
-				result->value = tm_year / 10;
+				result->u.value = tm_year / 10;
 				break;
 			case DTK_CENTURY:
                 /* caution: C division may have negative remainder */
-                result->value = tm_year / 100;
+                result->u.value = tm_year / 100;
                 break;
 			case DTK_MILLENNIUM:
 				/* caution: C division may have negative remainder */
-				result->value = tm_year / 1000;
+				result->u.value = tm_year / 1000;
 				break;
 			default:
 				STROM_ELOG(kcxt, "not a supported for interval type");
@@ -3821,13 +3835,14 @@ pgfn_extract_interval(XPU_PGFUNCTION_ARGS)
 	else if (type == RESERV && value == DTK_EPOCH)
 	{
 		memset(result, 0, sizeof(xpu_numeric_t));
-		result->value =
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
+		result->weight = 6;
+		result->u.value =
 			(((int64_t)ival.value.month / MONTHS_PER_YEAR) * SECS_PER_YEAR +
 			 ((int64_t)ival.value.month % MONTHS_PER_YEAR) * SECS_PER_MONTH +
 			 (int64_t)ival.value.day * SECS_PER_DAY) * 1000000L +
 			(int64_t)ival.value.time;
-		result->weight = 6;
-		result->expr_ops = &xpu_numeric_ops;
 	}
     else
 	{

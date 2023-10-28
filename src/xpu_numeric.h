@@ -16,20 +16,27 @@ typedef struct {
 	KVEC_DATUM_COMMON_FIELD;
 	uint8_t		kinds[KVEC_UNITSZ];
 	int16_t		weights[KVEC_UNITSZ];
-	int128_t	values[KVEC_UNITSZ];
+	struct {
+		const varlena  *ptr;
+		uint64_t		u64;
+	}			values_lo[KVEC_UNITSZ];
+	int64_t		values_hi[KVEC_UNITSZ];
 } kvec_numeric_t;
 
 typedef struct {
 	XPU_DATUM_COMMON_FIELD;
-	uint8_t		kind;		/* one of XPU_NUMERIC_KIND__* below */
+	uint8_t		kind;			/* one of XPU_NUMERIC_KIND__* below */
 	int16_t		weight;
-	int128_t	value;
+	union {
+		const varlena *vl_addr;	/* <= XPU_NUMERIC_KIND__VARLENA */
+		int128_t	value;		/* <= XPU_NUMERIC_KIND__VALID */
+	} u;
 } xpu_numeric_t;
 #define XPU_NUMERIC_KIND__VALID		0x00
 #define XPU_NUMERIC_KIND__NAN		0x01
 #define XPU_NUMERIC_KIND__POS_INF	0x02
 #define XPU_NUMERIC_KIND__NEG_INF	0x03
-
+#define XPU_NUMERIC_KIND__VARLENA	0xff		/* still in raw varlena format */
 EXTERN_DATA xpu_datum_operators xpu_numeric_ops;
 
 /*
@@ -169,9 +176,9 @@ set_normalized_numeric(xpu_numeric_t *result, int128_t value, int16_t weight)
 		}
 	}
 	result->expr_ops = &xpu_numeric_ops;
-	result->kind = XPU_NUMERIC_KIND__VALID;
-	result->weight = weight;
-	result->value = value;
+	result->kind     = XPU_NUMERIC_KIND__VALID;
+	result->weight   = weight;
+	result->u.value  = value;
 }
 
 INLINE_FUNCTION(const char *)
@@ -197,8 +204,8 @@ __xpu_numeric_from_varlena(xpu_numeric_t *result, const varlena *addr)
 			else
 				goto error;
 
-			result->weight = 0;
-			result->value = 0;
+			result->weight  = 0;
+			result->u.value = 0;
 		}
 		else
 		{
@@ -305,12 +312,12 @@ pg_numeric_to_cstring(kern_context *kcxt,
 EXTERN_FUNCTION(bool)
 __xpu_numeric_to_int64(kern_context *kcxt,
 					   int64_t *p_ival,
-					   const xpu_numeric_t *num,
+					   xpu_numeric_t *num,
 					   int64_t min_value,
 					   int64_t max_value);
 EXTERN_FUNCTION(bool)
 __xpu_numeric_to_fp64(kern_context *kcxt,
 					  float8_t *p_ival,
-					  const xpu_numeric_t *num);
+					  xpu_numeric_t *num);
 
 #endif /* XPU_NUMERIC_H */

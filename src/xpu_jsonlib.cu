@@ -317,9 +317,9 @@ __xpu_jsonb_comp_hash(kern_context *kcxt, JsonbContainer *jc)
 STATIC_FUNCTION(bool)
 xpu_jsonb_datum_hash(kern_context*kcxt,
 					 uint32_t *p_hash,
-					 const xpu_datum_t *__arg)
+					 xpu_datum_t *__arg)
 {
-	const xpu_jsonb_t  *arg = (const xpu_jsonb_t *)__arg;
+	xpu_jsonb_t  *arg = (xpu_jsonb_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -334,8 +334,8 @@ xpu_jsonb_datum_hash(kern_context*kcxt,
 STATIC_FUNCTION(bool)
 xpu_jsonb_datum_comp(kern_context*kcxt,
 					 int *p_comp,
-					 const xpu_datum_t *__a,
-					 const xpu_datum_t *__b)
+					 xpu_datum_t *__a,
+					 xpu_datum_t *__b)
 {
 	STROM_ELOG(kcxt, "device jsonb type has no compare handler");
 	return false;

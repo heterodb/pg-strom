@@ -2074,7 +2074,7 @@ xpu_array_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_array_datum_hash(kern_context *kcxt,
 					 uint32_t *p_hash,
-					 const xpu_datum_t *arg)
+					 xpu_datum_t *arg)
 {
 	STROM_ELOG(kcxt, "xpu_array_datum_hash is not implemented");
 	return false;
@@ -2083,8 +2083,8 @@ xpu_array_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_array_datum_comp(kern_context *kcxt,
 					 int *p_comp,
-					 const xpu_datum_t *__a,
-					 const xpu_datum_t *__b)
+					 xpu_datum_t *__a,
+					 xpu_datum_t *__b)
 {
 	STROM_ELOG(kcxt, "xpu_array_datum_comp is not implemented");
 	return false;
@@ -2324,7 +2324,7 @@ xpu_composite_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_composite_datum_hash(kern_context *kcxt,
 						 uint32_t *p_hash,
-						 const xpu_datum_t *arg)
+						 xpu_datum_t *arg)
 {
 	STROM_ELOG(kcxt, "xpu_composite_datum_hash is not implemented");
 	return false;
@@ -2332,8 +2332,8 @@ xpu_composite_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_composite_datum_comp(kern_context *kcxt,
 						 int *p_comp,
-						 const xpu_datum_t *__a,
-						 const xpu_datum_t *__b)
+						 xpu_datum_t *__a,
+						 xpu_datum_t *__b)
 {
 	STROM_ELOG(kcxt, "xpu_composite_datum_comp is not implemented");
 	return false;
@@ -2430,7 +2430,7 @@ xpu_internal_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_internal_datum_hash(kern_context *kcxt,
 					    uint32_t *p_hash,
-					    const xpu_datum_t *arg)
+						xpu_datum_t *arg)
 {
 	STROM_ELOG(kcxt, "xpu_internal_datum_hash is not supported");
 	return false;
@@ -2438,8 +2438,8 @@ xpu_internal_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_internal_datum_comp(kern_context *kcxt,
 						int *p_comp,
-						const xpu_datum_t *__a,
-						const xpu_datum_t *__b)
+						xpu_datum_t *__a,
+						xpu_datum_t *__b)
 {
 	STROM_ELOG(kcxt, "xpu_internal_datum_comp is not supported");
 	return false;
