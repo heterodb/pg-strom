@@ -495,16 +495,22 @@ pgfn_BoolExprNot(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_NullTestExpr(XPU_PGFUNCTION_ARGS)
 {
-	KEXP_PROCESS_ARGS1(bool, bool, status);
+	xpu_bool_t	   *result = (xpu_bool_t *)__result;
+	xpu_datum_t	   *xdatum;
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 
+	assert(kexp->nr_args == 1);
+	xdatum = (xpu_datum_t *)alloca(karg->expr_ops->xpu_type_sizeof);
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, xdatum))
+		return false;
 	result->expr_ops = &xpu_bool_ops;
 	switch (kexp->opcode)
 	{
 		case FuncOpCode__NullTestExpr_IsNull:
-			result->value = XPU_DATUM_ISNULL(&status);
+			result->value = XPU_DATUM_ISNULL(xdatum);
 			break;
 		case FuncOpCode__NullTestExpr_IsNotNull:
-			result->value = !XPU_DATUM_ISNULL(&status);
+			result->value = !XPU_DATUM_ISNULL(xdatum);
 			break;
 		default:
 			STROM_ELOG(kcxt, "corrupted kernel expression");
