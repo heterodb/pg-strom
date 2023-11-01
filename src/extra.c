@@ -258,6 +258,43 @@ gpuDirectUnmapGpuMemory(CUdeviceptr m_segment)
 }
 
 /*
+ * gpuDirectRegisterStream
+ */
+static int	(*p_cufile__register_stream_v3)(CUstream cuda_stream,
+											uint32_t flags) = NULL;
+bool
+gpuDirectRegisterStream(CUstream cuda_stream)
+{
+	if (p_cufile__register_stream_v3)
+	{
+		uint32_t	flags = (CU_FILE_STREAM_FIXED_BUF_OFFSET |
+							 CU_FILE_STREAM_FIXED_FILE_OFFSET |
+							 CU_FILE_STREAM_FIXED_FILE_SIZE |
+							 CU_FILE_STREAM_PAGE_ALIGNED_INPUTS);
+
+		if (p_cufile__register_stream_v3(cuda_stream, flags) != 0)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * gpuDirectDeregisterStream
+ */
+static int	(*p_cufile__deregister_stream_v3)(CUstream cuda_stream) = NULL;
+
+bool
+gpuDirectDeregisterStream(CUstream cuda_stream)
+{
+	if (p_cufile__deregister_stream_v3)
+	{
+		if (!p_cufile__deregister_stream_v3(cuda_stream) != 0)
+			return false;
+	}
+	return true;
+}
+
+/*
  * __fallbackFileReadIOV
  */
 static bool
@@ -373,6 +410,47 @@ gpuDirectFileReadIOV(const char *pathname,
 										   iovec,
 										   p_npages_direct_read,
 										   p_npages_vfs_read) == 0);
+	/* fallback by the regular filesystem */
+	return __fallbackFileReadIOV(pathname,
+								 m_segment,
+								 m_offset,
+								 iovec,
+								 p_npages_direct_read,
+								 p_npages_vfs_read);
+}
+
+/*
+ * gpuDirectFileReadAsyncIOV
+ */
+static int	(*p_cufile__read_file_async_iov_v3)(
+	const char *pathname,
+	CUdeviceptr m_segment,
+	off_t m_offset,
+	const strom_io_vector *iovec,
+	CUstream cuda_stream,
+	uint32_t *p_error_code_async,
+	uint32_t *p_npages_direct_read,
+	uint32_t *p_npages_vfs_read) = NULL;
+
+bool
+gpuDirectFileReadAsyncIOV(const char *pathname,
+						  CUdeviceptr m_segment,
+						  off_t m_offset,
+						  const strom_io_vector *iovec,
+						  CUstream cuda_stream,
+						  uint32_t *p_error_code_async,
+						  uint32_t *p_npages_direct_read,
+						  uint32_t *p_npages_vfs_read)
+{
+	if (p_cufile__read_file_async_iov_v3)
+		return (p_cufile__read_file_async_iov_v3(pathname,
+												 m_segment,
+												 m_offset,
+												 iovec,
+												 cuda_stream,
+												 p_error_code_async,
+												 p_npages_direct_read,
+												 p_npages_vfs_read) == 0);
 	/* fallback by the regular filesystem */
 	return __fallbackFileReadIOV(pathname,
 								 m_segment,
@@ -540,7 +618,10 @@ pgstrom_init_extra(void)
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__driver_close_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__map_gpu_memory_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__unmap_gpu_memory_v2);
+			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__register_stream_v3);
+			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__deregister_stream_v3);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__read_file_iov_v3);
+			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__read_file_async_iov_v3);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__get_property_v2);
 			LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__set_property_v2);
 
@@ -559,7 +640,10 @@ pgstrom_init_extra(void)
 		p_cufile__driver_close_v2 = NULL;
 		p_cufile__map_gpu_memory_v2 = NULL;
 		p_cufile__unmap_gpu_memory_v2 = NULL;
+		p_cufile__register_stream_v3 = NULL;
+		p_cufile__deregister_stream_v3 = NULL;
 		p_cufile__read_file_iov_v3 = NULL;
+		p_cufile__read_file_async_iov_v3 = NULL;
 		p_cufile__get_property_v2 = NULL;
 		p_cufile__set_property_v2 = NULL;
 		p_heterodb_license_reload = NULL;

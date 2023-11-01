@@ -504,12 +504,22 @@ extern void		gpuDirectCloseDriver(void);
 extern bool		gpuDirectMapGpuMemory(CUdeviceptr m_segment,
 									  size_t segment_sz);
 extern bool		gpuDirectUnmapGpuMemory(CUdeviceptr m_segment);
+extern bool		gpuDirectRegisterStream(CUstream cuda_stream);
+extern bool		gpuDirectDeregisterStream(CUstream cuda_stream);
 extern bool		gpuDirectFileReadIOV(const char *pathname,
 									 CUdeviceptr m_segment,
 									 off_t m_offset,
 									 const strom_io_vector *iovec,
 									 uint32_t *p_npages_direct_read,
 									 uint32_t *p_npages_vfs_read);
+extern bool		gpuDirectFileReadAsyncIOV(const char *pathname,
+										  CUdeviceptr m_segment,
+										  off_t m_offset,
+										  const strom_io_vector *iovec,
+										  CUstream cuda_stream,
+										  uint32_t *p_error_code_async,
+										  uint32_t *p_npages_direct_read,
+										  uint32_t *p_npages_vfs_read);
 extern char	   *gpuDirectGetProperty(void);
 extern void		gpuDirectSetProperty(const char *key, const char *value);
 extern bool		gpuDirectIsAvailable(void);
