@@ -615,34 +615,28 @@ execGpuJoinProjection(kern_context *kcxt,
 					  char *src_kvecs_buffer,
 					  bool *p_try_suspend)
 {
-	uint32_t	write_pos = WARP_WRITE_POS(wp,n_rels);
-	uint32_t	read_pos = WARP_READ_POS(wp,n_rels);
+	uint32_t	wr_pos = WARP_WRITE_POS(wp,n_rels);
+	uint32_t	rd_pos = WARP_READ_POS(wp,n_rels);
 	uint32_t	count;
-	uint32_t	mask;
 	uint32_t	row_id;
-	uint32_t	offset;
+	int64_t		offset;
 	int			tupsz = 0;
-	int			total_sz = 0;
+	uint32_t	total_sz = 0;
 	bool		try_suspend = false;
-	union {
-		struct {
-			uint32_t	nitems;
-			uint32_t	usage;
-		} i;
-		uint64_t		v64;
-	} oldval, curval, newval;
+	__shared__ uint32_t	base_rowid;
+	__shared__ uint32_t	base_usage;
 
 	/*
 	 * The previous depth still may produce new tuples, and number of
 	 * the current result tuples is not sufficient to run projection.
 	 */
-	if (wp->scan_done <= n_rels && read_pos + warpSize > write_pos)
+	if (wp->scan_done <= n_rels && rd_pos + get_local_size() > wr_pos)
 		return n_rels;
+	rd_pos += get_local_id();
 
-	read_pos += LaneId();
-	kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+	kcxt->kvecs_curr_id = (rd_pos % KVEC_UNITSZ);
 	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
-	if (read_pos < write_pos)
+	if (rd_pos < wr_pos)
 	{
 		tupsz = kern_estimate_heaptuple(kcxt,
 										kexp_projection,
@@ -651,19 +645,23 @@ execGpuJoinProjection(kern_context *kcxt,
 			STROM_ELOG(kcxt, "unable to compute tuple size");
 	}
 	/* error checks */
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
 	/* allocation of the destination buffer */
-	assert(kds_dst->format == KDS_FORMAT_ROW);
-	mask = __ballot_sync(__activemask(), tupsz > 0);
-	count = __popc(mask);
-	mask &= ((1U << LaneId()) - 1);
-	row_id = __popc(mask);
-	assert(tupsz == 0 || row_id < count);
-
-	offset = __reduce_stair_add_sync(tupsz, &total_sz);
-	if (LaneId() == 0)
+	assert(kds_dst->format == KDS_FORMAT_ROW &&
+		   tupsz == MAXALIGN(tupsz));
+	row_id = pgstrom_stair_sum_binary(tupsz > 0, &count);
+	offset = pgstrom_stair_sum_uint32(tupsz, &total_sz);
+	if (get_local_id() == 0)
 	{
+		union {
+			struct {
+				uint32_t	nitems;
+				uint32_t	usage;
+			} i;
+			uint64_t		v64;
+		} oldval, curval, newval;
+
 		curval.i.nitems = kds_dst->nitems;
 		curval.i.usage  = kds_dst->usage;
 		do {
@@ -681,11 +679,10 @@ execGpuJoinProjection(kern_context *kcxt,
 		} while ((curval.v64 = atomicCAS((unsigned long long *)&kds_dst->nitems,
 										 oldval.v64,
 										 newval.v64)) != oldval.v64);
+		base_rowid = oldval.i.nitems;
+		base_usage = oldval.i.usage;
 	}
-	oldval.v64 = __shfl_sync(__activemask(), oldval.v64, 0);
-	row_id += oldval.i.nitems;
-	/* data store has no space? */
-	if (__any_sync(__activemask(), try_suspend))
+	if (__syncthreads_count(try_suspend) > 0)
 	{
 		*p_try_suspend = true;
 		return -1;
@@ -695,7 +692,9 @@ execGpuJoinProjection(kern_context *kcxt,
 	{
 		kern_tupitem   *tupitem;
 
-		offset += __kds_unpack(oldval.i.usage);
+		row_id += base_rowid;
+		offset += __kds_unpack(base_usage);
+
 		KDS_GET_ROWINDEX(kds_dst)[row_id] = __kds_packed(offset);
 		tupitem = (kern_tupitem *)
 			((char *)kds_dst + kds_dst->length - offset);
@@ -706,15 +705,15 @@ execGpuJoinProjection(kern_context *kcxt,
 											 &tupitem->htup);
 	}
 	/* update the read position */
-	if (LaneId() == 0)
+	if (get_local_id() == 0)
 	{
 		WARP_READ_POS(wp,n_rels) += count;
 		assert(WARP_WRITE_POS(wp,n_rels) >= WARP_READ_POS(wp,n_rels));
 	}
-	__syncwarp();
+	__syncthreads();
 	if (wp->scan_done <= n_rels)
 	{
-		if (WARP_WRITE_POS(wp,n_rels) < WARP_READ_POS(wp,n_rels) + warpSize)
+		if (WARP_WRITE_POS(wp,n_rels) < WARP_READ_POS(wp,n_rels) + get_local_size())
 			return n_rels;	/* back to the previous depth */
 	}
 	else
@@ -745,7 +744,6 @@ kern_gpujoin_main(kern_session_info *session,
 	uint32_t			wp_base_sz;
 	uint32_t			n_rels = (kmrels ? kmrels->num_rels : 0);
 	int					depth;
-	__shared__ uint32_t smx_row_count;
 
 	assert(kgtask->kvars_nslots == session->kcxt_kvars_nslots &&
 		   kgtask->kvecs_bufsz  == session->kcxt_kvecs_bufsz &&
@@ -754,13 +752,13 @@ kern_gpujoin_main(kern_session_info *session,
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session);
 	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(kgtask->kvecs_ndims);
-	wp = (kern_warp_context *)SHARED_WORKMEM(wp_base_sz, get_local_id() / warpSize);
+	wp = (kern_warp_context *)SHARED_WORKMEM(0);
 	INIT_KERN_GPUTASK_SUBFIELDS(kgtask,
 								&wp_saved,
 								&l_state,
 								&matched);
-	setupGpuPreAggGroupByBuffer(kcxt, kgtask,
-								SHARED_WORKMEM(wp_base_sz, get_local_size() / warpSize));
+	setupGpuPreAggGroupByBuffer(kcxt, kgtask, SHARED_WORKMEM(wp_base_sz));
+
 	kvec_buffer_base = (char *)wp_saved + wp_base_sz;
 	kvec_buffer_size = TYPEALIGN(CUDA_L1_CACHELINE_SZ, kcxt->kvecs_bufsz);
 #define __KVEC_BUFFER(__depth)							\
@@ -769,19 +767,15 @@ kern_gpujoin_main(kern_session_info *session,
 	if (kgtask->resume_context)
 	{
 		/* resume the warp-context from the previous execution */
-		if (LaneId() == 0)
-			memcpy(wp, wp_saved, wp_base_sz);
 		if (get_local_id() == 0)
-			smx_row_count = wp->smx_row_count;
-		depth = __shfl_sync(__activemask(), wp->depth, 0);
+			memcpy(wp, wp_saved, wp_base_sz);
+		depth = wp->depth;
 	}
 	else
 	{
 		/* zero clear the wp */
-		if (LaneId() == 0)
-			memset(wp, 0, wp_base_sz);
 		if (get_local_id() == 0)
-			smx_row_count = 0;
+			memset(wp, 0, wp_base_sz);
 		for (depth=0; depth < kgtask->n_rels; depth++)
 		{
 			l_state[depth * get_global_size() + get_global_id()] = 0;
@@ -807,8 +801,7 @@ kern_gpujoin_main(kern_session_info *session,
 										  SESSION_KEXP_LOAD_VARS(session, 0),
 										  SESSION_KEXP_SCAN_QUALS(session),
 										  SESSION_KEXP_MOVE_VARS(session, 0),
-										  __KVEC_BUFFER(0),
-										  &smx_row_count);
+										  __KVEC_BUFFER(0));
 		}
 		else if (depth > n_rels)
 		{
@@ -885,9 +878,8 @@ kern_gpujoin_main(kern_session_info *session,
 										__L_STATE(depth),	/* call by reference */
 										__MATCHED(depth));	/* call by reference */
 		}
-		assert(__shfl_sync(__activemask(), depth, 0) == depth);
 		/* bailout if any error status */
-		if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 			break;
 	}
 	__syncthreads();
@@ -928,7 +920,6 @@ kern_gpujoin_main(kern_session_info *session,
 		}
 		/* suspend the execution context */
 		wp->depth = depth;
-		wp->smx_row_count = smx_row_count;
 		memcpy(wp_saved, wp, wp_base_sz);
 	}
 	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);

@@ -2832,7 +2832,8 @@ gpuservSetupGpuContext(int cuda_dindex)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuDeviceGet: %s", cuStrError(rc));
 		rc = cuCtxCreate(&gcontext->cuda_context,
-						 CU_CTX_SCHED_AUTO,
+						 CU_CTX_SCHED_BLOCKING_SYNC,
+//						 CU_CTX_SCHED_AUTO,
 						 gcontext->cuda_device);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuCtxCreate: %s", cuStrError(rc));

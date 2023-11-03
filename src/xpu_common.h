@@ -252,7 +252,6 @@ __strcmp(const char *s1, const char *s2)
  */
 #define WARPSIZE				32
 #define MAXTHREADS_PER_BLOCK	1024
-#define MAXWARPS_PER_BLOCK		(MAXTHREADS_PER_BLOCK / WARPSIZE)
 #define CUDA_L1_CACHELINE_SZ	128
 
 #if defined(__CUDACC__)
@@ -261,13 +260,14 @@ __strcmp(const char *s1, const char *s2)
 #define get_num_groups()		(gridDim.x)
 #define get_local_id()			(threadIdx.x)
 #define get_local_size()		(blockDim.x)
-#define get_global_id()			(threadIdx.x + blockIdx.x * blockDim.x)
+#define get_global_id()			(blockDim.x * blockIdx.x + threadIdx.x)
+#define get_global_base()		(blockDim.x * blockIdx.x)
 #define get_global_size()		(blockDim.x * gridDim.x)
 
 /* Dynamic shared memory entrypoint */
 extern __shared__ char __pgstrom_dynamic_shared_workmem[] __MAXALIGNED__;
-#define SHARED_WORKMEM(UNITSZ,INDEX)						\
-	(__pgstrom_dynamic_shared_workmem + (UNITSZ)*(INDEX))
+#define SHARED_WORKMEM(OFFSET)					\
+	(__pgstrom_dynamic_shared_workmem + (OFFSET))
 
 /* Reference to the special registers */
 INLINE_FUNCTION(uint32_t) LaneId(void)
@@ -1578,7 +1578,7 @@ typedef struct toast_compress_header
  *
  * ----------------------------------------------------------------
  */
-#define KVEC_UNITSZ			64
+#define KVEC_UNITSZ			(MAXTHREADS_PER_BLOCK * 2)
 #define KVEC_ALIGN(x)		TYPEALIGN(16,(x))	/* 128bit alignment */
 
 #define KVEC_DATUM_COMMON_FIELD					\

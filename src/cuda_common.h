@@ -65,10 +65,10 @@ STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
  * ----------------------------------------------------------------
  */
 #define UNIT_TUPLES_PER_DEPTH		(2 * WARPSIZE)
+#define LP_ITEMS_PER_BLOCK			(2 * MAXTHREADS_PER_BLOCK)
 typedef struct
 {
-	uint32_t		smx_row_count;	/* just for suspend/resume */
-	uint32_t		__nrels__deprecated;		/* number of inner relations, if JOIN */
+	uint32_t		smx_row_count;	/* current position of outer relation */
 	int				depth;		/* 'depth' when suspended */
 	int				scan_done;	/* smallest depth that may produce more tuples */
 	/* only KDS_FORMAT_BLOCK */
@@ -76,7 +76,7 @@ typedef struct
 	uint32_t		lp_count;	/* lp_items array once, to pull maximum GPU */
 	uint32_t		lp_wr_pos;	/* utilization by simultaneous execution of */
 	uint32_t		lp_rd_pos;	/* the kern_scan_quals. */
-	uint32_t		lp_items[UNIT_TUPLES_PER_DEPTH];
+	uint32_t		lp_items[LP_ITEMS_PER_BLOCK];
 	/* read/write_pos of the combination buffer for each depth */
 	struct {
 		uint32_t	read;		/* read_pos of depth=X */
@@ -134,10 +134,7 @@ typedef struct {
 	/*
 	 * variable length fields
 	 * +-----------------------------------+
-	 * | kern_warp_context[0] for warp-0   |
-	 * | kern_warp_context[1] for warp-1   |
-	 * |     :    :            :           |
-	 * | kern_warp_context[nwarps-1]       |
+	 * | kern_warp_context for this block  |
 	 * +-----------------------------------+ -----
 	 * | l_state[num_rels] for each thread |  only if JOIN is involved
 	 * +-----------------------------------+  (n_rels > 0)
@@ -150,8 +147,7 @@ typedef struct {
 	TYPEALIGN(CUDA_L1_CACHELINE_SZ, offsetof(kern_gputask, stats[(kvecs_ndims)]))
 #define KERN_GPUTASK_LENGTH(kvecs_ndims,kvecs_bufsz,n_threads)			\
 	(__KERN_GPUTASK_WARP_OFFSET((kvecs_ndims),(kvecs_bufsz)) +			\
-	 KERN_WARP_CONTEXT_LENGTH((kvecs_ndims),							\
-							  (kvecs_bufsz)) * (((n_threads) + WARPSIZE - 1) / WARPSIZE) + \
+	 KERN_WARP_CONTEXT_LENGTH((kvecs_ndims),(kvecs_bufsz)) +			\
 	 MAXALIGN(sizeof(uint32_t) * (n_threads) * (kvecs_ndims)) +			\
 	 MAXALIGN(sizeof(bool)     * (n_threads) * (kvecs_ndims)))
 
@@ -163,17 +159,15 @@ INIT_KERN_GPUTASK_SUBFIELDS(kern_gputask *kgtask,
 							bool **p_matched_array)
 {
 	uint32_t	wp_unitsz;
-	uint32_t	off;
 	char	   *pos;
 
 	wp_unitsz = KERN_WARP_CONTEXT_LENGTH(kgtask->kvecs_ndims,
 										 kgtask->kvecs_bufsz);
-	off = __KERN_GPUTASK_WARP_OFFSET(kgtask->kvecs_ndims,
-									 kgtask->kvecs_bufsz);
-	pos = (char *)kgtask + off;
-	off = wp_unitsz * (get_global_id() / warpSize);
-	*p_wp_context = (kern_warp_context *)(pos + off);
-	pos += wp_unitsz * (get_global_size() / warpSize);
+	pos = ((char *)kgtask +
+		   __KERN_GPUTASK_WARP_OFFSET(kgtask->kvecs_ndims,
+									  kgtask->kvecs_bufsz));
+	*p_wp_context = (kern_warp_context *)pos;
+	pos += wp_unitsz;
 
 	*p_lstate_array  = (uint32_t *)pos;
 	pos += MAXALIGN(sizeof(uint32_t) * get_global_size() * kgtask->n_rels);
@@ -186,6 +180,13 @@ INIT_KERN_GPUTASK_SUBFIELDS(kern_gputask *kgtask,
 /*
  * Declarations related to generic device executor routines
  */
+EXTERN_FUNCTION(uint32_t)
+pgstrom_stair_sum_binary(bool predicate, uint32_t *p_total_count);
+EXTERN_FUNCTION(uint32_t)
+pgstrom_stair_sum_uint32(uint32_t value, uint32_t *p_total_count);
+EXTERN_FUNCTION(uint64_t)
+pgstrom_stair_sum_uint64(uint64_t value, uint64_t *p_total_count);
+
 EXTERN_FUNCTION(int)
 execGpuScanLoadSource(kern_context *kcxt,
 					  kern_warp_context *wp,
@@ -194,8 +195,7 @@ execGpuScanLoadSource(kern_context *kcxt,
 					  const kern_expression *kexp_load_vars,
 					  const kern_expression *kexp_scan_quals,
 					  const kern_expression *kexp_move_vars,
-					  char     *dst_kvecs_buffer,
-					  uint32_t *p_smx_row_count);
+					  char     *dst_kvecs_buffer);
 EXTERN_FUNCTION(int)
 execGpuJoinProjection(kern_context *kcxt,
 					  kern_warp_context *wp,
