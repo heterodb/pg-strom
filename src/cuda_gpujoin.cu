@@ -28,13 +28,13 @@ execGpuJoinNestLoop(kern_context *kcxt,
 	const kern_expression *kexp;
 	kern_data_store *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
 	bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth-1);
-	uint32_t	read_pos;
-	uint32_t	write_pos;
-	uint32_t	mask;
+	uint32_t	rd_pos;
+	uint32_t	wr_pos;
+	uint32_t	count;
 	bool		left_outer = kmrels->chunks[depth-1].left_outer;
 	bool		tuple_is_valid = false;
 
-	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
+	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + get_local_size())
 	{
 		/*
 		 * The destination depth already keeps warpSize or more pending
@@ -43,18 +43,18 @@ execGpuJoinNestLoop(kern_context *kcxt,
 		return depth+1;
 	}
 
-	if (__all_sync(__activemask(), l_state >= kds_heap->nitems) &&
-		(!left_outer || __all_sync(__activemask(), l_state == UINT_MAX)))
+	if (__syncthreads_count(l_state < kds_heap->nitems) == 0 &&
+		(!left_outer || __syncthreads_count(l_state != UINT_MAX) == 0))
 	{
 		/*
-		 * OK, all the threads in this warp reached to the end of hash-slot
-		 * chain. Due to the above checks, the next depth has enough space
-		 * to store the result in this depth.
+		 * OK, all the threads in this block reached to end of the inner
+		 * heap chain. Due to the above checks, the next depth has enough
+		 * space to store the result in this depth.
 		 */
-		if (LaneId() == 0)
-			WARP_READ_POS(wp,depth-1) = Min(WARP_READ_POS(wp,depth-1) + warpSize,
+		if (get_local_id() == 0)
+			WARP_READ_POS(wp,depth-1) = Min(WARP_READ_POS(wp,depth-1) + get_local_size(),
 											WARP_WRITE_POS(wp,depth-1));
-		__syncwarp();
+		__syncthreads();
 		l_state = 0;
 		matched = false;
 		if (wp->scan_done >= depth)
@@ -62,7 +62,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 			assert(wp->scan_done == depth);
 			if (WARP_READ_POS(wp,depth-1) >= WARP_WRITE_POS(wp,depth-1))
 			{
-				if (LaneId() == 0)
+				if (get_local_id() == 0)
 					wp->scan_done = depth + 1;
 				return depth+1;
 			}
@@ -75,15 +75,15 @@ execGpuJoinNestLoop(kern_context *kcxt,
 		else
 		{
 			/* back to the previous depth to generate the source tuples. */
-			if (WARP_READ_POS(wp,depth-1) + warpSize > WARP_WRITE_POS(wp,depth-1))
+			if (WARP_READ_POS(wp,depth-1) + get_local_size() > WARP_WRITE_POS(wp,depth-1))
 				return depth-1;
 		}
 	}
 
-	read_pos = WARP_READ_POS(wp,depth-1) + LaneId();
-	kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+	rd_pos = WARP_READ_POS(wp,depth-1) + get_local_id();
+	kcxt->kvecs_curr_id = (rd_pos % KVEC_UNITSZ);
 	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
-	if (read_pos < WARP_WRITE_POS(wp,depth-1))
+	if (rd_pos < WARP_WRITE_POS(wp,depth-1))
 	{
 		uint32_t	index = l_state++;
 
@@ -131,18 +131,13 @@ execGpuJoinNestLoop(kern_context *kcxt,
 		l_state = UINT_MAX;
 	}
 	/* error checks */
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
 	/* save the result */
-	mask = __ballot_sync(__activemask(), tuple_is_valid);
-	if (LaneId() == 0)
-	{
-		write_pos = WARP_WRITE_POS(wp,depth);
-		WARP_WRITE_POS(wp,depth) += __popc(mask);
-	}
-	write_pos = __shfl_sync(__activemask(), write_pos, 0);
-	mask &= ((1U << LaneId()) - 1);
-	write_pos += __popc(mask);
+	wr_pos = WARP_WRITE_POS(wp,depth);
+	wr_pos += pgstrom_stair_sum_binary(tuple_is_valid, &count);
+	if (get_local_id() == 0)
+		WARP_WRITE_POS(wp,depth) += count;
 
 	if (tuple_is_valid)
 	{
@@ -151,15 +146,15 @@ execGpuJoinNestLoop(kern_context *kcxt,
 		if (!ExecMoveKernelVariables(kcxt,
 									 kexp_move,
 									 dst_kvecs_buffer,
-									 (write_pos % KVEC_UNITSZ)))
+									 (wr_pos % KVEC_UNITSZ)))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		}
 	}
 	/* error checks */
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
-	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
+	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + get_local_id())
 		return depth+1;
 	return depth;
 }
@@ -181,21 +176,21 @@ execGpuJoinHashJoin(kern_context *kcxt,
 	bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth-1);
 	kern_expression *kexp = NULL;
 	kern_hashitem *khitem = NULL;
-	uint32_t	read_pos;
-	uint32_t	write_pos;
-	uint32_t	mask;
+	uint32_t	rd_pos;
+	uint32_t	wr_pos;
+	uint32_t	count;
 	bool		tuple_is_valid = false;
 
-	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
+	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + get_local_size())
 	{
 		/*
-		 * Next depth already keeps warpSize or more pending tuples,
+		 * Next depth already keeps blockSize or more pending tuples,
 		 * so wipe out these tuples first.
 		 */
 		return depth+1;
 	}
 
-	if (__all_sync(__activemask(), l_state == UINT_MAX))
+	if (__syncthreads_count(l_state != UINT_MAX) == 0)
 	{
 		/*
 		 * OK, all the threads in this warp reached to the end of hash-slot
@@ -206,10 +201,10 @@ execGpuJoinHashJoin(kern_context *kcxt,
 		 * in this depth), or move to the next depth if previous depth already
 		 * reached to end of the chunk.
 		 */
-		if (LaneId() == 0)
-			WARP_READ_POS(wp,depth-1) = Min(WARP_READ_POS(wp,depth-1) + warpSize,
+		if (get_local_id() == 0)
+			WARP_READ_POS(wp,depth-1) = Min(WARP_READ_POS(wp,depth-1) + get_local_size(),
 											WARP_WRITE_POS(wp,depth-1));
-		__syncwarp();
+		__syncthreads();
 		l_state = 0;
 		matched = false;
 		if (wp->scan_done < depth)
@@ -217,7 +212,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			/*
 			 * The previous depth still may generate the source tuple.
 			 */
-			if (WARP_WRITE_POS(wp,depth-1) < WARP_READ_POS(wp,depth-1) + warpSize)
+			if (WARP_WRITE_POS(wp,depth-1) < WARP_READ_POS(wp,depth-1) + get_local_size())
 				return depth-1;
 		}
 		else
@@ -225,7 +220,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			assert(wp->scan_done == depth);
 			if (WARP_READ_POS(wp,depth-1) >= WARP_WRITE_POS(wp,depth-1))
 			{
-				if (LaneId() == 0)
+				if (get_local_id() == 0)
 					wp->scan_done = depth+1;
 				return depth+1;
 			}
@@ -236,15 +231,15 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			 */
 		}
 	}
-	write_pos = WARP_WRITE_POS(wp,depth-1);
-	read_pos = WARP_READ_POS(wp,depth-1) + LaneId();
-	kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+	wr_pos = WARP_WRITE_POS(wp,depth-1);
+	rd_pos = WARP_READ_POS(wp,depth-1) + get_local_id();
+	kcxt->kvecs_curr_id = (rd_pos % KVEC_UNITSZ);
 	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
 
 	if (l_state == 0)
 	{
 		/* pick up the first item from the hash-slot */
-		if (read_pos < write_pos)
+		if (rd_pos < wr_pos)
 		{
 			xpu_int4_t	hash;
 
@@ -274,7 +269,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next));
 	}
 	/* error checks */
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
 
 	if (khitem)
@@ -312,18 +307,14 @@ execGpuJoinHashJoin(kern_context *kcxt,
 		l_state = UINT_MAX;
 	}
 	/* error checks */
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
 	/* save the result on the destination buffer */
-	mask = __ballot_sync(__activemask(), tuple_is_valid);
-	if (LaneId() == 0)
-	{
-		write_pos = WARP_WRITE_POS(wp,depth);
-		WARP_WRITE_POS(wp,depth) += __popc(mask);
-	}
-	write_pos = __shfl_sync(__activemask(), write_pos, 0);
-	mask &= ((1U << LaneId()) - 1);
-	write_pos += __popc(mask);
+	wr_pos = WARP_WRITE_POS(wp,depth);
+	wr_pos += pgstrom_stair_sum_binary(tuple_is_valid, &count);
+	if (get_local_id() == 0)
+		WARP_WRITE_POS(wp,depth) += count;
+
 	if (tuple_is_valid)
 	{
 		const kern_expression  *kexp_move
@@ -331,15 +322,15 @@ execGpuJoinHashJoin(kern_context *kcxt,
 		if (!ExecMoveKernelVariables(kcxt,
 									 kexp_move,
 									 dst_kvecs_buffer,
-									 (write_pos % KVEC_UNITSZ)))
+									 (wr_pos % KVEC_UNITSZ)))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		}
 	}
 	/* error checks */
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
-	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
+	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + get_local_size())
 		return depth+1;
 	return depth;
 }
@@ -419,9 +410,9 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
 	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth-1);
 	int				gist_depth = kexp_gist->u.gist.gist_depth;
-	uint32_t		mask;
-	uint32_t		read_pos;
-	uint32_t		write_pos;
+	uint32_t		count;
+	uint32_t		rd_pos;
+	uint32_t		wr_pos;
 
 	assert(kds_hash && kds_hash->format == KDS_FORMAT_HASH &&
 		   kds_gist && kds_gist->format == KDS_FORMAT_BLOCK);
@@ -444,10 +435,10 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		return depth+1;
 	}
 
-	if (WARP_WRITE_POS(wp,gist_depth)  >= WARP_READ_POS(wp,gist_depth) + warpSize ||
+	if (WARP_WRITE_POS(wp,gist_depth) >= WARP_READ_POS(wp,gist_depth) + get_local_size() ||
 		(wp->scan_done >= depth &&		/* is terminal case? */
 		 WARP_WRITE_POS(wp,depth-1) == WARP_READ_POS(wp,depth-1) &&
-		 __all_sync(__activemask(), l_state == UINT_MAX)))
+		 __syncthreads_count(l_state != UINT_MAX) == 0))
 	{
 		/*
 		 * We already have 32 or more pending tuples; that is fetched by
@@ -455,15 +446,15 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		 */
 		bool	join_is_valid = false;
 
-		read_pos = WARP_READ_POS(wp,gist_depth) + LaneId();
-		if (read_pos < WARP_WRITE_POS(wp,gist_depth))
+		rd_pos = WARP_READ_POS(wp,gist_depth) + get_local_id();
+		if (rd_pos < WARP_WRITE_POS(wp,gist_depth))
 		{
 			const kern_expression *kexp_load
 				= SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 			const kern_expression *kexp_join
 				= SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
 
-			kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+			kcxt->kvecs_curr_id = (rd_pos % KVEC_UNITSZ);
 			kcxt->kvecs_curr_buffer = gist_kvecs_buffer;
 			join_is_valid = ExecGiSTIndexPostQuals(kcxt, depth,
 												   kds_hash,
@@ -472,21 +463,16 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 												   kexp_join);
 		}
 		/* error checks */
-		if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 			return -1;
-		if (LaneId() == 0)
-			WARP_READ_POS(wp,gist_depth) = Max(WARP_READ_POS(wp,gist_depth) + warpSize,
+		if (get_local_id() == 0)
+			WARP_READ_POS(wp,gist_depth) = Max(WARP_READ_POS(wp,gist_depth) + get_local_size(),
 											   WARP_WRITE_POS(wp,gist_depth));
+		wr_pos = WARP_WRITE_POS(wp,depth);
+		wr_pos += pgstrom_stair_sum_binary(join_is_valid, &count);
+		if (get_local_id() == 0)
+			WARP_WRITE_POS(wp,depth) += count;
 
-		mask = __ballot_sync(__activemask(), join_is_valid);
-		if (LaneId() == 0)
-		{
-			write_pos = WARP_WRITE_POS(wp,depth);
-			WARP_WRITE_POS(wp,depth) += __popc(mask);
-		}
-		write_pos = __shfl_sync(__activemask(), write_pos, 0);
-		mask &= ((1U << LaneId()) - 1);
-		write_pos += __popc(mask);
 		if (join_is_valid)
 		{
 			const kern_expression *kexp_move
@@ -494,45 +480,44 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 			if (!ExecMoveKernelVariables(kcxt,
 										 kexp_move,
 										 dst_kvecs_buffer,
-										 (write_pos % KVEC_UNITSZ)))
+										 (wr_pos % KVEC_UNITSZ)))
 			{
 				assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 			}
 		}
 		/* error checks */
-		if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 			return -1;
 		/* termination checks */
-		if (LaneId() == 0 &&
-			wp->scan_done >= depth &&
+		if (wp->scan_done >= depth &&
 			WARP_WRITE_POS(wp,depth-1) == WARP_READ_POS(wp,depth-1) &&
 			WARP_WRITE_POS(wp,gist_depth) <= WARP_READ_POS(wp,gist_depth) &&
-			__all_sync(__activemask(), l_state == UINT_MAX))
+			__syncthreads_count(l_state != UINT_MAX) == 0)
 		{
-			assert(wp->scan_done == depth);
-			wp->scan_done++;
+			if (get_local_id() == 0)
+				wp->scan_done++;
 			depth++;
 		}
-		return __shfl_sync(__activemask(), depth, 0);
+		return depth;
 	}
 
-	if (__all_sync(__activemask(), l_state == UINT_MAX))
+	if (__syncthreads_count(l_state != UINT_MAX) == 0)
 	{
 		/*
-		 * OK, all the threads in this warp reached to the end of the GiST
+		 * OK, all the threads in this block reached to the end of the GiST
 		 * index tree. Due to the above checks, the next depth has enough
 		 * space to store the result in this depth.
 		 */
-		if (LaneId() == 0)
-			WARP_READ_POS(wp,depth-1) = Min(WARP_READ_POS(wp,depth-1) + warpSize,
+		if (get_local_id() == 0)
+			WARP_READ_POS(wp,depth-1) = Min(WARP_READ_POS(wp,depth-1) + get_local_size(),
 											WARP_WRITE_POS(wp,depth-1));
-		__syncwarp();
+		__syncthreads();
 		l_state = 0;
 		matched = false;
 		if (wp->scan_done < depth)
 		{
 			/* back to the previous depth; that still may generate source tuples */
-			if (WARP_WRITE_POS(wp,depth-1) < WARP_READ_POS(wp,depth-1) + warpSize)
+			if (WARP_WRITE_POS(wp,depth-1) < WARP_READ_POS(wp,depth-1) + get_local_size())
 				return depth-1;
 		}
 		else
@@ -554,13 +539,13 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 	/*
 	 * Restart GiST-index scan from the head, or the previous position
 	 */
-	read_pos = WARP_READ_POS(wp,depth-1) + LaneId();
-	if (read_pos < WARP_WRITE_POS(wp,depth-1))
+	rd_pos = WARP_READ_POS(wp,depth-1) + get_local_id();
+	if (rd_pos < WARP_WRITE_POS(wp,depth-1))
 	{
 		if (l_state != UINT_MAX)
 		{
 			kcxt->kvecs_curr_buffer = src_kvecs_buffer;
-			kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+			kcxt->kvecs_curr_id = (rd_pos % KVEC_UNITSZ);
 			l_state = ExecGiSTIndexGetNext(kcxt,
 										   kds_hash,
 										   kds_gist,
@@ -573,18 +558,14 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		l_state = UINT_MAX;
 	}
 	/* error checks */
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
 	/* save the result on the destination buffer */
-	mask = __ballot_sync(__activemask(), l_state != UINT_MAX);
-	if (LaneId() == 0)
-	{
-		write_pos = WARP_WRITE_POS(wp,gist_depth);
-		WARP_WRITE_POS(wp,gist_depth) += __popc(mask);
-	}
-	write_pos = __shfl_sync(__activemask(), write_pos, 0);
-	mask &= ((1U << LaneId()) - 1);
-	write_pos += __popc(mask);
+	wr_pos = WARP_WRITE_POS(wp,gist_depth);
+	wr_pos += pgstrom_stair_sum_binary(l_state != UINT_MAX, &count);
+	if (get_local_id() == 0)
+		WARP_WRITE_POS(wp,gist_depth) += count;
+
 	if (l_state != UINT_MAX)
 	{
 		const kern_expression  *kexp_move
@@ -592,13 +573,13 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		if (!ExecMoveKernelVariables(kcxt,
 									 kexp_move,
 									 gist_kvecs_buffer,
-									 (write_pos % KVEC_UNITSZ)))
+									 (wr_pos % KVEC_UNITSZ)))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		}
 	}
 	/* error checks */
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
 	return depth;
 }
@@ -827,9 +808,9 @@ kern_gpujoin_main(kern_session_info *session,
 											 __KVEC_BUFFER(n_rels),
 											 &try_suspend);
 			}
-			if (__any_sync(__activemask(), try_suspend))
+			if (__syncthreads_count(try_suspend) > 0)
 			{
-				if (LaneId() == 0)
+				if (get_local_id() == 0)
 					atomicAdd(&kgtask->suspend_count, 1);
 				assert(depth < 0);
 			}
@@ -889,9 +870,9 @@ kern_gpujoin_main(kern_session_info *session,
 	/* merge the group-by buffer to the kds_final, if any */
 	mergeGpuPreAggGroupByBuffer(kcxt, kds_dst);
 
-	if (LaneId() == 0)
+	/* update the statistics */
+	if (get_local_id() == 0)
 	{
-		/* update the statistics */
 		if (depth < 0 && WARP_READ_POS(wp,n_rels) >= WARP_WRITE_POS(wp,n_rels))
 		{
 			/* number of raw-tuples fetched from the heap block */
