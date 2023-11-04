@@ -123,7 +123,7 @@
 #include "utils/uuid.h"
 #include "utils/wait_event.h"
 #include <assert.h>
-#define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
+//#define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
 #include <cufile.h>
 #include <ctype.h>

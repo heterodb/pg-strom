@@ -93,19 +93,20 @@ typedef struct
  * variables
  */
 int		pgstrom_max_async_gpu_tasks;	/* GUC */
-static __thread int		CU_DINDEX_PER_THREAD = -1;
-static __thread CUdevice CU_DEVICE_PER_THREAD = -1;
-static __thread CUcontext CU_CONTEXT_PER_THREAD = NULL;
-static __thread CUevent	CU_EVENT_PER_THREAD = NULL;
+static __thread int			MY_DINDEX_PER_THREAD = -1;
+static __thread CUdevice	MY_DEVICE_PER_THREAD = -1;
+static __thread CUcontext	MY_CONTEXT_PER_THREAD = NULL;
+static __thread CUstream	MY_STREAM_PER_THREAD = NULL;
+static __thread CUevent		MY_EVENT_PER_THREAD = NULL;
 static __thread gpuContext *GpuWorkerCurrentContext = NULL;
-static volatile int		gpuserv_bgworker_got_signal = 0;
-static dlist_head		gpuserv_gpucontext_list;
-static int				gpuserv_epoll_fdesc = -1;
+static volatile int			gpuserv_bgworker_got_signal = 0;
+static dlist_head			gpuserv_gpucontext_list;
+static int					gpuserv_epoll_fdesc = -1;
 static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
-static gpuServSharedState *gpuserv_shared_state = NULL;
-static int				__pgstrom_max_async_tasks_dummy;
-static bool				__gpuserv_debug_output_dummy;
+static gpuServSharedState  *gpuserv_shared_state = NULL;
+static int					__pgstrom_max_async_tasks_dummy;
+static bool					__gpuserv_debug_output_dummy;
 
 #define __GpuServDebug(fmt,...)											\
 	do {																\
@@ -642,7 +643,7 @@ __setupGpuQueryJoinGiSTIndexBuffer(gpuContext *gcontext,
 							grid_sz, 1, 1,
 							block_sz, 1, 1,
 							shmem_sz,
-							CU_STREAM_PER_THREAD,
+							MY_STREAM_PER_THREAD,
 							kern_args,
 							NULL);
 		if (rc != CUDA_SUCCESS)
@@ -656,14 +657,14 @@ __setupGpuQueryJoinGiSTIndexBuffer(gpuContext *gcontext,
 
 	if (has_gist)
 	{
-		rc = cuEventRecord(CU_EVENT_PER_THREAD, CU_STREAM_PER_THREAD);
+		rc = cuEventRecord(MY_EVENT_PER_THREAD, MY_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 		{
 			snprintf(errmsg, errmsg_sz,
 					 "failed on cuEventRecord: %s", cuStrError(rc));
 			return false;
 		}
-		rc = cuEventSynchronize(CU_EVENT_PER_THREAD);
+		rc = cuEventSynchronize(MY_EVENT_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 		{
 			snprintf(errmsg, errmsg_sz,
@@ -733,8 +734,8 @@ __setupGpuQueryJoinInnerBuffer(gpuContext *gcontext,
 	}
 	memcpy((void *)m_kmrels, h_kmrels, mmap_sz);
 	(void)cuMemPrefetchAsync(m_kmrels, mmap_sz,
-							 CU_DEVICE_PER_THREAD,
-							 CU_STREAM_PER_THREAD);
+							 MY_DEVICE_PER_THREAD,
+							 MY_STREAM_PER_THREAD);
 	gq_buf->m_kmrels = m_kmrels;
 	gq_buf->h_kmrels = h_kmrels;
 	gq_buf->kmrels_sz = mmap_sz;
@@ -778,8 +779,8 @@ __setupGpuQueryGroupByBuffer(gpuContext *gcontext,
 		   KDS_HEAD_LENGTH(kds_final_head));
 	(void)cuMemPrefetchAsync(m_kds_final,
 							 KDS_HEAD_LENGTH(kds_final_head),
-							 CU_DEVICE_PER_THREAD,
-							 CU_STREAM_PER_THREAD);
+							 MY_DEVICE_PER_THREAD,
+							 MY_STREAM_PER_THREAD);
 	gq_buf->m_kds_final = m_kds_final;
 	gq_buf->m_kds_final_length = kds_final_head->length;
 	pthreadRWLockInit(&gq_buf->m_kds_final_rwlock);
@@ -857,7 +858,7 @@ getGpuQueryBuffer(gpuContext *gcontext,
 	/* lookup hash table first */
 	memset(&hkey, 0, sizeof(hkey));
 	hkey.buffer_id = buffer_id;
-	hkey.cuda_dindex = CU_DINDEX_PER_THREAD;
+	hkey.cuda_dindex = MY_DINDEX_PER_THREAD;
 	hindex = hash_bytes((unsigned char *)&hkey,
 						sizeof(hkey)) % GPU_QUERY_BUFFER_NSLOTS;
 	pthreadMutexLock(&gpu_query_buffer_mutex);
@@ -866,7 +867,7 @@ getGpuQueryBuffer(gpuContext *gcontext,
 		gq_buf = dlist_container(gpuQueryBuffer,
 								 chain, iter.cur);
 		if (gq_buf->buffer_id   == buffer_id &&
-			gq_buf->cuda_dindex == CU_DINDEX_PER_THREAD)
+			gq_buf->cuda_dindex == MY_DINDEX_PER_THREAD)
 		{
 			gq_buf->refcnt++;
 
@@ -896,7 +897,7 @@ getGpuQueryBuffer(gpuContext *gcontext,
 	gq_buf->refcnt = 1;
 	gq_buf->phase  = 0;	/* not initialized yet */
 	gq_buf->buffer_id = buffer_id;
-	gq_buf->cuda_dindex = CU_DINDEX_PER_THREAD;
+	gq_buf->cuda_dindex = MY_DINDEX_PER_THREAD;
 	dlist_push_tail(&gpu_query_buffer_hslot[hindex], &gq_buf->chain);
 	pthreadMutexUnlock(&gpu_query_buffer_mutex);
 
@@ -1844,8 +1845,8 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	{
 		rc = cuMemPrefetchAsync((CUdeviceptr)kds_src,
 								kds_src->length,
-								CU_DEVICE_PER_THREAD,
-								CU_STREAM_PER_THREAD);
+								MY_DEVICE_PER_THREAD,
+								MY_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 		{
 			gpuClientFatal(gclient, "failed on cuMemPrefetchAsync: %s",
@@ -1929,7 +1930,7 @@ resume_kernel:
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
 						shmem_sz,
-						CU_STREAM_PER_THREAD,
+						MY_STREAM_PER_THREAD,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
@@ -1938,7 +1939,7 @@ resume_kernel:
 		goto bailout;
 	}
 
-	rc = cuEventRecord(CU_EVENT_PER_THREAD, CU_STREAM_PER_THREAD);
+	rc = cuEventRecord(MY_EVENT_PER_THREAD, MY_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientFatal(gclient, "failed on cuEventRecord: %s", cuStrError(rc));
@@ -1946,7 +1947,7 @@ resume_kernel:
 	}
 
 	/* point of synchronization */
-	rc = cuEventSynchronize(CU_EVENT_PER_THREAD);
+	rc = cuEventSynchronize(MY_EVENT_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuClientFatal(gclient, "failed on cuEventSynchronize: %s", cuStrError(rc));
@@ -2086,15 +2087,16 @@ gpuservGpuCacheManager(void *__arg)
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuCtxSetCurrent: %s", cuStrError(rc));
 
-	GpuWorkerCurrentContext = gcontext;
-	CU_DINDEX_PER_THREAD  = gcontext->cuda_dindex;
-	CU_DEVICE_PER_THREAD  = gcontext->cuda_device;
-	CU_CONTEXT_PER_THREAD = gcontext->cuda_context;
-	CU_EVENT_PER_THREAD   = NULL;
+	GpuWorkerCurrentContext	= gcontext;
+	MY_DINDEX_PER_THREAD	= gcontext->cuda_dindex;
+	MY_DEVICE_PER_THREAD	= gcontext->cuda_device;
+	MY_CONTEXT_PER_THREAD	= gcontext->cuda_context;
+	MY_STREAM_PER_THREAD	= CU_STREAM_LEGACY;
+	MY_EVENT_PER_THREAD		= NULL;
 	pg_memory_barrier();
 
 	__GpuServDebug("GPU-%d GpuCache manager thread launched.",
-				   CU_DINDEX_PER_THREAD);
+				   MY_DINDEX_PER_THREAD);
 	
 	gpucacheManagerEventLoop(gcontext->cuda_dindex,
 							 gcontext->cuda_context,
@@ -2107,7 +2109,7 @@ gpuservGpuCacheManager(void *__arg)
 	free(gworker);
 
 	__GpuServDebug("GPU-%d GpuCache manager terminated.",
-				   CU_DINDEX_PER_THREAD);
+				   MY_DINDEX_PER_THREAD);
 	return NULL;
 }
 
@@ -2186,24 +2188,29 @@ gpuservGpuWorkerMain(void *__arg)
 	gpuWorker  *gworker = (gpuWorker *)__arg;
 	gpuContext *gcontext = gworker->gcontext;
 	gpuClient  *gclient;
+	CUstream	cuda_stream;
 	CUevent		cuda_event;
 	CUresult	rc;
 
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuCtxSetCurrent: %s", cuStrError(rc));
+	rc = cuStreamCreate(&cuda_stream, CU_STREAM_NON_BLOCKING);
+	if (rc != CUDA_SUCCESS)
+		 __FATAL("failed on cuStreamCreate: %s", cuStrError(rc));
 	rc = cuEventCreate(&cuda_event, CU_EVENT_DEFAULT);
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuEventCreate: %s", cuStrError(rc));
 
 	GpuWorkerCurrentContext = gcontext;
-	CU_DINDEX_PER_THREAD  = gcontext->cuda_dindex;
-	CU_DEVICE_PER_THREAD  = gcontext->cuda_device;
-	CU_CONTEXT_PER_THREAD = gcontext->cuda_context;
-	CU_EVENT_PER_THREAD = cuda_event;
+	MY_DINDEX_PER_THREAD	= gcontext->cuda_dindex;
+	MY_DEVICE_PER_THREAD	= gcontext->cuda_device;
+	MY_CONTEXT_PER_THREAD	= gcontext->cuda_context;
+	MY_STREAM_PER_THREAD	= cuda_stream;
+	MY_EVENT_PER_THREAD		= cuda_event;
 	pg_memory_barrier();
 
-	__GpuServDebug("GPU-%d worker thread launched\n", CU_DINDEX_PER_THREAD);
+	__GpuServDebug("GPU-%d worker thread launched\n", MY_DINDEX_PER_THREAD);
 	
 	pthreadMutexLock(&gcontext->lock);
 	while (!gpuServiceGoingTerminate() && !gworker->termination)
@@ -2267,9 +2274,12 @@ gpuservGpuWorkerMain(void *__arg)
 	pthreadMutexLock(&gcontext->worker_lock);
 	dlist_delete(&gworker->chain);
 	pthreadMutexUnlock(&gcontext->worker_lock);
+	/* release */
+	cuEventDestroy(cuda_event);
+	cuStreamDestroy(cuda_stream);
 	free(gworker);
 
-	__GpuServDebug("GPU-%d worker thread launched\n", CU_DINDEX_PER_THREAD);
+	__GpuServDebug("GPU-%d worker thread launched\n", MY_DINDEX_PER_THREAD);
 
 	return NULL;
 }
