@@ -17,6 +17,9 @@
 static __shared__ union {
 	uint32_t	u32[MAXTHREADS_PER_BLOCK / WARPSIZE];
 	uint64_t	u64[MAXTHREADS_PER_BLOCK / WARPSIZE];
+	int32_t		i32[MAXTHREADS_PER_BLOCK / WARPSIZE];
+	int64_t		i64[MAXTHREADS_PER_BLOCK / WARPSIZE];
+	float8_t	fp64[MAXTHREADS_PER_BLOCK / WARPSIZE];
 } __stair_sum_buffer;
 
 template <typename T>
@@ -115,6 +118,65 @@ pgstrom_stair_sum_binary(bool predicate, uint32_t *p_total_count)
 
 PGSTROM_STAIR_SUM_TEMPLATE(uint32, uint32_t, u32)
 PGSTROM_STAIR_SUM_TEMPLATE(uint64, uint64_t, u64)
+PGSTROM_STAIR_SUM_TEMPLATE(int64,  int64_t,  i64)
+PGSTROM_STAIR_SUM_TEMPLATE(fp64,   float8_t, fp64)
+
+#define PGSTROM_LOCAL_MINMAX_TEMPLATE(SUFFIX, BASETYPE, FIELD, OPER, INVAL)	\
+	PUBLIC_FUNCTION(BASETYPE)											\
+	pgstrom_local_##SUFFIX(BASETYPE my_value)							\
+	{																	\
+		int			warp_id = get_local_id()   / warpSize;				\
+		int			n_warps = get_local_size() / warpSize;				\
+		BASETYPE	curr = my_value;									\
+		BASETYPE	temp;												\
+																		\
+		/* makes warp local min/max */									\
+		assert(__activemask() == ~0U);									\
+		temp = __shfl_xor_sync(__activemask(), curr, 0x0001);			\
+		curr = OPER(curr, temp);										\
+		temp = __shfl_xor_sync(__activemask(), curr, 0x0002);			\
+		curr = OPER(curr, temp);										\
+		temp = __shfl_xor_sync(__activemask(), curr, 0x0004);			\
+		curr = OPER(curr, temp);										\
+		temp = __shfl_xor_sync(__activemask(), curr, 0x0008);			\
+		curr = OPER(curr, temp);										\
+		temp = __shfl_xor_sync(__activemask(), curr, 0x0010);			\
+		curr = OPER(curr, temp);										\
+																		\
+		if (LaneId() == 0)												\
+			__stair_sum_buffer.FIELD[warp_id] = curr;					\
+		__syncthreads();												\
+																		\
+		if (warp_id == 0)												\
+		{																\
+			assert(__activemask() == ~0U);								\
+			curr = (LaneId() < n_warps ? __stair_sum_buffer.FIELD[LaneId()] : INVAL); \
+																		\
+			temp = __shfl_xor_sync(__activemask(), curr, 0x0001);		\
+			curr = OPER(curr, temp);									\
+			temp = __shfl_xor_sync(__activemask(), curr, 0x0002);		\
+			curr = OPER(curr, temp);									\
+			temp = __shfl_xor_sync(__activemask(), curr, 0x0004);		\
+			curr = OPER(curr, temp);									\
+			temp = __shfl_xor_sync(__activemask(), curr, 0x0008);		\
+			curr = OPER(curr, temp);									\
+			temp = __shfl_xor_sync(__activemask(), curr, 0x0010);		\
+			curr = OPER(curr, temp);									\
+																		\
+			__stair_sum_buffer.FIELD[LaneId()] = curr;					\
+		}																\
+		__syncthreads();												\
+		curr = __stair_sum_buffer.FIELD[LaneId()];						\
+		__syncthreads();												\
+		return curr;													\
+	}
+
+PGSTROM_LOCAL_MINMAX_TEMPLATE(min_int32, int32_t, i32,  Min,  INT_MAX)
+PGSTROM_LOCAL_MINMAX_TEMPLATE(max_int32, int32_t, i32,  Max,  INT_MIN)
+PGSTROM_LOCAL_MINMAX_TEMPLATE(min_int64, int64_t, i64,  Min,  LONG_MAX)
+PGSTROM_LOCAL_MINMAX_TEMPLATE(max_int64, int64_t, i64,  Max,  LONG_MIN)
+PGSTROM_LOCAL_MINMAX_TEMPLATE(min_fp64, float8_t, fp64, Min,  DBL_MAX)
+PGSTROM_LOCAL_MINMAX_TEMPLATE(max_fp64, float8_t, fp64, Max, -DBL_MAX)
 
 /* ----------------------------------------------------------------
  *
@@ -179,7 +241,6 @@ __gpuscan_load_source_row(kern_context *kcxt,
 	 * save the private kvars slot on the combination buffer (depth=0)
 	 */
 	wr_pos = WARP_WRITE_POS(wp,0);
-	assert(__activemask() == ~0U);
 	wr_pos += pgstrom_stair_sum_binary(tupitem != NULL, &count);
 	if (get_local_id() == 0)
 		WARP_WRITE_POS(wp,0) += count;
@@ -246,7 +307,6 @@ __gpuscan_load_source_block(kern_context *kcxt,
 		 * save the private kvars on the warp-buffer
 		 */
 		wr_pos = WARP_WRITE_POS(wp,0);
-		assert(__activemask() == ~0U);
 		wr_pos += pgstrom_stair_sum_binary(htup != NULL, &count);
 		if (get_local_id() == 0)
 			WARP_WRITE_POS(wp,0) += count;
@@ -310,7 +370,6 @@ __gpuscan_load_source_block(kern_context *kcxt,
 	}
 	/* put visible tuples on the lp_items[] array */
 	wr_pos = wp->lp_wr_pos;
-	assert(__activemask() == ~0U);
 	wr_pos += pgstrom_stair_sum_binary(htup != NULL, &count);
 	if (get_local_id() == 0)
 		wp->lp_wr_pos += count;
@@ -386,7 +445,6 @@ __gpuscan_load_source_arrow(kern_context *kcxt,
 	 * save the private kvars slot on the combination buffer (depth=0)
 	 */
 	wr_pos = WARP_WRITE_POS(wp,0);
-	assert(__activemask() == ~0U);
 	wr_pos += pgstrom_stair_sum_binary(is_valid, &count);
 	if (get_local_id() == 0)
 		WARP_WRITE_POS(wp,0) += count;
@@ -511,7 +569,6 @@ __gpuscan_load_source_column(kern_context *kcxt,
 	 * save the private kvars slot on the combination buffer (depth=0)
 	 */
 	wr_pos = WARP_WRITE_POS(wp,0);
-	assert(__activemask() == ~0U);
 	wr_pos += pgstrom_stair_sum_binary(is_valid, &count);
 	if (get_local_id() == 0)
 		WARP_WRITE_POS(wp,0) += count;

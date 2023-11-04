@@ -662,6 +662,8 @@ execGpuJoinProjection(kern_context *kcxt,
 										 newval.v64)) != oldval.v64);
 		base_rowid = oldval.i.nitems;
 		base_usage = oldval.i.usage;
+
+		printf("block=%u write %u items\n", get_group_id(), count);
 	}
 	if (__syncthreads_count(try_suspend) > 0)
 	{

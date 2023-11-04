@@ -1643,8 +1643,8 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 	else
 	{
 		/* NO-GROUPS */
-		num_buffers = (block_sz + WARPSIZE - 1) / WARPSIZE;
-		prepfn_usage = session->groupby_prepfn_bufsz * num_buffers;
+		num_buffers = 1;
+		prepfn_usage = session->groupby_prepfn_bufsz;
 		if (shmem_base_sz + prepfn_usage > shmem_dynamic_sz)
 			goto no_prepfunc_buffer;
 	}
@@ -1821,7 +1821,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	 */
 	sz = KERN_GPUTASK_LENGTH(session->kcxt_kvecs_ndims,
 							 session->kcxt_kvecs_bufsz,
-							 grid_sz * block_sz);
+							 grid_sz, block_sz);
 	t_chunk = gpuMemAllocManaged(sz);
 	if (!t_chunk)
 	{

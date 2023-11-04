@@ -205,15 +205,15 @@ __update_nogroups__nrows_any(kern_context *kcxt,
 							 kern_aggregate_desc *desc,
 							 bool source_is_valid)
 {
-	uint32_t	mask;
+	uint32_t	count;
 
-	mask = __ballot_sync(__activemask(), source_is_valid);
-	if (LaneId() == 0)
+	pgstrom_stair_sum_binary(source_is_valid, &count);
+	if (get_local_id() == 0)
 	{
 		if (__isShared(buffer))
-			*((uint64_t *)buffer) += __popc(mask);
+			*((uint64_t *)buffer) += count;
 		else
-			__atomic_add_uint64((uint64_t *)buffer, __popc(mask));
+			__atomic_add_uint64((uint64_t *)buffer, count);
 	}
 }
 
@@ -227,7 +227,7 @@ __update_nogroups__nrows_cond(kern_context *kcxt,
 							  kern_aggregate_desc *desc,
 							  bool source_is_valid)
 {
-	uint32_t	mask;
+	uint32_t	count;
 
 	if (source_is_valid)
 	{
@@ -236,13 +236,13 @@ __update_nogroups__nrows_cond(kern_context *kcxt,
 		if (XPU_DATUM_ISNULL(xdatum))
 			source_is_valid = false;
 	}
-	mask = __ballot_sync(__activemask(), source_is_valid);
-	if (LaneId() == 0)
+	pgstrom_stair_sum_binary(source_is_valid, &count);
+	if (get_local_id() == 0)
 	{
 		if (__isShared(buffer))
-			*((uint64_t *)buffer) += __popc(mask);
+			*((uint64_t *)buffer) += count;
 		else
-			__atomic_add_uint64((uint64_t *)buffer, __popc(mask));
+			__atomic_add_uint64((uint64_t *)buffer, count);
 	}
 }
 
@@ -260,52 +260,39 @@ __update_nogroups__pmin_int32(kern_context *kcxt,
 							  kern_aggregate_desc *desc,
 							  bool source_is_valid)
 {
-	int32_t		ival = INT_MAX;
-	int32_t		temp;
-	uint32_t	mask;
+	int32_t		ival;
+	int			count;
 
 	if (source_is_valid)
 	{
 		xpu_int4_t	   *xdatum = (xpu_int4_t *)
 			kcxt->kvars_slot[desc->arg0_slot_id];
 
-		if (!XPU_DATUM_ISNULL(xdatum))
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
+		else
 		{
 			assert(xdatum->expr_ops == &xpu_int4_ops);
 			ival = xdatum->value;
 		}
-		else
-		{
-			source_is_valid = false;
-		}
 	}
-	mask = __ballot_sync(__activemask(), source_is_valid);
-	if (mask != 0)
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
 	{
-		kagg_state__pminmax_int64_packed *r =
-			(kagg_state__pminmax_int64_packed *)buffer;
-
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0001);
-		ival = Min(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0002);
-		ival = Min(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0004);
-		ival = Min(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0008);
-		ival = Min(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0010);
-		ival = Min(ival, temp);
-		if (LaneId() == 0)
+		ival = pgstrom_local_min_int32(source_is_valid ? ival : INT_MAX);
+		if (get_local_id() == 0)
 		{
+			kagg_state__pminmax_int64_packed *r =
+				(kagg_state__pminmax_int64_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += __popc(mask);
+				r->nitems += count;
 				if (r->value > ival)
 					r->value = ival;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_add_uint32(&r->nitems, count);
 				__atomic_min_int64(&r->value, (int64_t)ival);
 			}
 		}
@@ -322,56 +309,43 @@ __update_nogroups__pmin_int64(kern_context *kcxt,
 							  kern_aggregate_desc *desc,
 							  bool source_is_valid)
 {
-	int64_t		ival = LONG_MAX;
-	int64_t		temp;
-	uint32_t	mask;
+	int64_t		ival;
+	int			count;
 
 	if (source_is_valid)
 	{
 		xpu_int8_t	   *xdatum = (xpu_int8_t *)
 			kcxt->kvars_slot[desc->arg0_slot_id];
 
-		if (!XPU_DATUM_ISNULL(xdatum))
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
+		else
 		{
 			assert(xdatum->expr_ops == &xpu_int8_ops);
 			ival = xdatum->value;
 		}
-		else
-		{
-			source_is_valid = false;
-		}
 	}
-	mask = __ballot_sync(__activemask(), source_is_valid);
-	if (mask != 0)
-	{
-		kagg_state__pminmax_int64_packed *r =
-			(kagg_state__pminmax_int64_packed *)buffer;
-
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0001);
-		ival = Min(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0002);
-		ival = Min(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0004);
-		ival = Min(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0008);
-		ival = Min(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0010);
-		ival = Min(ival, temp);
-		if (LaneId() == 0)
-		{
-			if (__isShared(r))
-			{
-				r->nitems += __popc(mask);
-				if (r->value > ival)
-					r->value = ival;
-			}
-			else
-			{
-				__atomic_add_uint32(&r->nitems, __popc(mask));
-				__atomic_min_int64(&r->value, ival);
-			}
-		}
-	}
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
+    {
+        ival = pgstrom_local_min_int64(source_is_valid ? ival : LONG_MAX);
+        if (get_local_id() == 0)
+        {
+            kagg_state__pminmax_int64_packed *r =
+                (kagg_state__pminmax_int64_packed *)buffer;
+            if (__isShared(r))
+            {
+                r->nitems += count;
+                if (r->value > ival)
+                    r->value = ival;
+            }
+            else
+            {
+                __atomic_add_uint32(&r->nitems, count);
+                __atomic_min_int64(&r->value, ival);
+            }
+        }
+    }
 }
 
 /*
@@ -384,54 +358,40 @@ __update_nogroups__pmax_int32(kern_context *kcxt,
 							  kern_aggregate_desc *desc,
 							  bool source_is_valid)
 {
-	int32_t		ival = INT_MIN;
-	int32_t		temp;
-	uint32_t	mask;
+	int32_t		ival;
+	int			count;
 
 	if (source_is_valid)
 	{
 		xpu_int4_t	   *xdatum = (xpu_int4_t *)
 			kcxt->kvars_slot[desc->arg0_slot_id];
 
-		if (!XPU_DATUM_ISNULL(xdatum))
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
+		else
 		{
 			assert(xdatum->expr_ops == &xpu_int4_ops);
 			ival = xdatum->value;
 		}
-		else
-		{
-			source_is_valid = false;
-		}
 	}
-	mask = __ballot_sync(__activemask(), source_is_valid);
-	if (mask != 0)
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
 	{
-		kagg_state__pminmax_int64_packed *r =
-			(kagg_state__pminmax_int64_packed *)buffer;
-
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0001);
-		ival = Max(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0002);
-		ival = Max(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0004);
-		ival = Max(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0008);
-		ival = Max(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0010);
-		ival = Max(ival, temp);
-
-		if (LaneId() == 0)
+		ival = pgstrom_local_max_int64(source_is_valid ? ival : INT_MIN);
+		if (get_local_id() == 0)
 		{
+			kagg_state__pminmax_int64_packed *r =
+				(kagg_state__pminmax_int64_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += __popc(mask);
+				r->nitems += count;
 				if (r->value < ival)
 					r->value = ival;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, __popc(mask));
-				__atomic_max_int64(&r->value,  (int64_t)ival);
+				__atomic_add_uint32(&r->nitems, count);
+				__atomic_max_int64(&r->value, (int64_t)ival);
 			}
 		}
 	}
@@ -447,54 +407,40 @@ __update_nogroups__pmax_int64(kern_context *kcxt,
 							  kern_aggregate_desc *desc,
 							  bool source_is_valid)
 {
-	int64_t		ival = LONG_MIN;
-	int64_t		temp;
-	uint32_t	mask;
+	int64_t		ival;
+	int			count;
 
 	if (source_is_valid)
 	{
-		xpu_int8_t	   *xdatum = (xpu_int8_t *)
+		xpu_int4_t	   *xdatum = (xpu_int4_t *)
 			kcxt->kvars_slot[desc->arg0_slot_id];
 
-		if (!XPU_DATUM_ISNULL(xdatum))
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
+		else
 		{
 			assert(xdatum->expr_ops == &xpu_int8_ops);
 			ival = xdatum->value;
 		}
-		else
-		{
-			source_is_valid = false;
-		}
 	}
-	mask = __ballot_sync(__activemask(), source_is_valid);
-	if (mask != 0)
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
 	{
-		kagg_state__pminmax_int64_packed *r =
-			(kagg_state__pminmax_int64_packed *)buffer;
-
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0001);
-		ival = Max(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0002);
-		ival = Max(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0004);
-		ival = Max(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0008);
-		ival = Max(ival, temp);
-		temp = __shfl_xor_sync(__activemask(), ival, 0x0010);
-		ival = Max(ival, temp);
-
-		if (LaneId() == 0)
+		ival = pgstrom_local_min_int64(source_is_valid ? ival : LONG_MIN);
+		if (get_local_id() == 0)
 		{
+			kagg_state__pminmax_int64_packed *r =
+				(kagg_state__pminmax_int64_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += __popc(mask);
+				r->nitems += count;
 				if (r->value < ival)
 					r->value = ival;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, __popc(mask));
-				__atomic_max_int64(&r->value,  ival);
+				__atomic_add_uint32(&r->nitems, count);
+				__atomic_max_int64(&r->value, ival);
 			}
 		}
 	}
@@ -510,53 +456,39 @@ __update_nogroups__pmin_fp64(kern_context *kcxt,
 							 kern_aggregate_desc *desc,
 							 bool source_is_valid)
 {
-	float8_t	fval = DBL_MAX;
-	float8_t	temp;
-	uint32_t	mask;
+	float8_t	fval;
+	int			count;
 
 	if (source_is_valid)
 	{
 		xpu_float8_t   *xdatum = (xpu_float8_t *)
 			kcxt->kvars_slot[desc->arg0_slot_id];
 
-		if (!XPU_DATUM_ISNULL(xdatum))
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
+		else
 		{
 			assert(xdatum->expr_ops == &xpu_float8_ops);
 			fval = xdatum->value;
 		}
-		else
-		{
-			source_is_valid = false;
-		}
 	}
-	mask = __ballot_sync(__activemask(), source_is_valid);
-	if (mask != 0)
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
 	{
-		kagg_state__pminmax_fp64_packed *r =
-			(kagg_state__pminmax_fp64_packed *)buffer;
-
-		temp = __shfl_xor_sync(__activemask(), fval, 0x0001);
-		fval = Min(fval, temp);
-		temp = __shfl_xor_sync(__activemask(), fval, 0x0002);
-		fval = Min(fval, temp);
-		temp = __shfl_xor_sync(__activemask(), fval, 0x0004);
-		fval = Min(fval, temp);
-		temp = __shfl_xor_sync(__activemask(), fval, 0x0008);
-		fval = Min(fval, temp);
-		temp = __shfl_xor_sync(__activemask(), fval, 0x0010);
-		fval = Min(fval, temp);
-
-		if (LaneId() == 0)
+		fval = pgstrom_local_min_fp64(source_is_valid ? fval : DBL_MAX);
+		if (get_local_id() == 0)
 		{
+			kagg_state__pminmax_fp64_packed *r =
+				(kagg_state__pminmax_fp64_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += __popc(mask);
+				r->nitems += count;
 				if (r->value > fval)
 					r->value = fval;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_add_uint32(&r->nitems, count);
 				__atomic_min_fp64(&r->value, fval);
 			}
 		}
@@ -573,54 +505,40 @@ __update_nogroups__pmax_fp64(kern_context *kcxt,
 							 kern_aggregate_desc *desc,
 							 bool source_is_valid)
 {
-	float8_t	fval = -DBL_MAX;
-	float8_t	temp;
-	uint32_t	mask;
+	float8_t	fval;
+	int			count;
 
 	if (source_is_valid)
 	{
 		xpu_float8_t   *xdatum = (xpu_float8_t *)
 			kcxt->kvars_slot[desc->arg0_slot_id];
 
-		if (!XPU_DATUM_ISNULL(xdatum))
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
+		else
 		{
 			assert(xdatum->expr_ops == &xpu_float8_ops);
 			fval = xdatum->value;
 		}
-		else
-		{
-			source_is_valid = false;
-		}
 	}
-	mask = __ballot_sync(__activemask(), source_is_valid);
-	if (mask != 0)
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
 	{
-		kagg_state__pminmax_fp64_packed *r =
-			(kagg_state__pminmax_fp64_packed *)buffer;
-
-		temp = __shfl_xor_sync(__activemask(), fval, 0x0001);
-		fval = Max(fval, temp);
-		temp = __shfl_xor_sync(__activemask(), fval, 0x0002);
-		fval = Max(fval, temp);
-		temp = __shfl_xor_sync(__activemask(), fval, 0x0004);
-		fval = Max(fval, temp);
-		temp = __shfl_xor_sync(__activemask(), fval, 0x0008);
-		fval = Max(fval, temp);
-		temp = __shfl_xor_sync(__activemask(), fval, 0x0010);
-		fval = Max(fval, temp);
-
-		if (LaneId() == 0)
+		fval = pgstrom_local_max_fp64(source_is_valid ? fval : -DBL_MAX);
+		if (get_local_id() == 0)
 		{
+			kagg_state__pminmax_fp64_packed *r =
+				(kagg_state__pminmax_fp64_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += __popc(mask);
+				r->nitems += count;
 				if (r->value < fval)
 					r->value = fval;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, __popc(mask));
-				__atomic_max_fp64(&r->value, fval);
+				__atomic_add_uint32(&r->nitems, count);
+				__atomic_min_fp64(&r->value, fval);
 			}
 		}
 	}
@@ -636,45 +554,40 @@ __update_nogroups__psum_int(kern_context *kcxt,
 							kern_aggregate_desc *desc,
 							bool source_is_valid)
 {
-	int64_t		ival = 0;
-	uint32_t	mask;
+	int64_t		ival, sum;
+	int			count;
 
 	if (source_is_valid)
 	{
 		xpu_int8_t *xdatum = (xpu_int8_t *)
 			kcxt->kvars_slot[desc->arg0_slot_id];
 
-		if (!XPU_DATUM_ISNULL(xdatum))
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
+		else
 		{
 			assert(xdatum->expr_ops == &xpu_int8_ops);
 			ival = xdatum->value;
 		}
-		else
-		{
-			source_is_valid = false;
-		}
 	}
-	mask = __ballot_sync(__activemask(), source_is_valid);
-	if (mask != 0)
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
 	{
-		ival += __shfl_xor_sync(__activemask(), ival, 0x0001);
-		ival += __shfl_xor_sync(__activemask(), ival, 0x0002);
-		ival += __shfl_xor_sync(__activemask(), ival, 0x0004);
-		ival += __shfl_xor_sync(__activemask(), ival, 0x0008);
-		ival += __shfl_xor_sync(__activemask(), ival, 0x0010);
-		if (LaneId() == 0)
+		kagg_state__psum_int_packed *r =
+			(kagg_state__psum_int_packed *)buffer;
+
+		pgstrom_stair_sum_int64(ival, &sum);
+		if (get_local_id() == 0)
 		{
-			kagg_state__psum_int_packed *r =
-				(kagg_state__psum_int_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += __popc(mask);
-				r->sum    += ival;
+				r->nitems += count;
+				r->sum    += sum;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, __popc(mask));
-				__atomic_add_int64(&r->sum, ival);
+				__atomic_add_uint32(&r->nitems, count);
+				__atomic_add_int64(&r->sum, sum);
 			}
 		}
 	}
@@ -690,45 +603,40 @@ __update_nogroups__psum_fp(kern_context *kcxt,
 						   kern_aggregate_desc *desc,
 						   bool source_is_valid)
 {
-	float8_t	fval = 0;
-	uint32_t	mask;
+	float8_t	fval, sum;
+	int			count;
 
 	if (source_is_valid)
 	{
 		xpu_float8_t   *xdatum = (xpu_float8_t *)
 			kcxt->kvars_slot[desc->arg0_slot_id];
 
-		if (!XPU_DATUM_ISNULL(xdatum))
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
+		else
 		{
 			assert(xdatum->expr_ops == &xpu_float8_ops);
 			fval = xdatum->value;
 		}
-		else
-		{
-			source_is_valid = false;
-		}
 	}
-	mask = __ballot_sync(__activemask(), source_is_valid);
-	if (mask != 0)
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
 	{
-		fval += __shfl_xor_sync(__activemask(), fval, 0x0001);
-		fval += __shfl_xor_sync(__activemask(), fval, 0x0002);
-		fval += __shfl_xor_sync(__activemask(), fval, 0x0004);
-		fval += __shfl_xor_sync(__activemask(), fval, 0x0008);
-		fval += __shfl_xor_sync(__activemask(), fval, 0x0010);
-		if (LaneId() == 0)
+		kagg_state__psum_fp_packed *r =
+			(kagg_state__psum_fp_packed *)buffer;
+
+		pgstrom_stair_sum_fp64(fval, &sum);
+		if (get_local_id() == 0)
 		{
-			kagg_state__psum_fp_packed *r =
-				(kagg_state__psum_fp_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += __popc(mask);
-				r->sum    += fval;
+				r->nitems += count;
+				r->sum    += sum;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, __popc(mask));
-				__atomic_add_fp64(&r->sum, fval);
+				__atomic_add_uint32(&r->nitems, count);
+				__atomic_add_fp64(&r->sum, sum);
 			}
 		}
 	}
@@ -743,55 +651,43 @@ __update_nogroups__pstddev(kern_context *kcxt,
 						   kern_aggregate_desc *desc,
 						   bool source_is_valid)
 {
-	float8_t	sum_x = 0.0;
-	uint32_t	mask;
+	float8_t	xval = 0.0;
+	int			count;
 
 	if (source_is_valid)
 	{
 		xpu_float8_t   *xdatum = (xpu_float8_t *)
 			kcxt->kvars_slot[desc->arg0_slot_id];
 
-		if (!XPU_DATUM_ISNULL(xdatum))
-		{
-			assert(xdatum->expr_ops == &xpu_float8_ops);
-			sum_x = xdatum->value;
-		}
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
 		else
 		{
-			source_is_valid = false;
+			assert(xdatum->expr_ops == &xpu_float8_ops);
+			xval = xdatum->value;
 		}
 	}
-	mask = __ballot_sync(__activemask(), source_is_valid);
-	if (mask != 0)
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
 	{
-		float8_t	sum_x2 = sum_x * sum_x;
+		float8_t	sum_x, sum_x2;
 
-		/* sum_x */
-		sum_x += __shfl_xor_sync(__activemask(), sum_x, 0x0001);
-		sum_x += __shfl_xor_sync(__activemask(), sum_x, 0x0002);
-		sum_x += __shfl_xor_sync(__activemask(), sum_x, 0x0004);
-		sum_x += __shfl_xor_sync(__activemask(), sum_x, 0x0008);
-		sum_x += __shfl_xor_sync(__activemask(), sum_x, 0x0010);
-		/* sum_x2 */
-		sum_x2 += __shfl_xor_sync(__activemask(), sum_x2, 0x0001);
-		sum_x2 += __shfl_xor_sync(__activemask(), sum_x2, 0x0002);
-		sum_x2 += __shfl_xor_sync(__activemask(), sum_x2, 0x0004);
-		sum_x2 += __shfl_xor_sync(__activemask(), sum_x2, 0x0008);
-		sum_x2 += __shfl_xor_sync(__activemask(), sum_x2, 0x0010);
+		pgstrom_stair_sum_fp64(xval, &sum_x);
+		pgstrom_stair_sum_fp64(xval * xval, &sum_x2);
 
-		if (LaneId() == 0)
+		if (get_local_id() == 0)
 		{
 			kagg_state__stddev_packed *r =
 				(kagg_state__stddev_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += __popc(mask);
+				r->nitems += count;
 				r->sum_x  += sum_x;
 				r->sum_x2 += sum_x2;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_add_uint32(&r->nitems, count);
 				__atomic_add_fp64(&r->sum_x,  sum_x);
 				__atomic_add_fp64(&r->sum_x2, sum_x2);
 			}
@@ -809,9 +705,9 @@ __update_nogroups__pcovar(kern_context *kcxt,
 						  kern_aggregate_desc *desc,
 						  bool source_is_valid)
 {
-	float8_t	sum_x = 0.0;
-	float8_t	sum_y = 0.0;
-	uint32_t	mask;
+	float8_t	xval = 0.0;
+	float8_t	yval = 0.0;
+	int			count;
 
 	if (source_is_valid)
 	{
@@ -824,63 +720,32 @@ __update_nogroups__pcovar(kern_context *kcxt,
 		{
 			assert(xdatum->expr_ops == &xpu_float8_ops &&
 				   ydatum->expr_ops == &xpu_float8_ops);
-			sum_x = xdatum->value;
-			sum_y = ydatum->value;
+			xval = xdatum->value;
+			yval = ydatum->value;
 		}
 		else
 		{
 			source_is_valid = false;
 		}
 	}
-	mask = __ballot_sync(__activemask(), source_is_valid);
-	if (mask != 0)
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
 	{
-		float8_t	sum_xx = sum_x * sum_x;
-		float8_t	sum_xy = sum_x * sum_y;
-		float8_t	sum_yy = sum_y * sum_y;
+		float8_t	sum_x, sum_y, sum_xx, sum_yy, sum_xy;
 
-		/* sum_x */
-		sum_x += __shfl_xor_sync(__activemask(), sum_x, 0x0001);
-		sum_x += __shfl_xor_sync(__activemask(), sum_x, 0x0002);
-		sum_x += __shfl_xor_sync(__activemask(), sum_x, 0x0004);
-		sum_x += __shfl_xor_sync(__activemask(), sum_x, 0x0008);
-		sum_x += __shfl_xor_sync(__activemask(), sum_x, 0x0010);
+		pgstrom_stair_sum_fp64(xval, &sum_x);
+		pgstrom_stair_sum_fp64(yval, &sum_y);
+		pgstrom_stair_sum_fp64(xval * xval, &sum_xx);
+		pgstrom_stair_sum_fp64(yval * yval, &sum_yy);
+		pgstrom_stair_sum_fp64(xval * yval, &sum_xy);
 
-		/* sum_y */
-		sum_y += __shfl_xor_sync(__activemask(), sum_y, 0x0001);
-		sum_y += __shfl_xor_sync(__activemask(), sum_y, 0x0002);
-		sum_y += __shfl_xor_sync(__activemask(), sum_y, 0x0004);
-		sum_y += __shfl_xor_sync(__activemask(), sum_y, 0x0008);
-		sum_y += __shfl_xor_sync(__activemask(), sum_y, 0x0010);
-
-		/* sum_xx */
-		sum_xx += __shfl_xor_sync(__activemask(), sum_xx, 0x0001);
-		sum_xx += __shfl_xor_sync(__activemask(), sum_xx, 0x0002);
-		sum_xx += __shfl_xor_sync(__activemask(), sum_xx, 0x0004);
-		sum_xx += __shfl_xor_sync(__activemask(), sum_xx, 0x0008);
-		sum_xx += __shfl_xor_sync(__activemask(), sum_xx, 0x0010);
-
-		/* sum_xy */
-		sum_xy += __shfl_xor_sync(__activemask(), sum_xy, 0x0001);
-		sum_xy += __shfl_xor_sync(__activemask(), sum_xy, 0x0002);
-		sum_xy += __shfl_xor_sync(__activemask(), sum_xy, 0x0004);
-		sum_xy += __shfl_xor_sync(__activemask(), sum_xy, 0x0008);
-		sum_xy += __shfl_xor_sync(__activemask(), sum_xy, 0x0010);
-
-		/* sum_yy */
-		sum_yy += __shfl_xor_sync(__activemask(), sum_yy, 0x0001);
-		sum_yy += __shfl_xor_sync(__activemask(), sum_yy, 0x0002);
-		sum_yy += __shfl_xor_sync(__activemask(), sum_yy, 0x0004);
-		sum_yy += __shfl_xor_sync(__activemask(), sum_yy, 0x0008);
-		sum_yy += __shfl_xor_sync(__activemask(), sum_yy, 0x0010);
-
-		if (LaneId() == 0)
+		if (get_global_id() == 0)
 		{
 			kagg_state__covar_packed *r =
 				(kagg_state__covar_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += __popc(mask);
+				r->nitems += count;
 				r->sum_x  += sum_x;
 				r->sum_xx += sum_xx;
 				r->sum_y  += sum_y;
@@ -889,7 +754,7 @@ __update_nogroups__pcovar(kern_context *kcxt,
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, __popc(mask));
+				__atomic_add_uint32(&r->nitems, count);
 				__atomic_add_fp64(&r->sum_x,  sum_x);
 				__atomic_add_fp64(&r->sum_xx, sum_xx);
 				__atomic_add_fp64(&r->sum_y,  sum_y);
@@ -912,6 +777,8 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 {
 	char	   *buffer;
 
+	assert((char *)htup >  (char*)kds_final &&
+		   (char *)htup <= (char *)kds_final + kds_final->length);
 	if (kcxt->groupby_prepfn_buffer)
 	{
 		buffer = kcxt->groupby_prepfn_buffer;
@@ -1072,14 +939,14 @@ __execGpuPreAggNoGroups(kern_context *kcxt,
 						kern_expression *kexp_groupby_actions,
 						bool *p_try_suspend)
 {
-	kern_tupitem *tupitem;
+	__shared__ kern_tupitem *tupitem;
 	bool		try_suspend = false;
 
 	assert(kds_final->format == KDS_FORMAT_ROW);
 	assert(kexp_groupby_actions->opcode == FuncOpCode__AggFuncs);
 	for (;;)
 	{
-		if (LaneId() == 0)
+		if (get_local_id() == 0)
 		{
 			uint32_t	nitems = __volatileRead(&kds_final->nitems);
 			uint32_t	oldval;
@@ -1126,15 +993,13 @@ __execGpuPreAggNoGroups(kern_context *kcxt,
 			}
 		}
 		/* out of memory? */
-		try_suspend = __shfl_sync(__activemask(), try_suspend, 0);
-		if (try_suspend)
+		if (__syncthreads_count(try_suspend) > 0)
 		{
 			*p_try_suspend = true;
 			return false;
 		}
-		/* is the destination tuple ready?  */
-		tupitem = (kern_tupitem *)__shfl_sync(__activemask(), (uintptr_t)tupitem, 0);
-		if (tupitem != NULL)
+		/* is the destination tuple ready? */
+		if (tupitem)
 			break;
 	}
 	/* update partial aggregation */
@@ -1586,7 +1451,7 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 		if (EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keyhash, &hash))
 			assert(!XPU_DATUM_ISNULL(&hash));
 	}
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return false;
 
 	/*
@@ -1673,13 +1538,13 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 			}
 		}
 		/* suspend the kernel? */
-		if (__any_sync(__activemask(), *p_try_suspend))
+		if (__syncthreads_count(*p_try_suspend) > 0)
 			return false;
 		/* error checks */
-		if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 			return false;
 		/* retry, if any threads are not ready yet */
-	} while (__any_sync(__activemask(), !XPU_DATUM_ISNULL(&hash) && !hitem));
+	} while (__syncthreads_count(!XPU_DATUM_ISNULL(&hash) && !hitem) > 0);
 
 	/*
 	 * update the partial aggregation
@@ -1839,11 +1704,10 @@ setupGpuPreAggGroupByBuffer(kern_context *kcxt,
 		}
 		else
 		{
-			assert(kgtask->groupby_prepfn_nbufs >= get_local_size() / warpSize);
+			assert(kgtask->groupby_prepfn_nbufs == 1);
 			kcxt->groupby_prepfn_bufsz = kgtask->groupby_prepfn_bufsz;
 			kcxt->groupby_prepfn_nbufs = 1;
-			kcxt->groupby_prepfn_buffer = groupby_prepfn_buffer
-				+ kgtask->groupby_prepfn_bufsz * (get_local_id() / warpSize);
+			kcxt->groupby_prepfn_buffer = groupby_prepfn_buffer;
 			__setupGpuPreAggGroupByBufferOne(kcxt, kexp_actions,
 											 kcxt->groupby_prepfn_buffer);
 		}
@@ -2089,7 +1953,7 @@ mergeGpuPreAggGroupByBuffer(kern_context *kcxt,
 		/* merge the no-group results */
 		uint32_t	nitems = __volatileRead(&kds_final->nitems);
 
-		if (LaneId() == 0 && nitems > 0)
+		if (get_local_id() == 0 && nitems > 0)
 		{
 			kern_tupitem *tupitem = KDS_GET_TUPITEM(kds_final, 0);
 
@@ -2115,29 +1979,28 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	kern_expression *kexp_groupby_keycomp = SESSION_KEXP_GROUPBY_KEYCOMP(session);
 	kern_expression *kexp_groupby_actions = SESSION_KEXP_GROUPBY_ACTIONS(session);
 	kern_expression *karg;
-	uint32_t	write_pos = WARP_WRITE_POS(wp,n_rels);
-	uint32_t	read_pos = WARP_READ_POS(wp,n_rels);
-	uint32_t	i, mask;
+	uint32_t	rd_pos = WARP_READ_POS(wp,n_rels);
+	uint32_t	wr_pos = WARP_WRITE_POS(wp,n_rels);
 	bool		status;
+	int			i;
 	
 	/*
 	 * The previous depth still may produce new tuples, and number of
 	 * the current result tuples is not sufficient to run projection.
 	 */
-	if (wp->scan_done <= n_rels && read_pos + warpSize > write_pos)
+	if (wp->scan_done <= n_rels && rd_pos + get_local_size() > wr_pos)
 		return n_rels;
 
-	read_pos += LaneId();
-	kcxt->kvecs_curr_id = (read_pos % KVEC_UNITSZ);
+	rd_pos += get_local_id();
+	kcxt->kvecs_curr_id = (rd_pos % KVEC_UNITSZ);
 	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
-	mask = __ballot_sync(__activemask(), (read_pos < write_pos));
-	if (mask == 0)
+	if (__syncthreads_count(rd_pos < wr_pos) == 0)
 		goto skip_reduction;
 
 	/*
 	 * fillup the kvars_slot if it involves expressions
 	 */
-	if (read_pos < write_pos)
+	if (rd_pos < wr_pos)
 	{
 		for (i=0, karg = KEXP_FIRST_ARG(kexp_groupby_actions);
 			 i < kexp_groupby_actions->nr_args;
@@ -2151,7 +2014,7 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 			}
 		}
 	}
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
 
 	/*
@@ -2163,7 +2026,7 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 		kexp_groupby_keycomp)
 	{
 		status = __execGpuPreAggGroupBy(kcxt, kds_final,
-										(read_pos < write_pos),
+										(rd_pos < wr_pos),
 										kexp_groupby_keyhash,
 										kexp_groupby_keyload,
 										kexp_groupby_keycomp,
@@ -2173,26 +2036,24 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	else
 	{
 		status = __execGpuPreAggNoGroups(kcxt, kds_final,
-										 (read_pos < write_pos),
+										 (rd_pos < wr_pos),
 										 kexp_groupby_actions,
 										 p_try_suspend);
 	}
-	if (__any_sync(__activemask(), !status))
+	if (__syncthreads_count(!status) > 0)
 		return -1;
 
 	/*
 	 * Update the read position
 	 */
 skip_reduction:
-	if (LaneId() == 0)
-	{
-		WARP_READ_POS(wp,n_rels) += __popc(mask);
-		assert(WARP_WRITE_POS(wp,n_rels) >= WARP_READ_POS(wp,n_rels));
-	}
-	__syncwarp();
+	if (get_local_id() == 0)
+		WARP_READ_POS(wp,n_rels) += Min(WARP_WRITE_POS(wp,n_rels),
+										WARP_READ_POS(wp,n_rels) + get_local_size());
+	__syncthreads();
 	if (wp->scan_done <= n_rels)
 	{
-		if (WARP_WRITE_POS(wp,n_rels) < WARP_READ_POS(wp,n_rels) + warpSize)
+		if (WARP_WRITE_POS(wp,n_rels) < WARP_READ_POS(wp,n_rels) + get_local_size())
 			return n_rels;	/* back to the previous depth */
     }
 	else

@@ -133,8 +133,8 @@ typedef struct {
 	} stats[1];		/* 'n_rels' items */
 	/*
 	 * variable length fields
-	 * +-----------------------------------+
-	 * | kern_warp_context for this block  |
+	 * +-----------------------------------+  <---  __KERN_GPUTASK_WARP_OFFSET()
+	 * | kern_warp_context for each block  |
 	 * +-----------------------------------+ -----
 	 * | l_state[num_rels] for each thread |  only if JOIN is involved
 	 * +-----------------------------------+  (n_rels > 0)
@@ -143,13 +143,13 @@ typedef struct {
 	 */
 } kern_gputask;
 
-#define __KERN_GPUTASK_WARP_OFFSET(kvecs_ndims,kvecs_bufsz)				\
+#define __KERN_GPUTASK_WARP_OFFSET(kvecs_ndims,kvecs_bufsz)					\
 	TYPEALIGN(CUDA_L1_CACHELINE_SZ, offsetof(kern_gputask, stats[(kvecs_ndims)]))
-#define KERN_GPUTASK_LENGTH(kvecs_ndims,kvecs_bufsz,n_threads)			\
-	(__KERN_GPUTASK_WARP_OFFSET((kvecs_ndims),(kvecs_bufsz)) +			\
-	 KERN_WARP_CONTEXT_LENGTH((kvecs_ndims),(kvecs_bufsz)) +			\
-	 MAXALIGN(sizeof(uint32_t) * (n_threads) * (kvecs_ndims)) +			\
-	 MAXALIGN(sizeof(bool)     * (n_threads) * (kvecs_ndims)))
+#define KERN_GPUTASK_LENGTH(kvecs_ndims,kvecs_bufsz,grid_sz,block_sz)		\
+	(__KERN_GPUTASK_WARP_OFFSET((kvecs_ndims),(kvecs_bufsz)) +				\
+	 KERN_WARP_CONTEXT_LENGTH((kvecs_ndims),(kvecs_bufsz)) * (grid_sz) +	\
+	 MAXALIGN(sizeof(uint32_t) * (grid_sz) * (block_sz) * (kvecs_ndims)) +	\
+	 MAXALIGN(sizeof(bool)     * (grid_sz) * (block_sz) * (kvecs_ndims)))
 
 #if defined(__CUDACC__)
 INLINE_FUNCTION(void)
@@ -166,8 +166,8 @@ INIT_KERN_GPUTASK_SUBFIELDS(kern_gputask *kgtask,
 	pos = ((char *)kgtask +
 		   __KERN_GPUTASK_WARP_OFFSET(kgtask->kvecs_ndims,
 									  kgtask->kvecs_bufsz));
-	*p_wp_context = (kern_warp_context *)pos;
-	pos += wp_unitsz;
+	*p_wp_context = (kern_warp_context *)(pos + wp_unitsz * get_group_id());
+	pos += wp_unitsz * get_num_groups();
 
 	*p_lstate_array  = (uint32_t *)pos;
 	pos += MAXALIGN(sizeof(uint32_t) * get_global_size() * kgtask->n_rels);
@@ -186,6 +186,22 @@ EXTERN_FUNCTION(uint32_t)
 pgstrom_stair_sum_uint32(uint32_t value, uint32_t *p_total_count);
 EXTERN_FUNCTION(uint64_t)
 pgstrom_stair_sum_uint64(uint64_t value, uint64_t *p_total_count);
+EXTERN_FUNCTION(int64_t)
+pgstrom_stair_sum_int64(int64_t value, int64_t *p_total_count);
+EXTERN_FUNCTION(float8_t)
+pgstrom_stair_sum_fp64(float8_t value, float8_t *p_total_count);
+EXTERN_FUNCTION(int32_t)
+pgstrom_local_min_int32(int32_t my_value);
+EXTERN_FUNCTION(int32_t)
+pgstrom_local_max_int32(int32_t my_value);
+EXTERN_FUNCTION(int64_t)
+pgstrom_local_min_int64(int64_t my_value);
+EXTERN_FUNCTION(int64_t)
+pgstrom_local_max_int64(int64_t my_value);
+EXTERN_FUNCTION(float8_t)
+pgstrom_local_min_fp64(float8_t my_value);
+EXTERN_FUNCTION(float8_t)
+pgstrom_local_max_fp64(float8_t my_value);
 
 EXTERN_FUNCTION(int)
 execGpuScanLoadSource(kern_context *kcxt,
