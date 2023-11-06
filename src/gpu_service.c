@@ -85,6 +85,7 @@ typedef struct
 typedef struct
 {
 	volatile pid_t		gpuserv_pid;
+	pg_atomic_uint32	max_async_tasks_updated;
 	pg_atomic_uint32	max_async_tasks;
 	pg_atomic_uint32	gpuserv_debug_output;
 } gpuServSharedState;
@@ -151,31 +152,25 @@ gpuserv_debug_output_show(void)
 static void
 pgstrom_max_async_tasks_assign(int newval, void *extra)
 {
-	uint32_t	max_async_tasks = ((newval << 1) | 1U);
-
 	if (gpuserv_shared_state)
 	{
 		pid_t	gpuserv_pid = gpuserv_shared_state->gpuserv_pid;
 
-		pg_atomic_write_u32(&gpuserv_shared_state->max_async_tasks, max_async_tasks);
+		pg_atomic_write_u32(&gpuserv_shared_state->max_async_tasks, newval);
+		pg_atomic_write_u32(&gpuserv_shared_state->max_async_tasks_updated, 1);
 		if (gpuserv_pid != 0)
 			kill(gpuserv_pid, SIGUSR2);
 	}
 	else
-		__pgstrom_max_async_tasks_dummy = max_async_tasks;
+		__pgstrom_max_async_tasks_dummy = newval;
 }
 
 int
 pgstrom_max_async_tasks(void)
 {
-	uint32_t	max_async_tasks;
-
-	if (gpuserv_shared_state)
-		max_async_tasks = pg_atomic_read_u32(&gpuserv_shared_state->max_async_tasks);
-	else
-		max_async_tasks = __pgstrom_max_async_tasks_dummy;
-
-	return (max_async_tasks >> 1);
+	return (gpuserv_shared_state
+			? pg_atomic_read_u32(&gpuserv_shared_state->max_async_tasks)
+			: __pgstrom_max_async_tasks_dummy);
 }
 
 static const char *
@@ -2652,6 +2647,8 @@ __gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
 	bool		has_gpucache = false;
 	bool		needs_wakeup = false;
 	uint32_t	count = 0;
+	int			nr_startup = 0;
+	int			nr_terminate = 0;
 	dlist_iter	__iter;
 
 	pthreadMutexLock(&gcontext->worker_lock);
@@ -2675,19 +2672,21 @@ __gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
 		{
 			gworker->termination = true;
 			needs_wakeup = true;
+			nr_terminate++;
 		}
 	}
 	pthreadMutexUnlock(&gcontext->worker_lock);
 	if (needs_wakeup)
 		pthreadCondBroadcast(&gcontext->cond);
 	if (count >= nworkers && has_gpucache)
-		return;
+		goto out;
 
 	/* launch workers */
 	if (pthread_attr_init(&th_attr) != 0)
 		__FATAL("failed on pthread_attr_init");
 	if (pthread_attr_setdetachstate(&th_attr, PTHREAD_CREATE_DETACHED) != 0)
 		__FATAL("failed on pthread_attr_setdetachstate");
+	elog(LOG, "count = %d nworkers = %d", count, nworkers);
 	while (count < nworkers)
 	{
 		gpuWorker  *gworker = calloc(1, sizeof(gpuWorker));
@@ -2712,6 +2711,7 @@ __gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
 		dlist_push_tail(&gcontext->worker_list, &gworker->chain);
 		pthreadMutexUnlock(&gcontext->worker_lock);
 		count++;
+		nr_startup += 2;
 	}
 	if (!has_gpucache)
 	{
@@ -2736,28 +2736,38 @@ __gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
 		pthreadMutexLock(&gcontext->worker_lock);
 		dlist_push_tail(&gcontext->worker_list, &gworker->chain);
 		pthreadMutexUnlock(&gcontext->worker_lock);
+		nr_startup += 3;
+	}
+out:
+	if (nr_startup > 0 || nr_terminate > 0)
+	{
+		elog(LOG, "GPU%d workers - %d startup%s, %d terminate",
+			 gcontext->cuda_dindex,
+			 nr_startup >> 1,
+			 (nr_startup & 1) ? " (incl. GpuCacheManager)" : "",
+			 nr_terminate);
 	}
 }
 
 static void
 __gpuContextAdjustWorkers(void)
 {
-	uint32_t	max_async_tasks;
-	uint32_t	nworkers;
-	dlist_iter  iter;
+	uint32_t	updated;
 
-	max_async_tasks = pg_atomic_read_u32(&gpuserv_shared_state->max_async_tasks);
-	if ((max_async_tasks & 1) == 0)
-		return;		/* not updated */
-	nworkers = (max_async_tasks >> 1) * 3;
-
-	dlist_foreach(iter, &gpuserv_gpucontext_list)
+	updated = pg_atomic_exchange_u32(&gpuserv_shared_state->max_async_tasks_updated, 0);
+	if (updated)
 	{
-		gpuContext *gcontext = dlist_container(gpuContext, chain, iter.cur);
+		uint32_t	nworkers;
+		dlist_iter  iter;
 
-		__gpuContextAdjustWorkersOne(gcontext, nworkers);
+		nworkers = pg_atomic_read_u32(&gpuserv_shared_state->max_async_tasks);
+		dlist_foreach(iter, &gpuserv_gpucontext_list)
+		{
+			gpuContext *gcontext = dlist_container(gpuContext, chain, iter.cur);
+
+			__gpuContextAdjustWorkersOne(gcontext, nworkers);
+		}
 	}
-	pg_atomic_fetch_and_u32(&gpuserv_shared_state->max_async_tasks, ~1U);
 }
 
 /*
@@ -2871,7 +2881,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 				gcontext->cuda_profiler_started = true;
 		}
 		/* launch worker threads */
-		pg_atomic_fetch_or_u32(&gpuserv_shared_state->max_async_tasks, 1);
+		pg_atomic_write_u32(&gpuserv_shared_state->max_async_tasks_updated, 1);
 	}
 	PG_CATCH();
 	{
@@ -3090,6 +3100,7 @@ pgstrom_startup_executor(void)
 										   MAXALIGN(sizeof(gpuServSharedState)),
 										   &found);
 	memset(gpuserv_shared_state, 0, sizeof(gpuServSharedState));
+	pg_atomic_init_u32(&gpuserv_shared_state->max_async_tasks_updated, 1);
 	pg_atomic_init_u32(&gpuserv_shared_state->max_async_tasks,
 					   __pgstrom_max_async_tasks_dummy);
 	pg_atomic_init_u32(&gpuserv_shared_state->gpuserv_debug_output,
