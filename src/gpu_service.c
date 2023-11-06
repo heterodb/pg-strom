@@ -219,6 +219,7 @@ typedef struct
 	size_t			segment_sz;
 	size_t			active_sz;		/* == 0 can be released */
 	CUdeviceptr		devptr;
+	unsigned long	iomap_handle;	/* for legacy nvme_strom */
 	dlist_head		free_chunks;	/* list of free chunks */
 	dlist_head		addr_chunks;	/* list of ordered chunks */
 	struct timeval	tval;
@@ -312,7 +313,8 @@ __gpuMemAllocNewSegment(gpuMemoryPool *pool, size_t segment_sz)
 		if (rc != CUDA_SUCCESS)
 			goto error;
 		if (!gpuDirectMapGpuMemory(mseg->devptr,
-								   mseg->segment_sz))
+								   mseg->segment_sz,
+								   &mseg->iomap_handle))
 			goto error;
 	}
 	chunk->mseg   = mseg;
@@ -477,7 +479,8 @@ __gpuMemoryPoolMaintenanceTask(gpuContext *gcontext, gpuMemoryPool *pool)
 				continue;
 
 			/* ok, this segment should be released */
-			if (!gpuDirectUnmapGpuMemory(mseg->devptr))
+			if (!gpuDirectUnmapGpuMemory(mseg->devptr,
+										 mseg->iomap_handle))
 				__FATAL("failed on gpuDirectUnmapGpuMemory");
 			rc = cuMemFree(mseg->devptr);
 			if (rc != CUDA_SUCCESS)
@@ -1536,6 +1539,7 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 	if (!gpuDirectFileReadIOV(pathname,
 							  chunk->__base,
 							  chunk->__offset + off,
+							  chunk->mseg->iomap_handle,
 							  kds_iovec,
 							  p_npages_direct_read,
 							  p_npages_vfs_read))
