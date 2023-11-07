@@ -24,42 +24,26 @@ __xpu_varlena_datum_arrow_ref(kern_context *kcxt,
 							  const char **p_value)
 {
 	uint32_t	unitsz;
-	const void *addr;
 
 	switch (cmeta->attopts.tag)
 	{
 		case ArrowType__FixedSizeBinary:
 			unitsz = cmeta->attopts.fixed_size_binary.byteWidth;
-			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, unitsz);
-			if (!addr)
-			{
-				STROM_ELOG(kcxt, "Arrow::FixedSizeBinary out of range");
-				return false;
-			}
+			*p_value = (const char *)
+				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, unitsz);
 			*p_length = unitsz;
-			*p_value = (const char *)addr;
 			break;
 
 		case ArrowType__Utf8:
 		case ArrowType__Binary:
-			addr = KDS_ARROW_REF_VARLENA32_DATUM(kds, cmeta, kds_index, p_length);
-			if (!addr)
-			{
-				STROM_ELOG(kcxt, "Arrow::Utf8/Binary out of range");
-				return false;
-			}
-			*p_value = (const char *)addr;
+			*p_value = (const char *)
+				KDS_ARROW_REF_VARLENA32_DATUM(kds, cmeta, kds_index, p_length);
 			break;
 
 		case ArrowType__LargeUtf8:
 		case ArrowType__LargeBinary:
-			addr = KDS_ARROW_REF_VARLENA64_DATUM(kds, cmeta, kds_index, p_length);
-			if (!addr)
-			{
-				STROM_ELOG(kcxt, "Arrow::LargeUtf8/LargeBinary out of range");
-				return false;
-			}
-			*p_value = (const char *)addr;
+			*p_value = (const char *)
+				KDS_ARROW_REF_VARLENA64_DATUM(kds, cmeta, kds_index, p_length);
 			break;
 
 		default:
