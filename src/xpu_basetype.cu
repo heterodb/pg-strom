@@ -41,11 +41,16 @@ xpu_bool_datum_arrow_read(kern_context *kcxt,
 						  xpu_datum_t *__result)
 {
 	xpu_bool_t *result = (xpu_bool_t *)__result;
-	const uint8_t  *bitmap = (const uint8_t *)
-		((const char *)kds + __kds_unpack(cmeta->values_offset));
 
-	result->expr_ops = &xpu_bool_ops;
-	result->value    = ((bitmap[kds_index>>3] & (1<<(kds_index & 7))) != 0);
+	if (KDS_ARROW_CHECK_ISNULL(kds, cmeta, kds_index))
+		result->expr_ops = NULL;
+	else
+	{
+		const uint8_t  *bitmap = (const uint8_t *)
+			((const char *)kds + __kds_unpack(cmeta->values_offset));
+		result->expr_ops = &xpu_bool_ops;
+		result->value    = ((bitmap[kds_index>>3] & (1<<(kds_index & 7))) != 0);
+	}
 	return true;
 }
 
@@ -251,13 +256,19 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 		{																\
 			const BASETYPE *addr = (const BASETYPE *)					\
 				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, index, sizeof(BASETYPE)); \
-			if (addr && (cmeta->attopts.integer.is_signed || *addr >= 0)) \
+			if (!addr)													\
+				result->expr_ops = NULL;								\
+			else if (!cmeta->attopts.integer.is_signed && *addr < 0)	\
+			{															\
+				STROM_ELOG(kcxt, "Arrow::Int is out of range");			\
+				return false;											\
+			}															\
+			else														\
 			{															\
 				result->expr_ops = &xpu_##NAME##_ops;					\
 				result->value = *addr;									\
-				return true;											\
 			}															\
-			STROM_ELOG(kcxt, "Arrow::Int is out of range");				\
+			return true;												\
 		}																\
 		return false;													\
 	}																	\
@@ -282,8 +293,13 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 		{																\
 			const BASETYPE *addr = (const BASETYPE *)					\
 				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, index, sizeof(BASETYPE)); \
-			result->expr_ops = &xpu_##NAME##_ops;						\
-			result->value = *addr;										\
+			if (!addr)													\
+				result->expr_ops = NULL;								\
+			else														\
+			{															\
+				result->expr_ops = &xpu_##NAME##_ops;					\
+				result->value = *addr;									\
+			}															\
 			return true;												\
 		}																\
 		return false;													\

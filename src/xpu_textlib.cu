@@ -99,11 +99,14 @@ xpu_bpchar_datum_arrow_read(kern_context *kcxt,
 {
 	xpu_bpchar_t *result = (xpu_bpchar_t *)__result;
 
-	result->expr_ops = &xpu_bpchar_ops;
-	return __xpu_varlena_datum_arrow_ref(kcxt, kds, cmeta,
-										 kds_index,
-										 &result->length,
-										 &result->value);
+	if (!__xpu_varlena_datum_arrow_ref(kcxt, kds, cmeta,
+									   kds_index,
+									   &result->length,
+									   &result->value))
+		return false;
+
+	result->expr_ops = (result->value ? &xpu_bpchar_ops : NULL);
+	return true;
 }
 
 STATIC_FUNCTION(bool)
@@ -256,11 +259,14 @@ xpu_text_datum_arrow_read(kern_context *kcxt,
 {
 	xpu_text_t *result = (xpu_text_t *)__result;
 
-	result->expr_ops = &xpu_text_ops;
-	return __xpu_varlena_datum_arrow_ref(kcxt, kds, cmeta,
-										 kds_index,
-										 &result->length,
-										 &result->value);
+	if (!__xpu_varlena_datum_arrow_ref(kcxt, kds, cmeta,
+									   kds_index,
+									   &result->length,
+									   &result->value))
+		return false;
+
+	result->expr_ops = (result->value ? &xpu_text_ops : NULL);
+	return false;
 }
 
 STATIC_FUNCTION(bool)
@@ -410,11 +416,14 @@ xpu_bytea_datum_arrow_read(kern_context *kcxt,
 {
 	xpu_bytea_t *result = (xpu_bytea_t *)__result;
 
-	result->expr_ops = &xpu_bytea_ops;
-	return __xpu_varlena_datum_arrow_ref(kcxt, kds, cmeta,
-										 kds_index,
-										 &result->length,
-										 &result->value);
+	if (!__xpu_varlena_datum_arrow_ref(kcxt, kds, cmeta,
+									   kds_index,
+									   &result->length,
+									   &result->value))
+		return false;
+
+	result->expr_ops = (result->value ? &xpu_bytea_ops : NULL);
+	return false;
 }
 
 STATIC_FUNCTION(bool)

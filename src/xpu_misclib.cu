@@ -571,13 +571,13 @@ xpu_money_datum_arrow_read(kern_context *kcxt,
 	switch (cmeta->attopts.integer.bitWidth)
 	{
 		case 32:
+			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
+											  kds_index,
+											  sizeof(int32_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(int32_t));
-				if (!addr)
-				{
-					STROM_ELOG(kcxt, "Arrow::Int32 out of range");
-					return false;
-				}
 				if (cmeta->attopts.integer.is_signed)
 					result->value = *((int32_t *)addr);
 				else
@@ -586,13 +586,16 @@ xpu_money_datum_arrow_read(kern_context *kcxt,
 			}
 			break;
 		case 64:
+			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(int64_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else if (!cmeta->attopts.integer.is_signed && *((int64_t *)addr) < 0)
 			{
-				addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(int64_t));
-				if (!addr || (!cmeta->attopts.integer.is_signed && *((int64_t *)addr) < 0))
-				{
-					STROM_ELOG(kcxt, "Arrow::Int64 out of range");
-					return false;
-				}
+				STROM_ELOG(kcxt, "Arrow::Int64 out of range");
+				return false;
+			}
+			else
+			{
 				result->value = *((int64_t *)addr);
 				result->expr_ops = &xpu_money_ops;
 			}
@@ -726,12 +729,12 @@ xpu_uuid_datum_arrow_read(kern_context *kcxt,
 	}
 	addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, UUID_LEN);
 	if (!addr)
+		result->expr_ops = NULL;
+	else
 	{
-		STROM_ELOG(kcxt, "Arrow::FixedSizeBinary out of range");
-		return false;
+		result->expr_ops = &xpu_uuid_ops;
+		memcpy(result->value.data, addr, UUID_LEN);
 	}
-	result->expr_ops = &xpu_uuid_ops;
-	memcpy(result->value.data, addr, UUID_LEN);
 	return true;
 }
 
@@ -908,12 +911,12 @@ xpu_macaddr_datum_arrow_read(kern_context *kcxt,
 	}
 	addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(macaddr));
 	if (!addr)
+		result->expr_ops = NULL;
+	else
 	{
-		STROM_ELOG(kcxt, "Arrow::FixedSizeBinary out of range");
-		return false;
+		result->expr_ops = &xpu_macaddr_ops;
+		memcpy(&result->value, addr, sizeof(macaddr));
 	}
-	result->expr_ops = &xpu_macaddr_ops;
-	memcpy(&result->value, addr, sizeof(macaddr));
 	return true;
 }
 
@@ -1156,27 +1159,27 @@ xpu_inet_datum_arrow_read(kern_context *kcxt,
 	{
 		addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, 4);
 		if (!addr)
+			result->expr_ops = NULL;
+		else
 		{
-			STROM_ELOG(kcxt, "Arrow::FixedSizeBinary<4> out of range");
-			return false;
+			result->expr_ops = &xpu_inet_ops;
+			result->value.family = PGSQL_AF_INET;
+			result->value.bits = 32;
+			memcpy(result->value.ipaddr, addr, 4);
 		}
-		result->expr_ops = &xpu_inet_ops;
-		result->value.family = PGSQL_AF_INET;
-		result->value.bits = 32;
-		memcpy(result->value.ipaddr, addr, 4);
 	}
 	else if (cmeta->attopts.fixed_size_binary.byteWidth == 16)
 	{
 		addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, 4);
 		if (!addr)
+			result->expr_ops = NULL;
+		else
 		{
-			STROM_ELOG(kcxt, "Arrow::FixedSizeBinary<16> out of range");
-			return false;
+			result->expr_ops = &xpu_inet_ops;
+			result->value.family = PGSQL_AF_INET6;
+			result->value.bits = 128;
+			memcpy(result->value.ipaddr, addr, 16);
 		}
-		result->expr_ops = &xpu_inet_ops;
-		result->value.family = PGSQL_AF_INET6;
-		result->value.bits = 128;
-		memcpy(result->value.ipaddr, addr, 16);
 	}
 	else
 	{

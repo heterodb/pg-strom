@@ -95,13 +95,13 @@ xpu_date_datum_arrow_read(kern_context *kcxt,
 											  kds_index,
 											  sizeof(uint32_t));
 			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				STROM_ELOG(kcxt, "Arrow::Date[sec] out of range");
-				return false;
+				result->expr_ops = &xpu_date_ops;
+				result->value = *((uint32_t *)addr)
+					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 			}
-			result->expr_ops = &xpu_date_ops;
-			result->value = *((uint32_t *)addr)
-				- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 			break;
 
 		case ArrowDateUnit__MilliSecond:
@@ -109,13 +109,13 @@ xpu_date_datum_arrow_read(kern_context *kcxt,
 											  kds_index,
 											  sizeof(uint64_t));
 			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				STROM_ELOG(kcxt, "Arrow::Date[ms] out of range");
-				return false;
+				result->expr_ops = &xpu_date_ops;
+				result->value = *((uint64_t *)addr) / (SECS_PER_DAY * 1000)
+					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 			}
-			result->expr_ops = &xpu_date_ops;
-			result->value = *((uint64_t *)addr) / (SECS_PER_DAY * 1000)
-				- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
 			break;
 
 		default:
@@ -251,12 +251,12 @@ xpu_time_datum_arrow_read(kern_context *kcxt,
 											  kds_index,
 											  sizeof(int32_t));
 			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				STROM_ELOG(kcxt, "Arrow::Time[sec] out of range");
-				return false;
+				result->expr_ops = &xpu_time_ops;
+				result->value = (int64_t)(*((int32_t *)addr)) * 1000000L;
 			}
-			result->expr_ops = &xpu_time_ops;
-			result->value = (int64_t)(*((int32_t *)addr)) * 1000000L;
 			break;
 
 		case ArrowTimeUnit__MilliSecond:
@@ -264,12 +264,12 @@ xpu_time_datum_arrow_read(kern_context *kcxt,
 											  kds_index,
 											  sizeof(int32_t));
 			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				STROM_ELOG(kcxt, "Arrow::Time[ms] out of range");
-				return false;
+				result->expr_ops = &xpu_time_ops;
+				result->value = (int64_t)(*((int32_t *)addr)) * 1000L;
 			}
-			result->expr_ops = &xpu_time_ops;
-			result->value = (int64_t)(*((int32_t *)addr)) * 1000L;
 			break;
 
 		case ArrowTimeUnit__MicroSecond:
@@ -277,12 +277,12 @@ xpu_time_datum_arrow_read(kern_context *kcxt,
 											  kds_index,
 											  sizeof(int64_t));
 			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				STROM_ELOG(kcxt, "Arrow::Time[us] out of range");
-				return false;
+				result->expr_ops = &xpu_time_ops;
+				result->value = *((int64_t *)addr);
 			}
-			result->expr_ops = &xpu_time_ops;
-			result->value = *((int64_t *)addr);
 			break;
 
 		case ArrowTimeUnit__NanoSecond:
@@ -290,12 +290,12 @@ xpu_time_datum_arrow_read(kern_context *kcxt,
 											  kds_index,
 											  sizeof(int64_t));
 			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				STROM_ELOG(kcxt, "Arrow::Time[ns] out of range");
-				return false;
+				result->expr_ops = &xpu_time_ops;
+				result->value = *((int64_t *)addr) / 1000L;
 			}
-			result->expr_ops = &xpu_time_ops;
-			result->value = *((int64_t *)addr) / 1000L;
 			break;
 
 		default:
@@ -543,52 +543,52 @@ xpu_timestamp_datum_arrow_read(kern_context *kcxt,
 			addr = (const uint64_t *)
 				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(uint64_t));
 			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				STROM_ELOG(kcxt, "Arrow::Timestamp[sec] out of range");
-				return false;
+				result->expr_ops = &xpu_timestamp_ops;
+				result->value = *addr * 1000000L -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 			}
-			result->expr_ops = &xpu_timestamp_ops;
-			result->value = *addr * 1000000L -
-				(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 			break;
 
 		case ArrowTimeUnit__MilliSecond:
 			addr = (const uint64_t *)
 				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(uint64_t));
 			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				STROM_ELOG(kcxt, "Arrow::Timestamp[ms] out of range");
-				return false;
+				result->expr_ops = &xpu_timestamp_ops;
+				result->value = *addr * 1000L -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 			}
-			result->expr_ops = &xpu_timestamp_ops;
-			result->value = *addr * 1000L -
-				(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 			break;
 
 		case ArrowTimeUnit__MicroSecond:
 			addr = (const uint64_t *)
 				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(uint64_t));
 			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				STROM_ELOG(kcxt, "Arrow::Timestamp[us] out of range");
-				return false;
+				result->expr_ops = &xpu_timestamp_ops;
+				result->value = *addr -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 			}
-			result->expr_ops = &xpu_timestamp_ops;
-			result->value = *addr -
-				(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 			break;
 
 		case ArrowTimeUnit__NanoSecond:
 			addr = (const uint64_t *)
 				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(uint64_t));
 			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				STROM_ELOG(kcxt, "Arrow::Timestamp[ns] out of range");
-				return false;
+				result->expr_ops = &xpu_timestamp_ops;
+				result->value = *addr / 1000L -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 			}
-			result->expr_ops = &xpu_timestamp_ops;
-			result->value = *addr / 1000L -
-				(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 			break;
 
 		default:
@@ -855,14 +855,14 @@ xpu_interval_datum_arrow_read(kern_context *kcxt,
 											  kds_index,
 											  sizeof(uint32_t));
 			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				STROM_ELOG(kcxt, "Arrow::Interval[Year-Month] out of range");
-				return false;
+				result->expr_ops = &xpu_interval_ops;
+				result->value.month = *((uint32_t *)addr);
+				result->value.day   = 0;
+				result->value.time  = 0;
 			}
-			result->expr_ops = &xpu_interval_ops;
-			result->value.month = *((uint32_t *)addr);
-			result->value.day   = 0;
-			result->value.time  = 0;
 			break;
 
 		case ArrowIntervalUnit__Day_Time:
@@ -870,14 +870,14 @@ xpu_interval_datum_arrow_read(kern_context *kcxt,
 											  kds_index,
 											  sizeof(uint32_t) * 2);
 			if (!addr)
+				result->expr_ops = NULL;
+			else
 			{
-				STROM_ELOG(kcxt, "Arrow::Interval[Day-Time] out of range");
-				return false;
+				result->expr_ops = &xpu_interval_ops;
+				result->value.month = 0;
+				result->value.day   = *((uint32_t *)addr);
+				result->value.time  = *((uint32_t *)addr + 1);
 			}
-			result->expr_ops = &xpu_interval_ops;
-			result->value.month = 0;
-			result->value.day   = *((uint32_t *)addr);
-			result->value.time  = *((uint32_t *)addr + 1);
 			break;
 
 		default:
