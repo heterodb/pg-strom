@@ -451,14 +451,80 @@ pgfn_money_to_numeric(XPU_PGFUNCTION_ARGS)
 	return true;
 }
 
-#define PG_FLOAT_TO_NUMERIC_TEMPLATE(SOURCE,__TYPE,__CAST,			\
-									 __MODF,__RINTL)				\
+STATIC_FUNCTION(void)
+__xpu_fp64_to_numeric(xpu_numeric_t *result, float8_t __fval)
+{
+	uint64_t	fval = __double_as_longlong__(__fval);
+	uint64_t	frac = (fval & ((1UL<<FP64_FRAC_BITS)-1));
+	int32_t		expo = (fval >> (FP64_FRAC_BITS)) & ((1UL<<FP64_EXPO_BITS)-1);
+	bool		sign = (fval >> (FP64_FRAC_BITS + FP64_EXPO_BITS)) != 0;
+	int			weight = 0;
+
+	/* special cases */
+	if (expo == 0x7ff)
+	{
+		if (fval != 0)
+			result->kind = XPU_NUMERIC_KIND__NAN;
+		else if (sign)
+			result->kind = XPU_NUMERIC_KIND__NEG_INF;
+		else
+			result->kind = XPU_NUMERIC_KIND__POS_INF;
+		result->expr_ops = &xpu_numeric_ops;
+		return;
+	}
+	frac |= (1UL << FP64_FRAC_BITS);
+
+	/*
+	 * fraction must be adjusted by 10^prec / 2^(FP64_FRAC_BITS - expo)
+	 * with keeping accuracy (52bit).
+	 */
+	while (expo > FP64_EXPO_BIAS + FP64_FRAC_BITS)
+	{
+		if (frac <= 0x1800000000000000UL)
+		{
+			frac *= 2;
+			expo--;
+		}
+		else
+		{
+			frac /= 10;
+			weight--;
+		}
+	}
+	while (expo < FP64_EXPO_BIAS + FP64_FRAC_BITS)
+	{
+		if (frac >= 0x1800000000000000UL)
+		{
+			frac /= 2;
+			expo++;
+		}
+		else
+		{
+			frac *= 10;
+			weight++;
+		}
+	}
+	/* only 15 digits are valid */
+	while (frac >= 1000000000000000UL)
+	{
+		frac /= 10;
+		weight--;
+	}
+	result->kind = XPU_NUMERIC_KIND__VALID;
+	result->weight = weight;
+	if (!sign)
+		result->u.value = (int128_t)frac;
+	else
+		result->u.value = -(int128_t)frac;
+	result->expr_ops = &xpu_numeric_ops;
+}
+
+#define PG_FLOAT_TO_NUMERIC_TEMPLATE(SOURCE,__TYPE,__CAST)			\
 	PUBLIC_FUNCTION(bool)											\
 	pgfn_##SOURCE##_to_numeric(XPU_PGFUNCTION_ARGS)					\
 	{																\
 		xpu_numeric_t	   *result = (xpu_numeric_t *)__result;		\
 		xpu_##SOURCE##_t	datum;									\
-		__TYPE				fval;									\
 		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
 		assert(kexp->nr_args == 1 &&								\
@@ -468,38 +534,12 @@ pgfn_money_to_numeric(XPU_PGFUNCTION_ARGS)
 		if (XPU_DATUM_ISNULL(&datum))								\
 			result->expr_ops = NULL;								\
 		else														\
-		{															\
-			result->expr_ops = &xpu_numeric_ops;					\
-			fval = __CAST(datum.value);								\
-			if (isinf(fval))										\
-				result->kind = (fval > 0.0							\
-								? XPU_NUMERIC_KIND__POS_INF			\
-								: XPU_NUMERIC_KIND__NEG_INF);		\
-			else if (isnan(fval))									\
-				result->kind = XPU_NUMERIC_KIND__NAN;				\
-			else													\
-			{														\
-				__TYPE		a,b = __MODF(fval, &a);					\
-				int128_t	value = (int128_t)a;					\
-				int16_t		weight = 0;								\
-				bool		negative = (value < 0);					\
-																	\
-				if (negative)										\
-					value = -value;									\
-				while (b != 0.0 && (value>>124) == 0)				\
-				{													\
-					b = __MODF(b * 10.0, &a);						\
-					value = 10 * value + (int128_t)a;				\
-					weight++;										\
-				}													\
-				set_normalized_numeric(result,value,weight);		\
-			}														\
-		}															\
+			__xpu_fp64_to_numeric(result, __CAST(datum.value));		\
 		return true;												\
 	}
-PG_FLOAT_TO_NUMERIC_TEMPLATE(float2, float,__to_fp32,modff,rintf)
-PG_FLOAT_TO_NUMERIC_TEMPLATE(float4, float,__to_fp32,modff,rintf)
-PG_FLOAT_TO_NUMERIC_TEMPLATE(float8,double,__to_fp64,modf, rint)
+PG_FLOAT_TO_NUMERIC_TEMPLATE(float2, float,__to_fp32)
+PG_FLOAT_TO_NUMERIC_TEMPLATE(float4, float,__to_fp32)
+PG_FLOAT_TO_NUMERIC_TEMPLATE(float8,double,__to_fp64)
 
 STATIC_FUNCTION(int)
 __numeric_compare(const xpu_numeric_t *a, const xpu_numeric_t *b)
