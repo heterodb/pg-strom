@@ -109,7 +109,7 @@ count_num_of_subfields(Oid type_oid)
 
 			if (attr->attisdropped)
 				continue;
-			count += count_num_of_subfields(attr->atttypid);
+			count += 1 + count_num_of_subfields(attr->atttypid);
 		}
 	}
 	return count;

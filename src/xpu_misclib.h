@@ -64,10 +64,19 @@ typedef struct
 	((inetptr)->family == PGSQL_AF_INET ? 32 : 128)
 #endif	/* INET_H */
 
-PGSTROM_SQLTYPE_SIMPLE_DECLARATION(money, int64_t);
-PGSTROM_SQLTYPE_SIMPLE_DECLARATION(uuid, pg_uuid_t);
+PGSTROM_SQLTYPE_SIMPLE_DECLARATION(money,   Cash);
+PGSTROM_SQLTYPE_SIMPLE_DECLARATION(uuid,    pg_uuid_t);
 PGSTROM_SQLTYPE_SIMPLE_DECLARATION(macaddr, macaddr);
-PGSTROM_SQLTYPE_SIMPLE_DECLARATION(inet, inet_struct);
+
+typedef struct {
+	KVEC_DATUM_COMMON_FIELD;
+	uint8_t		family[KVEC_UNITSZ];
+	uint8_t		bits[KVEC_UNITSZ];
+	struct {
+		uint8_t	data[16];
+	}			ipaddr[KVEC_UNITSZ];
+} kvec_inet_t;
+__PGSTROM_SQLTYPE_SIMPLE_DECLARATION(inet, inet_struct);
 
 EXTERN_FUNCTION(int)
 xpu_interval_write_heap(kern_context *kcxt,

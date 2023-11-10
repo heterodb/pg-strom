@@ -542,53 +542,120 @@ pgfn_tan(XPU_PGFUNCTION_ARGS)
  * Currency data type (xpu_money_t), functions and operators
  */
 STATIC_FUNCTION(bool)
-xpu_money_datum_ref(kern_context *kcxt,
-					xpu_datum_t *__result,
-					int vclass,
-					const kern_variable *kvar)
+xpu_money_datum_heap_read(kern_context *kcxt,
+						  const void *addr,
+						  xpu_datum_t *__result)
 {
 	xpu_money_t *result = (xpu_money_t *)__result;
 
 	result->expr_ops = &xpu_money_ops;
-	if (vclass == KVAR_CLASS__INLINE)
-		result->value = kvar->i64;
-	else if (vclass >= sizeof(Cash))
-		result->value = *((Cash *)kvar->ptr);
-	else
+	result->value = *((Cash *)addr);
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_money_datum_arrow_read(kern_context *kcxt,
+						   const kern_data_store *kds,
+						   const kern_colmeta *cmeta,
+						   uint32_t kds_index,
+						   xpu_datum_t *__result)
+{
+	xpu_money_t *result = (xpu_money_t *)__result;
+	const void	*addr;
+
+	if (cmeta->attopts.tag != ArrowType__Int)
 	{
-		STROM_ELOG(kcxt, "unexpected vclass for device money data type.");
+		STROM_ELOG(kcxt, "xpu_money_t must be mapped on Arrow::Int32 or Int64");
 		return false;
+	}
+	switch (cmeta->attopts.integer.bitWidth)
+	{
+		case 32:
+			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
+											  kds_index,
+											  sizeof(int32_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				if (cmeta->attopts.integer.is_signed)
+					result->value = *((int32_t *)addr);
+				else
+					result->value = *((uint32_t *)addr);
+				result->expr_ops = &xpu_money_ops;
+			}
+			break;
+		case 64:
+			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(int64_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else if (!cmeta->attopts.integer.is_signed && *((int64_t *)addr) < 0)
+			{
+				STROM_ELOG(kcxt, "Arrow::Int64 out of range");
+				return false;
+			}
+			else
+			{
+				result->value = *((int64_t *)addr);
+				result->expr_ops = &xpu_money_ops;
+			}
+			break;
+		default:
+			STROM_ELOG(kcxt, "xpu_money_t must be mapped on Arrow::Int32 or Int64");
+			return false;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_money_datum_store(kern_context *kcxt,
-					  const xpu_datum_t *__arg,
-					  int *p_vclass,
-					  kern_variable *p_kvar)
+xpu_money_datum_kvec_load(kern_context *kcxt,
+						  const kvec_datum_t *__kvecs,
+						  uint32_t kvecs_id,
+						  xpu_datum_t *__result)
 {
-	const xpu_money_t *arg = (const xpu_money_t *)__arg;
+	const kvec_money_t *kvecs = (const kvec_money_t *)__kvecs;
+	xpu_money_t *result = (xpu_money_t *)__result;
 
-	if (XPU_DATUM_ISNULL(arg))
-		*p_vclass = KVAR_CLASS__NULL;
-	else
-	{
-		*p_vclass = KVAR_CLASS__INLINE;
-		p_kvar->i64 = arg->value;
-	}
+	result->expr_ops = &xpu_money_ops;
+	result->value = kvecs->values[kvecs_id];
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_money_datum_kvec_save(kern_context *kcxt,
+						  const xpu_datum_t *__xdatum,
+						  kvec_datum_t *__kvecs,
+						  uint32_t kvecs_id)
+{
+	const xpu_money_t *xdatum = (const xpu_money_t *)__xdatum;
+	kvec_money_t *kvecs = (kvec_money_t *)__kvecs;
+
+	kvecs->values[kvecs_id] = xdatum->value;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_money_datum_kvec_copy(kern_context *kcxt,
+                          const kvec_datum_t *__kvecs_src,
+                          uint32_t kvecs_src_id,
+                          kvec_datum_t *__kvecs_dst,
+                          uint32_t kvecs_dst_id)
+{
+	const kvec_money_t *kvecs_src = (const kvec_money_t *)__kvecs_src;
+	kvec_money_t *kvecs_dst = (kvec_money_t *)__kvecs_dst;
+
+	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_money_datum_write(kern_context *kcxt,
 					  char *buffer,
+					  const kern_colmeta *cmeta,
 					  const xpu_datum_t *__arg)
 {
 	const xpu_money_t *arg = (const xpu_money_t *)__arg;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (buffer)
 		*((Cash *)buffer) = arg->value;
 	return sizeof(Cash);
@@ -597,9 +664,9 @@ xpu_money_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_money_datum_hash(kern_context *kcxt,
 					 uint32_t *p_hash,
-					 const xpu_datum_t *__arg)
+					 xpu_datum_t *__arg)
 {
-	const xpu_money_t *arg = (const xpu_money_t *)__arg;
+	xpu_money_t *arg = (xpu_money_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -611,11 +678,11 @@ xpu_money_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_money_datum_comp(kern_context *kcxt,
 					 int *p_comp,
-					 const xpu_datum_t *__a,
-					 const xpu_datum_t *__b)
+					 xpu_datum_t *__a,
+					 xpu_datum_t *__b)
 {
-	const xpu_money_t *a = (const xpu_money_t *)__a;
-	const xpu_money_t *b = (const xpu_money_t *)__b;
+	xpu_money_t *a = (xpu_money_t *)__a;
+	xpu_money_t *b = (xpu_money_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	if (a->value < b->value)
@@ -628,73 +695,110 @@ xpu_money_datum_comp(kern_context *kcxt,
 }
 PGSTROM_SQLTYPE_OPERATORS(money, true, 8, sizeof(Cash));
 PG_SIMPLE_COMPARE_TEMPLATE(cash_,money,money,)
+
 /*
  * UUID data type (xpu_uuid_t), functions and operators
  */
 STATIC_FUNCTION(bool)
-xpu_uuid_datum_ref(kern_context *kcxt,
-				   xpu_datum_t *__result,
-				   int vclass,
-				   const kern_variable *kvar)
+xpu_uuid_datum_heap_read(kern_context *kcxt,
+						 const void *addr,
+                         xpu_datum_t *__result)
 {
 	xpu_uuid_t *result = (xpu_uuid_t *)__result;
 
 	result->expr_ops = &xpu_uuid_ops;
-	if (vclass >= sizeof(pg_uuid_t))
+	memcpy(result->value.data, addr, UUID_LEN);
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_uuid_datum_arrow_read(kern_context *kcxt,
+						  const kern_data_store *kds,
+						  const kern_colmeta *cmeta,
+						  uint32_t kds_index,
+						  xpu_datum_t *__result)
+{
+	xpu_uuid_t *result = (xpu_uuid_t *)__result;
+	const void *addr;
+
+	if (cmeta->attopts.tag != ArrowType__FixedSizeBinary ||
+		cmeta->attopts.fixed_size_binary.byteWidth != UUID_LEN)
 	{
-		memcpy(&result->value, kvar->ptr, sizeof(pg_uuid_t));
+		STROM_ELOG(kcxt, "xpu_uuid_t must be mapped on Arrow::FixedSizeBinary");
+		return false;
 	}
+	addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, UUID_LEN);
+	if (!addr)
+		result->expr_ops = NULL;
 	else
 	{
-		STROM_ELOG(kcxt, "unexpected vclass for device uuid data type.");
-		return false;
+		result->expr_ops = &xpu_uuid_ops;
+		memcpy(result->value.data, addr, UUID_LEN);
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_uuid_datum_store(kern_context *kcxt,
-					 const xpu_datum_t *__arg,
-					 int *p_vclass,
-					 kern_variable *p_kvar)
+xpu_uuid_datum_kvec_load(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs,
+                         uint32_t kvecs_id,
+                         xpu_datum_t *__result)
 {
-	xpu_uuid_t	   *arg = (xpu_uuid_t *)__arg;
+	const kvec_uuid_t *kvecs = (const kvec_uuid_t *)__kvecs;
+	xpu_uuid_t *result = (xpu_uuid_t *)__result;
 
-	if (XPU_DATUM_ISNULL(arg))
-		*p_vclass = KVAR_CLASS__NULL;
-	else
-	{
-		pg_uuid_t  *buf = (pg_uuid_t *)kcxt_alloc(kcxt, sizeof(pg_uuid_t));
+	result->expr_ops = &xpu_uuid_ops;
+	memcpy(result->value.data, kvecs->values[kvecs_id].data, UUID_LEN);
+	return true;
+}
 
-		if (!buf)
-			return false;
-		memcpy(buf, &arg->value, sizeof(pg_uuid_t));
-		p_kvar->ptr = buf;
-		*p_vclass = sizeof(pg_uuid_t);
-	}
+STATIC_FUNCTION(bool)
+xpu_uuid_datum_kvec_save(kern_context *kcxt,
+						 const xpu_datum_t *__xdatum,
+						 kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id)
+{
+	const xpu_uuid_t *xdatum = (const xpu_uuid_t *)__xdatum;
+	kvec_uuid_t *kvecs = (kvec_uuid_t *)__kvecs;
+
+	memcpy(kvecs->values[kvecs_id].data, xdatum->value.data, UUID_LEN);
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_uuid_datum_kvec_copy(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs_src,
+						 uint32_t kvecs_src_id,
+						 kvec_datum_t *__kvecs_dst,
+						 uint32_t kvecs_dst_id)
+{
+	const kvec_uuid_t *kvecs_src = (const kvec_uuid_t *)__kvecs_src;
+	kvec_uuid_t *kvecs_dst = (kvec_uuid_t *)__kvecs_dst;
+
+	memcpy(kvecs_dst->values[kvecs_dst_id].data,
+		   kvecs_src->values[kvecs_src_id].data, UUID_LEN);
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_uuid_datum_write(kern_context *kcxt,
 					 char *buffer,
+					 const kern_colmeta *cmeta,
 					 const xpu_datum_t *__arg)
 {
 	const xpu_uuid_t *arg = (const xpu_uuid_t *)__arg;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (buffer)
-		memcpy(buffer, &arg->value, sizeof(pg_uuid_t));
+		memcpy(buffer, arg->value.data, UUID_LEN);
 	return sizeof(pg_uuid_t);
 }
 
 STATIC_FUNCTION(bool)
 xpu_uuid_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					const xpu_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	const xpu_uuid_t *arg = (const xpu_uuid_t *)__arg;
+	xpu_uuid_t *arg = (xpu_uuid_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -720,17 +824,14 @@ uuid_cmp_internal(const xpu_uuid_t *datum_a,
 	return 0;
 }
 
-
-
-
 STATIC_FUNCTION(bool)
 xpu_uuid_datum_comp(kern_context *kcxt,
 					int *p_comp,
-					const xpu_datum_t *__a,
-					const xpu_datum_t *__b)
+					xpu_datum_t *__a,
+					xpu_datum_t *__b)
 {
-	const xpu_uuid_t *a = (const xpu_uuid_t *)__a;
-	const xpu_uuid_t *b = (const xpu_uuid_t *)__b;
+	xpu_uuid_t *a = (xpu_uuid_t *)__a;
+	xpu_uuid_t *b = (xpu_uuid_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	*p_comp = __memcmp(a->value.data,
@@ -781,56 +882,94 @@ PG_UUID_COMPARE_TEMPLATE(ge, >=)
  * Macaddr data type (xpu_macaddr_t), functions and operators
  */
 STATIC_FUNCTION(bool)
-xpu_macaddr_datum_ref(kern_context *kcxt,
-					  xpu_datum_t *__result,
-					  int vclass,
-					  const kern_variable *kvar)
+xpu_macaddr_datum_heap_read(kern_context *kcxt,
+							const void *addr,
+							xpu_datum_t *__result)
 {
 	xpu_macaddr_t *result = (xpu_macaddr_t *)__result;
 
 	result->expr_ops = &xpu_macaddr_ops;
-	if (vclass >= sizeof(macaddr))
-		memcpy(&result->value, kvar->ptr, sizeof(macaddr));
+	memcpy(&result->value, addr, sizeof(macaddr));
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_macaddr_datum_arrow_read(kern_context *kcxt,
+							 const kern_data_store *kds,
+							 const kern_colmeta *cmeta,
+							 uint32_t kds_index,
+							 xpu_datum_t *__result)
+{
+	xpu_macaddr_t  *result = (xpu_macaddr_t *)__result;
+	const void	   *addr;
+
+	if (cmeta->attopts.tag != ArrowType__FixedSizeBinary ||
+		cmeta->attopts.fixed_size_binary.byteWidth != sizeof(macaddr))
+	{
+		STROM_ELOG(kcxt, "xpu_macaddr_t must be mapped on Arrow::FixedSizeBinary");
+		return false;
+	}
+	addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(macaddr));
+	if (!addr)
+		result->expr_ops = NULL;
 	else
 	{
-		STROM_ELOG(kcxt, "unexpected vclass for device macaddr data type.");
-		return false;
+		result->expr_ops = &xpu_macaddr_ops;
+		memcpy(&result->value, addr, sizeof(macaddr));
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_macaddr_datum_store(kern_context *kcxt,
-						const xpu_datum_t *__arg,
-						int *p_vclass,
-						kern_variable *p_kvar)
+xpu_macaddr_datum_kvec_load(kern_context *kcxt,
+							const kvec_datum_t *__kvecs,
+							uint32_t kvecs_id,
+							xpu_datum_t *__result)
 {
-	xpu_macaddr_t  *arg = (xpu_macaddr_t *)__arg;
+	const kvec_macaddr_t *kvecs = (const kvec_macaddr_t *)__kvecs;
+	xpu_macaddr_t *result = (xpu_macaddr_t *)__result;
 
-	if (XPU_DATUM_ISNULL(arg))
-		*p_vclass = KVAR_CLASS__NULL;
-	else
-	{
-		macaddr	   *buf = (macaddr *)kcxt_alloc(kcxt, sizeof(macaddr));
+	result->expr_ops = &xpu_macaddr_ops;
+	memcpy(&result->value, &kvecs->values[kvecs_id], sizeof(macaddr));
+	return true;
+}
 
-		if (!buf)
-			return false;
-		memcpy(buf, &arg->value, sizeof(macaddr));
-		p_kvar->ptr = buf;
-		*p_vclass = sizeof(macaddr);
-	}
+STATIC_FUNCTION(bool)
+xpu_macaddr_datum_kvec_save(kern_context *kcxt,
+							const xpu_datum_t *__xdatum,
+							kvec_datum_t *__kvecs,
+							uint32_t kvecs_id)
+{
+	const xpu_macaddr_t *xdatum = (const xpu_macaddr_t *)__xdatum;
+	kvec_macaddr_t *kvecs = (kvec_macaddr_t *)__kvecs;
+
+	memcpy(&kvecs->values[kvecs_id], &xdatum->value, sizeof(macaddr));
+    return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_macaddr_datum_kvec_copy(kern_context *kcxt,
+							const kvec_datum_t *__kvecs_src,
+							uint32_t kvecs_src_id,
+							kvec_datum_t *__kvecs_dst,
+							uint32_t kvecs_dst_id)
+{
+	const kvec_macaddr_t *kvecs_src = (const kvec_macaddr_t *)__kvecs_src;
+	kvec_macaddr_t *kvecs_dst = (kvec_macaddr_t *)__kvecs_dst;
+
+	memcpy(&kvecs_dst->values[kvecs_dst_id],
+		   &kvecs_src->values[kvecs_src_id], sizeof(macaddr));
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_macaddr_datum_write(kern_context *kcxt,
 						char *buffer,
+						const kern_colmeta *cmeta,
 						const xpu_datum_t *__arg)
 {
 	const xpu_macaddr_t  *arg = (xpu_macaddr_t *)__arg;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (buffer)
 		memcpy(buffer, &arg->value, sizeof(macaddr));
 	return sizeof(macaddr);
@@ -839,9 +978,9 @@ xpu_macaddr_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_macaddr_datum_hash(kern_context *kcxt,
 					   uint32_t *p_hash,
-					   const xpu_datum_t *__arg)
+					   xpu_datum_t *__arg)
 {
-	const xpu_macaddr_t *arg = (const xpu_macaddr_t *)__arg;
+	xpu_macaddr_t *arg = (xpu_macaddr_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -884,11 +1023,11 @@ macaddr_cmp_internal(const xpu_macaddr_t *datum_a, const xpu_macaddr_t *datum_b)
 STATIC_FUNCTION(bool)
 xpu_macaddr_datum_comp(kern_context *kcxt,
 					   int *p_comp,
-					   const xpu_datum_t *__a,
-					   const xpu_datum_t *__b)
+					   xpu_datum_t *__a,
+					   xpu_datum_t *__b)
 {
-	const xpu_macaddr_t *a = (const xpu_macaddr_t *)__a;
-	const xpu_macaddr_t *b = (const xpu_macaddr_t *)__b;
+	xpu_macaddr_t *a = (xpu_macaddr_t *)__a;
+	xpu_macaddr_t *b = (xpu_macaddr_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	*p_comp = macaddr_cmp_internal(a, b);
@@ -961,99 +1100,156 @@ pgfn_macaddr_trunc(XPU_PGFUNCTION_ARGS)
  * Inet data type (xpu_iner_t), functions and operators
  */
 STATIC_FUNCTION(bool)
-xpu_inet_datum_ref(kern_context *kcxt,
-                   xpu_datum_t *__result,
-				   int vclass,
-				   const kern_variable *kvar)
+xpu_inet_datum_heap_read(kern_context *kcxt,
+                         const void *addr,
+                         xpu_datum_t *__result)
 {
 	xpu_inet_t *result = (xpu_inet_t *)__result;
+	int		sz;
 
-	if (vclass == KVAR_CLASS__VARLENA)
+	if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
 	{
-		const char *addr = (const char *)kvar->ptr;
-
-		if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+		STROM_CPU_FALLBACK(kcxt, "inet value is compressed or toasted");
+		return false;
+	}
+	sz = VARSIZE_ANY_EXHDR(addr);
+	if (sz == offsetof(inet_struct, ipaddr[4]))
+	{
+		memcpy(&result->value, VARDATA_ANY(addr), sz);
+		if (result->value.family != PGSQL_AF_INET)
 		{
-			STROM_CPU_FALLBACK(kcxt, "inet value is compressed or toasted");
+			STROM_ELOG(kcxt, "inet (ipv4) value corruption");
 			return false;
 		}
-		else
+	}
+	else if (sz == offsetof(inet_struct, ipaddr[16]))
+	{
+		memcpy(&result->value, VARDATA_ANY(addr), sz);
+		if (result->value.family != PGSQL_AF_INET6)
 		{
-			int		sz = VARSIZE_ANY_EXHDR(addr);
-
-			if (sz == offsetof(inet_struct, ipaddr[4]))
-			{
-				memcpy(&result->value, VARDATA_ANY(addr), sz);
-				if (result->value.family != PGSQL_AF_INET)
-				{
-					STROM_ELOG(kcxt, "inet (ipv4) value corruption");
-					return false;
-				}
-			}
-			else if (sz == offsetof(inet_struct, ipaddr[16]))
-			{
-				memcpy(&result->value, VARDATA_ANY(addr), sz);
-				if (result->value.family != PGSQL_AF_INET6)
-				{
-					STROM_ELOG(kcxt, "inet (ipv6) value corruption");
-					return false;
-				}
-			}
-			else
-			{
-				STROM_ELOG(kcxt, "Bug? inet value is corrupted");
-				return false;
-			}
-			result->expr_ops = &xpu_inet_ops;
+			STROM_ELOG(kcxt, "inet (ipv6) value corruption");
+			return false;
 		}
 	}
 	else
 	{
-		STROM_ELOG(kcxt, "unexpected vclass for device inet data type.");
+		STROM_ELOG(kcxt, "Bug? inet value is corrupted");
+		return false;
+	}
+	result->expr_ops = &xpu_inet_ops;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_inet_datum_arrow_read(kern_context *kcxt,
+                          const kern_data_store *kds,
+                          const kern_colmeta *cmeta,
+                          uint32_t kds_index,
+                          xpu_datum_t *__result)
+{
+	xpu_inet_t *result = (xpu_inet_t *)__result;
+	const void *addr;
+
+	if (cmeta->attopts.tag != ArrowType__FixedSizeBinary)
+	{
+		STROM_ELOG(kcxt, "xpu_inet_t must be mapped on Arrow::FixedSizeBinary");
+		return false;
+	}
+	if (cmeta->attopts.fixed_size_binary.byteWidth == 4)
+	{
+		addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, 4);
+		if (!addr)
+			result->expr_ops = NULL;
+		else
+		{
+			result->expr_ops = &xpu_inet_ops;
+			result->value.family = PGSQL_AF_INET;
+			result->value.bits = 32;
+			memcpy(result->value.ipaddr, addr, 4);
+		}
+	}
+	else if (cmeta->attopts.fixed_size_binary.byteWidth == 16)
+	{
+		addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, 4);
+		if (!addr)
+			result->expr_ops = NULL;
+		else
+		{
+			result->expr_ops = &xpu_inet_ops;
+			result->value.family = PGSQL_AF_INET6;
+			result->value.bits = 128;
+			memcpy(result->value.ipaddr, addr, 16);
+		}
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "xpu_inet_t must be mapped on Arrow::FixedSizeBinary<4> or <16>");
 		return false;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_inet_datum_store(kern_context *kcxt,
-					 const xpu_datum_t *__arg,
-					 int *p_vclass,
-					 kern_variable *p_kvar)
+xpu_inet_datum_kvec_load(kern_context *kcxt,
+                         const kvec_datum_t *__kvecs,
+                         uint32_t kvecs_id,
+                         xpu_datum_t *__result)
 {
-	xpu_inet_t *arg = (xpu_inet_t *)__arg;
+	const kvec_inet_t *kvecs = (const kvec_inet_t *)__kvecs;
+	xpu_inet_t *result = (xpu_inet_t *)__result;
+	uint8_t		family;
 
-	if (XPU_DATUM_ISNULL(arg))
-		*p_vclass = KVAR_CLASS__NULL;
-	else
-	{
-		inet   *in;
-		int		sz;
+	result->expr_ops = &xpu_inet_ops;
+	result->value.family = family = kvecs->family[kvecs_id];
+	result->value.bits = kvecs->bits[kvecs_id];
+	memcpy(result->value.ipaddr,
+		   kvecs->ipaddr[kvecs_id].data,
+		   (family == PGSQL_AF_INET ? 4 : 16));
+	return true;
+}
 
-		if (arg->value.family == PGSQL_AF_INET)
-			sz = offsetof(inet_struct, ipaddr) + 4;
-		else if (arg->value.family == PGSQL_AF_INET6)
-			sz = offsetof(inet_struct, ipaddr) + 16;
-		else
-		{
-			STROM_ELOG(kcxt, "Bug? inet value is corrupted");
-			return false;
-		}
-		in = (inet *)kcxt_alloc(kcxt, offsetof(inet, inet_data) + sz);
-		if (!in)
-			return false;
-		memcpy(&in->inet_data, &arg->value, sz);
-		SET_VARSIZE(in, VARHDRSZ + sz);
+STATIC_FUNCTION(bool)
+xpu_inet_datum_kvec_save(kern_context *kcxt,
+						 const xpu_datum_t *__xdatum,
+						 kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id)
+{
+    const xpu_inet_t *xdatum = (const xpu_inet_t *)__xdatum;
+    kvec_inet_t *kvecs = (kvec_inet_t *)__kvecs;
+	uint8_t		family;
 
-		p_kvar->ptr = in;
-		*p_vclass = KVAR_CLASS__VARLENA;
-	}
+	kvecs->family[kvecs_id] = family = xdatum->value.family;
+	kvecs->bits[kvecs_id] = xdatum->value.bits;
+	memcpy(kvecs->ipaddr[kvecs_id].data,
+		   xdatum->value.ipaddr,
+		   (family == PGSQL_AF_INET ? 4 : 16));
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_inet_datum_kvec_copy(kern_context *kcxt,
+                          const kvec_datum_t *__kvecs_src,
+                          uint32_t kvecs_src_id,
+                          kvec_datum_t *__kvecs_dst,
+                          uint32_t kvecs_dst_id)
+{
+	const kvec_inet_t *kvecs_src = (const kvec_inet_t *)__kvecs_src;
+	kvec_inet_t *kvecs_dst = (kvec_inet_t *)__kvecs_dst;
+	uint8_t		family;
+
+	family = kvecs_src->family[kvecs_src_id];
+	kvecs_dst->family[kvecs_dst_id] = family;
+	kvecs_dst->bits[kvecs_dst_id]   = kvecs_src->bits[kvecs_src_id];
+	memcpy(kvecs_dst->ipaddr[kvecs_dst_id].data,
+		   kvecs_src->ipaddr[kvecs_src_id].data,
+		   (family == PGSQL_AF_INET ? 4 : 16));
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_inet_datum_write(kern_context *kcxt,
 					 char *buffer,
+					 const kern_colmeta *cmeta,
 					 const xpu_datum_t *__arg)
 {
 	const xpu_inet_t  *arg = (xpu_inet_t *)__arg;
@@ -1081,9 +1277,9 @@ xpu_inet_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_inet_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					const xpu_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	const xpu_inet_t *arg = (const xpu_inet_t *)__arg;
+	xpu_inet_t *arg = (xpu_inet_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -1164,11 +1360,11 @@ inet_cmp_internal(const xpu_inet_t *datum_a,
 STATIC_FUNCTION(bool)
 xpu_inet_datum_comp(kern_context *kcxt,
 					int *p_comp,
-					const xpu_datum_t *__a,
-					const xpu_datum_t *__b)
+					xpu_datum_t *__a,
+					xpu_datum_t *__b)
 {
-	const xpu_inet_t *a = (const xpu_inet_t *)__a;
-	const xpu_inet_t *b = (const xpu_inet_t *)__b;
+	xpu_inet_t *a = (xpu_inet_t *)__a;
+	xpu_inet_t *b = (xpu_inet_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	*p_comp = inet_cmp_internal(a, b);

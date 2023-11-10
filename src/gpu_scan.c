@@ -291,7 +291,6 @@ buildOuterScanPlanInfo(PlannerInfo *root,
 					   ParamPathInfo **p_param_info)
 {
 	RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
-	List	   *input_rels_tlist = list_make1(makeInteger(baserel->relid));
 	List	   *dev_quals = NIL;
 	List	   *dev_costs = NIL;
 	List	   *host_quals = NIL;
@@ -329,7 +328,8 @@ buildOuterScanPlanInfo(PlannerInfo *root,
 
 		if (pgstrom_xpu_expression(rinfo->clause,
 								   xpu_task_flags,
-								   input_rels_tlist,
+								   baserel->relid,
+								   NIL,
 								   &devcost))
 		{
 			dev_quals = lappend(dev_quals, rinfo);
@@ -356,7 +356,8 @@ buildOuterScanPlanInfo(PlannerInfo *root,
 
 			if (pgstrom_xpu_expression(rinfo->clause,
 									   xpu_task_flags,
-									   input_rels_tlist,
+									   baserel->relid,
+									   NIL,
 									   &devcost))
 			{
 				dev_quals = lappend(dev_quals, rinfo);
@@ -516,8 +517,8 @@ try_fetch_xpuscan_planinfo(const Path *__path)
 typedef struct
 {
 	uint32_t	xpu_task_flags;
+	Index		scan_relid;
 	List	   *tlist_dev;
-	List	   *input_rels_tlist;
 	bool		resjunk;
 } build_projection_context;
 
@@ -539,7 +540,8 @@ __gpuscan_build_projection_walker(Node *node, void *__priv)
 	if (IsA(node, Var) ||
 		pgstrom_xpu_expression((Expr *)node,
 							   context->xpu_task_flags,
-							   context->input_rels_tlist,
+							   context->scan_relid,
+							   NIL,
 							   NULL))
 	{
 		AttrNumber		resno = list_length(context->tlist_dev) + 1;
@@ -564,7 +566,7 @@ gpuscan_build_projection(RelOptInfo *baserel,
 
 	memset(&context, 0, sizeof(build_projection_context));
 	context.xpu_task_flags = pp_info->xpu_task_flags;
-	context.input_rels_tlist = list_make1(makeInteger(baserel->relid));
+	context.scan_relid = baserel->relid;
 
 	if (tlist != NIL)
 	{
@@ -679,28 +681,29 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 					  pgstromPlanInfo *pp_info,
 					  const CustomScanMethods *xpuscan_plan_methods)
 {
-	codegen_context context;
+	codegen_context *context;
 	CustomScan	   *cscan;
-	List		   *input_rels_tlist = list_make1(makeInteger(baserel->relid));
 
+	context = create_codegen_context(best_path, pp_info);
 	/* code generation for WHERE-clause */
-	codegen_context_init(&context, pp_info->xpu_task_flags);
-	context.input_rels_tlist = input_rels_tlist;
-	pp_info->kexp_scan_quals = codegen_build_scan_quals(&context, pp_info->scan_quals);
+	pp_info->kexp_scan_quals = codegen_build_scan_quals(context, pp_info->scan_quals);
 	pp_info->scan_quals_fallback = pp_info->scan_quals;
 	/* code generation for the Projection */
-	context.tlist_dev = gpuscan_build_projection(baserel, pp_info, tlist);
-	pp_info->kexp_projection = codegen_build_projection(&context);
-	pp_info->kexp_scan_kvars_load = codegen_build_scan_loadvars(&context);
-	pp_info->kvars_depth = context.kvars_depth;
-	pp_info->kvars_resno = context.kvars_resno;
-	pp_info->kvars_types = context.kvars_types;
-	pp_info->kvars_exprs = context.kvars_exprs;
-	pp_info->extra_flags = context.extra_flags;
-	pp_info->extra_bufsz = context.extra_bufsz;
-	pp_info->used_params = context.used_params;
+	context->tlist_dev = gpuscan_build_projection(baserel, pp_info, tlist);
+	pp_info->kexp_projection = codegen_build_projection(context);
+	codegen_build_packed_kvars_load(context, pp_info);
+	codegen_build_packed_kvars_move(context, pp_info);
+	pp_info->kvars_deflist = context->kvars_deflist;
+	pp_info->extra_flags = context->extra_flags;
+	pp_info->extra_bufsz = context->extra_bufsz;
+	pp_info->used_params = context->used_params;
+	__build_explain_tlist_junks(root, baserel, context);
 
-	__build_explain_tlist_junks(root, baserel, &context);
+	/* assign kvec buffer size for this scan */
+	pp_info->kvars_deflist = context->kvars_deflist;
+	pp_info->kvecs_bufsz = KVEC_ALIGN(context->kvecs_usage);
+	pp_info->kvecs_ndims = context->kvecs_ndims;
+
 	/*
 	 * Build CustomScan(GpuScan) node
 	 */
@@ -711,7 +714,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	cscan->flags = best_path->flags;
 	cscan->methods = xpuscan_plan_methods;
 	cscan->custom_plans = NIL;
-	cscan->custom_scan_tlist = context.tlist_dev;
+	cscan->custom_scan_tlist = context->tlist_dev;
 
 	return cscan;
 }

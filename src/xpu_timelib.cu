@@ -61,53 +61,119 @@
  * xpu_date_t device type handlers
  */
 STATIC_FUNCTION(bool)
-xpu_date_datum_ref(kern_context *kcxt,
-				   xpu_datum_t *__result,
-				   int vclass,
-				   const kern_variable *kvar)
+xpu_date_datum_heap_read(kern_context *kcxt,
+                         const void *addr,
+                         xpu_datum_t *__result)
 {
 	xpu_date_t *result = (xpu_date_t *)__result;
 
 	result->expr_ops = &xpu_date_ops;
-	if (vclass == KVAR_CLASS__INLINE)
-		result->value = kvar->i32;
-	else if (vclass >= sizeof(DateADT))
-		result->value = *((const DateADT *)kvar->ptr);
-	else
+	result->value = *((const DateADT *)addr);
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_date_datum_arrow_read(kern_context *kcxt,
+                          const kern_data_store *kds,
+						  const kern_colmeta *cmeta,
+                          uint32_t kds_index,
+                          xpu_datum_t *__result)
+{
+	xpu_date_t *result = (xpu_date_t *)__result;
+	const void *addr;
+
+	if (cmeta->attopts.tag != ArrowType__Date)
 	{
-		STROM_ELOG(kcxt, "unexpected vclass for device date data type.");
+		STROM_ELOG(kcxt, "xpu_date_t must be mapped on Arrow::Date");
 		return false;
+	}
+
+	switch (cmeta->attopts.date.unit)
+	{
+		case ArrowDateUnit__Day:
+			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
+											  kds_index,
+											  sizeof(uint32_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				result->expr_ops = &xpu_date_ops;
+				result->value = *((uint32_t *)addr)
+					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+			}
+			break;
+
+		case ArrowDateUnit__MilliSecond:
+			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
+											  kds_index,
+											  sizeof(uint64_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				result->expr_ops = &xpu_date_ops;
+				result->value = *((uint64_t *)addr) / (SECS_PER_DAY * 1000)
+					- (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE);
+			}
+			break;
+
+		default:
+			STROM_ELOG(kcxt, "unknown unit size of Arrow::Date");
+			return false;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_date_datum_store(kern_context *kcxt,
-					 const xpu_datum_t *__arg,
-					 int *p_vclass,
-					 kern_variable *p_kvar)
+xpu_date_datum_kvec_load(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id,
+						 xpu_datum_t *__result)
 {
-	const xpu_date_t *arg = (const xpu_date_t *)__arg;
+	const kvec_date_t *kvecs = (const kvec_date_t *)__kvecs;
+	xpu_date_t *result = (xpu_date_t *)__result;
 
-	if (XPU_DATUM_ISNULL(arg))
-		*p_vclass = KVAR_CLASS__NULL;
-	else
-	{
-		p_kvar->u32 = arg->value;
-		*p_vclass = KVAR_CLASS__INLINE;
-	}
+	result->expr_ops = &xpu_date_ops;
+	result->value = kvecs->values[kvecs_id];
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_date_datum_kvec_save(kern_context *kcxt,
+						 const xpu_datum_t *__xdatum,
+						 kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id)
+{
+	const xpu_date_t *xdatum = (const xpu_date_t *)__xdatum;
+	kvec_date_t *kvecs = (kvec_date_t *)__kvecs;
+
+	kvecs->values[kvecs_id] = xdatum->value;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_date_datum_kvec_copy(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs_src,
+						 uint32_t kvecs_src_id,
+						 kvec_datum_t *__kvecs_dst,
+						 uint32_t kvecs_dst_id)
+{
+	const kvec_date_t *kvecs_src = (const kvec_date_t *)__kvecs_src;
+	kvec_date_t *kvecs_dst = (kvec_date_t *)__kvecs_dst;
+
+	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_date_datum_write(kern_context *kcxt,
 					 char *buffer,
+					 const kern_colmeta *cmeta,
 					 const xpu_datum_t *__arg)
 {
 	const xpu_date_t *arg = (const xpu_date_t *)__arg;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (buffer)
 		*((DateADT *)buffer) = arg->value;
 	return sizeof(DateADT);
@@ -116,9 +182,9 @@ xpu_date_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_date_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					const xpu_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	const xpu_date_t *arg = (const xpu_date_t *)__arg;
+	xpu_date_t *arg = (xpu_date_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -130,11 +196,11 @@ xpu_date_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_date_datum_comp(kern_context *kcxt,
 					int *p_comp,
-					const xpu_datum_t *__a,
-					const xpu_datum_t *__b)
+					xpu_datum_t *__a,
+					xpu_datum_t *__b)
 {
-	const xpu_date_t *a = (const xpu_date_t *)__a;
-	const xpu_date_t *b = (const xpu_date_t *)__b;
+	xpu_date_t *a = (xpu_date_t *)__a;
+	xpu_date_t *b = (xpu_date_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	if (a->value > b->value)
@@ -151,53 +217,143 @@ PGSTROM_SQLTYPE_OPERATORS(date, true, 4, sizeof(DateADT));
  * xpu_time_t device type handlers
  */
 STATIC_FUNCTION(bool)
-xpu_time_datum_ref(kern_context *kcxt,
-				   xpu_datum_t *__result,
-				   int vclass,
-				   const kern_variable *kvar)
+xpu_time_datum_heap_read(kern_context *kcxt,
+						 const void *addr,
+						 xpu_datum_t *__result)
 {
 	xpu_time_t *result = (xpu_time_t *)__result;
 
 	result->expr_ops = &xpu_time_ops;
-	if (vclass == KVAR_CLASS__INLINE)
-		result->value = kvar->i64;
-	else if (vclass >= sizeof(TimeADT))
-		result->value = *((const TimeADT *)kvar->ptr);
-	else
+	result->value = *((const TimeADT *)addr);
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_time_datum_arrow_read(kern_context *kcxt,
+                          const kern_data_store *kds,
+                          const kern_colmeta *cmeta,
+                          uint32_t kds_index,
+                          xpu_datum_t *__result)
+{
+	xpu_time_t *result = (xpu_time_t *)__result;
+	const void *addr;
+
+	if (cmeta->attopts.tag != ArrowType__Time)
 	{
-		STROM_ELOG(kcxt, "unexpected vclass for device time data type.");
+		STROM_ELOG(kcxt, "xpu_time_t must be mapped on Arrow::Time");
 		return false;
+	}
+
+	switch (cmeta->attopts.time.unit)
+	{
+		case ArrowTimeUnit__Second:
+			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
+											  kds_index,
+											  sizeof(int32_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				result->expr_ops = &xpu_time_ops;
+				result->value = (int64_t)(*((int32_t *)addr)) * 1000000L;
+			}
+			break;
+
+		case ArrowTimeUnit__MilliSecond:
+			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
+											  kds_index,
+											  sizeof(int32_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				result->expr_ops = &xpu_time_ops;
+				result->value = (int64_t)(*((int32_t *)addr)) * 1000L;
+			}
+			break;
+
+		case ArrowTimeUnit__MicroSecond:
+			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
+											  kds_index,
+											  sizeof(int64_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				result->expr_ops = &xpu_time_ops;
+				result->value = *((int64_t *)addr);
+			}
+			break;
+
+		case ArrowTimeUnit__NanoSecond:
+			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
+											  kds_index,
+											  sizeof(int64_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				result->expr_ops = &xpu_time_ops;
+				result->value = *((int64_t *)addr) / 1000L;
+			}
+			break;
+
+		default:
+			STROM_ELOG(kcxt, "unknown unit size of Arrow::Time");
+			return false;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_time_datum_store(kern_context *kcxt,
-					 const xpu_datum_t *__arg,
-					 int *p_vclass,
-					 kern_variable *p_kvar)
+xpu_time_datum_kvec_load(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id,
+						 xpu_datum_t *__result)
 {
-	const xpu_time_t *arg = (const xpu_time_t *)__arg;
+	const kvec_time_t *kvecs = (const kvec_time_t *)__kvecs;
+	xpu_time_t *result = (xpu_time_t *)__result;
 
-	if (XPU_DATUM_ISNULL(arg))
-		*p_vclass = KVAR_CLASS__NULL;
-	else
-	{
-		p_kvar->u64 = arg->value;
-		*p_vclass = KVAR_CLASS__INLINE;
-	}
+	result->expr_ops = &xpu_time_ops;
+	result->value = kvecs->values[kvecs_id];
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_time_datum_kvec_save(kern_context *kcxt,
+						 const xpu_datum_t *__xdatum,
+						 kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id)
+{
+	const xpu_time_t *xdatum = (const xpu_time_t *)__xdatum;
+	kvec_time_t *kvecs = (kvec_time_t *)__kvecs;
+
+	kvecs->values[kvecs_id] = xdatum->value;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_time_datum_kvec_copy(kern_context *kcxt,
+                         const kvec_datum_t *__kvecs_src,
+                         uint32_t kvecs_src_id,
+                         kvec_datum_t *__kvecs_dst,
+                         uint32_t kvecs_dst_id)
+{
+	const kvec_time_t *kvecs_src = (const kvec_time_t *)__kvecs_src;
+	kvec_time_t *kvecs_dst = (kvec_time_t *)__kvecs_dst;
+
+	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_time_datum_write(kern_context *kcxt,
 					 char *buffer,
+					 const kern_colmeta *cmeta,
 					 const xpu_datum_t *__arg)
 {
 	const xpu_time_t *arg = (const xpu_time_t *)__arg;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (buffer)
 		*((TimeADT *)buffer) = arg->value;
 	return sizeof(TimeADT);
@@ -206,9 +362,9 @@ xpu_time_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_time_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					const xpu_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	const xpu_time_t *arg = (const xpu_time_t *)__arg;
+	xpu_time_t *arg = (xpu_time_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -220,11 +376,11 @@ xpu_time_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_time_datum_comp(kern_context *kcxt,
 					int *p_comp,
-					const xpu_datum_t *__a,
-					const xpu_datum_t *__b)
+					xpu_datum_t *__a,
+					xpu_datum_t *__b)
 {
-	const xpu_time_t *a = (const xpu_time_t *)__a;
-	const xpu_time_t *b = (const xpu_time_t *)__b;
+	xpu_time_t *a = (xpu_time_t *)__a;
+	xpu_time_t *b = (xpu_time_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	if (a->value > b->value)
@@ -241,68 +397,96 @@ PGSTROM_SQLTYPE_OPERATORS(time, true, 8, sizeof(TimeADT));
  * xpu_timetz_t device type handlers
  */
 STATIC_FUNCTION(bool)
-xpu_timetz_datum_ref(kern_context *kcxt,
-					 xpu_datum_t *__result,
-					 int vclass,
-					 const kern_variable *kvar)
+xpu_timetz_datum_heap_read(kern_context *kcxt,
+						   const void *addr,
+						   xpu_datum_t *__result)
 {
 	xpu_timetz_t *result = (xpu_timetz_t *)__result;
 
 	result->expr_ops = &xpu_timetz_ops;
-	if (vclass >= SizeOfTimeTzADT)
-		memcpy(&result->value, kvar->ptr, SizeOfTimeTzADT);
-	else
-	{
-		STROM_ELOG(kcxt, "unexpected vclass for device timetz data type.");
-		return false;
-	}
+	memcpy(&result->value, addr, SizeOfTimeTzADT);
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_timetz_datum_store(kern_context *kcxt,
-					   const xpu_datum_t *__arg,
-					   int *p_vclass,
-					   kern_variable *p_kvar)
+xpu_timetz_datum_arrow_read(kern_context *kcxt,
+							const kern_data_store *kds,
+							const kern_colmeta *cmeta,
+							uint32_t kds_index,
+							xpu_datum_t *__result)
 {
-	xpu_timetz_t *arg = (xpu_timetz_t *)__arg;
+	STROM_ELOG(kcxt, "xpu_timetz_t cannot be mapped on any Arrow type");
+	return false;
+}
 
-	if (XPU_DATUM_ISNULL(arg))
-		*p_vclass = KVAR_CLASS__NULL;
-    else
-	{
-		TimeTzADT  *buf = (TimeTzADT *)kcxt_alloc(kcxt, SizeOfTimeTzADT);
+STATIC_FUNCTION(bool)
+xpu_timetz_datum_kvec_load(kern_context *kcxt,
+						   const kvec_datum_t *__kvecs,
+						   uint32_t kvecs_id,
+						   xpu_datum_t *__result)
+{
+	const kvec_timetz_t *kvecs = (const kvec_timetz_t *)__kvecs;
+	xpu_timetz_t *result = (xpu_timetz_t *)__result;
 
-		if (!buf)
-			return false;
-		buf->time = arg->value.time;
-		buf->zone = arg->value.zone;
-		p_kvar->ptr = buf;
-		*p_vclass = SizeOfTimeTzADT;
-	}
+	result->expr_ops = &xpu_timetz_ops;
+	result->value.time = kvecs->values[kvecs_id].time;
+	result->value.zone = kvecs->values[kvecs_id].zone;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_timetz_datum_kvec_save(kern_context *kcxt,
+                           const xpu_datum_t *__xdatum,
+                           kvec_datum_t *__kvecs,
+                           uint32_t kvecs_id)
+{
+	const xpu_timetz_t *xdatum = (const xpu_timetz_t *)__xdatum;
+	kvec_timetz_t *kvecs = (kvec_timetz_t *)__kvecs;
+
+	kvecs->values[kvecs_id].time = xdatum->value.time;
+	kvecs->values[kvecs_id].zone = xdatum->value.zone;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_timetz_datum_kvec_copy(kern_context *kcxt,
+						   const kvec_datum_t *__kvecs_src,
+						   uint32_t kvecs_src_id,
+						   kvec_datum_t *__kvecs_dst,
+						   uint32_t kvecs_dst_id)
+{
+	const kvec_timetz_t *kvecs_src = (const kvec_timetz_t *)__kvecs_src;
+	kvec_timetz_t *kvecs_dst = (kvec_timetz_t *)__kvecs_dst;
+
+	kvecs_dst->values[kvecs_dst_id].time = kvecs_src->values[kvecs_src_id].time;
+	kvecs_dst->values[kvecs_dst_id].time = kvecs_src->values[kvecs_src_id].zone;
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_timetz_datum_write(kern_context *kcxt,
 					   char *buffer,
+					   const kern_colmeta *cmeta,
 					   const xpu_datum_t *__arg)
 {
 	const xpu_timetz_t *arg = (const xpu_timetz_t *)__arg;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (buffer)
-		*((TimeTzADT *)buffer) = arg->value;
-	return sizeof(TimeTzADT);
+	{
+		TimeTzADT  *ttz = (TimeTzADT *)buffer;
+
+		ttz->time = arg->value.time;
+		ttz->zone = arg->value.zone;
+	}
+	return SizeOfTimeTzADT;
 }
 
 STATIC_FUNCTION(bool)
 xpu_timetz_datum_hash(kern_context *kcxt,
 					  uint32_t *p_hash,
-					  const xpu_datum_t *__arg)
+					  xpu_datum_t *__arg)
 {
-	const xpu_timetz_t *arg = (const xpu_timetz_t *)__arg;
+	xpu_timetz_t *arg = (xpu_timetz_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -314,8 +498,8 @@ xpu_timetz_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_timetz_datum_comp(kern_context *kcxt,
 					  int *p_comp,
-					  const xpu_datum_t *__a,
-					const xpu_datum_t *__b)
+					  xpu_datum_t *__a,
+					  xpu_datum_t *__b)
 {
 	STROM_ELOG(kcxt, "timetz has no compare handler");
 	return false;
@@ -326,53 +510,143 @@ PGSTROM_SQLTYPE_OPERATORS(timetz, false, 8, SizeOfTimeTzADT);
  * xpu_timestamp_t device type handlers
  */
 STATIC_FUNCTION(bool)
-xpu_timestamp_datum_ref(kern_context *kcxt,
-						xpu_datum_t *__result,
-						int vclass,
-						const kern_variable *kvar)
+xpu_timestamp_datum_heap_read(kern_context *kcxt,
+							  const void *addr,
+							  xpu_datum_t *__result)
 {
 	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
 
 	result->expr_ops = &xpu_timestamp_ops;
-	if (vclass == KVAR_CLASS__INLINE)
-		result->value = kvar->i64;
-	else if (vclass >= sizeof(Timestamp))
-		result->value = *((const Timestamp *)kvar->ptr);
-	else
+	result->value = *((int64_t *)addr);
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_timestamp_datum_arrow_read(kern_context *kcxt,
+							   const kern_data_store *kds,
+							   const kern_colmeta *cmeta,
+							   uint32_t kds_index,
+							   xpu_datum_t *__result)
+{
+	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
+	const uint64_t	*addr;
+
+	if (cmeta->attopts.tag != ArrowType__Timestamp)
 	{
-		STROM_ELOG(kcxt, "unexpected vclass for device timestamp data type.");
+		STROM_ELOG(kcxt, "xpu_timestamp_t must be mapped on Arrow::Timestamp");
 		return false;
+	}
+
+	switch (cmeta->attopts.timestamp.unit)
+	{
+		case ArrowTimeUnit__Second:
+			addr = (const uint64_t *)
+				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(uint64_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				result->expr_ops = &xpu_timestamp_ops;
+				result->value = *addr * 1000000L -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+			}
+			break;
+
+		case ArrowTimeUnit__MilliSecond:
+			addr = (const uint64_t *)
+				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(uint64_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				result->expr_ops = &xpu_timestamp_ops;
+				result->value = *addr * 1000L -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+			}
+			break;
+
+		case ArrowTimeUnit__MicroSecond:
+			addr = (const uint64_t *)
+				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(uint64_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				result->expr_ops = &xpu_timestamp_ops;
+				result->value = *addr -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+			}
+			break;
+
+		case ArrowTimeUnit__NanoSecond:
+			addr = (const uint64_t *)
+				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, sizeof(uint64_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				result->expr_ops = &xpu_timestamp_ops;
+				result->value = *addr / 1000L -
+					(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
+			}
+			break;
+
+		default:
+			STROM_ELOG(kcxt, "unknown unit size of Arrow::Timestamp");
+			return false;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_timestamp_datum_store(kern_context *kcxt,
-						  const xpu_datum_t *__arg,
-						  int *p_vclass,
-						  kern_variable *p_kvar)
+xpu_timestamp_datum_kvec_load(kern_context *kcxt,
+							  const kvec_datum_t *__kvecs,
+							  uint32_t kvecs_id,
+							  xpu_datum_t *__result)
 {
-	const xpu_timestamp_t *arg = (const xpu_timestamp_t *)__arg;
+	const kvec_timestamp_t *kvecs = (const kvec_timestamp_t *)__kvecs;
+	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
 
-	if (XPU_DATUM_ISNULL(arg))
-		*p_vclass = KVAR_CLASS__NULL;
-	else
-	{
-		p_kvar->i64 = arg->value;
-		*p_vclass = KVAR_CLASS__INLINE;
-	}
+	result->expr_ops = &xpu_timestamp_ops;
+	result->value = kvecs->values[kvecs_id];
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_timestamp_datum_kvec_save(kern_context *kcxt,
+							  const xpu_datum_t *__xdatum,
+							  kvec_datum_t *__kvecs,
+							  uint32_t kvecs_id)
+{
+	const xpu_timestamp_t *xdatum = (const xpu_timestamp_t *)__xdatum;
+	kvec_timestamp_t *kvecs = (kvec_timestamp_t *)__kvecs;
+
+	kvecs->values[kvecs_id] = xdatum->value;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_timestamp_datum_kvec_copy(kern_context *kcxt,
+							  const kvec_datum_t *__kvecs_src,
+							  uint32_t kvecs_src_id,
+							  kvec_datum_t *__kvecs_dst,
+							  uint32_t kvecs_dst_id)
+{
+	const kvec_timestamp_t *kvecs_src = (const kvec_timestamp_t *)__kvecs_src;
+	kvec_timestamp_t *kvecs_dst = (kvec_timestamp_t *)__kvecs_dst;
+
+	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_timestamp_datum_write(kern_context *kcxt,
 						  char *buffer,
+						  const kern_colmeta *cmeta,
 						  const xpu_datum_t *__arg)
 {
 	const xpu_timestamp_t *arg = (const xpu_timestamp_t *)__arg;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (buffer)
 		*((Timestamp *)buffer) = arg->value;
 	return sizeof(Timestamp);
@@ -381,9 +655,9 @@ xpu_timestamp_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_timestamp_datum_hash(kern_context *kcxt,
 						 uint32_t *p_hash,
-						 const xpu_datum_t *__arg)
+						 xpu_datum_t *__arg)
 {
-	const xpu_timestamp_t *arg = (const xpu_timestamp_t *)__arg;
+	xpu_timestamp_t *arg = (xpu_timestamp_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -395,11 +669,11 @@ xpu_timestamp_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_timestamp_datum_comp(kern_context *kcxt,
 						 int *p_comp,
-						 const xpu_datum_t *__a,
-						 const xpu_datum_t *__b)
+						 xpu_datum_t *__a,
+						 xpu_datum_t *__b)
 {
-	const xpu_timestamp_t *a = (const xpu_timestamp_t *)__a;
-	const xpu_timestamp_t *b = (const xpu_timestamp_t *)__b;
+	xpu_timestamp_t *a = (xpu_timestamp_t *)__a;
+	xpu_timestamp_t *b = (xpu_timestamp_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	if (a->value > b->value)
@@ -416,53 +690,77 @@ PGSTROM_SQLTYPE_OPERATORS(timestamp, true, 8, sizeof(Timestamp));
  * xpu_timestamptz_t device type handlers
  */
 STATIC_FUNCTION(bool)
-xpu_timestamptz_datum_ref(kern_context *kcxt,
-						  xpu_datum_t *__result,
-						  int vclass,
-						  const kern_variable *kvar)
+xpu_timestamptz_datum_heap_read(kern_context *kcxt,
+								const void *addr,
+								xpu_datum_t *__result)
 {
 	xpu_timestamptz_t *result = (xpu_timestamptz_t *)__result;
 
 	result->expr_ops = &xpu_timestamptz_ops;
-	if (vclass == KVAR_CLASS__INLINE)
-		result->value = kvar->i64;
-	else if (vclass >= sizeof(Timestamp))
-		result->value = *((const TimestampTz *)kvar->ptr);
-	else
-	{
-		STROM_ELOG(kcxt, "unexpected vclass for device timestamp data type.");
-		return false;
-	}
+	result->value = *((const TimestampTz *)addr);
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_timestamptz_datum_store(kern_context *kcxt,
-							const xpu_datum_t *__arg,
-							int *p_vclass,
-							kern_variable *p_kvar)
+xpu_timestamptz_datum_arrow_read(kern_context *kcxt,
+								 const kern_data_store *kds,
+								 const kern_colmeta *cmeta,
+								 uint32_t kds_index,
+								 xpu_datum_t *__result)
 {
-	const xpu_timestamptz_t *arg = (const xpu_timestamptz_t *)__arg;
+	STROM_ELOG(kcxt, "xpu_timestamptz_t cannot be mapped on any Arrow type");
+	return false;
+}
 
-	if (XPU_DATUM_ISNULL(arg))
-		*p_vclass = KVAR_CLASS__NULL;
-	else
-	{
-		p_kvar->i64 = arg->value;
-		*p_vclass = KVAR_CLASS__INLINE;
-	}
+STATIC_FUNCTION(bool)
+xpu_timestamptz_datum_kvec_load(kern_context *kcxt,
+								const kvec_datum_t *__kvecs,
+								uint32_t kvecs_id,
+								xpu_datum_t *__result)
+{
+	const kvec_timestamptz_t *kvecs = (const kvec_timestamptz_t *)__kvecs;
+	xpu_timestamptz_t *result = (xpu_timestamptz_t *)__result;
+
+	result->expr_ops = &xpu_timestamptz_ops;
+	result->value = kvecs->values[kvecs_id];
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_timestamptz_datum_kvec_save(kern_context *kcxt,
+								const xpu_datum_t *__xdatum,
+								kvec_datum_t *__kvecs,
+								uint32_t kvecs_id)
+{
+	const xpu_timestamptz_t *xdatum = (const xpu_timestamptz_t *)__xdatum;
+	kvec_timestamptz_t *kvecs = (kvec_timestamptz_t *)__kvecs;
+
+	kvecs->values[kvecs_id] = xdatum->value;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_timestamptz_datum_kvec_copy(kern_context *kcxt,
+								const kvec_datum_t *__kvecs_src,
+								uint32_t kvecs_src_id,
+								kvec_datum_t *__kvecs_dst,
+								uint32_t kvecs_dst_id)
+{
+	const kvec_timestamptz_t *kvecs_src = (const kvec_timestamptz_t *)__kvecs_src;
+	kvec_timestamptz_t *kvecs_dst = (kvec_timestamptz_t *)__kvecs_dst;
+
+	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_timestamptz_datum_write(kern_context *kcxt,
 							char *buffer,
+							const kern_colmeta *cmeta,
 							const xpu_datum_t *__arg)
 {
 	const xpu_timestamptz_t *arg = (const xpu_timestamptz_t *)__arg;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (buffer)
 		*((TimestampTz *)buffer) = arg->value;
 	return sizeof(TimestampTz);
@@ -471,9 +769,9 @@ xpu_timestamptz_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_timestamptz_datum_hash(kern_context *kcxt,
 						   uint32_t *p_hash,
-						   const xpu_datum_t *__arg)
+						   xpu_datum_t *__arg)
 {
-	const xpu_timestamptz_t *arg = (const xpu_timestamptz_t *)__arg;
+	xpu_timestamptz_t *arg = (xpu_timestamptz_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -485,11 +783,11 @@ xpu_timestamptz_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_timestamptz_datum_comp(kern_context *kcxt,
 						   int *p_comp,
-						   const xpu_datum_t *__a,
-						   const xpu_datum_t *__b)
+						   xpu_datum_t *__a,
+						   xpu_datum_t *__b)
 {
-	const xpu_timestamptz_t *a = (const xpu_timestamptz_t *)__a;
-	const xpu_timestamptz_t *b = (const xpu_timestamptz_t *)__b;
+	xpu_timestamptz_t *a = (xpu_timestamptz_t *)__a;
+	xpu_timestamptz_t *b = (xpu_timestamptz_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	if (a->value > b->value)
@@ -524,61 +822,125 @@ STATIC_DATA const int year_lengths[2] = {
 };
 
 STATIC_FUNCTION(bool)
-xpu_interval_datum_ref(kern_context *kcxt,
-					   xpu_datum_t *__result,
-					   int vclass,
-					   const kern_variable *kvar)
+xpu_interval_datum_heap_read(kern_context *kcxt,
+							 const void *addr,
+							 xpu_datum_t *__result)
 {
 	xpu_interval_t *result = (xpu_interval_t *)__result;
 
 	result->expr_ops = &xpu_interval_ops;
-	if (vclass >= sizeof(Interval))
+	memcpy(&result->value, addr, sizeof(Interval));
+    return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_interval_datum_arrow_read(kern_context *kcxt,
+							  const kern_data_store *kds,
+							  const kern_colmeta *cmeta,
+							  uint32_t kds_index,
+							  xpu_datum_t *__result)
+{
+	xpu_interval_t *result = (xpu_interval_t *)__result;
+	const void	   *addr;
+
+	if (cmeta->attopts.tag != ArrowType__Interval)
 	{
-		result->expr_ops = &xpu_interval_ops;
-		memcpy(&result->value, kvar->ptr, sizeof(Interval));
-	}
-	else
-	{
-		STROM_ELOG(kcxt, "unexpected vclass for device interval data type.");
+		STROM_ELOG(kcxt, "xpu_interval_t must be mapped on Arrow::Interval");
 		return false;
+	}
+	switch (cmeta->attopts.interval.unit)
+	{
+		case ArrowIntervalUnit__Year_Month:
+			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
+											  kds_index,
+											  sizeof(uint32_t));
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				result->expr_ops = &xpu_interval_ops;
+				result->value.month = *((uint32_t *)addr);
+				result->value.day   = 0;
+				result->value.time  = 0;
+			}
+			break;
+
+		case ArrowIntervalUnit__Day_Time:
+			addr = KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
+											  kds_index,
+											  sizeof(uint32_t) * 2);
+			if (!addr)
+				result->expr_ops = NULL;
+			else
+			{
+				result->expr_ops = &xpu_interval_ops;
+				result->value.month = 0;
+				result->value.day   = *((uint32_t *)addr);
+				result->value.time  = *((uint32_t *)addr + 1);
+			}
+			break;
+
+		default:
+			STROM_ELOG(kcxt, "unknown unit-size of Arrow::Interval");
+			return false;
 	}
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_interval_datum_store(kern_context *kcxt,
-						 const xpu_datum_t *__arg,
-						 int *p_vclass,
-						 kern_variable *p_kvar)
+xpu_interval_datum_kvec_load(kern_context *kcxt,
+							 const kvec_datum_t *__kvecs,
+							 uint32_t kvecs_id,
+							 xpu_datum_t *__result)
 {
-	xpu_interval_t *arg = (xpu_interval_t *)__arg;
+	const kvec_interval_t *kvecs = (const kvec_interval_t *)__kvecs;
+	xpu_interval_t *result = (xpu_interval_t *)__result;
 
-	if (XPU_DATUM_ISNULL(arg))
-		*p_vclass = KVAR_CLASS__NULL;
-	else
-	{
-		Interval   *buf = (Interval *)kcxt_alloc(kcxt, sizeof(Interval));
+	result->value.time  = kvecs->values[kvecs_id].time;
+	result->value.day   = kvecs->values[kvecs_id].day;
+	result->value.month = kvecs->values[kvecs_id].month;
+	return true;
+}
 
-		if (!buf)
-			return false;
-		buf->time  = arg->value.time;
-		buf->day   = arg->value.day;
-		buf->month = arg->value.month;
-		p_kvar->ptr = buf;
-		*p_vclass = sizeof(Interval);
-	}
+STATIC_FUNCTION(bool)
+xpu_interval_datum_kvec_save(kern_context *kcxt,
+							 const xpu_datum_t *__xdatum,
+							 kvec_datum_t *__kvecs,
+							 uint32_t kvecs_id)
+{
+	const xpu_interval_t *xdatum = (const xpu_interval_t *)__xdatum;
+	kvec_interval_t *kvecs = (kvec_interval_t *)__kvecs;
+
+	kvecs->values[kvecs_id].time  = xdatum->value.time;
+	kvecs->values[kvecs_id].day   = xdatum->value.day;
+	kvecs->values[kvecs_id].month = xdatum->value.month;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_interval_datum_kvec_copy(kern_context *kcxt,
+							 const kvec_datum_t *__kvecs_src,
+							 uint32_t kvecs_src_id,
+							 kvec_datum_t *__kvecs_dst,
+							 uint32_t kvecs_dst_id)
+{
+	const kvec_interval_t *kvecs_src = (const kvec_interval_t *)__kvecs_src;
+	kvec_interval_t *kvecs_dst = (kvec_interval_t *)__kvecs_dst;
+
+	memcpy(&kvecs_dst->values[kvecs_dst_id],
+		   &kvecs_src->values[kvecs_src_id],
+		   sizeof(Interval));
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_interval_datum_write(kern_context *kcxt,
 						 char *buffer,
+						 const kern_colmeta *cmeta,
 						 const xpu_datum_t *__arg)
 {
 	const xpu_interval_t *arg = (const xpu_interval_t *)__arg;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (buffer)
 		memcpy(buffer, &arg->value, sizeof(Interval));
 	return sizeof(Interval);
@@ -587,9 +949,9 @@ xpu_interval_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_interval_datum_hash(kern_context *kcxt,
 						uint32_t *p_hash,
-						const xpu_datum_t *__arg)
+						xpu_datum_t *__arg)
 {
-	const xpu_interval_t *arg = (const xpu_interval_t *)__arg;
+	xpu_interval_t *arg = (xpu_interval_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -616,12 +978,12 @@ interval_cmp_value(const Interval *ival)
 
 STATIC_FUNCTION(bool)
 xpu_interval_datum_comp(kern_context *kcxt,
-						 int *p_comp,
-						 const xpu_datum_t *__a,
-						 const xpu_datum_t *__b)
+						int *p_comp,
+						xpu_datum_t *__a,
+						xpu_datum_t *__b)
 {
-	const xpu_interval_t *a = (const xpu_interval_t *)__a;
-	const xpu_interval_t *b = (const xpu_interval_t *)__b;
+	xpu_interval_t *a = (xpu_interval_t *)__a;
+	xpu_interval_t *b = (xpu_interval_t *)__b;
 	int128_t	aval;
 	int128_t	bval;
 
@@ -632,7 +994,6 @@ xpu_interval_datum_comp(kern_context *kcxt,
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(interval, false, 8, sizeof(Interval));
-
 
 STATIC_FUNCTION(int)
 date2j(int y, int m, int d)
@@ -2950,92 +3311,93 @@ __pg_extract_timestamp_common(kern_context *kcxt,
 			return false;
 		}
 		memset(result, 0, sizeof(xpu_numeric_t));
-
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
 		switch (value)
 		{
 			case DTK_MICROSEC:
-				result->value = tm.tm_sec * 1000000 + fsec;
+				result->u.value = tm.tm_sec * 1000000 + fsec;
 				result->weight = 6;
 				break;
 			case DTK_MILLISEC:
-				result->value = tm.tm_sec * 1000 + fsec / 1000.0;
+				result->u.value = tm.tm_sec * 1000 + fsec / 1000.0;
 				result->weight = 3;
 				break;
 			case DTK_SECOND:
-				result->value = tm.tm_sec;
+				result->u.value = tm.tm_sec;
 				break;
 			case DTK_MINUTE:
-				result->value = tm.tm_min;
+				result->u.value = tm.tm_min;
 				break;
 			case DTK_HOUR:
-				result->value = tm.tm_hour;
+				result->u.value = tm.tm_hour;
 				break;
 			case DTK_DAY:
-				result->value = tm.tm_mday;
+				result->u.value = tm.tm_mday;
 				break;
 			case DTK_MONTH:
-				result->value = tm.tm_mon;
+				result->u.value = tm.tm_mon;
 				break;
 			case DTK_QUARTER:
-				result->value = (tm.tm_mon - 1) / 3 + 1;
+				result->u.value = (tm.tm_mon - 1) / 3 + 1;
 				break;
 			case DTK_WEEK:
-				result->value = date2isoweek(tm.tm_year,
-											 tm.tm_mon,
-											 tm.tm_mday);
+				result->u.value = date2isoweek(tm.tm_year,
+											   tm.tm_mon,
+											   tm.tm_mday);
 				break;
 			case DTK_YEAR:
 				/* there is no year 0, just 1 BC and 1 AD */
 				if (tm.tm_year > 0)
-					result->value = tm.tm_year;
+					result->u.value = tm.tm_year;
 				else
-					result->value = tm.tm_year - 1;
+					result->u.value = tm.tm_year - 1;
 				break;
 			case DTK_DECADE:
 				if (tm.tm_year >= 0)
-					result->value = tm.tm_year / 10;
+					result->u.value = tm.tm_year / 10;
 				else
-					result->value = -((8 - (tm.tm_year - 1)) / 10);
+					result->u.value = -((8 - (tm.tm_year - 1)) / 10);
 				break;
 			case DTK_CENTURY:
 				if (tm.tm_year > 0)
-					result->value = (tm.tm_year + 99) / 100;
+					result->u.value = (tm.tm_year + 99) / 100;
 				else
-					result->value = -((99 - (tm.tm_year - 1)) / 100);
+					result->u.value = -((99 - (tm.tm_year - 1)) / 100);
 				break;
 			case DTK_MILLENNIUM:
 				if (tm.tm_year > 0)
-					result->value = (tm.tm_year + 999) / 1000;
+					result->u.value = (tm.tm_year + 999) / 1000;
 				else
-					result->value = -((999 - (tm.tm_year - 1)) / 1000);
+					result->u.value = -((999 - (tm.tm_year - 1)) / 1000);
 				break;
 			case DTK_JULIAN:
-				result->value = date2j(tm.tm_year,
-									   tm.tm_mon,
-									   tm.tm_mday) * 1000000L +
+				result->u.value = date2j(tm.tm_year,
+										 tm.tm_mon,
+										 tm.tm_mday) * 1000000L +
 					(double)(tm.tm_hour * SECS_PER_HOUR +
 							 tm.tm_min  * SECS_PER_MINUTE +
 							 tm.tm_sec) * 1000000.0 / (double)SECS_PER_DAY;
 				result->weight = 6;
 				break;
 			case DTK_ISOYEAR:
-				result->value = date2isoyear(tm.tm_year,
-											 tm.tm_mon,
-											 tm.tm_mday);
+				result->u.value = date2isoyear(tm.tm_year,
+											   tm.tm_mon,
+											   tm.tm_mday);
 				break;
 			case DTK_DOW:
 			case DTK_ISODOW:
-				result->value = j2day(date2j(tm.tm_year,
-											 tm.tm_mon,
-											 tm.tm_mday));
-				if (value == DTK_ISODOW && result->value == 0)
-					result->value = 7;
+				result->u.value = j2day(date2j(tm.tm_year,
+											   tm.tm_mon,
+											   tm.tm_mday));
+				if (value == DTK_ISODOW && result->u.value == 0)
+					result->u.value = 7;
 				break;
 			case DTK_DOY:
-				result->value = (date2j(tm.tm_year,
-										tm.tm_mon,
-										tm.tm_mday) -
-								 date2j(tm.tm_year, 1, 1) + 1);
+				result->u.value = (date2j(tm.tm_year,
+										  tm.tm_mon,
+										  tm.tm_mday) -
+								   date2j(tm.tm_year, 1, 1) + 1);
 				break;
 			case DTK_TZ:
 			case DTK_TZ_MINUTE:
@@ -3044,16 +3406,17 @@ __pg_extract_timestamp_common(kern_context *kcxt,
 				STROM_ELOG(kcxt, "unsupported unit of timestamp");
 				return false;
 		}
-		result->expr_ops = &xpu_numeric_ops;
 	}
 	else if (type == RESERV)
 	{
 		memset(result, 0, sizeof(xpu_numeric_t));
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
 		if (value == DTK_EPOCH)
 		{
 			Timestamp	epoch = kcxt->session->hostEpochTimestamp;
 
-			result->value = (ts - epoch);
+			result->u.value = (ts - epoch);
 			result->weight = 6;
 		}
 		else
@@ -3061,7 +3424,6 @@ __pg_extract_timestamp_common(kern_context *kcxt,
 			STROM_ELOG(kcxt, "unsupported unit of timestamp");
 			return false;
 		}
-		result->expr_ops = &xpu_numeric_ops;
 	}
 	else
 	{
@@ -3138,6 +3500,7 @@ pgfn_extract_date(XPU_PGFUNCTION_ARGS)
 			case DTK_DOW:
 			case DTK_ISODOW:
 			case DTK_DOY:
+				/* returns NULL */
 				break;
 			/* Monotonically-increasing units */
 			case DTK_YEAR:
@@ -3147,11 +3510,11 @@ pgfn_extract_date(XPU_PGFUNCTION_ARGS)
 			case DTK_JULIAN:
 			case DTK_ISOYEAR:
 			case DTK_EPOCH:
+				result->expr_ops = &xpu_numeric_ops;
 				if (DATE_IS_NOBEGIN(dval.value))
 					result->kind = XPU_NUMERIC_KIND__NEG_INF;
 				else
 					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				result->expr_ops = &xpu_numeric_ops;
 				break;
 			default:
 				STROM_ELOG(kcxt, "not a supported unit of date");
@@ -3164,73 +3527,77 @@ pgfn_extract_date(XPU_PGFUNCTION_ARGS)
 
 		j2date(dval.value + POSTGRES_EPOCH_JDATE, &year, &mon, &mday);
 		memset(result, 0, sizeof(xpu_numeric_t));
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
 		switch (value)
 		{
 			case DTK_DAY:
-				result->value = mday;
+				result->u.value = mday;
 				break;
 			case DTK_MONTH:
-				result->value = mon;
+				result->u.value = mon;
 				break;
 			case DTK_QUARTER:
-				result->value = (mon - 1) / 3 + 1;
+				result->u.value = (mon - 1) / 3 + 1;
 				break;
 			case DTK_WEEK:
-				result->value = date2isoweek(year, mon, mday);
+				result->u.value = date2isoweek(year, mon, mday);
 				break;
 			case DTK_YEAR:
-				result->value = (year > 0 ? year : year - 1);
+				result->u.value = (year > 0 ? year : year - 1);
 				break;
 			case DTK_DECADE:
 				if (year >= 0)
-					result->value = year / 10;
+					result->u.value = year / 10;
 				else
-					result->value = -((8 - (year - 1)) / 10);
+					result->u.value = -((8 - (year - 1)) / 10);
 				break;
 			case DTK_CENTURY:
 				/* see comments in timestamp_part */
 				if (year > 0)
-					result->value = (year + 99) / 100;
+					result->u.value = (year + 99) / 100;
 				else
-					result->value = -((99 - (year - 1)) / 100);
+					result->u.value = -((99 - (year - 1)) / 100);
 				break;
 			case DTK_MILLENNIUM:
 				/* see comments in timestamp_part */
 				if (year > 0)
-					result->value = (year + 999) / 1000;
+					result->u.value = (year + 999) / 1000;
 				else
-					result->value = -((999 - (year - 1)) / 1000);
+					result->u.value = -((999 - (year - 1)) / 1000);
 				break;
 			case DTK_JULIAN:
-                result->value = dval.value + POSTGRES_EPOCH_JDATE;
+                result->u.value = dval.value + POSTGRES_EPOCH_JDATE;
                 break;
 			case DTK_ISOYEAR:
-                result->value = date2isoyear(year, mon, mday);
+                result->u.value = date2isoyear(year, mon, mday);
                 /* Adjust BC years */
-				if (result->value <= 0)
-					result->value -= 1;
+				if (result->u.value <= 0)
+					result->u.value -= 1;
 				break;
 			case DTK_DOW:
 			case DTK_ISODOW:
-				result->value = j2day(dval.value + POSTGRES_EPOCH_JDATE);
-				if (value == DTK_ISODOW && result->value == 0)
-					result->value = 7;
+				result->u.value = j2day(dval.value + POSTGRES_EPOCH_JDATE);
+				if (value == DTK_ISODOW && result->u.value == 0)
+					result->u.value = 7;
                 break;
 			case DTK_DOY:
-                result->value = date2j(year, mon, mday) - date2j(year, 1, 1) + 1;
+				result->u.value = (date2j(year, mon, mday) -
+								   date2j(year, 1, 1) + 1);
                 break;
-            default:
+			default:
 				STROM_ELOG(kcxt, "not a not supported for date");
 				return false;
 		}
-		result->expr_ops = &xpu_numeric_ops;
 	}
 	else if (type == RESERV && value == DTK_EPOCH)
 	{
-		result->value = ((int64_t)dval.value
-						 + POSTGRES_EPOCH_JDATE 
-						 - UNIX_EPOCH_JDATE) * SECS_PER_DAY;
+		memset(result, 0, sizeof(xpu_numeric_t));
 		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
+		result->u.value = ((int64_t)dval.value
+						   + POSTGRES_EPOCH_JDATE 
+						   - UNIX_EPOCH_JDATE) * SECS_PER_DAY;
 	}
 	else
 	{
@@ -3259,38 +3626,41 @@ pgfn_extract_time(XPU_PGFUNCTION_ARGS)
 		struct pg_tm tm;
 		fsec_t		fsec;
 
-		memset(result, 0, sizeof(xpu_numeric_t));
 		time2tm(tval.value, &tm, &fsec);
+
+		memset(result, 0, sizeof(xpu_numeric_t));
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
 		switch (value)
 		{
 			case DTK_MICROSEC:
-				result->value = tm.tm_sec * 1000000L + fsec;
+				result->u.value = tm.tm_sec * 1000000L + fsec;
 				break;
 			case DTK_MILLISEC:
-				result->value = tm.tm_sec * 1000000L + fsec;
+				result->u.value = tm.tm_sec * 1000000L + fsec;
 				result->weight = 3;
 				break;
 			case DTK_SECOND:
-				result->value = tm.tm_sec * 1000000L + fsec;
+				result->u.value = tm.tm_sec * 1000000L + fsec;
 				result->weight = 6;
 				break;
 			case DTK_MINUTE:
-				result->value = tm.tm_min;
+				result->u.value = tm.tm_min;
 				break;
 			case DTK_HOUR:
-				result->value = tm.tm_hour;
+				result->u.value = tm.tm_hour;
 				break;
 			default:
 				STROM_ELOG(kcxt, "unsupported unit of time");
 				return false;
 		}
-		result->expr_ops = &xpu_numeric_ops;
 	}
 	else if (type == RESERV && value == DTK_EPOCH)
 	{
 		memset(result, 0, sizeof(xpu_numeric_t));
-		result->value = tval.value / 1000000;
 		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
+		result->u.value = tval.value / 1000000;
 	}
 	else
 	{
@@ -3323,45 +3693,47 @@ pgfn_extract_timetz(XPU_PGFUNCTION_ARGS)
 
 		memset(result, 0, sizeof(xpu_numeric_t));
 		timetz2tm(&tval.value, &tm, &fsec, &tz);
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
 		switch (value)
 		{
 			case DTK_TZ:
-				result->value = -tz;
+				result->u.value = -tz;
                 break;
             case DTK_TZ_MINUTE:
-                result->value = (-tz / SECS_PER_MINUTE) % MINS_PER_HOUR;
+                result->u.value = (-tz / SECS_PER_MINUTE) % MINS_PER_HOUR;
                 break;
 			case DTK_TZ_HOUR:
-                result->value  = -tz / SECS_PER_HOUR;
+                result->u.value  = -tz / SECS_PER_HOUR;
                 break;
 			case DTK_MICROSEC:
-                result->value = tm.tm_sec * 1000000L + fsec;
+                result->u.value = tm.tm_sec * 1000000L + fsec;
                 break;
             case DTK_MILLISEC:
-				result->value = tm.tm_sec * 1000000L + fsec;
+				result->u.value = tm.tm_sec * 1000000L + fsec;
 				result->weight = 3;
 				break;
             case DTK_SECOND:
-				result->value = tm.tm_sec * 1000000L + fsec;
+				result->u.value = tm.tm_sec * 1000000L + fsec;
 				result->weight = 6;
 				break;
             case DTK_MINUTE:
-                result->value = tm.tm_min;
+                result->u.value = tm.tm_min;
                 break;
 			case DTK_HOUR:
-                result->value = tm.tm_hour;
+                result->u.value = tm.tm_hour;
                 break;
 			default:
 				STROM_ELOG(kcxt, "unsupported unit of time");
 				return false;
 		}
-		result->expr_ops = &xpu_numeric_ops;
 	}
 	else if (type == RESERV && value == DTK_EPOCH)
 	{
 		memset(result, 0, sizeof(xpu_numeric_ops));
-		result->value = tval.value.time / 1000000L + tval.value.zone;
 		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
+		result->u.value = tval.value.time / 1000000L + tval.value.zone;
 	}
 	else
 	{
@@ -3409,48 +3781,51 @@ pgfn_extract_interval(XPU_PGFUNCTION_ARGS)
 		tm_sec  = tfrac;
 		tm_usec = time;
 
+		memset(result, 0, sizeof(xpu_numeric_t));
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
 		switch (value)
 		{
 			case DTK_MICROSEC:
-				result->value = tm_sec * 1000000L + tm_usec;
+				result->u.value = tm_sec * 1000000L + tm_usec;
 				break;
 			case DTK_MILLISEC:
-				result->value = tm_sec * 1000000L + tm_usec;
+				result->u.value = tm_sec * 1000000L + tm_usec;
 				result->weight = 3;
 				break;
             case DTK_SECOND:
-				result->value = tm_sec * 1000000L + tm_usec;
+				result->u.value = tm_sec * 1000000L + tm_usec;
 				result->weight = 6;
 				break;
             case DTK_MINUTE:
-                result->value = tm_min;
+                result->u.value = tm_min;
                 break;
 			case DTK_HOUR:
-                result->value = tm_hour;
+                result->u.value = tm_hour;
                 break;
             case DTK_DAY:
-                result->value = tm_mday;
+                result->u.value = tm_mday;
                 break;
             case DTK_MONTH:
-                result->value = tm_mon;
+                result->u.value = tm_mon;
                 break;
             case DTK_QUARTER:
-                result->value = (tm_mon / 3) + 1;
+                result->u.value = (tm_mon / 3) + 1;
                 break;
             case DTK_YEAR:
-                result->value = tm_year;
+                result->u.value = tm_year;
                 break;
 			case DTK_DECADE:
 				/* caution: C division may have negative remainder */
-				result->value = tm_year / 10;
+				result->u.value = tm_year / 10;
 				break;
 			case DTK_CENTURY:
                 /* caution: C division may have negative remainder */
-                result->value = tm_year / 100;
+                result->u.value = tm_year / 100;
                 break;
 			case DTK_MILLENNIUM:
 				/* caution: C division may have negative remainder */
-				result->value = tm_year / 1000;
+				result->u.value = tm_year / 1000;
 				break;
 			default:
 				STROM_ELOG(kcxt, "not a supported for interval type");
@@ -3460,13 +3835,14 @@ pgfn_extract_interval(XPU_PGFUNCTION_ARGS)
 	else if (type == RESERV && value == DTK_EPOCH)
 	{
 		memset(result, 0, sizeof(xpu_numeric_t));
-		result->value =
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
+		result->weight = 6;
+		result->u.value =
 			(((int64_t)ival.value.month / MONTHS_PER_YEAR) * SECS_PER_YEAR +
 			 ((int64_t)ival.value.month % MONTHS_PER_YEAR) * SECS_PER_MONTH +
 			 (int64_t)ival.value.day * SECS_PER_DAY) * 1000000L +
 			(int64_t)ival.value.time;
-		result->weight = 6;
-		result->expr_ops = &xpu_numeric_ops;
 	}
     else
 	{

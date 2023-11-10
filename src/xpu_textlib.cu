@@ -13,6 +13,47 @@
 #include "xpu_common.h"
 
 /*
+ * Arrow handlers
+ */
+STATIC_FUNCTION(bool)
+__xpu_varlena_datum_arrow_ref(kern_context *kcxt,
+							  const kern_data_store *kds,
+							  const kern_colmeta *cmeta,
+							  uint32_t kds_index,
+							  int *p_length,
+							  const char **p_value)
+{
+	uint32_t	unitsz;
+
+	switch (cmeta->attopts.tag)
+	{
+		case ArrowType__FixedSizeBinary:
+			unitsz = cmeta->attopts.fixed_size_binary.byteWidth;
+			*p_value = (const char *)
+				KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta, kds_index, unitsz);
+			*p_length = unitsz;
+			break;
+
+		case ArrowType__Utf8:
+		case ArrowType__Binary:
+			*p_value = (const char *)
+				KDS_ARROW_REF_VARLENA32_DATUM(kds, cmeta, kds_index, p_length);
+			break;
+
+		case ArrowType__LargeUtf8:
+		case ArrowType__LargeBinary:
+			*p_value = (const char *)
+				KDS_ARROW_REF_VARLENA64_DATUM(kds, cmeta, kds_index, p_length);
+			break;
+
+		default:
+			STROM_ELOG(kcxt, "not a mappable Arrow data type");
+			return false;
+	}
+	return true;
+}
+
+/*
  * bpchar type handlers
  */
 INLINE_FUNCTION(int)
@@ -29,76 +70,98 @@ bpchar_truelen(const char *s, int len)
 }
 
 STATIC_FUNCTION(bool)
-xpu_bpchar_datum_ref(kern_context *kcxt,
-					 xpu_datum_t *__result,
-					 int vclass,
-					 const kern_variable *kvar)
+xpu_bpchar_datum_heap_read(kern_context *kcxt,
+						   const void *addr,
+						   xpu_datum_t *__result)
 {
-	xpu_bpchar_t   *result = (xpu_bpchar_t *)__result;
-	const char	   *addr = (const char *)kvar->ptr;
+	xpu_bpchar_t *result = (xpu_bpchar_t *)__result;
 
-	if (vclass == KVAR_CLASS__VARLENA)
+	if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
 	{
-		if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
-		{
-			result->value  = addr;
-			result->length = -1;
-		}
-		else
-		{
-			result->value  = VARDATA_ANY(addr);
-			result->length = bpchar_truelen(result->value, VARSIZE_ANY_EXHDR(addr));
-		}
-	}
-	else if (vclass >= 0)
-	{
-		result->value  = addr;
-		result->length = vclass;
+		result->value  = (const char *)addr;
+		result->length = -1;
 	}
 	else
 	{
-		STROM_ELOG(kcxt, "unexpected vclass for device bpchar data type.");
-		return false;
+		result->value  = VARDATA_ANY(addr);
+		result->length = bpchar_truelen(result->value, VARSIZE_ANY_EXHDR(addr));
 	}
 	result->expr_ops = &xpu_bpchar_ops;
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_bpchar_datum_store(kern_context *kcxt,
-					   const xpu_datum_t *__arg,
-					   int *p_vclass,
-					   kern_variable *p_kvar)
+xpu_bpchar_datum_arrow_read(kern_context *kcxt,
+							const kern_data_store *kds,
+							const kern_colmeta *cmeta,
+							uint32_t kds_index,
+							xpu_datum_t *__result)
 {
-	const xpu_bpchar_t *arg = (const xpu_bpchar_t *)__arg;
+	xpu_bpchar_t *result = (xpu_bpchar_t *)__result;
 
-	if (XPU_DATUM_ISNULL(arg))
-	{
-		*p_vclass = KVAR_CLASS__NULL;
-	}
-	else if (arg->length < 0)
-	{
-		*p_vclass   = KVAR_CLASS__VARLENA;
-		p_kvar->ptr = (void *)arg->value;
-	}
-	else
-	{
-		*p_vclass   = arg->length;
-		p_kvar->ptr = (void *)arg->value;
-	}
+	if (!__xpu_varlena_datum_arrow_ref(kcxt, kds, cmeta,
+									   kds_index,
+									   &result->length,
+									   &result->value))
+		return false;
+
+	result->expr_ops = (result->value ? &xpu_bpchar_ops : NULL);
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bpchar_datum_kvec_load(kern_context *kcxt,
+						   const kvec_datum_t *__kvecs,
+						   uint32_t kvecs_id,
+						   xpu_datum_t *__result)
+{
+	const kvec_bpchar_t *kvecs = (const kvec_bpchar_t *)__kvecs;
+	xpu_bpchar_t *result = (xpu_bpchar_t *)__result;
+
+	result->expr_ops = &xpu_bpchar_ops;
+	result->length = kvecs->length[kvecs_id];
+	result->value  = kvecs->values[kvecs_id];
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bpchar_datum_kvec_save(kern_context *kcxt,
+						   const xpu_datum_t *__xdatum,
+						   kvec_datum_t *__kvecs,
+						   uint32_t kvecs_id)
+{
+	const xpu_bpchar_t *xdatum = (const xpu_bpchar_t *)__xdatum;
+	kvec_bpchar_t *kvecs = (kvec_bpchar_t *)__kvecs;
+
+	kvecs->length[kvecs_id] = xdatum->length;
+	kvecs->values[kvecs_id] = xdatum->value;
+    return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bpchar_datum_kvec_copy(kern_context *kcxt,
+                          const kvec_datum_t *__kvecs_src,
+                          uint32_t kvecs_src_id,
+                          kvec_datum_t *__kvecs_dst,
+                          uint32_t kvecs_dst_id)
+{
+	const kvec_bpchar_t *kvecs_src = (const kvec_bpchar_t *)__kvecs_src;
+	kvec_bpchar_t *kvecs_dst = (kvec_bpchar_t *)__kvecs_dst;
+
+	kvecs_dst->length[kvecs_dst_id] = kvecs_src->length[kvecs_src_id];
+	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_bpchar_datum_write(kern_context *kcxt,
 					   char *buffer,
+					   const kern_colmeta *cmeta,
 					   const xpu_datum_t *__arg)
 {
 	const xpu_bpchar_t *arg = (const xpu_bpchar_t *)__arg;
 	int		nbytes;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (arg->length < 0)
 	{
 		nbytes = VARSIZE_ANY(arg->value);
@@ -120,9 +183,9 @@ xpu_bpchar_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_bpchar_datum_hash(kern_context*kcxt,
 					  uint32_t *p_hash,
-					  const xpu_datum_t *__arg)
+					  xpu_datum_t *__arg)
 {
-	const xpu_bpchar_t *arg = (const xpu_bpchar_t *)__arg;
+	xpu_bpchar_t *arg = (xpu_bpchar_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -136,11 +199,11 @@ xpu_bpchar_datum_hash(kern_context*kcxt,
 STATIC_FUNCTION(bool)
 xpu_bpchar_datum_comp(kern_context *kcxt,
 					  int *p_comp,
-					  const xpu_datum_t *__str1,
-					  const xpu_datum_t *__str2)
+					  xpu_datum_t *__str1,
+					  xpu_datum_t *__str2)
 {
-	const xpu_bpchar_t *str1 = (const xpu_bpchar_t *)__str1;
-	const xpu_bpchar_t *str2 = (const xpu_bpchar_t *)__str2;
+	xpu_bpchar_t *str1 = (xpu_bpchar_t *)__str1;
+	xpu_bpchar_t *str2 = (xpu_bpchar_t *)__str2;
 	int			sz1, sz2;
 	int			comp;
 
@@ -167,76 +230,98 @@ PGSTROM_SQLTYPE_OPERATORS(bpchar, false, 4, -1);
  * xpu_text_t device type handler
  */
 STATIC_FUNCTION(bool)
-xpu_text_datum_ref(kern_context *kcxt,
-				   xpu_datum_t *__result,
-				   int vclass,
-				   const kern_variable *kvar)
+xpu_text_datum_heap_read(kern_context *kcxt,
+						 const void *addr,
+						 xpu_datum_t *__result)
 {
 	xpu_text_t *result = (xpu_text_t *)__result;
-	const char *addr = (const char *)kvar->ptr;
 
-	if (vclass == KVAR_CLASS__VARLENA)
+	if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
 	{
-		if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
-		{
-			result->value  = addr;
-			result->length = -1;
-		}
-		else
-		{
-			result->value  = VARDATA_ANY(addr);
-			result->length = VARSIZE_ANY_EXHDR(addr);
-		}
-	}
-	else if (vclass >= 0)
-	{
-		result->value = addr;
-		result->length = vclass;
+		result->value  = (const char *)addr;
+		result->length = -1;
 	}
 	else
 	{
-		STROM_ELOG(kcxt, "unexpected vclass for device bpchar data type.");
-		return false;
+		result->value  = VARDATA_ANY(addr);
+		result->length = bpchar_truelen(result->value, VARSIZE_ANY_EXHDR(addr));
 	}
 	result->expr_ops = &xpu_text_ops;
 	return true;
 }
 
 STATIC_FUNCTION(bool)
-xpu_text_datum_store(kern_context *kcxt,
-					 const xpu_datum_t *__arg,
-					 int *p_vclass,
-					 kern_variable *p_kvar)
+xpu_text_datum_arrow_read(kern_context *kcxt,
+						  const kern_data_store *kds,
+						  const kern_colmeta *cmeta,
+						  uint32_t kds_index,
+						  xpu_datum_t *__result)
 {
-	const xpu_text_t *arg = (const xpu_text_t *)__arg;
+	xpu_text_t *result = (xpu_text_t *)__result;
 
-	if (XPU_DATUM_ISNULL(arg))
-	{
-		*p_vclass = KVAR_CLASS__NULL;
-	}
-	else if (arg->length < 0)
-	{
-		*p_vclass   = KVAR_CLASS__VARLENA;
-		p_kvar->ptr = (void *)arg->value;
-	}
-	else
-	{
-		*p_vclass   = arg->length;
-		p_kvar->ptr = (void *)arg->value;
-	}
+	if (!__xpu_varlena_datum_arrow_ref(kcxt, kds, cmeta,
+									   kds_index,
+									   &result->length,
+									   &result->value))
+		return false;
+
+	result->expr_ops = (result->value ? &xpu_text_ops : NULL);
+	return false;
+}
+
+STATIC_FUNCTION(bool)
+xpu_text_datum_kvec_load(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id,
+						 xpu_datum_t *__result)
+{
+	const kvec_text_t *kvecs = (const kvec_text_t *)__kvecs;
+	xpu_text_t *result = (xpu_text_t *)__result;
+
+	result->expr_ops = &xpu_text_ops;
+	result->length = kvecs->length[kvecs_id];
+	result->value  = kvecs->values[kvecs_id];
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_text_datum_kvec_save(kern_context *kcxt,
+						 const xpu_datum_t *__xdatum,
+						 kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id)
+{
+	const xpu_text_t *xdatum = (const xpu_text_t *)__xdatum;
+	kvec_text_t *kvecs = (kvec_text_t *)__kvecs;
+
+	kvecs->length[kvecs_id] = xdatum->length;
+	kvecs->values[kvecs_id] = xdatum->value;
+    return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_text_datum_kvec_copy(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs_src,
+						 uint32_t kvecs_src_id,
+						 kvec_datum_t *__kvecs_dst,
+						 uint32_t kvecs_dst_id)
+{
+	const kvec_text_t *kvecs_src = (const kvec_text_t *)__kvecs_src;
+	kvec_text_t *kvecs_dst = (kvec_text_t *)__kvecs_dst;
+
+	kvecs_dst->length[kvecs_dst_id] = kvecs_src->length[kvecs_src_id];
+	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_text_datum_write(kern_context *kcxt,
 					 char *buffer,
+					 const kern_colmeta *cmeta,
 					 const xpu_datum_t *__arg)
 {
 	const xpu_text_t *arg = (const xpu_text_t *)__arg;
 	int		nbytes;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
 	if (arg->length < 0)
 	{
 		nbytes = VARSIZE_ANY(arg->value);
@@ -258,9 +343,9 @@ xpu_text_datum_write(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_text_datum_hash(kern_context *kcxt,
 					uint32_t *p_hash,
-					const xpu_datum_t *__arg)
+					xpu_datum_t *__arg)
 {
-	const xpu_text_t *arg = (const xpu_text_t *)__arg;
+	xpu_text_t *arg = (xpu_text_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -274,11 +359,11 @@ xpu_text_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_text_datum_comp(kern_context *kcxt,
 					int *p_comp,
-					const xpu_datum_t *__str1,
-					const xpu_datum_t *__str2)
+					xpu_datum_t *__str1,
+					xpu_datum_t *__str2)
 {
-	const xpu_text_t *str1 = (const xpu_text_t *)__str1;
-	const xpu_text_t *str2 = (const xpu_text_t *)__str2;
+	xpu_text_t *str1 = (xpu_text_t *)__str1;
+	xpu_text_t *str2 = (xpu_text_t *)__str2;
 	int			comp;
 
 	if (!xpu_text_is_valid(kcxt, str1) ||
@@ -302,36 +387,93 @@ PGSTROM_SQLTYPE_OPERATORS(text, false, 4, -1);
  * xpu_bytea_t device type handler
  */
 STATIC_FUNCTION(bool)
-xpu_bytea_datum_ref(kern_context *kcxt,
-					xpu_datum_t *__result,
-					int vclass,
-					const kern_variable *kvar)
+xpu_bytea_datum_heap_read(kern_context *kcxt,
+						  const void *addr,
+						  xpu_datum_t *__result)
 {
 	xpu_bytea_t *result = (xpu_bytea_t *)__result;
-	const char	*addr = (const char *)kvar->ptr;
 
-	if (vclass == KVAR_CLASS__VARLENA)
+	if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
 	{
-		result->value  = VARDATA_ANY(addr);
-		result->length = VARSIZE_ANY_EXHDR(addr);
-	}
-	else if (vclass >= 0)
-	{
-		result->value  = addr;
-		result->length = vclass;
+		result->value  = (const char *)addr;
+		result->length = -1;
 	}
 	else
 	{
-		STROM_ELOG(kcxt, "unexpected vclass for device bytea data type.");
-		return false;
+		result->value  = VARDATA_ANY(addr);
+		result->length = bpchar_truelen(result->value, VARSIZE_ANY_EXHDR(addr));
 	}
 	result->expr_ops = &xpu_bytea_ops;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bytea_datum_arrow_read(kern_context *kcxt,
+						   const kern_data_store *kds,
+						   const kern_colmeta *cmeta,
+						   uint32_t kds_index,
+						   xpu_datum_t *__result)
+{
+	xpu_bytea_t *result = (xpu_bytea_t *)__result;
+
+	if (!__xpu_varlena_datum_arrow_ref(kcxt, kds, cmeta,
+									   kds_index,
+									   &result->length,
+									   &result->value))
+		return false;
+
+	result->expr_ops = (result->value ? &xpu_bytea_ops : NULL);
+	return false;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bytea_datum_kvec_load(kern_context *kcxt,
+						  const kvec_datum_t *__kvecs,
+						  uint32_t kvecs_id,
+						  xpu_datum_t *__result)
+{
+	const kvec_bytea_t *kvecs = (const kvec_bytea_t *)__kvecs;
+	xpu_bytea_t *result = (xpu_bytea_t *)__result;
+
+	result->expr_ops = &xpu_bytea_ops;
+	result->length = kvecs->length[kvecs_id];
+	result->value  = kvecs->values[kvecs_id];
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bytea_datum_kvec_save(kern_context *kcxt,
+						  const xpu_datum_t *__xdatum,
+						  kvec_datum_t *__kvecs,
+						  uint32_t kvecs_id)
+{
+	const xpu_bytea_t *xdatum = (const xpu_bytea_t *)__xdatum;
+	kvec_bytea_t *kvecs = (kvec_bytea_t *)__kvecs;
+
+	kvecs->length[kvecs_id] = xdatum->length;
+	kvecs->values[kvecs_id] = xdatum->value;
+    return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_bytea_datum_kvec_copy(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs_src,
+						 uint32_t kvecs_src_id,
+						 kvec_datum_t *__kvecs_dst,
+						 uint32_t kvecs_dst_id)
+{
+	const kvec_bytea_t *kvecs_src = (const kvec_bytea_t *)__kvecs_src;
+	kvec_bytea_t *kvecs_dst = (kvec_bytea_t *)__kvecs_dst;
+
+	kvecs_dst->length[kvecs_dst_id] = kvecs_src->length[kvecs_src_id];
+	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_bytea_datum_write(kern_context *kcxt,
 					  char *buffer,
+					  const kern_colmeta *cmeta,
 					  const xpu_datum_t *__arg)
 {
 	const xpu_bytea_t *arg = (const xpu_bytea_t *)__arg;
@@ -358,36 +500,11 @@ xpu_bytea_datum_write(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(bool)
-xpu_bytea_datum_store(kern_context *kcxt,
-					  const xpu_datum_t *__arg,
-					  int *p_vclass,
-					  kern_variable *p_kvar)
-{
-	const xpu_bytea_t *arg = (const xpu_bytea_t *)__arg;
-
-	if (XPU_DATUM_ISNULL(arg))
-	{
-		*p_vclass = KVAR_CLASS__NULL;
-	}
-	else if (arg->length < 0)
-	{
-		*p_vclass   = KVAR_CLASS__VARLENA;
-		p_kvar->ptr = (void *)arg->value;
-	}
-	else
-	{
-		*p_vclass   = arg->length;
-		p_kvar->ptr = (void *)arg->value;
-	}
-	return true;
-}
-
-STATIC_FUNCTION(bool)
 xpu_bytea_datum_hash(kern_context *kcxt,
 					 uint32_t *p_hash,
-					 const xpu_datum_t *__arg)
+					 xpu_datum_t *__arg)
 {
-	const xpu_bytea_t *arg = (const xpu_bytea_t *)__arg;
+	xpu_bytea_t *arg = (xpu_bytea_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
@@ -401,11 +518,11 @@ xpu_bytea_datum_hash(kern_context *kcxt,
 STATIC_FUNCTION(bool)
 xpu_bytea_datum_comp(kern_context *kcxt,
 					 int *p_comp,
-					 const xpu_datum_t *__a,
-					 const xpu_datum_t *__b)
+					 xpu_datum_t *__a,
+					 xpu_datum_t *__b)
 {
-	const xpu_bytea_t *a = (const xpu_bytea_t *)__a;
-	const xpu_bytea_t *b = (const xpu_bytea_t *)__b;
+	xpu_bytea_t *a = (xpu_bytea_t *)__a;
+	xpu_bytea_t *b = (xpu_bytea_t *)__b;
 	int			comp;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
@@ -455,8 +572,8 @@ PGSTROM_SQLTYPE_OPERATORS(bytea, false, 4, -1);
 			int		comp;												\
 																		\
 			if (!xpu_bpchar_datum_comp(kcxt, &comp,						\
-									   (const xpu_datum_t *)&datum_a,	\
-									   (const xpu_datum_t *)&datum_b))	\
+									   (xpu_datum_t *)&datum_a,			\
+									   (xpu_datum_t *)&datum_b))		\
 				return false;											\
 			result->value = (comp OPER 0);								\
 			result->expr_ops = &xpu_bool_ops;							\
@@ -522,8 +639,8 @@ pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
 			int		comp;												\
 																		\
 			if (!xpu_text_datum_comp(kcxt, &comp,						\
-									 (const xpu_datum_t *)&datum_a,		\
-									 (const xpu_datum_t *)&datum_b))	\
+									 (xpu_datum_t *)&datum_a,			\
+									 (xpu_datum_t *)&datum_b))			\
 				return false;											\
 			result->value = (comp OPER 0);								\
 			result->expr_ops = &xpu_bool_ops;							\

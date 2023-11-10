@@ -3249,7 +3249,7 @@ retry:
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
 						shmem_sz,
-						CU_STREAM_PER_THREAD,
+						CU_STREAM_LEGACY,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
@@ -3258,7 +3258,7 @@ retry:
 				 "failed on cuLaunchKernel: %s", cuStrError(rc));
 		goto bailout;
 	}
-	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	rc = cuStreamSynchronize(CU_STREAM_LEGACY);
 	if (rc != CUDA_SUCCESS)
 	{
 		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
@@ -3437,7 +3437,7 @@ retry:
 							grid_sz, 1, 1,
 							block_sz, 1, 1,
 							shmem_sz,
-							CU_STREAM_PER_THREAD,
+							CU_STREAM_LEGACY,
 							kern_args,
 							NULL);
 		if (rc != CUDA_SUCCESS)
@@ -3447,7 +3447,7 @@ retry:
 			goto bailout;
 		}
 	}
-	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	rc = cuStreamSynchronize(CU_STREAM_LEGACY);
     if (rc != CUDA_SUCCESS)
     {
 		snprintf(cmd->errbuf, sizeof(cmd->errbuf),

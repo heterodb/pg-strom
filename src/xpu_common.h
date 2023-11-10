@@ -244,6 +244,60 @@ __strcmp(const char *s1, const char *s2)
 	return c1 - c2;
 }
 
+/* ----------------------------------------------------------------
+ *
+ * Fundamental CUDA definitions
+ *
+ * ----------------------------------------------------------------
+ */
+#define WARPSIZE				32
+#define MAXTHREADS_PER_BLOCK	1024
+#define CUDA_L1_CACHELINE_SZ	128
+
+#if defined(__CUDACC__)
+/* Thread index at CUDA C++ */
+#define get_group_id()			(blockIdx.x)
+#define get_num_groups()		(gridDim.x)
+#define get_local_id()			(threadIdx.x)
+#define get_local_size()		(blockDim.x)
+#define get_global_id()			(blockDim.x * blockIdx.x + threadIdx.x)
+#define get_global_base()		(blockDim.x * blockIdx.x)
+#define get_global_size()		(blockDim.x * gridDim.x)
+
+/* Dynamic shared memory entrypoint */
+extern __shared__ char __pgstrom_dynamic_shared_workmem[] __MAXALIGNED__;
+#define SHARED_WORKMEM(OFFSET)					\
+	(__pgstrom_dynamic_shared_workmem + (OFFSET))
+
+/* Reference to the special registers */
+INLINE_FUNCTION(uint32_t) LaneId(void)
+{
+	uint32_t	rv;
+
+	asm volatile("mov.u32 %0, %laneid;" : "=r"(rv) );
+
+	return rv;
+}
+
+INLINE_FUNCTION(uint32_t) DynamicShmemSize(void)
+{
+	uint32_t	rv;
+
+	asm volatile("mov.u32 %0, %dynamic_smem_size;" : "=r"(rv) );
+
+	return rv;
+}
+
+INLINE_FUNCTION(uint32_t) TotalShmemSize(void)
+{
+	uint32_t	rv;
+
+	asm volatile("mov.u32 %0, %total_smem_size;" : "=r"(rv) );
+
+	return rv;
+}
+#endif		/* __CUDACC__ */
+
 /*
  * TypeOpCode / FuncOpCode
  */
@@ -253,8 +307,7 @@ typedef enum {
 #include "xpu_opcodes.h"
 	TypeOpCode__composite,
 	TypeOpCode__array,
-	TypeOpCode__record,
-	TypeOpCode__unsupported,
+	TypeOpCode__internal,
 	TypeOpCode__BuiltInMax,
 } TypeOpCode;
 
@@ -286,14 +339,14 @@ typedef enum {
 	FuncOpCode__ScalarArrayOpAny,
 	FuncOpCode__ScalarArrayOpAll,
 #include "xpu_opcodes.h"
-	/* for projection */
-	FuncOpCode__Projection = 9999,
-	FuncOpCode__LoadVars,
+	FuncOpCode__LoadVars = 9999,
+	FuncOpCode__MoveVars,
 	FuncOpCode__JoinQuals,
 	FuncOpCode__HashValue,
 	FuncOpCode__GiSTEval,
 	FuncOpCode__SaveExpr,
 	FuncOpCode__AggFuncs,
+	FuncOpCode__Projection,
 	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
 	FuncOpCode__BuiltInMax,
 } FuncOpCode;
@@ -301,14 +354,15 @@ typedef enum {
 /*
  * Error status
  */
-#define ERRCODE_STROM_SUCCESS			0
-#define ERRCODE_CPU_FALLBACK			1
-#define ERRCODE_WRONG_XPU_CODE			3
-#define ERRCODE_VARLENA_UNSUPPORTED		4
-#define ERRCODE_RECURSION_TOO_DEEP		5
-#define ERRCODE_BUFFER_NO_SPACE			6
-#define ERRCODE_DEVICE_INTERNAL			99
-#define ERRCODE_DEVICE_FATAL			999
+#define ERRCODE_STROM_SUCCESS				0
+#define ERRCODE_CPU_FALLBACK				1
+#define ERRCODE_WRONG_XPU_CODE				3
+#define ERRCODE_VARLENA_UNSUPPORTED			4
+#define ERRCODE_RECURSION_TOO_DEEP			5
+#define ERRCODE_BUFFER_NO_SPACE				6
+#define ERRCODE_GPUDIRECT_READFILE_ASYNC	7
+#define ERRCODE_DEVICE_INTERNAL				99
+#define ERRCODE_DEVICE_FATAL				999
 
 #define KERN_ERRORBUF_FILENAME_LEN		32
 #define KERN_ERRORBUF_FUNCNAME_LEN		64
@@ -321,6 +375,7 @@ typedef struct {
 	char		message[KERN_ERRORBUF_MESSAGE_LEN+1];
 } kern_errorbuf;
 
+#if 1
 /*
  * kern_variable
  */
@@ -344,6 +399,7 @@ typedef union
 	float8_t	fp64;
 	void	   *ptr;
 } kern_variable;
+#endif
 
 /*
  * kern_context - a set of run-time information
@@ -357,18 +413,22 @@ typedef struct
 	const char	   *error_message;
 	struct kern_session_info *session;
 
+	/* the kernel variables slot */
+	struct xpu_datum_t **kvars_slot;
+	const struct kern_varslot_desc *kvars_desc;
+	uint32_t		kvars_nslots;		/* length of kvars_values / desc */
+	uint32_t		kvars_nrooms;		/* length of kvars_desc (incl. subfields) */
+	uint32_t		kvecs_bufsz;		/* kvecs-buffer size per depth */
+	uint32_t		kvecs_ndims;		/* number of kvecs-buffer per warp */
+	char		   *kvecs_curr_buffer;	/* current kvecs-buffer */
+	uint32_t		kvecs_curr_id;		/* current kvecs-id */
+
 	/*
-	 * current slot of the kernel variable references
-	 *
-	 * if kvars_class[slot_id] < 0, if means kvars_slot[slot_id] has pointer
-	 * or inline value according to KVAR_CLASS__*.
-	 * elsewhere (kvars_class[slot_id] >= 0), kvars_slot[slot_id].ptr points
-	 * variable length datum with this length; used for Arrow::Utf-8 or Binary.
+	 * GPU shared memory buffer for GPU-PreAgg boosting.
 	 */
-	uint32_t		kvars_nslots;
-	uint32_t		kvars_nbytes;
-	kern_variable  *kvars_slot;
-	int			   *kvars_class;
+	uint32_t		groupby_prepfn_bufsz;
+	uint32_t		groupby_prepfn_nbufs;
+	char		   *groupby_prepfn_buffer;
 
 	/*
 	 * mode control flags
@@ -385,16 +445,31 @@ typedef struct
 
 #define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
 	do {																\
+		const kern_varslot_desc *__vs_desc;								\
 		uint32_t	__bufsz = Max(512, (SESSION)->kcxt_extra_bufsz);	\
 		uint32_t	__len = offsetof(kern_context, vlbuf) +	__bufsz;	\
 																		\
 		KCXT = (kern_context *)alloca(__len);							\
 		memset(KCXT, 0, __len);											\
 		KCXT->session = (SESSION);										\
+		KCXT->kvars_nrooms = (SESSION)->kcxt_kvars_nrooms;				\
 		KCXT->kvars_nslots = (SESSION)->kcxt_kvars_nslots;				\
-		KCXT->kvars_nbytes = (SESSION)->kcxt_kvars_nbytes;				\
-		KCXT->kvars_slot = NULL;										\
-		KCXT->kvars_class = NULL;										\
+		KCXT->kvecs_bufsz  = (SESSION)->kcxt_kvecs_bufsz;				\
+		KCXT->kvecs_ndims  = (SESSION)->kcxt_kvecs_ndims;				\
+		KCXT->kvecs_curr_buffer = NULL;									\
+		KCXT->kvecs_curr_id = 0;										\
+		KCXT->kvars_slot = (struct xpu_datum_t **)						\
+			alloca(sizeof(struct xpu_datum_t *) * KCXT->kvars_nslots);	\
+		__vs_desc = SESSION_KVARS_SLOT_DESC(SESSION);					\
+		for (int __i=0; __i < KCXT->kvars_nslots; __i++)				\
+		{																\
+			const xpu_datum_operators *vs_ops =	__vs_desc[__i].vs_ops;	\
+			/* alloca() guarantees 16bytes-aligned */					\
+			assert(vs_ops->xpu_type_alignof <= 16);						\
+			KCXT->kvars_slot[__i] = (struct xpu_datum_t *)				\
+				alloca(vs_ops->xpu_type_sizeof);						\
+		}													   			\
+		KCXT->kvars_desc = __vs_desc;									\
 		KCXT->vlpos = KCXT->vlbuf;										\
 		KCXT->vlend = KCXT->vlbuf + __bufsz;							\
 	} while(0)
@@ -446,17 +521,6 @@ INLINE_FUNCTION(void)
 kcxt_reset(kern_context *kcxt)
 {
 	kcxt->vlpos = kcxt->vlbuf;
-}
-
-INLINE_FUNCTION(char *)
-kcxt_slot_buf(kern_context *kcxt, uint32_t slot_off)
-{
-	if (slot_off == 0)
-		return NULL;
-	assert(slot_off >= (sizeof(kern_variable) * kcxt->kvars_nslots +
-						sizeof(int)           * kcxt->kvars_nslots) &&
-		   slot_off <  kcxt->kvars_nbytes);
-	return ((char *)kcxt->kvars_slot + slot_off);
 }
 
 INLINE_FUNCTION(void)
@@ -1061,7 +1125,7 @@ KDS_BODY_ADDR(const kern_data_store *kds)
 
 /* access functions for KDS_FORMAT_ROW/HASH */
 INLINE_FUNCTION(uint32_t *)
-KDS_GET_ROWINDEX(kern_data_store *kds)
+KDS_GET_ROWINDEX(const kern_data_store *kds)
 {
 	Assert(kds->format == KDS_FORMAT_ROW ||
 		   kds->format == KDS_FORMAT_HASH);
@@ -1219,59 +1283,95 @@ KDS_BLOCK_CHECK_VALID(const kern_data_store *kds,
 }
 
 /* access functions for apache arrow format */
-INLINE_FUNCTION(void *)
-KDS_ARROW_REF_SIMPLE_DATUM(kern_data_store *kds,
-						   kern_colmeta *cmeta,
-						   uint32_t index,
-						   uint32_t unitsz)
+INLINE_FUNCTION(bool)
+KDS_ARROW_CHECK_ISNULL(const kern_data_store *kds,
+					   const kern_colmeta *cmeta,
+					   uint32_t index)
 {
 	uint8_t	   *nullmap;
-	char	   *values;
 
-	Assert(cmeta >= &kds->colmeta[0] &&
-		   cmeta <= &kds->colmeta[kds->nr_colmeta - 1]);
+	Assert(cmeta >= kds->colmeta &&
+		   cmeta <  kds->colmeta + kds->nr_colmeta);
 	if (cmeta->nullmap_offset)
 	{
 		nullmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
 		if (att_isnull(index, nullmap))
-			return NULL;
+			return true;
 	}
-	Assert(cmeta->values_offset > 0);
-	Assert(cmeta->extra_offset == 0);
-	Assert(cmeta->extra_length == 0);
-	Assert(unitsz * (index+1) <= __kds_unpack(cmeta->values_length));
-	values = (char *)kds + __kds_unpack(cmeta->values_offset);
-	return values + unitsz * index;
+	return false;
 }
 
-INLINE_FUNCTION(void *)
-KDS_ARROW_REF_VARLENA_DATUM(kern_data_store *kds,
-							kern_colmeta *cmeta,
-							uint32_t rowidx,
-							uint32_t *p_length)
+INLINE_FUNCTION(const void *)
+KDS_ARROW_REF_SIMPLE_DATUM(const kern_data_store *kds,
+						   const kern_colmeta *cmeta,
+						   uint32_t index,
+						   uint32_t unitsz)
 {
-	uint8_t	   *nullmap;
-	uint32_t   *offset;
-	char	   *extra;
-
-	Assert(cmeta >= &kds->colmeta[0] &&
-		   cmeta <= &kds->colmeta[kds->nr_colmeta - 1]);
-	if (cmeta->nullmap_offset)
-	{
-		nullmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
-		if (att_isnull(rowidx, nullmap))
-			return NULL;
-	}
 	Assert(cmeta->values_offset > 0 &&
-		   cmeta->extra_offset > 0 &&
-		   sizeof(uint32_t) * (rowidx+1) <= __kds_unpack(cmeta->values_length));
-	offset = (uint32_t *)(kds + __kds_unpack(cmeta->values_length));
-	extra = (char *)kds + __kds_unpack(cmeta->extra_offset);
+		   cmeta->extra_offset == 0 &&
+		   cmeta->extra_length == 0);
+	if (!KDS_ARROW_CHECK_ISNULL(kds, cmeta, index) &&
+		unitsz * (index + 1) <= __kds_unpack(cmeta->values_length))
+	{
+		const char *values = ((const char *)kds +
+							  __kds_unpack(cmeta->values_offset));
+		return values + unitsz * index;
+	}
+	return NULL;
+}
 
-	Assert(offset[rowidx]   <= offset[rowidx+1] &&
-		   offset[rowidx+1] <= __kds_unpack(cmeta->extra_length));
-	*p_length = offset[rowidx+1] - offset[rowidx];
-	return (extra + offset[rowidx]);	
+#define VARATT_MAX		0x4ffffff8U
+
+INLINE_FUNCTION(const void *)
+KDS_ARROW_REF_VARLENA32_DATUM(const kern_data_store *kds,
+							  const kern_colmeta *cmeta,
+							  uint32_t index,
+							  int *p_length)
+{
+	Assert(cmeta->values_offset > 0 &&
+		   cmeta->extra_offset  > 0);
+	if (!KDS_ARROW_CHECK_ISNULL(kds, cmeta, index) &&
+		sizeof(uint32_t) * (index+1) <= __kds_unpack(cmeta->values_length))
+	{
+		const uint32_t *offset = (const uint32_t *)
+			((const char *)kds + __kds_unpack(cmeta->values_length));
+		const char	   *extra  = (const char *)
+			((const char *)kds + __kds_unpack(cmeta->extra_offset));
+		if (offset[index] <= offset[index+1] &&
+			offset[index+1] <= __kds_unpack(cmeta->extra_length) &&
+			offset[index+1] - offset[index] <= VARATT_MAX)
+		{
+			*p_length = (int)(offset[index+1] - offset[index]);
+			return (extra + offset[index]);
+		}
+	}
+	return NULL;
+}
+
+INLINE_FUNCTION(const void *)
+KDS_ARROW_REF_VARLENA64_DATUM(const kern_data_store *kds,
+							  const kern_colmeta *cmeta,
+							  uint32_t index,
+							  int *p_length)
+{
+	Assert(cmeta->values_offset > 0 &&
+		   cmeta->extra_offset  > 0);
+	if (!KDS_ARROW_CHECK_ISNULL(kds, cmeta, index) &&
+		sizeof(uint32_t) * (index+1) <= __kds_unpack(cmeta->values_length))
+	{
+		const uint64_t *offset = (const uint64_t *)
+			((const char *)kds + __kds_unpack(cmeta->values_length));
+		const char	   *extra  = (const char *)
+			((const char *)kds + __kds_unpack(cmeta->extra_offset));
+		if (offset[index] <= offset[index+1] &&
+			offset[index+1] <= __kds_unpack(cmeta->extra_length) &&
+			offset[index+1] - offset[index] <= VARATT_MAX)
+		{
+			*p_length = (int)(offset[index+1] - offset[index]);
+			return (extra + offset[index]);
+		}
+	}
+	return NULL;
 }
 
 INLINE_FUNCTION(bool)
@@ -1474,12 +1574,28 @@ typedef struct toast_compress_header
 
 /* ----------------------------------------------------------------
  *
+ * Definition of vectorized xPU device data types
+ *
+ * ----------------------------------------------------------------
+ */
+#define KVEC_UNITSZ			(MAXTHREADS_PER_BLOCK * 2)
+#define KVEC_ALIGN(x)		TYPEALIGN(16,(x))	/* 128bit alignment */
+
+#define KVEC_DATUM_COMMON_FIELD					\
+	bool			isnull[KVEC_UNITSZ]
+typedef struct kvec_datum_t {
+	KVEC_DATUM_COMMON_FIELD;
+} kvec_datum_t;
+
+/* ----------------------------------------------------------------
+ *
  * Definitions for XPU device data types
  *
  * ----------------------------------------------------------------
  */
-typedef struct xpu_datum_t		xpu_datum_t;
-typedef struct xpu_datum_operators xpu_datum_operators;
+typedef struct xpu_datum_t			xpu_datum_t;
+typedef struct xpu_datum_operators	xpu_datum_operators;
+typedef struct kern_varslot_desc	kern_varslot_desc;
 
 #define XPU_DATUM_COMMON_FIELD			\
 	const struct xpu_datum_operators *expr_ops
@@ -1496,56 +1612,136 @@ struct xpu_datum_operators {
 	bool		xpu_type_byval;		/* = pg_type.typbyval */
 	int8_t		xpu_type_align;		/* = pg_type.typalign */
 	int16_t		xpu_type_length;	/* = pg_type.typlen */
-	TypeOpCode	xpu_type_code;
-	int			xpu_type_sizeof;	/* =sizeof(xpu_XXXX_t), not PG type! */
-	int			xpu_type_alignof;	/* =__alignof__(xpu_XXX_t), not PG type! */
-	bool	  (*xpu_datum_ref)(kern_context *kcxt,
-							   xpu_datum_t *result,			/* out */
-							   int vclass,					/* in */
-							   const kern_variable *kvar);	/* in */
-	bool	  (*xpu_datum_store)(kern_context *kcxt,
-								 const xpu_datum_t *arg,	/* in */
-								 int *p_vclass,				/* out */
-								 kern_variable *p_kvar);	/* out */
+	TypeOpCode	xpu_type_code;		/* = TypeOpCode__XXXX */
+	int			xpu_type_sizeof;	/* = sizeof(xpu_XXXX_t), not PG type! */
+	int			xpu_type_alignof;	/* = __alignof__(xpu_XXX_t), not PG type! */
+	int			xpu_kvec_sizeof;	/* = sizeof(kvec_XXXX_t), not PG type! */
+	int			xpu_kvec_alignof;	/* = __alignof__(kvec_XXX_t), not PG type! */
+
+	/*
+	 * xpu_datum_heap_read: called by LoadVars to load heap datum
+	 * to the xpu_datum slot, prior to execution of the kexp in
+	 * the current depth.
+	 * also, it is used to reference const and param.
+	 */
+	bool	  (*xpu_datum_heap_read)(kern_context *kcxt,
+									 const void *addr,		/* in */
+									 xpu_datum_t *result);	/* out */
+	/*
+	 * xpu_datum_arrow_ref: called by LoadVars to load arrow datum
+	 * to the xpu_datum slot, prior to execution of the kexp in the
+	 * current depth.
+	 */
+	bool	  (*xpu_datum_arrow_read)(kern_context *kcxt,
+									  const kern_data_store *kds,	/* in */
+									  const kern_colmeta *cmeta,	/* in */
+									  uint32_t kds_index,			/* in */
+									  xpu_datum_t *result);			/* out */
+
+	/*
+	 * xpu_datum_kvec_load: it loads the xpu_datum_t (scalar value)
+	 * from the vectorized buffer.
+	 */
+	bool	  (*xpu_datum_kvec_load)(kern_context *kcxt,
+									 const kvec_datum_t *kvecs,	/* in */
+									 uint32_t kvecs_id,			/* in */
+									 xpu_datum_t *result);		/* out */
+	/*
+	 * xpu_datum_kvec_save: it saves the xpu_datum_t (scalar value)
+	 * onto the vectorized buffer.
+	 */
+	bool	  (*xpu_datum_kvec_save)(kern_context *kcxt,
+									 const xpu_datum_t *xdatum, /* in */
+									 kvec_datum_t *kvecs,		/* out */
+									 uint32_t kvecs_id);		/* out */
+	/*
+	 * xpu_datum_kvec_copy: it moves a vectorized buffer entry from the
+	 * source to the destination.
+	 */
+	bool	  (*xpu_datum_kvec_copy)(kern_context *kcxt,
+									 const kvec_datum_t *kvecs_src,	/* in */
+									 uint32_t kvecs_src_id,			/* in */
+									 kvec_datum_t *kvecs_dst,		/* out */
+									 uint32_t kvecs_dst_id);		/* out */
+	/*
+	 * xpu_datum_write: called by Projection or GpuPreAgg to write out
+	 * xdatum onto the destination/final buffer.
+	 */
 	int		  (*xpu_datum_write)(kern_context *kcxt,
-								 char *buffer,				/* out */
-								 const xpu_datum_t *xdatum);/* in */
+								 char *buffer,					/* out */
+								 const kern_colmeta *cmeta_dst,	/* in */
+								 const xpu_datum_t *xdatum);	/* in */
+	/*
+	 * xpu_datum_hash: calculation of hash value using pg_hash_any()
+	 */
 	bool	  (*xpu_datum_hash)(kern_context *kcxt,
-								uint32_t *p_hash,
-								const xpu_datum_t *arg);
+								uint32_t *p_hash,		/* out */
+								xpu_datum_t *arg);		/* in */
+	/*
+	 * xpu_datum_comp: compares two xpu_datum values
+	 */
 	bool	  (*xpu_datum_comp)(kern_context *kcxt,
-								int *p_comp,				/* out */
-								const xpu_datum_t *a,		/* in */
-								const xpu_datum_t *b);		/* in */
+								int *p_comp,			/* out */
+								xpu_datum_t *a,			/* in */
+								xpu_datum_t *b);		/* in */
 };
 
-#define PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\
+#define __PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\
 	typedef struct {										\
 		XPU_DATUM_COMMON_FIELD;								\
 		BASETYPE	value;									\
 	} xpu_##NAME##_t;										\
 	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
-#define PGSTROM_SQLTYPE_VARLENA_DECLARATION(NAME)			\
+#define PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\
+	typedef struct {										\
+		KVEC_DATUM_COMMON_FIELD;							\
+		BASETYPE	values[KVEC_UNITSZ];					\
+	} kvec_##NAME##_t;										\
+	typedef struct {										\
+		XPU_DATUM_COMMON_FIELD;								\
+		BASETYPE	value;									\
+	} xpu_##NAME##_t;										\
+	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
+
+#define __PGSTROM_SQLTYPE_VARLENA_DECLARATION(NAME)			\
 	typedef struct {										\
 		XPU_DATUM_COMMON_FIELD;								\
 		int			length;		/* -1, if PG verlena */		\
 		const char *value;									\
 	} xpu_##NAME##_t;										\
 	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
+#define PGSTROM_SQLTYPE_VARLENA_DECLARATION(NAME)			\
+	typedef struct {										\
+		KVEC_DATUM_COMMON_FIELD;							\
+		int			length[KVEC_UNITSZ];					\
+		const char *values[KVEC_UNITSZ];					\
+	} kvec_##NAME##_t;										\
+	typedef struct {										\
+		XPU_DATUM_COMMON_FIELD;								\
+		int			length;		/* -1, if PG verlena */		\
+		const char *value;									\
+	} xpu_##NAME##_t;										\
+	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
+
 #define PGSTROM_SQLTYPE_OPERATORS(NAME,TYPBYVAL,TYPALIGN,TYPLENGTH) \
 	PUBLIC_DATA xpu_datum_operators xpu_##NAME##_ops = {			\
-		.xpu_type_name = #NAME,										\
-		.xpu_type_byval = TYPBYVAL,									\
-		.xpu_type_align = TYPALIGN,									\
-		.xpu_type_length = TYPLENGTH,								\
-		.xpu_type_code = TypeOpCode__##NAME,						\
-		.xpu_type_sizeof = sizeof(xpu_##NAME##_t),					\
-		.xpu_type_alignof = __alignof__(xpu_##NAME##_t),			\
-		.xpu_datum_ref = xpu_##NAME##_datum_ref,					\
-		.xpu_datum_store = xpu_##NAME##_datum_store,				\
-		.xpu_datum_write = xpu_##NAME##_datum_write,				\
-		.xpu_datum_hash = xpu_##NAME##_datum_hash,					\
-		.xpu_datum_comp = xpu_##NAME##_datum_comp,					\
+		.xpu_type_name        = #NAME,								\
+		.xpu_type_byval       = TYPBYVAL,							\
+		.xpu_type_align       = TYPALIGN,							\
+		.xpu_type_length      = TYPLENGTH,							\
+		.xpu_type_code        = TypeOpCode__##NAME,					\
+		.xpu_type_sizeof      = sizeof(xpu_##NAME##_t),				\
+		.xpu_type_alignof     = __alignof__(xpu_##NAME##_t),		\
+		.xpu_kvec_sizeof      = sizeof(kvec_##NAME##_t),			\
+		.xpu_kvec_alignof     = __alignof__(kvec_##NAME##_t),		\
+		.xpu_datum_heap_read  = xpu_##NAME##_datum_heap_read,		\
+		.xpu_datum_arrow_read = xpu_##NAME##_datum_arrow_read,		\
+		.xpu_datum_kvec_load  = xpu_##NAME##_datum_kvec_load,		\
+		.xpu_datum_kvec_save  = xpu_##NAME##_datum_kvec_save,		\
+		.xpu_datum_kvec_copy  = xpu_##NAME##_datum_kvec_copy,		\
+		.xpu_datum_write      = xpu_##NAME##_datum_write,			\
+		.xpu_datum_hash       = xpu_##NAME##_datum_hash,			\
+		.xpu_datum_comp       = xpu_##NAME##_datum_comp,			\
 	}
 
 #include "xpu_basetype.h"
@@ -1565,20 +1761,35 @@ struct xpu_datum_operators {
  * Elsewhere, @length means number of elements, from @start of the array on
  * the columnar buffer by @smeta. @kds can be pulled by @smeta->kds_offset.
  */
-struct xpu_array_t {
+typedef struct {
 	XPU_DATUM_COMMON_FIELD;
-	int32_t				length;
+	int32_t		length;
 	union {
 		struct {
 			const varlena *value;
 		} heap;
 		struct {
+			const kern_colmeta *cmeta;
 			uint32_t	start;
-			const kern_colmeta *smeta;
+			uint32_t	slot_id;
 		} arrow;
 	} u;
-};
-typedef struct xpu_array_t			xpu_array_t;
+} xpu_array_t;
+
+typedef struct {
+	KVEC_DATUM_COMMON_FIELD;
+	const kern_colmeta *cmeta;		/* common in kvec */
+	uint32_t	slot_id;			/* common in kvec */	
+	int32_t		length[KVEC_UNITSZ];
+	union {
+		struct {
+			const varlena  *values[KVEC_UNITSZ];
+		} heap;		/* length < 0 */
+		struct {
+			uint32_t		start[KVEC_UNITSZ];
+		} arrow;	/* length >= 0 */
+	} u;
+} kvec_array_t;
 EXTERN_DATA xpu_datum_operators		xpu_array_ops;
 
 /* access macros for heap array */
@@ -1643,24 +1854,64 @@ __pg_array_dataptr(const __ArrayTypeData *ar)
  * xpu_composite_t - composite type support
  *
  * NOTE: xpu_composite_t is designed to store both of PostgreSQL / Arrow composite
- * values. If @value != NULL, it means @value points a varlena based PostgreSQL
- * composite values. Elsewhere (@value == NULL), it points composite values on
- * KDS_FORMAT_ARROW chunk, identified by the @rowidx.
- * For both cases, @smeta points the column-metadata of the composite sub-fields,
- * thus smeta[0] ... smeta[@nfields-1] describes the composite data type definition.
+ * values. If @cmeta is NULL, it means @heap.value points a varlena based PostgreSQL
+ * composite datum. Elsewhere, @arrow.value points the composite value on the
+ * KDS_FORMAT_ARROW chunk,identified by the @rowidx.
  */
-struct xpu_composite_t {
+typedef struct {
 	XPU_DATUM_COMMON_FIELD;
-	Oid			comp_typid;
-	int32_t		comp_typmod;
-	uint32_t	rowidx;		/* valid only if KDS_FORMAT_ARROW */
-	uint32_t	nfields;	/* length of the smeta[] array */
-	const kern_colmeta *smeta; /* colmeta array of the sub-fields */
-	const varlena *value;	/* composite varlena datum if heap-format */
-};
-typedef struct xpu_composite_t		xpu_composite_t;
+	const kern_colmeta *cmeta;		/* if Arrow::Composite type, it reference to the composite
+									 * metadata to walk on the subfields. Elsewhere, @cmeta is
+									 * NULL, and @u.heap.value points PostgreSQL record. */
+	union {
+		struct {
+			const varlena *value;	/* composite varlena in heap-format */
+		} heap;
+		struct {
+			uint32_t	rowidx;		/* composite row-index in arrow-format */
+			uint32_t	slot_id;	/* vs_desc slot-id that stored in */
+		} arrow;
+	} u;
+} xpu_composite_t;
+
+typedef struct
+{
+	KVEC_DATUM_COMMON_FIELD;
+	const kern_colmeta *cmeta;		/* to be identical in kvec */
+	union {
+		struct {
+			const varlena *values[KVEC_UNITSZ];
+		} heap;
+		struct {
+			uint32_t	slot_id;	/* to be identical in kvec */
+			uint32_t	rowidx[KVEC_UNITSZ];
+		} arrow;
+	} u;
+} kvec_composite_t;
+
 EXTERN_DATA xpu_datum_operators		xpu_composite_ops;
 
+/*
+ * xpu_internal_t - utility data type for internal usage such as:
+ *
+ * - to carry fixed-length datum for device projection
+ * - to carry GiST-index pointer to the next depth
+ */
+typedef struct {
+	XPU_DATUM_COMMON_FIELD;
+	const void *value;
+} xpu_internal_t;
+
+typedef struct {
+	KVEC_DATUM_COMMON_FIELD;
+	const void *values[KVEC_UNITSZ];
+} kvec_internal_t;
+
+EXTERN_DATA xpu_datum_operators		xpu_internal_ops;
+
+/*
+ * device type catalogs
+ */
 typedef struct {
 	TypeOpCode		type_opcode;
 	xpu_datum_operators *type_ops;
@@ -1812,20 +2063,6 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME4))			\
 		return false
 
-typedef struct
-{
-	int32_t			var_resno;
-	uint32_t		var_slot_id;
-	uint32_t		var_slot_off;	/* offset of the slot-buffer (some margin at
-									 * the end of kcxt->kvars_slot[] to store several
-									 * special arrow types (array, composite) */
-} kern_vars_defitem;
-
-typedef struct
-{
-	uint32_t		slot_id;
-} kern_projection_desc;
-
 #define KAGG_ACTION__VREF			101		/* simple var copy */
 #define KAGG_ACTION__VREF_NOKEY		102		/* simple var copy; but not a grouping-
 											 * key, if GROUP-BY primary key.
@@ -1892,16 +2129,42 @@ typedef struct
 	float8_t	sum_xy;
 } kagg_state__covar_packed;
 
-struct kern_aggregate_desc
+typedef struct
 {
-	uint16_t	action;			/* any of KAGG_ACTION__* */
-	int16_t		arg0_slot_id;	/* -1, if not used */
-	int16_t		arg1_slot_id;	/* -1, if not used */
-	int16_t		__reserved__;
-};
-typedef struct kern_aggregate_desc	kern_aggregate_desc;
+	uint32_t	action;			/* any of KAGG_ACTION__* */
+	int32_t		arg0_slot_id;
+	int32_t		arg1_slot_id;
+} kern_aggregate_desc;
 
-#define KERN_EXPRESSION_MAGIC	(0x4b657870)	/* 'K' 'e' 'x' 'p' */
+typedef struct
+{
+	int16_t		vl_resno;		/* resno of the source */
+	int16_t		vl_slot_id;		/* slot-id to load the datum  */
+} kern_varload_desc;
+
+typedef struct
+{
+	int32_t		vm_offset;		/* source & destination kvecs-offset */
+	int16_t		vm_slot_id;		/* source slot-id. */
+	bool		vm_from_xdatum; /* true, if variable is originated from the current
+								 * depth, so values must be copied from the xdatum,
+								 * not kvecs-buffer.
+								 */
+} kern_varmove_desc;
+
+struct kern_varslot_desc
+{
+	TypeOpCode	vs_type_code;
+	bool		vs_typbyval;
+	int8_t		vs_typalign;
+	int16_t		vs_typlen;
+	int32_t		vs_typmod;
+	uint16_t	idx_subfield;	/* offset to the subfield descriptor */
+	uint16_t	num_subfield;	/* number of the subfield (array or composite) */
+	const struct xpu_datum_operators *vs_ops;
+};
+
+#define KERN_EXPRESSION_MAGIC			(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
 #define KEXP_FLAG__IS_PUSHED_DOWN		0x0001U
 
@@ -1926,12 +2189,18 @@ struct kern_expression
 		} c;		/* ConstExpr */
 		struct {
 			uint32_t	param_id;
+			char		__data[1];
 		} p;		/* ParamExpr */
 		struct {
-			int16_t		var_typlen;
-			bool		var_typbyval;
-			uint8_t		var_typalign;
-			uint32_t	var_slot_id;
+			/* if var_offset < 0, it means variables should be loaded from
+			 * the kcxt->kvars_values[] entries, used for the new values
+			 * loaded in this depth, or temporary variables.
+			 * elsewhere, 'var_offset' points particular region on the
+			 * kernel vectorized values buffer (kvecs).
+			 */
+			int32_t		var_offset;		/* kvec's buffer offset */
+			uint16_t	var_slot_id;	/* kvar's slot-id */
+			char		__data[1];
 		} v;		/* VarExpr */
 		struct {
 			uint32_t	case_comp;		/* key value to be compared, if any */
@@ -1939,38 +2208,37 @@ struct kern_expression
 			char		data[1]			__MAXALIGNED__;
 		} casewhen;	/* Case-When */
 		struct {
-			uint32_t	slot_id;		/* temporary slot-id */
-			uint32_t	slot_bufsz;		/* if >0, alloca(slot_bufsz) */
-			bool		elem_byval;		/* attbyval of the element type */
-			int8_t		elem_align;		/* attalign of the element type */
-			int16_t		elem_len;		/* attlen of the element type */
+			uint16_t	elem_slot_id;	/* slot-id of temporary array element */
 			char		data[1]			__MAXALIGNED__;
 		} saop;		/* ScalarArrayOp */
 		struct {
 			int			depth;
-			int			nloads;
-			kern_vars_defitem kvars[1];
+			int			nitems;
+			kern_varload_desc desc[1];
 		} load;		/* VarLoads */
 		struct {
-			int			gist_depth;	/* special depth for GiST index */
-			uint32_t	gist_oid;	/* OID of GiST index (for EXPLAIN) */
-			kern_vars_defitem ivar;	/* index item reference */
-			char		data[1]		__MAXALIGNED__;
+			int			depth;		/* kvecs-buffer to write-out */
+			int			nitems;
+			kern_varmove_desc desc[1];
+		} move;
+		struct {
+			uint32_t	gist_oid;		/* OID of GiST index (for EXPLAIN) */
+			int16_t		gist_depth;		/* depth of index tuple */
+			uint16_t	htup_slot_id;	/* slot_id to save htup pointer */
+			kern_varload_desc ivar_desc; /* index-var load descriptor */
+			char		data[1]			__MAXALIGNED__;
 		} gist;		/* GiSTEval */
 		struct {
-			uint32_t	slot_id;	/* destination slot-id */
-			uint32_t	slot_off;	/* kvars-slot buffer offset, if needed */
-			char		data[1]		__MAXALIGNED__;
+			uint16_t	sv_slot_id;
+			char		data[1]			__MAXALIGNED__;
 		} save;		/* SaveExpr */
 		struct {
 			int			nattrs;
 			kern_aggregate_desc desc[1];
 		} pagg;		/* PreAggs */
 		struct {
-			int			datum_sz;
 			int			nattrs;
-			int			ctid_slot;	/* slot_id of ctid system column, if any */
-			kern_projection_desc desc[1];
+			uint16_t	slot_id[1];
 		} proj;		/* Projection */
 		struct {
 			uint32_t	npacked;	/* number of packed sub-expressions; including
@@ -2023,10 +2291,8 @@ __KEXP_IS_VALID(const kern_expression *kexp,
 
 #define SizeOfKernExpr(__PAYLOAD_SZ)						\
 	(offsetof(kern_expression, u.data) + (__PAYLOAD_SZ))
-#define SizeOfKernExprParam					\
-	(offsetof(kern_expression, u.p.param_id) + sizeof(uint32_t))
 #define SizeOfKernExprVar					\
-	(offsetof(kern_expression, u.v.var_slot_id) + sizeof(int))
+	(offsetof(kern_expression, u.v.__data))
 typedef struct {
 	FuncOpCode		func_opcode;
 	xpu_function_t	func_dptr;
@@ -2068,21 +2334,17 @@ typedef struct
 typedef struct kern_session_info
 {
 	uint64_t	query_plan_id;		/* unique-id to use per-query buffer */
-	uint32_t	kcxt_kvars_nslots;	/* kcxt->kvars_nslots */
-	uint32_t	kcxt_kvars_nbytes;	/* byte length of kvars_slot[], kvars_class[] and
-									 * kvars-buffer (for xpu_array_t, xpu_composite_t
-									 * and xpu_geometry_t) */
-	uint32_t	kcxt_kvars_ndims;	/* number of kvars_slot for each warp; it is
-									 * usually equivalent to (nrels+1), however,
-									 * GiST-index support may consume more slots.
-									 */
+	uint32_t	kcxt_kvars_nrooms;	/* length of kvars_slot_desc[] array*/
+	uint32_t	kcxt_kvars_nslots;	/* number of kvars slot */
+	uint32_t	kcxt_kvars_defs;	/* offset of kvars_slot_desc[] array */
+	uint32_t	kcxt_kvecs_bufsz;	/* length of kvecs buffer */
+	uint32_t	kcxt_kvecs_ndims;	/* =(num_rels + 2) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
-
 	uint32_t	xpu_task_flags;		/* mask of device flags */
 	/* xpucode for this session */
-	uint32_t	xpucode_scan_load_vars;
+	uint32_t	xpucode_load_vars_packed;
+	uint32_t	xpucode_move_vars_packed;
 	uint32_t	xpucode_scan_quals;
-	uint32_t	xpucode_join_load_vars_packed;
 	uint32_t	xpucode_join_quals_packed;
 	uint32_t	xpucode_hash_values_packed;
 	uint32_t	xpucode_gist_evals_packed;
@@ -2108,7 +2370,8 @@ typedef struct kern_session_info
 
 	/* group-by final buffer */
 	uint32_t	groupby_kds_final;	/* header portion of kds_final */
-
+	uint32_t	groupby_prepfn_bufsz; /* buffer size for preagg functions */
+	float4_t	groupby_ngroups_estimation; /* planne's estimation of ngroups */
 	/* executor parameter buffer */
 	uint32_t	nparams;	/* number of parameters */
 	uint32_t	poffset[1];	/* offset of params */
@@ -2190,20 +2453,14 @@ typedef struct
 /*
  * kern_session_info utility functions.
  */
-INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_SCAN_LOAD_VARS(kern_session_info *session)
+INLINE_FUNCTION(kern_varslot_desc *)
+SESSION_KVARS_SLOT_DESC(const kern_session_info *session)
 {
-	if (session->xpucode_scan_load_vars == 0)
+	if (session->kcxt_kvars_nslots == 0 ||
+		session->kcxt_kvars_defs == 0)
 		return NULL;
-	return (kern_expression *)((char *)session + session->xpucode_scan_load_vars);
-}
 
-INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_SCAN_QUALS(kern_session_info *session)
-{
-	if (session->xpucode_scan_quals == 0)
-		return NULL;
-	return (kern_expression *)((char *)session + session->xpucode_scan_quals);
+	return (kern_varslot_desc *)((char *)session + session->kcxt_kvars_defs);
 }
 
 INLINE_FUNCTION(kern_expression *)
@@ -2225,25 +2482,51 @@ __PICKUP_PACKED_KEXP(const kern_expression *kexp, int dindex)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_JOIN_LOAD_VARS(kern_session_info *session, int dindex)
+SESSION_KEXP_LOAD_VARS(const kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
 
-	if (session->xpucode_join_load_vars_packed == 0)
+	if (session->xpucode_load_vars_packed == 0)
 		return NULL;
 	kexp = (kern_expression *)
-		((char *)session + session->xpucode_join_load_vars_packed);
-	if (dindex < 0)
+		((char *)session + session->xpucode_load_vars_packed);
+	if (depth < 0)
 		return kexp;
-	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	karg = __PICKUP_PACKED_KEXP(kexp, depth);
 	assert(!karg || (karg->opcode == FuncOpCode__LoadVars &&
 					 karg->exptype == TypeOpCode__int4));
 	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int dindex)
+SESSION_KEXP_MOVE_VARS(const kern_session_info *session, int depth)
+{
+	kern_expression *kexp;
+	kern_expression *karg;
+
+	if (session->xpucode_move_vars_packed == 0)
+		return NULL;
+	kexp = (kern_expression *)
+		((char *)session + session->xpucode_move_vars_packed);
+	if (depth < 0)
+		return kexp;
+	karg = __PICKUP_PACKED_KEXP(kexp, depth);
+	assert(!karg || (karg->opcode == FuncOpCode__MoveVars &&
+					 karg->exptype == TypeOpCode__int4));
+	return karg;
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_SCAN_QUALS(const kern_session_info *session)
+{
+	if (session->xpucode_scan_quals == 0)
+		return NULL;
+	return (kern_expression *)((char *)session + session->xpucode_scan_quals);
+}
+
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_JOIN_QUALS(const kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
@@ -2252,16 +2535,16 @@ SESSION_KEXP_JOIN_QUALS(kern_session_info *session, int dindex)
 		return NULL;
 	kexp = (kern_expression *)
 		((char *)session + session->xpucode_join_quals_packed);
-	if (dindex < 0)
+	if (depth < 0)
 		return kexp;
-	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	karg = __PICKUP_PACKED_KEXP(kexp, depth);
 	assert(!karg || (karg->opcode == FuncOpCode__JoinQuals &&
 					 karg->exptype == TypeOpCode__bool));
 	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_HASH_VALUE(kern_session_info *session, int dindex)
+SESSION_KEXP_HASH_VALUE(const kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
@@ -2270,16 +2553,16 @@ SESSION_KEXP_HASH_VALUE(kern_session_info *session, int dindex)
 		return NULL;
 	kexp = (kern_expression *)
 		((char *)session + session->xpucode_hash_values_packed);
-	if (dindex < 0)
+	if (depth < 0)
 		return kexp;
-	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	karg = __PICKUP_PACKED_KEXP(kexp, depth);
 	assert(!karg || (karg->opcode == FuncOpCode__HashValue &&
 					 karg->exptype == TypeOpCode__int4));
 	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GIST_EVALS(kern_session_info *session, int dindex)
+SESSION_KEXP_GIST_EVALS(const kern_session_info *session, int depth)
 {
 	kern_expression *kexp;
 	kern_expression *karg;
@@ -2288,15 +2571,15 @@ SESSION_KEXP_GIST_EVALS(kern_session_info *session, int dindex)
 		return NULL;
 	kexp = (kern_expression *)
 		((char *)session + session->xpucode_gist_evals_packed);
-	if (dindex < 0)
+	if (depth < 0)
 		return kexp;
-	karg = __PICKUP_PACKED_KEXP(kexp, dindex);
+	karg = __PICKUP_PACKED_KEXP(kexp, depth);
 	assert(!karg || karg->opcode == FuncOpCode__GiSTEval);
 	return karg;
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_PROJECTION(kern_session_info *session)
+SESSION_KEXP_PROJECTION(const kern_session_info *session)
 {
 	kern_expression *kexp = NULL;
 
@@ -2311,7 +2594,7 @@ SESSION_KEXP_PROJECTION(kern_session_info *session)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GROUPBY_KEYHASH(kern_session_info *session)
+SESSION_KEXP_GROUPBY_KEYHASH(const kern_session_info *session)
 {
 	kern_expression *kexp = NULL;
 
@@ -2326,7 +2609,7 @@ SESSION_KEXP_GROUPBY_KEYHASH(kern_session_info *session)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GROUPBY_KEYLOAD(kern_session_info *session)
+SESSION_KEXP_GROUPBY_KEYLOAD(const kern_session_info *session)
 {
 	kern_expression *kexp = NULL;
 
@@ -2341,7 +2624,7 @@ SESSION_KEXP_GROUPBY_KEYLOAD(kern_session_info *session)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GROUPBY_KEYCOMP(kern_session_info *session)
+SESSION_KEXP_GROUPBY_KEYCOMP(const kern_session_info *session)
 {
 	kern_expression *kexp = NULL;
 
@@ -2355,7 +2638,7 @@ SESSION_KEXP_GROUPBY_KEYCOMP(kern_session_info *session)
 }
 
 INLINE_FUNCTION(kern_expression *)
-SESSION_KEXP_GROUPBY_ACTIONS(kern_session_info *session)
+SESSION_KEXP_GROUPBY_ACTIONS(const kern_session_info *session)
 {
 	kern_expression *kexp = NULL;
 
@@ -2564,23 +2847,28 @@ ExecLoadVarsHeapTuple(kern_context *kcxt,
 					  const HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterRow(kern_context *kcxt,
-					 kern_expression *kexp_load_vars,
-					 kern_expression *kexp_scan_quals,
-					 kern_data_store *kds_src,
-					 HeapTupleHeaderData *htup);
+					 const kern_expression *kexp_load_vars,
+					 const kern_expression *kexp_scan_quals,
+					 const kern_data_store *kds_src,
+					 const HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterArrow(kern_context *kcxt,
-					   kern_expression *kexp_load_vars,
-					   kern_expression *kexp_scan_quals,
-					   kern_data_store *kds_src,
+					   const kern_expression *kexp_load_vars,
+					   const kern_expression *kexp_scan_quals,
+					   const kern_data_store *kds_src,
 					   uint32_t kds_index);
-PUBLIC_FUNCTION(bool)
+EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterColumn(kern_context *kcxt,
-						kern_expression *kexp_load_vars,
-						kern_expression *kexp_scan_quals,
-						kern_data_store *kds,
-						kern_data_extra *extra,
+						const kern_expression *kexp_load_vars,
+						const kern_expression *kexp_scan_quals,
+						const kern_data_store *kds,
+						const kern_data_extra *extra,
 						uint32_t kds_index);
+EXTERN_FUNCTION(bool)
+ExecMoveKernelVariables(kern_context *kcxt,
+						const kern_expression *kexp_move_vars,
+                        char *dst_kvec_buffer,
+                        int dst_kvec_id);
 EXTERN_FUNCTION(uint32_t)
 ExecGiSTIndexGetNext(kern_context *kcxt,
 					 const kern_data_store *kds_hash,
@@ -2676,5 +2964,340 @@ KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int dindex)
 	assert(dindex >= 0 && dindex < kmrels->num_rels);
 	offset = kmrels->chunks[dindex].gist_offset;
 	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+}
+
+/* ----------------------------------------------------------------
+ *
+ * Atomic Operations
+ *
+ * ----------------------------------------------------------------
+ */
+INLINE_FUNCTION(uint32_t)
+__atomic_write_uint32(uint32_t *ptr, uint32_t ival)
+{
+#ifdef __CUDACC__
+	return atomicExch((unsigned int *)ptr, ival);
+#else
+	return __atomic_exchange_n(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint64_t)
+__atomic_write_uint64(uint64_t *ptr, uint64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicExch((unsigned long long int *)ptr, ival);
+#else
+	return __atomic_exchange_n(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_add_uint32(uint32_t *ptr, uint32_t ival)
+{
+#ifdef __CUDACC__
+	return atomicAdd((unsigned int *)ptr, (unsigned int)ival);
+#else
+	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint64_t)
+__atomic_add_uint64(uint64_t *ptr, uint64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicAdd((unsigned long long *)ptr, (unsigned long long)ival);
+#else
+	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(int64_t)
+__atomic_add_int64(int64_t *ptr, int64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicAdd((unsigned long long int *)ptr, (unsigned long long int)ival);
+#else
+	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(float8_t)
+__atomic_add_fp64(float8_t *ptr, float8_t fval)
+{
+#ifdef __CUDACC__
+	return atomicAdd((double *)ptr, (double)fval);
+#else
+	union {
+		uint64_t	ival;
+		float8_t	fval;
+	} oldval, newval;
+
+	oldval.fval = __volatileRead(ptr);
+	do {
+		newval.fval = oldval.fval + fval;
+	} while (!__atomic_compare_exchange_n((uint64_t *)ptr,
+										  &oldval.ival,
+										  newval.ival,
+										  false,
+										  __ATOMIC_SEQ_CST,
+										  __ATOMIC_SEQ_CST));
+	return oldval.fval;
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_and_uint32(uint32_t *ptr, uint32_t mask)
+{
+#ifdef __CUDACC__
+	return atomicAnd((unsigned int *)ptr, (unsigned int)mask);
+#else
+	return __atomic_fetch_and(ptr, mask, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_or_uint32(uint32_t *ptr, uint32_t mask)
+{
+#ifdef __CUDACC__
+	return atomicOr((unsigned int *)ptr, (unsigned int)mask);
+#else
+	return __atomic_fetch_or(ptr, mask, __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_max_uint32(uint32_t *ptr, uint32_t ival)
+{
+#ifdef __CUDACC__
+	return atomicMax((unsigned int *)ptr, (unsigned int)ival);
+#else
+	uint32_t	oldval = __volatileRead(ptr);
+
+	while (oldval > ival)
+	{
+		if (__atomic_compare_exchange_n(ptr,
+										&oldval,
+										ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval;
+#endif
+}
+
+INLINE_FUNCTION(int64_t)
+__atomic_min_int64(int64_t *ptr, int64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicMin((long long int *)ptr, (long long int)ival);
+#else
+	int64_t		oldval = __volatileRead(ptr);
+
+	while (oldval > ival)
+	{
+		if (__atomic_compare_exchange_n(ptr,
+										&oldval,
+										ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval;
+#endif
+}
+
+INLINE_FUNCTION(int64_t)
+__atomic_max_int64(int64_t *ptr, int64_t ival)
+{
+#ifdef __CUDACC__
+	return atomicMax((long long int *)ptr, (long long int)ival);
+#else
+	int64_t		oldval = __volatileRead(ptr);
+
+	while (oldval < ival)
+	{
+		if (__atomic_compare_exchange_n(ptr,
+										&oldval,
+										ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval;
+#endif
+}
+
+INLINE_FUNCTION(float8_t)
+__atomic_min_fp64(float8_t *ptr, float8_t fval)
+{
+#ifdef __CUDACC__
+	union {
+		unsigned long long ival;
+		float8_t	fval;
+	} oldval, curval, newval;
+
+	newval.fval = fval;
+	curval.fval = __volatileRead(ptr);
+	while (newval.fval < curval.fval)
+	{
+		oldval = curval;
+		curval.ival = atomicCAS((unsigned long long *)ptr,
+								oldval.ival,
+								newval.ival);
+		if (curval.ival == oldval.ival)
+			break;
+	}
+	return curval.fval;
+#else
+	union {
+		uint64_t	ival;
+		float8_t	fval;
+	} oldval, newval;
+
+	newval.fval = fval;
+	oldval.fval = __volatileRead(ptr);
+	while (oldval.fval > newval.fval)
+	{
+		if (__atomic_compare_exchange_n((uint64_t *)ptr,
+										&oldval.ival,
+										newval.ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval.fval;
+#endif
+}
+
+INLINE_FUNCTION(float8_t)
+__atomic_max_fp64(float8_t *ptr, float8_t fval)
+{
+#ifdef __CUDACC__
+	union {
+		unsigned long long ival;
+		float8_t	fval;
+	} oldval, curval, newval;
+
+	newval.fval = fval;
+	curval.fval = __volatileRead(ptr);
+	while (newval.fval > curval.fval)
+	{
+		oldval = curval;
+		curval.ival = atomicCAS((unsigned long long *)ptr,
+								oldval.ival,
+								newval.ival);
+		if (curval.ival == oldval.ival)
+			break;
+	}
+	return curval.fval;
+#else
+	union {
+		uint64_t	ival;
+		float8_t	fval;
+	} oldval, newval;
+
+	newval.fval = fval;
+	oldval.fval = __volatileRead(ptr);
+	while (oldval.fval > newval.fval)
+	{
+		if (__atomic_compare_exchange_n((uint64_t *)ptr,
+										&oldval.ival,
+										newval.ival,
+										false,
+										__ATOMIC_SEQ_CST,
+										__ATOMIC_SEQ_CST))
+			break;
+	}
+	return oldval.fval;
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
+__atomic_cas_uint32(uint32_t *ptr, uint32_t comp, uint32_t newval)
+{
+#ifdef __CUDACC__
+	return atomicCAS((unsigned int *)ptr,
+					 (unsigned int)comp,
+					 (unsigned int)newval);
+#else
+	__atomic_compare_exchange_n(ptr,
+								&comp,
+								newval,
+								false,
+								__ATOMIC_SEQ_CST,
+								__ATOMIC_SEQ_CST);
+	return comp;
+#endif
+}
+
+INLINE_FUNCTION(uint64_t)
+__atomic_cas_uint64(uint64_t *ptr, uint64_t comp, uint64_t newval)
+{
+#ifdef __CUDACC__
+	return atomicCAS((unsigned long long int *)ptr,
+					 (unsigned long long int)comp,
+					 (unsigned long long int)newval);
+#else
+	__atomic_compare_exchange_n(ptr,
+								&comp,
+								newval,
+								false,
+								__ATOMIC_SEQ_CST,
+								__ATOMIC_SEQ_CST);
+	return comp;
+#endif
+}
+
+/* ----------------------------------------------------------------
+ *
+ * Misc functions
+ *
+ * ----------------------------------------------------------------
+ */
+INLINE_FUNCTION(void)
+print_kern_data_store(const kern_data_store *kds)
+{
+	printf("kds %p { length=%lu, nitems=%u, usage=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
+		   kds,
+		   kds->length,
+		   kds->nitems,
+		   kds->usage,
+		   kds->ncols,
+		   kds->format,
+		   kds->has_varlena ? 't' : 'f',
+		   kds->tdhasoid ? 't' : 'f',
+		   kds->tdtypeid,
+		   kds->tdtypmod,
+		   kds->table_oid,
+		   kds->hash_nslots,
+		   kds->block_offset,
+		   kds->block_nloaded,
+		   kds->nr_colmeta);
+	for (int j=0; j < kds->nr_colmeta; j++)
+	{
+		const kern_colmeta *cmeta = &kds->colmeta[j];
+
+		printf("cmeta[%d] { attbyval=%c, attalign=%d, attlen=%d, attnum=%d, attcacheoff=%d, atttypid=%u, atttypmod=%d, atttypkind=%c, kds_format=%c, kds_offset=%u, idx_subattrs=%u, num_subattrs=%u, attname='%s' }\n",
+			   j,
+			   cmeta->attbyval ? 't' : 'f',
+			   (int)cmeta->attalign,
+			   (int)cmeta->attlen,
+			   (int)cmeta->attnum,
+			   (int)cmeta->attcacheoff,
+			   cmeta->atttypid,
+			   cmeta->atttypmod,
+			   cmeta->atttypkind,
+			   cmeta->kds_format,
+			   cmeta->kds_offset,
+			   (unsigned int)cmeta->idx_subattrs,
+			   (unsigned int)cmeta->num_subattrs,
+			   cmeta->attname);
+	}
 }
 #endif	/* XPU_COMMON_H */
