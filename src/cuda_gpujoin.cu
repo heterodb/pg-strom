@@ -154,7 +154,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 	/* error checks */
 	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
-	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + get_local_id())
+	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + get_local_size())
 		return depth+1;
 	return depth;
 }
@@ -724,7 +724,7 @@ kern_gpujoin_main(kern_session_info *session,
 	bool			   *matched;
 	uint32_t			wp_base_sz;
 	uint32_t			n_rels = (kmrels ? kmrels->num_rels : 0);
-	int					depth;
+	int					depth = 0;
 
 	assert(kgtask->kvars_nslots == session->kcxt_kvars_nslots &&
 		   kgtask->kvecs_bufsz  == session->kcxt_kvecs_bufsz &&
@@ -757,10 +757,10 @@ kern_gpujoin_main(kern_session_info *session,
 		/* zero clear the wp */
 		if (get_local_id() == 0)
 			memset(wp, 0, wp_base_sz);
-		for (depth=0; depth < kgtask->n_rels; depth++)
+		for (int d=0; d < kgtask->n_rels; d++)
 		{
-			l_state[depth * get_global_size() + get_global_id()] = 0;
-			matched[depth * get_global_size() + get_global_id()] = false;
+			l_state[d * get_global_size() + get_global_id()] = 0;
+			matched[d * get_global_size() + get_global_id()] = false;
 		}
 	}
 	__syncthreads();
@@ -768,7 +768,7 @@ kern_gpujoin_main(kern_session_info *session,
 	l_state[get_global_size() * ((__depth)-1) + get_global_id()]
 #define __MATCHED(__depth)						\
 	matched[get_global_size() * ((__depth)-1) + get_global_id()]
-	
+
 	/* main logic of GpuJoin */
 	while (depth >= 0)
 	{
@@ -864,6 +864,7 @@ kern_gpujoin_main(kern_session_info *session,
 			break;
 	}
 	__syncthreads();
+
 #undef __KVEC_BUFFER
 #undef __L_STATE
 #undef __MATCHED
