@@ -2464,6 +2464,7 @@ PUBLIC_DATA xpu_type_catalog_entry builtin_xpu_types_catalog[] = {
 #include "xpu_opcodes.h"
 	//{ TypeOpCode__composite, &xpu_composite_ops },
 	{ TypeOpCode__array, &xpu_array_ops },
+	{ TypeOpCode__internal, &xpu_internal_ops },
 	{ TypeOpCode__Invalid, NULL }
 };
 

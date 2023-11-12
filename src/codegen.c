@@ -383,7 +383,7 @@ found:
  * devtype_lookup_by_opcode
  */
 static devtype_info *
-devtype_lookup_by_opcode(TypeOpCode type_code)
+__devtype_lookup_by_opcode(TypeOpCode type_code)
 {
 	Datum		hash;
 	uint32_t	index;
@@ -400,6 +400,58 @@ devtype_lookup_by_opcode(TypeOpCode type_code)
 	}
 	return NULL;
 }
+
+static const char *
+devtype_get_name_by_opcode(TypeOpCode type_code)
+{
+	devtype_info   *dtype;
+
+	switch (type_code)
+	{
+		case TypeOpCode__composite:
+			return "composite";
+		case TypeOpCode__array:
+			return "array";
+		case TypeOpCode__internal:
+			return "internal";
+		default:
+			dtype = __devtype_lookup_by_opcode(type_code);
+			if (dtype)
+				return dtype->type_name;
+			break;
+	}
+	elog(ERROR, "device type opcode:%u not found", type_code);
+}
+
+static uint32_t
+devtype_get_kvec_sizeof_by_opcode(TypeOpCode type_code)
+{
+	devtype_info   *dtype;
+
+	switch (type_code)
+	{
+		case TypeOpCode__composite:
+			return sizeof(kvec_composite_t);
+		case TypeOpCode__array:
+			return sizeof(kvec_array_t);
+		case TypeOpCode__internal:
+			return sizeof(kvec_internal_t);
+		default:
+			dtype = __devtype_lookup_by_opcode(type_code);
+			if (dtype)
+				return dtype->kvec_sizeof;
+			break;
+	}
+	elog(ERROR, "device type opcode:%u not found", type_code);
+}
+
+
+
+
+
+
+
+
 
 /*
  * Built-in device type hash functions
@@ -3549,11 +3601,11 @@ __get_expression_cstring(const CustomScanState *css,
 static void
 __xpucode_const_cstring(StringInfo buf, const kern_expression *kexp)
 {
-	devtype_info   *dtype = devtype_lookup_by_opcode(kexp->exptype);
+	const char *dname = devtype_get_name_by_opcode(kexp->exptype);
 
 	if (kexp->u.c.const_isnull)
 	{
-		appendStringInfo(buf, "{Const(%s): value=NULL}", dtype->type_name);
+		appendStringInfo(buf, "{Const(%s): value=NULL}", dname);
 	}
 	else
 	{
@@ -3580,7 +3632,7 @@ __xpucode_const_cstring(StringInfo buf, const kern_expression *kexp)
 			datum = PointerGetDatum(kexp->u.c.const_value);
 		label = OidFunctionCall1(type_outfunc, datum);
 		appendStringInfo(buf, "{Const(%s): value='%s'}",
-						 dtype->type_name,
+						 dname,
 						 DatumGetCString(label));
 	}
 }
@@ -3588,10 +3640,10 @@ __xpucode_const_cstring(StringInfo buf, const kern_expression *kexp)
 static void
 __xpucode_param_cstring(StringInfo buf, const kern_expression *kexp)
 {
-	devtype_info   *dtype = devtype_lookup_by_opcode(kexp->exptype);
+	const char *dname = devtype_get_name_by_opcode(kexp->exptype);
 
 	appendStringInfo(buf, "{Param(%s): param_id=%u}",
-					 dtype->type_name,
+					 dname,
 					 kexp->u.p.param_id);
 }
 
@@ -3602,16 +3654,18 @@ __xpucode_var_cstring(StringInfo buf,
 					  ExplainState *es,				/* optional */
 					  List *dcontext)				/* optionsl */
 {
-	devtype_info   *dtype = devtype_lookup_by_opcode(kexp->exptype);
-	const char	   *label = __get_expression_cstring(css, dcontext,
-													 kexp->u.v.var_slot_id);
-	appendStringInfo(buf, "{Var(%s):", dtype->type_name);
+	uint32_t	kvec_sz = devtype_get_kvec_sizeof_by_opcode(kexp->exptype);
+	const char *dname = devtype_get_name_by_opcode(kexp->exptype);
+	const char *label = __get_expression_cstring(css, dcontext,
+												 kexp->u.v.var_slot_id);
+
+	appendStringInfo(buf, "{Var(%s):", dname);
 	if (kexp->u.v.var_offset < 0)
 		appendStringInfo(buf, " slot=%u", kexp->u.v.var_slot_id);
 	else
 		appendStringInfo(buf, " kvec=0x%04x-%04x",
 						 kexp->u.v.var_offset,
-						 kexp->u.v.var_offset + dtype->kvec_sizeof);
+						 kexp->u.v.var_offset + kvec_sz);
 	appendStringInfo(buf, ", expr='%s'}", label);
 }
 
@@ -3634,24 +3688,23 @@ __xpucode_loadvars_cstring(StringInfo buf,
 	{
 		const kern_varload_desc *vl_desc = &kexp->u.load.desc[i];
 		const codegen_kvar_defitem *kvdef;
-		devtype_info   *dtype;
+		const char	   *dname;
+		const char	   *label;
 
 		kvdef = __lookup_kvar_defitem_by_slot_id(css, vl_desc->vl_slot_id);
 		if (!kvdef)
 			elog(ERROR, "failed on kernel variable with slot_id=%d",
 				vl_desc->vl_slot_id);
-		dtype = devtype_lookup_by_opcode(kvdef->kv_type_code);
-		if (!dtype)
-			elog(ERROR, "failed on devtype_lookup_by_opcode(%u)",
-				 kvdef->kv_type_code);
+		dname = devtype_get_name_by_opcode(kvdef->kv_type_code);
+		label = __get_expression_cstring(css, dcontext,
+										 vl_desc->vl_slot_id);
 		if (i > 0)
 			appendStringInfo(buf, ", ");
 		appendStringInfo(buf, "<slot=%d, type='%s' resno=%d(%s)>",
 						 vl_desc->vl_slot_id,
-						 dtype->type_name,
+						 dname,
 						 vl_desc->vl_resno,
-						 __get_expression_cstring(css, dcontext,
-												  vl_desc->vl_slot_id));
+						 label);
 	}
 	if (kexp->u.load.nitems > 0)
 		appendStringInfoChar(buf, ']');
@@ -3672,16 +3725,18 @@ __xpucode_movevars_cstring(StringInfo buf,
 	{
 		const kern_varmove_desc *vm_desc = &kexp->u.move.desc[i];
 		const codegen_kvar_defitem *kvdef;
-		devtype_info   *dtype;
+		const char *dname;
+		const char *label;
+		uint32_t	kvec_sz;
 
 		kvdef = __lookup_kvar_defitem_by_slot_id(css, vm_desc->vm_slot_id);
 		if (!kvdef)
 			elog(ERROR, "failed on kernel variable with slot_id=%d",
 				 vm_desc->vm_slot_id);
-		dtype = devtype_lookup_by_opcode(kvdef->kv_type_code);
-		if (!dtype)
-			elog(ERROR, "failed on devtype_lookup_by_opcode(%u)",
-				 kvdef->kv_type_code);
+		dname = devtype_get_name_by_opcode(kvdef->kv_type_code);
+		kvec_sz = devtype_get_kvec_sizeof_by_opcode(kvdef->kv_type_code);
+		label = __get_expression_cstring(css, dcontext,
+										 vm_desc->vm_slot_id);
 		if (i > 0)
 			appendStringInfo(buf, ", ");
 		appendStringInfo(buf, "<");
@@ -3689,10 +3744,9 @@ __xpucode_movevars_cstring(StringInfo buf,
 			appendStringInfo(buf, "slot=%d, ", vm_desc->vm_slot_id);
 		appendStringInfo(buf, "offset=0x%04x-%04x, type='%s', expr='%s'>",
 						 vm_desc->vm_offset,
-						 vm_desc->vm_offset + dtype->kvec_sizeof - 1,
-						 dtype->type_name,
-						 __get_expression_cstring(css, dcontext,
-												  vm_desc->vm_slot_id));
+						 vm_desc->vm_offset + kvec_sz - 1,
+						 dname,
+						 label);
 	}
 	appendStringInfo(buf, "]}");
 }
@@ -3706,29 +3760,23 @@ __xpucode_gisteval_cstring(StringInfo buf,
 {
 	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
 	const codegen_kvar_defitem *kvdef;
-	devtype_info   *dtype;
+	const char	   *dname = devtype_get_name_by_opcode(kexp->exptype);
 
 	Assert(kexp->nr_args == 1 &&
 		   kexp->exptype == karg->exptype);
-	dtype = devtype_lookup_by_opcode(kexp->exptype);
-	if (!dtype)
-		elog(ERROR, "device type lookup failed for code:%u", kexp->exptype);
-	appendStringInfo(buf, "{GiSTEval(%s): ", dtype->type_name);
+
+	appendStringInfo(buf, "{GiSTEval(%s): ", dname);
 
 	kvdef = __lookup_kvar_defitem_by_slot_id(css, kexp->u.gist.ivar_desc.vl_slot_id);
 	if (!kvdef)
 		elog(ERROR, "failed on kernel variable with slot_id=%d",
 			 kexp->u.gist.ivar_desc.vl_slot_id);
-	dtype = devtype_lookup_by_opcode(kvdef->kv_type_code);
-	if (!dtype)
-		elog(ERROR, "device type lookup failed for code:%u",
-			 kvdef->kv_type_code);
 	appendStringInfo(buf, "<slot=%d, idxname%d='%s', type='%s'>, arg=",
 					 kexp->u.gist.ivar_desc.vl_slot_id,
 					 kexp->u.gist.ivar_desc.vl_resno,
 					 get_attname(kexp->u.gist.gist_oid,
 								 kexp->u.gist.ivar_desc.vl_resno, false),
-					 dtype->type_name);
+					 devtype_get_name_by_opcode(kvdef->kv_type_code));
 	__xpucode_to_cstring(buf, karg, css, es, dcontext);
 	appendStringInfo(buf, "}");
 }
@@ -3863,7 +3911,7 @@ __xpucode_to_cstring(StringInfo buf,
 	const kern_expression *karg;
 	const codegen_kvar_defitem *kvdef;
 	devfunc_info *dfunc;
-	devtype_info *dtype;
+	const char *dname;
 	const char *label;
 	int			i, pos;
 
@@ -3920,13 +3968,10 @@ __xpucode_to_cstring(StringInfo buf,
 			appendStringInfo(buf, "}");
 			return;
 		case FuncOpCode__SaveExpr:
-			dtype = devtype_lookup_by_opcode(kexp->exptype);
-			if (!dtype)
-				elog(ERROR, "device type lookup failed for code:%u",
-					 kexp->exptype);
+			dname = devtype_get_name_by_opcode(kexp->exptype);
 			appendStringInfo(buf, "{SaveExpr: <slot=%d, type='%s'>",
 							 kexp->u.save.sv_slot_id,
-							 dtype->type_name);
+							 dname);
 			break;
 		case FuncOpCode__AggFuncs:
 			__xpucode_aggfuncs_cstring(buf, kexp, css, es, dcontext);
@@ -4044,16 +4089,13 @@ __xpucode_to_cstring(StringInfo buf,
 				label = "Any";
 			else
 				label = "All";
-			appendStringInfo(buf, "{ScalarArrayOp%s: ", label);
-
+			appendStringInfo(buf, "{ScalarArrayOp%s: elem=<slot=%d",
+							 label,
+							 kexp->u.saop.elem_slot_id);
 			kvdef = __lookup_kvar_defitem_by_slot_id(css, kexp->u.saop.elem_slot_id);
 			if (kvdef)
-				dtype = devtype_lookup_by_opcode(kvdef->kv_type_code);
-			else
-				dtype = NULL;
-			appendStringInfo(buf, " elem=<slot=%d", kexp->u.saop.elem_slot_id);
-			if (dtype)
-				appendStringInfo(buf, ", type='%s'", dtype->type_name);
+				appendStringInfo(buf, ", type='%s'",
+								 devtype_get_name_by_opcode(kvdef->kv_type_code));
 			appendStringInfoChar(buf, '>');
 			break;
 
@@ -4073,9 +4115,9 @@ __xpucode_to_cstring(StringInfo buf,
 				dfunc = devfunc_lookup_by_opcode(kexp->opcode);
 				if (dfunc)
 				{
-					dtype = devtype_lookup_by_opcode(kexp->exptype);
+					dname = devtype_get_name_by_opcode(kexp->exptype);
 					appendStringInfo(buf, "{Func(%s)::%s",
-									 dtype->type_name,
+									 dname,
                                      dfunc->func_name);
 				}
 				else
@@ -4135,14 +4177,11 @@ __explain_kvars_slot_subfield_types(StringInfo buf, List *subfields_list)
 	foreach (lc, subfields_list)
 	{
 		codegen_kvar_defitem *kvdef = lfirst(lc);
-		devtype_info   *dtype;
+		const char *dname = devtype_get_name_by_opcode(kvdef->kv_type_code);
 
-		dtype = devtype_lookup_by_opcode(kvdef->kv_type_code);
-		if (!dtype)
-			elog(ERROR, "device type lookup failed for code:%u", kvdef->kv_type_code);
 		if (lc != list_head(subfields_list))
 			appendStringInfo(buf, ", ");
-		appendStringInfo(buf, "%s", dtype->type_name);
+		appendStringInfo(buf, "%s", dname);
 		if (kvdef->kv_subfields != NIL)
 		{
 			appendStringInfoChar(buf, '(');
@@ -4168,11 +4207,8 @@ pgstrom_explain_kvars_slot(const CustomScanState *css,
 	foreach (lc, pp_info->kvars_deflist)
 	{
 		codegen_kvar_defitem *kvdef = lfirst(lc);
-		devtype_info   *dtype;
+		const char *dname = devtype_get_name_by_opcode(kvdef->kv_type_code);
 
-		dtype = devtype_lookup_by_opcode(kvdef->kv_type_code);
-		if (!dtype)
-			elog(ERROR, "device type lookup failed for code:%u", kvdef->kv_type_code);
 		if (lc != list_head(pp_info->kvars_deflist))
 			appendStringInfo(&buf, ", ");
 		appendStringInfo(&buf, "<slot=%d", slot_id);
@@ -4180,9 +4216,9 @@ pgstrom_explain_kvars_slot(const CustomScanState *css,
 		appendStringInfo(&buf, ", depth=%d, resno=%d",
 						 kvdef->kv_depth,
 						 kvdef->kv_resno);
-#endif	
-		appendStringInfo(&buf, ", type='%s", dtype->type_name);
-		if (dtype->type_code == TypeOpCode__internal)
+#endif
+		appendStringInfo(&buf, ", type='%s", dname);
+		if (kvdef->kv_type_code == TypeOpCode__internal)
 			appendStringInfo(&buf, "[%d]", kvdef->kv_typlen);
 		else if (kvdef->kv_subfields)
 		{
@@ -4252,20 +4288,16 @@ pgstrom_explain_kvecs_buffer(const CustomScanState *css,
 	for (int i=0; i < nitems; i++)
 	{
 		const codegen_kvar_defitem *kvdef = kvdef_array[i];
-		devtype_info   *dtype;
+		const char *dname = devtype_get_name_by_opcode(kvdef->kv_type_code);
+		uint32_t	kvec_sz = devtype_get_kvec_sizeof_by_opcode(kvdef->kv_type_code);
 
-		dtype = devtype_lookup_by_opcode(kvdef->kv_type_code);
-		if (!dtype)
-			elog(ERROR, "device type lookup failed for code:%u",
-				 kvdef->kv_type_code);
 		if (i > 0)
 			appendStringInfo(&buf, ", ");
-
 		appendStringInfo(&buf, "kvec%d=<0x%04x-%04x, type='%s', expr='%s'>",
 						 i,
 						 kvdef->kv_offset,
-						 kvdef->kv_offset + dtype->kvec_sizeof - 1,
-						 dtype->type_name,
+						 kvdef->kv_offset + kvec_sz - 1,
+						 dname,
 						 deparse_expression((Node *)kvdef->kv_expr,
 											dcontext,
 											false, false));
