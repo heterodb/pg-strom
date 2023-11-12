@@ -1260,7 +1260,7 @@ __substring_common(kern_context *kcxt,
 			{
 				int		w = encode->enc_mblen(pos);
 
-				if (pos + w >= end)
+				if (pos + w > end)
 					break;
 				if (i == start)
 					result->value = pos;
@@ -1283,44 +1283,24 @@ __substring_common(kern_context *kcxt,
 PUBLIC_FUNCTION(bool)
 pgfn_substring(XPU_PGFUNCTION_ARGS)
 {
-	const kern_expression *karg;
-	xpu_text_t	str;
-	xpu_int4_t	start;
-	xpu_int4_t	count;
+	KEXP_PROCESS_ARGS3(text, text, str, int4, start, int4, count);
 
-	assert(kexp->nr_args == 3 &&
-		   kexp->exptype == TypeOpCode__text);
-	__result->expr_ops = NULL;
-
-	karg = KEXP_FIRST_ARG(kexp);
-	assert(KEXP_IS_VALID(karg, text));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &str))
-		return false;
-	if (XPU_DATUM_ISNULL(&str))
-		return true;	/* NULL */
+	if (XPU_DATUM_ISNULL(&str) ||
+		XPU_DATUM_ISNULL(&start) ||
+		XPU_DATUM_ISNULL(&count))
+	{
+		result->expr_ops = NULL;
+		return true;
+	}
 	if (!xpu_text_is_valid(kcxt, &str))
 		return false;	/* compressed or external */
-
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg, int4));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &start))
-		return false;
-	if (XPU_DATUM_ISNULL(&start))
-		return true;	/* NULL */
-
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg, int4));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &count))
-		return false;
-	if (XPU_DATUM_ISNULL(&count))
-		return true;
 	if (count.value < 0)
 	{
 		STROM_ELOG(kcxt, "negative substring length not allowed");
 		return false;
 	}
 	return __substring_common(kcxt,
-							  (xpu_text_t *)__result,
+							  result,
 							  str.value,
 							  str.length,
 							  start.value - 1,	/* 0-origin */
@@ -1336,32 +1316,18 @@ pgfn_substr(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_substring_nolen(XPU_PGFUNCTION_ARGS)
 {
-	const kern_expression *karg;
-	xpu_text_t	str;
-	xpu_int4_t	start;
+	KEXP_PROCESS_ARGS2(text, text, str, int4, start);
 
-	assert(kexp->nr_args == 2 &&
-		   kexp->exptype == TypeOpCode__text);
-	__result->expr_ops = NULL;
-
-	karg = KEXP_FIRST_ARG(kexp);
-	assert(KEXP_IS_VALID(karg, text));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &str))
-		return false;
-	if (XPU_DATUM_ISNULL(&str))
-		return true;	/* NULL */
+	if (XPU_DATUM_ISNULL(&str) || XPU_DATUM_ISNULL(&start))
+	{
+		result->expr_ops = NULL;
+		return true;
+	}
 	if (!xpu_text_is_valid(kcxt, &str))
 		return false;	/* compressed or external */
 
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg, int4));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &start))
-		return false;
-	if (XPU_DATUM_ISNULL(&start))
-		return true;	/* NULL */
-
 	return __substring_common(kcxt,
-							  (xpu_text_t *)__result,
+							  result,
 							  str.value,
 							  str.length,
 							  start.value - 1,	/* 0-origin */

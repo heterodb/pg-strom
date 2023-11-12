@@ -329,14 +329,8 @@ INLINE_FUNCTION(bool) __iszero(float8_t fval) { return fval == 0.0; }
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##SOURCE##_to_##TARGET(XPU_PGFUNCTION_ARGS)					\
 	{																	\
-		xpu_##TARGET##_t *result = (xpu_##TARGET##_t *)__result;		\
-		xpu_##SOURCE##_t  datum;										\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+		KEXP_PROCESS_ARGS1(TARGET, SOURCE, datum);						\
 																		\
-		assert(kexp->nr_args == 1);										\
-		assert(KEXP_IS_VALID(karg,SOURCE));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))					\
-			return false;												\
 		if (XPU_DATUM_ISNULL(&datum))									\
 			result->expr_ops = NULL;									\
 		else															\
@@ -346,7 +340,7 @@ INLINE_FUNCTION(bool) __iszero(float8_t fval) { return fval == 0.0; }
 				STROM_ELOG(kcxt, #SOURCE " to " #TARGET ": out of range"); \
 				return false;											\
 			}															\
-			result->expr_ops = kexp->expr_ops;							\
+			result->expr_ops = &xpu_##TARGET##_ops;						\
 			result->value = CAST(datum.value);							\
 		}																\
 		return true;													\
@@ -485,19 +479,8 @@ PG_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, )
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)									\
 	{																	\
-		xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;			\
-		xpu_##XTYPE##_t x_val;											\
-		xpu_##YTYPE##_t y_val;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+		KEXP_PROCESS_ARGS2(RTYPE, XTYPE, x_val, YTYPE, y_val);			\
 																		\
-		assert(kexp->nr_args == 2);										\
-		assert(KEXP_IS_VALID(karg, XTYPE));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, YTYPE));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
-			return false;												\
 		if (XPU_DATUM_ISNULL(&x_val) || XPU_DATUM_ISNULL(&y_val))		\
 			result->expr_ops = NULL;									\
 		else															\
@@ -519,19 +502,8 @@ PG_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, )
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)									\
 	{																	\
-		xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;			\
-		xpu_##XTYPE##_t x_val;											\
-		xpu_##YTYPE##_t y_val;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+		KEXP_PROCESS_ARGS2(RTYPE, XTYPE, x_val, YTYPE, y_val);			\
 																		\
-		assert(kexp->nr_args == 2);										\
-		assert(KEXP_IS_VALID(karg,XTYPE));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, YTYPE));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
-			return false;												\
 		if (XPU_DATUM_ISNULL(&x_val) || XPU_DATUM_ISNULL(&y_val))		\
 			result->expr_ops = NULL;									\
 		else															\
@@ -639,19 +611,8 @@ PG_FLOAT_BIN_OPERATOR_TEMPLATE(float8mul, float8,float8,float8,*,)
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)									\
 	{																	\
-		xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;			\
-		xpu_##XTYPE##_t x_val;											\
-		xpu_##YTYPE##_t y_val;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+		KEXP_PROCESS_ARGS2(RTYPE, XTYPE, x_val, YTYPE, y_val);			\
 																		\
-		assert(kexp->nr_args == 2);										\
-		assert(KEXP_IS_VALID(karg,XTYPE));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg,YTYPE));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
-			return false;												\
 		if (XPU_DATUM_ISNULL(&x_val) || XPU_DATUM_ISNULL(&y_val))		\
 			result->expr_ops = NULL;									\
 		else															\
@@ -684,28 +645,17 @@ PG_FLOAT_BIN_OPERATOR_TEMPLATE(float8mul, float8,float8,float8,*,)
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)                                   \
     {                                                                   \
-        xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;          \
-        xpu_##XTYPE##_t x_val;                                          \
-        xpu_##YTYPE##_t y_val;                                          \
-        const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
-                                                                        \
-		assert(kexp->nr_args == 2);										\
-		assert(KEXP_IS_VALID(karg,XTYPE));								\
-        if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
-            return false;                                               \
-        karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg,YTYPE));								\
-        if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
-            return false;                                               \
+		KEXP_PROCESS_ARGS2(RTYPE, XTYPE, x_val, YTYPE, y_val);			\
+																		\
 		if (XPU_DATUM_ISNULL(&x_val) || XPU_DATUM_ISNULL(&y_val))		\
 			result->expr_ops = NULL;									\
 		else															\
-		{                                                               \
+		{																\
 			if (__iszero(y_val.value))									\
-			{                                                           \
-				STROM_ELOG(kcxt, #FNAME ": division by zero");          \
-				return false;                                           \
-			}                                                           \
+			{															\
+				STROM_ELOG(kcxt, #FNAME ": division by zero");			\
+				return false;											\
+			}															\
 			result->value = __CAST(x_val.value) / __CAST(y_val.value);	\
 			/* CHECKFLOATVAL */											\
 			if ((isinf(result->value) && (!isinf(x_val.value) &&		\
@@ -717,9 +667,8 @@ PG_FLOAT_BIN_OPERATOR_TEMPLATE(float8mul, float8,float8,float8,*,)
 			}															\
 			result->expr_ops = &xpu_##RTYPE##_ops;						\
 		}																\
-        return true;                                                    \
-    }
-
+		return true;													\
+	}
 PG_INT_DIV_OPERATOR_TEMPLATE(int1div, int1,int1,int1,SCHAR_MIN)
 PG_INT_DIV_OPERATOR_TEMPLATE(int12div,int2,int1,int2,0)
 PG_INT_DIV_OPERATOR_TEMPLATE(int14div,int4,int1,int4,0)
@@ -753,19 +702,8 @@ PG_FLOAT_DIV_OPERATOR_TEMPLATE(float8div, float8,float8,float8,)
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##TYPE##mod(XPU_PGFUNCTION_ARGS)								\
 	{																	\
-		xpu_##TYPE##_t *result = (xpu_##TYPE##_t *)__result;			\
-		xpu_##TYPE##_t x_val;											\
-		xpu_##TYPE##_t y_val;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+		KEXP_PROCESS_ARGS2(TYPE, TYPE, x_val, TYPE, y_val);				\
 																		\
-		assert(kexp->nr_args == 2);										\
-		assert(KEXP_IS_VALID(karg, TYPE));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, TYPE));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
-			return false;												\
 		if (XPU_DATUM_ISNULL(&x_val) || XPU_DATUM_ISNULL(&y_val))		\
 			result->expr_ops = NULL;									\
 		else															\
@@ -775,12 +713,11 @@ PG_FLOAT_DIV_OPERATOR_TEMPLATE(float8div, float8,float8,float8,)
 				STROM_ELOG(kcxt, #TYPE "mod : division by zero");		\
 				return false;											\
 			}															\
-			result->expr_ops = &xpu_##TYPE##_ops;						\
-			result->value = x_val.value % y_val.value;					\
+			result->expr_ops = &xpu_##TYPE##_ops;                       \
+			result->value = x_val.value % y_val.value;                  \
 		}																\
 		return true;													\
 	}
-
 PG_INT_MOD_OPERATOR_TEMPLATE(int1)
 PG_INT_MOD_OPERATOR_TEMPLATE(int2)
 PG_INT_MOD_OPERATOR_TEMPLATE(int4)
@@ -793,18 +730,13 @@ PG_INT_MOD_OPERATOR_TEMPLATE(int8)
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)									\
 	{																	\
-		xpu_##XTYPE##_t *result = (xpu_##XTYPE##_t *)__result;			\
-		xpu_##XTYPE##_t x_val;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+		KEXP_PROCESS_ARGS1(XTYPE,XTYPE,x_val);							\
 																		\
-		assert(kexp->nr_args==1 && KEXP_IS_VALID(karg,XTYPE));			\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
-			return false;												\
 		if (XPU_DATUM_ISNULL(&x_val))									\
 			result->expr_ops = NULL;									\
 		else															\
 		{																\
-			result->expr_ops = kexp->expr_ops;							\
+			result->expr_ops = &xpu_##XTYPE##_ops;						\
 			result->value = OPER(x_val.value);							\
 		}																\
 		return true;													\
@@ -814,19 +746,8 @@ PG_INT_MOD_OPERATOR_TEMPLATE(int8)
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)									\
 	{																	\
-		xpu_##RTYPE##_t *result = (xpu_##RTYPE##_t *)__result;			\
-		xpu_##XTYPE##_t x_val;											\
-		xpu_##YTYPE##_t y_val;											\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+		KEXP_PROCESS_ARGS2(RTYPE,XTYPE,x_val,YTYPE,y_val);				\
 																		\
-		assert(karg->nr_args == 2);										\
-		assert(KEXP_IS_VALID(karg,XTYPE));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x_val))					\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg,YTYPE));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y_val))					\
-			return false;												\
 		if (XPU_DATUM_ISNULL(&x_val) || XPU_DATUM_ISNULL(&y_val))		\
 			result->expr_ops = NULL;									\
 		else															\

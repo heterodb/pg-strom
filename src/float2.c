@@ -759,7 +759,7 @@ pgstrom_float2um(PG_FUNCTION_ARGS)
 #ifndef EMULATE_FLOAT2
 	fval = -fval;
 #else
-	fval ^= ~0x8000;
+	fval ^= 0x8000;
 #endif
 	PG_RETURN_FP16(fval);
 }

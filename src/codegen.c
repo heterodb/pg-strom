@@ -950,12 +950,7 @@ found:
 	{
 		/* see texteq, bpchareq */
 		if (!lc_collate_is_c(func_collid))
-		{
-			pg_locale_t	mylocate = pg_newlocale_from_collation(func_collid);
-
-			if (mylocate && !mylocate->deterministic)
-				return NULL;	/* not supported */
-		}
+			return NULL;	/* not supported */
 	}
 	return dfunc;
 }
@@ -1423,7 +1418,7 @@ codegen_func_expression(codegen_context *context,
 									 curr_depth,
 									 func->funcid,
 									 func->args,
-									 func->funccollid);
+									 func->inputcollid);
 }
 
 static int
@@ -1436,7 +1431,7 @@ codegen_oper_expression(codegen_context *context,
 									 curr_depth,
 									 get_opcode(oper->opno),
 									 oper->args,
-									 oper->opcollid);
+									 oper->inputcollid);
 }
 
 static int
