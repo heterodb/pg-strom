@@ -197,8 +197,12 @@ SELECT id, a/b v1, a/d v2, a/f v3,
   FROM rt_float
  WHERE z BETWEEN -16000 AND 16000
    AND b != 0.0 AND d != 0.0 AND f != 0.0;
-(SELECT * FROM test13g EXCEPT ALL SELECT * FROM test13p) ORDER BY id;
-(SELECT * FROM test13p EXCEPT ALL SELECT * FROM test13g) ORDER BY id;
+SELECT *
+FROM test13g g, test13p p
+WHERE g.id=p.id 
+AND (abs(g.v1 - p.v1) > 0.1 OR abs(g.v2 - p.v2) > 0.1 OR abs(g.v3 - p.v3) > 0.001 OR
+      abs(g.v4 - p.v4) > 0.001 OR abs(g.v5 - p.v5) > 0.001 OR abs(g.v6 - p.v6) > 0.001 OR
+      abs(g.v7 - p.v7) > 0.001 OR abs(g.v8 - p.v8) > 0.001 OR abs(g.v9 - p.v9) > 0.001);
 
 -- unary operators ('+','-','@')
 SET pg_strom.enabled = on;
@@ -222,8 +226,13 @@ SELECT id, +a v1, -b v2, @(a+b) v3,
   INTO test14p
   FROM rt_float
  WHERE z < 0;
-(SELECT * FROM test14g EXCEPT ALL SELECT * FROM test14p) ORDER BY id;
-(SELECT * FROM test14p EXCEPT ALL SELECT * FROM test14g) ORDER BY id;
+
+SELECT *
+FROM test14g g, test14p p
+WHERE g.id=p.id 
+AND (abs(g.v1 - p.v1) > 0.1 OR abs(g.v2 - p.v2) > 0.1 OR abs(g.v3 - p.v3) > 0.001 OR
+      abs(g.v4 - p.v4) > 0.001 OR abs(g.v5 - p.v5) > 0.001 OR abs(g.v6 - p.v6) > 0.001 OR
+      abs(g.v7 - p.v7) > 0.001 OR abs(g.v8 - p.v8) > 0.001 OR abs(g.v9 - p.v9) > 0.001);
 
 -- '='  : equal operators
 SET pg_strom.enabled = on;

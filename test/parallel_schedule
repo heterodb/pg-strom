@@ -4,7 +4,6 @@
 # By convention, we put no more than twenty tests in any one parallel group;
 # this limits the number of connections needed to run the tests.
 # ----------
-test: hoge
 
 # ----------
 # Check default parameter setting
@@ -15,6 +14,8 @@ test: hoge
 # Test for each data types
 # ----------
 #test: dtype_int dtype_float dtype_numeric dtype_time dtype_text dtype_jsonb dtype_range additional_dtype
+test: dtype_float dtype_text
+##test: dtype_float
 
 # ----------
 # Test for various functions / expressions

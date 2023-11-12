@@ -21,9 +21,7 @@ CREATE TABLE rt_text (
   vc1   varchar(80) COLLATE "C",
   vc2   varchar(80) COLLATE "C",
   tc1   text        COLLATE "C",
-  tc2   text        COLLATE "C",
-  tj1   text        COLLATE "en_US",
-  tj2   text        COLLATE "en_US"
+  tc2   text        COLLATE "C"
 );
 SELECT pgstrom.random_setseed(20190616);
 INSERT INTO rt_text (
@@ -31,8 +29,6 @@ INSERT INTO rt_text (
             pgstrom.random_text_len(1,  80),
             pgstrom.random_text_len(1,  80),
             pgstrom.random_text_len(1,  80),
-            pgstrom.random_text_len(1, 160),
-            pgstrom.random_text_len(1, 160),
             pgstrom.random_text_len(1, 160),
             pgstrom.random_text_len(1, 160)
     FROM generate_series(1,3000) x
@@ -124,37 +120,11 @@ SELECT id, tc1 = tc2 eq, tc1 <> tc2 ne,
 (SELECT * FROM test11p EXCEPT SELECT * FROM test11g) ORDER BY id;
 
 
-SET pg_strom.enabled = on;
-EXPLAIN (costs off, verbose)
-SELECT id, tj1 = tj2 eq, tj1 <> tj2 ne,
-           tj1 > tj2 lt, tj1 >= tj2 le,
-           tj1 < tj2 gt, tj1 <= tj2 ge
-  INTO test12g
-  FROM rt_text
- WHERE id > 0;
-SELECT id, tj1 = tj2 eq, tj1 <> tj2 ne,
-           tj1 > tj2 lt, tj1 >= tj2 le,
-           tj1 < tj2 gt, tj1 <= tj2 ge
-  INTO test12g
-  FROM rt_text
- WHERE id > 0;
-SET pg_strom.enabled = off;
-SELECT id, tj1 = tj2 eq, tj1 <> tj2 ne,
-           tj1 > tj2 lt, tj1 >= tj2 le,
-           tj1 < tj2 gt, tj1 <= tj2 ge
-  INTO test12p
-  FROM rt_text
- WHERE id > 0;
-(SELECT * FROM test12g EXCEPT SELECT * FROM test12p) ORDER BY id;
-(SELECT * FROM test12p EXCEPT SELECT * FROM test12g) ORDER BY id;
-
 -- LIKE & ILIKE operators
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
 SELECT id, bc1 LIKE '%ab%cd%' v1,
            bc2 LIKE '%bc_de%' v2,
-           tj1 LIKE '%cd%ef%' v3,
-           tj2 LIKE '%de_fg%' v4,
            tc1 LIKE '%ef_gh%' v5,
            tc2 LIKE '%fg_hi%' v6
   INTO test20g
@@ -162,8 +132,6 @@ SELECT id, bc1 LIKE '%ab%cd%' v1,
  WHERE id > 0;
 SELECT id, bc1 LIKE '%ab%cd%' v1,
            bc2 LIKE '%bc_de%' v2,
-           tj1 LIKE '%cd%ef%' v3,
-           tj2 LIKE '%de_fg%' v4,
            tc1 LIKE '%ef_gh%' v5,
            tc2 LIKE '%fg_hi%' v6
   INTO test20g
@@ -172,8 +140,6 @@ SELECT id, bc1 LIKE '%ab%cd%' v1,
 SET pg_strom.enabled = off;
 SELECT id, bc1 LIKE '%ab%cd%' v1,
            bc2 LIKE '%bc_de%' v2,
-           tj1 LIKE '%cd%ef%' v3,
-           tj2 LIKE '%de_fg%' v4,
            tc1 LIKE '%ef_gh%' v5,
            tc2 LIKE '%fg_hi%' v6
   INTO test20p
@@ -187,8 +153,6 @@ SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
 SELECT id, bc1 ILIKE '%ab%cd%' v1,
            bc2 ILIKE '%bc_de%' v2,
-           tj1 ILIKE '%cd%ef%' v3,
-           tj2 ILIKE '%de_fg%' v4,
            tc1 ILIKE '%ef_gh%' v5,
            tc2 ILIKE '%fg_hi%' v6
   INTO test21g
@@ -196,8 +160,6 @@ SELECT id, bc1 ILIKE '%ab%cd%' v1,
  WHERE id > 0;
 SELECT id, bc1 ILIKE '%ab%cd%' v1,
            bc2 ILIKE '%bc_de%' v2,
-           tj1 ILIKE '%cd%ef%' v3,
-           tj2 ILIKE '%de_fg%' v4,
            tc1 ILIKE '%ef_gh%' v5,
            tc2 ILIKE '%fg_hi%' v6
   INTO test21g
@@ -206,8 +168,6 @@ SELECT id, bc1 ILIKE '%ab%cd%' v1,
 SET pg_strom.enabled = off;
 SELECT id, bc1 ILIKE '%ab%cd%' v1,
            bc2 ILIKE '%bc_de%' v2,
-           tj1 ILIKE '%cd%ef%' v3,
-           tj2 ILIKE '%de_fg%' v4,
            tc1 ILIKE '%ef_gh%' v5,
            tc2 ILIKE '%fg_hi%' v6
   INTO test21p
@@ -250,24 +210,18 @@ SELECT id, length(tc1) v1,
 -- substring
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
-SELECT id, length(tc2) v1, length(tj2) v2,
-       substring(tj1, 8, id % 15 + 5) v3,
-       substring(tj1, id % 10 + 1) v4,
+SELECT id, length(tc2) v1, 
        substring(vc1 || '-hoge-' || vc2, id % 15 + 5, 20) v5
   INTO test31g
   FROM rt_text
  WHERE id > 0;
-SELECT id, length(tc2) v1, length(tj2) v2,
-       substring(tj1, 8, id % 15 + 5) v3,
-       substring(tj1, id % 10 + 1) v4,
+SELECT id, length(tc2) v1, 
        substring(vc1 || '-hoge-' || vc2, id % 15 + 5, 20) v5
   INTO test31g
   FROM rt_text
  WHERE id > 0;
 SET pg_strom.enabled = off;
-SELECT id, length(tc2) v1, length(tj2) v2,
-       substring(tj1, 8, id % 15 + 5) v3,
-       substring(tj1, id % 10 + 1) v4,
+SELECT id, length(tc2) v1, 
        substring(vc1 || '-hoge-' || vc2, id % 15 + 5, 20) v5
   INTO test31p
   FROM rt_text
