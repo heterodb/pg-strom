@@ -1876,28 +1876,34 @@ pgfn_timestamp_to_timestamptz(XPU_PGFUNCTION_ARGS)
 		result->expr_ops = NULL;
 	else
 	{
-		const pg_tz	   *tz_info = SESSION_TIMEZONE(kcxt->session);
 		struct pg_tm	tm;
-		Timestamp		ts = datum.value;
 		fsec_t			fsec;
 
 		result->expr_ops = &xpu_timestamptz_ops;
 		if (TIMESTAMP_NOT_FINITE(datum.value))
 			result->value = datum.value;
-		else if (!timestamp2tm(datum.value, &tm, &fsec, tz_info))
+		else if (!timestamp2tm(datum.value, &tm, &fsec, NULL))
 		{
 			STROM_ELOG(kcxt, "timestamp out of range");
 			return false;
 		}
-		ts -= tm.tm_gmtoff * USECS_PER_SEC;
-		if (!IS_VALID_TIMESTAMP(ts))
+		else
 		{
+			const pg_tz *tz_info = SESSION_TIMEZONE(kcxt->session);
+			Timestamp	ts;
+			int			tz;
+
+			tz = DetermineTimeZoneOffset(&tm, tz_info);
+			/* see dt2local() */
+			ts = datum.value + tz * USECS_PER_SEC;
+
 			if (ts < MIN_TIMESTAMP)
-				ts = DT_NOBEGIN;
+				result->value = DT_NOBEGIN;
+			else if (ts >= END_TIMESTAMP)
+				result->value = DT_NOEND;
 			else
-				ts = DT_NOEND;
+				result->value = ts;
 		}
-		result->value = ts;
 	}
 	return true;
 }
