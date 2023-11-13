@@ -621,7 +621,7 @@ __numeric_compare(const xpu_numeric_t *a, const xpu_numeric_t *b)
 		}																\
 		else															\
 		{																\
-			result->expr_ops = &xpu_numeric_ops;						\
+			result->expr_ops = &xpu_bool_ops;							\
 			result->value = (__numeric_compare(&datum_a,				\
 											   &datum_b) OPER 0);		\
 		}																\
