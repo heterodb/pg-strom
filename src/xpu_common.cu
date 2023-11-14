@@ -1793,22 +1793,24 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 					   const kern_expression *kexp_load,
 					   const kern_expression *kexp_join)
 {
+	const kvec_internal_t *kvecs;
 	HeapTupleHeaderData *htup;
-	xpu_internal_t *xdatum;
 	xpu_bool_t		status;
 	uint32_t		slot_id;
 
 	/* fetch the inner heap tuple */
 	assert(kexp_gist->opcode == FuncOpCode__GiSTEval);
 	slot_id = kexp_gist->u.gist.htup_slot_id;
-	assert(slot_id < kcxt->kvars_nslots &&
-		   kcxt->kvars_desc[slot_id].vs_type_code == TypeOpCode__internal);
+	assert(slot_id < kcxt->kvars_nslots);
 	/* load the inner heap tuple */
-	xdatum = (xpu_internal_t *)kcxt->kvars_slot[slot_id];
-	assert(!XPU_DATUM_ISNULL(xdatum) &&
-		   xdatum->value >= (char *)kds_hash &&
-		   xdatum->value <  (char *)kds_hash + kds_hash->length);
-	htup = (HeapTupleHeaderData *)xdatum->value;
+	assert(kcxt->kvars_desc[slot_id].vs_type_code == TypeOpCode__internal);
+	kvecs = (const kvec_internal_t *)(kcxt->kvecs_curr_buffer +
+									  kexp_gist->u.gist.htup_offset);
+	assert(kcxt->kvecs_curr_id < KVEC_UNITSZ);
+	assert(!kvecs->isnull[kcxt->kvecs_curr_id]);
+	htup = (HeapTupleHeaderData *)kvecs->values[kcxt->kvecs_curr_id];
+	assert((char *)htup >= (char *)kds_hash &&
+		   (char *)htup <  (char *)kds_hash + kds_hash->length);
 	if (!ExecLoadVarsHeapTuple(kcxt, kexp_load, depth, kds_hash, htup))
 	{
 		STROM_ELOG(kcxt, "Bug? GiST-Index prep fetched corrupted tuple");

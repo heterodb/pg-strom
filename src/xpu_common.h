@@ -2225,6 +2225,7 @@ struct kern_expression
 			uint32_t	gist_oid;		/* OID of GiST index (for EXPLAIN) */
 			int16_t		gist_depth;		/* depth of index tuple */
 			uint16_t	htup_slot_id;	/* slot_id to save htup pointer */
+			int32_t		htup_offset;	/* kvec's buffer offset of htup pointer */
 			kern_varload_desc ivar_desc; /* index-var load descriptor */
 			char		data[1]			__MAXALIGNED__;
 		} gist;		/* GiSTEval */

@@ -768,8 +768,14 @@ __FUNC_OPCODE(geometry_contains, geometry/geometry,        99, "postgis")
 __FUNC_OPCODE(geometry_within,   geometry/geometry,        99, "postgis")
 __FUNC_OPCODE(st_expand,         geometry/float8,          20, "postgis")
 FUNC_OPCODE(overlaps_2d,     box2df/geometry, DEVKIND__ANY, box2df_geometry_overlaps, 40, "postgis")
+FUNC_OPCODE(overlaps_2d,     geometry/box2df, DEVKIND__ANY, geometry_box2df_overlaps, 40, "postgis")
+FUNC_OPCODE(overlaps_2d,     box2df/box2df,   DEVKIND__ANY, box2df_overlaps,          40, "postgis")
 FUNC_OPCODE(contains_2d,     box2df/geometry, DEVKIND__ANY, box2df_geometry_contains, 40, "postgis")
+FUNC_OPCODE(contains_2d,     geometry/box2df, DEVKIND__ANY, geometry_box2df_contains, 40, "postgis")
+FUNC_OPCODE(contains_2d,     box2df/box2df,   DEVKIND__ANY, box2df_contains,          40, "postgis")
 FUNC_OPCODE(is_contained_2d, box2df/geometry, DEVKIND__ANY, box2df_geometry_within,   40, "postgis")
+FUNC_OPCODE(is_contained_2d, geometry/box2df, DEVKIND__ANY, geometry_box2df_within,   40, "postgis")
+FUNC_OPCODE(is_contained_2d, box2df/box2df,   DEVKIND__ANY, box2df_within,            40, "postgis")
 
 #undef TYPE_OPCODE
 #undef TYPE_ALIAS

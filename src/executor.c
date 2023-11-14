@@ -2323,7 +2323,7 @@ pgstromExplainTaskState(CustomScanState *node,
 		{
 			char   *idxname = get_rel_name(pp_inner->gist_index_oid);
 			char   *colname = get_attname(pp_inner->gist_index_oid,
-										  pp_inner->gist_index_col+1, false);
+										  pp_inner->gist_index_col, false);
 			resetStringInfo(&buf);
 
 			str = deparse_expression((Node *)pp_inner->gist_clause,

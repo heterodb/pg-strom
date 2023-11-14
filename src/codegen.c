@@ -2975,10 +2975,11 @@ __codegen_build_one_gistquals(codegen_context *context,
 	uint32_t		__pos2;
 	uint32_t		gist_depth;
 	uint32_t		htup_slot_id;
+	uint32_t		htup_offset;
 
 	/* device GiST evaluation operator */
 	argtypes[0] = get_atttype(gist_index_oid,
-							  gist_index_col + 1);
+							  gist_index_col);
 	argtypes[1] = exprType((Node *)gist_func_arg);
 	dfunc = __pgstrom_devfunc_lookup(gist_func_oid,
 									 2, argtypes,
@@ -3007,6 +3008,7 @@ __codegen_build_one_gistquals(codegen_context *context,
 	context->kvecs_usage += KVEC_ALIGN(sizeof(kvec_internal_t));
 	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
 	htup_slot_id = kvdef->kv_slot_id;
+	htup_offset  = kvdef->kv_offset;
 
 	/*
 	 * allocation of the index-variable reference
@@ -3033,11 +3035,12 @@ __codegen_build_one_gistquals(codegen_context *context,
 	kexp.opcode   = FuncOpCode__GiSTEval;
 	kexp.nr_args  = 1;
 	kexp.args_offset = offsetof(kern_expression, u.gist.data);
-	kexp.u.gist.gist_oid = gist_index_oid;
-	kexp.u.gist.gist_depth = kvdef->kv_depth;
+	kexp.u.gist.gist_oid     = gist_index_oid;
+	kexp.u.gist.gist_depth   = kvdef->kv_depth;
 	kexp.u.gist.htup_slot_id = htup_slot_id;
-	kexp.u.gist.ivar_desc.vl_resno     = kvdef->kv_resno;
-	kexp.u.gist.ivar_desc.vl_slot_id   = kvdef->kv_slot_id;
+	kexp.u.gist.htup_offset  = htup_offset;
+	kexp.u.gist.ivar_desc.vl_resno   = kvdef->kv_resno;
+	kexp.u.gist.ivar_desc.vl_slot_id = kvdef->kv_slot_id;
 	off = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
 
 	/* setup binary operator to evaluate GiST index */

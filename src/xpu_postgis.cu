@@ -1073,20 +1073,10 @@ __geom_overlaps_bbox2d(const geom_bbox_2d *bbox1,
 PUBLIC_FUNCTION(bool)
 pgfn_geometry_overlaps(XPU_PGFUNCTION_ARGS)
 {
-	xpu_bool_t	   *result = (xpu_bool_t *)__result;
-	xpu_geometry_t	geom1;
-	xpu_geometry_t	geom2;
 	geom_bbox_2d	bbox1;
 	geom_bbox_2d	bbox2;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(bool, geometry, geom1, geometry, geom2);
 
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom1))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
-		return false;
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
 	else
@@ -1105,19 +1095,9 @@ pgfn_geometry_overlaps(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_box2df_geometry_overlaps(XPU_PGFUNCTION_ARGS)
 {
-	xpu_bool_t	   *result = (xpu_bool_t *)__result;
-	xpu_box2df_t	bbox1;
-	xpu_geometry_t	geom2;
 	geom_bbox_2d	bbox2;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(bool, box2df, bbox1, geometry, geom2);
 
-	assert(KEXP_IS_VALID(karg,box2df));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &bbox1))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
-		return false;
 	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
 	else
@@ -1127,6 +1107,41 @@ pgfn_box2df_geometry_overlaps(XPU_PGFUNCTION_ARGS)
 			result->value = __geom_overlaps_bbox2d(&bbox1.value, &bbox2);
 		else
 			result->value = false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_geometry_box2df_overlaps(XPU_PGFUNCTION_ARGS)
+{
+	geom_bbox_2d	bbox1;
+	KEXP_PROCESS_ARGS2(bool, geometry, geom1, box2df, bbox2);
+
+	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&bbox2))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		if (__geometry_get_bbox2d(kcxt, &geom1, &bbox1))
+			result->value = __geom_overlaps_bbox2d(&bbox1, &bbox2.value);
+		else
+			result->value = false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_box2df_overlaps(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(bool, box2df, bbox1, box2df, bbox2);
+
+	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&bbox2))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = __geom_overlaps_bbox2d(&bbox1.value,
+											   &bbox2.value);
 	}
 	return true;
 }
@@ -1152,18 +1167,9 @@ __geom_contains_bbox2d(const geom_bbox_2d *bbox1,
 PUBLIC_FUNCTION(bool)
 pgfn_geometry_contains(XPU_PGFUNCTION_ARGS)
 {
-	xpu_bool_t	   *result = (xpu_bool_t *)__result;
-	xpu_geometry_t	geom1, geom2;
 	geom_bbox_2d	bbox1, bbox2;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(bool, geometry, geom1, geometry, geom2);
 
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom1))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
-		return false;
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
 	else
@@ -1181,32 +1187,53 @@ pgfn_geometry_contains(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_box2df_geometry_contains(XPU_PGFUNCTION_ARGS)
 {
-	xpu_bool_t	   *result = (xpu_bool_t *)__result;
-	xpu_box2df_t	bbox1;
-	xpu_geometry_t	geom2;
 	geom_bbox_2d	bbox2;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(bool, box2df, bbox1, geometry, geom2);
 
-	assert(KEXP_IS_VALID(karg,box2df));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &bbox1))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
-		return false;
 	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&geom2))
-	{
 		result->expr_ops = NULL;
-	}
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
 		if (__geometry_get_bbox2d(kcxt, &geom2, &bbox2))
-		{
 			result->value = __geom_contains_bbox2d(&bbox1.value, &bbox2);
-		}
 		else
 			result->value = false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_geometry_box2df_contains(XPU_PGFUNCTION_ARGS)
+{
+	geom_bbox_2d	bbox1;
+	KEXP_PROCESS_ARGS2(bool, geometry, geom1, box2df, bbox2);
+
+	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&bbox2))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		if (__geometry_get_bbox2d(kcxt, &geom1, &bbox1))
+			result->value = __geom_contains_bbox2d(&bbox1, &bbox2.value);
+		else
+			result->value = false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_box2df_contains(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(bool, box2df, bbox1, box2df, bbox2);
+
+	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&bbox2))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = __geom_contains_bbox2d(&bbox1.value,
+											   &bbox2.value);
 	}
 	return true;
 }
@@ -1230,18 +1257,9 @@ __geom_within_bbox2d(const geom_bbox_2d *bbox1,
 PUBLIC_FUNCTION(bool)
 pgfn_geometry_within(XPU_PGFUNCTION_ARGS)
 {
-	xpu_bool_t	   *result = (xpu_bool_t *)__result;
-	xpu_geometry_t	geom1, geom2;
 	geom_bbox_2d	bbox1, bbox2;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(bool, geometry, geom1, geometry, geom2);
 
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom1))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
-		return false;
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
 	else
@@ -1260,19 +1278,9 @@ pgfn_geometry_within(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_box2df_geometry_within(XPU_PGFUNCTION_ARGS)
 {
-	xpu_bool_t	   *result = (xpu_bool_t *)__result;
-	xpu_box2df_t	bbox1;
-	xpu_geometry_t	geom2;
 	geom_bbox_2d	bbox2;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(bool, box2df, bbox1, geometry, geom2);
 
-	assert(KEXP_IS_VALID(karg,box2df));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &bbox1))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
-		return false;
 	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
 	else
@@ -1282,6 +1290,41 @@ pgfn_box2df_geometry_within(XPU_PGFUNCTION_ARGS)
 			result->value = __geom_within_bbox2d(&bbox1.value, &bbox2);
 		else
 			result->value = false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_geometry_box2df_within(XPU_PGFUNCTION_ARGS)
+{
+	geom_bbox_2d	bbox1;
+	KEXP_PROCESS_ARGS2(bool, geometry, geom1, box2df, bbox2);
+
+	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&bbox2))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		if (__geometry_get_bbox2d(kcxt, &geom1, &bbox1))
+			result->value = __geom_within_bbox2d(&bbox1, &bbox2.value);
+		else
+			result->value = false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_box2df_within(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(bool, box2df, bbox1, box2df, bbox2);
+
+	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&bbox2))
+		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = __geom_within_bbox2d(&bbox1.value,
+											 &bbox2.value);
 	}
 	return true;
 }
@@ -1359,99 +1402,6 @@ pgfn_st_expand(XPU_PGFUNCTION_ARGS)
 	}
 	return true;
 }
-
-#if 0
-/* ================================================================
- *
- * GiST Index Handlers
- *
- * ================================================================
- */
-DEVICE_FUNCTION(bool)
-pgindex_gist_geometry_overlap(kern_context *kcxt,
-							  PageHeaderData *i_page,
-							  const pg_box2df_t &i_var,
-							  const pg_geometry_t &i_arg)
-{
-	geom_bbox_2d __bbox;
-
-	if (!i_var.isnull &&
-		!i_arg.isnull && __geometry_get_bbox2d(kcxt, &i_arg, &__bbox))
-		return __geom_overlaps_bbox2d(&i_var.value, &__bbox);
-	return false;
-}
-
-DEVICE_FUNCTION(bool)
-pgindex_gist_box2df_overlap(kern_context *kcxt,
-							PageHeaderData *i_page,
-							const pg_box2df_t &i_var,
-							const pg_box2df_t &i_arg)
-{
-	if (!i_var.isnull && !i_arg.isnull)
-		return __geom_overlaps_bbox2d(&i_var.value, &i_arg.value);
-	return false;
-}
-
-DEVICE_FUNCTION(bool)
-pgindex_gist_geometry_contains(kern_context *kcxt,
-							   PageHeaderData *i_page,
-							   const pg_box2df_t &i_var,
-							   const pg_geometry_t &i_arg)
-{
-	geom_bbox_2d __bbox;
-
-	if (!i_var.isnull &&
-		!i_arg.isnull && __geometry_get_bbox2d(kcxt, &i_arg, &__bbox))
-		return __geom_contains_bbox2d(&i_var.value, &__bbox);
-	return false;
-}
-
-DEVICE_FUNCTION(bool)
-pgindex_gist_box2df_contains(kern_context *kcxt,
-							 PageHeaderData *i_page,
-							 const pg_box2df_t &i_var,
-							 const pg_box2df_t &i_arg)
-{
-	if (!i_var.isnull && !i_arg.isnull)
-		return __geom_contains_bbox2d(&i_var.value, &i_arg.value);
-	return false;
-}
-
-DEVICE_FUNCTION(bool)
-pgindex_gist_geometry_contained(kern_context *kcxt,
-								PageHeaderData *i_page,
-								const pg_box2df_t &i_var,
-								const pg_geometry_t &i_arg)
-{
-	geom_bbox_2d __bbox;
-
-	if (!i_var.isnull &&
-		!i_arg.isnull && __geometry_get_bbox2d(kcxt, &i_arg, &__bbox))
-	{
-		if (!GistPageIsLeaf(i_page))
-			return __geom_overlaps_bbox2d(&i_var.value, &__bbox);
-		else
-			return __geom_within_bbox2d(&i_var.value, &__bbox);
-	}
-	return false;
-}
-
-DEVICE_FUNCTION(bool)
-pgindex_gist_box2df_contained(kern_context *kcxt,
-							  PageHeaderData *i_page,
-							  const pg_box2df_t &i_var,
-							  const pg_box2df_t &i_arg)
-{
-	if (!i_var.isnull && !i_arg.isnull)
-	{
-		if (!GistPageIsLeaf(i_page))
-			return __geom_overlaps_bbox2d(&i_var.value, &i_arg.value);
-		else
-			return __geom_within_bbox2d(&i_var.value, &i_arg.value);
-	}
-	return false;
-}
-#endif
 
 /* ================================================================
  *
