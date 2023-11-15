@@ -2048,8 +2048,8 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	 */
 skip_reduction:
 	if (get_local_id() == 0)
-		WARP_READ_POS(wp,n_rels) += Min(WARP_WRITE_POS(wp,n_rels),
-										WARP_READ_POS(wp,n_rels) + get_local_size());
+		WARP_READ_POS(wp,n_rels) = Min(WARP_WRITE_POS(wp,n_rels),
+									   WARP_READ_POS(wp,n_rels) + get_local_size());
 	__syncthreads();
 	if (wp->scan_done <= n_rels)
 	{
