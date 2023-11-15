@@ -379,21 +379,24 @@ __geometry_datum_ref_v2(kern_context *kcxt,
 	return true;
 }
 
-STATIC_FUNCTION(bool)
-xpu_geometry_datum_heap_read(kern_context *kcxt,
-							 const void *addr,
-							 xpu_datum_t *__result)
+INLINE_FUNCTION(bool)
+xpu_geometry_is_valid(kern_context *kcxt, xpu_geometry_t *geom)
 {
-	xpu_geometry_t *geom = (xpu_geometry_t *)__result;
-
-	if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+	if (GEOM_TYPE_IS_VALID(geom->type))
+		return true;
+	if (geom->type != GEOM_INVALID_VARLENA)
+	{
+		STROM_CPU_FALLBACK(kcxt, "unknown geometry type");
+	}
+	else if (VARATT_IS_EXTERNAL(geom->rawdata) ||
+			 VARATT_IS_COMPRESSED(geom->rawdata))
 	{
 		STROM_CPU_FALLBACK(kcxt, "geometry datum is compressed or external");
 	}
 	else
 	{
-		__GSERIALIZED  *g = (__GSERIALIZED *)VARDATA_ANY(addr);
-		int32_t			sz = VARSIZE_ANY_EXHDR(addr);
+		__GSERIALIZED  *g = (__GSERIALIZED *)VARDATA_ANY(geom->rawdata);
+		int32_t			sz = VARSIZE_ANY_EXHDR(geom->rawdata);
 
 		if ((g->gflags & G2FLAG_VER_0) != 0)
 			return __geometry_datum_ref_v2(kcxt, geom, g, sz);
@@ -401,6 +404,21 @@ xpu_geometry_datum_heap_read(kern_context *kcxt,
 			return __geometry_datum_ref_v1(kcxt, geom, g, sz);
 	}
 	return false;
+}
+
+STATIC_FUNCTION(bool)
+xpu_geometry_datum_heap_read(kern_context *kcxt,
+							 const void *addr,
+							 xpu_datum_t *__result)
+{
+	xpu_geometry_t *geom = (xpu_geometry_t *)__result;
+
+	memset(geom, 0, sizeof(xpu_geometry_t));
+	geom->expr_ops = &xpu_geometry_ops;
+	geom->type     = GEOM_INVALID_VARLENA;
+	geom->rawdata  = (const char *)addr;
+
+	return true;
 }
 
 STATIC_FUNCTION(bool)
@@ -487,6 +505,14 @@ xpu_geometry_datum_write(kern_context *kcxt,
 
 	if (XPU_DATUM_ISNULL(geom))
 		return 0;
+	/* special case if geometry type is not touched */
+	if (geom->type == GEOM_INVALID_VARLENA)
+	{
+		len = VARSIZE_ANY(geom->rawdata);
+		if (buffer)
+			memcpy(buffer, geom->rawdata, len);
+		return len;
+	}
 	/* setup flag bits */
 	if ((geom->flags & GEOM_FLAG__Z) != 0)
 		gflags |= G2FLAG_Z;
@@ -540,6 +566,9 @@ xpu_geometry_datum_write(kern_context *kcxt,
 	if (buffer)
 		memcpy(buffer + len, geom->rawdata, geom->rawsize);
 	len += geom->rawsize;
+	/* set size */
+	if (buffer)
+		SET_VARSIZE(buffer, len);
 
 	return len;
 }
@@ -698,6 +727,8 @@ pgfn_st_setsrid(XPU_PGFUNCTION_ARGS)
 		return false;
 	if (XPU_DATUM_ISNULL(geom) || XPU_DATUM_ISNULL(&srid))
 		geom->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, geom))
+		return false;
 	else
 	{
 		assert(geom->expr_ops == &xpu_geometry_ops);
@@ -721,19 +752,10 @@ pgfn_st_point(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_st_makepoint2(XPU_PGFUNCTION_ARGS)
 {
-	xpu_geometry_t *geom = (xpu_geometry_t *)__result;
-	xpu_float8_t	x, y;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(geometry, float8, x, float8, y);
 
-	assert(KEXP_IS_VALID(karg,float8));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,float8));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y))
-		return false;
 	if (XPU_DATUM_ISNULL(&x) || XPU_DATUM_ISNULL(&y))
-		geom->expr_ops = NULL;
+		result->expr_ops = NULL;
 	else
 	{
 		double	   *rawdata = (double *)kcxt_alloc(kcxt, 2 * sizeof(double));
@@ -746,14 +768,14 @@ pgfn_st_makepoint2(XPU_PGFUNCTION_ARGS)
 		rawdata[0] = x.value;
 		rawdata[1] = y.value;
 
-		geom->expr_ops = &xpu_geometry_ops;
-		geom->type = GEOM_POINTTYPE;
-		geom->flags = 0;
-		geom->srid = SRID_UNKNOWN;
-		geom->nitems = 1;
-		geom->rawsize = 2 * sizeof(double);
-		geom->rawdata = (char *)rawdata;
-		geom->bbox = NULL;
+		result->expr_ops = &xpu_geometry_ops;
+		result->type = GEOM_POINTTYPE;
+		result->flags = 0;
+		result->srid = SRID_UNKNOWN;
+		result->nitems = 1;
+		result->rawsize = 2 * sizeof(double);
+		result->rawdata = (char *)rawdata;
+		result->bbox = NULL;
 	}
 	return true;
 }
@@ -761,23 +783,10 @@ pgfn_st_makepoint2(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_st_makepoint3(XPU_PGFUNCTION_ARGS)
 {
-	xpu_geometry_t *geom = (xpu_geometry_t *)__result;
-	xpu_float8_t	x, y, z;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS3(geometry, float8, x, float8, y, float8, z);
 
-	assert(KEXP_IS_VALID(karg,float8));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,float8));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,float8));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &z))
-		return false;
 	if (XPU_DATUM_ISNULL(&x) || XPU_DATUM_ISNULL(&y) || XPU_DATUM_ISNULL(&z))
-		geom->expr_ops = NULL;
+		result->expr_ops = NULL;
 	else
 	{
 		double	   *rawdata = (double *)kcxt_alloc(kcxt, 3 * sizeof(double));
@@ -791,14 +800,14 @@ pgfn_st_makepoint3(XPU_PGFUNCTION_ARGS)
 		rawdata[1] = y.value;
 		rawdata[2] = z.value;
 
-		geom->expr_ops = &xpu_geometry_ops;
-		geom->type = GEOM_POINTTYPE;
-		geom->flags = GEOM_FLAG__Z;
-		geom->srid = SRID_UNKNOWN;
-		geom->nitems = 1;
-		geom->rawsize = 3 * sizeof(double);
-		geom->rawdata = (char *)rawdata;
-		geom->bbox = NULL;
+		result->expr_ops = &xpu_geometry_ops;
+		result->type = GEOM_POINTTYPE;
+		result->flags = GEOM_FLAG__Z;
+		result->srid = SRID_UNKNOWN;
+		result->nitems = 1;
+		result->rawsize = 3 * sizeof(double);
+		result->rawdata = (char *)rawdata;
+		result->bbox = NULL;
 	}
 	return true;
 }
@@ -807,29 +816,13 @@ pgfn_st_makepoint3(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_st_makepoint4(XPU_PGFUNCTION_ARGS)
 {
-	xpu_geometry_t *geom = (xpu_geometry_t *)__result;
-	xpu_float8_t	x, y, z, m;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
-
-	assert(KEXP_IS_VALID(karg,float8));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &x))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,float8));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &y))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,float8));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &z))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,float8));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &m))
-		return false;
+	KEXP_PROCESS_ARGS4(geometry,
+					   float8, x, float8, y,
+					   float8, z, float8, m);
 
 	if (XPU_DATUM_ISNULL(&x) || XPU_DATUM_ISNULL(&y) ||
 		XPU_DATUM_ISNULL(&z) || XPU_DATUM_ISNULL(&m))
-		geom->expr_ops = NULL;
+		result->expr_ops = NULL;
 	else
 	{
 		double	   *rawdata = (double *)kcxt_alloc(kcxt, 4 * sizeof(double));
@@ -844,14 +837,14 @@ pgfn_st_makepoint4(XPU_PGFUNCTION_ARGS)
 		rawdata[2] = z.value;
 		rawdata[3] = m.value;
 
-		geom->expr_ops = &xpu_geometry_ops;
-		geom->type = GEOM_POINTTYPE;
-		geom->flags = GEOM_FLAG__Z | GEOM_FLAG__M;
-		geom->srid = SRID_UNKNOWN;
-		geom->nitems = 1;
-		geom->rawsize = 4 * sizeof(double);
-		geom->rawdata = (char *)rawdata;
-		geom->bbox = NULL;
+		result->expr_ops = &xpu_geometry_ops;
+		result->type = GEOM_POINTTYPE;
+		result->flags = GEOM_FLAG__Z | GEOM_FLAG__M;
+		result->srid = SRID_UNKNOWN;
+		result->nitems = 1;
+		result->rawsize = 4 * sizeof(double);
+		result->rawdata = (char *)rawdata;
+		result->bbox = NULL;
 	}
 	return true;
 }
@@ -1079,6 +1072,9 @@ pgfn_geometry_overlaps(XPU_PGFUNCTION_ARGS)
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
+			 !xpu_geometry_is_valid(kcxt, &geom2))
+		return false;
 	else
 	{
 		/* see box2df_overlaps() */
@@ -1100,6 +1096,8 @@ pgfn_box2df_geometry_overlaps(XPU_PGFUNCTION_ARGS)
 
 	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, &geom2))
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
@@ -1119,6 +1117,8 @@ pgfn_geometry_box2df_overlaps(XPU_PGFUNCTION_ARGS)
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&bbox2))
 		result->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, &geom1))
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
@@ -1172,6 +1172,9 @@ pgfn_geometry_contains(XPU_PGFUNCTION_ARGS)
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
+			 !xpu_geometry_is_valid(kcxt, &geom2))
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
@@ -1192,6 +1195,8 @@ pgfn_box2df_geometry_contains(XPU_PGFUNCTION_ARGS)
 
 	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, &geom2))
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
@@ -1211,6 +1216,8 @@ pgfn_geometry_box2df_contains(XPU_PGFUNCTION_ARGS)
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&bbox2))
 		result->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, &geom1))
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
@@ -1262,6 +1269,9 @@ pgfn_geometry_within(XPU_PGFUNCTION_ARGS)
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
+			 !xpu_geometry_is_valid(kcxt, &geom2))
+		return false;
 	else
 	{
 		/* see box2df_within() */
@@ -1283,6 +1293,8 @@ pgfn_box2df_geometry_within(XPU_PGFUNCTION_ARGS)
 
 	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, &geom2))
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
@@ -1302,6 +1314,8 @@ pgfn_geometry_box2df_within(XPU_PGFUNCTION_ARGS)
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&bbox2))
 		result->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, &geom1))
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
@@ -1333,21 +1347,13 @@ pgfn_box2df_within(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_st_expand(XPU_PGFUNCTION_ARGS)
 {
-	xpu_geometry_t *result = (xpu_geometry_t *)__result;
-	xpu_geometry_t	geom1;
 	geom_bbox_2d	bbox1;
-	xpu_float8_t	arg2;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(geometry, geometry, geom1, float8, arg2);
 
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom1))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,float8));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &arg2))
-		return false;
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&arg2))
 		result->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, &geom1))
+		return false;
 	else if (geom1.nitems > 0 &&
 			 __geometry_get_bbox2d(kcxt, &geom1, &bbox1))
 	{
@@ -3325,29 +3331,18 @@ pgfn_st_distance(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_st_dwithin(XPU_PGFUNCTION_ARGS)
 {
-	xpu_bool_t	   *result = (xpu_bool_t *)__result;
-	xpu_geometry_t	geom1;
-	xpu_geometry_t	geom2;
-	xpu_float8_t	dist3;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
-
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom1))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-    assert(KEXP_IS_VALID(karg,float8));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &dist3))
-		return false;
+	KEXP_PROCESS_ARGS3(bool, geometry, geom1, geometry, geom2, float8, dist3);
 
 	if (XPU_DATUM_ISNULL(&geom1) ||
 		XPU_DATUM_ISNULL(&geom2) ||
 		XPU_DATUM_ISNULL(&dist3))
 	{
 		result->expr_ops = NULL;
+	}
+	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
+			 !xpu_geometry_is_valid(kcxt, &geom2))
+	{
+		return false;
 	}
 	else if (geom1.srid != geom2.srid)
 	{
@@ -3511,22 +3506,16 @@ __geom_crossing_direction(kern_context *kcxt,
 PUBLIC_FUNCTION(bool)
 pgfn_st_linecrossingdirection(XPU_PGFUNCTION_ARGS)
 {
-	xpu_int4_t	   *result = (xpu_int4_t *)__result;
-	xpu_geometry_t	geom1;
-	xpu_geometry_t	geom2;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
-
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom1))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
-		return false;
+	KEXP_PROCESS_ARGS2(int4, geometry, geom1, geometry, geom2);
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
 	{
 		result->expr_ops = NULL;
+	}
+	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
+			 !xpu_geometry_is_valid(kcxt, &geom2))
+	{
+		return false;
 	}
 	else if (geom1.srid != geom2.srid)
 	{
@@ -5955,20 +5944,17 @@ geom_relate_internal(kern_context *kcxt,
 PUBLIC_FUNCTION(bool)
 pgfn_st_relate(XPU_PGFUNCTION_ARGS)
 {
-	xpu_text_t	   *result = (xpu_text_t *)__result;
-	xpu_geometry_t	geom1;
-	xpu_geometry_t	geom2;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(text, geometry, geom1, geometry, geom2);
 
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom1))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
-		return false;
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
+	{
 		result->expr_ops = NULL;
+	}
+	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
+			 !xpu_geometry_is_valid(kcxt, &geom2))
+	{
+		return false;
+	}
 	else
 	{
 		int32_t		status;
@@ -6082,21 +6068,19 @@ fast_geom_contains_polygon_point(kern_context *kcxt,
 PUBLIC_FUNCTION(bool)
 pgfn_st_contains(XPU_PGFUNCTION_ARGS)
 {
-	xpu_bool_t	   *result = (xpu_bool_t *)__result;
-	xpu_geometry_t	geom1;
-	xpu_geometry_t	geom2;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(bool, geometry, geom1, geometry, geom2);
 
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom1))
+	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
+		result->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
+			 !xpu_geometry_is_valid(kcxt, &geom2))
 		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
-		return false;
-
-	if (!XPU_DATUM_ISNULL(&geom1)  && !XPU_DATUM_ISNULL(&geom2) &&
-		!geometry_is_empty(&geom1) && !geometry_is_empty(&geom2))
+	else if (geometry_is_empty(&geom1) || geometry_is_empty(&geom2))
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = false;
+	}
+	else
 	{
 		int			status;
 
@@ -6164,22 +6148,19 @@ pgfn_st_contains(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_st_crosses(XPU_PGFUNCTION_ARGS)
 {
-	xpu_bool_t	   *result = (xpu_bool_t *)__result;
-	xpu_geometry_t	geom1;
-	xpu_geometry_t	geom2;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(bool, geometry, geom1, geometry, geom2);
 
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom1))
+	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
+		result->expr_ops = NULL;
+	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
+			 !xpu_geometry_is_valid(kcxt, &geom2))
 		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg,geometry));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &geom2))
-		return false;
-
-	result->expr_ops = NULL;
-	if (!XPU_DATUM_ISNULL(&geom1)  && !XPU_DATUM_ISNULL(&geom2) &&
-		!geometry_is_empty(&geom1) && !geometry_is_empty(&geom2))
+	else if (geometry_is_empty(&geom1) || geometry_is_empty(&geom2))
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = false;
+	}
+	else
 	{
 		int		status;
 
