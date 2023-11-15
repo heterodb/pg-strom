@@ -193,25 +193,6 @@ kern_extract_heap_tuple(kern_context *kcxt,
 /*
  * Routines to extract Arrow data store
  */
-INLINE_FUNCTION(bool)
-arrow_bitmap_check(const kern_data_store *kds,
-				   uint32_t kds_index,
-				   uint32_t bitmap_offset,
-				   uint32_t bitmap_length)
-{
-	uint8_t	   *bitmap;
-	uint8_t		mask = (1<<(kds_index & 7));
-	uint32_t	idx = (kds_index >> 3);
-
-	if (bitmap_offset == 0 ||	/* no bitmap */
-		bitmap_length == 0 ||	/* no bitmap */
-		idx >= __kds_unpack(bitmap_length))		/* out of range */
-		return false;
-	bitmap = (uint8_t *)kds + __kds_unpack(bitmap_offset);
-
-	return (bitmap[idx] & mask) != 0;
-}
-
 STATIC_FUNCTION(bool)
 __kern_extract_arrow_field(kern_context *kcxt,
 						   const kern_data_store *kds,
@@ -220,10 +201,7 @@ __kern_extract_arrow_field(kern_context *kcxt,
 						   const kern_varslot_desc *vs_desc,
 						   xpu_datum_t *result)
 {
-	if (cmeta->nullmap_offset == 0 ||
-		arrow_bitmap_check(kds, kds_index,
-						   cmeta->nullmap_offset,
-						   cmeta->nullmap_length))
+	if (!KDS_ARROW_CHECK_ISNULL(kds, cmeta, kds_index))
 	{
 		if (!vs_desc->vs_ops->xpu_datum_arrow_read(kcxt,
 												   kds,
@@ -231,6 +209,7 @@ __kern_extract_arrow_field(kern_context *kcxt,
 												   kds_index,
 												   result))
 			return false;
+		/* If Arrow file is sane, NULL is not welcome */
 		assert(vs_desc->vs_ops == result->expr_ops);
 		if (result->expr_ops == &xpu_array_ops)
 		{
