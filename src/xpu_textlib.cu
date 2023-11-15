@@ -583,12 +583,37 @@ pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
 
 	if (XPU_DATUM_ISNULL(&datum))
 		result->expr_ops = NULL;
+	else if (!xpu_bpchar_is_valid(kcxt, &datum))
+		return false;
 	else
 	{
-		result->expr_ops = &xpu_int4_ops;
-		if (!xpu_bpchar_is_valid(kcxt, &datum))
+		xpu_encode_info *encode = SESSION_ENCODE(kcxt->session);
+
+		if (!encode)
+		{
+			STROM_ELOG(kcxt, "No encoding info was supplied");
 			return false;
-		result->value = datum.length;
+		}
+
+		if (encode->enc_maxlen == 1)
+			result->value = datum.length;
+		else
+		{
+			const char *mbstr = datum.value;
+			int			len = datum.length;
+			int			sz = 0;
+
+			while (len > 0 && *mbstr)
+			{
+				int		n = encode->enc_mblen(mbstr);
+
+				len -= n;
+				mbstr += n;
+				sz++;
+			}
+			result->value = sz;
+		}
+		result->expr_ops = &xpu_int4_ops;
 	}
 	return true;
 }
@@ -645,6 +670,11 @@ pgfn_textlen(XPU_PGFUNCTION_ARGS)
 		}
 		else if (encode->enc_maxlen == 1)
 		{
+			/*
+			 * in case of enc_maxlen == 1, byte-length is identical with
+			 * number of characters. So, we can handle compressed or
+			 * external varlena without decompression or de-toasting.
+			 */
 			if (len < 0)
 			{
 				if (VARATT_IS_COMPRESSED(datum.value))
