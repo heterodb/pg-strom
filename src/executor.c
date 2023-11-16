@@ -1941,8 +1941,8 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 
 		/* control variables for parallel tasks */
 		pts->rjoin_devs_count  = (pg_atomic_uint32 *)dsm_addr;
-		memset(dsm_addr, 0, sizeof(pg_atomic_uint32 *) * num_devs);
-		dsm_addr += MAXALIGN(sizeof(pg_atomic_uint32 *) * num_devs);
+		memset(dsm_addr, 0, sizeof(pg_atomic_uint32) * num_devs);
+		dsm_addr += MAXALIGN(sizeof(pg_atomic_uint32) * num_devs);
 		pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
 
 		/* parallel scan descriptor */
