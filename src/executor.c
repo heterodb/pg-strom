@@ -1683,7 +1683,7 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 			case XpuCommandTag__Success:
 				if (resp->u.results.ojmap_offset != 0)
 					ExecFallbackCpuJoinOuterJoinMap(pts, resp);
-				if (resp->u.results.final_this_device)
+				if (resp->u.results.final_plan_node)
 					ExecFallbackCpuJoinRightOuter(pts);
 				if (resp->u.results.chunks_nitems == 0)
 					goto next_chunks;
