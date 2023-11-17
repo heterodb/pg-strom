@@ -205,9 +205,9 @@ __update_nogroups__nrows_any(kern_context *kcxt,
 							 kern_aggregate_desc *desc,
 							 bool source_is_valid)
 {
-	uint32_t	count;
+	int		count;
 
-	pgstrom_stair_sum_binary(source_is_valid, &count);
+	count = __syncthreads_count(source_is_valid);
 	if (get_local_id() == 0)
 	{
 		if (__isShared(buffer))
@@ -227,7 +227,7 @@ __update_nogroups__nrows_cond(kern_context *kcxt,
 							  kern_aggregate_desc *desc,
 							  bool source_is_valid)
 {
-	uint32_t	count;
+	int		count;
 
 	if (source_is_valid)
 	{
@@ -236,7 +236,7 @@ __update_nogroups__nrows_cond(kern_context *kcxt,
 		if (XPU_DATUM_ISNULL(xdatum))
 			source_is_valid = false;
 	}
-	pgstrom_stair_sum_binary(source_is_valid, &count);
+	count = __syncthreads_count(source_is_valid);
 	if (get_local_id() == 0)
 	{
 		if (__isShared(buffer))
@@ -554,7 +554,7 @@ __update_nogroups__psum_int(kern_context *kcxt,
 							kern_aggregate_desc *desc,
 							bool source_is_valid)
 {
-	int64_t		ival, sum;
+	int64_t		sum, ival = 0;
 	int			count;
 
 	if (source_is_valid)
@@ -576,6 +576,7 @@ __update_nogroups__psum_int(kern_context *kcxt,
 		kagg_state__psum_int_packed *r =
 			(kagg_state__psum_int_packed *)buffer;
 
+		assert(ival >= 0);
 		pgstrom_stair_sum_int64(ival, &sum);
 		if (get_local_id() == 0)
 		{
@@ -603,7 +604,7 @@ __update_nogroups__psum_fp(kern_context *kcxt,
 						   kern_aggregate_desc *desc,
 						   bool source_is_valid)
 {
-	float8_t	fval, sum;
+	float8_t	sum, fval = 0.0;
 	int			count;
 
 	if (source_is_valid)
