@@ -406,8 +406,8 @@ typedef struct
 	 */
 	List		   *hash_outer_keys;    /* list of ExprState */
 	List		   *hash_inner_keys;    /* list of ExprState */
-	List		   *hash_outer_dtypes;  /* list of devtype_info */
-	List		   *hash_inner_dtypes;  /* list of devtype_info */
+	List		   *hash_outer_funcs;	/* list of devtype_hashfunc_f */
+	List		   *hash_inner_funcs;	/* list of devtype_hashfunc_f */
 	/*
 	 * join properties (gist-join)
 	 */

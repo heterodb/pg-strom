@@ -732,7 +732,7 @@ __build_fallback_exprs_join_walker(Node *node, void *data)
 		if (equal(node, kvar->kv_expr))
 		{
 			return (Node *)makeVar(INDEX_VAR,
-								   kvar->kv_slot_id,
+								   kvar->kv_slot_id + 1,
 								   exprType(node),
 								   exprTypmod(node),
 								   exprCollation(node),
@@ -743,13 +743,48 @@ __build_fallback_exprs_join_walker(Node *node, void *data)
 		elog(ERROR, "Bug? Var-node (%s) is missing at the kvars_exprs list",
 			 nodeToString(node));
 
-	return expression_tree_mutator(node, __build_fallback_exprs_join_walker, context);
+	return expression_tree_mutator(node, __build_fallback_exprs_join_walker, data);
 }
 
 static List *
 build_fallback_exprs_join(codegen_context *context, List *join_exprs)
 {
 	return (List *)__build_fallback_exprs_join_walker((Node *)join_exprs, context);
+}
+
+static Node *
+__build_fallback_exprs_inner_walker(Node *node, void *data)
+{
+	codegen_context *context = (codegen_context *)data;
+	ListCell   *lc;
+
+	if (!node)
+		return NULL;
+	foreach (lc, context->kvars_deflist)
+	{
+		codegen_kvar_defitem *kvar = lfirst(lc);
+
+		if (equal(node, kvar->kv_expr))
+		{
+			return (Node *)makeVar(INNER_VAR,
+								   kvar->kv_resno,
+								   exprType(node),
+								   exprTypmod(node),
+								   exprCollation(node),
+								   0);
+		}
+	}
+	if (IsA(node, Var))
+		elog(ERROR, "Bug? Var-node (%s) is missing at the kvars_exprs list",
+			 nodeToString(node));
+
+	return expression_tree_mutator(node, __build_fallback_exprs_inner_walker, data);
+}
+
+static List *
+build_fallback_exprs_inner(codegen_context *context, List *inner_keys)
+{
+	return (List *)__build_fallback_exprs_inner_walker((Node *)inner_keys, context);
 }
 
 /*
@@ -1142,7 +1177,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		pp_inner->hash_outer_keys_fallback
 			= build_fallback_exprs_join(context, pp_inner->hash_outer_keys);
 		pp_inner->hash_inner_keys_fallback
-			= build_fallback_exprs_join(context, pp_inner->hash_inner_keys);
+			= build_fallback_exprs_inner(context, pp_inner->hash_inner_keys);
 		pp_inner->join_quals_fallback
 			= build_fallback_exprs_join(context, pp_inner->join_quals);
 		pp_inner->other_quals_fallback
@@ -1298,15 +1333,15 @@ get_tuple_hashvalue(pgstromTaskInnerState *istate,
 	/* calculation of a hash value of this entry */
 	econtext->ecxt_innertuple = slot;
 	forboth (lc1, istate->hash_inner_keys,
-			 lc2, istate->hash_inner_dtypes)
+			 lc2, istate->hash_inner_funcs)
 	{
 		ExprState	   *es = lfirst(lc1);
-		devtype_info   *dtype = lfirst(lc2);
+		devtype_hashfunc_f h_func = lfirst(lc2);
 		Datum			datum;
 		bool			isnull;
 
 		datum = ExecEvalExpr(es, econtext, &isnull);
-		hash ^= dtype->type_hashfunc(isnull, datum);
+		hash ^= h_func(isnull, datum);
 	}
 	hash ^= 0xffffffffU;
 
@@ -2090,15 +2125,15 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	 */
 	hash = 0xffffffffU;
 	forboth (lc1, istate->hash_outer_keys,
-			 lc2, istate->hash_outer_dtypes)
+			 lc2, istate->hash_outer_funcs)
 	{
 		ExprState	   *h_key = lfirst(lc1);
-		devtype_info   *dtype = lfirst(lc2);
+		devtype_hashfunc_f h_func = lfirst(lc2);
 		Datum			datum;
 		bool			isnull;
 
 		datum = ExecEvalExprSwitchContext(h_key, econtext, &isnull);
-		hash ^= dtype->type_hashfunc(isnull, datum);
+		hash ^= h_func(isnull, datum);
 	}
 	hash ^= 0xffffffffU;
 
