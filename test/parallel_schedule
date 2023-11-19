@@ -14,8 +14,8 @@
 # Test for each data types
 # ----------
 #test: dtype_int dtype_float dtype_numeric dtype_time dtype_text dtype_jsonb dtype_range additional_dtype
-test: dtype_float dtype_text
-##test: dtype_float
+test: dtype_time
+##test: dtype_float dtype_text dtype_numeric
 
 # ----------
 # Test for various functions / expressions
@@ -48,4 +48,4 @@ test: dtype_float dtype_text
 # ----------
 # GPU Cache
 # ----------
-#test: gpu_cache
+##test: gpu_cache
