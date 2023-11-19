@@ -216,11 +216,6 @@ static bool		__gpuCacheAppendLog(GpuCacheDesc *gc_desc,
 static void		gpuCacheInvokeDropUnload(const GpuCacheDesc *gc_desc,
 										 bool is_async);
 void	gpuCacheStartupPreloader(Datum arg);
-PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
-PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
-PG_FUNCTION_INFO_V1(pgstrom_gpucache_compaction);
-PG_FUNCTION_INFO_V1(pgstrom_gpucache_recovery);
-PG_FUNCTION_INFO_V1(pgstrom_gpucache_info);
 
 /*
  * gpucache_sync_trigger_function_oid
@@ -2397,7 +2392,8 @@ __gpuCacheTruncateLog(Oid table_oid)
 /*
  * pgstrom_gpucache_sync_trigger
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
+PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 {
 	TriggerData	   *trigdata = (TriggerData *) fcinfo->context;
@@ -2463,7 +2459,8 @@ bailout:
 /*
  * pgstrom_gpucache_apply_redo
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
+PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 {
 	Oid			table_oid = PG_GETARG_OID(0);
@@ -2491,7 +2488,8 @@ pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 /*
  * pgstrom_gpucache_compaction
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_compaction);
+PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 {
 	Oid			table_oid = PG_GETARG_OID(0);
@@ -2512,7 +2510,8 @@ pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 /*
  * pgstrom_gpucache_recovery
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_recovery);
+PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_recovery(PG_FUNCTION_ARGS)
 {
 	Oid			table_oid = PG_GETARG_OID(0);
@@ -4064,6 +4063,7 @@ gpuCacheStartupPreloader(Datum arg)
  *
  * ------------------------------------------------------------
  */
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_info);
 static List *
 __pgstrom_gpucache_info(void)
 {
@@ -4126,7 +4126,7 @@ __pgstrom_gpucache_info(void)
 	return results;
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 {
 	GpuCacheSharedState *gc_sstate;

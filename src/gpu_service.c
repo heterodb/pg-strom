@@ -2129,16 +2129,15 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 	memset(&resp, 0, sizeof(XpuCommand));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag   = XpuCommandTag__Success;
-	resp.u.results.chunks_nitems = 0;
 	resp.u.results.chunks_offset = MAXALIGN(offsetof(XpuCommand, u.results.stats));
+	resp.u.results.chunks_nitems = 0;
 
-	/*
-	 * Is the outer-join-map written back to the host buffer?
-	 */
-	if (kfin->final_this_device)
+	if (kfin->final_this_device && gq_buf)
 	{
-		if (gq_buf &&
-			gq_buf->m_kmrels != 0UL &&
+		/*
+		 * Is the outer-join-map written back to the host buffer?
+		 */
+		if (gq_buf->m_kmrels != 0UL &&
 			gq_buf->h_kmrels != NULL)
 		{
 			kern_multirels *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
@@ -2158,20 +2157,19 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 				}
 			}
 		}
-	}
-	/*
-	 * Is the GpuPreAgg final buffer written back?
-	 */
-	if (kfin->final_plan_node)
-	{
-		if (gq_buf && gq_buf->m_kds_final != 0UL)
+
+		/*
+		 * Is the GpuPreAgg final buffer written back?
+		 */
+		if (gq_buf->m_kds_final != 0UL)
 		{
 			kds_final = (kern_data_store *)gq_buf->m_kds_final;
 			resp.u.results.chunks_nitems = 1;
-			resp.u.results.final_plan_node = true;
+			resp.u.results.final_this_device = true;
 		}
 	}
-	//fprintf(stderr, "gpuservHandleGpuTaskFinal: kfin => {final_this_device=%d final_plan_node=%d} resp => {final_this_device=%d final_plan_node=%d}\n", kfin->final_this_device, kfin->final_plan_node, resp.u.results.final_this_device, resp.u.results.final_plan_node);
+	resp.u.results.final_plan_node = kfin->final_plan_node;
+
 	gpuClientWriteBack(gclient, &resp,
 					   resp.u.results.chunks_offset,
 					   resp.u.results.chunks_nitems,
@@ -2686,7 +2684,7 @@ __gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
 		__FATAL("failed on pthread_attr_init");
 	if (pthread_attr_setdetachstate(&th_attr, PTHREAD_CREATE_DETACHED) != 0)
 		__FATAL("failed on pthread_attr_setdetachstate");
-	elog(LOG, "count = %d nworkers = %d", count, nworkers);
+
 	while (count < nworkers)
 	{
 		gpuWorker  *gworker = calloc(1, sizeof(gpuWorker));
@@ -2744,7 +2742,7 @@ out:
 		elog(LOG, "GPU%d workers - %d startup%s, %d terminate",
 			 gcontext->cuda_dindex,
 			 nr_startup >> 1,
-			 (nr_startup & 1) ? " (incl. GpuCacheManager)" : "",
+			 (nr_startup & 1) ? " (with GpuCacheManager)" : "",
 			 nr_terminate);
 	}
 }
@@ -2978,7 +2976,7 @@ gpuservCleanupOnProcExit(int code, Datum arg)
 /*
  * gpuservBgWorkerMain
  */
-void
+PUBLIC_FUNCTION(void)
 gpuservBgWorkerMain(Datum arg)
 {
 	CUresult	rc;

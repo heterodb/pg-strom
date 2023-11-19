@@ -244,7 +244,7 @@ xpu_text_datum_heap_read(kern_context *kcxt,
 	else
 	{
 		result->value  = VARDATA_ANY(addr);
-		result->length = bpchar_truelen(result->value, VARSIZE_ANY_EXHDR(addr));
+		result->length = VARSIZE_ANY_EXHDR(addr);
 	}
 	result->expr_ops = &xpu_text_ops;
 	return true;
@@ -266,7 +266,7 @@ xpu_text_datum_arrow_read(kern_context *kcxt,
 		return false;
 
 	result->expr_ops = (result->value ? &xpu_text_ops : NULL);
-	return false;
+	return true;
 }
 
 STATIC_FUNCTION(bool)
@@ -401,7 +401,7 @@ xpu_bytea_datum_heap_read(kern_context *kcxt,
 	else
 	{
 		result->value  = VARDATA_ANY(addr);
-		result->length = bpchar_truelen(result->value, VARSIZE_ANY_EXHDR(addr));
+		result->length = VARSIZE_ANY_EXHDR(addr);
 	}
 	result->expr_ops = &xpu_bytea_ops;
 	return true;
@@ -423,7 +423,7 @@ xpu_bytea_datum_arrow_read(kern_context *kcxt,
 		return false;
 
 	result->expr_ops = (result->value ? &xpu_bytea_ops : NULL);
-	return false;
+	return true;
 }
 
 STATIC_FUNCTION(bool)
@@ -550,19 +550,8 @@ PGSTROM_SQLTYPE_OPERATORS(bytea, false, 4, -1);
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_bpchar##NAME(XPU_PGFUNCTION_ARGS)								\
 	{																	\
-		xpu_bool_t	   *result = (xpu_bool_t *)__result;				\
-		xpu_bpchar_t	datum_a;										\
-		xpu_bpchar_t	datum_b;										\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+		KEXP_PROCESS_ARGS2(bool, bpchar, datum_a, bpchar, datum_b);		\
 																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg, bpchar));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, bpchar));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
-			return false;												\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
 		{																\
 			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
@@ -590,22 +579,41 @@ PG_BPCHAR_COMPARE_TEMPLATE(ge, >=)
 PUBLIC_FUNCTION(bool)
 pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
 {
-	xpu_int4_t	   *result = (xpu_int4_t *)__result;
-	xpu_bpchar_t	datum;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS1(int4, bpchar, datum);
 
-	assert(kexp->nr_args == 1 &&
-		   KEXP_IS_VALID(karg, bpchar));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum))
 		result->expr_ops = NULL;
+	else if (!xpu_bpchar_is_valid(kcxt, &datum))
+		return false;
 	else
 	{
-		result->expr_ops = &xpu_int4_ops;
-		if (!xpu_bpchar_is_valid(kcxt, &datum))
+		xpu_encode_info *encode = SESSION_ENCODE(kcxt->session);
+
+		if (!encode)
+		{
+			STROM_ELOG(kcxt, "No encoding info was supplied");
 			return false;
-		result->value = datum.length;
+		}
+
+		if (encode->enc_maxlen == 1)
+			result->value = datum.length;
+		else
+		{
+			const char *mbstr = datum.value;
+			int			len = datum.length;
+			int			sz = 0;
+
+			while (len > 0 && *mbstr)
+			{
+				int		n = encode->enc_mblen(mbstr);
+
+				len -= n;
+				mbstr += n;
+				sz++;
+			}
+			result->value = sz;
+		}
+		result->expr_ops = &xpu_int4_ops;
 	}
 	return true;
 }
@@ -617,19 +625,8 @@ pgfn_bpcharlen(XPU_PGFUNCTION_ARGS)
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_text_##NAME(XPU_PGFUNCTION_ARGS)								\
 	{																	\
-		xpu_bool_t	   *result = (xpu_bool_t *)__result;				\
-		xpu_text_t		datum_a;										\
-		xpu_text_t		datum_b;										\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+		KEXP_PROCESS_ARGS2(bool, text, datum_a, text, datum_b);			\
 																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg, text));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, text));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
-			return false;												\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
 		{																\
 			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
@@ -657,14 +654,8 @@ PG_TEXT_COMPARE_TEMPLATE(ge, >=)
 PUBLIC_FUNCTION(bool)
 pgfn_textlen(XPU_PGFUNCTION_ARGS)
 {
-	xpu_int4_t	   *result = (xpu_int4_t *)__result;
-	xpu_text_t		datum;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS1(int4, text, datum);
 
-	assert(kexp->nr_args == 1 &&
-		   KEXP_IS_VALID(karg, text));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum))
 		result->expr_ops = NULL;
 	else
@@ -679,6 +670,11 @@ pgfn_textlen(XPU_PGFUNCTION_ARGS)
 		}
 		else if (encode->enc_maxlen == 1)
 		{
+			/*
+			 * in case of enc_maxlen == 1, byte-length is identical with
+			 * number of characters. So, we can handle compressed or
+			 * external varlena without decompression or de-toasting.
+			 */
 			if (len < 0)
 			{
 				if (VARATT_IS_COMPRESSED(datum.value))
@@ -1094,19 +1090,9 @@ GENERIC_MATCH_TEXT_TEMPLATE(GenericCaseMatchText, GetCharUpper)
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##FN_NAME(XPU_PGFUNCTION_ARGS)									\
 	{																	\
-		xpu_bool_t	   *result = (xpu_bool_t *)__result;				\
-		xpu_text_t		datum_a;	/* string */						\
-		xpu_text_t		datum_b;	/* pattern */						\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
-																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg, text));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, text));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
-			return false;												\
+		KEXP_PROCESS_ARGS2(bool,										\
+						   text, datum_a,	/* string */				\
+						   text, datum_b);	/* pattern */				\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
 			result->expr_ops = NULL;									\
 		else															\
@@ -1138,19 +1124,9 @@ PG_TEXTLIKE_TEMPLATE(texticnlike, GenericCaseMatchText, !=)
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##FN_NAME(XPU_PGFUNCTION_ARGS)									\
 	{																	\
-		xpu_bool_t	   *result = (xpu_bool_t *)__result;				\
-		xpu_bpchar_t	datum_a;	/* string */						\
-		xpu_text_t		datum_b;	/* pattern */						\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
-																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg, bpchar));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, text));								\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
-			return false;												\
+		KEXP_PROCESS_ARGS2(bool,										\
+						   bpchar, datum_a,		/* string */			\
+						   text,   datum_b);	/* pattern */			\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
 			result->expr_ops = NULL;									\
 		else															\

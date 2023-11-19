@@ -1083,45 +1083,6 @@ pgstrom_copy_pathnode(const Path *pathnode)
 	return NULL;
 }
 
-#if 0
-/*
- * pgstrom_define_shell_type - A wrapper for TypeShellMake with a particular OID
- */
-PG_FUNCTION_INFO_V1(pgstrom_define_shell_type);
-Datum
-pgstrom_define_shell_type(PG_FUNCTION_ARGS)
-{
-	char   *type_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	Oid		type_oid = PG_GETARG_OID(1);
-	Oid		type_namespace = PG_GETARG_OID(2);
-	bool	__IsBinaryUpgrade = IsBinaryUpgrade;
-	Oid		__binary_upgrade_next_pg_type_oid = binary_upgrade_next_pg_type_oid;
-
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to create a shell type")));
-	PG_TRY();
-	{
-		IsBinaryUpgrade = true;
-		binary_upgrade_next_pg_type_oid = type_oid;
-
-		TypeShellMake(type_name, type_namespace, GetUserId());
-	}
-	PG_CATCH();
-	{
-		IsBinaryUpgrade = __IsBinaryUpgrade;
-		binary_upgrade_next_pg_type_oid = __binary_upgrade_next_pg_type_oid;
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	IsBinaryUpgrade = __IsBinaryUpgrade;
-	binary_upgrade_next_pg_type_oid = __binary_upgrade_next_pg_type_oid;
-
-	PG_RETURN_OID(type_oid);
-}
-#endif
-
 /*
  * ----------------------------------------------------------------
  *
@@ -1129,30 +1090,11 @@ pgstrom_define_shell_type(PG_FUNCTION_ARGS)
  *
  * ----------------------------------------------------------------
  */
-Datum pgstrom_random_setseed(PG_FUNCTION_ARGS);
-Datum pgstrom_random_int(PG_FUNCTION_ARGS);
-Datum pgstrom_random_float(PG_FUNCTION_ARGS);
-Datum pgstrom_random_date(PG_FUNCTION_ARGS);
-Datum pgstrom_random_time(PG_FUNCTION_ARGS);
-Datum pgstrom_random_timetz(PG_FUNCTION_ARGS);
-Datum pgstrom_random_timestamp(PG_FUNCTION_ARGS);
-Datum pgstrom_random_timestamptz(PG_FUNCTION_ARGS);
-Datum pgstrom_random_interval(PG_FUNCTION_ARGS);
-Datum pgstrom_random_macaddr(PG_FUNCTION_ARGS);
-Datum pgstrom_random_inet(PG_FUNCTION_ARGS);
-Datum pgstrom_random_text(PG_FUNCTION_ARGS);
-Datum pgstrom_random_text_length(PG_FUNCTION_ARGS);
-Datum pgstrom_random_int4range(PG_FUNCTION_ARGS);
-Datum pgstrom_random_int8range(PG_FUNCTION_ARGS);
-Datum pgstrom_random_tsrange(PG_FUNCTION_ARGS);
-Datum pgstrom_random_tstzrange(PG_FUNCTION_ARGS);
-Datum pgstrom_random_daterange(PG_FUNCTION_ARGS);
-Datum pgstrom_abort_if(PG_FUNCTION_ARGS);
-
 static unsigned int		pgstrom_random_seed = 0;
 static bool				pgstrom_random_seed_set = false;
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_setseed);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_setseed(PG_FUNCTION_ARGS)
 {
 	unsigned int	seed = PG_GETARG_UINT32(0);
@@ -1162,7 +1104,6 @@ pgstrom_random_setseed(PG_FUNCTION_ARGS)
 
 	PG_RETURN_VOID();
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_setseed);
 
 static int64_t
 __random(void)
@@ -1191,7 +1132,8 @@ generate_null(double ratio)
 	return false;
 }
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_int);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_int(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1209,9 +1151,9 @@ pgstrom_random_int(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT64(lower + v % (upper - lower));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_int);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_float);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_float(PG_FUNCTION_ARGS)
 {
 	float8	ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1227,9 +1169,9 @@ pgstrom_random_float(PG_FUNCTION_ARGS)
 
 	PG_RETURN_FLOAT8((upper - lower) * __drand48() + lower);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_float);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_date);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_date(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1256,9 +1198,9 @@ pgstrom_random_date(PG_FUNCTION_ARGS)
 
 	PG_RETURN_DATEADT(lower + v % (upper - lower));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_date);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_time);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_time(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1280,9 +1222,9 @@ pgstrom_random_time(PG_FUNCTION_ARGS)
 
 	PG_RETURN_TIMEADT(lower + v % (upper - lower));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_time);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_timetz);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_timetz(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1310,9 +1252,9 @@ pgstrom_random_timetz(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_TIMETZADT_P(temp);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_timetz);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_timestamp);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_timestamp(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1350,9 +1292,9 @@ pgstrom_random_timestamp(PG_FUNCTION_ARGS)
 
 	PG_RETURN_TIMESTAMP(lower + v % (upper - lower));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_timestamp);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_macaddr);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_macaddr(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1401,9 +1343,9 @@ pgstrom_random_macaddr(PG_FUNCTION_ARGS)
 	temp->f = (x      ) & 0x00ff;
 	PG_RETURN_MACADDR_P(temp);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_macaddr);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_inet);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_inet(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1454,9 +1396,9 @@ pgstrom_random_inet(PG_FUNCTION_ARGS)
 	ip_bits(temp) = ip_maxbits(temp);
 	PG_RETURN_INET_P(temp);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_inet);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_text);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_text(PG_FUNCTION_ARGS)
 {
 	static const char *base32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
@@ -1492,9 +1434,9 @@ pgstrom_random_text(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_TEXT_P(temp);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_text);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_text_length);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_text_length(PG_FUNCTION_ARGS)
 {
 	static const char *base64 =
@@ -1531,7 +1473,6 @@ pgstrom_random_text_length(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_TEXT_P(temp);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_text_length);
 
 static Datum
 simple_make_range(PG_FUNCTION_ARGS,
@@ -1557,7 +1498,8 @@ simple_make_range(PG_FUNCTION_ARGS,
 	return PointerGetDatum(range);
 }
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_int4range);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_int4range(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1582,9 +1524,9 @@ pgstrom_random_int4range(PG_FUNCTION_ARGS)
 							 Int32GetDatum(Min(x,y)),
 							 Int32GetDatum(Max(x,y)));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_int4range);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_int8range);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_int8range(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1611,9 +1553,9 @@ pgstrom_random_int8range(PG_FUNCTION_ARGS)
 							 Int64GetDatum(Min(x,y)),
 							 Int64GetDatum(Max(x,y)));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_int8range);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_tsrange);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_tsrange(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1663,9 +1605,9 @@ pgstrom_random_tsrange(PG_FUNCTION_ARGS)
 							 TimestampGetDatum(Min(x,y)),
 							 TimestampGetDatum(Max(x,y)));	
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_tsrange);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_tstzrange);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_tstzrange(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1715,9 +1657,9 @@ pgstrom_random_tstzrange(PG_FUNCTION_ARGS)
 							 TimestampTzGetDatum(Min(x,y)),
 							 TimestampTzGetDatum(Max(x,y)));	
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_tstzrange);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_daterange);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_daterange(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1753,9 +1695,9 @@ pgstrom_random_daterange(PG_FUNCTION_ARGS)
 							 DateADTGetDatum(Min(x,y)),
 							 DateADTGetDatum(Max(x,y)));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_daterange);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_abort_if);
+PUBLIC_FUNCTION(Datum)
 pgstrom_abort_if(PG_FUNCTION_ARGS)
 {
 	bool		cond = PG_GETARG_BOOL(0);
@@ -1765,7 +1707,6 @@ pgstrom_abort_if(PG_FUNCTION_ARGS)
 
 	PG_RETURN_VOID();
 }
-PG_FUNCTION_INFO_V1(pgstrom_abort_if);
 
 /*
  * Simple wrapper for read(2) and write(2) to ensure full-buffer read and

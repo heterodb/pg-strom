@@ -568,7 +568,7 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 				(!gist_index || gist_selectivity > curr_selectivity))
 			{
 				gist_index           = curr_index;
-				gist_index_col       = indexcol;
+				gist_index_col       = indexcol + 1;
 				gist_func_oid        = curr_func_oid;
 				gist_clause          = curr_clause;
 				gist_selectivity     = curr_selectivity;

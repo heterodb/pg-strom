@@ -189,11 +189,6 @@ static bool					arrow_fdw_enabled;	/* GUC */
 static bool					arrow_fdw_stats_hint_enabled;	/* GUC */
 static int					arrow_metadata_cache_size_kb;	/* GUC */
 
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_handler);
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_validator);
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_import_file);
-PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_precheck_schema);
-
 /* ----------------------------------------------------------------
  *
  * Apache Arrow <--> PG Types Mapping Routines
@@ -4227,6 +4222,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
  * However, it is not a reasonable restriction for foreign-table, because
  * it does not use heap-format internally.
  */
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_import_file);
 static void
 __insertPgAttributeTuple(Relation pg_attr_rel,
 						 CatalogIndexState pg_attr_index,
@@ -4291,7 +4287,7 @@ __insertPgAttributeTuple(Relation pg_attr_rel,
 	heap_freetuple(tup);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 {
 	CreateForeignTableStmt stmt;
@@ -4399,7 +4395,8 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 /*
  * handler of Arrow_Fdw
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_handler);
+PUBLIC_FUNCTION(Datum)
 pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_POINTER(&pgstrom_arrow_fdw_routine);
@@ -4408,7 +4405,8 @@ pgstrom_arrow_fdw_handler(PG_FUNCTION_ARGS)
 /*
  * validator of Arrow_Fdw
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_validator);
+PUBLIC_FUNCTION(Datum)
 pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 {
 	List   *options = untransformRelOptions(PG_GETARG_DATUM(0));
@@ -4457,7 +4455,8 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 /*
  * pgstrom_arrow_fdw_precheck_schema
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_precheck_schema);
+PUBLIC_FUNCTION(Datum)
 pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 {
 	EventTriggerData *trigdata;

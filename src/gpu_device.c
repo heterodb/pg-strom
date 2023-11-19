@@ -44,9 +44,6 @@ static struct {
 #undef DEV_ATTR
 };
 
-/* declaration */
-Datum pgstrom_gpu_device_info(PG_FUNCTION_ARGS);
-
 /*
  * collectGpuDevAttrs
  */
@@ -575,7 +572,7 @@ gpuOptimalBlockSize(int *p_grid_sz,
  * pgstrom_gpu_device_info - SQL function to dump device info
  */
 PG_FUNCTION_INFO_V1(pgstrom_gpu_device_info);
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_gpu_device_info(PG_FUNCTION_ARGS)
 {
 	FuncCallContext *fncxt;

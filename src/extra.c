@@ -19,7 +19,6 @@
 static int		gpudirect_driver_kind;
 static __thread void   *gpudirect_vfs_dma_buffer = NULL;
 static __thread size_t	gpudirect_vfs_dma_buffer_sz = 0UL;
-PG_FUNCTION_INFO_V1(pgstrom_license_query);
 
 /*
  * heterodbExtraModuleInfo
@@ -150,6 +149,7 @@ heterodbValidateDevice(int gpu_device_id,
 /*
  * pgstrom_license_query
  */
+PG_FUNCTION_INFO_V1(pgstrom_license_query);
 static char *
 __heterodb_license_query(void)
 {
@@ -172,7 +172,7 @@ retry:
 	goto retry;
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_license_query(PG_FUNCTION_ARGS)
 {
 	char	   *license;
@@ -324,16 +324,17 @@ static int	(*p_cufile__register_stream_v3)(CUstream cuda_stream,
 bool
 gpuDirectRegisterStream(CUstream cuda_stream)
 {
-	uint32_t	flags = (CU_FILE_STREAM_FIXED_BUF_OFFSET |
-						 CU_FILE_STREAM_FIXED_FILE_OFFSET |
-						 CU_FILE_STREAM_FIXED_FILE_SIZE |
-						 CU_FILE_STREAM_PAGE_ALIGNED_INPUTS);
-
 	switch (gpudirect_driver_kind)
 	{
 		case GPUDIRECT_DRIVER__CUFILE:
+			/*
+			 * NOTE: CU_FILE_STREAM_* labels are defined at CUDA12.2,
+			 * so older CUDA version leads build errors. Right now,
+			 * we don't use Async-Read APIs, so tentatively put the
+			 * equivalent immidiate value.
+			 */
 			if (p_cufile__register_stream_v3 == NULL ||
-				p_cufile__register_stream_v3(cuda_stream, flags) != 0)
+				p_cufile__register_stream_v3(cuda_stream, 15) != 0)
 				return false;
 		default:
 			break;
@@ -863,6 +864,10 @@ pgstrom_init_extra(void)
 	enum_options[enum_index].val  = GPUDIRECT_DRIVER__VFS;
 	enum_index++;
 
+	/* MEMO: Since PGv16, GUC variable must be initialized with the boot
+	 * value to pass assertion checks.
+	 */
+	gpudirect_driver_kind = enum_options[0].val;
 	DefineCustomEnumVariable("pg_strom.gpudirect_driver",
 							 "Choice of GPU-Direct SQL Driver",
 							 NULL,

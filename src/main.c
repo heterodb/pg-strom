@@ -15,9 +15,9 @@ PG_MODULE_MAGIC;
 
 /* misc variables */
 static Oid	__pgstrom_namespace_oid = UINT_MAX;
-static bool	__pgstrom_enabled_guc;			/* GUC */
-int			pgstrom_cpu_fallback_elevel;	/* GUC */
-bool		pgstrom_regression_test_mode;	/* GUC */
+static bool	__pgstrom_enabled_guc = true;			/* GUC */
+int			pgstrom_cpu_fallback_elevel = NOTICE;	/* GUC */
+bool		pgstrom_regression_test_mode = false;	/* GUC */
 long		PAGE_SIZE;
 long		PAGE_MASK;
 int			PAGE_SHIFT;
@@ -30,7 +30,7 @@ static CustomScanMethods	pgstrom_dummy_plan_methods;
 
 /* pg_strom.githash() */
 PG_FUNCTION_INFO_V1(pgstrom_githash);
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_githash(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_TEXT_P(cstring_to_text(pgstrom_githash_cstring));

@@ -585,6 +585,35 @@ __relScanDirectCachedBlock(pgstromTaskState *pts, BlockNumber block_num)
 	kds->block_nloaded++;
 }
 
+static bool
+__relScanDirectCheckBufferClean(SMgrRelation smgr, BlockNumber block_num)
+{
+	BufferTag	bufTag;
+	uint32_t	bufHash;
+	LWLock	   *bufLock;
+	Buffer		buffer;
+	BufferDesc *bufDesc;
+	uint32_t	bufState;
+
+	smgr_init_buffer_tag(&bufTag, smgr, MAIN_FORKNUM, block_num);
+	bufHash = BufTableHashCode(&bufTag);
+	bufLock = BufMappingPartitionLock(bufHash);
+
+	/* check whether the block exists on the shared buffer? */
+	LWLockAcquire(bufLock, LW_SHARED);
+	buffer = BufTableLookup(&bufTag, bufHash);
+	if (buffer < 0)
+	{
+		LWLockRelease(bufLock);
+		return true;		/* OK, block is not buffered */
+	}
+	bufDesc = GetBufferDescriptor(buffer - 1);
+	bufState = pg_atomic_read_u32(&bufDesc->state);
+	LWLockRelease(bufLock);
+
+	return (bufState & BM_DIRTY) == 0;
+}
+
 XpuCommand *
 pgstromRelScanChunkDirect(pgstromTaskState *pts,
 						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
@@ -668,7 +697,8 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			 * HEAP_XMIN_* or HEAP_XMAX_* flags correctly, we can have MVCC
 			 * logic in the device code.
 			 */
-			if (VM_ALL_VISIBLE(relation, block_num, &pts->curr_vm_buffer))
+			if (VM_ALL_VISIBLE(relation, block_num, &pts->curr_vm_buffer) &&
+				__relScanDirectCheckBufferClean(smgr, block_num))
 			{
 				/*
 				 * We don't allow xPU Direct SQL across multiple heap

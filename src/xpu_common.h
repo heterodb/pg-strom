@@ -39,7 +39,7 @@
 /* C++ */
 #define INLINE_FUNCTION(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)		static RET_TYPE
-#define PUBLIC_FUNCTION(RET_TYPE)		RET_TYPE
+#define PUBLIC_FUNCTION(RET_TYPE)		PGDLLEXPORT RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)		extern "C" RET_TYPE
 #define EXTERN_FUNCTION(RET_TYPE)		extern "C" RET_TYPE
 #define EXTERN_DATA						extern "C"
@@ -49,7 +49,7 @@
 /* C */
 #define INLINE_FUNCTION(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)		static RET_TYPE
-#define PUBLIC_FUNCTION(RET_TYPE)		RET_TYPE
+#define PUBLIC_FUNCTION(RET_TYPE)		PGDLLEXPORT RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)		RET_TYPE
 #define EXTERN_FUNCTION(RET_TYPE)		extern RET_TYPE
 #define EXTERN_DATA						extern
@@ -1288,15 +1288,17 @@ KDS_ARROW_CHECK_ISNULL(const kern_data_store *kds,
 					   const kern_colmeta *cmeta,
 					   uint32_t index)
 {
-	uint8_t	   *nullmap;
-
 	Assert(cmeta >= kds->colmeta &&
 		   cmeta <  kds->colmeta + kds->nr_colmeta);
 	if (cmeta->nullmap_offset)
 	{
-		nullmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
-		if (att_isnull(index, nullmap))
-			return true;
+		uint8_t	   *nullmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
+		uint32_t	mask = (1U << (index & 7));
+
+		index = (index >> 3);
+		if (index >= __kds_unpack(cmeta->nullmap_length) ||
+			(nullmap[index] & mask) == 0)
+			return true;	/* NULL */
 	}
 	return false;
 }
@@ -1310,8 +1312,9 @@ KDS_ARROW_REF_SIMPLE_DATUM(const kern_data_store *kds,
 	Assert(cmeta->values_offset > 0 &&
 		   cmeta->extra_offset == 0 &&
 		   cmeta->extra_length == 0);
-	if (!KDS_ARROW_CHECK_ISNULL(kds, cmeta, index) &&
-		unitsz * (index + 1) <= __kds_unpack(cmeta->values_length))
+	/* NOTE: caller should already apply NULL-checks, so we don't check
+	 * it again. */
+	if (unitsz * (index + 1) <= __kds_unpack(cmeta->values_length))
 	{
 		const char *values = ((const char *)kds +
 							  __kds_unpack(cmeta->values_offset));
@@ -1330,11 +1333,12 @@ KDS_ARROW_REF_VARLENA32_DATUM(const kern_data_store *kds,
 {
 	Assert(cmeta->values_offset > 0 &&
 		   cmeta->extra_offset  > 0);
-	if (!KDS_ARROW_CHECK_ISNULL(kds, cmeta, index) &&
-		sizeof(uint32_t) * (index+1) <= __kds_unpack(cmeta->values_length))
+	/* NOTE: caller should already apply NULL-checks, so we don't check
+	 * it again. */
+	if (sizeof(uint32_t) * (index+1) <= __kds_unpack(cmeta->values_length))
 	{
 		const uint32_t *offset = (const uint32_t *)
-			((const char *)kds + __kds_unpack(cmeta->values_length));
+			((const char *)kds + __kds_unpack(cmeta->values_offset));
 		const char	   *extra  = (const char *)
 			((const char *)kds + __kds_unpack(cmeta->extra_offset));
 		if (offset[index] <= offset[index+1] &&
@@ -1356,11 +1360,10 @@ KDS_ARROW_REF_VARLENA64_DATUM(const kern_data_store *kds,
 {
 	Assert(cmeta->values_offset > 0 &&
 		   cmeta->extra_offset  > 0);
-	if (!KDS_ARROW_CHECK_ISNULL(kds, cmeta, index) &&
-		sizeof(uint32_t) * (index+1) <= __kds_unpack(cmeta->values_length))
+	if (sizeof(uint32_t) * (index+1) <= __kds_unpack(cmeta->values_length))
 	{
 		const uint64_t *offset = (const uint64_t *)
-			((const char *)kds + __kds_unpack(cmeta->values_length));
+			((const char *)kds + __kds_unpack(cmeta->values_offset));
 		const char	   *extra  = (const char *)
 			((const char *)kds + __kds_unpack(cmeta->extra_offset));
 		if (offset[index] <= offset[index+1] &&
@@ -2225,6 +2228,7 @@ struct kern_expression
 			uint32_t	gist_oid;		/* OID of GiST index (for EXPLAIN) */
 			int16_t		gist_depth;		/* depth of index tuple */
 			uint16_t	htup_slot_id;	/* slot_id to save htup pointer */
+			int32_t		htup_offset;	/* kvec's buffer offset of htup pointer */
 			kern_varload_desc ivar_desc; /* index-var load descriptor */
 			char		data[1]			__MAXALIGNED__;
 		} gist;		/* GiSTEval */
