@@ -94,7 +94,7 @@ check_float8_value(float8 value, bool inf_is_valid, bool zero_is_valid)
 /*
  * NROWS
  */
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_partial_nrows(PG_FUNCTION_ARGS)
 {
 	int		i;
@@ -110,7 +110,7 @@ pgstrom_partial_nrows(PG_FUNCTION_ARGS)
 /*
  * MIN(X) and MAX(X) functions
  */
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_partial_minmax_int64(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *r;
@@ -123,7 +123,7 @@ pgstrom_partial_minmax_int64(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(r);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_partial_minmax_fp64(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *r;
@@ -171,31 +171,31 @@ pgstrom_partial_minmax_fp64(PG_FUNCTION_ARGS)
 	}																	\
 	PG_RETURN_POINTER(state);
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fmin_trans_int64(PG_FUNCTION_ARGS)
 {
 	__MINMAX_TRANS_TEMPLATE(int64,Min);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fmin_trans_fp64(PG_FUNCTION_ARGS)
 {
 	__MINMAX_TRANS_TEMPLATE(fp64,Min);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fmax_trans_int64(PG_FUNCTION_ARGS)
 {
 	__MINMAX_TRANS_TEMPLATE(int64,Max);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fmax_trans_fp64(PG_FUNCTION_ARGS)
 {
 	__MINMAX_TRANS_TEMPLATE(fp64,Max);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fminmax_final_int8(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *state
@@ -207,7 +207,7 @@ pgstrom_fminmax_final_int8(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(state->value);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fminmax_final_int16(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *state
@@ -219,7 +219,7 @@ pgstrom_fminmax_final_int16(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(state->value);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fminmax_final_int32(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *state
@@ -231,7 +231,7 @@ pgstrom_fminmax_final_int32(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(state->value);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fminmax_final_int64(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *state
@@ -241,7 +241,7 @@ pgstrom_fminmax_final_int64(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(state->value);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fminmax_final_fp16(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *state
@@ -251,7 +251,7 @@ pgstrom_fminmax_final_fp16(PG_FUNCTION_ARGS)
 	PG_RETURN_UINT16(__half_as_short__(fp64_to_fp16(state->value)));
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fminmax_final_fp32(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *state
@@ -261,7 +261,7 @@ pgstrom_fminmax_final_fp32(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT4(state->value);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fminmax_final_fp64(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *state
@@ -271,7 +271,7 @@ pgstrom_fminmax_final_fp64(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(state->value);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fminmax_final_numeric(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *state
@@ -285,7 +285,7 @@ pgstrom_fminmax_final_numeric(PG_FUNCTION_ARGS)
 /*
  * SUM(X),AVG(X) functions
  */
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_partial_sum_int(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_int_packed *r = palloc(sizeof(kagg_state__psum_int_packed));
@@ -297,7 +297,7 @@ pgstrom_partial_sum_int(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(r);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_partial_sum_fp(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_fp_packed *r = palloc(sizeof(kagg_state__psum_fp_packed));
@@ -309,7 +309,7 @@ pgstrom_partial_sum_fp(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(r);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_partial_sum_cash(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_int_packed *r = palloc(sizeof(kagg_state__psum_int_packed));
@@ -321,7 +321,7 @@ pgstrom_partial_sum_cash(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(r);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fsum_trans_int(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_int_packed *state;
@@ -351,7 +351,7 @@ pgstrom_fsum_trans_int(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(state);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fsum_trans_fp(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_fp_packed *state;
@@ -381,7 +381,7 @@ pgstrom_fsum_trans_fp(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(state);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fsum_final_int(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_int_packed *state;
@@ -392,7 +392,7 @@ pgstrom_fsum_final_int(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(state->sum);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fsum_final_int_as_numeric(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_int_packed *state;
@@ -404,7 +404,7 @@ pgstrom_fsum_final_int_as_numeric(PG_FUNCTION_ARGS)
 										Int64GetDatum(state->sum)));
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fsum_final_int_as_cash(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_int_packed *state;
@@ -415,7 +415,7 @@ pgstrom_fsum_final_int_as_cash(PG_FUNCTION_ARGS)
 	PG_RETURN_CASH(state->sum);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fsum_final_fp32(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_fp_packed *state
@@ -425,7 +425,7 @@ pgstrom_fsum_final_fp32(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT4(state->sum);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fsum_final_fp64(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_fp_packed *state
@@ -435,7 +435,7 @@ pgstrom_fsum_final_fp64(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(state->sum);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_fsum_final_fp64_as_numeric(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_fp_packed *state
@@ -446,7 +446,7 @@ pgstrom_fsum_final_fp64_as_numeric(PG_FUNCTION_ARGS)
 										Float8GetDatum(state->sum)));
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_favg_final_int(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_int_packed *state;
@@ -461,7 +461,7 @@ pgstrom_favg_final_int(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(DirectFunctionCall2(numeric_div, sum, n));
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_favg_final_fp(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_fp_packed *state;
@@ -472,7 +472,7 @@ pgstrom_favg_final_fp(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8((double)state->sum / (double)state->nitems);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_favg_final_num(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_fp_packed *state;
@@ -490,7 +490,7 @@ pgstrom_favg_final_num(PG_FUNCTION_ARGS)
 /*
  * STDDEV/VARIANCE
  */
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_partial_variance(PG_FUNCTION_ARGS)
 {
 	kagg_state__stddev_packed *r = palloc(sizeof(kagg_state__stddev_packed));
@@ -503,7 +503,7 @@ pgstrom_partial_variance(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(r);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_stddev_trans(PG_FUNCTION_ARGS)
 {
 	kagg_state__stddev_packed *state;
@@ -535,7 +535,7 @@ pgstrom_stddev_trans(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(state);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_var_sampf_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__stddev_packed *state
@@ -550,7 +550,7 @@ pgstrom_var_sampf_final(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_var_samp_final(PG_FUNCTION_ARGS)
 {
 	Datum	datum = pgstrom_var_sampf_final(fcinfo);
@@ -560,7 +560,7 @@ pgstrom_var_samp_final(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(DirectFunctionCall1(float8_numeric, datum));
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_var_popf_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__stddev_packed *state
@@ -575,7 +575,7 @@ pgstrom_var_popf_final(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_var_pop_final(PG_FUNCTION_ARGS)
 {
 	Datum	datum = pgstrom_var_popf_final(fcinfo);
@@ -585,7 +585,7 @@ pgstrom_var_pop_final(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(DirectFunctionCall1(float8_numeric, datum));
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_stddev_sampf_final(PG_FUNCTION_ARGS)
 {
 	Datum   datum = pgstrom_var_sampf_final(fcinfo);
@@ -595,7 +595,7 @@ pgstrom_stddev_sampf_final(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(sqrt(DatumGetFloat8(datum)));
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_stddev_samp_final(PG_FUNCTION_ARGS)
 {
 	Datum	datum = pgstrom_stddev_sampf_final(fcinfo);
@@ -605,7 +605,7 @@ pgstrom_stddev_samp_final(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(DirectFunctionCall1(float8_numeric, datum));
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_stddev_popf_final(PG_FUNCTION_ARGS)
 {
 	Datum	datum = pgstrom_var_popf_final(fcinfo);
@@ -615,7 +615,7 @@ pgstrom_stddev_popf_final(PG_FUNCTION_ARGS)
     PG_RETURN_FLOAT8(sqrt(DatumGetFloat8(datum)));
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_stddev_pop_final(PG_FUNCTION_ARGS)
 {
 	Datum	datum = pgstrom_stddev_popf_final(fcinfo);
@@ -628,7 +628,7 @@ pgstrom_stddev_pop_final(PG_FUNCTION_ARGS)
 /*
  * COVAR/REGR_*
  */
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_partial_covar(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *r = palloc(sizeof(kagg_state__covar_packed));
@@ -646,7 +646,7 @@ pgstrom_partial_covar(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(r);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_covar_accum(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state;
@@ -681,7 +681,7 @@ pgstrom_covar_accum(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(state);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_covar_samp_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
@@ -697,7 +697,7 @@ pgstrom_covar_samp_final(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_covar_pop_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
@@ -713,7 +713,7 @@ pgstrom_covar_pop_final(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_regr_avgx_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
@@ -727,7 +727,7 @@ pgstrom_regr_avgx_final(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_regr_avgy_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
@@ -741,7 +741,7 @@ pgstrom_regr_avgy_final(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_regr_count_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
@@ -750,7 +750,7 @@ pgstrom_regr_count_final(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8((float8_t)state->nitems);
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_regr_intercept_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
@@ -765,7 +765,7 @@ pgstrom_regr_intercept_final(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_regr_r2_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
@@ -780,7 +780,7 @@ pgstrom_regr_r2_final(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_regr_slope_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
@@ -792,7 +792,7 @@ pgstrom_regr_slope_final(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_regr_sxx_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
@@ -804,7 +804,7 @@ pgstrom_regr_sxx_final(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_regr_sxy_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
@@ -816,7 +816,7 @@ pgstrom_regr_sxy_final(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_regr_syy_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
@@ -1084,13 +1084,13 @@ __pgstrom_hll_sketch_update_common(PG_FUNCTION_ARGS, uint64 hash)
 #define PGSTROM_HLL_HANDLER_TEMPLATE(NAME)								\
 	PG_FUNCTION_INFO_V1(pgstrom_hll_hash_##NAME);						\
 	PG_FUNCTION_INFO_V1(pgstrom_hll_sketch_update_##NAME);				\
-	Datum																\
+	PUBLIC_FUNCTION(Datum)												\
 	pgstrom_hll_hash_##NAME(PG_FUNCTION_ARGS)							\
 	{																	\
 		Datum	arg = PG_GETARG_DATUM(0);								\
 		PG_RETURN_UINT64(__pgstrom_hll_hash_##NAME(arg));				\
 	}																	\
-	Datum																\
+	PUBLIC_FUNCTION(Datum)												\
 	pgstrom_hll_sketch_update_##NAME(PG_FUNCTION_ARGS)					\
 	{																	\
 		if (PG_ARGISNULL(1))											\
@@ -1127,7 +1127,7 @@ PGSTROM_HLL_HANDLER_TEMPLATE(uuid)
 /*
  * pgstrom_hll_sketch_new
  */
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_hll_sketch_new(PG_FUNCTION_ARGS)
 {
 	uint64		nrooms = (1UL << pgstrom_hll_register_bits);
@@ -1153,7 +1153,7 @@ pgstrom_hll_sketch_new(PG_FUNCTION_ARGS)
 /*
  * pgstrom_hll_sketch_merge
  */
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_hll_sketch_merge(PG_FUNCTION_ARGS)
 {
 	MemoryContext	aggcxt;
@@ -1204,7 +1204,7 @@ pgstrom_hll_sketch_merge(PG_FUNCTION_ARGS)
 /*
  * pgstrom_hll_count_final
  */
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_hll_count_final(PG_FUNCTION_ARGS)
 {
 	bytea	   *hll_state;
@@ -1255,7 +1255,7 @@ pgstrom_hll_count_final(PG_FUNCTION_ARGS)
 /*
  * pgstrom_hll_sketch_histogram
  */
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_hll_sketch_histogram(PG_FUNCTION_ARGS)
 {
 	bytea	   *hll_state = PG_GETARG_BYTEA_P(0);

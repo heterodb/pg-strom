@@ -1038,9 +1038,9 @@ pgstrom_build_groupby_tlist_dev(codegen_context *context,
 
 				if (!tlist_member(arg, context->tlist_dev))
 				{
-					TargetEntry *tle = makeTargetEntry(arg, resno, NULL, true);
+					TargetEntry *__tle = makeTargetEntry(arg, resno, NULL, true);
 
-					context->tlist_dev = lappend(context->tlist_dev, tle);
+					context->tlist_dev = lappend(context->tlist_dev, __tle);
 				}
 			}
 		}

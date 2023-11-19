@@ -2684,7 +2684,7 @@ __gpuContextAdjustWorkersOne(gpuContext *gcontext, uint32_t nworkers)
 		__FATAL("failed on pthread_attr_init");
 	if (pthread_attr_setdetachstate(&th_attr, PTHREAD_CREATE_DETACHED) != 0)
 		__FATAL("failed on pthread_attr_setdetachstate");
-	elog(LOG, "count = %d nworkers = %d", count, nworkers);
+
 	while (count < nworkers)
 	{
 		gpuWorker  *gworker = calloc(1, sizeof(gpuWorker));
@@ -2742,7 +2742,7 @@ out:
 		elog(LOG, "GPU%d workers - %d startup%s, %d terminate",
 			 gcontext->cuda_dindex,
 			 nr_startup >> 1,
-			 (nr_startup & 1) ? " (incl. GpuCacheManager)" : "",
+			 (nr_startup & 1) ? " (with GpuCacheManager)" : "",
 			 nr_terminate);
 	}
 }
@@ -2976,7 +2976,7 @@ gpuservCleanupOnProcExit(int code, Datum arg)
 /*
  * gpuservBgWorkerMain
  */
-void
+PUBLIC_FUNCTION(void)
 gpuservBgWorkerMain(Datum arg)
 {
 	CUresult	rc;

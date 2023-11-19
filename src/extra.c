@@ -19,7 +19,6 @@
 static int		gpudirect_driver_kind;
 static __thread void   *gpudirect_vfs_dma_buffer = NULL;
 static __thread size_t	gpudirect_vfs_dma_buffer_sz = 0UL;
-PG_FUNCTION_INFO_V1(pgstrom_license_query);
 
 /*
  * heterodbExtraModuleInfo
@@ -150,6 +149,7 @@ heterodbValidateDevice(int gpu_device_id,
 /*
  * pgstrom_license_query
  */
+PG_FUNCTION_INFO_V1(pgstrom_license_query);
 static char *
 __heterodb_license_query(void)
 {
@@ -172,7 +172,7 @@ retry:
 	goto retry;
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_license_query(PG_FUNCTION_ARGS)
 {
 	char	   *license;
@@ -864,6 +864,10 @@ pgstrom_init_extra(void)
 	enum_options[enum_index].val  = GPUDIRECT_DRIVER__VFS;
 	enum_index++;
 
+	/* MEMO: Since PGv16, GUC variable must be initialized with the boot
+	 * value to pass assertion checks.
+	 */
+	gpudirect_driver_kind = enum_options[0].val;
 	DefineCustomEnumVariable("pg_strom.gpudirect_driver",
 							 "Choice of GPU-Direct SQL Driver",
 							 NULL,
