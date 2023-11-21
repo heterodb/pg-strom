@@ -391,9 +391,8 @@ typedef struct
 	/*
 	 * inner preload buffer
 	 */
-	List		   *preload_tuples;
-	List		   *preload_hashes;     /* if hash-join or gist-join */
-	size_t			preload_usage;
+	void		   *preload_buffer;
+
 	/*
 	 * join properties (common)
 	 */

@@ -655,195 +655,6 @@ __getByteaConst(Const *con)
 	return (con->constisnull ? NULL : DatumGetByteaP(con->constvalue));
 }
 
-#if 0
-/*
- * pathnode_tree_walker
- */
-static bool
-pathnode_tree_walker(Path *node,
-					 bool (*walker)(),
-					 void *context)
-{
-	ListCell   *lc;
-
-	if (!node)
-		return false;
-
-	check_stack_depth();
-	switch (nodeTag(node))
-	{
-		case T_Path:
-		case T_IndexPath:
-		case T_BitmapHeapPath:
-		case T_BitmapAndPath:
-		case T_BitmapOrPath:
-		case T_TidPath:
-#if PG_VERSION_NUM < 120000
-		case T_ResultPath:
-#else
-		case T_GroupResultPath:
-#endif
-		case T_MinMaxAggPath:
-			/* primitive path nodes */
-			break;
-		case T_SubqueryScanPath:
-			if (walker(((SubqueryScanPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_ForeignPath:
-			if (walker(((ForeignPath *)node)->fdw_outerpath, context))
-				return true;
-			break;
-		case T_CustomPath:
-			foreach (lc, ((CustomPath *)node)->custom_paths)
-			{
-				if (walker((Path *)lfirst(lc), context))
-					return true;
-			}
-			break;
-		case T_NestPath:
-		case T_MergePath:
-		case T_HashPath:
-			if (walker(((JoinPath *)node)->outerjoinpath, context))
-				return true;
-			if (walker(((JoinPath *)node)->innerjoinpath, context))
-				return true;
-			break;
-		case T_AppendPath:
-			foreach (lc, ((AppendPath *)node)->subpaths)
-			{
-				if (walker((Path *)lfirst(lc), context))
-					return true;
-			}
-			break;
-		case T_MergeAppendPath:
-			foreach (lc, ((MergeAppendPath *)node)->subpaths)
-			{
-				if (walker((Path *)lfirst(lc), context))
-					return true;
-			}
-			break;
-		case T_MaterialPath:
-			if (walker(((MaterialPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_UniquePath:
-			if (walker(((UniquePath *)node)->subpath, context))
-				return true;
-			break;
-		case T_GatherPath:
-			if (walker(((GatherPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_GatherMergePath:
-			if (walker(((GatherMergePath *)node)->subpath, context))
-				return true;
-			break;
-		case T_ProjectionPath:
-			if (walker(((ProjectionPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_ProjectSetPath:
-			if (walker(((ProjectSetPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_SortPath:
-			if (walker(((SortPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_GroupPath:
-			if (walker(((GroupPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_UpperUniquePath:
-			if (walker(((UpperUniquePath *)node)->subpath, context))
-				return true;
-			break;
-		case T_AggPath:
-			if (walker(((AggPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_GroupingSetsPath:
-			if (walker(((GroupingSetsPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_WindowAggPath:
-			if (walker(((WindowAggPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_SetOpPath:
-			if (walker(((SetOpPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_RecursiveUnionPath:
-			if (walker(((RecursiveUnionPath *)node)->leftpath, context))
-				return true;
-			if (walker(((RecursiveUnionPath *)node)->rightpath, context))
-				return true;
-			break;
-		case T_LockRowsPath:
-			if (walker(((LockRowsPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_ModifyTablePath:
-#if PG_VERSION_NUM < 140000
-			foreach (lc, ((ModifyTablePath *)node)->subpaths)
-			{
-				if (walker((Path *)lfirst(lc), context))
-					return true;
-			}
-#else
-			if (walker(((ModifyTablePath *)node)->subpath))
-				return true;
-#endif
-			break;
-		case T_LimitPath:
-			if (walker(((LimitPath *)node)->subpath, context))
-				return true;
-			break;
-		default:
-			elog(ERROR, "unrecognized path-node type: %d",
-				 (int) nodeTag(node));
-			break;
-	}
-	return false;
-}
-
-static bool
-__pathtree_has_gpupath(Path *node, void *context)
-{
-	if (!node)
-		return false;
-	if (pgstrom_path_is_gpuscan(node) ||
-		pgstrom_path_is_gpujoin(node) ||
-		pgstrom_path_is_gpupreagg(node))
-		return true;
-	return pathnode_tree_walker(node, __pathtree_has_gpupath, context);
-}
-
-bool
-pathtree_has_gpupath(Path *node)
-{
-	return __pathtree_has_gpupath(node, NULL);
-}
-
-static bool
-__pathtree_has_parallel_aware(Path *path, void *context)
-{
-	bool	rv = path->parallel_aware;
-
-	if (!rv)
-		rv = pathnode_tree_walker(path, __pathtree_has_parallel_aware, context);
-	return rv;
-}
-
-bool
-pathtree_has_parallel_aware(Path *node)
-{
-	return __pathtree_has_parallel_aware(node, NULL);
-}
-#endif
-
 /*
  * pgstrom_copy_pathnode
  *
@@ -885,6 +696,8 @@ pgstrom_copy_pathnode(const Path *pathnode)
 			return pmemdup(pathnode, sizeof(BitmapOrPath));
 		case T_TidPath:
 			return pmemdup(pathnode, sizeof(TidPath));
+		case T_TidRangePath:
+			return pmemdup(pathnode, sizeof(TidRangePath));
 		case T_SubqueryScanPath:
 			{
 				SubqueryScanPath *a = (SubqueryScanPath *)pathnode;
@@ -1003,6 +816,13 @@ pgstrom_copy_pathnode(const Path *pathnode)
 				SortPath	   *b = pmemdup(a, sizeof(SortPath));
 				b->subpath = pgstrom_copy_pathnode(a->subpath);
 				return &b->path;
+			}
+		case T_IncrementalSortPath:
+			{
+				IncrementalSortPath *a = (IncrementalSortPath *)pathnode;
+				IncrementalSortPath *b = pmemdup(a, sizeof(IncrementalSortPath));
+				b->spath.subpath = pgstrom_copy_pathnode(a->spath.subpath);
+				return &b->spath.path;
 			}
 		case T_GroupPath:
 			{

@@ -1322,6 +1322,17 @@ CreateDpuJoinState(CustomScan *cscan)
  *
  * ---------------------------------------------------------------- *
  */
+typedef struct
+{
+	uint32_t		nitems;
+	uint32_t		nrooms;
+	size_t			usage;
+	struct {
+		HeapTuple	htup;
+		uint32_t	hash;		/* if hash-join or gist-join */
+	} rows[1];
+} inner_preload_buffer;
+
 static uint32_t
 get_tuple_hashvalue(pgstromTaskInnerState *istate,
 					TupleTableSlot *slot)
@@ -1352,17 +1363,27 @@ get_tuple_hashvalue(pgstromTaskInnerState *istate,
  * execInnerPreloadOneDepth
  */
 static void
-execInnerPreloadOneDepth(pgstromTaskInnerState *istate,
-						 MemoryContext memcxt)
+execInnerPreloadOneDepth(MemoryContext memcxt,
+						 pgstromTaskInnerState *istate,
+						 pg_atomic_uint64 *p_shared_inner_nitems,
+						 pg_atomic_uint64 *p_shared_inner_usage)
 {
 	PlanState	   *ps = istate->ps;
 	MemoryContext	oldcxt;
+	inner_preload_buffer *preload_buf;
+
+	/* initial alloc of inner_preload_buffer */
+	preload_buf = MemoryContextAlloc(memcxt, offsetof(inner_preload_buffer,
+													  rows[12000]));
+	memset(preload_buf, 0, offsetof(inner_preload_buffer, rows));
+	preload_buf->nrooms = 12000;
 
 	for (;;)
 	{
 		TupleTableSlot *slot;
 		TupleDesc		tupdesc;
 		HeapTuple		htup;
+		uint32_t		index;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -1389,14 +1410,24 @@ execInnerPreloadOneDepth(pgstromTaskInnerState *istate,
 		htup = heap_form_tuple(slot->tts_tupleDescriptor,
 							   slot->tts_values,
 							   slot->tts_isnull);
+		if (preload_buf->nitems >= preload_buf->nrooms)
+		{
+			uint32_t	nrooms_new = 2 * preload_buf->nrooms + 4000;
+
+			preload_buf = repalloc_huge(preload_buf, offsetof(inner_preload_buffer,
+															  rows[nrooms_new]));
+			preload_buf->nrooms = nrooms_new;
+		}
+		index = preload_buf->nitems++;
+
 		if (istate->hash_inner_keys != NIL)
 		{
 			uint32_t	hash = get_tuple_hashvalue(istate, slot);
 
-			istate->preload_tuples = lappend(istate->preload_tuples, htup);
-			istate->preload_hashes = lappend_int(istate->preload_hashes, hash);
-			istate->preload_usage += MAXALIGN(offsetof(kern_hashitem,
-													   t.htup) + htup->t_len);
+			preload_buf->rows[index].htup = htup;
+			preload_buf->rows[index].hash = hash;
+			preload_buf->usage += MAXALIGN(offsetof(kern_hashitem,
+													t.htup) + htup->t_len);
 		}
 		else if (istate->gist_irel)
 		{
@@ -1410,19 +1441,24 @@ execInnerPreloadOneDepth(pgstromTaskInnerState *istate,
 				elog(ERROR, "Unable to build GiST-index buffer with NULL-ctid");
 			ItemPointerCopy(ctid, &htup->t_self);
 			hash = hash_any((unsigned char *)ctid, sizeof(ItemPointerData));
-			istate->preload_tuples = lappend(istate->preload_tuples, htup);
-			istate->preload_hashes = lappend_int(istate->preload_hashes, hash);
-			istate->preload_usage += MAXALIGN(offsetof(kern_hashitem,
-													   t.htup) + htup->t_len);
+
+			preload_buf->rows[index].htup = htup;
+			preload_buf->rows[index].hash = hash;
+			preload_buf->usage += MAXALIGN(offsetof(kern_hashitem,
+													t.htup) + htup->t_len);
 		}
 		else
 		{
-			istate->preload_tuples = lappend(istate->preload_tuples, htup);
-			istate->preload_usage += MAXALIGN(offsetof(kern_tupitem,
-													   htup) + htup->t_len);
+			preload_buf->rows[index].htup = htup;
+			preload_buf->rows[index].hash = 0;
+			preload_buf->usage += MAXALIGN(offsetof(kern_tupitem,
+													htup) + htup->t_len);
 		}
 		MemoryContextSwitchTo(oldcxt);
 	}
+	istate->preload_buffer = preload_buf;
+	pg_atomic_fetch_add_u64(p_shared_inner_nitems, preload_buf->nitems);
+	pg_atomic_fetch_add_u64(p_shared_inner_usage,  preload_buf->usage);
 }
 
 /*
@@ -1654,12 +1690,11 @@ __innerPreloadSetupHeapBuffer(kern_data_store *kds,
 	uint32_t	rowid = base_nitems;
 	char	   *tail_pos = (char *)kds + kds->length;
 	char	   *curr_pos = tail_pos - __kds_unpack(base_usage);
-	ListCell   *lc;
+	inner_preload_buffer *preload_buf = istate->preload_buffer;
 
-	Assert(istate->preload_hashes == NIL);
-	foreach (lc, istate->preload_tuples)
+	for (uint32_t index=0; index < preload_buf->nitems; index++)
 	{
-		HeapTuple	htup = lfirst(lc);
+		HeapTuple	htup = preload_buf->rows[index].htup;
 		size_t		sz;
 		kern_tupitem *titem;
 
@@ -1689,13 +1724,12 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 	uint32_t	rowid = base_nitems;
 	char	   *tail_pos = (char *)kds + kds->length;
 	char	   *curr_pos = tail_pos - __kds_unpack(base_usage);
-	ListCell   *lc1, *lc2;
+	inner_preload_buffer *preload_buf = istate->preload_buffer;
 
-	forboth (lc1, istate->preload_tuples,
-			 lc2, istate->preload_hashes)
+	for (uint32_t index=0; index < preload_buf->nitems; index++)
 	{
-		HeapTuple	htup = lfirst(lc1);
-		uint32_t	hash = lfirst_int(lc2);
+		HeapTuple	htup = preload_buf->rows[index].htup;
+		uint32_t	hash = preload_buf->rows[index].hash;
 		uint32_t	hindex = hash % kds->hash_nslots;
 		uint32_t	next, self;
 		size_t		sz;
@@ -1754,11 +1788,9 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			{
 				pgstromTaskInnerState *istate = &leader->inners[i];
 
-				execInnerPreloadOneDepth(istate, memcxt);
-				pg_atomic_fetch_add_u64(&ps_state->inners[i].inner_nitems,
-										list_length(istate->preload_tuples));
-				pg_atomic_fetch_add_u64(&ps_state->inners[i].inner_usage,
-										istate->preload_usage);
+				execInnerPreloadOneDepth(memcxt, istate,
+										 &ps_state->inners[i].inner_nitems,
+										 &ps_state->inners[i].inner_usage);
 			}
 
 			/*
@@ -1830,15 +1862,16 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			for (int i=0; i < leader->num_rels; i++)
 			{
 				pgstromTaskInnerState *istate = &leader->inners[i];
+				inner_preload_buffer *preload_buf = istate->preload_buffer;
 				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, i);
                 uint32_t		base_nitems;
 				uint32_t		base_usage;
 
 				SpinLockAcquire(&ps_state->preload_mutex);
 				base_nitems  = kds->nitems;
-				kds->nitems += list_length(istate->preload_tuples);
+				kds->nitems += preload_buf->nitems;
 				base_usage   = kds->usage;
-				kds->usage  += __kds_packed(istate->preload_usage);
+				kds->usage  += __kds_packed(preload_buf->usage);
 				SpinLockRelease(&ps_state->preload_mutex);
 
 				if (kds->format == KDS_FORMAT_ROW)
@@ -1851,11 +1884,6 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
                                                   base_usage);
                 else
 					elog(ERROR, "unexpected inner-KDS format");
-
-				/* reset local buffer */
-				istate->preload_tuples = NIL;
-				istate->preload_hashes = NIL;
-				istate->preload_usage  = 0;
 			}
 
 			/*

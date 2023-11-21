@@ -252,45 +252,43 @@ __xpu_numeric_to_int64(kern_context *kcxt,
 					   int64_t min_value,
 					   int64_t max_value)
 {
-	int128_t	ival;
-	int16_t		weight;
-
 	assert(num->expr_ops == &xpu_numeric_ops);
-	if (!xpu_numeric_validate(kcxt, num))
-		return false;
-	if (num->kind != XPU_NUMERIC_KIND__VALID)
+	if (num->kind == XPU_NUMERIC_KIND__VALID)
 	{
-		STROM_ELOG(kcxt, "cannot convert NaN/Inf to integer");
-		return false;
-	}
+		int128_t	ival = num->u.value;
+		int16_t		weight = num->weight;
 
-	ival = num->u.value;
-	weight = num->weight;
-	if (ival != 0)
-	{
-		while (weight > 0)
+		if (ival != 0)
 		{
-			/* round of 0.x digit */
-			if (weight == 1)
-				ival += (ival > 0 ? 5 : -5);
-			ival /= 10;
-			weight--;
-		}
-		while (weight < 0)
-		{
-			ival *= 10;
-			weight++;
+			while (weight > 0)
+			{
+				/* round of 0.x digit */
+				if (weight == 1)
+					ival += (ival > 0 ? 5 : -5);
+				ival /= 10;
+				weight--;
+			}
+			while (weight < 0)
+			{
+				ival *= 10;
+				weight++;
+				if (ival < min_value || ival > max_value)
+					break;
+			}
 			if (ival < min_value || ival > max_value)
-				break;
+			{
+				STROM_ELOG(kcxt, "integer out of range");
+				return false;
+			}
 		}
-		if (ival < min_value || ival > max_value)
-		{
-			STROM_ELOG(kcxt, "integer out of range");
-			return false;
-		}
+		*p_ival = ival;
+		return true;
 	}
-	*p_ival = ival;
-	return true;
+	assert(num->kind == XPU_NUMERIC_KIND__NAN ||
+		   num->kind == XPU_NUMERIC_KIND__POS_INF ||
+		   num->kind == XPU_NUMERIC_KIND__NEG_INF);
+	STROM_ELOG(kcxt, "cannot convert NaN/Inf to integer");
+	return false;
 }
 
 #define PG_NUMERIC_TO_INT_TEMPLATE(TARGET,MIN_VALUE,MAX_VALUE)		\
@@ -304,7 +302,8 @@ __xpu_numeric_to_int64(kern_context *kcxt,
 		{															\
 			result->expr_ops = NULL;								\
 		}															\
-		else if (!__xpu_numeric_to_int64(kcxt, &ival, &num,			\
+		else if (!xpu_numeric_validate(kcxt, &num) ||				\
+				 !__xpu_numeric_to_int64(kcxt, &ival, &num,			\
 										 MIN_VALUE, MAX_VALUE))		\
 		{															\
 			return false;											\
@@ -329,6 +328,8 @@ pgfn_numeric_to_money(XPU_PGFUNCTION_ARGS)
 
 	if (XPU_DATUM_ISNULL(&num))
 		result->expr_ops = NULL;
+	else if (!xpu_numeric_validate(kcxt, &num))
+		return false;
 	else
 	{
 		const kern_session_info *session = kcxt->session;
@@ -351,8 +352,6 @@ __xpu_numeric_to_fp64(kern_context *kcxt,
 					  float8_t *p_fval,
 					  xpu_numeric_t *num)
 {
-	if (!xpu_numeric_validate(kcxt, num))
-		return false;
 	if (num->kind == XPU_NUMERIC_KIND__VALID)
 	{
 		float8_t	fval = num->u.value;
@@ -383,8 +382,10 @@ __xpu_numeric_to_fp64(kern_context *kcxt,
 	else if (num->kind == XPU_NUMERIC_KIND__NEG_INF)
 		*p_fval = -INFINITY;
 	else
+	{
+		assert(num->kind == XPU_NUMERIC_KIND__NAN);
 		*p_fval = NAN;
-
+	}
 	return true;
 }
 
@@ -397,7 +398,8 @@ __xpu_numeric_to_fp64(kern_context *kcxt,
 																	\
 		if (XPU_DATUM_ISNULL(&num))									\
 			result->expr_ops = NULL;								\
-		else if (!__xpu_numeric_to_fp64(kcxt, &fval, &num))			\
+		else if (!xpu_numeric_validate(kcxt, &num) ||				\
+				 !__xpu_numeric_to_fp64(kcxt, &fval, &num))			\
 			return false;											\
 		else														\
 		{															\
