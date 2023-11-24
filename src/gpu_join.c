@@ -847,7 +847,14 @@ __pgstrom_build_tlist_dev_walker(Node *node, void *__priv)
 	depth = -1;
 	resno = -1;
 found:
-	if (pgstrom_xpu_expression((Expr *)node,
+	/*
+	 * NOTE: Even if the expression is not supported by the device,
+	 * Var-node must be added because it is a simple projection that
+	 * is never touched during xPU kernel execution.
+	 * All the xPU kernel doing is simple copy.
+	 */
+	if (IsA(node, Var) ||
+		pgstrom_xpu_expression((Expr *)node,
 							   context->xpu_task_flags,
 							   context->scan_relid,
 							   context->inner_target_list,
@@ -1183,6 +1190,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		pp_inner->other_quals_fallback
 			= build_fallback_exprs_join(context, pp_inner->other_quals);
 	}
+
 	foreach (lc, context->tlist_dev)
 	{
 		TargetEntry *tle = lfirst(lc);
