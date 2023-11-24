@@ -445,14 +445,6 @@ devtype_get_kvec_sizeof_by_opcode(TypeOpCode type_code)
 	elog(ERROR, "device type opcode:%u not found", type_code);
 }
 
-
-
-
-
-
-
-
-
 /*
  * Built-in device type hash functions
  */
@@ -790,6 +782,8 @@ devtype_box2df_hash(bool isnull, Datum value)
  * Built-in device functions/operators
  */
 #define FUNC_OPCODE(SQLNAME,FN_ARGS,FN_FLAGS,DEVNAME,FUNC_COST,EXTENSION) \
+	{ #SQLNAME, #FN_ARGS, FN_FLAGS, FuncOpCode__##DEVNAME, FUNC_COST, EXTENSION },
+#define FUNC_ALIAS(SQLNAME,FN_ARGS,FN_FLAGS,DEVNAME,FUNC_COST,EXTENSION) \
 	{ #SQLNAME, #FN_ARGS, FN_FLAGS, FuncOpCode__##DEVNAME, FUNC_COST, EXTENSION },
 static struct {
 	const char	   *func_name;
@@ -4110,7 +4104,7 @@ __xpucode_to_cstring(StringInfo buf,
 					const char *rettype_name;
 				} devonly_funcs_catalog[] = {
 #define DEVONLY_FUNC_OPCODE(RET_TYPE,DEV_NAME,a,b,c)	\
-				{FuncOpCode__##DEV_NAME, #DEV_NAME, #RET_TYPE},
+					{FuncOpCode__##DEV_NAME, #DEV_NAME, #RET_TYPE},
 #include "xpu_opcodes.h"
 					{FuncOpCode__Invalid,NULL,NULL}
 				};

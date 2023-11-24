@@ -459,7 +459,7 @@ xpu_timetz_datum_kvec_copy(kern_context *kcxt,
 	kvec_timetz_t *kvecs_dst = (kvec_timetz_t *)__kvecs_dst;
 
 	kvecs_dst->values[kvecs_dst_id].time = kvecs_src->values[kvecs_src_id].time;
-	kvecs_dst->values[kvecs_dst_id].time = kvecs_src->values[kvecs_src_id].zone;
+	kvecs_dst->values[kvecs_dst_id].zone = kvecs_src->values[kvecs_src_id].zone;
 	return true;
 }
 
@@ -2461,7 +2461,7 @@ pgfn_timetz_pl_interval(XPU_PGFUNCTION_ARGS)
 		t -= (t / USECS_PER_DAY) * USECS_PER_DAY;
 		if (t < 0)
 			t += USECS_PER_DAY;
-		result->expr_ops = &xpu_time_ops;
+		result->expr_ops = &xpu_timetz_ops;
 		result->value.time = t;
 		result->value.zone = tval.value.zone;
 	}
@@ -2483,7 +2483,7 @@ pgfn_timetz_mi_interval(XPU_PGFUNCTION_ARGS)
 		t -= (t / USECS_PER_DAY) * USECS_PER_DAY;
 		if (t < 0)
 			t += USECS_PER_DAY;
-		result->expr_ops = &xpu_time_ops;
+		result->expr_ops = &xpu_timetz_ops;
 		result->value.time = t;
 		result->value.zone = tval.value.zone;
 	}
@@ -2597,7 +2597,7 @@ __pg_timestamptz_pl_interval(kern_context *kcxt,
 		result->expr_ops = NULL;
 	else if (TIMESTAMP_NOT_FINITE(tval->value))
 	{
-		result->expr_ops = &xpu_timestamp_ops;
+		result->expr_ops = &xpu_timestamptz_ops;
 		result->value = tval->value;
 	}
 	else
@@ -2669,7 +2669,7 @@ __pg_timestamptz_pl_interval(kern_context *kcxt,
 			STROM_ELOG(kcxt, "timestamp out of range");
 			return false;
 		}
-		result->expr_ops = &xpu_timestamp_ops;
+		result->expr_ops = &xpu_timestamptz_ops;
 		result->value    = ts;
 	}
 	return true;

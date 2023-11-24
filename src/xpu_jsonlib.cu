@@ -450,7 +450,7 @@ extractJsonbItemFromContainer(kern_context *kcxt,
 		}
 		else
 		{
-			memcpy(r->children, data, datalen);
+			memcpy(r->children+1, data, datalen);
 			entry = (entry & JENTRY_TYPEMASK) | datalen;
 		}
 		r->children[0] = entry;

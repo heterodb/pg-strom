@@ -54,6 +54,9 @@ TYPE_ALIAS(cidr,    NULL, inet, NULL)
 #ifndef FUNC_OPCODE
 #define FUNC_OPCODE(SQL_NAME,FUNC_ARGS,FUNC_FLAGS,DEV_NAME,FUNC_COST,EXTENSION)
 #endif
+#ifndef FUNC_ALIAS
+#define FUNC_ALIAS(SQL_NAME,FUNC_ARGS,FUNC_FLAGS,DEV_NAME,FUNC_COST,EXTENSION)
+#endif
 #ifndef DEVONLY_FUNC_OPCODE
 #define DEVONLY_FUNC_OPCODE(RET_TYPE,DEV_NAME,FUNC_ARGS,FUNC_FLAGS,FUNC_COST)
 #endif
@@ -249,11 +252,18 @@ __FUNC_OPCODE(float8um, float8, 1, NULL)
 /* '@' : absolute value operators */
 __FUNC_OPCODE(int1abs, int1, 1, "pg_strom")
 __FUNC_OPCODE(int2abs, int2, 1, NULL)
-__FUNC_OPCODE(int4abs, int2, 1, NULL)
-__FUNC_OPCODE(int8abs, int2, 1, NULL)
+__FUNC_OPCODE(int4abs, int4, 1, NULL)
+__FUNC_OPCODE(int8abs, int8, 1, NULL)
 __FUNC_OPCODE(float2abs, float2, 1, "pg_strom")
 __FUNC_OPCODE(float4abs, float4, 1, NULL)
 __FUNC_OPCODE(float8abs, float8, 1, NULL)
+FUNC_ALIAS(abs, int1,   DEVKIND__ANY, int1abs,   1, "pg_strom")
+FUNC_ALIAS(abs, int2,   DEVKIND__ANY, int2abs,   1, NULL)
+FUNC_ALIAS(abs, int4,   DEVKIND__ANY, int4abs,   1, NULL)
+FUNC_ALIAS(abs, int8,   DEVKIND__ANY, int8abs,   1, NULL)
+FUNC_ALIAS(abs, float2, DEVKIND__ANY, float2abs, 1, "pg_strom")
+FUNC_ALIAS(abs, float4, DEVKIND__ANY, float4abs, 1, NULL)
+FUNC_ALIAS(abs, float8, DEVKIND__ANY, float8abs, 1, NULL)
 
 /* '=' : equal operators */
 __FUNC_OPCODE(booleq,  bool/bool, 1, NULL)
@@ -479,6 +489,7 @@ __FUNC_OPCODE(numeric_mod, numeric/numeric, 30, NULL)
 __FUNC_OPCODE(numeric_uplus, numeric, 30, NULL)
 __FUNC_OPCODE(numeric_uminus, numeric, 30, NULL)	
 __FUNC_OPCODE(numeric_abs, numeric, 30, NULL)
+FUNC_ALIAS(abs, numeric, DEVKIND__ANY, numeric_abs, 30, NULL)
 __FUNC_OPCODE(numeric_eq, numeric/numeric, 30, NULL)
 __FUNC_OPCODE(numeric_ne, numeric/numeric, 30, NULL)
 __FUNC_OPCODE(numeric_lt, numeric/numeric, 30, NULL)
@@ -780,4 +791,5 @@ FUNC_OPCODE(is_contained_2d, box2df/box2df,   DEVKIND__ANY, box2df_within,      
 #undef TYPE_OPCODE
 #undef TYPE_ALIAS
 #undef FUNC_OPCODE
+#undef FUNC_ALIAS
 #undef DEVONLY_FUNC_OPCODE
