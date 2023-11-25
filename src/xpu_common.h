@@ -1136,37 +1136,13 @@ KDS_GET_ROWINDEX(const kern_data_store *kds)
 INLINE_FUNCTION(kern_tupitem *)
 KDS_GET_TUPITEM(kern_data_store *kds, uint32_t kds_index)
 {
-	uint32_t	offset = KDS_GET_ROWINDEX(kds)[kds_index];
+	uint32_t	offset = __volatileRead(KDS_GET_ROWINDEX(kds) + kds_index);
 
 	if (!offset)
 		return NULL;
 	return (kern_tupitem *)((char *)kds
 							+ kds->length
 							- __kds_unpack(offset));
-}
-
-/* kern_tupitem by tuple-offset */
-INLINE_FUNCTION(HeapTupleHeaderData *)
-KDS_FETCH_TUPITEM(kern_data_store *kds,
-				  uint32_t tuple_offset,
-				  ItemPointerData *p_self,
-				  uint32_t *p_len)
-{
-	kern_tupitem   *tupitem;
-
-	Assert(kds->format == KDS_FORMAT_ROW ||
-		   kds->format == KDS_FORMAT_HASH);
-	if (tuple_offset == 0)
-		return NULL;
-	Assert(tuple_offset < kds->length);
-	tupitem = (kern_tupitem *)((char *)kds
-							   + kds->length
-							   - __kds_unpack(tuple_offset));
-	if (p_self)
-		*p_self = tupitem->htup.t_ctid;
-	if (p_len)
-		*p_len = tupitem->t_len;
-	return &tupitem->htup;
 }
 
 INLINE_FUNCTION(uint32_t *)

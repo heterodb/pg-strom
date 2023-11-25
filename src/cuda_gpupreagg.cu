@@ -926,6 +926,7 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 							 kexp_groupby_actions);
 	tupitem->t_len = tupsz;
 	tupitem->rowid = 0;
+	__threadfence();
 	__atomic_write_uint32(KDS_GET_ROWINDEX(kds_final),
 						  __kds_packed((char *)kds_final
 									   + kds_final->length
