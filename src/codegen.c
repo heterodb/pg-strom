@@ -16,7 +16,6 @@
 #define DEVFUNC_INFO_NSLOTS		1024
 static MemoryContext	devinfo_memcxt = NULL;
 static List	   *devtype_info_slot[DEVTYPE_INFO_NSLOTS];
-static List	   *devtype_code_slot[DEVTYPE_INFO_NSLOTS];	/* by TypeOpCode */
 static List	   *devfunc_info_slot[DEVFUNC_INFO_NSLOTS];
 static List	   *devfunc_code_slot[DEVFUNC_INFO_NSLOTS];	/* by FuncOpCode */
 
@@ -366,13 +365,6 @@ pgstrom_devtype_lookup(Oid type_oid)
 	dtype->hash = hash;
 	devtype_info_slot[index] = lappend_cxt(devinfo_memcxt,
 										   devtype_info_slot[index], dtype);
-	if (!dtype->type_is_negative)
-	{
-		hash = hash_any((unsigned char *)&dtype->type_code, sizeof(TypeOpCode));
-		index = hash % DEVTYPE_INFO_NSLOTS;
-		devtype_code_slot[index] = lappend_cxt(devinfo_memcxt,
-											   devtype_code_slot[index], dtype);
-	}
 found:
 	if (dtype->type_is_negative)
 		return NULL;
@@ -380,32 +372,11 @@ found:
 }
 
 /*
- * devtype_lookup_by_opcode
+ * devtype_get_name_by_opcode
  */
-static devtype_info *
-__devtype_lookup_by_opcode(TypeOpCode type_code)
-{
-	Datum		hash;
-	uint32_t	index;
-	ListCell   *lc;
-
-	hash = hash_any((unsigned char *)&type_code, sizeof(TypeOpCode));
-	index = hash % DEVTYPE_INFO_NSLOTS;
-	foreach (lc, devtype_code_slot[index])
-	{
-		devtype_info *dtype = lfirst(lc);
-
-		if (dtype->type_code == type_code)
-			return dtype;
-	}
-	return NULL;
-}
-
 static const char *
 devtype_get_name_by_opcode(TypeOpCode type_code)
 {
-	devtype_info   *dtype;
-
 	switch (type_code)
 	{
 		case TypeOpCode__composite:
@@ -415,19 +386,22 @@ devtype_get_name_by_opcode(TypeOpCode type_code)
 		case TypeOpCode__internal:
 			return "internal";
 		default:
-			dtype = __devtype_lookup_by_opcode(type_code);
-			if (dtype)
-				return dtype->type_name;
+			for (int i=0; devtype_catalog[i].type_name != NULL; i++)
+			{
+				if (devtype_catalog[i].type_code == type_code)
+					return devtype_catalog[i].type_name;
+			}
 			break;
 	}
 	elog(ERROR, "device type opcode:%u not found", type_code);
 }
 
+/*
+ * devtype_get_kvec_sizeof_by_opcode
+ */
 static uint32_t
 devtype_get_kvec_sizeof_by_opcode(TypeOpCode type_code)
 {
-	devtype_info   *dtype;
-
 	switch (type_code)
 	{
 		case TypeOpCode__composite:
@@ -437,9 +411,11 @@ devtype_get_kvec_sizeof_by_opcode(TypeOpCode type_code)
 		case TypeOpCode__internal:
 			return sizeof(kvec_internal_t);
 		default:
-			dtype = __devtype_lookup_by_opcode(type_code);
-			if (dtype)
-				return dtype->kvec_sizeof;
+			for (int i=0; devtype_catalog[i].type_name != NULL; i++)
+			{
+				if (devtype_catalog[i].type_code == type_code)
+					return devtype_catalog[i].kvec_sizeof;
+			}
 			break;
 	}
 	elog(ERROR, "device type opcode:%u not found", type_code);
@@ -4347,7 +4323,6 @@ pgstrom_devcache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 {
 	MemoryContextReset(devinfo_memcxt);
 	memset(devtype_info_slot, 0, sizeof(List *) * DEVTYPE_INFO_NSLOTS);
-	memset(devtype_code_slot, 0, sizeof(List *) * DEVTYPE_INFO_NSLOTS);
 	memset(devfunc_info_slot, 0, sizeof(List *) * DEVFUNC_INFO_NSLOTS);
 	memset(devfunc_code_slot, 0, sizeof(List *) * DEVFUNC_INFO_NSLOTS);
 }
