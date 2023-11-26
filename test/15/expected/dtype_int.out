@@ -1,0 +1,886 @@
+---
+--- Micro test cases for integer operators / functions
+---
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_dtype_int_temp CASCADE;
+CREATE SCHEMA regtest_dtype_int_temp;
+RESET client_min_messages;
+SET search_path = regtest_dtype_int_temp,public;
+CREATE TABLE rt_int (
+  id   int,
+  a    int2,
+  b    int2,
+  c    int4,
+  d    int4,
+  e    int8,
+  f    int8,
+  x    float2,
+  y    float4,
+  z    float8
+);
+SELECT pgstrom.random_setseed(20190608);
+ random_setseed 
+----------------
+ 
+(1 row)
+
+INSERT INTO rt_int (
+  SELECT x, pgstrom.random_int(1,  -3200,  3200),
+            pgstrom.random_int(1,  -3200,  3200),
+            pgstrom.random_int(1, -32000, 32000),
+            pgstrom.random_int(1, -32000, 32000),
+            pgstrom.random_int(1, -32000, 32000),
+            pgstrom.random_int(1, -32000, 32000),
+            pgstrom.random_float(0.5, -32000.0, 32000.0),
+            pgstrom.random_float(0.5, -32000.0, 32000.0),
+            pgstrom.random_float(0.5, -32000.0, 32000.0)
+   FROM generate_series(1,2000) x);
+ALTER TABLE rt_int ADD g int1, ADD h int2, ADD i int4, ADD j int8,  ADD k float2, ADD l float4, ADD m float8, ADD n int1; 
+UPDATE rt_int SET g = (id% 256 -128);
+UPDATE rt_int SET h = g, i = g, j = g, k = g, l = g, m = g, n = g;
+VACUUM ANALYZE;
+-- force to use GpuScan, instead of SeqScan
+SET enable_seqscan = off;
+-- not to print kernel source code
+SET pg_strom.debug_kernel_source = off;
+-- cast operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint, g::smallint
+  INTO test01g
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+                                                                                                                                                                                                                                                                                                                                                                                           QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                           
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((c)::smallint), ((e)::smallint), ((x)::smallint), ((y)::smallint), ((z)::smallint), ((g)::smallint)
+   GPU Projection: id, (c)::smallint, (e)::smallint, (x)::smallint, (y)::smallint, (z)::smallint, (g)::smallint
+   GPU Scan Quals: ((x >= '-15000'::double precision) AND (x <= '15000'::double precision)) [rows: 2000 -> 917]
+   KVars-Slot: <slot=0, type='float2', expr='x'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int2', expr='(c)::smallint'>, <slot=3, type='int4', expr='c'>, <slot=4, type='int2', expr='(e)::smallint'>, <slot=5, type='int8', expr='e'>, <slot=6, type='int2', expr='(x)::smallint'>, <slot=7, type='int2', expr='(y)::smallint'>, <slot=8, type='float4', expr='y'>, <slot=9, type='int2', expr='(z)::smallint'>, <slot=10, type='float8', expr='z'>, <slot=11, type='int2', expr='(g)::smallint'>, <slot=12, type='int1', expr='g'>
+   KVecs-Buffer: nbytes: 77824, ndims: 2, items=[kvec0=<0x0000-17ff, type='float2', expr='x'>, kvec1=<0x1800-3fff, type='int4', expr='id'>, kvec2=<0x4000-67ff, type='int4', expr='c'>, kvec3=<0x6800-afff, type='int8', expr='e'>, kvec4=<0xb000-d7ff, type='float4', expr='y'>, kvec5=<0xd800-11fff, type='float8', expr='z'>, kvec6=<0x12000-12fff, type='int1', expr='g'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='int4' resno=4(c)>, <slot=5, type='int8' resno=6(e)>, <slot=0, type='float2' resno=8(x)>, <slot=8, type='float4' resno=9(y)>, <slot=10, type='float8' resno=10(z)>, <slot=12, type='int1' resno=11(g)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-17ff, type='float2', expr='x'>, <slot=1, offset=0x1800-3fff, type='int4', expr='id'>, <slot=3, offset=0x4000-67ff, type='int4', expr='c'>, <slot=5, offset=0x6800-afff, type='int8', expr='e'>, <slot=8, offset=0xb000-d7ff, type='float4', expr='y'>, <slot=10, offset=0xd800-11fff, type='float8', expr='z'>, <slot=12, offset=0x12000-12fff, type='int1', expr='g'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float28ge args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='-15000'}]}, {Func(bool)::float28le args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='15000'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,4,6,7,9,11> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x1800-4000, expr='id'}}, {SaveExpr: <slot=2, type='int2'> arg={Func(int2)::int2 arg={Var(int4): kvec=0x4000-6800, expr='c'}}}, {SaveExpr: <slot=4, type='int2'> arg={Func(int2)::int2 arg={Var(int8): kvec=0x6800-b000, expr='e'}}}, {SaveExpr: <slot=6, type='int2'> arg={Func(int2)::int2 arg={Var(float2): kvec=0x0000-1800, expr='x'}}}, {SaveExpr: <slot=7, type='int2'> arg={Func(int2)::int2 arg={Var(float4): kvec=0xb000-d800, expr='y'}}}, {SaveExpr: <slot=9, type='int2'> arg={Func(int2)::int2 arg={Var(float8): kvec=0xd800-12000, expr='z'}}}, {SaveExpr: <slot=11, type='int2'> arg={Func(int2)::int2 arg={Var(int1): kvec=0x12000-13000, expr='g'}}}]}
+(10 rows)
+
+SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint, g::smallint
+  INTO test01g
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+SET pg_strom.enabled = off;
+SELECT id, c::smallint, e::smallint, x::smallint, y::smallint, z::smallint, g::smallint
+  INTO test01p
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+(SELECT * FROM test01g EXCEPT ALL SELECT * FROM test01p) order by id;
+ id | c | e | x | y | z | g 
+----+---+---+---+---+---+---
+(0 rows)
+
+(SELECT * FROM test01p EXCEPT ALL SELECT * FROM test01g) order by id;
+ id | c | e | x | y | z | g 
+----+---+---+---+---+---+---
+(0 rows)
+
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a::int, e::int, x::int, y::int, z::int, g::int
+  INTO test02g
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+                                                                                                                                                                                                                                                                                                                                                                                           QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                           
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a)::integer), ((e)::integer), ((x)::integer), ((y)::integer), ((z)::integer), ((g)::integer)
+   GPU Projection: id, (a)::integer, (e)::integer, (x)::integer, (y)::integer, (z)::integer, (g)::integer
+   GPU Scan Quals: ((x >= '-15000'::double precision) AND (x <= '15000'::double precision)) [rows: 2000 -> 917]
+   KVars-Slot: <slot=0, type='float2', expr='x'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int4', expr='(a)::integer'>, <slot=3, type='int2', expr='a'>, <slot=4, type='int4', expr='(e)::integer'>, <slot=5, type='int8', expr='e'>, <slot=6, type='int4', expr='(x)::integer'>, <slot=7, type='int4', expr='(y)::integer'>, <slot=8, type='float4', expr='y'>, <slot=9, type='int4', expr='(z)::integer'>, <slot=10, type='float8', expr='z'>, <slot=11, type='int4', expr='(g)::integer'>, <slot=12, type='int1', expr='g'>
+   KVecs-Buffer: nbytes: 73728, ndims: 2, items=[kvec0=<0x0000-17ff, type='float2', expr='x'>, kvec1=<0x1800-3fff, type='int4', expr='id'>, kvec2=<0x4000-57ff, type='int2', expr='a'>, kvec3=<0x5800-9fff, type='int8', expr='e'>, kvec4=<0xa000-c7ff, type='float4', expr='y'>, kvec5=<0xc800-10fff, type='float8', expr='z'>, kvec6=<0x11000-11fff, type='int1', expr='g'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='int2' resno=2(a)>, <slot=5, type='int8' resno=6(e)>, <slot=0, type='float2' resno=8(x)>, <slot=8, type='float4' resno=9(y)>, <slot=10, type='float8' resno=10(z)>, <slot=12, type='int1' resno=11(g)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-17ff, type='float2', expr='x'>, <slot=1, offset=0x1800-3fff, type='int4', expr='id'>, <slot=3, offset=0x4000-57ff, type='int2', expr='a'>, <slot=5, offset=0x5800-9fff, type='int8', expr='e'>, <slot=8, offset=0xa000-c7ff, type='float4', expr='y'>, <slot=10, offset=0xc800-10fff, type='float8', expr='z'>, <slot=12, offset=0x11000-11fff, type='int1', expr='g'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float28ge args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='-15000'}]}, {Func(bool)::float28le args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='15000'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,4,6,7,9,11> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x1800-4000, expr='id'}}, {SaveExpr: <slot=2, type='int4'> arg={Func(int4)::int4 arg={Var(int2): kvec=0x4000-5800, expr='a'}}}, {SaveExpr: <slot=4, type='int4'> arg={Func(int4)::int4 arg={Var(int8): kvec=0x5800-a000, expr='e'}}}, {SaveExpr: <slot=6, type='int4'> arg={Func(int4)::int4 arg={Var(float2): kvec=0x0000-1800, expr='x'}}}, {SaveExpr: <slot=7, type='int4'> arg={Func(int4)::int4 arg={Var(float4): kvec=0xa000-c800, expr='y'}}}, {SaveExpr: <slot=9, type='int4'> arg={Func(int4)::int4 arg={Var(float8): kvec=0xc800-11000, expr='z'}}}, {SaveExpr: <slot=11, type='int4'> arg={Func(int4)::int4 arg={Var(int1): kvec=0x11000-12000, expr='g'}}}]}
+(10 rows)
+
+SELECT id, a::int, e::int, x::int, y::int, z::int, g::int
+  INTO test02g
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+SET pg_strom.enabled = off;
+SELECT id, a::int, e::int, x::int, y::int, z::int, g::int
+  INTO test02p
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+(SELECT * FROM test02g EXCEPT ALL SELECT * FROM test02p);
+ id | a | e | x | y | z | g 
+----+---+---+---+---+---+---
+(0 rows)
+
+(SELECT * FROM test02p EXCEPT ALL SELECT * FROM test02g);
+ id | a | e | x | y | z | g 
+----+---+---+---+---+---+---
+(0 rows)
+
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint, g::bigint
+  INTO test03g
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+                                                                                                                                                                                                                                                                                                                                                                                          QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                          
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a)::bigint), ((c)::bigint), ((x)::bigint), ((y)::bigint), ((z)::bigint), ((g)::bigint)
+   GPU Projection: id, (a)::bigint, (c)::bigint, (x)::bigint, (y)::bigint, (z)::bigint, (g)::bigint
+   GPU Scan Quals: ((x >= '-15000'::double precision) AND (x <= '15000'::double precision)) [rows: 2000 -> 917]
+   KVars-Slot: <slot=0, type='float2', expr='x'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int8', expr='(a)::bigint'>, <slot=3, type='int2', expr='a'>, <slot=4, type='int8', expr='(c)::bigint'>, <slot=5, type='int4', expr='c'>, <slot=6, type='int8', expr='(x)::bigint'>, <slot=7, type='int8', expr='(y)::bigint'>, <slot=8, type='float4', expr='y'>, <slot=9, type='int8', expr='(z)::bigint'>, <slot=10, type='float8', expr='z'>, <slot=11, type='int8', expr='(g)::bigint'>, <slot=12, type='int1', expr='g'>
+   KVecs-Buffer: nbytes: 65536, ndims: 2, items=[kvec0=<0x0000-17ff, type='float2', expr='x'>, kvec1=<0x1800-3fff, type='int4', expr='id'>, kvec2=<0x4000-57ff, type='int2', expr='a'>, kvec3=<0x5800-7fff, type='int4', expr='c'>, kvec4=<0x8000-a7ff, type='float4', expr='y'>, kvec5=<0xa800-efff, type='float8', expr='z'>, kvec6=<0xf000-ffff, type='int1', expr='g'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='int2' resno=2(a)>, <slot=5, type='int4' resno=4(c)>, <slot=0, type='float2' resno=8(x)>, <slot=8, type='float4' resno=9(y)>, <slot=10, type='float8' resno=10(z)>, <slot=12, type='int1' resno=11(g)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-17ff, type='float2', expr='x'>, <slot=1, offset=0x1800-3fff, type='int4', expr='id'>, <slot=3, offset=0x4000-57ff, type='int2', expr='a'>, <slot=5, offset=0x5800-7fff, type='int4', expr='c'>, <slot=8, offset=0x8000-a7ff, type='float4', expr='y'>, <slot=10, offset=0xa800-efff, type='float8', expr='z'>, <slot=12, offset=0xf000-ffff, type='int1', expr='g'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float28ge args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='-15000'}]}, {Func(bool)::float28le args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='15000'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,4,6,7,9,11> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x1800-4000, expr='id'}}, {SaveExpr: <slot=2, type='int8'> arg={Func(int8)::int8 arg={Var(int2): kvec=0x4000-5800, expr='a'}}}, {SaveExpr: <slot=4, type='int8'> arg={Func(int8)::int8 arg={Var(int4): kvec=0x5800-8000, expr='c'}}}, {SaveExpr: <slot=6, type='int8'> arg={Func(int8)::int8 arg={Var(float2): kvec=0x0000-1800, expr='x'}}}, {SaveExpr: <slot=7, type='int8'> arg={Func(int8)::int8 arg={Var(float4): kvec=0x8000-a800, expr='y'}}}, {SaveExpr: <slot=9, type='int8'> arg={Func(int8)::int8 arg={Var(float8): kvec=0xa800-f000, expr='z'}}}, {SaveExpr: <slot=11, type='int8'> arg={Func(int8)::int8 arg={Var(int1): kvec=0xf000-10000, expr='g'}}}]}
+(10 rows)
+
+SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint, g::bigint
+  INTO test03g
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+SET pg_strom.enabled = off;
+SELECT id, a::bigint, c::bigint, x::bigint, y::bigint, z::bigint, g::bigint
+  INTO test03p
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+(SELECT * FROM test03g EXCEPT ALL SELECT * FROM test03p);
+ id | a | c | x | y | z | g 
+----+---+---+---+---+---+---
+(0 rows)
+
+(SELECT * FROM test03p EXCEPT ALL SELECT * FROM test03g);
+ id | a | c | x | y | z | g 
+----+---+---+---+---+---+---
+(0 rows)
+
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, h::int1, i::int1, j::int1, k::int1, l::int1, m::int1
+  INTO test04g
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+                                                                                                                                                                                                                                                                                                                                                                                            QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                            
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((h)::int1), ((i)::int1), ((j)::int1), ((k)::int1), ((l)::int1), ((m)::int1)
+   GPU Projection: id, (h)::int1, (i)::int1, (j)::int1, (k)::int1, (l)::int1, (m)::int1
+   GPU Scan Quals: ((x >= '-15000'::double precision) AND (x <= '15000'::double precision)) [rows: 2000 -> 917]
+   KVars-Slot: <slot=0, type='float2', expr='x'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int1', expr='(h)::int1'>, <slot=3, type='int2', expr='h'>, <slot=4, type='int1', expr='(i)::int1'>, <slot=5, type='int4', expr='i'>, <slot=6, type='int1', expr='(j)::int1'>, <slot=7, type='int8', expr='j'>, <slot=8, type='int1', expr='(k)::int1'>, <slot=9, type='float2', expr='k'>, <slot=10, type='int1', expr='(l)::int1'>, <slot=11, type='float4', expr='l'>, <slot=12, type='int1', expr='(m)::int1'>, <slot=13, type='float8', expr='m'>
+   KVecs-Buffer: nbytes: 86016, ndims: 2, items=[kvec0=<0x0000-17ff, type='float2', expr='x'>, kvec1=<0x1800-3fff, type='int4', expr='id'>, kvec2=<0x4000-57ff, type='int2', expr='h'>, kvec3=<0x5800-7fff, type='int4', expr='i'>, kvec4=<0x8000-c7ff, type='int8', expr='j'>, kvec5=<0xc800-dfff, type='float2', expr='k'>, kvec6=<0xe000-107ff, type='float4', expr='l'>, kvec7=<0x10800-14fff, type='float8', expr='m'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=0, type='float2' resno=8(x)>, <slot=3, type='int2' resno=12(h)>, <slot=5, type='int4' resno=13(i)>, <slot=7, type='int8' resno=14(j)>, <slot=9, type='float2' resno=15(k)>, <slot=11, type='float4' resno=16(l)>, <slot=13, type='float8' resno=17(m)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1800-3fff, type='int4', expr='id'>, <slot=3, offset=0x4000-57ff, type='int2', expr='h'>, <slot=5, offset=0x5800-7fff, type='int4', expr='i'>, <slot=7, offset=0x8000-c7ff, type='int8', expr='j'>, <slot=9, offset=0xc800-dfff, type='float2', expr='k'>, <slot=11, offset=0xe000-107ff, type='float4', expr='l'>, <slot=13, offset=0x10800-14fff, type='float8', expr='m'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float28ge args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='-15000'}]}, {Func(bool)::float28le args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='15000'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,4,6,8,10,12> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x1800-4000, expr='id'}}, {SaveExpr: <slot=2, type='int1'> arg={Func(int1)::int1 arg={Var(int2): kvec=0x4000-5800, expr='h'}}}, {SaveExpr: <slot=4, type='int1'> arg={Func(int1)::int1 arg={Var(int4): kvec=0x5800-8000, expr='i'}}}, {SaveExpr: <slot=6, type='int1'> arg={Func(int1)::int1 arg={Var(int8): kvec=0x8000-c800, expr='j'}}}, {SaveExpr: <slot=8, type='int1'> arg={Func(int1)::int1 arg={Var(float2): kvec=0xc800-e000, expr='k'}}}, {SaveExpr: <slot=10, type='int1'> arg={Func(int1)::int1 arg={Var(float4): kvec=0xe000-10800, expr='l'}}}, {SaveExpr: <slot=12, type='int1'> arg={Func(int1)::int1 arg={Var(float8): kvec=0x10800-15000, expr='m'}}}]}
+(10 rows)
+
+SELECT id, h::int1, i::int1, j::int1, k::int1, l::int1, m::int1
+  INTO test04g
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+SET pg_strom.enabled = off;
+SELECT id, h::int1, i::int1, j::int1, k::int1, l::int1, m::int1
+  INTO test04p
+  FROM rt_int
+ WHERE x between -15000.0 AND 15000.0;
+(SELECT * FROM test04g EXCEPT ALL SELECT * FROM test04p);
+ id | h | i | j | k | l | m 
+----+---+---+---+---+---+---
+(0 rows)
+
+(SELECT * FROM test04p EXCEPT ALL SELECT * FROM test04g);
+ id | h | i | j | k | l | m 
+----+---+---+---+---+---+---
+(0 rows)
+
+-- '+' operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a+b v1, a+c v2, b+e v3, 
+           c+b v4, c+d v5, c+e v6,
+           e+a v7, e+d v8, e+f v9,
+           a+g v10, c+g v11, e+g v12,
+           CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
+  INTO test10g
+  FROM rt_int
+ WHERE x >= 0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a + b)), ((a + c)), ((b + e)), ((c + b)), ((c + d)), ((c + e)), ((e + a)), ((e + d)), ((e + f)), ((a + g)), ((c + g)), ((e + g)), (CASE WHEN ((g >= '-64'::integer) AND (g <= 63)) THEN ((g + n))::integer ELSE 0 END)
+   GPU Projection: id, (a + b), (a + c), (b + e), (c + b), (c + d), (c + e), (e + a), (e + d), (e + f), (a + g), (c + g), (e + g), CASE WHEN ((g >= '-64'::integer) AND (g <= 63)) THEN ((g + n))::integer ELSE 0 END
+   GPU Scan Quals: (x >= '0'::double precision) [rows: 2000 -> 996]
+   KVars-Slot: <slot=0, type='float2', expr='x'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int2', expr='(a + b)'>, <slot=3, type='int2', expr='a'>, <slot=4, type='int2', expr='b'>, <slot=5, type='int4', expr='(a + c)'>, <slot=6, type='int4', expr='c'>, <slot=7, type='int8', expr='(b + e)'>, <slot=8, type='int8', expr='e'>, <slot=9, type='int4', expr='(c + b)'>, <slot=10, type='int4', expr='(c + d)'>, <slot=11, type='int4', expr='d'>, <slot=12, type='int8', expr='(c + e)'>, <slot=13, type='int8', expr='(e + a)'>, <slot=14, type='int8', expr='(e + d)'>, <slot=15, type='int8', expr='(e + f)'>, <slot=16, type='int8', expr='f'>, <slot=17, type='int2', expr='(a + g)'>, <slot=18, type='int1', expr='g'>, <slot=19, type='int4', expr='(c + g)'>, <slot=20, type='int8', expr='(e + g)'>, <slot=21, type='int4', expr='CASE WHEN ((g >= '-64'::integer) AND (g <= 63)) THEN ((g + n))::integer ELSE 0 END'>, <slot=22, type='int1', expr='n'>
+   KVecs-Buffer: nbytes: 94208, ndims: 2, items=[kvec0=<0x0000-17ff, type='float2', expr='x'>, kvec1=<0x1800-3fff, type='int4', expr='id'>, kvec2=<0x4000-57ff, type='int2', expr='a'>, kvec3=<0x5800-6fff, type='int2', expr='b'>, kvec4=<0x7000-97ff, type='int4', expr='c'>, kvec5=<0x9800-dfff, type='int8', expr='e'>, kvec6=<0xe000-107ff, type='int4', expr='d'>, kvec7=<0x10800-14fff, type='int8', expr='f'>, kvec8=<0x15000-15fff, type='int1', expr='g'>, kvec9=<0x16000-16fff, type='int1', expr='n'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='int2' resno=2(a)>, <slot=4, type='int2' resno=3(b)>, <slot=6, type='int4' resno=4(c)>, <slot=11, type='int4' resno=5(d)>, <slot=8, type='int8' resno=6(e)>, <slot=16, type='int8' resno=7(f)>, <slot=0, type='float2' resno=8(x)>, <slot=18, type='int1' resno=11(g)>, <slot=22, type='int1' resno=18(n)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1800-3fff, type='int4', expr='id'>, <slot=3, offset=0x4000-57ff, type='int2', expr='a'>, <slot=4, offset=0x5800-6fff, type='int2', expr='b'>, <slot=6, offset=0x7000-97ff, type='int4', expr='c'>, <slot=8, offset=0x9800-dfff, type='int8', expr='e'>, <slot=11, offset=0xe000-107ff, type='int4', expr='d'>, <slot=16, offset=0x10800-14fff, type='int8', expr='f'>, <slot=18, offset=0x15000-15fff, type='int1', expr='g'>, <slot=22, offset=0x16000-16fff, type='int1', expr='n'>]}}}
+   Scan Quals OpCode: {Func(bool)::float28ge args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='0'}]}
+   Projection OpCode: {Projection: layout=<1,2,5,7,9,10,12,13,14,15,17,19,20,21> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x1800-4000, expr='id'}}, {SaveExpr: <slot=2, type='int2'> arg={Func(int2)::int2pl args=[{Var(int2): kvec=0x4000-5800, expr='a'}, {Var(int2): kvec=0x5800-7000, expr='b'}]}}, {SaveExpr: <slot=5, type='int4'> arg={Func(int4)::int24pl args=[{Var(int2): kvec=0x4000-5800, expr='a'}, {Var(int4): kvec=0x7000-9800, expr='c'}]}}, {SaveExpr: <slot=7, type='int8'> arg={Func(int8)::int28pl args=[{Var(int2): kvec=0x5800-7000, expr='b'}, {Var(int8): kvec=0x9800-e000, expr='e'}]}}, {SaveExpr: <slot=9, type='int4'> arg={Func(int4)::int42pl args=[{Var(int4): kvec=0x7000-9800, expr='c'}, {Var(int2): kvec=0x5800-7000, expr='b'}]}}, {SaveExpr: <slot=10, type='int4'> arg={Func(int4)::int4pl args=[{Var(int4): kvec=0x7000-9800, expr='c'}, {Var(int4): kvec=0xe000-10800, expr='d'}]}}, {SaveExpr: <slot=12, type='int8'> arg={Func(int8)::int48pl args=[{Var(int4): kvec=0x7000-9800, expr='c'}, {Var(int8): kvec=0x9800-e000, expr='e'}]}}, {SaveExpr: <slot=13, type='int8'> arg={Func(int8)::int82pl args=[{Var(int8): kvec=0x9800-e000, expr='e'}, {Var(int2): kvec=0x4000-5800, expr='a'}]}}, {SaveExpr: <slot=14, type='int8'> arg={Func(int8)::int84pl args=[{Var(int8): kvec=0x9800-e000, expr='e'}, {Var(int4): kvec=0xe000-10800, expr='d'}]}}, {SaveExpr: <slot=15, type='int8'> arg={Func(int8)::int8pl args=[{Var(int8): kvec=0x9800-e000, expr='e'}, {Var(int8): kvec=0x10800-15000, expr='f'}]}}, {SaveExpr: <slot=17, type='int2'> arg={Func(int2)::int21pl args=[{Var(int2): kvec=0x4000-5800, expr='a'}, {Var(int1): kvec=0x15000-16000, expr='g'}]}}, {SaveExpr: <slot=19, type='int4'> arg={Func(int4)::int41pl args=[{Var(int4): kvec=0x7000-9800, expr='c'}, {Var(int1): kvec=0x15000-16000, expr='g'}]}}, {SaveExpr: <slot=20, type='int8'> arg={Func(int8)::int81pl args=[{Var(int8): kvec=0x9800-e000, expr='e'}, {Var(int1): kvec=0x15000-16000, expr='g'}]}}, {SaveExpr: <slot=21, type='int4'> arg={Case: <when={Bool::AND args=[{Func(bool)::int14ge args=[{Var(int1): kvec=0x15000-16000, expr='g'}, {Const(int4): value='-64'}]}, {Func(bool)::int14le args=[{Var(int1): kvec=0x15000-16000, expr='g'}, {Const(int4): value='63'}]}]}, then={Func(int4)::int4 arg={Func(int1)::int1pl args=[{Var(int1): kvec=0x15000-16000, expr='g'}, {Var(int1): kvec=0x16000-17000, expr='n'}]}}> <else={Const(int4): value='0'}>}}]}
+(10 rows)
+
+SELECT id, a+b v1, a+c v2, b+e v3,
+           c+b v4, c+d v5, c+e v6,
+           e+a v7, e+d v8, e+f v9,
+           a+g v10, c+g v11, e+g v12,
+           CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
+  INTO test10g
+  FROM rt_int
+ WHERE x >= 0;
+SET pg_strom.enabled = off;
+SELECT id, a+b v1, a+c v2, b+e v3,
+           c+b v4, c+d v5, c+e v6,
+           e+a v7, e+d v8, e+f v9,
+           a+g v10, c+g v11, e+g v12,
+           CASE WHEN g BETWEEN -64 AND 63 THEN g+n ELSE 0 END v13
+  INTO test10p
+  FROM rt_int
+ WHERE x >= 0;
+(SELECT * FROM test10g EXCEPT ALL SELECT * FROM test10p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test10p EXCEPT ALL SELECT * FROM test10g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+-- '-' operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a-b v1, a-c v2, b-e v3,
+           c-b v4, c-d v5, c-e v6,
+           e-a v7, e-d v8, e-f v9,
+           a-g v10, c-g v11, e-g v12, g-n v13
+  INTO test11g
+  FROM rt_int
+ WHERE x <= 0.0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a - b)), ((a - c)), ((b - e)), ((c - b)), ((c - d)), ((c - e)), ((e - a)), ((e - d)), ((e - f)), ((a - g)), ((c - g)), ((e - g)), ((g - n))
+   GPU Projection: id, (a - b), (a - c), (b - e), (c - b), (c - d), (c - e), (e - a), (e - d), (e - f), (a - g), (c - g), (e - g), (g - n)
+   GPU Scan Quals: (x <= '0'::double precision) [rows: 2000 -> 994]
+   KVars-Slot: <slot=0, type='float2', expr='x'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int2', expr='(a - b)'>, <slot=3, type='int2', expr='a'>, <slot=4, type='int2', expr='b'>, <slot=5, type='int4', expr='(a - c)'>, <slot=6, type='int4', expr='c'>, <slot=7, type='int8', expr='(b - e)'>, <slot=8, type='int8', expr='e'>, <slot=9, type='int4', expr='(c - b)'>, <slot=10, type='int4', expr='(c - d)'>, <slot=11, type='int4', expr='d'>, <slot=12, type='int8', expr='(c - e)'>, <slot=13, type='int8', expr='(e - a)'>, <slot=14, type='int8', expr='(e - d)'>, <slot=15, type='int8', expr='(e - f)'>, <slot=16, type='int8', expr='f'>, <slot=17, type='int2', expr='(a - g)'>, <slot=18, type='int1', expr='g'>, <slot=19, type='int4', expr='(c - g)'>, <slot=20, type='int8', expr='(e - g)'>, <slot=21, type='int1', expr='(g - n)'>, <slot=22, type='int1', expr='n'>
+   KVecs-Buffer: nbytes: 94208, ndims: 2, items=[kvec0=<0x0000-17ff, type='float2', expr='x'>, kvec1=<0x1800-3fff, type='int4', expr='id'>, kvec2=<0x4000-57ff, type='int2', expr='a'>, kvec3=<0x5800-6fff, type='int2', expr='b'>, kvec4=<0x7000-97ff, type='int4', expr='c'>, kvec5=<0x9800-dfff, type='int8', expr='e'>, kvec6=<0xe000-107ff, type='int4', expr='d'>, kvec7=<0x10800-14fff, type='int8', expr='f'>, kvec8=<0x15000-15fff, type='int1', expr='g'>, kvec9=<0x16000-16fff, type='int1', expr='n'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='int2' resno=2(a)>, <slot=4, type='int2' resno=3(b)>, <slot=6, type='int4' resno=4(c)>, <slot=11, type='int4' resno=5(d)>, <slot=8, type='int8' resno=6(e)>, <slot=16, type='int8' resno=7(f)>, <slot=0, type='float2' resno=8(x)>, <slot=18, type='int1' resno=11(g)>, <slot=22, type='int1' resno=18(n)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1800-3fff, type='int4', expr='id'>, <slot=3, offset=0x4000-57ff, type='int2', expr='a'>, <slot=4, offset=0x5800-6fff, type='int2', expr='b'>, <slot=6, offset=0x7000-97ff, type='int4', expr='c'>, <slot=8, offset=0x9800-dfff, type='int8', expr='e'>, <slot=11, offset=0xe000-107ff, type='int4', expr='d'>, <slot=16, offset=0x10800-14fff, type='int8', expr='f'>, <slot=18, offset=0x15000-15fff, type='int1', expr='g'>, <slot=22, offset=0x16000-16fff, type='int1', expr='n'>]}}}
+   Scan Quals OpCode: {Func(bool)::float28le args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='0'}]}
+   Projection OpCode: {Projection: layout=<1,2,5,7,9,10,12,13,14,15,17,19,20,21> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x1800-4000, expr='id'}}, {SaveExpr: <slot=2, type='int2'> arg={Func(int2)::int2mi args=[{Var(int2): kvec=0x4000-5800, expr='a'}, {Var(int2): kvec=0x5800-7000, expr='b'}]}}, {SaveExpr: <slot=5, type='int4'> arg={Func(int4)::int24mi args=[{Var(int2): kvec=0x4000-5800, expr='a'}, {Var(int4): kvec=0x7000-9800, expr='c'}]}}, {SaveExpr: <slot=7, type='int8'> arg={Func(int8)::int28mi args=[{Var(int2): kvec=0x5800-7000, expr='b'}, {Var(int8): kvec=0x9800-e000, expr='e'}]}}, {SaveExpr: <slot=9, type='int4'> arg={Func(int4)::int42mi args=[{Var(int4): kvec=0x7000-9800, expr='c'}, {Var(int2): kvec=0x5800-7000, expr='b'}]}}, {SaveExpr: <slot=10, type='int4'> arg={Func(int4)::int4mi args=[{Var(int4): kvec=0x7000-9800, expr='c'}, {Var(int4): kvec=0xe000-10800, expr='d'}]}}, {SaveExpr: <slot=12, type='int8'> arg={Func(int8)::int48mi args=[{Var(int4): kvec=0x7000-9800, expr='c'}, {Var(int8): kvec=0x9800-e000, expr='e'}]}}, {SaveExpr: <slot=13, type='int8'> arg={Func(int8)::int82mi args=[{Var(int8): kvec=0x9800-e000, expr='e'}, {Var(int2): kvec=0x4000-5800, expr='a'}]}}, {SaveExpr: <slot=14, type='int8'> arg={Func(int8)::int84mi args=[{Var(int8): kvec=0x9800-e000, expr='e'}, {Var(int4): kvec=0xe000-10800, expr='d'}]}}, {SaveExpr: <slot=15, type='int8'> arg={Func(int8)::int8mi args=[{Var(int8): kvec=0x9800-e000, expr='e'}, {Var(int8): kvec=0x10800-15000, expr='f'}]}}, {SaveExpr: <slot=17, type='int2'> arg={Func(int2)::int21mi args=[{Var(int2): kvec=0x4000-5800, expr='a'}, {Var(int1): kvec=0x15000-16000, expr='g'}]}}, {SaveExpr: <slot=19, type='int4'> arg={Func(int4)::int41mi args=[{Var(int4): kvec=0x7000-9800, expr='c'}, {Var(int1): kvec=0x15000-16000, expr='g'}]}}, {SaveExpr: <slot=20, type='int8'> arg={Func(int8)::int81mi args=[{Var(int8): kvec=0x9800-e000, expr='e'}, {Var(int1): kvec=0x15000-16000, expr='g'}]}}, {SaveExpr: <slot=21, type='int1'> arg={Func(int1)::int1mi args=[{Var(int1): kvec=0x15000-16000, expr='g'}, {Var(int1): kvec=0x16000-17000, expr='n'}]}}]}
+(10 rows)
+
+SELECT id, a-b v1, a-c v2, b-e v3,
+           c-b v4, c-d v5, c-e v6,
+           e-a v7, e-d v8, e-f v9,
+           a-g v10, c-g v11, e-g v12, g-n v13
+  INTO test11g
+  FROM rt_int
+ WHERE x <= 0.0;
+SET pg_strom.enabled = off;
+SELECT id, a-b v1, a-c v2, b-e v3,
+           c-b v4, c-d v5, c-e v6,
+           e-a v7, e-d v8, e-f v9,
+           a-g v10, c-g v11, e-g v12, g-n v13
+  INTO test11p
+  FROM rt_int
+ WHERE x <= 0.0;
+(SELECT * FROM test11g EXCEPT ALL SELECT * FROM test11p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test11p EXCEPT ALL SELECT * FROM test11g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+-- '*' operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
+           c*b v4, c*d v5, c*e v6,
+           e*b v7, e*d v8, e*f v9,
+           a * (g %10) v10, c*g v11, e*g v12, 
+           CASE WHEN abs(g) < 12 THEN g*n ELSE 0 END v15
+  INTO test12g
+  FROM rt_int
+ WHERE x BETWEEN -10000.0 AND 20000.0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a * ((b)::integer % 10))), ((a * c)), ((a * e)), ((c * b)), ((c * d)), ((c * e)), ((e * b)), ((e * d)), ((e * f)), ((a * ((g)::integer % 10))), ((c * g)), ((e * g)), (CASE WHEN (abs((g)::double precision) < '12'::double precision) THEN ((g * n))::integer ELSE 0 END)
+   GPU Projection: id, (a * ((b)::integer % 10)), (a * c), (a * e), (c * b), (c * d), (c * e), (e * b), (e * d), (e * f), (a * ((g)::integer % 10)), (c * g), (e * g), CASE WHEN (abs((g)::double precision) < '12'::double precision) THEN ((g * n))::integer ELSE 0 END
+   GPU Scan Quals: ((x >= '-10000'::double precision) AND (x <= '20000'::double precision)) [rows: 2000 -> 914]
+   KVars-Slot: <slot=0, type='float2', expr='x'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int4', expr='(a * ((b)::integer % 10))'>, <slot=3, type='int2', expr='a'>, <slot=4, type='int2', expr='b'>, <slot=5, type='int4', expr='(a * c)'>, <slot=6, type='int4', expr='c'>, <slot=7, type='int8', expr='(a * e)'>, <slot=8, type='int8', expr='e'>, <slot=9, type='int4', expr='(c * b)'>, <slot=10, type='int4', expr='(c * d)'>, <slot=11, type='int4', expr='d'>, <slot=12, type='int8', expr='(c * e)'>, <slot=13, type='int8', expr='(e * b)'>, <slot=14, type='int8', expr='(e * d)'>, <slot=15, type='int8', expr='(e * f)'>, <slot=16, type='int8', expr='f'>, <slot=17, type='int4', expr='(a * ((g)::integer % 10))'>, <slot=18, type='int1', expr='g'>, <slot=19, type='int4', expr='(c * g)'>, <slot=20, type='int8', expr='(e * g)'>, <slot=21, type='int4', expr='CASE WHEN (abs((g)::double precision) < '12'::double precision) THEN ((g * n))::integer ELSE 0 END'>, <slot=22, type='int1', expr='n'>
+   KVecs-Buffer: nbytes: 94208, ndims: 2, items=[kvec0=<0x0000-17ff, type='float2', expr='x'>, kvec1=<0x1800-3fff, type='int4', expr='id'>, kvec2=<0x4000-57ff, type='int2', expr='a'>, kvec3=<0x5800-6fff, type='int2', expr='b'>, kvec4=<0x7000-97ff, type='int4', expr='c'>, kvec5=<0x9800-dfff, type='int8', expr='e'>, kvec6=<0xe000-107ff, type='int4', expr='d'>, kvec7=<0x10800-14fff, type='int8', expr='f'>, kvec8=<0x15000-15fff, type='int1', expr='g'>, kvec9=<0x16000-16fff, type='int1', expr='n'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='int2' resno=2(a)>, <slot=4, type='int2' resno=3(b)>, <slot=6, type='int4' resno=4(c)>, <slot=11, type='int4' resno=5(d)>, <slot=8, type='int8' resno=6(e)>, <slot=16, type='int8' resno=7(f)>, <slot=0, type='float2' resno=8(x)>, <slot=18, type='int1' resno=11(g)>, <slot=22, type='int1' resno=18(n)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1800-3fff, type='int4', expr='id'>, <slot=3, offset=0x4000-57ff, type='int2', expr='a'>, <slot=4, offset=0x5800-6fff, type='int2', expr='b'>, <slot=6, offset=0x7000-97ff, type='int4', expr='c'>, <slot=8, offset=0x9800-dfff, type='int8', expr='e'>, <slot=11, offset=0xe000-107ff, type='int4', expr='d'>, <slot=16, offset=0x10800-14fff, type='int8', expr='f'>, <slot=18, offset=0x15000-15fff, type='int1', expr='g'>, <slot=22, offset=0x16000-16fff, type='int1', expr='n'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float28ge args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='-10000'}]}, {Func(bool)::float28le args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='20000'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,5,7,9,10,12,13,14,15,17,19,20,21> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x1800-4000, expr='id'}}, {SaveExpr: <slot=2, type='int4'> arg={Func(int4)::int24mul args=[{Var(int2): kvec=0x4000-5800, expr='a'}, {Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int2): kvec=0x5800-7000, expr='b'}}, {Const(int4): value='10'}]}]}}, {SaveExpr: <slot=5, type='int4'> arg={Func(int4)::int24mul args=[{Var(int2): kvec=0x4000-5800, expr='a'}, {Var(int4): kvec=0x7000-9800, expr='c'}]}}, {SaveExpr: <slot=7, type='int8'> arg={Func(int8)::int28mul args=[{Var(int2): kvec=0x4000-5800, expr='a'}, {Var(int8): kvec=0x9800-e000, expr='e'}]}}, {SaveExpr: <slot=9, type='int4'> arg={Func(int4)::int42mul args=[{Var(int4): kvec=0x7000-9800, expr='c'}, {Var(int2): kvec=0x5800-7000, expr='b'}]}}, {SaveExpr: <slot=10, type='int4'> arg={Func(int4)::int4mul args=[{Var(int4): kvec=0x7000-9800, expr='c'}, {Var(int4): kvec=0xe000-10800, expr='d'}]}}, {SaveExpr: <slot=12, type='int8'> arg={Func(int8)::int48mul args=[{Var(int4): kvec=0x7000-9800, expr='c'}, {Var(int8): kvec=0x9800-e000, expr='e'}]}}, {SaveExpr: <slot=13, type='int8'> arg={Func(int8)::int82mul args=[{Var(int8): kvec=0x9800-e000, expr='e'}, {Var(int2): kvec=0x5800-7000, expr='b'}]}}, {SaveExpr: <slot=14, type='int8'> arg={Func(int8)::int84mul args=[{Var(int8): kvec=0x9800-e000, expr='e'}, {Var(int4): kvec=0xe000-10800, expr='d'}]}}, {SaveExpr: <slot=15, type='int8'> arg={Func(int8)::int8mul args=[{Var(int8): kvec=0x9800-e000, expr='e'}, {Var(int8): kvec=0x10800-15000, expr='f'}]}}, {SaveExpr: <slot=17, type='int4'> arg={Func(int4)::int24mul args=[{Var(int2): kvec=0x4000-5800, expr='a'}, {Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): kvec=0x15000-16000, expr='g'}}, {Const(int4): value='10'}]}]}}, {SaveExpr: <slot=19, type='int4'> arg={Func(int4)::int41mul args=[{Var(int4): kvec=0x7000-9800, expr='c'}, {Var(int1): kvec=0x15000-16000, expr='g'}]}}, {SaveExpr: <slot=20, type='int8'> arg={Func(int8)::int81mul args=[{Var(int8): kvec=0x9800-e000, expr='e'}, {Var(int1): kvec=0x15000-16000, expr='g'}]}}, {SaveExpr: <slot=21, type='int4'> arg={Case: <when={Func(bool)::float8lt args=[{Func(float8)::abs arg={Func(float8)::float8 arg={Var(int1): kvec=0x15000-16000, expr='g'}}}, {Const(float8): value='12'}]}, then={Func(int4)::int4 arg={Func(int1)::int1mul args=[{Var(int1): kvec=0x15000-16000, expr='g'}, {Var(int1): kvec=0x16000-17000, expr='n'}]}}> <else={Const(int4): value='0'}>}}]}
+(10 rows)
+
+SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
+           c*b v4, c*d v5, c*e v6,
+           e*b v7, e*d v8, e*f v9,
+           a * (g %10) v10, c*g v11, e*g v12, 
+           CASE WHEN abs(g) < 12 THEN g*n ELSE 0 END v15
+  INTO test12g
+  FROM rt_int
+ WHERE x BETWEEN -10000.0 AND 20000.0;
+SET pg_strom.enabled = off;
+SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
+           c*b v4, c*d v5, c*e v6,
+           e*b v7, e*d v8, e*f v9,
+           a * (g %10) v10, c*g v11, e*g v12, 
+           CASE WHEN abs(g) < 12 THEN g*n ELSE 0 END v15
+  INTO test12p
+  FROM rt_int
+ WHERE x BETWEEN -10000.0 AND 20000.0;
+(SELECT * FROM test12g EXCEPT ALL SELECT * FROM test12p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v15 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test12p EXCEPT ALL SELECT * FROM test12g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v15 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+-- '/' operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a/(b%100) v1, a/(d%100) v2, a/(f%100) v3,
+           c/(b%100) v4, c/(d%100) v5, c/(f%100) v6,
+           e/(b%100) v7, e/(d%100) v8, e/(f%100) v9,
+           g/(b%100) v10, g/(d%100) v11, g/(f%100) v12
+  INTO test13g
+  FROM rt_int
+ WHERE x BETWEEN -20000.0 AND 10000.0
+   AND (b%100) <> 0 AND (d%100) <> 0 AND (f%100) <> 0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a / ((b)::integer % 100))), ((a / (d % 100))), ((a / (f % '100'::bigint))), ((c / ((b)::integer % 100))), ((c / (d % 100))), ((c / (f % '100'::bigint))), ((e / ((b)::integer % 100))), ((e / (d % 100))), ((e / (f % '100'::bigint))), ((g / ((b)::integer % 100))), ((g / (d % 100))), ((g / (f % '100'::bigint)))
+   GPU Projection: id, (a / ((b)::integer % 100)), (a / (d % 100)), (a / (f % '100'::bigint)), (c / ((b)::integer % 100)), (c / (d % 100)), (c / (f % '100'::bigint)), (e / ((b)::integer % 100)), (e / (d % 100)), (e / (f % '100'::bigint)), (g / ((b)::integer % 100)), (g / (d % 100)), (g / (f % '100'::bigint))
+   GPU Scan Quals: ((x >= '-20000'::double precision) AND (x <= '10000'::double precision) AND ((d % 100) <> 0) AND ((f % '100'::bigint) <> 0) AND (((b)::integer % 100) <> 0)) [rows: 2000 -> 892]
+   KVars-Slot: <slot=0, type='float2', expr='x'>, <slot=1, type='int4', expr='d'>, <slot=2, type='int8', expr='f'>, <slot=3, type='int2', expr='b'>, <slot=4, type='int4', expr='id'>, <slot=5, type='int4', expr='(a / ((b)::integer % 100))'>, <slot=6, type='int2', expr='a'>, <slot=7, type='int4', expr='(a / (d % 100))'>, <slot=8, type='int8', expr='(a / (f % '100'::bigint))'>, <slot=9, type='int4', expr='(c / ((b)::integer % 100))'>, <slot=10, type='int4', expr='c'>, <slot=11, type='int4', expr='(c / (d % 100))'>, <slot=12, type='int8', expr='(c / (f % '100'::bigint))'>, <slot=13, type='int8', expr='(e / ((b)::integer % 100))'>, <slot=14, type='int8', expr='e'>, <slot=15, type='int8', expr='(e / (d % 100))'>, <slot=16, type='int8', expr='(e / (f % '100'::bigint))'>, <slot=17, type='int4', expr='(g / ((b)::integer % 100))'>, <slot=18, type='int1', expr='g'>, <slot=19, type='int4', expr='(g / (d % 100))'>, <slot=20, type='int8', expr='(g / (f % '100'::bigint))'>
+   KVecs-Buffer: nbytes: 90112, ndims: 2, items=[kvec0=<0x0000-17ff, type='float2', expr='x'>, kvec1=<0x1800-3fff, type='int4', expr='d'>, kvec2=<0x4000-87ff, type='int8', expr='f'>, kvec3=<0x8800-9fff, type='int2', expr='b'>, kvec4=<0xa000-c7ff, type='int4', expr='id'>, kvec5=<0xc800-dfff, type='int2', expr='a'>, kvec6=<0xe000-107ff, type='int4', expr='c'>, kvec7=<0x10800-14fff, type='int8', expr='e'>, kvec8=<0x15000-15fff, type='int1', expr='g'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=4, type='int4' resno=1(id)>, <slot=6, type='int2' resno=2(a)>, <slot=3, type='int2' resno=3(b)>, <slot=10, type='int4' resno=4(c)>, <slot=1, type='int4' resno=5(d)>, <slot=14, type='int8' resno=6(e)>, <slot=2, type='int8' resno=7(f)>, <slot=0, type='float2' resno=8(x)>, <slot=18, type='int1' resno=11(g)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1800-3fff, type='int4', expr='d'>, <slot=2, offset=0x4000-87ff, type='int8', expr='f'>, <slot=3, offset=0x8800-9fff, type='int2', expr='b'>, <slot=4, offset=0xa000-c7ff, type='int4', expr='id'>, <slot=6, offset=0xc800-dfff, type='int2', expr='a'>, <slot=10, offset=0xe000-107ff, type='int4', expr='c'>, <slot=14, offset=0x10800-14fff, type='int8', expr='e'>, <slot=18, offset=0x15000-15fff, type='int1', expr='g'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float28ge args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='-20000'}]}, {Func(bool)::float28le args=[{Var(float2): slot=0, expr='x'}, {Const(float8): value='10000'}]}, {Func(bool)::int4ne args=[{Func(int4)::int4mod args=[{Var(int4): slot=1, expr='d'}, {Const(int4): value='100'}]}, {Const(int4): value='0'}]}, {Func(bool)::int84ne args=[{Func(int8)::int8mod args=[{Var(int8): slot=2, expr='f'}, {Const(int8): value='100'}]}, {Const(int4): value='0'}]}, {Func(bool)::int4ne args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int2): slot=3, expr='b'}}, {Const(int4): value='100'}]}, {Const(int4): value='0'}]}]}
+   Projection OpCode: {Projection: layout=<4,5,7,8,9,11,12,13,15,16,17,19,20> args=[{SaveExpr: <slot=4, type='int4'> arg={Var(int4): kvec=0xa000-c800, expr='id'}}, {SaveExpr: <slot=5, type='int4'> arg={Func(int4)::int24div args=[{Var(int2): kvec=0xc800-e000, expr='a'}, {Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int2): kvec=0x8800-a000, expr='b'}}, {Const(int4): value='100'}]}]}}, {SaveExpr: <slot=7, type='int4'> arg={Func(int4)::int24div args=[{Var(int2): kvec=0xc800-e000, expr='a'}, {Func(int4)::int4mod args=[{Var(int4): kvec=0x1800-4000, expr='d'}, {Const(int4): value='100'}]}]}}, {SaveExpr: <slot=8, type='int8'> arg={Func(int8)::int28div args=[{Var(int2): kvec=0xc800-e000, expr='a'}, {Func(int8)::int8mod args=[{Var(int8): kvec=0x4000-8800, expr='f'}, {Const(int8): value='100'}]}]}}, {SaveExpr: <slot=9, type='int4'> arg={Func(int4)::int4div args=[{Var(int4): kvec=0xe000-10800, expr='c'}, {Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int2): kvec=0x8800-a000, expr='b'}}, {Const(int4): value='100'}]}]}}, {SaveExpr: <slot=11, type='int4'> arg={Func(int4)::int4div args=[{Var(int4): kvec=0xe000-10800, expr='c'}, {Func(int4)::int4mod args=[{Var(int4): kvec=0x1800-4000, expr='d'}, {Const(int4): value='100'}]}]}}, {SaveExpr: <slot=12, type='int8'> arg={Func(int8)::int48div args=[{Var(int4): kvec=0xe000-10800, expr='c'}, {Func(int8)::int8mod args=[{Var(int8): kvec=0x4000-8800, expr='f'}, {Const(int8): value='100'}]}]}}, {SaveExpr: <slot=13, type='int8'> arg={Func(int8)::int84div args=[{Var(int8): kvec=0x10800-15000, expr='e'}, {Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int2): kvec=0x8800-a000, expr='b'}}, {Const(int4): value='100'}]}]}}, {SaveExpr: <slot=15, type='int8'> arg={Func(int8)::int84div args=[{Var(int8): kvec=0x10800-15000, expr='e'}, {Func(int4)::int4mod args=[{Var(int4): kvec=0x1800-4000, expr='d'}, {Const(int4): value='100'}]}]}}, {SaveExpr: <slot=16, type='int8'> arg={Func(int8)::int8div args=[{Var(int8): kvec=0x10800-15000, expr='e'}, {Func(int8)::int8mod args=[{Var(int8): kvec=0x4000-8800, expr='f'}, {Const(int8): value='100'}]}]}}, {SaveExpr: <slot=17, type='int4'> arg={Func(int4)::int14div args=[{Var(int1): kvec=0x15000-16000, expr='g'}, {Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int2): kvec=0x8800-a000, expr='b'}}, {Const(int4): value='100'}]}]}}, {SaveExpr: <slot=19, type='int4'> arg={Func(int4)::int14div args=[{Var(int1): kvec=0x15000-16000, expr='g'}, {Func(int4)::int4mod args=[{Var(int4): kvec=0x1800-4000, expr='d'}, {Const(int4): value='100'}]}]}}, {SaveExpr: <slot=20, type='int8'> arg={Func(int8)::int18div args=[{Var(int1): kvec=0x15000-16000, expr='g'}, {Func(int8)::int8mod args=[{Var(int8): kvec=0x4000-8800, expr='f'}, {Const(int8): value='100'}]}]}}]}
+(10 rows)
+
+SELECT id, a/(b%100) v1, a/(d%100) v2, a/(f%100) v3,
+           c/(b%100) v4, c/(d%100) v5, c/(f%100) v6,
+           e/(b%100) v7, e/(d%100) v8, e/(f%100) v9,
+           g/(b%100) v10, g/(d%100) v11, g/(f%100) v12
+  INTO test13g
+  FROM rt_int
+ WHERE x BETWEEN -20000.0 AND 10000.0
+   AND (b%100) <> 0 AND (d%100) <> 0 AND (f%100) <> 0;
+SET pg_strom.enabled = off;
+SELECT id, a/(b%100) v1, a/(d%100) v2, a/(f%100) v3,
+           c/(b%100) v4, c/(d%100) v5, c/(f%100) v6,
+           e/(b%100) v7, e/(d%100) v8, e/(f%100) v9,
+           g/(b%100) v10, g/(d%100) v11, g/(f%100) v12
+  INTO test13p
+  FROM rt_int
+ WHERE x BETWEEN -20000.0 AND 10000.0
+   AND (b%100) <> 0 AND (d%100) <> 0 AND (f%100) <> 0;
+(SELECT * FROM test13g EXCEPT ALL SELECT * FROM test13p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test13p EXCEPT ALL SELECT * FROM test13g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----
+(0 rows)
+
+-- '%' operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a % 100::smallint v1, c % 1000::int v2, d % 1000::bigint v3, g % 100::int1 v4
+  INTO test14g
+  FROM rt_int
+ WHERE y BETWEEN -15000.0 AND 15000.0;
+                                                                                                                                                                                                                                                                                                                                                              QUERY PLAN                                                                                                                                                                                                                                                                                                                                                              
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a % '100'::smallint)), ((c % 1000)), (((d)::bigint % '1000'::bigint)), ((g % '100'::int1))
+   GPU Projection: id, (a % '100'::smallint), (c % 1000), ((d)::bigint % '1000'::bigint), (g % '100'::int1)
+   GPU Scan Quals: ((y >= '-15000'::double precision) AND (y <= '15000'::double precision)) [rows: 2000 -> 923]
+   KVars-Slot: <slot=0, type='float4', expr='y'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int2', expr='(a % '100'::smallint)'>, <slot=3, type='int2', expr='a'>, <slot=4, type='int4', expr='(c % 1000)'>, <slot=5, type='int4', expr='c'>, <slot=6, type='int8', expr='((d)::bigint % '1000'::bigint)'>, <slot=7, type='int4', expr='d'>, <slot=8, type='int1', expr='(g % '100'::int1)'>, <slot=9, type='int1', expr='g'>
+   KVecs-Buffer: nbytes: 51200, ndims: 2, items=[kvec0=<0x0000-27ff, type='float4', expr='y'>, kvec1=<0x2800-4fff, type='int4', expr='id'>, kvec2=<0x5000-67ff, type='int2', expr='a'>, kvec3=<0x6800-8fff, type='int4', expr='c'>, kvec4=<0x9000-b7ff, type='int4', expr='d'>, kvec5=<0xb800-c7ff, type='int1', expr='g'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='int2' resno=2(a)>, <slot=5, type='int4' resno=4(c)>, <slot=7, type='int4' resno=5(d)>, <slot=0, type='float4' resno=9(y)>, <slot=9, type='int1' resno=11(g)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x2800-4fff, type='int4', expr='id'>, <slot=3, offset=0x5000-67ff, type='int2', expr='a'>, <slot=5, offset=0x6800-8fff, type='int4', expr='c'>, <slot=7, offset=0x9000-b7ff, type='int4', expr='d'>, <slot=9, offset=0xb800-c7ff, type='int1', expr='g'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float48ge args=[{Var(float4): slot=0, expr='y'}, {Const(float8): value='-15000'}]}, {Func(bool)::float48le args=[{Var(float4): slot=0, expr='y'}, {Const(float8): value='15000'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,4,6,8> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x2800-5000, expr='id'}}, {SaveExpr: <slot=2, type='int2'> arg={Func(int2)::int2mod args=[{Var(int2): kvec=0x5000-6800, expr='a'}, {Const(int2): value='100'}]}}, {SaveExpr: <slot=4, type='int4'> arg={Func(int4)::int4mod args=[{Var(int4): kvec=0x6800-9000, expr='c'}, {Const(int4): value='1000'}]}}, {SaveExpr: <slot=6, type='int8'> arg={Func(int8)::int8mod args=[{Func(int8)::int8 arg={Var(int4): kvec=0x9000-b800, expr='d'}}, {Const(int8): value='1000'}]}}, {SaveExpr: <slot=8, type='int1'> arg={Func(int1)::int1mod args=[{Var(int1): kvec=0xb800-c800, expr='g'}, {Const(int1): value='100'}]}}]}
+(10 rows)
+
+SELECT id, a % 100::smallint v1, c % 1000::int v2, d % 1000::bigint v3, g % 100::int1 v4
+  INTO test14g
+  FROM rt_int
+ WHERE y BETWEEN -15000.0 AND 15000.0;
+SET pg_strom.enabled = off;
+SELECT id, a % 100::smallint v1, c % 1000::int v2, d % 1000::bigint v3, g % 100::int1 v4
+  INTO test14p
+  FROM rt_int
+ WHERE y BETWEEN -15000.0 AND 15000.0;
+(SELECT * FROM test14g EXCEPT ALL SELECT * FROM test14p);
+ id | v1 | v2 | v3 | v4 
+----+----+----+----+----
+(0 rows)
+
+(SELECT * FROM test14p EXCEPT ALL SELECT * FROM test14g);
+ id | v1 | v2 | v3 | v4 
+----+----+----+----+----
+(0 rows)
+
+-- unary operators ('+', '-' and '@')
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, +a v1, -b v2, @(a+b) v3,
+           +c v4, -d v5, @(c+d) v6,
+           +e v7, -f v8, @(e+f) v9,
+           +g v10, -n v11, @(g-n/2) v12
+   INTO test15g
+  FROM rt_int
+ WHERE y BETWEEN -10000.0 AND 20000.0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((+ a)), ((- b)), ((@ (a + b))), (+ c), (- d), ((@ (c + d))), (+ e), (- f), ((@ (e + f))), ((+ g)), ((- n)), ((@ (g - (n / 2))))
+   GPU Projection: id, (+ a), (- b), (@ (a + b)), c, d, (@ (c + d)), e, f, (@ (e + f)), (+ g), (- n), (@ (g - (n / 2)))
+   GPU Scan Quals: ((y >= '-10000'::double precision) AND (y <= '20000'::double precision)) [rows: 2000 -> 917]
+   KVars-Slot: <slot=0, type='float4', expr='y'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int2', expr='(+ a)'>, <slot=3, type='int2', expr='a'>, <slot=4, type='int2', expr='(- b)'>, <slot=5, type='int2', expr='b'>, <slot=6, type='int2', expr='(@ (a + b))'>, <slot=7, type='int4', expr='c'>, <slot=8, type='int4', expr='d'>, <slot=9, type='int4', expr='(@ (c + d))'>, <slot=10, type='int8', expr='e'>, <slot=11, type='int8', expr='f'>, <slot=12, type='int8', expr='(@ (e + f))'>, <slot=13, type='int1', expr='(+ g)'>, <slot=14, type='int1', expr='g'>, <slot=15, type='int1', expr='(- n)'>, <slot=16, type='int1', expr='n'>, <slot=17, type='int4', expr='(@ (g - (n / 2)))'>
+   KVecs-Buffer: nbytes: 98304, ndims: 2, items=[kvec0=<0x0000-27ff, type='float4', expr='y'>, kvec1=<0x2800-4fff, type='int4', expr='id'>, kvec2=<0x5000-67ff, type='int2', expr='a'>, kvec3=<0x6800-7fff, type='int2', expr='b'>, kvec4=<0x8000-a7ff, type='int4', expr='c'>, kvec5=<0xa800-cfff, type='int4', expr='d'>, kvec6=<0xd000-117ff, type='int8', expr='e'>, kvec7=<0x11800-15fff, type='int8', expr='f'>, kvec8=<0x16000-16fff, type='int1', expr='g'>, kvec9=<0x17000-17fff, type='int1', expr='n'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='int2' resno=2(a)>, <slot=5, type='int2' resno=3(b)>, <slot=7, type='int4' resno=4(c)>, <slot=8, type='int4' resno=5(d)>, <slot=10, type='int8' resno=6(e)>, <slot=11, type='int8' resno=7(f)>, <slot=0, type='float4' resno=9(y)>, <slot=14, type='int1' resno=11(g)>, <slot=16, type='int1' resno=18(n)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x2800-4fff, type='int4', expr='id'>, <slot=3, offset=0x5000-67ff, type='int2', expr='a'>, <slot=5, offset=0x6800-7fff, type='int2', expr='b'>, <slot=7, offset=0x8000-a7ff, type='int4', expr='c'>, <slot=8, offset=0xa800-cfff, type='int4', expr='d'>, <slot=10, offset=0xd000-117ff, type='int8', expr='e'>, <slot=11, offset=0x11800-15fff, type='int8', expr='f'>, <slot=14, offset=0x16000-16fff, type='int1', expr='g'>, <slot=16, offset=0x17000-17fff, type='int1', expr='n'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float48ge args=[{Var(float4): slot=0, expr='y'}, {Const(float8): value='-10000'}]}, {Func(bool)::float48le args=[{Var(float4): slot=0, expr='y'}, {Const(float8): value='20000'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,4,6,7,8,9,10,11,12,13,15,17> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x2800-5000, expr='id'}}, {SaveExpr: <slot=2, type='int2'> arg={Func(int2)::int2up arg={Var(int2): kvec=0x5000-6800, expr='a'}}}, {SaveExpr: <slot=4, type='int2'> arg={Func(int2)::int2um arg={Var(int2): kvec=0x6800-8000, expr='b'}}}, {SaveExpr: <slot=6, type='int2'> arg={Func(int2)::int2abs arg={Func(int2)::int2pl args=[{Var(int2): kvec=0x5000-6800, expr='a'}, {Var(int2): kvec=0x6800-8000, expr='b'}]}}}, {SaveExpr: <slot=7, type='int4'> arg={Var(int4): kvec=0x8000-a800, expr='c'}}, {SaveExpr: <slot=8, type='int4'> arg={Var(int4): kvec=0xa800-d000, expr='d'}}, {SaveExpr: <slot=9, type='int4'> arg={Func(int4)::int4abs arg={Func(int4)::int4pl args=[{Var(int4): kvec=0x8000-a800, expr='c'}, {Var(int4): kvec=0xa800-d000, expr='d'}]}}}, {SaveExpr: <slot=10, type='int8'> arg={Var(int8): kvec=0xd000-11800, expr='e'}}, {SaveExpr: <slot=11, type='int8'> arg={Var(int8): kvec=0x11800-16000, expr='f'}}, {SaveExpr: <slot=12, type='int8'> arg={Func(int8)::int8abs arg={Func(int8)::int8pl args=[{Var(int8): kvec=0xd000-11800, expr='e'}, {Var(int8): kvec=0x11800-16000, expr='f'}]}}}, {SaveExpr: <slot=13, type='int1'> arg={Func(int1)::int1up arg={Var(int1): kvec=0x16000-17000, expr='g'}}}, {SaveExpr: <slot=15, type='int1'> arg={Func(int1)::int1um arg={Var(int1): kvec=0x17000-18000, expr='n'}}}, {SaveExpr: <slot=17, type='int4'> arg={Func(int4)::int4abs arg={Func(int4)::int14mi args=[{Var(int1): kvec=0x16000-17000, expr='g'}, {Func(int4)::int14div args=[{Var(int1): kvec=0x17000-18000, expr='n'}, {Const(int4): value='2'}]}]}}}]}
+(10 rows)
+
+SELECT id, +a v1, -b v2, @(a+b) v3,
+           +c v4, -d v5, @(c+d) v6,
+           +e v7, -f v8, @(e+f) v9,
+           +g v10, -n v11, @(g-n/2) v12
+  INTO test15g
+  FROM rt_int
+ WHERE y BETWEEN -10000.0 AND 20000.0;
+SET pg_strom.enabled = off;
+SELECT id, +a v1, -b v2, @(a+b) v3,
+           +c v4, -d v5, @(c+d) v6,
+           +e v7, -f v8, @(e+f) v9,
+           +g v10, -n v11, @(g-n/2) v12
+  INTO test15p
+  FROM rt_int
+ WHERE y BETWEEN -10000.0 AND 20000.0;
+(SELECT * FROM test15g EXCEPT ALL SELECT * FROM test15p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test15p EXCEPT ALL SELECT * FROM test15g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----
+(0 rows)
+
+-- '=' : equal operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a=b v1, a=d v2, a=f v3,
+           c=b v4, c=d v5, c=f v6,
+           e=b v7, e=d v8, e=f v9,
+           g=b v10, g=d v11, g=f v12, g=n v13
+  INTO test20g
+  FROM rt_int
+ WHERE id % 6 = 0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a = b)), ((a = d)), ((a = f)), ((c = b)), ((c = d)), ((c = f)), ((e = b)), ((e = d)), ((e = f)), ((g = b)), ((g = d)), ((g = f)), ((g = n))
+   GPU Projection: id, (a = b), (a = d), (a = f), (c = b), (c = d), (c = f), (e = b), (e = d), (e = f), (g = b), (g = d), (g = f), (g = n)
+   GPU Scan Quals: ((id % 6) = 0) [rows: 2000 -> 10]
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='(a = b)'>, <slot=2, type='int2', expr='a'>, <slot=3, type='int2', expr='b'>, <slot=4, type='bool', expr='(a = d)'>, <slot=5, type='int4', expr='d'>, <slot=6, type='bool', expr='(a = f)'>, <slot=7, type='int8', expr='f'>, <slot=8, type='bool', expr='(c = b)'>, <slot=9, type='int4', expr='c'>, <slot=10, type='bool', expr='(c = d)'>, <slot=11, type='bool', expr='(c = f)'>, <slot=12, type='bool', expr='(e = b)'>, <slot=13, type='int8', expr='e'>, <slot=14, type='bool', expr='(e = d)'>, <slot=15, type='bool', expr='(e = f)'>, <slot=16, type='bool', expr='(g = b)'>, <slot=17, type='int1', expr='g'>, <slot=18, type='bool', expr='(g = d)'>, <slot=19, type='bool', expr='(g = f)'>, <slot=20, type='bool', expr='(g = n)'>, <slot=21, type='int1', expr='n'>
+   KVecs-Buffer: nbytes: 88064, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-3fff, type='int2', expr='a'>, kvec2=<0x4000-57ff, type='int2', expr='b'>, kvec3=<0x5800-7fff, type='int4', expr='d'>, kvec4=<0x8000-c7ff, type='int8', expr='f'>, kvec5=<0xc800-efff, type='int4', expr='c'>, kvec6=<0xf000-137ff, type='int8', expr='e'>, kvec7=<0x13800-147ff, type='int1', expr='g'>, kvec8=<0x14800-157ff, type='int1', expr='n'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='int2' resno=2(a)>, <slot=3, type='int2' resno=3(b)>, <slot=9, type='int4' resno=4(c)>, <slot=5, type='int4' resno=5(d)>, <slot=13, type='int8' resno=6(e)>, <slot=7, type='int8' resno=7(f)>, <slot=17, type='int1' resno=11(g)>, <slot=21, type='int1' resno=18(n)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-3fff, type='int2', expr='a'>, <slot=3, offset=0x4000-57ff, type='int2', expr='b'>, <slot=5, offset=0x5800-7fff, type='int4', expr='d'>, <slot=7, offset=0x8000-c7ff, type='int8', expr='f'>, <slot=9, offset=0xc800-efff, type='int4', expr='c'>, <slot=13, offset=0xf000-137ff, type='int8', expr='e'>, <slot=17, offset=0x13800-147ff, type='int1', expr='g'>, <slot=21, offset=0x14800-157ff, type='int1', expr='n'>]}}}
+   Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='6'}]}, {Const(int4): value='0'}]}
+   Projection OpCode: {Projection: layout=<0,1,4,6,8,10,11,12,14,15,16,18,19,20> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='bool'> arg={Func(bool)::int2eq args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=4, type='bool'> arg={Func(bool)::int24eq args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=6, type='bool'> arg={Func(bool)::int28eq args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=8, type='bool'> arg={Func(bool)::int42eq args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=10, type='bool'> arg={Func(bool)::int4eq args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=11, type='bool'> arg={Func(bool)::int48eq args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=12, type='bool'> arg={Func(bool)::int82eq args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=14, type='bool'> arg={Func(bool)::int84eq args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=15, type='bool'> arg={Func(bool)::int8eq args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=16, type='bool'> arg={Func(bool)::int12eq args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=18, type='bool'> arg={Func(bool)::int14eq args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=19, type='bool'> arg={Func(bool)::int18eq args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=20, type='bool'> arg={Func(bool)::int1eq args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int1): kvec=0x14800-15800, expr='n'}]}}]}
+(10 rows)
+
+SELECT id, a=b v1, a=d v2, a=f v3,
+           c=b v4, c=d v5, c=f v6,
+           e=b v7, e=d v8, e=f v9,
+           g=b v10, g=d v11, g=f v12, g=n v13
+  INTO test20g
+  FROM rt_int
+ WHERE id % 6 = 0;
+SET pg_strom.enabled = off;
+SELECT id, a=b v1, a=d v2, a=f v3,
+           c=b v4, c=d v5, c=f v6,
+           e=b v7, e=d v8, e=f v9,
+           g=b v10, g=d v11, g=f v12, g=n v13
+  INTO test20p
+  FROM rt_int
+ WHERE id % 6 = 0;
+(SELECT * FROM test20g EXCEPT ALL SELECT * FROM test20p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test20p EXCEPT ALL SELECT * FROM test20g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+-- '<>' : not equal operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a<>b v1, a<>d v2, a<>f v3,
+           c<>b v4, c<>d v5, c<>f v6,
+           e<>b v7, e<>d v8, e<>f v9,
+           g<>b v10, g<>d v11, g<>f v12, g <> n v13
+  INTO test21g
+  FROM rt_int
+ WHERE id % 6 = 1;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a <> b)), ((a <> d)), ((a <> f)), ((c <> b)), ((c <> d)), ((c <> f)), ((e <> b)), ((e <> d)), ((e <> f)), ((g <> b)), ((g <> d)), ((g <> f)), ((g <> n))
+   GPU Projection: id, (a <> b), (a <> d), (a <> f), (c <> b), (c <> d), (c <> f), (e <> b), (e <> d), (e <> f), (g <> b), (g <> d), (g <> f), (g <> n)
+   GPU Scan Quals: ((id % 6) = 1) [rows: 2000 -> 10]
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='(a <> b)'>, <slot=2, type='int2', expr='a'>, <slot=3, type='int2', expr='b'>, <slot=4, type='bool', expr='(a <> d)'>, <slot=5, type='int4', expr='d'>, <slot=6, type='bool', expr='(a <> f)'>, <slot=7, type='int8', expr='f'>, <slot=8, type='bool', expr='(c <> b)'>, <slot=9, type='int4', expr='c'>, <slot=10, type='bool', expr='(c <> d)'>, <slot=11, type='bool', expr='(c <> f)'>, <slot=12, type='bool', expr='(e <> b)'>, <slot=13, type='int8', expr='e'>, <slot=14, type='bool', expr='(e <> d)'>, <slot=15, type='bool', expr='(e <> f)'>, <slot=16, type='bool', expr='(g <> b)'>, <slot=17, type='int1', expr='g'>, <slot=18, type='bool', expr='(g <> d)'>, <slot=19, type='bool', expr='(g <> f)'>, <slot=20, type='bool', expr='(g <> n)'>, <slot=21, type='int1', expr='n'>
+   KVecs-Buffer: nbytes: 88064, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-3fff, type='int2', expr='a'>, kvec2=<0x4000-57ff, type='int2', expr='b'>, kvec3=<0x5800-7fff, type='int4', expr='d'>, kvec4=<0x8000-c7ff, type='int8', expr='f'>, kvec5=<0xc800-efff, type='int4', expr='c'>, kvec6=<0xf000-137ff, type='int8', expr='e'>, kvec7=<0x13800-147ff, type='int1', expr='g'>, kvec8=<0x14800-157ff, type='int1', expr='n'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='int2' resno=2(a)>, <slot=3, type='int2' resno=3(b)>, <slot=9, type='int4' resno=4(c)>, <slot=5, type='int4' resno=5(d)>, <slot=13, type='int8' resno=6(e)>, <slot=7, type='int8' resno=7(f)>, <slot=17, type='int1' resno=11(g)>, <slot=21, type='int1' resno=18(n)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-3fff, type='int2', expr='a'>, <slot=3, offset=0x4000-57ff, type='int2', expr='b'>, <slot=5, offset=0x5800-7fff, type='int4', expr='d'>, <slot=7, offset=0x8000-c7ff, type='int8', expr='f'>, <slot=9, offset=0xc800-efff, type='int4', expr='c'>, <slot=13, offset=0xf000-137ff, type='int8', expr='e'>, <slot=17, offset=0x13800-147ff, type='int1', expr='g'>, <slot=21, offset=0x14800-157ff, type='int1', expr='n'>]}}}
+   Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='6'}]}, {Const(int4): value='1'}]}
+   Projection OpCode: {Projection: layout=<0,1,4,6,8,10,11,12,14,15,16,18,19,20> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='bool'> arg={Func(bool)::int2ne args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=4, type='bool'> arg={Func(bool)::int24ne args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=6, type='bool'> arg={Func(bool)::int28ne args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=8, type='bool'> arg={Func(bool)::int42ne args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=10, type='bool'> arg={Func(bool)::int4ne args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=11, type='bool'> arg={Func(bool)::int48ne args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=12, type='bool'> arg={Func(bool)::int82ne args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=14, type='bool'> arg={Func(bool)::int84ne args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=15, type='bool'> arg={Func(bool)::int8ne args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=16, type='bool'> arg={Func(bool)::int12ne args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=18, type='bool'> arg={Func(bool)::int14ne args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=19, type='bool'> arg={Func(bool)::int18ne args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=20, type='bool'> arg={Func(bool)::int1ne args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int1): kvec=0x14800-15800, expr='n'}]}}]}
+(10 rows)
+
+SELECT id, a<>b v1, a<>d v2, a<>f v3,
+           c<>b v4, c<>d v5, c<>f v6,
+           e<>b v7, e<>d v8, e<>f v9,
+           g<>b v10, g<>d v11, g<>f v12, g <> n v13
+  INTO test21g
+  FROM rt_int
+ WHERE id % 6 = 1;
+SET pg_strom.enabled = off;
+SELECT id, a<>b v1, a<>d v2, a<>f v3,
+           c<>b v4, c<>d v5, c<>f v6,
+           e<>b v7, e<>d v8, e<>f v9,
+           g<>b v10, g<>d v11, g<>f v12, g <> n v13
+  INTO test21p
+  FROM rt_int
+ WHERE id % 6 = 1;
+(SELECT * FROM test21g EXCEPT ALL SELECT * FROM test21p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test21p EXCEPT ALL SELECT * FROM test21g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+-- '>' : greater than operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a>b v1, a>d v2, a>f v3,
+           c>b v4, c>d v5, c>f v6,
+           e>b v7, e>d v8, e>f v9,
+           g>b v10, g>d v11, g>f v12, g>n v13
+  INTO test22g
+  FROM rt_int
+ WHERE id % 6 = 2;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a > b)), ((a > d)), ((a > f)), ((c > b)), ((c > d)), ((c > f)), ((e > b)), ((e > d)), ((e > f)), ((g > b)), ((g > d)), ((g > f)), ((g > n))
+   GPU Projection: id, (a > b), (a > d), (a > f), (c > b), (c > d), (c > f), (e > b), (e > d), (e > f), (g > b), (g > d), (g > f), (g > n)
+   GPU Scan Quals: ((id % 6) = 2) [rows: 2000 -> 10]
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='(a > b)'>, <slot=2, type='int2', expr='a'>, <slot=3, type='int2', expr='b'>, <slot=4, type='bool', expr='(a > d)'>, <slot=5, type='int4', expr='d'>, <slot=6, type='bool', expr='(a > f)'>, <slot=7, type='int8', expr='f'>, <slot=8, type='bool', expr='(c > b)'>, <slot=9, type='int4', expr='c'>, <slot=10, type='bool', expr='(c > d)'>, <slot=11, type='bool', expr='(c > f)'>, <slot=12, type='bool', expr='(e > b)'>, <slot=13, type='int8', expr='e'>, <slot=14, type='bool', expr='(e > d)'>, <slot=15, type='bool', expr='(e > f)'>, <slot=16, type='bool', expr='(g > b)'>, <slot=17, type='int1', expr='g'>, <slot=18, type='bool', expr='(g > d)'>, <slot=19, type='bool', expr='(g > f)'>, <slot=20, type='bool', expr='(g > n)'>, <slot=21, type='int1', expr='n'>
+   KVecs-Buffer: nbytes: 88064, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-3fff, type='int2', expr='a'>, kvec2=<0x4000-57ff, type='int2', expr='b'>, kvec3=<0x5800-7fff, type='int4', expr='d'>, kvec4=<0x8000-c7ff, type='int8', expr='f'>, kvec5=<0xc800-efff, type='int4', expr='c'>, kvec6=<0xf000-137ff, type='int8', expr='e'>, kvec7=<0x13800-147ff, type='int1', expr='g'>, kvec8=<0x14800-157ff, type='int1', expr='n'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='int2' resno=2(a)>, <slot=3, type='int2' resno=3(b)>, <slot=9, type='int4' resno=4(c)>, <slot=5, type='int4' resno=5(d)>, <slot=13, type='int8' resno=6(e)>, <slot=7, type='int8' resno=7(f)>, <slot=17, type='int1' resno=11(g)>, <slot=21, type='int1' resno=18(n)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-3fff, type='int2', expr='a'>, <slot=3, offset=0x4000-57ff, type='int2', expr='b'>, <slot=5, offset=0x5800-7fff, type='int4', expr='d'>, <slot=7, offset=0x8000-c7ff, type='int8', expr='f'>, <slot=9, offset=0xc800-efff, type='int4', expr='c'>, <slot=13, offset=0xf000-137ff, type='int8', expr='e'>, <slot=17, offset=0x13800-147ff, type='int1', expr='g'>, <slot=21, offset=0x14800-157ff, type='int1', expr='n'>]}}}
+   Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='6'}]}, {Const(int4): value='2'}]}
+   Projection OpCode: {Projection: layout=<0,1,4,6,8,10,11,12,14,15,16,18,19,20> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='bool'> arg={Func(bool)::int2gt args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=4, type='bool'> arg={Func(bool)::int24gt args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=6, type='bool'> arg={Func(bool)::int28gt args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=8, type='bool'> arg={Func(bool)::int42gt args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=10, type='bool'> arg={Func(bool)::int4gt args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=11, type='bool'> arg={Func(bool)::int48gt args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=12, type='bool'> arg={Func(bool)::int82gt args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=14, type='bool'> arg={Func(bool)::int84gt args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=15, type='bool'> arg={Func(bool)::int8gt args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=16, type='bool'> arg={Func(bool)::int12gt args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=18, type='bool'> arg={Func(bool)::int14gt args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=19, type='bool'> arg={Func(bool)::int18gt args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=20, type='bool'> arg={Func(bool)::int1gt args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int1): kvec=0x14800-15800, expr='n'}]}}]}
+(10 rows)
+
+SELECT id, a>b v1, a>d v2, a>f v3,
+           c>b v4, c>d v5, c>f v6,
+           e>b v7, e>d v8, e>f v9,
+           g>b v10, g>d v11, g>f v12, g>n v13
+  INTO test22g
+  FROM rt_int
+ WHERE id % 6 = 2;
+SET pg_strom.enabled = off;
+SELECT id, a>b v1, a>d v2, a>f v3,
+           c>b v4, c>d v5, c>f v6,
+           e>b v7, e>d v8, e>f v9,
+           g>b v10, g>d v11, g>f v12, g>n v13
+  INTO test22p
+  FROM rt_int
+ WHERE id % 6 = 2;
+(SELECT * FROM test22g EXCEPT ALL SELECT * FROM test22p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test22p EXCEPT ALL SELECT * FROM test22g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+-- '<' : less than operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a<b v1, a<d v2, a<f v3,
+           c<b v4, c<d v5, c<f v6,
+           e<b v7, e<d v8, e<f v9,
+           g<b v10, g<d v11, g<f v12, g<n v13
+  INTO test23g
+  FROM rt_int
+ WHERE id % 6 = 3;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a < b)), ((a < d)), ((a < f)), ((c < b)), ((c < d)), ((c < f)), ((e < b)), ((e < d)), ((e < f)), ((g < b)), ((g < d)), ((g < f)), ((g < n))
+   GPU Projection: id, (a < b), (a < d), (a < f), (c < b), (c < d), (c < f), (e < b), (e < d), (e < f), (g < b), (g < d), (g < f), (g < n)
+   GPU Scan Quals: ((id % 6) = 3) [rows: 2000 -> 10]
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='(a < b)'>, <slot=2, type='int2', expr='a'>, <slot=3, type='int2', expr='b'>, <slot=4, type='bool', expr='(a < d)'>, <slot=5, type='int4', expr='d'>, <slot=6, type='bool', expr='(a < f)'>, <slot=7, type='int8', expr='f'>, <slot=8, type='bool', expr='(c < b)'>, <slot=9, type='int4', expr='c'>, <slot=10, type='bool', expr='(c < d)'>, <slot=11, type='bool', expr='(c < f)'>, <slot=12, type='bool', expr='(e < b)'>, <slot=13, type='int8', expr='e'>, <slot=14, type='bool', expr='(e < d)'>, <slot=15, type='bool', expr='(e < f)'>, <slot=16, type='bool', expr='(g < b)'>, <slot=17, type='int1', expr='g'>, <slot=18, type='bool', expr='(g < d)'>, <slot=19, type='bool', expr='(g < f)'>, <slot=20, type='bool', expr='(g < n)'>, <slot=21, type='int1', expr='n'>
+   KVecs-Buffer: nbytes: 88064, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-3fff, type='int2', expr='a'>, kvec2=<0x4000-57ff, type='int2', expr='b'>, kvec3=<0x5800-7fff, type='int4', expr='d'>, kvec4=<0x8000-c7ff, type='int8', expr='f'>, kvec5=<0xc800-efff, type='int4', expr='c'>, kvec6=<0xf000-137ff, type='int8', expr='e'>, kvec7=<0x13800-147ff, type='int1', expr='g'>, kvec8=<0x14800-157ff, type='int1', expr='n'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='int2' resno=2(a)>, <slot=3, type='int2' resno=3(b)>, <slot=9, type='int4' resno=4(c)>, <slot=5, type='int4' resno=5(d)>, <slot=13, type='int8' resno=6(e)>, <slot=7, type='int8' resno=7(f)>, <slot=17, type='int1' resno=11(g)>, <slot=21, type='int1' resno=18(n)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-3fff, type='int2', expr='a'>, <slot=3, offset=0x4000-57ff, type='int2', expr='b'>, <slot=5, offset=0x5800-7fff, type='int4', expr='d'>, <slot=7, offset=0x8000-c7ff, type='int8', expr='f'>, <slot=9, offset=0xc800-efff, type='int4', expr='c'>, <slot=13, offset=0xf000-137ff, type='int8', expr='e'>, <slot=17, offset=0x13800-147ff, type='int1', expr='g'>, <slot=21, offset=0x14800-157ff, type='int1', expr='n'>]}}}
+   Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='6'}]}, {Const(int4): value='3'}]}
+   Projection OpCode: {Projection: layout=<0,1,4,6,8,10,11,12,14,15,16,18,19,20> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='bool'> arg={Func(bool)::int2lt args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=4, type='bool'> arg={Func(bool)::int24lt args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=6, type='bool'> arg={Func(bool)::int28lt args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=8, type='bool'> arg={Func(bool)::int42lt args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=10, type='bool'> arg={Func(bool)::int4lt args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=11, type='bool'> arg={Func(bool)::int48lt args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=12, type='bool'> arg={Func(bool)::int82lt args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=14, type='bool'> arg={Func(bool)::int84lt args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=15, type='bool'> arg={Func(bool)::int8lt args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=16, type='bool'> arg={Func(bool)::int12lt args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=18, type='bool'> arg={Func(bool)::int14lt args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=19, type='bool'> arg={Func(bool)::int18lt args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=20, type='bool'> arg={Func(bool)::int1lt args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int1): kvec=0x14800-15800, expr='n'}]}}]}
+(10 rows)
+
+SELECT id, a<b v1, a<d v2, a<f v3,
+           c<b v4, c<d v5, c<f v6,
+           e<b v7, e<d v8, e<f v9,
+           g<b v10, g<d v11, g<f v12, g<n v13
+  INTO test23g
+  FROM rt_int
+ WHERE id % 6 = 3;
+SET pg_strom.enabled = off;
+SELECT id, a<b v1, a<d v2, a<f v3,
+           c<b v4, c<d v5, c<f v6,
+           e<b v7, e<d v8, e<f v9,
+           g<b v10, g<d v11, g<f v12, g<n v13
+  INTO test23p
+  FROM rt_int
+ WHERE id % 6 = 3;
+(SELECT * FROM test23g EXCEPT ALL SELECT * FROM test23p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test23p EXCEPT ALL SELECT * FROM test23g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+-- '>=' : greater than or equal to operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a>=b v1, a>=d v2, a>=f v3,
+           c>=b v4, c>=d v5, c>=f v6,
+           e>=b v7, e>=d v8, e>=f v9,
+           g>=b v10, g>=d v11, g>=f v12, g>=n v13
+  INTO test24g
+  FROM rt_int
+ WHERE id % 6 = 4;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a >= b)), ((a >= d)), ((a >= f)), ((c >= b)), ((c >= d)), ((c >= f)), ((e >= b)), ((e >= d)), ((e >= f)), ((g >= b)), ((g >= d)), ((g >= f)), ((g >= n))
+   GPU Projection: id, (a >= b), (a >= d), (a >= f), (c >= b), (c >= d), (c >= f), (e >= b), (e >= d), (e >= f), (g >= b), (g >= d), (g >= f), (g >= n)
+   GPU Scan Quals: ((id % 6) = 4) [rows: 2000 -> 10]
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='(a >= b)'>, <slot=2, type='int2', expr='a'>, <slot=3, type='int2', expr='b'>, <slot=4, type='bool', expr='(a >= d)'>, <slot=5, type='int4', expr='d'>, <slot=6, type='bool', expr='(a >= f)'>, <slot=7, type='int8', expr='f'>, <slot=8, type='bool', expr='(c >= b)'>, <slot=9, type='int4', expr='c'>, <slot=10, type='bool', expr='(c >= d)'>, <slot=11, type='bool', expr='(c >= f)'>, <slot=12, type='bool', expr='(e >= b)'>, <slot=13, type='int8', expr='e'>, <slot=14, type='bool', expr='(e >= d)'>, <slot=15, type='bool', expr='(e >= f)'>, <slot=16, type='bool', expr='(g >= b)'>, <slot=17, type='int1', expr='g'>, <slot=18, type='bool', expr='(g >= d)'>, <slot=19, type='bool', expr='(g >= f)'>, <slot=20, type='bool', expr='(g >= n)'>, <slot=21, type='int1', expr='n'>
+   KVecs-Buffer: nbytes: 88064, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-3fff, type='int2', expr='a'>, kvec2=<0x4000-57ff, type='int2', expr='b'>, kvec3=<0x5800-7fff, type='int4', expr='d'>, kvec4=<0x8000-c7ff, type='int8', expr='f'>, kvec5=<0xc800-efff, type='int4', expr='c'>, kvec6=<0xf000-137ff, type='int8', expr='e'>, kvec7=<0x13800-147ff, type='int1', expr='g'>, kvec8=<0x14800-157ff, type='int1', expr='n'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='int2' resno=2(a)>, <slot=3, type='int2' resno=3(b)>, <slot=9, type='int4' resno=4(c)>, <slot=5, type='int4' resno=5(d)>, <slot=13, type='int8' resno=6(e)>, <slot=7, type='int8' resno=7(f)>, <slot=17, type='int1' resno=11(g)>, <slot=21, type='int1' resno=18(n)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-3fff, type='int2', expr='a'>, <slot=3, offset=0x4000-57ff, type='int2', expr='b'>, <slot=5, offset=0x5800-7fff, type='int4', expr='d'>, <slot=7, offset=0x8000-c7ff, type='int8', expr='f'>, <slot=9, offset=0xc800-efff, type='int4', expr='c'>, <slot=13, offset=0xf000-137ff, type='int8', expr='e'>, <slot=17, offset=0x13800-147ff, type='int1', expr='g'>, <slot=21, offset=0x14800-157ff, type='int1', expr='n'>]}}}
+   Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='6'}]}, {Const(int4): value='4'}]}
+   Projection OpCode: {Projection: layout=<0,1,4,6,8,10,11,12,14,15,16,18,19,20> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='bool'> arg={Func(bool)::int2ge args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=4, type='bool'> arg={Func(bool)::int24ge args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=6, type='bool'> arg={Func(bool)::int28ge args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=8, type='bool'> arg={Func(bool)::int42ge args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=10, type='bool'> arg={Func(bool)::int4ge args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=11, type='bool'> arg={Func(bool)::int48ge args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=12, type='bool'> arg={Func(bool)::int82ge args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=14, type='bool'> arg={Func(bool)::int84ge args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=15, type='bool'> arg={Func(bool)::int8ge args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=16, type='bool'> arg={Func(bool)::int12ge args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=18, type='bool'> arg={Func(bool)::int14ge args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=19, type='bool'> arg={Func(bool)::int18ge args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=20, type='bool'> arg={Func(bool)::int1ge args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int1): kvec=0x14800-15800, expr='n'}]}}]}
+(10 rows)
+
+SELECT id, a>=b v1, a>=d v2, a>=f v3,
+           c>=b v4, c>=d v5, c>=f v6,
+           e>=b v7, e>=d v8, e>=f v9,
+           g>=b v10, g>=d v11, g>=f v12, g>=n v13
+  INTO test24g
+  FROM rt_int
+ WHERE id % 6 = 4;
+SET pg_strom.enabled = off;
+SELECT id, a>=b v1, a>=d v2, a>=f v3,
+           c>=b v4, c>=d v5, c>=f v6,
+           e>=b v7, e>=d v8, e>=f v9,
+           g>=b v10, g>=d v11, g>=f v12, g>=n v13
+  INTO test24p
+  FROM rt_int
+ WHERE id % 6 = 4;
+(SELECT * FROM test24g EXCEPT ALL SELECT * FROM test24p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test24p EXCEPT ALL SELECT * FROM test24g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+-- '<=' : less than or equal to operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a<=b v1, a<=d v2, a<=f v3,
+           c<=b v4, c<=d v5, c<=f v6,
+           e<=b v7, e<=d v8, e<=f v9,
+           g<=b v10, g<=d v11, g<=f v12, g<=n v13
+  INTO test25g
+  FROM rt_int
+ WHERE id % 6 = 5;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a <= b)), ((a <= d)), ((a <= f)), ((c <= b)), ((c <= d)), ((c <= f)), ((e <= b)), ((e <= d)), ((e <= f)), ((g <= b)), ((g <= d)), ((g <= f)), ((g <= n))
+   GPU Projection: id, (a <= b), (a <= d), (a <= f), (c <= b), (c <= d), (c <= f), (e <= b), (e <= d), (e <= f), (g <= b), (g <= d), (g <= f), (g <= n)
+   GPU Scan Quals: ((id % 6) = 5) [rows: 2000 -> 10]
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='(a <= b)'>, <slot=2, type='int2', expr='a'>, <slot=3, type='int2', expr='b'>, <slot=4, type='bool', expr='(a <= d)'>, <slot=5, type='int4', expr='d'>, <slot=6, type='bool', expr='(a <= f)'>, <slot=7, type='int8', expr='f'>, <slot=8, type='bool', expr='(c <= b)'>, <slot=9, type='int4', expr='c'>, <slot=10, type='bool', expr='(c <= d)'>, <slot=11, type='bool', expr='(c <= f)'>, <slot=12, type='bool', expr='(e <= b)'>, <slot=13, type='int8', expr='e'>, <slot=14, type='bool', expr='(e <= d)'>, <slot=15, type='bool', expr='(e <= f)'>, <slot=16, type='bool', expr='(g <= b)'>, <slot=17, type='int1', expr='g'>, <slot=18, type='bool', expr='(g <= d)'>, <slot=19, type='bool', expr='(g <= f)'>, <slot=20, type='bool', expr='(g <= n)'>, <slot=21, type='int1', expr='n'>
+   KVecs-Buffer: nbytes: 88064, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-3fff, type='int2', expr='a'>, kvec2=<0x4000-57ff, type='int2', expr='b'>, kvec3=<0x5800-7fff, type='int4', expr='d'>, kvec4=<0x8000-c7ff, type='int8', expr='f'>, kvec5=<0xc800-efff, type='int4', expr='c'>, kvec6=<0xf000-137ff, type='int8', expr='e'>, kvec7=<0x13800-147ff, type='int1', expr='g'>, kvec8=<0x14800-157ff, type='int1', expr='n'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='int2' resno=2(a)>, <slot=3, type='int2' resno=3(b)>, <slot=9, type='int4' resno=4(c)>, <slot=5, type='int4' resno=5(d)>, <slot=13, type='int8' resno=6(e)>, <slot=7, type='int8' resno=7(f)>, <slot=17, type='int1' resno=11(g)>, <slot=21, type='int1' resno=18(n)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-3fff, type='int2', expr='a'>, <slot=3, offset=0x4000-57ff, type='int2', expr='b'>, <slot=5, offset=0x5800-7fff, type='int4', expr='d'>, <slot=7, offset=0x8000-c7ff, type='int8', expr='f'>, <slot=9, offset=0xc800-efff, type='int4', expr='c'>, <slot=13, offset=0xf000-137ff, type='int8', expr='e'>, <slot=17, offset=0x13800-147ff, type='int1', expr='g'>, <slot=21, offset=0x14800-157ff, type='int1', expr='n'>]}}}
+   Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='6'}]}, {Const(int4): value='5'}]}
+   Projection OpCode: {Projection: layout=<0,1,4,6,8,10,11,12,14,15,16,18,19,20> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='bool'> arg={Func(bool)::int2le args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=4, type='bool'> arg={Func(bool)::int24le args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=6, type='bool'> arg={Func(bool)::int28le args=[{Var(int2): kvec=0x2800-4000, expr='a'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=8, type='bool'> arg={Func(bool)::int42le args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=10, type='bool'> arg={Func(bool)::int4le args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=11, type='bool'> arg={Func(bool)::int48le args=[{Var(int4): kvec=0xc800-f000, expr='c'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=12, type='bool'> arg={Func(bool)::int82le args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=14, type='bool'> arg={Func(bool)::int84le args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=15, type='bool'> arg={Func(bool)::int8le args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=16, type='bool'> arg={Func(bool)::int12le args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int2): kvec=0x4000-5800, expr='b'}]}}, {SaveExpr: <slot=18, type='bool'> arg={Func(bool)::int14le args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int4): kvec=0x5800-8000, expr='d'}]}}, {SaveExpr: <slot=19, type='bool'> arg={Func(bool)::int18le args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int8): kvec=0x8000-c800, expr='f'}]}}, {SaveExpr: <slot=20, type='bool'> arg={Func(bool)::int1le args=[{Var(int1): kvec=0x13800-14800, expr='g'}, {Var(int1): kvec=0x14800-15800, expr='n'}]}}]}
+(10 rows)
+
+SELECT id, a<=b v1, a<=d v2, a<=f v3,
+           c<=b v4, c<=d v5, c<=f v6,
+           e<=b v7, e<=d v8, e<=f v9,
+           g<=b v10, g<=d v11, g<=f v12, g<=n v13
+  INTO test25g
+  FROM rt_int
+ WHERE id % 6 = 5;
+SET pg_strom.enabled = off;
+SELECT id, a<=b v1, a<=d v2, a<=f v3,
+           c<=b v4, c<=d v5, c<=f v6,
+           e<=b v7, e<=d v8, e<=f v9,
+           g<=b v10, g<=d v11, g<=f v12, g<=n v13
+  INTO test25p
+  FROM rt_int
+ WHERE id % 6 = 5;
+(SELECT * FROM test25g EXCEPT ALL SELECT * FROM test25p);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test25p EXCEPT ALL SELECT * FROM test25g);
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----
+(0 rows)
+
+-- bitwise operators
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a&b v1, c&d v2, e&f v3, g&n v13,	-- bitwise AND
+           a|b v4, c|d v5, e|f v6, g|n v14,	-- bitwise OR
+           a#b v7, c#d v8, e#f v9, g#n v15,	-- bitwise XOR
+           ~a v10, ~c v11, ~e v12, ~g v16	-- bitwise NOT
+  INTO test30g
+  FROM rt_int
+ WHERE z BETWEEN -20000.0 AND 20000.0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a & b)), ((c & d)), ((e & f)), ((g & n)), ((a | b)), ((c | d)), ((e | f)), ((g | n)), ((a # b)), ((c # d)), ((e # f)), ((g # n)), ((~ a)), ((~ c)), ((~ e)), ((~ g))
+   GPU Projection: id, (a & b), (c & d), (e & f), (g & n), (a | b), (c | d), (e | f), (g | n), (a # b), (c # d), (e # f), (g # n), (~ a), (~ c), (~ e), (~ g)
+   GPU Scan Quals: ((z >= '-20000'::double precision) AND (z <= '20000'::double precision)) [rows: 2000 -> 1224]
+   KVars-Slot: <slot=0, type='float8', expr='z'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int2', expr='(a & b)'>, <slot=3, type='int2', expr='a'>, <slot=4, type='int2', expr='b'>, <slot=5, type='int4', expr='(c & d)'>, <slot=6, type='int4', expr='c'>, <slot=7, type='int4', expr='d'>, <slot=8, type='int8', expr='(e & f)'>, <slot=9, type='int8', expr='e'>, <slot=10, type='int8', expr='f'>, <slot=11, type='int1', expr='(g & n)'>, <slot=12, type='int1', expr='g'>, <slot=13, type='int1', expr='n'>, <slot=14, type='int2', expr='(a | b)'>, <slot=15, type='int4', expr='(c | d)'>, <slot=16, type='int8', expr='(e | f)'>, <slot=17, type='int1', expr='(g | n)'>, <slot=18, type='int2', expr='(a # b)'>, <slot=19, type='int4', expr='(c # d)'>, <slot=20, type='int8', expr='(e # f)'>, <slot=21, type='int1', expr='(g # n)'>, <slot=22, type='int2', expr='(~ a)'>, <slot=23, type='int4', expr='(~ c)'>, <slot=24, type='int8', expr='(~ e)'>, <slot=25, type='int1', expr='(~ g)'>
+   KVecs-Buffer: nbytes: 106496, ndims: 2, items=[kvec0=<0x0000-47ff, type='float8', expr='z'>, kvec1=<0x4800-6fff, type='int4', expr='id'>, kvec2=<0x7000-87ff, type='int2', expr='a'>, kvec3=<0x8800-9fff, type='int2', expr='b'>, kvec4=<0xa000-c7ff, type='int4', expr='c'>, kvec5=<0xc800-efff, type='int4', expr='d'>, kvec6=<0xf000-137ff, type='int8', expr='e'>, kvec7=<0x13800-17fff, type='int8', expr='f'>, kvec8=<0x18000-18fff, type='int1', expr='g'>, kvec9=<0x19000-19fff, type='int1', expr='n'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='int2' resno=2(a)>, <slot=4, type='int2' resno=3(b)>, <slot=6, type='int4' resno=4(c)>, <slot=7, type='int4' resno=5(d)>, <slot=9, type='int8' resno=6(e)>, <slot=10, type='int8' resno=7(f)>, <slot=0, type='float8' resno=10(z)>, <slot=12, type='int1' resno=11(g)>, <slot=13, type='int1' resno=18(n)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x4800-6fff, type='int4', expr='id'>, <slot=3, offset=0x7000-87ff, type='int2', expr='a'>, <slot=4, offset=0x8800-9fff, type='int2', expr='b'>, <slot=6, offset=0xa000-c7ff, type='int4', expr='c'>, <slot=7, offset=0xc800-efff, type='int4', expr='d'>, <slot=9, offset=0xf000-137ff, type='int8', expr='e'>, <slot=10, offset=0x13800-17fff, type='int8', expr='f'>, <slot=12, offset=0x18000-18fff, type='int1', expr='g'>, <slot=13, offset=0x19000-19fff, type='int1', expr='n'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float8ge args=[{Var(float8): slot=0, expr='z'}, {Const(float8): value='-20000'}]}, {Func(bool)::float8le args=[{Var(float8): slot=0, expr='z'}, {Const(float8): value='20000'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,5,8,11,14,15,16,17,18,19,20,21,22,23,24,25> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x4800-7000, expr='id'}}, {SaveExpr: <slot=2, type='int2'> arg={Func(int2)::int2and args=[{Var(int2): kvec=0x7000-8800, expr='a'}, {Var(int2): kvec=0x8800-a000, expr='b'}]}}, {SaveExpr: <slot=5, type='int4'> arg={Func(int4)::int4and args=[{Var(int4): kvec=0xa000-c800, expr='c'}, {Var(int4): kvec=0xc800-f000, expr='d'}]}}, {SaveExpr: <slot=8, type='int8'> arg={Func(int8)::int8and args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int8): kvec=0x13800-18000, expr='f'}]}}, {SaveExpr: <slot=11, type='int1'> arg={Func(int1)::int1and args=[{Var(int1): kvec=0x18000-19000, expr='g'}, {Var(int1): kvec=0x19000-1a000, expr='n'}]}}, {SaveExpr: <slot=14, type='int2'> arg={Func(int2)::int2or args=[{Var(int2): kvec=0x7000-8800, expr='a'}, {Var(int2): kvec=0x8800-a000, expr='b'}]}}, {SaveExpr: <slot=15, type='int4'> arg={Func(int4)::int4or args=[{Var(int4): kvec=0xa000-c800, expr='c'}, {Var(int4): kvec=0xc800-f000, expr='d'}]}}, {SaveExpr: <slot=16, type='int8'> arg={Func(int8)::int8or args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int8): kvec=0x13800-18000, expr='f'}]}}, {SaveExpr: <slot=17, type='int1'> arg={Func(int1)::int1or args=[{Var(int1): kvec=0x18000-19000, expr='g'}, {Var(int1): kvec=0x19000-1a000, expr='n'}]}}, {SaveExpr: <slot=18, type='int2'> arg={Func(int2)::int2xor args=[{Var(int2): kvec=0x7000-8800, expr='a'}, {Var(int2): kvec=0x8800-a000, expr='b'}]}}, {SaveExpr: <slot=19, type='int4'> arg={Func(int4)::int4xor args=[{Var(int4): kvec=0xa000-c800, expr='c'}, {Var(int4): kvec=0xc800-f000, expr='d'}]}}, {SaveExpr: <slot=20, type='int8'> arg={Func(int8)::int8xor args=[{Var(int8): kvec=0xf000-13800, expr='e'}, {Var(int8): kvec=0x13800-18000, expr='f'}]}}, {SaveExpr: <slot=21, type='int1'> arg={Func(int1)::int1xor args=[{Var(int1): kvec=0x18000-19000, expr='g'}, {Var(int1): kvec=0x19000-1a000, expr='n'}]}}, {SaveExpr: <slot=22, type='int2'> arg={Func(int2)::int2not arg={Var(int2): kvec=0x7000-8800, expr='a'}}}, {SaveExpr: <slot=23, type='int4'> arg={Func(int4)::int4not arg={Var(int4): kvec=0xa000-c800, expr='c'}}}, {SaveExpr: <slot=24, type='int8'> arg={Func(int8)::int8not arg={Var(int8): kvec=0xf000-13800, expr='e'}}}, {SaveExpr: <slot=25, type='int1'> arg={Func(int1)::int1not arg={Var(int1): kvec=0x18000-19000, expr='g'}}}]}
+(10 rows)
+
+SELECT id, a&b v1, c&d v2, e&f v3, g&n v13,	-- bitwise AND
+           a|b v4, c|d v5, e|f v6, g|n v14,	-- bitwise OR
+           a#b v7, c#d v8, e#f v9, g#n v15,	-- bitwise XOR
+           ~a v10, ~c v11, ~e v12, ~g v16	-- bitwise NOT
+  INTO test30g
+  FROM rt_int
+ WHERE z BETWEEN -20000.0 AND 20000.0;
+SET pg_strom.enabled = off;
+SELECT id, a&b v1, c&d v2, e&f v3, g&n v13,	-- bitwise AND
+           a|b v4, c|d v5, e|f v6, g|n v14,	-- bitwise OR
+           a#b v7, c#d v8, e#f v9, g#n v15,	-- bitwise XOR
+           ~a v10, ~c v11, ~e v12, ~g v16	-- bitwise NOT
+  INTO test30p
+  FROM rt_int
+ WHERE z BETWEEN -20000.0 AND 20000.0;
+(SELECT * FROM test30g EXCEPT ALL SELECT * FROM test30p);
+ id | v1 | v2 | v3 | v13 | v4 | v5 | v6 | v14 | v7 | v8 | v9 | v15 | v10 | v11 | v12 | v16 
+----+----+----+----+-----+----+----+----+-----+----+----+----+-----+-----+-----+-----+-----
+(0 rows)
+
+(SELECT * FROM test30p EXCEPT ALL SELECT * FROM test30g);
+ id | v1 | v2 | v3 | v13 | v4 | v5 | v6 | v14 | v7 | v8 | v9 | v15 | v10 | v11 | v12 | v16 
+----+----+----+----+-----+----+----+----+-----+----+----+----+-----+-----+-----+-----+-----
+(0 rows)
+
+-- bit shift
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, a >> (id%10) v1, c >> (id%12) v2, e >> (id%12) v3, g >> (g/64) v7,
+           b << (id%5)  v4, d << (id%7)  v5, f << (id%8)  v6, g << (id % 3) v8
+  INTO test31g
+  FROM rt_int
+ WHERE z > -10000.0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
+   Output: id, ((a >> (id % 10))), ((c >> (id % 12))), ((e >> (id % 12))), ((g >> (g / 64))), ((b << (id % 5))), ((d << (id % 7))), ((f << (id % 8))), ((g << (id % 3)))
+   GPU Projection: id, (a >> (id % 10)), (c >> (id % 12)), (e >> (id % 12)), (g >> (g / 64)), (b << (id % 5)), (d << (id % 7)), (f << (id % 8)), (g << (id % 3))
+   GPU Scan Quals: (z > '-10000'::double precision) [rows: 2000 -> 1303]
+   KVars-Slot: <slot=0, type='float8', expr='z'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int2', expr='(a >> (id % 10))'>, <slot=3, type='int2', expr='a'>, <slot=4, type='int4', expr='(c >> (id % 12))'>, <slot=5, type='int4', expr='c'>, <slot=6, type='int8', expr='(e >> (id % 12))'>, <slot=7, type='int8', expr='e'>, <slot=8, type='int1', expr='(g >> (g / 64))'>, <slot=9, type='int1', expr='g'>, <slot=10, type='int2', expr='(b << (id % 5))'>, <slot=11, type='int2', expr='b'>, <slot=12, type='int4', expr='(d << (id % 7))'>, <slot=13, type='int4', expr='d'>, <slot=14, type='int8', expr='(f << (id % 8))'>, <slot=15, type='int8', expr='f'>, <slot=16, type='int1', expr='(g << (id % 3))'>
+   KVecs-Buffer: nbytes: 102400, ndims: 2, items=[kvec0=<0x0000-47ff, type='float8', expr='z'>, kvec1=<0x4800-6fff, type='int4', expr='id'>, kvec2=<0x7000-87ff, type='int2', expr='a'>, kvec3=<0x8800-afff, type='int4', expr='c'>, kvec4=<0xb000-f7ff, type='int8', expr='e'>, kvec5=<0xf800-107ff, type='int1', expr='g'>, kvec6=<0x10800-11fff, type='int2', expr='b'>, kvec7=<0x12000-147ff, type='int4', expr='d'>, kvec8=<0x14800-18fff, type='int8', expr='f'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='int2' resno=2(a)>, <slot=11, type='int2' resno=3(b)>, <slot=5, type='int4' resno=4(c)>, <slot=13, type='int4' resno=5(d)>, <slot=7, type='int8' resno=6(e)>, <slot=15, type='int8' resno=7(f)>, <slot=0, type='float8' resno=10(z)>, <slot=9, type='int1' resno=11(g)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x4800-6fff, type='int4', expr='id'>, <slot=3, offset=0x7000-87ff, type='int2', expr='a'>, <slot=5, offset=0x8800-afff, type='int4', expr='c'>, <slot=7, offset=0xb000-f7ff, type='int8', expr='e'>, <slot=9, offset=0xf800-107ff, type='int1', expr='g'>, <slot=11, offset=0x10800-11fff, type='int2', expr='b'>, <slot=13, offset=0x12000-147ff, type='int4', expr='d'>, <slot=15, offset=0x14800-18fff, type='int8', expr='f'>]}}}
+   Scan Quals OpCode: {Func(bool)::float8gt args=[{Var(float8): slot=0, expr='z'}, {Const(float8): value='-10000'}]}
+   Projection OpCode: {Projection: layout=<1,2,4,6,8,10,12,14,16> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x4800-7000, expr='id'}}, {SaveExpr: <slot=2, type='int2'> arg={Func(int2)::int2shr args=[{Var(int2): kvec=0x7000-8800, expr='a'}, {Func(int4)::int4mod args=[{Var(int4): kvec=0x4800-7000, expr='id'}, {Const(int4): value='10'}]}]}}, {SaveExpr: <slot=4, type='int4'> arg={Func(int4)::int4shr args=[{Var(int4): kvec=0x8800-b000, expr='c'}, {Func(int4)::int4mod args=[{Var(int4): kvec=0x4800-7000, expr='id'}, {Const(int4): value='12'}]}]}}, {SaveExpr: <slot=6, type='int8'> arg={Func(int8)::int8shr args=[{Var(int8): kvec=0xb000-f800, expr='e'}, {Func(int4)::int4mod args=[{Var(int4): kvec=0x4800-7000, expr='id'}, {Const(int4): value='12'}]}]}}, {SaveExpr: <slot=8, type='int1'> arg={Func(int1)::int1shr args=[{Var(int1): kvec=0xf800-10800, expr='g'}, {Func(int4)::int14div args=[{Var(int1): kvec=0xf800-10800, expr='g'}, {Const(int4): value='64'}]}]}}, {SaveExpr: <slot=10, type='int2'> arg={Func(int2)::int2shl args=[{Var(int2): kvec=0x10800-12000, expr='b'}, {Func(int4)::int4mod args=[{Var(int4): kvec=0x4800-7000, expr='id'}, {Const(int4): value='5'}]}]}}, {SaveExpr: <slot=12, type='int4'> arg={Func(int4)::int4shl args=[{Var(int4): kvec=0x12000-14800, expr='d'}, {Func(int4)::int4mod args=[{Var(int4): kvec=0x4800-7000, expr='id'}, {Const(int4): value='7'}]}]}}, {SaveExpr: <slot=14, type='int8'> arg={Func(int8)::int8shl args=[{Var(int8): kvec=0x14800-19000, expr='f'}, {Func(int4)::int4mod args=[{Var(int4): kvec=0x4800-7000, expr='id'}, {Const(int4): value='8'}]}]}}, {SaveExpr: <slot=16, type='int1'> arg={Func(int1)::int1shl args=[{Var(int1): kvec=0xf800-10800, expr='g'}, {Func(int4)::int4mod args=[{Var(int4): kvec=0x4800-7000, expr='id'}, {Const(int4): value='3'}]}]}}]}
+(10 rows)
+
+SELECT id, a >> (id%10) v1, c >> (id%12) v2, e >> (id%12) v3, g >> (g/64) v7,
+           b << (id%5)  v4, d << (id%7)  v5, f << (id%8)  v6, g << (id % 3) v8
+  INTO test31g
+  FROM rt_int
+ WHERE z > -10000.0;
+SET pg_strom.enabled = off;
+SELECT id, a >> (id%10) v1, c >> (id%12) v2, e >> (id%12) v3, g >> (g/64) v7,
+           b << (id%5)  v4, d << (id%7)  v5, f << (id%8)  v6, g << (id % 3) v8
+  INTO test31p
+  FROM rt_int
+ WHERE z > -10000.0;
+(SELECT * FROM test31g EXCEPT ALL SELECT * FROM test31p);
+ id | v1 | v2 | v3 | v7 | v4 | v5 | v6 | v8 
+----+----+----+----+----+----+----+----+----
+(0 rows)
+
+(SELECT * FROM test31p EXCEPT ALL SELECT * FROM test31g);
+ id | v1 | v2 | v3 | v7 | v4 | v5 | v6 | v8 
+----+----+----+----+----+----+----+----+----
+(0 rows)
+
+-- cleanup temporary resource
+SET client_min_messages = error;
+DROP SCHEMA regtest_dtype_int_temp CASCADE;
