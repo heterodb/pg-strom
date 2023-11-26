@@ -573,6 +573,9 @@ typedef struct
 	} pd[1];
 } codegen_context;
 
+extern Oid		get_int1_type_oid(bool missing_ok);
+extern Oid		get_float2_type_oid(bool missing_ok);
+extern Oid		get_cube_type_oid(bool missing_ok);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 											List *func_args,

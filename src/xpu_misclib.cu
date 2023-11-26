@@ -1485,3 +1485,493 @@ pgfn_network_overlap(XPU_PGFUNCTION_ARGS)
 	}
 	return true;
 }
+
+/* ----------------------------------------------------------------
+ *
+ * cube (alias of earthdistance) data type and functions
+ *
+ * ----------------------------------------------------------------
+ */
+INLINE_FUNCTION(bool)
+IS_POINT(const __NDBOX *cube)
+{
+	return ((__Fetch(&cube->header) & POINT_BIT) != 0);
+}
+
+INLINE_FUNCTION(int)
+DIM(const __NDBOX *cube)
+{
+	return (__Fetch(&cube->header) & DIM_MASK);
+}
+
+INLINE_FUNCTION(double)
+LL_COORD(const __NDBOX *cube, int i)
+{
+	return __Fetch(cube->x + i);
+}
+
+INLINE_FUNCTION(double)
+UR_COORD(const __NDBOX *cube, int i)
+{
+	return __Fetch(cube->x + (IS_POINT(cube) ? i : DIM(cube) + i));
+}
+
+INLINE_FUNCTION(bool)
+xpu_cube_is_valid(kern_context *kcxt, const xpu_cube_t *arg)
+{
+	int		dim;
+
+	if (arg->length < 0)
+	{
+		STROM_CPU_FALLBACK(kcxt, "cube datum is compressed or external");
+		return false;
+	}
+
+	dim = DIM((const __NDBOX *)arg->value);
+	if (arg->length < (IS_POINT((const __NDBOX *)arg->value)
+					   ? offsetof(__NDBOX, x[dim])
+					   : offsetof(__NDBOX, x[2 * dim])))
+	{
+		STROM_ELOG(kcxt, "cube datum is corrupted");
+		return false;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_cube_datum_heap_read(kern_context *kcxt,
+						 const void *addr,
+						 xpu_datum_t *__result)
+{
+	xpu_cube_t *result = (xpu_cube_t *)__result;
+
+	if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
+	{
+		result->value  = (const char *)addr;
+		result->length = -1;
+	}
+	else
+	{
+		result->value  = VARDATA_ANY(addr);
+		result->length = VARSIZE_ANY_EXHDR(addr);
+	}
+	result->expr_ops = &xpu_cube_ops;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_cube_datum_arrow_read(kern_context *kcxt,
+						  const kern_data_store *kds,
+						  const kern_colmeta *cmeta,
+						  uint32_t kds_index,
+						  xpu_datum_t *__result)
+{
+	xpu_cube_t *result = (xpu_cube_t *)__result;
+	int		length;
+
+	if (cmeta->attopts.tag == ArrowType__Binary)
+	{
+		result->value = (const char *)
+			KDS_ARROW_REF_VARLENA32_DATUM(kds, cmeta, kds_index, &length);
+		result->length = length;
+		result->expr_ops = &xpu_cube_ops;
+	}
+	else if (cmeta->attopts.tag == ArrowType__LargeBinary)
+	{
+		result->value = (const char *)
+			KDS_ARROW_REF_VARLENA64_DATUM(kds, cmeta, kds_index, &length);
+		result->length = length;
+		result->expr_ops = &xpu_cube_ops;
+	}
+	else
+	{
+		STROM_ELOG(kcxt, "not a mappable Arrow data type for cube");
+		return false;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_cube_datum_kvec_load(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id,
+						 xpu_datum_t *__result)
+{
+	const kvec_cube_t *kvecs = (const kvec_cube_t *)__kvecs;
+	xpu_cube_t *result = (xpu_cube_t *)__result;
+
+	result->expr_ops = &xpu_cube_ops;
+	result->length = kvecs->length[kvecs_id];
+	result->value  = kvecs->values[kvecs_id];
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_cube_datum_kvec_save(kern_context *kcxt,
+						 const xpu_datum_t *__xdatum,
+						 kvec_datum_t *__kvecs,
+						 uint32_t kvecs_id)
+{
+	const xpu_cube_t *xdatum = (const xpu_cube_t *)__xdatum;
+	kvec_cube_t *kvecs = (kvec_cube_t *)__kvecs;
+
+	kvecs->length[kvecs_id] = xdatum->length;
+	kvecs->values[kvecs_id] = xdatum->value;
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_cube_datum_kvec_copy(kern_context *kcxt,
+						 const kvec_datum_t *__kvecs_src,
+						 uint32_t kvecs_src_id,
+						 kvec_datum_t *__kvecs_dst,
+						 uint32_t kvecs_dst_id)
+{
+	const kvec_cube_t *kvecs_src = (const kvec_cube_t *)__kvecs_src;
+	kvec_cube_t *kvecs_dst = (kvec_cube_t *)__kvecs_dst;
+
+	kvecs_dst->length[kvecs_dst_id] = kvecs_src->length[kvecs_src_id];
+	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
+    return true;
+}
+
+STATIC_FUNCTION(int)
+xpu_cube_datum_write(kern_context *kcxt,
+					 char *buffer,
+					 const kern_colmeta *cmeta,
+					 const xpu_datum_t *__arg)
+{
+	const xpu_cube_t *arg = (const xpu_cube_t *)__arg;
+	int		nbytes;
+
+	if (arg->length < 0)
+	{
+		nbytes = VARSIZE_ANY(arg->value);
+		if (buffer)
+			memcpy(buffer, arg->value, nbytes);
+	}
+	else
+	{
+		nbytes = VARHDRSZ + arg->length;
+		if (buffer)
+		{
+			memcpy(buffer+VARHDRSZ, arg->value, arg->length);
+			SET_VARSIZE(buffer, nbytes);
+		}
+	}
+	return nbytes;
+}
+
+STATIC_FUNCTION(bool)
+xpu_cube_datum_hash(kern_context *kcxt,
+					uint32_t *p_hash,
+					xpu_datum_t *__arg)
+{
+	xpu_cube_t *arg = (xpu_cube_t *)__arg;
+
+	if (XPU_DATUM_ISNULL(arg))
+		*p_hash = 0;
+	else if (xpu_cube_is_valid(kcxt, arg))
+		*p_hash = pg_hash_any(arg->value, arg->length);
+	else
+		return false;
+	return true;
+}
+
+STATIC_FUNCTION(int)
+pg_cube_cmp_v0(const __NDBOX *a, const __NDBOX *b)
+{
+	int		dim = Min(DIM(a), DIM(b));
+
+	/* compare the common dimensions */
+	for (int i = 0; i < dim; i++)
+	{
+		if (Min(LL_COORD(a,i), UR_COORD(a,i)) > Min(LL_COORD(b,i), UR_COORD(b,i)))
+			return 1;
+		if (Min(LL_COORD(a,i), UR_COORD(a,i)) < Min(LL_COORD(b,i), UR_COORD(b,i)))
+			return -1;
+	}
+	for (int i = 0; i < dim; i++)
+	{
+		if (Max(LL_COORD(a,i), UR_COORD(a,i)) > Max(LL_COORD(b,i), UR_COORD(b,i)))
+			return 1;
+		if (Max(LL_COORD(a,i), UR_COORD(a,i)) < Max(LL_COORD(b,i), UR_COORD(b,i)))
+			return -1;
+	}
+
+	/* compare extra dimensions to zero */
+	if (DIM(a) > DIM(b))
+	{
+		for (int i = dim; i < DIM(a); i++)
+		{
+			if (Min(LL_COORD(a,i), UR_COORD(a,i)) > 0)
+				return 1;
+			if (Min(LL_COORD(a,i), UR_COORD(a,i)) < 0)
+				return -1;
+		}
+		for (int i = dim; i < DIM(a); i++)
+		{
+			if (Max(LL_COORD(a, i), UR_COORD(a, i)) > 0)
+				return 1;
+			if (Max(LL_COORD(a, i), UR_COORD(a, i)) < 0)
+				return -1;
+		}
+
+		/*
+		 * if all common dimensions are equal, the cube with more dimensions
+		 * wins
+		 */
+		return 1;
+	}
+	if (DIM(a) < DIM(b))
+	{
+		for (int i = dim; i < DIM(b); i++)
+		{
+			if (Min(LL_COORD(b,i), UR_COORD(b,i)) > 0)
+				return -1;
+			if (Min(LL_COORD(b,i), UR_COORD(b,i)) < 0)
+				return 1;
+		}
+		for (int i = dim; i < DIM(b); i++)
+		{
+			if (Max(LL_COORD(b,i), UR_COORD(b,i)) > 0)
+				return -1;
+			if (Max(LL_COORD(b,i), UR_COORD(b,i)) < 0)
+				return 1;
+		}
+
+		/*
+		 * if all common dimensions are equal, the cube with more dimensions
+		 * wins
+		 */
+		return -1;
+	}
+	/* They're really equal */
+	return 0;
+}
+
+STATIC_FUNCTION(bool)
+xpu_cube_datum_comp(kern_context *kcxt,
+					int *p_comp,
+					xpu_datum_t *__a,
+					xpu_datum_t *__b)
+{
+	const xpu_cube_t *a = (const xpu_cube_t *)__a;
+	const xpu_cube_t *b = (const xpu_cube_t *)__b;	
+
+	if (!xpu_cube_is_valid(kcxt, a) ||
+		!xpu_cube_is_valid(kcxt, b))
+		return false;
+
+	*p_comp = pg_cube_cmp_v0((const __NDBOX *)a->value,
+							 (const __NDBOX *)b->value);
+	return true;
+}
+PGSTROM_SQLTYPE_OPERATORS(cube, false, 8, -1);
+
+PUBLIC_FUNCTION(bool)
+pgfn_cube_eq(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(bool, cube, arg1, cube, arg2);
+
+	if (XPU_DATUM_ISNULL(&arg1) || XPU_DATUM_ISNULL(&arg2))
+		result->expr_ops = NULL;
+	else if (!xpu_cube_is_valid(kcxt, &arg1) ||
+			 !xpu_cube_is_valid(kcxt, &arg2))
+		return false;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = (pg_cube_cmp_v0((const __NDBOX *)arg1.value,
+										(const __NDBOX *)arg2.value) == 0);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_cube_ne(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(bool, cube, arg1, cube, arg2);
+
+	if (XPU_DATUM_ISNULL(&arg1) || XPU_DATUM_ISNULL(&arg2))
+		result->expr_ops = NULL;
+	else if (!xpu_cube_is_valid(kcxt, &arg1) ||
+			 !xpu_cube_is_valid(kcxt, &arg2))
+		return false;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = (pg_cube_cmp_v0((const __NDBOX *)arg1.value,
+										(const __NDBOX *)arg2.value) != 0);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_cube_lt(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(bool, cube, arg1, cube, arg2);
+
+	if (XPU_DATUM_ISNULL(&arg1) || XPU_DATUM_ISNULL(&arg2))
+		result->expr_ops = NULL;
+	else if (!xpu_cube_is_valid(kcxt, &arg1) ||
+			 !xpu_cube_is_valid(kcxt, &arg2))
+		return false;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = (pg_cube_cmp_v0((const __NDBOX *)arg1.value,
+										(const __NDBOX *)arg2.value) < 0);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_cube_gt(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(bool, cube, arg1, cube, arg2);
+
+	if (XPU_DATUM_ISNULL(&arg1) || XPU_DATUM_ISNULL(&arg2))
+		result->expr_ops = NULL;
+	else if (!xpu_cube_is_valid(kcxt, &arg1) ||
+			 !xpu_cube_is_valid(kcxt, &arg2))
+		return false;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = (pg_cube_cmp_v0((const __NDBOX *)arg1.value,
+										(const __NDBOX *)arg2.value) > 0);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_cube_le(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(bool, cube, arg1, cube, arg2);
+
+	if (XPU_DATUM_ISNULL(&arg1) || XPU_DATUM_ISNULL(&arg2))
+		result->expr_ops = NULL;
+	else if (!xpu_cube_is_valid(kcxt, &arg1) ||
+			 !xpu_cube_is_valid(kcxt, &arg2))
+		return false;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = (pg_cube_cmp_v0((const __NDBOX *)arg1.value,
+										(const __NDBOX *)arg2.value) <= 0);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_cube_ge(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(bool, cube, arg1, cube, arg2);
+
+	if (XPU_DATUM_ISNULL(&arg1) || XPU_DATUM_ISNULL(&arg2))
+		result->expr_ops = NULL;
+	else if (!xpu_cube_is_valid(kcxt, &arg1) ||
+			 !xpu_cube_is_valid(kcxt, &arg2))
+		return false;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = (pg_cube_cmp_v0((const __NDBOX *)arg1.value,
+										(const __NDBOX *)arg2.value) >= 0);
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+pg_cube_contains_v0(const __NDBOX *a, const __NDBOX *b)
+{
+	if (DIM(a) < DIM(b))
+	{
+		/*
+		 * the further comparisons will make sense if the excess dimensions of
+		 * (b) were zeroes Since both UL and UR coordinates must be zero, we
+		 * can check them all without worrying about which is which.
+		 */
+		for (int i = DIM(a); i < DIM(b); i++)
+		{
+			if (LL_COORD(b, i) != 0)
+				return false;
+			if (UR_COORD(b, i) != 0)
+				return false;
+        }
+	}
+	/* Can't care less about the excess dimensions of (a), if any */
+	for (int i = 0; i < Min(DIM(a), DIM(b)); i++)
+	{
+		if (Min(LL_COORD(a, i), UR_COORD(a, i)) >
+			Min(LL_COORD(b, i), UR_COORD(b, i)))
+			return false;
+		if (Max(LL_COORD(a, i), UR_COORD(a, i)) <
+			Max(LL_COORD(b, i), UR_COORD(b, i)))
+			return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_cube_contains(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(bool, cube, arg1, cube, arg2);
+
+	if (XPU_DATUM_ISNULL(&arg1) || XPU_DATUM_ISNULL(&arg2))
+		result->expr_ops = NULL;
+	else if (!xpu_cube_is_valid(kcxt, &arg1) ||
+			 !xpu_cube_is_valid(kcxt, &arg2))
+		return false;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = pg_cube_contains_v0((const __NDBOX *)arg1.value,
+											(const __NDBOX *)arg2.value);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_cube_contained(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(bool, cube, arg1, cube, arg2);
+
+	if (XPU_DATUM_ISNULL(&arg1) || XPU_DATUM_ISNULL(&arg2))
+		result->expr_ops = NULL;
+	else if (!xpu_cube_is_valid(kcxt, &arg1) ||
+			 !xpu_cube_is_valid(kcxt, &arg2))
+		return false;
+	else
+	{
+		result->expr_ops = &xpu_bool_ops;
+		result->value = pg_cube_contains_v0((const __NDBOX *)arg2.value,
+											(const __NDBOX *)arg1.value);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+pgfn_cube_ll_coord(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS2(float8, cube, cval, int4, ival);
+
+	if (XPU_DATUM_ISNULL(&cval) || XPU_DATUM_ISNULL(&ival))
+		result->expr_ops = NULL;
+	else if (!xpu_cube_is_valid(kcxt, &cval))
+		return false;
+	else
+	{
+		const __NDBOX  *c = (const __NDBOX *)cval.value;
+		int				n = ival.value;
+
+		if (DIM(c) >= n && n > 0)
+			result->value = Max(LL_COORD(c, n-1),
+								UR_COORD(c, n-1));
+		else
+			result->value = 0.0;
+		result->expr_ops = &xpu_float8_ops;
+	}
+	return true;
+}
