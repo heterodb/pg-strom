@@ -2067,18 +2067,20 @@ codegen_casewhen_expression(codegen_context *context,
 			return -1;
 	}
 	/* CASE <expression> */
-	if (buf && caseexpr->arg)
+	if (caseexpr->arg)
 	{
-		kexp.u.casewhen.case_comp = (__appendZeroStringInfo(buf, 0) - pos);
+		if (buf)
+			kexp.u.casewhen.case_comp = (__appendZeroStringInfo(buf, 0) - pos);
 		if (codegen_expression_walker(context, buf,
 									  curr_depth,
 									  caseexpr->arg) < 0)
 			return -1;
 	}
 	/* ELSE <expression> */
-	if (buf && caseexpr->defresult)
+	if (caseexpr->defresult)
 	{
-		kexp.u.casewhen.case_else = (__appendZeroStringInfo(buf, 0) - pos);
+		if (buf)
+			kexp.u.casewhen.case_else = (__appendZeroStringInfo(buf, 0) - pos);
 		if (codegen_expression_walker(context, buf,
 									  curr_depth,
 									  caseexpr->defresult) < 0)
