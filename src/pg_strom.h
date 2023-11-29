@@ -348,7 +348,6 @@ typedef struct
 	/* pg-strom's unique plan-id */
 	uint64_t			query_plan_id;
 	/* control variables to detect the last plan-node at parallel execution */
-	//pg_atomic_uint32	scan_task_control;
 	pg_atomic_uint32	parallel_task_control;
 	pg_atomic_uint32	__rjoin_exit_count;
 	/* statistics */
@@ -358,6 +357,8 @@ typedef struct
 	pg_atomic_uint64	source_ntuples_raw;	/* # of raw tuples in the base relation */
 	pg_atomic_uint64	source_ntuples_in;	/* # of tuples survived from WHERE-quals */
 	pg_atomic_uint64	result_ntuples;		/* # of tuples returned from xPU */
+	/* for parallel-scan */
+	uint32_t			parallel_scan_desc_offset;
 	/* for arrow_fdw */
 	pg_atomic_uint32	arrow_rbatch_index;
 	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */

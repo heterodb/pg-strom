@@ -745,20 +745,29 @@ static void
 pgstromTaskStateResetScan(pgstromTaskState *pts)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
+	TableScanDesc scan = pts->css.ss.ss_currentScanDesc;
 	int		num_devs = 0;
 
 	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 		num_devs = numGpuDevAttrs;
 	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 		num_devs = DpuStorageEntryCount();
-	
+	else
+		elog(ERROR, "Bug? no GPU/DPUs are in use");
+
 	pg_atomic_write_u32(&ps_state->parallel_task_control, 0);
-	pg_atomic_write_u32(&ps_state->__rjoin_exit_count, 0);
-	pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
-	pts->rjoin_devs_count = (pg_atomic_uint32 *)
-		((char *)ps_state + MAXALIGN(offsetof(pgstromSharedState,
-                                              inners[pts->num_rels])));
-	memset(pts->rjoin_devs_count, 0, sizeof(pg_atomic_uint32) * num_devs);
+	pg_atomic_write_u32(pts->rjoin_exit_count, 0);
+	for (int i=0; i < num_devs; i++)
+		pg_atomic_write_u32(pts->rjoin_devs_count + i, 0);
+	if (ps_state->ss_handle == DSM_HANDLE_INVALID)
+		table_rescan(scan, NULL);
+	else
+	{
+		Relation	rel = pts->css.ss.ss_currentRelation;
+		ParallelTableScanDesc pscan = (ParallelTableScanDesc)
+			((char *)ps_state + ps_state->parallel_scan_desc_offset);
+		table_parallelscan_reinitialize(rel, pscan);
+	}
 }
 
 /*
@@ -1911,6 +1920,7 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 
 			table_parallelscan_initialize(relation, pdesc, snapshot);
 			scan = table_beginscan_parallel(relation, pdesc);
+			ps_state->parallel_scan_desc_offset = ((char *)pdesc - (char *)ps_state);
 		}
 	}
 	else

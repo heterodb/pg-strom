@@ -2365,6 +2365,7 @@ xpu_internal_datum_kvec_load(kern_context *kcxt,
 	const kvec_internal_t *kvecs = (const kvec_internal_t *)__kvecs;
 	xpu_internal_t *result = (xpu_internal_t *)__result;
 
+	result->expr_ops = &xpu_internal_ops;
 	result->value = kvecs->values[kvecs_id];
 	return true;
 }
