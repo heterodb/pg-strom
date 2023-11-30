@@ -175,7 +175,7 @@ pgfn_pi(XPU_PGFUNCTION_ARGS)
 	KEXP_PROCESS_ARGS0(float8);
 
 	result->expr_ops = &xpu_float8_ops;
-	result->value = M_PI;
+	result->value = 3.14159265358979323846;
 	return true;
 }
 
