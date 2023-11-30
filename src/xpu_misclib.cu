@@ -142,7 +142,7 @@ pgfn_ln(XPU_PGFUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(bool)
-pgfn_dlog1(XPU_PGFUNCTION_ARGS)
+pgfn_dlog10(XPU_PGFUNCTION_ARGS)
 {
 	KEXP_PROCESS_ARGS1(float8, float8, fval);
 
@@ -161,24 +161,12 @@ pgfn_dlog1(XPU_PGFUNCTION_ARGS)
 	else
 	{
 		result->expr_ops = &xpu_float8_ops;
-		result->value = log(fval.value);
+		result->value = log10(fval.value);
 		CHECKFLOATVAL(kcxt, result->value,
 					  isinf(fval.value),
 					  fval.value != 1.0);
 	}
 	return true;
-}
-
-PUBLIC_FUNCTION(bool)
-pgfn_log(XPU_PGFUNCTION_ARGS)
-{
-	return pgfn_dlog1(kcxt, kexp, __result);
-}
-
-PUBLIC_FUNCTION(bool)
-pgfn_dlog10(XPU_PGFUNCTION_ARGS)
-{
-	return pgfn_dlog1(kcxt, kexp, __result);
 }
 
 PUBLIC_FUNCTION(bool)
@@ -192,7 +180,7 @@ pgfn_pi(XPU_PGFUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(bool)
-pgfn_power(XPU_PGFUNCTION_ARGS)
+pgfn_dpow(XPU_PGFUNCTION_ARGS)
 {
 	KEXP_PROCESS_ARGS2(float8, float8, fval, float8, pval);
 
@@ -217,19 +205,7 @@ pgfn_power(XPU_PGFUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(bool)
-pgfn_pow(XPU_PGFUNCTION_ARGS)
-{
-	return pgfn_power(kcxt,kexp,__result);
-}
-
-PUBLIC_FUNCTION(bool)
-pgfn_dpow(XPU_PGFUNCTION_ARGS)
-{
-	return pgfn_power(kcxt,kexp,__result);
-}
-
-PUBLIC_FUNCTION(bool)
-pgfn_round(XPU_PGFUNCTION_ARGS)
+pgfn_dround(XPU_PGFUNCTION_ARGS)
 {
 	KEXP_PROCESS_ARGS1(float8, float8, fval);
 
@@ -241,12 +217,6 @@ pgfn_round(XPU_PGFUNCTION_ARGS)
 		result->value = rint(fval.value);
 	}
 	return true;
-}
-
-PUBLIC_FUNCTION(bool)
-pgfn_dround(XPU_PGFUNCTION_ARGS)
-{
-	return pgfn_round(kcxt, kexp, __result);
 }
 
 PUBLIC_FUNCTION(bool)
@@ -270,7 +240,7 @@ pgfn_sign(XPU_PGFUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(bool)
-pgfn_sqrt(XPU_PGFUNCTION_ARGS)
+pgfn_dsqrt(XPU_PGFUNCTION_ARGS)
 {
 	KEXP_PROCESS_ARGS1(float8, float8, fval);
 
@@ -293,13 +263,7 @@ pgfn_sqrt(XPU_PGFUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(bool)
-pgfn_dsqrt(XPU_PGFUNCTION_ARGS)
-{
-	return pgfn_sqrt(kcxt, kexp, __result);
-}
-
-PUBLIC_FUNCTION(bool)
-pgfn_trunc(XPU_PGFUNCTION_ARGS)
+pgfn_dtrunc(XPU_PGFUNCTION_ARGS)
 {
 	KEXP_PROCESS_ARGS1(float8, float8, fval);
 
@@ -314,12 +278,6 @@ pgfn_trunc(XPU_PGFUNCTION_ARGS)
 			result->value = -floor(-fval.value);
 	}
 	return true;
-}
-
-PUBLIC_FUNCTION(bool)
-pgfn_dtrunc(XPU_PGFUNCTION_ARGS)
-{
-	return pgfn_trunc(kcxt, kexp, __result);
 }
 
 /*
@@ -337,7 +295,7 @@ pgfn_degrees(XPU_PGFUNCTION_ARGS)
 	else
 	{
 		result->expr_ops = &xpu_float8_ops;
-		result->value = fval.value / 0.0174532925199432957692;
+		result->value = fval.value / RADIANS_PER_DEGREE;
 		CHECKFLOATVAL(kcxt, result->value,
 					  isinf(fval.value),
 					  fval.value == 0.0);
@@ -355,7 +313,7 @@ pgfn_radians(XPU_PGFUNCTION_ARGS)
 	else
 	{
 		result->expr_ops = &xpu_float8_ops;
-		result->value = fval.value * 0.0174532925199432957692;
+		result->value = fval.value * RADIANS_PER_DEGREE;
 		CHECKFLOATVAL(kcxt, result->value,
 					  isinf(fval.value),
 					  fval.value == 0.0);
@@ -510,7 +468,7 @@ pgfn_sin(XPU_PGFUNCTION_ARGS)
 			result->value = DBL_NAN;
 		else
 		{
-			result->value = cos(fval.value);
+			result->value = sin(fval.value);
 			CHECKFLOATVAL(kcxt, result->value, false, true);
 		}
 	}
