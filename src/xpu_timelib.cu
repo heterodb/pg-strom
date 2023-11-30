@@ -896,6 +896,7 @@ xpu_interval_datum_kvec_load(kern_context *kcxt,
 	const kvec_interval_t *kvecs = (const kvec_interval_t *)__kvecs;
 	xpu_interval_t *result = (xpu_interval_t *)__result;
 
+	result->expr_ops    = &xpu_interval_ops;
 	result->value.time  = kvecs->values[kvecs_id].time;
 	result->value.day   = kvecs->values[kvecs_id].day;
 	result->value.month = kvecs->values[kvecs_id].month;
