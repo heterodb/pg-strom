@@ -109,19 +109,49 @@ static gpuServSharedState  *gpuserv_shared_state = NULL;
 static int					__pgstrom_max_async_tasks_dummy;
 static bool					__gpuserv_debug_output_dummy;
 
-#define __GpuServDebug(fmt,...)											\
+#define GpuServDebug(fmt, ...)											\
 	do {																\
 		if (gpuserv_shared_state &&										\
 			pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0) \
 		{																\
 			const char *__fname = __FILE__;								\
+																		\
 			for (const char *__pos = __fname; *__pos != '\0'; __pos++)	\
 			{															\
 				if (__pos[0] == '/' && __pos[1] != '\0')				\
 					__fname = __pos + 1;								\
 			}															\
-			fprintf(stderr, "GpuServ: " fmt " (%s:%d)\n",				\
+			fprintf(stderr, "gpuserv: " fmt " (%s:%d)\n",				\
 					##__VA_ARGS__, __fname, __LINE__);					\
+		}																\
+	} while(0)
+
+#define GpuServDebugExtra(fmt, ...)										\
+	do {																\
+		if (gpuserv_shared_state &&										\
+			pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0) \
+		{																\
+			const char *filename;										\
+			uint32_t	lineno;											\
+			int			errcode;										\
+			char		buffer[2048];									\
+																		\
+			errcode = heterodbExtraGetError(&filename,					\
+											&lineno,					\
+											NULL,						\
+											buffer, sizeof(buffer));	\
+			if (errcode == 0)											\
+				fprintf(stderr, "gpuserv: " fmt "\n", ##__VA_ARGS__);	\
+			else														\
+			{															\
+				for (const char *__pos = filename; *__pos != '\0'; __pos++)	\
+				{														\
+					if (__pos[0] == '/' && __pos[1] != '\0')			\
+						filename = __pos + 1;							\
+				}														\
+				fprintf(stderr, "gpuserv: " fmt " [%s] (code=%d, %s:%d)\n",	\
+						buffer, ##__VA_ARGS__, errcode, filename, lineno); \
+			}															\
 		}																\
 	} while(0)
 
@@ -253,7 +283,10 @@ __gpuMemAllocFromSegment(gpuMemoryPool *pool,
 			{
 				buddy = calloc(1, sizeof(gpuMemChunk));
 				if (!buddy)
+				{
+					GpuServDebug("out of memory");
 					return NULL;	/* out of memory */
+				}
 				chunk->__length -= surplus;
 
 				buddy->mseg   = mseg;
@@ -299,18 +332,29 @@ __gpuMemAllocNewSegment(gpuMemoryPool *pool, size_t segment_sz)
 		rc = cuMemAllocManaged(&mseg->devptr, mseg->segment_sz,
 							   CU_MEM_ATTACH_GLOBAL);
 		if (rc != CUDA_SUCCESS)
+		{
+			GpuServDebug("failed on cuMemAllocManaged(sz=%lu): %s",
+						 mseg->segment_sz, cuStrError(rc));
 			goto error;
+		}
 		memset((void *)mseg->devptr, 0, mseg->segment_sz);
 	}
 	else
 	{
 		rc = cuMemAlloc(&mseg->devptr, mseg->segment_sz);
 		if (rc != CUDA_SUCCESS)
+		{
+			GpuServDebug("failed on cuMemAlloc(sz=%lu): %s",
+						 mseg->segment_sz, cuStrError(rc));
 			goto error;
+		}
 		if (!gpuDirectMapGpuMemory(mseg->devptr,
 								   mseg->segment_sz,
 								   &mseg->iomap_handle))
+		{
+			GpuServDebugExtra("failed on gpuDirectMapGpuMemory");
 			goto error;
+		}
 	}
 	chunk->mseg   = mseg;
 	chunk->__base = mseg->devptr;
@@ -357,7 +401,12 @@ __gpuMemAllocCommon(gpuMemoryPool *pool, size_t bytesize)
 	segment_sz = ((size_t)pgstrom_gpu_mempool_segment_sz_kb << 10);
 	if (segment_sz < bytesize)
 		segment_sz = bytesize;
-	if (pool->total_sz + segment_sz <= pool->hard_limit)
+	/*
+	 * total consumption of mapped GPU memory must be less than
+	 * the hard-limit of the memory pool.
+	 */
+	if (pool->is_managed ||
+		pool->total_sz + segment_sz <= pool->hard_limit)
 	{
 		gpuMemorySegment *mseg = __gpuMemAllocNewSegment(pool, segment_sz);
 
@@ -491,8 +540,8 @@ __gpuMemoryPoolMaintenanceTask(gpuContext *gcontext, gpuMemoryPool *pool)
 					   chunk->free_chain.next);
 				free(chunk);
 			}
-			__GpuServDebug("GPU-%d: i/o mapped device memory %lu bytes released",
-						   gcontext->cuda_dindex, mseg->segment_sz);
+			GpuServDebug("GPU-%d: i/o mapped device memory %lu bytes released",
+						 gcontext->cuda_dindex, mseg->segment_sz);
 			Assert(pool->total_sz >= mseg->segment_sz);
 			pool->total_sz -= mseg->segment_sz;
 			free(mseg);
@@ -567,19 +616,19 @@ __putGpuQueryBufferNoLock(gpuQueryBuffer *gq_buf)
 		{
 			rc = cuMemFree(gq_buf->m_kmrels);
 			if (rc != CUDA_SUCCESS)
-				__GpuServDebug("failed on cuMemFree: %s", cuStrError(rc));
+				GpuServDebug("failed on cuMemFree: %s", cuStrError(rc));
 		}
 		if (gq_buf->h_kmrels)
 		{
 			if (munmap(gq_buf->h_kmrels,
 					   gq_buf->kmrels_sz) != 0)
-				__GpuServDebug("failed on munmap: %m");
+				GpuServDebug("failed on munmap: %m");
 		}
 		if (gq_buf->m_kds_final)
 		{
 			rc = cuMemFree(gq_buf->m_kds_final);
 			if (rc != CUDA_SUCCESS)
-				__GpuServDebug("failed on cuMemFree: %s", cuStrError(rc));
+				GpuServDebug("failed on cuMemFree: %s", cuStrError(rc));
 		}
 		dlist_delete(&gq_buf->chain);
 		free(gq_buf);
@@ -827,8 +876,8 @@ __expandGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 			   (char *)kds_old + kds_old->length - sz, sz);
 
 		/* swap them */
-		__GpuServDebug("kds_final expand: %lu => %lu\n",
-					   kds_old->length, kds_new->length);
+		GpuServDebug("kds_final expand: %lu => %lu\n",
+					 kds_old->length, kds_new->length);
 		cuMemFree(gq_buf->m_kds_final);
 		gq_buf->m_kds_final = m_devptr;
 		gq_buf->m_kds_final_length = length;
@@ -1229,11 +1278,11 @@ __gpuClientELog(gpuClient *gclient,
 	/* unable to continue GPU service, so try to restart */
 	if (errcode == ERRCODE_DEVICE_FATAL)
 	{
-		__GpuServDebug("(%s:%d, %s) GPU fatal - %s\n",
-					   resp.u.error.filename,
-					   resp.u.error.lineno,
-					   resp.u.error.funcname,
-					   resp.u.error.message);
+		GpuServDebug("(%s:%d, %s) GPU fatal - %s\n",
+					 resp.u.error.filename,
+					 resp.u.error.lineno,
+					 resp.u.error.funcname,
+					 resp.u.error.message);
 		gpuserv_bgworker_got_signal |= (1 << SIGHUP);
 		pg_memory_barrier();
 		SetLatch(MyLatch);
@@ -1975,7 +2024,7 @@ resume_kernel:
 			/* restore warp context from the previous state */
 			kgtask->resume_context = true;
 			kgtask->suspend_count = 0;
-			__GpuServDebug("suspend / resume happen\n");
+			GpuServDebug("suspend / resume happen\n");
 			if (kds_final_locked)
 				pthreadRWLockUnlock(&gq_buf->m_kds_final_rwlock);
 			goto resume_kernel;
@@ -2094,8 +2143,8 @@ gpuservGpuCacheManager(void *__arg)
 	MY_EVENT_PER_THREAD		= NULL;
 	pg_memory_barrier();
 
-	__GpuServDebug("GPU-%d GpuCache manager thread launched.",
-				   MY_DINDEX_PER_THREAD);
+	GpuServDebug("GPU-%d GpuCache manager thread launched.",
+				 MY_DINDEX_PER_THREAD);
 	
 	gpucacheManagerEventLoop(gcontext->cuda_dindex,
 							 gcontext->cuda_context,
@@ -2107,8 +2156,8 @@ gpuservGpuCacheManager(void *__arg)
 	pthreadMutexUnlock(&gcontext->worker_lock);
 	free(gworker);
 
-	__GpuServDebug("GPU-%d GpuCache manager terminated.",
-				   MY_DINDEX_PER_THREAD);
+	GpuServDebug("GPU-%d GpuCache manager terminated.",
+				 MY_DINDEX_PER_THREAD);
 	return NULL;
 }
 
@@ -2207,7 +2256,7 @@ gpuservGpuWorkerMain(void *__arg)
 	MY_EVENT_PER_THREAD		= cuda_event;
 	pg_memory_barrier();
 
-	__GpuServDebug("GPU-%d worker thread launched\n", MY_DINDEX_PER_THREAD);
+	GpuServDebug("GPU-%d worker thread launched\n", MY_DINDEX_PER_THREAD);
 	
 	pthreadMutexLock(&gcontext->lock);
 	while (!gpuServiceGoingTerminate() && !gworker->termination)
@@ -2276,7 +2325,7 @@ gpuservGpuWorkerMain(void *__arg)
 	cuStreamDestroy(cuda_stream);
 	free(gworker);
 
-	__GpuServDebug("GPU-%d worker thread launched\n", MY_DINDEX_PER_THREAD);
+	GpuServDebug("GPU-%d worker thread launched\n", MY_DINDEX_PER_THREAD);
 
 	return NULL;
 }
@@ -2295,8 +2344,8 @@ gpuservMonitorClient(void *__priv)
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 	{
-		__GpuServDebug("[%s] failed on cuCtxSetCurrent: %s\n",
-					   elabel, cuStrError(rc));
+		GpuServDebug("[%s] failed on cuCtxSetCurrent: %s\n",
+					 elabel, cuStrError(rc));
 		goto out;
 	}
 	GpuWorkerCurrentContext = gcontext;
@@ -2315,7 +2364,7 @@ gpuservMonitorClient(void *__priv)
 		{
 			if (errno == EINTR)
 				continue;
-			__GpuServDebug("[%s] failed on poll(2): %m", elabel);
+			GpuServDebug("[%s] failed on poll(2): %m", elabel);
 			break;
 		}
 		if (nevents == 0)
@@ -2328,7 +2377,7 @@ gpuservMonitorClient(void *__priv)
 		}
 		else if (pfd.revents & ~POLLIN)
 		{
-			__GpuServDebug("[%s] peer socket closed.", elabel);
+			GpuServDebug("[%s] peer socket closed.", elabel);
 			break;
 		}
 	}
@@ -3135,7 +3184,7 @@ pgstrom_init_gpu_service(void)
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB | GUC_NO_SHOW_ALL,
 							NULL, NULL, NULL);
 	DefineCustomRealVariable("pg_strom.gpu_mempool_max_ratio",
-							 "GPU memory pool: maximum usable ratio for memory pool",
+							 "GPU memory pool: maximum usable ratio for memory pool (only mapped memory)",
 							 NULL,
 							 &pgstrom_gpu_mempool_max_ratio,
 							 0.50,		/* 50% */
@@ -3145,12 +3194,12 @@ pgstrom_init_gpu_service(void)
 							 GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
 							 NULL, NULL, NULL);
 	DefineCustomRealVariable("pg_strom.gpu_mempool_min_ratio",
-							 "GPU memory pool: minimum preserved ratio memory pool",
+							 "GPU memory pool: minimum preserved ratio memory pool (both mapped/managed memory)",
 							 NULL,
 							 &pgstrom_gpu_mempool_min_ratio,
 							 0.05,		/*  5% */
 							 0.0,		/*  0% */
-							 pgstrom_gpu_mempool_max_ratio,
+							 pgstrom_gpu_mempool_min_ratio,
 							 PGC_SIGHUP,
 							 GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
 							 NULL, NULL, NULL);
