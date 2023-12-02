@@ -68,6 +68,98 @@ get_extension_name_by_object(Oid class_id, Oid object_id)
 	return NULL;
 }
 
+/*
+ * type oid cache
+ */
+static Oid		__type_oid_cache_int1	= UINT_MAX;
+Oid
+get_int1_type_oid(bool missing_ok)
+{
+	if (__type_oid_cache_int1 == UINT_MAX)
+	{
+		const char *ext_name;
+		Oid			type_oid;
+
+		type_oid =  GetSysCacheOid2(TYPENAMENSP,
+									Anum_pg_type_oid,
+									CStringGetDatum("int1"),
+									ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+		if (OidIsValid(type_oid))
+		{
+			ext_name = get_extension_name_by_object(TypeRelationId, type_oid);
+			if (!ext_name || strcmp(ext_name, "pg_strom") != 0)
+				type_oid = InvalidOid;
+		}
+		__type_oid_cache_int1 = type_oid;
+	}
+	if (!missing_ok && !OidIsValid(__type_oid_cache_int1))
+		elog(ERROR, "type 'int1' is not installed");
+	return __type_oid_cache_int1;
+}
+
+static Oid		__type_oid_cache_float2	= UINT_MAX;
+Oid
+get_float2_type_oid(bool missing_ok)
+{
+	if (__type_oid_cache_float2 == UINT_MAX)
+	{
+		const char *ext_name;
+		Oid			type_oid;
+
+		type_oid = GetSysCacheOid2(TYPENAMENSP,
+								   Anum_pg_type_oid,
+								   CStringGetDatum("float2"),
+								   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+		if (OidIsValid(type_oid))
+		{
+			ext_name = get_extension_name_by_object(TypeRelationId, type_oid);
+			if (!ext_name || strcmp(ext_name, "pg_strom") != 0)
+				type_oid = InvalidOid;
+		}
+		__type_oid_cache_float2 = type_oid;
+	}
+	if (!missing_ok && !OidIsValid(__type_oid_cache_float2))
+		elog(ERROR, "type 'float2' is not installed");
+	return __type_oid_cache_float2;
+}
+
+static Oid		__type_oid_cache_cube	= UINT_MAX;
+Oid
+get_cube_type_oid(bool missing_ok)
+{
+	if (__type_oid_cache_cube == UINT_MAX)
+	{
+		Oid			type_oid = InvalidOid;
+		CatCList   *typelist;
+
+		typelist = SearchSysCacheList1(TYPENAMENSP,
+									   CStringGetDatum("cube"));
+		for (int i=0; i < typelist->n_members; i++)
+		{
+			HeapTuple	type_htup = &typelist->members[i]->tuple;
+			Form_pg_type type_form = (Form_pg_type)GETSTRUCT(type_htup);
+			const char *ext_name;
+
+			ext_name = get_extension_name_by_object(TypeRelationId,
+													type_form->oid);
+			if (ext_name && strcmp(ext_name, "cube") == 0)
+			{
+				type_oid = type_form->oid;
+				break;
+			}
+		}
+		ReleaseCatCacheList(typelist);
+
+		__type_oid_cache_cube = type_oid;
+	}
+	if (!missing_ok && !OidIsValid(__type_oid_cache_cube))
+		elog(ERROR, "type 'cube' is not installed");
+	return __type_oid_cache_cube;
+}
+
+/*
+ * build_basic_devtype_info
+ */
 static devtype_info *
 build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 {
@@ -127,6 +219,9 @@ build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	return NULL;		/* not found */
 }
 
+/*
+ * build_composite_devtype_info
+ */
 static devtype_info *
 build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 {
@@ -179,6 +274,9 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	return dtype;
 }
 
+/*
+ * build_array_devtype_info
+ */
 static devtype_info *
 build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 {
@@ -752,6 +850,14 @@ static uint32_t
 devtype_box2df_hash(bool isnull, Datum value)
 {
 	elog(ERROR, "box2df type has no device hash function");
+}
+
+static uint32_t
+devtype_cube_hash(bool isnull, Datum value)
+{
+	if (isnull)
+		return 0;
+	return hash_any((unsigned char *)VARDATA_ANY(value), VARSIZE_ANY_EXHDR(value));
 }
 
 /*
@@ -1961,18 +2067,20 @@ codegen_casewhen_expression(codegen_context *context,
 			return -1;
 	}
 	/* CASE <expression> */
-	if (buf && caseexpr->arg)
+	if (caseexpr->arg)
 	{
-		kexp.u.casewhen.case_comp = (__appendZeroStringInfo(buf, 0) - pos);
+		if (buf)
+			kexp.u.casewhen.case_comp = (__appendZeroStringInfo(buf, 0) - pos);
 		if (codegen_expression_walker(context, buf,
 									  curr_depth,
 									  caseexpr->arg) < 0)
 			return -1;
 	}
 	/* ELSE <expression> */
-	if (buf && caseexpr->defresult)
+	if (caseexpr->defresult)
 	{
-		kexp.u.casewhen.case_else = (__appendZeroStringInfo(buf, 0) - pos);
+		if (buf)
+			kexp.u.casewhen.case_else = (__appendZeroStringInfo(buf, 0) - pos);
 		if (codegen_expression_walker(context, buf,
 									  curr_depth,
 									  caseexpr->defresult) < 0)
@@ -4325,6 +4433,10 @@ pgstrom_devcache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 	memset(devtype_info_slot, 0, sizeof(List *) * DEVTYPE_INFO_NSLOTS);
 	memset(devfunc_info_slot, 0, sizeof(List *) * DEVFUNC_INFO_NSLOTS);
 	memset(devfunc_code_slot, 0, sizeof(List *) * DEVFUNC_INFO_NSLOTS);
+
+	__type_oid_cache_int1	= UINT_MAX;
+	__type_oid_cache_float2	= UINT_MAX;
+	__type_oid_cache_cube	= UINT_MAX;
 }
 
 void

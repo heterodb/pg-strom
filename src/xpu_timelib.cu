@@ -896,6 +896,7 @@ xpu_interval_datum_kvec_load(kern_context *kcxt,
 	const kvec_interval_t *kvecs = (const kvec_interval_t *)__kvecs;
 	xpu_interval_t *result = (xpu_interval_t *)__result;
 
+	result->expr_ops    = &xpu_interval_ops;
 	result->value.time  = kvecs->values[kvecs_id].time;
 	result->value.day   = kvecs->values[kvecs_id].day;
 	result->value.month = kvecs->values[kvecs_id].month;
@@ -2602,16 +2603,15 @@ __pg_timestamptz_pl_interval(kern_context *kcxt,
 	}
 	else
 	{
-		Timestamp	ts = tval->value;
 		const pg_tz *tz_info = SESSION_TIMEZONE(kcxt->session);
-		int			tz;
+		Timestamp	ts = tval->value;
 
 		if (ival->value.month != 0)
 		{
 			struct pg_tm tm;
 			fsec_t	fsec;
 
-			if (!timestamp2tm(ts, &tm, &fsec, NULL))
+			if (!timestamp2tm(ts, &tm, &fsec, tz_info))
 			{
 				STROM_ELOG(kcxt, "timestamp out of range");
 				return false;
@@ -2631,13 +2631,11 @@ __pg_timestamptz_pl_interval(kern_context *kcxt,
 			if (tm.tm_mday > day_tab[isleap(tm.tm_year)][tm.tm_mon - 1])
 				tm.tm_mday = day_tab[isleap(tm.tm_year)][tm.tm_mon - 1];
 
-			tz = DetermineTimeZoneOffset(&tm, tz_info);
-			if (!tm2timestamp(&ts, &tm, fsec, NULL))
+			if (!tm2timestamp(&ts, &tm, fsec, tz_info))
 			{
 				STROM_ELOG(kcxt, "timestamp out of range");
 				return false;
 			}
-			ts += tz * USECS_PER_SEC;
 		}
 
 		if (ival->value.day != 0)
@@ -2646,7 +2644,7 @@ __pg_timestamptz_pl_interval(kern_context *kcxt,
 			fsec_t	fsec;
 			int		julian;
 
-			if (!timestamp2tm(ts, &tm, &fsec, NULL))
+			if (!timestamp2tm(ts, &tm, &fsec, tz_info))
 			{
 				STROM_ELOG(kcxt, "timestamp out of range");
 				return false;
@@ -2655,13 +2653,11 @@ __pg_timestamptz_pl_interval(kern_context *kcxt,
             julian = date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) + ival->value.day;
             j2date(julian, &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
 
-            tz = DetermineTimeZoneOffset(&tm, tz_info);
-			if (!tm2timestamp(&ts, &tm, fsec, NULL))
+			if (!tm2timestamp(&ts, &tm, fsec, tz_info))
 			{
 				STROM_ELOG(kcxt, "timestamp out of range");
 				return false;
 			}
-			ts += tz * USECS_PER_SEC;
 		}
 		ts += ival->value.time;
 		if (!IS_VALID_TIMESTAMP(ts))

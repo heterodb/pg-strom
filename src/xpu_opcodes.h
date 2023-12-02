@@ -41,12 +41,14 @@ TYPE_OPCODE(inet, NULL, DEVTYPE__HAS_COMPARE)
 TYPE_OPCODE(jsonb, NULL, 0)
 TYPE_OPCODE(geometry, "postgis", DEVTYPE__USE_KVARS_SLOTBUF)
 TYPE_OPCODE(box2df, "postgis", 0)
+TYPE_OPCODE(cube, "cube", 0)
 
 #ifndef TYPE_ALIAS
 #define TYPE_ALIAS(NAME,EXTENSION,BASE,BASE_EXTENSION)
 #endif
 TYPE_ALIAS(varchar, NULL, text, NULL)
 TYPE_ALIAS(cidr,    NULL, inet, NULL)
+TYPE_ALIAS(earth, "earthdistance", cube, "cube")
 
 /*
  * PostgreSQL Device Functions / Operators
@@ -506,20 +508,20 @@ __FUNC_OPCODE(exp,     float8, 5, NULL)
 __FUNC_OPCODE(dexp,    float8, 5, NULL)
 __FUNC_OPCODE(floor,   float8, 1, NULL)
 __FUNC_OPCODE(ln,      float8, 5, NULL)
-__FUNC_OPCODE(dlog1,   float8, 5, NULL)
-__FUNC_OPCODE(log,     float8, 5, NULL)
 __FUNC_OPCODE(dlog10,  float8, 5, NULL)
 __FUNC_OPCODE(pi, , 0, NULL)
-__FUNC_OPCODE(power,   float8/float8, 5, NULL)
-__FUNC_OPCODE(pow,     float8/float8, 5, NULL)
-__FUNC_OPCODE(dpow,    float8/float8, 5, NULL)
-__FUNC_OPCODE(round,   float8, 5, NULL)
+__FUNC_OPCODE(dpow, float8/float8, 5, NULL)
 __FUNC_OPCODE(dround,  float8, 5, NULL)
 __FUNC_OPCODE(sign,    float8, 1, NULL)
-__FUNC_OPCODE(sqrt,    float8, 5, NULL)
 __FUNC_OPCODE(dsqrt,   float8, 5, NULL)
-__FUNC_OPCODE(trunc,   float8, 1, NULL)
 __FUNC_OPCODE(dtrunc,  float8, 1, NULL)
+FUNC_ALIAS(dlog1, float8, DEVKIND__ANY, dlog10, 5, NULL)
+FUNC_ALIAS(log,   float8, DEVKIND__ANY, dlog10, 5, NULL)
+FUNC_ALIAS(power, float8/float8, DEVKIND__ANY, dpow, 5, NULL)
+FUNC_ALIAS(pow,   float8/float8, DEVKIND__ANY, dpow, 5, NULL)
+FUNC_ALIAS(round, float8, DEVKIND__ANY, dround, 5, NULL)
+FUNC_ALIAS(sqrt,  float8, DEVKIND__ANY, dsqrt, 5, NULL)
+FUNC_ALIAS(trunc, float8, DEVKIND__ANY, dtrunc, 1, NULL)
 
 /* Trigonometric function */
 __FUNC_OPCODE(degrees, float8, 5, NULL)
@@ -787,6 +789,17 @@ FUNC_OPCODE(contains_2d,     box2df/box2df,   DEVKIND__ANY, box2df_contains,    
 FUNC_OPCODE(is_contained_2d, box2df/geometry, DEVKIND__ANY, box2df_geometry_within,   40, "postgis")
 FUNC_OPCODE(is_contained_2d, geometry/box2df, DEVKIND__ANY, geometry_box2df_within,   40, "postgis")
 FUNC_OPCODE(is_contained_2d, box2df/box2df,   DEVKIND__ANY, box2df_within,            40, "postgis")
+
+/* cube/earthdistance */
+__FUNC_OPCODE(cube_eq,        cube/cube,  5, "cube")
+__FUNC_OPCODE(cube_ne,        cube/cube,  5, "cube")
+__FUNC_OPCODE(cube_lt,        cube/cube,  5, "cube")
+__FUNC_OPCODE(cube_le,        cube/cube,  5, "cube")
+__FUNC_OPCODE(cube_gt,        cube/cube,  5, "cube")
+__FUNC_OPCODE(cube_ge,        cube/cube,  5, "cube")
+__FUNC_OPCODE(cube_contains,  cube/cube, 10, "cube")
+__FUNC_OPCODE(cube_contained, cube/cube, 10, "cube")
+__FUNC_OPCODE(cube_ll_coord,  cube/cube, 10, "cube")
 
 #undef TYPE_OPCODE
 #undef TYPE_ALIAS
