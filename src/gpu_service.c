@@ -3199,7 +3199,7 @@ pgstrom_init_gpu_service(void)
 							 &pgstrom_gpu_mempool_min_ratio,
 							 0.05,		/*  5% */
 							 0.0,		/*  0% */
-							 pgstrom_gpu_mempool_min_ratio,
+							 pgstrom_gpu_mempool_max_ratio,
 							 PGC_SIGHUP,
 							 GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
 							 NULL, NULL, NULL);
