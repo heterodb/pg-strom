@@ -1744,8 +1744,7 @@ timestamp2tm(Timestamp dt, struct pg_tm *tm, fsec_t *fsec, const pg_tz *tz_info)
 }
 
 STATIC_FUNCTION(bool)
-tm2timestamp(Timestamp *result, const struct pg_tm *tm, fsec_t fsec,
-			 const pg_tz *tz_info)
+tm2timestamp(Timestamp *result, const struct pg_tm *tm, fsec_t fsec, int *tzp)
 {
 	TimeOffset	date;
 	TimeOffset	time;
@@ -1764,8 +1763,8 @@ tm2timestamp(Timestamp *result, const struct pg_tm *tm, fsec_t fsec,
 	if ((ts < 0 && date > 0) || (ts > 0 && date < -1))
 		return false;
 	/* TZ conversion, if any */
-	if (tz_info)
-		ts -= (tm->tm_gmtoff * USECS_PER_SEC);
+	if (tzp)
+		ts += (*tzp * USECS_PER_SEC);
 	/* final range check */
 	if (!IS_VALID_TIMESTAMP(ts))
 		return false;
@@ -2610,8 +2609,9 @@ __pg_timestamptz_pl_interval(kern_context *kcxt,
 		{
 			struct pg_tm tm;
 			fsec_t	fsec;
+			int		tz;
 
-			if (!timestamp2tm(ts, &tm, &fsec, tz_info))
+			if (!timestamp2tm(ts, &tm, &fsec, NULL))
 			{
 				STROM_ELOG(kcxt, "timestamp out of range");
 				return false;
@@ -2630,8 +2630,8 @@ __pg_timestamptz_pl_interval(kern_context *kcxt,
 			/* adjust for end of month boundary problems... */
 			if (tm.tm_mday > day_tab[isleap(tm.tm_year)][tm.tm_mon - 1])
 				tm.tm_mday = day_tab[isleap(tm.tm_year)][tm.tm_mon - 1];
-
-			if (!tm2timestamp(&ts, &tm, fsec, tz_info))
+			tz = DetermineTimeZoneOffset(&tm, tz_info);
+			if (!tm2timestamp(&ts, &tm, fsec, &tz))
 			{
 				STROM_ELOG(kcxt, "timestamp out of range");
 				return false;
@@ -2643,6 +2643,7 @@ __pg_timestamptz_pl_interval(kern_context *kcxt,
 			struct pg_tm tm;
 			fsec_t	fsec;
 			int		julian;
+			int		tz;
 
 			if (!timestamp2tm(ts, &tm, &fsec, tz_info))
 			{
@@ -2653,7 +2654,8 @@ __pg_timestamptz_pl_interval(kern_context *kcxt,
             julian = date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) + ival->value.day;
             j2date(julian, &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
 
-			if (!tm2timestamp(&ts, &tm, fsec, tz_info))
+			tz = DetermineTimeZoneOffset(&tm, tz_info);
+			if (!tm2timestamp(&ts, &tm, fsec, &tz))
 			{
 				STROM_ELOG(kcxt, "timestamp out of range");
 				return false;

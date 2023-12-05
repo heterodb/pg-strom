@@ -170,6 +170,34 @@ pgfn_dlog10(XPU_PGFUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(bool)
+pgfn_dlog1(XPU_PGFUNCTION_ARGS)
+{
+	KEXP_PROCESS_ARGS1(float8, float8, fval);
+
+	if (XPU_DATUM_ISNULL(&fval))
+		result->expr_ops = NULL;
+	else if (fval.value == 0.0)
+	{
+		STROM_ELOG(kcxt, "cannot take logarithm of zero");
+		return false;
+	}
+	else if (fval.value < 0.0)
+	{
+		STROM_ELOG(kcxt, "cannot take logarithm of a negative number");
+		return false;
+	}
+	else
+	{
+		result->expr_ops = &xpu_float8_ops;
+		result->value = log(fval.value);
+		CHECKFLOATVAL(kcxt, result->value,
+					  isinf(fval.value),
+					  fval.value != 1.0);
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
 pgfn_pi(XPU_PGFUNCTION_ARGS)
 {
 	KEXP_PROCESS_ARGS0(float8);
