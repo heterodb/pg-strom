@@ -1112,7 +1112,7 @@ ExecFallbackRowDataStore(pgstromTaskState *pts,
 		ItemPointerCopy(&tupitem->htup.t_ctid, &tuple.t_self);
 		tuple.t_tableOid = kds->table_oid;
 		tuple.t_data = &tupitem->htup;
-		pts->cb_cpu_fallback(pts, kds, &tuple);
+		pts->cb_cpu_fallback(pts, &tuple);
 	}
 }
 
@@ -1140,7 +1140,7 @@ ExecFallbackBlockDataStore(pgstromTaskState *pts,
 				tuple.t_tableOid = kds->table_oid;
 				tuple.t_data = (HeapTupleHeader)PageGetItem((Page)pg_page, lpp);
 
-				pts->cb_cpu_fallback(pts, kds, &tuple);
+				pts->cb_cpu_fallback(pts, &tuple);
 			}
 		}
 	}
@@ -1161,7 +1161,7 @@ ExecFallbackColumnDataStore(pgstromTaskState *pts,
 		bool		should_free;
 
 		tuple = ExecFetchSlotHeapTuple(pts->base_slot, false, &should_free);
-		pts->cb_cpu_fallback(pts, kds, tuple);
+		pts->cb_cpu_fallback(pts, tuple);
 		if (should_free)
 			pfree(tuple);
 	}
@@ -1185,7 +1185,7 @@ ExecFallbackArrowDataStore(pgstromTaskState *pts,
 			break;
 
 		tuple = ExecFetchSlotHeapTuple(pts->base_slot, false, &should_free);
-		pts->cb_cpu_fallback(pts, kds, tuple);
+		pts->cb_cpu_fallback(pts, tuple);
 		if (should_free)
 			pfree(tuple);
 	}
@@ -1697,14 +1697,83 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 /*
  * pgstromExecScanReCheck
  */
-static bool
-pgstromExecScanReCheck(pgstromTaskState *pts, TupleTableSlot *epq_slot)
+static TupleTableSlot *
+pgstromExecScanReCheck(pgstromTaskState *pts, EPQState *epqstate)
 {
-	/*
-	 * NOTE: Only immutable operators/functions are executable
-	 * on the GPU devices, so its decision will never changed.
-	 */
-	return true;
+	Index		scanrelid = ((Scan *)pts->css.ss.ps.plan)->scanrelid;
+
+	/* see ExecScanFetch */
+	if (scanrelid == 0)
+	{
+		elog(ERROR, "Bug? CustomScan(%s) has scanrelid==0",
+			 pts->css.methods->CustomName);
+	}
+	else if (epqstate->relsubs_done[scanrelid-1])
+	{
+		return NULL;
+	}
+	else if (epqstate->relsubs_slot[scanrelid-1])
+	{
+		TupleTableSlot *ss_slot = pts->css.ss.ss_ScanTupleSlot;
+		TupleTableSlot *epq_slot = epqstate->relsubs_slot[scanrelid-1];
+		size_t			fallback_index_saved = pts->fallback_index;
+		size_t			fallback_usage_saved = pts->fallback_usage;
+
+		Assert(epqstate->relsubs_rowmark[scanrelid - 1] == NULL);
+		/* Mark to remember that we shouldn't return it again */
+		epqstate->relsubs_done[scanrelid - 1] = true;
+
+		/* Return empty slot if we haven't got a test tuple */
+		if (TupIsNull(epq_slot))
+			ExecClearTuple(ss_slot);
+		else
+		{
+			HeapTuple	epq_tuple;
+			bool		should_free;
+#if 0
+			slot_getallattrs(epq_slot);
+			for (int j=0; j < epq_slot->tts_nvalid; j++)
+			{
+				elog(INFO, "epq_slot[%d] isnull=%s values=0x%lx", j,
+					 epq_slot->tts_isnull[j] ? "true" : "false",
+					 epq_slot->tts_values[j]);
+			}
+#endif
+			epq_tuple = ExecFetchSlotHeapTuple(epq_slot, false,
+											   &should_free);
+			if (pts->cb_cpu_fallback(pts, epq_tuple) &&
+				pts->fallback_tuples != NULL &&
+				pts->fallback_buffer != NULL &&
+				pts->fallback_nitems > fallback_index_saved)
+			{
+				HeapTupleData	htup;
+				kern_tupitem   *titem = (kern_tupitem *)
+					(pts->fallback_buffer +
+					 pts->fallback_tuples[fallback_index_saved]);
+
+				htup.t_len = titem->t_len;
+				htup.t_data = &titem->htup;
+				ss_slot = pts->css.ss.ss_ScanTupleSlot;
+				ExecForceStoreHeapTuple(&htup, ss_slot, false);
+			}
+			else
+			{
+				ExecClearTuple(ss_slot);
+			}
+			/* release fallback tuple & buffer */
+			if (should_free)
+				pfree(epq_tuple);
+			pts->fallback_index = fallback_index_saved;
+			pts->fallback_usage = fallback_usage_saved;
+		}
+		return ss_slot;
+	}
+	else if (epqstate->relsubs_rowmark[scanrelid-1])
+	{
+		elog(ERROR, "RowMark on CustomScan(%s) is not implemented yet",
+			 pts->css.methods->CustomName);
+	}
+	return pgstromExecScanAccess(pts);
 }
 
 /*
@@ -1762,6 +1831,11 @@ TupleTableSlot *
 pgstromExecTaskState(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *)node;
+	EState		   *estate = pts->css.ss.ps.state;
+	ExprState	   *host_quals = node->ss.ps.qual;
+	ExprContext	   *econtext = node->ss.ps.ps_ExprContext;
+	ProjectionInfo *proj_info = node->ss.ps.ps_ProjInfo;
+	TupleTableSlot *slot;
 
 	if (!pts->conn)
 	{
@@ -1769,9 +1843,42 @@ pgstromExecTaskState(CustomScanState *node)
 			return NULL;
 		Assert(pts->conn);
 	}
-	return ExecScan(&pts->css.ss,
-					(ExecScanAccessMtd) pgstromExecScanAccess,
-					(ExecScanRecheckMtd) pgstromExecScanReCheck);
+
+	/*
+	 * see, ExecScan() - it assumes CustomScan with scanrelid > 0 returns
+	 * tuples identical with table definition, thus these tuples are not
+	 * suitable for input of ExecProjection().
+	 */
+	if (estate->es_epq_active)
+	{
+		slot = pgstromExecScanReCheck(pts, estate->es_epq_active);
+		if (TupIsNull(slot))
+			return NULL;
+		ResetExprContext(econtext);
+		econtext->ecxt_scantuple = slot;
+		if (proj_info)
+			return ExecProject(proj_info);
+		return slot;
+	}
+
+	for (;;)
+	{
+		slot = pgstromExecScanAccess(pts);
+		if (TupIsNull(slot))
+			break;
+		/* check whether the current tuple satisfies the qual-clause */
+		ResetExprContext(econtext);
+		econtext->ecxt_scantuple = slot;
+
+		if (!host_quals || ExecQual(host_quals, econtext))
+		{
+			if (proj_info)
+				return ExecProject(proj_info);
+			return slot;
+		}
+		InstrCountFiltered1(pts, 1);
+	}
+	return NULL;
 }
 
 /*

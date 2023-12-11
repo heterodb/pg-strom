@@ -822,10 +822,8 @@ CreateDpuScanState(CustomScan *cscan)
 /*
  * ExecFallbackCpuScan
  */
-void
-ExecFallbackCpuScan(pgstromTaskState *pts,
-					kern_data_store *kds,
-					HeapTuple tuple)
+bool
+ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 {
 	ExprContext	*econtext = pts->css.ss.ps.ps_ExprContext;
 	bool		should_free;
@@ -838,7 +836,7 @@ ExecFallbackCpuScan(pgstromTaskState *pts,
 	{
 		ResetExprContext(econtext);
 		if (!ExecQual(pts->base_quals, econtext))
-			return;
+			return false;
 	}
 	Assert(!pts->fallback_slot);
 	
@@ -857,6 +855,7 @@ ExecFallbackCpuScan(pgstromTaskState *pts,
 	pgstromStoreFallbackTuple(pts, tuple);
 	if (should_free)
 		pfree(tuple);
+	return true;
 }
 
 /*
