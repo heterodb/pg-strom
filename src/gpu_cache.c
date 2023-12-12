@@ -1571,18 +1571,28 @@ releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool normal_commit)
 			if (pitem->tag == 'I')
 			{
 				if (normal_commit)
+				{
 					tx_log.type = GCACHE_TX_LOG__COMMIT_INS;
+				}
 				else
+				{
 					tx_log.type = GCACHE_TX_LOG__ABORT_INS;
+					__removeGpuCacheRowId(gc_desc->gc_lmap, &pitem->ctid);
+				}
 				tx_log.length = sizeof(GCacheTxLogXact);
 				tx_log.rowid = pitem->rowid;
 			}
 			else if (pitem->tag == 'D')
 			{
 				if (normal_commit)
+				{
 					tx_log.type = GCACHE_TX_LOG__COMMIT_DEL;
+					__removeGpuCacheRowId(gc_desc->gc_lmap, &pitem->ctid);
+				}
 				else
+				{
 					tx_log.type = GCACHE_TX_LOG__ABORT_DEL;
+				}
 				tx_log.length = sizeof(GCacheTxLogXact);
 				tx_log.rowid = pitem->rowid;
 			}
