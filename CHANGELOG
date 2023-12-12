@@ -1,15 +1,28 @@
-* Sun Sep 17 2023 KaiGai Kohei <kaigai@heterodb.com> - 5.0-beta
-- The code base is re-designed entirely.
-- GPU code generator now generates 'kexp' pseudo code, instead of
-  CUDA C++ native code. (and, run-time compile stuff by NVRTC was
-  removed.)
-- Now only GPU-Direct Storage is supported, and our nvme_strom.ko
-  became obsolete.
-- Process model was revised, unlike v3.x, 5.x series launches
-  a background worker that handles all the GPU requests under
-  multi-threading model. It saves device memory consumption.
-- GPU-Cache is now built based on CUDA managed memory that allows
-  memory overcommit.
+* Fri Dec 15 2023 KaiGai Kohei <kaigai@heterodb.com>
+- The code base has been re-designed entirely with various improvement.
+- Process model was revised to concentrate GPU resource management to
+  multi-threaded background worker process (PG-Strom GPU Service).
+  Unlike v3.x or older, this new design reduces GPU resource consumption
+  and overhead of task-switching.
+- GPU device code in v5.0 operates individual tasks according to the pseudo
+  code (called 'kexp') generated from the supplied SQL clauses. Unlike v3.x or
+  older, it never generates CUDA C++ native code (thus, run-time compiler
+  stuff by NVRTC was removed).
+  It improves agility of query execution, and helps software quality assurance
+  due to code stability. It is also a groundwork for the future support of CSD
+  (computational storage drives), DPU (data processing unit) or others.
+- GPU-Cache is now built on CUDA managed memory that allows memory
+  overcommit, larger than the physical size of GPU DRAM.
+- xPU device type definition was modified to optimize for wide-band GPU
+  memory with utilization of coleasced memory access. kvec_datum_t (or its
+  inherited) type internally declared with small array for each fields to access
+  these values simultaneously.
+- gpupreagg tends to use GPU shared memory for more lightweight aggregation
+  as long as number of groups are less than the capacity.
+- gpujoin extracts tuples once per depth, unlike v3.x or older.
+- partition-wise gpujoin is still works-in-progress, so we will re-activate
+  the feature at v5.1.
+- ...and fixed various bugs.
 
 * Sat Dec 11 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.3-2
 - Rebuild for CUDA11.5 Update 1; contains compiler optimization bugfix

@@ -26,13 +26,14 @@ rpm-pg_strom: tarball
 	cp -f $(PGSTROM_TGZ) $(__SOURCEDIR) || exit 1
 	git show --format=raw $(GITHASH):files/systemd-pg_strom.conf > \
 		$(__SOURCEDIR)/systemd-pg_strom.conf || exit 1
-	git show --format=raw $(GITHASH):files/pg_strom.spec.in |	\
+	(git show --format=raw $(GITHASH):files/pg_strom.spec.in |	\
 		sed -e "s/@@STROM_VERSION@@/$(VERSION)/g"		\
 		    -e "s/@@STROM_RELEASE@@/$(RELEASE)/g"		\
-		    -e "s/@@STROM_TARBALL@@/$(__PGSTROM_TGZ)/g"		\
+		    -e "s/@@STROM_TARBALL@@/$(__PGSTROM_TGZ)/g"	\
 		    -e "s/@@PGSTROM_GITHASH@@/$(GITHASH)/g"		\
-		    -e "s/@@PGSQL_VERSION@@/$(PG_MAJORVERSION)/g" >	\
-		$(__SPECDIR)/pg_strom-PG$(PG_MAJORVERSION).spec
+		    -e "s/@@PGSQL_VERSION@@/$(PG_MAJORVERSION)/g";\
+	 git show --format=raw $(GITHASH):CHANGELOG) >		\
+	$(__SPECDIR)/pg_strom-PG$(PG_MAJORVERSION).spec
 	rpmbuild -ba $(__SPECDIR)/pg_strom-PG$(PG_MAJORVERSION).spec \
 		--undefine=_debugsource_packages
 
