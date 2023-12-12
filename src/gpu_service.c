@@ -1537,7 +1537,7 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	memset(&resp, 0, sizeof(resp));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag = XpuCommandTag__Success;
-	resp.length = offsetof(XpuCommand, u);
+	resp.length = offsetof(XpuCommand, u.results.stats);
 
 	iov.iov_base = &resp;
 	iov.iov_len  = resp.length;
