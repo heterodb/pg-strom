@@ -1,4 +1,4 @@
-* Fri Dec 15 2023 KaiGai Kohei <kaigai@heterodb.com>
+* Fri Dec 15 2023 KaiGai Kohei <kaigai@heterodb.com> - 5.0-1
 - The code base has been re-designed entirely with various improvement.
 - Process model was revised to concentrate GPU resource management to
   multi-threaded background worker process (PG-Strom GPU Service).
