@@ -295,6 +295,11 @@ __xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 			n_data[PG_MAX_DATA - ndigits] = mod;
 		}
 	}
+	else
+	{
+		/* value == 0 makes no sense on 'weight' */
+		weight = 0;
+	}
 
 	while (value != 0)
     {
