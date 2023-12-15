@@ -2254,15 +2254,14 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts, int depth)
 	}
 }
 
-void
-ExecFallbackCpuJoin(pgstromTaskState *pts,
-					kern_data_store *kds,
-					HeapTuple tuple)
+bool
+ExecFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple)
 {
 	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
 	TupleTableSlot *base_slot = pts->base_slot;
 	TupleTableSlot *fallback_slot = pts->fallback_slot;
+	size_t			fallback_index_saved = pts->fallback_index;
 	ListCell	   *lc;
 
 	ExecForceStoreHeapTuple(tuple, base_slot, false);
@@ -2272,7 +2271,7 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 	{
 		ResetExprContext(econtext);
 		if (!ExecQual(pts->base_quals, econtext))
-			return;
+			return 0;
 	}
 
 	/*
@@ -2292,7 +2291,7 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 		pgstromStoreFallbackTuple(pts, proj_htup);
 		if (should_free)
 			pfree(proj_htup);
-		return;
+		return 1;
 	}
 
 	/* Load the base tuple (depth-0) to the fallback slot */
@@ -2318,6 +2317,7 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 	/* Run JOIN, if any */
 	Assert(pts->h_kmrels);
 	__execFallbackCpuJoinOneDepth(pts, 1);
+	return (pts->fallback_index -  fallback_index_saved > 0);
 }
 
 static void
