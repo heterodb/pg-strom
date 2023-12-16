@@ -1,47 +1,40 @@
 <!DOCTYPE html>
-<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
-<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<html class="writer-html5" lang="en" >
 <head>
-  <meta charset="utf-8">
-  <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  
-  <meta name="author" content="PG-Strom Development Team">
-  
-  <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>SQLオブジェクト - PG-Strom Manual</title>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
-
-  <link rel="stylesheet" href="../css/theme.css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
-  <link href="../custom.css" rel="stylesheet" />
-  
-  <script>
-    // Current page data
-    var mkdocs_page_name = "SQL\u30aa\u30d6\u30b8\u30a7\u30af\u30c8";
-    var mkdocs_page_input_path = "ref_sqlfuncs.md";
-    var mkdocs_page_url = null;
-  </script>
-  
-  <script src="../js/jquery-2.1.1.min.js" defer></script>
-  <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
-  <script>hljs.initHighlightingOnLoad();</script> 
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>SQLオブジェクト - PG-Strom Manual</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+        <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+        <link href="../custom.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "SQL\u30aa\u30d6\u30b8\u30a7\u30af\u30c8";
+        var mkdocs_page_input_path = "ref_sqlfuncs.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
 </head>
 
 <body class="wy-body-for-nav" role="document">
 
   <div class="wy-grid-for-nav">
-
-    
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
     <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
-        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
-        <div role="search">
+          <a href=".." class="icon icon-home"> PG-Strom Manual
+        </a><div role="search">
   <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" />
   </form>
@@ -49,48 +42,48 @@
 </div>
       </div>
 
-      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
-                    </li>
-                </ul>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">利用ガイド</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">先進機能</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">リファレンス</span></p>
-                <ul class="current">
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
-                    </li>
-                    <li class="toctree-l1 current"><a class="reference internal current" href="./">SQLオブジェクト</a>
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">利用ガイド</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">先進機能</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">リファレンス</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="./">SQLオブジェクト</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#_1">システム情報</a>
     </li>
@@ -105,57 +98,46 @@
     <li class="toctree-l2"><a class="reference internal" href="#_3">その他の関数</a>
     </li>
     </ul>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">リリースノート</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
-                    </li>
-                </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">リリースノート</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                  </li>
+              </ul>
       </div>
     </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
-
-      
-      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
-        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-        <a href="..">PG-Strom Manual</a>
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">PG-Strom Manual</a>
+        
       </nav>
-
-      
       <div class="wy-nav-content">
-        <div class="rst-content">
-          <div role="navigation" aria-label="breadcrumbs navigation">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
-    <li><a href="..">Docs</a> &raquo;</li>
-    
-      
-        
-          <li>リファレンス &raquo;</li>
-        
-      
-    
-    <li>SQLオブジェクト</li>
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">リファレンス</li>
+      <li class="breadcrumb-item active">SQLオブジェクト</li>
     <li class="wy-breadcrumbs-aside">
-      
     </li>
   </ul>
-  
   <hr/>
 </div>
-
-          <div role="main">
-            <div class="section">
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
               
                 <h1 id="sql">SQLオブジェクト</h1>
 <p>本章ではPG-Stromが独自に提供するSQLオブジェクトについて説明します。</p>
@@ -168,31 +150,31 @@
 <table>
 <thead>
 <tr>
-<th align="left">name</th>
-<th align="left">type</th>
-<th align="left">description</th>
+<th style="text-align: left;">name</th>
+<th style="text-align: left;">type</th>
+<th style="text-align: left;">description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td align="left">device_nr</td>
-<td align="left"><code>int</code></td>
-<td align="left">GPUデバイス番号</td>
+<td style="text-align: left;">device_nr</td>
+<td style="text-align: left;"><code>int</code></td>
+<td style="text-align: left;">GPUデバイス番号</td>
 </tr>
 <tr>
-<td align="left">aindex</td>
-<td align="left"><code>int</code></td>
-<td align="left">属性インデックス</td>
+<td style="text-align: left;">aindex</td>
+<td style="text-align: left;"><code>int</code></td>
+<td style="text-align: left;">属性インデックス</td>
 </tr>
 <tr>
-<td align="left">attribute</td>
-<td align="left"><code>text</code></td>
-<td align="left">デバイス属性名</td>
+<td style="text-align: left;">attribute</td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">デバイス属性名</td>
 </tr>
 <tr>
-<td align="left">value</td>
-<td align="left"><code>text</code></td>
-<td align="left">デバイス属性値</td>
+<td style="text-align: left;">value</td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">デバイス属性値</td>
 </tr>
 </tbody>
 </table>
@@ -277,91 +259,91 @@ ERROR:  target lists can have at most 1664 entries
 <table>
 <thead>
 <tr>
-<th align="left">name</th>
-<th align="left">type</th>
-<th align="left">description</th>
+<th style="text-align: left;">name</th>
+<th style="text-align: left;">type</th>
+<th style="text-align: left;">description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>database_oid</code></td>
-<td align="left"><code>oid</code></td>
-<td align="left">GPUキャッシュを設定したテーブルの属するデータベースのOIDです</td>
+<td style="text-align: left;"><code>database_oid</code></td>
+<td style="text-align: left;"><code>oid</code></td>
+<td style="text-align: left;">GPUキャッシュを設定したテーブルの属するデータベースのOIDです</td>
 </tr>
 <tr>
-<td align="left"><code>database_name</code></td>
-<td align="left"><code>text</code></td>
-<td align="left">GPUキャッシュを設定したテーブルの属するデータベースの名前です</td>
+<td style="text-align: left;"><code>database_name</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">GPUキャッシュを設定したテーブルの属するデータベースの名前です</td>
 </tr>
 <tr>
-<td align="left"><code>table_oid</code></td>
-<td align="left"><code>oid</code></td>
-<td align="left">GPUキャッシュを設定したテーブルのOIDです。必ずしも現在のデータベースとは限らない事に留意してください。</td>
+<td style="text-align: left;"><code>table_oid</code></td>
+<td style="text-align: left;"><code>oid</code></td>
+<td style="text-align: left;">GPUキャッシュを設定したテーブルのOIDです。必ずしも現在のデータベースとは限らない事に留意してください。</td>
 </tr>
 <tr>
-<td align="left"><code>table_name</code></td>
-<td align="left"><code>text</code></td>
-<td align="left">GPUキャッシュを設定したテーブルの名前です。必ずしも現在のデータベースとは限らない事に留意してください。</td>
+<td style="text-align: left;"><code>table_name</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">GPUキャッシュを設定したテーブルの名前です。必ずしも現在のデータベースとは限らない事に留意してください。</td>
 </tr>
 <tr>
-<td align="left"><code>signature</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">GPUキャッシュの一意性を示すハッシュ値です。例えば<code>ALTER TABLE</code>の前後などでこの値が変わる場合があります。</td>
+<td style="text-align: left;"><code>signature</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td style="text-align: left;">GPUキャッシュの一意性を示すハッシュ値です。例えば<code>ALTER TABLE</code>の前後などでこの値が変わる場合があります。</td>
 </tr>
 <tr>
-<td align="left"><code>refcnt</code></td>
-<td align="left"><code>int4</code></td>
-<td align="left">GPUキャッシュの参照カウンタです。必ずしも最新の状態を反映しているとは限りません。</td>
+<td style="text-align: left;"><code>refcnt</code></td>
+<td style="text-align: left;"><code>int4</code></td>
+<td style="text-align: left;">GPUキャッシュの参照カウンタです。必ずしも最新の状態を反映しているとは限りません。</td>
 </tr>
 <tr>
-<td align="left"><code>corrupted</code></td>
-<td align="left"><code>bool</code></td>
-<td align="left">GPUキャッシュが破損（corrupted）状態のときに<code>true</code>となります。</td>
+<td style="text-align: left;"><code>corrupted</code></td>
+<td style="text-align: left;"><code>bool</code></td>
+<td style="text-align: left;">GPUキャッシュが破損（corrupted）状態のときに<code>true</code>となります。</td>
 </tr>
 <tr>
-<td align="left"><code>gpu_main_sz</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">GPUキャッシュ上に確保された固定長データ用の領域のサイズです。</td>
+<td style="text-align: left;"><code>gpu_main_sz</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td style="text-align: left;">GPUキャッシュ上に確保された固定長データ用の領域のサイズです。</td>
 </tr>
 <tr>
-<td align="left"><code>gpu_extra_sz</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">GPUキャッシュ上に確保された可変長データ用の領域のサイズです。</td>
+<td style="text-align: left;"><code>gpu_extra_sz</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td style="text-align: left;">GPUキャッシュ上に確保された可変長データ用の領域のサイズです。</td>
 </tr>
 <tr>
-<td align="left"><code>redo_write_ts</code></td>
-<td align="left"><code>timestamptz</code></td>
-<td align="left">REDOログバッファを最後に更新した時刻です。</td>
+<td style="text-align: left;"><code>redo_write_ts</code></td>
+<td style="text-align: left;"><code>timestamptz</code></td>
+<td style="text-align: left;">REDOログバッファを最後に更新した時刻です。</td>
 </tr>
 <tr>
-<td align="left"><code>redo_write_nitems</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">REDOログバッファに書き込まれたREDOログの総数です。</td>
+<td style="text-align: left;"><code>redo_write_nitems</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td style="text-align: left;">REDOログバッファに書き込まれたREDOログの総数です。</td>
 </tr>
 <tr>
-<td align="left"><code>redo_write_pos</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">REDOログバッファに書き込まれたREDOログの総バイト数です。</td>
+<td style="text-align: left;"><code>redo_write_pos</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td style="text-align: left;">REDOログバッファに書き込まれたREDOログの総バイト数です。</td>
 </tr>
 <tr>
-<td align="left"><code>redo_read_nitems</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">REDOログバッファから読み出し、GPUに適用されたREDOログの総数です。</td>
+<td style="text-align: left;"><code>redo_read_nitems</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td style="text-align: left;">REDOログバッファから読み出し、GPUに適用されたREDOログの総数です。</td>
 </tr>
 <tr>
-<td align="left"><code>redo_read_pos</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">REDOログバッファから読み出し、GPUに適用されたREDOログの総バイト数です。</td>
+<td style="text-align: left;"><code>redo_read_pos</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td style="text-align: left;">REDOログバッファから読み出し、GPUに適用されたREDOログの総バイト数です。</td>
 </tr>
 <tr>
-<td align="left"><code>redo_sync_pos</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">REDOログバッファ書き込まれたREDOログのうち、既にGPUキャッシュへの適用をバックグラウンドワーカにリクエストした位置です。<br>REDOログバッファの残り容量が逼迫してきた際に、多数のセッションが同時に非同期のリクエストを発生させる事を避けるため、内部的に使用されます。</td>
+<td style="text-align: left;"><code>redo_sync_pos</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td style="text-align: left;">REDOログバッファ書き込まれたREDOログのうち、既にGPUキャッシュへの適用をバックグラウンドワーカにリクエストした位置です。<br>REDOログバッファの残り容量が逼迫してきた際に、多数のセッションが同時に非同期のリクエストを発生させる事を避けるため、内部的に使用されます。</td>
 </tr>
 <tr>
-<td align="left"><code>config_options</code></td>
-<td align="left"><code>text</code></td>
-<td align="left">GPUキャッシュのオプション文字列です。</td>
+<td style="text-align: left;"><code>config_options</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">GPUキャッシュのオプション文字列です。</td>
 </tr>
 </tbody>
 </table>
@@ -477,29 +459,21 @@ ERROR:  target lists can have at most 1664 entries
 </code></pre>
               
             </div>
-          </div>
-          <footer>
-  
-    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
-      
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../ref_devfuncs/" class="btn btn-neutral float-left" title="関数と演算子"><span class="icon icon-circle-arrow-left"></span> Previous</a>
         <a href="../ref_params/" class="btn btn-neutral float-right" title="GUCパラメータ">Next <span class="icon icon-circle-arrow-right"></span></a>
-      
-      
-        <a href="../ref_devfuncs/" class="btn btn-neutral" title="関数と演算子"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-      
     </div>
-  
 
   <hr/>
 
   <div role="contentinfo">
     <!-- Copyright etc -->
-    
   </div>
 
-  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
-      
+          
         </div>
       </div>
 
@@ -507,7 +481,7 @@ ERROR:  target lists can have at most 1664 entries
 
   </div>
 
-  <div class="rst-versions" role="note" aria-label="versions">
+  <div class="rst-versions" role="note" aria-label="Versions">
   <span class="rst-current-version" data-toggle="rst-current-version">
     
     
@@ -518,14 +492,15 @@ ERROR:  target lists can have at most 1664 entries
     
   </span>
 </div>
-    <script>var base_url = '..';</script>
-    <script src="../js/theme_extra.js" defer></script>
-    <script src="../js/theme.js" defer></script>
-      <script src="../search/main.js" defer></script>
-    <script defer>
-        window.onload = function () {
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
             SphinxRtdTheme.Navigation.enable(true);
-        };
+        });
     </script>
 
 </body>

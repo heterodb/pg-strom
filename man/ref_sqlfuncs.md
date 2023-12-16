@@ -172,8 +172,8 @@ Below is an example of `pgstrom.gpucache_info` system view.
 ```
 
 `trigger pgstrom.gpucache_sync_trigger()`
-: @ja{テーブル更新の際にGPUキャッシュを同期するためのトリガ関数です。詳しくは[GPUキャッシュ](../gpucache/)の章を参照してください。}
-: @en{A trigger function to synchronize GPU Cache on table updates. See [GPU Cache](../gpucache/) chapter for more details.}
+: @ja{テーブル更新の際にGPUキャッシュを同期するためのトリガ関数です。詳しくは[GPUキャッシュ](gpucache.md)の章を参照してください。}
+: @en{A trigger function to synchronize GPU Cache on table updates. See [GPU Cache](gpucache.md) chapter for more details.}
 
 `bigint pgstrom.gpucache_apply_redo(regclass)`
 : @ja{引数で指定されたテーブルにGPUキャッシュが設定されている場合、未適用のREDOログを強制的にGPUキャッシュに適用します。}
@@ -195,8 +195,8 @@ Below is an example of `pgstrom.gpucache_info` system view.
 : @en{An aggregate function to estimate cardinarity of the key value, using HyperLogLog algorithm.}
 : @ja{`TYPE`は`int1`、`int2`、`int4`、`int8`、`numeric`、`date`、`time`、`timetz`、`timestamp`、`timestamptz`、`bpchar`、`text`、または`uuid`のいずれかです。}
 : @en{`TYPE` is any of `int1`, `int2`, `int4`, `int8`, `numeric`, `date`, `time`, `timetz`, `timestamp`, `timestamptz`, `bpchar`, `text`, or `uuid`.}
-: @ja{PG-StromのHyperLogLog機能について、詳しくは[HyperLogLog](../hll_count/)を参照してください。}
-: @en{See HyperLogLog for more details of [HyperLogLog](../hll_count/) functionality of PG-Strom.}
+: @ja{PG-StromのHyperLogLog機能について、詳しくは[HyperLogLog](hll_count.md)を参照してください。}
+: @en{See HyperLogLog for more details of [HyperLogLog](hll_count.md) functionality of PG-Strom.}
 
 `bytea pg_catalog.hll_sketch(TYPE)`
 : @ja{引数で与えたキー値から、HyperLogLogアルゴリズムで使用するHLL Sketchを生成し、`bytea`データとして返す集約関数です。}

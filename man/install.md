@@ -58,7 +58,7 @@ This chapter introduces the steps to install PG-Strom.
 @ja{
 インストール作業の前に、GPUダイレクトSQLのソフトウェアスタックを検討してください。
 
-[GPUダイレクトSQL](../ssd2gpu/)を実行するために必要なLinux kernelドライバには以下の２種類があります。
+[GPUダイレクトSQL](ssd2gpu.md)を実行するために必要なLinux kernelドライバには以下の２種類があります。
 
 - HeteroDB NVME-Strom
     - 2018年にリリースされ、PG-Strom v2.0以降でサポートされているHeteroDB社製の専用ドライバ。
@@ -74,7 +74,7 @@ This chapter introduces the steps to install PG-Strom.
 @en{
 Please consider the software stack for GPUDirect SQL, prior to the installation.
 
-There are two individual Linux kernel driver for [GPUDirect SQL](../ssd2gpu/) execution, as follows:
+There are two individual Linux kernel driver for [GPUDirect SQL](ssd2gpu.md) execution, as follows:
 
 - HeteroDB NVME-Strom
     - The dedicated Linux kernel module, released at 2018, supported since PG-Strom v2.0.
