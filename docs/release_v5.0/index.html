@@ -145,16 +145,18 @@
 <div style="text-align: right;">PG-Strom Development Team (15-Dec-2023)</div>
 
 <h2 id="overview">Overview</h2>
-<p>Major changes in PG-Strom v5.0 are as follows:
-- The code base has been re-designed entirely with various improvement.
-- Process model was revised to multi-threaded background worker (PG-Strom GPU Service) from multi-process model. It reduced GPU resource consumption and overhead of task-switching.
-- GPU device code dynamically generated using CUDA C++ was replaced by the pseudo kernel code. It eliminates just-in-time compilation using NVRTC, and improved the first response time. This is also a groundwork for the future support of CSD(Computational Storage Drive) and DPU(Data Processing Unit).
-- GPU-Cache is now deployed on CUDA managed memory that allows overcommit of GPU device memory.
-- Data layout of PostgreSQL data types were revised to adjust Coalesced Memory Access.
-- GpuPreAgg replaced entire GROUP BY implementation, then improved whole performance.
-- GpuJoin extract tuples only once regardless of the depth of Join.
-- Arrow_Fdw and Pg2Arrow supports min/max statistics of arrow files.
-- Two arrow tools were added: Pca2Arrow captures network packets, and arrow2csv dumps arrow files in CSV format.</p>
+<p>Major changes in PG-Strom v5.0 are as follows:</p>
+<ul>
+<li>The code base has been re-designed entirely with various improvement.</li>
+<li>Process model was revised to multi-threaded background worker (PG-Strom GPU Service) from multi-process model. It reduced GPU resource consumption and overhead of task-switching.</li>
+<li>GPU device code dynamically generated using CUDA C++ was replaced by the pseudo kernel code. It eliminates just-in-time compilation using NVRTC, and improved the first response time. This is also a groundwork for the future support of CSD(Computational Storage Drive) and DPU(Data Processing Unit).</li>
+<li>GPU-Cache is now deployed on CUDA managed memory that allows overcommit of GPU device memory.</li>
+<li>Data layout of PostgreSQL data types were revised to adjust Coalesced Memory Access.</li>
+<li>GpuPreAgg replaced entire GROUP BY implementation, then improved whole performance.</li>
+<li>GpuJoin extract tuples only once regardless of the depth of Join.</li>
+<li>Arrow_Fdw and Pg2Arrow supports min/max statistics of arrow files.</li>
+<li>Two arrow tools were added: Pca2Arrow captures network packets, and arrow2csv dumps arrow files in CSV format.</li>
+</ul>
 <h2 id="prerequisites">Prerequisites</h2>
 <ul>
 <li>PostgreSQL v15.x, v16.x</li>

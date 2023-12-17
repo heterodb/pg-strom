@@ -8,6 +8,7 @@
 
 @ja{
 PG-Strom v5.0における主要な変更は点は以下の通りです。
+
 - コードベースを一新し、従来の設計における問題点を改良しました。
 - プロセスモデルがマルチプロセスからマルチスレッドになりました。これにより、GPUリソースの消費量を削減し、タスクスイッチングが軽量になりました。
 - GPUデバイスコードはCUDA C++で動的生成されたネイティブコードから疑似コードへと置き換えられました。これにより、実行時コンパイル(NVRTC)が不要となりクエリの応答速度が向上したほか、将来的にCSD(Computational Storage Drive)やDPU(Data Processing Unit)でワークロードを実行するための設計変更です。
@@ -21,6 +22,7 @@ PG-Strom v5.0における主要な変更は点は以下の通りです。
 
 @en{
 Major changes in PG-Strom v5.0 are as follows:
+
 - The code base has been re-designed entirely with various improvement.
 - Process model was revised to multi-threaded background worker (PG-Strom GPU Service) from multi-process model. It reduced GPU resource consumption and overhead of task-switching.
 - GPU device code dynamically generated using CUDA C++ was replaced by the pseudo kernel code. It eliminates just-in-time compilation using NVRTC, and improved the first response time. This is also a groundwork for the future support of CSD(Computational Storage Drive) and DPU(Data Processing Unit).

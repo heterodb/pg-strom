@@ -145,16 +145,18 @@
 <div style="text-align: right;">PG-Strom Development Team (15-Dec-2023)</div>
 
 <h2 id="_1">概要</h2>
-<p>PG-Strom v5.0における主要な変更は点は以下の通りです。
-- コードベースを一新し、従来の設計における問題点を改良しました。
-- プロセスモデルがマルチプロセスからマルチスレッドになりました。これにより、GPUリソースの消費量を削減し、タスクスイッチングが軽量になりました。
-- GPUデバイスコードはCUDA C++で動的生成されたネイティブコードから疑似コードへと置き換えられました。これにより、実行時コンパイル(NVRTC)が不要となりクエリの応答速度が向上したほか、将来的にCSD(Computational Storage Drive)やDPU(Data Processing Unit)でワークロードを実行するための設計変更です。
-- GPU-CacheはCUDAマネージドメモリ上に展開されるようになりました。これにより、GPUデバイスメモリのオーバーコミットが可能になります。
-- GPUデバイスコード上のPostgreSQLデータ型の表現が、Coalesced Memory Accessを意識したレイアウトに変わりました。
-- GpuPreAggでのGROUP BY処理が一新され、全般的な処理速度が向上しました。
-- GpuJoinの段数が深くなっても、タプルの展開は一回だけで済むようになりました。
-- Arrow_FdwおよびPg2Arrowがmin/max統計値付きのArrowファイルに対応しました。
-- ネットワークパケットをキャプチャするPcap2Arrowツール、およびArrowファイルをCSV出力するarrow2csvツールを追加しました。</p>
+<p>PG-Strom v5.0における主要な変更は点は以下の通りです。</p>
+<ul>
+<li>コードベースを一新し、従来の設計における問題点を改良しました。</li>
+<li>プロセスモデルがマルチプロセスからマルチスレッドになりました。これにより、GPUリソースの消費量を削減し、タスクスイッチングが軽量になりました。</li>
+<li>GPUデバイスコードはCUDA C++で動的生成されたネイティブコードから疑似コードへと置き換えられました。これにより、実行時コンパイル(NVRTC)が不要となりクエリの応答速度が向上したほか、将来的にCSD(Computational Storage Drive)やDPU(Data Processing Unit)でワークロードを実行するための設計変更です。</li>
+<li>GPU-CacheはCUDAマネージドメモリ上に展開されるようになりました。これにより、GPUデバイスメモリのオーバーコミットが可能になります。</li>
+<li>GPUデバイスコード上のPostgreSQLデータ型の表現が、Coalesced Memory Accessを意識したレイアウトに変わりました。</li>
+<li>GpuPreAggでのGROUP BY処理が一新され、全般的な処理速度が向上しました。</li>
+<li>GpuJoinの段数が深くなっても、タプルの展開は一回だけで済むようになりました。</li>
+<li>Arrow_FdwおよびPg2Arrowがmin/max統計値付きのArrowファイルに対応しました。</li>
+<li>ネットワークパケットをキャプチャするPcap2Arrowツール、およびArrowファイルをCSV出力するarrow2csvツールを追加しました。</li>
+</ul>
 <h2 id="_2">動作環境</h2>
 <ul>
 <li>PostgreSQL v15.x, v16.x</li>

@@ -91,9 +91,7 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#_6">雑多なデータ型</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#_7">範囲型</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#_8">ジオメトリ型</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_7">ジオメトリ型</a>
     </li>
     </ul>
                   </li>
@@ -155,6 +153,12 @@
 <dd>64bit整数型</dd>
 <dt><code>float2</code>  [データ長: 2bytes]</dt>
 <dd>半精度浮動小数点型。PG-Stromによる独自拡張</dd>
+</dl>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>GPUでは半精度浮動小数点型がハードウェアでサポートされていますが、CPU(x86_64プロセッサ)では未対応です。そのため、<code>float2</code>データ型をCPUで処理する場合には、これを一度<code>float</code>や<code>double</code>型に変換した上で演算を行います。そのため、GPUのように<code>float2</code>の方が演算速度で有利という事はありません。機械学習や統計解析用途にデータ量を抑制するための機能です。</p>
+</div>
+<dl>
 <dt><code>float4</code> (別名 <code>real</code>) [データ長: 4bytes]</dt>
 <dd>単精度浮動小数点型</dd>
 <dt><code>float8</code> (別名 <code>double precision</code>) [データ長: 8bytes]</dt>
@@ -167,10 +171,6 @@
 <p>GPUが<code>numeric</code>型のデータを処理する際、実装上の理由からこれを128bit固定少数点の内部表現に変換して処理します。（これは Apache Arrow の<code>Decimal</code>型と同一の形式です）
 これら内部表現への/からの変換は透過的に行われますが、例えば、桁数の大きな<code>numeric</code>型のデータは表現する事ができないため、PG-StromはCPU側でのフォールバック処理を試みます。したがって、桁数の大きな<code>numeric</code>型のデータをGPUに与えると却って実行速度が低下してしまう事になります。
 これを避けるには、GUCパラメータ<code>pg_strom.enable_numeric_type</code>を使用して<code>numeric</code>データ型を含む演算式をGPUで実行しないように設定します。</p>
-</div>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>GPUでは半精度浮動小数点型がハードウェアでサポートされていますが、CPU(x86_64プロセッサ)では未対応です。そのため、<code>float2</code>データ型をCPUで処理する場合には、これを一度<code>float</code>や<code>double</code>型に変換した上で演算を行います。そのため、GPUのように<code>float2</code>の方が演算速度で有利という事はありません。機械学習や統計解析用途にデータ量を抑制するための機能です。</p>
 </div>
 <h2 id="_3">日付時刻型</h2>
 <dl>
@@ -223,24 +223,48 @@
 <dd>ネットワークアドレス型</dd>
 <dt><code>cidr</code> [データ長: 7 or 19butes]</dt>
 <dd>ネットワークアドレス型</dd>
+<dt><code>cube</code> [データ長: 可変長]</dt>
+<dd><code>contrib/cube</code>によって提供される拡張データ型</dd>
 </dl>
-<h2 id="_7">範囲型</h2>
-<dl>
-<dt><code>int4range</code> [データ長: 14bytes]</dt>
-<dd>32bit整数値範囲型</dd>
-<dt><code>int8range</code> [データ長: 22bytes]</dt>
-<dd>64bit整数値範囲型</dd>
-<dt><code>tsrange</code> [データ長: 22bytes]</dt>
-<dd>タイムスタンプ範囲型</dd>
-<dt><code>tstzrange</code> [データ長: 22bytes]</dt>
-<dd>タイムゾーン付きタイムスタンプ範囲型</dd>
-<dt><code>daterange</code> [データ長: 14bytes]</dt>
-<dd>日付データ範囲型</dd>
-</dl>
-<h2 id="_8">ジオメトリ型</h2>
+<!--
+## 範囲型
+
+`int4range` [データ長: 14bytes]
+:   32bit整数値範囲型
+
+
+
+
+`int8range` [データ長: 22bytes]
+:   64bit整数値範囲型
+
+
+
+
+`tsrange` [データ長: 22bytes]
+:   タイムスタンプ範囲型
+
+
+
+
+`tstzrange` [データ長: 22bytes]
+:   タイムゾーン付きタイムスタンプ範囲型
+
+
+
+
+`daterange` [データ長: 14bytes]
+:   日付データ範囲型
+
+
+-->
+
+<h2 id="_7">ジオメトリ型</h2>
 <dl>
 <dt><code>geometry</code> [データ長: 可変]</dt>
 <dd>PostGISジオメトリオブジェクト</dd>
+<dt><code>box2df</code> [データ長: 16bytes]</dt>
+<dd>2次元バウンディングボックス（GiSTインデックス用）</dd>
 </dl>
               
             </div>

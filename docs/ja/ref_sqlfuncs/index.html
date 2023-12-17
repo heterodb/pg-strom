@@ -91,8 +91,6 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpu">GPUキャッシュ</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#hyperloglog">HyperLogLog 関数</a>
-    </li>
     <li class="toctree-l2"><a class="reference internal" href="#_2">テストデータ生成</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#_3">その他の関数</a>
@@ -143,9 +141,13 @@
 <p>本章ではPG-Stromが独自に提供するSQLオブジェクトについて説明します。</p>
 <h2 id="_1">システム情報</h2>
 <dl>
-<dt><code>pgstrom.device_info</code> システムビュー</dt>
-<dd>PG-Strom用にインストールされたGPUデバイスのプロパティを表示します。<br>このビューのスキーマ定義は以下の通りです。</dd>
-<dd></dd>
+<dt><code>pgstrom.device_info</code> システムビュー </dt>
+<dd>
+<p>PG-Strom用にインストールされたGPUデバイスのプロパティを表示します。</p>
+</dd>
+<dd>
+<p>このビューのスキーマ定義は以下の通りです。</p>
+</dd>
 </dl>
 <table>
 <thead>
@@ -157,58 +159,66 @@
 </thead>
 <tbody>
 <tr>
-<td style="text-align: left;">device_nr</td>
+<td style="text-align: left;">gpu_id</td>
 <td style="text-align: left;"><code>int</code></td>
 <td style="text-align: left;">GPUデバイス番号</td>
 </tr>
 <tr>
-<td style="text-align: left;">aindex</td>
-<td style="text-align: left;"><code>int</code></td>
-<td style="text-align: left;">属性インデックス</td>
-</tr>
-<tr>
-<td style="text-align: left;">attribute</td>
+<td style="text-align: left;">att_name</td>
 <td style="text-align: left;"><code>text</code></td>
 <td style="text-align: left;">デバイス属性名</td>
 </tr>
 <tr>
-<td style="text-align: left;">value</td>
+<td style="text-align: left;">att_value</td>
 <td style="text-align: left;"><code>text</code></td>
 <td style="text-align: left;">デバイス属性値</td>
+</tr>
+<tr>
+<td style="text-align: left;">att_desc</td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">デバイス属性の説明</td>
 </tr>
 </tbody>
 </table>
 <p>GPUデバイスのプロパティは非常に数が多く、またCUDAドライバのバージョンによっても対応しているプロパティの数はまちまちです。
-そのため、<code>pgstrom.device_info</code>システムビューでは、GPUデバイス番号(<code>device_nr</code>)と、属性インデックス(<code>aindex</code>)によって対象となるプロパティを特定します。</p>
+そのため、<code>pgstrom.device_info</code>システムビューでは、GPUデバイス番号(<code>gpu_id</code>)と、デバイス属性名(<code>att_name</code>)によって対象となるプロパティを特定します。</p>
 <p>以下は<code>pgstrom.device_info</code>システムビューの出力例です。</p>
-<pre><code>postgres=# select * from pgstrom.device_info limit 10;
- device_nr | aindex |              attribute              |                  value
------------+--------+-------------------------------------+------------------------------------------
-         0 |      0 | GPU Device Name                     | NVIDIA Tesla V100-PCIE-16GB
-         0 |      1 | GPU Device Brand                    | TESLA
-         0 |      2 | GPU Device UUID                     | GPU-8ba149db-53d8-c5f3-0f55-97ce8cfadb28
-         0 |      3 | GPU Total RAM Size                  | 15.78GB
-         0 |      4 | GPU PCI Bar1 Size                   | 16.00GB
-         0 |      5 | Maximum number of threads per block | 1024
-         0 |      6 | Maximum block dimension X           | 1024
-         0 |      7 | Maximum block dimension Y           | 1024
-         0 |      8 | Maximum block dimension Z           | 64
-         0 |      9 | Maximum grid dimension X            | 2147483647
+<pre><code>postgres=# select * from pgstrom.gpu_device_info limit 10;
+ gpu_id |       att_name        |                att_value                 |              att_desc
+--------+-----------------------+------------------------------------------+-------------------------------------
+      0 | DEV_NAME              | NVIDIA A100-PCIE-40GB                    | GPU Device Name
+      0 | DEV_ID                | 0                                        | GPU Device ID
+      0 | DEV_UUID              | GPU-13943bfd-5b30-38f5-0473-78979c134606 | GPU Device UUID
+      0 | DEV_TOTAL_MEMSZ       | 39.39GB                                  | GPU Total RAM Size
+      0 | DEV_BAR1_MEMSZ        | 64.00GB                                  | GPU PCI Bar1 Size
+      0 | NUMA_NODE_ID          | -1                                       | GPU NUMA Node Id
+      0 | MAX_THREADS_PER_BLOCK | 1024                                     | Maximum number of threads per block
+      0 | MAX_BLOCK_DIM_X       | 1024                                     | Maximum block dimension X
+      0 | MAX_BLOCK_DIM_Y       | 1024                                     | Maximum block dimension Y
+      0 | MAX_BLOCK_DIM_Z       | 64                                       | Maximum block dimension Z
 (10 rows)
 </code></pre>
 <h2 id="arrow_fdw">Arrow_Fdw</h2>
 <dl>
 <dt><code>fdw_handler pgstrom.arrow_fdw_handler()</code></dt>
 <dd>Arrow_FdwのFDWハンドラ関数です。通常、ユーザがこの関数を使用する必要はありません。</dd>
-<dd></dd>
 <dt><code>void pgstrom.arrow_fdw_validator(text[], oid)</code></dt>
 <dd>Arrow_FdwのFDWオプション検証用関数です。通常、ユーザがこの関数を使用する必要はありません。</dd>
-<dd></dd>
+<dt><code>event_trigger pgstrom.arrow_fdw_precheck_schema()</code></dt>
+<dd>Arrowファイルのスキーマ定義をチェックするためのイベントトリガ関数です。通常、ユーザがこの関数を使用する必要はありません。</dd>
 <dt><code>void pgstrom.arrow_fdw_import_file(text, text, text = null)</code></dt>
-<dd>Apache Arrow形式ファイルをインポートし、新たに外部テーブル(foreign table)を定義します。第一引数は外部テーブルの名前、第二引数はApache Arrow形式ファイルのパス、省略可能な第三引数はスキーマ名です。</dd>
-<dd>この関数は<code>IMPORT FOREIGN SCHEMA</code>構文に似ていますが、PostgreSQLにおけるテーブルの列数制限（<code>MaxTupleAttributeNumber</code> = 1664）を越える列が定義されたApache Arrow形式ファイルをインポートできます。つまり、これに該当しない大半のユースケースでは<code>IMPORT FOREIGN SCHEMA</code>構文を利用すべきです。</dd>
-<dd>以下の例は、<code>pgstrom.arrow_fdw_import_file</code>を用いて2000個のInt16列を持つApache Arrowファイルをインポートしたものです。<code>\d mytest</code>の実行結果より、新たに作成された外部テーブル<code>mytest</code>が2000個のフィールドを持っている事が分かります。</dd>
-<dd>PostgreSQL内部表現の都合上、全ての列を一度に読み出す事はできませんが、最後の例のように一部の列だけを参照するワークロードであれば実行可能です。</dd>
+<dd>
+<p>Apache Arrow形式ファイルをインポートし、新たに外部テーブル(foreign table)を定義します。第一引数は外部テーブルの名前、第二引数はApache Arrow形式ファイルのパス、省略可能な第三引数はスキーマ名です。</p>
+</dd>
+<dd>
+<p>この関数は<code>IMPORT FOREIGN SCHEMA</code>構文に似ていますが、PostgreSQLにおけるテーブルの列数制限（<code>MaxTupleAttributeNumber</code> = 1664）を越える列が定義されたApache Arrow形式ファイルをインポートできます。つまり、これに該当しない大半のユースケースでは<code>IMPORT FOREIGN SCHEMA</code>構文を利用すべきです。</p>
+</dd>
+<dd>
+<p>以下の例は、<code>pgstrom.arrow_fdw_import_file</code>を用いて2000個のInt16列を持つApache Arrowファイルをインポートしたものです。<code>\d mytest</code>の実行結果より、新たに作成された外部テーブル<code>mytest</code>が2000個のフィールドを持っている事が分かります。</p>
+</dd>
+<dd>
+<p>PostgreSQL内部表現の都合上、全ての列を一度に読み出す事はできませんが、最後の例のように一部の列だけを参照するワークロードであれば実行可能です。</p>
+</dd>
 </dl>
 <pre><code>=# select pgstrom.arrow_fdw_import_file('mytest', '/tmp/wide2000.arrow');
  arrow_fdw_import_file
@@ -261,100 +271,119 @@ ERROR:  target lists can have at most 1664 entries
 <tr>
 <th style="text-align: left;">name</th>
 <th style="text-align: left;">type</th>
-<th style="text-align: left;">description</th>
+<th>description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td style="text-align: left;"><code>database_oid</code></td>
 <td style="text-align: left;"><code>oid</code></td>
-<td style="text-align: left;">GPUキャッシュを設定したテーブルの属するデータベースのOIDです</td>
+<td>GPUキャッシュを設定したテーブルの属するデータベースのOIDです</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>database_name</code></td>
 <td style="text-align: left;"><code>text</code></td>
-<td style="text-align: left;">GPUキャッシュを設定したテーブルの属するデータベースの名前です</td>
+<td>GPUキャッシュを設定したテーブルの属するデータベースの名前です</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>table_oid</code></td>
 <td style="text-align: left;"><code>oid</code></td>
-<td style="text-align: left;">GPUキャッシュを設定したテーブルのOIDです。必ずしも現在のデータベースとは限らない事に留意してください。</td>
+<td>GPUキャッシュを設定したテーブルのOIDです。必ずしも現在のデータベースとは限らない事に留意してください。</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>table_name</code></td>
 <td style="text-align: left;"><code>text</code></td>
-<td style="text-align: left;">GPUキャッシュを設定したテーブルの名前です。必ずしも現在のデータベースとは限らない事に留意してください。</td>
+<td>GPUキャッシュを設定したテーブルの名前です。必ずしも現在のデータベースとは限らない事に留意してください。</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>signature</code></td>
 <td style="text-align: left;"><code>int8</code></td>
-<td style="text-align: left;">GPUキャッシュの一意性を示すハッシュ値です。例えば<code>ALTER TABLE</code>の前後などでこの値が変わる場合があります。</td>
+<td>GPUキャッシュの一意性を示すハッシュ値です。例えば<code>ALTER TABLE</code>の前後などでこの値が変わる場合があります。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>refcnt</code></td>
-<td style="text-align: left;"><code>int4</code></td>
-<td style="text-align: left;">GPUキャッシュの参照カウンタです。必ずしも最新の状態を反映しているとは限りません。</td>
+<td style="text-align: left;"><code>phase</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td>GPUキャッシュ構築の段階を示します。<code>not_built</code>, <code>is_empty</code>, <code>is_loading</code>, <code>is_ready</code>, <code>corrupted</code>のいずれかです。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>corrupted</code></td>
-<td style="text-align: left;"><code>bool</code></td>
-<td style="text-align: left;">GPUキャッシュが破損（corrupted）状態のときに<code>true</code>となります。</td>
+<td style="text-align: left;"><code>rowid_num_used</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>割当て済みの行IDの数です。</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>rowid_num_free</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>未割当の行IDの数です。</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>gpu_main_sz</code></td>
 <td style="text-align: left;"><code>int8</code></td>
-<td style="text-align: left;">GPUキャッシュ上に確保された固定長データ用の領域のサイズです。</td>
+<td>GPUキャッシュ上の固定長データ用の領域のサイズです。</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>gpu_main_nitems</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>GPUキャッシュ上のタプル数です。</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>gpu_extra_sz</code></td>
 <td style="text-align: left;"><code>int8</code></td>
-<td style="text-align: left;">GPUキャッシュ上に確保された可変長データ用の領域のサイズです。</td>
+<td>GPUキャッシュ上の可変長データ用の領域のサイズです。</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>gpu_extra_usage</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>GPUキャッシュ上の可変長データ領域の使用済みサイズです。</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>gpu_extra_dead</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>GPUキャッシュ上の可変長データ領域の未使用サイズです。</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>redo_write_ts</code></td>
 <td style="text-align: left;"><code>timestamptz</code></td>
-<td style="text-align: left;">REDOログバッファを最後に更新した時刻です。</td>
+<td>REDOログバッファを最後に更新した時刻です。</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>redo_write_nitems</code></td>
 <td style="text-align: left;"><code>int8</code></td>
-<td style="text-align: left;">REDOログバッファに書き込まれたREDOログの総数です。</td>
+<td>REDOログバッファに書き込まれたREDOログの総数です。</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>redo_write_pos</code></td>
 <td style="text-align: left;"><code>int8</code></td>
-<td style="text-align: left;">REDOログバッファに書き込まれたREDOログの総バイト数です。</td>
+<td>REDOログバッファに書き込まれたREDOログの総バイト数です。</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>redo_read_nitems</code></td>
 <td style="text-align: left;"><code>int8</code></td>
-<td style="text-align: left;">REDOログバッファから読み出し、GPUに適用されたREDOログの総数です。</td>
+<td>REDOログバッファから読み出し、GPUに適用されたREDOログの総数です。</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>redo_read_pos</code></td>
 <td style="text-align: left;"><code>int8</code></td>
-<td style="text-align: left;">REDOログバッファから読み出し、GPUに適用されたREDOログの総バイト数です。</td>
+<td>REDOログバッファから読み出し、GPUに適用されたREDOログの総バイト数です。</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>redo_sync_pos</code></td>
 <td style="text-align: left;"><code>int8</code></td>
-<td style="text-align: left;">REDOログバッファ書き込まれたREDOログのうち、既にGPUキャッシュへの適用をバックグラウンドワーカにリクエストした位置です。<br>REDOログバッファの残り容量が逼迫してきた際に、多数のセッションが同時に非同期のリクエストを発生させる事を避けるため、内部的に使用されます。</td>
+<td>REDOログバッファ書き込まれたREDOログのうち、既にGPUキャッシュへの適用をバックグラウンドワーカにリクエストした位置です。REDOログバッファの残り容量が逼迫してきた際に、多数のセッションが同時に非同期のリクエストを発生させる事を避けるため、内部的に使用されます。</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>config_options</code></td>
 <td style="text-align: left;"><code>text</code></td>
-<td style="text-align: left;">GPUキャッシュのオプション文字列です。</td>
+<td>GPUキャッシュのオプション文字列です。</td>
 </tr>
 </tbody>
 </table>
 <p>以下は<code>pgstrom.gpucache_info</code>システムビューの出力例です。</p>
 <pre><code>=# select * from pgstrom.gpucache_info ;
- database_oid | database_name | table_oid | table_name | signature  | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |
-  config_options
---------------+---------------+-----------+------------+------------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
-        12728 | postgres      |     25244 | mytest     | 6295279771 |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
-        12728 | postgres      |     25262 | dpoints    | 5985886065 |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
-(2 rows)
+ database_oid | database_name | table_oid |    table_name    | signature  |  phase   | rowid_num_used | rowid_num_free | gpu_main_sz | gpu_main_nitems | gpu_extra_sz | gpu_extra_usage | gpu_extra_dead |         redo_write_ts         | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos |
+redo_sync_pos |                                                   config_options
+--------------+---------------+-----------+------------------+------------+----------+----------------+----------------+-------------+-----------------+--------------+-----------------+----------------+-------------------------------+-------------------+----------------+------------------+---------------+---------------+---------------------------------------------------------------------------------------------------------------------
+       193450 | hoge          |    603029 | cache_test_table | 4529357070 | is_ready |           4000 |           6000 |      439904 |            4000 |      3200024 |          473848 |              0 | 2023-12-18 01:25:42.850193+09 |              4000 |         603368 |             4000 |        603368 |       603368 | gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
+(1 row)
 </code></pre>
 <dl>
 <dt><code>trigger pgstrom.gpucache_sync_trigger()</code></dt>
@@ -370,86 +399,84 @@ ERROR:  target lists can have at most 1664 entries
 <dd>破損（corrupted）状態となったGPUキャッシュを復元しようと試みます。</dd>
 <dd></dd>
 </dl>
-<h2 id="hyperloglog">HyperLogLog 関数</h2>
-<dl>
-<dt><code>bigint pg_catalog.hll_count(TYPE)</code></dt>
-<dd>HyperLogLogアルゴリズムを使用してキー値のカーディナリティを推定する集約関数です。</dd>
-<dd></dd>
-<dd><code>TYPE</code>は<code>int1</code>、<code>int2</code>、<code>int4</code>、<code>int8</code>、<code>numeric</code>、<code>date</code>、<code>time</code>、<code>timetz</code>、<code>timestamp</code>、<code>timestamptz</code>、<code>bpchar</code>、<code>text</code>、または<code>uuid</code>のいずれかです。</dd>
-<dd></dd>
-<dd>PG-StromのHyperLogLog機能について、詳しくは<a href="../hll_count/">HyperLogLog</a>を参照してください。</dd>
-<dd></dd>
-<dt><code>bytea pg_catalog.hll_sketch(TYPE)</code></dt>
-<dd>引数で与えたキー値から、HyperLogLogアルゴリズムで使用するHLL Sketchを生成し、<code>bytea</code>データとして返す集約関数です。</dd>
-<dd></dd>
-<dd><code>TYPE</code>は<code>int1</code>、<code>int2</code>、<code>int4</code>、<code>int8</code>、<code>numeric</code>、<code>date</code>、<code>time</code>、<code>timetz</code>、<code>timestamp</code>、<code>timestamptz</code>、<code>bpchar</code>、<code>text</code>、または<code>uuid</code>のいずれかです。</dd>
-<dd></dd>
-<dt><code>bigint pg_catalog.hll_merge(bytea)</code></dt>
-<dd>HLL Sketchから、元になったキー値のカーディナリティを推定する集約関数です。引数は<code>hll_sketch()</code>関数の生成したHLL Sketchである事が期待されています。</dd>
-<dd></dd>
-<dt><code>bytea pg_catalog.hll_combine(bytea)</code></dt>
-<dd>複数のHLL Sketchを結合し、その結果をまたHLL Sketchとして出力する集約関数です。例えば週次データのHLL Sketchを月次データに変換するといった利用方法を想定しています。</dd>
-<dd></dd>
-<dt><code>int4[] pg_catalog.hll_sketch_histogram(bytea)</code></dt>
-<dd>引数として与えたHLL Sketchを走査し、各レジスタの値に基づくヒストグラムを作成して出力する関数です。これは集約関数ではありません。<code>hll_sketch()</code>などで出力したHLL Sketchの内容を可視化する事を目的としています。</dd>
-<dd></dd>
-</dl>
+<!--
+##HyperLogLog 関数
+
+`bigint pg_catalog.hll_count(TYPE)`
+: HyperLogLogアルゴリズムを使用してキー値のカーディナリティを推定する集約関数です。
+: 
+: `TYPE`は`int1`、`int2`、`int4`、`int8`、`numeric`、`date`、`time`、`timetz`、`timestamp`、`timestamptz`、`bpchar`、`text`、または`uuid`のいずれかです。
+: 
+: PG-StromのHyperLogLog機能について、詳しくは[HyperLogLog](hll_count.md)を参照してください。
+: 
+
+`bytea pg_catalog.hll_sketch(TYPE)`
+: 引数で与えたキー値から、HyperLogLogアルゴリズムで使用するHLL Sketchを生成し、`bytea`データとして返す集約関数です。
+: 
+: `TYPE`は`int1`、`int2`、`int4`、`int8`、`numeric`、`date`、`time`、`timetz`、`timestamp`、`timestamptz`、`bpchar`、`text`、または`uuid`のいずれかです。
+: 
+
+`bigint pg_catalog.hll_merge(bytea)`
+: HLL Sketchから、元になったキー値のカーディナリティを推定する集約関数です。引数は`hll_sketch()`関数の生成したHLL Sketchである事が期待されています。
+: 
+
+`bytea pg_catalog.hll_combine(bytea)`
+: 複数のHLL Sketchを結合し、その結果をまたHLL Sketchとして出力する集約関数です。例えば週次データのHLL Sketchを月次データに変換するといった利用方法を想定しています。
+: 
+
+`int4[] pg_catalog.hll_sketch_histogram(bytea)`
+: 引数として与えたHLL Sketchを走査し、各レジスタの値に基づくヒストグラムを作成して出力する関数です。これは集約関数ではありません。`hll_sketch()`などで出力したHLL Sketchの内容を可視化する事を目的としています。
+: 
+-->
+
 <h2 id="_2">テストデータ生成</h2>
 <dl>
 <dt><code>void pgstrom.random_setseed(int)</code></dt>
 <dd>乱数の系列を初期化します。</dd>
-<dd></dd>
 <dt><code>bigint pgstrom.random_int(float=0.0, bigint=0, bigint=INT_MAX)</code></dt>
 <dd><code>bigint</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
 <dt><code>float pgstrom.random_float(float=0.0, float=0.0, float=1.0)</code></dt>
 <dd><code>float</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
 <dt><code>date pgstrom.random_date(float=0.0, date='2015-01-01', date='2025-12-31')</code></dt>
 <dd><code>date</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
 <dt><code>time pgstrom.random_time(float=0.0, time='00:00:00', time='23:59:59')</code></dt>
 <dd><code>time</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
 <dt><code>timetz pgstrom.random_timetz(float=0.0, time='00:00:00', time='23:59:59')</code></dt>
 <dd><code>timetz</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
 <dt><code>timestamp pgstrom.random_timestamp(float=0.0, timestamp='2015-01-01', timestamp='2025-01-01')</code></dt>
 <dd><code>timestamp</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
 <dt><code>macaddr pgstrom.random_macaddr(float=0.0, macaddr='ab:cd:00:00:00', macaddr='ab:cd:ff:ff:ff:ff')</code></dt>
 <dd><code>macaddr</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
 <dt><code>inet pgstrom.random_inet(float=0.0, inet='192.168.0.1/16')</code></dt>
 <dd><code>inet</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
 <dt><code>text pgstrom.random_text(float=0.0, text='test_**')</code></dt>
 <dd><code>text</code>型のランダムデータを生成します。第二引数の'*'文字をランダムに置き換えます。</dd>
-<dd></dd>
 <dt><code>text pgstrom.random_text_len(float=0.0, int=10)</code></dt>
 <dd><code>text</code>型のランダムデータを指定文字列長の範囲内で生成します。</dd>
-<dd></dd>
 <dt><code>int4range pgstrom.random_int4range(float=0.0, bigint=0, bigint=INT_MAX)</code></dt>
-<dd><code>int4range</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
+<dd><code>int4range</code>型のランダムデータを指定の範囲内で生成します。}</dd>
 <dt><code>int8range pgstrom.random_int8range(float=0.0, bigint=0, bigint=LONG_MAX)</code></dt>
 <dd><code>int8range</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
 <dt><code>tsrange pgstrom.random_tsrange(float=0.0, timestamp='2015-01-01', timestamp='2025-01-01')</code></dt>
 <dd><code>tsrange</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
 <dt><code>tstzrange pgstrom.random_tstzrange(float=0.0, timestamptz='2015-01-01', timestamptz='2025-01-01')</code></dt>
 <dd><code>tstzrange</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
 <dt><code>daterange pgstrom.random_daterange(float=0.0, date='2015-01-01', date='2025-12-31')</code></dt>
 <dd><code>daterange</code>型のランダムデータを指定の範囲内で生成します。</dd>
-<dd></dd>
 </dl>
 <h2 id="_3">その他の関数</h2>
 <dl>
-<dt><code>pgstrom.license_query</code></dt>
+<dt><code>pgstrom.githash()</code></dt>
+<dd>現在ロードされているPG-Stromモジュールの元となったソースコードリビジョンのハッシュ値を表示します。この値は、障害時にソフトウェアのリビジョンを特定するのに有用です。</dd>
+</dl>
+<pre><code>postgres=# select pgstrom.githash();
+                 githash
+------------------------------------------
+ 103984be24cafd1e7ce6330a050960d97675c196
+</code></pre>
+<dl>
+<dt><code>pgstrom.license_query()</code></dt>
 <dd>ロードされていれば、現在ロードされている商用サブスクリプションを表示します。</dd>
-<dd></dd>
 </dl>
 <pre><code>=# select pgstrom.license_query();
                                                                                license_query

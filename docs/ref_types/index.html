@@ -91,8 +91,6 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#miscellaneous-types">Miscellaneous types</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#range-data-types">Range data types</a>
-    </li>
     <li class="toctree-l2"><a class="reference internal" href="#geometry-data-types">Geometry data types</a>
     </li>
     </ul>
@@ -155,6 +153,12 @@
 <dd>64bit integer data type</dd>
 <dt><code>float2</code>  [length: 2bytes]</dt>
 <dd>Half precision data type; enhanced data type by PG-Strom</dd>
+</dl>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Even though GPU supports half-precision floating-point numbers by hardware, CPU (x86_64 processor) does not support it yet. So, when CPU processes <code>float2</code> data types, it transform them to <code>float</code> or <code>double</code> on calculations. So, CPU has no advantages for calculation performance of <code>float2</code>, unlike GPU. It is a feature to save storage/memory capacity for machine-learning / statistical-analytics. </p>
+</div>
+<dl>
 <dt><code>float4</code> (alias <code>real</code>) [length: 4bytes]</dt>
 <dd>Single precision floating-point data type</dd>
 <dt><code>float8</code> (alias <code>double precision</code>) [length: 8bytes]</dt>
@@ -167,10 +171,6 @@
 <p>When GPU processes values in <code>numeric</code> data type, it is converted to an internal 128bit fixed-point number because of implementation reason. (This layout is identical to <code>Decimal</code> type in Apache Arrow.)
 It is transparently converted to/from the internal format, on the other hands, PG-Strom cannot convert <code>numaric</code> datum with large number of digits, so tries to fallback operations by CPU. Therefore, it may lead slowdown if <code>numeric</code> data with large number of digits are supplied to GPU device.
 To avoid the problem, turn off the GUC option <code>pg_strom.enable_numeric_type</code> not to run operational expression including <code>numeric</code> data types on GPU devices.</p>
-</div>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>Even though GPU supports half-precision floating-point numbers by hardware, CPU (x86_64 processor) does not support it yet. So, when CPU processes <code>float2</code> data types, it transform them to <code>float</code> or <code>double</code> on calculations. So, CPU has no advantages for calculation performance of <code>float2</code>, unlike GPU. It is a feature to save storage/memory capacity for machine-learning / statistical-analytics. </p>
 </div>
 <h2 id="date-and-time-types">Date and time types</h2>
 <dl>
@@ -224,24 +224,48 @@ Regarding to the 2nd problem, you can extend table's storage option <code>toast_
 <dd>Network address data type</dd>
 <dt><code>cidr</code> [length: 7 or 19butes]</dt>
 <dd>Network address data type</dd>
+<dt><code>cube</code> [length: variable]</dt>
+<dd>Extra data type provided by <code>contrib/cube</code></dd>
 </dl>
-<h2 id="range-data-types">Range data types</h2>
-<dl>
-<dt><code>int4range</code> [length: 14bytes]</dt>
-<dd>Range type of 32bit integer</dd>
-<dt><code>int8range</code> [length: 22bytes]</dt>
-<dd>Range type of 64bit integer</dd>
-<dt><code>tsrange</code> [length: 22bytes]</dt>
-<dd>Range type of timestamp data</dd>
-<dt><code>tstzrange</code> [length: 22bytes]</dt>
-<dd>Range type of timestamp with timezone data</dd>
-<dt><code>daterange</code> [length: 14bytes]</dt>
-<dd>Range type of date type</dd>
-</dl>
+<!--
+## Range data types
+
+
+`int4range` [length: 14bytes]
+:   Range type of 32bit integer
+
+
+
+
+`int8range` [length: 22bytes]
+:   Range type of 64bit integer
+
+
+
+
+`tsrange` [length: 22bytes]
+:   Range type of timestamp data
+
+
+
+
+`tstzrange` [length: 22bytes]
+:   Range type of timestamp with timezone data
+
+
+
+
+`daterange` [length: 14bytes]
+:   Range type of date type
+
+-->
+
 <h2 id="geometry-data-types">Geometry data types</h2>
 <dl>
 <dt><code>geometry</code> [length: variable]</dt>
 <dd>Geometry object of PostGIS</dd>
+<dt><code>box2df</code> [length: 16bytes]</dt>
+<dd>2-dimension bounding box (used to GiST-index)</dd>
 </dl>
               
             </div>
