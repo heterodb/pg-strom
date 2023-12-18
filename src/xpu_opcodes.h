@@ -799,7 +799,7 @@ __FUNC_OPCODE(cube_gt,        cube/cube,  5, "cube")
 __FUNC_OPCODE(cube_ge,        cube/cube,  5, "cube")
 __FUNC_OPCODE(cube_contains,  cube/cube, 10, "cube")
 __FUNC_OPCODE(cube_contained, cube/cube, 10, "cube")
-__FUNC_OPCODE(cube_ll_coord,  cube/cube, 10, "cube")
+__FUNC_OPCODE(cube_ll_coord,  cube/int4, 10, "cube")
 
 #undef TYPE_OPCODE
 #undef TYPE_ALIAS

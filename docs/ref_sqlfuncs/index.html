@@ -466,7 +466,7 @@ redo_sync_pos |                                                   config_options
 </dl>
 <h2 id="other-functions">Other Functions</h2>
 <dl>
-<dt><code>pgstrom.githash()</code></dt>
+<dt><code>text pgstrom.githash()</code></dt>
 <dd>It displays the hash value of the source code revision from the currently loaded PG-Strom module is based. This value is useful in determining the software revision in the event of a failure.</dd>
 </dl>
 <pre><code>postgres=# select pgstrom.githash();
@@ -475,7 +475,7 @@ redo_sync_pos |                                                   config_options
  103984be24cafd1e7ce6330a050960d97675c196
 </code></pre>
 <dl>
-<dt><code>pgstrom.license_query()</code></dt>
+<dt><code>text pgstrom.license_query()</code></dt>
 <dd>It displays the active commercial subscription, if loaded.</dd>
 </dl>
 <pre><code>=# select pgstrom.license_query();

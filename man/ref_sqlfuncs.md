@@ -293,7 +293,7 @@ redo_sync_pos |                                                   config_options
 @ja:##その他の関数
 @en:##Other Functions
 
-`pgstrom.githash()`
+`text pgstrom.githash()`
 @ja:: 現在ロードされているPG-Stromモジュールの元となったソースコードリビジョンのハッシュ値を表示します。この値は、障害時にソフトウェアのリビジョンを特定するのに有用です。
 @en:: It displays the hash value of the source code revision from the currently loaded PG-Strom module is based. This value is useful in determining the software revision in the event of a failure.
 
@@ -304,7 +304,7 @@ postgres=# select pgstrom.githash();
  103984be24cafd1e7ce6330a050960d97675c196
 ```
 
-`pgstrom.license_query()`
+`text pgstrom.license_query()`
 @ja:: ロードされていれば、現在ロードされている商用サブスクリプションを表示します。
 @en:: It displays the active commercial subscription, if loaded.
 

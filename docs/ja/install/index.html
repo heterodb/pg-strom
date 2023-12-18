@@ -51,36 +51,38 @@
                 <li class="toctree-l1 current"><a class="reference internal current" href="./">インストール</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#_2">チェックリスト</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#gpusql">GPUダイレクトSQL実行ドライバの選択</a>
     </li>
-        </ul>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">インストール手順</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#os">OSのインストール</a>
         <ul>
     <li class="toctree-l3"><a class="reference internal" href="#nouveau">nouveauドライバの無効化</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#epel-release">epel-releaseのインストール</a>
+    <li class="toctree-l3"><a class="reference internal" href="#iommu">IOMMUの無効化</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#_4">追加リポジトリの有効化</a>
+        <ul>
+    <li class="toctree-l4"><a class="reference internal" href="#epelextra-packages-for-enterprise-linux">EPEL(Extra Packages for Enterprise Linux)</a>
+    </li>
+    <li class="toctree-l4"><a class="reference internal" href="#red-hat-codeready-linux-builder">Red Hat CodeReady Linux Builder</a>
+    </li>
+        </ul>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#heterodb-swdc">heterodb-swdcのインストール</a>
     </li>
         </ul>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#cuda-toolkit">CUDA Toolkitのインストール</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#heterodb">HeteroDB 拡張モジュール</a>
         <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#_3">ライセンスの有効化</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#heterodb-kmod">heterodb-kmod のインストール</a>
+    <li class="toctree-l3"><a class="reference internal" href="#pci-bar1">PCI Bar1メモリの設定</a>
     </li>
         </ul>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#nvidia-gpudirect-storage">NVIDIA GPUDirect Storage</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#mofed">MOFEDドライバのインストール</a>
+    <li class="toctree-l2"><a class="reference internal" href="#heterodb">HeteroDB 拡張モジュール</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#gpudirect-storage">GPUDirect Storageのインストール</a>
+    <li class="toctree-l2"><a class="reference internal" href="#mofed">MOFEDドライバのインストール</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#_5">ライセンスの有効化</a>
     </li>
         </ul>
     </li>
@@ -90,17 +92,17 @@
         <ul>
     <li class="toctree-l3"><a class="reference internal" href="#rpm">RPMによるインストール</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#_4">ソースからのインストール</a>
+    <li class="toctree-l3"><a class="reference internal" href="#_6">ソースからのインストール</a>
         <ul>
-    <li class="toctree-l4"><a class="reference internal" href="#_5">ソースコードの入手</a>
+    <li class="toctree-l4"><a class="reference internal" href="#_7">ソースコードの入手</a>
     </li>
     <li class="toctree-l4"><a class="reference internal" href="#pg-strom_1">PG-Stromのビルド</a>
     </li>
         </ul>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#_6">インストール後の設定</a>
+    <li class="toctree-l3"><a class="reference internal" href="#_8">インストール後の設定</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#_7">データベースクラスタの作成</a>
+    <li class="toctree-l3"><a class="reference internal" href="#_9">データベースクラスタの作成</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#postgresqlconf">postgresql.confの編集</a>
     </li>
@@ -207,73 +209,63 @@
 </li>
 <li><strong>Operating System</strong><ul>
 <li>PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはCentOSのバージョン8.xシリーズです。</li>
-<li>GPUダイレクトSQL実行（HeteroDBドライバ）を利用するには、Red Hat Enterprise Linux または CentOS のバージョン7.3以降または8.0以降が必要です。</li>
-<li>GPUダイレクトSQL実行（NVIDIAドライバ; 実験的）を利用するには Red Hat Enterprise Linux または CentOS のバージョン 8.3 以降と、Mellanox OFED (OpenFabrics Enterprise Distribution) ドライバが必要です。</li>
+<li>GPUダイレクトSQL（cuFileドライバ）を利用するには、CUDA Toolkitに含まれるnvidia-fsドライバと、Mellanox OFED (OpenFabrics Enterprise Distribution) ドライバのインストールが必要です。</li>
 </ul>
 </li>
 <li><strong>PostgreSQL</strong><ul>
-<li>PG-Strom v3.0の実行にはPostgreSQLバージョン11以降が必要です。</li>
+<li>PG-Strom v5.0の実行にはPostgreSQLバージョン15以降が必要です。</li>
 <li>PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。</li>
 </ul>
 </li>
 <li><strong>CUDA Toolkit</strong><ul>
-<li>PG-Stromの実行にはCUDA Toolkit バージョン11.4以降が必要です。</li>
+<li>PG-Stromの実行にはCUDA Toolkit バージョン12.2以降が必要です。</li>
 <li>PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。</li>
-<li>NVIDIA GPUDirect Storage (GDS)はCUDA Toolkit バージョン11.4以降に同梱されています。</li>
 </ul>
 </li>
 </ul>
-<h3 id="gpusql">GPUダイレクトSQL実行ドライバの選択</h3>
-<p>インストール作業の前に、GPUダイレクトSQLのソフトウェアスタックを検討してください。</p>
-<p><a href="../ssd2gpu/">GPUダイレクトSQL</a>を実行するために必要なLinux kernelドライバには以下の２種類があります。</p>
-<ul>
-<li>HeteroDB NVME-Strom<ul>
-<li>2018年にリリースされ、PG-Strom v2.0以降でサポートされているHeteroDB社製の専用ドライバ。</li>
-<li>RHEL7.x/RHEL8.xに対応し、GPUDirect RDMA機構を用いてローカルのNVME-SSDからGPUへの直接データ読み出しが可能です。</li>
-</ul>
-</li>
-<li>NVIDIA GPUDirect Storage<ul>
-<li>NVIDIA社が開発している、NVME/NVME-oFデバイスからGPUへ直接データ読み出しを可能にするドライバで、2021年5月現在、パブリックベータ版が提供されています。</li>
-<li>PG-Strom v3.0で実験的に対応しており、RHEL8.3/8.4、およびUbuntu 18.04/20.04に対応しています。</li>
-<li>HeteroDB社を含む複数のパートナー企業が対応を表明しており、共有ファイルシステムやNVME-oFを通じたSDS(Software Defined Storage)デバイスからの直接読み出しも可能です。</li>
-</ul>
-</li>
-</ul>
-<p>どちらのドライバを使用しても、性能面での差異はほとんどありません。
-しかし、GPUDirect Storageドライバの方が、対応するストレージやファイルシステムの種類といった周辺エコシステムや、ソフトウェア品質管理体制において優位性があると考えられるため、RHEL7/CentOS7でPG-Stromを利用する場合を除き、今後はGPUDirect Storageドライバの利用を推奨します。</p>
-<div class="admonition tips">
-<p class="admonition-title">Tips</p>
-<p>RHEL8/CentOS8 または Ubuntu 18.04/20.04 の場合、以下のステップでインストールを進めてください。</p>
+<!--
+もうこの記述は必要ないはず
+
+### GPUダイレクトSQL実行ドライバの選択
+
+
+インストール作業の前に、GPUダイレクトSQLのソフトウェアスタックを検討してください。
+
+[GPUダイレクトSQL](ssd2gpu.md)を実行するために必要なLinux kernelドライバには以下の２種類があります。
+
+- HeteroDB NVME-Strom
+    - 2018年にリリースされ、PG-Strom v2.0以降でサポートされているHeteroDB社製の専用ドライバ。
+    - RHEL7.x/RHEL8.xに対応し、GPUDirect RDMA機構を用いてローカルのNVME-SSDからGPUへの直接データ読み出しが可能です。
+- NVIDIA GPUDirect Storage
+    - NVIDIA社が開発している、NVME/NVME-oFデバイスからGPUへ直接データ読み出しを可能にするドライバで、2021年5月現在、パブリックベータ版が提供されています。
+    - PG-Strom v3.0で実験的に対応しており、RHEL8.3/8.4、およびUbuntu 18.04/20.04に対応しています。
+    - HeteroDB社を含む複数のパートナー企業が対応を表明しており、共有ファイルシステムやNVME-oFを通じたSDS(Software Defined Storage)デバイスからの直接読み出しも可能です。
+
+どちらのドライバを使用しても、性能面での差異はほとんどありません。
+しかし、GPUDirect Storageドライバの方が、対応するストレージやファイルシステムの種類といった周辺エコシステムや、ソフトウェア品質管理体制において優位性があると考えられるため、RHEL7/CentOS7でPG-Stromを利用する場合を除き、今後はGPUDirect Storageドライバの利用を推奨します。
+
+
+-->
+
+<h2 id="_3">インストール手順</h2>
+<p>一連のインストール手順は以下の通りとなります。</p>
 <ol>
+<li>H/Wの初期設定</li>
 <li>OSのインストール</li>
 <li>CUDA Toolkit のインストール</li>
-<li><code>heterodb-extra</code> モジュールのインストール<ul>
-<li><strong><em><code>heterodb-kmod</code> モジュールのインストールは不要</em></strong></li>
-</ul>
-</li>
 <li>MOFEDドライバのインストール</li>
-<li>GPUDirect Storageモジュールのインストール</li>
+<li>HeteroDB拡張モジュールのインストール</li>
 <li>PostgreSQLのインストール</li>
 <li>PG-Stromのインストール</li>
-<li>PostGISのインストール（必要に応じて）</li>
-</ol>
-<p>RHEL7/CentOS7の場合、以下のステップでインストールを進めてください。</p>
-<ol>
-<li>OSのインストール</li>
-<li>CUDA Toolkit のインストール</li>
-<li><code>heterodb-extra</code> モジュールのインストール</li>
-<li><code>heterodb-kmod</code> モジュールのインストール<ul>
-<li><strong><em>MOFEDドライバ、GPUDirect Storageモジュールのインストールは不要</em></strong></li>
+<li>PostgreSQL拡張モジュールのインストール（必要に応じて）<ul>
+<li>PostGIS</li>
+<li>contrib/cube</li>
 </ul>
 </li>
-<li>PostgreSQLのインストール</li>
-<li>PG-Stromのインストール</li>
-<li>PostGISのインストール（必要に応じて）</li>
 </ol>
-</div>
 <h2 id="os">OSのインストール</h2>
 <p>CUDA ToolkitのサポートするLinuxディストリビューションを選択し、個々のディストリビューションのインストールプロセスに従ってインストール作業を行ってください。 CUDA ToolkitのサポートするLinuxディストリビューションは、<a href="https://developer.nvidia.com/">NVIDIA DEVELOPER ZONE</a>において紹介されています。</p>
-<p>例えば、Red Hat Enterprise Linux 8.x系列、またはCentOS 8.x系列の場合、ベース環境として「最小限のインストール」を選択し、さらに以下のアドオンを選択してください。</p>
+<p>例えば、Red Hat Enterprise Linux 8.x系列の場合、ベース環境として「最小限のインストール」を選択し、さらに以下のアドオンを選択してください。</p>
 <ul>
 <li>開発ツール</li>
 </ul>
@@ -300,7 +292,23 @@ EOF
 # dracut -f
 # shutdown -r now
 </code></pre>
-<h3 id="epel-release">epel-releaseのインストール</h3>
+<h3 id="iommu">IOMMUの無効化</h3>
+<p>GPU-Direct SQLはCUDAのGPUDirect Storage (cuFile)というAPIを使用しています。</p>
+<p>GPUDirect Storageの利用に先立って、OS側でIOMMUの設定を無効化する必要があります。</p>
+<p><a href="https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#install-prereqs">NVIDIA GPUDirect Storage Installation and Troubleshooting Guide</a>の記述を参考に、カーネル起動オプションの設定を行ってください。</p>
+<p>IOMMUを無効化するには、カーネル起動オプションに<code>amd_iommu=off</code> (AMD製CPUの場合)または、<code>intel_iommu=off</code> (Intel製CPUの場合)の設定を付加します。</p>
+<p>エディタで<code>/etc/default/grub</code>を編集し、<code>GRUB_CMDLINE_LINUX_DEFAULT=</code>行に上記のオプションを付加してください。</p>
+<p>例えば、以下のような設定となるはずです。</p>
+<pre><code>  :
+GRUB_CMDLINE_LINUX=&quot;rhgb quiet amd_iommu=off&quot;
+  :
+</code></pre>
+<p>以下のコマンドを実行し、この設定をカーネル起動オプションに反映します。</p>
+<pre><code>$ sudo update-grub
+$ sudo shutdown -r now
+</code></pre>
+<h3 id="_4">追加リポジトリの有効化</h3>
+<h4 id="epelextra-packages-for-enterprise-linux">EPEL(Extra Packages for Enterprise Linux)</h4>
 <p>PG-Stromの実行に必要なソフトウェアモジュールのいくつかは、EPEL(Extra Packages for Enterprise Linux)の一部として配布されています。
 これらのソフトウェアを入手するためにEPELパッケージ群のリポジトリ定義をyumシステムに追加する必要があります。</p>
 <p>EPELリポジトリから入手するパッケージの一つがDKMS(Dynamic Kernel Module Support)です。これは動作中のLinuxカーネルに適合したLinuxカーネルモジュールをオンデマンドでビルドするためのフレームワークで、NVIDIAのGPUデバイスドライバなど関連するカーネルモジュールが使用しています。
@@ -313,6 +321,15 @@ CentOS8では<code>dnf</code>コマンドを用いてのインストールも可
 -- For CentOS8
 # dnf install epel-release
 </code></pre>
+<h4 id="red-hat-codeready-linux-builder">Red Hat CodeReady Linux Builder</h4>
+<p>MOFED（Mellanox OpenFabrics Enterprise Distribution）ドライバのインストールには、Red Hat Enterprise Linux 8.xの標準インストール構成では無効化されている Red Hat CodeReady Linux Builder リポジトリを有効化する必要があります。CentOSにおいては、このリポジトリは PowerTools と呼ばれています。</p>
+<p>このリポジトリを有効化するには、以下のコマンドを実行します。</p>
+<pre><code>-- For RHEL8
+# subscription-manager repos --enable codeready-builder-for-rhel-8-x86_64-rpms
+
+-- For CentOS8
+# dnf config-manager --set-enabled powertools
+</code></pre>
 <h3 id="heterodb-swdc">heterodb-swdcのインストール</h3>
 <p>PG-Stromほか関連パッケージは<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から配布されています。
 これらのソフトウェアを入手するために、HeteroDB-SWDCのリポジトリ定義をyumシステムに追加する必要があります。</p>
@@ -323,19 +340,21 @@ heterodb-swdcパッケージがインストールされると、HeteroDB-SWDCか
 <pre><code># dnf install https://heterodb.github.io/swdc/yum/rhel8-noarch/heterodb-swdc-1.2-1.el8.noarch.rpm
 </code></pre>
 <h2 id="cuda-toolkit">CUDA Toolkitのインストール</h2>
-<p>本節ではCUDA Toolkitのインストールについて説明します。 既に最新のCUDA Toolkitをインストール済みであれば、本節の内容は読み飛ばして構いません</p>
-<p>NVIDIAはCUDA Toolkitのインストールに２通りの方法を提供しています。一つは自己実行型アーカイブ（runfileと呼ばれる）によるもの。もう一つはRPMパッケージによるものです。
-ソフトウェアの更新が容易である事から、後者のRPMパッケージによるインストールが推奨です。</p>
-<p>CUDA Toolkitのインストール用パッケージはNVIDIA DEVELOPER ZONEからダウンロードする事ができます。 適切なOS、アーキテクチャ、ディストリビューション、バージョンを指定し、『rpm(network)』版を選択してください。</p>
+<p>本節ではCUDA Toolkitのインストールについて説明します。 既に最新のCUDA Toolkitをインストール済みである場合、本節の初期設定と合致しているかどうか確認してください。</p>
+<p>NVIDIAはCUDA Toolkitのインストールに２通りの方法を提供しています。一つは自己実行型アーカイブ（runfile）によるもの。もう一つはRPMパッケージによるものです。
+インストールオプションを指定するため、ここではrunfileを用いる方法を推奨します。</p>
+<p>CUDA Toolkitのインストール用パッケージはNVIDIA DEVELOPER ZONEからダウンロードする事ができます。 適切なOS、アーキテクチャ、ディストリビューション、バージョンを指定し、『runfile(local)』版を選択してください。</p>
 <p><img alt="CUDA Toolkit download" src="../img/cuda-download.png" /></p>
-<p>『rpm(network)』を選択すると、ネットワーク経由でCUDA ToolkitをRPMインストールするためのリポジトリ定義情報の追加方法と、関連パッケージをインストールするためのコマンドが表示されます。
+<p>『runfile(local)』を選択すると、自己実行型アーカイブをダウンロードするURLと、それを起動するためのシェルコマンドが表示されます。
 ガイダンス通りにインストールを進めてください。</p>
-<p>以下の例は、RHEL8/CentOS8向けのインストール手順です。</p>
-<pre><code>sudo dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
-sudo dnf clean all
-sudo dnf -y module install nvidia-driver:latest-dkms
-sudo dnf -y install cuda
+<pre><code>$ wget https://developer.download.nvidia.com/compute/cuda/12.3.1/local_installers/cuda_12.3.1_545.23.08_linux.run
+$ sudo sh cuda_12.3.1_545.23.08_linux.run
 </code></pre>
+<p>インストーラが起動すると、いくつかのインストールオプションを指定する事ができます。</p>
+<p>まず、デフォルトではチェックの外れている<code>[X] Kernel Objects</code> --&gt; <code>[X] nvidia-fs</code> にチェックを入れてください。これはGPU-Direct SQLを使用するために必須のオプションです。</p>
+<p><img alt="CUDA Runfile Installer1" src="../img/cuda-runfile-install-01.png" /></p>
+<p>次に、<code>Options</code> --&gt; <code>Driver Options</code> を下ってゆき、<code>[X] Install the kernel open module flavor</code> にチェックを入れてください。将来的に、GPUDirect Storage機能はオープンソース版のドライバでのみサポートされるという事が予告されています。</p>
+<p><img alt="CUDA Runfile Installer1" src="../img/cuda-runfile-install-02.png" /></p>
 <p>正常にインストールが完了すると、<code>/usr/local/cuda</code>配下にCUDA Toolkitが導入されています。</p>
 <pre><code>$ ls /usr/local/cuda
 bin     include  libnsight         nvml       samples  tools
@@ -344,30 +363,54 @@ extras  lib64    nsightee_plugins  pkgconfig  src
 </code></pre>
 <p>インストールが完了したら、GPUが正しく認識されている事を確認してください。<code>nvidia-smi</code>コマンドを実行すると、以下の出力例のように、システムに搭載されているGPUの情報が表示されます。</p>
 <pre><code>$ nvidia-smi
-Thu May 27 15:05:50 2021
-+-----------------------------------------------------------------------------+
-| NVIDIA-SMI 465.19.01    Driver Version: 465.19.01    CUDA Version: 11.3     |
-|-------------------------------+----------------------+----------------------+
-| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
-| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
-|                               |                      |               MIG M. |
-|===============================+======================+======================|
-|   0  NVIDIA A100-PCI...  Off  | 00000000:8E:00.0 Off |                    0 |
-| N/A   44C    P0    49W / 250W |      0MiB / 40536MiB |      0%      Default |
-|                               |                      |             Disabled |
-+-------------------------------+----------------------+----------------------+
-|   1  NVIDIA A100-PCI...  Off  | 00000000:B1:00.0 Off |                    0 |
-| N/A   41C    P0    54W / 250W |      0MiB / 40536MiB |      0%      Default |
-|                               |                      |             Disabled |
-+-------------------------------+----------------------+----------------------+
+Mon Dec 18 18:02:14 2023
++---------------------------------------------------------------------------------------+
+| NVIDIA-SMI 545.23.08              Driver Version: 545.23.08    CUDA Version: 12.3     |
+|-----------------------------------------+----------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |
+|                                         |                      |               MIG M. |
+|=========================================+======================+======================|
+|   0  NVIDIA L40S                    Off | 00000000:41:00.0 Off |                    0 |
+| N/A   40C    P0              90W / 350W |      4MiB / 46068MiB |      3%      Default |
+|                                         |                      |                  N/A |
++-----------------------------------------+----------------------+----------------------+
 
-+-----------------------------------------------------------------------------+
-| Processes:                                                                  |
-|  GPU   GI   CI        PID   Type   Process name                  GPU Memory |
-|        ID   ID                                                   Usage      |
-|=============================================================================|
-|  No running processes found                                                 |
-+-----------------------------------------------------------------------------+
++---------------------------------------------------------------------------------------+
+| Processes:                                                                            |
+|  GPU   GI   CI        PID   Type   Process name                            GPU Memory |
+|        ID   ID                                                             Usage      |
+|=======================================================================================|
+|  No running processes found                                                           |
++---------------------------------------------------------------------------------------+
+</code></pre>
+<h3 id="pci-bar1">PCI Bar1メモリの設定</h3>
+<p>GPU-Direct SQLは、GPUデバイスメモリをホストシステム上のPCI BAR1領域（物理アドレス空間）にマップし、そこをDestinationとするP2P-RDMA要求をNVME機器に対して行う事で、ロスのない高速なデータ読出しを実現します。</p>
+<p>十分な多重度を持ったP2P-RDMAを行うには、GPUがバッファをマップするのに十分なPCI BAR1領域を有している必要があります。大半のGPUではPCI BAR1領域の大きさは固定で、PG-Stromにおいては、それがGPUデバイスメモリのサイズを上回っている製品を推奨しています。</p>
+<p>しかし、一部のGPU製品においては『動作モード』を切り替える事でPCI BAR1領域のサイズを切り替える事ができるものが存在します。お使いのGPUがそれに該当する場合は、<a href="https://developer.nvidia.com/displaymodeselector">NVIDIA Display Mode Selector Tool</a>を参照の上、PCI BAR1領域のサイズを最大化するモードへと切り替えてください。</p>
+<p>2023年12月時点では、以下のGPUの場合にNVIDIA Display Mode Selector Toolを利用して<strong>*Display Off</strong>モードへと切り替える必要があります。</p>
+<ul>
+<li>NVIDIA L40S</li>
+<li>NVIDIA L40</li>
+<li>NVIDIA A40</li>
+<li>NVIDIA RTX 6000 Ada</li>
+<li>NVIDIA RTX A6000</li>
+<li>NVIDIA RTX A5500</li>
+<li>NVIDIA RTX A5000</li>
+</ul>
+<p>システムに搭載されているGPUのメモリサイズやPCI BAR1サイズを確認するには、<code>nvidia-smi -q</code>コマンドを利用します。以下のように、メモリ関連の状態が表示されます。</p>
+<pre><code>$ nvidia-smi -q
+        :
+    FB Memory Usage
+        Total                             : 46068 MiB
+        Reserved                          : 685 MiB
+        Used                              : 4 MiB
+        Free                              : 45377 MiB
+    BAR1 Memory Usage
+        Total                             : 65536 MiB
+        Used                              : 1 MiB
+        Free                              : 65535 MiB
+        :
 </code></pre>
 <h2 id="heterodb">HeteroDB 拡張モジュール</h2>
 <p><code>heterodb-extra</code>モジュールは、PG-Stromに以下の機能を追加します。</p>
@@ -382,174 +425,39 @@ Thu May 27 15:05:50 2021
 <p>以下のように、SWDCから<code>heterodb-extra</code>パッケージをインストールしてください。</p>
 <pre><code># dnf install heterodb-extra
 </code></pre>
-<h3 id="_3">ライセンスの有効化</h3>
-<p><code>heterodb-extra</code>モジュールの全ての機能を利用するには、HeteroDB社が提供するライセンスの有効化が必要です。ライセンスなしで運用する事も可能ですが、その場合、下記の機能が制限を受けます。</p>
-<ul>
-<li>マルチGPUの利用</li>
-<li>GPUダイレクトSQLにおける複数NVME-SSDによるストライピング(md-raid0)</li>
-<li>GPUダイレクトSQLにおけるNVME-oFデバイスの利用</li>
-<li>GPU版PostGISにおけるGiSTインデックスの利用</li>
-</ul>
-<p>ライセンスファイルは以下のような形式でHeteroDB社から入手する事ができます。</p>
-<pre><code>IAgIVdKxhe+BSer3Y67jQW0+uTzYh00K6WOSH7xQ26Qcw8aeUNYqJB9YcKJTJb+QQhjmUeQpUnboNxVwLCd3HFuLXeBWMKp11/BgG0FSrkUWu/ZCtDtw0F1hEIUY7m767zAGV8y+i7BuNXGJFvRlAkxdVO3/K47ocIgoVkuzBfLvN/h9LffOydUnHPzrFHfLc0r3nNNgtyTrfvoZiXegkGM9GBTAKyq8uWu/OGonh9ybzVKOgofhDLk0rVbLohOXDhMlwDl2oMGIr83tIpCWG+BGE+TDwsJ4n71Sv6n4bi/ZBXBS498qShNHDGrbz6cNcDVBa+EuZc6HzZoF6UrljEcl=
-----
-VERSION:2
-SERIAL_NR:HDB-TRIAL
-ISSUED_AT:2019-05-09
-EXPIRED_AT:2019-06-08
-GPU_UUID:GPU-a137b1df-53c9-197f-2801-f2dccaf9d42f
-</code></pre>
-<p>これを <code>/etc/heterodb.license</code> にコピーし、PostgreSQLを再起動します。</p>
-<p>以下のようにPostgreSQLの起動ログにライセンス情報が出力され、ライセンスの有効化が行われた事が分かります。</p>
-<pre><code>    :
- LOG:  HeteroDB Extra module loaded (API=20210525; NVIDIA cuFile)
- LOG:  HeteroDB License: { &quot;version&quot; : 2, &quot;serial_nr&quot; : &quot;HDB-TRIAL&quot;, &quot;issued_at&quot; : &quot;2020-11-24&quot;, &quot;expired_at&quot; : &quot;2025-12-31&quot;, &quot;gpus&quot; : [ { &quot;uuid&quot; : &quot;GPU-8ba149db-53d8-c5f3-0f55-97ce8cfadb28&quot; } ]}
- LOG:  PG-Strom version 3.0 built for PostgreSQL 12
-</code></pre>
-<h3 id="heterodb-kmod">heterodb-kmod のインストール</h3>
-<p>このモジュールは、HeteroDB社による<code>nvme_strom</code>カーネルモジュールを用いてGPUダイレクトSQLを使用する場合に必要です。</p>
-<p>NVIDIA GPUDirect Storageを使用する場合、本節の内容は読み飛ばしてください。</p>
-<p><code>heterodb-kmod</code>パッケージはは(https://heterodb.github.io/swdc/)[HeteroDB Software Distribution Center]からフリーソフトウェアとして配布されています。すなわち、オープンソースソフトウェアではありません。</p>
-<p><code>heterodb-swdc</code>パッケージを導入済みであれば、<code>dnf install</code>コマンドを用いてRPMパッケージをダウンロード、インストールする事ができます。</p>
-<pre><code># dnf install heterodb-kmod
-</code></pre>
-<p>問題なくインストールが完了していれば、<code>modinfo</code>コマンドで<code>nvme_strom</code>カーネルモジュールの存在を確認できるはずです。</p>
-<pre><code># modinfo nvme_strom
-filename:       /lib/modules/4.18.0-240.22.1.el8_3.x86_64/extra/nvme_strom.ko.xz
-version:        2.9-1.el8
-license:        BSD
-description:    SSD-to-GPU Direct SQL Module
-author:         KaiGai Kohei &lt;kaigai@heterodbcom&gt;
-rhelversion:    8.3
-depends:
-name:           nvme_strom
-vermagic:       4.18.0-240.22.1.el8_3.x86_64 SMP mod_unload modversions
-parm:           verbose:Enables debug messages (1=on, 2=verbose) (int)
-parm:           stat_enabled:Enables run-time statistics (int)
-parm:           p2p_dma_max_depth:Max number of concurrent P2P DMA requests per NVME device
-parm:           p2p_dma_max_unitsz:Max length of single DMA request in kB
-parm:           fast_ssd_mode:Use SSD2GPU Direct even if clean page caches exist (int)
-parm:           license:License validation status
-</code></pre>
-<p>NVME-Stromカーネルモジュールには幾つかパラメータがあります。</p>
-<table>
-<thead>
-<tr>
-<th style="text-align: center;">パラメータ名</th>
-<th style="text-align: center;">型</th>
-<th style="text-align: center;">初期値</th>
-<th style="text-align: center;">説明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td style="text-align: center;"><code>verbose</code></td>
-<td style="text-align: center;"><code>int</code></td>
-<td style="text-align: center;"><code>0</code></td>
-<td style="text-align: center;">詳細なデバッグ出力を行います。</td>
-</tr>
-<tr>
-<td style="text-align: center;"><code>stat_enabled</code></td>
-<td style="text-align: center;"><code>int</code></td>
-<td style="text-align: center;"><code>1</code></td>
-<td style="text-align: center;"><code>nvme_stat</code>コマンドによる統計情報の採取を有効にします。</td>
-</tr>
-<tr>
-<td style="text-align: center;"><code>fast_ssd_mode</code></td>
-<td style="text-align: center;"><code>int</code></td>
-<td style="text-align: center;"><code>0</code></td>
-<td style="text-align: center;">高速なNVME-SSDに適した動作モードです。</td>
-</tr>
-<tr>
-<td style="text-align: center;"><code>p2p_dma_max_depth</code></td>
-<td style="text-align: center;"><code>int</code></td>
-<td style="text-align: center;"><code>1024</code></td>
-<td style="text-align: center;">NVMEデバイスのI/Oキューに同時に送出する事のできる非同期DMA要求の最大数です。</td>
-</tr>
-<tr>
-<td style="text-align: center;"><code>p2p_dma_max_unitsz</code></td>
-<td style="text-align: center;"><code>int</code></td>
-<td style="text-align: center;"><code>256</code></td>
-<td style="text-align: center;">P2P DMA要求で一度に読み出すデータブロックの最大長（kB単位）です。</td>
-</tr>
-<tr>
-<td style="text-align: center;"><code>license</code></td>
-<td style="text-align: center;"><code>string</code></td>
-<td style="text-align: center;"><code>-1</code></td>
-<td style="text-align: center;">ライセンスがロードされている場合、その失効日を表示します。</td>
-</tr>
-</tbody>
-</table>
-<p><br></p>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p><code>fast_ssd_mode</code>パラメータについての補足説明を付記します。</p>
-<p>NVME-StromモジュールがGPUDirect SQLでのダイレクトデータ転送の要求を受け取ると、まず該当するデータブロックがOSのページキャッシュに載っているかどうかを調べます。
-<code>fast_ssd_mode</code>が<code>0</code>の場合、データブロックが既にページキャッシュに載っていれば、その内容を呼び出し元のユーザ空間バッファに書き戻し、アプリケーションにCUDA APIを用いたHost-&gt;Device間のデータ転送を行うよう促します。これはPCIe x4接続のNVME-SSDなど比較的低速なデバイス向きの動作です。</p>
-<p>一方、PCIe x8接続の高速SSDを使用したり、複数のSSDをストライピング構成で使用する場合は、バッファ間コピーの後で改めてHost-&gt;Device間のデータ転送を行うよりも、SSD-to-GPUのダイレクトデータ転送を行った方が効率的である事もあります。<code>fast_ssd_mode</code>が<code>0</code>以外の場合、NVME-StromドライバはOSのページキャッシュの状態に関わらず、SSD-to-GPUダイレクトのデータ転送を行います。</p>
-<p>ただし、いかなる場合においてもOSのページキャッシュが dirty である場合にはGPUダイレクトでのデータ転送は行われません。</p>
-</div>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p><code>p2p_dma_max_depth</code>パラメータに関する補足説明を付記します。</p>
-<p>NVME-Stromモジュールは、GPUダイレクトSQLを実行するため、データ転送のDMA要求を作成し、それをNVMEデバイスのI/Oキューに送出します。
-NVMEデバイスの能力を越えるペースで非同期DMA要求が投入されると、NVME-SSDコントローラはDMA要求を順に処理する事になるため、DMA要求のレイテンシは極めて悪化します。（一方、NVME-SSDコントローラには切れ目なくDMA要求が来るため、スループットは最大になります）
-DMA要求の発行から処理結果が返ってくるまでの時間があまりにも長いと、場合によっては、これが何らかのエラーと誤認され、I/O要求のタイムアウトとエラーを引き起こす可能性があります。そのため、NVMEデバイスが遊ばない程度にDMA要求をI/Oキューに詰めておけば、それ以上のDMA要求を一度にキューに投入するのは有害無益という事になります。
-<code>p2p_dma_max_depth</code>パラメータは、NVMEデバイス毎に、一度にI/Oキューに投入する事のできる非同期P2P DMA要求の数を制御します。設定値以上のDMA要求を投入しようとすると、スレッドは現在実行中のDMAが完了するまでブロックされ、それによってNVMEデバイスの高負荷を避ける事が可能となります。</p>
-</div>
-<h2 id="nvidia-gpudirect-storage">NVIDIA GPUDirect Storage</h2>
-<p>NVIDIA GPUDirect Storageは、2021年6月にリリースされた CUDA Toolkit バージョン11.4 の新機能です。</p>
-<p>GPUDirect Storageを用いて、ローカルのNVME-SSDやリモートのNVME-oFデバイスからの直接読出しを行うには、
-Mellanox社の提供するOpenFabrics Enterprise Distribution (MOFED) ドライバのインストールが必要です。
-MOFEDドライバは、<a href="https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed">こちら</a>からダウンロードする事ができます。</p>
-<p>また、本節の内容は必ずしも最新のインストール手順を反映していない可能性があります。
-<a href="https://docs.nvidia.com/gpudirect-storage/">NVIDIA社の公式ドキュメント</a>もあわせて参照してください。</p>
-<p>GPUダイレクトSQLを使用しない場合、本節の内容は読み飛ばして下さい。</p>
-<h3 id="mofed">MOFEDドライバのインストール</h3>
+<h2 id="mofed">MOFEDドライバのインストール</h2>
 <p>MOFEDドライバは、<a href="https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed">こちら</a>からダウンロードする事ができます。</p>
 <p>本節ではtgzアーカイブからのインストール例を紹介します。</p>
 <p><img alt="MOFED Driver Selection" src="../img/mofed-download.png" /></p>
 <p>tgzアーカイブを展開し、<code>mlnxofedinstall</code>スクリプトを実行します。この時、GPUDirect Storageのサポートを有効化するオプションを付加するのを忘れないでください。</p>
-<pre><code># tar xvf MLNX_OFED_LINUX-5.3-1.0.0.1-rhel8.3-x86_64.tgz
-# cd MLNX_OFED_LINUX-5.3-1.0.0.1-rhel8.3-x86_64
-# ./mlnxofedinstall --with-nvmf --with-nfsrdma --enable-gds --add-kernel-support
+<pre><code># tar xvf MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64.tgz
+# cd MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64
+# ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
 # dracut -f
 </code></pre>
 <p>MOFEDドライバのビルドおよびインストール中、不足パッケージのインストールを要求される事があります。
-ここまで手順通りにインストールを進めている場合、以下のパッケージが不足しているはずですので、これらを dnf コマンドで追加インストールしてください。</p>
-<ul>
-<li>createrepo</li>
-<li>kernel-rpm-macros</li>
-<li>python36-devel</li>
-<li>pciutils</li>
-<li>python36</li>
-<li>lsof</li>
-<li>kernel-modules-extra</li>
-<li>tcsh</li>
-<li>tcl</li>
-<li>tk</li>
-<li>gcc-gfortran</li>
-</ul>
+その場合、エラーメッセージを確認して要求されたパッケージの追加インストールを行ってください。</p>
+<pre><code>Error: One or more required packages for installing MLNX_OFED_LINUX are missing.
+Please install the missing packages using your Linux distribution Package Management tool.
+Run:
+yum install tcsh tcl tk kernel-modules-extra gcc-gfortran python36
+</code></pre>
 <p>MOFEDドライバのインストールが完了すると、nvmeドライバなど、OS標準のものが置き換えられているはずです。</p>
 <p>例えば以下の例では、OS標準の<code>nvme-rdma</code>ドライバ（<code>/lib/modules/&lt;KERNEL_VERSION&gt;/kernel/drivers/nvme/host/nvme-rdma.ko.xz</code>）ではなく、追加インストールされた<code>/lib/modules/&lt;KERNEL_VERSION&gt;/extra/mlnx-nvme/host/nvme-rdma.ko</code>が優先して使用されています。</p>
 <pre><code># modinfo nvme-rdma
-filename:       /lib/modules/4.18.0-240.22.1.el8_3.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
+filename:       /lib/modules/4.18.0-477.10.1.el8_8.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
 license:        GPL v2
-rhelversion:    8.3
-srcversion:     49FD1FC7CCB178E4D859F29
-depends:        mlx_compat,rdma_cm,ib_core,nvme-core,nvme-fabrics
+rhelversion:    8.8
+srcversion:     533BB7E5866E52F63B9ACCB
+depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics
 name:           nvme_rdma
-vermagic:       4.18.0-240.22.1.el8_3.x86_64 SMP mod_unload modversions
+vermagic:       4.18.0-477.10.1.el8_8.x86_64 SMP mod_unload modversions
 parm:           register_always:Use memory registration even for contiguous memory regions (bool)
 </code></pre>
 <p>既にロードされているカーネルモジュール（例: <code>nvme</code>）を置き換えるため、ここで一度システムのシャットダウンと再起動を行います。</p>
 <p><code>mlnxofedinstall</code>スクリプトの完了後に、<code>dracut -f</code>を実行するのを忘れないでください。</p>
-<h3 id="gpudirect-storage">GPUDirect Storageのインストール</h3>
-<p>続いて、GPUDirect Storageのインストールを行います。</p>
-<pre><code># dnf install nvidia-gds
-</code></pre>
-<p>インストールが完了すると、<code>gdscheck</code>コマンドを用いてGPUDirect Storageの状態を検査する事ができます。
-ここまでの手順で、NVME（ローカルNVME-SSD）とNVME-oF（リモート接続）が<code>Supported</code>となっているはずです。</p>
+<p>再起動が完了すると、GPUDirect Storageが利用可能な状態となっているはずです。
+以下の通り、<code>gdscheck</code>ツールを用いてストレージデバイス毎のコンフィグを確認してください。</p>
 <pre><code># /usr/local/cuda/gds/tools/gdscheck -p
  GDS release version: 1.0.0.82
  nvidia_fs version:  2.7 libcufile version: 2.4
@@ -615,6 +523,31 @@ parm:           register_always:Use memory registration even for contiguous memo
 <p>その後、設定を反映させるためにシステムを再起動してください。
 詳しくは<a href="https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#adding-udev-rules">NVIDIA GPUDirect Storage Installation and Troubleshooting Guide</a>を参照してください。</p>
 </div>
+<h3 id="_5">ライセンスの有効化</h3>
+<p><code>heterodb-extra</code>モジュールの全ての機能を利用するには、HeteroDB社が提供するライセンスの有効化が必要です。ライセンスなしで運用する事も可能ですが、その場合、下記の機能が制限を受けます。</p>
+<ul>
+<li>マルチGPUの利用</li>
+<li>GPUダイレクトSQLにおける複数NVME-SSDによるストライピング(md-raid0)</li>
+<li>GPUダイレクトSQLにおけるNVME-oFデバイスの利用</li>
+<li>GPU版PostGISにおけるGiSTインデックスの利用</li>
+</ul>
+<p>ライセンスファイルは以下のような形式でHeteroDB社から入手する事ができます。</p>
+<pre><code>IAgIVdKxhe+BSer3Y67jQW0+uTzYh00K6WOSH7xQ26Qcw8aeUNYqJB9YcKJTJb+QQhjmUeQpUnboNxVwLCd3HFuLXeBWMKp11/BgG0FSrkUWu/ZCtDtw0F1hEIUY7m767zAGV8y+i7BuNXGJFvRlAkxdVO3/K47ocIgoVkuzBfLvN/h9LffOydUnHPzrFHfLc0r3nNNgtyTrfvoZiXegkGM9GBTAKyq8uWu/OGonh9ybzVKOgofhDLk0rVbLohOXDhMlwDl2oMGIr83tIpCWG+BGE+TDwsJ4n71Sv6n4bi/ZBXBS498qShNHDGrbz6cNcDVBa+EuZc6HzZoF6UrljEcl=
+----
+VERSION:2
+SERIAL_NR:HDB-TRIAL
+ISSUED_AT:2019-05-09
+EXPIRED_AT:2019-06-08
+GPU_UUID:GPU-a137b1df-53c9-197f-2801-f2dccaf9d42f
+</code></pre>
+<p>これを <code>/etc/heterodb.license</code> にコピーし、PostgreSQLを再起動します。</p>
+<p>以下のようにPostgreSQLの起動ログにライセンス情報が出力され、ライセンスの有効化が行われた事が分かります。</p>
+<pre><code>    :
+ LOG:  HeteroDB Extra module loaded [api_version=20231105,cufile=on,nvme_strom=off,githash=9ca2fe4d2fbb795ad2d741dcfcb9f2fe499a5bdf]
+ LOG:  HeteroDB License: { &quot;version&quot; : 2, &quot;serial_nr&quot; : &quot;HDB-TRIAL&quot;, &quot;issued_at&quot; : &quot;2022-11-19&quot;, &quot;expired_at&quot; : &quot;2099-12-31&quot;, &quot;nr_gpus&quot; : 1, &quot;gpus&quot; : [ { &quot;uuid&quot; : &quot;GPU-13943bfd-5b30-38f5-0473-78979c134606&quot; } ]}
+ LOG:  PG-Strom version 5.0.1 built for PostgreSQL 15 (githash: 972441dbafed6679af86af40bc8613be2d73c4fd)
+    :
+</code></pre>
 <h2 id="postgresql">PostgreSQLのインストール</h2>
 <p>本節ではRPMによるPostgreSQLのインストールについて紹介します。
 ソースからのインストールに関しては既にドキュメントが数多く存在し、<code>./configure</code>スクリプトのオプションが多岐にわたる事から、ここでは紹介しません。</p>
@@ -626,22 +559,18 @@ EPELの設定のように、yumリポジトリの設定を行うだけの小さ�
 <p>以下のステップで PostgreSQL のインストールを行います。</p>
 <ul>
 <li>yumリポジトリの定義をインストール</li>
-<li>OS標準のPostgreSQLモジュールの無効化<ul>
-<li>RHEL8/CentOS8系列のみ</li>
-</ul>
-</li>
+<li>OS標準のPostgreSQLモジュールの無効化</li>
 <li>PostgreSQLパッケージのインストール</li>
 </ul>
-<p>例えばPostgreSQL v13を使用する場合、PG-Stromのインストールには <code>postgresql13-server</code>および<code>postgresql13-devel</code>パッケージが必要です。</p>
-<p>以下は、RHEL8/CentOS8においてPostgreSQL v13をインストールする手順の例です。</p>
+<p>例えばPostgreSQL v15を使用する場合、PG-Stromのインストールには <code>postgresql15-server</code>および<code>postgresql15-devel</code>パッケージが必要です。</p>
+<p>以下は、RHEL8/CentOS8においてPostgreSQL v15をインストールする手順の例です。</p>
 <pre><code># dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
 # dnf -y module disable postgresql
-# dnf install -y postgresql13-devel postgresql13-server
+# dnf install -y postgresql15-devel postgresql15-server
 </code></pre>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>Red Hat Enterprise Linux 8 および CentOS 8の場合、パッケージ名<code>postgresql</code>がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、<code>dnf -y module disable postgresql</code> コマンドを用いてディストリビューション標準の<code>postgresql</code>モジュールを無効化します。
-Red Hat Enterprise Linux 7 および CentOS 7の場合はモジュールの無効化は必要ありません。PGDG提供のパッケージはメジャーバージョンにより識別されます。</p>
+<p>Red Hat Enterprise Linux 8 および CentOS 8の場合、パッケージ名<code>postgresql</code>がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、<code>dnf -y module disable postgresql</code> コマンドを用いてディストリビューション標準の<code>postgresql</code>モジュールを無効化します。</p>
 </div>
 <p>PostgreSQL Global Development Groupの提供するRPMパッケージは<code>/usr/pgsql-&lt;version&gt;</code>という少々変則的なディレクトリにソフトウェアをインストールするため、<code>psql</code>等の各種コマンドを実行する際にはパスが通っているかどうか注意する必要があります。</p>
 <p><code>postgresql-alternatives</code>パッケージをインストールしておくと、各種コマンドへのシンボリックリンクを<code>/usr/local/bin</code>以下に作成するため各種オペレーションが便利です。また、複数バージョンのPostgreSQLをインストールした場合でも、<code>alternatives</code>コマンドによってターゲットとなるPostgreSQLバージョンを切り替える事が可能です。</p>
@@ -653,14 +582,14 @@ Red Hat Enterprise Linux 7 および CentOS 7の場合はモジュールの無�
 <h3 id="rpm">RPMによるインストール</h3>
 <p>PG-Stromおよび関連パッケージは<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>より配布されています。
 既にyumシステムへリポジトリを追加済みであれば、それほど作業は多くありません。</p>
-<p>基盤となるPostgreSQLのバージョンごとに別個のPG-StromのRPMパッケージが準備されており、PostgreSQL v12用であれば<code>pg_strom-PG12</code>パッケージを、PostgreSQL v13用であれば<code>pg_strom-PG13</code>パッケージをインストールします。</p>
+<p>基盤となるPostgreSQLのバージョンごとに別個のPG-StromのRPMパッケージが準備されており、PostgreSQL v15用であれば<code>pg_strom-PG15</code>パッケージを、PostgreSQL v16用であれば<code>pg_strom-PG16</code>パッケージをインストールします。</p>
 <p>これは、PostgreSQL拡張モジュールのバイナリ互換性に伴う制約です。</p>
-<pre><code># dnf install -y pg_strom-PG13
+<pre><code># dnf install -y pg_strom-PG15
 </code></pre>
 <p>以上でパッケージのインストールは完了です。</p>
-<h3 id="_4">ソースからのインストール</h3>
+<h3 id="_6">ソースからのインストール</h3>
 <p>開発者向けに、ソースコードからPG-Stromをビルドする方法についても紹介します。</p>
-<h4 id="_5">ソースコードの入手</h4>
+<h4 id="_7">ソースコードの入手</h4>
 <p>RPMパッケージと同様に、ソースコードのtarballを<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から入手する事ができます。</p>
 <p>ただ、tarballのリリースにはある程度のタイムラグが生じてしまうため、最新の開発版を使いたい場合には<a href="https://github.com/heterodb/pg-strom">PG-StromのGitHubリポジトリ</a>の<code>master</code>ブランチをチェックアウトする方法の方が好まれるかもしれません。</p>
 <pre><code>$ git clone https://github.com/heterodb/pg-strom.git
@@ -676,11 +605,11 @@ Resolving deltas: 100% (10504/10504), done.
 <p><code>pg_config</code>にパスが通っており、それがインストール先のPostgreSQLのものであれば、そのまま<code>make</code>、<code>make install</code>を実行します。
 直接パスが通っていない場合は、<code>make</code>コマンドに<code>PG_CONFIG=...</code>パラメータを与え、<code>pg_config</code>のフルパスを渡します。</p>
 <pre><code>$ cd pg-strom
-$ make PG_CONFIG=/usr/pgsql-13/bin/pg_config
-$ sudo make install PG_CONFIG=/usr/pgsql-13/bin/pg_config
+$ make PG_CONFIG=/usr/pgsql-15/bin/pg_config
+$ sudo make install PG_CONFIG=/usr/pgsql-15/bin/pg_config
 </code></pre>
-<h3 id="_6">インストール後の設定</h3>
-<h3 id="_7">データベースクラスタの作成</h3>
+<h3 id="_8">インストール後の設定</h3>
+<h3 id="_9">データベースクラスタの作成</h3>
 <p>データベースクラスタの作成が済んでいない場合は、<code>initdb</code>コマンドを実行してPostgreSQLの初期データベースを作成します。</p>
 <p>RPMインストールにおけるデフォルトのデータベースクラスタのパスは<code>/var/lib/pgsql/&lt;version number&gt;/data</code>です。
 <code>postgresql-alternatives</code>パッケージをインストールしている場合は、PostgreSQLのバージョンに拠らず<code>/var/lib/pgdata</code>で参照する事ができます。</p>
@@ -790,7 +719,7 @@ May 28 13:09:44 kujira.heterodb.in systemd[1]: Started PostgreSQL 13 database se
 <p>なお、この手順は新しいデータベースを作成するたびに必要になる事に注意してください。
 新しいデータベースを作成した時点で既にPG-Strom関連オブジェクトが作成されていてほしい場合は、予め<code>template1</code>データベースでPG-Stromエクステンションを作成しておけば、<code>CREATE DATABASE</code>コマンドの実行時に新しいデータベースへ設定がコピーされます。</p>
 <pre><code>$ psql -U postgres
-psql (13.3)
+psql (15.1)
 Type &quot;help&quot; for help.
 
 postgres=# create extension pg_strom ;
@@ -801,19 +730,12 @@ CREATE EXTENSION
 <p>PG-Stromは一部のPostGIS関数のGPU処理をサポートしています。
 本節ではPostGISのインストール手順について説明を行いますが、必要に応じて読み飛ばしてください。</p>
 <p>PostgreSQLと同様に、PostgreSQL Global Development GroupのyumリポジトリからPostGISモジュールをインストールする事ができます。
-以下の例は、PostgreSQL v13向けにビルドされたPostGIS v3.2をインストールするものです。</p>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>RHEL8およびCentOS8では、PostGISが必要とするパッケージのうちいくつかが初期状態で有効となっている
-リポジトリに含まれていません。
-そのため、RHEL8では<code>--enablerepo</code>オプションに<code>codeready-builder-for-rhel-8-x86_64-rpms</code>リポジトリを、
-CentOS8では<code>PowerTools</code>リポジトリを指定して、これらパッケージに対する依存関係を解決してください。</p>
-</div>
+以下の例は、PostgreSQL v15向けにビルドされたPostGIS v3.2をインストールするものです。</p>
 <pre><code>-- For RHEL8
-# dnf install -y postgis32_13 --enablerepo=codeready-builder-for-rhel-8-x86_64-rpms
+# dnf install -y postgis32_15 --enablerepo=codeready-builder-for-rhel-8-x86_64-rpms
 
 -- For CentOS8
-# dnf install -y postgis32_13 --enablerepo=powertools
+# dnf install -y postgis32_15 --enablerepo=powertools
 </code></pre>
 <p>データベースクラスタを作成してPostgreSQLサーバを起動し、SQLクライアントから<code>CREATE EXTENSION</code>コマンドを実行してGeometryデータ型や地理情報分析のためのSQL関数を作成します。
 これでPostGISのインストールは完了です。</p>

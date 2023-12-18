@@ -103,9 +103,9 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#jsonb-operators">JSONB operators</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#range-type-functionsoperators">Range type functions/operators</a>
-    </li>
     <li class="toctree-l2"><a class="reference internal" href="#postgis-functions">PostGIS Functions</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#cube-type-functions">CUBE Type Functions</a>
     </li>
     </ul>
                   </li>
@@ -174,61 +174,44 @@
 <h2 id="numeric-functionsoperators">Numeric functions/operators</h2>
 <dl>
 <dt><code>bool COMP bool</code></dt>
-<dd></dd>
-<dd>comparison operators of boolean type. <code>COMP</code> is any of <code>=,&lt;&gt;</code></dd>
+<dd>comparison operators of boolean type. <code>COMP</code> is any of <code>=,&lt;&gt;</code>}</dd>
 <dt><code>INT COMP INT</code></dt>
-<dd></dd>
-<dd>comparison operators of integer types.<br><code>INT</code> is any of <code>int1,int2,int4,int8</code>. It is acceptable if left side and right side have different interger types.<br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></dd>
+<dd>comparison operators of integer types.<br><code>INT</code> is any of <code>int1,int2,int4,int8</code>. It is acceptable if left side and right side have different interger types.<br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>}</dd>
 <dt><code>FP COMP FP</code></dt>
-<dd></dd>
-<dd>comparison operators of floating-point types.<br><code>FP</code> is any of <code>float2,float4,float8</code>. It is acceptable if left side and right side have different floating-point types.<br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></dd>
+<dd>comparison operators of floating-point types.<br><code>FP</code> is any of <code>float2,float4,float8</code>. It is acceptable if left side and right side have different floating-point types.<br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>}</dd>
 <dt><code>numeric COMP numeric</code></dt>
-<dd></dd>
-<dd>comparison operators of <code>numeric</code> type.<br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></dd>
+<dd>comparison operators of <code>numeric</code> type.<br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>}</dd>
 <dt><code>INT OP INT</code></dt>
-<dd></dd>
-<dd>arithemetic operators of integer types.<br><code>INT</code> is any of <code>int1,int2,int4,int8</code>. It is acceptable if left side and right side have different interger types.<br><code>OP</code> is any of <code>+,-,*,/</code></dd>
+<dd>arithemetic operators of integer types.<br><code>INT</code> is any of <code>int1,int2,int4,int8</code>. It is acceptable if left side and right side have different interger types.<br><code>OP</code> is any of <code>+,-,*,/</code>}</dd>
 <dt><code>FP OP FP</code></dt>
-<dd></dd>
-<dd>arithemetic operators of floating-point types.<br><code>FP</code> is any of <code>float2,float4,float8</code>. It is acceptable if left side and right side have different floating-point types.<br><code>COMP</code> is any of <code>+,-,*,/</code></dd>
+<dd>arithemetic operators of floating-point types.<br><code>FP</code> is any of <code>float2,float4,float8</code>. It is acceptable if left side and right side have different floating-point types.<br><code>COMP</code> is any of <code>+,-,*,/</code>}</dd>
 <dt><code>numeric OP numeric</code></dt>
-<dd></dd>
-<dd>comparison operators of <code>numeric</code> type.<br><code>OP</code> is any of <code>+,-,*,/</code></dd>
+<dd>comparison operators of <code>numeric</code> type.<br><code>OP</code> is any of <code>+,-,*,/</code>}</dd>
 <dt><code>INT % INT</code></dt>
-<dd></dd>
-<dd>Reminer operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code></dd>
+<dd>Reminer operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code>}</dd>
 <dt><code>INT &amp; INT</code></dt>
-<dd></dd>
-<dd>Bitwise AND operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code></dd>
+<dd>Bitwise AND operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code>}</dd>
 <dt><code>INT | INT</code></dt>
-<dd></dd>
-<dd>Bitwise OR operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code></dd>
+<dd>Bitwise OR operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code>}</dd>
 <dt><code>INT # INT</code></dt>
-<dd></dd>
-<dd>Bitwise XOR operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code></dd>
+<dd>Bitwise XOR operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code>}</dd>
 <dt><code>~ INT</code></dt>
-<dd></dd>
-<dd>Bitwise NOT operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code></dd>
+<dd>Bitwise NOT operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code>}</dd>
 <dt><code>INT &gt;&gt; int4</code></dt>
-<dd></dd>
-<dd>Right shift operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code></dd>
+<dd>Right shift operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code>}</dd>
 <dt><code>INT &lt;&lt; int4</code></dt>
-<dd></dd>
-<dd>Left shift operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code></dd>
+<dd>Left shift operator. <code>INT</code> is any of <code>int1,int2,int4,int8</code>}</dd>
 <dt><code>+ TYPE</code></dt>
-<dd></dd>
-<dd>Unary plus operator. <code>TYPE</code> is any of <code>int1,int2,int4,int8,float2,float4,float8,numeric</code>.</dd>
+<dd>Unary plus operator. <code>TYPE</code> is any of <code>int1,int2,int4,int8,float2,float4,float8,numeric</code>.}</dd>
 <dt><code>- TYPE</code></dt>
-<dd></dd>
-<dd>Unary minus operator. <code>TYPE</code> is any of <code>int1,int2,int4,int8,float2,float4,float8,numeric</code>.</dd>
+<dd>Unary minus operator. <code>TYPE</code> is any of <code>int1,int2,int4,int8,float2,float4,float8,numeric</code>.}</dd>
 <dt><code>@ TYPE</code></dt>
-<dd></dd>
-<dd>Absolute value. <code>TYPE</code> is any of <code>int1,int2,int4,int8,float2,float4,float8,numeric</code>.</dd>
+<dd>Absolute value. <code>TYPE</code> is any of <code>int1,int2,int4,int8,float2,float4,float8,numeric</code>.}</dd>
 </dl>
 <h2 id="mathematical-functions">Mathematical functions</h2>
 <dl>
 <dt><code>float8 cbrt(float8)</code><br><code>float8 dcbrt(float8)</code></dt>
-<dd>cube root|</dd>
+<dd>cube root</dd>
 <dt><code>float8 ceil(float8)</code><br><code>float8 ceiling(float8)</code></dt>
 <dd>nearest integer greater than or equal to argument</dd>
 <dt><code>float8 exp(float8)</code><br><code>float8 dexp(float8)</code></dt>
@@ -255,381 +238,316 @@
 <h2 id="trigonometric-functions">Trigonometric functions</h2>
 <dl>
 <dt><code>float8 degrees(float8)</code></dt>
-<dd></dd>
-<dd>radians to degrees</dd>
+<dd>radians to degrees}</dd>
 <dt><code>float8 radians(float8)</code></dt>
-<dd></dd>
-<dd>degrees to radians</dd>
+<dd>degrees to radians}</dd>
 <dt><code>float8 acos(float8)</code></dt>
-<dd></dd>
-<dd>inverse cosine</dd>
+<dd>inverse cosine}</dd>
 <dt><code>float8 asin(float8)</code></dt>
-<dd></dd>
-<dd>inverse sine</dd>
+<dd>inverse sine}</dd>
 <dt><code>float8 atan(float8)</code></dt>
-<dd></dd>
-<dd>inverse tangent</dd>
+<dd>inverse tangent}</dd>
 <dt><code>float8 atan2(float8,float8)</code></dt>
-<dd></dd>
-<dd>inverse tangent of <code>arg1 / arg2</code></dd>
+<dd>inverse tangent of <code>arg1 / arg2</code>}</dd>
 <dt><code>float8 cos(float8)</code></dt>
-<dd></dd>
-<dd>cosine</dd>
+<dd>cosine}</dd>
 <dt><code>float8 cot(float8)</code></dt>
-<dd></dd>
-<dd>cotangent</dd>
+<dd>cotangent}</dd>
 <dt><code>float8 sin(float8)</code></dt>
-<dd></dd>
-<dd>sine</dd>
+<dd>sine}</dd>
 <dt><code>float8 tan(float8)</code></dt>
-<dd></dd>
-<dd>tangent</dd>
+<dd>tangent}</dd>
 </dl>
 <h2 id="date-and-time-operators">Date and time operators</h2>
 <dl>
 <dt><code>date COMP date</code></dt>
-<dd></dd>
-<dd>comparison operators for <code>date</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.</dd>
+<dd>comparison operators for <code>date</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.}</dd>
 <dt><code>date COMP timestamp</code><br><code>timestamp COMP date</code></dt>
-<dd></dd>
-<dd>comparison operators for <code>date</code> and <code>timestamp</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.</dd>
+<dd>comparison operators for <code>date</code> and <code>timestamp</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.}</dd>
 <dt><code>date COMP timestamptz</code><br><code>timestamptz COMP date</code></dt>
-<dd></dd>
-<dd>comparison operators for <code>date</code> and <code>timestamptz</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.</dd>
+<dd>comparison operators for <code>date</code> and <code>timestamptz</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.}</dd>
 <dt><code>time COMP time</code></dt>
-<dd></dd>
-<dd>comparison operators for <code>time</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.</dd>
+<dd>comparison operators for <code>time</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.}</dd>
 <dt><code>timetz COMP timetz</code></dt>
-<dd></dd>
-<dd>comparison operators for <code>timetz</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.</dd>
+<dd>comparison operators for <code>timetz</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.}</dd>
 <dt><code>timestamp COMP timestamp</code></dt>
-<dd></dd>
-<dd>comparison operators for <code>timestamp</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.</dd>
+<dd>comparison operators for <code>timestamp</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.}</dd>
 <dt><code>timestamptz COMP timestamptz</code></dt>
-<dd></dd>
-<dd>comparison operators for <code>timestamptz</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.</dd>
+<dd>comparison operators for <code>timestamptz</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.}</dd>
 <dt><code>timestamp COMP timestamptz</code><br><code>timestamptz COMP timestamp</code></dt>
-<dd></dd>
-<dd>comparison operators for <code>timestamp</code> and <code>timestamptz</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.</dd>
+<dd>comparison operators for <code>timestamp</code> and <code>timestamptz</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.}</dd>
 <dt><code>interval COMP interval</code></dt>
-<dd></dd>
-<dd>comparison operators for <code>interval</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.</dd>
+<dd>comparison operators for <code>interval</code> type. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>.}</dd>
 <dt><code>date + int4</code><br><code>int4 + date</code></dt>
-<dd></dd>
-<dd>addition operator of <code>date</code> type</dd>
+<dd>addition operator of <code>date</code> type}</dd>
 <dt><code>date - int4</code></dt>
-<dd></dd>
-<dd>subtraction operator of <code>date</code> type</dd>
+<dd>subtraction operator of <code>date</code> type}</dd>
 <dt><code>date - date</code></dt>
-<dd></dd>
-<dd>difference between <code>date</code> types</dd>
+<dd>difference between <code>date</code> types}</dd>
 <dt><code>date + time</code><br><code>time + date</code></dt>
-<dd></dd>
-<dd>constructs a <code>timestamp</code> from <code>date</code> and <code>time</code></dd>
+<dd>constructs a <code>timestamp</code> from <code>date</code> and <code>time</code>}</dd>
 <dt><code>date + timetz</code></dt>
-<dd></dd>
-<dd>constructs a <code>timestamptz</code> from <code>date</code> and <code>timetz</code></dd>
+<dd>constructs a <code>timestamptz</code> from <code>date</code> and <code>timetz</code>}</dd>
 <dt><code>time - time</code></dt>
-<dd></dd>
-<dd>difference between <code>time</code> types</dd>
+<dd>difference between <code>time</code> types}</dd>
 <dt><code>timestamp - timestamp</code></dt>
-<dd></dd>
-<dd>difference between <code>timestamp</code> types</dd>
+<dd>difference between <code>timestamp</code> types}</dd>
 <dt><code>timetz + interval</code><br><code>timetz - interval</code></dt>
-<dd></dd>
-<dd>addition or subtraction operator of <code>timetz</code> by <code>interval</code>.</dd>
+<dd>addition or subtraction operator of <code>timetz</code> by <code>interval</code>.}</dd>
 <dt><code>timestamptz + interval</code><br><code>timestamptz - interval</code></dt>
-<dd></dd>
-<dd>addition or subtraction operator of <code>timestamptz</code> by <code>interval</code>.</dd>
+<dd>addition or subtraction operator of <code>timestamptz</code> by <code>interval</code>.}</dd>
 <dt><code>overlaps(TYPE,TYPE,TYPE,TYPE)</code></dt>
-<dd></dd>
-<dd>checks whether the 2 given time periods overlaps.<br><code>TYPE</code> is any of <code>time,timetz,timestamp,timestamptz</code>.</dd>
+<dd>checks whether the 2 given time periods overlaps.<br><code>TYPE</code> is any of <code>time,timetz,timestamp,timestamptz</code>.}</dd>
 <dt><code>extract(text FROM TYPE)</code></dt>
-<dd></dd>
-<dd>retrieves subfields such as <code>day</code> or <code>hour</code> from date/time values.<br><code>TYPE</code> is any of <code>time,timetz,timestamp,timestamptz,interval</code>.</dd>
+<dd>retrieves subfields such as <code>day</code> or <code>hour</code> from date/time values.<br><code>TYPE</code> is any of <code>time,timetz,timestamp,timestamptz,interval</code>.}</dd>
 <dt><code>now()</code></dt>
-<dd></dd>
-<dd>current time of the transaction</dd>
+<dd>current time of the transaction}</dd>
 <dt><code>- interval</code></dt>
-<dd></dd>
-<dd>unary minus operator of <code>interval</code> type</dd>
+<dd>unary minus operator of <code>interval</code> type}</dd>
 <dt><code>interval + interval</code></dt>
-<dd></dd>
-<dd>addition operator of <code>interval</code> type</dd>
+<dd>addition operator of <code>interval</code> type}</dd>
 <dt><code>interval - interval</code></dt>
-<dd></dd>
-<dd>subtraction operator of <code>interval</code> type</dd>
+<dd>subtraction operator of <code>interval</code> type}</dd>
 </dl>
 <h2 id="text-functionsoperators">Text functions/operators</h2>
 <dl>
 <dt><code>{text,bpchar} COMP {text,bpchar}</code></dt>
-<dd></dd>
-<dd>comparison operators; <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code><br>Note that <code>&lt;,&lt;=,&gt;=,&gt;</code> operators are valid only when locale is UTF-8 or C (no locale).</dd>
-<dt><code>varchar || varchar</code></dt>
-<dd></dd>
-<dd>concatenates the two strings.<br>Both side must be <code>varchar(n)</code> to ensure maximum length of the result being predictible.</dd>
+<dd>comparison operators; <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code><br>Note that <code>&lt;,&lt;=,&gt;=,&gt;</code> operators are valid only when locale is UTF-8 or C (no locale).}</dd>
+</dl>
+<!--
+`varchar || varchar`
+: concatenates the two strings.<br>Both side must be `varchar(n)` to ensure maximum length of the result being predictible.}
+-->
+
+<dl>
 <dt><code>substring(text,int4)</code><br><code>substring(text,int4,int4)</code><br><code>substr(text,int4)</code><br><code>substr(text,int4,int4)</code></dt>
-<dd></dd>
-<dd>extracts the substring</dd>
+<dd>extracts the substring}</dd>
 <dt><code>length({text,bpchar})</code></dt>
-<dd></dd>
-<dd>length of the string</dd>
+<dd>length of the string}</dd>
 <dt><code>{text,bpchar} [NOT] LIKE text</code></dt>
-<dd></dd>
-<dd>pattern-matching according to the LIKE expression</dd>
+<dd>pattern-matching according to the LIKE expression}</dd>
 <dt><code>{text,bpchar} [NOT] ILIKE text</code></dt>
-<dd></dd>
-<dd>case-insensitive pattern-matching according to the LIKE expression.<br>Note that <code>ILIKE</code> operator is valid only when locale is UTF-8 or C (no locale).</dd>
+<dd>case-insensitive pattern-matching according to the LIKE expression.<br>Note that <code>ILIKE</code> operator is valid only when locale is UTF-8 or C (no locale).}</dd>
 </dl>
 <h2 id="network-functionsoperators">Network functions/operators</h2>
 <dl>
 <dt><code>macaddr COMP macaddr</code></dt>
-<dd></dd>
-<dd>comparison operators; <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></dd>
+<dd>comparison operators; <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>}</dd>
 <dt><code>macaddr &amp; macaddr</code></dt>
-<dd></dd>
-<dd>Bitwise AND operator</dd>
+<dd>Bitwise AND operator}</dd>
 <dt><code>macaddr | macaddr</code></dt>
-<dd></dd>
-<dd>Bitwise OR operator</dd>
+<dd>Bitwise OR operator}</dd>
 <dt><code>~ macaddr</code></dt>
-<dd></dd>
-<dd>Bitwise NOT operator</dd>
+<dd>Bitwise NOT operator}</dd>
 <dt><code>trunc(macaddr)</code></dt>
-<dd></dd>
-<dd>Set last 3 bytes to zero</dd>
+<dd>Set last 3 bytes to zero}</dd>
 <dt><code>inet COMP inet</code></dt>
-<dd></dd>
-<dd>comparison operators; <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></dd>
+<dd>comparison operators; <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>}</dd>
 <dt><code>inet &lt;&lt; inet</code></dt>
-<dd></dd>
-<dd>Left side is contained by right side</dd>
+<dd>Left side is contained by right side}</dd>
 <dt><code>inet &lt;&lt;= inet</code></dt>
-<dd></dd>
-<dd>Left side is contained by or equals to right side</dd>
+<dd>Left side is contained by or equals to right side}</dd>
 <dt><code>inet &gt;&gt; inet</code></dt>
-<dd></dd>
-<dd>Left side contains right side</dd>
+<dd>Left side contains right side}</dd>
 <dt><code>inet &gt;&gt;= inet</code></dt>
-<dd></dd>
-<dd>Left side contains or is equals to right side</dd>
+<dd>Left side contains or is equals to right side}</dd>
 <dt><code>inet &amp;&amp; inet</code></dt>
-<dd></dd>
-<dd>Left side contains or is contained by right side</dd>
+<dd>Left side contains or is contained by right side}</dd>
 <dt><code>~ inet</code></dt>
-<dd></dd>
-<dd>Bitwise NOT operator</dd>
+<dd>Bitwise NOT operator}</dd>
 <dt><code>inet &amp; inet</code></dt>
-<dd></dd>
-<dd>Bitwise AND operator</dd>
+<dd>Bitwise AND operator}</dd>
 <dt><code>inet | inet</code></dt>
-<dd></dd>
-<dd>Bitwise OR operator</dd>
+<dd>Bitwise OR operator}</dd>
 <dt><code>inet + int8</code></dt>
-<dd></dd>
-<dd>addition operator</dd>
+<dd>addition operator}</dd>
 <dt><code>inet - int8</code></dt>
-<dd></dd>
-<dd>subtraction operator</dd>
+<dd>subtraction operator}</dd>
 <dt><code>inet - inet</code></dt>
-<dd></dd>
-<dd>subtraction operator</dd>
+<dd>subtraction operator}</dd>
 <dt><code>broadcast(inet)</code></dt>
-<dd></dd>
-<dd>returns the broadcast address of the given network address</dd>
+<dd>returns the broadcast address of the given network address}</dd>
 <dt><code>family(inet)</code></dt>
-<dd></dd>
-<dd>returns the family of the given network address; <code>4</code> for IPv4, and <code>6</code> for IPv6</dd>
+<dd>returns the family of the given network address; <code>4</code> for IPv4, and <code>6</code> for IPv6}</dd>
 <dt><code>hostmask(inet)</code></dt>
-<dd></dd>
-<dd>extract host mask of the given network address</dd>
+<dd>extract host mask of the given network address}</dd>
 <dt><code>masklen(inet)</code></dt>
-<dd></dd>
-<dd>extract netmask length of the given network address</dd>
+<dd>extract netmask length of the given network address}</dd>
 <dt><code>netmask(inet)</code></dt>
-<dd></dd>
-<dd>extract netmask of the given network address</dd>
+<dd>extract netmask of the given network address}</dd>
 <dt><code>network(inet)</code></dt>
-<dd></dd>
-<dd>extract network part of the given network address</dd>
+<dd>extract network part of the given network address}</dd>
 <dt><code>set_masklen(NETADDR,int)</code></dt>
-<dd></dd>
-<dd>set netmask length of the given network address; <code>NETADDR</code> is either <code>inet</code> or <code>cidr</code>.</dd>
+<dd>set netmask length of the given network address; <code>NETADDR</code> is either <code>inet</code> or <code>cidr</code>.}</dd>
 <dt><code>inet_merge(inet,inet)</code></dt>
-<dd></dd>
-<dd>the smallest network which includes both of the given networks</dd>
+<dd>the smallest network which includes both of the given networks}</dd>
 </dl>
 <h2 id="currency-operators">Currency operators</h2>
 <dl>
 <dt><code>money COMP money</code></dt>
-<dd></dd>
-<dd>comparison operators; <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></dd>
+<dd>comparison operators; <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>}</dd>
 <dt><code>money OP money</code></dt>
-<dd></dd>
-<dd>arthmetric operators; <code>OP</code> is any of <code>+,-,/</code></dd>
+<dd>arthmetric operators; <code>OP</code> is any of <code>+,-,/</code>}</dd>
 <dt><code>money * TYPE</code><br><code>TYPE * money</code></dt>
-<dd></dd>
-<dd>Multiply a currency with a numeric value; <code>TYPE</code> is any of <code>int2,int4,float2,float4,float8</code></dd>
+<dd>Multiply a currency with a numeric value; <code>TYPE</code> is any of <code>int2,int4,float2,float4,float8</code>}</dd>
 <dt><code>money / TYPE</code></dt>
-<dd></dd>
-<dd>Division of a currency by a numeric value; <code>TYPE</code> is any of <code>int2,int4,float2,float4,float8</code></dd>
+<dd>Division of a currency by a numeric value; <code>TYPE</code> is any of <code>int2,int4,float2,float4,float8</code>}</dd>
 <dt><code>money / money</code></dt>
-<dd></dd>
-<dd>Division of currency values</dd>
+<dd>Division of currency values}</dd>
 </dl>
 <h2 id="uuid-operators">UUID operators</h2>
 <dl>
 <dt><code>uuid COMP uuid</code></dt>
-<dd></dd>
-<dd>comparison operator. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></dd>
+<dd>comparison operator. <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>}</dd>
 </dl>
 <h2 id="jsonb-operators">JSONB operators</h2>
 <dl>
 <dt><code>jsonb -&gt; KEY</code></dt>
-<dd></dd>
-<dd>Get a JSON object field specified by the <code>KEY</code></dd>
+<dd>Get a JSON object field specified by the <code>KEY</code>}</dd>
 <dt><code>jsonb -&gt; NUM</code></dt>
-<dd></dd>
-<dd>Get a JSON array element indexed by <code>NUM</code></dd>
+<dd>Get a JSON array element indexed by <code>NUM</code>}</dd>
 <dt><code>jsonb -&gt;&gt; KEY</code></dt>
-<dd></dd>
-<dd>Get a JSON object field specified by the <code>KEY</code>, as text</dd>
+<dd>Get a JSON object field specified by the <code>KEY</code>, as text}</dd>
 <dt><code>jsonb -&gt;&gt; NUM</code></dt>
-<dd></dd>
-<dd>Get a JSON array element indexed by <code>NUM</code>, as text</dd>
+<dd>Get a JSON array element indexed by <code>NUM</code>, as text}</dd>
 <dt><code>(jsonb -&gt;&gt; KEY)::TYPE</code></dt>
-<dd></dd>
-<dd>If <code>TYPE</code> is any of <code>int2,int4,int8,float4,float8,numeric</code>, get a JSON object field specified by <code>KEY</code>, as numeric data type. See the note below.</dd>
+<dd>If <code>TYPE</code> is any of <code>int2,int4,int8,float4,float8,numeric</code>, get a JSON object field specified by <code>KEY</code>, as numeric data type. See the note below.}</dd>
 <dt><code>(jsonb -&gt;&gt; NUM)::TYPE</code></dt>
-<dd></dd>
-<dd>If <code>TYPE</code> is any of <code>int2,int4,int8,float4,float8,numeric</code><br>Get a JSON array element indexed by <code>NUM</code>, as numeric data type. See the note below.</dd>
+<dd>If <code>TYPE</code> is any of <code>int2,int4,int8,float4,float8,numeric</code><br>Get a JSON array element indexed by <code>NUM</code>, as numeric data type. See the note below.}</dd>
 <dt><code>jsonb ? KEY</code></dt>
-<dd></dd>
-<dd>Check whether jsonb object contains the <code>KEY</code></dd>
+<dd>Check whether jsonb object contains the <code>KEY</code>}</dd>
 </dl>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>When we convert a jsonb element fetched by <code>jsonb -&gt;&gt; KEY</code> operator into numerical data types like <code>float</code> or <code>numeric</code>, PostgreSQL takes 2 steps operations; an internal numerical form is printed as text first, then it is converted into numerical data type.
 PG-Strom optimizes the GPU code using a special device function to fetch a numerical datum from jsonb object/array, if <code>jsonb -&gt;&gt; KEY</code> operator and text-to-numeric case are continuously used.</p>
 </div>
-<h2 id="range-type-functionsoperators">Range type functions/operators</h2>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p><code>RANGE</code> is any of {<code>int4range</code>, <code>int8range</code>, <code>tsrange</code>, <code>tstzrange</code>, <code>daterange</code>} in this section.<br>
-<code>TYPE</code> is the element type of the <code>RANGE</code> which is introduced together in this section.</p>
-</div>
-<dl>
-<dt><code>RANGE = RANGE</code></dt>
-<dd>Both sides are equal.</dd>
-<dt><code>RANGE &lt;&gt; RANGE</code></dt>
-<dd>Both sides are not equal.</dd>
-<dt><code>RANGE &lt; RANGE</code></dt>
-<dd>Left side is less than right side.</dd>
-<dt><code>RANGE &lt;= RANGE</code></dt>
-<dd></dd>
-<dd>Left side is less than or equal to right side.</dd>
-<dt><code>RANGE &gt; RANGE</code></dt>
-<dd></dd>
-<dd>Left side is greater than right side.</dd>
-<dt><code>RANGE &gt;= RANGE</code></dt>
-<dd></dd>
-<dd>Left side is greater than or equal to right side.</dd>
-<dt><code>RANGE @ RANGE</code></dt>
-<dd></dd>
-<dd>The range in left side contains the range in right side.</dd>
-<dt><code>RANGE @ TYPE</code></dt>
-<dd></dd>
-<dd>The range in left side contains the element in right side.</dd>
-<dt><code>RANGE &lt;@ RANGE</code></dt>
-<dd></dd>
-<dd>The range in left side is contained by the range in right side.</dd>
-<dt><code>TYPE &lt;@ RANGE</code></dt>
-<dd></dd>
-<dd>The element in left side is contained by the range in right side.</dd>
-<dt><code>RANGE &amp;&amp; RANGE</code></dt>
-<dd></dd>
-<dd>Left and right side are overlap (they have points in common).</dd>
-<dt><code>RANGE &lt;&lt; RANGE</code></dt>
-<dd></dd>
-<dd>Left side is strictly less than the right side</dd>
-<dt><code>RANGE &gt;&gt; RANGE</code></dt>
-<dd></dd>
-<dd>Left side is strictly greater than the right side</dd>
-<dt><code>RANGE &amp;&lt; RANGE</code></dt>
-<dd></dd>
-<dd>Any points in the left side is never greater than the right side</dd>
-<dt><code>RANGE &amp;&gt; RANGE</code></dt>
-<dd></dd>
-<dd>Any points in the right side is never greater than the left side</dd>
-<dt><code>RANGE -|- RANGE</code></dt>
-<dd></dd>
-<dd>Left side is adjacent to the right side</dd>
-<dt><code>RANGE + RANGE</code></dt>
-<dd></dd>
-<dd>A union range by the left side and right side</dd>
-<dt><code>RANGE * RANGE</code></dt>
-<dd></dd>
-<dd>An intersection range by the left and right side</dd>
-<dt><code>RANGE - RANGE</code></dt>
-<dd></dd>
-<dd>An difference range by the left and right side</dd>
-<dt><code>lower(RANGE)</code></dt>
-<dd></dd>
-<dd>lower bound of the range</dd>
-<dt><code>upper(RANGE)</code></dt>
-<dd></dd>
-<dd>upper bound of the range</dd>
-<dt><code>isempty(RANGE)</code></dt>
-<dd></dd>
-<dd>checks whether the range is empty</dd>
-<dt><code>lower_inc(RANGE)</code></dt>
-<dd></dd>
-<dd>checks whether the lower bound is inclusive</dd>
-<dt><code>upper_inc(RANGE)</code></dt>
-<dd></dd>
-<dd>checks whether the upper bound is inclusive</dd>
-<dt><code>lower_inf(RANGE)</code></dt>
-<dd></dd>
-<dd>checks whether the lower bound is infinite</dd>
-<dt><code>upper_inf(RANGE)</code></dt>
-<dd></dd>
-<dd>checks whether the upper bound is infinite</dd>
-<dt><code>range_merge(RANGE,RANGE)</code></dt>
-<dd></dd>
-<dd>returns the smallest range which includes both of the given ranges</dd>
-</dl>
+<!--
+##Range type functions/operators
+
+
+
+!!! Note
+    `RANGE` is any of {`int4range`, `int8range`, `tsrange`, `tstzrange`, `daterange`} in this section.<br>
+    `TYPE` is the element type of the `RANGE` which is introduced together in this section.
+
+
+`RANGE = RANGE`
+: Both sides are equal.
+
+`RANGE <> RANGE`
+: Both sides are not equal.
+
+`RANGE < RANGE`
+: Left side is less than right side.
+
+`RANGE <= RANGE`
+: Left side is less than or equal to right side.
+
+`RANGE > RANGE`
+: Left side is greater than right side.
+
+`RANGE >= RANGE`
+: Left side is greater than or equal to right side.
+
+`RANGE @ RANGE`
+: The range in left side contains the range in right side.
+
+`RANGE @ TYPE`
+: The range in left side contains the element in right side.
+
+`RANGE <@ RANGE`
+: The range in left side is contained by the range in right side.
+
+`TYPE <@ RANGE`
+: The element in left side is contained by the range in right side.
+
+`RANGE && RANGE`
+: Left and right side are overlap (they have points in common).
+
+`RANGE << RANGE`
+: Left side is strictly less than the right side
+
+`RANGE >> RANGE`
+: Left side is strictly greater than the right side
+
+`RANGE &< RANGE`
+: Any points in the left side is never greater than the right side
+
+`RANGE &> RANGE`
+: Any points in the right side is never greater than the left side
+
+`RANGE -|- RANGE`
+: Left side is adjacent to the right side
+
+`RANGE + RANGE`
+: A union range by the left side and right side
+
+`RANGE * RANGE`
+: An intersection range by the left and right side
+
+`RANGE - RANGE`
+: An difference range by the left and right side
+
+`lower(RANGE)`
+: lower bound of the range
+
+`upper(RANGE)`
+: upper bound of the range
+
+`isempty(RANGE)`
+: checks whether the range is empty
+
+`lower_inc(RANGE)`
+: checks whether the lower bound is inclusive
+
+`upper_inc(RANGE)`
+: checks whether the upper bound is inclusive
+
+`lower_inf(RANGE)`
+: checks whether the lower bound is infinite
+
+`upper_inf(RANGE)`
+: checks whether the upper bound is infinite
+
+`range_merge(RANGE,RANGE)`
+: returns the smallest range which includes both of the given ranges
+
+-->
+
 <h2 id="postgis-functions">PostGIS Functions</h2>
 <dl>
 <dt><code>geometry st_makepoint(float8,float8)</code><br><code>geometry st_point(float8,float8)</code></dt>
-<dd></dd>
 <dd>It makes 2-dimensional POINT geometry.</dd>
 <dt><code>geometry st_makepoint(float8,float8,float8)</code></dt>
-<dd></dd>
 <dd>It makes 3-dimensional POINT geometry.</dd>
 <dt><code>geometry st_makepoint(float8,float8,float8,float8)</code></dt>
-<dd></dd>
 <dd>It makes 4-dimensional POINT geometry.</dd>
 <dt><code>geometry st_setsrid(geometry,int4)</code></dt>
-<dd></dd>
 <dd>It assigns SRID on the given geometry</dd>
 <dt><code>float8 st_distance(geometry,geometry)</code></dt>
-<dd></dd>
 <dd>It returns the distance between geometries in <code>float8</code>.</dd>
 <dt><code>bool st_dwithin(geometry,geometry,float8)</code></dt>
-<dd></dd>
 <dd>It returns <code>true</code> if the distance between geometries is shorter than the specified threshold. It is often faster than the combination of <code>st_distance</code> and comparison operator.</dd>
 <dt><code>text st_relate(geometry,geometry)</code></dt>
-<dd></dd>
 <dd>It checks intersection of geometries, then returns DE9-IM(Dimensionally Extended Nine-Intersection Matrix) format string.</dd>
 <dt><code>bool st_contains(geometry,geometry)</code></dt>
-<dd></dd>
-<dd>It returns whether the geometry1 fully contains the geometry1.</dd>
+<dd>It returns whether the geometry1 fully contains the geometry2.</dd>
 <dt><code>bool st_crosses(geometry,geometry)</code></dt>
-<dd></dd>
 <dd>It returns whether the geometries are crossed.</dd>
 <dt><code>int4 st_linecrossingdirection(geometry,geometry)</code></dt>
+<dd>It checks how two LINESTRING geometries are crossing, or not crossing.</dd>
+</dl>
+<h2 id="cube-type-functions">CUBE Type Functions</h2>
+<dl>
+<dt><code>cube COMP cube</code></dt>
+<dd>comparison operators; <code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>}</dd>
+<dt><code>bool cube_contains(cube, cube)</code></dt>
+<dd>It returns whether the first cube fully contains the second cube.</dd>
+<dt><code>bool cube_contained(cube, cube)</code></dt>
+<dd>It returns whether the first cube is fully contained by the second cube.</dd>
+<dt><code>float8 cube_ll_coord(cube, int4)</code></dt>
 <dd></dd>
-<dd>It checks how two LINESTRING geometries are crossing, or not crossing. </dd>
 </dl>
               
             </div>

@@ -466,7 +466,7 @@ redo_sync_pos |                                                   config_options
 </dl>
 <h2 id="_3">その他の関数</h2>
 <dl>
-<dt><code>pgstrom.githash()</code></dt>
+<dt><code>text pgstrom.githash()</code></dt>
 <dd>現在ロードされているPG-Stromモジュールの元となったソースコードリビジョンのハッシュ値を表示します。この値は、障害時にソフトウェアのリビジョンを特定するのに有用です。</dd>
 </dl>
 <pre><code>postgres=# select pgstrom.githash();
@@ -475,7 +475,7 @@ redo_sync_pos |                                                   config_options
  103984be24cafd1e7ce6330a050960d97675c196
 </code></pre>
 <dl>
-<dt><code>pgstrom.license_query()</code></dt>
+<dt><code>text pgstrom.license_query()</code></dt>
 <dd>ロードされていれば、現在ロードされている商用サブスクリプションを表示します。</dd>
 </dl>
 <pre><code>=# select pgstrom.license_query();

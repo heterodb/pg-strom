@@ -143,11 +143,13 @@
                 <h1 id="home">Home</h1>
 <p>This chapter introduces the overview of PG-Strom, and developer's community.</p>
 <h2 id="what-is-pg-strom">What is PG-Strom?</h2>
-<p>PG-Strom is an extension module of PostgreSQL designed for version 11 or later. By utilization of GPU (Graphic Processor Unit) device which has thousands cores per chip, it enables to accelerate SQL workloads for data analytics or batch processing to big data set.</p>
+<p>PG-Strom is an extension module of PostgreSQL designed for version 15 or later. By utilization of GPU (Graphic Processor Unit) device which has thousands cores per chip, it enables to accelerate SQL workloads for data analytics or batch processing to big data set.</p>
 <p>Its core features are GPU code generator that automatically generates GPU program according to the SQL commands and asynchronous parallel execution engine to run SQL workloads on GPU device. The latest version supports SCAN (evaluation of WHERE-clause), JOIN and GROUP BY workloads. In the case when GPU-processing has advantage, PG-Strom replaces the vanilla implementation of PostgreSQL and transparentlly works from users and applications.</p>
 <p>PG-Strom has two storage options. The first one is the heap storage system of PostgreSQL. It is not always optimal for aggregation / analysis workloads because of its row data format, on the other hands, it has an advantage to run aggregation workloads without data transfer from the transactional database. The other one is Apache Arrow files, that have structured columnar format. Even though it is not suitable for update per row basis, it enables to import large amount of data efficiently, and efficiently search / aggregate the data through foreign data wrapper (FDW).</p>
 <p>One of the characteristic feature of PG-Strom is GPUDirect SQL that bypasses the CPU/RAM to read the data from NVME / NVME-oF to the GPU directly. SQL processing on the GPU maximizes the bandwidth of these devices. PG-Strom v3.0 newly supports NVIDIA GPUDirect Storage, it allows to support SDS (Software Defined Storage) over the NVME-oF protocol and shared filesystems.</p>
-<p>Also, the v3.0 newly supports execution of some PostGIS function and GiST index search on the GPU side. Along with the GPU cache, that duplicates the table contents often updated very frequently, it enables search / analysis processing based on the real-time locational information.</p>
+<p>The v3.0 newly supports execution of some PostGIS function and GiST index search on the GPU side. Along with the GPU cache, that duplicates the table contents often updated very frequently, it enables search / analysis processing based on the real-time locational information.</p>
+<p>The v5.0 entirely revised the software architecture design, like update of the process model (multi-process to multi-thread), or switch from the CUDA C++ native code to the portable pseudo code. 
+It improves overall performance and stability.</p>
 <h2 id="license-and-copyright">License and Copyright</h2>
 <p>PG-Strom is an open source software distributed under the PostgreSQL License.
 See <a href="https://raw.githubusercontent.com/heterodb/pg-strom/master/LICENSE">LICENSE</a> for the license details.</p>
@@ -156,7 +158,7 @@ See <a href="https://raw.githubusercontent.com/heterodb/pg-strom/master/LICENSE"
 <p>Please pay attention it is a public board for world wide. So, it is your own responsibility not to disclose confidential information.</p>
 <p>The primary language of the discussion board is English. On the other hands, we know major portion of PG-Strom users are Japanese because of its development history, so we admit to have a discussion on the list in Japanese language. In this case, please don't forget to attach <code>(JP)</code> prefix on the subject like, for non-Japanese speakers to skip messages.</p>
 <h3 id="bug-or-troubles-report">Bug or troubles report</h3>
-<p>If you got troubles like incorrect results, system crash / lockup, or something strange behavior, please open a new issue with <strong>bug</strong> tag at the <a href="https://github.com/heterodb/pg-strom/issues">PG-Strom Issue Tracker</a>.</p>
+<p>If you got troubles like incorrect results, system crash / lockup, or something strange behavior, please open a new issue at the <a href="https://github.com/heterodb/pg-strom/issues">PG-Strom Issue Tracker</a>.</p>
 <p>Please ensure the items below on bug reports.</p>
 <ul>
 <li>Whether you can reproduce the same problem on the latest revision?<ul>
@@ -174,6 +176,7 @@ See <a href="https://raw.githubusercontent.com/heterodb/pg-strom/master/LICENSE"
 </ul>
 <p>The information below are helpful for bug-reports.</p>
 <ul>
+<li>Steps to reproduce the problem (Data and Query)</li>
 <li>Output of <code>EXPLAIN VERBOSE</code> for the queries in trouble.</li>
 <li>Data structure of the tables involved with <code>\d+ &lt;table name&gt;</code> on psql command.</li>
 <li>Log messages (verbose messages are more helpful)</li>
@@ -245,5 +248,5 @@ See <a href="https://raw.githubusercontent.com/heterodb/pg-strom/master/LICENSE"
 
 <!--
 MkDocs version : 1.5.3
-Build Date UTC : 2023-12-17 16:35:27.839247+00:00
+Build Date UTC : 2023-12-18 15:54:39.335384+00:00
 -->
