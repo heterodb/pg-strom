@@ -173,6 +173,8 @@ typedef struct GpuDevAttributes
 #undef DEV_ATTR
 } GpuDevAttributes;
 
+#define DEV_ATTR__UNKNOWN		(-0x7e7e7e7e)
+
 extern GpuDevAttributes *gpuDevAttrs;
 extern int		numGpuDevAttrs;
 #define GPUKERNEL_MAX_SM_MULTIPLICITY	4
