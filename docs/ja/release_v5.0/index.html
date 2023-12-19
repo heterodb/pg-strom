@@ -199,9 +199,9 @@
 </code></pre>
 <p>現在はまだ実装されていませんが、この疑似コードは、将来的にCSD(Computational Storage Drive)やDPU(Data Processing Unit)でSQL処理をオフロードするために設計されています。</p>
 <h2 id="_5">データレイアウトの改善</h2>
-<p>CPUと比較して、GPUは広帯域なメモリを持っていますが、この性能を引き出すには近傍のメモリ領域を同じタイミングでアクセスするCoalesced Mmoery Accessの条件を満たす必要があります。</p>
+<p>CPUと比較して、GPUは広帯域なメモリを持っていますが、この性能を引き出すには近傍のメモリ領域を同じタイミングでアクセスするCoalesced Memory Accessの条件を満たす必要があります。</p>
 <p>v5.0ではGPUデバイスコードにおけるPostgreSQLデータ型のレイアウトが改良され、Coalesced Memory Accessに適した形式となりました。
-PostgreSQLのデータ型をそのまま利用した場合、あるタイミングで参照されるフィールドは飛び飛びの位置を取る事になり、DRAMからの読出し帯域を有効に活用できません。これをフィールド毎に複数個まとめて配置する事で、隣接コアが隣接領域からデータを読み出せるようになり、Coalesced Mmoery Accessの条件を満たしやすくなります。</p>
+PostgreSQLのデータ型をそのまま利用した場合、あるタイミングで参照されるフィールドは飛び飛びの位置を取る事になり、DRAMからの読出し帯域を有効に活用できません。これをフィールド毎に複数個まとめて配置する事で、隣接コアが隣接領域からデータを読み出せるようになり、Coalesced Memory Accessの条件を満たしやすくなります。</p>
 <p>この改良は、極めて高性能なメモリ帯域を持つハイエンドGPU製品だけでなく、ミドルエンド級のGPUでも十分な実行性能を引き出すためのものです。</p>
 <p><img alt="Coalesced Memory Access" src="../img/kvec-datum-coalesced.png" /></p>
 <h2 id="arrow_fdw">Arrow_Fdwの統計情報サポート</h2>

@@ -120,10 +120,10 @@ Although not currently implemented, this pseudo-code is also designed to offload
 @ja:##データレイアウトの改善
 @en:##Improvement of data layout
 @ja{
-CPUと比較して、GPUは広帯域なメモリを持っていますが、この性能を引き出すには近傍のメモリ領域を同じタイミングでアクセスするCoalesced Mmoery Accessの条件を満たす必要があります。
+CPUと比較して、GPUは広帯域なメモリを持っていますが、この性能を引き出すには近傍のメモリ領域を同じタイミングでアクセスするCoalesced Memory Accessの条件を満たす必要があります。
 
 v5.0ではGPUデバイスコードにおけるPostgreSQLデータ型のレイアウトが改良され、Coalesced Memory Accessに適した形式となりました。
-PostgreSQLのデータ型をそのまま利用した場合、あるタイミングで参照されるフィールドは飛び飛びの位置を取る事になり、DRAMからの読出し帯域を有効に活用できません。これをフィールド毎に複数個まとめて配置する事で、隣接コアが隣接領域からデータを読み出せるようになり、Coalesced Mmoery Accessの条件を満たしやすくなります。
+PostgreSQLのデータ型をそのまま利用した場合、あるタイミングで参照されるフィールドは飛び飛びの位置を取る事になり、DRAMからの読出し帯域を有効に活用できません。これをフィールド毎に複数個まとめて配置する事で、隣接コアが隣接領域からデータを読み出せるようになり、Coalesced Memory Accessの条件を満たしやすくなります。
 
 この改良は、極めて高性能なメモリ帯域を持つハイエンドGPU製品だけでなく、ミドルエンド級のGPUでも十分な実行性能を引き出すためのものです。
 }
@@ -131,7 +131,7 @@ PostgreSQLのデータ型をそのまま利用した場合、あるタイミン�
 GPU has a wider memory bandwidth than CPU, but in order to take advantage of this performance, it is necessary to satisfy the condition of coalesced memory access, which accesses nearby memory areas at the same time.
 
 In v5.0, the layout of PostgreSQL data types in GPU device code has been improved to make them more suitable for Coalesced Memory Access.
-If we would use the PostgreSQL data type as is, fields that are referenced at certain times will be placed in discrete positions, making it impossible to effectively utilize the read bandwidth from DRAM. By arranging multiple of these for each field, adjacent cores can read data from adjacent areas, making it easier to satisfy the conditions of Coalesced Mmoery Access.
+If we would use the PostgreSQL data type as is, fields that are referenced at certain times will be placed in discrete positions, making it impossible to effectively utilize the read bandwidth from DRAM. By arranging multiple of these for each field, adjacent cores can read data from adjacent areas, making it easier to satisfy the conditions of Coalesced Memory Access.
 
 This improvement is aimed at bringing out sufficient execution performance not only for high-end GPU products with extremely high performance memory bandwidth, but also for mid-end GPUs.
 }

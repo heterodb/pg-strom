@@ -201,7 +201,7 @@
 <h2 id="improvement-of-data-layout">Improvement of data layout</h2>
 <p>GPU has a wider memory bandwidth than CPU, but in order to take advantage of this performance, it is necessary to satisfy the condition of coalesced memory access, which accesses nearby memory areas at the same time.</p>
 <p>In v5.0, the layout of PostgreSQL data types in GPU device code has been improved to make them more suitable for Coalesced Memory Access.
-If we would use the PostgreSQL data type as is, fields that are referenced at certain times will be placed in discrete positions, making it impossible to effectively utilize the read bandwidth from DRAM. By arranging multiple of these for each field, adjacent cores can read data from adjacent areas, making it easier to satisfy the conditions of Coalesced Mmoery Access.</p>
+If we would use the PostgreSQL data type as is, fields that are referenced at certain times will be placed in discrete positions, making it impossible to effectively utilize the read bandwidth from DRAM. By arranging multiple of these for each field, adjacent cores can read data from adjacent areas, making it easier to satisfy the conditions of Coalesced Memory Access.</p>
 <p>This improvement is aimed at bringing out sufficient execution performance not only for high-end GPU products with extremely high performance memory bandwidth, but also for mid-end GPUs.</p>
 <p><img alt="Coalesced Memory Access" src="../img/kvec-datum-coalesced.png" /></p>
 <h2 id="arrow_fdw-supports-minmax-statistics">Arrow_Fdw supports min/max statistics</h2>
