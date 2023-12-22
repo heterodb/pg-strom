@@ -756,10 +756,8 @@ extern void		gpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
 extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,
 									int *p_block_sz,
-									unsigned int *p_shmem_sz,
 									CUfunction kern_function,
-									size_t dynamic_shmem_per_block,
-									size_t dynamic_shmem_per_warp);
+									unsigned int dynamic_shmem_per_block);
 extern bool		pgstrom_init_gpu_device(void);
 
 /*
