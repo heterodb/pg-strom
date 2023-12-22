@@ -1,47 +1,40 @@
 <!DOCTYPE html>
-<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
-<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<html class="writer-html5" lang="en" >
 <head>
-  <meta charset="utf-8">
-  <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  
-  <meta name="author" content="PG-Strom Development Team">
-  
-  <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>関数と演算子 - PG-Strom Manual</title>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
-
-  <link rel="stylesheet" href="../css/theme.css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
-  <link href="../custom.css" rel="stylesheet" />
-  
-  <script>
-    // Current page data
-    var mkdocs_page_name = "\u95a2\u6570\u3068\u6f14\u7b97\u5b50";
-    var mkdocs_page_input_path = "ref_devfuncs.md";
-    var mkdocs_page_url = null;
-  </script>
-  
-  <script src="../js/jquery-2.1.1.min.js" defer></script>
-  <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
-  <script>hljs.initHighlightingOnLoad();</script> 
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>関数と演算子 - PG-Strom Manual</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+        <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+        <link href="../custom.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "\u95a2\u6570\u3068\u6f14\u7b97\u5b50";
+        var mkdocs_page_input_path = "ref_devfuncs.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
 </head>
 
 <body class="wy-body-for-nav" role="document">
 
   <div class="wy-grid-for-nav">
-
-    
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
     <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
-        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
-        <div role="search">
+          <a href=".." class="icon icon-home"> PG-Strom Manual
+        </a><div role="search">
   <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" />
   </form>
@@ -49,46 +42,46 @@
 </div>
       </div>
 
-      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
-                    </li>
-                </ul>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">利用ガイド</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">先進機能</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">リファレンス</span></p>
-                <ul class="current">
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
-                    </li>
-                    <li class="toctree-l1 current"><a class="reference internal current" href="./">関数と演算子</a>
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">利用ガイド</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">先進機能</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">リファレンス</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="./">関数と演算子</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#_2">型キャスト</a>
     </li>
@@ -110,64 +103,53 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#jsonb">JSONB型演算子</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#_10">範囲型演算子</a>
-    </li>
     <li class="toctree-l2"><a class="reference internal" href="#postgis">PostGIS関数</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#cube">CUBE型関数</a>
+    </li>
     </ul>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">リリースノート</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
-                    </li>
-                </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">リリースノート</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                  </li>
+              </ul>
       </div>
     </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
-
-      
-      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
-        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-        <a href="..">PG-Strom Manual</a>
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">PG-Strom Manual</a>
+        
       </nav>
-
-      
       <div class="wy-nav-content">
-        <div class="rst-content">
-          <div role="navigation" aria-label="breadcrumbs navigation">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
-    <li><a href="..">Docs</a> &raquo;</li>
-    
-      
-        
-          <li>リファレンス &raquo;</li>
-        
-      
-    
-    <li>関数と演算子</li>
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">リファレンス</li>
+      <li class="breadcrumb-item active">関数と演算子</li>
     <li class="wy-breadcrumbs-aside">
-      
     </li>
   </ul>
-  
   <hr/>
 </div>
-
-          <div role="main">
-            <div class="section">
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
               
                 <h1 id="_1">関数と演算子</h1>
 <p>本章ではGPUデバイス上で実行可能な関数と演算子について説明します。</p>
@@ -192,488 +174,398 @@
 <h2 id="_3">数値型演算子</h2>
 <dl>
 <dt><code>bool COMP bool</code></dt>
-<dd>論理値型の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;</code>のいずれかです。</dd>
-<dd></dd>
+<dd>論理値型の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;</code>のいずれかです。}</dd>
 <dt><code>INT COMP INT</code></dt>
-<dd>整数型の比較演算子。<br><code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかで、左辺と右辺が異なる整数型であっても構いません。<br><code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。</dd>
-<dd></dd>
+<dd>整数型の比較演算子。<br><code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかで、左辺と右辺が異なる整数型であっても構いません。<br><code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。}</dd>
 <dt><code>FP COMP FP</code></dt>
-<dd>浮動小数点型の比較演算子。<br><code>FP</code>は<code>float2,float4,float8</code>のいずれかで、左辺と右辺が異なる浮動小数点型であっても構いません。<br><code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。</dd>
-<dd></dd>
+<dd>浮動小数点型の比較演算子。<br><code>FP</code>は<code>float2,float4,float8</code>のいずれかで、左辺と右辺が異なる浮動小数点型であっても構いません。<br><code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。}</dd>
 <dt><code>numeric COMP numeric</code></dt>
-<dd>実数型の比較演算子。<br><code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。</dd>
-<dd></dd>
+<dd>実数型の比較演算子。<br><code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。}</dd>
 <dt><code>INT OP INT</code></dt>
-<dd>整数型の算術演算子。<br><code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかで、左辺と右辺が異なる整数型であっても構いません。<br><code>OP</code>は<code>+,-,*,/</code>のいずれかです。</dd>
-<dd></dd>
+<dd>整数型の算術演算子。<br><code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかで、左辺と右辺が異なる整数型であっても構いません。<br><code>OP</code>は<code>+,-,*,/</code>のいずれかです。}</dd>
 <dt><code>FP OP FP</code></dt>
-<dd>浮動小数点型の算術演算子。<br><code>FP</code>は<code>float2,float4,float8</code>のいずれかで、左辺と右辺が異なる浮動小数点型であっても構いません。<br><code>COMP</code>は<code>+,-,*,/</code>のいずれかです。</dd>
-<dd></dd>
+<dd>浮動小数点型の算術演算子。<br><code>FP</code>は<code>float2,float4,float8</code>のいずれかで、左辺と右辺が異なる浮動小数点型であっても構いません。<br><code>COMP</code>は<code>+,-,*,/</code>のいずれかです。}</dd>
 <dt><code>numeric OP numeric</code></dt>
-<dd>実数型の比較演算子。<br><code>OP</code>は<code>+,-,*,/</code>のいずれかです。</dd>
-<dd></dd>
+<dd>実数型の比較演算子。<br><code>OP</code>は<code>+,-,*,/</code>のいずれかです。}</dd>
 <dt><code>INT % INT</code></dt>
-<dd>剰余演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。</dd>
-<dd></dd>
+<dd>剰余演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。}</dd>
 <dt><code>INT &amp; INT</code></dt>
-<dd>論理積演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。</dd>
-<dd></dd>
+<dd>論理積演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。}</dd>
 <dt><code>INT | INT</code></dt>
-<dd>論理和演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。</dd>
-<dd></dd>
+<dd>論理和演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。}</dd>
 <dt><code>INT # INT</code></dt>
-<dd>排他的論理和演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。</dd>
-<dd></dd>
+<dd>排他的論理和演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。}</dd>
 <dt><code>~ INT</code></dt>
-<dd>論理否定演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。</dd>
-<dd></dd>
+<dd>論理否定演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。}</dd>
 <dt><code>INT &gt;&gt; int4</code></dt>
-<dd>右シフト演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。</dd>
-<dd></dd>
+<dd>右シフト演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。}</dd>
 <dt><code>INT &lt;&lt; int4</code></dt>
-<dd>左シフト演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。</dd>
-<dd></dd>
+<dd>左シフト演算子。<code>INT</code>は<code>int1,int2,int4,int8</code>のいずれかです。}</dd>
 <dt><code>+ TYPE</code></dt>
-<dd>単項プラス演算子。<code>TYPE</code>は<code>int1,int2,int4,int8,float2,float4,float8,numeric</code>のいずれかです。</dd>
-<dd></dd>
+<dd>単項プラス演算子。<code>TYPE</code>は<code>int1,int2,int4,int8,float2,float4,float8,numeric</code>のいずれかです。}</dd>
 <dt><code>- TYPE</code></dt>
-<dd>単項マイナス演算子。<code>TYPE</code>は<code>int1,int2,int4,int8,float2,float4,float8,numeric</code>のいずれかです。</dd>
-<dd></dd>
+<dd>単項マイナス演算子。<code>TYPE</code>は<code>int1,int2,int4,int8,float2,float4,float8,numeric</code>のいずれかです。}</dd>
 <dt><code>@ TYPE</code></dt>
-<dd>絶対値。<code>TYPE</code>は<code>int1,int2,int4,int8,float2,float4,float8,numeric</code>のいずれかです。</dd>
-<dd></dd>
+<dd>絶対値。<code>TYPE</code>は<code>int1,int2,int4,int8,float2,float4,float8,numeric</code>のいずれかです。}</dd>
 </dl>
 <h2 id="_4">数学関数</h2>
 <dl>
 <dt><code>float8 cbrt(float8)</code><br><code>float8 dcbrt(float8)</code></dt>
-<dd>cube root|</dd>
+<dd>立方根</dd>
 <dt><code>float8 ceil(float8)</code><br><code>float8 ceiling(float8)</code></dt>
-<dd>nearest integer greater than or equal to argument</dd>
+<dd>引数より大きいか等しく、引数に最も近い整数</dd>
 <dt><code>float8 exp(float8)</code><br><code>float8 dexp(float8)</code></dt>
-<dd>exponential</dd>
+<dd>指数（eを底とする指定のべき乗）</dd>
 <dt><code>float8 floor(float8)</code></dt>
-<dd>nearest integer less than or equal to argument</dd>
+<dd>引数より小さいか等しく、引数に最も近い整数</dd>
 <dt><code>float8 ln(float8)</code><br><code>float8 dlog1(float8)</code></dt>
-<dd>natural logarithm</dd>
+<dd>自然対数</dd>
 <dt><code>float8 log(float8)</code><br><code>float8 dlog10(float8)</code></dt>
-<dd>base 10 logarithm</dd>
+<dd>10を底とした対数</dd>
 <dt><code>float8 pi()</code></dt>
-<dd>circumference ratio</dd>
+<dd>円周率</dd>
 <dt><code>float8 power(float8,float8)</code><br><code>float8 pow(float8,float8)</code><br><code>float8 dpow(float8,float8)</code></dt>
-<dd>power</dd>
+<dd>べき乗</dd>
 <dt><code>float8 round(float8)</code><br><code>float8 dround(float8)</code></dt>
-<dd>round to the nearest integer</dd>
+<dd>最も近い整数への丸め</dd>
 <dt><code>float8 sign(float8)</code></dt>
-<dd>sign of the argument</dd>
+<dd>符号</dd>
 <dt><code>float8 sqrt(float8)</code><br><code>float8 dsqrt(float8)</code></dt>
-<dd>square root|</dd>
+<dd>平方根</dd>
 <dt><code>float8 trunc(float8)</code><br><code>float8 dtrunc(float8)</code></dt>
-<dd>truncate toward zero|</dd>
+<dd>整数への切捨て</dd>
 </dl>
 <h2 id="_5">三角関数</h2>
 <dl>
 <dt><code>float8 degrees(float8)</code></dt>
-<dd>ラジアンに対応する度</dd>
-<dd></dd>
+<dd>ラジアンに対応する度}</dd>
 <dt><code>float8 radians(float8)</code></dt>
-<dd>度に対応するラジアン</dd>
-<dd></dd>
+<dd>度に対応するラジアン}</dd>
 <dt><code>float8 acos(float8)</code></dt>
-<dd>逆余弦関数</dd>
-<dd></dd>
+<dd>逆余弦関数}</dd>
 <dt><code>float8 asin(float8)</code></dt>
-<dd>逆正弦関数</dd>
-<dd></dd>
+<dd>逆正弦関数}</dd>
 <dt><code>float8 atan(float8)</code></dt>
-<dd>逆正接関数</dd>
-<dd></dd>
+<dd>逆正接関数}</dd>
 <dt><code>float8 atan2(float8,float8)</code></dt>
-<dd><code>arg1 / arg2</code>の逆正接関数</dd>
-<dd></dd>
+<dd><code>arg1 / arg2</code>の逆正接関数}</dd>
 <dt><code>float8 cos(float8)</code></dt>
-<dd>余弦関数</dd>
-<dd></dd>
+<dd>余弦関数}</dd>
 <dt><code>float8 cot(float8)</code></dt>
-<dd>余接関数</dd>
-<dd></dd>
+<dd>余接関数}</dd>
 <dt><code>float8 sin(float8)</code></dt>
-<dd>正弦関数</dd>
-<dd></dd>
+<dd>正弦関数}</dd>
 <dt><code>float8 tan(float8)</code></dt>
-<dd>正接関数</dd>
-<dd></dd>
+<dd>正接関数}</dd>
 </dl>
 <h2 id="_6">日付/時刻型演算子</h2>
 <dl>
 <dt><code>date COMP date</code></dt>
-<dd><code>date</code>型同士の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。</dd>
-<dd></dd>
+<dd><code>date</code>型同士の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。}</dd>
 <dt><code>date COMP timestamp</code><br><code>timestamp COMP date</code></dt>
-<dd><code>date</code>型と<code>timestamp</code>型の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。</dd>
-<dd></dd>
+<dd><code>date</code>型と<code>timestamp</code>型の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。}</dd>
 <dt><code>date COMP timestamptz</code><br><code>timestamptz COMP date</code></dt>
-<dd><code>date</code>型と<code>timestamptz</code>型の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。</dd>
-<dd></dd>
+<dd><code>date</code>型と<code>timestamptz</code>型の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。}</dd>
 <dt><code>time COMP time</code></dt>
-<dd><code>time</code>型同士の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。</dd>
-<dd></dd>
+<dd><code>time</code>型同士の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。}</dd>
 <dt><code>timetz COMP timetz</code></dt>
-<dd><code>timetz</code>型同士の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。</dd>
-<dd></dd>
+<dd><code>timetz</code>型同士の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。}</dd>
 <dt><code>timestamp COMP timestamp</code></dt>
-<dd><code>timestamp</code>型同士の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。</dd>
-<dd></dd>
+<dd><code>timestamp</code>型同士の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。}</dd>
 <dt><code>timestamptz COMP timestamptz</code></dt>
-<dd><code>timestamptz</code>型同士の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。</dd>
-<dd></dd>
+<dd><code>timestamptz</code>型同士の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。}</dd>
 <dt><code>timestamp COMP timestamptz</code><br><code>timestamptz COMP timestamp</code></dt>
-<dd><code>timestamp</code>型と<code>timestamptz</code>型の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。</dd>
-<dd></dd>
+<dd><code>timestamp</code>型と<code>timestamptz</code>型の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。}</dd>
 <dt><code>interval COMP interval</code></dt>
-<dd><code>interval</code>型同士の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。</dd>
-<dd></dd>
+<dd><code>interval</code>型同士の比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれか。}</dd>
 <dt><code>date + int4</code><br><code>int4 + date</code></dt>
-<dd><code>date</code>型の加算演算子</dd>
-<dd></dd>
+<dd><code>date</code>型の加算演算子}</dd>
 <dt><code>date - int4</code></dt>
-<dd><code>date</code>型の減算演算子</dd>
-<dd></dd>
+<dd><code>date</code>型の減算演算子}</dd>
 <dt><code>date - date</code></dt>
-<dd><code>date</code>型同士の差分</dd>
-<dd></dd>
+<dd><code>date</code>型同士の差分}</dd>
 <dt><code>date + time</code><br><code>time + date</code></dt>
-<dd><code>date</code>と<code>time</code>から<code>timestamp</code>を生成します</dd>
-<dd></dd>
+<dd><code>date</code>と<code>time</code>から<code>timestamp</code>を生成します}</dd>
 <dt><code>date + timetz</code></dt>
-<dd><code>date</code>と<code>timetz</code>から<code>timestamptz</code>を生成します</dd>
-<dd></dd>
+<dd><code>date</code>と<code>timetz</code>から<code>timestamptz</code>を生成します}</dd>
 <dt><code>time - time</code></dt>
-<dd><code>time</code>型同士の差分</dd>
-<dd></dd>
+<dd><code>time</code>型同士の差分}</dd>
 <dt><code>timestamp - timestamp</code></dt>
-<dd><code>timestamp</code>型同士の差分</dd>
-<dd></dd>
+<dd><code>timestamp</code>型同士の差分}</dd>
 <dt><code>timetz + interval</code><br><code>timetz - interval</code></dt>
-<dd><code>timetz</code>と<code>interval</code>を加算、または減算します。</dd>
-<dd></dd>
+<dd><code>timetz</code>と<code>interval</code>を加算、または減算します。}</dd>
 <dt><code>timestamptz + interval</code><br><code>timestamptz - interval</code></dt>
-<dd><code>timestamptz</code>と<code>interval</code>を加算、または減算します。</dd>
-<dd></dd>
+<dd><code>timestamptz</code>と<code>interval</code>を加算、または減算します。}</dd>
 <dt><code>overlaps(TYPE,TYPE,TYPE,TYPE)</code></dt>
-<dd>2つの時間間隔が重なるかどうかを判定します。<br><code>TYPE</code>は<code>time,timetz,timestamp,timestamptz</code>のいずれか一つです。</dd>
-<dd></dd>
+<dd>2つの時間間隔が重なるかどうかを判定します。<br><code>TYPE</code>は<code>time,timetz,timestamp,timestamptz</code>のいずれか一つです。}</dd>
 <dt><code>extract(text FROM TYPE)</code></dt>
-<dd><code>day</code>や<code>hour</code>など日付時刻型の部分フィールドの抽出。<br><code>TYPE</code>は<code>time,timetz,timestamp,timestamptz,interval</code>のいずれか一つです。</dd>
-<dd></dd>
+<dd><code>day</code>や<code>hour</code>など日付時刻型の部分フィールドの抽出。<br><code>TYPE</code>は<code>time,timetz,timestamp,timestamptz,interval</code>のいずれか一つです。}</dd>
 <dt><code>now()</code></dt>
-<dd>トランザクションの現在時刻</dd>
-<dd></dd>
+<dd>トランザクションの現在時刻}</dd>
 <dt><code>- interval</code></dt>
-<dd><code>interval</code>型の単項マイナス演算子</dd>
-<dd></dd>
+<dd><code>interval</code>型の単項マイナス演算子}</dd>
 <dt><code>interval + interval</code></dt>
-<dd><code>interval</code>型の加算演算子</dd>
-<dd></dd>
+<dd><code>interval</code>型の加算演算子}</dd>
 <dt><code>interval - interval</code></dt>
-<dd><code>interval</code>型の減算演算子</dd>
-<dd></dd>
+<dd><code>interval</code>型の減算演算子}</dd>
 </dl>
 <h2 id="_7">文字列関数/演算子</h2>
 <dl>
 <dt><code>{text,bpchar} COMP {text,bpchar}</code></dt>
-<dd>比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。<br>なお、<code>&lt;,&lt;=,&gt;=,&gt;</code>演算子はロケール設定がUTF-8またはC(ロケール設定なし)の場合にのみ有効です。</dd>
-<dd></dd>
-<dt><code>varchar || varchar</code></dt>
-<dd>文字列結合<br>結果文字列の最大長を予測可能とするため、両辺は<code>varchar(n)</code>でなければいけません。</dd>
-<dd></dd>
+<dd>比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。<br>なお、<code>&lt;,&lt;=,&gt;=,&gt;</code>演算子はロケール設定がUTF-8またはC(ロケール設定なし)の場合にのみ有効です。}</dd>
+</dl>
+<!--
+`varchar || varchar`
+: 文字列結合<br>結果文字列の最大長を予測可能とするため、両辺は`varchar(n)`でなければいけません。}
+-->
+
+<dl>
 <dt><code>substring(text,int4)</code><br><code>substring(text,int4,int4)</code><br><code>substr(text,int4)</code><br><code>substr(text,int4,int4)</code></dt>
-<dd>部分文字列の切り出し</dd>
-<dd></dd>
+<dd>部分文字列の切り出し}</dd>
 <dt><code>length({text,bpchar})</code></dt>
-<dd>文字列長</dd>
-<dd></dd>
+<dd>文字列長}</dd>
 <dt><code>{text,bpchar} [NOT] LIKE text</code></dt>
-<dd>LIKE表現を用いたパターンマッチング</dd>
-<dd></dd>
+<dd>LIKE表現を用いたパターンマッチング}</dd>
 <dt><code>{text,bpchar} [NOT] ILIKE text</code></dt>
-<dd>LIKE表現を用いた大文字小文字を区別しないパターンマッチング。<br>なお、<code>ILIKE</code>演算子はロケール設定がUTF-8またはC(ロケール設定なし)の場合にのみ有効です。</dd>
-<dd></dd>
+<dd>LIKE表現を用いた大文字小文字を区別しないパターンマッチング。<br>なお、<code>ILIKE</code>演算子はロケール設定がUTF-8またはC(ロケール設定なし)の場合にのみ有効です。}</dd>
 </dl>
 <h2 id="_8">ネットワーク関数/演算子</h2>
 <dl>
 <dt><code>macaddr COMP macaddr</code></dt>
-<dd>比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。</dd>
-<dd></dd>
+<dd>比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。}</dd>
 <dt><code>macaddr &amp; macaddr</code></dt>
-<dd>ビット積演算子</dd>
-<dd></dd>
+<dd>ビット積演算子}</dd>
 <dt><code>macaddr | macaddr</code></dt>
-<dd>ビット和演算子</dd>
-<dd></dd>
+<dd>ビット和演算子}</dd>
 <dt><code>~ macaddr</code></dt>
-<dd>ビット否定演算子</dd>
-<dd></dd>
+<dd>ビット否定演算子}</dd>
 <dt><code>trunc(macaddr)</code></dt>
-<dd>末尾の3バイトをゼロに設定する</dd>
-<dd></dd>
+<dd>末尾の3バイトをゼロに設定する}</dd>
 <dt><code>inet COMP inet</code></dt>
-<dd>比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。</dd>
-<dd></dd>
+<dd>比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。}</dd>
 <dt><code>inet &lt;&lt; inet</code></dt>
-<dd>左辺は右辺に内包される。</dd>
-<dd></dd>
+<dd>左辺は右辺に内包される。}</dd>
 <dt><code>inet &lt;&lt;= inet</code></dt>
-<dd>左辺は右辺に内包されるか等しい。</dd>
-<dd></dd>
+<dd>左辺は右辺に内包されるか等しい。}</dd>
 <dt><code>inet &gt;&gt; inet</code></dt>
-<dd>左辺は右辺を内包する。</dd>
-<dd></dd>
+<dd>左辺は右辺を内包する。}</dd>
 <dt><code>inet &gt;&gt;= inet</code></dt>
-<dd>左辺は右辺を内包するか等しい。</dd>
-<dd></dd>
+<dd>左辺は右辺を内包するか等しい。}</dd>
 <dt><code>inet &amp;&amp; inet</code></dt>
-<dd>左辺は右辺を内包するか内包される</dd>
-<dd></dd>
+<dd>左辺は右辺を内包するか内包される}</dd>
 <dt><code>~ inet</code></dt>
-<dd>ビット否定演算子</dd>
-<dd></dd>
+<dd>ビット否定演算子}</dd>
 <dt><code>inet &amp; inet</code></dt>
-<dd>ビット積演算子</dd>
-<dd></dd>
+<dd>ビット積演算子}</dd>
 <dt><code>inet | inet</code></dt>
-<dd>ビット和演算子</dd>
-<dd></dd>
+<dd>ビット和演算子}</dd>
 <dt><code>inet + int8</code></dt>
-<dd>加算演算子</dd>
-<dd></dd>
+<dd>加算演算子}</dd>
 <dt><code>inet - int8</code></dt>
-<dd>減算演算子</dd>
-<dd></dd>
+<dd>減算演算子}</dd>
 <dt><code>inet - inet</code></dt>
-<dd>減算演算子</dd>
-<dd></dd>
+<dd>減算演算子}</dd>
 <dt><code>broadcast(inet)</code></dt>
-<dd>ネットワークアドレスのブロードキャストアドレスを返す</dd>
-<dd></dd>
+<dd>ネットワークアドレスのブロードキャストアドレスを返す}</dd>
 <dt><code>family(inet)</code></dt>
-<dd>ネットワークアドレスのアドレスファミリを返す。IPv4の場合は<code>4</code>、IPv6の場合は<code>6</code></dd>
-<dd></dd>
+<dd>ネットワークアドレスのアドレスファミリを返す。IPv4の場合は<code>4</code>、IPv6の場合は<code>6</code>}</dd>
 <dt><code>hostmask(inet)</code></dt>
-<dd>ネットワークアドレスのホストマスクを返す</dd>
-<dd></dd>
+<dd>ネットワークアドレスのホストマスクを返す}</dd>
 <dt><code>masklen(inet)</code></dt>
-<dd>ネットワークアドレスのマスク長を返す</dd>
-<dd></dd>
+<dd>ネットワークアドレスのマスク長を返す}</dd>
 <dt><code>netmask(inet)</code></dt>
-<dd>ネットワークアドレスのネットマスクを返す</dd>
-<dd></dd>
+<dd>ネットワークアドレスのネットマスクを返す}</dd>
 <dt><code>network(inet)</code></dt>
-<dd>ネットワークアドレスのネットワーク部を返す</dd>
-<dd></dd>
+<dd>ネットワークアドレスのネットワーク部を返す}</dd>
 <dt><code>set_masklen(NETADDR,int)</code></dt>
-<dd>ネットワークアドレスのネットマスク長を設定する。<code>NETADDR</code>は<code>inet</code>か<code>cidr</code>のどちらか。</dd>
-<dd></dd>
+<dd>ネットワークアドレスのネットマスク長を設定する。<code>NETADDR</code>は<code>inet</code>か<code>cidr</code>のどちらか。}</dd>
 <dt><code>inet_merge(inet,inet)</code></dt>
-<dd>両方のネットワークを含む最小のネットワークを返す</dd>
-<dd></dd>
+<dd>両方のネットワークを含む最小のネットワークを返す}</dd>
 </dl>
 <h2 id="_9">通貨型演算子</h2>
 <dl>
 <dt><code>money COMP money</code></dt>
-<dd>比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。</dd>
-<dd></dd>
+<dd>比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。}</dd>
 <dt><code>money OP money</code></dt>
-<dd>算術演算子。<code>OP</code>は<code>+,-,/</code>のいずれかです。</dd>
-<dd></dd>
+<dd>算術演算子。<code>OP</code>は<code>+,-,/</code>のいずれかです。}</dd>
 <dt><code>money * TYPE</code><br><code>TYPE * money</code></dt>
-<dd>通貨型と数値型の乗算。<code>TYPE</code>は<code>int1,int2,int4,float2,float4,float8</code>のいずれかです。</dd>
-<dd></dd>
+<dd>通貨型と数値型の乗算。<code>TYPE</code>は<code>int1,int2,int4,float2,float4,float8</code>のいずれかです。}</dd>
 <dt><code>money / TYPE</code></dt>
-<dd>通貨型の数値型による除算。<code>TYPE</code>は<code>int1,int2,int4,float2,float4,float8</code>のいずれかです。</dd>
-<dd></dd>
+<dd>通貨型の数値型による除算。<code>TYPE</code>は<code>int1,int2,int4,float2,float4,float8</code>のいずれかです。}</dd>
 <dt><code>money / money</code></dt>
-<dd>通貨型同士の除算。</dd>
-<dd></dd>
+<dd>通貨型同士の除算。}</dd>
 </dl>
 <h2 id="uuid">uuid型演算子</h2>
 <dl>
 <dt><code>uuid COMP uuid</code></dt>
-<dd>比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。</dd>
-<dd></dd>
+<dd>比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。}</dd>
 </dl>
 <h2 id="jsonb">JSONB型演算子</h2>
 <dl>
 <dt><code>jsonb -&gt; KEY</code></dt>
-<dd><code>KEY</code>で指定されたJSONオブジェクトフィールドを取得する</dd>
-<dd></dd>
+<dd><code>KEY</code>で指定されたJSONオブジェクトフィールドを取得する}</dd>
 <dt><code>jsonb -&gt; NUM</code></dt>
-<dd>インデックス番号<code>NUM</code>で指定されたJSONオブジェクトフィールドを取得する</dd>
-<dd></dd>
+<dd>インデックス番号<code>NUM</code>で指定されたJSONオブジェクトフィールドを取得する}</dd>
 <dt><code>jsonb -&gt;&gt; KEY</code></dt>
-<dd><code>KEY</code>で指定されたJSONオブジェクトフィールドをテキスト値として取得する</dd>
-<dd></dd>
+<dd><code>KEY</code>で指定されたJSONオブジェクトフィールドをテキスト値として取得する}</dd>
 <dt><code>jsonb -&gt;&gt; NUM</code></dt>
-<dd>インデックス番号<code>NUM</code>で指定されたJSONオブジェクトフィールドをテキスト値として取得する</dd>
-<dd></dd>
+<dd>インデックス番号<code>NUM</code>で指定されたJSONオブジェクトフィールドをテキスト値として取得する}</dd>
 <dt><code>(jsonb -&gt;&gt; KEY)::TYPE</code></dt>
-<dd><code>TYPE</code>が<code>int2,int4,int8,float4,float8,numeric</code>のいずれかである場合、<code>KEY</code>で指定されたJSONオブジェクトフィールドを数値型として取得する。下記の補足も参照。</dd>
-<dd></dd>
+<dd><code>TYPE</code>が<code>int2,int4,int8,float4,float8,numeric</code>のいずれかである場合、<code>KEY</code>で指定されたJSONオブジェクトフィールドを数値型として取得する。下記の補足も参照。}</dd>
 <dt><code>(jsonb -&gt;&gt; NUM)::TYPE</code></dt>
-<dd><code>TYPE</code>が<code>int2,int4,int8,float4,float8,numeric</code>のいずれかである場合、インデックス番号<code>NUM</code>で指定されたJSONオブジェクトフィールドを数値型として取得する。下記の補足も参照。</dd>
-<dd></dd>
+<dd><code>TYPE</code>が<code>int2,int4,int8,float4,float8,numeric</code>のいずれかである場合、インデックス番号<code>NUM</code>で指定されたJSONオブジェクトフィールドを数値型として取得する。下記の補足も参照。}</dd>
 <dt><code>jsonb ? KEY</code></dt>
-<dd>jsonbオブジェクトが指定された<code>KEY</code>を含むかどうかをチェックする</dd>
-<dd></dd>
+<dd>jsonbオブジェクトが指定された<code>KEY</code>を含むかどうかをチェックする}</dd>
 </dl>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p><code>jsonb -&gt;&gt; KEY</code>演算子によって取り出した数値データを<code>float</code>や<code>numeric</code>など数値型に変換する時、通常、PostgreSQLはjsonb内部表現をテキストとして出力し、それを数値表現に変換するという2ステップの処理を行います。
 PG-Stromは<code>jsonb -&gt;&gt; KEY</code>演算子による参照とテキスト⇒数値表現へのキャストが連続している時、jsonbオブジェクトから数値表現を取り出すための特別なデバイス関数を使用する事で最適化を行います。</p>
 </div>
-<h2 id="_10">範囲型演算子</h2>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>以下の説明において、<code>RANGE</code>は任意の{<code>int4range</code>、<code>int8range</code>、<code>tsrange</code>、<code>tstzrange</code>、<code>daterange</code>}です。<br>
-以下の説明において、<code>TYPE</code>は同時に使われている<code>RANGE</code>の要素型です。</p>
-</div>
-<dl>
-<dt><code>RANGE = RANGE</code></dt>
-<dd>両辺が等しい </dd>
-<dt><code>RANGE &lt;&gt; RANGE</code></dt>
-<dd>両辺が等しくない </dd>
-<dt><code>RANGE &lt; RANGE</code></dt>
-<dd>左辺は右辺より小さい </dd>
-<dt><code>RANGE &lt;= RANGE</code></dt>
-<dd>左辺は右辺より小さいか等しい</dd>
-<dd></dd>
-<dt><code>RANGE &gt; RANGE</code></dt>
-<dd>左辺は右辺より大きい</dd>
-<dd></dd>
-<dt><code>RANGE &gt;= RANGE</code></dt>
-<dd>左辺は右辺より大きいか等しい</dd>
-<dd></dd>
-<dt><code>RANGE @ RANGE</code></dt>
-<dd>左辺の範囲は右辺の範囲を包含する</dd>
-<dd></dd>
-<dt><code>RANGE @ TYPE</code></dt>
-<dd>左辺の範囲は右辺の要素を包含する</dd>
-<dd></dd>
-<dt><code>RANGE &lt;@ RANGE</code></dt>
-<dd>左辺の範囲は右辺の範囲に包含される</dd>
-<dd></dd>
-<dt><code>TYPE &lt;@ RANGE</code></dt>
-<dd>左辺の要素は右辺の範囲に包含される</dd>
-<dd></dd>
-<dt><code>RANGE &amp;&amp; RANGE</code></dt>
-<dd>左辺と右辺は重複する（共通点を持つ）</dd>
-<dd></dd>
-<dt><code>RANGE &lt;&lt; RANGE</code></dt>
-<dd>左辺は厳密に右辺よりも小さい</dd>
-<dd></dd>
-<dt><code>RANGE &gt;&gt; RANGE</code></dt>
-<dd>左辺は厳密に右辺よりも大きい</dd>
-<dd></dd>
-<dt><code>RANGE &amp;&lt; RANGE</code></dt>
-<dd>左辺のいかなる点も右辺の範囲を越えない</dd>
-<dd></dd>
-<dt><code>RANGE &amp;&gt; RANGE</code></dt>
-<dd>右辺のいかなる点も左辺の範囲を越えない</dd>
-<dd></dd>
-<dt><code>RANGE -|- RANGE</code></dt>
-<dd>左辺と右辺は隣接している</dd>
-<dd></dd>
-<dt><code>RANGE + RANGE</code></dt>
-<dd>左辺と右辺による結合範囲を返す</dd>
-<dd></dd>
-<dt><code>RANGE * RANGE</code></dt>
-<dd>左辺と右辺による交差範囲を返す</dd>
-<dd></dd>
-<dt><code>RANGE - RANGE</code></dt>
-<dd>左辺と右辺による差分範囲を返す</dd>
-<dd></dd>
-<dt><code>lower(RANGE)</code></dt>
-<dd>範囲の下限を返す</dd>
-<dd></dd>
-<dt><code>upper(RANGE)</code></dt>
-<dd>範囲の上限を返す</dd>
-<dd></dd>
-<dt><code>isempty(RANGE)</code></dt>
-<dd>空の範囲かどうかをチェックする</dd>
-<dd></dd>
-<dt><code>lower_inc(RANGE)</code></dt>
-<dd>下限は内包されているかどうかをチェックする</dd>
-<dd></dd>
-<dt><code>upper_inc(RANGE)</code></dt>
-<dd>上限は内包されているかをチェックする</dd>
-<dd></dd>
-<dt><code>lower_inf(RANGE)</code></dt>
-<dd>下限は無限大かどうかをチェックする</dd>
-<dd></dd>
-<dt><code>upper_inf(RANGE)</code></dt>
-<dd>上限は無限大かどうかをチェックする</dd>
-<dd></dd>
-<dt><code>range_merge(RANGE,RANGE)</code></dt>
-<dd>両方の範囲を含む最小の範囲を返す</dd>
-<dd></dd>
-</dl>
+<!--
+##範囲型演算子
+
+
+!!! Note
+    以下の説明において、`RANGE`は任意の{`int4range`、`int8range`、`tsrange`、`tstzrange`、`daterange`}です。<br>
+    以下の説明において、`TYPE`は同時に使われている`RANGE`の要素型です。
+
+
+
+`RANGE = RANGE`
+: 両辺が等しい
+
+`RANGE <> RANGE`
+: 両辺が等しくない
+
+`RANGE < RANGE`
+: 左辺は右辺より小さい
+
+`RANGE <= RANGE`
+: 左辺は右辺より小さいか等しい
+
+`RANGE > RANGE`
+: 左辺は右辺より大きい
+
+`RANGE >= RANGE`
+: 左辺は右辺より大きいか等しい
+
+`RANGE @ RANGE`
+: 左辺の範囲は右辺の範囲を包含する
+
+`RANGE @ TYPE`
+: 左辺の範囲は右辺の要素を包含する
+
+`RANGE <@ RANGE`
+: 左辺の範囲は右辺の範囲に包含される
+
+`TYPE <@ RANGE`
+: 左辺の要素は右辺の範囲に包含される
+
+`RANGE && RANGE`
+: 左辺と右辺は重複する（共通点を持つ）
+
+`RANGE << RANGE`
+: 左辺は厳密に右辺よりも小さい
+
+`RANGE >> RANGE`
+: 左辺は厳密に右辺よりも大きい
+
+`RANGE &< RANGE`
+: 左辺のいかなる点も右辺の範囲を越えない
+
+`RANGE &> RANGE`
+: 右辺のいかなる点も左辺の範囲を越えない
+
+`RANGE -|- RANGE`
+: 左辺と右辺は隣接している
+
+`RANGE + RANGE`
+: 左辺と右辺による結合範囲を返す
+
+`RANGE * RANGE`
+: 左辺と右辺による交差範囲を返す
+
+`RANGE - RANGE`
+: 左辺と右辺による差分範囲を返す
+
+`lower(RANGE)`
+: 範囲の下限を返す
+
+`upper(RANGE)`
+: 範囲の上限を返す
+
+`isempty(RANGE)`
+: 空の範囲かどうかをチェックする
+
+`lower_inc(RANGE)`
+: 下限は内包されているかどうかをチェックする
+
+`upper_inc(RANGE)`
+: 上限は内包されているかをチェックする
+
+`lower_inf(RANGE)`
+: 下限は無限大かどうかをチェックする
+
+`upper_inf(RANGE)`
+: 上限は無限大かどうかをチェックする
+
+`range_merge(RANGE,RANGE)`
+: 両方の範囲を含む最小の範囲を返す
+
+-->
+
 <h2 id="postgis">PostGIS関数</h2>
 <dl>
 <dt><code>geometry st_makepoint(float8,float8)</code><br><code>geometry st_point(float8,float8)</code></dt>
 <dd>2次元座標を含むPOINT型ジオメトリを返す</dd>
-<dd></dd>
 <dt><code>geometry st_makepoint(float8,float8,float8)</code></dt>
 <dd>3次元座標を含むPOINT型ジオメトリを返す</dd>
-<dd></dd>
 <dt><code>geometry st_makepoint(float8,float8,float8,float8)</code></dt>
 <dd>ZM座標を含むPOINT型ジオメトリを返す</dd>
-<dd></dd>
 <dt><code>geometry st_setsrid(geometry,int4)</code></dt>
 <dd>ジオメトリにSRIDを設定する</dd>
-<dd></dd>
 <dt><code>float8 st_distance(geometry,geometry)</code></dt>
 <dd>ジオメトリ間の距離を<code>float8</code>で返す</dd>
-<dd></dd>
 <dt><code>bool st_dwithin(geometry,geometry,float8)</code></dt>
 <dd>ジオメトリ間の距離が指定値以内なら真を返す。<code>st_distance</code>と比較演算子の組み合わせよりも高速な場合がある。</dd>
-<dd></dd>
 <dt><code>text st_relate(geometry,geometry)</code></dt>
 <dd>ジオメトリ間の交差状態を判定し、DE9-IM(Dimensionally Extended Nine-Intersection Matrix)書式を返す。</dd>
-<dd></dd>
 <dt><code>bool st_contains(geometry,geometry)</code></dt>
 <dd>ジオメトリ1がジオメトリ2を包含する時、真を返す。</dd>
-<dd></dd>
 <dt><code>bool st_crosses(geometry,geometry)</code></dt>
 <dd>ジオメトリ同士が空間的に交差する時、真を返す。</dd>
-<dd></dd>
 <dt><code>int4 st_linecrossingdirection(geometry,geometry)</code></dt>
 <dd>2つのLINESTRING型ジオメトリがどのように交差するか（しないか）を返す。</dd>
-<dd></dd>
+</dl>
+<h2 id="cube">CUBE型関数</h2>
+<dl>
+<dt><code>cube COMP cube</code></dt>
+<dd>比較演算子。<code>COMP</code>は<code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code>のいずれかです。}</dd>
+<dt><code>bool cube_contains(cube, cube)</code></dt>
+<dd>第一引数の立体が第二引数の立体を包含している時、真を返す。</dd>
+<dt><code>bool cube_contained(cube, cube)</code></dt>
+<dd>第一引数の立体が第二引数の立体に包含されている時、真を返す。</dd>
+<dt><code>float8 cube_ll_coord(cube, int4)</code></dt>
+<dd>立体の左下隅のn次座標の値を返します。</dd>
 </dl>
               
             </div>
-          </div>
-          <footer>
-  
-    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
-      
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../ref_types/" class="btn btn-neutral float-left" title="データ型"><span class="icon icon-circle-arrow-left"></span> Previous</a>
         <a href="../ref_sqlfuncs/" class="btn btn-neutral float-right" title="SQLオブジェクト">Next <span class="icon icon-circle-arrow-right"></span></a>
-      
-      
-        <a href="../ref_types/" class="btn btn-neutral" title="データ型"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-      
     </div>
-  
 
   <hr/>
 
   <div role="contentinfo">
     <!-- Copyright etc -->
-    
   </div>
 
-  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
-      
+          
         </div>
       </div>
 
@@ -681,7 +573,7 @@ PG-Stromは<code>jsonb -&gt;&gt; KEY</code>演算子による参照とテキス�
 
   </div>
 
-  <div class="rst-versions" role="note" aria-label="versions">
+  <div class="rst-versions" role="note" aria-label="Versions">
   <span class="rst-current-version" data-toggle="rst-current-version">
     
     
@@ -692,14 +584,15 @@ PG-Stromは<code>jsonb -&gt;&gt; KEY</code>演算子による参照とテキス�
     
   </span>
 </div>
-    <script>var base_url = '..';</script>
-    <script src="../js/theme_extra.js" defer></script>
-    <script src="../js/theme.js" defer></script>
-      <script src="../search/main.js" defer></script>
-    <script defer>
-        window.onload = function () {
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
             SphinxRtdTheme.Navigation.enable(true);
-        };
+        });
     </script>
 
 </body>

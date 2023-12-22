@@ -80,7 +80,10 @@ __collectGpuDevAttrs(GpuDevAttributes *dattrs, CUdevice cuda_device)
 	rc = cuDeviceGetAttribute(&dattrs->LABEL,						\
 							  CU_DEVICE_ATTRIBUTE_##LABEL,			\
 							  cuda_device);							\
-	if (rc != CUDA_SUCCESS)											\
+	if (CU_DEVICE_ATTRIBUTE_##LABEL > CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_SUPPORTED &&	\
+		rc == CUDA_ERROR_INVALID_VALUE)								\
+		dattrs->LABEL = DEV_ATTR__UNKNOWN;							\
+	else if (rc != CUDA_SUCCESS)									\
 		__FATAL("failed on cuDeviceGetAttribute(" #LABEL "): %s",	\
 				cuStrError(rc));
 #include "gpu_devattrs.h"
@@ -719,7 +722,10 @@ pgstrom_gpu_device_info(PG_FUNCTION_ARGS)
 					break;
 
 				default:
-					att_value = psprintf("%d", val);
+					if (val != DEV_ATTR__UNKNOWN)
+						att_value = psprintf("%d", val);
+					else
+						att_value = NULL;
 					break;
 			}
 			break;
@@ -727,7 +733,10 @@ pgstrom_gpu_device_info(PG_FUNCTION_ARGS)
 	memset(isnull, 0, sizeof(isnull));
 	values[0] = Int32GetDatum(dattrs->DEV_ID);
 	values[1] = CStringGetTextDatum(att_name);
-	values[2] = CStringGetTextDatum(att_value);
+	if (att_value)
+		values[2] = CStringGetTextDatum(att_value);
+	else
+		isnull[2] = true;
 	if (att_desc)
 		values[3] = CStringGetTextDatum(att_desc);
 	else

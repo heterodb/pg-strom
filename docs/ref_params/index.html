@@ -1,47 +1,40 @@
 <!DOCTYPE html>
-<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
-<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<html class="writer-html5" lang="en" >
 <head>
-  <meta charset="utf-8">
-  <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  
-  <meta name="author" content="PG-Strom Development Team">
-  
-  <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>GUC Parameters - PG-Strom Manual</title>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
-
-  <link rel="stylesheet" href="../css/theme.css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
-  <link href="../custom.css" rel="stylesheet" />
-  
-  <script>
-    // Current page data
-    var mkdocs_page_name = "GUC Parameters";
-    var mkdocs_page_input_path = "ref_params.md";
-    var mkdocs_page_url = null;
-  </script>
-  
-  <script src="../js/jquery-2.1.1.min.js" defer></script>
-  <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
-  <script>hljs.initHighlightingOnLoad();</script> 
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>GUC Parameters - PG-Strom Manual</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+        <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+        <link href="../custom.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "GUC Parameters";
+        var mkdocs_page_input_path = "ref_params.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
 </head>
 
 <body class="wy-body-for-nav" role="document">
 
   <div class="wy-grid-for-nav">
-
-    
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
     <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
-        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
-        <div role="search">
+          <a href=".." class="icon icon-home"> PG-Strom Manual
+        </a><div role="search">
   <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" />
   </form>
@@ -49,50 +42,50 @@
 </div>
       </div>
 
-      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
-                    </li>
-                </ul>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">Tutorial</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">Advanced Features</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../fluentd/">connect with Fluentd</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">References</span></p>
-                <ul class="current">
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
-                    </li>
-                    <li class="toctree-l1 current"><a class="reference internal current" href="./">GUC Parameters</a>
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Tutorial</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Advanced Features</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fluentd/">connect with Fluentd</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">References</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="./">GUC Parameters</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#enablesdisables-a-particular-feature">Enables/disables a particular feature</a>
     </li>
@@ -106,64 +99,47 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpu-cache-configuration">GPU Cache configuration</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#hyperloglog-configuration">HyperLogLog configuration</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</a>
-    </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpu-device-configuration">GPU Device Configuration</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#pg-strom-shared-memory-configuration">PG-Strom shared memory configuration</a>
-    </li>
     </ul>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">Release Note</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
-                    </li>
-                </ul>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Release Note</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                  </li>
+              </ul>
       </div>
     </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
-
-      
-      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
-        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-        <a href="..">PG-Strom Manual</a>
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">PG-Strom Manual</a>
+        
       </nav>
-
-      
       <div class="wy-nav-content">
-        <div class="rst-content">
-          <div role="navigation" aria-label="breadcrumbs navigation">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
-    <li><a href="..">Docs</a> &raquo;</li>
-    
-      
-        
-          <li>References &raquo;</li>
-        
-      
-    
-    <li>GUC Parameters</li>
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">References</li>
+      <li class="breadcrumb-item active">GUC Parameters</li>
     <li class="wy-breadcrumbs-aside">
-      
     </li>
   </ul>
-  
   <hr/>
 </div>
-
-          <div role="main">
-            <div class="section">
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
               
                 <h1 id="guc-parameters">GUC Parameters</h1>
 <p>This session introduces PG-Strom's configuration parameters.</p>
@@ -175,70 +151,68 @@
 <dd>Enables/disables GpuScan</dd>
 <dt><code>pg_strom.enable_gpuhashjoin</code> [type: <code>bool</code> / default: <code>on]</code></dt>
 <dd>Enables/disables JOIN by GpuHashJoin</dd>
-<dt><code>pg_strom.enable_gpunestloop</code> [type: <code>bool</code> / default: <code>on]</code></dt>
-<dd>Enables/disables JOIN by GpuNestLoop</dd>
+<dt><code>pg_strom.enable_gpugistindex</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables JOIN by GpuGiSTIndex</dd>
+<dt><code>pg_strom.enable_gpujoin</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables entire GpuJoin features (including GpuHashJoin and GpuGiSTIndex)</dd>
 <dt><code>pg_strom.enable_gpupreagg</code> [type: <code>bool</code> / default: <code>on]</code></dt>
 <dd>Enables/disables GpuPreAgg</dd>
-<dt><code>pg_strom.enable_brin</code> [type: <code>bool</code> / default: <code>on]</code></dt>
-<dd>Enables/disables BRIN index support on tables scan</dd>
-<dt><code>pg_strom.enable_gpucache</code> [type: <code>bool</code> / default: <code>on]</code></dt>
-<dd>Controls whether GPU Cache is referenced, instead of PostgreSQL tables, if any</dd>
-<dd>Note that GPU Cache trigger functions continue to update the REDO Log buffer, even if this parameter is turned off.</dd>
-<dt><code>pg_strom.enable_partitionwise_gpujoin</code> [type: <code>bool</code> / default: <code>on]</code></dt>
-<dd>Enables/disables whether GpuJoin is pushed down to the partition children.</dd>
-<dt><code>pg_strom.enable_partitionwise_gpupreagg</code> [type: <code>bool</code> / default: <code>on]</code></dt>
-<dd>Enables/disables whether GpuPreAgg is pushed down to the partition children.</dd>
-<dt><code>pg_strom.pullup_outer_scan</code> [type: <code>bool</code> / default: <code>on]</code></dt>
-<dd>Enables/disables to pull up full-table scan if it is just below GpuPreAgg/GpuJoin, to reduce data transfer between CPU/RAM and GPU.</dd>
-<dt><code>pg_strom.pullup_outer_join</code> [type: <code>bool</code> / default: <code>on]</code></dt>
-<dd>Enables/disables to pull up tables-join if GpuJoin is just below GpuPreAgg, to reduce data transfer between CPU/RAM and GPU.</dd>
 <dt><code>pg_strom.enable_numeric_aggfuncs</code> [type: <code>bool</code> / default: <code>on]</code></dt>
 <dd>Enables/disables support of aggregate function that takes <code>numeric</code> data type.</dd>
 <dd>Note that aggregated function at GPU mapps <code>numeric</code> data type to double precision floating point values. So, if you are sensitive to calculation errors, you can turn off this configuration to suppress the calculation errors by the operations on CPU.</dd>
-<dt><code>pg_strom.cpu_fallback</code> [type: <code>bool</code> / default: <code>off]</code></dt>
+<dt><code>pg_strom.enable_brin</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables BRIN index support on tables scan</dd>
+<dt><code>pg_strom.cpu_fallback</code> [type: <code>enum</code> / default: <code>notice</code>]</dt>
 <dd>Controls whether it actually run CPU fallback operations, if GPU program returned "CPU ReCheck Error"</dd>
+<dd><code>notice</code> ... Runs CPU fallback operations with notice message</dd>
+<dd><code>on</code>, <code>true</code> ... Runs CPU fallback operations with no message output</dd>
+<dd><code>off</code>, <code>false</code> ... Disabled CPU fallback operations with an error</dd>
 <dt><code>pg_strom.regression_test_mode</code> [type: <code>bool</code> / default: <code>off]</code></dt>
 <dd>It disables some <code>EXPLAIN</code> command output that depends on software execution platform, like GPU model name. It avoid "false-positive" on the regression test, so use usually don't tough this configuration.</dd>
 </dl>
 <h2 id="optimizer-configuration">Optimizer Configuration</h2>
 <dl>
-<dt><code>pg_strom.chunk_size</code> [type: <code>int</code> / default: <code>65534kB</code>]</dt>
-<dd>Size of the data blocks processed by a single GPU kernel invocation. It was configurable, but makes less sense, so fixed to about 64MB in the current version.</dd>
-<dt><code>pg_strom.gpu_setup_cost</code> [type: <code>real</code> / default: <code>4000</code>]</dt>
+<dt><code>pg_strom.gpu_setup_cost</code> [type: <code>real</code> / default: <code>100 * DEFAULT_SEQ_PAGE_COST</code>]</dt>
 <dd>Cost value for initialization of GPU device</dd>
-<dt><code>pg_strom.gpu_dma_cost</code> [type: <code>real</code> / default: <code>10</code>]</dt>
-<dd>Cost value for DMA transfer over PCIe bus per data-chunk (<code>pg_strom.chunk_size</code> = 64MB)</dd>
-<dt><code>pg_strom.gpu_operator_cost</code> [type: <code>real</code> / default: <code>0.00015</code>]</dt>
+<dt><code>pg_strom.gpu_tuple_cost</code> [type: <code>real</code> / default: <code>DEFAULT_CPU_TUPLE_COST</code>]</dt>
+<dd>Cost value to send tuples to, or receive tuples from GPU for each.</dd>
+<dt><code>pg_strom.gpu_operator_cost</code> [type: <code>real</code> / default: <code>DEFAULT_CPU_OPERATOR_COST / 16</code>]</dt>
 <dd>Cost value to process an expression formula on GPU. If larger value than <code>cpu_operator_cost</code> is configured, no chance to choose PG-Strom towards any size of tables</dd>
 </dl>
+<!--
+
+
+`pg_strom.enable_partitionwise_gpujoin` [type: `bool` / default: `on]`
+:   Enables/disables whether GpuJoin is pushed down to the partition children.
+
+
+
+`pg_strom.enable_partitionwise_gpupreagg` [type: `bool` / default: `on]`
+:   Enables/disables whether GpuPreAgg is pushed down to the partition children.
+
+-->
+
 <h2 id="executor-configuration">Executor Configuration</h2>
 <dl>
-<dt><code>pg_strom.max_async_tasks</code> [type: <code>int</code> / default: <code>5</code>]</dt>
-<dd>Max number of asynchronous taks PG-Strom can throw into GPU's execution queue per process.</dd>
-<dd>If CPU parallel is used in combination, this limitation shall be applied for each background worker. So, more than <code>pg_strom.max_async_tasks</code> asynchronous tasks are executed in parallel on the entire batch job.</dd>
-<dt><code>pg_strom.reuse_cuda_context</code> [type: <code>bool</code> / default: <code>off</code>]</dt>
-<dd>If <code>on</code>, it tries to reuse CUDA context on the next query execution, already constructed according to the previous query execution.</dd>
-<dd>Usually, construction of CUDA context takes 100-200ms, it may improve queries response time, on the other hands, it continue to occupy a part of GPU device memory on the down-side. So, we don't recommend to enable this parameter expect for benchmarking and so on.</dd>
-<dd>Also, this configuration makes no sense if query uses CPU parallel execution, because the worker processes shall always construct new CUDA context for each.</dd>
+<dt><code>pg_strom.max_async_tasks</code> [type: <code>int</code> / default: <code>12</code>]</dt>
+<dd>Max number of asynchronous taks PG-Strom can submit to the GPU execution queue, and is also the number of GPU Service worker threads.</dd>
 </dl>
 <h2 id="gpudirect-sql-configuration">GPUDirect SQL Configuration</h2>
 <dl>
 <dt><code>pg_strom.gpudirect_driver</code> [type: <code>text</code>]</dt>
 <dd>It shows the driver software name of GPUDirect SQL (read-only).</dd>
-<dd>Either <code>nvidia cufile</code> or <code>heterodb nvme-strom</code></dd>
+<dd>Either <code>cufile</code>, <code>nvme-strom</code> or <code>vfs</code></dd>
 <dt><code>pg_strom.gpudirect_enabled</code> [type: <code>bool</code> / default: <code>on</code>]</dt>
 <dd>Enables/disables GPUDirect SQL feature.</dd>
+<dt><code>pg_strom.gpu_direct_seq_page_cost</code> [type: <code>real</code> / default: <code>DEFAULT_SEQ_PAGE_COST / 4</code>]</dt>
+<dd>The cost of scanning a table using GPU-Direct SQL, instead of the <code>seq_page_cost</code>, when the optimizer calculates the cost of an execution plan.</dd>
 <dt><code>pg_strom.gpudirect_threshold</code> [type: <code>int</code> / default: auto]</dt>
 <dd>Controls the table-size threshold to invoke GPUDirect SQL feature.</dd>
 <dd>The default is auto configuration; a threshold calculated by the system physical memory size and <code>shared_buffers</code> configuration.</dd>
-<dt><code>pg_strom.cufile_io_unitsz</code> [type: <code>int</code> / default: <code>16MB</code>]</dt>
-<dd>Unit size of read-i/o when PG-Strom uses cuFile API. No need to change from the default setting for most cases.</dd>
-<dd>It is only available when <code>nvidia cufile</code> driver is used.</dd>
-<dt><code>pg_strom.nvme_distance_map</code> [type: <code>text</code> / default: <code>null</code>]</dt>
-<dd>It manually configures the closest GPU for particular storage evices, like NVME-SSD or NFS volumes.</dd>
-<dd>Its format string is <code>{(&lt;gpuX&gt;|&lt;nvmeX&gt;|&lt;sfdvX&gt;|&lt;/path/to/nfsmount&gt;),...}[,{...}]</code>. It puts identifiers of GPU and NVME devices within <code>{ ... }</code> block to group these devices.</dd>
-<dd>(example: <code>{gpu0,nvme1,nvme2,/opt/nfsmount},{gpu1,nvme0}</code></dd>
-<dd></dd>
+<dt><code>pg_strom.manual_optimal_gpus</code> [type: <code>text</code> / default: none]</dt>
+<dd>It manually configures the closest GPU for the target storage volumn, like NVME device or NFS volume.</dd>
+<dd>Its format string is: <code>{&lt;nvmeX&gt;|/path/to/tablespace}=gpuX[:gpuX...]</code>. It describes relationship between the closest GPU and NVME device or tablespace directory path. It accepts multiple configurations separated by comma character.</dd>
+<dd>Example: <code>pg_strom.manual_optimal_gpus = 'nvme1=gpu0,nvme2=gpu1,/mnt/nfsroot=gpu0'</code></dd>
 <dd>
 <ul>
 <li><code>&lt;gpuX&gt;</code> means a GPU with device identifier X.</li>
@@ -251,102 +225,101 @@
 </dd>
 <dd>
 <ul>
-<li><code>&lt;sfdvX&gt;</code> means a special device of CSD drives by ScaleFlux,Inc.</li>
+<li><code>/path/to/tablespace</code> means full-path of the tablespace directory.</li>
 </ul>
 </dd>
 <dd>
-<ul>
-<li><code>/path/to/nfsmount</code> means a mount point by NFS volume with NFS-over-RDMA.</li>
-</ul>
+<p>Automatic configuration is often sufficient for local NVME-SSD drives, however, you should manually configure the closest GPU for NVME-oF or NFS-over-RDMA volumes.</p>
 </dd>
-<dd></dd>
-<dd>Automatic configuration is often sufficient for local NVME-SSD drives, however, you should manually configure the closest GPU for NVME-oF or NFS-over-RDMA volumes.</dd>
 </dl>
 <h2 id="arrow_fdw-configuration">Arrow_Fdw Configuration</h2>
 <dl>
 <dt><code>arrow_fdw.enabled</code> [type: <code>bool</code> / default: <code>on</code>]</dt>
 <dd>By adjustment of estimated cost value, it turns on/off Arrow_Fdw. Note that only Foreign Scan (Arrow_Fdw) can scan on Arrow files, if GpuScan is not capable to run on.</dd>
-<dt><code>arrow_fdw.metadata_cache_size</code> [type: <code>int</code> / default: <code>128MB</code>]</dt>
+<dt><code>arrow_fdw.stats_hint_enabled</code> [type: <code>bool</code> / default: <code>on</code>]</dt>
+<dd>When Arrow file has min/max statistics, this parameter controls whether unnecessary record-batches shall be skipped, or not.</dd>
+<dt><code>arrow_fdw.metadata_cache_size</code> [type: <code>int</code> / default: <code>512MB</code>]</dt>
 <dd>Size of shared memory to cache metadata of Arrow files.</dd>
 <dd>Once consumption of the shared memory exceeds this value, the older metadata shall be released based on LRU.</dd>
-<dt><code>arrow_fdw.record_batch_size</code> [type: <code>int</code> / default: <code>256MB</code>]</dt>
-<dd>Threshold of RecordBatch when Arrow_Fdw foreign table is written. When total amount of the buffer size exceeds this configuration, Arrow_Fdw writes out the buffer to Apache Arrow file, even if <code>INSERT</code> command is not completed yet.</dd>
 </dl>
 <h2 id="gpu-cache-configuration">GPU Cache configuration</h2>
 <dl>
 <dt><code>pg_strom.enable_gpucache</code> [type: <code>bool</code> / default: <code>on</code>]</dt>
 <dd>Controls whether search/analytic query tries to use GPU Cache.</dd>
-<dd>Note that this parameter does not affect to any writes on the REDO Log buffer by the trigger.</dd>
+<dd>Note that GPU Cache trigger functions continue to update the REDO Log buffer, even if this parameter is turned off.</dd>
 <dt><code>pg_strom.gpucache_auto_preload</code> [type: <code>text</code> / default: <code>null</code>]</dt>
 <dd>It specifies the table names to be loaded onto GPU Cache just after PostgreSQL startup.</dd>
 <dd>Its format is <code>DATABASE_NAME.SCHEMA_NAME.TABLE_NAME</code>, and separated by comma if multiple tables are preloaded.</dd>
 <dd>Initial-loading of GPU Cache usually takes a lot of time. So, preloading enables to avoid delay of response time of search/analytic queries on the first time.</dd>
 <dd>If this parameter is '*', PG-Strom tries to load all the configured tables onto GPU Cache sequentially.</dd>
 </dl>
-<h2 id="hyperloglog-configuration">HyperLogLog configuration</h2>
-<dl>
-<dt><code>pg_strom.hll_registers_bits</code> [type: <code>int</code> / default: <code>9</code>]</dt>
-<dd>It specifies the width of HLL Sketch used for HyperLogLog.</dd>
-<dd>PG-Strom allocates <code>2^pg_strom.hll_registers_bits</code> registers for HLL Sketch, then uses the latest <code>pg_strom.hll_registers_bits</code> bits of hash-values as register selector. It must be configured between 4 and 15.</dd>
-<dd>See <a href="../hll_count/">HyperLogLog</a> for more details of HyperLogLog functionality of PG-Strom.</dd>
-</dl>
-<h2 id="configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</h2>
-<dl>
-<dt><code>pg_strom.program_cache_size</code> [type: <code>int</code> / default: <code>256MB</code>]</dt>
-<dd>Amount of the shared memory size to cache GPU programs already built. It needs restart to update the parameter.</dd>
-<dt><code>pg_strom.num_program_builders</code> [type: <code>int</code> / default: <code>2</code>]</dt>
-<dd>Number of background workers to build GPU programs asynchronously. It needs restart to update the parameter.</dd>
-<dt><code>pg_strom.debug_jit_compile_options</code> [type: <code>bool</code> / default: <code>off</code>]</dt>
-<dd>Controls to include debug option (line-numbers and symbol information) on JIT compile of GPU programs.</dd>
-<dd>It is valuable for complicated bug analysis using GPU core dump, however, should not be enabled on daily use because of performance degradation.</dd>
-<dt><code>pg_strom.extra_kernel_stack_size</code> [type: <code>int</code> / default: <code>0</code>]</dt>
-<dd>Extra size of stack, in bytes, for each GPU kernel thread to be allocated on execution. Usually, no need to change from the default value.</dd>
-</dl>
+<!--
+##HyperLogLog configuration
+
+
+`pg_strom.hll_registers_bits` [type: `int` / default: `9`]
+:    It specifies the width of HLL Sketch used for HyperLogLog.
+:    PG-Strom allocates `2^pg_strom.hll_registers_bits` registers for HLL Sketch, then uses the latest `pg_strom.hll_registers_bits` bits of hash-values as register selector. It must be configured between 4 and 15.
+:    See [HyperLogLog](hll_count.md) for more details of HyperLogLog functionality of PG-Strom.
+
+-->
+
 <h2 id="gpu-device-configuration">GPU Device Configuration</h2>
 <dl>
+<dt><code>pg_strom.gpu_mempool_segment_sz</code> [type: <code>int</code> / default: <code>1GB</code>]</dt>
+<dd>The segment size when GPU Service allocates GPU device memory for the memory pool.</dd>
+<dd>GPU device memory allocation is a relatively heavy process, so it is recommended to use memory pools to reuse memory.</dd>
+<dt><code>pg_strom.gpu_mempool_max_ratio</code> [type: <code>real</code> / default: <code>50%</code>]</dt>
+<dd>It specifies the percentage of device memory that can be used for the GPU device memory memory pool.</dd>
+<dd>It works to suppress excessive GPU device memory consumption by the memory pool and ensure sufficient working memory.</dd>
+<dt><code>pg_strom.gpu_mempool_min_ratio</code> [type: <code>real</code> / default: <code>5%</code>]</dt>
+<dd>It specify the percentage of GPU device memory that is preserved as the memory pool segment, and remained even after memory usage.</dd>
+<dd>By maintaining a minimum memory pool, the next query can be executed quickly.</dd>
+<dt><code>pg_strom.gpu_mempool_release_delay</code> [type: <code>int</code> / default: <code>5000</code>]</dt>
+<dd>GPU Service does not release a segment of a memory pool immediately, even if it becomes empty. When the time specified by this parameter (in milliseconds) has elapsed since the segment was last used, it is released and returned to the system.</dd>
+<dd>By inserting a certain delay, you can reduce the frequency of GPU device memory allocation/release.</dd>
+<dt><code>pg_strom.gpuserv_debug_output</code> [type: <code>bool</code> / default: <code>false</code>]</dt>
+<dd>Enable/disable GPU Service debug message output. This message may be useful for debugging, but normally you should not change it from the default value.</dd>
 <dt><code>pg_strom.cuda_visible_devices</code> [type: <code>text</code> / default: <code>null</code>]</dt>
 <dd>List of GPU device numbers in comma separated, if you want to recognize particular GPUs on PostgreSQL startup.</dd>
 <dd>It is equivalent to the environment variable <code>CUDAVISIBLE_DEVICES</code></dd>
-<dt><code>pg_strom.gpu_memory_segment_size</code> [type: <code>int</code> / default: <code>512MB</code>]</dt>
-<dd>Specifies the amount of device memory to be allocated per CUDA API call.</dd>
-<dd>Larger configuration will reduce the overhead of API calls, but not efficient usage of device memory.</dd>
 </dl>
-<h2 id="pg-strom-shared-memory-configuration">PG-Strom shared memory configuration</h2>
-<dl>
-<dt><code>shmbuf.segment_size</code> [type: <code>int</code> / default: <code>256MB</code>]</dt>
-<dd>It configures the unit length of the shared memory segment that has portable virtual addresses.</dd>
-<dd>Usually, it does not need to change the default value, except for the case when GPU Cache uses REDO Log buffer larger than <code>256MB</code>. In this case, you need to enlarge this parameter also.</dd>
-<dd>This parameter allows only power of 2.</dd>
-<dt><code>shmbuf.num_logical_segments</code> [type: <code>int</code> / default: auto]</dt>
-<dd>It configures the number of the shared memory segment that has portable virtual addresses.</dd>
-<dd>On the system startup, PG-Strom reserves (<code>shmbuf.segment_size</code> x <code>shmbuf.num_logical_segments</code>) bytes of virtual address space using mmap(2) with PROT_NONE, then, signal handler allocates physical memory on the demand.</dd>
-<dd>The default configuration is auto; that is almost twice of the physical memory size installed on the system.</dd>
-</dl>
+<!--
+## DPU related configurations
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-->
               
             </div>
-          </div>
-          <footer>
-  
-    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
-      
-        <a href="../release_v3.0/" class="btn btn-neutral float-right" title="PG-Strom v3.0">Next <span class="icon icon-circle-arrow-right"></span></a>
-      
-      
-        <a href="../ref_sqlfuncs/" class="btn btn-neutral" title="SQL Objects"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-      
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../ref_sqlfuncs/" class="btn btn-neutral float-left" title="SQL Objects"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../release_v5.0/" class="btn btn-neutral float-right" title="PG-Strom v5.0">Next <span class="icon icon-circle-arrow-right"></span></a>
     </div>
-  
 
   <hr/>
 
   <div role="contentinfo">
     <!-- Copyright etc -->
-    
   </div>
 
-  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
-      
+          
         </div>
       </div>
 
@@ -354,25 +327,26 @@
 
   </div>
 
-  <div class="rst-versions" role="note" aria-label="versions">
+  <div class="rst-versions" role="note" aria-label="Versions">
   <span class="rst-current-version" data-toggle="rst-current-version">
     
     
       <span><a href="../ref_sqlfuncs/" style="color: #fcfcfc">&laquo; Previous</a></span>
     
     
-      <span><a href="../release_v3.0/" style="color: #fcfcfc">Next &raquo;</a></span>
+      <span><a href="../release_v5.0/" style="color: #fcfcfc">Next &raquo;</a></span>
     
   </span>
 </div>
-    <script>var base_url = '..';</script>
-    <script src="../js/theme_extra.js" defer></script>
-    <script src="../js/theme.js" defer></script>
-      <script src="../search/main.js" defer></script>
-    <script defer>
-        window.onload = function () {
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
             SphinxRtdTheme.Navigation.enable(true);
-        };
+        });
     </script>
 
 </body>

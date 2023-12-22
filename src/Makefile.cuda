@@ -35,11 +35,12 @@ __NVCC_FLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
 # supported device depends on CUDA version
 # don't forget to update the logic of target_cc in cuda_program.c
 ifeq ($(shell test $(NVCC_VERSION) -ge 11080; echo $$?), 0)
-__NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80,sm_86
+__NVCC_FLAGS += --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80,sm_86,sm_89,sm_90
+__NVCC_NTHREADS := 8
 else
-#error "CUDA Toolkit version is too late (11.8 or later)"
+#error "CUDA Toolkit version is too old (must be 11.8 or later)"
 endif
-__NVCC_FLAGS += --threads 6
+__NVCC_FLAGS += --threads $(__NVCC_NTHREADS)
 __NVCC_FLAGS += --source-in-ptx
 __NVCC_FLAGS += -DHAVE_FLOAT2
 __NVCC_FLAGS += --relocatable-device-code=true

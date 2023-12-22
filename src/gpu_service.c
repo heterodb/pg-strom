@@ -93,7 +93,6 @@ typedef struct
 /*
  * variables
  */
-int		pgstrom_max_async_gpu_tasks;	/* GUC */
 static __thread int			MY_DINDEX_PER_THREAD = -1;
 static __thread CUdevice	MY_DEVICE_PER_THREAD = -1;
 static __thread CUcontext	MY_CONTEXT_PER_THREAD = NULL;
@@ -3163,16 +3162,6 @@ pgstrom_init_gpu_service(void)
 	BackgroundWorker worker;
 
 	Assert(numGpuDevAttrs > 0);
-	DefineCustomIntVariable("pg_strom.max_async_gpu_tasks",
-							"Max number of asynchronous GPU tasks",
-							NULL,
-							&pgstrom_max_async_gpu_tasks,
-							8,
-							1,
-							INT_MAX,
-							PGC_POSTMASTER,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.gpu_mempool_segment_sz",
 							"Segment size of GPU memory pool",
 							NULL,

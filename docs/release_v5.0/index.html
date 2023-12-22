@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>PG-Strom v5.0 - PG-Strom Manual</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+        <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+        <link href="../custom.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "PG-Strom v5.0";
+        var mkdocs_page_input_path = "release_v5.0.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> PG-Strom Manual
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<a href="../ja/release_v5.0/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Tutorial</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Advanced Features</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fluentd/">connect with Fluentd</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">References</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Release Note</span></p>
+              <ul class="current">
+                  <li class="toctree-l1 current"><a class="reference internal current" href="./">PG-Strom v5.0</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#prerequisites">Prerequisites</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#new-process-model">New Process Model</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#pseudo-device-code">Pseudo device code</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#improvement-of-data-layout">Improvement of data layout</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw-supports-minmax-statistics">Arrow_Fdw supports min/max statistics</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#other-changes">Other changes</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">PG-Strom Manual</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Release Note</li>
+      <li class="breadcrumb-item active">PG-Strom v5.0</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="pg-strom-v50-release">PG-Strom v5.0 Release</h1>
+<div style="text-align: right;">PG-Strom Development Team (15-Dec-2023)</div>
+
+<h2 id="overview">Overview</h2>
+<p>Major changes in PG-Strom v5.0 are as follows:</p>
+<ul>
+<li>The code base has been re-designed entirely with various improvement.</li>
+<li>Process model was revised to multi-threaded background worker (PG-Strom GPU Service) from multi-process model. It reduced GPU resource consumption and overhead of task-switching.</li>
+<li>GPU device code dynamically generated using CUDA C++ was replaced by the pseudo kernel code. It eliminates just-in-time compilation using NVRTC, and improved the first response time. This is also a groundwork for the future support of CSD(Computational Storage Drive) and DPU(Data Processing Unit).</li>
+<li>GPU-Cache is now deployed on CUDA managed memory that allows overcommit of GPU device memory.</li>
+<li>Data layout of PostgreSQL data types were revised to adjust Coalesced Memory Access.</li>
+<li>GpuPreAgg replaced entire GROUP BY implementation, then improved whole performance.</li>
+<li>GpuJoin extract tuples only once regardless of the depth of Join.</li>
+<li>Arrow_Fdw and Pg2Arrow supports min/max statistics of arrow files.</li>
+<li>Two arrow tools were added: Pca2Arrow captures network packets, and arrow2csv dumps arrow files in CSV format.</li>
+</ul>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>PostgreSQL v15.x, v16.x</li>
+<li>CUDA Toolkit 12.2 or later</li>
+<li>Linux distributions supported by CUDA Toolkit</li>
+<li>Intel x86 64bit architecture (x86_64)</li>
+<li>NVIDIA GPU CC 6.0 or later (Pascal at least; Volta or newer is recommended)</li>
+</ul>
+<h2 id="new-process-model">New Process Model</h2>
+<p>In v5.0, the multi-threaded background worker process (PG-Strom GPU Service) coordinates GPU resources and task executions, and individual PostgreSQL backend processes send requests to and receive results from the GPU service over IPC.</p>
+<p>Before the v3.x series, each PostgreSQL backend controls GPU devices individually. This design helps software debugging by easy identification of the problematic code when software quality of CUDA and PG-Strom were not sufficient, however, it extremely consumed GPU resources according to increase of database sessions, and was not recommended software architecture from the standpoint of task-switching.</p>
+<p>This design change makes PG-Strom v5.0 more stable towards increase of concurrent database sessions, and improves heavy GPU task's performance.</p>
+<h2 id="pseudo-device-code">Pseudo device code</h2>
+<p>PG-Strom v5.0 now generates its own "pseudo-code" from the supplied SQL, and the GPU device code works as an interpreter to execute this "pseudo-code". Unlike v3.x series, it does not generate CUDA C++ native code no longer.</p>
+<p>At first glance, this may appear to be a factor in performance degradation. However, dynamic code generation was originally targeted for only a small part of the code that changes with each query, such as the WHERE clause; most implementations were statically built, and runtime compilation was handled by NVRTC. (approximately 150ms) can now be omitted, contributing to improved response time.</p>
+<p>The "pseudo-code" is a set of low-level commands, can be displayed in EXPLAIN VERBOSE. For example, the query below contains the expression <code>lo_quantity &gt; 10</code> in the WHERE clause. This operation is defined as <code>Scan Quals OpCode</code> to call the <code>numeric_gt</code> function which compares the magnitude relationship between the <code>lo_quantity</code> column and the constant <code>10</code>.</p>
+<pre><code>postgres=# explain verbose select count(*), sum(lo_quantity), lo_shipmode from lineorder where lo_quantity &gt; 10 group by lo_shipmode;
+                                                                                                                                                                           QUERY PLAN
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=3242387.01..3242387.10 rows=7 width=51)
+   Output: pgstrom.fcount((pgstrom.nrows())), pgstrom.sum_fp_num((pgstrom.psum((lo_quantity)::double precision))), lo_shipmode
+   Group Key: lineorder.lo_shipmode
+   -&gt;  Custom Scan (GpuPreAgg) on public.lineorder  (cost=3242386.89..3242386.96 rows=7 width=51)
+         Output: (pgstrom.nrows()), (pgstrom.psum((lo_quantity)::double precision)), lo_shipmode
+         GPU Projection: pgstrom.nrows(), pgstrom.psum((lo_quantity)::double precision), lo_shipmode
+         GPU Scan Quals: (lo_quantity &gt; '10'::numeric) [rows: 600128800 -&gt; 479262800]
+         GPU-Direct SQL: enabled (GPU-0)
+         KVars-Slot: &lt;slot=0, type='numeric', expr='lo_quantity'&gt;, &lt;slot=1, type='bpchar', expr='lo_shipmode'&gt;, &lt;slot=2, type='bpchar', expr='lo_shipmode'&gt;, &lt;slot=3, type='float8', expr='lo_quantity'&gt;
+         KVecs-Buffer: nbytes: 83968, ndims: 2, items=[kvec0=&lt;0x0000-dfff, type='numeric', expr='lo_quantity'&gt;, kvec1=&lt;0xe000-147ff, type='bpchar', expr='lo_shipmode'&gt;]
+         LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[&lt;slot=0, type='numeric' resno=9(lo_quantity)&gt;, &lt;slot=1, type='bpchar' resno=17(lo_shipmode)&gt;]}}
+         MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[&lt;slot=0, offset=0x0000-dfff, type='numeric', expr='lo_quantity'&gt;, &lt;slot=1, offset=0xe000-147ff, type='bpchar', expr='lo_shipmode'&gt;]}}}
+         Scan Quals OpCode: {Func(bool)::numeric_gt args=[{Var(numeric): slot=0, expr='lo_quantity'}, {Const(numeric): value='10'}]}
+         Group-By KeyHash OpCode: {HashValue arg={SaveExpr: &lt;slot=1, type='bpchar'&gt; arg={Var(bpchar): kvec=0xe000-14800, expr='lo_shipmode'}}}
+         Group-By KeyLoad OpCode: {LoadVars(depth=-2): kvars=[&lt;slot=2, type='bpchar' resno=3(lo_shipmode)&gt;]}
+         Group-By KeyComp OpCode: {Func(bool)::bpchareq args=[{Var(bpchar): slot=1, expr='lo_shipmode'}, {Var(bpchar): slot=2, expr='lo_shipmode'}]}
+         Partial Aggregation OpCode: {AggFuncs &lt;nrows[*], psum::fp[slot=3, expr='lo_quantity'], vref[slot=1, expr='lo_shipmode']&gt; args=[{SaveExpr: &lt;slot=3, type='float8'&gt; arg={Func(float8)::float8 arg={Var(numeric): kvec=0x0000-e000, expr='lo_quantity'}}}, {SaveExpr: &lt;slot=1, type='bpchar'&gt; arg={Var(bpchar): kvec=0xe000-14800, expr='lo_shipmode'}}]}
+         Partial Function BufSz: 24
+(18 rows)
+</code></pre>
+<p>Although not currently implemented, this pseudo-code is also designed to offload SQL processing to a CSD (Computational Storage Drive) or DPU (Data Processing Unit) in the future.</p>
+<h2 id="improvement-of-data-layout">Improvement of data layout</h2>
+<p>GPU has a wider memory bandwidth than CPU, but in order to take advantage of this performance, it is necessary to satisfy the condition of coalesced memory access, which accesses nearby memory areas at the same time.</p>
+<p>In v5.0, the layout of PostgreSQL data types in GPU device code has been improved to make them more suitable for Coalesced Memory Access.
+If we would use the PostgreSQL data type as is, fields that are referenced at certain times will be placed in discrete positions, making it impossible to effectively utilize the read bandwidth from DRAM. By arranging multiple of these for each field, adjacent cores can read data from adjacent areas, making it easier to satisfy the conditions of Coalesced Memory Access.</p>
+<p>This improvement is aimed at bringing out sufficient execution performance not only for high-end GPU products with extremely high performance memory bandwidth, but also for mid-end GPUs.</p>
+<p><img alt="Coalesced Memory Access" src="../img/kvec-datum-coalesced.png" /></p>
+<h2 id="arrow_fdw-supports-minmax-statistics">Arrow_Fdw supports min/max statistics</h2>
+<p>Pg2Arrow can now generate Apache Arrow files with min/max statistics.</p>
+<p>Its new option <code>--stat=COLUMN_NAME</code> records the maximum/minimum value of the specified column for each RecordBatch and embeds it in the footer using Apache Arrow's Custom-Metadata mechanism.
+When reading an Apache Arrow file using Arrow_Fdw, perform like a range index scan using the above min/max statistics.</p>
+<p>For example, if the WHERE-clause for the Arrow_Fdw foreign table is as follows:</p>
+<p><code>WHERE ymd BETERRN '2020-01-01'::date AND '2021-12-31'::date</code></p>
+<p>Arrow_Fdw will skip the record-batch where the maximum value of the ymd field is less than <code>'2020-01-01'::date</code>, or the record-batch where the minimum value of ymd field is greater than <code>'2021-12-31</code>::date`, because it is obvious that it does not match the search conditions.</p>
+<p>As a result, performance equivalent to narrowing down using a range index can be obtained for datasets with patterns in which records with similar values ​​are clustered nearby, such as log data timestamps.</p>
+<h2 id="other-changes">Other changes</h2>
+<ul>
+<li>PG-Strom v5.0 stopped support of PostgreSQL v14 or older. Plan version up v15 or later.</li>
+<li>Due to development schedule reason, v5.0 disables partition-wise GpuJoin. It shall be re-implemented at the near future version.</li>
+</ul>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../ref_params/" class="btn btn-neutral float-left" title="GUC Parameters"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../release_v3.0/" class="btn btn-neutral float-right" title="PG-Strom v3.0">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../ref_params/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../release_v3.0/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

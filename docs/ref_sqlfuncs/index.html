@@ -1,47 +1,40 @@
 <!DOCTYPE html>
-<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
-<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<html class="writer-html5" lang="en" >
 <head>
-  <meta charset="utf-8">
-  <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  
-  <meta name="author" content="PG-Strom Development Team">
-  
-  <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>SQL Objects - PG-Strom Manual</title>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
-
-  <link rel="stylesheet" href="../css/theme.css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
-  <link href="../custom.css" rel="stylesheet" />
-  
-  <script>
-    // Current page data
-    var mkdocs_page_name = "SQL Objects";
-    var mkdocs_page_input_path = "ref_sqlfuncs.md";
-    var mkdocs_page_url = null;
-  </script>
-  
-  <script src="../js/jquery-2.1.1.min.js" defer></script>
-  <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
-  <script>hljs.initHighlightingOnLoad();</script> 
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>SQL Objects - PG-Strom Manual</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+        <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+        <link href="../custom.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "SQL Objects";
+        var mkdocs_page_input_path = "ref_sqlfuncs.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
 </head>
 
 <body class="wy-body-for-nav" role="document">
 
   <div class="wy-grid-for-nav">
-
-    
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
     <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
-        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
-        <div role="search">
+          <a href=".." class="icon icon-home"> PG-Strom Manual
+        </a><div role="search">
   <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" />
   </form>
@@ -49,48 +42,48 @@
 </div>
       </div>
 
-      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
-                    </li>
-                </ul>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">Tutorial</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">Advanced Features</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../fluentd/">connect with Fluentd</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">References</span></p>
-                <ul class="current">
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
-                    </li>
-                    <li class="toctree-l1 current"><a class="reference internal current" href="./">SQL Objects</a>
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Tutorial</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Advanced Features</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fluentd/">connect with Fluentd</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">References</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="./">SQL Objects</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#system-information">System Information</a>
     </li>
@@ -98,135 +91,134 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpu-cache">GPU Cache</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#hyperloglog-functions">HyperLogLog Functions</a>
-    </li>
     <li class="toctree-l2"><a class="reference internal" href="#test-data-generator">Test Data Generator</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#other-functions">Other Functions</a>
     </li>
     </ul>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">Release Note</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
-                    </li>
-                </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Release Note</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                  </li>
+              </ul>
       </div>
     </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
-
-      
-      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
-        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-        <a href="..">PG-Strom Manual</a>
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">PG-Strom Manual</a>
+        
       </nav>
-
-      
       <div class="wy-nav-content">
-        <div class="rst-content">
-          <div role="navigation" aria-label="breadcrumbs navigation">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
-    <li><a href="..">Docs</a> &raquo;</li>
-    
-      
-        
-          <li>References &raquo;</li>
-        
-      
-    
-    <li>SQL Objects</li>
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">References</li>
+      <li class="breadcrumb-item active">SQL Objects</li>
     <li class="wy-breadcrumbs-aside">
-      
     </li>
   </ul>
-  
   <hr/>
 </div>
-
-          <div role="main">
-            <div class="section">
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
               
                 <h1 id="sql-objects">SQL Objects</h1>
 <p>This chapter introduces SQL objects additionally provided by PG-Strom.</p>
 <h2 id="system-information">System Information</h2>
 <dl>
 <dt><code>pgstrom.device_info</code>  System View</dt>
-<dd></dd>
-<dd>It shows properties of GPU devices installed for PG-Strom.<br>Below is schema definition of the view.</dd>
+<dd>
+<p>It shows properties of GPU devices installed for PG-Strom.</p>
+</dd>
+<dd>
+<p>Below is schema definition of the view.</p>
+</dd>
 </dl>
 <table>
 <thead>
 <tr>
-<th align="left">name</th>
-<th align="left">type</th>
-<th align="left">description</th>
+<th style="text-align: left;">name</th>
+<th style="text-align: left;">type</th>
+<th style="text-align: left;">description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td align="left">device_nr</td>
-<td align="left"><code>int</code></td>
-<td align="left">GPU device number</td>
+<td style="text-align: left;">gpu_id</td>
+<td style="text-align: left;"><code>int</code></td>
+<td style="text-align: left;">GPU device number</td>
 </tr>
 <tr>
-<td align="left">aindex</td>
-<td align="left"><code>int</code></td>
-<td align="left">Attribute index</td>
+<td style="text-align: left;">att_name</td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">Attribute name</td>
 </tr>
 <tr>
-<td align="left">attribute</td>
-<td align="left"><code>text</code></td>
-<td align="left">Attribute name</td>
+<td style="text-align: left;">att_value</td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">Attribute value</td>
 </tr>
 <tr>
-<td align="left">value</td>
-<td align="left"><code>text</code></td>
-<td align="left">Attribute value</td>
+<td style="text-align: left;">att_desc</td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">Attribute description</td>
 </tr>
 </tbody>
 </table>
 <p>There are various kind of GPU device properties, but depending on the CUDA driver version where system is running.
-So, <code>pgstrom.device_info</code> system view identifies the target property by GPU device number (<code>device_nr</code>) and attribute index (<code>aindex</code>).</p>
+So, <code>pgstrom.device_info</code> system view identifies the target property by GPU device identifier (<code>gpu_id</code>) and attribute name (<code>att_name</code>).</p>
 <p>Below is an example of <code>pgstrom.device_info</code> system view.</p>
-<pre><code>postgres=# select * from pgstrom.device_info limit 10;
- device_nr | aindex |              attribute              |                  value
------------+--------+-------------------------------------+------------------------------------------
-         0 |      0 | GPU Device Name                     | NVIDIA Tesla V100-PCIE-16GB
-         0 |      1 | GPU Device Brand                    | TESLA
-         0 |      2 | GPU Device UUID                     | GPU-8ba149db-53d8-c5f3-0f55-97ce8cfadb28
-         0 |      3 | GPU Total RAM Size                  | 15.78GB
-         0 |      4 | GPU PCI Bar1 Size                   | 16.00GB
-         0 |      5 | Maximum number of threads per block | 1024
-         0 |      6 | Maximum block dimension X           | 1024
-         0 |      7 | Maximum block dimension Y           | 1024
-         0 |      8 | Maximum block dimension Z           | 64
-         0 |      9 | Maximum grid dimension X            | 2147483647
+<pre><code>postgres=# select * from pgstrom.gpu_device_info limit 10;
+ gpu_id |       att_name        |                att_value                 |              att_desc
+--------+-----------------------+------------------------------------------+-------------------------------------
+      0 | DEV_NAME              | NVIDIA A100-PCIE-40GB                    | GPU Device Name
+      0 | DEV_ID                | 0                                        | GPU Device ID
+      0 | DEV_UUID              | GPU-13943bfd-5b30-38f5-0473-78979c134606 | GPU Device UUID
+      0 | DEV_TOTAL_MEMSZ       | 39.39GB                                  | GPU Total RAM Size
+      0 | DEV_BAR1_MEMSZ        | 64.00GB                                  | GPU PCI Bar1 Size
+      0 | NUMA_NODE_ID          | -1                                       | GPU NUMA Node Id
+      0 | MAX_THREADS_PER_BLOCK | 1024                                     | Maximum number of threads per block
+      0 | MAX_BLOCK_DIM_X       | 1024                                     | Maximum block dimension X
+      0 | MAX_BLOCK_DIM_Y       | 1024                                     | Maximum block dimension Y
+      0 | MAX_BLOCK_DIM_Z       | 64                                       | Maximum block dimension Z
 (10 rows)
 </code></pre>
 <h2 id="arrow_fdw">Arrow_Fdw</h2>
 <dl>
 <dt><code>fdw_handler pgstrom.arrow_fdw_handler()</code></dt>
-<dd></dd>
 <dd>FDW handler function of Arrow_Fdw. Usually, users don't need to invoke this function.</dd>
 <dt><code>void pgstrom.arrow_fdw_validator(text[], oid)</code></dt>
-<dd></dd>
 <dd>FDW options validation function of Arrow_Fdw. Usually, users don't need to invoke this function.</dd>
-<dt><code>void pgstrom.arrow_fdw_import_file(text,text,text = null)</code></dt>
-<dd>This function tries to import Apache Arrow file, and defines a new foreign table. Its first argument is name of the new foreign table, the second argument is path of the Apache Arrow file, and the optional third argument is the schema name.</dd>
-<dd>This function is similar to <code>IMPORT FOREIGN SCHEMA</code> statement, but allows to import Apache Arrow files that have wider fields than the limitation of number of columns in PostgreSQL (<code>MaxTupleAttributeNumber</code> = 1664). So, we recommend to use <code>IMPORT FOREIGN SCHEMA</code> statement for most cases.</dd>
-<dd>The example below shows the steps to import an Apache Arrow file with 2000 of Int16 fields by the <code>pgstrom.arrow_fdw_import_file</code>. The result of <code>\d mytest</code> shows this foreign table has 2000 fields.</dd>
-<dd>Due to the internal data format of PostgreSQL, it is not possible to read all the columns at once, but possible to read a part of columns like the last example.</dd>
+<dt><code>event_trigger pgstrom.arrow_fdw_precheck_schema()</code></dt>
+<dd>Event trigger function to validate schema definition of Arrow files. Usually, users don't need to invoke this function.</dd>
+<dt><code>void pgstrom.arrow_fdw_import_file(text, text, text = null)</code></dt>
+<dd>
+<p>This function tries to import Apache Arrow file, and defines a new foreign table. Its first argument is name of the new foreign table, the second argument is path of the Apache Arrow file, and the optional third argument is the schema name.</p>
+</dd>
+<dd>
+<p>This function is similar to <code>IMPORT FOREIGN SCHEMA</code> statement, but allows to import Apache Arrow files that have wider fields than the limitation of number of columns in PostgreSQL (<code>MaxTupleAttributeNumber</code> = 1664). So, we recommend to use <code>IMPORT FOREIGN SCHEMA</code> statement for most cases.</p>
+</dd>
+<dd>
+<p>The example below shows the steps to import an Apache Arrow file with 2000 of Int16 fields by the <code>pgstrom.arrow_fdw_import_file</code>. The result of <code>\d mytest</code> shows this foreign table has 2000 fields.</p>
+</dd>
+<dd>
+<p>Due to the internal data format of PostgreSQL, it is not possible to read all the columns at once, but possible to read a part of columns like the last example.</p>
+</dd>
 </dl>
 <pre><code>=# select pgstrom.arrow_fdw_import_file('mytest', '/tmp/wide2000.arrow');
  arrow_fdw_import_file
@@ -277,102 +269,121 @@ ERROR:  target lists can have at most 1664 entries
 <table>
 <thead>
 <tr>
-<th align="left">name</th>
-<th align="left">type</th>
-<th align="left">description</th>
+<th style="text-align: left;">name</th>
+<th style="text-align: left;">type</th>
+<th>description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>database_oid</code></td>
-<td align="left"><code>oid</code></td>
-<td align="left">Database OID where the table with GPU Cache belongs to.</td>
+<td style="text-align: left;"><code>database_oid</code></td>
+<td style="text-align: left;"><code>oid</code></td>
+<td>Database OID where the table with GPU Cache belongs to.</td>
 </tr>
 <tr>
-<td align="left"><code>database_name</code></td>
-<td align="left"><code>text</code></td>
-<td align="left">Database name where the table with GPU Cache belongs to.</td>
+<td style="text-align: left;"><code>database_name</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td>Database name where the table with GPU Cache belongs to.</td>
 </tr>
 <tr>
-<td align="left"><code>table_oid</code></td>
-<td align="left"><code>oid</code></td>
-<td align="left">Table OID that has GPU Cache. Note that it may not be in the current database.</td>
+<td style="text-align: left;"><code>table_oid</code></td>
+<td style="text-align: left;"><code>oid</code></td>
+<td>Table OID that has GPU Cache. Note that it may not be in the current database.</td>
 </tr>
 <tr>
-<td align="left"><code>table_name</code></td>
-<td align="left"><code>text</code></td>
-<td align="left">Table name that has GPU Cache. Note that it may not be in the current database.</td>
+<td style="text-align: left;"><code>table_name</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td>Table name that has GPU Cache. Note that it may not be in the current database.</td>
 </tr>
 <tr>
-<td align="left"><code>signature</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">An identifier hash value of GPU Cache. It may be changed after <code>ALTER TABLE</code> for example.</td>
+<td style="text-align: left;"><code>signature</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>An identifier hash value of GPU Cache. It may be changed after <code>ALTER TABLE</code> for example.</td>
 </tr>
 <tr>
-<td align="left"><code>refcnt</code></td>
-<td align="left"><code>int4</code></td>
-<td align="left">Reference counter of the GPU cache. It does not always reflect the latest status.</td>
+<td style="text-align: left;"><code>phase</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td>Phase of GPU cache construction: either <code>not_built</code>, <code>is_empty</code>, <code>is_loading</code>, <code>is_ready</code>, or <code>corrupted</code></td>
 </tr>
 <tr>
-<td align="left"><code>corrupted</code></td>
-<td align="left"><code>bool</code></td>
-<td align="left">It shows whether GPU cache is corrupted, or not.</td>
+<td style="text-align: left;"><code>rowid_num_used</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>Number of allocated row-id</td>
 </tr>
 <tr>
-<td align="left"><code>gpu_main_sz</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">Size of the fixed-length values area on the GPU Cache.</td>
+<td style="text-align: left;"><code>rowid_num_free</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>Number of free row-id</td>
 </tr>
 <tr>
-<td align="left"><code>gpu_extra_sz</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">Size of the variable-length values area on the GPU Cache</td>
+<td style="text-align: left;"><code>gpu_main_sz</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>Size of the fixed-length values area on the GPU Cache.</td>
 </tr>
 <tr>
-<td align="left"><code>redo_write_ts</code></td>
-<td align="left"><code>timestamptz</code></td>
-<td align="left">Last update timestamp on the REDO Log buffer</td>
+<td style="text-align: left;"><code>gpu_main_nitems</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>Number of tuples on the GPU Cache.</td>
 </tr>
 <tr>
-<td align="left"><code>redo_write_nitems</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">Total number of REDO Log entries written to the REDO Log buffer.</td>
+<td style="text-align: left;"><code>gpu_extra_sz</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>Size of the variable-length values area on the GPU Cache.</td>
 </tr>
 <tr>
-<td align="left"><code>redo_write_pos</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">Total bytes of REDO Log entries written to the REDO Log buffer.</td>
+<td style="text-align: left;"><code>gpu_extra_usage</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>Size of the used variable-length values area on the GPU Cache.</td>
 </tr>
 <tr>
-<td align="left"><code>redo_read_nitems</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">Total number of REDO Log entries read from REDO Log buffer, and already applied to.</td>
+<td style="text-align: left;"><code>gpu_extra_dead</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>Size of the free variable-length values area on the GPU Cache.</td>
 </tr>
 <tr>
-<td align="left"><code>redo_read_pos</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">Total bytes of REDO Log entries read from REDO Log buffer, and already applied to.</td>
+<td style="text-align: left;"><code>redo_write_ts</code></td>
+<td style="text-align: left;"><code>timestamptz</code></td>
+<td>Last update timestamp on the REDO Log buffer</td>
 </tr>
 <tr>
-<td align="left"><code>redo_sync_pos</code></td>
-<td align="left"><code>int8</code></td>
-<td align="left">The latest position on the REDO Log buffer, where it is already required the background worker to synchronize onto the GPU Cache.<br>When free space of REDO Log buffer becomes tight, it is internally used to avoid flood of simultaneous asynchronized requests by many sessions.</td>
+<td style="text-align: left;"><code>redo_write_nitems</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>Total number of REDO Log entries written to the REDO Log buffer.</td>
 </tr>
 <tr>
-<td align="left"><code>config_options</code></td>
-<td align="left"><code>text</code></td>
-<td align="left">Options string of the GPU Cache</td>
+<td style="text-align: left;"><code>redo_write_pos</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>Total bytes of REDO Log entries written to the REDO Log buffer.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>redo_read_nitems</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>Total number of REDO Log entries read from REDO Log buffer, and already applied to.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>redo_read_pos</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>Total bytes of REDO Log entries read from REDO Log buffer, and already applied to.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>redo_sync_pos</code></td>
+<td style="text-align: left;"><code>int8</code></td>
+<td>The latest position on the REDO Log buffer, where it is already required the background worker to synchronize onto the GPU Cache. When free space of REDO Log buffer becomes tight, it is internally used to avoid flood of simultaneous asynchronized requests by many sessions.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>config_options</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td>Options string of the GPU Cache</td>
 </tr>
 </tbody>
 </table>
 <p>Below is an example of <code>pgstrom.gpucache_info</code> system view.</p>
 <pre><code>=# select * from pgstrom.gpucache_info ;
- database_oid | database_name | table_oid | table_name | signature  | gpu_main_sz | gpu_extra_sz |       redo_write_ts        | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos | redo_sync_pos |
-  config_options
---------------+---------------+-----------+------------+------------+-------------+--------------+----------------------------+-------------------+----------------+------------------+---------------+---------------+------------------------------------------------------------------------------------------------------------------------
-        12728 | postgres      |     25244 | mytest     | 6295279771 |   675028992 |            0 | 2021-05-14 03:00:18.623503 |            500000 |       36000000 |           500000 |      36000000 |      36000000 | gpu_device_id=0,max_num_rows=10485760,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
-        12728 | postgres      |     25262 | dpoints    | 5985886065 |   772505600 |            0 | 2021-05-14 03:00:18.524627 |           8000000 |      576000192 |          8000000 |     576000192 |     576000192 | gpu_device_id=0,max_num_rows=12000000,redo_buffer_size=167772160,gpu_sync_interval=5000000,gpu_sync_threshold=41943040
-(2 rows)
+ database_oid | database_name | table_oid |    table_name    | signature  |  phase   | rowid_num_used | rowid_num_free | gpu_main_sz | gpu_main_nitems | gpu_extra_sz | gpu_extra_usage | gpu_extra_dead |         redo_write_ts         | redo_write_nitems | redo_write_pos | redo_read_nitems | redo_read_pos |
+redo_sync_pos |                                                   config_options
+--------------+---------------+-----------+------------------+------------+----------+----------------+----------------+-------------+-----------------+--------------+-----------------+----------------+-------------------------------+-------------------+----------------+------------------+---------------+---------------+---------------------------------------------------------------------------------------------------------------------
+       193450 | hoge          |    603029 | cache_test_table | 4529357070 | is_ready |           4000 |           6000 |      439904 |            4000 |      3200024 |          473848 |              0 | 2023-12-18 01:25:42.850193+09 |              4000 |         603368 |             4000 |        603368 |       603368 | gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
+(1 row)
 </code></pre>
 <dl>
 <dt><code>trigger pgstrom.gpucache_sync_trigger()</code></dt>
@@ -388,86 +399,84 @@ ERROR:  target lists can have at most 1664 entries
 <dd></dd>
 <dd>It tries to recover the corrupted GPU cache.</dd>
 </dl>
-<h2 id="hyperloglog-functions">HyperLogLog Functions</h2>
-<dl>
-<dt><code>bigint pg_catalog.hll_count(TYPE)</code></dt>
-<dd></dd>
-<dd>An aggregate function to estimate cardinarity of the key value, using HyperLogLog algorithm.</dd>
-<dd></dd>
-<dd><code>TYPE</code> is any of <code>int1</code>, <code>int2</code>, <code>int4</code>, <code>int8</code>, <code>numeric</code>, <code>date</code>, <code>time</code>, <code>timetz</code>, <code>timestamp</code>, <code>timestamptz</code>, <code>bpchar</code>, <code>text</code>, or <code>uuid</code>.</dd>
-<dd></dd>
-<dd>See HyperLogLog for more details of <a href="../hll_count/">HyperLogLog</a> functionality of PG-Strom.</dd>
-<dt><code>bytea pg_catalog.hll_sketch(TYPE)</code></dt>
-<dd></dd>
-<dd>An aggregate function to build HLL Sketch, used for HyperLogLog algorithm, then return as <code>bytea</code> datum.</dd>
-<dd></dd>
-<dd><code>TYPE</code> is any of <code>int1</code>, <code>int2</code>, <code>int4</code>, <code>int8</code>, <code>numeric</code>, <code>date</code>, <code>time</code>, <code>timetz</code>, <code>timestamp</code>, <code>timestamptz</code>, <code>bpchar</code>, <code>text</code>, or <code>uuid</code>.</dd>
-<dt><code>bigint pg_catalog.hll_merge(bytea)</code></dt>
-<dd></dd>
-<dd>An aggregate function that estimate cardinarity of the key values that are the source of the supplied HLL Sketch.</dd>
-<dt><code>bytea pg_catalog.hll_combine(bytea)</code></dt>
-<dd></dd>
-<dd>An aggregate function that combines multiple HLL Sketches, then returns a consolicated HLL Sketch. It is expected to transform HLL Sketch of weekly data to monthly data, for example.</dd>
-<dt><code>int4[] pg_catalog.hll_sketch_histogram(bytea)</code></dt>
-<dd></dd>
-<dd>A function to generate a histogram based on the register values of the supplied HLL Sketch. This is not an aggregate function. It expects to visualize the contents of HLL Sketch generated by <code>hll_sketch()</code> and so on.</dd>
-</dl>
+<!--
+##HyperLogLog Functions
+
+`bigint pg_catalog.hll_count(TYPE)`
+: 
+: An aggregate function to estimate cardinarity of the key value, using HyperLogLog algorithm.
+: 
+: `TYPE` is any of `int1`, `int2`, `int4`, `int8`, `numeric`, `date`, `time`, `timetz`, `timestamp`, `timestamptz`, `bpchar`, `text`, or `uuid`.
+: 
+: See HyperLogLog for more details of [HyperLogLog](hll_count.md) functionality of PG-Strom.
+
+`bytea pg_catalog.hll_sketch(TYPE)`
+: 
+: An aggregate function to build HLL Sketch, used for HyperLogLog algorithm, then return as `bytea` datum.
+: 
+: `TYPE` is any of `int1`, `int2`, `int4`, `int8`, `numeric`, `date`, `time`, `timetz`, `timestamp`, `timestamptz`, `bpchar`, `text`, or `uuid`.
+
+`bigint pg_catalog.hll_merge(bytea)`
+: 
+: An aggregate function that estimate cardinarity of the key values that are the source of the supplied HLL Sketch.
+
+`bytea pg_catalog.hll_combine(bytea)`
+: 
+: An aggregate function that combines multiple HLL Sketches, then returns a consolicated HLL Sketch. It is expected to transform HLL Sketch of weekly data to monthly data, for example.
+
+`int4[] pg_catalog.hll_sketch_histogram(bytea)`
+: 
+: A function to generate a histogram based on the register values of the supplied HLL Sketch. This is not an aggregate function. It expects to visualize the contents of HLL Sketch generated by `hll_sketch()` and so on.
+-->
+
 <h2 id="test-data-generator">Test Data Generator</h2>
 <dl>
 <dt><code>void pgstrom.random_setseed(int)</code></dt>
-<dd></dd>
 <dd>It initializes the random seed.</dd>
 <dt><code>bigint pgstrom.random_int(float=0.0, bigint=0, bigint=INT_MAX)</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>bigint</code> type within the range.</dd>
 <dt><code>float pgstrom.random_float(float=0.0, float=0.0, float=1.0)</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>float</code> type within the range.</dd>
 <dt><code>date pgstrom.random_date(float=0.0, date='2015-01-01', date='2025-12-31')</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>date</code> type within the range.</dd>
 <dt><code>time pgstrom.random_time(float=0.0, time='00:00:00', time='23:59:59')</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>time</code> type within the range.</dd>
 <dt><code>timetz pgstrom.random_timetz(float=0.0, time='00:00:00', time='23:59:59')</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>timetz</code> type within the range.</dd>
 <dt><code>timestamp pgstrom.random_timestamp(float=0.0, timestamp='2015-01-01', timestamp='2025-01-01')</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>timestamp</code> type within the range.</dd>
 <dt><code>macaddr pgstrom.random_macaddr(float=0.0, macaddr='ab:cd:00:00:00', macaddr='ab:cd:ff:ff:ff:ff')</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>macaddr</code> type within the range.</dd>
 <dt><code>inet pgstrom.random_inet(float=0.0, inet='192.168.0.1/16')</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>inet</code> type within the range.</dd>
 <dt><code>text pgstrom.random_text(float=0.0, text='test_**')</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>text</code> type. The '*' characters in 2nd argument shall be replaced randomly.</dd>
 <dt><code>text pgstrom.random_text_len(float=0.0, int=10)</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>text</code> type within the specified length.</dd>
 <dt><code>int4range pgstrom.random_int4range(float=0.0, bigint=0, bigint=INT_MAX)</code></dt>
-<dd></dd>
-<dd>It generates random data in <code>int4range</code> type within the range.</dd>
+<dd>It generates random data in <code>int4range</code> type within the range.}</dd>
 <dt><code>int8range pgstrom.random_int8range(float=0.0, bigint=0, bigint=LONG_MAX)</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>int8range</code> type within the range.</dd>
 <dt><code>tsrange pgstrom.random_tsrange(float=0.0, timestamp='2015-01-01', timestamp='2025-01-01')</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>tsrange</code> type within the range.</dd>
 <dt><code>tstzrange pgstrom.random_tstzrange(float=0.0, timestamptz='2015-01-01', timestamptz='2025-01-01')</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>tstzrange</code> type within the range.</dd>
 <dt><code>daterange pgstrom.random_daterange(float=0.0, date='2015-01-01', date='2025-12-31')</code></dt>
-<dd></dd>
 <dd>It generates random data in <code>daterange</code> type within the range.</dd>
 </dl>
 <h2 id="other-functions">Other Functions</h2>
 <dl>
-<dt><code>pgstrom.license_query</code></dt>
-<dd></dd>
-<dd>It shows the active commercial subscription, if loaded.</dd>
+<dt><code>text pgstrom.githash()</code></dt>
+<dd>It displays the hash value of the source code revision from the currently loaded PG-Strom module is based. This value is useful in determining the software revision in the event of a failure.</dd>
+</dl>
+<pre><code>postgres=# select pgstrom.githash();
+                 githash
+------------------------------------------
+ 103984be24cafd1e7ce6330a050960d97675c196
+</code></pre>
+<dl>
+<dt><code>text pgstrom.license_query()</code></dt>
+<dd>It displays the active commercial subscription, if loaded.</dd>
 </dl>
 <pre><code>=# select pgstrom.license_query();
                                                                                license_query
@@ -477,29 +486,21 @@ ERROR:  target lists can have at most 1664 entries
 </code></pre>
               
             </div>
-          </div>
-          <footer>
-  
-    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
-      
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../ref_devfuncs/" class="btn btn-neutral float-left" title="Functions and Operators"><span class="icon icon-circle-arrow-left"></span> Previous</a>
         <a href="../ref_params/" class="btn btn-neutral float-right" title="GUC Parameters">Next <span class="icon icon-circle-arrow-right"></span></a>
-      
-      
-        <a href="../ref_devfuncs/" class="btn btn-neutral" title="Functions and Operators"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-      
     </div>
-  
 
   <hr/>
 
   <div role="contentinfo">
     <!-- Copyright etc -->
-    
   </div>
 
-  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
-      
+          
         </div>
       </div>
 
@@ -507,7 +508,7 @@ ERROR:  target lists can have at most 1664 entries
 
   </div>
 
-  <div class="rst-versions" role="note" aria-label="versions">
+  <div class="rst-versions" role="note" aria-label="Versions">
   <span class="rst-current-version" data-toggle="rst-current-version">
     
     
@@ -518,14 +519,15 @@ ERROR:  target lists can have at most 1664 entries
     
   </span>
 </div>
-    <script>var base_url = '..';</script>
-    <script src="../js/theme_extra.js" defer></script>
-    <script src="../js/theme.js" defer></script>
-      <script src="../search/main.js" defer></script>
-    <script defer>
-        window.onload = function () {
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
             SphinxRtdTheme.Navigation.enable(true);
-        };
+        });
     </script>
 
 </body>

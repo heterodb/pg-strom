@@ -50,11 +50,11 @@ Major changes in PG-Strom v3.0 are as follows:
 ##NVIDIA GPUDirect Storage
 
 @ja{
-[GPUダイレクトSQL](../ssd2gpu)用のドライバとして、従来の nvme_strom カーネルモジュールに加えて、
+[GPUダイレクトSQL](ssd2gpu.md)用のドライバとして、従来の nvme_strom カーネルモジュールに加えて、
 NVIDIAが開発を進めている[GPUDirect Storage](https://developer.nvidia.com/blog/gpudirect-storage/)にも対応しました。
 }
 @en{
-[GPUDirect Storage](https://developer.nvidia.com/blog/gpudirect-storage/), has been developed by NVIDIA, is now supported as a driver for [GPU Direct SQL](../ssd2gpu), in addition to the existing nvme_strom kernel module.
+[GPUDirect Storage](https://developer.nvidia.com/blog/gpudirect-storage/), has been developed by NVIDIA, is now supported as a driver for [GPU Direct SQL](ssd2gpu.md), in addition to the existing nvme_strom kernel module.
 }
 ![GPUDirect Storage](./img/release_3_0a.png)
 
