@@ -2134,9 +2134,9 @@ __compare_date_timestamptz(kern_context *kcxt, DateADT a, TimestampTz b)
 	return 0;
 }
 INLINE_FUNCTION(int)
-__compare_timestamptz_date(kern_context *kcxt, DateADT a, TimestampTz b)
+__compare_timestamptz_date(kern_context *kcxt, TimestampTz a, DateADT b)
 {
-	return __compare_date_timestamptz(kcxt, b, a);
+	return -__compare_date_timestamptz(kcxt, b, a);
 }
 PG_FLEXIBLE2_COMPARE_TEMPLATE(date, timestamptz, __compare_date_timestamptz)
 PG_FLEXIBLE2_COMPARE_TEMPLATE(timestamptz, date, __compare_timestamptz_date)

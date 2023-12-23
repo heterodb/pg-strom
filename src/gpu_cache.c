@@ -3220,7 +3220,6 @@ __gpucacheExecCompactionKernel(GpuCacheControlCommand *cmd,
 	kern_data_extra *kds_extra;
 	CUdeviceptr	m_kds_extra = 0UL;
 	int			grid_sz, block_sz;
-	unsigned int shmem_sz;
 	void	   *kern_args[4];
 	CUresult	rc;
 
@@ -3242,9 +3241,7 @@ retry:
 
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
-							 &shmem_sz,
-							 f_gcache_compaction,
-							 0, 0);
+							 f_gcache_compaction, 0);
 	if (rc != CUDA_SUCCESS)
 	{
 		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
@@ -3257,7 +3254,7 @@ retry:
 	rc = cuLaunchKernel(f_gcache_compaction,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
-						shmem_sz,
+						0,
 						CU_STREAM_LEGACY,
 						kern_args,
 						NULL);
@@ -3351,7 +3348,6 @@ __gpucacheExecApplyRedoKernel(GpuCacheControlCommand *cmd,
 	size_t		offset;
 	char	   *pos, *end;
 	int			grid_sz, block_sz;
-	unsigned int shmem_sz;
 	void	   *kern_args[4];
 	kern_gpucache_redolog *gcache_redo;
 	CUdeviceptr	m_gcache_redo = 0UL;
@@ -3425,9 +3421,7 @@ __gpucacheExecApplyRedoKernel(GpuCacheControlCommand *cmd,
 	/* GPU kernel invocation */
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
-							 &shmem_sz,
-							 f_gcache_apply_redo,
-							 0, 0);
+							 f_gcache_apply_redo, 0);
 	if (rc != CUDA_SUCCESS)
 	{
 		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
@@ -3445,7 +3439,7 @@ retry:
 		rc = cuLaunchKernel(f_gcache_apply_redo,
 							grid_sz, 1, 1,
 							block_sz, 1, 1,
-							shmem_sz,
+							0,
 							CU_STREAM_LEGACY,
 							kern_args,
 							NULL);
