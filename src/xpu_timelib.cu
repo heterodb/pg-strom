@@ -991,7 +991,12 @@ xpu_interval_datum_comp(kern_context *kcxt,
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
 	aval = interval_cmp_value(&a->value);
 	bval = interval_cmp_value(&b->value);
-	*p_comp = (aval - bval);
+	if (aval < bval)
+		*p_comp = -1;
+	else if (aval > bval)
+		*p_comp = 1;
+	else
+		*p_comp = 0;
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(interval, false, 8, sizeof(Interval));
@@ -2159,7 +2164,7 @@ __compare_timestamp_timestamptz(kern_context *kcxt,
 	else
 	{
 		tz = DetermineTimeZoneOffset(&tm, tz_info);
-		ts = a * USECS_PER_SEC + tz * USECS_PER_SEC;
+		ts = a + tz * USECS_PER_SEC;
 		if (ts < MIN_TIMESTAMP)
 			ts = DT_NOBEGIN;
 		else if (ts > END_TIMESTAMP)
@@ -2187,7 +2192,12 @@ __compare_interval(kern_context *kcxt, const Interval &lval, const Interval &rva
 	int128_t	lcmp = interval_cmp_value(&lval);
 	int128_t	rcmp = interval_cmp_value(&rval);
 
-	return (lcmp - rcmp);
+	if (lcmp < rcmp)
+		return -1;
+	else if (lcmp > rcmp)
+		return 1;
+	else
+		return 0;
 }
 PG_FLEXIBLE1_COMPARE_TEMPLATE(interval, __compare_interval)
 
