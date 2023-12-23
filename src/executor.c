@@ -390,6 +390,91 @@ __build_session_param_info(pgstromTaskState *pts,
 	}
 }
 
+/*
+ * __build_session_kvars_defs
+ */
+static int
+__count_session_kvars_defs_subfields(codegen_kvar_defitem *kvdef)
+{
+	int		count = list_length(kvdef->kv_subfields);
+	ListCell *lc;
+
+	foreach (lc, kvdef->kv_subfields)
+	{
+		codegen_kvar_defitem *__kvdef = lfirst(lc);
+
+		count += __count_session_kvars_defs_subfields(__kvdef);
+	}
+	return count;
+}
+
+static int
+__setup_session_kvars_defs_array(kern_varslot_desc *vslot_desc_root,
+								 kern_varslot_desc *vslot_desc_base,
+								 List *kvars_deflist)
+{
+	kern_varslot_desc *vs_desc = vslot_desc_base;
+	int			nitems = list_length(kvars_deflist);
+	int			count;
+	ListCell   *lc;
+
+	vslot_desc_base += nitems;
+	foreach (lc, kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+
+		vs_desc->vs_type_code = kvdef->kv_type_code;
+		vs_desc->vs_typbyval  = kvdef->kv_typbyval;
+        vs_desc->vs_typalign  = kvdef->kv_typalign;
+        vs_desc->vs_typlen    = kvdef->kv_typlen;
+		vs_desc->vs_typmod    = exprTypmod((Node *)kvdef->kv_expr);
+
+		if (kvdef->kv_subfields != NIL)
+		{
+			count = __setup_session_kvars_defs_array(vslot_desc_root,
+													 vslot_desc_base,
+													 kvdef->kv_subfields);
+			vs_desc->idx_subfield = (vslot_desc_base - vslot_desc_root);
+			vs_desc->num_subfield = count;
+
+			vslot_desc_base += count;
+			nitems += count;
+		}
+		vs_desc++;
+	}
+	return nitems;
+}
+
+static void
+__build_session_kvars_defs(pgstromTaskState *pts,
+						   kern_session_info *session,
+						   StringInfo buf)
+{
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	kern_varslot_desc *kvars_defs;
+	uint32_t	nitems = list_length(pp_info->kvars_deflist);
+	uint32_t	nrooms = nitems;
+	uint32_t	sz;
+	ListCell   *lc;
+
+	foreach (lc, pp_info->kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+
+		nrooms += __count_session_kvars_defs_subfields(kvdef);
+	}
+	sz = sizeof(kern_varslot_desc) * nrooms;
+	
+	kvars_defs = alloca(sz);
+	memset(kvars_defs, 0, sz);
+	__setup_session_kvars_defs_array(kvars_defs,
+									 kvars_defs,
+									 pp_info->kvars_deflist);
+	session->kcxt_kvars_nrooms = nrooms;
+	session->kcxt_kvars_nslots = nitems;
+	session->kcxt_kvars_defs = __appendBinaryStringInfo(buf, kvars_defs, sz);
+}
+
 static uint32_t
 __build_session_xact_state(StringInfo buf)
 {
@@ -450,12 +535,8 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
 	ParamListInfo	param_info = econtext->ecxt_param_list_info;
 	uint32_t		nparams = (param_info ? param_info->numParams : 0);
-	uint32_t		kvars_nbytes;
-	uint32_t		kvars_nslots;
-	uint32_t		kvars_ndims;
 	uint32_t		session_sz;
 	kern_session_info *session;
-	ListCell	   *lc1, *lc2;
 	XpuCommand	   *xcmd;
 	StringInfoData	buf;
 	bytea		   *xpucode;
@@ -467,10 +548,20 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	__appendZeroStringInfo(&buf, session_sz);
 	if (param_info)
 		__build_session_param_info(pts, session, &buf);
-	if (pp_info->kexp_scan_kvars_load)
+	if (pp_info->kvars_deflist != NIL)
+		__build_session_kvars_defs(pts, session, &buf);
+	if (pp_info->kexp_load_vars_packed)
 	{
-		xpucode = pp_info->kexp_scan_kvars_load;
-		session->xpucode_scan_load_vars =
+		xpucode = pp_info->kexp_load_vars_packed;
+		session->xpucode_load_vars_packed =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+	}
+	if (pp_info->kexp_move_vars_packed)
+	{
+		xpucode = pp_info->kexp_move_vars_packed;
+		session->xpucode_move_vars_packed =
 			__appendBinaryStringInfo(&buf,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
@@ -479,14 +570,6 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	{
 		xpucode = pp_info->kexp_scan_quals;
 		session->xpucode_scan_quals =
-			__appendBinaryStringInfo(&buf,
-									 VARDATA(xpucode),
-									 VARSIZE(xpucode) - VARHDRSZ);
-	}
-	if (pp_info->kexp_join_kvars_load_packed)
-	{
-		xpucode = pp_info->kexp_join_kvars_load_packed;
-		session->xpucode_join_load_vars_packed =
 			__appendBinaryStringInfo(&buf,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
@@ -574,37 +657,14 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		setup_kern_data_store(kds_temp, groupby_tdesc_final, kds_length, format);
 		kds_temp->hash_nslots = hash_nslots;
 		session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, sz);
+		session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
+		session->groupby_ngroups_estimation = pts->css.ss.ps.plan->plan_rows;
 	}
 	/* other database session information */
-	kvars_nslots = list_length(pp_info->kvars_depth);
-	Assert(kvars_nslots == list_length(pp_info->kvars_resno) &&
-		   kvars_nslots == list_length(pp_info->kvars_types));
-	kvars_nbytes = (sizeof(kern_variable) * kvars_nslots +
-					sizeof(int)           * kvars_nslots);
-	kvars_ndims  = pts->num_rels + 1;
-	forboth (lc1, pp_info->kvars_depth,
-			 lc2, pp_info->kvars_types)
-	{
-		int		depth = lfirst_int(lc1);
-		Oid		type_oid = lfirst_oid(lc2);
-		devtype_info *dtype;
-
-		if (depth >= 0 && kvars_ndims <= depth)
-			kvars_ndims = depth + 1;
-
-		if (OidIsValid(type_oid) &&
-			(dtype = pgstrom_devtype_lookup(type_oid)) != NULL)
-		{
-			kvars_nbytes = TYPEALIGN(dtype->type_alignof, kvars_nbytes);
-			kvars_nbytes += dtype->type_sizeof;
-		}
-	}
-	kvars_nbytes = MAXALIGN(kvars_nbytes);
 	session->query_plan_id = ps_state->query_plan_id;
+	session->kcxt_kvecs_bufsz = pp_info->kvecs_bufsz;
+	session->kcxt_kvecs_ndims = pp_info->kvecs_ndims;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
-	session->kcxt_kvars_nslots = kvars_nslots;
-	session->kcxt_kvars_nbytes = kvars_nbytes;
-	session->kcxt_kvars_ndims  = kvars_ndims;
 	session->xpu_task_flags = pts->xpu_task_flags;
 	session->hostEpochTimestamp = SetEpochTimestamp();
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
@@ -685,20 +745,29 @@ static void
 pgstromTaskStateResetScan(pgstromTaskState *pts)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
+	TableScanDesc scan = pts->css.ss.ss_currentScanDesc;
 	int		num_devs = 0;
 
 	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 		num_devs = numGpuDevAttrs;
 	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 		num_devs = DpuStorageEntryCount();
-	
+	else
+		elog(ERROR, "Bug? no GPU/DPUs are in use");
+
 	pg_atomic_write_u32(&ps_state->parallel_task_control, 0);
-	pg_atomic_write_u32(&ps_state->__rjoin_exit_count, 0);
-	pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
-	pts->rjoin_devs_count = (pg_atomic_uint32 *)
-		((char *)ps_state + MAXALIGN(offsetof(pgstromSharedState,
-                                              inners[pts->num_rels])));
-	memset(pts->rjoin_devs_count, 0, sizeof(pg_atomic_uint32) * num_devs);
+	pg_atomic_write_u32(pts->rjoin_exit_count, 0);
+	for (int i=0; i < num_devs; i++)
+		pg_atomic_write_u32(pts->rjoin_devs_count + i, 0);
+	if (ps_state->ss_handle == DSM_HANDLE_INVALID)
+		table_rescan(scan, NULL);
+	else
+	{
+		Relation	rel = pts->css.ss.ss_currentRelation;
+		ParallelTableScanDesc pscan = (ParallelTableScanDesc)
+			((char *)ps_state + ps_state->parallel_scan_desc_offset);
+		table_parallelscan_reinitialize(rel, pscan);
+	}
 }
 
 /*
@@ -1043,7 +1112,7 @@ ExecFallbackRowDataStore(pgstromTaskState *pts,
 		ItemPointerCopy(&tupitem->htup.t_ctid, &tuple.t_self);
 		tuple.t_tableOid = kds->table_oid;
 		tuple.t_data = &tupitem->htup;
-		pts->cb_cpu_fallback(pts, kds, &tuple);
+		pts->cb_cpu_fallback(pts, &tuple);
 	}
 }
 
@@ -1071,7 +1140,7 @@ ExecFallbackBlockDataStore(pgstromTaskState *pts,
 				tuple.t_tableOid = kds->table_oid;
 				tuple.t_data = (HeapTupleHeader)PageGetItem((Page)pg_page, lpp);
 
-				pts->cb_cpu_fallback(pts, kds, &tuple);
+				pts->cb_cpu_fallback(pts, &tuple);
 			}
 		}
 	}
@@ -1092,7 +1161,7 @@ ExecFallbackColumnDataStore(pgstromTaskState *pts,
 		bool		should_free;
 
 		tuple = ExecFetchSlotHeapTuple(pts->base_slot, false, &should_free);
-		pts->cb_cpu_fallback(pts, kds, tuple);
+		pts->cb_cpu_fallback(pts, tuple);
 		if (should_free)
 			pfree(tuple);
 	}
@@ -1116,7 +1185,7 @@ ExecFallbackArrowDataStore(pgstromTaskState *pts,
 			break;
 
 		tuple = ExecFetchSlotHeapTuple(pts->base_slot, false, &should_free);
-		pts->cb_cpu_fallback(pts, kds, tuple);
+		pts->cb_cpu_fallback(pts, tuple);
 		if (should_free)
 			pfree(tuple);
 	}
@@ -1214,24 +1283,22 @@ __fixup_fallback_projection(Node *node, void *__data)
 {
 	pgstromPlanInfo *pp_info = __data;
 	ListCell   *lc;
-	int			slot_id = 0;
 
 	if (!node)
 		return NULL;
-	foreach (lc, pp_info->kvars_exprs)
+	foreach (lc, pp_info->kvars_deflist)
 	{
-		Node   *curr = lfirst(lc);
+		codegen_kvar_defitem *kvdef = lfirst(lc);
 
-		if (equal(node, curr))
+		if (equal(kvdef->kv_expr, node))
 		{
 			return (Node *)makeVar(INDEX_VAR,
-								   slot_id+1,
+								   kvdef->kv_slot_id + 1,
 								   exprType(node),
 								   exprTypmod(node),
 								   exprCollation(node),
 								   0);
 		}
-		slot_id++;
 	}
 
 	if (IsA(node, Var))
@@ -1245,6 +1312,9 @@ __fixup_fallback_projection(Node *node, void *__data)
 	return expression_tree_mutator(node, __fixup_fallback_projection, pp_info);
 }
 
+/*
+ * fixup_fallback_join_inner_keys
+ */
 static void
 __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 {
@@ -1290,24 +1360,20 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 		 * follows the kvars_slot layout.
 		 * Then, it works as a source of fallback_proj.
 		 */
-		int		nslots = list_length(pp_info->kvars_exprs);
-		int		slot_id = 0;
+		int		nslots = list_length(pp_info->kvars_deflist);
 		bool	meet_junk = false;
 
-		Assert(nslots == list_length(pp_info->kvars_depth) &&
-			   nslots == list_length(pp_info->kvars_resno));
 		fallback_tdesc = CreateTemplateTupleDesc(nslots);
-		foreach (lc, pp_info->kvars_exprs)
+		foreach (lc, pp_info->kvars_deflist)
 		{
-			Node	   *expr = lfirst(lc);
+			codegen_kvar_defitem *kvdef = lfirst(lc);
 
 			TupleDescInitEntry(fallback_tdesc,
-							   slot_id + 1,
-							   psprintf("KVAR_%u", slot_id),
-							   exprType(expr),
-							   exprTypmod(expr),
+							   kvdef->kv_slot_id + 1,
+							   psprintf("KVAR_%u", kvdef->kv_slot_id),
+							   exprType((Node *)kvdef->kv_expr),
+							   exprTypmod((Node *)kvdef->kv_expr),
 							   0);
-			slot_id++;
 		}
 		pts->fallback_slot = MakeSingleTupleTableSlot(fallback_tdesc,
 													  &TTSOpsVirtual);
@@ -1454,7 +1520,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 					 nodeToString(outer_key));
 			es = ExecInitExpr((Expr *)outer_key, &pts->css.ss.ps);
 			istate->hash_outer_keys = lappend(istate->hash_outer_keys, es);
-			istate->hash_outer_dtypes = lappend(istate->hash_outer_dtypes, dtype);
+			istate->hash_outer_funcs = lappend(istate->hash_outer_funcs,
+											   dtype->type_hashfunc);
 		}
 		/* inner hash-keys references the result of inner-slot */
 		foreach (cell, pp_inner->hash_inner_keys_fallback)
@@ -1469,7 +1536,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 					 nodeToString(inner_key));
 			es = ExecInitExpr((Expr *)inner_key, &pts->css.ss.ps);
 			istate->hash_inner_keys = lappend(istate->hash_inner_keys, es);
-			istate->hash_inner_dtypes = lappend(istate->hash_inner_dtypes, dtype);
+			istate->hash_inner_funcs = lappend(istate->hash_inner_funcs,
+											   dtype->type_hashfunc);
 		}
 
 		if (OidIsValid(pp_inner->gist_index_oid))
@@ -1579,7 +1647,7 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 			case XpuCommandTag__Success:
 				if (resp->u.results.ojmap_offset != 0)
 					ExecFallbackCpuJoinOuterJoinMap(pts, resp);
-				if (resp->u.results.final_this_device)
+				if (resp->u.results.final_plan_node)
 					ExecFallbackCpuJoinRightOuter(pts);
 				if (resp->u.results.chunks_nitems == 0)
 					goto next_chunks;
@@ -1629,14 +1697,83 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 /*
  * pgstromExecScanReCheck
  */
-static bool
-pgstromExecScanReCheck(pgstromTaskState *pts, TupleTableSlot *epq_slot)
+static TupleTableSlot *
+pgstromExecScanReCheck(pgstromTaskState *pts, EPQState *epqstate)
 {
-	/*
-	 * NOTE: Only immutable operators/functions are executable
-	 * on the GPU devices, so its decision will never changed.
-	 */
-	return true;
+	Index		scanrelid = ((Scan *)pts->css.ss.ps.plan)->scanrelid;
+
+	/* see ExecScanFetch */
+	if (scanrelid == 0)
+	{
+		elog(ERROR, "Bug? CustomScan(%s) has scanrelid==0",
+			 pts->css.methods->CustomName);
+	}
+	else if (epqstate->relsubs_done[scanrelid-1])
+	{
+		return NULL;
+	}
+	else if (epqstate->relsubs_slot[scanrelid-1])
+	{
+		TupleTableSlot *ss_slot = pts->css.ss.ss_ScanTupleSlot;
+		TupleTableSlot *epq_slot = epqstate->relsubs_slot[scanrelid-1];
+		size_t			fallback_index_saved = pts->fallback_index;
+		size_t			fallback_usage_saved = pts->fallback_usage;
+
+		Assert(epqstate->relsubs_rowmark[scanrelid - 1] == NULL);
+		/* Mark to remember that we shouldn't return it again */
+		epqstate->relsubs_done[scanrelid - 1] = true;
+
+		/* Return empty slot if we haven't got a test tuple */
+		if (TupIsNull(epq_slot))
+			ExecClearTuple(ss_slot);
+		else
+		{
+			HeapTuple	epq_tuple;
+			bool		should_free;
+#if 0
+			slot_getallattrs(epq_slot);
+			for (int j=0; j < epq_slot->tts_nvalid; j++)
+			{
+				elog(INFO, "epq_slot[%d] isnull=%s values=0x%lx", j,
+					 epq_slot->tts_isnull[j] ? "true" : "false",
+					 epq_slot->tts_values[j]);
+			}
+#endif
+			epq_tuple = ExecFetchSlotHeapTuple(epq_slot, false,
+											   &should_free);
+			if (pts->cb_cpu_fallback(pts, epq_tuple) &&
+				pts->fallback_tuples != NULL &&
+				pts->fallback_buffer != NULL &&
+				pts->fallback_nitems > fallback_index_saved)
+			{
+				HeapTupleData	htup;
+				kern_tupitem   *titem = (kern_tupitem *)
+					(pts->fallback_buffer +
+					 pts->fallback_tuples[fallback_index_saved]);
+
+				htup.t_len = titem->t_len;
+				htup.t_data = &titem->htup;
+				ss_slot = pts->css.ss.ss_ScanTupleSlot;
+				ExecForceStoreHeapTuple(&htup, ss_slot, false);
+			}
+			else
+			{
+				ExecClearTuple(ss_slot);
+			}
+			/* release fallback tuple & buffer */
+			if (should_free)
+				pfree(epq_tuple);
+			pts->fallback_index = fallback_index_saved;
+			pts->fallback_usage = fallback_usage_saved;
+		}
+		return ss_slot;
+	}
+	else if (epqstate->relsubs_rowmark[scanrelid-1])
+	{
+		elog(ERROR, "RowMark on CustomScan(%s) is not implemented yet",
+			 pts->css.methods->CustomName);
+	}
+	return pgstromExecScanAccess(pts);
 }
 
 /*
@@ -1694,6 +1831,11 @@ TupleTableSlot *
 pgstromExecTaskState(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *)node;
+	EState		   *estate = pts->css.ss.ps.state;
+	ExprState	   *host_quals = node->ss.ps.qual;
+	ExprContext	   *econtext = node->ss.ps.ps_ExprContext;
+	ProjectionInfo *proj_info = node->ss.ps.ps_ProjInfo;
+	TupleTableSlot *slot;
 
 	if (!pts->conn)
 	{
@@ -1701,9 +1843,42 @@ pgstromExecTaskState(CustomScanState *node)
 			return NULL;
 		Assert(pts->conn);
 	}
-	return ExecScan(&pts->css.ss,
-					(ExecScanAccessMtd) pgstromExecScanAccess,
-					(ExecScanRecheckMtd) pgstromExecScanReCheck);
+
+	/*
+	 * see, ExecScan() - it assumes CustomScan with scanrelid > 0 returns
+	 * tuples identical with table definition, thus these tuples are not
+	 * suitable for input of ExecProjection().
+	 */
+	if (estate->es_epq_active)
+	{
+		slot = pgstromExecScanReCheck(pts, estate->es_epq_active);
+		if (TupIsNull(slot))
+			return NULL;
+		ResetExprContext(econtext);
+		econtext->ecxt_scantuple = slot;
+		if (proj_info)
+			return ExecProject(proj_info);
+		return slot;
+	}
+
+	for (;;)
+	{
+		slot = pgstromExecScanAccess(pts);
+		if (TupIsNull(slot))
+			break;
+		/* check whether the current tuple satisfies the qual-clause */
+		ResetExprContext(econtext);
+		econtext->ecxt_scantuple = slot;
+
+		if (!host_quals || ExecQual(host_quals, econtext))
+		{
+			if (proj_info)
+				return ExecProject(proj_info);
+			return slot;
+		}
+		InstrCountFiltered1(pts, 1);
+	}
+	return NULL;
 }
 
 /*
@@ -1837,8 +2012,8 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 
 		/* control variables for parallel tasks */
 		pts->rjoin_devs_count  = (pg_atomic_uint32 *)dsm_addr;
-		memset(dsm_addr, 0, sizeof(pg_atomic_uint32 *) * num_devs);
-		dsm_addr += MAXALIGN(sizeof(pg_atomic_uint32 *) * num_devs);
+		memset(dsm_addr, 0, sizeof(pg_atomic_uint32) * num_devs);
+		dsm_addr += MAXALIGN(sizeof(pg_atomic_uint32) * num_devs);
 		pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
 
 		/* parallel scan descriptor */
@@ -1852,6 +2027,7 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 
 			table_parallelscan_initialize(relation, pdesc, snapshot);
 			scan = table_beginscan_parallel(relation, pdesc);
+			ps_state->parallel_scan_desc_offset = ((char *)pdesc - (char *)ps_state);
 		}
 	}
 	else
@@ -2053,7 +2229,6 @@ pgstromExplainTaskState(CustomScanState *node,
 	char			   *str;
 	double				ntuples;
 	uint64_t			stat_ntuples = 0;
-	devtype_info	   *dtype;
 
 	/* setup deparse context */
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
@@ -2220,7 +2395,7 @@ pgstromExplainTaskState(CustomScanState *node,
 		{
 			char   *idxname = get_rel_name(pp_inner->gist_index_oid);
 			char   *colname = get_attname(pp_inner->gist_index_oid,
-										  pp_inner->gist_index_col+1, false);
+										  pp_inner->gist_index_col, false);
 			resetStringInfo(&buf);
 
 			str = deparse_expression((Node *)pp_inner->gist_clause,
@@ -2277,35 +2452,17 @@ pgstromExplainTaskState(CustomScanState *node,
 	 */
 	if (es->verbose)
 	{
-		int		kvars_nslots = list_length(pp_info->kvars_depth);
-		size_t	kvars_nbytes = (sizeof(kern_variable) * kvars_nslots +
-								sizeof(int)           * kvars_nslots);
-		foreach (lc, pp_info->kvars_types)
-		{
-			Oid		type_oid = lfirst_oid(lc);
-
-			if (OidIsValid(type_oid) &&
-				(dtype = pgstrom_devtype_lookup(type_oid)) != NULL)
-			{
-				kvars_nbytes = TYPEALIGN(dtype->type_alignof, kvars_nbytes);
-				kvars_nbytes += dtype->type_sizeof;
-			}
-		}
-		resetStringInfo(&buf);
-		appendStringInfo(&buf, "nslots: %u, nbytes: %zu",
-						 kvars_nslots,
-						 kvars_nbytes);
-		ExplainPropertyText("KVars", buf.data, es);
-
+		pgstrom_explain_kvars_slot(&pts->css, es, dcontext);
+		pgstrom_explain_kvecs_buffer(&pts->css, es, dcontext);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
-								"Scan VarLoads OpCode",
-								pp_info->kexp_scan_kvars_load);
+								"LoadVars OpCode",
+								pp_info->kexp_load_vars_packed);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"MoveVars OpCode",
+								pp_info->kexp_move_vars_packed);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Scan Quals OpCode",
 								pp_info->kexp_scan_quals);
-		pgstrom_explain_xpucode(&pts->css, es, dcontext,
-								"Join VarLoads OpCode",
-								pp_info->kexp_join_kvars_load_packed);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Join Quals OpCode",
 								pp_info->kexp_join_quals_packed);
@@ -2315,10 +2472,8 @@ pgstromExplainTaskState(CustomScanState *node,
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"GiST-Index Join OpCode",
 								pp_info->kexp_gist_evals_packed);
-		snprintf(label, sizeof(label),
-				 "%s Projection OpCode", xpu_label);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
-								label,
+								"Projection OpCode",
 								pp_info->kexp_projection);
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Group-By KeyHash OpCode",
@@ -2332,6 +2487,9 @@ pgstromExplainTaskState(CustomScanState *node,
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Partial Aggregation OpCode",
 								pp_info->kexp_groupby_actions);
+		if (pp_info->groupby_prepfn_bufsz > 0)
+			ExplainPropertyInteger("Partial Function BufSz", NULL,
+								   pp_info->groupby_prepfn_bufsz, es);
 	}
 	pfree(buf.data);
 }

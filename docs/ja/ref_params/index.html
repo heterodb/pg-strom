@@ -1,47 +1,40 @@
 <!DOCTYPE html>
-<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
-<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<html class="writer-html5" lang="en" >
 <head>
-  <meta charset="utf-8">
-  <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  
-  <meta name="author" content="PG-Strom Development Team">
-  
-  <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>GUCパラメータ - PG-Strom Manual</title>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700" />
-
-  <link rel="stylesheet" href="../css/theme.css" />
-  <link rel="stylesheet" href="../css/theme_extra.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
-  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
-  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
-  <link href="../custom.css" rel="stylesheet" />
-  
-  <script>
-    // Current page data
-    var mkdocs_page_name = "GUC\u30d1\u30e9\u30e1\u30fc\u30bf";
-    var mkdocs_page_input_path = "ref_params.md";
-    var mkdocs_page_url = null;
-  </script>
-  
-  <script src="../js/jquery-2.1.1.min.js" defer></script>
-  <script src="../js/modernizr-2.8.3.min.js" defer></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
-  <script>hljs.initHighlightingOnLoad();</script> 
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>GUCパラメータ - PG-Strom Manual</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+        <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+        <link href="../custom.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "GUC\u30d1\u30e9\u30e1\u30fc\u30bf";
+        var mkdocs_page_input_path = "ref_params.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
 </head>
 
 <body class="wy-body-for-nav" role="document">
 
   <div class="wy-grid-for-nav">
-
-    
     <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
     <div class="wy-side-scroll">
       <div class="wy-side-nav-search">
-        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
-        <div role="search">
+          <a href=".." class="icon icon-home"> PG-Strom Manual
+        </a><div role="search">
   <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" />
   </form>
@@ -49,50 +42,50 @@
 </div>
       </div>
 
-      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
-                    </li>
-                </ul>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">利用ガイド</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">先進機能</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">リファレンス</span></p>
-                <ul class="current">
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
-                    </li>
-                    <li class="toctree-l1 current"><a class="reference internal current" href="./">GUCパラメータ</a>
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">利用ガイド</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">先進機能</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">リファレンス</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="./">GUCパラメータ</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#_1">機能単位の有効化/無効化</a>
     </li>
@@ -106,64 +99,47 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpu">GPUキャッシュの設定</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#hyperloglog">HyperLogLogの設定</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#gpujit">GPUコードの生成、およびJITコンパイルの設定</a>
-    </li>
     <li class="toctree-l2"><a class="reference internal" href="#gpu_1">GPUデバイスに関連する設定</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#pg-strom">PG-Strom共有メモリに関連する設定</a>
-    </li>
     </ul>
-                    </li>
-                </ul>
-                <p class="caption"><span class="caption-text">リリースノート</span></p>
-                <ul>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
-                    </li>
-                    <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
-                    </li>
-                </ul>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">リリースノート</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                  </li>
+              </ul>
       </div>
     </div>
     </nav>
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
-
-      
-      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
-        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-        <a href="..">PG-Strom Manual</a>
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">PG-Strom Manual</a>
+        
       </nav>
-
-      
       <div class="wy-nav-content">
-        <div class="rst-content">
-          <div role="navigation" aria-label="breadcrumbs navigation">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
-    <li><a href="..">Docs</a> &raquo;</li>
-    
-      
-        
-          <li>リファレンス &raquo;</li>
-        
-      
-    
-    <li>GUCパラメータ</li>
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">リファレンス</li>
+      <li class="breadcrumb-item active">GUCパラメータ</li>
     <li class="wy-breadcrumbs-aside">
-      
     </li>
   </ul>
-  
   <hr/>
 </div>
-
-          <div role="main">
-            <div class="section">
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
               
                 <h1 id="guc">GUCパラメータ</h1>
 <p>本節ではPG-Stromの提供する設定パラメータについて説明します。</p>
@@ -175,70 +151,68 @@
 <dd>GpuScanによるスキャンを有効化/無効化する。</dd>
 <dt><code>pg_strom.enable_gpuhashjoin</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
 <dd>GpuHashJoinによるJOINを有効化/無効化する。</dd>
-<dt><code>pg_strom.enable_gpunestloop</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
-<dd>GpuNestLoopによるJOINを有効化/無効化する。</dd>
+<dt><code>pg_strom.enable_gpugistindex</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>GpuGiSTIndexによるJOINを有効化/無効化する。</dd>
+<dt><code>pg_strom.enable_gpujoin</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>GpuJoinによるJOINを一括で有効化/無効化する。（GpuHashJoinとGpuGiSTIndexを含む）</dd>
 <dt><code>pg_strom.enable_gpupreagg</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
 <dd>GpuPreAggによる集約処理を有効化/無効化する。</dd>
-<dt><code>pg_strom.enable_brin</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
-<dd>BRINインデックスを使ったテーブルスキャンを有効化/無効化する。</dd>
-<dt><code>pg_strom.enable_gpucache</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
-<dd>PostgreSQLテーブルの代わりにGPUキャッシュを参照するかどうかを制御する。</dd>
-<dd>なお、この設定値を<code>off</code>にしてもトリガ関数は引き続きREDOログバッファを更新し続けます。</dd>
-<dt><code>pg_strom.enable_partitionwise_gpujoin</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
-<dd>GpuJoinを各パーティションの要素へプッシュダウンするかどうかを制御する。</dd>
-<dt><code>pg_strom.enable_partitionwise_gpupreagg</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
-<dd>GpuPreAggを各パーティションの要素へプッシュダウンするかどうかを制御する。</dd>
-<dt><code>pg_strom.pullup_outer_scan</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
-<dd>GpuPreAgg/GpuJoin直下の実行計画が全件スキャンである場合に、上位ノードでスキャン処理も行い、CPU/RAM⇔GPU間のデータ転送を省略するかどうかを制御する。</dd>
-<dt><code>pg_strom.pullup_outer_join</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
-<dd>GpuPreAgg直下がGpuJoinである場合に、JOIN処理を上位の実行計画に引き上げ、CPU⇔GPU間のデータ転送を省略するかどうかを制御する。</dd>
 <dt><code>pg_strom.enable_numeric_aggfuncs</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
 <dd><code>numeric</code>データ型を引数に取る集約演算をGPUで処理するかどうかを制御する。</dd>
 <dd>GPUでの集約演算において<code>numeric</code>データ型は倍精度浮動小数点数にマッピングされるため、計算誤差にセンシティブな用途の場合は、この設定値を <code>off</code> にしてCPUで集約演算を実行し、計算誤差の発生を抑えることができます。</dd>
-<dt><code>pg_strom.cpu_fallback</code> [型: <code>bool</code> / 初期値: <code>off]</code></dt>
+<dt><code>pg_strom.enable_brin</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
+<dd>BRINインデックスを使ったテーブルスキャンを有効化/無効化する。</dd>
+<dt><code>pg_strom.cpu_fallback</code> [型: <code>enum</code> / 初期値: <code>notice</code>]</dt>
 <dd>GPUプログラムが"CPU再実行"エラーを返したときに、実際にCPUでの再実行を試みるかどうかを制御する。</dd>
+<dd><code>notice</code> ... メッセージを出力した上でCPUでの再実行を行う</dd>
+<dd><code>on</code>, <code>true</code> ... メッセージを出力せずCPUでの再実行を行う</dd>
+<dd><code>off</code>, <code>false</code> ... エラーを発生させCPUでの再実行を行わない</dd>
 <dt><code>pg_strom.regression_test_mode</code> [型: <code>bool</code> / 初期値: <code>off]</code></dt>
 <dd>GPUモデル名など、実行環境に依存して表示が変わる可能性のある<code>EXPLAIN</code>コマンドの出力を抑制します。これはリグレッションテストにおける偽陽性を防ぐための設定で、通常は利用者が操作する必要はありません。</dd>
 </dl>
 <h2 id="_2">オプティマイザに関する設定</h2>
 <dl>
-<dt><code>pg_strom.chunk_size</code> [型: <code>int</code> / 初期値: <code>65534kB</code>]</dt>
-<dd>PG-Stromが1回のGPUカーネル呼び出しで処理するデータブロックの大きさです。かつては変更可能でしたが、ほとんど意味がないため、現在では約64MBに固定されています。</dd>
-<dt><code>pg_strom.gpu_setup_cost</code> [型: <code>real</code> / 初期値: <code>4000</code>]</dt>
+<dt><code>pg_strom.gpu_setup_cost</code> [型: <code>real</code> / 初期値: <code>100 * DEFAULT_SEQ_PAGE_COST</code>]</dt>
 <dd>GPUデバイスの初期化に要するコストとして使用する値。</dd>
-<dt><code>pg_strom.gpu_dma_cost</code> [型: <code>real</code> / 初期値: <code>10</code>]</dt>
-<dd>チャンク(<code>pg_strom.chunk_size</code> = 約64MB)あたりのDMA転送に要するコストとして使用する値。</dd>
-<dt><code>pg_strom.gpu_operator_cost</code> [型: <code>real</code> / 初期値: <code>0.00015</code>]</dt>
+<dt><code>pg_strom.gpu_tuple_cost</code> [型: <code>real</code> / 初期値: <code>DEFAULT_CPU_TUPLE_COST</code>]</dt>
+<dd>GPUへ送出する／受け取るタプル一個あたりのコストとして使用する値。</dd>
+<dt><code>pg_strom.gpu_operator_cost</code> [型: <code>real</code> / 初期値: <code>DEFAULT_CPU_OPERATOR_COST / 16</code>]</dt>
 <dd>GPUの演算式あたりの処理コストとして使用する値。<code>cpu_operator_cost</code>よりも大きな値を設定してしまうと、いかなるサイズのテーブルに対してもPG-Stromが選択されることはなくなる。</dd>
 </dl>
+<!--
+
+`pg_strom.enable_partitionwise_gpujoin` [型: `bool` / 初期値: `on]`
+:   GpuJoinを各パーティションの要素へプッシュダウンするかどうかを制御する。
+
+
+
+`pg_strom.enable_partitionwise_gpupreagg` [型: `bool` / 初期値: `on]`
+:   GpuPreAggを各パーティションの要素へプッシュダウンするかどうかを制御する。
+
+
+-->
+
 <h2 id="_3">エグゼキュータに関する設定</h2>
 <dl>
-<dt><code>pg_strom.max_async_tasks</code> [型: <code>int</code> / 初期値: <code>5</code>]</dt>
-<dd>PG-StromがGPU実行キューに投入する事ができる非同期タスクのプロセス毎の最大値。</dd>
-<dd>CPUパラレル処理と併用する場合、この上限値は個々のバックグラウンドワーカー毎に適用されます。したがって、バッチジョブ全体では<code>pg_strom.max_async_tasks</code>よりも多くの非同期タスクが実行されることになります。</dd>
-<dt><code>pg_strom.reuse_cuda_context</code> [型: <code>bool</code> / 初期値: <code>off</code>]</dt>
-<dd>クエリの実行に伴って作成したCUDAコンテキストを、次回のクエリ実行時に再利用します。</dd>
-<dd>通常、CUDAコンテキストの作成には100～200ms程度を要するため、応答速度の改善が期待できる一方、一部のGPUデバイスメモリを占有し続けるというデメリットもあります。そのため、ベンチマーク等の用途を除いては使用すべきではありません。</dd>
-<dd>また、CPUパラレルを利用する場合、ワーカープロセスでは必ずCUDAコンテキストを作成する事になりますので、効果は期待できません。</dd>
+<dt><code>pg_strom.max_async_tasks</code> [型: <code>int</code> / 初期値: <code>12</code>]</dt>
+<dd>PG-StromがGPU実行キューに投入する事ができる非同期タスクのGPUデバイス毎の最大値で、GPU Serviceのワーカースレッド数でもあります。</dd>
 </dl>
 <h2 id="gpusql">GPUダイレクトSQLの設定</h2>
 <dl>
 <dt><code>pg_strom.gpudirect_driver</code> [型: <code>text</code>]</dt>
-<dd>GPUダイレクトSQLのドライバソフトウェア名を示す読み取り専用パラメータです。</dd>
-<dd><code>nvidia cufile</code>または<code>heterodb nvme-strom</code>のどちらかです。</dd>
+<dd>GPUダイレクトSQLのドライバソフトウェア名を示すパラメータです。</dd>
+<dd><code>cufile</code>、<code>nvme-strom</code>、もしくは<code>vfs</code>のどれかです。</dd>
 <dt><code>pg_strom.gpudirect_enabled</code> [型: <code>bool</code> / 初期値: <code>on</code>]</dt>
 <dd>GPUダイレクトSQL機能を有効化/無効化する。</dd>
+<dt><code>pg_strom.gpu_direct_seq_page_cost</code> [型: <code>real</code> / 初期値: <code>DEFAULT_SEQ_PAGE_COST / 4</code>]</dt>
+<dd>オプティマイザが実行プランのコストを計算する際に、GPU-Direct SQLを用いてテーブルをスキャンする場合のコストとして<code>seq_page_cost</code>の代わりに使用される値。</dd>
 <dt><code>pg_strom.gpudirect_threshold</code> [型: <code>int</code> / 初期値: 自動]</dt>
 <dd>GPUダイレクトSQL機能を発動させるテーブルサイズの閾値を設定する。</dd>
 <dd>初期値は自動設定で、システムの物理メモリと<code>shared_buffers</code>設定値から計算した閾値を設定します。</dd>
-<dt><code>pg_strom.cufile_io_unitsz</code> [型: <code>int</code> / 初期値: <code>16MB</code>]</dt>
-<dd>cuFile APIを使用してデータを読み出す際のI/Oサイズを指定する。通常は変更の必要はありません。</dd>
-<dd><code>nvidia cufile</code>ドライバを使用する場合のみ有効です。</dd>
-<dt><code>pg_strom.nvme_distance_map</code> [型: <code>text</code> / 初期値: <code>null</code>]</dt>
-<dd>NVMEデバイスやNFS区画など、ストレージ区画ごとに最も近傍のGPUを手動で設定します。</dd>
-<dd>書式は <code>{(&lt;gpuX&gt;|&lt;nvmeX&gt;|&lt;sfdvX&gt;|&lt;/path/to/nfsmount&gt;),...}[,{...}]</code>で、GPUとその近傍に位置するNVMEデバイスなどストレージの識別子を <code>{ ... }</code> で囲まれたグループに記述します。</dd>
-<dd>（例: <code>{gpu0,nvme1,nvme2,/opt/nfsmount},{gpu1,nvme0}</code></dd>
-<dd></dd>
+<dt><code>pg_strom.manual_optimal_gpus</code> [型: <code>text</code> / 初期値: なし]</dt>
+<dd>NVMEデバイスやNFS区画など、ストレージ区画ごとに最も近傍と判定されるGPUを手動で設定します。</dd>
+<dd>書式は <code>{&lt;nvmeX&gt;|/path/to/tablespace}=gpuX[:gpuX...]</code>で、NVMEデバイスまたはテーブルスペースのパスと、その近傍であるGPU（複数可）を記述します。カンマで区切って複数の設定を記述する事も可能です。</dd>
+<dd>例: <code>pg_strom.manual_optimal_gpus = 'nvme1=gpu0,nvme2=gpu1,/mnt/nfsroot=gpu0'</code></dd>
 <dd>
 <ul>
 <li><code>&lt;gpuX&gt;</code>はデバイス番号Xを持つGPUです。</li>
@@ -251,100 +225,140 @@
 </dd>
 <dd>
 <ul>
-<li><code>&lt;sfdvX&gt;</code>はScaleFlux社製CSDドライブ用の専用デバイスを意味します。</li>
+<li><code>/path/to/tablespace</code>は、テーブルスペースに紐づいたディレクトリのフルパスです。</li>
 </ul>
 </dd>
 <dd>
-<ul>
-<li><code>/path/to/nfsmount</code>はNFS-over-RDMAを用いてマウントしたNFS区画のマウントポイントです。</li>
-</ul>
+<p>ローカルのNVME-SSDに対しては多くの場合自動設定で十分ですが、NVME-oFデバイスやNFS-over-RDMAを使用する場合、機械的に近傍のGPUを特定する事ができないため、手動で近傍のGPUを指定する必要があります。</p>
 </dd>
-<dd></dd>
-<dd>ローカルのNVME-SSDに対しては多くの場合自動設定で十分ですが、NVME-oFデバイスやNFS-over-RDMAを使用する場合、機械的に近傍のGPUを特定する事ができないため、手動で近傍のGPUを指定する必要があります。</dd>
 </dl>
 <h2 id="arrow_fdw">Arrow_Fdw関連の設定</h2>
 <dl>
 <dt><code>arrow_fdw.enabled</code> [型: <code>bool</code> / 初期値: <code>on</code>]</dt>
 <dd>推定コスト値を調整し、Arrow_Fdwの有効/無効を切り替えます。ただし、GpuScanが利用できない場合には、Arrow_FdwによるForeign ScanだけがArrowファイルをスキャンできるという事に留意してください。</dd>
-<dt><code>arrow_fdw.metadata_cache_size</code> [型: <code>int</code> / 初期値: <code>128MB</code>]</dt>
+<dt><code>arrow_fdw.stats_hint_enabled</code> [型: <code>bool</code> / 初期値: <code>on</code>]</dt>
+<dd>Arrowファイルがmin/max統計情報を持っており、それを用いて不必要なrecord-batchを読み飛ばすかどうかを制御します。</dd>
+<dt><code>arrow_fdw.metadata_cache_size</code> [型: <code>int</code> / 初期値: <code>512MB</code>]</dt>
 <dd>Arrowファイルのメタ情報をキャッシュする共有メモリ領域の大きさを指定します。共有メモリの消費量がこのサイズを越えると、古いメタ情報から順に解放されます。</dd>
-<dt><code>arrow_fdw.record_batch_size</code> [型: <code>int</code> / 初期値: <code>256MB</code>]</dt>
-<dd>Arrow_Fdw外部テーブルへ書き込む際の RecordBatch の大きさの閾値です。<code>INSERT</code>コマンドが完了していなくとも、Arrow_Fdwは総書き込みサイズがこの値を越えるとバッファの内容をApache Arrowファイルへと書き出します。</dd>
 </dl>
 <h2 id="gpu">GPUキャッシュの設定</h2>
 <dl>
 <dt><code>pg_strom.enable_gpucache</code> [型: <code>bool</code> / 初期値: <code>on</code>]</dt>
 <dd>検索/分析系のクエリでGPUキャッシュを使用するかどうかを制御します。</dd>
-<dd>なお、本設定はトリガによるREDOログバッファへの追記には影響しません。</dd>
+<dd>なお、この設定値を<code>off</code>にしてもトリガ関数は引き続きREDOログバッファを更新し続けます。</dd>
 <dt><code>pg_strom.gpucache_auto_preload</code> [型: <code>text</code> / 初期値: <code>null</code>]</dt>
 <dd>PostgreSQLの起動直後にGPUキャッシュをロードすべきテーブル名を指定します。</dd>
 <dd>書式は <code>DATABASE_NAME.SCHEMA_NAME.TABLE_NAME</code> で、複数個のテーブルを指定する場合はこれをカンマ区切りで並べます。</dd>
 <dd>GPUキャッシュの初回ロードは相応に時間のかかる処理ですが、事前に初回ロードを済ませておく事で、検索/分析クエリの初回実行時に応答速度が遅延するのを避けることができます。</dd>
 <dd>なお、本パラメータを '*' に設定すると、GPUキャッシュを持つ全てのテーブルの内容を順にGPUへロードしようと試みます。</dd>
 </dl>
-<h2 id="hyperloglog">HyperLogLogの設定</h2>
-<dl>
-<dt><code>pg_strom.hll_registers_bits</code> [型: <code>int</code> / 初期値: <code>9</code>]</dt>
-<dd>HyperLogLogで使用する HLL Sketch の幅を指定します。</dd>
-<dd>実行時に<code>2^pg_strom.hll_registers_bits</code>個のレジスタを割当て、ハッシュ値の下位<code>pg_strom.hll_registers_bits</code>ビットをレジスタのセレクタとして使用します。設定可能な値は4～15の範囲内です。</dd>
-<dd>PG-StromのHyperLogLog機能について、詳しくは<a href="../hll_count/">HyperLogLog</a>を参照してください。</dd>
-</dl>
-<h2 id="gpujit">GPUコードの生成、およびJITコンパイルの設定</h2>
-<dl>
-<dt><code>pg_strom.program_cache_size</code> [型: <code>int</code> / 初期値: <code>256MB</code>]</dt>
-<dd>ビルド済みのGPUプログラムをキャッシュしておくための共有メモリ領域のサイズです。パラメータの更新には再起動が必要です。</dd>
-<dt><code>pg_strom.num_program_builders</code> [型: <code>int</code> / 初期値: <code>2</code>]</dt>
-<dd>GPUプログラムを非同期ビルドするためのバックグラウンドプロセスの数を指定します。パラメータの更新には再起動が必要です。</dd>
-<dt><code>pg_strom.debug_jit_compile_options</code> [型: <code>bool</code> / 初期値: <code>off</code>]</dt>
-<dd>GPUプログラムのJITコンパイル時に、デバッグオプション（行番号とシンボル情報）を含めるかどうかを指定します。GPUコアダンプ等を用いた複雑なバグの解析に有用ですが、性能のデグレードを引き起こすため、通常は使用すべきでありません。</dd>
-<dt><code>pg_strom.extra_kernel_stack_size</code> [型: <code>int</code> / 初期値: <code>0</code>]</dt>
-<dd>GPUカーネルの実行時にスレッド毎に追加的に割り当てるスタックの大きさをバイト単位で指定します。通常は初期値を変更する必要はありません。</dd>
-</dl>
+<!--
+##HyperLogLogの設定
+
+`pg_strom.hll_registers_bits` [型: `int` / 初期値: `9`]
+:    HyperLogLogで使用する HLL Sketch の幅を指定します。
+:    実行時に`2^pg_strom.hll_registers_bits`個のレジスタを割当て、ハッシュ値の下位`pg_strom.hll_registers_bits`ビットをレジスタのセレクタとして使用します。設定可能な値は4～15の範囲内です。
+:    PG-StromのHyperLogLog機能について、詳しくは[HyperLogLog](hll_count.md)を参照してください。
+
+
+-->
+
 <h2 id="gpu_1">GPUデバイスに関連する設定</h2>
 <dl>
+<dt><code>pg_strom.gpu_mempool_segment_sz</code> [型: <code>int</code> / 初期値: <code>1GB</code>]</dt>
+<dd>GPU Serviceがメモリプール用にGPUメモリを確保する際のセグメントサイズです。</dd>
+<dd>GPUデバイスメモリの割当ては比較的ヘビーな処理であるため、メモリプールを使用してメモリを使い回す事が推奨されています。</dd>
+<dt><code>pg_strom.gpu_mempool_max_ratio</code> [型: <code>real</code> / 初期値: <code>50%</code>]</dt>
+<dd>GPUデバイスメモリのメモリプール用に使用する事のできるデバイスメモリの割合を指定します。</dd>
+<dd>メモリプールによる過剰なGPUデバイスメモリの消費を抑制し、ワーキングメモリを十分に確保する事が目的です。</dd>
+<dt><code>pg_strom.gpu_mempool_min_ratio</code> [型: <code>real</code> / 初期値: <code>5%</code>]</dt>
+<dd>メモリプールに確保したGPUデバイスメモリのうち、利用終了後も解放せずに確保したままにしておくデバイスメモリの割合を指定します。</dd>
+<dd>最小限度のメモリプールを保持しておくことにより、次のクエリを速やかに実行する事ができます。</dd>
+<dt><code>pg_strom.gpu_mempool_release_delay</code> [型: <code>int</code> / 初期値: <code>5000</code>]</dt>
+<dd>GPU Serviceは、あるメモリプール上のセグメントが空になっても、これを直ちに開放しません。そのセグメントが最後に利用されてから、本パラメータで指定された時間（ミリ秒単位）を経過すると、これを開放してシステムに返却します。</dd>
+<dd>一定の遅延を挟む事で、GPUデバイスメモリの割当/解放の頻度を減らす事ができます。</dd>
+<dt><code>pg_strom.gpuserv_debug_output</code> [型: <code>bool</code> / 初期値: <code>false</code>]</dt>
+<dd>GPU Serviceのデバッグメッセージ出力を有効化/無効化します。このメッセージはデバッグにおいて有効である場合がありますが、通常は初期値のまま変更しないで下さい。</dd>
 <dt><code>pg_strom.cuda_visible_devices</code> [型: <code>text</code> / 初期値: <code>null</code>]</dt>
 <dd>PostgreSQLの起動時に特定のGPUデバイスだけを認識させてい場合は、カンマ区切りでGPUデバイス番号を記述します。</dd>
 <dd>これは環境変数<code>CUDA_VISIBLE_DEVICES</code>を設定するのと同等です。</dd>
-<dt><code>pg_strom.gpu_memory_segment_size</code> [型: <code>int</code> / 初期値: <code>512MB</code>]</dt>
-<dd>PG-StromがGPUメモリをアロケーションする際に、1回のCUDA API呼び出しで獲得するGPUデバイスメモリのサイズを指定します。</dd>
-<dd>この値が大きいとAPI呼び出しのオーバーヘッドは減らせますが、デバイスメモリのロスは大きくなります。</dd>
 </dl>
-<h2 id="pg-strom">PG-Strom共有メモリに関連する設定</h2>
-<dl>
-<dt><code>shmbuf.segment_size</code> [型: <code>int</code> / 初期値: <code>256MB</code>]</dt>
-<dd>ポータブルな仮想アドレスを持つ共有メモリセグメントの単位長を指定します。</dd>
-<dd>通常は初期値を変更する必要はありませんが、GPUキャッシュのREDOログバッファに<code>256MB</code>以上の大きさを指定する場合には、本パラメータも併せて拡大する必要があります。</dd>
-<dd>本パラメータの設定値は2のべき乗だけが許されます。</dd>
-<dt><code>shmbuf.num_logical_segments</code> [型: <code>int</code> / 初期値: 自動]</dt>
-<dd>ポータブルな仮想アドレスを持つ共有メモリのセグメント数を指定します。</dd>
-<dd>PG-Stromは起動時に(<code>shmbuf.segment_size</code> x <code>shmbuf.num_logical_segments</code>)バイトの領域をPROT_NONE属性でmmap(2)し、その後、シグナルハンドラを利用してオンデマンドの割当てを行います。</dd>
-<dd>デフォルトの論理セグメントサイズは自動設定で、システム搭載物理メモリの2倍の大きさです。</dd>
-</dl>
+<!--
+## DPU関連設定
+
+
+`pg_strom.dpu_endpoint_list` [型: `text` / 初期値: なし]
+:   
+
+
+pg_strom.dpu_endpoint_default_port [型: `int` / 初期値: 6543]
+
+
+`pg_strom.enable_dpuscan` [型: `bool` / 初期値: `on`]
+:   DpuScanによるスキャンを有効化/無効化する。
+
+
+`pg_strom.enable_dpujoin` [型: `bool` / 初期値: `on`]
+:   DpuJoinによるJOINを一括で有効化/無効化する。（DpuHashJoinとDpuGiSTIndexを含む）
+
+
+`pg_strom.enable_dpuhashjoin` [型: `bool` / 初期値: `on`]
+:   DpuHashJoinによるJOINを有効化/無効化する。
+
+
+`pg_strom.enable_dpugistindex` [型: `bool` / 初期値: `on`]
+:   DpuGiSTIndexによるJOINを有効化/無効化する。
+
+
+`pg_strom.enable_dpupreagg` [型: `bool` / 初期値: `on`]
+:   DpuPreAggによる集約処理を有効化/無効化する。
+
+
+`pg_strom.dpu_setup_cost` [型: `real` / 初期値: `100 * DEFAULT_SEQ_PAGE_COST`]
+:   DPUデバイスの初期化に要するコストとして使用する値。
+
+
+`pg_strom.dpu_operator_cost` [型: `real` / 初期値: `1.2 * DEFAULT_CPU_OPERATOR_COST`]
+:   DPUの演算式あたりの処理コストとして使用する値。
+
+
+`pg_strom.dpu_seq_page_cost` [型: `real` / 初期値: `DEFAULT_SEQ_PAGE_COST / 4`]
+:   DPUデバイスが自身に紐づいたストレージからブロックを読み出すためのコスト
+
+
+`pg_strom.dpu_tuple_cost` [型: `real` / 初期値: `DEFAULT_CPU_TUPLE_COST`]
+:   DPUへ送出する／受け取るタプル一個あたりのコストとして使用する値。
+
+
+`pg_strom.dpu_handle_cached_pages` [型: `bool` / 初期値: `off`]
+:   PostgreSQL側の共有バッファに載っており、更新がストレージ側にまだ反映されていないブロックを、わざわざDPU側に送出してDPU側で処理させるかどうかを制御します。
+:   通常、DPUの処理パフォーマンスはCPUよりも劣る上、さらにデータ転送のロスを含めるとCPUで処理する方が賢明です。
+
+
+`pg_strom.enable_partitionwise_dpupreagg` [型: `bool` / 初期値: `on`]
+
+
+`pg_strom.enable_partitionwise_dpupreagg` [型: `bool` / 初期値: `off`]
+
+
+-->
               
             </div>
-          </div>
-          <footer>
-  
-    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
-      
-        <a href="../release_v3.0/" class="btn btn-neutral float-right" title="PG-Strom v3.0">Next <span class="icon icon-circle-arrow-right"></span></a>
-      
-      
-        <a href="../ref_sqlfuncs/" class="btn btn-neutral" title="SQLオブジェクト"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-      
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../ref_sqlfuncs/" class="btn btn-neutral float-left" title="SQLオブジェクト"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../release_v5.0/" class="btn btn-neutral float-right" title="PG-Strom v5.0">Next <span class="icon icon-circle-arrow-right"></span></a>
     </div>
-  
 
   <hr/>
 
   <div role="contentinfo">
     <!-- Copyright etc -->
-    
   </div>
 
-  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
 </footer>
-      
+          
         </div>
       </div>
 
@@ -352,25 +366,26 @@
 
   </div>
 
-  <div class="rst-versions" role="note" aria-label="versions">
+  <div class="rst-versions" role="note" aria-label="Versions">
   <span class="rst-current-version" data-toggle="rst-current-version">
     
     
       <span><a href="../ref_sqlfuncs/" style="color: #fcfcfc">&laquo; Previous</a></span>
     
     
-      <span><a href="../release_v3.0/" style="color: #fcfcfc">Next &raquo;</a></span>
+      <span><a href="../release_v5.0/" style="color: #fcfcfc">Next &raquo;</a></span>
     
   </span>
 </div>
-    <script>var base_url = '..';</script>
-    <script src="../js/theme_extra.js" defer></script>
-    <script src="../js/theme.js" defer></script>
-      <script src="../search/main.js" defer></script>
-    <script defer>
-        window.onload = function () {
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
             SphinxRtdTheme.Navigation.enable(true);
-        };
+        });
     </script>
 
 </body>

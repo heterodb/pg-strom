@@ -12,7 +12,6 @@
 #ifndef XPU_BASETYPE_H
 #define XPU_BASETYPE_H
 
-
 #ifndef PG_BOOLOID
 #define PG_BOOLOID		16
 #endif	/* PG_BOOLOID */

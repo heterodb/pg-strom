@@ -429,7 +429,8 @@ match_clause_to_gist_index(PlannerInfo *root,
 						   AttrNumber indexcol,
 						   List *restrict_clauses,
 						   uint32_t xpu_task_flags,
-						   List *input_rels_tlist,
+						   Index base_scan_relid,
+						   List *inner_target_list,
 						   Expr **p_clause,
 						   Oid *p_func_oid,
 						   Selectivity *p_selectivity)
@@ -473,7 +474,9 @@ match_clause_to_gist_index(PlannerInfo *root,
 										 &__func_oid) &&
 			pgstrom_xpu_expression(__clause,
 								   xpu_task_flags,
-								   input_rels_tlist, NULL))
+								   base_scan_relid,
+								   inner_target_list,
+								   NULL))
 		{
 			__selectivity = clauselist_selectivity(root,
 												   iclause->indexquals,
@@ -508,7 +511,8 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 						Path *inner_path,
 						List *restrict_clauses,
 						uint32_t xpu_task_flags,
-						List *input_rels_tlist,
+						Index base_scan_relid,
+						List *inner_target_list,
 						pgstromPlanInnerInfo *pp_inner)
 {
 
@@ -556,14 +560,15 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 										   indexcol,
 										   restrict_clauses,
 										   xpu_task_flags,
-										   input_rels_tlist,
+										   base_scan_relid,
+										   inner_target_list,
 										   &curr_clause,
 										   &curr_func_oid,
 										   &curr_selectivity) &&
 				(!gist_index || gist_selectivity > curr_selectivity))
 			{
 				gist_index           = curr_index;
-				gist_index_col       = indexcol;
+				gist_index_col       = indexcol + 1;
 				gist_func_oid        = curr_func_oid;
 				gist_clause          = curr_clause;
 				gist_selectivity     = curr_selectivity;

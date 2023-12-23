@@ -9,10 +9,10 @@
 @en:##What is PG-Strom?
 
 @ja{
-PG-StromはPostgreSQL v11および以降のバージョン向けに設計された拡張モジュールで、チップあたり数千個のコアを持つGPU(Graphic Processor Unit)デバイスを利用する事で、大規模なデータセットに対する集計・解析処理やバッチ処理向けのSQLワークロードを高速化するために設計されています。
+PG-StromはPostgreSQL v15および以降のバージョン向けに設計された拡張モジュールで、チップあたり数千個のコアを持つGPU(Graphic Processor Unit)デバイスを利用する事で、大規模なデータセットに対する集計・解析処理やバッチ処理向けのSQLワークロードを高速化するために設計されています。
 }
 @en{
-PG-Strom is an extension module of PostgreSQL designed for version 11 or later. By utilization of GPU (Graphic Processor Unit) device which has thousands cores per chip, it enables to accelerate SQL workloads for data analytics or batch processing to big data set.
+PG-Strom is an extension module of PostgreSQL designed for version 15 or later. By utilization of GPU (Graphic Processor Unit) device which has thousands cores per chip, it enables to accelerate SQL workloads for data analytics or batch processing to big data set.
 }
 @ja{
 PG-Stromの中核となる機能は、SQL命令から自動的にGPUプログラムを生成するコードジェネレータと、SQLワークロードをGPU上で非同期かつ並列に実行する実行エンジンです。現バージョンではSCAN（WHERE句の評価）、JOINおよびGROUP BYのワークロードに対応しており、GPU処理にアドバンテージがある場合にはPostgreSQL標準の実装を置き換える事で、ユーザやアプリケーションからは透過的に動作します。
@@ -35,10 +35,18 @@ One of the characteristic feature of PG-Strom is GPUDirect SQL that bypasses the
 }
 
 @ja{
-また、v3.0では一部のPostGIS関数と、ジオメトリデータのGiSTインデックス探索をGPU側で実行する事が可能になりました。更新の多いテーブルの内容を予めGPUに複製しておくGPUキャッシュ機能と併せて、リアルタイムな位置情報に基づく検索、分析処理が可能となります。
+v3.0では一部のPostGIS関数と、ジオメトリデータのGiSTインデックス探索をGPU側で実行する事が可能になりました。更新の多いテーブルの内容を予めGPUに複製しておくGPUキャッシュ機能と併せて、リアルタイムな位置情報に基づく検索、分析処理が可能となります。
 }
 @en{
-Also, the v3.0 newly supports execution of some PostGIS function and GiST index search on the GPU side. Along with the GPU cache, that duplicates the table contents often updated very frequently, it enables search / analysis processing based on the real-time locational information.
+The v3.0 newly supports execution of some PostGIS function and GiST index search on the GPU side. Along with the GPU cache, that duplicates the table contents often updated very frequently, it enables search / analysis processing based on the real-time locational information.
+}
+
+@ja{
+v5.0ではプロセスモデルの更新（マルチプロセス⇒マルチスレッド）や、ネイティブコードから疑似コードへの切り替えなど、根本的なソフトウェア設計の変更が行われました。これにより、全般的な処理速度や安定性の改善が図られました。
+}
+@en{
+The v5.0 entirely revised the software architecture design, like update of the process model (multi-process to multi-thread), or switch from the CUDA C++ native code to the portable pseudo code. 
+It improves overall performance and stability.
 }
 
 @ja:## ライセンスと著作権
@@ -74,12 +82,11 @@ The primary language of the discussion board is English. On the other hands, we 
 @ja:###バグや障害の報告
 @en:###Bug or troubles report
 @ja{
-結果不正やシステムクラッシュ/ロックアップ、その他の疑わしい動作を発見した場合は、[PG-Strom Issue Tracker](https://github.com/heterodb/pg-strom/issues)で新しいイシューをオープンし **bug** タグを付けてください。
+結果不正やシステムクラッシュ/ロックアップ、その他の疑わしい動作を発見した場合は、[PG-Strom Issue Tracker](https://github.com/heterodb/pg-strom/issues)で新しいイシューをオープンしてください。
 }
 @en{
-If you got troubles like incorrect results, system crash / lockup, or something strange behavior, please open a new issue with **bug** tag at the [PG-Strom Issue Tracker](https://github.com/heterodb/pg-strom/issues).
+If you got troubles like incorrect results, system crash / lockup, or something strange behavior, please open a new issue at the [PG-Strom Issue Tracker](https://github.com/heterodb/pg-strom/issues).
 }
-
 
 @ja{
 バグレポートの作成に際しては、下記の点に留意してください。
@@ -104,6 +111,7 @@ Please ensure the items below on bug reports.
 @ja{
 以下のような情報はバグ報告において有用です。
 
+- 問題を再現する手順（データおよびクエリ）
 - 問題クエリの`EXPLAIN VERBOSE`出力
 - 関連するテーブルのデータ構造（`psql`上で`\d+ <table name>`を実行して得られる）
 - 出力されたログメッセージ（verbose出力が望ましい）
@@ -113,6 +121,7 @@ Please ensure the items below on bug reports.
 @en{
 The information below are helpful for bug-reports.
 
+- Steps to reproduce the problem (Data and Query)
 - Output of `EXPLAIN VERBOSE` for the queries in trouble.
 - Data structure of the tables involved with `\d+ <table name>` on psql command.
 - Log messages (verbose messages are more helpful)

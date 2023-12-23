@@ -12,75 +12,178 @@
 #include "xpu_common.h"
 #include <math.h>
 
+INLINE_FUNCTION(bool)
+xpu_numeric_validate(kern_context *kcxt, xpu_numeric_t *num)
+{
+	if (num->kind == XPU_NUMERIC_KIND__VARLENA)
+	{
+		const varlena  *vl_addr = num->u.vl_addr;
+		const char	   *errmsg;
+
+		errmsg = __xpu_numeric_from_varlena(num, vl_addr);
+		if (errmsg)
+		{
+			STROM_ELOG(kcxt, errmsg);
+			return false;
+		}
+		assert(num->kind != XPU_NUMERIC_KIND__VARLENA);
+	}
+	return true;
+}
+
 INLINE_FUNCTION(int)
 xpu_numeric_sign(xpu_numeric_t *num)
 {
+	assert(num->kind != XPU_NUMERIC_KIND__VARLENA);
 	if (num->kind != XPU_NUMERIC_KIND__VALID)
 	{
 		Assert(num->kind != XPU_NUMERIC_KIND__NAN);
 		/* Must be +Inf or -Inf */
 		return num->kind == XPU_NUMERIC_KIND__POS_INF ? INT_MAX : INT_MIN;
 	}
-	if (num->value > 0)
+	if (num->u.value > 0)
 		return 1;
-	if (num->value < 0)
+	if (num->u.value < 0)
 		return -1;
 	return 0;
 }
 
 STATIC_FUNCTION(bool)
-xpu_numeric_datum_ref(kern_context *kcxt,
-					  xpu_datum_t *__result,
-					  int vclass,
-					  const kern_variable *kvar)
+xpu_numeric_datum_heap_read(kern_context *kcxt,
+							const void *addr,
+							xpu_datum_t *__result)
 {
 	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-	const char	   *errmsg;
 
-	if (vclass == KVAR_CLASS__VARLENA)
-	{
-		errmsg = __xpu_numeric_from_varlena(result, (const varlena *)kvar->ptr);
-		if (!errmsg)
-			return true;
-		result->expr_ops = NULL;
-		STROM_ELOG(kcxt, errmsg);
-	}
-	else
-	{
-		STROM_ELOG(kcxt, "unexpected vclass for device numeric data type.");
-	}
-	return false;
+	result->expr_ops = &xpu_numeric_ops;
+	result->kind = XPU_NUMERIC_KIND__VARLENA;
+	result->weight = 0;
+	result->u.vl_addr = (const varlena *)addr;
+
+	return true;
 }
 
-PUBLIC_FUNCTION(bool)
-xpu_numeric_datum_store(kern_context *kcxt,
-						const xpu_datum_t *xdatum,
-						int *p_vclass,
-						kern_variable *p_kvar)
+STATIC_FUNCTION(bool)
+xpu_numeric_datum_arrow_read(kern_context *kcxt,
+							 const kern_data_store *kds,
+							 const kern_colmeta *cmeta,
+							 uint32_t kds_index,
+							 xpu_datum_t *__result)
 {
-	xpu_numeric_t  *num;
+	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
+	const int128_t *addr;
 
-	num = (xpu_numeric_t *)kcxt_alloc(kcxt, sizeof(xpu_numeric_t));
-	if (!num)
+	if (cmeta->attopts.tag != ArrowType__Decimal)
+	{
+		STROM_ELOG(kcxt, "xpu_numeric_t must be mapped on Arrow::Decimal");
 		return false;
-	memcpy(num, xdatum, sizeof(xpu_geometry_t));
-	assert(num->expr_ops == &xpu_numeric_ops);
+	}
+	if (cmeta->attopts.decimal.bitWidth != 128)
+	{
+		STROM_ELOG(kcxt, "Arrow::Decimal unsupported bitWidth");
+		return false;
+	}
+	addr = (const int128_t *)KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
+														kds_index,
+														sizeof(int128_t));
+	if (addr)
+		set_normalized_numeric(result, *addr,
+							   cmeta->attopts.decimal.scale);
+	else
+		result->expr_ops = NULL;
+	return true;
+}
 
-	*p_vclass = KVAR_CLASS__XPU_DATUM;
-	p_kvar->ptr = (void *)num;
+STATIC_FUNCTION(bool)
+xpu_numeric_datum_kvec_load(kern_context *kcxt,
+							const kvec_datum_t *__kvecs,
+							uint32_t kvecs_id,
+							xpu_datum_t *__result)
+{
+	const kvec_numeric_t *kvecs = (const kvec_numeric_t *)__kvecs;
+	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
+
+	result->expr_ops = &xpu_numeric_ops;
+	result->kind = kvecs->kinds[kvecs_id];
+	if (result->kind == XPU_NUMERIC_KIND__VARLENA)
+	{
+		result->u.vl_addr = kvecs->values_lo[kvecs_id].ptr;
+	}
+	else if (result->kind == XPU_NUMERIC_KIND__VALID)
+	{
+		result->weight  = kvecs->weights[kvecs_id];
+		result->u.value = kvecs->values_hi[kvecs_id];
+		result->u.value <<= 64;
+		result->u.value |= kvecs->values_lo[kvecs_id].u64;
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_numeric_datum_kvec_save(kern_context *kcxt,
+							const xpu_datum_t *__xdatum,
+							kvec_datum_t *__kvecs,
+							uint32_t kvecs_id)
+{
+	const xpu_numeric_t *xdatum = (const xpu_numeric_t *)__xdatum;
+	kvec_numeric_t *kvecs = (kvec_numeric_t *)__kvecs;
+
+	kvecs->kinds[kvecs_id] = xdatum->kind;
+	if (xdatum->kind == XPU_NUMERIC_KIND__VARLENA)
+	{
+		kvecs->values_lo[kvecs_id].ptr = xdatum->u.vl_addr;
+	}
+	else if (xdatum->kind == XPU_NUMERIC_KIND__VALID)
+	{
+		kvecs->weights[kvecs_id] = xdatum->weight;
+		kvecs->values_lo[kvecs_id].u64 = (uint64_t)(xdatum->u.value & ~0UL);
+		kvecs->values_hi[kvecs_id] = (int64_t)(xdatum->u.value >> 64);
+	}
+	return true;
+}
+
+STATIC_FUNCTION(bool)
+xpu_numeric_datum_kvec_copy(kern_context *kcxt,
+							const kvec_datum_t *__kvecs_src,
+							uint32_t kvecs_src_id,
+							kvec_datum_t *__kvecs_dst,
+							uint32_t kvecs_dst_id)
+{
+	const kvec_numeric_t *kvecs_src = (const kvec_numeric_t *)__kvecs_src;
+	kvec_numeric_t *kvecs_dst = (kvec_numeric_t *)__kvecs_dst;
+	uint8_t		kind;
+
+	kvecs_dst->kinds[kvecs_dst_id] = kind = kvecs_src->kinds[kvecs_src_id];
+	if (kind == XPU_NUMERIC_KIND__VARLENA)
+	{
+		kvecs_dst->values_lo[kvecs_dst_id].ptr = kvecs_src->values_lo[kvecs_src_id].ptr;
+	}
+	else if (kind == XPU_NUMERIC_KIND__VALID)
+	{
+		kvecs_dst->weights[kvecs_dst_id] = kvecs_src->weights[kvecs_src_id];
+		kvecs_dst->values_lo[kvecs_dst_id].u64 = kvecs_src->values_lo[kvecs_src_id].u64;
+		kvecs_dst->values_hi[kvecs_dst_id] = kvecs_src->values_hi[kvecs_src_id];
+	}
 	return true;
 }
 
 STATIC_FUNCTION(int)
 xpu_numeric_datum_write(kern_context *kcxt,
 						char *buffer,
+						const kern_colmeta *cmeta,
 						const xpu_datum_t *__arg)
 {
 	const xpu_numeric_t *arg = (const xpu_numeric_t *)__arg;
 
-	if (XPU_DATUM_ISNULL(arg))
-		return 0;
-	if (arg->kind != XPU_NUMERIC_KIND__VALID)
+	if (arg->kind == XPU_NUMERIC_KIND__VARLENA)
+	{
+		int		sz = VARSIZE_ANY(arg->u.vl_addr);
+
+		if (buffer)
+			memcpy(buffer, arg->u.vl_addr, sz);
+		return sz;
+	}
+	else if (arg->kind != XPU_NUMERIC_KIND__VALID)
 	{
 		int		sz = offsetof(NumericData, choice.n_header) + sizeof(uint16_t);
 
@@ -98,23 +201,25 @@ xpu_numeric_datum_write(kern_context *kcxt,
 		}
 		return sz;
 	}
-	return __xpu_numeric_to_varlena(buffer, arg->weight, arg->value);
+	return __xpu_numeric_to_varlena(buffer, arg->weight, arg->u.value);
 }
 
 PUBLIC_FUNCTION(bool)
 xpu_numeric_datum_hash(kern_context *kcxt,
 					   uint32_t *p_hash,
-					   const xpu_datum_t *__arg)
+					   xpu_datum_t *__arg)
 {
-	const xpu_numeric_t *arg = (const xpu_numeric_t *)__arg;
+	xpu_numeric_t *arg = (xpu_numeric_t *)__arg;
 
 	if (XPU_DATUM_ISNULL(arg))
 		*p_hash = 0;
+	else if (!xpu_numeric_validate(kcxt, arg))
+		return false;
 	else if (arg->kind != XPU_NUMERIC_KIND__VALID)
 		*p_hash = pg_hash_any(&arg->kind, sizeof(uint8_t));
 	else
 		*p_hash = (pg_hash_any(&arg->weight, sizeof(int16_t)) ^
-				   pg_hash_any(&arg->value, sizeof(int128_t)));
+				   pg_hash_any(&arg->u.value, sizeof(int128_t)));
 	return true;
 }
 
@@ -124,13 +229,17 @@ __numeric_compare(const xpu_numeric_t *a, const xpu_numeric_t *b);
 STATIC_FUNCTION(bool)
 xpu_numeric_datum_comp(kern_context *kcxt,
 					   int *p_comp,
-					   const xpu_datum_t *__a,
-					   const xpu_datum_t *__b)
+					   xpu_datum_t *__a,
+					   xpu_datum_t *__b)
 {
-	const xpu_numeric_t *a = (const xpu_numeric_t *)__a;
-	const xpu_numeric_t *b = (const xpu_numeric_t *)__b;
+	xpu_numeric_t *a = (xpu_numeric_t *)__a;
+	xpu_numeric_t *b = (xpu_numeric_t *)__b;
 
 	assert(!XPU_DATUM_ISNULL(a) && !XPU_DATUM_ISNULL(b));
+	if (!xpu_numeric_validate(kcxt, a) ||
+		!xpu_numeric_validate(kcxt, b))
+		return false;
+
 	*p_comp = __numeric_compare(a, b);
 	return true;
 }
@@ -139,48 +248,47 @@ PGSTROM_SQLTYPE_OPERATORS(numeric, false, 4, -1);
 PUBLIC_FUNCTION(bool)
 __xpu_numeric_to_int64(kern_context *kcxt,
 					   int64_t *p_ival,
-					   const xpu_numeric_t *num,
+					   xpu_numeric_t *num,
 					   int64_t min_value,
 					   int64_t max_value)
 {
-	int128_t	ival;
-	int16_t		weight;
-
 	assert(num->expr_ops == &xpu_numeric_ops);
-
-	if (num->kind != XPU_NUMERIC_KIND__VALID)
+	if (num->kind == XPU_NUMERIC_KIND__VALID)
 	{
-		STROM_ELOG(kcxt, "cannot convert NaN/Inf to integer");
-		return false;
-	}
+		int128_t	ival = num->u.value;
+		int16_t		weight = num->weight;
 
-	ival = num->value;
-	weight = num->weight;
-	if (ival != 0)
-	{
-		while (weight > 0)
+		if (ival != 0)
 		{
-			/* round of 0.x digit */
-			if (weight == 1)
-				ival += (ival > 0 ? 5 : -5);
-			ival /= 10;
-			weight--;
-		}
-		while (weight < 0)
-		{
-			ival *= 10;
-			weight++;
+			while (weight > 0)
+			{
+				/* round of 0.x digit */
+				if (weight == 1)
+					ival += (ival > 0 ? 5 : -5);
+				ival /= 10;
+				weight--;
+			}
+			while (weight < 0)
+			{
+				ival *= 10;
+				weight++;
+				if (ival < min_value || ival > max_value)
+					break;
+			}
 			if (ival < min_value || ival > max_value)
-				break;
+			{
+				STROM_ELOG(kcxt, "integer out of range");
+				return false;
+			}
 		}
-		if (ival < min_value || ival > max_value)
-		{
-			STROM_ELOG(kcxt, "integer out of range");
-			return false;
-		}
+		*p_ival = ival;
+		return true;
 	}
-	*p_ival = ival;
-	return true;
+	assert(num->kind == XPU_NUMERIC_KIND__NAN ||
+		   num->kind == XPU_NUMERIC_KIND__POS_INF ||
+		   num->kind == XPU_NUMERIC_KIND__NEG_INF);
+	STROM_ELOG(kcxt, "cannot convert NaN/Inf to integer");
+	return false;
 }
 
 #define PG_NUMERIC_TO_INT_TEMPLATE(TARGET,MIN_VALUE,MAX_VALUE)		\
@@ -194,7 +302,8 @@ __xpu_numeric_to_int64(kern_context *kcxt,
 		{															\
 			result->expr_ops = NULL;								\
 		}															\
-		else if (!__xpu_numeric_to_int64(kcxt, &ival, &num,			\
+		else if (!xpu_numeric_validate(kcxt, &num) ||				\
+				 !__xpu_numeric_to_int64(kcxt, &ival, &num,			\
 										 MIN_VALUE, MAX_VALUE))		\
 		{															\
 			return false;											\
@@ -219,6 +328,8 @@ pgfn_numeric_to_money(XPU_PGFUNCTION_ARGS)
 
 	if (XPU_DATUM_ISNULL(&num))
 		result->expr_ops = NULL;
+	else if (!xpu_numeric_validate(kcxt, &num))
+		return false;
 	else
 	{
 		const kern_session_info *session = kcxt->session;
@@ -239,11 +350,11 @@ pgfn_numeric_to_money(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 __xpu_numeric_to_fp64(kern_context *kcxt,
 					  float8_t *p_fval,
-					  const xpu_numeric_t *num)
+					  xpu_numeric_t *num)
 {
 	if (num->kind == XPU_NUMERIC_KIND__VALID)
 	{
-		float8_t	fval = num->value;
+		float8_t	fval = num->u.value;
 		int16_t		weight = num->weight;
 
 		if (fval != 0.0)
@@ -271,8 +382,10 @@ __xpu_numeric_to_fp64(kern_context *kcxt,
 	else if (num->kind == XPU_NUMERIC_KIND__NEG_INF)
 		*p_fval = -INFINITY;
 	else
+	{
+		assert(num->kind == XPU_NUMERIC_KIND__NAN);
 		*p_fval = NAN;
-
+	}
 	return true;
 }
 
@@ -285,7 +398,8 @@ __xpu_numeric_to_fp64(kern_context *kcxt,
 																	\
 		if (XPU_DATUM_ISNULL(&num))									\
 			result->expr_ops = NULL;								\
-		else if (!__xpu_numeric_to_fp64(kcxt, &fval, &num))			\
+		else if (!xpu_numeric_validate(kcxt, &num) ||				\
+				 !__xpu_numeric_to_fp64(kcxt, &fval, &num))			\
 			return false;											\
 		else														\
 		{															\
@@ -339,14 +453,80 @@ pgfn_money_to_numeric(XPU_PGFUNCTION_ARGS)
 	return true;
 }
 
-#define PG_FLOAT_TO_NUMERIC_TEMPLATE(SOURCE,__TYPE,__CAST,			\
-									 __MODF,__RINTL)				\
+STATIC_FUNCTION(void)
+__xpu_fp64_to_numeric(xpu_numeric_t *result, float8_t __fval)
+{
+	uint64_t	fval = __double_as_longlong__(__fval);
+	uint64_t	frac = (fval & ((1UL<<FP64_FRAC_BITS)-1));
+	int32_t		expo = (fval >> (FP64_FRAC_BITS)) & ((1UL<<FP64_EXPO_BITS)-1);
+	bool		sign = (fval >> (FP64_FRAC_BITS + FP64_EXPO_BITS)) != 0;
+	int			weight = 0;
+
+	/* special cases */
+	if (expo == 0x7ff)
+	{
+		if (fval != 0)
+			result->kind = XPU_NUMERIC_KIND__NAN;
+		else if (sign)
+			result->kind = XPU_NUMERIC_KIND__NEG_INF;
+		else
+			result->kind = XPU_NUMERIC_KIND__POS_INF;
+		result->expr_ops = &xpu_numeric_ops;
+		return;
+	}
+	frac |= (1UL << FP64_FRAC_BITS);
+
+	/*
+	 * fraction must be adjusted by 10^prec / 2^(FP64_FRAC_BITS - expo)
+	 * with keeping accuracy (52bit).
+	 */
+	while (expo > FP64_EXPO_BIAS + FP64_FRAC_BITS)
+	{
+		if (frac <= 0x1800000000000000UL)
+		{
+			frac *= 2;
+			expo--;
+		}
+		else
+		{
+			frac /= 10;
+			weight--;
+		}
+	}
+	while (expo < FP64_EXPO_BIAS + FP64_FRAC_BITS)
+	{
+		if (frac >= 0x1800000000000000UL)
+		{
+			frac /= 2;
+			expo++;
+		}
+		else
+		{
+			frac *= 10;
+			weight++;
+		}
+	}
+	/* only 15 digits are valid */
+	while (frac >= 1000000000000000UL)
+	{
+		frac /= 10;
+		weight--;
+	}
+	result->kind = XPU_NUMERIC_KIND__VALID;
+	result->weight = weight;
+	if (!sign)
+		result->u.value = (int128_t)frac;
+	else
+		result->u.value = -(int128_t)frac;
+	result->expr_ops = &xpu_numeric_ops;
+}
+
+#define PG_FLOAT_TO_NUMERIC_TEMPLATE(SOURCE,__TYPE,__CAST)			\
 	PUBLIC_FUNCTION(bool)											\
 	pgfn_##SOURCE##_to_numeric(XPU_PGFUNCTION_ARGS)					\
 	{																\
 		xpu_numeric_t	   *result = (xpu_numeric_t *)__result;		\
 		xpu_##SOURCE##_t	datum;									\
-		__TYPE				fval;									\
 		const kern_expression *karg = KEXP_FIRST_ARG(kexp);			\
 																	\
 		assert(kexp->nr_args == 1 &&								\
@@ -356,47 +536,23 @@ pgfn_money_to_numeric(XPU_PGFUNCTION_ARGS)
 		if (XPU_DATUM_ISNULL(&datum))								\
 			result->expr_ops = NULL;								\
 		else														\
-		{															\
-			result->expr_ops = &xpu_numeric_ops;					\
-			fval = __CAST(datum.value);								\
-			if (isinf(fval))										\
-				result->kind = (fval > 0.0							\
-								? XPU_NUMERIC_KIND__POS_INF			\
-								: XPU_NUMERIC_KIND__NEG_INF);		\
-			else if (isnan(fval))									\
-				result->kind = XPU_NUMERIC_KIND__NAN;				\
-			else													\
-			{														\
-				__TYPE		a,b = __MODF(fval, &a);					\
-				int128_t	value = (int128_t)a;					\
-				int16_t		weight = 0;								\
-				bool		negative = (value < 0);					\
-																	\
-				if (negative)										\
-					value = -value;									\
-				while (b != 0.0 && (value>>124) == 0)				\
-				{													\
-					b = __MODF(b * 10.0, &a);						\
-					value = 10 * value + (int128_t)a;				\
-					weight++;										\
-				}													\
-				set_normalized_numeric(result,value,weight);		\
-			}														\
-		}															\
+			__xpu_fp64_to_numeric(result, __CAST(datum.value));		\
 		return true;												\
 	}
-PG_FLOAT_TO_NUMERIC_TEMPLATE(float2, float,__to_fp32,modff,rintf)
-PG_FLOAT_TO_NUMERIC_TEMPLATE(float4, float,__to_fp32,modff,rintf)
-PG_FLOAT_TO_NUMERIC_TEMPLATE(float8,double,__to_fp64,modf, rint)
+PG_FLOAT_TO_NUMERIC_TEMPLATE(float2, float,__to_fp32)
+PG_FLOAT_TO_NUMERIC_TEMPLATE(float4, float,__to_fp32)
+PG_FLOAT_TO_NUMERIC_TEMPLATE(float8,double,__to_fp64)
 
 STATIC_FUNCTION(int)
 __numeric_compare(const xpu_numeric_t *a, const xpu_numeric_t *b)
 {
-	int128_t	a_val = a->value;
-	int128_t	b_val = b->value;
+	int128_t	a_val = a->u.value;
+	int128_t	b_val = b->u.value;
 	int16_t		a_weight = a->weight;
 	int16_t		b_weight = b->weight;
 
+	assert(a->kind != XPU_NUMERIC_KIND__VARLENA &&
+		   b->kind != XPU_NUMERIC_KIND__VARLENA);
 	/* If any NaN or Inf */
 	if (a->kind != XPU_NUMERIC_KIND__VALID)
 	{
@@ -454,25 +610,20 @@ __numeric_compare(const xpu_numeric_t *a, const xpu_numeric_t *b)
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_numeric_##NAME(XPU_PGFUNCTION_ARGS)							\
 	{																	\
-		xpu_bool_t	   *result = (xpu_bool_t *)__result;				\
-		xpu_numeric_t	datum_a, datum_b;								\
-		const kern_expression *karg = KEXP_FIRST_ARG(kexp);				\
+		KEXP_PROCESS_ARGS2(bool,numeric,datum_a,numeric,datum_b);		\
 																		\
-		assert(kexp->nr_args == 2 &&									\
-			   KEXP_IS_VALID(karg,numeric));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))				\
-			return false;												\
-		karg = KEXP_NEXT_ARG(karg);										\
-		assert(KEXP_IS_VALID(karg, numeric));							\
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))				\
-			return false;												\
 		if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))	\
 		{																\
 			__pg_simple_nullcomp_##NAME(&datum_a, &datum_b);			\
 		}																\
+		else if (!xpu_numeric_validate(kcxt, &datum_a) ||				\
+				 !xpu_numeric_validate(kcxt, &datum_b))					\
+		{																\
+			return false;												\
+		}																\
 		else															\
 		{																\
-			result->expr_ops = &xpu_numeric_ops;						\
+			result->expr_ops = &xpu_bool_ops;							\
 			result->value = (__numeric_compare(&datum_a,				\
 											   &datum_b) OPER 0);		\
 		}																\
@@ -488,21 +639,15 @@ PG_NUMERIC_COMPARE_TEMPLATE(ge, >=)
 PUBLIC_FUNCTION(bool)
 pgfn_numeric_add(XPU_PGFUNCTION_ARGS)
 {
-	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-	xpu_numeric_t	datum_a;
-	xpu_numeric_t	datum_b;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(numeric, numeric, datum_a, numeric, datum_b);
 
-	assert(kexp->nr_args == 2 &&
-		   KEXP_IS_VALID(karg, numeric));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg, numeric));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))
 		result->expr_ops = NULL;
+	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
+			 !xpu_numeric_validate(kcxt, &datum_b))
+	{
+		return false;
+	}
 	else
 	{
 		result->expr_ops = &xpu_numeric_ops;
@@ -536,16 +681,16 @@ pgfn_numeric_add(XPU_PGFUNCTION_ARGS)
 		{
 			while (datum_a.weight > datum_b.weight)
 			{
-				datum_b.value *= 10;
+				datum_b.u.value *= 10;
 				datum_b.weight++;
 			}
 			while (datum_a.weight < datum_b.weight)
 			{
-				datum_a.value *= 10;
+				datum_a.u.value *= 10;
 				datum_a.weight++;
 			}
 			set_normalized_numeric(result,
-								   datum_a.value + datum_b.value,
+								   datum_a.u.value + datum_b.u.value,
 								   datum_a.weight);
 		}
 	}
@@ -555,21 +700,15 @@ pgfn_numeric_add(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_numeric_sub(XPU_PGFUNCTION_ARGS)
 {
-	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-	xpu_numeric_t	datum_a;
-	xpu_numeric_t	datum_b;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(numeric, numeric, datum_a, numeric, datum_b);
 
-	assert(kexp->nr_args == 2 &&
-		   KEXP_IS_VALID(karg, numeric));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg, numeric));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))
 		result->expr_ops = NULL;
+	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
+			 !xpu_numeric_validate(kcxt, &datum_b))
+	{
+		return false;
+	}
 	else
 	{
 		result->expr_ops = &xpu_numeric_ops;
@@ -603,16 +742,16 @@ pgfn_numeric_sub(XPU_PGFUNCTION_ARGS)
 		{
 			while (datum_a.weight > datum_b.weight)
 			{
-				datum_b.value *= 10;
+				datum_b.u.value *= 10;
 				datum_b.weight++;
 			}
 			while (datum_a.weight < datum_b.weight)
 			{
-				datum_a.value *= 10;
+				datum_a.u.value *= 10;
 				datum_a.weight++;
 			}
 			set_normalized_numeric(result,
-								   datum_a.value - datum_b.value,
+								   datum_a.u.value - datum_b.u.value,
 								   datum_a.weight);
 		}
 	}
@@ -622,21 +761,15 @@ pgfn_numeric_sub(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_numeric_mul(XPU_PGFUNCTION_ARGS)
 {
-	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-	xpu_numeric_t	datum_a;
-	xpu_numeric_t	datum_b;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(numeric, numeric, datum_a, numeric, datum_b);
 
-	assert(kexp->nr_args == 2 &&
-		   KEXP_IS_VALID(karg, numeric));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg, numeric));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))
 		result->expr_ops = NULL;
+	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
+			 !xpu_numeric_validate(kcxt, &datum_b))
+	{
+		return false;
+	}
 	else
 	{
 		result->expr_ops = &xpu_numeric_ops;
@@ -697,7 +830,7 @@ pgfn_numeric_mul(XPU_PGFUNCTION_ARGS)
 		else
 		{
 			set_normalized_numeric(result,
-								   datum_a.value * datum_b.value,
+								   datum_a.u.value * datum_b.u.value,
 								   datum_a.weight + datum_b.weight);
 		}
 	}
@@ -707,21 +840,15 @@ pgfn_numeric_mul(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_numeric_div(XPU_PGFUNCTION_ARGS)
 {
-	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-	xpu_numeric_t	datum_a;
-	xpu_numeric_t	datum_b;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(numeric, numeric, datum_a, numeric, datum_b);
 
-	assert(kexp->nr_args == 2 &&
-		   KEXP_IS_VALID(karg, numeric));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg, numeric));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))
 		result->expr_ops = NULL;
+	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
+			 !xpu_numeric_validate(kcxt, &datum_b))
+	{
+		return false;
+	}
 	else
 	{
 		result->expr_ops = &xpu_numeric_ops;
@@ -771,15 +898,15 @@ pgfn_numeric_div(XPU_PGFUNCTION_ARGS)
 				set_normalized_numeric(result, 0, 0);
 			}
 		}
-		else if (datum_b.value == 0)
+		else if (datum_b.u.value == 0)
 		{
 			STROM_ELOG(kcxt, "division by zero");
 			return false;
 		}
 		else
 		{
-			int128_t	rem = datum_a.value;
-			int128_t	div = datum_b.value;
+			int128_t	rem = datum_a.u.value;
+			int128_t	div = datum_b.u.value;
 			int128_t	x, ival = 0;
 			int16_t		weight = datum_a.weight - datum_b.weight;
 			bool		negative = false;
@@ -820,21 +947,15 @@ pgfn_numeric_div(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_numeric_mod(XPU_PGFUNCTION_ARGS)
 {
-	xpu_numeric_t  *result = (xpu_numeric_t *)__result;
-	xpu_numeric_t	datum_a;
-	xpu_numeric_t	datum_b;
-	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	KEXP_PROCESS_ARGS2(numeric, numeric, datum_a, numeric, datum_b);
 
-	assert(kexp->nr_args == 2 &&
-		   KEXP_IS_VALID(karg, numeric));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_a))
-		return false;
-	karg = KEXP_NEXT_ARG(karg);
-	assert(KEXP_IS_VALID(karg, numeric));
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum_b))
-		return false;
 	if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))
 		result->expr_ops = NULL;
+	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
+			 !xpu_numeric_validate(kcxt, &datum_b))
+	{
+		return false;
+	}
 	else
 	{
 		result->expr_ops = &xpu_numeric_ops;
@@ -851,7 +972,7 @@ pgfn_numeric_mod(XPU_PGFUNCTION_ARGS)
 					 datum_a.kind == XPU_NUMERIC_KIND__NEG_INF)
 			{
 				if (datum_b.kind == XPU_NUMERIC_KIND__VALID &&
-					datum_b.value == 0)
+					datum_b.u.value == 0)
 				{
 					STROM_ELOG(kcxt, "division by zero");
 					return false;
@@ -865,28 +986,28 @@ pgfn_numeric_mod(XPU_PGFUNCTION_ARGS)
 			{
 				/* num2 must be [-]Inf; result is num1 regardless of sign of num2 */
 				result->kind = datum_b.kind;
-				result->value = datum_b.value;
+				result->u.value = datum_b.u.value;
 			}
 		}
-		else if (datum_b.value == 0)
+		else if (datum_b.u.value == 0)
 		{
 			STROM_ELOG(kcxt, "division by zero");
 			return false;
 		}
 		else
 		{
-			while (datum_a.weight > datum_b.value)
+			while (datum_a.weight > datum_b.weight)
 			{
-				datum_b.value *= 10;
+				datum_b.u.value *= 10;
 				datum_b.weight++;
 			}
 			while (datum_a.weight < datum_b.weight)
 			{
-				datum_a.value *= 10;
+				datum_a.u.value *= 10;
 				datum_a.weight++;
 			}
 			set_normalized_numeric(result,
-								   datum_a.value % datum_b.value,
+								   datum_a.u.value % datum_b.u.value,
 								   datum_a.weight);
 		}
 	}
@@ -912,12 +1033,14 @@ pgfn_numeric_uminus(XPU_PGFUNCTION_ARGS)
 	assert(kexp->nr_args == 1 &&
 		   KEXP_IS_VALID(karg, numeric));
 
-	if (!EXEC_KERN_EXPRESSION(kcxt, karg, result))
+	if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))
+		return false;
+	if (!xpu_numeric_validate(kcxt, result))
 		return false;
 	if (!XPU_DATUM_ISNULL(result))
 	{
 		if (result->kind == XPU_NUMERIC_KIND__VALID)
-			result->value = -result->value;
+			result->u.value = -result->u.value;
 	}
 	return true;
 }
@@ -932,11 +1055,13 @@ pgfn_numeric_abs(XPU_PGFUNCTION_ARGS)
 		   KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, result))
 		return false;
+	if (!xpu_numeric_validate(kcxt, result))
+		return false;
 	if (!XPU_DATUM_ISNULL(result))
 	{
 		if (result->kind == XPU_NUMERIC_KIND__VALID &&
-			result->value < 0)
-			result->value = -result->value;
+			result->u.value < 0)
+			result->u.value = -result->u.value;
 	}
 	return true;
 }

@@ -15,153 +15,11 @@
 #define PG_GETARG_INT8(x)		DatumGetInt8(PG_GETARG_DATUM(x))
 #define PG_RETURN_INT8(x)		return Int8GetDatum(x)
 
-/* type input/output */
-Datum pgstrom_int1in(PG_FUNCTION_ARGS);
-Datum pgstrom_int1out(PG_FUNCTION_ARGS);
-Datum pgstrom_int1send(PG_FUNCTION_ARGS);
-Datum pgstrom_int1recv(PG_FUNCTION_ARGS);
-
-/* type cast functions */
-Datum pgstrom_int1_to_int2(PG_FUNCTION_ARGS);
-Datum pgstrom_int1_to_int4(PG_FUNCTION_ARGS);
-Datum pgstrom_int1_to_int8(PG_FUNCTION_ARGS);
-Datum pgstrom_int1_to_float4(PG_FUNCTION_ARGS);
-Datum pgstrom_int1_to_float8(PG_FUNCTION_ARGS);
-Datum pgstrom_int1_to_numeric(PG_FUNCTION_ARGS);
-Datum pgstrom_int2_to_int1(PG_FUNCTION_ARGS);
-Datum pgstrom_int4_to_int1(PG_FUNCTION_ARGS);
-Datum pgstrom_int8_to_int1(PG_FUNCTION_ARGS);
-Datum pgstrom_float4_to_int1(PG_FUNCTION_ARGS);
-Datum pgstrom_float8_to_int1(PG_FUNCTION_ARGS);
-Datum pgstrom_numeric_to_int1(PG_FUNCTION_ARGS);
-
-/* comparison */
-Datum pgstrom_int1eq(PG_FUNCTION_ARGS);
-Datum pgstrom_int1ne(PG_FUNCTION_ARGS);
-Datum pgstrom_int1lt(PG_FUNCTION_ARGS);
-Datum pgstrom_int1le(PG_FUNCTION_ARGS);
-Datum pgstrom_int1gt(PG_FUNCTION_ARGS);
-Datum pgstrom_int1ge(PG_FUNCTION_ARGS);
-Datum pgstrom_int1larger(PG_FUNCTION_ARGS);
-Datum pgstrom_int1smaller(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int12eq(PG_FUNCTION_ARGS);
-Datum pgstrom_int12ne(PG_FUNCTION_ARGS);
-Datum pgstrom_int12lt(PG_FUNCTION_ARGS);
-Datum pgstrom_int12le(PG_FUNCTION_ARGS);
-Datum pgstrom_int12gt(PG_FUNCTION_ARGS);
-Datum pgstrom_int12ge(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int14eq(PG_FUNCTION_ARGS);
-Datum pgstrom_int14ne(PG_FUNCTION_ARGS);
-Datum pgstrom_int14lt(PG_FUNCTION_ARGS);
-Datum pgstrom_int14le(PG_FUNCTION_ARGS);
-Datum pgstrom_int14gt(PG_FUNCTION_ARGS);
-Datum pgstrom_int14ge(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int18eq(PG_FUNCTION_ARGS);
-Datum pgstrom_int18ne(PG_FUNCTION_ARGS);
-Datum pgstrom_int18lt(PG_FUNCTION_ARGS);
-Datum pgstrom_int18le(PG_FUNCTION_ARGS);
-Datum pgstrom_int18gt(PG_FUNCTION_ARGS);
-Datum pgstrom_int18ge(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int21eq(PG_FUNCTION_ARGS);
-Datum pgstrom_int21ne(PG_FUNCTION_ARGS);
-Datum pgstrom_int21lt(PG_FUNCTION_ARGS);
-Datum pgstrom_int21le(PG_FUNCTION_ARGS);
-Datum pgstrom_int21gt(PG_FUNCTION_ARGS);
-Datum pgstrom_int21ge(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int41eq(PG_FUNCTION_ARGS);
-Datum pgstrom_int41ne(PG_FUNCTION_ARGS);
-Datum pgstrom_int41lt(PG_FUNCTION_ARGS);
-Datum pgstrom_int41le(PG_FUNCTION_ARGS);
-Datum pgstrom_int41gt(PG_FUNCTION_ARGS);
-Datum pgstrom_int41ge(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int81eq(PG_FUNCTION_ARGS);
-Datum pgstrom_int81ne(PG_FUNCTION_ARGS);
-Datum pgstrom_int81lt(PG_FUNCTION_ARGS);
-Datum pgstrom_int81le(PG_FUNCTION_ARGS);
-Datum pgstrom_int81gt(PG_FUNCTION_ARGS);
-Datum pgstrom_int81ge(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int1hash(PG_FUNCTION_ARGS);
-Datum pgstrom_btint1cmp(PG_FUNCTION_ARGS);
-Datum pgstrom_btint12cmp(PG_FUNCTION_ARGS);
-Datum pgstrom_btint14cmp(PG_FUNCTION_ARGS);
-Datum pgstrom_btint18cmp(PG_FUNCTION_ARGS);
-Datum pgstrom_btint21cmp(PG_FUNCTION_ARGS);
-Datum pgstrom_btint41cmp(PG_FUNCTION_ARGS);
-Datum pgstrom_btint81cmp(PG_FUNCTION_ARGS);
-
-/* unary operators */
-Datum pgstrom_int1up(PG_FUNCTION_ARGS);
-Datum pgstrom_int1um(PG_FUNCTION_ARGS);
-Datum pgstrom_int1abs(PG_FUNCTION_ARGS);
-
-/* arithmetic operators */
-Datum pgstrom_int1pl(PG_FUNCTION_ARGS);
-Datum pgstrom_int1mi(PG_FUNCTION_ARGS);
-Datum pgstrom_int1mul(PG_FUNCTION_ARGS);
-Datum pgstrom_int1div(PG_FUNCTION_ARGS);
-Datum pgstrom_int1mod(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int12pl(PG_FUNCTION_ARGS);
-Datum pgstrom_int12mi(PG_FUNCTION_ARGS);
-Datum pgstrom_int12mul(PG_FUNCTION_ARGS);
-Datum pgstrom_int12div(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int14pl(PG_FUNCTION_ARGS);
-Datum pgstrom_int14mi(PG_FUNCTION_ARGS);
-Datum pgstrom_int14mul(PG_FUNCTION_ARGS);
-Datum pgstrom_int14div(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int18pl(PG_FUNCTION_ARGS);
-Datum pgstrom_int18mi(PG_FUNCTION_ARGS);
-Datum pgstrom_int18mul(PG_FUNCTION_ARGS);
-Datum pgstrom_int18div(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int21pl(PG_FUNCTION_ARGS);
-Datum pgstrom_int21mi(PG_FUNCTION_ARGS);
-Datum pgstrom_int21mul(PG_FUNCTION_ARGS);
-Datum pgstrom_int21div(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int41pl(PG_FUNCTION_ARGS);
-Datum pgstrom_int41mi(PG_FUNCTION_ARGS);
-Datum pgstrom_int41mul(PG_FUNCTION_ARGS);
-Datum pgstrom_int41div(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int81pl(PG_FUNCTION_ARGS);
-Datum pgstrom_int81mi(PG_FUNCTION_ARGS);
-Datum pgstrom_int81mul(PG_FUNCTION_ARGS);
-Datum pgstrom_int81div(PG_FUNCTION_ARGS);
-
-/* bit operations */
-Datum pgstrom_int1and(PG_FUNCTION_ARGS);
-Datum pgstrom_int1or(PG_FUNCTION_ARGS);
-Datum pgstrom_int1xor(PG_FUNCTION_ARGS);
-Datum pgstrom_int1not(PG_FUNCTION_ARGS);
-Datum pgstrom_int1shl(PG_FUNCTION_ARGS);
-Datum pgstrom_int1shr(PG_FUNCTION_ARGS);
-
-/* misc functions */
-Datum pgstrom_cash_mul_int1(PG_FUNCTION_ARGS);
-Datum pgstrom_int1_mul_cash(PG_FUNCTION_ARGS);
-Datum pgstrom_cash_div_int1(PG_FUNCTION_ARGS);
-
-/* aggregate functions */
-Datum pgstrom_int1_sum(PG_FUNCTION_ARGS);
-Datum pgstrom_int1_avg_accum(PG_FUNCTION_ARGS);
-Datum pgstrom_int1_avg_accum_inv(PG_FUNCTION_ARGS);
-Datum pgstrom_int1_var_accum(PG_FUNCTION_ARGS);
-Datum pgstrom_int1_var_accum_inv(PG_FUNCTION_ARGS);
-
 /*
  * Type input / output functions
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1in);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1in(PG_FUNCTION_ARGS)
 {
 	char   *num = PG_GETARG_CSTRING(0);
@@ -182,8 +40,8 @@ pgstrom_int1in(PG_FUNCTION_ARGS)
 						num, "tinyint")));
 	PG_RETURN_INT8(ival);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1in);
 
+PG_FUNCTION_INFO_V1(pgstrom_int1out);
 Datum
 pgstrom_int1out(PG_FUNCTION_ARGS)
 {
@@ -191,9 +49,9 @@ pgstrom_int1out(PG_FUNCTION_ARGS)
 	
 	PG_RETURN_CSTRING(psprintf("%d", (int)ival));
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1out);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1send);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1send(PG_FUNCTION_ARGS)
 {
 	int8	ival = PG_GETARG_INT8(0);
@@ -203,75 +61,75 @@ pgstrom_int1send(PG_FUNCTION_ARGS)
 	pq_sendint8(&buf, ival);
 	PG_RETURN_BYTEA_P(pq_endtypsend(&buf));
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1send);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1recv);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1recv(PG_FUNCTION_ARGS)
 {
 	StringInfo	buf = (StringInfo) PG_GETARG_POINTER(0);
 
 	PG_RETURN_INT8((int8) pq_getmsgint(buf, sizeof(int8)));
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1recv);
 
 /*
  * Type cast functions
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1_to_int2);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1_to_int2(PG_FUNCTION_ARGS)
 {
 	int8	ival = PG_GETARG_INT8(0);
 
 	PG_RETURN_INT16(ival);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1_to_int2);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1_to_int4);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1_to_int4(PG_FUNCTION_ARGS)
 {
 	int8	ival = PG_GETARG_INT8(0);
 
 	PG_RETURN_INT32(ival);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1_to_int4);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1_to_int8);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1_to_int8(PG_FUNCTION_ARGS)
 {
 	int8	ival = PG_GETARG_INT8(0);
 
 	PG_RETURN_INT64(ival);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1_to_int8);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1_to_float4);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1_to_float4(PG_FUNCTION_ARGS)
 {
 	int8	ival = PG_GETARG_INT8(0);
 
 	PG_RETURN_FLOAT4((float4) ival);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1_to_float4);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1_to_float8);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1_to_float8(PG_FUNCTION_ARGS)
 {
 	int8	ival = PG_GETARG_INT8(0);
 
 	PG_RETURN_FLOAT8((float8) ival);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1_to_float8);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1_to_numeric);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1_to_numeric(PG_FUNCTION_ARGS)
 {
 	int32	ival = (int32)PG_GETARG_INT8(0);
 
 	return DirectFunctionCall1(int4_numeric, Int32GetDatum(ival));
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1_to_numeric);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int2_to_int1);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int2_to_int1(PG_FUNCTION_ARGS)
 {
 	int16	ival = PG_GETARG_INT16(0);
@@ -282,9 +140,9 @@ pgstrom_int2_to_int1(PG_FUNCTION_ARGS)
 				 errmsg("tinyint out of range")));
 	PG_RETURN_INT8(ival);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int2_to_int1);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int4_to_int1);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int4_to_int1(PG_FUNCTION_ARGS)
 {
 	int32	ival = PG_GETARG_INT32(0);
@@ -295,9 +153,9 @@ pgstrom_int4_to_int1(PG_FUNCTION_ARGS)
 				 errmsg("tinyint out of range")));
 	PG_RETURN_INT8(ival);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int4_to_int1);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int8_to_int1);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int8_to_int1(PG_FUNCTION_ARGS)
 {
 	int64	ival = PG_GETARG_INT64(0);
@@ -308,9 +166,9 @@ pgstrom_int8_to_int1(PG_FUNCTION_ARGS)
 				 errmsg("tinyint out of range")));
 	PG_RETURN_INT8(ival);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int8_to_int1);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_float4_to_int1);
+PUBLIC_FUNCTION(Datum)
 pgstrom_float4_to_int1(PG_FUNCTION_ARGS)
 {
 	float4	fval = PG_GETARG_FLOAT4(0);
@@ -321,9 +179,9 @@ pgstrom_float4_to_int1(PG_FUNCTION_ARGS)
 				 errmsg("tinyint out of range")));
 	PG_RETURN_INT8(fval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_float4_to_int1);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_float8_to_int1);
+PUBLIC_FUNCTION(Datum)
 pgstrom_float8_to_int1(PG_FUNCTION_ARGS)
 {
 	float8	fval = PG_GETARG_FLOAT8(0);
@@ -334,9 +192,9 @@ pgstrom_float8_to_int1(PG_FUNCTION_ARGS)
 				 errmsg("tinyint out of range")));
 	PG_RETURN_INT8((int8)fval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_float8_to_int1);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_numeric_to_int1);
+PUBLIC_FUNCTION(Datum)
 pgstrom_numeric_to_int1(PG_FUNCTION_ARGS)
 {
 	int32	ival = DatumGetInt32(numeric_int4(fcinfo));
@@ -347,12 +205,12 @@ pgstrom_numeric_to_int1(PG_FUNCTION_ARGS)
 				 errmsg("tinyint out of range")));
 	PG_RETURN_INT8((int8)ival);
 }
-PG_FUNCTION_INFO_V1(pgstrom_numeric_to_int1);
 
 /*
  * Comparison functions
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1eq);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1eq(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -360,9 +218,9 @@ pgstrom_int1eq(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 == arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1eq);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1ne);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1ne(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -370,9 +228,9 @@ pgstrom_int1ne(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 != arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1ne);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1lt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1lt(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -380,9 +238,9 @@ pgstrom_int1lt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 < arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1lt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1le);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1le(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -390,9 +248,9 @@ pgstrom_int1le(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 <= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1le);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1gt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1gt(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -400,9 +258,9 @@ pgstrom_int1gt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 > arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1gt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1ge);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1ge(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -410,9 +268,9 @@ pgstrom_int1ge(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 >= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1ge);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1larger);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1larger(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -420,9 +278,9 @@ pgstrom_int1larger(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT8(arg1 > arg2 ? arg1 : arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1larger);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1smaller);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1smaller(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -430,9 +288,9 @@ pgstrom_int1smaller(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT8(arg1 < arg2 ? arg1 : arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1smaller);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int12eq);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int12eq(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -440,9 +298,9 @@ pgstrom_int12eq(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 == arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int12eq);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int12ne);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int12ne(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -450,9 +308,9 @@ pgstrom_int12ne(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 != arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int12ne);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int12lt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int12lt(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -460,9 +318,9 @@ pgstrom_int12lt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 < arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int12lt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int12le);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int12le(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -470,9 +328,9 @@ pgstrom_int12le(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 <= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int12le);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int12gt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int12gt(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -480,9 +338,9 @@ pgstrom_int12gt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 > arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int12gt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int12ge);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int12ge(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -490,9 +348,9 @@ pgstrom_int12ge(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 >= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int12ge);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int14eq);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int14eq(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -500,9 +358,9 @@ pgstrom_int14eq(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 == arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int14eq);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int14ne);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int14ne(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -510,9 +368,9 @@ pgstrom_int14ne(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 != arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int14ne);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int14lt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int14lt(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -520,9 +378,9 @@ pgstrom_int14lt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 < arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int14lt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int14le);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int14le(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -530,9 +388,9 @@ pgstrom_int14le(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 <= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int14le);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int14gt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int14gt(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -540,9 +398,9 @@ pgstrom_int14gt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 > arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int14gt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int14ge);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int14ge(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -550,9 +408,9 @@ pgstrom_int14ge(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 >= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int14ge);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int18eq);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int18eq(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -560,9 +418,9 @@ pgstrom_int18eq(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 == arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int18eq);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int18ne);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int18ne(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -570,9 +428,9 @@ pgstrom_int18ne(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 != arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int18ne);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int18lt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int18lt(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -580,9 +438,9 @@ pgstrom_int18lt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 < arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int18lt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int18le);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int18le(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -590,9 +448,9 @@ pgstrom_int18le(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 <= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int18le);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int18gt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int18gt(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -600,9 +458,9 @@ pgstrom_int18gt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 > arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int18gt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int18ge);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int18ge(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -610,9 +468,9 @@ pgstrom_int18ge(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 >= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int18ge);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int21eq);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int21eq(PG_FUNCTION_ARGS)
 {
 	int16	arg1 = PG_GETARG_INT16(0);
@@ -620,9 +478,9 @@ pgstrom_int21eq(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 == arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int21eq);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int21ne);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int21ne(PG_FUNCTION_ARGS)
 {
 	int16	arg1 = PG_GETARG_INT16(0);
@@ -630,9 +488,9 @@ pgstrom_int21ne(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 != arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int21ne);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int21lt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int21lt(PG_FUNCTION_ARGS)
 {
 	int16	arg1 = PG_GETARG_INT16(0);
@@ -640,9 +498,9 @@ pgstrom_int21lt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 < arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int21lt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int21le);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int21le(PG_FUNCTION_ARGS)
 {
 	int16	arg1 = PG_GETARG_INT16(0);
@@ -650,9 +508,9 @@ pgstrom_int21le(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 <= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int21le);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int21gt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int21gt(PG_FUNCTION_ARGS)
 {
 	int16	arg1 = PG_GETARG_INT16(0);
@@ -660,9 +518,9 @@ pgstrom_int21gt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 > arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int21gt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int21ge);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int21ge(PG_FUNCTION_ARGS)
 {
 	int16	arg1 = PG_GETARG_INT16(0);
@@ -670,9 +528,9 @@ pgstrom_int21ge(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 >= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int21ge);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int41eq);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int41eq(PG_FUNCTION_ARGS)
 {
 	int32	arg1 = PG_GETARG_INT32(0);
@@ -680,9 +538,9 @@ pgstrom_int41eq(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 == arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int41eq);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int41ne);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int41ne(PG_FUNCTION_ARGS)
 {
 	int32	arg1 = PG_GETARG_INT32(0);
@@ -690,9 +548,9 @@ pgstrom_int41ne(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 != arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int41ne);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int41lt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int41lt(PG_FUNCTION_ARGS)
 {
 	int32	arg1 = PG_GETARG_INT32(0);
@@ -700,9 +558,9 @@ pgstrom_int41lt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 < arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int41lt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int41le);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int41le(PG_FUNCTION_ARGS)
 {
 	int32	arg1 = PG_GETARG_INT32(0);
@@ -710,9 +568,9 @@ pgstrom_int41le(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 <= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int41le);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int41gt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int41gt(PG_FUNCTION_ARGS)
 {
 	int32	arg1 = PG_GETARG_INT32(0);
@@ -720,9 +578,9 @@ pgstrom_int41gt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 > arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int41gt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int41ge);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int41ge(PG_FUNCTION_ARGS)
 {
 	int32	arg1 = PG_GETARG_INT32(0);
@@ -730,9 +588,9 @@ pgstrom_int41ge(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 >= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int41ge);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int81eq);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int81eq(PG_FUNCTION_ARGS)
 {
 	int64	arg1 = PG_GETARG_INT64(0);
@@ -740,9 +598,9 @@ pgstrom_int81eq(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 == arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int81eq);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int81ne);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int81ne(PG_FUNCTION_ARGS)
 {
 	int64	arg1 = PG_GETARG_INT64(0);
@@ -750,9 +608,9 @@ pgstrom_int81ne(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 != arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int81ne);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int81lt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int81lt(PG_FUNCTION_ARGS)
 {
 	int64	arg1 = PG_GETARG_INT64(0);
@@ -760,9 +618,9 @@ pgstrom_int81lt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 < arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int81lt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int81le);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int81le(PG_FUNCTION_ARGS)
 {
 	int64	arg1 = PG_GETARG_INT64(0);
@@ -770,9 +628,9 @@ pgstrom_int81le(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 <= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int81le);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int81gt);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int81gt(PG_FUNCTION_ARGS)
 {
 	int64	arg1 = PG_GETARG_INT64(0);
@@ -780,9 +638,9 @@ pgstrom_int81gt(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 > arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int81gt);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int81ge);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int81ge(PG_FUNCTION_ARGS)
 {
 	int64	arg1 = PG_GETARG_INT64(0);
@@ -790,9 +648,9 @@ pgstrom_int81ge(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(arg1 >= arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int81ge);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1hash);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1hash(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -800,9 +658,9 @@ pgstrom_int1hash(PG_FUNCTION_ARGS)
 	/* Does it really make sense? */
 	return hash_any((unsigned char *)&arg1, sizeof(int8));
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1hash);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_btint1cmp);
+PUBLIC_FUNCTION(Datum)
 pgstrom_btint1cmp(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -815,9 +673,9 @@ pgstrom_btint1cmp(PG_FUNCTION_ARGS)
 	else
 		PG_RETURN_INT32(0);
 }
-PG_FUNCTION_INFO_V1(pgstrom_btint1cmp);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_btint12cmp);
+PUBLIC_FUNCTION(Datum)
 pgstrom_btint12cmp(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -830,9 +688,9 @@ pgstrom_btint12cmp(PG_FUNCTION_ARGS)
 	else
 		PG_RETURN_INT32(0);
 }
-PG_FUNCTION_INFO_V1(pgstrom_btint12cmp);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_btint14cmp);
+PUBLIC_FUNCTION(Datum)
 pgstrom_btint14cmp(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -845,9 +703,9 @@ pgstrom_btint14cmp(PG_FUNCTION_ARGS)
 	else
 		PG_RETURN_INT32(0);
 }
-PG_FUNCTION_INFO_V1(pgstrom_btint14cmp);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_btint18cmp);
+PUBLIC_FUNCTION(Datum)
 pgstrom_btint18cmp(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -860,9 +718,9 @@ pgstrom_btint18cmp(PG_FUNCTION_ARGS)
 	else
 		PG_RETURN_INT32(0);
 }
-PG_FUNCTION_INFO_V1(pgstrom_btint18cmp);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_btint21cmp);
+PUBLIC_FUNCTION(Datum)
 pgstrom_btint21cmp(PG_FUNCTION_ARGS)
 {
 	int16	arg1 = PG_GETARG_INT16(0);
@@ -875,9 +733,9 @@ pgstrom_btint21cmp(PG_FUNCTION_ARGS)
 	else
 		PG_RETURN_INT32(0);
 }
-PG_FUNCTION_INFO_V1(pgstrom_btint21cmp);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_btint41cmp);
+PUBLIC_FUNCTION(Datum)
 pgstrom_btint41cmp(PG_FUNCTION_ARGS)
 {
 	int32	arg1 = PG_GETARG_INT32(0);
@@ -890,9 +748,9 @@ pgstrom_btint41cmp(PG_FUNCTION_ARGS)
 	else
 		PG_RETURN_INT32(0);
 }
-PG_FUNCTION_INFO_V1(pgstrom_btint41cmp);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_btint81cmp);
+PUBLIC_FUNCTION(Datum)
 pgstrom_btint81cmp(PG_FUNCTION_ARGS)
 {
 	int64	arg1 = PG_GETARG_INT64(0);
@@ -905,40 +763,40 @@ pgstrom_btint81cmp(PG_FUNCTION_ARGS)
 	else
 		PG_RETURN_INT32(0);
 }
-PG_FUNCTION_INFO_V1(pgstrom_btint81cmp);
 
 /* unary operators */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1up);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1up(PG_FUNCTION_ARGS)
 {
 	int8	arg = PG_GETARG_INT8(0);
 
 	PG_RETURN_INT8(arg);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1up);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1um);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1um(PG_FUNCTION_ARGS)
 {
 	int8	arg = PG_GETARG_INT8(0);
 
 	PG_RETURN_INT8(-arg);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1um);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1abs);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1abs(PG_FUNCTION_ARGS)
 {
 	int8	arg = PG_GETARG_INT8(0);
 
 	PG_RETURN_INT8(arg < 0 ? -arg : arg);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1abs);
 
 /*
  * Arithmetic operators
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1pl);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1pl(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -951,9 +809,9 @@ pgstrom_int1pl(PG_FUNCTION_ARGS)
 				 errmsg("tinyint out of range")));
 	PG_RETURN_INT8(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1pl);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1mi);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1mi(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -966,9 +824,9 @@ pgstrom_int1mi(PG_FUNCTION_ARGS)
 				 errmsg("tinyint out of range")));
 	PG_RETURN_INT8(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1mi);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1mul);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1mul(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -981,9 +839,9 @@ pgstrom_int1mul(PG_FUNCTION_ARGS)
 				 errmsg("tinyint out of range")));
 	PG_RETURN_INT8(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1mul);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1div);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1div(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1008,9 +866,9 @@ pgstrom_int1div(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_INT8(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1div);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1mod);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1mod(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1025,9 +883,9 @@ pgstrom_int1mod(PG_FUNCTION_ARGS)
 	/* no overflow is possible */
 	PG_RETURN_INT8(arg1 % arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1mod);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int12pl);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int12pl(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1040,9 +898,9 @@ pgstrom_int12pl(PG_FUNCTION_ARGS)
 				 errmsg("smallint out of range")));
 	PG_RETURN_INT16(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int12pl);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int12mi);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int12mi(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1055,9 +913,9 @@ pgstrom_int12mi(PG_FUNCTION_ARGS)
 				 errmsg("smallint out of range")));
 	PG_RETURN_INT16(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int12mi);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int12mul);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int12mul(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1070,9 +928,9 @@ pgstrom_int12mul(PG_FUNCTION_ARGS)
 				 errmsg("smallint out of range")));
 	PG_RETURN_INT16(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int12mul);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int12div);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int12div(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1085,9 +943,9 @@ pgstrom_int12div(PG_FUNCTION_ARGS)
 	/* no overflow is possible */
 	PG_RETURN_INT16((int16)arg1 / arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int12div);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int14pl);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int14pl(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1100,9 +958,9 @@ pgstrom_int14pl(PG_FUNCTION_ARGS)
 				 errmsg("integer out of range")));
 	PG_RETURN_INT32(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int14pl);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int14mi);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int14mi(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1115,9 +973,9 @@ pgstrom_int14mi(PG_FUNCTION_ARGS)
 				 errmsg("integer out of range")));
 	PG_RETURN_INT32(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int14mi);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int14mul);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int14mul(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1130,9 +988,9 @@ pgstrom_int14mul(PG_FUNCTION_ARGS)
 				 errmsg("integer out of range")));
 	PG_RETURN_INT32(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int14mul);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int14div);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int14div(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1145,9 +1003,9 @@ pgstrom_int14div(PG_FUNCTION_ARGS)
 	/* no overflow is possible */
 	PG_RETURN_INT32((int32)arg1 / arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int14div);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int18pl);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int18pl(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1160,9 +1018,9 @@ pgstrom_int18pl(PG_FUNCTION_ARGS)
 				 errmsg("bigint out of range")));
 	PG_RETURN_INT64(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int18pl);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int18mi);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int18mi(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1175,9 +1033,9 @@ pgstrom_int18mi(PG_FUNCTION_ARGS)
 				 errmsg("bigint out of range")));
 	PG_RETURN_INT64(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int18mi);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int18mul);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int18mul(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1190,9 +1048,9 @@ pgstrom_int18mul(PG_FUNCTION_ARGS)
 				 errmsg("bigint out of range")));
 	PG_RETURN_INT64(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int18mul);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int18div);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int18div(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1205,9 +1063,9 @@ pgstrom_int18div(PG_FUNCTION_ARGS)
 	/* no overflow is possible */
 	PG_RETURN_INT64((int64)arg1 / arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int18div);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int21pl);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int21pl(PG_FUNCTION_ARGS)
 {
 	int16	arg1 = PG_GETARG_INT16(0);
@@ -1220,9 +1078,9 @@ pgstrom_int21pl(PG_FUNCTION_ARGS)
 				 errmsg("smallint out of range")));
 	PG_RETURN_INT16(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int21pl);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int21mi);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int21mi(PG_FUNCTION_ARGS)
 {
 	int16	arg1 = PG_GETARG_INT16(0);
@@ -1235,9 +1093,9 @@ pgstrom_int21mi(PG_FUNCTION_ARGS)
 				 errmsg("smallint out of range")));
 	PG_RETURN_INT16(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int21mi);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int21mul);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int21mul(PG_FUNCTION_ARGS)
 {
 	int16	arg1 = PG_GETARG_INT16(0);
@@ -1250,9 +1108,9 @@ pgstrom_int21mul(PG_FUNCTION_ARGS)
 				 errmsg("smallint out of range")));
 	PG_RETURN_INT16(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int21mul);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int21div);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int21div(PG_FUNCTION_ARGS)
 {
 	int16	arg1 = PG_GETARG_INT16(0);
@@ -1278,9 +1136,9 @@ pgstrom_int21div(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_INT16(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int21div);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int41pl);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int41pl(PG_FUNCTION_ARGS)
 {
 	int32	arg1 = PG_GETARG_INT32(0);
@@ -1293,9 +1151,9 @@ pgstrom_int41pl(PG_FUNCTION_ARGS)
 				 errmsg("integer out of range")));
 	PG_RETURN_INT32(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int41pl);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int41mi);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int41mi(PG_FUNCTION_ARGS)
 {
 	int32	arg1 = PG_GETARG_INT32(0);
@@ -1308,9 +1166,9 @@ pgstrom_int41mi(PG_FUNCTION_ARGS)
 				 errmsg("integer out of range")));
 	PG_RETURN_INT32(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int41mi);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int41mul);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int41mul(PG_FUNCTION_ARGS)
 {
 	int32	arg1 = PG_GETARG_INT32(0);
@@ -1323,9 +1181,9 @@ pgstrom_int41mul(PG_FUNCTION_ARGS)
 				 errmsg("integer out of range")));
 	PG_RETURN_INT32(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int41mul);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int41div);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int41div(PG_FUNCTION_ARGS)
 {
 	int32	arg1 = PG_GETARG_INT32(0);
@@ -1350,9 +1208,9 @@ pgstrom_int41div(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_INT32(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int41div);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int81pl);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int81pl(PG_FUNCTION_ARGS)
 {
 	int64	arg1 = PG_GETARG_INT64(0);
@@ -1365,9 +1223,9 @@ pgstrom_int81pl(PG_FUNCTION_ARGS)
 				 errmsg("bigint out of range")));
 	PG_RETURN_INT64(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int81pl);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int81mi);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int81mi(PG_FUNCTION_ARGS)
 {
 	int64	arg1 = PG_GETARG_INT64(0);
@@ -1380,9 +1238,9 @@ pgstrom_int81mi(PG_FUNCTION_ARGS)
 				 errmsg("bigint out of range")));
 	PG_RETURN_INT64(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int81mi);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int81mul);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int81mul(PG_FUNCTION_ARGS)
 {
 	int64	arg1 = PG_GETARG_INT64(0);
@@ -1395,9 +1253,9 @@ pgstrom_int81mul(PG_FUNCTION_ARGS)
 				 errmsg("bigint out of range")));
 	PG_RETURN_INT64(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int81mul);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int81div);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int81div(PG_FUNCTION_ARGS)
 {
 	int64	arg1 = PG_GETARG_INT64(0);
@@ -1422,12 +1280,12 @@ pgstrom_int81div(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_INT64(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int81div);
 
 /*
  * Bit operations
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1and);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1and(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1435,9 +1293,9 @@ pgstrom_int1and(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT8(arg1 & arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1and);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1or);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1or(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1445,9 +1303,9 @@ pgstrom_int1or(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT8(arg1 | arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1or);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1xor);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1xor(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1455,18 +1313,18 @@ pgstrom_int1xor(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT8(arg1 ^ arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1xor);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1not);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1not(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
 
 	PG_RETURN_INT8(~arg1);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1not);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1shl);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1shl(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1474,9 +1332,9 @@ pgstrom_int1shl(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT8(arg1 << arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1shl);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1shr);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1shr(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1484,12 +1342,12 @@ pgstrom_int1shr(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT8(arg1 >> arg2);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1shr);
 
 /*
  * misc functions
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_cash_mul_int1);
+PUBLIC_FUNCTION(Datum)
 pgstrom_cash_mul_int1(PG_FUNCTION_ARGS)
 {
 	Cash	arg1 = PG_GETARG_CASH(0);
@@ -1502,9 +1360,9 @@ pgstrom_cash_mul_int1(PG_FUNCTION_ARGS)
 				 errmsg("money out of range")));
 	PG_RETURN_CASH(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_cash_mul_int1);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1_mul_cash);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1_mul_cash(PG_FUNCTION_ARGS)
 {
 	int8	arg1 = PG_GETARG_INT8(0);
@@ -1517,9 +1375,9 @@ pgstrom_int1_mul_cash(PG_FUNCTION_ARGS)
 				 errmsg("money out of range")));
 	PG_RETURN_CASH(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1_mul_cash);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_cash_div_int1);
+PUBLIC_FUNCTION(Datum)
 pgstrom_cash_div_int1(PG_FUNCTION_ARGS)
 {
 	Cash	arg1 = PG_GETARG_CASH(0);
@@ -1544,10 +1402,10 @@ pgstrom_cash_div_int1(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_CASH(retval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_cash_div_int1);
 
 /* aggregate functions */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1_sum);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1_sum(PG_FUNCTION_ARGS)
 {
 	int64	newval;
@@ -1566,9 +1424,9 @@ pgstrom_int1_sum(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_INT64(newval);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1_sum);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1_avg_accum);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1_avg_accum(PG_FUNCTION_ARGS)
 {
 	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
@@ -1608,9 +1466,9 @@ pgstrom_int1_avg_accum(PG_FUNCTION_ARGS)
 		PG_RETURN_ARRAYTYPE_P(result);
 	}
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1_avg_accum);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1_avg_accum_inv);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1_avg_accum_inv(PG_FUNCTION_ARGS)
 {
 	ArrayType  *transarray;
@@ -1638,9 +1496,9 @@ pgstrom_int1_avg_accum_inv(PG_FUNCTION_ARGS)
 	transvalues[1] -= ival;
 	PG_RETURN_ARRAYTYPE_P(transarray);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1_avg_accum_inv);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1_var_accum);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1_var_accum(PG_FUNCTION_ARGS)
 {
 	int32		ival = (int32)PG_GETARG_INT8(1);
@@ -1648,9 +1506,9 @@ pgstrom_int1_var_accum(PG_FUNCTION_ARGS)
 	PG_GETARG_DATUM(1) = Int32GetDatum(ival);
 	return int4_accum(fcinfo);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1_var_accum);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_int1_var_accum_inv);
+PUBLIC_FUNCTION(Datum)
 pgstrom_int1_var_accum_inv(PG_FUNCTION_ARGS)
 {
 	int32		ival = (int32)PG_GETARG_INT8(1);
@@ -1658,4 +1516,3 @@ pgstrom_int1_var_accum_inv(PG_FUNCTION_ARGS)
 	PG_GETARG_DATUM(1) = Int32GetDatum(ival);
 	return int4_accum_inv(fcinfo);
 }
-PG_FUNCTION_INFO_V1(pgstrom_int1_var_accum_inv);

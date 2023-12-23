@@ -13,16 +13,30 @@
 #define XPU_NUMERIC_H
 
 typedef struct {
+	KVEC_DATUM_COMMON_FIELD;
+	uint8_t		kinds[KVEC_UNITSZ];
+	int16_t		weights[KVEC_UNITSZ];
+	struct {
+		const varlena  *ptr;
+		uint64_t		u64;
+	}			values_lo[KVEC_UNITSZ];
+	int64_t		values_hi[KVEC_UNITSZ];
+} kvec_numeric_t;
+
+typedef struct {
 	XPU_DATUM_COMMON_FIELD;
-	uint8_t		kind;		/* one of XPU_NUMERIC_KIND__* below */
+	uint8_t		kind;			/* one of XPU_NUMERIC_KIND__* below */
 	int16_t		weight;
-	int128_t	value;
+	union {
+		const varlena *vl_addr;	/* <= XPU_NUMERIC_KIND__VARLENA */
+		int128_t	value;		/* <= XPU_NUMERIC_KIND__VALID */
+	} u;
 } xpu_numeric_t;
 #define XPU_NUMERIC_KIND__VALID		0x00
 #define XPU_NUMERIC_KIND__NAN		0x01
 #define XPU_NUMERIC_KIND__POS_INF	0x02
 #define XPU_NUMERIC_KIND__NEG_INF	0x03
-
+#define XPU_NUMERIC_KIND__VARLENA	0xff		/* still in raw varlena format */
 EXTERN_DATA xpu_datum_operators xpu_numeric_ops;
 
 /*
@@ -162,9 +176,9 @@ set_normalized_numeric(xpu_numeric_t *result, int128_t value, int16_t weight)
 		}
 	}
 	result->expr_ops = &xpu_numeric_ops;
-	result->kind = XPU_NUMERIC_KIND__VALID;
-	result->weight = weight;
-	result->value = value;
+	result->kind     = XPU_NUMERIC_KIND__VALID;
+	result->weight   = weight;
+	result->u.value  = value;
 }
 
 INLINE_FUNCTION(const char *)
@@ -190,8 +204,8 @@ __xpu_numeric_from_varlena(xpu_numeric_t *result, const varlena *addr)
 			else
 				goto error;
 
-			result->weight = 0;
-			result->value = 0;
+			result->weight  = 0;
+			result->u.value = 0;
 		}
 		else
 		{
@@ -234,52 +248,82 @@ __xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 	NumericDigit	n_data[PG_MAX_DATA];
 	int				ndigits;
 	int				len;
-	uint16_t		n_header = (Max(weight, 0) & NUMERIC_DSCALE_MASK);
-	bool			is_negative = (value < 0);
+	uint16_t		n_header = Max(weight, 0);
+	bool			is_negative = false;
 
-	if (is_negative)
-		value = -value;
-	switch (weight % PG_DEC_DIGITS)
+	if (value < 0)
 	{
-		case 3:
-		case -1:
-			value *= 10;
-			weight += 1;
-			break;
-		case 2:
-		case -2:
-			value *= 100;
-			weight += 2;
-			break;
-		case 1:
-		case -3:
-			value *= 1000;
-			weight += 3;
-			break;
-		default:
-			/* ok */
-			break;
+		is_negative = true;
+		value = -value;
 	}
-	Assert(weight % PG_DEC_DIGITS == 0);
 
+	/* special case handling for the least digits */
 	ndigits = 0;
+	if (value != 0)
+	{
+		int		mod = -1;
+
+		switch (weight % PG_DEC_DIGITS)
+		{
+			case -1:
+			case 3:
+				mod = (value % 1000) * 10;
+				value /= 1000;
+				weight += 1;
+				break;
+
+			case -2:
+			case 2:
+				mod = (value % 100) * 100;
+				value /= 100;
+				weight += 2;
+				break;
+
+			case -3:
+			case 1:
+				mod = (value % 10) * 1000;
+				value /= 10;
+				weight += 3;
+				break;
+			default:
+				/* well aligned */
+				break;
+		}
+		if (mod >= 0)
+		{
+			ndigits++;
+			n_data[PG_MAX_DATA - ndigits] = mod;
+		}
+	}
+	else
+	{
+		/* value == 0 makes no sense on 'weight' */
+		weight = 0;
+	}
+
 	while (value != 0)
     {
 		int		mod;
 
 		mod = (value % PG_NBASE);
 		value /= PG_NBASE;
-		Assert(ndigits < PG_MAX_DATA);
 		ndigits++;
 		n_data[PG_MAX_DATA - ndigits] = mod;
 	}
+	assert((weight % PG_DEC_DIGITS) == 0);
 	len = (offsetof(NumericData, choice.n_long.n_data)
 		   + sizeof(NumericDigit) * ndigits);
+	if (weight < 0)
+		len += sizeof(NumericDigit) * (-weight / PG_DEC_DIGITS);
 	if (buffer)
 	{
-		memcpy(numBody->n_data,
-			   n_data + PG_MAX_DATA - ndigits,
-			   sizeof(NumericDigit) * ndigits);
+		if (ndigits > 0)
+			memcpy(numBody->n_data,
+				   n_data + PG_MAX_DATA - ndigits,
+				   sizeof(NumericDigit) * ndigits);
+		if (weight < 0)
+			memset(numBody->n_data + ndigits, 0,
+				   sizeof(NumericDigit) * (-weight / PG_DEC_DIGITS));
 		if (is_negative)
 			n_header |= NUMERIC_NEG;
 		numBody->n_sign_dscale = n_header;
@@ -297,12 +341,12 @@ pg_numeric_to_cstring(kern_context *kcxt,
 EXTERN_FUNCTION(bool)
 __xpu_numeric_to_int64(kern_context *kcxt,
 					   int64_t *p_ival,
-					   const xpu_numeric_t *num,
+					   xpu_numeric_t *num,
 					   int64_t min_value,
 					   int64_t max_value);
 EXTERN_FUNCTION(bool)
 __xpu_numeric_to_fp64(kern_context *kcxt,
 					  float8_t *p_ival,
-					  const xpu_numeric_t *num);
+					  xpu_numeric_t *num);
 
 #endif /* XPU_NUMERIC_H */

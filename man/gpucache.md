@@ -33,12 +33,12 @@ Nevertheless, you can process search/analytical SQL workloads on data already lo
 ![GPU Cache Usage](./img/gpucache_usage.png)
 
 @ja{
-GPUキャッシュの典型的な利用シーンとしては、自動車や携帯電話といったモバイルデバイスの位置情報（現在位置）を時々刻々収集し、[GPU版PostGIS](../postgis/)などを用いて他のデータと突き合わせるといったケースが考えられます。
+GPUキャッシュの典型的な利用シーンとしては、自動車や携帯電話といったモバイルデバイスの位置情報（現在位置）を時々刻々収集し、[GPU版PostGIS](postgis.md)などを用いて他のデータと突き合わせるといったケースが考えられます。
 多数のデバイスから送出される位置情報の更新は極めて更新ヘビーなワークロードですが、一方で、最新の位置情報に基づいて検索/分析クエリを実行する必要もあるため、これら更新データを遅滞なくGPU側へ適用する必要があります。
 データサイズには制約がありますが、GPUキャッシュは高頻度の更新と、高性能な検索/分析クエリの実行を両立する一つのオプションです。
 }
 @en{
-A typical use case of GPU Cache is to join location data, such as the current position of a mobile device like a car or a cell phone, collected in real time with other data using [GPU-PostGIS](../postgis/).
+A typical use case of GPU Cache is to join location data, such as the current position of a mobile device like a car or a cell phone, collected in real time with other data using [GPU-PostGIS](postgis.md).
 The workload of updating location information sent out by many devices is extremely heavy. However, it also needs to be applied on the GPU side without delay in order to perform search/analysis queries based on the latest location information.
 Although the size is limited, GPU Cache is one option to achieve both high frequency updates and high-performance search/analysis query execution.
 }

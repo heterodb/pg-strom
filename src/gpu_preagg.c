@@ -628,6 +628,7 @@ typedef struct
 	Oid		partial_func_rettype;
 	int		partial_func_nargs;
 	int		partial_func_action;
+	int		partial_func_bufsz;
 	bool	numeric_aware;
 	bool	is_valid_entry;
 } aggfunc_catalog_entry;
@@ -712,34 +713,59 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 	Oid		func_oid = __aggfunc_resolve_func_signature(partfn_signature);
 	Oid		type_oid;
 	int		func_nargs;
+	int		partfn_bufsz;
 
 	switch (partfn_action)
 	{
 		case KAGG_ACTION__NROWS_ANY:
 			func_nargs = 0;
 			type_oid = INT8OID;
+			partfn_bufsz = sizeof(int64_t);
 			break;
 		case KAGG_ACTION__NROWS_COND:
 			func_nargs = 1;
 			type_oid = INT8OID;
+			partfn_bufsz = sizeof(int64_t);
 			break;
 		case KAGG_ACTION__PMIN_INT32:
 		case KAGG_ACTION__PMIN_INT64:
-		case KAGG_ACTION__PMIN_FP64:
 		case KAGG_ACTION__PMAX_INT32:
 		case KAGG_ACTION__PMAX_INT64:
+			func_nargs = 1;
+            type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__pminmax_int64_packed);
+			break;
+
+		case KAGG_ACTION__PMIN_FP64:
 		case KAGG_ACTION__PMAX_FP64:
+			func_nargs = 1;
+			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__pminmax_fp64_packed);
+			break;
+
 		case KAGG_ACTION__PAVG_INT:
 		case KAGG_ACTION__PSUM_INT:
+			func_nargs = 1;
+			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__psum_int_packed);
+			break;
+
 		case KAGG_ACTION__PAVG_FP:
 		case KAGG_ACTION__PSUM_FP:
+			func_nargs = 1;
+			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__psum_fp_packed);
+			break;
+			
 		case KAGG_ACTION__STDDEV:
 			func_nargs = 1;
 			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__stddev_packed);
 			break;
 		case KAGG_ACTION__COVAR:
 			func_nargs = 2;
 			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__covar_packed);
 			break;
 		default:
 			elog(ERROR, "Catalog corruption? unknown action: %d", partfn_action);
@@ -749,9 +775,11 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 	entry->partial_func_rettype = get_func_rettype(func_oid);
 	entry->partial_func_nargs = get_func_nargs(func_oid);
 	entry->partial_func_action = partfn_action;
+	entry->partial_func_bufsz  = partfn_bufsz;
 
 	if (entry->partial_func_rettype != type_oid ||
-		entry->partial_func_nargs != func_nargs)
+		entry->partial_func_nargs != func_nargs ||
+		entry->partial_func_bufsz != MAXALIGN(partfn_bufsz))
 		elog(ERROR, "Catalog curruption? partial function mismatch: %s",
 			 partfn_signature);
 }
@@ -888,8 +916,8 @@ typedef struct
 	PathTarget	   *target_final;
 	AggClauseCosts	final_clause_costs;
 	pgstromPlanInfo *pp_info;
-	List		   *input_rels_tlist;
 	List		   *inner_paths_list;
+	List		   *inner_target_list;
 	List		   *groupby_keys;
 	List		   *groupby_keys_refno;
 	Node		   *havingQual;
@@ -1021,7 +1049,8 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 			expr = make_expr_typecast(expr, dest_oid);
 		if (!pgstrom_xpu_expression(expr,
 									pp_info->xpu_task_flags,
-									con->input_rels_tlist,
+									pp_info->scan_relid,
+									con->inner_target_list,
 									NULL))
 		{
 			elog(DEBUG2, "Partial aggregate argument is not executable: %s",
@@ -1044,6 +1073,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 		add_column_to_pathtarget(target_partial, partfn, 0);
 		pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
 											   aggfn_cat->partial_func_action);
+		pp_info->groupby_prepfn_bufsz += aggfn_cat->partial_func_bufsz;
 	}
 
 	/*
@@ -1210,7 +1240,8 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			/* grouping-key must be device executable. */
 			if (!pgstrom_xpu_expression(expr,
 										pp_info->xpu_task_flags,
-										con->input_rels_tlist,
+										pp_info->scan_relid,
+										con->inner_target_list,
 										NULL))
 			{
 				elog(DEBUG2, "Grouping-key must be device executable: %s",
@@ -1276,14 +1307,10 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 		Index	keyref = lfirst_int(lc2);
 
 		add_column_to_pathtarget(con->target_partial, key, keyref);
-//		pp_info->groupby_keys = lappend(pp_info->groupby_keys, key);
 		pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
 											   keyref == 0
 											   ? KAGG_ACTION__VREF_NOKEY
 											   : KAGG_ACTION__VREF);
-		pp_info->kvars_depth = lappend_int(pp_info->kvars_depth, -1);
-		pp_info->kvars_resno = lappend_int(pp_info->kvars_resno,
-										   list_length(con->target_partial->exprs));
 	}
 	set_pathtarget_cost_width(root, con->target_final);
 	set_pathtarget_cost_width(root, con->target_partial);
@@ -1429,15 +1456,14 @@ __xpupreagg_add_custompath(PlannerInfo *root,
 {
 	xpugroupby_build_path_context con;
 	Path	   *part_path;
-	List	   *inner_rels_tlist;
+	List	   *inner_target_list = NIL;
 	ListCell   *lc;
 
-	inner_rels_tlist = list_make1(makeInteger(pp_info->scan_relid));
 	foreach (lc, inner_paths_list)
 	{
 		Path   *i_path = (Path *)lfirst(lc);
 
-		inner_rels_tlist = lappend(inner_rels_tlist, i_path->pathtarget);
+		inner_target_list = lappend(inner_target_list, i_path->pathtarget);
 	}
 	/* setup context */
 	memset(&con, 0, sizeof(con));
@@ -1452,8 +1478,8 @@ __xpupreagg_add_custompath(PlannerInfo *root,
 	con.target_partial = create_empty_pathtarget();
 	con.target_final   = create_empty_pathtarget();
 	con.pp_info        = pp_info;
-	con.input_rels_tlist = inner_rels_tlist;
 	con.inner_paths_list = inner_paths_list;
+	con.inner_target_list = inner_target_list;
 	con.custom_path_methods = custom_path_methods;
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
@@ -1687,16 +1713,15 @@ CreateDpuPreAggScanState(CustomScan *cscan)
 /*
  * ExecFallbackCpuPreAgg
  */
-void
-ExecFallbackCpuPreAgg(pgstromTaskState *pts,
-					  kern_data_store *kds,
-					  HeapTuple tuple)
+bool
+ExecFallbackCpuPreAgg(pgstromTaskState *pts, HeapTuple tuple)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("CPU Fallback of GpuPreAgg is not implemented yet"),
 			 errhint("'pg_strom.enable_gpupreagg' configuration can turn off GpuPreAgg only"),
 			 errdetail("GpuPreAgg often detects uncontinuable errors during update of the final aggregation buffer. Even if we re-run the source data chunk, the final aggregation buffer is already polluted, so we have no reasonable way to recover right now.")));
+	return false;
 }
 
 /*

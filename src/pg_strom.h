@@ -123,7 +123,7 @@
 #include "utils/uuid.h"
 #include "utils/wait_event.h"
 #include <assert.h>
-#define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
+//#define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
 #include <cufile.h>
 #include <ctype.h>
@@ -173,6 +173,8 @@ typedef struct GpuDevAttributes
 #undef DEV_ATTR
 } GpuDevAttributes;
 
+#define DEV_ATTR__UNKNOWN		(-0x7e7e7e7e)
+
 extern GpuDevAttributes *gpuDevAttrs;
 extern int		numGpuDevAttrs;
 #define GPUKERNEL_MAX_SM_MULTIPLICITY	4
@@ -199,8 +201,9 @@ typedef struct devtype_info
 	const char *type_extension;
 	const char *type_name;
 	Oid			type_namespace;
-	int			type_sizeof;
+	int			type_sizeof;		/* sizeof(xpu_NAME_t) */
 	int			type_alignof;
+	int			kvec_sizeof;		/* sizeof(kvec_NAME_t) */
 	devtype_hashfunc_f type_hashfunc;
 	/* oid of type related functions */
 	Oid			type_eqfunc;
@@ -290,9 +293,9 @@ typedef struct
 	List	   *brin_index_conds;	/* BRIN-index key conditions */
 	List	   *brin_index_quals;	/* Original BRIN-index qualifier */
 	/* XPU code for JOIN */
-	bytea	   *kexp_scan_kvars_load;	/* VarLoads at depth=0 */
+	bytea	   *kexp_load_vars_packed;	/* LoadVars[] */
+	bytea	   *kexp_move_vars_packed;	/* MoveVars[] */
 	bytea	   *kexp_scan_quals;
-	bytea	   *kexp_join_kvars_load_packed; /* VarLoads at depth>0 */
 	bytea	   *kexp_join_quals_packed;
 	bytea	   *kexp_hash_keys_packed;
 	bytea	   *kexp_gist_evals_packed;
@@ -301,16 +304,16 @@ typedef struct
 	bytea	   *kexp_groupby_keyload;
 	bytea	   *kexp_groupby_keycomp;
 	bytea	   *kexp_groupby_actions;
-	List	   *kvars_depth;
-	List	   *kvars_resno;
-	List	   *kvars_types;	/* type-oid, if it needs extra buffer on kvars-slot */
-	List	   *kvars_exprs;
+	List	   *kvars_deflist;
+	uint32_t	kvecs_bufsz;	/* unit size of vectorized kernel values */
+	uint32_t	kvecs_ndims;
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
 	/* fallback projection */
 	List	   *fallback_tlist;	/* fallback_slot -> custom_scan_tlist if JOIN/PREAGG */
 	/* group-by parameters */
-	List	   *groupby_actions;	/* list of KAGG_ACTION__* on the kds_final */
+	List	   *groupby_actions;		/* list of KAGG_ACTION__* on the kds_final */
+	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */
 	/* inner relations */
 	int			num_rels;
 	pgstromPlanInnerInfo inners[FLEXIBLE_ARRAY_MEMBER];
@@ -347,7 +350,6 @@ typedef struct
 	/* pg-strom's unique plan-id */
 	uint64_t			query_plan_id;
 	/* control variables to detect the last plan-node at parallel execution */
-	//pg_atomic_uint32	scan_task_control;
 	pg_atomic_uint32	parallel_task_control;
 	pg_atomic_uint32	__rjoin_exit_count;
 	/* statistics */
@@ -357,6 +359,8 @@ typedef struct
 	pg_atomic_uint64	source_ntuples_raw;	/* # of raw tuples in the base relation */
 	pg_atomic_uint64	source_ntuples_in;	/* # of tuples survived from WHERE-quals */
 	pg_atomic_uint64	result_ntuples;		/* # of tuples returned from xPU */
+	/* for parallel-scan */
+	uint32_t			parallel_scan_desc_offset;
 	/* for arrow_fdw */
 	pg_atomic_uint32	arrow_rbatch_index;
 	pg_atomic_uint32	arrow_rbatch_nload;	/* # of loaded record-batches */
@@ -390,9 +394,8 @@ typedef struct
 	/*
 	 * inner preload buffer
 	 */
-	List		   *preload_tuples;
-	List		   *preload_hashes;     /* if hash-join or gist-join */
-	size_t			preload_usage;
+	void		   *preload_buffer;
+
 	/*
 	 * join properties (common)
 	 */
@@ -405,8 +408,8 @@ typedef struct
 	 */
 	List		   *hash_outer_keys;    /* list of ExprState */
 	List		   *hash_inner_keys;    /* list of ExprState */
-	List		   *hash_outer_dtypes;  /* list of devtype_info */
-	List		   *hash_inner_dtypes;  /* list of devtype_info */
+	List		   *hash_outer_funcs;	/* list of devtype_hashfunc_f */
+	List		   *hash_inner_funcs;	/* list of devtype_hashfunc_f */
 	/*
 	 * join properties (gist-join)
 	 */
@@ -470,8 +473,7 @@ struct pgstromTaskState
 	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts,
 										kern_final_task *fin,
 										struct iovec *xcmd_iov, int *xcmd_iovcnt);
-	void			  (*cb_cpu_fallback)(struct pgstromTaskState *pts,
-										 struct kern_data_store *kds,
+	bool			  (*cb_cpu_fallback)(struct pgstromTaskState *pts,
 										 HeapTuple htuple);
 	/* inner relations state (if JOIN) */
 	int					num_rels;
@@ -500,30 +502,61 @@ extern bool		heterodbValidateDevice(int gpu_device_id,
 									   const char *gpu_device_uuid);
 extern void		gpuDirectOpenDriver(void);
 extern void		gpuDirectCloseDriver(void);
-extern bool		gpuDirectMapGpuMemory(CUdeviceptr m_segment,
-									  size_t segment_sz);
-extern bool		gpuDirectUnmapGpuMemory(CUdeviceptr m_segment);
+extern bool		gpuDirectMapGpuMemory(CUdeviceptr m_segment, size_t segment_sz,
+									  unsigned long *p_iomap_handle);
+extern bool		gpuDirectUnmapGpuMemory(CUdeviceptr m_segment,
+										unsigned long iomap_handle);
+extern bool		gpuDirectRegisterStream(CUstream cuda_stream);
+extern bool		gpuDirectDeregisterStream(CUstream cuda_stream);
 extern bool		gpuDirectFileReadIOV(const char *pathname,
 									 CUdeviceptr m_segment,
 									 off_t m_offset,
+									 unsigned long iomap_handle,
 									 const strom_io_vector *iovec,
 									 uint32_t *p_npages_direct_read,
 									 uint32_t *p_npages_vfs_read);
+extern bool		gpuDirectFileReadAsyncIOV(const char *pathname,
+										  CUdeviceptr m_segment,
+										  off_t m_offset,
+										  unsigned long iomap_handle,
+										  const strom_io_vector *iovec,
+										  CUstream cuda_stream,
+										  uint32_t *p_error_code_async,
+										  uint32_t *p_npages_direct_read,
+										  uint32_t *p_npages_vfs_read);
 extern char	   *gpuDirectGetProperty(void);
 extern void		gpuDirectSetProperty(const char *key, const char *value);
+extern void		gpuDirectCleanUpOnThreadTerminate(void);
 extern bool		gpuDirectIsAvailable(void);
 
 extern int		heterodbExtraGetError(const char **p_filename,
 									  unsigned int *p_lineno,
 									  const char **p_funcname,
 									  char *buffer, size_t buffer_sz);
-
 /*
  * codegen.c
  */
 typedef struct
 {
+	int			kv_slot_id;		/* slot-id of kernel varslot / CPU fallback */
+	int			kv_depth;		/* source depth */
+	int			kv_resno;		/* source resno, if exist */
+	int			kv_maxref;		/* max depth that references this column. */
+	int			kv_offset;		/* offset of the vectorized buffer, if any */
+	Oid			kv_type_oid;	/* Type OID */
+	TypeOpCode	kv_type_code;	/* device type opcode */
+	bool		kv_typbyval;	/* typbyval from the catalog */
+	int8_t		kv_typalign;	/* typalign from the catalog */
+	int16_t		kv_typlen;		/* typlen from the catalog */
+	int			kv_kvec_sizeof;	/* =sizeof(kvec_XXXX_t) */
+	Expr	   *kv_expr;		/* original expression */
+	List	   *kv_subfields;	/* subfields definition, if array or composite */
+} codegen_kvar_defitem;
+
+typedef struct
+{
 	int			elevel;			/* ERROR or DEBUG2 */
+	int			curr_depth;
 	Expr	   *top_expr;
 	List	   *used_params;
 	uint32_t	required_flags;
@@ -531,15 +564,20 @@ typedef struct
 	uint32_t	extra_bufsz;
 	uint32_t	device_cost;
 	uint32_t	kexp_flags;
-	List	   *kvars_depth;
-	List	   *kvars_resno;
-	List	   *kvars_types;
-	List	   *kvars_exprs;
+	List	   *kvars_deflist;
 	List	   *tlist_dev;
-	uint32_t	kvars_nslots;
-	List	   *input_rels_tlist;
+	int			kvecs_ndims;
+	uint32_t	kvecs_usage;
+	Index		scan_relid;		/* depth==0 */
+	int			num_rels;
+	struct {
+		PathTarget *inner_target;
+	} pd[1];
 } codegen_context;
 
+extern Oid		get_int1_type_oid(bool missing_ok);
+extern Oid		get_float2_type_oid(bool missing_ok);
+extern Oid		get_cube_type_oid(bool missing_ok);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 											List *func_args,
@@ -548,14 +586,10 @@ extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 extern devfunc_info *devtype_lookup_equal_func(devtype_info *dtype, Oid coll_id);
 extern devfunc_info *devtype_lookup_compare_func(devtype_info *dtype, Oid coll_id);
 
-extern void		codegen_context_init(codegen_context *context,
-									 uint32_t xpu_task_flags);
-extern bytea   *codegen_build_qualifiers(codegen_context *context,
-										 List *dev_quals);
-extern bytea   *codegen_build_scan_loadvars(codegen_context *context);
+extern codegen_context *create_codegen_context(CustomPath *cpath,
+											   pgstromPlanInfo *pp_info);
 extern bytea   *codegen_build_scan_quals(codegen_context *context,
 										 List *dev_quals);
-extern bytea   *codegen_build_join_loadvars(codegen_context *context);
 extern bytea   *codegen_build_packed_joinquals(codegen_context *context,
 											   List *stacked_join_quals,
 											   List *stacked_other_quals);
@@ -566,6 +600,12 @@ extern void		codegen_build_packed_gistevals(codegen_context *context,
 extern bytea   *codegen_build_projection(codegen_context *context);
 extern void		codegen_build_groupby_actions(codegen_context *context,
 											  pgstromPlanInfo *pp_info);
+
+extern void		codegen_build_packed_kvars_load(codegen_context *context,
+												pgstromPlanInfo *pp_info);
+extern void		codegen_build_packed_kvars_move(codegen_context *context,
+												pgstromPlanInfo *pp_info);
+
 extern void		codegen_build_packed_xpucode(bytea **p_xpucode,
 											 List *exprs_list,
 											 bool inject_hash_value,
@@ -576,8 +616,15 @@ extern void		codegen_build_packed_xpucode(bytea **p_xpucode,
 											 List **p_used_params);
 extern bool		pgstrom_xpu_expression(Expr *expr,
 									   uint32_t required_xpu_flags,
-									   List *input_rels_tlist,
+									   Index scan_relid,
+									   List *inner_target_list,
 									   int *p_devcost);
+extern void		pgstrom_explain_kvars_slot(const CustomScanState *css,
+										   ExplainState *es,
+										   List *dcontext);
+extern void		pgstrom_explain_kvecs_buffer(const CustomScanState *css,
+											 ExplainState *es,
+											 List *dcontext);
 extern void		pgstrom_explain_xpucode(const CustomScanState *css,
 										ExplainState *es,
 										List *dcontext,
@@ -623,9 +670,9 @@ extern Path	   *pgstromTryFindGistIndex(PlannerInfo *root,
 										Path *inner_path,
 										List *restrict_clauses,
 										uint32_t xpu_task_flags,
-										List *input_rels_tlist,
+										Index base_scan_relid,
+										List *inner_target_list,
 										pgstromPlanInnerInfo *pp_inner);
-
 /*
  * relscan.c
  */
@@ -646,12 +693,6 @@ extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
 extern void		pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple tuple);
 extern TupleTableSlot *pgstromFetchFallbackTuple(pgstromTaskState *pts);
 extern void		pgstrom_init_relscan(void);
-
-/*
- * optimizer.c
- */
-
-
 
 /*
  * executor.c
@@ -715,10 +756,8 @@ extern void		gpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
 extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,
 									int *p_block_sz,
-									unsigned int *p_shmem_sz,
 									CUfunction kern_function,
-									size_t dynamic_shmem_per_block,
-									size_t dynamic_shmem_per_warp);
+									unsigned int dynamic_shmem_per_block);
 extern bool		pgstrom_init_gpu_device(void);
 
 /*
@@ -779,8 +818,7 @@ extern pgstromPlanInfo *buildOuterScanPlanInfo(PlannerInfo *root,
 											   bool allow_host_quals,
 											   bool allow_no_device_quals,
 											   ParamPathInfo **p_param_info);
-extern void		ExecFallbackCpuScan(pgstromTaskState *pts,
-									kern_data_store *kds,
+extern bool		ExecFallbackCpuScan(pgstromTaskState *pts,
 									HeapTuple tuple);
 extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
 extern void		pgstrom_init_gpu_scan(void);
@@ -789,9 +827,6 @@ extern void		pgstrom_init_dpu_scan(void);
 /*
  * gpu_join.c
  */
-extern void		form_pgstrom_plan_info(CustomScan *cscan,
-									   pgstromPlanInfo *pp_info);
-extern pgstromPlanInfo *deform_pgstrom_plan_info(CustomScan *cscan);
 extern pgstromPlanInfo *try_fetch_xpujoin_planinfo(const Path *path);
 extern pgstromPlanInfo *buildOuterJoinPlanInfo(PlannerInfo *root,
 											   RelOptInfo *outer_rel,
@@ -807,8 +842,7 @@ extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
 										 pgstromPlanInfo *pp_info,
 										 const CustomScanMethods *methods);
 extern uint32_t	GpuJoinInnerPreload(pgstromTaskState *pts);
-extern void		ExecFallbackCpuJoin(pgstromTaskState *pts,
-									kern_data_store *kds,
+extern bool		ExecFallbackCpuJoin(pgstromTaskState *pts,
 									HeapTuple tuple);
 extern void		ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts);
 extern void		ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts,
@@ -826,8 +860,7 @@ extern void		xpupreagg_add_custompath(PlannerInfo *root,
 										 void *extra,
 										 uint32_t task_kind,
 										 const CustomPathMethods *methods);
-extern void		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
-									  kern_data_store *kds,
+extern bool		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
 									  HeapTuple tuple);
 extern void		pgstrom_init_gpu_preagg(void);
 extern void		pgstrom_init_dpu_preagg(void);
@@ -895,6 +928,10 @@ extern bool		pgstrom_init_dpu_device(void);
 /*
  * misc.c
  */
+extern void		form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info);
+extern pgstromPlanInfo *deform_pgstrom_plan_info(CustomScan *cscan);
+extern pgstromPlanInfo *copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig);
+
 extern Node	   *fixup_varnode_to_origin(Node *node, List *cscan_tlist);
 extern int		__appendBinaryStringInfo(StringInfo buf,
 										 const void *data, int datalen);

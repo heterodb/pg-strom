@@ -9,251 +9,275 @@
 This session introduces PG-Strom's configuration parameters.
 }
 
-@ja{
-## 機能単位の有効化/無効化
+@ja:## 機能単位の有効化/無効化
+@en:## Enables/disables a particular feature
 
+@ja{
 `pg_strom.enabled` [型: `bool` / 初期値: `on]`
 :   PG-Strom機能全体を一括して有効化/無効化する。
+}
+@en{
+`pg_strom.enabled` [type: `bool` / default: `on]`
+:   Enables/disables entire PG-Strom features at once
+}
 
+@ja{
 `pg_strom.enable_gpuscan` [型: `bool` / 初期値: `on]`
 :   GpuScanによるスキャンを有効化/無効化する。
+}
+@en{
+`pg_strom.enable_gpuscan` [type: `bool` / default: `on]`
+:   Enables/disables GpuScan
+}
 
+@ja{
 `pg_strom.enable_gpuhashjoin` [型: `bool` / 初期値: `on]`
 :   GpuHashJoinによるJOINを有効化/無効化する。
+}
+@en{
+`pg_strom.enable_gpuhashjoin` [type: `bool` / default: `on]`
+:   Enables/disables JOIN by GpuHashJoin
+}
 
-`pg_strom.enable_gpunestloop` [型: `bool` / 初期値: `on]`
-:   GpuNestLoopによるJOINを有効化/無効化する。
+@ja{
+`pg_strom.enable_gpugistindex` [型: `bool` / 初期値: `on]`
+:   GpuGiSTIndexによるJOINを有効化/無効化する。
+}
+@en{
+`pg_strom.enable_gpugistindex` [type: `bool` / default: `on]`
+:   Enables/disables JOIN by GpuGiSTIndex
+}
 
+@ja{
+`pg_strom.enable_gpujoin` [型: `bool` / 初期値: `on]`
+:   GpuJoinによるJOINを一括で有効化/無効化する。（GpuHashJoinとGpuGiSTIndexを含む）
+}
+@en{
+`pg_strom.enable_gpujoin` [type: `bool` / default: `on]`
+:   Enables/disables entire GpuJoin features (including GpuHashJoin and GpuGiSTIndex)
+}
+
+@ja{
 `pg_strom.enable_gpupreagg` [型: `bool` / 初期値: `on]`
 :   GpuPreAggによる集約処理を有効化/無効化する。
+}
+@en{
+`pg_strom.enable_gpupreagg` [type: `bool` / default: `on]`
+:   Enables/disables GpuPreAgg
+}
 
-`pg_strom.enable_brin` [型: `bool` / 初期値: `on]`
-:   BRINインデックスを使ったテーブルスキャンを有効化/無効化する。
-
-`pg_strom.enable_gpucache` [型: `bool` / 初期値: `on]`
-:   PostgreSQLテーブルの代わりにGPUキャッシュを参照するかどうかを制御する。
-:   なお、この設定値を`off`にしてもトリガ関数は引き続きREDOログバッファを更新し続けます。
-
-`pg_strom.enable_partitionwise_gpujoin` [型: `bool` / 初期値: `on]`
-:   GpuJoinを各パーティションの要素へプッシュダウンするかどうかを制御する。
-
-`pg_strom.enable_partitionwise_gpupreagg` [型: `bool` / 初期値: `on]`
-:   GpuPreAggを各パーティションの要素へプッシュダウンするかどうかを制御する。
-
-`pg_strom.pullup_outer_scan` [型: `bool` / 初期値: `on]`
-:   GpuPreAgg/GpuJoin直下の実行計画が全件スキャンである場合に、上位ノードでスキャン処理も行い、CPU/RAM⇔GPU間のデータ転送を省略するかどうかを制御する。
-
-`pg_strom.pullup_outer_join` [型: `bool` / 初期値: `on]`
-:   GpuPreAgg直下がGpuJoinである場合に、JOIN処理を上位の実行計画に引き上げ、CPU⇔GPU間のデータ転送を省略するかどうかを制御する。
-
+@ja{
 `pg_strom.enable_numeric_aggfuncs` [型: `bool` / 初期値: `on]`
 :   `numeric`データ型を引数に取る集約演算をGPUで処理するかどうかを制御する。
 :   GPUでの集約演算において`numeric`データ型は倍精度浮動小数点数にマッピングされるため、計算誤差にセンシティブな用途の場合は、この設定値を `off` にしてCPUで集約演算を実行し、計算誤差の発生を抑えることができます。
-
-`pg_strom.cpu_fallback` [型: `bool` / 初期値: `off]`
-:   GPUプログラムが"CPU再実行"エラーを返したときに、実際にCPUでの再実行を試みるかどうかを制御する。
-
-`pg_strom.regression_test_mode` [型: `bool` / 初期値: `off]`
-:   GPUモデル名など、実行環境に依存して表示が変わる可能性のある`EXPLAIN`コマンドの出力を抑制します。これはリグレッションテストにおける偽陽性を防ぐための設定で、通常は利用者が操作する必要はありません。
 }
-
 @en{
-## Enables/disables a particular feature
-
-`pg_strom.enabled` [type: `bool` / default: `on]`
-:   Enables/disables entire PG-Strom features at once
-
-`pg_strom.enable_gpuscan` [type: `bool` / default: `on]`
-:   Enables/disables GpuScan
-
-`pg_strom.enable_gpuhashjoin` [type: `bool` / default: `on]`
-:   Enables/disables JOIN by GpuHashJoin
-
-`pg_strom.enable_gpunestloop` [type: `bool` / default: `on]`
-:   Enables/disables JOIN by GpuNestLoop
-
-`pg_strom.enable_gpupreagg` [type: `bool` / default: `on]`
-:   Enables/disables GpuPreAgg
-
-`pg_strom.enable_brin` [type: `bool` / default: `on]`
-:   Enables/disables BRIN index support on tables scan
-
-`pg_strom.enable_gpucache` [type: `bool` / default: `on]`
-:   Controls whether GPU Cache is referenced, instead of PostgreSQL tables, if any
-:   Note that GPU Cache trigger functions continue to update the REDO Log buffer, even if this parameter is turned off.
-
-`pg_strom.enable_partitionwise_gpujoin` [type: `bool` / default: `on]`
-:   Enables/disables whether GpuJoin is pushed down to the partition children.
-
-`pg_strom.enable_partitionwise_gpupreagg` [type: `bool` / default: `on]`
-:   Enables/disables whether GpuPreAgg is pushed down to the partition children.
-
-`pg_strom.pullup_outer_scan` [type: `bool` / default: `on]`
-:   Enables/disables to pull up full-table scan if it is just below GpuPreAgg/GpuJoin, to reduce data transfer between CPU/RAM and GPU.
-
-`pg_strom.pullup_outer_join` [type: `bool` / default: `on]`
-:   Enables/disables to pull up tables-join if GpuJoin is just below GpuPreAgg, to reduce data transfer between CPU/RAM and GPU.
-
 `pg_strom.enable_numeric_aggfuncs` [type: `bool` / default: `on]`
 :   Enables/disables support of aggregate function that takes `numeric` data type.
 :   Note that aggregated function at GPU mapps `numeric` data type to double precision floating point values. So, if you are sensitive to calculation errors, you can turn off this configuration to suppress the calculation errors by the operations on CPU.
+}
 
-`pg_strom.cpu_fallback` [type: `bool` / default: `off]`
+@ja{
+`pg_strom.enable_brin` [型: `bool` / 初期値: `on]`
+:   BRINインデックスを使ったテーブルスキャンを有効化/無効化する。
+}
+@en{
+`pg_strom.enable_brin` [type: `bool` / default: `on]`
+:   Enables/disables BRIN index support on tables scan
+}
+
+@ja{
+`pg_strom.cpu_fallback` [型: `enum` / 初期値: `notice`]
+:   GPUプログラムが"CPU再実行"エラーを返したときに、実際にCPUでの再実行を試みるかどうかを制御する。
+:   `notice` ... メッセージを出力した上でCPUでの再実行を行う
+:   `on`, `true` ... メッセージを出力せずCPUでの再実行を行う
+:   `off`, `false` ... エラーを発生させCPUでの再実行を行わない
+}
+@en{
+`pg_strom.cpu_fallback` [type: `enum` / default: `notice`]
 :   Controls whether it actually run CPU fallback operations, if GPU program returned "CPU ReCheck Error"
-
+:   `notice` ... Runs CPU fallback operations with notice message
+:   `on`, `true` ... Runs CPU fallback operations with no message output
+:   `off`, `false` ... Disabled CPU fallback operations with an error
+}
+@ja{
+`pg_strom.regression_test_mode` [型: `bool` / 初期値: `off]`
+:   GPUモデル名など、実行環境に依存して表示が変わる可能性のある`EXPLAIN`コマンドの出力を抑制します。これはリグレッションテストにおける偽陽性を防ぐための設定で、通常は利用者が操作する必要はありません。
+}
+@en{
 `pg_strom.regression_test_mode` [type: `bool` / default: `off]`
 :   It disables some `EXPLAIN` command output that depends on software execution platform, like GPU model name. It avoid "false-positive" on the regression test, so use usually don't tough this configuration.
 }
 
+@ja:## オプティマイザに関する設定
+@en:## Optimizer Configuration
+
 @ja{
-## オプティマイザに関する設定
-
-`pg_strom.chunk_size` [型: `int` / 初期値: `65534kB`]
-:   PG-Stromが1回のGPUカーネル呼び出しで処理するデータブロックの大きさです。かつては変更可能でしたが、ほとんど意味がないため、現在では約64MBに固定されています。
-
-`pg_strom.gpu_setup_cost` [型: `real` / 初期値: `4000`]
+`pg_strom.gpu_setup_cost` [型: `real` / 初期値: `100 * DEFAULT_SEQ_PAGE_COST`]
 :   GPUデバイスの初期化に要するコストとして使用する値。
+}
+@en{
+`pg_strom.gpu_setup_cost` [type: `real` / default: `100 * DEFAULT_SEQ_PAGE_COST`]
+:   Cost value for initialization of GPU device
+}
 
-`pg_strom.gpu_dma_cost` [型: `real` / 初期値: `10`]
-:   チャンク(`pg_strom.chunk_size` = 約64MB)あたりのDMA転送に要するコストとして使用する値。
+@ja{
+`pg_strom.gpu_tuple_cost` [型: `real` / 初期値: `DEFAULT_CPU_TUPLE_COST`]
+:   GPUへ送出する／受け取るタプル一個あたりのコストとして使用する値。
+}
+@en{
+`pg_strom.gpu_tuple_cost` [type: `real` / default: `DEFAULT_CPU_TUPLE_COST`]
+:   Cost value to send tuples to, or receive tuples from GPU for each.
+}
 
-`pg_strom.gpu_operator_cost` [型: `real` / 初期値: `0.00015`]
+@ja{
+`pg_strom.gpu_operator_cost` [型: `real` / 初期値: `DEFAULT_CPU_OPERATOR_COST / 16`]
 :   GPUの演算式あたりの処理コストとして使用する値。`cpu_operator_cost`よりも大きな値を設定してしまうと、いかなるサイズのテーブルに対してもPG-Stromが選択されることはなくなる。
 }
 @en{
-## Optimizer Configuration
-
-`pg_strom.chunk_size` [type: `int` / default: `65534kB`]
-:   Size of the data blocks processed by a single GPU kernel invocation. It was configurable, but makes less sense, so fixed to about 64MB in the current version.
-
-`pg_strom.gpu_setup_cost` [type: `real` / default: `4000`]
-:   Cost value for initialization of GPU device
-
-`pg_strom.gpu_dma_cost` [type: `real` / default: `10`]
-:   Cost value for DMA transfer over PCIe bus per data-chunk (`pg_strom.chunk_size` = 64MB)
-
-`pg_strom.gpu_operator_cost` [type: `real` / default: `0.00015`]
+`pg_strom.gpu_operator_cost` [type: `real` / default: `DEFAULT_CPU_OPERATOR_COST / 16`]
 :   Cost value to process an expression formula on GPU. If larger value than `cpu_operator_cost` is configured, no chance to choose PG-Strom towards any size of tables
 }
 
+<!--
 @ja{
-## エグゼキュータに関する設定
-
-`pg_strom.max_async_tasks` [型: `int` / 初期値: `5`]
-:   PG-StromがGPU実行キューに投入する事ができる非同期タスクのプロセス毎の最大値。
-:   CPUパラレル処理と併用する場合、この上限値は個々のバックグラウンドワーカー毎に適用されます。したがって、バッチジョブ全体では`pg_strom.max_async_tasks`よりも多くの非同期タスクが実行されることになります。
-
-`pg_strom.reuse_cuda_context` [型: `bool` / 初期値: `off`]
-:   クエリの実行に伴って作成したCUDAコンテキストを、次回のクエリ実行時に再利用します。
-:   通常、CUDAコンテキストの作成には100～200ms程度を要するため、応答速度の改善が期待できる一方、一部のGPUデバイスメモリを占有し続けるというデメリットもあります。そのため、ベンチマーク等の用途を除いては使用すべきではありません。
-:   また、CPUパラレルを利用する場合、ワーカープロセスでは必ずCUDAコンテキストを作成する事になりますので、効果は期待できません。
+`pg_strom.enable_partitionwise_gpujoin` [型: `bool` / 初期値: `on]`
+:   GpuJoinを各パーティションの要素へプッシュダウンするかどうかを制御する。
 }
 @en{
-##Executor Configuration
+`pg_strom.enable_partitionwise_gpujoin` [type: `bool` / default: `on]`
+:   Enables/disables whether GpuJoin is pushed down to the partition children.
+}
+@ja{
+`pg_strom.enable_partitionwise_gpupreagg` [型: `bool` / 初期値: `on]`
+:   GpuPreAggを各パーティションの要素へプッシュダウンするかどうかを制御する。
+}
+@en{
+`pg_strom.enable_partitionwise_gpupreagg` [type: `bool` / default: `on]`
+:   Enables/disables whether GpuPreAgg is pushed down to the partition children.
+}
+-->
 
-`pg_strom.max_async_tasks` [type: `int` / default: `5`]
-:   Max number of asynchronous taks PG-Strom can throw into GPU's execution queue per process.
-:   If CPU parallel is used in combination, this limitation shall be applied for each background worker. So, more than `pg_strom.max_async_tasks` asynchronous tasks are executed in parallel on the entire batch job.
+@ja:## エグゼキュータに関する設定
+@en:## Executor Configuration
 
-`pg_strom.reuse_cuda_context` [type: `bool` / default: `off`]
-:   If `on`, it tries to reuse CUDA context on the next query execution, already constructed according to the previous query execution.
-:   Usually, construction of CUDA context takes 100-200ms, it may improve queries response time, on the other hands, it continue to occupy a part of GPU device memory on the down-side. So, we don't recommend to enable this parameter expect for benchmarking and so on.
-:   Also, this configuration makes no sense if query uses CPU parallel execution, because the worker processes shall always construct new CUDA context for each.
+@ja{
+`pg_strom.max_async_tasks` [型: `int` / 初期値: `12`]
+:   PG-StromがGPU実行キューに投入する事ができる非同期タスクのGPUデバイス毎の最大値で、GPU Serviceのワーカースレッド数でもあります。
+}
+@en{
+`pg_strom.max_async_tasks` [type: `int` / default: `12`]
+:   Max number of asynchronous taks PG-Strom can submit to the GPU execution queue, and is also the number of GPU Service worker threads.
+}
+
+@ja:## GPUダイレクトSQLの設定
+@en:## GPUDirect SQL Configuration
+
+@ja{
+`pg_strom.gpudirect_driver` [型: `text`]
+:   GPUダイレクトSQLのドライバソフトウェア名を示すパラメータです。
+:   `cufile`、`nvme-strom`、もしくは`vfs`のどれかです。
+}
+@en{
+`pg_strom.gpudirect_driver` [type: `text`]
+:   It shows the driver software name of GPUDirect SQL (read-only).
+:   Either `cufile`, `nvme-strom` or `vfs`
 }
 
 @ja{
-##GPUダイレクトSQLの設定
-
-`pg_strom.gpudirect_driver` [型: `text`]
-:   GPUダイレクトSQLのドライバソフトウェア名を示す読み取り専用パラメータです。
-:   `nvidia cufile`または`heterodb nvme-strom`のどちらかです。
-
 `pg_strom.gpudirect_enabled` [型: `bool` / 初期値: `on`]
 :   GPUダイレクトSQL機能を有効化/無効化する。
+}
+@en{
+`pg_strom.gpudirect_enabled` [type: `bool` / default: `on`]
+:   Enables/disables GPUDirect SQL feature.
+}
 
+@ja{
+`pg_strom.gpu_direct_seq_page_cost` [型: `real` / 初期値: `DEFAULT_SEQ_PAGE_COST / 4`]
+:   オプティマイザが実行プランのコストを計算する際に、GPU-Direct SQLを用いてテーブルをスキャンする場合のコストとして`seq_page_cost`の代わりに使用される値。
+}
+@en{
+`pg_strom.gpu_direct_seq_page_cost` [type: `real` / default: `DEFAULT_SEQ_PAGE_COST / 4`]
+:   The cost of scanning a table using GPU-Direct SQL, instead of the `seq_page_cost`, when the optimizer calculates the cost of an execution plan.
+}
+
+@ja{
 `pg_strom.gpudirect_threshold` [型: `int` / 初期値: 自動]
 :   GPUダイレクトSQL機能を発動させるテーブルサイズの閾値を設定する。
 :   初期値は自動設定で、システムの物理メモリと`shared_buffers`設定値から計算した閾値を設定します。
-
-`pg_strom.cufile_io_unitsz` [型: `int` / 初期値: `16MB`]
-:   cuFile APIを使用してデータを読み出す際のI/Oサイズを指定する。通常は変更の必要はありません。
-:   `nvidia cufile`ドライバを使用する場合のみ有効です。
-
-`pg_strom.nvme_distance_map` [型: `text` / 初期値: `null`]
-:   NVMEデバイスやNFS区画など、ストレージ区画ごとに最も近傍のGPUを手動で設定します。
-:   書式は `{(<gpuX>|<nvmeX>|<sfdvX>|</path/to/nfsmount>),...}[,{...}]`で、GPUとその近傍に位置するNVMEデバイスなどストレージの識別子を `{ ... }` で囲まれたグループに記述します。
-:   （例: `{gpu0,nvme1,nvme2,/opt/nfsmount},{gpu1,nvme0}`
-:   
-:   - `<gpuX>`はデバイス番号Xを持つGPUです。
-:   - `<nvmeX>`はローカルのNVME-SSDまたはリモートのNVME-oFデバイスを意味します。
-:   - `<sfdvX>`はScaleFlux社製CSDドライブ用の専用デバイスを意味します。
-:   - `/path/to/nfsmount`はNFS-over-RDMAを用いてマウントしたNFS区画のマウントポイントです。
-:   
-:   ローカルのNVME-SSDに対しては多くの場合自動設定で十分ですが、NVME-oFデバイスやNFS-over-RDMAを使用する場合、機械的に近傍のGPUを特定する事ができないため、手動で近傍のGPUを指定する必要があります。
 }
 @en{
-##GPUDirect SQL Configuration
-
-`pg_strom.gpudirect_driver` [type: `text`]
-:   It shows the driver software name of GPUDirect SQL (read-only).
-:   Either `nvidia cufile` or `heterodb nvme-strom`
-
-`pg_strom.gpudirect_enabled` [type: `bool` / default: `on`]
-:   Enables/disables GPUDirect SQL feature.
-
 `pg_strom.gpudirect_threshold` [type: `int` / default: auto]
 :   Controls the table-size threshold to invoke GPUDirect SQL feature.
 :   The default is auto configuration; a threshold calculated by the system physical memory size and `shared_buffers` configuration.
+}
 
-`pg_strom.cufile_io_unitsz` [type: `int` / default: `16MB`]
-:   Unit size of read-i/o when PG-Strom uses cuFile API. No need to change from the default setting for most cases.
-:   It is only available when `nvidia cufile` driver is used.
-
-`pg_strom.nvme_distance_map` [type: `text` / default: `null`]
-:   It manually configures the closest GPU for particular storage evices, like NVME-SSD or NFS volumes.
-:   Its format string is `{(<gpuX>|<nvmeX>|<sfdvX>|</path/to/nfsmount>),...}[,{...}]`. It puts identifiers of GPU and NVME devices within `{ ... }` block to group these devices.
-:   (example: `{gpu0,nvme1,nvme2,/opt/nfsmount},{gpu1,nvme0}`
-:   
+@ja{
+`pg_strom.manual_optimal_gpus` [型: `text` / 初期値: なし]
+:   NVMEデバイスやNFS区画など、ストレージ区画ごとに最も近傍と判定されるGPUを手動で設定します。
+:   書式は `{<nvmeX>|/path/to/tablespace}=gpuX[:gpuX...]`で、NVMEデバイスまたはテーブルスペースのパスと、その近傍であるGPU（複数可）を記述します。カンマで区切って複数の設定を記述する事も可能です。
+:   例: `pg_strom.manual_optimal_gpus = 'nvme1=gpu0,nvme2=gpu1,/mnt/nfsroot=gpu0'`
+:   - `<gpuX>`はデバイス番号Xを持つGPUです。
+:   - `<nvmeX>`はローカルのNVME-SSDまたはリモートのNVME-oFデバイスを意味します。
+:   - `/path/to/tablespace`は、テーブルスペースに紐づいたディレクトリのフルパスです。
+:   ローカルのNVME-SSDに対しては多くの場合自動設定で十分ですが、NVME-oFデバイスやNFS-over-RDMAを使用する場合、機械的に近傍のGPUを特定する事ができないため、手動で近傍のGPUを指定する必要があります。
+}
+@en{
+`pg_strom.manual_optimal_gpus` [type: `text` / default: none]
+:   It manually configures the closest GPU for the target storage volumn, like NVME device or NFS volume.
+:   Its format string is: `{<nvmeX>|/path/to/tablespace}=gpuX[:gpuX...]`. It describes relationship between the closest GPU and NVME device or tablespace directory path. It accepts multiple configurations separated by comma character.
+:   Example: `pg_strom.manual_optimal_gpus = 'nvme1=gpu0,nvme2=gpu1,/mnt/nfsroot=gpu0'`
 :   - `<gpuX>` means a GPU with device identifier X.
 :   - `<nvmeX>` means a local NVME-SSD or a remote NVME-oF device.
-:   - `<sfdvX>` means a special device of CSD drives by ScaleFlux,Inc.
-:   - `/path/to/nfsmount` means a mount point by NFS volume with NFS-over-RDMA.
-:   
+:   - `/path/to/tablespace` means full-path of the tablespace directory.
 :   Automatic configuration is often sufficient for local NVME-SSD drives, however, you should manually configure the closest GPU for NVME-oF or NFS-over-RDMA volumes.
 }
 
-@ja{
-##Arrow_Fdw関連の設定
+@ja:## Arrow_Fdw関連の設定
+@en:## Arrow_Fdw Configuration
 
+@ja{
 `arrow_fdw.enabled` [型: `bool` / 初期値: `on`]
 :   推定コスト値を調整し、Arrow_Fdwの有効/無効を切り替えます。ただし、GpuScanが利用できない場合には、Arrow_FdwによるForeign ScanだけがArrowファイルをスキャンできるという事に留意してください。
-
-`arrow_fdw.metadata_cache_size` [型: `int` / 初期値: `128MB`]
-:   Arrowファイルのメタ情報をキャッシュする共有メモリ領域の大きさを指定します。共有メモリの消費量がこのサイズを越えると、古いメタ情報から順に解放されます。
-
-`arrow_fdw.record_batch_size` [型: `int` / 初期値: `256MB`]
-:   Arrow_Fdw外部テーブルへ書き込む際の RecordBatch の大きさの閾値です。`INSERT`コマンドが完了していなくとも、Arrow_Fdwは総書き込みサイズがこの値を越えるとバッファの内容をApache Arrowファイルへと書き出します。
 }
 @en{
-##Arrow_Fdw Configuration
-
 `arrow_fdw.enabled` [type: `bool` / default: `on`]
 :   By adjustment of estimated cost value, it turns on/off Arrow_Fdw. Note that only Foreign Scan (Arrow_Fdw) can scan on Arrow files, if GpuScan is not capable to run on.
-
-`arrow_fdw.metadata_cache_size` [type: `int` / default: `128MB`]
-:   Size of shared memory to cache metadata of Arrow files.
-:   Once consumption of the shared memory exceeds this value, the older metadata shall be released based on LRU.
-
-`arrow_fdw.record_batch_size` [type: `int` / default: `256MB`]
-:   Threshold of RecordBatch when Arrow_Fdw foreign table is written. When total amount of the buffer size exceeds this configuration, Arrow_Fdw writes out the buffer to Apache Arrow file, even if `INSERT` command is not completed yet.
 }
 
 @ja{
-##GPUキャッシュの設定
+`arrow_fdw.stats_hint_enabled` [型: `bool` / 初期値: `on`]
+:   Arrowファイルがmin/max統計情報を持っており、それを用いて不必要なrecord-batchを読み飛ばすかどうかを制御します。
+}
+@en{
+`arrow_fdw.stats_hint_enabled` [type: `bool` / default: `on`]
+:   When Arrow file has min/max statistics, this parameter controls whether unnecessary record-batches shall be skipped, or not.
+}
+
+@ja{
+`arrow_fdw.metadata_cache_size` [型: `int` / 初期値: `512MB`]
+:   Arrowファイルのメタ情報をキャッシュする共有メモリ領域の大きさを指定します。共有メモリの消費量がこのサイズを越えると、古いメタ情報から順に解放されます。
+}
+@en{
+`arrow_fdw.metadata_cache_size` [type: `int` / default: `512MB`]
+:   Size of shared memory to cache metadata of Arrow files.
+:   Once consumption of the shared memory exceeds this value, the older metadata shall be released based on LRU.
+}
+
+@ja:##GPUキャッシュの設定
+@en:##GPU Cache configuration
+@ja{
 `pg_strom.enable_gpucache` [型: `bool` / 初期値: `on`]
 :   検索/分析系のクエリでGPUキャッシュを使用するかどうかを制御します。
-:   なお、本設定はトリガによるREDOログバッファへの追記には影響しません。
-
+:   なお、この設定値を`off`にしてもトリガ関数は引き続きREDOログバッファを更新し続けます。
+}
+@en{
+`pg_strom.enable_gpucache` [type: `bool` / default: `on`]
+:   Controls whether search/analytic query tries to use GPU Cache.
+:   Note that GPU Cache trigger functions continue to update the REDO Log buffer, even if this parameter is turned off.
+}
+@ja{
 `pg_strom.gpucache_auto_preload` [型: `text` / 初期値: `null`]
 :   PostgreSQLの起動直後にGPUキャッシュをロードすべきテーブル名を指定します。
 :   書式は `DATABASE_NAME.SCHEMA_NAME.TABLE_NAME` で、複数個のテーブルを指定する場合はこれをカンマ区切りで並べます。
@@ -261,11 +285,6 @@ This session introduces PG-Strom's configuration parameters.
 :   なお、本パラメータを '*' に設定すると、GPUキャッシュを持つ全てのテーブルの内容を順にGPUへロードしようと試みます。
 }
 @en{
-##GPU Cache configuration
-`pg_strom.enable_gpucache` [type: `bool` / default: `on`]
-:   Controls whether search/analytic query tries to use GPU Cache.
-:   Note that this parameter does not affect to any writes on the REDO Log buffer by the trigger.
-
 `pg_strom.gpucache_auto_preload` [type: `text` / default: `null`]
 :   It specifies the table names to be loaded onto GPU Cache just after PostgreSQL startup.
 :   Its format is `DATABASE_NAME.SCHEMA_NAME.TABLE_NAME`, and separated by comma if multiple tables are preloaded.
@@ -273,102 +292,150 @@ This session introduces PG-Strom's configuration parameters.
 :   If this parameter is '*', PG-Strom tries to load all the configured tables onto GPU Cache sequentially.
 }
 
+<!--
+@ja:##HyperLogLogの設定
+@en:##HyperLogLog configuration
 @ja{
-##HyperLogLogの設定
 `pg_strom.hll_registers_bits` [型: `int` / 初期値: `9`]
 :    HyperLogLogで使用する HLL Sketch の幅を指定します。
 :    実行時に`2^pg_strom.hll_registers_bits`個のレジスタを割当て、ハッシュ値の下位`pg_strom.hll_registers_bits`ビットをレジスタのセレクタとして使用します。設定可能な値は4～15の範囲内です。
-:    PG-StromのHyperLogLog機能について、詳しくは[HyperLogLog](../hll_count/)を参照してください。
+:    PG-StromのHyperLogLog機能について、詳しくは[HyperLogLog](hll_count.md)を参照してください。
 }
-
 @en{
-##HyperLogLog configuration
 `pg_strom.hll_registers_bits` [type: `int` / default: `9`]
 :    It specifies the width of HLL Sketch used for HyperLogLog.
 :    PG-Strom allocates `2^pg_strom.hll_registers_bits` registers for HLL Sketch, then uses the latest `pg_strom.hll_registers_bits` bits of hash-values as register selector. It must be configured between 4 and 15.
-:    See [HyperLogLog](../hll_count/) for more details of HyperLogLog functionality of PG-Strom.
+:    See [HyperLogLog](hll_count.md) for more details of HyperLogLog functionality of PG-Strom.
 }
+-->
+
+
+@ja:## GPUデバイスに関連する設定
+@en:## GPU Device Configuration
 
 @ja{
-##GPUコードの生成、およびJITコンパイルの設定
-
-`pg_strom.program_cache_size` [型: `int` / 初期値: `256MB`]
-:   ビルド済みのGPUプログラムをキャッシュしておくための共有メモリ領域のサイズです。パラメータの更新には再起動が必要です。
-
-`pg_strom.num_program_builders` [型: `int` / 初期値: `2`]
-:   GPUプログラムを非同期ビルドするためのバックグラウンドプロセスの数を指定します。パラメータの更新には再起動が必要です。
-
-`pg_strom.debug_jit_compile_options` [型: `bool` / 初期値: `off`]
-:   GPUプログラムのJITコンパイル時に、デバッグオプション（行番号とシンボル情報）を含めるかどうかを指定します。GPUコアダンプ等を用いた複雑なバグの解析に有用ですが、性能のデグレードを引き起こすため、通常は使用すべきでありません。
-
-`pg_strom.extra_kernel_stack_size` [型: `int` / 初期値: `0`]
-:   GPUカーネルの実行時にスレッド毎に追加的に割り当てるスタックの大きさをバイト単位で指定します。通常は初期値を変更する必要はありません。
+`pg_strom.gpu_mempool_segment_sz` [型: `int` / 初期値: `1GB`]
+:   GPU Serviceがメモリプール用にGPUメモリを確保する際のセグメントサイズです。
+:   GPUデバイスメモリの割当ては比較的ヘビーな処理であるため、メモリプールを使用してメモリを使い回す事が推奨されています。
 }
 @en{
-##Configuration of GPU code generation and build
-
-`pg_strom.program_cache_size` [type: `int` / default: `256MB`]
-:   Amount of the shared memory size to cache GPU programs already built. It needs restart to update the parameter.
-
-`pg_strom.num_program_builders` [type: `int` / default: `2`]
-:   Number of background workers to build GPU programs asynchronously. It needs restart to update the parameter.
-
-`pg_strom.debug_jit_compile_options` [type: `bool` / default: `off`]
-:   Controls to include debug option (line-numbers and symbol information) on JIT compile of GPU programs.
-:   It is valuable for complicated bug analysis using GPU core dump, however, should not be enabled on daily use because of performance degradation.
-
-`pg_strom.extra_kernel_stack_size` [type: `int` / default: `0`]
-:   Extra size of stack, in bytes, for each GPU kernel thread to be allocated on execution. Usually, no need to change from the default value.
+`pg_strom.gpu_mempool_segment_sz` [type: `int` / default: `1GB`]
+:   The segment size when GPU Service allocates GPU device memory for the memory pool.
+:   GPU device memory allocation is a relatively heavy process, so it is recommended to use memory pools to reuse memory.
 }
 
 @ja{
-##GPUデバイスに関連する設定
+`pg_strom.gpu_mempool_max_ratio` [型: `real` / 初期値: `50%`]
+:   GPUデバイスメモリのメモリプール用に使用する事のできるデバイスメモリの割合を指定します。
+:   メモリプールによる過剰なGPUデバイスメモリの消費を抑制し、ワーキングメモリを十分に確保する事が目的です。
+}
+@en{
+`pg_strom.gpu_mempool_max_ratio` [type: `real` / default: `50%`]
+:   It specifies the percentage of device memory that can be used for the GPU device memory memory pool.
+:   It works to suppress excessive GPU device memory consumption by the memory pool and ensure sufficient working memory.
+}
 
+@ja{
+`pg_strom.gpu_mempool_min_ratio` [型: `real` / 初期値: `5%`]
+:   メモリプールに確保したGPUデバイスメモリのうち、利用終了後も解放せずに確保したままにしておくデバイスメモリの割合を指定します。
+:   最小限度のメモリプールを保持しておくことにより、次のクエリを速やかに実行する事ができます。
+}
+@en{
+`pg_strom.gpu_mempool_min_ratio` [type: `real` / default: `5%`]
+:   It specify the percentage of GPU device memory that is preserved as the memory pool segment, and remained even after memory usage.
+:   By maintaining a minimum memory pool, the next query can be executed quickly.
+}
+
+@ja{
+`pg_strom.gpu_mempool_release_delay` [型: `int` / 初期値: `5000`]
+:   GPU Serviceは、あるメモリプール上のセグメントが空になっても、これを直ちに開放しません。そのセグメントが最後に利用されてから、本パラメータで指定された時間（ミリ秒単位）を経過すると、これを開放してシステムに返却します。
+:   一定の遅延を挟む事で、GPUデバイスメモリの割当/解放の頻度を減らす事ができます。
+}
+@en{
+`pg_strom.gpu_mempool_release_delay` [type: `int` / default: `5000`]
+:   GPU Service does not release a segment of a memory pool immediately, even if it becomes empty. When the time specified by this parameter (in milliseconds) has elapsed since the segment was last used, it is released and returned to the system.
+:   By inserting a certain delay, you can reduce the frequency of GPU device memory allocation/release.
+}
+
+@ja{
+`pg_strom.gpuserv_debug_output` [型: `bool` / 初期値: `false`]
+:   GPU Serviceのデバッグメッセージ出力を有効化/無効化します。このメッセージはデバッグにおいて有効である場合がありますが、通常は初期値のまま変更しないで下さい。
+}
+@en{
+`pg_strom.gpuserv_debug_output` [type: `bool` / default: `false`]
+:   Enable/disable GPU Service debug message output. This message may be useful for debugging, but normally you should not change it from the default value.
+}
+
+@ja{
 `pg_strom.cuda_visible_devices` [型: `text` / 初期値: `null`]
 :   PostgreSQLの起動時に特定のGPUデバイスだけを認識させてい場合は、カンマ区切りでGPUデバイス番号を記述します。
 :   これは環境変数`CUDA_VISIBLE_DEVICES`を設定するのと同等です。
-
-`pg_strom.gpu_memory_segment_size` [型: `int` / 初期値: `512MB`]
-:   PG-StromがGPUメモリをアロケーションする際に、1回のCUDA API呼び出しで獲得するGPUデバイスメモリのサイズを指定します。
-:   この値が大きいとAPI呼び出しのオーバーヘッドは減らせますが、デバイスメモリのロスは大きくなります。
 }
 @en{
-##GPU Device Configuration
-
 `pg_strom.cuda_visible_devices` [type: `text` / default: `null`]
 :   List of GPU device numbers in comma separated, if you want to recognize particular GPUs on PostgreSQL startup.
 :   It is equivalent to the environment variable `CUDAVISIBLE_DEVICES`
-
-`pg_strom.gpu_memory_segment_size` [type: `int` / default: `512MB`]
-:   Specifies the amount of device memory to be allocated per CUDA API call.
-:   Larger configuration will reduce the overhead of API calls, but not efficient usage of device memory.
 }
+
+<!--
+@ja:## DPU関連設定
+@en:## DPU related configurations
 
 @ja{
-##PG-Strom共有メモリに関連する設定
-
-`shmbuf.segment_size` [型: `int` / 初期値: `256MB`]
-:   ポータブルな仮想アドレスを持つ共有メモリセグメントの単位長を指定します。
-:   通常は初期値を変更する必要はありませんが、GPUキャッシュのREDOログバッファに`256MB`以上の大きさを指定する場合には、本パラメータも併せて拡大する必要があります。
-:   本パラメータの設定値は2のべき乗だけが許されます。
-
-`shmbuf.num_logical_segments` [型: `int` / 初期値: 自動]
-:   ポータブルな仮想アドレスを持つ共有メモリのセグメント数を指定します。
-:   PG-Stromは起動時に(`shmbuf.segment_size` x `shmbuf.num_logical_segments`)バイトの領域をPROT_NONE属性でmmap(2)し、その後、シグナルハンドラを利用してオンデマンドの割当てを行います。
-:   デフォルトの論理セグメントサイズは自動設定で、システム搭載物理メモリの2倍の大きさです。
+`pg_strom.dpu_endpoint_list` [型: `text` / 初期値: なし]
+:   
 }
-@en{
-##PG-Strom shared memory configuration
-
-`shmbuf.segment_size` [type: `int` / default: `256MB`]
-:   It configures the unit length of the shared memory segment that has portable virtual addresses.
-:   Usually, it does not need to change the default value, except for the case when GPU Cache uses REDO Log buffer larger than `256MB`. In this case, you need to enlarge this parameter also.
-:   This parameter allows only power of 2.
-
-`shmbuf.num_logical_segments` [type: `int` / default: auto]
-:   It configures the number of the shared memory segment that has portable virtual addresses.
-:   On the system startup, PG-Strom reserves (`shmbuf.segment_size` x `shmbuf.num_logical_segments`) bytes of virtual address space using mmap(2) with PROT_NONE, then, signal handler allocates physical memory on the demand.
-:   The default configuration is auto; that is almost twice of the physical memory size installed on the system.
+@ja{
+pg_strom.dpu_endpoint_default_port [型: `int` / 初期値: 6543]
 }
+@ja{
+`pg_strom.enable_dpuscan` [型: `bool` / 初期値: `on`]
+:   DpuScanによるスキャンを有効化/無効化する。
+}
+@ja{
+`pg_strom.enable_dpujoin` [型: `bool` / 初期値: `on`]
+:   DpuJoinによるJOINを一括で有効化/無効化する。（DpuHashJoinとDpuGiSTIndexを含む）
+}
+@ja{
+`pg_strom.enable_dpuhashjoin` [型: `bool` / 初期値: `on`]
+:   DpuHashJoinによるJOINを有効化/無効化する。
+}
+@ja{
+`pg_strom.enable_dpugistindex` [型: `bool` / 初期値: `on`]
+:   DpuGiSTIndexによるJOINを有効化/無効化する。
+}
+@ja{
+`pg_strom.enable_dpupreagg` [型: `bool` / 初期値: `on`]
+:   DpuPreAggによる集約処理を有効化/無効化する。
+}
+@ja{
+`pg_strom.dpu_setup_cost` [型: `real` / 初期値: `100 * DEFAULT_SEQ_PAGE_COST`]
+:   DPUデバイスの初期化に要するコストとして使用する値。
+}
+@ja{
+`pg_strom.dpu_operator_cost` [型: `real` / 初期値: `1.2 * DEFAULT_CPU_OPERATOR_COST`]
+:   DPUの演算式あたりの処理コストとして使用する値。
+}
+@ja{
+`pg_strom.dpu_seq_page_cost` [型: `real` / 初期値: `DEFAULT_SEQ_PAGE_COST / 4`]
+:   DPUデバイスが自身に紐づいたストレージからブロックを読み出すためのコスト
+}
+@ja{
+`pg_strom.dpu_tuple_cost` [型: `real` / 初期値: `DEFAULT_CPU_TUPLE_COST`]
+:   DPUへ送出する／受け取るタプル一個あたりのコストとして使用する値。
+}
+@ja{
+`pg_strom.dpu_handle_cached_pages` [型: `bool` / 初期値: `off`]
+:   PostgreSQL側の共有バッファに載っており、更新がストレージ側にまだ反映されていないブロックを、わざわざDPU側に送出してDPU側で処理させるかどうかを制御します。
+:   通常、DPUの処理パフォーマンスはCPUよりも劣る上、さらにデータ転送のロスを含めるとCPUで処理する方が賢明です。
+}
+@ja{
+`pg_strom.enable_partitionwise_dpupreagg` [型: `bool` / 初期値: `on`]
+}
+@ja{
+`pg_strom.enable_partitionwise_dpupreagg` [型: `bool` / 初期値: `off`]
+}
+
+-->
 
 

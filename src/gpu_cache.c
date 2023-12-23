@@ -216,11 +216,6 @@ static bool		__gpuCacheAppendLog(GpuCacheDesc *gc_desc,
 static void		gpuCacheInvokeDropUnload(const GpuCacheDesc *gc_desc,
 										 bool is_async);
 void	gpuCacheStartupPreloader(Datum arg);
-PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
-PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
-PG_FUNCTION_INFO_V1(pgstrom_gpucache_compaction);
-PG_FUNCTION_INFO_V1(pgstrom_gpucache_recovery);
-PG_FUNCTION_INFO_V1(pgstrom_gpucache_info);
 
 /*
  * gpucache_sync_trigger_function_oid
@@ -1576,18 +1571,28 @@ releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool normal_commit)
 			if (pitem->tag == 'I')
 			{
 				if (normal_commit)
+				{
 					tx_log.type = GCACHE_TX_LOG__COMMIT_INS;
+				}
 				else
+				{
 					tx_log.type = GCACHE_TX_LOG__ABORT_INS;
+					__removeGpuCacheRowId(gc_desc->gc_lmap, &pitem->ctid);
+				}
 				tx_log.length = sizeof(GCacheTxLogXact);
 				tx_log.rowid = pitem->rowid;
 			}
 			else if (pitem->tag == 'D')
 			{
 				if (normal_commit)
+				{
 					tx_log.type = GCACHE_TX_LOG__COMMIT_DEL;
+					__removeGpuCacheRowId(gc_desc->gc_lmap, &pitem->ctid);
+				}
 				else
+				{
 					tx_log.type = GCACHE_TX_LOG__ABORT_DEL;
+				}
 				tx_log.length = sizeof(GCacheTxLogXact);
 				tx_log.rowid = pitem->rowid;
 			}
@@ -2397,7 +2402,8 @@ __gpuCacheTruncateLog(Oid table_oid)
 /*
  * pgstrom_gpucache_sync_trigger
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_sync_trigger);
+PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 {
 	TriggerData	   *trigdata = (TriggerData *) fcinfo->context;
@@ -2463,7 +2469,8 @@ bailout:
 /*
  * pgstrom_gpucache_apply_redo
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_apply_redo);
+PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 {
 	Oid			table_oid = PG_GETARG_OID(0);
@@ -2491,7 +2498,8 @@ pgstrom_gpucache_apply_redo(PG_FUNCTION_ARGS)
 /*
  * pgstrom_gpucache_compaction
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_compaction);
+PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 {
 	Oid			table_oid = PG_GETARG_OID(0);
@@ -2512,7 +2520,8 @@ pgstrom_gpucache_compaction(PG_FUNCTION_ARGS)
 /*
  * pgstrom_gpucache_recovery
  */
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_recovery);
+PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_recovery(PG_FUNCTION_ARGS)
 {
 	Oid			table_oid = PG_GETARG_OID(0);
@@ -3211,7 +3220,6 @@ __gpucacheExecCompactionKernel(GpuCacheControlCommand *cmd,
 	kern_data_extra *kds_extra;
 	CUdeviceptr	m_kds_extra = 0UL;
 	int			grid_sz, block_sz;
-	unsigned int shmem_sz;
 	void	   *kern_args[4];
 	CUresult	rc;
 
@@ -3233,9 +3241,7 @@ retry:
 
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
-							 &shmem_sz,
-							 f_gcache_compaction,
-							 0, 0);
+							 f_gcache_compaction, 0);
 	if (rc != CUDA_SUCCESS)
 	{
 		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
@@ -3248,8 +3254,8 @@ retry:
 	rc = cuLaunchKernel(f_gcache_compaction,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
-						shmem_sz,
-						CU_STREAM_PER_THREAD,
+						0,
+						CU_STREAM_LEGACY,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
@@ -3258,7 +3264,7 @@ retry:
 				 "failed on cuLaunchKernel: %s", cuStrError(rc));
 		goto bailout;
 	}
-	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	rc = cuStreamSynchronize(CU_STREAM_LEGACY);
 	if (rc != CUDA_SUCCESS)
 	{
 		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
@@ -3342,7 +3348,6 @@ __gpucacheExecApplyRedoKernel(GpuCacheControlCommand *cmd,
 	size_t		offset;
 	char	   *pos, *end;
 	int			grid_sz, block_sz;
-	unsigned int shmem_sz;
 	void	   *kern_args[4];
 	kern_gpucache_redolog *gcache_redo;
 	CUdeviceptr	m_gcache_redo = 0UL;
@@ -3416,9 +3421,7 @@ __gpucacheExecApplyRedoKernel(GpuCacheControlCommand *cmd,
 	/* GPU kernel invocation */
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
-							 &shmem_sz,
-							 f_gcache_apply_redo,
-							 0, 0);
+							 f_gcache_apply_redo, 0);
 	if (rc != CUDA_SUCCESS)
 	{
 		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
@@ -3436,8 +3439,8 @@ retry:
 		rc = cuLaunchKernel(f_gcache_apply_redo,
 							grid_sz, 1, 1,
 							block_sz, 1, 1,
-							shmem_sz,
-							CU_STREAM_PER_THREAD,
+							0,
+							CU_STREAM_LEGACY,
 							kern_args,
 							NULL);
 		if (rc != CUDA_SUCCESS)
@@ -3447,7 +3450,7 @@ retry:
 			goto bailout;
 		}
 	}
-	rc = cuStreamSynchronize(CU_STREAM_PER_THREAD);
+	rc = cuStreamSynchronize(CU_STREAM_LEGACY);
     if (rc != CUDA_SUCCESS)
     {
 		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
@@ -4064,6 +4067,7 @@ gpuCacheStartupPreloader(Datum arg)
  *
  * ------------------------------------------------------------
  */
+PG_FUNCTION_INFO_V1(pgstrom_gpucache_info);
 static List *
 __pgstrom_gpucache_info(void)
 {
@@ -4126,7 +4130,7 @@ __pgstrom_gpucache_info(void)
 	return results;
 }
 
-Datum
+PUBLIC_FUNCTION(Datum)
 pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 {
 	GpuCacheSharedState *gc_sstate;

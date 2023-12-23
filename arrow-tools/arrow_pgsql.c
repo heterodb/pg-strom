@@ -1813,7 +1813,8 @@ assignArrowTypePgSQL(SQLfield *column,
 	if (extname != NULL)
 	{
 		/* contrib/cube (relocatable) */
-		if (strcmp(extname, "cube") == 0 &&
+		if (strcmp(typname, "cube") == 0 &&
+			strcmp(extname, "cube") == 0 &&
 			strcmp(extschema, typnamespace) == 0)
 		{
 			__assignArrowTypeHint(column, typname, typnamespace);

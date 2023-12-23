@@ -12,6 +12,327 @@
  */
 #include "pg_strom.h"
 
+/* ----------------------------------------------------------------
+ *
+ * form/deform/copy pgstromPlanInfo
+ *
+ * ----------------------------------------------------------------
+ */
+static List *
+__form_codegen_kvar_defitem(codegen_kvar_defitem *kvdef)
+{
+	List	   *result = NIL;
+	List	   *subfields = NIL;
+	ListCell   *lc;
+
+	result = lappend(result, makeInteger(kvdef->kv_slot_id));
+	result = lappend(result, makeInteger(kvdef->kv_depth));
+	result = lappend(result, makeInteger(kvdef->kv_resno));
+	result = lappend(result, makeInteger(kvdef->kv_maxref));
+	result = lappend(result, makeInteger(kvdef->kv_offset));
+
+	result = lappend(result, makeInteger(kvdef->kv_type_oid));
+	result = lappend(result, makeInteger(kvdef->kv_type_code));
+	result = lappend(result, makeBoolean(kvdef->kv_typbyval));
+	result = lappend(result, makeInteger(kvdef->kv_typalign));
+	result = lappend(result, makeInteger(kvdef->kv_typlen));
+	result = lappend(result, makeInteger(kvdef->kv_kvec_sizeof));
+	result = lappend(result, kvdef->kv_expr);
+	foreach (lc, kvdef->kv_subfields)
+	{
+		codegen_kvar_defitem *__kvdef = lfirst(lc);
+		subfields = lappend(subfields, __form_codegen_kvar_defitem(__kvdef));
+	}
+	result = lappend(result, subfields);
+
+	return result;
+}
+
+static codegen_kvar_defitem *
+__deform_codegen_kvar_defitem(List *sublist)
+{
+	codegen_kvar_defitem *kvdef = palloc0(sizeof(codegen_kvar_defitem));
+	List	   *subfields = NIL;
+	ListCell   *lc;
+	int			kvindex = 0;
+
+	kvdef->kv_slot_id  = intVal(list_nth(sublist, kvindex++));
+	kvdef->kv_depth    = intVal(list_nth(sublist, kvindex++));
+	kvdef->kv_resno    = intVal(list_nth(sublist, kvindex++));
+	kvdef->kv_maxref   = intVal(list_nth(sublist, kvindex++));
+	kvdef->kv_offset   = intVal(list_nth(sublist, kvindex++));
+
+	kvdef->kv_type_oid = intVal(list_nth(sublist, kvindex++));
+	kvdef->kv_type_code = intVal(list_nth(sublist, kvindex++));
+	kvdef->kv_typbyval = boolVal(list_nth(sublist, kvindex++));
+	kvdef->kv_typalign = intVal(list_nth(sublist, kvindex++));
+	kvdef->kv_typlen   = intVal(list_nth(sublist, kvindex++));
+	kvdef->kv_kvec_sizeof = intVal(list_nth(sublist, kvindex++));
+	kvdef->kv_expr     = list_nth(sublist, kvindex++);
+	subfields          = list_nth(sublist, kvindex++);
+	foreach (lc, subfields)
+	{
+		List   *__sublist = lfirst(lc);
+
+		kvdef->kv_subfields = lappend(kvdef->kv_subfields,
+									  __deform_codegen_kvar_defitem(__sublist));
+	}
+	return kvdef;
+}
+
+void
+form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
+{
+	List	   *privs = NIL;
+	List	   *exprs = NIL;
+	List	   *kvars_deflist = NIL;
+	ListCell   *lc;
+	int			endpoint_id;
+
+	privs = lappend(privs, makeInteger(pp_info->xpu_task_flags));
+	privs = lappend(privs, makeInteger(pp_info->gpu_cache_dindex));
+	privs = lappend(privs, bms_to_pglist(pp_info->gpu_direct_devs));
+	endpoint_id = DpuStorageEntryGetEndpointId(pp_info->ds_entry);
+	privs = lappend(privs, makeInteger(endpoint_id));
+	/* plan information */
+	privs = lappend(privs, bms_to_pglist(pp_info->outer_refs));
+	exprs = lappend(exprs, pp_info->used_params);
+	exprs = lappend(exprs, pp_info->host_quals);
+	privs = lappend(privs, makeInteger(pp_info->scan_relid));
+	exprs = lappend(exprs, pp_info->scan_quals);
+	privs = lappend(privs, pp_info->scan_quals_fallback);
+	privs = lappend(privs, __makeFloat(pp_info->scan_tuples));
+	privs = lappend(privs, __makeFloat(pp_info->scan_rows));
+	privs = lappend(privs, __makeFloat(pp_info->scan_startup_cost));
+	privs = lappend(privs, __makeFloat(pp_info->scan_run_cost));
+	privs = lappend(privs, makeInteger(pp_info->parallel_nworkers));
+	privs = lappend(privs, __makeFloat(pp_info->parallel_divisor));
+	privs = lappend(privs, __makeFloat(pp_info->final_cost));
+	/* bin-index support */
+	privs = lappend(privs, makeInteger(pp_info->brin_index_oid));
+	exprs = lappend(exprs, pp_info->brin_index_conds);
+	exprs = lappend(exprs, pp_info->brin_index_quals);
+	/* XPU code */
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_load_vars_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_move_vars_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_scan_quals));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_join_quals_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_hash_keys_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_gist_evals_packed));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_projection));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keyhash));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keyload));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keycomp));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_actions));
+	/* Kvars definitions */
+	foreach (lc, pp_info->kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+
+		kvars_deflist = lappend(kvars_deflist, __form_codegen_kvar_defitem(kvdef));
+	}
+	/* other planner fields */
+	privs = lappend(privs, kvars_deflist);
+	privs = lappend(privs, makeInteger(pp_info->kvecs_bufsz));
+	privs = lappend(privs, makeInteger(pp_info->kvecs_ndims));
+	privs = lappend(privs, makeInteger(pp_info->extra_flags));
+	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
+	privs = lappend(privs, pp_info->fallback_tlist);
+	privs = lappend(privs, pp_info->groupby_actions);
+	privs = lappend(privs, makeInteger(pp_info->groupby_prepfn_bufsz));
+	/* inner relations */
+	privs = lappend(privs, makeInteger(pp_info->num_rels));
+	for (int i=0; i < pp_info->num_rels; i++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+		List   *__privs = NIL;
+		List   *__exprs = NIL;
+
+		__privs = lappend(__privs, makeInteger(pp_inner->join_type));
+		__privs = lappend(__privs, __makeFloat(pp_inner->join_nrows));
+		__privs = lappend(__privs, __makeFloat(pp_inner->join_startup_cost));
+		__privs = lappend(__privs, __makeFloat(pp_inner->join_run_cost));
+		__exprs = lappend(__exprs, pp_inner->hash_outer_keys);
+		__privs = lappend(__privs, pp_inner->hash_outer_keys_fallback);
+		__exprs = lappend(__exprs, pp_inner->hash_inner_keys);
+		__privs = lappend(__privs, pp_inner->hash_inner_keys_fallback);
+		__exprs = lappend(__exprs, pp_inner->join_quals);
+		__privs = lappend(__privs, pp_inner->join_quals_fallback);
+		__exprs = lappend(__exprs, pp_inner->other_quals);
+		__privs = lappend(__privs, pp_inner->other_quals_fallback);
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_oid));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_col));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_ctid_resno));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_func_oid));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_slot_id));
+		__exprs = lappend(__exprs, pp_inner->gist_clause);
+		__privs = lappend(__privs, __makeFloat(pp_inner->gist_selectivity));
+		__privs = lappend(__privs, __makeFloat(pp_inner->gist_npages));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_height));
+
+		privs = lappend(privs, __privs);
+		exprs = lappend(exprs, __exprs);
+	}
+	cscan->custom_exprs = exprs;
+	cscan->custom_private = privs;
+}
+
+/*
+ * deform_pgstrom_plan_info
+ */
+pgstromPlanInfo *
+deform_pgstrom_plan_info(CustomScan *cscan)
+{
+	pgstromPlanInfo *pp_info;
+	pgstromPlanInfo	pp_data;
+	List	   *privs = cscan->custom_private;
+	List	   *exprs = cscan->custom_exprs;
+	int			pindex = 0;
+	int			eindex = 0;
+	List	   *kvars_deflist;
+	ListCell   *lc;
+	int			endpoint_id;
+
+	memset(&pp_data, 0, sizeof(pgstromPlanInfo));
+	/* device identifiers */
+	pp_data.xpu_task_flags = intVal(list_nth(privs, pindex++));
+	pp_data.gpu_cache_dindex = intVal(list_nth(privs, pindex++));
+	pp_data.gpu_direct_devs = bms_from_pglist(list_nth(privs, pindex++));
+	endpoint_id = intVal(list_nth(privs, pindex++));
+	pp_data.ds_entry = DpuStorageEntryByEndpointId(endpoint_id);
+	/* plan information */
+	pp_data.outer_refs = bms_from_pglist(list_nth(privs, pindex++));
+	pp_data.used_params = list_nth(exprs, eindex++);
+	pp_data.host_quals = list_nth(exprs, eindex++);
+	pp_data.scan_relid = intVal(list_nth(privs, pindex++));
+	pp_data.scan_quals = list_nth(exprs, eindex++);
+	pp_data.scan_quals_fallback = list_nth(privs, pindex++);
+	pp_data.scan_tuples = floatVal(list_nth(privs, pindex++));
+	pp_data.scan_rows = floatVal(list_nth(privs, pindex++));
+	pp_data.scan_startup_cost = floatVal(list_nth(privs, pindex++));
+	pp_data.scan_run_cost = floatVal(list_nth(privs, pindex++));
+	pp_data.parallel_nworkers = intVal(list_nth(privs, pindex++));
+	pp_data.parallel_divisor = floatVal(list_nth(privs, pindex++));
+	pp_data.final_cost = floatVal(list_nth(privs, pindex++));
+	/* brin-index support */
+	pp_data.brin_index_oid = intVal(list_nth(privs, pindex++));
+	pp_data.brin_index_conds = list_nth(exprs, eindex++);
+	pp_data.brin_index_quals = list_nth(exprs, eindex++);
+	/* XPU code */
+	pp_data.kexp_load_vars_packed  = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_move_vars_packed  = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_scan_quals        = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_join_quals_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_hash_keys_packed  = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_gist_evals_packed = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_projection        = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_keyhash   = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_keyload   = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_keycomp   = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_groupby_actions   = __getByteaConst(list_nth(privs, pindex++));
+	/* Kvars definitions */
+	kvars_deflist = list_nth(privs, pindex++);
+	foreach (lc, kvars_deflist)
+	{
+		List	   *sublist = (List *)lfirst(lc);
+
+		pp_data.kvars_deflist = lappend(pp_data.kvars_deflist,
+										__deform_codegen_kvar_defitem(sublist));
+	}
+	pp_data.kvecs_bufsz = intVal(list_nth(privs, pindex++));
+	pp_data.kvecs_ndims = intVal(list_nth(privs, pindex++));
+	pp_data.extra_flags = intVal(list_nth(privs, pindex++));
+	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
+	pp_data.fallback_tlist = list_nth(privs, pindex++);
+	pp_data.groupby_actions = list_nth(privs, pindex++);
+	pp_data.groupby_prepfn_bufsz  = intVal(list_nth(privs, pindex++));
+	/* inner relations */
+	pp_data.num_rels = intVal(list_nth(privs, pindex++));
+	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_data.num_rels]));
+	memcpy(pp_info, &pp_data, offsetof(pgstromPlanInfo, inners));
+	for (int i=0; i < pp_info->num_rels; i++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+		List   *__privs = list_nth(privs, pindex++);
+		List   *__exprs = list_nth(exprs, eindex++);
+		int		__pindex = 0;
+		int		__eindex = 0;
+
+		pp_inner->join_type       = intVal(list_nth(__privs, __pindex++));
+		pp_inner->join_nrows      = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->join_startup_cost = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->join_run_cost   = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->hash_outer_keys = list_nth(__exprs, __eindex++);
+		pp_inner->hash_outer_keys_fallback = list_nth(__privs, __pindex++);
+		pp_inner->hash_inner_keys = list_nth(__exprs, __eindex++);
+		pp_inner->hash_inner_keys_fallback = list_nth(__privs, __pindex++);
+		pp_inner->join_quals      = list_nth(__exprs, __eindex++);
+		pp_inner->join_quals_fallback = list_nth(__privs, __pindex++);
+		pp_inner->other_quals     = list_nth(__exprs, __eindex++);
+		pp_inner->other_quals_fallback = list_nth(__privs, __pindex++);
+		pp_inner->gist_index_oid  = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_index_col  = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_ctid_resno = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_func_oid   = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_slot_id    = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_clause     = list_nth(__exprs, __eindex++);
+		pp_inner->gist_selectivity = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_npages     = floatVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_height     = intVal(list_nth(__privs, __pindex++));
+	}
+	return pp_info;
+}
+
+/*
+ * copy_pgstrom_plan_info
+ */
+pgstromPlanInfo *
+copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
+{
+	pgstromPlanInfo *pp_dest;
+	ListCell   *lc;
+
+	/*
+	 * NOTE: we add one pgstromPlanInnerInfo margin to be used for GpuJoin.
+	 */
+	pp_dest = palloc0(offsetof(pgstromPlanInfo, inners[pp_orig->num_rels+1]));
+	memcpy(pp_dest, pp_orig, offsetof(pgstromPlanInfo,
+									  inners[pp_orig->num_rels]));
+	pp_dest->used_params      = list_copy(pp_dest->used_params);
+	pp_dest->host_quals       = copyObject(pp_dest->host_quals);
+	pp_dest->scan_quals       = copyObject(pp_dest->scan_quals);
+	pp_dest->scan_quals_fallback = copyObject(pp_dest->scan_quals_fallback);
+	pp_dest->brin_index_conds = copyObject(pp_dest->brin_index_conds);
+	pp_dest->brin_index_quals = copyObject(pp_dest->brin_index_quals);
+	foreach (lc, pp_orig->kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef_orig = lfirst(lc);
+		codegen_kvar_defitem *kvdef_dest;
+
+		kvdef_dest = pmemdup(kvdef_orig, sizeof(codegen_kvar_defitem));
+		kvdef_dest->kv_expr = copyObject(kvdef_dest->kv_expr);
+		pp_dest->kvars_deflist = lappend(pp_dest->kvars_deflist, kvdef_dest);
+	}
+	pp_dest->fallback_tlist   = copyObject(pp_dest->fallback_tlist);
+	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
+	for (int j=0; j < pp_orig->num_rels; j++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_dest->inners[j];
+#define __COPY(FIELD)	pp_inner->FIELD = copyObject(pp_inner->FIELD)
+		__COPY(hash_outer_keys);
+		__COPY(hash_outer_keys_fallback);
+		__COPY(hash_inner_keys);
+		__COPY(hash_inner_keys_fallback);
+		__COPY(join_quals);
+		__COPY(join_quals_fallback);
+		__COPY(other_quals);
+		__COPY(other_quals_fallback);
+		__COPY(gist_clause);
+#undef __COPY
+	}
+	return pp_dest;
+}
+
 /*
  * fixup_varnode_to_origin
  */
@@ -334,195 +655,6 @@ __getByteaConst(Const *con)
 	return (con->constisnull ? NULL : DatumGetByteaP(con->constvalue));
 }
 
-#if 0
-/*
- * pathnode_tree_walker
- */
-static bool
-pathnode_tree_walker(Path *node,
-					 bool (*walker)(),
-					 void *context)
-{
-	ListCell   *lc;
-
-	if (!node)
-		return false;
-
-	check_stack_depth();
-	switch (nodeTag(node))
-	{
-		case T_Path:
-		case T_IndexPath:
-		case T_BitmapHeapPath:
-		case T_BitmapAndPath:
-		case T_BitmapOrPath:
-		case T_TidPath:
-#if PG_VERSION_NUM < 120000
-		case T_ResultPath:
-#else
-		case T_GroupResultPath:
-#endif
-		case T_MinMaxAggPath:
-			/* primitive path nodes */
-			break;
-		case T_SubqueryScanPath:
-			if (walker(((SubqueryScanPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_ForeignPath:
-			if (walker(((ForeignPath *)node)->fdw_outerpath, context))
-				return true;
-			break;
-		case T_CustomPath:
-			foreach (lc, ((CustomPath *)node)->custom_paths)
-			{
-				if (walker((Path *)lfirst(lc), context))
-					return true;
-			}
-			break;
-		case T_NestPath:
-		case T_MergePath:
-		case T_HashPath:
-			if (walker(((JoinPath *)node)->outerjoinpath, context))
-				return true;
-			if (walker(((JoinPath *)node)->innerjoinpath, context))
-				return true;
-			break;
-		case T_AppendPath:
-			foreach (lc, ((AppendPath *)node)->subpaths)
-			{
-				if (walker((Path *)lfirst(lc), context))
-					return true;
-			}
-			break;
-		case T_MergeAppendPath:
-			foreach (lc, ((MergeAppendPath *)node)->subpaths)
-			{
-				if (walker((Path *)lfirst(lc), context))
-					return true;
-			}
-			break;
-		case T_MaterialPath:
-			if (walker(((MaterialPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_UniquePath:
-			if (walker(((UniquePath *)node)->subpath, context))
-				return true;
-			break;
-		case T_GatherPath:
-			if (walker(((GatherPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_GatherMergePath:
-			if (walker(((GatherMergePath *)node)->subpath, context))
-				return true;
-			break;
-		case T_ProjectionPath:
-			if (walker(((ProjectionPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_ProjectSetPath:
-			if (walker(((ProjectSetPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_SortPath:
-			if (walker(((SortPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_GroupPath:
-			if (walker(((GroupPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_UpperUniquePath:
-			if (walker(((UpperUniquePath *)node)->subpath, context))
-				return true;
-			break;
-		case T_AggPath:
-			if (walker(((AggPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_GroupingSetsPath:
-			if (walker(((GroupingSetsPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_WindowAggPath:
-			if (walker(((WindowAggPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_SetOpPath:
-			if (walker(((SetOpPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_RecursiveUnionPath:
-			if (walker(((RecursiveUnionPath *)node)->leftpath, context))
-				return true;
-			if (walker(((RecursiveUnionPath *)node)->rightpath, context))
-				return true;
-			break;
-		case T_LockRowsPath:
-			if (walker(((LockRowsPath *)node)->subpath, context))
-				return true;
-			break;
-		case T_ModifyTablePath:
-#if PG_VERSION_NUM < 140000
-			foreach (lc, ((ModifyTablePath *)node)->subpaths)
-			{
-				if (walker((Path *)lfirst(lc), context))
-					return true;
-			}
-#else
-			if (walker(((ModifyTablePath *)node)->subpath))
-				return true;
-#endif
-			break;
-		case T_LimitPath:
-			if (walker(((LimitPath *)node)->subpath, context))
-				return true;
-			break;
-		default:
-			elog(ERROR, "unrecognized path-node type: %d",
-				 (int) nodeTag(node));
-			break;
-	}
-	return false;
-}
-
-static bool
-__pathtree_has_gpupath(Path *node, void *context)
-{
-	if (!node)
-		return false;
-	if (pgstrom_path_is_gpuscan(node) ||
-		pgstrom_path_is_gpujoin(node) ||
-		pgstrom_path_is_gpupreagg(node))
-		return true;
-	return pathnode_tree_walker(node, __pathtree_has_gpupath, context);
-}
-
-bool
-pathtree_has_gpupath(Path *node)
-{
-	return __pathtree_has_gpupath(node, NULL);
-}
-
-static bool
-__pathtree_has_parallel_aware(Path *path, void *context)
-{
-	bool	rv = path->parallel_aware;
-
-	if (!rv)
-		rv = pathnode_tree_walker(path, __pathtree_has_parallel_aware, context);
-	return rv;
-}
-
-bool
-pathtree_has_parallel_aware(Path *node)
-{
-	return __pathtree_has_parallel_aware(node, NULL);
-}
-#endif
-
 /*
  * pgstrom_copy_pathnode
  *
@@ -564,6 +696,8 @@ pgstrom_copy_pathnode(const Path *pathnode)
 			return pmemdup(pathnode, sizeof(BitmapOrPath));
 		case T_TidPath:
 			return pmemdup(pathnode, sizeof(TidPath));
+		case T_TidRangePath:
+			return pmemdup(pathnode, sizeof(TidRangePath));
 		case T_SubqueryScanPath:
 			{
 				SubqueryScanPath *a = (SubqueryScanPath *)pathnode;
@@ -683,6 +817,13 @@ pgstrom_copy_pathnode(const Path *pathnode)
 				b->subpath = pgstrom_copy_pathnode(a->subpath);
 				return &b->path;
 			}
+		case T_IncrementalSortPath:
+			{
+				IncrementalSortPath *a = (IncrementalSortPath *)pathnode;
+				IncrementalSortPath *b = pmemdup(a, sizeof(IncrementalSortPath));
+				b->spath.subpath = pgstrom_copy_pathnode(a->spath.subpath);
+				return &b->spath.path;
+			}
 		case T_GroupPath:
 			{
 				GroupPath	   *a = (GroupPath *)pathnode;
@@ -762,45 +903,6 @@ pgstrom_copy_pathnode(const Path *pathnode)
 	return NULL;
 }
 
-#if 0
-/*
- * pgstrom_define_shell_type - A wrapper for TypeShellMake with a particular OID
- */
-PG_FUNCTION_INFO_V1(pgstrom_define_shell_type);
-Datum
-pgstrom_define_shell_type(PG_FUNCTION_ARGS)
-{
-	char   *type_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	Oid		type_oid = PG_GETARG_OID(1);
-	Oid		type_namespace = PG_GETARG_OID(2);
-	bool	__IsBinaryUpgrade = IsBinaryUpgrade;
-	Oid		__binary_upgrade_next_pg_type_oid = binary_upgrade_next_pg_type_oid;
-
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to create a shell type")));
-	PG_TRY();
-	{
-		IsBinaryUpgrade = true;
-		binary_upgrade_next_pg_type_oid = type_oid;
-
-		TypeShellMake(type_name, type_namespace, GetUserId());
-	}
-	PG_CATCH();
-	{
-		IsBinaryUpgrade = __IsBinaryUpgrade;
-		binary_upgrade_next_pg_type_oid = __binary_upgrade_next_pg_type_oid;
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	IsBinaryUpgrade = __IsBinaryUpgrade;
-	binary_upgrade_next_pg_type_oid = __binary_upgrade_next_pg_type_oid;
-
-	PG_RETURN_OID(type_oid);
-}
-#endif
-
 /*
  * ----------------------------------------------------------------
  *
@@ -808,30 +910,11 @@ pgstrom_define_shell_type(PG_FUNCTION_ARGS)
  *
  * ----------------------------------------------------------------
  */
-Datum pgstrom_random_setseed(PG_FUNCTION_ARGS);
-Datum pgstrom_random_int(PG_FUNCTION_ARGS);
-Datum pgstrom_random_float(PG_FUNCTION_ARGS);
-Datum pgstrom_random_date(PG_FUNCTION_ARGS);
-Datum pgstrom_random_time(PG_FUNCTION_ARGS);
-Datum pgstrom_random_timetz(PG_FUNCTION_ARGS);
-Datum pgstrom_random_timestamp(PG_FUNCTION_ARGS);
-Datum pgstrom_random_timestamptz(PG_FUNCTION_ARGS);
-Datum pgstrom_random_interval(PG_FUNCTION_ARGS);
-Datum pgstrom_random_macaddr(PG_FUNCTION_ARGS);
-Datum pgstrom_random_inet(PG_FUNCTION_ARGS);
-Datum pgstrom_random_text(PG_FUNCTION_ARGS);
-Datum pgstrom_random_text_length(PG_FUNCTION_ARGS);
-Datum pgstrom_random_int4range(PG_FUNCTION_ARGS);
-Datum pgstrom_random_int8range(PG_FUNCTION_ARGS);
-Datum pgstrom_random_tsrange(PG_FUNCTION_ARGS);
-Datum pgstrom_random_tstzrange(PG_FUNCTION_ARGS);
-Datum pgstrom_random_daterange(PG_FUNCTION_ARGS);
-Datum pgstrom_abort_if(PG_FUNCTION_ARGS);
-
 static unsigned int		pgstrom_random_seed = 0;
 static bool				pgstrom_random_seed_set = false;
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_setseed);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_setseed(PG_FUNCTION_ARGS)
 {
 	unsigned int	seed = PG_GETARG_UINT32(0);
@@ -841,7 +924,6 @@ pgstrom_random_setseed(PG_FUNCTION_ARGS)
 
 	PG_RETURN_VOID();
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_setseed);
 
 static int64_t
 __random(void)
@@ -870,7 +952,8 @@ generate_null(double ratio)
 	return false;
 }
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_int);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_int(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -888,9 +971,9 @@ pgstrom_random_int(PG_FUNCTION_ARGS)
 
 	PG_RETURN_INT64(lower + v % (upper - lower));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_int);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_float);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_float(PG_FUNCTION_ARGS)
 {
 	float8	ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -906,9 +989,9 @@ pgstrom_random_float(PG_FUNCTION_ARGS)
 
 	PG_RETURN_FLOAT8((upper - lower) * __drand48() + lower);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_float);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_date);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_date(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -935,9 +1018,9 @@ pgstrom_random_date(PG_FUNCTION_ARGS)
 
 	PG_RETURN_DATEADT(lower + v % (upper - lower));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_date);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_time);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_time(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -959,9 +1042,9 @@ pgstrom_random_time(PG_FUNCTION_ARGS)
 
 	PG_RETURN_TIMEADT(lower + v % (upper - lower));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_time);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_timetz);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_timetz(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -989,9 +1072,9 @@ pgstrom_random_timetz(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_TIMETZADT_P(temp);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_timetz);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_timestamp);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_timestamp(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1029,9 +1112,9 @@ pgstrom_random_timestamp(PG_FUNCTION_ARGS)
 
 	PG_RETURN_TIMESTAMP(lower + v % (upper - lower));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_timestamp);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_macaddr);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_macaddr(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1080,9 +1163,9 @@ pgstrom_random_macaddr(PG_FUNCTION_ARGS)
 	temp->f = (x      ) & 0x00ff;
 	PG_RETURN_MACADDR_P(temp);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_macaddr);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_inet);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_inet(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1133,9 +1216,9 @@ pgstrom_random_inet(PG_FUNCTION_ARGS)
 	ip_bits(temp) = ip_maxbits(temp);
 	PG_RETURN_INET_P(temp);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_inet);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_text);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_text(PG_FUNCTION_ARGS)
 {
 	static const char *base32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
@@ -1171,9 +1254,9 @@ pgstrom_random_text(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_TEXT_P(temp);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_text);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_text_length);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_text_length(PG_FUNCTION_ARGS)
 {
 	static const char *base64 =
@@ -1210,7 +1293,6 @@ pgstrom_random_text_length(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_TEXT_P(temp);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_text_length);
 
 static Datum
 simple_make_range(PG_FUNCTION_ARGS,
@@ -1236,7 +1318,8 @@ simple_make_range(PG_FUNCTION_ARGS,
 	return PointerGetDatum(range);
 }
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_int4range);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_int4range(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1261,9 +1344,9 @@ pgstrom_random_int4range(PG_FUNCTION_ARGS)
 							 Int32GetDatum(Min(x,y)),
 							 Int32GetDatum(Max(x,y)));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_int4range);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_int8range);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_int8range(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1290,9 +1373,9 @@ pgstrom_random_int8range(PG_FUNCTION_ARGS)
 							 Int64GetDatum(Min(x,y)),
 							 Int64GetDatum(Max(x,y)));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_int8range);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_tsrange);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_tsrange(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1342,9 +1425,9 @@ pgstrom_random_tsrange(PG_FUNCTION_ARGS)
 							 TimestampGetDatum(Min(x,y)),
 							 TimestampGetDatum(Max(x,y)));	
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_tsrange);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_tstzrange);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_tstzrange(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1394,9 +1477,9 @@ pgstrom_random_tstzrange(PG_FUNCTION_ARGS)
 							 TimestampTzGetDatum(Min(x,y)),
 							 TimestampTzGetDatum(Max(x,y)));	
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_tstzrange);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_random_daterange);
+PUBLIC_FUNCTION(Datum)
 pgstrom_random_daterange(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
@@ -1432,9 +1515,9 @@ pgstrom_random_daterange(PG_FUNCTION_ARGS)
 							 DateADTGetDatum(Min(x,y)),
 							 DateADTGetDatum(Max(x,y)));
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_daterange);
 
-Datum
+PG_FUNCTION_INFO_V1(pgstrom_abort_if);
+PUBLIC_FUNCTION(Datum)
 pgstrom_abort_if(PG_FUNCTION_ARGS)
 {
 	bool		cond = PG_GETARG_BOOL(0);
@@ -1444,7 +1527,6 @@ pgstrom_abort_if(PG_FUNCTION_ARGS)
 
 	PG_RETURN_VOID();
 }
-PG_FUNCTION_INFO_V1(pgstrom_abort_if);
 
 /*
  * Simple wrapper for read(2) and write(2) to ensure full-buffer read and

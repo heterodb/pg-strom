@@ -11,6 +11,173 @@
  */
 #include "cuda_common.h"
 
+/*
+ * pgstrom_stair_sum_xxxx
+ */
+static __shared__ union {
+	uint32_t	u32[MAXTHREADS_PER_BLOCK / WARPSIZE];
+	uint64_t	u64[MAXTHREADS_PER_BLOCK / WARPSIZE];
+	int32_t		i32[MAXTHREADS_PER_BLOCK / WARPSIZE];
+	int64_t		i64[MAXTHREADS_PER_BLOCK / WARPSIZE];
+	float8_t	fp64[MAXTHREADS_PER_BLOCK / WARPSIZE];
+} __stair_sum_buffer;
+
+template <typename T>
+INLINE_FUNCTION(T)
+__stair_sum_warp_common(T my_value)
+{
+	T	curr = my_value;
+	T	temp;
+
+	assert(__activemask() == ~0U);
+	temp = __shfl_sync(__activemask(), curr, (LaneId() & ~0x01));
+	if ((LaneId() & 0x01) != 0)
+		curr += temp;
+
+	temp = __shfl_sync(__activemask(), curr, (LaneId() & ~0x03) | 0x01);
+	if ((LaneId() & 0x02) != 0)
+		curr += temp;
+
+	temp = __shfl_sync(__activemask(), curr, (LaneId() & ~0x07) | 0x03);
+	if ((LaneId() & 0x04) != 0)
+		curr += temp;
+
+	temp = __shfl_sync(__activemask(), curr, (LaneId() & ~0x0f) | 0x07);
+	if ((LaneId() & 0x08) != 0)
+		curr += temp;
+
+	temp = __shfl_sync(__activemask(), curr, (LaneId() & ~0x1f) | 0x0f);
+	if ((LaneId() & 0x10) != 0)
+		curr += temp;
+
+	return curr;
+}
+
+PUBLIC_FUNCTION(uint32_t)
+pgstrom_stair_sum_binary(bool predicate, uint32_t *p_total_count)
+{
+	uint32_t	n_warps = get_local_size() / warpSize;
+	uint32_t	warp_id = get_local_id()   / warpSize;
+	uint32_t	mask;
+	uint32_t	sum;
+
+	assert(__activemask() == ~0U);
+	mask = __ballot_sync(__activemask(), predicate);
+	if (LaneId() == 0)
+		__stair_sum_buffer.u32[warp_id] = __popc(mask);
+	__syncthreads();
+
+	if (warp_id == 0)
+	{
+		uint32_t	temp = (LaneId() < n_warps ? __stair_sum_buffer.u32[LaneId()] : 0);
+
+		__stair_sum_buffer.u32[LaneId()] = __stair_sum_warp_common(temp);
+	}
+	__syncthreads();
+
+	if (p_total_count)
+		*p_total_count = __stair_sum_buffer.u32[warpSize-1];
+	sum = (warp_id > 0 ? __stair_sum_buffer.u32[warp_id-1] : 0);
+	__syncthreads();
+
+	mask &= ((1U << LaneId()) - 1);		/* not include myself */
+	return sum + __popc(mask);
+}
+
+#define PGSTROM_STAIR_SUM_TEMPLATE(SUFFIX, BASETYPE, FIELD)				\
+	PUBLIC_FUNCTION(BASETYPE)											\
+	pgstrom_stair_sum_##SUFFIX(BASETYPE value, BASETYPE *p_total_count)	\
+	{																	\
+		uint32_t	n_warps = get_local_size() / warpSize;				\
+		uint32_t	warp_id = get_local_id()   / warpSize;				\
+		BASETYPE	warp_sum;											\
+		BASETYPE	sum;												\
+																		\
+		assert(__activemask() == ~0U);									\
+		warp_sum = __stair_sum_warp_common(value);						\
+		assert(warp_sum >= value);										\
+		if (LaneId() == warpSize - 1)									\
+			__stair_sum_buffer.FIELD[warp_id] = warp_sum;				\
+		__syncthreads();												\
+																		\
+		if (warp_id == 0)												\
+		{																\
+			BASETYPE	temp = (LaneId() < n_warps						\
+								? __stair_sum_buffer.FIELD[LaneId()] : 0); \
+			__stair_sum_buffer.FIELD[LaneId()] = __stair_sum_warp_common(temp);	\
+		}																\
+		__syncthreads();												\
+																		\
+		if (p_total_count)												\
+			*p_total_count = __stair_sum_buffer.FIELD[warpSize-1];		\
+		sum = (warp_id > 0 ? __stair_sum_buffer.FIELD[warp_id-1] : 0);	\
+		__syncthreads();												\
+																		\
+		return sum + warp_sum;											\
+	}
+
+PGSTROM_STAIR_SUM_TEMPLATE(uint32, uint32_t, u32)
+PGSTROM_STAIR_SUM_TEMPLATE(uint64, uint64_t, u64)
+PGSTROM_STAIR_SUM_TEMPLATE(int64,  int64_t,  i64)
+PGSTROM_STAIR_SUM_TEMPLATE(fp64,   float8_t, fp64)
+
+#define PGSTROM_LOCAL_MINMAX_TEMPLATE(SUFFIX, BASETYPE, FIELD, OPER, INVAL)	\
+	PUBLIC_FUNCTION(BASETYPE)											\
+	pgstrom_local_##SUFFIX(BASETYPE my_value)							\
+	{																	\
+		int			warp_id = get_local_id()   / warpSize;				\
+		int			n_warps = get_local_size() / warpSize;				\
+		BASETYPE	curr = my_value;									\
+		BASETYPE	temp;												\
+																		\
+		/* makes warp local min/max */									\
+		assert(__activemask() == ~0U);									\
+		temp = __shfl_xor_sync(__activemask(), curr, 0x0001);			\
+		curr = OPER(curr, temp);										\
+		temp = __shfl_xor_sync(__activemask(), curr, 0x0002);			\
+		curr = OPER(curr, temp);										\
+		temp = __shfl_xor_sync(__activemask(), curr, 0x0004);			\
+		curr = OPER(curr, temp);										\
+		temp = __shfl_xor_sync(__activemask(), curr, 0x0008);			\
+		curr = OPER(curr, temp);										\
+		temp = __shfl_xor_sync(__activemask(), curr, 0x0010);			\
+		curr = OPER(curr, temp);										\
+																		\
+		if (LaneId() == 0)												\
+			__stair_sum_buffer.FIELD[warp_id] = curr;					\
+		__syncthreads();												\
+																		\
+		if (warp_id == 0)												\
+		{																\
+			assert(__activemask() == ~0U);								\
+			curr = (LaneId() < n_warps ? __stair_sum_buffer.FIELD[LaneId()] : INVAL); \
+																		\
+			temp = __shfl_xor_sync(__activemask(), curr, 0x0001);		\
+			curr = OPER(curr, temp);									\
+			temp = __shfl_xor_sync(__activemask(), curr, 0x0002);		\
+			curr = OPER(curr, temp);									\
+			temp = __shfl_xor_sync(__activemask(), curr, 0x0004);		\
+			curr = OPER(curr, temp);									\
+			temp = __shfl_xor_sync(__activemask(), curr, 0x0008);		\
+			curr = OPER(curr, temp);									\
+			temp = __shfl_xor_sync(__activemask(), curr, 0x0010);		\
+			curr = OPER(curr, temp);									\
+																		\
+			__stair_sum_buffer.FIELD[LaneId()] = curr;					\
+		}																\
+		__syncthreads();												\
+		curr = __stair_sum_buffer.FIELD[LaneId()];						\
+		__syncthreads();												\
+		return curr;													\
+	}
+
+PGSTROM_LOCAL_MINMAX_TEMPLATE(min_int32, int32_t, i32,  Min,  INT_MAX)
+PGSTROM_LOCAL_MINMAX_TEMPLATE(max_int32, int32_t, i32,  Max,  INT_MIN)
+PGSTROM_LOCAL_MINMAX_TEMPLATE(min_int64, int64_t, i64,  Min,  LONG_MAX)
+PGSTROM_LOCAL_MINMAX_TEMPLATE(max_int64, int64_t, i64,  Max,  LONG_MIN)
+PGSTROM_LOCAL_MINMAX_TEMPLATE(min_fp64, float8_t, fp64, Min,  DBL_MAX)
+PGSTROM_LOCAL_MINMAX_TEMPLATE(max_fp64, float8_t, fp64, Max, -DBL_MAX)
+
 /* ----------------------------------------------------------------
  *
  * execGpuScanLoadSource and related
@@ -20,32 +187,35 @@
 STATIC_FUNCTION(int)
 __gpuscan_load_source_row(kern_context *kcxt,
 						  kern_warp_context *wp,
-						  kern_data_store *kds_src,
-						  kern_expression *kexp_load_vars,
-						  kern_expression *kexp_scan_quals,
-						  char *kvars_addr_wp,
-						  uint32_t *p_smx_row_count)
+						  const kern_data_store *kds_src,
+						  const kern_expression *kexp_load_vars,
+						  const kern_expression *kexp_scan_quals,
+						  const kern_expression *kexp_move_vars,
+						  char *dst_kvecs_buffer)
 {
 	uint32_t	count;
 	uint32_t	index;
-	uint32_t	mask;
 	uint32_t	wr_pos;
 	kern_tupitem *tupitem = NULL;
 
-	/* fetch next warpSize tuples */
-	if (LaneId() == 0)
-		count = atomicAdd(p_smx_row_count, 1);
-	count = __shfl_sync(__activemask(), count, 0);
-	index = (get_num_groups() * count + get_group_id()) * warpSize;
+	/* compute the next row-index */
+	count = wp->smx_row_count;
+	__syncthreads();
+	if (get_local_id() == 0)
+		wp->smx_row_count++;
+	index = get_global_size() * count + get_global_base();
 	if (index >= kds_src->nitems)
 	{
-		if (LaneId() == 0)
+		if (get_local_id() == 0)
 			wp->scan_done = 1;
-		__syncwarp();
+		__syncthreads();
 		return 1;
 	}
-	index += LaneId();
+	index += get_local_id();
 
+	/*
+	 * fetch the outer tuple to scan
+	 */
 	if (index < kds_src->nitems)
 	{
 		uint32_t	offset = KDS_GET_ROWINDEX(kds_src)[index];
@@ -56,8 +226,6 @@ __gpuscan_load_source_row(kern_context *kcxt,
 								   __kds_unpack(offset));
 		assert((char *)tupitem >= (char *)kds_src &&
 			   (char *)tupitem <  (char *)kds_src + kds_src->length);
-		kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
-		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 		if (!ExecLoadVarsOuterRow(kcxt,
 								  kexp_load_vars,
 								  kexp_scan_quals,
@@ -66,32 +234,31 @@ __gpuscan_load_source_row(kern_context *kcxt,
 			tupitem = NULL;
 	}
 	/* error checks */
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
+
 	/*
 	 * save the private kvars slot on the combination buffer (depth=0)
 	 */
-	mask = __ballot_sync(__activemask(), tupitem != NULL);
-	if (LaneId() == 0)
-	{
-		wr_pos = WARP_WRITE_POS(wp,0);
-		WARP_WRITE_POS(wp,0) += __popc(mask);
-	}
-	wr_pos = __shfl_sync(__activemask(), wr_pos, 0);
-	mask &= ((1U << LaneId()) - 1);
-	wr_pos += __popc(mask);
+	wr_pos = WARP_WRITE_POS(wp,0);
+	wr_pos += pgstrom_stair_sum_binary(tupitem != NULL, &count);
+	if (get_local_id() == 0)
+		WARP_WRITE_POS(wp,0) += count;
 	if (tupitem != NULL)
 	{
-		index = (wr_pos % UNIT_TUPLES_PER_DEPTH);
-		memcpy((char *)kvars_addr_wp + index * kcxt->kvars_nbytes,
-			   kcxt->kvars_slot,
-			   kcxt->kvars_nbytes);
+		if (!ExecMoveKernelVariables(kcxt,
+									 kexp_move_vars,
+									 dst_kvecs_buffer,
+									 (wr_pos % KVEC_UNITSZ)))
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		}
 	}
-	kcxt->kvars_slot = NULL;
-	kcxt->kvars_class = NULL;
-	__syncwarp();
-	/* move to the next depth if more than 32 htuples were fetched */
-	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + warpSize ? 1 : 0);
+	/* error checks */
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+		return -1;
+	/* move to the next depth, if more than blockSize tuples were fetched. */
+	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + get_local_size() ? 1 : 0);
 }
 
 /*
@@ -100,32 +267,30 @@ __gpuscan_load_source_row(kern_context *kcxt,
 STATIC_FUNCTION(int)
 __gpuscan_load_source_block(kern_context *kcxt,
 							kern_warp_context *wp,
-							kern_data_store *kds_src,
-							kern_expression *kexp_load_vars,
-							kern_expression *kexp_scan_quals,
-							char *kvars_addr_wp,
-							uint32_t *p_smx_row_count)
+							const kern_data_store *kds_src,
+							const kern_expression *kexp_load_vars,
+							const kern_expression *kexp_scan_quals,
+							const kern_expression *kexp_move_vars,
+							char *dst_kvecs_buffer)
 {
-	uint32_t	block_id = __shfl_sync(__activemask(), wp->block_id, 0);
-	uint32_t	wr_pos = __shfl_sync(__activemask(), wp->lp_wr_pos, 0);
-	uint32_t	rd_pos = __shfl_sync(__activemask(), wp->lp_rd_pos, 0);
+	uint32_t	wr_pos = wp->lp_wr_pos;
+	uint32_t	rd_pos = wp->lp_rd_pos;
+	uint32_t	block_id;
 	uint32_t	count;
-	uint32_t	mask;
+	bool		has_next_lp_items = false;
+	HeapTupleHeaderData *htup = NULL;
 
 	assert(wr_pos >= rd_pos);
-	if (block_id > kds_src->nitems || wr_pos >= rd_pos + warpSize)
+	block_id = (get_global_size() / warpSize) * wp->smx_row_count;
+	if (block_id >= kds_src->nitems || wr_pos >= rd_pos + get_local_size())
 	{
-		HeapTupleHeaderData *htup = NULL;
 		uint32_t	off;
-		int			index;
 
-		rd_pos += LaneId();
+		rd_pos += get_local_id();
 		if (rd_pos < wr_pos)
 		{
-			off = wp->lp_items[rd_pos % UNIT_TUPLES_PER_DEPTH];
+			off = wp->lp_items[rd_pos % LP_ITEMS_PER_BLOCK];
 			htup = (HeapTupleHeaderData *)((char *)kds_src + __kds_unpack(off));
-			kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
-			kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 			if (!ExecLoadVarsOuterRow(kcxt,
 									  kexp_load_vars,
 									  kexp_scan_quals,
@@ -133,43 +298,41 @@ __gpuscan_load_source_block(kern_context *kcxt,
 				htup = NULL;
 		}
 		/* error checks */
-		if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 			return -1;
-		if (LaneId() == 0)
+		if (get_local_id() == 0)
 			wp->lp_rd_pos = Min(wp->lp_wr_pos,
-								wp->lp_rd_pos + warpSize);
+								wp->lp_rd_pos + get_local_size());
 		/*
 		 * save the private kvars on the warp-buffer
 		 */
-		mask = __ballot_sync(__activemask(), htup != NULL);
-		if (LaneId() == 0)
-		{
-			wr_pos = WARP_WRITE_POS(wp,0);
-			WARP_WRITE_POS(wp,0) += __popc(mask);
-		}
-		wr_pos = __shfl_sync(__activemask(), wr_pos, 0);
-		mask &= ((1U << LaneId()) - 1);
-		wr_pos += __popc(mask);
+		wr_pos = WARP_WRITE_POS(wp,0);
+		wr_pos += pgstrom_stair_sum_binary(htup != NULL, &count);
+		if (get_local_id() == 0)
+			WARP_WRITE_POS(wp,0) += count;
 		if (htup != NULL)
 		{
-			index = (wr_pos % UNIT_TUPLES_PER_DEPTH);
-			memcpy(kvars_addr_wp + index * kcxt->kvars_nbytes,
-				   kcxt->kvars_slot,
-				   kcxt->kvars_nbytes);
+			if (!ExecMoveKernelVariables(kcxt,
+										 kexp_move_vars,
+										 dst_kvecs_buffer,
+										 (wr_pos % KVEC_UNITSZ)))
+			{
+				assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			}
 		}
-		kcxt->kvars_slot = NULL;
-		kcxt->kvars_class = NULL;
-		__syncwarp();
+		/* error checks */
+		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+			return -1;
 		/* end-of-scan checks */
-		if (block_id > kds_src->nitems &&	/* no more blocks to fetch */
-			wp->lp_rd_pos >= wp->lp_wr_pos)	/* no more pending tuples  */
+		if (block_id >= kds_src->nitems &&	/* no more blocks to fetch */
+			wp->lp_rd_pos >= wp->lp_wr_pos)	/* no more pending tuples */
 		{
-			if (LaneId() == 0)
+			if (get_local_id() == 0)
 				wp->scan_done = 1;
 			return 1;
 		}
-		/* move to the next depth if more than 32 htuples were fetched */
-		return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + warpSize ? 1 : 0);
+		/* move to the next depth if more than blockSize tuples were fetched */
+		return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + get_local_size() ? 1 : 0);
 	}
 
 	/*
@@ -178,77 +341,58 @@ __gpuscan_load_source_block(kern_context *kcxt,
 	 * line-items or next block.
 	 * The pending tuples just passed the MVCC visivility checks, but
 	 * ScanQuals check is not applied yet. We try to run ScanQuals checks
-	 * with 32 threads simultaneously.
+	 * with maximum number of threads simultaneously, as large as we can.
 	 */
-	if (block_id == 0)
+	block_id += (get_global_id() / warpSize);
+	if (block_id < kds_src->nitems)
 	{
-		/*
-		 * block_id == 0 means this warp is not associated with particular
-		 * block-page, so we try to fetch the next page.
-		 */
-		if (LaneId() == 0)
-			count = atomicAdd(p_smx_row_count, 1);
-		count = __shfl_sync(__activemask(), count, 0);
-		block_id = (get_num_groups() * count + get_group_id()) + 1;
-		if (LaneId() == 0)
-			wp->block_id = block_id;
-	}
-	if (block_id <= kds_src->nitems)
-	{
-		HeapTupleHeaderData *htup = NULL;
-		PageHeaderData *pg_page = KDS_BLOCK_PGPAGE(kds_src, block_id-1);
-		BlockNumber		block_nr = KDS_BLOCK_BLCKNR(kds_src, block_id-1);
+		PageHeaderData *pg_page = KDS_BLOCK_PGPAGE(kds_src, block_id);
+		BlockNumber		block_nr = KDS_BLOCK_BLCKNR(kds_src, block_id);
+		uint32_t		nitems = PageGetMaxOffsetNumber(pg_page);
+		uint32_t		index;
 
-		count = __shfl_sync(__activemask(), wp->lp_count, 0);
-		if (count < PageGetMaxOffsetNumber(pg_page))
+		index = wp->lp_count * warpSize + LaneId();
+		if (index < PageGetMaxOffsetNumber(pg_page))
 		{
-			count += LaneId();
-			if (count < PageGetMaxOffsetNumber(pg_page))
-			{
-				ItemIdData *lpp = &pg_page->pd_linp[count];
+			ItemIdData *lpp = &pg_page->pd_linp[index];
 
-				assert((char *)lpp < (char *)pg_page + BLCKSZ);
-				if (ItemIdIsNormal(lpp))
-				{
-					htup = (HeapTupleHeaderData *)PageGetItem(pg_page, lpp);
-					/* for ctid system column reference */
-					htup->t_ctid.ip_blkid.bi_hi = (uint16_t)(block_nr >> 16);
-					htup->t_ctid.ip_blkid.bi_lo = (uint16_t)(block_nr & 0xffffU);
-					htup->t_ctid.ip_posid = count + 1;
-				}
-				else
-					htup = NULL;
-			}
-			/* put visible tuples on the lp_items[] array */
-			mask = __ballot_sync(__activemask(), htup != NULL);
-			if (LaneId() == 0)
+			assert((char *)lpp < (char *)pg_page + BLCKSZ);
+			if (ItemIdIsNormal(lpp))
 			{
-				wr_pos = wp->lp_wr_pos;
-				wp->lp_wr_pos += __popc(mask);
+				htup = (HeapTupleHeaderData *)PageGetItem(pg_page, lpp);
+				/* for ctid system column reference */
+				htup->t_ctid.ip_blkid.bi_hi = (uint16_t)(block_nr >> 16);
+				htup->t_ctid.ip_blkid.bi_lo = (uint16_t)(block_nr & 0xffffU);
+				htup->t_ctid.ip_posid = index + 1;
 			}
-			wr_pos = __shfl_sync(__activemask(), wr_pos, 0);
-			mask &= ((1U << LaneId()) - 1);
-			wr_pos += __popc(mask);
-			if (htup != NULL)
-			{
-				wp->lp_items[wr_pos % UNIT_TUPLES_PER_DEPTH]
-					= __kds_packed((char *)htup - (char *)kds_src);
-			}
-			if (LaneId() == 0)
-				wp->lp_count += warpSize;
 		}
-		else
+		has_next_lp_items = (index + warpSize < nitems);
+	}
+	/* put visible tuples on the lp_items[] array */
+	wr_pos = wp->lp_wr_pos;
+	wr_pos += pgstrom_stair_sum_binary(htup != NULL, &count);
+	if (get_local_id() == 0)
+		wp->lp_wr_pos += count;
+	if (htup != NULL)
+	{
+		wp->lp_items[wr_pos % LP_ITEMS_PER_BLOCK]
+			= __kds_packed((char *)htup - (char *)kds_src);
+	}
+	/* increment the row/line pointer */
+	if (__syncthreads_count(has_next_lp_items) > 0)
+	{
+		if (get_local_id() == 0)
+			wp->lp_count++;
+	}
+	else
+	{
+		if (get_local_id() == 0)
 		{
-			/* no more tuples to fetch from the current page */
-			if (LaneId() == 0)
-			{
-				wp->block_id = 0;
-				wp->lp_count = 0;
-			}
-			__syncwarp();
+			wp->smx_row_count++;
+			wp->lp_count = 0;
 		}
 	}
-	return 0;	/* stay depth-0 */
+	return 0;	/* stay depth=0 */
 }
 
 /*
@@ -257,69 +401,68 @@ __gpuscan_load_source_block(kern_context *kcxt,
 STATIC_FUNCTION(int)
 __gpuscan_load_source_arrow(kern_context *kcxt,
 							kern_warp_context *wp,
-							kern_data_store *kds_src,
-							kern_expression *kexp_load_vars,
-							kern_expression *kexp_scan_quals,
-							char *kvars_addr_wp,
-							uint32_t *p_smx_row_count)
+							const kern_data_store *kds_src,
+							const kern_expression *kexp_load_vars,
+							const kern_expression *kexp_scan_quals,
+							const kern_expression *kexp_move_vars,
+							char *dst_kvecs_buffer)
 {
-	uint32_t	kds_index;
 	uint32_t	count;
-	uint32_t	mask;
+	uint32_t	index;
 	uint32_t	wr_pos;
 	bool		is_valid = false;
 
-	/* fetch next warpSize tuples */
-	if (LaneId() == 0)
-		count = atomicAdd(p_smx_row_count, 1);
-	count = __shfl_sync(__activemask(), count, 0);
-	kds_index = (get_num_groups() * count + get_group_id()) * warpSize;
-	if (kds_index >= kds_src->nitems)
+	/* compute the next row-index */
+	count = wp->smx_row_count;
+	__syncthreads();
+	if (get_local_id() == 0)
+		wp->smx_row_count++;
+	index = get_global_size() * count + get_global_base();
+	if (index >= kds_src->nitems)
 	{
-		wp->scan_done = 1;
-		__syncwarp(__activemask());
+		if (get_local_id() == 0)
+			wp->scan_done = 1;
 		return 1;
 	}
-	kds_index += LaneId();
+	index += get_local_id();
 
-	if (kds_index < kds_src->nitems)
+	/*
+	 * fetch arrow tuple
+	 */
+	if (index < kds_src->nitems)
 	{
-		kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
-		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 		if (ExecLoadVarsOuterArrow(kcxt,
 								   kexp_load_vars,
 								   kexp_scan_quals,
 								   kds_src,
-								   kds_index))
+								   index))
 			is_valid = true;
 	}
 	/* error checks */
-	if (__any_sync(__activemask(), kcxt->errcode != 0))
+    if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
 	/*
-	 * save the htuple on the local combination buffer (depth=0)
+	 * save the private kvars slot on the combination buffer (depth=0)
 	 */
-	mask = __ballot_sync(__activemask(), is_valid);
-	if (LaneId() == 0)
-	{
-		wr_pos = WARP_WRITE_POS(wp,0);
-		WARP_WRITE_POS(wp,0) += __popc(mask);
-	}
-	wr_pos = __shfl_sync(__activemask(), wr_pos, 0);
-	mask &= ((1U << LaneId()) - 1);
-	wr_pos += __popc(mask);
+	wr_pos = WARP_WRITE_POS(wp,0);
+	wr_pos += pgstrom_stair_sum_binary(is_valid, &count);
+	if (get_local_id() == 0)
+		WARP_WRITE_POS(wp,0) += count;
 	if (is_valid)
 	{
-		int		index = (wr_pos % UNIT_TUPLES_PER_DEPTH);
-
-		memcpy(kvars_addr_wp + index * kcxt->kvars_nbytes,
-			   kcxt->kvars_slot,
-			   kcxt->kvars_nbytes);
+		if (!ExecMoveKernelVariables(kcxt,
+									 kexp_move_vars,
+									 dst_kvecs_buffer,
+									 (wr_pos % KVEC_UNITSZ)))
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		}
 	}
-	kcxt->kvars_slot = NULL;
-	kcxt->kvars_class = NULL;
-	/* move to the next depth if more than 32 htuples were fetched */
-	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + warpSize ? 1 : 0);
+	/* error checks */
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+		return -1;
+	/* move to the next depth, if more than blockSize rows were fetched. */
+	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + get_local_size() ? 1 : 0);
 }
 
 /*
@@ -379,91 +522,94 @@ xmin_is_visible:
 STATIC_FUNCTION(int)
 __gpuscan_load_source_column(kern_context *kcxt,
 							 kern_warp_context *wp,
-							 kern_data_store *kds_src,
-							 kern_data_extra *kds_extra,
-							 kern_expression *kexp_load_vars,
-							 kern_expression *kexp_scan_quals,
-							 char *kvars_addr_wp,
-							 uint32_t *p_smx_row_count)
+							 const kern_data_store *kds_src,
+							 const kern_data_extra *kds_extra,
+							 const kern_expression *kexp_load_vars,
+							 const kern_expression *kexp_scan_quals,
+							 const kern_expression *kexp_move_vars,
+							 char *dst_kvecs_buffer)
 {
 	uint32_t	count;
 	uint32_t	index;
-	uint32_t	mask;
 	uint32_t	wr_pos;
-	bool		row_is_valid = false;
+	bool		is_valid = false;
 
-	/* fetch next warpSize tuples */
-	if (LaneId() == 0)
-		count = atomicAdd(p_smx_row_count, 1);
-	count = __shfl_sync(__activemask(), count, 0);
-	index = (get_num_groups() * count + get_group_id()) * warpSize;
+	/* fetch next blockSize tuples */
+	count = wp->smx_row_count;
+	__syncthreads();
+	if (get_local_id() == 0)
+		wp->smx_row_count++;
+	index = get_global_size() * count + get_global_base();
 	if (index >= kds_src->nitems)
 	{
-		if (LaneId() == 0)
+		if (get_local_id() == 0)
 			wp->scan_done = 1;
-		__syncwarp();
 		return 1;
 	}
-	index += LaneId();
+	index += get_local_id();
 
+	/*
+	 * fetch the outer tuple to scan
+	 */
 	if (index < kds_src->nitems &&
 		kds_column_check_visibility(kcxt, kds_src, index))
 	{
-		kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
-		kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 		if (ExecLoadVarsOuterColumn(kcxt,
 									kexp_load_vars,
 									kexp_scan_quals,
 									kds_src,
 									kds_extra,
 									index))
-			row_is_valid = true;
+			is_valid = true;
 	}
 	/* error checks */
-	if (__any_sync(__activemask(), kcxt->errcode != ERRCODE_STROM_SUCCESS))
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
 	/*
 	 * save the private kvars slot on the combination buffer (depth=0)
 	 */
-	mask = __ballot_sync(__activemask(), row_is_valid);
-	if (LaneId() == 0)
+	wr_pos = WARP_WRITE_POS(wp,0);
+	wr_pos += pgstrom_stair_sum_binary(is_valid, &count);
+	if (get_local_id() == 0)
+		WARP_WRITE_POS(wp,0) += count;
+	if (is_valid)
 	{
-		wr_pos = WARP_WRITE_POS(wp,0);
-		WARP_WRITE_POS(wp,0) += __popc(mask);
+		if (!ExecMoveKernelVariables(kcxt,
+									 kexp_move_vars,
+									 dst_kvecs_buffer,
+									 (wr_pos % KVEC_UNITSZ)))
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		}
 	}
-	wr_pos = __shfl_sync(__activemask(), wr_pos, 0);
-	mask &= ((1U << LaneId()) - 1);
-	wr_pos += __popc(mask);
-	if (row_is_valid)
-	{
-		index = (wr_pos % UNIT_TUPLES_PER_DEPTH);
-		memcpy((char *)kvars_addr_wp + index * kcxt->kvars_nbytes,
-			   kcxt->kvars_slot,
-			   kcxt->kvars_nbytes);
-	}
-	kcxt->kvars_slot = NULL;
-	kcxt->kvars_class = NULL;
-	__syncwarp();
+	/* error checks */
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+        return -1;
 	/* move to the next depth if more than 32 htuples were fetched */
-	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + warpSize ? 1 : 0);
+	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + get_local_size() ? 1 : 0);
 }
 
 PUBLIC_FUNCTION(int)
 execGpuScanLoadSource(kern_context *kcxt,
 					  kern_warp_context *wp,
-					  kern_data_store *kds_src,
-					  kern_data_extra *kds_extra,
-					  kern_expression *kexp_load_vars,
-					  kern_expression *kexp_scan_quals,
-					  char *kvars_addr_wp,
-					  uint32_t *p_smx_row_count)
+					  const kern_data_store *kds_src,
+					  const kern_data_extra *kds_extra,
+					  const kern_expression *kexp_load_vars,
+					  const kern_expression *kexp_scan_quals,
+					  const kern_expression *kexp_move_vars,
+					  char *dst_kvecs_buffer)
 {
 	/*
 	 * Move to the next depth (or projection), if combination buffer (depth=0)
 	 * may overflow on the next action, or we already reached to the KDS tail.
 	 */
-	if (wp->scan_done || WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + warpSize)
+	if (wp->scan_done > 0 ||
+		WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + get_local_size())
 		return 1;
+
+	/* no source kernel-vectorized buffer for depth==0 */
+	kcxt->kvecs_curr_buffer = NULL;
+	kcxt->kvecs_curr_id = 0;
 
 	switch (kds_src->format)
 	{
@@ -472,30 +618,30 @@ execGpuScanLoadSource(kern_context *kcxt,
 											 kds_src,
 											 kexp_load_vars,
 											 kexp_scan_quals,
-											 kvars_addr_wp,
-											 p_smx_row_count);
+											 kexp_move_vars,
+											 dst_kvecs_buffer);
 		case KDS_FORMAT_BLOCK:
 			return __gpuscan_load_source_block(kcxt, wp,
 											   kds_src,
 											   kexp_load_vars,
 											   kexp_scan_quals,
-											   kvars_addr_wp,
-											   p_smx_row_count);
+											   kexp_move_vars,
+											   dst_kvecs_buffer);
 		case KDS_FORMAT_ARROW:
 			return __gpuscan_load_source_arrow(kcxt, wp,
 											   kds_src,
 											   kexp_load_vars,
 											   kexp_scan_quals,
-											   kvars_addr_wp,
-											   p_smx_row_count);
+											   kexp_move_vars,
+											   dst_kvecs_buffer);
 		case KDS_FORMAT_COLUMN:
 			return __gpuscan_load_source_column(kcxt, wp,
 												kds_src,
 												kds_extra,
 												kexp_load_vars,
 												kexp_scan_quals,
-												kvars_addr_wp,
-												p_smx_row_count);
+												kexp_move_vars,
+												dst_kvecs_buffer);
 		default:
 			STROM_ELOG(kcxt, "Bug? Unknown KDS format");
 			break;
