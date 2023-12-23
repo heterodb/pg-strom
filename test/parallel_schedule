@@ -13,19 +13,21 @@
 # ----------
 # Test for each data types
 # ----------
-#test: dtype_int dtype_float dtype_numeric dtype_time dtype_text dtype_jsonb dtype_range additional_dtype
+# test: dtype_int dtype_float dtype_numeric dtype_time dtype_text dtype_jsonb dtype_range additional_dtype
+# test: dtype_int dtype_float dtype_numeric dtype_text dtype_jsonb dtype_range additional_dtype
 test: dtype_time
-##test: dtype_float dtype_text dtype_numeric
 
 # ----------
 # Test for various functions / expressions
 # ----------
-#test: dfunc_math dfunc_mbtext dexpr_scalar_array_op dexpr_misc
+# test: dfunc_math dfunc_mbtext dexpr_scalar_array_op dexpr_misc
+# test: dfunc_math
 
 # ----------
 # Test for arrow_fdw
 # ----------
 #test: arrow_cpu arrow_write arrow_utils arrow_index
+# test: arrow_cpu
 
 # ----------
 # Test for CPU fallback and GPU kernel suspend / resume
@@ -48,4 +50,4 @@ test: dtype_time
 # ----------
 # GPU Cache
 # ----------
-##test: gpu_cache
+# test: gpu_cache
