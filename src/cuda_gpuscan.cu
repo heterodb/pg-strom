@@ -95,7 +95,6 @@ pgstrom_stair_sum_binary(bool predicate, uint32_t *p_total_count)
 																		\
 		assert(__activemask() == ~0U);									\
 		warp_sum = __stair_sum_warp_common(value);						\
-		assert(warp_sum >= value);										\
 		if (LaneId() == warpSize - 1)									\
 			__stair_sum_buffer.FIELD[warp_id] = warp_sum;				\
 		__syncthreads();												\
