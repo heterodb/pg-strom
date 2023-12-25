@@ -32,7 +32,7 @@
 #define PUBLIC_FUNCTION(RET_TYPE)		__device__ RET_TYPE
 #define EXTERN_FUNCTION(RET_TYPE)		extern "C" __device__ RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)		extern "C" __global__ RET_TYPE
-#define EXTERN_DATA						extern __device__
+#define EXTERN_DATA						extern "C" __device__
 #define PUBLIC_DATA						__device__
 #define STATIC_DATA						static __device__
 #elif defined(__cplusplus)
@@ -43,7 +43,7 @@
 #define KERNEL_FUNCTION(RET_TYPE)		extern "C" RET_TYPE
 #define EXTERN_FUNCTION(RET_TYPE)		extern "C" RET_TYPE
 #define EXTERN_DATA						extern "C"
-#define PUBLIC_DATA
+#define PUBLIC_DATA						extern "C"
 #define STATIC_DATA						static
 #else
 /* C */

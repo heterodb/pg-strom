@@ -748,6 +748,13 @@ pgstromTaskStateResetScan(pgstromTaskState *pts)
 	TableScanDesc scan = pts->css.ss.ss_currentScanDesc;
 	int		num_devs = 0;
 
+	/*
+	 * pgstromExecTaskState() is never called on the single process
+	 * execution, thus we have no state to reset.
+	 */
+	if (!ps_state)
+		return;
+
 	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 		num_devs = numGpuDevAttrs;
 	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)

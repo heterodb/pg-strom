@@ -4205,7 +4205,10 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 	memset(isnull, 0, sizeof(isnull));
 	values[0] = ObjectIdGetDatum(gc_sstate->ident.database_oid);
 	str = get_database_name(gc_sstate->ident.database_oid);
-	values[1] = CStringGetTextDatum(str);
+	if (str)
+		values[1] = CStringGetTextDatum(str);
+	else
+		isnull[1] = true;
 	values[2] = ObjectIdGetDatum(gc_sstate->ident.table_oid);
 	values[3] = CStringGetTextDatum(gc_sstate->table_name);
 	values[4] = Int64GetDatum(gc_sstate->ident.signature);

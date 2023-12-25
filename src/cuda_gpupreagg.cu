@@ -576,7 +576,6 @@ __update_nogroups__psum_int(kern_context *kcxt,
 		kagg_state__psum_int_packed *r =
 			(kagg_state__psum_int_packed *)buffer;
 
-		assert(ival >= 0);
 		pgstrom_stair_sum_int64(ival, &sum);
 		if (get_local_id() == 0)
 		{
