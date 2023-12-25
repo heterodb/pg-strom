@@ -2435,6 +2435,7 @@ static HTAB *
 __setupDevTypeLinkageTable(CUmodule cuda_module)
 {
 	xpu_type_catalog_entry *xpu_types_catalog;
+	const char *symbol = "builtin_xpu_types_catalog";
 	HASHCTL		hctl;
 	HTAB	   *htab = NULL;
 	CUdeviceptr	dptr;
@@ -2452,10 +2453,10 @@ __setupDevTypeLinkageTable(CUmodule cuda_module)
 					   &hctl,
 					   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
-	rc = cuModuleGetGlobal(&dptr, &nbytes, cuda_module,
-						   "builtin_xpu_types_catalog");
+	rc = cuModuleGetGlobal(&dptr, &nbytes, cuda_module, symbol);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetGlobal: %s", cuStrError(rc));
+		elog(ERROR, "failed on cuModuleGetGlobal('%s'): %s",
+			 symbol, cuStrError(rc));
 
 	xpu_types_catalog = alloca(nbytes);
 	rc = cuMemcpyDtoH(xpu_types_catalog, dptr, nbytes);
@@ -2483,6 +2484,7 @@ static HTAB *
 __setupDevFuncLinkageTable(CUmodule cuda_module)
 {
 	xpu_function_catalog_entry *xpu_funcs_catalog;
+	const char *symbol = "builtin_xpu_functions_catalog";
 	HASHCTL		hctl;
 	HTAB	   *htab;
 	CUdeviceptr	dptr;
@@ -2499,10 +2501,10 @@ __setupDevFuncLinkageTable(CUmodule cuda_module)
 					   &hctl,
 					   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
-	rc = cuModuleGetGlobal(&dptr, &nbytes, cuda_module,
-						   "builtin_xpu_functions_catalog");
+	rc = cuModuleGetGlobal(&dptr, &nbytes, cuda_module, symbol);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetGlobal: %s", cuStrError(rc));
+		elog(ERROR, "failed on cuModuleGetGlobal('%s'): %s",
+			 symbol, cuStrError(rc));
 	xpu_funcs_catalog = alloca(nbytes);
 	rc = cuMemcpyDtoH(xpu_funcs_catalog, dptr, nbytes);
 	if (rc != CUDA_SUCCESS)
@@ -2529,14 +2531,15 @@ static xpu_encode_info *
 __setupDevEncodeLinkageCatalog(CUmodule cuda_module)
 {
 	xpu_encode_info *xpu_encode_catalog;
+	const char *symbol = "xpu_encode_catalog";
 	CUdeviceptr	dptr;
 	CUresult	rc;
 	size_t		nbytes;
 
-	rc = cuModuleGetGlobal(&dptr, &nbytes, cuda_module,
-                           "xpu_encode_catalog");
+	rc = cuModuleGetGlobal(&dptr, &nbytes, cuda_module, symbol);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetGlobal: %s", cuStrError(rc));
+		elog(ERROR, "failed on cuModuleGetGlobal('%s'): %s",
+			 symbol, cuStrError(rc));
 	xpu_encode_catalog = MemoryContextAlloc(TopMemoryContext, nbytes);
 	rc = cuMemcpyDtoH(xpu_encode_catalog, dptr, nbytes);
 	if (rc != CUDA_SUCCESS)
