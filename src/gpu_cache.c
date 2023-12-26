@@ -1623,9 +1623,9 @@ __initialLoadGpuCacheVisibilityCheck(HeapTuple tuple,
 									 TransactionId *gcache_xmin,
 									 TransactionId *gcache_xmax)
 {
-	HeapTupleHeader		htup = tuple->t_data;
-	TransactionId		xmin;
-	TransactionId		xmax;
+	HeapTupleHeader	htup = tuple->t_data;
+	TransactionId	xmin;
+	TransactionId	xmax;
 
 	if (!HeapTupleHeaderXminCommitted(htup))
 	{
@@ -1634,6 +1634,17 @@ __initialLoadGpuCacheVisibilityCheck(HeapTuple tuple,
 		xmin = HeapTupleHeaderGetRawXmin(htup);
 		if (TransactionIdIsCurrentTransactionId(xmin))
 		{
+			if (HeapTupleHeaderGetCmin(htup) >= GetCurrentCommandId(false))
+			{
+				/*
+				 * This tuple is written in this command (INSERT/UPDATE),
+				 * and it should be tracked by the AFTER ROW trigger.
+				 * Thus, rowid allocation and insertion shall be done
+				 * in the trigger function to be called later.
+				 */
+				return false;
+			}
+
 			*gcache_xmin = xmin;
 			if (htup->t_infomask & HEAP_XMAX_INVALID)
 			{
@@ -1724,6 +1735,17 @@ __initialLoadGpuCacheVisibilityCheck(HeapTuple tuple,
 	{
 		if (HEAP_XMAX_IS_LOCKED_ONLY(htup->t_infomask))
 			*gcache_xmax = InvalidTransactionId;
+		else if (HeapTupleHeaderGetCmax(htup) >= GetCurrentCommandId(false))
+		{
+			/*
+			 * This tuple is removed by the current command (UPDATE/DELETE),
+			 * and its relevant AFTER-ROW trigger function should release its
+			 * rowid after the initial loading.
+			 * So, at this point, we perform like as this tuple is not removed
+			 * yet.
+			 */
+			*gcache_xmax = InvalidTransactionId;
+		}
 		else
 			*gcache_xmax = xmax;
 		return true;
@@ -2442,6 +2464,7 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 		{
 			tuple = __makeFlattenHeapTuple(trigdata->tg_relation,
 										   trigdata->tg_newtuple);
+
 			__gpuCacheDeleteLog(trigdata->tg_trigtuple, gc_desc);
 			__gpuCacheInsertLog(tuple, gc_desc);
 			if (tuple != trigdata->tg_newtuple)
