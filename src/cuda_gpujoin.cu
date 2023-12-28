@@ -750,7 +750,6 @@ kern_gpujoin_main(kern_session_info *session,
 		/* resume the warp-context from the previous execution */
 		if (get_local_id() == 0)
 			memcpy(wp, wp_saved, wp_base_sz);
-		depth = wp->depth;
 	}
 	else
 	{
@@ -770,6 +769,7 @@ kern_gpujoin_main(kern_session_info *session,
 	matched[get_global_size() * ((__depth)-1) + get_global_id()]
 
 	/* main logic of GpuJoin */
+	depth = wp->depth;
 	while (depth >= 0)
 	{
 		kcxt_reset(kcxt);
