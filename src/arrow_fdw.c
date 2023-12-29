@@ -3877,6 +3877,7 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 	foreach (lc1, arrow_state->af_states_list)
 	{
 		ArrowFileState *af_state = lfirst(lc1);
+		const char *filename = af_state->filename;
 		size_t		total_sz = af_state->stat_buf.st_size;
 		size_t		read_sz = 0;
 		size_t		sz;
@@ -3907,12 +3908,16 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 			}
 		}
 
+		/* displays only basename if regression test mode */
+		if (pgstrom_regression_test_mode)
+			filename = basename(pstrdup(filename));
+
 		/* file size and read size */
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
 			resetStringInfo(&buf);
 			appendStringInfo(&buf, "%s (read: %s, size: %s)",
-							 af_state->filename,
+							 filename,
 							 format_bytesz(read_sz),
 							 format_bytesz(total_sz));
 			snprintf(label, sizeof(label), "file%d", fcount);
@@ -3921,7 +3926,7 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 		else
 		{
 			snprintf(label, sizeof(label), "file%d", fcount);
-			ExplainPropertyText(label, af_state->filename, es);
+			ExplainPropertyText(label, filename, es);
 
 			snprintf(label, sizeof(label), "file%d-read", fcount);
 			ExplainPropertyText(label, format_bytesz(read_sz), es);
