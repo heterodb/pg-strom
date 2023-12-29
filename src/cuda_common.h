@@ -69,7 +69,6 @@ STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
 typedef struct
 {
 	uint32_t		smx_row_count;	/* current position of outer relation */
-	int				depth;		/* 'depth' when suspended */
 	int				scan_done;	/* smallest depth that may produce more tuples */
 	/* only KDS_FORMAT_BLOCK */
 	uint32_t		block_id;	/* BLOCK format needs to keep htuples on the */
