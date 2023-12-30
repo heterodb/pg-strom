@@ -516,10 +516,10 @@ lookupArrowMetadataCache(struct stat *stat_buf, bool has_exclusive)
 {
 	arrowMetadataCache *mcache;
 	uint32_t	hindex;
-	dlist_iter	iter;
+	dlist_mutable_iter iter;
 
 	hindex = arrowMetadataHashIndex(stat_buf);
-	dlist_foreach(iter, &arrow_metadata_cache->hash_slots[hindex])
+	dlist_foreach_modify(iter, &arrow_metadata_cache->hash_slots[hindex])
 	{
 		mcache = dlist_container(arrowMetadataCache, chain, iter.cur);
 
