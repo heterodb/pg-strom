@@ -729,7 +729,7 @@ __build_fallback_exprs_join_walker(Node *node, void *data)
 	{
 		codegen_kvar_defitem *kvar = lfirst(lc);
 
-		if (equal(node, kvar->kv_expr))
+		if (codegen_expression_equals(node, kvar->kv_expr))
 		{
 			return (Node *)makeVar(INDEX_VAR,
 								   kvar->kv_slot_id + 1,
@@ -764,7 +764,7 @@ __build_fallback_exprs_inner_walker(Node *node, void *data)
 	{
 		codegen_kvar_defitem *kvar = lfirst(lc);
 
-		if (equal(node, kvar->kv_expr))
+		if (codegen_expression_equals(node, kvar->kv_expr))
 		{
 			return (Node *)makeVar(INNER_VAR,
 								   kvar->kv_resno,
@@ -815,7 +815,7 @@ __pgstrom_build_tlist_dev_walker(Node *node, void *__priv)
 	{
 		TargetEntry	*tle = lfirst(lc1);
 
-		if (equal(node, tle->expr))
+		if (codegen_expression_equals(node, tle->expr))
 			return false;
 	}
 
@@ -839,7 +839,7 @@ __pgstrom_build_tlist_dev_walker(Node *node, void *__priv)
 		resno = 1;
 		foreach (lc2, reltarget->exprs)
 		{
-			if (equal(node, lfirst(lc2)))
+			if (codegen_expression_equals(node, lfirst(lc2)))
 				goto found;
 			resno++;
 		}
@@ -1081,7 +1081,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	ListCell   *lc;
 
 	Assert(pp_info->num_rels == list_length(custom_plans));
-	context = create_codegen_context(cpath, pp_info);
+	context = create_codegen_context(root, cpath, pp_info);
 
 	/* codegen for outer scan, if any */
 	if (pp_info->scan_quals)

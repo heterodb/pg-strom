@@ -684,7 +684,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	codegen_context *context;
 	CustomScan	   *cscan;
 
-	context = create_codegen_context(best_path, pp_info);
+	context = create_codegen_context(root, best_path, pp_info);
 	/* code generation for WHERE-clause */
 	pp_info->kexp_scan_quals = codegen_build_scan_quals(context, pp_info->scan_quals);
 	pp_info->scan_quals_fallback = pp_info->scan_quals;

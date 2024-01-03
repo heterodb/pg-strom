@@ -101,6 +101,7 @@
 #include "utils/catcache.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
+#include "utils/datum.h"
 #include "utils/float.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
@@ -558,6 +559,7 @@ typedef struct
 	int			elevel;			/* ERROR or DEBUG2 */
 	int			curr_depth;
 	Expr	   *top_expr;
+	PlannerInfo *root;
 	List	   *used_params;
 	uint32_t	required_flags;
 	uint32_t	extra_flags;
@@ -586,8 +588,10 @@ extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 extern devfunc_info *devtype_lookup_equal_func(devtype_info *dtype, Oid coll_id);
 extern devfunc_info *devtype_lookup_compare_func(devtype_info *dtype, Oid coll_id);
 
-extern codegen_context *create_codegen_context(CustomPath *cpath,
+extern codegen_context *create_codegen_context(PlannerInfo *root,
+											   CustomPath *cpath,
 											   pgstromPlanInfo *pp_info);
+extern bool		codegen_expression_equals(const void *__a, const void *__b);
 extern bytea   *codegen_build_scan_quals(codegen_context *context,
 										 List *dev_quals);
 extern bytea   *codegen_build_packed_joinquals(codegen_context *context,
