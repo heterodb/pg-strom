@@ -2337,99 +2337,6 @@ codegen_scalar_array_op_expression(codegen_context *context,
 	return 0;
 }
 
-
-/*
- * is_expression_equals_tlist
- *
- * It checks whether the supplied expression exactly matches any entry of
- * the target-list. If found, it returns its depth and resno.
- */
-static codegen_kvar_defitem *
-is_expression_equals_tlist(codegen_context *context, Expr *expr,
-						   int curr_depth,
-						   bool allows_host_only_vars)
-{
-	codegen_kvar_defitem *kvdef;
-	ListCell   *lc;
-	int			depth, resno;
-	Oid			kv_type_oid;
-	TypeOpCode	kv_type_code;
-	bool		kv_type_byval;
-	int8_t		kv_type_align;
-	int16_t		kv_type_length;
-	int32_t		kv_kvec_sizeof;
-
-	if (IsA(expr, Var))
-	{
-		Var	   *var = (Var *)expr;
-
-		if (var->varno == context->scan_relid)
-		{
-			depth = 0;
-			resno = var->varattno;
-			Assert(resno != InvalidAttrNumber);
-			goto found;
-		}
-	}
-
-	for (depth = 1; depth <= context->num_rels; depth++)
-	{
-		PathTarget *target = context->pd[depth].inner_target;
-
-		resno = 1;
-		foreach (lc, target->exprs)
-		{
-			if (equal(expr, lfirst(lc)))
-				goto found;
-			resno++;
-		}
-	}
-	return NULL;	/* not found */
-found:
-	foreach (lc, context->kvars_deflist)
-	{
-		kvdef = lfirst(lc);
-
-		if (kvdef->kv_depth == depth &&
-			kvdef->kv_resno == resno)
-		{
-			Assert(equal(expr, kvdef->kv_expr));
-			kvdef->kv_maxref = Max(kvdef->kv_maxref, curr_depth);
-			return kvdef;
-		}
-	}
-
-	kv_type_oid = exprType((Node *)expr);
-	if (!__assign_codegen_kvar_defitem_type_params(kv_type_oid,
-												   &kv_type_code,
-												   &kv_type_byval,
-												   &kv_type_align,
-												   &kv_type_length,
-												   &kv_kvec_sizeof,
-												   allows_host_only_vars))
-		return NULL;
-
-	/* attach new one */
-	kvdef = palloc0(sizeof(codegen_kvar_defitem));
-	kvdef->kv_slot_id     = list_length(context->kvars_deflist);
-	kvdef->kv_depth       = depth;
-	kvdef->kv_resno       = resno;
-	kvdef->kv_maxref      = curr_depth;
-	kvdef->kv_offset      = context->kvecs_usage;
-	kvdef->kv_type_oid    = kv_type_oid;
-	kvdef->kv_type_code   = kv_type_code;
-	kvdef->kv_typbyval    = kv_type_byval;
-	kvdef->kv_typalign    = kv_type_align;
-	kvdef->kv_typlen      = kv_type_length;
-	kvdef->kv_kvec_sizeof = kv_kvec_sizeof;
-	kvdef->kv_expr        = expr;
-	__assign_codegen_kvar_defitem_subfields(kvdef);
-	context->kvecs_usage += KVEC_ALIGN(kvdef->kv_kvec_sizeof);
-	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
-
-	return kvdef;
-}
-
 static int
 codegen_expression_walker(codegen_context *context,
 						  StringInfo buf, int curr_depth,
@@ -3055,7 +2962,8 @@ __try_inject_projection_expression(codegen_context *context,
 	 * When 'expr' is simple Var-reference on the input relations,
 	 * we don't need to inject expression node here.
 	 */
-	kvdef = is_expression_equals_tlist(context, expr, context->num_rels+1, true);
+	kvdef = lookup_input_varnode_defitem(context, (Var *)expr,
+										 context->num_rels+1, true);
 	if (kvdef)
 		goto found;
 
@@ -3067,7 +2975,7 @@ __try_inject_projection_expression(codegen_context *context,
 	{
 		kvdef = lfirst(lc);
 
-		if (equal(expr, kvdef->kv_expr))
+		if (codegen_expression_equals(expr, kvdef->kv_expr))
 			goto found;
 	}
 

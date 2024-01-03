@@ -98,3 +98,9 @@ githash.c:
 #
 %.fatbin: %.cu $(CUDA_HEADERS)
 	$(NVCC) $(NVCC_FLAGS) -o $@ $<
+
+#
+# clean up only host code binary
+#
+clean-host:
+	rm -f $(MODULE_big).so $(OBJS)

@@ -249,13 +249,13 @@ typedef struct
 	double			join_nrows;     /* estimated nrows in this depth */
 	Cost			join_startup_cost; /* estimated startup cost */
 	Cost			join_run_cost;	/* estimated run cost (incl final_cost) */
-	List		   *hash_outer_keys;/* hash-keys for outer-side */
+	List		   *hash_outer_keys_original;	/* hash-keys for outer-side */
 	List		   *hash_outer_keys_fallback;
-	List		   *hash_inner_keys;/* hash-keys for inner-side */
+	List		   *hash_inner_keys_original;	/* hash-keys for inner-side */
 	List		   *hash_inner_keys_fallback;
-	List		   *join_quals;     /* join quals */
+	List		   *join_quals_original;     /* join quals */
 	List		   *join_quals_fallback;
-	List		   *other_quals;    /* other quals */
+	List		   *other_quals_original;    /* other quals */
 	List		   *other_quals_fallback;
 	/* gist index properties */
 	Oid				gist_index_oid; /* GiST index oid */
@@ -281,7 +281,6 @@ typedef struct
 	List	   *host_quals;			/* host qualifiers to scan the outer */
 	Index		scan_relid;			/* relid of the outer relation to scan */
 	List	   *scan_quals;			/* device qualifiers to scan the outer */
-	List	   *scan_quals_fallback;/* 'scan_quals' for CPU fallback */
 	double		scan_tuples;		/* copy of baserel->tuples */
 	double		scan_rows;			/* copy of baserel->rows */
 	Cost		scan_startup_cost;	/* estimated startup cost to scan baserel */

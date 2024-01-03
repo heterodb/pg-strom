@@ -227,14 +227,14 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pp_inner = &pp_info->inners[pp_info->num_rels++];
 	pp_inner->join_type = join_type;
 	pp_inner->join_nrows = joinrel->rows;
-	pp_inner->hash_outer_keys = hash_outer_keys;
-	pp_inner->hash_inner_keys = hash_inner_keys;
-	pp_inner->join_quals = join_quals;
-	pp_inner->other_quals = other_quals;
+	pp_inner->hash_outer_keys_original = hash_outer_keys;
+	pp_inner->hash_inner_keys_original = hash_inner_keys;
+	pp_inner->join_quals_original = join_quals;
+	pp_inner->other_quals_original = other_quals;
 	/* GiST-Index availability checks */
 	if (enable_xpugistindex &&
-		pp_inner->hash_outer_keys == NIL &&
-		pp_inner->hash_inner_keys == NIL)
+		pp_inner->hash_outer_keys_original == NIL &&
+		pp_inner->hash_inner_keys_original == NIL)
 	{
 		Path   *gist_inner_path
 			= pgstromTryFindGistIndex(root,
@@ -762,12 +762,12 @@ __build_fallback_exprs_inner_walker(Node *node, void *data)
 		return NULL;
 	foreach (lc, context->kvars_deflist)
 	{
-		codegen_kvar_defitem *kvar = lfirst(lc);
+		codegen_kvar_defitem *kvdef = lfirst(lc);
 
-		if (codegen_expression_equals(node, kvar->kv_expr))
+		if (codegen_expression_equals(node, kvdef->kv_expr))
 		{
 			return (Node *)makeVar(INNER_VAR,
-								   kvar->kv_resno,
+								   kvdef->kv_resno,
 								   exprType(node),
 								   exprTypmod(node),
 								   exprCollation(node),
@@ -1086,7 +1086,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	/* codegen for outer scan, if any */
 	if (pp_info->scan_quals)
 	{
-		pp_info->scan_quals_fallback = pp_info->scan_quals;
+		pp_info->scan_quals = pp_info->scan_quals;
 		pp_info->kexp_scan_quals
 			= codegen_build_scan_quals(context, pp_info->scan_quals);
 		pull_varattnos((Node *)pp_info->scan_quals,
@@ -1102,29 +1102,31 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
 		/* xpu code to generate outer hash-value */
-		if (pp_inner->hash_outer_keys != NIL &&
-			pp_inner->hash_inner_keys != NIL)
+		if (pp_inner->hash_outer_keys_original != NIL &&
+			pp_inner->hash_inner_keys_original != NIL)
 		{
 			hash_keys_stacked = lappend(hash_keys_stacked,
-										pp_inner->hash_outer_keys);
-			pull_varattnos((Node *)pp_inner->hash_outer_keys,
+										pp_inner->hash_outer_keys_original);
+			pull_varattnos((Node *)pp_inner->hash_outer_keys_original,
 						   pp_info->scan_relid,
 						   &outer_refs);
 		}
 		else
 		{
-			Assert(pp_inner->hash_outer_keys == NIL &&
-				   pp_inner->hash_inner_keys == NIL);
+			Assert(pp_inner->hash_outer_keys_original == NIL &&
+				   pp_inner->hash_inner_keys_original == NIL);
 			hash_keys_stacked = lappend(hash_keys_stacked, NIL);
 		}
 		
 		/* xpu code to evaluate join qualifiers */
-		join_quals_stacked = lappend(join_quals_stacked, pp_inner->join_quals);
-		pull_varattnos((Node *)pp_inner->join_quals,
+		join_quals_stacked = lappend(join_quals_stacked,
+									 pp_inner->join_quals_original);
+		pull_varattnos((Node *)pp_inner->join_quals_original,
 					   pp_info->scan_relid,
 					   &outer_refs);
-		other_quals_stacked = lappend(other_quals_stacked, pp_inner->other_quals);
-		pull_varattnos((Node *)pp_inner->other_quals,
+		other_quals_stacked = lappend(other_quals_stacked,
+									  pp_inner->other_quals_original);
+		pull_varattnos((Node *)pp_inner->other_quals_original,
 					   pp_info->scan_relid,
 					   &outer_refs);
 
@@ -1182,13 +1184,13 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
 		pp_inner->hash_outer_keys_fallback
-			= build_fallback_exprs_join(context, pp_inner->hash_outer_keys);
+			= build_fallback_exprs_join(context, pp_inner->hash_outer_keys_original);
 		pp_inner->hash_inner_keys_fallback
-			= build_fallback_exprs_inner(context, pp_inner->hash_inner_keys);
+			= build_fallback_exprs_inner(context, pp_inner->hash_inner_keys_original);
 		pp_inner->join_quals_fallback
-			= build_fallback_exprs_join(context, pp_inner->join_quals);
+			= build_fallback_exprs_join(context, pp_inner->join_quals_original);
 		pp_inner->other_quals_fallback
-			= build_fallback_exprs_join(context, pp_inner->other_quals);
+			= build_fallback_exprs_join(context, pp_inner->other_quals_original);
 	}
 
 	foreach (lc, context->tlist_dev)
