@@ -145,7 +145,6 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 		List   *__privs = NIL;
-		List   *__exprs = NIL;
 
 		__privs = lappend(__privs, makeInteger(pp_inner->join_type));
 		__privs = lappend(__privs, __makeFloat(pp_inner->join_nrows));
@@ -164,13 +163,12 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_ctid_resno));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_func_oid));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_slot_id));
-		__exprs = lappend(__exprs, pp_inner->gist_clause);
+		__privs = lappend(__privs, pp_inner->gist_clause);
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_selectivity));
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_npages));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_height));
 
 		privs = lappend(privs, __privs);
-		exprs = lappend(exprs, __exprs);
 	}
 	cscan->custom_exprs = exprs;
 	cscan->custom_private = privs;
@@ -252,9 +250,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 		List   *__privs = list_nth(privs, pindex++);
-		List   *__exprs = list_nth(exprs, eindex++);
 		int		__pindex = 0;
-		int		__eindex = 0;
 
 		pp_inner->join_type       = intVal(list_nth(__privs, __pindex++));
 		pp_inner->join_nrows      = floatVal(list_nth(__privs, __pindex++));
@@ -273,7 +269,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 		pp_inner->gist_ctid_resno = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_func_oid   = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_slot_id    = intVal(list_nth(__privs, __pindex++));
-		pp_inner->gist_clause     = list_nth(__exprs, __eindex++);
+		pp_inner->gist_clause     = list_nth(__privs, __pindex++);
 		pp_inner->gist_selectivity = floatVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_npages     = floatVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_height     = intVal(list_nth(__privs, __pindex++));
