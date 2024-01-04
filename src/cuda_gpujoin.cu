@@ -426,7 +426,7 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		return depth+1;
 	}
 
-	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
+	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + get_local_size())
 	{
 		/*
 		 * Next depth already have warpSize or more pending tuples,
