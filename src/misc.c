@@ -109,8 +109,8 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, __makeFloat(pp_info->final_cost));
 	/* bin-index support */
 	privs = lappend(privs, makeInteger(pp_info->brin_index_oid));
-	exprs = lappend(exprs, pp_info->brin_index_conds);
-	exprs = lappend(exprs, pp_info->brin_index_quals);
+	privs = lappend(privs, pp_info->brin_index_conds);
+	privs = lappend(privs, pp_info->brin_index_quals);
 	/* XPU code */
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_load_vars_packed));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_move_vars_packed));
@@ -214,8 +214,8 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.final_cost = floatVal(list_nth(privs, pindex++));
 	/* brin-index support */
 	pp_data.brin_index_oid = intVal(list_nth(privs, pindex++));
-	pp_data.brin_index_conds = list_nth(exprs, eindex++);
-	pp_data.brin_index_quals = list_nth(exprs, eindex++);
+	pp_data.brin_index_conds = list_nth(privs, pindex++);
+	pp_data.brin_index_quals = list_nth(privs, pindex++);
 	/* XPU code */
 	pp_data.kexp_load_vars_packed  = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_move_vars_packed  = __getByteaConst(list_nth(privs, pindex++));
