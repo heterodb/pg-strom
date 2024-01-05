@@ -101,6 +101,7 @@
 #include "utils/catcache.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
+#include "utils/datum.h"
 #include "utils/float.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
@@ -248,13 +249,13 @@ typedef struct
 	double			join_nrows;     /* estimated nrows in this depth */
 	Cost			join_startup_cost; /* estimated startup cost */
 	Cost			join_run_cost;	/* estimated run cost (incl final_cost) */
-	List		   *hash_outer_keys;/* hash-keys for outer-side */
+	List		   *hash_outer_keys_original;	/* hash-keys for outer-side */
 	List		   *hash_outer_keys_fallback;
-	List		   *hash_inner_keys;/* hash-keys for inner-side */
+	List		   *hash_inner_keys_original;	/* hash-keys for inner-side */
 	List		   *hash_inner_keys_fallback;
-	List		   *join_quals;     /* join quals */
+	List		   *join_quals_original;     /* join quals */
 	List		   *join_quals_fallback;
-	List		   *other_quals;    /* other quals */
+	List		   *other_quals_original;    /* other quals */
 	List		   *other_quals_fallback;
 	/* gist index properties */
 	Oid				gist_index_oid; /* GiST index oid */
@@ -280,7 +281,6 @@ typedef struct
 	List	   *host_quals;			/* host qualifiers to scan the outer */
 	Index		scan_relid;			/* relid of the outer relation to scan */
 	List	   *scan_quals;			/* device qualifiers to scan the outer */
-	List	   *scan_quals_fallback;/* 'scan_quals' for CPU fallback */
 	double		scan_tuples;		/* copy of baserel->tuples */
 	double		scan_rows;			/* copy of baserel->rows */
 	Cost		scan_startup_cost;	/* estimated startup cost to scan baserel */
@@ -558,6 +558,7 @@ typedef struct
 	int			elevel;			/* ERROR or DEBUG2 */
 	int			curr_depth;
 	Expr	   *top_expr;
+	PlannerInfo *root;
 	List	   *used_params;
 	uint32_t	required_flags;
 	uint32_t	extra_flags;
@@ -586,8 +587,10 @@ extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 extern devfunc_info *devtype_lookup_equal_func(devtype_info *dtype, Oid coll_id);
 extern devfunc_info *devtype_lookup_compare_func(devtype_info *dtype, Oid coll_id);
 
-extern codegen_context *create_codegen_context(CustomPath *cpath,
+extern codegen_context *create_codegen_context(PlannerInfo *root,
+											   CustomPath *cpath,
 											   pgstromPlanInfo *pp_info);
+extern bool		codegen_expression_equals(const void *__a, const void *__b);
 extern bytea   *codegen_build_scan_quals(codegen_context *context,
 										 List *dev_quals);
 extern bytea   *codegen_build_packed_joinquals(codegen_context *context,

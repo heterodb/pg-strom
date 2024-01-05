@@ -1335,7 +1335,7 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 	/*
 	 * Init scan-quals for the base relation
 	 */
-	pts->base_quals = ExecInitQual(pp_info->scan_quals_fallback,
+	pts->base_quals = ExecInitQual(pp_info->scan_quals,
 								   &pts->css.ss.ps);
 	pts->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
 											  table_slot_callbacks(rel));
@@ -2308,12 +2308,13 @@ pgstromExplainTaskState(CustomScanState *node,
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
-		if (pp_inner->join_quals != NIL || pp_inner->other_quals != NIL)
+		if (pp_inner->join_quals_original != NIL ||
+			pp_inner->other_quals_original != NIL)
 		{
 			const char *join_label;
 
 			resetStringInfo(&buf);
-			foreach (lc, pp_inner->join_quals)
+			foreach (lc, pp_inner->join_quals_original)
 			{
 				Node   *expr = lfirst(lc);
 
@@ -2322,9 +2323,9 @@ pgstromExplainTaskState(CustomScanState *node,
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, str);
 			}
-			if (pp_inner->other_quals != NIL)
+			if (pp_inner->other_quals_original != NIL)
 			{
-				foreach (lc, pp_inner->other_quals)
+				foreach (lc, pp_inner->other_quals_original)
 				{
 					Node   *expr = lfirst(lc);
 
@@ -2366,10 +2367,10 @@ pgstromExplainTaskState(CustomScanState *node,
 		}
 		ntuples = pp_inner->join_nrows;
 
-		if (pp_inner->hash_outer_keys != NIL)
+		if (pp_inner->hash_outer_keys_original != NIL)
 		{
 			resetStringInfo(&buf);
-			foreach (lc, pp_inner->hash_outer_keys)
+			foreach (lc, pp_inner->hash_outer_keys_original)
 			{
 				Node   *expr = lfirst(lc);
 
@@ -2382,10 +2383,10 @@ pgstromExplainTaskState(CustomScanState *node,
 					 "%s Outer Hash [%d]", xpu_label, i+1);
 			ExplainPropertyText(label, buf.data, es);
 		}
-		if (pp_inner->hash_inner_keys != NIL)
+		if (pp_inner->hash_inner_keys_original != NIL)
 		{
 			resetStringInfo(&buf);
-			foreach (lc, pp_inner->hash_inner_keys)
+			foreach (lc, pp_inner->hash_inner_keys_original)
 			{
 				Node   *expr = lfirst(lc);
 

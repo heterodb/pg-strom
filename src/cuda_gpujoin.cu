@@ -426,7 +426,7 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		return depth+1;
 	}
 
-	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + warpSize)
+	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + get_local_size())
 	{
 		/*
 		 * Next depth already have warpSize or more pending tuples,
@@ -724,7 +724,7 @@ kern_gpujoin_main(kern_session_info *session,
 	bool			   *matched;
 	uint32_t			wp_base_sz;
 	uint32_t			n_rels = (kmrels ? kmrels->num_rels : 0);
-	int					depth = 0;
+	int					depth;
 
 	assert(kgtask->kvars_nslots == session->kcxt_kvars_nslots &&
 		   kgtask->kvecs_bufsz  == session->kcxt_kvecs_bufsz &&
@@ -750,7 +750,7 @@ kern_gpujoin_main(kern_session_info *session,
 		/* resume the warp-context from the previous execution */
 		if (get_local_id() == 0)
 			memcpy(wp, wp_saved, wp_base_sz);
-		depth = wp->depth;
+		depth = n_rels + 1;		/* start from projection/aggregation */
 	}
 	else
 	{
@@ -762,6 +762,7 @@ kern_gpujoin_main(kern_session_info *session,
 			l_state[d * get_global_size() + get_global_id()] = 0;
 			matched[d * get_global_size() + get_global_id()] = false;
 		}
+		depth = 0;
 	}
 	__syncthreads();
 #define __L_STATE(__depth)						\
@@ -901,7 +902,6 @@ kern_gpujoin_main(kern_session_info *session,
 			atomicAdd(&kgtask->nitems_out, WARP_WRITE_POS(wp, n_rels));
 		}
 		/* suspend the execution context */
-		wp->depth = depth;
 		memcpy(wp_saved, wp, wp_base_sz);
 	}
 	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);

@@ -516,10 +516,10 @@ lookupArrowMetadataCache(struct stat *stat_buf, bool has_exclusive)
 {
 	arrowMetadataCache *mcache;
 	uint32_t	hindex;
-	dlist_iter	iter;
+	dlist_mutable_iter iter;
 
 	hindex = arrowMetadataHashIndex(stat_buf);
-	dlist_foreach(iter, &arrow_metadata_cache->hash_slots[hindex])
+	dlist_foreach_modify(iter, &arrow_metadata_cache->hash_slots[hindex])
 	{
 		mcache = dlist_container(arrowMetadataCache, chain, iter.cur);
 
@@ -900,7 +900,7 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 					  OpExpr *op,
 					  bool reverse)
 {
-	Index		scanrelid = ((Scan *)ss->ps.plan)->scanrelid;
+	Scan	   *scan = (Scan *)ss->ps.plan;
 	Oid			opcode;
 	Var		   *var;
 	Node	   *arg;
@@ -923,7 +923,16 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 		arg = linitial(op->args);
 	}
 	/* Is it VAR <OPER> ARG form? */
-	if (!IsA(var, Var) || var->varno != scanrelid || !OidIsValid(opcode))
+	if (!IsA(var, Var) || !OidIsValid(opcode))
+		return false;
+	/* Fixup VAR if CustomScan with a valid tlist_dev */
+	if (IsA(scan, CustomScan) && ((CustomScan *)scan)->custom_scan_tlist != NIL)
+	{
+		List   *cscan_tlist = ((CustomScan *)scan)->custom_scan_tlist;
+
+		var = (Var *)fixup_varnode_to_origin((Node *)var, cscan_tlist);
+	}
+	if (var->varno != scan->scanrelid)
 		return false;
 	if (!bms_is_member(var->varattno, as_hint->stat_attrs))
 		return false;
@@ -1217,7 +1226,7 @@ __buildArrowFileStateByCache(const char *filename,
 			arrowMetadataFieldCache *fcache;
 
 			fcache = dlist_container(arrowMetadataFieldCache, chain, iter.cur);
-			if (p_stat_attrs && fcache->stat_datum.isnull)
+			if (p_stat_attrs && !fcache->stat_datum.isnull)
 				*p_stat_attrs = bms_add_member(*p_stat_attrs, j+1);
 			__buildRecordBatchFieldStateByCache(&rb_state->fields[j++], fcache);
 		}
@@ -3877,6 +3886,7 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 	foreach (lc1, arrow_state->af_states_list)
 	{
 		ArrowFileState *af_state = lfirst(lc1);
+		const char *filename = af_state->filename;
 		size_t		total_sz = af_state->stat_buf.st_size;
 		size_t		read_sz = 0;
 		size_t		sz;
@@ -3907,12 +3917,16 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 			}
 		}
 
+		/* displays only basename if regression test mode */
+		if (pgstrom_regression_test_mode)
+			filename = basename(pstrdup(filename));
+
 		/* file size and read size */
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
 			resetStringInfo(&buf);
 			appendStringInfo(&buf, "%s (read: %s, size: %s)",
-							 af_state->filename,
+							 filename,
 							 format_bytesz(read_sz),
 							 format_bytesz(total_sz));
 			snprintf(label, sizeof(label), "file%d", fcount);
@@ -3921,7 +3935,7 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 		else
 		{
 			snprintf(label, sizeof(label), "file%d", fcount);
-			ExplainPropertyText(label, af_state->filename, es);
+			ExplainPropertyText(label, filename, es);
 
 			snprintf(label, sizeof(label), "file%d-read", fcount);
 			ExplainPropertyText(label, format_bytesz(read_sz), es);

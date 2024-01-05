@@ -531,8 +531,8 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 	 * Not only GiST, index should be built on normal relations.
 	 * And, IndexOnlyScan may not contain CTID, so not supported.
 	 */
-	Assert(pp_inner->hash_outer_keys == NIL &&
-		   pp_inner->hash_inner_keys == NIL);
+	Assert(pp_inner->hash_outer_keys_original == NIL &&
+		   pp_inner->hash_inner_keys_original == NIL);
 	if (!IS_SIMPLE_REL(inner_rel) || inner_path->pathtype == T_IndexOnlyScan)
 		return NULL;
 	/* see the logic in create_index_paths */
