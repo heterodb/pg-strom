@@ -925,13 +925,6 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	/* Is it VAR <OPER> ARG form? */
 	if (!IsA(var, Var) || !OidIsValid(opcode))
 		return false;
-	/* Fixup VAR if CustomScan with a valid tlist_dev */
-	if (IsA(scan, CustomScan) && ((CustomScan *)scan)->custom_scan_tlist != NIL)
-	{
-		List   *cscan_tlist = ((CustomScan *)scan)->custom_scan_tlist;
-
-		var = (Var *)fixup_varnode_to_origin((Node *)var, cscan_tlist);
-	}
 	if (var->varno != scan->scanrelid)
 		return false;
 	if (!bms_is_member(var->varattno, as_hint->stat_attrs))
