@@ -122,7 +122,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 		   vl_desc->vl_resno < 0)
 	{
 		if (!__extract_heap_tuple_sysattr(kcxt, kds, htup, vl_desc))
-			return;
+			return false;
 		vl_desc++;
 		kvload_count++;
 	}

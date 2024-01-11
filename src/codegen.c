@@ -769,18 +769,15 @@ __devtype_jsonb_hash(JsonbContainer *jc)
 	char	   *data;
 	uint32_t	datalen;
 
-	if (!JsonContainerIsScalar(jc))
+	if (JsonContainerIsObject(jc))
 	{
-		if (JsonContainerIsObject(jc))
-		{
-			base = (char *)(jc->children + 2 * nitems);
-			hash ^= JB_FOBJECT;
-		}
-		else
-		{
-			base = (char *)(jc->children + nitems);
-			hash ^= JB_FARRAY;
-		}
+		base = (char *)(jc->children + 2 * nitems);
+		hash ^= JB_FOBJECT;
+	}
+	else
+	{
+		base = (char *)(jc->children + nitems);
+		hash ^= JB_FARRAY;
 	}
 
 	for (int j=0; j < nitems; j++)

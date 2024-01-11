@@ -11,6 +11,7 @@
  *
  */
 #include "xpu_common.h"
+#include <math.h>
 
 /*
  * Mathmatical functions
@@ -1514,9 +1515,10 @@ xpu_cube_is_valid(kern_context *kcxt, const xpu_cube_t *arg)
 	}
 
 	dim = DIM((const __NDBOX *)arg->value);
-	if (arg->length < (IS_POINT((const __NDBOX *)arg->value)
-					   ? offsetof(__NDBOX, x[dim])
-					   : offsetof(__NDBOX, x[2 * dim])))
+	if (arg->length < (offsetof(__NDBOX, x) +
+					   IS_POINT((const __NDBOX *)arg->value)
+					   ? sizeof(double) * dim
+					   : 2 * sizeof(double) * dim))
 	{
 		STROM_ELOG(kcxt, "cube datum is corrupted");
 		return false;
@@ -1553,27 +1555,25 @@ xpu_cube_datum_arrow_read(kern_context *kcxt,
 						  xpu_datum_t *__result)
 {
 	xpu_cube_t *result = (xpu_cube_t *)__result;
-	int		length;
 
 	if (cmeta->attopts.tag == ArrowType__Binary)
 	{
 		result->value = (const char *)
-			KDS_ARROW_REF_VARLENA32_DATUM(kds, cmeta, kds_index, &length);
-		result->length = length;
-		result->expr_ops = &xpu_cube_ops;
+			KDS_ARROW_REF_VARLENA32_DATUM(kds, cmeta, kds_index,
+										  &result->length);
 	}
 	else if (cmeta->attopts.tag == ArrowType__LargeBinary)
 	{
 		result->value = (const char *)
-			KDS_ARROW_REF_VARLENA64_DATUM(kds, cmeta, kds_index, &length);
-		result->length = length;
-		result->expr_ops = &xpu_cube_ops;
+			KDS_ARROW_REF_VARLENA64_DATUM(kds, cmeta, kds_index,
+										  &result->length);
 	}
 	else
 	{
 		STROM_ELOG(kcxt, "not a mappable Arrow data type for cube");
 		return false;
 	}
+	result->expr_ops = (result->value != NULL ? &xpu_cube_ops : NULL);
 	return true;
 }
 
