@@ -935,7 +935,6 @@ extern void		form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 extern pgstromPlanInfo *deform_pgstrom_plan_info(CustomScan *cscan);
 extern pgstromPlanInfo *copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig);
 
-extern Node	   *fixup_varnode_to_origin(Node *node, List *cscan_tlist);
 extern int		__appendBinaryStringInfo(StringInfo buf,
 										 const void *data, int datalen);
 extern int		__appendZeroStringInfo(StringInfo buf, int nbytes);

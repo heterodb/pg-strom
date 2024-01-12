@@ -326,33 +326,6 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 	return pp_dest;
 }
 
-/*
- * fixup_varnode_to_origin
- */
-Node *
-fixup_varnode_to_origin(Node *node, List *cscan_tlist)
-{
-	if (!node)
-		return NULL;
-	if (IsA(node, Var))
-	{
-		Var	   *varnode = (Var *)node;
-		TargetEntry *tle;
-
-		if (cscan_tlist != NIL)
-		{
-			Assert(varnode->varno == INDEX_VAR);
-			Assert(varnode->varattno >= 1 &&
-				   varnode->varattno <= list_length(cscan_tlist));
-			tle = list_nth(cscan_tlist, varnode->varattno - 1);
-			return (Node *)copyObject(tle->expr);
-		}
-		Assert(!IS_SPECIAL_VARNO(varnode->varno));
-	}
-	return expression_tree_mutator(node, fixup_varnode_to_origin,
-								   (void *)cscan_tlist);
-}
-
 #if 0
 /*
  * find_appinfos_by_relids_nofail
