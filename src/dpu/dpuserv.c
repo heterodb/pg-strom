@@ -422,6 +422,26 @@ __setupDevTypeLinkageTable(uint32_t xpu_type_hash_nslots)
 	/* add custom type */
 }
 
+static const xpu_type_hash_entry *
+__lookupDevTypeLinkageTable(TypeOpCode type_opcode)
+{
+	const xpu_type_hash_entry *entry;
+	uint32_t	k;
+
+	if (!dpuserv_type_htable)
+		return NULL;
+
+	k = (uint32_t)type_opcode % dpuserv_type_htable->nslots;
+	for (entry = dpuserv_type_htable->slots[k];
+		 entry != NULL;
+		 entry = entry->next)
+	{
+		if (entry->cat.type_opcode == type_opcode)
+			break;
+	}
+	return entry;
+}
+
 static void
 __setupDevFuncLinkageTable(uint32_t xpu_func_hash_nslots)
 {
@@ -448,25 +468,35 @@ __setupDevFuncLinkageTable(uint32_t xpu_func_hash_nslots)
 	/* add custom functions here */
 }
 
+static const xpu_func_hash_entry *
+__lookupDevFuncLinkageTable(FuncOpCode func_opcode)
+{
+	const xpu_func_hash_entry *entry;
+	uint32_t	k;
+
+	if (!dpuserv_func_htable)
+		return NULL;
+	k = (uint32_t)func_opcode % dpuserv_func_htable->nslots;
+	for (entry = dpuserv_func_htable->slots[k];
+		 entry != NULL;
+		 entry = entry->next)
+	{
+		if (entry->cat.func_opcode == func_opcode)
+			break;
+	}
+	return entry;
+}
+
 static bool
-__resolveDevicePointersWalker(kern_expression *kexp,
-							  const xpu_type_hash_table *xtype_htable,
-							  const xpu_func_hash_table *xfunc_htable)
+__resolveDevicePointersWalker(kern_expression *kexp)
 {
 	const xpu_type_hash_entry *dtype_hentry;
 	const xpu_func_hash_entry *dfunc_hentry;
 	kern_expression *karg;
-	uint32_t	i, k;
+	uint32_t	i;
 
 	/* lookup device function */
-	k = (uint32_t)kexp->opcode % xfunc_htable->nslots;
-	for (dfunc_hentry = xfunc_htable->slots[k];
-		 dfunc_hentry != NULL;
-		 dfunc_hentry = dfunc_hentry->next)
-	{
-		if (dfunc_hentry->cat.func_opcode == kexp->opcode)
-			break;
-	}
+	dfunc_hentry = __lookupDevFuncLinkageTable(kexp->opcode);
 	if (!dfunc_hentry)
 	{
 		fprintf(stderr, "device function pointer for opcode:%u not found.\n",
@@ -476,14 +506,7 @@ __resolveDevicePointersWalker(kern_expression *kexp,
 	kexp->fn_dptr = dfunc_hentry->cat.func_dptr;
 
 	/* lookup device type */
-	k = kexp->exptype % xtype_htable->nslots;
-	for (dtype_hentry = xtype_htable->slots[k];
-		 dtype_hentry != NULL;
-		 dtype_hentry = dtype_hentry->next)
-	{
-		if (dtype_hentry->cat.type_opcode == kexp->exptype)
-			break;
-	}
+	dtype_hentry = __lookupDevTypeLinkageTable(kexp->exptype);
 	if (!dtype_hentry)
 	{
 		fprintf(stderr, "device type pointer for opcode:%u not found.\n",
@@ -492,6 +515,39 @@ __resolveDevicePointersWalker(kern_expression *kexp,
 	}
 	kexp->expr_ops = dtype_hentry->cat.type_ops;
 
+	/* some special cases */
+	switch (kexp->opcode)
+	{
+		case FuncOpCode__CaseWhenExpr:
+			if (kexp->u.casewhen.case_comp)
+			{
+				karg = (kern_expression *)
+					((char *)kexp + kexp->u.casewhen.case_comp);
+				if (!__KEXP_IS_VALID(kexp, karg))
+				{
+					fprintf(stderr, "xPU code corruption at case_comp\n");
+					return false;
+				}
+				if (!__resolveDevicePointersWalker(karg))
+					return false;
+			}
+			if (kexp->u.casewhen.case_else)
+			{
+				karg = (kern_expression *)
+					((char *)kexp + kexp->u.casewhen.case_else);
+				if (!__KEXP_IS_VALID(kexp, karg))
+				{
+					fprintf(stderr, "xPU code corruption at case_else\n");
+					return false;
+				}
+				if (!__resolveDevicePointersWalker(karg))
+					return false;
+			}
+			break;
+
+		default:
+			break;
+	}
 	/* arguments  */
 	for (i=0, karg=KEXP_FIRST_ARG(kexp);
 		 i < kexp->nr_args;
@@ -502,9 +558,7 @@ __resolveDevicePointersWalker(kern_expression *kexp,
 			fprintf(stderr, "xPU code corruption at args[%d]\n", i);
 			return false;
 		}
-		if (!__resolveDevicePointersWalker(karg,
-										   xtype_htable,
-										   xfunc_htable))
+		if (!__resolveDevicePointersWalker(karg))
 			return false;
 	}
 	return true;
@@ -516,27 +570,42 @@ xpuServResolveDevicePointers(kern_session_info *session,
 							 const xpu_func_hash_table *xfunc_htable,
 							 const xpu_encode_info *xpu_encode_catalog)
 {
+	kern_varslot_desc *kvslot_desc = SESSION_KVARS_SLOT_DESC(session);
 	xpu_encode_info *encode = SESSION_ENCODE(session);
 	kern_expression *__kexp[20];
-	int		i, nitems = 0;
+	int		nitems = 0;
 
-	__kexp[nitems++] = SESSION_KEXP_SCAN_LOAD_VARS(session);
-	__kexp[nitems++] = SESSION_KEXP_SCAN_QUALS(session);
-	__kexp[nitems++] = SESSION_KEXP_JOIN_LOAD_VARS(session, -1);
-	__kexp[nitems++] = SESSION_KEXP_JOIN_QUALS(session, -1);
-	__kexp[nitems++] = SESSION_KEXP_HASH_VALUE(session, -1);
-	__kexp[nitems++] = SESSION_KEXP_GIST_QUALS(session, -1);
-	__kexp[nitems++] = SESSION_KEXP_PROJECTION(session);
-	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYHASH(session);
-	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYLOAD(session);
-	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYCOMP(session);
-	__kexp[nitems++] = SESSION_KEXP_GROUPBY_ACTIONS(session);
-	for (i=0; i < nitems; i++)
+	__kexp[nitems++] = SESSION_KEXP_LOAD_VARS(session, -1);
+	__kexp[nitems++] = SESSION_KEXP_MOVE_VARS(session, -1);
+    __kexp[nitems++] = SESSION_KEXP_SCAN_QUALS(session);
+    __kexp[nitems++] = SESSION_KEXP_JOIN_QUALS(session, -1);
+    __kexp[nitems++] = SESSION_KEXP_HASH_VALUE(session, -1);
+    __kexp[nitems++] = SESSION_KEXP_GIST_EVALS(session, -1);
+    __kexp[nitems++] = SESSION_KEXP_PROJECTION(session);
+    __kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYHASH(session);
+    __kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYLOAD(session);
+    __kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYCOMP(session);
+    __kexp[nitems++] = SESSION_KEXP_GROUPBY_ACTIONS(session);
+	/* fixup device pointers */
+	for (int i=0; i < nitems; i++)
 	{
-		if (__kexp[i] && !__resolveDevicePointersWalker(__kexp[i],
-														xtype_htable,
-														xfunc_htable))
+		if (__kexp[i] && !__resolveDevicePointersWalker(__kexp[i]))
 			return false;
+	}
+
+	/* fixup kern_varslot_desc also */
+	for (int i=0; i < session->kcxt_kvars_nslots; i++)
+	{
+		const xpu_type_hash_entry *entry;
+
+		entry = __lookupDevTypeLinkageTable(kvslot_desc[i].vs_type_code);
+		if (!entry)
+		{
+			fprintf(stderr, "device type for opcode:%u not found.\n",
+					(int)kvslot_desc[i].vs_type_code);
+			return false;
+		}
+		kvslot_desc[i].vs_ops = entry->cat.type_ops;
 	}
 
 	if (encode)
@@ -820,237 +889,6 @@ __handleDpuTaskExecProjection(dpuClient *dclient,
  *
  * ----------------------------------------------------------------
  */
-static inline uint32_t
-__atomic_write_uint32(uint32_t *ptr, uint32_t ival)
-{
-	return __atomic_exchange_n(ptr, ival, __ATOMIC_SEQ_CST);
-}
-
-static inline uint64_t
-__atomic_write_uint64(uint64_t *ptr, uint64_t ival)
-{
-	return __atomic_exchange_n(ptr, ival, __ATOMIC_SEQ_CST);
-}
-
-static inline uint32_t
-__atomic_add_uint32(uint32_t *ptr, uint32_t ival)
-{
-	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
-}
-
-static inline uint64_t
-__atomic_add_uint64(uint64_t *ptr, uint64_t ival)
-{
-	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
-}
-
-static inline int64_t
-__atomic_add_int64(int64_t *ptr, int64_t ival)
-{
-	return __atomic_fetch_add(ptr, ival, __ATOMIC_SEQ_CST);
-}
-
-static inline float8_t
-__atomic_add_fp64(float8_t *ptr, float8_t fval)
-{
-	union {
-		uint64_t	ival;
-		float8_t	fval;
-	} curval, newval;
-
-	curval.fval = __volatileRead(ptr);
-	do {
-		newval.fval = curval.fval + fval;
-	} while(!__atomic_compare_exchange_n((uint64_t *)ptr,
-										 &curval.ival,
-										 newval.ival,
-										 false,
-										 __ATOMIC_SEQ_CST,
-										 __ATOMIC_SEQ_CST));
-	return curval.fval;
-}
-
-static inline int64_t
-__atomic_min_int64(int64_t *ptr, int64_t ival)
-{
-	int64_t		curval = __volatileRead(ptr);
-
-	while (curval > ival)
-	{
-		if (__atomic_compare_exchange_n(ptr,
-										&curval,
-										ival,
-										false,
-										__ATOMIC_SEQ_CST,
-										__ATOMIC_SEQ_CST))
-			break;
-	}
-	return curval;
-}
-
-static inline int64_t
-__atomic_max_int64(int64_t *ptr, int64_t ival)
-{
-	int64_t		curval = __volatileRead(ptr);
-
-	while (curval < ival)
-	{
-		if (__atomic_compare_exchange_n(ptr,
-										&curval,
-										ival,
-										false,
-										__ATOMIC_SEQ_CST,
-										__ATOMIC_SEQ_CST))
-			break;
-	}
-	return curval;
-}
-
-static inline float8_t
-__atomic_min_fp64(float8_t *ptr, float8_t fval)
-{
-	union {
-		uint64_t	ival;
-		float8_t	fval;
-	} curval, newval;
-
-	newval.fval = fval;
-	curval.fval = __volatileRead(ptr);
-	while (curval.fval > newval.fval)
-	{
-		if (__atomic_compare_exchange_n((uint64_t *)ptr,
-										&curval.ival,
-										newval.ival,
-										false,
-										__ATOMIC_SEQ_CST,
-										__ATOMIC_SEQ_CST))
-			break;
-	}
-	return curval.fval;
-}
-
-static inline float8_t
-__atomic_max_fp64(float8_t *ptr, float8_t fval)
-{
-	union {
-		uint64_t	ival;
-		float8_t	fval;
-	} curval, newval;
-
-	newval.fval = fval;
-	curval.fval = __volatileRead(ptr);
-	while (curval.fval < newval.fval)
-	{
-		if (__atomic_compare_exchange_n((uint64_t *)ptr,
-										&curval.ival,
-										newval.ival,
-										false,
-										__ATOMIC_SEQ_CST,
-										__ATOMIC_SEQ_CST))
-			break;
-	}
-	return curval.fval;
-}
-
-static inline bool
-__atomic_cas_uint32(uint32_t *ptr, uint32_t *curval, uint32_t newval)
-{
-	return __atomic_compare_exchange_n(ptr,
-									   curval,
-									   newval,
-									   false,
-									   __ATOMIC_SEQ_CST,
-									   __ATOMIC_SEQ_CST);
-}
-
-static inline bool
-__atomic_cas_uint64(uint64_t *ptr, uint64_t *curval, uint64_t newval)
-{
-	return __atomic_compare_exchange_n(ptr,
-									   curval,
-									   newval,
-									   false,
-									   __ATOMIC_SEQ_CST,
-									   __ATOMIC_SEQ_CST);
-}
-
-/*
- * __writeOutOneTuplePreAgg
- */
-static int32_t
-__writeOutOneTupleGroupKey(kern_context *kcxt,
-						   const kern_colmeta *cmeta,
-						   const kern_aggregate_desc *pdesc,
-						   char *buffer)
-{
-	kern_variable *kvar;
-	int		vclass;
-	int		nbytes;
-
-	assert(pdesc->action == KAGG_ACTION__VREF &&
-		   pdesc->arg0_slot_id >= 0 &&
-		   pdesc->arg0_slot_id < kcxt->kvars_nslots);
-	vclass = kcxt->kvars_class[pdesc->arg0_slot_id];
-	kvar = &kcxt->kvars_slot[pdesc->arg0_slot_id];
-	switch (vclass)
-	{
-		case KVAR_CLASS__NULL:
-			return 0;
-
-		case KVAR_CLASS__INLINE:
-			assert(cmeta->attlen >= 0 &&
-				   cmeta->attlen <= sizeof(kern_variable));
-			if (buffer)
-				memcpy(buffer, kvar, cmeta->attlen);
-			return cmeta->attlen;
-
-		case KVAR_CLASS__VARLENA:
-			assert(cmeta->attlen == -1);
-			nbytes = VARSIZE_ANY(kvar->ptr);
-			if (buffer)
-				memcpy(buffer, kvar->ptr, nbytes);
-			return nbytes;
-
-		case KVAR_CLASS__XPU_DATUM:
-			{
-				xpu_datum_t *xdatum = (xpu_datum_t *)
-					((char *)kcxt->kvars_slot + kvar->xpu.offset);
-				const xpu_datum_operators *expr_ops = xdatum->expr_ops;
-
-				if (XPU_DATUM_ISNULL(xdatum))
-					return 0;
-				assert(expr_ops->xpu_type_code == kvar->xpu.type_code);
-				return expr_ops->xpu_datum_write(kcxt, buffer, xdatum);
-			}
-
-		default:
-			if (vclass < 0)
-				return -1;
-			if (cmeta->attlen >= 0)
-			{
-				if (buffer)
-				{
-					nbytes = Min(vclass, cmeta->attlen);
-					memcpy(buffer, kvar->ptr, nbytes);
-					if (nbytes < cmeta->attlen)
-						memset(buffer + nbytes, 0, cmeta->attlen - nbytes);
-				}
-				return cmeta->attlen;
-			}
-			else if (cmeta->attlen == -1)
-			{
-				nbytes = VARHDRSZ + vclass;
-				if (buffer)
-				{
-					memcpy(buffer+VARHDRSZ, kvar->ptr, vclass);
-					SET_VARSIZE(buffer, nbytes);
-				}
-				return nbytes;
-			}
-	}
-	return -1;
-}
-
 static int32_t
 __writeOutOneTuplePreAgg(kern_context *kcxt,
 						 kern_data_store *kds_final,
@@ -1080,8 +918,12 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 	{
 		kern_aggregate_desc *desc = &kexp_actions->u.pagg.desc[j];
 		kern_colmeta   *cmeta = &kds_final->colmeta[j];
+		xpu_datum_t	   *xdatum;
 		int				nbytes;
 
+		assert((char *)cmeta > (char *)kds_final &&
+			   (char *)cmeta < (char *)kds_final + kds_final->length);
+		assert(cmeta->attalign > 0 && cmeta->attalign <= 8);
 		t_next = TYPEALIGN(cmeta->attalign, t_hoff);
 		if (htup)
 		{
@@ -1093,19 +935,32 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 		switch (desc->action)
 		{
 			case KAGG_ACTION__VREF:
-				nbytes = __writeOutOneTupleGroupKey(kcxt, cmeta, desc, buffer);
-				if (nbytes < 0)
-					return -1;
+				assert(desc->arg0_slot_id >= 0 &&
+					   desc->arg0_slot_id < kcxt->kvars_nslots);
+				xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+				if (XPU_DATUM_ISNULL(xdatum))
+					nbytes = 0;
+				else
+				{
+					nbytes = xdatum->expr_ops->xpu_datum_write(kcxt,
+															   buffer,
+															   cmeta,
+															   xdatum);
+					if (nbytes < 0)
+						return -1;
+				}
 				break;
 
 			case KAGG_ACTION__NROWS_ANY:
 			case KAGG_ACTION__NROWS_COND:
+				assert(cmeta->attlen == sizeof(int64_t));
 				nbytes = sizeof(int64_t);
 				if (buffer)
 					*((int64_t *)buffer) = 0;
 				break;
 
-			case KAGG_ACTION__PMIN_INT:
+			case KAGG_ACTION__PMIN_INT32:
+			case KAGG_ACTION__PMIN_INT64:
 				nbytes = sizeof(kagg_state__pminmax_int64_packed);
 				if (buffer)
 				{
@@ -1118,7 +973,8 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
 
-			case KAGG_ACTION__PMAX_INT:
+			case KAGG_ACTION__PMAX_INT32:
+			case KAGG_ACTION__PMAX_INT64:
 				nbytes = sizeof(kagg_state__pminmax_int64_packed);
 				if (buffer)
 				{
@@ -1131,7 +987,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
 
-			case KAGG_ACTION__PMIN_FP:
+			case KAGG_ACTION__PMIN_FP64:
 				nbytes = sizeof(kagg_state__pminmax_fp64_packed);
 				if (buffer)
 				{
@@ -1144,7 +1000,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
 
-			case KAGG_ACTION__PMAX_FP:
+			case KAGG_ACTION__PMAX_FP64:
 				nbytes = sizeof(kagg_state__pminmax_fp64_packed);
 				if (buffer)
 				{
@@ -1157,7 +1013,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
 
-			case KAGG_ACTION__PSUM_INT
+			case KAGG_ACTION__PSUM_INT:
 			case KAGG_ACTION__PAVG_INT:
 				nbytes = sizeof(kagg_state__psum_int_packed);
 				if (buffer)
@@ -1200,7 +1056,8 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			default:
-				//error message
+				fprintf(stderr, "Bug? unknown DpuPreAgg action: %d",
+						(int)desc->action);
 				return -1;
 		}
 		if (htup && nbytes > 0)
@@ -1273,7 +1130,7 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 			uint32_t nitems;
 			uint32_t usage;
 		} kds;
-	} curval, newval;
+	} oldval, curval, newval;
 
 	assert(kds_final->format == KDS_FORMAT_HASH &&
 		   kds_final->hash_nslots > 0);
@@ -1286,7 +1143,8 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 	/* expand kds_final */
 	curval.kds.nitems = __volatileRead(&kds_final->nitems);
 	curval.kds.usage  = __volatileRead(&kds_final->usage);
-	do {
+	for (;;)
+	{
 		size_t		total_sz;
 
 		newval.kds.nitems = curval.kds.nitems + 1;
@@ -1297,9 +1155,13 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 					__kds_unpack(curval.kds.usage));
 		if (total_sz > kds_final->length)
 			return NULL;	/* out of memory */
-	} while (!__atomic_cas_uint64((uint64_t *)&kds_final->nitems,
-								  &curval.u64,
-								  newval.u64));
+		oldval.u64 = __atomic_cas_uint64((uint64_t *)&kds_final->nitems,
+										 curval.u64,
+										 newval.u64);
+		if (oldval.u64 == curval.u64)
+			break;
+		curval.u64 = oldval.u64;
+	}
 	hitem = (kern_hashitem *)((char *)kds_final
 							  + kds_final->length
 							  - __kds_unpack(newval.kds.usage));
@@ -1336,85 +1198,113 @@ __update_preagg__nrows_cond(kern_context *kcxt,
 							kern_colmeta *cmeta,
 							kern_aggregate_desc *desc)
 {
-	if (kcxt->kvars_class[desc->arg0_slot_id] != KVAR_CLASS__NULL)
+	xpu_datum_t	   *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+
+	if (!XPU_DATUM_ISNULL(xdatum))
 		__atomic_add_uint64((uint64_t *)buffer, 1);
 }
 
 /*
- * __update_preagg__pmin_int
+ * __update_preagg__pmin_intXX
  */
 static inline void
-__update_preagg__pmin_int(kern_context *kcxt,
-						  char *buffer,
-						  kern_colmeta *cmeta,
-						  kern_aggregate_desc *desc)
+__update_preagg__pmin_int32(kern_context *kcxt,
+							char *buffer,
+							kern_colmeta *cmeta,
+							kern_aggregate_desc *desc)
 {
-	int		slot_id = desc->arg0_slot_id;
+	xpu_int4_t	   *xdatum = (xpu_int4_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
-	if (kcxt->kvars_class[slot_id] == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
-		int64_t		ival = kcxt->kvars_slot[slot_id].i64;
-
+		assert(xdatum->expr_ops == &xpu_int4_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_min_int64(&r->value, ival);
+		__atomic_min_int64(&r->value, xdatum->value);
 	}
-	else
+}
+
+static inline void
+__update_preagg__pmin_int64(kern_context *kcxt,
+							char *buffer,
+							kern_colmeta *cmeta,
+							kern_aggregate_desc *desc)
+{
+	xpu_int8_t	   *xdatum = (xpu_int8_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
+
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
-		assert(kcxt->kvars_class[slot_id] == KVAR_CLASS__NULL);
+		kagg_state__pminmax_int64_packed *r =
+			(kagg_state__pminmax_int64_packed *)buffer;
+		assert(xdatum->expr_ops == &xpu_int8_ops);
+		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_min_int64(&r->value, xdatum->value);
 	}
 }
 
 /*
- * __update_preagg__pmax_int
+ * __update_preagg__pmax_intXX
  */
 static inline void
-__update_preagg__pmax_int(kern_context *kcxt,
-						  char *buffer,
-						  kern_colmeta *cmeta,
-						  kern_aggregate_desc *desc)
+__update_preagg__pmax_int32(kern_context *kcxt,
+							char *buffer,
+							kern_colmeta *cmeta,
+							kern_aggregate_desc *desc)
 {
-	int		slot_id = desc->arg0_slot_id;
+	xpu_int4_t	   *xdatum = (xpu_int4_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
-	if (kcxt->kvars_class[slot_id] == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
-		int64_t		ival = kcxt->kvars_slot[slot_id].i64;
-
+		assert(xdatum->expr_ops == &xpu_int4_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_max_int64(&r->value, ival);
+		__atomic_max_int64(&r->value, xdatum->value);
 	}
-	else
+}
+
+static inline void
+__update_preagg__pmax_int64(kern_context *kcxt,
+							char *buffer,
+							kern_colmeta *cmeta,
+							kern_aggregate_desc *desc)
+{
+	xpu_int8_t	   *xdatum = (xpu_int8_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
+
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
-		assert(kcxt->kvars_class[slot_id] == KVAR_CLASS__NULL);
+		kagg_state__pminmax_int64_packed *r =
+			(kagg_state__pminmax_int64_packed *)buffer;
+		assert(xdatum->expr_ops == &xpu_int8_ops);
+		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_max_int64(&r->value, xdatum->value);
 	}
 }
 
 /*
- * __update_preagg__pmin_fp
+ * __update_preagg__pmin_fp64
  */
 static inline void
-__update_preagg__pmin_fp(kern_context *kcxt,
-						 char *buffer,
-						 kern_colmeta *cmeta,
-						 kern_aggregate_desc *desc)
+__update_preagg__pmin_fp64(kern_context *kcxt,
+						   char *buffer,
+						   kern_colmeta *cmeta,
+						   kern_aggregate_desc *desc)
 {
-	int		slot_id = desc->arg0_slot_id;
+	xpu_float8_t   *xdatum = (xpu_float8_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
-	if (kcxt->kvars_class[slot_id] == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__pminmax_fp64_packed *r =
 			(kagg_state__pminmax_fp64_packed *)buffer;
-		float8_t	fval = kcxt->kvars_slot[slot_id].fp64;
-
+		assert(xdatum->expr_ops == &xpu_float8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_min_fp64(&r->value, fval);
-	}
-	else
-	{
-		assert(kcxt->kvars_class[slot_id] == KVAR_CLASS__NULL);
+		__atomic_min_fp64(&r->value, xdatum->value);
 	}
 }
 
@@ -1422,25 +1312,21 @@ __update_preagg__pmin_fp(kern_context *kcxt,
  * __update_preagg__pmax_fp
  */
 static inline void
-__update_preagg__pmax_fp(kern_context *kcxt,
-						 char *buffer,
-						 kern_colmeta *cmeta,
-						 kern_aggregate_desc *desc)
+__update_preagg__pmax_fp64(kern_context *kcxt,
+						   char *buffer,
+						   kern_colmeta *cmeta,
+						   kern_aggregate_desc *desc)
 {
-	int		slot_id = desc->arg0_slot_id;
+	xpu_float8_t   *xdatum = (xpu_float8_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
-	if (kcxt->kvars_class[slot_id] == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
 		kagg_state__pminmax_fp64_packed *r =
 			(kagg_state__pminmax_fp64_packed *)buffer;
-		float8_t	fval = kcxt->kvars_slot[slot_id].fp64;
-
+		assert(xdatum->expr_ops == &xpu_float8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_min_fp64(&r->value, fval);
-	}
-	else
-	{
-		assert(kcxt->kvars_class[slot_id] == KVAR_CLASS__NULL);
+		__atomic_min_fp64(&r->value, xdatum->value);
 	}
 }
 
@@ -1453,66 +1339,16 @@ __update_preagg__psum_int(kern_context *kcxt,
 						  kern_colmeta *cmeta,
 						  kern_aggregate_desc *desc)
 {
-	int		slot_id = desc->arg0_slot_id;
+	xpu_int8_t	   *xdatum = (xpu_int8_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
-	if (kcxt->kvars_class[slot_id] == KVAR_CLASS__INLINE)
+	if (!XPU_DATUM_ISNULL(xdatum))
 	{
-		int64_t		ival = kcxt->kvars_slot[slot_id].i64;
-
-		__atomic_add_int64((int64_t *)buffer, ival);
-	}
-	else
-	{
-		assert(kcxt->kvars_class[slot_id] == KVAR_CLASS__NULL);
-	}
-}
-
-/*
- * __update_preagg__psum_fp
- */
-static inline void
-__update_preagg__psum_fp(kern_context *kcxt,
-						 char *buffer,
-						 kern_colmeta *cmeta,
-						 kern_aggregate_desc *desc)
-{
-	int		slot_id = desc->arg0_slot_id;
-
-	if (kcxt->kvars_class[slot_id] == KVAR_CLASS__INLINE)
-	{
-		float8_t	fval = kcxt->kvars_slot[slot_id].fp64;
-
-		__atomic_add_fp64((float8_t *)buffer, fval);
-	}
-	else
-	{
-		assert(kcxt->kvars_class[slot_id] == KVAR_CLASS__NULL);
-	}
-}
-
-/*
- * __update_preagg__psum_int
- */
-static inline void
-__update_preagg__psum_int(kern_context *kcxt,
-						  char *buffer,
-						  kern_colmeta *cmeta,
-						  kern_aggregate_desc *desc)
-{
-	int		slot_id = desc->arg0_slot_id;
-
-	if (kcxt->kvars_class[slot_id] == KVAR_CLASS__INLINE)
-    {
 		kagg_state__psum_int_packed *r =
 			(kagg_state__psum_int_packed *)buffer;
-		int64_t		ival = kcxt->kvars_slot[slot_id].i64;
-
+		assert(xdatum->expr_ops == &xpu_int8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_int64(&r->sum, ival);
-	}
-	else
-	{
-		assert(kcxt->kvars_class[slot_id] == KVAR_CLASS__NULL);
+		__atomic_add_int64(&r->sum, xdatum->value);
 	}
 }
 
@@ -1525,20 +1361,16 @@ __update_preagg__psum_fp(kern_context *kcxt,
 						 kern_colmeta *cmeta,
 						 kern_aggregate_desc *desc)
 {
-	int		slot_id = desc->arg0_slot_id;
+	xpu_float8_t   *xdatum = (xpu_float8_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
-	if (kcxt->kvars_class[slot_id] == KVAR_CLASS__INLINE)
-    {
+	if (!XPU_DATUM_ISNULL(xdatum))
+	{
 		kagg_state__psum_fp_packed *r =
 			(kagg_state__psum_fp_packed *)buffer;
-		float8_t	fval = kcxt->kvars_slot[slot_id].fp64;
-
+		assert(xdatum->expr_ops == &xpu_float8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_fp64(&r->sum, fval);
-	}
-	else
-	{
-		assert(kcxt->kvars_class[slot_id] == KVAR_CLASS__NULL);
+		__atomic_add_fp64(&r->sum, xdatum->value);
 	}
 }
 
@@ -1551,21 +1383,17 @@ __update_preagg__pstddev(kern_context *kcxt,
 						 kern_colmeta *cmeta,
 						 kern_aggregate_desc *desc)
 {
-	int		slot_id = desc->arg0_slot_id;
+	xpu_float8_t   *xdatum = (xpu_float8_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
 
-	if (kcxt->kvars_class[slot_id] == KVAR_CLASS__INLINE)
-    {
+	if (!XPU_DATUM_ISNULL(xdatum))
+	{
 		kagg_state__stddev_packed *r =
 			(kagg_state__stddev_packed *)buffer;
-		float8_t	fval = kcxt->kvars_slot[slot_id].fp64;
-
+		assert(xdatum->expr_ops == &xpu_float8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_fp64(&r->sum_x,  fval);
-		__atomic_add_fp64(&r->sum_x2, fval * fval);
-	}
-	else
-	{
-		assert(kcxt->kvars_class[slot_id] == KVAR_CLASS__NULL);
+		__atomic_add_fp64(&r->sum_x,  xdatum->value);
+		__atomic_add_fp64(&r->sum_x2, xdatum->value * xdatum->value);
 	}
 }
 
@@ -1578,25 +1406,23 @@ __update_preagg__pcovar(kern_context *kcxt,
 						kern_colmeta *cmeta,
 						kern_aggregate_desc *desc)
 {
-	if (kcxt->kvars_class[desc->arg0_slot_id] == KVAR_CLASS__INLINE &&
-		kcxt->kvars_class[desc->arg1_slot_id] == KVAR_CLASS__INLINE)
+	xpu_float8_t   *xdatum = (xpu_float8_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
+	xpu_float8_t   *ydatum = (xpu_float8_t *)
+		kcxt->kvars_slot[desc->arg1_slot_id];
+
+	if (!XPU_DATUM_ISNULL(xdatum) && !XPU_DATUM_ISNULL(ydatum))
 	{
 		kagg_state__covar_packed *r =
 			(kagg_state__covar_packed *)buffer;
-		float8_t	xval = kcxt->kvars_slot[desc->arg0_slot_id].fp64;
-		float8_t	yval = kcxt->kvars_slot[desc->arg0_slot_id].fp64;
-
+		assert(xdatum->expr_ops == &xpu_float8_ops &&
+			   ydatum->expr_ops == &xpu_float8_ops);
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_fp64(&r->sum_x,  xval);
-		__atomic_add_fp64(&r->sum_xx, xval * xval);
-		__atomic_add_fp64(&r->sum_y,  yval);
-		__atomic_add_fp64(&r->sum_yy, yval * yval);
-		__atomic_add_fp64(&r->sum_xy, xval * yval);
-	}
-	else
-	{
-		assert(kcxt->kvars_class[desc->arg0_slot_id] == KVAR_CLASS__NULL ||
-			   kcxt->kvars_class[desc->arg1_slot_id] == KVAR_CLASS__NULL);
+		__atomic_add_fp64(&r->sum_x,  xdatum->value);
+		__atomic_add_fp64(&r->sum_xx, xdatum->value * xdatum->value);
+		__atomic_add_fp64(&r->sum_y,  ydatum->value);
+		__atomic_add_fp64(&r->sum_yy, ydatum->value * ydatum->value);
+		__atomic_add_fp64(&r->sum_xy, xdatum->value * ydatum->value);
 	}
 }
 
@@ -1643,42 +1469,45 @@ __updateOneTupleDpuPreAgg(kern_context *kcxt,
 
 		switch (desc->action)
         {
-            case KAGG_ACTION__NROWS_ANY:
-                __update_preagg__nrows_any(kcxt, buffer, cmeta, desc);
-                break;
-            case KAGG_ACTION__NROWS_COND:
-                __update_preagg__nrows_cond(kcxt, buffer, cmeta, desc);
-                break;
-            case KAGG_ACTION__PMIN_INT:
-                __update_preagg__pmin_int(kcxt, buffer, cmeta, desc);
-                break;
-            case KAGG_ACTION__PMAX_INT:
-                __update_preagg__pmax_int(kcxt, buffer, cmeta, desc);
-                break;
-            case KAGG_ACTION__PMIN_FP:
-                __update_preagg__pmin_fp(kcxt, buffer, cmeta, desc);
-                break;
-            case KAGG_ACTION__PMAX_FP:
-                __update_preagg__pmax_fp(kcxt, buffer, cmeta, desc);
-                break;
-            case KAGG_ACTION__PSUM_FP:
-                __update_preagg__psum_fp(kcxt, buffer, cmeta, desc);
-                break;
+			case KAGG_ACTION__NROWS_ANY:
+				__update_preagg__nrows_any(kcxt, buffer, cmeta, desc);
+				break;
+			case KAGG_ACTION__NROWS_COND:
+				__update_preagg__nrows_cond(kcxt, buffer, cmeta, desc);
+				break;
+			case KAGG_ACTION__PMIN_INT32:
+				__update_preagg__pmin_int32(kcxt, buffer, cmeta, desc);
+				break;
+			case KAGG_ACTION__PMIN_INT64:
+				__update_preagg__pmin_int64(kcxt, buffer, cmeta, desc);
+				break;
+			case KAGG_ACTION__PMAX_INT32:
+				__update_preagg__pmax_int32(kcxt, buffer, cmeta, desc);
+				break;
+			case KAGG_ACTION__PMAX_INT64:
+				__update_preagg__pmax_int64(kcxt, buffer, cmeta, desc);
+				break;
+			case KAGG_ACTION__PMIN_FP64:
+				__update_preagg__pmin_fp64(kcxt, buffer, cmeta, desc);
+				break;
+			case KAGG_ACTION__PMAX_FP64:
+				__update_preagg__pmax_fp64(kcxt, buffer, cmeta, desc);
+				break;
 			case KAGG_ACTION__PSUM_INT:
-            case KAGG_ACTION__PAVG_INT:
-                __update_preagg__psum_int(kcxt, buffer, cmeta, desc);
-                break;
+			case KAGG_ACTION__PAVG_INT:
+				__update_preagg__psum_int(kcxt, buffer, cmeta, desc);
+				break;
 			case KAGG_ACTION__PSUM_FP:
-            case KAGG_ACTION__PAVG_FP:
-                __update_preagg__psum_fp(kcxt, buffer, cmeta, desc);
-                break;
-            case KAGG_ACTION__STDDEV:
-                __update_preagg__pstddev(kcxt, buffer, cmeta, desc);
-                break;
-            case KAGG_ACTION__COVAR:
-                __update_preagg__pcovar(kcxt, buffer, cmeta, desc);
-                break;
-            default:
+			case KAGG_ACTION__PAVG_FP:
+				__update_preagg__psum_fp(kcxt, buffer, cmeta, desc);
+				break;
+			case KAGG_ACTION__STDDEV:
+				__update_preagg__pstddev(kcxt, buffer, cmeta, desc);
+				break;
+			case KAGG_ACTION__COVAR:
+				__update_preagg__pcovar(kcxt, buffer, cmeta, desc);
+				break;
+			default:
 				/*
 				 * No more partial aggregation exists after grouping-keys
 				 */
@@ -1806,8 +1635,8 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 	kern_expression	   *kexp_groupby_actions = SESSION_KEXP_GROUPBY_ACTIONS(session);
 	kern_expression	   *karg;
 	kern_data_store	   *kds_final;
-	kern_hashitem	   *hitem;
 	xpu_int4_t			hash;
+	kern_hashitem	   *hitem;
 	bool				has_exclusive = false;
 	int					i;
 
@@ -1829,23 +1658,35 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 	 */
 	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keyhash, &hash))
 		return false;
-	assert(!XPU_DATUM_ISNULL(&hash));
+	if (XPU_DATUM_ISNULL(&hash))
+		return false;
 
 	pthreadRWLockReadLock(&gf_buf->kds_final_rwlock);
+	kds_final = gf_buf->kds_final;
+	assert(kds_final->format == KDS_FORMAT_HASH);
 	do {
-		uint32_t   *hslot;
-		uint32_t	saved;
+		uint32_t   *hslot = KDS_GET_HASHSLOT(kds_final, hash.value);
+		uint32_t	hoffset = __volatileRead(hslot);
+		uint32_t	saved = hoffset;
 		xpu_bool_t	status;
 
-		kds_final = gf_buf->kds_final;
-		assert(kds_final->format == KDS_FORMAT_HASH);
-		hslot = KDS_GET_HASHSLOT(kds_final, hash.value);
-		for (hitem = KDS_HASH_FIRST_ITEM(kds_final, hslot, &saved);
-			 hitem != NULL;
-			 hitem = KDS_HASH_NEXT_ITEM(kds_final, hitem))
+		if (hoffset == UINT_MAX)
 		{
+			/* someone already hold the hslot-lock */
+			sched_yield();
+			continue;
+		}
+
+		for (hitem = KDS_HASH_NEXT_ITEM(kds_final, hoffset);
+			 hitem != NULL;
+			 hitem = KDS_HASH_NEXT_ITEM(kds_final, hitem->next))
+		{
+			bool	saved_compare_nulls = kcxt->kmode_compare_nulls;
+
 			if (hitem->hash != hash.value)
 				continue;
+
+			kcxt->kmode_compare_nulls = true;
 			ExecLoadVarsHeapTuple(kcxt,
 								  kexp_groupby_keyload,
 								  -2,
@@ -1853,60 +1694,51 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 								  &hitem->t.htup);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keycomp, &status))
 			{
-				assert(!XPU_DATUM_ISNULL(&status));
-				if (status.value)
+				kcxt->kmode_compare_nulls = saved_compare_nulls;
+				if (!XPU_DATUM_ISNULL(&status) && status.value)
 					break;
 			}
+			kcxt->kmode_compare_nulls = saved_compare_nulls;
 		}
 
-		if (!hitem)
+		if (!hitem && __atomic_cas_uint32(hslot, saved, UINT_MAX) == saved)
 		{
-			if (saved == UINT_MAX)
+			/* hslot-lock is now acquired */
+			hitem = __insertOneTupleGroupBy(kcxt, kds_final,
+											kexp_groupby_actions);
+			if (hitem)
 			{
-				/* someone already hold the hslot-lock */
-				sched_yield();
+				hitem->hash = hash.value;
+				hitem->next = saved;
+				hoffset = ((char *)kds_final
+						   + kds_final->length
+						   - (char *)hitem);
+				/* insert and unlock */
+				__atomic_write_uint32(hslot, __kds_packed(hoffset));
+				break;
 			}
-			else if (__atomic_cas_uint32(hslot, &saved, UINT_MAX))
+			else
 			{
-				/* hslot-lock is now acquired */
-				hitem = __insertOneTupleGroupBy(kcxt, kds_final,
-												kexp_groupby_actions);
-				if (hitem)
+				/* unlock; by out of the memory */
+				__atomic_write_uint32(hslot, saved);
+				if (!has_exclusive)
 				{
-					uint32_t	offset;
-
-					hitem->hash = hash.value;
-					hitem->next = saved;
-					offset = ((char *)kds_final
-							  + kds_final->length
-							  - (char *)hitem);
-					/* insert and unlock */
-					__atomic_write_uint32(hslot, __kds_packed(offset));
+					pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
+					pthreadRWLockWriteLock(&gf_buf->kds_final_rwlock);
+					has_exclusive = true;
 				}
 				else
 				{
-					/* unlock; by out of the memory */
-					__atomic_write_uint32(hslot, saved);
-					if (!has_exclusive)
+					/* expand the kds_final buffer */
+					if (!expandGroupByFinalBuffer(gf_buf))
 					{
 						pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
-						pthreadRWLockWriteLock(&gf_buf->kds_final_rwlock);
-						has_exclusive = true;
-					}
-					else
-					{
-						/* expand the kds_final buffer */
-						if (!expandGroupByFinalBuffer(gf_buf))
-						{
-							pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
-							return false;
-						}
+						return false;
 					}
 				}
 			}
 		}
 	} while (!hitem);
-
 	/* update the partial aggregation */
 	__updateOneTupleDpuPreAgg(kcxt, kds_final,
 							  &hitem->t.htup,
@@ -1938,8 +1770,8 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 	kern_multirels	   *kmrels = dclient->kmrels;
 	kern_data_store	   *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels,depth-1);
 	bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels,depth-1);
-	kern_expression	   *kexp_load_vars = SESSION_KEXP_JOIN_LOAD_VARS(session,depth-1);
-	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth-1);
+	kern_expression	   *kexp_load_vars = SESSION_KEXP_LOAD_VARS(session,depth);
+	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth);
 	bool				matched = false;
 
 	for (uint32_t rowid=0; rowid < kds_heap->nitems; rowid++)
@@ -2017,11 +1849,10 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 	kern_multirels	   *kmrels = dclient->kmrels;
 	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
 	bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth-1);
-	kern_expression	   *kexp_load_vars = SESSION_KEXP_JOIN_LOAD_VARS(session,depth-1);
-	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth-1);
-	kern_expression	   *kexp_hash_value = SESSION_KEXP_HASH_VALUE(session,depth-1);
+	kern_expression	   *kexp_load_vars = SESSION_KEXP_LOAD_VARS(session,depth);
+	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth);
+	kern_expression	   *kexp_hash_value = SESSION_KEXP_HASH_VALUE(session,depth);
 	kern_hashitem	   *khitem;
-	uint32_t		   *hslot;
 	xpu_int4_t			hash;
 	xpu_int4_t			status;
 	bool				matched = false;
@@ -2029,10 +1860,9 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_hash_value, &hash))
 		return false;
 	assert(!XPU_DATUM_ISNULL(&hash));
-	hslot = KDS_GET_HASHSLOT(kds_hash, hash.value);
-	for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hslot, NULL);
+	for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hash.value);
 		 khitem != NULL;
-		 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem))
+		 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next))
 	{
 		if (khitem->hash != hash.value)
 			continue;
@@ -2098,7 +1928,7 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 {
 	kern_session_info  *session = dclient->session;
 	kern_multirels	   *kmrels = dclient->kmrels;
-	kern_expression	   *kexp_load_vars = SESSION_KEXP_SCAN_LOAD_VARS(session);
+	kern_expression	   *kexp_load_vars = SESSION_KEXP_LOAD_VARS(session, 0);
 	kern_expression	   *kexp_scan_quals = SESSION_KEXP_SCAN_QUALS(session);
 	kern_context	   *kcxt;
 	uint32_t			block_index;
@@ -2107,8 +1937,6 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 		   kexp_load_vars->opcode == FuncOpCode__LoadVars);
 	assert(!kmrels || kmrels->num_rels > 0);
 	INIT_KERNEL_CONTEXT(kcxt, session);
-	kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
-	kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 	for (block_index = 0; block_index < kds_src->nitems; block_index++)
 	{
 		PageHeaderData *page = KDS_BLOCK_PGPAGE(kds_src, block_index);
@@ -2172,7 +2000,7 @@ __handleDpuScanExecArrow(dpuClient *dclient,
 {
 	kern_session_info  *session = dclient->session;
 	kern_multirels	   *kmrels = dclient->kmrels;
-	kern_expression	   *kexp_load_vars = SESSION_KEXP_SCAN_LOAD_VARS(session);
+	kern_expression	   *kexp_load_vars = SESSION_KEXP_LOAD_VARS(session, 0);
 	kern_expression	   *kexp_scan_quals = SESSION_KEXP_SCAN_QUALS(session);
 	kern_context	   *kcxt;
 	uint32_t			kds_index;
@@ -2181,8 +2009,6 @@ __handleDpuScanExecArrow(dpuClient *dclient,
 		   kexp_load_vars->opcode == FuncOpCode__LoadVars &&
 		   kexp_scan_quals->exptype == TypeOpCode__bool);
 	INIT_KERNEL_CONTEXT(kcxt, session);
-	kcxt->kvars_slot = (kern_variable *)alloca(kcxt->kvars_nbytes);
-	kcxt->kvars_class = (int *)(kcxt->kvars_slot + kcxt->kvars_nslots);
 	for (kds_index = 0; kds_index < kds_src->nitems; kds_index++)
 	{
 		kcxt_reset(kcxt);

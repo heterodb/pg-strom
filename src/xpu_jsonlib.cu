@@ -232,18 +232,15 @@ __xpu_jsonb_comp_hash(kern_context *kcxt, JsonbContainer *jc)
 	char	   *data;
 	uint32_t	datalen;
 
-	if (!JsonContainerIsScalar(jheader))
+	if (JsonContainerIsObject(jheader))
 	{
-		if (JsonContainerIsObject(jheader))
-		{
-			base = (char *)(jc->children + 2 * nitems);
-			hash ^= JB_FOBJECT;
-		}
-		else
-		{
-			base = (char *)(jc->children + nitems);
-			hash ^= JB_FARRAY;
-		}
+		base = (char *)(jc->children + 2 * nitems);
+		hash ^= JB_FOBJECT;
+	}
+	else
+	{
+		base = (char *)(jc->children + nitems);
+		hash ^= JB_FARRAY;
 	}
 
 	for (j=0; j < nitems; j++)

@@ -95,6 +95,7 @@ xpu_bool_datum_kvec_copy(kern_context *kcxt,
 	kvec_bool_t *kvecs_dst = (kvec_bool_t *)__kvecs_dst;
 
 	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
+	return true;
 }
 
 STATIC_FUNCTION(int)

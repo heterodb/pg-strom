@@ -2843,6 +2843,7 @@ pgfn_interval_mi(XPU_PGFUNCTION_ARGS)
 			return false;
 		}
 	}
+	return true;
 }
 
 #undef SAMESIGN
@@ -3101,7 +3102,7 @@ typedef struct
 } datetkn;
 #define TOKMAXLEN		10
 
-static __device__ const datetkn deltatktbl[] = {
+STATIC_DATA const datetkn deltatktbl[] = {
 	/* token, type, value */
 	{"@",		IGNORE_DTF, 0},		/* postgres relative prefix */
 	{"ago",		AGO, 0},			/* "ago" indicates negative time offset */
@@ -3176,7 +3177,7 @@ static __device__ const datetkn deltatktbl[] = {
 #define AD      0
 #define BC      1
 
-static __device__ const datetkn datetktbl[] = {
+STATIC_DATA const datetkn datetktbl[] = {
     /* token, type, value */
 	{"-infinity",	RESERV, DTK_EARLY},
 	{"ad",			ADBC, AD},           /* "ad" for years > 0 */

@@ -11,6 +11,7 @@
  */
 #include "xpu_common.h"
 #include "xpu_postgis.h"
+#include <math.h>
 
 /* ================================================================
  *
@@ -933,6 +934,50 @@ __geom_bbox_2d_is_empty(const geom_bbox_2d *bbox)
 {
 	return isnan(bbox->xmin);
 }
+
+#ifndef __CUDACC__
+/* double to float with round-down */
+INLINE_FUNCTION(float)
+__double2float_rd(double dval)
+{
+	float	fval;
+
+	if (isnan(dval) || isinf(dval))
+		fval = dval;
+	else if (dval > (double)FLT_MAX)
+		fval = FLT_MAX;
+	else if (dval <= (double)-FLT_MAX)
+		fval = -FLT_MAX;
+	else
+	{
+		fval = dval;
+		if (fval > dval)
+			fval = nextafterf(fval, -FLT_MAX);
+	}
+	return fval;
+}
+
+/* double to float with round-up */
+INLINE_FUNCTION(float)
+__double2float_ru(double dval)
+{
+	float	fval;
+
+	if (isnan(dval) || isinf(dval))
+		fval = dval;
+	else if (dval >= (double)FLT_MAX)
+		fval = FLT_MAX;
+	else if (dval < (double)-FLT_MAX)
+		fval = -FLT_MAX;
+	else
+	{
+		fval = dval;
+		if (fval < dval)
+			fval = nextafterf(fval, FLT_MAX);
+	}
+	return fval;
+}
+#endif	/* __CUDACC__ */
 
 /* see, gserialized_datum_get_box2df_p() */
 STATIC_FUNCTION(bool)
@@ -3489,15 +3534,15 @@ __geom_crossing_direction(kern_context *kcxt,
 	if (!cross_left && cross_right == 1)
         return LINE_CROSS_RIGHT;
     if (!cross_right && cross_left == 1)
-        return LINE_CROSS_LEFT;
-	if (cross_left - cross_right == 1)
+		return LINE_CROSS_LEFT;
+	if ((cross_left - cross_right) == 1)
         return LINE_MULTICROSS_END_LEFT;
-	if (cross_left - cross_right == -1)
+	if ((cross_left - cross_right) == -1)
         return LINE_MULTICROSS_END_RIGHT;
-	if (cross_left - cross_right == 0 &&
+	if ((cross_left - cross_right) == 0 &&
 		first_cross == SEG_CROSS_LEFT)
         return LINE_MULTICROSS_END_SAME_FIRST_LEFT;
-	if (cross_left - cross_right == 0 &&
+	if ((cross_left - cross_right) == 0 &&
 		first_cross == SEG_CROSS_RIGHT)
 		return LINE_MULTICROSS_END_SAME_FIRST_RIGHT;
 	return LINE_NO_CROSS;
@@ -4844,7 +4889,7 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 	int32_t		retval = 0;
 	int32_t		status;
 	int32_t		nrings = 0;
-	uint32_t		__nrings_next;
+	uint32_t	__nrings_next;
 
 	/* centroid of P1-P2 */
 	Pc.x = (P1.x + P2.x) / 2.0;
@@ -4868,11 +4913,11 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 				return -1;
 			poly = &__polyData;
 		}
-		if (poly->nitems == 0)
-			continue;
 		/* rewind to the point where recursive call is invoked */
 		__nrings_next = nrings + poly->nitems;
 		if (__nrings_next < nskips)
+			continue;
+		if (poly->nitems == 0)
 			continue;
 
 		/* check for each ring/hole */
@@ -5442,10 +5487,10 @@ __geom_relate_ring_polygon(kern_context *kcxt,
 						   const xpu_geometry_t *ring,
 						   const xpu_geometry_t *geom)
 {
-	const char *gpos;
-	const char *ppos;
-	uint32_t		unitsz;
-	uint32_t		nitems;
+	const char *gpos = NULL;
+	const char *ppos = NULL;
+	uint32_t	unitsz;
+	uint32_t	nitems;
 	int32_t		nloops;
 	bool		poly_has_inside = false;
 	bool		poly_has_outside = false;
@@ -5643,6 +5688,13 @@ geom_relate_triangle_triangle(kern_context *kcxt,
 	uint32_t	unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(geom2->flags);
 	const char *pos;
 	POINT2D		P;
+	union {
+		double			fval;
+		struct {
+			uint32_t	lo;
+			uint32_t	hi;
+		} ival;
+	} u;
 
 	assert(geom1->type == GEOM_TRIANGLETYPE &&
 		   geom2->type == GEOM_TRIANGLETYPE);
@@ -5682,9 +5734,9 @@ geom_relate_triangle_triangle(kern_context *kcxt,
 
 	/* setup pseudo polygon for code reuse */
 	pos = geom2->rawdata;
-
-	memset(polyData, 0, sizeof(polyData));
-	((uint32_t *)polyData)[0] = 4;
+	memset(&u, 0, sizeof(u));
+	u.ival.lo = 4;
+	polyData[0] = u.fval;
 	for (int i=0; i < 4; i++)
 	{
 		pos = __loadPoint2d(&P, pos, unitsz);

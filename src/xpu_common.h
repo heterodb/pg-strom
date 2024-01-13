@@ -23,6 +23,10 @@
 /*
  * Functions with qualifiers
  */
+#ifndef PGDLLEXPORT
+#define PGDLLEXPORT
+#endif
+
 #if defined(__CUDACC__)
 /* CUDA C++ */
 #define INLINE_FUNCTION(RET_TYPE)				\
@@ -37,13 +41,14 @@
 #define STATIC_DATA						static __device__
 #elif defined(__cplusplus)
 /* C++ */
+#include <cstdio>						/* for printf in C++ */
 #define INLINE_FUNCTION(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)		static RET_TYPE
 #define PUBLIC_FUNCTION(RET_TYPE)		PGDLLEXPORT RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)		extern "C" RET_TYPE
 #define EXTERN_FUNCTION(RET_TYPE)		extern "C" RET_TYPE
 #define EXTERN_DATA						extern "C"
-#define PUBLIC_DATA						extern "C"
+#define PUBLIC_DATA
 #define STATIC_DATA						static
 #else
 /* C */
@@ -1822,8 +1827,9 @@ __pg_array_dataptr(const __ArrayTypeData *ar)
 	{
 		int32_t	ndim = __pg_array_ndim(ar);
 
-		dataoff = MAXALIGN(VARHDRSZ + offsetof(__ArrayTypeData,
-											   data[2 * ndim]));
+		dataoff = MAXALIGN(VARHDRSZ +
+						   offsetof(__ArrayTypeData, data) +
+						   2 * sizeof(uint32_t) * ndim);
 	}
 	assert(dataoff >= VARHDRSZ + offsetof(__ArrayTypeData, data));
 	return (char *)ar + dataoff - VARHDRSZ;
