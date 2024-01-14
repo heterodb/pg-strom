@@ -2832,11 +2832,11 @@ pgfn_interval_mi(XPU_PGFUNCTION_ARGS)
 		result->value.month = ival1.value.month - ival2.value.month;
 		result->value.day   = ival1.value.day   - ival2.value.day;
 		result->value.time  = ival1.value.time  - ival2.value.time;
-		if ((SAMESIGN(ival1.value.month, ival2.value.month) &&
+		if ((!SAMESIGN(ival1.value.month, ival2.value.month) &&
 			 !SAMESIGN(result->value.month, ival1.value.month)) ||
-			(SAMESIGN(ival1.value.day, ival2.value.day) &&
+			(!SAMESIGN(ival1.value.day, ival2.value.day) &&
 			 !SAMESIGN(result->value.day, ival1.value.day)) ||
-			(SAMESIGN(ival1.value.time, ival2.value.time) &&
+			(!SAMESIGN(ival1.value.time, ival2.value.time) &&
 			 !SAMESIGN(result->value.time, ival1.value.time)))
 		{
 			STROM_ELOG(kcxt, "interval out of range");
