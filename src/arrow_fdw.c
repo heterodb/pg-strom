@@ -677,7 +677,7 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 			case ArrowNodeTag__Int:
 			case ArrowNodeTag__FloatingPoint:
 				stat_values[index].min.datum = (Datum)__min;
-				stat_values[index].max.datum = (Datum)__min;
+				stat_values[index].max.datum = (Datum)__max;
 				break;
 
 			case ArrowNodeTag__Decimal:
