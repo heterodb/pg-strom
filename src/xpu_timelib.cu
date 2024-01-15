@@ -3272,7 +3272,7 @@ datebsearch(const char *key, const datetkn *datetkntbl, int nitems)
 		comp = (int) key[0] - (int) position->token[0];
 		if (comp == 0)
 		{
-			comp = __strcmp(key, position->token);
+			comp = __strncmp(key, position->token, TOKMAXLEN);
 			if (comp == 0)
 				return position;
 		}
