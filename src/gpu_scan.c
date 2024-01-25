@@ -514,45 +514,51 @@ try_fetch_xpuscan_planinfo(const Path *__path)
 /*
  * gpuscan_build_projection - make custom_scan_tlist
  */
-typedef struct
+static List *
+__gpuscan_build_projection_expr(List *tlist_dev,
+								Node *node,
+								uint32_t xpu_task_flags,
+								Index scan_relid,
+								bool resjunk)
 {
-	uint32_t	xpu_task_flags;
-	Index		scan_relid;
-	List	   *tlist_dev;
-	bool		resjunk;
-} build_projection_context;
-
-static bool
-__gpuscan_build_projection_walker(Node *node, void *__priv)
-{
-	build_projection_context *context = __priv;
 	ListCell   *lc;
 
 	if (!node)
-		return false;
-	foreach (lc, context->tlist_dev)
+		return tlist_dev;
+	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 
-		if (equal(node, tle->expr))
-			return false;
+		if (codegen_expression_equals(node, tle->expr))
+			return tlist_dev;
 	}
 	if (IsA(node, Var) ||
 		pgstrom_xpu_expression((Expr *)node,
-							   context->xpu_task_flags,
-							   context->scan_relid,
+							   xpu_task_flags,
+							   scan_relid,
 							   NIL,
 							   NULL))
 	{
-		AttrNumber		resno = list_length(context->tlist_dev) + 1;
-		TargetEntry	   *tle = makeTargetEntry((Expr *)node,
-											  resno,
-											  NULL,
-											  context->resjunk);
-		context->tlist_dev = lappend(context->tlist_dev, tle);
-		return false;
+		AttrNumber	resno = list_length(tlist_dev) + 1;
+
+		tlist_dev = lappend(tlist_dev,
+							makeTargetEntry((Expr *)node,
+											resno,
+											NULL,
+											resjunk));
 	}
-	return expression_tree_walker(node, __gpuscan_build_projection_walker, __priv);
+	else
+	{
+		List	*vars_list = pull_vars_of_level(node, 0);
+
+		foreach (lc, vars_list)
+			tlist_dev = __gpuscan_build_projection_expr(tlist_dev,
+														lfirst(lc),
+														xpu_task_flags,
+														scan_relid,
+														resjunk);
+	}
+	return tlist_dev;
 }
 
 static List *
@@ -560,13 +566,9 @@ gpuscan_build_projection(RelOptInfo *baserel,
 						 pgstromPlanInfo *pp_info,
 						 List *tlist)
 {
-	build_projection_context context;
+	List	   *tlist_dev = NIL;
 	List	   *vars_list;
 	ListCell   *lc;
-
-	memset(&context, 0, sizeof(build_projection_context));
-	context.xpu_task_flags = pp_info->xpu_task_flags;
-	context.scan_relid = baserel->relid;
 
 	if (tlist != NIL)
 	{
@@ -576,7 +578,11 @@ gpuscan_build_projection(RelOptInfo *baserel,
 
 			if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
 				continue;
-			__gpuscan_build_projection_walker((Node *)tle->expr, &context);
+			tlist_dev = __gpuscan_build_projection_expr(tlist_dev,
+														(Node *)tle->expr,
+														pp_info->xpu_task_flags,
+														baserel->relid,
+														false);
 		}
 	}
 	else
@@ -596,19 +602,29 @@ gpuscan_build_projection(RelOptInfo *baserel,
 
 			if (IsA(node, Const) || IsA(node, Param))
 				continue;
-			__gpuscan_build_projection_walker(node, &context);
+			tlist_dev = __gpuscan_build_projection_expr(tlist_dev,
+														node,
+														pp_info->xpu_task_flags,
+														baserel->relid,
+														false);
 		}
 	}
 	vars_list = pull_vars_of_level((Node *)pp_info->host_quals, 0);
 	foreach (lc, vars_list)
-		__gpuscan_build_projection_walker((Node *)lfirst(lc), &context);
+		tlist_dev = __gpuscan_build_projection_expr(tlist_dev,
+													(Node *)lfirst(lc),
+													pp_info->xpu_task_flags,
+													baserel->relid,
+													false);
 
-	context.resjunk = true;
 	vars_list = pull_vars_of_level((Node *)pp_info->scan_quals, 0);
 	foreach (lc, vars_list)
-		__gpuscan_build_projection_walker((Node *)lfirst(lc), &context);
-
-	return context.tlist_dev;
+		tlist_dev = __gpuscan_build_projection_expr(tlist_dev,
+													(Node *)lfirst(lc),
+													pp_info->xpu_task_flags,
+													baserel->relid,
+													true);
+	return tlist_dev;
 }
 
 /*
