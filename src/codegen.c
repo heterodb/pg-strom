@@ -269,6 +269,7 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	dtype->type_namespace = get_type_namespace(tcache->type_id);
 	dtype->type_sizeof = sizeof(xpu_composite_t);
 	dtype->type_alignof = __alignof__(xpu_composite_t);
+	dtype->kvec_sizeof = sizeof(kvec_composite_t);
 	dtype->type_hashfunc = NULL; //devtype_composite_hash;
 	dtype->type_eqfunc = get_opcode(tcache->eq_opr);
 	dtype->type_cmpfunc = tcache->cmp_proc;
@@ -308,6 +309,7 @@ build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	dtype->type_namespace = get_type_namespace(tcache->type_id);
 	dtype->type_sizeof = sizeof(xpu_array_t);
 	dtype->type_alignof = __alignof__(xpu_array_t);
+	dtype->kvec_sizeof = sizeof(kvec_array_t);
 	dtype->type_hashfunc = NULL; //devtype_array_hash;
 	dtype->type_element = elem;
 	/* type equality functions */
