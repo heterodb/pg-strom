@@ -1091,6 +1091,7 @@ pgstromExecFinalChunkDummy(pgstromTaskState *pts,
 		xcmd->magic = XpuCommandMagicNumber;
 		xcmd->tag = XpuCommandTag__Success;
 		xcmd->length = offsetof(XpuCommand, u.results.stats);
+		xcmd->priv = conn;
 		xcmd->u.results.final_plan_node = true;
 
 		/* attach dummy xcmd at the tail of ready list */

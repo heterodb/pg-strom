@@ -943,7 +943,7 @@ apply_manual_optimal_gpus(const char *__config)
 											  &hctl,
 											  HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 			}
-			vfs = hash_search(vfs_gpus_htable, &path, HASH_ENTER, &found);
+			vfs = hash_search(vfs_gpus_htable, path, HASH_ENTER, &found);
 			if (!found)
 				vfs->optimal_gpus = optimal_gpus;
 		}
@@ -970,35 +970,24 @@ GetOptimalGpuForFile(const char *pathname)
 
 	if (vfs_gpus_htable)
 	{
-		char   *namebuf;
+		char	namebuf[PATH_MAX];
 		char   *dir;
 
-		if (pathname[0] == '/')
+		dir = realpath(pathname, namebuf);
+		if (dir)
 		{
-			namebuf = alloca(strlen(pathname) + 1);
-			strcpy(namebuf, pathname);
-		}
-		else
-		{
-			namebuf = alloca(strlen(DataDir) + strlen(pathname) + 2);
-			sprintf(namebuf, "%s/%s", DataDir, pathname);
-		}
-		Assert(namebuf[0] == '/');
-
-		if (S_ISDIR(stat_buf.st_mode))
-			dir = namebuf;
-		else
-			dir = dirname(namebuf);
-
-		for (;;)
-		{
-			VfsDevItem *vfs = hash_search(vfs_gpus_htable,
-										  dir, HASH_FIND, NULL);
-			if (vfs)
-				return vfs->optimal_gpus;
-			if (strcmp(dir, "/") != 0)
-				break;
-			dir = dirname(dir);
+			if (!S_ISDIR(stat_buf.st_mode))
+				dir = dirname(dir);
+			for (;;)
+			{
+				VfsDevItem *vfs = hash_search(vfs_gpus_htable,
+											  dir, HASH_FIND, NULL);
+				if (vfs)
+					return vfs->optimal_gpus;
+				if (strcmp(dir, "/") == 0)
+					break;
+				dir = dirname(dir);
+			}
 		}
 	}
 	return sysfs_lookup_optimal_gpus(major(stat_buf.st_dev),

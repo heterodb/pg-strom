@@ -58,6 +58,7 @@ static struct {
 	{NULL,NULL,NULL,NULL}
 };
 
+static void	__appendKernExpMagicAndLength(StringInfo buf, int head_pos);
 static int	codegen_expression_walker(codegen_context *context,
 									  StringInfo buf,
 									  int curr_depth,
@@ -268,6 +269,7 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	dtype->type_namespace = get_type_namespace(tcache->type_id);
 	dtype->type_sizeof = sizeof(xpu_composite_t);
 	dtype->type_alignof = __alignof__(xpu_composite_t);
+	dtype->kvec_sizeof = sizeof(kvec_composite_t);
 	dtype->type_hashfunc = NULL; //devtype_composite_hash;
 	dtype->type_eqfunc = get_opcode(tcache->eq_opr);
 	dtype->type_cmpfunc = tcache->cmp_proc;
@@ -307,6 +309,7 @@ build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	dtype->type_namespace = get_type_namespace(tcache->type_id);
 	dtype->type_sizeof = sizeof(xpu_array_t);
 	dtype->type_alignof = __alignof__(xpu_array_t);
+	dtype->kvec_sizeof = sizeof(kvec_array_t);
 	dtype->type_hashfunc = NULL; //devtype_array_hash;
 	dtype->type_element = elem;
 	/* type equality functions */
@@ -1394,6 +1397,90 @@ found:
 	return kvdef;
 }
 
+/*
+ * __try_inject_temporary_expression
+ */
+static codegen_kvar_defitem *
+__try_inject_temporary_expression(codegen_context *context,
+								  StringInfo buf,
+								  Expr *expr,
+								  int curr_depth,
+								  bool allows_host_only_types)
+{
+	codegen_kvar_defitem *kvdef;
+	kern_expression kexp;
+	ListCell   *lc;
+	int			pos = -1;
+
+	/*
+	 * When 'expr' is simple Var-reference on the input relations,
+	 * we don't need to inject expression node here.
+	 */
+	kvdef = lookup_input_varnode_defitem(context, (Var *)expr,
+										 curr_depth,
+										 allows_host_only_types);
+	if (kvdef)
+		goto found;
+
+	/*
+	 * Try to find out the expression which already injected to the
+	 * last level kvec buffer. If exists, we can reuse it.
+	 */
+	foreach (lc, context->kvars_deflist)
+	{
+		kvdef = lfirst(lc);
+
+		if (codegen_expression_equals(expr, kvdef->kv_expr))
+			goto found;
+	}
+
+	/*
+	 * Try to allocate a new kvec-buffer, if an expression (not a simple
+	 * var-reference) is required.
+	 */
+	kvdef = palloc0(sizeof(codegen_kvar_defitem));
+	kvdef->kv_slot_id   = list_length(context->kvars_deflist);
+	kvdef->kv_depth     = curr_depth;
+	kvdef->kv_resno     = InvalidAttrNumber; /* no source */
+	kvdef->kv_maxref    = curr_depth;
+	kvdef->kv_offset    = -1;				/* never use vectorized buffer */
+	kvdef->kv_type_oid  = exprType((Node *)expr);
+	if (!__assign_codegen_kvar_defitem_type_params(kvdef->kv_type_oid,
+												   &kvdef->kv_type_code,
+												   &kvdef->kv_typbyval,
+												   &kvdef->kv_typalign,
+												   &kvdef->kv_typlen,
+												   NULL,	/* no kvec-buffer */
+												   false))
+	{
+		elog(ERROR, "type %s is not device supported",
+			 format_type_be(kvdef->kv_type_oid));
+	}
+	kvdef->kv_expr      = expr;
+	__assign_codegen_kvar_defitem_subfields(kvdef);
+	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
+
+	/*
+	 * Setup SaveExpr expression
+	 */
+found:
+	memset(&kexp, 0, sizeof(kexp));
+	kexp.exptype  = kvdef->kv_type_code;
+	kexp.expflags = context->kexp_flags;
+	kexp.opcode   = FuncOpCode__SaveExpr;
+	kexp.nr_args  = 1;
+	kexp.args_offset = MAXALIGN(offsetof(kern_expression,
+										 u.save.data));
+	kexp.u.save.sv_slot_id   = kvdef->kv_slot_id;
+	if (buf)
+		pos = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
+	if (codegen_expression_walker(context, buf, curr_depth, expr) < 0)
+		return NULL;
+	if (buf)
+		__appendKernExpMagicAndLength(buf, pos);
+	return kvdef;
+}
+
 /* ----------------------------------------------------------------
  *
  * xPU pseudo code generator
@@ -1564,10 +1651,10 @@ codegen_var_expression(codegen_context *context,
 {
 	codegen_kvar_defitem *kvdef;
 
-	kvdef = lookup_input_varnode_defitem(context, var, curr_depth, false);
-
-	
-	
+	kvdef = lookup_input_varnode_defitem(context,
+										 var,
+										 curr_depth,
+										 false);
 	if (buf)
 	{
 		kern_expression kexp;
@@ -2083,6 +2170,44 @@ codegen_relabel_expression(codegen_context *context,
 }
 
 /*
+ * codegen_casetest_expression
+ */
+static int		codegen_casetest_key_slot_id = -1;
+
+static int
+codegen_casetest_expression(codegen_context *context,
+							StringInfo buf, int curr_depth,
+							CaseTestExpr *casetest)
+{
+	codegen_kvar_defitem   *kvdef;
+
+	if (codegen_casetest_key_slot_id < 0 ||
+		codegen_casetest_key_slot_id >= list_length(context->kvars_deflist))
+		__Elog("Bug? CaseTestExpr is used out of CaseWhen");
+	kvdef = list_nth(context->kvars_deflist, codegen_casetest_key_slot_id);
+
+	if (buf)
+	{
+		kern_expression	kexp;
+		int			pos;
+
+		memset(&kexp, 0, sizeof(kern_expression));
+		kexp.exptype = kvdef->kv_type_code;
+		kexp.expflags = context->kexp_flags;
+		kexp.opcode   = FuncOpCode__VarExpr;
+		kexp.u.v.var_slot_id = kvdef->kv_slot_id;
+		if (kvdef->kv_offset >= 0 &&
+			kvdef->kv_depth != curr_depth)
+			kexp.u.v.var_offset = kvdef->kv_offset;
+		else
+			kexp.u.v.var_offset = -1;
+		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExprVar);
+		__appendKernExpMagicAndLength(buf, pos);
+	}
+	return 0;
+}
+
+/*
  * codegen_casewhen_expression
  */
 static int
@@ -2091,20 +2216,19 @@ codegen_casewhen_expression(codegen_context *context,
 							CaseExpr *caseexpr)
 {
 	kern_expression	kexp;
-	devtype_info   *rtype;
-	devtype_info   *dtype;
-	TypeOpCode		cond_type_code = TypeOpCode__bool;
-	ListCell	   *lc;
-	int				pos = -1;
+	devtype_info *dtype;
+	ListCell   *lc;
+	int			pos = -1;
+	int			saved_casetest_key_slot_id = codegen_casetest_key_slot_id;
 
 	/* check result type */
-	rtype = pgstrom_devtype_lookup(caseexpr->casetype);
-	if (!rtype)
+	dtype = pgstrom_devtype_lookup(caseexpr->casetype);
+	if (!dtype)
 		__Elog("device type '%s' is not supported",
 			   format_type_be(caseexpr->casetype));
 	/* setup kexp */
 	memset(&kexp, 0, sizeof(kexp));
-	kexp.exptype = rtype->type_code;
+	kexp.exptype = dtype->type_code;
 	kexp.expflags = context->kexp_flags;
 	kexp.opcode = FuncOpCode__CaseWhenExpr;
 	kexp.nr_args = 2 * list_length(caseexpr->args);
@@ -2112,78 +2236,69 @@ codegen_casewhen_expression(codegen_context *context,
 	if (buf)
 		pos = __appendZeroStringInfo(buf, kexp.args_offset);
 
-	/* CASE expr WHEN */
+	/* CASE expr WHEN, if any */
 	if (caseexpr->arg)
 	{
-		Oid		type_oid = exprType((Node *)caseexpr->arg);
+		codegen_kvar_defitem *kvdef;
 
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			__Elog("device type '%s' is not supported",
-				   format_type_be(type_oid));
-		if ((dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
-			__Elog("device type '%s' has no comparison function",
-				   dtype->type_name);
-		cond_type_code = dtype->type_code;
-	}
-
-	/* WHEN ... THEN ... */
-	foreach (lc, caseexpr->args)
-	{
-		CaseWhen   *casewhen = (CaseWhen *)lfirst(lc);
-		Oid			type_oid;
-
-		/* check case cond */
-		type_oid = exprType((Node *)casewhen->expr);
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			__Elog("device type '%s' is not supported",
-				   format_type_be(type_oid));
-		if (dtype->type_code != cond_type_code)
-			__Elog("CaseWhen condition has unexpected data type: %s",
-				   nodeToString(caseexpr));
-		/* check case value */
-		type_oid = exprType((Node *)casewhen->result);
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			__Elog("device type '%s' is not supported",
-				   format_type_be(type_oid));
-		if (dtype->type_code != rtype->type_code)
-			__Elog("CaseWhen result has unexpected data type: %s",
-				   nodeToString(caseexpr));
-		/* write out CaseWhen */
-		if (codegen_expression_walker(context, buf,
-									  curr_depth,
-									  casewhen->expr) < 0)
-			return -1;
-		if (codegen_expression_walker(context, buf,
-									  curr_depth,
-									  casewhen->result) < 0)
-			return -1;
-	}
-	/* CASE <expression> */
-	if (caseexpr->arg)
-	{
 		if (buf)
 			kexp.u.casewhen.case_comp = (__appendZeroStringInfo(buf, 0) - pos);
-		if (codegen_expression_walker(context, buf,
-									  curr_depth,
-									  caseexpr->arg) < 0)
+
+		kvdef = __try_inject_temporary_expression(context,
+												  buf,
+												  caseexpr->arg,
+												  curr_depth,
+												  false);
+		if (!kvdef)
 			return -1;
-	}
-	/* ELSE <expression> */
-	if (caseexpr->defresult)
-	{
+		/* enforce MAXALIGN */
 		if (buf)
-			kexp.u.casewhen.case_else = (__appendZeroStringInfo(buf, 0) - pos);
-		if (codegen_expression_walker(context, buf,
-									  curr_depth,
-									  caseexpr->defresult) < 0)
-			return -1;
+			kexp.args_offset = (__appendZeroStringInfo(buf, 0) - pos);
+
+		codegen_casetest_key_slot_id = kvdef->kv_slot_id;
 	}
+
+	PG_TRY();
+	{
+		/* WHEN ... THEN ... */
+		foreach (lc, caseexpr->args)
+		{
+			CaseWhen   *casewhen = (CaseWhen *)lfirst(lc);
+
+			/* write out CaseWhen */
+			if (codegen_expression_walker(context, buf,
+										  curr_depth,
+										  casewhen->expr) < 0)
+				return -1;
+			if (codegen_expression_walker(context, buf,
+										  curr_depth,
+										  casewhen->result) < 0)
+				return -1;
+		}
+		/* ELSE <expression> */
+		if (caseexpr->defresult)
+		{
+			if (buf)
+				kexp.u.casewhen.case_else = (__appendZeroStringInfo(buf, 0) - pos);
+
+			if (codegen_expression_walker(context, buf,
+										  curr_depth,
+										  caseexpr->defresult) < 0)
+				return -1;
+		}
+	}
+	PG_CATCH();
+	{
+		codegen_casetest_key_slot_id = saved_casetest_key_slot_id;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	codegen_casetest_key_slot_id = saved_casetest_key_slot_id;
+
 	if (buf)
 	{
-		memcpy(buf->data + pos, &kexp, kexp.args_offset);
+		memcpy(buf->data + pos, &kexp,
+			   offsetof(kern_expression, u.casewhen.data));
 		__appendKernExpMagicAndLength(buf, pos);
 	}
 	return 0;
@@ -2386,6 +2501,9 @@ codegen_expression_walker(codegen_context *context,
 		case T_CaseExpr:
 			return codegen_casewhen_expression(context, buf, curr_depth,
 											   (CaseExpr *)expr);
+		case T_CaseTestExpr:
+			return codegen_casetest_expression(context, buf, curr_depth,
+											   (CaseTestExpr *)expr);
 		case T_ScalarArrayOpExpr:
 			return codegen_scalar_array_op_expression(context, buf, curr_depth,
 													  (ScalarArrayOpExpr *)expr);
@@ -2655,7 +2773,21 @@ codegen_expression_equals(const void *__a, const void *__b)
 				}
 			}
 			break;
-			
+
+		case T_CaseTestExpr:
+			{
+				const CaseTestExpr *a = __a;
+				const CaseTestExpr *b = __b;
+
+				if (a->typeId    == b->typeId &&
+					a->typeMod   == b->typeMod &&
+					a->collation == b->collation)
+				{
+					return true;
+				}
+			}
+			break;
+
 		case T_ScalarArrayOpExpr:
 			{
 				const ScalarArrayOpExpr *a = __a;
@@ -2940,87 +3072,6 @@ codegen_build_scan_quals(codegen_context *context, List *dev_quals)
 	return xpucode;
 }
 
-/*
- * try_inject_projection_expression
- */
-static codegen_kvar_defitem *
-__try_inject_projection_expression(codegen_context *context,
-								   StringInfo buf,
-								   Expr *expr)
-{
-	codegen_kvar_defitem *kvdef;
-	kern_expression kexp;
-	ListCell   *lc;
-	Oid			kv_type_oid;
-	int			pos;
-	int			proj_depth = context->num_rels + 1;
-
-	/*
-	 * When 'expr' is simple Var-reference on the input relations,
-	 * we don't need to inject expression node here.
-	 */
-	kvdef = lookup_input_varnode_defitem(context, (Var *)expr,
-										 context->num_rels+1, true);
-	if (kvdef)
-		goto found;
-
-	/*
-	 * Try to find out the expression which already injected to the
-	 * last level kvec buffer. If exists, we can reuse it.
-	 */
-	foreach (lc, context->kvars_deflist)
-	{
-		kvdef = lfirst(lc);
-
-		if (codegen_expression_equals(expr, kvdef->kv_expr))
-			goto found;
-	}
-
-	/*
-	 * Try to allocate a new kvec-buffer, if an expression (not a simple
-	 * var-reference) is required.
-	 */
-	kv_type_oid = exprType((Node *)expr);
-	kvdef = palloc0(sizeof(codegen_kvar_defitem));
-	kvdef->kv_slot_id   = list_length(context->kvars_deflist);
-	kvdef->kv_depth     = proj_depth;
-	kvdef->kv_resno     = InvalidAttrNumber;	/* no source */
-	kvdef->kv_maxref    = proj_depth;
-	kvdef->kv_offset    = -1;					/* never use vectorized buffer */
-	kvdef->kv_type_oid  = kv_type_oid;
-	if (!__assign_codegen_kvar_defitem_type_params(kv_type_oid,
-												   &kvdef->kv_type_code,
-												   &kvdef->kv_typbyval,
-												   &kvdef->kv_typalign,
-												   &kvdef->kv_typlen,
-												   NULL,	/* no kvec-buffer */
-												   false))
-	{
-		elog(ERROR, "type %s is not device supported", format_type_be(kv_type_oid));
-	}
-	kvdef->kv_expr      = expr;
-	__assign_codegen_kvar_defitem_subfields(kvdef);
-	context->kvars_deflist = lappend(context->kvars_deflist, kvdef);
-
-	/*
-	 * Setup VarExpr / SaveExpr expression
-	 */
-found:
-	memset(&kexp, 0, sizeof(kexp));
-	kexp.exptype  = kvdef->kv_type_code;
-	kexp.expflags = context->kexp_flags;
-	kexp.opcode   = FuncOpCode__SaveExpr;
-	kexp.nr_args  = 1;
-	kexp.args_offset = MAXALIGN(offsetof(kern_expression,
-										 u.save.data));
-	kexp.u.save.sv_slot_id   = kvdef->kv_slot_id;
-	pos = __appendBinaryStringInfo(buf, &kexp, kexp.args_offset);
-	codegen_expression_walker(context, buf, context->num_rels+1, expr);
-	__appendKernExpMagicAndLength(buf, pos);
-
-	return kvdef;
-}
-
 static codegen_kvar_defitem *
 try_inject_projection_expression(codegen_context *context,
 								 kern_expression *kexp_proj,
@@ -3030,7 +3081,9 @@ try_inject_projection_expression(codegen_context *context,
 	codegen_kvar_defitem *kvdef;
 	int		pos = buf->len;
 
-	kvdef = __try_inject_projection_expression(context, buf, expr);
+	kvdef = __try_inject_temporary_expression(context, buf, expr,
+											  context->num_rels+1,
+											  true);
 	for (int i=0; i < kexp_proj->u.proj.nattrs; i++)
 	{
 		uint16_t	proj_slot_id = kexp_proj->u.proj.slot_id[i];
@@ -3557,7 +3610,9 @@ codegen_build_groupby_keyhash(codegen_context *context,
 		{
 			codegen_kvar_defitem *kvdef;
 
-			kvdef = __try_inject_projection_expression(context, &buf, tle->expr);
+			kvdef = __try_inject_temporary_expression(context, &buf, tle->expr,
+													  context->num_rels+1,
+													  false);
 			groupby_key_items = lappend(groupby_key_items, kvdef);
 			kexp.nr_args++;
 		}
@@ -3765,7 +3820,9 @@ try_inject_groupby_expression(codegen_context *context,
 	int		pos = buf->len;
 
 	Assert(kexp_pagg->opcode == FuncOpCode__AggFuncs);
-	kvdef = __try_inject_projection_expression(context, buf, expr);
+	kvdef = __try_inject_temporary_expression(context, buf, expr,
+											  context->num_rels+1,
+											  false);
 	for (int i=0; i < kexp_pagg->u.pagg.nattrs; i++)
 	{
 		const kern_aggregate_desc *desc = &kexp_pagg->u.pagg.desc[i];

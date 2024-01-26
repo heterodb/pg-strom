@@ -790,33 +790,27 @@ build_fallback_exprs_inner(codegen_context *context, List *inner_keys)
 /*
  * pgstrom_build_tlist_dev
  */
-typedef struct
+static List *
+__pgstrom_build_tlist_dev_expr(List *tlist_dev,
+							   Node *node,
+							   uint32_t xpu_task_flags,
+							   Index scan_relid,
+							   List *inner_target_list)
 {
-	PlannerInfo *root;
-	uint32_t	xpu_task_flags;
-	List	   *tlist_dev;
-	Index		scan_relid;
-	List	   *inner_target_list;
-} build_tlist_dev_context;
-
-static bool
-__pgstrom_build_tlist_dev_walker(Node *node, void *__priv)
-{
-	build_tlist_dev_context *context = __priv;
 	int			depth;
 	int			resno;
 	ListCell   *lc1, *lc2;
 
 	if (!node)
-		return false;
+		return tlist_dev;
 
 	/* check whether the node is already on the tlist_dev */
-	foreach (lc1, context->tlist_dev)
+	foreach (lc1, tlist_dev)
 	{
 		TargetEntry	*tle = lfirst(lc1);
 
 		if (codegen_expression_equals(node, tle->expr))
-			return false;
+			return tlist_dev;
 	}
 
 	/* check whether the node is identical with any of input */
@@ -824,7 +818,7 @@ __pgstrom_build_tlist_dev_walker(Node *node, void *__priv)
 	{
 		Var	   *var = (Var *)node;
 
-		if (var->varno == context->scan_relid)
+		if (var->varno == scan_relid)
 		{
 			depth = 0;
 			resno = var->varattno;
@@ -832,7 +826,7 @@ __pgstrom_build_tlist_dev_walker(Node *node, void *__priv)
 		}
 	}
 	depth = 1;
-	foreach (lc1, context->inner_target_list)
+	foreach (lc1, inner_target_list)
 	{
 		PathTarget *reltarget = lfirst(lc1);
 
@@ -855,23 +849,34 @@ found:
 	 */
 	if (IsA(node, Var) ||
 		pgstrom_xpu_expression((Expr *)node,
-							   context->xpu_task_flags,
-							   context->scan_relid,
-							   context->inner_target_list,
+							   xpu_task_flags,
+							   scan_relid,
+							   inner_target_list,
 							   NULL))
 	{
-		TargetEntry *tle
-			= makeTargetEntry((Expr *)node,
-							  list_length(context->tlist_dev) + 1,
-							  NULL,
-							  false);
+		AttrNumber		tleno = list_length(tlist_dev) + 1;
+		TargetEntry	   *tle = makeTargetEntry((Expr *)node,
+											  tleno,
+											  NULL,
+											  false);
 		tle->resorigtbl = (depth < 0 ? UINT_MAX : depth);
 		tle->resorigcol  = resno;
-		context->tlist_dev = lappend(context->tlist_dev, tle);
-
-		return false;
+		tlist_dev = lappend(tlist_dev, tle);
 	}
-	return expression_tree_walker(node, __pgstrom_build_tlist_dev_walker, __priv);
+	else
+	{
+		List	   *vars_list = pull_vars_of_level(node, 0);
+
+		foreach (lc1, vars_list)
+		{
+			tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
+													   lfirst(lc1),
+													   xpu_task_flags,
+													   scan_relid,
+													   inner_target_list);
+		}
+	}
+	return tlist_dev;
 }
 
 /*
@@ -966,21 +971,16 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 							 RelOptInfo *joinrel,
 							 List *tlist)
 {
-	build_tlist_dev_context __context;
+	List	   *tlist_dev = NIL;
 	List	   *inner_target_list = NIL;
 	ListCell   *lc;
 
-	memset(&__context, 0, sizeof(build_tlist_dev_context));
-	__context.root = root;
-	__context.xpu_task_flags = context->required_flags;
-	__context.scan_relid = context->scan_relid;
 	for (int depth=1; depth <= context->num_rels; depth++)
 	{
 		PathTarget *target = context->pd[depth].inner_target;
 
 		inner_target_list = lappend(inner_target_list, target);
 	}
-	__context.inner_target_list = inner_target_list;
 
 	if (tlist != NIL)
 	{
@@ -990,7 +990,11 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 
 			context->top_expr = tle->expr;
 			if (contain_var_clause((Node *)tle->expr))
-				__pgstrom_build_tlist_dev_walker((Node *)tle->expr, &__context);
+				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
+														   (Node *)tle->expr,
+														   context->required_flags,
+														   context->scan_relid,
+														   inner_target_list);
 		}
 	}
 	else
@@ -1008,15 +1012,19 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 
 		foreach (lc, reltarget->exprs)
 		{
-			Expr   *node = lfirst(lc);
+			Node   *node = lfirst(lc);
 
-			context->top_expr = node;
-			if (contain_var_clause((Node *)node))
-				__pgstrom_build_tlist_dev_walker((Node *)node, &__context);
+			context->top_expr = (Expr *)node;
+			if (contain_var_clause(node))
+				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
+														   node,
+														   context->required_flags,
+														   context->scan_relid,
+														   inner_target_list);
 		}
 	}
 	//add junk?
-	context->tlist_dev = __context.tlist_dev;
+	context->tlist_dev = tlist_dev;
 }
 
 /*
