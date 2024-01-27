@@ -87,6 +87,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 
 			case KAGG_ACTION__PMIN_INT32:
 			case KAGG_ACTION__PMIN_INT64:
+			case KAGG_ACTION__PMIN_CASH:
 				nbytes = sizeof(kagg_state__pminmax_int64_packed);
 				if (buffer)
 				{
@@ -101,6 +102,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 
 			case KAGG_ACTION__PMAX_INT32:
 			case KAGG_ACTION__PMAX_INT64:
+			case KAGG_ACTION__PMAX_CASH:
 				nbytes = sizeof(kagg_state__pminmax_int64_packed);
 				if (buffer)
 				{
@@ -140,6 +142,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				break;
 
 			case KAGG_ACTION__PSUM_INT:
+			case KAGG_ACTION__PSUM_CASH:
 			case KAGG_ACTION__PAVG_INT:
 				nbytes = sizeof(kagg_state__psum_int_packed);
 				if (buffer)
@@ -327,25 +330,25 @@ __update_nogroups__pmin_int64(kern_context *kcxt,
 	}
 	count = __syncthreads_count(source_is_valid);
 	if (count > 0)
-    {
-        ival = pgstrom_local_min_int64(source_is_valid ? ival : LONG_MAX);
-        if (get_local_id() == 0)
-        {
-            kagg_state__pminmax_int64_packed *r =
-                (kagg_state__pminmax_int64_packed *)buffer;
-            if (__isShared(r))
-            {
-                r->nitems += count;
-                if (r->value > ival)
-                    r->value = ival;
-            }
-            else
-            {
-                __atomic_add_uint32(&r->nitems, count);
-                __atomic_min_int64(&r->value, ival);
-            }
-        }
-    }
+	{
+		ival = pgstrom_local_min_int64(source_is_valid ? ival : LONG_MAX);
+		if (get_local_id() == 0)
+		{
+			kagg_state__pminmax_int64_packed *r =
+				(kagg_state__pminmax_int64_packed *)buffer;
+			if (__isShared(r))
+			{
+				r->nitems += count;
+				if (r->value > ival)
+					r->value = ival;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, count);
+				__atomic_min_int64(&r->value, ival);
+			}
+		}
+	}
 }
 
 /*
@@ -426,7 +429,7 @@ __update_nogroups__pmax_int64(kern_context *kcxt,
 	count = __syncthreads_count(source_is_valid);
 	if (count > 0)
 	{
-		ival = pgstrom_local_min_int64(source_is_valid ? ival : LONG_MIN);
+		ival = pgstrom_local_max_int64(source_is_valid ? ival : LONG_MIN);
 		if (get_local_id() == 0)
 		{
 			kagg_state__pminmax_int64_packed *r =
@@ -545,6 +548,104 @@ __update_nogroups__pmax_fp64(kern_context *kcxt,
 }
 
 /*
+ * __update_nogroups__pmin_cash
+ */
+INLINE_FUNCTION(void)
+__update_nogroups__pmin_cash(kern_context *kcxt,
+							 char *buffer,
+							 kern_colmeta *cmeta,
+							 kern_aggregate_desc *desc,
+							 bool source_is_valid)
+{
+	int64_t		ival;
+	int			count;
+
+	if (source_is_valid)
+	{
+		xpu_money_t	   *xdatum = (xpu_money_t *)
+			kcxt->kvars_slot[desc->arg0_slot_id];
+
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
+		else
+		{
+			assert(xdatum->expr_ops == &xpu_money_ops);
+			ival = xdatum->value;
+		}
+	}
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
+	{
+		ival = pgstrom_local_min_int64(source_is_valid ? ival : LONG_MAX);
+		if (get_local_id() == 0)
+		{
+			kagg_state__pminmax_int64_packed *r =
+				(kagg_state__pminmax_int64_packed *)buffer;
+			if (__isShared(r))
+			{
+				r->nitems += count;
+				if (r->value > ival)
+					r->value = ival;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, count);
+				__atomic_min_int64(&r->value, ival);
+			}
+		}
+	}
+}
+
+/*
+ * __update_nogroups__pmax_cash
+ */
+INLINE_FUNCTION(void)
+__update_nogroups__pmax_cash(kern_context *kcxt,
+							 char *buffer,
+							 kern_colmeta *cmeta,
+							 kern_aggregate_desc *desc,
+							 bool source_is_valid)
+{
+	int64_t		ival;
+	int			count;
+
+	if (source_is_valid)
+	{
+		xpu_money_t	   *xdatum = (xpu_money_t *)
+			kcxt->kvars_slot[desc->arg0_slot_id];
+
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
+		else
+		{
+			assert(xdatum->expr_ops == &xpu_money_ops);
+			ival = xdatum->value;
+		}
+	}
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
+	{
+		ival = pgstrom_local_max_int64(source_is_valid ? ival : LONG_MIN);
+		if (get_local_id() == 0)
+		{
+			kagg_state__pminmax_int64_packed *r =
+				(kagg_state__pminmax_int64_packed *)buffer;
+			if (__isShared(r))
+			{
+				r->nitems += count;
+				if (r->value < ival)
+					r->value = ival;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, count);
+				__atomic_max_int64(&r->value, ival);
+			}
+		}
+	}
+}
+
+/*
  * __update_nogroups__psum_int
  */
 INLINE_FUNCTION(void)
@@ -641,6 +742,56 @@ __update_nogroups__psum_fp(kern_context *kcxt,
 		}
 	}
 }
+
+/*
+ * __update_nogroups__psum_cash
+ */
+INLINE_FUNCTION(void)
+__update_nogroups__psum_cash(kern_context *kcxt,
+							 char *buffer,
+							 kern_colmeta *cmeta,
+							 kern_aggregate_desc *desc,
+							 bool source_is_valid)
+{
+	int64_t		sum, ival = 0;
+	int			count;
+
+	if (source_is_valid)
+	{
+		xpu_money_t	   *xdatum = (xpu_money_t *)
+			kcxt->kvars_slot[desc->arg0_slot_id];
+
+		if (XPU_DATUM_ISNULL(xdatum))
+			source_is_valid = false;
+		else
+		{
+			assert(xdatum->expr_ops == &xpu_money_ops);
+			ival = xdatum->value;
+		}
+	}
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
+	{
+		kagg_state__psum_int_packed *r =
+			(kagg_state__psum_int_packed *)buffer;
+
+		pgstrom_stair_sum_int64(ival, &sum);
+		if (get_local_id() == 0)
+		{
+			if (__isShared(r))
+			{
+				r->nitems += count;
+				r->sum    += sum;
+			}
+			else
+			{
+				__atomic_add_uint32(&r->nitems, count);
+				__atomic_add_int64(&r->sum, sum);
+			}
+		}
+	}
+}
+
 /*
  * __update_nogroups__pstddev
  */
@@ -851,6 +1002,17 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 											 cmeta, desc,
 											 source_is_valid);
 				break;
+			case KAGG_ACTION__PMIN_CASH:
+				__update_nogroups__pmin_cash(kcxt, buffer,
+											 cmeta, desc,
+											 source_is_valid);
+				break;
+			case KAGG_ACTION__PMAX_CASH:
+				__update_nogroups__pmax_cash(kcxt, buffer,
+											 cmeta, desc,
+											 source_is_valid);
+				break;
+
 			case KAGG_ACTION__PSUM_INT:
 			case KAGG_ACTION__PAVG_INT:
 				__update_nogroups__psum_int(kcxt, buffer,
@@ -862,6 +1024,11 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 				__update_nogroups__psum_fp(kcxt, buffer,
 										   cmeta, desc,
 										   source_is_valid);
+				break;
+			case KAGG_ACTION__PSUM_CASH:
+				__update_nogroups__psum_cash(kcxt, buffer,
+											 cmeta, desc,
+											 source_is_valid);
 				break;
 			case KAGG_ACTION__STDDEV:
 				__update_nogroups__pstddev(kcxt, buffer,
@@ -1250,6 +1417,48 @@ __update_groupby__pmax_fp64(kern_context *kcxt,
 }
 
 INLINE_FUNCTION(int)
+__update_groupby__pmin_cash(kern_context *kcxt,
+							char *buffer,
+							const kern_colmeta *cmeta,
+							const kern_aggregate_desc *desc)
+{
+	xpu_money_t	   *xdatum = (xpu_money_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
+
+	if (!XPU_DATUM_ISNULL(xdatum))
+	{
+		kagg_state__pminmax_int64_packed *r =
+			(kagg_state__pminmax_int64_packed *)buffer;
+
+		assert(xdatum->expr_ops == &xpu_money_ops);
+		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_min_int64(&r->value, xdatum->value);
+	}
+	return sizeof(kagg_state__pminmax_int64_packed);
+}
+
+INLINE_FUNCTION(int)
+__update_groupby__pmax_cash(kern_context *kcxt,
+							char *buffer,
+							const kern_colmeta *cmeta,
+							const kern_aggregate_desc *desc)
+{
+	xpu_money_t	   *xdatum = (xpu_money_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
+
+	if (!XPU_DATUM_ISNULL(xdatum))
+	{
+		kagg_state__pminmax_int64_packed *r =
+			(kagg_state__pminmax_int64_packed *)buffer;
+
+		assert(xdatum->expr_ops == &xpu_int8_ops);
+		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_max_int64(&r->value, xdatum->value);
+	}
+	return sizeof(kagg_state__pminmax_int64_packed);
+}
+
+INLINE_FUNCTION(int)
 __update_groupby__psum_int(kern_context *kcxt,
 						   char *buffer,
 						   const kern_colmeta *cmeta,
@@ -1289,6 +1498,27 @@ __update_groupby__psum_fp(kern_context *kcxt,
 		__atomic_add_fp64(&r->sum, xdatum->value);
 	}
 	return sizeof(kagg_state__psum_fp_packed);
+}
+
+INLINE_FUNCTION(int)
+__update_groupby__psum_cash(kern_context *kcxt,
+							char *buffer,
+							const kern_colmeta *cmeta,
+							const kern_aggregate_desc *desc)
+{
+	xpu_money_t	   *xdatum = (xpu_money_t *)
+		kcxt->kvars_slot[desc->arg0_slot_id];
+
+	if (!XPU_DATUM_ISNULL(xdatum))
+	{
+		kagg_state__psum_int_packed *r =
+			(kagg_state__psum_int_packed *)buffer;
+
+		assert(xdatum->expr_ops == &xpu_money_ops);
+		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_add_int64(&r->sum, xdatum->value);
+	}
+	return sizeof(kagg_state__psum_int_packed);
 }
 
 INLINE_FUNCTION(int)
@@ -1404,6 +1634,12 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 			case KAGG_ACTION__PMAX_FP64:
 				curr += __update_groupby__pmax_fp64(kcxt, curr, cmeta, desc);
 				break;
+			case KAGG_ACTION__PMIN_CASH:
+				curr += __update_groupby__pmin_cash(kcxt, curr, cmeta, desc);
+				break;
+			case KAGG_ACTION__PMAX_CASH:
+				curr += __update_groupby__pmax_cash(kcxt, curr, cmeta, desc);
+				break;
 			case KAGG_ACTION__PAVG_INT:
 			case KAGG_ACTION__PSUM_INT:
 				curr += __update_groupby__psum_int(kcxt, curr, cmeta, desc);
@@ -1411,6 +1647,9 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 			case KAGG_ACTION__PAVG_FP:
 			case KAGG_ACTION__PSUM_FP:
 				curr += __update_groupby__psum_fp(kcxt, curr, cmeta, desc);
+				break;
+			case KAGG_ACTION__PSUM_CASH:
+				curr += __update_groupby__psum_cash(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__STDDEV:
 				curr += __update_groupby__pstddev(kcxt, curr, cmeta, desc);
@@ -1592,6 +1831,7 @@ __setupGpuPreAggGroupByBufferOne(kern_context *kcxt,
 
 			case KAGG_ACTION__PMIN_INT32:
 			case KAGG_ACTION__PMIN_INT64:
+			case KAGG_ACTION__PMIN_CASH:
 				{
 					kagg_state__pminmax_int64_packed *r =
 						(kagg_state__pminmax_int64_packed *)pos;
@@ -1604,6 +1844,7 @@ __setupGpuPreAggGroupByBufferOne(kern_context *kcxt,
 
 			case KAGG_ACTION__PMAX_INT32:
 			case KAGG_ACTION__PMAX_INT64:
+			case KAGG_ACTION__PMAX_CASH:
 				{
 					kagg_state__pminmax_int64_packed *r =
 						(kagg_state__pminmax_int64_packed *)pos;
@@ -1638,6 +1879,7 @@ __setupGpuPreAggGroupByBufferOne(kern_context *kcxt,
 
 			case KAGG_ACTION__PSUM_INT:
 			case KAGG_ACTION__PAVG_INT:
+			case KAGG_ACTION__PSUM_CASH:
 				memset(pos, 0, sizeof(kagg_state__psum_int_packed));
 				SET_VARSIZE(pos, sizeof(kagg_state__psum_int_packed));
 				pos += sizeof(kagg_state__psum_int_packed);
@@ -1753,6 +1995,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 
 			case KAGG_ACTION__PMIN_INT32:
 			case KAGG_ACTION__PMIN_INT64:
+			case KAGG_ACTION__PMIN_CASH:
 				{
 					const kagg_state__pminmax_int64_packed *s =
 						(const kagg_state__pminmax_int64_packed *)pos;
@@ -1769,6 +2012,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 
 			case KAGG_ACTION__PMAX_INT32:
 			case KAGG_ACTION__PMAX_INT64:
+			case KAGG_ACTION__PMAX_CASH:
 				{
 					const kagg_state__pminmax_int64_packed *s =
 						(const kagg_state__pminmax_int64_packed *)pos;
@@ -1815,6 +2059,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 
 			case KAGG_ACTION__PSUM_INT:
 			case KAGG_ACTION__PAVG_INT:
+			case KAGG_ACTION__PSUM_CASH:
 				{
 					const kagg_state__psum_int_packed *s =
 						(const kagg_state__psum_int_packed *)pos;

@@ -2164,8 +2164,9 @@ codegen_relabel_expression(codegen_context *context,
 			   format_type_be(type_oid));
 	if (dtype->type_code != type_code)
 		__Elog("device type '%s' -> '%s' is not binary convertible",
-			   format_type_be(relabel->resulttype),
-			   format_type_be(type_oid));
+			   format_type_be(type_oid),
+			   format_type_be(relabel->resulttype));
+
 	return codegen_expression_walker(context, buf, curr_depth, relabel->arg);
 }
 
@@ -4260,6 +4261,12 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
+			case KAGG_ACTION__PMIN_CASH:
+				appendStringInfo(buf, "pmin::cash[slot=%d, expr='%s']",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
 			case KAGG_ACTION__PMAX_INT32:
 				appendStringInfo(buf, "pmax::int32[slot=%d, expr='%s']",
 								 desc->arg0_slot_id,
@@ -4278,8 +4285,20 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
+			case KAGG_ACTION__PMAX_CASH:
+				appendStringInfo(buf, "pmax::cash[slot=%d, expr='%s']",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
 			case KAGG_ACTION__PSUM_INT:
 				appendStringInfo(buf, "psum::int[slot=%d, expr='%s']",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
+			case KAGG_ACTION__PSUM_CASH:
+				appendStringInfo(buf, "psum::cash[slot=%d, expr='%s']",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
