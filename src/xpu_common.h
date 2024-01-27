@@ -193,16 +193,35 @@ __runtime_file_name(const char *path)
 #define __FILE_NAME__	__runtime_file_name(__FILE__)
 #endif
 
-#ifdef __CUDACC__
+#ifdef __cplusplus
 template <typename T>
 INLINE_FUNCTION(T)
 __Fetch(const T *ptr)
 {
 	T	temp;
 
+	if ((sizeof(T) & (sizeof(T)-1)) == 0 &&
+		(((uintptr_t)ptr) & (sizeof(T)-1)) == 0)
+	{
+		return *ptr;
+	}
 	memcpy(&temp, ptr, sizeof(T));
-
 	return temp;
+}
+
+template <typename T>
+INLINE_FUNCTION(void)
+__FetchStore(T &dest, const T *ptr)
+{
+	if ((sizeof(T) & (sizeof(T)-1)) == 0 &&
+		(((uintptr_t)ptr) & (sizeof(T)-1)) == 0)
+	{
+		dest = *ptr;
+	}
+	else
+	{
+		memcpy(&dest, ptr, sizeof(T));
+	}
 }
 
 template <typename T>
@@ -212,8 +231,9 @@ __volatileRead(const volatile T *ptr)
 	return *ptr;
 }
 
-#else
+#else	/* __cplusplus */
 #define __Fetch(PTR)			(*(PTR))
+#define __FetchStore(DEST,PTR)	do { (DEST) = *(PTR); } while(0)
 #define __volatileRead(PTR)		(*(PTR))
 #endif
 
