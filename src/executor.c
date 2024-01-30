@@ -745,7 +745,6 @@ static void
 pgstromTaskStateResetScan(pgstromTaskState *pts)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	TableScanDesc scan = pts->css.ss.ss_currentScanDesc;
 	int		num_devs = 0;
 
 	/*
@@ -766,13 +765,22 @@ pgstromTaskStateResetScan(pgstromTaskState *pts)
 	pg_atomic_write_u32(pts->rjoin_exit_count, 0);
 	for (int i=0; i < num_devs; i++)
 		pg_atomic_write_u32(pts->rjoin_devs_count + i, 0);
-	if (ps_state->ss_handle == DSM_HANDLE_INVALID)
+	if (pts->arrow_state)
+	{
+		pgstromArrowFdwExecReset(pts->arrow_state);
+	}
+	else if (ps_state->ss_handle == DSM_HANDLE_INVALID)
+	{
+		TableScanDesc scan = pts->css.ss.ss_currentScanDesc;
+
 		table_rescan(scan, NULL);
+	}
 	else
 	{
 		Relation	rel = pts->css.ss.ss_currentRelation;
 		ParallelTableScanDesc pscan = (ParallelTableScanDesc)
 			((char *)ps_state + ps_state->parallel_scan_desc_offset);
+
 		table_parallelscan_reinitialize(rel, pscan);
 	}
 }
