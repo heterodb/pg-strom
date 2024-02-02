@@ -1,0 +1,308 @@
+--
+-- test for mathematical / trigonometric functions
+--
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_dfunc_math_temp CASCADE;
+CREATE SCHEMA regtest_dfunc_math_temp;
+RESET client_min_messages;
+SET search_path = regtest_dfunc_math_temp,public;
+CREATE TABLE rt_data (
+  id   int,
+  a    float8,   -- values between -1.0 and 1.0
+  b    float8,   -- values between -10.0 and 10.0
+  c    float8,   -- values between -100.0 and 100.0
+  d    float8,   -- values between -1000.0 and 1000.0
+  e    float2,
+  f    float4,
+  r    float8,   -- radian for trigonometric functions
+  x    int2,
+  y    int4,
+  z    int8
+);
+SELECT pgstrom.random_setseed(20190610);
+ random_setseed 
+----------------
+ 
+(1 row)
+
+INSERT INTO rt_data (
+  SELECT x, pgstrom.random_float(1, -1.0, 1.0),
+            pgstrom.random_float(1, -10.0, 10.0),
+            pgstrom.random_float(1, -100.0, 100.0),
+            pgstrom.random_float(1, -1000.0, 1000.0),
+            pgstrom.random_float(1, -1000.0, 1000.0),	-- float2
+            pgstrom.random_float(1, -1000.0, 1000.0),	-- float4
+			pgstrom.random_float(1, -2 * pi(), 2 * pi()), -- radian
+            pgstrom.random_int(1, -32000, 32000),		-- int2
+            pgstrom.random_int(1, -32000, 32000),		-- int4
+            pgstrom.random_int(1, -32000, 32000)		-- int8
+    FROM generate_series(1,2000) x);
+ALTER TABLE rt_data ADD p int1;
+UPDATE rt_data SET p=(id%255-127);
+VACUUM ANALYZE;
+-- force to use GpuScan, instead of SeqScan
+SET enable_seqscan = off;
+-- not to print kernel source code
+SET pg_strom.debug_kernel_source = off;
+-- PG12 changed default of extra_float_digits, so it affects to number of
+-- digits of float values.
+SET extra_float_digits = 1;
+-- absolute values
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, abs(e) f2, abs(f) f4, abs(a) f8, abs(x) i2, abs(y) i4, abs(z) i8, abs(p) ii
+  INTO test01g
+  FROM rt_data
+ WHERE c BETWEEN -80.0 AND 80.0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                     QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
+   Output: id, (abs(e)), (abs(f)), (abs(a)), (abs(x)), (abs(y)), (abs(z)), (abs((p)::double precision))
+   GPU Projection: id, abs(e), abs(f), abs(a), abs(x), abs(y), abs(z), abs((p)::double precision)
+   GPU Scan Quals: ((c >= '-80'::double precision) AND (c <= '80'::double precision)) [rows: 2000 -> 1588]
+   KVars-Slot: <slot=0, type='float8', expr='c'>, <slot=1, type='int4', expr='id'>, <slot=2, type='float2', expr='abs(e)'>, <slot=3, type='float2', expr='e'>, <slot=4, type='float4', expr='abs(f)'>, <slot=5, type='float4', expr='f'>, <slot=6, type='float8', expr='abs(a)'>, <slot=7, type='float8', expr='a'>, <slot=8, type='int2', expr='abs(x)'>, <slot=9, type='int2', expr='x'>, <slot=10, type='int4', expr='abs(y)'>, <slot=11, type='int4', expr='y'>, <slot=12, type='int8', expr='abs(z)'>, <slot=13, type='int8', expr='z'>, <slot=14, type='float8', expr='abs((p)::double precision)'>, <slot=15, type='int1', expr='p'>
+   KVecs-Buffer: nbytes: 102400, ndims: 2, items=[kvec0=<0x0000-47ff, type='float8', expr='c'>, kvec1=<0x4800-6fff, type='int4', expr='id'>, kvec2=<0x7000-87ff, type='float2', expr='e'>, kvec3=<0x8800-afff, type='float4', expr='f'>, kvec4=<0xb000-f7ff, type='float8', expr='a'>, kvec5=<0xf800-10fff, type='int2', expr='x'>, kvec6=<0x11000-137ff, type='int4', expr='y'>, kvec7=<0x13800-17fff, type='int8', expr='z'>, kvec8=<0x18000-18fff, type='int1', expr='p'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=7, type='float8' resno=2(a)>, <slot=0, type='float8' resno=4(c)>, <slot=3, type='float2' resno=6(e)>, <slot=5, type='float4' resno=7(f)>, <slot=9, type='int2' resno=9(x)>, <slot=11, type='int4' resno=10(y)>, <slot=13, type='int8' resno=11(z)>, <slot=15, type='int1' resno=12(p)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x4800-6fff, type='int4', expr='id'>, <slot=3, offset=0x7000-87ff, type='float2', expr='e'>, <slot=5, offset=0x8800-afff, type='float4', expr='f'>, <slot=7, offset=0xb000-f7ff, type='float8', expr='a'>, <slot=9, offset=0xf800-10fff, type='int2', expr='x'>, <slot=11, offset=0x11000-137ff, type='int4', expr='y'>, <slot=13, offset=0x13800-17fff, type='int8', expr='z'>, <slot=15, offset=0x18000-18fff, type='int1', expr='p'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float8ge args=[{Var(float8): slot=0, expr='c'}, {Const(float8): value='-80'}]}, {Func(bool)::float8le args=[{Var(float8): slot=0, expr='c'}, {Const(float8): value='80'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,4,6,8,10,12,14> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x4800-7000, expr='id'}}, {SaveExpr: <slot=2, type='float2'> arg={Func(float2)::abs arg={Var(float2): kvec=0x7000-8800, expr='e'}}}, {SaveExpr: <slot=4, type='float4'> arg={Func(float4)::abs arg={Var(float4): kvec=0x8800-b000, expr='f'}}}, {SaveExpr: <slot=6, type='float8'> arg={Func(float8)::abs arg={Var(float8): kvec=0xb000-f800, expr='a'}}}, {SaveExpr: <slot=8, type='int2'> arg={Func(int2)::abs arg={Var(int2): kvec=0xf800-11000, expr='x'}}}, {SaveExpr: <slot=10, type='int4'> arg={Func(int4)::abs arg={Var(int4): kvec=0x11000-13800, expr='y'}}}, {SaveExpr: <slot=12, type='int8'> arg={Func(int8)::abs arg={Var(int8): kvec=0x13800-18000, expr='z'}}}, {SaveExpr: <slot=14, type='float8'> arg={Func(float8)::abs arg={Func(float8)::float8 arg={Var(int1): kvec=0x18000-19000, expr='p'}}}}]}
+(10 rows)
+
+SELECT id, abs(e) f2, abs(f) f4, abs(a) f8, abs(x) i2, abs(y) i4, abs(z) i8, abs(p) ii
+  INTO test01g
+  FROM rt_data
+ WHERE c BETWEEN -80.0 AND 80.0;
+SET pg_strom.enabled = off;
+SELECT id, abs(e) f2, abs(f) f4, abs(a) f8, abs(x) i2, abs(y) i4, abs(z) i8, abs(p) ii
+  INTO test01p
+  FROM rt_data
+ WHERE c BETWEEN -80.0 AND 80.0;
+(SELECT * FROM test01g EXCEPT ALL SELECT * FROM test01p) order by id;
+ id | f2 | f4 | f8 | i2 | i4 | i8 | ii 
+----+----+----+----+----+----+----+----
+(0 rows)
+
+(SELECT * FROM test01p EXCEPT ALL SELECT * FROM test01g) order by id;
+ id | f2 | f4 | f8 | i2 | i4 | i8 | ii 
+----+----+----+----+----+----+----+----
+(0 rows)
+
+-- mathmatical functions
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, round(b), dround(c),
+           ceil(d), ceiling(d),
+           floor(d), trunc(c), dtrunc(d)
+  INTO test02g
+  FROM rt_data
+ WHERE c BETWEEN -40 AND 120;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                     QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
+   Output: id, (round(b)), (dround(c)), (ceil(d)), (ceiling(d)), (floor(d)), (trunc(c)), (dtrunc(d))
+   GPU Projection: id, round(b), dround(c), ceil(d), ceiling(d), floor(d), trunc(c), dtrunc(d)
+   GPU Scan Quals: ((c >= '-40'::double precision) AND (c <= '120'::double precision)) [rows: 2000 -> 1417]
+   KVars-Slot: <slot=0, type='float8', expr='c'>, <slot=1, type='int4', expr='id'>, <slot=2, type='float8', expr='round(b)'>, <slot=3, type='float8', expr='b'>, <slot=4, type='float8', expr='dround(c)'>, <slot=5, type='float8', expr='ceil(d)'>, <slot=6, type='float8', expr='d'>, <slot=7, type='float8', expr='ceiling(d)'>, <slot=8, type='float8', expr='floor(d)'>, <slot=9, type='float8', expr='trunc(c)'>, <slot=10, type='float8', expr='dtrunc(d)'>
+   KVecs-Buffer: nbytes: 65536, ndims: 2, items=[kvec0=<0x0000-47ff, type='float8', expr='c'>, kvec1=<0x4800-6fff, type='int4', expr='id'>, kvec2=<0x7000-b7ff, type='float8', expr='b'>, kvec3=<0xb800-ffff, type='float8', expr='d'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='float8' resno=3(b)>, <slot=0, type='float8' resno=4(c)>, <slot=6, type='float8' resno=5(d)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-47ff, type='float8', expr='c'>, <slot=1, offset=0x4800-6fff, type='int4', expr='id'>, <slot=3, offset=0x7000-b7ff, type='float8', expr='b'>, <slot=6, offset=0xb800-ffff, type='float8', expr='d'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float8ge args=[{Var(float8): slot=0, expr='c'}, {Const(float8): value='-40'}]}, {Func(bool)::float8le args=[{Var(float8): slot=0, expr='c'}, {Const(float8): value='120'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,4,5,7,8,9,10> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x4800-7000, expr='id'}}, {SaveExpr: <slot=2, type='float8'> arg={Func(float8)::round arg={Var(float8): kvec=0x7000-b800, expr='b'}}}, {SaveExpr: <slot=4, type='float8'> arg={Func(float8)::round arg={Var(float8): kvec=0x0000-4800, expr='c'}}}, {SaveExpr: <slot=5, type='float8'> arg={Func(float8)::ceil arg={Var(float8): kvec=0xb800-10000, expr='d'}}}, {SaveExpr: <slot=7, type='float8'> arg={Func(float8)::ceiling arg={Var(float8): kvec=0xb800-10000, expr='d'}}}, {SaveExpr: <slot=8, type='float8'> arg={Func(float8)::floor arg={Var(float8): kvec=0xb800-10000, expr='d'}}}, {SaveExpr: <slot=9, type='float8'> arg={Func(float8)::trunc arg={Var(float8): kvec=0x0000-4800, expr='c'}}}, {SaveExpr: <slot=10, type='float8'> arg={Func(float8)::trunc arg={Var(float8): kvec=0xb800-10000, expr='d'}}}]}
+(10 rows)
+
+SELECT id, round(b), dround(c),
+           ceil(d), ceiling(d),
+           floor(d), trunc(c), dtrunc(d)
+  INTO test02g
+  FROM rt_data
+ WHERE c BETWEEN -40 AND 120;
+SET pg_strom.enabled = off;
+SELECT id, round(b), dround(c),
+           ceil(d), ceiling(d),
+           floor(d), trunc(c), dtrunc(d)
+  INTO test02p
+  FROM rt_data
+ WHERE c BETWEEN -40 AND 120;
+(SELECT * FROM test02g EXCEPT ALL SELECT * FROM test02p) order by id;
+ id | round | dround | ceil | ceiling | floor | trunc | dtrunc 
+----+-------+--------+------+---------+-------+-------+--------
+(0 rows)
+
+(SELECT * FROM test02p EXCEPT ALL SELECT * FROM test02g) order by id;
+ id | round | dround | ceil | ceiling | floor | trunc | dtrunc 
+----+-------+--------+------+---------+-------+-------+--------
+(0 rows)
+
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, exp(a), dexp(b), ln(@c), dlog1(@d), log(@c), dlog10(@d),
+           power(@b, a), pow(@c, a), dpow(@d, a)
+  INTO test03g
+  FROM rt_data
+ WHERE c > 0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
+   Output: id, (exp(a)), (dexp(b)), (ln((@ c))), (dlog1((@ d))), (log((@ c))), (dlog10((@ d))), (power((@ b), a)), (pow((@ c), a)), (dpow((@ d), a))
+   GPU Projection: id, exp(a), dexp(b), ln((@ c)), dlog1((@ d)), log((@ c)), dlog10((@ d)), power((@ b), a), pow((@ c), a), dpow((@ d), a)
+   GPU Scan Quals: (c > '0'::double precision) [rows: 2000 -> 1009]
+   KVars-Slot: <slot=0, type='float8', expr='c'>, <slot=1, type='int4', expr='id'>, <slot=2, type='float8', expr='exp(a)'>, <slot=3, type='float8', expr='a'>, <slot=4, type='float8', expr='dexp(b)'>, <slot=5, type='float8', expr='b'>, <slot=6, type='float8', expr='ln((@ c))'>, <slot=7, type='float8', expr='dlog1((@ d))'>, <slot=8, type='float8', expr='d'>, <slot=9, type='float8', expr='log((@ c))'>, <slot=10, type='float8', expr='dlog10((@ d))'>, <slot=11, type='float8', expr='power((@ b), a)'>, <slot=12, type='float8', expr='pow((@ c), a)'>, <slot=13, type='float8', expr='dpow((@ d), a)'>
+   KVecs-Buffer: nbytes: 83968, ndims: 2, items=[kvec0=<0x0000-47ff, type='float8', expr='c'>, kvec1=<0x4800-6fff, type='int4', expr='id'>, kvec2=<0x7000-b7ff, type='float8', expr='a'>, kvec3=<0xb800-ffff, type='float8', expr='b'>, kvec4=<0x10000-147ff, type='float8', expr='d'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='float8' resno=2(a)>, <slot=5, type='float8' resno=3(b)>, <slot=0, type='float8' resno=4(c)>, <slot=8, type='float8' resno=5(d)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-47ff, type='float8', expr='c'>, <slot=1, offset=0x4800-6fff, type='int4', expr='id'>, <slot=3, offset=0x7000-b7ff, type='float8', expr='a'>, <slot=5, offset=0xb800-ffff, type='float8', expr='b'>, <slot=8, offset=0x10000-147ff, type='float8', expr='d'>]}}}
+   Scan Quals OpCode: {Func(bool)::float8gt args=[{Var(float8): slot=0, expr='c'}, {Const(float8): value='0'}]}
+   Projection OpCode: {Projection: layout=<1,2,4,6,7,9,10,11,12,13> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x4800-7000, expr='id'}}, {SaveExpr: <slot=2, type='float8'> arg={Func(float8)::exp arg={Var(float8): kvec=0x7000-b800, expr='a'}}}, {SaveExpr: <slot=4, type='float8'> arg={Func(float8)::dexp arg={Var(float8): kvec=0xb800-10000, expr='b'}}}, {SaveExpr: <slot=6, type='float8'> arg={Func(float8)::ln arg={Func(float8)::float8abs arg={Var(float8): kvec=0x0000-4800, expr='c'}}}}, {SaveExpr: <slot=7, type='float8'> arg={Func(float8)::dlog1 arg={Func(float8)::float8abs arg={Var(float8): kvec=0x10000-14800, expr='d'}}}}, {SaveExpr: <slot=9, type='float8'> arg={Func(float8)::log arg={Func(float8)::float8abs arg={Var(float8): kvec=0x0000-4800, expr='c'}}}}, {SaveExpr: <slot=10, type='float8'> arg={Func(float8)::log arg={Func(float8)::float8abs arg={Var(float8): kvec=0x10000-14800, expr='d'}}}}, {SaveExpr: <slot=11, type='float8'> arg={Func(float8)::power args=[{Func(float8)::float8abs arg={Var(float8): kvec=0xb800-10000, expr='b'}}, {Var(float8): kvec=0x7000-b800, expr='a'}]}}, {SaveExpr: <slot=12, type='float8'> arg={Func(float8)::power args=[{Func(float8)::float8abs arg={Var(float8): kvec=0x0000-4800, expr='c'}}, {Var(float8): kvec=0x7000-b800, expr='a'}]}}, {SaveExpr: <slot=13, type='float8'> arg={Func(float8)::power args=[{Func(float8)::float8abs arg={Var(float8): kvec=0x10000-14800, expr='d'}}, {Var(float8): kvec=0x7000-b800, expr='a'}]}}]}
+(10 rows)
+
+SELECT id, exp(a), dexp(b), ln(@c), dlog1(@d), log(@c), dlog10(@d),
+           power(@b, a), pow(@c, a), dpow(@d, a)
+  INTO test03g
+  FROM rt_data
+ WHERE c > 0;
+SET pg_strom.enabled = off;
+SELECT id, exp(a), dexp(b), ln(@c), dlog1(@d), log(@c), dlog10(@d),
+           power(@b, a), pow(@c, a), dpow(@d, a)
+  INTO test03p
+  FROM rt_data
+ WHERE c > 0;
+SELECT g.*, p.*
+  FROM test03g g JOIN test03p p ON g.id = p.id
+ WHERE @(g.exp    - p.exp)    > 0.000001
+    OR @(g.dexp   - p.dexp)   > 0.000001
+    OR @(g.ln     - p.ln)     > 0.000001
+    OR @(g.dlog1  - p.dlog1)  > 0.000001
+    OR @(g.log    - p.log)    > 0.000001
+    OR @(g.dlog10 - p.dlog10) > 0.000001
+    OR @(g.power  - p.power)  > 0.000001
+    OR @(g.pow    - p.pow)    > 0.000001
+    OR @(g.dpow   - p.dpow)   > 0.000001;
+ id | exp | dexp | ln | dlog1 | log | dlog10 | power | pow | dpow | id | exp | dexp | ln | dlog1 | log | dlog10 | power | pow | dpow 
+----+-----+------+----+-------+-----+--------+-------+-----+------+----+-----+------+----+-------+-----+--------+-------+-----+------
+(0 rows)
+
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, sign(a), sqrt(@c), dsqrt(@d), cbrt(d), dcbrt(d)
+  INTO test04g
+  FROM rt_data
+ WHERE d < 0;
+                                                                                                                                                                                                                                                                                                                                                                               QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
+   Output: id, (sign(a)), (sqrt((@ c))), (dsqrt((@ d))), (cbrt(d)), (dcbrt(d))
+   GPU Projection: id, sign(a), sqrt((@ c)), dsqrt((@ d)), cbrt(d), dcbrt(d)
+   GPU Scan Quals: (d < '0'::double precision) [rows: 2000 -> 991]
+   KVars-Slot: <slot=0, type='float8', expr='d'>, <slot=1, type='int4', expr='id'>, <slot=2, type='float8', expr='sign(a)'>, <slot=3, type='float8', expr='a'>, <slot=4, type='float8', expr='sqrt((@ c))'>, <slot=5, type='float8', expr='c'>, <slot=6, type='float8', expr='dsqrt((@ d))'>, <slot=7, type='float8', expr='cbrt(d)'>, <slot=8, type='float8', expr='dcbrt(d)'>
+   KVecs-Buffer: nbytes: 65536, ndims: 2, items=[kvec0=<0x0000-47ff, type='float8', expr='d'>, kvec1=<0x4800-6fff, type='int4', expr='id'>, kvec2=<0x7000-b7ff, type='float8', expr='a'>, kvec3=<0xb800-ffff, type='float8', expr='c'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='float8' resno=2(a)>, <slot=5, type='float8' resno=4(c)>, <slot=0, type='float8' resno=5(d)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-47ff, type='float8', expr='d'>, <slot=1, offset=0x4800-6fff, type='int4', expr='id'>, <slot=3, offset=0x7000-b7ff, type='float8', expr='a'>, <slot=5, offset=0xb800-ffff, type='float8', expr='c'>]}}}
+   Scan Quals OpCode: {Func(bool)::float8lt args=[{Var(float8): slot=0, expr='d'}, {Const(float8): value='0'}]}
+   Projection OpCode: {Projection: layout=<1,2,4,6,7,8> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x4800-7000, expr='id'}}, {SaveExpr: <slot=2, type='float8'> arg={Func(float8)::sign arg={Var(float8): kvec=0x7000-b800, expr='a'}}}, {SaveExpr: <slot=4, type='float8'> arg={Func(float8)::sqrt arg={Func(float8)::float8abs arg={Var(float8): kvec=0xb800-10000, expr='c'}}}}, {SaveExpr: <slot=6, type='float8'> arg={Func(float8)::sqrt arg={Func(float8)::float8abs arg={Var(float8): kvec=0x0000-4800, expr='d'}}}}, {SaveExpr: <slot=7, type='float8'> arg={Func(float8)::cbrt arg={Var(float8): kvec=0x0000-4800, expr='d'}}}, {SaveExpr: <slot=8, type='float8'> arg={Func(float8)::dcbrt arg={Var(float8): kvec=0x0000-4800, expr='d'}}}]}
+(10 rows)
+
+SELECT id, sign(a), sqrt(@c), dsqrt(@d), cbrt(d), dcbrt(d)
+  INTO test04g
+  FROM rt_data
+ WHERE d < 0;
+SET pg_strom.enabled = off;
+SELECT id, sign(a), sqrt(@c), dsqrt(@d), cbrt(d), dcbrt(d)
+  INTO test04p
+  FROM rt_data
+ WHERE d < 0;
+SELECT g.*, p.*
+  FROM test04g g JOIN test04p p ON g.id = p.id
+ WHERE g.sign != p.sign
+    OR @(g.sqrt  - p.sqrt)  > 0.000001
+    OR @(g.dsqrt - p.dsqrt) > 0.000001
+    OR @(g.cbrt  - p.cbrt)  > 0.000001
+    OR @(g.dcbrt - p.dcbrt) > 0.000001;
+ id | sign | sqrt | dsqrt | cbrt | dcbrt | id | sign | sqrt | dsqrt | cbrt | dcbrt 
+----+------+------+-------+------+-------+----+------+------+-------+------+-------
+(0 rows)
+
+-- trigonometric function
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, pi(), degrees(r), radians(d), cos(r), cot(r), sin(r), tan(r)
+  INTO test05g
+  FROM rt_data
+ WHERE r > -360.0 AND r < 360.0;
+                                                                                                                                                                                                                                                                                                                                                                                                        QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                         
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
+   Output: id, '3.141592653589793'::double precision, (degrees(r)), (radians(d)), (cos(r)), (cot(r)), (sin(r)), (tan(r))
+   GPU Projection: id, degrees(r), radians(d), cos(r), cot(r), sin(r), tan(r)
+   GPU Scan Quals: ((r > '-360'::double precision) AND (r < '360'::double precision)) [rows: 2000 -> 1988]
+   KVars-Slot: <slot=0, type='float8', expr='r'>, <slot=1, type='int4', expr='id'>, <slot=2, type='float8', expr='degrees(r)'>, <slot=3, type='float8', expr='radians(d)'>, <slot=4, type='float8', expr='d'>, <slot=5, type='float8', expr='cos(r)'>, <slot=6, type='float8', expr='cot(r)'>, <slot=7, type='float8', expr='sin(r)'>, <slot=8, type='float8', expr='tan(r)'>
+   KVecs-Buffer: nbytes: 47104, ndims: 2, items=[kvec0=<0x0000-47ff, type='float8', expr='r'>, kvec1=<0x4800-6fff, type='int4', expr='id'>, kvec2=<0x7000-b7ff, type='float8', expr='d'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=4, type='float8' resno=5(d)>, <slot=0, type='float8' resno=8(r)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-47ff, type='float8', expr='r'>, <slot=1, offset=0x4800-6fff, type='int4', expr='id'>, <slot=4, offset=0x7000-b7ff, type='float8', expr='d'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float8gt args=[{Var(float8): slot=0, expr='r'}, {Const(float8): value='-360'}]}, {Func(bool)::float8lt args=[{Var(float8): slot=0, expr='r'}, {Const(float8): value='360'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,3,5,6,7,8> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x4800-7000, expr='id'}}, {SaveExpr: <slot=2, type='float8'> arg={Func(float8)::degrees arg={Var(float8): kvec=0x0000-4800, expr='r'}}}, {SaveExpr: <slot=3, type='float8'> arg={Func(float8)::radians arg={Var(float8): kvec=0x7000-b800, expr='d'}}}, {SaveExpr: <slot=5, type='float8'> arg={Func(float8)::cos arg={Var(float8): kvec=0x0000-4800, expr='r'}}}, {SaveExpr: <slot=6, type='float8'> arg={Func(float8)::cot arg={Var(float8): kvec=0x0000-4800, expr='r'}}}, {SaveExpr: <slot=7, type='float8'> arg={Func(float8)::sin arg={Var(float8): kvec=0x0000-4800, expr='r'}}}, {SaveExpr: <slot=8, type='float8'> arg={Func(float8)::tan arg={Var(float8): kvec=0x0000-4800, expr='r'}}}]}
+(10 rows)
+
+SELECT id, pi(), degrees(r), radians(d), cos(r), cot(r), sin(r), tan(r)
+  INTO test05g
+  FROM rt_data
+ WHERE r > -360.0 AND r < 360.0;
+SET pg_strom.enabled = off;
+SELECT id, pi(), degrees(r), radians(d), cos(r), cot(r), sin(r), tan(r)
+  INTO test05p
+  FROM rt_data
+ WHERE r > -360.0 AND r < 360.0;
+SELECT g.*, p.*
+  FROM test05g g JOIN test05p p ON g.id = p.id
+ WHERE g.pi != p.pi
+    OR @(g.degrees - p.degrees) > 0.000001
+    OR @(g.radians - p.radians) > 0.000001
+    OR @(g.cos     - p.cos)     > 0.000001
+    OR @(g.cot     - p.cot)     > 0.000001
+    OR @(g.sin     - p.sin)     > 0.000001
+    OR @(g.tan     - p.tan)     > 0.000001;
+ id | pi | degrees | radians | cos | cot | sin | tan | id | pi | degrees | radians | cos | cot | sin | tan 
+----+----+---------+---------+-----+-----+-----+-----+----+----+---------+---------+-----+-----+-----+-----
+(0 rows)
+
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, acos(a), asin(a), atan(b), atan2(d,f)
+  INTO test06g
+  FROM rt_data
+ WHERE r > -360.0 AND r < 360.0;
+                                                                                                                                                                                                                                                                                                                                       QUERY PLAN                                                                                                                                                                                                                                                                                                                                        
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
+   Output: id, (acos(a)), (asin(a)), (atan(b)), atan2(d, ((f)::double precision))
+   GPU Projection: id, acos(a), asin(a), atan(b), d, (f)::double precision
+   GPU Scan Quals: ((r > '-360'::double precision) AND (r < '360'::double precision)) [rows: 2000 -> 1988]
+   KVars-Slot: <slot=0, type='float8', expr='r'>, <slot=1, type='int4', expr='id'>, <slot=2, type='float8', expr='acos(a)'>, <slot=3, type='float8', expr='a'>, <slot=4, type='float8', expr='asin(a)'>, <slot=5, type='float8', expr='atan(b)'>, <slot=6, type='float8', expr='b'>, <slot=7, type='float8', expr='d'>, <slot=8, type='float8', expr='f'>, <slot=9, type='float4', expr='f'>
+   KVecs-Buffer: nbytes: 94208, ndims: 2, items=[kvec0=<0x0000-47ff, type='float8', expr='r'>, kvec1=<0x4800-6fff, type='int4', expr='id'>, kvec2=<0x7000-b7ff, type='float8', expr='a'>, kvec3=<0xb800-ffff, type='float8', expr='b'>, kvec4=<0x10000-147ff, type='float8', expr='d'>, kvec5=<0x14800-16fff, type='float4', expr='f'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='float8' resno=2(a)>, <slot=6, type='float8' resno=3(b)>, <slot=7, type='float8' resno=5(d)>, <slot=9, type='float4' resno=7(f)>, <slot=0, type='float8' resno=8(r)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x4800-6fff, type='int4', expr='id'>, <slot=3, offset=0x7000-b7ff, type='float8', expr='a'>, <slot=6, offset=0xb800-ffff, type='float8', expr='b'>, <slot=7, offset=0x10000-147ff, type='float8', expr='d'>, <slot=9, offset=0x14800-16fff, type='float4', expr='f'>]}}}
+   Scan Quals OpCode: {Bool::AND args=[{Func(bool)::float8gt args=[{Var(float8): slot=0, expr='r'}, {Const(float8): value='-360'}]}, {Func(bool)::float8lt args=[{Var(float8): slot=0, expr='r'}, {Const(float8): value='360'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,4,5,7,8> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x4800-7000, expr='id'}}, {SaveExpr: <slot=2, type='float8'> arg={Func(float8)::acos arg={Var(float8): kvec=0x7000-b800, expr='a'}}}, {SaveExpr: <slot=4, type='float8'> arg={Func(float8)::asin arg={Var(float8): kvec=0x7000-b800, expr='a'}}}, {SaveExpr: <slot=5, type='float8'> arg={Func(float8)::atan arg={Var(float8): kvec=0xb800-10000, expr='b'}}}, {SaveExpr: <slot=7, type='float8'> arg={Var(float8): kvec=0x10000-14800, expr='d'}}, {SaveExpr: <slot=8, type='float8'> arg={Func(float8)::float8 arg={Var(float4): kvec=0x14800-17000, expr='f'}}}]}
+(10 rows)
+
+SELECT id, acos(a), asin(a), atan(b), atan2(d,f)
+  INTO test06g
+  FROM rt_data
+ WHERE r > -360.0 AND r < 360.0;
+SET pg_strom.enabled = off;
+SELECT id, acos(a), asin(a), atan(b), atan2(d,f)
+  INTO test06p
+  FROM rt_data
+ WHERE r > -360.0 AND r < 360.0;
+SELECT g.*, p.*
+  FROM test06g g JOIN test06p p ON g.id = p.id
+ WHERE @(g.acos  - p.acos)  > 0.000001
+    OR @(g.asin  - p.asin)  > 0.000001
+    OR @(g.atan  - p.atan)  > 0.000001
+    OR @(g.atan2 - p.atan2) > 0.000001;
+ id | acos | asin | atan | atan2 | id | acos | asin | atan | atan2 
+----+------+------+------+-------+----+------+------+------+-------
+(0 rows)
+
+-- cleanup temporary resource
+SET client_min_messages = error;
+DROP SCHEMA regtest_dfunc_math_temp CASCADE;
