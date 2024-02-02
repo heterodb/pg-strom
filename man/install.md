@@ -20,7 +20,7 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Stromを実行するには少なくとも一個のGPUデバイスがシステム上に必要です。これらはCUDA Toolkitでサポートされており、computing capability が6.0以降のモデル（Pascal世代以降）である必要があります。
     - [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models)を参考にGPUを選定してください。
 - **Operating System**
-    - PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはCentOSのバージョン8.xシリーズです。
+    - PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 8.xです。
     - GPUダイレクトSQL（cuFileドライバ）を利用するには、CUDA Toolkitに含まれるnvidia-fsドライバと、Mellanox OFED (OpenFabrics Enterprise Distribution) ドライバのインストールが必要です。
 - **PostgreSQL**
     - PG-Strom v5.0の実行にはPostgreSQLバージョン15以降が必要です。
@@ -38,7 +38,7 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Strom requires at least one GPU device on the system, which is supported by CUDA Toolkit, has computing capability 6.0 (Pascal generation) or later;
     - Please check at [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models) for GPU selection.
 - **Operating System**
-    - PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or CentOS version 8.x series.
+    - PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or Rocky Linux version 8.x series.
     - GPU Direct SQL (with cuFile driver) needs the `nvidia-fs` driver distributed with CUDA Toolkit, and Mellanox OFED (OpenFabrics Enterprise Distribution) driver.
 - **PostgreSQL**
     - PG-Strom v5.0 requires PostgreSQL v15 or later.
@@ -47,46 +47,6 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Strom requires CUDA Toolkit version 12.2 or later.
     - Some of CUDA Driver APIs used by PG-Strom internally are not included in the former versions.
 }
-
-<!--
-もうこの記述は必要ないはず
-
-@ja:### GPUダイレクトSQL実行ドライバの選択
-@en:### Selection of GPU Direct SQL Execiton drivers
-
-@ja{
-インストール作業の前に、GPUダイレクトSQLのソフトウェアスタックを検討してください。
-
-[GPUダイレクトSQL](ssd2gpu.md)を実行するために必要なLinux kernelドライバには以下の２種類があります。
-
-- HeteroDB NVME-Strom
-    - 2018年にリリースされ、PG-Strom v2.0以降でサポートされているHeteroDB社製の専用ドライバ。
-    - RHEL7.x/RHEL8.xに対応し、GPUDirect RDMA機構を用いてローカルのNVME-SSDからGPUへの直接データ読み出しが可能です。
-- NVIDIA GPUDirect Storage
-    - NVIDIA社が開発している、NVME/NVME-oFデバイスからGPUへ直接データ読み出しを可能にするドライバで、2021年5月現在、パブリックベータ版が提供されています。
-    - PG-Strom v3.0で実験的に対応しており、RHEL8.3/8.4、およびUbuntu 18.04/20.04に対応しています。
-    - HeteroDB社を含む複数のパートナー企業が対応を表明しており、共有ファイルシステムやNVME-oFを通じたSDS(Software Defined Storage)デバイスからの直接読み出しも可能です。
-
-どちらのドライバを使用しても、性能面での差異はほとんどありません。
-しかし、GPUDirect Storageドライバの方が、対応するストレージやファイルシステムの種類といった周辺エコシステムや、ソフトウェア品質管理体制において優位性があると考えられるため、RHEL7/CentOS7でPG-Stromを利用する場合を除き、今後はGPUDirect Storageドライバの利用を推奨します。
-}
-@en{
-Please consider the software stack for GPUDirect SQL, prior to the installation.
-
-There are two individual Linux kernel driver for [GPUDirect SQL](ssd2gpu.md) execution, as follows:
-
-- HeteroDB NVME-Strom
-    - The dedicated Linux kernel module, released at 2018, supported since PG-Strom v2.0.
-    - It supports RHEL7.x/RHEL8.x, enables direct read from local NVME-SSDs to GPU using GPUDirect RDMA.
-- NVIDIA GPUDirect Storage
-    - The general purpose driver stack, has been developed by NVIDIA, to support direct read from NVME/NVME-oF devices to GPU. At May-2021, its public beta revision has been published.
-    - PG-Strom v3.0 experimentally supports the GPUDirect Storage, that supports RHEL8.3/8.4 and Ubuntu 18.04/20.04.
-    - Some partners, including HeteroDB, expressed to support this feature. It also allows direct read from shared-filesystems or SDS(Software Defined Storage) devices over NVME-oF protocols.
-
-Here is little performance differences on the above two drivers.
-On the other hands, GPUDirect Storage has more variations of the supported storages and filesystems, and more mature software QA process, expect for the case of PG-Strom on RHEL7/CentOS7, we will recommend to use GPUDirect Storage driver.
-}
--->
 
 @ja:##インストール手順
 @en:##Steps to Install
@@ -140,7 +100,7 @@ In case of Red Hat Enterprise Linux 8.x series, choose "Minimal installation" as
 - Development Tools
 }
 
-![RHEL8/CentOS8 Package Selection](./img/centos8_package_selection.png)
+![RHEL8/Rocky8 Package Selection](./img/centos8_package_selection.png)
 
 @ja{
 サーバーへのOSインストール後、サードパーティーのパッケージをインストールするために、パッケージリポジトリの設定を行います。
@@ -266,28 +226,26 @@ Linux kernel module must be rebuilt according to version-up of Linux kernel, so 
 }
 @ja{
 EPELリポジトリの定義は `epel-release` パッケージにより提供され、[Fedora Project](https://docs.fedoraproject.org/en-US/epel/#_quickstart)のサイトから入手する事ができます。
-CentOS8では`dnf`コマンドを用いてのインストールも可能です。
 }
 @en{
 `epel-release` package provides the repository definition of EPEL. You can obtain the package from the [Fedora Project](https://docs.fedoraproject.org/en-US/epel/#_quickstart) website.
-For CentOS8, it can be installed using `dnf` command.
 }
 
 ```
 -- For RHEL8
 # dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
 
--- For CentOS8
+-- For Rocky8
 # dnf install epel-release
 ```
 #### Red Hat CodeReady Linux Builder
 @ja{
-MOFED（Mellanox OpenFabrics Enterprise Distribution）ドライバのインストールには、Red Hat Enterprise Linux 8.xの標準インストール構成では無効化されている Red Hat CodeReady Linux Builder リポジトリを有効化する必要があります。CentOSにおいては、このリポジトリは PowerTools と呼ばれています。
+MOFED（Mellanox OpenFabrics Enterprise Distribution）ドライバのインストールには、Red Hat Enterprise Linux 8.xの標準インストール構成では無効化されている Red Hat CodeReady Linux Builder リポジトリを有効化する必要があります。Rokey Linuxにおいては、このリポジトリは PowerTools と呼ばれています。
 
 このリポジトリを有効化するには、以下のコマンドを実行します。
 }
 @en{
-Installation of MOFED (Mellanox OpenFabrics Enterprise Distribution) driver requires the ***Red Hat CodeReady Linux Builder*** repository which is disabled in the default configuration of Red Hat Enterprise Linux 8.x installation. In CentOS, it is called ***PowerTools***
+Installation of MOFED (Mellanox OpenFabrics Enterprise Distribution) driver requires the ***Red Hat CodeReady Linux Builder*** repository which is disabled in the default configuration of Red Hat Enterprise Linux 8.x installation. In Rocky Linux, it is called ***PowerTools***
 
 To enable this repository, run the command below:
 }
@@ -296,7 +254,7 @@ To enable this repository, run the command below:
 -- For RHEL8
 # subscription-manager repos --enable codeready-builder-for-rhel-8-x86_64-rpms
 
--- For CentOS8
+-- For Rocky8
 # dnf config-manager --set-enabled powertools
 ```
 
@@ -773,10 +731,10 @@ We don't introduce the installation steps from the source because there are many
 }
 
 @ja{
-Linuxディストリビューションの配布するパッケージにもPostgreSQLは含まれていますが、必ずしも最新ではなく、PG-Stromの対応バージョンよりも古いものである事が多々あります。例えば、Red Hat Enterprise Linux 7.xやCentOS 7.xで配布されているPostgreSQLはv9.2.xですが、これはPostgreSQLコミュニティとして既にEOLとなっているバージョンです。
+Linuxディストリビューションの配布するパッケージにもPostgreSQLは含まれていますが、必ずしも最新ではなく、PG-Stromの対応バージョンよりも古いものである事が多々あります。例えば、Red Hat Enterprise Linux 7.xで配布されているPostgreSQLはv9.2.xですが、これはPostgreSQLコミュニティとして既にEOLとなっているバージョンです。
 }
 @en{
-PostgreSQL is also distributed in the packages of Linux distributions, however, it is not the latest one, and often older than the version which supports PG-Strom. For example, Red Hat Enterprise Linux 7.x or CentOS 7.x distributes PostgreSQL v9.2.x series. This version had been EOL by the PostgreSQL community.
+PostgreSQL is also distributed in the packages of Linux distributions, however, it is not the latest one, and often older than the version which supports PG-Strom. For example, Red Hat Enterprise Linux 7.x distributes PostgreSQL v9.2.x series. This version had been EOL by the PostgreSQL community.
 }
 @ja{
 PostgreSQL Global Development Groupは、最新のPostgreSQLおよび関連ソフトウェアの配布のためにyumリポジトリを提供しています。
@@ -807,7 +765,7 @@ Repository definitions are per PostgreSQL major version and Linux distribution. 
 
 例えばPostgreSQL v15を使用する場合、PG-Stromのインストールには `postgresql15-server`および`postgresql15-devel`パッケージが必要です。
 
-以下は、RHEL8/CentOS8においてPostgreSQL v15をインストールする手順の例です。
+以下は、RHEL8においてPostgreSQL v15をインストールする手順の例です。
 }
 @en{
 You can install PostgreSQL as following steps:
@@ -825,11 +783,11 @@ You can install PostgreSQL as following steps:
 
 @ja{
 !!! Note
-    Red Hat Enterprise Linux 8 および CentOS 8の場合、パッケージ名`postgresql`がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、`dnf -y module disable postgresql` コマンドを用いてディストリビューション標準の`postgresql`モジュールを無効化します。
+    Red Hat Enterprise Linux 8.x の場合、パッケージ名`postgresql`がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、`dnf -y module disable postgresql` コマンドを用いてディストリビューション標準の`postgresql`モジュールを無効化します。
 }
 @en{
 !!! Note
-    On the Red Hat Enterprise Linux 8 and CentOS 8, the package name `postgresql` conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the `postgresql` module by the distribution, using `dnf -y module disable postgresql`.
+    On the Red Hat Enterprise Linux 8.x, the package name `postgresql` conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the `postgresql` module by the distribution, using `dnf -y module disable postgresql`.
 }
 
 @ja{
@@ -1187,7 +1145,7 @@ The example below shows the command to install PostGIS v3.2 built for PostgreSQL
 -- For RHEL8
 # dnf install -y postgis32_15 --enablerepo=codeready-builder-for-rhel-8-x86_64-rpms
 
--- For CentOS8
+-- For Rocky8
 # dnf install -y postgis32_15 --enablerepo=powertools
 ```
 

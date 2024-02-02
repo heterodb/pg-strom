@@ -152,7 +152,7 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
 		result->expr_ops = &xpu_##NAME##_ops;							\
-		result->value = *((const BASETYPE *)addr);						\
+		__FetchStore(result->value, (const BASETYPE *)addr);			\
 		return true;													\
 	}																	\
 	STATIC_FUNCTION(bool)												\

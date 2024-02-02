@@ -208,7 +208,7 @@
 </ul>
 </li>
 <li><strong>Operating System</strong><ul>
-<li>PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはCentOSのバージョン8.xシリーズです。</li>
+<li>PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 8.xです。</li>
 <li>GPUダイレクトSQL（cuFileドライバ）を利用するには、CUDA Toolkitに含まれるnvidia-fsドライバと、Mellanox OFED (OpenFabrics Enterprise Distribution) ドライバのインストールが必要です。</li>
 </ul>
 </li>
@@ -223,30 +223,6 @@
 </ul>
 </li>
 </ul>
-<!--
-もうこの記述は必要ないはず
-
-### GPUダイレクトSQL実行ドライバの選択
-
-
-インストール作業の前に、GPUダイレクトSQLのソフトウェアスタックを検討してください。
-
-[GPUダイレクトSQL](ssd2gpu.md)を実行するために必要なLinux kernelドライバには以下の２種類があります。
-
-- HeteroDB NVME-Strom
-    - 2018年にリリースされ、PG-Strom v2.0以降でサポートされているHeteroDB社製の専用ドライバ。
-    - RHEL7.x/RHEL8.xに対応し、GPUDirect RDMA機構を用いてローカルのNVME-SSDからGPUへの直接データ読み出しが可能です。
-- NVIDIA GPUDirect Storage
-    - NVIDIA社が開発している、NVME/NVME-oFデバイスからGPUへ直接データ読み出しを可能にするドライバで、2021年5月現在、パブリックベータ版が提供されています。
-    - PG-Strom v3.0で実験的に対応しており、RHEL8.3/8.4、およびUbuntu 18.04/20.04に対応しています。
-    - HeteroDB社を含む複数のパートナー企業が対応を表明しており、共有ファイルシステムやNVME-oFを通じたSDS(Software Defined Storage)デバイスからの直接読み出しも可能です。
-
-どちらのドライバを使用しても、性能面での差異はほとんどありません。
-しかし、GPUDirect Storageドライバの方が、対応するストレージやファイルシステムの種類といった周辺エコシステムや、ソフトウェア品質管理体制において優位性があると考えられるため、RHEL7/CentOS7でPG-Stromを利用する場合を除き、今後はGPUDirect Storageドライバの利用を推奨します。
-
-
--->
-
 <h2 id="_3">インストール手順</h2>
 <p>一連のインストール手順は以下の通りとなります。</p>
 <ol>
@@ -269,7 +245,7 @@
 <ul>
 <li>開発ツール</li>
 </ul>
-<p><img alt="RHEL8/CentOS8 Package Selection" src="../img/centos8_package_selection.png" /></p>
+<p><img alt="RHEL8/Rocky8 Package Selection" src="../img/centos8_package_selection.png" /></p>
 <p>サーバーへのOSインストール後、サードパーティーのパッケージをインストールするために、パッケージリポジトリの設定を行います。</p>
 <p>なお、インストーラで「開発ツール」を選択しなかった場合、以下のコマンドでOSインストール後に追加インストールする事が可能です。</p>
 <pre><code># dnf groupinstall 'Development Tools'
@@ -313,21 +289,20 @@ $ sudo shutdown -r now
 これらのソフトウェアを入手するためにEPELパッケージ群のリポジトリ定義をyumシステムに追加する必要があります。</p>
 <p>EPELリポジトリから入手するパッケージの一つがDKMS(Dynamic Kernel Module Support)です。これは動作中のLinuxカーネルに適合したLinuxカーネルモジュールをオンデマンドでビルドするためのフレームワークで、NVIDIAのGPUデバイスドライバなど関連するカーネルモジュールが使用しています。
 Linuxカーネルモジュールは、Linuxカーネルのバージョンアップに追従して再ビルドが必要であるため、DKMSなしでのシステム運用は現実的ではありません。</p>
-<p>EPELリポジトリの定義は <code>epel-release</code> パッケージにより提供され、<a href="https://docs.fedoraproject.org/en-US/epel/#_quickstart">Fedora Project</a>のサイトから入手する事ができます。
-CentOS8では<code>dnf</code>コマンドを用いてのインストールも可能です。</p>
+<p>EPELリポジトリの定義は <code>epel-release</code> パッケージにより提供され、<a href="https://docs.fedoraproject.org/en-US/epel/#_quickstart">Fedora Project</a>のサイトから入手する事ができます。</p>
 <pre><code>-- For RHEL8
 # dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
 
--- For CentOS8
+-- For Rocky8
 # dnf install epel-release
 </code></pre>
 <h4 id="red-hat-codeready-linux-builder">Red Hat CodeReady Linux Builder</h4>
-<p>MOFED（Mellanox OpenFabrics Enterprise Distribution）ドライバのインストールには、Red Hat Enterprise Linux 8.xの標準インストール構成では無効化されている Red Hat CodeReady Linux Builder リポジトリを有効化する必要があります。CentOSにおいては、このリポジトリは PowerTools と呼ばれています。</p>
+<p>MOFED（Mellanox OpenFabrics Enterprise Distribution）ドライバのインストールには、Red Hat Enterprise Linux 8.xの標準インストール構成では無効化されている Red Hat CodeReady Linux Builder リポジトリを有効化する必要があります。Rokey Linuxにおいては、このリポジトリは PowerTools と呼ばれています。</p>
 <p>このリポジトリを有効化するには、以下のコマンドを実行します。</p>
 <pre><code>-- For RHEL8
 # subscription-manager repos --enable codeready-builder-for-rhel-8-x86_64-rpms
 
--- For CentOS8
+-- For Rocky8
 # dnf config-manager --set-enabled powertools
 </code></pre>
 <h3 id="heterodb-swdc">heterodb-swdcのインストール</h3>
@@ -551,7 +526,7 @@ GPU_UUID:GPU-a137b1df-53c9-197f-2801-f2dccaf9d42f
 <h2 id="postgresql">PostgreSQLのインストール</h2>
 <p>本節ではRPMによるPostgreSQLのインストールについて紹介します。
 ソースからのインストールに関しては既にドキュメントが数多く存在し、<code>./configure</code>スクリプトのオプションが多岐にわたる事から、ここでは紹介しません。</p>
-<p>Linuxディストリビューションの配布するパッケージにもPostgreSQLは含まれていますが、必ずしも最新ではなく、PG-Stromの対応バージョンよりも古いものである事が多々あります。例えば、Red Hat Enterprise Linux 7.xやCentOS 7.xで配布されているPostgreSQLはv9.2.xですが、これはPostgreSQLコミュニティとして既にEOLとなっているバージョンです。</p>
+<p>Linuxディストリビューションの配布するパッケージにもPostgreSQLは含まれていますが、必ずしも最新ではなく、PG-Stromの対応バージョンよりも古いものである事が多々あります。例えば、Red Hat Enterprise Linux 7.xで配布されているPostgreSQLはv9.2.xですが、これはPostgreSQLコミュニティとして既にEOLとなっているバージョンです。</p>
 <p>PostgreSQL Global Development Groupは、最新のPostgreSQLおよび関連ソフトウェアの配布のためにyumリポジトリを提供しています。
 EPELの設定のように、yumリポジトリの設定を行うだけの小さなパッケージをインストールし、その後、PostgreSQLやその他のソフトウェアをインストールします。</p>
 <p>yumリポジトリ定義の一覧は <a href="http://yum.postgresql.org/repopackages.php">http://yum.postgresql.org/repopackages.php</a> です。</p>
@@ -563,14 +538,14 @@ EPELの設定のように、yumリポジトリの設定を行うだけの小さ�
 <li>PostgreSQLパッケージのインストール</li>
 </ul>
 <p>例えばPostgreSQL v15を使用する場合、PG-Stromのインストールには <code>postgresql15-server</code>および<code>postgresql15-devel</code>パッケージが必要です。</p>
-<p>以下は、RHEL8/CentOS8においてPostgreSQL v15をインストールする手順の例です。</p>
+<p>以下は、RHEL8においてPostgreSQL v15をインストールする手順の例です。</p>
 <pre><code># dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
 # dnf -y module disable postgresql
 # dnf install -y postgresql15-devel postgresql15-server
 </code></pre>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>Red Hat Enterprise Linux 8 および CentOS 8の場合、パッケージ名<code>postgresql</code>がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、<code>dnf -y module disable postgresql</code> コマンドを用いてディストリビューション標準の<code>postgresql</code>モジュールを無効化します。</p>
+<p>Red Hat Enterprise Linux 8.x の場合、パッケージ名<code>postgresql</code>がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、<code>dnf -y module disable postgresql</code> コマンドを用いてディストリビューション標準の<code>postgresql</code>モジュールを無効化します。</p>
 </div>
 <p>PostgreSQL Global Development Groupの提供するRPMパッケージは<code>/usr/pgsql-&lt;version&gt;</code>という少々変則的なディレクトリにソフトウェアをインストールするため、<code>psql</code>等の各種コマンドを実行する際にはパスが通っているかどうか注意する必要があります。</p>
 <p><code>postgresql-alternatives</code>パッケージをインストールしておくと、各種コマンドへのシンボリックリンクを<code>/usr/local/bin</code>以下に作成するため各種オペレーションが便利です。また、複数バージョンのPostgreSQLをインストールした場合でも、<code>alternatives</code>コマンドによってターゲットとなるPostgreSQLバージョンを切り替える事が可能です。</p>
@@ -734,7 +709,7 @@ CREATE EXTENSION
 <pre><code>-- For RHEL8
 # dnf install -y postgis32_15 --enablerepo=codeready-builder-for-rhel-8-x86_64-rpms
 
--- For CentOS8
+-- For Rocky8
 # dnf install -y postgis32_15 --enablerepo=powertools
 </code></pre>
 <p>データベースクラスタを作成してPostgreSQLサーバを起動し、SQLクライアントから<code>CREATE EXTENSION</code>コマンドを実行してGeometryデータ型や地理情報分析のためのSQL関数を作成します。

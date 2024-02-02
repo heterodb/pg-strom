@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <strings.h>
+#include <time.h>
 
 /* command options */
 static char	   *sqldb_command = NULL;
@@ -334,11 +335,21 @@ shows_record_batch_progress(SQLtable *table, size_t nitems)
 	{
 		ArrowBlock *block;
 		int			index = table->numRecordBatches - 1;
+		time_t		tv = time(NULL);
+		struct tm	tm;
 
+		localtime_r(&tv, &tm);
 		assert(index >= 0);
 		block = &table->recordBatches[index];
-		printf("RecordBatch[%d]: "
+		printf("%04d-%02d-%02d %02d:%02d:%02d "
+			   "RecordBatch[%d]: "
 			   "offset=%lu length=%lu (meta=%u, body=%lu) nitems=%zu\n",
+			   tm.tm_year + 1900,
+			   tm.tm_mon + 1,
+			   tm.tm_mday,
+			   tm.tm_hour,
+			   tm.tm_min,
+			   tm.tm_sec,
 			   index,
 			   block->offset,
 			   block->metaDataLength + block->bodyLength,
@@ -875,7 +886,8 @@ int main(int argc, char * const argv[])
 	SQLtable	   *table;
 	ArrowKeyValue  *kv;
 	SQLdictionary  *sql_dict_list = NULL;
-	
+	time_t			tv1 = time(NULL);
+
 	parse_options(argc, argv);
 
 	/* special case if --dump=FILENAME */
@@ -955,6 +967,22 @@ int main(int argc, char * const argv[])
 	sqldb_close_connection(sqldb_state);
 	close(table->fdesc);
 
+	if (shows_progress)
+	{
+		time_t	elapsed = (time(NULL) - tv1);
+
+		if (elapsed > 2 * 86400)	/* > 2days */
+			printf("Total elapsed time: %ld days %02ld:%02ld:%02ld\n",
+				   elapsed / 86400,
+				   (elapsed % 86400) / 3600,
+				   (elapsed % 3600) / 60,
+				   (elapsed % 60));
+		else
+			printf("Total elapsed time: %02ld:%02ld:%02ld\n",
+				   (elapsed % 86400) / 3600,
+				   (elapsed % 3600) / 60,
+				   (elapsed % 60));
+	}
 	return 0;
 }
 

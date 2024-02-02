@@ -6,14 +6,19 @@ MYSQL_CONFIG     ?= mysql_config
 
 HAS_PG_CONFIG = $(shell which $(PG_CONFIG)>/dev/null 2>&1 && echo yes)
 HAS_MYSQL_CONFIG = $(shell which $(MYSQL_CONFIG)>/dev/null 2>&1 && echo yes)
+HAS_PF_RING = $(shell test -e /usr/include/pfring.h && echo -n yes)
 
-ALL_PROGS = pcap2arrow arrow2csv
+ALL_PROGS = arrow2csv
 ifeq ($(HAS_PG_CONFIG),yes)
 ALL_PROGS += pg2arrow
 endif
 ifeq ($(HAS_MYSQL_CONFIG),yes)
 ALL_PROGS += mysql2arrow
 endif
+ifeq ($(HAS_PF_RING),yes)
+ALL_PROGS += pcap2arrow
+endif
+
 PG2ARROW_OBJS    = __pgsql2arrow.o pgsql_client.o \
                    arrow_nodes.o arrow_write.o arrow_pgsql.o
 MYSQL2ARROW_OBJS = __mysql2arrow.o mysql_client.o \
@@ -74,12 +79,14 @@ endif
 #
 # Pcap2Arrow
 #
+ifeq ($(HAS_PF_RING),yes)
 pcap2arrow: $(PCAP2ARROW_OBJS)
 	$(CC) -o $@ $(PCAP2ARROW_OBJS) -lpthread -lpfring -lpcap
 
 install-pcap2arrow: pcap2arrow
 	mkdir -p $(DESTDIR)$(BINDIR) && \
 	install -m 0755 pcap2arrow $(DESTDIR)$(BINDIR)
+endif
 
 #
 # Arrow2CSV

@@ -68,7 +68,7 @@ xpu_date_datum_heap_read(kern_context *kcxt,
 	xpu_date_t *result = (xpu_date_t *)__result;
 
 	result->expr_ops = &xpu_date_ops;
-	result->value = *((const DateADT *)addr);
+	__FetchStore(result->value, (const DateADT *)addr);
 	return true;
 }
 
@@ -224,7 +224,7 @@ xpu_time_datum_heap_read(kern_context *kcxt,
 	xpu_time_t *result = (xpu_time_t *)__result;
 
 	result->expr_ops = &xpu_time_ops;
-	result->value = *((const TimeADT *)addr);
+	__FetchStore(result->value, (const TimeADT *)addr);
 	return true;
 }
 
@@ -517,7 +517,7 @@ xpu_timestamp_datum_heap_read(kern_context *kcxt,
 	xpu_timestamp_t *result = (xpu_timestamp_t *)__result;
 
 	result->expr_ops = &xpu_timestamp_ops;
-	result->value = *((int64_t *)addr);
+	__FetchStore(result->value, (int64_t *)addr);
 	return true;
 }
 
@@ -697,7 +697,7 @@ xpu_timestamptz_datum_heap_read(kern_context *kcxt,
 	xpu_timestamptz_t *result = (xpu_timestamptz_t *)__result;
 
 	result->expr_ops = &xpu_timestamptz_ops;
-	result->value = *((const TimestampTz *)addr);
+	__FetchStore(result->value, (const TimestampTz *)addr);
 	return true;
 }
 

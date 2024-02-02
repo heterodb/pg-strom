@@ -536,7 +536,7 @@ xpu_money_datum_heap_read(kern_context *kcxt,
 	xpu_money_t *result = (xpu_money_t *)__result;
 
 	result->expr_ops = &xpu_money_ops;
-	result->value = *((Cash *)addr);
+	__FetchStore(result->value, (Cash *)addr);
 	return true;
 }
 
