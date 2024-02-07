@@ -26,7 +26,7 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Strom v5.0の実行にはPostgreSQLバージョン15以降が必要です。
     - PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。
 - **CUDA Toolkit**
-    - PG-Stromの実行にはCUDA Toolkit バージョン12.2以降が必要です。
+    - PG-Stromの実行にはCUDA Toolkit バージョン12.2update2以降が必要です。
     - PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。
 }
 @en{
@@ -44,7 +44,7 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Strom v5.0 requires PostgreSQL v15 or later.
     - Some of PostgreSQL APIs used by PG-Strom internally are not included in the former versions.
 - **CUDA Toolkit**
-    - PG-Strom requires CUDA Toolkit version 12.2 or later.
+    - PG-Strom requires CUDA Toolkit version 12.2update2 or later.
     - Some of CUDA Driver APIs used by PG-Strom internally are not included in the former versions.
 }
 
@@ -56,8 +56,8 @@ This chapter introduces the steps to install PG-Strom.
 
 1. H/Wの初期設定
 1. OSのインストール
-1. CUDA Toolkit のインストール
 1. MOFEDドライバのインストール
+1. CUDA Toolkit のインストール
 1. HeteroDB拡張モジュールのインストール
 1. PostgreSQLのインストール
 1. PG-Stromのインストール
@@ -70,8 +70,8 @@ The overall steps to install are below:
 
 1. Hardware Configuration
 1. OS Installation
-1. CUDA Toolkit installation
 1. MOFED Driver installation
+1. CUDA Toolkit installation
 1. HeteroDB Extra Module installation
 1. PostgreSQL installation
 1. PG-Strom installation
@@ -258,6 +258,86 @@ To enable this repository, run the command below:
 # dnf config-manager --set-enabled powertools
 ```
 
+@ja:##MOFEDドライバのインストール
+@en:##MOFED Driver Installation
+
+@ja{
+MOFEDドライバは、[こちら](https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed)からダウンロードする事ができます。
+
+本節ではtgzアーカイブからのインストール例を紹介します。
+}
+@en{
+You can download the latest MOFED driver from [here](https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed).
+
+This section introduces the example of installation from the tgz archive.
+}
+
+![MOFED Driver Selection](./img/mofed-download.png)
+
+@ja{
+tgzアーカイブを展開し、`mlnxofedinstall`スクリプトを実行します。この時、GPUDirect Storageのサポートを有効化するオプションを付加するのを忘れないでください。
+}
+@en{
+Extract the tgz archive, then kick `mlnxofedinstall` script. Please don't forget the options to enable GPUDirect Storage features.
+}
+
+```
+# tar xvf MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64.tgz
+# cd MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64
+# ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
+# dracut -f
+```
+
+@ja{
+MOFEDドライバのビルドおよびインストール中、不足パッケージのインストールを要求される事があります。
+その場合、エラーメッセージを確認して要求されたパッケージの追加インストールを行ってください。
+}
+@en{
+During the build and installation of MOFED drivers, the installer may require additional packages.
+In this case, error message shall guide you the missing packages. So, please install them using `dnf` command.
+}
+
+```
+Error: One or more required packages for installing MLNX_OFED_LINUX are missing.
+Please install the missing packages using your Linux distribution Package Management tool.
+Run:
+yum install tcsh tcl tk kernel-modules-extra gcc-gfortran python36
+```
+
+@ja{
+MOFEDドライバのインストールが完了すると、nvmeドライバなど、OS標準のものが置き換えられているはずです。
+
+例えば以下の例では、OS標準の`nvme-rdma`ドライバ（`/lib/modules/<KERNEL_VERSION>/kernel/drivers/nvme/host/nvme-rdma.ko.xz`）ではなく、追加インストールされた`/lib/modules/<KERNEL_VERSION>/extra/mlnx-nvme/host/nvme-rdma.ko`が優先して使用されています。
+}
+@en{
+Once MOFED drivers got installed, it should replace several INBOX drivers like nvme driver.
+
+For example, the command below shows the `/lib/modules/<KERNEL_VERSION>/extra/mlnx-nvme/host/nvme-rdma.ko` that is additionally installed, instead of the INBOX `nvme-rdma` (`/lib/modules/<KERNEL_VERSION>/kernel/drivers/nvme/host/nvme-rdma.ko.xz`).
+}
+
+```
+# modinfo nvme-rdma
+filename:       /lib/modules/4.18.0-477.10.1.el8_8.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
+license:        GPL v2
+rhelversion:    8.8
+srcversion:     533BB7E5866E52F63B9ACCB
+depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics
+name:           nvme_rdma
+vermagic:       4.18.0-477.10.1.el8_8.x86_64 SMP mod_unload modversions
+parm:           register_always:Use memory registration even for contiguous memory regions (bool)
+```
+
+@ja{
+既にロードされているカーネルモジュール（例: `nvme`）を置き換えるため、ここで一度システムのシャットダウンと再起動を行います。
+
+`mlnxofedinstall`スクリプトの完了後に、`dracut -f`を実行するのを忘れないでください。
+}
+@en{
+Then, shutdown the system and restart, to replace the kernel modules already loaded (like `nvme`).
+
+Please don't forget to run `dracut -f` after completion of the `mlnxofedinstall` script.
+}
+
 @ja:### heterodb-swdcのインストール
 @en:### heterodb-swdc Installation
 
@@ -398,178 +478,15 @@ Mon Dec 18 18:02:14 2023
 +---------------------------------------------------------------------------------------+
 ```
 
-
-@ja:### PCI Bar1メモリの設定
-@en:### PCI Bar1 Memory Configuration
-
-@ja{
-GPU-Direct SQLは、GPUデバイスメモリをホストシステム上のPCI BAR1領域（物理アドレス空間）にマップし、そこをDestinationとするP2P-RDMA要求をNVME機器に対して行う事で、ロスのない高速なデータ読出しを実現します。
-
-十分な多重度を持ったP2P-RDMAを行うには、GPUがバッファをマップするのに十分なPCI BAR1領域を有している必要があります。大半のGPUではPCI BAR1領域の大きさは固定で、PG-Stromにおいては、それがGPUデバイスメモリのサイズを上回っている製品を推奨しています。
-
-しかし、一部のGPU製品においては『動作モード』を切り替える事でPCI BAR1領域のサイズを切り替える事ができるものが存在します。お使いのGPUがそれに該当する場合は、[NVIDIA Display Mode Selector Tool](https://developer.nvidia.com/displaymodeselector)を参照の上、PCI BAR1領域のサイズを最大化するモードへと切り替えてください。
-
-2023年12月時点では、以下のGPUの場合にNVIDIA Display Mode Selector Toolを利用して***Display Off**モードへと切り替える必要があります。
-}
-@en{
-GPU-Direct SQL maps GPU device memory to the PCI BAR1 region (physical address space) on the host system, and sends P2P-RDMA requests to NVME devices with that as the destination for the shortest data transfer.
-
-To perform P2P-RDMA with sufficient multiplicity, the GPU must have enough PCI BAR1 space to map the device buffer. The size of the PCI BAR1 area is fixed for most GPUs, and PG-Strom recommends products whose size exceeds the GPU device memory size.
-
-However, some GPU products allow to change the size of the PCI BAR1 area by switching the operation mode. If your GPU is either of the following, refer to the [NVIDIA Display Mode Selector Tool](https://developer.nvidia.com/displaymodeselector) and switch to the mode that maximizes the PCI BAR1 area size.
-}
-
-- NVIDIA L40S
-- NVIDIA L40
-- NVIDIA A40
-- NVIDIA RTX 6000 Ada
-- NVIDIA RTX A6000
-- NVIDIA RTX A5500
-- NVIDIA RTX A5000
+@ja:### GPUDirect Storageの確認
+@en:### Check GPUDirect Storage status
 
 @ja{
-システムに搭載されているGPUのメモリサイズやPCI BAR1サイズを確認するには、`nvidia-smi -q`コマンドを利用します。以下のように、メモリ関連の状態が表示されます。
-}
-@en{
-To check the GPU memory size and PCI BAR1 size installed in the system, use the `nvidia-smi -q` command. Memory-related status is displayed as shown below.
-}
-```
-$ nvidia-smi -q
-        :
-    FB Memory Usage
-        Total                             : 46068 MiB
-        Reserved                          : 685 MiB
-        Used                              : 4 MiB
-        Free                              : 45377 MiB
-    BAR1 Memory Usage
-        Total                             : 65536 MiB
-        Used                              : 1 MiB
-        Free                              : 65535 MiB
-        :
-```
-
-@ja:##HeteroDB 拡張モジュール
-@en:##HeteroDB extra modules
-
-@ja{
-`heterodb-extra`モジュールは、PG-Stromに以下の機能を追加します。
-
-- マルチGPUの対応
-- GPUダイレクトSQL
-- GiSTインデックス対応
-- ライセンス管理機能
-
-これらの機能を使用せず、オープンソース版の機能のみを使用する場合は `heterodb-extra` モジュールのインストールは不要です。
-本節の内容は読み飛ばして構いません。
-}
-@en{
-`heterodb-extra` module enhances PG-Strom the following features.
-
-- multi-GPUs support
-- GPUDirect SQL
-- GiST index support on GPU
-- License management
-
-If you don't use the above features, only open source modules, you don't need to install the `heterodb-extra` module here.
-Please skip this section.
-}
-
-@ja{
-以下のように、SWDCから`heterodb-extra`パッケージをインストールしてください。
-}
-@en{
-Install the `heterodb-extra` package, downloaded from the SWDC, as follows.
-}
-```
-# dnf install heterodb-extra
-```
-
-@ja:##MOFEDドライバのインストール
-@en:##MOFED Driver Installation
-
-@ja{
-MOFEDドライバは、[こちら](https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed)からダウンロードする事ができます。
-
-本節ではtgzアーカイブからのインストール例を紹介します。
-}
-@en{
-You can download the latest MOFED driver from [here](https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed).
-
-This section introduces the example of installation from the tgz archive.
-}
-
-![MOFED Driver Selection](./img/mofed-download.png)
-
-@ja{
-tgzアーカイブを展開し、`mlnxofedinstall`スクリプトを実行します。この時、GPUDirect Storageのサポートを有効化するオプションを付加するのを忘れないでください。
-}
-@en{
-Extract the tgz archive, then kick `mlnxofedinstall` script. Please don't forget the options to enable GPUDirect Storage features.
-}
-
-```
-# tar xvf MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64.tgz
-# cd MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64
-# ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
-# dracut -f
-```
-
-@ja{
-MOFEDドライバのビルドおよびインストール中、不足パッケージのインストールを要求される事があります。
-その場合、エラーメッセージを確認して要求されたパッケージの追加インストールを行ってください。
-}
-@en{
-During the build and installation of MOFED drivers, the installer may require additional packages.
-In this case, error message shall guide you the missing packages. So, please install them using `dnf` command.
-}
-
-```
-Error: One or more required packages for installing MLNX_OFED_LINUX are missing.
-Please install the missing packages using your Linux distribution Package Management tool.
-Run:
-yum install tcsh tcl tk kernel-modules-extra gcc-gfortran python36
-```
-
-@ja{
-MOFEDドライバのインストールが完了すると、nvmeドライバなど、OS標準のものが置き換えられているはずです。
-
-例えば以下の例では、OS標準の`nvme-rdma`ドライバ（`/lib/modules/<KERNEL_VERSION>/kernel/drivers/nvme/host/nvme-rdma.ko.xz`）ではなく、追加インストールされた`/lib/modules/<KERNEL_VERSION>/extra/mlnx-nvme/host/nvme-rdma.ko`が優先して使用されています。
-}
-@en{
-Once MOFED drivers got installed, it should replace several INBOX drivers like nvme driver.
-
-For example, the command below shows the `/lib/modules/<KERNEL_VERSION>/extra/mlnx-nvme/host/nvme-rdma.ko` that is additionally installed, instead of the INBOX `nvme-rdma` (`/lib/modules/<KERNEL_VERSION>/kernel/drivers/nvme/host/nvme-rdma.ko.xz`).
-}
-
-```
-# modinfo nvme-rdma
-filename:       /lib/modules/4.18.0-477.10.1.el8_8.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
-license:        GPL v2
-rhelversion:    8.8
-srcversion:     533BB7E5866E52F63B9ACCB
-depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics
-name:           nvme_rdma
-vermagic:       4.18.0-477.10.1.el8_8.x86_64 SMP mod_unload modversions
-parm:           register_always:Use memory registration even for contiguous memory regions (bool)
-```
-
-@ja{
-既にロードされているカーネルモジュール（例: `nvme`）を置き換えるため、ここで一度システムのシャットダウンと再起動を行います。
-
-`mlnxofedinstall`スクリプトの完了後に、`dracut -f`を実行するのを忘れないでください。
-}
-@en{
-Then, shutdown the system and restart, to replace the kernel modules already loaded (like `nvme`).
-
-Please don't forget to run `dracut -f` after completion of the `mlnxofedinstall` script.
-}
-
-@ja{
-再起動が完了すると、GPUDirect Storageが利用可能な状態となっているはずです。
+上記の手順でCUDA Toolkitのインストールが完了すると、GPUDirect Storageが利用可能な状態となっているはずです。
 以下の通り、`gdscheck`ツールを用いてストレージデバイス毎のコンフィグを確認してください。
 }
 @en{
-After the reboot, your system will become the GPUDirect Storage ready state.
+After the installation of CUDA Toolkit according to the steps above, your system will become ready for the GPUDirect Storage.
 Run `gdscheck` tool to confirm the configuration for each storage devices, as follows.
 }
 
@@ -660,6 +577,91 @@ Run `gdscheck` tool to confirm the configuration for each storage devices, as fo
     Then reboot the system to ensure the new configuration.
     See [NVIDIA GPUDirect Storage Installation and Troubleshooting Guide](https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#adding-udev-rules) for the details.
 }
+
+@ja:### PCI Bar1メモリの設定
+@en:### PCI Bar1 Memory Configuration
+
+@ja{
+GPU-Direct SQLは、GPUデバイスメモリをホストシステム上のPCI BAR1領域（物理アドレス空間）にマップし、そこをDestinationとするP2P-RDMA要求をNVME機器に対して行う事で、ロスのない高速なデータ読出しを実現します。
+
+十分な多重度を持ったP2P-RDMAを行うには、GPUがバッファをマップするのに十分なPCI BAR1領域を有している必要があります。大半のGPUではPCI BAR1領域の大きさは固定で、PG-Stromにおいては、それがGPUデバイスメモリのサイズを上回っている製品を推奨しています。
+
+しかし、一部のGPU製品においては『動作モード』を切り替える事でPCI BAR1領域のサイズを切り替える事ができるものが存在します。お使いのGPUがそれに該当する場合は、[NVIDIA Display Mode Selector Tool](https://developer.nvidia.com/displaymodeselector)を参照の上、PCI BAR1領域のサイズを最大化するモードへと切り替えてください。
+
+2023年12月時点では、以下のGPUの場合にNVIDIA Display Mode Selector Toolを利用して***Display Off**モードへと切り替える必要があります。
+}
+@en{
+GPU-Direct SQL maps GPU device memory to the PCI BAR1 region (physical address space) on the host system, and sends P2P-RDMA requests to NVME devices with that as the destination for the shortest data transfer.
+
+To perform P2P-RDMA with sufficient multiplicity, the GPU must have enough PCI BAR1 space to map the device buffer. The size of the PCI BAR1 area is fixed for most GPUs, and PG-Strom recommends products whose size exceeds the GPU device memory size.
+
+However, some GPU products allow to change the size of the PCI BAR1 area by switching the operation mode. If your GPU is either of the following, refer to the [NVIDIA Display Mode Selector Tool](https://developer.nvidia.com/displaymodeselector) and switch to the mode that maximizes the PCI BAR1 area size.
+}
+
+- NVIDIA L40S
+- NVIDIA L40
+- NVIDIA A40
+- NVIDIA RTX 6000 Ada
+- NVIDIA RTX A6000
+- NVIDIA RTX A5500
+- NVIDIA RTX A5000
+
+@ja{
+システムに搭載されているGPUのメモリサイズやPCI BAR1サイズを確認するには、`nvidia-smi -q`コマンドを利用します。以下のように、メモリ関連の状態が表示されます。
+}
+@en{
+To check the GPU memory size and PCI BAR1 size installed in the system, use the `nvidia-smi -q` command. Memory-related status is displayed as shown below.
+}
+```
+$ nvidia-smi -q
+        :
+    FB Memory Usage
+        Total                             : 46068 MiB
+        Reserved                          : 685 MiB
+        Used                              : 4 MiB
+        Free                              : 45377 MiB
+    BAR1 Memory Usage
+        Total                             : 65536 MiB
+        Used                              : 1 MiB
+        Free                              : 65535 MiB
+        :
+```
+
+@ja:##HeteroDB 拡張モジュール
+@en:##HeteroDB extra modules
+
+@ja{
+`heterodb-extra`モジュールは、PG-Stromに以下の機能を追加します。
+
+- マルチGPUの対応
+- GPUダイレクトSQL
+- GiSTインデックス対応
+- ライセンス管理機能
+
+これらの機能を使用せず、オープンソース版の機能のみを使用する場合は `heterodb-extra` モジュールのインストールは不要です。
+本節の内容は読み飛ばして構いません。
+}
+@en{
+`heterodb-extra` module enhances PG-Strom the following features.
+
+- multi-GPUs support
+- GPUDirect SQL
+- GiST index support on GPU
+- License management
+
+If you don't use the above features, only open source modules, you don't need to install the `heterodb-extra` module here.
+Please skip this section.
+}
+
+@ja{
+以下のように、SWDCから`heterodb-extra`パッケージをインストールしてください。
+}
+@en{
+Install the `heterodb-extra` package, downloaded from the SWDC, as follows.
+}
+```
+# dnf install heterodb-extra
+```
 
 @ja:### ライセンスの有効化
 @en:### License activation

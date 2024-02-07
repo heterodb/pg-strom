@@ -68,19 +68,23 @@
     </li>
         </ul>
     </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#mofed-driver-installation">MOFED Driver Installation</a>
+        <ul>
     <li class="toctree-l3"><a class="reference internal" href="#heterodb-swdc-installation">heterodb-swdc Installation</a>
     </li>
         </ul>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#cuda-toolkit-installation">CUDA Toolkit Installation</a>
         <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#check-gpudirect-storage-status">Check GPUDirect Storage status</a>
+    </li>
     <li class="toctree-l3"><a class="reference internal" href="#pci-bar1-memory-configuration">PCI Bar1 Memory Configuration</a>
     </li>
         </ul>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#heterodb-extra-modules">HeteroDB extra modules</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#mofed-driver-installation">MOFED Driver Installation</a>
         <ul>
     <li class="toctree-l3"><a class="reference internal" href="#license-activation">License activation</a>
     </li>
@@ -218,7 +222,7 @@
 </ul>
 </li>
 <li><strong>CUDA Toolkit</strong><ul>
-<li>PG-Strom requires CUDA Toolkit version 12.2 or later.</li>
+<li>PG-Strom requires CUDA Toolkit version 12.2update2 or later.</li>
 <li>Some of CUDA Driver APIs used by PG-Strom internally are not included in the former versions.</li>
 </ul>
 </li>
@@ -228,8 +232,8 @@
 <ol>
 <li>Hardware Configuration</li>
 <li>OS Installation</li>
-<li>CUDA Toolkit installation</li>
 <li>MOFED Driver installation</li>
+<li>CUDA Toolkit installation</li>
 <li>HeteroDB Extra Module installation</li>
 <li>PostgreSQL installation</li>
 <li>PG-Strom installation</li>
@@ -305,6 +309,37 @@ Linux kernel module must be rebuilt according to version-up of Linux kernel, so 
 -- For Rocky8
 # dnf config-manager --set-enabled powertools
 </code></pre>
+<h2 id="mofed-driver-installation">MOFED Driver Installation</h2>
+<p>You can download the latest MOFED driver from <a href="https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed">here</a>.</p>
+<p>This section introduces the example of installation from the tgz archive.</p>
+<p><img alt="MOFED Driver Selection" src="../img/mofed-download.png" /></p>
+<p>Extract the tgz archive, then kick <code>mlnxofedinstall</code> script. Please don't forget the options to enable GPUDirect Storage features.</p>
+<pre><code># tar xvf MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64.tgz
+# cd MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64
+# ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
+# dracut -f
+</code></pre>
+<p>During the build and installation of MOFED drivers, the installer may require additional packages.
+In this case, error message shall guide you the missing packages. So, please install them using <code>dnf</code> command.</p>
+<pre><code>Error: One or more required packages for installing MLNX_OFED_LINUX are missing.
+Please install the missing packages using your Linux distribution Package Management tool.
+Run:
+yum install tcsh tcl tk kernel-modules-extra gcc-gfortran python36
+</code></pre>
+<p>Once MOFED drivers got installed, it should replace several INBOX drivers like nvme driver.</p>
+<p>For example, the command below shows the <code>/lib/modules/&lt;KERNEL_VERSION&gt;/extra/mlnx-nvme/host/nvme-rdma.ko</code> that is additionally installed, instead of the INBOX <code>nvme-rdma</code> (<code>/lib/modules/&lt;KERNEL_VERSION&gt;/kernel/drivers/nvme/host/nvme-rdma.ko.xz</code>).</p>
+<pre><code># modinfo nvme-rdma
+filename:       /lib/modules/4.18.0-477.10.1.el8_8.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
+license:        GPL v2
+rhelversion:    8.8
+srcversion:     533BB7E5866E52F63B9ACCB
+depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics
+name:           nvme_rdma
+vermagic:       4.18.0-477.10.1.el8_8.x86_64 SMP mod_unload modversions
+parm:           register_always:Use memory registration even for contiguous memory regions (bool)
+</code></pre>
+<p>Then, shutdown the system and restart, to replace the kernel modules already loaded (like <code>nvme</code>).</p>
+<p>Please don't forget to run <code>dracut -f</code> after completion of the <code>mlnxofedinstall</code> script.</p>
 <h3 id="heterodb-swdc-installation">heterodb-swdc Installation</h3>
 <p>PG-Strom and related packages are distributed from <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.
 You need to add a repository definition of HeteroDB-SWDC for you system to obtain these software.</p>
@@ -360,78 +395,8 @@ Mon Dec 18 18:02:14 2023
 |  No running processes found                                                           |
 +---------------------------------------------------------------------------------------+
 </code></pre>
-<h3 id="pci-bar1-memory-configuration">PCI Bar1 Memory Configuration</h3>
-<p>GPU-Direct SQL maps GPU device memory to the PCI BAR1 region (physical address space) on the host system, and sends P2P-RDMA requests to NVME devices with that as the destination for the shortest data transfer.</p>
-<p>To perform P2P-RDMA with sufficient multiplicity, the GPU must have enough PCI BAR1 space to map the device buffer. The size of the PCI BAR1 area is fixed for most GPUs, and PG-Strom recommends products whose size exceeds the GPU device memory size.</p>
-<p>However, some GPU products allow to change the size of the PCI BAR1 area by switching the operation mode. If your GPU is either of the following, refer to the <a href="https://developer.nvidia.com/displaymodeselector">NVIDIA Display Mode Selector Tool</a> and switch to the mode that maximizes the PCI BAR1 area size.</p>
-<ul>
-<li>NVIDIA L40S</li>
-<li>NVIDIA L40</li>
-<li>NVIDIA A40</li>
-<li>NVIDIA RTX 6000 Ada</li>
-<li>NVIDIA RTX A6000</li>
-<li>NVIDIA RTX A5500</li>
-<li>NVIDIA RTX A5000</li>
-</ul>
-<p>To check the GPU memory size and PCI BAR1 size installed in the system, use the <code>nvidia-smi -q</code> command. Memory-related status is displayed as shown below.</p>
-<pre><code>$ nvidia-smi -q
-        :
-    FB Memory Usage
-        Total                             : 46068 MiB
-        Reserved                          : 685 MiB
-        Used                              : 4 MiB
-        Free                              : 45377 MiB
-    BAR1 Memory Usage
-        Total                             : 65536 MiB
-        Used                              : 1 MiB
-        Free                              : 65535 MiB
-        :
-</code></pre>
-<h2 id="heterodb-extra-modules">HeteroDB extra modules</h2>
-<p><code>heterodb-extra</code> module enhances PG-Strom the following features.</p>
-<ul>
-<li>multi-GPUs support</li>
-<li>GPUDirect SQL</li>
-<li>GiST index support on GPU</li>
-<li>License management</li>
-</ul>
-<p>If you don't use the above features, only open source modules, you don't need to install the <code>heterodb-extra</code> module here.
-Please skip this section.</p>
-<p>Install the <code>heterodb-extra</code> package, downloaded from the SWDC, as follows.</p>
-<pre><code># dnf install heterodb-extra
-</code></pre>
-<h2 id="mofed-driver-installation">MOFED Driver Installation</h2>
-<p>You can download the latest MOFED driver from <a href="https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed">here</a>.</p>
-<p>This section introduces the example of installation from the tgz archive.</p>
-<p><img alt="MOFED Driver Selection" src="../img/mofed-download.png" /></p>
-<p>Extract the tgz archive, then kick <code>mlnxofedinstall</code> script. Please don't forget the options to enable GPUDirect Storage features.</p>
-<pre><code># tar xvf MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64.tgz
-# cd MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64
-# ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
-# dracut -f
-</code></pre>
-<p>During the build and installation of MOFED drivers, the installer may require additional packages.
-In this case, error message shall guide you the missing packages. So, please install them using <code>dnf</code> command.</p>
-<pre><code>Error: One or more required packages for installing MLNX_OFED_LINUX are missing.
-Please install the missing packages using your Linux distribution Package Management tool.
-Run:
-yum install tcsh tcl tk kernel-modules-extra gcc-gfortran python36
-</code></pre>
-<p>Once MOFED drivers got installed, it should replace several INBOX drivers like nvme driver.</p>
-<p>For example, the command below shows the <code>/lib/modules/&lt;KERNEL_VERSION&gt;/extra/mlnx-nvme/host/nvme-rdma.ko</code> that is additionally installed, instead of the INBOX <code>nvme-rdma</code> (<code>/lib/modules/&lt;KERNEL_VERSION&gt;/kernel/drivers/nvme/host/nvme-rdma.ko.xz</code>).</p>
-<pre><code># modinfo nvme-rdma
-filename:       /lib/modules/4.18.0-477.10.1.el8_8.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
-license:        GPL v2
-rhelversion:    8.8
-srcversion:     533BB7E5866E52F63B9ACCB
-depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics
-name:           nvme_rdma
-vermagic:       4.18.0-477.10.1.el8_8.x86_64 SMP mod_unload modversions
-parm:           register_always:Use memory registration even for contiguous memory regions (bool)
-</code></pre>
-<p>Then, shutdown the system and restart, to replace the kernel modules already loaded (like <code>nvme</code>).</p>
-<p>Please don't forget to run <code>dracut -f</code> after completion of the <code>mlnxofedinstall</code> script.</p>
-<p>After the reboot, your system will become the GPUDirect Storage ready state.
+<h3 id="check-gpudirect-storage-status">Check GPUDirect Storage status</h3>
+<p>After the installation of CUDA Toolkit according to the steps above, your system will become ready for the GPUDirect Storage.
 Run <code>gdscheck</code> tool to confirm the configuration for each storage devices, as follows.</p>
 <pre><code># /usr/local/cuda/gds/tools/gdscheck -p
  GDS release version: 1.0.0.82
@@ -498,6 +463,46 @@ the following line must be added to the <code>/lib/udev/rules.d/63-md-raid-array
 <p>Then reboot the system to ensure the new configuration.
 See <a href="https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#adding-udev-rules">NVIDIA GPUDirect Storage Installation and Troubleshooting Guide</a> for the details.</p>
 </div>
+<h3 id="pci-bar1-memory-configuration">PCI Bar1 Memory Configuration</h3>
+<p>GPU-Direct SQL maps GPU device memory to the PCI BAR1 region (physical address space) on the host system, and sends P2P-RDMA requests to NVME devices with that as the destination for the shortest data transfer.</p>
+<p>To perform P2P-RDMA with sufficient multiplicity, the GPU must have enough PCI BAR1 space to map the device buffer. The size of the PCI BAR1 area is fixed for most GPUs, and PG-Strom recommends products whose size exceeds the GPU device memory size.</p>
+<p>However, some GPU products allow to change the size of the PCI BAR1 area by switching the operation mode. If your GPU is either of the following, refer to the <a href="https://developer.nvidia.com/displaymodeselector">NVIDIA Display Mode Selector Tool</a> and switch to the mode that maximizes the PCI BAR1 area size.</p>
+<ul>
+<li>NVIDIA L40S</li>
+<li>NVIDIA L40</li>
+<li>NVIDIA A40</li>
+<li>NVIDIA RTX 6000 Ada</li>
+<li>NVIDIA RTX A6000</li>
+<li>NVIDIA RTX A5500</li>
+<li>NVIDIA RTX A5000</li>
+</ul>
+<p>To check the GPU memory size and PCI BAR1 size installed in the system, use the <code>nvidia-smi -q</code> command. Memory-related status is displayed as shown below.</p>
+<pre><code>$ nvidia-smi -q
+        :
+    FB Memory Usage
+        Total                             : 46068 MiB
+        Reserved                          : 685 MiB
+        Used                              : 4 MiB
+        Free                              : 45377 MiB
+    BAR1 Memory Usage
+        Total                             : 65536 MiB
+        Used                              : 1 MiB
+        Free                              : 65535 MiB
+        :
+</code></pre>
+<h2 id="heterodb-extra-modules">HeteroDB extra modules</h2>
+<p><code>heterodb-extra</code> module enhances PG-Strom the following features.</p>
+<ul>
+<li>multi-GPUs support</li>
+<li>GPUDirect SQL</li>
+<li>GiST index support on GPU</li>
+<li>License management</li>
+</ul>
+<p>If you don't use the above features, only open source modules, you don't need to install the <code>heterodb-extra</code> module here.
+Please skip this section.</p>
+<p>Install the <code>heterodb-extra</code> package, downloaded from the SWDC, as follows.</p>
+<pre><code># dnf install heterodb-extra
+</code></pre>
 <h3 id="license-activation">License activation</h3>
 <p>License activation is needed to use all the features of <code>heterodb-extra</code>, provided by HeteroDB,Inc. You can operate the system without license, but features below are restricted.</p>
 <ul>

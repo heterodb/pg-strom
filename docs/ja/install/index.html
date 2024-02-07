@@ -68,19 +68,23 @@
     </li>
         </ul>
     </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#mofed">MOFEDドライバのインストール</a>
+        <ul>
     <li class="toctree-l3"><a class="reference internal" href="#heterodb-swdc">heterodb-swdcのインストール</a>
     </li>
         </ul>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#cuda-toolkit">CUDA Toolkitのインストール</a>
         <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#gpudirect-storage">GPUDirect Storageの確認</a>
+    </li>
     <li class="toctree-l3"><a class="reference internal" href="#pci-bar1">PCI Bar1メモリの設定</a>
     </li>
         </ul>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#heterodb">HeteroDB 拡張モジュール</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#mofed">MOFEDドライバのインストール</a>
         <ul>
     <li class="toctree-l3"><a class="reference internal" href="#_5">ライセンスの有効化</a>
     </li>
@@ -218,7 +222,7 @@
 </ul>
 </li>
 <li><strong>CUDA Toolkit</strong><ul>
-<li>PG-Stromの実行にはCUDA Toolkit バージョン12.2以降が必要です。</li>
+<li>PG-Stromの実行にはCUDA Toolkit バージョン12.2update2以降が必要です。</li>
 <li>PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。</li>
 </ul>
 </li>
@@ -228,8 +232,8 @@
 <ol>
 <li>H/Wの初期設定</li>
 <li>OSのインストール</li>
-<li>CUDA Toolkit のインストール</li>
 <li>MOFEDドライバのインストール</li>
+<li>CUDA Toolkit のインストール</li>
 <li>HeteroDB拡張モジュールのインストール</li>
 <li>PostgreSQLのインストール</li>
 <li>PG-Stromのインストール</li>
@@ -305,6 +309,37 @@ Linuxカーネルモジュールは、Linuxカーネルのバージョンアッ�
 -- For Rocky8
 # dnf config-manager --set-enabled powertools
 </code></pre>
+<h2 id="mofed">MOFEDドライバのインストール</h2>
+<p>MOFEDドライバは、<a href="https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed">こちら</a>からダウンロードする事ができます。</p>
+<p>本節ではtgzアーカイブからのインストール例を紹介します。</p>
+<p><img alt="MOFED Driver Selection" src="../img/mofed-download.png" /></p>
+<p>tgzアーカイブを展開し、<code>mlnxofedinstall</code>スクリプトを実行します。この時、GPUDirect Storageのサポートを有効化するオプションを付加するのを忘れないでください。</p>
+<pre><code># tar xvf MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64.tgz
+# cd MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64
+# ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
+# dracut -f
+</code></pre>
+<p>MOFEDドライバのビルドおよびインストール中、不足パッケージのインストールを要求される事があります。
+その場合、エラーメッセージを確認して要求されたパッケージの追加インストールを行ってください。</p>
+<pre><code>Error: One or more required packages for installing MLNX_OFED_LINUX are missing.
+Please install the missing packages using your Linux distribution Package Management tool.
+Run:
+yum install tcsh tcl tk kernel-modules-extra gcc-gfortran python36
+</code></pre>
+<p>MOFEDドライバのインストールが完了すると、nvmeドライバなど、OS標準のものが置き換えられているはずです。</p>
+<p>例えば以下の例では、OS標準の<code>nvme-rdma</code>ドライバ（<code>/lib/modules/&lt;KERNEL_VERSION&gt;/kernel/drivers/nvme/host/nvme-rdma.ko.xz</code>）ではなく、追加インストールされた<code>/lib/modules/&lt;KERNEL_VERSION&gt;/extra/mlnx-nvme/host/nvme-rdma.ko</code>が優先して使用されています。</p>
+<pre><code># modinfo nvme-rdma
+filename:       /lib/modules/4.18.0-477.10.1.el8_8.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
+license:        GPL v2
+rhelversion:    8.8
+srcversion:     533BB7E5866E52F63B9ACCB
+depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics
+name:           nvme_rdma
+vermagic:       4.18.0-477.10.1.el8_8.x86_64 SMP mod_unload modversions
+parm:           register_always:Use memory registration even for contiguous memory regions (bool)
+</code></pre>
+<p>既にロードされているカーネルモジュール（例: <code>nvme</code>）を置き換えるため、ここで一度システムのシャットダウンと再起動を行います。</p>
+<p><code>mlnxofedinstall</code>スクリプトの完了後に、<code>dracut -f</code>を実行するのを忘れないでください。</p>
 <h3 id="heterodb-swdc">heterodb-swdcのインストール</h3>
 <p>PG-Stromほか関連パッケージは<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から配布されています。
 これらのソフトウェアを入手するために、HeteroDB-SWDCのリポジトリ定義をyumシステムに追加する必要があります。</p>
@@ -359,79 +394,8 @@ Mon Dec 18 18:02:14 2023
 |  No running processes found                                                           |
 +---------------------------------------------------------------------------------------+
 </code></pre>
-<h3 id="pci-bar1">PCI Bar1メモリの設定</h3>
-<p>GPU-Direct SQLは、GPUデバイスメモリをホストシステム上のPCI BAR1領域（物理アドレス空間）にマップし、そこをDestinationとするP2P-RDMA要求をNVME機器に対して行う事で、ロスのない高速なデータ読出しを実現します。</p>
-<p>十分な多重度を持ったP2P-RDMAを行うには、GPUがバッファをマップするのに十分なPCI BAR1領域を有している必要があります。大半のGPUではPCI BAR1領域の大きさは固定で、PG-Stromにおいては、それがGPUデバイスメモリのサイズを上回っている製品を推奨しています。</p>
-<p>しかし、一部のGPU製品においては『動作モード』を切り替える事でPCI BAR1領域のサイズを切り替える事ができるものが存在します。お使いのGPUがそれに該当する場合は、<a href="https://developer.nvidia.com/displaymodeselector">NVIDIA Display Mode Selector Tool</a>を参照の上、PCI BAR1領域のサイズを最大化するモードへと切り替えてください。</p>
-<p>2023年12月時点では、以下のGPUの場合にNVIDIA Display Mode Selector Toolを利用して<strong>*Display Off</strong>モードへと切り替える必要があります。</p>
-<ul>
-<li>NVIDIA L40S</li>
-<li>NVIDIA L40</li>
-<li>NVIDIA A40</li>
-<li>NVIDIA RTX 6000 Ada</li>
-<li>NVIDIA RTX A6000</li>
-<li>NVIDIA RTX A5500</li>
-<li>NVIDIA RTX A5000</li>
-</ul>
-<p>システムに搭載されているGPUのメモリサイズやPCI BAR1サイズを確認するには、<code>nvidia-smi -q</code>コマンドを利用します。以下のように、メモリ関連の状態が表示されます。</p>
-<pre><code>$ nvidia-smi -q
-        :
-    FB Memory Usage
-        Total                             : 46068 MiB
-        Reserved                          : 685 MiB
-        Used                              : 4 MiB
-        Free                              : 45377 MiB
-    BAR1 Memory Usage
-        Total                             : 65536 MiB
-        Used                              : 1 MiB
-        Free                              : 65535 MiB
-        :
-</code></pre>
-<h2 id="heterodb">HeteroDB 拡張モジュール</h2>
-<p><code>heterodb-extra</code>モジュールは、PG-Stromに以下の機能を追加します。</p>
-<ul>
-<li>マルチGPUの対応</li>
-<li>GPUダイレクトSQL</li>
-<li>GiSTインデックス対応</li>
-<li>ライセンス管理機能</li>
-</ul>
-<p>これらの機能を使用せず、オープンソース版の機能のみを使用する場合は <code>heterodb-extra</code> モジュールのインストールは不要です。
-本節の内容は読み飛ばして構いません。</p>
-<p>以下のように、SWDCから<code>heterodb-extra</code>パッケージをインストールしてください。</p>
-<pre><code># dnf install heterodb-extra
-</code></pre>
-<h2 id="mofed">MOFEDドライバのインストール</h2>
-<p>MOFEDドライバは、<a href="https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed">こちら</a>からダウンロードする事ができます。</p>
-<p>本節ではtgzアーカイブからのインストール例を紹介します。</p>
-<p><img alt="MOFED Driver Selection" src="../img/mofed-download.png" /></p>
-<p>tgzアーカイブを展開し、<code>mlnxofedinstall</code>スクリプトを実行します。この時、GPUDirect Storageのサポートを有効化するオプションを付加するのを忘れないでください。</p>
-<pre><code># tar xvf MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64.tgz
-# cd MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64
-# ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
-# dracut -f
-</code></pre>
-<p>MOFEDドライバのビルドおよびインストール中、不足パッケージのインストールを要求される事があります。
-その場合、エラーメッセージを確認して要求されたパッケージの追加インストールを行ってください。</p>
-<pre><code>Error: One or more required packages for installing MLNX_OFED_LINUX are missing.
-Please install the missing packages using your Linux distribution Package Management tool.
-Run:
-yum install tcsh tcl tk kernel-modules-extra gcc-gfortran python36
-</code></pre>
-<p>MOFEDドライバのインストールが完了すると、nvmeドライバなど、OS標準のものが置き換えられているはずです。</p>
-<p>例えば以下の例では、OS標準の<code>nvme-rdma</code>ドライバ（<code>/lib/modules/&lt;KERNEL_VERSION&gt;/kernel/drivers/nvme/host/nvme-rdma.ko.xz</code>）ではなく、追加インストールされた<code>/lib/modules/&lt;KERNEL_VERSION&gt;/extra/mlnx-nvme/host/nvme-rdma.ko</code>が優先して使用されています。</p>
-<pre><code># modinfo nvme-rdma
-filename:       /lib/modules/4.18.0-477.10.1.el8_8.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
-license:        GPL v2
-rhelversion:    8.8
-srcversion:     533BB7E5866E52F63B9ACCB
-depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics
-name:           nvme_rdma
-vermagic:       4.18.0-477.10.1.el8_8.x86_64 SMP mod_unload modversions
-parm:           register_always:Use memory registration even for contiguous memory regions (bool)
-</code></pre>
-<p>既にロードされているカーネルモジュール（例: <code>nvme</code>）を置き換えるため、ここで一度システムのシャットダウンと再起動を行います。</p>
-<p><code>mlnxofedinstall</code>スクリプトの完了後に、<code>dracut -f</code>を実行するのを忘れないでください。</p>
-<p>再起動が完了すると、GPUDirect Storageが利用可能な状態となっているはずです。
+<h3 id="gpudirect-storage">GPUDirect Storageの確認</h3>
+<p>上記の手順でCUDA Toolkitのインストールが完了すると、GPUDirect Storageが利用可能な状態となっているはずです。
 以下の通り、<code>gdscheck</code>ツールを用いてストレージデバイス毎のコンフィグを確認してください。</p>
 <pre><code># /usr/local/cuda/gds/tools/gdscheck -p
  GDS release version: 1.0.0.82
@@ -498,6 +462,47 @@ parm:           register_always:Use memory registration even for contiguous memo
 <p>その後、設定を反映させるためにシステムを再起動してください。
 詳しくは<a href="https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#adding-udev-rules">NVIDIA GPUDirect Storage Installation and Troubleshooting Guide</a>を参照してください。</p>
 </div>
+<h3 id="pci-bar1">PCI Bar1メモリの設定</h3>
+<p>GPU-Direct SQLは、GPUデバイスメモリをホストシステム上のPCI BAR1領域（物理アドレス空間）にマップし、そこをDestinationとするP2P-RDMA要求をNVME機器に対して行う事で、ロスのない高速なデータ読出しを実現します。</p>
+<p>十分な多重度を持ったP2P-RDMAを行うには、GPUがバッファをマップするのに十分なPCI BAR1領域を有している必要があります。大半のGPUではPCI BAR1領域の大きさは固定で、PG-Stromにおいては、それがGPUデバイスメモリのサイズを上回っている製品を推奨しています。</p>
+<p>しかし、一部のGPU製品においては『動作モード』を切り替える事でPCI BAR1領域のサイズを切り替える事ができるものが存在します。お使いのGPUがそれに該当する場合は、<a href="https://developer.nvidia.com/displaymodeselector">NVIDIA Display Mode Selector Tool</a>を参照の上、PCI BAR1領域のサイズを最大化するモードへと切り替えてください。</p>
+<p>2023年12月時点では、以下のGPUの場合にNVIDIA Display Mode Selector Toolを利用して<strong>*Display Off</strong>モードへと切り替える必要があります。</p>
+<ul>
+<li>NVIDIA L40S</li>
+<li>NVIDIA L40</li>
+<li>NVIDIA A40</li>
+<li>NVIDIA RTX 6000 Ada</li>
+<li>NVIDIA RTX A6000</li>
+<li>NVIDIA RTX A5500</li>
+<li>NVIDIA RTX A5000</li>
+</ul>
+<p>システムに搭載されているGPUのメモリサイズやPCI BAR1サイズを確認するには、<code>nvidia-smi -q</code>コマンドを利用します。以下のように、メモリ関連の状態が表示されます。</p>
+<pre><code>$ nvidia-smi -q
+        :
+    FB Memory Usage
+        Total                             : 46068 MiB
+        Reserved                          : 685 MiB
+        Used                              : 4 MiB
+        Free                              : 45377 MiB
+    BAR1 Memory Usage
+        Total                             : 65536 MiB
+        Used                              : 1 MiB
+        Free                              : 65535 MiB
+        :
+</code></pre>
+<h2 id="heterodb">HeteroDB 拡張モジュール</h2>
+<p><code>heterodb-extra</code>モジュールは、PG-Stromに以下の機能を追加します。</p>
+<ul>
+<li>マルチGPUの対応</li>
+<li>GPUダイレクトSQL</li>
+<li>GiSTインデックス対応</li>
+<li>ライセンス管理機能</li>
+</ul>
+<p>これらの機能を使用せず、オープンソース版の機能のみを使用する場合は <code>heterodb-extra</code> モジュールのインストールは不要です。
+本節の内容は読み飛ばして構いません。</p>
+<p>以下のように、SWDCから<code>heterodb-extra</code>パッケージをインストールしてください。</p>
+<pre><code># dnf install heterodb-extra
+</code></pre>
 <h3 id="_5">ライセンスの有効化</h3>
 <p><code>heterodb-extra</code>モジュールの全ての機能を利用するには、HeteroDB社が提供するライセンスの有効化が必要です。ライセンスなしで運用する事も可能ですが、その場合、下記の機能が制限を受けます。</p>
 <ul>
