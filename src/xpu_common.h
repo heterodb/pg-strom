@@ -2077,14 +2077,11 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__PMIN_INT32		302		/* <int4>,<int8> - min value */
 #define KAGG_ACTION__PMIN_INT64		303		/* <int4>,<int8> - min value */
 #define KAGG_ACTION__PMIN_FP64		304		/* <int4>,<float8> - min value */
-#define KAGG_ACTION__PMIN_CASH		305		/* <int4>,<int8(cash) - min value */
 #define KAGG_ACTION__PMAX_INT32		402		/* <int4>,<int8> - max value */
 #define KAGG_ACTION__PMAX_INT64		403		/* <int4>,<int8> - max value */
 #define KAGG_ACTION__PMAX_FP64		404		/* <int4>,<float8> - max value */
-#define KAGG_ACTION__PMAX_CASH		405		/* <int4>,<int8(cash)> - max value */
 #define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
 #define KAGG_ACTION__PSUM_FP		503		/* <float8> - sum of values */
-#define KAGG_ACTION__PSUM_CASH		504		/* <int8(cash)> - sum of values */
 #define KAGG_ACTION__PAVG_INT		601		/* <int4>,<int8> - NROWS+PSUM */
 #define KAGG_ACTION__PAVG_FP		602		/* <int4>,<float8> - NROWS+PSUM */
 #define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */

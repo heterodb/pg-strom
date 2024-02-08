@@ -104,7 +104,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"min(money)",
 	 "s:min_cash(bytea)",
 	 "s:pmin(money)",
-	 KAGG_ACTION__PMIN_CASH, false
+	 KAGG_ACTION__PMIN_INT64, false
 	},
 	{"min(date)",
 	 "s:min_date(bytea)",
@@ -172,7 +172,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"max(money)",
 	 "s:max_cash(bytea)",
 	 "s:pmax(money)",
-	 KAGG_ACTION__PMAX_CASH, false
+	 KAGG_ACTION__PMAX_INT64, false
 	},
 	{"max(date)",
 	 "s:max_date(bytea)",
@@ -240,7 +240,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"sum(money)",
 	 "s:sum_cash(bytea)",
 	 "s:psum(money)",
-	 KAGG_ACTION__PSUM_CASH,  false
+	 KAGG_ACTION__PSUM_INT,  false
 	},
 	/*
 	 * AVG(X) = EX_AVG(NROWS(X), PSUM(X))
@@ -729,10 +729,8 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 			break;
 		case KAGG_ACTION__PMIN_INT32:
 		case KAGG_ACTION__PMIN_INT64:
-		case KAGG_ACTION__PMIN_CASH:
 		case KAGG_ACTION__PMAX_INT32:
 		case KAGG_ACTION__PMAX_INT64:
-		case KAGG_ACTION__PMAX_CASH:
 			func_nargs = 1;
             type_oid = BYTEAOID;
 			partfn_bufsz = sizeof(kagg_state__pminmax_int64_packed);
@@ -747,7 +745,6 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 
 		case KAGG_ACTION__PAVG_INT:
 		case KAGG_ACTION__PSUM_INT:
-		case KAGG_ACTION__PSUM_CASH:
 			func_nargs = 1;
 			type_oid = BYTEAOID;
 			partfn_bufsz = sizeof(kagg_state__psum_int_packed);
