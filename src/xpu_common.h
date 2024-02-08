@@ -3262,6 +3262,61 @@ __atomic_cas_uint64(uint64_t *ptr, uint64_t comp, uint64_t newval)
 
 /* ----------------------------------------------------------------
  *
+ * xPU PreAgg common utility functions
+ *
+ * ----------------------------------------------------------------
+ */
+INLINE_FUNCTION(bool)
+__preagg_fetch_xdatum_as_int32(int32_t *p_ival, const xpu_datum_t *xdatum)
+{
+	if (xdatum->expr_ops == &xpu_int4_ops)
+		*p_ival = ((const xpu_int4_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_date_ops)
+		*p_ival = ((const xpu_date_t *)xdatum)->value;
+	else
+	{
+		assert(XPU_DATUM_ISNULL(xdatum));
+		return false;
+	}
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+__preagg_fetch_xdatum_as_int64(int64_t *p_ival, const xpu_datum_t *xdatum)
+{
+	if (xdatum->expr_ops == &xpu_int8_ops)
+		*p_ival = ((const xpu_int8_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_timestamp_ops)
+		*p_ival = ((const xpu_timestamp_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_timestamptz_ops)
+		*p_ival = ((const xpu_timestamptz_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_time_ops)
+		*p_ival = ((const xpu_time_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_money_ops)
+		*p_ival = ((const xpu_money_t *)xdatum)->value;
+	else
+	{
+		assert(XPU_DATUM_ISNULL(xdatum));
+		return false;
+	}
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+__preagg_fetch_xdatum_as_float64(float8_t *p_fval, const xpu_datum_t *xdatum)
+{
+	if (xdatum->expr_ops == &xpu_float8_ops)
+		*p_fval = ((const xpu_float8_t *)xdatum)->value;
+	else
+	{
+		assert(XPU_DATUM_ISNULL(xdatum));
+		return false;
+	}
+	return true;
+}
+
+/* ----------------------------------------------------------------
+ *
  * Misc functions
  *
  * ----------------------------------------------------------------
