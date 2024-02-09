@@ -4261,12 +4261,6 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
-			case KAGG_ACTION__PMIN_CASH:
-				appendStringInfo(buf, "pmin::cash[slot=%d, expr='%s']",
-								 desc->arg0_slot_id,
-								 __get_expression_cstring(css, dcontext,
-														  desc->arg0_slot_id));
-				break;
 			case KAGG_ACTION__PMAX_INT32:
 				appendStringInfo(buf, "pmax::int32[slot=%d, expr='%s']",
 								 desc->arg0_slot_id,
@@ -4285,20 +4279,8 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
-			case KAGG_ACTION__PMAX_CASH:
-				appendStringInfo(buf, "pmax::cash[slot=%d, expr='%s']",
-								 desc->arg0_slot_id,
-								 __get_expression_cstring(css, dcontext,
-														  desc->arg0_slot_id));
-				break;
 			case KAGG_ACTION__PSUM_INT:
 				appendStringInfo(buf, "psum::int[slot=%d, expr='%s']",
-								 desc->arg0_slot_id,
-								 __get_expression_cstring(css, dcontext,
-														  desc->arg0_slot_id));
-				break;
-			case KAGG_ACTION__PSUM_CASH:
-				appendStringInfo(buf, "psum::cash[slot=%d, expr='%s']",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));

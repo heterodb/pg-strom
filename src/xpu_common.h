@@ -2077,14 +2077,11 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__PMIN_INT32		302		/* <int4>,<int8> - min value */
 #define KAGG_ACTION__PMIN_INT64		303		/* <int4>,<int8> - min value */
 #define KAGG_ACTION__PMIN_FP64		304		/* <int4>,<float8> - min value */
-#define KAGG_ACTION__PMIN_CASH		305		/* <int4>,<int8(cash) - min value */
 #define KAGG_ACTION__PMAX_INT32		402		/* <int4>,<int8> - max value */
 #define KAGG_ACTION__PMAX_INT64		403		/* <int4>,<int8> - max value */
 #define KAGG_ACTION__PMAX_FP64		404		/* <int4>,<float8> - max value */
-#define KAGG_ACTION__PMAX_CASH		405		/* <int4>,<int8(cash)> - max value */
 #define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
 #define KAGG_ACTION__PSUM_FP		503		/* <float8> - sum of values */
-#define KAGG_ACTION__PSUM_CASH		504		/* <int8(cash)> - sum of values */
 #define KAGG_ACTION__PAVG_INT		601		/* <int4>,<int8> - NROWS+PSUM */
 #define KAGG_ACTION__PAVG_FP		602		/* <int4>,<float8> - NROWS+PSUM */
 #define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
@@ -3261,6 +3258,61 @@ __atomic_cas_uint64(uint64_t *ptr, uint64_t comp, uint64_t newval)
 								__ATOMIC_SEQ_CST);
 	return comp;
 #endif
+}
+
+/* ----------------------------------------------------------------
+ *
+ * xPU PreAgg common utility functions
+ *
+ * ----------------------------------------------------------------
+ */
+INLINE_FUNCTION(bool)
+__preagg_fetch_xdatum_as_int32(int32_t *p_ival, const xpu_datum_t *xdatum)
+{
+	if (xdatum->expr_ops == &xpu_int4_ops)
+		*p_ival = ((const xpu_int4_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_date_ops)
+		*p_ival = ((const xpu_date_t *)xdatum)->value;
+	else
+	{
+		assert(XPU_DATUM_ISNULL(xdatum));
+		return false;
+	}
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+__preagg_fetch_xdatum_as_int64(int64_t *p_ival, const xpu_datum_t *xdatum)
+{
+	if (xdatum->expr_ops == &xpu_int8_ops)
+		*p_ival = ((const xpu_int8_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_timestamp_ops)
+		*p_ival = ((const xpu_timestamp_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_timestamptz_ops)
+		*p_ival = ((const xpu_timestamptz_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_time_ops)
+		*p_ival = ((const xpu_time_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_money_ops)
+		*p_ival = ((const xpu_money_t *)xdatum)->value;
+	else
+	{
+		assert(XPU_DATUM_ISNULL(xdatum));
+		return false;
+	}
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+__preagg_fetch_xdatum_as_float64(float8_t *p_fval, const xpu_datum_t *xdatum)
+{
+	if (xdatum->expr_ops == &xpu_float8_ops)
+		*p_fval = ((const xpu_float8_t *)xdatum)->value;
+	else
+	{
+		assert(XPU_DATUM_ISNULL(xdatum));
+		return false;
+	}
+	return true;
 }
 
 /* ----------------------------------------------------------------

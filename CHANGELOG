@@ -1,3 +1,6 @@
+* Thu Feb  8 2024 KaiGai Kohei <kaigai@heterodb.com> - 5.0-3
+- various bug fixes
+
 * Fri Dec 15 2023 KaiGai Kohei <kaigai@heterodb.com> - 5.0-1
 - The code base has been re-designed entirely with various improvement.
 - Process model was revised to concentrate GPU resource management to

@@ -1198,7 +1198,7 @@ __update_preagg__nrows_cond(kern_context *kcxt,
 							kern_colmeta *cmeta,
 							kern_aggregate_desc *desc)
 {
-	xpu_datum_t	   *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 		__atomic_add_uint64((uint64_t *)buffer, 1);
@@ -1213,16 +1213,16 @@ __update_preagg__pmin_int32(kern_context *kcxt,
 							kern_colmeta *cmeta,
 							kern_aggregate_desc *desc)
 {
-	xpu_int4_t	   *xdatum = (xpu_int4_t *)
-		kcxt->kvars_slot[desc->arg0_slot_id];
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	int32_t		ival;
 
-	if (!XPU_DATUM_ISNULL(xdatum))
+	if (__preagg_fetch_xdatum_as_int32(&ival, xdatum))
 	{
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
-		assert(xdatum->expr_ops == &xpu_int4_ops);
+
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_min_int64(&r->value, xdatum->value);
+		__atomic_min_int64(&r->value, ival);
 	}
 }
 
@@ -1232,16 +1232,16 @@ __update_preagg__pmin_int64(kern_context *kcxt,
 							kern_colmeta *cmeta,
 							kern_aggregate_desc *desc)
 {
-	xpu_int8_t	   *xdatum = (xpu_int8_t *)
-		kcxt->kvars_slot[desc->arg0_slot_id];
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	int64_t		ival;
 
-	if (!XPU_DATUM_ISNULL(xdatum))
+	if (__preagg_fetch_xdatum_as_int64(&ival, xdatum))
 	{
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
-		assert(xdatum->expr_ops == &xpu_int8_ops);
+
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_min_int64(&r->value, xdatum->value);
+		__atomic_min_int64(&r->value, ival);
 	}
 }
 
@@ -1254,16 +1254,16 @@ __update_preagg__pmax_int32(kern_context *kcxt,
 							kern_colmeta *cmeta,
 							kern_aggregate_desc *desc)
 {
-	xpu_int4_t	   *xdatum = (xpu_int4_t *)
-		kcxt->kvars_slot[desc->arg0_slot_id];
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	int32_t		ival;
 
-	if (!XPU_DATUM_ISNULL(xdatum))
+	if (__preagg_fetch_xdatum_as_int32(&ival, xdatum))
 	{
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
-		assert(xdatum->expr_ops == &xpu_int4_ops);
+
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_max_int64(&r->value, xdatum->value);
+		__atomic_max_int64(&r->value, ival);
 	}
 }
 
@@ -1273,16 +1273,16 @@ __update_preagg__pmax_int64(kern_context *kcxt,
 							kern_colmeta *cmeta,
 							kern_aggregate_desc *desc)
 {
-	xpu_int8_t	   *xdatum = (xpu_int8_t *)
-		kcxt->kvars_slot[desc->arg0_slot_id];
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	int64_t		ival;
 
-	if (!XPU_DATUM_ISNULL(xdatum))
+	if (__preagg_fetch_xdatum_as_int64(&ival, xdatum))
 	{
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
-		assert(xdatum->expr_ops == &xpu_int8_ops);
+
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_max_int64(&r->value, xdatum->value);
+		__atomic_max_int64(&r->value, ival);
 	}
 }
 
@@ -1295,16 +1295,16 @@ __update_preagg__pmin_fp64(kern_context *kcxt,
 						   kern_colmeta *cmeta,
 						   kern_aggregate_desc *desc)
 {
-	xpu_float8_t   *xdatum = (xpu_float8_t *)
-		kcxt->kvars_slot[desc->arg0_slot_id];
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	float8_t	fval;
 
-	if (!XPU_DATUM_ISNULL(xdatum))
+	if (__preagg_fetch_xdatum_as_float64(&fval, xdatum))
 	{
 		kagg_state__pminmax_fp64_packed *r =
 			(kagg_state__pminmax_fp64_packed *)buffer;
-		assert(xdatum->expr_ops == &xpu_float8_ops);
+
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_min_fp64(&r->value, xdatum->value);
+		__atomic_min_fp64(&r->value, fval);
 	}
 }
 
@@ -1317,16 +1317,16 @@ __update_preagg__pmax_fp64(kern_context *kcxt,
 						   kern_colmeta *cmeta,
 						   kern_aggregate_desc *desc)
 {
-	xpu_float8_t   *xdatum = (xpu_float8_t *)
-		kcxt->kvars_slot[desc->arg0_slot_id];
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	float8_t	fval;
 
-	if (!XPU_DATUM_ISNULL(xdatum))
+	if (__preagg_fetch_xdatum_as_float64(&fval, xdatum))
 	{
 		kagg_state__pminmax_fp64_packed *r =
 			(kagg_state__pminmax_fp64_packed *)buffer;
-		assert(xdatum->expr_ops == &xpu_float8_ops);
+
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_min_fp64(&r->value, xdatum->value);
+		__atomic_max_fp64(&r->value, fval);
 	}
 }
 
@@ -1339,16 +1339,16 @@ __update_preagg__psum_int(kern_context *kcxt,
 						  kern_colmeta *cmeta,
 						  kern_aggregate_desc *desc)
 {
-	xpu_int8_t	   *xdatum = (xpu_int8_t *)
-		kcxt->kvars_slot[desc->arg0_slot_id];
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	int64_t		ival;
 
-	if (!XPU_DATUM_ISNULL(xdatum))
+	if (__preagg_fetch_xdatum_as_int64(&ival, xdatum))
 	{
 		kagg_state__psum_int_packed *r =
 			(kagg_state__psum_int_packed *)buffer;
-		assert(xdatum->expr_ops == &xpu_int8_ops);
+
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_int64(&r->sum, xdatum->value);
+		__atomic_add_int64(&r->sum, ival);
 	}
 }
 
@@ -1361,16 +1361,16 @@ __update_preagg__psum_fp(kern_context *kcxt,
 						 kern_colmeta *cmeta,
 						 kern_aggregate_desc *desc)
 {
-	xpu_float8_t   *xdatum = (xpu_float8_t *)
-		kcxt->kvars_slot[desc->arg0_slot_id];
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	float8_t	fval;
 
-	if (!XPU_DATUM_ISNULL(xdatum))
+	if (__preagg_fetch_xdatum_as_float64(&fval, xdatum))
 	{
 		kagg_state__psum_fp_packed *r =
 			(kagg_state__psum_fp_packed *)buffer;
-		assert(xdatum->expr_ops == &xpu_float8_ops);
+
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_fp64(&r->sum, xdatum->value);
+		__atomic_add_fp64(&r->sum, fval);
 	}
 }
 
@@ -1383,17 +1383,17 @@ __update_preagg__pstddev(kern_context *kcxt,
 						 kern_colmeta *cmeta,
 						 kern_aggregate_desc *desc)
 {
-	xpu_float8_t   *xdatum = (xpu_float8_t *)
-		kcxt->kvars_slot[desc->arg0_slot_id];
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	float8_t	fval;
 
-	if (!XPU_DATUM_ISNULL(xdatum))
+	if (__preagg_fetch_xdatum_as_float64(&fval, xdatum))
 	{
 		kagg_state__stddev_packed *r =
 			(kagg_state__stddev_packed *)buffer;
-		assert(xdatum->expr_ops == &xpu_float8_ops);
+
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_fp64(&r->sum_x,  xdatum->value);
-		__atomic_add_fp64(&r->sum_x2, xdatum->value * xdatum->value);
+		__atomic_add_fp64(&r->sum_x,  fval);
+		__atomic_add_fp64(&r->sum_x2, fval * fval);
 	}
 }
 
@@ -1406,23 +1406,22 @@ __update_preagg__pcovar(kern_context *kcxt,
 						kern_colmeta *cmeta,
 						kern_aggregate_desc *desc)
 {
-	xpu_float8_t   *xdatum = (xpu_float8_t *)
-		kcxt->kvars_slot[desc->arg0_slot_id];
-	xpu_float8_t   *ydatum = (xpu_float8_t *)
-		kcxt->kvars_slot[desc->arg1_slot_id];
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	const xpu_datum_t  *ydatum = kcxt->kvars_slot[desc->arg1_slot_id];
+	float8_t	xval, yval;
 
-	if (!XPU_DATUM_ISNULL(xdatum) && !XPU_DATUM_ISNULL(ydatum))
+	if (__preagg_fetch_xdatum_as_float64(&xval, xdatum) &&
+		__preagg_fetch_xdatum_as_float64(&yval, ydatum))
 	{
 		kagg_state__covar_packed *r =
 			(kagg_state__covar_packed *)buffer;
-		assert(xdatum->expr_ops == &xpu_float8_ops &&
-			   ydatum->expr_ops == &xpu_float8_ops);
+
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_add_fp64(&r->sum_x,  xdatum->value);
-		__atomic_add_fp64(&r->sum_xx, xdatum->value * xdatum->value);
-		__atomic_add_fp64(&r->sum_y,  ydatum->value);
-		__atomic_add_fp64(&r->sum_yy, ydatum->value * ydatum->value);
-		__atomic_add_fp64(&r->sum_xy, xdatum->value * ydatum->value);
+		__atomic_add_fp64(&r->sum_x,  xval);
+		__atomic_add_fp64(&r->sum_xx, xval * xval);
+		__atomic_add_fp64(&r->sum_y,  yval);
+		__atomic_add_fp64(&r->sum_yy, yval * yval);
+		__atomic_add_fp64(&r->sum_xy, xval * yval);
 	}
 }
 
