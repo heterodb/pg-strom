@@ -354,6 +354,7 @@ buildOuterJoinPlanInfo(PlannerInfo *root,
 					   RelOptInfo *outer_rel,
 					   uint32_t xpu_task_flags,
 					   bool try_parallel_path,
+					   bool consider_partition,
 					   ParamPathInfo **p_param_info,
 					   List **p_inner_paths_list)
 {
@@ -366,19 +367,27 @@ buildOuterJoinPlanInfo(PlannerInfo *root,
 
 	if (IS_SIMPLE_REL(outer_rel))
 	{
-		pp_info = buildOuterScanPlanInfo(root,
+		List   *pp_list;
+		List   *param_list;
+
+		pp_list = buildOuterScanPlanInfo(root,
 										 outer_rel,
 										 xpu_task_flags,
 										 try_parallel_path,
+										 consider_partition,
 										 false,
 										 true,
-										 &param_info);
-		if (pp_info)
+										 &param_list);
+		if (list_length(pp_list) > 0)
 		{
-			*p_param_info = param_info;
+			//HOGE
+			if (list_length(pp_list) != 1)
+				return NULL;
+			*p_param_info = linitial(param_list);
 			*p_inner_paths_list = NIL;
+			return linitial(pp_list);
 		}
-		return pp_info;
+		return NULL;
 	}
 	else if (IS_JOIN_REL(outer_rel))
 	{
@@ -440,6 +449,7 @@ buildOuterJoinPlanInfo(PlannerInfo *root,
 											 o_path->parent,
 											 xpu_task_flags,
 											 try_parallel_path,
+											 consider_partition,
 											 &param_info,	/* dummy */
 											 &inner_paths_list);
 			if (!pp_prev)
@@ -474,6 +484,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
                             JoinType join_type,
                             JoinPathExtraData *extra,
 							bool try_parallel_path,
+							bool consider_partition,
 							uint32_t xpu_task_flags,
 							const CustomPathMethods *xpujoin_path_methods)
 {
@@ -506,6 +517,7 @@ try_add_simple_xpujoin_path(PlannerInfo *root,
 									 outer_rel,
 									 xpu_task_flags,
 									 try_parallel_path,
+									 consider_partition,
 									 &outer_path.param_info,
 									 &inner_paths_list);
 	if (!pp_prev)
@@ -592,7 +604,8 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 							 JoinType join_type,
 							 JoinPathExtraData *extra,
 							 uint32_t xpu_task_flags,
-							 const CustomPathMethods *xpujoin_path_methods)
+							 const CustomPathMethods *xpujoin_path_methods,
+							 bool consider_partition)
 {
 	List	   *inner_pathlist;
 	ListCell   *lc;
@@ -624,6 +637,7 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 		}
 
 		if (inner_path)
+		{
 			try_add_simple_xpujoin_path(root,
 										joinrel,
 										outerrel,
@@ -631,8 +645,21 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 										join_type,
 										extra,
 										try_parallel > 0,
+										false,
 										xpu_task_flags,
 										xpujoin_path_methods);
+			if (consider_partition)
+				try_add_simple_xpujoin_path(root,
+											joinrel,
+											outerrel,
+											inner_path,
+											join_type,
+											extra,
+											try_parallel > 0,
+											true,
+											xpu_task_flags,
+											xpujoin_path_methods);
+		}
 		/* 2nd trial uses the partial paths */
 		inner_pathlist = innerrel->partial_pathlist;
 	}
@@ -668,7 +695,8 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 										 join_type,
 										 extra,
 										 TASK_KIND__GPUJOIN,
-										 &gpujoin_path_methods);
+										 &gpujoin_path_methods,
+										 pgstrom_enable_partitionwise_gpujoin);
 		if (pgstrom_enable_dpujoin)
 			__xpuJoinAddCustomPathCommon(root,
 										 joinrel,
@@ -677,7 +705,8 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 										 join_type,
 										 extra,
 										 TASK_KIND__DPUJOIN,
-										 &dpujoin_path_methods);
+										 &dpujoin_path_methods,
+										 pgstrom_enable_partitionwise_dpujoin);
 	}
 }
 

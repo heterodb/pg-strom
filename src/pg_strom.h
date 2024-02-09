@@ -814,13 +814,14 @@ extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
 extern void		sort_device_qualifiers(List *dev_quals_list,
 									   List *dev_costs_list);
 extern pgstromPlanInfo *try_fetch_xpuscan_planinfo(const Path *path);
-extern pgstromPlanInfo *buildOuterScanPlanInfo(PlannerInfo *root,
-											   RelOptInfo *baserel,
-											   uint32_t xpu_task_flags,
-											   bool parallel_path,
-											   bool allow_host_quals,
-											   bool allow_no_device_quals,
-											   ParamPathInfo **p_param_info);
+extern List	   *buildOuterScanPlanInfo(PlannerInfo *root,
+									   RelOptInfo *baserel,
+									   uint32_t xpu_task_flags,
+									   bool parallel_path,
+									   bool consider_partition,
+									   bool allow_host_quals,
+									   bool allow_no_device_quals,
+									   List **p_param_info_list);
 extern bool		ExecFallbackCpuScan(pgstromTaskState *pts,
 									HeapTuple tuple);
 extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
@@ -835,6 +836,7 @@ extern pgstromPlanInfo *buildOuterJoinPlanInfo(PlannerInfo *root,
 											   RelOptInfo *outer_rel,
 											   uint32_t xpu_task_flags,
 											   bool try_parallel_path,
+											   bool consider_partition,
 											   ParamPathInfo **p_param_info,
 											   List **p_inner_paths_list);
 extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
