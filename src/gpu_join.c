@@ -22,6 +22,7 @@ static CustomExecMethods	gpujoin_exec_methods;
 static bool					pgstrom_enable_gpujoin = false;		/* GUC */
 static bool					pgstrom_enable_gpuhashjoin = false;	/* GUC */
 static bool					pgstrom_enable_gpugistindex = false;/* GUC */
+static bool					pgstrom_enable_partitionwise_gpujoin = false;
 
 static CustomPathMethods	dpujoin_path_methods;
 static CustomScanMethods	dpujoin_plan_methods;
@@ -29,6 +30,7 @@ static CustomExecMethods	dpujoin_exec_methods;
 static bool					pgstrom_enable_dpujoin = false;		/* GUC */
 static bool					pgstrom_enable_dpuhashjoin = false;	/* GUC */
 static bool					pgstrom_enable_dpugistindex = false;/* GUC */
+static bool					pgstrom_enable_partitionwise_dpujoin = false;
 
 /*
  * try_fetch_xpujoin_planinfo
@@ -2453,6 +2455,15 @@ pgstrom_init_gpu_join(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* turn on/off partition-wise gpujoin */
+	DefineCustomBoolVariable("pg_strom.enable_partitionwise_gpujoin",
+							 "Enables the use of partition-wise GpuJoin",
+							 NULL,
+							 &pgstrom_enable_partitionwise_gpujoin,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* setup path methods */
 	memset(&gpujoin_path_methods, 0, sizeof(CustomPathMethods));
 	gpujoin_path_methods.CustomName				= "GpuJoin";
@@ -2515,6 +2526,15 @@ pgstrom_init_dpu_join(void)
 							 "Enables the use of DpuGistIndex logic",
 							 NULL,
 							 &pgstrom_enable_dpugistindex,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* turn on/off partition-wise dpujoin */
+	DefineCustomBoolVariable("pg_strom.enable_partitionwise_dpujoin",
+							 "Enables the use of partition-wise DpuJoin",
+							 NULL,
+							 &pgstrom_enable_partitionwise_dpujoin,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
