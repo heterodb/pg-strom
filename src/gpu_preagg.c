@@ -1540,6 +1540,7 @@ __xpuPreAggAddCustomPathCommon(PlannerInfo *root,
 										 input_rel,
 										 xpu_task_flags,
 										 (try_parallel > 0),
+										 false, //consider_partition
 										 &param_info,
 										 &inner_paths_list);
 		if (pp_info)
