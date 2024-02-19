@@ -2194,7 +2194,7 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 		appendStringInfo(&buf, "%s (", (bms_is_empty(pts->optimal_gpus)
 										? "disabled"
 										: "enabled"));
-		if (!pgstrom_regression_test_mode)
+		if (!pgstrom_regression_test_mode && conn)
 			appendStringInfo(&buf, "%s; ", conn->devname);
 		pos = buf.len;
 

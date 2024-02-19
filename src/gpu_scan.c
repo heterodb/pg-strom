@@ -281,20 +281,104 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 	return pp_info;
 }
 
-static pgstromPlanInfo *
+/*
+ * fixup_expression_by_partition_leaf
+ */
+typedef struct
+{
+	PlannerInfo *root;
+	RelOptInfo	*leaf_rel;
+	AppendRelInfo **ap_info_index;
+} __fixup_expression_by_partition_leaf_context;
+
+
+static Node *
+__fixup_expression_by_partition_leaf_walker(Node *node, void *__data)
+{
+	__fixup_expression_by_partition_leaf_context *con = __data;
+
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var	   *var = (Var *)node;
+
+		while (con->ap_info_index[var->varno] != NULL)
+		{
+			AppendRelInfo *ap_info = con->ap_info_index[var->varno];
+
+			if (var->varattno > list_length(ap_info->translated_vars))
+				elog(ERROR, "attribute %d of relation \"%s\" does not exist",
+					 var->varattno, get_rel_name(ap_info->parent_reloid));
+			var = list_nth(ap_info->translated_vars,
+						   var->varattno - 1);
+		}
+		return (Node *)copyObject(var);
+	}
+	return expression_tree_mutator(node,
+								   __fixup_expression_by_partition_leaf_walker,
+								   __data);
+}
+
+List *
+fixup_expression_by_partition_leaf(PlannerInfo *root,
+								   RelOptInfo *leaf_rel,
+								   List *quals)
+{
+	__fixup_expression_by_partition_leaf_context con;
+	int		nrooms = root->simple_rel_array_size + 1;
+	int		curr = -1;
+	bool	needs_fixup = false;
+
+	/* shortcut, if no partition tables are involved */
+	if (!root->append_rel_array)
+		return quals;
+
+	memset(&con, 0, sizeof(con));
+	con.root = root;
+	con.leaf_rel = leaf_rel;
+	con.ap_info_index = alloca(sizeof(AppendRelInfo *) * nrooms);
+	memset(con.ap_info_index, 0, sizeof(AppendRelInfo *) * nrooms);
+
+	while ((curr = bms_next_member(leaf_rel->relids, curr)) >= 0)
+	{
+		int		leaf_id = curr;
+	again:
+		for (int k=0; k < root->simple_rel_array_size; k++)
+		{
+			AppendRelInfo *ap_info = root->append_rel_array[k];
+
+			if (ap_info && ap_info->child_relid == leaf_id)
+			{
+				Assert(ap_info->parent_relid < nrooms);
+				con.ap_info_index[ap_info->parent_relid] = ap_info;
+				leaf_id = ap_info->parent_relid;
+				needs_fixup = true;
+				goto again;
+			}
+		}
+	}
+	if (!needs_fixup)
+		return quals;
+	return (List *)__fixup_expression_by_partition_leaf_walker((Node *)quals, &con);
+}
+
+static pgstromOuterPartitionLeafInfo *
 buildSimpleScanPlanInfo(PlannerInfo *root,
 						RelOptInfo *baserel,
 						uint32_t xpu_task_flags,
 						bool parallel_path,
 						bool allow_host_quals,
-						bool allow_no_device_quals,
-						ParamPathInfo **p_param_info)
+						bool allow_no_device_quals)
 {
+	pgstromOuterPartitionLeafInfo *op_leaf;
+	pgstromPlanInfo *pp_info;
 	ParamPathInfo *param_info;
 	List	   *dev_quals = NIL;
 	List	   *dev_costs = NIL;
 	List	   *host_quals = NIL;
 	ListCell   *lc;
+	Path	   *__outer_path;
 	Cardinality	scan_nrows = baserel->rows;
 
 	Assert((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
@@ -353,18 +437,32 @@ buildSimpleScanPlanInfo(PlannerInfo *root,
 		}
 		scan_nrows = param_info->ppi_rows;
 	}
-	*p_param_info = param_info;
 	if (!allow_no_device_quals && dev_quals == NIL)
 		return NULL;
 	sort_device_qualifiers(dev_quals, dev_costs);
 
-	return __buildSimpleScanPlanInfo(root,
-									 baserel,
-									 xpu_task_flags,
-									 parallel_path,
-									 dev_quals,
-									 host_quals,
-									 scan_nrows);
+	pp_info = __buildSimpleScanPlanInfo(root,
+										baserel,
+										xpu_task_flags,
+										parallel_path,
+										dev_quals,
+										host_quals,
+										scan_nrows);
+	if (!pp_info)
+		return NULL;
+
+	/* setup pseudo outer-path */
+	__outer_path = makeNode(Path);
+	__outer_path->parent = baserel;
+	__outer_path->param_info = param_info;
+	__outer_path->rows = scan_nrows;
+
+	op_leaf = palloc0(sizeof(pgstromOuterPartitionLeafInfo));
+	op_leaf->pp_info = pp_info;
+	op_leaf->pseudo_outer_path = __outer_path;
+	op_leaf->inner_paths_list = NIL;
+
+	return op_leaf;
 }
 
 List *
@@ -374,12 +472,10 @@ buildOuterScanPlanInfo(PlannerInfo *root,
 					   bool parallel_path,
 					   bool consider_partition,
 					   bool allow_host_quals,
-					   bool allow_no_device_quals,
-					   List **p_param_info_list)
+					   bool allow_no_device_quals)
 {
+	pgstromOuterPartitionLeafInfo *op_leaf;
 	RangeTblEntry   *rte = root->simple_rte_array[baserel->relid];
-	pgstromPlanInfo *pp_info;
-	ParamPathInfo	*param_info;
 
 	Assert(IS_SIMPLE_REL(baserel));
 	/* does the base relation want parallel scan? */
@@ -388,10 +484,9 @@ buildOuterScanPlanInfo(PlannerInfo *root,
 	/* brief check towards the supplied baserel */
 	if (rte->relkind == RELKIND_PARTITIONED_TABLE)
 	{
-		if (true) //consider_partition)
+		if (consider_partition)
 		{
 			List   *results = NIL;
-			List   *param_list = NIL;
 
 			for (int k=0; k < baserel->nparts; k++)
 			{
@@ -399,24 +494,18 @@ buildOuterScanPlanInfo(PlannerInfo *root,
 				{
 					RelOptInfo *leafrel = baserel->part_rels[k];
 
-					pp_info = buildSimpleScanPlanInfo(root,
+					op_leaf = buildSimpleScanPlanInfo(root,
 													  leafrel,
 													  xpu_task_flags,
 													  parallel_path,
 													  allow_host_quals,
-													  allow_no_device_quals,
-													  &param_info);
-					if (!pp_info)
+													  allow_no_device_quals);
+					if (!op_leaf)
 						return NIL;
-					results = lappend(results, pp_info);
-					param_list = lappend(param_list, param_info);
+					results = lappend(results, op_leaf);
 				}
 			}
-			if (results != NIL)
-			{
-				*p_param_info_list = param_list;
-				return results;
-			}
+			return results;
 		}
 	}
 	else if (rte->relkind == RELKIND_RELATION ||
@@ -424,36 +513,28 @@ buildOuterScanPlanInfo(PlannerInfo *root,
 	{
 		if (get_relation_am(rte->relid, true) == HEAP_TABLE_AM_OID)
 		{
-			pp_info = buildSimpleScanPlanInfo(root,
+			op_leaf = buildSimpleScanPlanInfo(root,
 											  baserel,
 											  xpu_task_flags,
 											  parallel_path,
 											  allow_host_quals,
-											  allow_no_device_quals,
-											  &param_info);
-			if (pp_info)
-			{
-				*p_param_info_list = list_make1(param_info);
-				return list_make1(pp_info);
-			}
+											  allow_no_device_quals);
+			if (op_leaf)
+				return list_make1(op_leaf);
 		}
 	}
 	else if (rte->relkind == RELKIND_FOREIGN_TABLE)
 	{
 		if (baseRelIsArrowFdw(baserel))
 		{
-			pp_info = buildSimpleScanPlanInfo(root,
+			op_leaf = buildSimpleScanPlanInfo(root,
 											  baserel,
 											  xpu_task_flags,
 											  parallel_path,
 											  allow_host_quals,
-											  allow_no_device_quals,
-											  &param_info);
-			if (pp_info)
-			{
-				*p_param_info_list = list_make1(param_info);
-				return list_make1(pp_info);
-			}
+											  allow_no_device_quals);
+			if (op_leaf)
+				return list_make1(op_leaf);
 		}
 	}
 	return NIL;
@@ -472,41 +553,38 @@ buildXpuScanPath(PlannerInfo *root,
 				 const CustomPathMethods *xpuscan_path_methods)
 {
 	CustomPath *cpath = NULL;
-	List	   *pp_list;
-	List	   *param_list;
+	List	   *op_leaf_list;
 
-	pp_list = buildOuterScanPlanInfo(root,
-									 baserel,
-									 xpu_task_flags,
-									 parallel_path,
-									 false,
-									 allow_host_quals,
-									 allow_no_device_quals,
-									 &param_list);
-	if (list_length(pp_list) > 0)
+	op_leaf_list = buildOuterScanPlanInfo(root,
+										  baserel,
+										  xpu_task_flags,
+										  parallel_path,
+										  false,
+										  allow_host_quals,
+										  allow_no_device_quals);
+	if (list_length(op_leaf_list) > 0)
 	{
-		pgstromPlanInfo *pp_info = linitial(pp_list);
-		ParamPathInfo *param_info = linitial(param_list);
-
-		Assert(list_length(pp_list) == 1);
+		pgstromOuterPartitionLeafInfo *op_leaf = linitial(op_leaf_list);
+		pgstromPlanInfo *pp_info = op_leaf->pp_info;
+		Path	   *pseudo_outer_path = op_leaf->pseudo_outer_path;
 
 		cpath = makeNode(CustomPath);
-		cpath->path.pathtype = T_CustomScan;
-		cpath->path.parent = baserel;
-		cpath->path.pathtarget = baserel->reltarget;
-		cpath->path.param_info = param_info;
+		cpath->path.pathtype    = T_CustomScan;
+		cpath->path.parent      = baserel;
+		cpath->path.pathtarget  = baserel->reltarget;
+		cpath->path.param_info  = pseudo_outer_path->param_info;
 		cpath->path.parallel_aware = (pp_info->parallel_nworkers > 0);
 		cpath->path.parallel_safe = baserel->consider_parallel;
 		cpath->path.parallel_workers = pp_info->parallel_nworkers;
-		cpath->path.rows = pp_info->scan_rows;
+		cpath->path.rows        = pp_info->scan_rows;
 		cpath->path.startup_cost = pp_info->scan_startup_cost;
-		cpath->path.total_cost = (pp_info->scan_startup_cost +
-								  pp_info->scan_run_cost +
-								  pp_info->final_cost);
-		cpath->path.pathkeys = NIL;	/* unsorted results */
-		cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
-		cpath->custom_paths = NIL;
-		cpath->custom_private = list_make1(pp_info);
+		cpath->path.total_cost  = (pp_info->scan_startup_cost +
+								   pp_info->scan_run_cost +
+								   pp_info->final_cost);
+		cpath->path.pathkeys    = NIL;	/* unsorted results */
+		cpath->flags            = CUSTOMPATH_SUPPORT_PROJECTION;
+		cpath->custom_paths     = NIL;
+		cpath->custom_private   = list_make1(pp_info);
 		cpath->methods = xpuscan_path_methods;
 	}
 	return cpath;

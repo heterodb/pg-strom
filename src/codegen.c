@@ -3877,8 +3877,10 @@ __codegen_build_groupby_actions(codegen_context *context,
 		if (action == KAGG_ACTION__VREF ||
 			action == KAGG_ACTION__VREF_NOKEY)
 		{
-			kvdef = try_inject_groupby_expression(context, kexp, &buf, tle->expr);
-
+			kvdef = try_inject_groupby_expression(context,
+												  kexp,
+												  &buf,
+												  tle->expr);
 			desc->action = KAGG_ACTION__VREF;
             desc->arg0_slot_id = kvdef->kv_slot_id;
 		}
@@ -3894,7 +3896,10 @@ __codegen_build_groupby_actions(codegen_context *context,
 			{
 				Expr   *fn_arg = lfirst(cell);
 
-				kvdef = try_inject_groupby_expression(context, kexp, &buf, fn_arg);
+				kvdef = try_inject_groupby_expression(context,
+													  kexp,
+													  &buf,
+													  fn_arg);
 				if (cell == list_head(func->args))
 				{
 					desc->arg0_slot_id = kvdef->kv_slot_id;

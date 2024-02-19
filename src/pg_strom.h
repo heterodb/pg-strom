@@ -333,6 +333,16 @@ typedef struct
 	 : (pp_info)->inners[(pp_info)->num_rels - 1].join_run_cost)
 
 /*
+ * context for partition-wise xPU-Join/PreAgg pushdown per partition leaf
+ */
+typedef struct
+{
+	pgstromPlanInfo *pp_info;
+	Path	   *pseudo_outer_path;	/* only part of fields are valid */
+	List	   *inner_paths_list;
+} pgstromOuterPartitionLeafInfo;
+
+/*
  * pgstromSharedState
  */
 typedef struct
@@ -814,14 +824,16 @@ extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
 extern void		sort_device_qualifiers(List *dev_quals_list,
 									   List *dev_costs_list);
 extern pgstromPlanInfo *try_fetch_xpuscan_planinfo(const Path *path);
+extern List	   *fixup_expression_by_partition_leaf(PlannerInfo *root,
+												   RelOptInfo *leaf_rel,
+												   List *quals);
 extern List	   *buildOuterScanPlanInfo(PlannerInfo *root,
 									   RelOptInfo *baserel,
 									   uint32_t xpu_task_flags,
 									   bool parallel_path,
 									   bool consider_partition,
 									   bool allow_host_quals,
-									   bool allow_no_device_quals,
-									   List **p_param_info_list);
+									   bool allow_no_device_quals);
 extern bool		ExecFallbackCpuScan(pgstromTaskState *pts,
 									HeapTuple tuple);
 extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
@@ -832,13 +844,11 @@ extern void		pgstrom_init_dpu_scan(void);
  * gpu_join.c
  */
 extern pgstromPlanInfo *try_fetch_xpujoin_planinfo(const Path *path);
-extern pgstromPlanInfo *buildOuterJoinPlanInfo(PlannerInfo *root,
-											   RelOptInfo *outer_rel,
-											   uint32_t xpu_task_flags,
-											   bool try_parallel_path,
-											   bool consider_partition,
-											   ParamPathInfo **p_param_info,
-											   List **p_inner_paths_list);
+extern List	   *buildOuterJoinPlanInfo(PlannerInfo *root,
+									   RelOptInfo *outer_rel,
+									   uint32_t xpu_task_flags,
+									   bool try_parallel_path,
+									   bool consider_partition);
 extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
 										 RelOptInfo *joinrel,
 										 CustomPath *cpath,
