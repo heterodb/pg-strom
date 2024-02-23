@@ -807,6 +807,40 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 }
 
 /*
+ * __xpuJoinTryAddPartitionLeafs
+ */
+static void
+__xpuJoinTryAddPartitionLeafs(PlannerInfo *root,
+							  RelOptInfo *joinrel,
+							  bool be_parallel)
+{
+	List	   *op_leaf_list = NIL;
+
+	for (int k=0; k < joinrel->nparts; k++)
+	{
+		RelOptInfo *leaf_rel = joinrel->part_rels[k];
+		pgstromOuterPathLeafInfo *op_leaf;
+
+		op_leaf = pgstrom_find_op_normal(leaf_rel, be_parallel);
+		if (!op_leaf)
+			return;
+		op_leaf_list = lappend(op_leaf_list, op_leaf);
+	}
+	pgstrom_remember_op_leafs(joinrel, op_leaf_list, be_parallel);
+
+	if (joinrel->parent)
+	{
+		RelOptInfo *parent = joinrel->parent;
+
+		if (parent->nparts > 0 &&
+			parent->part_rels[parent->nparts-1] == joinrel)
+		{
+			__xpuJoinTryAddPartitionLeafs(root, parent, be_parallel);
+		}
+	}
+}
+
+/*
  * XpuJoinAddCustomPath
  */
 static void
@@ -848,6 +882,17 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 										 TASK_KIND__DPUJOIN,
 										 &dpujoin_path_methods,
 										 pgstrom_enable_partitionwise_dpujoin);
+		if (joinrel->parent)
+		{
+			RelOptInfo *parent = joinrel->parent;
+
+			if (parent->nparts > 0 &&
+				parent->part_rels[parent->nparts-1] == joinrel)
+			{
+				__xpuJoinTryAddPartitionLeafs(root, parent, false);
+				__xpuJoinTryAddPartitionLeafs(root, parent, true);
+			}
+		}
 	}
 }
 
