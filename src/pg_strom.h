@@ -74,6 +74,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/pathnodes.h"
+#include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
@@ -337,10 +338,14 @@ typedef struct
  */
 typedef struct
 {
-	pgstromPlanInfo *pp_info;
-	Path	   *pseudo_outer_path;	/* only part of fields are valid */
-	List	   *inner_paths_list;
-} pgstromOuterPartitionLeafInfo;
+	pgstromPlanInfo	*pp_info;
+	RelOptInfo	   *outer_rel;	/* if normal relation, outer_rel == leaf_rel */
+	RelOptInfo	   *leaf_rel;
+	ParamPathInfo  *leaf_param;
+	Cardinality		leaf_nrows;
+	Cost			leaf_cost;
+	List		   *inner_paths_list;
+} pgstromOuterPathLeafInfo;
 
 /*
  * pgstromSharedState
@@ -824,9 +829,6 @@ extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
 extern void		sort_device_qualifiers(List *dev_quals_list,
 									   List *dev_costs_list);
 extern pgstromPlanInfo *try_fetch_xpuscan_planinfo(const Path *path);
-extern List	   *fixup_expression_by_partition_leaf(PlannerInfo *root,
-												   RelOptInfo *leaf_rel,
-												   List *quals);
 extern List	   *buildOuterScanPlanInfo(PlannerInfo *root,
 									   RelOptInfo *baserel,
 									   uint32_t xpu_task_flags,
@@ -946,7 +948,12 @@ extern bool		pgstrom_init_dpu_device(void);
 extern void		form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info);
 extern pgstromPlanInfo *deform_pgstrom_plan_info(CustomScan *cscan);
 extern pgstromPlanInfo *copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig);
-
+extern List	   *fixup_expression_by_partition_leaf(PlannerInfo *root,
+												   Relids leaf_relids,
+												   List *clauses);
+extern Relids	fixup_relids_by_partition_leaf(PlannerInfo *root,
+											   Relids leaf_join_relids,
+											   Relids parent_relids);
 extern int		__appendBinaryStringInfo(StringInfo buf,
 										 const void *data, int datalen);
 extern int		__appendZeroStringInfo(StringInfo buf, int nbytes);
@@ -985,6 +992,16 @@ extern const char *pgstrom_githash_cstring;
 extern bool		pgstrom_enabled(void);
 extern int		pgstrom_cpu_fallback_elevel;
 extern bool		pgstrom_regression_test_mode;
+extern void		pgstrom_remember_op_normal(RelOptInfo *outer_rel,
+										   pgstromOuterPathLeafInfo *op_leaf,
+										   bool be_parallel);
+extern void		pgstrom_remember_op_leafs(RelOptInfo *parent_rel,
+										  List *op_leaf_list,
+										  bool be_parallel);
+extern pgstromOuterPathLeafInfo *pgstrom_find_op_normal(RelOptInfo *outer_rel,
+														bool be_parallel);
+extern List	   *pgstrom_find_op_leafs(RelOptInfo *outer_rel,
+									  bool be_parallel);
 extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);
 extern void		_PG_init(void);
 

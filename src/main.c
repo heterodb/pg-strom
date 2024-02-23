@@ -328,6 +328,173 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 }
 
 /*
+ * pgstrom_path_tracker
+ */
+static HTAB	   *pgstrom_paths_htable = NULL;
+
+typedef struct
+{
+	Relids		parent_relids;
+	pgstromOuterPathLeafInfo *op_normal_single;
+	pgstromOuterPathLeafInfo *op_normal_parallel;
+	List	   *op_leaf_single;
+	List	   *op_leaf_parallel;
+	Cost		total_cost_single;
+	Cost		total_cost_parallel;
+} pgstromPathEntry;
+
+static void
+__pgstrom_build_paths_htable(void)
+{
+	if (!pgstrom_paths_htable)
+	{
+		HASHCTL		hctl;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.hcxt = CurrentMemoryContext;
+		hctl.keysize = sizeof(Relids);
+		hctl.entrysize = sizeof(pgstromPathEntry);
+		hctl.hash = bitmap_hash;
+		hctl.match = bitmap_match;
+		pgstrom_paths_htable = hash_create("PG-Strom Outer/Leaf Paths Tracker",
+										   256L,
+										   &hctl,
+										   HASH_ELEM |
+										   HASH_FUNCTION |
+										   HASH_COMPARE |
+										   HASH_CONTEXT);
+	}
+}
+
+void
+pgstrom_remember_op_normal(RelOptInfo *outer_rel,
+						   pgstromOuterPathLeafInfo *op_leaf,
+						   bool be_parallel)
+{
+	pgstromPathEntry *pp_entry;
+	bool		found;
+
+	/* sanity checks */
+	Assert(list_length(op_leaf->inner_paths_list) == op_leaf->pp_info->num_rels);
+	op_leaf->outer_rel = outer_rel;
+
+	/* remember the entry */
+	__pgstrom_build_paths_htable();
+	pp_entry = (pgstromPathEntry *)
+		hash_search(pgstrom_paths_htable,
+					&outer_rel->relids,
+					HASH_ENTER,
+					&found);
+	if (!found)
+	{
+		memset((char *)pp_entry + sizeof(Relids), 0,
+			   sizeof(pgstromPathEntry) - sizeof(Relids));
+	}
+
+	if (be_parallel)
+	{
+		if (!pp_entry->op_normal_parallel ||
+			pp_entry->op_normal_parallel->leaf_cost > op_leaf->leaf_cost)
+			pp_entry->op_normal_parallel = op_leaf;
+	}
+	else
+	{
+		if (!pp_entry->op_normal_single ||
+			pp_entry->op_normal_single->leaf_cost > op_leaf->leaf_cost)
+			pp_entry->op_normal_single = op_leaf;
+	}
+}
+
+void
+pgstrom_remember_op_leafs(RelOptInfo *parent_rel,
+						  List *op_leaf_list,
+						  bool be_parallel)
+{
+	pgstromPathEntry *pp_entry;
+	ListCell   *lc;
+	Cost		total_cost = 0.0;
+	bool		found;
+
+	__pgstrom_build_paths_htable();
+	/* calculation of total cost */
+	foreach (lc, op_leaf_list)
+	{
+		pgstromOuterPathLeafInfo *op_leaf = lfirst(lc);
+
+		/* sanity checks */
+		Assert(list_length(op_leaf->inner_paths_list) == op_leaf->pp_info->num_rels);
+		op_leaf->outer_rel = parent_rel;
+		total_cost += op_leaf->leaf_cost;
+	}
+	pp_entry = (pgstromPathEntry *)
+		hash_search(pgstrom_paths_htable,
+					&parent_rel->relids,
+					HASH_ENTER,
+					&found);
+	if (!found)
+	{
+		memset((char *)pp_entry + sizeof(Relids), 0,
+			   sizeof(pgstromPathEntry) - sizeof(Relids));
+	}
+
+	if (be_parallel)
+	{
+		if (pp_entry->op_leaf_parallel == NIL ||
+			pp_entry->total_cost_parallel > total_cost)
+		{
+			pp_entry->op_leaf_parallel = op_leaf_list;
+			pp_entry->total_cost_parallel = total_cost;
+		}
+	}
+	else
+	{
+		if (pp_entry->op_leaf_single == NIL ||
+			pp_entry->total_cost_single > total_cost)
+		{
+			pp_entry->op_leaf_single = op_leaf_list;
+			pp_entry->total_cost_single = total_cost;
+		}
+	}
+}
+
+pgstromOuterPathLeafInfo *
+pgstrom_find_op_normal(RelOptInfo *outer_rel,
+					   bool be_parallel)
+{
+	if (pgstrom_paths_htable)
+	{
+		pgstromPathEntry *pp_entry = (pgstromPathEntry *)
+			hash_search(pgstrom_paths_htable,
+						&outer_rel->relids,
+						HASH_FIND,
+						NULL);
+		if (pp_entry)
+			return (be_parallel
+					? pp_entry->op_normal_parallel
+					: pp_entry->op_normal_single);
+	}
+	return NULL;
+}
+
+List *
+pgstrom_find_op_leafs(RelOptInfo *parent_rel, bool be_parallel)
+{
+	if (pgstrom_paths_htable)
+	{
+		pgstromPathEntry *pp_entry = (pgstromPathEntry *)
+			hash_search(pgstrom_paths_htable,
+						&parent_rel->relids,
+						HASH_FIND,
+						NULL);
+		if (pp_entry)
+			return (be_parallel
+					? pp_entry->op_leaf_parallel
+					: pp_entry->op_leaf_single);
+	}
+	return NIL;
+}
+
+/*
  * pgstrom_post_planner
  */
 static PlannedStmt *
@@ -336,18 +503,32 @@ pgstrom_post_planner(Query *parse,
 					 int cursorOptions,
 					 ParamListInfo boundParams)
 {
+	HTAB	   *saved_paths_htable = pgstrom_paths_htable;
 	PlannedStmt *pstmt;
 	ListCell   *lc;
 
-	pstmt = planner_hook_next(parse,
-							  query_string,
-							  cursorOptions,
-							  boundParams);
-	/* remove dummy plan */
-	pgstrom_removal_dummy_plans(pstmt, &pstmt->planTree);
-	foreach (lc, pstmt->subplans)
-		pgstrom_removal_dummy_plans(pstmt, (Plan **)&lfirst(lc));
+	PG_TRY();
+	{
+		pgstrom_paths_htable = NULL;
 
+		pstmt = planner_hook_next(parse,
+								  query_string,
+								  cursorOptions,
+								  boundParams);
+		/* remove dummy plan */
+		pgstrom_removal_dummy_plans(pstmt, &pstmt->planTree);
+		foreach (lc, pstmt->subplans)
+			pgstrom_removal_dummy_plans(pstmt, (Plan **)&lfirst(lc));
+	}
+	PG_CATCH();
+	{
+		hash_destroy(pgstrom_paths_htable);
+		pgstrom_paths_htable = saved_paths_htable;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	hash_destroy(pgstrom_paths_htable);
+	pgstrom_paths_htable = saved_paths_htable;
 	return pstmt;
 }
 

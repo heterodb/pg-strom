@@ -55,7 +55,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 					   RelOptInfo *joinrel,
 					   JoinType join_type,
 					   List *restrict_clauses,
-					   pgstromOuterPartitionLeafInfo *op_prev,
+					   pgstromOuterPathLeafInfo *op_prev,
 					   Path **p_inner_path)
 {
 	pgstromPlanInfo *pp_prev = op_prev->pp_info;
@@ -63,7 +63,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pgstromPlanInnerInfo *pp_inner;
 	Path		   *inner_path = *p_inner_path;
 	RelOptInfo	   *inner_rel = inner_path->parent;
-	RelOptInfo	   *outer_rel = op_prev->pseudo_outer_path->parent;
+	RelOptInfo	   *outer_rel = op_prev->leaf_rel;
 	Cardinality		outer_nrows;
 	Cost			startup_cost;
 	Cost			run_cost;
@@ -346,16 +346,221 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 }
 
 /*
- * lookupOrBuildLeafJoinRelOptInfo
+ * __build_simple_xpujoin_path
  */
+static CustomPath *
+__build_simple_xpujoin_path(PlannerInfo *root,
+							RelOptInfo *join_rel,
+							Path *outer_path,	/* may be pseudo outer-path */
+							Path *inner_path,
+							JoinType join_type,
+							pgstromOuterPathLeafInfo *op_prev,
+							pgstromOuterPathLeafInfo **p_op_leaf,
+							List *restrict_clauses,
+							SpecialJoinInfo *sjinfo,
+							Relids param_source_rels,
+							bool try_parallel_path,
+							uint32_t xpu_task_flags,
+							const CustomPathMethods *xpujoin_path_methods)
+{
+	pgstromPlanInfo *pp_info;
+	pgstromPlanInnerInfo *pp_inner;
+	Relids			required_outer;
+	ParamPathInfo  *param_info;
+	CustomPath	   *cpath;
+
+	required_outer = calc_non_nestloop_required_outer(outer_path,
+													  inner_path);
+	if (required_outer &&
+		!bms_overlap(required_outer, param_source_rels))
+		return NULL;
+
+	/*
+	 * Get param info
+	 */
+	param_info = get_joinrel_parampathinfo(root,
+										   join_rel,
+										   outer_path,
+										   inner_path,
+										   sjinfo,
+										   required_outer,
+										   &restrict_clauses);
+	if (restrict_clauses == NIL)
+		return NULL;		/* cross join is not welcome */
+
+	/*
+	 * Build a new pgstromPlanInfo
+	 */
+	pp_info = __buildXpuJoinPlanInfo(root,
+									 join_rel,
+									 join_type,
+									 restrict_clauses,
+									 op_prev,
+									 &inner_path);
+	if (!pp_info)
+		return NULL;
+	pp_info->xpu_task_flags &= ~DEVTASK__MASK;
+	pp_info->xpu_task_flags |= DEVTASK__JOIN;
+	pp_inner = &pp_info->inners[pp_info->num_rels-1];
+
+	/*
+	 * Build a new CustomPath
+	 */
+	cpath = makeNode(CustomPath);
+	cpath->path.pathtype = T_CustomScan;
+	cpath->path.parent = join_rel;
+	cpath->path.pathtarget = join_rel->reltarget;
+	cpath->path.param_info = param_info;
+	cpath->path.parallel_aware = try_parallel_path;
+	cpath->path.parallel_safe = join_rel->consider_parallel;
+	cpath->path.parallel_workers = pp_info->parallel_nworkers;
+	cpath->path.pathkeys = NIL;
+	cpath->path.rows = pp_inner->join_nrows;
+	cpath->path.startup_cost = pp_inner->join_startup_cost;
+	cpath->path.total_cost = (pp_inner->join_startup_cost +
+							  pp_inner->join_run_cost +
+							  pp_info->final_cost);
+	cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+	cpath->methods = xpujoin_path_methods;
+	cpath->custom_paths = lappend(list_copy(op_prev->inner_paths_list), inner_path);
+	cpath->custom_private = list_make1(pp_info);
+	if (p_op_leaf)
+	{
+		pgstromOuterPathLeafInfo *op_leaf;
+
+		op_leaf = palloc0(sizeof(pgstromOuterPathLeafInfo));
+		op_leaf->pp_info    = pp_info;
+		op_leaf->leaf_rel   = join_rel;
+		op_leaf->leaf_param = param_info;
+		op_leaf->leaf_nrows = cpath->path.rows;
+		op_leaf->leaf_cost  = cpath->path.total_cost;
+		op_leaf->inner_paths_list = cpath->custom_paths;
+
+		*p_op_leaf = op_leaf;
+	}
+	return cpath;
+}
+
+/*
+ * try_add_xpujoin_simple_path
+ */
+static void
+try_add_xpujoin_simple_path(PlannerInfo *root,
+							RelOptInfo *join_rel,
+							RelOptInfo *outer_rel,
+                            Path *inner_path,
+                            JoinType join_type,
+                            JoinPathExtraData *extra,
+							bool try_parallel_path,
+							uint32_t xpu_task_flags,
+							const CustomPathMethods *xpujoin_path_methods)
+{
+	pgstromOuterPathLeafInfo *op_prev;
+	pgstromOuterPathLeafInfo *op_leaf;
+	Path			__outer_path;	/* pseudo outer-path */
+	CustomPath	   *cpath;
+
+	op_prev = pgstrom_find_op_normal(outer_rel, try_parallel_path);
+	if (!op_prev)
+		return;
+	memset(&__outer_path, 0, sizeof(Path));
+	__outer_path.parent = outer_rel;
+	__outer_path.param_info = op_prev->leaf_param;
+	__outer_path.rows       = op_prev->leaf_nrows;
+
+	cpath = __build_simple_xpujoin_path(root,
+										join_rel,
+										&__outer_path,
+										inner_path,
+										join_type,
+										op_prev,
+										&op_leaf,
+										extra->restrictlist,
+										extra->sjinfo,
+										extra->param_source_rels,
+										try_parallel_path,
+										xpu_task_flags,
+										xpujoin_path_methods);
+	if (!cpath)
+		return;
+	/* register the XpuJoinPath */
+	pgstrom_remember_op_normal(join_rel, op_leaf,
+							   try_parallel_path);
+	if (!try_parallel_path)
+		add_path(join_rel, &cpath->path);
+	else
+		add_partial_path(join_rel, &cpath->path);
+}
+
+/*
+ * __build_child_join_sjinfo
+ */
+static SpecialJoinInfo *
+__build_child_join_sjinfo(PlannerInfo *root,
+						  Relids leaf_join_relids,
+						  SpecialJoinInfo *parent_sjinfo)
+{
+	SpecialJoinInfo *sjinfo = makeNode(SpecialJoinInfo);
+
+	memcpy(sjinfo, parent_sjinfo, sizeof(SpecialJoinInfo));
+	sjinfo->min_lefthand = fixup_relids_by_partition_leaf(root,
+														  leaf_join_relids,
+														  sjinfo->min_lefthand);
+	sjinfo->min_righthand = fixup_relids_by_partition_leaf(root,
+														   leaf_join_relids,
+														   sjinfo->min_righthand);
+	sjinfo->syn_lefthand = fixup_relids_by_partition_leaf(root,
+														  leaf_join_relids,
+														  sjinfo->syn_lefthand);
+	sjinfo->syn_righthand = fixup_relids_by_partition_leaf(root,
+														   leaf_join_relids,
+														   sjinfo->syn_righthand);
+	return sjinfo;
+}
+
+/*
+ * __lookup_or_build_leaf_joinrel
+ */
+static AppendRelInfo **
+__make_fake_apinfo_array(PlannerInfo *root,
+						 RelOptInfo *outer_rel,
+						 RelOptInfo *inner_rel)
+{
+	AppendRelInfo **ap_info_array;
+	Relids	__relids;
+	int		i;
+
+	ap_info_array = palloc(sizeof(AppendRelInfo *) * root->simple_rel_array_size);
+	memcpy(ap_info_array, root->append_rel_array,
+		   sizeof(AppendRelInfo *) * root->simple_rel_array_size);
+	__relids = bms_union(outer_rel->relids,
+						 inner_rel->relids);
+	for (i = bms_next_member(__relids, -1);
+		 i >= 0;
+		 i = bms_next_member(__relids, i))
+	{
+		RangeTblEntry  *rte = root->simple_rte_array[i];
+
+		if (!ap_info_array[i])
+		{
+			Relation	rel = relation_open(rte->relid, NoLock);
+
+			ap_info_array[i] = make_append_rel_info(rel, rel, i, i);
+
+			relation_close(rel, NoLock);
+		}
+	}
+	return ap_info_array;
+}
+
 static RelOptInfo *
-lookupOrBuildLeafJoinRelOptInfo(PlannerInfo *root,
-								RelOptInfo *parent_joinrel,
-								RelOptInfo *outer_rel,
-								RelOptInfo *inner_rel,
-								List *restrictlist,
-								SpecialJoinInfo *sjinfo,
-								JoinType jointype)
+__lookup_or_build_leaf_joinrel(PlannerInfo *root,
+							   RelOptInfo *parent_joinrel,
+							   RelOptInfo *outer_rel,
+							   RelOptInfo *inner_rel,
+							   List *restrictlist,
+							   SpecialJoinInfo *sjinfo,
+							   JoinType jointype)
 {
 	RelOptInfo *leaf_joinrel;
 	Relids		relids;
@@ -366,12 +571,18 @@ lookupOrBuildLeafJoinRelOptInfo(PlannerInfo *root,
 	if (!leaf_joinrel)
 	{
 		RelOptKind	reloptkind_saved = inner_rel->reloptkind;
+		bool		partitionwise_saved = parent_joinrel->consider_partitionwise_join;
+		AppendRelInfo **ap_array_saved = root->append_rel_array;
 
 		/* a small hack to avoid assert() */
 		inner_rel->reloptkind = RELOPT_OTHER_MEMBER_REL;
 		PG_TRY();
 		{
 			inner_rel->reloptkind = RELOPT_OTHER_MEMBER_REL;
+			parent_joinrel->consider_partitionwise_join = true;
+			root->append_rel_array = __make_fake_apinfo_array(root,
+															  outer_rel,
+															  inner_rel);
 			leaf_joinrel = build_child_join_rel(root,
 												outer_rel,
 												inner_rel,
@@ -383,348 +594,147 @@ lookupOrBuildLeafJoinRelOptInfo(PlannerInfo *root,
 		PG_CATCH();
 		{
 			inner_rel->reloptkind = reloptkind_saved;
+			parent_joinrel->consider_partitionwise_join = partitionwise_saved;
+			root->append_rel_array = ap_array_saved;
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
 		inner_rel->reloptkind = reloptkind_saved;
+		parent_joinrel->consider_partitionwise_join = partitionwise_saved;
+		root->append_rel_array = ap_array_saved;
 	}
 	return leaf_joinrel;
 }
 
 /*
- * __buildOuterAppendPlanInfo
+ * try_add_xpujoin_partition_path
  */
-static List *
-__buildOuterAppendPlanInfo(PlannerInfo *root,
-						   AppendPath *append_path,
-						   uint32_t xpu_task_flags,
-						   bool try_parallel_path)
+static void
+try_add_xpujoin_partition_path(PlannerInfo *root,
+							   RelOptInfo *join_rel,
+							   RelOptInfo *outer_rel,
+							   Path *inner_path,
+							   JoinType join_type,
+							   JoinPathExtraData *extra,
+							   bool try_parallel_path,
+							   uint32_t xpu_task_flags,
+							   const CustomPathMethods *xpujoin_path_methods)
 {
-	List	   *results = NIL;
-	ListCell   *lc;
-
-	if (append_path->path.pathkeys != NIL)
-		return NIL;
-	
-	foreach (lc, append_path->subpaths)
-	{
-		Path   *__path = lfirst(lc);
-		List   *__temp;
-
-		__temp = buildOuterJoinPlanInfo(root,
-										__path->parent,
-										xpu_task_flags,
-										try_parallel_path,
-										false);
-		if (list_length(__temp) != 1)
-			return NIL;
-		results = lappend(results, linitial(__temp));
-	}
-	return results;
-}
-
-/*
- * __buildOuterJoinPlanInfo
- */
-static List *
-__buildOuterJoinPlanInfo(PlannerInfo *root,
-						 JoinPath *join_path,
-						 uint32_t xpu_task_flags,
-						 bool try_parallel_path,
-						 bool consider_partition)
-{
-	Path	   *outer_path = join_path->outerjoinpath;
 	List	   *op_prev_list = NIL;
-	List	   *results = NIL;
-	ListCell   *lc;
-
-	/* only supported join type */
-	if (join_path->jointype != JOIN_INNER &&
-		join_path->jointype != JOIN_LEFT &&
-		join_path->jointype != JOIN_FULL &&
-		join_path->jointype != JOIN_RIGHT)
-		return NIL;
-
-	op_prev_list = buildOuterJoinPlanInfo(root,
-										  outer_path->parent,
-										  xpu_task_flags,
-										  try_parallel_path,
-										  consider_partition);
-	foreach (lc, op_prev_list)
-	{
-		pgstromOuterPartitionLeafInfo *op_prev = lfirst(lc);
-		pgstromOuterPartitionLeafInfo *op_leaf;
-		pgstromPlanInfo *pp_info;
-		Path	   *inner_path = join_path->innerjoinpath;
-		List	   *inner_paths_list;
-
-		pp_info = __buildXpuJoinPlanInfo(root,
-										 join_path->path.parent,
-                                         join_path->jointype,
-                                         join_path->joinrestrictinfo,
-										 op_prev,
-                                         &inner_path);
-		if (!pp_info)
-			return NIL;
-		inner_paths_list = list_copy(op_prev->inner_paths_list);
-		inner_paths_list = lappend(inner_paths_list, inner_path);
-
-		op_leaf = palloc0(sizeof(pgstromOuterPartitionLeafInfo));
-		op_leaf->pp_info = pp_info;
-		op_leaf->pseudo_outer_path = &join_path->path;
-		op_leaf->inner_paths_list = inner_paths_list;
-
-		results = lappend(results, op_leaf);
-	}
-	return results;
-}
-
-/*
- * buildOuterJoinPlanInfo
- */
-List *
-buildOuterJoinPlanInfo(PlannerInfo *root,
-					   RelOptInfo *outer_rel,
-					   uint32_t xpu_task_flags,
-					   bool try_parallel_path,
-					   bool consider_partition)
-{
-	if (IS_SIMPLE_REL(outer_rel))
-	{
-		return buildOuterScanPlanInfo(root,
-									  outer_rel,
-									  xpu_task_flags,
-									  try_parallel_path,
-									  consider_partition,
-									  false,
-									  true);
-	}
-	else if (IS_JOIN_REL(outer_rel))
-	{
-		pgstromPlanInfo *pp_prev;
-		List	   *pathlist;
-		ListCell   *lc;
-
-		if (!try_parallel_path)
-			pathlist = outer_rel->pathlist;
-		else
-			pathlist = outer_rel->partial_pathlist;
-
-		foreach (lc, pathlist)
-		{
-			Path   *path = lfirst(lc);
-			List   *results;
-
-		again:
-			if (IsA(path, ProjectionPath))
-			{
-				Assert(path->pathtype == T_Result);
-				path = ((ProjectionPath *)path)->subpath;
-				goto again;
-			}
-			else if (IsA(path, GatherPath))
-			{
-				Assert(path->pathtype == T_Gather);
-				path = ((GatherPath *)path)->subpath;
-				goto again;
-			}
-			else if (consider_partition && IsA(path, AppendPath))
-			{
-				results = __buildOuterAppendPlanInfo(root,
-													 (AppendPath *)path,
-													 xpu_task_flags,
-													 try_parallel_path);
-				if (results != NIL)
-					return results;
-			}
-			else if ((pp_prev = try_fetch_xpuscan_planinfo(path)) != NULL ||
-					 (pp_prev = try_fetch_xpujoin_planinfo(path)) != NULL)
-			{
-				pgstromOuterPartitionLeafInfo *op_leaf;
-				CustomPath	   *cpath = (CustomPath *)path;
-
-				op_leaf = palloc0(sizeof(pgstromOuterPartitionLeafInfo));
-				op_leaf->pp_info = copy_pgstrom_plan_info(pp_prev);
-				op_leaf->pseudo_outer_path = path;
-				op_leaf->inner_paths_list = list_copy(cpath->custom_paths);
-
-				return list_make1(op_leaf);
-			}
-			else if (path->pathtype == T_NestLoop ||
-					 path->pathtype == T_MergeJoin ||
-					 path->pathtype == T_HashJoin)
-			{
-				/*
-				 * Even if GpuJoin/GpuScan does not exist at the outer-
-				 * relation, we try to build the pgstromPlanInfo according
-				 * to the built-in join order.
-				 */
-				results = __buildOuterJoinPlanInfo(root,
-												   (JoinPath *)path,
-												   xpu_task_flags,
-												   try_parallel_path,
-												   consider_partition);
-				if (results != NIL)
-					return results;
-			}
-		}
-	}
-	return NIL;
-}
-
-/*
- * try_add_simple_xpujoin_path
- */
-static bool
-try_add_simple_xpujoin_path(PlannerInfo *root,
-							RelOptInfo *joinrel,
-							RelOptInfo *outer_rel,
-                            Path *inner_path,
-                            JoinType join_type,
-                            JoinPathExtraData *extra,
-							bool try_parallel_path,
-							bool consider_partition,
-							uint32_t xpu_task_flags,
-							const CustomPathMethods *xpujoin_path_methods)
-{
-	List	   *results = NIL;
-	List	   *op_leaf_list;
-	ListCell   *lc;
-	Path	   *xpujoinpath;
+	List	   *op_leaf_list = NIL;
+	List	   *cpaths_list = NIL;
+	PathTarget *append_target = NULL;
+	Path	   *append_path;
 	Relids		required_outer = NULL;
 	int			parallel_nworkers = 0;
 	double		total_nrows = 0.0;
+	ListCell   *lc;
 
-	/* sanity checks */
-	Assert(join_type == JOIN_INNER || join_type == JOIN_FULL ||
-		   join_type == JOIN_LEFT  || join_type == JOIN_RIGHT);
-
-	op_leaf_list = buildOuterJoinPlanInfo(root,
-										  outer_rel,
-										  xpu_task_flags,
-										  try_parallel_path,
-										  consider_partition);
-	if (op_leaf_list == NIL)
-		return false;
-
-	foreach (lc, op_leaf_list)
+	op_prev_list = pgstrom_find_op_leafs(outer_rel, try_parallel_path);
+	foreach (lc, op_prev_list)
 	{
-		pgstromOuterPartitionLeafInfo *op_prev = lfirst(lc);
-		Path	   *__outer_path = op_prev->pseudo_outer_path;	//pseudo
-		Path	   *__inner_path = inner_path;
-		Relids		__required_outer;
-		ParamPathInfo *param_info;
-		List	   *restrict_clauses = NIL;
-		RelOptInfo *leaf_joinrel;
-		pgstromPlanInfo *pp_info;
-		pgstromPlanInnerInfo *pp_inner;
-		CustomPath *cpath;
+		pgstromOuterPathLeafInfo *op_prev = lfirst(lc);
+		pgstromOuterPathLeafInfo *op_leaf;
+		Path			__outer_path;	//pseudo outer-path
+		Path		   *__inner_path = inner_path;
+		Relids			__join_relids;
+		Relids			__required_outer;
+		List		   *__restrict_clauses = NIL;
+		SpecialJoinInfo *__sjinfo;
+		RelOptInfo	   *__join_rel;
+		CustomPath	   *cpath;
 
-		__required_outer = calc_non_nestloop_required_outer(__outer_path,
+		/* setup pseudo outer-path */
+		memset(&__outer_path, 0, sizeof(Path));
+		__outer_path.parent     = op_prev->leaf_rel;
+		__outer_path.param_info = op_prev->leaf_param;
+		__outer_path.rows       = op_prev->leaf_nrows;
+
+		__required_outer = calc_non_nestloop_required_outer(&__outer_path,
 															__inner_path);
-		if (__required_outer && !bms_overlap(__required_outer,
-											 extra->param_source_rels))
-		{
-			return false;
-		}
-		if (lc == list_head(op_leaf_list))
-			required_outer = bms_copy(__required_outer);
-		else if (!bms_equal(required_outer, __required_outer))
-			return false;
+		if (__required_outer &&
+			!bms_overlap(__required_outer, extra->param_source_rels))
+			return;
 
 		/*
-		 * Get param info
+		 * setup SpecialJoinInfo for inner-leaf join
 		 */
-		param_info = get_joinrel_parampathinfo(root,
-											   joinrel,
-											   __outer_path,
-											   __inner_path,
-											   extra->sjinfo,
-											   required_outer,
-											   &restrict_clauses);
-		if (restrict_clauses == NIL)
-			return false;		/* cross join is not welcome */
-
+		__join_relids = bms_union(op_prev->leaf_rel->relids,
+								  __inner_path->parent->relids);
+		__sjinfo = __build_child_join_sjinfo(root,
+											 __join_relids,
+											 extra->sjinfo);
 		/*
-		 * Lookup joinrel to add
+		 * fixup restrict_clauses
 		 */
-		leaf_joinrel = lookupOrBuildLeafJoinRelOptInfo(root,
-													   joinrel,
-													   __outer_path->parent,
-													   __inner_path->parent,
-													   restrict_clauses,
-													   extra->sjinfo,
-													   join_type);
+		__restrict_clauses =
+			fixup_expression_by_partition_leaf(root,
+											   op_prev->leaf_rel->relids,
+											   extra->restrictlist);
 		/*
-		 * Build a new pgstromPlanInfo
+		 * lookup or construct a new join_rel
 		 */
-		pp_info = __buildXpuJoinPlanInfo(root,
-										 leaf_joinrel,
-										 join_type,
-										 restrict_clauses,
-										 op_prev,
-										 &__inner_path);
-		if (!pp_info)
-			return false;
-		pp_inner = &pp_info->inners[pp_info->num_rels-1];
-
+		__join_rel = __lookup_or_build_leaf_joinrel(root,
+													join_rel,
+													op_prev->leaf_rel,
+													inner_path->parent,
+													__restrict_clauses,
+													__sjinfo,
+													join_type);
 		/*
-		 * Build a new CustomPath
+		 * build XpuJoinPath
 		 */
-		cpath = makeNode(CustomPath);
-		cpath->path.pathtype = T_CustomScan;
-		cpath->path.parent = leaf_joinrel;
-		cpath->path.pathtarget = leaf_joinrel->reltarget;
-		cpath->path.param_info = param_info;
-		cpath->path.parallel_aware = try_parallel_path;
-		cpath->path.parallel_safe = joinrel->consider_parallel;
-		cpath->path.parallel_workers = pp_info->parallel_nworkers;
-		cpath->path.pathkeys = NIL;
-		cpath->path.rows = pp_inner->join_nrows;
-		cpath->path.startup_cost = pp_inner->join_startup_cost;
-		cpath->path.total_cost = (pp_inner->join_startup_cost +
-								  pp_inner->join_run_cost +
-								  pp_info->final_cost);
-		cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
-		cpath->methods = xpujoin_path_methods;
-		cpath->custom_paths = lappend(list_copy(op_prev->inner_paths_list),
-									  __inner_path);
-		cpath->custom_private = list_make1(pp_info);
-
+		cpath = __build_simple_xpujoin_path(root,
+											__join_rel,
+											&__outer_path,
+											inner_path,
+											join_type,
+											op_prev,
+											&op_leaf,
+											__restrict_clauses,
+											__sjinfo,
+											extra->param_source_rels,
+											try_parallel_path,
+											xpu_task_flags,
+											xpujoin_path_methods);
+		if (!cpath)
+			return;
 		parallel_nworkers += cpath->path.parallel_workers;
 		total_nrows += cpath->path.rows;
 
-		results = lappend(results, cpath);
+		cpaths_list  = lappend(cpaths_list, cpath);
+		op_leaf_list = lappend(op_leaf_list, op_leaf);
 	}
 
-	if (list_length(results) > 1)
-	{
-		xpujoinpath = (Path *)
-			create_append_path(root,
-							   joinrel,
-							   (try_parallel_path ? NIL : results),
-							   (try_parallel_path ? results : NIL),
-							   NIL,
-							   required_outer,
-							   (try_parallel_path ? parallel_nworkers : 0),
-							   try_parallel_path,
-							   total_nrows);
-	}
-	else if (list_length(results) == 1)
-	{
-		xpujoinpath = (Path *)linitial(results);
-	}
-	else
-	{
-		return false;
-	}
+	if (list_length(cpaths_list) == 0)
+		return;
 
+	if (try_parallel_path)
+	{
+		if (parallel_nworkers > max_parallel_workers_per_gather)
+			parallel_nworkers = max_parallel_workers_per_gather;
+		if (parallel_nworkers == 0)
+			return;
+	}
+	append_path = (Path *)
+		create_append_path(root,
+						   join_rel,
+						   (try_parallel_path ? NIL : cpaths_list),
+						   (try_parallel_path ? cpaths_list : NIL),
+						   NIL,
+						   required_outer,
+						   (try_parallel_path ? parallel_nworkers : 0),
+						   try_parallel_path,
+						   total_nrows);
+	//append_path->target = append_target; //FIXME
+	pgstrom_remember_op_leafs(join_rel, op_leaf_list,
+							  try_parallel_path);
 	if (!try_parallel_path)
-		add_path(joinrel, xpujoinpath);
+		add_path(join_rel, append_path);
 	else
-		add_partial_path(joinrel, xpujoinpath);
-	return true;
+		add_partial_path(join_rel, append_path);
 }
+
 
 /*
  * __xpuJoinAddCustomPathCommon
@@ -771,27 +781,25 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 
 		if (inner_path)
 		{
-			try_add_simple_xpujoin_path(root,
+			try_add_xpujoin_simple_path(root,
 										joinrel,
 										outerrel,
 										inner_path,
 										join_type,
 										extra,
 										try_parallel > 0,
-										false,
 										xpu_task_flags,
 										xpujoin_path_methods);
 			if (consider_partition)
-				try_add_simple_xpujoin_path(root,
-											joinrel,
-											outerrel,
-											inner_path,
-											join_type,
-											extra,
-											try_parallel > 0,
-											true,
-											xpu_task_flags,
-											xpujoin_path_methods);
+				try_add_xpujoin_partition_path(root,
+											   joinrel,
+											   outerrel,
+											   inner_path,
+											   join_type,
+											   extra,
+											   try_parallel > 0,
+											   xpu_task_flags,
+											   xpujoin_path_methods);
 		}
 		/* 2nd trial uses the partial paths */
 		inner_pathlist = innerrel->partial_pathlist;
@@ -1315,9 +1323,8 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	 */
 	if ((pp_info->xpu_task_flags & DEVTASK__MASK) == DEVTASK__PREAGG)
 	{
-		tlist = fixup_expression_by_partition_leaf(root,
-												   cpath->path.parent,
-												   tlist);
+		Relids	leaf_relids = cpath->path.parent->relids;
+		tlist = fixup_expression_by_partition_leaf(root, leaf_relids, tlist);
 		pgstrom_build_groupby_tlist_dev(context, root, tlist);
 		codegen_build_groupby_actions(context, pp_info);
 	}
