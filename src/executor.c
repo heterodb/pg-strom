@@ -2430,6 +2430,9 @@ pgstromExplainTaskState(CustomScanState *node,
 			ExplainPropertyText(label, buf.data, es);
 		}
 	}
+	if (pp_info->sibling_param_id >= 0)
+		ExplainPropertyInteger("Inner Siblings-Id", NULL,
+							   pp_info->sibling_param_id, es);
 
 	/*
 	 * Storage related info

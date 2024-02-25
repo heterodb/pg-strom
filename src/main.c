@@ -341,6 +341,8 @@ typedef struct
 	List	   *op_leaf_parallel;
 	Cost		total_cost_single;
 	Cost		total_cost_parallel;
+	bool		identical_inners_single;
+	bool		identical_inners_parallel;
 } pgstromPathEntry;
 
 static void
@@ -411,20 +413,46 @@ pgstrom_remember_op_leafs(RelOptInfo *parent_rel,
 						  bool be_parallel)
 {
 	pgstromPathEntry *pp_entry;
-	ListCell   *lc;
+	ListCell   *cell;
+	List	   *inner_paths_list = NIL;
+	int			identical_inners = -1;
 	Cost		total_cost = 0.0;
 	bool		found;
 
 	__pgstrom_build_paths_htable();
 	/* calculation of total cost */
-	foreach (lc, op_leaf_list)
+	foreach (cell, op_leaf_list)
 	{
-		pgstromOuterPathLeafInfo *op_leaf = lfirst(lc);
+		pgstromOuterPathLeafInfo *op_leaf = lfirst(cell);
 
 		/* sanity checks */
 		Assert(list_length(op_leaf->inner_paths_list) == op_leaf->pp_info->num_rels);
 		op_leaf->outer_rel = parent_rel;
 		total_cost += op_leaf->leaf_cost;
+
+		if (cell == list_head(op_leaf_list))
+		{
+			inner_paths_list = op_leaf->inner_paths_list;
+		}
+		else if (identical_inners != 0)
+		{
+			ListCell   *lc1, *lc2;
+
+			forboth (lc1, inner_paths_list,
+					 lc2, op_leaf->inner_paths_list)
+			{
+				Path   *__i_path1 = lfirst(lc1);
+				Path   *__i_path2 = lfirst(lc2);
+
+				if (!bms_equal(__i_path1->parent->relids,
+							   __i_path2->parent->relids))
+					break;
+			}
+			if (lc1 == NULL && lc2 == NULL)
+				identical_inners = 1;
+			else
+				identical_inners = 0;
+		}
 	}
 	pp_entry = (pgstromPathEntry *)
 		hash_search(pgstrom_paths_htable,
@@ -444,6 +472,7 @@ pgstrom_remember_op_leafs(RelOptInfo *parent_rel,
 		{
 			pp_entry->op_leaf_parallel = op_leaf_list;
 			pp_entry->total_cost_parallel = total_cost;
+			pp_entry->identical_inners_parallel = (identical_inners > 0);
 		}
 	}
 	else
@@ -453,6 +482,7 @@ pgstrom_remember_op_leafs(RelOptInfo *parent_rel,
 		{
 			pp_entry->op_leaf_single = op_leaf_list;
 			pp_entry->total_cost_single = total_cost;
+			pp_entry->identical_inners_single = (identical_inners > 0);
 		}
 	}
 }
@@ -477,7 +507,8 @@ pgstrom_find_op_normal(RelOptInfo *outer_rel,
 }
 
 List *
-pgstrom_find_op_leafs(RelOptInfo *parent_rel, bool be_parallel)
+pgstrom_find_op_leafs(RelOptInfo *parent_rel, bool be_parallel,
+					  bool *p_identical_inners)
 {
 	if (pgstrom_paths_htable)
 	{
@@ -487,9 +518,15 @@ pgstrom_find_op_leafs(RelOptInfo *parent_rel, bool be_parallel)
 						HASH_FIND,
 						NULL);
 		if (pp_entry)
+		{
+			if (p_identical_inners)
+				*p_identical_inners = (be_parallel
+									   ? pp_entry->identical_inners_parallel
+									   : pp_entry->identical_inners_single);
 			return (be_parallel
 					? pp_entry->op_leaf_parallel
 					: pp_entry->op_leaf_single);
+		}
 	}
 	return NIL;
 }

@@ -56,7 +56,8 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 					   JoinType join_type,
 					   List *restrict_clauses,
 					   pgstromOuterPathLeafInfo *op_prev,
-					   Path **p_inner_path)
+					   Path **p_inner_path,
+					   int sibling_param_id)
 {
 	pgstromPlanInfo *pp_prev = op_prev->pp_info;
 	pgstromPlanInfo *pp_info;
@@ -72,6 +73,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	double			xpu_tuple_cost;
 	Cost			xpu_ratio;
 	Cost			comp_cost = 0.0;
+	Cost			inner_cost = 0.0;
 	Cost			final_cost = 0.0;
 	QualCost		join_quals_cost;
 	List		   *join_quals = NIL;
@@ -228,6 +230,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	 * Setup pgstromPlanInfo
 	 */
 	pp_info = copy_pgstrom_plan_info(pp_prev);
+	pp_info->sibling_param_id = sibling_param_id;
 	pp_inner = &pp_info->inners[pp_info->num_rels++];
 	pp_inner->join_type = join_type;
 	pp_inner->join_nrows = joinrel->rows;
@@ -251,6 +254,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		if (gist_inner_path)
 			*p_inner_path = inner_path = gist_inner_path;
 	}
+
 	/*
 	 * Cost estimation
 	 */
@@ -268,8 +272,9 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		startup_cost = __pp_inner->join_startup_cost;
 		run_cost     = __pp_inner->join_run_cost;
 	}
-	startup_cost += (inner_path->total_cost +
-					 inner_path->rows * cpu_tuple_cost);
+	inner_cost += (inner_path->total_cost +
+				   inner_path->rows * cpu_tuple_cost);
+	startup_cost += inner_cost;
 	/* cost for join_quals */
 	cost_qual_eval(&join_quals_cost, join_quals, root);
 	startup_cost += join_quals_cost.startup;
@@ -337,6 +342,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	final_cost += (joinrel->reltarget->cost.per_tuple *
 				   joinrel->rows / pp_info->parallel_divisor);
 
+	pp_info->join_inner_cost += inner_cost;
 	pp_info->final_cost = final_cost;
 	pp_inner->join_nrows = (joinrel->rows / pp_info->parallel_divisor);
 	pp_inner->join_startup_cost = startup_cost;
@@ -360,6 +366,7 @@ __build_simple_xpujoin_path(PlannerInfo *root,
 							SpecialJoinInfo *sjinfo,
 							Relids param_source_rels,
 							bool try_parallel_path,
+							int sibling_param_id,
 							uint32_t xpu_task_flags,
 							const CustomPathMethods *xpujoin_path_methods)
 {
@@ -396,7 +403,8 @@ __build_simple_xpujoin_path(PlannerInfo *root,
 									 join_type,
 									 restrict_clauses,
 									 op_prev,
-									 &inner_path);
+									 &inner_path,
+									 sibling_param_id);
 	if (!pp_info)
 		return NULL;
 	pp_info->xpu_task_flags &= ~DEVTASK__MASK;
@@ -479,6 +487,7 @@ try_add_xpujoin_simple_path(PlannerInfo *root,
 										extra->sjinfo,
 										extra->param_source_rels,
 										try_parallel_path,
+										-1,		/* sibling_param_id */
 										xpu_task_flags,
 										xpujoin_path_methods);
 	if (!cpath)
@@ -623,14 +632,26 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 	List	   *op_prev_list = NIL;
 	List	   *op_leaf_list = NIL;
 	List	   *cpaths_list = NIL;
-	PathTarget *append_target = NULL;
 	Path	   *append_path;
 	Relids		required_outer = NULL;
 	int			parallel_nworkers = 0;
 	double		total_nrows = 0.0;
+	bool		identical_inners;
+	int			sibling_param_id = -1;
 	ListCell   *lc;
 
-	op_prev_list = pgstrom_find_op_leafs(outer_rel, try_parallel_path);
+	op_prev_list = pgstrom_find_op_leafs(outer_rel,
+										 try_parallel_path,
+										 &identical_inners);
+	if (identical_inners)
+	{
+		PlannerGlobal  *glob = root->glob;
+
+		sibling_param_id = list_length(glob->paramExecTypes);
+		glob->paramExecTypes = lappend_oid(glob->paramExecTypes,
+										   INTERNALOID);
+	}
+
 	foreach (lc, op_prev_list)
 	{
 		pgstromOuterPathLeafInfo *op_prev = lfirst(lc);
@@ -695,6 +716,7 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 											__sjinfo,
 											extra->param_source_rels,
 											try_parallel_path,
+											sibling_param_id,
 											xpu_task_flags,
 											xpujoin_path_methods);
 		if (!cpath)
@@ -726,7 +748,15 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 						   (try_parallel_path ? parallel_nworkers : 0),
 						   try_parallel_path,
 						   total_nrows);
-	//append_path->target = append_target; //FIXME
+	if (sibling_param_id >= 0 && list_length(cpaths_list) > 1)
+	{
+		CustomPath *cpath = linitial(cpaths_list);
+		pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
+		Cost		discount = (pp_info->join_inner_cost *
+								(Cost)(list_length(cpaths_list) - 1));
+		append_path->startup_cost -= discount;
+		append_path->total_cost   -= discount;
+	}
 	pgstrom_remember_op_leafs(join_rel, op_leaf_list,
 							  try_parallel_path);
 	if (!try_parallel_path)
@@ -777,6 +807,21 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 				continue;
 			if (!inner_path || inner_path->total_cost > path->total_cost)
 				inner_path = path;
+		}
+		if (!inner_path && IS_SIMPLE_REL(innerrel))
+		{
+			/*
+			 * In case when inner relation is very small, PostgreSQL may
+			 * skip to generate partial scan paths because it may calculate
+			 * the number of parallel workers zero due to small size.
+			 * Only if the innerrel is base relation, we add a partial
+			 * SeqScan path to use parallel inner path.
+			 */
+			inner_path = (Path *)
+				create_seqscan_path(root,
+									innerrel,
+									innerrel->lateral_relids,
+									try_parallel);
 		}
 
 		if (inner_path)

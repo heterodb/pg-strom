@@ -278,6 +278,7 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 	pull_varattnos((Node *)pp_info->host_quals, baserel->relid, &outer_refs);
 	pull_varattnos((Node *)pp_info->scan_quals, baserel->relid, &outer_refs);
 	pp_info->outer_refs = outer_refs;
+	pp_info->sibling_param_id = -1;
 	return pp_info;
 }
 

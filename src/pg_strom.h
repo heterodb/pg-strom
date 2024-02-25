@@ -288,6 +288,7 @@ typedef struct
 	Cost		scan_run_cost;		/* estimated run cost to scan baserel */
 	int			parallel_nworkers;	/* # of parallel workers */
 	double		parallel_divisor;	/* parallel divisor */
+	Cost		join_inner_cost;	/* cost for setting up inner multi-relations */
 	Cost		final_cost;			/* cost for sendback and host-side tasks */
 	/* BRIN-index support */
 	Oid			brin_index_oid;		/* OID of BRIN-index, if any */
@@ -316,6 +317,7 @@ typedef struct
 	List	   *groupby_actions;		/* list of KAGG_ACTION__* on the kds_final */
 	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */
 	/* inner relations */
+	int			sibling_param_id;
 	int			num_rels;
 	pgstromPlanInnerInfo inners[FLEXIBLE_ARRAY_MEMBER];
 } pgstromPlanInfo;
@@ -1001,7 +1003,8 @@ extern void		pgstrom_remember_op_leafs(RelOptInfo *parent_rel,
 extern pgstromOuterPathLeafInfo *pgstrom_find_op_normal(RelOptInfo *outer_rel,
 														bool be_parallel);
 extern List	   *pgstrom_find_op_leafs(RelOptInfo *outer_rel,
-									  bool be_parallel);
+									  bool be_parallel,
+									  bool *p_identical_inners);
 extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);
 extern void		_PG_init(void);
 
