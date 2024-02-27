@@ -405,7 +405,6 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		Expr	   *gist_clause = pp_inner->gist_clause;
 		double		gist_selectivity = pp_inner->gist_selectivity;
 		QualCost	gist_clause_cost;
-		Cost		comp_cost = 0.0;
 
 		/* cost to preload inner heap tuples by CPU */
 		startup_cost += cpu_tuple_cost * inner_path->rows;
