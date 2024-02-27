@@ -2293,7 +2293,7 @@ pgstromExplainTaskState(CustomScanState *node,
 		{
 			appendStringInfo(&buf, " [rows: %.0f -> %.0f]",
 							 pp_info->scan_tuples,
-							 pp_info->scan_rows);
+							 pp_info->scan_nrows);
 		}
 		else
 		{
@@ -2303,7 +2303,7 @@ pgstromExplainTaskState(CustomScanState *node,
 				prev_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
 			appendStringInfo(&buf, " [plan: %.0f -> %.0f, exec: %lu -> %lu]",
 							 pp_info->scan_tuples,
-							 pp_info->scan_rows,
+							 pp_info->scan_nrows,
 							 prev_ntuples,
 							 stat_ntuples);
 		}
@@ -2312,7 +2312,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	}
 
 	/* xPU JOIN */
-	ntuples = pp_info->scan_rows;
+	ntuples = pp_info->scan_nrows;
 	for (int i=0; i < pp_info->num_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];

@@ -1328,7 +1328,6 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 	Query	   *parse = con->root->parse;
 	Path	   *agg_path;
 	Path	   *dummy_path;
-	double		hashTableSz;
 
 	if (!parse->groupClause)
 	{
@@ -1348,25 +1347,18 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 	else
 	{
 		Assert(grouping_is_hashable(parse->groupClause));
-		hashTableSz = estimate_hashagg_tablesize(con->root,
-												 part_path,
-												 &con->final_clause_costs,
-												 con->num_groups);
-		if (hashTableSz <= (double)work_mem * 1024.0)
-		{
-			agg_path = (Path *)create_agg_path(con->root,
-											   con->group_rel,
-											   part_path,
-											   con->target_final,
-											   AGG_HASHED,
-											   AGGSPLIT_SIMPLE,
-											   parse->groupClause,
-											   (List *)con->havingQual,
-											   &con->final_clause_costs,
-											   con->num_groups);
-			dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
-			add_path(con->group_rel, dummy_path);
-		}
+		agg_path = (Path *)create_agg_path(con->root,
+										   con->group_rel,
+										   part_path,
+										   con->target_final,
+										   AGG_HASHED,
+										   AGGSPLIT_SIMPLE,
+										   parse->groupClause,
+										   (List *)con->havingQual,
+										   &con->final_clause_costs,
+										   con->num_groups);
+		dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
+		add_path(con->group_rel, dummy_path);
 	}
 }
 
@@ -1415,8 +1407,9 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	pp_info->sibling_param_id = con->sibling_param_id;
 
 	/* No tuples shall be generated until child JOIN/SCAN path completion */
-	startup_cost = (PP_INFO_STARTUP_COST(pp_info) +
-					PP_INFO_RUN_COST(pp_info));
+	startup_cost = (pp_info->startup_cost +
+					pp_info->inner_cost +
+					pp_info->run_cost);
 	/* Cost estimation for grouping */
 	num_group_keys = list_length(parse->groupClause);
 	startup_cost += (xpu_operator_cost *
@@ -1605,17 +1598,6 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 							   try_parallel_path,
 							   total_nrows);
 		part_path->pathtarget = part_target;
-
-		if (sibling_param_id >= 0 &&
-			list_length(preagg_cpath_list) > 1)
-		{
-			CustomPath *__cpath = linitial(preagg_cpath_list);
-			pgstromPlanInfo *__pp_info = linitial(__cpath->custom_private);
-			Cost		discount = (__pp_info->join_inner_cost *
-									(Cost)(list_length(preagg_cpath_list) - 1));
-			part_path->startup_cost -= discount;
-			part_path->total_cost -= discount;
-		}
 	}
 	else
 	{

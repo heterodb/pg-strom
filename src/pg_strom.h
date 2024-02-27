@@ -248,8 +248,6 @@ typedef struct
 {
 	JoinType		join_type;      /* one of JOIN_* */
 	double			join_nrows;     /* estimated nrows in this depth */
-	Cost			join_startup_cost; /* estimated startup cost */
-	Cost			join_run_cost;	/* estimated run cost (incl final_cost) */
 	List		   *hash_outer_keys_original;	/* hash-keys for outer-side */
 	List		   *hash_outer_keys_fallback;
 	List		   *hash_inner_keys_original;	/* hash-keys for inner-side */
@@ -283,12 +281,12 @@ typedef struct
 	Index		scan_relid;			/* relid of the outer relation to scan */
 	List	   *scan_quals;			/* device qualifiers to scan the outer */
 	double		scan_tuples;		/* copy of baserel->tuples */
-	double		scan_rows;			/* copy of baserel->rows */
-	Cost		scan_startup_cost;	/* estimated startup cost to scan baserel */
-	Cost		scan_run_cost;		/* estimated run cost to scan baserel */
+	double		scan_nrows;			/* copy of baserel->rows */
 	int			parallel_nworkers;	/* # of parallel workers */
 	double		parallel_divisor;	/* parallel divisor */
-	Cost		join_inner_cost;	/* cost for setting up inner multi-relations */
+	Cost		startup_cost;		/* startup cost (except for inner_cost) */
+	Cost		inner_cost;			/* cost for inner setup */
+	Cost		run_cost;			/* run cost */
 	Cost		final_cost;			/* cost for sendback and host-side tasks */
 	/* BRIN-index support */
 	Oid			brin_index_oid;		/* OID of BRIN-index, if any */
@@ -324,16 +322,8 @@ typedef struct
 
 #define PP_INFO_NUM_ROWS(pp_info)								\
 	((pp_info)->num_rels == 0									\
-	 ? (pp_info)->scan_rows										\
+	 ? (pp_info)->scan_nrows									\
 	 : (pp_info)->inners[(pp_info)->num_rels - 1].join_nrows)
-#define PP_INFO_STARTUP_COST(pp_info)								\
-	((pp_info)->num_rels == 0										\
-	 ? (pp_info)->scan_startup_cost									\
-	 : (pp_info)->inners[(pp_info)->num_rels - 1].join_startup_cost)
-#define PP_INFO_RUN_COST(pp_info)									\
-	((pp_info)->num_rels == 0										\
-	 ? (pp_info)->scan_run_cost										\
-	 : (pp_info)->inners[(pp_info)->num_rels - 1].join_run_cost)
 
 /*
  * context for partition-wise xPU-Join/PreAgg pushdown per partition leaf
@@ -665,7 +655,6 @@ extern Cost		cost_brin_bitmap_build(PlannerInfo *root,
 									   RelOptInfo *baserel,
 									   IndexOptInfo *indexOpt,
 									   List *indexQuals);
-
 extern void		pgstromBrinIndexExecBegin(pgstromTaskState *pts,
 										  Oid index_oid,
 										  List *index_conds,

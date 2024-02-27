@@ -101,12 +101,12 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, makeInteger(pp_info->scan_relid));
 	privs = lappend(privs, pp_info->scan_quals);
 	privs = lappend(privs, __makeFloat(pp_info->scan_tuples));
-	privs = lappend(privs, __makeFloat(pp_info->scan_rows));
-	privs = lappend(privs, __makeFloat(pp_info->scan_startup_cost));
-	privs = lappend(privs, __makeFloat(pp_info->scan_run_cost));
+	privs = lappend(privs, __makeFloat(pp_info->scan_nrows));
 	privs = lappend(privs, makeInteger(pp_info->parallel_nworkers));
 	privs = lappend(privs, __makeFloat(pp_info->parallel_divisor));
-	privs = lappend(privs, __makeFloat(pp_info->join_inner_cost));
+	privs = lappend(privs, __makeFloat(pp_info->startup_cost));
+	privs = lappend(privs, __makeFloat(pp_info->inner_cost));
+	privs = lappend(privs, __makeFloat(pp_info->run_cost));
 	privs = lappend(privs, __makeFloat(pp_info->final_cost));
 	/* bin-index support */
 	privs = lappend(privs, makeInteger(pp_info->brin_index_oid));
@@ -150,8 +150,6 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 
 		__privs = lappend(__privs, makeInteger(pp_inner->join_type));
 		__privs = lappend(__privs, __makeFloat(pp_inner->join_nrows));
-		__privs = lappend(__privs, __makeFloat(pp_inner->join_startup_cost));
-		__privs = lappend(__privs, __makeFloat(pp_inner->join_run_cost));
 		__privs = lappend(__privs, pp_inner->hash_outer_keys_original);
 		__privs = lappend(__privs, pp_inner->hash_outer_keys_fallback);
 		__privs = lappend(__privs, pp_inner->hash_inner_keys_original);
@@ -200,19 +198,19 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	endpoint_id = intVal(list_nth(privs, pindex++));
 	pp_data.ds_entry = DpuStorageEntryByEndpointId(endpoint_id);
 	/* plan information */
-	pp_data.outer_refs = bms_from_pglist(list_nth(privs, pindex++));
-	pp_data.used_params = list_nth(exprs, eindex++);
-	pp_data.host_quals = list_nth(privs, pindex++);
-	pp_data.scan_relid = intVal(list_nth(privs, pindex++));
-	pp_data.scan_quals = list_nth(privs, pindex++);
-	pp_data.scan_tuples = floatVal(list_nth(privs, pindex++));
-	pp_data.scan_rows = floatVal(list_nth(privs, pindex++));
-	pp_data.scan_startup_cost = floatVal(list_nth(privs, pindex++));
-	pp_data.scan_run_cost = floatVal(list_nth(privs, pindex++));
+	pp_data.outer_refs   = bms_from_pglist(list_nth(privs, pindex++));
+	pp_data.used_params  = list_nth(exprs, eindex++);
+	pp_data.host_quals   = list_nth(privs, pindex++);
+	pp_data.scan_relid   = intVal(list_nth(privs, pindex++));
+	pp_data.scan_quals   = list_nth(privs, pindex++);
+	pp_data.scan_tuples  = floatVal(list_nth(privs, pindex++));
+	pp_data.scan_nrows   = floatVal(list_nth(privs, pindex++));
 	pp_data.parallel_nworkers = intVal(list_nth(privs, pindex++));
 	pp_data.parallel_divisor = floatVal(list_nth(privs, pindex++));
-	pp_data.join_inner_cost = floatVal(list_nth(privs, pindex++));
-	pp_data.final_cost = floatVal(list_nth(privs, pindex++));
+	pp_data.startup_cost = floatVal(list_nth(privs, pindex++));
+	pp_data.inner_cost   = floatVal(list_nth(privs, pindex++));
+	pp_data.run_cost     = floatVal(list_nth(privs, pindex++));
+	pp_data.final_cost   = floatVal(list_nth(privs, pindex++));
 	/* brin-index support */
 	pp_data.brin_index_oid = intVal(list_nth(privs, pindex++));
 	pp_data.brin_index_conds = list_nth(privs, pindex++);
@@ -258,8 +256,6 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 
 		pp_inner->join_type       = intVal(list_nth(__privs, __pindex++));
 		pp_inner->join_nrows      = floatVal(list_nth(__privs, __pindex++));
-		pp_inner->join_startup_cost = floatVal(list_nth(__privs, __pindex++));
-		pp_inner->join_run_cost   = floatVal(list_nth(__privs, __pindex++));
 		pp_inner->hash_outer_keys_original = list_nth(__privs, __pindex++);
 		pp_inner->hash_outer_keys_fallback = list_nth(__privs, __pindex++);
 		pp_inner->hash_inner_keys_original = list_nth(__privs, __pindex++);

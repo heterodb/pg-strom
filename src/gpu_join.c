@@ -32,6 +32,92 @@ static bool					pgstrom_enable_dpuhashjoin = false;	/* GUC */
 static bool					pgstrom_enable_dpugistindex = false;/* GUC */
 static bool					pgstrom_enable_partitionwise_dpujoin = false;
 
+static bool					pgstrom_debug_xpujoinpath = false;
+
+/*
+ * DEBUG_XpuJoinPath
+ */
+static inline void
+__appendRangeTblEntry(StringInfo buf,
+					  Index rtindex,
+					  RangeTblEntry *rte)
+{
+	if (rte->rtekind == RTE_RELATION)
+	{
+		char   *relname = get_rel_name(rte->relid);
+
+		appendStringInfo(buf, "%s", relname);
+		if (rte->eref &&
+			rte->eref->aliasname &&
+			strcmp(relname, rte->eref->aliasname) != 0)
+			appendStringInfo(buf, "[%s]", rte->eref->aliasname);
+	}
+	else
+	{
+		const char *label;
+
+		switch (rte->rtekind)
+		{
+			case RTE_SUBQUERY:  label = "subquery";       break;
+			case RTE_JOIN:      label = "join";           break;
+			case RTE_FUNCTION:  label = "function";       break;
+			case RTE_TABLEFUNC: label = "table-function"; break;
+			case RTE_VALUES:    label = "values-list";    break;
+			case RTE_CTE:       label = "cte";            break;
+			case RTE_NAMEDTUPLESTORE: label = "tuplestore"; break;
+			case RTE_RESULT:    label = "result";         break;
+			default:            label = "unknown";        break;
+		}
+		if (rte->eref &&
+			rte->eref->aliasname)
+			appendStringInfo(buf, "[%s:%s]", label, rte->eref->aliasname);
+		else
+			appendStringInfo(buf, "[%s:%u]", label, rtindex);
+	}
+}
+
+static void
+DEBUG_XpuJoinPathPrint(PlannerInfo *root,
+					   const char *custom_name,
+					   const Path *path,
+					   RelOptInfo *outer_rel,
+					   RelOptInfo *inner_rel)
+{
+	if (pgstrom_debug_xpujoinpath)
+	{
+		StringInfoData buf;
+		int		i, count;
+
+		initStringInfo(&buf);
+		appendStringInfo(&buf, "%s: outer=(", custom_name);
+		for (i = bms_next_member(outer_rel->relids, -1), count=0;
+			 i >= 0;
+			 i = bms_next_member(outer_rel->relids, i), count++)
+		{
+			RangeTblEntry *rte = root->simple_rte_array[i];
+			if (count > 0)
+				appendStringInfo(&buf, ", ");
+			__appendRangeTblEntry(&buf, i, rte);
+		}
+		appendStringInfo(&buf, ") inner=(");
+		for (i = bms_next_member(outer_rel->relids, -1), count=0;
+			 i >= 0;
+			 i = bms_next_member(outer_rel->relids, i), count++)
+		{
+			RangeTblEntry *rte = root->simple_rte_array[i];
+			if (count > 0)
+				appendStringInfo(&buf, ", ");
+			__appendRangeTblEntry(&buf, i, rte);
+		}
+		appendStringInfo(&buf, ") parallel=%d cost=%.2f nrows=%.0f",
+						 (int)path->parallel_aware,
+						 path->total_cost,
+						 path->rows);
+		elog(NOTICE, "%s", buf.data);
+		pfree(buf.data);
+	}
+}
+
 /*
  * try_fetch_xpujoin_planinfo
  */
@@ -56,25 +142,27 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 					   JoinType join_type,
 					   List *restrict_clauses,
 					   pgstromOuterPathLeafInfo *op_prev,
-					   Path **p_inner_path,
-					   int sibling_param_id)
+					   List *inner_paths_list,
+					   int sibling_param_id,
+					   double inner_discount_ratio)
 {
 	pgstromPlanInfo *pp_prev = op_prev->pp_info;
 	pgstromPlanInfo *pp_info;
 	pgstromPlanInnerInfo *pp_inner;
-	Path		   *inner_path = *p_inner_path;
+	Path		   *inner_path = llast(inner_paths_list);
 	RelOptInfo	   *inner_rel = inner_path->parent;
 	RelOptInfo	   *outer_rel = op_prev->leaf_rel;
 	Cardinality		outer_nrows;
+	Cardinality		inner_nrows;
 	Cost			startup_cost;
+	Cost			inner_cost;
 	Cost			run_cost;
+	Cost			final_cost;
+	Cost			comp_cost = 0.0;
 	bool			enable_xpuhashjoin;
 	bool			enable_xpugistindex;
 	double			xpu_tuple_cost;
 	Cost			xpu_ratio;
-	Cost			comp_cost = 0.0;
-	Cost			inner_cost = 0.0;
-	Cost			final_cost = 0.0;
 	QualCost		join_quals_cost;
 	List		   *join_quals = NIL;
 	List		   *other_quals = NIL;
@@ -111,14 +199,12 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 			 pp_prev->xpu_task_flags);
 	}
 
-	/* setup inner_targets */
-	foreach (lc, op_prev->inner_paths_list)
+	/* setup inner_target_list */
+	foreach (lc, inner_paths_list)
 	{
 		Path   *i_path = lfirst(lc);
-
 		inner_target_list = lappend(inner_target_list, i_path->pathtarget);
 	}
-	inner_target_list = lappend(inner_target_list, inner_path->pathtarget);
 
 	/*
 	 * All the join-clauses must be executable on GPU device.
@@ -230,7 +316,10 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	 * Setup pgstromPlanInfo
 	 */
 	pp_info = copy_pgstrom_plan_info(pp_prev);
+	pp_info->xpu_task_flags &= ~DEVTASK__MASK;
+	pp_info->xpu_task_flags |= DEVTASK__JOIN;
 	pp_info->sibling_param_id = sibling_param_id;
+
 	pp_inner = &pp_info->inners[pp_info->num_rels++];
 	pp_inner->join_type = join_type;
 	pp_inner->join_nrows = joinrel->rows;
@@ -240,42 +329,54 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pp_inner->other_quals_original = other_quals;
 	/* GiST-Index availability checks */
 	if (enable_xpugistindex &&
-		pp_inner->hash_outer_keys_original == NIL &&
-		pp_inner->hash_inner_keys_original == NIL)
+		hash_outer_keys == NIL &&
+		hash_inner_keys == NIL)
 	{
+		Path   *orig_inner_path = llast(inner_paths_list);
 		Path   *gist_inner_path
 			= pgstromTryFindGistIndex(root,
-									  inner_path,
+									  orig_inner_path,
 									  restrict_clauses,
-									  pp_info->xpu_task_flags,
-									  pp_info->scan_relid,
+									  pp_prev->xpu_task_flags,
+									  pp_prev->scan_relid,
 									  inner_target_list,
 									  pp_inner);
 		if (gist_inner_path)
-			*p_inner_path = inner_path = gist_inner_path;
+			llast(inner_paths_list) = gist_inner_path;
 	}
 
 	/*
 	 * Cost estimation
 	 */
-	if (pp_prev->num_rels == 0)
-	{
-		outer_nrows  = pp_prev->scan_rows;
-		startup_cost = pp_prev->scan_startup_cost;
-		run_cost     = pp_prev->scan_run_cost;
-	}
-	else
-	{
-		const pgstromPlanInnerInfo *__pp_inner = &pp_prev->inners[pp_prev->num_rels-1];
+	startup_cost = pp_prev->startup_cost;
+	inner_cost   = pp_prev->inner_cost;
+	run_cost     = pp_prev->run_cost;
+	final_cost   = 0.0;
+	outer_nrows  = PP_INFO_NUM_ROWS(pp_prev);
 
-		outer_nrows  = __pp_inner->join_nrows;
-		startup_cost = __pp_inner->join_startup_cost;
-		run_cost     = __pp_inner->join_run_cost;
+	/*
+	 * Cost for inner-setup
+	 */
+	inner_nrows = inner_path->rows;
+	if (inner_path->parallel_aware)
+	{
+		double		divisor = inner_path->parallel_workers;
+		double		leader_contribution;
+
+		if (parallel_leader_participation)
+		{
+			leader_contribution = 1.0 - (0.3 * inner_path->parallel_workers);
+			if (leader_contribution > 0.0)
+				divisor += leader_contribution;
+		}
+		inner_nrows *= divisor;
 	}
 	inner_cost += (inner_path->total_cost +
-				   inner_path->rows * cpu_tuple_cost);
-	startup_cost += inner_cost;
-	/* cost for join_quals */
+				   inner_nrows * cpu_tuple_cost) * inner_discount_ratio;
+
+	/*
+	 * Cost for join_quals
+	 */
 	cost_qual_eval(&join_quals_cost, join_quals, root);
 	startup_cost += join_quals_cost.startup;
 	if (hash_outer_keys != NIL && hash_inner_keys != NIL)
@@ -304,6 +405,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		Expr	   *gist_clause = pp_inner->gist_clause;
 		double		gist_selectivity = pp_inner->gist_selectivity;
 		QualCost	gist_clause_cost;
+		Cost		comp_cost = 0.0;
 
 		/* cost to preload inner heap tuples by CPU */
 		startup_cost += cpu_tuple_cost * inner_path->rows;
@@ -330,23 +432,23 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		startup_cost += cpu_tuple_cost * inner_path->rows;
 
 		/* cost to evaluate join qualifiers by GPU */
-		run_cost += (join_quals_cost.per_tuple * xpu_ratio *
-					 inner_path->rows *
-					 outer_nrows);
+		comp_cost += (join_quals_cost.per_tuple * xpu_ratio *
+					  inner_path->rows *
+					  outer_nrows);
 	}
 	/* discount if CPU parallel is enabled */
 	run_cost += (comp_cost / pp_info->parallel_divisor);
 	/* cost for DMA receive (xPU --> Host) */
-	final_cost += xpu_tuple_cost * joinrel->rows;
+	final_cost += (xpu_tuple_cost * joinrel->rows) / pp_info->parallel_divisor;
 	/* cost for host projection */
 	final_cost += (joinrel->reltarget->cost.per_tuple *
 				   joinrel->rows / pp_info->parallel_divisor);
 
-	pp_info->join_inner_cost += inner_cost;
+	pp_info->startup_cost = startup_cost;
+	pp_info->inner_cost = inner_cost;
+	pp_info->run_cost = run_cost;
 	pp_info->final_cost = final_cost;
 	pp_inner->join_nrows = (joinrel->rows / pp_info->parallel_divisor);
-	pp_inner->join_startup_cost = startup_cost;
-	pp_inner->join_run_cost = run_cost;
 
 	return pp_info;
 }
@@ -367,14 +469,15 @@ __build_simple_xpujoin_path(PlannerInfo *root,
 							Relids param_source_rels,
 							bool try_parallel_path,
 							int sibling_param_id,
+							double inner_discount_ratio,
 							uint32_t xpu_task_flags,
 							const CustomPathMethods *xpujoin_path_methods)
 {
 	pgstromPlanInfo *pp_info;
-	pgstromPlanInnerInfo *pp_inner;
 	Relids			required_outer;
 	ParamPathInfo  *param_info;
 	CustomPath	   *cpath;
+	List		   *inner_paths_list;
 
 	required_outer = calc_non_nestloop_required_outer(outer_path,
 													  inner_path);
@@ -398,18 +501,18 @@ __build_simple_xpujoin_path(PlannerInfo *root,
 	/*
 	 * Build a new pgstromPlanInfo
 	 */
+	inner_paths_list = list_copy(op_prev->inner_paths_list);
+	inner_paths_list = lappend(inner_paths_list, inner_path);
 	pp_info = __buildXpuJoinPlanInfo(root,
 									 join_rel,
 									 join_type,
 									 restrict_clauses,
 									 op_prev,
-									 &inner_path,
-									 sibling_param_id);
+									 inner_paths_list,
+									 sibling_param_id,
+									 inner_discount_ratio);
 	if (!pp_info)
 		return NULL;
-	pp_info->xpu_task_flags &= ~DEVTASK__MASK;
-	pp_info->xpu_task_flags |= DEVTASK__JOIN;
-	pp_inner = &pp_info->inners[pp_info->num_rels-1];
 
 	/*
 	 * Build a new CustomPath
@@ -423,14 +526,17 @@ __build_simple_xpujoin_path(PlannerInfo *root,
 	cpath->path.parallel_safe = join_rel->consider_parallel;
 	cpath->path.parallel_workers = pp_info->parallel_nworkers;
 	cpath->path.pathkeys = NIL;
-	cpath->path.rows = pp_inner->join_nrows;
-	cpath->path.startup_cost = pp_inner->join_startup_cost;
-	cpath->path.total_cost = (pp_inner->join_startup_cost +
-							  pp_inner->join_run_cost +
+	cpath->path.rows = PP_INFO_NUM_ROWS(pp_info);
+	cpath->path.startup_cost = (pp_info->startup_cost +
+								pp_info->inner_cost);
+	cpath->path.total_cost = (pp_info->startup_cost +
+							  pp_info->inner_cost +
+							  pp_info->run_cost +
 							  pp_info->final_cost);
 	cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	cpath->methods = xpujoin_path_methods;
-	cpath->custom_paths = lappend(list_copy(op_prev->inner_paths_list), inner_path);
+	Assert(list_length(inner_paths_list) == pp_info->num_rels);
+	cpath->custom_paths = inner_paths_list;
 	cpath->custom_private = list_make1(pp_info);
 	if (p_op_leaf)
 	{
@@ -488,11 +594,17 @@ try_add_xpujoin_simple_path(PlannerInfo *root,
 										extra->param_source_rels,
 										try_parallel_path,
 										-1,		/* sibling_param_id */
+										1.0,	/* inner discount ratio */
 										xpu_task_flags,
 										xpujoin_path_methods);
 	if (!cpath)
 		return;
 	/* register the XpuJoinPath */
+	DEBUG_XpuJoinPathPrint(root,
+						   xpujoin_path_methods->CustomName,
+						   &cpath->path,
+						   outer_rel,
+						   inner_path->parent);
 	pgstrom_remember_op_normal(join_rel, op_leaf,
 							   try_parallel_path);
 	if (!try_parallel_path)
@@ -598,7 +710,6 @@ __lookup_or_build_leaf_joinrel(PlannerInfo *root,
 												parent_joinrel,
 												restrictlist,
 												sjinfo);
-//												jointype);
 		}
 		PG_CATCH();
 		{
@@ -638,6 +749,7 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 	double		total_nrows = 0.0;
 	bool		identical_inners;
 	int			sibling_param_id = -1;
+	double		inner_discount_ratio = 1.0;
 	ListCell   *lc;
 
 	op_prev_list = pgstrom_find_op_leafs(outer_rel,
@@ -650,7 +762,10 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 		sibling_param_id = list_length(glob->paramExecTypes);
 		glob->paramExecTypes = lappend_oid(glob->paramExecTypes,
 										   INTERNALOID);
+		if (list_length(op_prev_list) > 1)
+			inner_discount_ratio = 1.0 / (double)list_length(op_prev_list);
 	}
+	Assert(inner_discount_ratio >= 0.0 && inner_discount_ratio <= 1.0);
 
 	foreach (lc, op_prev_list)
 	{
@@ -717,6 +832,7 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 											extra->param_source_rels,
 											try_parallel_path,
 											sibling_param_id,
+											inner_discount_ratio,
 											xpu_task_flags,
 											xpujoin_path_methods);
 		if (!cpath)
@@ -748,15 +864,11 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 						   (try_parallel_path ? parallel_nworkers : 0),
 						   try_parallel_path,
 						   total_nrows);
-	if (sibling_param_id >= 0 && list_length(cpaths_list) > 1)
-	{
-		CustomPath *cpath = linitial(cpaths_list);
-		pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
-		Cost		discount = (pp_info->join_inner_cost *
-								(Cost)(list_length(cpaths_list) - 1));
-		append_path->startup_cost -= discount;
-		append_path->total_cost   -= discount;
-	}
+	DEBUG_XpuJoinPathPrint(root,
+						   xpujoin_path_methods->CustomName,
+						   append_path,
+						   outer_rel,
+						   inner_path->parent);
 	pgstrom_remember_op_leafs(join_rel, op_leaf_list,
 							  try_parallel_path);
 	if (!try_parallel_path)
@@ -859,11 +971,17 @@ __xpuJoinTryAddPartitionLeafs(PlannerInfo *root,
 							  RelOptInfo *joinrel,
 							  bool be_parallel)
 {
+	RelOptInfo *parent;
 	List	   *op_leaf_list = NIL;
 
-	for (int k=0; k < joinrel->nparts; k++)
+	parent = find_join_rel(root, joinrel->top_parent_relids);
+	if (parent == NULL ||
+		parent->nparts == 0 ||
+		parent->part_rels[parent->nparts-1] != joinrel)
+		return;
+	for (int k=0; k < parent->nparts; k++)
 	{
-		RelOptInfo *leaf_rel = joinrel->part_rels[k];
+		RelOptInfo *leaf_rel = parent->part_rels[k];
 		pgstromOuterPathLeafInfo *op_leaf;
 
 		op_leaf = pgstrom_find_op_normal(leaf_rel, be_parallel);
@@ -871,18 +989,7 @@ __xpuJoinTryAddPartitionLeafs(PlannerInfo *root,
 			return;
 		op_leaf_list = lappend(op_leaf_list, op_leaf);
 	}
-	pgstrom_remember_op_leafs(joinrel, op_leaf_list, be_parallel);
-
-	if (joinrel->parent)
-	{
-		RelOptInfo *parent = joinrel->parent;
-
-		if (parent->nparts > 0 &&
-			parent->part_rels[parent->nparts-1] == joinrel)
-		{
-			__xpuJoinTryAddPartitionLeafs(root, parent, be_parallel);
-		}
-	}
+	pgstrom_remember_op_leafs(parent, op_leaf_list, be_parallel);
 }
 
 /*
@@ -927,16 +1034,10 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 										 TASK_KIND__DPUJOIN,
 										 &dpujoin_path_methods,
 										 pgstrom_enable_partitionwise_dpujoin);
-		if (joinrel->parent)
+		if (joinrel->reloptkind == RELOPT_OTHER_JOINREL)
 		{
-			RelOptInfo *parent = joinrel->parent;
-
-			if (parent->nparts > 0 &&
-				parent->part_rels[parent->nparts-1] == joinrel)
-			{
-				__xpuJoinTryAddPartitionLeafs(root, parent, false);
-				__xpuJoinTryAddPartitionLeafs(root, parent, true);
-			}
+			__xpuJoinTryAddPartitionLeafs(root, joinrel, false);
+			__xpuJoinTryAddPartitionLeafs(root, joinrel, true);
 		}
 	}
 }
@@ -2685,6 +2786,33 @@ ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts, XpuCommand *resp)
 }
 
 /*
+ * pgstrom_init_xpu_join_common
+ */
+static void
+pgstrom_init_xpu_join_common(void)
+{
+	static bool	__initialized = false;
+
+	if (!__initialized)
+	{
+		/* pg_strom.debug_xpujoinpath */
+		DefineCustomBoolVariable("pg_strom.debug_xpujoinpath",
+								 "Turn on/off debug output for XpuJoin paths",
+								 NULL,
+								 &pgstrom_debug_xpujoinpath,
+								 false,
+								 PGC_USERSET,
+								 GUC_NOT_IN_SAMPLE,
+								 NULL, NULL, NULL);
+		/* hook registration */
+		set_join_pathlist_next = set_join_pathlist_hook;
+		set_join_pathlist_hook = XpuJoinAddCustomPath;
+
+		__initialized = true;
+	}
+}
+
+/*
  * pgstrom_init_gpu_join
  */
 void
@@ -2750,12 +2878,7 @@ pgstrom_init_gpu_join(void)
 	gpujoin_exec_methods.ShutdownCustomScan		= pgstromSharedStateShutdownDSM;
 	gpujoin_exec_methods.ExplainCustomScan		= pgstromExplainTaskState;
 
-	/* hook registration */
-	if (!set_join_pathlist_next)
-	{
-		set_join_pathlist_next = set_join_pathlist_hook;
-		set_join_pathlist_hook = XpuJoinAddCustomPath;
-	}
+	pgstrom_init_xpu_join_common();
 }
 
 
@@ -2825,10 +2948,5 @@ pgstrom_init_dpu_join(void)
 	dpujoin_exec_methods.ShutdownCustomScan     = pgstromSharedStateShutdownDSM;
 	dpujoin_exec_methods.ExplainCustomScan      = pgstromExplainTaskState;
 
-	/* hook registration */
-	if (!set_join_pathlist_next)
-	{
-		set_join_pathlist_next = set_join_pathlist_hook;
-		set_join_pathlist_hook = XpuJoinAddCustomPath;
-	}
+	pgstrom_init_xpu_join_common();
 }
