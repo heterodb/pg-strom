@@ -2194,7 +2194,7 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 		appendStringInfo(&buf, "%s (", (bms_is_empty(pts->optimal_gpus)
 										? "disabled"
 										: "enabled"));
-		if (!pgstrom_regression_test_mode)
+		if (!pgstrom_regression_test_mode && conn)
 			appendStringInfo(&buf, "%s; ", conn->devname);
 		pos = buf.len;
 
@@ -2293,7 +2293,7 @@ pgstromExplainTaskState(CustomScanState *node,
 		{
 			appendStringInfo(&buf, " [rows: %.0f -> %.0f]",
 							 pp_info->scan_tuples,
-							 pp_info->scan_rows);
+							 pp_info->scan_nrows);
 		}
 		else
 		{
@@ -2303,7 +2303,7 @@ pgstromExplainTaskState(CustomScanState *node,
 				prev_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
 			appendStringInfo(&buf, " [plan: %.0f -> %.0f, exec: %lu -> %lu]",
 							 pp_info->scan_tuples,
-							 pp_info->scan_rows,
+							 pp_info->scan_nrows,
 							 prev_ntuples,
 							 stat_ntuples);
 		}
@@ -2312,7 +2312,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	}
 
 	/* xPU JOIN */
-	ntuples = pp_info->scan_rows;
+	ntuples = pp_info->scan_nrows;
 	for (int i=0; i < pp_info->num_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
@@ -2430,6 +2430,9 @@ pgstromExplainTaskState(CustomScanState *node,
 			ExplainPropertyText(label, buf.data, es);
 		}
 	}
+	if (pp_info->sibling_param_id >= 0)
+		ExplainPropertyInteger("Inner Siblings-Id", NULL,
+							   pp_info->sibling_param_id, es);
 
 	/*
 	 * Storage related info

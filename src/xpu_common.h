@@ -199,12 +199,21 @@ INLINE_FUNCTION(T)
 __Fetch(const T *ptr)
 {
 	T	temp;
-
+#if 0
+	/*
+	 * MEMO: probably, nvcc expects the 'ptr' is aligned by the caller
+	 * of function, therefore, compiler optimization might consider
+	 * the following if-block is always true, and condition checks can
+	 * be removed. However, __Fetch() is used to the address where we
+	 * cannot guarantee the alignment (e.g, payload of short-varlena).
+	 * So, we always have to use memcpy() for the safe memory access.
+	 */
 	if ((sizeof(T) & (sizeof(T)-1)) == 0 &&
 		(((uintptr_t)ptr) & (sizeof(T)-1)) == 0)
 	{
 		return *ptr;
 	}
+#endif
 	memcpy(&temp, ptr, sizeof(T));
 	return temp;
 }

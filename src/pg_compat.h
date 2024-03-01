@@ -43,4 +43,13 @@
 #define pg_proc_aclcheck(a,b,c)		object_aclcheck(ProcedureRelationId,(a),(b),(c))
 #endif
 
+/*
+ * MEMO: PostgreSQL v16 removed the 7th 'jointype' argument that has been
+ * redundant because same value is also stored in the SpecialJoinInfo.
+ */
+#if PG_VERSION_NUM < 160000
+#define build_child_join_rel(a,b,c,d,e,f)	\
+	build_child_join_rel((a),(b),(c),(d),(e),(f),(f)->jointype)
+#endif
+
 #endif	/* PG_COMPAT_H */

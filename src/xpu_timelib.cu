@@ -3398,15 +3398,16 @@ __pg_extract_timestamp_common(kern_context *kcxt,
 		switch (value)
 		{
 			case DTK_MICROSEC:
-				result->u.value = tm.tm_sec * 1000000 + fsec;
-				result->weight = 6;
+				result->u.value = (int64_t)tm.tm_sec * 1000000L + fsec;
+				//result->weight = 0;
 				break;
 			case DTK_MILLISEC:
-				result->u.value = tm.tm_sec * 1000 + fsec / 1000.0;
+				result->u.value = (int64_t)tm.tm_sec * 1000000L + fsec;
 				result->weight = 3;
 				break;
 			case DTK_SECOND:
-				result->u.value = tm.tm_sec;
+				result->u.value = (int64_t)tm.tm_sec * 1000000L + fsec;
+				result->weight = 6;
 				break;
 			case DTK_MINUTE:
 				result->u.value = tm.tm_min;
