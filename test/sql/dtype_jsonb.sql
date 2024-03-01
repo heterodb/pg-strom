@@ -8,6 +8,7 @@ CREATE SCHEMA regtest_dtype_jsonb_temp;
 RESET client_min_messages;
 
 SET search_path = regtest_dtype_jsonb_temp, public;
+SELECT pgstrom.random_setseed(20190623);
 CREATE TABLE rt_jsonb_a (
   id  int,
   v   jsonb
@@ -20,7 +21,6 @@ CREATE TABLE rt_jsonb_c (
   id  int,
   v   jsonb
 );
-SELECT pgstrom.random_setseed(20190623);
 
 INSERT INTO rt_jsonb_a (
   SELECT x, ('[ ' || case when i is null then 'null' else i::text end
@@ -101,8 +101,6 @@ INSERT INTO rt_jsonb_c (
 
 -- force to use GpuScan, instead of SeqScan
 SET enable_seqscan = off;
--- not to print kernel source code
-SET pg_strom.debug_kernel_source = off;
 
 -- Fetch items from array-jsonb
 SET pg_strom.enabled = on;

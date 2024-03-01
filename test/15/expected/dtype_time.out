@@ -63,8 +63,6 @@ INSERT INTO rt_datetime (
 VACUUM ANALYZE;
 -- force to use GpuScan, instead of SeqScan
 SET enable_seqscan = off;
--- not to print kernel source code
-SET pg_strom.debug_kernel_source = off;
 -- type cast operators
 SET timezone = 'Japan';
 SET pg_strom.enabled = on;
@@ -310,21 +308,21 @@ SELECT id, -iv1 v1, iv1 + iv2 v2, iv2 - iv1 v3
   INTO test13g
   FROM rt_datetime
  WHERE id > 0;
-ERROR:  cuda_gpujoin.cu:626  unable to compute tuple size
-HINT:  device at GPU-0, function at execGpuJoinProjection
 SET pg_strom.enabled = off;
 SELECT id, -iv1 v1, iv1 + iv2 v2, iv2 - iv1 v3
   INTO test13p
   FROM rt_datetime
  WHERE id > 0;
 (SELECT * FROM test13g EXCEPT SELECT * FROM test13p) ORDER BY id;
-ERROR:  relation "test13g" does not exist
-LINE 1: (SELECT * FROM test13g EXCEPT SELECT * FROM test13p) ORDER B...
-                       ^
+ id | v1 | v2 | v3 
+----+----+----+----
+(0 rows)
+
 (SELECT * FROM test13p EXCEPT SELECT * FROM test13g) ORDER BY id;
-ERROR:  relation "test13g" does not exist
-LINE 1: (SELECT * FROM test13p EXCEPT SELECT * FROM test13g) ORDER B...
-                                                    ^
+ id | v1 | v2 | v3 
+----+----+----+----
+(0 rows)
+
 -- 'date' <COMP> 'date'
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
@@ -1064,8 +1062,6 @@ SELECT id, EXTRACT (microseconds FROM t1) v1,
   INTO test41g
   FROM rt_datetime
  WHERE id > 0;
-ERROR:  xpu_timelib.cu:3247  not a recognized unit name
-HINT:  device at GPU-0, function at extract_decode_unit
 SET pg_strom.enabled = off;
 SELECT id, EXTRACT (microseconds FROM t1) v1,
            EXTRACT (milliseconds FROM t2) v2,
@@ -1083,9 +1079,10 @@ SELECT * FROM test41g AS a, test41p AS b WHERE a.id=b.id AND
   OR ABS(a.v4 - b.v4) > 0.1
   OR ABS(a.v5 - b.v5) > 0.1
 ) LIMIT 5;
-ERROR:  relation "test41g" does not exist
-LINE 1: SELECT * FROM test41g AS a, test41p AS b WHERE a.id=b.id AND
-                      ^
+ id | v1 | v2 | v3 | v4 | v5 | id | v1 | v2 | v3 | v4 | v5 
+----+----+----+----+----+----+----+----+----+----+----+----
+(0 rows)
+
 -- extract() on 'timetz' type
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
@@ -1119,8 +1116,6 @@ SELECT id, EXTRACT (microseconds FROM tz1) v1,
   INTO test42g
   FROM rt_datetime
  WHERE id > 0;
-ERROR:  xpu_timelib.cu:3247  not a recognized unit name
-HINT:  device at GPU-0, function at extract_decode_unit
 SET pg_strom.enabled = off;
 SELECT id, EXTRACT (microseconds FROM tz1) v1,
            EXTRACT (milliseconds FROM tz2) v2,
@@ -1138,9 +1133,10 @@ SELECT * FROM test42g AS a, test42p AS b WHERE a.id=b.id AND
   OR ABS(a.v4 - b.v4) > 0.1
   OR ABS(a.v5 - b.v5) > 0.1
 ) LIMIT 5;
-ERROR:  relation "test42g" does not exist
-LINE 1: SELECT * FROM test42g AS a, test42p AS b WHERE a.id=b.id AND
-                      ^
+ id | v1 | v2 | v3 | v4 | v5 | id | v1 | v2 | v3 | v4 | v5 
+----+----+----+----+----+----+----+----+----+----+----+----
+(0 rows)
+
 -- extract() on 'timestamp' type
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
@@ -1200,8 +1196,6 @@ SELECT id, EXTRACT (century         FROM ts1) v1,
   INTO test43g
   FROM rt_datetime
  WHERE id > 0;
-ERROR:  xpu_timelib.cu:3247  not a recognized unit name
-HINT:  device at GPU-0, function at extract_decode_unit
 SET pg_strom.enabled = off;
 SELECT id, EXTRACT (century         FROM ts1) v1,
            EXTRACT (day             FROM ts2) v2,
@@ -1245,9 +1239,10 @@ SELECT * FROM test43g AS a, test43p AS b WHERE a.id=b.id AND
   OR ABS(a.v17 - b.v17) > 0.1
   OR ABS(a.v18 - b.v18) > 0.1
 ) LIMIT 5;
-ERROR:  relation "test43g" does not exist
-LINE 1: SELECT * FROM test43g AS a, test43p AS b WHERE a.id=b.id AND
-                      ^
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 | v14 | v15 | v16 | v17 | v18 | id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 | v14 | v15 | v16 | v17 | v18 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----+-----+-----+-----+-----+-----+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----+-----+-----+-----+-----+-----
+(0 rows)
+
 -- extract() on 'timestamptz' type
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
@@ -1313,8 +1308,6 @@ SELECT id, EXTRACT (century         FROM tsz1) v1,
   INTO test44g
   FROM rt_datetime
  WHERE id > 0;
-ERROR:  xpu_timelib.cu:3247  not a recognized unit name
-HINT:  device at GPU-0, function at extract_decode_unit
 SET pg_strom.enabled = off;
 SELECT id, EXTRACT (century         FROM tsz1) v1,
            EXTRACT (day             FROM tsz2) v2,
@@ -1364,9 +1357,10 @@ SELECT * FROM test44g AS a, test44p AS b WHERE a.id=b.id AND
   OR ABS(a.v20 - b.v20) > 0.1
   OR ABS(a.v21 - b.v21) > 0.1
 ) LIMIT 5;
-ERROR:  relation "test44g" does not exist
-LINE 1: SELECT * FROM test44g AS a, test44p AS b WHERE a.id=b.id AND
-                      ^
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 | v14 | v15 | v16 | v17 | v18 | v19 | v20 | v21 | id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | v13 | v14 | v15 | v16 | v17 | v18 | v19 | v20 | v21 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----+-----+-----+-----+-----+-----+-----+-----+-----+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+-----+-----+-----+-----+-----+-----+-----+-----+-----
+(0 rows)
+
 -- extract() on 'interval' type
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)
@@ -1382,7 +1376,7 @@ SELECT id, EXTRACT (microseconds FROM iv1) v1,
            EXTRACT (decade       FROM iv2) v10,
            EXTRACT (century      FROM iv1) v11,
            EXTRACT (millennium   FROM iv2) v12
-  INTO test44g
+  INTO test45g
   FROM rt_datetime
  WHERE id > 0;
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
@@ -1414,8 +1408,6 @@ SELECT id, EXTRACT (microseconds FROM iv1) v1,
   INTO test45g
   FROM rt_datetime
  WHERE id > 0;
-ERROR:  xpu_timelib.cu:3247  not a recognized unit name
-HINT:  device at GPU-0, function at extract_decode_unit
 SET pg_strom.enabled = off;
 SELECT id, EXTRACT (microseconds FROM iv1) v1,
            EXTRACT (milliseconds FROM iv2) v2,
@@ -1447,9 +1439,10 @@ SELECT * FROM test45g AS a, test45p AS b WHERE a.id=b.id AND
   OR ABS(a.v11 - b.v11) > 0.1
   OR ABS(a.v12 - b.v12) > 0.1
 ) LIMIT 5;
-ERROR:  relation "test45g" does not exist
-LINE 1: SELECT * FROM test45g AS a, test45p AS b WHERE a.id=b.id AND
-                      ^
+ id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 | id | v1 | v2 | v3 | v4 | v5 | v6 | v7 | v8 | v9 | v10 | v11 | v12 
+----+----+----+----+----+----+----+----+----+----+-----+-----+-----+----+----+----+----+----+----+----+----+----+----+-----+-----+-----
+(0 rows)
+
 -- cleanup temporary resource
 SET client_min_messages = error;
 DROP SCHEMA regtest_dtype_time_temp CASCADE;

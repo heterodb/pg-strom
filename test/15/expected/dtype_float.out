@@ -40,8 +40,6 @@ ALTER TABLE rt_float ADD p int1;
 UPDATE rt_float SET p=(id%256-128);
 -- force to use GpuScan, instead of SeqScan
 SET enable_seqscan = off;
--- not to print kernel source code
-SET pg_strom.debug_kernel_source = off;
 -- cast operators
 SET pg_strom.enabled = on;
 EXPLAIN (verbose, costs off)

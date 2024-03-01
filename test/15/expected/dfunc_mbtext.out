@@ -16,8 +16,6 @@ ALTER TABLE rt_mbtext ALTER line SET STORAGE plain;
 COPY rt_mbtext FROM :'mbtext_1_file_path';
 -- force to use GpuScan, instead of SeqScan
 SET enable_seqscan = off;
--- not to print kernel source code
-SET pg_strom.debug_kernel_source = off;
 -- LIKE operator on mbtext
 SET pg_strom.enabled = on;
 EXPLAIN (costs off, verbose)

@@ -1,0 +1,69 @@
+--
+-- test for multibyte text (LIKE operator)
+--
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_dfunc_mbtext_temp CASCADE;
+CREATE SCHEMA regtest_dfunc_mbtext_temp;
+RESET client_min_messages;
+
+SET search_path = regtest_dfunc_mbtext_temp,public;
+
+\set mbtext_1_file_path `echo -n $ARROW_TEST_DATA_DIR/mbtext_1.data`
+
+CREATE TABLE rt_mbtext (
+  id    int,
+  line  text
+);
+ALTER TABLE rt_mbtext ALTER line SET STORAGE plain;
+COPY rt_mbtext FROM :'mbtext_1_file_path';
+
+-- force to use GpuScan, instead of SeqScan
+SET enable_seqscan = off;
+
+-- LIKE operator on mbtext
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, line
+  INTO test01g
+  FROM rt_mbtext
+ WHERE line like '%メロス%セリヌンティウス%';
+SELECT id, line
+  INTO test01g
+  FROM rt_mbtext
+ WHERE line like '%メロス%セリヌンティウス%';
+SET pg_strom.enabled = off;
+SELECT id, line
+  INTO test01p
+  FROM rt_mbtext
+ WHERE line like '%メロス%セリヌンティウス%';
+
+(SELECT id FROM test01g EXCEPT ALL SELECT id FROM test01p) order by id;
+(SELECT id FROM test01p EXCEPT ALL SELECT id FROM test01g) order by id;
+
+-- text length and substring
+SET pg_strom.enabled = on;
+EXPLAIN (costs off, verbose)
+SELECT id, substring(line, id % 20, id % 10 + 5) v1,
+           substring(line, id % 30, 10) || substring(line, id % 20 + 30, 10) v2
+  INTO test02g
+  FROM rt_mbtext
+ WHERE id > 0;
+SELECT id, substring(line, id % 20, id % 10 + 5) v1,
+           substring(line, id % 30, 10) || substring(line, id % 20 + 30, 10) v2
+  INTO test02g
+  FROM rt_mbtext
+ WHERE id > 0;
+SET pg_strom.enabled = off;
+SELECT id, substring(line, id % 20, id % 10 + 5) v1,
+           substring(line, id % 30, 10) || substring(line, id % 20 + 30, 10) v2
+  INTO test02p
+  FROM rt_mbtext
+ WHERE id > 0;
+
+(SELECT id FROM test02g EXCEPT ALL SELECT id FROM test02p) order by id;
+(SELECT id FROM test02p EXCEPT ALL SELECT id FROM test02g) order by id;
+
+-- cleanup temporary resource
+SET client_min_messages = error;
+DROP SCHEMA regtest_dfunc_mbtext_temp CASCADE;

@@ -13,8 +13,8 @@ CREATE TABLE t1(c0 money , c1 money);
 INSERT INTO t1(c0, c1) VALUES(1, 1);
 EXPLAIN(costs off, verbose)
 SELECT SUM(t1.c1) FROM t1;
-                                                                             QUERY PLAN                                                                              
----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                             QUERY PLAN                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
    Output: pgstrom.sum_cash((pgstrom.psum(c1)))
    ->  Custom Scan (GpuPreAgg) on regtest_miscs.t1
@@ -24,7 +24,7 @@ SELECT SUM(t1.c1) FROM t1;
          KVecs-Buffer: nbytes: 18432, ndims: 2, item=kvec0=<0x0000-47ff, type='money', expr='c1'>
          LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='money' resno=2(c1)>]}}
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-47ff, type='money', expr='c1'>]}}}
-         Partial Aggregation OpCode: {AggFuncs <psum::cash[slot=0, expr='c1']> arg={SaveExpr: <slot=0, type='money'> arg={Var(money): kvec=0x0000-4800, expr='c1'}}}
+         Partial Aggregation OpCode: {AggFuncs <psum::int[slot=0, expr='c1']> arg={SaveExpr: <slot=0, type='money'> arg={Var(money): kvec=0x0000-4800, expr='c1'}}}
          Partial Function BufSz: 16
 (11 rows)
 
@@ -166,7 +166,7 @@ SELECT SUM(t1.c0) FROM t1 LEFT OUTER JOIN t0 ON ((t0.c0)IS DISTINCT FROM(CAST(1.
          LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='money' resno=1(c0)>]}, items[1]={LoadVars(depth=1): kvars=[<slot=1, type='bool' resno=1(c1)>]}}
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-47ff, type='money', expr='c0'>]}}, items[1]={MoveVars(depth=1): items=[<offset=0x0000-47ff, type='money', expr='c0'>]}}}
          Join Quals OpCode: {Packed items[1]={JoinQuals:  <{IsNull arg={Var(bool): slot=1, expr='c1'}}>}}
-         Partial Aggregation OpCode: {AggFuncs <psum::cash[slot=0, expr='c0']> arg={SaveExpr: <slot=0, type='money'> arg={Var(money): kvec=0x0000-4800, expr='c0'}}}
+         Partial Aggregation OpCode: {AggFuncs <psum::int[slot=0, expr='c0']> arg={SaveExpr: <slot=0, type='money'> arg={Var(money): kvec=0x0000-4800, expr='c0'}}}
          Partial Function BufSz: 16
          ->  Custom Scan (GpuScan) on regtest_miscs.t0
                Output: t0.c1

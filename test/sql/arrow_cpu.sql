@@ -7,6 +7,7 @@ SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_cpu_temp CASCADE;
 CREATE SCHEMA regtest_arrow_cpu_temp;
 RESET client_min_messages;
+
 SET search_path = regtest_arrow_cpu_temp,public;
 CREATE TYPE regtest_comp AS (
   a   int,
@@ -15,6 +16,7 @@ CREATE TYPE regtest_comp AS (
   d   numeric(9,3),
   e   timestamp
 );
+
 CREATE TABLE regtest_data (
   id     int,
   i2     int2,
@@ -34,8 +36,6 @@ CREATE TABLE regtest_data (
   tz     timestamptz
 );
 SELECT pgstrom.random_setseed(20190711);
- 
-
 INSERT INTO regtest_data (
   SELECT x, pgstrom.random_int(2, -32000, 32000),
             pgstrom.random_int(2, -16777216, 16777216),
@@ -59,32 +59,20 @@ UPDATE regtest_data
        comp.c = pgstrom.random_text_len(2, 64),
        comp.d = pgstrom.random_float(2, -100000.0, 100000.0),
        comp.e = pgstrom.random_timestamp(2);
+
 \! $PG2ARROW_CMD --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_cpu_temp.regtest_data' -o $ARROW_TEST_DATA_DIR/test_arrow_cpu_1.data
+
 \set test_arrow_cpu_1_path `echo -n $ARROW_TEST_DATA_DIR/test_arrow_cpu_1.data`
+
 IMPORT FOREIGN SCHEMA regtest_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_cpu_temp
 OPTIONS (file :'test_arrow_cpu_1_path');
+
 SELECT attnum, attname, atttypid::regtype
   FROM pg_attribute
  WHERE attrelid = 'regtest_arrow'::regclass AND attnum > 0
  ORDER BY attnum;
-      1 | id      | integer
-      2 | i2      | smallint
-      3 | i4      | integer
-      4 | i8      | bigint
-      5 | f2      | float2
-      6 | f4      | real
-      7 | f8      | double precision
-      8 | n1      | numeric
-      9 | n2      | numeric
-     10 | comp    | regtest_comp
-     11 | t1      | text
-     12 | t2      | text
-     13 | dt      | date
-     14 | tm      | time without time zone
-     15 | ts      | timestamp without time zone
-     16 | tz      | timestamp with time zone
 
 CREATE TABLE timezone_data (
   id     int,
@@ -97,12 +85,16 @@ INSERT INTO timezone_data (
             pgstrom.random_timestamp(1, '2020-02-11 12:00:00',
                                         '2020-02-13 12:00:00')
     FROM generate_series(1,1500) x);
+
 \! $PG2ARROW_CMD -c 'SELECT * FROM regtest_arrow_cpu_temp.timezone_data' -o $ARROW_TEST_DATA_DIR/test_arrow_cpu_2.data
+
 \set timezone_arrow_file_path `echo -n $ARROW_TEST_DATA_DIR/test_arrow_cpu_2.data`
+
 IMPORT FOREIGN SCHEMA timezone_arrow
   FROM SERVER arrow_fdw
   INTO regtest_arrow_cpu_temp
 OPTIONS (file :'timezone_arrow_file_path');
+
 SET pg_strom.enabled = off;
 -- should be empty results
 SELECT d.id, d.i2, d.i4, d.i8, a.i2, a.i4, a.i8
@@ -137,6 +129,7 @@ SELECT d.id, d.dt, d.tm, d.ts, d.tz, a.dt, a.tm, a.ts, a.tz
 -- Timestamp and timezone
 --
 RESET pg_strom.enabled;
+
 SET timezone = 'Europe/Berlin';
 -- by CPU
 RESET arrow_fdw.enabled;
@@ -145,7 +138,6 @@ WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
 (SELECT * FROM d EXCEPT SELECT * FROM a)
 UNION ALL
 (SELECT * FROM a EXCEPT SELECT * FROM d);
-
 -- by GPU
 SET arrow_fdw.enabled = off;
 WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
@@ -162,7 +154,6 @@ WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
 (SELECT * FROM d EXCEPT SELECT * FROM a)
 UNION ALL
 (SELECT * FROM a EXCEPT SELECT * FROM d);
-
 -- by GPU
 SET arrow_fdw.enabled = off;
 WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
@@ -179,7 +170,6 @@ WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
 (SELECT * FROM d EXCEPT SELECT * FROM a)
 UNION ALL
 (SELECT * FROM a EXCEPT SELECT * FROM d);
-
 -- by GPU
 SET arrow_fdw.enabled = off;
 WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
@@ -187,4 +177,3 @@ WITH d AS (SELECT * FROM timezone_data  WHERE ts < tz),
 (SELECT * FROM d EXCEPT SELECT * FROM a)
 UNION ALL
 (SELECT * FROM a EXCEPT SELECT * FROM d);
-
