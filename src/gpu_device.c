@@ -592,7 +592,8 @@ out:
  * __rebuild_gpu_fatbin_file
  */
 static void
-__rebuild_gpu_fatbin_file(const char *fatbin_file)
+__rebuild_gpu_fatbin_file(const char *fatbin_dir,
+						  const char *fatbin_file)
 {
 	StringInfoData cmd;
 	char	workdir[200];
@@ -665,8 +666,8 @@ __rebuild_gpu_fatbin_file(const char *fatbin_file)
 	appendStringInfo(&cmd,
 					 "mkdir -p '%s'; "
 					 "install -m 0644 %s/%s '%s'",
-					 PGSTROM_FATBIN_DIR,
-					 workdir, fatbin_file, PGSTROM_FATBIN_DIR);
+					 fatbin_dir,
+					 workdir, fatbin_file, fatbin_dir);
 	strcpy(namebuf, CUDA_CORE_FILES);
 	for (tok = strtok_r(namebuf, " ", &pos);
 		 tok != NULL;
@@ -692,13 +693,23 @@ static void
 pgstrom_setup_gpu_fatbin(void)
 {
 	const char *fatbin_file = __setup_gpu_fatbin_filename();
+	const char *fatbin_dir = PGSHAREDIR "/pg_strom";
 	char	   *path;
 
-	if (!__validate_gpu_fatbin_file(PGSTROM_FATBIN_DIR, fatbin_file))
-		__rebuild_gpu_fatbin_file(fatbin_file);
-
-	path = alloca(strlen(fatbin_file) + 200);
-	sprintf(path, "%s/%s", PGSTROM_FATBIN_DIR, fatbin_file);
+	if (!__validate_gpu_fatbin_file(fatbin_dir,
+									fatbin_file))
+	{
+		fatbin_dir = PGSTROM_FATBIN_DIR;
+		if (!__validate_gpu_fatbin_file(fatbin_dir,
+										fatbin_file))
+		{
+			__rebuild_gpu_fatbin_file(fatbin_dir,
+									  fatbin_file);
+		}
+	}
+	path = alloca(strlen(fatbin_dir) +
+				  strlen(fatbin_file) + 100);
+	sprintf(path, "%s/%s", fatbin_dir, fatbin_file);
 	pgstrom_fatbin_image_filename = strdup(path);
 	if (!pgstrom_fatbin_image_filename)
 		elog(ERROR, "out of memory");

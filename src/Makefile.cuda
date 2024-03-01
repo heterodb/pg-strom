@@ -25,16 +25,26 @@ NVCC_VERSION := $(shell $(NVCC) --version | grep ^Cuda | \
 # (64k / 128 = up to 512 threads per SM)
 MAXREGCOUNT := 128
 
+__NUM_GPUS := $(shell ls -d /proc/driver/nvidia/gpus/*/information | wc -l)
+ifeq ($(__NUM_GPUS),0)
+__NVCC_TARGET := --gpu-architecture=compute_60 \
+                 --gpu-code=sm_60,sm_61,sm_70,sm_75,sm_80,sm_86,sm_89,sm_90 \
+                 --threads 8
+else
+__NVCC_TARGET := --gpu-architecture=native
+endif
+
 # flags to build GPU libraries
-__NVCC_FLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
-                --maxrregcount=$(MAXREGCOUNT) \
-                --source-in-ptx -lineinfo \
-                -DHAVE_FLOAT2 \
-                -Xnvlink --suppress-stack-size-warning \
-                --gpu-architecture=native \
-				--threads 4
+__NVCC_CFLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
+                 --maxrregcount=$(MAXREGCOUNT)           \
+                 --source-in-ptx -lineinfo               \
+                 -DHAVE_FLOAT2                           \
+                 $(__NVCC_TARGET)
+__NVCC_LDFLAGS += -Xnvlink --suppress-stack-size-warning \
+                  $(__NVCC_TARGET)
 # nvcc flags
-NVCC_FLAGS = $(__NVCC_FLAGS) $(NVCC_FLAGS_CUSTOM)
+NVCC_CFLAGS  = $(__NVCC_CFLAGS)  $(NVCC_FLAGS_CUSTOM) $(NVCC_CFLAGS_CUSTOM)
+NVCC_LDFLAGS = $(__NVCC_LDFLAGS) $(NVCC_FLAGS_CUSTOM) $(NVCC_LDFLAGS_CUSTOM)
 
 # PG-Strom GPU Code
 __CUDA_CORE_FILES = xpu_common cuda_gpuscan cuda_gpujoin cuda_gpupreagg \

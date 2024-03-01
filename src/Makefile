@@ -2,7 +2,6 @@
 # PG-Strom Makefile
 #
 include ../Makefile.common
-PGXS := $(shell $(PG_CONFIG) --pgxs)
 
 #
 # Source of PG-Strom host code
@@ -66,11 +65,14 @@ MODULEDIR  = pg_strom
 DATA = $(STROM_SQL) ../LICENSE Makefile.cuda \
        $(CUDA_SRCS) $(CUDA_HEADERS) $(STROM_HEADERS)
 OBJS = $(STROM_OBJS)
+ifeq ($(WITH_FATBIN),1)
 DATA_built = $(CUDA_FATBIN)
+endif
 EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
               $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
 EXTENSION = pg_strom
 
+PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
 #
@@ -95,9 +97,9 @@ githash.c:
 # GPU Device Code
 #
 %.o: %.cu $(CUDA_HEADERS)
-	$(NVCC) $(NVCC_FLAGS) --device-c -o $@ $<
+	$(NVCC) $(NVCC_CFLAGS)  --device-c -o $@ $<
 
 $(CUDA_FATBIN): $(CUDA_OBJS)
-	$(NVCC) $(NVCC_FLAGS) --device-link --fatbin -o $@ $(CUDA_OBJS)
+	$(NVCC) $(NVCC_LDFLAGS) --device-link --fatbin -o $@ $(CUDA_OBJS)
 
 fatbin: $(CUDA_FATBIN)
