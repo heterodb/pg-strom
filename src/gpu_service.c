@@ -2596,83 +2596,13 @@ static void
 gpuservSetupGpuModule(gpuContext *gcontext)
 {
 	CUmodule	cuda_module;
-	CUlinkState	lstate;
-	CUjit_option jit_options[16];
-	void	   *jit_option_values[16];
-	int			jit_index = 0;
-	void	   *bin_image;
-	size_t		bin_length;
-	char		log_buffer[16384];
-	char	   *cuda_builtin_objs;
-	char	   *tok, *saveptr;
 	CUresult	rc;
 
-	/* Limit max number of registers per threads for ABI compatibility */
-	jit_options[jit_index] = CU_JIT_MAX_REGISTERS;
-	jit_option_values[jit_index] = (void *)CUDA_MAXREGCOUNT;
-	jit_index++;
-
-	/* Get optimal binary to the current context */
-	jit_options[jit_index] = CU_JIT_TARGET_FROM_CUCONTEXT;
-	jit_option_values[jit_index] = NULL;
-	jit_index++;
-
-	/* Compile with L1 cache enabled */
-	jit_options[jit_index] = CU_JIT_CACHE_MODE;
-	jit_option_values[jit_index] = (void *)CU_JIT_CACHE_OPTION_CA;
-	jit_index++;
-
-	jit_options[jit_index] = CU_JIT_GENERATE_LINE_INFO;
-	jit_option_values[jit_index] = (void *)1UL;
-	jit_index++;
-
-	/* Link log buffer */
-	jit_options[jit_index] = CU_JIT_ERROR_LOG_BUFFER;
-	jit_option_values[jit_index] = (void *)log_buffer;
-	jit_index++;
-
-	jit_options[jit_index] = CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES;
-	jit_option_values[jit_index] = (void *)sizeof(log_buffer);
-	jit_index++;
-
-	rc = cuLinkCreate(jit_index, jit_options, jit_option_values, &lstate);
+	rc = cuModuleLoad(&cuda_module, pgstrom_fatbin_image_filename);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuLinkCreate: %s", cuStrError(rc));
-
-	/* Add builtin fatbin files */
-	cuda_builtin_objs = alloca(sizeof(CUDA_BUILTIN_OBJS) + 1);
-	strcpy(cuda_builtin_objs, CUDA_BUILTIN_OBJS);
-	for (tok = strtok_r(cuda_builtin_objs, " ", &saveptr);
-		 tok != NULL;
-		 tok = strtok_r(NULL, " ", &saveptr))
-	{
-		char	pathname[MAXPGPATH];
-
-		snprintf(pathname, MAXPGPATH,
-				 PGSHAREDIR "/pg_strom/%s.fatbin",
-				 __trim(tok));
-		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_FATBINARY,
-						   pathname, 0, NULL, NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLinkAddFile('%s'): %s",
-				 pathname, cuStrError(rc));
-	}
-	//TODO: Load the extra CUDA module
-
-	/* do the linkage */
-	rc = cuLinkComplete(lstate, &bin_image, &bin_length);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuLinkComplete: %s\n%s",
-			 cuStrError(rc), log_buffer);
-
-	rc = cuModuleLoadData(&cuda_module, bin_image);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleLoadData: %s", cuStrError(rc));
-
-	rc = cuLinkDestroy(lstate);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuLinkDestroy: %s", cuStrError(rc));
-
+		elog(ERROR, "failed on cuModuleLoad('%s'): %s",
+			 pgstrom_fatbin_image_filename,
+			 cuStrError(rc));
 	/* setup XPU linkage hash tables */
 	gcontext->cuda_type_htab = __setupDevTypeLinkageTable(cuda_module);
 	gcontext->cuda_func_htab = __setupDevFuncLinkageTable(cuda_module);

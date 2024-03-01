@@ -19,6 +19,8 @@ double		pgstrom_gpu_setup_cost;			/* GUC */
 double		pgstrom_gpu_tuple_cost;			/* GUC */
 double		pgstrom_gpu_operator_cost;		/* GUC */
 double		pgstrom_gpu_direct_seq_page_cost; /* GUC */
+char	   *pgstrom_cuda_toolkit_basedir = CUDA_TOOLKIT_BASEDIR; /* GUC */
+const char *pgstrom_fatbin_image_filename = "/dev/null";
 /* catalog of device attributes */
 typedef enum {
 	DEVATTRKIND__INT,
@@ -357,6 +359,353 @@ pgstrom_collect_gpu_devices(void)
 }
 
 /*
+ * __setup_gpu_fatbin_filename
+ */
+#define PGSTROM_FATBIN_DIR		".pgstrom_fatbin"
+
+static void
+__appendTextFromFile(StringInfo buf, const char *filename, const char *suffix)
+{
+	char	path[MAXPGPATH];
+	int		fdesc;
+
+	snprintf(path, MAXPGPATH,
+			 PGSHAREDIR "/pg_strom/%s%s", filename, suffix ? suffix : "");
+	fdesc = open(path, O_RDONLY);
+	if (fdesc < 0)
+		elog(ERROR, "could not open '%s': %m", path);
+	PG_TRY();
+	{
+		struct stat st_buf;
+		off_t		remained;
+		ssize_t		nbytes;
+
+		if (fstat(fdesc, &st_buf) != 0)
+			elog(ERROR, "failed on fstat('%s'): %m", path);
+		remained = st_buf.st_size;
+
+		enlargeStringInfo(buf, remained);
+		while (remained > 0)
+		{
+			nbytes = read(fdesc, buf->data + buf->len, remained);
+			if (nbytes < 0)
+			{
+				if (errno != EINTR)
+					elog(ERROR, "failed on read('%s'): %m", path);
+			}
+			else if (nbytes == 0)
+			{
+				elog(ERROR, "unable to read '%s' by the EOF", path);
+			}
+			else
+			{
+				Assert(nbytes <= remained);
+				buf->len += nbytes;
+				remained -= nbytes;
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		close(fdesc);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	close(fdesc);
+}
+
+static char *
+__setup_gpu_fatbin_filename(void)
+{
+	int			cuda_version = -1;
+	char		hexsum[33];		/* 128bit hash */
+	char	   *namebuf;
+	char	   *tok, *pos;
+	const char *errstr;
+	StringInfoData buf;
+
+	for (int i=0; i < numGpuDevAttrs; i++)
+	{
+		if (i == 0)
+			cuda_version = gpuDevAttrs[i].CUDA_DRIVER_VERSION;
+		else if (cuda_version != gpuDevAttrs[i].CUDA_DRIVER_VERSION)
+			elog(ERROR, "Bug? CUDA Driver version mismatch between devices");
+	}
+	namebuf = alloca(Max(sizeof(CUDA_CORE_HEADERS),
+						 sizeof(CUDA_CORE_FILES)) + 1);
+	initStringInfo(&buf);
+	/* CUDA_CORE_HEADERS */
+	strcpy(namebuf, CUDA_CORE_HEADERS);
+	for (tok = strtok_r(namebuf, " ", &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL, " ", &pos))
+	{
+		__appendTextFromFile(&buf, tok, NULL);
+	}
+
+	/* CUDA_CORE_SRCS */
+	strcpy(namebuf, CUDA_CORE_FILES);
+	for (tok = strtok_r(namebuf, " ", &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL, " ", &pos))
+	{
+		__appendTextFromFile(&buf, tok, ".cu");
+	}
+	if (!pg_md5_hash(buf.data, buf.len, hexsum, &errstr))
+		elog(ERROR, "could not compute MD5 hash: %s", errstr);
+
+	return psprintf("pgstrom-gpucode-V%06d-%s.fatbin",
+					cuda_version, hexsum);
+}
+
+/*
+ * __gpu_archtecture_label
+ */
+static const char *
+__gpu_archtecture_label(int major_cc, int minor_cc)
+{
+	int		cuda_arch = major_cc * 100 + minor_cc;
+
+	switch (cuda_arch)
+	{
+		case 600:	/* Tesla P100 */
+			return "sm_60";
+		case 601:	/* Tesla P40 */
+			return "sm_61";
+		case 700:	/* Tesla V100 */
+			return "sm_70";
+		case 705:	/* Tesla T4 */
+			return "sm_75";
+		case 800:	/* NVIDIA A100 */
+			return "sm_80";
+		case 806:	/* NVIDIA A40 */
+			return "sm_86";
+		case 809:	/* NVIDIA L40 */
+			return "sm_89";
+		case 900:	/* NVIDIA H100 */
+			return "sm_90";
+		default:
+			elog(ERROR, "unsupported compute capability (%d.%d)",
+				 major_cc, minor_cc);
+	}
+	return NULL;
+}
+
+/*
+ * __validate_gpu_fatbin_file
+ */
+static bool
+__validate_gpu_fatbin_file(const char *fatbin_dir, const char *fatbin_file)
+{
+	StringInfoData cmd;
+	StringInfoData buf;
+	FILE	   *filp;
+	char	   *temp;
+	bool		retval = false;
+
+	initStringInfo(&cmd);
+	initStringInfo(&buf);
+
+	appendStringInfo(&buf, "%s/%s", fatbin_dir, fatbin_file);
+	if (access(buf.data, R_OK) != 0)
+		return false;
+	/* Pick up supported SM from the fatbin file */
+	appendStringInfo(&cmd,
+					 "%s/bin/cuobjdump '%s/%s'"
+					 " | grep '^arch '"
+					 " | awk '{print $3}'",
+					 pgstrom_cuda_toolkit_basedir,
+					 fatbin_dir, fatbin_file);
+	filp = OpenPipeStream(cmd.data, "r");
+	if (!filp)
+	{
+		elog(LOG, "unable to run [%s]: %m", cmd.data);
+		goto out;
+	}
+
+	resetStringInfo(&buf);
+	for (;;)
+	{
+		ssize_t	nbytes;
+
+		enlargeStringInfo(&buf, 512);
+		nbytes = fread(buf.data + buf.len, 1, 512, filp);
+
+		if (nbytes < 0)
+		{
+			if (errno != EINTR)
+			{
+				elog(LOG, "unable to read from pipe:[%s]: %m", cmd.data);
+				goto out;
+			}
+		}
+		else if (nbytes == 0)
+		{
+			if (feof(filp))
+				break;
+			elog(LOG, "unable to read from pipe:[%s]: %m", cmd.data);
+			goto out;
+		}
+		else
+		{
+			buf.len += nbytes;
+		}
+	}
+	ClosePipeStream(filp);
+
+	temp = alloca(buf.len + 1);
+	for (int i=0; i < numGpuDevAttrs; i++)
+	{
+		char	   *tok, *pos;
+		const char *label;
+
+		label = __gpu_archtecture_label(gpuDevAttrs[i].COMPUTE_CAPABILITY_MAJOR,
+										gpuDevAttrs[i].COMPUTE_CAPABILITY_MINOR);
+
+		memcpy(temp, buf.data, buf.len+1);
+		for (tok = strtok_r(temp, " \n\r", &pos);
+			 tok != NULL;
+			 tok = strtok_r(NULL, " \n\r", &pos))
+		{
+			if (strcmp(label, tok) == 0)
+				break;	/* ok, supported */
+		}
+		if (!tok)
+		{
+			elog(LOG, "GPU%d '%s' CC%d.%d is not supported at '%s'",
+				 i, gpuDevAttrs[i].DEV_NAME,
+				 gpuDevAttrs[i].COMPUTE_CAPABILITY_MAJOR,
+				 gpuDevAttrs[i].COMPUTE_CAPABILITY_MINOR,
+				 fatbin_file);
+			goto out;
+		}
+	}
+	/* ok, this fatbin is validated */
+	retval = true;
+out:
+	pfree(cmd.data);
+	pfree(buf.data);
+	return retval;
+}
+
+/*
+ * __rebuild_gpu_fatbin_file
+ */
+static void
+__rebuild_gpu_fatbin_file(const char *fatbin_file)
+{
+	StringInfoData cmd;
+	char	workdir[200];
+	char   *namebuf;
+	char   *tok, *pos;
+	int		count;
+	int		status;
+
+	strcpy(workdir, "/tmp/.pgstrom_fatbin_build_XXXXXX");
+	if (!mkdtemp(workdir))
+		elog(ERROR, "unable to create work directory for fatbin rebuild");
+
+	elog(LOG, "PG-Strom fatbin image is not valid now, so rebuild in progress...");
+	
+	namebuf = alloca(sizeof(CUDA_CORE_FILES) + 1);
+	strcpy(namebuf, CUDA_CORE_FILES);
+
+	initStringInfo(&cmd);
+	appendStringInfo(&cmd, "cd '%s' && (", workdir);
+	for (tok = strtok_r(namebuf, " ", &pos), count=0;
+		 tok != NULL;
+		 tok = strtok_r(NULL,    " ", &pos), count++)
+	{
+		if (count > 0)
+			appendStringInfo(&cmd, " & ");
+		appendStringInfo(&cmd,
+						 " /bin/sh -x -c '%s/bin/nvcc"
+						 " --maxrregcount=%d"
+						 " --source-in-ptx -lineinfo"
+						 " -I. -I%s "
+						 " -DHAVE_FLOAT2 "
+						 " -arch=native --threads 4"
+						 " --device-c"
+						 " -o %s.o"
+						 " %s/pg_strom/%s.cu' >& %s.log",
+						 pgstrom_cuda_toolkit_basedir,
+						 CUDA_MAXREGCOUNT,
+						 PGINCLUDEDIR,
+						 tok,
+						 PGSHAREDIR, tok, tok);
+	}
+	appendStringInfo(&cmd,
+					 ") && wait;"
+					 " /bin/sh -x -c '%s/bin/nvcc"
+					 " -Xnvlink --suppress-stack-size-warning"
+					 " -arch=native --threads 4"
+					 " --device-link --fatbin"
+					 " -o '%s'",
+					 pgstrom_cuda_toolkit_basedir,
+					 fatbin_file);
+	strcpy(namebuf, CUDA_CORE_FILES);
+	for (tok = strtok_r(namebuf, " ", &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL,    " ", &pos))
+	{
+		appendStringInfo(&cmd, " %s.o", tok);
+	}
+	appendStringInfo(&cmd, "' >& %s.log", fatbin_file);
+
+	status = system(cmd.data);
+	if (status != 0)
+		elog(ERROR, "failed on the build process at [%s]", workdir);
+
+	/* validation of the fatbin file */
+	if (!__validate_gpu_fatbin_file(workdir, fatbin_file))
+		elog(ERROR, "failed on validation of the rebuilt fatbin at [%s]", workdir);
+
+	/* installation of the rebuilt fatbin */
+	resetStringInfo(&cmd);
+	appendStringInfo(&cmd,
+					 "mkdir -p '%s'; "
+					 "install -m 0644 %s/%s '%s'",
+					 PGSTROM_FATBIN_DIR,
+					 workdir, fatbin_file, PGSTROM_FATBIN_DIR);
+	strcpy(namebuf, CUDA_CORE_FILES);
+	for (tok = strtok_r(namebuf, " ", &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL,    " ", &pos))
+	{
+		appendStringInfo(&cmd, "; cat %s/%s.log >> %s/%s.log",
+						 workdir, tok,
+						 PGSTROM_FATBIN_DIR, fatbin_file);
+	}
+	appendStringInfo(&cmd, "; cat %s/%s.log >> %s/%s.log",
+					 workdir, fatbin_file,
+					 PGSTROM_FATBIN_DIR, fatbin_file);
+
+	status = system(cmd.data);
+	if (status != 0)
+		elog(ERROR, "failed on shell command: %s", cmd.data);
+}
+
+/*
+ * pgstrom_setup_gpu_fatbin
+ */
+static void
+pgstrom_setup_gpu_fatbin(void)
+{
+	const char *fatbin_file = __setup_gpu_fatbin_filename();
+	char	   *path;
+
+	if (!__validate_gpu_fatbin_file(PGSTROM_FATBIN_DIR, fatbin_file))
+		__rebuild_gpu_fatbin_file(fatbin_file);
+
+	path = alloca(strlen(fatbin_file) + 200);
+	sprintf(path, "%s/%s", PGSTROM_FATBIN_DIR, fatbin_file);
+	pgstrom_fatbin_image_filename = strdup(path);
+	if (!pgstrom_fatbin_image_filename)
+		elog(ERROR, "out of memory");
+	elog(LOG, "PG-Strom fatbin image is ready: %s", fatbin_file);
+}
+
+/*
  * pgstrom_gpu_operator_ratio
  */
 double
@@ -450,6 +799,15 @@ pgstrom_init_gpu_device(void)
 	pgstrom_collect_gpu_devices();
 	if (numGpuDevAttrs > 0)
 	{
+		DefineCustomStringVariable("pg_strom.cuda_toolkit_basedir",
+								   "CUDA Toolkit installation directory",
+								   NULL,
+								   &pgstrom_cuda_toolkit_basedir,
+								   CUDA_TOOLKIT_BASEDIR,
+								   PGC_POSTMASTER,
+								   GUC_NOT_IN_SAMPLE,
+								   NULL, NULL, NULL);
+		pgstrom_setup_gpu_fatbin();
 		pgstrom_init_gpu_options();
 		return true;
 	}

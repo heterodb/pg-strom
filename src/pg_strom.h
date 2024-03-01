@@ -62,6 +62,7 @@
 #include "commands/typecmds.h"
 #include "common/hashfn.h"
 #include "common/int.h"
+#include "common/md5.h"
 #include "executor/nodeSubplan.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
@@ -761,6 +762,7 @@ extern double	pgstrom_gpu_tuple_cost;		/* GUC */
 extern double	pgstrom_gpu_operator_cost;	/* GUC */
 extern double	pgstrom_gpu_direct_seq_page_cost; /* GUC */
 extern double	pgstrom_gpu_operator_ratio(void);
+extern const char *pgstrom_fatbin_image_filename;
 extern void		gpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
 extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,
