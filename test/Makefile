@@ -10,13 +10,13 @@ PSQL           := $(shell $(PG_CONFIG) --bindir)/psql
 PG2ARROW_CMD   := $(shell cd ../arrow-tools; pwd)/pg2arrow
 ARROW2CSV_CMD  := $(shell cd ../arrow-tools; pwd)/arrow2csv
 DBGEN_SSBM_CMD := $(shell cd ./ssbm; pwd)/dbgen-ssbm
-MY_DATA_DIR    := $(shell pwd)/data
+ARROW_TEST_DATA_DIR    := $(shell pwd)/data
 
 REGRESS_DBNAME := contrib_regression_$(MODULE_big)
 REGRESS_REVISION := 20230911
 REGRESS := --schedule=./parallel_schedule
 REGRESS_SETENV = 'PGDATABASE=$(REGRESS_DBNAME)'		\
-                 'MY_DATA_DIR=$(MY_DATA_DIR)'		\
+                 'ARROW_TEST_DATA_DIR=$(ARROW_TEST_DATA_DIR)'		\
                  'PG2ARROW_CMD=$(PG2ARROW_CMD)'		\
                  'ARROW2CSV_CMD=$(ARROW2CSV_CMD)'	\
                  'DBGEN_SSBM_CMD=$(DBGEN_SSBM_CMD)'

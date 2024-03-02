@@ -1,6 +1,7 @@
 ---
 --- test cases for GPU Cache
 ---
+\t on
 SET pg_strom.regression_test_mode = on;
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS gpu_cache_temp_test CASCADE;
@@ -43,6 +44,7 @@ SET enable_seqscan=off;
 EXPLAIN (costs off, verbose)
 INSERT INTO cache_test_table(id) values (1);
 
+SELECT pgstrom.random_setseed(20190608);
 
 INSERT INTO cache_test_table (
   SELECT x 
@@ -292,6 +294,9 @@ CREATE TRIGGER row_sync_corruption AFTER INSERT OR UPDATE OR DELETE ON cache_cor
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=5000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
 ALTER TABLE cache_corruption_test ENABLE ALWAYS TRIGGER row_sync_corruption;
 
+-- check phase
+SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
+
 -- INSERT 4000 rows ( < max: 5000 rows )
 INSERT INTO cache_corruption_test (
   SELECT x 
@@ -309,32 +314,32 @@ INSERT INTO cache_corruption_test (
 );
 
 -- Apply to GPUCache
-SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') = 0 AS apply_redo_result;
+SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') AS apply_redo_result;
 
--- corrupted must be false
-SELECT corrupted IS false FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
+-- phase should be 'is_ready'
+SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
 
 -- check GPUCache is still usable.
 EXPLAIN (costs off, verbose)
 SELECT * FROM cache_corruption_test WHERE b%3=0;
 
 -- update to make the table corrupted
-UPDATE cache_corruption_test SET d=d/2 WHERE id in (SELECT id FROM cache_corruption_test LIMIT 1000);
+UPDATE cache_corruption_test SET d=d/2 WHERE id in (SELECT id FROM cache_corruption_test LIMIT 1001);
 -- Apply to GPUCache (returns error because the table is corrupted)
-SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') > 0 AS apply_redo_result;
+SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') AS apply_redo_result;
 
--- corrupted must be true
-SELECT corrupted IS true FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
+-- phase should be 'corrupted'
+SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
 
 -- check GPUCache is not usable.
 EXPLAIN (costs off, verbose)
 SELECT * FROM cache_corruption_test WHERE b%3=0;
 
 -- Recover GPUCache
-SELECT pgstrom.gpucache_recovery('cache_corruption_test') = 0;
+SELECT pgstrom.gpucache_recovery('cache_corruption_test');
 
--- corrupted must be false
-SELECT corrupted IS false FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
+-- phase should be is_ready
+SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
 
 EXPLAIN (costs off, verbose)
 SELECT count(*) FROM cache_corruption_test;

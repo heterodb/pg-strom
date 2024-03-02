@@ -45,8 +45,6 @@ UPDATE regtest_data
 
 --- force to use GpuScan
 SET enable_seqscan = off;
--- not to print kernel source code
-SET pg_strom.debug_kernel_source = off;
 
 -- ScalarArrayOp test
 SET pg_strom.enabled = on;

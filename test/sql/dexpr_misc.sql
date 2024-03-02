@@ -28,7 +28,6 @@ INSERT INTO regtest_data (
 
 -- force to use GpuScan and disables to print source files
 SET enable_seqscan = off;
-SET pg_strom.debug_kernel_source = off;
 
 -- test for COALESCE / GREATEST / LEAST
 SET pg_strom.enabled = on;

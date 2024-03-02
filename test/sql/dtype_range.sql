@@ -45,6 +45,7 @@ CREATE TABLE rt_daterange (
   y     daterange
 );
 
+SELECT pgstrom.random_setseed(20190711);
 INSERT INTO rt_int4range
     (SELECT x, pgstrom.random_int(1, 0, 1000),
 	           pgstrom.random_int4range(1,   0,1000),
