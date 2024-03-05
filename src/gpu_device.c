@@ -422,6 +422,8 @@ __setup_gpu_fatbin_filename(void)
 	char	   *namebuf;
 	char	   *tok, *pos;
 	const char *errstr;
+	ResourceOwner resowner_saved;
+	ResourceOwner resowner_dummy;
 	StringInfoData buf;
 
 	for (int i=0; i < numGpuDevAttrs; i++)
@@ -451,8 +453,36 @@ __setup_gpu_fatbin_filename(void)
 	{
 		__appendTextFromFile(&buf, tok, ".cu");
 	}
-	if (!pg_md5_hash(buf.data, buf.len, hexsum, &errstr))
-		elog(ERROR, "could not compute MD5 hash: %s", errstr);
+	/*
+	 * Calculation of MD5SUM. Note that pg_md5_hash internally use
+	 * ResourceOwner to track openSSL memory, however, we may not
+	 * have the CurrentResourceOwner during startup.
+	 */
+	resowner_saved = CurrentResourceOwner;
+	resowner_dummy = ResourceOwnerCreate(NULL, "MD5SUM Dummy");
+	PG_TRY();
+	{
+		CurrentResourceOwner = resowner_dummy;
+		if (!pg_md5_hash(buf.data, buf.len, hexsum, &errstr))
+			elog(ERROR, "could not compute MD5 hash: %s", errstr);
+	}
+	PG_CATCH();
+	{
+		CurrentResourceOwner = resowner_saved;
+		ResourceOwnerRelease(resowner_dummy,
+							 RESOURCE_RELEASE_BEFORE_LOCKS,
+							 false,
+							 false);
+		ResourceOwnerDelete(resowner_dummy);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	CurrentResourceOwner = resowner_saved;
+	ResourceOwnerRelease(resowner_dummy,
+						 RESOURCE_RELEASE_BEFORE_LOCKS,
+						 true,
+						 false);
+	ResourceOwnerDelete(resowner_dummy);
 
 	return psprintf("pgstrom-gpucode-V%06d-%s.fatbin",
 					cuda_version, hexsum);
