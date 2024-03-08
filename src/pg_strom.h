@@ -281,6 +281,7 @@ typedef struct
 	List	   *host_quals;			/* host qualifiers to scan the outer */
 	Index		scan_relid;			/* relid of the outer relation to scan */
 	List	   *scan_quals;			/* device qualifiers to scan the outer */
+	List	   *scan_quals_explain;	/* device qualifiers for EXPLAIN output */
 	double		scan_tuples;		/* copy of baserel->tuples */
 	double		scan_nrows;			/* copy of baserel->rows */
 	int			parallel_nworkers;	/* # of parallel workers */

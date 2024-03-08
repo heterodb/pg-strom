@@ -2277,9 +2277,9 @@ pgstromExplainTaskState(CustomScanState *node,
 	/* xPU Scan Quals */
 	if (ps_state)
 		stat_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_in);
-	if (pp_info->scan_quals)
+	if (pp_info->scan_quals_explain)
 	{
-		List   *scan_quals = pp_info->scan_quals;
+		List   *scan_quals = pp_info->scan_quals_explain;
 		Expr   *expr;
 
 		resetStringInfo(&buf);
