@@ -95,6 +95,7 @@ xpu_bool_datum_kvec_copy(kern_context *kcxt,
 	kvec_bool_t *kvecs_dst = (kvec_bool_t *)__kvecs_dst;
 
 	kvecs_dst->values[kvecs_dst_id] = kvecs_src->values[kvecs_src_id];
+	return true;
 }
 
 STATIC_FUNCTION(int)
@@ -151,7 +152,7 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 		xpu_##NAME##_t *result = (xpu_##NAME##_t *)__result;			\
 																		\
 		result->expr_ops = &xpu_##NAME##_ops;							\
-		result->value = *((const BASETYPE *)addr);						\
+		__FetchStore(result->value, (const BASETYPE *)addr);			\
 		return true;													\
 	}																	\
 	STATIC_FUNCTION(bool)												\
@@ -461,15 +462,60 @@ PG_SIMPLE_COMPARE_TEMPLATE(int82, int8, int2, (int64_t))
 PG_SIMPLE_COMPARE_TEMPLATE(int84, int8, int4, (int64_t))
 PG_SIMPLE_COMPARE_TEMPLATE(int8,  int8, int8, )
 
-PG_SIMPLE_COMPARE_TEMPLATE(float2,  float2, float2, )
-PG_SIMPLE_COMPARE_TEMPLATE(float24, float2, float4, (float4_t))
-PG_SIMPLE_COMPARE_TEMPLATE(float28, float2, float8, (float8_t))
-PG_SIMPLE_COMPARE_TEMPLATE(float42, float4, float2, (float4_t))
-PG_SIMPLE_COMPARE_TEMPLATE(float4,  float4, float4, )
-PG_SIMPLE_COMPARE_TEMPLATE(float48, float4, float8, (float8_t))
-PG_SIMPLE_COMPARE_TEMPLATE(float82, float8, float2, (float8_t))
-PG_SIMPLE_COMPARE_TEMPLATE(float84, float8, float4, (float8_t))
-PG_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, )
+#define __float_comp_eq(x,y,CAST)						\
+	(isnan(x) ? isnan(y) : !isnan(y) && (CAST (x) == CAST (y)))
+#define __float_comp_ne(x,y,CAST)						\
+	(isnan(x) ? !isnan(y) : isnan(y) || (CAST (x) != CAST (y)))
+#define __float_comp_lt(x,y,CAST)						\
+	(!isnan(x) && (isnan(y) || (CAST (x) <  CAST (y))))
+#define __float_comp_le(x,y,CAST)						\
+	(isnan(y) || (!isnan(x) && (CAST (x) <= CAST (y))))
+#define __float_comp_gt(x,y,CAST)						\
+	(!isnan(y) && (isnan(x) || (CAST (x) >  CAST (y))))
+#define __float_comp_ge(x,y,CAST)						\
+	(isnan(x) || (!isnan(y) && (CAST (x) >= CAST (y))))
+
+#define __PG_FLOAT_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,EXTRA)	\
+	PUBLIC_FUNCTION(bool)											\
+	pgfn_##FNAME##EXTRA(XPU_PGFUNCTION_ARGS)						\
+	{																\
+		KEXP_PROCESS_ARGS2(bool,LNAME,lval,RNAME,rval);				\
+		if (XPU_DATUM_ISNULL(&lval) || XPU_DATUM_ISNULL(&rval))		\
+		{															\
+			__pg_simple_nullcomp_eq(&lval, &rval);					\
+		}															\
+		else														\
+		{															\
+			result->expr_ops = kexp->expr_ops;						\
+			result->value = __float_comp_##EXTRA(lval.value,		\
+												 rval.value, CAST);	\
+		}															\
+		return true;												\
+	}
+#define PG_FLOAT_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST)	\
+	__PG_FLOAT_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,eq)	\
+	__PG_FLOAT_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,ne)	\
+	__PG_FLOAT_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,lt)	\
+	__PG_FLOAT_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,le)	\
+	__PG_FLOAT_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,gt)	\
+	__PG_FLOAT_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,ge)	\
+
+PG_FLOAT_COMPARE_TEMPLATE(float2,  float2, float2, )
+PG_FLOAT_COMPARE_TEMPLATE(float24, float2, float4, (float4_t))
+PG_FLOAT_COMPARE_TEMPLATE(float28, float2, float8, (float8_t))
+PG_FLOAT_COMPARE_TEMPLATE(float42, float4, float2, (float4_t))
+PG_FLOAT_COMPARE_TEMPLATE(float4,  float4, float4, )
+PG_FLOAT_COMPARE_TEMPLATE(float48, float4, float8, (float8_t))
+PG_FLOAT_COMPARE_TEMPLATE(float82, float8, float2, (float8_t))
+PG_FLOAT_COMPARE_TEMPLATE(float84, float8, float4, (float8_t))
+PG_FLOAT_COMPARE_TEMPLATE(float8,  float8, float8, )
+
+#undef __float_comp_eq
+#undef __float_comp_ne
+#undef __float_comp_lt
+#undef __float_comp_le
+#undef __float_comp_gt
+#undef __float_comp_ge
 
 /*
  * Binary operator template

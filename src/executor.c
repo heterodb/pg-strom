@@ -745,8 +745,14 @@ static void
 pgstromTaskStateResetScan(pgstromTaskState *pts)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	TableScanDesc scan = pts->css.ss.ss_currentScanDesc;
 	int		num_devs = 0;
+
+	/*
+	 * pgstromExecTaskState() is never called on the single process
+	 * execution, thus we have no state to reset.
+	 */
+	if (!ps_state)
+		return;
 
 	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 		num_devs = numGpuDevAttrs;
@@ -759,13 +765,22 @@ pgstromTaskStateResetScan(pgstromTaskState *pts)
 	pg_atomic_write_u32(pts->rjoin_exit_count, 0);
 	for (int i=0; i < num_devs; i++)
 		pg_atomic_write_u32(pts->rjoin_devs_count + i, 0);
-	if (ps_state->ss_handle == DSM_HANDLE_INVALID)
+	if (pts->arrow_state)
+	{
+		pgstromArrowFdwExecReset(pts->arrow_state);
+	}
+	else if (ps_state->ss_handle == DSM_HANDLE_INVALID)
+	{
+		TableScanDesc scan = pts->css.ss.ss_currentScanDesc;
+
 		table_rescan(scan, NULL);
+	}
 	else
 	{
 		Relation	rel = pts->css.ss.ss_currentRelation;
 		ParallelTableScanDesc pscan = (ParallelTableScanDesc)
 			((char *)ps_state + ps_state->parallel_scan_desc_offset);
+
 		table_parallelscan_reinitialize(rel, pscan);
 	}
 }
@@ -1084,6 +1099,7 @@ pgstromExecFinalChunkDummy(pgstromTaskState *pts,
 		xcmd->magic = XpuCommandMagicNumber;
 		xcmd->tag = XpuCommandTag__Success;
 		xcmd->length = offsetof(XpuCommand, u.results.stats);
+		xcmd->priv = conn;
 		xcmd->u.results.final_plan_node = true;
 
 		/* attach dummy xcmd at the tail of ready list */
@@ -1328,7 +1344,7 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 	/*
 	 * Init scan-quals for the base relation
 	 */
-	pts->base_quals = ExecInitQual(pp_info->scan_quals_fallback,
+	pts->base_quals = ExecInitQual(pp_info->scan_quals,
 								   &pts->css.ss.ps);
 	pts->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
 											  table_slot_callbacks(rel));
@@ -2178,7 +2194,7 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 		appendStringInfo(&buf, "%s (", (bms_is_empty(pts->optimal_gpus)
 										? "disabled"
 										: "enabled"));
-		if (!pgstrom_regression_test_mode)
+		if (!pgstrom_regression_test_mode && conn)
 			appendStringInfo(&buf, "%s; ", conn->devname);
 		pos = buf.len;
 
@@ -2261,9 +2277,9 @@ pgstromExplainTaskState(CustomScanState *node,
 	/* xPU Scan Quals */
 	if (ps_state)
 		stat_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_in);
-	if (pp_info->scan_quals)
+	if (pp_info->scan_quals_explain)
 	{
-		List   *scan_quals = pp_info->scan_quals;
+		List   *scan_quals = pp_info->scan_quals_explain;
 		Expr   *expr;
 
 		resetStringInfo(&buf);
@@ -2277,7 +2293,7 @@ pgstromExplainTaskState(CustomScanState *node,
 		{
 			appendStringInfo(&buf, " [rows: %.0f -> %.0f]",
 							 pp_info->scan_tuples,
-							 pp_info->scan_rows);
+							 pp_info->scan_nrows);
 		}
 		else
 		{
@@ -2287,7 +2303,7 @@ pgstromExplainTaskState(CustomScanState *node,
 				prev_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
 			appendStringInfo(&buf, " [plan: %.0f -> %.0f, exec: %lu -> %lu]",
 							 pp_info->scan_tuples,
-							 pp_info->scan_rows,
+							 pp_info->scan_nrows,
 							 prev_ntuples,
 							 stat_ntuples);
 		}
@@ -2296,17 +2312,18 @@ pgstromExplainTaskState(CustomScanState *node,
 	}
 
 	/* xPU JOIN */
-	ntuples = pp_info->scan_rows;
+	ntuples = pp_info->scan_nrows;
 	for (int i=0; i < pp_info->num_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
-		if (pp_inner->join_quals != NIL || pp_inner->other_quals != NIL)
+		if (pp_inner->join_quals_original != NIL ||
+			pp_inner->other_quals_original != NIL)
 		{
 			const char *join_label;
 
 			resetStringInfo(&buf);
-			foreach (lc, pp_inner->join_quals)
+			foreach (lc, pp_inner->join_quals_original)
 			{
 				Node   *expr = lfirst(lc);
 
@@ -2315,9 +2332,9 @@ pgstromExplainTaskState(CustomScanState *node,
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, str);
 			}
-			if (pp_inner->other_quals != NIL)
+			if (pp_inner->other_quals_original != NIL)
 			{
-				foreach (lc, pp_inner->other_quals)
+				foreach (lc, pp_inner->other_quals_original)
 				{
 					Node   *expr = lfirst(lc);
 
@@ -2359,10 +2376,10 @@ pgstromExplainTaskState(CustomScanState *node,
 		}
 		ntuples = pp_inner->join_nrows;
 
-		if (pp_inner->hash_outer_keys != NIL)
+		if (pp_inner->hash_outer_keys_original != NIL)
 		{
 			resetStringInfo(&buf);
-			foreach (lc, pp_inner->hash_outer_keys)
+			foreach (lc, pp_inner->hash_outer_keys_original)
 			{
 				Node   *expr = lfirst(lc);
 
@@ -2375,10 +2392,10 @@ pgstromExplainTaskState(CustomScanState *node,
 					 "%s Outer Hash [%d]", xpu_label, i+1);
 			ExplainPropertyText(label, buf.data, es);
 		}
-		if (pp_inner->hash_inner_keys != NIL)
+		if (pp_inner->hash_inner_keys_original != NIL)
 		{
 			resetStringInfo(&buf);
-			foreach (lc, pp_inner->hash_inner_keys)
+			foreach (lc, pp_inner->hash_inner_keys_original)
 			{
 				Node   *expr = lfirst(lc);
 
@@ -2413,6 +2430,9 @@ pgstromExplainTaskState(CustomScanState *node,
 			ExplainPropertyText(label, buf.data, es);
 		}
 	}
+	if (pp_info->sibling_param_id >= 0)
+		ExplainPropertyInteger("Inner Siblings-Id", NULL,
+							   pp_info->sibling_param_id, es);
 
 	/*
 	 * Storage related info

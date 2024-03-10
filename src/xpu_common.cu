@@ -122,7 +122,7 @@ kern_extract_heap_tuple(kern_context *kcxt,
 		   vl_desc->vl_resno < 0)
 	{
 		if (!__extract_heap_tuple_sysattr(kcxt, kds, htup, vl_desc))
-			return;
+			return false;
 		vl_desc++;
 		kvload_count++;
 	}
@@ -679,18 +679,16 @@ STATIC_FUNCTION(bool)
 pgfn_CaseWhenExpr(XPU_PGFUNCTION_ARGS)
 {
 	const kern_expression *karg;
-	xpu_datum_t	   *comp = NULL;
-	xpu_datum_t	   *temp = NULL;
-	int				i, temp_sz = 0;
+	int			i;
 
 	/* CASE <key> expression, if any */
 	if (kexp->u.casewhen.case_comp)
 	{
 		karg = (const kern_expression *)
 			((char *)kexp + kexp->u.casewhen.case_comp);
-		assert(__KEXP_IS_VALID(kexp, karg));
-		comp = (xpu_datum_t *)alloca(karg->expr_ops->xpu_type_sizeof);
-		if (!EXEC_KERN_EXPRESSION(kcxt, karg, comp))
+		assert(__KEXP_IS_VALID(kexp, karg) &&
+			   karg->opcode == FuncOpCode__SaveExpr);
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, NULL))
 			return false;
 	}
 
@@ -700,38 +698,16 @@ pgfn_CaseWhenExpr(XPU_PGFUNCTION_ARGS)
 		 i < kexp->nr_args;
 		 i += 2, karg=KEXP_NEXT_ARG(karg))
 	{
-		bool		matched = false;
+		xpu_bool_t		status;
 
-		assert(__KEXP_IS_VALID(kexp, karg));
-		if (comp)
-		{
-			int			status;
-
-			if (temp_sz < karg->expr_ops->xpu_type_sizeof)
-			{
-				temp_sz = karg->expr_ops->xpu_type_sizeof + 32;
-				temp = (xpu_datum_t *)alloca(temp_sz);
-			}
-			if (!EXEC_KERN_EXPRESSION(kcxt, karg, temp))
-				return false;
-			if (!karg->expr_ops->xpu_datum_comp(kcxt, &status, comp, temp))
-				return false;
-			if (status == 0)
-				matched = true;
-		}
-		else
-		{
-			xpu_bool_t	status;
-
-			if (!EXEC_KERN_EXPRESSION(kcxt, karg, &status))
-				return false;
-			if (!XPU_DATUM_ISNULL(&status) && status.value)
-				matched = true;
-		}
+		assert(__KEXP_IS_VALID(kexp, karg) &&
+			   karg->exptype == TypeOpCode__bool);
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &status))
+			return false;
 
 		karg = KEXP_NEXT_ARG(karg);
 		assert(__KEXP_IS_VALID(kexp, karg));
-		if (matched)
+		if (!XPU_DATUM_ISNULL(&status) && status.value)
 		{
 			assert(kexp->exptype == karg->exptype);
 			if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))

@@ -211,7 +211,7 @@ static shmem_startup_hook_type shmem_startup_next = NULL;
 static object_access_hook_type object_access_next = NULL;
 
 /* --- function declarations --- */
-static bool		__gpuCacheAppendLog(GpuCacheDesc *gc_desc,
+static void		__gpuCacheAppendLog(GpuCacheDesc *gc_desc,
 									GCacheTxLogCommon *tx_log);
 static void		gpuCacheInvokeDropUnload(const GpuCacheDesc *gc_desc,
 										 bool is_async);
@@ -840,6 +840,7 @@ static GpuCacheLocalMapping *
 __openGpuCacheSharedState(Oid database_oid,
 						  Oid table_oid,
 						  uint64_t signature,
+						  bool try_open_if_corrupted,
 						  char *errbuf, size_t errbuf_sz)
 {
 	int			fdesc = -1;
@@ -898,9 +899,13 @@ __openGpuCacheSharedState(Oid database_oid,
 		if (phase == GCACHE_PHASE__IS_EMPTY ||
 			phase == GCACHE_PHASE__IS_LOADING ||
 			phase == GCACHE_PHASE__IS_READY)
+		{
 			break;
+		}
 		else if (phase == GCACHE_PHASE__IS_CORRUPTED)
 		{
+			if (try_open_if_corrupted)
+				break;
 			snprintf(errbuf, errbuf_sz,
 					 "GpuCacheSharedState is already corrupted");
 			goto bailout;
@@ -1056,6 +1061,7 @@ __createGpuCacheSharedState(Relation rel,
 		gc_lmap = __openGpuCacheSharedState(MyDatabaseId,
 											RelationGetRelid(rel),
 											signature,
+											false,
 											errbuf, sizeof(errbuf));
 		if (!gc_lmap || gc_lmap == MAP_FAILED)
 			elog(ERROR, "%s: %s", __FUNCTION__, errbuf);
@@ -1128,7 +1134,8 @@ __createGpuCacheSharedState(Relation rel,
 static GpuCacheLocalMapping *
 getGpuCacheLocalMappingIfExist(Oid database_oid,
 							   Oid table_oid,
-							   uint64_t signature)
+							   uint64_t signature,
+							   bool try_open_if_currupted)
 {
 	GpuCacheLocalMapping *gc_lmap;
 	dlist_head	   *hslot;
@@ -1157,6 +1164,7 @@ getGpuCacheLocalMappingIfExist(Oid database_oid,
 	gc_lmap = __openGpuCacheSharedState(database_oid,
 										table_oid,
 										signature,
+										try_open_if_currupted,
 										errbuf, sizeof(errbuf));
 	pthreadMutexUnlock(&gcache_shared_mapping_lock);
 	if (!gc_lmap)
@@ -1178,7 +1186,8 @@ getGpuCacheLocalMapping(Relation rel,
 		return NULL;
 	gc_lmap = getGpuCacheLocalMappingIfExist(MyDatabaseId,
 											 RelationGetRelid(rel),
-											 signature);
+											 signature,
+											 false);
 	if (!gc_lmap)
 	{
 		pthreadMutexLock(&gcache_shared_head->gcache_sstate_mutex);
@@ -1456,7 +1465,8 @@ lookupGpuCacheDescNoLoad(Oid table_oid,
 			GpuCacheLocalMapping *gc_lmap
 				= getGpuCacheLocalMappingIfExist(MyDatabaseId,
 												 table_oid,
-												 signature);
+												 signature,
+												 false);
 			Assert(!gc_lmap || GpuCacheIdentEqual(&gc_desc->ident,
 												  &gc_lmap->ident));
 			memcpy(&gc_desc->gc_options, gc_options, sizeof(GpuCacheOptions));
@@ -1602,8 +1612,8 @@ releaseGpuCacheDesc(GpuCacheDesc *gc_desc, bool normal_commit)
 					 pitem->tag);
 				continue;
 			}
-			if (!__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)&tx_log))
-				elog(WARNING, "Bug? unable to write out GpuCache Log");
+			__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)&tx_log);
+
 			pos += sizeof(PendingCtidItem);
 		}
 		putGpuCacheLocalMapping(gc_desc->gc_lmap);
@@ -1623,9 +1633,9 @@ __initialLoadGpuCacheVisibilityCheck(HeapTuple tuple,
 									 TransactionId *gcache_xmin,
 									 TransactionId *gcache_xmax)
 {
-	HeapTupleHeader		htup = tuple->t_data;
-	TransactionId		xmin;
-	TransactionId		xmax;
+	HeapTupleHeader	htup = tuple->t_data;
+	TransactionId	xmin;
+	TransactionId	xmax;
 
 	if (!HeapTupleHeaderXminCommitted(htup))
 	{
@@ -1634,6 +1644,17 @@ __initialLoadGpuCacheVisibilityCheck(HeapTuple tuple,
 		xmin = HeapTupleHeaderGetRawXmin(htup);
 		if (TransactionIdIsCurrentTransactionId(xmin))
 		{
+			if (HeapTupleHeaderGetCmin(htup) >= GetCurrentCommandId(false))
+			{
+				/*
+				 * This tuple is written in this command (INSERT/UPDATE),
+				 * and it should be tracked by the AFTER ROW trigger.
+				 * Thus, rowid allocation and insertion shall be done
+				 * in the trigger function to be called later.
+				 */
+				return false;
+			}
+
 			*gcache_xmin = xmin;
 			if (htup->t_infomask & HEAP_XMAX_INVALID)
 			{
@@ -1724,6 +1745,17 @@ __initialLoadGpuCacheVisibilityCheck(HeapTuple tuple,
 	{
 		if (HEAP_XMAX_IS_LOCKED_ONLY(htup->t_infomask))
 			*gcache_xmax = InvalidTransactionId;
+		else if (HeapTupleHeaderGetCmax(htup) >= GetCurrentCommandId(false))
+		{
+			/*
+			 * This tuple is removed by the current command (UPDATE/DELETE),
+			 * and its relevant AFTER-ROW trigger function should release its
+			 * rowid after the initial loading.
+			 * So, at this point, we perform like as this tuple is not removed
+			 * yet.
+			 */
+			*gcache_xmax = InvalidTransactionId;
+		}
 		else
 			*gcache_xmax = xmax;
 		return true;
@@ -1935,8 +1967,8 @@ __initialLoadGpuCache(GpuCacheDesc *gc_desc, Relation rel)
 			HeapTupleHeaderSetXmin(&item->htup, gcache_xmin);
 			HeapTupleHeaderSetXmax(&item->htup, gcache_xmax);
 			HeapTupleHeaderSetCmin(&item->htup, InvalidCommandId);
-			if (!__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)item))
-				elog(WARNING, "unable to write out GpuCache TxLogInsert");
+
+			__gpuCacheAppendLog(gc_desc, (GCacheTxLogCommon *)item);
 		}
 		PG_CATCH();
 		{
@@ -2213,7 +2245,7 @@ gpuCacheInvokeDropUnload(const GpuCacheDesc *gc_desc, bool is_async)
 /*
  * __gpuCacheAppendLog
  */
-static bool
+static void
 __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 {
 	GpuCacheSharedState *gc_sstate = gc_desc->gc_lmap->gc_sstate;
@@ -2234,7 +2266,7 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 		 */
 		phase = pg_atomic_read_u32(&gc_sstate->phase);
 		if (phase == GCACHE_PHASE__IS_CORRUPTED)
-			return false;
+			return;
 		Assert(phase == GCACHE_PHASE__IS_LOADING ||
 			   phase == GCACHE_PHASE__IS_READY);
 
@@ -2287,7 +2319,6 @@ __gpuCacheAppendLog(GpuCacheDesc *gc_desc, GCacheTxLogCommon *tx_log)
 		if (!append_done)
 			pg_usleep(2000L);	/* 2ms */
 	}
-	return append_done;
 }
 
 /*
@@ -2442,6 +2473,7 @@ pgstrom_gpucache_sync_trigger(PG_FUNCTION_ARGS)
 		{
 			tuple = __makeFlattenHeapTuple(trigdata->tg_relation,
 										   trigdata->tg_newtuple);
+
 			__gpuCacheDeleteLog(trigdata->tg_trigtuple, gc_desc);
 			__gpuCacheInsertLog(tuple, gc_desc);
 			if (tuple != trigdata->tg_newtuple)
@@ -3200,6 +3232,14 @@ __gpucacheMarkAsCorrupted(GpuCacheLocalMapping *gc_lmap)
 	Assert(gc_lmap->refcnt >= 2);
 	pthreadMutexUnlock(&gcache_shared_mapping_lock);
 
+	fprintf(stderr, "gpucache on '%s' was marked as corrupted (main: size=%lu, nitems=%lu, extra: size=%lu, usage=%lu, dead=%lu)\n",
+			gc_sstate->table_name,
+			pg_atomic_read_u64(&gc_sstate->gcache_main_size),
+			pg_atomic_read_u64(&gc_sstate->gcache_main_nitems),
+			pg_atomic_read_u64(&gc_sstate->gcache_extra_size),
+			pg_atomic_read_u64(&gc_sstate->gcache_extra_usage),
+			pg_atomic_read_u64(&gc_sstate->gcache_extra_dead));
+
 	pg_atomic_write_u64(&gc_sstate->gcache_main_size, 0);
 	pg_atomic_write_u64(&gc_sstate->gcache_main_nitems, 0);
 	pg_atomic_write_u64(&gc_sstate->gcache_extra_size, 0);
@@ -3308,7 +3348,8 @@ __gpucacheExecCompaction(GpuCacheControlCommand *cmd,
 
 	gc_lmap = getGpuCacheLocalMappingIfExist(cmd->ident.database_oid,
 											 cmd->ident.table_oid,
-											 cmd->ident.signature);
+											 cmd->ident.signature,
+											 false);
 	if (!gc_lmap)
 	{
 		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
@@ -3525,7 +3566,8 @@ __gpucacheExecApplyRedo(GpuCacheControlCommand *cmd,
 
 	gc_lmap = getGpuCacheLocalMappingIfExist(cmd->ident.database_oid,
 											 cmd->ident.table_oid,
-											 cmd->ident.signature);
+											 cmd->ident.signature,
+											 false);
 	if (!gc_lmap)
 	{
 		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
@@ -3566,7 +3608,8 @@ __gpucacheExecDropUnload(GpuCacheControlCommand *cmd)
 
 	gc_lmap = getGpuCacheLocalMappingIfExist(cmd->ident.database_oid,
 											 cmd->ident.table_oid,
-											 cmd->ident.signature);
+											 cmd->ident.signature,
+											 true);
 	if (!gc_lmap)
 	{
 		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
@@ -3713,7 +3756,8 @@ gpuCacheGetDeviceBuffer(const GpuCacheIdent *ident,
 
 	gc_lmap = getGpuCacheLocalMappingIfExist(ident->database_oid,
 											 ident->table_oid,
-											 ident->signature);
+											 ident->signature,
+											 false);
 	if (!gc_lmap)
 		return NULL;
 	pthreadRWLockReadLock(&gc_lmap->gcache_rwlock);
@@ -4205,7 +4249,10 @@ pgstrom_gpucache_info(PG_FUNCTION_ARGS)
 	memset(isnull, 0, sizeof(isnull));
 	values[0] = ObjectIdGetDatum(gc_sstate->ident.database_oid);
 	str = get_database_name(gc_sstate->ident.database_oid);
-	values[1] = CStringGetTextDatum(str);
+	if (str)
+		values[1] = CStringGetTextDatum(str);
+	else
+		isnull[1] = true;
 	values[2] = ObjectIdGetDatum(gc_sstate->ident.table_oid);
 	values[3] = CStringGetTextDatum(gc_sstate->table_name);
 	values[4] = Int64GetDatum(gc_sstate->ident.signature);

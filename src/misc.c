@@ -97,21 +97,22 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	/* plan information */
 	privs = lappend(privs, bms_to_pglist(pp_info->outer_refs));
 	exprs = lappend(exprs, pp_info->used_params);
-	exprs = lappend(exprs, pp_info->host_quals);
+	privs = lappend(privs, pp_info->host_quals);
 	privs = lappend(privs, makeInteger(pp_info->scan_relid));
-	exprs = lappend(exprs, pp_info->scan_quals);
-	privs = lappend(privs, pp_info->scan_quals_fallback);
+	privs = lappend(privs, pp_info->scan_quals);
+	exprs = lappend(exprs, pp_info->scan_quals_explain);
 	privs = lappend(privs, __makeFloat(pp_info->scan_tuples));
-	privs = lappend(privs, __makeFloat(pp_info->scan_rows));
-	privs = lappend(privs, __makeFloat(pp_info->scan_startup_cost));
-	privs = lappend(privs, __makeFloat(pp_info->scan_run_cost));
+	privs = lappend(privs, __makeFloat(pp_info->scan_nrows));
 	privs = lappend(privs, makeInteger(pp_info->parallel_nworkers));
 	privs = lappend(privs, __makeFloat(pp_info->parallel_divisor));
+	privs = lappend(privs, __makeFloat(pp_info->startup_cost));
+	privs = lappend(privs, __makeFloat(pp_info->inner_cost));
+	privs = lappend(privs, __makeFloat(pp_info->run_cost));
 	privs = lappend(privs, __makeFloat(pp_info->final_cost));
 	/* bin-index support */
 	privs = lappend(privs, makeInteger(pp_info->brin_index_oid));
-	exprs = lappend(exprs, pp_info->brin_index_conds);
-	exprs = lappend(exprs, pp_info->brin_index_quals);
+	privs = lappend(privs, pp_info->brin_index_conds);
+	privs = lappend(privs, pp_info->brin_index_quals);
 	/* XPU code */
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_load_vars_packed));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_move_vars_packed));
@@ -141,37 +142,34 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, pp_info->groupby_actions);
 	privs = lappend(privs, makeInteger(pp_info->groupby_prepfn_bufsz));
 	/* inner relations */
+	privs = lappend(privs, makeInteger(pp_info->sibling_param_id));
 	privs = lappend(privs, makeInteger(pp_info->num_rels));
 	for (int i=0; i < pp_info->num_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 		List   *__privs = NIL;
-		List   *__exprs = NIL;
 
 		__privs = lappend(__privs, makeInteger(pp_inner->join_type));
 		__privs = lappend(__privs, __makeFloat(pp_inner->join_nrows));
-		__privs = lappend(__privs, __makeFloat(pp_inner->join_startup_cost));
-		__privs = lappend(__privs, __makeFloat(pp_inner->join_run_cost));
-		__exprs = lappend(__exprs, pp_inner->hash_outer_keys);
+		__privs = lappend(__privs, pp_inner->hash_outer_keys_original);
 		__privs = lappend(__privs, pp_inner->hash_outer_keys_fallback);
-		__exprs = lappend(__exprs, pp_inner->hash_inner_keys);
+		__privs = lappend(__privs, pp_inner->hash_inner_keys_original);
 		__privs = lappend(__privs, pp_inner->hash_inner_keys_fallback);
-		__exprs = lappend(__exprs, pp_inner->join_quals);
+		__privs = lappend(__privs, pp_inner->join_quals_original);
 		__privs = lappend(__privs, pp_inner->join_quals_fallback);
-		__exprs = lappend(__exprs, pp_inner->other_quals);
+		__privs = lappend(__privs, pp_inner->other_quals_original);
 		__privs = lappend(__privs, pp_inner->other_quals_fallback);
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_oid));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_col));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_ctid_resno));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_func_oid));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_slot_id));
-		__exprs = lappend(__exprs, pp_inner->gist_clause);
+		__privs = lappend(__privs, pp_inner->gist_clause);
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_selectivity));
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_npages));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_height));
 
 		privs = lappend(privs, __privs);
-		exprs = lappend(exprs, __exprs);
 	}
 	cscan->custom_exprs = exprs;
 	cscan->custom_private = privs;
@@ -201,23 +199,24 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	endpoint_id = intVal(list_nth(privs, pindex++));
 	pp_data.ds_entry = DpuStorageEntryByEndpointId(endpoint_id);
 	/* plan information */
-	pp_data.outer_refs = bms_from_pglist(list_nth(privs, pindex++));
-	pp_data.used_params = list_nth(exprs, eindex++);
-	pp_data.host_quals = list_nth(exprs, eindex++);
-	pp_data.scan_relid = intVal(list_nth(privs, pindex++));
-	pp_data.scan_quals = list_nth(exprs, eindex++);
-	pp_data.scan_quals_fallback = list_nth(privs, pindex++);
-	pp_data.scan_tuples = floatVal(list_nth(privs, pindex++));
-	pp_data.scan_rows = floatVal(list_nth(privs, pindex++));
-	pp_data.scan_startup_cost = floatVal(list_nth(privs, pindex++));
-	pp_data.scan_run_cost = floatVal(list_nth(privs, pindex++));
+	pp_data.outer_refs   = bms_from_pglist(list_nth(privs, pindex++));
+	pp_data.used_params  = list_nth(exprs, eindex++);
+	pp_data.host_quals   = list_nth(privs, pindex++);
+	pp_data.scan_relid   = intVal(list_nth(privs, pindex++));
+	pp_data.scan_quals   = list_nth(privs, pindex++);
+	pp_data.scan_quals_explain = list_nth(exprs, eindex++);
+	pp_data.scan_tuples  = floatVal(list_nth(privs, pindex++));
+	pp_data.scan_nrows   = floatVal(list_nth(privs, pindex++));
 	pp_data.parallel_nworkers = intVal(list_nth(privs, pindex++));
 	pp_data.parallel_divisor = floatVal(list_nth(privs, pindex++));
-	pp_data.final_cost = floatVal(list_nth(privs, pindex++));
+	pp_data.startup_cost = floatVal(list_nth(privs, pindex++));
+	pp_data.inner_cost   = floatVal(list_nth(privs, pindex++));
+	pp_data.run_cost     = floatVal(list_nth(privs, pindex++));
+	pp_data.final_cost   = floatVal(list_nth(privs, pindex++));
 	/* brin-index support */
 	pp_data.brin_index_oid = intVal(list_nth(privs, pindex++));
-	pp_data.brin_index_conds = list_nth(exprs, eindex++);
-	pp_data.brin_index_quals = list_nth(exprs, eindex++);
+	pp_data.brin_index_conds = list_nth(privs, pindex++);
+	pp_data.brin_index_quals = list_nth(privs, pindex++);
 	/* XPU code */
 	pp_data.kexp_load_vars_packed  = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_move_vars_packed  = __getByteaConst(list_nth(privs, pindex++));
@@ -247,6 +246,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.groupby_actions = list_nth(privs, pindex++);
 	pp_data.groupby_prepfn_bufsz  = intVal(list_nth(privs, pindex++));
 	/* inner relations */
+	pp_data.sibling_param_id = intVal(list_nth(privs, pindex++));
 	pp_data.num_rels = intVal(list_nth(privs, pindex++));
 	pp_info = palloc0(offsetof(pgstromPlanInfo, inners[pp_data.num_rels]));
 	memcpy(pp_info, &pp_data, offsetof(pgstromPlanInfo, inners));
@@ -254,28 +254,24 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 		List   *__privs = list_nth(privs, pindex++);
-		List   *__exprs = list_nth(exprs, eindex++);
 		int		__pindex = 0;
-		int		__eindex = 0;
 
 		pp_inner->join_type       = intVal(list_nth(__privs, __pindex++));
 		pp_inner->join_nrows      = floatVal(list_nth(__privs, __pindex++));
-		pp_inner->join_startup_cost = floatVal(list_nth(__privs, __pindex++));
-		pp_inner->join_run_cost   = floatVal(list_nth(__privs, __pindex++));
-		pp_inner->hash_outer_keys = list_nth(__exprs, __eindex++);
+		pp_inner->hash_outer_keys_original = list_nth(__privs, __pindex++);
 		pp_inner->hash_outer_keys_fallback = list_nth(__privs, __pindex++);
-		pp_inner->hash_inner_keys = list_nth(__exprs, __eindex++);
+		pp_inner->hash_inner_keys_original = list_nth(__privs, __pindex++);
 		pp_inner->hash_inner_keys_fallback = list_nth(__privs, __pindex++);
-		pp_inner->join_quals      = list_nth(__exprs, __eindex++);
+		pp_inner->join_quals_original = list_nth(__privs, __pindex++);
 		pp_inner->join_quals_fallback = list_nth(__privs, __pindex++);
-		pp_inner->other_quals     = list_nth(__exprs, __eindex++);
+		pp_inner->other_quals_original = list_nth(__privs, __pindex++);
 		pp_inner->other_quals_fallback = list_nth(__privs, __pindex++);
 		pp_inner->gist_index_oid  = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_index_col  = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_ctid_resno = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_func_oid   = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_slot_id    = intVal(list_nth(__privs, __pindex++));
-		pp_inner->gist_clause     = list_nth(__exprs, __eindex++);
+		pp_inner->gist_clause     = list_nth(__privs, __pindex++);
 		pp_inner->gist_selectivity = floatVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_npages     = floatVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_height     = intVal(list_nth(__privs, __pindex++));
@@ -301,7 +297,7 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 	pp_dest->used_params      = list_copy(pp_dest->used_params);
 	pp_dest->host_quals       = copyObject(pp_dest->host_quals);
 	pp_dest->scan_quals       = copyObject(pp_dest->scan_quals);
-	pp_dest->scan_quals_fallback = copyObject(pp_dest->scan_quals_fallback);
+	pp_dest->scan_quals_explain = copyObject(pp_dest->scan_quals_explain);
 	pp_dest->brin_index_conds = copyObject(pp_dest->brin_index_conds);
 	pp_dest->brin_index_quals = copyObject(pp_dest->brin_index_quals);
 	foreach (lc, pp_orig->kvars_deflist)
@@ -319,13 +315,13 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_dest->inners[j];
 #define __COPY(FIELD)	pp_inner->FIELD = copyObject(pp_inner->FIELD)
-		__COPY(hash_outer_keys);
+		__COPY(hash_outer_keys_original);
 		__COPY(hash_outer_keys_fallback);
-		__COPY(hash_inner_keys);
+		__COPY(hash_inner_keys_original);
 		__COPY(hash_inner_keys_fallback);
-		__COPY(join_quals);
+		__COPY(join_quals_original);
 		__COPY(join_quals_fallback);
-		__COPY(other_quals);
+		__COPY(other_quals_original);
 		__COPY(other_quals_fallback);
 		__COPY(gist_clause);
 #undef __COPY
@@ -334,145 +330,81 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 }
 
 /*
- * fixup_varnode_to_origin
+ * fixup_expression_by_partition_leaf
  */
-Node *
-fixup_varnode_to_origin(Node *node, List *cscan_tlist)
+List *
+fixup_expression_by_partition_leaf(PlannerInfo *root,
+								   Relids leaf_relids,
+								   List *clauses)
 {
-	if (!node)
-		return NULL;
-	if (IsA(node, Var))
-	{
-		Var	   *varnode = (Var *)node;
-		TargetEntry *tle;
-
-		if (cscan_tlist != NIL)
-		{
-			Assert(varnode->varno == INDEX_VAR);
-			Assert(varnode->varattno >= 1 &&
-				   varnode->varattno <= list_length(cscan_tlist));
-			tle = list_nth(cscan_tlist, varnode->varattno - 1);
-			return (Node *)copyObject(tle->expr);
-		}
-		Assert(!IS_SPECIAL_VARNO(varnode->varno));
-	}
-	return expression_tree_mutator(node, fixup_varnode_to_origin,
-								   (void *)cscan_tlist);
-}
-
-#if 0
-/*
- * find_appinfos_by_relids_nofail
- *
- * It is almost equivalent to find_appinfos_by_relids(), but ignores
- * relations that are not partition leafs, instead of ereport().
- * In addition, it tries to solve multi-leve parent-child relations.
- */
-static AppendRelInfo *
-build_multilevel_appinfos(PlannerInfo *root,
-						  AppendRelInfo **appstack, int nlevels)
-{
-	AppendRelInfo *apinfo = appstack[nlevels-1];
-	AppendRelInfo *apleaf = appstack[0];
-	AppendRelInfo *result;
-	ListCell   *lc;
-	int			i;
-
-	foreach (lc, root->append_rel_list)
-	{
-		AppendRelInfo *aptemp = lfirst(lc);
-
-		if (aptemp->child_relid == apinfo->parent_relid)
-		{
-			appstack[nlevels] = aptemp;
-			return build_multilevel_appinfos(root, appstack, nlevels+1);
-		}
-	}
-	/* shortcut if a simple single-level relationship */
-	if (nlevels == 1)
-		return apinfo;
-
-	result = makeNode(AppendRelInfo);
-	result->parent_relid = apinfo->parent_relid;
-	result->child_relid = apleaf->child_relid;
-	result->parent_reltype = apinfo->parent_reltype;
-	result->child_reltype = apleaf->child_reltype;
-	foreach (lc, apinfo->translated_vars)
-	{
-		Var	   *var = lfirst(lc);
-
-		for (i=nlevels-1; i>=0; i--)
-		{
-			AppendRelInfo *apcurr = appstack[i];
-			Var	   *temp;
-
-			if (var->varattno > list_length(apcurr->translated_vars))
-				elog(ERROR, "attribute %d of relation \"%s\" does not exist",
-					 var->varattno, get_rel_name(apcurr->parent_reloid));
-			temp = list_nth(apcurr->translated_vars, var->varattno - 1);
-			if (!temp)
-				elog(ERROR, "attribute %d of relation \"%s\" does not exist",
-					 var->varattno, get_rel_name(apcurr->parent_reloid));
-			var = temp;
-		}
-		result->translated_vars = lappend(result->translated_vars, var);
-	}
-	result->parent_reloid = apinfo->parent_reloid;
-
-	return result;
-}
-
-AppendRelInfo **
-find_appinfos_by_relids_nofail(PlannerInfo *root,
-							   Relids relids,
-							   int *nappinfos)
-{
-	AppendRelInfo **appstack;
 	AppendRelInfo **appinfos;
-	ListCell   *lc;
-	int			nrooms = bms_num_members(relids);
-	int			nitems = 0;
+	Relids		next_relids = NULL;
+	int			i, nitems = 0;
 
-	appinfos = palloc0(sizeof(AppendRelInfo *) * nrooms);
-	appstack = alloca(sizeof(AppendRelInfo *) * root->simple_rel_array_size);
-	foreach (lc, root->append_rel_list)
+	if (!root->append_rel_array)
+		return clauses;		/* shortcut */
+
+	appinfos = alloca(sizeof(AppendRelInfo *) * root->simple_rel_array_size);
+	for (i = bms_next_member(leaf_relids, -1);
+		 i >= 0;
+		 i = bms_next_member(leaf_relids, i))
 	{
-		AppendRelInfo *apinfo = lfirst(lc);
+		AppendRelInfo *appinfo = root->append_rel_array[i];
 
-		if (bms_is_member(apinfo->child_relid, relids))
+		if (appinfo)
 		{
-			appstack[0] = apinfo;
-			appinfos[nitems++] = build_multilevel_appinfos(root, appstack, 1);
+			Assert(appinfo->child_relid == i);
+			appinfos[nitems++] = appinfo;
+			next_relids = bms_add_member(next_relids, appinfo->parent_relid);
 		}
 	}
-	Assert(nitems <= nrooms);
-	*nappinfos = nitems;
 
-	return appinfos;
+	if (nitems > 0)
+	{
+		clauses = fixup_expression_by_partition_leaf(root,
+													 next_relids,
+													 clauses);
+		clauses = (List *)adjust_appendrel_attrs(root,
+												 (Node *)clauses,
+												 nitems,
+												 appinfos);
+	}
+	return clauses;
 }
 
 /*
- * get_parallel_divisor - Estimate the fraction of the work that each worker
- * will do given the number of workers budgeted for the path.
+ * fixup_relids_by_partition_leaf
  */
-double
-get_parallel_divisor(Path *path)
+Relids
+fixup_relids_by_partition_leaf(PlannerInfo *root,
+							   const Relids leaf_relids,
+							   const Relids parent_relids)
 {
-	double		parallel_divisor = path->parallel_workers;
+	Relids	results = NULL;
+	int		curr;
 
-#if PG_VERSION_NUM >= 110000
-	if (parallel_leader_participation)
-#endif
+	for (curr = bms_next_member(leaf_relids, -1);
+		 curr >= 0;
+		 curr = bms_next_member(leaf_relids, curr))
 	{
-		double	leader_contribution;
+		int		relid = curr;
+	again:
+		for (int k=0; k < root->simple_rel_array_size; k++)
+		{
+			AppendRelInfo *ap_info = root->append_rel_array[k];
 
-		leader_contribution = 1.0 - (0.3 * path->parallel_workers);
-		if (leader_contribution > 0)
-			parallel_divisor += leader_contribution;
+			if (ap_info && ap_info->child_relid == relid)
+			{
+				if (ap_info->parent_relid == relid)
+					break;
+				relid = ap_info->parent_relid;
+				goto again;
+			}
+		}
+		results = bms_add_member(results, relid);
 	}
-	return parallel_divisor;
+	return results;
 }
-#endif
 
 /*
  * append a binary chunk at the aligned block

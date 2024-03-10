@@ -13,6 +13,7 @@ STROM_OBJS = main.o githash.o extra.o codegen.o misc.o executor.o \
              arrow_fdw.o arrow_nodes.o \
              pcie.o float2.o tinyint.o aggfuncs.o
 GENERATED-HEADERS = gpu_devattrs.h githash.c
+STROM_HEADERS = arrow_defs.h arrow_ipc.h float2.h
 
 #
 # Githash.c checker
@@ -23,13 +24,6 @@ GITHASH_CHECKS := $(shell grep -q \"$(PGSTROM_GITHASH)\" githash.c 2>/dev/null |
 # Source of NVIDIA GPU device code
 #
 include Makefile.cuda
-__CUDA_OBJS = xpu_common cuda_gpuscan cuda_gpujoin cuda_gpupreagg \
-              xpu_basetype xpu_numeric xpu_timelib xpu_textlib xpu_misclib \
-              xpu_jsonlib xpu_postgis
-CUDA_HEADERS = cuda_common.h xpu_common.h xpu_opcodes.h xpu_basetype.h \
-               xpu_numeric.h xpu_textlib.h xpu_timelib.h xpu_misclib.h \
-               xpu_jsonlib.h xpu_postgis.h
-CUDA_OBJS = $(addsuffix .fatbin,$(__CUDA_OBJS))
 
 #
 # Installation Scripts
@@ -54,10 +48,12 @@ endif
 ifneq ($(PGSTROM_GITHASH),)
 PGSTROM_FLAGS += -DPGSTROM_GITHASH=\"$(PGSTROM_GITHASH)\"
 endif
-PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"
-PGSTROM_FLAGS += -DCUDA_MAXREGCOUNT=$(MAXREGCOUNT)
-PGSTROM_FLAGS += -DCUDA_BUILTIN_OBJS="\"$(__CUDA_OBJS)\""
-PGSTROM_FLAGS += -DNVCC_VERSION=$(NVCC_VERSION)
+PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"   \
+        -DPGINCLUDEDIR=\"$(shell $(PG_CONFIG) --includedir-server)\" \
+        -DCUDA_MAXREGCOUNT=$(MAXREGCOUNT)                 \
+        -DCUDA_CORE_FILES="\"$(__CUDA_CORE_FILES)\""      \
+        -DCUDA_CORE_HEADERS="\"$(__CUDA_CORE_HEADERS)\""  \
+        -DCUDA_TOOLKIT_BASEDIR="\"$(CUDA_PATH)\""
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
 SHLIB_LINK := -L $(CUDA_LPATH) -lcuda
 
@@ -66,10 +62,14 @@ SHLIB_LINK := -L $(CUDA_LPATH) -lcuda
 #
 MODULE_big = pg_strom
 MODULEDIR  = pg_strom
-DATA = $(STROM_SQL) ../LICENSE Makefile.cuda
+DATA = $(STROM_SQL) ../LICENSE Makefile.cuda \
+       $(CUDA_SRCS) $(CUDA_HEADERS) $(STROM_HEADERS)
 OBJS = $(STROM_OBJS)
-DATA_built = $(CUDA_OBJS)
-EXTRA_CLEAN = $(DATA_built) $(GENERATED-HEADERS)
+ifeq ($(WITH_FATBIN),1)
+DATA_built = $(CUDA_FATBIN)
+endif
+EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
+              $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
 EXTENSION = pg_strom
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -96,5 +96,10 @@ githash.c:
 #
 # GPU Device Code
 #
-%.fatbin: %.cu $(CUDA_HEADERS)
-	$(NVCC) $(NVCC_FLAGS) -o $@ $<
+%.o: %.cu $(CUDA_HEADERS)
+	$(NVCC) $(NVCC_CFLAGS)  --device-c -o $@ $<
+
+$(CUDA_FATBIN): $(CUDA_OBJS)
+	$(NVCC) $(NVCC_LDFLAGS) --device-link --fatbin -o $@ $(CUDA_OBJS)
+
+fatbin: $(CUDA_FATBIN)

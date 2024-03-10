@@ -23,6 +23,10 @@
 /*
  * Functions with qualifiers
  */
+#ifndef PGDLLEXPORT
+#define PGDLLEXPORT
+#endif
+
 #if defined(__CUDACC__)
 /* CUDA C++ */
 #define INLINE_FUNCTION(RET_TYPE)				\
@@ -32,11 +36,12 @@
 #define PUBLIC_FUNCTION(RET_TYPE)		__device__ RET_TYPE
 #define EXTERN_FUNCTION(RET_TYPE)		extern "C" __device__ RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)		extern "C" __global__ RET_TYPE
-#define EXTERN_DATA						extern __device__
+#define EXTERN_DATA						extern "C" __device__
 #define PUBLIC_DATA						__device__
 #define STATIC_DATA						static __device__
 #elif defined(__cplusplus)
 /* C++ */
+#include <cstdio>						/* for printf in C++ */
 #define INLINE_FUNCTION(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)		static RET_TYPE
 #define PUBLIC_FUNCTION(RET_TYPE)		PGDLLEXPORT RET_TYPE
@@ -188,16 +193,44 @@ __runtime_file_name(const char *path)
 #define __FILE_NAME__	__runtime_file_name(__FILE__)
 #endif
 
-#ifdef __CUDACC__
+#ifdef __cplusplus
 template <typename T>
 INLINE_FUNCTION(T)
 __Fetch(const T *ptr)
 {
 	T	temp;
-
+#if 0
+	/*
+	 * MEMO: probably, nvcc expects the 'ptr' is aligned by the caller
+	 * of function, therefore, compiler optimization might consider
+	 * the following if-block is always true, and condition checks can
+	 * be removed. However, __Fetch() is used to the address where we
+	 * cannot guarantee the alignment (e.g, payload of short-varlena).
+	 * So, we always have to use memcpy() for the safe memory access.
+	 */
+	if ((sizeof(T) & (sizeof(T)-1)) == 0 &&
+		(((uintptr_t)ptr) & (sizeof(T)-1)) == 0)
+	{
+		return *ptr;
+	}
+#endif
 	memcpy(&temp, ptr, sizeof(T));
-
 	return temp;
+}
+
+template <typename T>
+INLINE_FUNCTION(void)
+__FetchStore(T &dest, const T *ptr)
+{
+	if ((sizeof(T) & (sizeof(T)-1)) == 0 &&
+		(((uintptr_t)ptr) & (sizeof(T)-1)) == 0)
+	{
+		dest = *ptr;
+	}
+	else
+	{
+		memcpy(&dest, ptr, sizeof(T));
+	}
 }
 
 template <typename T>
@@ -207,8 +240,9 @@ __volatileRead(const volatile T *ptr)
 	return *ptr;
 }
 
-#else
+#else	/* __cplusplus */
 #define __Fetch(PTR)			(*(PTR))
+#define __FetchStore(DEST,PTR)	do { (DEST) = *(PTR); } while(0)
 #define __volatileRead(PTR)		(*(PTR))
 #endif
 
@@ -1822,8 +1856,9 @@ __pg_array_dataptr(const __ArrayTypeData *ar)
 	{
 		int32_t	ndim = __pg_array_ndim(ar);
 
-		dataoff = MAXALIGN(VARHDRSZ + offsetof(__ArrayTypeData,
-											   data[2 * ndim]));
+		dataoff = MAXALIGN(VARHDRSZ +
+						   offsetof(__ArrayTypeData, data) +
+						   2 * sizeof(uint32_t) * ndim);
 	}
 	assert(dataoff >= VARHDRSZ + offsetof(__ArrayTypeData, data));
 	return (char *)ar + dataoff - VARHDRSZ;
@@ -3236,10 +3271,67 @@ __atomic_cas_uint64(uint64_t *ptr, uint64_t comp, uint64_t newval)
 
 /* ----------------------------------------------------------------
  *
+ * xPU PreAgg common utility functions
+ *
+ * ----------------------------------------------------------------
+ */
+INLINE_FUNCTION(bool)
+__preagg_fetch_xdatum_as_int32(int32_t *p_ival, const xpu_datum_t *xdatum)
+{
+	if (xdatum->expr_ops == &xpu_int4_ops)
+		*p_ival = ((const xpu_int4_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_date_ops)
+		*p_ival = ((const xpu_date_t *)xdatum)->value;
+	else
+	{
+		assert(XPU_DATUM_ISNULL(xdatum));
+		return false;
+	}
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+__preagg_fetch_xdatum_as_int64(int64_t *p_ival, const xpu_datum_t *xdatum)
+{
+	if (xdatum->expr_ops == &xpu_int8_ops)
+		*p_ival = ((const xpu_int8_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_timestamp_ops)
+		*p_ival = ((const xpu_timestamp_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_timestamptz_ops)
+		*p_ival = ((const xpu_timestamptz_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_time_ops)
+		*p_ival = ((const xpu_time_t *)xdatum)->value;
+	else if (xdatum->expr_ops == &xpu_money_ops)
+		*p_ival = ((const xpu_money_t *)xdatum)->value;
+	else
+	{
+		assert(XPU_DATUM_ISNULL(xdatum));
+		return false;
+	}
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+__preagg_fetch_xdatum_as_float64(float8_t *p_fval, const xpu_datum_t *xdatum)
+{
+	if (xdatum->expr_ops == &xpu_float8_ops)
+		*p_fval = ((const xpu_float8_t *)xdatum)->value;
+	else
+	{
+		assert(XPU_DATUM_ISNULL(xdatum));
+		return false;
+	}
+	return true;
+}
+
+/* ----------------------------------------------------------------
+ *
  * Misc functions
  *
  * ----------------------------------------------------------------
  */
+#include <stdio.h>
+
 INLINE_FUNCTION(void)
 print_kern_data_store(const kern_data_store *kds)
 {

@@ -68,19 +68,23 @@
     </li>
         </ul>
     </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#mofed-driver-installation">MOFED Driver Installation</a>
+        <ul>
     <li class="toctree-l3"><a class="reference internal" href="#heterodb-swdc-installation">heterodb-swdc Installation</a>
     </li>
         </ul>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#cuda-toolkit-installation">CUDA Toolkit Installation</a>
         <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#check-gpudirect-storage-status">Check GPUDirect Storage status</a>
+    </li>
     <li class="toctree-l3"><a class="reference internal" href="#pci-bar1-memory-configuration">PCI Bar1 Memory Configuration</a>
     </li>
         </ul>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#heterodb-extra-modules">HeteroDB extra modules</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#mofed-driver-installation">MOFED Driver Installation</a>
         <ul>
     <li class="toctree-l3"><a class="reference internal" href="#license-activation">License activation</a>
     </li>
@@ -208,7 +212,7 @@
 </ul>
 </li>
 <li><strong>Operating System</strong><ul>
-<li>PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or CentOS version 8.x series.</li>
+<li>PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or Rocky Linux version 8.x series.</li>
 <li>GPU Direct SQL (with cuFile driver) needs the <code>nvidia-fs</code> driver distributed with CUDA Toolkit, and Mellanox OFED (OpenFabrics Enterprise Distribution) driver.</li>
 </ul>
 </li>
@@ -218,42 +222,18 @@
 </ul>
 </li>
 <li><strong>CUDA Toolkit</strong><ul>
-<li>PG-Strom requires CUDA Toolkit version 12.2 or later.</li>
+<li>PG-Strom requires CUDA Toolkit version 12.2update2 or later.</li>
 <li>Some of CUDA Driver APIs used by PG-Strom internally are not included in the former versions.</li>
 </ul>
 </li>
 </ul>
-<!--
-もうこの記述は必要ないはず
-
-### Selection of GPU Direct SQL Execiton drivers
-
-
-
-Please consider the software stack for GPUDirect SQL, prior to the installation.
-
-There are two individual Linux kernel driver for [GPUDirect SQL](ssd2gpu.md) execution, as follows:
-
-- HeteroDB NVME-Strom
-    - The dedicated Linux kernel module, released at 2018, supported since PG-Strom v2.0.
-    - It supports RHEL7.x/RHEL8.x, enables direct read from local NVME-SSDs to GPU using GPUDirect RDMA.
-- NVIDIA GPUDirect Storage
-    - The general purpose driver stack, has been developed by NVIDIA, to support direct read from NVME/NVME-oF devices to GPU. At May-2021, its public beta revision has been published.
-    - PG-Strom v3.0 experimentally supports the GPUDirect Storage, that supports RHEL8.3/8.4 and Ubuntu 18.04/20.04.
-    - Some partners, including HeteroDB, expressed to support this feature. It also allows direct read from shared-filesystems or SDS(Software Defined Storage) devices over NVME-oF protocols.
-
-Here is little performance differences on the above two drivers.
-On the other hands, GPUDirect Storage has more variations of the supported storages and filesystems, and more mature software QA process, expect for the case of PG-Strom on RHEL7/CentOS7, we will recommend to use GPUDirect Storage driver.
-
--->
-
 <h2 id="steps-to-install">Steps to Install</h2>
 <p>The overall steps to install are below:</p>
 <ol>
 <li>Hardware Configuration</li>
 <li>OS Installation</li>
-<li>CUDA Toolkit installation</li>
 <li>MOFED Driver installation</li>
+<li>CUDA Toolkit installation</li>
 <li>HeteroDB Extra Module installation</li>
 <li>PostgreSQL installation</li>
 <li>PG-Strom installation</li>
@@ -269,7 +249,7 @@ On the other hands, GPUDirect Storage has more variations of the supported stora
 <ul>
 <li>Development Tools</li>
 </ul>
-<p><img alt="RHEL8/CentOS8 Package Selection" src="../img/centos8_package_selection.png" /></p>
+<p><img alt="RHEL8/Rocky8 Package Selection" src="../img/centos8_package_selection.png" /></p>
 <p>Next to the OS installation on the server, go on the package repository configuration to install the third-party packages.</p>
 <p>If you didn't check the "Development Tools" at the installer, we can additionally install the software using the command below after the operating system installation.</p>
 <pre><code># dnf groupinstall 'Development Tools'
@@ -313,23 +293,53 @@ $ sudo shutdown -r now
 You need to add a repository definition of EPEL packages for yum system to obtain these software.</p>
 <p>One of the package we will get from EPEL repository is DKMS (Dynamic Kernel Module Support). It is a framework to build Linux kernel module for the running Linux kernel on demand; used for NVIDIA's GPU driver and related.
 Linux kernel module must be rebuilt according to version-up of Linux kernel, so we don't recommend to operate the system without DKMS.</p>
-<p><code>epel-release</code> package provides the repository definition of EPEL. You can obtain the package from the <a href="https://docs.fedoraproject.org/en-US/epel/#_quickstart">Fedora Project</a> website.
-For CentOS8, it can be installed using <code>dnf</code> command.</p>
+<p><code>epel-release</code> package provides the repository definition of EPEL. You can obtain the package from the <a href="https://docs.fedoraproject.org/en-US/epel/#_quickstart">Fedora Project</a> website.</p>
 <pre><code>-- For RHEL8
 # dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
 
--- For CentOS8
+-- For Rocky8
 # dnf install epel-release
 </code></pre>
 <h4 id="red-hat-codeready-linux-builder">Red Hat CodeReady Linux Builder</h4>
-<p>Installation of MOFED (Mellanox OpenFabrics Enterprise Distribution) driver requires the <strong><em>Red Hat CodeReady Linux Builder</em></strong> repository which is disabled in the default configuration of Red Hat Enterprise Linux 8.x installation. In CentOS, it is called <strong><em>PowerTools</em></strong></p>
+<p>Installation of MOFED (Mellanox OpenFabrics Enterprise Distribution) driver requires the <strong><em>Red Hat CodeReady Linux Builder</em></strong> repository which is disabled in the default configuration of Red Hat Enterprise Linux 8.x installation. In Rocky Linux, it is called <strong><em>PowerTools</em></strong></p>
 <p>To enable this repository, run the command below:</p>
 <pre><code>-- For RHEL8
 # subscription-manager repos --enable codeready-builder-for-rhel-8-x86_64-rpms
 
--- For CentOS8
+-- For Rocky8
 # dnf config-manager --set-enabled powertools
 </code></pre>
+<h2 id="mofed-driver-installation">MOFED Driver Installation</h2>
+<p>You can download the latest MOFED driver from <a href="https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed">here</a>.</p>
+<p>This section introduces the example of installation from the tgz archive.</p>
+<p><img alt="MOFED Driver Selection" src="../img/mofed-download.png" /></p>
+<p>Extract the tgz archive, then kick <code>mlnxofedinstall</code> script. Please don't forget the options to enable GPUDirect Storage features.</p>
+<pre><code># tar xvf MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64.tgz
+# cd MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64
+# ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
+# dracut -f
+</code></pre>
+<p>During the build and installation of MOFED drivers, the installer may require additional packages.
+In this case, error message shall guide you the missing packages. So, please install them using <code>dnf</code> command.</p>
+<pre><code>Error: One or more required packages for installing MLNX_OFED_LINUX are missing.
+Please install the missing packages using your Linux distribution Package Management tool.
+Run:
+yum install tcsh tcl tk kernel-modules-extra gcc-gfortran python36
+</code></pre>
+<p>Once MOFED drivers got installed, it should replace several INBOX drivers like nvme driver.</p>
+<p>For example, the command below shows the <code>/lib/modules/&lt;KERNEL_VERSION&gt;/extra/mlnx-nvme/host/nvme-rdma.ko</code> that is additionally installed, instead of the INBOX <code>nvme-rdma</code> (<code>/lib/modules/&lt;KERNEL_VERSION&gt;/kernel/drivers/nvme/host/nvme-rdma.ko.xz</code>).</p>
+<pre><code># modinfo nvme-rdma
+filename:       /lib/modules/4.18.0-477.10.1.el8_8.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
+license:        GPL v2
+rhelversion:    8.8
+srcversion:     533BB7E5866E52F63B9ACCB
+depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics
+name:           nvme_rdma
+vermagic:       4.18.0-477.10.1.el8_8.x86_64 SMP mod_unload modversions
+parm:           register_always:Use memory registration even for contiguous memory regions (bool)
+</code></pre>
+<p>Then, shutdown the system and restart, to replace the kernel modules already loaded (like <code>nvme</code>).</p>
+<p>Please don't forget to run <code>dracut -f</code> after completion of the <code>mlnxofedinstall</code> script.</p>
 <h3 id="heterodb-swdc-installation">heterodb-swdc Installation</h3>
 <p>PG-Strom and related packages are distributed from <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.
 You need to add a repository definition of HeteroDB-SWDC for you system to obtain these software.</p>
@@ -385,78 +395,8 @@ Mon Dec 18 18:02:14 2023
 |  No running processes found                                                           |
 +---------------------------------------------------------------------------------------+
 </code></pre>
-<h3 id="pci-bar1-memory-configuration">PCI Bar1 Memory Configuration</h3>
-<p>GPU-Direct SQL maps GPU device memory to the PCI BAR1 region (physical address space) on the host system, and sends P2P-RDMA requests to NVME devices with that as the destination for the shortest data transfer.</p>
-<p>To perform P2P-RDMA with sufficient multiplicity, the GPU must have enough PCI BAR1 space to map the device buffer. The size of the PCI BAR1 area is fixed for most GPUs, and PG-Strom recommends products whose size exceeds the GPU device memory size.</p>
-<p>However, some GPU products allow to change the size of the PCI BAR1 area by switching the operation mode. If your GPU is either of the following, refer to the <a href="https://developer.nvidia.com/displaymodeselector">NVIDIA Display Mode Selector Tool</a> and switch to the mode that maximizes the PCI BAR1 area size.</p>
-<ul>
-<li>NVIDIA L40S</li>
-<li>NVIDIA L40</li>
-<li>NVIDIA A40</li>
-<li>NVIDIA RTX 6000 Ada</li>
-<li>NVIDIA RTX A6000</li>
-<li>NVIDIA RTX A5500</li>
-<li>NVIDIA RTX A5000</li>
-</ul>
-<p>To check the GPU memory size and PCI BAR1 size installed in the system, use the <code>nvidia-smi -q</code> command. Memory-related status is displayed as shown below.</p>
-<pre><code>$ nvidia-smi -q
-        :
-    FB Memory Usage
-        Total                             : 46068 MiB
-        Reserved                          : 685 MiB
-        Used                              : 4 MiB
-        Free                              : 45377 MiB
-    BAR1 Memory Usage
-        Total                             : 65536 MiB
-        Used                              : 1 MiB
-        Free                              : 65535 MiB
-        :
-</code></pre>
-<h2 id="heterodb-extra-modules">HeteroDB extra modules</h2>
-<p><code>heterodb-extra</code> module enhances PG-Strom the following features.</p>
-<ul>
-<li>multi-GPUs support</li>
-<li>GPUDirect SQL</li>
-<li>GiST index support on GPU</li>
-<li>License management</li>
-</ul>
-<p>If you don't use the above features, only open source modules, you don't need to install the <code>heterodb-extra</code> module here.
-Please skip this section.</p>
-<p>Install the <code>heterodb-extra</code> package, downloaded from the SWDC, as follows.</p>
-<pre><code># dnf install heterodb-extra
-</code></pre>
-<h2 id="mofed-driver-installation">MOFED Driver Installation</h2>
-<p>You can download the latest MOFED driver from <a href="https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed">here</a>.</p>
-<p>This section introduces the example of installation from the tgz archive.</p>
-<p><img alt="MOFED Driver Selection" src="../img/mofed-download.png" /></p>
-<p>Extract the tgz archive, then kick <code>mlnxofedinstall</code> script. Please don't forget the options to enable GPUDirect Storage features.</p>
-<pre><code># tar xvf MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64.tgz
-# cd MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64
-# ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
-# dracut -f
-</code></pre>
-<p>During the build and installation of MOFED drivers, the installer may require additional packages.
-In this case, error message shall guide you the missing packages. So, please install them using <code>dnf</code> command.</p>
-<pre><code>Error: One or more required packages for installing MLNX_OFED_LINUX are missing.
-Please install the missing packages using your Linux distribution Package Management tool.
-Run:
-yum install tcsh tcl tk kernel-modules-extra gcc-gfortran python36
-</code></pre>
-<p>Once MOFED drivers got installed, it should replace several INBOX drivers like nvme driver.</p>
-<p>For example, the command below shows the <code>/lib/modules/&lt;KERNEL_VERSION&gt;/extra/mlnx-nvme/host/nvme-rdma.ko</code> that is additionally installed, instead of the INBOX <code>nvme-rdma</code> (<code>/lib/modules/&lt;KERNEL_VERSION&gt;/kernel/drivers/nvme/host/nvme-rdma.ko.xz</code>).</p>
-<pre><code># modinfo nvme-rdma
-filename:       /lib/modules/4.18.0-477.10.1.el8_8.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
-license:        GPL v2
-rhelversion:    8.8
-srcversion:     533BB7E5866E52F63B9ACCB
-depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics
-name:           nvme_rdma
-vermagic:       4.18.0-477.10.1.el8_8.x86_64 SMP mod_unload modversions
-parm:           register_always:Use memory registration even for contiguous memory regions (bool)
-</code></pre>
-<p>Then, shutdown the system and restart, to replace the kernel modules already loaded (like <code>nvme</code>).</p>
-<p>Please don't forget to run <code>dracut -f</code> after completion of the <code>mlnxofedinstall</code> script.</p>
-<p>After the reboot, your system will become the GPUDirect Storage ready state.
+<h3 id="check-gpudirect-storage-status">Check GPUDirect Storage status</h3>
+<p>After the installation of CUDA Toolkit according to the steps above, your system will become ready for the GPUDirect Storage.
 Run <code>gdscheck</code> tool to confirm the configuration for each storage devices, as follows.</p>
 <pre><code># /usr/local/cuda/gds/tools/gdscheck -p
  GDS release version: 1.0.0.82
@@ -523,6 +463,46 @@ the following line must be added to the <code>/lib/udev/rules.d/63-md-raid-array
 <p>Then reboot the system to ensure the new configuration.
 See <a href="https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#adding-udev-rules">NVIDIA GPUDirect Storage Installation and Troubleshooting Guide</a> for the details.</p>
 </div>
+<h3 id="pci-bar1-memory-configuration">PCI Bar1 Memory Configuration</h3>
+<p>GPU-Direct SQL maps GPU device memory to the PCI BAR1 region (physical address space) on the host system, and sends P2P-RDMA requests to NVME devices with that as the destination for the shortest data transfer.</p>
+<p>To perform P2P-RDMA with sufficient multiplicity, the GPU must have enough PCI BAR1 space to map the device buffer. The size of the PCI BAR1 area is fixed for most GPUs, and PG-Strom recommends products whose size exceeds the GPU device memory size.</p>
+<p>However, some GPU products allow to change the size of the PCI BAR1 area by switching the operation mode. If your GPU is either of the following, refer to the <a href="https://developer.nvidia.com/displaymodeselector">NVIDIA Display Mode Selector Tool</a> and switch to the mode that maximizes the PCI BAR1 area size.</p>
+<ul>
+<li>NVIDIA L40S</li>
+<li>NVIDIA L40</li>
+<li>NVIDIA A40</li>
+<li>NVIDIA RTX 6000 Ada</li>
+<li>NVIDIA RTX A6000</li>
+<li>NVIDIA RTX A5500</li>
+<li>NVIDIA RTX A5000</li>
+</ul>
+<p>To check the GPU memory size and PCI BAR1 size installed in the system, use the <code>nvidia-smi -q</code> command. Memory-related status is displayed as shown below.</p>
+<pre><code>$ nvidia-smi -q
+        :
+    FB Memory Usage
+        Total                             : 46068 MiB
+        Reserved                          : 685 MiB
+        Used                              : 4 MiB
+        Free                              : 45377 MiB
+    BAR1 Memory Usage
+        Total                             : 65536 MiB
+        Used                              : 1 MiB
+        Free                              : 65535 MiB
+        :
+</code></pre>
+<h2 id="heterodb-extra-modules">HeteroDB extra modules</h2>
+<p><code>heterodb-extra</code> module enhances PG-Strom the following features.</p>
+<ul>
+<li>multi-GPUs support</li>
+<li>GPUDirect SQL</li>
+<li>GiST index support on GPU</li>
+<li>License management</li>
+</ul>
+<p>If you don't use the above features, only open source modules, you don't need to install the <code>heterodb-extra</code> module here.
+Please skip this section.</p>
+<p>Install the <code>heterodb-extra</code> package, downloaded from the SWDC, as follows.</p>
+<pre><code># dnf install heterodb-extra
+</code></pre>
 <h3 id="license-activation">License activation</h3>
 <p>License activation is needed to use all the features of <code>heterodb-extra</code>, provided by HeteroDB,Inc. You can operate the system without license, but features below are restricted.</p>
 <ul>
@@ -551,7 +531,7 @@ GPU_UUID:GPU-a137b1df-53c9-197f-2801-f2dccaf9d42f
 <h2 id="postgresql-installation">PostgreSQL Installation</h2>
 <p>This section introduces PostgreSQL installation with RPM.
 We don't introduce the installation steps from the source because there are many documents for this approach, and there are also various options for the <code>./configure</code> script.</p>
-<p>PostgreSQL is also distributed in the packages of Linux distributions, however, it is not the latest one, and often older than the version which supports PG-Strom. For example, Red Hat Enterprise Linux 7.x or CentOS 7.x distributes PostgreSQL v9.2.x series. This version had been EOL by the PostgreSQL community.</p>
+<p>PostgreSQL is also distributed in the packages of Linux distributions, however, it is not the latest one, and often older than the version which supports PG-Strom. For example, Red Hat Enterprise Linux 7.x distributes PostgreSQL v9.2.x series. This version had been EOL by the PostgreSQL community.</p>
 <p>PostgreSQL Global Development Group provides yum repository to distribute the latest PostgreSQL and related packages.
 Like the configuration of EPEL, you can install a small package to set up yum repository, then install PostgreSQL and related software.</p>
 <p>Here is the list of yum repository definition: <a href="http://yum.postgresql.org/repopackages.php">http://yum.postgresql.org/repopackages.php</a>.</p>
@@ -568,7 +548,7 @@ Like the configuration of EPEL, you can install a small package to set up yum re
 </code></pre>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>On the Red Hat Enterprise Linux 8 and CentOS 8, the package name <code>postgresql</code> conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the <code>postgresql</code> module by the distribution, using <code>dnf -y module disable postgresql</code>.</p>
+<p>On the Red Hat Enterprise Linux 8.x, the package name <code>postgresql</code> conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the <code>postgresql</code> module by the distribution, using <code>dnf -y module disable postgresql</code>.</p>
 </div>
 <p>The RPM packages provided by PostgreSQL Global Development Group installs software under the <code>/usr/pgsql-&lt;version&gt;</code> directory, so you may pay attention whether the PATH environment variable is configured appropriately.</p>
 <p><code>postgresql-alternative</code> package set up symbolic links to the related commands under <code>/usr/local/bin</code>, so allows to simplify the operations. Also, it enables to switch target version using <code>alternatives</code> command even if multiple version of PostgreSQL.</p>
@@ -730,7 +710,7 @@ The example below shows the command to install PostGIS v3.2 built for PostgreSQL
 <pre><code>-- For RHEL8
 # dnf install -y postgis32_15 --enablerepo=codeready-builder-for-rhel-8-x86_64-rpms
 
--- For CentOS8
+-- For Rocky8
 # dnf install -y postgis32_15 --enablerepo=powertools
 </code></pre>
 <p>Start PostgreSQL server after the initial setup of database cluster, then run <code>CREATE EXTENSION</code> command from SQL client to define geometry data type and SQL functions for geoanalytics.</p>

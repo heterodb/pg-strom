@@ -20,13 +20,13 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Stromを実行するには少なくとも一個のGPUデバイスがシステム上に必要です。これらはCUDA Toolkitでサポートされており、computing capability が6.0以降のモデル（Pascal世代以降）である必要があります。
     - [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models)を参考にGPUを選定してください。
 - **Operating System**
-    - PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはCentOSのバージョン8.xシリーズです。
+    - PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 8.xです。
     - GPUダイレクトSQL（cuFileドライバ）を利用するには、CUDA Toolkitに含まれるnvidia-fsドライバと、Mellanox OFED (OpenFabrics Enterprise Distribution) ドライバのインストールが必要です。
 - **PostgreSQL**
     - PG-Strom v5.0の実行にはPostgreSQLバージョン15以降が必要です。
     - PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。
 - **CUDA Toolkit**
-    - PG-Stromの実行にはCUDA Toolkit バージョン12.2以降が必要です。
+    - PG-Stromの実行にはCUDA Toolkit バージョン12.2update2以降が必要です。
     - PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。
 }
 @en{
@@ -38,55 +38,15 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Strom requires at least one GPU device on the system, which is supported by CUDA Toolkit, has computing capability 6.0 (Pascal generation) or later;
     - Please check at [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models) for GPU selection.
 - **Operating System**
-    - PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or CentOS version 8.x series.
+    - PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or Rocky Linux version 8.x series.
     - GPU Direct SQL (with cuFile driver) needs the `nvidia-fs` driver distributed with CUDA Toolkit, and Mellanox OFED (OpenFabrics Enterprise Distribution) driver.
 - **PostgreSQL**
     - PG-Strom v5.0 requires PostgreSQL v15 or later.
     - Some of PostgreSQL APIs used by PG-Strom internally are not included in the former versions.
 - **CUDA Toolkit**
-    - PG-Strom requires CUDA Toolkit version 12.2 or later.
+    - PG-Strom requires CUDA Toolkit version 12.2update2 or later.
     - Some of CUDA Driver APIs used by PG-Strom internally are not included in the former versions.
 }
-
-<!--
-もうこの記述は必要ないはず
-
-@ja:### GPUダイレクトSQL実行ドライバの選択
-@en:### Selection of GPU Direct SQL Execiton drivers
-
-@ja{
-インストール作業の前に、GPUダイレクトSQLのソフトウェアスタックを検討してください。
-
-[GPUダイレクトSQL](ssd2gpu.md)を実行するために必要なLinux kernelドライバには以下の２種類があります。
-
-- HeteroDB NVME-Strom
-    - 2018年にリリースされ、PG-Strom v2.0以降でサポートされているHeteroDB社製の専用ドライバ。
-    - RHEL7.x/RHEL8.xに対応し、GPUDirect RDMA機構を用いてローカルのNVME-SSDからGPUへの直接データ読み出しが可能です。
-- NVIDIA GPUDirect Storage
-    - NVIDIA社が開発している、NVME/NVME-oFデバイスからGPUへ直接データ読み出しを可能にするドライバで、2021年5月現在、パブリックベータ版が提供されています。
-    - PG-Strom v3.0で実験的に対応しており、RHEL8.3/8.4、およびUbuntu 18.04/20.04に対応しています。
-    - HeteroDB社を含む複数のパートナー企業が対応を表明しており、共有ファイルシステムやNVME-oFを通じたSDS(Software Defined Storage)デバイスからの直接読み出しも可能です。
-
-どちらのドライバを使用しても、性能面での差異はほとんどありません。
-しかし、GPUDirect Storageドライバの方が、対応するストレージやファイルシステムの種類といった周辺エコシステムや、ソフトウェア品質管理体制において優位性があると考えられるため、RHEL7/CentOS7でPG-Stromを利用する場合を除き、今後はGPUDirect Storageドライバの利用を推奨します。
-}
-@en{
-Please consider the software stack for GPUDirect SQL, prior to the installation.
-
-There are two individual Linux kernel driver for [GPUDirect SQL](ssd2gpu.md) execution, as follows:
-
-- HeteroDB NVME-Strom
-    - The dedicated Linux kernel module, released at 2018, supported since PG-Strom v2.0.
-    - It supports RHEL7.x/RHEL8.x, enables direct read from local NVME-SSDs to GPU using GPUDirect RDMA.
-- NVIDIA GPUDirect Storage
-    - The general purpose driver stack, has been developed by NVIDIA, to support direct read from NVME/NVME-oF devices to GPU. At May-2021, its public beta revision has been published.
-    - PG-Strom v3.0 experimentally supports the GPUDirect Storage, that supports RHEL8.3/8.4 and Ubuntu 18.04/20.04.
-    - Some partners, including HeteroDB, expressed to support this feature. It also allows direct read from shared-filesystems or SDS(Software Defined Storage) devices over NVME-oF protocols.
-
-Here is little performance differences on the above two drivers.
-On the other hands, GPUDirect Storage has more variations of the supported storages and filesystems, and more mature software QA process, expect for the case of PG-Strom on RHEL7/CentOS7, we will recommend to use GPUDirect Storage driver.
-}
--->
 
 @ja:##インストール手順
 @en:##Steps to Install
@@ -96,8 +56,8 @@ On the other hands, GPUDirect Storage has more variations of the supported stora
 
 1. H/Wの初期設定
 1. OSのインストール
-1. CUDA Toolkit のインストール
 1. MOFEDドライバのインストール
+1. CUDA Toolkit のインストール
 1. HeteroDB拡張モジュールのインストール
 1. PostgreSQLのインストール
 1. PG-Stromのインストール
@@ -110,8 +70,8 @@ The overall steps to install are below:
 
 1. Hardware Configuration
 1. OS Installation
-1. CUDA Toolkit installation
 1. MOFED Driver installation
+1. CUDA Toolkit installation
 1. HeteroDB Extra Module installation
 1. PostgreSQL installation
 1. PG-Strom installation
@@ -140,7 +100,7 @@ In case of Red Hat Enterprise Linux 8.x series, choose "Minimal installation" as
 - Development Tools
 }
 
-![RHEL8/CentOS8 Package Selection](./img/centos8_package_selection.png)
+![RHEL8/Rocky8 Package Selection](./img/centos8_package_selection.png)
 
 @ja{
 サーバーへのOSインストール後、サードパーティーのパッケージをインストールするために、パッケージリポジトリの設定を行います。
@@ -266,28 +226,26 @@ Linux kernel module must be rebuilt according to version-up of Linux kernel, so 
 }
 @ja{
 EPELリポジトリの定義は `epel-release` パッケージにより提供され、[Fedora Project](https://docs.fedoraproject.org/en-US/epel/#_quickstart)のサイトから入手する事ができます。
-CentOS8では`dnf`コマンドを用いてのインストールも可能です。
 }
 @en{
 `epel-release` package provides the repository definition of EPEL. You can obtain the package from the [Fedora Project](https://docs.fedoraproject.org/en-US/epel/#_quickstart) website.
-For CentOS8, it can be installed using `dnf` command.
 }
 
 ```
 -- For RHEL8
 # dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
 
--- For CentOS8
+-- For Rocky8
 # dnf install epel-release
 ```
 #### Red Hat CodeReady Linux Builder
 @ja{
-MOFED（Mellanox OpenFabrics Enterprise Distribution）ドライバのインストールには、Red Hat Enterprise Linux 8.xの標準インストール構成では無効化されている Red Hat CodeReady Linux Builder リポジトリを有効化する必要があります。CentOSにおいては、このリポジトリは PowerTools と呼ばれています。
+MOFED（Mellanox OpenFabrics Enterprise Distribution）ドライバのインストールには、Red Hat Enterprise Linux 8.xの標準インストール構成では無効化されている Red Hat CodeReady Linux Builder リポジトリを有効化する必要があります。Rokey Linuxにおいては、このリポジトリは PowerTools と呼ばれています。
 
 このリポジトリを有効化するには、以下のコマンドを実行します。
 }
 @en{
-Installation of MOFED (Mellanox OpenFabrics Enterprise Distribution) driver requires the ***Red Hat CodeReady Linux Builder*** repository which is disabled in the default configuration of Red Hat Enterprise Linux 8.x installation. In CentOS, it is called ***PowerTools***
+Installation of MOFED (Mellanox OpenFabrics Enterprise Distribution) driver requires the ***Red Hat CodeReady Linux Builder*** repository which is disabled in the default configuration of Red Hat Enterprise Linux 8.x installation. In Rocky Linux, it is called ***PowerTools***
 
 To enable this repository, run the command below:
 }
@@ -296,9 +254,89 @@ To enable this repository, run the command below:
 -- For RHEL8
 # subscription-manager repos --enable codeready-builder-for-rhel-8-x86_64-rpms
 
--- For CentOS8
+-- For Rocky8
 # dnf config-manager --set-enabled powertools
 ```
+
+@ja:##MOFEDドライバのインストール
+@en:##MOFED Driver Installation
+
+@ja{
+MOFEDドライバは、[こちら](https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed)からダウンロードする事ができます。
+
+本節ではtgzアーカイブからのインストール例を紹介します。
+}
+@en{
+You can download the latest MOFED driver from [here](https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed).
+
+This section introduces the example of installation from the tgz archive.
+}
+
+![MOFED Driver Selection](./img/mofed-download.png)
+
+@ja{
+tgzアーカイブを展開し、`mlnxofedinstall`スクリプトを実行します。この時、GPUDirect Storageのサポートを有効化するオプションを付加するのを忘れないでください。
+}
+@en{
+Extract the tgz archive, then kick `mlnxofedinstall` script. Please don't forget the options to enable GPUDirect Storage features.
+}
+
+```
+# tar xvf MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64.tgz
+# cd MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64
+# ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
+# dracut -f
+```
+
+@ja{
+MOFEDドライバのビルドおよびインストール中、不足パッケージのインストールを要求される事があります。
+その場合、エラーメッセージを確認して要求されたパッケージの追加インストールを行ってください。
+}
+@en{
+During the build and installation of MOFED drivers, the installer may require additional packages.
+In this case, error message shall guide you the missing packages. So, please install them using `dnf` command.
+}
+
+```
+Error: One or more required packages for installing MLNX_OFED_LINUX are missing.
+Please install the missing packages using your Linux distribution Package Management tool.
+Run:
+yum install tcsh tcl tk kernel-modules-extra gcc-gfortran python36
+```
+
+@ja{
+MOFEDドライバのインストールが完了すると、nvmeドライバなど、OS標準のものが置き換えられているはずです。
+
+例えば以下の例では、OS標準の`nvme-rdma`ドライバ（`/lib/modules/<KERNEL_VERSION>/kernel/drivers/nvme/host/nvme-rdma.ko.xz`）ではなく、追加インストールされた`/lib/modules/<KERNEL_VERSION>/extra/mlnx-nvme/host/nvme-rdma.ko`が優先して使用されています。
+}
+@en{
+Once MOFED drivers got installed, it should replace several INBOX drivers like nvme driver.
+
+For example, the command below shows the `/lib/modules/<KERNEL_VERSION>/extra/mlnx-nvme/host/nvme-rdma.ko` that is additionally installed, instead of the INBOX `nvme-rdma` (`/lib/modules/<KERNEL_VERSION>/kernel/drivers/nvme/host/nvme-rdma.ko.xz`).
+}
+
+```
+# modinfo nvme-rdma
+filename:       /lib/modules/4.18.0-477.10.1.el8_8.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
+license:        GPL v2
+rhelversion:    8.8
+srcversion:     533BB7E5866E52F63B9ACCB
+depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics
+name:           nvme_rdma
+vermagic:       4.18.0-477.10.1.el8_8.x86_64 SMP mod_unload modversions
+parm:           register_always:Use memory registration even for contiguous memory regions (bool)
+```
+
+@ja{
+既にロードされているカーネルモジュール（例: `nvme`）を置き換えるため、ここで一度システムのシャットダウンと再起動を行います。
+
+`mlnxofedinstall`スクリプトの完了後に、`dracut -f`を実行するのを忘れないでください。
+}
+@en{
+Then, shutdown the system and restart, to replace the kernel modules already loaded (like `nvme`).
+
+Please don't forget to run `dracut -f` after completion of the `mlnxofedinstall` script.
+}
 
 @ja:### heterodb-swdcのインストール
 @en:### heterodb-swdc Installation
@@ -440,178 +478,15 @@ Mon Dec 18 18:02:14 2023
 +---------------------------------------------------------------------------------------+
 ```
 
-
-@ja:### PCI Bar1メモリの設定
-@en:### PCI Bar1 Memory Configuration
-
-@ja{
-GPU-Direct SQLは、GPUデバイスメモリをホストシステム上のPCI BAR1領域（物理アドレス空間）にマップし、そこをDestinationとするP2P-RDMA要求をNVME機器に対して行う事で、ロスのない高速なデータ読出しを実現します。
-
-十分な多重度を持ったP2P-RDMAを行うには、GPUがバッファをマップするのに十分なPCI BAR1領域を有している必要があります。大半のGPUではPCI BAR1領域の大きさは固定で、PG-Stromにおいては、それがGPUデバイスメモリのサイズを上回っている製品を推奨しています。
-
-しかし、一部のGPU製品においては『動作モード』を切り替える事でPCI BAR1領域のサイズを切り替える事ができるものが存在します。お使いのGPUがそれに該当する場合は、[NVIDIA Display Mode Selector Tool](https://developer.nvidia.com/displaymodeselector)を参照の上、PCI BAR1領域のサイズを最大化するモードへと切り替えてください。
-
-2023年12月時点では、以下のGPUの場合にNVIDIA Display Mode Selector Toolを利用して***Display Off**モードへと切り替える必要があります。
-}
-@en{
-GPU-Direct SQL maps GPU device memory to the PCI BAR1 region (physical address space) on the host system, and sends P2P-RDMA requests to NVME devices with that as the destination for the shortest data transfer.
-
-To perform P2P-RDMA with sufficient multiplicity, the GPU must have enough PCI BAR1 space to map the device buffer. The size of the PCI BAR1 area is fixed for most GPUs, and PG-Strom recommends products whose size exceeds the GPU device memory size.
-
-However, some GPU products allow to change the size of the PCI BAR1 area by switching the operation mode. If your GPU is either of the following, refer to the [NVIDIA Display Mode Selector Tool](https://developer.nvidia.com/displaymodeselector) and switch to the mode that maximizes the PCI BAR1 area size.
-}
-
-- NVIDIA L40S
-- NVIDIA L40
-- NVIDIA A40
-- NVIDIA RTX 6000 Ada
-- NVIDIA RTX A6000
-- NVIDIA RTX A5500
-- NVIDIA RTX A5000
+@ja:### GPUDirect Storageの確認
+@en:### Check GPUDirect Storage status
 
 @ja{
-システムに搭載されているGPUのメモリサイズやPCI BAR1サイズを確認するには、`nvidia-smi -q`コマンドを利用します。以下のように、メモリ関連の状態が表示されます。
-}
-@en{
-To check the GPU memory size and PCI BAR1 size installed in the system, use the `nvidia-smi -q` command. Memory-related status is displayed as shown below.
-}
-```
-$ nvidia-smi -q
-        :
-    FB Memory Usage
-        Total                             : 46068 MiB
-        Reserved                          : 685 MiB
-        Used                              : 4 MiB
-        Free                              : 45377 MiB
-    BAR1 Memory Usage
-        Total                             : 65536 MiB
-        Used                              : 1 MiB
-        Free                              : 65535 MiB
-        :
-```
-
-@ja:##HeteroDB 拡張モジュール
-@en:##HeteroDB extra modules
-
-@ja{
-`heterodb-extra`モジュールは、PG-Stromに以下の機能を追加します。
-
-- マルチGPUの対応
-- GPUダイレクトSQL
-- GiSTインデックス対応
-- ライセンス管理機能
-
-これらの機能を使用せず、オープンソース版の機能のみを使用する場合は `heterodb-extra` モジュールのインストールは不要です。
-本節の内容は読み飛ばして構いません。
-}
-@en{
-`heterodb-extra` module enhances PG-Strom the following features.
-
-- multi-GPUs support
-- GPUDirect SQL
-- GiST index support on GPU
-- License management
-
-If you don't use the above features, only open source modules, you don't need to install the `heterodb-extra` module here.
-Please skip this section.
-}
-
-@ja{
-以下のように、SWDCから`heterodb-extra`パッケージをインストールしてください。
-}
-@en{
-Install the `heterodb-extra` package, downloaded from the SWDC, as follows.
-}
-```
-# dnf install heterodb-extra
-```
-
-@ja:##MOFEDドライバのインストール
-@en:##MOFED Driver Installation
-
-@ja{
-MOFEDドライバは、[こちら](https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed)からダウンロードする事ができます。
-
-本節ではtgzアーカイブからのインストール例を紹介します。
-}
-@en{
-You can download the latest MOFED driver from [here](https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed).
-
-This section introduces the example of installation from the tgz archive.
-}
-
-![MOFED Driver Selection](./img/mofed-download.png)
-
-@ja{
-tgzアーカイブを展開し、`mlnxofedinstall`スクリプトを実行します。この時、GPUDirect Storageのサポートを有効化するオプションを付加するのを忘れないでください。
-}
-@en{
-Extract the tgz archive, then kick `mlnxofedinstall` script. Please don't forget the options to enable GPUDirect Storage features.
-}
-
-```
-# tar xvf MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64.tgz
-# cd MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64
-# ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
-# dracut -f
-```
-
-@ja{
-MOFEDドライバのビルドおよびインストール中、不足パッケージのインストールを要求される事があります。
-その場合、エラーメッセージを確認して要求されたパッケージの追加インストールを行ってください。
-}
-@en{
-During the build and installation of MOFED drivers, the installer may require additional packages.
-In this case, error message shall guide you the missing packages. So, please install them using `dnf` command.
-}
-
-```
-Error: One or more required packages for installing MLNX_OFED_LINUX are missing.
-Please install the missing packages using your Linux distribution Package Management tool.
-Run:
-yum install tcsh tcl tk kernel-modules-extra gcc-gfortran python36
-```
-
-@ja{
-MOFEDドライバのインストールが完了すると、nvmeドライバなど、OS標準のものが置き換えられているはずです。
-
-例えば以下の例では、OS標準の`nvme-rdma`ドライバ（`/lib/modules/<KERNEL_VERSION>/kernel/drivers/nvme/host/nvme-rdma.ko.xz`）ではなく、追加インストールされた`/lib/modules/<KERNEL_VERSION>/extra/mlnx-nvme/host/nvme-rdma.ko`が優先して使用されています。
-}
-@en{
-Once MOFED drivers got installed, it should replace several INBOX drivers like nvme driver.
-
-For example, the command below shows the `/lib/modules/<KERNEL_VERSION>/extra/mlnx-nvme/host/nvme-rdma.ko` that is additionally installed, instead of the INBOX `nvme-rdma` (`/lib/modules/<KERNEL_VERSION>/kernel/drivers/nvme/host/nvme-rdma.ko.xz`).
-}
-
-```
-# modinfo nvme-rdma
-filename:       /lib/modules/4.18.0-477.10.1.el8_8.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
-license:        GPL v2
-rhelversion:    8.8
-srcversion:     533BB7E5866E52F63B9ACCB
-depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics
-name:           nvme_rdma
-vermagic:       4.18.0-477.10.1.el8_8.x86_64 SMP mod_unload modversions
-parm:           register_always:Use memory registration even for contiguous memory regions (bool)
-```
-
-@ja{
-既にロードされているカーネルモジュール（例: `nvme`）を置き換えるため、ここで一度システムのシャットダウンと再起動を行います。
-
-`mlnxofedinstall`スクリプトの完了後に、`dracut -f`を実行するのを忘れないでください。
-}
-@en{
-Then, shutdown the system and restart, to replace the kernel modules already loaded (like `nvme`).
-
-Please don't forget to run `dracut -f` after completion of the `mlnxofedinstall` script.
-}
-
-@ja{
-再起動が完了すると、GPUDirect Storageが利用可能な状態となっているはずです。
+上記の手順でCUDA Toolkitのインストールが完了すると、GPUDirect Storageが利用可能な状態となっているはずです。
 以下の通り、`gdscheck`ツールを用いてストレージデバイス毎のコンフィグを確認してください。
 }
 @en{
-After the reboot, your system will become the GPUDirect Storage ready state.
+After the installation of CUDA Toolkit according to the steps above, your system will become ready for the GPUDirect Storage.
 Run `gdscheck` tool to confirm the configuration for each storage devices, as follows.
 }
 
@@ -703,6 +578,91 @@ Run `gdscheck` tool to confirm the configuration for each storage devices, as fo
     See [NVIDIA GPUDirect Storage Installation and Troubleshooting Guide](https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#adding-udev-rules) for the details.
 }
 
+@ja:### PCI Bar1メモリの設定
+@en:### PCI Bar1 Memory Configuration
+
+@ja{
+GPU-Direct SQLは、GPUデバイスメモリをホストシステム上のPCI BAR1領域（物理アドレス空間）にマップし、そこをDestinationとするP2P-RDMA要求をNVME機器に対して行う事で、ロスのない高速なデータ読出しを実現します。
+
+十分な多重度を持ったP2P-RDMAを行うには、GPUがバッファをマップするのに十分なPCI BAR1領域を有している必要があります。大半のGPUではPCI BAR1領域の大きさは固定で、PG-Stromにおいては、それがGPUデバイスメモリのサイズを上回っている製品を推奨しています。
+
+しかし、一部のGPU製品においては『動作モード』を切り替える事でPCI BAR1領域のサイズを切り替える事ができるものが存在します。お使いのGPUがそれに該当する場合は、[NVIDIA Display Mode Selector Tool](https://developer.nvidia.com/displaymodeselector)を参照の上、PCI BAR1領域のサイズを最大化するモードへと切り替えてください。
+
+2023年12月時点では、以下のGPUの場合にNVIDIA Display Mode Selector Toolを利用して***Display Off**モードへと切り替える必要があります。
+}
+@en{
+GPU-Direct SQL maps GPU device memory to the PCI BAR1 region (physical address space) on the host system, and sends P2P-RDMA requests to NVME devices with that as the destination for the shortest data transfer.
+
+To perform P2P-RDMA with sufficient multiplicity, the GPU must have enough PCI BAR1 space to map the device buffer. The size of the PCI BAR1 area is fixed for most GPUs, and PG-Strom recommends products whose size exceeds the GPU device memory size.
+
+However, some GPU products allow to change the size of the PCI BAR1 area by switching the operation mode. If your GPU is either of the following, refer to the [NVIDIA Display Mode Selector Tool](https://developer.nvidia.com/displaymodeselector) and switch to the mode that maximizes the PCI BAR1 area size.
+}
+
+- NVIDIA L40S
+- NVIDIA L40
+- NVIDIA A40
+- NVIDIA RTX 6000 Ada
+- NVIDIA RTX A6000
+- NVIDIA RTX A5500
+- NVIDIA RTX A5000
+
+@ja{
+システムに搭載されているGPUのメモリサイズやPCI BAR1サイズを確認するには、`nvidia-smi -q`コマンドを利用します。以下のように、メモリ関連の状態が表示されます。
+}
+@en{
+To check the GPU memory size and PCI BAR1 size installed in the system, use the `nvidia-smi -q` command. Memory-related status is displayed as shown below.
+}
+```
+$ nvidia-smi -q
+        :
+    FB Memory Usage
+        Total                             : 46068 MiB
+        Reserved                          : 685 MiB
+        Used                              : 4 MiB
+        Free                              : 45377 MiB
+    BAR1 Memory Usage
+        Total                             : 65536 MiB
+        Used                              : 1 MiB
+        Free                              : 65535 MiB
+        :
+```
+
+@ja:##HeteroDB 拡張モジュール
+@en:##HeteroDB extra modules
+
+@ja{
+`heterodb-extra`モジュールは、PG-Stromに以下の機能を追加します。
+
+- マルチGPUの対応
+- GPUダイレクトSQL
+- GiSTインデックス対応
+- ライセンス管理機能
+
+これらの機能を使用せず、オープンソース版の機能のみを使用する場合は `heterodb-extra` モジュールのインストールは不要です。
+本節の内容は読み飛ばして構いません。
+}
+@en{
+`heterodb-extra` module enhances PG-Strom the following features.
+
+- multi-GPUs support
+- GPUDirect SQL
+- GiST index support on GPU
+- License management
+
+If you don't use the above features, only open source modules, you don't need to install the `heterodb-extra` module here.
+Please skip this section.
+}
+
+@ja{
+以下のように、SWDCから`heterodb-extra`パッケージをインストールしてください。
+}
+@en{
+Install the `heterodb-extra` package, downloaded from the SWDC, as follows.
+}
+```
+# dnf install heterodb-extra
+```
+
 @ja:### ライセンスの有効化
 @en:### License activation
 
@@ -773,10 +733,10 @@ We don't introduce the installation steps from the source because there are many
 }
 
 @ja{
-Linuxディストリビューションの配布するパッケージにもPostgreSQLは含まれていますが、必ずしも最新ではなく、PG-Stromの対応バージョンよりも古いものである事が多々あります。例えば、Red Hat Enterprise Linux 7.xやCentOS 7.xで配布されているPostgreSQLはv9.2.xですが、これはPostgreSQLコミュニティとして既にEOLとなっているバージョンです。
+Linuxディストリビューションの配布するパッケージにもPostgreSQLは含まれていますが、必ずしも最新ではなく、PG-Stromの対応バージョンよりも古いものである事が多々あります。例えば、Red Hat Enterprise Linux 7.xで配布されているPostgreSQLはv9.2.xですが、これはPostgreSQLコミュニティとして既にEOLとなっているバージョンです。
 }
 @en{
-PostgreSQL is also distributed in the packages of Linux distributions, however, it is not the latest one, and often older than the version which supports PG-Strom. For example, Red Hat Enterprise Linux 7.x or CentOS 7.x distributes PostgreSQL v9.2.x series. This version had been EOL by the PostgreSQL community.
+PostgreSQL is also distributed in the packages of Linux distributions, however, it is not the latest one, and often older than the version which supports PG-Strom. For example, Red Hat Enterprise Linux 7.x distributes PostgreSQL v9.2.x series. This version had been EOL by the PostgreSQL community.
 }
 @ja{
 PostgreSQL Global Development Groupは、最新のPostgreSQLおよび関連ソフトウェアの配布のためにyumリポジトリを提供しています。
@@ -807,7 +767,7 @@ Repository definitions are per PostgreSQL major version and Linux distribution. 
 
 例えばPostgreSQL v15を使用する場合、PG-Stromのインストールには `postgresql15-server`および`postgresql15-devel`パッケージが必要です。
 
-以下は、RHEL8/CentOS8においてPostgreSQL v15をインストールする手順の例です。
+以下は、RHEL8においてPostgreSQL v15をインストールする手順の例です。
 }
 @en{
 You can install PostgreSQL as following steps:
@@ -825,11 +785,11 @@ You can install PostgreSQL as following steps:
 
 @ja{
 !!! Note
-    Red Hat Enterprise Linux 8 および CentOS 8の場合、パッケージ名`postgresql`がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、`dnf -y module disable postgresql` コマンドを用いてディストリビューション標準の`postgresql`モジュールを無効化します。
+    Red Hat Enterprise Linux 8.x の場合、パッケージ名`postgresql`がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、`dnf -y module disable postgresql` コマンドを用いてディストリビューション標準の`postgresql`モジュールを無効化します。
 }
 @en{
 !!! Note
-    On the Red Hat Enterprise Linux 8 and CentOS 8, the package name `postgresql` conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the `postgresql` module by the distribution, using `dnf -y module disable postgresql`.
+    On the Red Hat Enterprise Linux 8.x, the package name `postgresql` conflicts to the default one at the distribution, thus, unable to install the packages from PGDG. So, disable the `postgresql` module by the distribution, using `dnf -y module disable postgresql`.
 }
 
 @ja{
@@ -1187,7 +1147,7 @@ The example below shows the command to install PostGIS v3.2 built for PostgreSQL
 -- For RHEL8
 # dnf install -y postgis32_15 --enablerepo=codeready-builder-for-rhel-8-x86_64-rpms
 
--- For CentOS8
+-- For Rocky8
 # dnf install -y postgis32_15 --enablerepo=powertools
 ```
 

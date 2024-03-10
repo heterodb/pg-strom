@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <strings.h>
+#include <time.h>
 
 /* command options */
 static char	   *sqldb_command = NULL;
@@ -29,6 +30,7 @@ static char	   *sqldb_password = NULL;
 static char	   *sqldb_database = NULL;
 static char	   *dump_arrow_filename = NULL;
 static char	   *stat_embedded_columns = NULL;
+static int		num_worker_threads = 0;
 static int		shows_progress = 0;
 static userConfigOption *sqldb_session_configs = NULL;
 static nestLoopOption *sqldb_nestloop_options = NULL;
@@ -334,11 +336,21 @@ shows_record_batch_progress(SQLtable *table, size_t nitems)
 	{
 		ArrowBlock *block;
 		int			index = table->numRecordBatches - 1;
+		time_t		tv = time(NULL);
+		struct tm	tm;
 
+		localtime_r(&tv, &tm);
 		assert(index >= 0);
 		block = &table->recordBatches[index];
-		printf("RecordBatch[%d]: "
+		printf("%04d-%02d-%02d %02d:%02d:%02d "
+			   "RecordBatch[%d]: "
 			   "offset=%lu length=%lu (meta=%u, body=%lu) nitems=%zu\n",
+			   tm.tm_year + 1900,
+			   tm.tm_mon + 1,
+			   tm.tm_mday,
+			   tm.tm_hour,
+			   tm.tm_min,
+			   tm.tm_sec,
 			   index,
 			   block->offset,
 			   block->metaDataLength + block->bodyLength,
@@ -574,6 +586,9 @@ usage(void)
 		  "  -c, --command=COMMAND SQL command to run\n"
 		  "  -t, --table=TABLENAME Equivalent to '-c SELECT * FROM TABLENAME'\n"
 		  "      (-c and -t are exclusive, either of them must be given)\n"
+		  "  -n, --num-workers=N_WORKERS Enables parallel dump mode. It requires\n"
+		  "                        the SQL command contains $(WORKER_ID) and\n"
+		  "                        $(N_WORKERS) to avoid data duplication.\n"
 #ifdef __PG2ARROW__
 		  "      --inner-join=SUB_COMMAND\n"
 		  "      --outer-join=SUB_COMMAND\n"
@@ -638,6 +653,7 @@ parse_options(int argc, char * const argv[])
 		{"inner-join",   required_argument, NULL, 1004},
 		{"outer-join",   required_argument, NULL, 1005},
 		{"stat",         optional_argument, NULL, 'S'},
+		{"num-workers",  required_argument, NULL, 'n'},
 		{"help",         no_argument,       NULL, 9999},
 		{NULL, 0, NULL, 0},
 	};
@@ -645,7 +661,6 @@ parse_options(int argc, char * const argv[])
 	bool		meet_command = false;
 	bool		meet_table = false;
 	int			password_prompt = 0;
-	const char *pos;
 	userConfigOption *last_user_config = NULL;
 	nestLoopOption *last_nest_loop __attribute__((unused)) = NULL;
 
@@ -657,7 +672,7 @@ parse_options(int argc, char * const argv[])
 #ifdef __MYSQL2ARROW__
 							"P:"
 #endif
-							"S::", long_options, NULL)) >= 0)
+							"n:S::", long_options, NULL)) >= 0)
 	{
 		switch (c)
 		{
@@ -676,6 +691,7 @@ parse_options(int argc, char * const argv[])
 					sqldb_command = read_sql_command_from_file(optarg + 7);
 				else
 					sqldb_command = optarg;
+				meet_command = true;
 				break;
 
 			case 't':
@@ -687,6 +703,7 @@ parse_options(int argc, char * const argv[])
 				if (!sqldb_command)
 					Elog("out of memory");
 				sprintf(sqldb_command, "SELECT * FROM %s", optarg);
+				meet_table = true;
 				break;
 
 			case 'o':
@@ -708,22 +725,41 @@ parse_options(int argc, char * const argv[])
 			case 's':
 				if (batch_segment_sz != 0)
 					Elog("-s option was supplied twice");
-				pos = optarg;
-				while (isdigit(*pos))
-					pos++;
-				if (*pos == '\0')
-					batch_segment_sz = atol(optarg);
-				else if (strcasecmp(pos, "k") == 0 ||
-						 strcasecmp(pos, "kb") == 0)
-					batch_segment_sz = atol(optarg) * (1UL << 10);
-				else if (strcasecmp(pos, "m") == 0 ||
-						 strcasecmp(pos, "mb") == 0)
-					batch_segment_sz = atol(optarg) * (1UL << 20);
-				else if (strcasecmp(pos, "g") == 0 ||
-						 strcasecmp(pos, "gb") == 0)
-					batch_segment_sz = atol(optarg) * (1UL << 30);
 				else
-					Elog("segment size is not valid: %s", optarg);
+				{
+					char   *end;
+					long	sz = strtoul(optarg, &end, 10);
+
+					if (sz == 0)
+						Elog("not a valid segment size: %s", optarg);
+					else if (*end == '\0')
+						batch_segment_sz = sz;
+					else if (strcasecmp(end, "k") == 0 ||
+							 strcasecmp(end, "kb") == 0)
+						batch_segment_sz = (sz << 10);
+					else if (strcasecmp(end, "m") == 0 ||
+							 strcasecmp(end, "mb") == 0)
+						batch_segment_sz = (sz << 20);
+					else if (strcasecmp(end, "g") == 0 ||
+							 strcasecmp(end, "gb") == 0)
+						batch_segment_sz = (sz << 30);
+					else
+						Elog("not a valid segment size: %s", optarg);
+				}
+				break;
+
+			case 'n':
+				if (num_worker_threads != 0)
+					Elog("-n option was supplied twice");
+				else
+				{
+					char   *end;
+					long	num = strtoul(optarg, &end, 10);
+
+					if (*end != '\0' || num < 1 || num > 9999)
+						Elog("not a valid -n|--num-workers option: %s", optarg);
+					num_worker_threads = num;
+				}
 				break;
 
 			case 'h':
@@ -860,6 +896,42 @@ parse_options(int argc, char * const argv[])
 	}
 	if (!sqldb_command)
 		Elog("Neither -c nor -t options are supplied");
+
+	/*
+	 * The 'sqldb_command' must contains $(WORKER_ID) and $(N_WORKERS).
+	 */
+	if (num_worker_threads == 0)
+		num_worker_threads = 1;
+	if (num_worker_threads == 1)
+	{
+		if (strstr(sqldb_command, "$(WORKER_ID)") != NULL ||
+			strstr(sqldb_command, "$(N_WORKERS)") != NULL)
+			Elog("The reserved keywords: $(WORKER_ID) and $(N_WORKERS) should not be used in non-parallel SQL commands");
+	}
+	else
+	{
+		assert(num_worker_threads > 1);
+#ifdef __PG2ARROW__
+		if (meet_table)
+		{
+			char   *temp = alloca(strlen(sqldb_command) + 200);
+
+			assert(!meet_command);
+			sprintf(temp, "%s WHERE hashtid(ctid) %% $(N_WORKERS) = $(WORKER_ID)",
+					sqldb_command);
+			sqldb_command = strdup(temp);
+			if (!sqldb_command)
+				Elog("out of memory");
+		}
+		else
+#endif	/* __PG2ARROW__ */
+		{
+			if (strstr(sqldb_command, "$(WORKER_ID)") == NULL ||
+				strstr(sqldb_command, "$(N_WORKERS)") == NULL)
+				Elog("The custom SQL command has to contains $(WORKER_ID) and $(N_WORKERS) to avoid data duplications.\n"
+					 "example)  SELECT * FROM my_table WHERE hashtid(ctid) %% $(N_WORKERS) = $(WORKER_ID)");
+		}
+	}
 	if (batch_segment_sz == 0)
 		batch_segment_sz = (1UL << 28);		/* 256MB in default */
 }
@@ -875,7 +947,8 @@ int main(int argc, char * const argv[])
 	SQLtable	   *table;
 	ArrowKeyValue  *kv;
 	SQLdictionary  *sql_dict_list = NULL;
-	
+	time_t			tv1 = time(NULL);
+
 	parse_options(argc, argv);
 
 	/* special case if --dump=FILENAME */
@@ -955,6 +1028,22 @@ int main(int argc, char * const argv[])
 	sqldb_close_connection(sqldb_state);
 	close(table->fdesc);
 
+	if (shows_progress)
+	{
+		time_t	elapsed = (time(NULL) - tv1);
+
+		if (elapsed > 2 * 86400)	/* > 2days */
+			printf("Total elapsed time: %ld days %02ld:%02ld:%02ld\n",
+				   elapsed / 86400,
+				   (elapsed % 86400) / 3600,
+				   (elapsed % 3600) / 60,
+				   (elapsed % 60));
+		else
+			printf("Total elapsed time: %02ld:%02ld:%02ld\n",
+				   (elapsed % 86400) / 3600,
+				   (elapsed % 3600) / 60,
+				   (elapsed % 60));
+	}
 	return 0;
 }
 

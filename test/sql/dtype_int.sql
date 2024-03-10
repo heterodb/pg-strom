@@ -39,8 +39,6 @@ VACUUM ANALYZE;
 
 -- force to use GpuScan, instead of SeqScan
 SET enable_seqscan = off;
--- not to print kernel source code
-SET pg_strom.debug_kernel_source = off;
 
 -- cast operators
 SET pg_strom.enabled = on;

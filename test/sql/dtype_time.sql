@@ -60,8 +60,6 @@ VACUUM ANALYZE;
 
 -- force to use GpuScan, instead of SeqScan
 SET enable_seqscan = off;
--- not to print kernel source code
-SET pg_strom.debug_kernel_source = off;
 
 -- type cast operators
 SET timezone = 'Japan';
@@ -871,7 +869,7 @@ SELECT id, EXTRACT (microseconds FROM iv1) v1,
            EXTRACT (decade       FROM iv2) v10,
            EXTRACT (century      FROM iv1) v11,
            EXTRACT (millennium   FROM iv2) v12
-  INTO test44g
+  INTO test45g
   FROM rt_datetime
  WHERE id > 0;
 SELECT id, EXTRACT (microseconds FROM iv1) v1,
