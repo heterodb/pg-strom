@@ -99,7 +99,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	exprs = lappend(exprs, pp_info->used_params);
 	privs = lappend(privs, pp_info->host_quals);
 	privs = lappend(privs, makeInteger(pp_info->scan_relid));
-	privs = lappend(privs, pp_info->scan_quals);
+	privs = lappend(privs, pp_info->scan_quals_fallback);
 	exprs = lappend(exprs, pp_info->scan_quals_explain);
 	privs = lappend(privs, __makeFloat(pp_info->scan_tuples));
 	privs = lappend(privs, __makeFloat(pp_info->scan_nrows));
@@ -147,17 +147,18 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	for (int i=0; i < pp_info->num_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+		List   *__exprs = NIL;
 		List   *__privs = NIL;
 
 		__privs = lappend(__privs, makeInteger(pp_inner->join_type));
 		__privs = lappend(__privs, __makeFloat(pp_inner->join_nrows));
-		__privs = lappend(__privs, pp_inner->hash_outer_keys_original);
+		__exprs = lappend(__exprs, pp_inner->hash_outer_keys_original);
 		__privs = lappend(__privs, pp_inner->hash_outer_keys_fallback);
-		__privs = lappend(__privs, pp_inner->hash_inner_keys_original);
+		__exprs = lappend(__exprs, pp_inner->hash_inner_keys_original);
 		__privs = lappend(__privs, pp_inner->hash_inner_keys_fallback);
-		__privs = lappend(__privs, pp_inner->join_quals_original);
+		__exprs = lappend(__exprs, pp_inner->join_quals_original);
 		__privs = lappend(__privs, pp_inner->join_quals_fallback);
-		__privs = lappend(__privs, pp_inner->other_quals_original);
+		__exprs = lappend(__exprs, pp_inner->other_quals_original);
 		__privs = lappend(__privs, pp_inner->other_quals_fallback);
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_oid));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_col));
@@ -169,6 +170,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_npages));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_height));
 
+		exprs = lappend(exprs, __exprs);
 		privs = lappend(privs, __privs);
 	}
 	cscan->custom_exprs = exprs;
@@ -203,7 +205,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.used_params  = list_nth(exprs, eindex++);
 	pp_data.host_quals   = list_nth(privs, pindex++);
 	pp_data.scan_relid   = intVal(list_nth(privs, pindex++));
-	pp_data.scan_quals   = list_nth(privs, pindex++);
+	pp_data.scan_quals_fallback = list_nth(privs, pindex++);
 	pp_data.scan_quals_explain = list_nth(exprs, eindex++);
 	pp_data.scan_tuples  = floatVal(list_nth(privs, pindex++));
 	pp_data.scan_nrows   = floatVal(list_nth(privs, pindex++));
@@ -253,18 +255,20 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	for (int i=0; i < pp_info->num_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+		List   *__exprs = list_nth(exprs, eindex++);
 		List   *__privs = list_nth(privs, pindex++);
+		int		__eindex = 0;
 		int		__pindex = 0;
 
 		pp_inner->join_type       = intVal(list_nth(__privs, __pindex++));
 		pp_inner->join_nrows      = floatVal(list_nth(__privs, __pindex++));
-		pp_inner->hash_outer_keys_original = list_nth(__privs, __pindex++);
+		pp_inner->hash_outer_keys_original = list_nth(__exprs, __eindex++);
 		pp_inner->hash_outer_keys_fallback = list_nth(__privs, __pindex++);
-		pp_inner->hash_inner_keys_original = list_nth(__privs, __pindex++);
+		pp_inner->hash_inner_keys_original = list_nth(__exprs, __eindex++);
 		pp_inner->hash_inner_keys_fallback = list_nth(__privs, __pindex++);
-		pp_inner->join_quals_original = list_nth(__privs, __pindex++);
+		pp_inner->join_quals_original = list_nth(__exprs, __eindex++);
 		pp_inner->join_quals_fallback = list_nth(__privs, __pindex++);
-		pp_inner->other_quals_original = list_nth(__privs, __pindex++);
+		pp_inner->other_quals_original = list_nth(__exprs, __eindex++);
 		pp_inner->other_quals_fallback = list_nth(__privs, __pindex++);
 		pp_inner->gist_index_oid  = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_index_col  = intVal(list_nth(__privs, __pindex++));
@@ -296,7 +300,7 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 									  inners[pp_orig->num_rels]));
 	pp_dest->used_params      = list_copy(pp_dest->used_params);
 	pp_dest->host_quals       = copyObject(pp_dest->host_quals);
-	pp_dest->scan_quals       = copyObject(pp_dest->scan_quals);
+	pp_dest->scan_quals_fallback = copyObject(pp_dest->scan_quals_fallback);
 	pp_dest->scan_quals_explain = copyObject(pp_dest->scan_quals_explain);
 	pp_dest->brin_index_conds = copyObject(pp_dest->brin_index_conds);
 	pp_dest->brin_index_quals = copyObject(pp_dest->brin_index_quals);

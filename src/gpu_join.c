@@ -919,7 +919,7 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 			if (!inner_path || inner_path->total_cost > path->total_cost)
 				inner_path = path;
 		}
-		if (!inner_path && IS_SIMPLE_REL(innerrel))
+		if (!inner_path && IS_SIMPLE_REL(innerrel) && innerrel->rtekind == RTE_RELATION)
 		{
 			/*
 			 * In case when inner relation is very small, PostgreSQL may
@@ -1454,12 +1454,11 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	context = create_codegen_context(root, cpath, pp_info);
 
 	/* codegen for outer scan, if any */
-	if (pp_info->scan_quals)
+	if (pp_info->scan_quals_fallback)
 	{
-		pp_info->scan_quals = pp_info->scan_quals;
 		pp_info->kexp_scan_quals
-			= codegen_build_scan_quals(context, pp_info->scan_quals);
-		pull_varattnos((Node *)pp_info->scan_quals,
+			= codegen_build_scan_quals(context, pp_info->scan_quals_fallback);
+		pull_varattnos((Node *)pp_info->scan_quals_fallback,
 					   pp_info->scan_relid,
 					   &outer_refs);
 	}
