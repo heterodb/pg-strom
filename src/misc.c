@@ -290,6 +290,7 @@ pgstromPlanInfo *
 copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 {
 	pgstromPlanInfo *pp_dest;
+	List	   *kvars_deflist = NIL;
 	ListCell   *lc;
 
 	/*
@@ -311,8 +312,9 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 
 		kvdef_dest = pmemdup(kvdef_orig, sizeof(codegen_kvar_defitem));
 		kvdef_dest->kv_expr = copyObject(kvdef_dest->kv_expr);
-		pp_dest->kvars_deflist = lappend(pp_dest->kvars_deflist, kvdef_dest);
+		kvars_deflist = lappend(kvars_deflist, kvdef_dest);
 	}
+	pp_dest->kvars_deflist    = kvars_deflist;
 	pp_dest->fallback_tlist   = copyObject(pp_dest->fallback_tlist);
 	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
 	for (int j=0; j < pp_orig->num_rels; j++)
