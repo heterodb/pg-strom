@@ -392,7 +392,8 @@ try_add_simple_scan_path(PlannerInfo *root,
 	if (rte->relkind == RELKIND_RELATION ||
 		rte->relkind == RELKIND_MATVIEW)
 	{
-		if (get_relation_am(rte->relid, true) == HEAP_TABLE_AM_OID)
+		if (rte->rtekind == RTE_RELATION &&
+			get_relation_am(rte->relid, true) == HEAP_TABLE_AM_OID)
 		{
 			op_leaf = buildSimpleScanPlanInfo(root,
 											  baserel,
@@ -448,7 +449,8 @@ try_add_simple_scan_path(PlannerInfo *root,
 		 */
 		if (pp_info->host_quals == NIL)
 		{
-			pgstrom_remember_op_normal(baserel,
+			pgstrom_remember_op_normal(root,
+									   baserel,
 									   op_leaf,
 									   be_parallel);
 		}
@@ -486,7 +488,7 @@ try_add_partitioned_scan_path(PlannerInfo *root,
 			op_leaf_list = lappend(op_leaf_list, op_leaf);
 		}
 	}
-	pgstrom_remember_op_leafs(baserel, op_leaf_list, be_parallel);
+	pgstrom_remember_op_leafs(root, baserel, op_leaf_list, be_parallel);
 }
 
 /*

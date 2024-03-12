@@ -1644,7 +1644,9 @@ __xpuPreAggAddCustomPathCommon(PlannerInfo *root,
 		/*
 		 * Try normal XpuPreAgg Path
 		 */
-		op_leaf = pgstrom_find_op_normal(input_rel, (try_parallel > 0));
+		op_leaf = pgstrom_find_op_normal(root,
+										 input_rel,
+										 (try_parallel > 0));
 		if (op_leaf)
 		{
 			__try_add_xpupreagg_normal_path(root,
@@ -1665,7 +1667,8 @@ __xpuPreAggAddCustomPathCommon(PlannerInfo *root,
 			bool	identical_inners;
 			int		sibling_param_id = -1;
 
-			op_leaf_list = pgstrom_find_op_leafs(input_rel,
+			op_leaf_list = pgstrom_find_op_leafs(root,
+												 input_rel,
 												 (try_parallel > 0),
 												 &identical_inners);
 			if (identical_inners)

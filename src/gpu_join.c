@@ -573,7 +573,7 @@ try_add_xpujoin_simple_path(PlannerInfo *root,
 	Path			__outer_path;	/* pseudo outer-path */
 	CustomPath	   *cpath;
 
-	op_prev = pgstrom_find_op_normal(outer_rel, try_parallel_path);
+	op_prev = pgstrom_find_op_normal(root, outer_rel, try_parallel_path);
 	if (!op_prev)
 		return;
 	memset(&__outer_path, 0, sizeof(Path));
@@ -604,7 +604,9 @@ try_add_xpujoin_simple_path(PlannerInfo *root,
 						   &cpath->path,
 						   outer_rel,
 						   inner_path->parent);
-	pgstrom_remember_op_normal(join_rel, op_leaf,
+	pgstrom_remember_op_normal(root,
+							   join_rel,
+							   op_leaf,
 							   try_parallel_path);
 	if (!try_parallel_path)
 		add_path(join_rel, &cpath->path);
@@ -751,7 +753,8 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 	double		inner_discount_ratio = 1.0;
 	ListCell   *lc;
 
-	op_prev_list = pgstrom_find_op_leafs(outer_rel,
+	op_prev_list = pgstrom_find_op_leafs(root,
+										 outer_rel,
 										 try_parallel_path,
 										 &identical_inners);
 	if (identical_inners)
@@ -868,7 +871,9 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 						   append_path,
 						   outer_rel,
 						   inner_path->parent);
-	pgstrom_remember_op_leafs(join_rel, op_leaf_list,
+	pgstrom_remember_op_leafs(root,
+							  join_rel,
+							  op_leaf_list,
 							  try_parallel_path);
 	if (!try_parallel_path)
 		add_path(join_rel, append_path);
@@ -983,12 +988,15 @@ __xpuJoinTryAddPartitionLeafs(PlannerInfo *root,
 		RelOptInfo *leaf_rel = parent->part_rels[k];
 		pgstromOuterPathLeafInfo *op_leaf;
 
-		op_leaf = pgstrom_find_op_normal(leaf_rel, be_parallel);
+		op_leaf = pgstrom_find_op_normal(root, leaf_rel, be_parallel);
 		if (!op_leaf)
 			return;
 		op_leaf_list = lappend(op_leaf_list, op_leaf);
 	}
-	pgstrom_remember_op_leafs(parent, op_leaf_list, be_parallel);
+	pgstrom_remember_op_leafs(root,
+							  parent,
+							  op_leaf_list,
+							  be_parallel);
 }
 
 /*
