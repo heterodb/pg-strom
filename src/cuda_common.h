@@ -43,10 +43,12 @@ STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
 				  ERRCODE_STROM_SUCCESS,
 				  kcxt->errcode) == ERRCODE_STROM_SUCCESS)
 	{
+		const char *filename = __basenam
+
 		ebuf->errcode = kcxt->errcode;
 		ebuf->lineno  = kcxt->error_lineno;
 		__strncpy(ebuf->filename,
-				  kcxt->error_filename,
+				  __basename(kcxt->error_filename),
 				  KERN_ERRORBUF_FILENAME_LEN);
 		__strncpy(ebuf->funcname,
 				  kcxt->error_funcname,
