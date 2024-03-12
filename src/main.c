@@ -494,7 +494,7 @@ pgstrom_remember_op_leafs(PlannerInfo *root,
 	pp_key.parent_relids = parent_rel->relids;
 	pp_entry = (pgstromPathEntry *)
 		hash_search(pgstrom_paths_htable,
-					&parent_rel->relids,
+					&pp_key,
 					HASH_ENTER,
 					&found);
 	if (!found)

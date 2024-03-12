@@ -926,6 +926,8 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 		}
 		if (!inner_path && IS_SIMPLE_REL(innerrel) && innerrel->rtekind == RTE_RELATION)
 		{
+			RangeTblEntry  *rte = root->simple_rte_array[innerrel->relid];
+
 			/*
 			 * In case when inner relation is very small, PostgreSQL may
 			 * skip to generate partial scan paths because it may calculate
@@ -933,11 +935,15 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 			 * Only if the innerrel is base relation, we add a partial
 			 * SeqScan path to use parallel inner path.
 			 */
-			inner_path = (Path *)
-				create_seqscan_path(root,
-									innerrel,
-									innerrel->lateral_relids,
-									try_parallel);
+			Assert(innerrel->relid < root->simple_rel_array_size);
+			if (rte->relkind == RELKIND_RELATION)
+			{
+				inner_path = (Path *)
+					create_seqscan_path(root,
+										innerrel,
+										innerrel->lateral_relids,
+										try_parallel);
+			}
 		}
 
 		if (inner_path)
