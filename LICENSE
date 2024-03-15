@@ -1,7 +1,7 @@
 PG-Strom Extension for GPU Acceleration on PostgreSQL Database
 
-Copyright (c) 2012-2023, KaiGai Kohei <kaigai@kaigai.gr.jp>
-Copyright (c) 2017-2023, HeteroDB,Inc <contact@heterodb.com>
+Copyright (c) 2012-2024, KaiGai Kohei <kaigai@kaigai.gr.jp>
+Copyright (c) 2017-2024, HeteroDB,Inc <contact@heterodb.com>
 
 Permission to use, copy, modify, and distribute this software and its
 documentation for any purpose, without fee, and without a written agreement
@@ -15,5 +15,5 @@ EVEN IF HETERODB,INC HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 HETERODB,INC SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
 THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
-THE SOFTWARE PROVIDED HEREUNDER IS ON AN "AS IS" BASIS, AND $ORGANISATION HAS
+THE SOFTWARE PROVIDED HEREUNDER IS ON AN "AS IS" BASIS, AND HETERODB,INC HAS
 NO OBLIGATIONS TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
