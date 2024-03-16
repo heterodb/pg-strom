@@ -260,8 +260,8 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 	pp_info->ds_entry = ds_entry;
 	pp_info->scan_relid = baserel->relid;
 	pp_info->host_quals = extract_actual_clauses(host_quals, false);
-	pp_info->scan_quals = extract_actual_clauses(dev_quals, false);
-	pp_info->scan_quals_explain = copyObject(pp_info->scan_quals);
+	pp_info->scan_quals_fallback = extract_actual_clauses(dev_quals, false);
+	pp_info->scan_quals_explain = copyObject(pp_info->scan_quals_fallback);
 	pp_info->scan_tuples = baserel->tuples;
 	pp_info->scan_nrows = scan_nrows;
 	pp_info->parallel_nworkers = parallel_nworkers;
@@ -276,8 +276,10 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 		pp_info->brin_index_quals = indexQuals;
 	}
 	outer_refs = pickup_outer_referenced(root, baserel, outer_refs);
-	pull_varattnos((Node *)pp_info->host_quals, baserel->relid, &outer_refs);
-	pull_varattnos((Node *)pp_info->scan_quals, baserel->relid, &outer_refs);
+	pull_varattnos((Node *)pp_info->host_quals,
+				   baserel->relid, &outer_refs);
+	pull_varattnos((Node *)pp_info->scan_quals_fallback,
+				   baserel->relid, &outer_refs);
 	pp_info->outer_refs = outer_refs;
 	pp_info->sibling_param_id = -1;
 	return pp_info;
@@ -390,7 +392,8 @@ try_add_simple_scan_path(PlannerInfo *root,
 	if (rte->relkind == RELKIND_RELATION ||
 		rte->relkind == RELKIND_MATVIEW)
 	{
-		if (get_relation_am(rte->relid, true) == HEAP_TABLE_AM_OID)
+		if (rte->rtekind == RTE_RELATION &&
+			get_relation_am(rte->relid, true) == HEAP_TABLE_AM_OID)
 		{
 			op_leaf = buildSimpleScanPlanInfo(root,
 											  baserel,
@@ -413,7 +416,7 @@ try_add_simple_scan_path(PlannerInfo *root,
 	{
 		pgstromPlanInfo *pp_info = op_leaf->pp_info;
 
-		if (pp_info->scan_quals != NIL)
+		if (pp_info->scan_quals_fallback != NIL)
 		{
 			CustomPath *cpath = makeNode(CustomPath);
 
@@ -446,7 +449,8 @@ try_add_simple_scan_path(PlannerInfo *root,
 		 */
 		if (pp_info->host_quals == NIL)
 		{
-			pgstrom_remember_op_normal(baserel,
+			pgstrom_remember_op_normal(root,
+									   baserel,
 									   op_leaf,
 									   be_parallel);
 		}
@@ -484,7 +488,7 @@ try_add_partitioned_scan_path(PlannerInfo *root,
 			op_leaf_list = lappend(op_leaf_list, op_leaf);
 		}
 	}
-	pgstrom_remember_op_leafs(baserel, op_leaf_list, be_parallel);
+	pgstrom_remember_op_leafs(root, baserel, op_leaf_list, be_parallel);
 }
 
 /*
@@ -671,7 +675,7 @@ gpuscan_build_projection(RelOptInfo *baserel,
 													baserel->relid,
 													false);
 
-	vars_list = pull_vars_of_level((Node *)pp_info->scan_quals, 0);
+	vars_list = pull_vars_of_level((Node *)pp_info->scan_quals_fallback, 0);
 	foreach (lc, vars_list)
 		tlist_dev = __gpuscan_build_projection_expr(tlist_dev,
 													(Node *)lfirst(lc),
@@ -756,7 +760,8 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 
 	context = create_codegen_context(root, best_path, pp_info);
 	/* code generation for WHERE-clause */
-	pp_info->kexp_scan_quals = codegen_build_scan_quals(context, pp_info->scan_quals);
+	pp_info->kexp_scan_quals = codegen_build_scan_quals(context,
+														pp_info->scan_quals_fallback);
 	/* code generation for the Projection */
 	context->tlist_dev = gpuscan_build_projection(baserel, pp_info, tlist);
 	pp_info->kexp_projection = codegen_build_projection(context);

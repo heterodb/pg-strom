@@ -334,6 +334,7 @@ static HTAB	   *pgstrom_paths_htable = NULL;
 
 typedef struct
 {
+	PlannerInfo *root;
 	Relids		parent_relids;
 	pgstromOuterPathLeafInfo *op_normal_single;
 	pgstromOuterPathLeafInfo *op_normal_parallel;
@@ -345,6 +346,29 @@ typedef struct
 	bool		identical_inners_parallel;
 } pgstromPathEntry;
 
+static uint32
+pgstrom_path_entry_hash(const void *key, Size keysize)
+{
+	const pgstromPathEntry *entry = key;
+
+	return (hash_bytes((const unsigned char *)&entry->root,
+					   sizeof(PlannerInfo *)) ^
+			bms_hash_value(entry->parent_relids));
+}
+
+static int
+pgstrom_path_entry_match(const void *key1, const void *key2, Size keysize)
+{
+	const pgstromPathEntry *entry1 = key1;
+	const pgstromPathEntry *entry2 = key2;
+
+	Assert(keysize == offsetof(pgstromPathEntry,
+							   parent_relids) + sizeof(Relids));
+	return (entry1->root == entry2->root &&
+			bms_equal(entry1->parent_relids,
+					  entry2->parent_relids) ? 0 : -1);
+}
+
 static void
 __pgstrom_build_paths_htable(void)
 {
@@ -354,10 +378,11 @@ __pgstrom_build_paths_htable(void)
 
 		memset(&hctl, 0, sizeof(HASHCTL));
 		hctl.hcxt = CurrentMemoryContext;
-		hctl.keysize = sizeof(Relids);
+		hctl.keysize = offsetof(pgstromPathEntry,
+								parent_relids) + sizeof(Relids);
 		hctl.entrysize = sizeof(pgstromPathEntry);
-		hctl.hash = bitmap_hash;
-		hctl.match = bitmap_match;
+		hctl.hash = pgstrom_path_entry_hash;
+		hctl.match = pgstrom_path_entry_match;
 		pgstrom_paths_htable = hash_create("PG-Strom Outer/Leaf Paths Tracker",
 										   256L,
 										   &hctl,
@@ -369,28 +394,35 @@ __pgstrom_build_paths_htable(void)
 }
 
 void
-pgstrom_remember_op_normal(RelOptInfo *outer_rel,
+pgstrom_remember_op_normal(PlannerInfo *root,
+						   RelOptInfo *outer_rel,
 						   pgstromOuterPathLeafInfo *op_leaf,
 						   bool be_parallel)
 {
 	pgstromPathEntry *pp_entry;
+	pgstromPathEntry  pp_key;
 	bool		found;
 
 	/* sanity checks */
 	Assert(list_length(op_leaf->inner_paths_list) == op_leaf->pp_info->num_rels);
 	op_leaf->outer_rel = outer_rel;
 
-	/* remember the entry */
+	/* lookup the hash-table */
 	__pgstrom_build_paths_htable();
+	memset(&pp_key, 0, sizeof(pgstromPathEntry));
+	pp_key.root = root;
+	pp_key.parent_relids = outer_rel->relids;
 	pp_entry = (pgstromPathEntry *)
 		hash_search(pgstrom_paths_htable,
-					&outer_rel->relids,
+					&pp_key,
 					HASH_ENTER,
 					&found);
 	if (!found)
 	{
-		memset((char *)pp_entry + sizeof(Relids), 0,
-			   sizeof(pgstromPathEntry) - sizeof(Relids));
+		Assert(pp_key.root == pp_entry->root &&
+			   bms_equal(pp_key.parent_relids,
+						 pp_entry->parent_relids));
+		memcpy(pp_entry, &pp_key, sizeof(pgstromPathEntry));
 	}
 
 	if (be_parallel)
@@ -408,11 +440,13 @@ pgstrom_remember_op_normal(RelOptInfo *outer_rel,
 }
 
 void
-pgstrom_remember_op_leafs(RelOptInfo *parent_rel,
+pgstrom_remember_op_leafs(PlannerInfo *root,
+						  RelOptInfo *parent_rel,
 						  List *op_leaf_list,
 						  bool be_parallel)
 {
 	pgstromPathEntry *pp_entry;
+	pgstromPathEntry  pp_key;
 	ListCell   *cell;
 	List	   *inner_paths_list = NIL;
 	int			identical_inners = -1;
@@ -454,15 +488,21 @@ pgstrom_remember_op_leafs(RelOptInfo *parent_rel,
 				identical_inners = 0;
 		}
 	}
+	/* lookup the hash-table */
+	memset(&pp_key, 0, sizeof(pgstromPathEntry));
+	pp_key.root = root;
+	pp_key.parent_relids = parent_rel->relids;
 	pp_entry = (pgstromPathEntry *)
 		hash_search(pgstrom_paths_htable,
-					&parent_rel->relids,
+					&pp_key,
 					HASH_ENTER,
 					&found);
 	if (!found)
 	{
-		memset((char *)pp_entry + sizeof(Relids), 0,
-			   sizeof(pgstromPathEntry) - sizeof(Relids));
+		Assert(pp_key.root == pp_entry->root &&
+			   bms_equal(pp_key.parent_relids,
+						 pp_entry->parent_relids));
+		memcpy(pp_entry, &pp_key, sizeof(pgstromPathEntry));
 	}
 
 	if (be_parallel)
@@ -488,14 +528,21 @@ pgstrom_remember_op_leafs(RelOptInfo *parent_rel,
 }
 
 pgstromOuterPathLeafInfo *
-pgstrom_find_op_normal(RelOptInfo *outer_rel,
+pgstrom_find_op_normal(PlannerInfo *root,
+					   RelOptInfo *outer_rel,
 					   bool be_parallel)
 {
 	if (pgstrom_paths_htable)
 	{
-		pgstromPathEntry *pp_entry = (pgstromPathEntry *)
+		pgstromPathEntry *pp_entry;
+		pgstromPathEntry  pp_key;
+
+		memset(&pp_key, 0, sizeof(pgstromPathEntry));
+		pp_key.root = root;
+		pp_key.parent_relids = outer_rel->relids;
+		pp_entry = (pgstromPathEntry *)
 			hash_search(pgstrom_paths_htable,
-						&outer_rel->relids,
+						&pp_key,
 						HASH_FIND,
 						NULL);
 		if (pp_entry)
@@ -507,14 +554,22 @@ pgstrom_find_op_normal(RelOptInfo *outer_rel,
 }
 
 List *
-pgstrom_find_op_leafs(RelOptInfo *parent_rel, bool be_parallel,
+pgstrom_find_op_leafs(PlannerInfo *root,
+					  RelOptInfo *parent_rel,
+					  bool be_parallel,
 					  bool *p_identical_inners)
 {
 	if (pgstrom_paths_htable)
 	{
-		pgstromPathEntry *pp_entry = (pgstromPathEntry *)
+		pgstromPathEntry *pp_entry;
+		pgstromPathEntry  pp_key;
+
+		memset(&pp_key, 0, sizeof(pgstromPathEntry));
+		pp_key.root = root;
+		pp_key.parent_relids = parent_rel->relids;
+		pp_entry = (pgstromPathEntry *)
 			hash_search(pgstrom_paths_htable,
-						&parent_rel->relids,
+						&pp_key,
 						HASH_FIND,
 						NULL);
 		if (pp_entry)

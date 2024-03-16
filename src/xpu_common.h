@@ -508,6 +508,19 @@ typedef struct
 		KCXT->vlend = KCXT->vlbuf + __bufsz;							\
 	} while(0)
 
+INLINE_FUNCTION(const char *)
+__basename(const char *filename)
+{
+	const char *pos;
+
+	for (pos = filename; *pos != '\0'; pos++)
+	{
+		if (pos[0] == '/' && pos[1] != '\0')
+			filename = pos + 1;
+	}
+	return filename;
+}
+
 INLINE_FUNCTION(void)
 __STROM_EREPORT(kern_context *kcxt,
 				uint32_t errcode,
@@ -521,7 +534,7 @@ __STROM_EREPORT(kern_context *kcxt,
 													errcode != ERRCODE_STROM_SUCCESS)))
 	{
 		kcxt->errcode        = errcode;
-		kcxt->error_filename = filename;
+		kcxt->error_filename = __basename(filename);
 		kcxt->error_lineno   = lineno;
 		kcxt->error_funcname = funcname;
 		kcxt->error_message  = message;

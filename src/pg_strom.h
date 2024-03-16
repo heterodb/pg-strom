@@ -280,7 +280,7 @@ typedef struct
 	List	   *used_params;		/* param list in use */
 	List	   *host_quals;			/* host qualifiers to scan the outer */
 	Index		scan_relid;			/* relid of the outer relation to scan */
-	List	   *scan_quals;			/* device qualifiers to scan the outer */
+	List	   *scan_quals_fallback;/* device qualifiers to scan the outer */
 	List	   *scan_quals_explain;	/* device qualifiers for EXPLAIN output */
 	double		scan_tuples;		/* copy of baserel->tuples */
 	double		scan_nrows;			/* copy of baserel->rows */
@@ -986,15 +986,19 @@ extern const char *pgstrom_githash_cstring;
 extern bool		pgstrom_enabled(void);
 extern int		pgstrom_cpu_fallback_elevel;
 extern bool		pgstrom_regression_test_mode;
-extern void		pgstrom_remember_op_normal(RelOptInfo *outer_rel,
+extern void		pgstrom_remember_op_normal(PlannerInfo *root,
+										   RelOptInfo *outer_rel,
 										   pgstromOuterPathLeafInfo *op_leaf,
 										   bool be_parallel);
-extern void		pgstrom_remember_op_leafs(RelOptInfo *parent_rel,
+extern void		pgstrom_remember_op_leafs(PlannerInfo *root,
+										  RelOptInfo *parent_rel,
 										  List *op_leaf_list,
 										  bool be_parallel);
-extern pgstromOuterPathLeafInfo *pgstrom_find_op_normal(RelOptInfo *outer_rel,
+extern pgstromOuterPathLeafInfo *pgstrom_find_op_normal(PlannerInfo *root,
+														RelOptInfo *outer_rel,
 														bool be_parallel);
-extern List	   *pgstrom_find_op_leafs(RelOptInfo *outer_rel,
+extern List	   *pgstrom_find_op_leafs(PlannerInfo *root,
+									  RelOptInfo *outer_rel,
 									  bool be_parallel,
 									  bool *p_identical_inners);
 extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);

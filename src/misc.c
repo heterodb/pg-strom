@@ -18,64 +18,80 @@
  *
  * ----------------------------------------------------------------
  */
-static List *
-__form_codegen_kvar_defitem(codegen_kvar_defitem *kvdef)
+static void
+__form_codegen_kvar_defitem(codegen_kvar_defitem *kvdef,
+							List **p__kv_privs,
+							List **p__kv_exprs)
 {
-	List	   *result = NIL;
-	List	   *subfields = NIL;
+	List	   *__kv_privs = NIL;
+	List	   *__kv_exprs = NIL;
+	List	   *__sub_privs = NIL;
+	List	   *__sub_exprs = NIL;
 	ListCell   *lc;
 
-	result = lappend(result, makeInteger(kvdef->kv_slot_id));
-	result = lappend(result, makeInteger(kvdef->kv_depth));
-	result = lappend(result, makeInteger(kvdef->kv_resno));
-	result = lappend(result, makeInteger(kvdef->kv_maxref));
-	result = lappend(result, makeInteger(kvdef->kv_offset));
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_slot_id));
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_depth));
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_resno));
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_maxref));
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_offset));
 
-	result = lappend(result, makeInteger(kvdef->kv_type_oid));
-	result = lappend(result, makeInteger(kvdef->kv_type_code));
-	result = lappend(result, makeBoolean(kvdef->kv_typbyval));
-	result = lappend(result, makeInteger(kvdef->kv_typalign));
-	result = lappend(result, makeInteger(kvdef->kv_typlen));
-	result = lappend(result, makeInteger(kvdef->kv_kvec_sizeof));
-	result = lappend(result, kvdef->kv_expr);
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_type_oid));
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_type_code));
+	__kv_privs = lappend(__kv_privs, makeBoolean(kvdef->kv_typbyval));
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_typalign));
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_typlen));
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_kvec_sizeof));
+	__kv_exprs = lappend(__kv_exprs, kvdef->kv_expr);
 	foreach (lc, kvdef->kv_subfields)
 	{
 		codegen_kvar_defitem *__kvdef = lfirst(lc);
-		subfields = lappend(subfields, __form_codegen_kvar_defitem(__kvdef));
-	}
-	result = lappend(result, subfields);
+		List   *__privs = NIL;
+		List   *__exprs = NIL;
 
-	return result;
+		__form_codegen_kvar_defitem(__kvdef, &__privs, &__exprs);
+		__sub_privs = lappend(__sub_privs, __privs);
+		__sub_exprs = lappend(__sub_exprs, __exprs);
+	}
+	__kv_privs = lappend(__kv_privs, __sub_privs);
+	__kv_exprs = lappend(__kv_exprs, __sub_exprs);
+
+	*p__kv_privs = __kv_privs;
+	*p__kv_exprs = __kv_exprs;
 }
 
 static codegen_kvar_defitem *
-__deform_codegen_kvar_defitem(List *sublist)
+__deform_codegen_kvar_defitem(List *__kv_privs, List *__kv_exprs)
 {
 	codegen_kvar_defitem *kvdef = palloc0(sizeof(codegen_kvar_defitem));
-	List	   *subfields = NIL;
-	ListCell   *lc;
-	int			kvindex = 0;
+	List	   *__sub_privs = NIL;
+	List	   *__sub_exprs = NIL;
+	ListCell   *lc1, *lc2;
+	int			pindex = 0;
+	int			eindex = 0;
 
-	kvdef->kv_slot_id  = intVal(list_nth(sublist, kvindex++));
-	kvdef->kv_depth    = intVal(list_nth(sublist, kvindex++));
-	kvdef->kv_resno    = intVal(list_nth(sublist, kvindex++));
-	kvdef->kv_maxref   = intVal(list_nth(sublist, kvindex++));
-	kvdef->kv_offset   = intVal(list_nth(sublist, kvindex++));
+	kvdef->kv_slot_id   = intVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_depth     = intVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_resno     = intVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_maxref    = intVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_offset    = intVal(list_nth(__kv_privs, pindex++));
 
-	kvdef->kv_type_oid = intVal(list_nth(sublist, kvindex++));
-	kvdef->kv_type_code = intVal(list_nth(sublist, kvindex++));
-	kvdef->kv_typbyval = boolVal(list_nth(sublist, kvindex++));
-	kvdef->kv_typalign = intVal(list_nth(sublist, kvindex++));
-	kvdef->kv_typlen   = intVal(list_nth(sublist, kvindex++));
-	kvdef->kv_kvec_sizeof = intVal(list_nth(sublist, kvindex++));
-	kvdef->kv_expr     = list_nth(sublist, kvindex++);
-	subfields          = list_nth(sublist, kvindex++);
-	foreach (lc, subfields)
+	kvdef->kv_type_oid  = intVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_type_code = intVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_typbyval  = boolVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_typalign  = intVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_typlen    = intVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_kvec_sizeof = intVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_expr      = list_nth(__kv_exprs, eindex++);
+	__sub_privs         = list_nth(__kv_privs, pindex++);
+	__sub_exprs         = list_nth(__kv_exprs, eindex++);
+	forboth (lc1, __sub_privs,
+			 lc2, __sub_exprs)
 	{
-		List   *__sublist = lfirst(lc);
+		codegen_kvar_defitem *__kvdef;
 
-		kvdef->kv_subfields = lappend(kvdef->kv_subfields,
-									  __deform_codegen_kvar_defitem(__sublist));
+		__kvdef = __deform_codegen_kvar_defitem(lfirst(lc1),
+												lfirst(lc2));
+		kvdef->kv_subfields = lappend(kvdef->kv_subfields, __kvdef);
 	}
 	return kvdef;
 }
@@ -85,7 +101,8 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 {
 	List	   *privs = NIL;
 	List	   *exprs = NIL;
-	List	   *kvars_deflist = NIL;
+	List	   *kvars_deflist_privs = NIL;
+	List	   *kvars_deflist_exprs = NIL;
 	ListCell   *lc;
 	int			endpoint_id;
 
@@ -99,7 +116,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	exprs = lappend(exprs, pp_info->used_params);
 	privs = lappend(privs, pp_info->host_quals);
 	privs = lappend(privs, makeInteger(pp_info->scan_relid));
-	privs = lappend(privs, pp_info->scan_quals);
+	privs = lappend(privs, pp_info->scan_quals_fallback);
 	exprs = lappend(exprs, pp_info->scan_quals_explain);
 	privs = lappend(privs, __makeFloat(pp_info->scan_tuples));
 	privs = lappend(privs, __makeFloat(pp_info->scan_nrows));
@@ -129,11 +146,16 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	foreach (lc, pp_info->kvars_deflist)
 	{
 		codegen_kvar_defitem *kvdef = lfirst(lc);
+		List   *__kv_privs = NIL;
+		List   *__kv_exprs = NIL;
 
-		kvars_deflist = lappend(kvars_deflist, __form_codegen_kvar_defitem(kvdef));
+		__form_codegen_kvar_defitem(kvdef, &__kv_privs, &__kv_exprs);
+		kvars_deflist_privs = lappend(kvars_deflist_privs, __kv_privs);
+		kvars_deflist_exprs = lappend(kvars_deflist_exprs, __kv_exprs);
 	}
 	/* other planner fields */
-	privs = lappend(privs, kvars_deflist);
+	privs = lappend(privs, kvars_deflist_privs);
+	exprs = lappend(exprs, kvars_deflist_exprs);
 	privs = lappend(privs, makeInteger(pp_info->kvecs_bufsz));
 	privs = lappend(privs, makeInteger(pp_info->kvecs_ndims));
 	privs = lappend(privs, makeInteger(pp_info->extra_flags));
@@ -147,17 +169,18 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	for (int i=0; i < pp_info->num_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+		List   *__exprs = NIL;
 		List   *__privs = NIL;
 
 		__privs = lappend(__privs, makeInteger(pp_inner->join_type));
 		__privs = lappend(__privs, __makeFloat(pp_inner->join_nrows));
-		__privs = lappend(__privs, pp_inner->hash_outer_keys_original);
+		__exprs = lappend(__exprs, pp_inner->hash_outer_keys_original);
 		__privs = lappend(__privs, pp_inner->hash_outer_keys_fallback);
-		__privs = lappend(__privs, pp_inner->hash_inner_keys_original);
+		__exprs = lappend(__exprs, pp_inner->hash_inner_keys_original);
 		__privs = lappend(__privs, pp_inner->hash_inner_keys_fallback);
-		__privs = lappend(__privs, pp_inner->join_quals_original);
+		__exprs = lappend(__exprs, pp_inner->join_quals_original);
 		__privs = lappend(__privs, pp_inner->join_quals_fallback);
-		__privs = lappend(__privs, pp_inner->other_quals_original);
+		__exprs = lappend(__exprs, pp_inner->other_quals_original);
 		__privs = lappend(__privs, pp_inner->other_quals_fallback);
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_oid));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_col));
@@ -169,6 +192,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_npages));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_height));
 
+		exprs = lappend(exprs, __exprs);
 		privs = lappend(privs, __privs);
 	}
 	cscan->custom_exprs = exprs;
@@ -187,8 +211,9 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	List	   *exprs = cscan->custom_exprs;
 	int			pindex = 0;
 	int			eindex = 0;
-	List	   *kvars_deflist;
-	ListCell   *lc;
+	List	   *kvars_deflist_privs;
+	List	   *kvars_deflist_exprs;
+	ListCell   *lc1, *lc2;
 	int			endpoint_id;
 
 	memset(&pp_data, 0, sizeof(pgstromPlanInfo));
@@ -203,7 +228,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.used_params  = list_nth(exprs, eindex++);
 	pp_data.host_quals   = list_nth(privs, pindex++);
 	pp_data.scan_relid   = intVal(list_nth(privs, pindex++));
-	pp_data.scan_quals   = list_nth(privs, pindex++);
+	pp_data.scan_quals_fallback = list_nth(privs, pindex++);
 	pp_data.scan_quals_explain = list_nth(exprs, eindex++);
 	pp_data.scan_tuples  = floatVal(list_nth(privs, pindex++));
 	pp_data.scan_nrows   = floatVal(list_nth(privs, pindex++));
@@ -230,13 +255,17 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.kexp_groupby_keycomp   = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_groupby_actions   = __getByteaConst(list_nth(privs, pindex++));
 	/* Kvars definitions */
-	kvars_deflist = list_nth(privs, pindex++);
-	foreach (lc, kvars_deflist)
+	kvars_deflist_privs = list_nth(privs, pindex++);
+	kvars_deflist_exprs = list_nth(exprs, eindex++);
+	Assert(list_length(kvars_deflist_privs) == list_length(kvars_deflist_exprs));
+	forboth (lc1, kvars_deflist_privs,
+			 lc2, kvars_deflist_exprs)
 	{
-		List	   *sublist = (List *)lfirst(lc);
+		codegen_kvar_defitem *kvdef;
 
-		pp_data.kvars_deflist = lappend(pp_data.kvars_deflist,
-										__deform_codegen_kvar_defitem(sublist));
+		kvdef = __deform_codegen_kvar_defitem(lfirst(lc1),
+											  lfirst(lc2));
+		pp_data.kvars_deflist = lappend(pp_data.kvars_deflist, kvdef);
 	}
 	pp_data.kvecs_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.kvecs_ndims = intVal(list_nth(privs, pindex++));
@@ -253,18 +282,20 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	for (int i=0; i < pp_info->num_rels; i++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+		List   *__exprs = list_nth(exprs, eindex++);
 		List   *__privs = list_nth(privs, pindex++);
+		int		__eindex = 0;
 		int		__pindex = 0;
 
 		pp_inner->join_type       = intVal(list_nth(__privs, __pindex++));
 		pp_inner->join_nrows      = floatVal(list_nth(__privs, __pindex++));
-		pp_inner->hash_outer_keys_original = list_nth(__privs, __pindex++);
+		pp_inner->hash_outer_keys_original = list_nth(__exprs, __eindex++);
 		pp_inner->hash_outer_keys_fallback = list_nth(__privs, __pindex++);
-		pp_inner->hash_inner_keys_original = list_nth(__privs, __pindex++);
+		pp_inner->hash_inner_keys_original = list_nth(__exprs, __eindex++);
 		pp_inner->hash_inner_keys_fallback = list_nth(__privs, __pindex++);
-		pp_inner->join_quals_original = list_nth(__privs, __pindex++);
+		pp_inner->join_quals_original = list_nth(__exprs, __eindex++);
 		pp_inner->join_quals_fallback = list_nth(__privs, __pindex++);
-		pp_inner->other_quals_original = list_nth(__privs, __pindex++);
+		pp_inner->other_quals_original = list_nth(__exprs, __eindex++);
 		pp_inner->other_quals_fallback = list_nth(__privs, __pindex++);
 		pp_inner->gist_index_oid  = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_index_col  = intVal(list_nth(__privs, __pindex++));
@@ -286,6 +317,7 @@ pgstromPlanInfo *
 copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 {
 	pgstromPlanInfo *pp_dest;
+	List	   *kvars_deflist = NIL;
 	ListCell   *lc;
 
 	/*
@@ -296,7 +328,7 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 									  inners[pp_orig->num_rels]));
 	pp_dest->used_params      = list_copy(pp_dest->used_params);
 	pp_dest->host_quals       = copyObject(pp_dest->host_quals);
-	pp_dest->scan_quals       = copyObject(pp_dest->scan_quals);
+	pp_dest->scan_quals_fallback = copyObject(pp_dest->scan_quals_fallback);
 	pp_dest->scan_quals_explain = copyObject(pp_dest->scan_quals_explain);
 	pp_dest->brin_index_conds = copyObject(pp_dest->brin_index_conds);
 	pp_dest->brin_index_quals = copyObject(pp_dest->brin_index_quals);
@@ -307,8 +339,9 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 
 		kvdef_dest = pmemdup(kvdef_orig, sizeof(codegen_kvar_defitem));
 		kvdef_dest->kv_expr = copyObject(kvdef_dest->kv_expr);
-		pp_dest->kvars_deflist = lappend(pp_dest->kvars_deflist, kvdef_dest);
+		kvars_deflist = lappend(kvars_deflist, kvdef_dest);
 	}
+	pp_dest->kvars_deflist    = kvars_deflist;
 	pp_dest->fallback_tlist   = copyObject(pp_dest->fallback_tlist);
 	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
 	for (int j=0; j < pp_orig->num_rels; j++)

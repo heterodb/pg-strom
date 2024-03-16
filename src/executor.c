@@ -1344,7 +1344,7 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 	/*
 	 * Init scan-quals for the base relation
 	 */
-	pts->base_quals = ExecInitQual(pp_info->scan_quals,
+	pts->base_quals = ExecInitQual(pp_info->scan_quals_fallback,
 								   &pts->css.ss.ps);
 	pts->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
 											  table_slot_callbacks(rel));
@@ -1471,7 +1471,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	else if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
 	{
 		if (!pgstromArrowFdwExecInit(pts,
-									 pp_info->scan_quals,
+									 pp_info->scan_quals_fallback,
 									 pp_info->outer_refs))
 			elog(ERROR, "Bug? only arrow_fdw is supported in PG-Strom");
 	}

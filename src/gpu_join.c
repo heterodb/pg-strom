@@ -573,7 +573,7 @@ try_add_xpujoin_simple_path(PlannerInfo *root,
 	Path			__outer_path;	/* pseudo outer-path */
 	CustomPath	   *cpath;
 
-	op_prev = pgstrom_find_op_normal(outer_rel, try_parallel_path);
+	op_prev = pgstrom_find_op_normal(root, outer_rel, try_parallel_path);
 	if (!op_prev)
 		return;
 	memset(&__outer_path, 0, sizeof(Path));
@@ -604,7 +604,9 @@ try_add_xpujoin_simple_path(PlannerInfo *root,
 						   &cpath->path,
 						   outer_rel,
 						   inner_path->parent);
-	pgstrom_remember_op_normal(join_rel, op_leaf,
+	pgstrom_remember_op_normal(root,
+							   join_rel,
+							   op_leaf,
 							   try_parallel_path);
 	if (!try_parallel_path)
 		add_path(join_rel, &cpath->path);
@@ -751,7 +753,8 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 	double		inner_discount_ratio = 1.0;
 	ListCell   *lc;
 
-	op_prev_list = pgstrom_find_op_leafs(outer_rel,
+	op_prev_list = pgstrom_find_op_leafs(root,
+										 outer_rel,
 										 try_parallel_path,
 										 &identical_inners);
 	if (identical_inners)
@@ -868,7 +871,9 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 						   append_path,
 						   outer_rel,
 						   inner_path->parent);
-	pgstrom_remember_op_leafs(join_rel, op_leaf_list,
+	pgstrom_remember_op_leafs(root,
+							  join_rel,
+							  op_leaf_list,
 							  try_parallel_path);
 	if (!try_parallel_path)
 		add_path(join_rel, append_path);
@@ -919,8 +924,10 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 			if (!inner_path || inner_path->total_cost > path->total_cost)
 				inner_path = path;
 		}
-		if (!inner_path && IS_SIMPLE_REL(innerrel))
+		if (!inner_path && IS_SIMPLE_REL(innerrel) && innerrel->rtekind == RTE_RELATION)
 		{
+			RangeTblEntry  *rte = root->simple_rte_array[innerrel->relid];
+
 			/*
 			 * In case when inner relation is very small, PostgreSQL may
 			 * skip to generate partial scan paths because it may calculate
@@ -928,11 +935,15 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 			 * Only if the innerrel is base relation, we add a partial
 			 * SeqScan path to use parallel inner path.
 			 */
-			inner_path = (Path *)
-				create_seqscan_path(root,
-									innerrel,
-									innerrel->lateral_relids,
-									try_parallel);
+			Assert(innerrel->relid < root->simple_rel_array_size);
+			if (rte->relkind == RELKIND_RELATION)
+			{
+				inner_path = (Path *)
+					create_seqscan_path(root,
+										innerrel,
+										innerrel->lateral_relids,
+										try_parallel);
+			}
 		}
 
 		if (inner_path)
@@ -983,12 +994,15 @@ __xpuJoinTryAddPartitionLeafs(PlannerInfo *root,
 		RelOptInfo *leaf_rel = parent->part_rels[k];
 		pgstromOuterPathLeafInfo *op_leaf;
 
-		op_leaf = pgstrom_find_op_normal(leaf_rel, be_parallel);
+		op_leaf = pgstrom_find_op_normal(root, leaf_rel, be_parallel);
 		if (!op_leaf)
 			return;
 		op_leaf_list = lappend(op_leaf_list, op_leaf);
 	}
-	pgstrom_remember_op_leafs(parent, op_leaf_list, be_parallel);
+	pgstrom_remember_op_leafs(root,
+							  parent,
+							  op_leaf_list,
+							  be_parallel);
 }
 
 /*
@@ -1454,12 +1468,11 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	context = create_codegen_context(root, cpath, pp_info);
 
 	/* codegen for outer scan, if any */
-	if (pp_info->scan_quals)
+	if (pp_info->scan_quals_fallback)
 	{
-		pp_info->scan_quals = pp_info->scan_quals;
 		pp_info->kexp_scan_quals
-			= codegen_build_scan_quals(context, pp_info->scan_quals);
-		pull_varattnos((Node *)pp_info->scan_quals,
+			= codegen_build_scan_quals(context, pp_info->scan_quals_fallback);
+		pull_varattnos((Node *)pp_info->scan_quals_fallback,
 					   pp_info->scan_relid,
 					   &outer_refs);
 	}

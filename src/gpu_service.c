@@ -113,15 +113,8 @@ static bool					__gpuserv_debug_output_dummy;
 		if (gpuserv_shared_state &&										\
 			pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0) \
 		{																\
-			const char *__fname = __FILE__;								\
-																		\
-			for (const char *__pos = __fname; *__pos != '\0'; __pos++)	\
-			{															\
-				if (__pos[0] == '/' && __pos[1] != '\0')				\
-					__fname = __pos + 1;								\
-			}															\
 			fprintf(stderr, "gpuserv: " fmt " (%s:%d)\n",				\
-					##__VA_ARGS__, __fname, __LINE__);					\
+					##__VA_ARGS__, __basename(__FILE__), __LINE__);		\
 		}																\
 	} while(0)
 
@@ -143,13 +136,9 @@ static bool					__gpuserv_debug_output_dummy;
 				fprintf(stderr, "gpuserv: " fmt "\n", ##__VA_ARGS__);	\
 			else														\
 			{															\
-				for (const char *__pos = filename; *__pos != '\0'; __pos++)	\
-				{														\
-					if (__pos[0] == '/' && __pos[1] != '\0')			\
-						filename = __pos + 1;							\
-				}														\
 				fprintf(stderr, "gpuserv: " fmt " [%s] (code=%d, %s:%d)\n",	\
-						buffer, ##__VA_ARGS__, errcode, filename, lineno); \
+						buffer, ##__VA_ARGS__, errcode,					\
+						__basename(filename), lineno);					\
 			}															\
 		}																\
 	} while(0)
@@ -1246,22 +1235,17 @@ __gpuClientELog(gpuClient *gclient,
 	XpuCommand		resp;
 	va_list			ap;
 	struct iovec	iov;
-	const char	   *pos;
 
-	for (pos = filename; *pos != '\0'; pos++)
-	{
-		if (pos[0] == '/' && pos[1] != '\0')
-			filename = pos + 1;
-	}
-	
 	memset(&resp, 0, sizeof(resp));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag = XpuCommandTag__Error;
 	resp.length = offsetof(XpuCommand, u.error) + sizeof(kern_errorbuf);
 	resp.u.error.errcode = errcode,
 	resp.u.error.lineno = lineno;
-	strncpy(resp.u.error.filename, filename, KERN_ERRORBUF_FILENAME_LEN);
-	strncpy(resp.u.error.funcname, funcname, KERN_ERRORBUF_FUNCNAME_LEN);
+	strncpy(resp.u.error.filename, __basename(filename),
+			KERN_ERRORBUF_FILENAME_LEN);
+	strncpy(resp.u.error.funcname, funcname,
+			KERN_ERRORBUF_FUNCNAME_LEN);
 
 	va_start(ap, fmt);
 	vsnprintf(resp.u.error.message, KERN_ERRORBUF_MESSAGE_LEN, fmt, ap);
