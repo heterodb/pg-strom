@@ -837,6 +837,29 @@ pgfn_numeric_mul(XPU_PGFUNCTION_ARGS)
 	return true;
 }
 
+INLINE_FUNCTION(int)
+select_div_scale(int128_t ival)
+{
+	int		n_digs = 0;
+
+	assert(ival >= 0);
+	while (ival >= 10000)
+	{
+		ival /= 10000;
+		n_digs += 4;
+	}
+	if (ival >= 1000)
+		n_digs += 4;
+	else if (ival >= 100)
+		n_digs += 3;
+	else if (ival >= 10)
+		n_digs += 2;
+	else if (ival >= 1)
+		n_digs += 1;
+
+	return Max(16 - n_digs, 0);
+}
+
 PUBLIC_FUNCTION(bool)
 pgfn_numeric_div(XPU_PGFUNCTION_ARGS)
 {
@@ -909,6 +932,7 @@ pgfn_numeric_div(XPU_PGFUNCTION_ARGS)
 			int128_t	div = datum_b.u.value;
 			int128_t	x, ival = 0;
 			int16_t		weight = datum_a.weight - datum_b.weight;
+			int			max_loops = -1;
 			bool		negative = false;
 
 			if (rem < 0)
@@ -926,7 +950,10 @@ pgfn_numeric_div(XPU_PGFUNCTION_ARGS)
 			}
 			assert(rem >= 0 && div >= 0);
 
-			for (;;)
+			ival = rem / div;
+			rem -= ival * div;
+			max_loops = select_div_scale(ival);
+			for (int loop=0; loop < max_loops; loop++)
 			{
 				x = rem / div;
 				ival = 10 * ival + x;
