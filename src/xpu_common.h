@@ -2941,6 +2941,11 @@ EXTERN_FUNCTION(void)
 pg_kern_ereport(kern_context *kcxt);	/* only host code */
 EXTERN_FUNCTION(uint32_t)
 pg_hash_any(const void *ptr, int sz);
+INLINE_FUNCTION(uint32_t)
+pg_hash_merge(uint32_t hash_prev, uint32_t hash_next)
+{
+	return ((hash_prev >> 3) | (hash_prev << 29)) ^ hash_next;
+}
 
 /* ----------------------------------------------------------------
  *

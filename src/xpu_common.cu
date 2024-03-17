@@ -1113,7 +1113,7 @@ pgfn_HashValue(XPU_PGFUNCTION_ARGS)
 		{
 			if (!expr_ops->xpu_datum_hash(kcxt, &__hash, datum))
 				return false;
-			hash ^= __hash;
+			hash = pg_hash_merge(hash, __hash);
 		}
 	}
 	hash ^= 0xffffffffU;

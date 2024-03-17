@@ -650,8 +650,15 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 			pp_info->kexp_groupby_keyload &&
 			pp_info->kexp_groupby_keycomp)
 		{
+			double	n_groups = pts->css.ss.ps.plan->plan_rows;
+
 			format = KDS_FORMAT_HASH;
-			hash_nslots = 20000; //to be estimated using num_groups
+			if (n_groups <= 5000.0)
+				hash_nslots = 20000;
+			else if (n_groups <= 4000000.0)
+				hash_nslots = 20000 + (int)(2.0 * n_groups);
+			else
+				hash_nslots = 8020000 + n_groups;
 			kds_length = (1UL << 30);			/* 1GB */
 		}
 		setup_kern_data_store(kds_temp, groupby_tdesc_final, kds_length, format);

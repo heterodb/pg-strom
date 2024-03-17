@@ -1747,7 +1747,7 @@ get_tuple_hashvalue(pgstromTaskInnerState *istate,
 		bool			isnull;
 
 		datum = ExecEvalExpr(es, econtext, &isnull);
-		hash ^= h_func(isnull, datum);
+		hash = pg_hash_merge(hash, h_func(isnull, datum));
 	}
 	hash ^= 0xffffffffU;
 
