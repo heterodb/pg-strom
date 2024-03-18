@@ -2259,8 +2259,16 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				pgstromTaskInnerState *istate = &leader->inners[i];
 				inner_preload_buffer *preload_buf = istate->preload_buffer;
 				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, i);
-                uint32_t		base_nitems;
-				uint32_t		base_usage;
+				uint32_t	base_nitems;
+				uint32_t	base_usage;
+
+				/*
+				 * If this backend/worker process called GpuJoinInnerPreload()
+				 * after the INNER_PHASE__SCAN_RELATIONS completed, it has no
+				 * preload_buf, thus, no tuples should be added.
+				 */
+				if (!preload_buf)
+					continue;
 
 				SpinLockAcquire(&ps_state->preload_mutex);
 				base_nitems  = kds->nitems;
@@ -2272,12 +2280,12 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				if (kds->format == KDS_FORMAT_ROW)
 					__innerPreloadSetupHeapBuffer(kds, istate,
 												  base_nitems,
-                                                  base_usage);
-                else if (kds->format == KDS_FORMAT_HASH)
-                    __innerPreloadSetupHashBuffer(kds, istate,
-                                                  base_nitems,
-                                                  base_usage);
-                else
+												  base_usage);
+				else if (kds->format == KDS_FORMAT_HASH)
+					__innerPreloadSetupHashBuffer(kds, istate,
+												  base_nitems,
+												  base_usage);
+				else
 					elog(ERROR, "unexpected inner-KDS format");
 			}
 
