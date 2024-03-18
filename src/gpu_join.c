@@ -2564,7 +2564,7 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 		bool			isnull;
 
 		datum = ExecEvalExprSwitchContext(h_key, econtext, &isnull);
-		hash ^= h_func(isnull, datum);
+		hash = pg_hash_merge(hash, h_func(isnull, datum));
 	}
 	hash ^= 0xffffffffU;
 
