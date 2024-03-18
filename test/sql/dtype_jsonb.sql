@@ -104,6 +104,7 @@ SET enable_seqscan = off;
 
 -- Fetch items from array-jsonb
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (costs off, verbose)
 SELECT id, v->0 ival, v->1 fval, v->2 bval, v->3 sval_1, v->4 sval_2
   INTO test01g
@@ -122,6 +123,7 @@ SELECT id, v->0 ival, v->1 fval, v->2 bval, v->3 sval_1, v->4 sval_2
 (SELECT * FROM test01p EXCEPT SELECT * FROM test01g) ORDER BY id;
 
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (costs off, verbose)
 SELECT id, v->>0 ival, v->>1 fval, v->>2 bval, v->>3 sval_1, v->>4 sval_2
   INTO test02g
@@ -141,6 +143,7 @@ SELECT id, v->>0 ival, v->>1 fval, v->>2 bval, v->>3 sval_1, v->>4 sval_2
 
 -- Fetch items from key-value jsonb
 SET pg_strom.enabled = on;
+VACUUM ANALYZE rt_jsonb_o;
 EXPLAIN (costs off, verbose)
 SELECT id, (v)->'ival' ival, (v)->'fval' fval, (v)->'bval',
            (v)->'sval_1' sval_1, (v)->'sval_2' sval_2
@@ -162,6 +165,7 @@ SELECT id, (v)->'ival' ival, (v)->'fval' fval, (v)->'bval',
 (SELECT * FROM test03p EXCEPT SELECT * FROM test03g) ORDER BY id;
 
 SET pg_strom.enabled = on;
+VACUUM ANALYZE rt_jsonb_o;
 EXPLAIN (costs off, verbose)
 SELECT id, (v)->>'ival' ival, (v)->>'fval' fval, (v)->>'bval' bval,
            (v)->>'sval_1' sval_1, (v)->>'sval_2' sval_2
@@ -184,6 +188,7 @@ SELECT id, (v)->>'ival' ival, (v)->>'fval' fval, (v)->>'bval' bval,
 
 -- Fetch items from nested-jsonb
 SET pg_strom.enabled = on;
+VACUUM ANALYZE rt_jsonb_c;
 EXPLAIN (costs off, verbose)
 SELECT id, (v)->'comp' comp
   INTO test05g
@@ -202,6 +207,7 @@ SELECT id, (v)->'comp' comp
 (SELECT * FROM test05p EXCEPT SELECT * FROM test05g) ORDER BY id;
 
 SET pg_strom.enabled = on;
+VACUUM ANALYZE rt_jsonb_o;
 EXPLAIN (costs off, verbose)
 SELECT id, ((v)->>'num1')::numeric + ((v)->'comp'->>'ival')::numeric v1,
            ((v)->>'num2')::numeric + ((v)->'comp'->>'fval')::numeric v2,

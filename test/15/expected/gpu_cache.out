@@ -444,12 +444,13 @@ UPDATE normal_table SET k=b/2;
 ---
 --- SELECT 
 ---
+VACUUM ANALYZE cache_test_table;
 EXPLAIN (costs off, verbose)
 SELECT * FROM cache_test_table WHERE a % 3 = 0;
  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_test_table
    Output: id, a, b, c, d, e, f, g, h, i, j, k
    GPU Projection: id, a, b, c, d, e, f, g, h, i, j, k
-   GPU Scan Quals: (((a)::integer % 3) = 0) [rows: 6914 -> 35]
+   GPU Scan Quals: (((a)::integer % 3) = 0) [rows: 3434 -> 17]
    GPU Cache: GPU0 [phase: ready, max_num_rows: 10000]
    GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
    KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int2', expr='b'>, <slot=3, type='int4', expr='c'>, <slot=4, type='int8', expr='d'>, <slot=5, type='float2', expr='e'>, <slot=6, type='float4', expr='f'>, <slot=7, type='float8', expr='g'>, <slot=8, type='text', expr='h'>, <slot=9, type='text', expr='i'>, <slot=10, type='bpchar', expr='j'>, <slot=11, type='int2', expr='k'>
@@ -460,6 +461,7 @@ SELECT * FROM cache_test_table WHERE a % 3 = 0;
    Projection OpCode: {Projection: layout=<1,0,2,3,4,5,6,7,8,9,10,11> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x1000-3800, expr='id'}}, {SaveExpr: <slot=0, type='int1'> arg={Var(int1): kvec=0x0000-1000, expr='a'}}, {SaveExpr: <slot=2, type='int2'> arg={Var(int2): kvec=0x3800-5000, expr='b'}}, {SaveExpr: <slot=3, type='int4'> arg={Var(int4): kvec=0x5000-7800, expr='c'}}, {SaveExpr: <slot=4, type='int8'> arg={Var(int8): kvec=0x7800-c000, expr='d'}}, {SaveExpr: <slot=5, type='float2'> arg={Var(float2): kvec=0xc000-d800, expr='e'}}, {SaveExpr: <slot=6, type='float4'> arg={Var(float4): kvec=0xd800-10000, expr='f'}}, {SaveExpr: <slot=7, type='float8'> arg={Var(float8): kvec=0x10000-14800, expr='g'}}, {SaveExpr: <slot=8, type='text'> arg={Var(text): kvec=0x14800-1b000, expr='h'}}, {SaveExpr: <slot=9, type='text'> arg={Var(text): kvec=0x1b000-21800, expr='i'}}, {SaveExpr: <slot=10, type='bpchar'> arg={Var(bpchar): kvec=0x21800-28000, expr='j'}}, {SaveExpr: <slot=11, type='int2'> arg={Var(int2): kvec=0x28000-29800, expr='k'}}]}
 
 --clms=("a" "b" "c" "d" "e" "f" "g") ; for a in ${clms[@]}; do echo "COUNT($a) AS ${a}_count,ROUND(SUM($a)::NUMERIC/100,2) AS ${a}_sum,ROUND(AVG($a)::NUMERIC/100,2) AS ${a}_avg,MAX($a) AS ${a}_max,MIN($a) AS ${a}_min," ; done
+VACUUM ANALYZE cache_test_table;
 EXPLAIN (costs off, verbose)
 SELECT 
 COUNT(a) AS a_count,SUM(a) AS a_sum,AVG(a) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
@@ -475,7 +477,7 @@ INTO TEMPORARY cached_result FROM cache_test_table WHERE id%3=0;
    ->  Custom Scan (GpuPreAgg) on gpu_cache_temp_test.cache_test_table
          Output: (pgstrom.nrows(a)), (pgstrom.psum((a)::bigint)), (pgstrom.pavg((a)::bigint)), (pgstrom.pmax((a)::integer)), (pgstrom.pmin((a)::integer)), (pgstrom.nrows(b)), (pgstrom.psum((b)::bigint)), (pgstrom.pavg((b)::bigint)), (pgstrom.pmax((b)::integer)), (pgstrom.pmin((b)::integer)), (pgstrom.nrows(c)), (pgstrom.psum((c)::bigint)), (pgstrom.pavg((c)::bigint)), (pgstrom.pmax(c)), (pgstrom.pmin(c)), (pgstrom.nrows(d)), (pgstrom.psum(d)), (pgstrom.pavg(d)), (pgstrom.pmax(d)), (pgstrom.pmin(d)), (pgstrom.nrows(e)), (pgstrom.psum((e)::double precision)), (pgstrom.pavg((e)::double precision)), (pgstrom.pmax((e)::double precision)), (pgstrom.pmin((e)::double precision)), (pgstrom.nrows(f)), (pgstrom.psum((f)::double precision)), (pgstrom.pavg((f)::double precision)), (pgstrom.pmax((f)::double precision)), (pgstrom.pmin((f)::double precision)), (pgstrom.nrows(g)), (pgstrom.psum(g)), (pgstrom.pavg(g)), (pgstrom.pmax(g)), (pgstrom.pmin(g))
          GPU Projection: pgstrom.nrows(a), pgstrom.psum((a)::bigint), pgstrom.pavg((a)::bigint), pgstrom.pmax((a)::integer), pgstrom.pmin((a)::integer), pgstrom.nrows(b), pgstrom.psum((b)::bigint), pgstrom.pavg((b)::bigint), pgstrom.pmax((b)::integer), pgstrom.pmin((b)::integer), pgstrom.nrows(c), pgstrom.psum((c)::bigint), pgstrom.pavg((c)::bigint), pgstrom.pmax(c), pgstrom.pmin(c), pgstrom.nrows(d), pgstrom.psum(d), pgstrom.pavg(d), pgstrom.pmax(d), pgstrom.pmin(d), pgstrom.nrows(e), pgstrom.psum((e)::double precision), pgstrom.pavg((e)::double precision), pgstrom.pmax((e)::double precision), pgstrom.pmin((e)::double precision), pgstrom.nrows(f), pgstrom.psum((f)::double precision), pgstrom.pavg((f)::double precision), pgstrom.pmax((f)::double precision), pgstrom.pmin((f)::double precision), pgstrom.nrows(g), pgstrom.psum(g), pgstrom.pavg(g), pgstrom.pmax(g), pgstrom.pmin(g)
-         GPU Scan Quals: ((id % 3) = 0) [rows: 6914 -> 35]
+         GPU Scan Quals: ((id % 3) = 0) [rows: 3434 -> 17]
          GPU Cache: GPU0 [phase: ready, max_num_rows: 10000]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
          KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='int1', expr='a'>, <slot=2, type='int8', expr='a'>, <slot=3, type='int4', expr='a'>, <slot=4, type='int2', expr='b'>, <slot=5, type='int8', expr='b'>, <slot=6, type='int4', expr='b'>, <slot=7, type='int4', expr='c'>, <slot=8, type='int8', expr='c'>, <slot=9, type='int8', expr='d'>, <slot=10, type='float2', expr='e'>, <slot=11, type='float8', expr='e'>, <slot=12, type='float4', expr='f'>, <slot=13, type='float8', expr='f'>, <slot=14, type='float8', expr='g'>
@@ -603,12 +605,13 @@ SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test'
  is_ready
 
 -- check GPUCache is still usable.
+VACUUM ANALYZE cache_corruption_test;
 EXPLAIN (costs off, verbose)
 SELECT * FROM cache_corruption_test WHERE b%3=0;
  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_corruption_test
    Output: id, a, b, c, d, e, f, g, h, i, j
    GPU Projection: id, a, b, c, d, e, f, g, h, i, j
-   GPU Scan Quals: (((b)::integer % 3) = 0) [rows: 1820 -> 9]
+   GPU Scan Quals: (((b)::integer % 3) = 0) [rows: 4000 -> 20]
    GPU Cache: GPU0 [phase: ready, max_num_rows: 5000]
    GPU Cache Options: gpu_device_id=0,max_num_rows=5000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
    KVars-Slot: <slot=0, type='int2', expr='b'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int1', expr='a'>, <slot=3, type='int4', expr='c'>, <slot=4, type='int8', expr='d'>, <slot=5, type='float2', expr='e'>, <slot=6, type='float4', expr='f'>, <slot=7, type='float8', expr='g'>, <slot=8, type='text', expr='h'>, <slot=9, type='text', expr='i'>, <slot=10, type='bpchar', expr='j'>
@@ -630,12 +633,13 @@ SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test'
  corrupted
 
 -- check GPUCache is not usable.
+VACUUM ANALYZE cache_corruption_test;
 EXPLAIN (costs off, verbose)
 SELECT * FROM cache_corruption_test WHERE b%3=0;
  Custom Scan (GpuScan) on gpu_cache_temp_test.cache_corruption_test
    Output: id, a, b, c, d, e, f, g, h, i, j
    GPU Projection: id, a, b, c, d, e, f, g, h, i, j
-   GPU Scan Quals: (((b)::integer % 3) = 0) [rows: 2262 -> 11]
+   GPU Scan Quals: (((b)::integer % 3) = 0) [rows: 4000 -> 20]
    KVars-Slot: <slot=0, type='int2', expr='b'>, <slot=1, type='int4', expr='id'>, <slot=2, type='int1', expr='a'>, <slot=3, type='int4', expr='c'>, <slot=4, type='int8', expr='d'>, <slot=5, type='float2', expr='e'>, <slot=6, type='float4', expr='f'>, <slot=7, type='float8', expr='g'>, <slot=8, type='text', expr='h'>, <slot=9, type='text', expr='i'>, <slot=10, type='bpchar', expr='j'>
    KVecs-Buffer: nbytes: 163840, ndims: 2, items=[kvec0=<0x0000-17ff, type='int2', expr='b'>, kvec1=<0x1800-3fff, type='int4', expr='id'>, kvec2=<0x4000-4fff, type='int1', expr='a'>, kvec3=<0x5000-77ff, type='int4', expr='c'>, kvec4=<0x7800-bfff, type='int8', expr='d'>, kvec5=<0xc000-d7ff, type='float2', expr='e'>, kvec6=<0xd800-ffff, type='float4', expr='f'>, kvec7=<0x10000-147ff, type='float8', expr='g'>, kvec8=<0x14800-1afff, type='text', expr='h'>, kvec9=<0x1b000-217ff, type='text', expr='i'>, kvec10=<0x21800-27fff, type='bpchar', expr='j'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=2, type='int1' resno=2(a)>, <slot=0, type='int2' resno=3(b)>, <slot=3, type='int4' resno=4(c)>, <slot=4, type='int8' resno=5(d)>, <slot=5, type='float2' resno=6(e)>, <slot=6, type='float4' resno=7(f)>, <slot=7, type='float8' resno=8(g)>, <slot=8, type='text' resno=9(h)>, <slot=9, type='text' resno=10(i)>, <slot=10, type='bpchar' resno=11(j)>]}}
@@ -651,6 +655,7 @@ SELECT pgstrom.gpucache_recovery('cache_corruption_test');
 SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
  is_empty
 
+VACUUM ANALYZE cache_corruption_test;
 EXPLAIN (costs off, verbose)
 SELECT count(*) FROM cache_corruption_test;
  Aggregate

@@ -116,7 +116,7 @@ SELECT id, x+y v1, substring(memo, 1, 20) v2
   INTO test01g
   FROM fallback_data
  WHERE memo LIKE '%abc%';	-- error
-ERROR:  (xpu_textlib.h:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
+ERROR:  (/home/onishi/pgbin152/share/pos:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
 SET pg_strom.cpu_fallback = on;
 SELECT id, x+y v1, substring(memo, 1, 20) v2
   INTO test01g
@@ -203,7 +203,7 @@ SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test03g
   FROM fallback_data
  WHERE memo LIKE '%abc%' OR id > 0;
-NOTICE:  (xpu_textlib.h:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
+NOTICE:  (/home/onishi/pgbin152/share/pos:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
 SET pg_strom.enabled = off;
 SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test03p
@@ -258,7 +258,7 @@ SELECT id, x+y+z v, memo
   INTO test10g
   FROM fallback_data d NATURAL JOIN fallback_small s
  WHERE memo LIKE '%abc%';
-NOTICE:  (xpu_textlib.h:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
+NOTICE:  (/home/onishi/pgbin152/share/pos:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
 SET pg_strom.enabled = off;
 SELECT id, x+y+z v, memo
   INTO test10p
@@ -363,7 +363,7 @@ SELECT *
 SELECT * INTO test12g
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
  WHERE l.aid < 2500 AND memo LIKE '%ab%';
-NOTICE:  (xpu_textlib.h:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
+NOTICE:  (/home/onishi/pgbin152/share/pos:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
 SET pg_strom.enabled = off;
 SELECT * INTO test12p
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
