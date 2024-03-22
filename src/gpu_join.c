@@ -643,6 +643,39 @@ __build_child_join_sjinfo(PlannerInfo *root,
 /*
  * __lookup_or_build_leaf_joinrel
  */
+static AppendRelInfo *
+__build_fake_apinfo_non_relations(PlannerInfo *root, Index rtindex)
+{
+	AppendRelInfo *apinfo = makeNode(AppendRelInfo);
+	RelOptInfo *rel = root->simple_rel_array[rtindex];
+	PathTarget *reltarget = rel->reltarget;
+	List	   *trans_vars = NIL;
+	ListCell   *lc;
+	AttrNumber	attno = 1;
+	AttrNumber *colnos
+		= palloc0(sizeof(AttrNumber) * list_length(reltarget->exprs));
+
+	foreach (lc, reltarget->exprs)
+	{
+		Node   *node = lfirst(lc);
+		Var	   *var;
+
+		var = makeVar(rtindex,
+					  attno++,
+					  exprType(node),
+					  exprTypmod(node),
+					  exprCollation(node),
+					  0);
+		trans_vars = lappend(trans_vars, var);
+		colnos[attno-1] = attno;
+	}
+	apinfo->translated_vars = trans_vars;
+	apinfo->num_child_cols = attno;
+	apinfo->parent_colnos = colnos;
+
+	return apinfo;
+}
+
 static AppendRelInfo **
 __make_fake_apinfo_array(PlannerInfo *root,
 						 RelOptInfo *outer_rel,
@@ -661,15 +694,20 @@ __make_fake_apinfo_array(PlannerInfo *root,
 		 i >= 0;
 		 i = bms_next_member(__relids, i))
 	{
-		RangeTblEntry  *rte = root->simple_rte_array[i];
-
 		if (!ap_info_array[i])
 		{
-			Relation	rel = relation_open(rte->relid, NoLock);
+			RangeTblEntry  *rte = root->simple_rte_array[i];
 
-			ap_info_array[i] = make_append_rel_info(rel, rel, i, i);
+			if (rte->rtekind != RTE_RELATION)
+				ap_info_array[i] = __build_fake_apinfo_non_relations(root, i);
+			else
+			{
+				Relation	rel = relation_open(rte->relid, NoLock);
 
-			relation_close(rel, NoLock);
+				ap_info_array[i] = make_append_rel_info(rel, rel, i, i);
+
+				relation_close(rel, NoLock);
+			}
 		}
 	}
 	return ap_info_array;
