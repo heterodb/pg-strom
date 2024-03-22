@@ -460,35 +460,65 @@ try_add_simple_scan_path(PlannerInfo *root,
 /*
  * try_add_partitioned_scan_path
  */
-static void
-try_add_partitioned_scan_path(PlannerInfo *root,
-							  RelOptInfo *baserel,
-							  RangeTblEntry *rte,
-							  uint32_t xpu_task_flags,
-							  bool be_parallel)
+static List *
+__try_add_partitioned_scan_path(PlannerInfo *root,
+								RelOptInfo *baserel,
+								uint32_t xpu_task_flags,
+								bool be_parallel)
 {
-	List   *op_leaf_list = NIL;
+	List   *results = NIL;
+	List   *temp;
 
 	for (int k=0; k < baserel->nparts; k++)
 	{
 		if (bms_is_member(k, baserel->live_parts))
 		{
 			RelOptInfo *leaf_rel = baserel->part_rels[k];
-			pgstromOuterPathLeafInfo *op_leaf;
+			RangeTblEntry *rte = root->simple_rte_array[leaf_rel->relid];
 
-			op_leaf = buildSimpleScanPlanInfo(root,
-											  leaf_rel,
-											  xpu_task_flags,
-											  be_parallel);
-			if (!op_leaf)
-				return;
-			/* unable to register scan path with host quals */
-			if (op_leaf->pp_info->host_quals != NIL)
-				return;
-			op_leaf_list = lappend(op_leaf_list, op_leaf);
+			if (rte->inh &&
+				rte->relkind == RELKIND_PARTITIONED_TABLE)
+			{
+				temp = __try_add_partitioned_scan_path(root,
+													   leaf_rel,
+													   xpu_task_flags,
+													   be_parallel);
+				if (temp == NIL)
+					return NIL;
+				results = list_concat(results, temp);
+			}
+			else
+			{
+				pgstromOuterPathLeafInfo *op_leaf;
+
+				op_leaf = buildSimpleScanPlanInfo(root,
+												  leaf_rel,
+												  xpu_task_flags,
+												  be_parallel);
+				if (!op_leaf)
+					return NIL;
+				/* unable to register scan path with host quals */
+				if (op_leaf->pp_info->host_quals != NIL)
+					return NIL;
+				results = lappend(results, op_leaf);
+			}
 		}
 	}
-	pgstrom_remember_op_leafs(root, baserel, op_leaf_list, be_parallel);
+	return results;
+}
+
+static void
+try_add_partitioned_scan_path(PlannerInfo *root,
+							  RelOptInfo *baserel,
+							  uint32_t xpu_task_flags,
+							  bool be_parallel)
+{
+	List   *results = __try_add_partitioned_scan_path(root,
+													  baserel,
+													  xpu_task_flags,
+													  be_parallel);
+	if (results != NIL)
+		pgstrom_remember_op_leafs(root, baserel, results, be_parallel);
 }
 
 /*
@@ -508,14 +538,13 @@ __xpuScanAddScanPathCommon(PlannerInfo *root,
 	/* Creation of GpuScan path */
 	for (int try_parallel=0; try_parallel < 2; try_parallel++)
 	{
-		if (rte->inh)
+		if (rte->inh &&
+			rte->relkind == RELKIND_PARTITIONED_TABLE)
 		{
-			if (rte->relkind == RELKIND_PARTITIONED_TABLE)
-				try_add_partitioned_scan_path(root,
-											  baserel,
-											  rte,
-											  xpu_task_flags,
-											  (try_parallel > 0));
+			try_add_partitioned_scan_path(root,
+										  baserel,
+										  xpu_task_flags,
+										  (try_parallel > 0));
 		}
 		else
 		{
