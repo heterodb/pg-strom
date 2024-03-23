@@ -39,6 +39,8 @@ struct gpuContext
 	gpuMemoryPool	pool_raw;
 	gpuMemoryPool	pool_managed;
 	bool			cuda_profiler_started;
+	volatile uint32_t cuda_stack_limit;	/* current configuration */
+	pthread_mutex_t	cuda_setlimit_lock;
 	int				gpumain_shmem_sz_dynamic;
 	/* GPU client */
 	pthread_mutex_t	client_lock;
@@ -106,6 +108,7 @@ static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static gpuServSharedState  *gpuserv_shared_state = NULL;
 static int					__pgstrom_max_async_tasks_dummy;
+static int					__pgstrom_cuda_stack_limit_kb;
 static bool					__gpuserv_debug_output_dummy;
 
 #define GpuServDebug(fmt, ...)											\
@@ -1293,6 +1296,48 @@ gpuClientELogByExtraModule(gpuClient *gclient)
 }
 
 /*
+ * expandCudaStackLimit
+ */
+static bool
+expandCudaStackLimit(gpuClient *gclient, kern_session_info *session)
+{
+	gpuContext *gcontext = gclient->gcontext;
+	uint32_t	cuda_stack_size = session->cuda_stack_size;
+	uint32_t	cuda_stack_limit;
+	CUresult	rc;
+
+	if (cuda_stack_size > gcontext->cuda_stack_limit)
+	{
+		cuda_stack_limit = TYPEALIGN(1024, cuda_stack_size);
+		if (cuda_stack_limit > (__pgstrom_cuda_stack_limit_kb << 10))
+		{
+			gpuClientELog(gclient, "CUDA stack size %u is larger than the configured limitation %ukB by pg_strom.cuda_stack_limit",
+						  cuda_stack_size, __pgstrom_cuda_stack_limit_kb);
+			return false;
+		}
+
+		pthreadMutexLock(&gcontext->cuda_setlimit_lock);
+		if (cuda_stack_size > gcontext->cuda_stack_limit)
+		{
+			rc = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, cuda_stack_limit);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuCtxSetLimit: %s",
+							  cuStrError(rc));
+				pthreadMutexUnlock(&gcontext->cuda_setlimit_lock);
+				return false;
+			}
+			GpuServDebug("CUDA stack size expanded %u -> %u bytes",
+						 gcontext->cuda_stack_limit,
+						 cuda_stack_limit);
+			gcontext->cuda_stack_limit = cuda_stack_limit;
+		}
+		pthreadMutexUnlock(&gcontext->cuda_setlimit_lock);
+	}
+	return true;
+}
+
+/*
  * gpuservHandleOpenSession
  */
 static bool
@@ -1483,6 +1528,9 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 		gpuClientELog(gclient, "OpenSession is called twice");
 		return false;
 	}
+	/* expand CUDA thread stack limit on demand */
+	if (!expandCudaStackLimit(gclient, session))
+		return false;
 
 	/* resolve device pointers */
 	if (!__resolveDevicePointers(gcontext, session, emsg, sizeof(emsg)))
@@ -2769,7 +2817,6 @@ gpuservSetupGpuContext(int cuda_dindex)
 	GpuDevAttributes *dattrs = &gpuDevAttrs[cuda_dindex];
 	gpuContext *gcontext = NULL;
 	CUresult	rc;
-	size_t		stack_sz;
 	struct sockaddr_un addr;
 	struct epoll_event ev;
 
@@ -2779,6 +2826,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 		elog(ERROR, "out of memory");
 	gcontext->serv_fd = -1;
 	gcontext->cuda_dindex = cuda_dindex;
+	pthreadMutexInit(&gcontext->cuda_setlimit_lock);
 	gpuMemoryPoolInit(&gcontext->pool_raw,     false, dattrs->DEV_TOTAL_MEMSZ);
 	gpuMemoryPoolInit(&gcontext->pool_managed, true,  dattrs->DEV_TOTAL_MEMSZ);
 	pthreadMutexInit(&gcontext->client_lock);
@@ -2821,14 +2869,6 @@ gpuservSetupGpuContext(int cuda_dindex)
 						 gcontext->cuda_device);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuCtxCreate: %s", cuStrError(rc));
-
-		rc = cuCtxGetLimit(&stack_sz, CU_LIMIT_STACK_SIZE);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxGetLimit: %s", cuStrError(rc));
-		stack_sz += 4096;
-		rc = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, stack_sz);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxSetLimit: %s", cuStrError(rc));
 
 		gpuservSetupGpuModule(gcontext);
 		/* enable kernel profiling if captured */
@@ -3128,6 +3168,16 @@ pgstrom_init_gpu_service(void)
 							NULL,
 							pgstrom_max_async_tasks_assign,
 							pgstrom_max_async_tasks_show);
+	DefineCustomIntVariable("pg_strom.cuda_stack_limit",
+							"Limit of adaptive cuda stack size per thread",
+							NULL,
+							&__pgstrom_cuda_stack_limit_kb,
+							32,		/* 32kB */
+							4,		/* 4kB */
+							2048,	/* 2MB */
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
 	DefineCustomBoolVariable("pg_strom.gpuserv_debug_output",
 							 "enables to generate debug message of GPU service",
 							 NULL,

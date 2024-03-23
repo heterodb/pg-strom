@@ -650,8 +650,15 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 			pp_info->kexp_groupby_keyload &&
 			pp_info->kexp_groupby_keycomp)
 		{
+			double	n_groups = pts->css.ss.ps.plan->plan_rows;
+
 			format = KDS_FORMAT_HASH;
-			hash_nslots = 20000; //to be estimated using num_groups
+			if (n_groups <= 5000.0)
+				hash_nslots = 20000;
+			else if (n_groups <= 4000000.0)
+				hash_nslots = 20000 + (int)(2.0 * n_groups);
+			else
+				hash_nslots = 8020000 + n_groups;
 			kds_length = (1UL << 30);			/* 1GB */
 		}
 		setup_kern_data_store(kds_temp, groupby_tdesc_final, kds_length, format);
@@ -665,6 +672,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->kcxt_kvecs_bufsz = pp_info->kvecs_bufsz;
 	session->kcxt_kvecs_ndims = pp_info->kvecs_ndims;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
+	session->cuda_stack_size  = pp_info->cuda_stack_size;
 	session->xpu_task_flags = pts->xpu_task_flags;
 	session->hostEpochTimestamp = SetEpochTimestamp();
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
@@ -2510,6 +2518,9 @@ pgstromExplainTaskState(CustomScanState *node,
 		if (pp_info->groupby_prepfn_bufsz > 0)
 			ExplainPropertyInteger("Partial Function BufSz", NULL,
 								   pp_info->groupby_prepfn_bufsz, es);
+		if (pp_info->cuda_stack_size > 0)
+			ExplainPropertyInteger("CUDA Stack Size", NULL,
+								   pp_info->cuda_stack_size, es);
 	}
 	pfree(buf.data);
 }

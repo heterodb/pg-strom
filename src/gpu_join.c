@@ -643,8 +643,42 @@ __build_child_join_sjinfo(PlannerInfo *root,
 /*
  * __lookup_or_build_leaf_joinrel
  */
+static AppendRelInfo *
+__build_fake_apinfo_non_relations(PlannerInfo *root, Index rtindex)
+{
+	AppendRelInfo *apinfo = makeNode(AppendRelInfo);
+	RelOptInfo *rel = root->simple_rel_array[rtindex];
+	PathTarget *reltarget = rel->reltarget;
+	List	   *trans_vars = NIL;
+	ListCell   *lc;
+	AttrNumber	attno = 1;
+	AttrNumber *colnos
+		= palloc0(sizeof(AttrNumber) * list_length(reltarget->exprs));
+
+	foreach (lc, reltarget->exprs)
+	{
+		Node   *node = lfirst(lc);
+		Var	   *var;
+
+		var = makeVar(rtindex,
+					  attno++,
+					  exprType(node),
+					  exprTypmod(node),
+					  exprCollation(node),
+					  0);
+		trans_vars = lappend(trans_vars, var);
+		colnos[attno-1] = attno;
+	}
+	apinfo->translated_vars = trans_vars;
+	apinfo->num_child_cols = attno;
+	apinfo->parent_colnos = colnos;
+
+	return apinfo;
+}
+
 static AppendRelInfo **
 __make_fake_apinfo_array(PlannerInfo *root,
+						 RelOptInfo *parent_joinrel,
 						 RelOptInfo *outer_rel,
 						 RelOptInfo *inner_rel)
 {
@@ -652,25 +686,79 @@ __make_fake_apinfo_array(PlannerInfo *root,
 	Relids	__relids;
 	int		i;
 
-	ap_info_array = palloc(sizeof(AppendRelInfo *) * root->simple_rel_array_size);
-	memcpy(ap_info_array, root->append_rel_array,
-		   sizeof(AppendRelInfo *) * root->simple_rel_array_size);
+	ap_info_array = palloc0(sizeof(AppendRelInfo *) *
+							root->simple_rel_array_size);
 	__relids = bms_union(outer_rel->relids,
 						 inner_rel->relids);
 	for (i = bms_next_member(__relids, -1);
 		 i >= 0;
 		 i = bms_next_member(__relids, i))
 	{
-		RangeTblEntry  *rte = root->simple_rte_array[i];
+		AppendRelInfo  *ap_info = root->append_rel_array[i];
 
-		if (!ap_info_array[i])
+		if (ap_info)
 		{
-			Relation	rel = relation_open(rte->relid, NoLock);
+			bool	rebuild = false;
 
-			ap_info_array[i] = make_append_rel_info(rel, rel, i, i);
+			while (!bms_is_member(ap_info->parent_relid,
+								  parent_joinrel->relids))
+			{
+				Index	curr_child = ap_info->parent_relid;
 
-			relation_close(rel, NoLock);
+				ap_info = NULL;
+				for (int j=0; j < root->simple_rel_array_size; j++)
+				{
+					AppendRelInfo *__ap_info = root->append_rel_array[j];
+
+					if (__ap_info &&
+						__ap_info->child_relid == curr_child)
+					{
+						ap_info = root->append_rel_array[j];
+						break;
+					}
+				}
+				if (!ap_info)
+					elog(ERROR, "Bug? AppendRelInfo chain is not linked");
+				rebuild = true;
+			}
+
+			if (rebuild)
+			{
+				Index			parent_relid = ap_info->parent_relid;
+				RangeTblEntry  *rte_child = root->simple_rte_array[i];
+				RangeTblEntry  *rte_parent = root->simple_rte_array[parent_relid];
+				Relation		rel_child;
+				Relation		rel_parent;
+
+				if (rte_child->rtekind != RTE_RELATION ||
+					rte_parent->rtekind != RTE_RELATION)
+					elog(ERROR, "Bug? not a relation has partition leaf");
+				rel_child = relation_open(rte_child->relid, NoLock);
+				rel_parent = relation_open(rte_parent->relid, NoLock);
+
+				ap_info = make_append_rel_info(rel_parent,
+											   rel_child,
+											   parent_relid, i);
+				relation_close(rel_child, NoLock);
+				relation_close(rel_parent, NoLock);
+			}
 		}
+		else
+		{
+			RangeTblEntry  *rte = root->simple_rte_array[i];
+
+			if (rte->rtekind != RTE_RELATION)
+				ap_info = __build_fake_apinfo_non_relations(root, i);
+			else
+			{
+				Relation	rel = relation_open(rte->relid, NoLock);
+
+				ap_info = make_append_rel_info(rel, rel, i, i);
+
+				relation_close(rel, NoLock);
+			}
+		}
+		ap_info_array[i] = ap_info;
 	}
 	return ap_info_array;
 }
@@ -703,6 +791,7 @@ __lookup_or_build_leaf_joinrel(PlannerInfo *root,
 			inner_rel->reloptkind = RELOPT_OTHER_MEMBER_REL;
 			parent_joinrel->consider_partitionwise_join = true;
 			root->append_rel_array = __make_fake_apinfo_array(root,
+															  parent_joinrel,
 															  outer_rel,
 															  inner_rel);
 			leaf_joinrel = build_child_join_rel(root,
@@ -1559,6 +1648,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	pp_info->kvecs_ndims = context->kvecs_ndims;
 	pp_info->extra_flags = context->extra_flags;
 	pp_info->extra_bufsz = context->extra_bufsz;
+	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
 	pp_info->used_params = context->used_params;
 	pp_info->outer_refs  = outer_refs;
 	/*
@@ -1747,7 +1837,7 @@ get_tuple_hashvalue(pgstromTaskInnerState *istate,
 		bool			isnull;
 
 		datum = ExecEvalExpr(es, econtext, &isnull);
-		hash ^= h_func(isnull, datum);
+		hash = pg_hash_merge(hash, h_func(isnull, datum));
 	}
 	hash ^= 0xffffffffU;
 
@@ -2259,8 +2349,16 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				pgstromTaskInnerState *istate = &leader->inners[i];
 				inner_preload_buffer *preload_buf = istate->preload_buffer;
 				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, i);
-                uint32_t		base_nitems;
-				uint32_t		base_usage;
+				uint32_t	base_nitems;
+				uint32_t	base_usage;
+
+				/*
+				 * If this backend/worker process called GpuJoinInnerPreload()
+				 * after the INNER_PHASE__SCAN_RELATIONS completed, it has no
+				 * preload_buf, thus, no tuples should be added.
+				 */
+				if (!preload_buf)
+					continue;
 
 				SpinLockAcquire(&ps_state->preload_mutex);
 				base_nitems  = kds->nitems;
@@ -2272,12 +2370,12 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				if (kds->format == KDS_FORMAT_ROW)
 					__innerPreloadSetupHeapBuffer(kds, istate,
 												  base_nitems,
-                                                  base_usage);
-                else if (kds->format == KDS_FORMAT_HASH)
-                    __innerPreloadSetupHashBuffer(kds, istate,
-                                                  base_nitems,
-                                                  base_usage);
-                else
+												  base_usage);
+				else if (kds->format == KDS_FORMAT_HASH)
+					__innerPreloadSetupHashBuffer(kds, istate,
+												  base_nitems,
+												  base_usage);
+				else
 					elog(ERROR, "unexpected inner-KDS format");
 			}
 
@@ -2556,7 +2654,7 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 		bool			isnull;
 
 		datum = ExecEvalExprSwitchContext(h_key, econtext, &isnull);
-		hash ^= h_func(isnull, datum);
+		hash = pg_hash_merge(hash, h_func(isnull, datum));
 	}
 	hash ^= 0xffffffffU;
 

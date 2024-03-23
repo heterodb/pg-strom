@@ -191,10 +191,12 @@ UPDATE normal_table SET k=b/2;
 ---
 --- SELECT 
 ---
+VACUUM ANALYZE cache_test_table;
 EXPLAIN (costs off, verbose)
 SELECT * FROM cache_test_table WHERE a % 3 = 0;
 
 --clms=("a" "b" "c" "d" "e" "f" "g") ; for a in ${clms[@]}; do echo "COUNT($a) AS ${a}_count,ROUND(SUM($a)::NUMERIC/100,2) AS ${a}_sum,ROUND(AVG($a)::NUMERIC/100,2) AS ${a}_avg,MAX($a) AS ${a}_max,MIN($a) AS ${a}_min," ; done
+VACUUM ANALYZE cache_test_table;
 EXPLAIN (costs off, verbose)
 SELECT 
 COUNT(a) AS a_count,SUM(a) AS a_sum,AVG(a) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
@@ -320,6 +322,7 @@ SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') AS apply_redo_result
 SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
 
 -- check GPUCache is still usable.
+VACUUM ANALYZE cache_corruption_test;
 EXPLAIN (costs off, verbose)
 SELECT * FROM cache_corruption_test WHERE b%3=0;
 
@@ -332,6 +335,7 @@ SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') AS apply_redo_result
 SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
 
 -- check GPUCache is not usable.
+VACUUM ANALYZE cache_corruption_test;
 EXPLAIN (costs off, verbose)
 SELECT * FROM cache_corruption_test WHERE b%3=0;
 
@@ -341,6 +345,7 @@ SELECT pgstrom.gpucache_recovery('cache_corruption_test');
 -- phase should be is_ready
 SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
 
+VACUUM ANALYZE cache_corruption_test;
 EXPLAIN (costs off, verbose)
 SELECT count(*) FROM cache_corruption_test;
 

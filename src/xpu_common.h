@@ -2368,6 +2368,7 @@ typedef struct kern_session_info
 	uint32_t	kcxt_kvecs_bufsz;	/* length of kvecs buffer */
 	uint32_t	kcxt_kvecs_ndims;	/* =(num_rels + 2) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
+	uint32_t	cuda_stack_size;	/* estimated stack size */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
 	/* xpucode for this session */
 	uint32_t	xpucode_load_vars_packed;
@@ -2941,6 +2942,11 @@ EXTERN_FUNCTION(void)
 pg_kern_ereport(kern_context *kcxt);	/* only host code */
 EXTERN_FUNCTION(uint32_t)
 pg_hash_any(const void *ptr, int sz);
+INLINE_FUNCTION(uint32_t)
+pg_hash_merge(uint32_t hash_prev, uint32_t hash_next)
+{
+	return ((hash_prev >> 3) | (hash_prev << 29)) ^ hash_next;
+}
 
 /* ----------------------------------------------------------------
  *

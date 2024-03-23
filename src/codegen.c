@@ -1168,6 +1168,7 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 										  bool *p_kv_type_byval,
 										  int8_t *p_kv_type_align,
 										  int16_t *p_kv_type_length,
+										  int32_t *p_kv_xdatum_sizeof,	/* optional */
 										  int32_t *p_kv_kvec_sizeof,	/* optional */
 										  bool allows_host_only_types)
 {
@@ -1179,6 +1180,8 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 		*p_kv_type_byval = dtype->type_byval;
 		*p_kv_type_align = dtype->type_align;
 		*p_kv_type_length = dtype->type_length;
+		if (p_kv_xdatum_sizeof)
+			*p_kv_xdatum_sizeof = dtype->type_sizeof;
 		if (p_kv_kvec_sizeof)
 			*p_kv_kvec_sizeof = dtype->kvec_sizeof;
 
@@ -1192,6 +1195,7 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 		bool		typbyval;
 		char		typalign;
 		int16_t		typlen;
+		int32_t		xdatum_sizeof;
 		int32_t		kvec_sizeof;
 
 		get_typlenbyvalalign(kv_type_oid, &typlen, &typbyval, &typalign);
@@ -1201,18 +1205,22 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 			{
 				case 1:
 					type_code   = TypeOpCode__int1;
+					xdatum_sizeof = sizeof(xpu_int1_t);
 					kvec_sizeof = sizeof(kvec_int1_t);
 					break;
 				case 2:
 					type_code   = TypeOpCode__int2;
+					xdatum_sizeof = sizeof(xpu_int2_t);
 					kvec_sizeof = sizeof(kvec_int2_t);
 					break;
                 case 4:
 					type_code   = TypeOpCode__int4;
+					xdatum_sizeof = sizeof(xpu_int4_t);
 					kvec_sizeof = sizeof(kvec_int4_t);
                     break;
                 case 8:
 					type_code   = TypeOpCode__int8;
+					xdatum_sizeof = sizeof(xpu_int8_t);
 					kvec_sizeof = sizeof(kvec_int8_t);
 					break;
 				default:
@@ -1223,11 +1231,13 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 		else if (typlen > 0)
 		{
 			type_code   = TypeOpCode__internal;
+			xdatum_sizeof = sizeof(xpu_internal_t);
 			kvec_sizeof = sizeof(kvec_internal_t);
 		}
 		else if (typlen == -1)
 		{
 			type_code   = TypeOpCode__bytea;
+			xdatum_sizeof = sizeof(xpu_bytea_t);
 			kvec_sizeof = sizeof(kvec_bytea_t);
 		}
 		else
@@ -1238,6 +1248,8 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 		*p_kv_type_byval = typbyval;
 		*p_kv_type_align = typealign_get_width(typalign);
 		*p_kv_type_length = typlen;
+		if (p_kv_xdatum_sizeof)
+			*p_kv_xdatum_sizeof = xdatum_sizeof;
 		if (p_kv_kvec_sizeof)
 			*p_kv_kvec_sizeof = kvec_sizeof;
 
@@ -1272,6 +1284,7 @@ __assign_codegen_kvar_defitem_subfields(codegen_kvar_defitem *kvdef)
 												  &__kvdef->kv_typbyval,
 												  &__kvdef->kv_typalign,
 												  &__kvdef->kv_typlen,
+												  &__kvdef->kv_xdatum_sizeof,
 												  &__kvdef->kv_kvec_sizeof,
 												  true);
 		__kvdef->kv_expr = (Expr *)makeNullConst(tcache->typelem, -1, InvalidOid);
@@ -1299,6 +1312,7 @@ __assign_codegen_kvar_defitem_subfields(codegen_kvar_defitem *kvdef)
 													  &__kvdef->kv_typbyval,
 													  &__kvdef->kv_typalign,
 													  &__kvdef->kv_typlen,
+													  &__kvdef->kv_xdatum_sizeof,
 													  &__kvdef->kv_kvec_sizeof,
 													  true);
 			__kvdef->kv_expr = (Expr *)makeNullConst(attr->atttypid, -1, InvalidOid);
@@ -1325,6 +1339,7 @@ lookup_input_varnode_defitem(codegen_context *context,
 	bool		kv_type_byval;
 	int8_t		kv_type_align;
 	int16_t		kv_type_length;
+	int32_t		kv_xdatum_sizeof;
 	int32_t		kv_kvec_sizeof;
 
 	if (!IsA(var, Var))
@@ -1372,6 +1387,7 @@ found:
 												   &kv_type_byval,
 												   &kv_type_align,
 												   &kv_type_length,
+												   &kv_xdatum_sizeof,
 												   &kv_kvec_sizeof,
 												   allows_host_only_types))
 	{
@@ -1388,6 +1404,7 @@ found:
 	kvdef->kv_typbyval    = kv_type_byval;
 	kvdef->kv_typalign    = kv_type_align;
 	kvdef->kv_typlen      = kv_type_length;
+	kvdef->kv_xdatum_sizeof = kv_xdatum_sizeof;
 	kvdef->kv_kvec_sizeof = kv_kvec_sizeof;
 	kvdef->kv_expr        = (Expr *)var;
 	__assign_codegen_kvar_defitem_subfields(kvdef);
@@ -1450,6 +1467,7 @@ __try_inject_temporary_expression(codegen_context *context,
 												   &kvdef->kv_typbyval,
 												   &kvdef->kv_typalign,
 												   &kvdef->kv_typlen,
+												   &kvdef->kv_xdatum_sizeof,
 												   NULL,	/* no kvec-buffer */
 												   false))
 	{
@@ -3982,6 +4000,38 @@ pgstrom_xpu_expression(Expr *expr,
 	if (p_devcost)
 		*p_devcost = context->device_cost;
 	return true;
+}
+
+/*
+ * estimate_cuda_stack_size
+ */
+uint32_t
+estimate_cuda_stack_size(codegen_context *context)
+{
+#define CUDA_ALLOCA_ALIGN	16
+	uint32_t	extra_bufsz = Max(context->extra_bufsz, 512);
+	uint32_t	stack_sz;
+	int			kvars_nslots;
+	ListCell   *lc;
+
+	/* minimum working area */
+	stack_sz = 3200;
+	/* kern_context */
+	stack_sz += TYPEALIGN(CUDA_ALLOCA_ALIGN,
+						  offsetof(kern_context, vlbuf) + extra_bufsz);
+	/* kvars_slot[] */
+	kvars_nslots = list_length(context->kvars_deflist);
+	stack_sz += TYPEALIGN(CUDA_ALLOCA_ALIGN,
+						  sizeof(xpu_datum_t *) * kvars_nslots);
+	foreach (lc, context->kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+
+		stack_sz += TYPEALIGN(CUDA_ALLOCA_ALIGN,
+							  kvdef->kv_xdatum_sizeof);
+	}
+	return stack_sz;
+#undef CUDA_ALLOCA_ALIGN
 }
 
 /*

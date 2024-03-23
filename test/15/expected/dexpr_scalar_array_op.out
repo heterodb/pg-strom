@@ -50,6 +50,7 @@ UPDATE regtest_data
 SET enable_seqscan = off;
 -- ScalarArrayOp test
 SET pg_strom.enabled = on;
+VACUUM ANALYZE regtest_data;
 EXPLAIN (costs off, verbose)
 SELECT id,x INTO test01g FROM regtest_data
  WHERE 72 = ANY(x);
@@ -58,7 +59,7 @@ SELECT id,x INTO test01g FROM regtest_data
  Custom Scan (GpuScan) on regtest_dexpr_scalar_array_op_temp.regtest_data
    Output: id, x
    GPU Projection: id, x
-   GPU Scan Quals: (72 = ANY (x)) [rows: 8505 -> 43]
+   GPU Scan Quals: (72 = ANY (x)) [rows: 5000 -> 17]
    KVars-Slot: <slot=0, type='int4', expr='NULL::integer'>, <slot=1, type='array(int4)', expr='x'>, <slot=2, type='int4', expr='id'>
    KVecs-Buffer: nbytes: 36880, ndims: 2, items=[kvec0=<0x0000-680f, type='array', expr='x'>, kvec1=<0x6810-900f, type='int4', expr='id'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=2, type='int4' resno=1(id)>, <slot=1, type='array' resno=2(x)>]}}
@@ -83,6 +84,7 @@ SELECT id,x INTO test01p FROM regtest_data
 (0 rows)
 
 SET pg_strom.enabled = on;
+VACUUM ANALYZE regtest_data;
 EXPLAIN (costs off, verbose)
 SELECT id,y INTO test02g FROM regtest_data
  WHERE 75.96 = ANY(y);
@@ -91,7 +93,7 @@ SELECT id,y INTO test02g FROM regtest_data
  Custom Scan (GpuScan) on regtest_dexpr_scalar_array_op_temp.regtest_data
    Output: id, y
    GPU Projection: id, y
-   GPU Scan Quals: (75.96 = ANY (y)) [rows: 8505 -> 43]
+   GPU Scan Quals: (75.96 = ANY (y)) [rows: 5000 -> 2]
    KVars-Slot: <slot=0, type='numeric', expr='NULL::numeric'>, <slot=1, type='array(numeric)', expr='y'>, <slot=2, type='int4', expr='id'>
    KVecs-Buffer: nbytes: 36880, ndims: 2, items=[kvec0=<0x0000-680f, type='array', expr='y'>, kvec1=<0x6810-900f, type='int4', expr='id'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=2, type='int4' resno=1(id)>, <slot=1, type='array' resno=3(y)>]}}
@@ -116,6 +118,7 @@ SELECT id,y INTO test02p FROM regtest_data
 (0 rows)
 
 SET pg_strom.enabled = on;
+VACUUM ANALYZE regtest_data;
 EXPLAIN (costs off, verbose)
 SELECT id,z INTO test03g FROM regtest_data
   WHERE 'kVOV' = ANY (z);
@@ -124,7 +127,7 @@ SELECT id,z INTO test03g FROM regtest_data
  Custom Scan (GpuScan) on regtest_dexpr_scalar_array_op_temp.regtest_data
    Output: id, z
    GPU Projection: id, z
-   GPU Scan Quals: ('kVOV'::text = ANY (z)) [rows: 8505 -> 43]
+   GPU Scan Quals: ('kVOV'::text = ANY (z)) [rows: 5000 -> 1]
    KVars-Slot: <slot=0, type='text', expr='NULL::text'>, <slot=1, type='array(text)', expr='z'>, <slot=2, type='int4', expr='id'>
    KVecs-Buffer: nbytes: 36880, ndims: 2, items=[kvec0=<0x0000-680f, type='array', expr='z'>, kvec1=<0x6810-900f, type='int4', expr='id'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=2, type='int4' resno=1(id)>, <slot=1, type='array' resno=4(z)>]}}

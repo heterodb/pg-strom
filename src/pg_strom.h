@@ -311,6 +311,7 @@ typedef struct
 	uint32_t	kvecs_ndims;
 	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
+	uint32_t	cuda_stack_size;/* estimated stack consumption */
 	/* fallback projection */
 	List	   *fallback_tlist;	/* fallback_slot -> custom_scan_tlist if JOIN/PREAGG */
 	/* group-by parameters */
@@ -557,7 +558,8 @@ typedef struct
 	bool		kv_typbyval;	/* typbyval from the catalog */
 	int8_t		kv_typalign;	/* typalign from the catalog */
 	int16_t		kv_typlen;		/* typlen from the catalog */
-	int			kv_kvec_sizeof;	/* =sizeof(kvec_XXXX_t) */
+	int			kv_xdatum_sizeof;/* =sizeof(xpu_XXXX_t), if any */
+	int			kv_kvec_sizeof;	/* =sizeof(kvec_XXXX_t), if any */
 	Expr	   *kv_expr;		/* original expression */
 	List	   *kv_subfields;	/* subfields definition, if array or composite */
 } codegen_kvar_defitem;
@@ -631,6 +633,7 @@ extern bool		pgstrom_xpu_expression(Expr *expr,
 									   Index scan_relid,
 									   List *inner_target_list,
 									   int *p_devcost);
+extern uint32_t	estimate_cuda_stack_size(codegen_context *context);
 extern void		pgstrom_explain_kvars_slot(const CustomScanState *css,
 										   ExplainState *es,
 										   List *dcontext);
