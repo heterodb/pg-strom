@@ -2368,6 +2368,7 @@ typedef struct kern_session_info
 	uint32_t	kcxt_kvecs_bufsz;	/* length of kvecs buffer */
 	uint32_t	kcxt_kvecs_ndims;	/* =(num_rels + 2) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
+	uint32_t	cuda_stack_size;	/* estimated stack size */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
 	/* xpucode for this session */
 	uint32_t	xpucode_load_vars_packed;

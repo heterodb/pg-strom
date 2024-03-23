@@ -1648,6 +1648,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	pp_info->kvecs_ndims = context->kvecs_ndims;
 	pp_info->extra_flags = context->extra_flags;
 	pp_info->extra_bufsz = context->extra_bufsz;
+	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
 	pp_info->used_params = context->used_params;
 	pp_info->outer_refs  = outer_refs;
 	/*

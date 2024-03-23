@@ -672,6 +672,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->kcxt_kvecs_bufsz = pp_info->kvecs_bufsz;
 	session->kcxt_kvecs_ndims = pp_info->kvecs_ndims;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
+	session->cuda_stack_size  = pp_info->cuda_stack_size;
 	session->xpu_task_flags = pts->xpu_task_flags;
 	session->hostEpochTimestamp = SetEpochTimestamp();
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
@@ -2517,6 +2518,9 @@ pgstromExplainTaskState(CustomScanState *node,
 		if (pp_info->groupby_prepfn_bufsz > 0)
 			ExplainPropertyInteger("Partial Function BufSz", NULL,
 								   pp_info->groupby_prepfn_bufsz, es);
+		if (pp_info->cuda_stack_size > 0)
+			ExplainPropertyInteger("CUDA Stack Size", NULL,
+								   pp_info->cuda_stack_size, es);
 	}
 	pfree(buf.data);
 }

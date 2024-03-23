@@ -40,6 +40,7 @@ __form_codegen_kvar_defitem(codegen_kvar_defitem *kvdef,
 	__kv_privs = lappend(__kv_privs, makeBoolean(kvdef->kv_typbyval));
 	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_typalign));
 	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_typlen));
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_xdatum_sizeof));
 	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_kvec_sizeof));
 	__kv_exprs = lappend(__kv_exprs, kvdef->kv_expr);
 	foreach (lc, kvdef->kv_subfields)
@@ -80,6 +81,7 @@ __deform_codegen_kvar_defitem(List *__kv_privs, List *__kv_exprs)
 	kvdef->kv_typbyval  = boolVal(list_nth(__kv_privs, pindex++));
 	kvdef->kv_typalign  = intVal(list_nth(__kv_privs, pindex++));
 	kvdef->kv_typlen    = intVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_xdatum_sizeof = intVal(list_nth(__kv_privs, pindex++));
 	kvdef->kv_kvec_sizeof = intVal(list_nth(__kv_privs, pindex++));
 	kvdef->kv_expr      = list_nth(__kv_exprs, eindex++);
 	__sub_privs         = list_nth(__kv_privs, pindex++);
@@ -160,6 +162,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, makeInteger(pp_info->kvecs_ndims));
 	privs = lappend(privs, makeInteger(pp_info->extra_flags));
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
+	privs = lappend(privs, makeInteger(pp_info->cuda_stack_size));
 	privs = lappend(privs, pp_info->fallback_tlist);
 	privs = lappend(privs, pp_info->groupby_actions);
 	privs = lappend(privs, makeInteger(pp_info->groupby_prepfn_bufsz));
@@ -271,6 +274,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.kvecs_ndims = intVal(list_nth(privs, pindex++));
 	pp_data.extra_flags = intVal(list_nth(privs, pindex++));
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
+	pp_data.cuda_stack_size = intVal(list_nth(privs, pindex++));
 	pp_data.fallback_tlist = list_nth(privs, pindex++);
 	pp_data.groupby_actions = list_nth(privs, pindex++);
 	pp_data.groupby_prepfn_bufsz  = intVal(list_nth(privs, pindex++));

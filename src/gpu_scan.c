@@ -799,6 +799,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	pp_info->kvars_deflist = context->kvars_deflist;
 	pp_info->extra_flags = context->extra_flags;
 	pp_info->extra_bufsz = context->extra_bufsz;
+	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
 	pp_info->used_params = context->used_params;
 	__build_explain_tlist_junks(root, baserel, context);
 
