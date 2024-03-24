@@ -1585,24 +1585,28 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 		preagg_cpath_list = lappend(preagg_cpath_list, cpath);
 	}
 
-	if (list_length(preagg_cpath_list) > 0)
-	{
-		part_path = (Path *)
-			create_append_path(root,
-							   input_rel,
-							   (try_parallel_path ? NIL : preagg_cpath_list),
-							   (try_parallel_path ? preagg_cpath_list : NIL),
-							   NIL,
-							   NULL,
-							   (try_parallel_path ? parallel_nworkers : 0),
-							   try_parallel_path,
-							   total_nrows);
-		part_path->pathtarget = part_target;
-	}
-	else
-	{
+	if (list_length(preagg_cpath_list) == 0)
 		return;
+	/* adjust number of workers */
+	if (try_parallel_path)
+	{
+		if (parallel_nworkers > max_parallel_workers_per_gather)
+			parallel_nworkers = max_parallel_workers_per_gather;
+		if (parallel_nworkers == 0)
+			return;
 	}
+	/* Append path to consolidate partition leafs */
+	part_path = (Path *)
+		create_append_path(root,
+						   input_rel,
+						   (try_parallel_path ? NIL : preagg_cpath_list),
+						   (try_parallel_path ? preagg_cpath_list : NIL),
+						   NIL,
+						   NULL,
+						   (try_parallel_path ? parallel_nworkers : 0),
+						   try_parallel_path,
+						   total_nrows);
+	part_path->pathtarget = part_target;
 
 	/* put Gather path if parallel-aware */
 	if (try_parallel_path)
