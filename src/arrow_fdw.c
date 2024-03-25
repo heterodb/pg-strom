@@ -665,6 +665,7 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 		bool		__isnull = false;
 		int128_t	__min = __atoi128(__trim(tok1), &__isnull);
 		int128_t	__max = __atoi128(__trim(tok2), &__isnull);
+		int64_t		__drift;
 
 		if (__isnull)
 		{
@@ -734,23 +735,24 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 				break;
 
 			case ArrowNodeTag__Timestamp:
+				__drift = (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 				switch (field->type.Timestamp.unit)
 				{
 					case ArrowTimeUnit__Second:
-						stat_values[index].min.datum = __min * 1000000L;
-						stat_values[index].max.datum = __max * 1000000L;
+						stat_values[index].min.datum = __min * 1000000L - __drift;
+						stat_values[index].max.datum = __max * 1000000L - __drift;
 						break;
 					case ArrowTimeUnit__MilliSecond:
-						stat_values[index].min.datum = __min * 1000L;
-						stat_values[index].max.datum = __max * 1000L;
+						stat_values[index].min.datum = __min * 1000L - __drift;
+						stat_values[index].max.datum = __max * 1000L - __drift;
 						break;
 					case ArrowTimeUnit__MicroSecond:
-						stat_values[index].min.datum = __min;
-						stat_values[index].max.datum = __max;
+						stat_values[index].min.datum = __min - __drift;
+						stat_values[index].max.datum = __max - __drift;
 						break;
 					case ArrowTimeUnit__NanoSecond:
-						stat_values[index].min.datum = __min / 1000;
-						stat_values[index].max.datum = __max / 1000;
+						stat_values[index].min.datum = __min / 1000 - __drift;
+						stat_values[index].max.datum = __max / 1000 - __drift;
 						break;
 					default:
 						goto bailout;
