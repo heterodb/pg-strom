@@ -2349,8 +2349,8 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				pgstromTaskInnerState *istate = &leader->inners[i];
 				inner_preload_buffer *preload_buf = istate->preload_buffer;
 				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, i);
-				uint32_t	base_nitems;
-				uint32_t	base_usage;
+				uint64_t	base_nitems;
+				uint64_t	base_usage;
 
 				/*
 				 * If this backend/worker process called GpuJoinInnerPreload()
@@ -2361,6 +2361,20 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 					continue;
 
 				SpinLockAcquire(&ps_state->preload_mutex);
+				/*
+				 * Sanity checks - KDS must be less than 32GB because of 32-bit
+				 * offset design (it is always aligned to 64bit).
+				 */
+				if (KDS_HEAD_LENGTH(kds) +
+					MAXALIGN(sizeof(uint32_t) * (kds->hash_nslots +
+												 kds->nitems +
+												 preload_buf->nitems)) +
+					__kds_unpack(kds->usage) +
+					preload_buf->usage >= __KDS_LENGTH_LIMIT)
+				{
+					SpinLockRelease(&ps_state->preload_mutex);
+					elog(ERROR, "Inner-KDS was expanding too large");
+				}
 				base_nitems  = kds->nitems;
 				kds->nitems += preload_buf->nitems;
 				base_usage   = kds->usage;

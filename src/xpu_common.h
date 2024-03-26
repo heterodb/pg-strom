@@ -782,6 +782,8 @@ typedef struct kern_data_extra		kern_data_extra;
  * is always aligned to MAXIMUM_ALIGNOF boundary (64bit).
  * It means we can use 32bit offset to represent up to 32GB range (35bit).
  */
+#define __KDS_LENGTH_LIMIT			(1UL<<35)
+
 INLINE_FUNCTION(uint32_t)
 __kds_packed(size_t offset)
 {
