@@ -766,7 +766,6 @@ extern double	pgstrom_gpu_tuple_cost;		/* GUC */
 extern double	pgstrom_gpu_operator_cost;	/* GUC */
 extern double	pgstrom_gpu_direct_seq_page_cost; /* GUC */
 extern double	pgstrom_gpu_operator_ratio(void);
-extern const char *pgstrom_fatbin_image_filename;
 extern void		gpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
 extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,
@@ -782,6 +781,7 @@ typedef struct gpuContext	gpuContext;
 typedef struct gpuClient	gpuClient;
 
 extern int		pgstrom_max_async_tasks(void);
+extern bool		gpuserv_ready_accept(void);
 extern const char *cuStrError(CUresult rc);
 extern bool		gpuServiceGoingTerminate(void);
 extern void		gpuservBgWorkerMain(Datum arg);

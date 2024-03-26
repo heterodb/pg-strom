@@ -1716,7 +1716,7 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 		return;
 	if (pgstrom_enabled())
 	{
-		if (pgstrom_enable_gpupreagg)
+		if (pgstrom_enable_gpupreagg && gpuserv_ready_accept())
 			__xpuPreAggAddCustomPathCommon(root,
 										   input_rel,
 										   group_rel,

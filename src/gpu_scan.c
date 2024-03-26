@@ -572,7 +572,7 @@ XpuScanAddScanPath(PlannerInfo *root,
 
 	if (pgstrom_enabled())
 	{
-		if (enable_gpuscan)
+		if (enable_gpuscan && gpuserv_ready_accept())
 			__xpuScanAddScanPathCommon(root, baserel, rtindex, rte,
 									   TASK_KIND__GPUSCAN,
 									   &gpuscan_path_methods);

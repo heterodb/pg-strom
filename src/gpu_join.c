@@ -1116,7 +1116,7 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 	/* quick bailout if PG-Strom is not enabled */
 	if (pgstrom_enabled())
 	{
-		if (pgstrom_enable_gpujoin)
+		if (pgstrom_enable_gpujoin && gpuserv_ready_accept())
 			__xpuJoinAddCustomPathCommon(root,
 										 joinrel,
 										 outerrel,
