@@ -1966,8 +1966,28 @@ BuildArrowFileState(Relation frel, const char *filename, Bitmapset **p_stat_attr
 	{
 		Form_pg_attribute	attr = TupleDescAttr(tupdesc, j);
 		RecordBatchFieldState *rb_field = &rb_state->fields[j];
+		bool		compatible = false;
 
-		if (attr->atttypid != rb_field->atttypid)
+		if (attr->atttypid == rb_field->atttypid)
+			compatible = true;
+		else
+		{
+			/* check for binary compatible data types */
+			HeapTuple	htup;
+
+			htup = SearchSysCache2(CASTSOURCETARGET,
+								   ObjectIdGetDatum(rb_field->atttypid),
+								   ObjectIdGetDatum(attr->atttypid));
+			if (HeapTupleIsValid(htup))
+			{
+				Form_pg_cast cast = (Form_pg_cast) GETSTRUCT(htup);
+
+				if (cast->castmethod == COERCION_METHOD_BINARY)
+					compatible = true;
+				ReleaseSysCache(htup);
+			}
+		}
+		if (!compatible)
 			elog(ERROR, "arrow_fdw: foreign table '%s' column '%s' (%s) is not compatible to the arrow field (%s) in the '%s'",
 				 RelationGetRelationName(frel),
 				 NameStr(attr->attname),
