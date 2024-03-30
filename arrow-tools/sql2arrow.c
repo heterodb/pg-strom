@@ -36,6 +36,16 @@ static userConfigOption *sqldb_session_configs = NULL;
 static nestLoopOption *sqldb_nestloop_options = NULL;
 
 /*
+ * Per-worker state variables
+ */
+static volatile bool	worker_setup_done  = false;
+static pthread_mutex_t	worker_setup_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t	worker_setup_cond  = PTHREAD_COND_INITIALIZER;
+static pthread_t	   *worker_threads;
+static SQLtable		  **worker_tables;
+static pthread_mutex_t	main_table_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/*
  * __trim
  */
 static inline char *
@@ -327,37 +337,6 @@ setup_output_file(SQLtable *table, const char *output_filename)
 	/* write out header stuff */
 	arrowFileWrite(table, "ARROW1\0\0", 8);
 	writeArrowSchema(table);
-}
-
-static void
-shows_record_batch_progress(SQLtable *table, size_t nitems)
-{
-	if (shows_progress)
-	{
-		ArrowBlock *block;
-		int			index = table->numRecordBatches - 1;
-		time_t		tv = time(NULL);
-		struct tm	tm;
-
-		localtime_r(&tv, &tm);
-		assert(index >= 0);
-		block = &table->recordBatches[index];
-		printf("%04d-%02d-%02d %02d:%02d:%02d "
-			   "RecordBatch[%d]: "
-			   "offset=%lu length=%lu (meta=%u, body=%lu) nitems=%zu\n",
-			   tm.tm_year + 1900,
-			   tm.tm_mon + 1,
-			   tm.tm_mday,
-			   tm.tm_hour,
-			   tm.tm_min,
-			   tm.tm_sec,
-			   index,
-			   block->offset,
-			   block->metaDataLength + block->bodyLength,
-			   block->metaDataLength,
-			   block->bodyLength,
-			   nitems);
-	}
 }
 
 static int
@@ -937,13 +916,229 @@ parse_options(int argc, char * const argv[])
 }
 
 /*
+ * sqldb_command_apply_worker_id
+ */
+const char *
+sqldb_command_apply_worker_id(const char *command, int worker_id)
+{
+	const char *src = command;
+	char   *buf = palloc(strlen(command) + 100);
+	char   *dst = buf;
+	int		c;
+
+	while ((c = *src++) != '\0')
+	{
+		if (c == '$')
+		{
+			if (strncmp(src, "(WORKER_ID)", 11) == 0)
+			{
+				dst += sprintf(dst, "%d", worker_id);
+				src += 11;
+				continue;
+			}
+			if (strncmp(src, "(N_WORKERS)", 11) == 0)
+			{
+				dst += sprintf(dst, "%d", num_worker_threads);
+				src += 11;
+				continue;
+			}
+		}
+		*dst++ = c;
+	}
+	*dst = '\0';
+
+	return buf;
+}
+
+/*
+ * sql_table_merge_one_row
+ */
+static void
+mergeArrowChunkOneRow(SQLtable *dst_table,
+					  SQLtable *src_table, size_t src_index)
+{
+	size_t	usage = 0;
+
+	for (int j=0; j < src_table->nfields; j++)
+	{
+		usage += sql_field_move_value(&dst_table->columns[j],
+									  &src_table->columns[j], src_index);
+	}
+	dst_table->nitems++;
+	dst_table->usage = usage;
+}
+
+/*
+ * shows_record_batch_progress
+ */
+static void
+shows_record_batch_progress(const ArrowBlock *block,
+							int rb_index, size_t nitems,
+							int worker_id)
+{
+	time_t		tv = time(NULL);
+	struct tm	tm;
+	char		namebuf[100];
+
+	if (num_worker_threads == 1)
+		namebuf[0] = '\0';
+	else
+		sprintf(namebuf, " by worker:%d", worker_id);
+
+	localtime_r(&tv, &tm);
+	printf("%04d-%02d-%02d %02d:%02d:%02d "
+		   "RecordBatch[%d]: "
+		   "offset=%lu length=%lu (meta=%u, body=%lu) nitems=%zu%s\n",
+		   tm.tm_year + 1900,
+		   tm.tm_mon + 1,
+		   tm.tm_mday,
+		   tm.tm_hour,
+		   tm.tm_min,
+		   tm.tm_sec,
+		   rb_index,
+		   block->offset,
+		   block->metaDataLength + block->bodyLength,
+		   block->metaDataLength,
+		   block->bodyLength,
+		   nitems,
+		   namebuf);
+}
+
+/*
+ * execute_sql2arrow
+ */
+static void
+sql2arrow_common(void *sqldb_conn, uint32_t worker_id)
+{
+	SQLtable   *main_table = worker_tables[0];
+	SQLtable   *data_table = worker_tables[worker_id];
+	ArrowBlock	__block;
+	int			__rb_index;
+
+	/* fetch results and write record batches */
+	while (sqldb_fetch_results(sqldb_conn, data_table))
+	{
+		if (data_table->usage >= batch_segment_sz)
+		{
+			__rb_index = writeArrowRecordBatchMT(main_table,
+												 data_table,
+												 &main_table_mutex,
+												 &__block);
+			if (shows_progress)
+				shows_record_batch_progress(&__block,
+											__rb_index,
+											data_table->nitems,
+											worker_id);
+			sql_table_clear(data_table);
+		}
+	}
+	/* wait and merge results */
+	for (uint32_t k=1; (worker_id & k) == 0; k <<= 1)
+	{
+		uint32_t	buddy = (worker_id | k);
+		SQLtable   *buddy_table;
+
+		if (buddy >= num_worker_threads)
+			break;
+		if ((errno = pthread_join(worker_threads[buddy], NULL)) != 0)
+			Elog("failed on pthread_join[%u]: %m", buddy);
+
+		buddy_table = worker_tables[buddy];
+		for (size_t i=0; i < buddy_table->nitems; i++)
+		{
+			/* merge one row */
+			mergeArrowChunkOneRow(data_table, buddy_table, i);
+			/* write out buffer */
+			if (data_table->usage >= batch_segment_sz)
+			{
+				__rb_index = writeArrowRecordBatchMT(main_table,
+													 data_table,
+													 &main_table_mutex,
+													 &__block);
+				if (shows_progress)
+					shows_record_batch_progress(&__block,
+												__rb_index,
+												data_table->nitems,
+												worker_id);
+				sql_table_clear(data_table);
+			}
+		}
+		if (shows_progress && buddy_table->nitems > 0)
+			printf("worker:%u merged pending results by worker:%u\n",
+				   worker_id, buddy);
+	}
+}
+
+/*
+ * worker_main
+ */
+static void *
+worker_main(void *__worker_id)
+{
+	uintptr_t	worker_id = (uintptr_t)__worker_id;
+	SQLtable   *main_table;
+	SQLtable   *data_table;
+	void	   *sqldb_conn;
+	const char *worker_command;
+
+	/* wait for the initial setup */
+	pthread_mutex_lock(&worker_setup_mutex);
+	while (!worker_setup_done)
+	{
+		pthread_cond_wait(&worker_setup_cond,
+						  &worker_setup_mutex);
+	}
+	pthread_mutex_unlock(&worker_setup_mutex);
+
+	/*
+	 * OK, now worker:0 already has started.
+	 */
+	main_table = worker_tables[0];
+	sqldb_conn = sqldb_server_connect(sqldb_hostname,
+									  sqldb_port_num,
+									  sqldb_username,
+									  sqldb_password,
+									  sqldb_database,
+									  sqldb_session_configs,
+									  sqldb_nestloop_options);
+	worker_command = sqldb_command_apply_worker_id(sqldb_command, worker_id);
+	data_table = sqldb_begin_query(sqldb_conn,
+								   worker_command,
+								   NULL,
+								   main_table->sql_dict_list);
+	if (!data_table)
+		Elog("Empty results by the query: %s", sqldb_command);
+	data_table->segment_sz = batch_segment_sz;
+	/* enables embedded min/max statistics, if any */
+	enable_embedded_stats(data_table);
+	/* print SQL */
+	if (shows_progress)
+		printf("worker:%lu SQL=[%s]\n", worker_id, worker_command);
+	/* check compatibility */
+	if (!IsSQLtableCompatible(main_table, data_table))
+		Elog("Schema definition by the query in worker:%lu is not compatible: %s",
+			 worker_id, worker_command);
+	worker_tables[worker_id] = data_table;
+	/* main loop to fetch and write results */
+	sql2arrow_common(sqldb_conn, worker_id);
+	/* close the connection */
+	sqldb_close_connection(sqldb_conn);
+
+	if (shows_progress)
+		printf("worker:%lu terminated\n", worker_id);
+
+	return NULL;
+}
+
+/*
  * Entrypoint of pg2arrow / mysql2arrow
  */
 int main(int argc, char * const argv[])
 {
 	int				append_fdesc = -1;
 	ArrowFileInfo	af_info;
-	void		   *sqldb_state;
+	void		   *sqldb_conn;
+	const char	   *prime_command;
 	SQLtable	   *table;
 	ArrowKeyValue  *kv;
 	SQLdictionary  *sql_dict_list = NULL;
@@ -955,14 +1150,26 @@ int main(int argc, char * const argv[])
 	if (dump_arrow_filename)
 		return dumpArrowFile(dump_arrow_filename);
 
+	/* setup workers */
+	assert(num_worker_threads > 0);
+	worker_threads = palloc0(sizeof(pthread_t)  * num_worker_threads);
+	worker_tables  = palloc0(sizeof(SQLtable *) * num_worker_threads);
+	for (uintptr_t i = 1; i < num_worker_threads; i++)
+	{
+		if ((errno = pthread_create(&worker_threads[i],
+									NULL,
+									worker_main,
+									(void *)i)) != 0)
+			Elog("failed on pthread_create: %m");
+	}
 	/* open connection */
-	sqldb_state = sqldb_server_connect(sqldb_hostname,
-									   sqldb_port_num,
-									   sqldb_username,
-									   sqldb_password,
-									   sqldb_database,
-									   sqldb_session_configs,
-									   sqldb_nestloop_options);
+	sqldb_conn = sqldb_server_connect(sqldb_hostname,
+									  sqldb_port_num,
+									  sqldb_username,
+									  sqldb_password,
+									  sqldb_database,
+									  sqldb_session_configs,
+									  sqldb_nestloop_options);
 	/* read the original arrow file, if --append mode */
 	if (append_filename)
 	{
@@ -973,8 +1180,9 @@ int main(int argc, char * const argv[])
 		sql_dict_list = loadArrowDictionaryBatches(append_fdesc, &af_info);
 	}
 	/* begin SQL command execution */
-	table = sqldb_begin_query(sqldb_state,
-							  sqldb_command,
+	prime_command = sqldb_command_apply_worker_id(sqldb_command, 0);
+	table = sqldb_begin_query(sqldb_conn,
+							  prime_command,
 							  append_filename ? &af_info : NULL,
 							  sql_dict_list);
 	if (!table)
@@ -1004,28 +1212,32 @@ int main(int argc, char * const argv[])
 	}
 	/* write out dictionary batch, if any */
 	writeArrowDictionaryBatches(table);
-	
-	/* main loop to fetch and write result */
-	while (sqldb_fetch_results(sqldb_state, table))
-	{
-		if (table->usage > batch_segment_sz)
-		{
-			writeArrowRecordBatch(table);
-			shows_record_batch_progress(table, table->nitems);
-			sql_table_clear(table);
-		}
-	}
+	/* the primary SQLtable become visible to other workers */
+	pthread_mutex_lock(&worker_setup_mutex);
+	worker_tables[0] = table;
+	worker_setup_done = true;
+	pthread_cond_broadcast(&worker_setup_cond);
+	pthread_mutex_unlock(&worker_setup_mutex);
+	/* main loop to fetch and write results*/
+	sql2arrow_common(sqldb_conn, 0);
 	if (table->nitems > 0)
 	{
-		writeArrowRecordBatch(table);
-		shows_record_batch_progress(table, table->nitems);
+		ArrowBlock	__block;
+		int			__rb_index;
+
+		__rb_index = writeArrowRecordBatch(table, &__block);
+		if (shows_progress)
+			shows_record_batch_progress(&__block,
+										__rb_index,
+										table->nitems,
+										0);
 		sql_table_clear(table);
 	}
 	/* write out footer portion */
 	writeArrowFooter(table);
 
 	/* cleanup */
-	sqldb_close_connection(sqldb_state);
+	sqldb_close_connection(sqldb_conn);
 	close(table->fdesc);
 
 	if (shows_progress)

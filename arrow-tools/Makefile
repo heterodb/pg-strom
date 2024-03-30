@@ -47,7 +47,7 @@ all: $(ALL_PROGS)
 #
 ifeq ($(HAS_PG_CONFIG),yes)
 pg2arrow: $(PG2ARROW_OBJS)
-	$(CC) -o $@ $(PG2ARROW_OBJS) -lpq \
+	$(CC) -o $@ $(PG2ARROW_OBJS) -lpq -lpthread \
 	$(shell $(PG_CONFIG) --ldflags) \
 	-L $(shell $(PG_CONFIG) --libdir)
 

@@ -148,6 +148,7 @@ struct SQLfield
 	ArrowType	arrow_type;		/* type in apache arrow */
 	/* data save as Apache Arrow datum */
 	size_t	(*put_value)(SQLfield *attr, const char *addr, int sz);
+	size_t	(*move_value)(SQLfield *dest, const SQLfield *src, long index);
 	int		(*write_stat)(SQLfield *attr, char *buf, size_t len,
 						  const SQLstat__datum *stat_datum);
 	/* data buffers of the field */
@@ -170,6 +171,12 @@ static inline size_t
 sql_field_put_value(SQLfield *column, const char *addr, int sz)
 {
 	return (column->__curr_usage__ = column->put_value(column, addr, sz));
+}
+
+static inline size_t
+sql_field_move_value(SQLfield *dest, const SQLfield *src, long index)
+{
+	return (dest->__curr_usage__ = dest->move_value(dest, src, index));
 }
 
 #ifndef FLEXIBLE_ARRAY_MEMBER
@@ -225,13 +232,22 @@ struct SQLdictionary
 };
 
 /* arrow_write.c */
+extern bool		IsSQLfieldCompatible(const SQLfield *field1,
+									 const SQLfield *field2);
+extern bool		IsSQLtableCompatible(const SQLtable *table1,
+									 const SQLtable *table2);
 extern void		arrowFileWrite(SQLtable *table,
 							   const char *buffer,
 							   ssize_t length);
 extern void		arrowFileWriteIOV(SQLtable *table);
 extern void		writeArrowSchema(SQLtable *table);
 extern void		writeArrowDictionaryBatches(SQLtable *table);
-extern int		writeArrowRecordBatch(SQLtable *table);
+extern int		writeArrowRecordBatch(SQLtable *table,
+									  ArrowBlock *p_arrow_block);
+extern int		writeArrowRecordBatchMT(SQLtable *main_table,
+										SQLtable *data_table,
+										pthread_mutex_t *main_table_mutex,
+										ArrowBlock *p_arrow_block);
 extern void		writeArrowFooter(SQLtable *table);
 
 extern size_t	setupArrowRecordBatchIOV(SQLtable *table);
@@ -386,6 +402,17 @@ sql_buffer_append_char(SQLbuffer *buf, int c, size_t len)
 		buf->usage += len;
 	}
 	assert(buf->usage <= buf->length);
+}
+
+static inline bool
+sql_buffer_getbit(const SQLbuffer *buf, size_t __index)
+{
+	size_t		index = __index >> 3;
+	int			mask  = (1 << (__index & 7));
+
+	if (index < buf->length && (buf->data[index] & mask) != 0)
+		return true;
+	return false;
 }
 
 static inline void

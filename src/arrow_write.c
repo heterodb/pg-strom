@@ -13,6 +13,7 @@
 #include "postgres.h"
 #endif
 #include <limits.h>
+#include <pthread.h>
 #include "arrow_ipc.h"
 
 /* alignment macros, if not */
@@ -887,6 +888,97 @@ createArrowFooter(ArrowFooter *node)
 }
 
 /* ----------------------------------------------------------------
+ * Compatibility Checks for SQLtable / SQLfield
+ * ---------------------------------------------------------------- */
+bool
+IsSQLfieldCompatible(const SQLfield *field1,
+					 const SQLfield *field2)
+{
+	if (field1->arrow_type.node.tag != field2->arrow_type.node.tag)
+		return false;
+#define __COMPARE(__TYPE,__ATTR)										\
+	(field1->arrow_type.__TYPE.__ATTR != field2->arrow_type.__TYPE.__ATTR)
+
+	switch (field1->arrow_type.node.tag)
+	{
+		case ArrowNodeTag__Int:
+			if (__COMPARE(Int, bitWidth) ||
+				(field1->arrow_type.Int.is_signed && !field2->arrow_type.Int.is_signed)||
+				(!field1->arrow_type.Int.is_signed && field2->arrow_type.Int.is_signed))
+				return false;
+			break;
+		case ArrowNodeTag__FloatingPoint:
+			if (__COMPARE(FloatingPoint, precision))
+				return false;
+			break;
+		case ArrowNodeTag__Utf8:
+		case ArrowNodeTag__Binary:
+		case ArrowNodeTag__Bool:
+			break;
+		case ArrowNodeTag__Decimal:
+			if (__COMPARE(Decimal, precision) ||
+				__COMPARE(Decimal, scale) ||
+				__COMPARE(Decimal, bitWidth))
+				return false;
+			break;
+		case ArrowNodeTag__Date:
+			if (__COMPARE(Date, unit))
+				return false;
+			break;
+		case ArrowNodeTag__Time:
+			if (__COMPARE(Time, unit))
+				return false;
+			break;
+		case ArrowNodeTag__Timestamp:
+			if (__COMPARE(Timestamp, unit))
+				return false;
+			break;
+		case ArrowNodeTag__Interval:
+			if (__COMPARE(Interval, unit))
+				return false;
+			break;
+		case ArrowNodeTag__List:
+		case ArrowNodeTag__Struct:
+			break;
+		case ArrowNodeTag__FixedSizeBinary:
+			if (__COMPARE(FixedSizeBinary, byteWidth))
+				return false;
+			break;
+		case ArrowNodeTag__FixedSizeList:
+			if (__COMPARE(FixedSizeList, listSize))
+				return false;
+			break;
+		case ArrowNodeTag__LargeBinary:
+		case ArrowNodeTag__LargeUtf8:
+		case ArrowNodeTag__LargeList:
+			break;
+		default:
+			Elog("unknown / unsupported Arrow Type (%d)",
+				 field1->arrow_type.node.tag);
+	}
+#undef __COMPARE
+	return true;
+}
+
+bool
+IsSQLtableCompatible(const SQLtable *table1,
+					 const SQLtable *table2)
+{
+	if (table1->nfields != table2->nfields)
+		return false;
+	if ((table1->has_statistics && !table2->has_statistics) ||
+		(!table1->has_statistics && table2->has_statistics))
+		return false;
+	for (int j=0; j < table1->nfields; j++)
+	{
+		if (!IsSQLfieldCompatible(&table1->columns[j],
+								  &table2->columns[j]))
+			return false;
+	}
+	return true;
+}
+
+/* ----------------------------------------------------------------
  * Routines for File I/O
  * ---------------------------------------------------------------- */
 void
@@ -912,20 +1004,24 @@ arrowFileWrite(SQLtable *table, const char *buffer, ssize_t length)
 	table->f_pos += length;
 }
 
-void
-arrowFileWriteIOV(SQLtable *table)
+static size_t
+__arrowFileWriteIOV(const char *filename,
+					int fdesc,
+					off_t f_pos,
+					SQLtable *table)
 {
-	int			index = 0;
-	ssize_t		nbytes;
+	int		index = 0;
+	off_t	f_pos_saved = f_pos;
 
 	while (index < table->__iov_cnt)
 	{
-		int		__iov_cnt = table->__iov_cnt - index;
+		int			__iov_cnt = table->__iov_cnt - index;
+		ssize_t		nbytes;
 
-		nbytes = pwritev(table->fdesc,
+		nbytes = pwritev(fdesc,
 						 table->__iov + index,
 						 __iov_cnt < IOV_MAX ? __iov_cnt : IOV_MAX,
-						 table->f_pos);
+						 f_pos);
 		if (nbytes < 0)
 		{
 			if (errno == EINTR)
@@ -937,7 +1033,7 @@ arrowFileWriteIOV(SQLtable *table)
 			Elog("unable to write on '%s' any more", table->filename);
 		}
 
-		table->f_pos += nbytes;
+		f_pos += nbytes;
 		while (index < table->__iov_cnt &&
 			   nbytes >= table->__iov[index].iov_len)
 		{
@@ -952,6 +1048,17 @@ arrowFileWriteIOV(SQLtable *table)
 		}
 	}
 	table->__iov_cnt = 0;
+
+	return (f_pos - f_pos_saved);
+}
+
+void
+arrowFileWriteIOV(SQLtable *table)
+{
+	table->f_pos += __arrowFileWriteIOV(table->filename,
+										table->fdesc,
+										table->f_pos,
+										table);
 }
 
 static void
@@ -1636,25 +1743,25 @@ setupArrowRecordBatchIOV(SQLtable *table)
 }
 
 static void
-__saveArrowRecordBatchStats(int rb_index, SQLfield *field)
+__saveArrowRecordBatchStats(SQLfield *main_field,
+							SQLfield *data_field, int rb_index)
 {
-	if (field->stat_datum.is_valid)
+	if (data_field->stat_datum.is_valid)
 	{
 		SQLstat	   *item = palloc(sizeof(SQLstat));
 
 		/* save the SQLstat item for the record-batch */
-		memcpy(item, &field->stat_datum, sizeof(SQLstat));
+		memcpy(item, &data_field->stat_datum, sizeof(SQLstat));
 		item->rb_index = rb_index;
-		item->next = field->stat_list;
-		field->stat_list = item;
-
+		item->next = main_field->stat_list;
+		main_field->stat_list = item;
 		/* reset statistics */
-		memset(&field->stat_datum, 0, sizeof(SQLstat));
+		memset(&data_field->stat_datum, 0, sizeof(SQLstat));
 	}
 }
 
 int
-writeArrowRecordBatch(SQLtable *table)
+writeArrowRecordBatch(SQLtable *table, ArrowBlock *p_arrow_block)
 {
 	ArrowBlock	block;
 	size_t		length;
@@ -1678,12 +1785,72 @@ writeArrowRecordBatch(SQLtable *table)
 	{
 		for (j=0; j < table->nfields; j++)
 		{
-			SQLfield   *field = &table->columns[j];
-
-			if (field->stat_enabled)
-				__saveArrowRecordBatchStats(rb_index, field);
+			if (table->columns[j].stat_enabled)
+				__saveArrowRecordBatchStats(&table->columns[j],
+											&table->columns[j], rb_index);
 		}
 	}
+	if (p_arrow_block)
+		memcpy(p_arrow_block, &block, sizeof(ArrowBlock));
+	return rb_index;
+}
+
+int
+writeArrowRecordBatchMT(SQLtable *main_table,
+						SQLtable *data_table,
+						pthread_mutex_t *main_table_mutex,
+						ArrowBlock *p_arrow_block)
+{
+	ArrowBlock	block;
+	size_t		length;
+	size_t		meta_sz;
+	int			rb_index;
+	int			fdesc;
+	off_t		f_pos;
+	const char *filename;
+
+	data_table->__iov_cnt = 0;			/* reset iov */
+	length = setupArrowRecordBatchIOV(data_table);
+	assert(data_table->__iov_cnt > 0 &&
+		   data_table->__iov[0].iov_len <= length);
+	meta_sz = data_table->__iov[0].iov_len;	/* metadata chunk */
+
+	/* critical section */
+	if ((errno = pthread_mutex_lock(main_table_mutex)) != 0)
+		Elog("failed on pthread_mutex_lock: %m");
+
+	/* move forward the destination file pointer */
+	filename = main_table->filename;
+	fdesc = main_table->fdesc;
+	f_pos = main_table->f_pos;
+	main_table->f_pos += length;
+
+	initArrowNode(&block, Block);
+	block.offset         = f_pos;
+	block.metaDataLength = meta_sz;
+	block.bodyLength     = length - meta_sz;
+
+	/* register the record batch and statistics */
+	rb_index = sql_table_append_record_batch(main_table, &block);
+	if (main_table->has_statistics)
+	{
+		assert(data_table->has_statistics);
+		for (int j=0; j < data_table->nfields; j++)
+		{
+			if (main_table->columns[j].stat_enabled)
+				__saveArrowRecordBatchStats(&main_table->columns[j],
+											&data_table->columns[j], rb_index);
+		}
+	}
+	if ((errno = pthread_mutex_unlock(main_table_mutex)) != 0)
+		Elog("failed on pthread_mutex_unlock: %m");
+
+	/* write file i/o */
+	__arrowFileWriteIOV(filename, fdesc, f_pos, data_table);
+
+	/* result back */
+	if (p_arrow_block)
+		memcpy(p_arrow_block, &block, sizeof(ArrowBlock));
 	return rb_index;
 }
 

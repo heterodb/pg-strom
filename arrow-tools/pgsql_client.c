@@ -1029,7 +1029,9 @@ sqldb_begin_query(void *sqldb_state,
 	/* move to the first tuple(-set) */
 	if (!pgsql_move_next(pgstate, NULL))
 		return NULL;
-	return pgsql_create_buffer(pgstate, af_info, dictionary_list);
+	return pgsql_create_buffer(pgstate,
+							   af_info,
+							   dictionary_list);
 }
 
 /*
