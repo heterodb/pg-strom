@@ -1198,6 +1198,8 @@ move_variable_value(SQLfield *dest, const SQLfield *src, long sindex)
 		uint32_t	tail = ((uint32_t *)src->values.data)[sindex+1];
 
 		assert(head <= tail && tail <= src->extra.usage);
+		if (tail - head >= INT_MAX)
+			Elog("too large variable data (len: %u)", tail - head);
 		addr = src->extra.data + head;
 		sz   = tail - head;
 	}

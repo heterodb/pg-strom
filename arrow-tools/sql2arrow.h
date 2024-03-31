@@ -1,6 +1,7 @@
 #ifndef SQL2ARROW_H
 #define SQL2ARROW_H
 #include "arrow_ipc.h"
+#include <limits.h>
 #include <pthread.h>
 
 typedef struct userConfigOption     userConfigOption;
