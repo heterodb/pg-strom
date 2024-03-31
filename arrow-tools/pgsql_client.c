@@ -1006,6 +1006,7 @@ sqldb_begin_query(void *sqldb_state,
                   ArrowFileInfo *af_info,
                   SQLdictionary *dictionary_list)
 {
+	static char *snapshot_identifier = NULL;
 	PGSTATE	   *pgstate = sqldb_state;
 	PGconn	   *conn = pgstate->conn;
 	PGresult   *res;
@@ -1016,6 +1017,38 @@ sqldb_begin_query(void *sqldb_state,
 	if (PQresultStatus(res) != PGRES_COMMAND_OK)
 		Elog("unable to begin transaction: %s", PQresultErrorMessage(res));
 	PQclear(res);
+
+	res = PQexec(conn, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		Elog("unable to switch transaction isolation level: %s",
+			 PQresultErrorMessage(res));
+	PQclear(res);
+
+	/* export snaphot / import snapshot */
+	if (!snapshot_identifier)
+	{
+		res = PQexec(conn, "SELECT pg_catalog.pg_export_snapshot()");
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			Elog("unable to export the current transaction snapshot: %s",
+				 PQresultErrorMessage(res));
+		if (PQntuples(res) != 1 || PQnfields(res) != 1)
+			Elog("unexpected result for pg_export_snapshot()");
+		snapshot_identifier = pstrdup(PQgetvalue(res, 0, 0));
+		printf("snapshot_identifier = [%s]\n", snapshot_identifier);
+		PQclear(res);
+	}
+	else
+	{
+		char	query[200];
+
+		snprintf(query, sizeof(query),
+				 "SET TRANSACTION SNAPSHOT '%s'",
+				 snapshot_identifier);
+		res = PQexec(conn, query);
+		if (PQresultStatus(res) != PGRES_COMMAND_OK)
+			Elog("unable to import transaction shapshot: %s",
+				 PQresultErrorMessage(res));
+	}
 
 	/* declare cursor */
 	query = palloc(strlen(sqldb_command) + 1024);
