@@ -921,7 +921,6 @@ parse_options(int argc, char * const argv[])
 				worker_dist_keys = repalloc(worker_dist_keys,
 											sizeof(const char *) * nrooms);
 			}
-			puts(tok);
 			worker_dist_keys[nitems++] = tok;
 		}
 		num_worker_threads = nitems;
