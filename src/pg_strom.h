@@ -693,6 +693,7 @@ extern Path	   *pgstromTryFindGistIndex(PlannerInfo *root,
 extern Bitmapset *pickup_outer_referenced(PlannerInfo *root,
 										  RelOptInfo *base_rel,
 										  Bitmapset *referenced);
+extern int		count_num_of_subfields(Oid type_oid);
 extern size_t	estimate_kern_data_store(TupleDesc tupdesc);
 extern size_t	setup_kern_data_store(kern_data_store *kds,
 									  TupleDesc tupdesc,

@@ -86,7 +86,7 @@ pickup_outer_referenced(PlannerInfo *root,
  *
  * ----------------------------------------------------------------
  */
-static int
+int
 count_num_of_subfields(Oid type_oid)
 {
 	TypeCacheEntry *tcache;
