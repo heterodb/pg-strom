@@ -276,6 +276,7 @@ gpuservLoggerDispatch(void)
 				break;
 		}
 	}
+	gpuserv_logger_buffer.data[gpuserv_logger_buffer.len] = '\0';
 
 	for (line = gpuserv_logger_buffer.data;
 		 (tail = strchr(line, '\n')) != NULL;
