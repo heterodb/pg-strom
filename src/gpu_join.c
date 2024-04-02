@@ -1058,6 +1058,8 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 											   xpujoin_path_methods);
 		}
 		/* 2nd trial uses the partial paths */
+		if (!joinrel->consider_parallel)
+			break;
 		inner_pathlist = innerrel->partial_pathlist;
 	}
 }

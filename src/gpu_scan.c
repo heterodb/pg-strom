@@ -557,6 +557,8 @@ __xpuScanAddScanPathCommon(PlannerInfo *root,
 									 false,	/* disallow no device quals*/
 									 xpuscan_path_methods);
 		}
+		if (!baserel->consider_parallel)
+			break;
 	}
 }
 
