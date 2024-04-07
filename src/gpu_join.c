@@ -1642,17 +1642,18 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		= codegen_build_packed_hashkeys(context,
 										hash_keys_stacked);
 	codegen_build_packed_gistevals(context, pp_info);
+	/* LoadVars for each depth */
 	codegen_build_packed_kvars_load(context, pp_info);
+	/* MoveVars for each depth (only GPUs) */
 	codegen_build_packed_kvars_move(context, pp_info);
 
 	pp_info->kvars_deflist = context->kvars_deflist;
-	pp_info->kvecs_bufsz = KVEC_ALIGN(context->kvecs_usage);
-	pp_info->kvecs_ndims = context->kvecs_ndims;
 	pp_info->extra_flags = context->extra_flags;
 	pp_info->extra_bufsz = context->extra_bufsz;
-	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
 	pp_info->used_params = context->used_params;
 	pp_info->outer_refs  = outer_refs;
+	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
+
 	/*
 	 * fixup fallback expressions
 	 */
@@ -2912,10 +2913,10 @@ ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts, XpuCommand *resp)
 }
 
 /*
- * pgstrom_init_xpu_join_common
+ * __pgstrom_init_xpujoin_common
  */
 static void
-pgstrom_init_xpu_join_common(void)
+__pgstrom_init_xpujoin_common(void)
 {
 	static bool	__initialized = false;
 
@@ -3003,8 +3004,8 @@ pgstrom_init_gpu_join(void)
 	gpujoin_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	gpujoin_exec_methods.ShutdownCustomScan		= pgstromSharedStateShutdownDSM;
 	gpujoin_exec_methods.ExplainCustomScan		= pgstromExplainTaskState;
-
-	pgstrom_init_xpu_join_common();
+	/* common portion */
+	__pgstrom_init_xpujoin_common();
 }
 
 
@@ -3073,6 +3074,6 @@ pgstrom_init_dpu_join(void)
 	dpujoin_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	dpujoin_exec_methods.ShutdownCustomScan     = pgstromSharedStateShutdownDSM;
 	dpujoin_exec_methods.ExplainCustomScan      = pgstromExplainTaskState;
-
-	pgstrom_init_xpu_join_common();
+	/* common portion */
+	__pgstrom_init_xpujoin_common();
 }

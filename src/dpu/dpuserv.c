@@ -1932,10 +1932,10 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 	kern_context	   *kcxt;
 	uint32_t			block_index;
 
-	assert(kds_src->format == KDS_FORMAT_BLOCK &&
-		   kexp_load_vars->opcode == FuncOpCode__LoadVars);
+	assert(kds_src->format == KDS_FORMAT_BLOCK);
 	assert(!kmrels || kmrels->num_rels > 0);
 	INIT_KERNEL_CONTEXT(kcxt, session);
+
 	for (block_index = 0; block_index < kds_src->nitems; block_index++)
 	{
 		PageHeaderData *page = KDS_BLOCK_PGPAGE(kds_src, block_index);
@@ -2004,9 +2004,7 @@ __handleDpuScanExecArrow(dpuClient *dclient,
 	kern_context	   *kcxt;
 	uint32_t			kds_index;
 
-	assert(kds_src->format == KDS_FORMAT_ARROW &&
-		   kexp_load_vars->opcode == FuncOpCode__LoadVars &&
-		   kexp_scan_quals->exptype == TypeOpCode__bool);
+	assert(kds_src->format == KDS_FORMAT_ARROW);
 	INIT_KERNEL_CONTEXT(kcxt, session);
 	for (kds_index = 0; kds_index < kds_src->nitems; kds_index++)
 	{

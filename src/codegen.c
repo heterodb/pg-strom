@@ -1683,7 +1683,14 @@ codegen_var_expression(codegen_context *context,
 		kexp.expflags        = context->kexp_flags;
 		kexp.opcode          = FuncOpCode__VarExpr;
 		kexp.u.v.var_slot_id = kvdef->kv_slot_id;
-		if (kvdef->kv_offset >= 0 &&
+		/*
+		 * NOTE: GPU uses kvec-buffer to save intermediation results
+		 * per depth, because different core shall handle this result
+		 * on the next depth, and private values are not visible to
+		 * others.
+		 */
+		if ((context->extra_flags & DEVKIND__NVIDIA_GPU) != 0 &&
+			kvdef->kv_offset >= 0 &&
 			kvdef->kv_depth != curr_depth)
 			kexp.u.v.var_offset = kvdef->kv_offset;
 		else
@@ -3006,6 +3013,10 @@ codegen_build_packed_kvars_move(codegen_context *context, pgstromPlanInfo *pp_in
 	int			nvalids = 0;
 	int			gist_depth = context->num_rels + 1;
 
+	/* Only NVIDIA-GPU has kvec-buffer for MoveVars across depth */
+	if ((context->extra_flags & DEVKIND__NVIDIA_GPU) == 0)
+		return;
+
 	sz = MAXALIGN(offsetof(kern_expression,
 						   u.pack.offset[context->num_rels+1]));
 	kexp = alloca(sz);
@@ -3056,6 +3067,9 @@ codegen_build_packed_kvars_move(codegen_context *context, pgstromPlanInfo *pp_in
 		pp_info->kexp_move_vars_packed = xpucode;
 	}
 	pfree(buf.data);
+
+	pp_info->kvecs_bufsz = KVEC_ALIGN(context->kvecs_usage);
+	pp_info->kvecs_ndims = context->kvecs_ndims;
 }
 
 /*
@@ -4014,6 +4028,9 @@ estimate_cuda_stack_size(codegen_context *context)
 	int			kvars_nslots;
 	ListCell   *lc;
 
+	/* only NVIDIA-GPU needs stack configuration */
+	if ((context->extra_flags & DEVKIND__NVIDIA_GPU) == 0)
+		return 0;
 	/* minimum working area */
 	stack_sz = 3200;
 	/* kern_context */
@@ -4749,6 +4766,11 @@ pgstrom_explain_kvecs_buffer(const CustomScanState *css,
 	uint32_t	nitems = 0;
 	ListCell   *lc;
 	StringInfoData	buf;
+
+	/* kvecs-buffer actually required? */
+	if (pp_info->kvecs_bufsz == 0 ||
+		pp_info->kvecs_ndims == 0)
+		return;
 
 	kvdef_array = alloca(sizeof(const codegen_kvar_defitem *) * nrooms);
 	foreach (lc, pp_info->kvars_deflist)

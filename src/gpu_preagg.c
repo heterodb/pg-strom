@@ -1846,6 +1846,24 @@ ExecFallbackCpuPreAgg(pgstromTaskState *pts, HeapTuple tuple)
 }
 
 /*
+ * __pgstrom_init_xpupreagg_common
+ */
+static void
+__pgstrom_init_xpupreagg_common(void)
+{
+	static bool		xpupreagg_common_initialized = false;
+
+	if (!xpupreagg_common_initialized)
+	{
+		create_upper_paths_next = create_upper_paths_hook;
+		create_upper_paths_hook = XpuPreAggAddCustomPath;
+		CacheRegisterSyscacheCallback(PROCOID, aggfunc_catalog_htable_invalidator, 0);
+
+		xpupreagg_common_initialized = true;
+	}
+}
+
+/*
  * Entrypoint of GpuPreAgg
  */
 void
@@ -1913,13 +1931,8 @@ pgstrom_init_gpu_preagg(void)
 	gpupreagg_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	gpupreagg_exec_methods.ShutdownCustomScan  = pgstromSharedStateShutdownDSM;
 	gpupreagg_exec_methods.ExplainCustomScan   = pgstromExplainTaskState;
-	/* hook registration */
-	if (!create_upper_paths_next)
-	{
-		create_upper_paths_next = create_upper_paths_hook;
-		create_upper_paths_hook = XpuPreAggAddCustomPath;
-		CacheRegisterSyscacheCallback(PROCOID, aggfunc_catalog_htable_invalidator, 0);
-	}
+	/* common portion */
+	__pgstrom_init_xpupreagg_common();
 }
 
 /*
@@ -1969,11 +1982,6 @@ pgstrom_init_dpu_preagg(void)
     dpupreagg_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
     dpupreagg_exec_methods.ShutdownCustomScan  = pgstromSharedStateShutdownDSM;
     dpupreagg_exec_methods.ExplainCustomScan   = pgstromExplainTaskState;
-    /* hook registration */
-	if (!create_upper_paths_next)
-	{
-		create_upper_paths_next = create_upper_paths_hook;
-		create_upper_paths_hook = XpuPreAggAddCustomPath;
-		CacheRegisterSyscacheCallback(PROCOID, aggfunc_catalog_htable_invalidator, 0);
-	}
+	/* common portion */
+	__pgstrom_init_xpupreagg_common();
 }
