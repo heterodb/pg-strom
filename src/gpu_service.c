@@ -2815,7 +2815,7 @@ gpuservGpuWorkerMain(void *__arg)
 	rc = cuStreamCreate(&cuda_stream, CU_STREAM_NON_BLOCKING);
 	if (rc != CUDA_SUCCESS)
 		 __FATAL("failed on cuStreamCreate: %s", cuStrError(rc));
-	rc = cuEventCreate(&cuda_event, CU_EVENT_DEFAULT);
+	rc = cuEventCreate(&cuda_event, CU_EVENT_BLOCKING_SYNC);
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuEventCreate: %s", cuStrError(rc));
 
