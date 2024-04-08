@@ -1459,7 +1459,7 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 			if (contain_var_clause((Node *)tle->expr))
 				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 														   (Node *)tle->expr,
-														   context->required_flags,
+														   context->xpu_task_flags,
 														   context->scan_relid,
 														   inner_target_list);
 		}
@@ -1485,7 +1485,7 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 			if (contain_var_clause(node))
 				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 														   node,
-														   context->required_flags,
+														   context->xpu_task_flags,
 														   context->scan_relid,
 														   inner_target_list);
 		}
@@ -1646,9 +1646,11 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	codegen_build_packed_kvars_load(context, pp_info);
 	/* MoveVars for each depth (only GPUs) */
 	codegen_build_packed_kvars_move(context, pp_info);
-
+	/* xpu_task_flags should not be cleared in codege.c */
+	Assert((context->xpu_task_flags &
+			pp_info->xpu_task_flags) == pp_info->xpu_task_flags);
 	pp_info->kvars_deflist = context->kvars_deflist;
-	pp_info->extra_flags = context->extra_flags;
+	pp_info->xpu_task_flags = context->xpu_task_flags;
 	pp_info->extra_bufsz = context->extra_bufsz;
 	pp_info->used_params = context->used_params;
 	pp_info->outer_refs  = outer_refs;

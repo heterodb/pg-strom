@@ -160,7 +160,6 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	exprs = lappend(exprs, kvars_deflist_exprs);
 	privs = lappend(privs, makeInteger(pp_info->kvecs_bufsz));
 	privs = lappend(privs, makeInteger(pp_info->kvecs_ndims));
-	privs = lappend(privs, makeInteger(pp_info->extra_flags));
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
 	privs = lappend(privs, makeInteger(pp_info->cuda_stack_size));
 	privs = lappend(privs, pp_info->fallback_tlist);
@@ -272,7 +271,6 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	}
 	pp_data.kvecs_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.kvecs_ndims = intVal(list_nth(privs, pindex++));
-	pp_data.extra_flags = intVal(list_nth(privs, pindex++));
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.cuda_stack_size = intVal(list_nth(privs, pindex++));
 	pp_data.fallback_tlist = list_nth(privs, pindex++);

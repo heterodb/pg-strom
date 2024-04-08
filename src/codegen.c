@@ -235,10 +235,9 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	devtype_info  **subtypes = alloca(sizeof(devtype_info *) * tupdesc->natts);
 	devtype_info   *dtype;
 	MemoryContext	oldcxt;
-	uint32_t		extra_flags = DEVKIND__ANY;
-	int				j;
+	uint32_t		subtype_flags = DEVKIND__ANY;
 
-	for (j=0; j < tupdesc->natts; j++)
+	for (int j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
 
@@ -248,7 +247,7 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 			ReleaseTupleDesc(tupdesc);
 			return NULL;
 		}
-		extra_flags &= dtype->type_flags;
+		subtype_flags &= dtype->type_flags;
 		subtypes[j] = dtype;
 	}
 	ReleaseTupleDesc(tupdesc);
@@ -260,7 +259,7 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 		dtype->type_extension = pstrdup(ext_name);
 	dtype->type_code = TypeOpCode__composite;
 	dtype->type_oid = tcache->type_id;
-	dtype->type_flags = extra_flags | DEVTYPE__USE_KVARS_SLOTBUF;
+	dtype->type_flags = subtype_flags;
 	dtype->type_length = tcache->typlen;
 	dtype->type_align = typealign_get_width(tcache->typalign);
 	dtype->type_byval = tcache->typbyval;
@@ -301,7 +300,7 @@ build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 		dtype->type_extension = pstrdup(ext_name);
 	dtype->type_code = TypeOpCode__array;
 	dtype->type_oid = tcache->type_id;
-	dtype->type_flags = elem->type_flags | DEVTYPE__USE_KVARS_SLOTBUF;
+	dtype->type_flags = elem->type_flags;
 	dtype->type_length = tcache->typlen;
 	dtype->type_align = typealign_get_width(tcache->typalign);
 	dtype->type_byval = tcache->typbyval;
@@ -1530,7 +1529,7 @@ create_codegen_context(PlannerInfo *root,
 												   pp_info->num_rels + 2]));
 	context->elevel = ERROR;
 	context->root = root;
-	context->required_flags = (pp_info->xpu_task_flags & DEVKIND__ANY);
+	context->xpu_task_flags = pp_info->xpu_task_flags;
 	context->kvecs_ndims = pp_info->num_rels + 1;
 	context->kvecs_usage = 0;
 	context->scan_relid = pp_info->scan_relid;
@@ -1689,7 +1688,7 @@ codegen_var_expression(codegen_context *context,
 		 * on the next depth, and private values are not visible to
 		 * others.
 		 */
-		if ((context->extra_flags & DEVKIND__NVIDIA_GPU) != 0 &&
+		if ((context->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0 &&
 			kvdef->kv_offset >= 0 &&
 			kvdef->kv_depth != curr_depth)
 			kexp.u.v.var_offset = kvdef->kv_offset;
@@ -1717,7 +1716,7 @@ __codegen_func_expression(codegen_context *context,
 
 	dfunc = pgstrom_devfunc_lookup(func_oid, func_args, func_collid);
 	if (!dfunc ||
-		(dfunc->func_flags & context->required_flags) != context->required_flags)
+		(dfunc->func_flags & context->xpu_task_flags & DEVKIND__ANY) == 0)
 		__Elog("function %s is not supported on the target device",
 			   format_procedure(func_oid));
 	dtype = dfunc->func_rettype;
@@ -3014,7 +3013,7 @@ codegen_build_packed_kvars_move(codegen_context *context, pgstromPlanInfo *pp_in
 	int			gist_depth = context->num_rels + 1;
 
 	/* Only NVIDIA-GPU has kvec-buffer for MoveVars across depth */
-	if ((context->extra_flags & DEVKIND__NVIDIA_GPU) == 0)
+	if ((context->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0)
 		return;
 
 	sz = MAXALIGN(offsetof(kern_expression,
@@ -3984,7 +3983,7 @@ codegen_build_groupby_actions(codegen_context *context,
  */
 bool
 pgstrom_xpu_expression(Expr *expr,
-					   uint32_t required_xpu_flags,
+					   uint32_t xpu_task_flags,
 					   Index scan_relid,
 					   List *inner_target_list,
 					   int *p_devcost)
@@ -3995,13 +3994,13 @@ pgstrom_xpu_expression(Expr *expr,
 	int			depth;
 	ListCell   *lc;
 
-	Assert((required_xpu_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
-		   (required_xpu_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
+	Assert((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
+		   (xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
 	context = alloca(sz);
 	memset(context, 0, sz);
 	context->elevel = DEBUG2;
 	context->top_expr = expr;
-	context->required_flags = (required_xpu_flags & DEVKIND__ANY);
+	context->xpu_task_flags = xpu_task_flags;
 	context->scan_relid = scan_relid;
 	context->num_rels = num_rels;
 	depth = 1;
@@ -4029,7 +4028,7 @@ estimate_cuda_stack_size(codegen_context *context)
 	ListCell   *lc;
 
 	/* only NVIDIA-GPU needs stack configuration */
-	if ((context->extra_flags & DEVKIND__NVIDIA_GPU) == 0)
+	if ((context->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0)
 		return 0;
 	/* minimum working area */
 	stack_sz = 3200;

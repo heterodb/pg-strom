@@ -309,7 +309,6 @@ typedef struct
 	List	   *kvars_deflist;
 	uint32_t	kvecs_bufsz;	/* unit size of vectorized kernel values */
 	uint32_t	kvecs_ndims;
-	uint32_t	extra_flags;
 	uint32_t	extra_bufsz;
 	uint32_t	cuda_stack_size;/* estimated stack consumption */
 	/* fallback projection */
@@ -571,8 +570,7 @@ typedef struct
 	Expr	   *top_expr;
 	PlannerInfo *root;
 	List	   *used_params;
-	uint32_t	required_flags;
-	uint32_t	extra_flags;
+	uint32_t	xpu_task_flags;
 	uint32_t	extra_bufsz;
 	uint32_t	device_cost;
 	uint32_t	kexp_flags;
@@ -619,15 +617,6 @@ extern void		codegen_build_packed_kvars_load(codegen_context *context,
 												pgstromPlanInfo *pp_info);
 extern void		codegen_build_packed_kvars_move(codegen_context *context,
 												pgstromPlanInfo *pp_info);
-
-extern void		codegen_build_packed_xpucode(bytea **p_xpucode,
-											 List *exprs_list,
-											 bool inject_hash_value,
-											 List *input_rels_tlist,
-											 uint32_t *p_extra_flags,
-											 uint32_t *p_extra_bufsz,
-											 uint32_t *p_kvars_nslots,
-											 List **p_used_params);
 extern bool		pgstrom_xpu_expression(Expr *expr,
 									   uint32_t required_xpu_flags,
 									   Index scan_relid,
