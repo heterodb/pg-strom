@@ -676,7 +676,7 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 " -arch=native --threads 4"
 						 " --device-c"
 						 " -o %s.o"
-						 " %s/pg_strom/%s.cu' >& %s.log",
+						 " %s/pg_strom/%s.cu' > %s.log 2>&1",
 						 pgstrom_cuda_toolkit_basedir,
 						 CUDA_MAXREGCOUNT,
 						 PGINCLUDEDIR,
@@ -699,7 +699,7 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 	{
 		appendStringInfo(&cmd, " %s.o", tok);
 	}
-	appendStringInfo(&cmd, "' >& %s.log", fatbin_file);
+	appendStringInfo(&cmd, "' > %s.log 2>&1", fatbin_file);
 
 	elog(LOG, "rebuild fatbin command: %s", cmd.data);
 	status = system(cmd.data);
