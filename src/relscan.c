@@ -607,7 +607,7 @@ __relScanDirectCheckBufferClean(SMgrRelation smgr, BlockNumber block_num)
 		LWLockRelease(bufLock);
 		return true;		/* OK, block is not buffered */
 	}
-	bufDesc = GetBufferDescriptor(buffer - 1);
+	bufDesc = GetBufferDescriptor(buffer);
 	bufState = pg_atomic_read_u32(&bufDesc->state);
 	LWLockRelease(bufLock);
 
