@@ -17,7 +17,7 @@
 static MemoryContext	devinfo_memcxt = NULL;
 static List	   *devtype_info_slot[DEVTYPE_INFO_NSLOTS];
 static List	   *devfunc_info_slot[DEVFUNC_INFO_NSLOTS];
-static List	   *devfunc_code_slot[DEVFUNC_INFO_NSLOTS];	/* by FuncOpCode */
+static HTAB	   *devfunc_rev_htable = NULL;		/* lookup by FuncOpCode */
 
 /* -------- static declarations -------- */
 #define TYPE_OPCODE(NAME,EXTENSION,FLAGS)								\
@@ -1067,13 +1067,6 @@ __pgstrom_devfunc_lookup(Oid func_oid,
 	dfunc->hash = hash;
 	devfunc_info_slot[i] = lappend_cxt(devinfo_memcxt,
 									   devfunc_info_slot[i], dfunc);
-	if (!dfunc->func_is_negative)
-	{
-		hash = hash_any((unsigned char *)&dfunc->func_code, sizeof(FuncOpCode));
-		i = hash % DEVFUNC_INFO_NSLOTS;
-		devfunc_code_slot[i] = lappend_cxt(devinfo_memcxt,
-										   devfunc_code_slot[i], dfunc);
-	}
 found:
 	if (dfunc->func_is_negative)
 		return NULL;
@@ -1107,21 +1100,83 @@ pgstrom_devfunc_lookup(Oid func_oid,
 	return __pgstrom_devfunc_lookup(func_oid, nargs, argtypes, func_collid);
 }
 
-static devfunc_info *
-devfunc_lookup_by_opcode(FuncOpCode func_code)
+/*
+ * devfunc_lookup_by_opcode - reverse lookup of device function
+ */
+typedef struct {
+	FuncOpCode		opcode;
+	bool			is_valid;
+	bool			device_only;
+	const char	   *dfunc_name;
+} devfunc_reverse_entry;
+
+static const char *
+devfunc_get_name_by_opcode(FuncOpCode func_code, bool *p_device_only)
 {
-	Datum		hash;
-	uint32_t	index;
-	ListCell   *lc;
+	devfunc_reverse_entry *entry;
+	bool		found;
 
-	hash = hash_any((unsigned char *)&func_code, sizeof(FuncOpCode));
-	index = hash % DEVFUNC_INFO_NSLOTS;
-	foreach (lc, devfunc_code_slot[index])
+	if (!devfunc_rev_htable)
 	{
-		devfunc_info *dfunc = lfirst(lc);
+		HASHCTL	hctl;
 
-		if (dfunc->func_code == func_code)
-			return dfunc;
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = sizeof(FuncOpCode);
+		hctl.entrysize = sizeof(devfunc_reverse_entry);
+		hctl.hcxt = devinfo_memcxt;
+
+		devfunc_rev_htable = hash_create("devfunc_rev_htable",
+										 256,
+										 &hctl,
+										 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+
+	entry = (devfunc_reverse_entry *)
+		hash_search(devfunc_rev_htable, &func_code, HASH_ENTER, &found);
+	if (!found)
+	{
+		static struct {
+			FuncOpCode	func_code;
+			const char *func_name;
+			const char *func_args;
+			const char *rtype_name;
+		} devonlyfunc_catalog[] = {
+#define DEVONLY_FUNC_OPCODE(RET_TYPE,DEV_NAME,FUNC_ARGS,a,b)			\
+			{FuncOpCode__##DEV_NAME, #DEV_NAME, #FUNC_ARGS, #RET_TYPE},
+#include "xpu_opcodes.h"
+			{FuncOpCode__Invalid,NULL,NULL}
+		};
+
+		for (int i=0; devfunc_catalog[i].func_code != FuncOpCode__Invalid; i++)
+		{
+			if (devfunc_catalog[i].func_code == func_code)
+			{
+				entry->is_valid    = true;
+				entry->device_only = false;
+				entry->dfunc_name  = devfunc_catalog[i].func_name;
+				goto found;
+			}
+		}
+
+		for (int i=0; devonlyfunc_catalog[i].func_code != FuncOpCode__Invalid; i++)
+		{
+			if (devonlyfunc_catalog[i].func_code == func_code)
+			{
+				entry->is_valid    = true;
+				entry->device_only = true;
+				entry->dfunc_name  = devonlyfunc_catalog[i].func_name;
+				goto found;
+			}
+		}
+		entry->is_valid   = false;
+		entry->dfunc_name = NULL;
+	}
+found:
+	if (entry->is_valid)
+	{
+		if (p_device_only)
+			*p_device_only = entry->device_only;
+		return entry->dfunc_name;
 	}
 	return NULL;
 }
@@ -4412,9 +4467,9 @@ __xpucode_to_cstring(StringInfo buf,
 {
 	const kern_expression *karg;
 	const codegen_kvar_defitem *kvdef;
-	devfunc_info *dfunc;
 	const char *dname;
 	const char *label;
+	bool		device_only;
 	int			i, pos;
 
 	switch (kexp->opcode)
@@ -4602,47 +4657,17 @@ __xpucode_to_cstring(StringInfo buf,
 			break;
 
 		default:
-			{
-				static struct {
-					FuncOpCode	func_code;
-					const char *func_name;
-					const char *rettype_name;
-				} devonly_funcs_catalog[] = {
-#define DEVONLY_FUNC_OPCODE(RET_TYPE,DEV_NAME,a,b,c)	\
-					{FuncOpCode__##DEV_NAME, #DEV_NAME, #RET_TYPE},
-#include "xpu_opcodes.h"
-					{FuncOpCode__Invalid,NULL,NULL}
-				};
-
-				dfunc = devfunc_lookup_by_opcode(kexp->opcode);
-				if (dfunc)
-				{
-					dname = devtype_get_name_by_opcode(kexp->exptype);
-					appendStringInfo(buf, "{Func(%s)::%s",
-									 dname,
-                                     dfunc->func_name);
-				}
-				else
-				{
-					const char *func_name = NULL;
-					const char *rettype_name = NULL;
-
-					for (i=0; devonly_funcs_catalog[i].func_code; i++)
-					{
-						if (devonly_funcs_catalog[i].func_code == kexp->opcode)
-						{
-							func_name = devonly_funcs_catalog[i].func_name;
-							rettype_name = devonly_funcs_catalog[i].rettype_name;
-							break;
-						}
-					}
-					if (!func_name || !rettype_name)
-						elog(ERROR, "unknown device only function: %u", kexp->opcode);
-					appendStringInfo(buf, "{DevOnlyFunc::%s(%s)",
-									 func_name,
-									 rettype_name);
-				}
-			}
+			dname = devfunc_get_name_by_opcode(kexp->opcode, &device_only);
+			if (!dname)
+				elog(ERROR, "unknown device function (code: %u)", kexp->opcode);
+			if (!device_only)
+				appendStringInfo(buf, "{Func(%s)::%s",
+								 devtype_get_name_by_opcode(kexp->exptype),
+								 dname);
+			else
+				appendStringInfo(buf, "{DevOnlyFunc::%s(%s)",
+								 dname,
+								 devtype_get_name_by_opcode(kexp->exptype));
 			break;
 	}
 	if (kexp->nr_args > 0)
@@ -4855,10 +4880,12 @@ pgstrom_xpucode_to_string(bytea *xpu_code)
 static void
 pgstrom_devcache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 {
+	hash_destroy(devfunc_rev_htable);
+	devfunc_rev_htable = NULL;
+
 	MemoryContextReset(devinfo_memcxt);
 	memset(devtype_info_slot, 0, sizeof(List *) * DEVTYPE_INFO_NSLOTS);
 	memset(devfunc_info_slot, 0, sizeof(List *) * DEVFUNC_INFO_NSLOTS);
-	memset(devfunc_code_slot, 0, sizeof(List *) * DEVFUNC_INFO_NSLOTS);
 
 	__type_oid_cache_int1	= UINT_MAX;
 	__type_oid_cache_float2	= UINT_MAX;
