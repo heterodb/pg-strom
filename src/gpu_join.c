@@ -1559,11 +1559,11 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	context = create_codegen_context(root, cpath, pp_info);
 
 	/* codegen for outer scan, if any */
-	if (pp_info->scan_quals_fallback)
+	if (pp_info->scan_quals)
 	{
 		pp_info->kexp_scan_quals
-			= codegen_build_scan_quals(context, pp_info->scan_quals_fallback);
-		pull_varattnos((Node *)pp_info->scan_quals_fallback,
+			= codegen_build_scan_quals(context, pp_info->scan_quals);
+		pull_varattnos((Node *)pp_info->scan_quals,
 					   pp_info->scan_relid,
 					   &outer_refs);
 	}
@@ -1694,10 +1694,10 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.scanrelid = pp_info->scan_relid;
 	cscan->flags = cpath->flags;
-	cscan->custom_plans = custom_plans;
-	cscan->custom_scan_tlist = context->tlist_dev;
 	cscan->methods = xpujoin_plan_methods;
-
+	cscan->custom_plans = custom_plans;
+	cscan->custom_scan_tlist = assign_custom_cscan_tlist(context->tlist_dev,
+														 pp_info);
 	return cscan;
 }
 
@@ -1764,22 +1764,8 @@ PlanDpuJoinPath(PlannerInfo *root,
 static Node *
 CreateGpuJoinState(CustomScan *cscan)
 {
-	pgstromTaskState *pts;
-	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
-	int			num_rels = list_length(cscan->custom_plans);
-
 	Assert(cscan->methods == &gpujoin_plan_methods);
-	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
-	NodeSetTag(pts, T_CustomScanState);
-	pts->css.flags = cscan->flags;
-	pts->css.methods = &gpujoin_exec_methods;
-	pts->xpu_task_flags = pp_info->xpu_task_flags;
-	pts->pp_info = pp_info;
-	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__GPUJOIN &&
-		   pp_info->num_rels == num_rels);
-	pts->num_rels = num_rels;
-
-	return (Node *)pts;
+	return pgstromCreateTaskState(cscan, &gpujoin_exec_methods);
 }
 
 /*
@@ -1788,22 +1774,8 @@ CreateGpuJoinState(CustomScan *cscan)
 static Node *
 CreateDpuJoinState(CustomScan *cscan)
 {
-	pgstromTaskState *pts;
-	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
-	int			num_rels = list_length(cscan->custom_plans);
-
 	Assert(cscan->methods == &dpujoin_plan_methods);
-	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
-	NodeSetTag(pts, T_CustomScanState);
-	pts->css.flags = cscan->flags;
-	pts->css.methods = &dpujoin_exec_methods;
-	pts->xpu_task_flags = pp_info->xpu_task_flags;
-	pts->pp_info = pp_info;
-	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__DPUJOIN &&
-		   pp_info->num_rels == num_rels);
-	pts->num_rels = num_rels;
-
-	return (Node *)pts;
+	return pgstromCreateTaskState(cscan, &dpujoin_exec_methods);
 }
 
 /* ---------------------------------------------------------------- *
@@ -2715,38 +2687,64 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 }
 
 static void
+__execFallbackCpuProjection(pgstromTaskState *pts)
+{
+	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
+	TupleTableSlot *fallback_slot = pts->fallback_slot;
+	ListCell	   *lc;
+	int				j=0;
+
+	foreach (lc, pts->fallback_proj)
+	{
+		ExprState  *state = lfirst(lc);
+		Datum		datum;
+		bool		isnull;
+
+		if (state)
+		{
+			datum = ExecEvalExpr(state, econtext, &isnull);
+
+			if (isnull)
+			{
+				fallback_slot->tts_isnull[j] = true;
+				fallback_slot->tts_values[j] = 0;
+			}
+			else
+			{
+				fallback_slot->tts_isnull[j] = false;
+				fallback_slot->tts_values[j] = datum;
+			}
+		}
+		j++;
+	}
+}
+
+static void
 __execFallbackCpuJoinOneDepth(pgstromTaskState *pts, int depth)
 {
-	kern_multirels	   *h_kmrels = pts->h_kmrels;
-	kern_data_store	   *kds_in;
-	bool			   *oj_map;
-
-	if (depth > h_kmrels->num_rels)
+	if (depth > pts->num_rels)
 	{
 		/* apply projection if any */
 		HeapTuple		tuple;
 		bool			should_free;
 
 		if (pts->fallback_proj)
-		{
-			TupleTableSlot *proj_slot = ExecProject(pts->fallback_proj);
-
-			tuple = ExecFetchSlotHeapTuple(proj_slot, false, &should_free);
-		}
-		else
-		{
-			tuple = ExecFetchSlotHeapTuple(pts->fallback_slot, false, &should_free);
-		}
-		/* save the tuple on the fallback buffer */
+			__execFallbackCpuProjection(pts);
+		tuple = ExecFetchSlotHeapTuple(pts->fallback_slot,
+									   false,
+									   &should_free);
 		pgstromStoreFallbackTuple(pts, tuple);
 		if (should_free)
 			pfree(tuple);
 	}
 	else
 	{
+		kern_multirels	   *h_kmrels = pts->h_kmrels;
+		kern_data_store	   *kds_in;
+		bool			   *oj_map;
+
 		kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth-1);
 		oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth-1);
-
 		if (h_kmrels->chunks[depth-1].is_nestloop)
 		{
 			__execFallbackCpuNestLoop(pts, kds_in, oj_map, depth);
@@ -2768,40 +2766,10 @@ ExecFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple)
 	size_t			fallback_index_saved = pts->fallback_index;
 	ListCell	   *lc;
 
-	ExecForceStoreHeapTuple(tuple, base_slot, false);
-	econtext->ecxt_scantuple = base_slot;
-	/* check WHERE-clause if any */
-	if (pts->base_quals)
-	{
-		ResetExprContext(econtext);
-		if (!ExecQual(pts->base_quals, econtext))
-			return 0;
-	}
-
-	/*
-	 * Shortcut, if GpuJoin is not involved. (GpuScan or GpuPreAgg + GpuScan).
-	 * This case does not have fallback_slot, and the fallback_proj directly
-	 * transforms the base-tuple to the ss_ScanTupleSlot.
-	 */
-	if (pts->num_rels == 0)
-	{
-		TupleTableSlot *proj_slot;
-		HeapTuple	proj_htup;
-		bool		should_free;
-
-		Assert(pts->fallback_slot == 0);
-		proj_slot = ExecProject(pts->fallback_proj);
-		proj_htup = ExecFetchSlotHeapTuple(proj_slot, false, &should_free);
-		pgstromStoreFallbackTuple(pts, proj_htup);
-		if (should_free)
-			pfree(proj_htup);
-		return 1;
-	}
-
 	/* Load the base tuple (depth-0) to the fallback slot */
+	ExecForceStoreHeapTuple(tuple, base_slot, false);
 	slot_getallattrs(base_slot);
-	Assert(fallback_slot != NULL);
-    ExecStoreAllNullTuple(fallback_slot);
+	ExecStoreAllNullTuple(fallback_slot);
 	foreach (lc, pp_info->kvars_deflist)
 	{
 		codegen_kvar_defitem *kvdef = lfirst(lc);
@@ -2810,16 +2778,23 @@ ExecFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple)
 			kvdef->kv_resno >= 1 &&
 			kvdef->kv_resno <= base_slot->tts_nvalid)
 		{
-			int		dst = kvdef->kv_slot_id;
 			int		src = kvdef->kv_resno - 1;
+			int		dst = kvdef->kv_slot_id;
 
 			fallback_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
 			fallback_slot->tts_values[dst] = base_slot->tts_values[src];
 		}
 	}
 	econtext->ecxt_scantuple = fallback_slot;
+
+	/* check WHERE-clause if any */
+	if (pts->base_quals)
+	{
+		ResetExprContext(econtext);
+		if (!ExecQual(pts->base_quals, econtext))
+			return 0;
+	}
 	/* Run JOIN, if any */
-	Assert(pts->h_kmrels);
 	__execFallbackCpuJoinOneDepth(pts, 1);
 	return (pts->fallback_index -  fallback_index_saved > 0);
 }

@@ -280,8 +280,7 @@ typedef struct
 	List	   *used_params;		/* param list in use */
 	List	   *host_quals;			/* host qualifiers to scan the outer */
 	Index		scan_relid;			/* relid of the outer relation to scan */
-	List	   *scan_quals_fallback;/* device qualifiers to scan the outer */
-	List	   *scan_quals_explain;	/* device qualifiers for EXPLAIN output */
+	List	   *scan_quals;			/* device qualifiers to scan the outer */
 	double		scan_tuples;		/* copy of baserel->tuples */
 	double		scan_nrows;			/* copy of baserel->rows */
 	int			parallel_nworkers;	/* # of parallel workers */
@@ -468,7 +467,8 @@ struct pgstromTaskState
 	size_t				fallback_bufsz;
 	char			   *fallback_buffer;
 	TupleTableSlot	   *fallback_slot;	/* host-side kvars-slot */
-	ProjectionInfo	   *fallback_proj;	/* base or fallback slot -> custom_tlist */
+	List			   *fallback_proj;
+//	ProjectionInfo	   *fallback_proj;	/* base or fallback slot -> custom_tlist */
 	/* request command buffer (+ status for table scan) */
 	TBMIterateResult   *curr_tbm;
 	Buffer				curr_vm_buffer;		/* for visibility-map */
@@ -547,7 +547,7 @@ extern int		heterodbExtraGetError(const char **p_filename,
  */
 typedef struct
 {
-	int			kv_slot_id;		/* slot-id of kernel varslot / CPU fallback */
+	int			kv_slot_id;		/* slot-id of kernel varslot */
 	int			kv_depth;		/* source depth */
 	int			kv_resno;		/* source resno, if exist */
 	int			kv_maxref;		/* max depth that references this column. */
@@ -559,6 +559,7 @@ typedef struct
 	int16_t		kv_typlen;		/* typlen from the catalog */
 	int			kv_xdatum_sizeof;/* =sizeof(xpu_XXXX_t), if any */
 	int			kv_kvec_sizeof;	/* =sizeof(kvec_XXXX_t), if any */
+	int			kv_fallback;	/* slot-id for CPU fallback */
 	Expr	   *kv_expr;		/* original expression */
 	List	   *kv_subfields;	/* subfields definition, if array or composite */
 } codegen_kvar_defitem;
@@ -718,6 +719,8 @@ extern void		xpuClientPutResponse(XpuCommand *xcmd);
 extern const XpuCommand *pgstromBuildSessionInfo(pgstromTaskState *pts,
 												 uint32_t join_inner_handle,
 												 TupleDesc tdesc_final);
+extern Node	   *pgstromCreateTaskState(CustomScan *cscan,
+									   const CustomExecMethods *methods);
 extern void		pgstromExecInitTaskState(CustomScanState *node,
 										  EState *estate,
 										 int eflags);
@@ -816,6 +819,8 @@ extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
 extern void		sort_device_qualifiers(List *dev_quals_list,
 									   List *dev_costs_list);
 extern pgstromPlanInfo *try_fetch_xpuscan_planinfo(const Path *path);
+extern List	   *assign_custom_cscan_tlist(List *tlist_dev,
+										  pgstromPlanInfo *pp_info);
 extern List	   *buildOuterScanPlanInfo(PlannerInfo *root,
 									   RelOptInfo *baserel,
 									   uint32_t xpu_task_flags,

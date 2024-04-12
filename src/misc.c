@@ -42,6 +42,7 @@ __form_codegen_kvar_defitem(codegen_kvar_defitem *kvdef,
 	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_typlen));
 	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_xdatum_sizeof));
 	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_kvec_sizeof));
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_fallback));
 	__kv_exprs = lappend(__kv_exprs, kvdef->kv_expr);
 	foreach (lc, kvdef->kv_subfields)
 	{
@@ -83,6 +84,7 @@ __deform_codegen_kvar_defitem(List *__kv_privs, List *__kv_exprs)
 	kvdef->kv_typlen    = intVal(list_nth(__kv_privs, pindex++));
 	kvdef->kv_xdatum_sizeof = intVal(list_nth(__kv_privs, pindex++));
 	kvdef->kv_kvec_sizeof = intVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_fallback  = intVal(list_nth(__kv_privs, pindex++));
 	kvdef->kv_expr      = list_nth(__kv_exprs, eindex++);
 	__sub_privs         = list_nth(__kv_privs, pindex++);
 	__sub_exprs         = list_nth(__kv_exprs, eindex++);
@@ -118,8 +120,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	exprs = lappend(exprs, pp_info->used_params);
 	privs = lappend(privs, pp_info->host_quals);
 	privs = lappend(privs, makeInteger(pp_info->scan_relid));
-	privs = lappend(privs, pp_info->scan_quals_fallback);
-	exprs = lappend(exprs, pp_info->scan_quals_explain);
+	exprs = lappend(exprs, pp_info->scan_quals);
 	privs = lappend(privs, __makeFloat(pp_info->scan_tuples));
 	privs = lappend(privs, __makeFloat(pp_info->scan_nrows));
 	privs = lappend(privs, makeInteger(pp_info->parallel_nworkers));
@@ -230,8 +231,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.used_params  = list_nth(exprs, eindex++);
 	pp_data.host_quals   = list_nth(privs, pindex++);
 	pp_data.scan_relid   = intVal(list_nth(privs, pindex++));
-	pp_data.scan_quals_fallback = list_nth(privs, pindex++);
-	pp_data.scan_quals_explain = list_nth(exprs, eindex++);
+	pp_data.scan_quals   = list_nth(exprs, eindex++);
 	pp_data.scan_tuples  = floatVal(list_nth(privs, pindex++));
 	pp_data.scan_nrows   = floatVal(list_nth(privs, pindex++));
 	pp_data.parallel_nworkers = intVal(list_nth(privs, pindex++));
@@ -330,8 +330,7 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 									  inners[pp_orig->num_rels]));
 	pp_dest->used_params      = list_copy(pp_dest->used_params);
 	pp_dest->host_quals       = copyObject(pp_dest->host_quals);
-	pp_dest->scan_quals_fallback = copyObject(pp_dest->scan_quals_fallback);
-	pp_dest->scan_quals_explain = copyObject(pp_dest->scan_quals_explain);
+	pp_dest->scan_quals       = copyObject(pp_dest->scan_quals);
 	pp_dest->brin_index_conds = copyObject(pp_dest->brin_index_conds);
 	pp_dest->brin_index_quals = copyObject(pp_dest->brin_index_quals);
 	foreach (lc, pp_orig->kvars_deflist)
