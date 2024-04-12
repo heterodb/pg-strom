@@ -1058,6 +1058,8 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 											   xpujoin_path_methods);
 		}
 		/* 2nd trial uses the partial paths */
+		if (!joinrel->consider_parallel)
+			break;
 		inner_pathlist = innerrel->partial_pathlist;
 	}
 }
@@ -1116,7 +1118,7 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 	/* quick bailout if PG-Strom is not enabled */
 	if (pgstrom_enabled())
 	{
-		if (pgstrom_enable_gpujoin)
+		if (pgstrom_enable_gpujoin && gpuserv_ready_accept())
 			__xpuJoinAddCustomPathCommon(root,
 										 joinrel,
 										 outerrel,
@@ -1457,7 +1459,7 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 			if (contain_var_clause((Node *)tle->expr))
 				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 														   (Node *)tle->expr,
-														   context->required_flags,
+														   context->xpu_task_flags,
 														   context->scan_relid,
 														   inner_target_list);
 		}
@@ -1483,7 +1485,7 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 			if (contain_var_clause(node))
 				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 														   node,
-														   context->required_flags,
+														   context->xpu_task_flags,
 														   context->scan_relid,
 														   inner_target_list);
 		}
@@ -1640,17 +1642,20 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		= codegen_build_packed_hashkeys(context,
 										hash_keys_stacked);
 	codegen_build_packed_gistevals(context, pp_info);
+	/* LoadVars for each depth */
 	codegen_build_packed_kvars_load(context, pp_info);
+	/* MoveVars for each depth (only GPUs) */
 	codegen_build_packed_kvars_move(context, pp_info);
-
+	/* xpu_task_flags should not be cleared in codege.c */
+	Assert((context->xpu_task_flags &
+			pp_info->xpu_task_flags) == pp_info->xpu_task_flags);
 	pp_info->kvars_deflist = context->kvars_deflist;
-	pp_info->kvecs_bufsz = KVEC_ALIGN(context->kvecs_usage);
-	pp_info->kvecs_ndims = context->kvecs_ndims;
-	pp_info->extra_flags = context->extra_flags;
+	pp_info->xpu_task_flags = context->xpu_task_flags;
 	pp_info->extra_bufsz = context->extra_bufsz;
-	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
 	pp_info->used_params = context->used_params;
 	pp_info->outer_refs  = outer_refs;
+	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
+
 	/*
 	 * fixup fallback expressions
 	 */
@@ -2349,8 +2354,8 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				pgstromTaskInnerState *istate = &leader->inners[i];
 				inner_preload_buffer *preload_buf = istate->preload_buffer;
 				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, i);
-				uint32_t	base_nitems;
-				uint32_t	base_usage;
+				uint64_t	base_nitems;
+				uint64_t	base_usage;
 
 				/*
 				 * If this backend/worker process called GpuJoinInnerPreload()
@@ -2361,6 +2366,20 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 					continue;
 
 				SpinLockAcquire(&ps_state->preload_mutex);
+				/*
+				 * Sanity checks - KDS must be less than 32GB because of 32-bit
+				 * offset design (it is always aligned to 64bit).
+				 */
+				if (KDS_HEAD_LENGTH(kds) +
+					MAXALIGN(sizeof(uint32_t) * (kds->hash_nslots +
+												 kds->nitems +
+												 preload_buf->nitems)) +
+					__kds_unpack(kds->usage) +
+					preload_buf->usage >= __KDS_LENGTH_LIMIT)
+				{
+					SpinLockRelease(&ps_state->preload_mutex);
+					elog(ERROR, "Inner-KDS was expanding too large");
+				}
 				base_nitems  = kds->nitems;
 				kds->nitems += preload_buf->nitems;
 				base_usage   = kds->usage;
@@ -2896,10 +2915,10 @@ ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts, XpuCommand *resp)
 }
 
 /*
- * pgstrom_init_xpu_join_common
+ * __pgstrom_init_xpujoin_common
  */
 static void
-pgstrom_init_xpu_join_common(void)
+__pgstrom_init_xpujoin_common(void)
 {
 	static bool	__initialized = false;
 
@@ -2987,8 +3006,8 @@ pgstrom_init_gpu_join(void)
 	gpujoin_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	gpujoin_exec_methods.ShutdownCustomScan		= pgstromSharedStateShutdownDSM;
 	gpujoin_exec_methods.ExplainCustomScan		= pgstromExplainTaskState;
-
-	pgstrom_init_xpu_join_common();
+	/* common portion */
+	__pgstrom_init_xpujoin_common();
 }
 
 
@@ -3057,6 +3076,6 @@ pgstrom_init_dpu_join(void)
 	dpujoin_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	dpujoin_exec_methods.ShutdownCustomScan     = pgstromSharedStateShutdownDSM;
 	dpujoin_exec_methods.ExplainCustomScan      = pgstromExplainTaskState;
-
-	pgstrom_init_xpu_join_common();
+	/* common portion */
+	__pgstrom_init_xpujoin_common();
 }

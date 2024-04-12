@@ -36,6 +36,7 @@ static long				dpuserv_num_workers = -1;
 static char			   *dpuserv_identifier = NULL;
 static const char	   *dpuserv_logfile = NULL;
 static bool				verbose = false;
+static bool				use_direct_io = false;
 static pthread_mutex_t	dpu_client_mutex;
 static dlist_head		dpu_client_list;
 static pthread_mutex_t	dpu_command_mutex;
@@ -684,9 +685,12 @@ __dpuservLoadKdsCommon(dpuClient *dclient,
 	kern_data_store *kds;
 	char	   *data;
 	char	   *end		__attribute__((unused));
+	int			flags = O_RDONLY | O_NOATIME;
 	int			fdesc;
 
-	fdesc = open(pathname, O_RDONLY | O_DIRECT | O_NOATIME);
+	if (use_direct_io)
+		flags |= O_DIRECT;
+	fdesc = open(pathname, flags);
 	if (fdesc < 0)
 	{
 		dpuClientElog(dclient, "failed on open('%s'): %m", pathname);
@@ -1932,10 +1936,10 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 	kern_context	   *kcxt;
 	uint32_t			block_index;
 
-	assert(kds_src->format == KDS_FORMAT_BLOCK &&
-		   kexp_load_vars->opcode == FuncOpCode__LoadVars);
+	assert(kds_src->format == KDS_FORMAT_BLOCK);
 	assert(!kmrels || kmrels->num_rels > 0);
 	INIT_KERNEL_CONTEXT(kcxt, session);
+
 	for (block_index = 0; block_index < kds_src->nitems; block_index++)
 	{
 		PageHeaderData *page = KDS_BLOCK_PGPAGE(kds_src, block_index);
@@ -2004,9 +2008,7 @@ __handleDpuScanExecArrow(dpuClient *dclient,
 	kern_context	   *kcxt;
 	uint32_t			kds_index;
 
-	assert(kds_src->format == KDS_FORMAT_ARROW &&
-		   kexp_load_vars->opcode == FuncOpCode__LoadVars &&
-		   kexp_scan_quals->exptype == TypeOpCode__bool);
+	assert(kds_src->format == KDS_FORMAT_ARROW);
 	INIT_KERNEL_CONTEXT(kcxt, session);
 	for (kds_index = 0; kds_index < kds_src->nitems; kds_index++)
 	{
@@ -2657,14 +2659,15 @@ int
 main(int argc, char *argv[])
 {
 	static struct option command_options[] = {
-		{"addr",       required_argument, 0, 'a'},
-		{"port",       required_argument, 0, 'p'},
-		{"directory",  required_argument, 0, 'd'},
-		{"nworkers",   required_argument, 0, 'n'},
-		{"identifier", required_argument, 0, 'i'},
-		{"log",        required_argument, 0, 'l'},
-		{"verbose",    no_argument,       0, 'v'},
-		{"help",       no_argument,       0, 'h'},
+		{"addr",       required_argument, 0,  'a'},
+		{"port",       required_argument, 0,  'p'},
+		{"directory",  required_argument, 0,  'd'},
+		{"nworkers",   required_argument, 0,  'n'},
+		{"identifier", required_argument, 0,  'i'},
+		{"log",        required_argument, 0,  'l'},
+		{"direct-io",  no_argument,       0, 1001},
+		{"verbose",    no_argument,       0,  'v'},
+		{"help",       no_argument,       0,  'h'},
 		{NULL, 0, 0, 0},
 	};
 	struct sockaddr *addr;
@@ -2732,7 +2735,13 @@ main(int argc, char *argv[])
 					__Elog("-l|--log option was given twice");
 				dpuserv_logfile = optarg;
 				break;
-				
+
+			case 1001:
+				if (use_direct_io)
+					__Elog("--direct-io was given twice");
+				use_direct_io = true;
+				break;
+
 			case 'v':
 				verbose = true;
 				break;
@@ -2743,6 +2752,8 @@ main(int argc, char *argv[])
 					  "\t-d|--directory=DIR       tablespace base (default: .)\n"
 					  "\t-n|--nworkers=N_WORKERS  number of workers (default: auto)\n"
 					  "\t-i|--identifier=IDENT    security identifier\n"
+					  "\t-l|--log=LOGFILE         log file (default: stderr)\n"
+					  "\t   --direct-io           enables O_DIRECT (default: no)\n"
 					  "\t-v|--verbose             verbose output\n"
 					  "\t-h|--help                shows this message\n",
 					  stderr);

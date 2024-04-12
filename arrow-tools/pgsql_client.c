@@ -1006,6 +1006,7 @@ sqldb_begin_query(void *sqldb_state,
                   ArrowFileInfo *af_info,
                   SQLdictionary *dictionary_list)
 {
+	static char *snapshot_identifier = NULL;
 	PGSTATE	   *pgstate = sqldb_state;
 	PGconn	   *conn = pgstate->conn;
 	PGresult   *res;
@@ -1017,6 +1018,37 @@ sqldb_begin_query(void *sqldb_state,
 		Elog("unable to begin transaction: %s", PQresultErrorMessage(res));
 	PQclear(res);
 
+	res = PQexec(conn, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		Elog("unable to switch transaction isolation level: %s",
+			 PQresultErrorMessage(res));
+	PQclear(res);
+
+	/* export snaphot / import snapshot */
+	if (!snapshot_identifier)
+	{
+		res = PQexec(conn, "SELECT pg_catalog.pg_export_snapshot()");
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			Elog("unable to export the current transaction snapshot: %s",
+				 PQresultErrorMessage(res));
+		if (PQntuples(res) != 1 || PQnfields(res) != 1)
+			Elog("unexpected result for pg_export_snapshot()");
+		snapshot_identifier = pstrdup(PQgetvalue(res, 0, 0));
+		PQclear(res);
+	}
+	else
+	{
+		char	temp[200];
+
+		snprintf(temp, sizeof(temp),
+				 "SET TRANSACTION SNAPSHOT '%s'",
+				 snapshot_identifier);
+		res = PQexec(conn, temp);
+		if (PQresultStatus(res) != PGRES_COMMAND_OK)
+			Elog("unable to import transaction shapshot: %s",
+				 PQresultErrorMessage(res));
+	}
+
 	/* declare cursor */
 	query = palloc(strlen(sqldb_command) + 1024);
 	sprintf(query, "DECLARE " CURSOR_NAME " BINARY CURSOR FOR %s",
@@ -1026,10 +1058,21 @@ sqldb_begin_query(void *sqldb_state,
 		Elog("unable to declare a SQL cursor: %s", PQresultErrorMessage(res));
 	PQclear(res);
 
-	/* move to the first tuple(-set) */
-	if (!pgsql_move_next(pgstate, NULL))
-		return NULL;
-	return pgsql_create_buffer(pgstate, af_info, dictionary_list);
+	/* fetch schema definition */
+	res = PQexecParams(conn,
+					   "FETCH FORWARD 0 FROM " CURSOR_NAME,
+					   0, NULL, NULL, NULL, NULL,
+					   1);	/* results in binary mode */
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		Elog("SQL execution failed: %s", PQresultErrorMessage(res));
+	pgstate->res = res;
+	pgstate->nitems = PQntuples(res);
+	pgstate->index  = 0;
+	assert(pgstate->nitems == 0);
+
+	return pgsql_create_buffer(pgstate,
+							   af_info,
+							   dictionary_list);
 }
 
 /*

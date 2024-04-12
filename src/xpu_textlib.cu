@@ -170,10 +170,14 @@ xpu_bpchar_datum_write(kern_context *kcxt,
 	}
 	else
 	{
-		nbytes = VARHDRSZ + arg->length;
+		int		sz = VARHDRSZ + arg->length;
+
+		nbytes = Max(sz, cmeta->atttypmod);
 		if (buffer)
 		{
 			memcpy(buffer+VARHDRSZ, arg->value, arg->length);
+			if (sz < cmeta->atttypmod)
+				memset(buffer+sz, ' ', cmeta->atttypmod - sz);
 			SET_VARSIZE(buffer, nbytes);
 		}
 	}

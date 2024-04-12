@@ -557,6 +557,8 @@ __xpuScanAddScanPathCommon(PlannerInfo *root,
 									 false,	/* disallow no device quals*/
 									 xpuscan_path_methods);
 		}
+		if (!baserel->consider_parallel)
+			break;
 	}
 }
 
@@ -572,7 +574,7 @@ XpuScanAddScanPath(PlannerInfo *root,
 
 	if (pgstrom_enabled())
 	{
-		if (enable_gpuscan)
+		if (enable_gpuscan && gpuserv_ready_accept())
 			__xpuScanAddScanPathCommon(root, baserel, rtindex, rte,
 									   TASK_KIND__GPUSCAN,
 									   &gpuscan_path_methods);
@@ -794,19 +796,19 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	/* code generation for the Projection */
 	context->tlist_dev = gpuscan_build_projection(baserel, pp_info, tlist);
 	pp_info->kexp_projection = codegen_build_projection(context);
+	/* VarLoads for each depth */
 	codegen_build_packed_kvars_load(context, pp_info);
+	/* VarMoves for each depth (only GPUs) */
 	codegen_build_packed_kvars_move(context, pp_info);
+	/* xpu_task_flags should not be cleared in codege.c */
+	Assert((context->xpu_task_flags &
+			pp_info->xpu_task_flags) == pp_info->xpu_task_flags);
 	pp_info->kvars_deflist = context->kvars_deflist;
-	pp_info->extra_flags = context->extra_flags;
+	pp_info->xpu_task_flags = context->xpu_task_flags;
 	pp_info->extra_bufsz = context->extra_bufsz;
-	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
 	pp_info->used_params = context->used_params;
+	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
 	__build_explain_tlist_junks(root, baserel, context);
-
-	/* assign kvec buffer size for this scan */
-	pp_info->kvars_deflist = context->kvars_deflist;
-	pp_info->kvecs_bufsz = KVEC_ALIGN(context->kvecs_usage);
-	pp_info->kvecs_ndims = context->kvecs_ndims;
 
 	/*
 	 * Build CustomScan(GpuScan) node
@@ -963,6 +965,24 @@ ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 }
 
 /*
+ * __pgstrom_init_xpuscan_common
+ */
+static void
+__pgstrom_init_xpuscan_common(void)
+{
+	static bool	xpuscan_common_initialized = false;
+
+	if (!xpuscan_common_initialized)
+	{
+		/* hook registration */
+		set_rel_pathlist_next = set_rel_pathlist_hook;
+		set_rel_pathlist_hook = XpuScanAddScanPath;
+
+		xpuscan_common_initialized = true;
+	}
+}
+
+/*
  * pgstrom_init_gpuscan
  */
 void
@@ -1000,13 +1020,8 @@ pgstrom_init_gpu_scan(void)
     gpuscan_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
     gpuscan_exec_methods.ShutdownCustomScan	= pgstromSharedStateShutdownDSM;
     gpuscan_exec_methods.ExplainCustomScan	= pgstromExplainTaskState;
-
-	/* hook registration */
-	if (!set_rel_pathlist_next)
-	{
-		set_rel_pathlist_next = set_rel_pathlist_hook;
-		set_rel_pathlist_hook = XpuScanAddScanPath;
-	}
+	/* common portion */
+	__pgstrom_init_xpuscan_common();
 }
 
 /*
@@ -1047,11 +1062,6 @@ pgstrom_init_dpu_scan(void)
 	dpuscan_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	dpuscan_exec_methods.ShutdownCustomScan = pgstromSharedStateShutdownDSM;
 	dpuscan_exec_methods.ExplainCustomScan	= pgstromExplainTaskState;
-
-	/* hook registration */
-	if (!set_rel_pathlist_next)
-	{
-		set_rel_pathlist_next = set_rel_pathlist_hook;
-		set_rel_pathlist_hook = XpuScanAddScanPath;
-	}
+	/* common portion */
+	__pgstrom_init_xpuscan_common();
 }

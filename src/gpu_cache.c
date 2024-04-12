@@ -79,6 +79,33 @@ GpuCacheOptionsEqual(const GpuCacheOptions *a, const GpuCacheOptions *b)
 }
 
 /*
+ * GpuCacheTableSignatureBuffer
+ */
+typedef struct
+{
+	Oid		reltablespace;
+	Oid		relfilenode;	/* if 0, cannot have gpucache */
+	int16	relnatts;
+	GpuCacheOptions gc_options;
+	struct {
+		Oid		atttypid;
+		int32	atttypmod;
+		int16	attlen;
+		bool	attbyval;
+		char	attalign;
+		bool	attnotnull;
+		bool	attisdropped;
+	} attrs[FLEXIBLE_ARRAY_MEMBER];
+} GpuCacheTableSignatureBuffer;
+
+typedef struct
+{
+	Oid			table_oid;
+	uint64_t	signature;
+	GpuCacheOptions gc_options;
+} GpuCacheTableSignatureCache;
+
+/*
  * GpuCacheSharedState (shared structure; dynamic memory mapped)
  */
 typedef struct
@@ -290,19 +317,17 @@ __parseSyncTriggerOptions(const char *__config, GpuCacheOptions *gc_options)
 
 		if (strcmp(key, "gpu_device_id") == 0)
 		{
-			int		i, gpu_device_id;
-			char   *end;
+			int		gpu_device_id;
 
-			gpu_device_id = strtol(value, &end, 10);
-			if (*end != '\0')
+			gpu_device_id = __strtol(value);
+			if (errno != 0)
 			{
-				elog(WARNING, "gpucache: invalid option [%s]=[%s]",
-					 key, value);
+				elog(WARNING, "gpucache: invalid option [%s]=[%s] : %m", key, value);
 				return false;
 			}
 
 			cuda_dindex = -1;
-			for (i=0; i < numGpuDevAttrs; i++)
+			for (int i=0; i < numGpuDevAttrs; i++)
 			{
 				if (gpuDevAttrs[i].DEV_ID == gpu_device_id)
 				{
@@ -313,81 +338,44 @@ __parseSyncTriggerOptions(const char *__config, GpuCacheOptions *gc_options)
 
 			if (cuda_dindex < 0)
 			{
-				elog(WARNING, "gpucache: gpu_device_id (%d) not found",
-					 gpu_device_id);
+				elog(WARNING, "gpucache: gpu_device_id (%d) not found", gpu_device_id);
 				return false;
 			}
 		}
 		else if (strcmp(key, "max_num_rows") == 0)
 		{
-			char   *end;
-
-			max_num_rows = strtol(value, &end, 10);
-			if (*end != '\0')
+			max_num_rows = __strtol(value);
+			if (errno != 0)
 			{
-				elog(WARNING, "gpucache: invalid option [%s]=[%s]",
-					 key, value);
-				return false;
-			}
-			if (max_num_rows >= UINT_MAX)
-			{
-				elog(WARNING, "gpucache: max_num_rows too large (%lu)",
-					 max_num_rows);
+				elog(WARNING, "gpucache: invalid option [%s]=[%s] : %m", key, value);
 				return false;
 			}
 		}
 		else if (strcmp(key, "gpu_sync_interval") == 0)
 		{
-			char   *end;
-
-			gpu_sync_interval = strtol(value, &end, 10);
-			if (*end != '\0')
+			gpu_sync_interval = __strtol(value);
+			if (errno != 0)
 			{
-				elog(WARNING, "gpucache: invalid option [%s]=[%s]",
-					 key, value);
+				elog(WARNING, "gpucache: invalid option [%s]=[%s] : %m", key, value);
 				return false;
 			}
 			gpu_sync_interval *= 1000000L;	/* [sec -> us] */
 		}
 		else if (strcmp(key, "gpu_sync_threshold") == 0)
 		{
-			char   *end;
-
-			gpu_sync_threshold = strtol(value, &end, 10);
-			if (strcasecmp(end, "g") == 0 || strcasecmp(end, "gb") == 0)
-				gpu_sync_threshold = (gpu_sync_threshold << 30);
-			else if (strcasecmp(end, "m") == 0 || strcasecmp(end, "mb") == 0)
-				gpu_sync_threshold = (gpu_sync_threshold << 20);
-			else if (strcasecmp(end, "k") == 0 || strcasecmp(end, "kb") == 0)
-				gpu_sync_threshold = (gpu_sync_threshold << 10);
-			else if (*end != '\0')
+			gpu_sync_threshold = __strtosz(value);
+			if (errno != 0)
 			{
-				elog(WARNING, "gpucache: invalid option [%s]=[%s]",
-					 key, value);
+				elog(WARNING, "gpucache: invalid option [%s]=[%s]", key, value);
 				return false;
 			}
 		}
 		else if (strcmp(key, "redo_buffer_size") == 0)
 		{
-			char   *end;
-
-			redo_buffer_size = strtol(value, &end, 10);
-			if (strcasecmp(end, "g") == 0 || strcasecmp(end, "gb") == 0)
-				redo_buffer_size = (redo_buffer_size << 30);
-			else if (strcasecmp(end, "m") == 0 || strcasecmp(end, "mb") == 0)
-				redo_buffer_size = (redo_buffer_size << 20);
-			else if (strcasecmp(end, "k") == 0 || strcasecmp(end, "kb") == 0)
-				redo_buffer_size = (redo_buffer_size << 10);
-			else if (*end != '\0')
+			redo_buffer_size = __strtosz(value);
+			if (errno != 0)
 			{
-				elog(WARNING, "gpucache: invalid option [%s]=[%s]",
-					 key, value);
-				return false;
-			}
-			if (redo_buffer_size < (16UL << 20))
-			{
-				elog(WARNING, "gpucache: 'redo_buffer_size' too small (%zu)",
-					 redo_buffer_size);
+				elog(WARNING, "gpucache: invalid option [%s]=[%s]", key, value);
 				return false;
 			}
 		}
@@ -401,11 +389,6 @@ out:
 	{
 		if (gpu_sync_threshold < 0)
 			gpu_sync_threshold = redo_buffer_size / 4;
-		if (gpu_sync_threshold > redo_buffer_size / 2)
-		{
-			elog(WARNING, "gpucache: gpu_sync_threshold is too small");
-			return false;
-		}
 		if (rowid_hash_nslots < 0)
 			rowid_hash_nslots = (max_num_rows + max_num_rows / 5);
 		gc_options->cuda_dindex       = cuda_dindex;
@@ -414,6 +397,85 @@ out:
 		gc_options->max_num_rows      = max_num_rows;
 		gc_options->rowid_hash_nslots = rowid_hash_nslots;
 		gc_options->redo_buffer_size  = redo_buffer_size;
+	}
+	return true;
+}
+
+/*
+ * __validateSyncTriggerOptions
+ */
+static bool
+__validateSyncTriggerOptions(const GpuCacheTableSignatureBuffer *sig)
+{
+	const GpuCacheOptions *gc_options = &sig->gc_options;
+	int			nr_colmeta = sig->relnatts + 1;
+	int64_t		max_num_rows = gc_options->max_num_rows;
+	size_t		main_sz = 0;
+	size_t		extra_sz = 0;
+	int			unitsz;
+
+	if (gc_options->redo_buffer_size < (16UL << 20))
+	{
+		elog(WARNING, "gpucache: 'redo_buffer_size' is too small (%zu)",
+			 gc_options->redo_buffer_size);
+		return false;
+	}
+	if (gc_options->gpu_sync_threshold > gc_options->redo_buffer_size / 2)
+	{
+		elog(WARNING, "gpucache: gpu_sync_threshold is too small (%.2f%% of 'redo_buffer_size')",
+			 ((double)gc_options->gpu_sync_threshold /
+			  (double)gc_options->redo_buffer_size) * 100.0);
+		return false;
+	}
+	if (gc_options->max_num_rows >= UINT_MAX)
+	{
+		elog(WARNING, "gpucache: max_num_rows too large (%lu)",
+			 gc_options->max_num_rows);
+		return false;
+	}
+
+	/* check initial kds_column/kds_extra size */
+	for (int j=0; j < sig->relnatts; j++)
+	{
+		if (!sig->attrs[j].attnotnull)
+			main_sz += MAXALIGN(BITMAPLEN(max_num_rows));
+		if (sig->attrs[j].attlen > 0)
+		{
+			unitsz = att_align_nominal(sig->attrs[j].attlen,
+									   sig->attrs[j].attalign);
+			main_sz += MAXALIGN(unitsz * max_num_rows);
+		}
+		else if (sig->attrs[j].attlen == -1)
+		{
+			main_sz += MAXALIGN(sizeof(uint32_t) * max_num_rows);
+			unitsz = get_typavgwidth(sig->attrs[j].atttypid,
+									 sig->attrs[j].atttypmod);
+			extra_sz += MAXALIGN(unitsz) * max_num_rows;
+		}
+		else
+		{
+			elog(ERROR, "unexpected type length (%d) for type %s",
+				 sig->attrs[j].attlen,
+				 format_type_be(sig->attrs[j].atttypid));
+		}
+		nr_colmeta += count_num_of_subfields(sig->attrs[j].atttypid);
+	}
+	main_sz += (MAXALIGN(offsetof(kern_data_store, colmeta[nr_colmeta])) +	/* KDS Header */
+				MAXALIGN(sizeof(GpuCacheSysattr) * max_num_rows));			/* System Column */
+
+	if (extra_sz > 0)
+	{
+		/* 25% margin + header */
+		extra_sz += extra_sz / 4;
+		extra_sz += offsetof(kern_data_extra, data);
+	}
+	if (main_sz >= __KDS_LENGTH_LIMIT || extra_sz >= __KDS_LENGTH_LIMIT)
+	{
+		elog(WARNING, "gpucache: max_num_rows = %ld consumes too much GPU device memory (main: %s, extra: %s), so we recommend to reduce 'max_num_rows' configuration",
+			 max_num_rows,
+			 format_bytesz(main_sz),
+			 format_bytesz(extra_sz));
+		return false;
 	}
 	return true;
 }
@@ -428,27 +490,6 @@ out:
  * The table signature is a simple and lightweight way to detect these cases.
  * ------------------------------------------------------------
  */
-typedef struct
-{
-	Oid		reltablespace;
-	Oid		relfilenode;	/* if 0, cannot have gpucache */
-	int16	relnatts;
-	GpuCacheOptions gc_options;
-	struct {
-		Oid		atttypid;
-		int32	atttypmod;
-		bool	attnotnull;
-		bool	attisdropped;
-	} attrs[FLEXIBLE_ARRAY_MEMBER];
-} GpuCacheTableSignatureBuffer;
-
-typedef struct
-{
-	Oid			table_oid;
-	uint64_t	signature;
-	GpuCacheOptions gc_options;
-} GpuCacheTableSignatureCache;
-
 static void
 __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 {
@@ -502,6 +543,7 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 										   &sig->gc_options)))
 			{
 				sig->gc_options.tg_sync_row = trig->tgoid;
+				break;
 			}
 			else
 			{
@@ -517,11 +559,17 @@ __gpuCacheTableSignature(Relation rel, GpuCacheTableSignatureCache *entry)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
 
-		sig->attrs[j].atttypid	= attr->atttypid;
-		sig->attrs[j].atttypmod	= attr->atttypmod;
+		sig->attrs[j].atttypid 	 = attr->atttypid;
+		sig->attrs[j].atttypmod  = attr->atttypmod;
+		sig->attrs[j].attlen     = attr->attlen;
+		sig->attrs[j].attbyval   = attr->attbyval;
+		sig->attrs[j].attalign   = attr->attalign;
 		sig->attrs[j].attnotnull = attr->attnotnull;
 		sig->attrs[j].attisdropped = attr->attisdropped;
 	}
+	/* validate option */
+	if (__validateSyncTriggerOptions(sig))
+		goto no_gpu_cache;
 	memcpy(&entry->gc_options, &sig->gc_options,
 		   sizeof(GpuCacheOptions));
 	entry->signature = hash_any((unsigned char *)sig, len) | 0x100000000UL;
@@ -667,11 +715,18 @@ __gpuCacheTableSignatureSnapshot(HeapTuple pg_class_tuple,
 
 		Assert(attr->attnum > 0 && attr->attnum <= sig->relnatts);
 		j = attr->attnum - 1;
-		sig->attrs[j].atttypid  = attr->atttypid;
-		sig->attrs[j].atttypmod = attr->atttypmod;
+		sig->attrs[j].atttypid   = attr->atttypid;
+		sig->attrs[j].atttypmod  = attr->atttypmod;
+		sig->attrs[j].attlen     = attr->attlen;
+		sig->attrs[j].attbyval   = attr->attbyval;
+		sig->attrs[j].attalign   = attr->attalign;
 		sig->attrs[j].attnotnull = attr->attnotnull;
 		sig->attrs[j].attisdropped = attr->attisdropped;
 	}
+	/* validate options */
+	if (!__validateSyncTriggerOptions(sig))
+		goto no_gpu_cache;
+
 	systable_endscan(sscan);
 	table_close(srel, AccessShareLock);
 
@@ -1016,8 +1071,11 @@ __resetGpuCacheSharedState(GpuCacheSharedState *gc_sstate)
     gc_sstate->redo_sync_pos = 0;
 	pthreadMutexUnlock(&gc_sstate->redo_mutex);
 
+	/* initial buffer size should be legal */
+	Assert(gc_sstate->kds_head.length <= __KDS_LENGTH_LIMIT &&
+		   gc_sstate->kds_extra_sz    <= __KDS_LENGTH_LIMIT);
 	/* make this GpuCache available again */
-	pg_atomic_init_u32(&gc_sstate->phase, GCACHE_PHASE__IS_EMPTY);
+	pg_atomic_write_u32(&gc_sstate->phase, GCACHE_PHASE__IS_EMPTY);
 }
 
 /*
@@ -3314,6 +3372,16 @@ retry:
 	if (kds_extra->usage > kds_extra->length)
 	{
 		gcache_extra_size = PAGE_ALIGN(kds_extra->usage * 5 / 4);	/* 25% margin */
+		if (gcache_extra_size >= __KDS_LENGTH_LIMIT)
+		{
+#if 1
+			fprintf(stderr,
+					"GpuCache (%s) extra buffer (%ldMB) exceeds the hard limit\n",
+					gc_sstate->table_name,
+					gcache_extra_size >> 20);
+#endif
+			goto bailout;
+		}
 		cuMemFree(m_kds_extra);
 		m_kds_extra = 0UL;
 		goto retry;
