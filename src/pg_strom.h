@@ -424,6 +424,11 @@ typedef struct
 	Relation		gist_irel;
 	ExprState	   *gist_clause;
 	AttrNumber		gist_ctid_resno;
+	/*
+	 * CPU fallback (inner-loading)
+	 */
+	List		   *inner_load_src;		/* resno of inner tuple */
+	List		   *inner_load_dst;		/* resno of fallback slot */
 } pgstromTaskInnerState;
 
 struct pgstromTaskState
@@ -468,7 +473,9 @@ struct pgstromTaskState
 	char			   *fallback_buffer;
 	TupleTableSlot	   *fallback_slot;	/* host-side kvars-slot */
 	List			   *fallback_proj;
-//	ProjectionInfo	   *fallback_proj;	/* base or fallback slot -> custom_tlist */
+
+	List			   *fallback_load_src;	/* source resno of base-rel */
+	List			   *fallback_load_dst;	/* dest resno of fallback-slot */
 	/* request command buffer (+ status for table scan) */
 	TBMIterateResult   *curr_tbm;
 	Buffer				curr_vm_buffer;		/* for visibility-map */

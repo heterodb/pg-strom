@@ -774,37 +774,6 @@ __build_explain_tlist_junks(PlannerInfo *root,
 }
 
 /*
- * __assign_cpu_fallback_slots
- */
-void
-__assign_cpu_fallback_slots(List *kvars_deflist, List *custom_scan_tlist)
-{
-	ListCell   *lc1, *lc2;
-
-	foreach (lc1, kvars_deflist)
-	{
-		codegen_kvar_defitem *kvdef = lfirst(lc1);
-		int		kv_fallback = -1;
-
-		if (kvdef->kv_depth >= 0 &&
-			kvdef->kv_resno > 0)
-		{
-			foreach (lc2, custom_scan_tlist)
-			{
-				TargetEntry *tle = lfirst(lc2);
-
-				if (equal(tle->expr, kvdef->kv_expr))
-				{
-					kv_fallback = tle->resno - 1;
-					break;
-				}
-			}
-		}
-		kvdef->kv_fallback = kv_fallback;
-	}
-}
-
-/*
  * assign_custom_cscan_tlist
  */
 List *
@@ -983,11 +952,10 @@ CreateDpuScanState(CustomScan *cscan)
 bool
 ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 {
-	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
 	TupleTableSlot *base_slot = pts->base_slot;
 	TupleTableSlot *fallback_slot = pts->css.ss.ss_ScanTupleSlot;
-	ListCell	   *lc;
+	ListCell	   *lc1, *lc2;
 	int				attidx = 0;
 	bool			should_free;
 
@@ -995,21 +963,14 @@ ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 	ExecForceStoreHeapTuple(tuple, base_slot, false);
 	slot_getallattrs(base_slot);
 	ExecStoreAllNullTuple(fallback_slot);
-	foreach (lc, pp_info->kvars_deflist)
+	forboth (lc1, pts->fallback_load_src,
+			 lc2, pts->fallback_load_dst)
 	{
-		codegen_kvar_defitem *kvdef = lfirst(lc);
+		int		src = lfirst_int(lc1) - 1;
+		int		dst = lfirst_int(lc2) - 1;
 
-		if (kvdef->kv_depth == 0 &&
-			kvdef->kv_resno >= 1 &&
-			kvdef->kv_resno <= base_slot->tts_nvalid &&
-			kvdef->kv_fallback >= 0)
-		{
-			int		src = kvdef->kv_resno - 1;
-			int		dst = kvdef->kv_fallback;
-
-			fallback_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
-			fallback_slot->tts_values[dst] = base_slot->tts_values[src];
-		}
+		fallback_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
+		fallback_slot->tts_values[dst] = base_slot->tts_values[src];
 	}
 	econtext->ecxt_scantuple = fallback_slot;
 
@@ -1021,9 +982,9 @@ ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 			return false;
 	}
 	/* apply GPU-Projection */
-	foreach (lc, pts->fallback_proj)
+	foreach (lc1, pts->fallback_proj)
 	{
-		ExprState  *state = lfirst(lc);
+		ExprState  *state = lfirst(lc1);
 		Datum		datum;
 		bool		isnull;
 

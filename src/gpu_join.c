@@ -1796,15 +1796,27 @@ typedef struct
 } inner_preload_buffer;
 
 static uint32_t
-get_tuple_hashvalue(pgstromTaskInnerState *istate,
-					TupleTableSlot *slot)
+get_tuple_hashvalue(pgstromTaskState *pts,
+					pgstromTaskInnerState *istate,
+					TupleTableSlot *inner_slot)
 {
-	ExprContext *econtext = istate->econtext;
-	uint32_t	hash = 0xffffffffU;
-	ListCell   *lc1, *lc2;
+	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
+	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
+	uint32_t		hash = 0xffffffffU;
+	ListCell	   *lc1, *lc2;
 
+	/* move to scan_slot from inner_slot */
+	forboth (lc1, istate->inner_load_src,
+			 lc2, istate->inner_load_dst)
+	{
+		int		src = lfirst_int(lc1) - 1;
+		int		dst = lfirst_int(lc2) - 1;
+
+		scan_slot->tts_isnull[dst] = inner_slot->tts_isnull[src];
+		scan_slot->tts_values[dst] = inner_slot->tts_values[src];
+	}
 	/* calculation of a hash value of this entry */
-	econtext->ecxt_innertuple = slot;
+	econtext->ecxt_scantuple = scan_slot;
 	forboth (lc1, istate->hash_inner_keys,
 			 lc2, istate->hash_inner_funcs)
 	{
@@ -1826,6 +1838,7 @@ get_tuple_hashvalue(pgstromTaskInnerState *istate,
  */
 static void
 execInnerPreloadOneDepth(MemoryContext memcxt,
+						 pgstromTaskState *pts,
 						 pgstromTaskInnerState *istate,
 						 pg_atomic_uint64 *p_shared_inner_nitems,
 						 pg_atomic_uint64 *p_shared_inner_usage)
@@ -1840,6 +1853,7 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
 	memset(preload_buf, 0, offsetof(inner_preload_buffer, rows));
 	preload_buf->nrooms = 12000;
 
+	ExecStoreAllNullTuple(pts->css.ss.ss_ScanTupleSlot);
 	for (;;)
 	{
 		TupleTableSlot *slot;
@@ -1884,7 +1898,7 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
 
 		if (istate->hash_inner_keys != NIL)
 		{
-			uint32_t	hash = get_tuple_hashvalue(istate, slot);
+			uint32_t	hash = get_tuple_hashvalue(pts, istate, slot);
 
 			preload_buf->rows[index].htup = htup;
 			preload_buf->rows[index].hash = hash;
@@ -2250,7 +2264,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			{
 				pgstromTaskInnerState *istate = &leader->inners[i];
 
-				execInnerPreloadOneDepth(memcxt, istate,
+				execInnerPreloadOneDepth(memcxt, pts, istate,
 										 &ps_state->inners[i].inner_nitems,
 										 &ps_state->inners[i].inner_usage);
 			}
@@ -2436,27 +2450,28 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts, int depth);
 
 static void
 __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
-						   const kern_expression *kexp_vloads,
+						   List *inner_load_src,
+						   List *inner_load_dst,
 						   const kern_data_store *kds,
 						   const ItemPointer t_self,
 						   const HeapTupleHeaderData *htup)
 {
-	const kern_varload_desc *vl_desc = kexp_vloads->u.load.desc;
-	uint32_t	offset = htup->t_hoff;
-	uint32_t	kvcnt = 0;
-	uint32_t	resno;
+	uint32_t	h_off = htup->t_hoff;
 	uint32_t	ncols = Min(htup->t_infomask2 & HEAP_NATTS_MASK, kds->ncols);
 	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+	ListCell   *lc1, *lc2;
 
-	Assert(kexp_vloads->opcode == FuncOpCode__LoadVars);
 	/* extract system attributes, if rquired */
-	while (kvcnt < kexp_vloads->u.load.nitems &&
-		   vl_desc->vl_resno < 0)
+	forboth (lc1, inner_load_src,
+			 lc2, inner_load_dst)
 	{
-		int		slot_id = vl_desc->vl_slot_id;
+		int		src = lfirst_int(lc1);
+		int		dst = lfirst_int(lc2);
 		Datum	datum;
 
-		switch (vl_desc->vl_resno)
+		if (src >= 0)
+			break;
+		switch (src)
 		{
 			case SelfItemPointerAttributeNumber:
 				datum = PointerGetDatum(t_self);
@@ -2475,45 +2490,38 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 				datum = ObjectIdGetDatum(kds->table_oid);
 				break;
 			default:
-				elog(ERROR, "invalid attnum: %d", vl_desc->vl_resno);
+				elog(ERROR, "invalid attnum: %d", src);
 		}
-		fallback_slot->tts_isnull[slot_id] = false;
-		fallback_slot->tts_values[slot_id] = datum;
-		vl_desc++;
-		kvcnt++;
+		fallback_slot->tts_isnull[dst] = false;
+		fallback_slot->tts_values[dst] = datum;
 	}
 	/* extract the user data */
-	resno = 1;
-	while (kvcnt < kexp_vloads->u.load.nitems && resno <= ncols)
+	for (int j=0; j < ncols && lc1 && lc2; j++)
 	{
-		const kern_colmeta *cmeta = &kds->colmeta[resno-1];
-		const char	   *addr;
+		const kern_colmeta *cmeta = &kds->colmeta[j];
+		const char *addr;
+		Datum		datum;
 
-		if (heap_hasnull && att_isnull(resno-1, htup->t_bits))
+		if (heap_hasnull && att_isnull(j, htup->t_bits))
 		{
 			addr = NULL;
+			datum = 0;
 		}
 		else
 		{
 			if (cmeta->attlen > 0)
-				offset = TYPEALIGN(cmeta->attalign, offset);
-			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
-				offset = TYPEALIGN(cmeta->attalign, offset);
-			addr = ((char *)htup + offset);
+				h_off = TYPEALIGN(cmeta->attalign, h_off);
+			else if (!VARATT_NOT_PAD_BYTE((char *)htup + h_off))
+				h_off = TYPEALIGN(cmeta->attalign, h_off);
+			addr = ((char *)htup + h_off);
 			if (cmeta->attlen > 0)
-				offset += cmeta->attlen;
+				h_off += cmeta->attlen;
+			else if (cmeta->attlen == -1)
+				h_off += VARSIZE_ANY(addr);
 			else
-				offset += VARSIZE_ANY(addr);
-		}
+				elog(ERROR, "unknown typlen (%d)", cmeta->attlen);
 
-		if (vl_desc->vl_resno == resno)
-		{
-			int		slot_id = vl_desc->vl_slot_id;
-			Datum	datum;
-
-			if (!addr)
-				datum = 0;
-			else if (cmeta->attbyval)
+			if (cmeta->attbyval)
 			{
 				switch (cmeta->attlen)
 				{
@@ -2530,29 +2538,36 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 						datum = *((uint64_t *)addr);
 						break;
 					default:
-						elog(ERROR, "invalid attlen: %d", cmeta->attlen);
+						elog(ERROR, "invalid typlen (%d) of inline type",
+							 cmeta->attlen);
 				}
 			}
 			else
 			{
 				datum = PointerGetDatum(addr);
 			}
-			fallback_slot->tts_isnull[slot_id] = !addr;
-			fallback_slot->tts_values[slot_id] = datum;
-			vl_desc++;
-			kvcnt++;
 		}
-		resno++;
+		if (lfirst_int(lc1) == j+1)
+		{
+			int		dst = lfirst_int(lc2) - 1;
+
+			fallback_slot->tts_isnull[dst] = !addr;
+			fallback_slot->tts_values[dst] = datum;
+
+			lc1 = lnext(inner_load_src, lc1);
+			lc2 = lnext(inner_load_dst, lc2);
+		}
 	}
 	/* fill-up by NULL for the remaining fields */
-	while (kvcnt < kexp_vloads->u.load.nitems)
+	while (lc1 && lc2)
 	{
-		int		slot_id = vl_desc->vl_slot_id;
+		int		dst = lfirst_int(lc2) - 1;
 
-		fallback_slot->tts_isnull[slot_id] = true;
-		fallback_slot->tts_values[slot_id] = 0;
-		vl_desc++;
-		kvcnt++;
+		fallback_slot->tts_isnull[dst] = true;
+		fallback_slot->tts_values[dst] = 0;
+
+		lc1 = lnext(inner_load_src, lc1);
+		lc2 = lnext(inner_load_dst, lc2);
 	}
 }
 
@@ -2562,18 +2577,10 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 						  bool *oj_map, int depth)
 {
 	pgstromTaskInnerState *istate = &pts->inners[depth-1];
-	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
-	kern_expression *kexp_join_kvars_load = NULL;
+	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
 
-	if (pp_info->kexp_load_vars_packed)
-	{
-		const kern_expression *temp = (const kern_expression *)
-			VARDATA(pp_info->kexp_load_vars_packed);
-		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth);
-	}
 	Assert(kds_in->format == KDS_FORMAT_ROW);
-
 	for (uint32_t index=0; index < kds_in->nitems; index++)
 	{
 		kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds_in, index);
@@ -2582,14 +2589,15 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 			continue;
 		ResetExprContext(econtext);
 		/* load inner variable */
-		if (kexp_join_kvars_load)
+		if (istate->inner_load_src != NIL &&
+			istate->inner_load_dst != NIL)
 		{
 			ItemPointerData	t_self;
 
 			ItemPointerSetInvalid(&t_self);
-			Assert(kexp_join_kvars_load->u.load.depth == depth);
-			__execFallbackLoadVarsSlot(pts->fallback_slot,
-									   kexp_join_kvars_load,
+			__execFallbackLoadVarsSlot(scan_slot,
+									   istate->inner_load_src,
+									   istate->inner_load_dst,
 									   kds_in,
 									   &t_self,
 									   &tupitem->htup);
@@ -2617,19 +2625,12 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 						  bool *oj_map, int depth)
 {
 	pgstromTaskInnerState *istate = &pts->inners[depth-1];
-	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
-	kern_expression *kexp_join_kvars_load = NULL;
+	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
 	kern_hashitem  *hitem;
 	uint32_t		hash;
 	ListCell	   *lc1, *lc2;
 
-	if (pp_info->kexp_load_vars_packed)
-	{
-		const kern_expression *temp = (const kern_expression *)
-			VARDATA(pp_info->kexp_load_vars_packed);
-		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth);
-	}
 	Assert(kds_in->format == KDS_FORMAT_HASH);
 
 	/*
@@ -2658,13 +2659,15 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	{
 		if (hitem->hash != hash)
 			continue;
-		if (kexp_join_kvars_load)
+		if (istate->inner_load_src != NIL &&
+			istate->inner_load_dst != NIL)
 		{
 			ItemPointerData	t_self;
 
 			ItemPointerSetInvalid(&t_self);
-			__execFallbackLoadVarsSlot(pts->fallback_slot,
-									   kexp_join_kvars_load,
+			__execFallbackLoadVarsSlot(scan_slot,
+									   istate->inner_load_src,
+									   istate->inner_load_dst,
 									   kds_in,
 									   &t_self,
 									   &hitem->t.htup);
@@ -2690,9 +2693,9 @@ static void
 __execFallbackCpuProjection(pgstromTaskState *pts)
 {
 	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
-	TupleTableSlot *fallback_slot = pts->fallback_slot;
+	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
 	ListCell	   *lc;
-	int				j=0;
+	int				dst=0;
 
 	foreach (lc, pts->fallback_proj)
 	{
@@ -2706,16 +2709,16 @@ __execFallbackCpuProjection(pgstromTaskState *pts)
 
 			if (isnull)
 			{
-				fallback_slot->tts_isnull[j] = true;
-				fallback_slot->tts_values[j] = 0;
+				scan_slot->tts_isnull[dst] = true;
+				scan_slot->tts_values[dst] = 0;
 			}
 			else
 			{
-				fallback_slot->tts_isnull[j] = false;
-				fallback_slot->tts_values[j] = datum;
+				scan_slot->tts_isnull[dst] = false;
+				scan_slot->tts_values[dst] = datum;
 			}
 		}
-		j++;
+		dst++;
 	}
 }
 
@@ -2725,17 +2728,16 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts, int depth)
 	if (depth > pts->num_rels)
 	{
 		/* apply projection if any */
-		HeapTuple		tuple;
-		bool			should_free;
+		TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
+		HeapTuple	tuple;
 
 		if (pts->fallback_proj)
 			__execFallbackCpuProjection(pts);
-		tuple = ExecFetchSlotHeapTuple(pts->fallback_slot,
-									   false,
-									   &should_free);
+		tuple = heap_form_tuple(scan_slot->tts_tupleDescriptor,
+								scan_slot->tts_values,
+								scan_slot->tts_isnull);
 		pgstromStoreFallbackTuple(pts, tuple);
-		if (should_free)
-			pfree(tuple);
+		pfree(tuple);
 	}
 	else
 	{
@@ -2759,33 +2761,26 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts, int depth)
 bool
 ExecFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple)
 {
-	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
 	TupleTableSlot *base_slot = pts->base_slot;
-	TupleTableSlot *fallback_slot = pts->fallback_slot;
+	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
 	size_t			fallback_index_saved = pts->fallback_index;
-	ListCell	   *lc;
+	ListCell	   *lc1, *lc2;
 
 	/* Load the base tuple (depth-0) to the fallback slot */
 	ExecForceStoreHeapTuple(tuple, base_slot, false);
 	slot_getallattrs(base_slot);
-	ExecStoreAllNullTuple(fallback_slot);
-	foreach (lc, pp_info->kvars_deflist)
+	ExecStoreAllNullTuple(scan_slot);
+	forboth (lc1, pts->fallback_load_src,
+			 lc2, pts->fallback_load_dst)
 	{
-		codegen_kvar_defitem *kvdef = lfirst(lc);
+		int		src = lfirst_int(lc1) - 1;
+		int		dst = lfirst_int(lc2) - 1;
 
-		if (kvdef->kv_depth == 0 &&
-			kvdef->kv_resno >= 1 &&
-			kvdef->kv_resno <= base_slot->tts_nvalid)
-		{
-			int		src = kvdef->kv_resno - 1;
-			int		dst = kvdef->kv_slot_id;
-
-			fallback_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
-			fallback_slot->tts_values[dst] = base_slot->tts_values[src];
-		}
+		scan_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
+		scan_slot->tts_values[dst] = base_slot->tts_values[src];
 	}
-	econtext->ecxt_scantuple = fallback_slot;
+	econtext->ecxt_scantuple = scan_slot;
 
 	/* check WHERE-clause if any */
 	if (pts->base_quals)
@@ -2803,20 +2798,12 @@ static void
 __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 {
 	pgstromTaskInnerState *istate = &pts->inners[depth-1];
-	pgstromPlanInfo	   *pp_info = pts->pp_info;
 	ExprContext		   *econtext = pts->css.ss.ps.ps_ExprContext;
-	TupleTableSlot	   *fallback_slot = pts->fallback_slot;
-	kern_expression	   *kexp_join_kvars_load = NULL;
+	TupleTableSlot	   *fallback_slot = pts->css.ss.ss_ScanTupleSlot;
 	kern_multirels	   *h_kmrels = pts->h_kmrels;
 	kern_data_store	   *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth-1);
 	bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth-1);
 
-	if (pp_info->kexp_load_vars_packed)
-	{
-		const kern_expression *temp = (const kern_expression *)
-			VARDATA(pp_info->kexp_load_vars_packed);
-		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth);
-	}
 	Assert(oj_map != NULL);
 
 	ExecStoreAllNullTuple(fallback_slot);
@@ -2825,8 +2812,8 @@ __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 	{
 		if (oj_map[i])
 			continue;
-
-		if (kexp_join_kvars_load)
+		if (istate->inner_load_src != NIL &&
+			istate->inner_load_dst != NIL)
 		{
 			kern_tupitem   *titem = KDS_GET_TUPITEM(kds_in, i);
 			ItemPointerData	t_self;
@@ -2835,7 +2822,8 @@ __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 				continue;
 			ItemPointerSetInvalid(&t_self);
 			__execFallbackLoadVarsSlot(fallback_slot,
-									   kexp_join_kvars_load,
+									   istate->inner_load_src,
+									   istate->inner_load_dst,
 									   kds_in,
 									   &t_self,
 									   &titem->htup);
