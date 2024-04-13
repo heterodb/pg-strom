@@ -4880,10 +4880,34 @@ pgstrom_xpucode_to_string(bytea *xpu_code)
 static void
 pgstrom_devcache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 {
-	hash_destroy(devfunc_rev_htable);
-	devfunc_rev_htable = NULL;
+	if (!MemoryContextIsEmpty(devinfo_memcxt))
+	{
+		/*
+		 * MEMO: invalidation callback can be invoked during devtype /
+		 * devfunc cache build, therefore, it is not safe to reset the
+		 * devinfo_memcxt immediately.
+		 * So, its deletion is postponed to the timing when portal is
+		 * dropped.
+		 */
+		if (PortalContext)
+		{
+			MemoryContext	devinfo_oldcxt = devinfo_memcxt;
 
-	MemoryContextReset(devinfo_memcxt);
+			devinfo_memcxt = AllocSetContextCreate(CacheMemoryContext,
+												   "device type/func info cache",
+												   ALLOCSET_DEFAULT_SIZES);
+			MemoryContextSetParent(devinfo_oldcxt, PortalContext);
+		}
+		else
+		{
+			/*
+			 * When PortalContext == NULL, it is obviously not under plan
+			 * constructing. So, we can reset the memory context now.
+			 */
+			MemoryContextReset(devinfo_memcxt);
+		}
+	}
+	devfunc_rev_htable = NULL;
 	memset(devtype_info_slot, 0, sizeof(List *) * DEVTYPE_INFO_NSLOTS);
 	memset(devfunc_info_slot, 0, sizeof(List *) * DEVFUNC_INFO_NSLOTS);
 
