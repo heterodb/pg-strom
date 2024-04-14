@@ -249,14 +249,10 @@ typedef struct
 {
 	JoinType		join_type;      /* one of JOIN_* */
 	double			join_nrows;     /* estimated nrows in this depth */
-	List		   *hash_outer_keys_original;	/* hash-keys for outer-side */
-	List		   *hash_outer_keys_fallback;
-	List		   *hash_inner_keys_original;	/* hash-keys for inner-side */
-	List		   *hash_inner_keys_fallback;
-	List		   *join_quals_original;     /* join quals */
-	List		   *join_quals_fallback;
-	List		   *other_quals_original;    /* other quals */
-	List		   *other_quals_fallback;
+	List		   *hash_outer_keys; /* hash-keys for outer-side */
+	List		   *hash_inner_keys; /* hash-keys for inner-side */
+	List		   *join_quals;		/* join quals */
+	List		   *other_quals;	/* other quals */
 	/* gist index properties */
 	Oid				gist_index_oid; /* GiST index oid */
 	int				gist_index_col; /* GiST index column number */
@@ -310,8 +306,6 @@ typedef struct
 	uint32_t	kvecs_ndims;
 	uint32_t	extra_bufsz;
 	uint32_t	cuda_stack_size;/* estimated stack consumption */
-	/* fallback projection */
-	List	   *fallback_tlist;	/* fallback_slot -> custom_scan_tlist if JOIN/PREAGG */
 	/* group-by parameters */
 	List	   *groupby_actions;		/* list of KAGG_ACTION__* on the kds_final */
 	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */

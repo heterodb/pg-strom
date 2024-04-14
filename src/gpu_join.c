@@ -323,10 +323,10 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pp_inner = &pp_info->inners[pp_info->num_rels++];
 	pp_inner->join_type = join_type;
 	pp_inner->join_nrows = joinrel->rows;
-	pp_inner->hash_outer_keys_original = hash_outer_keys;
-	pp_inner->hash_inner_keys_original = hash_inner_keys;
-	pp_inner->join_quals_original = join_quals;
-	pp_inner->other_quals_original = other_quals;
+	pp_inner->hash_outer_keys = hash_outer_keys;
+	pp_inner->hash_inner_keys = hash_inner_keys;
+	pp_inner->join_quals = join_quals;
+	pp_inner->other_quals = other_quals;
 	/* GiST-Index availability checks */
 	if (enable_xpugistindex &&
 		hash_outer_keys == NIL &&
@@ -1147,114 +1147,6 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 }
 
 /*
- * build_fallback_exprs_scan
- */
-static Node *
-__build_fallback_exprs_scan_walker(Node *node, void *data)
-{
-	codegen_context *context = (codegen_context *)data;
-
-	if (!node)
-		return NULL;
-	if (IsA(node, Var))
-	{
-		Var	   *var = (Var *)node;
-
-		if (var->varno == context->scan_relid)
-		{
-			return (Node *)makeVar(OUTER_VAR,
-								   var->varattno,
-								   var->vartype,
-								   var->vartypmod,
-								   var->varcollid,
-								   var->varlevelsup);
-		}
-		elog(ERROR, "Var-node does not reference the base relation (%d): %s",
-			 context->scan_relid, nodeToString(var));
-	}
-	return expression_tree_mutator(node, __build_fallback_exprs_scan_walker, data);
-}
-
-static List *
-build_fallback_exprs_scan(codegen_context *context, List *scan_exprs)
-{
-	return (List *)__build_fallback_exprs_scan_walker((Node *)scan_exprs, context);
-}
-
-/*
- * build_fallback_exprs_join
- */
-static Node *
-__build_fallback_exprs_join_walker(Node *node, void *data)
-{
-	codegen_context *context = (codegen_context *)data;
-	ListCell   *lc;
-
-	if (!node)
-		return NULL;
-	foreach (lc, context->kvars_deflist)
-	{
-		codegen_kvar_defitem *kvar = lfirst(lc);
-
-		if (codegen_expression_equals(node, kvar->kv_expr))
-		{
-			return (Node *)makeVar(INDEX_VAR,
-								   kvar->kv_slot_id + 1,
-								   exprType(node),
-								   exprTypmod(node),
-								   exprCollation(node),
-								   0);
-		}
-	}
-	if (IsA(node, Var))
-		elog(ERROR, "Bug? Var-node (%s) is missing at the kvars_exprs list",
-			 nodeToString(node));
-
-	return expression_tree_mutator(node, __build_fallback_exprs_join_walker, data);
-}
-
-static List *
-build_fallback_exprs_join(codegen_context *context, List *join_exprs)
-{
-	return (List *)__build_fallback_exprs_join_walker((Node *)join_exprs, context);
-}
-
-static Node *
-__build_fallback_exprs_inner_walker(Node *node, void *data)
-{
-	codegen_context *context = (codegen_context *)data;
-	ListCell   *lc;
-
-	if (!node)
-		return NULL;
-	foreach (lc, context->kvars_deflist)
-	{
-		codegen_kvar_defitem *kvdef = lfirst(lc);
-
-		if (codegen_expression_equals(node, kvdef->kv_expr))
-		{
-			return (Node *)makeVar(INNER_VAR,
-								   kvdef->kv_resno,
-								   exprType(node),
-								   exprTypmod(node),
-								   exprCollation(node),
-								   0);
-		}
-	}
-	if (IsA(node, Var))
-		elog(ERROR, "Bug? Var-node (%s) is missing at the kvars_exprs list",
-			 nodeToString(node));
-
-	return expression_tree_mutator(node, __build_fallback_exprs_inner_walker, data);
-}
-
-static List *
-build_fallback_exprs_inner(codegen_context *context, List *inner_keys)
-{
-	return (List *)__build_fallback_exprs_inner_walker((Node *)inner_keys, context);
-}
-
-/*
  * pgstrom_build_tlist_dev
  */
 static List *
@@ -1552,8 +1444,6 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	List	   *other_quals_stacked = NIL;
 	List	   *hash_keys_stacked = NIL;
 	List	   *gist_quals_stacked = NIL;
-	List	   *fallback_tlist = NIL;
-	ListCell   *lc;
 
 	Assert(pp_info->num_rels == list_length(custom_plans));
 	context = create_codegen_context(root, cpath, pp_info);
@@ -1576,31 +1466,31 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
 		/* xpu code to generate outer hash-value */
-		if (pp_inner->hash_outer_keys_original != NIL &&
-			pp_inner->hash_inner_keys_original != NIL)
+		if (pp_inner->hash_outer_keys != NIL &&
+			pp_inner->hash_inner_keys != NIL)
 		{
 			hash_keys_stacked = lappend(hash_keys_stacked,
-										pp_inner->hash_outer_keys_original);
-			pull_varattnos((Node *)pp_inner->hash_outer_keys_original,
+										pp_inner->hash_outer_keys);
+			pull_varattnos((Node *)pp_inner->hash_outer_keys,
 						   pp_info->scan_relid,
 						   &outer_refs);
 		}
 		else
 		{
-			Assert(pp_inner->hash_outer_keys_original == NIL &&
-				   pp_inner->hash_inner_keys_original == NIL);
+			Assert(pp_inner->hash_outer_keys == NIL &&
+				   pp_inner->hash_inner_keys == NIL);
 			hash_keys_stacked = lappend(hash_keys_stacked, NIL);
 		}
 		
 		/* xpu code to evaluate join qualifiers */
 		join_quals_stacked = lappend(join_quals_stacked,
-									 pp_inner->join_quals_original);
-		pull_varattnos((Node *)pp_inner->join_quals_original,
+									 pp_inner->join_quals);
+		pull_varattnos((Node *)pp_inner->join_quals,
 					   pp_info->scan_relid,
 					   &outer_refs);
 		other_quals_stacked = lappend(other_quals_stacked,
-									  pp_inner->other_quals_original);
-		pull_varattnos((Node *)pp_inner->other_quals_original,
+									  pp_inner->other_quals);
+		pull_varattnos((Node *)pp_inner->other_quals,
 					   pp_info->scan_relid,
 					   &outer_refs);
 
@@ -1655,41 +1545,9 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	pp_info->used_params = context->used_params;
 	pp_info->outer_refs  = outer_refs;
 	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
-
 	/*
-	 * fixup fallback expressions
+	 * build CustomScan
 	 */
-	for (int i=0; i < pp_info->num_rels; i++)
-	{
-		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
-
-		pp_inner->hash_outer_keys_fallback
-			= build_fallback_exprs_join(context, pp_inner->hash_outer_keys_original);
-		pp_inner->hash_inner_keys_fallback
-			= build_fallback_exprs_inner(context, pp_inner->hash_inner_keys_original);
-		pp_inner->join_quals_fallback
-			= build_fallback_exprs_join(context, pp_inner->join_quals_original);
-		pp_inner->other_quals_fallback
-			= build_fallback_exprs_join(context, pp_inner->other_quals_original);
-	}
-
-	foreach (lc, context->tlist_dev)
-	{
-		TargetEntry *tle = lfirst(lc);
-
-		if (tle->resjunk)
-			continue;
-		tle = makeTargetEntry(tle->expr,
-							  list_length(fallback_tlist) + 1,
-							  tle->resname,
-							  false);
-		fallback_tlist = lappend(fallback_tlist, tle);
-	}
-	pp_info->fallback_tlist =
-		(pp_info->num_rels == 0
-		 ? build_fallback_exprs_scan(context, fallback_tlist)
-		 : build_fallback_exprs_join(context, fallback_tlist));
-
 	cscan = makeNode(CustomScan);
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.scanrelid = pp_info->scan_relid;

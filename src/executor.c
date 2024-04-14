@@ -1545,15 +1545,15 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		istate->econtext = CreateExprContext(estate);
 		istate->depth = depth_index + 1;
 		istate->join_type = pp_inner->join_type;
-		istate->join_quals = ExecInitQual(pp_inner->join_quals_original,
+		istate->join_quals = ExecInitQual(pp_inner->join_quals,
 										  &pts->css.ss.ps);
-		istate->other_quals = ExecInitQual(pp_inner->other_quals_original,
+		istate->other_quals = ExecInitQual(pp_inner->other_quals,
 										   &pts->css.ss.ps);
 		if (pp_inner->join_type == JOIN_FULL ||
 			pp_inner->join_type == JOIN_RIGHT)
 			has_right_outer = true;
 
-		foreach (cell, pp_inner->hash_outer_keys_original)
+		foreach (cell, pp_inner->hash_outer_keys)
 		{
 			Node	   *outer_key = (Node *)lfirst(cell);
 			ExprState  *es;
@@ -1569,7 +1569,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 											   dtype->type_hashfunc);
 		}
 		/* inner hash-keys references the result of inner-slot */
-		foreach (cell, pp_inner->hash_inner_keys_original)
+		foreach (cell, pp_inner->hash_inner_keys)
 		{
 			Node	   *inner_key = (Node *)lfirst(cell);
 			ExprState  *es;
@@ -2347,13 +2347,13 @@ pgstromExplainTaskState(CustomScanState *node,
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
-		if (pp_inner->join_quals_original != NIL ||
-			pp_inner->other_quals_original != NIL)
+		if (pp_inner->join_quals != NIL ||
+			pp_inner->other_quals != NIL)
 		{
 			const char *join_label;
 
 			resetStringInfo(&buf);
-			foreach (lc, pp_inner->join_quals_original)
+			foreach (lc, pp_inner->join_quals)
 			{
 				Node   *expr = lfirst(lc);
 
@@ -2362,9 +2362,9 @@ pgstromExplainTaskState(CustomScanState *node,
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, str);
 			}
-			if (pp_inner->other_quals_original != NIL)
+			if (pp_inner->other_quals != NIL)
 			{
-				foreach (lc, pp_inner->other_quals_original)
+				foreach (lc, pp_inner->other_quals)
 				{
 					Node   *expr = lfirst(lc);
 
@@ -2406,10 +2406,10 @@ pgstromExplainTaskState(CustomScanState *node,
 		}
 		ntuples = pp_inner->join_nrows;
 
-		if (pp_inner->hash_outer_keys_original != NIL)
+		if (pp_inner->hash_outer_keys != NIL)
 		{
 			resetStringInfo(&buf);
-			foreach (lc, pp_inner->hash_outer_keys_original)
+			foreach (lc, pp_inner->hash_outer_keys)
 			{
 				Node   *expr = lfirst(lc);
 
@@ -2422,10 +2422,10 @@ pgstromExplainTaskState(CustomScanState *node,
 					 "%s Outer Hash [%d]", xpu_label, i+1);
 			ExplainPropertyText(label, buf.data, es);
 		}
-		if (pp_inner->hash_inner_keys_original != NIL)
+		if (pp_inner->hash_inner_keys != NIL)
 		{
 			resetStringInfo(&buf);
-			foreach (lc, pp_inner->hash_inner_keys_original)
+			foreach (lc, pp_inner->hash_inner_keys)
 			{
 				Node   *expr = lfirst(lc);
 
