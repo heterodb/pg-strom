@@ -27,9 +27,30 @@ CREATE TABLE cache_test_table (
 ---
 --- GPU Cache configuration
 ---
-CREATE TRIGGER row_sync_test AFTER INSERT OR UPDATE OR DELETE ON cache_test_table FOR ROW 
+
+-- syntax error
+CREATE TRIGGER row_sync_test_ng01 AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('cpu_device_id=0');
+-- validation error
+CREATE TRIGGER row_sync_test_ng02 AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('max_num_rows=200000000');
+-- validation error
+CREATE TRIGGER row_sync_test_ng03 AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('redo_buffer_size=4m');
+-- success
+CREATE TRIGGER row_sync_test AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW 
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=10000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
 ALTER TABLE cache_test_table ENABLE ALWAYS TRIGGER row_sync_test;
+
+-- duplicate row-sync trigger error
+CREATE TRIGGER row_sync_test_ng04 AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW 
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger();
+
 -- Make GPU cache 
 INSERT INTO cache_test_table(id) values (1);
 -- Check gpucache_info table.
