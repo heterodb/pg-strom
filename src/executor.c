@@ -1844,7 +1844,28 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 	/* XPU-PreAgg needs tupdesc of kds_final */
 	if ((pts->xpu_task_flags & DEVTASK__PREAGG) != 0)
 	{
-		tupdesc_kds_final = pts->css.ss.ps.scandesc;
+		CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
+		ListCell   *lc;
+		int			nvalids = 0;
+
+		/*
+		 * MEMO: 'scandesc' often contains junk fields, used only
+		 * for EXPLAIN output, thus GpuPreAgg results shall not have
+		 * any valid values for the junk, and these fields in kds_final
+		 * are waste of space (not only colmeta array, it affects the
+		 * length of BITMAPLEN(kds->ncols) and may expand the starting
+		 * point of t_hoff for all the tuples.
+		 */
+		tupdesc_kds_final = CreateTupleDescCopy(pts->css.ss.ps.scandesc);
+		foreach (lc, cscan->custom_scan_tlist)
+		{
+			TargetEntry *tle = lfirst(lc);
+
+			if (!tle->resjunk)
+				nvalids = tle->resno;
+		}
+		Assert(nvalids <= tupdesc_kds_final->natts);
+		tupdesc_kds_final->natts = nvalids;
 	}
 	/* build the session information */
 	session = pgstromBuildSessionInfo(pts, inner_handle, tupdesc_kds_final);
