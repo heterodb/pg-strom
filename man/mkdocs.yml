@@ -1,5 +1,5 @@
 site_name: PG-Strom Manual
-site_description: PG-Strom v2.0 Official Documentation
+site_description: PG-Strom v5.1 Official Documentation
 site_author: PG-Strom Development Team
 theme:
     name: readthedocs
@@ -18,7 +18,6 @@ nav:
     - 'BRIN Index' : 'brin.md'
     - 'Partitioning' : 'partition.md'
     - 'PostGIS' : 'postgis.md'
-    - 'HyperLogLog' : 'hll_count.md'
     - 'Trouble Shooting' : 'troubles.md'
 - 'Advanced Features' :
     - 'GPUDirect SQL' : 'ssd2gpu.md'
@@ -31,6 +30,7 @@ nav:
     - 'SQL Objects' : 'ref_sqlfuncs.md'
     - 'GUC Parameters' : 'ref_params.md'
 - 'Release Note' :
+    - 'PG-Strom v5.1' : 'release_v5.1.md'
     - 'PG-Strom v5.0' : 'release_v5.0.md'
     - 'PG-Strom v3.0' : 'release_v3.0.md'
     - 'PG-Strom v2.3' : 'release_v2.3.md'
@@ -45,7 +45,6 @@ nav:
     - 'BRINインデックス' : 'brin.md'
     - 'パーティション' : 'partition.md'
     - 'GPU版PostGIS' : 'postgis.md'
-    - 'HyperLogLog' : 'hll_count.md'
     - 'トラブルシューティング' : 'troubles.md'
 - '先進機能' :
     - 'GPUダイレクトSQL' : 'ssd2gpu.md'
@@ -58,6 +57,7 @@ nav:
     - 'SQLオブジェクト' : 'ref_sqlfuncs.md'
     - 'GUCパラメータ' : 'ref_params.md'
 - 'リリースノート' :
+    - 'PG-Strom v5.1' : 'release_v5.1.md'
     - 'PG-Strom v5.0' : 'release_v5.0.md'
     - 'PG-Strom v3.0' : 'release_v3.0.md'
     - 'PG-Strom v2.3' : 'release_v2.3.md'

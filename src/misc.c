@@ -42,6 +42,7 @@ __form_codegen_kvar_defitem(codegen_kvar_defitem *kvdef,
 	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_typlen));
 	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_xdatum_sizeof));
 	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_kvec_sizeof));
+	__kv_privs = lappend(__kv_privs, makeInteger(kvdef->kv_fallback));
 	__kv_exprs = lappend(__kv_exprs, kvdef->kv_expr);
 	foreach (lc, kvdef->kv_subfields)
 	{
@@ -83,6 +84,7 @@ __deform_codegen_kvar_defitem(List *__kv_privs, List *__kv_exprs)
 	kvdef->kv_typlen    = intVal(list_nth(__kv_privs, pindex++));
 	kvdef->kv_xdatum_sizeof = intVal(list_nth(__kv_privs, pindex++));
 	kvdef->kv_kvec_sizeof = intVal(list_nth(__kv_privs, pindex++));
+	kvdef->kv_fallback  = intVal(list_nth(__kv_privs, pindex++));
 	kvdef->kv_expr      = list_nth(__kv_exprs, eindex++);
 	__sub_privs         = list_nth(__kv_privs, pindex++);
 	__sub_exprs         = list_nth(__kv_exprs, eindex++);
@@ -118,8 +120,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	exprs = lappend(exprs, pp_info->used_params);
 	privs = lappend(privs, pp_info->host_quals);
 	privs = lappend(privs, makeInteger(pp_info->scan_relid));
-	privs = lappend(privs, pp_info->scan_quals_fallback);
-	exprs = lappend(exprs, pp_info->scan_quals_explain);
+	exprs = lappend(exprs, pp_info->scan_quals);
 	privs = lappend(privs, __makeFloat(pp_info->scan_tuples));
 	privs = lappend(privs, __makeFloat(pp_info->scan_nrows));
 	privs = lappend(privs, makeInteger(pp_info->parallel_nworkers));
@@ -162,7 +163,6 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, makeInteger(pp_info->kvecs_ndims));
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
 	privs = lappend(privs, makeInteger(pp_info->cuda_stack_size));
-	privs = lappend(privs, pp_info->fallback_tlist);
 	privs = lappend(privs, pp_info->groupby_actions);
 	privs = lappend(privs, makeInteger(pp_info->groupby_prepfn_bufsz));
 	/* inner relations */
@@ -176,20 +176,16 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 
 		__privs = lappend(__privs, makeInteger(pp_inner->join_type));
 		__privs = lappend(__privs, __makeFloat(pp_inner->join_nrows));
-		__exprs = lappend(__exprs, pp_inner->hash_outer_keys_original);
-		__privs = lappend(__privs, pp_inner->hash_outer_keys_fallback);
-		__exprs = lappend(__exprs, pp_inner->hash_inner_keys_original);
-		__privs = lappend(__privs, pp_inner->hash_inner_keys_fallback);
-		__exprs = lappend(__exprs, pp_inner->join_quals_original);
-		__privs = lappend(__privs, pp_inner->join_quals_fallback);
-		__exprs = lappend(__exprs, pp_inner->other_quals_original);
-		__privs = lappend(__privs, pp_inner->other_quals_fallback);
+		__exprs = lappend(__exprs, pp_inner->hash_outer_keys);
+		__exprs = lappend(__exprs, pp_inner->hash_inner_keys);
+		__exprs = lappend(__exprs, pp_inner->join_quals);
+		__exprs = lappend(__exprs, pp_inner->other_quals);
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_oid));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_col));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_ctid_resno));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_func_oid));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_slot_id));
-		__privs = lappend(__privs, pp_inner->gist_clause);
+		__exprs = lappend(__exprs, pp_inner->gist_clause);
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_selectivity));
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_npages));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_height));
@@ -230,8 +226,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.used_params  = list_nth(exprs, eindex++);
 	pp_data.host_quals   = list_nth(privs, pindex++);
 	pp_data.scan_relid   = intVal(list_nth(privs, pindex++));
-	pp_data.scan_quals_fallback = list_nth(privs, pindex++);
-	pp_data.scan_quals_explain = list_nth(exprs, eindex++);
+	pp_data.scan_quals   = list_nth(exprs, eindex++);
 	pp_data.scan_tuples  = floatVal(list_nth(privs, pindex++));
 	pp_data.scan_nrows   = floatVal(list_nth(privs, pindex++));
 	pp_data.parallel_nworkers = intVal(list_nth(privs, pindex++));
@@ -273,7 +268,6 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.kvecs_ndims = intVal(list_nth(privs, pindex++));
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.cuda_stack_size = intVal(list_nth(privs, pindex++));
-	pp_data.fallback_tlist = list_nth(privs, pindex++);
 	pp_data.groupby_actions = list_nth(privs, pindex++);
 	pp_data.groupby_prepfn_bufsz  = intVal(list_nth(privs, pindex++));
 	/* inner relations */
@@ -291,20 +285,16 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 
 		pp_inner->join_type       = intVal(list_nth(__privs, __pindex++));
 		pp_inner->join_nrows      = floatVal(list_nth(__privs, __pindex++));
-		pp_inner->hash_outer_keys_original = list_nth(__exprs, __eindex++);
-		pp_inner->hash_outer_keys_fallback = list_nth(__privs, __pindex++);
-		pp_inner->hash_inner_keys_original = list_nth(__exprs, __eindex++);
-		pp_inner->hash_inner_keys_fallback = list_nth(__privs, __pindex++);
-		pp_inner->join_quals_original = list_nth(__exprs, __eindex++);
-		pp_inner->join_quals_fallback = list_nth(__privs, __pindex++);
-		pp_inner->other_quals_original = list_nth(__exprs, __eindex++);
-		pp_inner->other_quals_fallback = list_nth(__privs, __pindex++);
+		pp_inner->hash_outer_keys = list_nth(__exprs, __eindex++);
+		pp_inner->hash_inner_keys = list_nth(__exprs, __eindex++);
+		pp_inner->join_quals      = list_nth(__exprs, __eindex++);
+		pp_inner->other_quals     = list_nth(__exprs, __eindex++);
 		pp_inner->gist_index_oid  = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_index_col  = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_ctid_resno = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_func_oid   = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_slot_id    = intVal(list_nth(__privs, __pindex++));
-		pp_inner->gist_clause     = list_nth(__privs, __pindex++);
+		pp_inner->gist_clause     = list_nth(__exprs, __eindex++);
 		pp_inner->gist_selectivity = floatVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_npages     = floatVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_height     = intVal(list_nth(__privs, __pindex++));
@@ -330,8 +320,7 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 									  inners[pp_orig->num_rels]));
 	pp_dest->used_params      = list_copy(pp_dest->used_params);
 	pp_dest->host_quals       = copyObject(pp_dest->host_quals);
-	pp_dest->scan_quals_fallback = copyObject(pp_dest->scan_quals_fallback);
-	pp_dest->scan_quals_explain = copyObject(pp_dest->scan_quals_explain);
+	pp_dest->scan_quals       = copyObject(pp_dest->scan_quals);
 	pp_dest->brin_index_conds = copyObject(pp_dest->brin_index_conds);
 	pp_dest->brin_index_quals = copyObject(pp_dest->brin_index_quals);
 	foreach (lc, pp_orig->kvars_deflist)
@@ -344,22 +333,16 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 		kvars_deflist = lappend(kvars_deflist, kvdef_dest);
 	}
 	pp_dest->kvars_deflist    = kvars_deflist;
-	pp_dest->fallback_tlist   = copyObject(pp_dest->fallback_tlist);
 	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
 	for (int j=0; j < pp_orig->num_rels; j++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_dest->inners[j];
-#define __COPY(FIELD)	pp_inner->FIELD = copyObject(pp_inner->FIELD)
-		__COPY(hash_outer_keys_original);
-		__COPY(hash_outer_keys_fallback);
-		__COPY(hash_inner_keys_original);
-		__COPY(hash_inner_keys_fallback);
-		__COPY(join_quals_original);
-		__COPY(join_quals_fallback);
-		__COPY(other_quals_original);
-		__COPY(other_quals_fallback);
-		__COPY(gist_clause);
-#undef __COPY
+
+		pp_inner->hash_outer_keys = copyObject(pp_inner->hash_outer_keys);
+		pp_inner->hash_inner_keys = copyObject(pp_inner->hash_inner_keys);
+		pp_inner->join_quals      = copyObject(pp_inner->join_quals);
+		pp_inner->other_quals     = copyObject(pp_inner->other_quals);
+		pp_inner->gist_clause     = copyObject(pp_inner->gist_clause);
 	}
 	return pp_dest;
 }

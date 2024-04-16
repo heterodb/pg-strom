@@ -260,8 +260,7 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 	pp_info->ds_entry = ds_entry;
 	pp_info->scan_relid = baserel->relid;
 	pp_info->host_quals = extract_actual_clauses(host_quals, false);
-	pp_info->scan_quals_fallback = extract_actual_clauses(dev_quals, false);
-	pp_info->scan_quals_explain = copyObject(pp_info->scan_quals_fallback);
+	pp_info->scan_quals = extract_actual_clauses(dev_quals, false);
 	pp_info->scan_tuples = baserel->tuples;
 	pp_info->scan_nrows = scan_nrows;
 	pp_info->parallel_nworkers = parallel_nworkers;
@@ -278,7 +277,7 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 	outer_refs = pickup_outer_referenced(root, baserel, outer_refs);
 	pull_varattnos((Node *)pp_info->host_quals,
 				   baserel->relid, &outer_refs);
-	pull_varattnos((Node *)pp_info->scan_quals_fallback,
+	pull_varattnos((Node *)pp_info->scan_quals,
 				   baserel->relid, &outer_refs);
 	pp_info->outer_refs = outer_refs;
 	pp_info->sibling_param_id = -1;
@@ -416,7 +415,7 @@ try_add_simple_scan_path(PlannerInfo *root,
 	{
 		pgstromPlanInfo *pp_info = op_leaf->pp_info;
 
-		if (pp_info->scan_quals_fallback != NIL)
+		if (pp_info->scan_quals != NIL)
 		{
 			CustomPath *cpath = makeNode(CustomPath);
 
@@ -706,7 +705,7 @@ gpuscan_build_projection(RelOptInfo *baserel,
 													baserel->relid,
 													false);
 
-	vars_list = pull_vars_of_level((Node *)pp_info->scan_quals_fallback, 0);
+	vars_list = pull_vars_of_level((Node *)pp_info->scan_quals, 0);
 	foreach (lc, vars_list)
 		tlist_dev = __gpuscan_build_projection_expr(tlist_dev,
 													(Node *)lfirst(lc),
@@ -775,7 +774,51 @@ __build_explain_tlist_junks(PlannerInfo *root,
 }
 
 /*
- * PlanXpuScanPathCommon
+ * assign_custom_cscan_tlist
+ */
+List *
+assign_custom_cscan_tlist(List *tlist_dev, pgstromPlanInfo *pp_info)
+{
+	ListCell   *lc1, *lc2;
+
+	/* clear kv_fallback */
+	foreach (lc1, pp_info->kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc1);
+
+		kvdef->kv_fallback = -1;
+	}
+
+	foreach (lc1, tlist_dev)
+	{
+		TargetEntry *tle = lfirst(lc1);
+
+		foreach (lc2, pp_info->kvars_deflist)
+		{
+			codegen_kvar_defitem *kvdef = lfirst(lc2);
+
+			if (kvdef->kv_depth >= 0 &&
+				kvdef->kv_depth <= pp_info->num_rels &&
+				kvdef->kv_resno >  0 &&
+				equal(tle->expr, kvdef->kv_expr))
+			{
+				kvdef->kv_fallback = tle->resno - 1;
+				tle->resorigtbl = (Oid)kvdef->kv_depth;
+				tle->resorigcol = kvdef->kv_resno;
+				break;
+			}
+		}
+		if (!lc2)
+		{
+			tle->resorigtbl = (Oid)UINT_MAX;
+			tle->resorigcol = -1;
+		}
+	}
+	return tlist_dev;
+}
+
+/*
+ * planxpuscanpathcommon
  */
 static CustomScan *
 PlanXpuScanPathCommon(PlannerInfo *root,
@@ -791,8 +834,7 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 
 	context = create_codegen_context(root, best_path, pp_info);
 	/* code generation for WHERE-clause */
-	pp_info->kexp_scan_quals = codegen_build_scan_quals(context,
-														pp_info->scan_quals_fallback);
+	pp_info->kexp_scan_quals = codegen_build_scan_quals(context, pp_info->scan_quals);
 	/* code generation for the Projection */
 	context->tlist_dev = gpuscan_build_projection(baserel, pp_info, tlist);
 	pp_info->kexp_projection = codegen_build_projection(context);
@@ -820,8 +862,8 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	cscan->flags = best_path->flags;
 	cscan->methods = xpuscan_plan_methods;
 	cscan->custom_plans = NIL;
-	cscan->custom_scan_tlist = context->tlist_dev;
-
+	cscan->custom_scan_tlist = assign_custom_cscan_tlist(context->tlist_dev,
+														 pp_info);
 	return cscan;
 }
 
@@ -890,19 +932,8 @@ PlanDpuScanPath(PlannerInfo *root,
 static Node *
 CreateGpuScanState(CustomScan *cscan)
 {
-	pgstromTaskState *pts = palloc0(sizeof(pgstromTaskState));
-	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
-
 	Assert(cscan->methods == &gpuscan_plan_methods);
-	/* Set tag and executor callbacks */
-	NodeSetTag(pts, T_CustomScanState);
-	pts->css.flags = cscan->flags;
-	pts->css.methods = &gpuscan_exec_methods;
-	pts->xpu_task_flags = pp_info->xpu_task_flags;
-	pts->pp_info = pp_info;
-	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__GPUSCAN);
-
-	return (Node *)pts;
+	return pgstromCreateTaskState(cscan, &gpuscan_exec_methods);
 }
 
 /*
@@ -911,18 +942,8 @@ CreateGpuScanState(CustomScan *cscan)
 static Node *
 CreateDpuScanState(CustomScan *cscan)
 {
-	pgstromTaskState *pts = palloc0(sizeof(pgstromTaskState));
-	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
-
 	Assert(cscan->methods == &dpuscan_plan_methods);
-	NodeSetTag(pts, T_CustomScanState);
-	pts->css.flags = cscan->flags;
-	pts->css.methods = &dpuscan_exec_methods;
-	pts->xpu_task_flags = pp_info->xpu_task_flags;
-	pts->pp_info = pp_info;
-	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__DPUSCAN);
-
-	return (Node *)pts;
+	return pgstromCreateTaskState(cscan, &dpuscan_exec_methods);
 }
 
 /*
@@ -931,11 +952,27 @@ CreateDpuScanState(CustomScan *cscan)
 bool
 ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 {
-	ExprContext	*econtext = pts->css.ss.ps.ps_ExprContext;
-	bool		should_free;
+	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
+	TupleTableSlot *base_slot = pts->base_slot;
+	TupleTableSlot *fallback_slot = pts->css.ss.ss_ScanTupleSlot;
+	ListCell	   *lc1, *lc2;
+	int				attidx = 0;
+	bool			should_free;
 
-	ExecForceStoreHeapTuple(tuple, pts->base_slot, false);
-	econtext->ecxt_scantuple = pts->base_slot;
+	/* Load the base tuple (depth-0) to the fallback slot */
+	ExecForceStoreHeapTuple(tuple, base_slot, false);
+	slot_getallattrs(base_slot);
+	ExecStoreAllNullTuple(fallback_slot);
+	forboth (lc1, pts->fallback_load_src,
+			 lc2, pts->fallback_load_dst)
+	{
+		int		src = lfirst_int(lc1) - 1;
+		int		dst = lfirst_int(lc2) - 1;
+
+		fallback_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
+		fallback_slot->tts_values[dst] = base_slot->tts_values[src];
+	}
+	econtext->ecxt_scantuple = fallback_slot;
 
 	/* check WHERE-clause if any */
 	if (pts->base_quals)
@@ -944,20 +981,33 @@ ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 		if (!ExecQual(pts->base_quals, econtext))
 			return false;
 	}
-	Assert(!pts->fallback_slot);
-	
-	/* apply Projection if any */
-	if (pts->fallback_proj)
+	/* apply GPU-Projection */
+	foreach (lc1, pts->fallback_proj)
 	{
-		TupleTableSlot *proj_slot = ExecProject(pts->fallback_proj);
+		ExprState  *state = lfirst(lc1);
+		Datum		datum;
+		bool		isnull;
 
-		tuple = ExecFetchSlotHeapTuple(proj_slot, false, &should_free);
-	}
-	else
-	{
-		tuple = ExecFetchSlotHeapTuple(pts->base_slot, false, &should_free);
+		if (state)
+		{
+			datum = ExecEvalExpr(state, econtext, &isnull);
+			if (isnull)
+			{
+				fallback_slot->tts_isnull[attidx] = true;
+				fallback_slot->tts_values[attidx] = 0;
+			}
+			else
+			{
+				fallback_slot->tts_isnull[attidx] = false;
+				fallback_slot->tts_values[attidx] = datum;
+			}
+		}
+		attidx++;
 	}
 	/* save the tuple on the fallback buffer */
+	tuple = ExecFetchSlotHeapTuple(fallback_slot,
+								   false,
+								   &should_free);
 	pgstromStoreFallbackTuple(pts, tuple);
 	if (should_free)
 		pfree(tuple);

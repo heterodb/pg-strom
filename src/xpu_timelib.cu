@@ -3483,7 +3483,6 @@ __pg_extract_timestamp_common(kern_context *kcxt,
 								   date2j(tm.tm_year, 1, 1) + 1);
 				break;
 			case DTK_TZ:
-				printf("value=%d tz_info = %p\n", (int)value, tz_info);
 				if (tz_info)
 				{
 					result->u.value = tm.tm_gmtoff;

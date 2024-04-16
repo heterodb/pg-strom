@@ -1652,7 +1652,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 								 const kern_expression *kexp_actions,
 								 const char *prepfn_buffer)
 {
-	int			nattrs = kds_final->ncols;
+	int			nattrs = Min(kds_final->ncols, kexp_actions->u.pagg.nattrs);
 	uint32_t	t_hoff, nbytes;
 	const char *pos = prepfn_buffer;
 

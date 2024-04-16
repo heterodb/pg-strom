@@ -249,14 +249,10 @@ typedef struct
 {
 	JoinType		join_type;      /* one of JOIN_* */
 	double			join_nrows;     /* estimated nrows in this depth */
-	List		   *hash_outer_keys_original;	/* hash-keys for outer-side */
-	List		   *hash_outer_keys_fallback;
-	List		   *hash_inner_keys_original;	/* hash-keys for inner-side */
-	List		   *hash_inner_keys_fallback;
-	List		   *join_quals_original;     /* join quals */
-	List		   *join_quals_fallback;
-	List		   *other_quals_original;    /* other quals */
-	List		   *other_quals_fallback;
+	List		   *hash_outer_keys; /* hash-keys for outer-side */
+	List		   *hash_inner_keys; /* hash-keys for inner-side */
+	List		   *join_quals;		/* join quals */
+	List		   *other_quals;	/* other quals */
 	/* gist index properties */
 	Oid				gist_index_oid; /* GiST index oid */
 	int				gist_index_col; /* GiST index column number */
@@ -280,8 +276,7 @@ typedef struct
 	List	   *used_params;		/* param list in use */
 	List	   *host_quals;			/* host qualifiers to scan the outer */
 	Index		scan_relid;			/* relid of the outer relation to scan */
-	List	   *scan_quals_fallback;/* device qualifiers to scan the outer */
-	List	   *scan_quals_explain;	/* device qualifiers for EXPLAIN output */
+	List	   *scan_quals;			/* device qualifiers to scan the outer */
 	double		scan_tuples;		/* copy of baserel->tuples */
 	double		scan_nrows;			/* copy of baserel->rows */
 	int			parallel_nworkers;	/* # of parallel workers */
@@ -311,8 +306,6 @@ typedef struct
 	uint32_t	kvecs_ndims;
 	uint32_t	extra_bufsz;
 	uint32_t	cuda_stack_size;/* estimated stack consumption */
-	/* fallback projection */
-	List	   *fallback_tlist;	/* fallback_slot -> custom_scan_tlist if JOIN/PREAGG */
 	/* group-by parameters */
 	List	   *groupby_actions;		/* list of KAGG_ACTION__* on the kds_final */
 	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */
@@ -425,6 +418,11 @@ typedef struct
 	Relation		gist_irel;
 	ExprState	   *gist_clause;
 	AttrNumber		gist_ctid_resno;
+	/*
+	 * CPU fallback (inner-loading)
+	 */
+	List		   *inner_load_src;		/* resno of inner tuple */
+	List		   *inner_load_dst;		/* resno of fallback slot */
 } pgstromTaskInnerState;
 
 struct pgstromTaskState
@@ -468,7 +466,10 @@ struct pgstromTaskState
 	size_t				fallback_bufsz;
 	char			   *fallback_buffer;
 	TupleTableSlot	   *fallback_slot;	/* host-side kvars-slot */
-	ProjectionInfo	   *fallback_proj;	/* base or fallback slot -> custom_tlist */
+	List			   *fallback_proj;
+
+	List			   *fallback_load_src;	/* source resno of base-rel */
+	List			   *fallback_load_dst;	/* dest resno of fallback-slot */
 	/* request command buffer (+ status for table scan) */
 	TBMIterateResult   *curr_tbm;
 	Buffer				curr_vm_buffer;		/* for visibility-map */
@@ -547,7 +548,7 @@ extern int		heterodbExtraGetError(const char **p_filename,
  */
 typedef struct
 {
-	int			kv_slot_id;		/* slot-id of kernel varslot / CPU fallback */
+	int			kv_slot_id;		/* slot-id of kernel varslot */
 	int			kv_depth;		/* source depth */
 	int			kv_resno;		/* source resno, if exist */
 	int			kv_maxref;		/* max depth that references this column. */
@@ -559,6 +560,7 @@ typedef struct
 	int16_t		kv_typlen;		/* typlen from the catalog */
 	int			kv_xdatum_sizeof;/* =sizeof(xpu_XXXX_t), if any */
 	int			kv_kvec_sizeof;	/* =sizeof(kvec_XXXX_t), if any */
+	int			kv_fallback;	/* slot-id for CPU fallback */
 	Expr	   *kv_expr;		/* original expression */
 	List	   *kv_subfields;	/* subfields definition, if array or composite */
 } codegen_kvar_defitem;
@@ -718,6 +720,8 @@ extern void		xpuClientPutResponse(XpuCommand *xcmd);
 extern const XpuCommand *pgstromBuildSessionInfo(pgstromTaskState *pts,
 												 uint32_t join_inner_handle,
 												 TupleDesc tdesc_final);
+extern Node	   *pgstromCreateTaskState(CustomScan *cscan,
+									   const CustomExecMethods *methods);
 extern void		pgstromExecInitTaskState(CustomScanState *node,
 										  EState *estate,
 										 int eflags);
@@ -816,6 +820,8 @@ extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
 extern void		sort_device_qualifiers(List *dev_quals_list,
 									   List *dev_costs_list);
 extern pgstromPlanInfo *try_fetch_xpuscan_planinfo(const Path *path);
+extern List	   *assign_custom_cscan_tlist(List *tlist_dev,
+										  pgstromPlanInfo *pp_info);
 extern List	   *buildOuterScanPlanInfo(PlannerInfo *root,
 									   RelOptInfo *baserel,
 									   uint32_t xpu_task_flags,

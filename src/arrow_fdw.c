@@ -924,12 +924,18 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 		var = lsecond(op->args);
 		arg = linitial(op->args);
 	}
-	/* Is it VAR <OPER> ARG form? */
+	/*
+	 * Is it VAR <OPER> ARG form?
+	 *
+	 * MEMO: expression nodes (like Var) might be rewritten to INDEX_VAR +
+	 * resno on the custom_scan_tlist by setrefs.c, so we should reference
+	 * Var::varnosyn and ::varattnosyn, instead of ::varno and ::varattno.
+	 */
 	if (!IsA(var, Var) || !OidIsValid(opcode))
 		return false;
-	if (var->varno != scan->scanrelid)
+	if (var->varnosyn != scan->scanrelid)
 		return false;
-	if (!bms_is_member(var->varattno, as_hint->stat_attrs))
+	if (!bms_is_member(var->varattnosyn, as_hint->stat_attrs))
 		return false;
 	if (contain_var_clause(arg) ||
 		contain_volatile_functions(arg))
