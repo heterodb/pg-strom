@@ -1179,18 +1179,17 @@ worker_main(void *__worker_id)
 									  sqldb_session_configs,
 									  sqldb_nestloop_options);
 	worker_command = sqldb_command_apply_worker_id(sqldb_command, worker_id);
+	if (shows_progress)
+		printf("worker:%lu SQL=[%s]\n", worker_id, worker_command);
 	data_table = sqldb_begin_query(sqldb_conn,
 								   worker_command,
 								   NULL,
 								   main_table->sql_dict_list);
 	if (!data_table)
-		Elog("Empty results by the query: %s", sqldb_command);
+		Elog("Empty results by the query: %s", worker_command);
 	data_table->segment_sz = batch_segment_sz;
 	/* enables embedded min/max statistics, if any */
 	enable_embedded_stats(data_table);
-	/* print SQL */
-	if (shows_progress)
-		printf("worker:%lu SQL=[%s]\n", worker_id, worker_command);
 	/* check compatibility */
 	if (!IsSQLtableCompatible(main_table, data_table))
 		Elog("Schema definition by the query in worker:%lu is not compatible: %s",
@@ -1215,7 +1214,7 @@ int main(int argc, char * const argv[])
 	int				append_fdesc = -1;
 	ArrowFileInfo	af_info;
 	void		   *sqldb_conn;
-	const char	   *prime_command;
+	const char	   *main_command;
 	SQLtable	   *table;
 	ArrowKeyValue  *kv;
 	SQLdictionary  *sql_dict_list = NULL;
@@ -1257,9 +1256,11 @@ int main(int argc, char * const argv[])
 		sql_dict_list = loadArrowDictionaryBatches(append_fdesc, &af_info);
 	}
 	/* begin SQL command execution */
-	prime_command = sqldb_command_apply_worker_id(sqldb_command, 0);
+	main_command = sqldb_command_apply_worker_id(sqldb_command, 0);
+	if (shows_progress)
+		printf("worker:0 SQL=[%s]\n", main_command);
 	table = sqldb_begin_query(sqldb_conn,
-							  prime_command,
+							  main_command,
 							  append_filename ? &af_info : NULL,
 							  sql_dict_list);
 	if (!table)
