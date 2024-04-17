@@ -43,6 +43,7 @@ SELECT id, line
 
 -- text length and substring
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (costs off, verbose)
 SELECT id, substring(line, id % 20, id % 10 + 5) v1,
            substring(line, id % 30, 10) || substring(line, id % 20 + 30, 10) v2

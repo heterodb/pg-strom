@@ -97,6 +97,7 @@ INSERT INTO fallback_enlarge (
 -- GpuScan  with CPU fallback
 SET pg_strom.enabled = on;
 SET pg_strom.cpu_fallback = off;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT id, x+y v1, substring(memo, 1, 20) v2
   INTO test01g
@@ -122,6 +123,7 @@ RESET pg_strom.cpu_fallback;
 
 -- GpuScan with GPU kernel suspend/resume
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test02g
@@ -141,6 +143,7 @@ SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
 
 -- GpuScan with GPU kernel suspend/resume and CPU fallback
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test03g
@@ -161,6 +164,7 @@ RESET pg_strom.cpu_fallback;
 
 -- GpuJoin with CPU fallback
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT id, x+y+z v, memo
   INTO test10g
@@ -181,6 +185,7 @@ RESET pg_strom.cpu_fallback;
 
 -- GpuJoin with GPU kernel suspend / resume
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT * INTO test11g
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
@@ -195,6 +200,7 @@ SELECT * INTO test11p
 (SELECT * FROM test11g EXCEPT SELECT * FROM test11p) ORDER BY id;
 (SELECT * FROM test11p EXCEPT SELECT * FROM test11g) ORDER BY id;
 
+
 -- GpuJoin with GPU kernel suspend / resume, and CPU fallback
 SET pg_strom.enabled = on;
 EXPLAIN (verbose, costs off)
@@ -208,6 +214,6 @@ SET pg_strom.enabled = off;
 SELECT * INTO test12p
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
  WHERE l.aid < 2500 AND memo LIKE '%ab%';
-(SELECT * FROM test12g EXCEPT SELECT * FROM test12p) ORDER BY id;
-(SELECT * FROM test12p EXCEPT SELECT * FROM test12g) ORDER BY id;
+(SELECT * FROM test12g EXCEPT SELECT * FROM test12p) ORDER BY id LIMIT 10;
+(SELECT * FROM test12p EXCEPT SELECT * FROM test12g) ORDER BY id LIMIT 10;
 RESET pg_strom.cpu_fallback;

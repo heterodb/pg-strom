@@ -1,0 +1,395 @@
+---
+--- Test for CPU fallback and GPU kernel suspend / resume on PostgreSQL table
+---
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_arrow_index_temp CASCADE;
+CREATE SCHEMA regtest_arrow_index_temp;
+RESET client_min_messages;
+SET search_path = regtest_arrow_index_temp,public;
+-- disables SeqScan and kernel source
+SET enable_seqscan = off;
+SET max_parallel_workers_per_gather = 0;
+-- prepare table
+-- test for CPU fallback / GPU kernel suspend/resume
+CREATE TABLE fallback_data (
+  id    int,
+  aid   int,
+  cat   text,
+  x     float,
+  y     float,
+  memo  text
+);
+SELECT pgstrom.random_setseed(20190714);
+ random_setseed 
+----------------
+ 
+(1 row)
+
+INSERT INTO fallback_data (
+  SELECT x, pgstrom.random_int(0.5, 1, 4000),
+            CASE floor(random()*26)
+            WHEN 0 THEN 'aaa'
+            WHEN  1 THEN 'bbb'
+            WHEN  2 THEN 'ccc'
+            WHEN  3 THEN 'ddd'
+            WHEN  4 THEN 'eee'
+            WHEN  5 THEN 'fff'
+            WHEN  6 THEN 'ggg'
+            WHEN  7 THEN 'hhh'
+            WHEN  8 THEN 'iii'
+            WHEN  9 THEN 'jjj'
+            WHEN 10 THEN 'kkk'
+            WHEN 11 THEN 'lll'
+            WHEN 12 THEN 'mmm'
+            WHEN 13 THEN 'nnn'
+            WHEN 14 THEN 'ooo'
+            WHEN 15 THEN 'ppp'
+            WHEN 16 THEN 'qqq'
+            WHEN 17 THEN 'rrr'
+            WHEN 18 THEN 'sss'
+            WHEN 19 THEN 'ttt'
+            WHEN 20 THEN 'uuu'
+            WHEN 21 THEN 'vvv'
+            WHEN 22 THEN 'www'
+            WHEN 23 THEN 'xxx'
+            WHEN 24 THEN 'yyy'
+            ELSE 'zzz'
+            END,
+            pgstrom.random_float(2,-1000.0,1000.0),
+            pgstrom.random_float(2,-1000.0,1000.0),
+            pgstrom.random_text_len(2, 200)
+    FROM generate_series(1,400001) x);
+UPDATE fallback_data
+   SET memo = md5(memo) || md5(memo)
+ WHERE id = 400001;
+UPDATE fallback_data
+   SET memo = memo || '-' || memo || '-' || memo || '-' || memo
+ WHERE id = 400001;
+UPDATE fallback_data
+   SET memo = memo || '-' || memo || '-' || memo || '-' || memo
+ WHERE id = 400001;
+UPDATE fallback_data
+   SET memo = memo || '-' || memo || '-' || memo || '-' || memo
+ WHERE id = 400001;
+CREATE TABLE fallback_small (
+  aid   int,
+  z     float,
+  md5   varchar(32)
+);
+INSERT INTO fallback_small (
+  SELECT x, pgstrom.random_float(2,-1000.0,1000.0),
+            md5(x::text)
+    FROM generate_series(1,4000) x);
+CREATE TABLE fallback_enlarge (
+  aid   int,
+  z     float,
+  md5   char(200)
+);
+INSERT INTO fallback_enlarge (
+  SELECT x / 5, pgstrom.random_float(2,-1000.0,1000.0),
+            md5(x::text)
+    FROM generate_series(1,20000) x);
+-- GpuScan  with CPU fallback
+SET pg_strom.enabled = on;
+SET pg_strom.cpu_fallback = off;
+VACUUM ANALYZE;
+EXPLAIN (verbose, costs off)
+SELECT id, x+y v1, substring(memo, 1, 20) v2
+  INTO test01g
+  FROM fallback_data
+ WHERE memo LIKE '%abc%';
+                                                                                                                                                                                                                                  QUERY PLAN                                                                                                                                                                                                                                  
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_arrow_index_temp.fallback_data
+   Output: id, ((x + y)), ("substring"(memo, 1, 20))
+   GPU Projection: id, (x + y), "substring"(memo, 1, 20)
+   GPU Scan Quals: (memo ~~ '%abc%'::text) [rows: 400001 -> 39]
+   KVars-Slot: <slot=0, type='text', expr='memo'>, <slot=1, type='int4', expr='id'>, <slot=2, type='float8', expr='((x + y))'>, <slot=3, type='float8', expr='x'>, <slot=4, type='float8', expr='y'>, <slot=5, type='text', expr='("substring"(memo, 1, 20))'>
+   KVecs-Buffer: nbytes: 73728, ndims: 2, items=[kvec0=<0x0000-67ff, type='text', expr='memo'>, kvec1=<0x6800-8fff, type='int4', expr='id'>, kvec2=<0x9000-d7ff, type='float8', expr='x'>, kvec3=<0xd800-11fff, type='float8', expr='y'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='float8' resno=4(x)>, <slot=4, type='float8' resno=5(y)>, <slot=0, type='text' resno=6(memo)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-67ff, type='text', expr='memo'>, <slot=1, offset=0x6800-8fff, type='int4', expr='id'>, <slot=3, offset=0x9000-d7ff, type='float8', expr='x'>, <slot=4, offset=0xd800-11fff, type='float8', expr='y'>]}}}
+   Scan Quals OpCode: {Func(bool)::textlike args=[{Var(text): slot=0, expr='memo'}, {Const(text): value='%abc%'}]}
+   Projection OpCode: {Projection: layout=<1,2,5> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x6800-9000, expr='id'}}, {SaveExpr: <slot=2, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x9000-d800, expr='x'}, {Var(float8): kvec=0xd800-12000, expr='y'}]}}, {SaveExpr: <slot=5, type='text'> arg={Func(text)::substring args=[{Var(text): kvec=0x0000-6800, expr='memo'}, {Const(int4): value='1'}, {Const(int4): value='20'}]}}]}
+   CUDA Stack Size: 4032
+(11 rows)
+
+SELECT id, x+y v1, substring(memo, 1, 20) v2
+  INTO test01g
+  FROM fallback_data
+ WHERE memo LIKE '%abc%';	-- error
+ERROR:  (xpu_textlib.h:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
+SET pg_strom.cpu_fallback = on;
+SELECT id, x+y v1, substring(memo, 1, 20) v2
+  INTO test01g
+  FROM fallback_data
+ WHERE memo LIKE '%abc%';
+SET pg_strom.enabled = off;
+SELECT id, x+y v1, substring(memo, 1, 20) v2
+  INTO test01p
+  FROM fallback_data
+ WHERE memo LIKE '%abc%';
+(SELECT * FROM test01g EXCEPT SELECT * FROM test01p) ORDER BY id;
+ id | v1 | v2 
+----+----+----
+(0 rows)
+
+(SELECT * FROM test01p EXCEPT SELECT * FROM test01g) ORDER BY id;
+ id | v1 | v2 
+----+----+----
+(0 rows)
+
+RESET pg_strom.cpu_fallback;
+-- GpuScan with GPU kernel suspend/resume
+SET pg_strom.enabled = on;
+VACUUM ANALYZE;
+EXPLAIN (verbose, costs off)
+SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
+  INTO test02g
+  FROM fallback_data
+ WHERE id > 0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_arrow_index_temp.fallback_data
+   Output: id, ((x + y)), ((x - y)), ((x + '1'::double precision)), ((y + '1'::double precision)), ((x + '2'::double precision)), ((y + '2'::double precision)), ((x + '3'::double precision)), ((y + '4'::double precision)), memo
+   GPU Projection: id, (x + y), (x - y), (x + '1'::double precision), (y + '1'::double precision), (x + '2'::double precision), (y + '2'::double precision), (x + '3'::double precision), (y + '4'::double precision), memo
+   GPU Scan Quals: (id > 0) [rows: 400001 -> 399961]
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='float8', expr='((x + y))'>, <slot=2, type='float8', expr='x'>, <slot=3, type='float8', expr='y'>, <slot=4, type='float8', expr='((x - y))'>, <slot=5, type='float8', expr='((x + '1'::double precision))'>, <slot=6, type='float8', expr='((y + '1'::double precision))'>, <slot=7, type='float8', expr='((x + '2'::double precision))'>, <slot=8, type='float8', expr='((y + '2'::double precision))'>, <slot=9, type='float8', expr='((x + '3'::double precision))'>, <slot=10, type='float8', expr='((y + '4'::double precision))'>, <slot=11, type='text', expr='memo'>
+   KVecs-Buffer: nbytes: 73728, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-6fff, type='float8', expr='x'>, kvec2=<0x7000-b7ff, type='float8', expr='y'>, kvec3=<0xb800-11fff, type='text', expr='memo'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='float8' resno=4(x)>, <slot=3, type='float8' resno=5(y)>, <slot=11, type='text' resno=6(memo)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-6fff, type='float8', expr='x'>, <slot=3, offset=0x7000-b7ff, type='float8', expr='y'>, <slot=11, offset=0xb800-11fff, type='text', expr='memo'>]}}}
+   Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='0'}]}
+   Projection OpCode: {Projection: layout=<0,1,4,5,6,7,8,9,10,11> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x2800-7000, expr='x'}, {Var(float8): kvec=0x7000-b800, expr='y'}]}}, {SaveExpr: <slot=4, type='float8'> arg={Func(float8)::float8mi args=[{Var(float8): kvec=0x2800-7000, expr='x'}, {Var(float8): kvec=0x7000-b800, expr='y'}]}}, {SaveExpr: <slot=5, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x2800-7000, expr='x'}, {Const(float8): value='1'}]}}, {SaveExpr: <slot=6, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x7000-b800, expr='y'}, {Const(float8): value='1'}]}}, {SaveExpr: <slot=7, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x2800-7000, expr='x'}, {Const(float8): value='2'}]}}, {SaveExpr: <slot=8, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x7000-b800, expr='y'}, {Const(float8): value='2'}]}}, {SaveExpr: <slot=9, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x2800-7000, expr='x'}, {Const(float8): value='3'}]}}, {SaveExpr: <slot=10, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x7000-b800, expr='y'}, {Const(float8): value='4'}]}}, {SaveExpr: <slot=11, type='text'> arg={Var(text): kvec=0xb800-12000, expr='memo'}}]}
+   CUDA Stack Size: 4160
+(11 rows)
+
+SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
+  INTO test02g
+  FROM fallback_data
+ WHERE id > 0;
+SET pg_strom.enabled = off;
+SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
+  INTO test02p
+  FROM fallback_data
+ WHERE id > 0;
+(SELECT * FROM test02g EXCEPT SELECT * FROM test02p) ORDER BY id;
+ id | a | b | c | d | e | f | g | h | memo 
+----+---+---+---+---+---+---+---+---+------
+(0 rows)
+
+(SELECT * FROM test02p EXCEPT SELECT * FROM test02g) ORDER BY id;
+ id | a | b | c | d | e | f | g | h | memo 
+----+---+---+---+---+---+---+---+---+------
+(0 rows)
+
+-- GpuScan with GPU kernel suspend/resume and CPU fallback
+SET pg_strom.enabled = on;
+VACUUM ANALYZE;
+EXPLAIN (verbose, costs off)
+SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
+  INTO test03g
+  FROM fallback_data
+ WHERE memo LIKE '%abc%' OR id > 0;
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_arrow_index_temp.fallback_data
+   Output: id, ((x + y)), ((x - y)), ((x + '1'::double precision)), ((y + '1'::double precision)), ((x + '2'::double precision)), ((y + '2'::double precision)), ((x + '3'::double precision)), ((y + '4'::double precision)), memo
+   GPU Projection: id, (x + y), (x - y), (x + '1'::double precision), (y + '1'::double precision), (x + '2'::double precision), (y + '2'::double precision), (x + '3'::double precision), (y + '4'::double precision), memo
+   GPU Scan Quals: ((memo ~~ '%abc%'::text) OR (id > 0)) [rows: 400001 -> 399961]
+   KVars-Slot: <slot=0, type='text', expr='memo'>, <slot=1, type='int4', expr='id'>, <slot=2, type='float8', expr='((x + y))'>, <slot=3, type='float8', expr='x'>, <slot=4, type='float8', expr='y'>, <slot=5, type='float8', expr='((x - y))'>, <slot=6, type='float8', expr='((x + '1'::double precision))'>, <slot=7, type='float8', expr='((y + '1'::double precision))'>, <slot=8, type='float8', expr='((x + '2'::double precision))'>, <slot=9, type='float8', expr='((y + '2'::double precision))'>, <slot=10, type='float8', expr='((x + '3'::double precision))'>, <slot=11, type='float8', expr='((y + '4'::double precision))'>
+   KVecs-Buffer: nbytes: 73728, ndims: 2, items=[kvec0=<0x0000-67ff, type='text', expr='memo'>, kvec1=<0x6800-8fff, type='int4', expr='id'>, kvec2=<0x9000-d7ff, type='float8', expr='x'>, kvec3=<0xd800-11fff, type='float8', expr='y'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=3, type='float8' resno=4(x)>, <slot=4, type='float8' resno=5(y)>, <slot=0, type='text' resno=6(memo)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-67ff, type='text', expr='memo'>, <slot=1, offset=0x6800-8fff, type='int4', expr='id'>, <slot=3, offset=0x9000-d7ff, type='float8', expr='x'>, <slot=4, offset=0xd800-11fff, type='float8', expr='y'>]}}}
+   Scan Quals OpCode: {Bool::OR args=[{Func(bool)::textlike args=[{Var(text): slot=0, expr='memo'}, {Const(text): value='%abc%'}]}, {Func(bool)::int4gt args=[{Var(int4): slot=1, expr='id'}, {Const(int4): value='0'}]}]}
+   Projection OpCode: {Projection: layout=<1,2,5,6,7,8,9,10,11,0> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x6800-9000, expr='id'}}, {SaveExpr: <slot=2, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x9000-d800, expr='x'}, {Var(float8): kvec=0xd800-12000, expr='y'}]}}, {SaveExpr: <slot=5, type='float8'> arg={Func(float8)::float8mi args=[{Var(float8): kvec=0x9000-d800, expr='x'}, {Var(float8): kvec=0xd800-12000, expr='y'}]}}, {SaveExpr: <slot=6, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x9000-d800, expr='x'}, {Const(float8): value='1'}]}}, {SaveExpr: <slot=7, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0xd800-12000, expr='y'}, {Const(float8): value='1'}]}}, {SaveExpr: <slot=8, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x9000-d800, expr='x'}, {Const(float8): value='2'}]}}, {SaveExpr: <slot=9, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0xd800-12000, expr='y'}, {Const(float8): value='2'}]}}, {SaveExpr: <slot=10, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x9000-d800, expr='x'}, {Const(float8): value='3'}]}}, {SaveExpr: <slot=11, type='float8'> arg={Func(float8)::float8pl args=[{Var(float8): kvec=0xd800-12000, expr='y'}, {Const(float8): value='4'}]}}, {SaveExpr: <slot=0, type='text'> arg={Var(text): kvec=0x0000-6800, expr='memo'}}]}
+   CUDA Stack Size: 4160
+(11 rows)
+
+SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
+  INTO test03g
+  FROM fallback_data
+ WHERE memo LIKE '%abc%' OR id > 0;
+NOTICE:  (xpu_textlib.h:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
+SET pg_strom.enabled = off;
+SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
+  INTO test03p
+  FROM fallback_data
+ WHERE memo LIKE '%abc%' OR id > 0;
+(SELECT * FROM test03g EXCEPT SELECT * FROM test03p) ORDER BY id;
+ id | a | b | c | d | e | f | g | h | memo 
+----+---+---+---+---+---+---+---+---+------
+(0 rows)
+
+(SELECT * FROM test03p EXCEPT SELECT * FROM test03g) ORDER BY id;
+ id | a | b | c | d | e | f | g | h | memo 
+----+---+---+---+---+---+---+---+---+------
+(0 rows)
+
+RESET pg_strom.cpu_fallback;
+-- GpuJoin with CPU fallback
+SET pg_strom.enabled = on;
+VACUUM ANALYZE;
+EXPLAIN (verbose, costs off)
+SELECT id, x+y+z v, memo
+  INTO test10g
+  FROM fallback_data d NATURAL JOIN fallback_small s
+ WHERE memo LIKE '%abc%';
+                                                                                                                                                                                                                                              QUERY PLAN                                                                                                                                                                                                                                               
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_arrow_index_temp.fallback_small s
+   Output: d.id, (((d.x + d.y) + s.z)), d.memo
+   GPU Projection: d.id, ((d.x + d.y) + s.z), d.memo
+   GPU Join Quals [1]: (d.aid = s.aid) ... [nrows: 4000 -> 39]
+   GPU Outer Hash [1]: s.aid
+   GPU Inner Hash [1]: d.aid
+   KVars-Slot: <slot=0, type='int4', expr='d.id'>, <slot=1, type='float8', expr='(((d.x + d.y) + s.z))'>, <slot=2, type='float8', expr='d.x'>, <slot=3, type='float8', expr='d.y'>, <slot=4, type='float8', expr='s.z'>, <slot=5, type='text', expr='d.memo'>, <slot=6, type='int4', expr='d.aid'>, <slot=7, type='int4', expr='s.aid'>
+   KVecs-Buffer: nbytes: 112640, ndims: 3, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-6fff, type='float8', expr='x'>, kvec2=<0x7000-b7ff, type='float8', expr='y'>, kvec3=<0xb800-ffff, type='float8', expr='z'>, kvec4=<0x10000-167ff, type='text', expr='memo'>, kvec5=<0x16800-18fff, type='int4', expr='aid'>, kvec6=<0x19000-1b7ff, type='int4', expr='aid'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=7, type='int4' resno=1(aid)>, <slot=4, type='float8' resno=2(z)>]}, items[1]={LoadVars(depth=1): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='float8' resno=2(x)>, <slot=3, type='float8' resno=3(y)>, <slot=5, type='text' resno=4(memo)>, <slot=6, type='int4' resno=5(aid)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=4, offset=0xb800-ffff, type='float8', expr='z'>, <slot=7, offset=0x19000-1b7ff, type='int4', expr='aid'>]}}, items[1]={MoveVars(depth=1): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-6fff, type='float8', expr='x'>, <slot=3, offset=0x7000-b7ff, type='float8', expr='y'>, <offset=0xb800-ffff, type='float8', expr='z'>, <slot=5, offset=0x10000-167ff, type='text', expr='memo'>]}}}
+   Join Quals OpCode: {Packed items[1]={JoinQuals:  {Func(bool)::int4eq args=[{Var(int4): slot=6, expr='aid'}, {Var(int4): kvec=0x19000-1b800, expr='aid'}]}}}
+   Join HashValue OpCode: {Packed items[1]={HashValue arg={Var(int4): kvec=0x19000-1b800, expr='aid'}}}
+   Projection OpCode: {Projection: layout=<0,1,5> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='float8'> arg={Func(float8)::float8pl args=[{Func(float8)::float8pl args=[{Var(float8): kvec=0x2800-7000, expr='x'}, {Var(float8): kvec=0x7000-b800, expr='y'}]}, {Var(float8): kvec=0xb800-10000, expr='z'}]}}, {SaveExpr: <slot=5, type='text'> arg={Var(text): kvec=0x10000-16800, expr='memo'}}]}
+   CUDA Stack Size: 4064
+   ->  Custom Scan (GpuScan) on regtest_arrow_index_temp.fallback_data d
+         Output: d.id, d.x, d.y, d.memo, d.aid
+         GPU Projection: id, x, y, memo, aid
+         GPU Scan Quals: (memo ~~ '%abc%'::text) [rows: 400001 -> 39]
+         KVars-Slot: <slot=0, type='text', expr='memo'>, <slot=1, type='int4', expr='id'>, <slot=2, type='float8', expr='x'>, <slot=3, type='float8', expr='y'>, <slot=4, type='int4', expr='aid'>
+         KVecs-Buffer: nbytes: 83968, ndims: 2, items=[kvec0=<0x0000-67ff, type='text', expr='memo'>, kvec1=<0x6800-8fff, type='int4', expr='id'>, kvec2=<0x9000-d7ff, type='float8', expr='x'>, kvec3=<0xd800-11fff, type='float8', expr='y'>, kvec4=<0x12000-147ff, type='int4', expr='aid'>]
+         LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=4, type='int4' resno=2(aid)>, <slot=2, type='float8' resno=4(x)>, <slot=3, type='float8' resno=5(y)>, <slot=0, type='text' resno=6(memo)>]}}
+         MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-67ff, type='text', expr='memo'>, <slot=1, offset=0x6800-8fff, type='int4', expr='id'>, <slot=2, offset=0x9000-d7ff, type='float8', expr='x'>, <slot=3, offset=0xd800-11fff, type='float8', expr='y'>, <slot=4, offset=0x12000-147ff, type='int4', expr='aid'>]}}}
+         Scan Quals OpCode: {Func(bool)::textlike args=[{Var(text): slot=0, expr='memo'}, {Const(text): value='%abc%'}]}
+         Projection OpCode: {Projection: layout=<1,2,3,0,4> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x6800-9000, expr='id'}}, {SaveExpr: <slot=2, type='float8'> arg={Var(float8): kvec=0x9000-d800, expr='x'}}, {SaveExpr: <slot=3, type='float8'> arg={Var(float8): kvec=0xd800-12000, expr='y'}}, {SaveExpr: <slot=0, type='text'> arg={Var(text): kvec=0x0000-6800, expr='memo'}}, {SaveExpr: <slot=4, type='int4'> arg={Var(int4): kvec=0x12000-14800, expr='aid'}}]}
+         CUDA Stack Size: 4000
+(25 rows)
+
+SELECT id, x+y+z v, memo
+  INTO test10g
+  FROM fallback_data d NATURAL JOIN fallback_small s
+ WHERE memo LIKE '%abc%';
+NOTICE:  (xpu_textlib.h:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
+SET pg_strom.enabled = off;
+SELECT id, x+y+z v, memo
+  INTO test10p
+  FROM fallback_data d NATURAL JOIN fallback_small s
+ WHERE memo LIKE '%abc%';
+(SELECT * FROM test10g EXCEPT SELECT * FROM test10p) ORDER BY id;
+ id | v | memo 
+----+---+------
+(0 rows)
+
+(SELECT * FROM test10p EXCEPT SELECT * FROM test10g) ORDER BY id;
+ id | v | memo 
+----+---+------
+(0 rows)
+
+RESET pg_strom.cpu_fallback;
+-- GpuJoin with GPU kernel suspend / resume
+SET pg_strom.enabled = on;
+VACUUM ANALYZE;
+EXPLAIN (verbose, costs off)
+SELECT * INTO test11g
+  FROM fallback_data d NATURAL JOIN fallback_enlarge l
+ WHERE l.aid < 1000;
+                                                                                                                                                                                                                                                                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_arrow_index_temp.fallback_data d
+   Output: d.aid, d.id, d.cat, d.x, d.y, d.memo, l.z, l.md5
+   GPU Projection: d.aid, d.id, d.cat, d.x, d.y, d.memo, l.z, l.md5
+   GPU Join Quals [1]: (d.aid = l.aid) ... [nrows: 400001 -> 496979]
+   GPU Outer Hash [1]: d.aid
+   GPU Inner Hash [1]: l.aid
+   KVars-Slot: <slot=0, type='int4', expr='d.aid'>, <slot=1, type='int4', expr='d.id'>, <slot=2, type='text', expr='d.cat'>, <slot=3, type='float8', expr='d.x'>, <slot=4, type='float8', expr='d.y'>, <slot=5, type='text', expr='d.memo'>, <slot=6, type='float8', expr='l.z'>, <slot=7, type='bpchar', expr='l.md5'>, <slot=8, type='int4', expr='l.aid'>
+   KVecs-Buffer: nbytes: 165888, ndims: 3, items=[kvec0=<0x0000-27ff, type='int4', expr='aid'>, kvec1=<0x2800-4fff, type='int4', expr='id'>, kvec2=<0x5000-b7ff, type='text', expr='cat'>, kvec3=<0xb800-ffff, type='float8', expr='x'>, kvec4=<0x10000-147ff, type='float8', expr='y'>, kvec5=<0x14800-1afff, type='text', expr='memo'>, kvec6=<0x1b000-1f7ff, type='float8', expr='z'>, kvec7=<0x1f800-25fff, type='bpchar', expr='md5'>, kvec8=<0x26000-287ff, type='int4', expr='aid'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=0, type='int4' resno=2(aid)>, <slot=2, type='text' resno=3(cat)>, <slot=3, type='float8' resno=4(x)>, <slot=4, type='float8' resno=5(y)>, <slot=5, type='text' resno=6(memo)>]}, items[1]={LoadVars(depth=1): kvars=[<slot=6, type='float8' resno=1(z)>, <slot=7, type='bpchar' resno=2(md5)>, <slot=8, type='int4' resno=3(aid)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='aid'>, <slot=1, offset=0x2800-4fff, type='int4', expr='id'>, <slot=2, offset=0x5000-b7ff, type='text', expr='cat'>, <slot=3, offset=0xb800-ffff, type='float8', expr='x'>, <slot=4, offset=0x10000-147ff, type='float8', expr='y'>, <slot=5, offset=0x14800-1afff, type='text', expr='memo'>]}}, items[1]={MoveVars(depth=1): items=[<offset=0x0000-27ff, type='int4', expr='aid'>, <offset=0x2800-4fff, type='int4', expr='id'>, <offset=0x5000-b7ff, type='text', expr='cat'>, <offset=0xb800-ffff, type='float8', expr='x'>, <offset=0x10000-147ff, type='float8', expr='y'>, <offset=0x14800-1afff, type='text', expr='memo'>, <slot=6, offset=0x1b000-1f7ff, type='float8', expr='z'>, <slot=7, offset=0x1f800-25fff, type='bpchar', expr='md5'>]}}}
+   Join Quals OpCode: {Packed items[1]={JoinQuals:  {Func(bool)::int4eq args=[{Var(int4): kvec=0x0000-2800, expr='aid'}, {Var(int4): slot=8, expr='aid'}]}}}
+   Join HashValue OpCode: {Packed items[1]={HashValue arg={Var(int4): kvec=0x0000-2800, expr='aid'}}}
+   Projection OpCode: {Projection: layout=<0,1,2,3,4,5,6,7> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='aid'}}, {SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x2800-5000, expr='id'}}, {SaveExpr: <slot=2, type='text'> arg={Var(text): kvec=0x5000-b800, expr='cat'}}, {SaveExpr: <slot=3, type='float8'> arg={Var(float8): kvec=0xb800-10000, expr='x'}}, {SaveExpr: <slot=4, type='float8'> arg={Var(float8): kvec=0x10000-14800, expr='y'}}, {SaveExpr: <slot=5, type='text'> arg={Var(text): kvec=0x14800-1b000, expr='memo'}}, {SaveExpr: <slot=6, type='float8'> arg={Var(float8): kvec=0x1b000-1f800, expr='z'}}, {SaveExpr: <slot=7, type='bpchar'> arg={Var(bpchar): kvec=0x1f800-26000, expr='md5'}}]}
+   CUDA Stack Size: 4128
+   ->  Custom Scan (GpuScan) on regtest_arrow_index_temp.fallback_enlarge l
+         Output: l.z, l.md5, l.aid
+         GPU Projection: z, md5, aid
+         GPU Scan Quals: (aid < 1000) [rows: 20000 -> 4995]
+         KVars-Slot: <slot=0, type='int4', expr='aid'>, <slot=1, type='float8', expr='z'>, <slot=2, type='bpchar', expr='md5'>
+         KVecs-Buffer: nbytes: 55296, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='aid'>, kvec1=<0x2800-6fff, type='float8', expr='z'>, kvec2=<0x7000-d7ff, type='bpchar', expr='md5'>]
+         LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(aid)>, <slot=1, type='float8' resno=2(z)>, <slot=2, type='bpchar' resno=3(md5)>]}}
+         MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='aid'>, <slot=1, offset=0x2800-6fff, type='float8', expr='z'>, <slot=2, offset=0x7000-d7ff, type='bpchar', expr='md5'>]}}}
+         Scan Quals OpCode: {Func(bool)::int4lt args=[{Var(int4): slot=0, expr='aid'}, {Const(int4): value='1000'}]}
+         Projection OpCode: {Projection: layout=<1,2,0> args=[{SaveExpr: <slot=1, type='float8'> arg={Var(float8): kvec=0x2800-7000, expr='z'}}, {SaveExpr: <slot=2, type='bpchar'> arg={Var(bpchar): kvec=0x7000-d800, expr='md5'}}, {SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='aid'}}]}
+         CUDA Stack Size: 3952
+(25 rows)
+
+SELECT * INTO test11g
+  FROM fallback_data d NATURAL JOIN fallback_enlarge l
+ WHERE l.aid < 1000;
+SET pg_strom.enabled = off;
+SELECT * INTO test11p
+  FROM fallback_data d NATURAL JOIN fallback_enlarge l
+ WHERE l.aid < 1000;
+(SELECT * FROM test11g EXCEPT SELECT * FROM test11p) ORDER BY id;
+ aid | id | cat | x | y | memo | z | md5 
+-----+----+-----+---+---+------+---+-----
+(0 rows)
+
+(SELECT * FROM test11p EXCEPT SELECT * FROM test11g) ORDER BY id;
+ aid | id | cat | x | y | memo | z | md5 
+-----+----+-----+---+---+------+---+-----
+(0 rows)
+
+-- GpuJoin with GPU kernel suspend / resume, and CPU fallback
+SET pg_strom.enabled = on;
+EXPLAIN (verbose, costs off)
+SELECT *
+  FROM fallback_data d NATURAL JOIN fallback_enlarge l
+ WHERE l.aid < 2500 AND memo LIKE '%ab%';
+                                                                                                                                                                                                                                                                                                                                                                                                                                 QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_arrow_index_temp.fallback_data d
+   Output: d.aid, d.id, d.cat, d.x, d.y, d.memo, l.z, l.md5
+   GPU Projection: d.aid, d.id, d.cat, d.x, d.y, d.memo, l.z, l.md5
+   GPU Scan Quals: (d.memo ~~ '%ab%'::text) [rows: 400001 -> 11862]
+   GPU Join Quals [1]: (d.aid = l.aid) ... [nrows: 11862 -> 36867]
+   GPU Outer Hash [1]: d.aid
+   GPU Inner Hash [1]: l.aid
+   KVars-Slot: <slot=0, type='text', expr='d.memo'>, <slot=1, type='int4', expr='d.aid'>, <slot=2, type='int4', expr='d.id'>, <slot=3, type='text', expr='d.cat'>, <slot=4, type='float8', expr='d.x'>, <slot=5, type='float8', expr='d.y'>, <slot=6, type='float8', expr='l.z'>, <slot=7, type='bpchar', expr='l.md5'>, <slot=8, type='int4', expr='l.aid'>
+   KVecs-Buffer: nbytes: 165888, ndims: 3, items=[kvec0=<0x0000-67ff, type='text', expr='memo'>, kvec1=<0x6800-8fff, type='int4', expr='aid'>, kvec2=<0x9000-b7ff, type='int4', expr='id'>, kvec3=<0xb800-11fff, type='text', expr='cat'>, kvec4=<0x12000-167ff, type='float8', expr='x'>, kvec5=<0x16800-1afff, type='float8', expr='y'>, kvec6=<0x1b000-1f7ff, type='float8', expr='z'>, kvec7=<0x1f800-25fff, type='bpchar', expr='md5'>, kvec8=<0x26000-287ff, type='int4', expr='aid'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=2, type='int4' resno=1(id)>, <slot=1, type='int4' resno=2(aid)>, <slot=3, type='text' resno=3(cat)>, <slot=4, type='float8' resno=4(x)>, <slot=5, type='float8' resno=5(y)>, <slot=0, type='text' resno=6(memo)>]}, items[1]={LoadVars(depth=1): kvars=[<slot=6, type='float8' resno=1(z)>, <slot=7, type='bpchar' resno=2(md5)>, <slot=8, type='int4' resno=3(aid)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-67ff, type='text', expr='memo'>, <slot=1, offset=0x6800-8fff, type='int4', expr='aid'>, <slot=2, offset=0x9000-b7ff, type='int4', expr='id'>, <slot=3, offset=0xb800-11fff, type='text', expr='cat'>, <slot=4, offset=0x12000-167ff, type='float8', expr='x'>, <slot=5, offset=0x16800-1afff, type='float8', expr='y'>]}}, items[1]={MoveVars(depth=1): items=[<offset=0x0000-67ff, type='text', expr='memo'>, <offset=0x6800-8fff, type='int4', expr='aid'>, <offset=0x9000-b7ff, type='int4', expr='id'>, <offset=0xb800-11fff, type='text', expr='cat'>, <offset=0x12000-167ff, type='float8', expr='x'>, <offset=0x16800-1afff, type='float8', expr='y'>, <slot=6, offset=0x1b000-1f7ff, type='float8', expr='z'>, <slot=7, offset=0x1f800-25fff, type='bpchar', expr='md5'>]}}}
+   Scan Quals OpCode: {Func(bool)::textlike args=[{Var(text): slot=0, expr='memo'}, {Const(text): value='%ab%'}]}
+   Join Quals OpCode: {Packed items[1]={JoinQuals:  {Func(bool)::int4eq args=[{Var(int4): kvec=0x6800-9000, expr='aid'}, {Var(int4): slot=8, expr='aid'}]}}}
+   Join HashValue OpCode: {Packed items[1]={HashValue arg={Var(int4): kvec=0x6800-9000, expr='aid'}}}
+   Projection OpCode: {Projection: layout=<1,2,3,4,5,0,6,7> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x6800-9000, expr='aid'}}, {SaveExpr: <slot=2, type='int4'> arg={Var(int4): kvec=0x9000-b800, expr='id'}}, {SaveExpr: <slot=3, type='text'> arg={Var(text): kvec=0xb800-12000, expr='cat'}}, {SaveExpr: <slot=4, type='float8'> arg={Var(float8): kvec=0x12000-16800, expr='x'}}, {SaveExpr: <slot=5, type='float8'> arg={Var(float8): kvec=0x16800-1b000, expr='y'}}, {SaveExpr: <slot=0, type='text'> arg={Var(text): kvec=0x0000-6800, expr='memo'}}, {SaveExpr: <slot=6, type='float8'> arg={Var(float8): kvec=0x1b000-1f800, expr='z'}}, {SaveExpr: <slot=7, type='bpchar'> arg={Var(bpchar): kvec=0x1f800-26000, expr='md5'}}]}
+   CUDA Stack Size: 4128
+   ->  Custom Scan (GpuScan) on regtest_arrow_index_temp.fallback_enlarge l
+         Output: l.z, l.md5, l.aid
+         GPU Projection: z, md5, aid
+         GPU Scan Quals: (aid < 2500) [rows: 20000 -> 12495]
+         KVars-Slot: <slot=0, type='int4', expr='aid'>, <slot=1, type='float8', expr='z'>, <slot=2, type='bpchar', expr='md5'>
+         KVecs-Buffer: nbytes: 55296, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='aid'>, kvec1=<0x2800-6fff, type='float8', expr='z'>, kvec2=<0x7000-d7ff, type='bpchar', expr='md5'>]
+         LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(aid)>, <slot=1, type='float8' resno=2(z)>, <slot=2, type='bpchar' resno=3(md5)>]}}
+         MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='aid'>, <slot=1, offset=0x2800-6fff, type='float8', expr='z'>, <slot=2, offset=0x7000-d7ff, type='bpchar', expr='md5'>]}}}
+         Scan Quals OpCode: {Func(bool)::int4lt args=[{Var(int4): slot=0, expr='aid'}, {Const(int4): value='2500'}]}
+         Projection OpCode: {Projection: layout=<1,2,0> args=[{SaveExpr: <slot=1, type='float8'> arg={Var(float8): kvec=0x2800-7000, expr='z'}}, {SaveExpr: <slot=2, type='bpchar'> arg={Var(bpchar): kvec=0x7000-d800, expr='md5'}}, {SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='aid'}}]}
+         CUDA Stack Size: 3952
+(27 rows)
+
+SELECT * INTO test12g
+  FROM fallback_data d NATURAL JOIN fallback_enlarge l
+ WHERE l.aid < 2500 AND memo LIKE '%ab%';
+NOTICE:  (xpu_textlib.h:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
+SET pg_strom.enabled = off;
+SELECT * INTO test12p
+  FROM fallback_data d NATURAL JOIN fallback_enlarge l
+ WHERE l.aid < 2500 AND memo LIKE '%ab%';
+(SELECT * FROM test12g EXCEPT SELECT * FROM test12p) ORDER BY id LIMIT 10;
+ aid | id | cat | x | y | memo | z | md5 
+-----+----+-----+---+---+------+---+-----
+(0 rows)
+
+(SELECT * FROM test12p EXCEPT SELECT * FROM test12g) ORDER BY id LIMIT 10;
+ aid | id | cat | x | y | memo | z | md5 
+-----+----+-----+---+---+------+---+-----
+(0 rows)
+
+RESET pg_strom.cpu_fallback;
