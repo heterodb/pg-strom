@@ -187,7 +187,6 @@ extern int		numGpuDevAttrs;
  */
 struct devtype_info;
 struct devfunc_info;
-struct devcast_info;
 
 typedef uint32_t (*devtype_hashfunc_f)(bool isnull, Datum value);
 
@@ -222,7 +221,6 @@ typedef struct devtype_info
 
 typedef struct devfunc_info
 {
-	dlist_node	chain;
 	uint32_t	hash;
 	FuncOpCode	func_code;
 	const char *func_extension;
