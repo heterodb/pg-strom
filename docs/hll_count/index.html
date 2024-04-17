@@ -5,7 +5,7 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
       <link rel="shortcut icon" href="../img/favicon.ico" />
-    <title>HyperLogLog - PG-Strom Manual</title>
+    <title>HyperLogLog版 COUNT(distinct) - PG-Strom Manual</title>
     <link rel="stylesheet" href="../css/theme.css" />
     <link rel="stylesheet" href="../css/theme_extra.css" />
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
@@ -15,7 +15,7 @@
     
       <script>
         // Current page data
-        var mkdocs_page_name = "HyperLogLog";
+        var mkdocs_page_name = "HyperLogLog\u7248 COUNT(distinct)";
         var mkdocs_page_input_path = "hll_count.md";
         var mkdocs_page_url = null;
       </script>
@@ -52,7 +52,7 @@
                 </li>
               </ul>
               <p class="caption"><span class="caption-text">Tutorial</span></p>
-              <ul class="current">
+              <ul>
                   <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
@@ -60,22 +60,6 @@
                   <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
-                  </li>
-                  <li class="toctree-l1 current"><a class="reference internal current" href="./">HyperLogLog</a>
-    <ul class="current">
-    <li class="toctree-l2"><a class="reference internal" href="#background">Background</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#usage">Usage</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#cautions">Cautions</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#re-use-of-hll-scketch">Re-use of HLL Scketch</a>
-    </li>
-    </ul>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
                   </li>
@@ -104,6 +88,8 @@
               </ul>
               <p class="caption"><span class="caption-text">Release Note</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
@@ -129,8 +115,7 @@
         <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
     <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
-          <li class="breadcrumb-item">Tutorial</li>
-      <li class="breadcrumb-item active">HyperLogLog</li>
+      <li class="breadcrumb-item active">HyperLogLog版 COUNT(distinct)</li>
     <li class="wy-breadcrumbs-aside">
     </li>
   </ul>
@@ -139,28 +124,29 @@
           <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
             <div class="section" itemprop="articleBody">
               
-                <h1 id="countdistinct-with-hyperloglog">COUNT(distinct) with HyperLogLog</h1>
-<h2 id="background">Background</h2>
-<p>We often run the <code>SELECT COUNT (distinct KEY)</code> command on large datasets to count the number of unique users or items (this is called cardinality).
-However, there is a nasty dilemma between key-value deduplication and parallel / distributed processing, including GPU utilization.</p>
-<p>There are two strategies to implement key-value deduplication.</p>
-<p>The first one is pre-sorting of the input data stream to the Aggregate operation that actually runs <code>COUNT(distinct)</code>. It increments the internal counter each time the key-value changes. It is a simple implementation, however, sorting a large amount of data is a heavy process, and this method strongly depends on the order in which records are processed, so there is no choice but to execute it in a single thread.</p>
-<p>One other idea is building an internal hash-table of Aggregate operation to track all the key-values for deduplication. It is not easy to predict amount of memory consumption in advance, and can often consume too much resources.</p>
-<p>These characteristics prevents to run <code>COUNT (distinct KEY)</code> aggregate function on GPUs in parallel, thus, PG-Strom does not support right now.</p>
+                <h1 id="hyperloglog-countdistinct">HyperLogLog版 COUNT(distinct)</h1>
+<h2 id="_1">背景</h2>
+<p>ユニークユーザ数やユニークアイテム数（これをカーディナリティと呼びます）の集計を目的として、しばしば大量のデータセットに対して<code>SELECT COUNT(distinct KEY)</code>構文を実行する事があります。
+しかし、キー値の重複排除とGPUを含む並列・分散処理との間には厄介なジレンマが存在します。</p>
+<p>キー値の重複排除を実装する場合、２つの戦略を考える事ができます。</p>
+<p>一つは、集計処理を行う Aggregate 処理への入力を予めキー値でソートしておき、キー値の値が変化するたびにカウンタをインクリメントするという実装。単純ですが、大量のデータをソートするのは重い処理である上に、レコードを処理する順序に強く依存する方式であるため、シングルスレッドで実行するほかありません。</p>
+<p>もう一つは、集計処理を行う Aggregate 処理ノードの内部にハッシュ表を作成し、重複排除のためにキー値を全てトラックするという方法が考えられます。メモリ消費量が事前に予測し難く、過大なリソースを消費してしまう事があります。</p>
+<p>これらの特性が、集約関数<code>COUNT(distinct KEY)</code>をGPUで並列実行する上での障害となっており、現在のところ、PG-Stromではこれをサポートしていません。</p>
 <p><img alt="Count with distinct" src="../img/hll_count_background.png" /></p>
-<h2 id="overview">Overview</h2>
-<p>For example, when we use the number of unique users aggregated by <code>COUNT (distinct KEY)</code> as a source of graph, in other words, in a usage scene where a certain amount of error is sufficiently acceptable, we may be able to subsitute a mathematically predicted estimation with a certain level of accuracy, instead of the strict deduplication and aggregation.</p>
-<p>HyperLogLog is an algorithm to estimate the number of unique key-values from a large data set. Due to its characteristics, it is easy to easy to partition large-scale table scans by multiple processes, and the memory consumption is sufficiently small and predictable in advance, so suitable for GPU processing.</p>
-<p>Below introduces the basic idea of HyperLogLog.</p>
-<p>First, the key-values for the deduplication shall be applied to the hash function to calculate the hash value. If the hash function performs good enough, we can assume the hash value bit patterns corresponding to the key-values are randomly distributed. Then, among the hash-values devived from many kind of key-values, we expect there is a characteristics one in which 0-bits appear consecutively.</p>
-<p>For example, in the case of a data set with 32 different key values, it is no wonder if there is 4 consecutive bits pattern from the latest bit, such as <code>... 1011000</code>, in any of the hash-values generated from the key-values. In this way, HyperLogLog estimates the cardinality of the original dataset by examining the maximum number of consecutive 0-bits from the leatest bits of the hash-values.</p>
-<p>In practice, some bits of the hash value are used as "register selectors". For example, if 8 bits are used as a selector, 256 registers shall be reserved for HLL Sketch in advance, and the register on HLL Scketch is indexed by the least 8 bits of the hash value. Then, the number of consecutive 0-bits from the least significant bit of the remaining hash values is counter, and the maximum value shall be recorded for each register.</p>
-<p>What recorded in the register is the number of 0-bits from the least bits, therefore, in case of the 64-bit hash function, used in PG-Strom, 8-bits registers are sufficient to record the necessary information. If the nummber of registers is 256, the total required storage area is only 256bytes.</p>
+<h2 id="_2">概要</h2>
+<p>例えば<code>COUNT(distinct KEY)</code>で集計したユニークユーザ数を単にグラフとして出力する、つまりある程度の誤差は十分に許容範囲であるような利用シーンにおいては、厳密にキー値の重複排除と集計を行うのではなく、代わりに、ある程度の正確さが数学的に予測された推定値で代替するという方法が考えられます。</p>
+<p>HyperLogLogとは、大きなデータセットから重複しないキー値の数を推定するためのアルゴリズムです。その特性から、大規模なテーブルのスキャンを複数のプロセスで分割統治する事が容易で、消費するメモリサイズは十分に小さく事前に予測可能であるといった、GPUでの処理に適した特性を備えています。</p>
+<p>基本的な考え方を説明します。</p>
+<p>はじめに、重複排除を行うキー値をハッシュ関数にかけ、ハッシュ値を計算します。ハッシュ関数の性能が十分に良ければ、キー値に対応するハッシュ値のビットパターンはランダムに分布すると仮定します。そうすると、何種類ものキー値から導出したハッシュ値の中には、0が連続して出現するような特徴的なものも存在すると考えられます。</p>
+<p>例えば、32種類のキー値が存在するデータセットであれば、キー値から生成したハッシュ値の中に、<code>.... 10110000</code> というように、下位ビットから4個の0が連続するというパターンが出現する事は不思議ではないでしょう。このようにHyperLogLogでは、生成したハッシュ値のビットパターンのうち、下位ビットから連続した0の個数の最大値を調べる事で、元のデータセットのカーディナリティを推定するのです。</p>
+<p>実用上は、ハッシュ値のうち何ビットかを「レジスタセレクタ」として使用します。例えば8bit分をセレクタとして使用するのであれば、256個のレジスタからなるHLL Sketchを予め確保し、ハッシュ値の下位8bitを用いてHLL Sketch上のレジスタを指定します。そして、残るハッシュ値のうち最下位ビットからの連続する 0 の個数をカウントして、レジスタ毎にその最大値を記録します。
+最後にスキャンの終了後、256個のレジスタの内容を平均（調和平均）し、補正を加える事で、比較的精度の高いカーディナリティの推定を行う事ができます。</p>
+<p>レジスタに記録するのは下位ビットから連続する0の個数です。したがって、PG-Stromで利用する64bitのハッシュ関数なら、それぞれ8bitもあれば十分に必要な情報を記録する事ができ、レジスタの数が256個であれば必要な記憶領域の合計は僅かに256バイトにすぎません。</p>
 <p><img alt="HLL Algorithm" src="../img/hll_count_algorithm.png" /></p>
-<h2 id="usage">Usage</h2>
-<p>By using the aggregate function the <code>hll_count(KEY)</code> provided by PG-Strom instead of the <code>count (distinct KEY)</code>, it allows to estimate the cardinality using HyperLogLog.</p>
-<p>For example, the strict deduplication of the <code>lo_custkey</code> column in the following query has a cardinality of 2,000,000, but it took more than 400 seconds to derive this result from the <code>lineorder</code> table with 600 million rows (87GB). increase.
-Its query execution plan by EXPLAIN displays that it does not choose CPU parallel query, thus it scans the entire table in a single process.</p>
+<h2 id="_3">利用方法</h2>
+<p><code>count(distinct KEY)</code>の代わりに、PG-Stromが独自に提供する集約関数<code>hll_count(KEY)</code>を使用する事で、HyperLogLogを使用したカーディナリティの推測を行う事ができます。</p>
+<p>例えば、以下のクエリで厳密に重複排除を行った<code>lo_custkey</code>列のカーディナリティ数は2,000,000ですが、6億行(87GB)のテーブル<code>lineorder</code>からこれを導出するのに400秒以上を要しています。
+実行計画を見ると、CPU並列クエリは選択されておらず、シングルプロセスでテーブル全体をスキャンしている事が分かります。</p>
 <pre><code>=# select count(distinct lo_custkey) from lineorder ;
   count
 ---------
@@ -176,8 +162,8 @@ Time: 403360.908 ms (06:43.361)
    -&gt;  Seq Scan on lineorder  (cost=0.00..17396057.84 rows=600014784 width=6)
 (2 rows)
 </code></pre>
-<p>On the other hand, use of the <code>hll_count(lo_custkey)</code> instead of the <code>count (distinct lo_custkey)</code> allows to get relatively accurate cardinality estimate of 2,005,437 (0.3% error rate to the actual value) on the same hardware, but 40 times faster than the strict deduplication.
-Its query execution plan by EXPLAIN displays that it utilizes various acceleration technologies, in addition to CPU parallel query, such as GPU aggregation and GPU-Direct SQL.</p>
+<p>一方、<code>count(distinct lo_custkey)</code>の代わりに<code>hll_count(lo_custkey)</code>を利用すると、カーディナリティの推測値2,005,437（実際の値に対する誤差率0.3%）という比較的正確な値を、同じハードウェア上で40倍以上も高速に導出できている事が分かります。
+実行計画を確認すると、CPU並列クエリに加えて、GPUでの集約、GPU-Direct SQLといった各種の高速化技術を利用している事が分かります。</p>
 <pre><code>=# select hll_count(lo_custkey) from lineorder ;
  hll_count
 -----------
@@ -199,12 +185,12 @@ Time: 9660.810 ms (00:09.661)
                GPUDirect SQL: enabled
 (8 rows)
 </code></pre>
-<h3 id="cautions">Cautions</h3>
-<p>Due to the characteristics of the HyperLogLog algorithm, the estimation error is not negligible for attributes with small key-value cardinality.
-For example, the <code>lo_orderpriority</code> column of the<code>lineorder</code> table below can have only 5 different values from <code>'1-URGENT'</code> to <code>'5-LOW'</code>.
-The <code>count (distinct lo_order priority)</code> tells us that its strict deduplicated cardinarity was 5.
-On the other hand, <code>hll_count (lo_orderpriority)</code> tells us the estimated cardinarity was 370.</p>
-<p>When using <code>hll_count()</code>, we need to pay attention for the characteristics and distribution of the data.</p>
+<h3 id="_4">注意事項</h3>
+<p>HyperLogLogのアルゴリズムの特性上、キー値のカーディナリティが小さい属性に対しては推定誤差が無視できないほど大きくなります。
+例えば、以下の<code>lineorder</code>テーブルの<code>lo_orderpriority</code>列は、<code>'1-URGENT'</code>から<code>'5-LOW'</code>まで僅か5種類の値しか持ちえません。
+<code>count(distinct lo_orderpriority)</code>により、厳密な重複排除を行って集計すると結果は5と出力されます。
+一方、<code>hll_count(lo_orderpriority)</code>を用いてカーディナリティの推測を行った場合、その結果は370と出力されてしまいました。</p>
+<p><code>hll_count()</code>の利用に際しては、データの特性や分布に対しても注意が必要です。</p>
 <pre><code>=# select count(distinct lo_orderpriority) from lineorder ;
  count
 -------
@@ -217,9 +203,9 @@ On the other hand, <code>hll_count (lo_orderpriority)</code> tells us the estima
        370
 (1 row)
 </code></pre>
-<h2 id="re-use-of-hll-scketch">Re-use of HLL Scketch</h2>
-<p>Check query execution plan again, when the aggregate function <code>hll_count()</code> is executed.
-We can confirm the output list for each execution step, by <code>explain verbose</code>.</p>
+<h2 id="hll-sketch">HLL Sketchの再利用</h2>
+<p>もう一度、集約関数 <code>hll_count()</code> を実行した時の実行計画を確認してみます。
+<code>explain verbose</code>を実行すると、それぞれの処理ステップでどのような出力が行われるのかを確認する事ができます。</p>
 <pre><code>=# explain verbose select hll_count(lo_custkey) from lineorder ;
                                                    QUERY PLAN
 -----------------------------------------------------------------------------------------------------------------
@@ -240,14 +226,14 @@ We can confirm the output list for each execution step, by <code>explain verbose
                Kernel Binary: /var/lib/pgdata/pgsql_tmp/pgsql_tmp_strom_374786.7.ptx
 (15 rows)
 </code></pre>
-<p>It shows us the Aggregate node runs <code>hll_merge()</code> instead of the <code>hll_count()</code>.
-This is an aggregate function that receives bytea datum of HLL Sketch and outputs a cardinality estimate.</p>
-<p>It is the role of GpuPreAgg to generate the HLL Sketch, where the hash value generated by <code>pgstrom.hll_hash()</code> is passed to <code>pgstrom.hll_sketch_new()</code> to create a HLL Sketch of the <code>lo_custkey</code> column.
-Note that the HLL Sketch generated here already completes partial aggregation, thus, only 1 row with HLL Sketch shall be poped for each worker process, where its internal state has been already updated according to the contents of 200 million rows.</p>
-<p>In other words, it pre-processes the aggregation of 200 million records on the GPU into 1 HLL Sketch, then CPU finally merges the HLL Sketches and generates the estimation.</p>
-<p>Due to the characteristics of the algorithm, for example, if HLL Sketch is calculated in advance for each monthly data and saved in the database, the difference can be obtained without scanning the entire table to estimate the cardinality of key values. You can get the cardinarity estimation by calculating the HLL Sketch towards the differences and merging it with the saved HLL Sketches.</p>
-<p>For example, the following query calculates HLL Sketch on annual basis and estimates the cumulative cardinality by merging the annual HLL Sketch.
-This data is artificially adjusted to increase the cardinality of <code>lo_custkey</code>. You can see the estimated total number of customers has increased year by year.</p>
+<p>集約関数<code>hll_count()</code>をCPUで実行する代わりに、Aggregateでは <code>hll_merge()</code> が実行されているのが分かります。
+これは HLL Sketch である bytea データを受け取り、カーディナリティの推定値を出力する集約関数です。</p>
+<p>HLL Sketchを生成するのは GpuPreAgg の役割で、ここでは、<code>pgstrom.hll_hash()</code> で生成したハッシュ値を <code>pgstrom.hll_sketch_new()</code> に渡して、<code>lo_custkey</code>列のHLL Sketchを生成しています。
+なお、ここで生成されるHLL Sketchは既に部分集約が終わった状態のものですので、およそ2億レコードを処理した後のHLL Sketchを各ワーカーごとにそれぞれ1行だけ返却するという処理になります。</p>
+<p>つまり、2億件のレコードを1件のHLL Sketchに集約するまではGPUで実行し、最終的にHLL Sketchをマージして推計値を集計するところはCPUで実行しているわけです。</p>
+<p>このようなアルゴリズムの特性により、例えば、月次のデータごとに HLL Sketch を予め計算してデータベースに保存しておけば、キー値のカーディナリティを推定するためにテーブル全体をスキャンしなくても、差分データの HLL Sketch を計算し、保存していた HLL Sketch と合成するだけでキー値のカーディナリティを推定する事ができます。</p>
+<p>例えば、以下のクエリは年次単位でHLL Sketchを計算し、年次ごとのHLL Sketchをマージする事で累積でのカーディナリティを推定しています。
+これが人為的に<code>lo_custkey</code>のカーディナリティが増加するよう調整したデータですが、時間経過とともに累計ユーザ数の推定値が増えている事が分かります。</p>
 <pre><code>=# select lo_orderdate / 10000 as year, hll_sketch(lo_custkey) as sketch
      into pg_temp.annual
      from lineorder group by 1;
@@ -278,14 +264,10 @@ SELECT 7
   1999 |   2005437
 (7 rows)
 </code></pre>
-<p>Note that <code>hll_sketch_histogram()</code> is a SQL function which receives a raw data of HLL Sketch, then returns its histogram of the distribution of register values.</p>
+<p>なお、<code>hll_sketch_histogram()</code>はHLL Sketchの生データを引数として受け取り、そのレジスタ値の分布をヒストグラムとして返す関数です。</p>
               
             </div>
           </div><footer>
-    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
-        <a href="../postgis/" class="btn btn-neutral float-left" title="PostGIS"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-        <a href="../troubles/" class="btn btn-neutral float-right" title="Trouble Shooting">Next <span class="icon icon-circle-arrow-right"></span></a>
-    </div>
 
   <hr/>
 
@@ -307,10 +289,6 @@ SELECT 7
   <span class="rst-current-version" data-toggle="rst-current-version">
     
     
-      <span><a href="../postgis/" style="color: #fcfcfc">&laquo; Previous</a></span>
-    
-    
-      <span><a href="../troubles/" style="color: #fcfcfc">Next &raquo;</a></span>
     
   </span>
 </div>

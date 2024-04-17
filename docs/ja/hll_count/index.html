@@ -5,7 +5,7 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
       <link rel="shortcut icon" href="../img/favicon.ico" />
-    <title>HyperLogLog - PG-Strom Manual</title>
+    <title>HyperLogLog版 COUNT(distinct) - PG-Strom Manual</title>
     <link rel="stylesheet" href="../css/theme.css" />
     <link rel="stylesheet" href="../css/theme_extra.css" />
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
@@ -15,7 +15,7 @@
     
       <script>
         // Current page data
-        var mkdocs_page_name = "HyperLogLog";
+        var mkdocs_page_name = "HyperLogLog\u7248 COUNT(distinct)";
         var mkdocs_page_input_path = "hll_count.md";
         var mkdocs_page_url = null;
       </script>
@@ -52,7 +52,7 @@
                 </li>
               </ul>
               <p class="caption"><span class="caption-text">利用ガイド</span></p>
-              <ul class="current">
+              <ul>
                   <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
@@ -60,22 +60,6 @@
                   <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
-                  </li>
-                  <li class="toctree-l1 current"><a class="reference internal current" href="./">HyperLogLog</a>
-    <ul class="current">
-    <li class="toctree-l2"><a class="reference internal" href="#_1">背景</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#_2">概要</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#_3">利用方法</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#_4">注意事項</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#hll-sketch">HLL Sketchの再利用</a>
-    </li>
-    </ul>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
                   </li>
@@ -104,6 +88,8 @@
               </ul>
               <p class="caption"><span class="caption-text">リリースノート</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
@@ -129,8 +115,7 @@
         <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
     <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
-          <li class="breadcrumb-item">利用ガイド</li>
-      <li class="breadcrumb-item active">HyperLogLog</li>
+      <li class="breadcrumb-item active">HyperLogLog版 COUNT(distinct)</li>
     <li class="wy-breadcrumbs-aside">
     </li>
   </ul>
@@ -283,10 +268,6 @@ SELECT 7
               
             </div>
           </div><footer>
-    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
-        <a href="../postgis/" class="btn btn-neutral float-left" title="GPU版PostGIS"><span class="icon icon-circle-arrow-left"></span> Previous</a>
-        <a href="../troubles/" class="btn btn-neutral float-right" title="トラブルシューティング">Next <span class="icon icon-circle-arrow-right"></span></a>
-    </div>
 
   <hr/>
 
@@ -308,10 +289,6 @@ SELECT 7
   <span class="rst-current-version" data-toggle="rst-current-version">
     
     
-      <span><a href="../postgis/" style="color: #fcfcfc">&laquo; Previous</a></span>
-    
-    
-      <span><a href="../troubles/" style="color: #fcfcfc">Next &raquo;</a></span>
     
   </span>
 </div>

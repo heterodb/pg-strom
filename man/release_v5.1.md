@@ -1,7 +1,7 @@
 @ja:#PG-Strom v5.1リリース
 @en:#PG-Strom v5.1 Release
 
-<div style="text-align: right;">PG-Strom Development Team (15-Apr-2024)</div>
+<div style="text-align: right;">PG-Strom Development Team (17-Apr-2024)</div>
 
 @ja:##概要
 @en:##Overview
