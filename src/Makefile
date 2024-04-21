@@ -11,7 +11,7 @@ STROM_OBJS = main.o githash.o extra.o codegen.o misc.o executor.o \
              gpu_scan.o gpu_join.o gpu_preagg.o \
              relscan.o brin.o gist.o gpu_cache.o \
              arrow_fdw.o arrow_nodes.o \
-             pcie.o float2.o tinyint.o aggfuncs.o
+             float2.o tinyint.o aggfuncs.o
 GENERATED-HEADERS = gpu_devattrs.h githash.c
 STROM_HEADERS = arrow_defs.h arrow_ipc.h float2.h
 

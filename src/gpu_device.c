@@ -14,11 +14,16 @@
 
 /* variable declarations */
 GpuDevAttributes *gpuDevAttrs = NULL;
-int			numGpuDevAttrs = 0;
-double		pgstrom_gpu_setup_cost;			/* GUC */
-double		pgstrom_gpu_tuple_cost;			/* GUC */
-double		pgstrom_gpu_operator_cost;		/* GUC */
-double		pgstrom_gpu_direct_seq_page_cost; /* GUC */
+int				numGpuDevAttrs = 0;
+double			pgstrom_gpu_setup_cost;			/* GUC */
+double			pgstrom_gpu_tuple_cost;			/* GUC */
+double			pgstrom_gpu_operator_cost;		/* GUC */
+double			pgstrom_gpu_direct_seq_page_cost; /* GUC */
+static bool		pgstrom_gpudirect_enabled;			/* GUC */
+static int		__pgstrom_gpudirect_threshold_kb;	/* GUC */
+#define pgstrom_gpudirect_threshold		((size_t)__pgstrom_gpudirect_threshold_kb << 10)
+
+
 /* catalog of device attributes */
 typedef enum {
 	DEVATTRKIND__INT,
@@ -44,6 +49,39 @@ static struct {
 #undef DEV_ATTR
 };
 
+static const char *
+sysfs_read_line(const char *path)
+{
+	static char	buffer[2048];
+	int			fdesc;
+	ssize_t		off, sz;
+	char	   *pos;
+
+	fdesc = open(path, O_RDONLY);
+	if (fdesc < 0)
+		return NULL;
+	off = 0;
+	for (;;)
+	{
+		sz = read(fdesc, buffer+off, sizeof(buffer)-1-off);
+		if (sz > 0)
+			off += sz;
+		else if (sz == 0)
+			break;
+		else if (errno != EINTR)
+		{
+			close(fdesc);
+			return NULL;
+		}
+	}
+	close(fdesc);
+	buffer[sz] = '\0';
+	pos = strchr(buffer, '\n');
+	if (pos)
+		*pos = '\0';
+	return __trim(buffer);
+}
+
 /*
  * collectGpuDevAttrs
  */
@@ -54,6 +92,7 @@ __collectGpuDevAttrs(GpuDevAttributes *dattrs, CUdevice cuda_device)
 	char		path[1024];
 	char		linebuf[1024];
 	FILE	   *filp;
+	CUuuid		uuid;
 	int			x, y, z;
 	const char *str;
 	struct stat	stat_buf;
@@ -70,9 +109,27 @@ __collectGpuDevAttrs(GpuDevAttributes *dattrs, CUdevice cuda_device)
 	rc = cuDeviceGetName(dattrs->DEV_NAME, sizeof(dattrs->DEV_NAME), cuda_device);
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuDeviceGetName: %s", cuStrError(rc));
-	rc = cuDeviceGetUuid((CUuuid *)dattrs->DEV_UUID, cuda_device);
+	rc = cuDeviceGetUuid(&uuid, cuda_device);
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuDeviceGetUuid: %s", cuStrError(rc));
+	sprintf(dattrs->DEV_UUID,
+			"GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+			(unsigned char)uuid.bytes[0],
+			(unsigned char)uuid.bytes[1],
+			(unsigned char)uuid.bytes[2],
+			(unsigned char)uuid.bytes[3],
+			(unsigned char)uuid.bytes[4],
+			(unsigned char)uuid.bytes[5],
+			(unsigned char)uuid.bytes[6],
+			(unsigned char)uuid.bytes[7],
+			(unsigned char)uuid.bytes[8],
+			(unsigned char)uuid.bytes[9],
+			(unsigned char)uuid.bytes[10],
+			(unsigned char)uuid.bytes[11],
+			(unsigned char)uuid.bytes[12],
+			(unsigned char)uuid.bytes[13],
+			(unsigned char)uuid.bytes[14],
+			(unsigned char)uuid.bytes[15]);
 	rc = cuDeviceTotalMem(&dattrs->DEV_TOTAL_MEMSZ, cuda_device);
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuDeviceTotalMem: %s", cuStrError(rc));
@@ -174,11 +231,12 @@ collectGpuDevAttrs(int fdesc)
 static void
 receiveGpuDevAttrs(int fdesc)
 {
-	GpuDevAttributes *__devAttrs = NULL;
-	GpuDevAttributes dattrs_saved;
+	static GpuDevAttributes devNotValidated;
+	GpuDevAttributes *devAttrs = NULL;
+	int			dindex = 0;
 	int			nitems = 0;
 	int			nrooms = 0;
-	bool		is_saved = false;
+	int			num_not_validated = 0;
 
 	for (;;)
 	{
@@ -199,35 +257,51 @@ receiveGpuDevAttrs(int fdesc)
 				 dtemp.COMPUTE_CAPABILITY_MINOR);
 			continue;
 		}
-		if (heterodbValidateDevice(dtemp.DEV_ID,
-								   dtemp.DEV_NAME,
-								   dtemp.DEV_UUID))
+		dindex = heterodbValidateDevice(dtemp.DEV_NAME,
+										dtemp.DEV_UUID);
+		if (dindex >= 0)
 		{
-			if (nitems >= nrooms)
+			while (dindex >= nrooms)
 			{
-				nrooms += 10;
-				__devAttrs = realloc(__devAttrs, sizeof(GpuDevAttributes) * nrooms);
+				GpuDevAttributes *__devAttrs;
+				int		__nrooms = nrooms + 10;
+
+				__devAttrs = calloc(__nrooms, sizeof(GpuDevAttributes));
 				if (!__devAttrs)
 					elog(ERROR, "out of memory");
+				if (devAttrs)
+				{
+					memcpy(__devAttrs, devAttrs,
+						   sizeof(GpuDevAttributes) * nrooms);
+					free(devAttrs);
+				}
+				devAttrs = __devAttrs;
+				nrooms = __nrooms;
 			}
-			memcpy(&__devAttrs[nitems++], &dtemp, sizeof(GpuDevAttributes));
+			memcpy(&devAttrs[dindex], &dtemp, sizeof(GpuDevAttributes));
+			nitems = Max(nitems, dindex+1);
 		}
-		else if (!is_saved)
+		else if (num_not_validated++ == 0)
 		{
-			memcpy(&dattrs_saved, &dtemp, sizeof(GpuDevAttributes));
-			is_saved = true;
+			memcpy(&devNotValidated, &dtemp, sizeof(GpuDevAttributes));
 		}
 	}
 
-	if (nitems == 0 && is_saved)
+	if (devAttrs)
 	{
-		__devAttrs = malloc(sizeof(GpuDevAttributes));
-		if (!__devAttrs)
-			elog(ERROR, "out of memory");
-		memcpy(&__devAttrs[nitems++], &dattrs_saved, sizeof(GpuDevAttributes));
+		numGpuDevAttrs = nitems;
+		gpuDevAttrs = devAttrs;
 	}
-	numGpuDevAttrs = nitems;
-	gpuDevAttrs = __devAttrs;
+	else if (num_not_validated > 0)
+	{
+		numGpuDevAttrs = 1;
+		gpuDevAttrs = &devNotValidated;
+	}
+	else
+	{
+		numGpuDevAttrs = 0;
+		gpuDevAttrs = NULL;
+	}
 }
 
 /*
@@ -356,38 +430,6 @@ pgstrom_collect_gpu_devices(void)
 	pfree(buf.data);
 }
 
-#if 0
-/*
- * pgstrom_setup_gpu_fatbin
- */
-static void
-pgstrom_setup_gpu_fatbin(void)
-{
-	const char *fatbin_file = __setup_gpu_fatbin_filename();
-	const char *fatbin_dir = PGSHAREDIR "/pg_strom";
-	char	   *path;
-
-	if (!__validate_gpu_fatbin_file(fatbin_dir,
-									fatbin_file))
-	{
-		fatbin_dir = PGSTROM_FATBIN_DIR;
-		if (!__validate_gpu_fatbin_file(fatbin_dir,
-										fatbin_file))
-		{
-			__rebuild_gpu_fatbin_file(fatbin_dir,
-									  fatbin_file);
-		}
-	}
-	path = alloca(strlen(fatbin_dir) +
-				  strlen(fatbin_file) + 100);
-	sprintf(path, "%s/%s", fatbin_dir, fatbin_file);
-	pgstrom_fatbin_image_filename = strdup(path);
-	if (!pgstrom_fatbin_image_filename)
-		elog(ERROR, "out of memory");
-	elog(LOG, "PG-Strom fatbin image is ready: %s", fatbin_file);
-}
-#endif
-
 /*
  * pgstrom_gpu_operator_ratio
  */
@@ -402,11 +444,402 @@ pgstrom_gpu_operator_ratio(void)
 }
 
 /*
+ * optimal-gpus cache
+ */
+static HTAB	   *filesystem_optimal_gpu_htable = NULL;
+static HTAB	   *tablespace_optimal_gpu_htable = NULL;
+
+typedef struct
+{
+	dev_t		file_dev;	/* stat_buf.st_dev */
+	ino_t		file_ino;	/* stat_buf.st_ino */
+	struct timespec file_ctime; /* stat_buf.st_ctim */
+	int64_t		optimal_gpus;
+} filesystem_optimal_gpu_entry;
+
+typedef struct
+{
+	Oid			tablespace_oid;
+	int64_t		optimal_gpus;
+} tablespace_optimal_gpu_entry;
+
+static void
+tablespace_optimal_gpu_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
+{
+	/* invalidate all the cached status */
+	if (filesystem_optimal_gpu_htable)
+	{
+		hash_destroy(filesystem_optimal_gpu_htable);
+		filesystem_optimal_gpu_htable = NULL;
+	}
+	if (tablespace_optimal_gpu_htable)
+	{
+		hash_destroy(tablespace_optimal_gpu_htable);
+		tablespace_optimal_gpu_htable = NULL;
+	}
+}
+
+/*
+ * GetOptimalGpuForFile
+ */
+static int64_t
+__GetOptimalGpuForFile(const char *pathname)
+{
+	filesystem_optimal_gpu_entry *hentry;
+	struct stat stat_buf;
+	bool		found;
+
+	if (!filesystem_optimal_gpu_htable)
+	{
+		HASHCTL		hctl;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = offsetof(filesystem_optimal_gpu_entry,
+								file_ino) + sizeof(ino_t);
+		hctl.entrysize = sizeof(filesystem_optimal_gpu_entry);
+		hctl.hcxt = CacheMemoryContext;
+		filesystem_optimal_gpu_htable
+			= hash_create("FilesystemOptimalGpus", 1024, &hctl,
+						  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+
+	if (stat(pathname, &stat_buf) != 0)
+	{
+		elog(WARNING, "failed on stat('%s'): %m", pathname);
+		return 0UL;
+	}
+	hentry = (filesystem_optimal_gpu_entry *)
+		hash_search(filesystem_optimal_gpu_htable,
+					&stat_buf,
+					HASH_ENTER,
+					&found);
+	if (!found || (stat_buf.st_ctim.tv_sec > hentry->file_ctime.tv_sec ||
+				   (stat_buf.st_ctim.tv_sec == hentry->file_ctime.tv_sec &&
+					stat_buf.st_ctim.tv_nsec > hentry->file_ctime.tv_nsec)))
+	{
+		Assert(hentry->file_dev == stat_buf.st_dev &&
+			   hentry->file_ino == stat_buf.st_ino);
+		memcpy(&hentry->file_ctime, &stat_buf.st_ctim, sizeof(struct timespec));
+		hentry->optimal_gpus = heterodbGetOptimalGpus(pathname);
+	}
+	return hentry->optimal_gpus;
+}
+
+const Bitmapset *
+GetOptimalGpuForFile(const char *pathname)
+{
+	int64_t		optimal_gpus = __GetOptimalGpuForFile(pathname);
+	Bitmapset  *result = NULL;
+
+	if (optimal_gpus)
+	{
+		result = palloc0(offsetof(Bitmapset, words[1]));
+		result->type     = T_Bitmapset;
+		result->nwords   = 1;
+		result->words[0] = optimal_gpus;
+	}
+	return result;
+}
+
+/*
+ * GetOptimalGpuForTablespace
+ */
+static const Bitmapset *
+GetOptimalGpuForTablespace(Oid tablespace_oid)
+{
+    tablespace_optimal_gpu_entry *hentry;
+	Bitmapset  *result = NULL;
+	bool        found;
+
+    if (!pgstrom_gpudirect_enabled)
+		return NULL;
+
+	if (!OidIsValid(tablespace_oid))
+		tablespace_oid = MyDatabaseTableSpace;
+
+	if (!tablespace_optimal_gpu_htable)
+	{
+		HASHCTL     hctl;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = sizeof(Oid);
+		hctl.entrysize = sizeof(tablespace_optimal_gpu_entry);
+		hctl.hcxt = CacheMemoryContext;
+		tablespace_optimal_gpu_htable
+			= hash_create("TablespaceOptimalGpus", 128, &hctl,
+						  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+    }
+
+	hentry = (tablespace_optimal_gpu_entry *)
+		hash_search(tablespace_optimal_gpu_htable,
+					&tablespace_oid,
+					HASH_ENTER,
+					&found);
+	if (!found)
+	{
+		char	   *path;
+
+		Assert(hentry->tablespace_oid == tablespace_oid);
+		PG_TRY();
+		{
+			path = GetDatabasePath(MyDatabaseId, tablespace_oid);
+			hentry->optimal_gpus = __GetOptimalGpuForFile(path);
+		}
+		PG_CATCH();
+		{
+			hash_search(tablespace_optimal_gpu_htable,
+						&tablespace_oid,
+						HASH_REMOVE,
+						NULL);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+	}
+	if (hentry->optimal_gpus != 0)
+	{
+		result = palloc0(offsetof(Bitmapset, words[1]));
+		result->type     = T_Bitmapset;
+		result->nwords   = 1;
+		result->words[0] = hentry->optimal_gpus;
+	}
+	return result;
+}
+
+/*
+ * GetOptimalGpuForRelation
+ */
+const Bitmapset *
+GetOptimalGpuForRelation(Relation relation)
+{
+	Oid		tablespace_oid;
+
+	/* only heap relation */
+	Assert(RelationGetForm(relation)->relam == HEAP_TABLE_AM_OID);
+	tablespace_oid = RelationGetForm(relation)->reltablespace;
+
+	return GetOptimalGpuForTablespace(tablespace_oid);
+}
+
+/*
+ * GetOptimalGpuForBaseRel - checks wthere the relation can use GPU-Direct SQL.
+ * If possible, it returns bitmap of the optimal GPUs.
+ */
+const Bitmapset *
+GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
+{
+	const Bitmapset *optimal_gpus;
+	double		total_sz;
+
+	if (!pgstrom_gpudirect_enabled)
+		return NULL;
+	if (baseRelIsArrowFdw(baserel))
+	{
+		if (pgstrom_gpudirect_enabled)
+			return GetOptimalGpusForArrowFdw(root, baserel);
+		return NULL;
+	}
+	total_sz = (size_t)baserel->pages * (size_t)BLCKSZ;
+	if (total_sz < pgstrom_gpudirect_threshold)
+		return NULL;	/* table is too small */
+
+	optimal_gpus = GetOptimalGpuForTablespace(baserel->reltablespace);
+	if (!bms_is_empty(optimal_gpus))
+	{
+		RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
+		char	relpersistence = get_rel_persistence(rte->relid);
+
+		/* temporary table is not supported by GPU-Direct SQL */
+		if (relpersistence != RELPERSISTENCE_PERMANENT &&
+			relpersistence != RELPERSISTENCE_UNLOGGED)
+			optimal_gpus = NULL;
+	}
+	return optimal_gpus;
+}
+
+/*
+ * __fetchJsonField/Element - NULL aware thin-wrapper
+ */
+static Datum
+__fetchJsonField(Datum json, const char *field)
+{
+	LOCAL_FCINFO(fcinfo, 2);
+	Datum	datum;
+
+	InitFunctionCallInfoData(*fcinfo, NULL, 2, InvalidOid, NULL, NULL);
+
+	fcinfo->args[0].value = json;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = CStringGetTextDatum(field);
+	fcinfo->args[1].isnull = false;
+
+	datum = json_object_field(fcinfo);
+	if (fcinfo->isnull)
+		return 0UL;
+	Assert(datum != 0UL);
+	return datum;
+}
+
+static char *
+__fetchJsonFieldText(Datum json, const char *field)
+{
+	LOCAL_FCINFO(fcinfo, 2);
+	Datum	datum;
+
+	InitFunctionCallInfoData(*fcinfo, NULL, 2, InvalidOid, NULL, NULL);
+
+	fcinfo->args[0].value = json;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = CStringGetTextDatum(field);
+	fcinfo->args[1].isnull = false;
+
+	datum = json_object_field_text(fcinfo);
+	if (fcinfo->isnull)
+		return NULL;
+	return TextDatumGetCString(datum);
+}
+
+static Datum
+__fetchJsonElement(Datum json, int index)
+{
+	LOCAL_FCINFO(fcinfo, 2);
+	Datum	datum;
+
+	InitFunctionCallInfoData(*fcinfo, NULL, 2, InvalidOid, NULL, NULL);
+
+	fcinfo->args[0].value = json;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = Int32GetDatum(index);
+	fcinfo->args[1].isnull = false;
+
+	datum = json_array_element(fcinfo);
+	if (fcinfo->isnull)
+		return 0UL;
+	Assert(datum != 0UL);
+	return datum;
+}
+
+static char *
+__fetchJsonFieldOptimalGpus(Datum json)
+{
+	char   *s = __fetchJsonFieldText(json, "optimal_gpus");
+	int64_t	optimal_gpus = (s ? atol(s) : 0);
+	char	buf[1024];
+	size_t	off = 0;
+
+	if (optimal_gpus == 0)
+		return "<no GPUs>";
+	for (int k=0; optimal_gpus != 0; k++)
+	{
+		if ((optimal_gpus & (1UL<<k)) != 0)
+		{
+			if (off > 0)
+				buf[off++] = ',';
+			off += sprintf(buf+off, "GPU%d", k);
+		}
+		optimal_gpus &= ~(1UL<<k);
+	}
+	return pstrdup(buf);
+}
+
+/*
+ * pgstrom_print_gpu_properties
+ */
+static void
+pgstrom_print_gpu_properties(const char *manual_config)
+{
+	const char *json_cstring = heterodbInitOptimalGpus(manual_config);
+
+	if (json_cstring)
+	{
+		Datum	json;
+		Datum	gpus_array;
+		Datum	disk_array;
+
+		PG_TRY();
+		{
+			json = DirectFunctionCall1(json_in, PointerGetDatum(json_cstring));
+			gpus_array = __fetchJsonField(json, "gpus");
+			if (gpus_array != 0UL)
+			{
+				Datum	gpu;
+
+				for (int i=0; (gpu = __fetchJsonElement(gpus_array, i)) != 0UL; i++)
+				{
+					char   *dindex = __fetchJsonFieldText(gpu, "dindex");
+					char   *name = __fetchJsonFieldText(gpu, "name");
+					char   *uuid = __fetchJsonFieldText(gpu, "uuid");
+					char   *pcie = __fetchJsonFieldText(gpu, "pcie");
+
+					elog(LOG, "[%s] GPU%s (%s; %s)",
+						 pcie ? pcie : "????:??:??.?",
+						 dindex ? dindex : "??",
+						 name ? name : "unknown GPU",
+						 uuid ? uuid : "unknown UUID");
+				}
+			}
+
+			disk_array = __fetchJsonField(json, "disk");
+			if (disk_array != 0UL)
+			{
+				Datum	disk;
+
+				for (int i=0; (disk = __fetchJsonElement(disk_array, i)) != 0UL; i++)
+				{
+					char   *type;
+
+					type = __fetchJsonFieldText(disk, "type");
+					if (!type)
+						continue;
+					if (strcmp(type, "nvme") == 0)
+					{
+						char   *name = __fetchJsonFieldText(disk, "name");
+						char   *model = __fetchJsonFieldText(disk, "model");
+						char   *pcie = __fetchJsonFieldText(disk, "pcie");
+						char   *dist = __fetchJsonFieldText(disk, "distance");
+						char   *optimal_gpus = __fetchJsonFieldOptimalGpus(disk);
+
+						elog(LOG, "[%s] %s (%s) --> %s [dist=%s]",
+							 pcie ? pcie : "????:??:??.?",
+							 name ? name : "nvme??",
+							 model ? model : "unknown nvme",
+							 optimal_gpus,
+							 dist ? dist : "???");
+					}
+					else if (strcmp(type, "hca") == 0)
+					{
+						char   *name = __fetchJsonFieldText(disk, "name");
+						char   *hca_type = __fetchJsonFieldText(disk, "hca_type");
+						char   *pcie = __fetchJsonFieldText(disk, "pcie");
+						char   *dist = __fetchJsonFieldText(disk, "distance");
+						char   *optimal_gpus = __fetchJsonFieldOptimalGpus(disk);
+
+						elog(LOG, "[%s] %s (%s) --> %s [dist=%s]",
+							 pcie ? pcie : "????:??:??.?",
+                             name ? name : "???",
+							 hca_type ? hca_type : "???",
+							 optimal_gpus,
+							 dist ? dist : "???");
+					}
+				}
+			}
+		}
+		PG_CATCH();
+		{
+			FlushErrorState();
+			elog(LOG, "GPU-NVME Properties: %s", json_cstring);
+		}
+		PG_END_TRY();
+	}
+}
+
+/*
  * pgstrom_init_gpu_options - init GUC options related to GPUs
  */
 static void
 pgstrom_init_gpu_options(void)
 {
+	bool	has_gpudirectsql = gpuDirectIsAvailable();
+
 	/* cost factor for GPU setup */
 	DefineCustomRealVariable("pg_strom.gpu_setup_cost",
 							 "Cost to setup GPU device to run",
@@ -451,6 +884,26 @@ pgstrom_init_gpu_options(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* on/off GPU-Direct SQL */
+	DefineCustomBoolVariable("pg_strom.gpudirect_enabled",
+							 "enables GPUDirect SQL",
+							 NULL,
+							 &pgstrom_gpudirect_enabled,
+							 (has_gpudirectsql ? true : false),
+							 (has_gpudirectsql ? PGC_SUSET : PGC_POSTMASTER),
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* table size threshold for GPU-Direct SQL */
+	DefineCustomIntVariable("pg_strom.gpudirect_threshold",
+							"table-size threshold to use GPU-Direct SQL",
+							NULL,
+							&__pgstrom_gpudirect_threshold_kb,
+							2097152,	/* 2GB */
+							0,
+							INT_MAX,
+							PGC_SUSET,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
 }
 
 /*
@@ -482,7 +935,34 @@ pgstrom_init_gpu_device(void)
 	pgstrom_collect_gpu_devices();
 	if (numGpuDevAttrs > 0)
 	{
+		static char *pgstrom_manual_optimal_gpus = NULL; /* GUC */
+
 		pgstrom_init_gpu_options();
+		/*
+		 * pg_strom.manual_optimal_xpus
+		 *
+		 * config := <token>[,<token> ...]
+		 * token  := <path>=<xpus>
+		 * path   := (<absolute dir>|<nvmeX>)
+		 * gpus   := <gpuX>[:<gpuX>...]
+		 *
+		 * e.g) /mnt/data_1=gpu0,/mnt/data_2=gpu1:gpu2,nvme3=gpu3,/mnt/data_2/extra=gpu0
+		 */
+		DefineCustomStringVariable("pg_strom.manual_optimal_gpus",
+								   "manual configuration of optimal GPUs",
+								   NULL,
+								   &pgstrom_manual_optimal_gpus,
+								   NULL,
+								   PGC_POSTMASTER,
+								   GUC_NOT_IN_SAMPLE,
+								   NULL, NULL, NULL);
+		/* tablespace cache */
+		tablespace_optimal_gpu_htable = NULL;
+		CacheRegisterSyscacheCallback(TABLESPACEOID,
+									  tablespace_optimal_gpu_cache_callback,
+									  (Datum) 0);
+		/* print hardware configuration */
+		pgstrom_print_gpu_properties(pgstrom_manual_optimal_gpus);
 		return true;
 	}
 	return false;
@@ -632,24 +1112,7 @@ pgstrom_gpu_device_info(PG_FUNCTION_ARGS)
 		case 2:
 			att_name = "DEV_UUID";
 			att_desc = "GPU Device UUID";
-			att_value = psprintf("GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-"
-								 "%02x%02x-%02x%02x%02x%02x%02x%02x",
-								 (uint8_t)dattrs->DEV_UUID[0],
-								 (uint8_t)dattrs->DEV_UUID[1],
-								 (uint8_t)dattrs->DEV_UUID[2],
-								 (uint8_t)dattrs->DEV_UUID[3],
-								 (uint8_t)dattrs->DEV_UUID[4],
-								 (uint8_t)dattrs->DEV_UUID[5],
-								 (uint8_t)dattrs->DEV_UUID[6],
-								 (uint8_t)dattrs->DEV_UUID[7],
-								 (uint8_t)dattrs->DEV_UUID[8],
-								 (uint8_t)dattrs->DEV_UUID[9],
-								 (uint8_t)dattrs->DEV_UUID[10],
-								 (uint8_t)dattrs->DEV_UUID[11],
-								 (uint8_t)dattrs->DEV_UUID[12],
-								 (uint8_t)dattrs->DEV_UUID[13],
-								 (uint8_t)dattrs->DEV_UUID[14],
-								 (uint8_t)dattrs->DEV_UUID[15]);
+			att_value = dattrs->DEV_UUID;
 			break;
 		case 3:
 			att_name = "DEV_TOTAL_MEMSZ";
