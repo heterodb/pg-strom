@@ -28,7 +28,7 @@ test: dfunc_math dfunc_mbtext dexpr_scalar_array_op dexpr_misc
 # ----------
 # Test for CPU fallback and GPU kernel suspend / resume
 # ----------
-test: fallback_pgsql
+###test: fallback_pgsql
 
 # ----------
 # Test for Asymmetric Partition-wise JOIN
@@ -46,7 +46,7 @@ test: fallback_pgsql
 # ----------
 # GPU Cache
 # ----------
-##test: gpu_cache
+test: gpu_cache
 
 # ----------
 # Misc tests

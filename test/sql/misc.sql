@@ -105,10 +105,12 @@ WITH MYWITH AS (SELECT 1 AS f1
    FROM  (SELECT "c2" AS f6 FROM t0) AS t1 
     INNER JOIN  (SELECT "c1" AS f5 FROM t1) AS t2  
     ON (( ((f5)  IN (f6))) AND ((1 > ((f6)::bigint >> 5)) IS FALSE)))
+SELECT * FROM MYWITH;
 WITH MYWITH AS (SELECT 1 AS f1
    FROM  (SELECT "c2" AS f6 FROM t0) AS t1 
     INNER JOIN  (SELECT "c1" AS f5 FROM t1) AS t2  
     ON (( ((f5)  IN (f6))) AND ((1 > ((f6)::bigint >> 5)) IS FALSE)))
+SELECT * FROM MYWITH;
 
 
 -- #632

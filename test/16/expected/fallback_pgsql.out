@@ -296,7 +296,7 @@ SELECT * INTO test11g
  Custom Scan (GpuJoin) on regtest_arrow_index_temp.fallback_data d
    Output: d.aid, d.id, d.cat, d.x, d.y, d.memo, l.z, l.md5
    GPU Projection: d.aid, d.id, d.cat, d.x, d.y, d.memo, l.z, l.md5
-   GPU Join Quals [1]: (d.aid = l.aid) ... [nrows: 400001 -> 496979]
+   GPU Join Quals [1]: (d.aid = l.aid) ... [nrows: 400001 -> 496763]
    GPU Outer Hash [1]: d.aid
    GPU Inner Hash [1]: l.aid
    KVars-Slot: <slot=0, type='int4', expr='d.aid'>, <slot=1, type='int4', expr='d.id'>, <slot=2, type='text', expr='d.cat'>, <slot=3, type='float8', expr='d.x'>, <slot=4, type='float8', expr='d.y'>, <slot=5, type='text', expr='d.memo'>, <slot=6, type='float8', expr='l.z'>, <slot=7, type='bpchar', expr='l.md5'>, <slot=8, type='int4', expr='l.aid'>
@@ -339,6 +339,7 @@ SELECT * INTO test11p
 
 -- GpuJoin with GPU kernel suspend / resume, and CPU fallback
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT *
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
@@ -348,8 +349,8 @@ SELECT *
  Custom Scan (GpuJoin) on regtest_arrow_index_temp.fallback_data d
    Output: d.aid, d.id, d.cat, d.x, d.y, d.memo, l.z, l.md5
    GPU Projection: d.aid, d.id, d.cat, d.x, d.y, d.memo, l.z, l.md5
-   GPU Scan Quals: (d.memo ~~ '%ab%'::text) [rows: 400001 -> 11862]
-   GPU Join Quals [1]: (d.aid = l.aid) ... [nrows: 11862 -> 36867]
+   GPU Scan Quals: (d.memo ~~ '%ab%'::text) [rows: 400001 -> 11876]
+   GPU Join Quals [1]: (d.aid = l.aid) ... [nrows: 11876 -> 36910]
    GPU Outer Hash [1]: d.aid
    GPU Inner Hash [1]: l.aid
    KVars-Slot: <slot=0, type='text', expr='d.memo'>, <slot=1, type='int4', expr='d.aid'>, <slot=2, type='int4', expr='d.id'>, <slot=3, type='text', expr='d.cat'>, <slot=4, type='float8', expr='d.x'>, <slot=5, type='float8', expr='d.y'>, <slot=6, type='float8', expr='l.z'>, <slot=7, type='bpchar', expr='l.md5'>, <slot=8, type='int4', expr='l.aid'>
