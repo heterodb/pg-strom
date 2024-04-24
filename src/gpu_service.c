@@ -3406,13 +3406,28 @@ gpuservSetupGpuContext(int cuda_dindex)
 		rc = cuDeviceGet(&gcontext->cuda_device, dattrs->DEV_ID);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuDeviceGet: %s", cuStrError(rc));
+#if 0
 		rc = cuCtxCreate(&gcontext->cuda_context,
 						 CU_CTX_SCHED_BLOCKING_SYNC,
 //						 CU_CTX_SCHED_AUTO,
 						 gcontext->cuda_device);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuCtxCreate: %s", cuStrError(rc));
+#else
+		rc = cuDevicePrimaryCtxRetain(&gcontext->cuda_context,
+									  gcontext->cuda_device);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuDevicePrimaryCtxRetain: %s", cuStrError(rc));
 
+		rc = cuDevicePrimaryCtxSetFlags(gcontext->cuda_device,
+										CU_CTX_SCHED_BLOCKING_SYNC);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuDevicePrimaryCtxSetFlags: %s", cuStrError(rc));
+
+		rc = cuCtxSetCurrent(gcontext->cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxSetCurrent: %s", cuStrError(rc));
+#endif
 		gpuservSetupGpuModule(gcontext);
 		/* enable kernel profiling if captured */
 		if (getenv("NSYS_PROFILING_SESSION_ID") != NULL)

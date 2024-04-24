@@ -166,7 +166,7 @@ typedef struct GpuDevAttributes
 	int32		NUMA_NODE_ID;
 	int32		DEV_ID;
 	char		DEV_NAME[256];
-	char		DEV_UUID[sizeof(CUuuid)];
+	char		DEV_UUID[2 * sizeof(CUuuid) + 8];	/* human readable */
 	size_t		DEV_TOTAL_MEMSZ;
 	size_t		DEV_BAR1_MEMSZ;
 	bool		DEV_SUPPORT_GPUDIRECTSQL;
@@ -187,7 +187,6 @@ extern int		numGpuDevAttrs;
  */
 struct devtype_info;
 struct devfunc_info;
-struct devcast_info;
 
 typedef uint32_t (*devtype_hashfunc_f)(bool isnull, Datum value);
 
@@ -222,7 +221,6 @@ typedef struct devtype_info
 
 typedef struct devfunc_info
 {
-	dlist_node	chain;
 	uint32_t	hash;
 	FuncOpCode	func_code;
 	const char *func_extension;
@@ -507,9 +505,10 @@ extern long		PAGES_PER_BLOCK;	/* (BLCKSZ / PAGE_SIZE) */
  * extra.c
  */
 extern void		pgstrom_init_extra(void);
-extern bool		heterodbValidateDevice(int gpu_device_id,
-									   const char *gpu_device_name,
+extern int		heterodbValidateDevice(const char *gpu_device_name,
 									   const char *gpu_device_uuid);
+extern const char *heterodbInitOptimalGpus(const char *manual_config);
+extern int64_t	heterodbGetOptimalGpus(const char *path);
 extern void		gpuDirectOpenDriver(void);
 extern void		gpuDirectCloseDriver(void);
 extern bool		gpuDirectMapGpuMemory(CUdeviceptr m_segment, size_t segment_sz,
@@ -745,11 +744,6 @@ extern void		pgstrom_init_executor(void);
 /*
  * pcie.c
  */
-extern const Bitmapset *GetOptimalGpuForFile(const char *pathname);
-extern const Bitmapset *GetOptimalGpuForRelation(Relation relation);
-extern const Bitmapset *GetOptimalGpuForBaseRel(PlannerInfo *root,
-												RelOptInfo *baserel);
-extern const char  *sysfs_read_line(const char *path);
 extern void			pgstrom_init_pcie(void);
 
 /*
@@ -760,6 +754,10 @@ extern double	pgstrom_gpu_tuple_cost;		/* GUC */
 extern double	pgstrom_gpu_operator_cost;	/* GUC */
 extern double	pgstrom_gpu_direct_seq_page_cost; /* GUC */
 extern double	pgstrom_gpu_operator_ratio(void);
+extern const Bitmapset *GetOptimalGpuForFile(const char *pathname);
+extern const Bitmapset *GetOptimalGpuForRelation(Relation relation);
+extern const Bitmapset *GetOptimalGpuForBaseRel(PlannerInfo *root,
+												RelOptInfo *baserel);
 extern void		gpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
 extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,

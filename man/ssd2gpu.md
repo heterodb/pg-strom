@@ -101,7 +101,7 @@ GPUダイレクトSQL実行は以下の条件で発動します。
 
 - スキャン対象のテーブルがNVMe-SSDで構成された区画に配置されている。
     - `/dev/nvmeXXXX`ブロックデバイス、または`/dev/nvmeXXXX`ブロックデバイスのみから構成されたmd-raid0区画が対象です。
-- テーブルサイズが`pg_strom.nvme_strom_threshold`よりも大きい事。
+- テーブルサイズが`pg_strom.gpudirect_threshold`よりも大きい事。
     - この設定値は任意に変更可能ですが、デフォルト値は本体搭載物理メモリに`shared_buffers`の設定値の1/3を加えた大きさです。
 }
 @en{
@@ -109,7 +109,7 @@ GPU Direct SQL Execution shall be invoked in the following case.
 
 - The target table to be scanned locates on the partition being consist of NVMe-SSD.
     - `/dev/nvmeXXXX` block device, or md-raid0 volume which consists of NVMe-SSDs only.
-- The target table size is larger than `pg_strom.nvme_strom_threshold`.
+- The target table size is larger than `pg_strom.gpudirect_threshold`.
     - You can adjust this configuration. Its default is physical RAM size of the system plus 1/3 of `shared_buffers` configuration.
 }
 
@@ -264,7 +264,7 @@ If `off`, GPU Direct SQL Execution should not be used regardless of the table si
 ワークロードの特性によっては必ずしもこの設定が正しいとは限りません。
 }
 @en{
-The other one is `pg_strom.nvme_strom_threshold` which specifies the least table size to invoke GPU Direct SQL Execution.
+The other one is `pg_strom.gpudirect_threshold` which specifies the least table size to invoke GPU Direct SQL Execution.
 
 PG-Strom will choose GPU Direct SQL Execution when target table is located on NVME-SSD volume (or md-raid0 volume which consists of NVME-SSD only), and the table size is larger than this parameter.
 Its default configuration is sum of the physical memory size and 1/3 of the `shared_buffers`. It means default configuration invokes GPU Direct SQL Execution only for the tables where we certainly cannot process them on memory.

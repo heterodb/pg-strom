@@ -61,8 +61,6 @@
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
                   </li>
-                  <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
-                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
                   </li>
               </ul>
@@ -114,6 +112,8 @@
               </ul>
               <p class="caption"><span class="caption-text">Release Note</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
@@ -181,7 +181,7 @@ We <strong>experimentally</strong> provide a driver for NVME-oF devices, but don
 <li><code>/dev/nvmeXXXX</code> block device, or md-raid0 volume which consists of NVMe-SSDs only.</li>
 </ul>
 </li>
-<li>The target table size is larger than <code>pg_strom.nvme_strom_threshold</code>.<ul>
+<li>The target table size is larger than <code>pg_strom.gpudirect_threshold</code>.<ul>
 <li>You can adjust this configuration. Its default is physical RAM size of the system plus 1/3 of <code>shared_buffers</code> configuration.</li>
 </ul>
 </li>
@@ -233,7 +233,7 @@ It shall be added to <code>postgresql.conf</code>. Please note than manual confi
 <p>There are two GPU parameters related to GPU Direct SQL Execution.</p>
 <p>The first is <code>pg_strom.gpudirect_enabled</code> that simply turn on/off the function of GPU Direct SQL Execution.
 If <code>off</code>, GPU Direct SQL Execution should not be used regardless of the table size or physical location. Default is <code>on</code>.</p>
-<p>The other one is <code>pg_strom.nvme_strom_threshold</code> which specifies the least table size to invoke GPU Direct SQL Execution.</p>
+<p>The other one is <code>pg_strom.gpudirect_threshold</code> which specifies the least table size to invoke GPU Direct SQL Execution.</p>
 <p>PG-Strom will choose GPU Direct SQL Execution when target table is located on NVME-SSD volume (or md-raid0 volume which consists of NVME-SSD only), and the table size is larger than this parameter.
 Its default configuration is sum of the physical memory size and 1/3 of the <code>shared_buffers</code>. It means default configuration invokes GPU Direct SQL Execution only for the tables where we certainly cannot process them on memory.</p>
 <p>Even if GPU Direct SQL Execution has advantages on a single table scan workload, usage of disk cache may work better on the second or later trial for the tables which are available to load onto the main memory.</p>

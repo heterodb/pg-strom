@@ -686,7 +686,6 @@ _PG_init(void)
 		pgstrom_init_dpu_join();
 		pgstrom_init_dpu_preagg();
 	}
-	pgstrom_init_pcie();
 	/* callback for the extension checker */
 	CacheRegisterSyscacheCallback(NAMESPACEOID, pgstrom_extension_checker_callback, 0);
 	/* dummy custom-scan node */

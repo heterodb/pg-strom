@@ -15,8 +15,10 @@
 #define DEVTYPE_INFO_NSLOTS		128
 #define DEVFUNC_INFO_NSLOTS		1024
 static MemoryContext	devinfo_memcxt = NULL;
+static volatile int		devinfo_memcxt_generation = 0;
 static List	   *devtype_info_slot[DEVTYPE_INFO_NSLOTS];
 static List	   *devfunc_info_slot[DEVFUNC_INFO_NSLOTS];
+static HTAB	   *devtype_rev_htable = NULL;		/* lookup by TypeOpCode */
 static HTAB	   *devfunc_rev_htable = NULL;		/* lookup by FuncOpCode */
 
 /* -------- static declarations -------- */
@@ -407,6 +409,7 @@ pgstrom_devtype_lookup(Oid type_oid)
 	ListCell	   *lc;
 	const char	   *ext_name;
 	TypeCacheEntry *tcache;
+	int				__generation;
 
 	if (!OidIsValid(type_oid))
 		return NULL;	/* InvalidOid should never has device-type */
@@ -423,82 +426,123 @@ pgstrom_devtype_lookup(Oid type_oid)
 			goto found;
 		}
 	}
-	/* try to build devtype_info entry */
-	ext_name = get_extension_name_by_object(TypeRelationId, type_oid);
-	tcache = lookup_type_cache(type_oid,
-							   TYPECACHE_EQ_OPR |
-							   TYPECACHE_CMP_PROC);
-	/* if domain, move to the base type */
-	while (tcache->nextDomain)
-		tcache = tcache->nextDomain;
-	/* if aliased device type, resolve this one */
-	tcache = __devtype_resolve_alias(tcache);
+	/*
+	 * Not found, try to build devtype_info entry
+	 */
+	do {
+		__generation = devinfo_memcxt_generation;
 
-	if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
-	{
-		/* array type */
-		dtype = build_array_devtype_info(tcache, ext_name);
-	}
-	else if (tcache->typtype == TYPTYPE_COMPOSITE)
-	{
-		/* composite type */
-		if (!OidIsValid(tcache->typrelid))
-			elog(ERROR, "Bug? wrong composite definition at %s",
-				 format_type_be(type_oid));
-		dtype = build_composite_devtype_info(tcache, ext_name);
-	}
-	else if (tcache->typtype == TYPTYPE_BASE ||
-			 tcache->typtype == TYPTYPE_RANGE)
-	{
-		/* base or range type */
-		dtype = build_basic_devtype_info(tcache, ext_name);
-	}
-	else
-	{
-		/* not a supported type */
-		dtype = NULL;
-	}
+		ext_name = get_extension_name_by_object(TypeRelationId, type_oid);
+		tcache = lookup_type_cache(type_oid,
+								   TYPECACHE_EQ_OPR |
+								   TYPECACHE_CMP_PROC);
+		/* if domain, move to the base type */
+		while (tcache->nextDomain)
+			tcache = tcache->nextDomain;
+		/* if aliased device type, resolve this one */
+		tcache = __devtype_resolve_alias(tcache);
 
-	/* make a negative entry, if not device executable */
-	if (!dtype)
-	{
-		dtype = MemoryContextAllocZero(devinfo_memcxt,
-									   sizeof(devtype_info));
-		dtype->type_is_negative = true;
-	}
-	dtype->type_oid = type_oid;
-	dtype->hash = hash;
+		if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+		{
+			/* array type */
+			dtype = build_array_devtype_info(tcache, ext_name);
+		}
+		else if (tcache->typtype == TYPTYPE_COMPOSITE)
+		{
+			/* composite type */
+			if (!OidIsValid(tcache->typrelid))
+				elog(ERROR, "Bug? wrong composite definition at %s",
+					 format_type_be(type_oid));
+			dtype = build_composite_devtype_info(tcache, ext_name);
+		}
+		else if (tcache->typtype == TYPTYPE_BASE ||
+				 tcache->typtype == TYPTYPE_RANGE)
+		{
+			/* base or range type */
+			dtype = build_basic_devtype_info(tcache, ext_name);
+		}
+		else
+		{
+			/* not a supported type */
+			dtype = NULL;
+		}
+		/* make a negative entry, if not device executable */
+		if (!dtype)
+		{
+			dtype = MemoryContextAllocZero(devinfo_memcxt,
+										   sizeof(devtype_info));
+			dtype->type_is_negative = true;
+		}
+		dtype->type_oid = type_oid;
+		dtype->hash = hash;
+	} while (__generation != devinfo_memcxt_generation);
+
 	devtype_info_slot[index] = lappend_cxt(devinfo_memcxt,
 										   devtype_info_slot[index], dtype);
 found:
-	if (dtype->type_is_negative)
-		return NULL;
-	return dtype;
+	return (dtype->type_is_negative ? NULL : dtype);
 }
 
 /*
  * devtype_get_name_by_opcode
  */
+typedef struct {
+	TypeOpCode	type_code;
+	const char *type_name;
+} devtype_reverse_entry;
+
 static const char *
 devtype_get_name_by_opcode(TypeOpCode type_code)
 {
-	switch (type_code)
+	devtype_reverse_entry *entry;
+	bool		found;
+
+	if (!devtype_rev_htable)
 	{
-		case TypeOpCode__composite:
-			return "composite";
-		case TypeOpCode__array:
-			return "array";
-		case TypeOpCode__internal:
-			return "internal";
-		default:
-			for (int i=0; devtype_catalog[i].type_name != NULL; i++)
-			{
-				if (devtype_catalog[i].type_code == type_code)
-					return devtype_catalog[i].type_name;
-			}
-			break;
+		HASHCTL	hctl;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = sizeof(TypeOpCode);
+		hctl.entrysize = sizeof(devtype_reverse_entry);
+		hctl.hcxt = devinfo_memcxt;
+
+		devtype_rev_htable = hash_create("devtype_rev_htable",
+										 128,
+										 &hctl,
+										 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	}
-	elog(ERROR, "device type opcode:%u not found", type_code);
+
+	entry = (devtype_reverse_entry *)
+		hash_search(devtype_rev_htable, &type_code, HASH_ENTER, &found);
+	if (!found)
+	{
+		switch (type_code)
+		{
+			case TypeOpCode__composite:
+				entry->type_name = "composite";
+				break;
+			case TypeOpCode__array:
+				entry->type_name = "array";
+				break;
+			case TypeOpCode__internal:
+				entry->type_name = "internal";
+				break;
+			default:
+				entry->type_name = NULL;
+				for (int i=0; devtype_catalog[i].type_name != NULL; i++)
+				{
+					if (devtype_catalog[i].type_code == type_code)
+					{
+						entry->type_name = devtype_catalog[i].type_name;
+						break;
+					}
+				}
+				break;
+		}
+	}
+	if (!entry->type_name)
+		elog(ERROR, "device type opcode:%u not found", type_code);
+	return entry->type_name;
 }
 
 /*
@@ -1012,6 +1056,7 @@ __pgstrom_devfunc_lookup(Oid func_oid,
 	ListCell	   *lc;
 	uint32_t		hash;
 	int				i, j, sz;
+	int				__generation;
 
 	sz = offsetof(devfunc_cache_signature, func_argtypes[func_nargs]);
 	signature = alloca(sz);
@@ -1041,30 +1086,35 @@ __pgstrom_devfunc_lookup(Oid func_oid,
 		}
 	}
 	/* not found, build a new entry */
-	dfunc = pgstrom_devfunc_build(func_oid, func_nargs, func_argtypes);
-	if (!dfunc)
-	{
-		MemoryContext	oldcxt;
+	do {
+		__generation = devinfo_memcxt_generation;
 
-		oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
-		dfunc =  palloc0(offsetof(devfunc_info, func_argtypes[func_nargs]));
-		dfunc->func_oid = func_oid;
-		dfunc->func_nargs = func_nargs;
-		dfunc->func_is_negative = true;
-		for (i=0; i < func_nargs; i++)
+		dfunc = pgstrom_devfunc_build(func_oid, func_nargs, func_argtypes);
+		if (!dfunc)
 		{
-			dtype = pgstrom_devtype_lookup(func_argtypes[i]);
-			if (!dtype)
+			MemoryContext	oldcxt;
+
+			oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+			dfunc =  palloc0(offsetof(devfunc_info, func_argtypes[func_nargs]));
+			dfunc->func_oid = func_oid;
+			dfunc->func_nargs = func_nargs;
+			dfunc->func_is_negative = true;
+			for (i=0; i < func_nargs; i++)
 			{
-				dtype = palloc0(sizeof(devtype_info));
-				dtype->type_oid = func_argtypes[i];
-				dtype->type_is_negative = true;
+				dtype = pgstrom_devtype_lookup(func_argtypes[i]);
+				if (!dtype)
+				{
+					dtype = palloc0(sizeof(devtype_info));
+					dtype->type_oid = func_argtypes[i];
+					dtype->type_is_negative = true;
+				}
+				dfunc->func_argtypes[i] = dtype;
 			}
-			dfunc->func_argtypes[i] = dtype;
+			MemoryContextSwitchTo(oldcxt);
 		}
-		MemoryContextSwitchTo(oldcxt);
-	}
-	dfunc->hash = hash;
+		dfunc->hash = hash;
+	} while (__generation != devinfo_memcxt_generation);
+
 	devfunc_info_slot[i] = lappend_cxt(devinfo_memcxt,
 									   devfunc_info_slot[i], dfunc);
 found:
@@ -4880,6 +4930,8 @@ pgstrom_xpucode_to_string(bytea *xpu_code)
 static void
 pgstrom_devcache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 {
+	devinfo_memcxt_generation++;
+
 	if (!MemoryContextIsEmpty(devinfo_memcxt))
 	{
 		/*
@@ -4907,6 +4959,7 @@ pgstrom_devcache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 			MemoryContextReset(devinfo_memcxt);
 		}
 	}
+	devtype_rev_htable = NULL;
 	devfunc_rev_htable = NULL;
 	memset(devtype_info_slot, 0, sizeof(List *) * DEVTYPE_INFO_NSLOTS);
 	memset(devfunc_info_slot, 0, sizeof(List *) * DEVFUNC_INFO_NSLOTS);

@@ -1,7 +1,51 @@
 --
--- Schema to deploy PG-Strom objects
+-- Remove v3.x based objects in the 'pgstrom' schema once
+--
+CREATE SCHEMA IF NOT EXISTS __my_shelter__;
+
+ALTER FUNCTION pgstrom.float2_in(pg_catalog.cstring)    SET SCHEMA __my_shelter__;
+ALTER FUNCTION pgstrom.float2_out(pg_catalog.float2)    SET SCHEMA __my_shelter__;
+ALTER FUNCTION pgstrom.float2_recv(pg_catalog.internal) SET SCHEMA __my_shelter__;
+ALTER FUNCTION pgstrom.float2_send(pg_catalog.float2)   SET SCHEMA __my_shelter__;
+
+ALTER FUNCTION pgstrom.int1in(pg_catalog.cstring)       SET SCHEMA __my_shelter__;
+ALTER FUNCTION pgstrom.int1out(pg_catalog.int1)         SET SCHEMA __my_shelter__;
+ALTER FUNCTION pgstrom.int1recv(pg_catalog.internal)    SET SCHEMA __my_shelter__;
+ALTER FUNCTION pgstrom.int1send(pg_catalog.int1)        SET SCHEMA __my_shelter__;
+
+ALTER FUNCTION pgstrom.arrow_fdw_handler()              SET SCHEMA __my_shelter__;
+ALTER FUNCTION pgstrom.arrow_fdw_validator(text[],oid)  SET SCHEMA __my_shelter__;
+ALTER FUNCTION pgstrom.arrow_fdw_precheck_schema()      SET SCHEMA __my_shelter__;
+ALTER FUNCTION pgstrom.arrow_fdw_import_file(text, text, text) SET SCHEMA __my_shelter__;
+
+DROP SCHEMA IF EXISTS pgstrom CASCADE;
+
+--
+-- Restore the above special objects
 --
 CREATE SCHEMA IF NOT EXISTS pgstrom;
+
+ALTER FUNCTION __my_shelter__.float2_in(pg_catalog.cstring)    SET SCHEMA pgstrom;
+ALTER FUNCTION __my_shelter__.float2_out(pg_catalog.float2)    SET SCHEMA pgstrom;
+ALTER FUNCTION __my_shelter__.float2_recv(pg_catalog.internal) SET SCHEMA pgstrom;
+ALTER FUNCTION __my_shelter__.float2_send(pg_catalog.float2)   SET SCHEMA pgstrom;
+
+ALTER FUNCTION __my_shelter__.int1in(pg_catalog.cstring)       SET SCHEMA pgstrom;
+ALTER FUNCTION __my_shelter__.int1out(pg_catalog.int1)         SET SCHEMA pgstrom;
+ALTER FUNCTION __my_shelter__.int1recv(pg_catalog.internal)    SET SCHEMA pgstrom;
+ALTER FUNCTION __my_shelter__.int1send(pg_catalog.int1)        SET SCHEMA pgstrom;
+
+ALTER FUNCTION __my_shelter__.arrow_fdw_handler()              SET SCHEMA pgstrom;
+ALTER FUNCTION __my_shelter__.arrow_fdw_validator(text[],oid)  SET SCHEMA pgstrom;
+ALTER FUNCTION __my_shelter__.arrow_fdw_precheck_schema()      SET SCHEMA pgstrom;
+ALTER FUNCTION __my_shelter__.arrow_fdw_import_file(text, text, text) SET SCHEMA pgstrom;
+
+DROP SCHEMA IF EXISTS __my_shelter__ CASCADE;
+
+--
+-- some random deletion
+--
+DROP FUNCTION IF EXISTS pg_catalog.abs(pg_catalog.float2) CASCADE;
 
 -- ================================================================
 --
@@ -41,6 +85,13 @@ CREATE VIEW pgstrom.gpu_device_info AS
 --
 -- ================================================================
 
+--
+-- MEMO: Arrow_Fdw related definitions are not changed from v3.x.
+--       If it would be removed on extension upgrade, foreign tables
+--       are also removed. So, we keep Arrow_Fdw related core definition
+--       as-is.
+--
+/*
 CREATE FUNCTION pgstrom.arrow_fdw_handler()
   RETURNS fdw_handler
   AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_handler'
@@ -75,6 +126,7 @@ CREATE FUNCTION pgstrom.arrow_fdw_import_file(text,	    -- relname
   RETURNS void
   AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_import_file'
   LANGUAGE C;
+*/
 
 -- ================================================================
 --
@@ -137,6 +189,14 @@ CREATE VIEW pgstrom.gpucache_info AS
 -- float2 - half-precision floating point data support
 --
 -- ==================================================================
+
+--
+-- MEMO: PG-Strom v3.x assigned fixed OID 421 for float2
+--       which is not removable as a system object.
+--       v5.x never assume the fixed number of OID,
+--       so we keep the legacy definition as-is.
+--
+/*
 CREATE TYPE pg_catalog.float2;
 
 CREATE FUNCTION pgstrom.float2in(cstring)
@@ -163,6 +223,8 @@ CREATE TYPE pg_catalog.float2
   send = pgstrom.float2send,
   like = pg_catalog.int2
 );
+*/
+
 --
 -- float2 cast definitions
 --
@@ -1113,6 +1175,13 @@ CREATE OPERATOR CLASS pg_catalog.float2_ops
 -- int1(tinyint) - 8bit width integer data support
 --
 -- ==================================================================
+
+-- MEMO: PG-Strom v3.x assigned fixed OID 606 for int1
+--       which is not removable as a system object.
+--       v5.x never assume the fixed number of OID,
+--       so we keep the legacy definition as-is.
+--
+/*
 CREATE TYPE pg_catalog.int1;
 
 CREATE FUNCTION pgstrom.int1in(cstring)
@@ -1144,6 +1213,7 @@ CREATE TYPE pg_catalog.int1
   like = pg_catalog.bool,
   category = 'N'
 );
+*/
 
 --
 -- Type Cast Definitions
