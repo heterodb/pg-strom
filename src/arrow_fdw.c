@@ -1060,6 +1060,7 @@ execInitArrowStatsHint(ScanState *ss, List *outer_quals, Bitmapset *stat_attrs)
 	Expr		   *eval_expr;
 	ListCell	   *lc;
 
+	outer_quals = fixup_scanstate_expressions(ss, outer_quals);
 	as_hint = palloc0(sizeof(arrowStatsHint));
 	as_hint->stat_attrs = stat_attrs;
 	foreach (lc, outer_quals)

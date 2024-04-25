@@ -348,6 +348,54 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 }
 
 /*
+ * fixup_scanstate_expressions
+ */
+static Node *
+__fixup_customscan_expressions_walker(Node *node, void *__priv)
+{
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		CustomScan *cscan = (CustomScan *)__priv;
+		Var	   *var = (Var *)node;
+
+		if (var->varno == INDEX_VAR)
+		{
+			if (var->varattno > 0 &&
+				var->varattno <= list_length(cscan->custom_scan_tlist))
+			{
+				TargetEntry *tle = list_nth(cscan->custom_scan_tlist,
+											var->varattno - 1);
+				Assert(var->vartype   == exprType((Node *)tle->expr) &&
+					   var->vartypmod == exprTypmod((Node *)tle->expr));
+				return copyObject((Node *)tle->expr);
+			}
+			else
+			{
+				elog(ERROR, "Bug? INDEX_VAR referenced out of the custom_scan_tlist");
+			}
+		}
+		else
+		{
+			Assert(!IS_SPECIAL_VARNO(var->varno));
+			Assert(cscan->custom_scan_tlist == NIL);
+			return copyObject(node);
+		}
+	}
+	return expression_tree_mutator(node, __fixup_customscan_expressions_walker, __priv);
+}
+
+List *
+fixup_scanstate_expressions(ScanState *ss, List *expressions)
+{
+	if (IsA(ss, CustomScanState))
+		return (List *)__fixup_customscan_expressions_walker((Node *)expressions,
+															 ss->ps.plan);
+	return expressions;
+}
+
+/*
  * fixup_expression_by_partition_leaf
  */
 List *
