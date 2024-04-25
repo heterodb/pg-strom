@@ -600,7 +600,6 @@ extern devfunc_info *devtype_lookup_compare_func(devtype_info *dtype, Oid coll_i
 extern codegen_context *create_codegen_context(PlannerInfo *root,
 											   CustomPath *cpath,
 											   pgstromPlanInfo *pp_info);
-extern bool		codegen_expression_equals(const void *__a, const void *__b);
 extern bytea   *codegen_build_scan_quals(codegen_context *context,
 										 List *dev_quals);
 extern bytea   *codegen_build_packed_joinquals(codegen_context *context,

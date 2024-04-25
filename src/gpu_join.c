@@ -1160,17 +1160,8 @@ __pgstrom_build_tlist_dev_expr(List *tlist_dev,
 	int			resno;
 	ListCell   *lc1, *lc2;
 
-	if (!node)
+	if (!node || tlist_member((Expr *)node, tlist_dev))
 		return tlist_dev;
-
-	/* check whether the node is already on the tlist_dev */
-	foreach (lc1, tlist_dev)
-	{
-		TargetEntry	*tle = lfirst(lc1);
-
-		if (codegen_expression_equals(node, tle->expr))
-			return tlist_dev;
-	}
 
 	/* check whether the node is identical with any of input */
 	if (IsA(node, Var))
@@ -1192,7 +1183,7 @@ __pgstrom_build_tlist_dev_expr(List *tlist_dev,
 		resno = 1;
 		foreach (lc2, reltarget->exprs)
 		{
-			if (codegen_expression_equals(node, lfirst(lc2)))
+			if (equal(node, lfirst(lc2)))
 				goto found;
 			resno++;
 		}
@@ -1236,92 +1227,6 @@ found:
 		}
 	}
 	return tlist_dev;
-}
-
-/*
- * __build_explain_tlist_junks
- *
- * it builds junk TLEs for EXPLAIN output only
- */
-static void
-__build_explain_tlist_junks(codegen_context *context,
-							PlannerInfo *root,
-							const Bitmapset *outer_refs)
-{
-	Index		scan_relid = context->scan_relid;
-	RelOptInfo *base_rel = root->simple_rel_array[scan_relid];
-	RangeTblEntry *rte = root->simple_rte_array[scan_relid];
-	int			j, k;
-
-	Assert(IS_SIMPLE_REL(base_rel) && rte->rtekind == RTE_RELATION);
-	/* depth==0 */
-	for (j = bms_next_member(outer_refs, -1);
-		 j >= 0;
-		 j = bms_next_member(outer_refs, j))
-	{
-		Var	   *var;
-		char   *attname;
-
-		k = j + FirstLowInvalidHeapAttributeNumber;
-		if (k != InvalidAttrNumber)
-		{
-			HeapTuple	htup;
-			Form_pg_attribute attr;
-
-			htup = SearchSysCache2(ATTNUM,
-								   ObjectIdGetDatum(rte->relid),
-								   Int16GetDatum(k));
-			if (!HeapTupleIsValid(htup))
-				elog(ERROR,"cache lookup failed for attriubte %d of relation %u",
-					 k, rte->relid);
-			attr = (Form_pg_attribute) GETSTRUCT(htup);
-			var = makeVar(base_rel->relid,
-						  attr->attnum,
-						  attr->atttypid,
-						  attr->atttypmod,
-						  attr->attcollation,
-						  0);
-			attname = pstrdup(NameStr(attr->attname));
-			ReleaseSysCache(htup);
-		}
-		else
-		{
-			/* special case handling if whole row reference */
-			var = makeWholeRowVar(rte,
-								  base_rel->relid,
-								  0, false);
-			attname = get_rel_name(rte->relid);
-		}
-
-		if (tlist_member((Expr *)var, context->tlist_dev) == NULL)
-		{
-			TargetEntry *tle;
-			int		resno = list_length(context->tlist_dev) + 1;
-
-			tle = makeTargetEntry((Expr *)var, resno, attname, true);
-			context->tlist_dev = lappend(context->tlist_dev, tle);
-		}
-	}
-	/* depth > 0 */
-	for (int depth=1; depth <= context->num_rels; depth++)
-	{
-		PathTarget *target = context->pd[depth].inner_target;
-		ListCell   *lc;
-
-		foreach (lc, target->exprs)
-		{
-			Expr   *expr = lfirst(lc);
-
-			if (tlist_member(expr, context->tlist_dev) == NULL)
-			{
-				TargetEntry *tle;
-				int		resno = list_length(context->tlist_dev) + 1;
-
-				tle = makeTargetEntry(expr, resno, NULL, true);
-				context->tlist_dev = lappend(context->tlist_dev, tle);
-			}
-		}
-	}
 }
 
 static void
@@ -1425,6 +1330,93 @@ pgstrom_build_groupby_tlist_dev(codegen_context *context,
 	}
 }
 
+
+/*
+ * build_explain_tlist_junks
+ *
+ * it builds junk TLEs for EXPLAIN output only
+ */
+static bool
+__build_explain_tlist_junks_walker(Node *node, void *__priv)
+{
+	codegen_context *context = __priv;
+
+	if (!node)
+		return false;
+
+	if (tlist_member((Expr *)node, context->tlist_dev) != NULL)
+		return false;
+	if (IsA(node, Var))
+	{
+		TargetEntry *tle;
+
+		tle = makeTargetEntry((Expr *)node,
+							  list_length(context->tlist_dev) + 1,
+							  NULL,
+							  true);
+		context->tlist_dev = lappend(context->tlist_dev, tle);
+		return false;
+	}
+	return expression_tree_walker(node, __build_explain_tlist_junks_walker, __priv);
+}
+
+static void
+build_explain_tlist_junks(codegen_context *context,
+						  pgstromPlanInfo *pp_info,
+						  const Bitmapset *outer_refs)
+{
+	List   *vars_in_exprs = pull_vars_of_level((Node *)context->tlist_dev, 0);
+
+	__build_explain_tlist_junks_walker((Node *)pp_info->used_params, context);
+	__build_explain_tlist_junks_walker((Node *)pp_info->host_quals, context);
+	__build_explain_tlist_junks_walker((Node *)pp_info->scan_quals, context);
+
+	for (int i=0; i < pp_info->num_rels; i++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+
+		__build_explain_tlist_junks_walker((Node *)pp_inner->hash_outer_keys,
+										   context);
+		__build_explain_tlist_junks_walker((Node *)pp_inner->hash_inner_keys,
+										   context);
+		__build_explain_tlist_junks_walker((Node *)pp_inner->join_quals,
+										   context);
+		__build_explain_tlist_junks_walker((Node *)pp_inner->other_quals,
+										   context);
+		__build_explain_tlist_junks_walker((Node *)pp_inner->gist_clause,
+										   context);
+	}
+	__build_explain_tlist_junks_walker((Node *)vars_in_exprs, context);
+	
+	/* sanity checks for outer references */
+#ifdef USE_ASSERT_CHECKING
+	for (int j = bms_next_member(outer_refs, -1);
+		 j >= 0;
+		 j = bms_next_member(outer_refs, j))
+	{
+		int			anum = j + FirstLowInvalidHeapAttributeNumber;
+		ListCell   *lc;
+
+		foreach (lc, context->tlist_dev)
+		{
+			TargetEntry *tle = lfirst(lc);
+
+			if (IsA(tle->expr, Var))
+			{
+				Var	   *var = (Var *)tle->expr;
+
+				if (var->varno == pp_info->scan_relid &&
+					var->varattno == anum)
+					break;
+			}
+		}
+		if (lc == NULL)
+			elog(INFO, "scan_relid=%d anum=%d tlist_dev=%s", pp_info->scan_relid, anum, nodeToString(context->tlist_dev));
+		Assert(lc != NULL);
+	}
+#endif
+}
+
 /*
  * PlanXpuJoinPathCommon
  */
@@ -1521,7 +1513,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	pull_varattnos((Node *)context->tlist_dev,
 				   pp_info->scan_relid,
 				   &outer_refs);
-	__build_explain_tlist_junks(context, root, outer_refs);
+	build_explain_tlist_junks(context, pp_info, outer_refs);
 
 	/* assign remaining PlanInfo members */
 	pp_info->kexp_join_quals_packed
