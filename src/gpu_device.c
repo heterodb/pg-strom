@@ -529,16 +529,17 @@ const Bitmapset *
 GetOptimalGpuForFile(const char *pathname)
 {
 	int64_t		optimal_gpus = __GetOptimalGpuForFile(pathname);
-	Bitmapset  *result = NULL;
+	Bitmapset  *bms = NULL;
 
-	if (optimal_gpus)
+	for (int k=0; optimal_gpus != 0; k++)
 	{
-		result = palloc0(offsetof(Bitmapset, words[1]));
-		result->type     = T_Bitmapset;
-		result->nwords   = 1;
-		result->words[0] = optimal_gpus;
+		if ((optimal_gpus & (1UL<<k)) != 0)
+		{
+			bms = bms_add_member(bms, k);
+			optimal_gpus &= ~(1UL<<k);
+		}
 	}
-	return result;
+	return bms;
 }
 
 /*
@@ -548,7 +549,7 @@ static const Bitmapset *
 GetOptimalGpuForTablespace(Oid tablespace_oid)
 {
     tablespace_optimal_gpu_entry *hentry;
-	Bitmapset  *result = NULL;
+	Bitmapset  *bms = NULL;
 	bool        found;
 
     if (!pgstrom_gpudirect_enabled)
@@ -597,12 +598,18 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 	}
 	if (hentry->optimal_gpus != 0)
 	{
-		result = palloc0(offsetof(Bitmapset, words[1]));
-		result->type     = T_Bitmapset;
-		result->nwords   = 1;
-		result->words[0] = hentry->optimal_gpus;
+		int64_t		optimal_gpus = hentry->optimal_gpus;
+
+		for (int k=0; optimal_gpus != 0; k++)
+		{
+			if ((optimal_gpus & (1UL<<k)) != 0)
+			{
+				bms = bms_add_member(bms, k);
+				optimal_gpus &= ~(1UL<<k);
+			}
+		}
 	}
-	return result;
+	return bms;
 }
 
 /*
