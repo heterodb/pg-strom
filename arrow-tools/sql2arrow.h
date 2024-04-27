@@ -41,6 +41,11 @@ sqldb_fetch_results(void *sqldb_state, SQLtable *table);
 extern void
 sqldb_close_connection(void *sqldb_state);
 
+extern char *
+sqldb_build_simple_command(void *sqldb_state,
+						   const char *simple_table_name,
+						   int num_worker_threads,
+						   size_t batch_segment_sz);
 /* misc functions */
 extern void	   *palloc(size_t sz);
 extern void	   *palloc0(size_t sz);
