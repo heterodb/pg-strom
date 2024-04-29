@@ -1,3 +1,9 @@
+* Mon Apr 29 2024 KaiGai Kohei <kaigai@heterodb.com> - 5.1-1
+- partition-wise GpuJoin/PreAgg support
+- parallel mode support in pg2arrow
+- use of primary CUDA context, instead of own context
+- various bug fixes
+
 * Wed Feb 28 2024 KaiGai Kohei <kaigai@heterodb.com> - 5.0-4
 - various bug fixes
 
