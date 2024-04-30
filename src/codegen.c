@@ -1427,6 +1427,24 @@ __assign_codegen_kvar_defitem_subfields(codegen_kvar_defitem *kvdef)
 }
 
 /*
+ * equalVar - compares two Var nodes except for varnullingrels
+ */
+static inline bool
+equalVar(const void *__a, const void *__b)
+{
+	const Var  *a = __a;
+	const Var  *b = __b;
+
+	return (IsA(a, Var)    && IsA(b, Var) &&
+			a->varno       == b->varno &&
+			a->varattno    == b->varattno &&
+			a->vartype     == b->vartype &&
+			a->vartypmod   == b->vartypmod &&
+			a->varcollid   == b->varcollid &&
+			a->varlevelsup == b->varlevelsup);
+}
+
+/*
  * lookup_input_varnode_defitem
  */
 static codegen_kvar_defitem *
@@ -1464,7 +1482,7 @@ lookup_input_varnode_defitem(codegen_context *context,
 		resno = 1;
 		foreach (lc, target->exprs)
 		{
-			if (equal(var, lfirst(lc)))
+			if (equalVar(var, lfirst(lc)))
 				goto found;
 			resno++;
 		}
@@ -1478,7 +1496,7 @@ found:
 		if (kvdef->kv_depth == depth &&
 			kvdef->kv_resno == resno)
 		{
-			Assert(equal(var, kvdef->kv_expr));
+			Assert(equalVar(var, kvdef->kv_expr));
 			kvdef->kv_maxref = Max(kvdef->kv_maxref, curr_depth);
 			return kvdef;
 		}
