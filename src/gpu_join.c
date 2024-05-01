@@ -134,6 +134,78 @@ try_fetch_xpujoin_planinfo(const Path *path)
 }
 
 /*
+ * fixup_join_varnullingrels
+ *
+ * MEMO: PG16 added the Var::varnullingrels field to track potentially
+ * NULL-able columns for OUTER JOINs. It it setup by the core optimizer
+ * for each joinrel, so expression pulled-up from the prior level join
+ * or scan must be adjusted as if Var-nodes are used in this Join.
+ * Without this fixup, setrefs.c shall raise an error due to mismatch
+ * of equal() that checks varnullingrels field also.
+ */
+#if PG_VERSION_NUM < 160000
+#define fixup_join_varnullingrels(joinrel,pp_info)		(pp_info)
+#else
+static Node *
+__fixup_join_varnullingrels_walker(Node *node, void *__data)
+{
+	RelOptInfo *joinrel = __data;
+	PathTarget *reltarget = joinrel->reltarget;
+	ListCell   *lc;
+
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var	   *var = copyObject((Var *)node);
+
+		foreach (lc, reltarget->exprs)
+		{
+			Var	   *__var = lfirst(lc);
+
+			if (var->varno == __var->varno &&
+				var->varattno == __var->varattno)
+			{
+				Assert(var->vartype   == __var->vartype &&
+					   var->vartypmod == __var->vartypmod &&
+					   var->varcollid == __var->varcollid);
+				var->varnullingrels = bms_copy(__var->varnullingrels);
+				return (Node *)var;
+			}
+		}
+		var->varnullingrels = NULL;
+		return (Node *)var;
+	}
+	return expression_tree_mutator(node, __fixup_join_varnullingrels_walker, __data);
+}
+
+static pgstromPlanInfo *
+fixup_join_varnullingrels(RelOptInfo *joinrel, pgstromPlanInfo *pp_info)
+{
+#define __FIXUP_FIELD(VAL)												\
+	VAL = (void *)__fixup_join_varnullingrels_walker((Node *)(VAL), joinrel)
+
+	__FIXUP_FIELD(pp_info->used_params);
+	__FIXUP_FIELD(pp_info->host_quals);
+	__FIXUP_FIELD(pp_info->scan_quals);
+	__FIXUP_FIELD(pp_info->brin_index_conds);
+	__FIXUP_FIELD(pp_info->brin_index_quals);
+	for (int i=0; i < pp_info->num_rels; i++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+
+		__FIXUP_FIELD(pp_inner->hash_outer_keys);
+		__FIXUP_FIELD(pp_inner->hash_inner_keys);
+		__FIXUP_FIELD(pp_inner->join_quals);
+		__FIXUP_FIELD(pp_inner->other_quals);
+		__FIXUP_FIELD(pp_inner->gist_clause);
+	}
+#undef __FIXUP_FIELD
+	return pp_info;
+}
+#endif
+
+/*
  * __buildXpuJoinPlanInfo
  */
 static pgstromPlanInfo *
@@ -449,7 +521,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pp_info->final_cost = final_cost;
 	pp_inner->join_nrows = (joinrel->rows / pp_info->parallel_divisor);
 
-	return pp_info;
+	return fixup_join_varnullingrels(joinrel, pp_info);
 }
 
 /*
