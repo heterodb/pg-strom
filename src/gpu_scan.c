@@ -224,7 +224,6 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 											 NULL);
 		ntuples *= selectivity;		/* rows after dev_quals */
 	}
-	dev_quals = extract_actual_clauses(dev_quals, false);
 
 	/*
 	 * Cost for DMA receive (xPU-->Host)
@@ -247,8 +246,6 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 											 NULL);
 		ntuples *= selectivity;		/* rows after host_quals */
 	}
-	host_quals = extract_actual_clauses(host_quals, false);
-
 	/*
 	 * Cost for host projection
 	 */
@@ -262,8 +259,8 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 	pp_info->gpu_direct_devs = gpu_direct_devs;
 	pp_info->ds_entry = ds_entry;
 	pp_info->scan_relid = baserel->relid;
-	pp_info->host_quals = strip_varnullingrels(host_quals);
-	pp_info->scan_quals = strip_varnullingrels(dev_quals);
+	pp_info->host_quals = extract_actual_clauses(host_quals, false);
+	pp_info->scan_quals = extract_actual_clauses(dev_quals, false);
 	pp_info->scan_tuples = baserel->tuples;
 	pp_info->scan_nrows = scan_nrows;
 	pp_info->parallel_nworkers = parallel_nworkers;

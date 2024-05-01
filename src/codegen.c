@@ -1427,6 +1427,24 @@ __assign_codegen_kvar_defitem_subfields(codegen_kvar_defitem *kvdef)
 }
 
 /*
+ * equalVar - compares two Var nodes except for varnullingrels
+ */
+static inline bool
+equalVar(const void *__a, const void *__b)
+{
+	const Var  *a = __a;
+	const Var  *b = __b;
+
+	return (IsA(a, Var)    && IsA(b, Var) &&
+			a->varno       == b->varno &&
+			a->varattno    == b->varattno &&
+			a->vartype     == b->vartype &&
+			a->vartypmod   == b->vartypmod &&
+			a->varcollid   == b->varcollid &&
+			a->varlevelsup == b->varlevelsup);
+}
+
+/*
  * lookup_input_varnode_defitem
  */
 static codegen_kvar_defitem *
@@ -1448,7 +1466,6 @@ lookup_input_varnode_defitem(codegen_context *context,
 
 	if (!IsA(var, Var))
 		return NULL;
-	var = strip_varnullingrels(var);
 
 	if (var->varno == context->scan_relid)
 	{
@@ -1465,7 +1482,7 @@ lookup_input_varnode_defitem(codegen_context *context,
 		resno = 1;
 		foreach (lc, target->exprs)
 		{
-			if (equal(var, lfirst(lc)))
+			if (equalVar(var, lfirst(lc)))
 				goto found;
 			resno++;
 		}
@@ -1479,7 +1496,7 @@ found:
 		if (kvdef->kv_depth == depth &&
 			kvdef->kv_resno == resno)
 		{
-			Assert(equal(var, kvdef->kv_expr));
+			Assert(equalVar(var, kvdef->kv_expr));
 			kvdef->kv_maxref = Max(kvdef->kv_maxref, curr_depth);
 			return kvdef;
 		}
@@ -1533,9 +1550,6 @@ __try_inject_temporary_expression(codegen_context *context,
 	kern_expression kexp;
 	ListCell   *lc;
 	int			pos = -1;
-
-	/* remove varnullingrels, if any */
-	expr = strip_varnullingrels(expr);
 
 	/*
 	 * When 'expr' is simple Var-reference on the input relations,
@@ -2887,7 +2901,6 @@ codegen_build_scan_quals(codegen_context *context, List *dev_quals)
 	int			saved_depth = context->curr_depth;
 
 	Assert(context->elevel >= ERROR);
-	Assert(check_varnullingrels(dev_quals));
 	if (dev_quals == NIL)
 		return NULL;
 	if (list_length(dev_quals) == 1)

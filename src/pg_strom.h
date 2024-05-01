@@ -938,8 +938,6 @@ extern bool		pgstrom_init_dpu_device(void);
 extern void		form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info);
 extern pgstromPlanInfo *deform_pgstrom_plan_info(CustomScan *cscan);
 extern pgstromPlanInfo *copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig);
-extern void	   *strip_varnullingrels(void *node);
-extern bool		check_varnullingrels(void *node);
 extern List	   *fixup_scanstate_expressions(ScanState *ss, List *exprs_list);
 extern List	   *fixup_expression_by_partition_leaf(PlannerInfo *root,
 												   Relids leaf_relids,

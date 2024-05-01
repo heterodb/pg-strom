@@ -348,62 +348,6 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 }
 
 /*
- * strip_varnullingrels
- *
- * PG16 adds Var::varnullingrels to show potentially nullable Vars for
- * special case optimization, however, PG-Strom's CustomScan path don't
- * have this kind of optimization, and here is an adverse effect that
- * makes equal() does not match Var-nodes with different varnullingrels.
- * (It can be happen to handle multi-level Join, like GpuJoin)
- */
-static Node *
-__strip_varnullingrels_walker(Node *node, void *__data)
-{
-	if (!node)
-		return NULL;
-#if PG_VERSION_NUM >= 160000
-	if (IsA(node, Var))
-	{
-		Var	   *var = copyObject((Var *)node);
-
-		var->varnullingrels = NULL;
-		return (Node *)var;
-	}
-#endif
-	return expression_tree_mutator(node, __strip_varnullingrels_walker, __data);
-}
-
-void *
-strip_varnullingrels(void *node)
-{
-	return __strip_varnullingrels_walker(node, NULL);
-}
-
-static bool
-__check_varnullingrels_walker(Node *node, void *__data)
-{
-#if PG_VERSION_NUM >= 160000
-	if (!node)
-		return false;
-	if (IsA(node, Var))
-	{
-		Var	   *var = (Var *)node;
-
-		return !bms_is_empty(var->varnullingrels);
-	}
-	return expression_tree_walker(node, __check_varnullingrels_walker, __data);
-#else
-	return true;
-#endif
-}
-
-bool
-check_varnullingrels(void *node)
-{
-	return !__check_varnullingrels_walker(node, NULL);
-}
-
-/*
  * fixup_scanstate_expressions
  */
 static Node *
