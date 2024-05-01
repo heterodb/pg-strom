@@ -323,10 +323,10 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pp_inner = &pp_info->inners[pp_info->num_rels++];
 	pp_inner->join_type = join_type;
 	pp_inner->join_nrows = joinrel->rows;
-	pp_inner->hash_outer_keys = hash_outer_keys;
-	pp_inner->hash_inner_keys = hash_inner_keys;
-	pp_inner->join_quals = join_quals;
-	pp_inner->other_quals = other_quals;
+	pp_inner->hash_outer_keys = strip_varnullingrels(hash_outer_keys);
+	pp_inner->hash_inner_keys = strip_varnullingrels(hash_inner_keys);
+	pp_inner->join_quals  = strip_varnullingrels(join_quals);
+	pp_inner->other_quals = strip_varnullingrels(other_quals);
 	/* GiST-Index availability checks */
 	if (enable_xpugistindex &&
 		hash_outer_keys == NIL &&
@@ -1343,7 +1343,7 @@ __build_explain_tlist_junks_walker(Node *node, void *__priv)
 
 	if (!node)
 		return false;
-
+	Assert(check_varnullingrels(node));
 	if (tlist_member((Expr *)node, context->tlist_dev) != NULL)
 		return false;
 	if (IsA(node, Var))
@@ -1424,13 +1424,14 @@ CustomScan *
 PlanXpuJoinPathCommon(PlannerInfo *root,
 					  RelOptInfo *joinrel,
 					  CustomPath *cpath,
-					  List *tlist,
+					  List *__tlist,
 					  List *custom_plans,
 					  pgstromPlanInfo *pp_info,
 					  const CustomScanMethods *xpujoin_plan_methods)
 {
 	codegen_context *context;
 	CustomScan *cscan;
+	List	   *tlist = strip_varnullingrels(__tlist);
 	Bitmapset  *outer_refs = NULL;
 	List	   *join_quals_stacked = NIL;
 	List	   *other_quals_stacked = NIL;
@@ -1443,6 +1444,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	/* codegen for outer scan, if any */
 	if (pp_info->scan_quals)
 	{
+		Assert(check_varnullingrels(pp_info->scan_quals));
 		pp_info->kexp_scan_quals
 			= codegen_build_scan_quals(context, pp_info->scan_quals);
 		pull_varattnos((Node *)pp_info->scan_quals,
@@ -1457,6 +1459,10 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
+		Assert(check_varnullingrels(pp_inner->hash_outer_keys) &&
+			   check_varnullingrels(pp_inner->hash_inner_keys) &&
+			   check_varnullingrels(pp_inner->join_quals) &&
+			   check_varnullingrels(pp_inner->other_quals));
 		/* xpu code to generate outer hash-value */
 		if (pp_inner->hash_outer_keys != NIL &&
 			pp_inner->hash_inner_keys != NIL)
