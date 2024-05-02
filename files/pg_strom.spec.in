@@ -5,25 +5,24 @@ Summary: PG-Strom extension module for PostgreSQL
 Group: Applications/Databases
 License: PostgreSQL
 URL: https://github.com/heterodb/pg-strom
-Source0: @@STROM_TARBALL@@.tar.gz
+Source0: https://heterodb.github.io/swdc/tgz/@@STROM_TARBALL@@.tar.gz
 Source1: systemd-pg_strom.conf
-Obsoletes: nvme_strom < 2.0
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 AutoReqProv: no
 
 %undefine _debugsource_packages
 %undefine _debuginfo_subpackages
 
-%define __githash	@@PGSTROM_GITHASH@@
-%define __cuda_path	/usr/local/cuda
-%define __pg_config_15	/usr/pgsql-15/bin/pg_config
-%define __pg_config_16	/usr/pgsql-16/bin/pg_config
-%define __pg_config_17	/usr/pgsql-17/bin/pg_config
-%define __heterodb_extra_min_version    5.4
+%define __githash       @@PGSTROM_GITHASH@@
+%define __cuda_path     /usr/local/cuda
+%define __pg_config_15  /usr/pgsql-15/bin/pg_config
+%define __pg_config_16  /usr/pgsql-16/bin/pg_config
+%define __pg_config_17  /usr/pgsql-17/bin/pg_config
+%define __heterodb_extra_min_version 5.4
 
-%define __HAS_PG15	%(test -x %{__pg_config_15} && echo -n 1 || echo -n 0)
-%define __HAS_PG16	%(test -x %{__pg_config_16} && echo -n 1 || echo -n 0)
-%define __HAS_PG17	%(test -x %{__pg_config_17} && echo -n 1 || echo -n 0)
+%define __HAS_PG15      %(test -x %{__pg_config_15} && echo -n 1 || echo -n 0)
+%define __HAS_PG16      %(test -x %{__pg_config_16} && echo -n 1 || echo -n 0)
+%define __HAS_PG17      %(test -x %{__pg_config_17} && echo -n 1 || echo -n 0)
 
 %define __make_options_common VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot} CUDA_PATH=%{__cuda_path}
 
@@ -52,7 +51,7 @@ PG-Strom %{version}-%{release} built for PostgreSQL v15, based on %{__githash}
 %define __pkglibdir_15     %(%{__pg_config_15} --pkglibdir)
 %define __pkgbindir_15     %(%{__pg_config_15} --bindir)
 %define __pkgsharedir_15   %(%{__pg_config_15} --sharedir)
-%define __systemd_conf_15  %{_sysconfdir}/systemd/system/postgresql-15.service.d/pg_strom.conf
+%define __systemd_conf_15  %{_unitdir}/postgresql-15.service.d/pg_strom.conf
 %define __make_options_15  PG_CONFIG=%{__pg_config_15} %{__make_options_common} BINDIR=%{__pkgbindir_15}
 %endif
 
@@ -77,7 +76,7 @@ PG-Strom %{version}-%{release} built for PostgreSQL v16, based on %{__githash}
 %define __pkglibdir_16     %(%{__pg_config_16} --pkglibdir)
 %define __pkgbindir_16     %(%{__pg_config_16} --bindir)
 %define __pkgsharedir_16   %(%{__pg_config_16} --sharedir)
-%define __systemd_conf_16  %{_sysconfdir}/systemd/system/postgresql-16.service.d/pg_strom.conf
+%define __systemd_conf_16  %{_unitdir}/postgresql-16.service.d/pg_strom.conf
 %define __make_options_16  PG_CONFIG=%{__pg_config_16} %{__make_options_common} BINDIR=%{__pkgbindir_16}
 %endif
 
@@ -102,7 +101,7 @@ PG-Strom %{version}-%{release} built for PostgreSQL v17, based on %{__githash}
 %define __pkglibdir_17     %(%{__pg_config_17} --pkglibdir)
 %define __pkgbindir_17     %(%{__pg_config_17} --bindir)
 %define __pkgsharedir_17   %(%{__pg_config_17} --sharedir)
-%define __systemd_conf_17  %{_sysconfdir}/systemd/system/postgresql-17.service.d/pg_strom.conf
+%define __systemd_conf_17  %{_unitdir}/postgresql-17.service.d/pg_strom.conf
 %define __make_options_17  PG_CONFIG=%{__pg_config_17} %{__make_options_common} BINDIR=%{__pkgbindir_17}
 %endif
 
@@ -119,32 +118,27 @@ PG-Strom %{version}-%{release} built for PostgreSQL v17, based on %{__githash}
 %endif
 
 %build
-rm -rf %{buildroot}
-
 %if %{__HAS_PG15}
 pushd ../PG15
-%{__make} -C src -j 12   %{__make_options_15}
+%{__make} -C src -j 12 %{__make_options_15}
 %{__make} -C arrow-tools -j 6 %{__make_options_15} pg2arrow
 %{__make} -C arrow-tools -j 6 %{__make_options_15} arrow2csv
-%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir_15}
 popd
 %endif
 
 %if %{__HAS_PG16}
 pushd ../PG16
-%{__make} -C src -j 12   %{__make_options_16}
+%{__make} -C src -j 12 %{__make_options_16}
 %{__make} -C arrow-tools -j 6 %{__make_options_16} pg2arrow
 %{__make} -C arrow-tools -j 6 %{__make_options_16} arrow2csv
-%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir_16}
 popd
 %endif
 
 %if %{__HAS_PG17}
 pushd ../PG17
-%{__make} -C src -j 12   %{__make_options_17}
+%{__make} -C src -j 12 %{__make_options_17}
 %{__make} -C arrow-tools -j 6 %{__make_options_17} pg2arrow
 %{__make} -C arrow-tools -j 6 %{__make_options_17} arrow2csv
-%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir_17}
 popd
 %endif
 
@@ -156,7 +150,6 @@ pushd ../PG15
 %{__make} -C src         %{__make_options_15} CUDA_PATH=%{__cuda_path} install
 %{__make} -C arrow-tools %{__make_options_15} install-pg2arrow
 %{__make} -C arrow-tools %{__make_options_15} install-arrow2csv
-%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir_15} install
 %{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf_15}
 popd
 %endif
@@ -166,7 +159,6 @@ pushd ../PG16
 %{__make} -C src         %{__make_options_16} CUDA_PATH=%{__cuda_path} install
 %{__make} -C arrow-tools %{__make_options_16} install-pg2arrow
 %{__make} -C arrow-tools %{__make_options_16} install-arrow2csv
-%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir_16} install
 %{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf_16}
 popd
 %endif
@@ -176,7 +168,6 @@ pushd ../PG17
 %{__make} -C src         %{__make_options_17} CUDA_PATH=%{__cuda_path} install
 %{__make} -C arrow-tools %{__make_options_17} install-pg2arrow
 %{__make} -C arrow-tools %{__make_options_17} install-arrow2csv
-%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir_17} install
 %{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf_17}
 popd
 %endif
@@ -189,14 +180,12 @@ rm -rf %{buildroot}
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_15}/pg2arrow   1500 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_15}/arrow2csv  1500 || exit 0
-    /usr/sbin/update-alternatives --install /usr/bin/dbgen-ssbm pgsql-dbgen-ssbm %{__pkgbindir_15}/dbgen-ssbm 1500 || exit 0
 fi
 
 %postun PG15
 if [ "$1" -eq 0 ]; then
     /usr/sbin/update-alternatives --remove pgsql-pg2arrow   %{__pkgbindir_15}/pg2arrow   || exit 0
     /usr/sbin/update-alternatives --remove pgsql-arrow2csv  %{__pkgbindir_15}/arrow2csv  || exit 0
-    /usr/sbin/update-alternatives --remove pgsql-dbgen-ssbm %{__pkgbindir_15}/dbgen-ssbm || exit 0
 fi
 %endif
 
@@ -205,14 +194,12 @@ fi
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_16}/pg2arrow   1600 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_16}/arrow2csv  1600 || exit 0
-    /usr/sbin/update-alternatives --install /usr/bin/dbgen-ssbm pgsql-dbgen-ssbm %{__pkgbindir_16}/dbgen-ssbm 1600 || exit 0
 fi
 
 %postun PG16
 if [ "$1" -eq 0 ]; then
     /usr/sbin/update-alternatives --remove pgsql-pg2arrow   %{__pkgbindir_16}/pg2arrow   || exit 0
     /usr/sbin/update-alternatives --remove pgsql-arrow2csv  %{__pkgbindir_16}/arrow2csv  || exit 0
-    /usr/sbin/update-alternatives --remove pgsql-dbgen-ssbm %{__pkgbindir_16}/dbgen-ssbm || exit 0
 fi
 %endif
 
@@ -221,13 +208,11 @@ fi
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_17}/pg2arrow   1700 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_17}/arrow2csv  1700 || exit 0
-    /usr/sbin/update-alternatives --install /usr/bin/dbgen-ssbm pgsql-dbgen-ssbm %{__pkgbindir_17}/dbgen-ssbm 1700 || exit 0
 fi
 %postun PG17
 if [ "$1" -eq 0 ]; then
     /usr/sbin/update-alternatives --remove pgsql-pg2arrow   %{__pkgbindir_17}/pg2arrow   || exit 0
     /usr/sbin/update-alternatives --remove pgsql-arrow2csv  %{__pkgbindir_17}/arrow2csv  || exit 0
-    /usr/sbin/update-alternatives --remove pgsql-dbgen-ssbm %{__pkgbindir_17}/dbgen-ssbm || exit 0
 fi
 %endif
 
@@ -240,10 +225,9 @@ fi
 %{__pkglibdir_15}/pg_strom.so
 %{__pkgbindir_15}/pg2arrow
 %{__pkgbindir_15}/arrow2csv
-%{__pkgbindir_15}/dbgen-ssbm
 %{__pkgsharedir_15}/extension/pg_strom.control
 %{__pkgsharedir_15}/pg_strom/*
-%config(noreplace) %{__systemd_conf_15}
+%{__systemd_conf_15}
 %{__pkglibdir_15}/bitcode/pg_strom*
 %endif
 
@@ -252,10 +236,9 @@ fi
 %{__pkglibdir_16}/pg_strom.so
 %{__pkgbindir_16}/pg2arrow
 %{__pkgbindir_16}/arrow2csv
-%{__pkgbindir_16}/dbgen-ssbm
 %{__pkgsharedir_16}/extension/pg_strom.control
 %{__pkgsharedir_16}/pg_strom/*
-%config(noreplace) %{__systemd_conf_16}
+%{__systemd_conf_16}
 %{__pkglibdir_16}/bitcode/pg_strom*
 %endif
 
@@ -264,14 +247,17 @@ fi
 %{__pkglibdir_17}/pg_strom.so
 %{__pkgbindir_17}/pg2arrow
 %{__pkgbindir_17}/arrow2csv
-%{__pkgbindir_17}/dbgen-ssbm
 %{__pkgsharedir_17}/extension/pg_strom.control
 %{__pkgsharedir_17}/pg_strom/*
-%config(noreplace) %{__systemd_conf_17}
+%{__systemd_conf_17}
 %{__pkglibdir_17}/bitcode/pg_strom*
 %endif
 
 %changelog
+* Thu May  2 2024 KaiGai Kohei <kaigai@heterodb.com> - 5.1-2
+- RPM specfile is revised (-PGxx is now built as sub-package)
+- various bug fixes
+
 * Mon Apr 29 2024 KaiGai Kohei <kaigai@heterodb.com> - 5.1-1
 - partition-wise GpuJoin/PreAgg support
 - parallel mode support in pg2arrow
