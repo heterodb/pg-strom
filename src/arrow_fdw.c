@@ -2774,6 +2774,9 @@ ArrowGetForeignPaths(PlannerInfo *root,
 									NIL,	/* no pathkeys */
 									required_outer,
 									NULL,	/* no extra plan */
+#if PG_VERSION_NUM >= 170000
+									NIL,	/* no restrict-info of Join push-down */
+#endif
 									NIL);	/* no particular private */
 	cost_arrow_fdw_seqscan(&fpath->path,
 						   root,
@@ -2801,6 +2804,9 @@ ArrowGetForeignPaths(PlannerInfo *root,
 										NIL,	/* no pathkeys */
 										required_outer,
 										NULL,	/* no extra plan */
+#if PG_VERSION_NUM >= 170000
+										NIL,	/* no restrict-info of Join push-down */
+#endif
 										NIL);	/* no particular private */
 		fpath->path.parallel_aware = true;
 		cost_arrow_fdw_seqscan(&fpath->path,

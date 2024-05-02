@@ -10,8 +10,6 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
-#include "access/brin_revmap.h"
-#include "executor/nodeIndexscan.h"
 
 /* Data structure for collecting qual clauses that match an index */
 typedef struct
@@ -507,8 +505,7 @@ pgstromBrinIndexExecBegin(pgstromTaskState *pts,
 	br_state->index_rel = index_open(index_oid, lockmode);
 	br_state->index_quals = copyObject(index_quals);
 	br_state->brinRevmap = brinRevmapInitialize(br_state->index_rel,
-												&br_state->pagesPerRange,
-												estate->es_snapshot);
+												&br_state->pagesPerRange);
 	br_state->brinDesc = brin_build_desc(br_state->index_rel); 
 	br_state->nblocks = RelationGetNumberOfBlocks(relation);
 	br_state->nchunks = (br_state->nblocks +
@@ -738,15 +735,14 @@ __BrinIndexExecBuildResults(pgstromTaskState *pts)
 
 		CHECK_FOR_INTERRUPTS();
 
-		MemoryContextResetAndDeleteChildren(per_range_cxt);
+		MemoryContextReset(per_range_cxt);
 
 		__btup = brinGetTupleForHeapBlock(br_state->brinRevmap,
 										  chunk_id * br_state->pagesPerRange,
 										  &buffer,
 										  &off,
 										  &size,
-										  BUFFER_LOCK_SHARE,
-										  estate->es_snapshot);
+										  BUFFER_LOCK_SHARE);
 		if (!__btup)
 			goto skip;
 		btup = brin_copy_tuple(__btup, size, btup, &btupsz);

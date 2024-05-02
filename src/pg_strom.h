@@ -20,6 +20,7 @@
 #define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
 
 #include "access/brin.h"
+#include "access/brin_revmap.h"
 #include "access/heapam.h"
 #include "access/genam.h"
 #include "access/reloptions.h"
@@ -63,6 +64,7 @@
 #include "common/hashfn.h"
 #include "common/int.h"
 #include "common/md5.h"
+#include "executor/nodeIndexscan.h"
 #include "executor/nodeSubplan.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"

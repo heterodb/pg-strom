@@ -52,4 +52,23 @@
 	build_child_join_rel((a),(b),(c),(d),(e),(f),(f)->jointype)
 #endif
 
+/*
+ * MEMO: PostgreSQL v16 removed 'IsBackgroundWorker' variable, and
+ * AmBackgroundWorkerProcess() is used instead.
+ */
+#if PG_VERSION_NUM < 170000
+#define AmBackgroundWorkerProcess()		(IsBackgroundWorker)
+#endif
+
+/*
+ * MEMO: PostgreSQL v17 removed 'snapshot' argument from the
+ * brinRevmapInitialize().
+ */
+#if PG_VERSION_NUM < 170000
+#define brinRevmapInitialize(a,b)				\
+	brinRevmapInitialize((a),(b), estate->es_snapshot)
+#define brinGetTupleForHeapBlock(a,b,c,d,e,f)	\
+	brinGetTupleForHeapBlock((a),(b),(c),(d),(e),(f), estate->es_snapshot)
+#endif
+
 #endif	/* PG_COMPAT_H */
