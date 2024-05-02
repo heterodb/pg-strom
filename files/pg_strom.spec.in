@@ -1,4 +1,4 @@
-Name: pg_strom-PG@@PGSQL_VERSION@@
+Name: pg_strom
 Version: @@STROM_VERSION@@
 Release: @@STROM_RELEASE@@%{?dist}
 Summary: PG-Strom extension module for PostgreSQL
@@ -7,76 +7,407 @@ License: PostgreSQL
 URL: https://github.com/heterodb/pg-strom
 Source0: @@STROM_TARBALL@@.tar.gz
 Source1: systemd-pg_strom.conf
-BuildRequires: postgresql@@PGSQL_VERSION@@
-BuildRequires: postgresql@@PGSQL_VERSION@@-devel
-Requires: postgresql@@PGSQL_VERSION@@-server
-Requires(post): %{_sbindir}/update-alternatives
-Requires(postun): %{_sbindir}/update-alternatives
 Obsoletes: nvme_strom < 2.0
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 AutoReqProv: no
 
-%define __pg_config     /usr/pgsql-@@PGSQL_VERSION@@/bin/pg_config
-%define __pkglibdir     %(%{__pg_config} --pkglibdir)
-%define __pkgbindir     %(%{__pg_config} --bindir)
-%define __pkgsharedir   %(%{__pg_config} --sharedir)
-%define __cuda_path     /usr/local/cuda
-%define __systemd_conf  %{_sysconfdir}/systemd/system/postgresql-@@PGSQL_VERSION@@.service.d/pg_strom.conf
+%undefine _debugsource_packages
+%undefine _debuginfo_subpackages
+
 %define __githash	@@PGSTROM_GITHASH@@
+%define __cuda_path	/usr/local/cuda
+%define __pg_config_15	/usr/pgsql-15/bin/pg_config
+%define __pg_config_16	/usr/pgsql-16/bin/pg_config
+%define __pg_config_17	/usr/pgsql-17/bin/pg_config
+%define __heterodb_extra_min_version    5.4
+
+%define __HAS_PG15	%(test -x %{__pg_config_15} && echo -n 1 || echo -n 0)
+%define __HAS_PG16	%(test -x %{__pg_config_16} && echo -n 1 || echo -n 0)
+%define __HAS_PG17	%(test -x %{__pg_config_17} && echo -n 1 || echo -n 0)
+
+%define __make_options_common VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot} CUDA_PATH=%{__cuda_path}
 
 %description
 PG-Strom is an extension for PostgreSQL, to accelerate large data processing
 queries using the capability of GPU and NVME devices.
-This package is built from @@PGSTROM_GITHASH@@ of the Git repo.
+
+# ----------------------------------------------------------------
+#  PostgreSQL 15 subpackage
+# ----------------------------------------------------------------
+%if %{__HAS_PG15}
+%package PG15
+Summary: PG-Strom extension module for PostgreSQL v15
+Group: Applications/Databases
+BuildRequires: postgresql15
+BuildRequires: postgresql15-devel
+Requires: postgresql15-server
+Requires: heterodb-extra >= %{__heterodb_extra_min_version}
+Requires: %{name}
+Requires(post): %{_sbindir}/update-alternatives
+Requires(postun): %{_sbindir}/update-alternatives
+
+%description PG15
+PG-Strom %{version}-%{release} built for PostgreSQL v15, based on %{__githash}
+
+%define __pkglibdir_15     %(%{__pg_config_15} --pkglibdir)
+%define __pkgbindir_15     %(%{__pg_config_15} --bindir)
+%define __pkgsharedir_15   %(%{__pg_config_15} --sharedir)
+%define __systemd_conf_15  %{_sysconfdir}/systemd/system/postgresql-15.service.d/pg_strom.conf
+%define __make_options_15  PG_CONFIG=%{__pg_config_15} %{__make_options_common} BINDIR=%{__pkgbindir_15}
+%endif
+
+# ----------------------------------------------------------------
+#  PostgreSQL 16 subpackage
+# ----------------------------------------------------------------
+%if %{__HAS_PG16}
+%package PG16
+Summary: PG-Strom extension module for PostgreSQL v16
+Group: Applications/Databases
+BuildRequires: postgresql16
+BuildRequires: postgresql16-devel
+Requires: postgresql16-server
+Requires: heterodb-extra >= %{__heterodb_extra_min_version}
+Requires: %{name}
+Requires(post): %{_sbindir}/update-alternatives
+Requires(postun): %{_sbindir}/update-alternatives
+
+%description PG16
+PG-Strom %{version}-%{release} built for PostgreSQL v16, based on %{__githash}
+
+%define __pkglibdir_16     %(%{__pg_config_16} --pkglibdir)
+%define __pkgbindir_16     %(%{__pg_config_16} --bindir)
+%define __pkgsharedir_16   %(%{__pg_config_16} --sharedir)
+%define __systemd_conf_16  %{_sysconfdir}/systemd/system/postgresql-16.service.d/pg_strom.conf
+%define __make_options_16  PG_CONFIG=%{__pg_config_16} %{__make_options_common} BINDIR=%{__pkgbindir_16}
+%endif
+
+# ----------------------------------------------------------------
+#  PostgreSQL 17 subpackage
+# ----------------------------------------------------------------
+%if %{__HAS_PG17}
+%package PG17
+Summary: PG-Strom extension module for PostgreSQL v17
+Group: Applications/Databases
+BuildRequires: postgresql17
+BuildRequires: postgresql17-devel
+Requires: postgresql17-server
+Requires: heterodb-extra >= %{__heterodb_extra_min_version}
+Requires: %{name}
+Requires(post): %{_sbindir}/update-alternatives
+Requires(postun): %{_sbindir}/update-alternatives
+
+%description PG17
+PG-Strom %{version}-%{release} built for PostgreSQL v17, based on %{__githash}
+
+%define __pkglibdir_17     %(%{__pg_config_17} --pkglibdir)
+%define __pkgbindir_17     %(%{__pg_config_17} --bindir)
+%define __pkgsharedir_17   %(%{__pg_config_17} --sharedir)
+%define __systemd_conf_17  %{_sysconfdir}/systemd/system/postgresql-17.service.d/pg_strom.conf
+%define __make_options_17  PG_CONFIG=%{__pg_config_17} %{__make_options_common} BINDIR=%{__pkgbindir_17}
+%endif
 
 %prep
 %setup -q -n @@STROM_TARBALL@@
+%if %{__HAS_PG15}
+%{__cp} -R . ../PG15
+%endif
+%if %{__HAS_PG16}
+%{__cp} -R . ../PG16
+%endif
+%if %{__HAS_PG17}
+%{__cp} -R . ../PG17
+%endif
 
 %build
 rm -rf %{buildroot}
-%{__make} -C src -j 12   PG_CONFIG=%{__pg_config} VERSION=@@STROM_VERSION@@ RELEASE=@@STROM_RELEASE@@ GITHASH=%{__githash} CUDA_PATH=%{__cuda_path}
-%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} VERSION=@@STROM_VERSION@@ RELEASE=@@STROM_RELEASE@@ GITHASH=%{__githash} pg2arrow
-%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} VERSION=@@STROM_VERSION@@ RELEASE=@@STROM_RELEASE@@ GITHASH=%{__githash} arrow2csv
-%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir}
+
+%if %{__HAS_PG15}
+pushd ../PG15
+%{__make} -C src -j 12   %{__make_options_15}
+%{__make} -C arrow-tools -j 6 %{__make_options_15} pg2arrow
+%{__make} -C arrow-tools -j 6 %{__make_options_15} arrow2csv
+%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir_15}
+popd
+%endif
+
+%if %{__HAS_PG16}
+pushd ../PG16
+%{__make} -C src -j 12   %{__make_options_16}
+%{__make} -C arrow-tools -j 6 %{__make_options_16} pg2arrow
+%{__make} -C arrow-tools -j 6 %{__make_options_16} arrow2csv
+%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir_16}
+popd
+%endif
+
+%if %{__HAS_PG17}
+pushd ../PG17
+%{__make} -C src -j 12   %{__make_options_17}
+%{__make} -C arrow-tools -j 6 %{__make_options_17} pg2arrow
+%{__make} -C arrow-tools -j 6 %{__make_options_17} arrow2csv
+%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir_17}
+popd
+%endif
 
 %install
 rm -rf %{buildroot}
-%{__make} -C src -j 12   PG_CONFIG=%{__pg_config} VERSION=@@STROM_VERSION@@ RELEASE=@@STROM_RELEASE@@ GITHASH=%{__githash} DESTDIR=%{buildroot} CUDA_PATH=%{__cuda_path} install
-%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} VERSION=@@STROM_VERSION@@ RELEASE=@@STROM_RELEASE@@ GITHASH=%{__githash} DESTDIR=%{buildroot} BINDIR=%{__pkgbindir} install-pg2arrow
-%{__make} -C arrow-tools PG_CONFIG=%{__pg_config} VERSION=@@STROM_VERSION@@ RELEASE=@@STROM_RELEASE@@ GITHASH=%{__githash} DESTDIR=%{buildroot} BINDIR=%{__pkgbindir} install-arrow2csv
-%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir} install
-%{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf}
+
+%if %{__HAS_PG15}
+pushd ../PG15
+%{__make} -C src         %{__make_options_15} CUDA_PATH=%{__cuda_path} install
+%{__make} -C arrow-tools %{__make_options_15} install-pg2arrow
+%{__make} -C arrow-tools %{__make_options_15} install-arrow2csv
+%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir_15} install
+%{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf_15}
+popd
+%endif
+
+%if %{__HAS_PG16}
+pushd ../PG16
+%{__make} -C src         %{__make_options_16} CUDA_PATH=%{__cuda_path} install
+%{__make} -C arrow-tools %{__make_options_16} install-pg2arrow
+%{__make} -C arrow-tools %{__make_options_16} install-arrow2csv
+%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir_16} install
+%{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf_16}
+popd
+%endif
+
+%if %{__HAS_PG17}
+pushd ../PG17
+%{__make} -C src         %{__make_options_17} CUDA_PATH=%{__cuda_path} install
+%{__make} -C arrow-tools %{__make_options_17} install-pg2arrow
+%{__make} -C arrow-tools %{__make_options_17} install-arrow2csv
+%{__make} -C test/ssbm DESTDIR=%{buildroot} BINDIR=%{__pkgbindir_17} install
+%{__install} -Dpm 644 %{SOURCE1} %{buildroot}/%{__systemd_conf_17}
+popd
+%endif
 
 %clean
 rm -rf %{buildroot}
 
-%post
+%if %{__HAS_PG15}
+%post PG15
 if [ "$1" -eq 1 ]; then
-    /usr/sbin/update-alternatives --add-slave pgsql-psql %{__pkgbindir}/psql \
-                                  /usr/bin/pg2arrow pgsql-pg2arrow %{__pkgbindir}/pg2arrow || exit 0
-    /usr/sbin/update-alternatives --add-slave pgsql-psql %{__pkgbindir}/psql \
-                                  /usr/bin/arrow2csv pgsql-arrow2csv %{__pkgbindir}/arrow2csv || exit 0
-    /usr/sbin/update-alternatives --add-slave pgsql-psql %{__pkgbindir}/ssbm-dbgen \
-                                  /usr/bin/dbgen-ssbm pgsql-dbgen-ssbm %{__pkgbindir}/dbgen-ssbm || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_15}/pg2arrow   1500 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_15}/arrow2csv  1500 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/dbgen-ssbm pgsql-dbgen-ssbm %{__pkgbindir_15}/dbgen-ssbm 1500 || exit 0
 fi
 
-%postun
+%postun PG15
 if [ "$1" -eq 0 ]; then
-    /usr/sbin/update-alternatives --remove-slave pgsql-psql %{__pkgbindir}/psql pgsql-pg2arrow
-    /usr/sbin/update-alternatives --remove-slave pgsql-psql %{__pkgbindir}/psql pgsql-arrow2csv
-    /usr/sbin/update-alternatives --remove-slave pgsql-psql %{__pkgbindir}/psql pgsql-dbgen-ssbm
+    /usr/sbin/update-alternatives --remove pgsql-pg2arrow   %{__pkgbindir_15}/pg2arrow   || exit 0
+    /usr/sbin/update-alternatives --remove pgsql-arrow2csv  %{__pkgbindir_15}/arrow2csv  || exit 0
+    /usr/sbin/update-alternatives --remove pgsql-dbgen-ssbm %{__pkgbindir_15}/dbgen-ssbm || exit 0
 fi
+%endif
+
+%if %{__HAS_PG16}
+%post PG16
+if [ "$1" -eq 1 ]; then
+    /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_16}/pg2arrow   1600 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_16}/arrow2csv  1600 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/dbgen-ssbm pgsql-dbgen-ssbm %{__pkgbindir_16}/dbgen-ssbm 1600 || exit 0
+fi
+
+%postun PG16
+if [ "$1" -eq 0 ]; then
+    /usr/sbin/update-alternatives --remove pgsql-pg2arrow   %{__pkgbindir_16}/pg2arrow   || exit 0
+    /usr/sbin/update-alternatives --remove pgsql-arrow2csv  %{__pkgbindir_16}/arrow2csv  || exit 0
+    /usr/sbin/update-alternatives --remove pgsql-dbgen-ssbm %{__pkgbindir_16}/dbgen-ssbm || exit 0
+fi
+%endif
+
+%if %{__HAS_PG17}
+%post PG17
+if [ "$1" -eq 1 ]; then
+    /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_17}/pg2arrow   1700 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_17}/arrow2csv  1700 || exit 0
+    /usr/sbin/update-alternatives --install /usr/bin/dbgen-ssbm pgsql-dbgen-ssbm %{__pkgbindir_17}/dbgen-ssbm 1700 || exit 0
+fi
+%postun PG17
+if [ "$1" -eq 0 ]; then
+    /usr/sbin/update-alternatives --remove pgsql-pg2arrow   %{__pkgbindir_17}/pg2arrow   || exit 0
+    /usr/sbin/update-alternatives --remove pgsql-arrow2csv  %{__pkgbindir_17}/arrow2csv  || exit 0
+    /usr/sbin/update-alternatives --remove pgsql-dbgen-ssbm %{__pkgbindir_17}/dbgen-ssbm || exit 0
+fi
+%endif
 
 %files
 %defattr(-,root,root,-)
-%doc LICENSE
-%{__pkglibdir}/pg_strom.so
-%{__pkgbindir}/pg2arrow
-%{__pkgbindir}/arrow2csv
-%{__pkgbindir}/dbgen-ssbm
-%{__pkgsharedir}/extension/pg_strom.control
-%{__pkgsharedir}/pg_strom/*
-%config %{__systemd_conf}
-%{__pkglibdir}/bitcode/pg_strom*
+%doc LICENSE README.md
+
+%if %{__HAS_PG15}
+%files PG15
+%{__pkglibdir_15}/pg_strom.so
+%{__pkgbindir_15}/pg2arrow
+%{__pkgbindir_15}/arrow2csv
+%{__pkgbindir_15}/dbgen-ssbm
+%{__pkgsharedir_15}/extension/pg_strom.control
+%{__pkgsharedir_15}/pg_strom/*
+%config(noreplace) %{__systemd_conf_15}
+%{__pkglibdir_15}/bitcode/pg_strom*
+%endif
+
+%if %{__HAS_PG16}
+%files PG16
+%{__pkglibdir_16}/pg_strom.so
+%{__pkgbindir_16}/pg2arrow
+%{__pkgbindir_16}/arrow2csv
+%{__pkgbindir_16}/dbgen-ssbm
+%{__pkgsharedir_16}/extension/pg_strom.control
+%{__pkgsharedir_16}/pg_strom/*
+%config(noreplace) %{__systemd_conf_16}
+%{__pkglibdir_16}/bitcode/pg_strom*
+%endif
+
+%if %{__HAS_PG17}
+%files PG17
+%{__pkglibdir_17}/pg_strom.so
+%{__pkgbindir_17}/pg2arrow
+%{__pkgbindir_17}/arrow2csv
+%{__pkgbindir_17}/dbgen-ssbm
+%{__pkgsharedir_17}/extension/pg_strom.control
+%{__pkgsharedir_17}/pg_strom/*
+%config(noreplace) %{__systemd_conf_17}
+%{__pkglibdir_17}/bitcode/pg_strom*
+%endif
 
 %changelog
+* Mon Apr 29 2024 KaiGai Kohei <kaigai@heterodb.com> - 5.1-1
+- partition-wise GpuJoin/PreAgg support
+- parallel mode support in pg2arrow
+- use of primary CUDA context, instead of own context
+- various bug fixes
+
+* Wed Feb 28 2024 KaiGai Kohei <kaigai@heterodb.com> - 5.0-4
+- various bug fixes
+
+* Thu Feb  8 2024 KaiGai Kohei <kaigai@heterodb.com> - 5.0-3
+- various bug fixes
+
+* Fri Dec 15 2023 KaiGai Kohei <kaigai@heterodb.com> - 5.0-1
+- The code base has been re-designed entirely with various improvement.
+- Process model was revised to concentrate GPU resource management to
+  multi-threaded background worker process (PG-Strom GPU Service).
+  Unlike v3.x or older, this new design reduces GPU resource consumption
+  and overhead of task-switching.
+- GPU device code in v5.0 operates individual tasks according to the pseudo
+  code (called 'kexp') generated from the supplied SQL clauses. Unlike v3.x or
+  older, it never generates CUDA C++ native code (thus, run-time compiler
+  stuff by NVRTC was removed).
+  It improves agility of query execution, and helps software quality assurance
+  due to code stability. It is also a groundwork for the future support of CSD
+  (computational storage drives), DPU (data processing unit) or others.
+- GPU-Cache is now built on CUDA managed memory that allows memory
+  overcommit, larger than the physical size of GPU DRAM.
+- xPU device type definition was modified to optimize for wide-band GPU
+  memory with utilization of coleasced memory access. kvec_datum_t (or its
+  inherited) type internally declared with small array for each fields to access
+  these values simultaneously.
+- gpupreagg tends to use GPU shared memory for more lightweight aggregation
+  as long as number of groups are less than the capacity.
+- gpujoin extracts tuples once per depth, unlike v3.x or older.
+- partition-wise gpujoin is still works-in-progress, so we will re-activate
+  the feature at v5.1.
+- ...and fixed various bugs.
+
+* Sat Dec 11 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.3-2
+- Rebuild for CUDA11.5 Update 1; contains compiler optimization bugfix
+- A critical bug fix on nogroup_reduction
+- Various bug fixes
+
+* Sun Nov 14 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.3-1
+- Support of heterodb-extra API version 20211018
+- Allows multiple optimal GPUs
+- GpuPreAgg: fix optimizer error if ORDER BY is used together.
+- Various bug fixes
+
+* Tue Oct  5 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.2-1
+- GpuPreAgg: reduction logic reworked (local+global hybrid hash)
+- GpuPreAgg: add hyper-log-log cardinarity estimation with hll_count(X)
+- Add information views for CUDA programs/shared memory chunks
+- Add truncate handler for PG14
+- Various bug fixes
+
+* Sat Aug 21 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.1-1
+- Arrow_Fdw supports min/max statistics as like BRIN index
+- GpuCache: BEFORE TRUNCATE trigger is not needed on PG13
+- GpuCache: add corruption state if failed on redo-log-apply
+- Now PG-Strom can be built standalong (w/o heterodb-extra)
+- various bug fixes
+
+* Wed Jun 30 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.0-2
+- Built for CUDA11.4
+
+* Tue Jun 29 2021 KaiGai Kohei <kaigai@heterodb.com> - 3.0-1
+- several PostGIS functions are added for GPU execution
+- GiST-index support was added for GpuJoin
+- GpuCache was added for small data workloads
+- experimental support of NVIDIA GPUDirect Storage
+- support of custom GPU types/functions with 3rd party modules
+- pg2arrow/arrow_fdw support wider Arrow files than PG limit
+- pcap2arrow was added to capture network packets as Arrow files
+- experimental support of 8bit-integer type (int1)
+- add support of Ampere GPUs (A100) and CUDA11.3
+- add support of PostgreSQL 13.x, drop support of PostgreSQL 10.x
+- add support of ScaleFlux CSD drives as source of GPUDirect SQL
+- error reports in GPU kernels were more human readable
+- ...and miscellaneous improvement and fix various bugs
+
+* Tue Mar 24 2020 KaiGai Kohei <kaigai@heterodb.com> - 2.3-1
+- GpuJoin supports parallel execution on inner hash/heap table.
+- Partition-wise GpuJoin was refactored for better query plan.
+- Arrow_Fdw now supports INSERT/TRUNCATE commands.
+- mysql2arrow was added, for collaboration with MySQL database.
+- CuPy_Strom enables to share data frame between DB and Python.
+- PL/CUDA was deprecated, CuPy + CuPy_Strom can do same jobs.
+- Gstore_Fdw was deprecated, Arrow_Fdw is successor
+
+* Wed Dec 25 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2-2
+- support of RHEL8/CentOS8
+- pg2arrow supports the latest Arrow 0.15 format; upcoming 1.0
+- add support of ANALYZE on arrow_fdw
+- PostgreSQL v9.6 is dropped from the supported list.
+
+* Thu Sep  5 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.2-1
+- fixes of various bugs
+- support of Apache Arrow columnar store (Arrow_Fdw)
+- pg2arrow utility command is added
+- support of JSONB data type
+- pre-built GPU binary for quick code compilation/optimization
+- support of nvme_strom v2; enables to handle cached disk pages
+- asymmetric partition-wise JOIN support
+
+* Wed Feb 20 2019 KaiGai Kohei <kaigai@heterodb.com> - 2.1-1
+- hotfixes for various bugs
+- Device Numeric is now based on 128bit
+- Various groundwork to support Apache Arrow in the next version
+
+* Thu Dec 27 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-181227
+- hotfixes for various bugs
+- Add PostgreSQL 11 support
+- columnar cache was removed
+- Gstore_Fdw can be used for source relation of SELECT, with GpuSort
+- add partitioning and multi-GPUs support
+- PL/CUDA design revised
+
+* Thu Jul 12 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-180712
+- hotfixes for various bugs
+- add BRIN index support
+
+* Thu Jun  7 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-180607
+- hotfixes for various bugs
+- add partition-wise GpuJoin/GpuPreAgg (experimental)
+
+* Tue May 15 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-180515
+- hotfixes for various bugs
+
+* Mon Apr 30 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-180430
+- hotfixes for reported bugs
+- CUDA C code builder is re-designed as background worker, instead of
+  the worker thread of GpuContext.
+
+* Tue Apr 17 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-1
+- PG-Strom v2.0 release
+
+* Sat Jan 20 2018 KaiGai Kohei <kaigai@heterodb.com> - 1.9-180120
+- initial RPM specfile

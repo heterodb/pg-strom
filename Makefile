@@ -17,14 +17,13 @@ __SOURCEDIR = $(shell rpmbuild -E %{_sourcedir})
 __SPECDIR = $(shell rpmbuild -E %{_specdir})
 __RPMDIR = $(shell rpmbuild -E %{_rpmdir})/$(__ARCH)
 __SRPMDIR = $(shell rpmbuild -E %{_srcrpmdir})
-__SPECFILE = $(__SPECDIR)/pg_strom-PG$(PG_MAJORVERSION).spec
+__SPECFILE = $(__SPECDIR)/pg_strom.spec
 
 rpm: rpm-pg_strom
 
 all: rpm-pg_strom rpm-mysql2arrow rpm-pcap2arrow
 
 __precheck_swdc:
-	rpm -qf `which $(PG_CONFIG)` || exit 1
 	(cd $(SWDC);	\
 	 test "`git remote get-url origin`" = "$(__SWDC_URL)" || exit 1; \
 	 git pull || exit 1)
@@ -32,24 +31,33 @@ __precheck_swdc:
 swdc: __precheck_swdc rpm-pg_strom
 	(PGSTROM_TGZ_FULLPATH="`realpath $(PGSTROM_TGZ)`";	\
 	 cd $(SWDC);						\
-	 RPM="`rpmspec -q --rpms $(__SPECFILE) | grep -v debug`.rpm"; \
+	 RPMS="`rpmspec -q --rpms $(__SPECFILE) | grep -v debuginfo`"; \
 	 DEST=docs/yum/$(__DIST)-$(__ARCH);		 	\
-	   rpmsign --addsign $(__RPMDIR)/$${RPM} && 		\
-	   mkdir -p $${DEST} &&					\
-	   install -m 644 $(__RPMDIR)/$${RPM} $${DEST} &&	\
-	   git add $${DEST}/$${RPM};				\
-	 RPM="`rpmspec -q --rpms $(__SPECFILE) | grep debuginfo`.rpm"; \
+	 mkdir -p $${DEST};					\
+	 for f in $$RPMS; do					\
+	   __file="$${f}.rpm";					\
+	   rpmsign --addsign "$(__RPMDIR)/$${__file}" &&	\
+	   install -m 644 "$(__RPMDIR)/$${__file}" $${DEST} &&	\
+	   git add "$${DEST}/$${__file}";			\
+	 done;							\
+	 RPMS="`rpmspec -q --rpms $(__SPECFILE) | grep debuginfo`";\
 	 DEST=docs/yum/$(__DIST)-debuginfo;			\
-	   rpmsign --addsign $(__RPMDIR)/$${RPM} &&		\
-	   mkdir -p $${DEST} &&					\
-	   install -m 644 $(__RPMDIR)/$${RPM} $${DEST} &&	\
-	   git add $${DEST}/$${RPM};				\
-	 RPM=`rpmspec -q --srpm $(__SPECFILE) | sed 's/$(__ARCH)/src.rpm/g'`; \
-	 DEST=docs/yum/$(__DIST)-source;				\
-	   rpmsign --addsign $(__SRPMDIR)/$${RPM} &&		\
-	   mkdir -p $${DEST} &&					\
-	   install -m 644 $(__SRPMDIR)/$${RPM} $${DEST} &&	\
-	   git add $${DEST}/$${RPM};				\
+	 mkdir -p $${DEST};					\
+	 for f in $$RPMS; do					\
+	   __file="$${f}.rpm";					\
+	   rpmsign --addsign "$(__RPMDIR)/$${__file}" &&	\
+	   install -m 644 "$(__RPMDIR)/$${__file}" $${DEST} &&	\
+	   git add "$${DEST}/$${__file}";			\
+	 done;							\
+	 RPMS="`rpmspec -q --srpm $(__SPECFILE)`";		\
+	 DEST=docs/yum/$(__DIST)-source;			\
+	 mkdir -p $${DEST};					\
+	 for f in $$RPMS; do					\
+	   __file="`echo $${f} | sed 's/$(__ARCH)/src.rpm/g'`" && \
+	   rpmsign --addsign "$(__SRPMDIR)/$${__file}" &&	\
+	   install -m 644 "$(__SRPMDIR)/$${__file}" $${DEST} &&	\
+	   git add "$${DEST}/$${__file}";			\
+	 done;							\
 	 install -m 644 $${PGSTROM_TGZ_FULLPATH} ./docs/tgz &&	\
 	   git add ./docs/tgz/$(PGSTROM_TGZ);			\
 	./update-index.sh)
@@ -58,21 +66,19 @@ tarball:
 	git archive --format=tar.gz \
 	            --prefix=$(__PGSTROM_TGZ)/ \
 	            -o $(PGSTROM_TGZ) $(GITHASH) \
-	            LICENSE Makefile Makefile.common \
+	            LICENSE README.md Makefile Makefile.common \
 	            src arrow-tools test/ssbm
 
 rpm-pg_strom: tarball
 	cp -f $(PGSTROM_TGZ) $(__SOURCEDIR) || exit 1
 	git show --format=raw $(GITHASH):files/systemd-pg_strom.conf > \
 		$(__SOURCEDIR)/systemd-pg_strom.conf || exit 1
-	(git show --format=raw $(GITHASH):files/pg_strom.spec.in |	\
+	git show --format=raw $(GITHASH):files/pg_strom.spec.in |	\
 		sed -e "s/@@STROM_VERSION@@/$(VERSION)/g"		\
 		    -e "s/@@STROM_RELEASE@@/$(RELEASE)/g"		\
-		    -e "s/@@STROM_TARBALL@@/$(__PGSTROM_TGZ)/g"	\
-		    -e "s/@@PGSTROM_GITHASH@@/$(GITHASH)/g"		\
-		    -e "s/@@PGSQL_VERSION@@/$(PG_MAJORVERSION)/g";\
-	 git show --format=raw $(GITHASH):CHANGELOG) > $(__SPECFILE)
-	rpmbuild -ba $(__SPECFILE) --undefine=_debugsource_packages
+		    -e "s/@@STROM_TARBALL@@/$(__PGSTROM_TGZ)/g"		\
+		    -e "s/@@PGSTROM_GITHASH@@/$(GITHASH)/g" > $(__SPECFILE)
+	rpmbuild -ba $(__SPECFILE)
 
 rpm-mysql2arrow: tarball
 	cp -f $(PGSTROM_TGZ) $(__SOURCEDIR) || exit 1
@@ -85,8 +91,7 @@ rpm-mysql2arrow: tarball
 	git show --format=raw $(GITHASH):files/pg_strom.spec.in |	\
 		awk 'BEGIN {flag=0;} /^%changelog$$/{flag=1; next;} { if (flag>0) print; }' >> \
 		$(__SPECDIR)/mysql2arrow.spec
-	rpmbuild -ba $(__SPECDIR)/mysql2arrow.spec			\
-		--undefine=_debugsource_packages
+	rpmbuild -ba $(__SPECDIR)/mysql2arrow.spec
 
 rpm-pcap2arrow: tarball
 	cp -f $(PGSTROM_TGZ) $(__SOURCEDIR) || exit 1
@@ -99,5 +104,4 @@ rpm-pcap2arrow: tarball
 	git show --format=raw $(GITHASH):files/pg_strom.spec.in |	\
 		awk 'BEGIN {flag=0;} /^%changelog$$/{flag=1; next;} { if (flag>0) print; }' >> \
 		$(__SPECDIR)/mysql2arrow.spec
-	rpmbuild -ba $(__SPECDIR)/pcap2arrow.spec			\
-		--undefine=_debugsource_packages
+	rpmbuild -ba $(__SPECDIR)/pcap2arrow.spec
