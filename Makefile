@@ -6,6 +6,7 @@
 include Makefile.common
 
 __PGSTROM_TGZ := pg_strom-$(PGSTROM_VERSION)
+PGSTROM_TAR   := $(__PGSTROM_TGZ).tar
 PGSTROM_TGZ   := $(__PGSTROM_TGZ).tar.gz
 
 SWDC ?= $(shell test -d ../swdc/.git && realpath ../swdc || echo /dev/null)
@@ -63,11 +64,22 @@ swdc: __precheck_swdc rpm-pg_strom
 	./update-index.sh)
 
 tarball:
-	git archive --format=tar.gz \
-	            --prefix=$(__PGSTROM_TGZ)/ \
-	            -o $(PGSTROM_TGZ) $(GITHASH) \
-	            LICENSE README.md Makefile Makefile.common \
+	git archive --format=tar			\
+	            --prefix=$(__PGSTROM_TGZ)/		\
+	            -o $(PGSTROM_TAR) $(GITHASH)	\
+	            LICENSE README.md Makefile		\
 	            src arrow-tools test/ssbm
+	TARFILE=`realpath $(PGSTROM_TAR)` && 		\
+	TEMP=`mktemp -d` &&				\
+	mkdir -p $${TEMP}/$(__PGSTROM_TGZ) &&		\
+	git show --format=raw $(GITHASH):Makefile.common \
+	| awk '/^GITHASH_IF_NOT_GIVEN/{ print "GITHASH_IF_NOT_GIVEN := $(GITHASH)"; next } { print }' \
+	> $${TEMP}/$(__PGSTROM_TGZ)/Makefile.common &&	\
+	pushd $${TEMP} &&				\
+	echo $${TARFILE} &&				\
+	tar rf $${TARFILE} $(__PGSTROM_TGZ)/Makefile.common && \
+	popd &&						\
+	gzip -f $(PGSTROM_TAR)
 
 rpm-pg_strom: tarball
 	cp -f $(PGSTROM_TGZ) $(__SOURCEDIR) || exit 1
