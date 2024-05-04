@@ -738,11 +738,12 @@ static void
 gpuservSetupFatbin(void)
 {
 	const char *fatbin_file = __setup_gpu_fatbin_filename();
-	const char *fatbin_dir = PGSHAREDIR "/pg_strom";
+	const char *fatbin_dir  = PGSHAREDIR "/pg_strom";
 	char	   *path;
-
+#ifdef WITH_FATBIN
 	if (!__validate_gpu_fatbin_file(fatbin_dir,
 									fatbin_file))
+#endif
 	{
 		fatbin_dir = PGSTROM_FATBIN_DIR;
 		if (!__validate_gpu_fatbin_file(fatbin_dir,

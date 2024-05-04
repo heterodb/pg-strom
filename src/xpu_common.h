@@ -409,32 +409,6 @@ typedef struct {
 	char		message[KERN_ERRORBUF_MESSAGE_LEN+1];
 } kern_errorbuf;
 
-#if 1
-/*
- * kern_variable
- */
-#define KVAR_CLASS__NULL		(-1)
-#define KVAR_CLASS__INLINE		(-2)
-#define KVAR_CLASS__VARLENA		(-3)
-#define KVAR_CLASS__XPU_DATUM	(-4)
-
-typedef union
-{
-	int8_t		i8;
-	uint8_t		u8;
-	int16_t		i16;
-	uint16_t	u16;
-	int32_t		i32;
-	uint32_t	u32;
-	int64_t		i64;
-	uint64_t	u64;
-	float2_t	fp16;
-	float4_t	fp32;
-	float8_t	fp64;
-	void	   *ptr;
-} kern_variable;
-#endif
-
 /*
  * kern_context - a set of run-time information
  */
@@ -663,6 +637,8 @@ typedef struct kern_colmeta		kern_colmeta;
 #define KDS_FORMAT_BLOCK		'b'		/* raw blocks for direct loading */
 #define KDS_FORMAT_COLUMN		'c'		/* columnar based storage format */
 #define KDS_FORMAT_ARROW		'a'		/* apache arrow format */
+#define KDS_FORMAT_ROW64		'R'		/* normal heap-tuples (64bit) */
+#define KDS_FORMAT_HASH64		'H'		/* inner hash table for HashJoin (64bit) */
 
 struct kern_data_store {
 	uint64_t		length;		/* length of this data-store */
@@ -719,6 +695,34 @@ typedef struct kern_data_store		kern_data_store;
  * | | Buffer for        |  |  |
  * | | kern_tupitem,  <--------+
  * | | or kern_hashitem  |  | packed 'usage'
+ * | v                   |  v
+ * +---------------------+----
+ *
+ * Layout of KDS_FORMAT_ROW64 / KDS_FORMAT_HASH64
+ *
+ * +---------------------+
+ * | kern_data_store     |
+ * |        :            |
+ * | +-------------------+
+ * | | kern_colmeta      |
+ * | |   colmeta[...]    |
+ * +-+-------------------+  <-- KDS_BODY_ADDR(kds)
+ * | ^                   |
+ * | | Hash slots if any | (*) KDS_FORMAT_ROW always has 'hash_nslots' == 0,
+ * | | (uint64 * nslots) |     thus, this field is only for KDS_FORMAT_HASH64
+ * | v                   |
+ * +---------------------+
+ * | ^                   |
+ * | | Row index      o--------+  ((char *)kds + kds->length - row_index[i])
+ * | | (uint64 * nitems) |     |
+ * | v                   |     |
+ * +---------------------+     |
+ * |        :            |     |
+ * +---------------------+ --- |
+ * | ^                   |  ^  |
+ * | | Buffer for        |  |  |
+ * | | kern_tupitem,  <--------+
+ * | | or kern_hashitem64|  | packed 'usage'
  * | v                   |  v
  * +---------------------+----
  *
@@ -1148,12 +1152,13 @@ struct kern_tupitem
 typedef struct kern_tupitem		kern_tupitem;
 
 /*
- * kern_hashitem - individual items for KDS_FORMAT_HASH
+ * kern_hashitem - individual items for KDS_FORMAT_HASH / KDS_FORMAT_HASH64
  */
 struct kern_hashitem
 {
 	uint32_t		hash;		/* 32-bit hash value */
-	uint32_t		next;		/* offset of the next (PACKED) */
+	uint32_t		__padding__;/* unused */
+	uint64_t		next;		/* offset of the next (PACKED or 64bit) */
 	kern_tupitem	t;			/* HeapTuple of this entry */
 };
 typedef struct kern_hashitem	kern_hashitem;
@@ -1172,16 +1177,20 @@ KDS_BODY_ADDR(const kern_data_store *kds)
 	return (char *)kds + KDS_HEAD_LENGTH(kds);
 }
 
-/* access functions for KDS_FORMAT_ROW/HASH */
+/* ------------------------------------------------
+ *
+ * access functions for KDS_FORMAT_ROW/HASH
+ *
+ * ------------------------------------------------
+ */
 INLINE_FUNCTION(uint32_t *)
 KDS_GET_ROWINDEX(const kern_data_store *kds)
 {
-	Assert(kds->format == KDS_FORMAT_ROW ||
+	assert(kds->format == KDS_FORMAT_ROW ||
 		   kds->format == KDS_FORMAT_HASH);
 	return (uint32_t *)KDS_BODY_ADDR(kds) + kds->hash_nslots;
 }
 
-/* kern_tupitem by kds_index */
 INLINE_FUNCTION(kern_tupitem *)
 KDS_GET_TUPITEM(kern_data_store *kds, uint32_t kds_index)
 {
@@ -1194,6 +1203,12 @@ KDS_GET_TUPITEM(kern_data_store *kds, uint32_t kds_index)
 							- __kds_unpack(offset));
 }
 
+/* ------------------------------------------------
+ *
+ * access functions for KDS_FORMAT_HASH
+ *
+ * ------------------------------------------------
+ */
 INLINE_FUNCTION(uint32_t *)
 KDS_GET_HASHSLOT_BASE(const kern_data_store *kds)
 {
@@ -1249,7 +1264,94 @@ KDS_HASH_NEXT_ITEM(const kern_data_store *kds, uint32_t hnext_offset)
 	return NULL;
 }
 
-/* access macros for KDS_FORMAT_BLOCK */
+/* ------------------------------------------------
+ *
+ * access functions for KDS_FORMAT_ROW64/HASH64
+ *
+ * ------------------------------------------------ */
+INLINE_FUNCTION(uint64_t *)
+KDS_GET_ROWINDEX64(const kern_data_store *kds)
+{
+	assert(kds->format == KDS_FORMAT_ROW64 ||
+		   kds->format == KDS_FORMAT_HASH64);
+	return (uint64_t *)KDS_BODY_ADDR(kds) + kds->hash_nslots;
+}
+
+INLINE_FUNCTION(kern_tupitem *)
+KDS_GET_TUPITEM64(kern_data_store *kds, uint32_t kds_index)
+{
+	uint64_t	offset = __volatileRead(KDS_GET_ROWINDEX(kds) + kds_index);
+
+	if (!offset)
+		return NULL;
+	return (kern_tupitem *)((char *)kds + kds->length - offset);
+}
+
+/* ------------------------------------------------
+ *
+ * access functions for KDS_FORMAT_HASH64
+ *
+ * ------------------------------------------------
+ */
+INLINE_FUNCTION(uint64_t *)
+KDS_GET_HASHSLOT64_BASE(const kern_data_store *kds)
+{
+	assert(kds->format == KDS_FORMAT_HASH64 && kds->hash_nslots > 0);
+	return (uint64_t *)(KDS_BODY_ADDR(kds));
+}
+
+INLINE_FUNCTION(uint64_t *)
+KDS_GET_HASHSLOT64(const kern_data_store *kds, uint32_t hash)
+{
+	uint64_t   *hslot = KDS_GET_HASHSLOT64_BASE(kds);
+
+	return hslot + (hash % kds->hash_nslots);
+}
+
+INLINE_FUNCTION(bool)
+__KDS_HASH64_ITEM_CHECK_VALID(const kern_data_store *kds, kern_hashitem *hitem)
+{
+	char   *tail = (char *)kds + kds->length;
+	char   *head = (KDS_BODY_ADDR(kds) +
+					sizeof(uint64_t) * (kds->hash_nslots + kds->nitems));
+	return ((char *)hitem >= head &&
+			(char *)&hitem->t.htup + hitem->t.t_len <= tail);
+}
+
+INLINE_FUNCTION(kern_hashitem *)
+KDS_HASH64_FIRST_ITEM(const kern_data_store *kds, uint32_t hash)
+{
+	uint64_t   *hslot = KDS_GET_HASHSLOT64(kds, hash);
+	uint64_t	offset = __volatileRead(hslot);
+
+	if (offset != 0 && offset != ULONG_MAX)
+	{
+		kern_hashitem *hitem = (kern_hashitem *)
+			((char *)kds + kds->length - offset);
+		Assert(__KDS_HASH64_ITEM_CHECK_VALID(kds, hitem));
+		return hitem;
+	}
+	return NULL;
+}
+
+INLINE_FUNCTION(kern_hashitem *)
+KDS_HASH64_NEXT_ITEM(const kern_data_store *kds, uint32_t hnext_offset)
+{
+	if (hnext_offset != 0 && hnext_offset != ULONG_MAX)
+	{
+		kern_hashitem *hnext = (kern_hashitem *)
+			((char *)kds + kds->length - hnext_offset);
+		Assert(__KDS_HASH64_ITEM_CHECK_VALID(kds, hnext));
+		return hnext;
+	}
+	return NULL;
+}
+/* ------------------------------------------------
+ *
+ * access functions for KDS_FORMAT_BLOCK
+ *
+ * ------------------------------------------------
+ */
 #define KDS_BLOCK_BLCKNR(kds,block_id)					\
 	(((BlockNumber *)KDS_BODY_ADDR(kds))[block_id])
 #define KDS_BLOCK_PGPAGE(kds,block_id)					\
