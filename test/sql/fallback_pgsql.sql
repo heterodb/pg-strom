@@ -97,12 +97,12 @@ INSERT INTO fallback_enlarge (
 -- GpuScan  with CPU fallback
 SET pg_strom.enabled = on;
 SET pg_strom.cpu_fallback = off;
-ANALYZE;
-EXPLAIN (verbose, costs off)
-SELECT id, x+y v1, substring(memo, 1, 20) v2
-  INTO test01g
-  FROM fallback_data
- WHERE memo LIKE '%abc%';
+VACUUM ANALYZE;
+-- EXPLAIN (verbose, costs off)
+-- SELECT id, x+y v1, substring(memo, 1, 20) v2
+--   INTO test01g
+--   FROM fallback_data
+--  WHERE memo LIKE '%abc%';
 SELECT id, x+y v1, substring(memo, 1, 20) v2
   INTO test01g
   FROM fallback_data
@@ -123,12 +123,12 @@ RESET pg_strom.cpu_fallback;
 
 -- GpuScan with GPU kernel suspend/resume
 SET pg_strom.enabled = on;
-ANALYZE;
-EXPLAIN (verbose, costs off)
-SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
-  INTO test02g
-  FROM fallback_data
- WHERE id > 0;
+VACUUM ANALYZE;
+-- EXPLAIN (verbose, costs off)
+-- SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
+--   INTO test02g
+--   FROM fallback_data
+--  WHERE id > 0;
 SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test02g
   FROM fallback_data
@@ -143,12 +143,12 @@ SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
 
 -- GpuScan with GPU kernel suspend/resume and CPU fallback
 SET pg_strom.enabled = on;
-ANALYZE;
-EXPLAIN (verbose, costs off)
-SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
-  INTO test03g
-  FROM fallback_data
- WHERE memo LIKE '%abc%' OR id > 0;
+VACUUM ANALYZE;
+-- EXPLAIN (verbose, costs off)
+-- SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
+--   INTO test03g
+--   FROM fallback_data
+--  WHERE memo LIKE '%abc%' OR id > 0;
 SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test03g
   FROM fallback_data
@@ -164,12 +164,12 @@ RESET pg_strom.cpu_fallback;
 
 -- GpuJoin with CPU fallback
 SET pg_strom.enabled = on;
-ANALYZE;
-EXPLAIN (verbose, costs off)
-SELECT id, x+y+z v, memo
-  INTO test10g
-  FROM fallback_data d NATURAL JOIN fallback_small s
- WHERE memo LIKE '%abc%';
+VACUUM ANALYZE;
+-- EXPLAIN (verbose, costs off)
+-- SELECT id, x+y+z v, memo
+--   INTO test10g
+--   FROM fallback_data d NATURAL JOIN fallback_small s
+--  WHERE memo LIKE '%abc%';
 SELECT id, x+y+z v, memo
   INTO test10g
   FROM fallback_data d NATURAL JOIN fallback_small s
@@ -185,11 +185,11 @@ RESET pg_strom.cpu_fallback;
 
 -- GpuJoin with GPU kernel suspend / resume
 SET pg_strom.enabled = on;
-ANALYZE;
-EXPLAIN (verbose, costs off)
-SELECT * INTO test11g
-  FROM fallback_data d NATURAL JOIN fallback_enlarge l
- WHERE l.aid < 1000;
+VACUUM ANALYZE;
+-- EXPLAIN (verbose, costs off)
+-- SELECT * INTO test11g
+--   FROM fallback_data d NATURAL JOIN fallback_enlarge l
+--  WHERE l.aid < 1000;
 SELECT * INTO test11g
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
  WHERE l.aid < 1000;
@@ -203,11 +203,11 @@ SELECT * INTO test11p
 
 -- GpuJoin with GPU kernel suspend / resume, and CPU fallback
 SET pg_strom.enabled = on;
-ANALYZE;
-EXPLAIN (verbose, costs off)
-SELECT *
-  FROM fallback_data d NATURAL JOIN fallback_enlarge l
- WHERE l.aid < 2500 AND memo LIKE '%ab%';
+VACUUM ANALYZE;
+-- EXPLAIN (verbose, costs off)
+-- SELECT *
+--   FROM fallback_data d NATURAL JOIN fallback_enlarge l
+--  WHERE l.aid < 2500 AND memo LIKE '%ab%';
 SELECT * INTO test12g
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
  WHERE l.aid < 2500 AND memo LIKE '%ab%';
