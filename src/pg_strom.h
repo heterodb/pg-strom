@@ -20,6 +20,7 @@
 #define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
 
 #include "access/brin.h"
+#include "access/brin_revmap.h"
 #include "access/heapam.h"
 #include "access/genam.h"
 #include "access/reloptions.h"
@@ -63,6 +64,7 @@
 #include "common/hashfn.h"
 #include "common/int.h"
 #include "common/md5.h"
+#include "executor/nodeIndexscan.h"
 #include "executor/nodeSubplan.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
@@ -600,7 +602,6 @@ extern devfunc_info *devtype_lookup_compare_func(devtype_info *dtype, Oid coll_i
 extern codegen_context *create_codegen_context(PlannerInfo *root,
 											   CustomPath *cpath,
 											   pgstromPlanInfo *pp_info);
-extern bool		codegen_expression_equals(const void *__a, const void *__b);
 extern bytea   *codegen_build_scan_quals(codegen_context *context,
 										 List *dev_quals);
 extern bytea   *codegen_build_packed_joinquals(codegen_context *context,
@@ -939,6 +940,7 @@ extern bool		pgstrom_init_dpu_device(void);
 extern void		form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info);
 extern pgstromPlanInfo *deform_pgstrom_plan_info(CustomScan *cscan);
 extern pgstromPlanInfo *copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig);
+extern List	   *fixup_scanstate_expressions(ScanState *ss, List *exprs_list);
 extern List	   *fixup_expression_by_partition_leaf(PlannerInfo *root,
 												   Relids leaf_relids,
 												   List *clauses);

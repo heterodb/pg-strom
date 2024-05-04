@@ -1252,6 +1252,20 @@ sqldb_close_connection(void *sqldb_state)
 	mysql_close(mystate->conn);
 }
 
+char *
+sqldb_build_simple_command(void *sqldb_state,
+						   const char *simple_table_name,
+						   int num_worker_threads,
+						   size_t segment_sz)
+{
+	char   *buf = alloca(strlen(simple_table_name) + 100);
+
+	assert(num_worker_threads == 1);
+	sprintf(buf, "SELECT * FROM %s", simple_table_name);
+
+	return pstrdup(buf);
+}
+
 /*
  * PG12 or later replaces XXprintf by pg_XXprintf
  */

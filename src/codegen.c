@@ -1427,6 +1427,34 @@ __assign_codegen_kvar_defitem_subfields(codegen_kvar_defitem *kvdef)
 }
 
 /*
+ * equalVar - compares two Var nodes except for varnullingrels
+ *
+ * NOTE: Var-nodes in the reltarget of input-paths are not normalized
+ * to this level of GpuJoin, so it may have different varnullingrels
+ * even if they are identical Var-nodes. So, we should not use equal()
+ * here to compare Var-nodes.
+ */
+static inline bool
+equalVar(const void *__a, const void *__b)
+{
+	if (IsA(__a, Var) && IsA(__b, Var))
+	{
+		const Var  *a = __a;
+		const Var  *b = __b;
+
+		if (a->varno    == b->varno &&
+			a->varattno == b->varattno)
+		{
+			Assert(a->vartype   == b->vartype &&
+				   a->vartypmod == b->vartypmod &&
+				   a->varcollid == b->varcollid);
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
  * lookup_input_varnode_defitem
  */
 static codegen_kvar_defitem *
@@ -1464,7 +1492,7 @@ lookup_input_varnode_defitem(codegen_context *context,
 		resno = 1;
 		foreach (lc, target->exprs)
 		{
-			if (codegen_expression_equals(var, lfirst(lc)))
+			if (equalVar(var, lfirst(lc)))
 				goto found;
 			resno++;
 		}
@@ -1478,7 +1506,7 @@ found:
 		if (kvdef->kv_depth == depth &&
 			kvdef->kv_resno == resno)
 		{
-			Assert(codegen_expression_equals(var, kvdef->kv_expr));
+			Assert(equalVar(var, kvdef->kv_expr));
 			kvdef->kv_maxref = Max(kvdef->kv_maxref, curr_depth);
 			return kvdef;
 		}
@@ -1551,7 +1579,7 @@ __try_inject_temporary_expression(codegen_context *context,
 	{
 		kvdef = lfirst(lc);
 
-		if (codegen_expression_equals(expr, kvdef->kv_expr))
+		if (equal(expr, kvdef->kv_expr))
 			goto found;
 	}
 
@@ -2642,311 +2670,6 @@ codegen_expression_walker(codegen_context *context,
 			__Elog("not a supported expression type: %s", nodeToString(expr));
 	}
 	return -1;
-}
-
-/*
- * codegen_expression_equals
- *
- * it is sub-set of equal() because of Var::varnullingrels, but only supports
- * expression nodes supported by the device code
- */
-bool
-codegen_expression_equals(const void *__a, const void *__b)
-{
-	if (__a == __b)
-		return true;	/* including if (__a == NULL && __b == NULL) */
-	if (__a == NULL || __b == NULL)
-		return false;	/* either one is NULL? */
-	if (nodeTag(__a) != nodeTag(__b))
-		return false;
-
-	switch (nodeTag(__a))
-	{
-		case T_List:
-			{
-				const List *list1 = __a;
-				const List *list2 = __b;
-				ListCell   *lc1, *lc2;
-
-				if (list_length(list1) == list_length(list2))
-				{
-					forboth (lc1, list1,
-							 lc2, list2)
-					{
-						if (!codegen_expression_equals(lfirst(lc1),
-													   lfirst(lc2)))
-							return false;
-					}
-					return true;
-				}
-			}
-			break;
-
-		case T_Const:
-			{
-				const Const	*a = __a;
-				const Const *b = __b;
-
-				if (a->consttype == b->consttype &&
-					a->consttypmod == b->consttypmod &&
-					a->constcollid == b->constcollid &&
-					a->constlen    == b->constlen &&
-					a->constisnull == b->constisnull &&
-					a->constbyval  == b->constbyval)
-				{
-					if (a->constisnull)
-						return true;
-					return  datumIsEqual(a->constvalue,
-										 b->constvalue,
-										 a->constbyval,
-										 a->constlen);
-				}
-			}
-			break;
-
-		case T_Param:
-			{
-				const Param *a = __a;
-				const Param *b = __b;
-
-				if (a->paramkind == b->paramkind &&
-					a->paramid   == b->paramid &&
-					a->paramtype == b->paramtype &&
-					a->paramtypmod == b->paramtypmod &&
-					a->paramcollid == b->paramcollid)
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_Var:
-			{
-				const Var  *a = __a;
-				const Var  *b = __b;
-
-				if (a->varno       == b->varno &&
-					a->varattno    == b->varattno &&
-					a->vartype     == b->vartype &&
-					a->vartypmod   == b->vartypmod &&
-					a->varcollid   == b->varcollid &&
-					a->varlevelsup == b->varlevelsup)
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_FuncExpr:
-			{
-				const FuncExpr *a = __a;
-				const FuncExpr *b = __b;
-
-				if (a->funcid         == b->funcid &&
-					a->funcresulttype == b->funcresulttype &&
-					a->funcretset     == b->funcretset &&
-					a->funcvariadic   == b->funcvariadic &&
-					a->funccollid     == b->funccollid &&
-					a->inputcollid    == b->inputcollid &&
-					codegen_expression_equals(a->args, b->args))
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_OpExpr:
-		case T_DistinctExpr:
-			{
-				const OpExpr   *a = __a;
-				const OpExpr   *b = __b;
-
-				if (a->opno         == b->opno &&
-					(a->opfuncid == 0 ||
-					 b->opfuncid == 0 ||
-					 a->opfuncid == b->opfuncid) &&
-					a->opresulttype == b->opresulttype &&
-					a->opretset     == b->opretset &&
-					a->opcollid     == b->opcollid &&
-					a->inputcollid  == b->inputcollid &&
-					codegen_expression_equals(a->args, b->args))
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_BoolExpr:
-			{
-				const BoolExpr *a = __a;
-				const BoolExpr *b = __b;
-
-				if (a->boolop == b->boolop &&
-					codegen_expression_equals(a->args, b->args))
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_NullTest:
-			{
-				const NullTest *a = __a;
-				const NullTest *b = __b;
-
-				if (a->nulltesttype == b->nulltesttype &&
-					a->argisrow     == b->argisrow &&
-					codegen_expression_equals(a->arg, b->arg))
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_BooleanTest:
-			{
-				const BooleanTest *a = __a;
-				const BooleanTest *b = __b;
-
-				if (a->booltesttype == b->booltesttype &&
-					codegen_expression_equals(a->arg, b->arg))
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_CoerceViaIO:
-			{
-				const CoerceViaIO *a = __a;
-				const CoerceViaIO *b = __b;
-
-				if (a->resulttype   == b->resulttype &&
-					a->resultcollid == b->resultcollid &&
-					codegen_expression_equals(a->arg, b->arg))
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_CoalesceExpr:
-			{
-				const CoalesceExpr *a = __a;
-				const CoalesceExpr *b = __b;
-
-				if (a->coalescetype   == b->coalescetype &&
-					a->coalescecollid == b->coalescecollid &&
-					codegen_expression_equals(a->args, b->args))
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_MinMaxExpr:
-			{
-				const MinMaxExpr *a = __a;
-				const MinMaxExpr *b = __b;
-
-				if (a->minmaxtype == b->minmaxtype &&
-					a->minmaxcollid == b->minmaxcollid &&
-					a->inputcollid == b->inputcollid &&
-					a->op == b->op &&
-					codegen_expression_equals(a->args, b->args))
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_RelabelType:
-        	{
-				const RelabelType *a = __a;
-				const RelabelType *b = __b;
-
-				if (a->resulttype == b->resulttype &&
-					a->resulttypmod == b->resulttypmod &&
-					a->resultcollid == b->resultcollid &&
-					codegen_expression_equals(a->arg, b->arg))
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_CaseExpr:
-			{
-				const CaseExpr *a = __a;
-				const CaseExpr *b = __b;
-
-				if (a->casetype == b->casetype &&
-					a->casecollid == b->casecollid &&
-					codegen_expression_equals(a->arg, b->arg) &&
-					codegen_expression_equals(a->args, b->args) &&
-					codegen_expression_equals(a->defresult, b->defresult))
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_CaseWhen:
-			{
-				const CaseWhen *a = __a;
-				const CaseWhen *b = __b;
-
-				if (codegen_expression_equals(a->expr, b->expr) &&
-					codegen_expression_equals(a->result, b->result))
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_CaseTestExpr:
-			{
-				const CaseTestExpr *a = __a;
-				const CaseTestExpr *b = __b;
-
-				if (a->typeId    == b->typeId &&
-					a->typeMod   == b->typeMod &&
-					a->collation == b->collation)
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_ScalarArrayOpExpr:
-			{
-				const ScalarArrayOpExpr *a = __a;
-				const ScalarArrayOpExpr *b = __b;
-
-				if (a->opno == b->opno &&
-					(a->opfuncid == 0 ||
-					 b->opfuncid == 0 ||
-					 a->opfuncid == b->opfuncid) &&
-					(a->hashfuncid == 0 ||
-					 b->hashfuncid == 0 ||
-					 a->hashfuncid == b->hashfuncid) &&
-					(a->negfuncid == 0 ||
-					 b->negfuncid == 0 ||
-					 a->negfuncid == b->negfuncid) &&
-					a->useOr == b->useOr &&
-					a->inputcollid == b->inputcollid &&
-					codegen_expression_equals(a->args, b->args))
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_CoerceToDomain:
-		default:
-			break;
-	}
-	return false;
 }
 #undef __Elog
 

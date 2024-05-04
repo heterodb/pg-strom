@@ -1060,6 +1060,7 @@ execInitArrowStatsHint(ScanState *ss, List *outer_quals, Bitmapset *stat_attrs)
 	Expr		   *eval_expr;
 	ListCell	   *lc;
 
+	outer_quals = fixup_scanstate_expressions(ss, outer_quals);
 	as_hint = palloc0(sizeof(arrowStatsHint));
 	as_hint->stat_attrs = stat_attrs;
 	foreach (lc, outer_quals)
@@ -2773,6 +2774,9 @@ ArrowGetForeignPaths(PlannerInfo *root,
 									NIL,	/* no pathkeys */
 									required_outer,
 									NULL,	/* no extra plan */
+#if PG_VERSION_NUM >= 170000
+									NIL,	/* no restrict-info of Join push-down */
+#endif
 									NIL);	/* no particular private */
 	cost_arrow_fdw_seqscan(&fpath->path,
 						   root,
@@ -2800,6 +2804,9 @@ ArrowGetForeignPaths(PlannerInfo *root,
 										NIL,	/* no pathkeys */
 										required_outer,
 										NULL,	/* no extra plan */
+#if PG_VERSION_NUM >= 170000
+										NIL,	/* no restrict-info of Join push-down */
+#endif
 										NIL);	/* no particular private */
 		fpath->path.parallel_aware = true;
 		cost_arrow_fdw_seqscan(&fpath->path,

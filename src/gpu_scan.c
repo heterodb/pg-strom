@@ -611,15 +611,9 @@ __gpuscan_build_projection_expr(List *tlist_dev,
 {
 	ListCell   *lc;
 
-	if (!node)
+	if (!node || tlist_member((Expr *)node, tlist_dev))
 		return tlist_dev;
-	foreach (lc, tlist_dev)
-	{
-		TargetEntry	   *tle = lfirst(lc);
 
-		if (codegen_expression_equals(node, tle->expr))
-			return tlist_dev;
-	}
 	if (IsA(node, Var) ||
 		pgstrom_xpu_expression((Expr *)node,
 							   xpu_task_flags,

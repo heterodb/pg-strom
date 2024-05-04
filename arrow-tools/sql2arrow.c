@@ -19,6 +19,7 @@
 #include <time.h>
 
 /* command options */
+static char	   *simple_table_name = NULL;
 static char	   *sqldb_command = NULL;
 static char	   *output_filename = NULL;
 static char	   *append_filename = NULL;
@@ -474,6 +475,32 @@ parseNestLoopOption(const char *command, bool outer_join)
 }
 #endif	/* __PG2ARROW__ */
 
+int
+parseParallelDistKeys(const char *parallel_dist_keys, const char *delim)
+{
+	char   *temp = pstrdup(parallel_dist_keys);
+	char   *tok, *pos;
+	int		nitems = 0;
+	int		nrooms = 25;
+
+	worker_dist_keys = palloc0(sizeof(const char *) * nrooms);
+	for (tok = strtok_r(temp, delim, &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL, delim, &pos))
+	{
+		tok = __trim(tok);
+
+		if (nitems >= nrooms)
+		{
+			nrooms += nrooms;
+			worker_dist_keys = repalloc(worker_dist_keys,
+										sizeof(const char *) * nrooms);
+		}
+		worker_dist_keys[nitems++] = tok;
+	}
+	return nitems;
+}
+
 static bool
 __enable_field_stats(SQLfield *field)
 {
@@ -647,8 +674,6 @@ parse_options(int argc, char * const argv[])
 		{NULL, 0, NULL, 0},
 	};
 	int			c;
-	bool		meet_command = false;
-	bool		meet_table = false;
 	int			password_prompt = 0;
 	userConfigOption *last_user_config = NULL;
 	nestLoopOption *last_nest_loop __attribute__((unused)) = NULL;
@@ -672,27 +697,22 @@ parse_options(int argc, char * const argv[])
 				break;
 
 			case 'c':
-				if (meet_command)
+				if (sqldb_command)
 					Elog("-c option was supplied twice");
-				if (meet_table)
+				if (simple_table_name)
 					Elog("-c and -t options are exclusive");
 				if (strncmp(optarg, "file://", 7) == 0)
 					sqldb_command = read_sql_command_from_file(optarg + 7);
 				else
-					sqldb_command = optarg;
-				meet_command = true;
+					sqldb_command = __trim(optarg);
 				break;
 
 			case 't':
-				if (meet_table)
+				if (simple_table_name)
 					Elog("-t option was supplied twice");
-				if (meet_command)
+				if (sqldb_command)
 					Elog("-c and -t options are exclusive");
-				sqldb_command = malloc(100 + strlen(optarg));
-				if (!sqldb_command)
-					Elog("out of memory");
-				sprintf(sqldb_command, "SELECT * FROM %s", optarg);
-				meet_table = true;
+				simple_table_name = __trim(optarg);
 				break;
 
 			case 'o':
@@ -894,69 +914,57 @@ parse_options(int argc, char * const argv[])
 			Elog("--dump option is exclusive with -c, -t, -o and --append");
 		return;
 	}
-	if (!sqldb_command)
+	if (!simple_table_name &&!sqldb_command)
 		Elog("Neither -c nor -t options are supplied");
-
-	/*
-	 * The 'sqldb_command' must contains $(WORKER_ID) and $(N_WORKERS).
-	 */
+	assert((simple_table_name && !sqldb_command) ||
+		   (!simple_table_name && sqldb_command));
 	if (parallel_dist_keys)
 	{
-		char   *temp = pstrdup(parallel_dist_keys);
-		char   *tok, *pos;
-		int		nitems = 0;
-		int		nrooms = 25;
+		if (simple_table_name)
+			Elog("Unable to use -k|--parallel-keys with -t|--table, adopt -c|--command instead");
+		if (strstr(sqldb_command, "$(PARALLEL_KEY)") == NULL)
+			Elog("SQL command must contain $(PARALLEL_KEY) token");
 
-		assert(num_worker_threads == 0);
-		worker_dist_keys = palloc0(sizeof(const char *) * nrooms);
-		for (tok = strtok_r(temp, ",", &pos);
-			 tok != NULL;
-			 tok = strtok_r(NULL, ",", &pos))
-		{
-			tok = __trim(tok);
-
-			if (nitems >= nrooms)
-			{
-				nrooms += nrooms;
-				worker_dist_keys = repalloc(worker_dist_keys,
-											sizeof(const char *) * nrooms);
-			}
-			worker_dist_keys[nitems++] = tok;
-		}
-		num_worker_threads = nitems;
+		num_worker_threads = parseParallelDistKeys(parallel_dist_keys, ",");
 	}
-	else if (num_worker_threads == 0 || num_worker_threads == 1)
+	else if (sqldb_command)
 	{
-		if (strstr(sqldb_command, "$(WORKER_ID)") != NULL ||
-			strstr(sqldb_command, "$(N_WORKERS)") != NULL ||
-			strstr(sqldb_command, "$(PARALLEL_KEY)") != NULL)
-			Elog("Non-parallel SQL command should not use the reserved keywords: $(WORKER_ID), $(N_WORKERS) and $(PARALLEL_KEY)");
-		num_worker_threads = 1;
-	}
-	else
-	{
-		assert(num_worker_threads > 1);
-#ifdef __PG2ARROW__
-		if (meet_table)
+		assert(!simple_table_name);
+		if (num_worker_threads == 0 || num_worker_threads == 1)
 		{
-			char   *temp = alloca(strlen(sqldb_command) + 200);
-
-			assert(!meet_command);
-			sprintf(temp, "%s WHERE hashtid(ctid) %% $(N_WORKERS) = $(WORKER_ID)",
-					sqldb_command);
-			sqldb_command = pstrdup(temp);
+			if (strstr(sqldb_command, "$(WORKER_ID)") != NULL ||
+				strstr(sqldb_command, "$(N_WORKERS)") != NULL ||
+				strstr(sqldb_command, "$(PARALLEL_KEY)") != NULL)
+				Elog("Non-parallel SQL command should not use the reserved keywords: $(WORKER_ID), $(N_WORKERS) and $(PARALLEL_KEY)");
+			num_worker_threads = 1;
 		}
 		else
-#endif	/* __PG2ARROW__ */
 		{
+			assert(num_worker_threads > 1);
 			if (strstr(sqldb_command, "$(WORKER_ID)") == NULL ||
 				strstr(sqldb_command, "$(N_WORKERS)") == NULL)
 				Elog("The custom SQL command has to contains $(WORKER_ID) and $(N_WORKERS) to avoid data duplications.\n"
-					 "example)  SELECT * FROM my_table WHERE hashtid(ctid) %% $(N_WORKERS) = $(WORKER_ID)");
+					 "example) SELECT * FROM my_table WHERE my_id %% $(N_WORKERS) = $(WORKER_ID)");
 			if (strstr(sqldb_command, "$(PARALLEL_KEY)") != NULL)
-				Elog("-n|--num-workers does not support $(PARALLEL_KEY) macro.");
+				Elog("-n|--num-workers does not support $(PARALLEL_KEY) token.");
 		}
 	}
+	else
+	{
+		assert(simple_table_name);
+		if (num_worker_threads == 0)
+		{
+			/* -t TABLE without -n option */
+			num_worker_threads = 1;
+		}
+#ifndef __PG2ARROW__
+		else if (num_worker_threads > 1)
+		{
+			Elog("-t|--table with parallel execution is not supported");
+		}
+#endif
+	}
+	/* default segment size */
 	if (batch_segment_sz == 0)
 		batch_segment_sz = (1UL << 28);		/* 256MB in default */
 }
@@ -1254,6 +1262,17 @@ int main(int argc, char * const argv[])
 			Elog("failed on open('%s'): %m", append_filename);
 		readArrowFileDesc(append_fdesc, &af_info);
 		sql_dict_list = loadArrowDictionaryBatches(append_fdesc, &af_info);
+	}
+	/* build simple table-scan query command */
+	if (simple_table_name)
+	{
+		assert(!sqldb_command);
+		sqldb_command = sqldb_build_simple_command(sqldb_conn,
+												   simple_table_name,
+												   num_worker_threads,
+												   batch_segment_sz);
+		if (!sqldb_command)
+			Elog("out of memory");
 	}
 	/* begin SQL command execution */
 	main_command = sqldb_command_apply_worker_id(sqldb_command, 0);

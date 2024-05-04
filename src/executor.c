@@ -2059,7 +2059,7 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	pgstromSharedState *ps_state;
 	TableScanDesc scan = NULL;
 
-	Assert(!IsBackgroundWorker);
+	Assert(!AmBackgroundWorkerProcess());
 	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 		num_devs = numGpuDevAttrs;
 	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
