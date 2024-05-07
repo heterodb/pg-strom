@@ -1403,7 +1403,7 @@ __expandGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 		kds_new->length = length;
 
 		/* later falf */
-		sz = __kds_unpack(kds_old->usage);
+		sz = kds_old->__usage64;
 		memcpy((char *)kds_new + kds_new->length - sz,
 			   (char *)kds_old + kds_old->length - sz, sz);
 
@@ -1661,6 +1661,7 @@ gpuClientWriteBack(gpuClient  *gclient,
 	{
 		kern_data_store *kds = kds_array[i];
 		size_t		sz1, sz2, sz3;
+		size_t		head_sz;
 
 		if (kds->format == KDS_FORMAT_HASH)
 		{
@@ -1670,7 +1671,7 @@ gpuClientWriteBack(gpuClient  *gclient,
 			iov->iov_base = kds;
 			iov->iov_len  = sz1;
 
-			sz2 = MAXALIGN(sizeof(uint32_t) * kds->nitems);
+			sz2 = sizeof(uint64_t) * kds->nitems;
 			if (sz2 > 0)
 			{
 				iov = &iov_array[iovcnt++];
@@ -1678,7 +1679,17 @@ gpuClientWriteBack(gpuClient  *gclient,
 				iov->iov_len  = sz2;
 			}
 
-			sz3 = __kds_unpack(kds->usage);
+			/*
+			 * MEMO: When GPU Projection or similar fill up KDS-ROW/HASH,
+			 * it often increase kds->usage too much if no space left.
+			 * In this case, results are not written of course, however,
+			 * kds->usage is not reliable. So, we cut down the usege by
+			 * the tail of row-offset array.
+			 */
+			head_sz = (sz1 + sizeof(uint64_t) * (kds->hash_nslots +
+												 kds->nitems));
+			sz3 = Min(kds->__usage64,
+					  kds->length - head_sz);
 			if (sz3 > 0)
 			{
 				iov = &iov_array[iovcnt++];
@@ -1694,9 +1705,10 @@ gpuClientWriteBack(gpuClient  *gclient,
 		{
 			assert(kds->hash_nslots == 0);
 			sz1 = (KDS_HEAD_LENGTH(kds) +
-				   MAXALIGN(sizeof(uint32_t) * kds->nitems));
-			sz2 = __kds_unpack(kds->usage);
-			if (sz1 + sz2 == kds->length)
+				   MAXALIGN(sizeof(uint64_t) * kds->nitems));
+			/* see comment above */
+			sz2 = kds->__usage64;
+			if (sz1 + sz2 >= kds->length)
 			{
 				iov = &iov_array[iovcnt++];
 				iov->iov_base = kds;
@@ -1715,6 +1727,7 @@ gpuClientWriteBack(gpuClient  *gclient,
 					iov->iov_base = (char *)kds + kds->length - sz2;
 					iov->iov_len  = sz2;
 				}
+				/* fixup kds */
 				kds->length = (sz1 + sz2);
 			}
 		}

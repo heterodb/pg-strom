@@ -505,11 +505,11 @@ dump_tuple_desc(const TupleDesc tdesc)
 INLINE_FUNCTION(void)
 dump_kern_data_store(const kern_data_store *kds)
 {
-	fprintf(stderr, "kds %p { length=%lu, nitems=%u, usage=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
+	fprintf(stderr, "kds %p { length=%lu, usage=%lu, nitems=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
 			kds,
 			kds->length,
+			kds->__usage64,
 			kds->nitems,
-			kds->usage,
 			kds->ncols,
 			kds->format,
 			kds->has_varlena ? 't' : 'f',

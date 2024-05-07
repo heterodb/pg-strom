@@ -1938,6 +1938,9 @@ again:
 
 		nrooms = pg_atomic_read_u64(&ps_state->inners[i].inner_nitems);
 		usage  = pg_atomic_read_u64(&ps_state->inners[i].inner_usage);
+		if (nrooms >= UINT_MAX)
+			elog(ERROR, "GpuJoin: Inner Relation[%d] has %lu tuples, too large",
+				 i+1, nrooms);
 		if (h_kmrels)
 		{
 			kds = (kern_data_store *)((char *)h_kmrels + offset);
@@ -1951,15 +1954,15 @@ again:
 			/* Hash-Join */
 			uint32_t	nslots = Max(320, nrooms);
 
-			nbytes += (MAXALIGN(sizeof(uint32_t) * nrooms) +
-					   MAXALIGN(sizeof(uint32_t) * nslots) +
+			nbytes += (MAXALIGN(sizeof(uint64_t) * nrooms) +
+					   MAXALIGN(sizeof(uint64_t) * nslots) +
 					   MAXALIGN(usage));
 			if (h_kmrels)
 			{
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
 				kds->hash_nslots = nslots;
-				memset(KDS_GET_HASHSLOT_BASE(kds), 0, sizeof(uint32_t) * nslots);
+				memset(KDS_GET_HASHSLOT_BASE(kds), 0, sizeof(uint64_t) * nslots);
 			}
 			offset += nbytes;
 		}
@@ -1973,14 +1976,15 @@ again:
 			uint32_t	nslots = Max(320, nrooms);
 
 			/* 1st part - inner tuples indexed by ctid */
-			nbytes += (MAXALIGN(sizeof(uint32_t) * nrooms) +
-					   MAXALIGN(sizeof(uint32_t) * nslots) +
+			nbytes += (MAXALIGN(sizeof(uint64_t) * nrooms) +
+					   MAXALIGN(sizeof(uint64_t) * nslots) +
 					   MAXALIGN(usage));
 			if (h_kmrels)
 			{
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
 				kds->hash_nslots = nslots;
+				memset(KDS_GET_HASHSLOT_BASE(kds), 0, sizeof(uint64_t) * nslots);
 			}
 			offset += nbytes;
 
@@ -2024,7 +2028,7 @@ again:
 		else
 		{
 			/* Nested-Loop */
-			nbytes += (MAXALIGN(sizeof(uint32_t) * nrooms) +
+			nbytes += (MAXALIGN(sizeof(uint64_t) * nrooms) +
 					   MAXALIGN(usage));
 			if (h_kmrels)
 			{
@@ -2082,14 +2086,14 @@ static void
 __innerPreloadSetupHeapBuffer(kern_data_store *kds,
 							  pgstromTaskInnerState *istate,
 							  uint32_t base_nitems,
-							  uint32_t base_usage)
+							  uint64_t base_usage)
 {
-	uint32_t   *row_index = KDS_GET_ROWINDEX(kds);
+	uint64_t   *row_index = KDS_GET_ROWINDEX(kds);
 	uint32_t	rowid = base_nitems;
 	char	   *tail_pos = (char *)kds + kds->length;
-	char	   *curr_pos = tail_pos - __kds_unpack(base_usage);
+	char	   *curr_pos = (tail_pos - base_usage);
 	inner_preload_buffer *preload_buf = istate->preload_buffer;
-
+	
 	for (uint32_t index=0; index < preload_buf->nitems; index++)
 	{
 		HeapTuple	htup = preload_buf->rows[index].htup;
@@ -2104,7 +2108,7 @@ __innerPreloadSetupHeapBuffer(kern_data_store *kds,
 		memcpy(&titem->htup, htup->t_data, htup->t_len);
 		memcpy(&titem->htup.t_ctid, &htup->t_self, sizeof(ItemPointerData));
 
-		row_index[rowid++] = __kds_packed(tail_pos - curr_pos);
+		row_index[rowid++] = (tail_pos - curr_pos);
 	}
 }
 
@@ -2115,13 +2119,13 @@ static void
 __innerPreloadSetupHashBuffer(kern_data_store *kds,
 							  pgstromTaskInnerState *istate,
 							  uint32_t base_nitems,
-							  uint32_t base_usage)
+							  uint64_t base_usage)
 {
-	uint32_t   *row_index = KDS_GET_ROWINDEX(kds);
-	uint32_t   *hash_slot = KDS_GET_HASHSLOT_BASE(kds);
+	uint64_t   *row_index = KDS_GET_ROWINDEX(kds);
+	uint64_t   *hash_slot = KDS_GET_HASHSLOT_BASE(kds);
 	uint32_t	rowid = base_nitems;
 	char	   *tail_pos = (char *)kds + kds->length;
-	char	   *curr_pos = tail_pos - __kds_unpack(base_usage);
+	char	   *curr_pos = (tail_pos - base_usage);
 	inner_preload_buffer *preload_buf = istate->preload_buffer;
 
 	for (uint32_t index=0; index < preload_buf->nitems; index++)
@@ -2129,24 +2133,26 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 		HeapTuple	htup = preload_buf->rows[index].htup;
 		uint32_t	hash = preload_buf->rows[index].hash;
 		uint32_t	hindex = hash % kds->hash_nslots;
-		uint32_t	next, self;
+		uint64_t	next, self;
 		size_t		sz;
 		kern_hashitem *hitem;
 
 		sz = MAXALIGN(offsetof(kern_hashitem, t.htup) + htup->t_len);
 		curr_pos -= sz;
-		self = __kds_packed(tail_pos - curr_pos);
-		__atomic_exchange(&hash_slot[hindex], &self, &next,
-						  __ATOMIC_SEQ_CST);
+		self = (tail_pos - curr_pos);
+
+		next = __atomic_exchange_uint64(&hash_slot[hindex], self);
 		hitem = (kern_hashitem *)curr_pos;
-		hitem->hash = hash;
 		hitem->next = next;
+		hitem->hash = hash;
+		hitem->__padding__ = 0;
 		hitem->t.t_len = htup->t_len;
 		hitem->t.rowid = rowid;
 		memcpy(&hitem->t.htup, htup->t_data, htup->t_len);
 		memcpy(&hitem->t.htup.t_ctid, &htup->t_self, sizeof(ItemPointerData));
 
-		row_index[rowid++] = __kds_packed(tail_pos - (char *)&hitem->t);
+		row_index[rowid++] = (tail_pos - (char *)&hitem->t);
+		Assert(curr_pos >= (char *)kds + KDS_HEAD_LENGTH(kds) + sizeof(uint64_t) * (kds->hash_nslots + rowid));
 	}
 }
 
@@ -2274,25 +2280,22 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 					continue;
 
 				SpinLockAcquire(&ps_state->preload_mutex);
-				/*
-				 * Sanity checks - KDS must be less than 32GB because of 32-bit
-				 * offset design (it is always aligned to 64bit).
-				 */
-				if (KDS_HEAD_LENGTH(kds) +
-					MAXALIGN(sizeof(uint32_t) * (kds->hash_nslots +
-												 kds->nitems +
-												 preload_buf->nitems)) +
-					__kds_unpack(kds->usage) +
-					preload_buf->usage >= __KDS_LENGTH_LIMIT)
-				{
-					SpinLockRelease(&ps_state->preload_mutex);
-					elog(ERROR, "Inner-KDS was expanding too large");
-				}
 				base_nitems  = kds->nitems;
 				kds->nitems += preload_buf->nitems;
-				base_usage   = kds->usage;
-				kds->usage  += __kds_packed(preload_buf->usage);
+				base_usage   = kds->__usage64;
+				kds->__usage64 += preload_buf->usage;
 				SpinLockRelease(&ps_state->preload_mutex);
+
+				/* sanity checks */
+				if (base_nitems + preload_buf->nitems >= UINT_MAX)
+					elog(ERROR, "GpuJoin: inner relation has %lu tuples, too large",
+						 base_nitems + preload_buf->nitems);
+				Assert(KDS_HEAD_LENGTH(kds) +
+					   MAXALIGN(sizeof(uint64_t) * (kds->hash_nslots +
+													base_nitems +
+													preload_buf->nitems)) +
+					   base_usage +
+					   preload_buf->usage <= kds->length);
 
 				if (kds->format == KDS_FORMAT_ROW)
 					__innerPreloadSetupHeapBuffer(kds, istate,

@@ -1,8 +1,8 @@
 \timing on
 
-SET max_parallel_workers_per_gather = 2;
+SET max_parallel_workers_per_gather = 3;
 SET pg_strom.enabled = on;
-SET pg_strom.max_async_tasks = 12;
+SET pg_strom.max_async_tasks = 18;
 
 --Q1_1
 

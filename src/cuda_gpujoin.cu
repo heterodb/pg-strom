@@ -22,7 +22,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 					int			depth,
 					char	   *src_kvecs_buffer,
 					char	   *dst_kvecs_buffer,
-					uint32_t   &l_state,
+					uint64_t   &l_state,
 					bool	   &matched)
 {
 	const kern_expression *kexp;
@@ -44,7 +44,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 	}
 
 	if (__syncthreads_count(l_state < kds_heap->nitems) == 0 &&
-		(!left_outer || __syncthreads_count(l_state != UINT_MAX) == 0))
+		(!left_outer || __syncthreads_count(l_state != ULONG_MAX) == 0))
 	{
 		/*
 		 * OK, all the threads in this block reached to end of the inner
@@ -90,12 +90,12 @@ execGpuJoinNestLoop(kern_context *kcxt,
 		if (index < kds_heap->nitems)
 		{
 			kern_tupitem *tupitem;
-			uint32_t	offset = KDS_GET_ROWINDEX(kds_heap)[index];
+			uint64_t	offset = KDS_GET_ROWINDEX(kds_heap)[index];
 			xpu_int4_t	status;
 
-			tupitem = (kern_tupitem *)((char *)kds_heap +
-									   kds_heap->length -
-									   __kds_unpack(offset));
+			tupitem = (kern_tupitem *)((char *)kds_heap
+									   + kds_heap->length
+									   - offset);
 			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, &tupitem->htup);
 			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
@@ -119,16 +119,16 @@ execGpuJoinNestLoop(kern_context *kcxt,
 			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, NULL);
 			tuple_is_valid = true;
-			l_state = UINT_MAX;
+			l_state = ULONG_MAX;
 		}
 		else
 		{
-			l_state = UINT_MAX;
+			l_state = ULONG_MAX;
 		}
 	}
 	else
 	{
-		l_state = UINT_MAX;
+		l_state = ULONG_MAX;
 	}
 	/* error checks */
 	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
@@ -169,7 +169,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 					int			depth,
 					char	   *src_kvecs_buffer,
 					char	   *dst_kvecs_buffer,
-					uint32_t   &l_state,
+					uint64_t   &l_state,
 					bool	   &matched)
 {
 	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
@@ -190,7 +190,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 		return depth+1;
 	}
 
-	if (__syncthreads_count(l_state != UINT_MAX) == 0)
+	if (__syncthreads_count(l_state != ULONG_MAX) == 0)
 	{
 		/*
 		 * OK, all the threads in this warp reached to the end of hash-slot
@@ -254,15 +254,16 @@ execGpuJoinHashJoin(kern_context *kcxt,
 		}
 		else
 		{
-			l_state = UINT_MAX;
+			l_state = ULONG_MAX;
 		}
 	}
-	else if (l_state != UINT_MAX)
+	else if (l_state != ULONG_MAX)
 	{
 		/* pick up the next one if any */
 		uint32_t	hash_value;
 
-		khitem = (kern_hashitem *)((char *)kds_hash + __kds_unpack(l_state));
+		khitem = (kern_hashitem *)((char *)kds_hash + l_state);
+		assert(__KDS_TUPITEM_CHECK_VALID(kds_hash, &khitem->t));
 		hash_value = khitem->hash;
 		for (khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next);
 			 khitem != NULL && khitem->hash != hash_value;
@@ -292,19 +293,19 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			assert(khitem->t.rowid < kds_hash->nitems);
 			oj_map[khitem->t.rowid] = true;
 		}
-		l_state = __kds_packed((char *)khitem - (char *)kds_hash);
+		l_state = ((char *)khitem - (char *)kds_hash);
 	}
 	else
 	{
 		if (kmrels->chunks[depth-1].left_outer &&
-			l_state != UINT_MAX && !matched)
+			l_state != ULONG_MAX && !matched)
 		{
 			/* load NULL values on the inner portion */
 			 kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 			 ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, NULL);
 			 tuple_is_valid = true;
 		}
-		l_state = UINT_MAX;
+		l_state = ULONG_MAX;
 	}
 	/* error checks */
 	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
@@ -404,7 +405,7 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 					char	   *dst_kvecs_buffer,
 					const kern_expression *kexp_gist,
 					char	   *gist_kvecs_buffer,
-					uint32_t   &l_state,
+					uint64_t   &l_state,
 					bool       &matched)
 {
 	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
@@ -438,7 +439,7 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 	if (WARP_WRITE_POS(wp,gist_depth) >= WARP_READ_POS(wp,gist_depth) + get_local_size() ||
 		(wp->scan_done >= depth &&		/* is terminal case? */
 		 WARP_WRITE_POS(wp,depth-1) == WARP_READ_POS(wp,depth-1) &&
-		 __syncthreads_count(l_state != UINT_MAX) == 0))
+		 __syncthreads_count(l_state != ULONG_MAX) == 0))
 	{
 		/*
 		 * We already have 32 or more pending tuples; that is fetched by
@@ -492,7 +493,7 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		if (wp->scan_done >= depth &&
 			WARP_WRITE_POS(wp,depth-1) == WARP_READ_POS(wp,depth-1) &&
 			WARP_WRITE_POS(wp,gist_depth) <= WARP_READ_POS(wp,gist_depth) &&
-			__syncthreads_count(l_state != UINT_MAX) == 0)
+			__syncthreads_count(l_state != ULONG_MAX) == 0)
 		{
 			if (get_local_id() == 0)
 				wp->scan_done++;
@@ -501,7 +502,7 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		return depth;
 	}
 
-	if (__syncthreads_count(l_state != UINT_MAX) == 0)
+	if (__syncthreads_count(l_state != ULONG_MAX) == 0)
 	{
 		/*
 		 * OK, all the threads in this block reached to the end of the GiST
@@ -542,7 +543,7 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 	rd_pos = WARP_READ_POS(wp,depth-1) + get_local_id();
 	if (rd_pos < WARP_WRITE_POS(wp,depth-1))
 	{
-		if (l_state != UINT_MAX)
+		if (l_state != ULONG_MAX)
 		{
 			kcxt->kvecs_curr_buffer = src_kvecs_buffer;
 			kcxt->kvecs_curr_id = (rd_pos % KVEC_UNITSZ);
@@ -555,18 +556,18 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 	}
 	else
 	{
-		l_state = UINT_MAX;
+		l_state = ULONG_MAX;
 	}
 	/* error checks */
 	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
 	/* save the result on the destination buffer */
 	wr_pos = WARP_WRITE_POS(wp,gist_depth);
-	wr_pos += pgstrom_stair_sum_binary(l_state != UINT_MAX, &count);
+	wr_pos += pgstrom_stair_sum_binary(l_state != ULONG_MAX, &count);
 	if (get_local_id() == 0)
 		WARP_WRITE_POS(wp,gist_depth) += count;
 
-	if (l_state != UINT_MAX)
+	if (l_state != ULONG_MAX)
 	{
 		const kern_expression  *kexp_move
 			= SESSION_KEXP_MOVE_VARS(kcxt->session, gist_depth);
@@ -600,12 +601,12 @@ execGpuJoinProjection(kern_context *kcxt,
 	uint32_t	rd_pos = WARP_READ_POS(wp,n_rels);
 	uint32_t	count;
 	uint32_t	row_id;
-	int64_t		offset;
+	uint64_t	offset;
 	int			tupsz = 0;
 	uint32_t	total_sz = 0;
 	bool		try_suspend = false;
 	__shared__ uint32_t	base_rowid;
-	__shared__ uint32_t	base_usage;
+	__shared__ uint64_t	base_usage;
 
 	/*
 	 * The previous depth still may produce new tuples, and number of
@@ -635,33 +636,28 @@ execGpuJoinProjection(kern_context *kcxt,
 	offset = pgstrom_stair_sum_uint32(tupsz, &total_sz);
 	if (get_local_id() == 0)
 	{
-		union {
-			struct {
-				uint32_t	nitems;
-				uint32_t	usage;
-			} i;
-			uint64_t		v64;
-		} oldval, curval, newval;
+		uint64_t	__usage;
+		uint32_t	__nitems_old;
+		uint32_t	__nitems_cur;
+		uint32_t	__nitems_new;
 
-		curval.i.nitems = kds_dst->nitems;
-		curval.i.usage  = kds_dst->usage;
+		__usage = __atomic_add_uint64(&kds_dst->__usage64, total_sz);
+		__nitems_cur = __volatileRead(&kds_dst->nitems);
 		do {
-			newval = oldval = curval;
-			newval.i.nitems += count;
-			newval.i.usage  += __kds_packed(total_sz);
-
-			if (KDS_HEAD_LENGTH(kds_dst) +
-				MAXALIGN(sizeof(uint32_t) * newval.i.nitems) +
-				__kds_unpack(newval.i.usage) > kds_dst->length)
+			__nitems_old = __nitems_cur;
+			__nitems_new = __nitems_cur + count;
+			if (!__KDS_CHECK_OVERFLOW(kds_dst,
+									  __nitems_new,
+									  __usage + total_sz))
 			{
 				try_suspend = true;
 				break;
 			}
-		} while ((curval.v64 = atomicCAS((unsigned long long *)&kds_dst->nitems,
-										 oldval.v64,
-										 newval.v64)) != oldval.v64);
-		base_rowid = oldval.i.nitems;
-		base_usage = oldval.i.usage;
+		} while ((__nitems_cur = __atomic_cas_uint32(&kds_dst->nitems,
+													 __nitems_old,
+													 __nitems_new)) != __nitems_old);
+		base_rowid = __nitems_cur;
+		base_usage = __usage;
 	}
 	if (__syncthreads_count(try_suspend) > 0)
 	{
@@ -671,12 +667,12 @@ execGpuJoinProjection(kern_context *kcxt,
 	/* write out the tuple */
 	if (tupsz > 0)
 	{
-		kern_tupitem   *tupitem;
+		kern_tupitem *tupitem;
 
 		row_id += base_rowid;
-		offset += __kds_unpack(base_usage);
+		offset += base_usage;
 
-		KDS_GET_ROWINDEX(kds_dst)[row_id] = __kds_packed(offset);
+		KDS_GET_ROWINDEX(kds_dst)[row_id] = offset;
 		tupitem = (kern_tupitem *)
 			((char *)kds_dst + kds_dst->length - offset);
 		tupitem->rowid = row_id;
@@ -720,7 +716,7 @@ kern_gpujoin_main(kern_session_info *session,
 	kern_warp_context  *wp, *wp_saved;
 	char			   *kvec_buffer_base;
 	uint32_t			kvec_buffer_size;
-	uint32_t		   *l_state;
+	uint64_t		   *l_state;
 	bool			   *matched;
 	uint32_t			wp_base_sz;
 	uint32_t			n_rels = (kmrels ? kmrels->num_rels : 0);

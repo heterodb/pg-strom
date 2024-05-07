@@ -1619,12 +1619,12 @@ kern_extract_gist_tuple(kern_context *kcxt,
 	return __extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, NULL);
 }
 
-PUBLIC_FUNCTION(uint32_t)
+PUBLIC_FUNCTION(uint64_t)
 ExecGiSTIndexGetNext(kern_context *kcxt,
 					 const kern_data_store *kds_hash,
 					 const kern_data_store *kds_gist,
 					 const kern_expression *kexp_gist,
-					 uint32_t l_state)
+					 uint64_t l_state)
 {
 	PageHeaderData *gist_page;
 	ItemIdData	   *lpp;
@@ -1684,13 +1684,13 @@ restart:
 		if (!kern_extract_gist_tuple(kcxt, kds_gist, itup, vl_desc))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
-			return UINT_MAX;
+			return ULONG_MAX;
 		}
 		/* runs index-qualifier */
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg_gist, &status))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
-			return UINT_MAX;
+			return ULONG_MAX;
 		}
 		/* check result */
 		if (!XPU_DATUM_ISNULL(&status) && status.value)
@@ -1715,7 +1715,7 @@ restart:
 														  kcxt->kvars_slot[slot_id]))
 				{
 					assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
-					return UINT_MAX;
+					return ULONG_MAX;
 				}
 				/* returns the offset of the next line item pointer */
 				assert((((uintptr_t)lpp) & (sizeof(ItemIdData)-1)) == 0);
@@ -1737,7 +1737,7 @@ restart:
 		gist_page = KDS_BLOCK_PGPAGE(kds_gist, gist_page->pd_parent_blkno);
 		goto restart;
 	}
-	return UINT_MAX;	/* no more chance for this outer */
+	return ULONG_MAX;	/* no more chance for this outer */
 }
 
 PUBLIC_FUNCTION(bool)

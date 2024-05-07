@@ -276,8 +276,8 @@ setup_kern_data_store(kern_data_store *kds,
 
 	memset(kds, 0, offsetof(kern_data_store, colmeta));
 	kds->length		= length;
+	kds->__usage64	= 0;
 	kds->nitems		= 0;
-	kds->usage		= 0;
 	kds->ncols		= tupdesc->natts;
 	kds->format		= format;
 	kds->tdhasoid	= false;	/* PG12 removed 'oid' system column */
@@ -360,6 +360,7 @@ pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple htuple)
 {
 	MemoryContext memcxt = pts->css.ss.ps.state->es_query_cxt;
 	kern_tupitem *titem;
+	uint32_t	rowid;
 	size_t		sz;
 
 	if (!pts->fallback_tuples)
@@ -390,13 +391,15 @@ pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple htuple)
 		pts->fallback_tuples = repalloc_huge(pts->fallback_tuples,
 											 sizeof(off_t) * pts->fallback_nrooms);
 	}
+	rowid = pts->fallback_nitems++;
+
 	titem = (kern_tupitem *)(pts->fallback_buffer +
 							 pts->fallback_usage);
 	titem->t_len = htuple->t_len;
-	titem->rowid = pts->fallback_nitems++;
+	titem->rowid = rowid;
 	memcpy(&titem->htup, htuple->t_data, htuple->t_len);
 
-	pts->fallback_tuples[titem->rowid] = pts->fallback_usage;
+	pts->fallback_tuples[rowid] = pts->fallback_usage;
 	pts->fallback_usage += sz;
 }
 
@@ -638,7 +641,7 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	kds_nrooms = (PGSTROM_CHUNK_SIZE -
 				  KDS_HEAD_LENGTH(kds)) / (sizeof(BlockNumber) + BLCKSZ);
 	kds->nitems  = 0;
-	kds->usage   = 0;
+	kds->__usage64 = 0;
 	kds->block_offset = (KDS_HEAD_LENGTH(kds) +
 						 MAXALIGN(sizeof(BlockNumber) * kds_nrooms));
 	kds->block_nloaded = 0;
@@ -865,26 +868,27 @@ out:
 static bool
 __kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 {
-	uint32_t   *rowindex = KDS_GET_ROWINDEX(kds);
+	uint64_t   *rowindex = KDS_GET_ROWINDEX(kds);
 	HeapTuple	tuple;
-	size_t		sz, __usage;
+	size_t		__usage;
 	bool		should_free;
 	kern_tupitem *titem;
 
 	Assert(kds->format == KDS_FORMAT_ROW && kds->hash_nslots == 0);
 	tuple = ExecFetchSlotHeapTuple(slot, false, &should_free);
 
-	__usage = (__kds_unpack(kds->usage) +
+	__usage = (kds->__usage64 +
 			   MAXALIGN(offsetof(kern_tupitem, htup) + tuple->t_len));
-	sz = KDS_HEAD_LENGTH(kds) + sizeof(uint32_t) * (kds->nitems + 1) + __usage;
-	if (sz > kds->length)
+	if (KDS_HEAD_LENGTH(kds) +
+		sizeof(uint64_t) * (kds->nitems + 1) +
+		__usage > kds->length)
 		return false;	/* no more items! */
 	titem = (kern_tupitem *)((char *)kds + kds->length - __usage);
 	titem->t_len = tuple->t_len;
 	titem->rowid = kds->nitems;
 	memcpy(&titem->htup, tuple->t_data, tuple->t_len);
 	memcpy(&titem->htup.t_ctid, &tuple->t_self, sizeof(ItemPointerData));
-	kds->usage = rowindex[kds->nitems++] = __kds_packed(__usage);
+	kds->__usage64 = rowindex[kds->nitems++] = __usage;
 
 	if (should_free)
 		heap_freetuple(tuple);
@@ -908,7 +912,7 @@ pgstromRelScanChunkNormal(pgstromTaskState *pts,
 	enlargeStringInfo(&pts->xcmd_buf, 0);
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
 	kds->nitems = 0;
-	kds->usage  = 0;
+	kds->__usage64 = 0;
 	kds->length = PGSTROM_CHUNK_SIZE;
 
 	if (pts->br_state)
@@ -961,11 +965,11 @@ pgstromRelScanChunkNormal(pgstromTaskState *pts,
 
 	/* setup iovec that may skip the hole between row-index and tuples-buffer */
 	sz1 = ((KDS_BODY_ADDR(kds) - pts->xcmd_buf.data) +
-		   MAXALIGN(sizeof(uint32_t) * kds->nitems));
-	sz2 = __kds_unpack(kds->usage);
+		   MAXALIGN(sizeof(uint64_t) * kds->nitems));
+	sz2 = kds->__usage64;
 	Assert(sz1 + sz2 <= pts->xcmd_buf.len);
 	kds->length = (KDS_HEAD_LENGTH(kds) +
-				   MAXALIGN(sizeof(uint32_t) * kds->nitems) + sz2);
+				   MAXALIGN(sizeof(uint64_t) * kds->nitems) + sz2);
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
 	xcmd->length = sz1 + sz2;
 	xcmd_iov[0].iov_base = xcmd;
