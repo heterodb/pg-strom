@@ -2,18 +2,14 @@
 --- Test for CPU fallback and GPU kernel suspend / resume on PostgreSQL table
 ---
 SET pg_strom.regression_test_mode = on;
-
 SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_arrow_index_temp CASCADE;
 CREATE SCHEMA regtest_arrow_index_temp;
 RESET client_min_messages;
-
 SET search_path = regtest_arrow_index_temp,public;
-
 -- disables SeqScan and kernel source
 SET enable_seqscan = off;
 SET max_parallel_workers_per_gather = 0;
-
 -- prepare table
 -- test for CPU fallback / GPU kernel suspend/resume
 CREATE TABLE fallback_data (
@@ -25,6 +21,11 @@ CREATE TABLE fallback_data (
   memo  text
 );
 SELECT pgstrom.random_setseed(20190714);
+ random_setseed 
+----------------
+ 
+(1 row)
+
 INSERT INTO fallback_data (
   SELECT x, pgstrom.random_int(0.5, 1, 4000),
             CASE floor(random()*26)
@@ -71,7 +72,6 @@ UPDATE fallback_data
 UPDATE fallback_data
    SET memo = memo || '-' || memo || '-' || memo || '-' || memo
  WHERE id = 400001;
-
 CREATE TABLE fallback_small (
   aid   int,
   z     float,
@@ -81,7 +81,6 @@ INSERT INTO fallback_small (
   SELECT x, pgstrom.random_float(2,-1000.0,1000.0),
             md5(x::text)
     FROM generate_series(1,4000) x);
-
 CREATE TABLE fallback_enlarge (
   aid   int,
   z     float,
@@ -91,9 +90,6 @@ INSERT INTO fallback_enlarge (
   SELECT x / 5, pgstrom.random_float(2,-1000.0,1000.0),
             md5(x::text)
     FROM generate_series(1,20000) x);
-
-
-
 -- GpuScan  with CPU fallback
 SET pg_strom.enabled = on;
 SET pg_strom.cpu_fallback = off;
@@ -107,6 +103,7 @@ SELECT id, x+y v1, substring(memo, 1, 20) v2
   INTO test01g
   FROM fallback_data
  WHERE memo LIKE '%abc%';	-- error
+ERROR:  (xpu_textlib.h:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
 SET pg_strom.cpu_fallback = on;
 SELECT id, x+y v1, substring(memo, 1, 20) v2
   INTO test01g
@@ -118,9 +115,16 @@ SELECT id, x+y v1, substring(memo, 1, 20) v2
   FROM fallback_data
  WHERE memo LIKE '%abc%';
 (SELECT * FROM test01g EXCEPT SELECT * FROM test01p) ORDER BY id;
-(SELECT * FROM test01p EXCEPT SELECT * FROM test01g) ORDER BY id;
-RESET pg_strom.cpu_fallback;
+ id | v1 | v2 
+----+----+----
+(0 rows)
 
+(SELECT * FROM test01p EXCEPT SELECT * FROM test01g) ORDER BY id;
+ id | v1 | v2 
+----+----+----
+(0 rows)
+
+RESET pg_strom.cpu_fallback;
 -- GpuScan with GPU kernel suspend/resume
 SET pg_strom.enabled = on;
 VACUUM ANALYZE;
@@ -139,7 +143,14 @@ SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   FROM fallback_data
  WHERE id > 0;
 (SELECT * FROM test02g EXCEPT SELECT * FROM test02p) ORDER BY id;
+ id | a | b | c | d | e | f | g | h | memo 
+----+---+---+---+---+---+---+---+---+------
+(0 rows)
+
 (SELECT * FROM test02p EXCEPT SELECT * FROM test02g) ORDER BY id;
+ id | a | b | c | d | e | f | g | h | memo 
+----+---+---+---+---+---+---+---+---+------
+(0 rows)
 
 -- GpuScan with GPU kernel suspend/resume and CPU fallback
 SET pg_strom.enabled = on;
@@ -153,15 +164,23 @@ SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test03g
   FROM fallback_data
  WHERE memo LIKE '%abc%' OR id > 0;
+NOTICE:  (xpu_textlib.h:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
 SET pg_strom.enabled = off;
 SELECT id, x+y a, x-y b, x+1 c, y+1 d, x+2 e, y+2 f, x+3 g, y+4 h, memo
   INTO test03p
   FROM fallback_data
  WHERE memo LIKE '%abc%' OR id > 0;
 (SELECT * FROM test03g EXCEPT SELECT * FROM test03p) ORDER BY id;
-(SELECT * FROM test03p EXCEPT SELECT * FROM test03g) ORDER BY id;
-RESET pg_strom.cpu_fallback;
+ id | a | b | c | d | e | f | g | h | memo 
+----+---+---+---+---+---+---+---+---+------
+(0 rows)
 
+(SELECT * FROM test03p EXCEPT SELECT * FROM test03g) ORDER BY id;
+ id | a | b | c | d | e | f | g | h | memo 
+----+---+---+---+---+---+---+---+---+------
+(0 rows)
+
+RESET pg_strom.cpu_fallback;
 -- GpuJoin with CPU fallback
 SET pg_strom.enabled = on;
 VACUUM ANALYZE;
@@ -174,15 +193,23 @@ SELECT id, x+y+z v, memo
   INTO test10g
   FROM fallback_data d NATURAL JOIN fallback_small s
  WHERE memo LIKE '%abc%';
+NOTICE:  (xpu_textlib.h:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
 SET pg_strom.enabled = off;
 SELECT id, x+y+z v, memo
   INTO test10p
   FROM fallback_data d NATURAL JOIN fallback_small s
  WHERE memo LIKE '%abc%';
 (SELECT * FROM test10g EXCEPT SELECT * FROM test10p) ORDER BY id;
-(SELECT * FROM test10p EXCEPT SELECT * FROM test10g) ORDER BY id;
-RESET pg_strom.cpu_fallback;
+ id | v | memo 
+----+---+------
+(0 rows)
 
+(SELECT * FROM test10p EXCEPT SELECT * FROM test10g) ORDER BY id;
+ id | v | memo 
+----+---+------
+(0 rows)
+
+RESET pg_strom.cpu_fallback;
 -- GpuJoin with GPU kernel suspend / resume
 SET pg_strom.enabled = on;
 VACUUM ANALYZE;
@@ -198,8 +225,14 @@ SELECT * INTO test11p
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
  WHERE l.aid < 1000;
 (SELECT * FROM test11g EXCEPT SELECT * FROM test11p) ORDER BY id;
-(SELECT * FROM test11p EXCEPT SELECT * FROM test11g) ORDER BY id;
+ aid | id | cat | x | y | memo | z | md5 
+-----+----+-----+---+---+------+---+-----
+(0 rows)
 
+(SELECT * FROM test11p EXCEPT SELECT * FROM test11g) ORDER BY id;
+ aid | id | cat | x | y | memo | z | md5 
+-----+----+-----+---+---+------+---+-----
+(0 rows)
 
 -- GpuJoin with GPU kernel suspend / resume, and CPU fallback
 SET pg_strom.enabled = on;
@@ -211,10 +244,19 @@ VACUUM ANALYZE;
 SELECT * INTO test12g
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
  WHERE l.aid < 2500 AND memo LIKE '%ab%';
+NOTICE:  (xpu_textlib.h:56) CPU fallback due to text datum is compressed or external [xpu_text_is_valid]
 SET pg_strom.enabled = off;
 SELECT * INTO test12p
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
  WHERE l.aid < 2500 AND memo LIKE '%ab%';
 (SELECT * FROM test12g EXCEPT SELECT * FROM test12p) ORDER BY id LIMIT 10;
+ aid | id | cat | x | y | memo | z | md5 
+-----+----+-----+---+---+------+---+-----
+(0 rows)
+
 (SELECT * FROM test12p EXCEPT SELECT * FROM test12g) ORDER BY id LIMIT 10;
+ aid | id | cat | x | y | memo | z | md5 
+-----+----+-----+---+---+------+---+-----
+(0 rows)
+
 RESET pg_strom.cpu_fallback;

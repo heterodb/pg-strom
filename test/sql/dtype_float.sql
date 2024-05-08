@@ -39,6 +39,7 @@ SET enable_seqscan = off;
 
 -- cast operators
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT id, (c/400.0)::float2 c, (e/4000.0)::float2 e,
        x::float2, y::float2, z::float2, p::float2
@@ -60,6 +61,7 @@ SELECT id, (c/400.0)::float2 c, (e/4000.0)::float2 e,
 (SELECT * FROM test01p EXCEPT ALL SELECT * FROM test01g) ORDER BY id;
 
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT id, a::float4, e::float4, x::float4, y::float4, z::float4, p::float4
   INTO test02g
@@ -78,6 +80,7 @@ SELECT id, a::float4, e::float4, x::float4, y::float4, z::float4, p::float4
 (SELECT * FROM test02p EXCEPT ALL SELECT * FROM test02g) ORDER BY id;
 
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT id, a::float8, c::float8, x::float8, y::float8, z::float8, p::float8
   INTO test03g
@@ -97,6 +100,7 @@ SELECT id, a::float8, c::float8, x::float8, y::float8, z::float8, p::float8
 
 -- '+' operators
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT id, a+b v1, a+c v2, a+e v3,
            c+b v4, c+d v5, c+e v6,
@@ -122,6 +126,7 @@ SELECT id, a+b v1, a+c v2, a+e v3,
 
 -- '-' operators
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT id, a-b v1, a-c v2, a-e v3,
            c-b v4, c-d v5, c-e v6,
@@ -147,6 +152,7 @@ SELECT id, a-b v1, a-c v2, a-e v3,
 
 -- '*' operators
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT id, a*b v1, a*c v2, a*e v3,
            c*b v4, c*d v5, c*e v6,
@@ -172,6 +178,7 @@ SELECT id, a*b v1, a*c v2, a*e v3,
 
 -- '/' operators
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT id, a/b v1, a/d v2, a/f v3,
            c/b v4, c/d v5, c/f v6,
@@ -204,6 +211,7 @@ AND (abs(g.v1 - p.v1) > 0.1 OR abs(g.v2 - p.v2) > 0.1 OR abs(g.v3 - p.v3) > 0.00
 
 -- unary operators ('+','-','@')
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (verbose, costs off)
 SELECT id, +a v1, -b v2, @(a+b) v3,
            +c v4, -d v5, @(c+d) v6,
@@ -234,6 +242,7 @@ AND (abs(g.v1 - p.v1) > 0.1 OR abs(g.v2 - p.v2) > 0.1 OR abs(g.v3 - p.v3) > 0.00
 
 -- '='  : equal operators
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (costs off, verbose)
 SELECT id, a=b v1, a=d v2, a=f v3,
            c=b v4, c=d v5, c=f v6,
@@ -259,6 +268,7 @@ SELECT id, a=b v1, a=d v2, a=f v3,
 
 -- '<>' : not equal operators
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (costs off, verbose)
 SELECT id, a<>b v1, a<>d v2, a<>f v3,
            c<>b v4, c<>d v5, c<>f v6,
@@ -284,6 +294,7 @@ SELECT id, a<>b v1, a<>d v2, a<>f v3,
 
 -- '>'  : greater than operators
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (costs off, verbose)
 SELECT id, a>b v1, a>d v2, a>f v3,
            c>b v4, c>d v5, c>f v6,
@@ -309,6 +320,7 @@ SELECT id, a>b v1, a>d v2, a>f v3,
 
 -- '<'  : less than operators
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (costs off, verbose)
 SELECT id, a<b v1, a<d v2, a<f v3,
            c<b v4, c<d v5, c<f v6,
@@ -334,6 +346,7 @@ SELECT id, a<b v1, a<d v2, a<f v3,
 
 -- '>=' : equal operators
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (costs off, verbose)
 SELECT id, a>=b v1, a>=d v2, a>=f v3,
            c>=b v4, c>=d v5, c>=f v6,
@@ -359,6 +372,7 @@ SELECT id, a>=b v1, a>=d v2, a>=f v3,
 
 -- '<=' : equal operators
 SET pg_strom.enabled = on;
+VACUUM ANALYZE;
 EXPLAIN (costs off, verbose)
 SELECT id, a<=b v1, a<=d v2, a<=f v3,
            c<=b v4, c<=d v5, c<=f v6,
