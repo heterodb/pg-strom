@@ -65,7 +65,7 @@ STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
  * ----------------------------------------------------------------
  */
 #define UNIT_TUPLES_PER_DEPTH		(2 * WARPSIZE)
-#define LP_ITEMS_PER_BLOCK			(2 * MAXTHREADS_PER_BLOCK)
+#define LP_ITEMS_PER_BLOCK			(2 * CUDA_MAXTHREADS_PER_BLOCK)
 typedef struct
 {
 	uint32_t		smx_row_count;	/* current position of outer relation */

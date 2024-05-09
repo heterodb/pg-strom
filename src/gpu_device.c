@@ -1047,12 +1047,20 @@ gpuOptimalBlockSize(int *p_grid_sz,
 					CUfunction kern_function,
 					unsigned int dynamic_shmem_per_block)
 {
-	return cuOccupancyMaxPotentialBlockSize(p_grid_sz,
-											p_block_sz,
-											kern_function,
-											NULL,
-											dynamic_shmem_per_block,
-											0);
+	CUresult	rc;
+
+	rc = cuOccupancyMaxPotentialBlockSize(p_grid_sz,
+										  p_block_sz,
+										  kern_function,
+										  NULL,
+										  dynamic_shmem_per_block,
+										  0);
+	if (rc == CUDA_SUCCESS)
+	{
+		if (*p_block_sz > CUDA_MAXTHREADS_PER_BLOCK)
+			*p_block_sz = CUDA_MAXTHREADS_PER_BLOCK;
+	}
+	return rc;
 }
 
 /*

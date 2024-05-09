@@ -285,7 +285,7 @@ __strcmp(const char *s1, const char *s2)
  * ----------------------------------------------------------------
  */
 #define WARPSIZE				32
-#define MAXTHREADS_PER_BLOCK	1024
+//#define MAXTHREADS_PER_BLOCK	1024
 #define CUDA_L1_CACHELINE_SZ	128
 
 #if defined(__CUDACC__)
@@ -1621,7 +1621,7 @@ typedef struct toast_compress_header
  *
  * ----------------------------------------------------------------
  */
-#define KVEC_UNITSZ			(MAXTHREADS_PER_BLOCK * 2)
+#define KVEC_UNITSZ			(CUDA_MAXTHREADS_PER_BLOCK * 2)
 #define KVEC_ALIGN(x)		TYPEALIGN(16,(x))	/* 128bit alignment */
 
 #define KVEC_DATUM_COMMON_FIELD					\

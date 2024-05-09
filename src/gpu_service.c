@@ -673,6 +673,7 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 " --source-in-ptx -lineinfo"
 						 " -I. -I%s "
 						 " -DHAVE_FLOAT2 "
+						 " -DCUDA_MAXTHREADS_PER_BLOCK=%u "
 						 " -arch=native --threads 4"
 						 " --device-c"
 						 " -o %s.o"
@@ -680,6 +681,7 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 pgstrom_cuda_toolkit_basedir,
 						 CUDA_MAXREGCOUNT,
 						 PGINCLUDEDIR,
+						 CUDA_MAXTHREADS_PER_BLOCK,
 						 tok,
 						 PGSHAREDIR, tok, tok);
 	}

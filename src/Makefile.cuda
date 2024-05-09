@@ -24,6 +24,7 @@ NVCC_VERSION := $(shell $(NVCC) --version | grep ^Cuda | \
 # Max number of registers per GPU thread for PG-Strom modules
 # (64k / 128 = up to 512 threads per SM)
 MAXREGCOUNT := 128
+MAXTHREADS_PER_BLOCK := $(shell expr 65536 / $(MAXREGCOUNT))
 
 __NUM_GPUS := $(shell ls -d /proc/driver/nvidia/gpus/*/information | wc -l)
 ifeq ($(__NUM_GPUS),0)
@@ -39,6 +40,7 @@ __NVCC_CFLAGS += -I $(shell $(PG_CONFIG) --includedir-server) \
                  --maxrregcount=$(MAXREGCOUNT)           \
                  --source-in-ptx -lineinfo               \
                  -DHAVE_FLOAT2                           \
+                 -DCUDA_MAXTHREADS_PER_BLOCK=$(MAXTHREADS_PER_BLOCK) \
                  $(__NVCC_TARGET)
 __NVCC_LDFLAGS += -Xnvlink --suppress-stack-size-warning \
                   $(__NVCC_TARGET)
