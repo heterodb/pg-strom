@@ -4177,6 +4177,7 @@ gpuCacheAutoPreloadConnectDatabase(int32 *p_start, int32 *p_end)
 
 		if (strcmp(database_name, entry->database_name) != 0)
 			break;
+		curr++;
 	}
 	gcache_shared_head->gcache_auto_preload_count = curr;
 
