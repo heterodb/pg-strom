@@ -4219,7 +4219,8 @@ gpuCacheStartupPreloader(Datum arg)
 
 		rel = table_openrv(&rvar, AccessShareLock);
 		gc_desc = lookupGpuCacheDesc(rel);
-		initialLoadGpuCache(gc_desc, rel);
+		if (gc_desc)
+			initialLoadGpuCache(gc_desc, rel);
 		table_close(rel, NoLock);
 
 		elog(LOG, "gpucache: auto preload '%s.%s' (DB: %s)",
