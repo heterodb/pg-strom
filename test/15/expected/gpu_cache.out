@@ -27,9 +27,31 @@ CREATE TABLE cache_test_table (
 ---
 --- GPU Cache configuration
 ---
-CREATE TRIGGER row_sync_test AFTER INSERT OR UPDATE OR DELETE ON cache_test_table FOR ROW 
+-- syntax error
+CREATE TRIGGER row_sync_test_ng01 AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('cpu_device_id=0');
+ERROR:  gpucache: unknown option [cpu_device_id]=[0]
+-- validation error
+CREATE TRIGGER row_sync_test_ng02 AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('max_num_rows=200000000');
+ERROR:  gpucache: max_num_rows = 200000000 consumes too much GPU device memory (main: 12.36GB, extra: 59.60GB), so we recommend to reduce 'max_num_rows' configuration
+-- validation error
+CREATE TRIGGER row_sync_test_ng03 AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('redo_buffer_size=4m');
+ERROR:  gpucache: 'redo_buffer_size' is too small (4194304)
+-- success
+CREATE TRIGGER row_sync_test AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW 
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=10000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
 ALTER TABLE cache_test_table ENABLE ALWAYS TRIGGER row_sync_test;
+-- duplicate row-sync trigger error
+CREATE TRIGGER row_sync_test_ng04 AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW 
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger();
+ERROR:  gpucache: relation cache_test_table has multiple row-sync triggers
 -- Make GPU cache 
 INSERT INTO cache_test_table(id) values (1);
 -- Check gpucache_info table.
@@ -80,12 +102,13 @@ UPDATE cache_test_table SET a = (a+1) % 127 WHERE a%97=0;
          GPU Scan Quals: (((a)::integer % 97) = 0) [rows: 4000 -> 20]
          GPU Cache: GPU0 [phase: ready, max_num_rows: 10000]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
-         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='int1', expr='((a + 1) % 127)'>, <slot=2, type='internal[6]', expr='ctid'>
+         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='int1', expr='((((a + 1) % 127))::int1)'>, <slot=2, type='internal[6]', expr='ctid'>
          KVecs-Buffer: nbytes: 22528, ndims: 2, items=[kvec0=<0x0000-0fff, type='int1', expr='a'>, kvec1=<0x1000-57ff, type='internal', expr='ctid'>]
          LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=2, type='internal' resno=-1(ctid)>, <slot=0, type='int1' resno=2(a)>]}}
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-0fff, type='int1', expr='a'>, <slot=2, offset=0x1000-57ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='97'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,2> args=[{SaveExpr: <slot=1, type='int1'> arg={Func(int1)::int1 arg={Func(int4)::int4mod args=[{Func(int4)::int14pl args=[{Var(int1): kvec=0x0000-1000, expr='a'}, {Const(int4): value='1'}]}, {Const(int4): value='127'}]}}}, {SaveExpr: <slot=2, type='internal'> arg={Var(internal): kvec=0x1000-5800, expr='ctid'}}]}
+         CUDA Stack Size: 3936
 
 UPDATE cache_test_table SET a = (a+1) % 127 WHERE a%97=0;
 UPDATE normal_table     SET a = (a+1) % 127 WHERE a%97=0;
@@ -98,12 +121,13 @@ UPDATE cache_test_table SET b = (b+1) % 32767 WHERE a%89=0;
          GPU Scan Quals: (((a)::integer % 89) = 0) [rows: 4000 -> 20]
          GPU Cache: GPU0 [phase: ready, max_num_rows: 10000]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
-         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='int2', expr='((b + 1) % 32767)'>, <slot=2, type='int2', expr='b'>, <slot=3, type='internal[6]', expr='ctid'>
+         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='int2', expr='((((b + 1) % 32767))::smallint)'>, <slot=2, type='int2', expr='b'>, <slot=3, type='internal[6]', expr='ctid'>
          KVecs-Buffer: nbytes: 28672, ndims: 2, items=[kvec0=<0x0000-0fff, type='int1', expr='a'>, kvec1=<0x1000-27ff, type='int2', expr='b'>, kvec2=<0x2800-6fff, type='internal', expr='ctid'>]
          LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=3, type='internal' resno=-1(ctid)>, <slot=0, type='int1' resno=2(a)>, <slot=2, type='int2' resno=3(b)>]}}
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x1000-27ff, type='int2', expr='b'>, <slot=3, offset=0x2800-6fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='89'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,3> args=[{SaveExpr: <slot=1, type='int2'> arg={Func(int2)::int2 arg={Func(int4)::int4mod args=[{Func(int4)::int24pl args=[{Var(int2): kvec=0x1000-2800, expr='b'}, {Const(int4): value='1'}]}, {Const(int4): value='32767'}]}}}, {SaveExpr: <slot=3, type='internal'> arg={Var(internal): kvec=0x2800-7000, expr='ctid'}}]}
+         CUDA Stack Size: 3952
 
 UPDATE cache_test_table SET b = (b+1) % 32767 WHERE a%89=0;
 UPDATE normal_table     SET b = (b+1) % 32767 WHERE a%89=0;
@@ -116,12 +140,13 @@ UPDATE cache_test_table SET c = (c+1) % 2147483647 WHERE a%83=0;
          GPU Scan Quals: (((a)::integer % 83) = 0) [rows: 4057 -> 20]
          GPU Cache: GPU0 [phase: ready, max_num_rows: 10000]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
-         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='int4', expr='((c + 1) % 2147483647)'>, <slot=2, type='int4', expr='c'>, <slot=3, type='internal[6]', expr='ctid'>
+         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='int4', expr='(((c + 1) % 2147483647))'>, <slot=2, type='int4', expr='c'>, <slot=3, type='internal[6]', expr='ctid'>
          KVecs-Buffer: nbytes: 32768, ndims: 2, items=[kvec0=<0x0000-0fff, type='int1', expr='a'>, kvec1=<0x1000-37ff, type='int4', expr='c'>, kvec2=<0x3800-7fff, type='internal', expr='ctid'>]
          LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=3, type='internal' resno=-1(ctid)>, <slot=0, type='int1' resno=2(a)>, <slot=2, type='int4' resno=4(c)>]}}
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x1000-37ff, type='int4', expr='c'>, <slot=3, offset=0x3800-7fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='83'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,3> args=[{SaveExpr: <slot=1, type='int4'> arg={Func(int4)::int4mod args=[{Func(int4)::int4pl args=[{Var(int4): kvec=0x1000-3800, expr='c'}, {Const(int4): value='1'}]}, {Const(int4): value='2147483647'}]}}, {SaveExpr: <slot=3, type='internal'> arg={Var(internal): kvec=0x3800-8000, expr='ctid'}}]}
+         CUDA Stack Size: 3952
 
 UPDATE cache_test_table SET c = (c+1) % 2147483647 WHERE a%83=0;
 UPDATE normal_table     SET c = (c+1) % 2147483647 WHERE a%83=0;
@@ -134,12 +159,13 @@ UPDATE cache_test_table SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
          GPU Scan Quals: (((a)::integer % 79) = 0) [rows: 4114 -> 21]
          GPU Cache: GPU0 [phase: ready, max_num_rows: 10000]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
-         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='int8', expr='((d + 1) % '9223372036854775807'::bigint)'>, <slot=2, type='int8', expr='d'>, <slot=3, type='internal[6]', expr='ctid'>
+         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='int8', expr='(((d + 1) % '9223372036854775807'::bigint))'>, <slot=2, type='int8', expr='d'>, <slot=3, type='internal[6]', expr='ctid'>
          KVecs-Buffer: nbytes: 40960, ndims: 2, items=[kvec0=<0x0000-0fff, type='int1', expr='a'>, kvec1=<0x1000-57ff, type='int8', expr='d'>, kvec2=<0x5800-9fff, type='internal', expr='ctid'>]
          LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=3, type='internal' resno=-1(ctid)>, <slot=0, type='int1' resno=2(a)>, <slot=2, type='int8' resno=5(d)>]}}
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x1000-57ff, type='int8', expr='d'>, <slot=3, offset=0x5800-9fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='79'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,3> args=[{SaveExpr: <slot=1, type='int8'> arg={Func(int8)::int8mod args=[{Func(int8)::int84pl args=[{Var(int8): kvec=0x1000-5800, expr='d'}, {Const(int4): value='1'}]}, {Const(int8): value='9223372036854775807'}]}}, {SaveExpr: <slot=3, type='internal'> arg={Var(internal): kvec=0x5800-a000, expr='ctid'}}]}
+         CUDA Stack Size: 3952
 
 UPDATE cache_test_table SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
 UPDATE normal_table     SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
@@ -152,12 +178,13 @@ UPDATE cache_test_table SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
          GPU Scan Quals: (((a)::integer % 73) = 0) [rows: 4114 -> 21]
          GPU Cache: GPU0 [phase: ready, max_num_rows: 10000]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
-         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='float2', expr='(((e + '0.5'::double precision))::numeric % '999999'::numeric)'>, <slot=2, type='float2', expr='e'>, <slot=3, type='internal[6]', expr='ctid'>
+         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='float2', expr='(((((e + '0.5'::double precision))::numeric % '999999'::numeric))::float2)'>, <slot=2, type='float2', expr='e'>, <slot=3, type='internal[6]', expr='ctid'>
          KVecs-Buffer: nbytes: 28672, ndims: 2, items=[kvec0=<0x0000-0fff, type='int1', expr='a'>, kvec1=<0x1000-27ff, type='float2', expr='e'>, kvec2=<0x2800-6fff, type='internal', expr='ctid'>]
          LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=3, type='internal' resno=-1(ctid)>, <slot=0, type='int1' resno=2(a)>, <slot=2, type='float2' resno=6(e)>]}}
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x1000-27ff, type='float2', expr='e'>, <slot=3, offset=0x2800-6fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='73'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,3> args=[{SaveExpr: <slot=1, type='float2'> arg={Func(float2)::float2 arg={Func(numeric)::numeric_mod args=[{Func(numeric)::numeric arg={Func(float8)::float28pl args=[{Var(float2): kvec=0x1000-2800, expr='e'}, {Const(float8): value='0.5'}]}}, {Const(numeric): value='999999'}]}}}, {SaveExpr: <slot=3, type='internal'> arg={Var(internal): kvec=0x2800-7000, expr='ctid'}}]}
+         CUDA Stack Size: 3952
 
 UPDATE cache_test_table SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
 UPDATE normal_table     SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
@@ -170,12 +197,13 @@ UPDATE cache_test_table SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
          GPU Scan Quals: (((a)::integer % 71) = 0) [rows: 4171 -> 21]
          GPU Cache: GPU0 [phase: ready, max_num_rows: 10000]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
-         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='float4', expr='(((f + '0.5'::double precision))::numeric % '999999'::numeric)'>, <slot=2, type='float4', expr='f'>, <slot=3, type='internal[6]', expr='ctid'>
+         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='float4', expr='(((((f + '0.5'::double precision))::numeric % '999999'::numeric))::real)'>, <slot=2, type='float4', expr='f'>, <slot=3, type='internal[6]', expr='ctid'>
          KVecs-Buffer: nbytes: 32768, ndims: 2, items=[kvec0=<0x0000-0fff, type='int1', expr='a'>, kvec1=<0x1000-37ff, type='float4', expr='f'>, kvec2=<0x3800-7fff, type='internal', expr='ctid'>]
          LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=3, type='internal' resno=-1(ctid)>, <slot=0, type='int1' resno=2(a)>, <slot=2, type='float4' resno=7(f)>]}}
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x1000-37ff, type='float4', expr='f'>, <slot=3, offset=0x3800-7fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='71'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,3> args=[{SaveExpr: <slot=1, type='float4'> arg={Func(float4)::float4 arg={Func(numeric)::numeric_mod args=[{Func(numeric)::numeric arg={Func(float8)::float48pl args=[{Var(float4): kvec=0x1000-3800, expr='f'}, {Const(float8): value='0.5'}]}}, {Const(numeric): value='999999'}]}}}, {SaveExpr: <slot=3, type='internal'> arg={Var(internal): kvec=0x3800-8000, expr='ctid'}}]}
+         CUDA Stack Size: 3952
 
 UPDATE cache_test_table SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
 UPDATE normal_table     SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
@@ -188,12 +216,13 @@ UPDATE cache_test_table SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
          GPU Scan Quals: (((a)::integer % 67) = 0) [rows: 4171 -> 21]
          GPU Cache: GPU0 [phase: ready, max_num_rows: 10000]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
-         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='float8', expr='(((g + '0.5'::double precision))::numeric % '999999'::numeric)'>, <slot=2, type='float8', expr='g'>, <slot=3, type='internal[6]', expr='ctid'>
+         KVars-Slot: <slot=0, type='int1', expr='a'>, <slot=1, type='float8', expr='(((((g + '0.5'::double precision))::numeric % '999999'::numeric))::double precision)'>, <slot=2, type='float8', expr='g'>, <slot=3, type='internal[6]', expr='ctid'>
          KVecs-Buffer: nbytes: 40960, ndims: 2, items=[kvec0=<0x0000-0fff, type='int1', expr='a'>, kvec1=<0x1000-57ff, type='float8', expr='g'>, kvec2=<0x5800-9fff, type='internal', expr='ctid'>]
          LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=3, type='internal' resno=-1(ctid)>, <slot=0, type='int1' resno=2(a)>, <slot=2, type='float8' resno=8(g)>]}}
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x1000-57ff, type='float8', expr='g'>, <slot=3, offset=0x5800-9fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='67'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,3> args=[{SaveExpr: <slot=1, type='float8'> arg={Func(float8)::float8 arg={Func(numeric)::numeric_mod args=[{Func(numeric)::numeric arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x1000-5800, expr='g'}, {Const(float8): value='0.5'}]}}, {Const(numeric): value='999999'}]}}}, {SaveExpr: <slot=3, type='internal'> arg={Var(internal): kvec=0x5800-a000, expr='ctid'}}]}
+         CUDA Stack Size: 3952
 
 UPDATE cache_test_table SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
 UPDATE normal_table     SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
@@ -212,6 +241,7 @@ UPDATE cache_test_table SET h = 'delete' WHERE a%103=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1000-57ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='103'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x1000-5800, expr='ctid'}}}
+         CUDA Stack Size: 3904
 
 UPDATE cache_test_table SET h = 'delete' WHERE a%103=0;
 UPDATE normal_table     SET h = 'delete' WHERE a%103=0;
@@ -230,6 +260,7 @@ UPDATE cache_test_table SET i = 'delete' WHERE a%107=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1000-57ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='107'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x1000-5800, expr='ctid'}}}
+         CUDA Stack Size: 3904
 
 UPDATE cache_test_table SET i = 'delete' WHERE a%107=0;
 UPDATE normal_table     SET i = 'delete' WHERE a%107=0;
@@ -248,6 +279,7 @@ UPDATE cache_test_table SET j = 'delete' WHERE a%109=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1000-57ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='109'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x1000-5800, expr='ctid'}}}
+         CUDA Stack Size: 3904
 
 UPDATE cache_test_table SET j = 'delete' WHERE a%109=0;
 UPDATE normal_table     SET j = 'delete' WHERE a%109=0;
@@ -269,6 +301,7 @@ DELETE FROM cache_test_table WHERE a%101=0 OR a IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1000-57ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(int1): slot=0, expr='a'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x1000-5800, expr='ctid'}}}
+         CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE a%101=0 OR a IS NULL;
 DELETE FROM normal_table WHERE a%101=0 OR a IS NULL;
@@ -287,6 +320,7 @@ DELETE FROM cache_test_table WHERE b%101=0 OR b IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1800-5fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int2): slot=0, expr='b'}}, {Const(int4): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(int2): slot=0, expr='b'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x1800-6000, expr='ctid'}}}
+         CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE b%101=0 OR b IS NULL;
 DELETE FROM normal_table WHERE b%101=0 OR b IS NULL;
@@ -305,6 +339,7 @@ DELETE FROM cache_test_table WHERE c%101=0 OR c IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x2800-6fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Var(int4): slot=0, expr='c'}, {Const(int4): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(int4): slot=0, expr='c'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x2800-7000, expr='ctid'}}}
+         CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE c%101=0 OR c IS NULL;
 DELETE FROM normal_table WHERE c%101=0 OR c IS NULL;
@@ -323,6 +358,7 @@ DELETE FROM cache_test_table WHERE d%101=0 OR d IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x4800-8fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int84eq args=[{Func(int8)::int8mod args=[{Var(int8): slot=0, expr='d'}, {Const(int8): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(int8): slot=0, expr='d'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x4800-9000, expr='ctid'}}}
+         CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE d%101=0 OR d IS NULL;
 DELETE FROM normal_table WHERE d%101=0 OR d IS NULL;
@@ -341,6 +377,7 @@ DELETE FROM cache_test_table WHERE e::int8%101=0 OR e IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1800-5fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int84eq args=[{Func(int8)::int8mod args=[{Func(int8)::int8 arg={Var(float2): slot=0, expr='e'}}, {Const(int8): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(float2): slot=0, expr='e'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x1800-6000, expr='ctid'}}}
+         CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE e::int8%101=0 OR e IS NULL;
 DELETE FROM normal_table WHERE e::int8%101=0 OR e IS NULL;
@@ -359,6 +396,7 @@ DELETE FROM cache_test_table WHERE f::int8%101=0 OR f IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x2800-6fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int84eq args=[{Func(int8)::int8mod args=[{Func(int8)::int8 arg={Var(float4): slot=0, expr='f'}}, {Const(int8): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(float4): slot=0, expr='f'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x2800-7000, expr='ctid'}}}
+         CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE f::int8%101=0 OR f IS NULL;
 DELETE FROM normal_table WHERE f::int8%101=0 OR f IS NULL;
@@ -377,6 +415,7 @@ DELETE FROM cache_test_table WHERE g::int8%101=0 OR g IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x4800-8fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int84eq args=[{Func(int8)::int8mod args=[{Func(int8)::int8 arg={Var(float8): slot=0, expr='g'}}, {Const(int8): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(float8): slot=0, expr='g'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x4800-9000, expr='ctid'}}}
+         CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE g::int8%101=0 OR g IS NULL;
 DELETE FROM normal_table WHERE g::int8%101=0 OR g IS NULL;
@@ -395,6 +434,7 @@ DELETE FROM cache_test_table WHERE h='delete' OR h IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x6800-afff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::texteq args=[{Var(text): slot=0, expr='h'}, {Const(text): value='delete'}]}, {IsNull arg={Var(text): slot=0, expr='h'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x6800-b000, expr='ctid'}}}
+         CUDA Stack Size: 3920
 
 DELETE FROM cache_test_table WHERE h='delete' OR h IS NULL;
 DELETE FROM normal_table WHERE h='delete' OR h IS NULL;
@@ -413,6 +453,7 @@ DELETE FROM cache_test_table WHERE i='delete' OR i IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x6800-afff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::texteq args=[{Var(text): slot=0, expr='i'}, {Const(text): value='delete'}]}, {IsNull arg={Var(text): slot=0, expr='i'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x6800-b000, expr='ctid'}}}
+         CUDA Stack Size: 3920
 
 DELETE FROM cache_test_table WHERE i='delete' OR i IS NULL;
 DELETE FROM normal_table WHERE i='delete' OR i IS NULL;
@@ -431,6 +472,7 @@ DELETE FROM cache_test_table WHERE j='delete' OR j IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x6800-afff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::bpchareq args=[{Var(bpchar): slot=0, expr='j'}, {Const(bpchar): value='delete'}]}, {IsNull arg={Var(bpchar): slot=0, expr='j'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x6800-b000, expr='ctid'}}}
+         CUDA Stack Size: 3920
 
 DELETE FROM cache_test_table WHERE j='delete' OR j IS NULL;
 DELETE FROM normal_table WHERE j='delete' OR j IS NULL;
@@ -459,6 +501,7 @@ SELECT * FROM cache_test_table WHERE a % 3 = 0;
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-0fff, type='int1', expr='a'>, <slot=1, offset=0x1000-37ff, type='int4', expr='id'>, <slot=2, offset=0x3800-4fff, type='int2', expr='b'>, <slot=3, offset=0x5000-77ff, type='int4', expr='c'>, <slot=4, offset=0x7800-bfff, type='int8', expr='d'>, <slot=5, offset=0xc000-d7ff, type='float2', expr='e'>, <slot=6, offset=0xd800-ffff, type='float4', expr='f'>, <slot=7, offset=0x10000-147ff, type='float8', expr='g'>, <slot=8, offset=0x14800-1afff, type='text', expr='h'>, <slot=9, offset=0x1b000-217ff, type='text', expr='i'>, <slot=10, offset=0x21800-27fff, type='bpchar', expr='j'>, <slot=11, offset=0x28000-297ff, type='int2', expr='k'>]}}}
    Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='3'}]}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<1,0,2,3,4,5,6,7,8,9,10,11> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x1000-3800, expr='id'}}, {SaveExpr: <slot=0, type='int1'> arg={Var(int1): kvec=0x0000-1000, expr='a'}}, {SaveExpr: <slot=2, type='int2'> arg={Var(int2): kvec=0x3800-5000, expr='b'}}, {SaveExpr: <slot=3, type='int4'> arg={Var(int4): kvec=0x5000-7800, expr='c'}}, {SaveExpr: <slot=4, type='int8'> arg={Var(int8): kvec=0x7800-c000, expr='d'}}, {SaveExpr: <slot=5, type='float2'> arg={Var(float2): kvec=0xc000-d800, expr='e'}}, {SaveExpr: <slot=6, type='float4'> arg={Var(float4): kvec=0xd800-10000, expr='f'}}, {SaveExpr: <slot=7, type='float8'> arg={Var(float8): kvec=0x10000-14800, expr='g'}}, {SaveExpr: <slot=8, type='text'> arg={Var(text): kvec=0x14800-1b000, expr='h'}}, {SaveExpr: <slot=9, type='text'> arg={Var(text): kvec=0x1b000-21800, expr='i'}}, {SaveExpr: <slot=10, type='bpchar'> arg={Var(bpchar): kvec=0x21800-28000, expr='j'}}, {SaveExpr: <slot=11, type='int2'> arg={Var(int2): kvec=0x28000-29800, expr='k'}}]}
+   CUDA Stack Size: 4192
 
 --clms=("a" "b" "c" "d" "e" "f" "g") ; for a in ${clms[@]}; do echo "COUNT($a) AS ${a}_count,ROUND(SUM($a)::NUMERIC/100,2) AS ${a}_sum,ROUND(AVG($a)::NUMERIC/100,2) AS ${a}_avg,MAX($a) AS ${a}_max,MIN($a) AS ${a}_min," ; done
 VACUUM ANALYZE cache_test_table;
@@ -480,13 +523,14 @@ INTO TEMPORARY cached_result FROM cache_test_table WHERE id%3=0;
          GPU Scan Quals: ((id % 3) = 0) [rows: 3434 -> 17]
          GPU Cache: GPU0 [phase: ready, max_num_rows: 10000]
          GPU Cache Options: gpu_device_id=0,max_num_rows=10000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
-         KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='int1', expr='a'>, <slot=2, type='int8', expr='a'>, <slot=3, type='int4', expr='a'>, <slot=4, type='int2', expr='b'>, <slot=5, type='int8', expr='b'>, <slot=6, type='int4', expr='b'>, <slot=7, type='int4', expr='c'>, <slot=8, type='int8', expr='c'>, <slot=9, type='int8', expr='d'>, <slot=10, type='float2', expr='e'>, <slot=11, type='float8', expr='e'>, <slot=12, type='float4', expr='f'>, <slot=13, type='float8', expr='f'>, <slot=14, type='float8', expr='g'>
+         KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='int1', expr='a'>, <slot=2, type='int8', expr='((a)::bigint)'>, <slot=3, type='int4', expr='((a)::integer)'>, <slot=4, type='int2', expr='b'>, <slot=5, type='int8', expr='((b)::bigint)'>, <slot=6, type='int4', expr='((b)::integer)'>, <slot=7, type='int4', expr='c'>, <slot=8, type='int8', expr='((c)::bigint)'>, <slot=9, type='int8', expr='d'>, <slot=10, type='float2', expr='e'>, <slot=11, type='float8', expr='((e)::double precision)'>, <slot=12, type='float4', expr='f'>, <slot=13, type='float8', expr='((f)::double precision)'>, <slot=14, type='float8', expr='g'>
          KVecs-Buffer: nbytes: 83968, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-37ff, type='int1', expr='a'>, kvec2=<0x3800-4fff, type='int2', expr='b'>, kvec3=<0x5000-77ff, type='int4', expr='c'>, kvec4=<0x7800-bfff, type='int8', expr='d'>, kvec5=<0xc000-d7ff, type='float2', expr='e'>, kvec6=<0xd800-ffff, type='float4', expr='f'>, kvec7=<0x10000-147ff, type='float8', expr='g'>]
          LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=1, type='int1' resno=2(a)>, <slot=4, type='int2' resno=3(b)>, <slot=7, type='int4' resno=4(c)>, <slot=9, type='int8' resno=5(d)>, <slot=10, type='float2' resno=6(e)>, <slot=12, type='float4' resno=7(f)>, <slot=14, type='float8' resno=8(g)>]}}
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x2800-37ff, type='int1', expr='a'>, <slot=4, offset=0x3800-4fff, type='int2', expr='b'>, <slot=7, offset=0x5000-77ff, type='int4', expr='c'>, <slot=9, offset=0x7800-bfff, type='int8', expr='d'>, <slot=10, offset=0xc000-d7ff, type='float2', expr='e'>, <slot=12, offset=0xd800-ffff, type='float4', expr='f'>, <slot=14, offset=0x10000-147ff, type='float8', expr='g'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='3'}]}, {Const(int4): value='0'}]}
-         Partial Aggregation OpCode: {AggFuncs <nrows[slot=1, expr='a'], psum::int[slot=2, expr='a'], pavg::int[slot=2, expr='a'], pmax::int32[slot=3, expr='a'], pmin::int32[slot=3, expr='a'], nrows[slot=4, expr='b'], psum::int[slot=5, expr='b'], pavg::int[slot=5, expr='b'], pmax::int32[slot=6, expr='b'], pmin::int32[slot=6, expr='b'], nrows[slot=7, expr='c'], psum::int[slot=8, expr='c'], pavg::int[slot=8, expr='c'], pmax::int32[slot=7, expr='c'], pmin::int32[slot=7, expr='c'], nrows[slot=9, expr='d'], psum::int[slot=9, expr='d'], pavg::int[slot=9, expr='d'], pmax::int64[slot=9, expr='d'], pmin::int64[slot=9, expr='d'], nrows[slot=10, expr='e'], psum::fp[slot=11, expr='e'], pavg::fp[slot=11, expr='e'], pmax::fp64[slot=11, expr='e'], pmin::fp64[slot=11, expr='e'], nrows[slot=12, expr='f'], psum::fp[slot=13, expr='f'], pavg::fp[slot=13, expr='f'], pmax::fp64[slot=13, expr='f'], pmin::fp64[slot=13, expr='f'], nrows[slot=14, expr='g'], psum::fp[slot=14, expr='g'], pavg::fp[slot=14, expr='g'], pmax::fp64[slot=14, expr='g'], pmin::fp64[slot=14, expr='g']> args=[{SaveExpr: <slot=1, type='int1'> arg={Var(int1): kvec=0x2800-3800, expr='a'}}, {SaveExpr: <slot=2, type='int8'> arg={Func(int8)::int8 arg={Var(int1): kvec=0x2800-3800, expr='a'}}}, {SaveExpr: <slot=3, type='int4'> arg={Func(int4)::int4 arg={Var(int1): kvec=0x2800-3800, expr='a'}}}, {SaveExpr: <slot=4, type='int2'> arg={Var(int2): kvec=0x3800-5000, expr='b'}}, {SaveExpr: <slot=5, type='int8'> arg={Func(int8)::int8 arg={Var(int2): kvec=0x3800-5000, expr='b'}}}, {SaveExpr: <slot=6, type='int4'> arg={Func(int4)::int4 arg={Var(int2): kvec=0x3800-5000, expr='b'}}}, {SaveExpr: <slot=7, type='int4'> arg={Var(int4): kvec=0x5000-7800, expr='c'}}, {SaveExpr: <slot=8, type='int8'> arg={Func(int8)::int8 arg={Var(int4): kvec=0x5000-7800, expr='c'}}}, {SaveExpr: <slot=9, type='int8'> arg={Var(int8): kvec=0x7800-c000, expr='d'}}, {SaveExpr: <slot=10, type='float2'> arg={Var(float2): kvec=0xc000-d800, expr='e'}}, {SaveExpr: <slot=11, type='float8'> arg={Func(float8)::float8 arg={Var(float2): kvec=0xc000-d800, expr='e'}}}, {SaveExpr: <slot=12, type='float4'> arg={Var(float4): kvec=0xd800-10000, expr='f'}}, {SaveExpr: <slot=13, type='float8'> arg={Func(float8)::float8 arg={Var(float4): kvec=0xd800-10000, expr='f'}}}, {SaveExpr: <slot=14, type='float8'> arg={Var(float8): kvec=0x10000-14800, expr='g'}}]}
+         Partial Aggregation OpCode: {AggFuncs <nrows[slot=1, expr='a'], psum::int[slot=2, expr='((a)::bigint)'], pavg::int[slot=2, expr='((a)::bigint)'], pmax::int32[slot=3, expr='((a)::integer)'], pmin::int32[slot=3, expr='((a)::integer)'], nrows[slot=4, expr='b'], psum::int[slot=5, expr='((b)::bigint)'], pavg::int[slot=5, expr='((b)::bigint)'], pmax::int32[slot=6, expr='((b)::integer)'], pmin::int32[slot=6, expr='((b)::integer)'], nrows[slot=7, expr='c'], psum::int[slot=8, expr='((c)::bigint)'], pavg::int[slot=8, expr='((c)::bigint)'], pmax::int32[slot=7, expr='c'], pmin::int32[slot=7, expr='c'], nrows[slot=9, expr='d'], psum::int[slot=9, expr='d'], pavg::int[slot=9, expr='d'], pmax::int64[slot=9, expr='d'], pmin::int64[slot=9, expr='d'], nrows[slot=10, expr='e'], psum::fp[slot=11, expr='((e)::double precision)'], pavg::fp[slot=11, expr='((e)::double precision)'], pmax::fp64[slot=11, expr='((e)::double precision)'], pmin::fp64[slot=11, expr='((e)::double precision)'], nrows[slot=12, expr='f'], psum::fp[slot=13, expr='((f)::double precision)'], pavg::fp[slot=13, expr='((f)::double precision)'], pmax::fp64[slot=13, expr='((f)::double precision)'], pmin::fp64[slot=13, expr='((f)::double precision)'], nrows[slot=14, expr='g'], psum::fp[slot=14, expr='g'], pavg::fp[slot=14, expr='g'], pmax::fp64[slot=14, expr='g'], pmin::fp64[slot=14, expr='g']> args=[{SaveExpr: <slot=1, type='int1'> arg={Var(int1): kvec=0x2800-3800, expr='a'}}, {SaveExpr: <slot=2, type='int8'> arg={Func(int8)::int8 arg={Var(int1): kvec=0x2800-3800, expr='a'}}}, {SaveExpr: <slot=3, type='int4'> arg={Func(int4)::int4 arg={Var(int1): kvec=0x2800-3800, expr='a'}}}, {SaveExpr: <slot=4, type='int2'> arg={Var(int2): kvec=0x3800-5000, expr='b'}}, {SaveExpr: <slot=5, type='int8'> arg={Func(int8)::int8 arg={Var(int2): kvec=0x3800-5000, expr='b'}}}, {SaveExpr: <slot=6, type='int4'> arg={Func(int4)::int4 arg={Var(int2): kvec=0x3800-5000, expr='b'}}}, {SaveExpr: <slot=7, type='int4'> arg={Var(int4): kvec=0x5000-7800, expr='c'}}, {SaveExpr: <slot=8, type='int8'> arg={Func(int8)::int8 arg={Var(int4): kvec=0x5000-7800, expr='c'}}}, {SaveExpr: <slot=9, type='int8'> arg={Var(int8): kvec=0x7800-c000, expr='d'}}, {SaveExpr: <slot=10, type='float2'> arg={Var(float2): kvec=0xc000-d800, expr='e'}}, {SaveExpr: <slot=11, type='float8'> arg={Func(float8)::float8 arg={Var(float2): kvec=0xc000-d800, expr='e'}}}, {SaveExpr: <slot=12, type='float4'> arg={Var(float4): kvec=0xd800-10000, expr='f'}}, {SaveExpr: <slot=13, type='float8'> arg={Func(float8)::float8 arg={Var(float4): kvec=0xd800-10000, expr='f'}}}, {SaveExpr: <slot=14, type='float8'> arg={Var(float8): kvec=0x10000-14800, expr='g'}}]}
          Partial Function BufSz: 504
+         CUDA Stack Size: 4224
 
 SELECT 
 COUNT(a) AS a_count,SUM(a) AS a_sum,AVG(a) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
@@ -620,6 +664,7 @@ SELECT * FROM cache_corruption_test WHERE b%3=0;
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-17ff, type='int2', expr='b'>, <slot=1, offset=0x1800-3fff, type='int4', expr='id'>, <slot=2, offset=0x4000-4fff, type='int1', expr='a'>, <slot=3, offset=0x5000-77ff, type='int4', expr='c'>, <slot=4, offset=0x7800-bfff, type='int8', expr='d'>, <slot=5, offset=0xc000-d7ff, type='float2', expr='e'>, <slot=6, offset=0xd800-ffff, type='float4', expr='f'>, <slot=7, offset=0x10000-147ff, type='float8', expr='g'>, <slot=8, offset=0x14800-1afff, type='text', expr='h'>, <slot=9, offset=0x1b000-217ff, type='text', expr='i'>, <slot=10, offset=0x21800-27fff, type='bpchar', expr='j'>]}}}
    Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int2): slot=0, expr='b'}}, {Const(int4): value='3'}]}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<1,2,0,3,4,5,6,7,8,9,10> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x1800-4000, expr='id'}}, {SaveExpr: <slot=2, type='int1'> arg={Var(int1): kvec=0x4000-5000, expr='a'}}, {SaveExpr: <slot=0, type='int2'> arg={Var(int2): kvec=0x0000-1800, expr='b'}}, {SaveExpr: <slot=3, type='int4'> arg={Var(int4): kvec=0x5000-7800, expr='c'}}, {SaveExpr: <slot=4, type='int8'> arg={Var(int8): kvec=0x7800-c000, expr='d'}}, {SaveExpr: <slot=5, type='float2'> arg={Var(float2): kvec=0xc000-d800, expr='e'}}, {SaveExpr: <slot=6, type='float4'> arg={Var(float4): kvec=0xd800-10000, expr='f'}}, {SaveExpr: <slot=7, type='float8'> arg={Var(float8): kvec=0x10000-14800, expr='g'}}, {SaveExpr: <slot=8, type='text'> arg={Var(text): kvec=0x14800-1b000, expr='h'}}, {SaveExpr: <slot=9, type='text'> arg={Var(text): kvec=0x1b000-21800, expr='i'}}, {SaveExpr: <slot=10, type='bpchar'> arg={Var(bpchar): kvec=0x21800-28000, expr='j'}}]}
+   CUDA Stack Size: 4176
 
 -- update to make the table corrupted
 UPDATE cache_corruption_test SET d=d/2 WHERE id in (SELECT id FROM cache_corruption_test LIMIT 1001);
@@ -646,6 +691,7 @@ SELECT * FROM cache_corruption_test WHERE b%3=0;
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-17ff, type='int2', expr='b'>, <slot=1, offset=0x1800-3fff, type='int4', expr='id'>, <slot=2, offset=0x4000-4fff, type='int1', expr='a'>, <slot=3, offset=0x5000-77ff, type='int4', expr='c'>, <slot=4, offset=0x7800-bfff, type='int8', expr='d'>, <slot=5, offset=0xc000-d7ff, type='float2', expr='e'>, <slot=6, offset=0xd800-ffff, type='float4', expr='f'>, <slot=7, offset=0x10000-147ff, type='float8', expr='g'>, <slot=8, offset=0x14800-1afff, type='text', expr='h'>, <slot=9, offset=0x1b000-217ff, type='text', expr='i'>, <slot=10, offset=0x21800-27fff, type='bpchar', expr='j'>]}}}
    Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int2): slot=0, expr='b'}}, {Const(int4): value='3'}]}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<1,2,0,3,4,5,6,7,8,9,10> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x1800-4000, expr='id'}}, {SaveExpr: <slot=2, type='int1'> arg={Var(int1): kvec=0x4000-5000, expr='a'}}, {SaveExpr: <slot=0, type='int2'> arg={Var(int2): kvec=0x0000-1800, expr='b'}}, {SaveExpr: <slot=3, type='int4'> arg={Var(int4): kvec=0x5000-7800, expr='c'}}, {SaveExpr: <slot=4, type='int8'> arg={Var(int8): kvec=0x7800-c000, expr='d'}}, {SaveExpr: <slot=5, type='float2'> arg={Var(float2): kvec=0xc000-d800, expr='e'}}, {SaveExpr: <slot=6, type='float4'> arg={Var(float4): kvec=0xd800-10000, expr='f'}}, {SaveExpr: <slot=7, type='float8'> arg={Var(float8): kvec=0x10000-14800, expr='g'}}, {SaveExpr: <slot=8, type='text'> arg={Var(text): kvec=0x14800-1b000, expr='h'}}, {SaveExpr: <slot=9, type='text'> arg={Var(text): kvec=0x1b000-21800, expr='i'}}, {SaveExpr: <slot=10, type='bpchar'> arg={Var(bpchar): kvec=0x21800-28000, expr='j'}}]}
+   CUDA Stack Size: 4176
 
 -- Recover GPUCache
 SELECT pgstrom.gpucache_recovery('cache_corruption_test');
@@ -668,6 +714,7 @@ SELECT count(*) FROM cache_corruption_test;
          KVars-Slot: 
          Partial Aggregation OpCode: {AggFuncs <nrows[*]>}
          Partial Function BufSz: 8
+         CUDA Stack Size: 3856
 
 -- cleanup temporary resource
 SET client_min_messages = error;
