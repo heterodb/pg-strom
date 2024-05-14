@@ -1006,6 +1006,7 @@ sqldb_begin_query(void *sqldb_state,
                   ArrowFileInfo *af_info,
                   SQLdictionary *dictionary_list)
 {
+	static char *snapshot_identifier = NULL;
 	PGSTATE	   *pgstate = sqldb_state;
 	PGconn	   *conn = pgstate->conn;
 	PGresult   *res;
@@ -1017,6 +1018,37 @@ sqldb_begin_query(void *sqldb_state,
 		Elog("unable to begin transaction: %s", PQresultErrorMessage(res));
 	PQclear(res);
 
+	res = PQexec(conn, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+	if (PQresultStatus(res) != PGRES_COMMAND_OK)
+		Elog("unable to switch transaction isolation level: %s",
+			 PQresultErrorMessage(res));
+	PQclear(res);
+
+	/* export snaphot / import snapshot */
+	if (!snapshot_identifier)
+	{
+		res = PQexec(conn, "SELECT pg_catalog.pg_export_snapshot()");
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			Elog("unable to export the current transaction snapshot: %s",
+				 PQresultErrorMessage(res));
+		if (PQntuples(res) != 1 || PQnfields(res) != 1)
+			Elog("unexpected result for pg_export_snapshot()");
+		snapshot_identifier = pstrdup(PQgetvalue(res, 0, 0));
+		PQclear(res);
+	}
+	else
+	{
+		char	temp[200];
+
+		snprintf(temp, sizeof(temp),
+				 "SET TRANSACTION SNAPSHOT '%s'",
+				 snapshot_identifier);
+		res = PQexec(conn, temp);
+		if (PQresultStatus(res) != PGRES_COMMAND_OK)
+			Elog("unable to import transaction shapshot: %s",
+				 PQresultErrorMessage(res));
+	}
+
 	/* declare cursor */
 	query = palloc(strlen(sqldb_command) + 1024);
 	sprintf(query, "DECLARE " CURSOR_NAME " BINARY CURSOR FOR %s",
@@ -1026,10 +1058,21 @@ sqldb_begin_query(void *sqldb_state,
 		Elog("unable to declare a SQL cursor: %s", PQresultErrorMessage(res));
 	PQclear(res);
 
-	/* move to the first tuple(-set) */
-	if (!pgsql_move_next(pgstate, NULL))
-		return NULL;
-	return pgsql_create_buffer(pgstate, af_info, dictionary_list);
+	/* fetch schema definition */
+	res = PQexecParams(conn,
+					   "FETCH FORWARD 0 FROM " CURSOR_NAME,
+					   0, NULL, NULL, NULL, NULL,
+					   1);	/* results in binary mode */
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		Elog("SQL execution failed: %s", PQresultErrorMessage(res));
+	pgstate->res = res;
+	pgstate->nitems = PQntuples(res);
+	pgstate->index  = 0;
+	assert(pgstate->nitems == 0);
+
+	return pgsql_create_buffer(pgstate,
+							   af_info,
+							   dictionary_list);
 }
 
 /*
@@ -1117,4 +1160,150 @@ sqldb_close_connection(void *sqldb_state)
 	PQclear(res);
 	/* close the connection */
 	PQfinish(conn);
+}
+
+/*
+ * sqldb_build_simple_command
+ */
+extern int	parseParallelDistKeys(const char *parallel_dist_keys,
+								  const char *delim);
+#define __RELKIND_LABEL(relkind)								\
+	(strcmp((relkind), "r") == 0 ? "table" :					\
+	 strcmp((relkind), "i") == 0 ? "index" :					\
+	 strcmp((relkind), "S") == 0 ? "sequence" :					\
+	 strcmp((relkind), "t") == 0 ? "toast values" :				\
+	 strcmp((relkind), "v") == 0 ? "view" :						\
+	 strcmp((relkind), "m") == 0 ? "materialized view" :		\
+	 strcmp((relkind), "c") == 0 ? "composite type" :			\
+	 strcmp((relkind), "f") == 0 ? "foreign table" :			\
+	 strcmp((relkind), "p") == 0 ? "partitioned table" :		\
+	 strcmp((relkind), "I") == 0 ? "partitioned index" : "???")
+
+static char *
+__sqldb_build_simple_command(PGSTATE *pgstate,
+							 const char *simple_table_name,
+							 int num_worker_threads,
+							 size_t batch_segment_sz)
+{
+	PGconn	   *conn = pgstate->conn;
+	PGresult   *res;
+	char	   *sql = alloca(strlen(simple_table_name) + 1000);
+	char	   *relkind;
+	int			inhcnt;
+
+	sprintf(sql,
+			"SELECT c.relname, c.relkind, "
+			"       (SELECT count(*)"
+			"          FROM pg_catalog.pg_inherits"
+			"         WHERE inhparent = c.oid) inhcnt"
+			"  FROM pg_catalog.pg_class c"
+			" WHERE oid = '%s'::regclass",
+			simple_table_name);
+	res = PQexec(conn, sql);
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		Elog("unable to check '%s' property: %s",
+			 simple_table_name, PQresultErrorMessage(res));
+	relkind = pstrdup(PQgetvalue(res, 0, 1));
+	inhcnt  = atoi(PQgetvalue(res, 0, 2));
+	PQclear(res);
+
+	if (strcmp(relkind, "p") == 0 ||	/* RELKIND_PARTITIONED_TABLE */
+		inhcnt != 0)					/* has inherited children */
+	{
+		/* check whether the supported relation of not */
+		sprintf(sql,
+				"WITH RECURSIVE r AS (\n"
+				" SELECT NULL::regclass parent, '%s'::regclass table\n"
+				"  UNION ALL\n"
+				" SELECT inhparent, inhrelid\n"
+				"   FROM pg_catalog.pg_inherits, r\n"
+				"  WHERE inhparent = r.table\n"
+				")\n"
+				"SELECT r.*, c.relkind\n"
+				"  FROM r, pg_catalog.pg_class c\n"
+				" WHERE r.table = c.oid",
+				simple_table_name);
+		res = PQexec(conn, sql);
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			Elog("failed on [%s]: %s", sql, PQresultErrorMessage(res));
+		for (int i=0; i < PQntuples(res); i++)
+		{
+			relkind = PQgetvalue(res, i, 2);
+			if (strcmp(relkind, "r") != 0 &&
+				strcmp(relkind, "m") != 0 &&
+				strcmp(relkind, "t") != 0 &&
+				strcmp(relkind, "p") != 0)
+				Elog("unable to attach hashtid(ctid) on '%s' [%s]",
+					 PQgetvalue(res, i, 1), __RELKIND_LABEL(relkind));
+		}
+		sprintf(sql,
+				"SELECT * FROM %s WHERE hashtid(ctid) %% $(N_WORKERS) = $(WORKER_ID)",
+				simple_table_name);
+	}
+	else if (strcmp(relkind, "r") == 0 ||	/* RELKIND_RELATION */
+			 strcmp(relkind, "m") == 0 ||	/* RELKIND_MATVIEW */
+			 strcmp(relkind, "t") == 0)		/* RELKIND_TOASTVALUE */
+	{
+		/* determine the block size per client */
+		uint64_t	num_blocks;
+		uint64_t	per_client;
+		char	   *conds;
+		char	   *pos;
+
+		sprintf(sql,
+				"SELECT GREATEST(pg_relation_size('%s'::regclass), %lu)"
+				"     / current_setting('block_size')::int",
+				simple_table_name, batch_segment_sz * num_worker_threads);
+		res = PQexec(conn, sql);
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			Elog("failed on [%s]: %s", sql, PQresultErrorMessage(res));
+		num_blocks = atol(PQgetvalue(res, 0, 0));
+		per_client = num_blocks / num_worker_threads;
+		PQclear(res);
+		assert(per_client * (num_worker_threads - 1) < UINT_MAX);
+
+		pos = conds = alloca(100 * num_worker_threads);
+		for (int i=1; i <= num_worker_threads; i++)
+		{
+			if (i == 1)
+				pos += sprintf(pos, "ctid < '(%lu,0)'::tid",
+							   per_client);
+			else if (i == num_worker_threads)
+				pos += sprintf(pos, "\tctid >= '(%lu,0)'::tid",
+							   per_client * (i-1));
+			else
+				pos += sprintf(pos, "\tctid >= '(%lu,0)'::tid AND ctid < '(%lu,0)'::tid",
+							   per_client * (i-1),
+							   per_client * i);
+		}
+		parseParallelDistKeys(conds, "\t");
+		sprintf(sql, "SELECT * FROM %s WHERE $(PARALLEL_KEY)",
+				simple_table_name);
+	}
+	else
+	{
+		Elog("unable to dump '%s' [%s] using -t, use -c instead",
+			 simple_table_name, __RELKIND_LABEL(relkind));
+	}
+	return pstrdup(sql);
+}
+
+char *
+sqldb_build_simple_command(void *sqldb_state,
+						   const char *simple_table_name,
+						   int num_worker_threads,
+						   size_t batch_segment_sz)
+{
+	assert(num_worker_threads > 0);
+	if (num_worker_threads == 1)
+	{
+		char   *buf = alloca(strlen(simple_table_name) + 80);
+
+		sprintf(buf, "SELECT * FROM %s", simple_table_name);
+		return pstrdup(buf);
+	}
+	return __sqldb_build_simple_command((PGSTATE *)sqldb_state,
+										simple_table_name,
+										num_worker_threads,
+										batch_segment_sz);
 }

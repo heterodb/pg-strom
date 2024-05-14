@@ -7,9 +7,9 @@ MODULE_big := pg_strom
 CREATEDB_CMD   := $(shell $(PG_CONFIG) --bindir)/createdb
 DROPDB_CMD     := $(shell $(PG_CONFIG) --bindir)/dropdb
 PSQL           := $(shell $(PG_CONFIG) --bindir)/psql
-PG2ARROW_CMD   := $(shell cd ../arrow-tools; pwd)/pg2arrow
-ARROW2CSV_CMD  := $(shell cd ../arrow-tools; pwd)/arrow2csv
-DBGEN_SSBM_CMD := $(shell cd ./ssbm; pwd)/dbgen-ssbm
+PG2ARROW_CMD   := $(shell realpath ../arrow-tools/pg2arrow)
+ARROW2CSV_CMD  := $(shell realpath ../arrow-tools/arrow2csv)
+DBGEN_SSBM_CMD := $(shell realpath ./ssbm/dbgen-ssbm)
 ARROW_TEST_DATA_DIR    := $(shell pwd)/data
 
 REGRESS_DBNAME := contrib_regression_$(MODULE_big)

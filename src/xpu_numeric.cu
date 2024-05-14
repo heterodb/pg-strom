@@ -925,13 +925,15 @@ pgfn_numeric_div(XPU_PGFUNCTION_ARGS)
 				div = -div;
 			}
 			assert(rem >= 0 && div >= 0);
-
 			for (;;)
 			{
 				x = rem / div;
 				ival = 10 * ival + x;
 				rem -= x * div;
-				if (rem == 0)
+				/*
+				 * 999,999,999,999,999 = 0x03 8D7E A4C6 7FFF
+				 */
+				if (rem == 0 || (ival >> 50) != 0)
 					break;
 				rem *= 10;
 				weight++;

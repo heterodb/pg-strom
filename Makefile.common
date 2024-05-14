@@ -1,6 +1,7 @@
 PG_CONFIG ?= pg_config
-VERSION ?= 5.0
-RELEASE ?= 4
+VERSION ?= 5.1
+RELEASE ?= 2
+GITHASH_IF_NOT_GIVEN := HEAD
 
 #
 # PostgreSQL major version
@@ -23,7 +24,7 @@ endif
 ifeq ($(GITHASH),)
 GITHASH := $(shell git rev-parse HEAD 2>/dev/null)
 ifeq ($(GITHASH),)
-GITHASH := HEAD
+GITHASH := $(GITHASH_IF_NOT_GIVEN)
 else
 ifeq ($(shell git diff | wc -l),0)
 PGSTROM_GITHASH := $(GITHASH)

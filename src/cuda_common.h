@@ -147,14 +147,14 @@ typedef struct {
 #define KERN_GPUTASK_LENGTH(kvecs_ndims,kvecs_bufsz,grid_sz,block_sz)		\
 	(__KERN_GPUTASK_WARP_OFFSET((kvecs_ndims),(kvecs_bufsz)) +				\
 	 KERN_WARP_CONTEXT_LENGTH((kvecs_ndims),(kvecs_bufsz)) * (grid_sz) +	\
-	 MAXALIGN(sizeof(uint32_t) * (grid_sz) * (block_sz) * (kvecs_ndims)) +	\
+	 MAXALIGN(sizeof(uint64_t) * (grid_sz) * (block_sz) * (kvecs_ndims)) +	\
 	 MAXALIGN(sizeof(bool)     * (grid_sz) * (block_sz) * (kvecs_ndims)))
 
 #if defined(__CUDACC__)
 INLINE_FUNCTION(void)
 INIT_KERN_GPUTASK_SUBFIELDS(kern_gputask *kgtask,
 							kern_warp_context **p_wp_context,
-							uint32_t **p_lstate_array,
+							uint64_t **p_lstate_array,
 							bool **p_matched_array)
 {
 	uint32_t	wp_unitsz;
@@ -168,8 +168,8 @@ INIT_KERN_GPUTASK_SUBFIELDS(kern_gputask *kgtask,
 	*p_wp_context = (kern_warp_context *)(pos + wp_unitsz * get_group_id());
 	pos += wp_unitsz * get_num_groups();
 
-	*p_lstate_array  = (uint32_t *)pos;
-	pos += MAXALIGN(sizeof(uint32_t) * get_global_size() * kgtask->n_rels);
+	*p_lstate_array  = (uint64_t *)pos;
+	pos += MAXALIGN(sizeof(uint64_t) * get_global_size() * kgtask->n_rels);
 
 	*p_matched_array = (bool *)pos;
 	pos += MAXALIGN(sizeof(bool)     * get_global_size() * kgtask->n_rels);

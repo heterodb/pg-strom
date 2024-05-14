@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>PG-Strom v5.1 - PG-Strom Manual</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+        <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+        <link href="../custom.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "PG-Strom v5.1";
+        var mkdocs_page_input_path = "release_v5.1.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> PG-Strom Manual
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<a href="../ja/release_v5.1/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Tutorial</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Advanced Features</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fluentd/">connect with Fluentd</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">References</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Release Note</span></p>
+              <ul class="current">
+                  <li class="toctree-l1 current"><a class="reference internal current" href="./">PG-Strom v5.1</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#prerequisites">Prerequisites</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#partition-wise-gpujoingpupreagg">Partition-wise GpuJoin/GpuPreAgg</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#build-gpu-code-on-startup">Build GPU code on startup</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#pg2arrow-parallel-execution">pg2arrow parallel execution</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">PG-Strom Manual</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Release Note</li>
+      <li class="breadcrumb-item active">PG-Strom v5.1</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="pg-strom-v51-release">PG-Strom v5.1 Release</h1>
+<div style="text-align: right;">PG-Strom Development Team (17-Apr-2024)</div>
+
+<h2 id="overview">Overview</h2>
+<p>Major changes in PG-Strom v5.1 are as follows:</p>
+<ul>
+<li>Added support for partition-wise GPU-Join/PreAgg.</li>
+<li>GPU code is now built in the execution environment at startup.</li>
+<li>pg2arrow now support parallel execution.</li>
+<li>CUDA Stack size is now set adaptically.</li>
+<li>Cumulative bug fixes</li>
+</ul>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>PostgreSQL v15.x, v16.x</li>
+<li>CUDA Toolkit 12.2 or later</li>
+<li>Linux distributions supported by CUDA Toolkit</li>
+<li>Intel x86 64bit architecture (x86_64)</li>
+<li>NVIDIA GPU CC 6.0 or later (Pascal at least; Volta or newer is recommended)</li>
+</ul>
+<h2 id="partition-wise-gpujoingpupreagg">Partition-wise GpuJoin/GpuPreAgg</h2>
+<p>Support for PostgreSQL partitions itself was also included in PG-Strom v3.0, but execution plans often could not be created properly, therefore it could not be moved out of its experimental status.
+Then, in PG-Strom v5.1, we fundamentally revised the internal design, re-implemented it, and incorporated it as an official feature again.</p>
+<p>If the <code>lineorder</code> table below is partitioned and the <code>date1</code> table is a non-partitioned table, previously all the data read from the partitioned tables under <code>lineorder</code> must be joined with <code>date1</code> table after the consolidation of all the partition leafs by the <code>Append</code> node.</p>
+<p>Usually, PG-Strom bypasses the CPU and loads data from the NVME-SSD to the GPU to perform various SQL processing (GPU-Direct SQL), so the data must be returned to the CPU before JOIN. It has been a big penalty.</p>
+<pre><code>ssbm=# explain (costs off)
+select sum(lo_extendedprice*lo_discount) as revenue
+from lineorder,date1
+where lo_orderdate = d_datekey
+and d_year = 1993
+and lo_discount between 1 and 3
+and lo_quantity &lt; 25;
+                                                                              QUERY PLAN
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   -&gt;  Hash Join
+         Hash Cond: (lineorder.lo_orderdate = date1.d_datekey)
+         -&gt;  Append
+               -&gt;  Custom Scan (GpuScan) on lineorder__p1992 lineorder_1
+                     GPU Projection: lo_extendedprice, lo_discount, lo_orderdate
+                     GPU Scan Quals: ((lo_discount &gt;= '1'::numeric) AND (lo_discount &lt;= '3'::numeric) AND (lo_quantity &lt; '25'::numeric)) [rows: 91250920 -&gt; 11911380]
+                     GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Custom Scan (GpuScan) on lineorder__p1993 lineorder_2
+                     GPU Projection: lo_extendedprice, lo_discount, lo_orderdate
+                     GPU Scan Quals: ((lo_discount &gt;= '1'::numeric) AND (lo_discount &lt;= '3'::numeric) AND (lo_quantity &lt; '25'::numeric)) [rows: 91008500 -&gt; 11980460]
+                     GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Custom Scan (GpuScan) on lineorder__p1994 lineorder_3
+                     GPU Projection: lo_extendedprice, lo_discount, lo_orderdate
+                     GPU Scan Quals: ((lo_discount &gt;= '1'::numeric) AND (lo_discount &lt;= '3'::numeric) AND (lo_quantity &lt; '25'::numeric)) [rows: 91044060 -&gt; 12150700]
+                     GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Custom Scan (GpuScan) on lineorder__p1995 lineorder_4
+                     GPU Projection: lo_extendedprice, lo_discount, lo_orderdate
+                     GPU Scan Quals: ((lo_discount &gt;= '1'::numeric) AND (lo_discount &lt;= '3'::numeric) AND (lo_quantity &lt; '25'::numeric)) [rows: 91011720 -&gt; 11779920]
+                     GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Custom Scan (GpuScan) on lineorder__p1996 lineorder_5
+                     GPU Projection: lo_extendedprice, lo_discount, lo_orderdate
+                     GPU Scan Quals: ((lo_discount &gt;= '1'::numeric) AND (lo_discount &lt;= '3'::numeric) AND (lo_quantity &lt; '25'::numeric)) [rows: 91305650 -&gt; 11942810]
+                     GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Custom Scan (GpuScan) on lineorder__p1997 lineorder_6
+                     GPU Projection: lo_extendedprice, lo_discount, lo_orderdate
+                     GPU Scan Quals: ((lo_discount &gt;= '1'::numeric) AND (lo_discount &lt;= '3'::numeric) AND (lo_quantity &lt; '25'::numeric)) [rows: 91049100 -&gt; 12069740]
+                     GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Custom Scan (GpuScan) on lineorder__p1998 lineorder_7
+                     GPU Projection: lo_extendedprice, lo_discount, lo_orderdate
+                     GPU Scan Quals: ((lo_discount &gt;= '1'::numeric) AND (lo_discount &lt;= '3'::numeric) AND (lo_quantity &lt; '25'::numeric)) [rows: 53370560 -&gt; 6898138]
+                     GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on lineorder__p1999 lineorder_8
+                     Filter: ((lo_discount &gt;= '1'::numeric) AND (lo_discount &lt;= '3'::numeric) AND (lo_quantity &lt; '25'::numeric))
+         -&gt;  Hash
+               -&gt;  Seq Scan on date1
+                     Filter: (d_year = 1993)
+(37 rows)
+</code></pre>
+<p>In PG-Strom v5.1, it is now possible to push-down JOINs with non-partitioned tables to partitioned child tables. In some cases, it is also possible to complete the GROUP-BY processing and then return much smaller results to CPU.
+For example, in the example below, 70 million rows extracted from a total of 600 million rows in the partitioned child tables. By performing a JOIN with the non-partitioned table <code>date1</code> and then aggregation function <code>SUM()</code> pushed-down to the partitioned child tables, the CPU only needs to process 8 rows.</p>
+<p>Although there is a disadvantage that reading on the INNER side occurs multiple times (* This will be fixed in a future version), this type of rewriting will significantly reduce the amount of data that must be processed by the CPU, contributing to improved processing speed. To do.</p>
+<pre><code>ssbm=# explain (costs off)
+select sum(lo_extendedprice*lo_discount) as revenue
+from lineorder,date1
+where lo_orderdate = d_datekey
+and d_year = 1993
+and lo_discount between 1 and 3
+and lo_quantity &lt; 25;
+                                               QUERY PLAN
+----------------------------------------------------------------------------------------------------
+ Aggregate
+   -&gt;  Append
+         -&gt;  Custom Scan (GpuPreAgg) on lineorder__p1992 lineorder_1
+               GPU Projection: pgstrom.psum(((lineorder_1.lo_extendedprice * lineorder_1.lo_discount))::double precision)
+               GPU Scan Quals: ((lineorder_1.lo_discount &gt;= '1'::numeric) AND (lineorder_1.lo_discount &lt;= '3'::numeric) AND (lineorder_1.lo_quantity &lt; '25'::numeric)) [rows: 91250920 -&gt; 11911380]
+               GPU Join Quals [1]: (lineorder_1.lo_orderdate = date1.d_datekey) ... [nrows: 11911380 -&gt; 1700960]
+               GPU Outer Hash [1]: lineorder_1.lo_orderdate
+               GPU Inner Hash [1]: date1.d_datekey
+               Inner Siblings-Id: 2
+               GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on date1
+                     Filter: (d_year = 1993)
+         -&gt;  Custom Scan (GpuPreAgg) on lineorder__p1993 lineorder_2
+               GPU Projection: pgstrom.psum(((lineorder_2.lo_extendedprice * lineorder_2.lo_discount))::double precision)
+               GPU Scan Quals: ((lineorder_2.lo_discount &gt;= '1'::numeric) AND (lineorder_2.lo_discount &lt;= '3'::numeric) AND (lineorder_2.lo_quantity &lt; '25'::numeric)) [rows: 91008500 -&gt; 11980460]
+               GPU Join Quals [1]: (lineorder_2.lo_orderdate = date1.d_datekey) ... [nrows: 11980460 -&gt; 1710824]
+               GPU Outer Hash [1]: lineorder_2.lo_orderdate
+               GPU Inner Hash [1]: date1.d_datekey
+               Inner Siblings-Id: 2
+               GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on date1
+                     Filter: (d_year = 1993)
+         -&gt;  Custom Scan (GpuPreAgg) on lineorder__p1994 lineorder_3
+               GPU Projection: pgstrom.psum(((lineorder_3.lo_extendedprice * lineorder_3.lo_discount))::double precision)
+               GPU Scan Quals: ((lineorder_3.lo_discount &gt;= '1'::numeric) AND (lineorder_3.lo_discount &lt;= '3'::numeric) AND (lineorder_3.lo_quantity &lt; '25'::numeric)) [rows: 91044060 -&gt; 12150700]
+               GPU Join Quals [1]: (lineorder_3.lo_orderdate = date1.d_datekey) ... [nrows: 12150700 -&gt; 1735135]
+               GPU Outer Hash [1]: lineorder_3.lo_orderdate
+               GPU Inner Hash [1]: date1.d_datekey
+               Inner Siblings-Id: 2
+               GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on date1
+                     Filter: (d_year = 1993)
+         -&gt;  Custom Scan (GpuPreAgg) on lineorder__p1995 lineorder_4
+               GPU Projection: pgstrom.psum(((lineorder_4.lo_extendedprice * lineorder_4.lo_discount))::double precision)
+               GPU Scan Quals: ((lineorder_4.lo_discount &gt;= '1'::numeric) AND (lineorder_4.lo_discount &lt;= '3'::numeric) AND (lineorder_4.lo_quantity &lt; '25'::numeric)) [rows: 91011720 -&gt; 11779920]
+               GPU Join Quals [1]: (lineorder_4.lo_orderdate = date1.d_datekey) ... [nrows: 11779920 -&gt; 1682188]
+               GPU Outer Hash [1]: lineorder_4.lo_orderdate
+               GPU Inner Hash [1]: date1.d_datekey
+               Inner Siblings-Id: 2
+               GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on date1
+                     Filter: (d_year = 1993)
+         -&gt;  Custom Scan (GpuPreAgg) on lineorder__p1996 lineorder_5
+               GPU Projection: pgstrom.psum(((lineorder_5.lo_extendedprice * lineorder_5.lo_discount))::double precision)
+               GPU Scan Quals: ((lineorder_5.lo_discount &gt;= '1'::numeric) AND (lineorder_5.lo_discount &lt;= '3'::numeric) AND (lineorder_5.lo_quantity &lt; '25'::numeric)) [rows: 91305650 -&gt; 11942810]
+               GPU Join Quals [1]: (lineorder_5.lo_orderdate = date1.d_datekey) ... [nrows: 11942810 -&gt; 1705448]
+               GPU Outer Hash [1]: lineorder_5.lo_orderdate
+               GPU Inner Hash [1]: date1.d_datekey
+               Inner Siblings-Id: 2
+               GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on date1
+                     Filter: (d_year = 1993)
+         -&gt;  Custom Scan (GpuPreAgg) on lineorder__p1997 lineorder_6
+               GPU Projection: pgstrom.psum(((lineorder_6.lo_extendedprice * lineorder_6.lo_discount))::double precision)
+               GPU Scan Quals: ((lineorder_6.lo_discount &gt;= '1'::numeric) AND (lineorder_6.lo_discount &lt;= '3'::numeric) AND (lineorder_6.lo_quantity &lt; '25'::numeric)) [rows: 91049100 -&gt; 12069740]
+               GPU Join Quals [1]: (lineorder_6.lo_orderdate = date1.d_datekey) ... [nrows: 12069740 -&gt; 1723574]
+               GPU Outer Hash [1]: lineorder_6.lo_orderdate
+               GPU Inner Hash [1]: date1.d_datekey
+               Inner Siblings-Id: 2
+               GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on date1
+                     Filter: (d_year = 1993)
+         -&gt;  Custom Scan (GpuPreAgg) on lineorder__p1998 lineorder_7
+               GPU Projection: pgstrom.psum(((lineorder_7.lo_extendedprice * lineorder_7.lo_discount))::double precision)
+               GPU Scan Quals: ((lineorder_7.lo_discount &gt;= '1'::numeric) AND (lineorder_7.lo_discount &lt;= '3'::numeric) AND (lineorder_7.lo_quantity &lt; '25'::numeric)) [rows: 53370560 -&gt; 6898138]
+               GPU Join Quals [1]: (lineorder_7.lo_orderdate = date1.d_datekey) ... [nrows: 6898138 -&gt; 985063]
+               GPU Outer Hash [1]: lineorder_7.lo_orderdate
+               GPU Inner Hash [1]: date1.d_datekey
+               Inner Siblings-Id: 2
+               GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on date1
+                     Filter: (d_year = 1993)
+         -&gt;  Custom Scan (GpuPreAgg) on lineorder__p1999 lineorder_8
+               GPU Projection: pgstrom.psum(((lineorder_8.lo_extendedprice * lineorder_8.lo_discount))::double precision)
+               GPU Scan Quals: ((lineorder_8.lo_discount &gt;= '1'::numeric) AND (lineorder_8.lo_discount &lt;= '3'::numeric) AND (lineorder_8.lo_quantity &lt; '25'::numeric)) [rows: 150 -&gt; 1]
+               GPU Join Quals [1]: (lineorder_8.lo_orderdate = date1.d_datekey) ... [nrows: 1 -&gt; 1]
+               GPU Outer Hash [1]: lineorder_8.lo_orderdate
+               GPU Inner Hash [1]: date1.d_datekey
+               Inner Siblings-Id: 2
+               GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on date1
+                     Filter: (d_year = 1993)
+(82 rows)
+</code></pre>
+<h2 id="build-gpu-code-on-startup">Build GPU code on startup</h2>
+<p>Previous versions of PG-Strom was distributing pre-built binary modules for GPUs.
+Although this is simple, the GPU binary module often raised a runtime error depending on the combination of CUDA Toolkit and NVIDIA driver versions in the PG-Strom (PostgreSQL) execution environment.
+Typically, this is when the execution environment has an older version of the CUDA Toolkit or NVIDIA driver installed than the environment in which the RPM package was built.</p>
+<p>PG-Strom v5.1 has been changed to check the GPU source code and CUDA Toolkit version at startup, and build a GPU binary module if there are any difference. With this fix, PG-Strom can now utilize GPU devices and GPU binary modules for CUDA Toolkit in the execution environment.</p>
+<h2 id="pg2arrow-parallel-execution">pg2arrow parallel execution</h2>
+<p><code>pg2arrow</code> now supports the new <code>-n|--num-workers</code> and <code>-k|--parallel-keys</code> options.</p>
+<p><code>-n N_WORKERS</code> option launches the specified number of threads to connect to PostgreSQL for each, execute queries in parallel, and write the results to the Apache Arrow file.
+Queries can contain the special token <code>$(N_WORKERS)</code> and <code>$(WORKER_ID)</code>, which will be replaced by the number of workers and worker-specific ID values, respectively, when querying PostgreSQL.
+It is user's responsibility to ensure the tuples read by each worker thread do not overlap or are missing.</p>
+<p>Another <code>-k|--parallel-key</code> option starts a worker thread for each comma-separated key value given by the argument, and replaces <code>$(PARALLEL_KEY)</code> with the key in the query.
+The worker thread runs this query for each, then write the result as an Apache Arrow file.</p>
+<p>For example, if the <code>lineorder</code> table is partitioned and there are child tables <code>lineorder__sun</code>, <code>lineorder__mon</code>, ... <code>lineorder__sat</code>, each worker thread scans each child table of the partition according to the keys given by the <code>-k sun,mon,tue,wed,thu,fri,sat</code> option. This parallel key is replaced by the <code>$(PARALLEL_KEY)</code> in the query given by <code>-c 'SELECT * FROM lineorder__$(PARALLEL_KEY)'</code> option. It launches 7 worker threads which shall scan the partitioned child table for each.</p>
+<pre><code>$ pg2arrow -d ssbm -c 'SELECT * FROM lineorder__$(PARALLEL_KEY)' -o /path/to/f_lineorder.arrow -k=sun,mon,tue,wed,thu,fri,sat --progress
+worker:1 SQL=[SELECT * FROM lineorder__sun]
+worker:3 SQL=[SELECT * FROM lineorder__tue]
+worker:2 SQL=[SELECT * FROM lineorder__mon]
+worker:4 SQL=[SELECT * FROM lineorder__wed]
+worker:5 SQL=[SELECT * FROM lineorder__thu]
+   :
+   :
+</code></pre>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../ref_params/" class="btn btn-neutral float-left" title="GUC Parameters"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../release_v5.0/" class="btn btn-neutral float-right" title="PG-Strom v5.0">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../ref_params/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../release_v5.0/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

@@ -836,8 +836,7 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 	kern_tupitem   *tupitem;
 	int32_t			tupsz;
 	uint32_t		required;
-	uint32_t		usage;
-	size_t			total_sz;
+	uint64_t		offset;
 
 	assert(kds_final->format == KDS_FORMAT_ROW &&
 		   kds_final->hash_nslots == 0);
@@ -846,28 +845,21 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 									 kexp_groupby_actions);
 	assert(tupsz > 0);
 	required = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
-	assert(required < 1000);
-	total_sz = (KDS_HEAD_LENGTH(kds_final) +
-				MAXALIGN(sizeof(uint32_t)) +
-				required + __kds_unpack(kds_final->usage));
-	if (total_sz > kds_final->length)
+	offset = __atomic_add_uint64(&kds_final->__usage64, required);
+	if (!__KDS_CHECK_OVERFLOW(kds_final, 1, offset + required))
 		return NULL;	/* out of memory */
-	usage = __atomic_add_uint32(&kds_final->usage, __kds_packed(required));
+	offset += required;
 	tupitem = (kern_tupitem *)((char *)kds_final
 							   + kds_final->length
-							   - __kds_unpack(usage)
-							   - required);
-
+							   - offset);
 	__writeOutOneTuplePreAgg(kcxt, kds_final,
 							 &tupitem->htup,
 							 kexp_groupby_actions);
 	tupitem->t_len = tupsz;
 	tupitem->rowid = 0;
 	__threadfence();
-	__atomic_write_uint32(KDS_GET_ROWINDEX(kds_final),
-						  __kds_packed((char *)kds_final
-									   + kds_final->length
-									   - (char *)tupitem));
+	__atomic_write_uint64(KDS_GET_ROWINDEX(kds_final), offset);
+
 	return tupitem;
 }
 
@@ -958,14 +950,11 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 						kern_expression *kexp_groupby_actions)
 {
 	kern_hashitem  *hitem;
-	int32_t			tupsz;
-	union {
-		uint64_t	u64;
-		struct {
-			uint32_t nitems;
-			uint32_t usage;
-		} kds;
-	} oldval, curval, newval;
+	int32_t			tupsz, __sz;
+	uint64_t		__usage;
+	uint32_t		__nitems_old;
+	uint32_t		__nitems_cur;
+	uint32_t		__nitems_new;
 
 	assert(kds_final->format == KDS_FORMAT_HASH &&
 		   kds_final->hash_nslots > 0);
@@ -973,65 +962,52 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 	tupsz = __writeOutOneTuplePreAgg(kcxt, kds_final, NULL,
 									 kexp_groupby_actions);
 	assert(tupsz > 0);
-
-	/* expand kds_final */
-	curval.u64 = __volatileRead((uint64_t *)&kds_final->nitems);
-	for (;;)
-	{
-		uintptr_t	tup_addr;
-		size_t		total_sz;
-
-		/*
-		 * NOTE: A L1 Cache Line should not be shared by multiple tuples.
-		 *
-		 * When we try to add a new tuple on the same L1 cache line that is
-		 * partially used by other tuples, this cache line may be already
-		 * loaded to other SMs L1 cache.
-		 * At CUDA 12.1, we observed the newer tuple that is written in this
-		 * L1 cache line is not visible to other SMs. To avoid the problem,
-		 * we ensure one L1 cache line (128B) will never store the multiple
-		 * tuples. Only kds_final of GpuPreAgg will refer the tuple once
-		 * written by other threads.
-		 */
-		tup_addr = TYPEALIGN_DOWN(CUDA_L1_CACHELINE_SZ,
-								  (uintptr_t)kds_final
-								  + kds_final->length
-								  - __kds_unpack(curval.kds.usage)
-								  - (offsetof(kern_hashitem, t.htup) + tupsz));
-		newval.kds.nitems = curval.kds.nitems + 1;
-		newval.kds.usage  = __kds_packed((uintptr_t)kds_final
-										 + kds_final->length
-										 - tup_addr);
-		total_sz = (KDS_HEAD_LENGTH(kds_final) +
-					MAXALIGN(sizeof(uint32_t) * (kds_final->hash_nslots +
-												 newval.kds.nitems)) +
-					__kds_unpack(newval.kds.usage));
-		if (total_sz > kds_final->length)
+	/*
+	 * expand kds_final buffer
+	 * ------------
+	 * NOTE: A L1 Cache Line should not be shared by multiple tuples.
+	 *
+	 * When we try to add a new tuple on the same L1 cache line that is
+	 * partially used by other tuples, this cache line may be already
+	 * loaded to other SMs L1 cache.
+	 * At CUDA 12.1, we observed the newer tuple that is written in this
+	 * L1 cache line is not visible to other SMs. To avoid the problem,
+	 * we ensure one L1 cache line (128B) will never store the multiple
+	 * tuples. Only kds_final of GpuPreAgg will refer the tuple once
+	 * written by other threads.
+	 */
+	__sz = TYPEALIGN(CUDA_L1_CACHELINE_SZ, tupsz);
+	__usage = __atomic_add_uint64(&kds_final->__usage64, __sz);
+	__nitems_cur = __volatileRead(&kds_final->nitems);
+	do {
+		__nitems_old = __nitems_cur;
+		__nitems_new = __nitems_cur + 1;
+		if (!__KDS_CHECK_OVERFLOW(kds_final,
+								  __nitems_new,
+								  __usage + __sz))
 			return NULL;	/* out of memory */
-		oldval.u64 = __atomic_cas_uint64((uint64_t *)&kds_final->nitems,
-										 curval.u64,
-										 newval.u64);
-		if (oldval.u64 == curval.u64)
-			break;
-		curval.u64 = oldval.u64;
-	}
+	} while ((__nitems_cur = __atomic_cas_uint32(&kds_final->nitems,
+												 __nitems_old,
+												 __nitems_new)) != __nitems_old);
+	/* ok, both nitems and usage are valid to write */
 	hitem = (kern_hashitem *)((char *)kds_final
 							  + kds_final->length
-							  - __kds_unpack(newval.kds.usage));
+							  - __usage
+							  - __sz);
 	__writeOutOneTuplePreAgg(kcxt, kds_final,
 							 &hitem->t.htup,
 							 kexp_groupby_actions);
 	hitem->t.t_len = tupsz;
-	hitem->t.rowid = newval.kds.nitems - 1;
+	hitem->t.rowid = __nitems_new - 1;
 	/*
 	 * all setup stuff must be completed before its row-index is visible
 	 * to other threads in the device.
 	 */
 	__threadfence();
 	KDS_GET_ROWINDEX(kds_final)[hitem->t.rowid]
-		= __kds_packed((char *)kds_final
-					   + kds_final->length
-					   - (char *)&hitem->t);
+		= ((char *)kds_final
+		   + kds_final->length
+		   - (char *)&hitem->t);
 	return hitem;
 }
 
@@ -1388,9 +1364,9 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 	do {
 		if (!XPU_DATUM_ISNULL(&hash) && !hitem)
 		{
-			uint32_t   *hslot = KDS_GET_HASHSLOT(kds_final, hash.value);
-			uint32_t	hoffset;
-			uint32_t	saved;
+			uint64_t   *hslot = KDS_GET_HASHSLOT(kds_final, hash.value);
+			uint64_t	hoffset;
+			uint64_t	saved;
 			bool		has_lock = false;
 			xpu_bool_t	status;
 
@@ -1404,7 +1380,6 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 
 				if (hitem->hash != hash.value)
 					continue;
-
 				kcxt->kmode_compare_nulls = true;
 				ExecLoadVarsHeapTuple(kcxt, kexp_groupby_keyload,
 									  -2,
@@ -1425,8 +1400,8 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 				{
 					/* try lock */
 					saved = __volatileRead(hslot);
-					if (saved != UINT_MAX &&
-						__atomic_cas_uint32(hslot, saved, UINT_MAX) == saved)
+					if (saved != ULONG_MAX &&
+						__atomic_cas_uint64(hslot, saved, ULONG_MAX) == saved)
 					{
 						has_lock = true;
 						hoffset = saved;
@@ -1440,7 +1415,7 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 					if (hitem)
 					{
 						/* insert and unlock */
-						size_t		__offset;
+						uint64_t	__offset;
 
 						hitem->hash = hash.value;
 						hitem->next = saved;
@@ -1448,12 +1423,12 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 						__offset = ((char *)kds_final
 									+ kds_final->length
 									- (char *)hitem);
-						__atomic_write_uint32(hslot, __kds_packed(__offset));
+						__atomic_write_uint64(hslot, __offset);
 					}
 					else
 					{
 						/* out of the memory, and unlcok */
-						__atomic_write_uint32(hslot, saved);
+						__atomic_write_uint64(hslot, saved);
 						*p_try_suspend = true;
 					}
 					has_lock = false;
@@ -1462,7 +1437,7 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 			else if (has_lock)
 			{
 				/* unlock */
-				__atomic_write_uint32(hslot, saved);
+				__atomic_write_uint64(hslot, saved);
 			}
 		}
 		/* suspend the kernel? */
@@ -1652,7 +1627,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 								 const kern_expression *kexp_actions,
 								 const char *prepfn_buffer)
 {
-	int			nattrs = kds_final->ncols;
+	int			nattrs = Min(kds_final->ncols, kexp_actions->u.pagg.nattrs);
 	uint32_t	t_hoff, nbytes;
 	const char *pos = prepfn_buffer;
 

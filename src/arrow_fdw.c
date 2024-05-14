@@ -665,6 +665,7 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 		bool		__isnull = false;
 		int128_t	__min = __atoi128(__trim(tok1), &__isnull);
 		int128_t	__max = __atoi128(__trim(tok2), &__isnull);
+		int64_t		__drift;
 
 		if (__isnull)
 		{
@@ -734,23 +735,24 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 				break;
 
 			case ArrowNodeTag__Timestamp:
+				__drift = (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY;
 				switch (field->type.Timestamp.unit)
 				{
 					case ArrowTimeUnit__Second:
-						stat_values[index].min.datum = __min * 1000000L;
-						stat_values[index].max.datum = __max * 1000000L;
+						stat_values[index].min.datum = __min * 1000000L - __drift;
+						stat_values[index].max.datum = __max * 1000000L - __drift;
 						break;
 					case ArrowTimeUnit__MilliSecond:
-						stat_values[index].min.datum = __min * 1000L;
-						stat_values[index].max.datum = __max * 1000L;
+						stat_values[index].min.datum = __min * 1000L - __drift;
+						stat_values[index].max.datum = __max * 1000L - __drift;
 						break;
 					case ArrowTimeUnit__MicroSecond:
-						stat_values[index].min.datum = __min;
-						stat_values[index].max.datum = __max;
+						stat_values[index].min.datum = __min - __drift;
+						stat_values[index].max.datum = __max - __drift;
 						break;
 					case ArrowTimeUnit__NanoSecond:
-						stat_values[index].min.datum = __min / 1000;
-						stat_values[index].max.datum = __max / 1000;
+						stat_values[index].min.datum = __min / 1000 - __drift;
+						stat_values[index].max.datum = __max / 1000 - __drift;
 						break;
 					default:
 						goto bailout;
@@ -922,12 +924,18 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 		var = lsecond(op->args);
 		arg = linitial(op->args);
 	}
-	/* Is it VAR <OPER> ARG form? */
+	/*
+	 * Is it VAR <OPER> ARG form?
+	 *
+	 * MEMO: expression nodes (like Var) might be rewritten to INDEX_VAR +
+	 * resno on the custom_scan_tlist by setrefs.c, so we should reference
+	 * Var::varnosyn and ::varattnosyn, instead of ::varno and ::varattno.
+	 */
 	if (!IsA(var, Var) || !OidIsValid(opcode))
 		return false;
-	if (var->varno != scan->scanrelid)
+	if (var->varnosyn != scan->scanrelid)
 		return false;
-	if (!bms_is_member(var->varattno, as_hint->stat_attrs))
+	if (!bms_is_member(var->varattnosyn, as_hint->stat_attrs))
 		return false;
 	if (contain_var_clause(arg) ||
 		contain_volatile_functions(arg))
@@ -1052,6 +1060,7 @@ execInitArrowStatsHint(ScanState *ss, List *outer_quals, Bitmapset *stat_attrs)
 	Expr		   *eval_expr;
 	ListCell	   *lc;
 
+	outer_quals = fixup_scanstate_expressions(ss, outer_quals);
 	as_hint = palloc0(sizeof(arrowStatsHint));
 	as_hint->stat_attrs = stat_attrs;
 	foreach (lc, outer_quals)
@@ -1964,8 +1973,28 @@ BuildArrowFileState(Relation frel, const char *filename, Bitmapset **p_stat_attr
 	{
 		Form_pg_attribute	attr = TupleDescAttr(tupdesc, j);
 		RecordBatchFieldState *rb_field = &rb_state->fields[j];
+		bool		compatible = false;
 
-		if (attr->atttypid != rb_field->atttypid)
+		if (attr->atttypid == rb_field->atttypid)
+			compatible = true;
+		else
+		{
+			/* check for binary compatible data types */
+			HeapTuple	htup;
+
+			htup = SearchSysCache2(CASTSOURCETARGET,
+								   ObjectIdGetDatum(rb_field->atttypid),
+								   ObjectIdGetDatum(attr->atttypid));
+			if (HeapTupleIsValid(htup))
+			{
+				Form_pg_cast cast = (Form_pg_cast) GETSTRUCT(htup);
+
+				if (cast->castmethod == COERCION_METHOD_BINARY)
+					compatible = true;
+				ReleaseSysCache(htup);
+			}
+		}
+		if (!compatible)
 			elog(ERROR, "arrow_fdw: foreign table '%s' column '%s' (%s) is not compatible to the arrow field (%s) in the '%s'",
 				 RelationGetRelationName(frel),
 				 NameStr(attr->attname),
@@ -2745,6 +2774,9 @@ ArrowGetForeignPaths(PlannerInfo *root,
 									NIL,	/* no pathkeys */
 									required_outer,
 									NULL,	/* no extra plan */
+#if PG_VERSION_NUM >= 170000
+									NIL,	/* no restrict-info of Join push-down */
+#endif
 									NIL);	/* no particular private */
 	cost_arrow_fdw_seqscan(&fpath->path,
 						   root,
@@ -2772,6 +2804,9 @@ ArrowGetForeignPaths(PlannerInfo *root,
 										NIL,	/* no pathkeys */
 										required_outer,
 										NULL,	/* no extra plan */
+#if PG_VERSION_NUM >= 170000
+										NIL,	/* no restrict-info of Join push-down */
+#endif
 										NIL);	/* no particular private */
 		fpath->path.parallel_aware = true;
 		cost_arrow_fdw_seqscan(&fpath->path,

@@ -39,6 +39,8 @@ struct gpuContext
 	gpuMemoryPool	pool_raw;
 	gpuMemoryPool	pool_managed;
 	bool			cuda_profiler_started;
+	volatile uint32_t cuda_stack_limit;	/* current configuration */
+	pthread_mutex_t	cuda_setlimit_lock;
 	int				gpumain_shmem_sz_dynamic;
 	/* GPU client */
 	pthread_mutex_t	client_lock;
@@ -85,6 +87,7 @@ typedef struct
 typedef struct
 {
 	volatile pid_t		gpuserv_pid;
+	volatile bool		gpuserv_ready_accept;
 	pg_atomic_uint32	max_async_tasks_updated;
 	pg_atomic_uint32	max_async_tasks;
 	pg_atomic_uint32	gpuserv_debug_output;
@@ -99,27 +102,40 @@ static __thread CUcontext	MY_CONTEXT_PER_THREAD = NULL;
 static __thread CUstream	MY_STREAM_PER_THREAD = NULL;
 static __thread CUevent		MY_EVENT_PER_THREAD = NULL;
 static __thread gpuContext *GpuWorkerCurrentContext = NULL;
-static volatile int			gpuserv_bgworker_got_signal = 0;
-static dlist_head			gpuserv_gpucontext_list;
-static int					gpuserv_epoll_fdesc = -1;
+static volatile int	gpuserv_bgworker_got_signal = 0;
+static dlist_head	gpuserv_gpucontext_list;
+static int			gpuserv_epoll_fdesc = -1;
+static int			gpuserv_logger_pipefd[2];
+static FILE		   *gpuserv_logger_filp;
+static StringInfoData gpuserv_logger_buffer;
 static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
-static gpuServSharedState  *gpuserv_shared_state = NULL;
-static int					__pgstrom_max_async_tasks_dummy;
-static bool					__gpuserv_debug_output_dummy;
+static gpuServSharedState *gpuserv_shared_state = NULL;
+static int			__pgstrom_max_async_tasks_dummy;
+static int			__pgstrom_cuda_stack_limit_kb;
+static bool			__gpuserv_debug_output_dummy;
+static char		   *pgstrom_cuda_toolkit_basedir = CUDA_TOOLKIT_BASEDIR; /* GUC */
+static const char  *pgstrom_fatbin_image_filename = "/dev/null";
 
-#define GpuServDebug(fmt, ...)											\
-	do {																\
-		if (gpuserv_shared_state &&										\
+
+static void
+gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
+
+#define __gsLog(fmt, ...)										\
+	gpuservLoggerReport("GPU%d|LOG|%s|%d|%s|" fmt "\n",	\
+						MY_DINDEX_PER_THREAD,					\
+						__basename(__FILE__),					\
+						__LINE__, __FUNCTION__,					\
+						##__VA_ARGS__)
+#define __gsDebug(fmt, ...)						\
+	do {										\
+		if (gpuserv_shared_state &&				\
 			pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0) \
-		{																\
-			fprintf(stderr, "gpuserv: " fmt " (%s:%d)\n",				\
-					##__VA_ARGS__, __basename(__FILE__), __LINE__);		\
-		}																\
+			__gsLog(fmt, ##__VA_ARGS__);		\
 	} while(0)
 
-#define GpuServDebugExtra(fmt, ...)										\
-	do {																\
+#define __gsDebugExtra(fmt, ...)				\
+	do {										\
 		if (gpuserv_shared_state &&										\
 			pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0) \
 		{																\
@@ -131,15 +147,14 @@ static bool					__gpuserv_debug_output_dummy;
 			errcode = heterodbExtraGetError(&filename,					\
 											&lineno,					\
 											NULL,						\
-											buffer, sizeof(buffer));	\
+											buffer,						\
+											sizeof(buffer));			\
 			if (errcode == 0)											\
-				fprintf(stderr, "gpuserv: " fmt "\n", ##__VA_ARGS__);	\
+				__gsLog("heterodb-extra: " fmt, ##__VA_ARGS__);			\
 			else														\
-			{															\
-				fprintf(stderr, "gpuserv: " fmt " [%s] (code=%d, %s:%d)\n",	\
-						buffer, ##__VA_ARGS__, errcode,					\
+				__gsLog("heterodb-extra: " fmt " [%s] (code=%d, %s:%d)", \
+						##__VA_ARGS__, buffer, errcode,					\
 						__basename(filename), lineno);					\
-			}															\
 		}																\
 	} while(0)
 
@@ -198,6 +213,145 @@ pgstrom_max_async_tasks_show(void)
 }
 
 /*
+ * gpuserv_ready_accept
+ */
+bool
+gpuserv_ready_accept(void)
+{
+	return (gpuserv_shared_state &&
+			gpuserv_shared_state->gpuserv_ready_accept);
+}
+
+/*
+ * gpuservLoggerOpen
+ */
+static void
+gpuservLoggerOpen(void)
+{
+	struct epoll_event ev;
+
+	if (pipe(gpuserv_logger_pipefd) != 0)
+		elog(ERROR, "failed on pipe(2): %m");
+	memset(&ev, 0, sizeof(ev));
+	ev.events = EPOLLIN;
+	ev.data.ptr = NULL;
+	if (epoll_ctl(gpuserv_epoll_fdesc,
+				  EPOLL_CTL_ADD,
+				  gpuserv_logger_pipefd[0], &ev) != 0)
+		elog(ERROR, "failed on epoll_ctl(2): %m");
+	gpuserv_logger_filp = fdopen(gpuserv_logger_pipefd[1], "ab");
+
+	initStringInfo(&gpuserv_logger_buffer);
+}
+
+/*
+ * gpuservLoggerDispatch
+ */
+static void
+gpuservLoggerDispatch(void)
+{
+	char   *line, *tail;
+
+	Assert(!GpuWorkerCurrentContext);
+	/* read from pipe */
+	for (;;)
+	{
+		size_t	unitsz = 2048;
+		ssize_t	nbytes;
+
+		enlargeStringInfo(&gpuserv_logger_buffer, unitsz);
+
+		nbytes = read(gpuserv_logger_pipefd[0],
+					  gpuserv_logger_buffer.data + gpuserv_logger_buffer.len,
+					  unitsz);
+		if (nbytes < 0)
+		{
+			if (errno != EINTR)
+				elog(ERROR, "failed on read(gpuserv_logger_pipefd): %m");
+		}
+		else
+		{
+			gpuserv_logger_buffer.len += nbytes;
+			if (nbytes < unitsz)
+				break;
+		}
+	}
+	gpuserv_logger_buffer.data[gpuserv_logger_buffer.len] = '\0';
+
+	for (line = gpuserv_logger_buffer.data;
+		 (tail = strchr(line, '\n')) != NULL;
+		 line = tail + 1)
+	{
+		char	   *tok, *saveptr;
+		char	   *domain		= "GPU?";
+		char	   *filename	= "unknown file";
+		int			lineno		= -1;
+		char	   *funcname	= "unknown function";
+		char	   *message		= "unknown message";
+		int			elevel		= LOG;
+
+		*tail = '\0';
+		tok = strtok_r(line, "|", &saveptr);
+		if (tok)
+			domain = __trim(tok);
+		tok = strtok_r(NULL, "|", &saveptr);
+		if (tok)
+		{
+			char   *elabel = __trim(tok);
+
+			if (strcmp(elabel, "DEBUG") == 0)
+				elevel = DEBUG1;
+			else if (strcmp(elabel, "NOTICE") == 0)
+				elevel = NOTICE;
+			else if (strcmp(elabel, "WARNING") == 0)
+				elevel = WARNING;
+			else
+				elevel = LOG;
+		}
+		tok = strtok_r(NULL, "|", &saveptr);
+		if (tok)
+			filename = __trim(tok);
+		tok = strtok_r(NULL, "|", &saveptr);
+		if (tok)
+			lineno = atoi(__trim(tok));
+		tok = strtok_r(NULL, "|", &saveptr);
+		if (tok)
+		{
+			funcname = __trim(tok);
+			message  = saveptr;
+		}
+
+		if (errstart(elevel, domain))
+		{
+			errmsg("%s: %s", domain, message);
+			errfinish(filename, lineno, funcname);
+		}
+	}
+
+	if (*line != '\0' && line != gpuserv_logger_buffer.data)
+	{
+		size_t	remained = strlen(line);
+
+		memmove(gpuserv_logger_buffer.data, line, remained+1);
+		gpuserv_logger_buffer.len = remained;
+	}
+}
+
+/*
+ * gpuservLoggerReport
+ */
+static void
+gpuservLoggerReport(const char *fmt, ...)
+{
+	va_list		ap;
+
+	va_start(ap, fmt);
+	vfprintf(gpuserv_logger_filp, fmt, ap);
+	va_end(ap);
+	fflush(gpuserv_logger_filp);
+}
+
+/*
  * cuStrError
  */
 const char *
@@ -213,6 +367,399 @@ cuStrError(CUresult rc)
 		return err_name;
 	snprintf(buffer, sizeof(buffer), "Unknown CUDA Error (%d)", (int)rc);
 	return buffer;
+}
+
+/* ----------------------------------------------------------------
+ *
+ * GPU Fatbin Builder
+ *
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * __gpu_archtecture_label
+ */
+static const char *
+__gpu_archtecture_label(int major_cc, int minor_cc)
+{
+	int		cuda_arch = major_cc * 100 + minor_cc;
+
+	switch (cuda_arch)
+	{
+		case 600:	/* Tesla P100 */
+			return "sm_60";
+		case 601:	/* Tesla P40 */
+			return "sm_61";
+		case 700:	/* Tesla V100 */
+			return "sm_70";
+		case 705:	/* Tesla T4 */
+			return "sm_75";
+		case 800:	/* NVIDIA A100 */
+			return "sm_80";
+		case 806:	/* NVIDIA A40 */
+			return "sm_86";
+		case 809:	/* NVIDIA L40 */
+			return "sm_89";
+		case 900:	/* NVIDIA H100 */
+			return "sm_90";
+		default:
+			elog(ERROR, "unsupported compute capability (%d.%d)",
+				 major_cc, minor_cc);
+	}
+	return NULL;
+}
+
+/*
+ * __setup_gpu_fatbin_filename
+ */
+#define PGSTROM_FATBIN_DIR		".pgstrom_fatbin"
+
+static void
+__appendTextFromFile(StringInfo buf, const char *filename, const char *suffix)
+{
+	char	path[MAXPGPATH];
+	int		fdesc;
+
+	snprintf(path, MAXPGPATH,
+			 PGSHAREDIR "/pg_strom/%s%s", filename, suffix ? suffix : "");
+	fdesc = open(path, O_RDONLY);
+	if (fdesc < 0)
+		elog(ERROR, "could not open '%s': %m", path);
+	PG_TRY();
+	{
+		struct stat st_buf;
+		off_t		remained;
+		ssize_t		nbytes;
+
+		if (fstat(fdesc, &st_buf) != 0)
+			elog(ERROR, "failed on fstat('%s'): %m", path);
+		remained = st_buf.st_size;
+
+		enlargeStringInfo(buf, remained);
+		while (remained > 0)
+		{
+			nbytes = read(fdesc, buf->data + buf->len, remained);
+			if (nbytes < 0)
+			{
+				if (errno != EINTR)
+					elog(ERROR, "failed on read('%s'): %m", path);
+			}
+			else if (nbytes == 0)
+			{
+				elog(ERROR, "unable to read '%s' by the EOF", path);
+			}
+			else
+			{
+				Assert(nbytes <= remained);
+				buf->len += nbytes;
+				remained -= nbytes;
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		close(fdesc);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	close(fdesc);
+}
+
+static char *
+__setup_gpu_fatbin_filename(void)
+{
+	int			cuda_version = -1;
+	char		hexsum[33];		/* 128bit hash */
+	char	   *namebuf;
+	char	   *tok, *pos;
+	const char *errstr;
+	ResourceOwner resowner_saved;
+	ResourceOwner resowner_dummy;
+	StringInfoData buf;
+
+	for (int i=0; i < numGpuDevAttrs; i++)
+	{
+		if (i == 0)
+			cuda_version = gpuDevAttrs[i].CUDA_DRIVER_VERSION;
+		else if (cuda_version != gpuDevAttrs[i].CUDA_DRIVER_VERSION)
+			elog(ERROR, "Bug? CUDA Driver version mismatch between devices");
+	}
+	namebuf = alloca(Max(sizeof(CUDA_CORE_HEADERS),
+						 sizeof(CUDA_CORE_FILES)) + 1);
+	initStringInfo(&buf);
+	/* CUDA_CORE_HEADERS */
+	strcpy(namebuf, CUDA_CORE_HEADERS);
+	for (tok = strtok_r(namebuf, " ", &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL, " ", &pos))
+	{
+		__appendTextFromFile(&buf, tok, NULL);
+	}
+
+	/* CUDA_CORE_SRCS */
+	strcpy(namebuf, CUDA_CORE_FILES);
+	for (tok = strtok_r(namebuf, " ", &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL, " ", &pos))
+	{
+		__appendTextFromFile(&buf, tok, ".cu");
+	}
+	/*
+	 * Calculation of MD5SUM. Note that pg_md5_hash internally use
+	 * ResourceOwner to track openSSL memory, however, we may not
+	 * have the CurrentResourceOwner during startup.
+	 */
+	resowner_saved = CurrentResourceOwner;
+	resowner_dummy = ResourceOwnerCreate(NULL, "MD5SUM Dummy");
+	PG_TRY();
+	{
+		CurrentResourceOwner = resowner_dummy;
+		if (!pg_md5_hash(buf.data, buf.len, hexsum, &errstr))
+			elog(ERROR, "could not compute MD5 hash: %s", errstr);
+	}
+	PG_CATCH();
+	{
+		CurrentResourceOwner = resowner_saved;
+		ResourceOwnerRelease(resowner_dummy,
+							 RESOURCE_RELEASE_BEFORE_LOCKS,
+							 false,
+							 false);
+		ResourceOwnerDelete(resowner_dummy);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	CurrentResourceOwner = resowner_saved;
+	ResourceOwnerRelease(resowner_dummy,
+						 RESOURCE_RELEASE_BEFORE_LOCKS,
+						 true,
+						 false);
+	ResourceOwnerDelete(resowner_dummy);
+
+	return psprintf("pgstrom-gpucode-V%06d-%s.fatbin",
+					cuda_version, hexsum);
+}
+
+/*
+ * __validate_gpu_fatbin_file
+ */
+static bool
+__validate_gpu_fatbin_file(const char *fatbin_dir, const char *fatbin_file)
+{
+	StringInfoData cmd;
+	StringInfoData buf;
+	FILE	   *filp;
+	char	   *temp;
+	bool		retval = false;
+
+	initStringInfo(&cmd);
+	initStringInfo(&buf);
+
+	appendStringInfo(&buf, "%s/%s", fatbin_dir, fatbin_file);
+	if (access(buf.data, R_OK) != 0)
+		return false;
+	/* Pick up supported SM from the fatbin file */
+	appendStringInfo(&cmd,
+					 "%s/bin/cuobjdump '%s/%s'"
+					 " | grep '^arch '"
+					 " | awk '{print $3}'",
+					 pgstrom_cuda_toolkit_basedir,
+					 fatbin_dir, fatbin_file);
+	filp = OpenPipeStream(cmd.data, "r");
+	if (!filp)
+	{
+		elog(LOG, "unable to run [%s]: %m", cmd.data);
+		goto out;
+	}
+
+	resetStringInfo(&buf);
+	for (;;)
+	{
+		ssize_t	nbytes;
+
+		enlargeStringInfo(&buf, 512);
+		nbytes = fread(buf.data + buf.len, 1, 512, filp);
+
+		if (nbytes < 0)
+		{
+			if (errno != EINTR)
+			{
+				elog(LOG, "unable to read from pipe:[%s]: %m", cmd.data);
+				goto out;
+			}
+		}
+		else if (nbytes == 0)
+		{
+			if (feof(filp))
+				break;
+			elog(LOG, "unable to read from pipe:[%s]: %m", cmd.data);
+			goto out;
+		}
+		else
+		{
+			buf.len += nbytes;
+		}
+	}
+	ClosePipeStream(filp);
+
+	temp = alloca(buf.len + 1);
+	for (int i=0; i < numGpuDevAttrs; i++)
+	{
+		char	   *tok, *pos;
+		const char *label;
+
+		label = __gpu_archtecture_label(gpuDevAttrs[i].COMPUTE_CAPABILITY_MAJOR,
+										gpuDevAttrs[i].COMPUTE_CAPABILITY_MINOR);
+
+		memcpy(temp, buf.data, buf.len+1);
+		for (tok = strtok_r(temp, " \n\r", &pos);
+			 tok != NULL;
+			 tok = strtok_r(NULL, " \n\r", &pos))
+		{
+			if (strcmp(label, tok) == 0)
+				break;	/* ok, supported */
+		}
+		if (!tok)
+		{
+			elog(LOG, "GPU%d '%s' CC%d.%d is not supported at '%s'",
+				 i, gpuDevAttrs[i].DEV_NAME,
+				 gpuDevAttrs[i].COMPUTE_CAPABILITY_MAJOR,
+				 gpuDevAttrs[i].COMPUTE_CAPABILITY_MINOR,
+				 fatbin_file);
+			goto out;
+		}
+	}
+	/* ok, this fatbin is validated */
+	retval = true;
+out:
+	pfree(cmd.data);
+	pfree(buf.data);
+	return retval;
+}
+
+/*
+ * __rebuild_gpu_fatbin_file
+ */
+static void
+__rebuild_gpu_fatbin_file(const char *fatbin_dir,
+						  const char *fatbin_file)
+{
+	StringInfoData cmd;
+	char	workdir[200];
+	char   *namebuf;
+	char   *tok, *pos;
+	int		count;
+	int		status;
+
+	strcpy(workdir, "/tmp/.pgstrom_fatbin_build_XXXXXX");
+	if (!mkdtemp(workdir))
+		elog(ERROR, "unable to create work directory for fatbin rebuild");
+
+	elog(LOG, "PG-Strom fatbin image is not valid now, so rebuild in progress...");
+
+	namebuf = alloca(sizeof(CUDA_CORE_FILES) + 1);
+	strcpy(namebuf, CUDA_CORE_FILES);
+
+	initStringInfo(&cmd);
+	appendStringInfo(&cmd, "cd '%s' && (", workdir);
+	for (tok = strtok_r(namebuf, " ", &pos), count=0;
+		 tok != NULL;
+		 tok = strtok_r(NULL,    " ", &pos), count++)
+	{
+		if (count > 0)
+			appendStringInfo(&cmd, " & ");
+		appendStringInfo(&cmd,
+						 " /bin/sh -x -c '%s/bin/nvcc"
+						 " --maxrregcount=%d"
+						 " --source-in-ptx -lineinfo"
+						 " -I. -I%s "
+						 " -DHAVE_FLOAT2 "
+						 " -arch=native --threads 4"
+						 " --device-c"
+						 " -o %s.o"
+						 " %s/pg_strom/%s.cu' > %s.log 2>&1",
+						 pgstrom_cuda_toolkit_basedir,
+						 CUDA_MAXREGCOUNT,
+						 PGINCLUDEDIR,
+						 tok,
+						 PGSHAREDIR, tok, tok);
+	}
+	appendStringInfo(&cmd,
+					 ") && wait;"
+					 " /bin/sh -x -c '%s/bin/nvcc"
+					 " -Xnvlink --suppress-stack-size-warning"
+					 " -arch=native --threads 4"
+					 " --device-link --fatbin"
+					 " -o '%s'",
+					 pgstrom_cuda_toolkit_basedir,
+					 fatbin_file);
+	strcpy(namebuf, CUDA_CORE_FILES);
+	for (tok = strtok_r(namebuf, " ", &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL,    " ", &pos))
+	{
+		appendStringInfo(&cmd, " %s.o", tok);
+	}
+	appendStringInfo(&cmd, "' > %s.log 2>&1", fatbin_file);
+
+	elog(LOG, "rebuild fatbin command: %s", cmd.data);
+	status = system(cmd.data);
+	if (status != 0)
+		elog(ERROR, "failed on the build process at [%s]", workdir);
+
+	/* validation of the fatbin file */
+	if (!__validate_gpu_fatbin_file(workdir, fatbin_file))
+		elog(ERROR, "failed on validation of the rebuilt fatbin at [%s]", workdir);
+
+	/* installation of the rebuilt fatbin */
+	resetStringInfo(&cmd);
+	appendStringInfo(&cmd,
+					 "mkdir -p '%s'; "
+					 "install -m 0644 %s/%s '%s'",
+					 fatbin_dir,
+					 workdir, fatbin_file, fatbin_dir);
+	strcpy(namebuf, CUDA_CORE_FILES);
+	for (tok = strtok_r(namebuf, " ", &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL,    " ", &pos))
+	{
+		appendStringInfo(&cmd, "; cat %s/%s.log >> %s/%s.log",
+						 workdir, tok,
+						 PGSTROM_FATBIN_DIR, fatbin_file);
+	}
+	appendStringInfo(&cmd, "; cat %s/%s.log >> %s/%s.log",
+					 workdir, fatbin_file,
+					 PGSTROM_FATBIN_DIR, fatbin_file);
+	status = system(cmd.data);
+	if (status != 0)
+		elog(ERROR, "failed on shell command: %s", cmd.data);
+}
+
+static void
+gpuservSetupFatbin(void)
+{
+	const char *fatbin_file = __setup_gpu_fatbin_filename();
+	const char *fatbin_dir  = PGSHAREDIR "/pg_strom";
+	char	   *path;
+#ifdef WITH_FATBIN
+	if (!__validate_gpu_fatbin_file(fatbin_dir,
+									fatbin_file))
+#endif
+	{
+		fatbin_dir = PGSTROM_FATBIN_DIR;
+		if (!__validate_gpu_fatbin_file(fatbin_dir,
+										fatbin_file))
+		{
+			__rebuild_gpu_fatbin_file(fatbin_dir,
+									  fatbin_file);
+		}
+	}
+	path = alloca(strlen(fatbin_dir) +
+				  strlen(fatbin_file) + 100);
+	sprintf(path, "%s/%s", fatbin_dir, fatbin_file);
+	pgstrom_fatbin_image_filename = strdup(path);
+	if (!pgstrom_fatbin_image_filename)
+		elog(ERROR, "out of memory");
+	elog(LOG, "PG-Strom fatbin image is ready: %s", fatbin_file);
 }
 
 /* ----------------------------------------------------------------
@@ -272,7 +819,7 @@ __gpuMemAllocFromSegment(gpuMemoryPool *pool,
 				buddy = calloc(1, sizeof(gpuMemChunk));
 				if (!buddy)
 				{
-					GpuServDebug("out of memory");
+					__gsDebug("out of memory");
 					return NULL;	/* out of memory */
 				}
 				chunk->__length -= surplus;
@@ -321,8 +868,8 @@ __gpuMemAllocNewSegment(gpuMemoryPool *pool, size_t segment_sz)
 							   CU_MEM_ATTACH_GLOBAL);
 		if (rc != CUDA_SUCCESS)
 		{
-			GpuServDebug("failed on cuMemAllocManaged(sz=%lu): %s",
-						 mseg->segment_sz, cuStrError(rc));
+			__gsDebug("failed on cuMemAllocManaged(sz=%lu): %s",
+					  mseg->segment_sz, cuStrError(rc));
 			goto error;
 		}
 		memset((void *)mseg->devptr, 0, mseg->segment_sz);
@@ -332,15 +879,15 @@ __gpuMemAllocNewSegment(gpuMemoryPool *pool, size_t segment_sz)
 		rc = cuMemAlloc(&mseg->devptr, mseg->segment_sz);
 		if (rc != CUDA_SUCCESS)
 		{
-			GpuServDebug("failed on cuMemAlloc(sz=%lu): %s",
-						 mseg->segment_sz, cuStrError(rc));
+			__gsDebug("failed on cuMemAlloc(sz=%lu): %s",
+					  mseg->segment_sz, cuStrError(rc));
 			goto error;
 		}
 		if (!gpuDirectMapGpuMemory(mseg->devptr,
 								   mseg->segment_sz,
 								   &mseg->iomap_handle))
 		{
-			GpuServDebugExtra("failed on gpuDirectMapGpuMemory");
+			__gsDebugExtra("failed on gpuDirectMapGpuMemory");
 			goto error;
 		}
 	}
@@ -528,8 +1075,8 @@ __gpuMemoryPoolMaintenanceTask(gpuContext *gcontext, gpuMemoryPool *pool)
 					   chunk->free_chain.next);
 				free(chunk);
 			}
-			GpuServDebug("GPU-%d: i/o mapped device memory %lu bytes released",
-						 gcontext->cuda_dindex, mseg->segment_sz);
+			__gsDebug("GPU-%d: i/o mapped device memory %lu bytes released",
+					  gcontext->cuda_dindex, mseg->segment_sz);
 			Assert(pool->total_sz >= mseg->segment_sz);
 			pool->total_sz -= mseg->segment_sz;
 			free(mseg);
@@ -604,19 +1151,19 @@ __putGpuQueryBufferNoLock(gpuQueryBuffer *gq_buf)
 		{
 			rc = cuMemFree(gq_buf->m_kmrels);
 			if (rc != CUDA_SUCCESS)
-				GpuServDebug("failed on cuMemFree: %s", cuStrError(rc));
+				__gsDebug("failed on cuMemFree: %s", cuStrError(rc));
 		}
 		if (gq_buf->h_kmrels)
 		{
 			if (munmap(gq_buf->h_kmrels,
 					   gq_buf->kmrels_sz) != 0)
-				GpuServDebug("failed on munmap: %m");
+				__gsDebug("failed on munmap: %m");
 		}
 		if (gq_buf->m_kds_final)
 		{
 			rc = cuMemFree(gq_buf->m_kds_final);
 			if (rc != CUDA_SUCCESS)
-				GpuServDebug("failed on cuMemFree: %s", cuStrError(rc));
+				__gsDebug("failed on cuMemFree: %s", cuStrError(rc));
 		}
 		dlist_delete(&gq_buf->chain);
 		free(gq_buf);
@@ -856,13 +1403,13 @@ __expandGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 		kds_new->length = length;
 
 		/* later falf */
-		sz = __kds_unpack(kds_old->usage);
+		sz = kds_old->__usage64;
 		memcpy((char *)kds_new + kds_new->length - sz,
 			   (char *)kds_old + kds_old->length - sz, sz);
 
 		/* swap them */
-		GpuServDebug("kds_final expand: %lu => %lu\n",
-					 kds_old->length, kds_new->length);
+		__gsDebug("kds_final expand: %lu => %lu\n",
+				  kds_old->length, kds_new->length);
 		cuMemFree(gq_buf->m_kds_final);
 		gq_buf->m_kds_final = m_devptr;
 		gq_buf->m_kds_final_length = length;
@@ -1114,6 +1661,7 @@ gpuClientWriteBack(gpuClient  *gclient,
 	{
 		kern_data_store *kds = kds_array[i];
 		size_t		sz1, sz2, sz3;
+		size_t		head_sz;
 
 		if (kds->format == KDS_FORMAT_HASH)
 		{
@@ -1123,7 +1671,7 @@ gpuClientWriteBack(gpuClient  *gclient,
 			iov->iov_base = kds;
 			iov->iov_len  = sz1;
 
-			sz2 = MAXALIGN(sizeof(uint32_t) * kds->nitems);
+			sz2 = sizeof(uint64_t) * kds->nitems;
 			if (sz2 > 0)
 			{
 				iov = &iov_array[iovcnt++];
@@ -1131,7 +1679,17 @@ gpuClientWriteBack(gpuClient  *gclient,
 				iov->iov_len  = sz2;
 			}
 
-			sz3 = __kds_unpack(kds->usage);
+			/*
+			 * MEMO: When GPU Projection or similar fill up KDS-ROW/HASH,
+			 * it often increase kds->usage too much if no space left.
+			 * In this case, results are not written of course, however,
+			 * kds->usage is not reliable. So, we cut down the usege by
+			 * the tail of row-offset array.
+			 */
+			head_sz = (sz1 + sizeof(uint64_t) * (kds->hash_nslots +
+												 kds->nitems));
+			sz3 = Min(kds->__usage64,
+					  kds->length - head_sz);
 			if (sz3 > 0)
 			{
 				iov = &iov_array[iovcnt++];
@@ -1147,9 +1705,10 @@ gpuClientWriteBack(gpuClient  *gclient,
 		{
 			assert(kds->hash_nslots == 0);
 			sz1 = (KDS_HEAD_LENGTH(kds) +
-				   MAXALIGN(sizeof(uint32_t) * kds->nitems));
-			sz2 = __kds_unpack(kds->usage);
-			if (sz1 + sz2 == kds->length)
+				   MAXALIGN(sizeof(uint64_t) * kds->nitems));
+			/* see comment above */
+			sz2 = kds->__usage64;
+			if (sz1 + sz2 >= kds->length)
 			{
 				iov = &iov_array[iovcnt++];
 				iov->iov_base = kds;
@@ -1168,6 +1727,7 @@ gpuClientWriteBack(gpuClient  *gclient,
 					iov->iov_base = (char *)kds + kds->length - sz2;
 					iov->iov_len  = sz2;
 				}
+				/* fixup kds */
 				kds->length = (sz1 + sz2);
 			}
 		}
@@ -1258,11 +1818,11 @@ __gpuClientELog(gpuClient *gclient,
 	/* unable to continue GPU service, so try to restart */
 	if (errcode == ERRCODE_DEVICE_FATAL)
 	{
-		GpuServDebug("(%s:%d, %s) GPU fatal - %s\n",
-					 resp.u.error.filename,
-					 resp.u.error.lineno,
-					 resp.u.error.funcname,
-					 resp.u.error.message);
+		__gsDebug("(%s:%d, %s) GPU fatal - %s\n",
+				  resp.u.error.filename,
+				  resp.u.error.lineno,
+				  resp.u.error.funcname,
+				  resp.u.error.message);
 		gpuserv_bgworker_got_signal |= (1 << SIGHUP);
 		pg_memory_barrier();
 		SetLatch(MyLatch);
@@ -1290,6 +1850,48 @@ gpuClientELogByExtraModule(gpuClient *gclient)
 						filename, lineno,
 						funcname,
 						"extra-module: %s", buffer);
+}
+
+/*
+ * expandCudaStackLimit
+ */
+static bool
+expandCudaStackLimit(gpuClient *gclient, kern_session_info *session)
+{
+	gpuContext *gcontext = gclient->gcontext;
+	uint32_t	cuda_stack_size = session->cuda_stack_size;
+	uint32_t	cuda_stack_limit;
+	CUresult	rc;
+
+	if (cuda_stack_size > gcontext->cuda_stack_limit)
+	{
+		cuda_stack_limit = TYPEALIGN(1024, cuda_stack_size);
+		if (cuda_stack_limit > (__pgstrom_cuda_stack_limit_kb << 10))
+		{
+			gpuClientELog(gclient, "CUDA stack size %u is larger than the configured limitation %ukB by pg_strom.cuda_stack_limit",
+						  cuda_stack_size, __pgstrom_cuda_stack_limit_kb);
+			return false;
+		}
+
+		pthreadMutexLock(&gcontext->cuda_setlimit_lock);
+		if (cuda_stack_size > gcontext->cuda_stack_limit)
+		{
+			rc = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, cuda_stack_limit);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuCtxSetLimit: %s",
+							  cuStrError(rc));
+				pthreadMutexUnlock(&gcontext->cuda_setlimit_lock);
+				return false;
+			}
+			__gsLog("CUDA stack size expanded %u -> %u bytes",
+					gcontext->cuda_stack_limit,
+					cuda_stack_limit);
+			gcontext->cuda_stack_limit = cuda_stack_limit;
+		}
+		pthreadMutexUnlock(&gcontext->cuda_setlimit_lock);
+	}
+	return true;
 }
 
 /*
@@ -1483,6 +2085,9 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 		gpuClientELog(gclient, "OpenSession is called twice");
 		return false;
 	}
+	/* expand CUDA thread stack limit on demand */
+	if (!expandCudaStackLimit(gclient, session))
+		return false;
 
 	/* resolve device pointers */
 	if (!__resolveDevicePointers(gcontext, session, emsg, sizeof(emsg)))
@@ -2004,7 +2609,7 @@ resume_kernel:
 			/* restore warp context from the previous state */
 			kgtask->resume_context = true;
 			kgtask->suspend_count = 0;
-			GpuServDebug("suspend / resume happen\n");
+			__gsDebug("suspend / resume happen\n");
 			if (kds_final_locked)
 				pthreadRWLockUnlock(&gq_buf->m_kds_final_rwlock);
 			goto resume_kernel;
@@ -2123,8 +2728,8 @@ gpuservGpuCacheManager(void *__arg)
 	MY_EVENT_PER_THREAD		= NULL;
 	pg_memory_barrier();
 
-	GpuServDebug("GPU-%d GpuCache manager thread launched.",
-				 MY_DINDEX_PER_THREAD);
+	__gsDebug("GPU-%d GpuCache manager thread launched.",
+			  MY_DINDEX_PER_THREAD);
 	
 	gpucacheManagerEventLoop(gcontext->cuda_dindex,
 							 gcontext->cuda_context,
@@ -2136,8 +2741,8 @@ gpuservGpuCacheManager(void *__arg)
 	pthreadMutexUnlock(&gcontext->worker_lock);
 	free(gworker);
 
-	GpuServDebug("GPU-%d GpuCache manager terminated.",
-				 MY_DINDEX_PER_THREAD);
+	__gsDebug("GPU-%d GpuCache manager terminated.",
+			  MY_DINDEX_PER_THREAD);
 	return NULL;
 }
 
@@ -2224,7 +2829,7 @@ gpuservGpuWorkerMain(void *__arg)
 	rc = cuStreamCreate(&cuda_stream, CU_STREAM_NON_BLOCKING);
 	if (rc != CUDA_SUCCESS)
 		 __FATAL("failed on cuStreamCreate: %s", cuStrError(rc));
-	rc = cuEventCreate(&cuda_event, CU_EVENT_DEFAULT);
+	rc = cuEventCreate(&cuda_event, CU_EVENT_BLOCKING_SYNC);
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuEventCreate: %s", cuStrError(rc));
 
@@ -2236,7 +2841,7 @@ gpuservGpuWorkerMain(void *__arg)
 	MY_EVENT_PER_THREAD		= cuda_event;
 	pg_memory_barrier();
 
-	GpuServDebug("GPU-%d worker thread launched\n", MY_DINDEX_PER_THREAD);
+	__gsDebug("GPU-%d worker thread launched\n", MY_DINDEX_PER_THREAD);
 	
 	pthreadMutexLock(&gcontext->lock);
 	while (!gpuServiceGoingTerminate() && !gworker->termination)
@@ -2305,7 +2910,7 @@ gpuservGpuWorkerMain(void *__arg)
 	cuStreamDestroy(cuda_stream);
 	free(gworker);
 
-	GpuServDebug("GPU-%d worker thread launched\n", MY_DINDEX_PER_THREAD);
+	__gsDebug("GPU-%d worker thread launched\n", MY_DINDEX_PER_THREAD);
 
 	return NULL;
 }
@@ -2324,8 +2929,8 @@ gpuservMonitorClient(void *__priv)
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 	{
-		GpuServDebug("[%s] failed on cuCtxSetCurrent: %s\n",
-					 elabel, cuStrError(rc));
+		__gsDebug("[%s] failed on cuCtxSetCurrent: %s\n",
+				  elabel, cuStrError(rc));
 		goto out;
 	}
 	GpuWorkerCurrentContext = gcontext;
@@ -2344,7 +2949,7 @@ gpuservMonitorClient(void *__priv)
 		{
 			if (errno == EINTR)
 				continue;
-			GpuServDebug("[%s] failed on poll(2): %m", elabel);
+			__gsDebug("[%s] failed on poll(2): %m", elabel);
 			break;
 		}
 		if (nevents == 0)
@@ -2357,7 +2962,7 @@ gpuservMonitorClient(void *__priv)
 		}
 		else if (pfd.revents & ~POLLIN)
 		{
-			GpuServDebug("[%s] peer socket closed.", elabel);
+			__gsDebug("[%s] peer socket closed.", elabel);
 			break;
 		}
 	}
@@ -2769,7 +3374,6 @@ gpuservSetupGpuContext(int cuda_dindex)
 	GpuDevAttributes *dattrs = &gpuDevAttrs[cuda_dindex];
 	gpuContext *gcontext = NULL;
 	CUresult	rc;
-	size_t		stack_sz;
 	struct sockaddr_un addr;
 	struct epoll_event ev;
 
@@ -2779,6 +3383,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 		elog(ERROR, "out of memory");
 	gcontext->serv_fd = -1;
 	gcontext->cuda_dindex = cuda_dindex;
+	pthreadMutexInit(&gcontext->cuda_setlimit_lock);
 	gpuMemoryPoolInit(&gcontext->pool_raw,     false, dattrs->DEV_TOTAL_MEMSZ);
 	gpuMemoryPoolInit(&gcontext->pool_managed, true,  dattrs->DEV_TOTAL_MEMSZ);
 	pthreadMutexInit(&gcontext->client_lock);
@@ -2815,20 +3420,20 @@ gpuservSetupGpuContext(int cuda_dindex)
 		rc = cuDeviceGet(&gcontext->cuda_device, dattrs->DEV_ID);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuDeviceGet: %s", cuStrError(rc));
-		rc = cuCtxCreate(&gcontext->cuda_context,
-						 CU_CTX_SCHED_BLOCKING_SYNC,
-//						 CU_CTX_SCHED_AUTO,
-						 gcontext->cuda_device);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxCreate: %s", cuStrError(rc));
 
-		rc = cuCtxGetLimit(&stack_sz, CU_LIMIT_STACK_SIZE);
+		rc = cuDevicePrimaryCtxRetain(&gcontext->cuda_context,
+									  gcontext->cuda_device);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxGetLimit: %s", cuStrError(rc));
-		stack_sz += 4096;
-		rc = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, stack_sz);
+			elog(ERROR, "failed on cuDevicePrimaryCtxRetain: %s", cuStrError(rc));
+
+		rc = cuDevicePrimaryCtxSetFlags(gcontext->cuda_device,
+										CU_CTX_SCHED_BLOCKING_SYNC);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxSetLimit: %s", cuStrError(rc));
+			elog(ERROR, "failed on cuDevicePrimaryCtxSetFlags: %s", cuStrError(rc));
+
+		rc = cuCtxSetCurrent(gcontext->cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxSetCurrent: %s", cuStrError(rc));
 
 		gpuservSetupGpuModule(gcontext);
 		/* enable kernel profiling if captured */
@@ -2845,8 +3450,6 @@ gpuservSetupGpuContext(int cuda_dindex)
 	}
 	PG_CATCH();
 	{
-		if (gcontext->cuda_context)
-			cuCtxDestroy(gcontext->cuda_context);
 		if (gcontext->serv_fd >= 0)
 			close(gcontext->serv_fd);
 		free(gcontext);
@@ -2882,9 +3485,6 @@ gpuservCleanupGpuContext(gpuContext *gcontext)
 		if (rc != CUDA_SUCCESS)
 			elog(LOG, "failed on cuProfilerStop: %s", cuStrError(rc));
 	}
-	rc = cuCtxDestroy(gcontext->cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(LOG, "failed on cuCtxDestroy: %s", cuStrError(rc));
 }
 
 /*
@@ -2958,6 +3558,11 @@ gpuservBgWorkerMain(Datum arg)
 	gpuserv_epoll_fdesc = epoll_create(30);
 	if (gpuserv_epoll_fdesc < 0)
 		elog(ERROR, "failed on epoll_create: %m");
+	/* Open logger pipe for worker threads */
+	gpuservLoggerOpen();
+
+	/* Build the fatbin binary image on demand */
+	gpuservSetupFatbin();
 
 	/* Init GPU Context for each devices */
 	rc = cuInit(0);
@@ -2971,6 +3576,9 @@ gpuservBgWorkerMain(Datum arg)
 			gpuContext *gcontext = gpuservSetupGpuContext(dindex);
 			dlist_push_tail(&gpuserv_gpucontext_list, &gcontext->chain);
 		}
+		/* ready to accept connection from the PostgreSQL backend */
+		gpuserv_shared_state->gpuserv_ready_accept = true;
+
 		gpuDirectOpenDriver();
 		while (!gpuServiceGoingTerminate())
 		{
@@ -2999,13 +3607,19 @@ gpuservBgWorkerMain(Datum arg)
 					break;
 				/* any connection pending? */
 				if ((ep_ev.events & EPOLLIN) != 0)
-					gpuservAcceptClient((gpuContext *)ep_ev.data.ptr);
+				{
+					if (ep_ev.data.ptr)
+						gpuservAcceptClient((gpuContext *)ep_ev.data.ptr);
+					else
+						gpuservLoggerDispatch();
+				}
 			}
 		}
 	}
 	PG_CATCH();
 	{
 		gpuserv_shared_state->gpuserv_pid = 0;
+		gpuserv_shared_state->gpuserv_ready_accept = false;
 		while (!dlist_is_empty(&gpuserv_gpucontext_list))
 		{
 			dlist_node *dnode = dlist_pop_head_node(&gpuserv_gpucontext_list);
@@ -3019,6 +3633,7 @@ gpuservBgWorkerMain(Datum arg)
 
 	/* cleanup */
 	gpuserv_shared_state->gpuserv_pid = 0;
+	gpuserv_shared_state->gpuserv_ready_accept = false;
 	while (!dlist_is_empty(&gpuserv_gpucontext_list))
 	{
 		dlist_node *dnode = dlist_pop_head_node(&gpuserv_gpucontext_list);
@@ -3128,6 +3743,24 @@ pgstrom_init_gpu_service(void)
 							NULL,
 							pgstrom_max_async_tasks_assign,
 							pgstrom_max_async_tasks_show);
+	DefineCustomStringVariable("pg_strom.cuda_toolkit_basedir",
+							   "CUDA Toolkit installation directory",
+							   NULL,
+							   &pgstrom_cuda_toolkit_basedir,
+							   CUDA_TOOLKIT_BASEDIR,
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_strom.cuda_stack_limit",
+							"Limit of adaptive cuda stack size per thread",
+							NULL,
+							&__pgstrom_cuda_stack_limit_kb,
+							32,		/* 32kB */
+							4,		/* 4kB */
+							2048,	/* 2MB */
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
 	DefineCustomBoolVariable("pg_strom.gpuserv_debug_output",
 							 "enables to generate debug message of GPU service",
 							 NULL,

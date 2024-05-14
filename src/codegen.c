@@ -15,9 +15,11 @@
 #define DEVTYPE_INFO_NSLOTS		128
 #define DEVFUNC_INFO_NSLOTS		1024
 static MemoryContext	devinfo_memcxt = NULL;
+static volatile int		devinfo_memcxt_generation = 0;
 static List	   *devtype_info_slot[DEVTYPE_INFO_NSLOTS];
 static List	   *devfunc_info_slot[DEVFUNC_INFO_NSLOTS];
-static List	   *devfunc_code_slot[DEVFUNC_INFO_NSLOTS];	/* by FuncOpCode */
+static HTAB	   *devtype_rev_htable = NULL;		/* lookup by TypeOpCode */
+static HTAB	   *devfunc_rev_htable = NULL;		/* lookup by FuncOpCode */
 
 /* -------- static declarations -------- */
 #define TYPE_OPCODE(NAME,EXTENSION,FLAGS)								\
@@ -235,10 +237,9 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	devtype_info  **subtypes = alloca(sizeof(devtype_info *) * tupdesc->natts);
 	devtype_info   *dtype;
 	MemoryContext	oldcxt;
-	uint32_t		extra_flags = DEVKIND__ANY;
-	int				j;
+	uint32_t		subtype_flags = DEVKIND__ANY;
 
-	for (j=0; j < tupdesc->natts; j++)
+	for (int j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
 
@@ -248,7 +249,7 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 			ReleaseTupleDesc(tupdesc);
 			return NULL;
 		}
-		extra_flags &= dtype->type_flags;
+		subtype_flags &= dtype->type_flags;
 		subtypes[j] = dtype;
 	}
 	ReleaseTupleDesc(tupdesc);
@@ -260,7 +261,7 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 		dtype->type_extension = pstrdup(ext_name);
 	dtype->type_code = TypeOpCode__composite;
 	dtype->type_oid = tcache->type_id;
-	dtype->type_flags = extra_flags | DEVTYPE__USE_KVARS_SLOTBUF;
+	dtype->type_flags = subtype_flags;
 	dtype->type_length = tcache->typlen;
 	dtype->type_align = typealign_get_width(tcache->typalign);
 	dtype->type_byval = tcache->typbyval;
@@ -301,7 +302,7 @@ build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 		dtype->type_extension = pstrdup(ext_name);
 	dtype->type_code = TypeOpCode__array;
 	dtype->type_oid = tcache->type_id;
-	dtype->type_flags = elem->type_flags | DEVTYPE__USE_KVARS_SLOTBUF;
+	dtype->type_flags = elem->type_flags;
 	dtype->type_length = tcache->typlen;
 	dtype->type_align = typealign_get_width(tcache->typalign);
 	dtype->type_byval = tcache->typbyval;
@@ -408,6 +409,7 @@ pgstrom_devtype_lookup(Oid type_oid)
 	ListCell	   *lc;
 	const char	   *ext_name;
 	TypeCacheEntry *tcache;
+	int				__generation;
 
 	if (!OidIsValid(type_oid))
 		return NULL;	/* InvalidOid should never has device-type */
@@ -424,82 +426,123 @@ pgstrom_devtype_lookup(Oid type_oid)
 			goto found;
 		}
 	}
-	/* try to build devtype_info entry */
-	ext_name = get_extension_name_by_object(TypeRelationId, type_oid);
-	tcache = lookup_type_cache(type_oid,
-							   TYPECACHE_EQ_OPR |
-							   TYPECACHE_CMP_PROC);
-	/* if domain, move to the base type */
-	while (tcache->nextDomain)
-		tcache = tcache->nextDomain;
-	/* if aliased device type, resolve this one */
-	tcache = __devtype_resolve_alias(tcache);
+	/*
+	 * Not found, try to build devtype_info entry
+	 */
+	do {
+		__generation = devinfo_memcxt_generation;
 
-	if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
-	{
-		/* array type */
-		dtype = build_array_devtype_info(tcache, ext_name);
-	}
-	else if (tcache->typtype == TYPTYPE_COMPOSITE)
-	{
-		/* composite type */
-		if (!OidIsValid(tcache->typrelid))
-			elog(ERROR, "Bug? wrong composite definition at %s",
-				 format_type_be(type_oid));
-		dtype = build_composite_devtype_info(tcache, ext_name);
-	}
-	else if (tcache->typtype == TYPTYPE_BASE ||
-			 tcache->typtype == TYPTYPE_RANGE)
-	{
-		/* base or range type */
-		dtype = build_basic_devtype_info(tcache, ext_name);
-	}
-	else
-	{
-		/* not a supported type */
-		dtype = NULL;
-	}
+		ext_name = get_extension_name_by_object(TypeRelationId, type_oid);
+		tcache = lookup_type_cache(type_oid,
+								   TYPECACHE_EQ_OPR |
+								   TYPECACHE_CMP_PROC);
+		/* if domain, move to the base type */
+		while (tcache->nextDomain)
+			tcache = tcache->nextDomain;
+		/* if aliased device type, resolve this one */
+		tcache = __devtype_resolve_alias(tcache);
 
-	/* make a negative entry, if not device executable */
-	if (!dtype)
-	{
-		dtype = MemoryContextAllocZero(devinfo_memcxt,
-									   sizeof(devtype_info));
-		dtype->type_is_negative = true;
-	}
-	dtype->type_oid = type_oid;
-	dtype->hash = hash;
+		if (OidIsValid(tcache->typelem) && tcache->typlen == -1)
+		{
+			/* array type */
+			dtype = build_array_devtype_info(tcache, ext_name);
+		}
+		else if (tcache->typtype == TYPTYPE_COMPOSITE)
+		{
+			/* composite type */
+			if (!OidIsValid(tcache->typrelid))
+				elog(ERROR, "Bug? wrong composite definition at %s",
+					 format_type_be(type_oid));
+			dtype = build_composite_devtype_info(tcache, ext_name);
+		}
+		else if (tcache->typtype == TYPTYPE_BASE ||
+				 tcache->typtype == TYPTYPE_RANGE)
+		{
+			/* base or range type */
+			dtype = build_basic_devtype_info(tcache, ext_name);
+		}
+		else
+		{
+			/* not a supported type */
+			dtype = NULL;
+		}
+		/* make a negative entry, if not device executable */
+		if (!dtype)
+		{
+			dtype = MemoryContextAllocZero(devinfo_memcxt,
+										   sizeof(devtype_info));
+			dtype->type_is_negative = true;
+		}
+		dtype->type_oid = type_oid;
+		dtype->hash = hash;
+	} while (__generation != devinfo_memcxt_generation);
+
 	devtype_info_slot[index] = lappend_cxt(devinfo_memcxt,
 										   devtype_info_slot[index], dtype);
 found:
-	if (dtype->type_is_negative)
-		return NULL;
-	return dtype;
+	return (dtype->type_is_negative ? NULL : dtype);
 }
 
 /*
  * devtype_get_name_by_opcode
  */
+typedef struct {
+	TypeOpCode	type_code;
+	const char *type_name;
+} devtype_reverse_entry;
+
 static const char *
 devtype_get_name_by_opcode(TypeOpCode type_code)
 {
-	switch (type_code)
+	devtype_reverse_entry *entry;
+	bool		found;
+
+	if (!devtype_rev_htable)
 	{
-		case TypeOpCode__composite:
-			return "composite";
-		case TypeOpCode__array:
-			return "array";
-		case TypeOpCode__internal:
-			return "internal";
-		default:
-			for (int i=0; devtype_catalog[i].type_name != NULL; i++)
-			{
-				if (devtype_catalog[i].type_code == type_code)
-					return devtype_catalog[i].type_name;
-			}
-			break;
+		HASHCTL	hctl;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = sizeof(TypeOpCode);
+		hctl.entrysize = sizeof(devtype_reverse_entry);
+		hctl.hcxt = devinfo_memcxt;
+
+		devtype_rev_htable = hash_create("devtype_rev_htable",
+										 128,
+										 &hctl,
+										 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	}
-	elog(ERROR, "device type opcode:%u not found", type_code);
+
+	entry = (devtype_reverse_entry *)
+		hash_search(devtype_rev_htable, &type_code, HASH_ENTER, &found);
+	if (!found)
+	{
+		switch (type_code)
+		{
+			case TypeOpCode__composite:
+				entry->type_name = "composite";
+				break;
+			case TypeOpCode__array:
+				entry->type_name = "array";
+				break;
+			case TypeOpCode__internal:
+				entry->type_name = "internal";
+				break;
+			default:
+				entry->type_name = NULL;
+				for (int i=0; devtype_catalog[i].type_name != NULL; i++)
+				{
+					if (devtype_catalog[i].type_code == type_code)
+					{
+						entry->type_name = devtype_catalog[i].type_name;
+						break;
+					}
+				}
+				break;
+		}
+	}
+	if (!entry->type_name)
+		elog(ERROR, "device type opcode:%u not found", type_code);
+	return entry->type_name;
 }
 
 /*
@@ -1013,6 +1056,7 @@ __pgstrom_devfunc_lookup(Oid func_oid,
 	ListCell	   *lc;
 	uint32_t		hash;
 	int				i, j, sz;
+	int				__generation;
 
 	sz = offsetof(devfunc_cache_signature, func_argtypes[func_nargs]);
 	signature = alloca(sz);
@@ -1042,39 +1086,37 @@ __pgstrom_devfunc_lookup(Oid func_oid,
 		}
 	}
 	/* not found, build a new entry */
-	dfunc = pgstrom_devfunc_build(func_oid, func_nargs, func_argtypes);
-	if (!dfunc)
-	{
-		MemoryContext	oldcxt;
+	do {
+		__generation = devinfo_memcxt_generation;
 
-		oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
-		dfunc =  palloc0(offsetof(devfunc_info, func_argtypes[func_nargs]));
-		dfunc->func_oid = func_oid;
-		dfunc->func_nargs = func_nargs;
-		dfunc->func_is_negative = true;
-		for (i=0; i < func_nargs; i++)
+		dfunc = pgstrom_devfunc_build(func_oid, func_nargs, func_argtypes);
+		if (!dfunc)
 		{
-			dtype = pgstrom_devtype_lookup(func_argtypes[i]);
-			if (!dtype)
+			MemoryContext	oldcxt;
+
+			oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+			dfunc =  palloc0(offsetof(devfunc_info, func_argtypes[func_nargs]));
+			dfunc->func_oid = func_oid;
+			dfunc->func_nargs = func_nargs;
+			dfunc->func_is_negative = true;
+			for (i=0; i < func_nargs; i++)
 			{
-				dtype = palloc0(sizeof(devtype_info));
-				dtype->type_oid = func_argtypes[i];
-				dtype->type_is_negative = true;
+				dtype = pgstrom_devtype_lookup(func_argtypes[i]);
+				if (!dtype)
+				{
+					dtype = palloc0(sizeof(devtype_info));
+					dtype->type_oid = func_argtypes[i];
+					dtype->type_is_negative = true;
+				}
+				dfunc->func_argtypes[i] = dtype;
 			}
-			dfunc->func_argtypes[i] = dtype;
+			MemoryContextSwitchTo(oldcxt);
 		}
-		MemoryContextSwitchTo(oldcxt);
-	}
-	dfunc->hash = hash;
+		dfunc->hash = hash;
+	} while (__generation != devinfo_memcxt_generation);
+
 	devfunc_info_slot[i] = lappend_cxt(devinfo_memcxt,
 									   devfunc_info_slot[i], dfunc);
-	if (!dfunc->func_is_negative)
-	{
-		hash = hash_any((unsigned char *)&dfunc->func_code, sizeof(FuncOpCode));
-		i = hash % DEVFUNC_INFO_NSLOTS;
-		devfunc_code_slot[i] = lappend_cxt(devinfo_memcxt,
-										   devfunc_code_slot[i], dfunc);
-	}
 found:
 	if (dfunc->func_is_negative)
 		return NULL;
@@ -1108,21 +1150,83 @@ pgstrom_devfunc_lookup(Oid func_oid,
 	return __pgstrom_devfunc_lookup(func_oid, nargs, argtypes, func_collid);
 }
 
-static devfunc_info *
-devfunc_lookup_by_opcode(FuncOpCode func_code)
+/*
+ * devfunc_lookup_by_opcode - reverse lookup of device function
+ */
+typedef struct {
+	FuncOpCode		opcode;
+	bool			is_valid;
+	bool			device_only;
+	const char	   *dfunc_name;
+} devfunc_reverse_entry;
+
+static const char *
+devfunc_get_name_by_opcode(FuncOpCode func_code, bool *p_device_only)
 {
-	Datum		hash;
-	uint32_t	index;
-	ListCell   *lc;
+	devfunc_reverse_entry *entry;
+	bool		found;
 
-	hash = hash_any((unsigned char *)&func_code, sizeof(FuncOpCode));
-	index = hash % DEVFUNC_INFO_NSLOTS;
-	foreach (lc, devfunc_code_slot[index])
+	if (!devfunc_rev_htable)
 	{
-		devfunc_info *dfunc = lfirst(lc);
+		HASHCTL	hctl;
 
-		if (dfunc->func_code == func_code)
-			return dfunc;
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = sizeof(FuncOpCode);
+		hctl.entrysize = sizeof(devfunc_reverse_entry);
+		hctl.hcxt = devinfo_memcxt;
+
+		devfunc_rev_htable = hash_create("devfunc_rev_htable",
+										 256,
+										 &hctl,
+										 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+
+	entry = (devfunc_reverse_entry *)
+		hash_search(devfunc_rev_htable, &func_code, HASH_ENTER, &found);
+	if (!found)
+	{
+		static struct {
+			FuncOpCode	func_code;
+			const char *func_name;
+			const char *func_args;
+			const char *rtype_name;
+		} devonlyfunc_catalog[] = {
+#define DEVONLY_FUNC_OPCODE(RET_TYPE,DEV_NAME,FUNC_ARGS,a,b)			\
+			{FuncOpCode__##DEV_NAME, #DEV_NAME, #FUNC_ARGS, #RET_TYPE},
+#include "xpu_opcodes.h"
+			{FuncOpCode__Invalid,NULL,NULL}
+		};
+
+		for (int i=0; devfunc_catalog[i].func_code != FuncOpCode__Invalid; i++)
+		{
+			if (devfunc_catalog[i].func_code == func_code)
+			{
+				entry->is_valid    = true;
+				entry->device_only = false;
+				entry->dfunc_name  = devfunc_catalog[i].func_name;
+				goto found;
+			}
+		}
+
+		for (int i=0; devonlyfunc_catalog[i].func_code != FuncOpCode__Invalid; i++)
+		{
+			if (devonlyfunc_catalog[i].func_code == func_code)
+			{
+				entry->is_valid    = true;
+				entry->device_only = true;
+				entry->dfunc_name  = devonlyfunc_catalog[i].func_name;
+				goto found;
+			}
+		}
+		entry->is_valid   = false;
+		entry->dfunc_name = NULL;
+	}
+found:
+	if (entry->is_valid)
+	{
+		if (p_device_only)
+			*p_device_only = entry->device_only;
+		return entry->dfunc_name;
 	}
 	return NULL;
 }
@@ -1168,6 +1272,7 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 										  bool *p_kv_type_byval,
 										  int8_t *p_kv_type_align,
 										  int16_t *p_kv_type_length,
+										  int32_t *p_kv_xdatum_sizeof,	/* optional */
 										  int32_t *p_kv_kvec_sizeof,	/* optional */
 										  bool allows_host_only_types)
 {
@@ -1179,6 +1284,8 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 		*p_kv_type_byval = dtype->type_byval;
 		*p_kv_type_align = dtype->type_align;
 		*p_kv_type_length = dtype->type_length;
+		if (p_kv_xdatum_sizeof)
+			*p_kv_xdatum_sizeof = dtype->type_sizeof;
 		if (p_kv_kvec_sizeof)
 			*p_kv_kvec_sizeof = dtype->kvec_sizeof;
 
@@ -1192,6 +1299,7 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 		bool		typbyval;
 		char		typalign;
 		int16_t		typlen;
+		int32_t		xdatum_sizeof;
 		int32_t		kvec_sizeof;
 
 		get_typlenbyvalalign(kv_type_oid, &typlen, &typbyval, &typalign);
@@ -1201,18 +1309,22 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 			{
 				case 1:
 					type_code   = TypeOpCode__int1;
+					xdatum_sizeof = sizeof(xpu_int1_t);
 					kvec_sizeof = sizeof(kvec_int1_t);
 					break;
 				case 2:
 					type_code   = TypeOpCode__int2;
+					xdatum_sizeof = sizeof(xpu_int2_t);
 					kvec_sizeof = sizeof(kvec_int2_t);
 					break;
                 case 4:
 					type_code   = TypeOpCode__int4;
+					xdatum_sizeof = sizeof(xpu_int4_t);
 					kvec_sizeof = sizeof(kvec_int4_t);
                     break;
                 case 8:
 					type_code   = TypeOpCode__int8;
+					xdatum_sizeof = sizeof(xpu_int8_t);
 					kvec_sizeof = sizeof(kvec_int8_t);
 					break;
 				default:
@@ -1223,11 +1335,13 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 		else if (typlen > 0)
 		{
 			type_code   = TypeOpCode__internal;
+			xdatum_sizeof = sizeof(xpu_internal_t);
 			kvec_sizeof = sizeof(kvec_internal_t);
 		}
 		else if (typlen == -1)
 		{
 			type_code   = TypeOpCode__bytea;
+			xdatum_sizeof = sizeof(xpu_bytea_t);
 			kvec_sizeof = sizeof(kvec_bytea_t);
 		}
 		else
@@ -1238,6 +1352,8 @@ __assign_codegen_kvar_defitem_type_params(Oid kv_type_oid,
 		*p_kv_type_byval = typbyval;
 		*p_kv_type_align = typealign_get_width(typalign);
 		*p_kv_type_length = typlen;
+		if (p_kv_xdatum_sizeof)
+			*p_kv_xdatum_sizeof = xdatum_sizeof;
 		if (p_kv_kvec_sizeof)
 			*p_kv_kvec_sizeof = kvec_sizeof;
 
@@ -1272,6 +1388,7 @@ __assign_codegen_kvar_defitem_subfields(codegen_kvar_defitem *kvdef)
 												  &__kvdef->kv_typbyval,
 												  &__kvdef->kv_typalign,
 												  &__kvdef->kv_typlen,
+												  &__kvdef->kv_xdatum_sizeof,
 												  &__kvdef->kv_kvec_sizeof,
 												  true);
 		__kvdef->kv_expr = (Expr *)makeNullConst(tcache->typelem, -1, InvalidOid);
@@ -1299,6 +1416,7 @@ __assign_codegen_kvar_defitem_subfields(codegen_kvar_defitem *kvdef)
 													  &__kvdef->kv_typbyval,
 													  &__kvdef->kv_typalign,
 													  &__kvdef->kv_typlen,
+													  &__kvdef->kv_xdatum_sizeof,
 													  &__kvdef->kv_kvec_sizeof,
 													  true);
 			__kvdef->kv_expr = (Expr *)makeNullConst(attr->atttypid, -1, InvalidOid);
@@ -1306,6 +1424,34 @@ __assign_codegen_kvar_defitem_subfields(codegen_kvar_defitem *kvdef)
 			kvdef->kv_subfields = lappend(kvdef->kv_subfields, __kvdef);
 		}
 	}
+}
+
+/*
+ * equalVar - compares two Var nodes except for varnullingrels
+ *
+ * NOTE: Var-nodes in the reltarget of input-paths are not normalized
+ * to this level of GpuJoin, so it may have different varnullingrels
+ * even if they are identical Var-nodes. So, we should not use equal()
+ * here to compare Var-nodes.
+ */
+static inline bool
+equalVar(const void *__a, const void *__b)
+{
+	if (IsA(__a, Var) && IsA(__b, Var))
+	{
+		const Var  *a = __a;
+		const Var  *b = __b;
+
+		if (a->varno    == b->varno &&
+			a->varattno == b->varattno)
+		{
+			Assert(a->vartype   == b->vartype &&
+				   a->vartypmod == b->vartypmod &&
+				   a->varcollid == b->varcollid);
+			return true;
+		}
+	}
+	return false;
 }
 
 /*
@@ -1325,6 +1471,7 @@ lookup_input_varnode_defitem(codegen_context *context,
 	bool		kv_type_byval;
 	int8_t		kv_type_align;
 	int16_t		kv_type_length;
+	int32_t		kv_xdatum_sizeof;
 	int32_t		kv_kvec_sizeof;
 
 	if (!IsA(var, Var))
@@ -1345,7 +1492,7 @@ lookup_input_varnode_defitem(codegen_context *context,
 		resno = 1;
 		foreach (lc, target->exprs)
 		{
-			if (codegen_expression_equals(var, lfirst(lc)))
+			if (equalVar(var, lfirst(lc)))
 				goto found;
 			resno++;
 		}
@@ -1359,7 +1506,7 @@ found:
 		if (kvdef->kv_depth == depth &&
 			kvdef->kv_resno == resno)
 		{
-			Assert(codegen_expression_equals(var, kvdef->kv_expr));
+			Assert(equalVar(var, kvdef->kv_expr));
 			kvdef->kv_maxref = Max(kvdef->kv_maxref, curr_depth);
 			return kvdef;
 		}
@@ -1372,6 +1519,7 @@ found:
 												   &kv_type_byval,
 												   &kv_type_align,
 												   &kv_type_length,
+												   &kv_xdatum_sizeof,
 												   &kv_kvec_sizeof,
 												   allows_host_only_types))
 	{
@@ -1388,6 +1536,7 @@ found:
 	kvdef->kv_typbyval    = kv_type_byval;
 	kvdef->kv_typalign    = kv_type_align;
 	kvdef->kv_typlen      = kv_type_length;
+	kvdef->kv_xdatum_sizeof = kv_xdatum_sizeof;
 	kvdef->kv_kvec_sizeof = kv_kvec_sizeof;
 	kvdef->kv_expr        = (Expr *)var;
 	__assign_codegen_kvar_defitem_subfields(kvdef);
@@ -1430,7 +1579,7 @@ __try_inject_temporary_expression(codegen_context *context,
 	{
 		kvdef = lfirst(lc);
 
-		if (codegen_expression_equals(expr, kvdef->kv_expr))
+		if (equal(expr, kvdef->kv_expr))
 			goto found;
 	}
 
@@ -1450,6 +1599,7 @@ __try_inject_temporary_expression(codegen_context *context,
 												   &kvdef->kv_typbyval,
 												   &kvdef->kv_typalign,
 												   &kvdef->kv_typlen,
+												   &kvdef->kv_xdatum_sizeof,
 												   NULL,	/* no kvec-buffer */
 												   false))
 	{
@@ -1512,7 +1662,7 @@ create_codegen_context(PlannerInfo *root,
 												   pp_info->num_rels + 2]));
 	context->elevel = ERROR;
 	context->root = root;
-	context->required_flags = (pp_info->xpu_task_flags & DEVKIND__ANY);
+	context->xpu_task_flags = pp_info->xpu_task_flags;
 	context->kvecs_ndims = pp_info->num_rels + 1;
 	context->kvecs_usage = 0;
 	context->scan_relid = pp_info->scan_relid;
@@ -1665,7 +1815,14 @@ codegen_var_expression(codegen_context *context,
 		kexp.expflags        = context->kexp_flags;
 		kexp.opcode          = FuncOpCode__VarExpr;
 		kexp.u.v.var_slot_id = kvdef->kv_slot_id;
-		if (kvdef->kv_offset >= 0 &&
+		/*
+		 * NOTE: GPU uses kvec-buffer to save intermediation results
+		 * per depth, because different core shall handle this result
+		 * on the next depth, and private values are not visible to
+		 * others.
+		 */
+		if ((context->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0 &&
+			kvdef->kv_offset >= 0 &&
 			kvdef->kv_depth != curr_depth)
 			kexp.u.v.var_offset = kvdef->kv_offset;
 		else
@@ -1692,7 +1849,7 @@ __codegen_func_expression(codegen_context *context,
 
 	dfunc = pgstrom_devfunc_lookup(func_oid, func_args, func_collid);
 	if (!dfunc ||
-		(dfunc->func_flags & context->required_flags) != context->required_flags)
+		(dfunc->func_flags & context->xpu_task_flags & DEVKIND__ANY) == 0)
 		__Elog("function %s is not supported on the target device",
 			   format_procedure(func_oid));
 	dtype = dfunc->func_rettype;
@@ -2514,311 +2671,6 @@ codegen_expression_walker(codegen_context *context,
 	}
 	return -1;
 }
-
-/*
- * codegen_expression_equals
- *
- * it is sub-set of equal() because of Var::varnullingrels, but only supports
- * expression nodes supported by the device code
- */
-bool
-codegen_expression_equals(const void *__a, const void *__b)
-{
-	if (__a == __b)
-		return true;	/* including if (__a == NULL && __b == NULL) */
-	if (__a == NULL || __b == NULL)
-		return false;	/* either one is NULL? */
-	if (nodeTag(__a) != nodeTag(__b))
-		return false;
-
-	switch (nodeTag(__a))
-	{
-		case T_List:
-			{
-				const List *list1 = __a;
-				const List *list2 = __b;
-				ListCell   *lc1, *lc2;
-
-				if (list_length(list1) == list_length(list2))
-				{
-					forboth (lc1, list1,
-							 lc2, list2)
-					{
-						if (!codegen_expression_equals(lfirst(lc1),
-													   lfirst(lc2)))
-							return false;
-					}
-					return true;
-				}
-			}
-			break;
-
-		case T_Const:
-			{
-				const Const	*a = __a;
-				const Const *b = __b;
-
-				if (a->consttype == b->consttype &&
-					a->consttypmod == b->consttypmod &&
-					a->constcollid == b->constcollid &&
-					a->constlen    == b->constlen &&
-					a->constisnull == b->constisnull &&
-					a->constbyval  == b->constbyval)
-				{
-					if (a->constisnull)
-						return true;
-					return  datumIsEqual(a->constvalue,
-										 b->constvalue,
-										 a->constbyval,
-										 a->constlen);
-				}
-			}
-			break;
-
-		case T_Param:
-			{
-				const Param *a = __a;
-				const Param *b = __b;
-
-				if (a->paramkind == b->paramkind &&
-					a->paramid   == b->paramid &&
-					a->paramtype == b->paramtype &&
-					a->paramtypmod == b->paramtypmod &&
-					a->paramcollid == b->paramcollid)
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_Var:
-			{
-				const Var  *a = __a;
-				const Var  *b = __b;
-
-				if (a->varno       == b->varno &&
-					a->varattno    == b->varattno &&
-					a->vartype     == b->vartype &&
-					a->vartypmod   == b->vartypmod &&
-					a->varcollid   == b->varcollid &&
-					a->varlevelsup == b->varlevelsup)
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_FuncExpr:
-			{
-				const FuncExpr *a = __a;
-				const FuncExpr *b = __b;
-
-				if (a->funcid         == b->funcid &&
-					a->funcresulttype == b->funcresulttype &&
-					a->funcretset     == b->funcretset &&
-					a->funcvariadic   == b->funcvariadic &&
-					a->funccollid     == b->funccollid &&
-					a->inputcollid    == b->inputcollid &&
-					codegen_expression_equals(a->args, b->args))
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_OpExpr:
-		case T_DistinctExpr:
-			{
-				const OpExpr   *a = __a;
-				const OpExpr   *b = __b;
-
-				if (a->opno         == b->opno &&
-					(a->opfuncid == 0 ||
-					 b->opfuncid == 0 ||
-					 a->opfuncid == b->opfuncid) &&
-					a->opresulttype == b->opresulttype &&
-					a->opretset     == b->opretset &&
-					a->opcollid     == b->opcollid &&
-					a->inputcollid  == b->inputcollid &&
-					codegen_expression_equals(a->args, b->args))
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_BoolExpr:
-			{
-				const BoolExpr *a = __a;
-				const BoolExpr *b = __b;
-
-				if (a->boolop == b->boolop &&
-					codegen_expression_equals(a->args, b->args))
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_NullTest:
-			{
-				const NullTest *a = __a;
-				const NullTest *b = __b;
-
-				if (a->nulltesttype == b->nulltesttype &&
-					a->argisrow     == b->argisrow &&
-					codegen_expression_equals(a->arg, b->arg))
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_BooleanTest:
-			{
-				const BooleanTest *a = __a;
-				const BooleanTest *b = __b;
-
-				if (a->booltesttype == b->booltesttype &&
-					codegen_expression_equals(a->arg, b->arg))
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_CoerceViaIO:
-			{
-				const CoerceViaIO *a = __a;
-				const CoerceViaIO *b = __b;
-
-				if (a->resulttype   == b->resulttype &&
-					a->resultcollid == b->resultcollid &&
-					codegen_expression_equals(a->arg, b->arg))
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_CoalesceExpr:
-			{
-				const CoalesceExpr *a = __a;
-				const CoalesceExpr *b = __b;
-
-				if (a->coalescetype   == b->coalescetype &&
-					a->coalescecollid == b->coalescecollid &&
-					codegen_expression_equals(a->args, b->args))
-				{
-					return true;
-				}
-			}
-			break;
-
-        case T_MinMaxExpr:
-			{
-				const MinMaxExpr *a = __a;
-				const MinMaxExpr *b = __b;
-
-				if (a->minmaxtype == b->minmaxtype &&
-					a->minmaxcollid == b->minmaxcollid &&
-					a->inputcollid == b->inputcollid &&
-					a->op == b->op &&
-					codegen_expression_equals(a->args, b->args))
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_RelabelType:
-        	{
-				const RelabelType *a = __a;
-				const RelabelType *b = __b;
-
-				if (a->resulttype == b->resulttype &&
-					a->resulttypmod == b->resulttypmod &&
-					a->resultcollid == b->resultcollid &&
-					codegen_expression_equals(a->arg, b->arg))
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_CaseExpr:
-			{
-				const CaseExpr *a = __a;
-				const CaseExpr *b = __b;
-
-				if (a->casetype == b->casetype &&
-					a->casecollid == b->casecollid &&
-					codegen_expression_equals(a->arg, b->arg) &&
-					codegen_expression_equals(a->args, b->args) &&
-					codegen_expression_equals(a->defresult, b->defresult))
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_CaseWhen:
-			{
-				const CaseWhen *a = __a;
-				const CaseWhen *b = __b;
-
-				if (codegen_expression_equals(a->expr, b->expr) &&
-					codegen_expression_equals(a->result, b->result))
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_CaseTestExpr:
-			{
-				const CaseTestExpr *a = __a;
-				const CaseTestExpr *b = __b;
-
-				if (a->typeId    == b->typeId &&
-					a->typeMod   == b->typeMod &&
-					a->collation == b->collation)
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_ScalarArrayOpExpr:
-			{
-				const ScalarArrayOpExpr *a = __a;
-				const ScalarArrayOpExpr *b = __b;
-
-				if (a->opno == b->opno &&
-					(a->opfuncid == 0 ||
-					 b->opfuncid == 0 ||
-					 a->opfuncid == b->opfuncid) &&
-					(a->hashfuncid == 0 ||
-					 b->hashfuncid == 0 ||
-					 a->hashfuncid == b->hashfuncid) &&
-					(a->negfuncid == 0 ||
-					 b->negfuncid == 0 ||
-					 a->negfuncid == b->negfuncid) &&
-					a->useOr == b->useOr &&
-					a->inputcollid == b->inputcollid &&
-					codegen_expression_equals(a->args, b->args))
-				{
-					return true;
-				}
-			}
-			break;
-
-		case T_CoerceToDomain:
-		default:
-			break;
-	}
-	return false;
-}
 #undef __Elog
 
 /*
@@ -2988,6 +2840,10 @@ codegen_build_packed_kvars_move(codegen_context *context, pgstromPlanInfo *pp_in
 	int			nvalids = 0;
 	int			gist_depth = context->num_rels + 1;
 
+	/* Only NVIDIA-GPU has kvec-buffer for MoveVars across depth */
+	if ((context->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0)
+		return;
+
 	sz = MAXALIGN(offsetof(kern_expression,
 						   u.pack.offset[context->num_rels+1]));
 	kexp = alloca(sz);
@@ -3038,6 +2894,9 @@ codegen_build_packed_kvars_move(codegen_context *context, pgstromPlanInfo *pp_in
 		pp_info->kexp_move_vars_packed = xpucode;
 	}
 	pfree(buf.data);
+
+	pp_info->kvecs_bufsz = KVEC_ALIGN(context->kvecs_usage);
+	pp_info->kvecs_ndims = context->kvecs_ndims;
 }
 
 /*
@@ -3952,7 +3811,7 @@ codegen_build_groupby_actions(codegen_context *context,
  */
 bool
 pgstrom_xpu_expression(Expr *expr,
-					   uint32_t required_xpu_flags,
+					   uint32_t xpu_task_flags,
 					   Index scan_relid,
 					   List *inner_target_list,
 					   int *p_devcost)
@@ -3963,13 +3822,13 @@ pgstrom_xpu_expression(Expr *expr,
 	int			depth;
 	ListCell   *lc;
 
-	Assert((required_xpu_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
-		   (required_xpu_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
+	Assert((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_GPU ||
+		   (xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU);
 	context = alloca(sz);
 	memset(context, 0, sz);
 	context->elevel = DEBUG2;
 	context->top_expr = expr;
-	context->required_flags = (required_xpu_flags & DEVKIND__ANY);
+	context->xpu_task_flags = xpu_task_flags;
 	context->scan_relid = scan_relid;
 	context->num_rels = num_rels;
 	depth = 1;
@@ -3982,6 +3841,41 @@ pgstrom_xpu_expression(Expr *expr,
 	if (p_devcost)
 		*p_devcost = context->device_cost;
 	return true;
+}
+
+/*
+ * estimate_cuda_stack_size
+ */
+uint32_t
+estimate_cuda_stack_size(codegen_context *context)
+{
+#define CUDA_ALLOCA_ALIGN	16
+	uint32_t	extra_bufsz = Max(context->extra_bufsz, 512);
+	uint32_t	stack_sz;
+	int			kvars_nslots;
+	ListCell   *lc;
+
+	/* only NVIDIA-GPU needs stack configuration */
+	if ((context->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0)
+		return 0;
+	/* minimum working area */
+	stack_sz = 3200;
+	/* kern_context */
+	stack_sz += TYPEALIGN(CUDA_ALLOCA_ALIGN,
+						  offsetof(kern_context, vlbuf) + extra_bufsz);
+	/* kvars_slot[] */
+	kvars_nslots = list_length(context->kvars_deflist);
+	stack_sz += TYPEALIGN(CUDA_ALLOCA_ALIGN,
+						  sizeof(xpu_datum_t *) * kvars_nslots);
+	foreach (lc, context->kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+
+		stack_sz += TYPEALIGN(CUDA_ALLOCA_ALIGN,
+							  kvdef->kv_xdatum_sizeof);
+	}
+	return stack_sz;
+#undef CUDA_ALLOCA_ALIGN
 }
 
 /*
@@ -4346,9 +4240,9 @@ __xpucode_to_cstring(StringInfo buf,
 {
 	const kern_expression *karg;
 	const codegen_kvar_defitem *kvdef;
-	devfunc_info *dfunc;
 	const char *dname;
 	const char *label;
+	bool		device_only;
 	int			i, pos;
 
 	switch (kexp->opcode)
@@ -4536,47 +4430,17 @@ __xpucode_to_cstring(StringInfo buf,
 			break;
 
 		default:
-			{
-				static struct {
-					FuncOpCode	func_code;
-					const char *func_name;
-					const char *rettype_name;
-				} devonly_funcs_catalog[] = {
-#define DEVONLY_FUNC_OPCODE(RET_TYPE,DEV_NAME,a,b,c)	\
-					{FuncOpCode__##DEV_NAME, #DEV_NAME, #RET_TYPE},
-#include "xpu_opcodes.h"
-					{FuncOpCode__Invalid,NULL,NULL}
-				};
-
-				dfunc = devfunc_lookup_by_opcode(kexp->opcode);
-				if (dfunc)
-				{
-					dname = devtype_get_name_by_opcode(kexp->exptype);
-					appendStringInfo(buf, "{Func(%s)::%s",
-									 dname,
-                                     dfunc->func_name);
-				}
-				else
-				{
-					const char *func_name = NULL;
-					const char *rettype_name = NULL;
-
-					for (i=0; devonly_funcs_catalog[i].func_code; i++)
-					{
-						if (devonly_funcs_catalog[i].func_code == kexp->opcode)
-						{
-							func_name = devonly_funcs_catalog[i].func_name;
-							rettype_name = devonly_funcs_catalog[i].rettype_name;
-							break;
-						}
-					}
-					if (!func_name || !rettype_name)
-						elog(ERROR, "unknown device only function: %u", kexp->opcode);
-					appendStringInfo(buf, "{DevOnlyFunc::%s(%s)",
-									 func_name,
-									 rettype_name);
-				}
-			}
+			dname = devfunc_get_name_by_opcode(kexp->opcode, &device_only);
+			if (!dname)
+				elog(ERROR, "unknown device function (code: %u)", kexp->opcode);
+			if (!device_only)
+				appendStringInfo(buf, "{Func(%s)::%s",
+								 devtype_get_name_by_opcode(kexp->exptype),
+								 dname);
+			else
+				appendStringInfo(buf, "{DevOnlyFunc::%s(%s)",
+								 dname,
+								 devtype_get_name_by_opcode(kexp->exptype));
 			break;
 	}
 	if (kexp->nr_args > 0)
@@ -4700,6 +4564,11 @@ pgstrom_explain_kvecs_buffer(const CustomScanState *css,
 	ListCell   *lc;
 	StringInfoData	buf;
 
+	/* kvecs-buffer actually required? */
+	if (pp_info->kvecs_bufsz == 0 ||
+		pp_info->kvecs_ndims == 0)
+		return;
+
 	kvdef_array = alloca(sizeof(const codegen_kvar_defitem *) * nrooms);
 	foreach (lc, pp_info->kvars_deflist)
 	{
@@ -4784,10 +4653,39 @@ pgstrom_xpucode_to_string(bytea *xpu_code)
 static void
 pgstrom_devcache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 {
-	MemoryContextReset(devinfo_memcxt);
+	devinfo_memcxt_generation++;
+
+	if (!MemoryContextIsEmpty(devinfo_memcxt))
+	{
+		/*
+		 * MEMO: invalidation callback can be invoked during devtype /
+		 * devfunc cache build, therefore, it is not safe to reset the
+		 * devinfo_memcxt immediately.
+		 * So, its deletion is postponed to the timing when portal is
+		 * dropped.
+		 */
+		if (PortalContext)
+		{
+			MemoryContext	devinfo_oldcxt = devinfo_memcxt;
+
+			devinfo_memcxt = AllocSetContextCreate(CacheMemoryContext,
+												   "device type/func info cache",
+												   ALLOCSET_DEFAULT_SIZES);
+			MemoryContextSetParent(devinfo_oldcxt, PortalContext);
+		}
+		else
+		{
+			/*
+			 * When PortalContext == NULL, it is obviously not under plan
+			 * constructing. So, we can reset the memory context now.
+			 */
+			MemoryContextReset(devinfo_memcxt);
+		}
+	}
+	devtype_rev_htable = NULL;
+	devfunc_rev_htable = NULL;
 	memset(devtype_info_slot, 0, sizeof(List *) * DEVTYPE_INFO_NSLOTS);
 	memset(devfunc_info_slot, 0, sizeof(List *) * DEVFUNC_INFO_NSLOTS);
-	memset(devfunc_code_slot, 0, sizeof(List *) * DEVFUNC_INFO_NSLOTS);
 
 	__type_oid_cache_int1	= UINT_MAX;
 	__type_oid_cache_float2	= UINT_MAX;

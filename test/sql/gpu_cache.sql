@@ -27,9 +27,30 @@ CREATE TABLE cache_test_table (
 ---
 --- GPU Cache configuration
 ---
-CREATE TRIGGER row_sync_test AFTER INSERT OR UPDATE OR DELETE ON cache_test_table FOR ROW 
+
+-- syntax error
+CREATE TRIGGER row_sync_test_ng01 AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('cpu_device_id=0');
+-- validation error
+CREATE TRIGGER row_sync_test_ng02 AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('max_num_rows=200000000');
+-- validation error
+CREATE TRIGGER row_sync_test_ng03 AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('redo_buffer_size=4m');
+-- success
+CREATE TRIGGER row_sync_test AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW 
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('gpu_device_id=0,max_num_rows=10000,redo_buffer_size=150m,gpu_sync_threshold=10m,gpu_sync_interval=4');
 ALTER TABLE cache_test_table ENABLE ALWAYS TRIGGER row_sync_test;
+
+-- duplicate row-sync trigger error
+CREATE TRIGGER row_sync_test_ng04 AFTER INSERT OR UPDATE OR DELETE
+    ON cache_test_table FOR ROW 
+    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger();
+
 -- Make GPU cache 
 INSERT INTO cache_test_table(id) values (1);
 -- Check gpucache_info table.
@@ -191,10 +212,12 @@ UPDATE normal_table SET k=b/2;
 ---
 --- SELECT 
 ---
+VACUUM ANALYZE cache_test_table;
 EXPLAIN (costs off, verbose)
 SELECT * FROM cache_test_table WHERE a % 3 = 0;
 
 --clms=("a" "b" "c" "d" "e" "f" "g") ; for a in ${clms[@]}; do echo "COUNT($a) AS ${a}_count,ROUND(SUM($a)::NUMERIC/100,2) AS ${a}_sum,ROUND(AVG($a)::NUMERIC/100,2) AS ${a}_avg,MAX($a) AS ${a}_max,MIN($a) AS ${a}_min," ; done
+VACUUM ANALYZE cache_test_table;
 EXPLAIN (costs off, verbose)
 SELECT 
 COUNT(a) AS a_count,SUM(a) AS a_sum,AVG(a) AS a_avg,MAX(a) AS a_max,MIN(a) AS a_min,
@@ -320,6 +343,7 @@ SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') AS apply_redo_result
 SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
 
 -- check GPUCache is still usable.
+VACUUM ANALYZE cache_corruption_test;
 EXPLAIN (costs off, verbose)
 SELECT * FROM cache_corruption_test WHERE b%3=0;
 
@@ -332,6 +356,7 @@ SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') AS apply_redo_result
 SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
 
 -- check GPUCache is not usable.
+VACUUM ANALYZE cache_corruption_test;
 EXPLAIN (costs off, verbose)
 SELECT * FROM cache_corruption_test WHERE b%3=0;
 
@@ -341,6 +366,7 @@ SELECT pgstrom.gpucache_recovery('cache_corruption_test');
 -- phase should be is_ready
 SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
 
+VACUUM ANALYZE cache_corruption_test;
 EXPLAIN (costs off, verbose)
 SELECT count(*) FROM cache_corruption_test;
 

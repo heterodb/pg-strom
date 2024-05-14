@@ -112,6 +112,79 @@ __trim(char *token)
 	return token;
 }
 
+/*
+ * __strtol / __strtoul / __strtosz - set errno if token is not pure digits
+ */
+static inline long int
+__strtol(const char *token)
+{
+	long int ival;
+	char   *end;
+
+	errno = 0;		/* clear */
+	ival = strtol(token, &end, 10);
+	if (*end != '\0')
+		errno = EINVAL;
+	return ival;
+}
+
+static inline unsigned long int
+__strtoul(const char *token)
+{
+	unsigned long int ival;
+	char   *end;
+
+	errno = 0;		/* clear */
+	ival = strtoul(token, &end, 10);
+	if (*end != '\0')
+		errno = EINVAL;
+	return ival;
+}
+
+static inline size_t
+__strtosz(const char *token)
+{
+	size_t	sz;
+	char   *end;
+
+	errno = 0;		/* clear */
+	sz = strtoul(token, &end, 10);
+	if (errno == 0)
+	{
+		if (strcasecmp(end, "t") == 0 || strcasecmp(end, "tb") == 0)
+		{
+			if (sz > 0x0000000000ffffffUL)
+				errno = ERANGE;
+			else
+				sz <<= 40;
+		}
+		else if (strcasecmp(end, "g") == 0 || strcasecmp(end, "gb") == 0)
+		{
+			if (sz > 0x00000003ffffffffUL)
+				errno = ERANGE;
+			else
+				sz <<= 30;
+		}
+		else if (strcasecmp(end, "m") == 0 || strcasecmp(end, "mb") == 0)
+		{
+			if (sz > 0x00000fffffffffffUL)
+				errno = ERANGE;
+			else
+				sz <<= 20;
+		}
+		else if (strcasecmp(end, "k") == 0 || strcasecmp(end, "kb") == 0)
+		{
+			if (sz > 0x003fffffffffffffUL)
+				errno = ERANGE;
+			else
+				sz <<= 10;
+		}
+		else if (*end != '\0')
+			errno = EINVAL;
+	}
+	return sz;
+}
+
 /* lappend on the specified memory-context */
 static inline List *
 lappend_cxt(MemoryContext memcxt, List *list, void *datum)
@@ -432,11 +505,11 @@ dump_tuple_desc(const TupleDesc tdesc)
 INLINE_FUNCTION(void)
 dump_kern_data_store(const kern_data_store *kds)
 {
-	fprintf(stderr, "kds %p { length=%lu, nitems=%u, usage=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
+	fprintf(stderr, "kds %p { length=%lu, usage=%lu, nitems=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
 			kds,
 			kds->length,
+			kds->__usage64,
 			kds->nitems,
-			kds->usage,
 			kds->ncols,
 			kds->format,
 			kds->has_varlena ? 't' : 'f',

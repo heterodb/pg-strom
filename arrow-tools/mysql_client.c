@@ -26,6 +26,26 @@ static int		__exp10[] = {1,
 							 100000000,
 							 1000000000 };
 
+#define STAT_UPDATES(COLUMN,FIELD,VALUE)					\
+	do {													\
+		if ((COLUMN)->stat_enabled)							\
+		{													\
+			if (!(COLUMN)->stat_datum.is_valid)				\
+			{												\
+				(COLUMN)->stat_datum.min.FIELD = VALUE;		\
+				(COLUMN)->stat_datum.max.FIELD = VALUE;		\
+				(COLUMN)->stat_datum.is_valid = true;		\
+			}												\
+			else											\
+			{												\
+				if ((COLUMN)->stat_datum.min.FIELD > VALUE)	\
+					(COLUMN)->stat_datum.min.FIELD = VALUE;	\
+				if ((COLUMN)->stat_datum.max.FIELD < VALUE)	\
+					(COLUMN)->stat_datum.max.FIELD = VALUE;	\
+			}												\
+		}													\
+	} while(0)
+
 /*
  * put values handlers
  */
@@ -38,169 +58,227 @@ __put_inline_null_value(SQLfield *column, size_t row_index, int sz)
 }
 
 static size_t
-__put_int8_value(SQLfield *column, const char *addr, int sz)
+put_int8_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t	row_index = column->nitems++;
+	char   *end;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint8_t));
+		__put_inline_null_value(column, row_index, sizeof(int8_t));
 	else
 	{
-		int		value = atoi(addr);
+		int64_t		ival = strtol(addr, &end, 10);
 
-		if (column->arrow_type.Int.is_signed
-			? (value < SCHAR_MIN || value > SCHAR_MAX)
-			: (value < 0 || value > UCHAR_MAX))
-			Elog("value '%s' is out of range for %s",
-				 addr, arrowNodeName(&column->arrow_type.node));
+		if (*end != '\0' || errno != 0)
+			Elog("value '%s' is not valid", addr);
+		if (ival < SCHAR_MIN || ival > SCHAR_MAX)
+			Elog("value '%s' is out of range for Arrow::Int8", addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(uint8_t));
+		sql_buffer_append(&column->values, &ival, sizeof(int8_t));
+		STAT_UPDATES(column, i8, ival);
 	}
 	return __buffer_usage_inline_type(column);
 }
 
 static size_t
-__put_int16_value(SQLfield *column, const char *addr, int sz)
+put_uint8_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t	row_index = column->nitems++;
+	char   *end;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint16_t));
+		__put_inline_null_value(column, row_index, sizeof(int8_t));
 	else
 	{
-		int		value = atoi(addr);
+		uint64_t	ival = strtol(addr, &end, 10);
 
-		if (column->arrow_type.Int.is_signed
-			? (value < SHRT_MIN || value > SHRT_MAX)
-			: (value < 0 || value > USHRT_MAX))
-			Elog("value '%s' is out of range for %s",
-				 addr, arrowNodeName(&column->arrow_type.node));
+		if (*end != '\0' || errno != 0)
+			Elog("value '%s' is not valid", addr);
+		if (ival > UCHAR_MAX)
+			Elog("value '%s' is out of range for Arrow::Uint8", addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(uint16_t));
+		sql_buffer_append(&column->values, &ival, sizeof(uint8_t));
+		STAT_UPDATES(column, u8, ival);
 	}
 	return __buffer_usage_inline_type(column);
 }
 
 static size_t
-__put_int32_value(SQLfield *column, const char *addr, int sz)
+put_int16_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t	row_index = column->nitems++;
+	char   *end;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint32_t));
+		__put_inline_null_value(column, row_index, sizeof(int16_t));
 	else
 	{
-		long	value = atol(addr);
+		int64_t		ival = strtol(addr, &end, 10);
 
-		if (column->arrow_type.Int.is_signed
-			? (value < INT_MIN || value > INT_MAX)
-			: (value < 0 || value > UINT_MAX))
-			Elog("value '%s' is out of range for %s",
-				 addr, arrowNodeName(&column->arrow_type.node));
+		if (*end != '\0' || errno != 0)
+			Elog("value '%s' is not valid", addr);
+		if (ival < SHRT_MIN || ival > SHRT_MAX)
+			Elog("value '%s' is out of range for Arrow::Int16", addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(uint32_t));
+		sql_buffer_append(&column->values, &ival, sizeof(int16_t));
+		STAT_UPDATES(column, i16, ival);
 	}
 	return __buffer_usage_inline_type(column);
 }
 
 static size_t
-__put_int64_value(SQLfield *column, const char *addr, int sz)
+put_uint16_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t	row_index = column->nitems++;
+	char   *end;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, sizeof(uint64_t));
-	else if (column->arrow_type.Int.is_signed)
-	{
-		int64_t		value = strtol(addr, NULL, 10);
-
-		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(uint64_t));
-	}
+		__put_inline_null_value(column, row_index, sizeof(int16_t));
 	else
 	{
-		uint64_t	value = strtoul(addr, NULL, 10);
+		uint64_t	ival = strtoul(addr, &end, 10);
 
+		if (*end != '\0' || errno != 0)
+			Elog("value '%s' is not valid", addr);
+		if (ival > USHRT_MAX)
+			Elog("value '%s' is out of range for Arrow::Uint16", addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(uint64_t));
+		sql_buffer_append(&column->values, &ival, sizeof(uint16_t));
+		STAT_UPDATES(column, u16, ival);
 	}
 	return __buffer_usage_inline_type(column);
 }
 
 static size_t
-put_int_value(SQLfield *column, const char *addr, int sz)
+put_int32_value(SQLfield *column, const char *addr, int sz)
 {
-	switch (column->arrow_type.Int.bitWidth)
+	size_t	row_index = column->nitems++;
+	char   *end;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int32_t));
+	else
 	{
-		case 8:
-			column->put_value = __put_int8_value;
-			break;
-		case 16:
-			column->put_value = __put_int16_value;
-			break;
-		case 32:
-			column->put_value = __put_int32_value;
-			break;
-		case 64:
-			column->put_value = __put_int64_value;
-			break;
-		default:
-			Elog("unexpected Arrow::Int.bitWidth (%d)",
-				 column->arrow_type.Int.bitWidth);
+		int64_t		ival = strtol(addr, &end, 10);
+
+		if (*end != '\0' || errno != 0)
+			Elog("value '%s' is not valid", addr);
+		if (ival < INT_MIN || ival > INT_MAX)
+			Elog("value '%s' is out of range for Arrow::Int32", addr);
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &ival, sizeof(int32_t));
+		STAT_UPDATES(column, i32, ival);
 	}
-	return column->put_value(column, addr, sz);
+	return __buffer_usage_inline_type(column);
 }
 
 static size_t
-__put_float32_value(SQLfield *column, const char *addr, int sz)
+put_uint32_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t	row_index = column->nitems++;
+	char   *end;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int32_t));
+	else
+	{
+		uint64_t	ival = strtoul(addr, &end, 10);
+
+		if (*end != '\0' || errno != 0)
+			Elog("value '%s' is not valid", addr);
+		if (ival > UINT_MAX)
+			Elog("value '%s' is out of range for Arrow::Uint32", addr);
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &ival, sizeof(uint32_t));
+		STAT_UPDATES(column, u32, ival);
+	}
+	return __buffer_usage_inline_type(column);
+}
+
+static size_t
+put_int64_value(SQLfield *column, const char *addr, int sz)
+{
+	size_t	row_index = column->nitems++;
+	char   *end;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int64_t));
+	else
+	{
+		int64_t		ival = strtol(addr, &end, 10);
+
+		if (*end != '\0' || errno != 0)
+			Elog("value '%s' is not valid", addr);
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &ival, sizeof(int64_t));
+		STAT_UPDATES(column, i64, ival);
+	}
+	return __buffer_usage_inline_type(column);
+}
+
+static size_t
+put_uint64_value(SQLfield *column, const char *addr, int sz)
+{
+	size_t	row_index = column->nitems++;
+	char   *end;
+
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int64_t));
+	else
+	{
+		uint64_t	ival = strtoul(addr, &end, 10);
+
+		if (*end != '\0' || errno != 0)
+			Elog("value '%s' is not valid", addr);
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &ival, sizeof(uint64_t));
+		STAT_UPDATES(column, u64, ival);
+	}
+	return __buffer_usage_inline_type(column);
+}
+
+static size_t
+put_float32_value(SQLfield *column, const char *addr, int sz)
+{
+	size_t	row_index = column->nitems++;
+	char   *end;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(float));
 	else
 	{
-		float	value = atof(addr);
+		float	fval = strtof(addr, &end);
 
+		if (*end != '\0' || errno != 0)
+			Elog("value '%s' is out of range for %s",
+				 addr, arrowNodeName(&column->arrow_type.node));
 		sql_buffer_setbit(&column->nullmap, row_index);
-        sql_buffer_append(&column->values, &value, sizeof(float));
+        sql_buffer_append(&column->values, &fval, sizeof(float));
+		STAT_UPDATES(column, f32, fval);
 	}
 	return __buffer_usage_inline_type(column);
 }
 
 static size_t
-__put_float64_value(SQLfield *column, const char *addr, int sz)
+put_float64_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t	row_index = column->nitems++;
+	char   *end;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(double));
 	else
 	{
-		double	value = atof(addr);
+		double	fval = strtod(addr, &end);
 
+		if (*end != '\0' || errno != 0)
+			Elog("value '%s' is out of range for %s",
+				 addr, arrowNodeName(&column->arrow_type.node));
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sizeof(double));
+		sql_buffer_append(&column->values, &fval, sizeof(double));
+		STAT_UPDATES(column, f64, fval);
 	}
 	return __buffer_usage_inline_type(column);
-}
-
-static size_t
-put_float_value(SQLfield *column, const char *addr, int sz)
-{
-	switch (column->arrow_type.FloatingPoint.precision)
-	{
-		case ArrowPrecision__Single:
-			column->put_value = __put_float32_value;
-			break;
-		case ArrowPrecision__Double:
-			column->put_value = __put_float64_value;
-			break;
-		default:
-            Elog("unexpected Arrow::FloatingPoint.precision (%d)",
-				 column->arrow_type.FloatingPoint.precision);
-	}
-    return column->put_value(column, addr, sz);
 }
 
 static size_t
@@ -293,14 +371,13 @@ date2j(int y, int m, int d)
 /*
  * Date
  */
-static inline size_t
-__put_date_value_generic(SQLfield *column, const char *addr, int length,
-						 int adjustment, int arrow_sz)
+static size_t
+put_date_day_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
 
 	if (!addr)
-		__put_inline_null_value(column, row_index, arrow_sz);
+		__put_inline_null_value(column, row_index, sizeof(int32_t));
 	else
 	{
 		int			y, m, d;
@@ -309,232 +386,147 @@ __put_date_value_generic(SQLfield *column, const char *addr, int length,
 		if (sscanf(addr, "%d-%d-%d", &y, &m, &d) != 3)
 			Elog("invalid Date value: [%s]", addr);
 		value = date2j(y, m, d) - UNIX_EPOCH_JDATE;
-		if (adjustment > 0)
-			value *= adjustment;
-		else if (adjustment < 0)
-			value /= adjustment;
-		sql_buffer_append(&column->values, &value, arrow_sz);
+		if (value < INT_MAX || value > INT_MAX)
+			Elog("Arrow::Date[day] out of range");
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sizeof(int32_t));
+		STAT_UPDATES(column, i32, value);
 	}
-	return __buffer_usage_inline_type(column);		
-}
-
-static size_t
-put_date_day_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_date_value_generic(column, addr, sz, 0, sizeof(int32_t));
+	return __buffer_usage_inline_type(column);
 }
 
 static size_t
 put_date_ms_value(SQLfield *column, const char *addr, int sz)
 {
-	return __put_date_value_generic(column, addr, sz, 1000000, sizeof(int64_t));
-}
+	size_t		row_index = column->nitems++;
 
-static size_t
-put_date_value(SQLfield *column, const char *addr, int sz)
-{
-	switch (column->arrow_type.Date.unit)
+	if (!addr)
+		__put_inline_null_value(column, row_index, sizeof(int32_t));
+	else
 	{
-		case ArrowDateUnit__Day:
-			column->put_value = put_date_day_value;
-			break;
-		case ArrowDateUnit__MilliSecond:
-			column->put_value = put_date_ms_value;
-			break;
-		default:
-			Elog("Unknown unit of Arrow::Date type (%d)",
-				 column->arrow_type.Date.unit);
+		int			y, m, d;
+		int64_t		value;
+
+		if (sscanf(addr, "%d-%d-%d", &y, &m, &d) != 3)
+			Elog("invalid Date value: [%s]", addr);
+		value = date2j(y, m, d) - UNIX_EPOCH_JDATE;
+		if (value <= LONG_MIN / 1000000 || value >= LONG_MAX / 1000000)
+			Elog("Arrow::Date[ms] out of range");
+		value *= 1000000;
+		sql_buffer_setbit(&column->nullmap, row_index);
+		sql_buffer_append(&column->values, &value, sizeof(int64_t));
+		STAT_UPDATES(column, i64, value);
 	}
-	return column->put_value(column, addr, sz);
+	return __buffer_usage_inline_type(column);
 }
 
 /*
  * Time
  */
-static inline size_t
-__put_time_value_generic(SQLfield *column, const char *addr, int sz,
-						 int arrow_scale, int arrow_sz)
-{
-	size_t	row_index = column->nitems++;
-	if (!addr)
-		__put_inline_null_value(column, row_index, arrow_sz);
-	else
-	{
-		int			h, m, s, frac = 0;
-		int64_t		value;
-		char	   *pos = strchr(addr, '.');
-
-		if (pos)
-		{
-			int		scale = strlen(pos + 1);
-
-			if (scale < 0 || scale > 6)
-				Elog("invalid Time value [%s]", addr);
-			scale -= arrow_scale;
-			if (sscanf(addr, "%d:%d:%d.%d", &h, &m, &s, &frac) != 4)
-				Elog("invalid Time value [%s]", addr);
-			if (scale < 0)
-				frac *= __exp10[-scale];
-			else if (scale > 0)
-				frac /= __exp10[scale];
-		}
-		else
-		{
-			if (sscanf(addr, "%d:%d:%d", &h, &m, &s) != 3)
-				Elog("invalid Time value [%s]", addr);
-		}
-		value = 3600L * (long)h + 60L * (long)m + (long)s;
-		value = value * __exp10[arrow_scale] + frac;
-
-		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, arrow_sz);
+#define __PUT_TIME_VALUE_TEMPLATE(NAME,ARROW_SCALE,ARROW_SZ,STAT_VALUE)	\
+	static size_t														\
+	put_time_##NAME##_value(SQLfield *column, const char *addr, int sz)	\
+	{																	\
+		size_t	row_index = column->nitems++;							\
+																		\
+		assert(sz == ARROW_SZ);											\
+		if (!addr)														\
+			__put_inline_null_value(column, row_index, ARROW_SZ);		\
+		else															\
+		{																\
+			int		h, m, s, frac = 0;									\
+			int64_t	value;												\
+			char   *pos = strchr(addr, '.');							\
+																		\
+			if (pos)													\
+			{															\
+				int	scale = strlen(pos + 1);							\
+																		\
+				if (scale < 0 || scale > 6)								\
+					Elog("invalid Time value [%s]", addr);				\
+				scale -= ARROW_SCALE;									\
+				if (sscanf(addr, "%d:%d:%d.%d",							\
+						   &h, &m, &s, &frac) != 4)						\
+					Elog("invalid Time value [%s]", addr);				\
+				if (scale < 0)											\
+					frac *= __exp10[-scale];							\
+				else if (scale > 0)										\
+					frac /= __exp10[scale];								\
+			}															\
+			else														\
+			{															\
+				if (sscanf(addr, "%d:%d:%d",							\
+						   &h, &m, &s) != 3)							\
+					Elog("invalid Time value [%s]", addr);				\
+			}															\
+			value = 3600L * (long)h + 60L * (long)m + (long)s;			\
+			value = value * __exp10[ARROW_SCALE] + frac;				\
+																		\
+			sql_buffer_setbit(&column->nullmap, row_index);				\
+			sql_buffer_append(&column->values, &value, ARROW_SZ);		\
+			STAT_UPDATES(column, STAT_VALUE, value);					\
+		}																\
+		return __buffer_usage_inline_type(column);						\
 	}
-	return __buffer_usage_inline_type(column);
-}
-
-static size_t
-__put_time_sec_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_time_value_generic(column, addr, sz, 0, sizeof(int32_t));
-}
-
-static size_t
-__put_time_ms_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_time_value_generic(column, addr, sz, 3, sizeof(int32_t));
-}
-
-static size_t
-__put_time_us_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_time_value_generic(column, addr, sz, 6, sizeof(int64_t));
-}
-
-static size_t
-__put_time_ns_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_time_value_generic(column, addr, sz, 9, sizeof(int64_t));
-}
-
-static size_t
-put_time_value(SQLfield *column, const char *addr, int sz)
-{
-	switch (column->arrow_type.Time.unit)
-	{
-		case ArrowTimeUnit__Second:
-			column->put_value = __put_time_sec_value;
-			break;
-		case ArrowTimeUnit__MilliSecond:
-			column->put_value = __put_time_ms_value;
-			break;
-		case ArrowTimeUnit__MicroSecond:
-			column->put_value = __put_time_us_value;
-			break;
-		case ArrowTimeUnit__NanoSecond:
-			column->put_value = __put_time_ns_value;
-			break;
-		default:
-			Elog("unknown ArrowTimeUnit: %d",
-				 (int)column->arrow_type.Time.unit);
-	}
-	return column->put_value(column, addr, sz);
-}
+__PUT_TIME_VALUE_TEMPLATE(sec,0,sizeof(int32_t),i32)
+__PUT_TIME_VALUE_TEMPLATE( ms,3,sizeof(int32_t),i32)
+__PUT_TIME_VALUE_TEMPLATE( us,6,sizeof(int64_t),i64)
+__PUT_TIME_VALUE_TEMPLATE( ns,9,sizeof(int64_t),i64)
 
 /*
  * Timestamp
  */
-static inline size_t
-__put_timestamp_value_generic(SQLfield *column, const char *addr, int sz,
-							  int arrow_scale, int arrow_sz)
-{
-	size_t	row_index = column->nitems++;
-
-	if (!addr)
-		__put_inline_null_value(column, row_index, arrow_sz);
-	else
-	{
-		int			year, mon, day, hour, min, sec, frac = 0;
-		int64_t		value;
-		char	   *pos = strchr(addr, '.');
-
-		if (pos != NULL)
-		{
-			int		scale = strlen(pos + 1);
-
-			scale -= arrow_scale;
-			if (sscanf(addr, "%04d-%02d-%02d %d:%d:%d.%d",
-					   &year, &mon, &day,
-					   &hour, &min, &sec, &frac) != 7)
-				Elog("invalid Time value [%s]", addr);
-			if (scale < 0)
-				frac *= __exp10[-scale];
-			else if (scale > 0)
-				frac /= __exp10[scale];
-		}
-		else
-		{
-			if (sscanf(addr, "%04d-%02d-%02d %d:%d:%d",
-					   &year, &mon, &day,
-					   &hour, &min, &sec) != 6)
-				Elog("invalid Timestamp value [%s]", addr);
-		}
-		value = date2j(year, mon, day) - UNIX_EPOCH_JDATE;
-		value = 86400L * value + (3600L * hour + 60L * min + sec);
-		value = value * __exp10[arrow_scale] + frac;
-
-		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, arrow_sz);
+#define __PUT_TIMESTAMP_VALUE_TEMPLATE(NAME,ARROW_SCALE,ARROW_SZ)		\
+	static size_t														\
+	put_timestamp_##NAME##_value(SQLfield *column, const char *addr, int sz) \
+	{																	\
+		size_t	row_index = column->nitems++;							\
+																		\
+		assert(sz == ARROW_SZ);											\
+		if (!addr)														\
+			__put_inline_null_value(column, row_index, ARROW_SZ);		\
+		else															\
+		{																\
+			int		year, mon, day, hour, min, sec, frac = 0;			\
+			int64_t	value;												\
+			char   *pos = strchr(addr, '.');							\
+																		\
+			if (pos != NULL)											\
+			{															\
+				int	scale = strlen(pos + 1);							\
+																		\
+				scale -= ARROW_SCALE;									\
+				if (sscanf(addr, "%04d-%02d-%02d %d:%d:%d.%d",			\
+						   &year, &mon, &day,							\
+						   &hour, &min, &sec, &frac) != 7)				\
+					Elog("invalid Time value [%s]", addr);				\
+				if (scale < 0)											\
+					frac *= __exp10[-scale];							\
+				else if (scale > 0)										\
+					frac /= __exp10[scale];								\
+			}															\
+			else														\
+			{															\
+				if (sscanf(addr, "%04d-%02d-%02d %d:%d:%d",				\
+						   &year, &mon, &day,							\
+						   &hour, &min, &sec) != 6)						\
+					Elog("invalid Timestamp value [%s]", addr);			\
+			}															\
+			value = date2j(year, mon, day) - UNIX_EPOCH_JDATE;			\
+			value = 86400L * value + (3600L * hour + 60L * min + sec);	\
+			value = value * __exp10[ARROW_SCALE] + frac;				\
+																		\
+			sql_buffer_setbit(&column->nullmap, row_index);				\
+			sql_buffer_append(&column->values, &value, ARROW_SZ);		\
+			STAT_UPDATES(column, i64, value);							\
+		}																\
+		return __buffer_usage_inline_type(column);						\
 	}
-	return __buffer_usage_inline_type(column);
-}
 
-static size_t
-__put_timestamp_sec_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_timestamp_value_generic(column, addr, sz, 0, sizeof(int64_t));
-}
-
-static size_t
-__put_timestamp_ms_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_timestamp_value_generic(column, addr, sz, 3, sizeof(int64_t));
-}
-
-static size_t
-__put_timestamp_us_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_timestamp_value_generic(column, addr, sz, 6, sizeof(int64_t));
-}
-
-static size_t
-__put_timestamp_ns_value(SQLfield *column, const char *addr, int sz)
-{
-	return __put_timestamp_value_generic(column, addr, sz, 9, sizeof(int64_t));
-}
-
-static size_t
-put_timestamp_value(SQLfield *column, const char *addr, int sz)
-{
-	switch (column->arrow_type.Timestamp.unit)
-	{
-		case ArrowTimeUnit__Second:
-			column->put_value = __put_timestamp_sec_value;
-			break;
-		case ArrowTimeUnit__MilliSecond:
-			column->put_value = __put_timestamp_ms_value;
-			break;
-		case ArrowTimeUnit__MicroSecond:
-			column->put_value = __put_timestamp_us_value;
-			break;
-		case ArrowTimeUnit__NanoSecond:
-			column->put_value = __put_timestamp_ns_value;
-			break;
-		default:
-			Elog("unknown ArrowTimeUnit: %d",
-				 (int)column->arrow_type.Timestamp.unit);
-	}
-	return column->put_value(column, addr, sz);
-}
+__PUT_TIMESTAMP_VALUE_TEMPLATE(sec,0,sizeof(int64_t))
+__PUT_TIMESTAMP_VALUE_TEMPLATE( ms,3,sizeof(int64_t))
+__PUT_TIMESTAMP_VALUE_TEMPLATE( us,6,sizeof(int64_t))
+__PUT_TIMESTAMP_VALUE_TEMPLATE( ns,9,sizeof(int64_t))
 
 static size_t
 put_variable_value(SQLfield *column, const char *addr, int sz)
@@ -603,6 +595,61 @@ put_dictionary_value(SQLfield *column, const char *addr, int sz)
 #endif
 
 /*
+ * Callbacks for move values between SQLtables (for parallel execution)
+ */
+#define MOVE_SCALAR_TEMPLATE(NAME,VALUE_TYPE,STAT_NAME)                 \
+	static size_t                                                       \
+	move_##NAME##_value(SQLfield *dest, const SQLfield *src, long sindex) \
+	{                                                                   \
+		size_t  dindex = dest->nitems++;                                \
+                                                                        \
+		if (!sql_buffer_getbit(&src->nullmap, sindex))                  \
+			__put_inline_null_value(dest, dindex, sizeof(VALUE_TYPE));  \
+		else                                                            \
+		{                                                               \
+			VALUE_TYPE  value;                                          \
+                                                                        \
+			value = ((VALUE_TYPE *)src->values.data)[sindex];           \
+			sql_buffer_setbit(&dest->nullmap, dindex);                  \
+			sql_buffer_append(&dest->values, &value,                    \
+							  sizeof(VALUE_TYPE));                      \
+			STAT_UPDATES(dest,STAT_NAME,value);                         \
+		}                                                               \
+		return __buffer_usage_inline_type(dest);                        \
+	}
+MOVE_SCALAR_TEMPLATE(int8, int8_t, i8)
+MOVE_SCALAR_TEMPLATE(uint8, uint8_t, u8)
+MOVE_SCALAR_TEMPLATE(int16, int16_t, i16)
+MOVE_SCALAR_TEMPLATE(uint16, uint16_t, u16)
+MOVE_SCALAR_TEMPLATE(int32, int32_t, i32)
+MOVE_SCALAR_TEMPLATE(uint32, uint32_t, u32)
+MOVE_SCALAR_TEMPLATE(int64, int64_t, i64)
+MOVE_SCALAR_TEMPLATE(uint64, uint64_t, u64)
+MOVE_SCALAR_TEMPLATE(float32, float, f32)
+MOVE_SCALAR_TEMPLATE(float64, double, f64)
+MOVE_SCALAR_TEMPLATE(decimal, int128_t, i128)
+
+static size_t
+move_variable_value(SQLfield *dest, const SQLfield *src, long sindex)
+{
+	const char *addr = NULL;
+	int			sz = 0;
+
+	if (sql_buffer_getbit(&src->nullmap, sindex))
+	{
+		uint32_t	head = ((uint32_t *)src->values.data)[sindex];
+		uint32_t	tail = ((uint32_t *)src->values.data)[sindex+1];
+
+		assert(head <= tail && tail <= src->extra.usage);
+		if (tail - head >= INT_MAX)
+			Elog("too large variable data (len: %u)", tail - head);
+		addr = src->extra.data + head;
+		sz   = tail - head;
+	}
+	return put_variable_value(dest, addr, sz);
+}
+
+/*
  * mysql_setup_attribute
  */
 static int
@@ -633,61 +680,159 @@ mysql_setup_attribute(MYSQL *conn,
 		 */
 		case MYSQL_TYPE_TINY:
 			if (bitWidth < 0)
-				bitWidth = 8;
+			{
+				if (!arrow_type)
+					bitWidth = 8;
+				else if (arrow_type->node.tag == ArrowNodeTag__Int &&
+						 (is_signed
+						  ? arrow_type->Int.is_signed && arrow_type->Int.bitWidth >= 8
+						  : arrow_type->Int.bitWidth > 8))
+				{
+					bitWidth  = arrow_type->Int.bitWidth;
+					is_signed = arrow_type->Int.is_signed;
+				}
+				else
+				{
+					Elog("attribute '%s' is not compatible", my_field->name);
+				}
+			}
+
 		case MYSQL_TYPE_SHORT:
 		case MYSQL_TYPE_YEAR:
 			if (bitWidth < 0)
-				bitWidth = 16;
+			{
+				if (!arrow_type)
+					bitWidth = 16;
+				else if (arrow_type->node.tag == ArrowNodeTag__Int &&
+						 (is_signed
+						  ? arrow_type->Int.is_signed && arrow_type->Int.bitWidth >= 16
+						  : arrow_type->Int.bitWidth > 16))
+				{
+					bitWidth  = arrow_type->Int.bitWidth;
+					is_signed = arrow_type->Int.is_signed;
+				}
+				else
+				{
+					Elog("attribute '%s' is not compatible", my_field->name);
+				}
+			}
+
 		case MYSQL_TYPE_INT24:
 		case MYSQL_TYPE_LONG:
 			if (bitWidth < 0)
-				bitWidth = 32;
+			{
+				if (!arrow_type)
+					bitWidth = 32;
+				else if (arrow_type->node.tag == ArrowNodeTag__Int &&
+						 (is_signed
+						  ? arrow_type->Int.is_signed && arrow_type->Int.bitWidth >= 32
+						  : arrow_type->Int.bitWidth > 32))
+				{
+					bitWidth  = arrow_type->Int.bitWidth;
+					is_signed = arrow_type->Int.is_signed;
+				}
+				else
+				{
+					Elog("attribute '%s' is not compatible", my_field->name);
+				}
+			}
+
 		case MYSQL_TYPE_LONGLONG:
 			if (bitWidth < 0)
-				bitWidth = 64;
-			if (arrow_type)
 			{
-				if (arrow_type->node.tag != ArrowNodeTag__Int ||
-					arrow_type->Int.bitWidth < bitWidth)
-					Elog("attribute %d is not compatible to %s",
-						 attnum, arrow_type->node.tagName);
-				if (arrow_type->Int.bitWidth > bitWidth)
-					bitWidth = arrow_type->Int.bitWidth;
-				is_signed = arrow_type->Int.is_signed;
+				if (!arrow_type)
+					bitWidth = 64;
+				else if (arrow_type->node.tag == ArrowNodeTag__Int &&
+						 (is_signed
+						  ? arrow_type->Int.is_signed && arrow_type->Int.bitWidth >= 64
+						  : arrow_type->Int.bitWidth > 64))
+				{
+					bitWidth  = arrow_type->Int.bitWidth;
+					is_signed = arrow_type->Int.is_signed;
+				}
+				else
+				{
+					Elog("attribute '%s' is not compatible", my_field->name);
+				}
 			}
 			initArrowNode(&column->arrow_type, Int);
 			column->arrow_type.Int.is_signed = is_signed;
 			column->arrow_type.Int.bitWidth = bitWidth;
-			column->put_value = put_int_value;
+			switch (bitWidth)
+			{
+				case 8:
+					column->put_value  = (is_signed ? put_int8_value  : put_uint8_value);
+					column->move_value = (is_signed ? move_int8_value : move_uint8_value);
+					break;
+				case 16:
+					column->put_value  = (is_signed ? put_int16_value  : put_uint16_value);
+					column->move_value = (is_signed ? move_int16_value : move_uint16_value);
+					break;
+				case 32:
+					column->put_value  = (is_signed ? put_int32_value  : put_uint32_value);
+					column->move_value = (is_signed ? move_int32_value : move_uint32_value);
+					break;
+				case 64:
+					column->put_value  = (is_signed ? put_int64_value  : put_uint64_value);
+					column->move_value = (is_signed ? move_int64_value : move_uint64_value);
+					break;
+				default:
+					Elog("attribute '%s' try to use unsupported Int::bitWidth(%d)",
+						 my_field->name, bitWidth);
+					break;
+			}
 			return 2;		/* nullmap + values */
+
 		/*
 		 * ArrowTypeFloatingPoint
 		 */
 		case MYSQL_TYPE_FLOAT:
 			if (precision < 0)
-				precision = ArrowPrecision__Single;
+			{
+				if (!arrow_type)
+					precision = ArrowPrecision__Single;
+				else if (arrow_type->node.tag == ArrowNodeTag__FloatingPoint &&
+						 (arrow_type->FloatingPoint.precision == ArrowPrecision__Single ||
+						  arrow_type->FloatingPoint.precision == ArrowPrecision__Double))
+					precision = arrow_type->FloatingPoint.precision;
+				else
+					Elog("attribute '%s' is not compatible", my_field->name);
+			}
 		case MYSQL_TYPE_DOUBLE:
 			if (precision < 0)
-				precision = ArrowPrecision__Double;
-			if (arrow_type)
 			{
-				if (arrow_type->node.tag != ArrowNodeTag__FloatingPoint ||
-					arrow_type->FloatingPoint.precision < precision)
-					Elog("attribute %d is not compatible to %s",
-						 attnum, arrow_type->node.tagName);
-				precision = arrow_type->FloatingPoint.precision;
+				if (!arrow_type)
+					precision = ArrowPrecision__Double;
+				else if (arrow_type->node.tag == ArrowNodeTag__FloatingPoint &&
+						 (arrow_type->FloatingPoint.precision == ArrowPrecision__Single ||
+						  arrow_type->FloatingPoint.precision == ArrowPrecision__Double))
+					precision = arrow_type->FloatingPoint.precision;
+				else
+					Elog("attribute '%s' is not compatible", my_field->name);
 			}
 			initArrowNode(&column->arrow_type, FloatingPoint);
 			column->arrow_type.FloatingPoint.precision = precision;
-			column->put_value = put_float_value;
+			switch (precision)
+			{
+				case ArrowPrecision__Single:
+					column->put_value  = put_float32_value;
+					column->move_value = move_float32_value;
+					break;
+				case ArrowPrecision__Double:
+					column->put_value  = put_float64_value;
+					column->move_value = move_float64_value;
+					break;
+				default:
+					Elog("attribute '%s' try to use unknown FloatingPoint::precision(%d)",
+						 my_field->name, precision);
+					break;
+			}
 			return 2;		/* nullmap + values */
 		/*
 		 * ArrowTypeDecimal
 		 */
 		case MYSQL_TYPE_DECIMAL:
 		case MYSQL_TYPE_NEWDECIMAL:
-			printf("Decimal length=%lu max_length=%lu decimals=%d\n",
-				   my_field->length, my_field->max_length, my_field->decimals);
 			precision = my_field->max_length;
 			dscale = my_field->decimals;
 			if (arrow_type)
@@ -702,101 +847,136 @@ mysql_setup_attribute(MYSQL *conn,
 			column->arrow_type.Decimal.precision = precision;
 			column->arrow_type.Decimal.scale = dscale;
 			column->put_value = put_decimal_value;
+			column->move_value = move_decimal_value;
 			return 2;		/* nullmap + values */
 		/*
 		 * ArrowTypeDate
 		 */
 		case MYSQL_TYPE_DATE:
-			unit = ArrowDateUnit__Day;
-			if (arrow_type)
-			{
-				if (arrow_type->node.tag != ArrowNodeTag__Date)
-					Elog("attribute %d is not compatible to %s",
-						 attnum, arrow_type->node.tagName);
+			if (!arrow_type)
+				unit = ArrowDateUnit__Day;
+			else if (arrow_type->node.tag == ArrowNodeTag__Date &&
+					 (arrow_type->Date.unit == ArrowDateUnit__Day ||
+					  arrow_type->Date.unit == ArrowDateUnit__MilliSecond))
 				unit = arrow_type->Date.unit;
-				if (unit != ArrowDateUnit__Day &&
-					unit != ArrowDateUnit__MilliSecond)
-					Elog("unknown unit (%d) for Arrow::Date", unit);
-			}
+			else
+				Elog("attribute '%s' is not compatible", my_field->name);
 			initArrowNode(&column->arrow_type, Date);
 			column->arrow_type.Date.unit = unit;
-			column->put_value = put_date_value;
+			switch (unit)
+			{
+				case ArrowDateUnit__Day:
+					column->put_value  = put_date_day_value;
+					column->move_value = move_int32_value;
+					break;
+				case ArrowDateUnit__MilliSecond:
+					column->put_value  = put_date_ms_value;
+					column->move_value = move_int64_value;
+					break;
+			}
 			return 2;		/* nullmap + values */
 		/*
 		 * ArrowTypeTime
 		 */
 		case MYSQL_TYPE_TIME:
-			if (my_field->decimals == 0)
-				unit = ArrowTimeUnit__Second;
-			else if (my_field->decimals <= 3)
-				unit = ArrowTimeUnit__MilliSecond;
-			else if (my_field->decimals <= 6)
-				unit = ArrowTimeUnit__MicroSecond;
-			else
-				unit = ArrowTimeUnit__NanoSecond;
-			if (arrow_type)
+			if (!arrow_type)
 			{
-				if (arrow_type->node.tag != ArrowNodeTag__Time)
-					Elog("attribute %d is not compatible to %s",
-						 attnum, arrow_type->node.tagName);
-				unit = arrow_type->Time.unit;
-				if (unit == ArrowTimeUnit__Second ||
-					unit == ArrowTimeUnit__MilliSecond)
-				{
-					if (arrow_type->Time.bitWidth != 32)
-						Elog("Arrow::Time has wrong bitWidth (%d)",
-							 arrow_type->Time.bitWidth);
-				}
-				else if (unit == ArrowTimeUnit__MicroSecond ||
-						 unit == ArrowTimeUnit__NanoSecond)
-				{
-					if (arrow_type->Time.bitWidth != 64)
-						Elog("Arrow::Time has wrong bitWidth (%d)",
-							 arrow_type->Time.bitWidth);
-				}
+				if (my_field->decimals == 0)
+					unit = ArrowTimeUnit__Second;
+				else if (my_field->decimals <= 3)
+					unit = ArrowTimeUnit__MilliSecond;
+				else if (my_field->decimals <= 6)
+					unit = ArrowTimeUnit__MicroSecond;
 				else
-					Elog("unknown unit (%d) for Arrow::Time", unit);
+					unit = ArrowTimeUnit__NanoSecond;
 			}
-			if (unit == ArrowTimeUnit__Second ||
-				unit == ArrowTimeUnit__MilliSecond)
-				bitWidth = 32;
-			else if (unit == ArrowTimeUnit__MicroSecond ||
-					 unit == ArrowTimeUnit__NanoSecond)
-				bitWidth = 64;
+			else if (arrow_type->node.tag == ArrowNodeTag__Time)
+			{
+				switch (arrow_type->Time.unit)
+				{
+					case ArrowTimeUnit__Second:
+					case ArrowTimeUnit__MilliSecond:
+						if (arrow_type->Time.bitWidth != 32)
+							Elog("Arrow::Time has wrong bitWidth (%d)",
+								 arrow_type->Time.bitWidth);
+						break;
+					case ArrowTimeUnit__MicroSecond:
+					case ArrowTimeUnit__NanoSecond:
+						if (arrow_type->Time.bitWidth != 64)
+							Elog("Arrow::Time has wrong bitWidth (%d)",
+								 arrow_type->Time.bitWidth);
+						break;
+					default:
+						Elog("Arrow::Time has unknown unit (%d)",
+							 arrow_type->Time.unit);
+						break;
+				}
+				unit = arrow_type->Time.unit;
+			}
 			else
-				Elog("unknown unit (%d) for Arrow::Time", unit);
-			
+			{
+				Elog("attribute '%s' is not compatible", my_field->name);
+			}
+
 			initArrowNode(&column->arrow_type, Time);
 			column->arrow_type.Time.unit = unit;
-			column->arrow_type.Time.bitWidth = bitWidth;
-			column->put_value = put_time_value;
+			switch (unit)
+			{
+				case ArrowTimeUnit__Second:
+					column->arrow_type.Time.bitWidth = 32;
+					column->put_value  = put_time_sec_value;
+					column->move_value = move_int32_value;
+					break;
+				case ArrowTimeUnit__MilliSecond:
+					column->arrow_type.Time.bitWidth = 32;
+					column->put_value  = put_time_ms_value;
+					column->move_value = move_int32_value;
+					break;
+				case ArrowTimeUnit__MicroSecond:
+					column->arrow_type.Time.bitWidth = 64;
+					column->put_value  = put_time_us_value;
+					column->move_value = move_uint64_value;
+					break;
+				case ArrowTimeUnit__NanoSecond:
+					column->arrow_type.Time.bitWidth = 64;
+					column->put_value  = put_time_ns_value;
+					column->move_value = move_uint64_value;
+					break;
+				default:
+					Elog("Bug? unknown Arrow::Time unit (%d)", unit);
+					break;
+			}
 			return 2;		/* nullmap + values */
-
+			
 		/*
 		 * ArrowTypeTimestamp
 		 */
 		case MYSQL_TYPE_TIMESTAMP:
 			tz_name = mysql_timezone;
 		case MYSQL_TYPE_DATETIME:
-			if (my_field->decimals == 0)
-				unit = ArrowTimeUnit__Second;
-			else if (my_field->decimals <= 3)
-				unit = ArrowTimeUnit__MilliSecond;
-			else if (my_field->decimals <= 6)
-				unit = ArrowTimeUnit__MicroSecond;
-			else
-				unit = ArrowTimeUnit__NanoSecond;
-			if (arrow_type)
+			if (!arrow_type)
 			{
-				if (arrow_type->node.tag != ArrowNodeTag__Timestamp)
-					Elog("attribute %d is not compatible to %s",
-						 attnum, arrow_type->node.tagName);
-                unit = arrow_type->Timestamp.unit;
-                if (unit != ArrowTimeUnit__Second &&
-                    unit != ArrowTimeUnit__MilliSecond &&
+				if (my_field->decimals == 0)
+					unit = ArrowTimeUnit__Second;
+				else if (my_field->decimals <= 3)
+					unit = ArrowTimeUnit__MilliSecond;
+				else if (my_field->decimals <= 6)
+					unit = ArrowTimeUnit__MicroSecond;
+				else
+					unit = ArrowTimeUnit__NanoSecond;
+			}
+			else if (arrow_type->node.tag == ArrowNodeTag__Timestamp)
+			{
+				unit = arrow_type->Timestamp.unit;
+				if (unit != ArrowTimeUnit__Second &&
+					unit != ArrowTimeUnit__MilliSecond &&
 					unit != ArrowTimeUnit__MicroSecond &&
-					unit == ArrowTimeUnit__NanoSecond)
-					Elog("unknown unit (%d) for Arrow::Timestamp", unit);
+					unit != ArrowTimeUnit__NanoSecond)
+					Elog("Arrow::Timestamp has unknown unit (%d)", unit);
+			}
+			else
+			{
+				Elog("attribute '%s' is not compatible", my_field->name);
 			}
 			initArrowNode(&column->arrow_type, Timestamp);
 			column->arrow_type.Timestamp.unit = unit;
@@ -805,7 +985,28 @@ mysql_setup_attribute(MYSQL *conn,
 				column->arrow_type.Timestamp.timezone = pstrdup(tz_name);
 				column->arrow_type.Timestamp._timezone_len = strlen(tz_name);
 			}
-			column->put_value = put_timestamp_value;
+			switch (unit)
+			{
+				case ArrowTimeUnit__Second:
+					column->put_value  = put_timestamp_sec_value;
+					column->move_value = move_int64_value;
+					break;
+				case ArrowTimeUnit__MilliSecond:
+					column->put_value  = put_timestamp_ms_value;
+					column->move_value = move_int64_value;
+					break;
+				case ArrowTimeUnit__MicroSecond:
+					column->put_value  = put_timestamp_us_value;
+					column->move_value = move_int64_value;
+					break;
+				case ArrowTimeUnit__NanoSecond:
+					column->put_value  = put_timestamp_ns_value;
+					column->move_value = move_int64_value;
+					break;
+				default:
+					Elog("Bug? unknown Arrow::Timestamp unit(%d)", unit);
+					break;
+			}
 			return 2;		/* nullmap + values */
 
 		case MYSQL_TYPE_STRING:
@@ -821,7 +1022,8 @@ mysql_setup_attribute(MYSQL *conn,
 				 * ArrowTypeUtf8
 				 */
 				initArrowNode(&column->arrow_type, Utf8);
-				column->put_value = put_variable_value;
+				column->put_value  = put_variable_value;
+				column->move_value = move_variable_value;
 			}
 			else
 			{
@@ -829,7 +1031,8 @@ mysql_setup_attribute(MYSQL *conn,
 				 * ArrowTypeBinary
 				 */
 				initArrowNode(&column->arrow_type, Binary);
-				column->put_value = put_variable_value;
+				column->put_value  = put_variable_value;
+				column->move_value = move_variable_value;
 			}
 			return 3;	/* nullmap + index + extra */
 
@@ -1047,6 +1250,20 @@ sqldb_close_connection(void *sqldb_state)
 
 	mysql_free_result(mystate->res);
 	mysql_close(mystate->conn);
+}
+
+char *
+sqldb_build_simple_command(void *sqldb_state,
+						   const char *simple_table_name,
+						   int num_worker_threads,
+						   size_t segment_sz)
+{
+	char   *buf = alloca(strlen(simple_table_name) + 100);
+
+	assert(num_worker_threads == 1);
+	sprintf(buf, "SELECT * FROM %s", simple_table_name);
+
+	return pstrdup(buf);
 }
 
 /*

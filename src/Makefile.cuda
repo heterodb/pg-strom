@@ -20,7 +20,7 @@ NVCC       := $(CUDA_BPATH)/nvcc
 NVCC_VERSION := $(shell $(NVCC) --version | grep ^Cuda | \
                   grep -o -E 'V[0-9\.]+$$' |             \
 		  sed -e 's/V//g' -e 's/\./ /g' |        \
-		  awk '{ print $$1 * 1000 + $$2 * 10; }')
+		  awk '{ printf("%06u", $$1 * 1000 + $$2 * 10); }')
 # Max number of registers per GPU thread for PG-Strom modules
 # (64k / 128 = up to 512 threads per SM)
 MAXREGCOUNT := 128

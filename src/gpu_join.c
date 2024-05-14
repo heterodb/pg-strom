@@ -134,6 +134,78 @@ try_fetch_xpujoin_planinfo(const Path *path)
 }
 
 /*
+ * fixup_join_varnullingrels
+ *
+ * MEMO: PG16 added the Var::varnullingrels field to track potentially
+ * NULL-able columns for OUTER JOINs. It it setup by the core optimizer
+ * for each joinrel, so expression pulled-up from the prior level join
+ * or scan must be adjusted as if Var-nodes are used in this Join.
+ * Without this fixup, setrefs.c shall raise an error due to mismatch
+ * of equal() that checks varnullingrels field also.
+ */
+#if PG_VERSION_NUM < 160000
+#define fixup_join_varnullingrels(joinrel,pp_info)		(pp_info)
+#else
+static Node *
+__fixup_join_varnullingrels_walker(Node *node, void *__data)
+{
+	RelOptInfo *joinrel = __data;
+	PathTarget *reltarget = joinrel->reltarget;
+	ListCell   *lc;
+
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var	   *var = copyObject((Var *)node);
+
+		foreach (lc, reltarget->exprs)
+		{
+			Var	   *__var = lfirst(lc);
+
+			if (var->varno == __var->varno &&
+				var->varattno == __var->varattno)
+			{
+				Assert(var->vartype   == __var->vartype &&
+					   var->vartypmod == __var->vartypmod &&
+					   var->varcollid == __var->varcollid);
+				var->varnullingrels = bms_copy(__var->varnullingrels);
+				return (Node *)var;
+			}
+		}
+		var->varnullingrels = NULL;
+		return (Node *)var;
+	}
+	return expression_tree_mutator(node, __fixup_join_varnullingrels_walker, __data);
+}
+
+static pgstromPlanInfo *
+fixup_join_varnullingrels(RelOptInfo *joinrel, pgstromPlanInfo *pp_info)
+{
+#define __FIXUP_FIELD(VAL)												\
+	VAL = (void *)__fixup_join_varnullingrels_walker((Node *)(VAL), joinrel)
+
+	__FIXUP_FIELD(pp_info->used_params);
+	__FIXUP_FIELD(pp_info->host_quals);
+	__FIXUP_FIELD(pp_info->scan_quals);
+	__FIXUP_FIELD(pp_info->brin_index_conds);
+	__FIXUP_FIELD(pp_info->brin_index_quals);
+	for (int i=0; i < pp_info->num_rels; i++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+
+		__FIXUP_FIELD(pp_inner->hash_outer_keys);
+		__FIXUP_FIELD(pp_inner->hash_inner_keys);
+		__FIXUP_FIELD(pp_inner->join_quals);
+		__FIXUP_FIELD(pp_inner->other_quals);
+		__FIXUP_FIELD(pp_inner->gist_clause);
+	}
+#undef __FIXUP_FIELD
+	return pp_info;
+}
+#endif
+
+/*
  * __buildXpuJoinPlanInfo
  */
 static pgstromPlanInfo *
@@ -323,10 +395,10 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pp_inner = &pp_info->inners[pp_info->num_rels++];
 	pp_inner->join_type = join_type;
 	pp_inner->join_nrows = joinrel->rows;
-	pp_inner->hash_outer_keys_original = hash_outer_keys;
-	pp_inner->hash_inner_keys_original = hash_inner_keys;
-	pp_inner->join_quals_original = join_quals;
-	pp_inner->other_quals_original = other_quals;
+	pp_inner->hash_outer_keys = hash_outer_keys;
+	pp_inner->hash_inner_keys = hash_inner_keys;
+	pp_inner->join_quals = join_quals;
+	pp_inner->other_quals = other_quals;
 	/* GiST-Index availability checks */
 	if (enable_xpugistindex &&
 		hash_outer_keys == NIL &&
@@ -449,7 +521,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pp_info->final_cost = final_cost;
 	pp_inner->join_nrows = (joinrel->rows / pp_info->parallel_divisor);
 
-	return pp_info;
+	return fixup_join_varnullingrels(joinrel, pp_info);
 }
 
 /*
@@ -643,8 +715,42 @@ __build_child_join_sjinfo(PlannerInfo *root,
 /*
  * __lookup_or_build_leaf_joinrel
  */
+static AppendRelInfo *
+__build_fake_apinfo_non_relations(PlannerInfo *root, Index rtindex)
+{
+	AppendRelInfo *apinfo = makeNode(AppendRelInfo);
+	RelOptInfo *rel = root->simple_rel_array[rtindex];
+	PathTarget *reltarget = rel->reltarget;
+	List	   *trans_vars = NIL;
+	ListCell   *lc;
+	AttrNumber	attno = 1;
+	AttrNumber *colnos
+		= palloc0(sizeof(AttrNumber) * list_length(reltarget->exprs));
+
+	foreach (lc, reltarget->exprs)
+	{
+		Node   *node = lfirst(lc);
+		Var	   *var;
+
+		var = makeVar(rtindex,
+					  attno++,
+					  exprType(node),
+					  exprTypmod(node),
+					  exprCollation(node),
+					  0);
+		trans_vars = lappend(trans_vars, var);
+		colnos[attno-1] = attno;
+	}
+	apinfo->translated_vars = trans_vars;
+	apinfo->num_child_cols = attno;
+	apinfo->parent_colnos = colnos;
+
+	return apinfo;
+}
+
 static AppendRelInfo **
 __make_fake_apinfo_array(PlannerInfo *root,
+						 RelOptInfo *parent_joinrel,
 						 RelOptInfo *outer_rel,
 						 RelOptInfo *inner_rel)
 {
@@ -652,25 +758,79 @@ __make_fake_apinfo_array(PlannerInfo *root,
 	Relids	__relids;
 	int		i;
 
-	ap_info_array = palloc(sizeof(AppendRelInfo *) * root->simple_rel_array_size);
-	memcpy(ap_info_array, root->append_rel_array,
-		   sizeof(AppendRelInfo *) * root->simple_rel_array_size);
+	ap_info_array = palloc0(sizeof(AppendRelInfo *) *
+							root->simple_rel_array_size);
 	__relids = bms_union(outer_rel->relids,
 						 inner_rel->relids);
 	for (i = bms_next_member(__relids, -1);
 		 i >= 0;
 		 i = bms_next_member(__relids, i))
 	{
-		RangeTblEntry  *rte = root->simple_rte_array[i];
+		AppendRelInfo  *ap_info = root->append_rel_array[i];
 
-		if (!ap_info_array[i])
+		if (ap_info)
 		{
-			Relation	rel = relation_open(rte->relid, NoLock);
+			bool	rebuild = false;
 
-			ap_info_array[i] = make_append_rel_info(rel, rel, i, i);
+			while (!bms_is_member(ap_info->parent_relid,
+								  parent_joinrel->relids))
+			{
+				Index	curr_child = ap_info->parent_relid;
 
-			relation_close(rel, NoLock);
+				ap_info = NULL;
+				for (int j=0; j < root->simple_rel_array_size; j++)
+				{
+					AppendRelInfo *__ap_info = root->append_rel_array[j];
+
+					if (__ap_info &&
+						__ap_info->child_relid == curr_child)
+					{
+						ap_info = root->append_rel_array[j];
+						break;
+					}
+				}
+				if (!ap_info)
+					elog(ERROR, "Bug? AppendRelInfo chain is not linked");
+				rebuild = true;
+			}
+
+			if (rebuild)
+			{
+				Index			parent_relid = ap_info->parent_relid;
+				RangeTblEntry  *rte_child = root->simple_rte_array[i];
+				RangeTblEntry  *rte_parent = root->simple_rte_array[parent_relid];
+				Relation		rel_child;
+				Relation		rel_parent;
+
+				if (rte_child->rtekind != RTE_RELATION ||
+					rte_parent->rtekind != RTE_RELATION)
+					elog(ERROR, "Bug? not a relation has partition leaf");
+				rel_child = relation_open(rte_child->relid, NoLock);
+				rel_parent = relation_open(rte_parent->relid, NoLock);
+
+				ap_info = make_append_rel_info(rel_parent,
+											   rel_child,
+											   parent_relid, i);
+				relation_close(rel_child, NoLock);
+				relation_close(rel_parent, NoLock);
+			}
 		}
+		else
+		{
+			RangeTblEntry  *rte = root->simple_rte_array[i];
+
+			if (rte->rtekind != RTE_RELATION)
+				ap_info = __build_fake_apinfo_non_relations(root, i);
+			else
+			{
+				Relation	rel = relation_open(rte->relid, NoLock);
+
+				ap_info = make_append_rel_info(rel, rel, i, i);
+
+				relation_close(rel, NoLock);
+			}
+		}
+		ap_info_array[i] = ap_info;
 	}
 	return ap_info_array;
 }
@@ -703,6 +863,7 @@ __lookup_or_build_leaf_joinrel(PlannerInfo *root,
 			inner_rel->reloptkind = RELOPT_OTHER_MEMBER_REL;
 			parent_joinrel->consider_partitionwise_join = true;
 			root->append_rel_array = __make_fake_apinfo_array(root,
+															  parent_joinrel,
 															  outer_rel,
 															  inner_rel);
 			leaf_joinrel = build_child_join_rel(root,
@@ -969,6 +1130,8 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 											   xpujoin_path_methods);
 		}
 		/* 2nd trial uses the partial paths */
+		if (!joinrel->consider_parallel)
+			break;
 		inner_pathlist = innerrel->partial_pathlist;
 	}
 }
@@ -1027,7 +1190,7 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 	/* quick bailout if PG-Strom is not enabled */
 	if (pgstrom_enabled())
 	{
-		if (pgstrom_enable_gpujoin)
+		if (pgstrom_enable_gpujoin && gpuserv_ready_accept())
 			__xpuJoinAddCustomPathCommon(root,
 										 joinrel,
 										 outerrel,
@@ -1056,114 +1219,6 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 }
 
 /*
- * build_fallback_exprs_scan
- */
-static Node *
-__build_fallback_exprs_scan_walker(Node *node, void *data)
-{
-	codegen_context *context = (codegen_context *)data;
-
-	if (!node)
-		return NULL;
-	if (IsA(node, Var))
-	{
-		Var	   *var = (Var *)node;
-
-		if (var->varno == context->scan_relid)
-		{
-			return (Node *)makeVar(OUTER_VAR,
-								   var->varattno,
-								   var->vartype,
-								   var->vartypmod,
-								   var->varcollid,
-								   var->varlevelsup);
-		}
-		elog(ERROR, "Var-node does not reference the base relation (%d): %s",
-			 context->scan_relid, nodeToString(var));
-	}
-	return expression_tree_mutator(node, __build_fallback_exprs_scan_walker, data);
-}
-
-static List *
-build_fallback_exprs_scan(codegen_context *context, List *scan_exprs)
-{
-	return (List *)__build_fallback_exprs_scan_walker((Node *)scan_exprs, context);
-}
-
-/*
- * build_fallback_exprs_join
- */
-static Node *
-__build_fallback_exprs_join_walker(Node *node, void *data)
-{
-	codegen_context *context = (codegen_context *)data;
-	ListCell   *lc;
-
-	if (!node)
-		return NULL;
-	foreach (lc, context->kvars_deflist)
-	{
-		codegen_kvar_defitem *kvar = lfirst(lc);
-
-		if (codegen_expression_equals(node, kvar->kv_expr))
-		{
-			return (Node *)makeVar(INDEX_VAR,
-								   kvar->kv_slot_id + 1,
-								   exprType(node),
-								   exprTypmod(node),
-								   exprCollation(node),
-								   0);
-		}
-	}
-	if (IsA(node, Var))
-		elog(ERROR, "Bug? Var-node (%s) is missing at the kvars_exprs list",
-			 nodeToString(node));
-
-	return expression_tree_mutator(node, __build_fallback_exprs_join_walker, data);
-}
-
-static List *
-build_fallback_exprs_join(codegen_context *context, List *join_exprs)
-{
-	return (List *)__build_fallback_exprs_join_walker((Node *)join_exprs, context);
-}
-
-static Node *
-__build_fallback_exprs_inner_walker(Node *node, void *data)
-{
-	codegen_context *context = (codegen_context *)data;
-	ListCell   *lc;
-
-	if (!node)
-		return NULL;
-	foreach (lc, context->kvars_deflist)
-	{
-		codegen_kvar_defitem *kvdef = lfirst(lc);
-
-		if (codegen_expression_equals(node, kvdef->kv_expr))
-		{
-			return (Node *)makeVar(INNER_VAR,
-								   kvdef->kv_resno,
-								   exprType(node),
-								   exprTypmod(node),
-								   exprCollation(node),
-								   0);
-		}
-	}
-	if (IsA(node, Var))
-		elog(ERROR, "Bug? Var-node (%s) is missing at the kvars_exprs list",
-			 nodeToString(node));
-
-	return expression_tree_mutator(node, __build_fallback_exprs_inner_walker, data);
-}
-
-static List *
-build_fallback_exprs_inner(codegen_context *context, List *inner_keys)
-{
-	return (List *)__build_fallback_exprs_inner_walker((Node *)inner_keys, context);
-}
-
-/*
  * pgstrom_build_tlist_dev
  */
 static List *
@@ -1177,17 +1232,8 @@ __pgstrom_build_tlist_dev_expr(List *tlist_dev,
 	int			resno;
 	ListCell   *lc1, *lc2;
 
-	if (!node)
+	if (!node || tlist_member((Expr *)node, tlist_dev))
 		return tlist_dev;
-
-	/* check whether the node is already on the tlist_dev */
-	foreach (lc1, tlist_dev)
-	{
-		TargetEntry	*tle = lfirst(lc1);
-
-		if (codegen_expression_equals(node, tle->expr))
-			return tlist_dev;
-	}
 
 	/* check whether the node is identical with any of input */
 	if (IsA(node, Var))
@@ -1209,7 +1255,7 @@ __pgstrom_build_tlist_dev_expr(List *tlist_dev,
 		resno = 1;
 		foreach (lc2, reltarget->exprs)
 		{
-			if (codegen_expression_equals(node, lfirst(lc2)))
+			if (equal(node, lfirst(lc2)))
 				goto found;
 			resno++;
 		}
@@ -1255,92 +1301,6 @@ found:
 	return tlist_dev;
 }
 
-/*
- * __build_explain_tlist_junks
- *
- * it builds junk TLEs for EXPLAIN output only
- */
-static void
-__build_explain_tlist_junks(codegen_context *context,
-							PlannerInfo *root,
-							const Bitmapset *outer_refs)
-{
-	Index		scan_relid = context->scan_relid;
-	RelOptInfo *base_rel = root->simple_rel_array[scan_relid];
-	RangeTblEntry *rte = root->simple_rte_array[scan_relid];
-	int			j, k;
-
-	Assert(IS_SIMPLE_REL(base_rel) && rte->rtekind == RTE_RELATION);
-	/* depth==0 */
-	for (j = bms_next_member(outer_refs, -1);
-		 j >= 0;
-		 j = bms_next_member(outer_refs, j))
-	{
-		Var	   *var;
-		char   *attname;
-
-		k = j + FirstLowInvalidHeapAttributeNumber;
-		if (k != InvalidAttrNumber)
-		{
-			HeapTuple	htup;
-			Form_pg_attribute attr;
-
-			htup = SearchSysCache2(ATTNUM,
-								   ObjectIdGetDatum(rte->relid),
-								   Int16GetDatum(k));
-			if (!HeapTupleIsValid(htup))
-				elog(ERROR,"cache lookup failed for attriubte %d of relation %u",
-					 k, rte->relid);
-			attr = (Form_pg_attribute) GETSTRUCT(htup);
-			var = makeVar(base_rel->relid,
-						  attr->attnum,
-						  attr->atttypid,
-						  attr->atttypmod,
-						  attr->attcollation,
-						  0);
-			attname = pstrdup(NameStr(attr->attname));
-			ReleaseSysCache(htup);
-		}
-		else
-		{
-			/* special case handling if whole row reference */
-			var = makeWholeRowVar(rte,
-								  base_rel->relid,
-								  0, false);
-			attname = get_rel_name(rte->relid);
-		}
-
-		if (tlist_member((Expr *)var, context->tlist_dev) == NULL)
-		{
-			TargetEntry *tle;
-			int		resno = list_length(context->tlist_dev) + 1;
-
-			tle = makeTargetEntry((Expr *)var, resno, attname, true);
-			context->tlist_dev = lappend(context->tlist_dev, tle);
-		}
-	}
-	/* depth > 0 */
-	for (int depth=1; depth <= context->num_rels; depth++)
-	{
-		PathTarget *target = context->pd[depth].inner_target;
-		ListCell   *lc;
-
-		foreach (lc, target->exprs)
-		{
-			Expr   *expr = lfirst(lc);
-
-			if (tlist_member(expr, context->tlist_dev) == NULL)
-			{
-				TargetEntry *tle;
-				int		resno = list_length(context->tlist_dev) + 1;
-
-				tle = makeTargetEntry(expr, resno, NULL, true);
-				context->tlist_dev = lappend(context->tlist_dev, tle);
-			}
-		}
-	}
-}
-
 static void
 pgstrom_build_join_tlist_dev(codegen_context *context,
 							 PlannerInfo *root,
@@ -1368,7 +1328,7 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 			if (contain_var_clause((Node *)tle->expr))
 				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 														   (Node *)tle->expr,
-														   context->required_flags,
+														   context->xpu_task_flags,
 														   context->scan_relid,
 														   inner_target_list);
 		}
@@ -1394,7 +1354,7 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 			if (contain_var_clause(node))
 				tlist_dev = __pgstrom_build_tlist_dev_expr(tlist_dev,
 														   node,
-														   context->required_flags,
+														   context->xpu_task_flags,
 														   context->scan_relid,
 														   inner_target_list);
 		}
@@ -1442,6 +1402,93 @@ pgstrom_build_groupby_tlist_dev(codegen_context *context,
 	}
 }
 
+
+/*
+ * build_explain_tlist_junks
+ *
+ * it builds junk TLEs for EXPLAIN output only
+ */
+static bool
+__build_explain_tlist_junks_walker(Node *node, void *__priv)
+{
+	codegen_context *context = __priv;
+
+	if (!node)
+		return false;
+
+	if (tlist_member((Expr *)node, context->tlist_dev) != NULL)
+		return false;
+	if (IsA(node, Var))
+	{
+		TargetEntry *tle;
+
+		tle = makeTargetEntry((Expr *)node,
+							  list_length(context->tlist_dev) + 1,
+							  NULL,
+							  true);
+		context->tlist_dev = lappend(context->tlist_dev, tle);
+		return false;
+	}
+	return expression_tree_walker(node, __build_explain_tlist_junks_walker, __priv);
+}
+
+static void
+build_explain_tlist_junks(codegen_context *context,
+						  pgstromPlanInfo *pp_info,
+						  const Bitmapset *outer_refs)
+{
+	List   *vars_in_exprs = pull_vars_of_level((Node *)context->tlist_dev, 0);
+
+	__build_explain_tlist_junks_walker((Node *)pp_info->used_params, context);
+	__build_explain_tlist_junks_walker((Node *)pp_info->host_quals, context);
+	__build_explain_tlist_junks_walker((Node *)pp_info->scan_quals, context);
+
+	for (int i=0; i < pp_info->num_rels; i++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
+
+		__build_explain_tlist_junks_walker((Node *)pp_inner->hash_outer_keys,
+										   context);
+		__build_explain_tlist_junks_walker((Node *)pp_inner->hash_inner_keys,
+										   context);
+		__build_explain_tlist_junks_walker((Node *)pp_inner->join_quals,
+										   context);
+		__build_explain_tlist_junks_walker((Node *)pp_inner->other_quals,
+										   context);
+		__build_explain_tlist_junks_walker((Node *)pp_inner->gist_clause,
+										   context);
+	}
+	__build_explain_tlist_junks_walker((Node *)vars_in_exprs, context);
+	
+	/* sanity checks for outer references */
+#ifdef USE_ASSERT_CHECKING
+	for (int j = bms_next_member(outer_refs, -1);
+		 j >= 0;
+		 j = bms_next_member(outer_refs, j))
+	{
+		int			anum = j + FirstLowInvalidHeapAttributeNumber;
+		ListCell   *lc;
+
+		foreach (lc, context->tlist_dev)
+		{
+			TargetEntry *tle = lfirst(lc);
+
+			if (IsA(tle->expr, Var))
+			{
+				Var	   *var = (Var *)tle->expr;
+
+				if (var->varno == pp_info->scan_relid &&
+					var->varattno == anum)
+					break;
+			}
+		}
+		if (lc == NULL)
+			elog(INFO, "scan_relid=%d anum=%d tlist_dev=%s", pp_info->scan_relid, anum, nodeToString(context->tlist_dev));
+		Assert(lc != NULL);
+	}
+#endif
+}
+
 /*
  * PlanXpuJoinPathCommon
  */
@@ -1461,18 +1508,16 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	List	   *other_quals_stacked = NIL;
 	List	   *hash_keys_stacked = NIL;
 	List	   *gist_quals_stacked = NIL;
-	List	   *fallback_tlist = NIL;
-	ListCell   *lc;
 
 	Assert(pp_info->num_rels == list_length(custom_plans));
 	context = create_codegen_context(root, cpath, pp_info);
 
 	/* codegen for outer scan, if any */
-	if (pp_info->scan_quals_fallback)
+	if (pp_info->scan_quals)
 	{
 		pp_info->kexp_scan_quals
-			= codegen_build_scan_quals(context, pp_info->scan_quals_fallback);
-		pull_varattnos((Node *)pp_info->scan_quals_fallback,
+			= codegen_build_scan_quals(context, pp_info->scan_quals);
+		pull_varattnos((Node *)pp_info->scan_quals,
 					   pp_info->scan_relid,
 					   &outer_refs);
 	}
@@ -1485,31 +1530,31 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
 
 		/* xpu code to generate outer hash-value */
-		if (pp_inner->hash_outer_keys_original != NIL &&
-			pp_inner->hash_inner_keys_original != NIL)
+		if (pp_inner->hash_outer_keys != NIL &&
+			pp_inner->hash_inner_keys != NIL)
 		{
 			hash_keys_stacked = lappend(hash_keys_stacked,
-										pp_inner->hash_outer_keys_original);
-			pull_varattnos((Node *)pp_inner->hash_outer_keys_original,
+										pp_inner->hash_outer_keys);
+			pull_varattnos((Node *)pp_inner->hash_outer_keys,
 						   pp_info->scan_relid,
 						   &outer_refs);
 		}
 		else
 		{
-			Assert(pp_inner->hash_outer_keys_original == NIL &&
-				   pp_inner->hash_inner_keys_original == NIL);
+			Assert(pp_inner->hash_outer_keys == NIL &&
+				   pp_inner->hash_inner_keys == NIL);
 			hash_keys_stacked = lappend(hash_keys_stacked, NIL);
 		}
 		
 		/* xpu code to evaluate join qualifiers */
 		join_quals_stacked = lappend(join_quals_stacked,
-									 pp_inner->join_quals_original);
-		pull_varattnos((Node *)pp_inner->join_quals_original,
+									 pp_inner->join_quals);
+		pull_varattnos((Node *)pp_inner->join_quals,
 					   pp_info->scan_relid,
 					   &outer_refs);
 		other_quals_stacked = lappend(other_quals_stacked,
-									  pp_inner->other_quals_original);
-		pull_varattnos((Node *)pp_inner->other_quals_original,
+									  pp_inner->other_quals);
+		pull_varattnos((Node *)pp_inner->other_quals,
 					   pp_info->scan_relid,
 					   &outer_refs);
 
@@ -1540,7 +1585,7 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	pull_varattnos((Node *)context->tlist_dev,
 				   pp_info->scan_relid,
 				   &outer_refs);
-	__build_explain_tlist_junks(context, root, outer_refs);
+	build_explain_tlist_junks(context, pp_info, outer_refs);
 
 	/* assign remaining PlanInfo members */
 	pp_info->kexp_join_quals_packed
@@ -1551,58 +1596,30 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		= codegen_build_packed_hashkeys(context,
 										hash_keys_stacked);
 	codegen_build_packed_gistevals(context, pp_info);
+	/* LoadVars for each depth */
 	codegen_build_packed_kvars_load(context, pp_info);
+	/* MoveVars for each depth (only GPUs) */
 	codegen_build_packed_kvars_move(context, pp_info);
-
+	/* xpu_task_flags should not be cleared in codege.c */
+	Assert((context->xpu_task_flags &
+			pp_info->xpu_task_flags) == pp_info->xpu_task_flags);
 	pp_info->kvars_deflist = context->kvars_deflist;
-	pp_info->kvecs_bufsz = KVEC_ALIGN(context->kvecs_usage);
-	pp_info->kvecs_ndims = context->kvecs_ndims;
-	pp_info->extra_flags = context->extra_flags;
+	pp_info->xpu_task_flags = context->xpu_task_flags;
 	pp_info->extra_bufsz = context->extra_bufsz;
 	pp_info->used_params = context->used_params;
 	pp_info->outer_refs  = outer_refs;
+	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
 	/*
-	 * fixup fallback expressions
+	 * build CustomScan
 	 */
-	for (int i=0; i < pp_info->num_rels; i++)
-	{
-		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[i];
-
-		pp_inner->hash_outer_keys_fallback
-			= build_fallback_exprs_join(context, pp_inner->hash_outer_keys_original);
-		pp_inner->hash_inner_keys_fallback
-			= build_fallback_exprs_inner(context, pp_inner->hash_inner_keys_original);
-		pp_inner->join_quals_fallback
-			= build_fallback_exprs_join(context, pp_inner->join_quals_original);
-		pp_inner->other_quals_fallback
-			= build_fallback_exprs_join(context, pp_inner->other_quals_original);
-	}
-
-	foreach (lc, context->tlist_dev)
-	{
-		TargetEntry *tle = lfirst(lc);
-
-		if (tle->resjunk)
-			continue;
-		tle = makeTargetEntry(tle->expr,
-							  list_length(fallback_tlist) + 1,
-							  tle->resname,
-							  false);
-		fallback_tlist = lappend(fallback_tlist, tle);
-	}
-	pp_info->fallback_tlist =
-		(pp_info->num_rels == 0
-		 ? build_fallback_exprs_scan(context, fallback_tlist)
-		 : build_fallback_exprs_join(context, fallback_tlist));
-
 	cscan = makeNode(CustomScan);
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.scanrelid = pp_info->scan_relid;
 	cscan->flags = cpath->flags;
-	cscan->custom_plans = custom_plans;
-	cscan->custom_scan_tlist = context->tlist_dev;
 	cscan->methods = xpujoin_plan_methods;
-
+	cscan->custom_plans = custom_plans;
+	cscan->custom_scan_tlist = assign_custom_cscan_tlist(context->tlist_dev,
+														 pp_info);
 	return cscan;
 }
 
@@ -1669,22 +1686,8 @@ PlanDpuJoinPath(PlannerInfo *root,
 static Node *
 CreateGpuJoinState(CustomScan *cscan)
 {
-	pgstromTaskState *pts;
-	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
-	int			num_rels = list_length(cscan->custom_plans);
-
 	Assert(cscan->methods == &gpujoin_plan_methods);
-	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
-	NodeSetTag(pts, T_CustomScanState);
-	pts->css.flags = cscan->flags;
-	pts->css.methods = &gpujoin_exec_methods;
-	pts->xpu_task_flags = pp_info->xpu_task_flags;
-	pts->pp_info = pp_info;
-	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__GPUJOIN &&
-		   pp_info->num_rels == num_rels);
-	pts->num_rels = num_rels;
-
-	return (Node *)pts;
+	return pgstromCreateTaskState(cscan, &gpujoin_exec_methods);
 }
 
 /*
@@ -1693,22 +1696,8 @@ CreateGpuJoinState(CustomScan *cscan)
 static Node *
 CreateDpuJoinState(CustomScan *cscan)
 {
-	pgstromTaskState *pts;
-	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
-	int			num_rels = list_length(cscan->custom_plans);
-
 	Assert(cscan->methods == &dpujoin_plan_methods);
-	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
-	NodeSetTag(pts, T_CustomScanState);
-	pts->css.flags = cscan->flags;
-	pts->css.methods = &dpujoin_exec_methods;
-	pts->xpu_task_flags = pp_info->xpu_task_flags;
-	pts->pp_info = pp_info;
-	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__DPUJOIN &&
-		   pp_info->num_rels == num_rels);
-	pts->num_rels = num_rels;
-
-	return (Node *)pts;
+	return pgstromCreateTaskState(cscan, &dpujoin_exec_methods);
 }
 
 /* ---------------------------------------------------------------- *
@@ -1729,15 +1718,27 @@ typedef struct
 } inner_preload_buffer;
 
 static uint32_t
-get_tuple_hashvalue(pgstromTaskInnerState *istate,
-					TupleTableSlot *slot)
+get_tuple_hashvalue(pgstromTaskState *pts,
+					pgstromTaskInnerState *istate,
+					TupleTableSlot *inner_slot)
 {
-	ExprContext *econtext = istate->econtext;
-	uint32_t	hash = 0xffffffffU;
-	ListCell   *lc1, *lc2;
+	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
+	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
+	uint32_t		hash = 0xffffffffU;
+	ListCell	   *lc1, *lc2;
 
+	/* move to scan_slot from inner_slot */
+	forboth (lc1, istate->inner_load_src,
+			 lc2, istate->inner_load_dst)
+	{
+		int		src = lfirst_int(lc1) - 1;
+		int		dst = lfirst_int(lc2) - 1;
+
+		scan_slot->tts_isnull[dst] = inner_slot->tts_isnull[src];
+		scan_slot->tts_values[dst] = inner_slot->tts_values[src];
+	}
 	/* calculation of a hash value of this entry */
-	econtext->ecxt_innertuple = slot;
+	econtext->ecxt_scantuple = scan_slot;
 	forboth (lc1, istate->hash_inner_keys,
 			 lc2, istate->hash_inner_funcs)
 	{
@@ -1747,7 +1748,7 @@ get_tuple_hashvalue(pgstromTaskInnerState *istate,
 		bool			isnull;
 
 		datum = ExecEvalExpr(es, econtext, &isnull);
-		hash ^= h_func(isnull, datum);
+		hash = pg_hash_merge(hash, h_func(isnull, datum));
 	}
 	hash ^= 0xffffffffU;
 
@@ -1759,6 +1760,7 @@ get_tuple_hashvalue(pgstromTaskInnerState *istate,
  */
 static void
 execInnerPreloadOneDepth(MemoryContext memcxt,
+						 pgstromTaskState *pts,
 						 pgstromTaskInnerState *istate,
 						 pg_atomic_uint64 *p_shared_inner_nitems,
 						 pg_atomic_uint64 *p_shared_inner_usage)
@@ -1773,6 +1775,7 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
 	memset(preload_buf, 0, offsetof(inner_preload_buffer, rows));
 	preload_buf->nrooms = 12000;
 
+	ExecStoreAllNullTuple(pts->css.ss.ss_ScanTupleSlot);
 	for (;;)
 	{
 		TupleTableSlot *slot;
@@ -1817,7 +1820,7 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
 
 		if (istate->hash_inner_keys != NIL)
 		{
-			uint32_t	hash = get_tuple_hashvalue(istate, slot);
+			uint32_t	hash = get_tuple_hashvalue(pts, istate, slot);
 
 			preload_buf->rows[index].htup = htup;
 			preload_buf->rows[index].hash = hash;
@@ -1935,6 +1938,9 @@ again:
 
 		nrooms = pg_atomic_read_u64(&ps_state->inners[i].inner_nitems);
 		usage  = pg_atomic_read_u64(&ps_state->inners[i].inner_usage);
+		if (nrooms >= UINT_MAX)
+			elog(ERROR, "GpuJoin: Inner Relation[%d] has %lu tuples, too large",
+				 i+1, nrooms);
 		if (h_kmrels)
 		{
 			kds = (kern_data_store *)((char *)h_kmrels + offset);
@@ -1948,15 +1954,15 @@ again:
 			/* Hash-Join */
 			uint32_t	nslots = Max(320, nrooms);
 
-			nbytes += (MAXALIGN(sizeof(uint32_t) * nrooms) +
-					   MAXALIGN(sizeof(uint32_t) * nslots) +
+			nbytes += (MAXALIGN(sizeof(uint64_t) * nrooms) +
+					   MAXALIGN(sizeof(uint64_t) * nslots) +
 					   MAXALIGN(usage));
 			if (h_kmrels)
 			{
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
 				kds->hash_nslots = nslots;
-				memset(KDS_GET_HASHSLOT_BASE(kds), 0, sizeof(uint32_t) * nslots);
+				memset(KDS_GET_HASHSLOT_BASE(kds), 0, sizeof(uint64_t) * nslots);
 			}
 			offset += nbytes;
 		}
@@ -1970,14 +1976,15 @@ again:
 			uint32_t	nslots = Max(320, nrooms);
 
 			/* 1st part - inner tuples indexed by ctid */
-			nbytes += (MAXALIGN(sizeof(uint32_t) * nrooms) +
-					   MAXALIGN(sizeof(uint32_t) * nslots) +
+			nbytes += (MAXALIGN(sizeof(uint64_t) * nrooms) +
+					   MAXALIGN(sizeof(uint64_t) * nslots) +
 					   MAXALIGN(usage));
 			if (h_kmrels)
 			{
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
 				kds->hash_nslots = nslots;
+				memset(KDS_GET_HASHSLOT_BASE(kds), 0, sizeof(uint64_t) * nslots);
 			}
 			offset += nbytes;
 
@@ -2021,7 +2028,7 @@ again:
 		else
 		{
 			/* Nested-Loop */
-			nbytes += (MAXALIGN(sizeof(uint32_t) * nrooms) +
+			nbytes += (MAXALIGN(sizeof(uint64_t) * nrooms) +
 					   MAXALIGN(usage));
 			if (h_kmrels)
 			{
@@ -2079,14 +2086,14 @@ static void
 __innerPreloadSetupHeapBuffer(kern_data_store *kds,
 							  pgstromTaskInnerState *istate,
 							  uint32_t base_nitems,
-							  uint32_t base_usage)
+							  uint64_t base_usage)
 {
-	uint32_t   *row_index = KDS_GET_ROWINDEX(kds);
+	uint64_t   *row_index = KDS_GET_ROWINDEX(kds);
 	uint32_t	rowid = base_nitems;
 	char	   *tail_pos = (char *)kds + kds->length;
-	char	   *curr_pos = tail_pos - __kds_unpack(base_usage);
+	char	   *curr_pos = (tail_pos - base_usage);
 	inner_preload_buffer *preload_buf = istate->preload_buffer;
-
+	
 	for (uint32_t index=0; index < preload_buf->nitems; index++)
 	{
 		HeapTuple	htup = preload_buf->rows[index].htup;
@@ -2101,7 +2108,7 @@ __innerPreloadSetupHeapBuffer(kern_data_store *kds,
 		memcpy(&titem->htup, htup->t_data, htup->t_len);
 		memcpy(&titem->htup.t_ctid, &htup->t_self, sizeof(ItemPointerData));
 
-		row_index[rowid++] = __kds_packed(tail_pos - curr_pos);
+		row_index[rowid++] = (tail_pos - curr_pos);
 	}
 }
 
@@ -2112,13 +2119,13 @@ static void
 __innerPreloadSetupHashBuffer(kern_data_store *kds,
 							  pgstromTaskInnerState *istate,
 							  uint32_t base_nitems,
-							  uint32_t base_usage)
+							  uint64_t base_usage)
 {
-	uint32_t   *row_index = KDS_GET_ROWINDEX(kds);
-	uint32_t   *hash_slot = KDS_GET_HASHSLOT_BASE(kds);
+	uint64_t   *row_index = KDS_GET_ROWINDEX(kds);
+	uint64_t   *hash_slot = KDS_GET_HASHSLOT_BASE(kds);
 	uint32_t	rowid = base_nitems;
 	char	   *tail_pos = (char *)kds + kds->length;
-	char	   *curr_pos = tail_pos - __kds_unpack(base_usage);
+	char	   *curr_pos = (tail_pos - base_usage);
 	inner_preload_buffer *preload_buf = istate->preload_buffer;
 
 	for (uint32_t index=0; index < preload_buf->nitems; index++)
@@ -2126,24 +2133,26 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 		HeapTuple	htup = preload_buf->rows[index].htup;
 		uint32_t	hash = preload_buf->rows[index].hash;
 		uint32_t	hindex = hash % kds->hash_nslots;
-		uint32_t	next, self;
+		uint64_t	next, self;
 		size_t		sz;
 		kern_hashitem *hitem;
 
 		sz = MAXALIGN(offsetof(kern_hashitem, t.htup) + htup->t_len);
 		curr_pos -= sz;
-		self = __kds_packed(tail_pos - curr_pos);
-		__atomic_exchange(&hash_slot[hindex], &self, &next,
-						  __ATOMIC_SEQ_CST);
+		self = (tail_pos - curr_pos);
+
+		next = __atomic_exchange_uint64(&hash_slot[hindex], self);
 		hitem = (kern_hashitem *)curr_pos;
-		hitem->hash = hash;
 		hitem->next = next;
+		hitem->hash = hash;
+		hitem->__padding__ = 0;
 		hitem->t.t_len = htup->t_len;
 		hitem->t.rowid = rowid;
 		memcpy(&hitem->t.htup, htup->t_data, htup->t_len);
 		memcpy(&hitem->t.htup.t_ctid, &htup->t_self, sizeof(ItemPointerData));
 
-		row_index[rowid++] = __kds_packed(tail_pos - (char *)&hitem->t);
+		row_index[rowid++] = (tail_pos - (char *)&hitem->t);
+		Assert(curr_pos >= (char *)kds + KDS_HEAD_LENGTH(kds) + sizeof(uint64_t) * (kds->hash_nslots + rowid));
 	}
 }
 
@@ -2183,7 +2192,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			{
 				pgstromTaskInnerState *istate = &leader->inners[i];
 
-				execInnerPreloadOneDepth(memcxt, istate,
+				execInnerPreloadOneDepth(memcxt, pts, istate,
 										 &ps_state->inners[i].inner_nitems,
 										 &ps_state->inners[i].inner_usage);
 			}
@@ -2259,25 +2268,44 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				pgstromTaskInnerState *istate = &leader->inners[i];
 				inner_preload_buffer *preload_buf = istate->preload_buffer;
 				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, i);
-                uint32_t		base_nitems;
-				uint32_t		base_usage;
+				uint64_t	base_nitems;
+				uint64_t	base_usage;
+
+				/*
+				 * If this backend/worker process called GpuJoinInnerPreload()
+				 * after the INNER_PHASE__SCAN_RELATIONS completed, it has no
+				 * preload_buf, thus, no tuples should be added.
+				 */
+				if (!preload_buf)
+					continue;
 
 				SpinLockAcquire(&ps_state->preload_mutex);
 				base_nitems  = kds->nitems;
 				kds->nitems += preload_buf->nitems;
-				base_usage   = kds->usage;
-				kds->usage  += __kds_packed(preload_buf->usage);
+				base_usage   = kds->__usage64;
+				kds->__usage64 += preload_buf->usage;
 				SpinLockRelease(&ps_state->preload_mutex);
+
+				/* sanity checks */
+				if (base_nitems + preload_buf->nitems >= UINT_MAX)
+					elog(ERROR, "GpuJoin: inner relation has %lu tuples, too large",
+						 base_nitems + preload_buf->nitems);
+				Assert(KDS_HEAD_LENGTH(kds) +
+					   MAXALIGN(sizeof(uint64_t) * (kds->hash_nslots +
+													base_nitems +
+													preload_buf->nitems)) +
+					   base_usage +
+					   preload_buf->usage <= kds->length);
 
 				if (kds->format == KDS_FORMAT_ROW)
 					__innerPreloadSetupHeapBuffer(kds, istate,
 												  base_nitems,
-                                                  base_usage);
-                else if (kds->format == KDS_FORMAT_HASH)
-                    __innerPreloadSetupHashBuffer(kds, istate,
-                                                  base_nitems,
-                                                  base_usage);
-                else
+												  base_usage);
+				else if (kds->format == KDS_FORMAT_HASH)
+					__innerPreloadSetupHashBuffer(kds, istate,
+												  base_nitems,
+												  base_usage);
+				else
 					elog(ERROR, "unexpected inner-KDS format");
 			}
 
@@ -2347,27 +2375,28 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts, int depth);
 
 static void
 __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
-						   const kern_expression *kexp_vloads,
+						   List *inner_load_src,
+						   List *inner_load_dst,
 						   const kern_data_store *kds,
 						   const ItemPointer t_self,
 						   const HeapTupleHeaderData *htup)
 {
-	const kern_varload_desc *vl_desc = kexp_vloads->u.load.desc;
-	uint32_t	offset = htup->t_hoff;
-	uint32_t	kvcnt = 0;
-	uint32_t	resno;
+	uint32_t	h_off = htup->t_hoff;
 	uint32_t	ncols = Min(htup->t_infomask2 & HEAP_NATTS_MASK, kds->ncols);
 	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+	ListCell   *lc1, *lc2;
 
-	Assert(kexp_vloads->opcode == FuncOpCode__LoadVars);
 	/* extract system attributes, if rquired */
-	while (kvcnt < kexp_vloads->u.load.nitems &&
-		   vl_desc->vl_resno < 0)
+	forboth (lc1, inner_load_src,
+			 lc2, inner_load_dst)
 	{
-		int		slot_id = vl_desc->vl_slot_id;
+		int		src = lfirst_int(lc1);
+		int		dst = lfirst_int(lc2);
 		Datum	datum;
 
-		switch (vl_desc->vl_resno)
+		if (src >= 0)
+			break;
+		switch (src)
 		{
 			case SelfItemPointerAttributeNumber:
 				datum = PointerGetDatum(t_self);
@@ -2386,45 +2415,38 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 				datum = ObjectIdGetDatum(kds->table_oid);
 				break;
 			default:
-				elog(ERROR, "invalid attnum: %d", vl_desc->vl_resno);
+				elog(ERROR, "invalid attnum: %d", src);
 		}
-		fallback_slot->tts_isnull[slot_id] = false;
-		fallback_slot->tts_values[slot_id] = datum;
-		vl_desc++;
-		kvcnt++;
+		fallback_slot->tts_isnull[dst] = false;
+		fallback_slot->tts_values[dst] = datum;
 	}
 	/* extract the user data */
-	resno = 1;
-	while (kvcnt < kexp_vloads->u.load.nitems && resno <= ncols)
+	for (int j=0; j < ncols && lc1 && lc2; j++)
 	{
-		const kern_colmeta *cmeta = &kds->colmeta[resno-1];
-		const char	   *addr;
+		const kern_colmeta *cmeta = &kds->colmeta[j];
+		const char *addr;
+		Datum		datum;
 
-		if (heap_hasnull && att_isnull(resno-1, htup->t_bits))
+		if (heap_hasnull && att_isnull(j, htup->t_bits))
 		{
 			addr = NULL;
+			datum = 0;
 		}
 		else
 		{
 			if (cmeta->attlen > 0)
-				offset = TYPEALIGN(cmeta->attalign, offset);
-			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
-				offset = TYPEALIGN(cmeta->attalign, offset);
-			addr = ((char *)htup + offset);
+				h_off = TYPEALIGN(cmeta->attalign, h_off);
+			else if (!VARATT_NOT_PAD_BYTE((char *)htup + h_off))
+				h_off = TYPEALIGN(cmeta->attalign, h_off);
+			addr = ((char *)htup + h_off);
 			if (cmeta->attlen > 0)
-				offset += cmeta->attlen;
+				h_off += cmeta->attlen;
+			else if (cmeta->attlen == -1)
+				h_off += VARSIZE_ANY(addr);
 			else
-				offset += VARSIZE_ANY(addr);
-		}
+				elog(ERROR, "unknown typlen (%d)", cmeta->attlen);
 
-		if (vl_desc->vl_resno == resno)
-		{
-			int		slot_id = vl_desc->vl_slot_id;
-			Datum	datum;
-
-			if (!addr)
-				datum = 0;
-			else if (cmeta->attbyval)
+			if (cmeta->attbyval)
 			{
 				switch (cmeta->attlen)
 				{
@@ -2441,29 +2463,36 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 						datum = *((uint64_t *)addr);
 						break;
 					default:
-						elog(ERROR, "invalid attlen: %d", cmeta->attlen);
+						elog(ERROR, "invalid typlen (%d) of inline type",
+							 cmeta->attlen);
 				}
 			}
 			else
 			{
 				datum = PointerGetDatum(addr);
 			}
-			fallback_slot->tts_isnull[slot_id] = !addr;
-			fallback_slot->tts_values[slot_id] = datum;
-			vl_desc++;
-			kvcnt++;
 		}
-		resno++;
+		if (lfirst_int(lc1) == j+1)
+		{
+			int		dst = lfirst_int(lc2) - 1;
+
+			fallback_slot->tts_isnull[dst] = !addr;
+			fallback_slot->tts_values[dst] = datum;
+
+			lc1 = lnext(inner_load_src, lc1);
+			lc2 = lnext(inner_load_dst, lc2);
+		}
 	}
 	/* fill-up by NULL for the remaining fields */
-	while (kvcnt < kexp_vloads->u.load.nitems)
+	while (lc1 && lc2)
 	{
-		int		slot_id = vl_desc->vl_slot_id;
+		int		dst = lfirst_int(lc2) - 1;
 
-		fallback_slot->tts_isnull[slot_id] = true;
-		fallback_slot->tts_values[slot_id] = 0;
-		vl_desc++;
-		kvcnt++;
+		fallback_slot->tts_isnull[dst] = true;
+		fallback_slot->tts_values[dst] = 0;
+
+		lc1 = lnext(inner_load_src, lc1);
+		lc2 = lnext(inner_load_dst, lc2);
 	}
 }
 
@@ -2473,18 +2502,10 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 						  bool *oj_map, int depth)
 {
 	pgstromTaskInnerState *istate = &pts->inners[depth-1];
-	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
-	kern_expression *kexp_join_kvars_load = NULL;
+	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
 
-	if (pp_info->kexp_load_vars_packed)
-	{
-		const kern_expression *temp = (const kern_expression *)
-			VARDATA(pp_info->kexp_load_vars_packed);
-		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth);
-	}
 	Assert(kds_in->format == KDS_FORMAT_ROW);
-
 	for (uint32_t index=0; index < kds_in->nitems; index++)
 	{
 		kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds_in, index);
@@ -2493,14 +2514,15 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 			continue;
 		ResetExprContext(econtext);
 		/* load inner variable */
-		if (kexp_join_kvars_load)
+		if (istate->inner_load_src != NIL &&
+			istate->inner_load_dst != NIL)
 		{
 			ItemPointerData	t_self;
 
 			ItemPointerSetInvalid(&t_self);
-			Assert(kexp_join_kvars_load->u.load.depth == depth);
-			__execFallbackLoadVarsSlot(pts->fallback_slot,
-									   kexp_join_kvars_load,
+			__execFallbackLoadVarsSlot(scan_slot,
+									   istate->inner_load_src,
+									   istate->inner_load_dst,
 									   kds_in,
 									   &t_self,
 									   &tupitem->htup);
@@ -2528,19 +2550,12 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 						  bool *oj_map, int depth)
 {
 	pgstromTaskInnerState *istate = &pts->inners[depth-1];
-	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
-	kern_expression *kexp_join_kvars_load = NULL;
+	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
 	kern_hashitem  *hitem;
 	uint32_t		hash;
 	ListCell	   *lc1, *lc2;
 
-	if (pp_info->kexp_load_vars_packed)
-	{
-		const kern_expression *temp = (const kern_expression *)
-			VARDATA(pp_info->kexp_load_vars_packed);
-		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth);
-	}
 	Assert(kds_in->format == KDS_FORMAT_HASH);
 
 	/*
@@ -2556,7 +2571,7 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 		bool			isnull;
 
 		datum = ExecEvalExprSwitchContext(h_key, econtext, &isnull);
-		hash ^= h_func(isnull, datum);
+		hash = pg_hash_merge(hash, h_func(isnull, datum));
 	}
 	hash ^= 0xffffffffU;
 
@@ -2569,13 +2584,15 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	{
 		if (hitem->hash != hash)
 			continue;
-		if (kexp_join_kvars_load)
+		if (istate->inner_load_src != NIL &&
+			istate->inner_load_dst != NIL)
 		{
 			ItemPointerData	t_self;
 
 			ItemPointerSetInvalid(&t_self);
-			__execFallbackLoadVarsSlot(pts->fallback_slot,
-									   kexp_join_kvars_load,
+			__execFallbackLoadVarsSlot(scan_slot,
+									   istate->inner_load_src,
+									   istate->inner_load_dst,
 									   kds_in,
 									   &t_self,
 									   &hitem->t.htup);
@@ -2598,38 +2615,63 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 }
 
 static void
+__execFallbackCpuProjection(pgstromTaskState *pts)
+{
+	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
+	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
+	ListCell	   *lc;
+	int				dst=0;
+
+	foreach (lc, pts->fallback_proj)
+	{
+		ExprState  *state = lfirst(lc);
+		Datum		datum;
+		bool		isnull;
+
+		if (state)
+		{
+			datum = ExecEvalExpr(state, econtext, &isnull);
+
+			if (isnull)
+			{
+				scan_slot->tts_isnull[dst] = true;
+				scan_slot->tts_values[dst] = 0;
+			}
+			else
+			{
+				scan_slot->tts_isnull[dst] = false;
+				scan_slot->tts_values[dst] = datum;
+			}
+		}
+		dst++;
+	}
+}
+
+static void
 __execFallbackCpuJoinOneDepth(pgstromTaskState *pts, int depth)
 {
-	kern_multirels	   *h_kmrels = pts->h_kmrels;
-	kern_data_store	   *kds_in;
-	bool			   *oj_map;
-
-	if (depth > h_kmrels->num_rels)
+	if (depth > pts->num_rels)
 	{
 		/* apply projection if any */
-		HeapTuple		tuple;
-		bool			should_free;
+		TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
+		HeapTuple	tuple;
 
 		if (pts->fallback_proj)
-		{
-			TupleTableSlot *proj_slot = ExecProject(pts->fallback_proj);
-
-			tuple = ExecFetchSlotHeapTuple(proj_slot, false, &should_free);
-		}
-		else
-		{
-			tuple = ExecFetchSlotHeapTuple(pts->fallback_slot, false, &should_free);
-		}
-		/* save the tuple on the fallback buffer */
+			__execFallbackCpuProjection(pts);
+		tuple = heap_form_tuple(scan_slot->tts_tupleDescriptor,
+								scan_slot->tts_values,
+								scan_slot->tts_isnull);
 		pgstromStoreFallbackTuple(pts, tuple);
-		if (should_free)
-			pfree(tuple);
+		pfree(tuple);
 	}
 	else
 	{
+		kern_multirels	   *h_kmrels = pts->h_kmrels;
+		kern_data_store	   *kds_in;
+		bool			   *oj_map;
+
 		kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth-1);
 		oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth-1);
-
 		if (h_kmrels->chunks[depth-1].is_nestloop)
 		{
 			__execFallbackCpuNestLoop(pts, kds_in, oj_map, depth);
@@ -2644,15 +2686,27 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts, int depth)
 bool
 ExecFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple)
 {
-	pgstromPlanInfo *pp_info = pts->pp_info;
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
 	TupleTableSlot *base_slot = pts->base_slot;
-	TupleTableSlot *fallback_slot = pts->fallback_slot;
+	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
 	size_t			fallback_index_saved = pts->fallback_index;
-	ListCell	   *lc;
+	ListCell	   *lc1, *lc2;
 
+	/* Load the base tuple (depth-0) to the fallback slot */
 	ExecForceStoreHeapTuple(tuple, base_slot, false);
-	econtext->ecxt_scantuple = base_slot;
+	slot_getallattrs(base_slot);
+	ExecStoreAllNullTuple(scan_slot);
+	forboth (lc1, pts->fallback_load_src,
+			 lc2, pts->fallback_load_dst)
+	{
+		int		src = lfirst_int(lc1) - 1;
+		int		dst = lfirst_int(lc2) - 1;
+
+		scan_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
+		scan_slot->tts_values[dst] = base_slot->tts_values[src];
+	}
+	econtext->ecxt_scantuple = scan_slot;
+
 	/* check WHERE-clause if any */
 	if (pts->base_quals)
 	{
@@ -2660,49 +2714,7 @@ ExecFallbackCpuJoin(pgstromTaskState *pts, HeapTuple tuple)
 		if (!ExecQual(pts->base_quals, econtext))
 			return 0;
 	}
-
-	/*
-	 * Shortcut, if GpuJoin is not involved. (GpuScan or GpuPreAgg + GpuScan).
-	 * This case does not have fallback_slot, and the fallback_proj directly
-	 * transforms the base-tuple to the ss_ScanTupleSlot.
-	 */
-	if (pts->num_rels == 0)
-	{
-		TupleTableSlot *proj_slot;
-		HeapTuple	proj_htup;
-		bool		should_free;
-
-		Assert(pts->fallback_slot == 0);
-		proj_slot = ExecProject(pts->fallback_proj);
-		proj_htup = ExecFetchSlotHeapTuple(proj_slot, false, &should_free);
-		pgstromStoreFallbackTuple(pts, proj_htup);
-		if (should_free)
-			pfree(proj_htup);
-		return 1;
-	}
-
-	/* Load the base tuple (depth-0) to the fallback slot */
-	slot_getallattrs(base_slot);
-	Assert(fallback_slot != NULL);
-    ExecStoreAllNullTuple(fallback_slot);
-	foreach (lc, pp_info->kvars_deflist)
-	{
-		codegen_kvar_defitem *kvdef = lfirst(lc);
-
-		if (kvdef->kv_depth == 0 &&
-			kvdef->kv_resno >= 1 &&
-			kvdef->kv_resno <= base_slot->tts_nvalid)
-		{
-			int		dst = kvdef->kv_slot_id;
-			int		src = kvdef->kv_resno - 1;
-
-			fallback_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
-			fallback_slot->tts_values[dst] = base_slot->tts_values[src];
-		}
-	}
-	econtext->ecxt_scantuple = fallback_slot;
 	/* Run JOIN, if any */
-	Assert(pts->h_kmrels);
 	__execFallbackCpuJoinOneDepth(pts, 1);
 	return (pts->fallback_index -  fallback_index_saved > 0);
 }
@@ -2711,20 +2723,12 @@ static void
 __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 {
 	pgstromTaskInnerState *istate = &pts->inners[depth-1];
-	pgstromPlanInfo	   *pp_info = pts->pp_info;
 	ExprContext		   *econtext = pts->css.ss.ps.ps_ExprContext;
-	TupleTableSlot	   *fallback_slot = pts->fallback_slot;
-	kern_expression	   *kexp_join_kvars_load = NULL;
+	TupleTableSlot	   *fallback_slot = pts->css.ss.ss_ScanTupleSlot;
 	kern_multirels	   *h_kmrels = pts->h_kmrels;
 	kern_data_store	   *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth-1);
 	bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth-1);
 
-	if (pp_info->kexp_load_vars_packed)
-	{
-		const kern_expression *temp = (const kern_expression *)
-			VARDATA(pp_info->kexp_load_vars_packed);
-		kexp_join_kvars_load = __PICKUP_PACKED_KEXP(temp, depth);
-	}
 	Assert(oj_map != NULL);
 
 	ExecStoreAllNullTuple(fallback_slot);
@@ -2733,8 +2737,8 @@ __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 	{
 		if (oj_map[i])
 			continue;
-
-		if (kexp_join_kvars_load)
+		if (istate->inner_load_src != NIL &&
+			istate->inner_load_dst != NIL)
 		{
 			kern_tupitem   *titem = KDS_GET_TUPITEM(kds_in, i);
 			ItemPointerData	t_self;
@@ -2743,7 +2747,8 @@ __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 				continue;
 			ItemPointerSetInvalid(&t_self);
 			__execFallbackLoadVarsSlot(fallback_slot,
-									   kexp_join_kvars_load,
+									   istate->inner_load_src,
+									   istate->inner_load_dst,
 									   kds_in,
 									   &t_self,
 									   &titem->htup);
@@ -2798,10 +2803,10 @@ ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts, XpuCommand *resp)
 }
 
 /*
- * pgstrom_init_xpu_join_common
+ * __pgstrom_init_xpujoin_common
  */
 static void
-pgstrom_init_xpu_join_common(void)
+__pgstrom_init_xpujoin_common(void)
 {
 	static bool	__initialized = false;
 
@@ -2889,8 +2894,8 @@ pgstrom_init_gpu_join(void)
 	gpujoin_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	gpujoin_exec_methods.ShutdownCustomScan		= pgstromSharedStateShutdownDSM;
 	gpujoin_exec_methods.ExplainCustomScan		= pgstromExplainTaskState;
-
-	pgstrom_init_xpu_join_common();
+	/* common portion */
+	__pgstrom_init_xpujoin_common();
 }
 
 
@@ -2959,6 +2964,6 @@ pgstrom_init_dpu_join(void)
 	dpujoin_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	dpujoin_exec_methods.ShutdownCustomScan     = pgstromSharedStateShutdownDSM;
 	dpujoin_exec_methods.ExplainCustomScan      = pgstromExplainTaskState;
-
-	pgstrom_init_xpu_join_common();
+	/* common portion */
+	__pgstrom_init_xpujoin_common();
 }

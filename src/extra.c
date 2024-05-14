@@ -131,19 +131,48 @@ heterodbLicenseQuery(char *buf, size_t bufsz)
 /*
  * heterodbValidateDevice
  */
-static int (*p_heterodb_validate_device)(int gpu_device_id,
-										 const char *gpu_device_name,
-                                         const char *gpu_device_uuid) = NULL;
-bool
-heterodbValidateDevice(int gpu_device_id,
-					   const char *gpu_device_name,
+static int (*p_heterodb_validate_device_v2)(const char *gpu_device_name,
+											const char *gpu_device_uuid) = NULL;
+int
+heterodbValidateDevice(const char *gpu_device_name,
 					   const char *gpu_device_uuid)
 {
-	if (!p_heterodb_validate_device)
-		return false;
-	return (p_heterodb_validate_device(gpu_device_id,
-									   gpu_device_name,
-									   gpu_device_uuid) > 0);
+	if (!p_heterodb_validate_device_v2)
+		return -1;
+	return (p_heterodb_validate_device_v2(gpu_device_name,
+										  gpu_device_uuid));
+}
+
+/*
+ * heterodbInitOptimalGpus
+ */
+static const char *(*p_heterodb_init_optimal_gpus)(const char *manual_config) = NULL;
+
+const char *
+heterodbInitOptimalGpus(const char *manual_config)
+{
+	const char *json = NULL;
+
+	if (p_heterodb_init_optimal_gpus)
+	{
+		json = p_heterodb_init_optimal_gpus(manual_config);
+		if (!json)
+			heterodbExtraEreport(ERROR);
+	}
+	return json;
+}
+
+/*
+ * heterodbGetOptimalGpus
+ */
+static int64_t (*p_heterodb_get_optimal_gpus)(const char *path) = NULL;
+
+int64_t
+heterodbGetOptimalGpus(const char *path)
+{
+	if (p_heterodb_get_optimal_gpus)
+		return p_heterodb_get_optimal_gpus(path);
+	return 0;
 }
 
 /*
@@ -844,7 +873,9 @@ pgstrom_init_extra(void)
 		gpuDirectInitDriver();
 	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_reload);
 	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_query);
-	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_validate_device);
+	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_validate_device_v2);
+	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_init_optimal_gpus);
+	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_get_optimal_gpus);
 	elog(LOG, "HeteroDB Extra module loaded [%s]", extra_module_info);
 
 	memset(enum_options, 0, sizeof(enum_options));

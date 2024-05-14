@@ -217,14 +217,13 @@ __gpuscan_load_source_row(kern_context *kcxt,
 	 */
 	if (index < kds_src->nitems)
 	{
-		uint32_t	offset = KDS_GET_ROWINDEX(kds_src)[index];
+		uint64_t	offset = KDS_GET_ROWINDEX(kds_src)[index];
 
-		assert(offset <= kds_src->usage);
+		assert(offset <= kds_src->__usage64);
 		tupitem = (kern_tupitem *)((char *)kds_src +
 								   kds_src->length -
-								   __kds_unpack(offset));
-		assert((char *)tupitem >= (char *)kds_src &&
-			   (char *)tupitem <  (char *)kds_src + kds_src->length);
+								   offset);
+		assert(__KDS_TUPITEM_CHECK_VALID(kds_src, tupitem));
 		if (!ExecLoadVarsOuterRow(kcxt,
 								  kexp_load_vars,
 								  kexp_scan_quals,

@@ -61,8 +61,6 @@
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
                   </li>
-                  <li class="toctree-l1"><a class="reference internal" href="../hll_count/">HyperLogLog</a>
-                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
                   </li>
               </ul>
@@ -114,6 +112,8 @@
               </ul>
               <p class="caption"><span class="caption-text">リリースノート</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
@@ -181,7 +181,7 @@ SASやSATAといったインターフェースで接続された旧式のスト�
 <li><code>/dev/nvmeXXXX</code>ブロックデバイス、または<code>/dev/nvmeXXXX</code>ブロックデバイスのみから構成されたmd-raid0区画が対象です。</li>
 </ul>
 </li>
-<li>テーブルサイズが<code>pg_strom.nvme_strom_threshold</code>よりも大きい事。<ul>
+<li>テーブルサイズが<code>pg_strom.gpudirect_threshold</code>よりも大きい事。<ul>
 <li>この設定値は任意に変更可能ですが、デフォルト値は本体搭載物理メモリに<code>shared_buffers</code>の設定値の1/3を加えた大きさです。</li>
 </ul>
 </li>

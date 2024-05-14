@@ -1585,24 +1585,28 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 		preagg_cpath_list = lappend(preagg_cpath_list, cpath);
 	}
 
-	if (list_length(preagg_cpath_list) > 0)
-	{
-		part_path = (Path *)
-			create_append_path(root,
-							   input_rel,
-							   (try_parallel_path ? NIL : preagg_cpath_list),
-							   (try_parallel_path ? preagg_cpath_list : NIL),
-							   NIL,
-							   NULL,
-							   (try_parallel_path ? parallel_nworkers : 0),
-							   try_parallel_path,
-							   total_nrows);
-		part_path->pathtarget = part_target;
-	}
-	else
-	{
+	if (list_length(preagg_cpath_list) == 0)
 		return;
+	/* adjust number of workers */
+	if (try_parallel_path)
+	{
+		if (parallel_nworkers > max_parallel_workers_per_gather)
+			parallel_nworkers = max_parallel_workers_per_gather;
+		if (parallel_nworkers == 0)
+			return;
 	}
+	/* Append path to consolidate partition leafs */
+	part_path = (Path *)
+		create_append_path(root,
+						   input_rel,
+						   (try_parallel_path ? NIL : preagg_cpath_list),
+						   (try_parallel_path ? preagg_cpath_list : NIL),
+						   NIL,
+						   NULL,
+						   (try_parallel_path ? parallel_nworkers : 0),
+						   try_parallel_path,
+						   total_nrows);
+	part_path->pathtarget = part_target;
 
 	/* put Gather path if parallel-aware */
 	if (try_parallel_path)
@@ -1712,7 +1716,7 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 		return;
 	if (pgstrom_enabled())
 	{
-		if (pgstrom_enable_gpupreagg)
+		if (pgstrom_enable_gpupreagg && gpuserv_ready_accept())
 			__xpuPreAggAddCustomPathCommon(root,
 										   input_rel,
 										   group_rel,
@@ -1785,22 +1789,8 @@ PlanDpuPreAggPath(PlannerInfo *root,
 static Node *
 CreateGpuPreAggScanState(CustomScan *cscan)
 {
-	pgstromTaskState *pts;
-	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
-	int		num_rels = list_length(cscan->custom_plans);
-
 	Assert(cscan->methods == &gpupreagg_plan_methods);
-	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
-	NodeSetTag(pts, T_CustomScanState);
-	pts->css.flags = cscan->flags;
-	pts->css.methods = &gpupreagg_exec_methods;
-	pts->xpu_task_flags = pp_info->xpu_task_flags;
-	pts->pp_info = pp_info;
-	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__GPUPREAGG &&
-		   pp_info->num_rels == num_rels);
-	pts->num_rels = num_rels;
-
-	return (Node *)pts;
+	return pgstromCreateTaskState(cscan, &gpupreagg_exec_methods);
 }
 
 /*
@@ -1809,22 +1799,8 @@ CreateGpuPreAggScanState(CustomScan *cscan)
 static Node *
 CreateDpuPreAggScanState(CustomScan *cscan)
 {
-	pgstromTaskState *pts;
-	pgstromPlanInfo  *pp_info = deform_pgstrom_plan_info(cscan);
-	int			num_rels = list_length(cscan->custom_plans);
-
 	Assert(cscan->methods == &dpupreagg_plan_methods);
-	pts = palloc0(offsetof(pgstromTaskState, inners[num_rels]));
-	NodeSetTag(pts, T_CustomScanState);
-	pts->css.flags = cscan->flags;
-	pts->css.methods = &dpupreagg_exec_methods;
-	pts->xpu_task_flags = pp_info->xpu_task_flags;
-	pts->pp_info = pp_info;
-	Assert((pts->xpu_task_flags & TASK_KIND__MASK) == TASK_KIND__DPUPREAGG &&
-		   pp_info->num_rels == num_rels);
-	pts->num_rels = num_rels;
-
-	return (Node *)pts;
+	return pgstromCreateTaskState(cscan, &dpupreagg_exec_methods);
 }
 
 /*
@@ -1839,6 +1815,24 @@ ExecFallbackCpuPreAgg(pgstromTaskState *pts, HeapTuple tuple)
 			 errhint("'pg_strom.enable_gpupreagg' configuration can turn off GpuPreAgg only"),
 			 errdetail("GpuPreAgg often detects uncontinuable errors during update of the final aggregation buffer. Even if we re-run the source data chunk, the final aggregation buffer is already polluted, so we have no reasonable way to recover right now.")));
 	return false;
+}
+
+/*
+ * __pgstrom_init_xpupreagg_common
+ */
+static void
+__pgstrom_init_xpupreagg_common(void)
+{
+	static bool		xpupreagg_common_initialized = false;
+
+	if (!xpupreagg_common_initialized)
+	{
+		create_upper_paths_next = create_upper_paths_hook;
+		create_upper_paths_hook = XpuPreAggAddCustomPath;
+		CacheRegisterSyscacheCallback(PROCOID, aggfunc_catalog_htable_invalidator, 0);
+
+		xpupreagg_common_initialized = true;
+	}
 }
 
 /*
@@ -1909,13 +1903,8 @@ pgstrom_init_gpu_preagg(void)
 	gpupreagg_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	gpupreagg_exec_methods.ShutdownCustomScan  = pgstromSharedStateShutdownDSM;
 	gpupreagg_exec_methods.ExplainCustomScan   = pgstromExplainTaskState;
-	/* hook registration */
-	if (!create_upper_paths_next)
-	{
-		create_upper_paths_next = create_upper_paths_hook;
-		create_upper_paths_hook = XpuPreAggAddCustomPath;
-		CacheRegisterSyscacheCallback(PROCOID, aggfunc_catalog_htable_invalidator, 0);
-	}
+	/* common portion */
+	__pgstrom_init_xpupreagg_common();
 }
 
 /*
@@ -1965,11 +1954,6 @@ pgstrom_init_dpu_preagg(void)
     dpupreagg_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
     dpupreagg_exec_methods.ShutdownCustomScan  = pgstromSharedStateShutdownDSM;
     dpupreagg_exec_methods.ExplainCustomScan   = pgstromExplainTaskState;
-    /* hook registration */
-	if (!create_upper_paths_next)
-	{
-		create_upper_paths_next = create_upper_paths_hook;
-		create_upper_paths_hook = XpuPreAggAddCustomPath;
-		CacheRegisterSyscacheCallback(PROCOID, aggfunc_catalog_htable_invalidator, 0);
-	}
+	/* common portion */
+	__pgstrom_init_xpupreagg_common();
 }

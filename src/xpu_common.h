@@ -409,32 +409,6 @@ typedef struct {
 	char		message[KERN_ERRORBUF_MESSAGE_LEN+1];
 } kern_errorbuf;
 
-#if 1
-/*
- * kern_variable
- */
-#define KVAR_CLASS__NULL		(-1)
-#define KVAR_CLASS__INLINE		(-2)
-#define KVAR_CLASS__VARLENA		(-3)
-#define KVAR_CLASS__XPU_DATUM	(-4)
-
-typedef union
-{
-	int8_t		i8;
-	uint8_t		u8;
-	int16_t		i16;
-	uint16_t	u16;
-	int32_t		i32;
-	uint32_t	u32;
-	int64_t		i64;
-	uint64_t	u64;
-	float2_t	fp16;
-	float4_t	fp32;
-	float8_t	fp64;
-	void	   *ptr;
-} kern_variable;
-#endif
-
 /*
  * kern_context - a set of run-time information
  */
@@ -666,12 +640,8 @@ typedef struct kern_colmeta		kern_colmeta;
 
 struct kern_data_store {
 	uint64_t		length;		/* length of this data-store */
-	/*
-	 * NOTE: {nitems + usage} must be aligned to 64bit because these pair of
-	 * values can be updated atomically using cmpxchg.
-	 */
-	uint32_t		nitems; 	/* number of rows in this store */
-	uint32_t		usage;		/* usage of this data-store (PACKED) */
+	uint64_t		__usage64;	/* usage of this data-store */
+	uint32_t		nitems;		/* number of rows (or blocks) in this store */
 	uint32_t		ncols;		/* number of columns in this store */
 	char			format;		/* one of KDS_FORMAT_* above */
 	bool			has_varlena; /* true, if any varlena attribute */
@@ -705,12 +675,12 @@ typedef struct kern_data_store		kern_data_store;
  * +-+-------------------+  <-- KDS_BODY_ADDR(kds)
  * | ^                   |
  * | | Hash slots if any | (*) KDS_FORMAT_ROW always has 'hash_nslots' == 0,
- * | | (uint32 * nslots) |     thus, this field is only for KDS_FORMAT_HASH
+ * | | (uint64 * nslots) |     thus, this field is only for KDS_FORMAT_HASH
  * | v                   |
  * +---------------------+
  * | ^                   |
- * | | Row index      o--------+  ((char *)kds + kds->length -
- * | | (uint32 * nitems) |     |    __kds_unpack(row_index[i]))
+ * | | Row index      o--------+  ((char *)kds + kds->length - row_index[i])
+ * | | (uint64 * nitems) |     |
  * | v                   |     |
  * +---------------------+     |
  * |        :            |     |
@@ -782,6 +752,8 @@ typedef struct kern_data_extra		kern_data_extra;
  * is always aligned to MAXIMUM_ALIGNOF boundary (64bit).
  * It means we can use 32bit offset to represent up to 32GB range (35bit).
  */
+#define __KDS_LENGTH_LIMIT			(1UL<<35)
+
 INLINE_FUNCTION(uint32_t)
 __kds_packed(size_t offset)
 {
@@ -1146,13 +1118,14 @@ struct kern_tupitem
 typedef struct kern_tupitem		kern_tupitem;
 
 /*
- * kern_hashitem - individual items for KDS_FORMAT_HASH
+ * kern_hashitem - individual items for KDS_FORMAT_HASH / KDS_FORMAT_HASH64
  */
 struct kern_hashitem
 {
+	uint64_t		next;		/* offset of the next entry */
 	uint32_t		hash;		/* 32-bit hash value */
-	uint32_t		next;		/* offset of the next (PACKED) */
-	kern_tupitem	t;			/* HeapTuple of this entry */
+	uint32_t		__padding__;
+	kern_tupitem	t	__MAXALIGNED__;			/* HeapTuple of this entry */
 };
 typedef struct kern_hashitem	kern_hashitem;
 
@@ -1170,39 +1143,68 @@ KDS_BODY_ADDR(const kern_data_store *kds)
 	return (char *)kds + KDS_HEAD_LENGTH(kds);
 }
 
-/* access functions for KDS_FORMAT_ROW/HASH */
-INLINE_FUNCTION(uint32_t *)
+/* ------------------------------------------------
+ *
+ * access functions for KDS_FORMAT_ROW/HASH
+ *
+ * ------------------------------------------------
+ */
+INLINE_FUNCTION(uint64_t *)
 KDS_GET_ROWINDEX(const kern_data_store *kds)
 {
-	Assert(kds->format == KDS_FORMAT_ROW ||
+	assert(kds->format == KDS_FORMAT_ROW ||
 		   kds->format == KDS_FORMAT_HASH);
-	return (uint32_t *)KDS_BODY_ADDR(kds) + kds->hash_nslots;
+	return (uint64_t *)KDS_BODY_ADDR(kds) + kds->hash_nslots;
 }
 
-/* kern_tupitem by kds_index */
 INLINE_FUNCTION(kern_tupitem *)
 KDS_GET_TUPITEM(kern_data_store *kds, uint32_t kds_index)
 {
-	uint32_t	offset = __volatileRead(KDS_GET_ROWINDEX(kds) + kds_index);
+	uint64_t	offset = __volatileRead(KDS_GET_ROWINDEX(kds) + kds_index);
 
 	if (!offset)
 		return NULL;
-	return (kern_tupitem *)((char *)kds
-							+ kds->length
-							- __kds_unpack(offset));
+	return (kern_tupitem *)((char *)kds + kds->length - offset);
 }
 
-INLINE_FUNCTION(uint32_t *)
+INLINE_FUNCTION(bool)
+__KDS_TUPITEM_CHECK_VALID(const kern_data_store *kds, const kern_tupitem *tupitem)
+{
+	const char *head = (const char *)kds + sizeof(uint64_t) * (kds->hash_nslots +
+															   kds->nitems);
+	const char *tail = (const char *)kds + kds->length;
+
+	return ((const char *)tupitem >= head &&
+			(const char *)tupitem + tupitem->t_len <= tail);
+}
+
+INLINE_FUNCTION(bool)
+__KDS_CHECK_OVERFLOW(const kern_data_store *kds, uint32_t nitems, uint64_t usage)
+{
+	assert(kds->format == KDS_FORMAT_ROW ||
+		   kds->format == KDS_FORMAT_HASH);
+	return (KDS_HEAD_LENGTH(kds) +
+			sizeof(uint64_t) * (kds->hash_nslots + nitems) +
+			usage) <= kds->length;
+}
+
+/* ------------------------------------------------
+ *
+ * access functions for KDS_FORMAT_HASH
+ *
+ * ------------------------------------------------
+ */
+INLINE_FUNCTION(uint64_t *)
 KDS_GET_HASHSLOT_BASE(const kern_data_store *kds)
 {
 	Assert(kds->format == KDS_FORMAT_HASH && kds->hash_nslots > 0);
-	return (uint32_t *)(KDS_BODY_ADDR(kds));
+	return (uint64_t *)(KDS_BODY_ADDR(kds));
 }
 
-INLINE_FUNCTION(uint32_t *)
+INLINE_FUNCTION(uint64_t *)
 KDS_GET_HASHSLOT(const kern_data_store *kds, uint32_t hash)
 {
-	uint32_t   *hslot = KDS_GET_HASHSLOT_BASE(kds);
+	uint64_t   *hslot = KDS_GET_HASHSLOT_BASE(kds);
 
 	return hslot + (hash % kds->hash_nslots);
 }
@@ -1211,43 +1213,58 @@ INLINE_FUNCTION(bool)
 __KDS_HASH_ITEM_CHECK_VALID(const kern_data_store *kds, kern_hashitem *hitem)
 {
 	char   *tail = (char *)kds + kds->length;
-	char   *head = (KDS_BODY_ADDR(kds) +
-					sizeof(uint32_t) * (kds->hash_nslots + kds->nitems));
+	char   *head = (KDS_BODY_ADDR(kds) + sizeof(uint64_t) * (kds->hash_nslots +
+															 kds->nitems));
 	return ((char *)hitem >= head &&
 			(char *)&hitem->t.htup + hitem->t.t_len <= tail);
 }
+#include <stdio.h>
 
 INLINE_FUNCTION(kern_hashitem *)
 KDS_HASH_FIRST_ITEM(const kern_data_store *kds, uint32_t hash)
 {
-	uint32_t   *hslot = KDS_GET_HASHSLOT(kds, hash);
-	uint32_t	offset = __volatileRead(hslot);
+	uint64_t   *hslot = KDS_GET_HASHSLOT(kds, hash);
+	uint64_t	offset = __volatileRead(hslot);
 
-	if (offset != 0 && offset != UINT_MAX)
+	if (offset != 0 && offset != ULONG_MAX)
 	{
-		kern_hashitem *hitem = (kern_hashitem *)((char *)kds
-												 + kds->length
-												 - __kds_unpack(offset));
-		Assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hitem));
+		kern_hashitem *hitem = (kern_hashitem *)
+			((char *)kds + kds->length - offset);
+//		Assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hitem));
+		if (!__KDS_HASH_ITEM_CHECK_VALID(kds, hitem))
+		{
+			printf("kds=%p-%p len=%lu hitem=%p\n", kds, (char *)kds + kds->length, kds->length, hitem);
+			return NULL;
+		}
 		return hitem;
 	}
 	return NULL;
 }
 
 INLINE_FUNCTION(kern_hashitem *)
-KDS_HASH_NEXT_ITEM(const kern_data_store *kds, uint32_t hnext_offset)
+KDS_HASH_NEXT_ITEM(const kern_data_store *kds, uint64_t hnext_offset)
 {
-	if (hnext_offset != 0 && hnext_offset != UINT_MAX)
+	if (hnext_offset != 0 && hnext_offset != ULONG_MAX)
 	{
 		kern_hashitem *hnext = (kern_hashitem *)
-			((char *)kds + kds->length - __kds_unpack(hnext_offset));
-		Assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hnext));
+			((char *)kds + kds->length - hnext_offset);
+		//Assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hnext));
+		if (!__KDS_HASH_ITEM_CHECK_VALID(kds, hnext))
+		{
+			printf("KDS=%p-%p len=%lu hitem=%p %u\n", kds, (char *)kds + kds->length, kds->length, hnext, hnext->t.t_len);
+			return NULL;
+		}
 		return hnext;
 	}
 	return NULL;
 }
 
-/* access macros for KDS_FORMAT_BLOCK */
+/* ------------------------------------------------
+ *
+ * access functions for KDS_FORMAT_BLOCK
+ *
+ * ------------------------------------------------
+ */
 #define KDS_BLOCK_BLCKNR(kds,block_id)					\
 	(((BlockNumber *)KDS_BODY_ADDR(kds))[block_id])
 #define KDS_BLOCK_PGPAGE(kds,block_id)					\
@@ -1974,8 +1991,6 @@ typedef struct
 												 * no locale configuration */
 #define DEVKERN__SESSION_TIMEZONE	0x00000200U	/* Device function needs session
 												 * timezone */
-#define DEVTYPE__USE_KVARS_SLOTBUF	0x00000400U	/* Device type uses extra buffer on
-												 * the kvars-slot for LoadVars */
 #define DEVTYPE__HAS_COMPARE		0x00000800U	/* Device type has compare handler */
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
@@ -2368,6 +2383,7 @@ typedef struct kern_session_info
 	uint32_t	kcxt_kvecs_bufsz;	/* length of kvecs buffer */
 	uint32_t	kcxt_kvecs_ndims;	/* =(num_rels + 2) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
+	uint32_t	cuda_stack_size;	/* estimated stack size */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
 	/* xpucode for this session */
 	uint32_t	xpucode_load_vars_packed;
@@ -2897,12 +2913,12 @@ ExecMoveKernelVariables(kern_context *kcxt,
 						const kern_expression *kexp_move_vars,
                         char *dst_kvec_buffer,
                         int dst_kvec_id);
-EXTERN_FUNCTION(uint32_t)
+EXTERN_FUNCTION(uint64_t)
 ExecGiSTIndexGetNext(kern_context *kcxt,
 					 const kern_data_store *kds_hash,
 					 const kern_data_store *kds_gist,
 					 const kern_expression *kexp_gist,
-					 uint32_t l_state);
+					 uint64_t l_state);
 EXTERN_FUNCTION(bool)
 ExecGiSTIndexPostQuals(kern_context *kcxt,
 					   int depth,
@@ -2941,6 +2957,11 @@ EXTERN_FUNCTION(void)
 pg_kern_ereport(kern_context *kcxt);	/* only host code */
 EXTERN_FUNCTION(uint32_t)
 pg_hash_any(const void *ptr, int sz);
+INLINE_FUNCTION(uint32_t)
+pg_hash_merge(uint32_t hash_prev, uint32_t hash_next)
+{
+	return ((hash_prev >> 3) | (hash_prev << 29)) ^ hash_next;
+}
 
 /* ----------------------------------------------------------------
  *
@@ -3247,6 +3268,32 @@ __atomic_max_fp64(float8_t *ptr, float8_t fval)
 }
 
 INLINE_FUNCTION(uint32_t)
+__atomic_exchange_uint32(uint32_t *ptr, uint32_t newval)
+{
+#ifdef __CUDACC__
+	return atomicExch((unsigned int *)ptr,
+					  (unsigned int)newval);
+#else
+	return __atomic_exchange_n(ptr,
+							   newval,
+							   __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint64_t)
+__atomic_exchange_uint64(uint64_t *ptr, uint64_t newval)
+{
+#ifdef __CUDACC__
+	return atomicExch((unsigned long long int *)ptr,
+					  (unsigned long long int)newval);
+#else
+	return __atomic_exchange_n(ptr,
+							   newval,
+							   __ATOMIC_SEQ_CST);
+#endif
+}
+
+INLINE_FUNCTION(uint32_t)
 __atomic_cas_uint32(uint32_t *ptr, uint32_t comp, uint32_t newval)
 {
 #ifdef __CUDACC__
@@ -3348,11 +3395,11 @@ __preagg_fetch_xdatum_as_float64(float8_t *p_fval, const xpu_datum_t *xdatum)
 INLINE_FUNCTION(void)
 print_kern_data_store(const kern_data_store *kds)
 {
-	printf("kds %p { length=%lu, nitems=%u, usage=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
+	printf("kds %p { length=%lu, usage=%lu, nitems=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
 		   kds,
 		   kds->length,
+		   kds->__usage64,
 		   kds->nitems,
-		   kds->usage,
 		   kds->ncols,
 		   kds->format,
 		   kds->has_varlena ? 't' : 'f',

@@ -15,13 +15,14 @@
 
 #define HETERODB_EXTRA_FILENAME		"heterodb_extra.so"
 #define HETERODB_EXTRA_PATHNAME		"/usr/lib64/" HETERODB_EXTRA_FILENAME
+#define HETERODB_EXTRA_MAX_GPUS		63
 
 #define HETERODB_LICENSE_PATHNAME	"/etc/heterodb.license"
 /* fixed length of the license key (2048bits) */
 #define HETERODB_LICENSE_KEYLEN		256
 #define HETERODB_LICENSE_KEYBITS	(8 * HETERODB_LICENSE_KEYLEN)
 
-#define HETERODB_EXTRA_API_VERSION	20231105
+#define HETERODB_EXTRA_API_VERSION	20240418
 
 /* cufile.c */
 typedef struct

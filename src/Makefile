@@ -11,7 +11,7 @@ STROM_OBJS = main.o githash.o extra.o codegen.o misc.o executor.o \
              gpu_scan.o gpu_join.o gpu_preagg.o \
              relscan.o brin.o gist.o gpu_cache.o \
              arrow_fdw.o arrow_nodes.o \
-             pcie.o float2.o tinyint.o aggfuncs.o
+             float2.o tinyint.o aggfuncs.o
 GENERATED-HEADERS = gpu_devattrs.h githash.c
 STROM_HEADERS = arrow_defs.h arrow_ipc.h float2.h
 
@@ -28,7 +28,7 @@ include Makefile.cuda
 #
 # Installation Scripts
 #
-__STROM_SQL = pg_strom--5.0.sql
+__STROM_SQL = pg_strom--4.0--5.0.sql pg_strom--5.0.sql pg_strom--5.0--5.1.sql
 STROM_SQL = $(addprefix sql/,$(__STROM_SQL))
 
 #
@@ -54,8 +54,13 @@ PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"   \
         -DCUDA_CORE_FILES="\"$(__CUDA_CORE_FILES)\""      \
         -DCUDA_CORE_HEADERS="\"$(__CUDA_CORE_HEADERS)\""  \
         -DCUDA_TOOLKIT_BASEDIR="\"$(CUDA_PATH)\""
-PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
-SHLIB_LINK := -L $(CUDA_LPATH) -lcuda
+#
+# Pre-built Fatbin (only debugging purpose)
+#
+ifeq ($(WITH_FATBIN),1)
+DATA_built = $(CUDA_FATBIN)
+PGSTROM_FLAGS += -DWITH_FATBIN=1
+endif
 
 #
 # Definition of PG-Strom Extension
@@ -65,12 +70,12 @@ MODULEDIR  = pg_strom
 DATA = $(STROM_SQL) ../LICENSE Makefile.cuda \
        $(CUDA_SRCS) $(CUDA_HEADERS) $(STROM_HEADERS)
 OBJS = $(STROM_OBJS)
-ifeq ($(WITH_FATBIN),1)
-DATA_built = $(CUDA_FATBIN)
-endif
+
 EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
               $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
 EXTENSION = pg_strom
+PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
+SHLIB_LINK := -L $(CUDA_LPATH) -lcuda
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
