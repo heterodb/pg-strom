@@ -26,7 +26,8 @@ SELECT SUM(t1.c1) FROM t1;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-47ff, type='money', expr='c1'>]}}}
          Partial Aggregation OpCode: {AggFuncs <psum::int[slot=0, expr='c1']> arg={SaveExpr: <slot=0, type='money'> arg={Var(money): kvec=0x0000-4800, expr='c1'}}}
          Partial Function BufSz: 16
-(11 rows)
+         CUDA Stack Size: 3888
+(12 rows)
 
 SELECT SUM(t1.c1) FROM t1;
   sum  
@@ -55,9 +56,10 @@ SELECT * FROM t1 LEFT OUTER JOIN t0 ON (t1.c0 = t1.c1);
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x5000-77ff, type='int4', expr='c0'>]}}, items[1]={MoveVars(depth=1): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='c0'>, <slot=1, offset=0x2800-4fff, type='int4', expr='c1'>, <offset=0x5000-77ff, type='int4', expr='c0'>]}}}
    Join Quals OpCode: {Packed items[1]={JoinQuals:  {Func(bool)::int4eq args=[{Var(int4): slot=0, expr='c0'}, {Var(int4): slot=1, expr='c1'}]}}}
    Projection OpCode: {Projection: layout=<0,1,2> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='c0'}}, {SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x2800-5000, expr='c1'}}, {SaveExpr: <slot=2, type='int4'> arg={Var(int4): kvec=0x5000-7800, expr='c0'}}]}
+   CUDA Stack Size: 3936
    ->  Seq Scan on regtest_miscs.t1
          Output: t1.c0, t1.c1
-(12 rows)
+(13 rows)
 
 SELECT * FROM t1 LEFT OUTER JOIN t0 ON (t1.c0 = t1.c1);
  c0 | c1 | c0 
@@ -168,6 +170,7 @@ SELECT SUM(t1.c0) FROM t1 LEFT OUTER JOIN t0 ON ((t0.c0)IS DISTINCT FROM(CAST(1.
          Join Quals OpCode: {Packed items[1]={JoinQuals:  <{IsNull arg={Var(bool): slot=1, expr='c1'}}>}}
          Partial Aggregation OpCode: {AggFuncs <psum::int[slot=0, expr='c0']> arg={SaveExpr: <slot=0, type='money'> arg={Var(money): kvec=0x0000-4800, expr='c0'}}}
          Partial Function BufSz: 16
+         CUDA Stack Size: 3904
          ->  Custom Scan (GpuScan) on regtest_miscs.t0
                Output: t0.c1
                GPU Projection: c1
@@ -178,7 +181,8 @@ SELECT SUM(t1.c0) FROM t1 LEFT OUTER JOIN t0 ON ((t0.c0)IS DISTINCT FROM(CAST(1.
                MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x4800-57ff, type='bool', expr='c1'>]}}}
                Scan Quals OpCode: {DistinctFrom arg={Func(bool)::cash_eq args=[{Var(money): slot=0, expr='c0'}, {Func(money)::money arg={Const(numeric): value='10'}}]}}
                Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='bool'> arg={Var(bool): kvec=0x4800-5800, expr='c1'}}}
-(23 rows)
+               CUDA Stack Size: 3904
+(25 rows)
 
 SELECT SUM(t1.c0) FROM t1 LEFT OUTER JOIN t0 ON ((t0.c0)IS DISTINCT FROM(CAST(1.0E1 AS MONEY))) WHERE (t0.c1) IS NULL;
  sum 
@@ -206,17 +210,48 @@ WITH MYWITH AS (SELECT 1 AS f1
    FROM  (SELECT "c2" AS f6 FROM t0) AS t1 
     INNER JOIN  (SELECT "c1" AS f5 FROM t1) AS t2  
     ON (( ((f5)  IN (f6))) AND ((1 > ((f6)::bigint >> 5)) IS FALSE)))
+SELECT * FROM MYWITH;
+                                                                                                        QUERY PLAN                                                                                                         
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_miscs.t1
+   Output: 1
+   GPU Projection: 
+   GPU Join Quals [1]: ((t0.c2)::double precision = t1.c1) ... [nrows: 1100 -> 4032]
+   GPU Outer Hash [1]: t1.c1
+   GPU Inner Hash [1]: (t0.c2)::double precision
+   KVars-Slot: <slot=0, type='numeric', expr='t0.c2'>, <slot=1, type='float8', expr='t1.c1'>
+   KVecs-Buffer: nbytes: 75776, ndims: 3, items=[kvec0=<0x0000-dfff, type='numeric', expr='c2'>, kvec1=<0xe000-127ff, type='float8', expr='c1'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='float8' resno=2(c1)>]}, items[1]={LoadVars(depth=1): kvars=[<slot=0, type='numeric' resno=1(c2)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0xe000-127ff, type='float8', expr='c1'>]}}}
+   Join Quals OpCode: {Packed items[1]={JoinQuals:  {Func(bool)::float8eq args=[{Func(float8)::float8 arg={Var(numeric): slot=0, expr='c2'}}, {Var(float8): kvec=0xe000-12800, expr='c1'}]}}}
+   Join HashValue OpCode: {Packed items[1]={HashValue arg={Var(float8): kvec=0xe000-12800, expr='c1'}}}
+   Projection OpCode: {Projection: layout=<>}
+   CUDA Stack Size: 3920
+   ->  Custom Scan (GpuScan) on regtest_miscs.t0
+         Output: t0.c2
+         GPU Projection: c2
+         GPU Scan Quals: ((1 > ((c2)::bigint >> 5)) IS FALSE) [rows: 1100 -> 733]
+         KVars-Slot: <slot=0, type='numeric', expr='c2'>
+         KVecs-Buffer: nbytes: 57344, ndims: 2, item=kvec0=<0x0000-dfff, type='numeric', expr='c2'>
+         LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='numeric' resno=3(c2)>]}}
+         MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-dfff, type='numeric', expr='c2'>]}}}
+         Scan Quals OpCode: {BoolTest::IsFalse arg={Func(bool)::int48gt args=[{Const(int4): value='1'}, {Func(int8)::int8shr args=[{Func(int8)::int8 arg={Var(numeric): slot=0, expr='c2'}}, {Const(int4): value='5'}]}]}}
+         Projection OpCode: {Projection: layout=<0> arg={SaveExpr: <slot=0, type='numeric'> arg={Var(numeric): kvec=0x0000-e000, expr='c2'}}}
+         CUDA Stack Size: 3904
+(25 rows)
+
 WITH MYWITH AS (SELECT 1 AS f1
    FROM  (SELECT "c2" AS f6 FROM t0) AS t1 
     INNER JOIN  (SELECT "c1" AS f5 FROM t1) AS t2  
     ON (( ((f5)  IN (f6))) AND ((1 > ((f6)::bigint >> 5)) IS FALSE)))
+SELECT * FROM MYWITH;
+ f1 
+----
+(0 rows)
+
 -- #632
 DROP TABLE IF EXISTS t0;
-ERROR:  syntax error at or near "WITH"
-LINE 6: WITH MYWITH AS (SELECT 1 AS f1
-        ^
 create table t0 (c1 float, c2 decimal(40, 20));
-ERROR:  relation "t0" already exists
 insert into t0 values (1,0.1);
 SELECT * FROM
         (SELECT c2 AS f1,
@@ -279,9 +314,8 @@ SELECT MAX(c0) FROM t0 GROUP BY t0.c1 HAVING t0.c0<MIN(t0.c0);
 (0 rows)
 
 -- #637
-DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
 CREATE TABLE t1(c0 int) USING heap;
-ERROR:  relation "t1" already exists
 INSERT INTO t1(c0) VALUES(1);
 SELECT c0 FROM t1 GROUP BY t1.c0 HAVING NOT (MIN(65536))::BOOLEAN;
  c0 
@@ -289,9 +323,8 @@ SELECT c0 FROM t1 GROUP BY t1.c0 HAVING NOT (MIN(65536))::BOOLEAN;
 (0 rows)
 
 -- #638
-DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
 CREATE TABLE t1(c0 int) USING heap;
-ERROR:  relation "t1" already exists
 INSERT INTO t1(c0) VALUES(1);
 SELECT MIN(1) FROM t1 GROUP BY t1.c0 HAVING NOT (MIN(1))::BOOLEAN;
  min 
@@ -426,6 +459,7 @@ SELECT t1.c0 FROM t2, t1 WHERE (t2.c0) BETWEEN SYMMETRIC (t1.c0) AND ((0.9)::MON
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-47ff, type='money', expr='c0'>]}}, items[1]={MoveVars(depth=1): items=[<offset=0x0000-47ff, type='money', expr='c0'>]}}}
    Join Quals OpCode: {Packed items[1]={JoinQuals:  {Bool::OR args=[{Bool::AND args=[{Func(bool)::cash_ge args=[{Var(money): slot=1, expr='c0'}, {Var(money): kvec=0x0000-4800, expr='c0'}]}, {Func(bool)::cash_le args=[{Var(money): slot=1, expr='c0'}, {Func(money)::money arg={Const(numeric): value='0.9'}}]}]}, {Bool::AND args=[{Func(bool)::cash_ge args=[{Var(money): slot=1, expr='c0'}, {Func(money)::money arg={Const(numeric): value='0.9'}}]}, {Func(bool)::cash_le args=[{Var(money): slot=1, expr='c0'}, {Var(money): kvec=0x0000-4800, expr='c0'}]}]}]}}}
    Projection OpCode: {Projection: layout=<0> arg={SaveExpr: <slot=0, type='money'> arg={Var(money): kvec=0x0000-4800, expr='c0'}}}
+   CUDA Stack Size: 3904
    ->  Custom Scan (GpuScan) on regtest_miscs.t2
          Output: t2.c0
          GPU Projection: c0
@@ -436,7 +470,8 @@ SELECT t1.c0 FROM t2, t1 WHERE (t2.c0) BETWEEN SYMMETRIC (t1.c0) AND ((0.9)::MON
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-47ff, type='money', expr='c0'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::cash_le args=[{Var(money): slot=0, expr='c0'}, {Func(money)::money arg={Const(numeric): value='0.9'}}]}, {Func(bool)::cash_ge args=[{Var(money): slot=0, expr='c0'}, {Func(money)::money arg={Const(numeric): value='0.9'}}]}]}
          Projection OpCode: {Projection: layout=<0> arg={SaveExpr: <slot=0, type='money'> arg={Var(money): kvec=0x0000-4800, expr='c0'}}}
-(20 rows)
+         CUDA Stack Size: 3888
+(22 rows)
 
 SELECT t1.c0 FROM t2, t1 WHERE (t2.c0) BETWEEN SYMMETRIC (t1.c0) AND ((0.9)::MONEY);
   c0   
@@ -466,6 +501,7 @@ SELECT * FROM t1, t0 WHERE (t0.c0) BETWEEN (t1.c0) AND (CAST(0.8 AS MONEY));
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-47ff, type='money', expr='c0'>]}}, items[1]={MoveVars(depth=1): items=[<offset=0x0000-47ff, type='money', expr='c0'>, <slot=1, offset=0x4800-8fff, type='money', expr='c0'>]}}}
    Join Quals OpCode: {Packed items[1]={JoinQuals:  {Func(bool)::cash_ge args=[{Var(money): slot=1, expr='c0'}, {Var(money): kvec=0x0000-4800, expr='c0'}]}}}
    Projection OpCode: {Projection: layout=<0,1> args=[{SaveExpr: <slot=0, type='money'> arg={Var(money): kvec=0x0000-4800, expr='c0'}}, {SaveExpr: <slot=1, type='money'> arg={Var(money): kvec=0x4800-9000, expr='c0'}}]}
+   CUDA Stack Size: 3904
    ->  Custom Scan (GpuScan) on regtest_miscs.t0
          Output: t0.c0
          GPU Projection: c0
@@ -476,7 +512,8 @@ SELECT * FROM t1, t0 WHERE (t0.c0) BETWEEN (t1.c0) AND (CAST(0.8 AS MONEY));
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-47ff, type='money', expr='c0'>]}}}
          Scan Quals OpCode: {Func(bool)::cash_le args=[{Var(money): slot=0, expr='c0'}, {Func(money)::money arg={Const(numeric): value='0.8'}}]}
          Projection OpCode: {Projection: layout=<0> arg={SaveExpr: <slot=0, type='money'> arg={Var(money): kvec=0x0000-4800, expr='c0'}}}
-(20 rows)
+         CUDA Stack Size: 3888
+(22 rows)
 
 SELECT * FROM t1, t0 WHERE (t0.c0) BETWEEN (t1.c0) AND (CAST(0.8 AS MONEY));
   c0   |  c0   
@@ -505,9 +542,10 @@ SELECT * FROM t0,t1 WHERE ((t0.c0)::INT IS NOT DISTINCT FROM (t0.c0)) OR (t1.c0)
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x2800-37ff, type='bool', expr='c0'>]}}, items[1]={MoveVars(depth=1): items=[<slot=0, offset=0x0000-27ff, type='float4', expr='c0'>, <offset=0x2800-37ff, type='bool', expr='c0'>]}}}
    Join Quals OpCode: {Packed items[1]={JoinQuals:  {Bool::OR args=[{Bool::NOT arg={DistinctFrom arg={Func(bool)::float84eq args=[{Func(float8)::float8 arg={Func(int4)::int4 arg={Var(float4): slot=0, expr='c0'}}}, {Var(float4): slot=0, expr='c0'}]}}}, {Var(bool): kvec=0x2800-3800, expr='c0'}]}}}
    Projection OpCode: {Projection: layout=<0,1> args=[{SaveExpr: <slot=0, type='float4'> arg={Var(float4): kvec=0x0000-2800, expr='c0'}}, {SaveExpr: <slot=1, type='bool'> arg={Var(bool): kvec=0x2800-3800, expr='c0'}}]}
+   CUDA Stack Size: 3904
    ->  Seq Scan on regtest_miscs.t0
          Output: t0.c0
-(12 rows)
+(13 rows)
 
 SELECT * FROM t0,t1 WHERE ((t0.c0)::INT IS NOT DISTINCT FROM (t0.c0)) OR (t1.c0);
  c0 | c0 
@@ -575,9 +613,10 @@ SELECT t1.c1, t0.c2 FROM t1 FULL OUTER JOIN t0 ON (t0.c2) IN (t1.c2) WHERE ((t0.
    Join Quals OpCode: {Packed items[1]={JoinQuals:  {Func(bool)::network_eq args=[{Var(inet): slot=1, expr='c2'}, {Var(inet): kvec=0x10000-19800, expr='c2'}]}, <{IsNull arg={Func(bool)::cash_eq args=[{Var(money): slot=3, expr='c0'}, {Func(money)::money arg={Const(numeric): value='0.1'}}]}}>}}
    Join HashValue OpCode: {Packed items[1]={HashValue arg={Var(inet): kvec=0x10000-19800, expr='c2'}}}
    Projection OpCode: {Projection: layout=<0,1> args=[{SaveExpr: <slot=0, type='bytea'> arg={Var(bytea): kvec=0x0000-6800, expr='c1'}}, {SaveExpr: <slot=1, type='inet'> arg={Var(inet): kvec=0x6800-10000, expr='c2'}}]}
+   CUDA Stack Size: 4000
    ->  Seq Scan on regtest_miscs.t0
          Output: t0.c2, t0.c0
-(15 rows)
+(16 rows)
 
 SELECT t1.c1, t0.c2 FROM t1 FULL OUTER JOIN t0 ON (t0.c2) IN (t1.c2) WHERE ((t0.c0) IN ((0.1)::MONEY)) ISNULL;
  c1 | c2 
@@ -606,16 +645,17 @@ SELECT DISTINCT ON (t3.c0 + 1) t3.c0 FROM t3 FULL OUTER JOIN t2 ON (t2.c0) IN (t
                GPU Full Outer Join Quals [1]: (t2.c0 = t3.c0) ... [nrows: 2260 -> 25538]
                GPU Outer Hash [1]: t3.c0
                GPU Inner Hash [1]: t2.c0
-               KVars-Slot: <slot=0, type='int8', expr='t3.c0'>, <slot=1, type='int8', expr='(t3.c0 + 1)'>, <slot=2, type='int8', expr='t2.c0'>
+               KVars-Slot: <slot=0, type='int8', expr='t3.c0'>, <slot=1, type='int8', expr='((t3.c0 + 1))'>, <slot=2, type='int8', expr='t2.c0'>
                KVecs-Buffer: nbytes: 36864, ndims: 3, items=[kvec0=<0x0000-47ff, type='int8', expr='c0'>, kvec1=<0x4800-8fff, type='int8', expr='c0'>]
                LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int8' resno=1(c0)>]}, items[1]={LoadVars(depth=1): kvars=[<slot=2, type='int8' resno=1(c0)>]}}
                MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-47ff, type='int8', expr='c0'>]}}, items[1]={MoveVars(depth=1): items=[<offset=0x0000-47ff, type='int8', expr='c0'>]}}}
                Join Quals OpCode: {Packed items[1]={JoinQuals:  {Func(bool)::int8eq args=[{Var(int8): slot=2, expr='c0'}, {Var(int8): kvec=0x0000-4800, expr='c0'}]}}}
                Join HashValue OpCode: {Packed items[1]={HashValue arg={Var(int8): kvec=0x0000-4800, expr='c0'}}}
                Projection OpCode: {Projection: layout=<0,1> args=[{SaveExpr: <slot=0, type='int8'> arg={Var(int8): kvec=0x0000-4800, expr='c0'}}, {SaveExpr: <slot=1, type='int8'> arg={Func(int8)::int84pl args=[{Var(int8): kvec=0x0000-4800, expr='c0'}, {Const(int4): value='1'}]}}]}
+               CUDA Stack Size: 3936
                ->  Seq Scan on regtest_miscs.t2
                      Output: t2.c0
-(20 rows)
+(21 rows)
 
 SELECT DISTINCT ON (t3.c0 + 1) t3.c0 FROM t3 FULL OUTER JOIN t2 ON (t2.c0) IN (t3.c0);
   c0   

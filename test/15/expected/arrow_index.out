@@ -378,7 +378,7 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_num);
                                               QUERY PLAN                                              
 ------------------------------------------------------------------------------------------------------
- Gather (actual rows=0 loops=1)
+ Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Params Evaluated: $0
    Workers Launched: 2
@@ -386,33 +386,34 @@ WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_n
      ->  Seq Scan on target_num (actual rows=1 loops=1)
    ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
          Filter: (timestamp_num = $0)
+         Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (timestamp_num = $0)  [loaded: 0, skipped: 4]
+         Stats-Hint: (timestamp_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(11 rows)
+(12 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
-                                                                                                        QUERY PLAN                                                                                                         
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                             QUERY PLAN                                                                                                              
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=0 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
          GPU Projection: pgstrom.nrows()
-         GPU Scan Quals: ((timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone) AND (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)) [plan: 1000000 -> 5000, exec: 0 -> 0]
+         GPU Scan Quals: ((timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone) AND (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)) [plan: 1000000 -> 5000, exec: 621378 -> 410884]
          referenced: timestamp_num
-         Stats-Hint: (timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone), (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)  [loaded: 0, skipped: 4]
+         Stats-Hint: (timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone), (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)  [loaded: 2, skipped: 2]
          file0: test_arrow_index.data (read: 7812.69KB, size: 51.50MB)
-         GPU-Direct SQL: disabled (ntuples=0)
+         GPU-Direct SQL: disabled (vfs=607, ntuples=621378)
 (8 rows)
 
 SELECT count(*)
   FROM regtest_arrow
  WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
- count 
--------
-     0
+ count  
+--------
+ 410884
 (1 row)
 
 SET pg_strom.enabled = off;

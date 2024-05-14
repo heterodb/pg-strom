@@ -66,7 +66,8 @@ SELECT id,x INTO test01g FROM regtest_data
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0000-680f, type='array', expr='x'>, <slot=2, offset=0x6810-900f, type='int4', expr='id'>]}}}
    Scan Quals OpCode: {ScalarArrayOpAny: elem=<slot=0, type='int4'> args=[{Var(array): slot=1, expr='x'}, {Func(bool)::int4eq args=[{Const(int4): value='72'}, {Var(int4): slot=0, expr='NULL::integer'}]}]}
    Projection OpCode: {Projection: layout=<2,1> args=[{SaveExpr: <slot=2, type='int4'> arg={Var(int4): kvec=0x6810-9010, expr='id'}}, {SaveExpr: <slot=1, type='array'> arg={Var(array): kvec=0x0000-6810, expr='x'}}]}
-(10 rows)
+   CUDA Stack Size: 3936
+(11 rows)
 
 SELECT id,x INTO test01g FROM regtest_data
  WHERE 72 = ANY(x);
@@ -100,7 +101,8 @@ SELECT id,y INTO test02g FROM regtest_data
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0000-680f, type='array', expr='y'>, <slot=2, offset=0x6810-900f, type='int4', expr='id'>]}}}
    Scan Quals OpCode: {ScalarArrayOpAny: elem=<slot=0, type='numeric'> args=[{Var(array): slot=1, expr='y'}, {Func(bool)::numeric_eq args=[{Const(numeric): value='75.96'}, {Var(numeric): slot=0, expr='NULL::numeric'}]}]}
    Projection OpCode: {Projection: layout=<2,1> args=[{SaveExpr: <slot=2, type='int4'> arg={Var(int4): kvec=0x6810-9010, expr='id'}}, {SaveExpr: <slot=1, type='array'> arg={Var(array): kvec=0x0000-6810, expr='y'}}]}
-(10 rows)
+   CUDA Stack Size: 3936
+(11 rows)
 
 SELECT id,y INTO test02g FROM regtest_data
  WHERE 75.96 = ANY(y);
@@ -134,7 +136,8 @@ SELECT id,z INTO test03g FROM regtest_data
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0000-680f, type='array', expr='z'>, <slot=2, offset=0x6810-900f, type='int4', expr='id'>]}}}
    Scan Quals OpCode: {ScalarArrayOpAny: elem=<slot=0, type='text'> args=[{Var(array): slot=1, expr='z'}, {Func(bool)::texteq args=[{Const(text): value='kVOV'}, {Var(text): slot=0, expr='NULL::text'}]}]}
    Projection OpCode: {Projection: layout=<2,1> args=[{SaveExpr: <slot=2, type='int4'> arg={Var(int4): kvec=0x6810-9010, expr='id'}}, {SaveExpr: <slot=1, type='array'> arg={Var(array): kvec=0x0000-6810, expr='z'}}]}
-(10 rows)
+   CUDA Stack Size: 3936
+(11 rows)
 
 SELECT id,z INTO test03g FROM regtest_data
   WHERE 'kVOV' = ANY (z);

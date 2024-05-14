@@ -61,13 +61,14 @@ SELECT id, bc1::text, bc2::varchar,
    Output: id, (bc1)::text, (bc2)::character varying, (vc1)::character(1), ((vc2)::text), (tc1)::character(1), ((tc2)::character varying)
    GPU Projection: id, bc1, bc2, vc1, (vc2)::text, tc1, (tc2)::character varying
    GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
-   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bpchar', expr='bc1'>, <slot=2, type='bpchar', expr='bc2'>, <slot=3, type='text', expr='vc1'>, <slot=4, type='text', expr='(vc2)::text'>, <slot=5, type='text', expr='vc2'>, <slot=6, type='text', expr='tc1'>, <slot=7, type='text', expr='(tc2)::character varying'>, <slot=8, type='text', expr='tc2'>
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bpchar', expr='bc1'>, <slot=2, type='bpchar', expr='bc2'>, <slot=3, type='text', expr='vc1'>, <slot=4, type='text', expr='((vc2)::text)'>, <slot=5, type='text', expr='vc2'>, <slot=6, type='text', expr='tc1'>, <slot=7, type='text', expr='((tc2)::character varying)'>, <slot=8, type='text', expr='tc2'>
    KVecs-Buffer: nbytes: 169984, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-8fff, type='bpchar', expr='bc1'>, kvec2=<0x9000-f7ff, type='bpchar', expr='bc2'>, kvec3=<0xf800-15fff, type='text', expr='vc1'>, kvec4=<0x16000-1c7ff, type='text', expr='vc2'>, kvec5=<0x1c800-22fff, type='text', expr='tc1'>, kvec6=<0x23000-297ff, type='text', expr='tc2'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=1, type='bpchar' resno=2(bc1)>, <slot=2, type='bpchar' resno=3(bc2)>, <slot=3, type='text' resno=4(vc1)>, <slot=5, type='text' resno=5(vc2)>, <slot=6, type='text' resno=6(tc1)>, <slot=8, type='text' resno=7(tc2)>]}}
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=1, offset=0x2800-8fff, type='bpchar', expr='bc1'>, <slot=2, offset=0x9000-f7ff, type='bpchar', expr='bc2'>, <slot=3, offset=0xf800-15fff, type='text', expr='vc1'>, <slot=5, offset=0x16000-1c7ff, type='text', expr='vc2'>, <slot=6, offset=0x1c800-22fff, type='text', expr='tc1'>, <slot=8, offset=0x23000-297ff, type='text', expr='tc2'>]}}}
    Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<0,1,2,3,4,6,7> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='bpchar'> arg={Var(bpchar): kvec=0x2800-9000, expr='bc1'}}, {SaveExpr: <slot=2, type='bpchar'> arg={Var(bpchar): kvec=0x9000-f800, expr='bc2'}}, {SaveExpr: <slot=3, type='text'> arg={Var(text): kvec=0xf800-16000, expr='vc1'}}, {SaveExpr: <slot=4, type='text'> arg={Var(text): kvec=0x16000-1c800, expr='vc2'}}, {SaveExpr: <slot=6, type='text'> arg={Var(text): kvec=0x1c800-23000, expr='tc1'}}, {SaveExpr: <slot=7, type='text'> arg={Var(text): kvec=0x23000-29800, expr='tc2'}}]}
-(10 rows)
+   CUDA Stack Size: 4208
+(11 rows)
 
 SELECT id, bc1::text, bc2::varchar,
            vc1::char, vc2::text,
@@ -108,13 +109,14 @@ SELECT id, bc1 = bc2 eq, bc1 <> bc2 ne,
    Output: id, ((bc1 = bc2)), ((bc1 <> bc2)), ((bc1 > bc2)), ((bc1 >= bc2)), ((bc1 < bc2)), ((bc1 <= bc2))
    GPU Projection: id, (bc1 = bc2), (bc1 <> bc2), (bc1 > bc2), (bc1 >= bc2), (bc1 < bc2), (bc1 <= bc2)
    GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
-   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='(bc1 = bc2)'>, <slot=2, type='bpchar', expr='bc1'>, <slot=3, type='bpchar', expr='bc2'>, <slot=4, type='bool', expr='(bc1 <> bc2)'>, <slot=5, type='bool', expr='(bc1 > bc2)'>, <slot=6, type='bool', expr='(bc1 >= bc2)'>, <slot=7, type='bool', expr='(bc1 < bc2)'>, <slot=8, type='bool', expr='(bc1 <= bc2)'>
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='((bc1 = bc2))'>, <slot=2, type='bpchar', expr='bc1'>, <slot=3, type='bpchar', expr='bc2'>, <slot=4, type='bool', expr='((bc1 <> bc2))'>, <slot=5, type='bool', expr='((bc1 > bc2))'>, <slot=6, type='bool', expr='((bc1 >= bc2))'>, <slot=7, type='bool', expr='((bc1 < bc2))'>, <slot=8, type='bool', expr='((bc1 <= bc2))'>
    KVecs-Buffer: nbytes: 63488, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-8fff, type='bpchar', expr='bc1'>, kvec2=<0x9000-f7ff, type='bpchar', expr='bc2'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='bpchar' resno=2(bc1)>, <slot=3, type='bpchar' resno=3(bc2)>]}}
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-8fff, type='bpchar', expr='bc1'>, <slot=3, offset=0x9000-f7ff, type='bpchar', expr='bc2'>]}}}
    Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<0,1,4,5,6,7,8> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='bool'> arg={Func(bool)::bpchareq args=[{Var(bpchar): kvec=0x2800-9000, expr='bc1'}, {Var(bpchar): kvec=0x9000-f800, expr='bc2'}]}}, {SaveExpr: <slot=4, type='bool'> arg={Func(bool)::bpcharne args=[{Var(bpchar): kvec=0x2800-9000, expr='bc1'}, {Var(bpchar): kvec=0x9000-f800, expr='bc2'}]}}, {SaveExpr: <slot=5, type='bool'> arg={Func(bool)::bpchargt args=[{Var(bpchar): kvec=0x2800-9000, expr='bc1'}, {Var(bpchar): kvec=0x9000-f800, expr='bc2'}]}}, {SaveExpr: <slot=6, type='bool'> arg={Func(bool)::bpcharge args=[{Var(bpchar): kvec=0x2800-9000, expr='bc1'}, {Var(bpchar): kvec=0x9000-f800, expr='bc2'}]}}, {SaveExpr: <slot=7, type='bool'> arg={Func(bool)::bpcharlt args=[{Var(bpchar): kvec=0x2800-9000, expr='bc1'}, {Var(bpchar): kvec=0x9000-f800, expr='bc2'}]}}, {SaveExpr: <slot=8, type='bool'> arg={Func(bool)::bpcharle args=[{Var(bpchar): kvec=0x2800-9000, expr='bc1'}, {Var(bpchar): kvec=0x9000-f800, expr='bc2'}]}}]}
-(10 rows)
+   CUDA Stack Size: 4112
+(11 rows)
 
 SELECT id, bc1 = bc2 eq, bc1 <> bc2 ne,
            bc1 > bc2 lt, bc1 >= bc2 le,
@@ -153,13 +155,14 @@ SELECT id, tc1 = tc2 eq, tc1 <> tc2 ne,
    Output: id, ((tc1 = tc2)), ((tc1 <> tc2)), ((tc1 > tc2)), ((tc1 >= tc2)), ((tc1 < tc2)), ((tc1 <= tc2))
    GPU Projection: id, (tc1 = tc2), (tc1 <> tc2), (tc1 > tc2), (tc1 >= tc2), (tc1 < tc2), (tc1 <= tc2)
    GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
-   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='(tc1 = tc2)'>, <slot=2, type='text', expr='tc1'>, <slot=3, type='text', expr='tc2'>, <slot=4, type='bool', expr='(tc1 <> tc2)'>, <slot=5, type='bool', expr='(tc1 > tc2)'>, <slot=6, type='bool', expr='(tc1 >= tc2)'>, <slot=7, type='bool', expr='(tc1 < tc2)'>, <slot=8, type='bool', expr='(tc1 <= tc2)'>
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='((tc1 = tc2))'>, <slot=2, type='text', expr='tc1'>, <slot=3, type='text', expr='tc2'>, <slot=4, type='bool', expr='((tc1 <> tc2))'>, <slot=5, type='bool', expr='((tc1 > tc2))'>, <slot=6, type='bool', expr='((tc1 >= tc2))'>, <slot=7, type='bool', expr='((tc1 < tc2))'>, <slot=8, type='bool', expr='((tc1 <= tc2))'>
    KVecs-Buffer: nbytes: 63488, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-8fff, type='text', expr='tc1'>, kvec2=<0x9000-f7ff, type='text', expr='tc2'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='text' resno=6(tc1)>, <slot=3, type='text' resno=7(tc2)>]}}
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-8fff, type='text', expr='tc1'>, <slot=3, offset=0x9000-f7ff, type='text', expr='tc2'>]}}}
    Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<0,1,4,5,6,7,8> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='bool'> arg={Func(bool)::texteq args=[{Var(text): kvec=0x2800-9000, expr='tc1'}, {Var(text): kvec=0x9000-f800, expr='tc2'}]}}, {SaveExpr: <slot=4, type='bool'> arg={Func(bool)::textne args=[{Var(text): kvec=0x2800-9000, expr='tc1'}, {Var(text): kvec=0x9000-f800, expr='tc2'}]}}, {SaveExpr: <slot=5, type='bool'> arg={Func(bool)::text_gt args=[{Var(text): kvec=0x2800-9000, expr='tc1'}, {Var(text): kvec=0x9000-f800, expr='tc2'}]}}, {SaveExpr: <slot=6, type='bool'> arg={Func(bool)::text_ge args=[{Var(text): kvec=0x2800-9000, expr='tc1'}, {Var(text): kvec=0x9000-f800, expr='tc2'}]}}, {SaveExpr: <slot=7, type='bool'> arg={Func(bool)::text_lt args=[{Var(text): kvec=0x2800-9000, expr='tc1'}, {Var(text): kvec=0x9000-f800, expr='tc2'}]}}, {SaveExpr: <slot=8, type='bool'> arg={Func(bool)::text_le args=[{Var(text): kvec=0x2800-9000, expr='tc1'}, {Var(text): kvec=0x9000-f800, expr='tc2'}]}}]}
-(10 rows)
+   CUDA Stack Size: 4112
+(11 rows)
 
 SELECT id, tc1 = tc2 eq, tc1 <> tc2 ne,
            tc1 > tc2 lt, tc1 >= tc2 le,
@@ -200,13 +203,14 @@ SELECT id, bc1 LIKE '%ab%cd%' v1,
    Output: id, ((bc1 ~~ '%ab%cd%'::text)), ((bc2 ~~ '%bc_de%'::text)), ((tc1 ~~ '%ef_gh%'::text)), ((tc2 ~~ '%fg_hi%'::text))
    GPU Projection: id, (bc1 ~~ '%ab%cd%'::text), (bc2 ~~ '%bc_de%'::text), (tc1 ~~ '%ef_gh%'::text), (tc2 ~~ '%fg_hi%'::text)
    GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
-   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='(bc1 ~~ '%ab%cd%'::text)'>, <slot=2, type='bpchar', expr='bc1'>, <slot=3, type='bool', expr='(bc2 ~~ '%bc_de%'::text)'>, <slot=4, type='bpchar', expr='bc2'>, <slot=5, type='bool', expr='(tc1 ~~ '%ef_gh%'::text)'>, <slot=6, type='text', expr='tc1'>, <slot=7, type='bool', expr='(tc2 ~~ '%fg_hi%'::text)'>, <slot=8, type='text', expr='tc2'>
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='((bc1 ~~ '%ab%cd%'::text))'>, <slot=2, type='bpchar', expr='bc1'>, <slot=3, type='bool', expr='((bc2 ~~ '%bc_de%'::text))'>, <slot=4, type='bpchar', expr='bc2'>, <slot=5, type='bool', expr='((tc1 ~~ '%ef_gh%'::text))'>, <slot=6, type='text', expr='tc1'>, <slot=7, type='bool', expr='((tc2 ~~ '%fg_hi%'::text))'>, <slot=8, type='text', expr='tc2'>
    KVecs-Buffer: nbytes: 116736, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-8fff, type='bpchar', expr='bc1'>, kvec2=<0x9000-f7ff, type='bpchar', expr='bc2'>, kvec3=<0xf800-15fff, type='text', expr='tc1'>, kvec4=<0x16000-1c7ff, type='text', expr='tc2'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='bpchar' resno=2(bc1)>, <slot=4, type='bpchar' resno=3(bc2)>, <slot=6, type='text' resno=6(tc1)>, <slot=8, type='text' resno=7(tc2)>]}}
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-8fff, type='bpchar', expr='bc1'>, <slot=4, offset=0x9000-f7ff, type='bpchar', expr='bc2'>, <slot=6, offset=0xf800-15fff, type='text', expr='tc1'>, <slot=8, offset=0x16000-1c7ff, type='text', expr='tc2'>]}}}
    Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<0,1,3,5,7> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='bool'> arg={Func(bool)::bpcharlike args=[{Var(bpchar): kvec=0x2800-9000, expr='bc1'}, {Const(text): value='%ab%cd%'}]}}, {SaveExpr: <slot=3, type='bool'> arg={Func(bool)::bpcharlike args=[{Var(bpchar): kvec=0x9000-f800, expr='bc2'}, {Const(text): value='%bc_de%'}]}}, {SaveExpr: <slot=5, type='bool'> arg={Func(bool)::textlike args=[{Var(text): kvec=0xf800-16000, expr='tc1'}, {Const(text): value='%ef_gh%'}]}}, {SaveExpr: <slot=7, type='bool'> arg={Func(bool)::textlike args=[{Var(text): kvec=0x16000-1c800, expr='tc2'}, {Const(text): value='%fg_hi%'}]}}]}
-(10 rows)
+   CUDA Stack Size: 4144
+(11 rows)
 
 SELECT id, bc1 LIKE '%ab%cd%' v1,
            bc2 LIKE '%bc_de%' v2,
@@ -249,13 +253,14 @@ SELECT id, bc1 ILIKE '%ab%cd%' v1,
    Output: id, ((bc1 ~~* '%ab%cd%'::text)), ((bc2 ~~* '%bc_de%'::text)), ((tc1 ~~* '%ef_gh%'::text)), ((tc2 ~~* '%fg_hi%'::text))
    GPU Projection: id, (bc1 ~~* '%ab%cd%'::text), (bc2 ~~* '%bc_de%'::text), (tc1 ~~* '%ef_gh%'::text), (tc2 ~~* '%fg_hi%'::text)
    GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
-   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='(bc1 ~~* '%ab%cd%'::text)'>, <slot=2, type='bpchar', expr='bc1'>, <slot=3, type='bool', expr='(bc2 ~~* '%bc_de%'::text)'>, <slot=4, type='bpchar', expr='bc2'>, <slot=5, type='bool', expr='(tc1 ~~* '%ef_gh%'::text)'>, <slot=6, type='text', expr='tc1'>, <slot=7, type='bool', expr='(tc2 ~~* '%fg_hi%'::text)'>, <slot=8, type='text', expr='tc2'>
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='bool', expr='((bc1 ~~* '%ab%cd%'::text))'>, <slot=2, type='bpchar', expr='bc1'>, <slot=3, type='bool', expr='((bc2 ~~* '%bc_de%'::text))'>, <slot=4, type='bpchar', expr='bc2'>, <slot=5, type='bool', expr='((tc1 ~~* '%ef_gh%'::text))'>, <slot=6, type='text', expr='tc1'>, <slot=7, type='bool', expr='((tc2 ~~* '%fg_hi%'::text))'>, <slot=8, type='text', expr='tc2'>
    KVecs-Buffer: nbytes: 116736, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-8fff, type='bpchar', expr='bc1'>, kvec2=<0x9000-f7ff, type='bpchar', expr='bc2'>, kvec3=<0xf800-15fff, type='text', expr='tc1'>, kvec4=<0x16000-1c7ff, type='text', expr='tc2'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='bpchar' resno=2(bc1)>, <slot=4, type='bpchar' resno=3(bc2)>, <slot=6, type='text' resno=6(tc1)>, <slot=8, type='text' resno=7(tc2)>]}}
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-8fff, type='bpchar', expr='bc1'>, <slot=4, offset=0x9000-f7ff, type='bpchar', expr='bc2'>, <slot=6, offset=0xf800-15fff, type='text', expr='tc1'>, <slot=8, offset=0x16000-1c7ff, type='text', expr='tc2'>]}}}
    Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<0,1,3,5,7> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='bool'> arg={Func(bool)::bpchariclike args=[{Var(bpchar): kvec=0x2800-9000, expr='bc1'}, {Const(text): value='%ab%cd%'}]}}, {SaveExpr: <slot=3, type='bool'> arg={Func(bool)::bpchariclike args=[{Var(bpchar): kvec=0x9000-f800, expr='bc2'}, {Const(text): value='%bc_de%'}]}}, {SaveExpr: <slot=5, type='bool'> arg={Func(bool)::texticlike args=[{Var(text): kvec=0xf800-16000, expr='tc1'}, {Const(text): value='%ef_gh%'}]}}, {SaveExpr: <slot=7, type='bool'> arg={Func(bool)::texticlike args=[{Var(text): kvec=0x16000-1c800, expr='tc2'}, {Const(text): value='%fg_hi%'}]}}]}
-(10 rows)
+   CUDA Stack Size: 4144
+(11 rows)
 
 SELECT id, bc1 ILIKE '%ab%cd%' v1,
            bc2 ILIKE '%bc_de%' v2,
@@ -299,13 +304,14 @@ SELECT id, length(tc1) v1,
    Output: id, (length(tc1)), (tc1 || '_foo'::text), ("substring"(tc1, 1, 10) || '_bar'::text), ((vc1)::text || '_baz'::text), (((vc1)::text || '--'::text) || (vc2)::text)
    GPU Projection: id, length(tc1), tc1, vc1, vc2
    GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
-   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='int4', expr='length(tc1)'>, <slot=2, type='text', expr='tc1'>, <slot=3, type='text', expr='vc1'>, <slot=4, type='text', expr='vc2'>
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='int4', expr='(length(tc1))'>, <slot=2, type='text', expr='tc1'>, <slot=3, type='text', expr='vc1'>, <slot=4, type='text', expr='vc2'>
    KVecs-Buffer: nbytes: 90112, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-8fff, type='text', expr='tc1'>, kvec2=<0x9000-f7ff, type='text', expr='vc1'>, kvec3=<0xf800-15fff, type='text', expr='vc2'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=3, type='text' resno=4(vc1)>, <slot=4, type='text' resno=5(vc2)>, <slot=2, type='text' resno=6(tc1)>]}}
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-8fff, type='text', expr='tc1'>, <slot=3, offset=0x9000-f7ff, type='text', expr='vc1'>, <slot=4, offset=0xf800-15fff, type='text', expr='vc2'>]}}}
    Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<0,1,2,3,4> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='int4'> arg={Func(int4)::length arg={Var(text): kvec=0x2800-9000, expr='tc1'}}}, {SaveExpr: <slot=2, type='text'> arg={Var(text): kvec=0x2800-9000, expr='tc1'}}, {SaveExpr: <slot=3, type='text'> arg={Var(text): kvec=0x9000-f800, expr='vc1'}}, {SaveExpr: <slot=4, type='text'> arg={Var(text): kvec=0xf800-16000, expr='vc2'}}]}
-(10 rows)
+   CUDA Stack Size: 4032
+(11 rows)
 
 SELECT id, length(tc1) v1,
        tc1 || '_foo'  v2,
@@ -348,13 +354,14 @@ SELECT id, length(tc2) v1,
    Output: id, (length(tc2)), "substring"((((vc1)::text || '-hoge-'::text) || (vc2)::text), ((id % 15) + 5), 20)
    GPU Projection: id, length(tc2), vc1, vc2
    GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
-   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='int4', expr='length(tc2)'>, <slot=2, type='text', expr='tc2'>, <slot=3, type='text', expr='vc1'>, <slot=4, type='text', expr='vc2'>
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='int4', expr='(length(tc2))'>, <slot=2, type='text', expr='tc2'>, <slot=3, type='text', expr='vc1'>, <slot=4, type='text', expr='vc2'>
    KVecs-Buffer: nbytes: 90112, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-8fff, type='text', expr='tc2'>, kvec2=<0x9000-f7ff, type='text', expr='vc1'>, kvec3=<0xf800-15fff, type='text', expr='vc2'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=3, type='text' resno=4(vc1)>, <slot=4, type='text' resno=5(vc2)>, <slot=2, type='text' resno=7(tc2)>]}}
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-8fff, type='text', expr='tc2'>, <slot=3, offset=0x9000-f7ff, type='text', expr='vc1'>, <slot=4, offset=0xf800-15fff, type='text', expr='vc2'>]}}}
    Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<0,1,3,4> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='int4'> arg={Func(int4)::length arg={Var(text): kvec=0x2800-9000, expr='tc2'}}}, {SaveExpr: <slot=3, type='text'> arg={Var(text): kvec=0x9000-f800, expr='vc1'}}, {SaveExpr: <slot=4, type='text'> arg={Var(text): kvec=0xf800-16000, expr='vc2'}}]}
-(10 rows)
+   CUDA Stack Size: 4032
+(11 rows)
 
 SELECT id, length(tc2) v1, 
        substring(vc1 || '-hoge-' || vc2, id % 15 + 5, 20) v5
@@ -394,13 +401,14 @@ SELECT id, length(tc1) v1,
    Output: id, (length(tc1)), concat(tc1, '_foo'), concat("substring"(tc1, 1, 10), '_bar'), concat("substring"(tc1, 1, 8), '--hoge--', "substring"(tc1, 8, 16)), concat("substring"(tc1, 1, 8), "substring"(tc2, 1, 8), vc1, vc2)
    GPU Projection: id, length(tc1), tc1, tc2, vc1, vc2
    GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
-   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='int4', expr='length(tc1)'>, <slot=2, type='text', expr='tc1'>, <slot=3, type='text', expr='tc2'>, <slot=4, type='text', expr='vc1'>, <slot=5, type='text', expr='vc2'>
+   KVars-Slot: <slot=0, type='int4', expr='id'>, <slot=1, type='int4', expr='(length(tc1))'>, <slot=2, type='text', expr='tc1'>, <slot=3, type='text', expr='tc2'>, <slot=4, type='text', expr='vc1'>, <slot=5, type='text', expr='vc2'>
    KVecs-Buffer: nbytes: 116736, ndims: 2, items=[kvec0=<0x0000-27ff, type='int4', expr='id'>, kvec1=<0x2800-8fff, type='text', expr='tc1'>, kvec2=<0x9000-f7ff, type='text', expr='tc2'>, kvec3=<0xf800-15fff, type='text', expr='vc1'>, kvec4=<0x16000-1c7ff, type='text', expr='vc2'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=4, type='text' resno=4(vc1)>, <slot=5, type='text' resno=5(vc2)>, <slot=2, type='text' resno=6(tc1)>, <slot=3, type='text' resno=7(tc2)>]}}
    MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-27ff, type='int4', expr='id'>, <slot=2, offset=0x2800-8fff, type='text', expr='tc1'>, <slot=3, offset=0x9000-f7ff, type='text', expr='tc2'>, <slot=4, offset=0xf800-15fff, type='text', expr='vc1'>, <slot=5, offset=0x16000-1c7ff, type='text', expr='vc2'>]}}}
    Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<0,1,2,3,4,5> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-2800, expr='id'}}, {SaveExpr: <slot=1, type='int4'> arg={Func(int4)::length arg={Var(text): kvec=0x2800-9000, expr='tc1'}}}, {SaveExpr: <slot=2, type='text'> arg={Var(text): kvec=0x2800-9000, expr='tc1'}}, {SaveExpr: <slot=3, type='text'> arg={Var(text): kvec=0x9000-f800, expr='tc2'}}, {SaveExpr: <slot=4, type='text'> arg={Var(text): kvec=0xf800-16000, expr='vc1'}}, {SaveExpr: <slot=5, type='text'> arg={Var(text): kvec=0x16000-1c800, expr='vc2'}}]}
-(10 rows)
+   CUDA Stack Size: 4064
+(11 rows)
 
 SELECT id, length(tc1) v1,
        concat(tc1, '_foo') v2,
