@@ -77,8 +77,7 @@ SELECT count(*)
          referenced: date_num
          Stats-Hint: (date_num >= '04-14-2019'::date), (date_num <= '05-23-2023'::date)  [loaded: 2, skipped: 2]
          file0: test_arrow_index.data (read: 3906.44KB, size: 51.50MB)
-         GPU-Direct SQL: disabled (vfs=305, ntuples=621378)
-(8 rows)
+(7 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -132,8 +131,7 @@ SELECT count(*)
          referenced: int_num
          Stats-Hint: (int_num >= '-50000'::integer), (int_num <= 50000)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 3906.44KB, size: 51.50MB)
-         GPU-Direct SQL: disabled (vfs=152, ntuples=310689)
-(8 rows)
+(7 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -187,8 +185,7 @@ SELECT count(*)
          referenced: float_num
          Stats-Hint: (float_num >= '-2000'::double precision), (float_num <= '2000'::double precision)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 7812.69KB, size: 51.50MB)
-         GPU-Direct SQL: disabled (vfs=304, ntuples=310689)
-(8 rows)
+(7 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -240,8 +237,7 @@ SELECT count(*)
          GPU Scan Quals: ((half_num >= '-2000'::double precision) AND (half_num <= '2000'::double precision)) [plan: 1000000 -> 5000, exec: 1000000 -> 199782]
          referenced: half_num
          file0: test_arrow_index.data (read: 1953.31KB, size: 51.50MB)
-         GPU-Direct SQL: disabled (vfs=245, ntuples=1000000)
-(7 rows)
+(6 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -295,8 +291,7 @@ SELECT count(*)
          referenced: decimal_num
          Stats-Hint: (decimal_num >= '-5000'::numeric), (decimal_num <= '5000'::numeric)  [loaded: 3, skipped: 1]
          file0: test_arrow_index.data (read: 15.26MB, size: 51.50MB)
-         GPU-Direct SQL: disabled (vfs=1822, ntuples=932067)
-(8 rows)
+(7 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -350,8 +345,7 @@ SELECT count(*)
          referenced: time_num
          Stats-Hint: (time_num >= '09:00:00'::time without time zone), (time_num <= '17:00:00'::time without time zone)  [loaded: 2, skipped: 2]
          file0: test_arrow_index.data (read: 7812.69KB, size: 51.50MB)
-         GPU-Direct SQL: disabled (vfs=607, ntuples=621378)
-(8 rows)
+(7 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -378,7 +372,7 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_num);
                                               QUERY PLAN                                              
 ------------------------------------------------------------------------------------------------------
- Gather (actual rows=0 loops=1)
+ Gather (actual rows=1 loops=1)
    Workers Planned: 2
    Params Evaluated: $0
    Workers Launched: 2
@@ -386,33 +380,33 @@ WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_n
      ->  Seq Scan on target_num (actual rows=1 loops=1)
    ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
          Filter: (timestamp_num = $0)
+         Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
-         Stats-Hint: (timestamp_num = $0)  [loaded: 0, skipped: 4]
+         Stats-Hint: (timestamp_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(11 rows)
+(12 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
-                                                                                                        QUERY PLAN                                                                                                         
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                             QUERY PLAN                                                                                                              
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=0 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
          GPU Projection: pgstrom.nrows()
-         GPU Scan Quals: ((timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone) AND (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)) [plan: 1000000 -> 5000, exec: 0 -> 0]
+         GPU Scan Quals: ((timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone) AND (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)) [plan: 1000000 -> 5000, exec: 621378 -> 410884]
          referenced: timestamp_num
-         Stats-Hint: (timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone), (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)  [loaded: 0, skipped: 4]
+         Stats-Hint: (timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone), (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)  [loaded: 2, skipped: 2]
          file0: test_arrow_index.data (read: 7812.69KB, size: 51.50MB)
-         GPU-Direct SQL: disabled (ntuples=0)
-(8 rows)
+(7 rows)
 
 SELECT count(*)
   FROM regtest_arrow
  WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
- count 
--------
-     0
+ count  
+--------
+ 410884
 (1 row)
 
 SET pg_strom.enabled = off;
