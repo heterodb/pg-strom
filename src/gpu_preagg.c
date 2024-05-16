@@ -1807,7 +1807,8 @@ CreateDpuPreAggScanState(CustomScan *cscan)
  * ExecFallbackCpuPreAgg
  */
 bool
-ExecFallbackCpuPreAgg(pgstromTaskState *pts, HeapTuple tuple)
+ExecFallbackCpuPreAgg(pgstromTaskState *pts,
+					  int depth, uint64_t l_state)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

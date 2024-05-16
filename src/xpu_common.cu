@@ -940,31 +940,29 @@ pgfn_ScalarArrayOp(XPU_PGFUNCTION_ARGS)
  * ----------------------------------------------------------------
  */
 PUBLIC_FUNCTION(int)
-kern_form_heaptuple(kern_context *kcxt,
-					const kern_expression *kexp_proj,
-					const kern_data_store *kds_dst,
-					HeapTupleHeaderData *htup)
+__kern_form_heaptuple(kern_context *kcxt,
+					  int proj_nattrs,
+					  const uint16_t *proj_slot_id,
+					  const kern_data_store *kds_dst,
+					  HeapTupleHeaderData *htup)
 {
 	/*
 	 * NOTE: the caller must call kern_estimate_heaptuple() preliminary to ensure
 	 *       kcxt->kvars_slot[] are filled-up by the scalar values to be written.
 	 */
-	int			nattrs = kexp_proj->u.proj.nattrs;
 	uint32_t	t_hoff;
 	uint16_t	t_infomask = 0;
 	bool		t_hasnull = false;
 
-	if (kds_dst && kds_dst->ncols < nattrs)
-		nattrs = kds_dst->ncols;
+	if (kds_dst && kds_dst->ncols < proj_nattrs)
+		proj_nattrs = kds_dst->ncols;
 	/* has any NULL attributes? */
-	for (int j=0; j < nattrs; j++)
+	for (int j=0; j < proj_nattrs; j++)
 	{
-		uint16_t		slot_id = kexp_proj->u.proj.slot_id[j];
-		xpu_datum_t	   *xdatum;
+		uint16_t		slot_id = proj_slot_id[j];
 
-		assert(slot_id < kcxt->kvars_nslots);
-		xdatum = kcxt->kvars_slot[slot_id];
-		if (XPU_DATUM_ISNULL(xdatum))
+		if (slot_id >= kcxt->kvars_nslots ||
+			XPU_DATUM_ISNULL(kcxt->kvars_slot[slot_id]))
 		{
 			t_infomask |= HEAP_HASNULL;
 			t_hasnull = true;
@@ -974,7 +972,7 @@ kern_form_heaptuple(kern_context *kcxt,
 	/* set up headers */
 	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
 	if (t_hasnull)
-		t_hoff += BITMAPLEN(nattrs);
+		t_hoff += BITMAPLEN(proj_nattrs);
 	t_hoff = MAXALIGN(t_hoff);
 
 	if (htup)
@@ -985,20 +983,21 @@ kern_form_heaptuple(kern_context *kcxt,
 		htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
 		htup->t_ctid.ip_blkid.bi_lo = 0xffff;
 		htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
-		htup->t_infomask2 = (nattrs & HEAP_NATTS_MASK);
+		htup->t_infomask2 = (proj_nattrs & HEAP_NATTS_MASK);
 		htup->t_hoff = t_hoff;
 	}
 
 	/* walks on the source attributes */
-	for (int j=0; j < nattrs; j++)
+	for (int j=0; j < proj_nattrs; j++)
 	{
 		const kern_colmeta *cmeta_dst = &kds_dst->colmeta[j];
-		uint16_t		slot_id = kexp_proj->u.proj.slot_id[j];
+		uint16_t		slot_id = proj_slot_id[j];
 		xpu_datum_t	   *xdatum;
 		int				sz, t_next;
 		char		   *buffer = NULL;
 
-		assert(slot_id < kcxt->kvars_nslots);
+		if (slot_id >= kcxt->kvars_nslots)
+			continue;	/* considered as NULL */
 		xdatum = kcxt->kvars_slot[slot_id];
 		if (!XPU_DATUM_ISNULL(xdatum))
 		{
@@ -1037,6 +1036,19 @@ kern_form_heaptuple(kern_context *kcxt,
 		SET_VARSIZE(&htup->t_choice.t_datum, t_hoff);
 	}
 	return t_hoff;	
+}
+
+PUBLIC_FUNCTION(int)
+kern_form_heaptuple(kern_context *kcxt,
+					const kern_expression *kexp_proj,
+					const kern_data_store *kds_dst,
+					HeapTupleHeaderData *htup)
+{
+	return __kern_form_heaptuple(kcxt,
+								 kexp_proj->u.proj.nattrs,
+								 kexp_proj->u.proj.slot_id,
+								 kds_dst,
+								 htup);
 }
 
 EXTERN_FUNCTION(int)
@@ -1381,7 +1393,7 @@ ExecLoadVarsOuterRow(kern_context *kcxt,
 			if (!XPU_DATUM_ISNULL(&retval) && retval.value)
 				return true;
 		}
-		else
+		else if (!HandleErrorIfCpuFallback(kcxt, 0, 0))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		}
@@ -1420,7 +1432,7 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 			if (!XPU_DATUM_ISNULL(&retval) && retval.value)
 				return true;
 		}
-		else
+		else if (!HandleErrorIfCpuFallback(kcxt, 0, 0))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		}
@@ -1461,7 +1473,7 @@ ExecLoadVarsOuterColumn(kern_context *kcxt,
 			if (!XPU_DATUM_ISNULL(&retval) && retval.value)
 				return true;
 		}
-		else
+		else if (!HandleErrorIfCpuFallback(kcxt, 0, 0))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		}
@@ -1555,6 +1567,139 @@ ExecMoveKernelVariables(kern_context *kcxt,
 		}
 	}
 	return true;
+}
+
+
+/* ------------------------------------------------------------
+ *
+ * Routines to support CPU Fallback
+ *
+ * ------------------------------------------------------------
+ */
+STATIC_FUNCTION(bool)
+__writeOutCpuFallbackTuple(kern_context *kcxt,
+						   int fallback_nattrs,
+						   uint16_t *fallback_slots,
+						   int depth,
+						   uint64_t l_state)
+{
+	kern_data_store *kds_fallback = kcxt->kds_fallback;
+	kern_fallbackitem *fbitem;
+	uint64_t	__usage;
+	uint32_t	__nitems_old;
+	uint32_t	__nitems_cur;
+	uint32_t	__nitems_new;
+	int			reqsz;
+	int			tupsz;
+
+	/* estimate length of the fallback tuple */
+	tupsz = __kern_form_heaptuple(kcxt,
+								  fallback_nattrs,
+								  fallback_slots,
+								  kds_fallback,
+								  NULL);
+	if (tupsz < 0)
+	{
+		STROM_ELOG(kcxt, "fallback: unable to compute tuple size");
+		return false;
+	}
+	reqsz = MAXALIGN(offsetof(kern_fallbackitem, htup) + tupsz);
+	/* allocation of fallback buffer */
+	__usage = __atomic_add_uint64(&kds_fallback->__usage64, reqsz);
+	__usage += reqsz;
+	__nitems_cur = __volatileRead(&kds_fallback->nitems);
+	do {
+		__nitems_old = __nitems_cur;
+		__nitems_new = __nitems_cur + 1;
+		if (!__KDS_CHECK_OVERFLOW(kds_fallback,
+								  __nitems_new,
+								  __usage))
+		{
+			/* needs expand the fallback buffer */
+			return false;
+		}
+	} while ((__nitems_cur = __atomic_cas_uint32(&kds_fallback->nitems,
+												 __nitems_old,
+												 __nitems_new)) != __nitems_old);
+	/* write out the fallback tuple */
+	fbitem = (kern_fallbackitem *)((char *)kds_fallback
+								   + kds_fallback->length
+								   - __usage);
+	fbitem->t_len = tupsz;
+	fbitem->depth = depth;
+	fbitem->l_state = l_state;
+	__kern_form_heaptuple(kcxt,
+						  fallback_nattrs,
+						  fallback_slots,
+						  kcxt->kds_fallback,
+						  &fbitem->htup);
+	KDS_GET_ROWINDEX(kds_fallback)[__nitems_old] = __usage;
+
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+HandleErrorIfCpuFallback(kern_context *kcxt, int depth, uint64_t l_state)
+{
+	if (kcxt->errcode == ERRCODE_SUSPEND_FALLBACK &&
+		kcxt->kds_fallback != NULL)
+	{
+		kern_session_info *session = kcxt->session;
+		kern_data_store   *kds_fallback = kcxt->kds_fallback;
+		kern_fallback_desc *fb_desc_array = (kern_fallback_desc *)
+			((char *)session + session->fallback_desc_defs);
+		int			fallback_nattrs = session->fallback_desc_nitems;
+		uint16_t   *fallback_slots = (uint16_t *)
+			alloca(sizeof(uint16_t) * kds_fallback->ncols);
+		/*
+		 * Load variables from the kvec-buffer (if depth>0)
+		 */
+		memset(fallback_slots, -1, sizeof(uint16_t) * kds_fallback->ncols);
+		for (int j=0; j < fallback_nattrs; j++)
+		{
+			kern_fallback_desc *fb_desc = &fb_desc_array[j];
+			int		slot_id = fb_desc->fb_slot_id;
+
+			assert(slot_id >= 0 && slot_id < kcxt->kvars_nslots);
+			assert(fb_desc->fb_dst_resno > 0 &&
+				   fb_desc->fb_dst_resno <= kds_fallback->ncols);
+			if (depth >  fb_desc->fb_src_depth &&
+				depth <= fb_desc->fb_max_depth)
+			{
+				const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[slot_id];
+				const kvec_datum_t *kvecs = (const kvec_datum_t *)
+					((char *)kcxt->kvecs_curr_buffer + vs_desc->vs_offset);
+
+				assert(vs_desc->vs_offset >= 0 &&
+					   vs_desc->vs_offset < kcxt->kvecs_bufsz);
+				if (!vs_desc->vs_ops->xpu_datum_kvec_load(kcxt,
+														  kvecs,
+														  kcxt->kvecs_curr_id,
+														  kcxt->kvars_slot[slot_id]))
+				{
+					STROM_ELOG(kcxt, "fallback: unable to load variables");
+					return false;
+				}
+			}
+			else if (depth != 0 || fb_desc->fb_src_depth != 0)
+			{
+				/* depth==0 is already loaded by the caller */
+				kcxt->kvars_slot[slot_id]->expr_ops = NULL;
+			}
+			fallback_slots[fb_desc->fb_dst_resno - 1] = slot_id;
+		}
+		/* try write out a fallback tuple */
+		if (__writeOutCpuFallbackTuple(kcxt,
+									   fallback_nattrs,
+									   fallback_slots,
+									   depth, l_state))
+		{
+			/* successfull fallbacked, clear the error code */
+			kcxt->errcode = ERRCODE_STROM_SUCCESS;
+			return true;
+		}
+	}
+	return false;
 }
 
 /* ------------------------------------------------------------
@@ -1778,6 +1923,7 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		return false;
 	}
+	//CHECK CPU FALLBACK
 	return (!XPU_DATUM_ISNULL(&status) && status.value);
 }
 

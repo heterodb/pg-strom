@@ -944,31 +944,21 @@ CreateDpuScanState(CustomScan *cscan)
  * ExecFallbackCpuScan
  */
 bool
-ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
+ExecFallbackCpuScan(pgstromTaskState *pts,
+					int depth, uint64_t l_state)
 {
 	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
-	TupleTableSlot *base_slot = pts->base_slot;
-	TupleTableSlot *fallback_slot = pts->css.ss.ss_ScanTupleSlot;
-	ListCell	   *lc1, *lc2;
+	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
+	HeapTuple		tuple;
+	ListCell	   *lc;
 	int				attidx = 0;
 	bool			should_free;
 
-	/* Load the base tuple (depth-0) to the fallback slot */
-	ExecForceStoreHeapTuple(tuple, base_slot, false);
-	slot_getallattrs(base_slot);
-	ExecStoreAllNullTuple(fallback_slot);
-	forboth (lc1, pts->fallback_load_src,
-			 lc2, pts->fallback_load_dst)
-	{
-		int		src = lfirst_int(lc1) - 1;
-		int		dst = lfirst_int(lc2) - 1;
-
-		fallback_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
-		fallback_slot->tts_values[dst] = base_slot->tts_values[src];
-	}
-	econtext->ecxt_scantuple = fallback_slot;
+	if (depth != 0)
+		elog(ERROR, "Bug? GpuScan does not expect fallback tuple with depth=%d", depth);
 
 	/* check WHERE-clause if any */
+	econtext->ecxt_scantuple = scan_slot;
 	if (pts->base_quals)
 	{
 		ResetExprContext(econtext);
@@ -976,9 +966,9 @@ ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 			return false;
 	}
 	/* apply GPU-Projection */
-	foreach (lc1, pts->fallback_proj)
+	foreach (lc, pts->fallback_proj)
 	{
-		ExprState  *state = lfirst(lc1);
+		ExprState  *state = lfirst(lc);
 		Datum		datum;
 		bool		isnull;
 
@@ -987,19 +977,19 @@ ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
 			datum = ExecEvalExpr(state, econtext, &isnull);
 			if (isnull)
 			{
-				fallback_slot->tts_isnull[attidx] = true;
-				fallback_slot->tts_values[attidx] = 0;
+				scan_slot->tts_isnull[attidx] = true;
+				scan_slot->tts_values[attidx] = 0;
 			}
 			else
 			{
-				fallback_slot->tts_isnull[attidx] = false;
-				fallback_slot->tts_values[attidx] = datum;
+				scan_slot->tts_isnull[attidx] = false;
+				scan_slot->tts_values[attidx] = datum;
 			}
 		}
 		attidx++;
 	}
 	/* save the tuple on the fallback buffer */
-	tuple = ExecFetchSlotHeapTuple(fallback_slot,
+	tuple = ExecFetchSlotHeapTuple(scan_slot,
 								   false,
 								   &should_free);
 	pgstromStoreFallbackTuple(pts, tuple);

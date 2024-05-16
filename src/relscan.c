@@ -488,7 +488,7 @@ __relScanDirectFallbackBlock(pgstromTaskState *pts,
 		HeapCheckForSerializableConflictOut(valid, relation, &htup,
 											buffer, snapshot);
 		if (valid)
-			pts->cb_cpu_fallback(pts, &htup);
+			execCpuFallbackBaseTuple(pts, &htup);
 	}
 	UnlockReleaseBuffer(buffer);
 	pg_atomic_fetch_add_u64(&ps_state->npages_buffer_read, PAGES_PER_BLOCK);

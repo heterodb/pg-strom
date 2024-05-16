@@ -38,12 +38,28 @@ __reduce_stair_add_sync(T value, T *p_total_sum = NULL)
 INLINE_FUNCTION(void)
 STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
 {
-	if (kcxt->errcode != ERRCODE_STROM_SUCCESS &&
-		atomicCAS(&ebuf->errcode,
-				  ERRCODE_STROM_SUCCESS,
-				  kcxt->errcode) == ERRCODE_STROM_SUCCESS)
+	if (kcxt->errcode != ERRCODE_STROM_SUCCESS)
 	{
-		ebuf->errcode = kcxt->errcode;
+		uint32_t	errcode_old;
+		uint32_t	errcode_cur;
+
+		errcode_cur = __volatileRead(&ebuf->errcode);
+		do {
+			errcode_old = errcode_cur;
+			switch (errcode_cur)
+			{
+				case ERRCODE_SUSPEND_FALLBACK:
+				case ERRCODE_SUSPEND_NO_SPACE:
+					if (ERRCODE_IS_SUSPEND(kcxt->errcode))
+						return;
+				case ERRCODE_STROM_SUCCESS:
+					break;
+				default:
+					return;		/* significant error code is already set */
+			}
+		} while ((errcode_cur = __atomic_cas_uint32(&ebuf->errcode,
+													errcode_old,
+													kcxt->errcode)) != errcode_old);
 		ebuf->lineno  = kcxt->error_lineno;
 		__strncpy(ebuf->filename,
 				  __basename(kcxt->error_filename),
@@ -69,6 +85,7 @@ STROM_WRITEBACK_ERROR_STATUS(kern_errorbuf *ebuf, kern_context *kcxt)
 typedef struct
 {
 	uint32_t		smx_row_count;	/* current position of outer relation */
+	int				depth;		/* depth when last kernel is suspended */
 	int				scan_done;	/* smallest depth that may produce more tuples */
 	/* only KDS_FORMAT_BLOCK */
 	uint32_t		block_id;	/* BLOCK format needs to keep htuples on the */
@@ -122,6 +139,8 @@ typedef struct {
 	/* suspend/resume support */
 	bool			resume_context;
 	uint32_t		suspend_count;
+	uint32_t		suspend_by_nospace;		/* destination buffer has no space */
+	uint32_t		suspend_by_fallback;	/* unable to continue fallback */
 	/* kernel statistics */
 	uint32_t		nitems_raw;		/* nitems in the raw data chunk */
 	uint32_t		nitems_in;		/* nitems after the scan_quals */
@@ -217,15 +236,13 @@ execGpuJoinProjection(kern_context *kcxt,
 					  int n_rels,
 					  kern_data_store *kds_dst,
 					  kern_expression *kexp_projection,
-					  char *kvars_addr_wp,
-					  bool *p_try_suspend);
+					  char *kvars_addr_wp);
 EXTERN_FUNCTION(int)
 execGpuPreAggGroupBy(kern_context *kcxt,
 					 kern_warp_context *wp,
 					 int n_rels,
 					 kern_data_store *kds_final,
-					 char *kvars_addr_wp,
-					 bool *p_try_suspend);
+					 char *kvars_addr_wp);
 EXTERN_FUNCTION(void)
 setupGpuPreAggGroupByBuffer(kern_context *kcxt,
 							kern_gputask *kgtask,
@@ -318,6 +335,7 @@ kern_gpujoin_main(kern_session_info *session,
 				  kern_multirels *kmrels,
 				  kern_data_store *kds_src,
 				  kern_data_extra *kds_extra,
-				  kern_data_store *kds_dst);
+				  kern_data_store *kds_dst,
+				  kern_data_store *kds_fallback);
 
 #endif	/* CUDA_COMMON_H */

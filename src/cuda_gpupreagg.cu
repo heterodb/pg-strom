@@ -867,11 +867,9 @@ STATIC_FUNCTION(bool)
 __execGpuPreAggNoGroups(kern_context *kcxt,
 						kern_data_store *kds_final,
 						bool source_is_valid,
-						kern_expression *kexp_groupby_actions,
-						bool *p_try_suspend)
+						kern_expression *kexp_groupby_actions)
 {
 	__shared__ kern_tupitem *tupitem;
-	bool		try_suspend = false;
 
 	assert(kds_final->format == KDS_FORMAT_ROW);
 	assert(kexp_groupby_actions->opcode == FuncOpCode__AggFuncs);
@@ -898,10 +896,10 @@ __execGpuPreAggNoGroups(kern_context *kcxt,
 													   kexp_groupby_actions);
 					if (!tupitem)
 					{
-						try_suspend = true;
 						/* UNLOCK */
 						oldval = __atomic_write_uint32(&kds_final->nitems, 0);
 						assert(oldval == UINT_MAX);
+						SUSPEND_NO_SPACE(kcxt, "GpuPreAgg(NoGroup) - no space to write");
 					}
 					else
 					{
@@ -923,12 +921,9 @@ __execGpuPreAggNoGroups(kern_context *kcxt,
 				tupitem = NULL;
 			}
 		}
-		/* out of memory? */
-		if (__syncthreads_count(try_suspend) > 0)
-		{
-			*p_try_suspend = true;
+		/* error & suspend checks */
+		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 			return false;
-		}
 		/* is the destination tuple ready? */
 		if (tupitem)
 			break;
@@ -1339,8 +1334,7 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 					   kern_expression *kexp_groupby_keyhash,
 					   kern_expression *kexp_groupby_keyload,
 					   kern_expression *kexp_groupby_keycomp,
-					   kern_expression *kexp_groupby_actions,
-					   bool *p_try_suspend)
+					   kern_expression *kexp_groupby_actions)
 {
 	kern_hashitem *hitem = NULL;
 	xpu_int4_t	hash;
@@ -1429,7 +1423,7 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 					{
 						/* out of the memory, and unlcok */
 						__atomic_write_uint64(hslot, saved);
-						*p_try_suspend = true;
+						SUSPEND_NO_SPACE(kcxt, "GpuPreAgg(GroupBy) - no space to write");
 					}
 					has_lock = false;
 				}
@@ -1440,10 +1434,7 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 				__atomic_write_uint64(hslot, saved);
 			}
 		}
-		/* suspend the kernel? */
-		if (__syncthreads_count(*p_try_suspend) > 0)
-			return false;
-		/* error checks */
+		/* error & suspend checks */
 		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 			return false;
 		/* retry, if any threads are not ready yet */
@@ -1873,8 +1864,7 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 					 kern_warp_context *wp,
 					 int n_rels,
 					 kern_data_store *kds_final,
-					 char *src_kvecs_buffer,
-					 bool *p_try_suspend)
+					 char *src_kvecs_buffer)
 {
 	kern_session_info *session = kcxt->session;
 	kern_expression *kexp_groupby_keyhash = SESSION_KEXP_GROUPBY_KEYHASH(session);
@@ -1933,15 +1923,13 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 										kexp_groupby_keyhash,
 										kexp_groupby_keyload,
 										kexp_groupby_keycomp,
-										kexp_groupby_actions,
-										p_try_suspend);
+										kexp_groupby_actions);
 	}
 	else
 	{
 		status = __execGpuPreAggNoGroups(kcxt, kds_final,
 										 (rd_pos < wr_pos),
-										 kexp_groupby_actions,
-										 p_try_suspend);
+										 kexp_groupby_actions);
 	}
 	if (__syncthreads_count(!status) > 0)
 		return -1;

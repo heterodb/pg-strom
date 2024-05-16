@@ -387,12 +387,12 @@ xpu_geometry_is_valid(kern_context *kcxt, xpu_geometry_t *geom)
 		return true;
 	if (geom->type != GEOM_INVALID_VARLENA)
 	{
-		STROM_CPU_FALLBACK(kcxt, "unknown geometry type");
+		SUSPEND_FALLBACK(kcxt, "unknown geometry type");
 	}
 	else if (VARATT_IS_EXTERNAL(geom->rawdata) ||
 			 VARATT_IS_COMPRESSED(geom->rawdata))
 	{
-		STROM_CPU_FALLBACK(kcxt, "geometry datum is compressed or external");
+		SUSPEND_FALLBACK(kcxt, "geometry datum is compressed or external");
 	}
 	else
 	{

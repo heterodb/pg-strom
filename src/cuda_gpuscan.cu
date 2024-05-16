@@ -794,8 +794,7 @@ __gpucache_apply_insert_log(kern_context *kcxt,
 			vl_off = __atomic_add_uint64(&extra->usage, MAXALIGN(vl_len));
 			if (vl_off + vl_len > extra->length)
 			{
-				STROM_EREPORT(kcxt, ERRCODE_BUFFER_NO_SPACE,
-							  "gpucache: extra buffer has no space");
+				SUSPEND_NO_SPACE(kcxt, "gpucache: extra buffer has no space");
 				return false;
 			}
 			memcpy((char *)extra + vl_off,

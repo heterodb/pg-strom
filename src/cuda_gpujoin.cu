@@ -107,6 +107,11 @@ execGpuJoinNestLoop(kern_context *kcxt,
 				if (status.value != 0)
 					matched = true;
 			}
+			else
+			{
+				HandleErrorIfCpuFallback(kcxt, depth, index);
+			}
+
 			if (oj_map && matched)
 			{
 				assert(tupitem->rowid < kds_heap->nitems);
@@ -251,6 +256,10 @@ execGpuJoinHashJoin(kern_context *kcxt,
 					 khitem != NULL && khitem->hash != hash.value;
 					 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next));
 			}
+			else if (HandleErrorIfCpuFallback(kcxt, depth, 0))
+			{
+				l_state = ULONG_MAX;
+			}
 		}
 		else
 		{
@@ -277,6 +286,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 	{
 		xpu_int4_t	status;
 
+		l_state = ((char *)khitem - (char *)kds_hash);
 		kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 		ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, &khitem->t.htup);
 		kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
@@ -288,12 +298,16 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			if (status.value != 0)
 				matched = true;
 		}
+		else if (HandleErrorIfCpuFallback(kcxt, depth, l_state))
+		{
+			l_state = ULONG_MAX;
+		}
+
 		if (oj_map && matched)
 		{
 			assert(khitem->t.rowid < kds_hash->nitems);
 			oj_map[khitem->t.rowid] = true;
 		}
-		l_state = ((char *)khitem - (char *)kds_hash);
 	}
 	else
 	{
@@ -594,8 +608,7 @@ execGpuJoinProjection(kern_context *kcxt,
 					  int n_rels,	/* index of read/write-pos */
 					  kern_data_store *kds_dst,
 					  kern_expression *kexp_projection,
-					  char *src_kvecs_buffer,
-					  bool *p_try_suspend)
+					  char *src_kvecs_buffer)
 {
 	uint32_t	wr_pos = WARP_WRITE_POS(wp,n_rels);
 	uint32_t	rd_pos = WARP_READ_POS(wp,n_rels);
@@ -661,7 +674,7 @@ execGpuJoinProjection(kern_context *kcxt,
 	}
 	if (__syncthreads_count(try_suspend) > 0)
 	{
-		*p_try_suspend = true;
+		SUSPEND_NO_SPACE(kcxt, "GpuProjection - no space to write");
 		return -1;
 	}
 	/* write out the tuple */
@@ -710,7 +723,8 @@ kern_gpujoin_main(kern_session_info *session,
 				  kern_multirels *kmrels,
 				  kern_data_store *kds_src,
 				  kern_data_extra *kds_extra,
-				  kern_data_store *kds_dst)
+				  kern_data_store *kds_dst,
+				  kern_data_store *kds_fallback)
 {
 	kern_context	   *kcxt;
 	kern_warp_context  *wp, *wp_saved;
@@ -727,7 +741,7 @@ kern_gpujoin_main(kern_session_info *session,
 		   kgtask->kvecs_ndims  >= n_rels &&
 		   kgtask->n_rels       == n_rels);
 	/* setup execution context */
-	INIT_KERNEL_CONTEXT(kcxt, session);
+	INIT_KERNEL_CONTEXT(kcxt, session, kds_fallback);
 	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(kgtask->kvecs_ndims);
 	wp = (kern_warp_context *)SHARED_WORKMEM(0);
 	INIT_KERN_GPUTASK_SUBFIELDS(kgtask,
@@ -746,7 +760,6 @@ kern_gpujoin_main(kern_session_info *session,
 		/* resume the warp-context from the previous execution */
 		if (get_local_id() == 0)
 			memcpy(wp, wp_saved, wp_base_sz);
-		depth = n_rels + 1;		/* start from projection/aggregation */
 	}
 	else
 	{
@@ -758,10 +771,11 @@ kern_gpujoin_main(kern_session_info *session,
 			l_state[d * get_global_size() + get_global_id()] = 0;
 			matched[d * get_global_size() + get_global_id()] = false;
 		}
-		depth = 0;
 	}
 	__syncthreads();
-#define __L_STATE(__depth)						\
+	depth = wp->depth;
+
+#define __L_STATE(__depth)											\
 	l_state[get_global_size() * ((__depth)-1) + get_global_id()]
 #define __MATCHED(__depth)						\
 	matched[get_global_size() * ((__depth)-1) + get_global_id()]
@@ -783,8 +797,6 @@ kern_gpujoin_main(kern_session_info *session,
 		}
 		else if (depth > n_rels)
 		{
-			bool	try_suspend = false;
-
 			assert(depth == n_rels+1);
 			if (session->xpucode_projection)
 			{
@@ -793,8 +805,7 @@ kern_gpujoin_main(kern_session_info *session,
 											  n_rels,
 											  kds_dst,
 											  SESSION_KEXP_PROJECTION(session),
-											  __KVEC_BUFFER(n_rels),
-											  &try_suspend);
+											  __KVEC_BUFFER(n_rels));
 			}
 			else
 			{
@@ -802,14 +813,7 @@ kern_gpujoin_main(kern_session_info *session,
 				depth = execGpuPreAggGroupBy(kcxt, wp,
 											 n_rels,
 											 kds_dst,
-											 __KVEC_BUFFER(n_rels),
-											 &try_suspend);
-			}
-			if (__syncthreads_count(try_suspend) > 0)
-			{
-				if (get_local_id() == 0)
-					atomicAdd(&kgtask->suspend_count, 1);
-				assert(depth < 0);
+											 __KVEC_BUFFER(n_rels));
 			}
 		}
 		else if (kmrels->chunks[depth-1].is_nestloop)
@@ -859,6 +863,8 @@ kern_gpujoin_main(kern_session_info *session,
 		/* bailout if any error status */
 		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 			break;
+		if (get_local_id() == 0)
+			wp->depth = depth;
 	}
 	__syncthreads();
 

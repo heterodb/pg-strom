@@ -4526,11 +4526,15 @@ pgstrom_explain_kvars_slot(const CustomScanState *css,
 			__explain_kvars_slot_subfield_types(&buf, kvdef->kv_subfields);
 			appendStringInfoChar(&buf, ')');
 		}
-		appendStringInfo(&buf, "', expr='%s'>",
+		appendStringInfo(&buf, "', expr='%s'",
 						 deparse_expression((Node *)kvdef->kv_expr,
 											dcontext,
 											(cscan->custom_plans != NIL),
 											false));
+		if (kvdef->kv_offset >= 0)
+			appendStringInfo(&buf, ", kv_off=0x%04x",
+							 kvdef->kv_offset);
+		appendStringInfoString(&buf, ">");
 		slot_id++;
 	}
 	ExplainPropertyText("KVars-Slot", buf.data, es);
@@ -4613,6 +4617,66 @@ pgstrom_explain_kvecs_buffer(const CustomScanState *css,
 	ExplainPropertyText("KVecs-Buffer", buf.data, es);
 
 	pfree(buf.data);
+}
+
+/*
+ * pgstrom_explain_fallback_desc
+ */
+void
+pgstrom_explain_fallback_desc(pgstromTaskState *pts,
+							  ExplainState *es,
+							  List *dcontext)
+{
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	kern_fallback_desc *fb_desc_array;
+	StringInfoData buf;
+	int			fb_desc_nitems;
+
+	if (!pts->kern_fallback_desc)
+		return;
+	initStringInfo(&buf);
+	fb_desc_array = (kern_fallback_desc *)VARDATA(pts->kern_fallback_desc);
+	fb_desc_nitems = (VARSIZE(pts->kern_fallback_desc) -
+					  VARHDRSZ) / sizeof(kern_fallback_desc);
+	appendStringInfo(&buf, "[");
+	for (int i=0; i < fb_desc_nitems; i++)
+	{
+		kern_fallback_desc *fb_desc = &fb_desc_array[i];
+		Expr	   *kv_expr = NULL;
+		ListCell   *lc;
+
+		foreach (lc, pp_info->kvars_deflist)
+		{
+			codegen_kvar_defitem *kvdef = lfirst(lc);
+
+			if (fb_desc->fb_src_depth == kvdef->kv_depth &&
+				fb_desc->fb_src_resno == kvdef->kv_resno)
+			{
+				kv_expr = kvdef->kv_expr;
+				break;
+			}
+		}
+		if (i > 0)
+			appendStringInfo(&buf, ", ");
+		if (!kv_expr)
+			appendStringInfo(&buf, "<dest='%d', slot='%d', depth=%d:%d>",
+							 fb_desc->fb_dst_resno-1,
+							 fb_desc->fb_slot_id,
+							 fb_desc->fb_src_depth,
+							 fb_desc->fb_max_depth);
+		else
+			appendStringInfo(&buf, "<dest='%d', expr='%s', depth=%d:%d>",
+							 fb_desc->fb_dst_resno-1,
+							 deparse_expression((Node *)kv_expr,
+												dcontext,
+												false, false),
+							 fb_desc->fb_src_depth,
+							 fb_desc->fb_max_depth);
+	}
+	appendStringInfo(&buf, "]");
+	if (buf.len > 0)
+		ExplainPropertyText("CPU-Fallback", buf.data, es);
+    pfree(buf.data);
 }
 
 /*

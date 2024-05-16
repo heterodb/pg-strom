@@ -343,6 +343,7 @@ typedef struct
 	pg_atomic_uint64	inner_usage;
 	pg_atomic_uint64	stats_gist;			/* only GiST-index */
 	pg_atomic_uint64	stats_join;			/* # of tuples by this join */
+	pg_atomic_uint64	fallback_nitems;	/* # of fallback tuples */
 } pgstromSharedInnerState;
 
 typedef struct
@@ -361,6 +362,7 @@ typedef struct
 	pg_atomic_uint64	source_ntuples_raw;	/* # of raw tuples in the base relation */
 	pg_atomic_uint64	source_ntuples_in;	/* # of tuples survived from WHERE-quals */
 	pg_atomic_uint64	result_ntuples;		/* # of tuples returned from xPU */
+	pg_atomic_uint64	fallback_nitems;	/* # of fallback tuples in depth==0 */
 	/* for parallel-scan */
 	uint32_t			parallel_scan_desc_offset;
 	/* for arrow_fdw */
@@ -467,9 +469,9 @@ struct pgstromTaskState
 	char			   *fallback_buffer;
 	TupleTableSlot	   *fallback_slot;	/* host-side kvars-slot */
 	List			   *fallback_proj;
-
 	List			   *fallback_load_src;	/* source resno of base-rel */
 	List			   *fallback_load_dst;	/* dest resno of fallback-slot */
+	bytea			   *kern_fallback_desc;
 	/* request command buffer (+ status for table scan) */
 	TBMIterateResult   *curr_tbm;
 	Buffer				curr_vm_buffer;		/* for visibility-map */
@@ -484,7 +486,7 @@ struct pgstromTaskState
 										kern_final_task *fin,
 										struct iovec *xcmd_iov, int *xcmd_iovcnt);
 	bool			  (*cb_cpu_fallback)(struct pgstromTaskState *pts,
-										 HeapTuple htuple);
+										 int depth, uint64_t l_state);
 	/* inner relations state (if JOIN) */
 	int					num_rels;
 	pgstromTaskInnerState inners[FLEXIBLE_ARRAY_MEMBER];
@@ -636,6 +638,9 @@ extern void		pgstrom_explain_xpucode(const CustomScanState *css,
 										List *dcontext,
 										const char *label,
 										bytea *xpucode);
+extern void		pgstrom_explain_fallback_desc(pgstromTaskState *pts,
+											  ExplainState *es,
+											  List *dcontext);
 extern char	   *pgstrom_xpucode_to_string(bytea *xpu_code);
 extern void		pgstrom_init_codegen(void);
 
@@ -720,6 +725,8 @@ extern void		xpuClientPutResponse(XpuCommand *xcmd);
 extern const XpuCommand *pgstromBuildSessionInfo(pgstromTaskState *pts,
 												 uint32_t join_inner_handle,
 												 TupleDesc tdesc_final);
+extern bool		execCpuFallbackBaseTuple(pgstromTaskState *pts,
+										 HeapTuple base_tuple);
 extern Node	   *pgstromCreateTaskState(CustomScan *cscan,
 									   const CustomExecMethods *methods);
 extern void		pgstromExecInitTaskState(CustomScanState *node,
@@ -829,7 +836,7 @@ extern List	   *buildOuterScanPlanInfo(PlannerInfo *root,
 									   bool allow_host_quals,
 									   bool allow_no_device_quals);
 extern bool		ExecFallbackCpuScan(pgstromTaskState *pts,
-									HeapTuple tuple);
+									int depth, uint64_t l_state);
 extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
 extern void		pgstrom_init_gpu_scan(void);
 extern void		pgstrom_init_dpu_scan(void);
@@ -852,7 +859,7 @@ extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
 										 const CustomScanMethods *methods);
 extern uint32_t	GpuJoinInnerPreload(pgstromTaskState *pts);
 extern bool		ExecFallbackCpuJoin(pgstromTaskState *pts,
-									HeapTuple tuple);
+									int depth, uint64_t l_state);
 extern void		ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts);
 extern void		ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts,
 												XpuCommand *resp);
@@ -870,7 +877,7 @@ extern void		xpupreagg_add_custompath(PlannerInfo *root,
 										 uint32_t task_kind,
 										 const CustomPathMethods *methods);
 extern bool		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
-									  HeapTuple tuple);
+									  int depth, uint64_t l_state);
 extern void		pgstrom_init_gpu_preagg(void);
 extern void		pgstrom_init_dpu_preagg(void);
 

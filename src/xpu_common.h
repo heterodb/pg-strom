@@ -388,15 +388,12 @@ typedef enum {
 /*
  * Error status
  */
-#define ERRCODE_STROM_SUCCESS				0
-#define ERRCODE_CPU_FALLBACK				1
-#define ERRCODE_WRONG_XPU_CODE				3
-#define ERRCODE_VARLENA_UNSUPPORTED			4
-#define ERRCODE_RECURSION_TOO_DEEP			5
-#define ERRCODE_BUFFER_NO_SPACE				6
-#define ERRCODE_GPUDIRECT_READFILE_ASYNC	7
-#define ERRCODE_DEVICE_INTERNAL				99
-#define ERRCODE_DEVICE_FATAL				999
+#define ERRCODE_STROM_SUCCESS		0
+#define ERRCODE_SUSPEND_FALLBACK	'f'		/* suspend by CPU fallback */
+#define ERRCODE_SUSPEND_NO_SPACE	'd'		/* suspend by buffer no space */
+#define ERRCODE_DEVICE_ERROR		'E'		/* generic device error */
+#define ERRCODE_DEVICE_FATAL		'F'		/* generic device fatal error */
+#define ERRCODE_IS_SUSPEND(x)		((x) >= 'a' && (x) <= 'z')
 
 #define KERN_ERRORBUF_FILENAME_LEN		32
 #define KERN_ERRORBUF_FUNCNAME_LEN		64
@@ -420,6 +417,7 @@ typedef struct
 	const char	   *error_funcname;
 	const char	   *error_message;
 	struct kern_session_info *session;
+	struct kern_data_store *kds_fallback;
 
 	/* the kernel variables slot */
 	struct xpu_datum_t **kvars_slot;
@@ -451,7 +449,7 @@ typedef struct
 	char			vlbuf[1];
 } kern_context;
 
-#define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
+#define INIT_KERNEL_CONTEXT(KCXT,SESSION,KDS_FALLBACK)					\
 	do {																\
 		const kern_varslot_desc *__vs_desc;								\
 		uint32_t	__bufsz = Max(512, (SESSION)->kcxt_extra_bufsz);	\
@@ -460,6 +458,7 @@ typedef struct
 		KCXT = (kern_context *)alloca(__len);							\
 		memset(KCXT, 0, __len);											\
 		KCXT->session = (SESSION);										\
+		KCXT->kds_fallback = (KDS_FALLBACK);							\
 		KCXT->kvars_nrooms = (SESSION)->kcxt_kvars_nrooms;				\
 		KCXT->kvars_nslots = (SESSION)->kcxt_kvars_nslots;				\
 		KCXT->kvecs_bufsz  = (SESSION)->kcxt_kvecs_bufsz;				\
@@ -503,25 +502,35 @@ __STROM_EREPORT(kern_context *kcxt,
 				const char *funcname,
 				const char *message)
 {
-	if ((kcxt->errcode == ERRCODE_STROM_SUCCESS && errcode != ERRCODE_STROM_SUCCESS) ||
-		(kcxt->errcode == ERRCODE_CPU_FALLBACK  && (errcode != ERRCODE_STROM_SUCCESS &&
-													errcode != ERRCODE_STROM_SUCCESS)))
+	/* in case when no significant errors are reported... */
+	if (errcode != ERRCODE_STROM_SUCCESS)
 	{
-		kcxt->errcode        = errcode;
-		kcxt->error_filename = __basename(filename);
-		kcxt->error_lineno   = lineno;
-		kcxt->error_funcname = funcname;
-		kcxt->error_message  = message;
+		switch (kcxt->errcode)
+		{
+			case ERRCODE_SUSPEND_FALLBACK:
+			case ERRCODE_SUSPEND_NO_SPACE:
+				if (ERRCODE_IS_SUSPEND(errcode))
+					return;
+			case ERRCODE_STROM_SUCCESS:
+				kcxt->errcode = errcode;
+				kcxt->error_filename = __basename(filename);
+				kcxt->error_lineno   = lineno;
+				kcxt->error_funcname = funcname;
+				kcxt->error_message  = message;
+				break;
+			default:
+				break;
+		}
 	}
 }
-#define STROM_ELOG(kcxt, message)									\
-	__STROM_EREPORT((kcxt),ERRCODE_DEVICE_INTERNAL,					\
+#define STROM_ELOG(kcxt, message)								\
+	__STROM_EREPORT((kcxt),ERRCODE_DEVICE_ERROR,				\
 					__FILE__,__LINE__,__FUNCTION__,(message))
-#define STROM_EREPORT(kcxt, errcode, message)						\
-	__STROM_EREPORT((kcxt),(errcode),								\
+#define SUSPEND_FALLBACK(kcxt, message)							\
+	__STROM_EREPORT((kcxt),ERRCODE_SUSPEND_FALLBACK,			\
 					__FILE__,__LINE__,__FUNCTION__,(message))
-#define STROM_CPU_FALLBACK(kcxt, message)							\
-	__STROM_EREPORT((kcxt),ERRCODE_CPU_FALLBACK,					\
+#define SUSPEND_NO_SPACE(kcxt, message)							\
+	__STROM_EREPORT((kcxt),ERRCODE_SUSPEND_NO_SPACE,			\
 					__FILE__,__LINE__,__FUNCTION__,(message))
 
 INLINE_FUNCTION(void *)
@@ -637,6 +646,7 @@ typedef struct kern_colmeta		kern_colmeta;
 #define KDS_FORMAT_BLOCK		'b'		/* raw blocks for direct loading */
 #define KDS_FORMAT_COLUMN		'c'		/* columnar based storage format */
 #define KDS_FORMAT_ARROW		'a'		/* apache arrow format */
+#define KDS_FORMAT_FALLBACK		'f'		/* CPU-fallback buffer */
 
 struct kern_data_store {
 	uint64_t		length;		/* length of this data-store */
@@ -1118,16 +1128,29 @@ struct kern_tupitem
 typedef struct kern_tupitem		kern_tupitem;
 
 /*
- * kern_hashitem - individual items for KDS_FORMAT_HASH / KDS_FORMAT_HASH64
+ * kern_hashitem - individual items for KDS_FORMAT_HASH
  */
 struct kern_hashitem
 {
 	uint64_t		next;		/* offset of the next entry */
 	uint32_t		hash;		/* 32-bit hash value */
 	uint32_t		__padding__;
-	kern_tupitem	t	__MAXALIGNED__;			/* HeapTuple of this entry */
+	/* HeapTuple of this entry */
+	kern_tupitem	t	__MAXALIGNED__;
 };
 typedef struct kern_hashitem	kern_hashitem;
+
+/*
+ * kern_fallbackitem - individual items for KDS_FORMAT_FALLBACK
+ */
+struct kern_fallbackitem
+{
+	uint32_t		t_len;
+	uint32_t		depth;
+	uint64_t		l_state;
+	HeapTupleHeaderData htup;
+};
+typedef struct kern_fallbackitem	kern_fallbackitem;
 
 /* Length of the header postion of kern_data_store */
 INLINE_FUNCTION(size_t)
@@ -1153,7 +1176,8 @@ INLINE_FUNCTION(uint64_t *)
 KDS_GET_ROWINDEX(const kern_data_store *kds)
 {
 	assert(kds->format == KDS_FORMAT_ROW ||
-		   kds->format == KDS_FORMAT_HASH);
+		   kds->format == KDS_FORMAT_HASH ||
+		   kds->format == KDS_FORMAT_FALLBACK);
 	return (uint64_t *)KDS_BODY_ADDR(kds) + kds->hash_nslots;
 }
 
@@ -1182,7 +1206,8 @@ INLINE_FUNCTION(bool)
 __KDS_CHECK_OVERFLOW(const kern_data_store *kds, uint32_t nitems, uint64_t usage)
 {
 	assert(kds->format == KDS_FORMAT_ROW ||
-		   kds->format == KDS_FORMAT_HASH);
+		   kds->format == KDS_FORMAT_HASH ||
+		   kds->format == KDS_FORMAT_FALLBACK);
 	return (KDS_HEAD_LENGTH(kds) +
 			sizeof(uint64_t) * (kds->hash_nslots + nitems) +
 			usage) <= kds->length;
@@ -2201,10 +2226,21 @@ struct kern_varslot_desc
 	int8_t		vs_typalign;
 	int16_t		vs_typlen;
 	int32_t		vs_typmod;
+	int32_t		vs_offset;		/* offset of kvec-buffer, if any. elsewhere -1. */
 	uint16_t	idx_subfield;	/* offset to the subfield descriptor */
 	uint16_t	num_subfield;	/* number of the subfield (array or composite) */
 	const struct xpu_datum_operators *vs_ops;
 };
+
+typedef struct
+{
+	int16_t		fb_src_depth;	/* source depth of this fallback variable */
+	int16_t		fb_src_resno;	/* source resno of this fallback variable */
+	int16_t		fb_dst_resno;	/* resno of the host scan-slot */
+	int16_t		fb_max_depth;	/* last depth that references this variable */
+	uint16_t	fb_slot_id;		/* kernel slot-id of this fallback variable */
+	int32_t		fb_kvec_offset;	/* kvec's buffer offset */
+} kern_fallback_desc;
 
 #define KERN_EXPRESSION_MAGIC			(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
@@ -2362,8 +2398,6 @@ typedef struct
  */
 #define XpuCommandTag__Success				0
 #define XpuCommandTag__Error				1
-#define XpuCommandTag__CPUFallback			2
-#define XpuCommandTag__SuccessFinal			50
 #define XpuCommandTag__OpenSession			100
 #define XpuCommandTag__XpuTaskExec			110
 #define XpuCommandTag__XpuTaskExecGpuCache	111
@@ -2416,6 +2450,12 @@ typedef struct kern_session_info
 	uint32_t	groupby_kds_final;	/* header portion of kds_final */
 	uint32_t	groupby_prepfn_bufsz; /* buffer size for preagg functions */
 	float4_t	groupby_ngroups_estimation; /* planne's estimation of ngroups */
+
+	/* fallback buffer */
+	uint32_t	fallback_kds_head;		/* offset to kds_fallback (header) */
+	uint32_t	fallback_desc_defs;		/* offset to kern_fallback_desc array */
+	uint32_t	fallback_desc_nitems;	/* number of kern_fallback_desc items */
+
 	/* executor parameter buffer */
 	uint32_t	nparams;	/* number of parameters */
 	uint32_t	poffset[1];	/* offset of params */
@@ -2934,6 +2974,8 @@ ExecKernProjection(kern_context *kcxt,
 				   kern_data_extra *kds_extra,
 				   int num_inners,
 				   kern_data_store **kds_inners);
+EXTERN_FUNCTION(bool)
+HandleErrorIfCpuFallback(kern_context *kcxt, int depth, uint64_t l_state);
 
 /* ----------------------------------------------------------------
  *

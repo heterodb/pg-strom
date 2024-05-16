@@ -1096,7 +1096,7 @@ xpu_inet_datum_heap_read(kern_context *kcxt,
 
 	if (VARATT_IS_EXTERNAL(addr) || VARATT_IS_COMPRESSED(addr))
 	{
-		STROM_CPU_FALLBACK(kcxt, "inet value is compressed or toasted");
+		SUSPEND_FALLBACK(kcxt, "inet value is compressed or toasted");
 		return false;
 	}
 	sz = VARSIZE_ANY_EXHDR(addr);
@@ -1510,7 +1510,7 @@ xpu_cube_is_valid(kern_context *kcxt, const xpu_cube_t *arg)
 
 	if (arg->length < 0)
 	{
-		STROM_CPU_FALLBACK(kcxt, "cube datum is compressed or external");
+		SUSPEND_FALLBACK(kcxt, "cube datum is compressed or external");
 		return false;
 	}
 

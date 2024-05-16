@@ -3625,34 +3625,7 @@ retry:
 		goto bailout;
 	}
 
-	if (gcache_redo->kerror.errcode == ERRCODE_BUFFER_NO_SPACE)
-	{
-		kern_data_extra *extra = (kern_data_extra *)gc_lmap->gcache_extra_devptr;
-		size_t		gcache_extra_size;
-		int			__status;
-
-		/* expand the extra buffer with 25% larger virtual space */
-		gcache_extra_size = PAGE_ALIGN((extra->length * 5) / 4);
-		__status = __gpucacheExecCompactionKernel(cmd,
-												  gc_lmap,
-												  f_gcache_compaction,
-												  gcache_extra_size);
-		if (__status == 0)
-			goto retry;
-		/* abort */
-		status = __status;
-	}
-	else if (gcache_redo->kerror.errcode != ERRCODE_STROM_SUCCESS)
-	{
-		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
-				 "gpucache: %s (%s:%d) %s (errcode=%d)\n",
-				 gcache_redo->kerror.funcname,
-				 gcache_redo->kerror.filename,
-				 gcache_redo->kerror.lineno,
-				 gcache_redo->kerror.message,
-				 gcache_redo->kerror.errcode);
-	}
-	else
+	if (gcache_redo->kerror.errcode == 0)
 	{
 		kern_data_store	   *kds = (kern_data_store *)gc_lmap->gcache_main_devptr;
 		kern_data_extra	   *extra = (kern_data_extra *)gc_lmap->gcache_extra_devptr;
@@ -3673,6 +3646,34 @@ retry:
 				pg_atomic_read_u64(&gc_sstate->gcache_extra_dead));
 #endif
 		status = 0;		/* success */
+	}
+	else if (gcache_redo->kerror.errcode == ERRCODE_SUSPEND_NO_SPACE)
+	{
+		kern_data_extra *extra = (kern_data_extra *)gc_lmap->gcache_extra_devptr;
+		size_t		gcache_extra_size;
+		int			__status;
+
+		/* expand the extra buffer with 25% larger virtual space */
+		gcache_extra_size = PAGE_ALIGN((extra->length * 5) / 4);
+		__status = __gpucacheExecCompactionKernel(cmd,
+												  gc_lmap,
+												  f_gcache_compaction,
+												  gcache_extra_size);
+		if (__status == 0)
+			goto retry;
+		/* abort */
+		status = __status;
+	}
+	else
+	{
+		/* significant error */
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "gpucache: %s (%s:%d) %s (errcode=%d)\n",
+				 gcache_redo->kerror.funcname,
+				 gcache_redo->kerror.filename,
+				 gcache_redo->kerror.lineno,
+				 gcache_redo->kerror.message,
+				 gcache_redo->kerror.errcode);
 	}
 bailout:
 	if (m_gcache_redo != 0UL)
