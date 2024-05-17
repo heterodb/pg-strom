@@ -780,6 +780,10 @@ pgstrom_int1um(PG_FUNCTION_ARGS)
 {
 	int8	arg = PG_GETARG_INT8(0);
 
+	if (arg == PG_INT8_MIN)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("tinyint out of range")));
 	PG_RETURN_INT8(-arg);
 }
 
@@ -789,6 +793,10 @@ pgstrom_int1abs(PG_FUNCTION_ARGS)
 {
 	int8	arg = PG_GETARG_INT8(0);
 
+	if (arg == PG_INT8_MIN)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("tinyint out of range")));
 	PG_RETURN_INT8(arg < 0 ? -arg : arg);
 }
 
