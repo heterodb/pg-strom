@@ -2475,7 +2475,7 @@ pgstromExplainTaskState(CustomScanState *node,
 					appendStringInfo(&buf, ", ");
 				appendStringInfo(&buf, "depth[%d]=%lu", i, fallback_nitems[i]);
 			}
-			ExplainPropertyText("CPU Fallback Rows", buf.data, es);
+			ExplainPropertyText("Fallback-stats", buf.data, es);
 		}
 	}
 

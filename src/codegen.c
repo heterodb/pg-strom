@@ -4675,7 +4675,7 @@ pgstrom_explain_fallback_desc(pgstromTaskState *pts,
 	}
 	appendStringInfo(&buf, "]");
 	if (buf.len > 0)
-		ExplainPropertyText("CPU-Fallback", buf.data, es);
+		ExplainPropertyText("Fallback-desc", buf.data, es);
     pfree(buf.data);
 }
 
