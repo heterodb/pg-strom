@@ -15,11 +15,11 @@
  * pgstrom_stair_sum_xxxx
  */
 static __shared__ union {
-	uint32_t	u32[CUDA_MAXTHREADS_PER_BLOCK / WARPSIZE];
-	uint64_t	u64[CUDA_MAXTHREADS_PER_BLOCK / WARPSIZE];
-	int32_t		i32[CUDA_MAXTHREADS_PER_BLOCK / WARPSIZE];
-	int64_t		i64[CUDA_MAXTHREADS_PER_BLOCK / WARPSIZE];
-	float8_t	fp64[CUDA_MAXTHREADS_PER_BLOCK / WARPSIZE];
+	uint32_t	u32[WARPSIZE];
+	uint64_t	u64[WARPSIZE];
+	int32_t		i32[WARPSIZE];
+	int64_t		i64[WARPSIZE];
+	float8_t	fp64[WARPSIZE];
 } __stair_sum_buffer;
 
 template <typename T>
@@ -61,6 +61,7 @@ pgstrom_stair_sum_binary(bool predicate, uint32_t *p_total_count)
 	uint32_t	mask;
 	uint32_t	sum;
 
+	assert(get_local_size() <= WARPSIZE * WARPSIZE);
 	assert(__activemask() == ~0U);
 	mask = __ballot_sync(__activemask(), predicate);
 	if (LaneId() == 0)
@@ -93,6 +94,7 @@ pgstrom_stair_sum_binary(bool predicate, uint32_t *p_total_count)
 		BASETYPE	warp_sum;											\
 		BASETYPE	sum;												\
 																		\
+		assert(get_local_size() <= WARPSIZE * WARPSIZE);				\
 		assert(__activemask() == ~0U);									\
 		warp_sum = __stair_sum_warp_common(value);						\
 		if (LaneId() == warpSize - 1)									\

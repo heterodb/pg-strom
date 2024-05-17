@@ -739,7 +739,8 @@ kern_gpujoin_main(kern_session_info *session,
 	assert(kgtask->kvars_nslots == session->kcxt_kvars_nslots &&
 		   kgtask->kvecs_bufsz  == session->kcxt_kvecs_bufsz &&
 		   kgtask->kvecs_ndims  >= n_rels &&
-		   kgtask->n_rels       == n_rels);
+		   kgtask->n_rels       == n_rels &&
+		   get_local_size()     <= CUDA_MAXTHREADS_PER_BLOCK);
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session, kds_fallback);
 	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(kgtask->kvecs_ndims);

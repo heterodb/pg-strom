@@ -1602,8 +1602,9 @@ setupGpuPreAggGroupByBuffer(kern_context *kcxt,
 			kcxt->groupby_prepfn_bufsz = kgtask->groupby_prepfn_bufsz;
 			kcxt->groupby_prepfn_nbufs = 1;
 			kcxt->groupby_prepfn_buffer = groupby_prepfn_buffer;
-			__setupGpuPreAggGroupByBufferOne(kcxt, kexp_actions,
-											 kcxt->groupby_prepfn_buffer);
+			if (get_local_id() == 0)
+				__setupGpuPreAggGroupByBufferOne(kcxt, kexp_actions,
+												 kcxt->groupby_prepfn_buffer);
 		}
 	}
 }
