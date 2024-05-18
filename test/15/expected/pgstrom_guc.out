@@ -41,9 +41,6 @@ SHOW pg_strom.gpu_operator_cost;
 SHOW pg_strom.max_async_tasks;
  12
 
-SHOW pg_strom.gpudirect_enabled;
- off
-
 SHOW pg_strom.gpu_direct_seq_page_cost;
  0.25
 
