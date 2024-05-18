@@ -668,6 +668,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		session->groupby_ngroups_estimation = pts->css.ss.ps.plan->plan_rows;
 	}
 	/* CPU fallback related */
+	if (pgstrom_cpu_fallback_elevel < ERROR)
 	{
 		TupleDesc	scan_desc = pts->css.ss.ps.scandesc;
 		size_t		sz = estimate_kern_data_store(scan_desc);
@@ -1079,24 +1080,31 @@ tryExecCpuFallbackChunks(pgstromTaskState *pts)
 			uint64_t	   *rowindex = KDS_GET_ROWINDEX(kds);
 			HeapTupleData	htuple;
 
-			memset(&htuple, 0, sizeof(HeapTupleData));
+			elog(pgstrom_cpu_fallback_elevel, "%s: CPU fallback %u tuples (%s)",
+				 pts->css.methods->CustomName, kds->nitems, format_bytesz(kds->__usage64));
 			for (uint32_t i=0; i < kds->nitems; i++)
 			{
 				kern_fallbackitem *fb_item = (kern_fallbackitem *)
 					((char *)kds + kds->length - rowindex[i]);
 
+				ExecStoreAllNullTuple(scan_slot);
 				htuple.t_len  = fb_item->t_len;
 				ItemPointerSetInvalid(&htuple.t_self);
 				htuple.t_tableOid = RelationGetRelid(scan_rel);
 				htuple.t_data = &fb_item->htup;
-				ExecForceStoreHeapTuple(&htuple, scan_slot, false);
+				heap_deform_tuple(&htuple,
+								  scan_slot->tts_tupleDescriptor,
+								  scan_slot->tts_values,
+								  scan_slot->tts_isnull);
 				if (pts->ps_state)
 				{
 					pgstromSharedState *ps_state = pts->ps_state;
-					if (fb_item->depth == 0)
+					int		depth = fb_item->depth;
+
+					if (depth == 0)
 						pg_atomic_fetch_add_u64(&ps_state->fallback_nitems, 1);
-					else if (fb_item->depth <= pts->num_rels)
-						pg_atomic_fetch_add_u64(&ps_state->inners[fb_item->depth-1].fallback_nitems, 1);
+					else if (depth <= pts->num_rels)
+						pg_atomic_fetch_add_u64(&ps_state->inners[depth-1].fallback_nitems, 1);
 				}
 				pts->cb_cpu_fallback(pts,
 									 fb_item->depth,

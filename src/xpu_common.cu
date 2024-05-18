@@ -1646,16 +1646,19 @@ HandleErrorIfCpuFallback(kern_context *kcxt, int depth, uint64_t l_state)
 	{
 		kern_session_info *session = kcxt->session;
 		kern_data_store   *kds_fallback = kcxt->kds_fallback;
+		int			fallback_ncols = kds_fallback->ncols;
 		kern_fallback_desc *fb_desc_array = (kern_fallback_desc *)
 			((char *)session + session->fallback_desc_defs);
-		int			fallback_nattrs = session->fallback_desc_nitems;
+		int			fallback_nitems = session->fallback_desc_nitems;
 		uint16_t   *fallback_slots = (uint16_t *)
-			alloca(sizeof(uint16_t) * kds_fallback->ncols);
+			alloca(sizeof(uint16_t) * fallback_ncols);
+		assert(session->fallback_desc_defs > 0);
+
 		/*
 		 * Load variables from the kvec-buffer (if depth>0)
 		 */
-		memset(fallback_slots, -1, sizeof(uint16_t) * kds_fallback->ncols);
-		for (int j=0; j < fallback_nattrs; j++)
+		memset(fallback_slots, -1, sizeof(uint16_t) * fallback_ncols);
+		for (int j=0; j < fallback_nitems; j++)
 		{
 			kern_fallback_desc *fb_desc = &fb_desc_array[j];
 			int		slot_id = fb_desc->fb_slot_id;
@@ -1690,7 +1693,7 @@ HandleErrorIfCpuFallback(kern_context *kcxt, int depth, uint64_t l_state)
 		}
 		/* try write out a fallback tuple */
 		if (__writeOutCpuFallbackTuple(kcxt,
-									   fallback_nattrs,
+									   fallback_ncols,
 									   fallback_slots,
 									   depth, l_state))
 		{

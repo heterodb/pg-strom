@@ -2398,8 +2398,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	unsigned int	groupby_prepfn_nbufs = 0;
 	size_t			kds_fallback_length = 0;
 	size_t			kds_final_length = 0;
-	bool			expand_results_buffer = true;	/* for first allocation */
-	bool			expand_fallback_buffer = false;
+	uint32_t		last_kernel_errcode = ERRCODE_SUSPEND_NO_SPACE;	/* for first allocation */
 	size_t			sz;
 	void		   *kern_args[10];
 
@@ -2565,7 +2564,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	 * Allocation of the destination buffer
 	 */
 resume_kernel:
-	if (expand_fallback_buffer)
+	if (last_kernel_errcode == ERRCODE_SUSPEND_FALLBACK)
 	{
 		if (!__expandGpuFallbackBuffer(gq_buf, session, kds_fallback_length))
 		{
@@ -2576,7 +2575,8 @@ resume_kernel:
 
 	if (gq_buf->m_kds_final)
 	{
-		if (expand_results_buffer)
+		/* needs to expand the final buffer? */
+		if (last_kernel_errcode == ERRCODE_SUSPEND_NO_SPACE)
 		{
 			if (!__expandGpuQueryGroupByBuffer(gq_buf, kds_final_length))
 			{
@@ -2592,7 +2592,7 @@ resume_kernel:
 	}
 	else
 	{
-		if (expand_results_buffer)
+		if (last_kernel_errcode == ERRCODE_SUSPEND_NO_SPACE)
 		{
 			gpuMemChunk	   *d_chunk;
 
@@ -2709,20 +2709,22 @@ resume_kernel:
 						   resp, resp_sz,
 						   kds_dst_nitems, kds_dst_array);
 	}
-	else if (kgtask->kerror.errcode == ERRCODE_SUSPEND_FALLBACK ||
-			 kgtask->kerror.errcode == ERRCODE_SUSPEND_NO_SPACE)
+	else if (kgtask->kerror.errcode == ERRCODE_SUSPEND_NO_SPACE ||
+			 (kgtask->kerror.errcode == ERRCODE_SUSPEND_FALLBACK &&
+			  session->fallback_kds_head > 0))
 	{
 		if (gpuServiceGoingTerminate())
 		{
-			gpuClientFatal(gclient, "GpuService is going to terminate during GpuScan kernel suspend/resume");
+			gpuClientFatal(gclient, "GpuService is going to terminate during kernel suspend/resume");
 			goto bailout;
 		}
-		/* no significant error */
-		expand_fallback_buffer = (kgtask->kerror.errcode == ERRCODE_SUSPEND_FALLBACK);
-		expand_results_buffer  = (kgtask->kerror.errcode == ERRCODE_SUSPEND_NO_SPACE);
+		last_kernel_errcode = kgtask->kerror.errcode;
 		kgtask->kerror.errcode = 0;
 		kgtask->resume_context = true;
-		__gsDebug("suspend / resume happen\n");
+		__gsDebug("suspend / resume by %s",
+				  kgtask->kerror.errcode == ERRCODE_SUSPEND_NO_SPACE
+				  ? "buffer no space"
+				  : "CPU fallback");
 		goto resume_kernel;
 	}
 	else
