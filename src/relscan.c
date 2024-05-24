@@ -274,6 +274,13 @@ setup_kern_data_store(kern_data_store *kds,
 {
 	int		j, attcacheoff = -1;
 
+	/*
+	 * lp_items[] is declared as uint32 (and uint64 has no benefit because
+	 * PGSTROM_CHUNK_SIZE is much smaller), so BLOCK format length must be
+	 * 32bit range.
+	 */
+	Assert(format != KDS_FORMAT_BLOCK || length < UINT_MAX);
+
 	memset(kds, 0, offsetof(kern_data_store, colmeta));
 	kds->length		= length;
 	kds->__usage64	= 0;

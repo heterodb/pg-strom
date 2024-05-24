@@ -47,9 +47,11 @@ xpu_bool_datum_arrow_read(kern_context *kcxt,
 	else
 	{
 		const uint8_t  *bitmap = (const uint8_t *)
-			((const char *)kds + __kds_unpack(cmeta->values_offset));
+			((const char *)kds + cmeta->values_offset);
+		uint8_t			mask = (1<<(kds_index & 7));
+
 		result->expr_ops = &xpu_bool_ops;
-		result->value    = ((bitmap[kds_index>>3] & (1<<(kds_index & 7))) != 0);
+		result->value    = ((bitmap[kds_index>>3] & mask) != 0);
 	}
 	return true;
 }

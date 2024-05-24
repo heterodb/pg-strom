@@ -1245,7 +1245,7 @@ __extract_gpucache_tuple_sysattr(kern_context *kcxt,
 		   cmeta->attlen == sizeof(GpuCacheSysattr) &&
 		   cmeta->nullmap_offset == 0);		/* NOT NULL */
 	sysatt = (GpuCacheSysattr *)
-		((char *)kds + __kds_unpack(cmeta->values_offset));
+		((char *)kds + cmeta->values_offset);
 	switch (vl_desc->vl_resno)
 	{
 		case SelfItemPointerAttributeNumber:
@@ -1307,7 +1307,7 @@ kern_extract_gpucache_tuple(kern_context *kcxt,
 		if (!KDS_COLUMN_ITEM_ISNULL(kds, cmeta, kds_index))
 		{
 			/* base pointer */
-			addr = ((const char *)kds + __kds_unpack(cmeta->values_offset));
+			addr = ((const char *)kds + cmeta->values_offset);
 
 			if (cmeta->attlen > 0)
 			{
@@ -1315,8 +1315,7 @@ kern_extract_gpucache_tuple(kern_context *kcxt,
 			}
 			else
 			{
-				addr = ((char *)extra +
-						__kds_unpack(((uint32_t *)addr)[kds_index]));
+				addr = ((char *)extra + ((uint64_t *)addr)[kds_index]);
 			}
 		}
 		else
@@ -1849,17 +1848,17 @@ restart:
 			{
 				const kern_varslot_desc *vs_desc;
 				uint32_t	slot_id = kexp_gist->u.gist.htup_slot_id;
-				uint32_t	t_off;
-				const char *addr;
+				uint32_t	rowid;
+				const kern_tupitem *tupitem;
 
 				assert(itup->t_tid.ip_posid == InvalidOffsetNumber);
-				t_off = ((uint32_t)itup->t_tid.ip_blkid.bi_hi << 16 |
+				rowid = ((uint32_t)itup->t_tid.ip_blkid.bi_hi << 16 |
 						 (uint32_t)itup->t_tid.ip_blkid.bi_lo);
-				addr = (const char *)kds_hash + __kds_unpack(t_off);
+				tupitem = KDS_GET_TUPITEM(kds_hash, rowid);
 				assert(slot_id < kcxt->kvars_nslots);
 				vs_desc = &kcxt->kvars_desc[slot_id];
 				assert(vs_desc->vs_ops == &xpu_internal_ops);
-				if (!vs_desc->vs_ops->xpu_datum_heap_read(kcxt, addr,
+				if (!vs_desc->vs_ops->xpu_datum_heap_read(kcxt, &tupitem->htup,
 														  kcxt->kvars_slot[slot_id]))
 				{
 					assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
@@ -1965,8 +1964,8 @@ xpu_array_datum_arrow_read(kern_context *kcxt,
 		case ArrowType__List:
 			{
 				const uint32_t *base = (const uint32_t *)
-					((const char *)kds + __kds_unpack(cmeta->values_offset));
-				if (sizeof(uint32_t) * (kds_index+2) > __kds_unpack(cmeta->values_length))
+					((const char *)kds + cmeta->values_offset);
+				if (sizeof(uint32_t) * (kds_index+2) > cmeta->values_length)
 				{
 					STROM_ELOG(kcxt, "Arrow::List reference out of range");
 					return false;
@@ -1983,8 +1982,8 @@ xpu_array_datum_arrow_read(kern_context *kcxt,
 		case ArrowType__LargeList:
 			{
 				const uint64_t   *base = (const uint64_t *)
-					((const char *)kds + __kds_unpack(cmeta->values_offset));
-				if (sizeof(uint64_t) * (kds_index+2) > __kds_unpack(cmeta->values_length))
+					((const char *)kds + cmeta->values_offset);
+				if (sizeof(uint64_t) * (kds_index+2) > cmeta->values_length)
 				{
 					STROM_ELOG(kcxt, "Arrow::LargeList reference out of range");
 					return false;

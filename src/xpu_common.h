@@ -632,12 +632,12 @@ struct kern_colmeta {
 	 * related data types, or precision in decimal data type.
 	 */
 	ArrowTypeOptions attopts;
-	uint32_t		nullmap_offset;
-	uint32_t		nullmap_length;
-	uint32_t		values_offset;
-	uint32_t		values_length;
-	uint32_t		extra_offset;
-	uint32_t		extra_length;
+	uint64_t		nullmap_offset;
+	uint64_t		nullmap_length;
+	uint64_t		values_offset;
+	uint64_t		values_length;
+	uint64_t		extra_offset;
+	uint64_t		extra_length;
 };
 typedef struct kern_colmeta		kern_colmeta;
 
@@ -762,20 +762,7 @@ typedef struct kern_data_extra		kern_data_extra;
  * is always aligned to MAXIMUM_ALIGNOF boundary (64bit).
  * It means we can use 32bit offset to represent up to 32GB range (35bit).
  */
-#define __KDS_LENGTH_LIMIT			(1UL<<35)
-
-INLINE_FUNCTION(uint32_t)
-__kds_packed(size_t offset)
-{
-	assert((offset & ~(0xffffffffUL << MAXIMUM_ALIGNOF_SHIFT)) == 0);
-	return (uint32_t)(offset >> MAXIMUM_ALIGNOF_SHIFT);
-}
-
-INLINE_FUNCTION(size_t)
-__kds_unpack(uint32_t offset)
-{
-	return (size_t)offset << MAXIMUM_ALIGNOF_SHIFT;
-}
+#define __KDS_LENGTH_LIMIT			(1UL<<35)		//deprecated
 
 /* ----------------------------------------------------------------
  *
@@ -1182,7 +1169,7 @@ KDS_GET_ROWINDEX(const kern_data_store *kds)
 }
 
 INLINE_FUNCTION(kern_tupitem *)
-KDS_GET_TUPITEM(kern_data_store *kds, uint32_t kds_index)
+KDS_GET_TUPITEM(const kern_data_store *kds, uint32_t kds_index)
 {
 	uint64_t	offset = __volatileRead(KDS_GET_ROWINDEX(kds) + kds_index);
 
@@ -1357,11 +1344,11 @@ KDS_ARROW_CHECK_ISNULL(const kern_data_store *kds,
 		   cmeta <  kds->colmeta + kds->nr_colmeta);
 	if (cmeta->nullmap_offset)
 	{
-		uint8_t	   *nullmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
+		uint8_t	   *nullmap = (uint8_t *)kds + cmeta->nullmap_offset;
 		uint32_t	mask = (1U << (index & 7));
 
 		index = (index >> 3);
-		if (index >= __kds_unpack(cmeta->nullmap_length) ||
+		if (index >= cmeta->nullmap_length ||
 			(nullmap[index] & mask) == 0)
 			return true;	/* NULL */
 	}
@@ -1379,10 +1366,10 @@ KDS_ARROW_REF_SIMPLE_DATUM(const kern_data_store *kds,
 		   cmeta->extra_length == 0);
 	/* NOTE: caller should already apply NULL-checks, so we don't check
 	 * it again. */
-	if (unitsz * (index + 1) <= __kds_unpack(cmeta->values_length))
+	if (unitsz * (index + 1) <= cmeta->values_length)
 	{
-		const char *values = ((const char *)kds +
-							  __kds_unpack(cmeta->values_offset));
+		const char *values = ((const char *)kds + cmeta->values_offset);
+
 		return values + unitsz * index;
 	}
 	return NULL;
@@ -1400,14 +1387,14 @@ KDS_ARROW_REF_VARLENA32_DATUM(const kern_data_store *kds,
 		   cmeta->extra_offset  > 0);
 	/* NOTE: caller should already apply NULL-checks, so we don't check
 	 * it again. */
-	if (sizeof(uint32_t) * (index+1) <= __kds_unpack(cmeta->values_length))
+	if (sizeof(uint32_t) * (index+1) <= cmeta->values_length)
 	{
 		const uint32_t *offset = (const uint32_t *)
-			((const char *)kds + __kds_unpack(cmeta->values_offset));
+			((const char *)kds + cmeta->values_offset);
 		const char	   *extra  = (const char *)
-			((const char *)kds + __kds_unpack(cmeta->extra_offset));
-		if (offset[index] <= offset[index+1] &&
-			offset[index+1] <= __kds_unpack(cmeta->extra_length) &&
+			((const char *)kds + cmeta->extra_offset);
+		if (offset[index]   <= offset[index+1] &&
+			offset[index+1] <= cmeta->extra_length &&
 			offset[index+1] - offset[index] <= VARATT_MAX)
 		{
 			*p_length = (int)(offset[index+1] - offset[index]);
@@ -1425,14 +1412,14 @@ KDS_ARROW_REF_VARLENA64_DATUM(const kern_data_store *kds,
 {
 	Assert(cmeta->values_offset > 0 &&
 		   cmeta->extra_offset  > 0);
-	if (sizeof(uint32_t) * (index+1) <= __kds_unpack(cmeta->values_length))
+	if (sizeof(uint32_t) * (index+1) <= cmeta->values_length)
 	{
 		const uint64_t *offset = (const uint64_t *)
-			((const char *)kds + __kds_unpack(cmeta->values_offset));
+			((const char *)kds + cmeta->values_offset);
 		const char	   *extra  = (const char *)
-			((const char *)kds + __kds_unpack(cmeta->extra_offset));
-		if (offset[index] <= offset[index+1] &&
-			offset[index+1] <= __kds_unpack(cmeta->extra_length) &&
+			((const char *)kds + cmeta->extra_offset);
+		if (offset[index]   <= offset[index+1] &&
+			offset[index+1] <= cmeta->extra_length &&
 			offset[index+1] - offset[index] <= VARATT_MAX)
 		{
 			*p_length = (int)(offset[index+1] - offset[index]);
@@ -1453,9 +1440,9 @@ KDS_COLUMN_ITEM_ISNULL(const kern_data_store *kds,
 
 	if (cmeta->nullmap_offset == 0)
 		return false;	/* NOT NULL */
-	if (idx >= __kds_unpack(cmeta->nullmap_length))
+	if (idx >= cmeta->nullmap_length)
 		return false;	/* NOT NULL */
-	bitmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
+	bitmap = (uint8_t *)kds + cmeta->nullmap_offset;
 
 	return (bitmap[idx] & mask) == 0;
 }

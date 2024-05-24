@@ -371,7 +371,7 @@ gpujoin_prep_gistindex(kern_multirels *kmrels, int depth)
 		ItemIdData	   *lpp;
 		IndexTupleData *itup;
 		kern_hashitem  *khitem;
-		uint32_t		hash, t_off;
+		uint32_t		hash;
 
 		gist_page = KDS_BLOCK_PGPAGE(kds_gist, block_nr);
 		if (!GistPageIsLeaf(gist_page))
@@ -392,10 +392,10 @@ gpujoin_prep_gistindex(kern_multirels *kmrels, int depth)
 			{
 				if (ItemPointerEquals(&khitem->t.htup.t_ctid, &itup->t_tid))
 				{
-					t_off = __kds_packed((char *)&khitem->t.htup -
-										 (char *)kds_hash);
-					itup->t_tid.ip_blkid.bi_hi = (t_off >> 16);
-					itup->t_tid.ip_blkid.bi_lo = (t_off & 0x0000ffffU);
+					uint32_t	rowid = khitem->t.rowid;
+
+					itup->t_tid.ip_blkid.bi_hi = (rowid >> 16);
+					itup->t_tid.ip_blkid.bi_lo = (rowid & 0xffffU);
 					itup->t_tid.ip_posid = InvalidOffsetNumber;
 					break;
 				}

@@ -2230,8 +2230,8 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 					 uint32_t chunk_align,
 					 off_t    chunk_offset,
 					 size_t   chunk_length,
-					 uint32_t *p_cmeta_offset,
-					 uint32_t *p_cmeta_length)
+					 uint64_t *p_cmeta_offset,
+					 uint64_t *p_cmeta_length)
 {
 	off_t		f_pos = con->rb_offset + chunk_offset;
 	off_t		f_gap;
@@ -2266,9 +2266,8 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 				con->m_offset += f_gap;
 				con->f_offset += f_gap;
 			}
-			*p_cmeta_offset = __kds_packed(con->kds_head_sz +
-										   con->m_offset);
-			*p_cmeta_length = __kds_packed(MAXALIGN(chunk_length));
+			*p_cmeta_offset = con->kds_head_sz + con->m_offset;
+			*p_cmeta_length = MAXALIGN(chunk_length);
 			con->m_offset += chunk_length;
 			con->f_offset += chunk_length;
 			return;
@@ -2297,8 +2296,8 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 	ioc->m_offset = m_offset - f_gap;
 	ioc->fchunk_id = f_base / PAGE_SIZE;
 
-	*p_cmeta_offset = __kds_packed(con->kds_head_sz + m_offset);
-	*p_cmeta_length = __kds_packed(MAXALIGN(chunk_length));
+	*p_cmeta_offset = con->kds_head_sz + m_offset;
+	*p_cmeta_length = MAXALIGN(chunk_length);
 	con->m_offset = m_offset + chunk_length;
 	con->f_offset = f_pos + chunk_length;
 }
@@ -2436,12 +2435,12 @@ arrowFdwSetupIOvector(RecordBatchState *rb_state,
 
 			elog(INFO, "%ccol[%d] nullmap=%lu,%lu values=%lu,%lu extra=%lu,%lu",
 				 j < kds->ncols ? ' ' : '*', j,
-				 __kds_unpack(cmeta->nullmap_offset),
-				 __kds_unpack(cmeta->nullmap_length),
-				 __kds_unpack(cmeta->values_offset),
-				 __kds_unpack(cmeta->values_length),
-				 __kds_unpack(cmeta->extra_offset),
-				 __kds_unpack(cmeta->extra_length));
+				 cmeta->nullmap_offset,
+				 cmeta->nullmap_length,
+				 cmeta->values_offset,
+				 cmeta->values_length,
+				 cmeta->extra_offset,
+				 cmeta->extra_length);
 		}
 	}
 #endif
@@ -2909,8 +2908,8 @@ static Datum
 pg_bpchar_arrow_ref(kern_data_store *kds,
 					kern_colmeta *cmeta, size_t index)
 {
-	char	   *values = ((char *)kds + __kds_unpack(cmeta->values_offset));
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *values = ((char *)kds + cmeta->values_offset);
+	size_t		length = cmeta->values_length;
 	int32_t		unitsz = cmeta->attopts.fixed_size_binary.byteWidth;
 	struct varlena *res;
 
@@ -2929,8 +2928,8 @@ static Datum
 pg_bool_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	uint8_t	   *bitmap = (uint8_t *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	uint8_t	   *bitmap = (uint8_t *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	bool		rv;
 
 	if (sizeof(uint8_t) * (index>>3) >= length)
@@ -2944,8 +2943,8 @@ pg_simple_arrow_ref(kern_data_store *kds,
 					kern_colmeta *cmeta, size_t index)
 {
 	int32_t		unitsz = cmeta->attopts.unitsz;
-	char	   *values = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *values = (char *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	Datum		retval = 0;
 
 	Assert(unitsz > 0 && unitsz <= sizeof(Datum));
@@ -2960,8 +2959,8 @@ pg_numeric_arrow_ref(kern_data_store *kds,
 					 kern_colmeta *cmeta, size_t index)
 {
 	char	   *result = palloc0(sizeof(struct NumericData));
-	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *base = (char *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	int			dscale = cmeta->attopts.decimal.scale;
 	int128_t	ival;
 
@@ -2977,8 +2976,8 @@ static Datum
 pg_date_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *base = (char *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	DateADT		dt;
 
 	switch (cmeta->attopts.date.unit)
@@ -3005,8 +3004,8 @@ static Datum
 pg_time_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *base = (char *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	TimeADT		tm;
 
 	switch (cmeta->attopts.time.unit)
@@ -3042,8 +3041,8 @@ static Datum
 pg_timestamp_arrow_ref(kern_data_store *kds,
 					   kern_colmeta *cmeta, size_t index)
 {
-	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *base = (char *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	Timestamp	ts;
 
 	switch (cmeta->attopts.timestamp.unit)
@@ -3082,8 +3081,8 @@ static Datum
 pg_interval_arrow_ref(kern_data_store *kds,
 					  kern_colmeta *cmeta, size_t index)
 {
-	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *base = (char *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	Interval   *iv = palloc0(sizeof(Interval));
 
 	switch (cmeta->attopts.interval.unit)
@@ -3111,8 +3110,8 @@ static Datum
 pg_macaddr_arrow_ref(kern_data_store *kds,
 					 kern_colmeta *cmeta, size_t index)
 {
-	char   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t	length = __kds_unpack(cmeta->values_length);
+	char   *base = (char *)kds + cmeta->values_offset;
+	size_t	length = cmeta->values_length;
 
 	if (cmeta->attopts.fixed_size_binary.byteWidth != sizeof(macaddr))
 		elog(ERROR, "Bug? wrong FixedSizeBinary::byteWidth(%d) for macaddr",
@@ -3127,8 +3126,8 @@ static Datum
 pg_inet_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	char   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t	length = __kds_unpack(cmeta->values_length);
+	char   *base = (char *)kds + cmeta->values_offset;
+	size_t	length = cmeta->values_length;
 	inet   *ip = palloc(sizeof(inet));
 
 	if (cmeta->attopts.fixed_size_binary.byteWidth == 4)
@@ -3331,10 +3330,10 @@ pg_datum_arrow_ref(kern_data_store *kds,
 					cmeta->idx_subattrs < kds->ncols ||
 					cmeta->idx_subattrs >= kds->nr_colmeta)
 					elog(ERROR, "Bug? corrupted kernel column metadata");
-				if (sizeof(uint32_t) * (index+2) > __kds_unpack(cmeta->values_length))
+				if (sizeof(uint32_t) * (index+2) > cmeta->values_length)
 					elog(ERROR, "Bug? array index is out of range");
 				smeta = &kds->colmeta[cmeta->idx_subattrs];
-				offset = (uint32_t *)((char *)kds + __kds_unpack(cmeta->values_offset));
+				offset = (uint32_t *)((char *)kds + cmeta->values_offset);
 				datum = pg_array_arrow_ref(kds, smeta,
 										   offset[index],
 										   offset[index+1]);
@@ -3351,10 +3350,10 @@ pg_datum_arrow_ref(kern_data_store *kds,
 					cmeta->idx_subattrs < kds->ncols ||
 					cmeta->idx_subattrs >= kds->nr_colmeta)
 					elog(ERROR, "Bug? corrupted kernel column metadata");
-				if (sizeof(uint64_t) * (index+2) > __kds_unpack(cmeta->values_length))
+				if (sizeof(uint64_t) * (index+2) > cmeta->values_length)
 					elog(ERROR, "Bug? array index is out of range");
 				smeta = &kds->colmeta[cmeta->idx_subattrs];
-				offset = (uint64_t *)((char *)kds + __kds_unpack(cmeta->values_offset));
+				offset = (uint64_t *)((char *)kds + cmeta->values_offset);
 				datum = pg_array_arrow_ref(kds, smeta,
 										   offset[index],
 										   offset[index+1]);

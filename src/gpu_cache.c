@@ -430,6 +430,12 @@ out:
 			 redo_buffer_size);
 		return false;
 	}
+	if (redo_buffer_size >= (2UL << 30))
+	{
+		elog(elevel, "gpucache: 'redo_buffer_size' is too large (%zu)",
+			 redo_buffer_size);
+		return false;
+	}
 	if (gpu_sync_threshold < Max(redo_buffer_size / 20, (4UL << 20)))
 	{
 		elog(elevel, "gpucache: 'gpu_sync_threshold' is too small (must be larger than [%zu])", Max(redo_buffer_size/20, (4UL<<20)));
@@ -852,8 +858,8 @@ __setup_kern_data_store_column(kern_data_store *kds_head,
 		if (!attr->attnotnull)
 		{
 			sz = MAXALIGN(BITMAPLEN(nrooms));
-			cmeta->nullmap_offset = __kds_packed(off);
-			cmeta->nullmap_length = __kds_packed(sz);
+			cmeta->nullmap_offset = off;
+			cmeta->nullmap_length = sz;
 			off += sz;
 		}
 
@@ -862,15 +868,15 @@ __setup_kern_data_store_column(kern_data_store *kds_head,
 			unitsz = att_align_nominal(attr->attlen,
 									   attr->attalign);
 			sz = MAXALIGN(unitsz * nrooms);
-			cmeta->values_offset = __kds_packed(off);
-			cmeta->values_length = __kds_packed(sz);
+			cmeta->values_offset = off;
+			cmeta->values_length = sz;
 			off += sz;
 		}
 		else if (attr->attlen == -1)
 		{
-			sz = MAXALIGN(sizeof(uint32) * nrooms);
-			cmeta->values_offset = __kds_packed(off);
-			cmeta->values_length = __kds_packed(sz);
+			sz = MAXALIGN(sizeof(uint64) * nrooms);
+			cmeta->values_offset = off;
+			cmeta->values_length = sz;
 			off += sz;
 			unitsz = get_typavgwidth(attr->atttypid,
 									 attr->atttypmod);
@@ -887,8 +893,8 @@ __setup_kern_data_store_column(kern_data_store *kds_head,
 	/* system column */
 	cmeta = &kds_head->colmeta[kds_head->nr_colmeta - 1];
 	sz = MAXALIGN(cmeta->attlen * nrooms);
-	cmeta->values_offset = __kds_packed(off);
-	cmeta->values_length = __kds_packed(sz);
+	cmeta->values_offset = off;
+	cmeta->values_length = sz;
 	off += sz;
 	kds_head->length = off;
 
@@ -3581,7 +3587,7 @@ __gpucacheExecApplyRedoKernel(GpuCacheControlCommand *cmd,
 
 		Assert((uintptr_t)pos == MAXALIGN((uintptr_t)pos));
 		gcache_redo->redo_items[gcache_redo->nitems++]
-			= __kds_packed((char *)pos - (char *)gcache_redo);
+			= (uint32_t)((char *)pos - (char *)gcache_redo);
 		pos += tx_log->length;
 	}
 
