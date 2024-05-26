@@ -4095,20 +4095,20 @@ __xpucode_gisteval_cstring(StringInfo buf,
 	Assert(kexp->nr_args == 1 &&
 		   kexp->exptype == karg->exptype);
 
-	appendStringInfo(buf, "{GiSTEval(%s): ", dname);
+	appendStringInfo(buf, "{GiSTEval(%s): gist_depth=%d",
+					 dname,
+					 kexp->u.gist.gist_depth);
 
 	kvdef = __lookup_kvar_defitem_by_slot_id(css, kexp->u.gist.ivar_desc.vl_slot_id);
 	if (!kvdef)
 		elog(ERROR, "failed on kernel variable with slot_id=%d",
 			 kexp->u.gist.ivar_desc.vl_slot_id);
-	appendStringInfo(buf, "<slot=%d, idxname%d='%s', type='%s'>, arg=",
+	appendStringInfo(buf, " <slot=%d, idxname%d='%s', type='%s'>",
 					 kexp->u.gist.ivar_desc.vl_slot_id,
 					 kexp->u.gist.ivar_desc.vl_resno,
 					 get_attname(kexp->u.gist.gist_oid,
 								 kexp->u.gist.ivar_desc.vl_resno, false),
 					 devtype_get_name_by_opcode(kvdef->kv_type_code));
-	__xpucode_to_cstring(buf, karg, css, es, dcontext);
-	appendStringInfo(buf, "}");
 }
 
 static void

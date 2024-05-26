@@ -1797,7 +1797,7 @@ ExecGiSTIndexGetNext(kern_context *kcxt,
 	}
 	else
 	{
-		size_t		l_off = sizeof(ItemIdData) * l_state;
+		size_t		l_off = l_state;
 		size_t		diff;
 
 		assert(l_off >= kds_gist->block_offset &&
@@ -1865,8 +1865,7 @@ restart:
 					return ULONG_MAX;
 				}
 				/* returns the offset of the next line item pointer */
-				assert((((uintptr_t)lpp) & (sizeof(ItemIdData)-1)) == 0);
-				return ((char *)(lpp+1) - (char *)(kds_gist)) / sizeof(ItemIdData);
+				return ((char *)(lpp+1) - (char *)(kds_gist));
 			}
 			block_nr = ((BlockNumber)itup->t_tid.ip_blkid.bi_hi << 16 |
 						(BlockNumber)itup->t_tid.ip_blkid.bi_lo);
@@ -1877,7 +1876,16 @@ restart:
 		}
 	}
 
-	if (!GistPageIsRoot(gist_page))
+	if (GistFollowRight(gist_page))
+	{
+		/* move to the next chain, if any */
+		uint32_t	rightlink = GistPageGetOpaque(gist_page)->rightlink;
+
+		gist_page = KDS_BLOCK_PGPAGE(kds_gist, rightlink);
+		start = FirstOffsetNumber;
+		goto restart;
+	}
+	else if (!GistPageIsRoot(gist_page))
 	{
 		/* pop to the parent page if not found */
 		start = gist_page->pd_parent_item + 1;

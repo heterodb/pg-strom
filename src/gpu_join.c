@@ -1863,43 +1863,64 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
  * innerPreloadSetupGiSTIndex
  */
 static void
-__innerPreloadSetupGiSTIndexWalker(char *base,
+__innerPreloadSetupGiSTIndexWalker(Relation i_rel,
+								   char *base,
 								   BlockNumber blkno,
 								   BlockNumber nblocks,
 								   BlockNumber parent_blkno,
 								   OffsetNumber parent_offno)
 {
-	Page			page = (Page)(base + BLCKSZ * blkno);
-	PageHeader		hpage = (PageHeader) page;
-	GISTPageOpaque	op = GistPageGetOpaque(page);
-	OffsetNumber	i, maxoff;
+	while (blkno < nblocks)
+	{
+		Page			page = (Page)(base + BLCKSZ * blkno);
+		PageHeader		hpage = (PageHeader) page;
+		OffsetNumber	i, maxoff;
 
-	Assert(hpage->pd_lsn.xlogid == InvalidBlockNumber &&
-		   hpage->pd_lsn.xrecoff == InvalidOffsetNumber);
-	hpage->pd_lsn.xlogid = parent_blkno;
-	hpage->pd_lsn.xrecoff = parent_offno;
-	if ((op->flags & F_LEAF) != 0)
-		return;
-	maxoff = PageGetMaxOffsetNumber(page);
-	for (i=FirstOffsetNumber; i <= maxoff; i = OffsetNumberNext(i))
-    {
-		ItemId		iid = PageGetItemId(page, i);
-		IndexTuple	it;
-		BlockNumber	child;
+		Assert(hpage->pd_lsn.xlogid == InvalidBlockNumber &&
+			   hpage->pd_lsn.xrecoff == InvalidOffsetNumber);
+		hpage->pd_lsn.xlogid = parent_blkno;
+		hpage->pd_lsn.xrecoff = parent_offno;
+		if (!GistPageIsLeaf(page))
+		{
+			maxoff = PageGetMaxOffsetNumber(page);
+			for (i = FirstOffsetNumber;
+				 i <= maxoff;
+				 i = OffsetNumberNext(i))
+			{
+				ItemId		iid = PageGetItemId(page, i);
+				IndexTuple	it;
+				BlockNumber	child;
 
-		if (ItemIdIsDead(iid))
-			continue;
-		it = (IndexTuple) PageGetItem(page, iid);
-		child = BlockIdGetBlockNumber(&it->t_tid.ip_blkid);
-		if (child < nblocks)
-			__innerPreloadSetupGiSTIndexWalker(base, child, nblocks, blkno, i);
+				if (!ItemIdIsNormal(iid))
+					continue;
+				it = (IndexTuple) PageGetItem(page, iid);
+				child = BlockIdGetBlockNumber(&it->t_tid.ip_blkid);
+				if (child < nblocks)
+					__innerPreloadSetupGiSTIndexWalker(i_rel,
+													   base,
+													   child,
+													   nblocks,
+													   blkno, i);
+				else
+					elog(ERROR, "GiST-Index '%s' may be corrupted: index-node %u of block %u dives into %u but out of the relation (nblocks=%u)",
+						 RelationGetRelationName(i_rel),
+						 i, blkno, child, nblocks);
+			}
+		}
+
+		if (GistFollowRight(page))
+			blkno = GistPageGetOpaque(page)->rightlink;
+		else
+			break;
 	}
 }
 
 static void
-innerPreloadSetupGiSTIndex(kern_data_store *kds_gist)
+innerPreloadSetupGiSTIndex(Relation i_rel, kern_data_store *kds_gist)
 {
-	__innerPreloadSetupGiSTIndexWalker((char *)KDS_BLOCK_PGPAGE(kds_gist, 0),
+	char   *base = (char *)KDS_BLOCK_PGPAGE(kds_gist, 0);
+
+	__innerPreloadSetupGiSTIndexWalker(i_rel, base,
 									   0, kds_gist->nitems,
 									   InvalidBlockNumber,
 									   InvalidOffsetNumber);
@@ -2021,7 +2042,7 @@ again:
 				kds->length = block_offset + BLCKSZ * nblocks;
 				kds->nitems = nblocks;
 				kds->block_nloaded = nblocks;
-				innerPreloadSetupGiSTIndex(kds);
+				innerPreloadSetupGiSTIndex(i_rel, kds);
 			}
 			offset += (block_offset + BLCKSZ * nblocks);
 		}
@@ -2152,7 +2173,9 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 		memcpy(&hitem->t.htup.t_ctid, &htup->t_self, sizeof(ItemPointerData));
 
 		row_index[rowid++] = (tail_pos - (char *)&hitem->t);
-		Assert(curr_pos >= (char *)kds + KDS_HEAD_LENGTH(kds) + sizeof(uint64_t) * (kds->hash_nslots + rowid));
+		Assert(curr_pos >= ((char *)kds
+							+ KDS_HEAD_LENGTH(kds)
+							+ sizeof(uint64_t) * (kds->hash_nslots + rowid)));
 	}
 }
 

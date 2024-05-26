@@ -444,20 +444,21 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + get_local_size())
 	{
 		/*
-		 * Next depth already have warpSize or more pending tuples,
+		 * Next depth already have blockSize or more pending tuples,
 		 * so wipe out these tuples first.
 		 */
 		return depth+1;
 	}
 
-	if (WARP_WRITE_POS(wp,gist_depth) >= WARP_READ_POS(wp,gist_depth) + get_local_size() ||
+	if (WARP_WRITE_POS(wp,gist_depth) >= (WARP_READ_POS(wp,gist_depth)
+										  + get_local_size()) ||
 		(wp->scan_done >= depth &&		/* is terminal case? */
 		 WARP_WRITE_POS(wp,depth-1) == WARP_READ_POS(wp,depth-1) &&
 		 __syncthreads_count(l_state != ULONG_MAX) == 0))
 	{
 		/*
-		 * We already have 32 or more pending tuples; that is fetched by
-		 * the GiST-index. So, try to fetch Join-Quals for these tuples.
+		 * We already have blockSize or more pending tuples; they were
+		 * fetched by the GiST-index. So, we try Join-quals for them.
 		 */
 		bool	join_is_valid = false;
 
@@ -481,7 +482,7 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 			return -1;
 		if (get_local_id() == 0)
-			WARP_READ_POS(wp,gist_depth) = Max(WARP_READ_POS(wp,gist_depth) + get_local_size(),
+			WARP_READ_POS(wp,gist_depth) = Min(WARP_READ_POS(wp,gist_depth) + get_local_size(),
 											   WARP_WRITE_POS(wp,gist_depth));
 		wr_pos = WARP_WRITE_POS(wp,depth);
 		wr_pos += pgstrom_stair_sum_binary(join_is_valid, &count);

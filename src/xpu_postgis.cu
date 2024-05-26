@@ -5323,9 +5323,11 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 					 * If P1-P2 would be I-E or E-I, it obviously goes
 					 * across the boundary line; should not happen.
 					 */
+#if 0
 					printf("P1 [%c] (%.2f,%.2f) P2 [%c] (%.2f,%.2f)\n",
 						   p1_location, P1.x, P1.y,
 						   p2_location, P2.x, P2.y);
+#endif
 					return -1;
 				}
 			}

@@ -1098,6 +1098,7 @@ GistFollowRight(PageHeaderData *page)
 {
 	return (GistPageGetOpaque(page)->flags & F_FOLLOW_RIGHT) != 0;
 }
+
 /* root page of a gist index */
 #define GIST_ROOT_BLKNO			0
 
@@ -1242,12 +1243,7 @@ KDS_HASH_FIRST_ITEM(const kern_data_store *kds, uint32_t hash)
 	{
 		kern_hashitem *hitem = (kern_hashitem *)
 			((char *)kds + kds->length - offset);
-//		Assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hitem));
-		if (!__KDS_HASH_ITEM_CHECK_VALID(kds, hitem))
-		{
-			printf("kds=%p-%p len=%lu hitem=%p\n", kds, (char *)kds + kds->length, kds->length, hitem);
-			return NULL;
-		}
+		assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hitem));
 		return hitem;
 	}
 	return NULL;
@@ -1260,12 +1256,7 @@ KDS_HASH_NEXT_ITEM(const kern_data_store *kds, uint64_t hnext_offset)
 	{
 		kern_hashitem *hnext = (kern_hashitem *)
 			((char *)kds + kds->length - hnext_offset);
-		//Assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hnext));
-		if (!__KDS_HASH_ITEM_CHECK_VALID(kds, hnext))
-		{
-			printf("KDS=%p-%p len=%lu hitem=%p %u\n", kds, (char *)kds + kds->length, kds->length, hnext, hnext->t.t_len);
-			return NULL;
-		}
+		assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hnext));
 		return hnext;
 	}
 	return NULL;
