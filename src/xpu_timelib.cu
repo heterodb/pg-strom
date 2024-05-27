@@ -2766,6 +2766,8 @@ pgfn_timestamptz_mi_interval(XPU_PGFUNCTION_ARGS)
 	return __pg_timestamptz_pl_interval(kcxt, result, &tval, &ival);
 }
 
+#define SAMESIGN(a,b)		(((a) < 0) == ((b) < 0))
+
 PUBLIC_FUNCTION(bool)
 pgfn_interval_um(XPU_PGFUNCTION_ARGS)
 {
@@ -2775,22 +2777,21 @@ pgfn_interval_um(XPU_PGFUNCTION_ARGS)
 		result->expr_ops = NULL;
 	else
 	{
-		if (ival.value.month   == -1 ||
-			ival.value.day     == -1 ||
-			result->value.time == -1L)
+		result->value.month = -ival.value.month;
+		result->value.day   = -ival.value.day;
+		result->value.time  = -ival.value.time;
+		if (result->value.time != 0 && SAMESIGN(ival.value.time, result->value.time) ||
+			result->value.day != 0 && SAMESIGN(ival.value.day, result->value.day) ||
+			result->value.month != 0 && SAMESIGN(ival.value.month, result->value.month))
 		{
 			STROM_ELOG(kcxt, "interval out of range");
 			return false;
 		}
-		result->value.month = -ival.value.month;
-		result->value.day   = -ival.value.day;
-		result->value.time  = -ival.value.time;
 		result->expr_ops    = &xpu_interval_ops;
 	}
 	return true;
 }
 
-#define SAMESIGN(a,b)		(((a) < 0) == ((b) < 0))
 
 PUBLIC_FUNCTION(bool)
 pgfn_interval_pl(XPU_PGFUNCTION_ARGS)
