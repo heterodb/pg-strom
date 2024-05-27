@@ -6,6 +6,11 @@
 # ----------
 
 # ----------
+# Init regression test dataset (if changed)
+# ----------
+test: pgstrom_init
+
+# ----------
 # Check default parameter setting
 # ----------
 test: pgstrom_guc
@@ -47,6 +52,11 @@ test: fallback_pgsql
 # GPU Cache
 # ----------
 test: gpu_cache
+
+# ---------- 
+# PostGIS (optional)
+# ----------
+#@@POSTGIS@@
 
 # ----------
 # Misc tests

@@ -1,0 +1,339 @@
+---
+--- Test for GPU PostGIS Support
+---
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_postgis_temp CASCADE;
+CREATE SCHEMA regtest_postgis_temp;
+SET search_path = regtest_postgis_temp,public;
+\set test_giskanto_src_path `echo -n $ARROW_TEST_DATA_DIR/giskanto.sql`
+\i :test_giskanto_src_path
+DROP TABLE IF EXISTS giskanto;
+CREATE TABLE giskanto (
+    gid  integer,
+    pref text,
+    city text,
+    geom geometry(MultiPolygon)
+);
+COPY giskanto (gid, pref, city, geom) FROM stdin;
+CREATE INDEX giskanto_geom_idx ON giskanto USING gist (geom);
+RESET client_min_messages;
+CREATE TABLE dpoints (
+  did    int,
+  x      float8,
+  y      float8
+);
+SELECT pgstrom.random_setseed(20240527);
+ random_setseed 
+----------------
+ 
+(1 row)
+
+INSERT INTO dpoints (SELECT i, pgstrom.random_float(0.0, 138.787661, 140.434258),
+                               pgstrom.random_float(0.0,  35.250012,  36.179917)
+                       FROM generate_series(1,300000) i);
+---
+--- Run GPU Join with GiST index
+---
+RESET pg_strom.enabled;
+EXPLAIN
+SELECT pref, city, count(*)
+  FROM giskanto, dpoints
+ WHERE (pref = '東京都' or city like '横浜市 %')
+   AND st_contains(geom, st_makepoint(x, y))
+ GROUP BY pref, city
+ ORDER BY pref, city;
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=3272.72..3273.91 rows=9 width=72)
+   Group Key: giskanto.pref, giskanto.city
+   ->  Gather Merge  (cost=3272.72..3273.76 rows=9 width=72)
+         Workers Planned: 1
+         ->  Sort  (cost=2272.71..2272.73 rows=9 width=72)
+               Sort Key: giskanto.pref, giskanto.city
+               ->  Partial HashAggregate  (cost=2272.48..2272.57 rows=9 width=72)
+                     Group Key: giskanto.pref, giskanto.city
+                     ->  Parallel Custom Scan (GpuJoin) on dpoints  (cost=178.13..2259.58 rows=1720 width=64)
+                           GPU Projection: giskanto.pref, giskanto.city
+                           GPU Join Quals [1]: st_contains(giskanto.geom, st_makepoint(dpoints.x, dpoints.y)) ... [nrows: 191100 -> 1720]
+                           GPU GiST Join [1]: (giskanto.geom ~ st_makepoint(dpoints.x, dpoints.y)) on giskanto_geom_idx (geom)
+                           ->  Parallel Seq Scan on giskanto  (cost=0.00..71.99 rows=5 width=96)
+                                 Filter: ((pref = '東京都'::text) OR (city ~~ '横浜市 %'::text))
+(14 rows)
+
+SELECT pref, city, count(*)
+  FROM giskanto, dpoints
+ WHERE (pref = '東京都' or city like '横浜市 %')
+   AND st_contains(geom, st_makepoint(x, y))
+ GROUP BY pref, city
+ ORDER BY pref, city;
+   pref   |       city        | count 
+----------+-------------------+-------
+ 東京都   | あきる野市        |  1496
+ 東京都   | 三鷹市            |   320
+ 東京都   | 世田谷区          |  1121
+ 東京都   | 中央区            |   195
+ 東京都   | 中野区            |   320
+ 東京都   | 八王子市          |  3590
+ 東京都   | 北区              |   379
+ 東京都   | 千代田区          |   230
+ 東京都   | 台東区            |   187
+ 東京都   | 品川区            |   418
+ 東京都   | 国分寺市          |   231
+ 東京都   | 国立市            |   154
+ 東京都   | 墨田区            |   260
+ 東京都   | 多摩市            |   423
+ 東京都   | 大田区            |  1229
+ 東京都   | 小平市            |   365
+ 東京都   | 小金井市          |   210
+ 東京都   | 府中市            |   565
+ 東京都   | 文京区            |   237
+ 東京都   | 新宿区            |   359
+ 東京都   | 日野市            |   556
+ 東京都   | 昭島市            |   340
+ 東京都   | 杉並区            |   654
+ 東京都   | 東久留米市        |   258
+ 東京都   | 東大和市          |   240
+ 東京都   | 東村山市          |   358
+ 東京都   | 板橋区            |   682
+ 東京都   | 武蔵村山市        |   313
+ 東京都   | 武蔵野市          |   216
+ 東京都   | 江戸川区          |   971
+ 東京都   | 江東区            |   747
+ 東京都   | 清瀬市            |   223
+ 東京都   | 渋谷区            |   304
+ 東京都   | 港区              |   405
+ 東京都   | 狛江市            |   128
+ 東京都   | 町田市            |  1481
+ 東京都   | 目黒区            |   288
+ 東京都   | 福生市            |   208
+ 東京都   | 稲城市            |   351
+ 東京都   | 立川市            |   485
+ 東京都   | 練馬区            |   975
+ 東京都   | 羽村市            |   200
+ 東京都   | 荒川区            |   199
+ 東京都   | 葛飾区            |   694
+ 東京都   | 西多摩郡 奥多摩町 |  4443
+ 東京都   | 西多摩郡 日の出町 |   509
+ 東京都   | 西多摩郡 檜原村   |  2050
+ 東京都   | 西多摩郡 瑞穂町   |   336
+ 東京都   | 西東京市          |   313
+ 東京都   | 調布市            |   441
+ 東京都   | 豊島区            |   269
+ 東京都   | 足立区            |  1055
+ 東京都   | 青梅市            |  2048
+ 神奈川県 | 横浜市 中区       |   404
+ 神奈川県 | 横浜市 保土ケ谷区 |   403
+ 神奈川県 | 横浜市 南区       |   254
+ 神奈川県 | 横浜市 戸塚区     |   754
+ 神奈川県 | 横浜市 旭区       |   642
+ 神奈川県 | 横浜市 栄区       |   390
+ 神奈川県 | 横浜市 泉区       |   476
+ 神奈川県 | 横浜市 港北区     |   620
+ 神奈川県 | 横浜市 港南区     |   410
+ 神奈川県 | 横浜市 瀬谷区     |   313
+ 神奈川県 | 横浜市 磯子区     |   346
+ 神奈川県 | 横浜市 神奈川区   |   451
+ 神奈川県 | 横浜市 緑区       |   480
+ 神奈川県 | 横浜市 西区       |   131
+ 神奈川県 | 横浜市 都筑区     |   492
+ 神奈川県 | 横浜市 金沢区     |   644
+ 神奈川県 | 横浜市 青葉区     |   670
+ 神奈川県 | 横浜市 鶴見区     |   662
+(71 rows)
+
+RESET pg_strom.enabled;
+EXPLAIN
+SELECT pref, city, count(*)
+  FROM giskanto, dpoints
+ WHERE ((pref = '東京都' and city like '%区') OR
+        (pref = '埼玉県' and city like '%市%'))
+   AND st_dwithin(geom, st_makepoint(x, y), 0.002)
+ GROUP BY pref, city
+ ORDER BY pref, city;
+                                                                              QUERY PLAN                                                                              
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=4096.84..4098.89 rows=1 width=72)
+   Group Key: giskanto.pref, giskanto.city
+   ->  Gather Merge  (cost=4096.84..4098.87 rows=1 width=72)
+         Workers Planned: 1
+         ->  Partial GroupAggregate  (cost=3096.83..3098.75 rows=1 width=72)
+               Group Key: giskanto.pref, giskanto.city
+               ->  Sort  (cost=3096.83..3097.31 rows=191 width=64)
+                     Sort Key: giskanto.pref, giskanto.city
+                     ->  Parallel Custom Scan (GpuJoin) on dpoints  (cost=180.69..3089.58 rows=191 width=64)
+                           GPU Projection: giskanto.pref, giskanto.city
+                           GPU Join Quals [1]: st_dwithin(giskanto.geom, st_makepoint(dpoints.x, dpoints.y), '0.002'::double precision) ... [nrows: 191100 -> 191]
+                           GPU GiST Join [1]: (giskanto.geom && st_expand(st_makepoint(dpoints.x, dpoints.y), '0.002'::double precision)) on giskanto_geom_idx (geom)
+                           ->  Parallel Seq Scan on giskanto  (cost=0.00..74.66 rows=1 width=96)
+                                 Filter: (((pref = '東京都'::text) AND (city ~~ '%区'::text)) OR ((pref = '埼玉県'::text) AND (city ~~ '%市%'::text)))
+(14 rows)
+
+SELECT pref, city, count(*)
+  FROM giskanto, dpoints
+ WHERE ((pref = '東京都' and city like '%区') OR
+        (pref = '埼玉県' and city like '%市%'))
+   AND st_dwithin(geom, st_makepoint(x, y), 0.002)
+ GROUP BY pref, city
+ ORDER BY pref, city;
+  pref  |       city        | count 
+--------+-------------------+-------
+ 埼玉県 | さいたま市 中央区 |   229
+ 埼玉県 | さいたま市 北区   |   416
+ 埼玉県 | さいたま市 南区   |   390
+ 埼玉県 | さいたま市 大宮区 |   350
+ 埼玉県 | さいたま市 岩槻区 |  1165
+ 埼玉県 | さいたま市 桜区   |   468
+ 埼玉県 | さいたま市 浦和区 |   293
+ 埼玉県 | さいたま市 緑区   |   695
+ 埼玉県 | さいたま市 西区   |   690
+ 埼玉県 | さいたま市 見沼区 |   705
+ 埼玉県 | ふじみ野市        |   434
+ 埼玉県 | 三郷市            |   744
+ 埼玉県 | 上尾市            |  1104
+ 埼玉県 | 久喜市            |  1900
+ 埼玉県 | 入間市            |   934
+ 埼玉県 | 八潮市            |   446
+ 埼玉県 | 加須市            |  2440
+ 埼玉県 | 北本市            |   493
+ 埼玉県 | 吉川市            |   765
+ 埼玉県 | 和光市            |   297
+ 埼玉県 | 坂戸市            |  1009
+ 埼玉県 | 富士見市          |   524
+ 埼玉県 | 川口市            |  1393
+ 埼玉県 | 川越市            |  2499
+ 埼玉県 | 幸手市            |   820
+ 埼玉県 | 志木市            |   261
+ 埼玉県 | 戸田市            |   462
+ 埼玉県 | 所沢市            |  1625
+ 埼玉県 | 新座市            |   579
+ 埼玉県 | 日高市            |  1141
+ 埼玉県 | 春日部市          |  1505
+ 埼玉県 | 朝霞市            |   465
+ 埼玉県 | 本庄市            |   706
+ 埼玉県 | 東松山市          |  1436
+ 埼玉県 | 桶川市            |   644
+ 埼玉県 | 深谷市            |  1438
+ 埼玉県 | 熊谷市            |  2393
+ 埼玉県 | 狭山市            |  1102
+ 埼玉県 | 白岡市            |   648
+ 埼玉県 | 秩父市            | 10577
+ 埼玉県 | 羽生市            |   851
+ 埼玉県 | 草加市            |   727
+ 埼玉県 | 蓮田市            |   673
+ 埼玉県 | 蕨市              |   151
+ 埼玉県 | 行田市            |  1295
+ 埼玉県 | 越谷市            |  1357
+ 埼玉県 | 飯能市            |  3952
+ 埼玉県 | 鴻巣市            |  1501
+ 埼玉県 | 鶴ヶ島市          |   488
+ 東京都 | 世田谷区          |  1307
+ 東京都 | 中央区            |   263
+ 東京都 | 中野区            |   429
+ 東京都 | 北区              |   513
+ 東京都 | 千代田区          |   286
+ 東京都 | 台東区            |   252
+ 東京都 | 品川区            |   589
+ 東京都 | 墨田区            |   338
+ 東京都 | 大田区            |  1525
+ 東京都 | 文京区            |   303
+ 東京都 | 新宿区            |   454
+ 東京都 | 杉並区            |   763
+ 東京都 | 板橋区            |   813
+ 東京都 | 江戸川区          |  1172
+ 東京都 | 江東区            |  1204
+ 東京都 | 渋谷区            |   390
+ 東京都 | 港区              |   561
+ 東京都 | 目黒区            |   395
+ 東京都 | 練馬区            |  1120
+ 東京都 | 荒川区            |   272
+ 東京都 | 葛飾区            |   848
+ 東京都 | 豊島区            |   369
+ 東京都 | 足立区            |  1255
+(72 rows)
+
+---
+--- PostGIS Functions
+---
+RESET pg_strom.enabled;
+/*
+--
+-- st_distance POLY-POLY is wrong
+--
+EXPLAIN
+SELECT a.pref, a.city, b.pref, b.city, st_distance(a.geom, b.geom)
+  FROM giskanto a, giskanto b
+ WHERE a.gid <> b.gid
+   AND a.city in ('目黒区','所沢市', '杉並区','府中市')
+   AND b.city in ('鴻巣市','蕨市','葛飾区','海老名市');
+
+SELECT a.pref, a.city, b.pref, b.city, st_distance(a.geom, b.geom)
+  FROM giskanto a, giskanto b
+ WHERE a.gid <> b.gid
+   AND a.city in ('目黒区','所沢市', '杉並区','府中市')
+   AND b.city in ('鴻巣市','蕨市','葛飾区','海老名市');
+*/
+-- distance from POINT(皇居)
+SET enable_seqscan = off;
+RESET pg_strom.enabled;
+EXPLAIN
+SELECT gid, pref, city,
+       st_distance(geom, st_makepoint(139.7234394, 35.6851783)) dist
+  INTO test01g
+  FROM giskanto
+ WHERE gid > 0;
+                                                  QUERY PLAN                                                  
+--------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on giskanto  (cost=100.00..3942.16 rows=302 width=76)
+   GPU Projection: gid, pref, city, st_distance(geom, '01010000006974626A26776140E5362BECB3D74140'::geometry)
+   GPU Scan Quals: (gid > 0) [rows: 906 -> 302]
+(3 rows)
+
+SELECT gid, pref, city,
+       st_distance(geom, st_makepoint(139.7234394, 35.6851783)) dist
+  INTO test01g
+  FROM giskanto
+ WHERE gid > 0;
+SET pg_strom.enabled = off;
+SELECT gid, pref, city,
+       st_distance(geom, st_makepoint(139.7234394, 35.6851783)) dist
+  INTO test01c
+  FROM giskanto
+ WHERE gid > 0;
+/*
+SELECT *
+  FROM test01g g, test01c c
+ WHERE g.gid = c.gid
+   AND abs(g.dist - c.dist) >= 0.00001;
+*/
+-- distance from POINT(筑波大学)
+RESET pg_strom.enabled;
+EXPLAIN
+SELECT gid, pref, city,
+       st_distance(geom, st_makepoint(140.1070404, 36.094009)) dist
+  INTO test02g
+  FROM giskanto
+ WHERE gid > 0;
+                                                  QUERY PLAN                                                  
+--------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on giskanto  (cost=100.00..3942.16 rows=302 width=76)
+   GPU Projection: gid, pref, city, st_distance(geom, '0101000000392BFDDF6C836140CC43A67C080C4240'::geometry)
+   GPU Scan Quals: (gid > 0) [rows: 906 -> 302]
+(3 rows)
+
+SELECT gid, pref, city,
+       st_distance(geom, st_makepoint(140.1070404, 36.094009)) dist
+  INTO test02g
+  FROM giskanto
+ WHERE gid > 0;
+SET pg_strom.enabled = off;
+SELECT gid, pref, city,
+       st_distance(geom, st_makepoint(140.1070404, 36.094009)) dist
+  INTO test02c
+  FROM giskanto
+ WHERE gid > 0;
+/*
+SELECT *
+  FROM test02g g, test02c c
+ WHERE g.gid = c.gid
+   AND abs(g.dist - c.dist) >= 0.00001;
+*/

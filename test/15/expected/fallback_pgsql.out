@@ -245,7 +245,7 @@ VACUUM ANALYZE;
 SELECT * INTO test12g
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
  WHERE l.aid < 2500 AND memo LIKE '%ab%';
-NOTICE:  GpuJoin: CPU fallback 1 tuples (176B)
+NOTICE:  GpuScan: CPU fallback 1 tuples (168B)
 SET pg_strom.enabled = off;
 SELECT * INTO test12p
   FROM fallback_data d NATURAL JOIN fallback_enlarge l
