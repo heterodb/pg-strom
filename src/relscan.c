@@ -388,13 +388,13 @@ pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple htuple)
 	sz = MAXALIGN(offsetof(kern_tupitem, htup) + htuple->t_len);
 	while (pts->fallback_usage + sz > pts->fallback_bufsz)
 	{
-		pts->fallback_bufsz *= 2 + BLCKSZ;
+		pts->fallback_bufsz = pts->fallback_bufsz * 2 + BLCKSZ;
 		pts->fallback_buffer = repalloc_huge(pts->fallback_buffer,
 											 pts->fallback_bufsz);
 	}
 	while (pts->fallback_nitems >= pts->fallback_nrooms)
 	{
-		pts->fallback_nrooms *= 2 + 100;
+		pts->fallback_nrooms = pts->fallback_nrooms * 2 + 100;
 		pts->fallback_tuples = repalloc_huge(pts->fallback_tuples,
 											 sizeof(off_t) * pts->fallback_nrooms);
 	}
