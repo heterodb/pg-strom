@@ -23,6 +23,7 @@ static bool					pgstrom_enable_gpujoin = false;		/* GUC */
 static bool					pgstrom_enable_gpuhashjoin = false;	/* GUC */
 static bool					pgstrom_enable_gpugistindex = false;/* GUC */
 static bool					pgstrom_enable_partitionwise_gpujoin = false;
+static int					__inner_zerocopy_threshold_mb = 512;/* GUC */
 
 static CustomPathMethods	dpujoin_path_methods;
 static CustomScanMethods	dpujoin_plan_methods;
@@ -119,6 +120,22 @@ DEBUG_XpuJoinPathPrint(PlannerInfo *root,
 }
 
 /*
+ * pgstrom_is_gpujoin_path
+ */
+bool
+pgstrom_is_gpujoin_path(const Path *path)
+{
+	if (IsA(path, CustomPath))
+	{
+		CustomPath *cpath = (CustomPath *)path;
+
+		if (cpath->methods == &gpujoin_path_methods)
+			return true;
+	}
+	return false;
+}
+
+/*
  * try_fetch_xpujoin_planinfo
  */
 pgstromPlanInfo *
@@ -130,6 +147,59 @@ try_fetch_xpujoin_planinfo(const Path *path)
 		(cpath->methods == &gpujoin_path_methods ||
 		 cpath->methods == &dpujoin_path_methods))
 		return (pgstromPlanInfo *)linitial(cpath->custom_private);
+	return NULL;
+}
+
+/*
+ * tryZeroCopyInnerJoinBufferPath
+ */
+static Path *
+tryZeroCopyInnerJoinBufferPath(pgstromPlanInnerInfo *pp_inner,
+							   Path *inner_path)
+{
+	PathTarget *inner_target;
+	size_t		inner_zerocopy_threshold;
+
+	if (OidIsValid(pp_inner->gist_index_oid))
+		return NULL;
+	if (__inner_zerocopy_threshold_mb < 0)
+		return NULL;
+	inner_zerocopy_threshold = (size_t)__inner_zerocopy_threshold_mb << 20;
+
+	inner_target = (inner_path->pathtarget
+					? inner_path->pathtarget
+					: inner_path->parent->reltarget);
+	if (pgstrom_is_gpuscan_path(inner_path) ||
+		pgstrom_is_gpujoin_path(inner_path))
+	{
+		int			nattrs = list_length(inner_target->exprs);
+		int			unitsz;
+		double		bufsz;
+
+		unitsz = ((pp_inner->hash_inner_keys != NIL
+				   ? offsetof(kern_hashitem, t.htup)
+				   : offsetof(kern_tupitem, htup)) +
+				  MAXALIGN(offsetof(HeapTupleHeaderData,
+									t_bits) + BITMAPLEN(nattrs)) +
+				  MAXALIGN(inner_target->width));
+
+		bufsz = MAXALIGN(offsetof(kern_data_store, colmeta[nattrs]));
+		if (pp_inner->hash_inner_keys != NIL)
+			bufsz += sizeof(uint64_t) * Max(inner_path->rows, 320.0);
+		bufsz += sizeof(uint64_t) * inner_path->rows;
+		bufsz += unitsz * inner_path->rows;
+		/* enables zero-copy inner buffer if enough large */
+		if (bufsz >= inner_zerocopy_threshold)
+		{
+			CustomPath *cpath = (CustomPath *)pgstrom_copy_pathnode(inner_path);
+			pgstromPlanInfo	*pp_temp = linitial(cpath->custom_private);
+
+			pp_temp = copy_pgstrom_plan_info(pp_temp);
+			pp_temp->projection_hashkeys = pp_inner->hash_inner_keys;
+			cpath->custom_private = list_make1(pp_temp);
+			return (Path *)cpath;
+		}
+	}
 	return NULL;
 }
 
@@ -222,6 +292,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pgstromPlanInfo *pp_info;
 	pgstromPlanInnerInfo *pp_inner;
 	Path		   *inner_path = llast(inner_paths_list);
+	Path		   *temp_path;
 	RelOptInfo	   *inner_rel = inner_path->parent;
 	RelOptInfo	   *outer_rel = op_prev->leaf_rel;
 	Cardinality		outer_nrows;
@@ -414,7 +485,16 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 									  inner_target_list,
 									  pp_inner);
 		if (gist_inner_path)
-			llast(inner_paths_list) = gist_inner_path;
+			llast(inner_paths_list) = inner_path = gist_inner_path;
+	}
+	/*
+	 * Try zero-copy inner buffer
+	 */
+	temp_path = tryZeroCopyInnerJoinBufferPath(pp_inner, inner_path);
+	if (temp_path)
+	{
+		llast(inner_paths_list) = inner_path = temp_path;
+		pp_inner->inner_zerocopy_buffer = true;
 	}
 
 	/*
@@ -568,7 +648,6 @@ __build_simple_xpujoin_path(PlannerInfo *root,
 										   &restrict_clauses);
 	if (restrict_clauses == NIL)
 		return NULL;		/* cross join is not welcome */
-
 	/*
 	 * Build a new pgstromPlanInfo
 	 */
@@ -1579,8 +1658,10 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	else
 	{
 		/* build device projection */
+		List   *proj_hash = pp_info->projection_hashkeys;
+
 		pgstrom_build_join_tlist_dev(context, root, joinrel, tlist);
-		pp_info->kexp_projection = codegen_build_projection(context);
+		pp_info->kexp_projection = codegen_build_projection(context, proj_hash);
 	}
 	pull_varattnos((Node *)context->tlist_dev,
 				   pp_info->scan_relid,
@@ -2897,6 +2978,17 @@ pgstrom_init_gpu_join(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* threshold of zero-copy inner buffer of GpuJoin */
+	DefineCustomIntVariable("pg_strom.gpujoin_inner_zerocopy_threshold",
+							"Threshold of the zero-copy inner table buffer of GpuJoin",
+							NULL,
+							&__inner_zerocopy_threshold_mb,
+							512,	/* 512MB */
+							-1,
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
+							NULL, NULL, NULL);
 	/* setup path methods */
 	memset(&gpujoin_path_methods, 0, sizeof(CustomPathMethods));
 	gpujoin_path_methods.CustomName				= "GpuJoin";

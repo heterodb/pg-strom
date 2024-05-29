@@ -165,6 +165,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, makeInteger(pp_info->cuda_stack_size));
 	privs = lappend(privs, pp_info->groupby_actions);
 	privs = lappend(privs, makeInteger(pp_info->groupby_prepfn_bufsz));
+	exprs = lappend(exprs, pp_info->projection_hashkeys);
 	/* inner relations */
 	privs = lappend(privs, makeInteger(pp_info->sibling_param_id));
 	privs = lappend(privs, makeInteger(pp_info->num_rels));
@@ -189,6 +190,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_selectivity));
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_npages));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_height));
+		__privs = lappend(__privs, makeBoolean(pp_inner->inner_zerocopy_buffer));
 
 		exprs = lappend(exprs, __exprs);
 		privs = lappend(privs, __privs);
@@ -269,7 +271,8 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.cuda_stack_size = intVal(list_nth(privs, pindex++));
 	pp_data.groupby_actions = list_nth(privs, pindex++);
-	pp_data.groupby_prepfn_bufsz  = intVal(list_nth(privs, pindex++));
+	pp_data.groupby_prepfn_bufsz = intVal(list_nth(privs, pindex++));
+	pp_data.projection_hashkeys = list_nth(exprs, eindex++);
 	/* inner relations */
 	pp_data.sibling_param_id = intVal(list_nth(privs, pindex++));
 	pp_data.num_rels = intVal(list_nth(privs, pindex++));
@@ -298,6 +301,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 		pp_inner->gist_selectivity = floatVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_npages     = floatVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_height     = intVal(list_nth(__privs, __pindex++));
+		pp_inner->inner_zerocopy_buffer = boolVal(list_nth(__privs, __pindex++));
 	}
 	return pp_info;
 }
@@ -334,6 +338,7 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 	}
 	pp_dest->kvars_deflist    = kvars_deflist;
 	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
+	pp_dest->projection_hashkeys = copyObject(pp_dest->projection_hashkeys);
 	for (int j=0; j < pp_orig->num_rels; j++)
 	{
 		pgstromPlanInnerInfo *pp_inner = &pp_dest->inners[j];

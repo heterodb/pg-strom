@@ -2961,72 +2961,6 @@ bailout:
 }
 
 /*
- * codegen_build_projection
- */
-bytea *
-codegen_build_projection(codegen_context *context)
-{
-	kern_expression	*kexp;
-	StringInfoData buf;
-	bytea	   *xpucode;
-	bool		meet_resjunk = false;
-	int			nattrs = 0;
-	int			sz;
-	ListCell   *lc;
-
-	/* count nattrs */
-	foreach (lc, context->tlist_dev)
-	{
-		TargetEntry *tle = lfirst(lc);
-
-		if (tle->resjunk)
-		{
-			meet_resjunk = true;
-			continue;
-		}
-		else if (meet_resjunk)
-			elog(ERROR, "Bug? a valid TLE after junk TLEs");
-		else
-			nattrs++;
-	}
-	sz = MAXALIGN(offsetof(kern_expression, u.proj.slot_id[nattrs]));
-	kexp = alloca(sz);
-	memset(kexp, 0, sz);
-
-	initStringInfo(&buf);
-	buf.len = sz;
-	foreach (lc, context->tlist_dev)
-	{
-		TargetEntry	*tle = lfirst(lc);
-		codegen_kvar_defitem *kvdef;
-
-		if (tle->resjunk)
-			break;
-		kvdef = try_inject_projection_expression(context,
-												 kexp,
-												 &buf,
-												 tle->expr);
-		kexp->u.proj.slot_id[kexp->u.proj.nattrs++] = kvdef->kv_slot_id;
-	}
-	Assert(nattrs == kexp->u.proj.nattrs);
-	kexp->exptype = TypeOpCode__int4;
-	kexp->expflags = context->kexp_flags;
-	kexp->opcode  = FuncOpCode__Projection;
-	kexp->args_offset = sz;
-	kexp->u.proj.nattrs = nattrs;
-	memcpy(buf.data, kexp, sz);
-	__appendKernExpMagicAndLength(&buf, 0);
-
-	xpucode = palloc(VARHDRSZ + buf.len);
-	memcpy(xpucode->vl_dat, buf.data, buf.len);
-	SET_VARSIZE(xpucode, VARHDRSZ + buf.len);
-
-	pfree(buf.data);
-
-	return xpucode;
-}
-
-/*
  * __codegen_build_joinquals
  */
 static kern_expression *
@@ -3432,6 +3366,82 @@ codegen_build_packed_gistevals(codegen_context *context,
 	}
 	pfree(buf.data);
 	pp_info->kexp_gist_evals_packed = result;
+}
+
+/*
+ * codegen_build_projection
+ */
+bytea *
+codegen_build_projection(codegen_context *context, List *proj_hash)
+{
+	kern_expression	*kexp;
+	StringInfoData buf;
+	bytea	   *xpucode;
+	bool		meet_resjunk = false;
+	int			nattrs = 0;
+	int			sz;
+	ListCell   *lc;
+
+	/* count nattrs */
+	foreach (lc, context->tlist_dev)
+	{
+		TargetEntry *tle = lfirst(lc);
+
+		if (tle->resjunk)
+		{
+			meet_resjunk = true;
+			continue;
+		}
+		else if (meet_resjunk)
+			elog(ERROR, "Bug? a valid TLE after junk TLEs");
+		else
+			nattrs++;
+	}
+	sz = MAXALIGN(offsetof(kern_expression, u.proj.slot_id[nattrs]));
+	kexp = alloca(sz);
+	memset(kexp, 0, sz);
+
+	initStringInfo(&buf);
+	buf.len = sz;
+	foreach (lc, context->tlist_dev)
+	{
+		TargetEntry	*tle = lfirst(lc);
+		codegen_kvar_defitem *kvdef;
+
+		if (tle->resjunk)
+			break;
+		kvdef = try_inject_projection_expression(context,
+												 kexp,
+												 &buf,
+												 tle->expr);
+		kexp->u.proj.slot_id[kexp->u.proj.nattrs++] = kvdef->kv_slot_id;
+	}
+	/* hash-value (optional; for zero-copy inner buffer) */
+	if (proj_hash != NIL)
+	{
+		const kern_expression  *khash
+			= __codegen_build_hash_value(context,
+										 proj_hash,
+										 context->num_rels+1);
+		if (khash)
+			kexp->u.proj.hash = __appendBinaryStringInfo(&buf, khash, khash->len);
+	}
+	Assert(nattrs == kexp->u.proj.nattrs);
+	kexp->exptype = TypeOpCode__int4;
+	kexp->expflags = context->kexp_flags;
+	kexp->opcode  = FuncOpCode__Projection;
+	kexp->args_offset = sz;
+	kexp->u.proj.nattrs = nattrs;
+	memcpy(buf.data, kexp, sz);
+	__appendKernExpMagicAndLength(&buf, 0);
+
+	xpucode = palloc(VARHDRSZ + buf.len);
+	memcpy(xpucode->vl_dat, buf.data, buf.len);
+	SET_VARSIZE(xpucode, VARHDRSZ + buf.len);
+
+	pfree(buf.data);
+
+	return xpucode;
 }
 
 /*
@@ -4232,6 +4242,34 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 }
 
 static void
+__xpucode_projection_cstring(StringInfo buf,
+							 const kern_expression *kexp,
+							 const CustomScanState *css,
+							 ExplainState *es,
+							 List *dcontext)
+{
+	appendStringInfo(buf, "{Projection: layout=<");
+	for (int j=0; j < kexp->u.proj.nattrs; j++)
+	{
+		uint16_t	proj_slot_id = kexp->u.proj.slot_id[j];
+
+		if (j > 0)
+			appendStringInfo(buf, ",");
+		appendStringInfo(buf, "%d", proj_slot_id);
+	}
+	appendStringInfo(buf, ">");
+
+	elog(INFO, "kexp->u.proj.hash = %u", kexp->u.proj.hash);
+	if (kexp->u.proj.hash != 0)
+	{
+		const kern_expression *khash = (const kern_expression *)
+			((const char *)kexp + kexp->u.proj.hash);
+		appendStringInfo(buf, ", Hash=");
+		__xpucode_to_cstring(buf, khash, css, es, dcontext);
+	}
+}
+
+static void
 __xpucode_to_cstring(StringInfo buf,
 					 const kern_expression *kexp,
 					 const CustomScanState *css,	/* optional */
@@ -4257,16 +4295,7 @@ __xpucode_to_cstring(StringInfo buf,
 			__xpucode_var_cstring(buf, kexp, css, es, dcontext);
 			return;
 		case FuncOpCode__Projection:
-			appendStringInfo(buf, "{Projection: layout=<");
-			for (int j=0; j < kexp->u.proj.nattrs; j++)
-			{
-				uint16_t	proj_slot_id = kexp->u.proj.slot_id[j];
-
-				if (j > 0)
-					appendStringInfo(buf, ",");
-				appendStringInfo(buf, "%d", proj_slot_id);
-			}
-			appendStringInfo(buf, ">");
+			__xpucode_projection_cstring(buf, kexp, css, es, dcontext);
 			break;
 		case FuncOpCode__LoadVars:
 			__xpucode_loadvars_cstring(buf, kexp, css, es, dcontext);

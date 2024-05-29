@@ -2294,6 +2294,7 @@ struct kern_expression
 			kern_aggregate_desc desc[1];
 		} pagg;		/* PreAggs */
 		struct {
+			uint32_t	hash;			/* kexp for hash-value calculation */
 			int			nattrs;
 			uint16_t	slot_id[1];
 		} proj;		/* Projection */

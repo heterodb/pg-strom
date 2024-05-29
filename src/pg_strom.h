@@ -263,6 +263,8 @@ typedef struct
 	Selectivity		gist_selectivity; /* GiST selectivity */
 	double			gist_npages;	/* number of disk pages */
 	int				gist_height;	/* index tree height, or -1 if unknown */
+	/* zerocopy inner buffer properties */
+	bool			inner_zerocopy_buffer;
 } pgstromPlanInnerInfo;
 
 typedef struct
@@ -309,6 +311,8 @@ typedef struct
 	/* group-by parameters */
 	List	   *groupby_actions;		/* list of KAGG_ACTION__* on the kds_final */
 	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */
+	/* zero-copy inner buffer */
+	List	   *projection_hashkeys;
 	/* inner relations */
 	int			sibling_param_id;
 	int			num_rels;
@@ -613,7 +617,8 @@ extern bytea   *codegen_build_packed_hashkeys(codegen_context *context,
 											  List *stacked_hash_values);
 extern void		codegen_build_packed_gistevals(codegen_context *context,
 											   pgstromPlanInfo *pp_info);
-extern bytea   *codegen_build_projection(codegen_context *context);
+extern bytea   *codegen_build_projection(codegen_context *context,
+										 List *proj_hash);
 extern void		codegen_build_groupby_actions(codegen_context *context,
 											  pgstromPlanInfo *pp_info);
 
@@ -823,6 +828,7 @@ extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
 /*
  * gpu_scan.c
  */
+extern bool		pgstrom_is_gpuscan_path(const Path *path);
 extern void		sort_device_qualifiers(List *dev_quals_list,
 									   List *dev_costs_list);
 extern pgstromPlanInfo *try_fetch_xpuscan_planinfo(const Path *path);
@@ -844,6 +850,7 @@ extern void		pgstrom_init_dpu_scan(void);
 /*
  * gpu_join.c
  */
+extern bool		pgstrom_is_gpujoin_path(const Path *path);
 extern pgstromPlanInfo *try_fetch_xpujoin_planinfo(const Path *path);
 extern List	   *buildOuterJoinPlanInfo(PlannerInfo *root,
 									   RelOptInfo *outer_rel,

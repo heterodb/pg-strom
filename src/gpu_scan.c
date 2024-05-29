@@ -23,6 +23,22 @@ static CustomExecMethods	dpuscan_exec_methods;
 static bool					enable_dpuscan = false;		/* GUC */
 
 /*
+ * pgstrom_is_gpuscan_path
+ */
+bool
+pgstrom_is_gpuscan_path(const Path *path)
+{
+	if (IsA(path, CustomPath))
+	{
+		CustomPath *cpath = (CustomPath *)path;
+
+		if (cpath->methods == &gpuscan_path_methods)
+			return true;
+	}
+	return false;
+}
+
+/*
  * sort_device_qualifiers
  */
 void
@@ -824,14 +840,15 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 					  const CustomScanMethods *xpuscan_plan_methods)
 {
 	codegen_context *context;
-	CustomScan	   *cscan;
+	CustomScan *cscan;
+	List	   *proj_hash = pp_info->projection_hashkeys;
 
 	context = create_codegen_context(root, best_path, pp_info);
 	/* code generation for WHERE-clause */
 	pp_info->kexp_scan_quals = codegen_build_scan_quals(context, pp_info->scan_quals);
 	/* code generation for the Projection */
 	context->tlist_dev = gpuscan_build_projection(baserel, pp_info, tlist);
-	pp_info->kexp_projection = codegen_build_projection(context);
+	pp_info->kexp_projection = codegen_build_projection(context, proj_hash);
 	/* VarLoads for each depth */
 	codegen_build_packed_kvars_load(context, pp_info);
 	/* VarMoves for each depth (only GPUs) */
