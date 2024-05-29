@@ -4259,7 +4259,6 @@ __xpucode_projection_cstring(StringInfo buf,
 	}
 	appendStringInfo(buf, ">");
 
-	elog(INFO, "kexp->u.proj.hash = %u", kexp->u.proj.hash);
 	if (kexp->u.proj.hash != 0)
 	{
 		const kern_expression *khash = (const kern_expression *)

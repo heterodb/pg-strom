@@ -24,7 +24,6 @@ static bool					pgstrom_enable_partitionwise_dpupreagg = false;
 static bool					pgstrom_enable_gpupreagg = false;
 static bool					pgstrom_enable_partitionwise_gpupreagg = false;
 static bool					pgstrom_enable_numeric_aggfuncs;
-int							pgstrom_hll_register_bits;
 
 /*
  * List of supported aggregate functions
@@ -1869,17 +1868,6 @@ pgstrom_init_gpu_preagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/* pg_strom.hll_registers_bits */
-	DefineCustomIntVariable("pg_strom.hll_registers_bits",
-							"Accuracy of HyperLogLog COUNT(distinct ...) estimation",
-							NULL,
-							&pgstrom_hll_register_bits,
-							9,
-							4,
-							15,
-							PGC_USERSET,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
 
 	/* initialization of path method table */
 	memset(&gpupreagg_path_methods, 0, sizeof(CustomPathMethods));
