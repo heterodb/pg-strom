@@ -35,30 +35,46 @@ INSERT INTO dpoints (SELECT i, pgstrom.random_float(0.0, 138.787661, 140.434258)
 --- Run GPU Join with GiST index
 ---
 RESET pg_strom.enabled;
-EXPLAIN
+EXPLAIN (verbose, costs off)
 SELECT pref, city, count(*)
   FROM giskanto, dpoints
  WHERE (pref = '東京都' or city like '横浜市 %')
    AND st_contains(geom, st_makepoint(x, y))
  GROUP BY pref, city
  ORDER BY pref, city;
-                                                                QUERY PLAN                                                                
-------------------------------------------------------------------------------------------------------------------------------------------
- Finalize GroupAggregate  (cost=3272.72..3273.91 rows=9 width=72)
+                                                                                                                                                                                                                                                                                    QUERY PLAN                                                                                                                                                                                                                                                                                     
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate
+   Output: giskanto.pref, giskanto.city, count(*)
    Group Key: giskanto.pref, giskanto.city
-   ->  Gather Merge  (cost=3272.72..3273.76 rows=9 width=72)
+   ->  Gather Merge
+         Output: giskanto.pref, giskanto.city, (PARTIAL count(*))
          Workers Planned: 1
-         ->  Sort  (cost=2272.71..2272.73 rows=9 width=72)
+         ->  Sort
+               Output: giskanto.pref, giskanto.city, (PARTIAL count(*))
                Sort Key: giskanto.pref, giskanto.city
-               ->  Partial HashAggregate  (cost=2272.48..2272.57 rows=9 width=72)
+               ->  Partial HashAggregate
+                     Output: giskanto.pref, giskanto.city, PARTIAL count(*)
                      Group Key: giskanto.pref, giskanto.city
-                     ->  Parallel Custom Scan (GpuJoin) on dpoints  (cost=178.13..2259.58 rows=1720 width=64)
+                     ->  Parallel Custom Scan (GpuJoin) on regtest_postgis_temp.dpoints
+                           Output: giskanto.pref, giskanto.city
                            GPU Projection: giskanto.pref, giskanto.city
                            GPU Join Quals [1]: st_contains(giskanto.geom, st_makepoint(dpoints.x, dpoints.y)) ... [nrows: 191100 -> 1720]
                            GPU GiST Join [1]: (giskanto.geom ~ st_makepoint(dpoints.x, dpoints.y)) on giskanto_geom_idx (geom)
-                           ->  Parallel Seq Scan on giskanto  (cost=0.00..71.99 rows=5 width=96)
-                                 Filter: ((pref = '東京都'::text) OR (city ~~ '横浜市 %'::text))
-(14 rows)
+                           KVars-Slot: <slot=0, type='text', expr='giskanto.pref', kv_off=0x0000>, <slot=1, type='text', expr='giskanto.city', kv_off=0x3400>, <slot=2, type='geometry', expr='giskanto.geom', kv_off=0x6800>, <slot=3, type='float8', expr='dpoints.x', kv_off=0xe800>, <slot=4, type='float8', expr='dpoints.y', kv_off=0x10c00>, <slot=5, type='internal[8]', expr='NULL::internal', kv_off=0x13000>, <slot=6, type='box2df', expr='NULL::box2df'>
+                           KVecs-Buffer: nbytes: 87040, ndims: 3, items=[kvec0=<0x0000-33ff, type='text', expr='pref'>, kvec1=<0x3400-67ff, type='text', expr='city'>, kvec2=<0x6800-e7ff, type='geometry', expr='geom'>, kvec3=<0xe800-10bff, type='float8', expr='x'>, kvec4=<0x10c00-12fff, type='float8', expr='y'>, kvec5=<0x13000-153ff, type='internal', expr='NULL::internal'>]
+                           LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=3, type='float8' resno=2(x)>, <slot=4, type='float8' resno=3(y)>]}, items[1]={LoadVars(depth=1): kvars=[<slot=0, type='text' resno=1(pref)>, <slot=1, type='text' resno=2(city)>, <slot=2, type='geometry' resno=3(geom)>]}, items[2]={LoadVars(depth=2): kvars=[<slot=5, type='internal' resno=0(NULL::internal)>, <slot=6, type='box2df' resno=1(NULL::box2df)>]}}
+                           MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=3, offset=0xe800-10bff, type='float8', expr='x'>, <slot=4, offset=0x10c00-12fff, type='float8', expr='y'>]}}, items[1]={MoveVars(depth=1): items=[<slot=0, offset=0x0000-33ff, type='text', expr='pref'>, <slot=1, offset=0x3400-67ff, type='text', expr='city'>]}}, items[2]={MoveVars(depth=0): items=[<offset=0xe800-10bff, type='float8', expr='x'>, <offset=0x10c00-12fff, type='float8', expr='y'>, <slot=5, offset=0x13000-153ff, type='internal', expr='NULL::internal'>]}}}
+                           Join Quals OpCode: {Packed items[1]={JoinQuals:  {Func(bool)::st_contains args=[{Var(geometry): slot=2, expr='geom'}, {Func(geometry)::st_makepoint args=[{Var(float8): kvec=0xe800-10c00, expr='x'}, {Var(float8): kvec=0x10c00-13000, expr='y'}]}]}}}
+                           GiST-Index Join OpCode: {Packed items[1]={GiSTEval(bool): gist_depth=2 <slot=6, idxname1='geom', type='box2df'> arg={Func(bool)::contains_2d args=[{Var(box2df): slot=6, expr='NULL::box2df'}, {Func(geometry)::st_makepoint args=[{Var(float8): kvec=0xe800-10c00, expr='x'}, {Var(float8): kvec=0x10c00-13000, expr='y'}]}]}}}
+                           Projection OpCode: {Projection: layout=<0,1> args=[{SaveExpr: <slot=0, type='text'> arg={Var(text): kvec=0x0000-3400, expr='pref'}}, {SaveExpr: <slot=1, type='text'> arg={Var(text): kvec=0x3400-6800, expr='city'}}]}
+                           Fallback-desc: [<dest='0', expr='pref', depth=1:2>, <dest='1', expr='city', depth=1:2>, <dest='2', expr='geom', depth=1:1>, <dest='3', expr='x', depth=0:1>, <dest='4', expr='y', depth=0:1>]
+                           Partial Function BufSz: 8
+                           CUDA Stack Size: 4064
+                           ->  Parallel Seq Scan on regtest_postgis_temp.giskanto
+                                 Output: giskanto.pref, giskanto.city, giskanto.geom, giskanto.ctid
+                                 Filter: ((giskanto.pref = '東京都'::text) OR (giskanto.city ~~ '横浜市 %'::text))
+(30 rows)
 
 SELECT pref, city, count(*)
   FROM giskanto, dpoints
@@ -142,7 +158,7 @@ SELECT pref, city, count(*)
 (71 rows)
 
 RESET pg_strom.enabled;
-EXPLAIN
+EXPLAIN (verbose, costs off)
 SELECT pref, city, count(*)
   FROM giskanto, dpoints
  WHERE ((pref = '東京都' and city like '%区') OR
@@ -150,23 +166,39 @@ SELECT pref, city, count(*)
    AND st_dwithin(geom, st_makepoint(x, y), 0.002)
  GROUP BY pref, city
  ORDER BY pref, city;
-                                                                              QUERY PLAN                                                                              
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Finalize GroupAggregate  (cost=4096.84..4098.89 rows=1 width=72)
+                                                                                                                                                                                                                                                                                    QUERY PLAN                                                                                                                                                                                                                                                                                     
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate
+   Output: giskanto.pref, giskanto.city, count(*)
    Group Key: giskanto.pref, giskanto.city
-   ->  Gather Merge  (cost=4096.84..4098.87 rows=1 width=72)
+   ->  Gather Merge
+         Output: giskanto.pref, giskanto.city, (PARTIAL count(*))
          Workers Planned: 1
-         ->  Partial GroupAggregate  (cost=3096.83..3098.75 rows=1 width=72)
+         ->  Partial GroupAggregate
+               Output: giskanto.pref, giskanto.city, PARTIAL count(*)
                Group Key: giskanto.pref, giskanto.city
-               ->  Sort  (cost=3096.83..3097.31 rows=191 width=64)
+               ->  Sort
+                     Output: giskanto.pref, giskanto.city
                      Sort Key: giskanto.pref, giskanto.city
-                     ->  Parallel Custom Scan (GpuJoin) on dpoints  (cost=180.69..3089.58 rows=191 width=64)
+                     ->  Parallel Custom Scan (GpuJoin) on regtest_postgis_temp.dpoints
+                           Output: giskanto.pref, giskanto.city
                            GPU Projection: giskanto.pref, giskanto.city
                            GPU Join Quals [1]: st_dwithin(giskanto.geom, st_makepoint(dpoints.x, dpoints.y), '0.002'::double precision) ... [nrows: 191100 -> 191]
                            GPU GiST Join [1]: (giskanto.geom && st_expand(st_makepoint(dpoints.x, dpoints.y), '0.002'::double precision)) on giskanto_geom_idx (geom)
-                           ->  Parallel Seq Scan on giskanto  (cost=0.00..74.66 rows=1 width=96)
-                                 Filter: (((pref = '東京都'::text) AND (city ~~ '%区'::text)) OR ((pref = '埼玉県'::text) AND (city ~~ '%市%'::text)))
-(14 rows)
+                           KVars-Slot: <slot=0, type='text', expr='giskanto.pref', kv_off=0x0000>, <slot=1, type='text', expr='giskanto.city', kv_off=0x3400>, <slot=2, type='geometry', expr='giskanto.geom', kv_off=0x6800>, <slot=3, type='float8', expr='dpoints.x', kv_off=0xe800>, <slot=4, type='float8', expr='dpoints.y', kv_off=0x10c00>, <slot=5, type='internal[8]', expr='NULL::internal', kv_off=0x13000>, <slot=6, type='box2df', expr='NULL::box2df'>
+                           KVecs-Buffer: nbytes: 87040, ndims: 3, items=[kvec0=<0x0000-33ff, type='text', expr='pref'>, kvec1=<0x3400-67ff, type='text', expr='city'>, kvec2=<0x6800-e7ff, type='geometry', expr='geom'>, kvec3=<0xe800-10bff, type='float8', expr='x'>, kvec4=<0x10c00-12fff, type='float8', expr='y'>, kvec5=<0x13000-153ff, type='internal', expr='NULL::internal'>]
+                           LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=3, type='float8' resno=2(x)>, <slot=4, type='float8' resno=3(y)>]}, items[1]={LoadVars(depth=1): kvars=[<slot=0, type='text' resno=1(pref)>, <slot=1, type='text' resno=2(city)>, <slot=2, type='geometry' resno=3(geom)>]}, items[2]={LoadVars(depth=2): kvars=[<slot=5, type='internal' resno=0(NULL::internal)>, <slot=6, type='box2df' resno=1(NULL::box2df)>]}}
+                           MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=3, offset=0xe800-10bff, type='float8', expr='x'>, <slot=4, offset=0x10c00-12fff, type='float8', expr='y'>]}}, items[1]={MoveVars(depth=1): items=[<slot=0, offset=0x0000-33ff, type='text', expr='pref'>, <slot=1, offset=0x3400-67ff, type='text', expr='city'>]}}, items[2]={MoveVars(depth=0): items=[<offset=0xe800-10bff, type='float8', expr='x'>, <offset=0x10c00-12fff, type='float8', expr='y'>, <slot=5, offset=0x13000-153ff, type='internal', expr='NULL::internal'>]}}}
+                           Join Quals OpCode: {Packed items[1]={JoinQuals:  {Func(bool)::st_dwithin args=[{Var(geometry): slot=2, expr='geom'}, {Func(geometry)::st_makepoint args=[{Var(float8): kvec=0xe800-10c00, expr='x'}, {Var(float8): kvec=0x10c00-13000, expr='y'}]}, {Const(float8): value='0.002'}]}}}
+                           GiST-Index Join OpCode: {Packed items[1]={GiSTEval(bool): gist_depth=2 <slot=6, idxname1='geom', type='box2df'> arg={Func(bool)::overlaps_2d args=[{Var(box2df): slot=6, expr='NULL::box2df'}, {Func(geometry)::st_expand args=[{Func(geometry)::st_makepoint args=[{Var(float8): kvec=0xe800-10c00, expr='x'}, {Var(float8): kvec=0x10c00-13000, expr='y'}]}, {Const(float8): value='0.002'}]}]}}}
+                           Projection OpCode: {Projection: layout=<0,1> args=[{SaveExpr: <slot=0, type='text'> arg={Var(text): kvec=0x0000-3400, expr='pref'}}, {SaveExpr: <slot=1, type='text'> arg={Var(text): kvec=0x3400-6800, expr='city'}}]}
+                           Fallback-desc: [<dest='0', expr='pref', depth=1:2>, <dest='1', expr='city', depth=1:2>, <dest='2', expr='geom', depth=1:1>, <dest='3', expr='x', depth=0:1>, <dest='4', expr='y', depth=0:1>]
+                           Partial Function BufSz: 8
+                           CUDA Stack Size: 4064
+                           ->  Parallel Seq Scan on regtest_postgis_temp.giskanto
+                                 Output: giskanto.pref, giskanto.city, giskanto.geom, giskanto.ctid
+                                 Filter: (((giskanto.pref = '東京都'::text) AND (giskanto.city ~~ '%区'::text)) OR ((giskanto.pref = '埼玉県'::text) AND (giskanto.city ~~ '%市%'::text)))
+(30 rows)
 
 SELECT pref, city, count(*)
   FROM giskanto, dpoints
@@ -275,18 +307,27 @@ SELECT a.pref, a.city, b.pref, b.city, st_distance(a.geom, b.geom)
 -- distance from POINT(皇居)
 SET enable_seqscan = off;
 RESET pg_strom.enabled;
-EXPLAIN
+EXPLAIN (verbose, costs off)
 SELECT gid, pref, city,
        st_distance(geom, st_makepoint(139.7234394, 35.6851783)) dist
   INTO test01g
   FROM giskanto
  WHERE gid > 0;
-                                                  QUERY PLAN                                                  
---------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuScan) on giskanto  (cost=100.00..3942.16 rows=302 width=76)
+                                                                                                                                                                                                                                                    QUERY PLAN                                                                                                                                                                                                                                                    
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_postgis_temp.giskanto
+   Output: gid, pref, city, (st_distance(geom, '01010000006974626A26776140E5362BECB3D74140'::geometry))
    GPU Projection: gid, pref, city, st_distance(geom, '01010000006974626A26776140E5362BECB3D74140'::geometry)
    GPU Scan Quals: (gid > 0) [rows: 906 -> 302]
-(3 rows)
+   KVars-Slot: <slot=0, type='int4', expr='gid', kv_off=0x0000>, <slot=1, type='text', expr='pref', kv_off=0x1400>, <slot=2, type='text', expr='city', kv_off=0x4800>, <slot=3, type='float8', expr='(st_distance(geom, '01010000006974626A26776140E5362BECB3D74140'::geometry))'>, <slot=4, type='geometry', expr='geom', kv_off=0x7c00>
+   KVecs-Buffer: nbytes: 64512, ndims: 2, items=[kvec0=<0x0000-13ff, type='int4', expr='gid'>, kvec1=<0x1400-47ff, type='text', expr='pref'>, kvec2=<0x4800-7bff, type='text', expr='city'>, kvec3=<0x7c00-fbff, type='geometry', expr='geom'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(gid)>, <slot=1, type='text' resno=2(pref)>, <slot=2, type='text' resno=3(city)>, <slot=4, type='geometry' resno=4(geom)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-13ff, type='int4', expr='gid'>, <slot=1, offset=0x1400-47ff, type='text', expr='pref'>, <slot=2, offset=0x4800-7bff, type='text', expr='city'>, <slot=4, offset=0x7c00-fbff, type='geometry', expr='geom'>]}}}
+   Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='gid'}, {Const(int4): value='0'}]}
+   Projection OpCode: {Projection: layout=<0,1,2,3> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-1400, expr='gid'}}, {SaveExpr: <slot=1, type='text'> arg={Var(text): kvec=0x1400-4800, expr='pref'}}, {SaveExpr: <slot=2, type='text'> arg={Var(text): kvec=0x4800-7c00, expr='city'}}, {SaveExpr: <slot=3, type='float8'> arg={Func(float8)::st_distance args=[{Var(geometry): kvec=0x7c00-fc00, expr='geom'}, {Const(geometry): value='01010000006974626A26776140E5362BECB3D74140'}]}}]}
+   Fallback-desc: [<dest='0', expr='gid', depth=0:1>, <dest='1', expr='pref', depth=0:1>, <dest='2', expr='city', depth=0:1>, <dest='4', expr='geom', depth=0:1>]
+   CUDA Stack Size: 4048
+(12 rows)
 
 SELECT gid, pref, city,
        st_distance(geom, st_makepoint(139.7234394, 35.6851783)) dist
@@ -307,18 +348,27 @@ SELECT *
 */
 -- distance from POINT(筑波大学)
 RESET pg_strom.enabled;
-EXPLAIN
+EXPLAIN (verbose, costs off)
 SELECT gid, pref, city,
        st_distance(geom, st_makepoint(140.1070404, 36.094009)) dist
   INTO test02g
   FROM giskanto
  WHERE gid > 0;
-                                                  QUERY PLAN                                                  
---------------------------------------------------------------------------------------------------------------
- Custom Scan (GpuScan) on giskanto  (cost=100.00..3942.16 rows=302 width=76)
+                                                                                                                                                                                                                                                    QUERY PLAN                                                                                                                                                                                                                                                    
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_postgis_temp.giskanto
+   Output: gid, pref, city, (st_distance(geom, '0101000000392BFDDF6C836140CC43A67C080C4240'::geometry))
    GPU Projection: gid, pref, city, st_distance(geom, '0101000000392BFDDF6C836140CC43A67C080C4240'::geometry)
    GPU Scan Quals: (gid > 0) [rows: 906 -> 302]
-(3 rows)
+   KVars-Slot: <slot=0, type='int4', expr='gid', kv_off=0x0000>, <slot=1, type='text', expr='pref', kv_off=0x1400>, <slot=2, type='text', expr='city', kv_off=0x4800>, <slot=3, type='float8', expr='(st_distance(geom, '0101000000392BFDDF6C836140CC43A67C080C4240'::geometry))'>, <slot=4, type='geometry', expr='geom', kv_off=0x7c00>
+   KVecs-Buffer: nbytes: 64512, ndims: 2, items=[kvec0=<0x0000-13ff, type='int4', expr='gid'>, kvec1=<0x1400-47ff, type='text', expr='pref'>, kvec2=<0x4800-7bff, type='text', expr='city'>, kvec3=<0x7c00-fbff, type='geometry', expr='geom'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(gid)>, <slot=1, type='text' resno=2(pref)>, <slot=2, type='text' resno=3(city)>, <slot=4, type='geometry' resno=4(geom)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-13ff, type='int4', expr='gid'>, <slot=1, offset=0x1400-47ff, type='text', expr='pref'>, <slot=2, offset=0x4800-7bff, type='text', expr='city'>, <slot=4, offset=0x7c00-fbff, type='geometry', expr='geom'>]}}}
+   Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='gid'}, {Const(int4): value='0'}]}
+   Projection OpCode: {Projection: layout=<0,1,2,3> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-1400, expr='gid'}}, {SaveExpr: <slot=1, type='text'> arg={Var(text): kvec=0x1400-4800, expr='pref'}}, {SaveExpr: <slot=2, type='text'> arg={Var(text): kvec=0x4800-7c00, expr='city'}}, {SaveExpr: <slot=3, type='float8'> arg={Func(float8)::st_distance args=[{Var(geometry): kvec=0x7c00-fc00, expr='geom'}, {Const(geometry): value='0101000000392BFDDF6C836140CC43A67C080C4240'}]}}]}
+   Fallback-desc: [<dest='0', expr='gid', depth=0:1>, <dest='1', expr='pref', depth=0:1>, <dest='2', expr='city', depth=0:1>, <dest='4', expr='geom', depth=0:1>]
+   CUDA Stack Size: 4048
+(12 rows)
 
 SELECT gid, pref, city,
        st_distance(geom, st_makepoint(140.1070404, 36.094009)) dist

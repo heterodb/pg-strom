@@ -22,7 +22,7 @@ INSERT INTO dpoints (SELECT i, pgstrom.random_float(0.0, 138.787661, 140.434258)
 --- Run GPU Join with GiST index
 ---
 RESET pg_strom.enabled;
-EXPLAIN
+EXPLAIN (verbose, costs off)
 SELECT pref, city, count(*)
   FROM giskanto, dpoints
  WHERE (pref = '東京都' or city like '横浜市 %')
@@ -38,7 +38,7 @@ SELECT pref, city, count(*)
  ORDER BY pref, city;
 
 RESET pg_strom.enabled;
-EXPLAIN
+EXPLAIN (verbose, costs off)
 SELECT pref, city, count(*)
   FROM giskanto, dpoints
  WHERE ((pref = '東京都' and city like '%区') OR
@@ -81,7 +81,7 @@ SELECT a.pref, a.city, b.pref, b.city, st_distance(a.geom, b.geom)
 -- distance from POINT(皇居)
 SET enable_seqscan = off;
 RESET pg_strom.enabled;
-EXPLAIN
+EXPLAIN (verbose, costs off)
 SELECT gid, pref, city,
        st_distance(geom, st_makepoint(139.7234394, 35.6851783)) dist
   INTO test01g
@@ -110,7 +110,7 @@ SELECT *
 
 -- distance from POINT(筑波大学)
 RESET pg_strom.enabled;
-EXPLAIN
+EXPLAIN (verbose, costs off)
 SELECT gid, pref, city,
        st_distance(geom, st_makepoint(140.1070404, 36.094009)) dist
   INTO test02g

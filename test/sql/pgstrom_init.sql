@@ -22,9 +22,92 @@ BEGIN;
 ALTER DATABASE :current_database SET pg_strom.regression_test_mode = on;
 
 ---
---- add initial data loading here
+--- load initial data of SSBM
 ---
+SET search_path = public;
 
+DROP TABLE IF EXISTS customer;
+CREATE TABLE customer (
+    c_custkey   integer NOT NULL,
+    c_name      character varying(25),
+    c_address   character varying(25),
+    c_city      character(10),
+    c_nation    character(15),
+    c_region    character(12),
+    c_phone     character(15),
+    c_mktsegment character(10)
+);
+
+DROP TABLE IF EXISTS date1;
+CREATE TABLE date1 (
+    d_datekey   integer NOT NULL,
+    d_date      character(18),
+    d_dayofweek character(12),
+    d_month     character(9),
+    d_year      integer,
+    d_yearmonthnum numeric,
+    d_yearmonth character(7),
+    d_daynuminweek numeric,
+    d_daynuminmonth numeric,
+    d_daynuminyear numeric,
+    d_monthnuminyear numeric,
+    d_weeknuminyear numeric,
+    d_sellingseason character(12),
+    d_lastdayinweekfl character(1),
+    d_lastdayinmonthfl character(1),
+    d_holidayfl character(1),
+    d_weekdayfl character(1)
+);
+
+DROP TABLE IF EXISTS lineorder;
+CREATE TABLE lineorder (
+    lo_orderkey     bigint,
+    lo_linenumber   integer,
+    lo_custkey      integer,
+    lo_partkey      integer,
+    lo_suppkey      integer,
+    lo_orderdate    integer,
+    lo_orderpriority character(15),
+    lo_shippriority character(1),
+    lo_quantity     numeric,
+    lo_extendedprice numeric,
+    lo_ordertotalprice numeric,
+    lo_discount     numeric,
+    lo_revenue      numeric,
+    lo_supplycost   numeric,
+    lo_tax          numeric,
+    lo_commit_date  character(8),
+    lo_shipmode     character(10)
+);
+
+DROP TABLE IF EXISTS part;
+CREATE TABLE part (
+    p_partkey       integer NOT NULL,
+    p_name          character varying(22),
+    p_mfgr          character(6),
+    p_category      character(7),
+    p_brand1        character(9),
+    p_color         character varying(11),
+    p_type          character varying(25),
+    p_size          numeric,
+    p_container     character(10)
+);
+
+DROP TABLE IF EXISTS supplier;
+CREATE TABLE supplier (
+    s_suppkey       integer NOT NULL,
+    s_name          character(25),
+    s_address       character varying(25),
+    s_city          character(10),
+    s_nation        character(15),
+    s_region        character(12),
+    s_phone         character(15)
+);
+\copy customer  FROM PROGRAM '$DBGEN_SSBM_CMD -s 1 -X -Tc' DELIMITER '|'
+\copy date1     FROM PROGRAM '$DBGEN_SSBM_CMD -s 1 -X -Td' DELIMITER '|'
+\copy lineorder FROM PROGRAM '$DBGEN_SSBM_CMD -s 1 -X -Tl' DELIMITER '|'
+\copy part      FROM PROGRAM '$DBGEN_SSBM_CMD -s 1 -X -Tp' DELIMITER '|'
+\copy supplier  FROM PROGRAM '$DBGEN_SSBM_CMD -s 1 -X -Ts' DELIMITER '|'
 
 \set revision_checker_body 'SELECT CAST(':regress_dataset_revision' as text)'
 
@@ -35,6 +118,8 @@ AS :'revision_checker_body'
 LANGUAGE 'sql';
 
 COMMIT;
+-- vacuum tables
+VACUUM ANALYZE;
 --- revision confirmation
 SELECT pgstrom.regression_testdb_revision();
 

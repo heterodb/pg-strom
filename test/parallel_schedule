@@ -61,4 +61,4 @@ test: gpu_cache
 # ----------
 # Misc tests
 # ----------
-test: misc
+test: misc distinct

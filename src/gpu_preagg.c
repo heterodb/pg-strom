@@ -905,6 +905,7 @@ typedef struct
 {
 	bool			device_executable;
 	PlannerInfo	   *root;
+	UpperRelationKind upper_stage;
 	RelOptInfo	   *group_rel;
 	RelOptInfo	   *input_rel;
 	ParamPathInfo  *param_info;
@@ -1211,9 +1212,13 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 		Expr   *expr = lfirst(lc1);
 		Index	sortgroupref = get_pathtarget_sortgroupref(target_upper, i++);
 
-		if (sortgroupref && parse->groupClause &&
-			get_sortgroupref_clause_noerr(sortgroupref,
-										  parse->groupClause) != NULL)
+		if (sortgroupref &&
+			((parse->groupClause &&
+			  get_sortgroupref_clause_noerr(sortgroupref,
+											parse->groupClause) != NULL) ||
+			 (parse->distinctClause &&
+			  get_sortgroupref_clause_noerr(sortgroupref,
+											parse->distinctClause) != NULL)))
 		{
 			/* Grouping Key */
 			devtype_info *dtype;
@@ -1272,6 +1277,13 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			}
 			add_column_to_pathtarget(con->target_final, altfn, 0);
 		}
+		else if (parse->distinctClause)
+		{
+			add_column_to_pathtarget(con->target_final, expr, 0);
+			/* add VREF_NOKEY entries */
+			con->groupby_keys = lappend(con->groupby_keys, expr);
+			con->groupby_keys_refno = lappend_int(con->groupby_keys_refno, 0);
+		}
 		else
 		{
 			elog(DEBUG2, "unexpected expression on the upper-tlist: %s",
@@ -1328,22 +1340,7 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 	Path	   *agg_path;
 	Path	   *dummy_path;
 
-	if (!parse->groupClause)
-	{
-		agg_path = (Path *)create_agg_path(con->root,
-										   con->group_rel,
-										   part_path,
-										   con->target_final,
-										   AGG_PLAIN,
-										   AGGSPLIT_SIMPLE,
-										   parse->groupClause,
-										   (List *)con->havingQual,
-										   &con->final_clause_costs,
-										   con->num_groups);
-		dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
-		add_path(con->group_rel, dummy_path);
-	}
-	else
+	if (parse->groupClause)
 	{
 		Assert(grouping_is_hashable(parse->groupClause));
 		agg_path = (Path *)create_agg_path(con->root,
@@ -1351,6 +1348,37 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 										   part_path,
 										   con->target_final,
 										   AGG_HASHED,
+										   AGGSPLIT_SIMPLE,
+										   parse->groupClause,
+										   (List *)con->havingQual,
+										   &con->final_clause_costs,
+										   con->num_groups);
+		dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
+
+		add_path(con->group_rel, dummy_path);
+	}
+	else if (parse->distinctClause)
+	{
+		Assert(grouping_is_hashable(parse->distinctClause));
+		agg_path = (Path *)create_agg_path(con->root,
+										   con->group_rel,
+										   part_path,
+										   con->target_final,
+										   AGG_HASHED,
+										   AGGSPLIT_SIMPLE,
+										   parse->distinctClause,
+										   (List *)con->havingQual,
+										   &con->final_clause_costs,
+										   con->num_groups);
+		add_path(con->group_rel, agg_path);
+	}
+	else
+	{
+		agg_path = (Path *)create_agg_path(con->root,
+										   con->group_rel,
+										   part_path,
+										   con->target_final,
+										   AGG_PLAIN,
 										   AGGSPLIT_SIMPLE,
 										   parse->groupClause,
 										   (List *)con->havingQual,
@@ -1439,6 +1467,7 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 
 static void
 __try_add_xpupreagg_normal_path(PlannerInfo *root,
+								UpperRelationKind upper_stage,
 								RelOptInfo *input_rel,
 								RelOptInfo *group_rel,
 								GroupPathExtraData *gp_extra,
@@ -1464,6 +1493,16 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 										 op_leaf->leaf_nrows,
 										 NULL, NULL);
 	}
+	else if (parse->distinctClause)
+	{
+		List   *distinctExprs;
+
+		distinctExprs = get_sortgrouplist_exprs(parse->distinctClause,
+												parse->targetList);
+		num_groups = estimate_num_groups(root, distinctExprs,
+										 op_leaf->leaf_nrows,
+										 NULL, NULL);
+	}
 	/* setup inner_target_list */
 	foreach (lc, op_leaf->inner_paths_list)
 	{
@@ -1474,12 +1513,13 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	memset(&con, 0, sizeof(con));
 	con.device_executable = true;
 	con.root           = root;
+	con.upper_stage    = upper_stage;
 	con.group_rel      = group_rel;
 	con.input_rel      = input_rel;
 	con.param_info     = op_leaf->leaf_param;
 	con.num_groups     = num_groups;
 	con.try_parallel   = be_parallel;
-	con.target_upper   = root->upper_targets[UPPERREL_GROUP_AGG];
+	con.target_upper   = root->upper_targets[upper_stage];
 	con.target_partial = create_empty_pathtarget();
 	con.target_final   = create_empty_pathtarget();
 	con.pp_info        = op_leaf->pp_info;
@@ -1508,6 +1548,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 
 static void
 __try_add_xpupreagg_partition_path(PlannerInfo *root,
+								   UpperRelationKind upper_stage,
 								   RelOptInfo *input_rel,
 								   RelOptInfo *group_rel,
 								   GroupPathExtraData *gp_extra,
@@ -1543,6 +1584,16 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 											 op_leaf->leaf_nrows,
 											 NULL, NULL);
 		}
+		else if (parse->distinctClause)
+		{
+			List   *distinctExprs;
+
+			distinctExprs = get_sortgrouplist_exprs(parse->groupClause,
+													parse->targetList);
+			num_groups = estimate_num_groups(root, distinctExprs,
+											 op_leaf->leaf_nrows,
+											 NULL, NULL);
+		}
 		/* setup inner_target_list */
 		foreach (lc2, op_leaf->inner_paths_list)
 		{
@@ -1553,12 +1604,13 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 		memset(&con, 0, sizeof(con));
 		con.device_executable = true;
 		con.root           = root;
+		con.upper_stage    = upper_stage;
 		con.group_rel      = group_rel;
 		con.input_rel      = op_leaf->leaf_rel;
 		con.param_info     = op_leaf->leaf_param;
 		con.num_groups     = num_groups;
 		con.try_parallel   = try_parallel_path;
-		con.target_upper   = root->upper_targets[UPPERREL_GROUP_AGG];
+		con.target_upper   = root->upper_targets[upper_stage];
 		con.target_partial = create_empty_pathtarget();
 		con.target_final   = create_empty_pathtarget();
 		con.pp_info        = op_leaf->pp_info;
@@ -1624,6 +1676,7 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 
 static void
 __xpuPreAggAddCustomPathCommon(PlannerInfo *root,
+							   UpperRelationKind upper_stage,
 							   RelOptInfo *input_rel,
 							   RelOptInfo *group_rel,
 							   void *extra,
@@ -1633,10 +1686,23 @@ __xpuPreAggAddCustomPathCommon(PlannerInfo *root,
 	Query	   *parse = root->parse;
 
 	/* quick bailout if not supported */
-	if (parse->groupingSets != NIL ||
-		!grouping_is_hashable(parse->groupClause))
+	if (parse->groupingSets != NIL)
 	{
-		elog(DEBUG2, "GROUP BY clause is not supported form");
+		elog(DEBUG2, "GROUPING SET is not supported");
+		return;
+	}
+	else if (!grouping_is_hashable(parse->groupClause) ||
+			 !grouping_is_hashable(parse->distinctClause))
+	{
+		elog(DEBUG2, "GROUPING KEY is not hashable");
+		return;
+	}
+	else if (parse->distinctClause && (parse->groupClause ||
+									   parse->groupingSets ||
+									   parse->hasAggs ||
+									   root->hasHavingQual))
+	{
+		elog(DEBUG2, "Unable to use GROUP BY and DISTINCT together");
 		return;
 	}
 
@@ -1653,6 +1719,7 @@ __xpuPreAggAddCustomPathCommon(PlannerInfo *root,
 		if (op_leaf)
 		{
 			__try_add_xpupreagg_normal_path(root,
+											upper_stage,
 											input_rel,
 											group_rel,
 											extra,
@@ -1684,6 +1751,7 @@ __xpuPreAggAddCustomPathCommon(PlannerInfo *root,
 			}
 			if (op_leaf_list != NIL)
 				__try_add_xpupreagg_partition_path(root,
+												   upper_stage,
 												   input_rel,
 												   group_rel,
 												   extra,
@@ -1700,23 +1768,24 @@ __xpuPreAggAddCustomPathCommon(PlannerInfo *root,
  */
 static void
 XpuPreAggAddCustomPath(PlannerInfo *root,
-					   UpperRelationKind stage,
+					   UpperRelationKind upper_stage,
 					   RelOptInfo *input_rel,
 					   RelOptInfo *group_rel,
 					   void *extra)
 {
 	if (create_upper_paths_next)
 		create_upper_paths_next(root,
-								stage,
+								upper_stage,
 								input_rel,
 								group_rel,
 								extra);
-	if (stage != UPPERREL_GROUP_AGG)
-		return;
-	if (pgstrom_enabled())
+	if (pgstrom_enabled() &&
+		(upper_stage == UPPERREL_GROUP_AGG ||
+		 upper_stage == UPPERREL_DISTINCT))
 	{
 		if (pgstrom_enable_gpupreagg && gpuserv_ready_accept())
 			__xpuPreAggAddCustomPathCommon(root,
+										   upper_stage,
 										   input_rel,
 										   group_rel,
 										   extra,
@@ -1724,6 +1793,7 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 										   pgstrom_enable_partitionwise_gpupreagg);
 		if (pgstrom_enable_dpupreagg)
 			__xpuPreAggAddCustomPathCommon(root,
+										   upper_stage,
 										   input_rel,
 										   group_rel,
 										   extra,

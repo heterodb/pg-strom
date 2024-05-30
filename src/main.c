@@ -142,7 +142,9 @@ pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath)
 
 	/* sanity checks */
 	if (list_length(upper_target->exprs) != list_length(sub_target->exprs))
-		elog(ERROR, "CustomScan(dummy): incompatible tlist is supplied");
+		elog(ERROR, "CustomScan(dummy): incompatible tlist is supplied\n%s\n%s",
+			 nodeToString(upper_target->exprs),
+			 nodeToString(sub_target->exprs));
 	forboth (lc1, upper_target->exprs,
 			 lc2, sub_target->exprs)
 	{

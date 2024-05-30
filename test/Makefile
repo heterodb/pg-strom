@@ -13,7 +13,7 @@ DBGEN_SSBM_CMD := $(shell realpath ./ssbm/dbgen-ssbm)
 ARROW_TEST_DATA_DIR    := $(shell pwd)/data
 
 REGRESS_DBNAME      := contrib_regression_$(MODULE_big)
-REGRESS_REVISION    := 20240527
+REGRESS_REVISION    := 20240530
 REGRESS_DB_REVISION := $(shell $(PSQL) $(REGRESS_DBNAME) -At -c 'SELECT pgstrom.regression_testdb_revision()')
 REGRESS        := --schedule=./parallel_schedule
 REGRESS_SETENV := 'PGDATABASE=$(REGRESS_DBNAME)'               \
