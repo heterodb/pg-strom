@@ -2386,8 +2386,8 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				SpinLockAcquire(&ps_state->preload_mutex);
 				base_nitems  = kds->nitems;
 				kds->nitems += preload_buf->nitems;
-				base_usage   = kds->__usage64;
-				kds->__usage64 += preload_buf->usage;
+				base_usage   = kds->usage;
+				kds->usage  += preload_buf->usage;
 				SpinLockRelease(&ps_state->preload_mutex);
 
 				/* sanity checks */
@@ -2689,7 +2689,7 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 	{
 		/* restart from the hash-chain */
 		Assert(l_state <  kds_in->length &&
-			   l_state >= kds_in->length - kds_in->__usage64);
+			   l_state >= kds_in->length - kds_in->usage);
 		hitem = (kern_hashitem *)((char *)kds_in + l_state);
 		hash = hitem->hash;
 	}

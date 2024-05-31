@@ -283,7 +283,7 @@ setup_kern_data_store(kern_data_store *kds,
 
 	memset(kds, 0, offsetof(kern_data_store, colmeta));
 	kds->length		= length;
-	kds->__usage64	= 0;
+	kds->usage		= 0;
 	kds->nitems		= 0;
 	kds->ncols		= tupdesc->natts;
 	kds->format		= format;
@@ -647,8 +647,8 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
 	kds_nrooms = (PGSTROM_CHUNK_SIZE -
 				  KDS_HEAD_LENGTH(kds)) / (sizeof(BlockNumber) + BLCKSZ);
-	kds->nitems  = 0;
-	kds->__usage64 = 0;
+	kds->nitems = 0;
+	kds->usage = 0;
 	kds->block_offset = (KDS_HEAD_LENGTH(kds) +
 						 MAXALIGN(sizeof(BlockNumber) * kds_nrooms));
 	kds->block_nloaded = 0;
@@ -884,7 +884,7 @@ __kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 	Assert(kds->format == KDS_FORMAT_ROW && kds->hash_nslots == 0);
 	tuple = ExecFetchSlotHeapTuple(slot, false, &should_free);
 
-	__usage = (kds->__usage64 +
+	__usage = (kds->usage +
 			   MAXALIGN(offsetof(kern_tupitem, htup) + tuple->t_len));
 	if (KDS_HEAD_LENGTH(kds) +
 		sizeof(uint64_t) * (kds->nitems + 1) +
@@ -895,7 +895,7 @@ __kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 	titem->rowid = kds->nitems;
 	memcpy(&titem->htup, tuple->t_data, tuple->t_len);
 	memcpy(&titem->htup.t_ctid, &tuple->t_self, sizeof(ItemPointerData));
-	kds->__usage64 = rowindex[kds->nitems++] = __usage;
+	kds->usage = rowindex[kds->nitems++] = __usage;
 
 	if (should_free)
 		heap_freetuple(tuple);
@@ -919,7 +919,7 @@ pgstromRelScanChunkNormal(pgstromTaskState *pts,
 	enlargeStringInfo(&pts->xcmd_buf, 0);
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
 	kds->nitems = 0;
-	kds->__usage64 = 0;
+	kds->usage = 0;
 	kds->length = PGSTROM_CHUNK_SIZE;
 
 	if (pts->br_state)
@@ -973,7 +973,7 @@ pgstromRelScanChunkNormal(pgstromTaskState *pts,
 	/* setup iovec that may skip the hole between row-index and tuples-buffer */
 	sz1 = ((KDS_BODY_ADDR(kds) - pts->xcmd_buf.data) +
 		   MAXALIGN(sizeof(uint64_t) * kds->nitems));
-	sz2 = kds->__usage64;
+	sz2 = kds->usage;
 	Assert(sz1 + sz2 <= pts->xcmd_buf.len);
 	kds->length = (KDS_HEAD_LENGTH(kds) +
 				   MAXALIGN(sizeof(uint64_t) * kds->nitems) + sz2);

@@ -221,7 +221,7 @@ __gpuscan_load_source_row(kern_context *kcxt,
 	{
 		uint64_t	offset = KDS_GET_ROWINDEX(kds_src)[index];
 
-		assert(offset <= kds_src->__usage64);
+		assert(offset <= kds_src->usage);
 		tupitem = (kern_tupitem *)((char *)kds_src +
 								   kds_src->length -
 								   offset);

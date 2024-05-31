@@ -1081,7 +1081,7 @@ tryExecCpuFallbackChunks(pgstromTaskState *pts)
 			HeapTupleData	htuple;
 
 			elog(pgstrom_cpu_fallback_elevel, "%s: CPU fallback %u tuples (%s)",
-				 pts->css.methods->CustomName, kds->nitems, format_bytesz(kds->__usage64));
+				 pts->css.methods->CustomName, kds->nitems, format_bytesz(kds->usage));
 			for (uint32_t i=0; i < kds->nitems; i++)
 			{
 				kern_fallbackitem *fb_item = (kern_fallbackitem *)

@@ -1604,7 +1604,7 @@ __writeOutCpuFallbackTuple(kern_context *kcxt,
 	}
 	reqsz = MAXALIGN(offsetof(kern_fallbackitem, htup) + tupsz);
 	/* allocation of fallback buffer */
-	__usage = __atomic_add_uint64(&kds_fallback->__usage64, reqsz);
+	__usage = __atomic_add_uint64(&kds_fallback->usage, reqsz);
 	__usage += reqsz;
 	__nitems_cur = __volatileRead(&kds_fallback->nitems);
 	do {

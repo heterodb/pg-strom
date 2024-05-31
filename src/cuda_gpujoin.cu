@@ -655,7 +655,7 @@ execGpuJoinProjection(kern_context *kcxt,
 		uint32_t	__nitems_cur;
 		uint32_t	__nitems_new;
 
-		__usage = __atomic_add_uint64(&kds_dst->__usage64, total_sz);
+		__usage = __atomic_add_uint64(&kds_dst->usage, total_sz);
 		__nitems_cur = __volatileRead(&kds_dst->nitems);
 		do {
 			__nitems_old = __nitems_cur;

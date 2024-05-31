@@ -845,7 +845,7 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 									 kexp_groupby_actions);
 	assert(tupsz > 0);
 	required = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
-	offset = __atomic_add_uint64(&kds_final->__usage64, required);
+	offset = __atomic_add_uint64(&kds_final->usage, required);
 	if (!__KDS_CHECK_OVERFLOW(kds_final, 1, offset + required))
 		return NULL;	/* out of memory */
 	offset += required;
@@ -972,7 +972,7 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 	 * written by other threads.
 	 */
 	__sz = TYPEALIGN(CUDA_L1_CACHELINE_SZ, tupsz);
-	__usage = __atomic_add_uint64(&kds_final->__usage64, __sz);
+	__usage = __atomic_add_uint64(&kds_final->usage, __sz);
 	__nitems_cur = __volatileRead(&kds_final->nitems);
 	do {
 		__nitems_old = __nitems_cur;

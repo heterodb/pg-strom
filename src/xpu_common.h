@@ -650,7 +650,7 @@ typedef struct kern_colmeta		kern_colmeta;
 
 struct kern_data_store {
 	uint64_t		length;		/* length of this data-store */
-	uint64_t		__usage64;	/* usage of this data-store */
+	uint64_t		usage;		/* usage of this data-store */
 	uint32_t		nitems;		/* number of rows (or blocks) in this store */
 	uint32_t		ncols;		/* number of columns in this store */
 	char			format;		/* one of KDS_FORMAT_* above */
@@ -3419,7 +3419,7 @@ print_kern_data_store(const kern_data_store *kds)
 	printf("kds %p { length=%lu, usage=%lu, nitems=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
 		   kds,
 		   kds->length,
-		   kds->__usage64,
+		   kds->usage,
 		   kds->nitems,
 		   kds->ncols,
 		   kds->format,

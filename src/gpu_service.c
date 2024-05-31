@@ -1406,7 +1406,7 @@ __expandGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 		kds_new->length = length;
 
 		/* later falf */
-		sz = kds_old->__usage64;
+		sz = kds_old->usage;
 		memcpy((char *)kds_new + kds_new->length - sz,
 			   (char *)kds_old + kds_old->length - sz, sz);
 
@@ -1483,7 +1483,7 @@ __expandGpuFallbackBuffer(gpuQueryBuffer *gq_buf,
 			kds_new->length = length;
 
 			/* later half */
-			sz = kds_old->__usage64;
+			sz = kds_old->usage;
 			memcpy((char *)kds_new + kds_new->length - sz,
 				   (char *)kds_old + kds_old->length - sz, sz);
 
@@ -1769,7 +1769,7 @@ gpuClientWriteBack(gpuClient  *gclient,
 			 */
 			head_sz = (sz1 + sizeof(uint64_t) * (kds->hash_nslots +
 												 kds->nitems));
-			sz3 = Min(kds->__usage64,
+			sz3 = Min(kds->usage,
 					  kds->length - head_sz);
 			if (sz3 > 0)
 			{
@@ -1790,7 +1790,7 @@ gpuClientWriteBack(gpuClient  *gclient,
 			sz1 = (KDS_HEAD_LENGTH(kds) +
 				   MAXALIGN(sizeof(uint64_t) * kds->nitems));
 			/* see comment above */
-			sz2 = kds->__usage64;
+			sz2 = kds->usage;
 			if (sz1 + sz2 >= kds->length)
 			{
 				iov = &iov_array[iovcnt++];
