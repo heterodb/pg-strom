@@ -11,7 +11,8 @@ DPUSERB_HEADS = dpuserv.h arrow_defs.h xpu_common.h xpu_basetype.h \
                 xpu_timelib.h xpu_misclib.h
 
 CFLAGS  := -Wall -g -O3 -D_GNU_SOURCE \
-           -Wno-sign-compare
+           -Wno-sign-compare \
+           -DCUDA_MAXTHREADS_PER_BLOCK=1
 LDFLAGS := -lpthread -lm -lstdc++
 ifeq ($(PGSTROM_DEBUG),1)
 CFLAGS += -O0
