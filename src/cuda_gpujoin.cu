@@ -639,6 +639,7 @@ execGpuJoinProjection(kern_context *kcxt,
 										kds_dst);
 		if (tupsz < 0)
 			STROM_ELOG(kcxt, "unable to compute tuple size");
+		tupsz = offsetof(kern_tupitem, htup) + tupsz;
 	}
 	/* error checks */
 	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
