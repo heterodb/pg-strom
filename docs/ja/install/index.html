@@ -48,7 +48,7 @@
                 </li>
               </ul>
               <ul class="current">
-                <li class="toctree-l1 current"><a class="reference internal current" href="./">インストール</a>
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">インストール</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#_2">チェックリスト</a>
     </li>
@@ -59,6 +59,12 @@
     <li class="toctree-l3"><a class="reference internal" href="#nouveau">nouveauドライバの無効化</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#iommu">IOMMUの無効化</a>
+        <ul>
+    <li class="toctree-l4"><a class="reference internal" href="#rhel9">RHEL9における設定</a>
+    </li>
+    <li class="toctree-l4"><a class="reference internal" href="#rhel8">RHEL8における設定</a>
+    </li>
+        </ul>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#_4">追加リポジトリの有効化</a>
         <ul>
@@ -245,11 +251,9 @@
 </ol>
 <h2 id="os">OSのインストール</h2>
 <p>CUDA ToolkitのサポートするLinuxディストリビューションを選択し、個々のディストリビューションのインストールプロセスに従ってインストール作業を行ってください。 CUDA ToolkitのサポートするLinuxディストリビューションは、<a href="https://developer.nvidia.com/">NVIDIA DEVELOPER ZONE</a>において紹介されています。</p>
-<p>例えば、Red Hat Enterprise Linux 8.x系列の場合、ベース環境として「最小限のインストール」を選択し、さらに以下のアドオンを選択してください。</p>
-<ul>
-<li>開発ツール</li>
-</ul>
-<p><img alt="RHEL8/Rocky8 Package Selection" src="../img/centos8_package_selection.png" /></p>
+<p>Red Hat Enterprise Linux 8.x系列（Rocky Linux 8.x系列を含む）の場合、ソフトウェア構成は、ベース環境として「最小限のインストール」を選択し、さらに追加のソフトウェアとして「開発ツール」を選択してください。</p>
+<p>Red Hat Enterprise Linux 9.x系列（Rocky Linux 9.x系列を含む）の場合、ソフトウェア構成は、ベース環境として「最小限のインストール」を選択し、さらに追加のソフトウェアとして「標準」「開発ツール」を選択してください。</p>
+<p><img alt="RHEL9 Software Selection" src="../img/centos8_package_selection.png" /></p>
 <p>サーバーへのOSインストール後、サードパーティーのパッケージをインストールするために、パッケージリポジトリの設定を行います。</p>
 <p>なお、インストーラで「開発ツール」を選択しなかった場合、以下のコマンドでOSインストール後に追加インストールする事が可能です。</p>
 <pre><code># dnf groupinstall 'Development Tools'
@@ -277,15 +281,23 @@ EOF
 <p>GPUDirect Storageの利用に先立って、OS側でIOMMUの設定を無効化する必要があります。</p>
 <p><a href="https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#install-prereqs">NVIDIA GPUDirect Storage Installation and Troubleshooting Guide</a>の記述を参考に、カーネル起動オプションの設定を行ってください。</p>
 <p>IOMMUを無効化するには、カーネル起動オプションに<code>amd_iommu=off</code> (AMD製CPUの場合)または、<code>intel_iommu=off</code> (Intel製CPUの場合)の設定を付加します。</p>
+<h4 id="rhel9">RHEL9における設定</h4>
+<p>以下のコマンドを実行し、カーネル起動オプションを追加してください。</p>
+<pre><code># grubby --update-kernel=ALL --args=&quot;amd_iommu=off&quot;
+</code></pre>
+<h4 id="rhel8">RHEL8における設定</h4>
 <p>エディタで<code>/etc/default/grub</code>を編集し、<code>GRUB_CMDLINE_LINUX_DEFAULT=</code>行に上記のオプションを付加してください。</p>
 <p>例えば、以下のような設定となるはずです。</p>
+<p>Open <code>/etc/default/grub</code> with an editor and add the above option to the <code>GRUB_CMDLINE_LINUX_DEFAULT=</code> line.</p>
+<p>For example, the settings should look like this:
+}</p>
 <pre><code>  :
 GRUB_CMDLINE_LINUX=&quot;rhgb quiet amd_iommu=off&quot;
   :
 </code></pre>
 <p>以下のコマンドを実行し、この設定をカーネル起動オプションに反映します。</p>
-<pre><code>$ sudo update-grub
-$ sudo shutdown -r now
+<pre><code># update-grub
+# shutdown -r now
 </code></pre>
 <h3 id="_4">追加リポジトリの有効化</h3>
 <h4 id="epelextra-packages-for-enterprise-linux">EPEL(Extra Packages for Enterprise Linux)</h4>
@@ -294,112 +306,143 @@ $ sudo shutdown -r now
 <p>EPELリポジトリから入手するパッケージの一つがDKMS(Dynamic Kernel Module Support)です。これは動作中のLinuxカーネルに適合したLinuxカーネルモジュールをオンデマンドでビルドするためのフレームワークで、NVIDIAのGPUデバイスドライバなど関連するカーネルモジュールが使用しています。
 Linuxカーネルモジュールは、Linuxカーネルのバージョンアップに追従して再ビルドが必要であるため、DKMSなしでのシステム運用は現実的ではありません。</p>
 <p>EPELリポジトリの定義は <code>epel-release</code> パッケージにより提供され、<a href="https://docs.fedoraproject.org/en-US/epel/#_quickstart">Fedora Project</a>のサイトから入手する事ができます。</p>
-<pre><code>-- For RHEL8
+<pre><code>-- For RHEL9
+# dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+
+-- For RHEL8
 # dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
 
--- For Rocky8
+-- For Rocky8/Rocky9
 # dnf install epel-release
 </code></pre>
 <h4 id="red-hat-codeready-linux-builder">Red Hat CodeReady Linux Builder</h4>
 <p>MOFED（Mellanox OpenFabrics Enterprise Distribution）ドライバのインストールには、Red Hat Enterprise Linux 8.xの標準インストール構成では無効化されている Red Hat CodeReady Linux Builder リポジトリを有効化する必要があります。Rokey Linuxにおいては、このリポジトリは PowerTools と呼ばれています。</p>
 <p>このリポジトリを有効化するには、以下のコマンドを実行します。</p>
-<pre><code>-- For RHEL8
+<pre><code>-- For RHEL9
+# subscription-manager repos --enable codeready-builder-for-rhel-9-x86_64-rpms
+
+-- For Rocky9
+# dnf config-manager --set-enabled crb
+
+-- For RHEL8
 # subscription-manager repos --enable codeready-builder-for-rhel-8-x86_64-rpms
 
 -- For Rocky8
 # dnf config-manager --set-enabled powertools
 </code></pre>
 <h2 id="mofed">MOFEDドライバのインストール</h2>
-<p>MOFEDドライバは、<a href="https://mellanox.com/products/infiniband-drivers/linux/mlnx_ofed">こちら</a>からダウンロードする事ができます。</p>
-<p>本節ではtgzアーカイブからのインストール例を紹介します。</p>
+<p>MOFEDドライバは、<a href="https://network.nvidia.com/products/infiniband-drivers/linux/mlnx_ofed/">こちら</a>からダウンロードする事ができます。
+本節では、MOFEDドライババージョン23.10のtgzアーカイブからのインストール例を紹介します。</p>
 <p><img alt="MOFED Driver Selection" src="../img/mofed-download.png" /></p>
-<p>tgzアーカイブを展開し、<code>mlnxofedinstall</code>スクリプトを実行します。この時、GPUDirect Storageのサポートを有効化するオプションを付加するのを忘れないでください。</p>
-<pre><code># tar xvf MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64.tgz
-# cd MLNX_OFED_LINUX-5.8-3.0.7.0-rhel8.8-x86_64
+<p>MOFEDドライバのインストーラを実行するために、最低限<code>createrepo</code>および<code>perl</code>パッケージのインストールが必要です。</p>
+<p>次にtgzアーカイブを展開し、<code>mlnxofedinstall</code>スクリプトを実行します。この時、GPUDirect Storageのサポートを有効化するオプションを付加するのを忘れないでください。</p>
+<pre><code># dnf install -y perl createrepo
+# tar zxvf MLNX_OFED_LINUX-23.10-2.1.3.1-rhel9.3-x86_64.tgz
+# cd MLNX_OFED_LINUX-23.10-2.1.3.1-rhel9.3-x86_64
 # ./mlnxofedinstall --with-nvmf --with-nfsrdma --add-kernel-support
 # dracut -f
 </code></pre>
 <p>MOFEDドライバのビルドおよびインストール中、不足パッケージのインストールを要求される事があります。
 その場合、エラーメッセージを確認して要求されたパッケージの追加インストールを行ってください。</p>
-<pre><code>Error: One or more required packages for installing MLNX_OFED_LINUX are missing.
+<pre><code>Error: One or more required packages for installing OFED-internal are missing.
 Please install the missing packages using your Linux distribution Package Management tool.
 Run:
-yum install tcsh tcl tk kernel-modules-extra gcc-gfortran python36
+yum install kernel-rpm-macros
+Failed to build MLNX_OFED_LINUX for 5.14.0-362.8.1.el9_3.x86_64
 </code></pre>
 <p>MOFEDドライバのインストールが完了すると、nvmeドライバなど、OS標準のものが置き換えられているはずです。</p>
 <p>例えば以下の例では、OS標準の<code>nvme-rdma</code>ドライバ（<code>/lib/modules/&lt;KERNEL_VERSION&gt;/kernel/drivers/nvme/host/nvme-rdma.ko.xz</code>）ではなく、追加インストールされた<code>/lib/modules/&lt;KERNEL_VERSION&gt;/extra/mlnx-nvme/host/nvme-rdma.ko</code>が優先して使用されています。</p>
-<pre><code># modinfo nvme-rdma
-filename:       /lib/modules/4.18.0-477.10.1.el8_8.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
+<pre><code>$ modinfo nvme-rdma
+filename:       /lib/modules/5.14.0-427.18.1.el9_4.x86_64/extra/mlnx-nvme/host/nvme-rdma.ko
 license:        GPL v2
-rhelversion:    8.8
-srcversion:     533BB7E5866E52F63B9ACCB
-depends:        nvme-core,mlx_compat,rdma_cm,ib_core,nvme-fabrics
+rhelversion:    9.4
+srcversion:     16C0049F26768D6EA12771B
+depends:        nvme-core,rdma_cm,ib_core,nvme-fabrics,mlx_compat
+retpoline:      Y
 name:           nvme_rdma
-vermagic:       4.18.0-477.10.1.el8_8.x86_64 SMP mod_unload modversions
+vermagic:       5.14.0-427.18.1.el9_4.x86_64 SMP preempt mod_unload modversions
 parm:           register_always:Use memory registration even for contiguous memory regions (bool)
 </code></pre>
 <p>既にロードされているカーネルモジュール（例: <code>nvme</code>）を置き換えるため、ここで一度システムのシャットダウンと再起動を行います。</p>
 <p><code>mlnxofedinstall</code>スクリプトの完了後に、<code>dracut -f</code>を実行するのを忘れないでください。</p>
+<div class="admonition tips">
+<p class="admonition-title">Tips</p>
+<p><strong>Linux kernelのバージョンアップとMOFEDドライバ</strong></p>
+<p>RHEL系列のディストリビューションにおいて、MODEDドライバはDKMS(Dynamic Kernel Module Support)を使用しません。
+そのため、Linux kernelをバージョンアップした場合には、上記の手順を再度実行し、新しいLinux kernelに対応したMOFEDドライバを再インストールする必要があります。</p>
+<p>後述のCUDA Toolkitのインストールなど、パッケージ更新のタイミングでLinux kernelがアップデートされる事もありますが、その場合でも同様です。</p>
+</div>
 <h3 id="heterodb-swdc">heterodb-swdcのインストール</h3>
 <p>PG-Stromほか関連パッケージは<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から配布されています。
 これらのソフトウェアを入手するために、HeteroDB-SWDCのリポジトリ定義をyumシステムに追加する必要があります。</p>
 <p>HeteroDB-SWDCリポジトリの定義はheterodb-swdcパッケージにより提供されます。
-Webブラウザなどで<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>へアクセスし、ページの先頭にリンクの記載されている<code>heterodb-swdc-1.2-1.el8.noarch.rpm</code>をダウンロードしてインストールしてください。
+Webブラウザなどで<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>へアクセスし、ページの先頭にリンクの記載されている<code>heterodb-swdc-1.3-1.el9.noarch.rpm</code>をダウンロードしてインストールしてください。（RHEL8の場合は<code>heterodb-swdc-1.3-1.el8.noarch.rpm</code>）
 heterodb-swdcパッケージがインストールされると、HeteroDB-SWDCからソフトウェアを入手するためのyumシステムへの設定が追加されます。</p>
 <p>以下のようにheterodb-swdcパッケージをインストールします。</p>
 <pre><code># dnf install https://heterodb.github.io/swdc/yum/rhel8-noarch/heterodb-swdc-1.2-1.el8.noarch.rpm
 </code></pre>
 <h2 id="cuda-toolkit">CUDA Toolkitのインストール</h2>
 <p>本節ではCUDA Toolkitのインストールについて説明します。 既に最新のCUDA Toolkitをインストール済みである場合、本節の初期設定と合致しているかどうか確認してください。</p>
-<p>NVIDIAはCUDA Toolkitのインストールに２通りの方法を提供しています。一つは自己実行型アーカイブ（runfile）によるもの。もう一つはRPMパッケージによるものです。
-インストールオプションを指定するため、ここではrunfileを用いる方法を推奨します。</p>
-<p>CUDA Toolkitのインストール用パッケージはNVIDIA DEVELOPER ZONEからダウンロードする事ができます。 適切なOS、アーキテクチャ、ディストリビューション、バージョンを指定し、『runfile(local)』版を選択してください。</p>
+<p>NVIDIAはCUDA Toolkitのインストールに２通りの方法を提供しています。一つは自己実行型アーカイブ（runfile）によるもの。もう一つはRPMパッケージによるもので、PG-StromのセットアップにはRPMパッケージによるインストールを推奨します。</p>
+<p>CUDA Toolkitのインストール用パッケージはNVIDIA DEVELOPER ZONEからダウンロードする事ができます。 適切なOS、アーキテクチャ、ディストリビューション、バージョンを指定し、『rpm(network)』版を選択してください。</p>
 <p><img alt="CUDA Toolkit download" src="../img/cuda-download.png" /></p>
-<p>『runfile(local)』を選択すると、自己実行型アーカイブをダウンロードするURLと、それを起動するためのシェルコマンドが表示されます。
-ガイダンス通りにインストールを進めてください。</p>
-<pre><code>$ wget https://developer.download.nvidia.com/compute/cuda/12.3.1/local_installers/cuda_12.3.1_545.23.08_linux.run
-$ sudo sh cuda_12.3.1_545.23.08_linux.run
+<p>『rpm(network)』を選択すると、リポジトリを登録し、ネットワーク経由でパッケージをインストールするためのシェルコマンドが表示されます。ガイダンス通りにインストールを進めてください。</p>
+<pre><code># dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
+# dnf clean all
+# dnf install cuda-toolkit-12-5
 </code></pre>
-<p>インストーラが起動すると、いくつかのインストールオプションを指定する事ができます。</p>
-<p>まず、デフォルトではチェックの外れている<code>[X] Kernel Objects</code> --&gt; <code>[X] nvidia-fs</code> にチェックを入れてください。これはGPU-Direct SQLを使用するために必須のオプションです。</p>
-<p><img alt="CUDA Runfile Installer1" src="../img/cuda-runfile-install-01.png" /></p>
-<p>次に、<code>Options</code> --&gt; <code>Driver Options</code> を下ってゆき、<code>[X] Install the kernel open module flavor</code> にチェックを入れてください。将来的に、GPUDirect Storage機能はオープンソース版のドライバでのみサポートされるという事が予告されています。</p>
-<p><img alt="CUDA Runfile Installer1" src="../img/cuda-runfile-install-02.png" /></p>
+<p>CUDA Toolkitのインストールに続いて、ドライバをインストールのためのコマンドが２種類表示されています。
+ここでは<strong>オープンソース版のnvidia-driver</strong>を使用してください。オープンソース版のみがGPUDirect Storage機能をサポートしており、PG-StromのGPU-Direct SQLは本機能を利用しています。</p>
+<div class="admonition tips">
+<p class="admonition-title">Tips</p>
+<p><strong>Volta以前のGPUの利用について</strong></p>
+<p>オープンソース版nvidiaドライバは、Volta世代以前のGPUには対応していません。
+したがって、VoltaまたはPascal世代のGPUでPG-Stromを利用する場合は、プロプラエタリ版のドライバがGPUDirect Storageに対応しているCUDA 12.2を利用する必要があります。
+CUDA 12.2のパッケージは<a href="https://developer.nvidia.com/cuda-12-2-2-download-archive?target_os=Linux&amp;target_arch=x86_64&amp;Distribution=RHEL&amp;target_version=8&amp;target_type=rpm_local">こちら</a>から入手する事ができます。</p>
+</div>
+<pre><code># dnf module install nvidia-driver:open-dkms
+# dnf install nvidia-gds
+</code></pre>
 <p>正常にインストールが完了すると、<code>/usr/local/cuda</code>配下にCUDA Toolkitが導入されています。</p>
-<pre><code>$ ls /usr/local/cuda
-bin     include  libnsight         nvml       samples  tools
-doc     jre      libnvvp           nvvm       share    version.txt
-extras  lib64    nsightee_plugins  pkgconfig  src
+<pre><code>$ ls /usr/local/cuda/
+bin/                            gds/      nsightee_plugins/  targets/
+compute-sanitizer/              include@ nvml/              tools/
+CUDA_Toolkit_Release_Notes.txt  lib64@   nvvm/              version.json
+DOCS                            libnvvp/  README
+EULA.txt                        LICENSE   share/
+extras/                         man/      src/
 </code></pre>
 <p>インストールが完了したら、GPUが正しく認識されている事を確認してください。<code>nvidia-smi</code>コマンドを実行すると、以下の出力例のように、システムに搭載されているGPUの情報が表示されます。</p>
 <pre><code>$ nvidia-smi
-Mon Dec 18 18:02:14 2023
-+---------------------------------------------------------------------------------------+
-| NVIDIA-SMI 545.23.08              Driver Version: 545.23.08    CUDA Version: 12.3     |
-|-----------------------------------------+----------------------+----------------------+
-| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |
-| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |
-|                                         |                      |               MIG M. |
-|=========================================+======================+======================|
-|   0  NVIDIA L40S                    Off | 00000000:41:00.0 Off |                    0 |
-| N/A   40C    P0              90W / 350W |      4MiB / 46068MiB |      3%      Default |
-|                                         |                      |                  N/A |
-+-----------------------------------------+----------------------+----------------------+
+Mon Jun  3 09:56:41 2024
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 555.42.02              Driver Version: 555.42.02      CUDA Version: 12.5     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100-PCIE-40GB          Off |   00000000:41:00.0 Off |                    0 |
+| N/A   58C    P0             66W /  250W |       1MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
 
-+---------------------------------------------------------------------------------------+
-| Processes:                                                                            |
-|  GPU   GI   CI        PID   Type   Process name                            GPU Memory |
-|        ID   ID                                                             Usage      |
-|=======================================================================================|
-|  No running processes found                                                           |
-+---------------------------------------------------------------------------------------+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
 </code></pre>
 <h3 id="gpudirect-storage">GPUDirect Storageの確認</h3>
 <p>上記の手順でCUDA Toolkitのインストールが完了すると、GPUDirect Storageが利用可能な状態となっているはずです。
-以下の通り、<code>gdscheck</code>ツールを用いてストレージデバイス毎のコンフィグを確認してください。</p>
+以下の通り、<code>gdscheck</code>ツールを用いてストレージデバイス毎のコンフィグを確認してください。
+（この例では、<code>nvme</code>だけでなく、<code>nvme-rdma</code>や<code>rpcrdma</code>カーネルモジュールもロードしているため、関連する機能が<code>Supported</code>となっています）</p>
 <pre><code># /usr/local/cuda/gds/tools/gdscheck -p
- GDS release version: 1.0.0.82
- nvidia_fs version:  2.7 libcufile version: 2.4
+ GDS release version: 1.10.0.4
+ nvidia_fs version:  2.20 libcufile version: 2.12
+ Platform: x86_64
  ============
  ENVIRONMENT:
  ============
@@ -413,10 +456,11 @@ Mon Dec 18 18:02:14 2023
  NVMesh             : Unsupported
  DDN EXAScaler      : Unsupported
  IBM Spectrum Scale : Unsupported
- NFS                : Unsupported
+ NFS                : Supported
+ BeeGFS             : Unsupported
  WekaFS             : Unsupported
  Userspace RDMA     : Unsupported
- --Mellanox PeerDirect : Enabled
+ --Mellanox PeerDirect : Disabled
  --rdma library        : Not Loaded (libcufile_rdma.so)
  --rdma devices        : Not configured
  --rdma_device_status  : Up: 0 Down: 0
@@ -424,9 +468,11 @@ Mon Dec 18 18:02:14 2023
  CUFILE CONFIGURATION:
  =====================
  properties.use_compat_mode : true
+ properties.force_compat_mode : false
  properties.gds_rdma_write_support : true
  properties.use_poll_mode : false
  properties.poll_mode_max_size_kb : 4
+ properties.max_batch_io_size : 128
  properties.max_batch_io_timeout_msecs : 5
  properties.max_direct_io_size_kb : 16384
  properties.max_device_cache_size_kb : 131072
@@ -437,21 +483,31 @@ Mon Dec 18 18:02:14 2023
  properties.rdma_dynamic_routing : 0
  fs.generic.posix_unaligned_writes : false
  fs.lustre.posix_gds_min_kb: 0
+ fs.beegfs.posix_gds_min_kb: 0
  fs.weka.rdma_write_support: false
+ fs.gpfs.gds_write_support: false
  profile.nvtx : false
  profile.cufile_stats : 0
  miscellaneous.api_check_aggressive : false
+ execution.max_io_threads : 4
+ execution.max_io_queue_depth : 128
+ execution.parallel_io : true
+ execution.min_io_threshold_size_kb : 8192
+ execution.max_request_parallelism : 4
+ properties.force_odirect_mode : false
+ properties.prefer_iouring : false
  =========
  GPU INFO:
  =========
- GPU index 0 NVIDIA A100-PCIE-40GB bar:1 bar size (MiB):65536 supports GDS
- GPU index 1 NVIDIA A100-PCIE-40GB bar:1 bar size (MiB):65536 supports GDS
+ GPU index 0 NVIDIA A100-PCIE-40GB bar:1 bar size (MiB):65536 supports GDS, IOMMU State: Disabled
  ==============
  PLATFORM INFO:
  ==============
  IOMMU: disabled
+ Nvidia Driver Info Status: Supported(Nvidia Open Driver Installed)
+ Cuda Driver Version Installed:  12050
+ Platform: AS -2014CS-TR, Arch: x86_64(Linux 5.14.0-427.18.1.el9_4.x86_64)
  Platform verification succeeded
-
 </code></pre>
 <div class="admonition tips">
 <p class="admonition-title">Tips</p>
@@ -535,27 +591,23 @@ GPU_UUID:GPU-a137b1df-53c9-197f-2801-f2dccaf9d42f
 <p>PostgreSQL Global Development Groupは、最新のPostgreSQLおよび関連ソフトウェアの配布のためにyumリポジトリを提供しています。
 EPELの設定のように、yumリポジトリの設定を行うだけの小さなパッケージをインストールし、その後、PostgreSQLやその他のソフトウェアをインストールします。</p>
 <p>yumリポジトリ定義の一覧は <a href="http://yum.postgresql.org/repopackages.php">http://yum.postgresql.org/repopackages.php</a> です。</p>
-<p>PostgreSQLメジャーバージョンとLinuxディストリビューションごとに多くのリポジトリ定義がありますが、あなたのLinuxディストリビューション向けのPostgreSQL 11以降のものを選択する必要があります。</p>
+<p>PostgreSQLメジャーバージョンとLinuxディストリビューションごとに多くのリポジトリ定義がありますが、あなたのLinuxディストリビューション向けのPostgreSQL 15以降のものを選択する必要があります。</p>
 <p>以下のステップで PostgreSQL のインストールを行います。</p>
 <ul>
 <li>yumリポジトリの定義をインストール</li>
 <li>OS標準のPostgreSQLモジュールの無効化</li>
 <li>PostgreSQLパッケージのインストール</li>
 </ul>
-<p>例えばPostgreSQL v15を使用する場合、PG-Stromのインストールには <code>postgresql15-server</code>および<code>postgresql15-devel</code>パッケージが必要です。</p>
-<p>以下は、RHEL8においてPostgreSQL v15をインストールする手順の例です。</p>
-<pre><code># dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+<p>例えばPostgreSQL v16を使用する場合、PG-Stromのインストールには <code>postgresql16-server</code>および<code>postgresql16-devel</code>パッケージが必要です。</p>
+<p>以下は、RHEL9においてPostgreSQL v16をインストールする手順の例です。</p>
+<pre><code># dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
 # dnf -y module disable postgresql
-# dnf install -y postgresql15-devel postgresql15-server
+# dnf install -y postgresql16-devel postgresql16-server
 </code></pre>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>Red Hat Enterprise Linux 8.x の場合、パッケージ名<code>postgresql</code>がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、<code>dnf -y module disable postgresql</code> コマンドを用いてディストリビューション標準の<code>postgresql</code>モジュールを無効化します。</p>
+<p>Red Hat Enterprise Linuxの場合、パッケージ名<code>postgresql</code>がディストリビューション標準のものと競合してしまい、PGDG提供のパッケージをインストールする事ができません。そのため、<code>dnf -y module disable postgresql</code> コマンドを用いてディストリビューション標準の<code>postgresql</code>モジュールを無効化します。</p>
 </div>
-<p>PostgreSQL Global Development Groupの提供するRPMパッケージは<code>/usr/pgsql-&lt;version&gt;</code>という少々変則的なディレクトリにソフトウェアをインストールするため、<code>psql</code>等の各種コマンドを実行する際にはパスが通っているかどうか注意する必要があります。</p>
-<p><code>postgresql-alternatives</code>パッケージをインストールしておくと、各種コマンドへのシンボリックリンクを<code>/usr/local/bin</code>以下に作成するため各種オペレーションが便利です。また、複数バージョンのPostgreSQLをインストールした場合でも、<code>alternatives</code>コマンドによってターゲットとなるPostgreSQLバージョンを切り替える事が可能です。</p>
-<pre><code># dnf install postgresql-alternatives
-</code></pre>
 <h2 id="pg-strom">PG-Stromのインストール</h2>
 <p>本節ではPG-Stromのインストール方法について説明します。
 推奨はRPMによるインストールですが、開発者向けにソースコードからのビルド方法についても紹介します。</p>
@@ -564,7 +616,7 @@ EPELの設定のように、yumリポジトリの設定を行うだけの小さ�
 既にyumシステムへリポジトリを追加済みであれば、それほど作業は多くありません。</p>
 <p>基盤となるPostgreSQLのバージョンごとに別個のPG-StromのRPMパッケージが準備されており、PostgreSQL v15用であれば<code>pg_strom-PG15</code>パッケージを、PostgreSQL v16用であれば<code>pg_strom-PG16</code>パッケージをインストールします。</p>
 <p>これは、PostgreSQL拡張モジュールのバイナリ互換性に伴う制約です。</p>
-<pre><code># dnf install -y pg_strom-PG15
+<pre><code># dnf install -y pg_strom-PG16
 </code></pre>
 <p>以上でパッケージのインストールは完了です。</p>
 <h3 id="_6">ソースからのインストール</h3>
@@ -585,7 +637,7 @@ Resolving deltas: 100% (10504/10504), done.
 <p><code>pg_config</code>にパスが通っており、それがインストール先のPostgreSQLのものであれば、そのまま<code>make</code>、<code>make install</code>を実行します。
 直接パスが通っていない場合は、<code>make</code>コマンドに<code>PG_CONFIG=...</code>パラメータを与え、<code>pg_config</code>のフルパスを渡します。</p>
 <pre><code>$ cd pg-strom
-$ make PG_CONFIG=/usr/pgsql-15/bin/pg_config
+$ make PG_CONFIG=/usr/pgsql-16/bin/pg_config
 $ sudo make install PG_CONFIG=/usr/pgsql-15/bin/pg_config
 </code></pre>
 <h3 id="_8">インストール後の設定</h3>
@@ -594,7 +646,7 @@ $ sudo make install PG_CONFIG=/usr/pgsql-15/bin/pg_config
 <p>RPMインストールにおけるデフォルトのデータベースクラスタのパスは<code>/var/lib/pgsql/&lt;version number&gt;/data</code>です。
 <code>postgresql-alternatives</code>パッケージをインストールしている場合は、PostgreSQLのバージョンに拠らず<code>/var/lib/pgdata</code>で参照する事ができます。</p>
 <pre><code># su - postgres
-$ initdb -D /var/lib/pgdata/
+$ /usr/pgsql-16/bin/initdb -D /var/lib/pgdata/
 The files belonging to this database system will be owned by user &quot;postgres&quot;.
 This user must also own the server process.
 
@@ -669,29 +721,25 @@ LimitCORE=infinity
 <p>PostgreSQLを起動します。</p>
 <p>正常にセットアップが完了していれば、ログにPG-StromがGPUを認識した事を示すメッセージが記録されているはずです。
 以下の例では、NVIDIA A100 (PCIE版; 40GB) を認識しており、また、NVME-SSDごとに近傍のGPUがどちらであるのか出力されています。</p>
-<pre><code># systemctl start postgresql-13
-# journalctl -u postgresql-13
--- Logs begin at Thu 2021-05-27 17:02:03 JST, end at Fri 2021-05-28 13:26:35 JST. --
-May 28 13:09:33 kujira.heterodb.in systemd[1]: Starting PostgreSQL 13 database server...
-May 28 13:09:33 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:33.500 JST [6336] LOG:  NVRTC 11.3 is successfully loaded.
-May 28 13:09:33 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:33.510 JST [6336] LOG:  failed on open('/proc/nvme-strom'): No such file or directory - likely nvme_strom.ko is not loaded
-May 28 13:09:33 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:33.510 JST [6336] LOG:  HeteroDB Extra module loaded (API=20210525; NVIDIA cuFile)
-May 28 13:09:33 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:33.553 JST [6336] LOG:  HeteroDB License: { &quot;version&quot; : 2, &quot;serial_nr&quot; : &quot;HDB-TRIAL&quot;, &quot;issued_at&quot; : &quot;2021-05-27&quot;, &quot;expired_at&quot; : &quot;2021-06-26&quot;, &quot;gpus&quot; : [ { &quot;uuid&quot; : &quot;GPU-cca38cf1-ddcc-6230-57fe-d42ad0dc3315&quot; }, { &quot;uuid&quot; : &quot;GPU-13943bfd-5b30-38f5-0473-78979c134606&quot; } ]}
-May 28 13:09:33 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:33.553 JST [6336] LOG:  PG-Strom version 2.9 built for PostgreSQL 13
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.748 JST [6336] LOG:  PG-Strom: GPU0 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.59GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.748 JST [6336] LOG:  PG-Strom: GPU1 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.59GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.755 JST [6336] LOG:  - nvme0n1 (INTEL SSDPEDKE020T7; 0000:5e:00.0)
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.755 JST [6336] LOG:  - nvme1n1 (INTEL SSDPE2KX010T8; 0000:8a:00.0 --&gt; GPU0)
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.755 JST [6336] LOG:  - nvme2n1 (INTEL SSDPE2KX010T8; 0000:8b:00.0 --&gt; GPU0)
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.755 JST [6336] LOG:  - nvme4n1 (INTEL SSDPE2KX010T8; 0000:8d:00.0 --&gt; GPU0)
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.755 JST [6336] LOG:  - nvme3n1 (INTEL SSDPE2KX010T8; 0000:8c:00.0 --&gt; GPU0)
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.755 JST [6336] LOG:  - nvme6n1 (INTEL SSDPE2KX010T8; 0000:b5:00.0 --&gt; GPU1)
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.755 JST [6336] LOG:  - nvme7n1 (INTEL SSDPE2KX010T8; 0000:b6:00.0 --&gt; GPU1)
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.755 JST [6336] LOG:  - nvme5n1 (INTEL SSDPE2KX010T8; 0000:b4:00.0 --&gt; GPU1)
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.755 JST [6336] LOG:  - nvme8n1 (INTEL SSDPE2KX010T8; 0000:b7:00.0 --&gt; GPU1)
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.909 JST [6336] LOG:  redirecting log output to logging collector process
-May 28 13:09:43 kujira.heterodb.in postmaster[6336]: 2021-05-28 13:09:43.909 JST [6336] HINT:  Future log output will appear in directory &quot;log&quot;.
-May 28 13:09:44 kujira.heterodb.in systemd[1]: Started PostgreSQL 13 database server.
+<pre><code># systemctl start postgresql-16
+# journalctl -u postgresql-16
+Jun 02 17:28:45 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:45.989 JST [20242] LOG:  HeteroDB Extra module loaded [api_version=20240418,cufile=off,nvme_strom=off,githash=3ffc65428c07bb3c9d0e5c75a2973389f91dfcd4]
+Jun 02 17:28:45 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:45.989 JST [20242] LOG:  HeteroDB License: { &quot;version&quot; : 2, &quot;serial_nr&quot; : &quot;HDB-TRIAL&quot;, &quot;issued_at&quot; : &quot;2024-06-02&quot;, &quot;expired_at&quot; : &quot;2099-12-31&quot;, &quot;nr_gpus&quot; : 1, &quot;gpus&quot; : [ { &quot;uuid&quot; : &quot;GPU-13943bfd-5b30-38f5-0473-78979c134606&quot; } ]}
+Jun 02 17:28:45 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:45.989 JST [20242] LOG:  PG-Strom version 5.12.el9 built for PostgreSQL 16 (githash: )
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.114 JST [20242] LOG:  PG-Strom binary built for CUDA 12.4 (CUDA runtime 12.5)
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.114 JST [20242] WARNING:  The CUDA version where this PG-Strom module binary was built for (12.4) is newer than the CUDA runtime version on this platform (12.5). It may lead unexpected behavior, and upgrade of CUDA toolkit is recommended.
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.114 JST [20242] LOG:  PG-Strom: GPU0 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.50GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:41:00:0] GPU0 (NVIDIA A100-PCIE-40GB; GPU-13943bfd-5b30-38f5-0473-78979c134606)
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:81:00:0] nvme6 (NGD-IN2500-080T4-C) --&gt; GPU0 [dist=9]
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:82:00:0] nvme3 (INTEL SSDPF2KX038TZ) --&gt; GPU0 [dist=9]
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:c2:00:0] nvme1 (INTEL SSDPF2KX038TZ) --&gt; GPU0 [dist=9]
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:c6:00:0] nvme4 (Corsair MP600 CORE) --&gt; GPU0 [dist=9]
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:c3:00:0] nvme5 (INTEL SSDPF2KX038TZ) --&gt; GPU0 [dist=9]
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:c1:00:0] nvme0 (INTEL SSDPF2KX038TZ) --&gt; GPU0 [dist=9]
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.117 JST [20242] LOG:  [0000:c4:00:0] nvme2 (NGD-IN2500-080T4-C) --&gt; GPU0 [dist=9]
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.217 JST [20242] LOG:  redirecting log output to logging collector process
+Jun 02 17:28:48 buri.heterodb.com postgres[20242]: 2024-06-02 17:28:48.217 JST [20242] HINT:  Future log output will appear in directory &quot;log&quot;.
+Jun 02 17:28:48 buri.heterodb.com systemd[1]: Started PostgreSQL 16 database server.
 </code></pre>
 <h3 id="pg-strom_2">PG-Stromエクステンションの作成</h3>
 <p>最後に、PG-Stromに関連するSQL関数などのDBオブジェクトを作成します。
@@ -699,10 +747,10 @@ May 28 13:09:44 kujira.heterodb.in systemd[1]: Started PostgreSQL 13 database se
 <p>なお、この手順は新しいデータベースを作成するたびに必要になる事に注意してください。
 新しいデータベースを作成した時点で既にPG-Strom関連オブジェクトが作成されていてほしい場合は、予め<code>template1</code>データベースでPG-Stromエクステンションを作成しておけば、<code>CREATE DATABASE</code>コマンドの実行時に新しいデータベースへ設定がコピーされます。</p>
 <pre><code>$ psql -U postgres
-psql (15.1)
+psql (16.3)
 Type &quot;help&quot; for help.
 
-postgres=# create extension pg_strom ;
+postgres=# CREATE EXTENSION pg_strom ;
 CREATE EXTENSION
 </code></pre>
 <p>以上でインストール作業は完了です。</p>
@@ -710,12 +758,8 @@ CREATE EXTENSION
 <p>PG-Stromは一部のPostGIS関数のGPU処理をサポートしています。
 本節ではPostGISのインストール手順について説明を行いますが、必要に応じて読み飛ばしてください。</p>
 <p>PostgreSQLと同様に、PostgreSQL Global Development GroupのyumリポジトリからPostGISモジュールをインストールする事ができます。
-以下の例は、PostgreSQL v15向けにビルドされたPostGIS v3.2をインストールするものです。</p>
-<pre><code>-- For RHEL8
-# dnf install -y postgis32_15 --enablerepo=codeready-builder-for-rhel-8-x86_64-rpms
-
--- For Rocky8
-# dnf install -y postgis32_15 --enablerepo=powertools
+以下の例は、PostgreSQL v16向けにビルドされたPostGIS v3.4をインストールするものです。</p>
+<pre><code># dnf install postgis34_16
 </code></pre>
 <p>データベースクラスタを作成してPostgreSQLサーバを起動し、SQLクライアントから<code>CREATE EXTENSION</code>コマンドを実行してGeometryデータ型や地理情報分析のためのSQL関数を作成します。
 これでPostGISのインストールは完了です。</p>

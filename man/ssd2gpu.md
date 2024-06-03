@@ -37,16 +37,16 @@ GPU Direct SQL Execution changes the flow to read blocks from the storage sequen
 }
 
 @ja{
-本機能は、内部的にNVIDIA GPUDirect Storageモジュール、またはHeteroDB社の独自Linux kernelモジュールであるNVME-Stromモジュール（RHEL7/CentOS7）を使用して、GPUデバイスメモリとNVMEストレージとの間でP2Pのデータ転送を行います。
-したがって、本機能を利用するには、PostgreSQLの拡張モジュールであるPG-Stromだけではなく、上記のどちらかのLinux kernel拡張モジュールが必要です。
+本機能は、内部的にNVIDIA GPUDirect Storageモジュール（`nvidia-fs`）を使用して、GPUデバイスメモリとNVMEストレージとの間でP2Pのデータ転送を行います。
+したがって、本機能を利用するには、PostgreSQLの拡張モジュールであるPG-Stromだけではなく、上記のLinux kernelモジュールが必要です。
 
 また、本機能が対応しているのはNVME仕様のSSDや、NVME-oFで接続されたリモートデバイスのみです。
 SASやSATAといったインターフェースで接続された旧式のストレージには対応していません。
 今までに動作実績のあるNVME-SSDについては [002: HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list) が参考になるでしょう。
 }
 @en{
-This feature internally uses either of NVIDIA GPUDirect Storage module or NVME-Strom module (if RHEL7/CentOS7), that is a Linux kernel module originally designed by HeteroDB, to coordinate P2P data transfer from NVME storage to GPU device memory.
-So, this feature requires either of the above Linux kernel modules, in addition to PG-Strom as an extension of PostgreSQL.
+This feature internally uses the NVIDIA GPUDirect Storage module (`nvidia-fs`) to coordinate P2P data transfer from NVME storage to GPU device memory.
+So, this feature requires this Linux kernel module, in addition to PG-Strom as an extension of PostgreSQL.
 
 Also note that this feature supports only NVME-SSD or NVME-oF remove devices.
 It does not support legacy storages like SAS or SATA-SSD.
@@ -60,38 +60,40 @@ We have tested several NVMD-SSD models. You can refer [002: HW Validation List](
 @en:###Driver Installation
 
 @ja{
-RHEL7/CentOS7プラットフォームでPG-Stromを利用する場合、つまり既存のPG-Stromシステムでは、GPUダイレクトSQL実行を使用するにはHeteroDB社のNVME-Stromドライバが必要です。
+以前のPG-Stromでは、GPUダイレクトSQLの利用にはHeteroDB社の開発した独自のLinux kernelドライバが必要でしたが、v3.0以降ではNVIDIAの提供するGPUDirect Storageを利用するように設計を変更しています。GPUDirect Storage用のLinux kernelドライバ（`nvidia-fs`）はCUDA Toolkitのインストールプロセスに統合され、本マニュアルの「インストール」の章に記載の手順でシステムをセットアップした場合、特に追加の設定は必要ではありません。
 
-インストールの詳細については、本マニュアルの(「インストール」⇒「heterodb-kmodのインストール」)[../install/#heterodb-kmod]を参照してください。
-
-!!! Note
-    NVME-Stromドライバを使用してGPUDirect SQLを使用する場合、ローカルのNVME-SSDドライブのみに対応しています。
-    実験的にNVME-oFデバイス用のドライバも提供されていますが、本番システムでの利用は非推奨です。
+必要なLinux kernelドライバがインストールされているかどうか、`modinfo`コマンドや`lsmod`コマンドを利用して確認する事ができます。
 }
 @en{
-When PG-Strom is used on a RHEL7/CentOS7 platform, for existing PG-Strom systems in other words, GPUDirect SQL Execution requires NVME-Strom driver by HeteroDB.
-
-See the ("Install" -> "heterodb-kmod Installation")[../install/#heterodb-kmod] of this manual for more details.
-
-!!! Note
-    GPUDirect SQL by NVME-Strom driver supports only local NVME-SSD drives.
-    We **experimentally** provide a driver for NVME-oF devices, but don't recommend to use in commercial systems.
+The previous version of PG-Strom required its original Linux kernel module developed by HeteroDB for GPU-Direct SQL support, however, the version 3.0 revised the software design to use GPUDirect Storage provided by NVIDIA, as a part of CUDA Toolkit. The Linux kernel module for GPUDirect Storage (`nvidia-fs`) is integrated into the CUDA Toolkit installation process and requires no additional configuration if you have set up your system as described in the Installation chapter of this manual. 
+You can check whether the required Linux kernel drivers are installed using the `modinfo` command or `lsmod` command.
 }
 
-@ja{
-RHEL7/CentOS7以外のプラットフォームでPG-Stromを利用する場合、つまり新規に構築するシステムの大半では、GPUダイレクトSQL実行を使用するにはNVIDIA GPUDirect Storageを使用します。
 
-これには、GPUDirect Storageモジュールのインストールに加えて、GPUDirect Storageのサポートを有効にしたMOFED（Mellanox Open Fabrics Enterprise Distribution）ドライバのインストールも必要となります。
+```
+$ modinfo nvidia-fs
+filename:       /lib/modules/5.14.0-427.18.1.el9_4.x86_64/extra/nvidia-fs.ko.xz
+description:    NVIDIA GPUDirect Storage
+license:        GPL v2
+version:        2.20.5
+rhelversion:    9.4
+srcversion:     096A726CAEC0A059E24049E
+depends:
+retpoline:      Y
+name:           nvidia_fs
+vermagic:       5.14.0-427.18.1.el9_4.x86_64 SMP preempt mod_unload modversions
+sig_id:         PKCS#7
+signer:         DKMS module signing key
+sig_key:        18:B4:AE:27:B8:7D:74:4F:C2:27:68:2A:EB:E0:6A:F0:84:B2:94:EE
+sig_hashalgo:   sha512
+   :              :
 
-詳しくは、本マニュアルの(「インストール」⇒「NVIDIA GPUDirect Storage」)[../install/#nvidia-gpudirect-storage]を参照してください。
-}
-@en{
-For usage of PG-Strom on the platform other than RHEL7/CentOS7, for newly installed PG-Strom systems in other words, GPUDirect SQL Execution requires NVIDIA GPUDirect Storage.
-
-It also requires to install the MOFED(Mellanox Open Fabrics Enterprise Distribution) driver with support of GPUDirect Storage, in addition to the GPUDirect Storage module itself.
-
-See the (「インストール」⇒「NVIDIA GPUDirect Storage」)[../install/#nvidia-gpudirect-storage] of this manual for more details.
-}
+$ lsmod | grep nvidia
+nvidia_fs             323584  32
+nvidia_uvm           6877184  4
+nvidia               8822784  43 nvidia_uvm,nvidia_fs
+drm                   741376  2 drm_kms_helper,nvidia
+```
 
 @ja:###テーブルスペースの設計
 @en:###Designing Tablespace
@@ -208,15 +210,15 @@ It is displayed at the start up log. Each NVME-SSD determines the preferable GPU
 ```
 $ pg_ctl restart
      :
-LOG:  GPU<->SSD Distance Matrix
-LOG:             GPU0     GPU1     GPU2
-LOG:      nvme0  (   3)      7       7
-LOG:      nvme5      7       7   (   3)
-LOG:      nvme4      7       7   (   3)
-LOG:      nvme2      7   (   3)      7
-LOG:      nvme1  (   3)      7       7
-LOG:      nvme3      7   (   3)      7
-     :
+LOG:  PG-Strom: GPU0 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.50GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
+LOG:  [0000:41:00:0] GPU0 (NVIDIA A100-PCIE-40GB; GPU-13943bfd-5b30-38f5-0473-78>
+LOG:  [0000:81:00:0] nvme0 (NGD-IN2500-080T4-C) --> GPU0 [dist=9]
+LOG:  [0000:82:00:0] nvme2 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=9]
+LOG:  [0000:c2:00:0] nvme3 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=9]
+LOG:  [0000:c6:00:0] nvme5 (Corsair MP600 CORE) --> GPU0 [dist=9]
+LOG:  [0000:c3:00:0] nvme4 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=9]
+LOG:  [0000:c1:00:0] nvme1 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=9]
+LOG:  [0000:c4:00:0] nvme6 (NGD-IN2500-080T4-C) --> GPU0 [dist=9]
 ```
 
 @ja{
@@ -233,7 +235,19 @@ The example below shows the configuration of `gpu2` for `nvme1`, and `gpu1` for 
 It shall be added to `postgresql.conf`. Please note than manual configuration takes priority than the automatic configuration.
 }
 ```
-pg_strom.nvme_distance_map = '{nvme1,gpu2},{nvme2,nvme3,gpu1}'
+pg_strom.nvme_distance_map = 'nvme1=gpu2,nvme2=gpu1,nvme3=gpu1'
+```
+
+@ja{
+ローカルのNVME-SSDデバイス以外、例えば100Gbイーサネットで接続されたストレージサーバからGPU-Direct SQLを実行する場合など、PCI-Eバス上の距離の概念が当てはまらない場合は、ストレージがマウントされたディレクトリと、そこに関連付けるGPUを指定する事もできます。
+以下は設定例です。
+}
+@en{
+If the concept of distance on the PCI-E bus is not suitable, such as when running GPU-Direct SQL from a storage server connected via 100Gb Ethernet, other than a local NVME-SSD device, you can specify the directory where the storage is mounted, and the preferable GPU devices to be associated with.
+Below is a setting example.
+}
+```
+pg_strom.nvme_distance_map = '/mnt/0=gpu0,/mnt/1=gpu1'
 ```
 
 @ja:###GUCパラメータによる制御
@@ -257,7 +271,7 @@ If `off`, GPU Direct SQL Execution should not be used regardless of the table si
 もう一つのパラメータは`pg_strom.gpudirect_threshold`で、GPUダイレクトSQL実行が使われるべき最小のテーブルサイズを指定します。
 
 テーブルの物理配置がNVME-SSD区画（または、NVME-SSDのみで構成されたmd-raid0区画）上に存在し、かつ、テーブルのサイズが本パラメータの指定値よりも大きな場合、PG-StromはGPUダイレクトSQL実行を選択します。
-本パラメータのデフォルト値は、システムの物理メモリサイズと`shared_buffers`パラメータの指定値の1/3です。つまり、初期設定では間違いなくオンメモリで処理しきれないサイズのテーブルに対してだけGPUダイレクトSQL実行を行うよう調整されています。
+本パラメータのデフォルト値は`2GB`です。つまり、明らかに小さなテーブルに対してはGPUダイレクトSQLではなく、PostgreSQLのバッファから読み出す事を優先します。
 
 これは、一回の読み出しであればGPUダイレクトSQL実行に優位性があったとしても、オンメモリ処理ができる程度のテーブルに対しては、二回目以降のディスクキャッシュ利用を考慮すると、必ずしも優位とは言えないという仮定に立っているという事です。
 
@@ -267,7 +281,7 @@ If `off`, GPU Direct SQL Execution should not be used regardless of the table si
 The other one is `pg_strom.gpudirect_threshold` which specifies the least table size to invoke GPU Direct SQL Execution.
 
 PG-Strom will choose GPU Direct SQL Execution when target table is located on NVME-SSD volume (or md-raid0 volume which consists of NVME-SSD only), and the table size is larger than this parameter.
-Its default configuration is sum of the physical memory size and 1/3 of the `shared_buffers`. It means default configuration invokes GPU Direct SQL Execution only for the tables where we certainly cannot process them on memory.
+Its default configuration is `2GB`. In other words, for obviously small tables, priority is given to reading from PostgreSQL's buffer rather than GPU-Direct SQL.
 
 Even if GPU Direct SQL Execution has advantages on a single table scan workload, usage of disk cache may work better on the second or later trial for the tables which are available to load onto the main memory.
 
