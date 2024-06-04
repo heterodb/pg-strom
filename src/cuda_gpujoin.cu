@@ -616,9 +616,8 @@ execGpuJoinProjection(kern_context *kcxt,
 	uint32_t	count;
 	uint32_t	row_id;
 	uint64_t	offset;
-	int			tupsz = 0;
+	int32_t		tupsz = 0;
 	uint32_t	total_sz = 0;
-	bool		try_suspend = false;
 	__shared__ uint32_t	base_rowid;
 	__shared__ uint64_t	base_usage;
 
@@ -639,45 +638,56 @@ execGpuJoinProjection(kern_context *kcxt,
 										kds_dst);
 		if (tupsz < 0)
 			STROM_ELOG(kcxt, "unable to compute tuple size");
-		tupsz = offsetof(kern_tupitem, htup) + tupsz;
+		tupsz = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
 	}
 	/* error checks */
 	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
 	/* allocation of the destination buffer */
-	assert(kds_dst->format == KDS_FORMAT_ROW &&
-		   tupsz == MAXALIGN(tupsz));
+	assert(kds_dst->format == KDS_FORMAT_ROW);
 	row_id = pgstrom_stair_sum_binary(tupsz > 0, &count);
 	offset = pgstrom_stair_sum_uint32(tupsz, &total_sz);
-	if (get_local_id() == 0)
+	for (;;)
 	{
+		uint32_t	__nitems;
 		uint64_t	__usage;
-		uint32_t	__nitems_old;
-		uint32_t	__nitems_cur;
-		uint32_t	__nitems_new;
+		bool		try_suspend = false;
+		bool		allocation_ok = false;
 
-		__usage = __atomic_add_uint64(&kds_dst->usage, total_sz);
-		__nitems_cur = __volatileRead(&kds_dst->nitems);
-		do {
-			__nitems_old = __nitems_cur;
-			__nitems_new = __nitems_cur + count;
-			if (!__KDS_CHECK_OVERFLOW(kds_dst,
-									  __nitems_new,
-									  __usage + total_sz))
+		if (get_local_id() == 0)
+		{
+			__nitems = __volatileRead(&kds_dst->nitems);
+			if (__nitems != UINT_MAX &&
+				__nitems == __atomic_cas_uint32(&kds_dst->nitems,
+												__nitems,
+												UINT_MAX))		/* LOCK */
 			{
-				try_suspend = true;
-				break;
+				__usage = __volatileRead(&kds_dst->usage);
+				if (__KDS_CHECK_OVERFLOW(kds_dst,
+										 __nitems + count,
+										 __usage + total_sz))
+				{
+					base_rowid = __nitems;
+					base_usage = __usage;
+					allocation_ok = true;
+
+					__atomic_add_uint64(&kds_dst->usage, total_sz);
+					__nitems += count;
+				}
+				else
+				{
+					try_suspend = true;
+				}
+				__atomic_write_uint32(&kds_dst->nitems, __nitems);	/* UNLOCK */
 			}
-		} while ((__nitems_cur = __atomic_cas_uint32(&kds_dst->nitems,
-													 __nitems_old,
-													 __nitems_new)) != __nitems_old);
-		base_rowid = __nitems_cur;
-		base_usage = __usage;
-	}
-	if (__syncthreads_count(try_suspend) > 0)
-	{
-		SUSPEND_NO_SPACE(kcxt, "GpuProjection - no space to write");
-		return -1;
+		}
+		if (__syncthreads_count(try_suspend) > 0)
+		{
+			SUSPEND_NO_SPACE(kcxt, "GpuProjection - no space to write");
+			return -1;
+		}
+		if (__syncthreads_count(allocation_ok) > 0)
+			break;
 	}
 	/* write out the tuple */
 	if (tupsz > 0)
@@ -695,6 +705,7 @@ execGpuJoinProjection(kern_context *kcxt,
 											 kexp_projection,
 											 kds_dst,
 											 &tupitem->htup);
+		assert(offsetof(kern_tupitem, htup) + tupitem->t_len <= tupsz);
 	}
 	/* update the read position */
 	if (get_local_id() == 0)
