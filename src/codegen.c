@@ -3093,8 +3093,8 @@ __codegen_build_hash_value(codegen_context *context,
 	if (hash_keys == NIL)
 		return NULL;
 
-	kexp = alloca(sz);
-	memset(kexp, 0, sz);
+	kexp = alloca(sizeof(kern_expression));
+	memset(kexp, 0, sizeof(kern_expression));
 	kexp->exptype = TypeOpCode__int4;
 	kexp->expflags = context->kexp_flags;
 	kexp->opcode  = FuncOpCode__HashValue;
