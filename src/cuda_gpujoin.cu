@@ -618,6 +618,7 @@ execGpuJoinProjection(kern_context *kcxt,
 	uint64_t	offset;
 	int32_t		tupsz = 0;
 	uint32_t	total_sz = 0;
+	int32_t		hash_value = 0;
 	__shared__ uint32_t	base_rowid;
 	__shared__ uint64_t	base_usage;
 
@@ -637,8 +638,38 @@ execGpuJoinProjection(kern_context *kcxt,
 										kexp_projection,
 										kds_dst);
 		if (tupsz < 0)
+		{
 			STROM_ELOG(kcxt, "unable to compute tuple size");
-		tupsz = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
+		}
+		else if (kds_dst->format == KDS_FORMAT_ROW)
+		{
+			tupsz = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
+		}
+		else
+		{
+			kern_expression *kexp_hash = (kern_expression *)
+				((char *)kexp_projection + kexp_projection->u.proj.hash);
+			xpu_int4_t	status;
+			/*
+			 * Calculation of Hash-value if destination buffer needs to
+			 * set up hash-table. Usually, when GpuScan results are
+			 * reused as an inner buffer of GpuJoin.
+			 */
+			assert(kds_dst->format == KDS_FORMAT_HASH &&
+				   __KEXP_IS_VALID(kexp_projection, kexp_hash));
+			if (EXEC_KERN_EXPRESSION(kcxt, kexp_hash, &status))
+			{
+				if (XPU_DATUM_ISNULL(&status))
+					STROM_ELOG(kcxt, "unable to compute hash-value");
+				else
+					hash_value = status.value;
+			}
+			else
+			{
+				assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			}
+			tupsz = MAXALIGN(offsetof(kern_hashitem, t.htup) + tupsz);
+		}
 	}
 	/* error checks */
 	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
@@ -692,20 +723,42 @@ execGpuJoinProjection(kern_context *kcxt,
 	/* write out the tuple */
 	if (tupsz > 0)
 	{
-		kern_tupitem *tupitem;
-
 		row_id += base_rowid;
 		offset += base_usage;
 
-		KDS_GET_ROWINDEX(kds_dst)[row_id] = offset;
-		tupitem = (kern_tupitem *)
-			((char *)kds_dst + kds_dst->length - offset);
-		tupitem->rowid = row_id;
-		tupitem->t_len = kern_form_heaptuple(kcxt,
-											 kexp_projection,
-											 kds_dst,
-											 &tupitem->htup);
-		assert(offsetof(kern_tupitem, htup) + tupitem->t_len <= tupsz);
+		if (kds_dst->format == KDS_FORMAT_ROW)
+		{
+			kern_tupitem   *tupitem = (kern_tupitem *)
+				((char *)kds_dst + kds_dst->length - offset);
+
+			tupitem->rowid = row_id;
+			tupitem->t_len = kern_form_heaptuple(kcxt,
+												 kexp_projection,
+												 kds_dst,
+												 &tupitem->htup);
+			assert(offsetof(kern_tupitem, htup) + tupitem->t_len <= tupsz);
+			__threadfence();
+			KDS_GET_ROWINDEX(kds_dst)[row_id] = offset;
+		}
+		else
+		{
+			kern_hashitem  *khitem = (kern_hashitem *)
+				((char *)kds_dst + kds_dst->length - offset);
+			uint64_t	   *hslots = KDS_GET_HASHSLOT(kds_dst, hash_value);
+
+			khitem->hash = hash_value;
+			khitem->next = __atomic_exchange_uint64(hslots, offset);
+			khitem->t.rowid = row_id;
+			khitem->t.t_len = kern_form_heaptuple(kcxt,
+												  kexp_projection,
+												  kds_dst,
+												  &khitem->t.htup);
+			assert(offsetof(kern_hashitem, t.htup) + khitem->t.t_len <= tupsz);
+			__threadfence();
+			KDS_GET_ROWINDEX(kds_dst)[row_id] = ((char *)kds_dst
+												 + kds_dst->length
+												 - (char *)&khitem->t);
+		}
 	}
 	/* update the read position */
 	if (get_local_id() == 0)
