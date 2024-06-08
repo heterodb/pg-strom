@@ -21,9 +21,13 @@ endif
 dpuserv: $(DPUSERV_OBJS)
 	$(CC) -o $@ $(DPUSERV_OBJS) $(LDFLAGS)
 
-.c.o: $(DPUSERB_HEADS)
+.PHONY: headers
+
+headers: $(DPUSERB_HEADS)
+
+.c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<
-.cc.o: $(DPUSERB_HEADS)
+.cc.o:
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:

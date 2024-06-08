@@ -1144,7 +1144,8 @@ typedef struct kern_fallbackitem	kern_fallbackitem;
 INLINE_FUNCTION(size_t)
 KDS_HEAD_LENGTH(const kern_data_store *kds)
 {
-	return MAXALIGN(offsetof(kern_data_store, colmeta[kds->nr_colmeta]));
+	return MAXALIGN(offsetof(kern_data_store, colmeta) +
+					sizeof(kern_colmeta) * kds->nr_colmeta);
 }
 
 /* Base address of the kern_data_store */

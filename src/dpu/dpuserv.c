@@ -71,8 +71,6 @@ struct dpuTaskExecState
 };
 typedef struct dpuTaskExecState		dpuTaskExecState;
 
-
-
 /*
  * dpuClientWriteBack
  */
