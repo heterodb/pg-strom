@@ -1430,7 +1430,10 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 		elog(ERROR, "Bug? unexpected task_kind: %08x", pp_info->xpu_task_flags);
 	}
 	pp_info->xpu_task_flags &= ~DEVTASK__MASK;
-	pp_info->xpu_task_flags |= DEVTASK__PREAGG;
+	if (parse->groupClause || parse->distinctClause)
+		pp_info->xpu_task_flags |= (DEVTASK__PREAGG | DEVTASK__PINNED_HASH_RESULTS);
+	else
+		pp_info->xpu_task_flags |= (DEVTASK__PREAGG | DEVTASK__PINNED_ROW_RESULTS);
 	pp_info->sibling_param_id = con->sibling_param_id;
 
 	/* No tuples shall be generated until child JOIN/SCAN path completion */

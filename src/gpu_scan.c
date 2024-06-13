@@ -30,9 +30,41 @@ pgstrom_is_gpuscan_path(const Path *path)
 {
 	if (IsA(path, CustomPath))
 	{
-		CustomPath *cpath = (CustomPath *)path;
+		const CustomPath *cpath = (const CustomPath *)path;
 
 		if (cpath->methods == &gpuscan_path_methods)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * pgstrom_is_gpuscan_plan
+ */
+bool
+pgstrom_is_gpuscan_plan(const Plan *plan)
+{
+	if (IsA(plan, CustomScan))
+	{
+		const CustomScan *cscan = (const CustomScan *)cscan;
+
+		if (cscan->methods == &gpuscan_plan_methods)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * pgstrom_is_gpuscan_state
+ */
+bool
+pgstrom_is_gpuscan_state(const PlanState *ps)
+{
+	if (IsA(ps, CustomScanState))
+	{
+		const CustomScanState *css = (const CustomScanState *)ps;
+
+		if (css->methods == &gpuscan_exec_methods)
 			return true;
 	}
 	return false;

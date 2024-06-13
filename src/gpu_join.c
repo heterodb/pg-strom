@@ -127,9 +127,41 @@ pgstrom_is_gpujoin_path(const Path *path)
 {
 	if (IsA(path, CustomPath))
 	{
-		CustomPath *cpath = (CustomPath *)path;
+		const CustomPath *cpath = (const CustomPath *)path;
 
 		if (cpath->methods == &gpujoin_path_methods)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * pgstrom_is_gpujoin_plan
+ */
+bool
+pgstrom_is_gpujoin_plan(const Plan *plan)
+{
+	if (IsA(plan, CustomScan))
+	{
+		const CustomScan *cscan = (const CustomScan *)plan;
+
+		if (cscan->methods == &gpujoin_plan_methods)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * pgstrom_is_gpujoin_state
+ */
+bool
+pgstrom_is_gpujoin_state(const PlanState *ps)
+{
+	if (IsA(ps, CustomScanState))
+	{
+		const CustomScanState *css = (const CustomScanState *)ps;
+
+		if (css->methods == &gpujoin_exec_methods)
 			return true;
 	}
 	return false;
@@ -494,7 +526,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	if (temp_path)
 	{
 		llast(inner_paths_list) = inner_path = temp_path;
-		pp_inner->inner_zerocopy_buffer = true;
+		pp_inner->inner_zerocopy_mode = true;
 	}
 
 	/*
@@ -2043,24 +2075,31 @@ again:
 		if (nrooms >= UINT_MAX)
 			elog(ERROR, "GpuJoin: Inner Relation[%d] has %lu tuples, too large",
 				 i+1, nrooms);
-		if (h_kmrels)
-		{
-			kds = (kern_data_store *)((char *)h_kmrels + offset);
-			h_kmrels->chunks[i].kds_offset = offset;
-		}
 
-		nbytes = estimate_kern_data_store(tupdesc);
-		if (istate->hash_inner_keys != NIL &&
-			istate->hash_outer_keys != NIL)
+		if (istate->inner_zerocopy_mode)
+		{
+			if (h_kmrels)
+			{
+				h_kmrels->chunks[i].zerocopy_buffer = true;
+				h_kmrels->chunks[i].buffer_id = istate->inner_buffer_id;
+				h_kmrels->chunks[i].dev_index = istate->inner_dev_index;
+			}
+		}
+		else if (istate->hash_inner_keys != NIL &&
+				 istate->hash_outer_keys != NIL)
 		{
 			/* Hash-Join */
 			uint32_t	nslots = Max(320, nrooms);
 
-			nbytes += (MAXALIGN(sizeof(uint64_t) * nrooms) +
-					   MAXALIGN(sizeof(uint64_t) * nslots) +
-					   MAXALIGN(usage));
+			nbytes = (estimate_kern_data_store(tupdesc) +
+					  MAXALIGN(sizeof(uint64_t) * nrooms) +
+					  MAXALIGN(sizeof(uint64_t) * nslots) +
+					  MAXALIGN(usage));
 			if (h_kmrels)
 			{
+				kds = (kern_data_store *)((char *)h_kmrels + offset);
+				h_kmrels->chunks[i].kds_offset = offset;
+
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
 				kds->hash_nslots = nslots;
@@ -2078,11 +2117,15 @@ again:
 			uint32_t	nslots = Max(320, nrooms);
 
 			/* 1st part - inner tuples indexed by ctid */
-			nbytes += (MAXALIGN(sizeof(uint64_t) * nrooms) +
-					   MAXALIGN(sizeof(uint64_t) * nslots) +
-					   MAXALIGN(usage));
+			nbytes = (estimate_kern_data_store(tupdesc) +
+					  MAXALIGN(sizeof(uint64_t) * nrooms) +
+					  MAXALIGN(sizeof(uint64_t) * nslots) +
+					  MAXALIGN(usage));
 			if (h_kmrels)
 			{
+				kds = (kern_data_store *)((char *)h_kmrels + offset);
+				h_kmrels->chunks[i].kds_offset = offset;
+
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
 				kds->hash_nslots = nslots;
@@ -2130,10 +2173,14 @@ again:
 		else
 		{
 			/* Nested-Loop */
-			nbytes += (MAXALIGN(sizeof(uint64_t) * nrooms) +
-					   MAXALIGN(usage));
+			nbytes = (estimate_kern_data_store(tupdesc) +
+					  MAXALIGN(sizeof(uint64_t) * nrooms) +
+					  MAXALIGN(usage));
 			if (h_kmrels)
 			{
+				kds = (kern_data_store *)((char *)h_kmrels + offset);
+				h_kmrels->chunks[i].kds_offset = offset;
+
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_ROW);
 				h_kmrels->chunks[i].is_nestloop = true;
@@ -2296,9 +2343,30 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			{
 				pgstromTaskInnerState *istate = &leader->inners[i];
 
-				execInnerPreloadOneDepth(memcxt, pts, istate,
-										 &ps_state->inners[i].inner_nitems,
-										 &ps_state->inners[i].inner_usage);
+				if (istate->inner_zerocopy_mode)
+				{
+					/*
+					 * ZeroCopy Inner Buffer
+					 *
+					 * For large inner relations by GpuScan/GpuJoin, it is waste
+					 * of shared memory consumption and data transfer over the
+					 * IPC connection. We allow to retain GpuScan/GpuJoin results
+					 * on the GPU device memory and reuse it on the next GpuJoin.
+					 */
+					Assert(pgstrom_is_gpuscan_state(istate->ps) ||
+						   pgstrom_is_gpujoin_state(istate->ps));
+					pgstromExecTaskStateRetainResults((pgstromTaskState *)istate->ps,
+													  &ps_state->inners[i].inner_nitems,
+													  &ps_state->inners[i].inner_usage,
+													  &pts->inners[i].inner_buffer_id,
+													  &pts->inners[i].inner_dev_index);
+				}
+				else
+				{
+					execInnerPreloadOneDepth(memcxt, pts, istate,
+											 &ps_state->inners[i].inner_nitems,
+											 &ps_state->inners[i].inner_usage);
+				}
 			}
 
 			/*
@@ -2383,6 +2451,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				if (!preload_buf)
 					continue;
 
+				Assert(kds != NULL);
 				SpinLockAcquire(&ps_state->preload_mutex);
 				base_nitems  = kds->nitems;
 				kds->nitems += preload_buf->nitems;

@@ -675,7 +675,6 @@ execGpuJoinProjection(kern_context *kcxt,
 	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
 	/* allocation of the destination buffer */
-	assert(kds_dst->format == KDS_FORMAT_ROW);
 	row_id = pgstrom_stair_sum_binary(tupsz > 0, &count);
 	offset = pgstrom_stair_sum_uint32(tupsz, &total_sz);
 	for (;;)

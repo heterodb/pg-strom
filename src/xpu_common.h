@@ -285,7 +285,6 @@ __strcmp(const char *s1, const char *s2)
  * ----------------------------------------------------------------
  */
 #define WARPSIZE				32
-//#define MAXTHREADS_PER_BLOCK	1024
 #define CUDA_L1_CACHELINE_SZ	128
 
 #if defined(__CUDACC__)
@@ -1996,6 +1995,10 @@ typedef struct
 #define DEVKERN__SESSION_TIMEZONE	0x00000200U	/* Device function needs session
 												 * timezone */
 #define DEVTYPE__HAS_COMPARE		0x00000800U	/* Device type has compare handler */
+#define DEVTASK__PINNED_HASH_RESULTS 0x00001000U/* Pinned results in HASH format */
+#define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
+
+
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
 #define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
@@ -2420,7 +2423,8 @@ typedef struct kern_session_info
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
 	int32_t		session_currency_frac_digits;	/* copy of lconv::frac_digits */
-
+	uint32_t	session_kds_final;	/* header portion of kds_final; used when
+									 * query results shall be retained in GPU */
 	/* join inner buffer */
 	uint32_t	pgsql_port_number;	/* = PostPortNumber */
 	uint32_t	pgsql_plan_node_id;	/* = Plan->plan_node_id */
@@ -2463,6 +2467,8 @@ typedef struct {
 	kern_final_task kfin;			/* copy from XpuTaskFinal if any */
 	bool		final_plan_node;
 	bool		final_this_device;
+	uint32_t	final_nitems;		/* final buffer's nitems, if any */
+	uint64_t	final_usage;		/* final buffer's usage, if any */
 	/* statistics */
 	uint32_t	npages_direct_read;	/* # of pages read by GPU-Direct Storage */
 	uint32_t	npages_vfs_read;	/* # of pages read by VFS (fallback) */
@@ -2997,12 +3003,16 @@ struct kern_multirels
 	uint32_t	num_rels;
 	struct
 	{
+		uint64_t	kds_devptr;		/* pointer to KDS (GPU service only) */
 		uint64_t	kds_offset;		/* offset to KDS */
 		uint64_t	ojmap_offset;	/* offset to outer-join map, if any */
 		uint64_t	gist_offset;	/* offset to GiST-index pages, if any */
 		bool		is_nestloop;	/* true, if NestLoop */
 		bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
+		bool		zerocopy_buffer;/* true, if zero-copy inner buffer mode */
+		uint64_t	buffer_id;		/* key to lookup zero-copy buffer */
+		uint32_t	dev_index;		/* key to lookup zero-copy buffer */
 	} chunks[1];
 };
 typedef struct kern_multirels	kern_multirels;
@@ -3010,11 +3020,14 @@ typedef struct kern_multirels	kern_multirels;
 INLINE_FUNCTION(kern_data_store *)
 KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int dindex)
 {
-	uint64_t	offset;
+	uint64_t	pos;
 
 	assert(dindex >= 0 && dindex < kmrels->num_rels);
-	offset = kmrels->chunks[dindex].kds_offset;
-	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+	pos = kmrels->chunks[dindex].kds_devptr;
+	if (pos != 0)
+		return (kern_data_store *)pos;
+	pos = kmrels->chunks[dindex].kds_offset;
+	return (kern_data_store *)(pos == 0 ? NULL : ((char *)kmrels + pos));
 }
 
 INLINE_FUNCTION(bool *)

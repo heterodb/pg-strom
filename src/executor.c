@@ -528,7 +528,7 @@ __build_session_lconvert(kern_session_info *session)
 const XpuCommand *
 pgstromBuildSessionInfo(pgstromTaskState *pts,
 						uint32_t join_inner_handle,
-						TupleDesc groupby_tdesc_final)
+						TupleDesc kds_final_tdesc)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
 	pgstromPlanInfo *pp_info = pts->pp_info;
@@ -638,30 +638,28 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-	if (groupby_tdesc_final)
+	if (kds_final_tdesc)
 	{
-		size_t		sz = estimate_kern_data_store(groupby_tdesc_final);
+		size_t		sz = estimate_kern_data_store(kds_final_tdesc);
 		kern_data_store *kds_temp = (kern_data_store *)alloca(sz);
 		char		format = KDS_FORMAT_ROW;
 		uint32_t	hash_nslots = 0;
 		size_t		kds_length = (4UL << 20);	/* 4MB */
 
-		if (pp_info->kexp_groupby_keyhash &&
-			pp_info->kexp_groupby_keyload &&
-			pp_info->kexp_groupby_keycomp)
+		if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
 		{
-			double	n_groups = pts->css.ss.ps.plan->plan_rows;
+			double	plan_rows = pts->css.ss.ps.plan->plan_rows;
 
-			format = KDS_FORMAT_HASH;
-			if (n_groups <= 5000.0)
+			if (plan_rows <= 5000.0)
 				hash_nslots = 20000;
-			else if (n_groups <= 4000000.0)
-				hash_nslots = 20000 + (int)(2.0 * n_groups);
+			else if (plan_rows <= 4000000.0)
+				hash_nslots = 20000 + (int)(2.0 * plan_rows);
 			else
-				hash_nslots = 8020000 + n_groups;
+				hash_nslots = 8020000 + plan_rows;
+			format = KDS_FORMAT_HASH;
 			kds_length = (1UL << 30);			/* 1GB */
 		}
-		setup_kern_data_store(kds_temp, groupby_tdesc_final, kds_length, format);
+		setup_kern_data_store(kds_temp, kds_final_tdesc, kds_length, format);
 		kds_temp->hash_nslots = hash_nslots;
 		session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, sz);
 		session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
@@ -689,6 +687,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	}
 	/* other database session information */
 	session->query_plan_id = ps_state->query_plan_id;
+	session->xpu_task_flags = pts->xpu_task_flags;
 	session->kcxt_kvecs_bufsz = pp_info->kvecs_bufsz;
 	session->kcxt_kvecs_ndims = pp_info->kvecs_ndims;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
@@ -840,6 +839,13 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 									xcmd->u.results.stats[i].nitems_out);
 		}
 		pg_atomic_fetch_add_u64(&ps_state->result_ntuples, xcmd->u.results.nitems_out);
+		if (xcmd->u.results.final_this_device)
+		{
+			pg_atomic_fetch_add_u64(&ps_state->final_nitems,
+									xcmd->u.results.final_nitems);
+			pg_atomic_fetch_add_u64(&ps_state->final_usage,
+									xcmd->u.results.final_usage);
+		}
 	}
 }
 
@@ -1588,7 +1594,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			istate->hash_inner_funcs = lappend(istate->hash_inner_funcs,
 											   dtype->type_hashfunc);
 		}
-
+		/* gist-index initialization */
 		if (OidIsValid(pp_inner->gist_index_oid))
 		{
 			istate->gist_irel = index_open(pp_inner->gist_index_oid,
@@ -1596,6 +1602,21 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			istate->gist_clause = ExecInitExpr((Expr *)pp_inner->gist_clause,
 											   &pts->css.ss.ps);
 			istate->gist_ctid_resno = pp_inner->gist_ctid_resno;
+		}
+		/* require the pinned results if GpuScan/Join results may large */
+		if (pp_inner->inner_zerocopy_mode)
+		{
+			pgstromTaskState   *i_pts = (pgstromTaskState *)istate->ps;
+
+			Assert(pgstrom_is_gpuscan_state(istate->ps) ||
+				   pgstrom_is_gpujoin_state(istate->ps));
+			if (pp_inner->hash_inner_keys != NIL &&
+				pp_inner->hash_outer_keys != NIL)
+				i_pts->xpu_task_flags |= DEVTASK__PINNED_HASH_RESULTS;
+			else
+				i_pts->xpu_task_flags |= DEVTASK__PINNED_ROW_RESULTS;
+
+			istate->inner_zerocopy_mode = pp_inner->inner_zerocopy_mode;
 		}
 		pts->css.custom_ps = lappend(pts->css.custom_ps, istate->ps);
 		depth_index++;
@@ -1803,7 +1824,7 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 {
 	const XpuCommand *session;
 	uint32_t	inner_handle = 0;
-	TupleDesc	tupdesc_kds_final = NULL;
+	TupleDesc	kds_final_tupdesc = NULL;
 
 	/* attach pgstromSharedState, if none */
 	if (!pts->ps_state)
@@ -1816,7 +1837,8 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 			return false;
 	}
 	/* XPU-PreAgg needs tupdesc of kds_final */
-	if ((pts->xpu_task_flags & DEVTASK__PREAGG) != 0)
+	if ((pts->xpu_task_flags & (DEVTASK__PINNED_HASH_RESULTS |
+								DEVTASK__PINNED_ROW_RESULTS)) != 0)
 	{
 		CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
 		ListCell   *lc;
@@ -1830,7 +1852,7 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 		 * length of BITMAPLEN(kds->ncols) and may expand the starting
 		 * point of t_hoff for all the tuples.
 		 */
-		tupdesc_kds_final = CreateTupleDescCopy(pts->css.ss.ps.scandesc);
+		kds_final_tupdesc = CreateTupleDescCopy(pts->css.ss.ps.scandesc);
 		foreach (lc, cscan->custom_scan_tlist)
 		{
 			TargetEntry *tle = lfirst(lc);
@@ -1838,12 +1860,11 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 			if (!tle->resjunk)
 				nvalids = tle->resno;
 		}
-		Assert(nvalids <= tupdesc_kds_final->natts);
-		tupdesc_kds_final->natts = nvalids;
+		Assert(nvalids <= kds_final_tupdesc->natts);
+		kds_final_tupdesc->natts = nvalids;
 	}
 	/* build the session information */
-	session = pgstromBuildSessionInfo(pts, inner_handle, tupdesc_kds_final);
-
+	session = pgstromBuildSessionInfo(pts, inner_handle, kds_final_tupdesc);
 	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 	{
 		gpuClientOpenSession(pts, session);
@@ -1860,7 +1881,6 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 	/* update the scan/join control variables */
 	if (!pgstromTaskStateBeginScan(pts))
 		return false;
-	
 	return true;
 }
 
@@ -1919,6 +1939,61 @@ pgstromExecTaskState(CustomScanState *node)
 		InstrCountFiltered1(pts, 1);
 	}
 	return NULL;
+}
+
+/*
+ * pgstromExecTaskStateRetainResults
+ *
+ * It runs the supplied pgstromTaskState but retains its results
+ * on the device memory. It shall be reused as a part of GpuJoin
+ * inner buffer.
+ */
+void
+pgstromExecTaskStateRetainResults(pgstromTaskState *pts,
+								  pg_atomic_uint64 *p_inner_nitems,
+								  pg_atomic_uint64 *p_inner_usage,
+								  uint64_t *p_inner_buffer_id,
+								  uint32_t *p_inner_dev_index)
+{
+	XpuCommand *resp;
+	uint64_t	ival;
+
+	if (pts->css.ss.ps.instrument)
+		InstrStartNode(pts->css.ss.ps.instrument);
+
+	if (!pts->conn)
+	{
+		if (!__pgstromExecTaskOpenConnection(pts))
+			goto skip;
+		Assert(pts->conn);
+	}
+
+	for (;;)
+	{
+		resp = __fetchNextXpuCommand(pts);
+		if (!resp)
+			break;
+		if (resp->tag == XpuCommandTag__Success)
+		{
+			if (resp->u.results.ojmap_offset != 0 ||
+				resp->u.results.chunks_nitems != 0)
+				elog(ERROR, "GPU Service returned valid contents, but should be pinned buffer");
+		}
+		else
+		{
+			elog(ERROR, "unexpected response tag: %u", resp->tag);
+		}
+	}
+	ival = pg_atomic_read_u64(&pts->ps_state->final_nitems);
+	pg_atomic_write_u64(p_inner_nitems, ival);
+	ival = pg_atomic_read_u64(&pts->ps_state->final_usage);
+	pg_atomic_write_u64(p_inner_usage,  ival);
+skip:
+	*p_inner_buffer_id = pts->ps_state->query_plan_id;
+	*p_inner_dev_index = pts->conn->dev_index;
+
+	if (pts->css.ss.ps.instrument)
+		InstrStopNode(pts->css.ss.ps.instrument, -1.0);
 }
 
 /*
@@ -2298,6 +2373,30 @@ pgstromExplainTaskState(CustomScanState *node,
 	snprintf(label, sizeof(label),
 			 "%s Projection", xpu_label);
 	ExplainPropertyText(label, buf.data, es);
+
+	/* Pinned Inner Buffer */
+	if ((pts->xpu_task_flags & (DEVTASK__PINNED_HASH_RESULTS |
+								DEVTASK__PINNED_ROW_RESULTS)) != 0 &&
+		(pts->xpu_task_flags & DEVTASK__PREAGG) == 0)
+	{
+		resetStringInfo(&buf);
+		if (!es->analyze)
+		{
+			appendStringInfoString(&buf, "enabled");
+		}
+		else
+		{
+			uint64_t	final_nitems = pg_atomic_read_u64(&ps_state->final_nitems);
+			uint64_t	final_usage  = pg_atomic_read_u64(&ps_state->final_usage);
+
+			appendStringInfo(&buf, "nitems: %lu, usage: %s",
+							 final_nitems,
+							 format_bytesz(final_usage));
+		}
+		snprintf(label, sizeof(label),
+				 "%s Pinned Buffer", xpu_label);
+		ExplainPropertyText(label, buf.data, es);
+	}
 
 	/* xPU Scan Quals */
 	if (ps_state)

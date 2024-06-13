@@ -264,7 +264,7 @@ typedef struct
 	double			gist_npages;	/* number of disk pages */
 	int				gist_height;	/* index tree height, or -1 if unknown */
 	/* zerocopy inner buffer properties */
-	bool			inner_zerocopy_buffer;
+	bool			inner_zerocopy_mode;
 } pgstromPlanInnerInfo;
 
 typedef struct
@@ -367,6 +367,8 @@ typedef struct
 	pg_atomic_uint64	source_ntuples_in;	/* # of tuples survived from WHERE-quals */
 	pg_atomic_uint64	result_ntuples;		/* # of tuples returned from xPU */
 	pg_atomic_uint64	fallback_nitems;	/* # of fallback tuples in depth==0 */
+	pg_atomic_uint64	final_nitems;		/* # of tuples in final buffer if any */
+	pg_atomic_uint64	final_usage;		/* usage bytes of final buffer if any */
 	/* for parallel-scan */
 	uint32_t			parallel_scan_desc_offset;
 	/* for arrow_fdw */
@@ -399,10 +401,14 @@ typedef struct
 {
 	PlanState	   *ps;
 	ExprContext	   *econtext;
+
 	/*
 	 * inner preload buffer
 	 */
 	void		   *preload_buffer;
+	bool			inner_zerocopy_mode;
+	uint64_t		inner_buffer_id;	/* buffer-id if ZC mode */
+	uint32_t		inner_dev_index;	/* dev-index if ZC mode */
 
 	/*
 	 * join properties (common)
@@ -454,6 +460,7 @@ struct pgstromTaskState
 	int64_t				curr_index;
 	bool				scan_done;
 	bool				final_done;
+
 	/*
 	 * control variables to fire the end-of-task event
 	 * for RIGHT OUTER JOIN and PRE-AGG
@@ -738,6 +745,11 @@ extern void		pgstromExecInitTaskState(CustomScanState *node,
 										  EState *estate,
 										 int eflags);
 extern TupleTableSlot *pgstromExecTaskState(CustomScanState *node);
+extern void		pgstromExecTaskStateRetainResults(pgstromTaskState *pts,
+												  pg_atomic_uint64 *p_inner_nitems,
+												  pg_atomic_uint64 *p_inner_usage,
+												  uint64_t *p_inner_buffer_id,
+												  uint32_t *p_inner_dev_index);
 extern void		pgstromExecEndTaskState(CustomScanState *node);
 extern void		pgstromExecResetTaskState(CustomScanState *node);
 extern Size		pgstromSharedStateEstimateDSM(CustomScanState *node,
@@ -829,6 +841,8 @@ extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
  * gpu_scan.c
  */
 extern bool		pgstrom_is_gpuscan_path(const Path *path);
+extern bool		pgstrom_is_gpuscan_plan(const Plan *plan);
+extern bool		pgstrom_is_gpuscan_state(const PlanState *ps);
 extern void		sort_device_qualifiers(List *dev_quals_list,
 									   List *dev_costs_list);
 extern pgstromPlanInfo *try_fetch_xpuscan_planinfo(const Path *path);
@@ -851,6 +865,8 @@ extern void		pgstrom_init_dpu_scan(void);
  * gpu_join.c
  */
 extern bool		pgstrom_is_gpujoin_path(const Path *path);
+extern bool		pgstrom_is_gpujoin_plan(const Plan *plan);
+extern bool		pgstrom_is_gpujoin_state(const PlanState *ps);
 extern pgstromPlanInfo *try_fetch_xpujoin_planinfo(const Path *path);
 extern List	   *buildOuterJoinPlanInfo(PlannerInfo *root,
 									   RelOptInfo *outer_rel,
