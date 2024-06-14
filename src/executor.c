@@ -1500,15 +1500,19 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		/* setup GpuCache if any */
 		if (pp_info->gpu_cache_dindex >= 0)
 			pts->gcache_desc = pgstromGpuCacheExecInit(pts);
-		/* setup BRIN-index if any */
-		pgstromBrinIndexExecBegin(pts,
-								  pp_info->brin_index_oid,
-								  pp_info->brin_index_conds,
-								  pp_info->brin_index_quals);
-		if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
-			pts->optimal_gpus = GetOptimalGpuForRelation(rel);
-		if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-			pts->ds_entry = GetOptimalDpuForRelation(rel, &kds_pathname);
+		/* elsewhere, no GpuCache is valid */
+		if (!pts->gcache_desc)
+		{
+			/* setup BRIN-index if any */
+			pgstromBrinIndexExecBegin(pts,
+									  pp_info->brin_index_oid,
+									  pp_info->brin_index_conds,
+									  pp_info->brin_index_quals);
+			if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
+				pts->optimal_gpus = GetOptimalGpuForRelation(rel);
+			if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
+				pts->ds_entry = GetOptimalDpuForRelation(rel, &kds_pathname);
+		}
 		pts->kds_pathname = kds_pathname;
 	}
 	else if (RelationGetForm(rel)->relkind == RELKIND_FOREIGN_TABLE)
@@ -2166,7 +2170,8 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 			scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
 	}
 	ps_state->query_plan_id = ((uint64_t)MyProcPid) << 32 |
-		(uint64_t)pts->css.ss.ps.plan->plan_node_id;	
+		(uint64_t)pts->css.ss.ps.plan->plan_node_id;
+	pg_atomic_init_u32(&ps_state->device_selection_hint, UINT_MAX);
 	ps_state->num_rels = num_rels;
 	ConditionVariableInit(&ps_state->preload_cond);
 	SpinLockInit(&ps_state->preload_mutex);

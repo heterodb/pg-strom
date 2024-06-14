@@ -2713,6 +2713,14 @@ pgstromGpuCacheExecInit(pgstromTaskState *pts)
 			 RelationGetRelationName(rel));
 		return NULL;
 	}
+	/*
+	 * 'pts->optimal_gpus' suggests __gpuClientChooseDevice() to choose
+	 * the right GPU device.
+	 */
+	Assert(gc_options.cuda_dindex >= 0 &&
+		   gc_options.cuda_dindex < numGpuDevAttrs);
+	pts->optimal_gpus = bms_make_singleton(gc_options.cuda_dindex);
+
 	return lookupGpuCacheDesc(rel);
 }
 

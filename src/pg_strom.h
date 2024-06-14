@@ -356,6 +356,8 @@ typedef struct
 	uint32_t			ss_length;			/* length of the SharedState */
 	/* pg-strom's unique plan-id */
 	uint64_t			query_plan_id;
+	/* hint for device selection, if necessary */
+	pg_atomic_uint32	device_selection_hint;
 	/* control variables to detect the last plan-node at parallel execution */
 	pg_atomic_uint32	parallel_task_control;
 	pg_atomic_uint32	__rjoin_exit_count;
