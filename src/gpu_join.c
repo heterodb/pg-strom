@@ -23,7 +23,7 @@ static bool					pgstrom_enable_gpujoin = false;		/* GUC */
 static bool					pgstrom_enable_gpuhashjoin = false;	/* GUC */
 static bool					pgstrom_enable_gpugistindex = false;/* GUC */
 static bool					pgstrom_enable_partitionwise_gpujoin = false;
-static int					__pinned_inner_buffer_threshold_mb = 512; /* GUC */
+static int					__pinned_inner_buffer_threshold_mb = 0; /* GUC */
 static CustomPathMethods	dpujoin_path_methods;
 static CustomScanMethods	dpujoin_plan_methods;
 static CustomExecMethods	dpujoin_exec_methods;
