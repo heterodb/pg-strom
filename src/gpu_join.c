@@ -23,8 +23,7 @@ static bool					pgstrom_enable_gpujoin = false;		/* GUC */
 static bool					pgstrom_enable_gpuhashjoin = false;	/* GUC */
 static bool					pgstrom_enable_gpugistindex = false;/* GUC */
 static bool					pgstrom_enable_partitionwise_gpujoin = false;
-static int					__inner_zerocopy_threshold_mb = 512;/* GUC */
-
+static int					__pinned_inner_buffer_threshold_mb = 512; /* GUC */
 static CustomPathMethods	dpujoin_path_methods;
 static CustomScanMethods	dpujoin_plan_methods;
 static CustomExecMethods	dpujoin_exec_methods;
@@ -183,55 +182,85 @@ try_fetch_xpujoin_planinfo(const Path *path)
 }
 
 /*
- * tryZeroCopyInnerJoinBufferPath
+ * tryPinnedInnerJoinBufferPath
  */
 static Path *
-tryZeroCopyInnerJoinBufferPath(pgstromPlanInnerInfo *pp_inner,
-							   Path *inner_path)
+tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
+							 Path *inner_path,
+							 Cost *p_inner_final_cost)
 {
+	pgstromPlanInnerInfo *pp_inner = &pp_info->inners[pp_info->num_rels-1];
 	PathTarget *inner_target;
-	size_t		inner_zerocopy_threshold;
+	size_t		inner_threshold_sz;
+	int			nattrs;
+	int			unitsz;
+	double		bufsz;
 
+	/*
+	 * should not have RIGHT/FULL OUTER JOIN before pinned inner buffer
+	 * (including the current-depth itself)
+	 */
+	for (int j=0; j < pp_info->num_rels; j++)
+	{
+		pgstromPlanInnerInfo *__pp_inner = &pp_info->inners[j];
+
+		if (__pp_inner->join_type == JOIN_RIGHT ||
+			__pp_inner->join_type == JOIN_FULL)
+			return NULL;
+		Assert(__pp_inner->join_type == JOIN_INNER ||
+			   __pp_inner->join_type == JOIN_LEFT);
+	}
+	/*
+	 * GiST-index buffer must be built by CPU
+	 */
 	if (OidIsValid(pp_inner->gist_index_oid))
 		return NULL;
-	if (__inner_zerocopy_threshold_mb < 0)
+	/*
+	 * Check expected pinned inner buffer size
+	 */
+	if (__pinned_inner_buffer_threshold_mb <= 0)
 		return NULL;
-	inner_zerocopy_threshold = (size_t)__inner_zerocopy_threshold_mb << 20;
+	inner_threshold_sz = (size_t)__pinned_inner_buffer_threshold_mb << 20;
 
 	inner_target = (inner_path->pathtarget
 					? inner_path->pathtarget
 					: inner_path->parent->reltarget);
+	nattrs = list_length(inner_target->exprs);
+	unitsz = ((pp_inner->hash_inner_keys != NIL
+			   ? offsetof(kern_hashitem, t.htup)
+			   : offsetof(kern_tupitem, htup)) +
+			  MAXALIGN(offsetof(HeapTupleHeaderData,
+								t_bits) + BITMAPLEN(nattrs)) +
+			  MAXALIGN(inner_target->width));
+	bufsz = MAXALIGN(offsetof(kern_data_store, colmeta[nattrs]));
+	if (pp_inner->hash_inner_keys != NIL)
+		bufsz += sizeof(uint64_t) * Max(inner_path->rows, 320.0);
+	bufsz += sizeof(uint64_t) * inner_path->rows;
+	bufsz += unitsz * inner_path->rows;
+	if (bufsz < inner_threshold_sz)
+		return NULL;
+
+	/* Ok, this inner path can use pinned-buffer */
 	if (pgstrom_is_gpuscan_path(inner_path) ||
 		pgstrom_is_gpujoin_path(inner_path))
 	{
-		int			nattrs = list_length(inner_target->exprs);
-		int			unitsz;
-		double		bufsz;
+		CustomPath *cpath = (CustomPath *)pgstrom_copy_pathnode(inner_path);
+		pgstromPlanInfo *pp_temp = linitial(cpath->custom_private);
 
-		unitsz = ((pp_inner->hash_inner_keys != NIL
-				   ? offsetof(kern_hashitem, t.htup)
-				   : offsetof(kern_tupitem, htup)) +
-				  MAXALIGN(offsetof(HeapTupleHeaderData,
-									t_bits) + BITMAPLEN(nattrs)) +
-				  MAXALIGN(inner_target->width));
-
-		bufsz = MAXALIGN(offsetof(kern_data_store, colmeta[nattrs]));
-		if (pp_inner->hash_inner_keys != NIL)
-			bufsz += sizeof(uint64_t) * Max(inner_path->rows, 320.0);
-		bufsz += sizeof(uint64_t) * inner_path->rows;
-		bufsz += unitsz * inner_path->rows;
-		/* enables zero-copy inner buffer if enough large */
-		if (bufsz >= inner_zerocopy_threshold)
-		{
-			CustomPath *cpath = (CustomPath *)pgstrom_copy_pathnode(inner_path);
-			pgstromPlanInfo	*pp_temp = linitial(cpath->custom_private);
-
-			pp_temp = copy_pgstrom_plan_info(pp_temp);
-			pp_temp->projection_hashkeys = pp_inner->hash_inner_keys;
-			cpath->custom_private = list_make1(pp_temp);
-			return (Path *)cpath;
-		}
+		pp_temp = copy_pgstrom_plan_info(pp_temp);
+		pp_temp->projection_hashkeys = pp_inner->hash_inner_keys;
+		cpath->custom_private = list_make1(pp_temp);
+		*p_inner_final_cost = pp_temp->final_cost;
+		return (Path *)cpath;
 	}
+#if 0
+	else if (IsA(inner_path, Path) &&
+			 inner_path->pathtype == T_SeqScan &&
+			 inner_path->pathkeys == NIL)
+	{
+		//TODO: Try to replace a simple SeqScan to GpuScan if possible
+	}
+#endif
 	return NULL;
 }
 
@@ -334,9 +363,11 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	Cost			run_cost;
 	Cost			final_cost;
 	Cost			comp_cost = 0.0;
+	Cost			inner_final_cost = 0.0;
 	bool			enable_xpuhashjoin;
 	bool			enable_xpugistindex;
 	double			xpu_tuple_cost;
+	Cost			xpu_operator_cost;
 	Cost			xpu_ratio;
 	QualCost		join_quals_cost;
 	List		   *join_quals = NIL;
@@ -359,6 +390,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		enable_xpuhashjoin  = pgstrom_enable_gpuhashjoin;
 		enable_xpugistindex = pgstrom_enable_gpugistindex;
 		xpu_tuple_cost      = pgstrom_gpu_tuple_cost;
+		xpu_operator_cost   = cpu_operator_cost * pgstrom_gpu_operator_ratio();
 		xpu_ratio           = pgstrom_gpu_operator_ratio();
 	}
 	else if ((pp_prev->xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
@@ -366,6 +398,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		enable_xpuhashjoin  = pgstrom_enable_dpuhashjoin;
 		enable_xpugistindex = pgstrom_enable_dpugistindex;
 		xpu_tuple_cost      = pgstrom_dpu_tuple_cost;
+		xpu_operator_cost   = cpu_operator_cost * pgstrom_dpu_operator_ratio();
 		xpu_ratio           = pgstrom_dpu_operator_ratio();
 	}
 	else
@@ -520,13 +553,15 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 			llast(inner_paths_list) = inner_path = gist_inner_path;
 	}
 	/*
-	 * Try zero-copy inner buffer
+	 * Try pinned inner buffer
 	 */
-	temp_path = tryZeroCopyInnerJoinBufferPath(pp_inner, inner_path);
+	temp_path = tryPinnedInnerJoinBufferPath(pp_info,
+											 inner_path,
+											 &inner_final_cost);
 	if (temp_path)
 	{
 		llast(inner_paths_list) = inner_path = temp_path;
-		pp_inner->inner_zerocopy_mode = true;
+		pp_inner->inner_pinned_buffer = true;
 	}
 
 	/*
@@ -555,8 +590,11 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		}
 		inner_nrows *= divisor;
 	}
-	inner_cost += (inner_path->total_cost +
-				   inner_nrows * cpu_tuple_cost) * inner_discount_ratio;
+	inner_cost += inner_path->total_cost;
+	if (pp_inner->inner_pinned_buffer)
+		inner_cost -= inner_final_cost * inner_discount_ratio;
+	else
+		inner_cost += cpu_tuple_cost * inner_nrows * inner_discount_ratio;
 
 	/*
 	 * Cost for join_quals
@@ -573,11 +611,11 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		int		num_hashkeys = list_length(hash_outer_keys);
 
 		/* cost to compute inner hash value by CPU */
-		startup_cost += cpu_operator_cost * num_hashkeys * inner_path->rows;
+		startup_cost += (pp_inner->inner_pinned_buffer
+						 ? xpu_operator_cost
+						 : cpu_operator_cost) * num_hashkeys * inner_path->rows;
 		/* cost to comput hash value by GPU */
-		comp_cost += (cpu_operator_cost * xpu_ratio *
-					  num_hashkeys *
-					  outer_nrows);
+		comp_cost += xpu_operator_cost * num_hashkeys * outer_nrows;
 		/* cost to evaluate join qualifiers */
 		comp_cost += join_quals_cost.per_tuple * xpu_ratio * outer_nrows;
 	}
@@ -612,7 +650,8 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 		 */
 
 		/* cost to preload inner heap tuples by CPU */
-		startup_cost += cpu_tuple_cost * inner_path->rows;
+		if (!pp_inner->inner_pinned_buffer)
+			startup_cost += cpu_tuple_cost * inner_path->rows;
 
 		/* cost to evaluate join qualifiers by GPU */
 		comp_cost += (join_quals_cost.per_tuple * xpu_ratio *
@@ -2076,11 +2115,11 @@ again:
 			elog(ERROR, "GpuJoin: Inner Relation[%d] has %lu tuples, too large",
 				 i+1, nrooms);
 
-		if (istate->inner_zerocopy_mode)
+		if (istate->inner_pinned_buffer)
 		{
 			if (h_kmrels)
 			{
-				h_kmrels->chunks[i].zerocopy_buffer = true;
+				h_kmrels->chunks[i].pinned_buffer = true;
 				h_kmrels->chunks[i].buffer_id = istate->inner_buffer_id;
 				h_kmrels->chunks[i].dev_index = istate->inner_dev_index;
 			}
@@ -2343,10 +2382,10 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			{
 				pgstromTaskInnerState *istate = &leader->inners[i];
 
-				if (istate->inner_zerocopy_mode)
+				if (istate->inner_pinned_buffer)
 				{
 					/*
-					 * ZeroCopy Inner Buffer
+					 * Pinned Inner Buffer
 					 *
 					 * For large inner relations by GpuScan/GpuJoin, it is waste
 					 * of shared memory consumption and data transfer over the
@@ -2355,11 +2394,11 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 					 */
 					Assert(pgstrom_is_gpuscan_state(istate->ps) ||
 						   pgstrom_is_gpujoin_state(istate->ps));
-					pgstromExecTaskStateRetainResults((pgstromTaskState *)istate->ps,
-													  &ps_state->inners[i].inner_nitems,
-													  &ps_state->inners[i].inner_usage,
-													  &pts->inners[i].inner_buffer_id,
-													  &pts->inners[i].inner_dev_index);
+					execInnerPreLoadPinnedOneDepth((pgstromTaskState *)istate->ps,
+												   &ps_state->inners[i].inner_nitems,
+												   &ps_state->inners[i].inner_usage,
+												   &pts->inners[i].inner_buffer_id,
+												   &pts->inners[i].inner_dev_index);
 				}
 				else
 				{
@@ -3047,13 +3086,13 @@ pgstrom_init_gpu_join(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/* threshold of zero-copy inner buffer of GpuJoin */
-	DefineCustomIntVariable("pg_strom.gpujoin_inner_zerocopy_threshold",
-							"Threshold of the zero-copy inner table buffer of GpuJoin",
+	/* threshold of pinned inner buffer of GpuJoin */
+	DefineCustomIntVariable("pg_strom.pinned_inner_buffer_threshold",
+							"Threshold of the inner buffer of GpuJoin",
 							NULL,
-							&__inner_zerocopy_threshold_mb,
-							512,	/* 512MB */
-							-1,
+							&__pinned_inner_buffer_threshold_mb,
+							0,		/* disabled */
+							0,		/* 0 means disabled */
 							INT_MAX,
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,

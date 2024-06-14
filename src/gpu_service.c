@@ -1329,7 +1329,7 @@ __setupGpuQueryJoinInnerBuffer(gpuContext *gcontext,
 	memcpy(m_kmrels, h_kmrels, mmap_sz);
 	for (int i=0; i < m_kmrels->num_rels; i++)
 	{
-		if (m_kmrels->chunks[i].zerocopy_buffer)
+		if (m_kmrels->chunks[i].pinned_buffer)
 		{
 			gpuQueryBuffer *__gq_buf;
 
@@ -1353,7 +1353,7 @@ __setupGpuQueryJoinInnerBuffer(gpuContext *gcontext,
 			if (!__gq_buf)
 			{
 				snprintf(errmsg, errmsg_sz,
-						 "zero-copy inner buffer[%d] was not found", i+1);
+						 "pinned inner buffer[%d] was not found", i+1);
 				cuMemFree((CUdeviceptr)m_kmrels);
 				munmap(h_kmrels, mmap_sz);
 				return false;

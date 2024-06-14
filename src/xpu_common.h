@@ -3010,9 +3010,9 @@ struct kern_multirels
 		bool		is_nestloop;	/* true, if NestLoop */
 		bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
-		bool		zerocopy_buffer;/* true, if zero-copy inner buffer mode */
-		uint64_t	buffer_id;		/* key to lookup zero-copy buffer */
-		uint32_t	dev_index;		/* key to lookup zero-copy buffer */
+		bool		pinned_buffer;	/* true, if it uses pinned-buffer */
+		uint64_t	buffer_id;		/* key to lookup pinned inner-buffer */
+		uint32_t	dev_index;		/* key to lookup pinned inner-buffer */
 	} chunks[1];
 };
 typedef struct kern_multirels	kern_multirels;

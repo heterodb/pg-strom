@@ -1608,7 +1608,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			istate->gist_ctid_resno = pp_inner->gist_ctid_resno;
 		}
 		/* require the pinned results if GpuScan/Join results may large */
-		if (pp_inner->inner_zerocopy_mode)
+		if (pp_inner->inner_pinned_buffer)
 		{
 			pgstromTaskState   *i_pts = (pgstromTaskState *)istate->ps;
 
@@ -1620,7 +1620,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			else
 				i_pts->xpu_task_flags |= DEVTASK__PINNED_ROW_RESULTS;
 
-			istate->inner_zerocopy_mode = pp_inner->inner_zerocopy_mode;
+			istate->inner_pinned_buffer = true;
 		}
 		pts->css.custom_ps = lappend(pts->css.custom_ps, istate->ps);
 		depth_index++;
@@ -1946,18 +1946,18 @@ pgstromExecTaskState(CustomScanState *node)
 }
 
 /*
- * pgstromExecTaskStateRetainResults
+ * execInnerPreLoadPinnedOneDepth
  *
- * It runs the supplied pgstromTaskState but retains its results
- * on the device memory. It shall be reused as a part of GpuJoin
- * inner buffer.
+ * It runs the supplied pgstromTaskState to build inner-pinned-buffer
+ * on the device memory. It shall be reused as a part of GpuJoin inner
+ * buffer, so no need to handle its results on the CPU side.
  */
 void
-pgstromExecTaskStateRetainResults(pgstromTaskState *pts,
-								  pg_atomic_uint64 *p_inner_nitems,
-								  pg_atomic_uint64 *p_inner_usage,
-								  uint64_t *p_inner_buffer_id,
-								  uint32_t *p_inner_dev_index)
+execInnerPreLoadPinnedOneDepth(pgstromTaskState *pts,
+							   pg_atomic_uint64 *p_inner_nitems,
+							   pg_atomic_uint64 *p_inner_usage,
+							   uint64_t *p_inner_buffer_id,
+							   uint32_t *p_inner_dev_index)
 {
 	XpuCommand *resp;
 	uint64_t	ival;

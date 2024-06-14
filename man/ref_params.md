@@ -139,7 +139,6 @@ This session introduces PG-Strom's configuration parameters.
 :   Cost value to process an expression formula on GPU. If larger value than `cpu_operator_cost` is configured, no chance to choose PG-Strom towards any size of tables
 }
 
-<!--
 @ja{
 `pg_strom.enable_partitionwise_gpujoin` [型: `bool` / 初期値: `on]`
 :   GpuJoinを各パーティションの要素へプッシュダウンするかどうかを制御する。
@@ -156,7 +155,17 @@ This session introduces PG-Strom's configuration parameters.
 `pg_strom.enable_partitionwise_gpupreagg` [type: `bool` / default: `on]`
 :   Enables/disables whether GpuPreAgg is pushed down to the partition children.
 }
--->
+
+@ja{
+`pg_strom.pinned_inner_buffer_threshold` [型: `int` / 初期値: `0`]
+:    GpuJoinのINNER表がGpuScanまたはGpuJoinである場合、処理結果の推定サイズがこの設定値よりも大きければ、結果をいったんCPUに戻すことなく、そのままGPU側に保持した上で、続くGpuJoinのINNERバッファとして使用する。
+:    設定値が`0`の場合、本機能は無効となる。
+}
+@en{
+`pg_strom.pinned_inner_buffer_threshold` [type: `int` / 初期値: `0`]
+:    If the INNER table of GpuJoin is either GpuScan or GpuJoin, and the estimated size of its processing result is larger than this configured value, the result is retained on the GPU device without being returned to the CPU, and then reused as a part of the INNER buffer of the subsequent GpuJoin.
+:    If the configured value is `0`, this function will be disabled.
+}
 
 @ja:## エグゼキュータに関する設定
 @en:## Executor Configuration

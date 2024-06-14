@@ -263,8 +263,8 @@ typedef struct
 	Selectivity		gist_selectivity; /* GiST selectivity */
 	double			gist_npages;	/* number of disk pages */
 	int				gist_height;	/* index tree height, or -1 if unknown */
-	/* zerocopy inner buffer properties */
-	bool			inner_zerocopy_mode;
+	/* inner pinned buffer? */
+	bool			inner_pinned_buffer;
 } pgstromPlanInnerInfo;
 
 typedef struct
@@ -311,7 +311,7 @@ typedef struct
 	/* group-by parameters */
 	List	   *groupby_actions;		/* list of KAGG_ACTION__* on the kds_final */
 	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */
-	/* zero-copy inner buffer */
+	/* pinned inner buffer stuff */
 	List	   *projection_hashkeys;
 	/* inner relations */
 	int			sibling_param_id;
@@ -408,7 +408,7 @@ typedef struct
 	 * inner preload buffer
 	 */
 	void		   *preload_buffer;
-	bool			inner_zerocopy_mode;
+	bool			inner_pinned_buffer;
 	uint64_t		inner_buffer_id;	/* buffer-id if ZC mode */
 	uint32_t		inner_dev_index;	/* dev-index if ZC mode */
 
@@ -747,11 +747,11 @@ extern void		pgstromExecInitTaskState(CustomScanState *node,
 										  EState *estate,
 										 int eflags);
 extern TupleTableSlot *pgstromExecTaskState(CustomScanState *node);
-extern void		pgstromExecTaskStateRetainResults(pgstromTaskState *pts,
-												  pg_atomic_uint64 *p_inner_nitems,
-												  pg_atomic_uint64 *p_inner_usage,
-												  uint64_t *p_inner_buffer_id,
-												  uint32_t *p_inner_dev_index);
+extern void		execInnerPreLoadPinnedOneDepth(pgstromTaskState *pts,
+											   pg_atomic_uint64 *p_inner_nitems,
+											   pg_atomic_uint64 *p_inner_usage,
+											   uint64_t *p_inner_buffer_id,
+											   uint32_t *p_inner_dev_index);
 extern void		pgstromExecEndTaskState(CustomScanState *node);
 extern void		pgstromExecResetTaskState(CustomScanState *node);
 extern Size		pgstromSharedStateEstimateDSM(CustomScanState *node,

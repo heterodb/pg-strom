@@ -132,6 +132,9 @@ Execution plan tree under the Gather is executable on background worker process.
 @ja:##下位プランの引き上げ
 @en:##Pullup underlying plans
 
+@ja{※本節の内容は有効ではありません。最新の実装を踏まえた書き直しが必要です。}
+@en{(*) This section does not follow the latest version, and need to rewrite according to the latest implementation.}
+
 @ja{
 PG-StromはSCAN、JOIN、GROUP BYの各処理をGPUで実行する事が可能ですが、これに対応するPostgreSQL標準の処理を単純に置き換えただけでは困った事態が発生します。
 SCANが終わった後のデータをいったんホスト側のバッファに書き戻し、次にそれをJOINするために再びGPUへとコピーし、さらにGROUP BYを実行する前に再びホスト側のバッファに書き戻し・・・といった形で、CPUとGPUの間でデータのピンポンが発生してしまうのです。
@@ -262,6 +265,92 @@ SCAN処理の引き上げは`pg_strom.pullup_outer_scan`パラメータによっ
 @en{
 The `pg_strom.pullup_outer_scan` parameter controls whether SCAN is pulled up, and the `pg_strom.pullup_outer_join` parameter also controls whether JOIN is pulled up.
 Both parameters are configured to `on`. Usually, no need to disable them, however, you can use the parameters to identify the problems on system troubles.
+}
+
+@ja:##GpuJoinにおけるInner Pinned Buffer
+@en:##Inner Pinned Buffer of GpuJoin
+
+@ja{
+以下の実行計画を見てください。
+PG-Stromがテーブルを結合する際、通常は最もサイズの大きなテーブル（この場合は`lineorder`で、OUTER表と呼びます）を非同期的に読み込みながら、他のテーブルとの結合処理および集計処理を進めます。
+JOINアルゴリズムの制約上、予めそれ以外のテーブル（この場合は`date1`、`part`、`supplier`で、INNER表と呼びます）をメモリ上に読み出し、またJOINキーのハッシュ値を計算する必要があります。これらのテーブルはOUTER表ほど大きなサイズではないものの、数GBを越えるようなINNERバッファの準備は相応に重い処理となります。
+}
+@en{
+Look at the EXPLAIN output below.
+When PG-Strom joins tables, it usually reads the largest table (`lineorder` in this case; called the OUTER table) asynchronously, while performing join processing and aggregation processing with other tables. Let's proceed.
+Due to the constraints of the JOIN algorithm, it is necessary to read other tables (`date1`, `part`, `supplier` in this case; called the INNER tables) into memory in advance, and also calculate the hash value of the JOIN key. Although these tables are not as large as the OUTER table, preparing an INNER buffer that exceeds several GB is a heavy process.
+}
+
+@ja{
+GpuJoinは通常、PostgreSQLのAPIを通してINNER表を一行ごとに読み出し、そのハッシュ値を計算するとともに共有メモリ上のINNERバッファに書き込みます。GPU-Serviceプロセスは、このINNERバッファをGPUメモリに転送し、そこではじめてOUTER表を読み出してJOIN処理を開始する事ができるようになります。
+INNER表が相応に大きくGPUで実行可能な検索条件を含む場合、以下の実行計画のように、GpuJoinの配下にGpuScanが存在するケースがあり得ます。この場合、INNER表はいったんGpuScanによってGPUで処理された後、その実行結果をCPU側に戻し、さらにINNERバッファに書き込まれた後でもう一度GPUへロードされます。ずいぶんと無駄なデータの流れが存在するように見えます。
+}
+@en{
+GpuJoin usually reads the INNER table through the PostgreSQL API row-by-row, calculates its hash value, and writes them to the INNER buffer on the host shared memory. The GPU-Service process transfers this INNER buffer onto the GPU device memory, then we can start reading the OUTER table and processing the JOIN with inner tables.
+If the INNER table is relatively large and contains search conditions that are executable on the GPU, GpuScan may exists under GpuJoin, as in the EXPLAIN output below. In this case, the INNER table is once processed on the GPU by GpuScan, the execution results are returned to the CPU, and then written to the INNER buffer before it is loaded onto the GPU again. It looks like there is quite a bit of wasted data flow.
+}
+
+```
+=# explain
+   select sum(lo_revenue), d_year, p_brand1
+     from lineorder, date1, part, supplier
+    where lo_orderdate = d_datekey
+      and lo_partkey = p_partkey
+      and lo_suppkey = s_suppkey
+      and p_brand1 between 'MFGR#2221' and 'MFGR#2228'
+      and s_region = 'ASIA'
+    group by d_year, p_brand1;
+                                                  QUERY PLAN
+---------------------------------------------------------------------------------------------------------------
+ GroupAggregate  (cost=31007186.70..31023043.21 rows=6482 width=46)
+   Group Key: date1.d_year, part.p_brand1
+   ->  Sort  (cost=31007186.70..31011130.57 rows=1577548 width=20)
+         Sort Key: date1.d_year, part.p_brand1
+         ->  Custom Scan (GpuJoin) on lineorder  (cost=275086.19..30844784.03 rows=1577548 width=20)
+               GPU Projection: date1.d_year, part.p_brand1, lineorder.lo_revenue
+               GPU Join Quals [1]: (part.p_partkey = lineorder.lo_partkey) ... [nrows: 5994236000 -> 7804495]
+               GPU Outer Hash [1]: lineorder.lo_partkey
+               GPU Inner Hash [1]: part.p_partkey
+               GPU Join Quals [2]: (supplier.s_suppkey = lineorder.lo_suppkey) ... [nrows: 7804495 -> 1577548]
+               GPU Outer Hash [2]: lineorder.lo_suppkey
+               GPU Inner Hash [2]: supplier.s_suppkey
+               GPU Join Quals [3]: (date1.d_datekey = lineorder.lo_orderdate) ... [nrows: 1577548 -> 1577548]
+               GPU Outer Hash [3]: lineorder.lo_orderdate
+               GPU Inner Hash [3]: date1.d_datekey
+               GPU-Direct SQL: enabled (GPU-0)
+               ->  Seq Scan on part  (cost=0.00..59258.00 rows=2604 width=14)
+                     Filter: ((p_brand1 >= 'MFGR#2221'::bpchar) AND (p_brand1 <= 'MFGR#2228'::bpchar))
+               ->  Custom Scan (GpuScan) on supplier  (cost=100.00..190348.83 rows=2019384 width=6)
+                     GPU Projection: s_suppkey
+                     GPU Pinned Buffer: enabled
+                     GPU Scan Quals: (s_region = 'ASIA'::bpchar) [rows: 9990357 -> 2019384]
+                     GPU-Direct SQL: enabled (GPU-0)
+               ->  Seq Scan on date1  (cost=0.00..72.56 rows=2556 width=8)
+(24 rows)
+```
+
+@ja{
+このように、INNER表の読出しやINNERバッファの構築の際にCPUとGPUの間でデータのピンポンが発生する場合、***Pinned Inner Buffer***を使用するよう設定する事で、GpuJoinの実行開始リードタイムの短縮や、メモリ使用量を削減する事ができます。
+上の実行計画では、`supplier`表の読出しがGpuScanにより行われる事になっており、統計情報によれば約200万行が読み出されると推定されています。その一方で、`GPU Pinned Buffer: enabled`の出力に注目してください。これは、INNER表の推定サイズが`pg_strom.pinned_inner_buffer_threshold`の設定値を越える場合、GpuScanの処理結果をそのままGPUメモリに残しておき、それを次のGpuJoinでINNERバッファの一部として利用するという機能です（必要であればハッシュ値の計算もGPUで行います）。
+そのため、`supplier`表の内容はGPU-Direct SQLによってストレージからGPUへと読み出された後、CPU側に戻されたり、再度GPUへロードされたりすることなく、次のGpuJoinで利用される事になります。
+}
+@en{
+In this way, if data ping-pong occurs between the CPU and GPU when reading the INNER table or building the INNER buffer, you can configure GPUJoin to use ***Pinned Inner Buffer***. It is possible to shorten the execution start lead time and reduce memory usage.
+In the above EXPLAIN output, reading of the `supplier` table will be performed by GpuScan, and according to the statistical information, it is estimated that about 2 million rows will be read from the table. Meanwhile, notice the output of `GPU Pinned Buffer: enabled`. This is a function that if the estimated size of the INNER table exceeds the configuration value of `pg_strom.pinned_inner_buffer_threshold`, the processing result of GpuScan is retained in the GPU memory and used as part of the INNER buffer at the next GpuJoin. (If necessary, hash value calculation is also performed on the GPU).
+Therefore, after the contents of the `supplier` table are read from storage to the GPU using GPU-Direct SQL, they can be used in the next GPUJoin without being returned to the CPU or loaded to the GPU again. It will be.
+}
+
+@ja{
+一方でPinned Inner Bufferの使用には若干のトレードオフもあるため、デフォルトでは無効化されています。
+本機能を使用する場合には、明示的に`pg_strom.pinned_inner_buffer_threshold`パラメータを設定する必要があります。
+
+Pinned Inner Bufferを使用した場合、CPU側はINNERバッファの内容を完全には保持していません。そのため、TOAST化された可変長データをGPUで参照した場合など、CPU Fallback処理を行う事ができずエラーを発生させます。また、CPU Fallbackを利用して実装されているRIGHT/FULL OUTER JOINも同様の理由でPinned Inner Bufferと共存する事ができません。
+}
+@en{
+However, there are some tradeoffs to using Pinned Inner Buffer, so it is disabled by default.
+When using this feature, you must explicitly set the `pg_strom.pinned_inner_buffer_threshold` parameter.
+
+The CPU side does not completely retain the contents of the INNER buffer when Pinned Inner Buffer is in use. Therefore, CPU fallback processing cannot be performed and an error will be raised. Also, RIGHT/FULL OUTER JOIN, which is implemented using CPU Fallback, cannot coexist with Pinned Inner Buffer for the same reason.
 }
 
 @ja:##ナレッジベース

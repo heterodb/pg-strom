@@ -3416,7 +3416,7 @@ codegen_build_projection(codegen_context *context, List *proj_hash)
 												 tle->expr);
 		kexp->u.proj.slot_id[kexp->u.proj.nattrs++] = kvdef->kv_slot_id;
 	}
-	/* hash-value (optional; for zero-copy inner buffer) */
+	/* hash-value (optional; for pinned inner buffer) */
 	if (proj_hash != NIL)
 	{
 		const kern_expression  *khash
