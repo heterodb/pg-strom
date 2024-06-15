@@ -109,7 +109,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 			}
 			else
 			{
-				HandleErrorIfCpuFallback(kcxt, depth, index);
+				HandleErrorIfCpuFallback(kcxt, depth, index, matched);
 			}
 
 			if (oj_map && matched)
@@ -256,7 +256,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 					 khitem != NULL && khitem->hash != hash.value;
 					 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next));
 			}
-			else if (HandleErrorIfCpuFallback(kcxt, depth, 0))
+			else if (HandleErrorIfCpuFallback(kcxt, depth, 0, false))
 			{
 				l_state = ULONG_MAX;
 			}
@@ -298,7 +298,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			if (status.value != 0)
 				matched = true;
 		}
-		else if (HandleErrorIfCpuFallback(kcxt, depth, l_state))
+		else if (HandleErrorIfCpuFallback(kcxt, depth, l_state, matched))
 		{
 			l_state = ULONG_MAX;
 		}

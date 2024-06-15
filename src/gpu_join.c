@@ -2584,7 +2584,9 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
  */
 static void
 __execFallbackCpuJoinOneDepth(pgstromTaskState *pts,
-							  int depth, uint64_t l_state);
+							  int depth,
+							  uint64_t l_state,
+							  bool matched);
 
 static void
 __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
@@ -2594,9 +2596,8 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 						   const ItemPointer t_self,
 						   const HeapTupleHeaderData *htup)
 {
-	uint32_t	h_off = htup->t_hoff;
-	uint32_t	ncols = Min(htup->t_infomask2 & HEAP_NATTS_MASK, kds->ncols);
-	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+	uint32_t	h_off, ncols;
+	bool		heap_hasnull;
 	ListCell   *lc1, *lc2;
 
 	/* extract system attributes, if rquired */
@@ -2607,6 +2608,8 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 		int		dst = lfirst_int(lc2);
 		Datum	datum;
 
+		if (!htup)
+			goto fillup_by_null;
 		if (src >= 0)
 			break;
 		switch (src)
@@ -2634,6 +2637,9 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 		fallback_slot->tts_values[dst] = datum;
 	}
 	/* extract the user data */
+	h_off = htup->t_hoff;
+	ncols = Min(htup->t_infomask2 & HEAP_NATTS_MASK, kds->ncols);
+	heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
 	for (int j=0; j < ncols && lc1 && lc2; j++)
 	{
 		const kern_colmeta *cmeta = &kds->colmeta[j];
@@ -2696,6 +2702,7 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 			lc2 = lnext(inner_load_dst, lc2);
 		}
 	}
+fillup_by_null:
 	/* fill-up by NULL for the remaining fields */
 	while (lc1 && lc2)
 	{
@@ -2713,7 +2720,8 @@ static void
 __execFallbackCpuNestLoop(pgstromTaskState *pts,
 						  kern_data_store *kds_in,
 						  bool *oj_map,
-						  int depth, uint64_t l_state)
+						  int depth,
+						  uint64_t l_state, bool matched)
 {
 	pgstromTaskInnerState *istate = &pts->inners[depth-1];
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
@@ -2749,12 +2757,27 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 				ExecQual(istate->other_quals, econtext))
 			{
 				/* Ok, go to the next depth */
-				__execFallbackCpuJoinOneDepth(pts, depth+1, 0);
+				__execFallbackCpuJoinOneDepth(pts, depth+1, 0, false);
 			}
 			/* mark outer-join map, if any */
 			if (oj_map)
 				oj_map[index] = true;
+			/* mark as 'matched' in this depth */
+			matched = true;
 		}
+	}
+
+	/* LEFT OUTER JOIN handling */
+	if (!matched && (istate->join_type == JOIN_LEFT ||
+					 istate->join_type == JOIN_FULL))
+	{
+		__execFallbackLoadVarsSlot(scan_slot,
+								   istate->inner_load_src,
+								   istate->inner_load_dst,
+								   kds_in,
+								   NULL,
+								   NULL);
+		__execFallbackCpuJoinOneDepth(pts, depth+1, 0, false);
 	}
 }
 
@@ -2762,7 +2785,8 @@ static void
 __execFallbackCpuHashJoin(pgstromTaskState *pts,
 						  kern_data_store *kds_in,
 						  bool *oj_map,
-						  int depth, uint64_t l_state)
+						  int depth,
+						  uint64_t l_state, bool matched)
 {
 	pgstromTaskInnerState *istate = &pts->inners[depth-1];
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
@@ -2830,14 +2854,29 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 					ExecQual(istate->other_quals, econtext))
 				{
 					/* Ok, go to the next depth */
-					__execFallbackCpuJoinOneDepth(pts, depth+1, 0);
+					__execFallbackCpuJoinOneDepth(pts, depth+1, 0, false);
 				}
 				/* mark outer-join map, if any */
 				if (oj_map)
 					oj_map[hitem->t.rowid] = true;
+				/* mark as 'matched' in this depth */
+				matched = true;
 			}
 		}
 		hitem = KDS_HASH_NEXT_ITEM(kds_in, hitem->next);
+	}
+
+	/* LEFT OUTER JOIN handling */
+	if (!matched && (istate->join_type == JOIN_LEFT ||
+					 istate->join_type == JOIN_FULL))
+	{
+		__execFallbackLoadVarsSlot(scan_slot,
+								   istate->inner_load_src,
+								   istate->inner_load_dst,
+								   kds_in,
+								   NULL,
+								   NULL);
+		__execFallbackCpuJoinOneDepth(pts, depth+1, 0, false);
 	}
 }
 
@@ -2876,7 +2915,9 @@ __execFallbackCpuProjection(pgstromTaskState *pts)
 
 static void
 __execFallbackCpuJoinOneDepth(pgstromTaskState *pts,
-							  int depth, uint64_t l_state)
+							  int depth,
+							  uint64_t l_state,
+							  bool matched)
 {
 	if (depth > pts->num_rels)
 	{
@@ -2902,18 +2943,20 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts,
 		oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth-1);
 		if (h_kmrels->chunks[depth-1].is_nestloop)
 		{
-			__execFallbackCpuNestLoop(pts, kds_in, oj_map, depth, l_state);
+			__execFallbackCpuNestLoop(pts, kds_in, oj_map, depth, l_state, matched);
 		}
 		else
 		{
-			__execFallbackCpuHashJoin(pts, kds_in, oj_map, depth, l_state);
+			__execFallbackCpuHashJoin(pts, kds_in, oj_map, depth, l_state, matched);
 		}
 	}
 }
 
 bool
 ExecFallbackCpuJoin(pgstromTaskState *pts,
-					int depth, uint64_t l_state)
+					int depth,
+					uint64_t l_state,
+					bool matched)
 {
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
 	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
@@ -2930,7 +2973,7 @@ ExecFallbackCpuJoin(pgstromTaskState *pts,
 		depth++;
 	}
 	/* Run JOIN, if any */
-	__execFallbackCpuJoinOneDepth(pts, depth, l_state);
+	__execFallbackCpuJoinOneDepth(pts, depth, l_state, matched);
 	return (pts->fallback_index -  fallback_index_saved > 0);
 }
 
@@ -2970,7 +3013,7 @@ __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 		}
 		if (istate->other_quals && !ExecQual(istate->other_quals, econtext))
 			continue;
-		__execFallbackCpuJoinOneDepth(pts, depth+1, 0);
+		__execFallbackCpuJoinOneDepth(pts, depth+1, 0, false);
 	}
 }
 

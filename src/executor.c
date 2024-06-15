@@ -1067,7 +1067,7 @@ execCpuFallbackBaseTuple(pgstromTaskState *pts,
 		pgstromSharedState *ps_state = pts->ps_state;
 		pg_atomic_fetch_add_u64(&ps_state->fallback_nitems, 1);
 	}
-	return pts->cb_cpu_fallback(pts, 0, 0);
+	return pts->cb_cpu_fallback(pts, 0, 0, false);
 }
 
 static int
@@ -1114,7 +1114,8 @@ tryExecCpuFallbackChunks(pgstromTaskState *pts)
 				}
 				pts->cb_cpu_fallback(pts,
 									 fb_item->depth,
-									 fb_item->l_state);
+									 fb_item->l_state,
+									 fb_item->matched);
 			}
 		}
 		else

@@ -994,7 +994,9 @@ CreateDpuScanState(CustomScan *cscan)
  */
 bool
 ExecFallbackCpuScan(pgstromTaskState *pts,
-					int depth, uint64_t l_state)
+					int depth,
+					uint64_t l_state,
+					bool matched)
 {
 	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
 	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;

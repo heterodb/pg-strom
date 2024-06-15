@@ -1133,7 +1133,9 @@ typedef struct kern_hashitem	kern_hashitem;
 struct kern_fallbackitem
 {
 	uint32_t		t_len;
-	uint32_t		depth;
+	uint16_t		depth;
+	uint8_t			__reserved__;
+	uint8_t			matched;
 	uint64_t		l_state;
 	HeapTupleHeaderData htup;
 };
@@ -2961,7 +2963,10 @@ ExecKernProjection(kern_context *kcxt,
 				   int num_inners,
 				   kern_data_store **kds_inners);
 EXTERN_FUNCTION(bool)
-HandleErrorIfCpuFallback(kern_context *kcxt, int depth, uint64_t l_state);
+HandleErrorIfCpuFallback(kern_context *kcxt,
+						 int depth,
+						 uint64_t l_state,
+						 bool matched);
 
 /* ----------------------------------------------------------------
  *

@@ -499,7 +499,7 @@ struct pgstromTaskState
 										kern_final_task *fin,
 										struct iovec *xcmd_iov, int *xcmd_iovcnt);
 	bool			  (*cb_cpu_fallback)(struct pgstromTaskState *pts,
-										 int depth, uint64_t l_state);
+										 int depth, uint64_t l_state, bool matched);
 	/* inner relations state (if JOIN) */
 	int					num_rels;
 	pgstromTaskInnerState inners[FLEXIBLE_ARRAY_MEMBER];
@@ -858,7 +858,9 @@ extern List	   *buildOuterScanPlanInfo(PlannerInfo *root,
 									   bool allow_host_quals,
 									   bool allow_no_device_quals);
 extern bool		ExecFallbackCpuScan(pgstromTaskState *pts,
-									int depth, uint64_t l_state);
+									int depth,
+									uint64_t l_state,
+									bool matched);
 extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
 extern void		pgstrom_init_gpu_scan(void);
 extern void		pgstrom_init_dpu_scan(void);
@@ -884,7 +886,9 @@ extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
 										 const CustomScanMethods *methods);
 extern uint32_t	GpuJoinInnerPreload(pgstromTaskState *pts);
 extern bool		ExecFallbackCpuJoin(pgstromTaskState *pts,
-									int depth, uint64_t l_state);
+									int depth,
+									uint64_t l_state,
+									bool matched);
 extern void		ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts);
 extern void		ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts,
 												XpuCommand *resp);
@@ -902,7 +906,9 @@ extern void		xpupreagg_add_custompath(PlannerInfo *root,
 										 uint32_t task_kind,
 										 const CustomPathMethods *methods);
 extern bool		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
-									  int depth, uint64_t l_state);
+									  int depth,
+									  uint64_t l_state,
+									  bool matched);
 extern void		pgstrom_init_gpu_preagg(void);
 extern void		pgstrom_init_dpu_preagg(void);
 

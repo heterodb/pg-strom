@@ -1392,7 +1392,7 @@ ExecLoadVarsOuterRow(kern_context *kcxt,
 			if (!XPU_DATUM_ISNULL(&retval) && retval.value)
 				return true;
 		}
-		else if (!HandleErrorIfCpuFallback(kcxt, 0, 0))
+		else if (!HandleErrorIfCpuFallback(kcxt, 0, 0, false))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		}
@@ -1431,7 +1431,7 @@ ExecLoadVarsOuterArrow(kern_context *kcxt,
 			if (!XPU_DATUM_ISNULL(&retval) && retval.value)
 				return true;
 		}
-		else if (!HandleErrorIfCpuFallback(kcxt, 0, 0))
+		else if (!HandleErrorIfCpuFallback(kcxt, 0, 0, false))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		}
@@ -1472,7 +1472,7 @@ ExecLoadVarsOuterColumn(kern_context *kcxt,
 			if (!XPU_DATUM_ISNULL(&retval) && retval.value)
 				return true;
 		}
-		else if (!HandleErrorIfCpuFallback(kcxt, 0, 0))
+		else if (!HandleErrorIfCpuFallback(kcxt, 0, 0, false))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		}
@@ -1580,7 +1580,8 @@ __writeOutCpuFallbackTuple(kern_context *kcxt,
 						   int fallback_nattrs,
 						   uint16_t *fallback_slots,
 						   int depth,
-						   uint64_t l_state)
+						   uint64_t l_state,
+						   bool matched)
 {
 	kern_data_store *kds_fallback = kcxt->kds_fallback;
 	kern_fallbackitem *fbitem;
@@ -1621,11 +1622,13 @@ __writeOutCpuFallbackTuple(kern_context *kcxt,
 												 __nitems_old,
 												 __nitems_new)) != __nitems_old);
 	/* write out the fallback tuple */
+	assert(depth >= 0 && depth <= USHRT_MAX);
 	fbitem = (kern_fallbackitem *)((char *)kds_fallback
 								   + kds_fallback->length
 								   - __usage);
 	fbitem->t_len = tupsz;
 	fbitem->depth = depth;
+	fbitem->matched = matched;
 	fbitem->l_state = l_state;
 	__kern_form_heaptuple(kcxt,
 						  fallback_nattrs,
@@ -1638,7 +1641,10 @@ __writeOutCpuFallbackTuple(kern_context *kcxt,
 }
 
 PUBLIC_FUNCTION(bool)
-HandleErrorIfCpuFallback(kern_context *kcxt, int depth, uint64_t l_state)
+HandleErrorIfCpuFallback(kern_context *kcxt,
+						 int depth,
+						 uint64_t l_state,
+						 bool matched)
 {
 	if (kcxt->errcode == ERRCODE_SUSPEND_FALLBACK &&
 		kcxt->kds_fallback != NULL)
@@ -1694,7 +1700,7 @@ HandleErrorIfCpuFallback(kern_context *kcxt, int depth, uint64_t l_state)
 		if (__writeOutCpuFallbackTuple(kcxt,
 									   fallback_ncols,
 									   fallback_slots,
-									   depth, l_state))
+									   depth, l_state, matched))
 		{
 			/* successfull fallbacked, clear the error code */
 			kcxt->errcode = ERRCODE_STROM_SUCCESS;
