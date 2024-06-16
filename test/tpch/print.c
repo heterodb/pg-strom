@@ -47,6 +47,8 @@
 #include "dsstypes.h"
 #include <string.h>
 
+int		print_to_stdout = 0;
+
 /*
  * Function Prototypes
  */
@@ -94,8 +96,13 @@ print_prep(int table, int update)
 				}
 		return(fopen(upath, "w"));
         }
-    res = tbl_open(table, "w");
-    OPEN_CHECK(res, tdefs[table].name);
+	if (print_to_stdout)
+		res = stdout;
+	else
+	{
+		res = tbl_open(table, "w");
+		OPEN_CHECK(res, tdefs[table].name);
+	}
     return(res);
 }
 
@@ -439,6 +446,3 @@ pr_drange(int tbl, DSS_HUGE min, DSS_HUGE cnt, long num)
     
     return(0);
 }
-
-
-

@@ -127,35 +127,24 @@ BUILD=`grep BUILD release.h | cut -f3 -d' '`
 NEW_BUILD=`expr ${BUILD} + 1`
 TREE_ROOT=/tmp/tree
 #
-PROG1 = dbgen$(EXE)
-PROG2 = qgen$(EXE)
-PROGS = $(PROG1) $(PROG2)
+DBGEN = dbgen-tpch$(EXE)
 #
-HDR1 = dss.h rnd.h config.h dsstypes.h shared.h bcd2.h rng64.h release.h
-HDR2 = tpcd.h permute.h
-HDR  = $(HDR1) $(HDR2)
+HDR = dss.h rnd.h config.h dsstypes.h shared.h bcd2.h rng64.h release.h dists.dss.h
 #
-SRC1 = build.c driver.c bm_utils.c rnd.c print.c load_stub.c bcd2.c \
+SRC = build.c driver.c bm_utils.c rnd.c print.c load_stub.c bcd2.c \
 	speed_seed.c text.c permute.c rng64.c
-SRC2 = qgen.c varsub.c 
-SRC  = $(SRC1) $(SRC2)
 #
-OBJ1 = build$(OBJ) driver$(OBJ) bm_utils$(OBJ) rnd$(OBJ) print$(OBJ) \
-	load_stub$(OBJ) bcd2$(OBJ) speed_seed$(OBJ) text$(OBJ) permute$(OBJ) \
-	rng64$(OBJ)
-OBJ2 = build$(OBJ) bm_utils$(OBJ) qgen$(OBJ) rnd$(OBJ) varsub$(OBJ) \
-	text$(OBJ) bcd2$(OBJ) permute$(OBJ) speed_seed$(OBJ) rng64$(OBJ)
-OBJS = $(OBJ1) $(OBJ2)
+OBJS = $(SRC:.c=.o)
+
 #
 SETS = dists.dss 
 DOC=README HISTORY PORTING.NOTES BUGS
 DDL  = dss.ddl dss.ri
-WINDOWS_IDE = tpch.dsw dbgen.dsp tpch.sln tpch.vcproj qgen.vcproj
-OTHER=makefile.suite $(SETS) $(DDL) $(WINDOWS_IDE)
+OTHER=makefile.suite $(SETS) $(DDL)
 # case is *important* in TEST_RES
 TEST_RES = O.res L.res c.res s.res P.res S.res n.res r.res
 #
-DBGENSRC=$(SRC1) $(HDR1) $(OTHER) $(DOC) $(SRC2) $(HDR2) $(SRC3)
+DBGENSRC=$(SRC) $(HDR) $(OTHER) $(DOC)
 FQD=queries/1.sql queries/2.sql queries/3.sql queries/4.sql queries/5.sql queries/6.sql queries/7.sql \
 	queries/8.sql queries/9.sql queries/10.sql queries/11.sql queries/12.sql queries/13.sql \
 	queries/14.sql queries/15.sql queries/16.sql queries/17.sql queries/18.sql queries/19.sql queries/20.sql \
@@ -172,27 +161,23 @@ SCRIPTS= check55.sh column_split.sh dop.sh gen_tasks.sh last_row.sh load_balance
 ALLSRC=$(DBGENSRC) $(REFERENCE) $(QSRC) $(SCRIPTS)
 JUNK  = 
 #
-all: $(PROGS)
-$(PROG1): $(OBJ1) $(SETS) 
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJ1) $(LIBS)
-$(PROG2): permute.h $(OBJ2) 
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJ2) $(LIBS)
-clean:
-	rm -f $(PROGS) $(OBJS) $(JUNK)
-lint:
-	lint $(CFLAGS) -u -x -wO -Ma -p $(SRC1)
-	lint $(CFLAGS) -u -x -wO -Ma -p $(SRC2)
+all: $(DBGEN)
 
-tar: $(ALLSRC) 
-	tar cvhf - $(ALLSRC) --exclude .svn\*/\* |gzip - > tpch_${VERSION}_${RELEASE}_${PATCH}.tar.gz
-	tar cvhf - $(REFERENCE_DATA) --exclude .svn\*/\* |gzip - > reference_${VERSION}_${RELEASE}_${PATCH}.tar.gz
-zip: $(ALLSRC)
-	zip -r tpch_${VERSION}_${RELEASE}_${PATCH}.zip $(ALLSRC) -x *.svn*
-	zip -r reference_${VERSION}_${RELEASE}_${PATCH}.zip $(REFERENCE_DATA) -x *.svn*
-release: 
-	make -f makefile.suite tar
-	make -f makefile.suite zip
-	( cd tests; sh test_list.sh `date '+%Y%m%d'` )
+$(DBGEN): $(OBJS) $(SETS) 
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+
+clean:
+	rm -f $(DBGEN) $(OBJS) $(JUNK) dists.dss.h
+lint:
+	lint $(CFLAGS) -u -x -wO -Ma -p $(SRC)
+
 rnd$(OBJ): rnd.h
-$(OBJ1): $(HDR1)
-$(OBJ2): dss.h tpcd.h config.h rng64.h release.h
+
+dists.dss.h: dists.dss
+	(echo "const char *static_dists_dss =";		\
+	 cat $^ | while read line;					\
+	 do											\
+	   echo $$line | sed -e 's/^/  "/g' -e 's/$$/\\n"/g'; \
+	 done; echo ";") > $@
+
+$(OBJS): $(HDR)

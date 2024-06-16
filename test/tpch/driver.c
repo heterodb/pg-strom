@@ -407,6 +407,7 @@ usage (void)
 	fprintf (stderr, "-T r   -- generate region ONLY\n");
 	fprintf (stderr, "-T s   -- generate suppliers ONLY\n");
 	fprintf (stderr, "-T S   -- generate partsupp ONLY\n");
+	fprintf (stderr, "-X     -- output to stdout (must be used with -T option)\n");
 	fprintf (stderr,
 		"\nTo generate the SF=1 (1GB), validation database population, use:\n");
 	fprintf (stderr, "\tdbgen -vf -s 1\n");
@@ -451,7 +452,7 @@ process_options (int count, char **vector)
 	FILE *pF;
 	
 	while ((option = getopt (count, vector,
-		"b:C:d:fi:hO:P:qs:S:T:U:v")) != -1)
+		"b:C:d:fi:hO:P:qs:S:T:XU:v")) != -1)
 	switch (option)
 	{
 		case 'b':				/* load distributions from named file */
@@ -576,6 +577,9 @@ process_options (int count, char **vector)
 				exit (1);
 			}
 			break;
+		case 'X':
+			print_to_stdout = 1;
+			break;
 		case 'O':				/* optional actions */
 			switch (tolower (*optarg))
 			{
@@ -601,6 +605,13 @@ process_options (int count, char **vector)
 			exit (1);
 	}
 
+	if (print_to_stdout)
+	{
+		if (table == 0)
+			fprintf(stderr, "-X must be used with -T together\n");
+		if ((table & (table - 1)) != 0)
+			fprintf(stderr, "-X must be used towards single -T option\n");
+	}
 	return;
 }
 

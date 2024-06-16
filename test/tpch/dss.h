@@ -240,6 +240,8 @@ void		dbg_text PROTO((char * t, int min, int max, int s));
 #define EXTERN extern
 #endif            /* DECLARER */
 
+/* print.c */
+extern int			print_to_stdout;
 
 EXTERN distribution nations;
 EXTERN distribution nations2;

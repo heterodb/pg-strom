@@ -104,7 +104,6 @@
 /* End of lines added by Chuck McDevitt for WIN32 support */
 #include "dsstypes.h"
 
-
 static char alpha_num[65] =
 "0123456789abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ,";
 
@@ -286,34 +285,64 @@ julian(long date)
 }
 
 /*
-* load a distribution from a flat file into the target structure;
-* should be rewritten to allow multiple dists in a file
-*/
+ * static dists_dss
+ */
+#include "dists.dss.h"
+static char *
+static_dist_fgets(char *d, int len, size_t *pos)
+{
+	static size_t limit = 0;
+	size_t  cur = *pos;
+	const char *s = static_dists_dss + cur;
+	int     i = 0;
+
+	if (limit == 0)
+		limit = strlen(static_dists_dss);
+	if (cur >= limit || *s == '\0')
+		return NULL;
+	while (i < len - 1)
+	{
+		int		c = s[i];
+
+		if (c == '\0')
+			break;
+		d[i++] = c;
+		if (c == '\n')
+			break;
+	}
+	d[i] = '\0';
+	*pos += i;
+
+	return d;
+}
+
+/*
+ * load a distribution from a flat file into the target structure;
+ * should be rewritten to allow multiple dists in a file
+ */
 void
 read_dist(char *path, char *name, distribution *target)
 {
-FILE     *fp;
-char      line[256],
-         token[256],
-        *c;
-long      weight,
-         count = 0,
-         name_set = 0;
+	FILE   *fp = NULL;
+	char    line[256];
+	char	token[256];
+	char   *c;
+	long	weight;
+	long	count = 0;
+	long	name_set = 0;
+	size_t	pos = 0;
 
-    if (d_path == NULL)
-		{
+	if (d_path == NULL)
+	{
 		sprintf(line, "%s%c%s", 
-			env_config(CONFIG_TAG, CONFIG_DFLT), PATH_SEP, path);
+				env_config(CONFIG_TAG, CONFIG_DFLT), PATH_SEP, path);
 		fp = fopen(line, "r");
 		OPEN_CHECK(fp, line);
-		}
-	else
-		{
-		fp = fopen(d_path, "r");
-		OPEN_CHECK(fp, d_path);
-		}
-    while (fgets(line, sizeof(line), fp) != NULL)
-        {
+	}
+	while (fp != NULL
+		   ? fgets(line, sizeof(line), fp) != NULL
+		   : static_dist_fgets(line, sizeof(line), &pos) != NULL)
+	{
         if ((c = strchr(line, '\n')) != NULL)
             *c = '\0';
         if ((c = strchr(line, '#')) != NULL)
@@ -322,28 +351,29 @@ long      weight,
             continue;
 
         if (!name_set)
-            {
+		{
             if (dsscasecmp(strtok(line, "\n\t "), "BEGIN"))
                 continue;
             if (dsscasecmp(strtok(NULL, "\n\t "), name))
                 continue;
             name_set = 1;
             continue;
-            }
+		}
         else
-            {
-            if (!dssncasecmp(line, "END", 3))
-                {
-                fclose(fp);
-                return;
-                }
-            }
+		{
+			if (!dssncasecmp(line, "END", 3))
+			{
+				if (fp)
+					fclose(fp);
+				return;
+			}
+		}
 
         if (sscanf(line, "%[^|]|%ld", token, &weight) != 2)
             continue;
 
         if (!dsscasecmp(token, "count"))
-            {
+		{
             target->count = weight;
             target->list =
                 (set_member *)
@@ -351,7 +381,7 @@ long      weight,
             MALLOC_CHECK(target->list);
             target->max = 0;
             continue;
-            }
+		}
         target->list[count].text =
             (char *) malloc((size_t)((int)strlen(token) + 1));
         MALLOC_CHECK(target->list[count].text);
@@ -360,16 +390,18 @@ long      weight,
         target->list[count].weight = target->max;
 
         count += 1;
-        } /* while fgets() */
+	} /* while fgets() */
 
     if (count != target->count)
-        {
-        fprintf(stderr, "Read error on dist '%s'\n", name);
-        fclose(fp);
+	{
+		fprintf(stderr, "Read error on dist '%s'\n", name);
+		if (fp)
+			fclose(fp);
         exit(1);
-        }
+	}
 	target->permute = (long *)NULL;
-    fclose(fp);
+	if (fp)
+		fclose(fp);
     return;
 }
 

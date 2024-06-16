@@ -115,6 +115,10 @@
 #endif /* SQLSERVER or MP/RAS */
 #endif /* ATT */
 
+#ifdef POSTGRESQL
+#define EOL_HANDLING	1
+#endif
+
 #ifdef HP
 #define _INCLUDE_POSIX_SOURCE
 #define STDLIB_HAS_GETOPT
