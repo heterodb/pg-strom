@@ -20,7 +20,7 @@ CREATE TABLE customer (
 -- Name: lineitem; Type: TABLE; Schema: public; Owner: kaigai
 --
 CREATE TABLE lineitem (
-    l_orderkey integer NOT NULL,
+    l_orderkey bigint NOT NULL,
     l_partkey integer NOT NULL,
     l_suppkey integer NOT NULL,
     l_linenumber integer NOT NULL,
@@ -52,7 +52,7 @@ CREATE TABLE nation (
 -- Name: orders; Type: TABLE; Schema: public; Owner: kaigai
 --
 CREATE TABLE orders (
-    o_orderkey integer NOT NULL,
+    o_orderkey bigint NOT NULL,
     o_custkey integer NOT NULL,
     o_orderstatus character(1) NOT NULL,
     o_totalprice numeric(15,2) NOT NULL,

@@ -332,11 +332,9 @@ read_dist(char *path, char *name, distribution *target)
 	long	name_set = 0;
 	size_t	pos = 0;
 
-	if (d_path == NULL)
+	if (d_path != NULL)
 	{
-		sprintf(line, "%s%c%s", 
-				env_config(CONFIG_TAG, CONFIG_DFLT), PATH_SEP, path);
-		fp = fopen(line, "r");
+		fp = fopen(d_path, "r");
 		OPEN_CHECK(fp, line);
 	}
 	while (fp != NULL
