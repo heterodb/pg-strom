@@ -2750,10 +2750,10 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 									   &tupitem->htup);
 		}
 		/* check JOIN-clause */
-		if (istate->join_quals != NULL ||
+		if (istate->join_quals == NULL ||
 			ExecQual(istate->join_quals, econtext))
 		{
-			if (istate->other_quals != NULL ||
+			if (istate->other_quals == NULL ||
 				ExecQual(istate->other_quals, econtext))
 			{
 				/* Ok, go to the next depth */
@@ -3041,6 +3041,9 @@ ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts, XpuCommand *resp)
 {
 	kern_multirels *h_kmrels = pts->h_kmrels;
 	bool	   *ojmap_resp = (bool *)((char *)resp + resp->u.results.ojmap_offset);
+
+	if (resp->u.results.ojmap_offset == 0)
+		return;
 
 	Assert(resp->u.results.ojmap_offset +
 		   resp->u.results.ojmap_length <= resp->length);

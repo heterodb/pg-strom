@@ -105,17 +105,16 @@ execGpuJoinNestLoop(kern_context *kcxt,
 				if (status.value > 0)
 					tuple_is_valid = true;
 				if (status.value != 0)
+				{
+					assert(tupitem->rowid < kds_heap->nitems);
+					if (oj_map)
+						oj_map[tupitem->rowid] = true;
 					matched = true;
+				}
 			}
 			else
 			{
 				HandleErrorIfCpuFallback(kcxt, depth, index, matched);
-			}
-
-			if (oj_map && matched)
-			{
-				assert(tupitem->rowid < kds_heap->nitems);
-				oj_map[tupitem->rowid] = true;
 			}
 		}
 		else if (left_outer && index >= kds_heap->nitems && !matched)
@@ -296,17 +295,16 @@ execGpuJoinHashJoin(kern_context *kcxt,
 			if (status.value > 0)
 				tuple_is_valid = true;
 			if (status.value != 0)
+			{
+				assert(khitem->t.rowid < kds_hash->nitems);
+				if (oj_map)
+					oj_map[khitem->t.rowid] = true;
 				matched = true;
+			}
 		}
 		else if (HandleErrorIfCpuFallback(kcxt, depth, l_state, matched))
 		{
 			l_state = ULONG_MAX;
-		}
-
-		if (oj_map && matched)
-		{
-			assert(khitem->t.rowid < kds_hash->nitems);
-			oj_map[khitem->t.rowid] = true;
 		}
 	}
 	else

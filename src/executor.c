@@ -1717,7 +1717,7 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 		resp = pts->curr_resp;
 		if (resp->tag == XpuCommandTag__Success)
 		{
-			if (resp->u.results.ojmap_offset != 0)
+			if (resp->u.results.final_this_device)
 				ExecFallbackCpuJoinOuterJoinMap(pts, resp);
 			if (resp->u.results.final_plan_node)
 				ExecFallbackCpuJoinRightOuter(pts);

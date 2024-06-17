@@ -2914,7 +2914,7 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 				{
 					for (uint32_t j=0; j < kds->nitems; j++)
 						h_ojmap[j] |= d_ojmap[j];
-					resp.u.results.final_this_device = true;
+					pg_memory_barrier();
 				}
 			}
 		}
@@ -2937,11 +2937,11 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 			if ((session->xpu_task_flags & DEVTASK__PREAGG) != 0)
 				kds_array[resp.u.results.chunks_nitems++] = kds_final;
 
-			resp.u.results.final_this_device = true;
 			resp.u.results.final_nitems = kds_final->nitems;
 			resp.u.results.final_usage = kds_final->usage;
 		}
 	}
+	resp.u.results.final_this_device = kfin->final_this_device;
 	resp.u.results.final_plan_node = kfin->final_plan_node;
 
 	gpuClientWriteBack(gclient, &resp,
