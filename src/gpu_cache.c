@@ -153,6 +153,7 @@ typedef struct
 	kern_data_store	kds_head;
 } GpuCacheSharedState;
 
+#define POSIX_SHMEM_DIRNAME		"/dev/shm"
 #define GpuCacheSharedStateName(nameBuf,nameLen,datOid,relOid,signature) \
 	snprintf((nameBuf), (nameLen),										\
 			 ".gpucache_p%u_d%u_r%u.%09lx.buf",							\
@@ -3100,6 +3101,63 @@ __gpuCacheOnDropTrigger(Oid trigger_oid)
 }
 
 static void
+__gpuCacheOnDropDatabase(Oid database_oid)
+{
+	const char *dirname = POSIX_SHMEM_DIRNAME;
+	DIR		   *dir;
+	struct dirent *dentry;
+
+	/*
+	 * DROP DATABASE should already take AccessExclusiveLock on the target
+	 * database, thus, there are no active sessions here, and no more
+	 * sessions will be made.
+	 */
+	Assert(database_oid != MyDatabaseId);
+	dir = AllocateDir(dirname);
+	while ((dentry = ReadDir(dir, dirname)) != NULL)
+	{
+		uint32_t		__port;
+		uint32_t		__database_oid;
+		uint32_t		__table_oid;
+		uint64_t		__signature;
+		GpuCacheDesc	hkey;
+		GpuCacheDesc   *gc_desc;
+
+		if (strncmp(dentry->d_name, ".gpucache_", 10) == 0 &&
+			sscanf(dentry->d_name,
+				   ".gpucache_p%u_d%u_r%u.%09lx.buf",
+				   &__port,
+				   &__database_oid,
+				   &__table_oid,
+				   &__signature) == 4 &&
+			__port == PostPortNumber &&
+			__database_oid == database_oid)
+		{
+			/* inject a dummy entry to drop shared memory segment */
+			memset(&hkey, 0, sizeof(GpuCacheDesc));
+			hkey.ident.database_oid = __database_oid;
+			hkey.ident.table_oid = __table_oid;
+			hkey.ident.signature = __signature;
+			hkey.xid = GetCurrentTransactionId();
+			Assert(TransactionIdIsValid(hkey.xid));
+
+			gc_desc = hash_search(gcache_descriptors_htab,
+								  &hkey, HASH_ENTER, NULL);
+			if (gc_desc)
+			{
+				memset(&gc_desc->gc_options, 0, sizeof(GpuCacheOptions));
+				gc_desc->gc_lmap = NULL;
+				gc_desc->drop_on_rollback = false;
+				gc_desc->drop_on_commit = true;
+				gc_desc->nitems = 0;
+				memset(&gc_desc->buf, 0, sizeof(StringInfoData));
+			}
+		}
+	}
+	FreeDir(dir);
+}
+
+static void
 gpuCacheObjectAccess(ObjectAccessType access,
 					 Oid classId,
 					 Oid objectId,
@@ -3160,6 +3218,13 @@ gpuCacheObjectAccess(ObjectAccessType access,
 			elog(LOG, "pid=%u OAT_DROP (pg_trigger, objectId=%u)", getpid(), objectId);
 #endif
 			__gpuCacheOnDropTrigger(objectId);
+		}
+		else if (classId == DatabaseRelationId)
+		{
+#ifdef GPUCACHE_DEBUG_MESSAGE
+			elog(LOG, "pid=%u OAT_DROP (pg_database, objectId=%u)", getpid(), objectId);
+#endif
+			__gpuCacheOnDropDatabase(objectId);
 		}
 	}
 	else if (access == OAT_TRUNCATE)
@@ -4258,7 +4323,7 @@ PG_FUNCTION_INFO_V1(pgstrom_gpucache_info);
 static List *
 __pgstrom_gpucache_info(void)
 {
-	const char *dirname = "/dev/shm";
+	const char *dirname = POSIX_SHMEM_DIRNAME;
 	DIR		   *dir;
 	struct dirent *dentry;
 	char		buffer[sizeof(GpuCacheSharedState)];
