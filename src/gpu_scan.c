@@ -310,7 +310,7 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 	pp_info->host_quals = extract_actual_clauses(host_quals, false);
 	pp_info->scan_quals = extract_actual_clauses(dev_quals, false);
 	pp_info->scan_tuples = baserel->tuples;
-	pp_info->scan_nrows = scan_nrows;
+	pp_info->scan_nrows = clamp_row_est(scan_nrows);
 	pp_info->parallel_nworkers = parallel_nworkers;
 	pp_info->parallel_divisor = parallel_divisor;
 	pp_info->startup_cost = startup_cost;

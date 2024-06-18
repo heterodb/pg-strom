@@ -530,7 +530,6 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 
 	pp_inner = &pp_info->inners[pp_info->num_rels++];
 	pp_inner->join_type = join_type;
-	pp_inner->join_nrows = joinrel->rows;
 	pp_inner->hash_outer_keys = hash_outer_keys;
 	pp_inner->hash_inner_keys = hash_inner_keys;
 	pp_inner->join_quals = join_quals;
@@ -670,7 +669,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pp_info->inner_cost = inner_cost;
 	pp_info->run_cost = run_cost;
 	pp_info->final_cost = final_cost;
-	pp_inner->join_nrows = (joinrel->rows / pp_info->parallel_divisor);
+	pp_inner->join_nrows = clamp_row_est(joinrel->rows / pp_info->parallel_divisor);
 
 	return fixup_join_varnullingrels(joinrel, pp_info);
 }
