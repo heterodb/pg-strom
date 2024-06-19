@@ -1060,7 +1060,7 @@ sqldb_begin_query(void *sqldb_state,
 
 	/* fetch schema definition */
 	res = PQexecParams(conn,
-					   "FETCH FORWARD 0 FROM " CURSOR_NAME,
+					   "FETCH FORWARD 100 FROM " CURSOR_NAME,
 					   0, NULL, NULL, NULL, NULL,
 					   1);	/* results in binary mode */
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
@@ -1068,8 +1068,17 @@ sqldb_begin_query(void *sqldb_state,
 	pgstate->res = res;
 	pgstate->nitems = PQntuples(res);
 	pgstate->index  = 0;
-	assert(pgstate->nitems == 0);
+	if (pgstate->nitems == 0)
+		Elog("SQL query has empty results: %s", sqldb_command);
 
+	for (int depth=1; depth <= pgstate->n_depth; depth++)
+	{
+		PGSTATE_NL *nl = &pgstate->nestloop[depth - 1];
+
+		nl->res = pgsql_exec_nestloop(pgstate, depth);
+		nl->nitems = PQntuples(nl->res);
+		nl->index = 0;
+	}
 	return pgsql_create_buffer(pgstate,
 							   af_info,
 							   dictionary_list);
