@@ -4156,6 +4156,35 @@ ArrowAnalyzeForeignTable(Relation frel,
 }
 
 /*
+ * ensureUniqueFieldNames
+ */
+static const char **
+ensureUniqueFieldNames(ArrowSchema *schema)
+{
+	const char **column_names = palloc0(sizeof(char *) * schema->_num_fields);
+	int		count = 2;
+
+	for (int k=0; k < schema->_num_fields; k++)
+	{
+		const char *cname = schema->fields[k].name;
+	retry:
+		for (int j=0; j < k; j++)
+		{
+			if (strcasecmp(cname, column_names[j]) == 0)
+			{
+				cname = psprintf("__%s_%d", schema->fields[k].name, count++);
+				goto retry;
+			}
+		}
+		if (schema->fields[k].name != cname)
+			elog(NOTICE, "Arrow::field[%d] '%s' meets a duplicated field name, so renamed to '%s'",
+				 k, schema->fields[k].name, cname);
+		column_names[k] = cname;
+	}
+	return column_names;
+}
+
+/*
  * ArrowImportForeignSchema
  */
 static List *
@@ -4164,7 +4193,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 	ArrowSchema	schema;
 	List	   *filesList;
 	ListCell   *lc;
-	int			j;
+	const char **column_names;
 	StringInfoData	cmd;
 
 	/* sanity checks */
@@ -4208,7 +4237,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			if (schema.endianness != stemp->endianness ||
 				schema._num_fields != stemp->_num_fields)
 				elog(ERROR, "file '%s' has incompatible schema definition", fname);
-			for (j=0; j < schema._num_fields; j++)
+			for (int j=0; j < schema._num_fields; j++)
 			{
 				if (!arrowFieldTypeIsEqual(&schema.fields[j],
 										   &stemp->fields[j]))
@@ -4216,12 +4245,14 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			}
 		}
 	}
+	/* ensure the field-names are unique */
+	column_names = ensureUniqueFieldNames(&schema);
 
 	/* makes a command to define foreign table */
 	initStringInfo(&cmd);
 	appendStringInfo(&cmd, "CREATE FOREIGN TABLE %s (\n",
 					 quote_identifier(stmt->remote_schema));
-	for (j=0; j < schema._num_fields; j++)
+	for (int j=0; j < schema._num_fields; j++)
 	{
 		ArrowField *field = &schema.fields[j];
 		Oid				type_oid;
@@ -4245,7 +4276,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		if (type_mod < 0)
 		{
 			appendStringInfo(&cmd, "  %s %s.%s",
-							 quote_identifier(field->name),
+							 quote_identifier(column_names[j]),
 							 quote_identifier(schema),
 							 NameStr(__type->typname));
 		}
@@ -4253,7 +4284,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		{
 			Assert(type_mod >= VARHDRSZ);
 			appendStringInfo(&cmd, "  %s %s.%s(%d)",
-							 quote_identifier(field->name),
+							 quote_identifier(column_names[j]),
 							 quote_identifier(schema),
 							 NameStr(__type->typname),
 							 type_mod - VARHDRSZ);
@@ -4295,6 +4326,7 @@ __insertPgAttributeTuple(Relation pg_attr_rel,
 						 CatalogIndexState pg_attr_index,
 						 Oid ftable_oid,
 						 AttrNumber attnum,
+						 const char *attname,
 						 ArrowField *field)
 {
 	Oid			type_oid;
@@ -4321,7 +4353,7 @@ __insertPgAttributeTuple(Relation pg_attr_rel,
 	memset(isnull, 0, sizeof(isnull));
 
 	values[Anum_pg_attribute_attrelid - 1] = ObjectIdGetDatum(ftable_oid);
-	values[Anum_pg_attribute_attname - 1] = CStringGetDatum(field->name);
+	values[Anum_pg_attribute_attname - 1] = CStringGetDatum(attname);
 	values[Anum_pg_attribute_atttypid - 1] = ObjectIdGetDatum(type_oid);
 	values[Anum_pg_attribute_attstattarget - 1] = Int32GetDatum(-1);
 	values[Anum_pg_attribute_attlen - 1] = Int16GetDatum(type_len);
@@ -4363,8 +4395,9 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 	char	   *ftable_name;
 	char	   *file_name;
 	char	   *namespace_name;
+	const char **column_names;
 	DefElem	   *defel;
-	int			j, nfields;
+	int			nfields;
 	Oid			ftable_oid;
 	ObjectAddress myself;
 	ArrowFileInfo af_info;
@@ -4389,6 +4422,7 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 	if (schema._num_fields > SHRT_MAX)
 		Elog("Arrow file '%s' has too much fields: %d",
 			 file_name, schema._num_fields);
+	column_names = ensureUniqueFieldNames(&schema);
 
 	/* setup CreateForeignTableStmt */
 	memset(&stmt, 0, sizeof(CreateForeignTableStmt));
@@ -4396,7 +4430,7 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 	stmt.base.relation = makeRangeVar(namespace_name, ftable_name, -1);
 
 	nfields = Min(schema._num_fields, 100);
-	for (j=0; j < nfields; j++)
+	for (int j=0; j < nfields; j++)
 	{
 		ColumnDef  *cdef;
 		Oid			type_oid;
@@ -4406,7 +4440,7 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 								 &type_oid,
 								 &type_mod,
 								 NULL);
-		cdef = makeColumnDef(schema.fields[j].name,
+		cdef = makeColumnDef(column_names[j],
 							 type_oid,
 							 type_mod,
 							 InvalidOid);
@@ -4437,12 +4471,13 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 		if (!HeapTupleIsValid(tup))
 			elog(ERROR, "cache lookup failed for relation %u", ftable_oid);
 
-		for (j=nfields; j < schema._num_fields; j++)
+		for (int j=nfields; j < schema._num_fields; j++)
 		{
 			__insertPgAttributeTuple(a_rel,
 									 a_index,
 									 ftable_oid,
 									 j+1,
+									 column_names[j],
                                      &schema.fields[j]);
 		}
 		/* update relnatts also */
