@@ -488,7 +488,6 @@ pgsql_setup_attribute(PGconn *conn,
 					  const char *nspname,
 					  const char *typname,
 					  const char *extname,	/* extension name, if any */
-					  const char *extschema,/* extension schema, if relocatable */
 					  ArrowField *arrow_field,
 					  int *p_numFieldNodes,
 					  int *p_numBuffers)
@@ -508,7 +507,6 @@ pgsql_setup_attribute(PGconn *conn,
 										  typelemid,
 										  server_timezone,
 										  extname,
-										  extschema,
 										  arrow_field);
 	if (typrelid != InvalidOid)
 	{
@@ -633,8 +631,8 @@ pgsql_setup_composite_type(PGconn *conn,
 		const char *typelem   = PQgetvalue(res, j, 9);
 		const char *nspname   = PQgetvalue(res, j, 10);
 		const char *typname   = PQgetvalue(res, j, 11);
-		const char *extname   = PQgetvalue(res, j, 12);
-		const char *extschema = PQgetvalue(res, j, 13);
+		const char *extname   = (PQgetisnull(res, j, 12) ? NULL : PQgetvalue(res, j, 12));
+//		const char *extschema = (PQgetisnull(res, j, 13) ? NULL : PQgetvalue(res, j, 13));
 		ArrowField *sub_field = NULL;
 		int			index     = atoi(attnum);
 
@@ -657,7 +655,6 @@ pgsql_setup_composite_type(PGconn *conn,
 							  nspname,
 							  typname,
 							  extname,
-							  extschema,
 							  sub_field,
 							  p_numFieldNodes,
 							  p_numBuffers);
@@ -688,7 +685,6 @@ pgsql_setup_array_element(PGconn *conn,
 	const char	   *typrelid;
 	const char	   *typelem;
 	const char	   *extname;
-	const char	   *extschema;
 	ArrowField	   *elem_field = NULL;
 
 	snprintf(query, sizeof(query),
@@ -737,8 +733,7 @@ pgsql_setup_array_element(PGconn *conn,
 	typtype  = PQgetvalue(res, 0, 6);
 	typrelid = PQgetvalue(res, 0, 7);
 	typelem  = PQgetvalue(res, 0, 8);
-	extname  = PQgetvalue(res, 0, 9);
-	extschema = PQgetvalue(res, 0, 10);
+	extname  = (PQgetisnull(res, 0, 9) ? NULL : PQgetvalue(res, 0, 9));
 
 	if (arrow_field)
 	{
@@ -761,7 +756,6 @@ pgsql_setup_array_element(PGconn *conn,
 						  nspname,
 						  typname,
 						  extname,
-						  extschema,
 						  elem_field,
 						  p_numFieldNode,
 						  p_numBuffers);
@@ -819,7 +813,6 @@ pgsql_create_buffer(PGSTATE *pgstate,
 		const char *typname;
 		const char *typtypmod;
 		const char *extname;
-		const char *extschema;
 		ArrowField *arrow_field = NULL;
 
 		if (j == PQnfields(res))
@@ -882,8 +875,7 @@ pgsql_create_buffer(PGSTATE *pgstate,
 			if (atttypmod < 0 && __typtypmod > 0)
 				atttypmod = __typtypmod;
 		}
-		extname  = PQgetvalue(__res, 0, 9);
-		extschema = PQgetvalue(__res, 0, 10);
+		extname  = (PQgetisnull(__res, 0, 9) ? NULL : PQgetvalue(__res, 0, 9));
 
 		if (af_info)
 			arrow_field = &af_info->footer.schema.fields[j];
@@ -903,7 +895,6 @@ pgsql_create_buffer(PGSTATE *pgstate,
 							  nspname,
 							  typname,
 							  extname,
-							  extschema,
 							  arrow_field,
 							  &table->numFieldNodes,
 							  &table->numBuffers);

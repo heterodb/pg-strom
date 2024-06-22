@@ -1982,13 +1982,13 @@ assignArrowTypeExtraCube(SQLfield *column, ArrowField *arrow_field)
 static void
 __assignArrowTypeHint(SQLfield *column,
 					  const char *typname,
-					  const char *typnamespace)
+					  const char *typnamespace,
+					  const char *typextension)
 {
-	int			index = column->numCustomMetadata++;
+	int		index = column->numCustomMetadata++;
 	ArrowKeyValue *kv;
-	const char *pos;
-	char		buf[200];
-	int			sz = 0;
+	char	buf[300];
+	int		sz = 0;
 
 	if (!column->customMetadata)
 		column->customMetadata = palloc(sizeof(ArrowKeyValue) * (index+1));
@@ -2000,22 +2000,20 @@ __assignArrowTypeHint(SQLfield *column,
 	kv->key = pstrdup("pg_type");
 	kv->_key_len = 7;
 
-	/* '.' must be escaped */
-	for (pos = typnamespace; *pos != '\0'; pos++)
+	if (!typextension && strcmp(typnamespace, "pg_catalog") != 0)
 	{
-		if (*pos == '.')
-			buf[sz++] = '\\';
-		buf[sz++] = *pos;
+		strcpy(buf+sz, typnamespace);
+		sz += strlen(typnamespace);
+		buf[sz++] = '.';
 	}
-	buf[sz++] = '.';
-	for (pos = typname; *pos != '\0'; pos++)
+	strcpy(buf+sz, typname);
+	sz += strlen(typname);
+	if (typextension)
 	{
-		if (*pos == '.')
-			buf[sz++] = '\\';
-		buf[sz++] = *pos;
+		buf[sz++] = '@';
+		strcpy(buf+sz, typextension);
+		sz += strlen(typextension);
 	}
-	buf[sz] = '\0';
-
 	kv->value = pstrdup(buf);
 	kv->_value_len = sz;
 }
@@ -2038,7 +2036,6 @@ assignArrowTypePgSQL(SQLfield *column,
 					 Oid typelemid,
 					 const char *tz_name,
 					 const char *extname,
-					 const char *extschema,
 					 ArrowField *arrow_field)
 {
 	SQLtype__pgsql	   *pgtype = &column->sql_type.pgsql;
@@ -2072,14 +2069,14 @@ assignArrowTypePgSQL(SQLfield *column,
 	/* composite type */
 	if (typrelid != 0)
 	{
-		__assignArrowTypeHint(column, typname, typnamespace);
+		__assignArrowTypeHint(column, typname, typnamespace, NULL);
 		return assignArrowTypeStruct(column, arrow_field);
 	}
 
 	/* enum type */
 	if (typtype == 'e')
 	{
-		__assignArrowTypeHint(column, typname, typnamespace);
+		__assignArrowTypeHint(column, typname, typnamespace, NULL);
 		return assignArrowTypeDictionary(column, arrow_field);
 	}
 
@@ -2088,10 +2085,9 @@ assignArrowTypePgSQL(SQLfield *column,
 	{
 		/* contrib/cube (relocatable) */
 		if (strcmp(typname, "cube") == 0 &&
-			strcmp(extname, "cube") == 0 &&
-			strcmp(extschema, typnamespace) == 0)
+			strcmp(extname, "cube") == 0)
 		{
-			__assignArrowTypeHint(column, typname, typnamespace);
+			__assignArrowTypeHint(column, typname, typnamespace, extname);
 			return assignArrowTypeExtraCube(column, arrow_field);
 		}
 	}
@@ -2158,7 +2154,7 @@ assignArrowTypePgSQL(SQLfield *column,
 			typlen == sizeof(int) ||
 			typlen == sizeof(double))
 		{
-			__assignArrowTypeHint(column, typname, typnamespace);
+			__assignArrowTypeHint(column, typname, typnamespace, NULL);
 			return assignArrowTypeInt(column, false, arrow_field);
 		}
 		/*
@@ -2172,7 +2168,7 @@ assignArrowTypePgSQL(SQLfield *column,
 	}
 	else if (typlen == -1)
 	{
-		__assignArrowTypeHint(column, typname, typnamespace);
+		__assignArrowTypeHint(column, typname, typnamespace, NULL);
 		return assignArrowTypeBinary(column, arrow_field);
 	}
 	Elog("PostgreSQL type: '%s' is not supported", typname);

@@ -206,9 +206,8 @@ arrowFieldGetPGTypeHint(const ArrowField *field)
 	{
 		ArrowKeyValue *kv = &field->custom_metadata[i];
 		Oid			extension_oid = InvalidOid;
-		Oid			namespace_oid = PG_CATALOG_NAMESPACE;
+		Oid			namespace_oid = InvalidOid;
 		Oid			hint_oid;
-		bool		namespace_specified = false;
 		char	   *namebuf, *pos;
 
 		/* pg_type = NAMESPACE.TYPENAME@EXTENSION */
@@ -224,7 +223,6 @@ arrowFieldGetPGTypeHint(const ArrowField *field)
 			if (!OidIsValid(namespace_oid))
 				continue;
 			namebuf = pos;
-			namespace_specified = true;
 		}
 		pos = strchr(namebuf, '@');
 		if (pos)
@@ -234,24 +232,39 @@ arrowFieldGetPGTypeHint(const ArrowField *field)
 			if (!OidIsValid(extension_oid))
 				continue;
 		}
-		/* 1st try: user specified namespace or 'pg_catalog' */
-		hint_oid = GetSysCacheOid2(TYPENAMENSP,
-								   Anum_pg_type_oid,
-								   CStringGetDatum(namebuf),
-								   ObjectIdGetDatum(namespace_oid));
-		if (OidIsValid(hint_oid))
+
+		if (OidIsValid(namespace_oid))
 		{
-			if (!OidIsValid(extension_oid) ||
-				getExtensionOfObject(TypeRelationId,
-									 hint_oid) == extension_oid)
-				return hint_oid;
+			hint_oid = GetSysCacheOid2(TYPENAMENSP,
+									   Anum_pg_type_oid,
+									   CStringGetDatum(namebuf),
+									   ObjectIdGetDatum(namespace_oid));
+			if (OidIsValid(hint_oid))
+			{
+				if (!OidIsValid(extension_oid) ||
+					getExtensionOfObject(TypeRelationId,
+										 hint_oid) == extension_oid)
+					return hint_oid;
+			}
 		}
-		/* 2nd try: any namespace (if not specified) */
-		if (!namespace_specified)
+		else
 		{
 			CatCList   *typelist;
 			HeapTuple	htup;
 
+			/* 1st try: 'pg_catalog' + typname */
+			hint_oid = GetSysCacheOid2(TYPENAMENSP,
+									   Anum_pg_type_oid,
+									   CStringGetDatum(namebuf),
+									   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+			if (OidIsValid(hint_oid))
+			{
+				if (!OidIsValid(extension_oid) ||
+					getExtensionOfObject(TypeRelationId,
+										 hint_oid) == extension_oid)
+					return hint_oid;
+			}
+			/* 2nd try: any other namespaces */
 			typelist = SearchSysCacheList1(TYPENAMENSP,
 										   CStringGetDatum(namebuf));
 			for (int k=0; k < typelist->n_members; k++)
