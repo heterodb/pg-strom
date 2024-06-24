@@ -2383,6 +2383,7 @@ typedef struct
  */
 #define XpuCommandTag__Success				0
 #define XpuCommandTag__Error				1
+#define XpuCommandTag__SuccessHalfWay		2
 #define XpuCommandTag__OpenSession			100
 #define XpuCommandTag__XpuTaskExec			110
 #define XpuCommandTag__XpuTaskExecGpuCache	111

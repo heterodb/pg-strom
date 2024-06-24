@@ -1133,7 +1133,7 @@ struct gpuQueryBuffer
 	CUdeviceptr		m_kds_final;	/* GpuPreAgg final buffer (device) */
 	size_t			m_kds_final_length;	/* length of GpuPreAgg final buffer */
 	CUdeviceptr		m_kds_fallback;	/* CPU-fallback buffer */
-	size_t			m_kds_fallback_length; /* length of CPU-fallback buffer */
+	uint32_t		m_kds_fallback_revision; /* revision of CPU-fallback buffer */
 	pthread_rwlock_t m_kds_rwlock;	/* RWLock for the final/fallback buffer */
 	int				nr_subbuffers;
 	struct gpuQueryBuffer **subbuffers;
@@ -1469,80 +1469,36 @@ __expandGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 }
 
 /*
- * __expandGpuFallbackBuffer
+ * __allocateGpuFallbackBuffer
  */
 static bool
-__expandGpuFallbackBuffer(gpuQueryBuffer *gq_buf,
-						  kern_session_info *session,
-						  size_t kds_length_last)
+__allocateGpuFallbackBuffer(gpuQueryBuffer *gq_buf,
+							kern_session_info *session)
 {
 	pthreadRWLockWriteLock(&gq_buf->m_kds_rwlock);
-	if (gq_buf->m_kds_fallback_length == kds_length_last)
+	if (gq_buf->m_kds_fallback == 0UL)
 	{
-		if (gq_buf->m_kds_fallback_length == 0)
+		/* allocation of a new one */
+		kern_data_store *kds_head;
+		CUdeviceptr	m_devptr;
+		CUresult	rc;
+
+		assert(session->fallback_kds_head != 0);
+		kds_head = (kern_data_store *)
+			((char *)session + session->fallback_kds_head);
+		rc = cuMemAllocManaged(&m_devptr, kds_head->length,
+							   CU_MEM_ATTACH_GLOBAL);
+		if (rc != CUDA_SUCCESS)
 		{
-			/* allocation of a new one */
-			kern_data_store *kds_head;
-			CUdeviceptr		m_devptr;
-			CUresult		rc;
-
-			assert(session->fallback_kds_head != 0);
-			kds_head = (kern_data_store *)
-				((char *)session + session->fallback_kds_head);
-			rc = cuMemAllocManaged(&m_devptr, kds_head->length,
-								   CU_MEM_ATTACH_GLOBAL);
-			if (rc != CUDA_SUCCESS)
-			{
-				pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
-				return false;
-			}
-			memcpy((void *)m_devptr, kds_head, KDS_HEAD_LENGTH(kds_head));
-			gq_buf->m_kds_fallback = m_devptr;
-			gq_buf->m_kds_fallback_length = kds_head->length;
-			__gsDebug("kds_fallback allocated: %lu", kds_head->length);
+			pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+			return false;
 		}
-		else
-		{
-			/* expand the existing one */
-			kern_data_store *kds_old = (kern_data_store *)gq_buf->m_kds_fallback;
-			kern_data_store *kds_new;
-			CUdeviceptr		m_devptr;
-			CUresult		rc;
-			size_t			sz, length;
-
-			assert(kds_old->length == gq_buf->m_kds_fallback_length);
-			length = (kds_old->length + Min(kds_old->length, (1UL<<30)));
-			rc = cuMemAllocManaged(&m_devptr, length,
-								   CU_MEM_ATTACH_GLOBAL);
-			if (rc != CUDA_SUCCESS)
-			{
-				pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
-				return false;
-			}
-			kds_new = (kern_data_store *)m_devptr;
-
-			/* early half */
-			sz = (KDS_HEAD_LENGTH(kds_old) +
-				  sizeof(uint64_t) * (kds_old->nitems +
-									  kds_old->hash_nslots));
-			memcpy(kds_new, kds_old, sz);
-			kds_new->length = length;
-
-			/* later half */
-			sz = kds_old->usage;
-			memcpy((char *)kds_new + kds_new->length - sz,
-				   (char *)kds_old + kds_old->length - sz, sz);
-
-			/* swap them */
-			__gsDebug("kds_fallback expand: %lu => %lu\n",
-					  kds_old->length, kds_new->length);
-			cuMemFree(gq_buf->m_kds_final);
-			gq_buf->m_kds_fallback = m_devptr;
-			gq_buf->m_kds_fallback_length = length;
-		}
+		memcpy((void *)m_devptr, kds_head, KDS_HEAD_LENGTH(kds_head));
+		gq_buf->m_kds_fallback = m_devptr;
+		gq_buf->m_kds_fallback_revision = 1;
+		__gsDebug("kds_fallback allocated: %lu", kds_head->length);
 	}
 	pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
-
 	return true;
 }
 
@@ -1796,101 +1752,182 @@ __gpuClientWriteBack(gpuClient *gclient, struct iovec *iov, int iovcnt)
 	pthreadMutexUnlock(&gclient->mutex);
 }
 
-static void
-gpuClientWriteBack(gpuClient  *gclient,
-				   XpuCommand *resp,
-				   size_t      resp_sz,
-				   int         kds_nitems,
-				   kern_data_store **kds_array)
+static int
+__gpuClientWriteBackOneChunk(gpuClient *gclient,
+							 struct iovec *iov_array,
+							 kern_data_store *kds)
 {
-	struct iovec   *iov_array;
 	struct iovec   *iov;
-	int				i, iovcnt = 0;
+	int				iovcnt = 0;
+	size_t			sz, head_sz;
 
-	iov_array = alloca(sizeof(struct iovec) * (3 * kds_nitems + 1));
-	iov = &iov_array[iovcnt++];
-	iov->iov_base = resp;
-	iov->iov_len  = resp_sz;
-	for (i=0; i < kds_nitems; i++)
+	if (kds->format == KDS_FORMAT_HASH)
 	{
-		kern_data_store *kds = kds_array[i];
-		size_t		sz1, sz2, sz3;
-		size_t		head_sz;
+		assert(kds->hash_nslots > 0);
+		sz = KDS_HEAD_LENGTH(kds);
+		iov = &iov_array[iovcnt++];
+		iov->iov_base = kds;
+		iov->iov_len  = sz;
 
-		if (kds->format == KDS_FORMAT_HASH)
+		sz = sizeof(uint64_t) * kds->nitems;
+		if (sz > 0)
 		{
-			assert(kds->hash_nslots > 0);
-			sz1 = KDS_HEAD_LENGTH(kds);
+			iov = &iov_array[iovcnt++];
+			iov->iov_base = KDS_GET_ROWINDEX(kds);
+			iov->iov_len  = sz;
+		}
+		/*
+		 * MEMO: When GPU Projection or similar fill up KDS-ROW/HASH,
+		 * it often increase kds->usage too much if no space left.
+		 * In this case, results are not written of course, however,
+		 * kds->usage is not reliable. So, we cut down the usege by
+		 * the tail of row-offset array.
+		 */
+		head_sz = (KDS_HEAD_LENGTH(kds) +
+				   sizeof(uint64_t) * (kds->hash_nslots +
+									   kds->nitems));
+		sz = Min(kds->usage, kds->length - head_sz);
+		if (sz > 0)
+		{
+			 iov = &iov_array[iovcnt++];
+			 iov->iov_base = (char *)kds + kds->length - sz;
+			 iov->iov_len  = sz;
+		}
+		/* fixup kds */
+		kds->format = KDS_FORMAT_ROW;
+		kds->hash_nslots = 0;
+		kds->length = (KDS_HEAD_LENGTH(kds) +
+					   sizeof(uint64_t) * kds->nitems +
+					   sz);
+	}
+	else
+	{
+		assert(kds->format == KDS_FORMAT_ROW ||
+			   kds->format == KDS_FORMAT_FALLBACK);
+		assert(kds->hash_nslots == 0);
+		head_sz = (KDS_HEAD_LENGTH(kds) +
+				   MAXALIGN(sizeof(uint64_t) * kds->nitems));
+		/* see the comment above */
+		if (head_sz + kds->usage >= kds->length)
+		{
 			iov = &iov_array[iovcnt++];
 			iov->iov_base = kds;
-			iov->iov_len  = sz1;
-
-			sz2 = sizeof(uint64_t) * kds->nitems;
-			if (sz2 > 0)
-			{
-				iov = &iov_array[iovcnt++];
-				iov->iov_base = KDS_GET_ROWINDEX(kds);
-				iov->iov_len  = sz2;
-			}
-
-			/*
-			 * MEMO: When GPU Projection or similar fill up KDS-ROW/HASH,
-			 * it often increase kds->usage too much if no space left.
-			 * In this case, results are not written of course, however,
-			 * kds->usage is not reliable. So, we cut down the usege by
-			 * the tail of row-offset array.
-			 */
-			head_sz = (sz1 + sizeof(uint64_t) * (kds->hash_nslots +
-												 kds->nitems));
-			sz3 = Min(kds->usage,
-					  kds->length - head_sz);
-			if (sz3 > 0)
-			{
-				iov = &iov_array[iovcnt++];
-				iov->iov_base = (char *)kds + kds->length - sz3;
-				iov->iov_len  = sz3;
-			}
-			/* fixup kds */
-			kds->format = KDS_FORMAT_ROW;
-			kds->hash_nslots = 0;
-			kds->length = (sz1 + sz2 + sz3);
+			iov->iov_len  = kds->length;
 		}
 		else
 		{
-			assert(kds->format == KDS_FORMAT_ROW ||
-				   kds->format == KDS_FORMAT_FALLBACK);
-			assert(kds->hash_nslots == 0);
-			sz1 = (KDS_HEAD_LENGTH(kds) +
-				   MAXALIGN(sizeof(uint64_t) * kds->nitems));
-			/* see comment above */
-			sz2 = kds->usage;
-			if (sz1 + sz2 >= kds->length)
-			{
-				iov = &iov_array[iovcnt++];
-				iov->iov_base = kds;
-				iov->iov_len  = kds->length;
-			}
-			else
-			{
-				assert(sz1 + sz2 < kds->length);
-				iov = &iov_array[iovcnt++];
-				iov->iov_base = kds;
-				iov->iov_len  = sz1;
+			iov = &iov_array[iovcnt++];
+			iov->iov_base = kds;
+			iov->iov_len  = head_sz;
 
-				if (sz2 > 0)
-				{
-					iov = &iov_array[iovcnt++];
-					iov->iov_base = (char *)kds + kds->length - sz2;
-					iov->iov_len  = sz2;
-				}
-				/* fixup kds */
-				kds->length = (sz1 + sz2);
+			if (kds->usage > 0)
+			{
+				iov = &iov_array[iovcnt++];
+				iov->iov_base = (char *)kds + kds->length - kds->usage;
+				iov->iov_len  = kds->usage;
 			}
+			/* fixup kds */
+			kds->length = head_sz + kds->usage;
 		}
-		resp_sz += kds->length;
 	}
-	resp->length = resp_sz;
+	return iovcnt;
+}
+
+static void
+gpuClientWriteBackPartial(gpuClient  *gclient,
+						  kern_data_store *kds)
+{
+	struct iovec	iov_array[10];
+	struct iovec   *iov;
+	int				iovcnt = 0;
+	XpuCommand		resp;
+	size_t			resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
+	size_t			__kds_length = kds->length;
+	char			__kds_format = kds->format;
+	uint32_t		__kds_hash_nslots = kds->hash_nslots;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.magic  = XpuCommandMagicNumber;
+	resp.tag    = XpuCommandTag__SuccessHalfWay;
+	resp.u.results.chunks_nitems = 1;
+	resp.u.results.chunks_offset = resp_sz;
+
+	iov = &iov_array[iovcnt++];
+	iov->iov_base = &resp;
+	iov->iov_len = resp_sz;
+	iovcnt += __gpuClientWriteBackOneChunk(gclient, iov_array+iovcnt, kds);
+	for (int i=1; i < iovcnt; i++)
+		resp_sz += iov_array[i].iov_len;
+	resp.length = resp_sz;
+
 	__gpuClientWriteBack(gclient, iov_array, iovcnt);
+	/* reset chunk */
+	kds->length = __kds_length;
+	kds->format = __kds_format;
+	kds->hash_nslots = __kds_hash_nslots;
+	kds->nitems = 0;
+	kds->usage  = 0;
+	if (kds->format == KDS_FORMAT_HASH)
+		memset(KDS_GET_HASHSLOT_BASE(kds), 0, sizeof(uint64_t) * kds->hash_nslots);
+}
+
+static void
+gpuClientWriteBackNormal(gpuClient  *gclient,
+						 kern_gputask *kgtask,
+						 uint32_t npages_direct_read,
+						 uint32_t npages_vfs_read,
+						 kern_data_store *kds)
+{
+	struct iovec	iov_array[10];
+	struct iovec   *iov;
+	int				iovcnt = 0;
+	XpuCommand	   *resp;
+	size_t			resp_sz;
+
+	resp_sz = MAXALIGN(offsetof(XpuCommand,
+								u.results.stats[kgtask->n_rels]));
+	resp = alloca(resp_sz);
+	memset(resp, 0, resp_sz);
+	resp->magic  = XpuCommandMagicNumber;
+	resp->tag    = XpuCommandTag__Success;
+	resp->u.results.chunks_nitems = 1;
+	resp->u.results.chunks_offset = resp_sz;
+	resp->u.results.npages_direct_read = npages_direct_read;
+	resp->u.results.npages_vfs_read = npages_vfs_read;
+	resp->u.results.nitems_raw = kgtask->nitems_raw;
+	resp->u.results.nitems_in  = kgtask->nitems_in;
+	resp->u.results.nitems_out = kgtask->nitems_out;
+	resp->u.results.num_rels   = kgtask->n_rels;
+	for (int i=0; i < kgtask->n_rels; i++)
+	{
+		resp->u.results.stats[i].nitems_gist = kgtask->stats[i].nitems_gist;
+		resp->u.results.stats[i].nitems_out  = kgtask->stats[i].nitems_out;
+	}
+	iov = &iov_array[iovcnt++];
+	iov->iov_base = resp;
+	iov->iov_len  = resp_sz;
+	iovcnt += __gpuClientWriteBackOneChunk(gclient, iov_array+iovcnt, kds);
+	for (int i=1; i < iovcnt; i++)
+		resp_sz += iov_array[i].iov_len;
+	resp->length = resp_sz;
+
+	__gpuClientWriteBack(gclient, iov_array, iovcnt);
+}
+
+static void
+gpuClientWriteBackStatusOnly(gpuClient  *gclient)
+{
+	struct iovec iov;
+	XpuCommand	resp;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.length = MAXALIGN(offsetof(XpuCommand, u.results.stats));
+	resp.magic  = XpuCommandMagicNumber;
+	resp.tag    = XpuCommandTag__Success;
+
+	iov.iov_base = &resp;
+	iov.iov_len  = resp.length;
+	__gpuClientWriteBack(gclient, &iov, 1);
 }
 
 /* ----------------------------------------------------------------
@@ -2461,9 +2498,6 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	kern_data_store *kds_dst = NULL;
 	kern_data_store *kds_fallback = NULL;
 	kern_data_store *kds_dst_head = NULL;
-	kern_data_store **kds_dst_array = NULL;
-	int				kds_dst_nrooms = 0;
-	int				kds_dst_nitems = 0;
 	int				num_inner_rels = 0;
 	uint32_t		npages_direct_read = 0;
 	uint32_t		npages_vfs_read = 0;
@@ -2471,7 +2505,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	void		   *gc_lmap = NULL;
 	gpuMemChunk	   *s_chunk = NULL;		/* for kds_src */
 	gpuMemChunk	   *t_chunk = NULL;		/* for kern_gputask */
-	gpuMemChunk	  **d_chunk_array = NULL; /* for kds_dst_array */
+	gpuMemChunk	   *d_chunk = NULL;
 	CUdeviceptr		m_kds_src = 0UL;
 	CUdeviceptr		m_kds_extra = 0UL;
 	CUdeviceptr		m_kmrels = 0UL;
@@ -2481,9 +2515,9 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	unsigned int	shmem_dynamic_sz;
 	unsigned int	groupby_prepfn_bufsz = 0;
 	unsigned int	groupby_prepfn_nbufs = 0;
-	size_t			kds_fallback_length = 0;
 	size_t			kds_final_length = 0;
-	uint32_t		last_kernel_errcode = ERRCODE_SUSPEND_NO_SPACE;	/* for first allocation */
+	uint32_t		kds_fallback_revision = 0;
+	uint32_t		last_kernel_errcode = 0;
 	size_t			sz;
 	void		   *kern_args[10];
 
@@ -2651,9 +2685,19 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 resume_kernel:
 	if (last_kernel_errcode == ERRCODE_SUSPEND_FALLBACK)
 	{
-		if (!__expandGpuFallbackBuffer(gq_buf, session, kds_fallback_length))
+		if (kds_fallback)
 		{
-			gpuClientFatal(gclient, "unable to expand GPU-Fallback buffer");
+			pthreadRWLockWriteLock(&gq_buf->m_kds_rwlock);
+			if (kds_fallback_revision == gq_buf->m_kds_fallback_revision)
+			{
+				gpuClientWriteBackPartial(gclient, kds_fallback);
+				gq_buf->m_kds_fallback_revision++;
+			}
+			pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+		}
+		else if (!__allocateGpuFallbackBuffer(gq_buf, session))
+		{
+			gpuClientFatal(gclient, "unable to allocate GPU-Fallback buffer");
 			goto bailout;
 		}
 	}
@@ -2673,16 +2717,20 @@ resume_kernel:
 		kds_dst = (kern_data_store *)gq_buf->m_kds_final;
 		kds_final_length = gq_buf->m_kds_final_length;
 		kds_fallback = (kern_data_store *)gq_buf->m_kds_fallback;
-		kds_fallback_length = gq_buf->m_kds_fallback_length;
+		kds_fallback_revision = gq_buf->m_kds_fallback_revision;
 	}
 	else
 	{
-		//FIXME: should return partial results
 		if (last_kernel_errcode == ERRCODE_SUSPEND_NO_SPACE)
 		{
-			gpuMemChunk	   *d_chunk;
-
-			sz = KDS_HEAD_LENGTH(kds_dst_head) + PGSTROM_CHUNK_SIZE;
+			assert(kds_dst != NULL && d_chunk != NULL);
+			gpuClientWriteBackPartial(gclient, kds_dst);
+			assert(kds_dst->nitems == 0 && kds_dst->usage == 0);
+		}
+		else
+		{
+			sz = (KDS_HEAD_LENGTH(kds_dst_head) +
+				  PGSTROM_CHUNK_SIZE);
 			d_chunk = gpuMemAllocManaged(sz);
 			if (!d_chunk)
 			{
@@ -2692,33 +2740,10 @@ resume_kernel:
 			kds_dst = (kern_data_store *)d_chunk->m_devptr;
 			memcpy(kds_dst, kds_dst_head, KDS_HEAD_LENGTH(kds_dst_head));
 			kds_dst->length = sz;
-			if (kds_dst_nitems >= kds_dst_nrooms)
-			{
-				kern_data_store	**kds_dst_temp;
-				gpuMemChunk		**d_chunk_temp;
-
-				kds_dst_nrooms = 2 * kds_dst_nrooms + 10;
-				kds_dst_temp = alloca(sizeof(kern_data_store *) * kds_dst_nrooms);
-				d_chunk_temp = alloca(sizeof(gpuMemChunk *) * kds_dst_nrooms);
-				if (kds_dst_nitems > 0)
-				{
-					memcpy(kds_dst_temp, kds_dst_array,
-						   sizeof(kern_data_store *) * kds_dst_nitems);
-					memcpy(d_chunk_temp, d_chunk_array,
-						   sizeof(gpuMemChunk *) * kds_dst_nitems);
-				}
-				kds_dst_array = kds_dst_temp;
-				d_chunk_array = d_chunk_temp;
-			}
-			kds_dst_array[kds_dst_nitems] = kds_dst;
-			d_chunk_array[kds_dst_nitems] = d_chunk;
-			kds_dst_nitems++;
 		}
-		assert(kds_dst_nitems > 0);
 		pthreadRWLockReadLock(&gq_buf->m_kds_rwlock);
-		kds_dst = (kern_data_store *)kds_dst_array[kds_dst_nitems-1];
 		kds_fallback = (kern_data_store *)gq_buf->m_kds_fallback;
-		kds_fallback_length = gq_buf->m_kds_fallback_length;
+		kds_fallback_revision = gq_buf->m_kds_fallback_revision;
 	}
 
 	/*
@@ -2768,32 +2793,14 @@ resume_kernel:
 	/* status check */
 	if (kgtask->kerror.errcode == ERRCODE_STROM_SUCCESS)
 	{
-		XpuCommand *resp;
-		size_t		resp_sz;
-
-		/* send back status and kds_dst */
-		resp_sz = MAXALIGN(offsetof(XpuCommand,
-									u.results.stats[num_inner_rels]));
-		resp = alloca(resp_sz);
-		memset(resp, 0, resp_sz);
-		resp->magic = XpuCommandMagicNumber;
-		resp->tag   = XpuCommandTag__Success;
-		resp->u.results.chunks_nitems = kds_dst_nitems;
-		resp->u.results.chunks_offset = resp_sz;
-		resp->u.results.npages_direct_read = npages_direct_read;
-		resp->u.results.npages_vfs_read = npages_vfs_read;
-		resp->u.results.nitems_raw = kgtask->nitems_raw;
-		resp->u.results.nitems_in  = kgtask->nitems_in;
-		resp->u.results.nitems_out = kgtask->nitems_out;
-		resp->u.results.num_rels = num_inner_rels;
-		for (int i=0; i < num_inner_rels; i++)
-		{
-			resp->u.results.stats[i].nitems_gist = kgtask->stats[i].nitems_gist;
-			resp->u.results.stats[i].nitems_out  = kgtask->stats[i].nitems_out;
-		}
-		gpuClientWriteBack(gclient,
-						   resp, resp_sz,
-						   kds_dst_nitems, kds_dst_array);
+		if (gq_buf->m_kds_final)
+			gpuClientWriteBackStatusOnly(gclient);
+		else
+			gpuClientWriteBackNormal(gclient,
+									 kgtask,
+									 npages_direct_read,
+									 npages_vfs_read,
+									 kds_dst);
 	}
 	else if (kgtask->kerror.errcode == ERRCODE_SUSPEND_NO_SPACE ||
 			 (kgtask->kerror.errcode == ERRCODE_SUSPEND_FALLBACK &&
@@ -2823,8 +2830,8 @@ bailout:
 		gpuMemFree(s_chunk);
 	if (t_chunk)
 		gpuMemFree(t_chunk);
-	while (kds_dst_nitems > 0)
-		gpuMemFree(d_chunk_array[--kds_dst_nitems]);
+	if (d_chunk)
+		gpuMemFree(d_chunk);
 	if (gc_lmap)
 		gpuCachePutDeviceBuffer(gc_lmap);
 }
@@ -2884,14 +2891,21 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 	kern_final_task *kfin = &xcmd->u.fin;
 	gpuQueryBuffer *gq_buf = gclient->gq_buf;
 	kern_session_info *session = gclient->session;
+	struct iovec	iov_array[10];
+	struct iovec   *iov;
+	int				iovcnt = 0;
 	XpuCommand		resp;
-	kern_data_store *kds_array[2];
+	size_t			resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
 
 	memset(&resp, 0, sizeof(XpuCommand));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag   = XpuCommandTag__Success;
-	resp.u.results.chunks_offset = MAXALIGN(offsetof(XpuCommand, u.results.stats));
 	resp.u.results.chunks_nitems = 0;
+	resp.u.results.chunks_offset = resp_sz;
+
+	iov = &iov_array[iovcnt++];
+	iov->iov_base = &resp;
+	iov->iov_len  = resp_sz;
 
 	if (kfin->final_this_device)
 	{
@@ -2923,8 +2937,12 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 		 */
 		if (gq_buf->m_kds_fallback != 0)
 		{
-			kds_array[resp.u.results.chunks_nitems++]
+			kern_data_store *kds_fallback
 				= (kern_data_store *)gq_buf->m_kds_fallback;
+			iovcnt += __gpuClientWriteBackOneChunk(gclient,
+												   iov_array+iovcnt,
+												   kds_fallback);
+			resp.u.results.chunks_nitems++;
 		}
 
 		/*
@@ -2932,11 +2950,16 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 		 */
 		if (gq_buf->m_kds_final != 0UL)
 		{
-			kern_data_store *kds_final = (kern_data_store *)gq_buf->m_kds_final;
+			kern_data_store *kds_final
+				= (kern_data_store *)gq_buf->m_kds_final;
 
 			if ((session->xpu_task_flags & DEVTASK__PREAGG) != 0)
-				kds_array[resp.u.results.chunks_nitems++] = kds_final;
-
+			{
+				iovcnt += __gpuClientWriteBackOneChunk(gclient,
+													   iov_array+iovcnt,
+													   kds_final);
+				resp.u.results.chunks_nitems++;
+			}
 			resp.u.results.final_nitems = kds_final->nitems;
 			resp.u.results.final_usage = kds_final->usage;
 		}
@@ -2944,10 +2967,11 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 	resp.u.results.final_this_device = kfin->final_this_device;
 	resp.u.results.final_plan_node = kfin->final_plan_node;
 
-	gpuClientWriteBack(gclient, &resp,
-					   resp.u.results.chunks_offset,
-					   resp.u.results.chunks_nitems,
-					   kds_array);
+	for (int i=1; i < iovcnt; i++)
+		resp_sz += iov_array[i].iov_len;
+	resp.length = resp_sz;
+
+	__gpuClientWriteBack(gclient, iov_array, iovcnt);
 }
 
 /*

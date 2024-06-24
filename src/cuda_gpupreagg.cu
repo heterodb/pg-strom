@@ -912,7 +912,7 @@ __execGpuPreAggNoGroups(kern_context *kcxt,
 				}
 				else
 				{
-					assert(oldval == 0 || oldval == UINT_MAX);
+					assert(oldval == 1 || oldval == UINT_MAX);
 					tupitem = NULL;
 				}
 			}

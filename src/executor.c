@@ -57,9 +57,9 @@ __xpuConnectAttachCommand(void *__priv, XpuCommand *xcmd)
 	xcmd->priv = conn;
 	pthreadMutexLock(&conn->mutex);
 	Assert(conn->num_running_cmds > 0);
-	conn->num_running_cmds--;
 	if (xcmd->tag == XpuCommandTag__Error)
 	{
+		conn->num_running_cmds--;
 		if (conn->errorbuf.errcode == ERRCODE_STROM_SUCCESS)
 		{
 			Assert(xcmd->u.error.errcode != ERRCODE_STROM_SUCCESS);
@@ -69,7 +69,19 @@ __xpuConnectAttachCommand(void *__priv, XpuCommand *xcmd)
 	}
 	else
 	{
-		Assert(xcmd->tag == XpuCommandTag__Success);
+		if (xcmd->tag == XpuCommandTag__Success)
+			conn->num_running_cmds--;
+		else
+		{
+			/*
+			 * NOTE: XpuCommandTag__SuccessHalfWay is used to return
+			 * partial results of the request, but GPU-Service still
+			 * continues the task execution, so we should not
+			 * decrement 'num_running_cmds'.
+			 */
+			Assert(xcmd->tag == XpuCommandTag__SuccessHalfWay);
+			xcmd->tag = XpuCommandTag__Success;
+		}
 		dlist_push_tail(&conn->ready_cmds_list, &xcmd->chain);
 		conn->num_ready_cmds++;
 	}
