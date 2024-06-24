@@ -611,6 +611,7 @@ execGpuJoinProjection(kern_context *kcxt,
 {
 	uint32_t	wr_pos = WARP_WRITE_POS(wp,n_rels);
 	uint32_t	rd_pos = WARP_READ_POS(wp,n_rels);
+	uint32_t	nr_input = Min(wr_pos - rd_pos, get_local_size());
 	uint32_t	count;
 	uint32_t	row_id;
 	uint64_t	offset;
@@ -637,7 +638,10 @@ execGpuJoinProjection(kern_context *kcxt,
 										kds_dst);
 		if (tupsz < 0)
 		{
-			STROM_ELOG(kcxt, "unable to compute tuple size");
+			if (HandleErrorIfCpuFallback(kcxt, n_rels+1, 0, false))
+				tupsz = 0;
+			else if (kcxt->errcode != ERRCODE_SUSPEND_FALLBACK)
+				STROM_ELOG(kcxt, "unable to compute tuple size");
 		}
 		else if (kds_dst->format == KDS_FORMAT_ROW)
 		{
@@ -648,6 +652,7 @@ execGpuJoinProjection(kern_context *kcxt,
 			kern_expression *kexp_hash = (kern_expression *)
 				((char *)kexp_projection + kexp_projection->u.proj.hash);
 			xpu_int4_t	status;
+
 			/*
 			 * Calculation of Hash-value if destination buffer needs to
 			 * set up hash-table. Usually, when GpuScan results are
@@ -661,12 +666,16 @@ execGpuJoinProjection(kern_context *kcxt,
 					STROM_ELOG(kcxt, "unable to compute hash-value");
 				else
 					hash_value = status.value;
+				tupsz = MAXALIGN(offsetof(kern_hashitem, t.htup) + tupsz);
+			}
+			else if (HandleErrorIfCpuFallback(kcxt, n_rels+1, 0, false))
+			{
+				tupsz = 0;
 			}
 			else
 			{
 				assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 			}
-			tupsz = MAXALIGN(offsetof(kern_hashitem, t.htup) + tupsz);
 		}
 	}
 	/* error checks */
@@ -760,7 +769,7 @@ execGpuJoinProjection(kern_context *kcxt,
 	/* update the read position */
 	if (get_local_id() == 0)
 	{
-		WARP_READ_POS(wp,n_rels) += count;
+		WARP_READ_POS(wp,n_rels) += nr_input;
 		assert(WARP_WRITE_POS(wp,n_rels) >= WARP_READ_POS(wp,n_rels));
 	}
 	__syncthreads();

@@ -868,6 +868,7 @@ STATIC_FUNCTION(bool)
 __execGpuPreAggNoGroups(kern_context *kcxt,
 						kern_data_store *kds_final,
 						bool source_is_valid,
+						int depth,
 						kern_expression *kexp_groupby_actions)
 {
 	__shared__ kern_tupitem *tupitem;
@@ -1346,6 +1347,7 @@ STATIC_FUNCTION(int)
 __execGpuPreAggGroupBy(kern_context *kcxt,
 					   kern_data_store *kds_final,
 					   bool source_is_valid,
+					   int depth,
 					   kern_expression *kexp_groupby_keyhash,
 					   kern_expression *kexp_groupby_keyload,
 					   kern_expression *kexp_groupby_keycomp,
@@ -1362,7 +1364,17 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 	if (source_is_valid)
 	{
 		if (EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keyhash, &hash))
+		{
 			assert(!XPU_DATUM_ISNULL(&hash));
+		}
+		else if (HandleErrorIfCpuFallback(kcxt, depth, 0, false))
+		{
+			memset(&hash, 0, sizeof(hash));
+		}
+		else
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		}
 	}
 	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return false;
@@ -1400,7 +1412,16 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 					if (!XPU_DATUM_ISNULL(&status) && status.value)
 						break;
 				}
-				kcxt->kmode_compare_nulls = saved_compare_nulls;
+				else
+				{
+					kcxt->kmode_compare_nulls = saved_compare_nulls;
+					if (HandleErrorIfCpuFallback(kcxt, depth, 0, false))
+						memset(&hash, 0, sizeof(hash));
+					else
+						assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+					hitem = NULL;
+					break;
+				}
 			}
 
 			if (!hitem)
@@ -1936,6 +1957,7 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	{
 		status = __execGpuPreAggGroupBy(kcxt, kds_final,
 										(rd_pos < wr_pos),
+										n_rels + 1,
 										kexp_groupby_keyhash,
 										kexp_groupby_keyload,
 										kexp_groupby_keycomp,
@@ -1945,6 +1967,7 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	{
 		status = __execGpuPreAggNoGroups(kcxt, kds_final,
 										 (rd_pos < wr_pos),
+										 n_rels + 1,
 										 kexp_groupby_actions);
 	}
 	if (__syncthreads_count(!status) > 0)

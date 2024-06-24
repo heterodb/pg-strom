@@ -498,8 +498,6 @@ struct pgstromTaskState
 	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts,
 										kern_final_task *fin,
 										struct iovec *xcmd_iov, int *xcmd_iovcnt);
-	bool			  (*cb_cpu_fallback)(struct pgstromTaskState *pts,
-										 int depth, uint64_t l_state, bool matched);
 	/* inner relations state (if JOIN) */
 	int					num_rels;
 	pgstromTaskInnerState inners[FLEXIBLE_ARRAY_MEMBER];
@@ -715,8 +713,6 @@ extern XpuCommand *pgstromRelScanChunkDirect(pgstromTaskState *pts,
 extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
 											 struct iovec *xcmd_iov,
 											 int *xcmd_iovcnt);
-extern void		pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple tuple);
-extern TupleTableSlot *pgstromFetchFallbackTuple(pgstromTaskState *pts);
 extern void		pgstrom_init_relscan(void);
 
 /*
@@ -739,8 +735,6 @@ extern void		xpuClientPutResponse(XpuCommand *xcmd);
 extern const XpuCommand *pgstromBuildSessionInfo(pgstromTaskState *pts,
 												 uint32_t join_inner_handle,
 												 TupleDesc tdesc_final);
-extern bool		execCpuFallbackBaseTuple(pgstromTaskState *pts,
-										 HeapTuple base_tuple);
 extern Node	   *pgstromCreateTaskState(CustomScan *cscan,
 									   const CustomExecMethods *methods);
 extern void		pgstromExecInitTaskState(CustomScanState *node,
@@ -857,10 +851,6 @@ extern List	   *buildOuterScanPlanInfo(PlannerInfo *root,
 									   bool consider_partition,
 									   bool allow_host_quals,
 									   bool allow_no_device_quals);
-extern bool		ExecFallbackCpuScan(pgstromTaskState *pts,
-									int depth,
-									uint64_t l_state,
-									bool matched);
 extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
 extern void		pgstrom_init_gpu_scan(void);
 extern void		pgstrom_init_dpu_scan(void);
@@ -889,9 +879,6 @@ extern bool		ExecFallbackCpuJoin(pgstromTaskState *pts,
 									int depth,
 									uint64_t l_state,
 									bool matched);
-extern void		ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts);
-extern void		ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts,
-												XpuCommand *resp);
 extern void		pgstrom_init_gpu_join(void);
 extern void		pgstrom_init_dpu_join(void);
 
@@ -944,6 +931,16 @@ extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 									  const Bitmapset *referenced);
 extern void pgstrom_init_arrow_fdw(void);
 
+/*
+ * fallback.c
+ */
+extern TupleTableSlot *pgstromFetchFallbackTuple(pgstromTaskState *pts);
+extern void		execCpuFallbackBaseTuple(pgstromTaskState *pts,
+										 HeapTuple base_tuple);
+extern void		execCpuFallbackOneChunk(pgstromTaskState *pts);
+extern void		ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts);
+extern void		ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts,
+												XpuCommand *resp);
 /*
  * dpu_device.c
  */

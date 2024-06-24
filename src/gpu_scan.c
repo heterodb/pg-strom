@@ -990,66 +990,6 @@ CreateDpuScanState(CustomScan *cscan)
 }
 
 /*
- * ExecFallbackCpuScan
- */
-bool
-ExecFallbackCpuScan(pgstromTaskState *pts,
-					int depth,
-					uint64_t l_state,
-					bool matched)
-{
-	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
-	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
-	HeapTuple		tuple;
-	ListCell	   *lc;
-	int				attidx = 0;
-	bool			should_free;
-
-	if (depth != 0)
-		elog(ERROR, "Bug? GpuScan does not expect fallback tuple with depth=%d", depth);
-
-	/* check WHERE-clause if any */
-	econtext->ecxt_scantuple = scan_slot;
-	if (pts->base_quals)
-	{
-		ResetExprContext(econtext);
-		if (!ExecQual(pts->base_quals, econtext))
-			return false;
-	}
-	/* apply GPU-Projection */
-	foreach (lc, pts->fallback_proj)
-	{
-		ExprState  *state = lfirst(lc);
-		Datum		datum;
-		bool		isnull;
-
-		if (state)
-		{
-			datum = ExecEvalExpr(state, econtext, &isnull);
-			if (isnull)
-			{
-				scan_slot->tts_isnull[attidx] = true;
-				scan_slot->tts_values[attidx] = 0;
-			}
-			else
-			{
-				scan_slot->tts_isnull[attidx] = false;
-				scan_slot->tts_values[attidx] = datum;
-			}
-		}
-		attidx++;
-	}
-	/* save the tuple on the fallback buffer */
-	tuple = ExecFetchSlotHeapTuple(scan_slot,
-								   false,
-								   &should_free);
-	pgstromStoreFallbackTuple(pts, tuple);
-	if (should_free)
-		pfree(tuple);
-	return true;
-}
-
-/*
  * __pgstrom_init_xpuscan_common
  */
 static void

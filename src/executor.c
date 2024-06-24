@@ -1042,35 +1042,7 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 /*
  * CPU Fallback Routines
  */
-bool
-execCpuFallbackBaseTuple(pgstromTaskState *pts,
-						 HeapTuple base_tuple)
-{
-	TupleTableSlot *base_slot = pts->base_slot;
-	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
-	ListCell	   *lc1, *lc2;
-
-	ExecForceStoreHeapTuple(base_tuple, base_slot, false);
-	slot_getallattrs(base_slot);
-	ExecStoreAllNullTuple(scan_slot);
-	forboth (lc1, pts->fallback_load_src,
-			 lc2, pts->fallback_load_dst)
-	{
-		int		src = lfirst_int(lc1) - 1;
-		int		dst = lfirst_int(lc2) - 1;
-
-		scan_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
-		scan_slot->tts_values[dst] = base_slot->tts_values[src];
-	}
-	if (pts->ps_state)
-	{
-		pgstromSharedState *ps_state = pts->ps_state;
-		pg_atomic_fetch_add_u64(&ps_state->fallback_nitems, 1);
-	}
-	return pts->cb_cpu_fallback(pts, 0, 0, false);
-}
-
-static int
+static inline int
 tryExecCpuFallbackChunks(pgstromTaskState *pts)
 {
 	int		nchunks = pts->curr_resp->u.results.chunks_nitems;
@@ -1081,52 +1053,17 @@ tryExecCpuFallbackChunks(pgstromTaskState *pts)
 
 		if (kds->format == KDS_FORMAT_FALLBACK)
 		{
-			Relation		scan_rel = pts->css.ss.ss_currentRelation;
-			TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
-			uint64_t	   *rowindex = KDS_GET_ROWINDEX(kds);
-			HeapTupleData	htuple;
-
-			elog(pgstrom_cpu_fallback_elevel, "%s: CPU fallback %u tuples (%s)",
-				 pts->css.methods->CustomName, kds->nitems, format_bytesz(kds->usage));
-			for (uint32_t i=0; i < kds->nitems; i++)
-			{
-				kern_fallbackitem *fb_item = (kern_fallbackitem *)
-					((char *)kds + kds->length - rowindex[i]);
-
-				ExecStoreAllNullTuple(scan_slot);
-				htuple.t_len  = fb_item->t_len;
-				ItemPointerSetInvalid(&htuple.t_self);
-				htuple.t_tableOid = RelationGetRelid(scan_rel);
-				htuple.t_data = &fb_item->htup;
-				heap_deform_tuple(&htuple,
-								  scan_slot->tts_tupleDescriptor,
-								  scan_slot->tts_values,
-								  scan_slot->tts_isnull);
-				if (pts->ps_state)
-				{
-					pgstromSharedState *ps_state = pts->ps_state;
-					int		depth = fb_item->depth;
-
-					if (depth == 0)
-						pg_atomic_fetch_add_u64(&ps_state->fallback_nitems, 1);
-					else if (depth <= pts->num_rels)
-						pg_atomic_fetch_add_u64(&ps_state->inners[depth-1].fallback_nitems, 1);
-				}
-				pts->cb_cpu_fallback(pts,
-									 fb_item->depth,
-									 fb_item->l_state,
-									 fb_item->matched);
-			}
+			execCpuFallbackOneChunk(pts);
+			/* move to the next chunk */
+			pts->curr_kds = (kern_data_store *)
+				((char *)kds + kds->length);
+			pts->curr_chunk++;
+			pts->curr_index = 0;
 		}
 		else
 		{
 			break;
 		}
-		/* move to the next buffer */
-		pts->curr_kds = (kern_data_store *)
-			((char *)kds + kds->length);
-		pts->curr_chunk++;
-		pts->curr_index = 0;
 	}
 	return (nchunks - pts->curr_chunk);
 }
@@ -1675,17 +1612,14 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	if ((pts->xpu_task_flags & DEVTASK__SCAN) != 0)
 	{
 		pts->cb_final_chunk = pgstromExecFinalChunk;
-		pts->cb_cpu_fallback = ExecFallbackCpuScan;
 	}
 	else if ((pts->xpu_task_flags & DEVTASK__JOIN) != 0)
 	{
 		pts->cb_final_chunk = pgstromExecFinalChunk;
-		pts->cb_cpu_fallback = ExecFallbackCpuJoin;
 	}
 	else if ((pts->xpu_task_flags & DEVTASK__PREAGG) != 0)
 	{
 		pts->cb_final_chunk = pgstromExecFinalChunk;
-		pts->cb_cpu_fallback = ExecFallbackCpuPreAgg;
 	}
 	else
 		elog(ERROR, "Bug? unknown DEVTASK");
@@ -1761,8 +1695,6 @@ pgstromExecScanReCheck(pgstromTaskState *pts, EPQState *epqstate)
 	{
 		TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
 		TupleTableSlot *epq_slot = epqstate->relsubs_slot[scanrelid-1];
-		size_t			fallback_index_saved = pts->fallback_index;
-		size_t			fallback_usage_saved = pts->fallback_usage;
 
 		Assert(epqstate->relsubs_rowmark[scanrelid - 1] == NULL);
 		/* Mark to remember that we shouldn't return it again */
@@ -1774,6 +1706,8 @@ pgstromExecScanReCheck(pgstromTaskState *pts, EPQState *epqstate)
 		else
 		{
 			HeapTuple	epq_tuple;
+			size_t		__fallback_nitems = pts->fallback_nitems;
+			size_t		__fallback_usage  = pts->fallback_usage;
 			bool		should_free;
 #if 0
 			slot_getallattrs(epq_slot);
@@ -1786,15 +1720,16 @@ pgstromExecScanReCheck(pgstromTaskState *pts, EPQState *epqstate)
 #endif
 			epq_tuple = ExecFetchSlotHeapTuple(epq_slot, false,
 											   &should_free);
-			if (execCpuFallbackBaseTuple(pts, epq_tuple) &&
-				pts->fallback_tuples != NULL &&
+			execCpuFallbackBaseTuple(pts, epq_tuple);
+			if (pts->fallback_tuples != NULL &&
 				pts->fallback_buffer != NULL &&
-				pts->fallback_nitems > fallback_index_saved)
+				pts->fallback_nitems > __fallback_nitems &&
+				pts->fallback_usage  > __fallback_usage)
 			{
 				HeapTupleData	htup;
 				kern_tupitem   *titem = (kern_tupitem *)
 					(pts->fallback_buffer +
-					 pts->fallback_tuples[fallback_index_saved]);
+					 pts->fallback_tuples[pts->fallback_index]);
 
 				htup.t_len = titem->t_len;
 				htup.t_data = &titem->htup;
@@ -1808,8 +1743,8 @@ pgstromExecScanReCheck(pgstromTaskState *pts, EPQState *epqstate)
 			/* release fallback tuple & buffer */
 			if (should_free)
 				pfree(epq_tuple);
-			pts->fallback_index = fallback_index_saved;
-			pts->fallback_usage = fallback_usage_saved;
+			pts->fallback_nitems = __fallback_nitems;
+			pts->fallback_usage  = __fallback_usage;
 		}
 		return scan_slot;
 	}
