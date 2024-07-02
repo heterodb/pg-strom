@@ -490,14 +490,6 @@ out:
 		extra_sz += extra_sz / 4;
 		extra_sz += offsetof(kern_data_extra, data);
 	}
-	if (main_sz >= __KDS_LENGTH_LIMIT || extra_sz >= __KDS_LENGTH_LIMIT)
-	{
-		elog(elevel, "gpucache: max_num_rows = %ld consumes too much GPU device memory (main: %s, extra: %s), so we recommend to reduce 'max_num_rows' configuration",
-			 max_num_rows,
-			 format_bytesz(main_sz),
-			 format_bytesz(extra_sz));
-		return false;
-	}
 
 	/*
 	 * write back to the caller
@@ -1094,9 +1086,6 @@ __resetGpuCacheSharedState(GpuCacheSharedState *gc_sstate)
     gc_sstate->redo_sync_pos = 0;
 	pthreadMutexUnlock(&gc_sstate->redo_mutex);
 
-	/* initial buffer size should be legal */
-	Assert(gc_sstate->kds_head.length <= __KDS_LENGTH_LIMIT &&
-		   gc_sstate->kds_extra_sz    <= __KDS_LENGTH_LIMIT);
 	/* make this GpuCache available again */
 	pg_atomic_write_u32(&gc_sstate->phase, GCACHE_PHASE__IS_EMPTY);
 }
@@ -3509,16 +3498,6 @@ retry:
 	if (kds_extra->usage > kds_extra->length)
 	{
 		gcache_extra_size = PAGE_ALIGN(kds_extra->usage * 5 / 4);	/* 25% margin */
-		if (gcache_extra_size >= __KDS_LENGTH_LIMIT)
-		{
-#if 1
-			fprintf(stderr,
-					"GpuCache (%s) extra buffer (%ldMB) exceeds the hard limit\n",
-					gc_sstate->table_name,
-					gcache_extra_size >> 20);
-#endif
-			goto bailout;
-		}
 		cuMemFree(m_kds_extra);
 		m_kds_extra = 0UL;
 		goto retry;

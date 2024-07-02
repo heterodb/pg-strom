@@ -754,15 +754,6 @@ struct kern_data_extra
 };
 typedef struct kern_data_extra		kern_data_extra;
 
-/*
- * MEMO: Support of 32GB KDS - KDS with row-, hash- and column-format
- * internally uses 32bit offset value from the head or base address.
- * We have assumption here - any objects pointed by the offset value
- * is always aligned to MAXIMUM_ALIGNOF boundary (64bit).
- * It means we can use 32bit offset to represent up to 32GB range (35bit).
- */
-#define __KDS_LENGTH_LIMIT			(1UL<<35)		//deprecated
-
 /* ----------------------------------------------------------------
  *
  * Definitions of HeapTuple/IndexTuple and related
