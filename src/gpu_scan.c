@@ -316,6 +316,7 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 	pp_info->startup_cost = startup_cost;
 	pp_info->run_cost = run_cost;
 	pp_info->final_cost = final_cost;
+	pp_info->final_nrows = baserel->rows;
 	if (indexOpt)
 	{
 		pp_info->brin_index_oid = indexOpt->indexoid;

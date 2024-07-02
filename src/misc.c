@@ -129,6 +129,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, __makeFloat(pp_info->inner_cost));
 	privs = lappend(privs, __makeFloat(pp_info->run_cost));
 	privs = lappend(privs, __makeFloat(pp_info->final_cost));
+	privs = lappend(privs, __makeFloat(pp_info->final_nrows));
 	/* bin-index support */
 	privs = lappend(privs, makeInteger(pp_info->brin_index_oid));
 	privs = lappend(privs, pp_info->brin_index_conds);
@@ -237,6 +238,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.inner_cost   = floatVal(list_nth(privs, pindex++));
 	pp_data.run_cost     = floatVal(list_nth(privs, pindex++));
 	pp_data.final_cost   = floatVal(list_nth(privs, pindex++));
+	pp_data.final_nrows  = floatVal(list_nth(privs, pindex++));
 	/* brin-index support */
 	pp_data.brin_index_oid = intVal(list_nth(privs, pindex++));
 	pp_data.brin_index_conds = list_nth(privs, pindex++);

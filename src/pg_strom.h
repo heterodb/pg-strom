@@ -287,6 +287,7 @@ typedef struct
 	Cost		inner_cost;			/* cost for inner setup */
 	Cost		run_cost;			/* run cost */
 	Cost		final_cost;			/* cost for sendback and host-side tasks */
+	double		final_nrows;		/* copy of result_rel->rows */
 	/* BRIN-index support */
 	Oid			brin_index_oid;		/* OID of BRIN-index, if any */
 	List	   *brin_index_conds;	/* BRIN-index key conditions */
@@ -371,6 +372,7 @@ typedef struct
 	pg_atomic_uint64	fallback_nitems;	/* # of fallback tuples in depth==0 */
 	pg_atomic_uint64	final_nitems;		/* # of tuples in final buffer if any */
 	pg_atomic_uint64	final_usage;		/* usage bytes of final buffer if any */
+	pg_atomic_uint64	final_total;		/* total usage of final buffer if any */
 	/* for parallel-scan */
 	uint32_t			parallel_scan_desc_offset;
 	/* for arrow_fdw */

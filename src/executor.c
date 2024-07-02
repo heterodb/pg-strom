@@ -652,28 +652,43 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	}
 	if (kds_final_tdesc)
 	{
-		size_t		sz = estimate_kern_data_store(kds_final_tdesc);
-		kern_data_store *kds_temp = (kern_data_store *)alloca(sz);
+		size_t		head_sz = estimate_kern_data_store(kds_final_tdesc);
+		kern_data_store *kds_temp = (kern_data_store *)alloca(head_sz);
 		char		format = KDS_FORMAT_ROW;
 		uint32_t	hash_nslots = 0;
 		size_t		kds_length = (4UL << 20);	/* 4MB */
 
 		if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
 		{
-			double	plan_rows = pts->css.ss.ps.plan->plan_rows;
+			double	final_nrows = pp_info->final_nrows;
+			size_t	unit_sz;
 
-			if (plan_rows <= 5000.0)
+			if (final_nrows <= 5000.0)
 				hash_nslots = 20000;
-			else if (plan_rows <= 4000000.0)
-				hash_nslots = 20000 + (int)(2.0 * plan_rows);
+			else if (final_nrows <= 4000000.0)
+				hash_nslots = 20000 + (int)(2.0 * final_nrows);
 			else
-				hash_nslots = 8020000 + plan_rows;
+				hash_nslots = 8020000 + final_nrows;
+
 			format = KDS_FORMAT_HASH;
-			kds_length = (1UL << 30);			/* 1GB */
+			unit_sz = offsetof(kern_hashitem, t.htup) +
+				MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
+						 BITMAPLEN(kds_final_tdesc->natts)) +
+				pts->css.ss.ps.plan->plan_width;
+
+			/* kds_final->length with margin */
+			kds_length = (head_sz +
+						  sizeof(uint64_t) * hash_nslots +	/* hash-slots */
+						  sizeof(uint64_t) * 2 * hash_nslots +	/* row-index */
+						  unit_sz * 2 * hash_nslots);
+			if (kds_length < (1UL<<30))
+				kds_length = (1UL<<30);		/* 1GB at least */
+			else
+				kds_length = TYPEALIGN(1024, kds_length);	/* alignment */
 		}
 		setup_kern_data_store(kds_temp, kds_final_tdesc, kds_length, format);
 		kds_temp->hash_nslots = hash_nslots;
-		session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, sz);
+		session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, head_sz);
 		session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
 		session->groupby_ngroups_estimation = pts->css.ss.ps.plan->plan_rows;
 	}
@@ -857,6 +872,8 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 									xcmd->u.results.final_nitems);
 			pg_atomic_fetch_add_u64(&ps_state->final_usage,
 									xcmd->u.results.final_usage);
+			pg_atomic_fetch_add_u64(&ps_state->final_total,
+									xcmd->u.results.final_total);
 		}
 	}
 }
@@ -2341,10 +2358,12 @@ pgstromExplainTaskState(CustomScanState *node,
 		{
 			uint64_t	final_nitems = pg_atomic_read_u64(&ps_state->final_nitems);
 			uint64_t	final_usage  = pg_atomic_read_u64(&ps_state->final_usage);
+			uint64_t	final_total  = pg_atomic_read_u64(&ps_state->final_total);
 
-			appendStringInfo(&buf, "nitems: %lu, usage: %s",
+			appendStringInfo(&buf, "nitems: %lu, usage: %s, total: %s",
 							 final_nitems,
-							 format_bytesz(final_usage));
+							 format_bytesz(final_usage),
+							 format_bytesz(final_total));
 		}
 		snprintf(label, sizeof(label),
 				 "%s Pinned Buffer", xpu_label);

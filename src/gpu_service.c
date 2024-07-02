@@ -117,7 +117,6 @@ static bool			__gpuserv_debug_output_dummy;
 static char		   *pgstrom_cuda_toolkit_basedir = CUDA_TOOLKIT_BASEDIR; /* GUC */
 static const char  *pgstrom_fatbin_image_filename = "/dev/null";
 
-
 static void
 gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
 
@@ -127,15 +126,15 @@ gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
 						__basename(__FILE__),					\
 						__LINE__, __FUNCTION__,					\
 						##__VA_ARGS__)
-#define __gsDebug(fmt, ...)						\
-	do {										\
-		if (gpuserv_shared_state &&				\
+#define __gsDebug(fmt, ...)										\
+	do {														\
+		if (gpuserv_shared_state &&								\
 			pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0) \
-			__gsLog(fmt, ##__VA_ARGS__);		\
+			__gsLog(fmt, ##__VA_ARGS__);						\
 	} while(0)
 
-#define __gsDebugExtra(fmt, ...)				\
-	do {										\
+#define __gsDebugExtra(fmt, ...)										\
+	do {																\
 		if (gpuserv_shared_state &&										\
 			pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0) \
 		{																\
@@ -251,6 +250,7 @@ static void
 gpuservLoggerDispatch(void)
 {
 	char   *line, *tail;
+	size_t	remained;
 
 	Assert(!GpuWorkerCurrentContext);
 	/* read from pipe */
@@ -291,6 +291,10 @@ gpuservLoggerDispatch(void)
 		int			elevel		= LOG;
 
 		*tail = '\0';
+		line = __trim(line);
+		if (line[0] == '\0')
+			continue;
+
 		tok = strtok_r(line, "|", &saveptr);
 		if (tok)
 			domain = __trim(tok);
@@ -327,13 +331,16 @@ gpuservLoggerDispatch(void)
 			errfinish(filename, lineno, funcname);
 		}
 	}
-
-	if (*line != '\0' && line != gpuserv_logger_buffer.data)
+	remained = strlen(line);
+	if (remained > 0)
 	{
-		size_t	remained = strlen(line);
-
-		memmove(gpuserv_logger_buffer.data, line, remained+1);
+		memmove(gpuserv_logger_buffer.data, line, remained);
+		gpuserv_logger_buffer.data[remained] = '\0';
 		gpuserv_logger_buffer.len = remained;
+	}
+	else
+	{
+		gpuserv_logger_buffer.len = 0;
 	}
 }
 
@@ -344,7 +351,7 @@ static void
 gpuservLoggerReport(const char *fmt, ...)
 {
 	va_list		ap;
-
+	
 	va_start(ap, fmt);
 	vfprintf(gpuserv_logger_filp, fmt, ap);
 	va_end(ap);
@@ -1111,6 +1118,115 @@ gpuMemoryPoolInit(gpuMemoryPool *pool,
 
 /* ----------------------------------------------------------------
  *
+ * gpuClientELog
+ *
+ * ----------------------------------------------------------------
+ */
+static void
+__gpuClientWriteBack(gpuClient *gclient,
+					 struct iovec *iov, int iovcnt);
+static void
+__gpuClientELog(gpuClient *gclient,
+				int errcode,
+				const char *filename, int lineno,
+				const char *funcname,
+				const char *fmt, ...)	pg_attribute_printf(6,7);
+
+#define gpuClientELog(gclient,fmt,...)						\
+	__gpuClientELog((gclient), ERRCODE_DEVICE_ERROR,		\
+					__FILE__, __LINE__, __FUNCTION__,		\
+					(fmt), ##__VA_ARGS__)
+#define gpuClientFatal(gclient,fmt,...)						\
+	__gpuClientELog((gclient), ERRCODE_DEVICE_FATAL,		\
+					__FILE__, __LINE__, __FUNCTION__,		\
+					(fmt), ##__VA_ARGS__)
+
+static void
+__gpuClientELogRaw(gpuClient *gclient, kern_errorbuf *errorbuf)
+{
+	XpuCommand		resp;
+	struct iovec	iov;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag = XpuCommandTag__Error;
+	resp.length = offsetof(XpuCommand, u.error) + sizeof(kern_errorbuf);
+	memcpy(&resp.u.error, errorbuf, sizeof(kern_errorbuf));
+
+	iov.iov_base = &resp;
+	iov.iov_len  = resp.length;
+	__gpuClientWriteBack(gclient, &iov, 1);
+}
+
+static void
+__gpuClientELog(gpuClient *gclient,
+				int errcode,
+				const char *filename, int lineno,
+				const char *funcname,
+				const char *fmt, ...)
+{
+	XpuCommand		resp;
+	va_list			ap;
+	struct iovec	iov;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag = XpuCommandTag__Error;
+	resp.length = offsetof(XpuCommand, u.error) + sizeof(kern_errorbuf);
+	resp.u.error.errcode = errcode,
+	resp.u.error.lineno = lineno;
+	strncpy(resp.u.error.filename, __basename(filename),
+			KERN_ERRORBUF_FILENAME_LEN);
+	strncpy(resp.u.error.funcname, funcname,
+			KERN_ERRORBUF_FUNCNAME_LEN);
+
+	va_start(ap, fmt);
+	vsnprintf(resp.u.error.message, KERN_ERRORBUF_MESSAGE_LEN, fmt, ap);
+	va_end(ap);
+
+	iov.iov_base = &resp;
+	iov.iov_len  = resp.length;
+	__gpuClientWriteBack(gclient, &iov, 1);
+
+	/* unable to continue GPU service, so try to restart */
+	if (errcode == ERRCODE_DEVICE_FATAL)
+	{
+		__gsDebug("(%s:%d, %s) GPU fatal - %s\n",
+				  resp.u.error.filename,
+				  resp.u.error.lineno,
+				  resp.u.error.funcname,
+				  resp.u.error.message);
+		gpuserv_bgworker_got_signal |= (1 << SIGHUP);
+		pg_memory_barrier();
+		SetLatch(MyLatch);
+	}
+}
+
+static void
+gpuClientELogByExtraModule(gpuClient *gclient)
+{
+	int				errcode;
+	const char	   *filename;
+	unsigned int	lineno;
+	const char	   *funcname;
+	char			buffer[2000];
+
+	errcode = heterodbExtraGetError(&filename,
+									&lineno,
+									&funcname,
+									buffer, sizeof(buffer));
+	if (errcode == 0)
+		gpuClientELog(gclient, "Bug? %s is called but no error status", __FUNCTION__);
+	else
+		__gpuClientELog(gclient,
+						errcode,
+						filename, lineno,
+						funcname,
+						"extra-module: %s", buffer);
+}
+
+/* ----------------------------------------------------------------
+ *
  * Session buffer support routines
  *
  * This buffer is used by GpuJoin's inner buffer and GpuPreAgg.
@@ -1421,7 +1537,8 @@ __setupGpuQueryGroupByBuffer(gpuContext *gcontext,
  * __expandGpuQueryGroupByBuffer
  */
 static bool
-__expandGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
+__expandGpuQueryGroupByBuffer(gpuClient *gclient,
+							  gpuQueryBuffer *gq_buf,
 							  size_t kds_length_last)
 {
 	pthreadRWLockWriteLock(&gq_buf->m_kds_rwlock);
@@ -1432,14 +1549,18 @@ __expandGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 		CUdeviceptr		m_devptr;
 		CUresult		rc;
 		size_t			sz, length;
+		struct timeval	tv1, tv2;
 
+		gettimeofday(&tv1, NULL);
 		assert(kds_old->length == gq_buf->m_kds_final_length);
-		length = kds_old->length + Min(kds_old->length, 1UL<<30);
+		length = kds_old->length + Max(kds_old->length, 1UL<<30);
 		rc = cuMemAllocManaged(&m_devptr, length,
 							   CU_MEM_ATTACH_GLOBAL);
 		if (rc != CUDA_SUCCESS)
 		{
 			pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+			gpuClientELog(gclient, "failed on cuMemAllocManaged(%lu): %s",
+						  length, cuStrError(rc));
 			return false;
 		}
 		kds_new = (kern_data_store *)m_devptr;
@@ -1448,17 +1569,34 @@ __expandGpuQueryGroupByBuffer(gpuQueryBuffer *gq_buf,
 		sz = (KDS_HEAD_LENGTH(kds_old) +
 			  sizeof(uint64_t) * (kds_old->nitems +
 								  kds_old->hash_nslots));
-		memcpy(kds_new, kds_old, sz);
+		rc = cuMemcpyDtoD((CUdeviceptr)kds_new,
+						  (CUdeviceptr)kds_old, sz);
+		if (rc != CUDA_SUCCESS)
+		{
+			pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+			cuMemFree(m_devptr);
+			gpuClientELog(gclient, "failed on cuMemcpyDtoD: %s", cuStrError(rc));
+			return false;
+		}
 		kds_new->length = length;
 
 		/* later falf */
 		sz = kds_old->usage;
-		memcpy((char *)kds_new + kds_new->length - sz,
-			   (char *)kds_old + kds_old->length - sz, sz);
-
+		rc = cuMemcpyDtoD((CUdeviceptr)kds_new + kds_new->length - sz,
+						  (CUdeviceptr)kds_old + kds_old->length - sz, sz);
+		if (rc != CUDA_SUCCESS)
+		{
+			pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+			cuMemFree(m_devptr);
+			gpuClientELog(gclient, "failed on cuMemcpyDtoD: %s", cuStrError(rc));
+			return false;
+		}
 		/* swap them */
-		__gsDebug("kds_final expand: %lu => %lu\n",
-				  kds_old->length, kds_new->length);
+		gettimeofday(&tv2, NULL);
+		__gsDebug("kds_final expand: %lu => %lu [%.3fs]",
+				  kds_old->length, kds_new->length,
+				  (double)((tv2.tv_sec  - tv1.tv_sec)   * 1000000 +
+						   (tv2.tv_usec - tv1.tv_usec)) / 1000000.0);
 		cuMemFree(gq_buf->m_kds_final);
 		gq_buf->m_kds_final = m_devptr;
 		gq_buf->m_kds_final_length = length;
@@ -1890,8 +2028,11 @@ gpuClientWriteBackNormal(gpuClient  *gclient,
 	memset(resp, 0, resp_sz);
 	resp->magic  = XpuCommandMagicNumber;
 	resp->tag    = XpuCommandTag__Success;
-	resp->u.results.chunks_nitems = 1;
-	resp->u.results.chunks_offset = resp_sz;
+	if (kds)
+	{
+		resp->u.results.chunks_nitems = 1;
+		resp->u.results.chunks_offset = resp_sz;
+	}
 	resp->u.results.npages_direct_read = npages_direct_read;
 	resp->u.results.npages_vfs_read = npages_vfs_read;
 	resp->u.results.nitems_raw = kgtask->nitems_raw;
@@ -1906,133 +2047,13 @@ gpuClientWriteBackNormal(gpuClient  *gclient,
 	iov = &iov_array[iovcnt++];
 	iov->iov_base = resp;
 	iov->iov_len  = resp_sz;
-	iovcnt += __gpuClientWriteBackOneChunk(gclient, iov_array+iovcnt, kds);
+	if (kds)
+		iovcnt += __gpuClientWriteBackOneChunk(gclient, iov_array+iovcnt, kds);
 	for (int i=1; i < iovcnt; i++)
 		resp_sz += iov_array[i].iov_len;
 	resp->length = resp_sz;
 
 	__gpuClientWriteBack(gclient, iov_array, iovcnt);
-}
-
-static void
-gpuClientWriteBackStatusOnly(gpuClient  *gclient)
-{
-	struct iovec iov;
-	XpuCommand	resp;
-
-	memset(&resp, 0, sizeof(resp));
-	resp.length = MAXALIGN(offsetof(XpuCommand, u.results.stats));
-	resp.magic  = XpuCommandMagicNumber;
-	resp.tag    = XpuCommandTag__Success;
-
-	iov.iov_base = &resp;
-	iov.iov_len  = resp.length;
-	__gpuClientWriteBack(gclient, &iov, 1);
-}
-
-/* ----------------------------------------------------------------
- *
- * gpuClientELog
- *
- * ----------------------------------------------------------------
- */
-static void
-__gpuClientELog(gpuClient *gclient,
-				int errcode,
-				const char *filename, int lineno,
-				const char *funcname,
-				const char *fmt, ...)	pg_attribute_printf(6,7);
-
-#define gpuClientELog(gclient,fmt,...)						\
-	__gpuClientELog((gclient), ERRCODE_DEVICE_ERROR,		\
-					__FILE__, __LINE__, __FUNCTION__,		\
-					(fmt), ##__VA_ARGS__)
-#define gpuClientFatal(gclient,fmt,...)						\
-	__gpuClientELog((gclient), ERRCODE_DEVICE_FATAL,		\
-					__FILE__, __LINE__, __FUNCTION__,		\
-					(fmt), ##__VA_ARGS__)
-static void
-__gpuClientELogRaw(gpuClient *gclient, kern_errorbuf *errorbuf)
-{
-	XpuCommand		resp;
-	struct iovec	iov;
-
-	memset(&resp, 0, sizeof(resp));
-	resp.magic = XpuCommandMagicNumber;
-	resp.tag = XpuCommandTag__Error;
-	resp.length = offsetof(XpuCommand, u.error) + sizeof(kern_errorbuf);
-	memcpy(&resp.u.error, errorbuf, sizeof(kern_errorbuf));
-
-	iov.iov_base = &resp;
-	iov.iov_len  = resp.length;
-	__gpuClientWriteBack(gclient, &iov, 1);
-}
-
-static void
-__gpuClientELog(gpuClient *gclient,
-				int errcode,
-				const char *filename, int lineno,
-				const char *funcname,
-				const char *fmt, ...)
-{
-	XpuCommand		resp;
-	va_list			ap;
-	struct iovec	iov;
-
-	memset(&resp, 0, sizeof(resp));
-	resp.magic = XpuCommandMagicNumber;
-	resp.tag = XpuCommandTag__Error;
-	resp.length = offsetof(XpuCommand, u.error) + sizeof(kern_errorbuf);
-	resp.u.error.errcode = errcode,
-	resp.u.error.lineno = lineno;
-	strncpy(resp.u.error.filename, __basename(filename),
-			KERN_ERRORBUF_FILENAME_LEN);
-	strncpy(resp.u.error.funcname, funcname,
-			KERN_ERRORBUF_FUNCNAME_LEN);
-
-	va_start(ap, fmt);
-	vsnprintf(resp.u.error.message, KERN_ERRORBUF_MESSAGE_LEN, fmt, ap);
-	va_end(ap);
-
-	iov.iov_base = &resp;
-	iov.iov_len  = resp.length;
-	__gpuClientWriteBack(gclient, &iov, 1);
-
-	/* unable to continue GPU service, so try to restart */
-	if (errcode == ERRCODE_DEVICE_FATAL)
-	{
-		__gsDebug("(%s:%d, %s) GPU fatal - %s\n",
-				  resp.u.error.filename,
-				  resp.u.error.lineno,
-				  resp.u.error.funcname,
-				  resp.u.error.message);
-		gpuserv_bgworker_got_signal |= (1 << SIGHUP);
-		pg_memory_barrier();
-		SetLatch(MyLatch);
-	}
-}
-
-static void
-gpuClientELogByExtraModule(gpuClient *gclient)
-{
-	int				errcode;
-	const char	   *filename;
-	unsigned int	lineno;
-	const char	   *funcname;
-	char			buffer[2000];
-
-	errcode = heterodbExtraGetError(&filename,
-									&lineno,
-									&funcname,
-									buffer, sizeof(buffer));
-	if (errcode == 0)
-		gpuClientELog(gclient,"Bug? %s is called but no error status", __FUNCTION__);
-	else
-		__gpuClientELog(gclient,
-						errcode,
-						filename, lineno,
-						funcname,
-						"extra-module: %s", buffer);
 }
 
 /*
@@ -2707,11 +2728,8 @@ resume_kernel:
 		/* needs to expand the final buffer? */
 		if (last_kernel_errcode == ERRCODE_SUSPEND_NO_SPACE)
 		{
-			if (!__expandGpuQueryGroupByBuffer(gq_buf, kds_final_length))
-			{
-				gpuClientFatal(gclient, "unable to expand GpuPreAgg final buffer");
+			if (!__expandGpuQueryGroupByBuffer(gclient, gq_buf, kds_final_length))
 				goto bailout;
-			}
 		}
 		pthreadRWLockReadLock(&gq_buf->m_kds_rwlock);
 		kds_dst = (kern_data_store *)gq_buf->m_kds_final;
@@ -2793,14 +2811,11 @@ resume_kernel:
 	/* status check */
 	if (kgtask->kerror.errcode == ERRCODE_STROM_SUCCESS)
 	{
-		if (gq_buf->m_kds_final)
-			gpuClientWriteBackStatusOnly(gclient);
-		else
-			gpuClientWriteBackNormal(gclient,
-									 kgtask,
-									 npages_direct_read,
-									 npages_vfs_read,
-									 kds_dst);
+		gpuClientWriteBackNormal(gclient,
+								 kgtask,
+								 npages_direct_read,
+								 npages_vfs_read,
+								 gq_buf->m_kds_final ? NULL : kds_dst);
 	}
 	else if (kgtask->kerror.errcode == ERRCODE_SUSPEND_NO_SPACE ||
 			 (kgtask->kerror.errcode == ERRCODE_SUSPEND_FALLBACK &&
@@ -2962,6 +2977,10 @@ gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
 			}
 			resp.u.results.final_nitems = kds_final->nitems;
 			resp.u.results.final_usage = kds_final->usage;
+			resp.u.results.final_total = KDS_HEAD_LENGTH(kds_final)
+				+ sizeof(uint64_t) * (kds_final->hash_nslots +
+									  kds_final->nitems)
+				+ kds_final->usage;
 		}
 	}
 	resp.u.results.final_this_device = kfin->final_this_device;
@@ -3005,7 +3024,7 @@ gpuservGpuWorkerMain(void *__arg)
 	MY_EVENT_PER_THREAD		= cuda_event;
 	pg_memory_barrier();
 
-	__gsDebug("GPU-%d worker thread launched\n", MY_DINDEX_PER_THREAD);
+	__gsDebug("GPU-%d worker thread launched", MY_DINDEX_PER_THREAD);
 	
 	pthreadMutexLock(&gcontext->lock);
 	while (!gpuServiceGoingTerminate() && !gworker->termination)
@@ -3074,7 +3093,7 @@ gpuservGpuWorkerMain(void *__arg)
 	cuStreamDestroy(cuda_stream);
 	free(gworker);
 
-	__gsDebug("GPU-%d worker thread launched\n", MY_DINDEX_PER_THREAD);
+	__gsDebug("GPU-%d worker thread launched", MY_DINDEX_PER_THREAD);
 
 	return NULL;
 }
@@ -3093,7 +3112,7 @@ gpuservMonitorClient(void *__priv)
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 	{
-		__gsDebug("[%s] failed on cuCtxSetCurrent: %s\n",
+		__gsDebug("[%s] failed on cuCtxSetCurrent: %s",
 				  elabel, cuStrError(rc));
 		goto out;
 	}

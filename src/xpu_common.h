@@ -2472,6 +2472,7 @@ typedef struct {
 	bool		final_this_device;
 	uint32_t	final_nitems;		/* final buffer's nitems, if any */
 	uint64_t	final_usage;		/* final buffer's usage, if any */
+	uint64_t	final_total;		/* final buffer's total size, if any */
 	/* statistics */
 	uint32_t	npages_direct_read;	/* # of pages read by GPU-Direct Storage */
 	uint32_t	npages_vfs_read;	/* # of pages read by VFS (fallback) */

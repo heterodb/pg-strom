@@ -1435,6 +1435,8 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	else
 		pp_info->xpu_task_flags |= (DEVTASK__PREAGG | DEVTASK__PINNED_ROW_RESULTS);
 	pp_info->sibling_param_id = con->sibling_param_id;
+	/* TODO: more precise cost factors */
+	pp_info->final_nrows = con->num_groups;
 
 	/* No tuples shall be generated until child JOIN/SCAN path completion */
 	startup_cost = (pp_info->startup_cost +

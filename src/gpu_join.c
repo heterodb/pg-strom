@@ -669,6 +669,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	pp_info->inner_cost = inner_cost;
 	pp_info->run_cost = run_cost;
 	pp_info->final_cost = final_cost;
+	pp_info->final_nrows = joinrel->rows;
 	pp_inner->join_nrows = clamp_row_est(joinrel->rows / pp_info->parallel_divisor);
 
 	return fixup_join_varnullingrels(joinrel, pp_info);
