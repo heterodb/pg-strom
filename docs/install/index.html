@@ -633,7 +633,7 @@ Resolving deltas: 100% (10504/10504), done.
 Thus, not to have inconsistency, PG-Strom does not have own configure script, but references the build configuration of PostgreSQL using <code>pg_config</code> command.</p>
 <p>If PATH environment variable is set to the <code>pg_config</code> command of the target PostgreSQL, run <code>make</code> and <code>make install</code>.
 Elsewhere, give <code>PG_CONFIG=...</code> parameter on <code>make</code> command to tell the full path of the <code>pg_config</code> command.</p>
-<pre><code>$ cd pg-strom
+<pre><code>$ cd pg-strom/src
 $ make PG_CONFIG=/usr/pgsql-16/bin/pg_config
 $ sudo make install PG_CONFIG=/usr/pgsql-15/bin/pg_config
 </code></pre>

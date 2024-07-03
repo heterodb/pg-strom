@@ -636,7 +636,7 @@ Resolving deltas: 100% (10504/10504), done.
 <p>PG-Stromをビルドする時のコンフィグは、インストール先のPostgreSQLと厳密に一致していなければいけません。例えば、同じ構造体がビルド時のコンフィグによりPostgreSQLとPG-Stromで異なったレイアウトを持ってしまったとすれば、非常に発見の難しいバグを生み出してしまうかもしれません。 したがって、（一貫性のない状態を避けるため）PG-Stromは独自にconfigureスクリプトを走らせたりはせず、<code>pg_config</code>を使ってPostgreSQLのビルド時設定を参照します。</p>
 <p><code>pg_config</code>にパスが通っており、それがインストール先のPostgreSQLのものであれば、そのまま<code>make</code>、<code>make install</code>を実行します。
 直接パスが通っていない場合は、<code>make</code>コマンドに<code>PG_CONFIG=...</code>パラメータを与え、<code>pg_config</code>のフルパスを渡します。</p>
-<pre><code>$ cd pg-strom
+<pre><code>$ cd pg-strom/src
 $ make PG_CONFIG=/usr/pgsql-16/bin/pg_config
 $ sudo make install PG_CONFIG=/usr/pgsql-15/bin/pg_config
 </code></pre>
