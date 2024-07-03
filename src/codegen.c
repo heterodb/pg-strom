@@ -2803,6 +2803,10 @@ __codegen_build_movevars_one(codegen_context *context, int depth, int gist_depth
 	{
 		const codegen_kvar_defitem *kvdef = lfirst(lc);
 
+		/* temporary variables? */
+		if (kvdef->kv_offset < 0)
+			continue;
+
 		if ((kvdef->kv_depth >= 0 &&
 			 kvdef->kv_depth <= depth &&
 			 kvdef->kv_maxref > depth) ||
