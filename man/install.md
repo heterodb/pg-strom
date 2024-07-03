@@ -973,7 +973,7 @@ Elsewhere, give `PG_CONFIG=...` parameter on `make` command to tell the full pat
 ```
 $ cd pg-strom/src
 $ make PG_CONFIG=/usr/pgsql-16/bin/pg_config
-$ sudo make install PG_CONFIG=/usr/pgsql-15/bin/pg_config
+$ sudo make install PG_CONFIG=/usr/pgsql-16/bin/pg_config
 ```
 
 @ja:### インストール後の設定
