@@ -30,6 +30,8 @@ static char	   *sqldb_username = NULL;
 static char	   *sqldb_password = NULL;
 static char	   *sqldb_database = NULL;
 static char	   *dump_arrow_filename = NULL;
+static char	   *schema_arrow_filename = NULL;
+static char	   *schema_arrow_tablename = NULL;
 static char	   *stat_embedded_columns = NULL;
 static int		num_worker_threads = 0;
 static char	   *parallel_dist_keys = NULL;
@@ -370,6 +372,245 @@ dumpArrowFile(const char *filename)
 			   dumpArrowNode((ArrowNode *)&af_info.footer.recordBatches[i]),
 			   dumpArrowNode((ArrowNode *)&af_info.recordBatches[i]));
 	}
+	close(fdesc);
+	return 0;
+}
+
+/*
+ * --schema option support routines
+ */
+static const char *
+__field_name_escaped(const char *field_name)
+{
+	char   *__namebuf;
+	int		i = 0;
+
+	for (const char *c = field_name; *c != '\0'; c++)
+	{
+		if (!isalnum(*c) && *c != '_')
+			goto escaped;
+	}
+	return field_name;
+escaped:
+	__namebuf = malloc(strlen(field_name) * 2 + 100);
+	if (!__namebuf)
+		Elog("out of memory");
+	__namebuf[i++] = '\"';
+	for (const char *c = field_name; *c != '\0'; c++)
+	{
+		if (*c == '\"')
+			__namebuf[i++] = '\\';
+		__namebuf[i++] = *c;
+	}
+	__namebuf[i++] = '\"';
+	__namebuf[i++] = '\0';
+
+	return __namebuf;
+}
+
+static const char *
+__field_type_label(ArrowField *field)
+{
+	const char *pg_type = NULL;
+	const char *label;
+	char	   *namebuf, *pos;
+
+	/* fetch "pg_type" custom-metadata */
+	for (int i=0; i < field->_num_custom_metadata; i++)
+	{
+		ArrowKeyValue *kv = &field->custom_metadata[i];
+
+		if (strcmp(kv->key, "pg_type") == 0)
+		{
+			pg_type = kv->value;
+			if (strcmp(pg_type, "pg_catalog.macaddr") == 0 ||
+				strcmp(pg_type, "macaddr") == 0)
+			{
+				if (field->type.node.tag == ArrowNodeTag__FixedSizeBinary &&
+					field->type.FixedSizeBinary.byteWidth == 6)
+					return "macaddr";
+			}
+			else if (strcmp(pg_type, "pg_catalog.inet") == 0 ||
+					 strcmp(pg_type, "inet") == 0)
+			{
+				if (field->type.node.tag == ArrowNodeTag__FixedSizeBinary &&
+					(field->type.FixedSizeBinary.byteWidth == 4 ||
+					 field->type.FixedSizeBinary.byteWidth == 16))
+					return "inet";
+			}
+			else if (strcmp(pg_type, "cube@cube") == 0)
+			{
+				if (field->type.node.tag == ArrowNodeTag__Binary ||
+					field->type.node.tag == ArrowNodeTag__LargeBinary)
+					return "cube";
+			}
+			break;
+		}
+	}
+
+	switch (field->type.node.tag)
+	{
+		case ArrowNodeTag__Int:
+			switch (field->type.Int.bitWidth)
+			{
+				case 8:	 return "int1";
+				case 16: return "int2";
+				case 32: return "int4";
+				case 64: return "int8";
+				default:
+					Elog("Arrow::Int has unknown bitWidth (%d)",
+						 field->type.Int.bitWidth);
+			}
+			break;
+
+		case ArrowNodeTag__FloatingPoint:
+			switch (field->type.FloatingPoint.precision)
+			{
+				case ArrowPrecision__Half:   return "float2";
+				case ArrowPrecision__Single: return "float4";
+				case ArrowPrecision__Double: return "float8";
+				default:
+					Elog("Arrow::FloatingPoint has unknown precision");
+			}
+			break;
+		case ArrowNodeTag__Utf8:
+		case ArrowNodeTag__LargeUtf8:
+			return "text";
+		case ArrowNodeTag__Binary:
+		case ArrowNodeTag__LargeBinary:
+			return "bytea";
+		case ArrowNodeTag__Bool:
+			return "bool";
+		case ArrowNodeTag__Decimal:
+			return "numeric";
+		case ArrowNodeTag__Date:
+			return "date";
+		case ArrowNodeTag__Time:
+			return "time";
+		case ArrowNodeTag__Timestamp:
+			return "timestamp";
+		case ArrowNodeTag__Interval:
+			return "interval";
+		case ArrowNodeTag__List:
+		case ArrowNodeTag__LargeList:
+			assert(field->_num_children == 1);
+			label = __field_type_label(field->children);
+			namebuf = alloca(strlen(label) + 10);
+			sprintf(namebuf, "%s[]", label);
+			return pstrdup(namebuf);
+		case ArrowNodeTag__Struct:
+			if (pg_type)
+			{
+				namebuf = alloca(strlen(pg_type) + 1);
+
+				strcpy(namebuf, pg_type);
+				/* strip earlier than '.' */
+				pos = strchr(namebuf, '.');
+				if (pos && pos[1] != '\0')
+					namebuf = pos+1;
+			}
+			else
+			{
+				namebuf = alloca(strlen(field->name) + 10);
+
+				sprintf(namebuf, "__%s_comp", field->name);
+			}
+			return pstrdup(namebuf);
+
+		case ArrowNodeTag__FixedSizeBinary:
+		case ArrowNodeTag__FixedSizeList:
+			namebuf = alloca(32);
+			sprintf(namebuf, "char(%d)",
+					field->type.FixedSizeBinary.byteWidth);
+			return pstrdup(namebuf);
+
+		default:
+			Elog("unknown Arrow type at field: %s", field->name);
+			break;
+	}
+	Elog("unknown Arrow type");
+}
+
+static void
+__schemaArrowComposite(ArrowField *field)
+{
+	const char *comp_name;
+
+	if (field->type.node.tag != ArrowNodeTag__Struct)
+		return;
+
+	for (int j=0; j < field->_num_children; j++)
+		__schemaArrowComposite(&field->children[j]);
+
+	comp_name = __field_type_label(field);
+	printf("---\n"
+		   "--- composite type definition of %s\n"
+		   "---\n"
+		   "CREATE TYPE %s AS (\n",
+		   field->name, __field_name_escaped(comp_name));
+	for (int j=0; j < field->_num_children; j++)
+	{
+		if (j > 0)
+			printf(",\n");
+		printf("  %s %s",
+			   __field_name_escaped(field->children[j].name),
+			   __field_type_label(&field->children[j]));
+	}
+	printf("\n);\n\n");
+}
+
+static int
+schemaArrowFile(const char *filename, const char *table_name)
+{
+	ArrowFileInfo af_info;
+	ArrowSchema *schema;
+	int		fdesc;
+
+	memset(&af_info, 0, sizeof(ArrowFileInfo));
+	fdesc = open(filename, O_RDONLY);
+	if (fdesc < 0)
+		Elog("unable to open '%s': %m", filename);
+	readArrowFileDesc(fdesc, &af_info);
+	schema = &af_info.footer.schema;
+	/* TODO: dump enum types if any */
+
+	/* dump composite types if any */
+	for (int j=0; j < schema->_num_fields; j++)
+		__schemaArrowComposite(&schema->fields[j]);
+
+	/* CREATE TABLE command */
+	if (!table_name)
+	{
+		char   *namebuf = alloca(strlen(filename) + 1);
+		char   *pos;
+
+		strcpy(namebuf, filename);
+		namebuf = basename(namebuf);
+		pos = strrchr(namebuf, '.');
+		if (pos && pos != namebuf)
+			*pos = '\0';
+		table_name = namebuf;
+	}
+	printf("---\n"
+		   "--- Definition of %s\n"
+		   "--- (generated from '%s')\n"
+		   "---\n"
+		   "CREATE TABLE %s (\n",
+		   table_name,
+		   filename,
+		   __field_name_escaped(table_name));
+	for (int j=0; j < schema->_num_fields; j++)
+	{
+		if (j > 0)
+			printf(",\n");
+		printf("  %s %s",
+			   __field_name_escaped(schema->fields[j].name),
+			   __field_type_label(&schema->fields[j]));
+		if (!schema->fields[j].nullable)
+			printf(" not null");
+	}
+	printf("\n);\n");
+	close(fdesc);
 	return 0;
 }
 
@@ -633,6 +874,8 @@ usage(void)
 		  "\n"
 		  "Other options:\n"
 		  "      --dump=FILENAME  dump information of arrow file\n"
+		  "      --schema=FILENAME dump schema definition as CREATE TABLE statement\n"
+		  "      --schema-name=NAME table name in the CREATE TABLE statement\n"
 		  "      --progress       shows progress of the job\n"
 		  "      --set=NAME:VALUE config option to set before SQL execution\n"
 		  "      --help           shows this message\n"
@@ -667,6 +910,8 @@ parse_options(int argc, char * const argv[])
 		{"set",          required_argument, NULL, 1003},
 		{"inner-join",   required_argument, NULL, 1004},
 		{"outer-join",   required_argument, NULL, 1005},
+		{"schema",       required_argument, NULL, 1006},
+		{"schema-name",  required_argument, NULL, 1007},
 		{"stat",         optional_argument, NULL, 'S'},
 		{"num-workers",  required_argument, NULL, 'n'},
 		{"parallel-keys",required_argument, NULL, 'k'},
@@ -819,6 +1064,8 @@ parse_options(int argc, char * const argv[])
 				break;
 #endif /* __MYSQL2ARROW__ */
 			case 1001:		/* --dump */
+				if (schema_arrow_filename)
+					Elog("--dump and --schema are exclusive");
 				if (dump_arrow_filename)
 					Elog("--dump option was supplied twice");
 				dump_arrow_filename = optarg;
@@ -867,6 +1114,18 @@ parse_options(int argc, char * const argv[])
 				}
 				break;
 #endif	/* __PG2ARROW__ */
+			case 1006:		/* --schema */
+				if (dump_arrow_filename)
+					Elog("--dump and --schema are exclusive");
+				if (schema_arrow_filename)
+					Elog("--schema was supplied twice");
+				schema_arrow_filename = optarg;
+				break;
+			case 1007:		/* --schema-name */
+				if (schema_arrow_tablename)
+					Elog("--schema-name was supplied twice");
+				schema_arrow_tablename = optarg;
+				break;
 			case 'S':		/* --stat */
 				{
 					if (stat_embedded_columns)
@@ -907,13 +1166,25 @@ parse_options(int argc, char * const argv[])
 		assert(!sqldb_password);
 		sqldb_password = pstrdup(getpass("Password: "));
 	}
-	/* --dump is exclusive other options */
+	/* --dump is exclusive other SQL options */
 	if (dump_arrow_filename)
 	{
 		if (sqldb_command || output_filename || append_filename)
 			Elog("--dump option is exclusive with -c, -t, -o and --append");
 		return;
 	}
+	/* --schema is exclusive other SQL options */
+	if (schema_arrow_filename)
+	{
+		if (sqldb_command || output_filename || append_filename)
+			Elog("--schema option is exclusive with -c, -t, -o and --append");
+		return;
+	}
+	else if (schema_arrow_tablename)
+	{
+		Elog("--schema-name option must be used with --schema");
+	}
+	/* SQL command options */
 	if (!simple_table_name &&!sqldb_command)
 		Elog("Neither -c nor -t options are supplied");
 	assert((simple_table_name && !sqldb_command) ||
@@ -1233,7 +1504,10 @@ int main(int argc, char * const argv[])
 	/* special case if --dump=FILENAME */
 	if (dump_arrow_filename)
 		return dumpArrowFile(dump_arrow_filename);
-
+	/* special case if --schema=FILENAME */
+	if (schema_arrow_filename)
+		return schemaArrowFile(schema_arrow_filename,
+							   schema_arrow_tablename);
 	/* setup workers */
 	assert(num_worker_threads > 0);
 	worker_threads = palloc0(sizeof(pthread_t)  * num_worker_threads);
