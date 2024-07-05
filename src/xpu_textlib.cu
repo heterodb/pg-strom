@@ -721,7 +721,7 @@ pgfn_textlen(XPU_PGFUNCTION_ARGS)
 		}
 		else
 		{
-			STROM_ELOG(kcxt, "unable to count compressed/external text under multi-bytes encoding");
+			SUSPEND_FALLBACK(kcxt, "unable to count compressed/external text under multi-bytes encoding");
 			return false;
 		}
 		result->value = len;

@@ -15,11 +15,11 @@
  * pgstrom_stair_sum_xxxx
  */
 static __shared__ union {
-	uint32_t	u32[MAXTHREADS_PER_BLOCK / WARPSIZE];
-	uint64_t	u64[MAXTHREADS_PER_BLOCK / WARPSIZE];
-	int32_t		i32[MAXTHREADS_PER_BLOCK / WARPSIZE];
-	int64_t		i64[MAXTHREADS_PER_BLOCK / WARPSIZE];
-	float8_t	fp64[MAXTHREADS_PER_BLOCK / WARPSIZE];
+	uint32_t	u32[WARPSIZE];
+	uint64_t	u64[WARPSIZE];
+	int32_t		i32[WARPSIZE];
+	int64_t		i64[WARPSIZE];
+	float8_t	fp64[WARPSIZE];
 } __stair_sum_buffer;
 
 template <typename T>
@@ -61,6 +61,7 @@ pgstrom_stair_sum_binary(bool predicate, uint32_t *p_total_count)
 	uint32_t	mask;
 	uint32_t	sum;
 
+	assert(get_local_size() <= WARPSIZE * WARPSIZE);
 	assert(__activemask() == ~0U);
 	mask = __ballot_sync(__activemask(), predicate);
 	if (LaneId() == 0)
@@ -93,6 +94,7 @@ pgstrom_stair_sum_binary(bool predicate, uint32_t *p_total_count)
 		BASETYPE	warp_sum;											\
 		BASETYPE	sum;												\
 																		\
+		assert(get_local_size() <= WARPSIZE * WARPSIZE);				\
 		assert(__activemask() == ~0U);									\
 		warp_sum = __stair_sum_warp_common(value);						\
 		if (LaneId() == warpSize - 1)									\
@@ -219,7 +221,7 @@ __gpuscan_load_source_row(kern_context *kcxt,
 	{
 		uint64_t	offset = KDS_GET_ROWINDEX(kds_src)[index];
 
-		assert(offset <= kds_src->__usage64);
+		assert(offset <= kds_src->usage);
 		tupitem = (kern_tupitem *)((char *)kds_src +
 								   kds_src->length -
 								   offset);
@@ -288,7 +290,7 @@ __gpuscan_load_source_block(kern_context *kcxt,
 		if (rd_pos < wr_pos)
 		{
 			off = wp->lp_items[rd_pos % LP_ITEMS_PER_BLOCK];
-			htup = (HeapTupleHeaderData *)((char *)kds_src + __kds_unpack(off));
+			htup = (HeapTupleHeaderData *)((char *)kds_src + off);
 			if (!ExecLoadVarsOuterRow(kcxt,
 									  kexp_load_vars,
 									  kexp_scan_quals,
@@ -374,7 +376,7 @@ __gpuscan_load_source_block(kern_context *kcxt,
 	if (htup != NULL)
 	{
 		wp->lp_items[wr_pos % LP_ITEMS_PER_BLOCK]
-			= __kds_packed((char *)htup - (char *)kds_src);
+			= (uint32_t)((char *)htup - (char *)kds_src);
 	}
 	/* increment the row/line pointer */
 	if (__syncthreads_count(has_next_lp_items) > 0)
@@ -477,7 +479,7 @@ kds_column_get_sysattr(const kern_data_store *kds, uint32_t rowid)
 		   cmeta->attlen == sizeof(GpuCacheSysattr) &&
 		   cmeta->nullmap_offset == 0);
 	base = (GpuCacheSysattr *)
-		((char *)kds + __kds_unpack(cmeta->values_offset));
+		((char *)kds + cmeta->values_offset);
 	if (rowid < kds->column_nrooms)
 		return &base[rowid];
 	return NULL;
@@ -669,8 +671,7 @@ gpucache_cleanup_row_owner(kern_context *kcxt,
 		uint32_t		offset = redo->redo_items[owner_id];
 		uint32_t		rowid;
 
-		tx_log = (GCacheTxLogCommon *)
-			((char *)redo + __kds_unpack(offset));
+		tx_log = (GCacheTxLogCommon *)((char *)redo + offset);
 		switch (tx_log->type)
 		{
 			case GCACHE_TX_LOG__INSERT:
@@ -711,8 +712,7 @@ gpucache_assign_update_owner(kern_context *kcxt,
 		uint32_t		offset = redo->redo_items[owner_id];
 		uint32_t		rowid;
 
-		tx_log = (GCacheTxLogCommon *)
-			((char *)redo + __kds_unpack(offset));
+		tx_log = (GCacheTxLogCommon *)((char *)redo + offset);
 		if (tx_log->type == GCACHE_TX_LOG__INSERT)
 		{
 			rowid = ((GCacheTxLogInsert *)tx_log)->rowid;
@@ -749,7 +749,7 @@ __gpucache_apply_insert_log(kern_context *kcxt,
 		if (cmeta->nullmap_offset != 0)
 		{
 			uint32_t   *nullmap = (uint32_t *)
-				((char *)kds + __kds_unpack(cmeta->nullmap_offset));
+				((char *)kds + cmeta->nullmap_offset);
 
 			if (heap_hasnull && att_isnull(j, htup->t_bits))
 			{
@@ -771,7 +771,7 @@ __gpucache_apply_insert_log(kern_context *kcxt,
 		}
 
 		assert(cmeta->values_offset != 0);
-		base = (char *)kds + __kds_unpack(cmeta->values_offset);
+		base = (char *)kds + cmeta->values_offset;
 		if (cmeta->attlen > 0)
 		{
 			offset = TYPEALIGN(cmeta->attalign, offset);
@@ -794,14 +794,13 @@ __gpucache_apply_insert_log(kern_context *kcxt,
 			vl_off = __atomic_add_uint64(&extra->usage, MAXALIGN(vl_len));
 			if (vl_off + vl_len > extra->length)
 			{
-				STROM_EREPORT(kcxt, ERRCODE_BUFFER_NO_SPACE,
-							  "gpucache: extra buffer has no space");
+				SUSPEND_NO_SPACE(kcxt, "gpucache: extra buffer has no space");
 				return false;
 			}
 			memcpy((char *)extra + vl_off,
 				   (char *)htup + offset,
 				   vl_len);
-			((uint32_t *)base)[rowid] = __kds_packed(vl_off);
+			((uint64_t *)base)[rowid] = vl_off;
 			offset += vl_len;
 		}
 	}
@@ -834,8 +833,7 @@ gpucache_apply_update_logs(kern_context *kcxt,
 		GpuCacheSysattr *sysattr;
 		uint32_t		offset = redo->redo_items[owner_id];
 
-		tx_log = (GCacheTxLogCommon *)
-			((char *)redo + __kds_unpack(offset));
+		tx_log = (GCacheTxLogCommon *)((char *)redo + offset);
 		if (tx_log->type == GCACHE_TX_LOG__INSERT)
 		{
 			GCacheTxLogInsert  *i_log = (GCacheTxLogInsert *)tx_log;
@@ -884,8 +882,7 @@ gpucache_assign_xact_owner(kern_context *kcxt,
 		uint32_t		offset = redo->redo_items[owner_id];
 		uint32_t		rowid;
 
-		tx_log = (GCacheTxLogCommon *)
-			((char *)redo + __kds_unpack(offset));
+		tx_log = (GCacheTxLogCommon *)((char *)redo + offset);
 		if (tx_log->type == GCACHE_TX_LOG__COMMIT_INS ||
 			tx_log->type == GCACHE_TX_LOG__COMMIT_DEL ||
 			tx_log->type == GCACHE_TX_LOG__ABORT_INS ||
@@ -917,9 +914,9 @@ __gpucache_count_deadspace(kern_data_store *kds,
 			assert(cmeta->attlen == -1);
 			if (!KDS_COLUMN_ITEM_ISNULL(kds, cmeta, rowid))
 			{
-				uint32_t   *base = (uint32_t *)
-					((char *)kds + __kds_unpack(cmeta->values_offset));
-				char	   *vl = (char *)extra + __kds_unpack(base[rowid]);
+				uint64_t   *base = (uint64_t *)
+					((char *)kds + cmeta->values_offset);
+				char	   *vl = (char *)extra + base[rowid];
 
 				retval += MAXALIGN(VARSIZE_ANY(vl));
 			}
@@ -956,8 +953,7 @@ gpucache_apply_xact_logs(kern_context *kcxt,
 		GpuCacheSysattr *sysattr;
 		uint32_t		offset = redo->redo_items[owner_id];
 
-		tx_log = (GCacheTxLogXact *)
-			((char *)redo + __kds_unpack(offset));
+		tx_log = (GCacheTxLogXact *)((char *)redo + offset);
 		switch (tx_log->type)
 		{
 			case GCACHE_TX_LOG__COMMIT_INS:
@@ -1073,7 +1069,7 @@ kern_gpucache_compaction(kern_data_store *kds,
 		for (int j=0; j < kds->ncols; j++)
 		{
 			kern_colmeta   *cmeta = &kds->colmeta[j];
-			uint32_t	   *values;
+			uint64_t	   *values;
 			char		   *vl_src;
 			uint32_t		vl_len;
 			uint64_t		offset;
@@ -1083,21 +1079,21 @@ kern_gpucache_compaction(kern_data_store *kds,
 			if (cmeta->nullmap_offset != 0)
 			{
 				uint8_t	   *nullmap = (uint8_t *)
-					((char *)kds + __kds_unpack(cmeta->nullmap_offset));
+					((char *)kds + cmeta->nullmap_offset);
 
 				if (att_isnull(index, nullmap))
 					continue;
 			}
-			values = (uint32_t *)
-				((char *)kds + __kds_unpack(cmeta->values_offset));
-			vl_src = ((char *)extra_src + __kds_unpack(values[index]));
+			values = (uint64_t *)
+				((char *)kds + cmeta->values_offset);
+			vl_src = ((char *)extra_src + values[index]);
 			vl_len = VARSIZE_ANY(vl_src);
 
 			offset = __atomic_add_uint64(&extra_dst->usage, MAXALIGN(vl_len));
 			if (offset + vl_len <= extra_dst->length)
 			{
 				memcpy((char *)extra_dst + offset, vl_src, vl_len);
-				values[index] = __kds_packed(offset);
+				values[index] = offset;
 			}
 		}
 	}

@@ -2803,6 +2803,10 @@ __codegen_build_movevars_one(codegen_context *context, int depth, int gist_depth
 	{
 		const codegen_kvar_defitem *kvdef = lfirst(lc);
 
+		/* temporary variables? */
+		if (kvdef->kv_offset < 0)
+			continue;
+
 		if ((kvdef->kv_depth >= 0 &&
 			 kvdef->kv_depth <= depth &&
 			 kvdef->kv_maxref > depth) ||
@@ -2961,72 +2965,6 @@ bailout:
 }
 
 /*
- * codegen_build_projection
- */
-bytea *
-codegen_build_projection(codegen_context *context)
-{
-	kern_expression	*kexp;
-	StringInfoData buf;
-	bytea	   *xpucode;
-	bool		meet_resjunk = false;
-	int			nattrs = 0;
-	int			sz;
-	ListCell   *lc;
-
-	/* count nattrs */
-	foreach (lc, context->tlist_dev)
-	{
-		TargetEntry *tle = lfirst(lc);
-
-		if (tle->resjunk)
-		{
-			meet_resjunk = true;
-			continue;
-		}
-		else if (meet_resjunk)
-			elog(ERROR, "Bug? a valid TLE after junk TLEs");
-		else
-			nattrs++;
-	}
-	sz = MAXALIGN(offsetof(kern_expression, u.proj.slot_id[nattrs]));
-	kexp = alloca(sz);
-	memset(kexp, 0, sz);
-
-	initStringInfo(&buf);
-	buf.len = sz;
-	foreach (lc, context->tlist_dev)
-	{
-		TargetEntry	*tle = lfirst(lc);
-		codegen_kvar_defitem *kvdef;
-
-		if (tle->resjunk)
-			break;
-		kvdef = try_inject_projection_expression(context,
-												 kexp,
-												 &buf,
-												 tle->expr);
-		kexp->u.proj.slot_id[kexp->u.proj.nattrs++] = kvdef->kv_slot_id;
-	}
-	Assert(nattrs == kexp->u.proj.nattrs);
-	kexp->exptype = TypeOpCode__int4;
-	kexp->expflags = context->kexp_flags;
-	kexp->opcode  = FuncOpCode__Projection;
-	kexp->args_offset = sz;
-	kexp->u.proj.nattrs = nattrs;
-	memcpy(buf.data, kexp, sz);
-	__appendKernExpMagicAndLength(&buf, 0);
-
-	xpucode = palloc(VARHDRSZ + buf.len);
-	memcpy(xpucode->vl_dat, buf.data, buf.len);
-	SET_VARSIZE(xpucode, VARHDRSZ + buf.len);
-
-	pfree(buf.data);
-
-	return xpucode;
-}
-
-/*
  * __codegen_build_joinquals
  */
 static kern_expression *
@@ -3159,8 +3097,8 @@ __codegen_build_hash_value(codegen_context *context,
 	if (hash_keys == NIL)
 		return NULL;
 
-	kexp = alloca(sz);
-	memset(kexp, 0, sz);
+	kexp = alloca(sizeof(kern_expression));
+	memset(kexp, 0, sizeof(kern_expression));
 	kexp->exptype = TypeOpCode__int4;
 	kexp->expflags = context->kexp_flags;
 	kexp->opcode  = FuncOpCode__HashValue;
@@ -3432,6 +3370,82 @@ codegen_build_packed_gistevals(codegen_context *context,
 	}
 	pfree(buf.data);
 	pp_info->kexp_gist_evals_packed = result;
+}
+
+/*
+ * codegen_build_projection
+ */
+bytea *
+codegen_build_projection(codegen_context *context, List *proj_hash)
+{
+	kern_expression	*kexp;
+	StringInfoData buf;
+	bytea	   *xpucode;
+	bool		meet_resjunk = false;
+	int			nattrs = 0;
+	int			sz;
+	ListCell   *lc;
+
+	/* count nattrs */
+	foreach (lc, context->tlist_dev)
+	{
+		TargetEntry *tle = lfirst(lc);
+
+		if (tle->resjunk)
+		{
+			meet_resjunk = true;
+			continue;
+		}
+		else if (meet_resjunk)
+			elog(ERROR, "Bug? a valid TLE after junk TLEs");
+		else
+			nattrs++;
+	}
+	sz = MAXALIGN(offsetof(kern_expression, u.proj.slot_id[nattrs]));
+	kexp = alloca(sz);
+	memset(kexp, 0, sz);
+
+	initStringInfo(&buf);
+	buf.len = sz;
+	foreach (lc, context->tlist_dev)
+	{
+		TargetEntry	*tle = lfirst(lc);
+		codegen_kvar_defitem *kvdef;
+
+		if (tle->resjunk)
+			break;
+		kvdef = try_inject_projection_expression(context,
+												 kexp,
+												 &buf,
+												 tle->expr);
+		kexp->u.proj.slot_id[kexp->u.proj.nattrs++] = kvdef->kv_slot_id;
+	}
+	/* hash-value (optional; for pinned inner buffer) */
+	if (proj_hash != NIL)
+	{
+		const kern_expression  *khash
+			= __codegen_build_hash_value(context,
+										 proj_hash,
+										 context->num_rels+1);
+		if (khash)
+			kexp->u.proj.hash = __appendBinaryStringInfo(&buf, khash, khash->len);
+	}
+	Assert(nattrs == kexp->u.proj.nattrs);
+	kexp->exptype = TypeOpCode__int4;
+	kexp->expflags = context->kexp_flags;
+	kexp->opcode  = FuncOpCode__Projection;
+	kexp->args_offset = sz;
+	kexp->u.proj.nattrs = nattrs;
+	memcpy(buf.data, kexp, sz);
+	__appendKernExpMagicAndLength(&buf, 0);
+
+	xpucode = palloc(VARHDRSZ + buf.len);
+	memcpy(xpucode->vl_dat, buf.data, buf.len);
+	SET_VARSIZE(xpucode, VARHDRSZ + buf.len);
+
+	pfree(buf.data);
+
+	return xpucode;
 }
 
 /*
@@ -4095,20 +4109,20 @@ __xpucode_gisteval_cstring(StringInfo buf,
 	Assert(kexp->nr_args == 1 &&
 		   kexp->exptype == karg->exptype);
 
-	appendStringInfo(buf, "{GiSTEval(%s): ", dname);
+	appendStringInfo(buf, "{GiSTEval(%s): gist_depth=%d",
+					 dname,
+					 kexp->u.gist.gist_depth);
 
 	kvdef = __lookup_kvar_defitem_by_slot_id(css, kexp->u.gist.ivar_desc.vl_slot_id);
 	if (!kvdef)
 		elog(ERROR, "failed on kernel variable with slot_id=%d",
 			 kexp->u.gist.ivar_desc.vl_slot_id);
-	appendStringInfo(buf, "<slot=%d, idxname%d='%s', type='%s'>, arg=",
+	appendStringInfo(buf, " <slot=%d, idxname%d='%s', type='%s'>",
 					 kexp->u.gist.ivar_desc.vl_slot_id,
 					 kexp->u.gist.ivar_desc.vl_resno,
 					 get_attname(kexp->u.gist.gist_oid,
 								 kexp->u.gist.ivar_desc.vl_resno, false),
 					 devtype_get_name_by_opcode(kvdef->kv_type_code));
-	__xpucode_to_cstring(buf, karg, css, es, dcontext);
-	appendStringInfo(buf, "}");
 }
 
 static void
@@ -4232,6 +4246,33 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 }
 
 static void
+__xpucode_projection_cstring(StringInfo buf,
+							 const kern_expression *kexp,
+							 const CustomScanState *css,
+							 ExplainState *es,
+							 List *dcontext)
+{
+	appendStringInfo(buf, "{Projection: layout=<");
+	for (int j=0; j < kexp->u.proj.nattrs; j++)
+	{
+		uint16_t	proj_slot_id = kexp->u.proj.slot_id[j];
+
+		if (j > 0)
+			appendStringInfo(buf, ",");
+		appendStringInfo(buf, "%d", proj_slot_id);
+	}
+	appendStringInfo(buf, ">");
+
+	if (kexp->u.proj.hash != 0)
+	{
+		const kern_expression *khash = (const kern_expression *)
+			((const char *)kexp + kexp->u.proj.hash);
+		appendStringInfo(buf, ", Hash=");
+		__xpucode_to_cstring(buf, khash, css, es, dcontext);
+	}
+}
+
+static void
 __xpucode_to_cstring(StringInfo buf,
 					 const kern_expression *kexp,
 					 const CustomScanState *css,	/* optional */
@@ -4257,16 +4298,7 @@ __xpucode_to_cstring(StringInfo buf,
 			__xpucode_var_cstring(buf, kexp, css, es, dcontext);
 			return;
 		case FuncOpCode__Projection:
-			appendStringInfo(buf, "{Projection: layout=<");
-			for (int j=0; j < kexp->u.proj.nattrs; j++)
-			{
-				uint16_t	proj_slot_id = kexp->u.proj.slot_id[j];
-
-				if (j > 0)
-					appendStringInfo(buf, ",");
-				appendStringInfo(buf, "%d", proj_slot_id);
-			}
-			appendStringInfo(buf, ">");
+			__xpucode_projection_cstring(buf, kexp, css, es, dcontext);
 			break;
 		case FuncOpCode__LoadVars:
 			__xpucode_loadvars_cstring(buf, kexp, css, es, dcontext);
@@ -4526,11 +4558,15 @@ pgstrom_explain_kvars_slot(const CustomScanState *css,
 			__explain_kvars_slot_subfield_types(&buf, kvdef->kv_subfields);
 			appendStringInfoChar(&buf, ')');
 		}
-		appendStringInfo(&buf, "', expr='%s'>",
+		appendStringInfo(&buf, "', expr='%s'",
 						 deparse_expression((Node *)kvdef->kv_expr,
 											dcontext,
 											(cscan->custom_plans != NIL),
 											false));
+		if (kvdef->kv_offset >= 0)
+			appendStringInfo(&buf, ", kv_off=0x%04x",
+							 kvdef->kv_offset);
+		appendStringInfoString(&buf, ">");
 		slot_id++;
 	}
 	ExplainPropertyText("KVars-Slot", buf.data, es);
@@ -4613,6 +4649,66 @@ pgstrom_explain_kvecs_buffer(const CustomScanState *css,
 	ExplainPropertyText("KVecs-Buffer", buf.data, es);
 
 	pfree(buf.data);
+}
+
+/*
+ * pgstrom_explain_fallback_desc
+ */
+void
+pgstrom_explain_fallback_desc(pgstromTaskState *pts,
+							  ExplainState *es,
+							  List *dcontext)
+{
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	kern_fallback_desc *fb_desc_array;
+	StringInfoData buf;
+	int			fb_desc_nitems;
+
+	if (!pts->kern_fallback_desc)
+		return;
+	initStringInfo(&buf);
+	fb_desc_array = (kern_fallback_desc *)VARDATA(pts->kern_fallback_desc);
+	fb_desc_nitems = (VARSIZE(pts->kern_fallback_desc) -
+					  VARHDRSZ) / sizeof(kern_fallback_desc);
+	appendStringInfo(&buf, "[");
+	for (int i=0; i < fb_desc_nitems; i++)
+	{
+		kern_fallback_desc *fb_desc = &fb_desc_array[i];
+		Expr	   *kv_expr = NULL;
+		ListCell   *lc;
+
+		foreach (lc, pp_info->kvars_deflist)
+		{
+			codegen_kvar_defitem *kvdef = lfirst(lc);
+
+			if (fb_desc->fb_src_depth == kvdef->kv_depth &&
+				fb_desc->fb_src_resno == kvdef->kv_resno)
+			{
+				kv_expr = kvdef->kv_expr;
+				break;
+			}
+		}
+		if (i > 0)
+			appendStringInfo(&buf, ", ");
+		if (!kv_expr)
+			appendStringInfo(&buf, "<dest='%d', slot='%d', depth=%d:%d>",
+							 fb_desc->fb_dst_resno-1,
+							 fb_desc->fb_slot_id,
+							 fb_desc->fb_src_depth,
+							 fb_desc->fb_max_depth);
+		else
+			appendStringInfo(&buf, "<dest='%d', expr='%s', depth=%d:%d>",
+							 fb_desc->fb_dst_resno-1,
+							 deparse_expression((Node *)kv_expr,
+												dcontext,
+												false, false),
+							 fb_desc->fb_src_depth,
+							 fb_desc->fb_max_depth);
+	}
+	appendStringInfo(&buf, "]");
+	if (buf.len > 0)
+		ExplainPropertyText("Fallback-desc", buf.data, es);
+    pfree(buf.data);
 }
 
 /*

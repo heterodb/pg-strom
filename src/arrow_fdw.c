@@ -206,9 +206,8 @@ arrowFieldGetPGTypeHint(const ArrowField *field)
 	{
 		ArrowKeyValue *kv = &field->custom_metadata[i];
 		Oid			extension_oid = InvalidOid;
-		Oid			namespace_oid = PG_CATALOG_NAMESPACE;
+		Oid			namespace_oid = InvalidOid;
 		Oid			hint_oid;
-		bool		namespace_specified = false;
 		char	   *namebuf, *pos;
 
 		/* pg_type = NAMESPACE.TYPENAME@EXTENSION */
@@ -224,7 +223,6 @@ arrowFieldGetPGTypeHint(const ArrowField *field)
 			if (!OidIsValid(namespace_oid))
 				continue;
 			namebuf = pos;
-			namespace_specified = true;
 		}
 		pos = strchr(namebuf, '@');
 		if (pos)
@@ -234,24 +232,39 @@ arrowFieldGetPGTypeHint(const ArrowField *field)
 			if (!OidIsValid(extension_oid))
 				continue;
 		}
-		/* 1st try: user specified namespace or 'pg_catalog' */
-		hint_oid = GetSysCacheOid2(TYPENAMENSP,
-								   Anum_pg_type_oid,
-								   CStringGetDatum(namebuf),
-								   ObjectIdGetDatum(namespace_oid));
-		if (OidIsValid(hint_oid))
+
+		if (OidIsValid(namespace_oid))
 		{
-			if (!OidIsValid(extension_oid) ||
-				getExtensionOfObject(TypeRelationId,
-									 hint_oid) == extension_oid)
-				return hint_oid;
+			hint_oid = GetSysCacheOid2(TYPENAMENSP,
+									   Anum_pg_type_oid,
+									   CStringGetDatum(namebuf),
+									   ObjectIdGetDatum(namespace_oid));
+			if (OidIsValid(hint_oid))
+			{
+				if (!OidIsValid(extension_oid) ||
+					getExtensionOfObject(TypeRelationId,
+										 hint_oid) == extension_oid)
+					return hint_oid;
+			}
 		}
-		/* 2nd try: any namespace (if not specified) */
-		if (!namespace_specified)
+		else
 		{
 			CatCList   *typelist;
 			HeapTuple	htup;
 
+			/* 1st try: 'pg_catalog' + typname */
+			hint_oid = GetSysCacheOid2(TYPENAMENSP,
+									   Anum_pg_type_oid,
+									   CStringGetDatum(namebuf),
+									   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+			if (OidIsValid(hint_oid))
+			{
+				if (!OidIsValid(extension_oid) ||
+					getExtensionOfObject(TypeRelationId,
+										 hint_oid) == extension_oid)
+					return hint_oid;
+			}
+			/* 2nd try: any other namespaces */
 			typelist = SearchSysCacheList1(TYPENAMENSP,
 										   CStringGetDatum(namebuf));
 			for (int k=0; k < typelist->n_members; k++)
@@ -2230,8 +2243,8 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 					 uint32_t chunk_align,
 					 off_t    chunk_offset,
 					 size_t   chunk_length,
-					 uint32_t *p_cmeta_offset,
-					 uint32_t *p_cmeta_length)
+					 uint64_t *p_cmeta_offset,
+					 uint64_t *p_cmeta_length)
 {
 	off_t		f_pos = con->rb_offset + chunk_offset;
 	off_t		f_gap;
@@ -2266,9 +2279,8 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 				con->m_offset += f_gap;
 				con->f_offset += f_gap;
 			}
-			*p_cmeta_offset = __kds_packed(con->kds_head_sz +
-										   con->m_offset);
-			*p_cmeta_length = __kds_packed(MAXALIGN(chunk_length));
+			*p_cmeta_offset = con->kds_head_sz + con->m_offset;
+			*p_cmeta_length = MAXALIGN(chunk_length);
 			con->m_offset += chunk_length;
 			con->f_offset += chunk_length;
 			return;
@@ -2297,8 +2309,8 @@ __setupIOvectorField(arrowFdwSetupIOContext *con,
 	ioc->m_offset = m_offset - f_gap;
 	ioc->fchunk_id = f_base / PAGE_SIZE;
 
-	*p_cmeta_offset = __kds_packed(con->kds_head_sz + m_offset);
-	*p_cmeta_length = __kds_packed(MAXALIGN(chunk_length));
+	*p_cmeta_offset = con->kds_head_sz + m_offset;
+	*p_cmeta_length = MAXALIGN(chunk_length);
 	con->m_offset = m_offset + chunk_length;
 	con->f_offset = f_pos + chunk_length;
 }
@@ -2436,12 +2448,12 @@ arrowFdwSetupIOvector(RecordBatchState *rb_state,
 
 			elog(INFO, "%ccol[%d] nullmap=%lu,%lu values=%lu,%lu extra=%lu,%lu",
 				 j < kds->ncols ? ' ' : '*', j,
-				 __kds_unpack(cmeta->nullmap_offset),
-				 __kds_unpack(cmeta->nullmap_length),
-				 __kds_unpack(cmeta->values_offset),
-				 __kds_unpack(cmeta->values_length),
-				 __kds_unpack(cmeta->extra_offset),
-				 __kds_unpack(cmeta->extra_length));
+				 cmeta->nullmap_offset,
+				 cmeta->nullmap_length,
+				 cmeta->values_offset,
+				 cmeta->values_length,
+				 cmeta->extra_offset,
+				 cmeta->extra_length);
 		}
 	}
 #endif
@@ -2909,8 +2921,8 @@ static Datum
 pg_bpchar_arrow_ref(kern_data_store *kds,
 					kern_colmeta *cmeta, size_t index)
 {
-	char	   *values = ((char *)kds + __kds_unpack(cmeta->values_offset));
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *values = ((char *)kds + cmeta->values_offset);
+	size_t		length = cmeta->values_length;
 	int32_t		unitsz = cmeta->attopts.fixed_size_binary.byteWidth;
 	struct varlena *res;
 
@@ -2929,8 +2941,8 @@ static Datum
 pg_bool_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	uint8_t	   *bitmap = (uint8_t *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	uint8_t	   *bitmap = (uint8_t *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	bool		rv;
 
 	if (sizeof(uint8_t) * (index>>3) >= length)
@@ -2944,8 +2956,8 @@ pg_simple_arrow_ref(kern_data_store *kds,
 					kern_colmeta *cmeta, size_t index)
 {
 	int32_t		unitsz = cmeta->attopts.unitsz;
-	char	   *values = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *values = (char *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	Datum		retval = 0;
 
 	Assert(unitsz > 0 && unitsz <= sizeof(Datum));
@@ -2960,8 +2972,8 @@ pg_numeric_arrow_ref(kern_data_store *kds,
 					 kern_colmeta *cmeta, size_t index)
 {
 	char	   *result = palloc0(sizeof(struct NumericData));
-	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *base = (char *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	int			dscale = cmeta->attopts.decimal.scale;
 	int128_t	ival;
 
@@ -2977,8 +2989,8 @@ static Datum
 pg_date_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *base = (char *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	DateADT		dt;
 
 	switch (cmeta->attopts.date.unit)
@@ -3005,8 +3017,8 @@ static Datum
 pg_time_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *base = (char *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	TimeADT		tm;
 
 	switch (cmeta->attopts.time.unit)
@@ -3042,8 +3054,8 @@ static Datum
 pg_timestamp_arrow_ref(kern_data_store *kds,
 					   kern_colmeta *cmeta, size_t index)
 {
-	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *base = (char *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	Timestamp	ts;
 
 	switch (cmeta->attopts.timestamp.unit)
@@ -3082,8 +3094,8 @@ static Datum
 pg_interval_arrow_ref(kern_data_store *kds,
 					  kern_colmeta *cmeta, size_t index)
 {
-	char	   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t		length = __kds_unpack(cmeta->values_length);
+	char	   *base = (char *)kds + cmeta->values_offset;
+	size_t		length = cmeta->values_length;
 	Interval   *iv = palloc0(sizeof(Interval));
 
 	switch (cmeta->attopts.interval.unit)
@@ -3111,8 +3123,8 @@ static Datum
 pg_macaddr_arrow_ref(kern_data_store *kds,
 					 kern_colmeta *cmeta, size_t index)
 {
-	char   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t	length = __kds_unpack(cmeta->values_length);
+	char   *base = (char *)kds + cmeta->values_offset;
+	size_t	length = cmeta->values_length;
 
 	if (cmeta->attopts.fixed_size_binary.byteWidth != sizeof(macaddr))
 		elog(ERROR, "Bug? wrong FixedSizeBinary::byteWidth(%d) for macaddr",
@@ -3127,8 +3139,8 @@ static Datum
 pg_inet_arrow_ref(kern_data_store *kds,
 				  kern_colmeta *cmeta, size_t index)
 {
-	char   *base = (char *)kds + __kds_unpack(cmeta->values_offset);
-	size_t	length = __kds_unpack(cmeta->values_length);
+	char   *base = (char *)kds + cmeta->values_offset;
+	size_t	length = cmeta->values_length;
 	inet   *ip = palloc(sizeof(inet));
 
 	if (cmeta->attopts.fixed_size_binary.byteWidth == 4)
@@ -3331,10 +3343,10 @@ pg_datum_arrow_ref(kern_data_store *kds,
 					cmeta->idx_subattrs < kds->ncols ||
 					cmeta->idx_subattrs >= kds->nr_colmeta)
 					elog(ERROR, "Bug? corrupted kernel column metadata");
-				if (sizeof(uint32_t) * (index+2) > __kds_unpack(cmeta->values_length))
+				if (sizeof(uint32_t) * (index+2) > cmeta->values_length)
 					elog(ERROR, "Bug? array index is out of range");
 				smeta = &kds->colmeta[cmeta->idx_subattrs];
-				offset = (uint32_t *)((char *)kds + __kds_unpack(cmeta->values_offset));
+				offset = (uint32_t *)((char *)kds + cmeta->values_offset);
 				datum = pg_array_arrow_ref(kds, smeta,
 										   offset[index],
 										   offset[index+1]);
@@ -3351,10 +3363,10 @@ pg_datum_arrow_ref(kern_data_store *kds,
 					cmeta->idx_subattrs < kds->ncols ||
 					cmeta->idx_subattrs >= kds->nr_colmeta)
 					elog(ERROR, "Bug? corrupted kernel column metadata");
-				if (sizeof(uint64_t) * (index+2) > __kds_unpack(cmeta->values_length))
+				if (sizeof(uint64_t) * (index+2) > cmeta->values_length)
 					elog(ERROR, "Bug? array index is out of range");
 				smeta = &kds->colmeta[cmeta->idx_subattrs];
-				offset = (uint64_t *)((char *)kds + __kds_unpack(cmeta->values_offset));
+				offset = (uint64_t *)((char *)kds + cmeta->values_offset);
 				datum = pg_array_arrow_ref(kds, smeta,
 										   offset[index],
 										   offset[index+1]);
@@ -4157,6 +4169,35 @@ ArrowAnalyzeForeignTable(Relation frel,
 }
 
 /*
+ * ensureUniqueFieldNames
+ */
+static const char **
+ensureUniqueFieldNames(ArrowSchema *schema)
+{
+	const char **column_names = palloc0(sizeof(char *) * schema->_num_fields);
+	int		count = 2;
+
+	for (int k=0; k < schema->_num_fields; k++)
+	{
+		const char *cname = schema->fields[k].name;
+	retry:
+		for (int j=0; j < k; j++)
+		{
+			if (strcasecmp(cname, column_names[j]) == 0)
+			{
+				cname = psprintf("__%s_%d", schema->fields[k].name, count++);
+				goto retry;
+			}
+		}
+		if (schema->fields[k].name != cname)
+			elog(NOTICE, "Arrow::field[%d] '%s' meets a duplicated field name, so renamed to '%s'",
+				 k, schema->fields[k].name, cname);
+		column_names[k] = cname;
+	}
+	return column_names;
+}
+
+/*
  * ArrowImportForeignSchema
  */
 static List *
@@ -4165,7 +4206,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 	ArrowSchema	schema;
 	List	   *filesList;
 	ListCell   *lc;
-	int			j;
+	const char **column_names;
 	StringInfoData	cmd;
 
 	/* sanity checks */
@@ -4209,7 +4250,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			if (schema.endianness != stemp->endianness ||
 				schema._num_fields != stemp->_num_fields)
 				elog(ERROR, "file '%s' has incompatible schema definition", fname);
-			for (j=0; j < schema._num_fields; j++)
+			for (int j=0; j < schema._num_fields; j++)
 			{
 				if (!arrowFieldTypeIsEqual(&schema.fields[j],
 										   &stemp->fields[j]))
@@ -4217,12 +4258,14 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			}
 		}
 	}
+	/* ensure the field-names are unique */
+	column_names = ensureUniqueFieldNames(&schema);
 
 	/* makes a command to define foreign table */
 	initStringInfo(&cmd);
 	appendStringInfo(&cmd, "CREATE FOREIGN TABLE %s (\n",
 					 quote_identifier(stmt->remote_schema));
-	for (j=0; j < schema._num_fields; j++)
+	for (int j=0; j < schema._num_fields; j++)
 	{
 		ArrowField *field = &schema.fields[j];
 		Oid				type_oid;
@@ -4246,7 +4289,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		if (type_mod < 0)
 		{
 			appendStringInfo(&cmd, "  %s %s.%s",
-							 quote_identifier(field->name),
+							 quote_identifier(column_names[j]),
 							 quote_identifier(schema),
 							 NameStr(__type->typname));
 		}
@@ -4254,7 +4297,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		{
 			Assert(type_mod >= VARHDRSZ);
 			appendStringInfo(&cmd, "  %s %s.%s(%d)",
-							 quote_identifier(field->name),
+							 quote_identifier(column_names[j]),
 							 quote_identifier(schema),
 							 NameStr(__type->typname),
 							 type_mod - VARHDRSZ);
@@ -4296,6 +4339,7 @@ __insertPgAttributeTuple(Relation pg_attr_rel,
 						 CatalogIndexState pg_attr_index,
 						 Oid ftable_oid,
 						 AttrNumber attnum,
+						 const char *attname,
 						 ArrowField *field)
 {
 	Oid			type_oid;
@@ -4322,7 +4366,7 @@ __insertPgAttributeTuple(Relation pg_attr_rel,
 	memset(isnull, 0, sizeof(isnull));
 
 	values[Anum_pg_attribute_attrelid - 1] = ObjectIdGetDatum(ftable_oid);
-	values[Anum_pg_attribute_attname - 1] = CStringGetDatum(field->name);
+	values[Anum_pg_attribute_attname - 1] = CStringGetDatum(attname);
 	values[Anum_pg_attribute_atttypid - 1] = ObjectIdGetDatum(type_oid);
 	values[Anum_pg_attribute_attstattarget - 1] = Int32GetDatum(-1);
 	values[Anum_pg_attribute_attlen - 1] = Int16GetDatum(type_len);
@@ -4364,8 +4408,9 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 	char	   *ftable_name;
 	char	   *file_name;
 	char	   *namespace_name;
+	const char **column_names;
 	DefElem	   *defel;
-	int			j, nfields;
+	int			nfields;
 	Oid			ftable_oid;
 	ObjectAddress myself;
 	ArrowFileInfo af_info;
@@ -4390,6 +4435,7 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 	if (schema._num_fields > SHRT_MAX)
 		Elog("Arrow file '%s' has too much fields: %d",
 			 file_name, schema._num_fields);
+	column_names = ensureUniqueFieldNames(&schema);
 
 	/* setup CreateForeignTableStmt */
 	memset(&stmt, 0, sizeof(CreateForeignTableStmt));
@@ -4397,7 +4443,7 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 	stmt.base.relation = makeRangeVar(namespace_name, ftable_name, -1);
 
 	nfields = Min(schema._num_fields, 100);
-	for (j=0; j < nfields; j++)
+	for (int j=0; j < nfields; j++)
 	{
 		ColumnDef  *cdef;
 		Oid			type_oid;
@@ -4407,7 +4453,7 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 								 &type_oid,
 								 &type_mod,
 								 NULL);
-		cdef = makeColumnDef(schema.fields[j].name,
+		cdef = makeColumnDef(column_names[j],
 							 type_oid,
 							 type_mod,
 							 InvalidOid);
@@ -4438,12 +4484,13 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 		if (!HeapTupleIsValid(tup))
 			elog(ERROR, "cache lookup failed for relation %u", ftable_oid);
 
-		for (j=nfields; j < schema._num_fields; j++)
+		for (int j=nfields; j < schema._num_fields; j++)
 		{
 			__insertPgAttributeTuple(a_rel,
 									 a_index,
 									 ftable_oid,
 									 j+1,
+									 column_names[j],
                                      &schema.fields[j]);
 		}
 		/* update relnatts also */

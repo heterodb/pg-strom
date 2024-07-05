@@ -277,7 +277,6 @@ extern int		assignArrowTypePgSQL(SQLfield *column,
 									 Oid typelem,
 									 const char *tz_name,
 									 const char *extname,
-									 const char *extschema,
 									 ArrowField *arrow_field);
 /*
  * Error messages, and misc definitions for pg2arrow

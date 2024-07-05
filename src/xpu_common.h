@@ -285,7 +285,6 @@ __strcmp(const char *s1, const char *s2)
  * ----------------------------------------------------------------
  */
 #define WARPSIZE				32
-#define MAXTHREADS_PER_BLOCK	1024
 #define CUDA_L1_CACHELINE_SZ	128
 
 #if defined(__CUDACC__)
@@ -388,15 +387,12 @@ typedef enum {
 /*
  * Error status
  */
-#define ERRCODE_STROM_SUCCESS				0
-#define ERRCODE_CPU_FALLBACK				1
-#define ERRCODE_WRONG_XPU_CODE				3
-#define ERRCODE_VARLENA_UNSUPPORTED			4
-#define ERRCODE_RECURSION_TOO_DEEP			5
-#define ERRCODE_BUFFER_NO_SPACE				6
-#define ERRCODE_GPUDIRECT_READFILE_ASYNC	7
-#define ERRCODE_DEVICE_INTERNAL				99
-#define ERRCODE_DEVICE_FATAL				999
+#define ERRCODE_STROM_SUCCESS		0
+#define ERRCODE_SUSPEND_FALLBACK	'f'		/* suspend by CPU fallback */
+#define ERRCODE_SUSPEND_NO_SPACE	'd'		/* suspend by buffer no space */
+#define ERRCODE_DEVICE_ERROR		'E'		/* generic device error */
+#define ERRCODE_DEVICE_FATAL		'F'		/* generic device fatal error */
+#define ERRCODE_IS_SUSPEND(x)		((x) >= 'a' && (x) <= 'z')
 
 #define KERN_ERRORBUF_FILENAME_LEN		32
 #define KERN_ERRORBUF_FUNCNAME_LEN		64
@@ -420,6 +416,7 @@ typedef struct
 	const char	   *error_funcname;
 	const char	   *error_message;
 	struct kern_session_info *session;
+	struct kern_data_store *kds_fallback;
 
 	/* the kernel variables slot */
 	struct xpu_datum_t **kvars_slot;
@@ -451,7 +448,7 @@ typedef struct
 	char			vlbuf[1];
 } kern_context;
 
-#define INIT_KERNEL_CONTEXT(KCXT,SESSION)								\
+#define INIT_KERNEL_CONTEXT(KCXT,SESSION,KDS_FALLBACK)					\
 	do {																\
 		const kern_varslot_desc *__vs_desc;								\
 		uint32_t	__bufsz = Max(512, (SESSION)->kcxt_extra_bufsz);	\
@@ -460,6 +457,7 @@ typedef struct
 		KCXT = (kern_context *)alloca(__len);							\
 		memset(KCXT, 0, __len);											\
 		KCXT->session = (SESSION);										\
+		KCXT->kds_fallback = (KDS_FALLBACK);							\
 		KCXT->kvars_nrooms = (SESSION)->kcxt_kvars_nrooms;				\
 		KCXT->kvars_nslots = (SESSION)->kcxt_kvars_nslots;				\
 		KCXT->kvecs_bufsz  = (SESSION)->kcxt_kvecs_bufsz;				\
@@ -503,25 +501,35 @@ __STROM_EREPORT(kern_context *kcxt,
 				const char *funcname,
 				const char *message)
 {
-	if ((kcxt->errcode == ERRCODE_STROM_SUCCESS && errcode != ERRCODE_STROM_SUCCESS) ||
-		(kcxt->errcode == ERRCODE_CPU_FALLBACK  && (errcode != ERRCODE_STROM_SUCCESS &&
-													errcode != ERRCODE_STROM_SUCCESS)))
+	/* in case when no significant errors are reported... */
+	if (errcode != ERRCODE_STROM_SUCCESS)
 	{
-		kcxt->errcode        = errcode;
-		kcxt->error_filename = __basename(filename);
-		kcxt->error_lineno   = lineno;
-		kcxt->error_funcname = funcname;
-		kcxt->error_message  = message;
+		switch (kcxt->errcode)
+		{
+			case ERRCODE_SUSPEND_FALLBACK:
+			case ERRCODE_SUSPEND_NO_SPACE:
+				if (ERRCODE_IS_SUSPEND(errcode))
+					return;
+			case ERRCODE_STROM_SUCCESS:
+				kcxt->errcode = errcode;
+				kcxt->error_filename = __basename(filename);
+				kcxt->error_lineno   = lineno;
+				kcxt->error_funcname = funcname;
+				kcxt->error_message  = message;
+				break;
+			default:
+				break;
+		}
 	}
 }
-#define STROM_ELOG(kcxt, message)									\
-	__STROM_EREPORT((kcxt),ERRCODE_DEVICE_INTERNAL,					\
+#define STROM_ELOG(kcxt, message)								\
+	__STROM_EREPORT((kcxt),ERRCODE_DEVICE_ERROR,				\
 					__FILE__,__LINE__,__FUNCTION__,(message))
-#define STROM_EREPORT(kcxt, errcode, message)						\
-	__STROM_EREPORT((kcxt),(errcode),								\
+#define SUSPEND_FALLBACK(kcxt, message)							\
+	__STROM_EREPORT((kcxt),ERRCODE_SUSPEND_FALLBACK,			\
 					__FILE__,__LINE__,__FUNCTION__,(message))
-#define STROM_CPU_FALLBACK(kcxt, message)							\
-	__STROM_EREPORT((kcxt),ERRCODE_CPU_FALLBACK,					\
+#define SUSPEND_NO_SPACE(kcxt, message)							\
+	__STROM_EREPORT((kcxt),ERRCODE_SUSPEND_NO_SPACE,			\
 					__FILE__,__LINE__,__FUNCTION__,(message))
 
 INLINE_FUNCTION(void *)
@@ -623,12 +631,12 @@ struct kern_colmeta {
 	 * related data types, or precision in decimal data type.
 	 */
 	ArrowTypeOptions attopts;
-	uint32_t		nullmap_offset;
-	uint32_t		nullmap_length;
-	uint32_t		values_offset;
-	uint32_t		values_length;
-	uint32_t		extra_offset;
-	uint32_t		extra_length;
+	uint64_t		nullmap_offset;
+	uint64_t		nullmap_length;
+	uint64_t		values_offset;
+	uint64_t		values_length;
+	uint64_t		extra_offset;
+	uint64_t		extra_length;
 };
 typedef struct kern_colmeta		kern_colmeta;
 
@@ -637,10 +645,11 @@ typedef struct kern_colmeta		kern_colmeta;
 #define KDS_FORMAT_BLOCK		'b'		/* raw blocks for direct loading */
 #define KDS_FORMAT_COLUMN		'c'		/* columnar based storage format */
 #define KDS_FORMAT_ARROW		'a'		/* apache arrow format */
+#define KDS_FORMAT_FALLBACK		'f'		/* CPU-fallback buffer */
 
 struct kern_data_store {
 	uint64_t		length;		/* length of this data-store */
-	uint64_t		__usage64;	/* usage of this data-store */
+	uint64_t		usage;		/* usage of this data-store */
 	uint32_t		nitems;		/* number of rows (or blocks) in this store */
 	uint32_t		ncols;		/* number of columns in this store */
 	char			format;		/* one of KDS_FORMAT_* above */
@@ -744,28 +753,6 @@ struct kern_data_extra
 	char		data[1];
 };
 typedef struct kern_data_extra		kern_data_extra;
-
-/*
- * MEMO: Support of 32GB KDS - KDS with row-, hash- and column-format
- * internally uses 32bit offset value from the head or base address.
- * We have assumption here - any objects pointed by the offset value
- * is always aligned to MAXIMUM_ALIGNOF boundary (64bit).
- * It means we can use 32bit offset to represent up to 32GB range (35bit).
- */
-#define __KDS_LENGTH_LIMIT			(1UL<<35)
-
-INLINE_FUNCTION(uint32_t)
-__kds_packed(size_t offset)
-{
-	assert((offset & ~(0xffffffffUL << MAXIMUM_ALIGNOF_SHIFT)) == 0);
-	return (uint32_t)(offset >> MAXIMUM_ALIGNOF_SHIFT);
-}
-
-INLINE_FUNCTION(size_t)
-__kds_unpack(uint32_t offset)
-{
-	return (size_t)offset << MAXIMUM_ALIGNOF_SHIFT;
-}
 
 /* ----------------------------------------------------------------
  *
@@ -1101,6 +1088,7 @@ GistFollowRight(PageHeaderData *page)
 {
 	return (GistPageGetOpaque(page)->flags & F_FOLLOW_RIGHT) != 0;
 }
+
 /* root page of a gist index */
 #define GIST_ROOT_BLKNO			0
 
@@ -1118,22 +1106,38 @@ struct kern_tupitem
 typedef struct kern_tupitem		kern_tupitem;
 
 /*
- * kern_hashitem - individual items for KDS_FORMAT_HASH / KDS_FORMAT_HASH64
+ * kern_hashitem - individual items for KDS_FORMAT_HASH
  */
 struct kern_hashitem
 {
 	uint64_t		next;		/* offset of the next entry */
 	uint32_t		hash;		/* 32-bit hash value */
 	uint32_t		__padding__;
-	kern_tupitem	t	__MAXALIGNED__;			/* HeapTuple of this entry */
+	/* HeapTuple of this entry */
+	kern_tupitem	t	__MAXALIGNED__;
 };
 typedef struct kern_hashitem	kern_hashitem;
+
+/*
+ * kern_fallbackitem - individual items for KDS_FORMAT_FALLBACK
+ */
+struct kern_fallbackitem
+{
+	uint32_t		t_len;
+	uint16_t		depth;
+	uint8_t			__reserved__;
+	uint8_t			matched;
+	uint64_t		l_state;
+	HeapTupleHeaderData htup;
+};
+typedef struct kern_fallbackitem	kern_fallbackitem;
 
 /* Length of the header postion of kern_data_store */
 INLINE_FUNCTION(size_t)
 KDS_HEAD_LENGTH(const kern_data_store *kds)
 {
-	return MAXALIGN(offsetof(kern_data_store, colmeta[kds->nr_colmeta]));
+	return MAXALIGN(offsetof(kern_data_store, colmeta) +
+					sizeof(kern_colmeta) * kds->nr_colmeta);
 }
 
 /* Base address of the kern_data_store */
@@ -1153,12 +1157,13 @@ INLINE_FUNCTION(uint64_t *)
 KDS_GET_ROWINDEX(const kern_data_store *kds)
 {
 	assert(kds->format == KDS_FORMAT_ROW ||
-		   kds->format == KDS_FORMAT_HASH);
+		   kds->format == KDS_FORMAT_HASH ||
+		   kds->format == KDS_FORMAT_FALLBACK);
 	return (uint64_t *)KDS_BODY_ADDR(kds) + kds->hash_nslots;
 }
 
 INLINE_FUNCTION(kern_tupitem *)
-KDS_GET_TUPITEM(kern_data_store *kds, uint32_t kds_index)
+KDS_GET_TUPITEM(const kern_data_store *kds, uint32_t kds_index)
 {
 	uint64_t	offset = __volatileRead(KDS_GET_ROWINDEX(kds) + kds_index);
 
@@ -1182,7 +1187,8 @@ INLINE_FUNCTION(bool)
 __KDS_CHECK_OVERFLOW(const kern_data_store *kds, uint32_t nitems, uint64_t usage)
 {
 	assert(kds->format == KDS_FORMAT_ROW ||
-		   kds->format == KDS_FORMAT_HASH);
+		   kds->format == KDS_FORMAT_HASH ||
+		   kds->format == KDS_FORMAT_FALLBACK);
 	return (KDS_HEAD_LENGTH(kds) +
 			sizeof(uint64_t) * (kds->hash_nslots + nitems) +
 			usage) <= kds->length;
@@ -1230,12 +1236,7 @@ KDS_HASH_FIRST_ITEM(const kern_data_store *kds, uint32_t hash)
 	{
 		kern_hashitem *hitem = (kern_hashitem *)
 			((char *)kds + kds->length - offset);
-//		Assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hitem));
-		if (!__KDS_HASH_ITEM_CHECK_VALID(kds, hitem))
-		{
-			printf("kds=%p-%p len=%lu hitem=%p\n", kds, (char *)kds + kds->length, kds->length, hitem);
-			return NULL;
-		}
+		assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hitem));
 		return hitem;
 	}
 	return NULL;
@@ -1248,12 +1249,7 @@ KDS_HASH_NEXT_ITEM(const kern_data_store *kds, uint64_t hnext_offset)
 	{
 		kern_hashitem *hnext = (kern_hashitem *)
 			((char *)kds + kds->length - hnext_offset);
-		//Assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hnext));
-		if (!__KDS_HASH_ITEM_CHECK_VALID(kds, hnext))
-		{
-			printf("KDS=%p-%p len=%lu hitem=%p %u\n", kds, (char *)kds + kds->length, kds->length, hnext, hnext->t.t_len);
-			return NULL;
-		}
+		assert(__KDS_HASH_ITEM_CHECK_VALID(kds, hnext));
 		return hnext;
 	}
 	return NULL;
@@ -1332,11 +1328,11 @@ KDS_ARROW_CHECK_ISNULL(const kern_data_store *kds,
 		   cmeta <  kds->colmeta + kds->nr_colmeta);
 	if (cmeta->nullmap_offset)
 	{
-		uint8_t	   *nullmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
+		uint8_t	   *nullmap = (uint8_t *)kds + cmeta->nullmap_offset;
 		uint32_t	mask = (1U << (index & 7));
 
 		index = (index >> 3);
-		if (index >= __kds_unpack(cmeta->nullmap_length) ||
+		if (index >= cmeta->nullmap_length ||
 			(nullmap[index] & mask) == 0)
 			return true;	/* NULL */
 	}
@@ -1354,10 +1350,10 @@ KDS_ARROW_REF_SIMPLE_DATUM(const kern_data_store *kds,
 		   cmeta->extra_length == 0);
 	/* NOTE: caller should already apply NULL-checks, so we don't check
 	 * it again. */
-	if (unitsz * (index + 1) <= __kds_unpack(cmeta->values_length))
+	if (unitsz * (index + 1) <= cmeta->values_length)
 	{
-		const char *values = ((const char *)kds +
-							  __kds_unpack(cmeta->values_offset));
+		const char *values = ((const char *)kds + cmeta->values_offset);
+
 		return values + unitsz * index;
 	}
 	return NULL;
@@ -1375,14 +1371,14 @@ KDS_ARROW_REF_VARLENA32_DATUM(const kern_data_store *kds,
 		   cmeta->extra_offset  > 0);
 	/* NOTE: caller should already apply NULL-checks, so we don't check
 	 * it again. */
-	if (sizeof(uint32_t) * (index+1) <= __kds_unpack(cmeta->values_length))
+	if (sizeof(uint32_t) * (index+1) <= cmeta->values_length)
 	{
 		const uint32_t *offset = (const uint32_t *)
-			((const char *)kds + __kds_unpack(cmeta->values_offset));
+			((const char *)kds + cmeta->values_offset);
 		const char	   *extra  = (const char *)
-			((const char *)kds + __kds_unpack(cmeta->extra_offset));
-		if (offset[index] <= offset[index+1] &&
-			offset[index+1] <= __kds_unpack(cmeta->extra_length) &&
+			((const char *)kds + cmeta->extra_offset);
+		if (offset[index]   <= offset[index+1] &&
+			offset[index+1] <= cmeta->extra_length &&
 			offset[index+1] - offset[index] <= VARATT_MAX)
 		{
 			*p_length = (int)(offset[index+1] - offset[index]);
@@ -1400,14 +1396,14 @@ KDS_ARROW_REF_VARLENA64_DATUM(const kern_data_store *kds,
 {
 	Assert(cmeta->values_offset > 0 &&
 		   cmeta->extra_offset  > 0);
-	if (sizeof(uint32_t) * (index+1) <= __kds_unpack(cmeta->values_length))
+	if (sizeof(uint32_t) * (index+1) <= cmeta->values_length)
 	{
 		const uint64_t *offset = (const uint64_t *)
-			((const char *)kds + __kds_unpack(cmeta->values_offset));
+			((const char *)kds + cmeta->values_offset);
 		const char	   *extra  = (const char *)
-			((const char *)kds + __kds_unpack(cmeta->extra_offset));
-		if (offset[index] <= offset[index+1] &&
-			offset[index+1] <= __kds_unpack(cmeta->extra_length) &&
+			((const char *)kds + cmeta->extra_offset);
+		if (offset[index]   <= offset[index+1] &&
+			offset[index+1] <= cmeta->extra_length &&
 			offset[index+1] - offset[index] <= VARATT_MAX)
 		{
 			*p_length = (int)(offset[index+1] - offset[index]);
@@ -1428,9 +1424,9 @@ KDS_COLUMN_ITEM_ISNULL(const kern_data_store *kds,
 
 	if (cmeta->nullmap_offset == 0)
 		return false;	/* NOT NULL */
-	if (idx >= __kds_unpack(cmeta->nullmap_length))
+	if (idx >= cmeta->nullmap_length)
 		return false;	/* NOT NULL */
-	bitmap = (uint8_t *)kds + __kds_unpack(cmeta->nullmap_offset);
+	bitmap = (uint8_t *)kds + cmeta->nullmap_offset;
 
 	return (bitmap[idx] & mask) == 0;
 }
@@ -1621,7 +1617,7 @@ typedef struct toast_compress_header
  *
  * ----------------------------------------------------------------
  */
-#define KVEC_UNITSZ			(MAXTHREADS_PER_BLOCK * 2)
+#define KVEC_UNITSZ			(CUDA_MAXTHREADS_PER_BLOCK * 2)
 #define KVEC_ALIGN(x)		TYPEALIGN(16,(x))	/* 128bit alignment */
 
 #define KVEC_DATUM_COMMON_FIELD					\
@@ -1992,6 +1988,10 @@ typedef struct
 #define DEVKERN__SESSION_TIMEZONE	0x00000200U	/* Device function needs session
 												 * timezone */
 #define DEVTYPE__HAS_COMPARE		0x00000800U	/* Device type has compare handler */
+#define DEVTASK__PINNED_HASH_RESULTS 0x00001000U/* Pinned results in HASH format */
+#define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
+
+
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
 #define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
@@ -2201,10 +2201,21 @@ struct kern_varslot_desc
 	int8_t		vs_typalign;
 	int16_t		vs_typlen;
 	int32_t		vs_typmod;
+	int32_t		vs_offset;		/* offset of kvec-buffer, if any. elsewhere -1. */
 	uint16_t	idx_subfield;	/* offset to the subfield descriptor */
 	uint16_t	num_subfield;	/* number of the subfield (array or composite) */
 	const struct xpu_datum_operators *vs_ops;
 };
+
+typedef struct
+{
+	int16_t		fb_src_depth;	/* source depth of this fallback variable */
+	int16_t		fb_src_resno;	/* source resno of this fallback variable */
+	int16_t		fb_dst_resno;	/* resno of the host scan-slot */
+	int16_t		fb_max_depth;	/* last depth that references this variable */
+	uint16_t	fb_slot_id;		/* kernel slot-id of this fallback variable */
+	int32_t		fb_kvec_offset;	/* kvec's buffer offset */
+} kern_fallback_desc;
 
 #define KERN_EXPRESSION_MAGIC			(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
@@ -2280,6 +2291,7 @@ struct kern_expression
 			kern_aggregate_desc desc[1];
 		} pagg;		/* PreAggs */
 		struct {
+			uint32_t	hash;			/* kexp for hash-value calculation */
 			int			nattrs;
 			uint16_t	slot_id[1];
 		} proj;		/* Projection */
@@ -2362,8 +2374,7 @@ typedef struct
  */
 #define XpuCommandTag__Success				0
 #define XpuCommandTag__Error				1
-#define XpuCommandTag__CPUFallback			2
-#define XpuCommandTag__SuccessFinal			50
+#define XpuCommandTag__SuccessHalfWay		2
 #define XpuCommandTag__OpenSession			100
 #define XpuCommandTag__XpuTaskExec			110
 #define XpuCommandTag__XpuTaskExecGpuCache	111
@@ -2406,7 +2417,8 @@ typedef struct kern_session_info
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
 	int32_t		session_currency_frac_digits;	/* copy of lconv::frac_digits */
-
+	uint32_t	session_kds_final;	/* header portion of kds_final; used when
+									 * query results shall be retained in GPU */
 	/* join inner buffer */
 	uint32_t	pgsql_port_number;	/* = PostPortNumber */
 	uint32_t	pgsql_plan_node_id;	/* = Plan->plan_node_id */
@@ -2416,6 +2428,12 @@ typedef struct kern_session_info
 	uint32_t	groupby_kds_final;	/* header portion of kds_final */
 	uint32_t	groupby_prepfn_bufsz; /* buffer size for preagg functions */
 	float4_t	groupby_ngroups_estimation; /* planne's estimation of ngroups */
+
+	/* fallback buffer */
+	uint32_t	fallback_kds_head;		/* offset to kds_fallback (header) */
+	uint32_t	fallback_desc_defs;		/* offset to kern_fallback_desc array */
+	uint32_t	fallback_desc_nitems;	/* number of kern_fallback_desc items */
+
 	/* executor parameter buffer */
 	uint32_t	nparams;	/* number of parameters */
 	uint32_t	poffset[1];	/* offset of params */
@@ -2443,6 +2461,9 @@ typedef struct {
 	kern_final_task kfin;			/* copy from XpuTaskFinal if any */
 	bool		final_plan_node;
 	bool		final_this_device;
+	uint32_t	final_nitems;		/* final buffer's nitems, if any */
+	uint64_t	final_usage;		/* final buffer's usage, if any */
+	uint64_t	final_total;		/* final buffer's total size, if any */
 	/* statistics */
 	uint32_t	npages_direct_read;	/* # of pages read by GPU-Direct Storage */
 	uint32_t	npages_vfs_read;	/* # of pages read by VFS (fallback) */
@@ -2934,6 +2955,11 @@ ExecKernProjection(kern_context *kcxt,
 				   kern_data_extra *kds_extra,
 				   int num_inners,
 				   kern_data_store **kds_inners);
+EXTERN_FUNCTION(bool)
+HandleErrorIfCpuFallback(kern_context *kcxt,
+						 int depth,
+						 uint64_t l_state,
+						 bool matched);
 
 /* ----------------------------------------------------------------
  *
@@ -2975,12 +3001,16 @@ struct kern_multirels
 	uint32_t	num_rels;
 	struct
 	{
+		uint64_t	kds_devptr;		/* pointer to KDS (GPU service only) */
 		uint64_t	kds_offset;		/* offset to KDS */
 		uint64_t	ojmap_offset;	/* offset to outer-join map, if any */
 		uint64_t	gist_offset;	/* offset to GiST-index pages, if any */
 		bool		is_nestloop;	/* true, if NestLoop */
 		bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
+		bool		pinned_buffer;	/* true, if it uses pinned-buffer */
+		uint64_t	buffer_id;		/* key to lookup pinned inner-buffer */
+		uint32_t	dev_index;		/* key to lookup pinned inner-buffer */
 	} chunks[1];
 };
 typedef struct kern_multirels	kern_multirels;
@@ -2988,11 +3018,14 @@ typedef struct kern_multirels	kern_multirels;
 INLINE_FUNCTION(kern_data_store *)
 KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int dindex)
 {
-	uint64_t	offset;
+	uint64_t	pos;
 
 	assert(dindex >= 0 && dindex < kmrels->num_rels);
-	offset = kmrels->chunks[dindex].kds_offset;
-	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+	pos = kmrels->chunks[dindex].kds_devptr;
+	if (pos != 0)
+		return (kern_data_store *)pos;
+	pos = kmrels->chunks[dindex].kds_offset;
+	return (kern_data_store *)(pos == 0 ? NULL : ((char *)kmrels + pos));
 }
 
 INLINE_FUNCTION(bool *)
@@ -3398,7 +3431,7 @@ print_kern_data_store(const kern_data_store *kds)
 	printf("kds %p { length=%lu, usage=%lu, nitems=%u, ncols=%u, format=%c, has_varlena=%c, tdhasoid=%c, tdtypeid=%u, tdtypmod=%d, table_oid=%u, hash_nslots=%u, block_offset=%u, block_nloaded=%u, nr_colmeta=%u }\n",
 		   kds,
 		   kds->length,
-		   kds->__usage64,
+		   kds->usage,
 		   kds->nitems,
 		   kds->ncols,
 		   kds->format,

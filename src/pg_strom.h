@@ -263,6 +263,8 @@ typedef struct
 	Selectivity		gist_selectivity; /* GiST selectivity */
 	double			gist_npages;	/* number of disk pages */
 	int				gist_height;	/* index tree height, or -1 if unknown */
+	/* inner pinned buffer? */
+	bool			inner_pinned_buffer;
 } pgstromPlanInnerInfo;
 
 typedef struct
@@ -285,6 +287,7 @@ typedef struct
 	Cost		inner_cost;			/* cost for inner setup */
 	Cost		run_cost;			/* run cost */
 	Cost		final_cost;			/* cost for sendback and host-side tasks */
+	double		final_nrows;		/* copy of result_rel->rows */
 	/* BRIN-index support */
 	Oid			brin_index_oid;		/* OID of BRIN-index, if any */
 	List	   *brin_index_conds;	/* BRIN-index key conditions */
@@ -309,6 +312,8 @@ typedef struct
 	/* group-by parameters */
 	List	   *groupby_actions;		/* list of KAGG_ACTION__* on the kds_final */
 	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */
+	/* pinned inner buffer stuff */
+	List	   *projection_hashkeys;
 	/* inner relations */
 	int			sibling_param_id;
 	int			num_rels;
@@ -343,6 +348,7 @@ typedef struct
 	pg_atomic_uint64	inner_usage;
 	pg_atomic_uint64	stats_gist;			/* only GiST-index */
 	pg_atomic_uint64	stats_join;			/* # of tuples by this join */
+	pg_atomic_uint64	fallback_nitems;	/* # of fallback tuples */
 } pgstromSharedInnerState;
 
 typedef struct
@@ -351,6 +357,8 @@ typedef struct
 	uint32_t			ss_length;			/* length of the SharedState */
 	/* pg-strom's unique plan-id */
 	uint64_t			query_plan_id;
+	/* hint for device selection, if necessary */
+	pg_atomic_uint32	device_selection_hint;
 	/* control variables to detect the last plan-node at parallel execution */
 	pg_atomic_uint32	parallel_task_control;
 	pg_atomic_uint32	__rjoin_exit_count;
@@ -361,6 +369,10 @@ typedef struct
 	pg_atomic_uint64	source_ntuples_raw;	/* # of raw tuples in the base relation */
 	pg_atomic_uint64	source_ntuples_in;	/* # of tuples survived from WHERE-quals */
 	pg_atomic_uint64	result_ntuples;		/* # of tuples returned from xPU */
+	pg_atomic_uint64	fallback_nitems;	/* # of fallback tuples in depth==0 */
+	pg_atomic_uint64	final_nitems;		/* # of tuples in final buffer if any */
+	pg_atomic_uint64	final_usage;		/* usage bytes of final buffer if any */
+	pg_atomic_uint64	final_total;		/* total usage of final buffer if any */
 	/* for parallel-scan */
 	uint32_t			parallel_scan_desc_offset;
 	/* for arrow_fdw */
@@ -393,10 +405,14 @@ typedef struct
 {
 	PlanState	   *ps;
 	ExprContext	   *econtext;
+
 	/*
 	 * inner preload buffer
 	 */
 	void		   *preload_buffer;
+	bool			inner_pinned_buffer;
+	uint64_t		inner_buffer_id;	/* buffer-id if ZC mode */
+	uint32_t		inner_dev_index;	/* dev-index if ZC mode */
 
 	/*
 	 * join properties (common)
@@ -448,6 +464,7 @@ struct pgstromTaskState
 	int64_t				curr_index;
 	bool				scan_done;
 	bool				final_done;
+
 	/*
 	 * control variables to fire the end-of-task event
 	 * for RIGHT OUTER JOIN and PRE-AGG
@@ -467,9 +484,9 @@ struct pgstromTaskState
 	char			   *fallback_buffer;
 	TupleTableSlot	   *fallback_slot;	/* host-side kvars-slot */
 	List			   *fallback_proj;
-
 	List			   *fallback_load_src;	/* source resno of base-rel */
 	List			   *fallback_load_dst;	/* dest resno of fallback-slot */
+	bytea			   *kern_fallback_desc;
 	/* request command buffer (+ status for table scan) */
 	TBMIterateResult   *curr_tbm;
 	Buffer				curr_vm_buffer;		/* for visibility-map */
@@ -483,8 +500,6 @@ struct pgstromTaskState
 	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts,
 										kern_final_task *fin,
 										struct iovec *xcmd_iov, int *xcmd_iovcnt);
-	bool			  (*cb_cpu_fallback)(struct pgstromTaskState *pts,
-										 HeapTuple htuple);
 	/* inner relations state (if JOIN) */
 	int					num_rels;
 	pgstromTaskInnerState inners[FLEXIBLE_ARRAY_MEMBER];
@@ -611,7 +626,8 @@ extern bytea   *codegen_build_packed_hashkeys(codegen_context *context,
 											  List *stacked_hash_values);
 extern void		codegen_build_packed_gistevals(codegen_context *context,
 											   pgstromPlanInfo *pp_info);
-extern bytea   *codegen_build_projection(codegen_context *context);
+extern bytea   *codegen_build_projection(codegen_context *context,
+										 List *proj_hash);
 extern void		codegen_build_groupby_actions(codegen_context *context,
 											  pgstromPlanInfo *pp_info);
 
@@ -636,6 +652,9 @@ extern void		pgstrom_explain_xpucode(const CustomScanState *css,
 										List *dcontext,
 										const char *label,
 										bytea *xpucode);
+extern void		pgstrom_explain_fallback_desc(pgstromTaskState *pts,
+											  ExplainState *es,
+											  List *dcontext);
 extern char	   *pgstrom_xpucode_to_string(bytea *xpu_code);
 extern void		pgstrom_init_codegen(void);
 
@@ -696,8 +715,6 @@ extern XpuCommand *pgstromRelScanChunkDirect(pgstromTaskState *pts,
 extern XpuCommand *pgstromRelScanChunkNormal(pgstromTaskState *pts,
 											 struct iovec *xcmd_iov,
 											 int *xcmd_iovcnt);
-extern void		pgstromStoreFallbackTuple(pgstromTaskState *pts, HeapTuple tuple);
-extern TupleTableSlot *pgstromFetchFallbackTuple(pgstromTaskState *pts);
 extern void		pgstrom_init_relscan(void);
 
 /*
@@ -726,6 +743,11 @@ extern void		pgstromExecInitTaskState(CustomScanState *node,
 										  EState *estate,
 										 int eflags);
 extern TupleTableSlot *pgstromExecTaskState(CustomScanState *node);
+extern void		execInnerPreLoadPinnedOneDepth(pgstromTaskState *pts,
+											   pg_atomic_uint64 *p_inner_nitems,
+											   pg_atomic_uint64 *p_inner_usage,
+											   uint64_t *p_inner_buffer_id,
+											   uint32_t *p_inner_dev_index);
 extern void		pgstromExecEndTaskState(CustomScanState *node);
 extern void		pgstromExecResetTaskState(CustomScanState *node);
 extern Size		pgstromSharedStateEstimateDSM(CustomScanState *node,
@@ -816,6 +838,9 @@ extern void		gpuCachePutDeviceBuffer(void *gc_lmap);
 /*
  * gpu_scan.c
  */
+extern bool		pgstrom_is_gpuscan_path(const Path *path);
+extern bool		pgstrom_is_gpuscan_plan(const Plan *plan);
+extern bool		pgstrom_is_gpuscan_state(const PlanState *ps);
 extern void		sort_device_qualifiers(List *dev_quals_list,
 									   List *dev_costs_list);
 extern pgstromPlanInfo *try_fetch_xpuscan_planinfo(const Path *path);
@@ -828,8 +853,6 @@ extern List	   *buildOuterScanPlanInfo(PlannerInfo *root,
 									   bool consider_partition,
 									   bool allow_host_quals,
 									   bool allow_no_device_quals);
-extern bool		ExecFallbackCpuScan(pgstromTaskState *pts,
-									HeapTuple tuple);
 extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
 extern void		pgstrom_init_gpu_scan(void);
 extern void		pgstrom_init_dpu_scan(void);
@@ -837,6 +860,9 @@ extern void		pgstrom_init_dpu_scan(void);
 /*
  * gpu_join.c
  */
+extern bool		pgstrom_is_gpujoin_path(const Path *path);
+extern bool		pgstrom_is_gpujoin_plan(const Plan *plan);
+extern bool		pgstrom_is_gpujoin_state(const PlanState *ps);
 extern pgstromPlanInfo *try_fetch_xpujoin_planinfo(const Path *path);
 extern List	   *buildOuterJoinPlanInfo(PlannerInfo *root,
 									   RelOptInfo *outer_rel,
@@ -852,10 +878,9 @@ extern CustomScan *PlanXpuJoinPathCommon(PlannerInfo *root,
 										 const CustomScanMethods *methods);
 extern uint32_t	GpuJoinInnerPreload(pgstromTaskState *pts);
 extern bool		ExecFallbackCpuJoin(pgstromTaskState *pts,
-									HeapTuple tuple);
-extern void		ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts);
-extern void		ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts,
-												XpuCommand *resp);
+									int depth,
+									uint64_t l_state,
+									bool matched);
 extern void		pgstrom_init_gpu_join(void);
 extern void		pgstrom_init_dpu_join(void);
 
@@ -870,7 +895,9 @@ extern void		xpupreagg_add_custompath(PlannerInfo *root,
 										 uint32_t task_kind,
 										 const CustomPathMethods *methods);
 extern bool		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
-									  HeapTuple tuple);
+									  int depth,
+									  uint64_t l_state,
+									  bool matched);
 extern void		pgstrom_init_gpu_preagg(void);
 extern void		pgstrom_init_dpu_preagg(void);
 
@@ -906,6 +933,16 @@ extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 									  const Bitmapset *referenced);
 extern void pgstrom_init_arrow_fdw(void);
 
+/*
+ * fallback.c
+ */
+extern TupleTableSlot *pgstromFetchFallbackTuple(pgstromTaskState *pts);
+extern void		execCpuFallbackBaseTuple(pgstromTaskState *pts,
+										 HeapTuple base_tuple);
+extern void		execCpuFallbackOneChunk(pgstromTaskState *pts);
+extern void		ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts);
+extern void		ExecFallbackCpuJoinOuterJoinMap(pgstromTaskState *pts,
+												XpuCommand *resp);
 /*
  * dpu_device.c
  */

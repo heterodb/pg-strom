@@ -23,6 +23,54 @@ static CustomExecMethods	dpuscan_exec_methods;
 static bool					enable_dpuscan = false;		/* GUC */
 
 /*
+ * pgstrom_is_gpuscan_path
+ */
+bool
+pgstrom_is_gpuscan_path(const Path *path)
+{
+	if (IsA(path, CustomPath))
+	{
+		const CustomPath *cpath = (const CustomPath *)path;
+
+		if (cpath->methods == &gpuscan_path_methods)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * pgstrom_is_gpuscan_plan
+ */
+bool
+pgstrom_is_gpuscan_plan(const Plan *plan)
+{
+	if (IsA(plan, CustomScan))
+	{
+		const CustomScan *cscan = (const CustomScan *)cscan;
+
+		if (cscan->methods == &gpuscan_plan_methods)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * pgstrom_is_gpuscan_state
+ */
+bool
+pgstrom_is_gpuscan_state(const PlanState *ps)
+{
+	if (IsA(ps, CustomScanState))
+	{
+		const CustomScanState *css = (const CustomScanState *)ps;
+
+		if (css->methods == &gpuscan_exec_methods)
+			return true;
+	}
+	return false;
+}
+
+/*
  * sort_device_qualifiers
  */
 void
@@ -262,12 +310,13 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 	pp_info->host_quals = extract_actual_clauses(host_quals, false);
 	pp_info->scan_quals = extract_actual_clauses(dev_quals, false);
 	pp_info->scan_tuples = baserel->tuples;
-	pp_info->scan_nrows = scan_nrows;
+	pp_info->scan_nrows = clamp_row_est(scan_nrows);
 	pp_info->parallel_nworkers = parallel_nworkers;
 	pp_info->parallel_divisor = parallel_divisor;
 	pp_info->startup_cost = startup_cost;
 	pp_info->run_cost = run_cost;
 	pp_info->final_cost = final_cost;
+	pp_info->final_nrows = baserel->rows;
 	if (indexOpt)
 	{
 		pp_info->brin_index_oid = indexOpt->indexoid;
@@ -824,14 +873,15 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 					  const CustomScanMethods *xpuscan_plan_methods)
 {
 	codegen_context *context;
-	CustomScan	   *cscan;
+	CustomScan *cscan;
+	List	   *proj_hash = pp_info->projection_hashkeys;
 
 	context = create_codegen_context(root, best_path, pp_info);
 	/* code generation for WHERE-clause */
 	pp_info->kexp_scan_quals = codegen_build_scan_quals(context, pp_info->scan_quals);
 	/* code generation for the Projection */
 	context->tlist_dev = gpuscan_build_projection(baserel, pp_info, tlist);
-	pp_info->kexp_projection = codegen_build_projection(context);
+	pp_info->kexp_projection = codegen_build_projection(context, proj_hash);
 	/* VarLoads for each depth */
 	codegen_build_packed_kvars_load(context, pp_info);
 	/* VarMoves for each depth (only GPUs) */
@@ -938,74 +988,6 @@ CreateDpuScanState(CustomScan *cscan)
 {
 	Assert(cscan->methods == &dpuscan_plan_methods);
 	return pgstromCreateTaskState(cscan, &dpuscan_exec_methods);
-}
-
-/*
- * ExecFallbackCpuScan
- */
-bool
-ExecFallbackCpuScan(pgstromTaskState *pts, HeapTuple tuple)
-{
-	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
-	TupleTableSlot *base_slot = pts->base_slot;
-	TupleTableSlot *fallback_slot = pts->css.ss.ss_ScanTupleSlot;
-	ListCell	   *lc1, *lc2;
-	int				attidx = 0;
-	bool			should_free;
-
-	/* Load the base tuple (depth-0) to the fallback slot */
-	ExecForceStoreHeapTuple(tuple, base_slot, false);
-	slot_getallattrs(base_slot);
-	ExecStoreAllNullTuple(fallback_slot);
-	forboth (lc1, pts->fallback_load_src,
-			 lc2, pts->fallback_load_dst)
-	{
-		int		src = lfirst_int(lc1) - 1;
-		int		dst = lfirst_int(lc2) - 1;
-
-		fallback_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
-		fallback_slot->tts_values[dst] = base_slot->tts_values[src];
-	}
-	econtext->ecxt_scantuple = fallback_slot;
-
-	/* check WHERE-clause if any */
-	if (pts->base_quals)
-	{
-		ResetExprContext(econtext);
-		if (!ExecQual(pts->base_quals, econtext))
-			return false;
-	}
-	/* apply GPU-Projection */
-	foreach (lc1, pts->fallback_proj)
-	{
-		ExprState  *state = lfirst(lc1);
-		Datum		datum;
-		bool		isnull;
-
-		if (state)
-		{
-			datum = ExecEvalExpr(state, econtext, &isnull);
-			if (isnull)
-			{
-				fallback_slot->tts_isnull[attidx] = true;
-				fallback_slot->tts_values[attidx] = 0;
-			}
-			else
-			{
-				fallback_slot->tts_isnull[attidx] = false;
-				fallback_slot->tts_values[attidx] = datum;
-			}
-		}
-		attidx++;
-	}
-	/* save the tuple on the fallback buffer */
-	tuple = ExecFetchSlotHeapTuple(fallback_slot,
-								   false,
-								   &should_free);
-	pgstromStoreFallbackTuple(pts, tuple);
-	if (should_free)
-		pfree(tuple);
-	return true;
 }
 
 /*

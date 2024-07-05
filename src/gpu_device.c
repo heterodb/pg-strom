@@ -979,10 +979,12 @@ pgstrom_init_gpu_device(void)
  * gpuClientOpenSession
  */
 static int
-__gpuClientChooseDevice(const Bitmapset *gpuset)
+__gpuClientChooseDevice(pgstromTaskState *pts)
 {
+	const Bitmapset	*optimal_gpus = pts->optimal_gpus;
 	static bool		rr_initialized = false;
 	static uint32	rr_counter = 0;
+	uint32_t		cuda_dindex;
 
 	if (!rr_initialized)
 	{
@@ -990,23 +992,51 @@ __gpuClientChooseDevice(const Bitmapset *gpuset)
 		rr_initialized = true;
 	}
 
-	if (!bms_is_empty(gpuset))
+	if (!bms_is_empty(optimal_gpus))
 	{
-		int		num = bms_num_members(gpuset);
-		int	   *dindex = alloca(sizeof(int) * num);
+		int		num = bms_num_members(optimal_gpus);
+		int	   *__dindex = alloca(sizeof(int) * num);
 		int		i, k;
 
-		for (i=0, k=bms_next_member(gpuset, -1);
+		for (i=0, k=bms_next_member(optimal_gpus, -1);
 			 k >= 0;
-			 i++, k=bms_next_member(gpuset, k))
+			 i++, k=bms_next_member(optimal_gpus, k))
 		{
-			dindex[i] = k;
+			__dindex[i] = k;
 		}
 		Assert(i == num);
-		return dindex[rr_counter++ % num];
+		cuda_dindex = __dindex[rr_counter++ % num];
 	}
-	/* a simple round-robin if no GPUs preference */
-	return (rr_counter++ % numGpuDevAttrs);
+	else
+	{
+		/* a simple round-robin if no GPUs preference */
+		cuda_dindex = (rr_counter++ % numGpuDevAttrs);
+	}
+
+	/*
+	 * In case when pinned device buffer is used, parallel workers must
+	 * connect to the identical device because its final buffer shall be
+	 * massively updated and passed to the next task (inner buffer of JOIN).
+	 */
+	if ((pts->xpu_task_flags & (DEVTASK__PINNED_HASH_RESULTS |
+								DEVTASK__PINNED_ROW_RESULTS)) != 0 &&
+		(pts->xpu_task_flags & DEVTASK__PREAGG) == 0)
+	{
+		pgstromSharedState *ps_state = pts->ps_state;
+		uint32_t	expected = UINT_MAX;
+
+		if (!pg_atomic_compare_exchange_u32(&ps_state->device_selection_hint,
+											&expected,
+											cuda_dindex))
+		{
+			cuda_dindex = expected;
+			if (cuda_dindex >= numGpuDevAttrs ||
+				(!bms_is_empty(optimal_gpus) &&
+				 !bms_is_member(cuda_dindex, optimal_gpus)))
+				elog(ERROR, "Bug? 'device_selection_hint' suggest GPU%u, but out of range", cuda_dindex);
+		}
+	}
+	return cuda_dindex;
 }
 
 void
@@ -1015,7 +1045,7 @@ gpuClientOpenSession(pgstromTaskState *pts,
 {
 	struct sockaddr_un addr;
 	pgsocket	sockfd;
-	int			cuda_dindex = __gpuClientChooseDevice(pts->optimal_gpus);
+	int			cuda_dindex = __gpuClientChooseDevice(pts);
 	char		namebuf[32];
 
 	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1047,12 +1077,20 @@ gpuOptimalBlockSize(int *p_grid_sz,
 					CUfunction kern_function,
 					unsigned int dynamic_shmem_per_block)
 {
-	return cuOccupancyMaxPotentialBlockSize(p_grid_sz,
-											p_block_sz,
-											kern_function,
-											NULL,
-											dynamic_shmem_per_block,
-											0);
+	CUresult	rc;
+
+	rc = cuOccupancyMaxPotentialBlockSize(p_grid_sz,
+										  p_block_sz,
+										  kern_function,
+										  NULL,
+										  dynamic_shmem_per_block,
+										  0);
+	if (rc == CUDA_SUCCESS)
+	{
+		if (*p_block_sz > CUDA_MAXTHREADS_PER_BLOCK)
+			*p_block_sz = CUDA_MAXTHREADS_PER_BLOCK;
+	}
+	return rc;
 }
 
 /*

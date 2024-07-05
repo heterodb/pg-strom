@@ -387,12 +387,12 @@ xpu_geometry_is_valid(kern_context *kcxt, xpu_geometry_t *geom)
 		return true;
 	if (geom->type != GEOM_INVALID_VARLENA)
 	{
-		STROM_CPU_FALLBACK(kcxt, "unknown geometry type");
+		SUSPEND_FALLBACK(kcxt, "unknown geometry type");
 	}
 	else if (VARATT_IS_EXTERNAL(geom->rawdata) ||
 			 VARATT_IS_COMPRESSED(geom->rawdata))
 	{
-		STROM_CPU_FALLBACK(kcxt, "geometry datum is compressed or external");
+		SUSPEND_FALLBACK(kcxt, "geometry datum is compressed or external");
 	}
 	else
 	{
@@ -5323,9 +5323,11 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 					 * If P1-P2 would be I-E or E-I, it obviously goes
 					 * across the boundary line; should not happen.
 					 */
+#if 0
 					printf("P1 [%c] (%.2f,%.2f) P2 [%c] (%.2f,%.2f)\n",
 						   p1_location, P1.x, P1.y,
 						   p2_location, P2.x, P2.y);
+#endif
 					return -1;
 				}
 			}

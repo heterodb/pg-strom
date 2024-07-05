@@ -42,7 +42,7 @@ xpu_bpchar_is_valid(kern_context *kcxt, const xpu_bpchar_t *arg)
 {
 	if (arg->length < 0)
 	{
-		STROM_CPU_FALLBACK(kcxt, "bpchar datum is compressed or external");
+		SUSPEND_FALLBACK(kcxt, "bpchar datum is compressed or external");
 		return false;
 	}
 	return true;
@@ -53,7 +53,7 @@ xpu_text_is_valid(kern_context *kcxt, const xpu_text_t *arg)
 {
 	if (arg->length < 0)
 	{
-		STROM_CPU_FALLBACK(kcxt, "text datum is compressed or external");
+		SUSPEND_FALLBACK(kcxt, "text datum is compressed or external");
 		return false;
 	}
 	return true;
@@ -64,7 +64,7 @@ xpu_bytea_is_valid(kern_context *kcxt, const xpu_bytea_t *arg)
 {
 	if (arg->length < 0)
 	{
-		STROM_CPU_FALLBACK(kcxt, "bytea datum is compressed or external");
+		SUSPEND_FALLBACK(kcxt, "bytea datum is compressed or external");
 		return false;
 	}
 	return true;

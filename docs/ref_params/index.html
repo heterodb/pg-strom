@@ -83,7 +83,7 @@
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
                   </li>
-                  <li class="toctree-l1 current"><a class="reference internal current" href="./">GUC Parameters</a>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">GUC Parameters</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#enablesdisables-a-particular-feature">Enables/disables a particular feature</a>
     </li>
@@ -178,20 +178,14 @@
 <dd>Cost value to send tuples to, or receive tuples from GPU for each.</dd>
 <dt><code>pg_strom.gpu_operator_cost</code> [type: <code>real</code> / default: <code>DEFAULT_CPU_OPERATOR_COST / 16</code>]</dt>
 <dd>Cost value to process an expression formula on GPU. If larger value than <code>cpu_operator_cost</code> is configured, no chance to choose PG-Strom towards any size of tables</dd>
+<dt><code>pg_strom.enable_partitionwise_gpujoin</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables whether GpuJoin is pushed down to the partition children.</dd>
+<dt><code>pg_strom.enable_partitionwise_gpupreagg</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables whether GpuPreAgg is pushed down to the partition children.</dd>
+<dt><code>pg_strom.pinned_inner_buffer_threshold</code> [type: <code>int</code> / 初期値: <code>0</code>]</dt>
+<dd>If the INNER table of GpuJoin is either GpuScan or GpuJoin, and the estimated size of its processing result is larger than this configured value, the result is retained on the GPU device without being returned to the CPU, and then reused as a part of the INNER buffer of the subsequent GpuJoin.</dd>
+<dd>If the configured value is <code>0</code>, this function will be disabled.</dd>
 </dl>
-<!--
-
-
-`pg_strom.enable_partitionwise_gpujoin` [type: `bool` / default: `on]`
-:   Enables/disables whether GpuJoin is pushed down to the partition children.
-
-
-
-`pg_strom.enable_partitionwise_gpupreagg` [type: `bool` / default: `on]`
-:   Enables/disables whether GpuPreAgg is pushed down to the partition children.
-
--->
-
 <h2 id="executor-configuration">Executor Configuration</h2>
 <dl>
 <dt><code>pg_strom.max_async_tasks</code> [type: <code>int</code> / default: <code>12</code>]</dt>

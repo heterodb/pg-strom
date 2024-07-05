@@ -420,6 +420,95 @@ print_arrow_large_binary(ARROW_PRINT_DATUM_ARGS)
 	return __print_arrow_binary_common(addr, sz, quote);
 }
 
+/*
+ * cube (contrib module)
+ */
+struct __NDBOX {
+	/*----------
+	 * Header contains info about NDBOX. For binary compatibility with old
+	 * versions, it is defined as "unsigned int".
+	 *
+	 * Following information is stored:
+	 *
+	 *  bits 0-7  : number of cube dimensions;
+	 *  bits 8-30 : unused, initialize to zero;
+	 *  bit  31   : point flag. If set, the upper right coordinates are not
+	 *              stored, and are implicitly the same as the lower left
+	 *              coordinates.
+	 *----------
+	 */
+	uint32_t	header;
+	double		x[1];	/* flexible length */
+}	__attribute__ ((packed));
+typedef struct __NDBOX		__NDBOX;
+
+#define POINT_BIT           0x80000000
+#define DIM_MASK            0x7fffffff
+
+static bool
+__print_arrow_cube_common(const char *addr, size_t sz, const char *quote)
+{
+	const __NDBOX  *cube = (const __NDBOX *)addr;
+	int		ndim = (cube->header & DIM_MASK);
+	bool	mismatch = false;
+
+	fprintf(output_filp, "%s(", quote);
+	for (int i=0; i < ndim; i++)
+	{
+		double	ll_coord = cube->x[i];
+
+		if (i > 0)
+			fprintf(output_filp, ", ");
+		fprintf(output_filp, "%f", ll_coord);
+		if ((cube->header & POINT_BIT) == 0)
+		{
+			if (ll_coord != cube->x[i + ndim])
+				mismatch = true;
+		}
+	}
+	fputc(')', output_filp);
+
+	if (mismatch)
+	{
+		fprintf(output_filp, ",(");
+		for (int i=0; i < ndim; i++)
+		{
+			double	ur_coord = cube->x[ndim + i];
+
+			if (i > 0)
+				fprintf(output_filp, ", ");
+			fprintf(output_filp, "%f", ur_coord);
+		}
+		fprintf(output_filp, ")");
+	}
+	fprintf(output_filp, "%s", quote);
+	return true;
+}
+
+static bool
+print_arrow_cube(ARROW_PRINT_DATUM_ARGS)
+{
+	const char *addr;
+	size_t		sz;
+
+	addr = __arrow_fetch_varlena32(rb_chunk, buffers, index, &sz);
+	if (!addr)
+		return false;
+	return __print_arrow_cube_common(addr, sz, quote);
+}
+
+static bool
+print_arrow_large_cube(ARROW_PRINT_DATUM_ARGS)
+{
+	const char *addr;
+	size_t		sz;
+
+	addr = __arrow_fetch_varlena64(rb_chunk, buffers, index, &sz);
+	if (!addr)
+		return false;
+	return __print_arrow_cube_common(addr, sz, quote);
+}
+
 static bool
 print_arrow_bool(ARROW_PRINT_DATUM_ARGS)
 {
@@ -1043,6 +1132,13 @@ setupArrowColumn(arrowColumn *column, ArrowField *field, int buffer_index)
 					Elog("custom-metadata pg_type=%s is only supported with Arrow::FixedSizeBinary", kv->value);
 				pg_type = "inet";
 			}
+			else if (strcmp(kv->value, "cube@cube") == 0)
+			{
+				if (field->type.node.tag != ArrowNodeTag__Binary &&
+					field->type.node.tag != ArrowNodeTag__LargeBinary)
+					Elog("custom-metadata pg_type=%s is only supported with Arrow::Binary or Arrow::LargeBinary", kv->value);
+				pg_type = "cube";
+			}
 			else
 				Elog("unknown 'pg_type' custom-metadata [%s]", kv->value);
 		}
@@ -1119,11 +1215,26 @@ setupArrowColumn(arrowColumn *column, ArrowField *field, int buffer_index)
 
 		case ArrowNodeTag__Binary:
 		case ArrowNodeTag__LargeBinary:
-			column->sqltype = "bytea";
-			if (field->type.node.tag == ArrowNodeTag__Binary)
-				column->print_datum = print_arrow_binary;
+			if (!pg_type)
+			{
+				column->sqltype = "bytea";
+				if (field->type.node.tag == ArrowNodeTag__Binary)
+					column->print_datum = print_arrow_binary;
+				else
+					column->print_datum = print_arrow_large_binary;
+			}
+			else if (strcmp(pg_type, "cube") == 0)
+			{
+				column->sqltype = "cube";
+				if (field->type.node.tag == ArrowNodeTag__Binary)
+					column->print_datum = print_arrow_cube;
+				else
+					column->print_datum = print_arrow_large_cube;
+			}
 			else
-				column->print_datum = print_arrow_large_binary;
+			{
+				Elog("unknown custom pg_type [%s]", pg_type);
+			}
 			buffer_count = 3;
 			break;
 

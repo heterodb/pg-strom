@@ -53,13 +53,15 @@
               </ul>
               <p class="caption"><span class="caption-text">Tutorial</span></p>
               <ul class="current">
-                  <li class="toctree-l1 current"><a class="reference internal current" href="./">Basic Operations</a>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Basic Operations</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#confirmation-of-gpu-off-loading">Confirmation of GPU off-loading</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#pullup-underlying-plans">Pullup underlying plans</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#inner-pinned-buffer-of-gpujoin">Inner Pinned Buffer of GpuJoin</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#knowledge-base">Knowledge base</a>
     </li>
@@ -208,6 +210,7 @@ Execution plan tree under the Gather is executable on background worker process.
 (18 rows)
 </code></pre>
 <h2 id="pullup-underlying-plans">Pullup underlying plans</h2>
+<p>(*) This section does not follow the latest version, and need to rewrite according to the latest implementation.</p>
 <p>PG-Strom can run SCAN, JOIN and GROUP BY workloads on GPU, however, it does not work with best performance if these custom execution plan simply replace the standard operations at PostgreSQL.
 An example of problematic scenario is that SCAN once writes back its result data set to the host buffer then send the same data into GPU again to execute JOIN. Once again, JOIN results are written back and send to GPU to execute GROUP BY. It causes data ping-pong between CPU and GPU.</p>
 <p>To avoid such inefficient jobs, PG-Strom has a special mode which pulls up its sub-plan to execute a bunch of jobs in a single GPU kernel invocation. Combination of the operations blow can cause pull-up of sub-plans.</p>
@@ -288,6 +291,55 @@ It means GpuJoin pulls up the underlying GpuScan, then combined GPU kernel funct
 It means GpuJoin is never executed during the query execution, and it is right. GpuPreAgg pulls up the underlying GpuJoin, then its combined GPU kernel function runs JOIN and GROUP BY.</p>
 <p>The <code>pg_strom.pullup_outer_scan</code> parameter controls whether SCAN is pulled up, and the <code>pg_strom.pullup_outer_join</code> parameter also controls whether JOIN is pulled up.
 Both parameters are configured to <code>on</code>. Usually, no need to disable them, however, you can use the parameters to identify the problems on system troubles.</p>
+<h2 id="inner-pinned-buffer-of-gpujoin">Inner Pinned Buffer of GpuJoin</h2>
+<p>Look at the EXPLAIN output below.
+When PG-Strom joins tables, it usually reads the largest table (<code>lineorder</code> in this case; called the OUTER table) asynchronously, while performing join processing and aggregation processing with other tables. Let's proceed.
+Due to the constraints of the JOIN algorithm, it is necessary to read other tables (<code>date1</code>, <code>part</code>, <code>supplier</code> in this case; called the INNER tables) into memory in advance, and also calculate the hash value of the JOIN key. Although these tables are not as large as the OUTER table, preparing an INNER buffer that exceeds several GB is a heavy process.</p>
+<p>GpuJoin usually reads the INNER table through the PostgreSQL API row-by-row, calculates its hash value, and writes them to the INNER buffer on the host shared memory. The GPU-Service process transfers this INNER buffer onto the GPU device memory, then we can start reading the OUTER table and processing the JOIN with inner tables.
+If the INNER table is relatively large and contains search conditions that are executable on the GPU, GpuScan may exists under GpuJoin, as in the EXPLAIN output below. In this case, the INNER table is once processed on the GPU by GpuScan, the execution results are returned to the CPU, and then written to the INNER buffer before it is loaded onto the GPU again. It looks like there is quite a bit of wasted data flow.</p>
+<pre><code>=# explain
+   select sum(lo_revenue), d_year, p_brand1
+     from lineorder, date1, part, supplier
+    where lo_orderdate = d_datekey
+      and lo_partkey = p_partkey
+      and lo_suppkey = s_suppkey
+      and p_brand1 between 'MFGR#2221' and 'MFGR#2228'
+      and s_region = 'ASIA'
+    group by d_year, p_brand1;
+                                                  QUERY PLAN
+---------------------------------------------------------------------------------------------------------------
+ GroupAggregate  (cost=31007186.70..31023043.21 rows=6482 width=46)
+   Group Key: date1.d_year, part.p_brand1
+   -&gt;  Sort  (cost=31007186.70..31011130.57 rows=1577548 width=20)
+         Sort Key: date1.d_year, part.p_brand1
+         -&gt;  Custom Scan (GpuJoin) on lineorder  (cost=275086.19..30844784.03 rows=1577548 width=20)
+               GPU Projection: date1.d_year, part.p_brand1, lineorder.lo_revenue
+               GPU Join Quals [1]: (part.p_partkey = lineorder.lo_partkey) ... [nrows: 5994236000 -&gt; 7804495]
+               GPU Outer Hash [1]: lineorder.lo_partkey
+               GPU Inner Hash [1]: part.p_partkey
+               GPU Join Quals [2]: (supplier.s_suppkey = lineorder.lo_suppkey) ... [nrows: 7804495 -&gt; 1577548]
+               GPU Outer Hash [2]: lineorder.lo_suppkey
+               GPU Inner Hash [2]: supplier.s_suppkey
+               GPU Join Quals [3]: (date1.d_datekey = lineorder.lo_orderdate) ... [nrows: 1577548 -&gt; 1577548]
+               GPU Outer Hash [3]: lineorder.lo_orderdate
+               GPU Inner Hash [3]: date1.d_datekey
+               GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on part  (cost=0.00..59258.00 rows=2604 width=14)
+                     Filter: ((p_brand1 &gt;= 'MFGR#2221'::bpchar) AND (p_brand1 &lt;= 'MFGR#2228'::bpchar))
+               -&gt;  Custom Scan (GpuScan) on supplier  (cost=100.00..190348.83 rows=2019384 width=6)
+                     GPU Projection: s_suppkey
+                     GPU Pinned Buffer: enabled
+                     GPU Scan Quals: (s_region = 'ASIA'::bpchar) [rows: 9990357 -&gt; 2019384]
+                     GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on date1  (cost=0.00..72.56 rows=2556 width=8)
+(24 rows)
+</code></pre>
+<p>In this way, if data ping-pong occurs between the CPU and GPU when reading the INNER table or building the INNER buffer, you can configure GPUJoin to use <strong><em>Pinned Inner Buffer</em></strong>. It is possible to shorten the execution start lead time and reduce memory usage.
+In the above EXPLAIN output, reading of the <code>supplier</code> table will be performed by GpuScan, and according to the statistical information, it is estimated that about 2 million rows will be read from the table. Meanwhile, notice the output of <code>GPU Pinned Buffer: enabled</code>. This is a function that if the estimated size of the INNER table exceeds the configuration value of <code>pg_strom.pinned_inner_buffer_threshold</code>, the processing result of GpuScan is retained in the GPU memory and used as part of the INNER buffer at the next GpuJoin. (If necessary, hash value calculation is also performed on the GPU).
+Therefore, after the contents of the <code>supplier</code> table are read from storage to the GPU using GPU-Direct SQL, they can be used in the next GPUJoin without being returned to the CPU or loaded to the GPU again. It will be.</p>
+<p>However, there are some tradeoffs to using Pinned Inner Buffer, so it is disabled by default.
+When using this feature, you must explicitly set the <code>pg_strom.pinned_inner_buffer_threshold</code> parameter.</p>
+<p>The CPU side does not completely retain the contents of the INNER buffer when Pinned Inner Buffer is in use. Therefore, CPU fallback processing cannot be performed and an error will be raised. Also, RIGHT/FULL OUTER JOIN, which is implemented using CPU Fallback, cannot coexist with Pinned Inner Buffer for the same reason.</p>
 <h2 id="knowledge-base">Knowledge base</h2>
 <p>We publish several articles, just called "notes", on the project wiki-site of PG-Strom.</p>
 <p><a href="https://github.com/heterodb/pg-strom/wiki">https://github.com/heterodb/pg-strom/wiki</a></p>

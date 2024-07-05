@@ -15,6 +15,7 @@
 INLINE_FUNCTION(bool)
 xpu_numeric_validate(kern_context *kcxt, xpu_numeric_t *num)
 {
+	assert(num->expr_ops == &xpu_numeric_ops);
 	if (num->kind == XPU_NUMERIC_KIND__VARLENA)
 	{
 		const varlena  *vl_addr = num->u.vl_addr;
@@ -151,9 +152,9 @@ xpu_numeric_datum_kvec_copy(kern_context *kcxt,
 {
 	const kvec_numeric_t *kvecs_src = (const kvec_numeric_t *)__kvecs_src;
 	kvec_numeric_t *kvecs_dst = (kvec_numeric_t *)__kvecs_dst;
-	uint8_t		kind;
+	uint8_t		kind = kvecs_src->kinds[kvecs_src_id];;
 
-	kvecs_dst->kinds[kvecs_dst_id] = kind = kvecs_src->kinds[kvecs_src_id];
+	kvecs_dst->kinds[kvecs_dst_id] = kind;
 	if (kind == XPU_NUMERIC_KIND__VARLENA)
 	{
 		kvecs_dst->values_lo[kvecs_dst_id].ptr = kvecs_src->values_lo[kvecs_src_id].ptr;
@@ -1037,12 +1038,16 @@ pgfn_numeric_uminus(XPU_PGFUNCTION_ARGS)
 
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, __result))
 		return false;
-	if (!xpu_numeric_validate(kcxt, result))
-		return false;
 	if (!XPU_DATUM_ISNULL(result))
 	{
+		if (!xpu_numeric_validate(kcxt, result))
+			return false;
 		if (result->kind == XPU_NUMERIC_KIND__VALID)
 			result->u.value = -result->u.value;
+		else if (result->kind == XPU_NUMERIC_KIND__POS_INF)
+			result->kind = XPU_NUMERIC_KIND__NEG_INF;
+		else if (result->kind == XPU_NUMERIC_KIND__NEG_INF)
+			result->kind = XPU_NUMERIC_KIND__POS_INF;
 	}
 	return true;
 }
@@ -1057,13 +1062,15 @@ pgfn_numeric_abs(XPU_PGFUNCTION_ARGS)
 		   KEXP_IS_VALID(karg, numeric));
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, result))
 		return false;
-	if (!xpu_numeric_validate(kcxt, result))
-		return false;
 	if (!XPU_DATUM_ISNULL(result))
 	{
+		if (!xpu_numeric_validate(kcxt, result))
+			return false;
 		if (result->kind == XPU_NUMERIC_KIND__VALID &&
 			result->u.value < 0)
 			result->u.value = -result->u.value;
+		else if (result->kind == XPU_NUMERIC_KIND__NEG_INF)
+			result->kind = XPU_NUMERIC_KIND__POS_INF;
 	}
 	return true;
 }

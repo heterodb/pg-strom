@@ -69,7 +69,7 @@ xpu_jsonb_is_valid(kern_context *kcxt, const xpu_jsonb_t *arg)
 {
 	if (arg->length < 0)
 	{
-		STROM_CPU_FALLBACK(kcxt, "jsonb datum is compressed or external");
+		SUSPEND_FALLBACK(kcxt, "jsonb datum is compressed or external");
 		return false;
 	}
 	return true;
@@ -437,7 +437,7 @@ extractJsonbItemFromContainer(kern_context *kcxt,
 		r = (JsonbContainer *)kcxt_alloc(kcxt, sz);
 		if (!r)
 		{
-			STROM_CPU_FALLBACK(kcxt, "out of memory");
+			SUSPEND_FALLBACK(kcxt, "out of memory");
 			return false;
 		}
 		r->header = JB_FARRAY | JB_FSCALAR | 1;
@@ -574,7 +574,7 @@ pg_jsonb_to_cstring(kern_context *kcxt,
 
 	if (depth > 8)
 	{
-		STROM_CPU_FALLBACK(kcxt,"too deep recursive function call");
+		SUSPEND_FALLBACK(kcxt,"too deep recursive function call");
 		return -1;
 	}
 
@@ -724,7 +724,7 @@ extractTextItemFromContainer(kern_context *kcxt,
 		sz = pg_numeric_to_cstring(kcxt, (varlena *)data, vlpos, kcxt->vlend);
 		if (sz < 0)
 		{
-			STROM_CPU_FALLBACK(kcxt, "out of memory");
+			SUSPEND_FALLBACK(kcxt, "out of memory");
 			return false;
 		}
 		else
@@ -759,7 +759,7 @@ extractTextItemFromContainer(kern_context *kcxt,
 								 vlpos, kcxt->vlend, 0);
 		if (sz < 0)
 		{
-			STROM_CPU_FALLBACK(kcxt, "out of memory");
+			SUSPEND_FALLBACK(kcxt, "out of memory");
 			return false;
 		}
 		else

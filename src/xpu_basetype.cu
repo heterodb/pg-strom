@@ -47,9 +47,11 @@ xpu_bool_datum_arrow_read(kern_context *kcxt,
 	else
 	{
 		const uint8_t  *bitmap = (const uint8_t *)
-			((const char *)kds + __kds_unpack(cmeta->values_offset));
+			((const char *)kds + cmeta->values_offset);
+		uint8_t			mask = (1<<(kds_index & 7));
+
 		result->expr_ops = &xpu_bool_ops;
-		result->value    = ((bitmap[kds_index>>3] & (1<<(kds_index & 7))) != 0);
+		result->value    = ((bitmap[kds_index>>3] & mask) != 0);
 	}
 	return true;
 }
@@ -772,7 +774,7 @@ PG_INT_MOD_OPERATOR_TEMPLATE(int8)
 /*
  * Bit operators: '&', '|', '#', '~', '>>', and '<<'
  */
-#define PG_UNARY_OPERATOR_TEMPLATE(FNAME,XTYPE,OPER)					\
+#define PG_UNARY_OPERATOR_TEMPLATE(FNAME,XTYPE,OPER,CHECKER)			\
 	PUBLIC_FUNCTION(bool)												\
 	pgfn_##FNAME(XPU_PGFUNCTION_ARGS)									\
 	{																	\
@@ -780,10 +782,15 @@ PG_INT_MOD_OPERATOR_TEMPLATE(int8)
 																		\
 		if (XPU_DATUM_ISNULL(&x_val))									\
 			result->expr_ops = NULL;									\
-		else															\
+		else if (CHECKER)												\
 		{																\
 			result->expr_ops = &xpu_##XTYPE##_ops;						\
 			result->value = OPER(x_val.value);							\
+		}																\
+		else															\
+		{																\
+			STROM_ELOG(kcxt, #FNAME ": value out of range");			\
+			return false;												\
 		}																\
 		return true;													\
 	}
@@ -804,29 +811,29 @@ PG_INT_MOD_OPERATOR_TEMPLATE(int8)
 		return true;													\
 	}
 
-PG_UNARY_OPERATOR_TEMPLATE(int1up,int1,)
-PG_UNARY_OPERATOR_TEMPLATE(int2up,int2,)
-PG_UNARY_OPERATOR_TEMPLATE(int4up,int4,)
-PG_UNARY_OPERATOR_TEMPLATE(int8up,int8,)
-PG_UNARY_OPERATOR_TEMPLATE(float2up,float2,)
-PG_UNARY_OPERATOR_TEMPLATE(float4up,float4,)
-PG_UNARY_OPERATOR_TEMPLATE(float8up,float8,)
+PG_UNARY_OPERATOR_TEMPLATE(int1up,int1,,true)
+PG_UNARY_OPERATOR_TEMPLATE(int2up,int2,,true)
+PG_UNARY_OPERATOR_TEMPLATE(int4up,int4,,true)
+PG_UNARY_OPERATOR_TEMPLATE(int8up,int8,,true)
+PG_UNARY_OPERATOR_TEMPLATE(float2up,float2,,true)
+PG_UNARY_OPERATOR_TEMPLATE(float4up,float4,,true)
+PG_UNARY_OPERATOR_TEMPLATE(float8up,float8,,true)
 
-PG_UNARY_OPERATOR_TEMPLATE(int1um,int1,-)
-PG_UNARY_OPERATOR_TEMPLATE(int2um,int2,-)
-PG_UNARY_OPERATOR_TEMPLATE(int4um,int4,-)
-PG_UNARY_OPERATOR_TEMPLATE(int8um,int8,-)
-PG_UNARY_OPERATOR_TEMPLATE(float2um,float2,__fp16_unary_minus)
-PG_UNARY_OPERATOR_TEMPLATE(float4um,float4,-)
-PG_UNARY_OPERATOR_TEMPLATE(float8um,float8,-)
+PG_UNARY_OPERATOR_TEMPLATE(int1um,int1,-,x_val.value!=SCHAR_MIN)
+PG_UNARY_OPERATOR_TEMPLATE(int2um,int2,-,x_val.value!=SHRT_MIN)
+PG_UNARY_OPERATOR_TEMPLATE(int4um,int4,-,x_val.value!=INT_MIN)
+PG_UNARY_OPERATOR_TEMPLATE(int8um,int8,-,x_val.value!=LONG_MIN)
+PG_UNARY_OPERATOR_TEMPLATE(float2um,float2,__fp16_unary_minus,true)
+PG_UNARY_OPERATOR_TEMPLATE(float4um,float4,-,true)
+PG_UNARY_OPERATOR_TEMPLATE(float8um,float8,-,true)
 
-PG_UNARY_OPERATOR_TEMPLATE(int1abs,int1,abs)
-PG_UNARY_OPERATOR_TEMPLATE(int2abs,int2,abs)
-PG_UNARY_OPERATOR_TEMPLATE(int4abs,int4,abs)
-PG_UNARY_OPERATOR_TEMPLATE(int8abs,int8,llabs)
-PG_UNARY_OPERATOR_TEMPLATE(float2abs,float2,__fp16_unary_abs)
-PG_UNARY_OPERATOR_TEMPLATE(float4abs,float4,fabsf)
-PG_UNARY_OPERATOR_TEMPLATE(float8abs,float8,fabs)
+PG_UNARY_OPERATOR_TEMPLATE(int1abs,int1,abs,x_val.value!=SCHAR_MIN)
+PG_UNARY_OPERATOR_TEMPLATE(int2abs,int2,abs,x_val.value!=SHRT_MIN)
+PG_UNARY_OPERATOR_TEMPLATE(int4abs,int4,abs,x_val.value!=INT_MIN)
+PG_UNARY_OPERATOR_TEMPLATE(int8abs,int8,llabs,x_val.value!=LONG_MIN)
+PG_UNARY_OPERATOR_TEMPLATE(float2abs,float2,__fp16_unary_abs,true)
+PG_UNARY_OPERATOR_TEMPLATE(float4abs,float4,fabsf,true)
+PG_UNARY_OPERATOR_TEMPLATE(float8abs,float8,fabs,true)
 
 PG_BITWISE_OPERATOR_TEMPLATE(int1and,int1,int1,int1,&)
 PG_BITWISE_OPERATOR_TEMPLATE(int2and,int2,int2,int2,&)
@@ -843,10 +850,10 @@ PG_BITWISE_OPERATOR_TEMPLATE(int2xor,int2,int2,int2,^)
 PG_BITWISE_OPERATOR_TEMPLATE(int4xor,int4,int4,int4,^)
 PG_BITWISE_OPERATOR_TEMPLATE(int8xor,int8,int8,int8,^)
 
-PG_UNARY_OPERATOR_TEMPLATE(int1not,int1,~)
-PG_UNARY_OPERATOR_TEMPLATE(int2not,int2,~)
-PG_UNARY_OPERATOR_TEMPLATE(int4not,int4,~)
-PG_UNARY_OPERATOR_TEMPLATE(int8not,int8,~)
+PG_UNARY_OPERATOR_TEMPLATE(int1not,int1,~,true)
+PG_UNARY_OPERATOR_TEMPLATE(int2not,int2,~,true)
+PG_UNARY_OPERATOR_TEMPLATE(int4not,int4,~,true)
+PG_UNARY_OPERATOR_TEMPLATE(int8not,int8,~,true)
 
 PG_BITWISE_OPERATOR_TEMPLATE(int1shr,int1,int1,int4,>>)
 PG_BITWISE_OPERATOR_TEMPLATE(int2shr,int2,int2,int4,>>)

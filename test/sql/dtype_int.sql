@@ -179,7 +179,7 @@ SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
            c*b v4, c*d v5, c*e v6,
            e*b v7, e*d v8, e*f v9,
            a * (g %10) v10, c*g v11, e*g v12, 
-           CASE WHEN abs(g) < 12 THEN g*n ELSE 0 END v15
+           CASE WHEN g between -11 and 11 THEN g*n ELSE 0 END v15
   INTO test12g
   FROM rt_int
  WHERE x BETWEEN -10000.0 AND 20000.0;
@@ -187,7 +187,7 @@ SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
            c*b v4, c*d v5, c*e v6,
            e*b v7, e*d v8, e*f v9,
            a * (g %10) v10, c*g v11, e*g v12, 
-           CASE WHEN abs(g) < 12 THEN g*n ELSE 0 END v15
+           CASE WHEN g between -11 and 11 THEN g*n ELSE 0 END v15
   INTO test12g
   FROM rt_int
  WHERE x BETWEEN -10000.0 AND 20000.0;
@@ -196,7 +196,7 @@ SELECT id, a * (b % 10) v1, a*c v2, a*e v3,
            c*b v4, c*d v5, c*e v6,
            e*b v7, e*d v8, e*f v9,
            a * (g %10) v10, c*g v11, e*g v12, 
-           CASE WHEN abs(g) < 12 THEN g*n ELSE 0 END v15
+           CASE WHEN g between -11 and 11 THEN g*n ELSE 0 END v15
   INTO test12p
   FROM rt_int
  WHERE x BETWEEN -10000.0 AND 20000.0;
@@ -260,16 +260,18 @@ SELECT id, +a v1, -b v2, @(a+b) v3,
            +c v4, -d v5, @(c+d) v6,
            +e v7, -f v8, @(e+f) v9,
            +g v10, -n v11, @(g-n/2) v12
-   INTO test15g
+  INTO test15g
   FROM rt_int
- WHERE y BETWEEN -10000.0 AND 20000.0;
+ WHERE y BETWEEN -10000.0 AND 20000.0
+   AND n <> -128;	-- avoid out of range
 SELECT id, +a v1, -b v2, @(a+b) v3,
            +c v4, -d v5, @(c+d) v6,
            +e v7, -f v8, @(e+f) v9,
            +g v10, -n v11, @(g-n/2) v12
   INTO test15g
   FROM rt_int
- WHERE y BETWEEN -10000.0 AND 20000.0;
+ WHERE y BETWEEN -10000.0 AND 20000.0
+   AND n <> -128;	-- avoid out of range
 SET pg_strom.enabled = off;
 SELECT id, +a v1, -b v2, @(a+b) v3,
            +c v4, -d v5, @(c+d) v6,
@@ -277,7 +279,8 @@ SELECT id, +a v1, -b v2, @(a+b) v3,
            +g v10, -n v11, @(g-n/2) v12
   INTO test15p
   FROM rt_int
- WHERE y BETWEEN -10000.0 AND 20000.0;
+ WHERE y BETWEEN -10000.0 AND 20000.0
+   AND n <> -128;	-- avoid out of range
 (SELECT * FROM test15g EXCEPT ALL SELECT * FROM test15p);
 (SELECT * FROM test15p EXCEPT ALL SELECT * FROM test15g);
 

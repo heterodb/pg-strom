@@ -15,7 +15,6 @@ SHOW pg_strom.gpu_setup_cost;
 SHOW pg_strom.gpu_tuple_cost;
 SHOW pg_strom.gpu_operator_cost;
 SHOW pg_strom.max_async_tasks;
-SHOW pg_strom.gpudirect_enabled;
 SHOW pg_strom.gpu_direct_seq_page_cost;
 SHOW arrow_fdw.enabled;
 SHOW arrow_fdw.stats_hint_enabled;

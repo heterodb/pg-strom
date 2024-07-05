@@ -153,6 +153,7 @@ typedef struct
 	kern_data_store	kds_head;
 } GpuCacheSharedState;
 
+#define POSIX_SHMEM_DIRNAME		"/dev/shm"
 #define GpuCacheSharedStateName(nameBuf,nameLen,datOid,relOid,signature) \
 	snprintf((nameBuf), (nameLen),										\
 			 ".gpucache_p%u_d%u_r%u.%09lx.buf",							\
@@ -430,6 +431,12 @@ out:
 			 redo_buffer_size);
 		return false;
 	}
+	if (redo_buffer_size >= (2UL << 30))
+	{
+		elog(elevel, "gpucache: 'redo_buffer_size' is too large (%zu)",
+			 redo_buffer_size);
+		return false;
+	}
 	if (gpu_sync_threshold < Max(redo_buffer_size / 20, (4UL << 20)))
 	{
 		elog(elevel, "gpucache: 'gpu_sync_threshold' is too small (must be larger than [%zu])", Max(redo_buffer_size/20, (4UL<<20)));
@@ -482,14 +489,6 @@ out:
 		/* 25% margin + header */
 		extra_sz += extra_sz / 4;
 		extra_sz += offsetof(kern_data_extra, data);
-	}
-	if (main_sz >= __KDS_LENGTH_LIMIT || extra_sz >= __KDS_LENGTH_LIMIT)
-	{
-		elog(elevel, "gpucache: max_num_rows = %ld consumes too much GPU device memory (main: %s, extra: %s), so we recommend to reduce 'max_num_rows' configuration",
-			 max_num_rows,
-			 format_bytesz(main_sz),
-			 format_bytesz(extra_sz));
-		return false;
 	}
 
 	/*
@@ -852,8 +851,8 @@ __setup_kern_data_store_column(kern_data_store *kds_head,
 		if (!attr->attnotnull)
 		{
 			sz = MAXALIGN(BITMAPLEN(nrooms));
-			cmeta->nullmap_offset = __kds_packed(off);
-			cmeta->nullmap_length = __kds_packed(sz);
+			cmeta->nullmap_offset = off;
+			cmeta->nullmap_length = sz;
 			off += sz;
 		}
 
@@ -862,15 +861,15 @@ __setup_kern_data_store_column(kern_data_store *kds_head,
 			unitsz = att_align_nominal(attr->attlen,
 									   attr->attalign);
 			sz = MAXALIGN(unitsz * nrooms);
-			cmeta->values_offset = __kds_packed(off);
-			cmeta->values_length = __kds_packed(sz);
+			cmeta->values_offset = off;
+			cmeta->values_length = sz;
 			off += sz;
 		}
 		else if (attr->attlen == -1)
 		{
-			sz = MAXALIGN(sizeof(uint32) * nrooms);
-			cmeta->values_offset = __kds_packed(off);
-			cmeta->values_length = __kds_packed(sz);
+			sz = MAXALIGN(sizeof(uint64) * nrooms);
+			cmeta->values_offset = off;
+			cmeta->values_length = sz;
 			off += sz;
 			unitsz = get_typavgwidth(attr->atttypid,
 									 attr->atttypmod);
@@ -887,8 +886,8 @@ __setup_kern_data_store_column(kern_data_store *kds_head,
 	/* system column */
 	cmeta = &kds_head->colmeta[kds_head->nr_colmeta - 1];
 	sz = MAXALIGN(cmeta->attlen * nrooms);
-	cmeta->values_offset = __kds_packed(off);
-	cmeta->values_length = __kds_packed(sz);
+	cmeta->values_offset = off;
+	cmeta->values_length = sz;
 	off += sz;
 	kds_head->length = off;
 
@@ -1087,9 +1086,6 @@ __resetGpuCacheSharedState(GpuCacheSharedState *gc_sstate)
     gc_sstate->redo_sync_pos = 0;
 	pthreadMutexUnlock(&gc_sstate->redo_mutex);
 
-	/* initial buffer size should be legal */
-	Assert(gc_sstate->kds_head.length <= __KDS_LENGTH_LIMIT &&
-		   gc_sstate->kds_extra_sz    <= __KDS_LENGTH_LIMIT);
 	/* make this GpuCache available again */
 	pg_atomic_write_u32(&gc_sstate->phase, GCACHE_PHASE__IS_EMPTY);
 }
@@ -2707,6 +2703,14 @@ pgstromGpuCacheExecInit(pgstromTaskState *pts)
 			 RelationGetRelationName(rel));
 		return NULL;
 	}
+	/*
+	 * 'pts->optimal_gpus' suggests __gpuClientChooseDevice() to choose
+	 * the right GPU device.
+	 */
+	Assert(gc_options.cuda_dindex >= 0 &&
+		   gc_options.cuda_dindex < numGpuDevAttrs);
+	pts->optimal_gpus = bms_make_singleton(gc_options.cuda_dindex);
+
 	return lookupGpuCacheDesc(rel);
 }
 
@@ -3086,6 +3090,63 @@ __gpuCacheOnDropTrigger(Oid trigger_oid)
 }
 
 static void
+__gpuCacheOnDropDatabase(Oid database_oid)
+{
+	const char *dirname = POSIX_SHMEM_DIRNAME;
+	DIR		   *dir;
+	struct dirent *dentry;
+
+	/*
+	 * DROP DATABASE should already take AccessExclusiveLock on the target
+	 * database, thus, there are no active sessions here, and no more
+	 * sessions will be made.
+	 */
+	Assert(database_oid != MyDatabaseId);
+	dir = AllocateDir(dirname);
+	while ((dentry = ReadDir(dir, dirname)) != NULL)
+	{
+		uint32_t		__port;
+		uint32_t		__database_oid;
+		uint32_t		__table_oid;
+		uint64_t		__signature;
+		GpuCacheDesc	hkey;
+		GpuCacheDesc   *gc_desc;
+
+		if (strncmp(dentry->d_name, ".gpucache_", 10) == 0 &&
+			sscanf(dentry->d_name,
+				   ".gpucache_p%u_d%u_r%u.%09lx.buf",
+				   &__port,
+				   &__database_oid,
+				   &__table_oid,
+				   &__signature) == 4 &&
+			__port == PostPortNumber &&
+			__database_oid == database_oid)
+		{
+			/* inject a dummy entry to drop shared memory segment */
+			memset(&hkey, 0, sizeof(GpuCacheDesc));
+			hkey.ident.database_oid = __database_oid;
+			hkey.ident.table_oid = __table_oid;
+			hkey.ident.signature = __signature;
+			hkey.xid = GetCurrentTransactionId();
+			Assert(TransactionIdIsValid(hkey.xid));
+
+			gc_desc = hash_search(gcache_descriptors_htab,
+								  &hkey, HASH_ENTER, NULL);
+			if (gc_desc)
+			{
+				memset(&gc_desc->gc_options, 0, sizeof(GpuCacheOptions));
+				gc_desc->gc_lmap = NULL;
+				gc_desc->drop_on_rollback = false;
+				gc_desc->drop_on_commit = true;
+				gc_desc->nitems = 0;
+				memset(&gc_desc->buf, 0, sizeof(StringInfoData));
+			}
+		}
+	}
+	FreeDir(dir);
+}
+
+static void
 gpuCacheObjectAccess(ObjectAccessType access,
 					 Oid classId,
 					 Oid objectId,
@@ -3146,6 +3207,13 @@ gpuCacheObjectAccess(ObjectAccessType access,
 			elog(LOG, "pid=%u OAT_DROP (pg_trigger, objectId=%u)", getpid(), objectId);
 #endif
 			__gpuCacheOnDropTrigger(objectId);
+		}
+		else if (classId == DatabaseRelationId)
+		{
+#ifdef GPUCACHE_DEBUG_MESSAGE
+			elog(LOG, "pid=%u OAT_DROP (pg_database, objectId=%u)", getpid(), objectId);
+#endif
+			__gpuCacheOnDropDatabase(objectId);
 		}
 	}
 	else if (access == OAT_TRUNCATE)
@@ -3430,16 +3498,6 @@ retry:
 	if (kds_extra->usage > kds_extra->length)
 	{
 		gcache_extra_size = PAGE_ALIGN(kds_extra->usage * 5 / 4);	/* 25% margin */
-		if (gcache_extra_size >= __KDS_LENGTH_LIMIT)
-		{
-#if 1
-			fprintf(stderr,
-					"GpuCache (%s) extra buffer (%ldMB) exceeds the hard limit\n",
-					gc_sstate->table_name,
-					gcache_extra_size >> 20);
-#endif
-			goto bailout;
-		}
 		cuMemFree(m_kds_extra);
 		m_kds_extra = 0UL;
 		goto retry;
@@ -3581,7 +3639,7 @@ __gpucacheExecApplyRedoKernel(GpuCacheControlCommand *cmd,
 
 		Assert((uintptr_t)pos == MAXALIGN((uintptr_t)pos));
 		gcache_redo->redo_items[gcache_redo->nitems++]
-			= __kds_packed((char *)pos - (char *)gcache_redo);
+			= (uint32_t)((char *)pos - (char *)gcache_redo);
 		pos += tx_log->length;
 	}
 
@@ -3625,34 +3683,7 @@ retry:
 		goto bailout;
 	}
 
-	if (gcache_redo->kerror.errcode == ERRCODE_BUFFER_NO_SPACE)
-	{
-		kern_data_extra *extra = (kern_data_extra *)gc_lmap->gcache_extra_devptr;
-		size_t		gcache_extra_size;
-		int			__status;
-
-		/* expand the extra buffer with 25% larger virtual space */
-		gcache_extra_size = PAGE_ALIGN((extra->length * 5) / 4);
-		__status = __gpucacheExecCompactionKernel(cmd,
-												  gc_lmap,
-												  f_gcache_compaction,
-												  gcache_extra_size);
-		if (__status == 0)
-			goto retry;
-		/* abort */
-		status = __status;
-	}
-	else if (gcache_redo->kerror.errcode != ERRCODE_STROM_SUCCESS)
-	{
-		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
-				 "gpucache: %s (%s:%d) %s (errcode=%d)\n",
-				 gcache_redo->kerror.funcname,
-				 gcache_redo->kerror.filename,
-				 gcache_redo->kerror.lineno,
-				 gcache_redo->kerror.message,
-				 gcache_redo->kerror.errcode);
-	}
-	else
+	if (gcache_redo->kerror.errcode == 0)
 	{
 		kern_data_store	   *kds = (kern_data_store *)gc_lmap->gcache_main_devptr;
 		kern_data_extra	   *extra = (kern_data_extra *)gc_lmap->gcache_extra_devptr;
@@ -3673,6 +3704,34 @@ retry:
 				pg_atomic_read_u64(&gc_sstate->gcache_extra_dead));
 #endif
 		status = 0;		/* success */
+	}
+	else if (gcache_redo->kerror.errcode == ERRCODE_SUSPEND_NO_SPACE)
+	{
+		kern_data_extra *extra = (kern_data_extra *)gc_lmap->gcache_extra_devptr;
+		size_t		gcache_extra_size;
+		int			__status;
+
+		/* expand the extra buffer with 25% larger virtual space */
+		gcache_extra_size = PAGE_ALIGN((extra->length * 5) / 4);
+		__status = __gpucacheExecCompactionKernel(cmd,
+												  gc_lmap,
+												  f_gcache_compaction,
+												  gcache_extra_size);
+		if (__status == 0)
+			goto retry;
+		/* abort */
+		status = __status;
+	}
+	else
+	{
+		/* significant error */
+		snprintf(cmd->errbuf, sizeof(cmd->errbuf),
+				 "gpucache: %s (%s:%d) %s (errcode=%d)\n",
+				 gcache_redo->kerror.funcname,
+				 gcache_redo->kerror.filename,
+				 gcache_redo->kerror.lineno,
+				 gcache_redo->kerror.message,
+				 gcache_redo->kerror.errcode);
 	}
 bailout:
 	if (m_gcache_redo != 0UL)
@@ -4177,6 +4236,7 @@ gpuCacheAutoPreloadConnectDatabase(int32 *p_start, int32 *p_end)
 
 		if (strcmp(database_name, entry->database_name) != 0)
 			break;
+		curr++;
 	}
 	gcache_shared_head->gcache_auto_preload_count = curr;
 
@@ -4218,7 +4278,8 @@ gpuCacheStartupPreloader(Datum arg)
 
 		rel = table_openrv(&rvar, AccessShareLock);
 		gc_desc = lookupGpuCacheDesc(rel);
-		initialLoadGpuCache(gc_desc, rel);
+		if (gc_desc)
+			initialLoadGpuCache(gc_desc, rel);
 		table_close(rel, NoLock);
 
 		elog(LOG, "gpucache: auto preload '%s.%s' (DB: %s)",
@@ -4241,7 +4302,7 @@ PG_FUNCTION_INFO_V1(pgstrom_gpucache_info);
 static List *
 __pgstrom_gpucache_info(void)
 {
-	const char *dirname = "/dev/shm";
+	const char *dirname = POSIX_SHMEM_DIRNAME;
 	DIR		   *dir;
 	struct dirent *dentry;
 	char		buffer[sizeof(GpuCacheSharedState)];
