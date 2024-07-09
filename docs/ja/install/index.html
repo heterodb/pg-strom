@@ -397,8 +397,8 @@ heterodb-swdcパッケージがインストールされると、HeteroDB-SWDCか
 <p class="admonition-title">Tips</p>
 <p><strong>Volta以前のGPUの利用について</strong></p>
 <p>オープンソース版nvidiaドライバは、Volta世代以前のGPUには対応していません。
-したがって、VoltaまたはPascal世代のGPUでPG-Stromを利用する場合は、プロプラエタリ版のドライバがGPUDirect Storageに対応しているCUDA 12.2を利用する必要があります。
-CUDA 12.2のパッケージは<a href="https://developer.nvidia.com/cuda-12-2-2-download-archive?target_os=Linux&amp;target_arch=x86_64&amp;Distribution=RHEL&amp;target_version=8&amp;target_type=rpm_local">こちら</a>から入手する事ができます。</p>
+したがって、VoltaまたはPascal世代のGPUでPG-Stromを利用する場合は、プロプラエタリ版のドライバであってもGPUDirect Storageに対応しているCUDA 12.2 Update 1を利用する必要があります。
+CUDA 12.2 Update 1のパッケージは<a href="https://developer.nvidia.com/cuda-12-2-1-download-archive?target_os=Linux&amp;target_arch=x86_64&amp;Distribution=RHEL&amp;target_version=8&amp;target_type=rpm_local">こちら</a>から入手する事ができます。</p>
 </div>
 <p>続いて、GPU-Direct Storage(GDS)を利用するためのドライバモジュール<code>nvidia-gds</code>をインストールします。
 パッケージ名に続いてCUDA Toolkitのバージョンと同一のバージョン名を指定してください。</p>

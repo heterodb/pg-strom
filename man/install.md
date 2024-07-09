@@ -476,8 +476,8 @@ CUDA Toolkitのインストールに続いて、ドライバをインストー�
     **Volta以前のGPUの利用について**
     
     オープンソース版nvidiaドライバは、Volta世代以前のGPUには対応していません。
-    したがって、VoltaまたはPascal世代のGPUでPG-Stromを利用する場合は、プロプラエタリ版のドライバがGPUDirect Storageに対応しているCUDA 12.2を利用する必要があります。
-    CUDA 12.2のパッケージは[こちら](https://developer.nvidia.com/cuda-12-2-2-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local)から入手する事ができます。
+    したがって、VoltaまたはPascal世代のGPUでPG-Stromを利用する場合は、プロプラエタリ版のドライバであってもGPUDirect Storageに対応しているCUDA 12.2 Update 1を利用する必要があります。
+    CUDA 12.2 Update 1のパッケージは[こちら](https://developer.nvidia.com/cuda-12-2-1-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local)から入手する事ができます。
 }
 
 @en{
@@ -489,8 +489,8 @@ Please use the open source version of nvidia-driver here. Only the open source v
     **Use of Volta or former GPUs**
     
     The open source edition of the nvidia driver does not support Volta generation GPUs or former.
-    Therefore, if you want to use PG-Strom with Volta or Pascal generation GPUs, you need to use CUDA 12.2, whose proprietary driver supports GPUDirect Storage.
-    The CUDA 12.2 package can be obtained [here](https://developer.nvidia.com/cuda-12-2-2-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local).
+    Therefore, if you want to use PG-Strom with Volta or Pascal generation GPUs, you need to use CUDA 12.2 Update 1, whose proprietary driver supports GPUDirect Storage.
+    The CUDA 12.2 Update 1 package can be obtained [here](https://developer.nvidia.com/cuda-12-2-1-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local).
 }
 
 @ja{
