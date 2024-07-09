@@ -100,6 +100,7 @@ __xpuConnectSessionWorker(void *__priv)
 		struct pollfd pfd;
 		int		sockfd;
 		int		nevents;
+		int		num_ready_cmds;
 
 		sockfd = conn->sockfd;
 		if (sockfd < 0)
@@ -129,10 +130,29 @@ __xpuConnectSessionWorker(void *__priv)
 			}
 			else if (pfd.revents & POLLIN)
 			{
-				if (__xpuConnectReceiveCommands(conn->sockfd,
-												conn,
-												conn->devname) < 0)
+				/* check # of pending (ready) tasks */
+				pthreadMutexLock(&conn->mutex);
+				num_ready_cmds = conn->num_ready_cmds;
+				pthreadMutexUnlock(&conn->mutex);
+
+				if (num_ready_cmds >= pgstrom_max_async_tasks())
+				{
+					/*
+					 * In case when the backend-side cannot handle the
+					 * pending results at this moment, session worker
+					 * temporary stops reading results from GPU service
+					 * to stop dry running.
+					 * Since poll(2) is level trigger, once pending tasks
+					 * are processed, session worker continue to read.
+					 */
+					pg_usleep(2000L);
+				}
+				else if (__xpuConnectReceiveCommands(conn->sockfd,
+													 conn,
+													 conn->devname) < 0)
+				{
 					break;
+				}
 			}
 		}
 	}
