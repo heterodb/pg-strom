@@ -400,8 +400,10 @@ Run the installation according to the guidance.</p>
 Therefore, if you want to use PG-Strom with Volta or Pascal generation GPUs, you need to use CUDA 12.2, whose proprietary driver supports GPUDirect Storage.
 The CUDA 12.2 package can be obtained <a href="https://developer.nvidia.com/cuda-12-2-2-download-archive?target_os=Linux&amp;target_arch=x86_64&amp;Distribution=RHEL&amp;target_version=8&amp;target_type=rpm_local">here</a>.</p>
 </div>
+<p>Next, install the driver module <code>nvidia-gds</code> for the GPU-Direct Storage (GDS).
+Please specify the same version name as the CUDA Toolkit version after the package name.</p>
 <pre><code># dnf module install nvidia-driver:open-dkms
-# dnf install nvidia-gds
+# dnf install nvidia-gds-12-5
 </code></pre>
 <p>Once installation completed successfully, CUDA Toolkit is deployed at <code>/usr/local/cuda</code>.</p>
 <pre><code>$ ls /usr/local/cuda/

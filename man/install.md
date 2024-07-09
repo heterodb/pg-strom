@@ -493,9 +493,18 @@ Please use the open source version of nvidia-driver here. Only the open source v
     The CUDA 12.2 package can be obtained [here](https://developer.nvidia.com/cuda-12-2-2-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local).
 }
 
+@ja{
+続いて、GPU-Direct Storage(GDS)を利用するためのドライバモジュール<code>nvidia-gds</code>をインストールします。
+パッケージ名に続いてCUDA Toolkitのバージョンと同一のバージョン名を指定してください。
+}
+@en{
+Next, install the driver module <code>nvidia-gds</code> for the GPU-Direct Storage (GDS).
+Please specify the same version name as the CUDA Toolkit version after the package name.
+}
+
 ```
 # dnf module install nvidia-driver:open-dkms
-# dnf install nvidia-gds
+# dnf install nvidia-gds-12-5
 ```
 
 @ja{
