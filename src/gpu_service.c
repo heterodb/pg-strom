@@ -2538,7 +2538,7 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	unsigned int	groupby_prepfn_nbufs = 0;
 	size_t			kds_final_length = 0;
 	uint32_t		kds_fallback_revision = 0;
-	uint32_t		last_kernel_errcode = 0;
+	uint32_t		last_kernel_errcode = ERRCODE_STROM_SUCCESS;
 	size_t			sz;
 	void		   *kern_args[10];
 
@@ -2745,7 +2745,7 @@ resume_kernel:
 			gpuClientWriteBackPartial(gclient, kds_dst);
 			assert(kds_dst->nitems == 0 && kds_dst->usage == 0);
 		}
-		else
+		else if (last_kernel_errcode == ERRCODE_STROM_SUCCESS)
 		{
 			sz = (KDS_HEAD_LENGTH(kds_dst_head) +
 				  PGSTROM_CHUNK_SIZE);
@@ -2758,6 +2758,14 @@ resume_kernel:
 			kds_dst = (kern_data_store *)d_chunk->m_devptr;
 			memcpy(kds_dst, kds_dst_head, KDS_HEAD_LENGTH(kds_dst_head));
 			kds_dst->length = sz;
+		}
+		else
+		{
+			/*
+			 * When GPU kernel is suspended by CPU fallback,
+			 * we don't need to touch the kds_dst.
+			 */
+			Assert(last_kernel_errcode == ERRCODE_SUSPEND_FALLBACK);
 		}
 		pthreadRWLockReadLock(&gq_buf->m_kds_rwlock);
 		kds_fallback = (kern_data_store *)gq_buf->m_kds_fallback;

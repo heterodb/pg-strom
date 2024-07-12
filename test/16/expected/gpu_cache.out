@@ -33,10 +33,11 @@ CREATE TRIGGER row_sync_test_ng01 AFTER INSERT OR UPDATE OR DELETE
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('cpu_device_id=0');
 ERROR:  gpucache: unknown option [cpu_device_id]=[0]
 -- validation error
+-- 32GB limitation check was removed, so it should not be an error
 CREATE TRIGGER row_sync_test_ng02 AFTER INSERT OR UPDATE OR DELETE
     ON cache_test_table FOR ROW
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('max_num_rows=200000000');
-ERROR:  gpucache: max_num_rows = 200000000 consumes too much GPU device memory (main: 12.36GB, extra: 59.60GB), so we recommend to reduce 'max_num_rows' configuration
+DROP TRIGGER IF EXISTS row_sync_test_ng02 ON cache_test_table;
 -- validation error
 CREATE TRIGGER row_sync_test_ng03 AFTER INSERT OR UPDATE OR DELETE
     ON cache_test_table FOR ROW
