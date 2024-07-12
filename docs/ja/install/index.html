@@ -126,6 +126,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#postgis">PostGISのインストール</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#ubuntu-linux">Ubuntu Linuxへのインストール</a>
+    </li>
     </ul>
                 </li>
               </ul>
@@ -218,7 +220,7 @@
 </ul>
 </li>
 <li><strong>Operating System</strong><ul>
-<li>PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 8.xです。</li>
+<li>PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 9.x、または8.xです。</li>
 <li>GPUダイレクトSQL（cuFileドライバ）を利用するには、CUDA Toolkitに含まれるnvidia-fsドライバと、Mellanox OFED (OpenFabrics Enterprise Distribution) ドライバのインストールが必要です。</li>
 </ul>
 </li>
@@ -228,7 +230,7 @@
 </ul>
 </li>
 <li><strong>CUDA Toolkit</strong><ul>
-<li>PG-Stromの実行にはCUDA Toolkit バージョン12.2update2以降が必要です。</li>
+<li>PG-Stromの実行にはCUDA Toolkit バージョン12.2update1以降が必要です。</li>
 <li>PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。</li>
 </ul>
 </li>
@@ -767,6 +769,22 @@ CREATE EXTENSION
 これでPostGISのインストールは完了です。</p>
 <pre><code>postgres=# CREATE EXTENSION postgis;
 CREATE EXTENSION
+</code></pre>
+<h2 id="ubuntu-linux">Ubuntu Linuxへのインストール</h2>
+<p>現在のところ、Ubuntu Linux向けのパッケージは提供されていませんが、ソースコードからPG-Stromをビルドして動作させることができます。</p>
+<p>OSのインストール後、それぞれUbuntu Linux向けのMOFEDドライバ、CUDA Toolkit、およびPostgreSQLをインストールしてください。</p>
+<p>続いて、<code>heterodb-extra</code>パッケージをインストールします。
+Ubuntu Linux 用の <code>.deb</code> パッケージが提供されていますので、その時点の最新版を<a href="https://heterodb.github.io/swdc/">SWDC</a>より入手してください。</p>
+<pre><code>$ wget https://heterodb.github.io/swdc/deb/heterodb-extra_5.4-1_amd64.deb
+$ sudo dpkg -i heterodb-extra_5.4-1_amd64.deb
+</code></pre>
+<p>PG-Stromはソースコードをチェックアウトしてインストールします。
+この時、ターゲットとするPostgreSQLの<code>pg_config</code>を指定するのを忘れないようにしてください。</p>
+<p>インストール後の設定は Red Hat Enterprise Linux や Rocky Linux の場合と同じです。</p>
+<pre><code>$ git clone https://github.com/heterodb/pg-strom.git
+$ cd pg-strom/src
+$ make PG_CONFIG=/path/to/pgsql/bin/pg_config -j 8
+$ sudo make PG_CONFIG=/path/to/pgsql/bin/pg_config install
 </code></pre>
               
             </div>

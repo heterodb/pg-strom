@@ -126,6 +126,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#postgis-installation">PostGIS Installation</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#installation-on-ubuntu-linux">Installation on Ubuntu Linux</a>
+    </li>
     </ul>
                 </li>
               </ul>
@@ -218,7 +220,7 @@
 </ul>
 </li>
 <li><strong>Operating System</strong><ul>
-<li>PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or Rocky Linux version 8.x series.</li>
+<li>PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or Rocky Linux version 9.x or 8.x series.</li>
 <li>GPU Direct SQL (with cuFile driver) needs the <code>nvidia-fs</code> driver distributed with CUDA Toolkit, and Mellanox OFED (OpenFabrics Enterprise Distribution) driver.</li>
 </ul>
 </li>
@@ -228,7 +230,7 @@
 </ul>
 </li>
 <li><strong>CUDA Toolkit</strong><ul>
-<li>PG-Strom requires CUDA Toolkit version 12.2update2 or later.</li>
+<li>PG-Strom requires CUDA Toolkit version 12.2update1 or later.</li>
 <li>Some of CUDA Driver APIs used by PG-Strom internally are not included in the former versions.</li>
 </ul>
 </li>
@@ -762,6 +764,22 @@ The example below shows the command to install PostGIS v3.4 built for PostgreSQL
 <p>Start PostgreSQL server after the initial setup of database cluster, then run <code>CREATE EXTENSION</code> command from SQL client to define geometry data type and SQL functions for geoanalytics.</p>
 <pre><code>postgres=# CREATE EXTENSION postgis;
 CREATE EXTENSION
+</code></pre>
+<h2 id="installation-on-ubuntu-linux">Installation on Ubuntu Linux</h2>
+<p>Although PG-Strom packages are not available for Ubuntu Linux right now, you can build and run PG-Strom from the source code.</p>
+<p>After the installation of Ubuntu Linux, install the MOFED driver, CUDA Toolkit, and PostgreSQL for Ubuntu Linux, respectively.</p>
+<p>Next, install the <code>heterodb-extra</code> package.
+A <code>.deb</code> package for Ubuntu Linux is provided, so please obtain the latest version from the <a href="https://heterodb.github.io/swdc/">SWDC</a>.</p>
+<pre><code>$ wget https://heterodb.github.io/swdc/deb/heterodb-extra_5.4-1_amd64.deb
+$ sudo dpkg -i heterodb-extra_5.4-1_amd64.deb
+</code></pre>
+<p>Checkout the source code of PG-Strom, build and install as follows.
+At this time, do not forget to specify the target PostgreSQL by <code>pg_config</code>.</p>
+<p>Post-installation configuration is the same as for Red Hat Enterprise Linux or Rocky Linux.</p>
+<pre><code>$ git clone https://github.com/heterodb/pg-strom.git
+$ cd pg-strom/src
+$ make PG_CONFIG=/path/to/pgsql/bin/pg_config -j 8
+$ sudo make PG_CONFIG=/path/to/pgsql/bin/pg_config install
 </code></pre>
               
             </div>
