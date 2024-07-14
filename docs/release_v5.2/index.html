@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>PG-Strom v5.2 - PG-Strom Manual</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+        <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+        <link href="../custom.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "PG-Strom v5.2";
+        var mkdocs_page_input_path = "release_v5.2.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> PG-Strom Manual
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<a href="../ja/release_v5.2/" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../install/">Install</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Tutorial</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../operations/">Basic Operations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../brin/">BRIN Index</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../partition/">Partitioning</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Advanced Features</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUDirect SQL</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fluentd/">connect with Fluentd</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">References</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_types/">Data Types</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">Functions and Operators</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUC Parameters</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Release Note</span></p>
+              <ul class="current">
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">PG-Strom v5.2</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#prerequisites">Prerequisites</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpujoin-pinned-inner-buffer">GpuJoin Pinned Inner Buffer</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#per-tuple-cpu-fallback">Per-tuple CPU-Fallback</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#64bit-gpu-buffer-representation">64bit GPU Buffer representation</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#other-new-features">Other new features</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#improved-gpu-direct-sql-performance">Improved GPU-Direct SQL performance</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#select-distinct-support">SELECT DISTINCT support</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#improced-parallel-pg2arrow">Improced parallel pg2arrow</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#aliases-for-duplicated-names-on-import-foreign-schema">Aliases for duplicated names on IMPORT FOREIGN SCHEMA</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#partial-concurrent-results-responding">Partial concurrent results responding</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#cumulative-bug-fixes">Cumulative bug fixes</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">PG-Strom Manual</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Release Note</li>
+      <li class="breadcrumb-item active">PG-Strom v5.2</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="pg-strom-v52-release">PG-Strom v5.2 Release</h1>
+<div style="text-align: right;">PG-Strom Development Team (14-Jul-2024)</div>
+
+<h2 id="overview">Overview</h2>
+<p>Major changes in PG-Strom v5.2 are as follows:</p>
+<ul>
+<li>GpuJoin Pinned Inner Buffer</li>
+<li>Improved GPU-Direct SQL performance</li>
+<li>64bit GPU Buffer representation</li>
+<li>Per-tuple CPU-Fallback</li>
+<li>SELECT DISTINCT support</li>
+<li>Improced parallel pg2arrow</li>
+<li>Cumulative bug fixes</li>
+</ul>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>PostgreSQL v15.x, v16.x</li>
+<li>CUDA Toolkit 12.2 or later</li>
+<li>Linux distributions supported by CUDA Toolkit</li>
+<li>Intel x86 64bit architecture (x86_64)</li>
+<li>NVIDIA GPU CC 6.0 or later (Pascal at least; Turing or newer is recommended)</li>
+</ul>
+<h2 id="gpujoin-pinned-inner-buffer">GpuJoin Pinned Inner Buffer</h2>
+<p>PG-Strom's GpuJoin is designed to perform tables JOIN based on the Hash-Join algorithm using GPU in parallel. Due to the nature of the Hash-Join algorithm, the table on the INNER side must be read onto the buffer before the JOIN processing. In the older version, the contents of the INNER tables were read line by line using PostgreSQL's internal APIs.</p>
+<p>This design was wasteful when the INNER side was a GpuScan that reads a huge table.</p>
+<p>For example, consider the following query. This query includes a JOIN of <code>lineitem</code> (882GB) and about 1/4 of <code>orders</code> (205GB).
+There is a GpuScan in the lower node of GpuPreAgg that includes JOIN, which reads the <code>orders</code> table into the INNER buffer, but this requires about 360 million GpuScan calls and uses 30GB of INNER buffer which should be moved to the GPU.</p>
+<pre><code>=# explain select l_shipmode, o_shippriority, sum(l_extendedprice)
+             from lineitem, orders
+            where l_orderkey = o_orderkey
+              and o_orderdate &gt;= '1997-01-01'
+            group by l_shipmode, o_shippriority;
+                                                           QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=38665701.61..38665701.69 rows=7 width=47)
+   Group Key: lineitem.l_shipmode, orders.o_shippriority
+   -&gt;  Custom Scan (GpuPreAgg) on lineitem  (cost=38665701.48..38665701.55 rows=7 width=47)
+         GPU Projection: pgstrom.psum((lineitem.l_extendedprice)::double precision), lineitem.l_shipmode, orders.o_shippriority
+         GPU Join Quals [1]: (lineitem.l_orderkey = orders.o_orderkey) ... [nrows: 6000244000 -&gt; 1454290000]
+         GPU Outer Hash [1]: lineitem.l_orderkey
+         GPU Inner Hash [1]: orders.o_orderkey
+         GPU-Direct SQL: enabled (GPU-0)
+         -&gt;  Custom Scan (GpuScan) on orders  (cost=100.00..10580836.56 rows=363551222 width=12)
+               GPU Projection: o_shippriority, o_orderkey
+               GPU Pinned Buffer: enabled
+               GPU Scan Quals: (o_orderdate &gt;= '1997-01-01'::date) [rows: 1499973000 -&gt; 363551200]
+               GPU-Direct SQL: enabled (GPU-0)
+(13 rows)
+
+</code></pre>
+<p>In the v5.2, GpuJoin's INNER buffer initial setup process has been redesigned to be more effectively.</p>
+<p><img alt="GpuJoin Pinned Inner Buffer" src="../img/release_5_2a.png" /></p>
+<p>GpuScan checks the WHERE clause on the rows read from the table and writes back to the host side (PostgreSQL backend process). GpuJoin reads the results to setup the INNER buffer, and copies this to the GPU side, but originally all the necessary data was on the GPU when GpuScan processed the INNER side table, and it is not very reasonable to get GpuScan's results back to the host side then copy to the GPU side again.</p>
+<p>GpuJoin Pinned Inner Buffer allows GpuScan to keep the processing results, when child node of GpuJoin is GpuScan, to use a part of INNER buffer on the next GpuJoin, instead of returning the GpuScan's results to the host side once. Thie mechanism allows to save a lot of initial setup time of GpuJoin when size of the INNER tables are very large.</p>
+<p>On the other hand, setting up of the INNER buffer on GPU side means that the GpuJoin INNER buffer does not physically exist on the CPU memory, therefore, SQL must be aborted by error if CPU fallback processing is required.</p>
+<p>Due to the potential side effects, the GpuJoin Pinned Inner Buffer function is disabled by default.
+You must explicitly enable the feature using command below; that means GpuJoin uses Pinned Inner Buffer if the estimated INNER buffer size exceeds 100MB.</p>
+<pre><code>=# set pg_strom.pinned_inner_buffer_threshold = '100MB';
+SET
+</code></pre>
+<h2 id="per-tuple-cpu-fallback">Per-tuple CPU-Fallback</h2>
+<p>When processing SQL workloads on GPUs, input data may have patterns that cannot be executed on GPUs in principle.
+For example, if long variable-length data does not fit into the PostgreSQL block size and is fragmented into an external table (this is called the TOAST mechanism), GPUs that do not have data in the external table will not continue processing.</p>
+<p>PG-Strom has a mechanism called CPU-Fallback, which allows processing of such data on the CPU side.
+Typically, processing logic such as GpuJoin and GpuPreAgg reads 64MB of data (called chunks) from a table and launches a GPU kernel to process the SQL workload.</p>
+<p>In the older version, if a CPU-Fallback error occurred while processing a SQL workload, the GPU kernel performing on the entire chunk was canceled and written back to the CPU side. However, this strategy was problematic in two points.
+First, if there is just one piece of bad data in a chunk containing hundreds of thousands of rows of data, the GPU processing of the entire chunk will be canceled. Another problem is that GpuPreAgg that keep updating the aggregation buffer, a situation may occur where it is difficult to know how much has been reflected in the aggregation table. (Therefore, before v5.1, GpuPreAgg's CPU-Fallback was treated as an error)</p>
+<p><img alt="Per-tuple CPU-Fallback" src="../img/release_5_2b.png" /></p>
+<p>PG-Strom v5.2 improves the CPU-Fallback implementation to resolve these issues.</p>
+<p>When a CPU-Fallback error occurs, instead of canceling the processing of the entire chunk as in the past, we prepare a "Fallback Buffer" in addition to the "Destination Buffer" that writes the normal processing result to handle the CPU-Fallback error. Only the generated tuples are written.
+The contents of "Fallback Buffer" are later written back to the CPU side and evaluated again by the CPU. Therefore, not only do you need to perform CPU-Fallback processing on only the minimum number of tuples required, but you also do not have to worry about the GpuPreAgg aggregation buffer being updated redundantly.</p>
+<h2 id="64bit-gpu-buffer-representation">64bit GPU Buffer representation</h2>
+<p>GPUs with memory such as 48GB or 80GB are now on sale, but the data format of the GPU buffer used internally by PG-Strom was designed around 2017 during the development of v2.0. In other words, even high-end GPUs were typically 16GB or 24GB, and others were generally 8GB or less.
+Under such a premise, a data format that can reduce memory usage was prioritized rather than being able to express physically impossible large amounts of data without too much or too little.</p>
+<p>Tuples loaded into PG-Strom's GPU buffer are always guaranteed to be 8-byte aligned. Therefore, by shifting the 32-bit offset value by 3 bits, it was actually possible to express an address width of 35 bits (= 32 GB). This is essentially the case until <a href="https://www.techpowerup.com/gpu-specs/a100-pcie-40-gb.c3623">NVIDIA A100[PCI-E; 40GB]</a> is announced in 2020. It was a meaningless restriction.</p>
+<p>Additionally, PG-Strom reads data from storage in 64MB chunks, so in most cases the GPU buffer size will never reach 32GB. However, in the following cases it becomes necessary to assume a very large result buffer.</p>
+<ul>
+<li>Cases where the GPU cache holds too much data.</li>
+<li>A case where the GpuJoin INNER buffer swelled to a huge size.</li>
+<li>When the number of rows resulting from GROUP BY or SELECT DISTINCT increases significantly.</li>
+</ul>
+<p>In PG-Strom v5.2, all offset values ​​on GPU buffers have been replaced with 64-bit representation.
+As a result, it is now possible to handle GPU buffers larger than 32GB, and even with workloads such as those mentioned above, it is now possible to handle up to the physical RAM size range.</p>
+<h2 id="other-new-features">Other new features</h2>
+<h3 id="improved-gpu-direct-sql-performance">Improved GPU-Direct SQL performance</h3>
+<p>NVIDIA's cuFile library assumed Devive Primary Context internally. As a result, there was a cost to switch the CUDA Context for API calls from the PG-Strom GPU Service, which was using a uniquely generated CUDA Context.</p>
+<p>In PG-Strom v5.2, GPU Service has also been redesigned to use Device Primary Context, which has improved performance by approximately 10% by eliminating switching costs in the cuFile library and the associated CPU Busy Loop. is being carried out.</p>
+<h3 id="select-distinct-support">SELECT DISTINCT support</h3>
+<p>PG-Strom v5.2 supports the <code>SELECT DISTINCT...</code> clause.
+In previous versions, this had to be rewritten as a <code>GROUP BY</code> clause.</p>
+<h3 id="improced-parallel-pg2arrow">Improced parallel pg2arrow</h3>
+<p>If you use the <code>-t</code> option and <code>-n</code> option together with the <code>pg2arrow</code> command, check the table size to be read, adjust the scan range so that each worker thread does not read the table redundantly, and execute the query. Issue.</p>
+<h3 id="aliases-for-duplicated-names-on-import-foreign-schema">Aliases for duplicated names on IMPORT FOREIGN SCHEMA</h3>
+<p>When importing an Arrow file using the <code>IMPORT FOREIGN SCHEMA</code> or <code>pgstrom.arrow_fdw_import_file()</code> function, if a Field has a duplicate name, give an alias to the second and subsequent columns with duplicate names. Now it looks like this.</p>
+<h3 id="partial-concurrent-results-responding">Partial concurrent results responding</h3>
+<p>When the Destination Buffer is used up in various processes such as GpuJoin or GpuPreAgg, execution of the GPU kernel will be paused, partial processing results will be returned to the backend process, and then execution of the GPU kernel will be resumed again. became.
+Until now, the structure was such that the Destination Buffer was expanded to hold all the processing results of the chunk, so if the result set was huge for the input, it would consume excessive CPU and GPU memory. There was a problem with the system becoming unstable.</p>
+<h2 id="cumulative-bug-fixes">Cumulative bug fixes</h2>
+<ul>
+<li>[#664] Too much CPU consumption ratio with cuFile/GDS on many threads</li>
+<li>[#757] wrong varnullingrels at setrefs.c</li>
+<li>[#762] arrow_fdw: scan-hint needs to resolve expressions using INDEV_VAR</li>
+<li>[#763] Var-nodes on kvdef-&gt;expr was not compared correctly</li>
+<li>[#764][#757] Var::varnullingrels come from the prior level join are not consistent</li>
+<li>[#673] lookup_input_varnode_defitem() should not use equal() to compare Var-nodes</li>
+<li>[#729] update RPM build chain</li>
+<li>[#765] Add regression test for PostgreSQL 16</li>
+<li>[#771] Update regression test for PostgreSQL 15</li>
+<li>[#768] fix dead loop in `gpuCacheAutoPreloadConnectDatabase</li>
+<li>[#xxx] Wrong GiST-Index based JOIN results</li>
+<li>[#774] add support of SELECT DISTINCT</li>
+<li>[#778] Disable overuse of kds_dst buffer in projection/gpupreagg</li>
+<li>[#752] add KDS_FORMAT_HASH support in execGpuJoinProjection()</li>
+<li>[#784] CPU-Fallback JOIN didn't handle LEFT/FULL OUTER case if tuple has no matched inner row</li>
+<li>[#777] Fix the bug of dynamically allocating fallback buffer size and nrooms</li>
+<li>[#776] Fix the out of range bug in pgfn_interval_um()</li>
+<li>[#706] gpucache: drop active cache at DROP DATABASE from shmem / gpumem</li>
+<li>[#791] gpujoin: wrong logic to detect unmatched inner tuple</li>
+<li>[#794] assertion failure at cost_memoize_rescan()</li>
+<li>[#xxx] pg2arrow: outer/inner-join subcommand initialization</li>
+<li>[#xxx] IMPORT FOREIGN SCHEMA renames duplicated field name</li>
+<li>[#xxx] arrow_fdw: correct pg_type hint parsing</li>
+<li>[#748] Add support CPU-fallback on GpuPreAgg, and revise fallback implementation</li>
+<li>[#778] Add XpuCommandTag__SuccessHalfWay response tag</li>
+</ul>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../ref_params/" class="btn btn-neutral float-left" title="GUC Parameters"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../release_v5.1/" class="btn btn-neutral float-right" title="PG-Strom v5.1">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../ref_params/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../release_v5.1/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
