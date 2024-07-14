@@ -22,7 +22,8 @@ __DOC_FILES :=	index.md	\
 		release_v2.3.md	\
 		release_v3.0.md	\
 		release_v5.0.md \
-		release_v5.1.md
+		release_v5.1.md	\
+		release_v5.2.md
 
 DOC_FILES := $(addprefix ./, $(__DOC_FILES))
 
