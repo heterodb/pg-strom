@@ -2,19 +2,25 @@
 --- initialization of regression test database
 ---
 SELECT current_database();
-\gset
+      current_database       
+-----------------------------
+ contrib_regression_pg_strom
+(1 row)
 
+\gset
 \getenv regress_dataset_revision REGRESS_DATASET_REVISION
 SELECT pgstrom.regression_testdb_revision() = cast(:regress_dataset_revision as text) revision_check_result
 \gset
-
 SET client_min_messages TO WARNING;
-
 \if :revision_check_result
 ---
 --- OK, regression test database is the latest revision
 ---
 SELECT pgstrom.regression_testdb_revision();
+ regression_testdb_revision 
+----------------------------
+ 20240530
+(1 row)
 
 \else
 BEGIN;
@@ -22,12 +28,10 @@ BEGIN;
 --- special GUC configuration
 ---
 ALTER DATABASE :current_database SET pg_strom.regression_test_mode = on;
-
 ---
 --- load initial data of SSBM
 ---
 SET search_path = public;
-
 DROP TABLE IF EXISTS customer;
 CREATE TABLE customer (
     c_custkey   integer NOT NULL,
@@ -39,7 +43,6 @@ CREATE TABLE customer (
     c_phone     character(15),
     c_mktsegment character(10)
 );
-
 DROP TABLE IF EXISTS date1;
 CREATE TABLE date1 (
     d_datekey   integer NOT NULL,
@@ -60,7 +63,6 @@ CREATE TABLE date1 (
     d_holidayfl character(1),
     d_weekdayfl character(1)
 );
-
 DROP TABLE IF EXISTS lineorder;
 CREATE TABLE lineorder (
     lo_orderkey     bigint,
@@ -81,7 +83,6 @@ CREATE TABLE lineorder (
     lo_commit_date  character(8),
     lo_shipmode     character(10)
 );
-
 DROP TABLE IF EXISTS part;
 CREATE TABLE part (
     p_partkey       integer NOT NULL,
@@ -94,7 +95,6 @@ CREATE TABLE part (
     p_size          numeric,
     p_container     character(10)
 );
-
 DROP TABLE IF EXISTS supplier;
 CREATE TABLE supplier (
     s_suppkey       integer NOT NULL,
@@ -110,19 +110,15 @@ CREATE TABLE supplier (
 \copy lineorder FROM PROGRAM '$DBGEN_SSBM_CMD -s 1 -X -Tl' DELIMITER '|'
 \copy part      FROM PROGRAM '$DBGEN_SSBM_CMD -s 1 -X -Tp' DELIMITER '|'
 \copy supplier  FROM PROGRAM '$DBGEN_SSBM_CMD -s 1 -X -Ts' DELIMITER '|'
-
 \set revision_checker_body 'SELECT CAST(':regress_dataset_revision' as text)'
-
 CREATE OR REPLACE FUNCTION
 pgstrom.regression_testdb_revision()
 RETURNS text
 AS :'revision_checker_body'
 LANGUAGE 'sql';
-
 COMMIT;
 -- vacuum tables
 VACUUM ANALYZE;
 --- revision confirmation
 SELECT pgstrom.regression_testdb_revision();
-
 \endif
