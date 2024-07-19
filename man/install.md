@@ -20,13 +20,13 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Stromを実行するには少なくとも一個のGPUデバイスがシステム上に必要です。これらはCUDA Toolkitでサポートされており、computing capability が6.0以降のモデル（Pascal世代以降）である必要があります。
     - [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models)を参考にGPUを選定してください。
 - **Operating System**
-    - PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 8.xです。
+    - PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 9.x、または8.xです。
     - GPUダイレクトSQL（cuFileドライバ）を利用するには、CUDA Toolkitに含まれるnvidia-fsドライバと、Mellanox OFED (OpenFabrics Enterprise Distribution) ドライバのインストールが必要です。
 - **PostgreSQL**
     - PG-Strom v5.0の実行にはPostgreSQLバージョン15以降が必要です。
     - PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。
 - **CUDA Toolkit**
-    - PG-Stromの実行にはCUDA Toolkit バージョン12.2update2以降が必要です。
+    - PG-Stromの実行にはCUDA Toolkit バージョン12.2update1以降が必要です。
     - PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。
 }
 @en{
@@ -38,13 +38,13 @@ This chapter introduces the steps to install PG-Strom.
     - PG-Strom requires at least one GPU device on the system, which is supported by CUDA Toolkit, has computing capability 6.0 (Pascal generation) or later;
     - Please check at [002: HW Validation List - List of supported GPU models](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#list-of-supported-gpu-models) for GPU selection.
 - **Operating System**
-    - PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or Rocky Linux version 8.x series.
+    - PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or Rocky Linux version 9.x or 8.x series.
     - GPU Direct SQL (with cuFile driver) needs the `nvidia-fs` driver distributed with CUDA Toolkit, and Mellanox OFED (OpenFabrics Enterprise Distribution) driver.
 - **PostgreSQL**
     - PG-Strom v5.0 requires PostgreSQL v15 or later.
     - Some of PostgreSQL APIs used by PG-Strom internally are not included in the former versions.
 - **CUDA Toolkit**
-    - PG-Strom requires CUDA Toolkit version 12.2update2 or later.
+    - PG-Strom requires CUDA Toolkit version 12.2update1 or later.
     - Some of CUDA Driver APIs used by PG-Strom internally are not included in the former versions.
 }
 
@@ -476,8 +476,8 @@ CUDA Toolkitのインストールに続いて、ドライバをインストー�
     **Volta以前のGPUの利用について**
     
     オープンソース版nvidiaドライバは、Volta世代以前のGPUには対応していません。
-    したがって、VoltaまたはPascal世代のGPUでPG-Stromを利用する場合は、プロプラエタリ版のドライバがGPUDirect Storageに対応しているCUDA 12.2を利用する必要があります。
-    CUDA 12.2のパッケージは[こちら](https://developer.nvidia.com/cuda-12-2-2-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local)から入手する事ができます。
+    したがって、VoltaまたはPascal世代のGPUでPG-Stromを利用する場合は、プロプラエタリ版のドライバであってもGPUDirect Storageに対応しているCUDA 12.2 Update 1を利用する必要があります。
+    CUDA 12.2 Update 1のパッケージは[こちら](https://developer.nvidia.com/cuda-12-2-1-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local)から入手する事ができます。
 }
 
 @en{
@@ -489,13 +489,22 @@ Please use the open source version of nvidia-driver here. Only the open source v
     **Use of Volta or former GPUs**
     
     The open source edition of the nvidia driver does not support Volta generation GPUs or former.
-    Therefore, if you want to use PG-Strom with Volta or Pascal generation GPUs, you need to use CUDA 12.2, whose proprietary driver supports GPUDirect Storage.
-    The CUDA 12.2 package can be obtained [here](https://developer.nvidia.com/cuda-12-2-2-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local).
+    Therefore, if you want to use PG-Strom with Volta or Pascal generation GPUs, you need to use CUDA 12.2 Update 1, whose proprietary driver supports GPUDirect Storage.
+    The CUDA 12.2 Update 1 package can be obtained [here](https://developer.nvidia.com/cuda-12-2-1-download-archive?target_os=Linux&target_arch=x86_64&Distribution=RHEL&target_version=8&target_type=rpm_local).
+}
+
+@ja{
+続いて、GPU-Direct Storage(GDS)を利用するためのドライバモジュール<code>nvidia-gds</code>をインストールします。
+パッケージ名に続いてCUDA Toolkitのバージョンと同一のバージョン名を指定してください。
+}
+@en{
+Next, install the driver module <code>nvidia-gds</code> for the GPU-Direct Storage (GDS).
+Please specify the same version name as the CUDA Toolkit version after the package name.
 }
 
 ```
 # dnf module install nvidia-driver:open-dkms
-# dnf install nvidia-gds
+# dnf install nvidia-gds-12-5
 ```
 
 @ja{
@@ -1187,8 +1196,6 @@ CREATE EXTENSION
 That's all for the installation.
 }
 
-
-
 @ja:##PostGISのインストール
 @en:##PostGIS Installation
 
@@ -1227,3 +1234,45 @@ postgres=# CREATE EXTENSION postgis;
 CREATE EXTENSION
 ```
 
+@ja:##Ubuntu Linuxへのインストール
+@en:##Installation on Ubuntu Linux
+
+@ja{
+現在のところ、Ubuntu Linux向けのパッケージは提供されていませんが、ソースコードからPG-Stromをビルドして動作させることができます。
+
+OSのインストール後、それぞれUbuntu Linux向けのMOFEDドライバ、CUDA Toolkit、およびPostgreSQLをインストールしてください。
+
+続いて、`heterodb-extra`パッケージをインストールします。
+Ubuntu Linux 用の `.deb` パッケージが提供されていますので、その時点の最新版を[SWDC](https://heterodb.github.io/swdc/)より入手してください。
+}
+@en{
+Although PG-Strom packages are not available for Ubuntu Linux right now, you can build and run PG-Strom from the source code.
+
+After the installation of Ubuntu Linux, install the MOFED driver, CUDA Toolkit, and PostgreSQL for Ubuntu Linux, respectively.
+
+Next, install the `heterodb-extra` package.
+A `.deb` package for Ubuntu Linux is provided, so please obtain the latest version from the [SWDC](https://heterodb.github.io/swdc/).
+}
+```
+$ wget https://heterodb.github.io/swdc/deb/heterodb-extra_5.4-1_amd64.deb
+$ sudo dpkg -i heterodb-extra_5.4-1_amd64.deb
+```
+
+@ja{
+PG-Stromはソースコードをチェックアウトしてインストールします。
+この時、ターゲットとするPostgreSQLの`pg_config`を指定するのを忘れないようにしてください。
+
+インストール後の設定は Red Hat Enterprise Linux や Rocky Linux の場合と同じです。
+}
+@en{
+Checkout the source code of PG-Strom, build and install as follows.
+At this time, do not forget to specify the target PostgreSQL by `pg_config`.
+
+Post-installation configuration is the same as for Red Hat Enterprise Linux or Rocky Linux.
+}
+```
+$ git clone https://github.com/heterodb/pg-strom.git
+$ cd pg-strom/src
+$ make PG_CONFIG=/path/to/pgsql/bin/pg_config -j 8
+$ sudo make PG_CONFIG=/path/to/pgsql/bin/pg_config install
+```

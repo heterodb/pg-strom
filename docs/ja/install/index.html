@@ -126,6 +126,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#postgis">PostGISのインストール</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#ubuntu-linux">Ubuntu Linuxへのインストール</a>
+    </li>
     </ul>
                 </li>
               </ul>
@@ -166,6 +168,8 @@
               </ul>
               <p class="caption"><span class="caption-text">リリースノート</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
@@ -218,7 +222,7 @@
 </ul>
 </li>
 <li><strong>Operating System</strong><ul>
-<li>PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 8.xです。</li>
+<li>PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはRocky Linuxバージョン 9.x、または8.xです。</li>
 <li>GPUダイレクトSQL（cuFileドライバ）を利用するには、CUDA Toolkitに含まれるnvidia-fsドライバと、Mellanox OFED (OpenFabrics Enterprise Distribution) ドライバのインストールが必要です。</li>
 </ul>
 </li>
@@ -228,7 +232,7 @@
 </ul>
 </li>
 <li><strong>CUDA Toolkit</strong><ul>
-<li>PG-Stromの実行にはCUDA Toolkit バージョン12.2update2以降が必要です。</li>
+<li>PG-Stromの実行にはCUDA Toolkit バージョン12.2update1以降が必要です。</li>
 <li>PG-Stromが内部的に利用しているAPIの中には、これ以前のバージョンでは提供されていないものが含まれています。</li>
 </ul>
 </li>
@@ -397,11 +401,13 @@ heterodb-swdcパッケージがインストールされると、HeteroDB-SWDCか
 <p class="admonition-title">Tips</p>
 <p><strong>Volta以前のGPUの利用について</strong></p>
 <p>オープンソース版nvidiaドライバは、Volta世代以前のGPUには対応していません。
-したがって、VoltaまたはPascal世代のGPUでPG-Stromを利用する場合は、プロプラエタリ版のドライバがGPUDirect Storageに対応しているCUDA 12.2を利用する必要があります。
-CUDA 12.2のパッケージは<a href="https://developer.nvidia.com/cuda-12-2-2-download-archive?target_os=Linux&amp;target_arch=x86_64&amp;Distribution=RHEL&amp;target_version=8&amp;target_type=rpm_local">こちら</a>から入手する事ができます。</p>
+したがって、VoltaまたはPascal世代のGPUでPG-Stromを利用する場合は、プロプラエタリ版のドライバであってもGPUDirect Storageに対応しているCUDA 12.2 Update 1を利用する必要があります。
+CUDA 12.2 Update 1のパッケージは<a href="https://developer.nvidia.com/cuda-12-2-1-download-archive?target_os=Linux&amp;target_arch=x86_64&amp;Distribution=RHEL&amp;target_version=8&amp;target_type=rpm_local">こちら</a>から入手する事ができます。</p>
 </div>
+<p>続いて、GPU-Direct Storage(GDS)を利用するためのドライバモジュール<code>nvidia-gds</code>をインストールします。
+パッケージ名に続いてCUDA Toolkitのバージョンと同一のバージョン名を指定してください。</p>
 <pre><code># dnf module install nvidia-driver:open-dkms
-# dnf install nvidia-gds
+# dnf install nvidia-gds-12-5
 </code></pre>
 <p>正常にインストールが完了すると、<code>/usr/local/cuda</code>配下にCUDA Toolkitが導入されています。</p>
 <pre><code>$ ls /usr/local/cuda/
@@ -765,6 +771,22 @@ CREATE EXTENSION
 これでPostGISのインストールは完了です。</p>
 <pre><code>postgres=# CREATE EXTENSION postgis;
 CREATE EXTENSION
+</code></pre>
+<h2 id="ubuntu-linux">Ubuntu Linuxへのインストール</h2>
+<p>現在のところ、Ubuntu Linux向けのパッケージは提供されていませんが、ソースコードからPG-Stromをビルドして動作させることができます。</p>
+<p>OSのインストール後、それぞれUbuntu Linux向けのMOFEDドライバ、CUDA Toolkit、およびPostgreSQLをインストールしてください。</p>
+<p>続いて、<code>heterodb-extra</code>パッケージをインストールします。
+Ubuntu Linux 用の <code>.deb</code> パッケージが提供されていますので、その時点の最新版を<a href="https://heterodb.github.io/swdc/">SWDC</a>より入手してください。</p>
+<pre><code>$ wget https://heterodb.github.io/swdc/deb/heterodb-extra_5.4-1_amd64.deb
+$ sudo dpkg -i heterodb-extra_5.4-1_amd64.deb
+</code></pre>
+<p>PG-Stromはソースコードをチェックアウトしてインストールします。
+この時、ターゲットとするPostgreSQLの<code>pg_config</code>を指定するのを忘れないようにしてください。</p>
+<p>インストール後の設定は Red Hat Enterprise Linux や Rocky Linux の場合と同じです。</p>
+<pre><code>$ git clone https://github.com/heterodb/pg-strom.git
+$ cd pg-strom/src
+$ make PG_CONFIG=/path/to/pgsql/bin/pg_config -j 8
+$ sudo make PG_CONFIG=/path/to/pgsql/bin/pg_config install
 </code></pre>
               
             </div>
