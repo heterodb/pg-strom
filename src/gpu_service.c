@@ -3168,6 +3168,7 @@ out:
 static void
 gpuservAcceptClient(gpuContext *gcontext)
 {
+	pthread_attr_t th_attr;
 	gpuClient  *gclient;
 	pgsocket	sockfd;
 	int			errcode;
@@ -3194,7 +3195,14 @@ gpuservAcceptClient(gpuContext *gcontext)
 	pthreadMutexInit(&gclient->mutex);
 	gclient->sockfd = sockfd;
 
-	if ((errcode = pthread_create(&gclient->worker, NULL,
+	/* launch workers */
+	if (pthread_attr_init(&th_attr) != 0)
+		__FATAL("failed on pthread_attr_init");
+	if (pthread_attr_setdetachstate(&th_attr, PTHREAD_CREATE_DETACHED) != 0)
+		__FATAL("failed on pthread_attr_setdetachstate");
+
+	if ((errcode = pthread_create(&gclient->worker,
+								  &th_attr,
 								  gpuservMonitorClient,
 								  gclient)) != 0)
 	{
