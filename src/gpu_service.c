@@ -3778,7 +3778,8 @@ gpuservBgWorkerMain(Datum arg)
 		/* ready to accept connection from the PostgreSQL backend */
 		gpuserv_shared_state->gpuserv_ready_accept = true;
 
-		gpuDirectOpenDriver();
+		if (!gpuDirectOpenDriver())
+			heterodbExtraEreport(true);
 		while (!gpuServiceGoingTerminate())
 		{
 			struct epoll_event	ep_ev;
@@ -3825,7 +3826,8 @@ gpuservBgWorkerMain(Datum arg)
 			gpuContext *gcontext = dlist_container(gpuContext, chain, dnode);
 			gpuservCleanupGpuContext(gcontext);
 		}
-		gpuDirectCloseDriver();
+		if (!gpuDirectCloseDriver())
+			heterodbExtraEreport(false);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -3839,7 +3841,8 @@ gpuservBgWorkerMain(Datum arg)
 		gpuContext *gcontext = dlist_container(gpuContext, chain, dnode);
 		gpuservCleanupGpuContext(gcontext);
 	}
-	gpuDirectCloseDriver();
+	if (!gpuDirectCloseDriver())
+		heterodbExtraEreport(false);
 
 	/*
 	 * If it received only SIGHUP (no SIGTERM), try to restart rather than

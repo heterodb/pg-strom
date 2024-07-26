@@ -521,44 +521,10 @@ extern long		PAGES_PER_BLOCK;	/* (BLCKSZ / PAGE_SIZE) */
 /*
  * extra.c
  */
-extern void		pgstrom_init_extra(void);
-extern int		heterodbValidateDevice(const char *gpu_device_name,
-									   const char *gpu_device_uuid);
-extern const char *heterodbInitOptimalGpus(const char *manual_config);
-extern int64_t	heterodbGetOptimalGpus(const char *path);
-extern void		gpuDirectOpenDriver(void);
-extern void		gpuDirectCloseDriver(void);
-extern bool		gpuDirectMapGpuMemory(CUdeviceptr m_segment, size_t segment_sz,
-									  unsigned long *p_iomap_handle);
-extern bool		gpuDirectUnmapGpuMemory(CUdeviceptr m_segment,
-										unsigned long iomap_handle);
-extern bool		gpuDirectRegisterStream(CUstream cuda_stream);
-extern bool		gpuDirectDeregisterStream(CUstream cuda_stream);
-extern bool		gpuDirectFileReadIOV(const char *pathname,
-									 CUdeviceptr m_segment,
-									 off_t m_offset,
-									 unsigned long iomap_handle,
-									 const strom_io_vector *iovec,
-									 uint32_t *p_npages_direct_read,
-									 uint32_t *p_npages_vfs_read);
-extern bool		gpuDirectFileReadAsyncIOV(const char *pathname,
-										  CUdeviceptr m_segment,
-										  off_t m_offset,
-										  unsigned long iomap_handle,
-										  const strom_io_vector *iovec,
-										  CUstream cuda_stream,
-										  uint32_t *p_error_code_async,
-										  uint32_t *p_npages_direct_read,
-										  uint32_t *p_npages_vfs_read);
-extern char	   *gpuDirectGetProperty(void);
-extern void		gpuDirectSetProperty(const char *key, const char *value);
-extern void		gpuDirectCleanUpOnThreadTerminate(void);
+extern void		heterodbExtraEreport(int elevel);
 extern bool		gpuDirectIsAvailable(void);
+extern void		pgstrom_init_extra(void);
 
-extern int		heterodbExtraGetError(const char **p_filename,
-									  unsigned int *p_lineno,
-									  const char **p_funcname,
-									  char *buffer, size_t buffer_sz);
 /*
  * codegen.c
  */

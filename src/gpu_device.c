@@ -22,7 +22,7 @@ double			pgstrom_gpu_direct_seq_page_cost; /* GUC */
 static bool		pgstrom_gpudirect_enabled;			/* GUC */
 static int		__pgstrom_gpudirect_threshold_kb;	/* GUC */
 #define pgstrom_gpudirect_threshold		((size_t)__pgstrom_gpudirect_threshold_kb << 10)
-
+static char	   *pgstrom_gpu_selection_policy = "optimal";
 
 /* catalog of device attributes */
 typedef enum {
@@ -479,6 +479,26 @@ tablespace_optimal_gpu_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
 	}
 }
 
+static bool
+pgstrom_gpu_selection_policy_check_callback(char **newval, void **extra,
+											GucSource source)
+{
+	const char *policy = *newval;
+
+	if (strcmp(policy, "optimal") == 0 ||
+		strcmp(policy, "numa") == 0 ||
+		strcmp(policy, "system") == 0)
+		return true;
+
+	return false;
+}
+
+static void
+pgstrom_gpu_selection_policy_assign_callback(const char *newval, void *extra)
+{
+	tablespace_optimal_gpu_cache_callback(0, 0, 0);
+}
+
 /*
  * GetOptimalGpuForFile
  */
@@ -517,10 +537,12 @@ __GetOptimalGpuForFile(const char *pathname)
 				   (stat_buf.st_ctim.tv_sec == hentry->file_ctime.tv_sec &&
 					stat_buf.st_ctim.tv_nsec > hentry->file_ctime.tv_nsec)))
 	{
+		const char *policy = pgstrom_gpu_selection_policy;
+
 		Assert(hentry->file_dev == stat_buf.st_dev &&
 			   hentry->file_ino == stat_buf.st_ino);
 		memcpy(&hentry->file_ctime, &stat_buf.st_ctim, sizeof(struct timespec));
-		hentry->optimal_gpus = heterodbGetOptimalGpus(pathname);
+		hentry->optimal_gpus = heterodbGetOptimalGpus(pathname, policy);
 	}
 	return hentry->optimal_gpus;
 }
@@ -963,6 +985,19 @@ pgstrom_init_gpu_device(void)
 								   PGC_POSTMASTER,
 								   GUC_NOT_IN_SAMPLE,
 								   NULL, NULL, NULL);
+		/*
+		 * pg_strom.gpu_selection_policy
+		 */
+		DefineCustomStringVariable("pg_strom.gpu_selection_policy",
+								   "GPU selection policy - one of 'optimal', 'numa' or 'system'",
+								   NULL,
+								   &pgstrom_gpu_selection_policy,
+								   "optimal",
+								   PGC_SUSET,
+								   GUC_NOT_IN_SAMPLE,
+								   pgstrom_gpu_selection_policy_check_callback,
+								   pgstrom_gpu_selection_policy_assign_callback,
+								   NULL);
 		/* tablespace cache */
 		tablespace_optimal_gpu_htable = NULL;
 		CacheRegisterSyscacheCallback(TABLESPACEOID,
