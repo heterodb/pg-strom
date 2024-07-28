@@ -1,6 +1,6 @@
 PG_CONFIG ?= pg_config
 VERSION ?= 5.2
-RELEASE ?= 1
+RELEASE ?= 2
 GITHASH_IF_NOT_GIVEN := HEAD
 
 #
@@ -12,7 +12,7 @@ PG_MINORVERSION := $(shell $(PG_CONFIG) --version | sed 's/\./ /g' | awk '{print
 #
 # PG-Strom version signature
 #
-ifeq ($(shell echo $(RELEASE) | grep -E '^[0-9]+$$'),)
+ifeq ($(shell echo $(RELEASE) | grep -E '^[0-9]+'),)
 PGSTROM_VERSION := $(VERSION)$(RELEASE)
 else
 PGSTROM_VERSION := $(VERSION).$(RELEASE)
