@@ -168,7 +168,7 @@ typedef struct
 	const geom_bbox *bbox;	/* boundary box if any */
 } xpu_geometry_t;
 
-EXTERN_DATA xpu_datum_operators	xpu_geometry_ops;
+EXTERN_DATA(xpu_datum_operators, xpu_geometry_ops);
 
 /*
  * POINT2D, POINT3D, POINT3DM, POINT4D

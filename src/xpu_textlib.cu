@@ -848,7 +848,7 @@ pg_gb18030_mblen(const char *s)
 #define DATABASE_SB_ENCODE(NAME)					{ #NAME, 1, pg_latin_mblen }
 #define DATABASE_MB_ENCODE(NAME,MAXLEN,FN_MBLEN)	{ #NAME, MAXLEN, FN_MBLEN }
 
-PUBLIC_DATA	xpu_encode_info	xpu_encode_catalog[] = {
+PUBLIC_DATA(xpu_encode_info, xpu_encode_catalog[]) = {
 	DATABASE_SB_ENCODE(SQL_ASCII),
 	DATABASE_MB_ENCODE(EUC_JP, 3, pg_euc_mblen),
 	DATABASE_MB_ENCODE(EUC_CN, 2, pg_euc_cn_mblen),

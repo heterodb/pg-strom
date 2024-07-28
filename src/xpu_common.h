@@ -36,9 +36,12 @@
 #define PUBLIC_FUNCTION(RET_TYPE)		__device__ RET_TYPE
 #define EXTERN_FUNCTION(RET_TYPE)		extern "C" __device__ RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)		extern "C" __global__ RET_TYPE
-#define EXTERN_DATA						extern "C" __device__
-#define PUBLIC_DATA						__device__
-#define STATIC_DATA						static __device__
+#define EXTERN_DATA(TYPE,NAME)			extern "C" __device__ TYPE NAME
+#define EXTERN_SHARED_DATA(TYPE,NAME)	extern "C" __shared__ TYPE NAME
+#define PUBLIC_DATA(TYPE,NAME)			__device__ TYPE NAME
+#define PUBLIC_SHARED_DATA(TYPE,NAME)	__shared__ TYPE NAME
+#define STATIC_DATA(TYPE,NAME)			static __device__ TYPE NAME
+#define STATIC_SHARED_DATA(TYPE,NAME)	static __shared__ TYPE NAME
 #elif defined(__cplusplus)
 /* C++ */
 #include <cstdio>						/* for printf in C++ */
@@ -47,9 +50,12 @@
 #define PUBLIC_FUNCTION(RET_TYPE)		PGDLLEXPORT RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)		extern "C" RET_TYPE
 #define EXTERN_FUNCTION(RET_TYPE)		extern "C" RET_TYPE
-#define EXTERN_DATA						extern "C"
-#define PUBLIC_DATA
-#define STATIC_DATA						static
+#define EXTERN_DATA(TYPE,NAME)			extern "C" TYPE NAME
+#define EXTERN_SHARED_DATA(TYPE,NAME)	extern "C" TYPE NAME
+#define PUBLIC_DATA(TYPE,NAME)			TYPE NAME
+#define PUBLIC_SHARED_DATA(TYPE,NAME)	PUBLIC_DATA(TYPE,NAME)
+#define STATIC_DATA(TYPE,NAME)			static TYPE NAME
+#define STATIC_SHARED_DATA(TYPE,NAME)	STATIC_DATA(TYPE,NAME)
 #else
 /* C */
 #define INLINE_FUNCTION(RET_TYPE)		static inline RET_TYPE
@@ -57,9 +63,12 @@
 #define PUBLIC_FUNCTION(RET_TYPE)		PGDLLEXPORT RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)		RET_TYPE
 #define EXTERN_FUNCTION(RET_TYPE)		extern RET_TYPE
-#define EXTERN_DATA						extern
-#define PUBLIC_DATA
-#define STATIC_DATA						static
+#define EXTERN_DATA(TYPE,NAME)			extern TYPE NAME
+#define EXTERN_SHARED_DATA(TYPE,NAME)	EXTERN_DATA(TYPE,NAME)
+#define PUBLIC_DATA(TYPE,NAME)			TYPE NAME
+#define PUBLIC_SHARED_DATA(TYPE,NAME)	PUBLIC_DATA(TYPE,NAME)
+#define STATIC_DATA(TYPE,NAME)			static TYPE NAME
+#define STATIC_SHARED_DATA(TYPE,NAME)	STATIC_DATA(TYPE,NAME)
 #endif	/* __CUDACC__ */
 
 /*
@@ -1730,7 +1739,7 @@ struct xpu_datum_operators {
 		XPU_DATUM_COMMON_FIELD;								\
 		BASETYPE	value;									\
 	} xpu_##NAME##_t;										\
-	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
+	EXTERN_DATA(xpu_datum_operators, xpu_##NAME##_ops)
 #define PGSTROM_SQLTYPE_SIMPLE_DECLARATION(NAME,BASETYPE)	\
 	typedef struct {										\
 		KVEC_DATUM_COMMON_FIELD;							\
@@ -1740,7 +1749,7 @@ struct xpu_datum_operators {
 		XPU_DATUM_COMMON_FIELD;								\
 		BASETYPE	value;									\
 	} xpu_##NAME##_t;										\
-	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
+	EXTERN_DATA(xpu_datum_operators, xpu_##NAME##_ops)
 
 #define __PGSTROM_SQLTYPE_VARLENA_DECLARATION(NAME)			\
 	typedef struct {										\
@@ -1748,7 +1757,7 @@ struct xpu_datum_operators {
 		int			length;		/* -1, if PG verlena */		\
 		const char *value;									\
 	} xpu_##NAME##_t;										\
-	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
+	EXTERN_DATA(xpu_datum_operators, xpu_##NAME##_ops)
 #define PGSTROM_SQLTYPE_VARLENA_DECLARATION(NAME)			\
 	typedef struct {										\
 		KVEC_DATUM_COMMON_FIELD;							\
@@ -1760,10 +1769,10 @@ struct xpu_datum_operators {
 		int			length;		/* -1, if PG verlena */		\
 		const char *value;									\
 	} xpu_##NAME##_t;										\
-	EXTERN_DATA xpu_datum_operators xpu_##NAME##_ops
+	EXTERN_DATA(xpu_datum_operators, xpu_##NAME##_ops)
 
 #define PGSTROM_SQLTYPE_OPERATORS(NAME,TYPBYVAL,TYPALIGN,TYPLENGTH) \
-	PUBLIC_DATA xpu_datum_operators xpu_##NAME##_ops = {			\
+	PUBLIC_DATA(xpu_datum_operators, xpu_##NAME##_ops) = {			\
 		.xpu_type_name        = #NAME,								\
 		.xpu_type_byval       = TYPBYVAL,							\
 		.xpu_type_align       = TYPALIGN,							\
@@ -1829,7 +1838,7 @@ typedef struct {
 		} arrow;	/* length >= 0 */
 	} u;
 } kvec_array_t;
-EXTERN_DATA xpu_datum_operators		xpu_array_ops;
+EXTERN_DATA(xpu_datum_operators, xpu_array_ops);
 
 /* access macros for heap array */
 typedef struct
@@ -1929,7 +1938,7 @@ typedef struct
 	} u;
 } kvec_composite_t;
 
-EXTERN_DATA xpu_datum_operators		xpu_composite_ops;
+EXTERN_DATA(xpu_datum_operators, xpu_composite_ops);
 
 /*
  * xpu_internal_t - utility data type for internal usage such as:
@@ -1947,7 +1956,7 @@ typedef struct {
 	const void *values[KVEC_UNITSZ];
 } kvec_internal_t;
 
-EXTERN_DATA xpu_datum_operators		xpu_internal_ops;
+EXTERN_DATA(xpu_datum_operators, xpu_internal_ops);
 
 /*
  * device type catalogs
@@ -1957,7 +1966,7 @@ typedef struct {
 	xpu_datum_operators *type_ops;
 } xpu_type_catalog_entry;
 
-EXTERN_DATA xpu_type_catalog_entry	builtin_xpu_types_catalog[];
+EXTERN_DATA(xpu_type_catalog_entry, builtin_xpu_types_catalog[]);
 
 /* device type hash for xPU service */
 typedef struct xpu_type_hash_entry xpu_type_hash_entry;
@@ -2353,7 +2362,7 @@ typedef struct {
 	xpu_function_t	func_dptr;
 } xpu_function_catalog_entry;
 
-EXTERN_DATA xpu_function_catalog_entry	builtin_xpu_functions_catalog[];
+EXTERN_DATA(xpu_function_catalog_entry, builtin_xpu_functions_catalog[]);
 
 /* device function hash for xPU service */
 typedef struct xpu_func_hash_entry	xpu_func_hash_entry;
@@ -2968,9 +2977,9 @@ HandleErrorIfCpuFallback(kern_context *kcxt,
  * ----------------------------------------------------------------
  */
 #define FUNC_OPCODE(a,b,c,NAME,d,e)			\
-	EXTERN_DATA bool pgfn_##NAME(XPU_PGFUNCTION_ARGS);
+	EXTERN_FUNCTION(bool) pgfn_##NAME(XPU_PGFUNCTION_ARGS);
 #define DEVONLY_FUNC_OPCODE(a,NAME,b,c,d)	\
-	EXTERN_DATA bool pgfn_##NAME(XPU_PGFUNCTION_ARGS);
+	EXTERN_FUNCTION(bool) pgfn_##NAME(XPU_PGFUNCTION_ARGS);
 #include "xpu_opcodes.h"
 
 /* ----------------------------------------------------------------

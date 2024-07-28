@@ -37,7 +37,7 @@ typedef struct {
 #define XPU_NUMERIC_KIND__POS_INF	0x02
 #define XPU_NUMERIC_KIND__NEG_INF	0x03
 #define XPU_NUMERIC_KIND__VARLENA	0xff		/* still in raw varlena format */
-EXTERN_DATA xpu_datum_operators xpu_numeric_ops;
+EXTERN_DATA(xpu_datum_operators, xpu_numeric_ops);
 
 /*
  * PostgreSQL numeric data type
