@@ -134,12 +134,14 @@ setup_geometry_rawsize(xpu_geometry_t *geom)
 	return false;
 }
 
-STATIC_FUNCTION(const char *)
-geometry_load_subitem(xpu_geometry_t *gsub,
+STATIC_FUNCTION(bool)
+geometry_load_subitem(kern_context *kcxt,
+					  xpu_geometry_t *gsub,
 					  const xpu_geometry_t *geom,
-					  const char *pos, int index,
-					  kern_context *kcxt = NULL)
+					  const char **p_pos, int index)
 {
+	const char *pos = *p_pos;
+
 	switch (geom->type)
 	{
 		case GEOM_POINTTYPE:
@@ -147,14 +149,17 @@ geometry_load_subitem(xpu_geometry_t *gsub,
 		case GEOM_TRIANGLETYPE:
 		case GEOM_CIRCSTRINGTYPE:
 			/* no sub-geometry */
-			if (kcxt)
-				STROM_ELOG(kcxt, "geometry data curruption (no sub-items)");
-			break;
+			STROM_ELOG(kcxt, "geometry data curruption (no sub-items)");
+			return false;
+
 		case GEOM_POLYGONTYPE:
 			if (index == 0)
 				pos = geom->rawdata + LONGALIGN(sizeof(int32_t) * geom->nitems);
 			else if (index >= geom->nitems)
-				break;
+			{
+				STROM_ELOG(kcxt, "geometry subitem out of range");
+				return false;
+			}
 			gsub->expr_ops = &xpu_geometry_ops;
 			gsub->type   = GEOM_LINETYPE;
 			gsub->flags  = geom->flags;
@@ -166,11 +171,10 @@ geometry_load_subitem(xpu_geometry_t *gsub,
 			pos += gsub->rawsize;
 			if (pos > geom->rawdata + geom->rawsize)
 			{
-				if (kcxt)
-					STROM_ELOG(kcxt,"geometry data curruption (polygon)");
-				break;
+				STROM_ELOG(kcxt,"geometry data curruption (polygon)");
+				return false;
 			}
-			return pos;
+			break;
 
 		case GEOM_MULTIPOINTTYPE:
         case GEOM_MULTILINETYPE:
@@ -185,7 +189,10 @@ geometry_load_subitem(xpu_geometry_t *gsub,
 			if (index == 0)
 				pos = geom->rawdata;
 			else if (index >= geom->nitems)
-				break;
+			{
+				STROM_ELOG(kcxt, "geometry subitem out of range");
+				return false;
+			}
 			gsub->expr_ops = &xpu_geometry_ops;
 			gsub->type = __Fetch((int32_t *)pos);
 			pos += sizeof(int32_t);
@@ -199,37 +206,38 @@ geometry_load_subitem(xpu_geometry_t *gsub,
 			pos += gsub->rawsize;
 			if (pos > geom->rawdata + geom->rawsize)
 			{
-				if (kcxt)
-					STROM_ELOG(kcxt, "geometry data curruption (collection)");
-				break;
+				STROM_ELOG(kcxt, "geometry data curruption (collection)");
+				return false;
 			}
-			return pos;
+			break;
 
 		default:
-			/* unknown geometry type */
-			break;
+			STROM_ELOG(kcxt, "unknown geometry type");
+			return false;
 	}
-	memset(gsub, 0, sizeof(xpu_geometry_t));
-	return NULL;
+	*p_pos = pos;
+	return true;
 }
 
-STATIC_FUNCTION(bool)
-geometry_is_empty(const xpu_geometry_t *geom)
+STATIC_FUNCTION(int)
+geometry_is_empty(kern_context *kcxt, const xpu_geometry_t *geom)
 {
 	if (geometry_is_collection(geom))
 	{
 		xpu_geometry_t	__geom;
-		const char	   *pos = NULL;
+		const char *pos = NULL;
+		int			status;
 
 		for (int i=0; i < geom->nitems; i++)
 		{
-			pos = geometry_load_subitem(&__geom, geom, pos, i);
-			if (!geometry_is_empty(&__geom))
-				return false;
+			if (!geometry_load_subitem(kcxt, &__geom, geom, &pos, i))
+				return -1;
+			if ((status = geometry_is_empty(kcxt, &__geom)) <= 0)
+				return status;	/* not-empty or error */
 		}
-		return true;	/* empty */
+		return 1;	/* empty */
 	}
-	return (geom->nitems == 0 ? true : false);
+	return (geom->nitems == 0 ? 1 : 0);
 }
 
 /* ================================================================
@@ -980,7 +988,7 @@ __double2float_ru(double dval)
 #endif	/* __CUDACC__ */
 
 /* see, gserialized_datum_get_box2df_p() */
-STATIC_FUNCTION(bool)
+STATIC_FUNCTION(int)
 __geometry_get_bbox2d(kern_context *kcxt,
 					  const xpu_geometry_t *geom, geom_bbox_2d *bbox)
 {
@@ -990,17 +998,17 @@ __geometry_get_bbox2d(kern_context *kcxt,
 	double			xmin, xmax;
 	double			ymin, ymax;
 	xpu_geometry_t	temp;
-	const char	   *pos;
+	const char	   *pos = NULL;
 
 	/* geometry already has bounding-box? */
 	if (geom->bbox)
 	{
 		memcpy(bbox, &geom->bbox->d2, sizeof(geom_bbox_2d));
-		return true;
+		return 1;
 	}
 
 	if ((geom->flags & GEOM_FLAG__GEODETIC) != 0)
-		return false;
+		return 0;
 	if (geom->type == GEOM_POINTTYPE)
 	{
 		__loadPoint2d(&pt, geom->rawdata, 0);
@@ -1029,17 +1037,15 @@ __geometry_get_bbox2d(kern_context *kcxt,
 	}
 	else if (geom->type == GEOM_MULTIPOINTTYPE)
 	{
-		pos = geometry_load_subitem(&temp, geom, NULL, 0, kcxt);
-		if (!pos)
-			return false;
+		if (!geometry_load_subitem(kcxt, &temp, geom, &pos, 0))
+			return -1;
 		__loadPoint2d(&pt, temp.rawdata, 0);
 		xmin = xmax = pt.x;
 		ymin = ymax = pt.y;
 		for (int i=1; i < geom->nitems; i++)
 		{
-			pos = geometry_load_subitem(&temp, geom, pos, i, kcxt);
-			if (!pos)
-				return false;
+			if (!geometry_load_subitem(kcxt, &temp, geom, &pos, i))
+				return -1;
 			__loadPoint2d(&pt, temp.rawdata, 0);
 			if (xmax < pt.x)
 				xmax = pt.x;
@@ -1055,17 +1061,15 @@ __geometry_get_bbox2d(kern_context *kcxt,
 	{
 		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(geom->flags);
 
-		pos = geometry_load_subitem(&temp, geom, NULL, 0, kcxt);
-		if (!pos)
-			return false;
+		if (!geometry_load_subitem(kcxt, &temp, geom, &pos, 0))
+			return -1;
 		__loadPoint2d(&pt, temp.rawdata, 0);
 		xmin = xmax = pt.x;
 		ymin = ymax = pt.y;
 		for (int i=1; i < geom->nitems; i++)
 		{
-			pos = geometry_load_subitem(&temp, geom, pos, i, kcxt);
-			if (!pos)
-				return false;
+			if (!geometry_load_subitem(kcxt, &temp, geom, &pos, i))
+				return -1;
 			rawdata = temp.rawdata;
 			for (int j=0; j < temp.nitems; j++)
 			{
@@ -1083,14 +1087,14 @@ __geometry_get_bbox2d(kern_context *kcxt,
 	}
 	else
 	{
-		return false;	/* not a supported type */
+		return 0;		/* not a supported type */
 	}
 	bbox->xmin = __double2float_rd(xmin);
 	bbox->xmax = __double2float_ru(xmax);
 	bbox->ymin = __double2float_rd(ymin);
 	bbox->ymax = __double2float_ru(ymax);
 
-	return true;
+	return 1;
 }
 
 INLINE_FUNCTION(bool)
@@ -1113,6 +1117,7 @@ pgfn_geometry_overlaps(XPU_PGFUNCTION_ARGS)
 {
 	geom_bbox_2d	bbox1;
 	geom_bbox_2d	bbox2;
+	int				status1, status2;
 	KEXP_PROCESS_ARGS2(bool, geometry, geom1, geometry, geom2);
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
@@ -1120,12 +1125,14 @@ pgfn_geometry_overlaps(XPU_PGFUNCTION_ARGS)
 	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
 			 !xpu_geometry_is_valid(kcxt, &geom2))
 		return false;
+	else if ((status1 = __geometry_get_bbox2d(kcxt, &geom1, &bbox1)) < 0 ||
+			 (status2 = __geometry_get_bbox2d(kcxt, &geom2, &bbox2)) < 0)
+		return false;
 	else
 	{
 		/* see box2df_overlaps() */
 		result->expr_ops = &xpu_bool_ops;
-		if (__geometry_get_bbox2d(kcxt, &geom1, &bbox1) &&
-			__geometry_get_bbox2d(kcxt, &geom2, &bbox2))
+		if (status1 > 0 && status2 > 0)
 			result->value = __geom_overlaps_bbox2d(&bbox1, &bbox2);
 		else
 			result->value = false;
@@ -1137,16 +1144,19 @@ PUBLIC_FUNCTION(bool)
 pgfn_box2df_geometry_overlaps(XPU_PGFUNCTION_ARGS)
 {
 	geom_bbox_2d	bbox2;
+	int				status2;
 	KEXP_PROCESS_ARGS2(bool, box2df, bbox1, geometry, geom2);
 
 	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
 	else if (!xpu_geometry_is_valid(kcxt, &geom2))
 		return false;
+	else if ((status2 = __geometry_get_bbox2d(kcxt, &geom2, &bbox2)) < 0)
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
-		if (__geometry_get_bbox2d(kcxt, &geom2, &bbox2))
+		if (status2 > 0)
 			result->value = __geom_overlaps_bbox2d(&bbox1.value, &bbox2);
 		else
 			result->value = false;
@@ -1158,16 +1168,19 @@ PUBLIC_FUNCTION(bool)
 pgfn_geometry_box2df_overlaps(XPU_PGFUNCTION_ARGS)
 {
 	geom_bbox_2d	bbox1;
+	int				status1;
 	KEXP_PROCESS_ARGS2(bool, geometry, geom1, box2df, bbox2);
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&bbox2))
 		result->expr_ops = NULL;
 	else if (!xpu_geometry_is_valid(kcxt, &geom1))
 		return false;
+	else if ((status1 = __geometry_get_bbox2d(kcxt, &geom1, &bbox1)) < 0)
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
-		if (__geometry_get_bbox2d(kcxt, &geom1, &bbox1))
+		if (status1 > 0)
 			result->value = __geom_overlaps_bbox2d(&bbox1, &bbox2.value);
 		else
 			result->value = false;
@@ -1213,6 +1226,7 @@ PUBLIC_FUNCTION(bool)
 pgfn_geometry_contains(XPU_PGFUNCTION_ARGS)
 {
 	geom_bbox_2d	bbox1, bbox2;
+	int				status1, status2;
 	KEXP_PROCESS_ARGS2(bool, geometry, geom1, geometry, geom2);
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
@@ -1220,11 +1234,13 @@ pgfn_geometry_contains(XPU_PGFUNCTION_ARGS)
 	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
 			 !xpu_geometry_is_valid(kcxt, &geom2))
 		return false;
+	else if ((status1 = __geometry_get_bbox2d(kcxt, &geom1, &bbox1)) < 0 ||
+			 (status2 = __geometry_get_bbox2d(kcxt, &geom2, &bbox2)) < 0)
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
-		if (__geometry_get_bbox2d(kcxt, &geom1, &bbox1) &&
-			__geometry_get_bbox2d(kcxt, &geom2, &bbox2))
+		if (status1 > 0 && status2 > 0)
 			result->value = __geom_contains_bbox2d(&bbox1, &bbox2);
 		else
 			result->value = false;
@@ -1236,16 +1252,19 @@ PUBLIC_FUNCTION(bool)
 pgfn_box2df_geometry_contains(XPU_PGFUNCTION_ARGS)
 {
 	geom_bbox_2d	bbox2;
+	int				status2;
 	KEXP_PROCESS_ARGS2(bool, box2df, bbox1, geometry, geom2);
 
 	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
 	else if (!xpu_geometry_is_valid(kcxt, &geom2))
 		return false;
+	else if ((status2 = __geometry_get_bbox2d(kcxt, &geom2, &bbox2)) < 0)
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
-		if (__geometry_get_bbox2d(kcxt, &geom2, &bbox2))
+		if (status2 > 0)
 			result->value = __geom_contains_bbox2d(&bbox1.value, &bbox2);
 		else
 			result->value = false;
@@ -1257,16 +1276,19 @@ PUBLIC_FUNCTION(bool)
 pgfn_geometry_box2df_contains(XPU_PGFUNCTION_ARGS)
 {
 	geom_bbox_2d	bbox1;
+	int				status1;
 	KEXP_PROCESS_ARGS2(bool, geometry, geom1, box2df, bbox2);
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&bbox2))
 		result->expr_ops = NULL;
 	else if (!xpu_geometry_is_valid(kcxt, &geom1))
 		return false;
+	else if ((status1 = __geometry_get_bbox2d(kcxt, &geom1, &bbox1)) < 0)
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
-		if (__geometry_get_bbox2d(kcxt, &geom1, &bbox1))
+		if (status1 > 0)
 			result->value = __geom_contains_bbox2d(&bbox1, &bbox2.value);
 		else
 			result->value = false;
@@ -1310,6 +1332,7 @@ PUBLIC_FUNCTION(bool)
 pgfn_geometry_within(XPU_PGFUNCTION_ARGS)
 {
 	geom_bbox_2d	bbox1, bbox2;
+	int				status1, status2;
 	KEXP_PROCESS_ARGS2(bool, geometry, geom1, geometry, geom2);
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
@@ -1317,12 +1340,14 @@ pgfn_geometry_within(XPU_PGFUNCTION_ARGS)
 	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
 			 !xpu_geometry_is_valid(kcxt, &geom2))
 		return false;
+	else if ((status1 = __geometry_get_bbox2d(kcxt, &geom1, &bbox1)) < 0 ||
+			 (status2 = __geometry_get_bbox2d(kcxt, &geom2, &bbox2)) < 0)
+		return false;
 	else
 	{
 		/* see box2df_within() */
 		result->expr_ops = &xpu_bool_ops;
-		if (__geometry_get_bbox2d(kcxt, &geom1, &bbox1) &&
-			__geometry_get_bbox2d(kcxt, &geom2, &bbox2))
+		if (status1 > 0 && status2 > 0)
 			result->value = __geom_within_bbox2d(&bbox1, &bbox2);
 		else
 			result->value = false;
@@ -1334,16 +1359,19 @@ PUBLIC_FUNCTION(bool)
 pgfn_box2df_geometry_within(XPU_PGFUNCTION_ARGS)
 {
 	geom_bbox_2d	bbox2;
+	int				status2;
 	KEXP_PROCESS_ARGS2(bool, box2df, bbox1, geometry, geom2);
 
 	if (XPU_DATUM_ISNULL(&bbox1) || XPU_DATUM_ISNULL(&geom2))
 		result->expr_ops = NULL;
 	else if (!xpu_geometry_is_valid(kcxt, &geom2))
 		return false;
+	else if ((status2 = __geometry_get_bbox2d(kcxt, &geom2, &bbox2)) < 0)
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
-		if (__geometry_get_bbox2d(kcxt, &geom2, &bbox2))
+		if (status2 > 0)
 			result->value = __geom_within_bbox2d(&bbox1.value, &bbox2);
 		else
 			result->value = false;
@@ -1355,16 +1383,19 @@ PUBLIC_FUNCTION(bool)
 pgfn_geometry_box2df_within(XPU_PGFUNCTION_ARGS)
 {
 	geom_bbox_2d	bbox1;
+	int				status1;
 	KEXP_PROCESS_ARGS2(bool, geometry, geom1, box2df, bbox2);
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&bbox2))
 		result->expr_ops = NULL;
 	else if (!xpu_geometry_is_valid(kcxt, &geom1))
 		return false;
+	else if ((status1 = __geometry_get_bbox2d(kcxt, &geom1, &bbox1)) < 0)
+		return false;
 	else
 	{
 		result->expr_ops = &xpu_bool_ops;
-		if (__geometry_get_bbox2d(kcxt, &geom1, &bbox1))
+		if (status1 > 0)
 			result->value = __geom_within_bbox2d(&bbox1, &bbox2.value);
 		else
 			result->value = false;
@@ -1393,14 +1424,16 @@ PUBLIC_FUNCTION(bool)
 pgfn_st_expand(XPU_PGFUNCTION_ARGS)
 {
 	geom_bbox_2d	bbox1;
+	int				status1;
 	KEXP_PROCESS_ARGS2(geometry, geometry, geom1, float8, arg2);
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&arg2))
 		result->expr_ops = NULL;
 	else if (!xpu_geometry_is_valid(kcxt, &geom1))
 		return false;
-	else if (geom1.nitems > 0 &&
-			 __geometry_get_bbox2d(kcxt, &geom1, &bbox1))
+	else if ((status1 = __geometry_get_bbox2d(kcxt, &geom1, &bbox1)) < 0)
+		return false;
+	else if (geom1.nitems > 0 && status1 > 0)
 	{
 		char	   *pos;
 		/* expand bbox */
@@ -2489,8 +2522,7 @@ geom_dist2d_point_poly(const xpu_geometry_t *geom1,
 		xpu_geometry_t __geom;
 		int		status;
 
-		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
-		if (!pos)
+		if (!geometry_load_subitem(dl->kcxt, &__geom, geom2, &pos, i))
 			return false;
 		status = __geom_contains_point(&__geom, &pt, dl->kcxt);
 		if (status == PT_ERROR)
@@ -2551,8 +2583,7 @@ geom_dist2d_point_curvepoly(const xpu_geometry_t *geom1,
 		xpu_geometry_t __geom;
 		int		status;
 
-		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
-		if (!pos)
+		if (!geometry_load_subitem(dl->kcxt, &__geom, geom2, &pos, i))
 			return false;
 		status = __geom_contains_point(&__geom, &pt, dl->kcxt);
 		if (status == PT_ERROR)
@@ -2627,8 +2658,7 @@ geom_dist2d_line_poly(const xpu_geometry_t *geom1,
 		xpu_geometry_t __geom;
 		int		status;
 
-		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
-		if (!pos)
+		if (!geometry_load_subitem(dl->kcxt, &__geom, geom2, &pos, i))
 			return false;
 		if (i == 0)
 		{
@@ -2699,8 +2729,7 @@ geom_dist2d_line_curvepoly(const xpu_geometry_t *geom1,
 		xpu_geometry_t __geom;
 		int		status;
 
-		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
-		if (!pos)
+		if (!geometry_load_subitem(dl->kcxt, &__geom, geom2, &pos, i))
 			return false;
 		if (i == 0)
 		{
@@ -2793,8 +2822,7 @@ geom_dist2d_tri_poly(const xpu_geometry_t *geom1,
 		xpu_geometry_t __geom;
 		int		status;
 
-		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
-		if (!pos)
+		if (!geometry_load_subitem(dl->kcxt, &__geom, geom2, &pos, i))
 			return false;
 		if (i == 0)
 		{
@@ -2918,8 +2946,7 @@ geom_dist2d_tri_curvepoly(const xpu_geometry_t *geom1,
 		xpu_geometry_t __geom;
 		int32_t		status;
 
-		pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
-		if (!pos)
+		if (!geometry_load_subitem(dl->kcxt, &__geom, geom2, &pos, i))
 			return false;
 		if (i == 0)
 		{
@@ -3023,9 +3050,8 @@ __geom_dist2d_xpoly_xpoly(const xpu_geometry_t *geom1,
 			geom1->type == GEOM_CURVEPOLYTYPE) &&
 		   (geom2->type == GEOM_POLYGONTYPE ||
 			geom2->type == GEOM_CURVEPOLYTYPE));
-	pos1 = geometry_load_subitem(&__geom1, geom1, pos1, 0, dl->kcxt);
-	pos2 = geometry_load_subitem(&__geom2, geom2, pos2, 0, dl->kcxt);
-	if (!pos1 || !pos2)
+	if (!geometry_load_subitem(dl->kcxt, &__geom1, geom1, &pos1, 0) ||
+		!geometry_load_subitem(dl->kcxt, &__geom2, geom2, &pos2, 0))
 		return false;
 
 	/* 2. check if poly1 has first point outside poly2 and vice versa,
@@ -3053,8 +3079,7 @@ __geom_dist2d_xpoly_xpoly(const xpu_geometry_t *geom1,
 	__loadPoint2d(&pt, __geom2.rawdata, 0);
 	for (int i = 1; i < geom1->nitems; i++)
 	{
-		pos1 = geometry_load_subitem(&__gtemp, geom1, pos1, i, dl->kcxt);
-		if (!pos1)
+		if (!geometry_load_subitem(dl->kcxt, &__gtemp, geom1, &pos1, i))
 			return false;
 		status = __geom_contains_point(&__gtemp, &pt, dl->kcxt);
 		if (status == PT_ERROR)
@@ -3069,8 +3094,7 @@ __geom_dist2d_xpoly_xpoly(const xpu_geometry_t *geom1,
 	 __loadPoint2d(&pt, __geom1.rawdata, 0);
 	 for (int i = 1; i < geom2->nitems; i++)
 	 {
-		 pos2 = geometry_load_subitem(&__gtemp, geom2, pos2, i, dl->kcxt);
-		 if (!pos2)
+		 if (!geometry_load_subitem(dl->kcxt, &__gtemp, geom2, &pos2, i))
 			 return false;
 		 status = __geom_contains_point(&__gtemp, &pt, dl->kcxt);
 		 if (status == PT_ERROR)
@@ -3156,8 +3180,8 @@ geom_dist2d_recursive(const xpu_geometry_t *geom1,
 	{
 		for (int i=0; i < geom1->nitems; i++)
 		{
-			pos = geometry_load_subitem(&__geom, geom1, pos, i, dl->kcxt);
-			if (!pos || !geom_dist2d_recursive(&__geom, geom2, dl))
+			if (!geometry_load_subitem(dl->kcxt, &__geom, geom1, &pos, i) ||
+				!geom_dist2d_recursive(&__geom, geom2, dl))
 				return false;
 			if (dl->distance <= dl->tolerance)
 				return true; /* just a check if the answer is already given */
@@ -3167,8 +3191,8 @@ geom_dist2d_recursive(const xpu_geometry_t *geom1,
 	{
 		for (int i=0; i < geom2->nitems; i++)
 		{
-			pos = geometry_load_subitem(&__geom, geom2, pos, i, dl->kcxt);
-			if (!pos || !geom_dist2d_recursive(geom1, &__geom, dl))
+			if (!geometry_load_subitem(dl->kcxt, &__geom, geom2, &pos, i) ||
+				!geom_dist2d_recursive(geom1, &__geom, dl))
 				return false;
 			if (dl->distance <= dl->tolerance)
 				return true; /* just a check if the answer is already given */
@@ -3675,8 +3699,7 @@ __geom_point_in_polygon(const xpu_geometry_t *poly, const POINT2D *pt,
 	assert(poly->type == GEOM_POLYGONTYPE);
 	for (int i=0; i < poly->nitems; i++)
 	{
-		pos = geometry_load_subitem(&ring, poly, pos, i, kcxt);
-		if (!pos)
+		if (!geometry_load_subitem(kcxt, &ring, poly, &pos, i))
 			return PT_ERROR;
 		status = __geom_point_in_ring(&ring, pt, kcxt);
 		if (status == PT_ERROR)
@@ -3708,21 +3731,19 @@ __geom_point_in_multipolygon(const xpu_geometry_t *geom, const POINT2D *pt,
 	xpu_geometry_t poly;
 	xpu_geometry_t ring;
 	const char *pos1 = NULL;
-	const char *pos2;
+	const char *pos2 = NULL;
 	int32_t		status;
 	int32_t		retval = PT_OUTSIDE;
 
 	assert(geom->type == GEOM_MULTIPOLYGONTYPE);
 	for (int j=0; j < geom->nitems; j++)
 	{
-		pos1 = geometry_load_subitem(&poly, geom, pos1, j, kcxt);
-		if (!pos1)
+		if (!geometry_load_subitem(kcxt, &poly, geom, &pos1, j))
 			return PT_ERROR;
 		if (poly.nitems == 0)
 			continue;	/* skip empty polygon */
 
-		pos2 = geometry_load_subitem(&ring, &poly, NULL, 0, kcxt);
-		if (!pos2)
+		if (!geometry_load_subitem(kcxt, &ring, &poly, &pos2, 0))
 			return PT_ERROR;
 		status = __geom_point_in_ring(&ring, pt, kcxt);
 		if (status == PT_ERROR)
@@ -3735,8 +3756,7 @@ __geom_point_in_multipolygon(const xpu_geometry_t *geom, const POINT2D *pt,
 		retval = status;
 		for (int i=1; i < poly.nitems; i++)
 		{
-			pos2 = geometry_load_subitem(&ring, &poly, pos2, i, kcxt);
-			if (!pos2)
+			if (!geometry_load_subitem(kcxt, &ring, &poly, &pos2, i))
 				return PT_ERROR;
 			status = __geom_point_in_ring(&ring, pt, kcxt);
 			if (status == PT_ERROR)
@@ -3883,8 +3903,7 @@ geom_relate_point_point(kern_context *kcxt,
 				__loadPoint2d(&pt1, geom1->rawdata, 0);
 			else
 			{
-				pos1 = geometry_load_subitem(&temp, geom1, pos1, i, kcxt);
-				if (!pos1)
+				if (!geometry_load_subitem(kcxt, &temp, geom1, &pos1, i))
 					return -1;
 				__loadPoint2d(&pt1, temp.rawdata, 0);
 			}
@@ -3897,8 +3916,7 @@ geom_relate_point_point(kern_context *kcxt,
 					__loadPoint2d(&pt2, geom2->rawdata, 0);
 				else
 				{
-					pos2 = geometry_load_subitem(&temp, geom2, pos2, j, kcxt);
-					if (!pos2)
+					if (!geometry_load_subitem(kcxt, &temp, geom2, &pos2, j))
 						return -1;
 					__loadPoint2d(&pt2, temp.rawdata, 0);
 				}
@@ -3976,8 +3994,7 @@ geom_relate_point_line(kern_context *kcxt,
 			{
 				xpu_geometry_t   __temp1;
 
-				pos1 = geometry_load_subitem(&__temp1, geom1, pos1, i);
-				if (!pos1)
+				if (!geometry_load_subitem(kcxt, &__temp1, geom1, &pos1, i))
 					return -1;
 				__loadPoint2d(&P, __temp1.rawdata, 0);
 			}
@@ -3996,8 +4013,7 @@ geom_relate_point_line(kern_context *kcxt,
 					line = geom2;
 				else
 				{
-					pos2 = geometry_load_subitem(&__line_data, geom2, pos2, j);
-					if (!pos2)
+					if (!geometry_load_subitem(kcxt, &__line_data, geom2, &pos2, j))
 						return -1;
 					line = &__line_data;
 				}
@@ -4097,8 +4113,7 @@ geom_relate_point_triangle(kern_context *kcxt,
 		{
 			xpu_geometry_t __temp;
 
-			pos = geometry_load_subitem(&__temp, geom1, pos, i, kcxt);
-			if (!pos)
+			if (!geometry_load_subitem(kcxt, &__temp, geom1, &pos, i))
 				return -1;
 			__loadPoint2d(&pt, __temp.rawdata, 0);
 		}
@@ -4165,8 +4180,7 @@ geom_relate_point_poly(kern_context *kcxt,
 			__loadPoint2d(&pt, geom1->rawdata, 0);
 		else
 		{
-			pos1 = geometry_load_subitem(&temp, geom1, pos1, i, kcxt);
-			if (!pos1)
+			if (!geometry_load_subitem(kcxt, &temp, geom1, &pos1, i))
 				return -1;
 			__loadPoint2d(&pt, temp.rawdata, 0);
 		}
@@ -4180,8 +4194,7 @@ geom_relate_point_poly(kern_context *kcxt,
 				poly = geom2;
 			else
 			{
-				pos2 = geometry_load_subitem(&temp, geom2, pos2, j, kcxt);
-				if (!pos2)
+				if (!geometry_load_subitem(kcxt, &temp, geom2, &pos2, j))
 					return -1;
 				poly = &temp;
 			}
@@ -4249,8 +4262,7 @@ __geom_relate_seg_line(kern_context *kcxt,
 			line = geom;
 		else
 		{
-			gpos = geometry_load_subitem(&__temp, geom, gpos, k, kcxt);
-			if (!gpos)
+			if (!geometry_load_subitem(kcxt, &__temp, geom, &gpos, k))
 				return -1;
 			line = &__temp;
 		}
@@ -4493,8 +4505,7 @@ geom_relate_line_line(kern_context *kcxt,
 			line = geom1;
 		else
 		{
-			gpos = geometry_load_subitem(&__temp, geom1, gpos, k, kcxt);
-			if (!gpos)
+			if (!geometry_load_subitem(kcxt, &__temp, geom1, &gpos, k))
 				return -1;
 			line = &__temp;
 		}
@@ -4517,8 +4528,7 @@ geom_relate_line_line(kern_context *kcxt,
 			line = geom2;
 		else
 		{
-			gpos = geometry_load_subitem(&__temp, geom2, gpos, k, kcxt);
-			if (!gpos)
+			if (!geometry_load_subitem(kcxt, &__temp, geom2, &gpos, k))
 				return -1;
 			line = &__temp;
 		}
@@ -4825,8 +4835,7 @@ geom_relate_line_triangle(kern_context *kcxt,
 		{
 			xpu_geometry_t __temp;
 
-			gpos = geometry_load_subitem(&__temp, geom1, gpos, k, kcxt);
-			if (!gpos)
+			if (!geometry_load_subitem(kcxt, &__temp, geom1, &gpos, k))
 				return -1;
 			line = &__temp;
 		}
@@ -4908,8 +4917,7 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 			poly = geom;
 		else
 		{
-			pos1 = geometry_load_subitem(&__polyData, geom, pos1, k, kcxt);
-			if (!pos1)
+			if (!geometry_load_subitem(kcxt, &__polyData, geom, &pos1, k))
 				return -1;
 			poly = &__polyData;
 		}
@@ -4933,8 +4941,7 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 
 			p1_location = p2_location = pc_location = '?';
 
-			pos2 = geometry_load_subitem(&ring, poly, pos2, i, kcxt);
-			if (!pos2)
+			if (!geometry_load_subitem(kcxt, &ring, poly, &pos2, i))
 				return -1;
 			if (ring.nitems < 4)
 			{
@@ -5427,8 +5434,7 @@ geom_relate_line_polygon(kern_context *kcxt,
 		{
 			xpu_geometry_t __lineData;
 
-			gpos = geometry_load_subitem(&__lineData, geom1, gpos, k, kcxt);
-			if (!gpos)
+			if (!geometry_load_subitem(kcxt, &__lineData, geom1, &gpos, k))
 				return -1;
 			line = &__lineData;
 		}
@@ -5554,20 +5560,19 @@ __geom_relate_ring_polygon(kern_context *kcxt,
 	{
 		xpu_geometry_t	poly0;
 		int32_t			location;
+		xpu_geometry_t	__temp;
+		const char	   *__tpos = NULL;
 
 		if (geom->type == GEOM_POLYGONTYPE)
 		{
-			if (!geometry_load_subitem(&poly0, geom, NULL, 0, kcxt))
+			if (!geometry_load_subitem(kcxt, &poly0, geom, &__tpos, 0))
 				return -1;
 		}
 		else
 		{
-			xpu_geometry_t	__temp;
-
-			gpos = geometry_load_subitem(&__temp, geom, gpos, k, kcxt);
-			if (!gpos)
+			if (!geometry_load_subitem(kcxt, &__temp, geom, &gpos, k))
 				return -1;
-			if (!geometry_load_subitem(&poly0, &__temp, NULL, 0, kcxt))
+			if (!geometry_load_subitem(kcxt, &poly0, &__temp, &__tpos, 0))
 				return -1;
 		}
 		unitsz = sizeof(double) * GEOM_FLAGS_NDIMS(poly0.flags);
@@ -5856,8 +5861,7 @@ geom_relate_polygon_polygon(kern_context *kcxt,
 			poly = geom1;
 		else
 		{
-			gpos = geometry_load_subitem(&__polyData, geom1, gpos, k, kcxt);
-			if (!gpos)
+			if (!geometry_load_subitem(kcxt, &__polyData, geom1, &gpos, k))
 				return -1;
 			poly = &__polyData;
 		}
@@ -5867,8 +5871,7 @@ geom_relate_polygon_polygon(kern_context *kcxt,
 			xpu_geometry_t ring;
 			int32_t		status;
 
-			rpos = geometry_load_subitem(&ring, poly, rpos, i, kcxt);
-			if (!rpos)
+			if (!geometry_load_subitem(kcxt, &ring, poly, &rpos, i))
 				return -1;
 
 			status = __geom_relate_ring_polygon(kcxt, &ring, geom2);
@@ -6091,8 +6094,7 @@ fast_geom_contains_polygon_point(kern_context *kcxt,
 
 		for (int i=0; i < geom2->nitems; i++)
 		{
-			pos = geometry_load_subitem(&__geom, geom2, pos, i);
-			if (!pos)
+			if (!geometry_load_subitem(kcxt, &__geom, geom2, &pos, i))
 				return -1;
 			__loadPoint2d(&pt, __geom.rawdata, 0);
 			if (geom1->bbox && (pt.x < bbox.xmin || pt.x > bbox.xmax ||
@@ -6122,6 +6124,7 @@ fast_geom_contains_polygon_point(kern_context *kcxt,
 PUBLIC_FUNCTION(bool)
 pgfn_st_contains(XPU_PGFUNCTION_ARGS)
 {
+	int		status1, status2;
 	KEXP_PROCESS_ARGS2(bool, geometry, geom1, geometry, geom2);
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
@@ -6129,7 +6132,10 @@ pgfn_st_contains(XPU_PGFUNCTION_ARGS)
 	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
 			 !xpu_geometry_is_valid(kcxt, &geom2))
 		return false;
-	else if (geometry_is_empty(&geom1) || geometry_is_empty(&geom2))
+	else if ((status1 = geometry_is_empty(kcxt, &geom1)) < 0 ||
+			 (status2 = geometry_is_empty(kcxt, &geom2)) < 0)
+		return false;
+	else if (status1 > 0 || status2 > 0)
 	{
 		result->expr_ops = &xpu_bool_ops;
 		result->value = false;
@@ -6202,6 +6208,7 @@ pgfn_st_contains(XPU_PGFUNCTION_ARGS)
 PUBLIC_FUNCTION(bool)
 pgfn_st_crosses(XPU_PGFUNCTION_ARGS)
 {
+	int		status1, status2;
 	KEXP_PROCESS_ARGS2(bool, geometry, geom1, geometry, geom2);
 
 	if (XPU_DATUM_ISNULL(&geom1) || XPU_DATUM_ISNULL(&geom2))
@@ -6209,7 +6216,10 @@ pgfn_st_crosses(XPU_PGFUNCTION_ARGS)
 	else if (!xpu_geometry_is_valid(kcxt, &geom1) ||
 			 !xpu_geometry_is_valid(kcxt, &geom2))
 		return false;
-	else if (geometry_is_empty(&geom1) || geometry_is_empty(&geom2))
+	else if ((status1 = geometry_is_empty(kcxt, &geom1)) < 0 ||
+			 (status2 = geometry_is_empty(kcxt, &geom2)) < 0)
+		return false;
+	else if (status1 > 0 || status2 > 0)
 	{
 		result->expr_ops = &xpu_bool_ops;
 		result->value = false;
