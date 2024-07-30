@@ -4248,6 +4248,12 @@ __geom_relate_seg_line(kern_context *kcxt,
 	uint32_t	nloops;
 	uint32_t	index = start;
 
+	if (CHECK_CUDA_STACK_OVERFLOW())
+	{
+		SUSPEND_FALLBACK(kcxt, "__geom_relate_seg_line recursion too deep");
+		return -1;
+	}
+
 	nloops = (geom->type == GEOM_LINETYPE ? 1 : geom->nitems);
 	for (int k=0; k < nloops; k++)
 	{
@@ -4478,10 +4484,11 @@ geom_relate_line_line(kern_context *kcxt,
 	const xpu_geometry_t *line;
 	xpu_geometry_t __temp;
 	POINT2D		P1, P2;
-	uint32_t		nloops;
-	uint32_t		unitsz;
+	uint32_t	nloops;
+	uint32_t	unitsz;
 	int32_t		retval1 = IM__EXTER_EXTER_2D;
 	int32_t		retval2 = IM__EXTER_EXTER_2D;
+	int32_t		status;
 
 	assert((geom1->type == GEOM_LINETYPE ||
 			geom1->type == GEOM_MULTILINETYPE) &&
@@ -4514,10 +4521,13 @@ geom_relate_line_line(kern_context *kcxt,
 		for (int i=2; i <= line->nitems; i++, P1=P2)
 		{
 			ppos = __loadPoint2d(&P2, ppos, unitsz);
-			retval1 |= __geom_relate_seg_line(kcxt,
-											  P1, i==2,
-											  P2, i==line->nitems,
-											  geom2, 0);
+			status = __geom_relate_seg_line(kcxt,
+											P1, i==2,
+											P2, i==line->nitems,
+											geom2, 0);
+			if (status < 0)
+				return -1;
+			retval1 |= status;
 		}
 	}
 	/* 2nd loop (twisted) */
@@ -4537,10 +4547,13 @@ geom_relate_line_line(kern_context *kcxt,
 		for (int j=2; j <= line->nitems; j++, P1=P2)
 		{
 			ppos = __loadPoint2d(&P2, ppos, unitsz);
-			retval2 |= __geom_relate_seg_line(kcxt,
-											  P1, j==2,
-											  P2, j==line->nitems,
-											  geom1, 0);
+			status = __geom_relate_seg_line(kcxt,
+											P1, j==2,
+											P2, j==line->nitems,
+											geom1, 0);
+			if (status < 0)
+				return -1;
+			retval2 |= status;
 		}
 	}
 	return retval1 | IM__TWIST(retval2);
@@ -4780,8 +4793,9 @@ geom_relate_line_triangle(kern_context *kcxt,
 	const char *gpos = NULL;
 	const char *ppos = NULL;
 	int32_t		nloops;
-	uint32_t		unitsz;
+	uint32_t	unitsz;
 	int32_t		retval, __mask;
+	int32_t		status;
 	geom_bbox_2d bbox2;
 
 	assert((geom1->type == GEOM_LINETYPE ||
@@ -4867,10 +4881,13 @@ geom_relate_line_triangle(kern_context *kcxt,
 			}
 			else
 			{
-				retval |= __geom_relate_seg_triangle(kcxt,
-													 P1, p1_is_head,
-													 P2, i==line->nitems,
-													 geom2);
+				status = __geom_relate_seg_triangle(kcxt,
+													P1, p1_is_head,
+													P2, i==line->nitems,
+													geom2);
+				if (status < 0)
+					return -1;
+				retval |= status;
 			}
 			p1_is_head = false;
 			P1=P2;
@@ -4900,6 +4917,11 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 	int32_t		nrings = 0;
 	uint32_t	__nrings_next;
 
+	if (CHECK_CUDA_STACK_OVERFLOW())
+	{
+		SUSPEND_FALLBACK(kcxt, "__geom_relate_seg_polygon: recursion too deep");
+		return -1;
+	}
 	/* centroid of P1-P2 */
 	Pc.x = (P1.x + P2.x) / 2.0;
 	Pc.y = (P1.y + P2.y) / 2.0;
@@ -5335,6 +5357,7 @@ __geom_relate_seg_polygon(kern_context *kcxt,
 						   p1_location, P1.x, P1.y,
 						   p2_location, P2.x, P2.y);
 #endif
+					STROM_ELOG(kcxt, "unexpected segment-polygon relation");
 					return -1;
 				}
 			}
@@ -5382,9 +5405,9 @@ geom_relate_line_polygon(kern_context *kcxt,
 	const char *gpos = NULL;
 	const char *ppos = NULL;
 	int32_t		nloops;
-	uint32_t		unitsz;
+	uint32_t	unitsz;
 	int32_t		retval = IM__EXTER_EXTER_2D;
-	int32_t		temp;
+	int32_t		status;
 	geom_bbox_2d bbox2;
 
 	assert((geom1->type == GEOM_LINETYPE ||
@@ -5468,13 +5491,13 @@ geom_relate_line_polygon(kern_context *kcxt,
 			}
 			else
 			{
-				temp = __geom_relate_seg_polygon(kcxt,
-												 P1, (has_boundary && p1_is_head),
-												 P2, (has_boundary && i==nitems),
-												 geom2, 0, false);
-				if (temp < 0)
+				status = __geom_relate_seg_polygon(kcxt,
+												   P1, (has_boundary && p1_is_head),
+												   P2, (has_boundary && i==nitems),
+												   geom2, 0, false);
+				if (status < 0)
 					return -1;
-				retval |= temp;
+				retval |= status;
 			}
 			P1=P2;
 			p1_is_head = false;
@@ -5482,8 +5505,8 @@ geom_relate_line_polygon(kern_context *kcxt,
 
 		if (has_boundary)
 		{
-			temp = (IM__LINE_HEAD_CONTAINED | IM__LINE_TAIL_CONTAINED);
-			if ((retval & temp) != temp)
+			status = (IM__LINE_HEAD_CONTAINED | IM__LINE_TAIL_CONTAINED);
+			if ((retval & status) != status)
 				retval |= IM__BOUND_EXTER_0D;
 		}
 	}
@@ -5682,6 +5705,7 @@ __geom_relate_ring_polygon(kern_context *kcxt,
 						   IM__EXTER_BOUND_1D |
 						   IM__EXTER_EXTER_2D);
 	}
+	STROM_ELOG(kcxt, "unknown intersection");
 	return -1;		/* unknown intersection */
 }
 
@@ -5747,8 +5771,6 @@ geom_relate_triangle_triangle(kern_context *kcxt,
 	for (int i=0; i < 4; i++)
 	{
 		pos = __loadPoint2d(&P, pos, unitsz);
-		if (!pos)
-			return -1;
 		polyData[2*i+1] = P.x;
 		polyData[2*i+2] = P.y;
 	}
