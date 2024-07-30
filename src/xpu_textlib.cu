@@ -915,8 +915,7 @@ PUBLIC_DATA(xpu_encode_info, xpu_encode_catalog[]) = {
 	STATIC_FUNCTION(int)												\
 	FUNCNAME(kern_context *kcxt,										\
 			 const char *t, int tlen,									\
-			 const char *p, int plen,									\
-			 int depth)													\
+			 const char *p, int plen)									\
 	{																	\
 		xpu_encode_info	   *encode = SESSION_ENCODE(kcxt->session);		\
 																		\
@@ -924,9 +923,9 @@ PUBLIC_DATA(xpu_encode_info, xpu_encode_catalog[]) = {
 		if (plen == 1 && *p == '%')										\
 			return LIKE_TRUE;											\
 		/* this function is recursive */								\
-		if (depth > 10)													\
+		if (CHECK_CUDA_STACK_OVERFLOW())								\
 		{																\
-			STROM_ELOG(kcxt, "like recursion too deep");				\
+			SUSPEND_FALLBACK(kcxt, #FUNCNAME ": recursion too deep");	\
 			return LIKE_EXCEPTION;										\
 		}																\
 		/*																\
@@ -1027,8 +1026,7 @@ PUBLIC_DATA(xpu_encode_info, xpu_encode_catalog[]) = {
 					{													\
 						int		matched = FUNCNAME(kcxt,				\
 												   t, tlen,				\
-												   p, plen,				\
-												   depth+1);			\
+												   p, plen);			\
 						if (matched != LIKE_FALSE)						\
 							return matched; /* TRUE or ABORT */			\
 					}													\
@@ -1108,7 +1106,7 @@ GENERIC_MATCH_TEXT_TEMPLATE(GenericCaseMatchText, GetCharUpper)
 				return false;											\
 			status = FN_MATCH(kcxt,										\
 							  datum_a.value, datum_a.length,			\
-							  datum_b.value, datum_b.length, 0);		\
+							  datum_b.value, datum_b.length);			\
 			if (status == LIKE_EXCEPTION)								\
 				return false;											\
 			result->value = (status OPER LIKE_TRUE);					\
@@ -1142,7 +1140,7 @@ PG_TEXTLIKE_TEMPLATE(texticnlike, GenericCaseMatchText, !=)
 				return false;											\
 			status = FN_MATCH(kcxt,										\
 							  datum_a.value, datum_a.length,			\
-							  datum_b.value, datum_b.length, 0);		\
+							  datum_b.value, datum_b.length);			\
 			if (status == LIKE_EXCEPTION)								\
 				return false;											\
 			result->value = (status OPER LIKE_TRUE);					\

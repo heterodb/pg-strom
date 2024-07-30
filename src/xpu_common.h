@@ -574,6 +574,34 @@ __strncpy(char *d, const char *s, uint32_t n)
 
 /* ----------------------------------------------------------------
  *
+ * Definition related to stack-overflow checker
+ *
+ * ----------------------------------------------------------------
+ */
+EXTERN_SHARED_DATA(uint32_t, pgstrom_cuda_stack_size);
+
+INLINE_FUNCTION(bool)
+CHECK_CUDA_STACK_OVERFLOW(void)
+{
+#if defined(__CUDACC__)
+	uint32_t	sp;
+
+	/*
+	 * MEMO: Even though it is not documented well, the stacksave instruction
+	 * returns a negative value in 24bit.
+	 * So, in case of zero stack-usage, the stack-pointer shall be 0x01000000U.
+	 */
+	asm volatile("stacksave.u32 %0;" : "=r"(sp) );
+
+	/* 256b margin for the stack boundary */
+	return (sp + pgstrom_cuda_stack_size < 0x00ffff00U);
+#else
+	return false;
+#endif
+}
+
+/* ----------------------------------------------------------------
+ *
  * Definitions related to the kernel data store
  *
  * ----------------------------------------------------------------
