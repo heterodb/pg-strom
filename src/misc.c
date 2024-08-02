@@ -111,8 +111,6 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	int			endpoint_id;
 
 	privs = lappend(privs, makeInteger(pp_info->xpu_task_flags));
-	privs = lappend(privs, makeInteger(pp_info->gpu_cache_dindex));
-	privs = lappend(privs, bms_to_pglist(pp_info->gpu_direct_devs));
 	endpoint_id = DpuStorageEntryGetEndpointId(pp_info->ds_entry);
 	privs = lappend(privs, makeInteger(endpoint_id));
 	/* plan information */
@@ -220,8 +218,6 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	memset(&pp_data, 0, sizeof(pgstromPlanInfo));
 	/* device identifiers */
 	pp_data.xpu_task_flags = intVal(list_nth(privs, pindex++));
-	pp_data.gpu_cache_dindex = intVal(list_nth(privs, pindex++));
-	pp_data.gpu_direct_devs = bms_from_pglist(list_nth(privs, pindex++));
 	endpoint_id = intVal(list_nth(privs, pindex++));
 	pp_data.ds_entry = DpuStorageEntryByEndpointId(endpoint_id);
 	/* plan information */

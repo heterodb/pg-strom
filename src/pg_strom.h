@@ -270,9 +270,7 @@ typedef struct
 typedef struct
 {
 	uint32_t	xpu_task_flags;		/* mask of device flags */
-	int			gpu_cache_dindex;	/* device for GpuCache, if any */
-	const Bitmapset *gpu_direct_devs;	/* device for GPU-Direct SQL, if any */
-	const DpuStorageEntry *ds_entry;	/* target DPU if DpuJoin */
+	const DpuStorageEntry *ds_entry; /* target DPU if DpuJoin */
 	/* Plan information */
 	const Bitmapset *outer_refs;	/* referenced columns */
 	List	   *used_params;		/* param list in use */
@@ -747,6 +745,7 @@ extern const Bitmapset *GetOptimalGpuForFile(const char *pathname);
 extern const Bitmapset *GetOptimalGpuForRelation(Relation relation);
 extern const Bitmapset *GetOptimalGpuForBaseRel(PlannerInfo *root,
 												RelOptInfo *baserel);
+extern const Bitmapset *GetSystemAvailableGpus(void);
 extern void		gpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
 extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,

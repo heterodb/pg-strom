@@ -686,6 +686,21 @@ GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 }
 
 /*
+ * GetSystemAvailableGpus - returns Bitmapset of all available GPUs
+ */
+const Bitmapset *
+GetSystemAvailableGpus(void)
+{
+	Bitmapset  *gpus = NULL;
+
+	for (int dindex=0; dindex < numGpuDevAttrs; dindex++)
+	{
+		gpus = bms_add_member(gpus, dindex);
+	}
+	return gpus;
+}
+
+/*
  * __fetchJsonField/Element - NULL aware thin-wrapper
  */
 static Datum

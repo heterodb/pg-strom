@@ -132,8 +132,6 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 {
 	RangeTblEntry  *rte = root->simple_rte_array[baserel->relid];
 	pgstromPlanInfo *pp_info;
-	int				gpu_cache_dindex = -1;
-	const Bitmapset *gpu_direct_devs = NULL;
 	const DpuStorageEntry *ds_entry = NULL;
 	Bitmapset	   *outer_refs = NULL;
 	IndexOptInfo   *indexOpt = NULL;
@@ -190,17 +188,23 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 		xpu_ratio = pgstrom_gpu_operator_ratio();
 		xpu_tuple_cost = pgstrom_gpu_tuple_cost;
 		startup_cost += pgstrom_gpu_setup_cost;
-		/* Is GPU-Cache available? */
-		gpu_cache_dindex = baseRelHasGpuCache(root, baserel);
-		/* Is GPU-Direct SQL available? */
-		gpu_direct_devs = GetOptimalGpuForBaseRel(root, baserel);
-		if (gpu_cache_dindex >= 0)
+
+		if (baseRelHasGpuCache(root, baserel) >= 0)
+		{
+			/* assume GPU-Cache is available */
 			avg_seq_page_cost = 0;
-		else if (gpu_direct_devs)
+		}
+		else if (GetOptimalGpuForBaseRel(root, baserel) != NULL)
+		{
+			/* assume GPU-Direct SQL is available */
 			avg_seq_page_cost = spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
 				pgstrom_gpu_direct_seq_page_cost * baserel->allvisfrac;
+		}
 		else
+		{
+			/* elsewhere, use PostgreSQL's storage layer */
 			avg_seq_page_cost = spc_seq_page_cost;
+		}
 	}
 	else if ((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
 	{
@@ -303,8 +307,6 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 	/* Setup the result */
 	pp_info = palloc0(sizeof(pgstromPlanInfo));
 	pp_info->xpu_task_flags = xpu_task_flags;
-	pp_info->gpu_cache_dindex = gpu_cache_dindex;
-	pp_info->gpu_direct_devs = gpu_direct_devs;
 	pp_info->ds_entry = ds_entry;
 	pp_info->scan_relid = baserel->relid;
 	pp_info->host_quals = extract_actual_clauses(host_quals, false);

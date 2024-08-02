@@ -1484,11 +1484,11 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		if (am_oid != HEAP_TABLE_AM_OID)
 			elog(ERROR, "PG-Strom does not support table access method: %s",
 				 get_am_name(am_oid));
-		/* setup GpuCache if any */
-		if (pp_info->gpu_cache_dindex >= 0)
-			pts->gcache_desc = pgstromGpuCacheExecInit(pts);
-		/* elsewhere, no GpuCache is valid */
-		if (!pts->gcache_desc)
+		/* Is GPU-Cache available? */
+		pts->gcache_desc = pgstromGpuCacheExecInit(pts);
+		if (pts->gcache_desc)
+			pts->xpu_task_flags |= DEVTASK__USED_GPUCACHE;
+		else
 		{
 			/* setup BRIN-index if any */
 			pgstromBrinIndexExecBegin(pts,
@@ -1496,7 +1496,21 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  pp_info->brin_index_conds,
 									  pp_info->brin_index_quals);
 			if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
+			{
 				pts->optimal_gpus = GetOptimalGpuForRelation(rel);
+				if (pts->optimal_gpus)
+				{
+					/*
+					 * If particular GPUs are optimal, we can use
+					 * GPU-Direct SQL for the table scan.
+					 */
+					pts->xpu_task_flags |= DEVTASK__USED_GPUDIRECT;
+				}
+				else
+				{
+					pts->optimal_gpus = GetSystemAvailableGpus();
+				}
+			}
 			if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 				pts->ds_entry = GetOptimalDpuForRelation(rel, &kds_pathname);
 		}
@@ -1635,8 +1649,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  tupdesc_dst,
 									  KDS_FORMAT_COLUMN);
 	}
-	else if (!bms_is_empty(pts->optimal_gpus) ||	/* GPU-Direct SQL */
-			 pts->ds_entry)							/* DPU Storage */
+	else if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0 ||
+			 pts->ds_entry)
 	{
 		pts->cb_next_chunk = pgstromRelScanChunkDirect;
 		pts->cb_next_tuple = pgstromScanNextTuple;
@@ -2246,33 +2260,26 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 	StringInfoData		buf;
 
 	initStringInfo(&buf);
-	if (!es->analyze || !ps_state)
+	if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) == 0)
 	{
-		if (bms_is_empty(pts->optimal_gpus))
-		{
-			appendStringInfo(&buf, "disabled");
-		}
-		else if (pgstrom_regression_test_mode)
-		{
-			appendStringInfo(&buf, "enabled");
-		}
-		else
-		{
-			bool	is_first = true;
-			int		k;
+		appendStringInfo(&buf, "disabled");
+	}
+	else if (!es->analyze || !ps_state)
+	{
+		bool	is_first = true;
+		int		k;
 
-			appendStringInfo(&buf, "enabled (");
-			for (k = bms_next_member(pts->optimal_gpus, -1);
-				 k >= 0;
-				 k = bms_next_member(pts->optimal_gpus, k))
-			{
-				if (!is_first)
-					appendStringInfo(&buf, ", ");
-				appendStringInfo(&buf, "GPU-%d", k);
-				is_first = false;
-			}
-			appendStringInfo(&buf, ")");
+		appendStringInfo(&buf, "enabled (");
+		for (k = bms_next_member(pts->optimal_gpus, -1);
+			 k >= 0;
+			 k = bms_next_member(pts->optimal_gpus, k))
+		{
+			if (!is_first)
+				appendStringInfo(&buf, ", ");
+			appendStringInfo(&buf, "GPU-%d", k);
+			is_first = false;
 		}
+		appendStringInfo(&buf, ")");
 	}
 	else
 	{
@@ -2280,13 +2287,11 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 		uint64			count;
 		int				pos;
 
-		appendStringInfo(&buf, "%s (", (bms_is_empty(pts->optimal_gpus)
-										? "disabled"
-										: "enabled"));
-		if (!pgstrom_regression_test_mode && conn)
+		appendStringInfo(&buf, "enabled (");
+		//FIXME
+		if (conn)
 			appendStringInfo(&buf, "%s; ", conn->devname);
 		pos = buf.len;
-
 		count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
 		if (count)
 			appendStringInfo(&buf, "%sbuffer=%lu",
@@ -2593,7 +2598,7 @@ pgstromExplainTaskState(CustomScanState *node,
 		/* GPU-Cache */
 		pgstromGpuCacheExplain(pts, es, dcontext);
 	}
-	else if (!bms_is_empty(pts->optimal_gpus))
+	else if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0)
 	{
 		/* GPU-Direct */
 		pgstromGpuDirectExplain(pts, es, dcontext);
