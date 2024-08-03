@@ -2434,6 +2434,7 @@ typedef struct kern_session_info
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	cuda_stack_size;	/* estimated stack size */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
+	int64_t		optimal_gpus;		/* mask of schedulable GPUs */
 	/* xpucode for this session */
 	uint32_t	xpucode_load_vars_packed;
 	uint32_t	xpucode_move_vars_packed;

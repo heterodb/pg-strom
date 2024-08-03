@@ -507,6 +507,20 @@ __build_session_kvars_defs(pgstromTaskState *pts,
 	session->kcxt_kvars_defs = __appendBinaryStringInfo(buf, kvars_defs, sz);
 }
 
+static int64_t
+__build_session_optimal_gpus(pgstromTaskState *pts)
+{
+	int64_t		optimal_gpus = 0;
+	int			k;
+
+	for (k = bms_next_member(pts->optimal_gpus, -1);
+		 k >= 0;
+		 k = bms_next_member(pts->optimal_gpus, k))
+		optimal_gpus |= (1UL << k);
+
+	return optimal_gpus;
+}
+
 static uint32_t
 __build_session_xact_state(StringInfo buf)
 {
@@ -735,6 +749,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	/* other database session information */
 	session->query_plan_id = ps_state->query_plan_id;
 	session->xpu_task_flags = pts->xpu_task_flags;
+	session->optimal_gpus = __build_session_optimal_gpus(pts);
 	session->kcxt_kvecs_bufsz = pp_info->kvecs_bufsz;
 	session->kcxt_kvecs_ndims = pp_info->kvecs_ndims;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;

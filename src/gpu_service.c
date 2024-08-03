@@ -52,18 +52,22 @@ struct gpuContext
 	pthread_cond_t	cond;
 	pthread_mutex_t	lock;
 	dlist_head		command_list;
+	pg_atomic_uint32 num_commands;
 };
+
+struct gpuMemChunk;
 
 struct gpuClient
 {
 	struct gpuContext *gcontext;/* per-device status */
 	dlist_node		chain;		/* gcontext->client_list */
-	kern_session_info *session;	/* per session info (on cuda managed memory) */
+	int64_t			optimal_gpus; /* candidate GPUs for scheduling */
 	struct gpuQueryBuffer *gq_buf; /* per query join/preagg device buffer */
 	pg_atomic_uint32 refcnt;	/* odd number, if error status */
 	pthread_mutex_t	mutex;		/* mutex to write the socket */
 	int				sockfd;		/* connection to PG backend */
 	pthread_t		worker;		/* receiver thread */
+	struct gpuMemChunk *__session[1];	/* per device session info */
 };
 
 #define GPUSERV_WORKER_KIND__GPUTASK		't'
@@ -102,12 +106,12 @@ static __thread CUcontext	MY_CONTEXT_PER_THREAD = NULL;
 static __thread CUstream	MY_STREAM_PER_THREAD = NULL;
 static __thread CUevent		MY_EVENT_PER_THREAD = NULL;
 static __thread gpuContext *GpuWorkerCurrentContext = NULL;
-static volatile int	gpuserv_bgworker_got_signal = 0;
-static dlist_head	gpuserv_gpucontext_list;
-static int			gpuserv_epoll_fdesc = -1;
-static int			gpuserv_logger_pipefd[2];
-static FILE		   *gpuserv_logger_filp;
-static StringInfoData gpuserv_logger_buffer;
+static volatile int			gpuserv_bgworker_got_signal = 0;
+static dlist_head			gpuserv_gpucontext_list;
+static int					gpuserv_epoll_fdesc = -1;
+static int					gpuserv_logger_pipefd[2];
+static FILE				   *gpuserv_logger_filp;
+static StringInfoData		gpuserv_logger_buffer;
 static shmem_request_hook_type shmem_request_next = NULL;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static gpuServSharedState *gpuserv_shared_state = NULL;
@@ -781,7 +785,7 @@ static int		pgstrom_gpu_mempool_segment_sz_kb;	/* GUC */
 static double	pgstrom_gpu_mempool_max_ratio;		/* GUC */
 static double	pgstrom_gpu_mempool_min_ratio;		/* GUC */
 static int		pgstrom_gpu_mempool_release_delay;	/* GUC */
-typedef struct
+struct gpuMemorySegment
 {
 	dlist_node		chain;
 	gpuMemoryPool  *pool;			/* memory pool that owns this segment */
@@ -792,9 +796,10 @@ typedef struct
 	dlist_head		free_chunks;	/* list of free chunks */
 	dlist_head		addr_chunks;	/* list of ordered chunks */
 	struct timeval	tval;
-} gpuMemorySegment;
+};
+typedef struct gpuMemorySegment gpuMemorySegment;
 
-typedef struct
+struct gpuMemChunk
 {
 	dlist_node	free_chain;
 	dlist_node	addr_chain;
@@ -803,7 +808,8 @@ typedef struct
 	size_t		__offset;	/* offset from the base */
 	size_t		__length;	/* length of the chunk */
 	CUdeviceptr	m_devptr;	/* __base + __offset */
-} gpuMemChunk;
+};
+typedef struct gpuMemChunk		gpuMemChunk;
 
 static gpuMemChunk *
 __gpuMemAllocFromSegment(gpuMemoryPool *pool,
@@ -1762,56 +1768,6 @@ gpuServiceGoingTerminate(void)
 	return (gpuserv_bgworker_got_signal != 0);
 }
 
-/* ----------------------------------------------------------------
- *
- * gpuservMonitorClient
- *
- * ----------------------------------------------------------------
- */
-typedef struct
-{
-	gpuMemChunk	   *chunk;
-	XpuCommand		xcmd;
-} gpuServXpuCommandPacked;
-
-static void *
-__gpuServiceAllocCommand(void *__priv, size_t sz)
-{
-	gpuMemChunk	   *chunk;
-	gpuServXpuCommandPacked *packed;
-
-	chunk = gpuMemAllocManaged(offsetof(gpuServXpuCommandPacked, xcmd) + sz);
-	if (!chunk)
-		return NULL;
-	packed = (gpuServXpuCommandPacked *)chunk->m_devptr;
-	packed->chunk = chunk;
-	return &packed->xcmd;
-}
-
-static void
-__gpuServiceAttachCommand(void *__priv, XpuCommand *xcmd)
-{
-	gpuClient  *gclient = (gpuClient *)__priv;
-	gpuContext *gcontext = gclient->gcontext;
-
-	pg_atomic_fetch_add_u32(&gclient->refcnt, 2);
-	xcmd->priv = gclient;
-
-	pthreadMutexLock(&gcontext->lock);
-	dlist_push_tail(&gcontext->command_list, &xcmd->chain);
-	pthreadMutexUnlock(&gcontext->lock);
-	pthreadCondSignal(&gcontext->cond);
-}
-
-static void
-__gpuServiceFreeCommand(XpuCommand *xcmd)
-{
-	gpuServXpuCommandPacked *packed = (gpuServXpuCommandPacked *)
-		((char *)xcmd - offsetof(gpuServXpuCommandPacked, xcmd));
-	gpuMemFree(packed->chunk);
-}
-TEMPLATE_XPU_CONNECT_RECEIVE_COMMANDS(__gpuService)
-
 /*
  * gpuClientPut
  */
@@ -1833,11 +1789,13 @@ gpuClientPut(gpuClient *gclient, bool exit_monitor_thread)
 			close(gclient->sockfd);
 		if (gclient->gq_buf)
 			putGpuQueryBuffer(gclient->gq_buf);
-		if (gclient->session)
+		for (int k=0; k < numGpuDevAttrs; k++)
 		{
-			XpuCommand	   *xcmd = (XpuCommand *)((char *)gclient->session -
-												  offsetof(XpuCommand, u.session));
-			__gpuServiceFreeCommand(xcmd);
+			gpuMemChunk *chunk = gclient->__session[k];
+
+			if (!chunk)
+				continue;
+			gpuMemFree(chunk);
 		}
 		free(gclient);
 	}
@@ -2056,13 +2014,140 @@ gpuClientWriteBackNormal(gpuClient  *gclient,
 	__gpuClientWriteBack(gclient, iov_array, iovcnt);
 }
 
+
+/* ----------------------------------------------------------------
+ *
+ * gpuservMonitorClient
+ *
+ * ----------------------------------------------------------------
+ */
+static bool	gpuservHandleOpenSession(gpuClient *gclient,
+									 XpuCommand *xcmd);
+
+typedef struct
+{
+	gpuContext	   *gcontext;
+	gpuMemChunk	   *chunk;
+	XpuCommand		xcmd;
+} gpuServXpuCommandPacked;
+
+static void *
+__gpuServiceAllocCommand(void *__priv, size_t sz)
+{
+	gpuClient	   *gclient = (gpuClient *)__priv;
+	gpuMemChunk	   *chunk;
+	gpuServXpuCommandPacked *packed;
+
+	sz += offsetof(gpuServXpuCommandPacked, xcmd);
+	if (gclient->optimal_gpus == 0)
+	{
+		packed = calloc(1, sz);
+		if (!packed)
+		{
+			gpuClientELog(gclient, "out of memory");
+			return NULL;
+		}
+		packed->gcontext = NULL;	/* be released by free(3) */
+		packed->chunk = NULL;		/* be released by free(3) */
+	}
+	else
+	{
+		/*
+		 * Once the target GPUs are determined by OpenSession command,
+		 * we choose one of the candidate GPU here.
+		 */
+		gpuContext *gcontext = NULL;
+		uint32_t	gcontext_count = 0;
+		dlist_iter	iter;
+
+		dlist_foreach(iter, &gpuserv_gpucontext_list)
+		{
+			gpuContext *__gcontext = dlist_container(gpuContext, chain, iter.cur);
+			int64_t		__mask = (1UL << __gcontext->cuda_dindex);
+			uint32_t	__count;
+
+			if ((gclient->optimal_gpus & __mask) == 0)
+				continue;
+			__count = pg_atomic_read_u32(&__gcontext->num_commands);
+			if (!gcontext || __count < gcontext_count)
+			{
+				gcontext        = __gcontext;
+				gcontext_count = __count;
+			}
+		}
+		if (!gcontext)
+		{
+			gpuClientELog(gclient, "No GPUs are available (optimal_gpus=%08lx)",
+						  gclient->optimal_gpus);
+			return NULL;
+		}
+		chunk = __gpuMemAllocCommon(&gcontext->pool_managed, sz);
+		if (!chunk)
+		{
+			gpuClientELog(gclient, "out of managed memory");
+			return NULL;
+		}
+		packed = (gpuServXpuCommandPacked *)chunk->m_devptr;
+		packed->gcontext = gcontext;
+		packed->chunk = chunk;
+	}
+	return &packed->xcmd;
+}
+
+static void
+__gpuServiceFreeCommand(XpuCommand *xcmd)
+{
+	gpuServXpuCommandPacked *packed = (gpuServXpuCommandPacked *)
+		((char *)xcmd - offsetof(gpuServXpuCommandPacked, xcmd));
+	if (!packed->chunk)
+		free(packed);		/* Xcmd of OpenSession */
+	else
+		gpuMemFree(packed->chunk);	/* other commands */
+}
+
+static void
+__gpuServiceAttachCommand(void *__priv, XpuCommand *xcmd)
+{
+	gpuServXpuCommandPacked *packed = (gpuServXpuCommandPacked *)
+		((char *)xcmd - offsetof(gpuServXpuCommandPacked, xcmd));
+	gpuClient  *gclient = (gpuClient *)__priv;
+
+	pg_atomic_fetch_add_u32(&gclient->refcnt, 2);
+	xcmd->priv = gclient;
+	if (!packed->gcontext)
+	{
+		Assert(gclient->optimal_gpus == 0);
+		if (xcmd->tag == XpuCommandTag__OpenSession)
+		{
+			gpuservHandleOpenSession(gclient, xcmd);
+		}
+		else
+		{
+			gpuClientELog(gclient, "XPU command '%d' before OpenSession", xcmd->tag);
+		}
+		__gpuServiceFreeCommand(xcmd);
+		gpuClientPut(gclient, false);
+	}
+	else
+	{
+		gpuContext *gcontext = packed->gcontext;
+
+		pthreadMutexLock(&gcontext->lock);
+		dlist_push_tail(&gcontext->command_list, &xcmd->chain);
+		pg_atomic_fetch_add_u32(&gcontext->num_commands, 1);
+		pthreadMutexUnlock(&gcontext->lock);
+		pthreadCondSignal(&gcontext->cond);
+	}
+}
+TEMPLATE_XPU_CONNECT_RECEIVE_COMMANDS(__gpuService)
+
 /*
  * expandCudaStackLimit
  */
 static bool
-expandCudaStackLimit(gpuClient *gclient, kern_session_info *session)
+expandCudaStackLimit(gpuContext *gcontext, kern_session_info *session,
+					 char *emsg, size_t emsg_sz)
 {
-	gpuContext *gcontext = gclient->gcontext;
 	uint32_t	cuda_stack_size = session->cuda_stack_size;
 	uint32_t	cuda_stack_limit;
 	CUresult	rc;
@@ -2072,8 +2157,8 @@ expandCudaStackLimit(gpuClient *gclient, kern_session_info *session)
 		cuda_stack_limit = TYPEALIGN(1024, cuda_stack_size);
 		if (cuda_stack_limit > (__pgstrom_cuda_stack_limit_kb << 10))
 		{
-			gpuClientELog(gclient, "CUDA stack size %u is larger than the configured limitation %ukB by pg_strom.cuda_stack_limit",
-						  cuda_stack_size, __pgstrom_cuda_stack_limit_kb);
+			snprintf(emsg, emsg_sz, "CUDA stack size %u is larger than the configured limitation %ukB by pg_strom.cuda_stack_limit",
+					 cuda_stack_size, __pgstrom_cuda_stack_limit_kb);
 			return false;
 		}
 
@@ -2083,8 +2168,8 @@ expandCudaStackLimit(gpuClient *gclient, kern_session_info *session)
 			rc = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, cuda_stack_limit);
 			if (rc != CUDA_SUCCESS)
 			{
-				gpuClientELog(gclient, "failed on cuCtxSetLimit: %s",
-							  cuStrError(rc));
+				snprintf(emsg, emsg_sz, "failed on cuCtxSetLimit: %s",
+						 cuStrError(rc));
 				pthreadMutexUnlock(&gcontext->cuda_setlimit_lock);
 				return false;
 			}
@@ -2292,27 +2377,57 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 {
 	gpuContext	   *gcontext = gclient->gcontext;
 	kern_session_info *session = &xcmd->u.session;
+	size_t			session_sz = xcmd->length - offsetof(XpuCommand, u.session);
+	dlist_iter		iter;
 	kern_data_store *kds_final_head = NULL;
 	XpuCommand		resp;
 	char			emsg[512];
 	struct iovec	iov;
 
-	if (gclient->session)
+	if (gclient->optimal_gpus != 0)
 	{
 		gpuClientELog(gclient, "OpenSession is called twice");
 		return false;
 	}
-	/* expand CUDA thread stack limit on demand */
-	if (!expandCudaStackLimit(gclient, session))
-		return false;
-
-	/* resolve device pointers */
-	if (!__resolveDevicePointers(gcontext, session, emsg, sizeof(emsg)))
+	if (session->optimal_gpus == 0)
 	{
-		gpuClientELog(gclient, "%s", emsg);
+		gpuClientELog(gclient, "GPU-client must have at least one schedulable GPUs");
 		return false;
 	}
 
+	dlist_foreach (iter, &gpuserv_gpucontext_list)
+	{
+		gpuContext *__gcontext = dlist_container(gpuContext, chain, iter.cur);
+		uint32_t	__cuda_dindex = __gcontext->cuda_dindex;
+		gpuMemChunk *__chunk;
+		kern_session_info *__session;
+
+		if ((gclient->optimal_gpus & (1UL<<__cuda_dindex)) == 0)
+			continue;
+		__chunk = __gpuMemAllocCommon(&__gcontext->pool_managed, session_sz);
+		if (!__chunk)
+		{
+			gpuClientELog(gclient, "out of managed memory");
+			goto error;
+		}
+		gclient->__session[__cuda_dindex] = __chunk;
+		__session = (kern_session_info *)__chunk->m_devptr;
+		memcpy(__session, session, session_sz);
+		/* expand CUDA thread stack limit on demand */
+		if (!expandCudaStackLimit(__gcontext, __session,
+								  emsg, sizeof(emsg)))
+		{
+			gpuClientELog(gclient, "%s", emsg);
+			goto error;
+		}
+		/* resolve device pointers */
+		if (!__resolveDevicePointers(__gcontext, __session,
+									 emsg, sizeof(emsg)))
+		{
+			gpuClientELog(gclient, "%s", emsg);
+			goto error;
+		}
+	}
 	/* setup per-cliend GPU buffer */
 	if (session->groupby_kds_final != 0)
 	{
@@ -2329,7 +2444,7 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 		gpuClientELog(gclient, "%s", emsg);
 		return false;
 	}
-	gclient->session = session;
+	gclient->optimal_gpus = xcmd->u.session.optimal_gpus;
 
 	/* success status */
 	memset(&resp, 0, sizeof(resp));
@@ -2342,6 +2457,9 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	__gpuClientWriteBack(gclient, &iov, 1);
 
 	return true;
+
+error:
+	return false;
 }
 
 /* ----------------------------------------------------------------
@@ -2507,10 +2625,11 @@ no_prepfunc_buffer:
 }
 
 static void
-gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
+gpuservHandleGpuTaskExec(gpuContext *gcontext,
+						 gpuClient *gclient,
+						 XpuCommand *xcmd)
 {
-	gpuContext		*gcontext = gclient->gcontext;
-	kern_session_info *session = gclient->session;
+	kern_session_info *session = NULL;
 	gpuQueryBuffer  *gq_buf = gclient->gq_buf;
 	kern_gputask	*kgtask = NULL;
 	const char		*kds_src_pathname = NULL;
@@ -2542,6 +2661,8 @@ gpuservHandleGpuTaskExec(gpuClient *gclient, XpuCommand *xcmd)
 	size_t			sz;
 	void		   *kern_args[10];
 
+	session = (kern_session_info *)
+		gclient->__session[gcontext->cuda_dindex];
 	if (xcmd->u.task.kds_src_pathname)
 		kds_src_pathname = (char *)xcmd + xcmd->u.task.kds_src_pathname;
 	if (xcmd->u.task.kds_src_iovec)
@@ -2775,7 +2896,7 @@ resume_kernel:
 	/*
 	 * Launch kernel
 	 */
-	kern_args[0] = &gclient->session;
+	kern_args[0] = &session;
 	kern_args[1] = &kgtask;
 	kern_args[2] = &m_kmrels;
 	kern_args[3] = &m_kds_src;
@@ -2909,17 +3030,21 @@ gpuservGpuCacheManager(void *__arg)
  * ----------------------------------------------------------------
  */
 static void
-gpuservHandleGpuTaskFinal(gpuClient *gclient, XpuCommand *xcmd)
+gpuservHandleGpuTaskFinal(gpuContext *gcontext,
+						  gpuClient *gclient,
+						  XpuCommand *xcmd)
 {
 	kern_final_task *kfin = &xcmd->u.fin;
 	gpuQueryBuffer *gq_buf = gclient->gq_buf;
-	kern_session_info *session = gclient->session;
+	kern_session_info *session;
 	struct iovec	iov_array[10];
 	struct iovec   *iov;
 	int				iovcnt = 0;
 	XpuCommand		resp;
 	size_t			resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
 
+	session = (kern_session_info *)
+		gclient->__session[gcontext->cuda_dindex]->m_devptr;
 	memset(&resp, 0, sizeof(XpuCommand));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag   = XpuCommandTag__Success;
@@ -3039,11 +3164,14 @@ gpuservGpuWorkerMain(void *__arg)
 	{
 		XpuCommand *xcmd;
 		dlist_node *dnode;
+		uint32_t	count;
 
 		if (!dlist_is_empty(&gcontext->command_list))
 		{
 			dnode = dlist_pop_head_node(&gcontext->command_list);
 			xcmd = dlist_container(XpuCommand, chain, dnode);
+			count = pg_atomic_fetch_sub_u32(&gcontext->num_commands, 1);
+			Assert(count > 0);
 			pthreadMutexUnlock(&gcontext->lock);
 
 			gclient = xcmd->priv;
@@ -3056,17 +3184,12 @@ gpuservGpuWorkerMain(void *__arg)
 			{
 				switch (xcmd->tag)
 				{
-					case XpuCommandTag__OpenSession:
-						if (gpuservHandleOpenSession(gclient, xcmd))
-							xcmd = NULL;	/* session information shall be kept until
-											 * end of the session. */
-						break;
 					case XpuCommandTag__XpuTaskExec:
 					case XpuCommandTag__XpuTaskExecGpuCache:
-						gpuservHandleGpuTaskExec(gclient, xcmd);
+						gpuservHandleGpuTaskExec(gcontext, gclient, xcmd);
 						break;
 					case XpuCommandTag__XpuTaskFinal:
-						gpuservHandleGpuTaskFinal(gclient, xcmd);
+						gpuservHandleGpuTaskFinal(gcontext, gclient, xcmd);
 						break;
 					default:
 						gpuClientELog(gclient, "unknown XPU command (%d)",
@@ -3074,9 +3197,7 @@ gpuservGpuWorkerMain(void *__arg)
 						break;
 				}
 			}
-
-			if (xcmd)
-				__gpuServiceFreeCommand(xcmd);
+			__gpuServiceFreeCommand(xcmd);
 			gpuClientPut(gclient, false);
 			pthreadMutexLock(&gcontext->lock);
 		}
@@ -3182,7 +3303,7 @@ gpuservAcceptClient(gpuContext *gcontext)
 		return;
 	}
 
-	gclient = calloc(1, sizeof(gpuClient));
+	gclient = calloc(1, offsetof(gpuClient, __session[numGpuDevAttrs]));
 	if (!gclient)
 	{
 		elog(LOG, "GPU%d: out of memory: %m",
@@ -3593,6 +3714,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 	pthreadCondInit(&gcontext->cond);
 	pthreadMutexInit(&gcontext->lock);
 	dlist_init(&gcontext->command_list);
+	pg_atomic_init_u32(&gcontext->num_commands, 0);
 
 	PG_TRY();
 	{
