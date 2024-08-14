@@ -1,7 +1,7 @@
 #!/bin/sh
 
-PG_MAJOR_VERSIONS="15 16"
-PG_COMMANDS="pg_ctl psql initdb pg_dump pg_dumpall pg_restore pg_isready createdb createuser dropdb dropuser clusterdb reindexdb vacuumdb pgbench"
+PG_MAJOR_VERSIONS="15 16 17"
+PG_COMMANDS="postgres pg_ctl psql initdb pg_dump pg_dumpall pg_restore pg_config pg_isready createdb createuser dropdb dropuser clusterdb reindexdb vacuumdb pgbench"
 
 for v in ${PG_MAJOR_VERSIONS}
 do
