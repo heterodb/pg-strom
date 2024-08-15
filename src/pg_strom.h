@@ -359,7 +359,6 @@ typedef struct
 	pg_atomic_uint32	device_selection_hint;
 	/* control variables to detect the last plan-node at parallel execution */
 	pg_atomic_uint32	parallel_task_control;
-	pg_atomic_uint32	__rjoin_exit_count;
 	/* statistics */
 	pg_atomic_uint64	npages_direct_read;	/* read by GPU-Direct Storage */
 	pg_atomic_uint64	npages_vfs_read;	/* read from VFS layer */
@@ -410,7 +409,7 @@ typedef struct
 	void		   *preload_buffer;
 	bool			inner_pinned_buffer;
 	uint64_t		inner_buffer_id;	/* buffer-id if ZC mode */
-	uint32_t		inner_dev_index;	/* dev-index if ZC mode */
+	gpumask_t		inner_optimal_gpus;	/* optimal-gpus if ZC mode */
 
 	/*
 	 * join properties (common)
@@ -443,7 +442,7 @@ struct pgstromTaskState
 {
 	CustomScanState		css;
 	uint32_t			xpu_task_flags;	/* mask of device flags */
-	const Bitmapset	   *optimal_gpus;	/* candidate GPUs to connect */
+	gpumask_t			optimal_gpus;	/* candidate GPUs to connect */
 	const DpuStorageEntry *ds_entry;	/* candidate DPUs to connect */
 	XpuConnection	   *conn;
 	pgstromSharedState *ps_state;		/* on the shared-memory segment */
@@ -463,12 +462,6 @@ struct pgstromTaskState
 	bool				scan_done;
 	bool				final_done;
 
-	/*
-	 * control variables to fire the end-of-task event
-	 * for RIGHT OUTER JOIN and PRE-AGG
-	 */
-	pg_atomic_uint32   *rjoin_devs_count;
-	pg_atomic_uint32   *rjoin_exit_count;
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
@@ -686,9 +679,7 @@ extern void		pgstrom_init_relscan(void);
  */
 extern void		__xpuClientOpenSession(pgstromTaskState *pts,
 									   const XpuCommand *session,
-									   pgsocket sockfd,
-									   const char *devname,
-									   int dev_index);
+									   pgsocket sockfd);
 extern int
 xpuConnectReceiveCommands(pgsocket sockfd,
 						  void *(*alloc_f)(void *priv, size_t sz),
@@ -711,7 +702,7 @@ extern void		execInnerPreLoadPinnedOneDepth(pgstromTaskState *pts,
 											   pg_atomic_uint64 *p_inner_nitems,
 											   pg_atomic_uint64 *p_inner_usage,
 											   uint64_t *p_inner_buffer_id,
-											   uint32_t *p_inner_dev_index);
+											   gpumask_t *p_inner_optimal_gpus);
 extern void		pgstromExecEndTaskState(CustomScanState *node);
 extern void		pgstromExecResetTaskState(CustomScanState *node);
 extern Size		pgstromSharedStateEstimateDSM(CustomScanState *node,
@@ -741,11 +732,11 @@ extern double	pgstrom_gpu_tuple_cost;		/* GUC */
 extern double	pgstrom_gpu_operator_cost;	/* GUC */
 extern double	pgstrom_gpu_direct_seq_page_cost; /* GUC */
 extern double	pgstrom_gpu_operator_ratio(void);
-extern const Bitmapset *GetOptimalGpuForFile(const char *pathname);
-extern const Bitmapset *GetOptimalGpuForRelation(Relation relation);
-extern const Bitmapset *GetOptimalGpuForBaseRel(PlannerInfo *root,
-												RelOptInfo *baserel);
-extern const Bitmapset *GetSystemAvailableGpus(void);
+extern gpumask_t	GetOptimalGpuForFile(const char *pathname);
+extern gpumask_t	GetOptimalGpuForRelation(Relation relation);
+extern gpumask_t	GetOptimalGpuForBaseRel(PlannerInfo *root,
+											RelOptInfo *baserel);
+extern gpumask_t	GetSystemAvailableGpus(void);
 extern void		gpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
 extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,
@@ -871,8 +862,8 @@ extern void		pgstrom_init_dpu_preagg(void);
  */
 extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
 extern bool 	RelationIsArrowFdw(Relation frel);
-extern const Bitmapset *GetOptimalGpusForArrowFdw(PlannerInfo *root,
-												  RelOptInfo *baserel);
+extern gpumask_t GetOptimalGpusForArrowFdw(PlannerInfo *root,
+										   RelOptInfo *baserel);
 extern const DpuStorageEntry *GetOptimalDpuForArrowFdw(PlannerInfo *root,
 													   RelOptInfo *baserel);
 extern bool		pgstromArrowFdwExecInit(pgstromTaskState *pts,

@@ -2121,7 +2121,7 @@ again:
 			{
 				h_kmrels->chunks[i].pinned_buffer = true;
 				h_kmrels->chunks[i].buffer_id = istate->inner_buffer_id;
-				h_kmrels->chunks[i].dev_index = istate->inner_dev_index;
+				h_kmrels->chunks[i].optimal_gpus = istate->inner_optimal_gpus;
 			}
 		}
 		else if (istate->hash_inner_keys != NIL &&
@@ -2398,7 +2398,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 												   &ps_state->inners[i].inner_nitems,
 												   &ps_state->inners[i].inner_usage,
 												   &pts->inners[i].inner_buffer_id,
-												   &pts->inners[i].inner_dev_index);
+												   &pts->inners[i].inner_optimal_gpus);
 				}
 				else
 				{

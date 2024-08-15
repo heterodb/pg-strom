@@ -2056,11 +2056,11 @@ RelationIsArrowFdw(Relation frel)
 /*
  * GetOptimalGpusForArrowFdw
  */
-const Bitmapset *
+gpumask_t
 GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 {
 	List	   *priv_list = (List *)baserel->fdw_private;
-	Bitmapset  *optimal_gpus = NULL;
+	gpumask_t	optimal_gpus = 0;
 
 	if (baseRelIsArrowFdw(baserel) &&
 		IsA(priv_list, List) && list_length(priv_list) == 2)
@@ -2071,13 +2071,13 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 		foreach (lc, af_list)
 		{
 			ArrowFileState *af_state = lfirst(lc);
-			const Bitmapset *__optimal_gpus;
+			gpumask_t	__optimal_gpus;
 
 			__optimal_gpus = GetOptimalGpuForFile(af_state->filename);
 			if (lc == list_head(af_list))
-				optimal_gpus = bms_copy(__optimal_gpus);
+				optimal_gpus = __optimal_gpus;
 			else
-				optimal_gpus = bms_intersect(optimal_gpus, __optimal_gpus);
+				optimal_gpus &= __optimal_gpus;
 		}
 	}
 	return optimal_gpus;
@@ -3455,7 +3455,7 @@ static ArrowFdwState *
 __arrowFdwExecInit(ScanState *ss,
 				   List *outer_quals,
 				   const Bitmapset *outer_refs,
-				   const Bitmapset **p_optimal_gpus,
+				   gpumask_t *p_optimal_gpus,
 				   const DpuStorageEntry **p_ds_entry)
 {
 	Relation		frel = ss->ss_currentRelation;
@@ -3463,14 +3463,14 @@ __arrowFdwExecInit(ScanState *ss,
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
 	Bitmapset	   *referenced = NULL;
 	Bitmapset	   *stat_attrs = NULL;
-	Bitmapset	   *optimal_gpus = NULL;
+	gpumask_t		optimal_gpus = 0UL;
 	const DpuStorageEntry *ds_entry = NULL;
 	bool			whole_row_ref = false;
 	List		   *filesList;
 	List		   *af_states_list = NIL;
 	uint32_t		rb_nrooms = 0;
 	uint32_t		rb_nitems = 0;
-	ArrowFdwState *arrow_state;
+	ArrowFdwState  *arrow_state;
 	ListCell	   *lc1, *lc2;
 
 	Assert(RelationIsArrowFdw(frel));
@@ -3501,12 +3501,12 @@ __arrowFdwExecInit(ScanState *ss,
 			rb_nrooms += list_length(af_state->rb_list);
 			if (p_optimal_gpus)
 			{
-				const Bitmapset  *__optimal_gpus = GetOptimalGpuForFile(fname);
+				gpumask_t	__optimal_gpus = GetOptimalGpuForFile(fname);
 
 				if (af_states_list == NIL)
-					optimal_gpus = bms_copy(__optimal_gpus);
+					optimal_gpus = __optimal_gpus;
 				else
-					optimal_gpus = bms_intersect(optimal_gpus, __optimal_gpus);
+					optimal_gpus &= __optimal_gpus;
 			}
 			if (p_ds_entry)
 			{

@@ -2709,7 +2709,7 @@ pgstromGpuCacheExecInit(pgstromTaskState *pts)
 	 */
 	Assert(gc_options.cuda_dindex >= 0 &&
 		   gc_options.cuda_dindex < numGpuDevAttrs);
-	pts->optimal_gpus = bms_make_singleton(gc_options.cuda_dindex);
+	pts->optimal_gpus = (1UL << gc_options.cuda_dindex);
 
 	return lookupGpuCacheDesc(rel);
 }

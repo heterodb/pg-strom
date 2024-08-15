@@ -18,8 +18,6 @@
 struct XpuConnection
 {
 	dlist_node		chain;	/* link to gpuserv_connection_slots */
-	char			devname[32];
-	int				dev_index;		/* cuda_dindex or dpu_endpoint_id */
 	volatile pgsocket sockfd;
 	volatile int	terminated;		/* positive: normal exit
 									 * negative: exit by errors */
@@ -113,8 +111,8 @@ __xpuConnectSessionWorker(void *__priv)
 		{
 			if (errno == EINTR)
 				continue;
-			fprintf(stderr, "[%s; %s:%d] failed on poll(2): %m\n",
-					conn->devname, __FILE_NAME__, __LINE__);
+			fprintf(stderr, "[%s:%d] failed on poll(2): %m\n",
+					__FILE_NAME__, __LINE__);
 			break;
 		}
 		else if (nevents > 0)
@@ -148,8 +146,7 @@ __xpuConnectSessionWorker(void *__priv)
 					pg_usleep(2000L);
 				}
 				else if (__xpuConnectReceiveCommands(conn->sockfd,
-													 conn,
-													 conn->devname) < 0)
+													 conn) < 0)
 				{
 					break;
 				}
@@ -507,20 +504,6 @@ __build_session_kvars_defs(pgstromTaskState *pts,
 	session->kcxt_kvars_defs = __appendBinaryStringInfo(buf, kvars_defs, sz);
 }
 
-static int64_t
-__build_session_optimal_gpus(pgstromTaskState *pts)
-{
-	int64_t		optimal_gpus = 0;
-	int			k;
-
-	for (k = bms_next_member(pts->optimal_gpus, -1);
-		 k >= 0;
-		 k = bms_next_member(pts->optimal_gpus, k))
-		optimal_gpus |= (1UL << k);
-
-	return optimal_gpus;
-}
-
 static uint32_t
 __build_session_xact_state(StringInfo buf)
 {
@@ -749,7 +732,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	/* other database session information */
 	session->query_plan_id = ps_state->query_plan_id;
 	session->xpu_task_flags = pts->xpu_task_flags;
-	session->optimal_gpus = __build_session_optimal_gpus(pts);
+	session->optimal_gpus = pts->optimal_gpus;
 	session->kcxt_kvecs_bufsz = pp_info->kvecs_bufsz;
 	session->kcxt_kvecs_ndims = pp_info->kvecs_ndims;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
@@ -796,7 +779,6 @@ pgstromTaskStateBeginScan(pgstromTaskState *pts)
 		newval = curval + 2;
 	} while (!pg_atomic_compare_exchange_u32(&ps_state->parallel_task_control,
 											 &curval, newval));
-	pg_atomic_fetch_add_u32(&pts->rjoin_devs_count[conn->dev_index], 1);
 	return true;
 }
 
@@ -821,9 +803,6 @@ pgstromTaskStateEndScan(pgstromTaskState *pts, kern_final_task *kfin)
 	if (newval == 1)
 		kfin->final_plan_node = true;
 
-	if (pg_atomic_sub_fetch_u32(&pts->rjoin_devs_count[conn->dev_index], 1) == 0)
-		kfin->final_this_device = true;
-
 	return (kfin->final_plan_node | kfin->final_this_device);
 }
 
@@ -834,7 +813,6 @@ static void
 pgstromTaskStateResetScan(pgstromTaskState *pts)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	int		num_devs = 0;
 
 	/*
 	 * pgstromExecTaskState() is never called on the single process
@@ -843,17 +821,7 @@ pgstromTaskStateResetScan(pgstromTaskState *pts)
 	if (!ps_state)
 		return;
 
-	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
-		num_devs = numGpuDevAttrs;
-	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-		num_devs = DpuStorageEntryCount();
-	else
-		elog(ERROR, "Bug? no GPU/DPUs are in use");
-
 	pg_atomic_write_u32(&ps_state->parallel_task_control, 0);
-	pg_atomic_write_u32(pts->rjoin_exit_count, 0);
-	for (int i=0; i < num_devs; i++)
-		pg_atomic_write_u32(pts->rjoin_devs_count + i, 0);
 	if (pts->arrow_state)
 	{
 		pgstromArrowFdwExecReset(pts->arrow_state);
@@ -956,10 +924,7 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 					 errmsg("%s:%d  %s",
 							conn->errorbuf.filename,
 							conn->errorbuf.lineno,
-							conn->errorbuf.message),
-					 errhint("device at %s, function at %s",
-							 conn->devname,
-							 conn->errorbuf.funcname)));
+							conn->errorbuf.message)));
 
 		}
 		if (!dlist_is_empty(&conn->ready_cmds_list))
@@ -1038,10 +1003,7 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 					 errmsg("%s:%d  %s",
 							conn->errorbuf.filename,
 							conn->errorbuf.lineno,
-							conn->errorbuf.message),
-					 errhint("device at %s, function at %s",
-							 conn->devname,
-							 conn->errorbuf.funcname)));
+							conn->errorbuf.message)));
 		}
 
 		if ((conn->num_running_cmds + conn->num_ready_cmds) < max_async_tasks &&
@@ -1971,7 +1933,7 @@ execInnerPreLoadPinnedOneDepth(pgstromTaskState *pts,
 							   pg_atomic_uint64 *p_inner_nitems,
 							   pg_atomic_uint64 *p_inner_usage,
 							   uint64_t *p_inner_buffer_id,
-							   uint32_t *p_inner_dev_index)
+							   gpumask_t *p_inner_optimal_gpus)
 {
 	XpuCommand *resp;
 	uint64_t	ival;
@@ -2007,8 +1969,8 @@ execInnerPreLoadPinnedOneDepth(pgstromTaskState *pts,
 	ival = pg_atomic_read_u64(&pts->ps_state->final_usage);
 	pg_atomic_write_u64(p_inner_usage,  ival);
 skip:
-	*p_inner_buffer_id = pts->ps_state->query_plan_id;
-	*p_inner_dev_index = pts->conn->dev_index;
+	*p_inner_buffer_id    = pts->ps_state->query_plan_id;
+	*p_inner_optimal_gpus = pts->optimal_gpus;
 
 	if (pts->css.ss.ps.instrument)
 		InstrStopNode(pts->css.ss.ps.instrument, -1.0);
@@ -2088,18 +2050,11 @@ pgstromSharedStateEstimateDSM(CustomScanState *node,
 	EState	   *estate   = node->ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
 	int			num_rels = list_length(node->custom_ps);
-	int			num_devs = 0;
 	Size		len = 0;
 
 	if (pts->br_state)
 		len += pgstromBrinIndexEstimateDSM(pts);
 	len += MAXALIGN(offsetof(pgstromSharedState, inners[num_rels]));
-
-	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
-		num_devs = numGpuDevAttrs;
-	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-		num_devs = DpuStorageEntryCount();
-	len += MAXALIGN(sizeof(pg_atomic_uint32) * num_devs);
 
 	if (!pts->arrow_state)
 		len += table_parallelscan_estimate(relation, snapshot);
@@ -2120,17 +2075,12 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	EState	   *estate   = node->ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
 	int			num_rels = list_length(node->custom_ps);
-	int			num_devs = 0;
 	size_t		dsm_length = offsetof(pgstromSharedState, inners[num_rels]);
 	char	   *dsm_addr = coordinate;
 	pgstromSharedState *ps_state;
 	TableScanDesc scan = NULL;
 
 	Assert(!AmBackgroundWorkerProcess());
-	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
-		num_devs = numGpuDevAttrs;
-	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-		num_devs = DpuStorageEntryCount();
 
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexInitDSM(pts, dsm_addr);
@@ -2142,12 +2092,6 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		ps_state->ss_handle = dsm_segment_handle(pcxt->seg);
 		ps_state->ss_length = dsm_length;
 		dsm_addr += MAXALIGN(dsm_length);
-
-		/* control variables for parallel tasks */
-		pts->rjoin_devs_count  = (pg_atomic_uint32 *)dsm_addr;
-		memset(dsm_addr, 0, sizeof(pg_atomic_uint32) * num_devs);
-		dsm_addr += MAXALIGN(sizeof(pg_atomic_uint32) * num_devs);
-		pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
 
 		/* parallel scan descriptor */
 		if (pts->gcache_desc)
@@ -2168,12 +2112,6 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		ps_state = MemoryContextAllocZero(estate->es_query_cxt, dsm_length);
 		ps_state->ss_handle = DSM_HANDLE_INVALID;
 		ps_state->ss_length = dsm_length;
-
-		/* control variables for scan/rjoin */
-		pts->rjoin_devs_count = (pg_atomic_uint32 *)
-			MemoryContextAllocZero(estate->es_query_cxt,
-								   sizeof(pg_atomic_uint32 *) * num_devs);
-		pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
 
 		/* scan descriptor */
 		if (pts->gcache_desc)
@@ -2207,22 +2145,12 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 	pgstromSharedState *ps_state;
 	char	   *dsm_addr = coordinate;
 	int			num_rels = list_length(pts->css.custom_ps);
-	int			num_devs = 0;
-
-	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
-		num_devs = numGpuDevAttrs;
-	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-		num_devs = DpuStorageEntryCount();
 
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
 	pts->ps_state = ps_state = (pgstromSharedState *)dsm_addr;
 	Assert(ps_state->num_rels == num_rels);
 	dsm_addr += MAXALIGN(offsetof(pgstromSharedState, inners[num_rels]));
-
-	pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
-	pts->rjoin_devs_count = (pg_atomic_uint32 *)dsm_addr;
-	dsm_addr += MAXALIGN(sizeof(pg_atomic_uint32) * num_devs);
 
 	if (pts->gcache_desc)
 		pgstromGpuCacheAttachDSM(pts, pts->ps_state);
@@ -2279,53 +2207,59 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 	{
 		appendStringInfo(&buf, "disabled");
 	}
-	else if (!es->analyze || !ps_state)
-	{
-		bool	is_first = true;
-		int		k;
-
-		appendStringInfo(&buf, "enabled (");
-		for (k = bms_next_member(pts->optimal_gpus, -1);
-			 k >= 0;
-			 k = bms_next_member(pts->optimal_gpus, k))
-		{
-			if (!is_first)
-				appendStringInfo(&buf, ", ");
-			appendStringInfo(&buf, "GPU-%d", k);
-			is_first = false;
-		}
-		appendStringInfo(&buf, ")");
-	}
 	else
 	{
-		XpuConnection  *conn = pts->conn;
-		uint64			count;
-		int				pos;
+		int		head = -1;
+		int		base;
+		uint64	count;
 
-		appendStringInfo(&buf, "enabled (");
-		//FIXME
-		if (conn)
-			appendStringInfo(&buf, "%s; ", conn->devname);
-		pos = buf.len;
-		count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
-		if (count)
-			appendStringInfo(&buf, "%sbuffer=%lu",
-							 (buf.len > pos ? ", " : ""),
-							 count / PAGES_PER_BLOCK);
-		count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
-		if (count)
-			appendStringInfo(&buf, "%svfs=%lu",
-							 (buf.len > pos ? ", " : ""),
-							 count / PAGES_PER_BLOCK);
-		count = pg_atomic_read_u64(&ps_state->npages_direct_read);
-		if (count)
-			appendStringInfo(&buf, "%sdirect=%lu",
-							 (buf.len > pos ? ", " : ""),
-							 count / PAGES_PER_BLOCK);
-		count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
-		appendStringInfo(&buf, "%sntuples=%lu",
-						 (buf.len > pos ? ", " : ""),
-						 count);
+		appendStringInfo(&buf, "enabled (N=%d,", numGpuDevAttrs);
+		base = buf.len;
+		for (int k=0; k <= numGpuDevAttrs; k++)
+		{
+			if (k < numGpuDevAttrs &&
+				(pts->optimal_gpus & (1UL<<k)) != 0)
+			{
+				if (head < 0)
+				{
+					appendStringInfo(&buf, "%s%d",
+									 buf.len == base ? "GPU" : ",", k);
+					head = k;
+				}
+			}
+			else if (head >= 0)
+			{
+				if (head + 2 == k)
+					appendStringInfo(&buf, ",%d", k-1);
+				else if (head + 2 > k)
+					appendStringInfo(&buf, "-%d", k-1);
+				head = -1;
+			}
+		}
+		if (es->analyze && ps_state)
+		{
+			base = buf.len;
+
+			count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
+			if (count)
+				appendStringInfo(&buf, "%sbuffer=%lu",
+								 (buf.len > base ? ", " : "; "),
+								 count / PAGES_PER_BLOCK);
+			count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
+			if (count)
+				appendStringInfo(&buf, "%svfs=%lu",
+								 (buf.len > base ? ", " : "; "),
+								 count / PAGES_PER_BLOCK);
+			count = pg_atomic_read_u64(&ps_state->npages_direct_read);
+			if (count)
+				appendStringInfo(&buf, "%sdirect=%lu",
+								 (buf.len > base ? ", " : "; "),
+								 count / PAGES_PER_BLOCK);
+			count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
+			appendStringInfo(&buf, "%sntuples=%lu",
+							 (buf.len > base ? ", " : "; "),
+							 count);
+		}
 		appendStringInfo(&buf, ")");
 	}
 	if (!pgstrom_regression_test_mode)
@@ -2688,9 +2622,7 @@ pgstromExplainTaskState(CustomScanState *node,
 void
 __xpuClientOpenSession(pgstromTaskState *pts,
 					   const XpuCommand *session,
-					   pgsocket sockfd,
-					   const char *devname,
-					   int dev_index)
+					   pgsocket sockfd)
 {
 	XpuConnection  *conn;
 	XpuCommand	   *resp;
@@ -2703,8 +2635,6 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 		close(sockfd);
 		elog(ERROR, "out of memory");
 	}
-	strncpy(conn->devname, devname, 32);
-	conn->dev_index = dev_index;
 	conn->sockfd = sockfd;
 	conn->resowner = CurrentResourceOwner;
 	conn->worker = pthread_self();	/* to be over-written by worker's-id */
@@ -2731,10 +2661,9 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 	xpuClientSendCommand(conn, session);
 	resp = __waitAndFetchNextXpuCommand(pts, false);
 	if (!resp)
-		elog(ERROR, "Bug? %s:OpenSession response is missing", conn->devname);
+		elog(ERROR, "Bug? OpenSession response is missing");
 	if (resp->tag != XpuCommandTag__Success)
-		elog(ERROR, "%s:OpenSession failed - %s (%s:%d %s)",
-			 conn->devname,
+		elog(ERROR, "OpenSession failed - %s (%s:%d %s)",
 			 resp->u.error.message,
 			 resp->u.error.filename,
 			 resp->u.error.lineno,

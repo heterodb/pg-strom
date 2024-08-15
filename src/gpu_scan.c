@@ -194,7 +194,7 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 			/* assume GPU-Cache is available */
 			avg_seq_page_cost = 0;
 		}
-		else if (GetOptimalGpuForBaseRel(root, baserel) != NULL)
+		else if (GetOptimalGpuForBaseRel(root, baserel) != 0UL)
 		{
 			/* assume GPU-Direct SQL is available */
 			avg_seq_page_cost = spc_seq_page_cost * (1.0 - baserel->allvisfrac) +

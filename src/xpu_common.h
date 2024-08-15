@@ -2800,9 +2800,7 @@ SESSION_ENCODE(kern_session_info *session)
  */
 #define TEMPLATE_XPU_CONNECT_RECEIVE_COMMANDS(__XPU_PREFIX)				\
 	static int															\
-	__XPU_PREFIX##ReceiveCommands(int sockfd,							\
-								  void *priv,							\
-								  const char *error_label)				\
+	__XPU_PREFIX##ReceiveCommands(int sockfd, void *priv)				\
 	{																	\
 		char		buffer_local[10000];								\
 		char	   *buffer;												\
@@ -2846,7 +2844,7 @@ SESSION_ENCODE(kern_session_info *session)
 					continue;											\
 				}														\
 				fprintf(stderr, "[%s] failed on recv(2): %m\n",			\
-						error_label);									\
+						__FUNCTION__);									\
 				return -1;												\
 			}															\
 			else if (nbytes == 0)										\
@@ -2855,7 +2853,7 @@ SESSION_ENCODE(kern_session_info *session)
 				if (curr || offset > 0)									\
 				{														\
 					fprintf(stderr, "[%s] connection closed in the halfway through XpuCommands read\n", \
-							error_label);								\
+							__FUNCTION__);								\
 					return -1;											\
 				}														\
 				return count;											\
@@ -2885,7 +2883,7 @@ SESSION_ENCODE(kern_session_info *session)
 					if (!xcmd)											\
 					{													\
 						fprintf(stderr, "[%s] out of memory (sz=%lu): %m\n", \
-								error_label, temp->length);				\
+								__FUNCTION__, temp->length);			\
 						return -1;										\
 					}													\
 					memcpy(xcmd, temp, temp->length);					\
@@ -2905,7 +2903,7 @@ SESSION_ENCODE(kern_session_info *session)
 					if (!curr)											\
 					{													\
 						fprintf(stderr, "[%s] out of memory (sz=%lu): %m\n", \
-								error_label, temp->length);				\
+								__FUNCTION__, temp->length);			\
 						return -1;										\
 					}													\
 					memcpy(curr, temp, offset);							\
@@ -2924,7 +2922,7 @@ SESSION_ENCODE(kern_session_info *session)
 			}															\
 		}																\
 		fprintf(stderr, "[%s] Bug? unexpected loop break\n",			\
-				error_label);											\
+				__FUNCTION__);											\
 		return -1;														\
 	}
 
@@ -3049,7 +3047,7 @@ struct kern_multirels
 		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
 		bool		pinned_buffer;	/* true, if it uses pinned-buffer */
 		uint64_t	buffer_id;		/* key to lookup pinned inner-buffer */
-		uint32_t	dev_index;		/* key to lookup pinned inner-buffer */
+		int64_t		optimal_gpus;	/* key to lookup pinned inner-buffer */
 	} chunks[1];
 };
 typedef struct kern_multirels	kern_multirels;

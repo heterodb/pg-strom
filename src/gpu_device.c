@@ -454,13 +454,13 @@ typedef struct
 	dev_t		file_dev;	/* stat_buf.st_dev */
 	ino_t		file_ino;	/* stat_buf.st_ino */
 	struct timespec file_ctime; /* stat_buf.st_ctim */
-	int64_t		optimal_gpus;
+	gpumask_t	optimal_gpus;
 } filesystem_optimal_gpu_entry;
 
 typedef struct
 {
 	Oid			tablespace_oid;
-	int64_t		optimal_gpus;
+	gpumask_t	optimal_gpus;
 } tablespace_optimal_gpu_entry;
 
 static void
@@ -502,8 +502,8 @@ pgstrom_gpu_selection_policy_assign_callback(const char *newval, void *extra)
 /*
  * GetOptimalGpuForFile
  */
-static int64_t
-__GetOptimalGpuForFile(const char *pathname)
+gpumask_t
+GetOptimalGpuForFile(const char *pathname)
 {
 	filesystem_optimal_gpu_entry *hentry;
 	struct stat stat_buf;
@@ -547,35 +547,17 @@ __GetOptimalGpuForFile(const char *pathname)
 	return hentry->optimal_gpus;
 }
 
-const Bitmapset *
-GetOptimalGpuForFile(const char *pathname)
-{
-	int64_t		optimal_gpus = __GetOptimalGpuForFile(pathname);
-	Bitmapset  *bms = NULL;
-
-	for (int k=0; optimal_gpus != 0; k++)
-	{
-		if ((optimal_gpus & (1UL<<k)) != 0)
-		{
-			bms = bms_add_member(bms, k);
-			optimal_gpus &= ~(1UL<<k);
-		}
-	}
-	return bms;
-}
-
 /*
  * GetOptimalGpuForTablespace
  */
-static const Bitmapset *
+static gpumask_t
 GetOptimalGpuForTablespace(Oid tablespace_oid)
 {
     tablespace_optimal_gpu_entry *hentry;
-	Bitmapset  *bms = NULL;
-	bool        found;
+	bool	found;
 
     if (!pgstrom_gpudirect_enabled)
-		return NULL;
+		return 0UL;
 
 	if (!OidIsValid(tablespace_oid))
 		tablespace_oid = MyDatabaseTableSpace;
@@ -606,7 +588,7 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 		PG_TRY();
 		{
 			path = GetDatabasePath(MyDatabaseId, tablespace_oid);
-			hentry->optimal_gpus = __GetOptimalGpuForFile(path);
+			hentry->optimal_gpus = GetOptimalGpuForFile(path);
 		}
 		PG_CATCH();
 		{
@@ -618,26 +600,13 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 		}
 		PG_END_TRY();
 	}
-	if (hentry->optimal_gpus != 0)
-	{
-		int64_t		optimal_gpus = hentry->optimal_gpus;
-
-		for (int k=0; optimal_gpus != 0; k++)
-		{
-			if ((optimal_gpus & (1UL<<k)) != 0)
-			{
-				bms = bms_add_member(bms, k);
-				optimal_gpus &= ~(1UL<<k);
-			}
-		}
-	}
-	return bms;
+	return hentry->optimal_gpus;
 }
 
 /*
  * GetOptimalGpuForRelation
  */
-const Bitmapset *
+gpumask_t
 GetOptimalGpuForRelation(Relation relation)
 {
 	Oid		tablespace_oid;
@@ -653,26 +622,26 @@ GetOptimalGpuForRelation(Relation relation)
  * GetOptimalGpuForBaseRel - checks wthere the relation can use GPU-Direct SQL.
  * If possible, it returns bitmap of the optimal GPUs.
  */
-const Bitmapset *
+gpumask_t
 GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 {
-	const Bitmapset *optimal_gpus;
+	gpumask_t	optimal_gpus;
 	double		total_sz;
 
 	if (!pgstrom_gpudirect_enabled)
-		return NULL;
+		return 0UL;
 	if (baseRelIsArrowFdw(baserel))
 	{
 		if (pgstrom_gpudirect_enabled)
 			return GetOptimalGpusForArrowFdw(root, baserel);
-		return NULL;
+		return 0UL;
 	}
 	total_sz = (size_t)baserel->pages * (size_t)BLCKSZ;
 	if (total_sz < pgstrom_gpudirect_threshold)
-		return NULL;	/* table is too small */
+		return 0UL;		/* table is too small */
 
 	optimal_gpus = GetOptimalGpuForTablespace(baserel->reltablespace);
-	if (!bms_is_empty(optimal_gpus))
+	if (optimal_gpus != 0)
 	{
 		RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
 		char	relpersistence = get_rel_persistence(rte->relid);
@@ -680,7 +649,7 @@ GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 		/* temporary table is not supported by GPU-Direct SQL */
 		if (relpersistence != RELPERSISTENCE_PERMANENT &&
 			relpersistence != RELPERSISTENCE_UNLOGGED)
-			optimal_gpus = NULL;
+			optimal_gpus = 0;
 	}
 	return optimal_gpus;
 }
@@ -688,16 +657,15 @@ GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 /*
  * GetSystemAvailableGpus - returns Bitmapset of all available GPUs
  */
-const Bitmapset *
+gpumask_t
 GetSystemAvailableGpus(void)
 {
-	Bitmapset  *gpus = NULL;
+	gpumask_t	available_gpus = 0;
 
 	for (int dindex=0; dindex < numGpuDevAttrs; dindex++)
-	{
-		gpus = bms_add_member(gpus, dindex);
-	}
-	return gpus;
+		available_gpus |= (1UL << dindex);
+
+	return available_gpus;
 }
 
 /*
@@ -1028,75 +996,12 @@ pgstrom_init_gpu_device(void)
 /*
  * gpuClientOpenSession
  */
-static int
-__gpuClientChooseDevice(pgstromTaskState *pts)
-{
-	const Bitmapset	*optimal_gpus = pts->optimal_gpus;
-	static bool		rr_initialized = false;
-	static uint32	rr_counter = 0;
-	uint32_t		cuda_dindex;
-
-	if (!rr_initialized)
-	{
-		rr_counter = (uint32)getpid();
-		rr_initialized = true;
-	}
-
-	if (!bms_is_empty(optimal_gpus))
-	{
-		int		num = bms_num_members(optimal_gpus);
-		int	   *__dindex = alloca(sizeof(int) * num);
-		int		i, k;
-
-		for (i=0, k=bms_next_member(optimal_gpus, -1);
-			 k >= 0;
-			 i++, k=bms_next_member(optimal_gpus, k))
-		{
-			__dindex[i] = k;
-		}
-		Assert(i == num);
-		cuda_dindex = __dindex[rr_counter++ % num];
-	}
-	else
-	{
-		/* a simple round-robin if no GPUs preference */
-		cuda_dindex = (rr_counter++ % numGpuDevAttrs);
-	}
-
-	/*
-	 * In case when pinned device buffer is used, parallel workers must
-	 * connect to the identical device because its final buffer shall be
-	 * massively updated and passed to the next task (inner buffer of JOIN).
-	 */
-	if ((pts->xpu_task_flags & (DEVTASK__PINNED_HASH_RESULTS |
-								DEVTASK__PINNED_ROW_RESULTS)) != 0 &&
-		(pts->xpu_task_flags & DEVTASK__PREAGG) == 0)
-	{
-		pgstromSharedState *ps_state = pts->ps_state;
-		uint32_t	expected = UINT_MAX;
-
-		if (!pg_atomic_compare_exchange_u32(&ps_state->device_selection_hint,
-											&expected,
-											cuda_dindex))
-		{
-			cuda_dindex = expected;
-			if (cuda_dindex >= numGpuDevAttrs ||
-				(!bms_is_empty(optimal_gpus) &&
-				 !bms_is_member(cuda_dindex, optimal_gpus)))
-				elog(ERROR, "Bug? 'device_selection_hint' suggest GPU%u, but out of range", cuda_dindex);
-		}
-	}
-	return cuda_dindex;
-}
-
 void
 gpuClientOpenSession(pgstromTaskState *pts,
 					 const XpuCommand *session)
 {
 	struct sockaddr_un addr;
 	pgsocket	sockfd;
-	int			cuda_dindex = __gpuClientChooseDevice(pts);
-	char		namebuf[32];
 
 	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (sockfd < 0)
@@ -1105,16 +1010,14 @@ gpuClientOpenSession(pgstromTaskState *pts,
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
 	snprintf(addr.sun_path, sizeof(addr.sun_path),
-			 ".pg_strom.%u.gpu%u.sock",
-			 PostmasterPid, cuda_dindex);
+			 ".pg_strom.%u.gpuserv.sock",
+			 PostmasterPid);
 	if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
 	{
 		close(sockfd);
 		elog(ERROR, "failed on connect('%s'): %m", addr.sun_path);
 	}
-	snprintf(namebuf, sizeof(namebuf), "GPU-%d", cuda_dindex);
-
-	__xpuClientOpenSession(pts, session, sockfd, namebuf, cuda_dindex);
+	__xpuClientOpenSession(pts, session, sockfd);
 }
 
 /*

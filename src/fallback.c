@@ -622,19 +622,12 @@ __execFallbackCpuJoinRightOuterOneDepth(pgstromTaskState *pts, int depth)
 void
 ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts)
 {
-	uint32_t	count;
-
-	count = pg_atomic_add_fetch_u32(pts->rjoin_exit_count, 1);
-	//TODO: use sibling count if partitioned join
-	if (count == 1)
+	for (int depth=1; depth <= pts->num_rels; depth++)
 	{
-		for (int depth=1; depth <= pts->num_rels; depth++)
-		{
-			JoinType	join_type = pts->inners[depth-1].join_type;
+		JoinType	join_type = pts->inners[depth-1].join_type;
 
-			if (join_type == JOIN_RIGHT || join_type == JOIN_FULL)
-				__execFallbackCpuJoinRightOuterOneDepth(pts, depth);
-		}
+		if (join_type == JOIN_RIGHT || join_type == JOIN_FULL)
+			__execFallbackCpuJoinRightOuterOneDepth(pts, depth);
 	}
 }
 

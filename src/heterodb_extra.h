@@ -19,6 +19,8 @@
 #define HETERODB_EXTRA_FILENAME		"heterodb_extra.so"
 #define HETERODB_EXTRA_PATHNAME		"/usr/lib64/" HETERODB_EXTRA_FILENAME
 #define HETERODB_EXTRA_MAX_GPUS		63
+#define INVALID_GPUMASK				(~0UL)
+typedef int64_t						gpumask_t;
 
 #define HETERODB_LICENSE_PATHNAME	"/etc/heterodb.license"
 /* fixed length of the license key (2048bits) */
@@ -73,7 +75,7 @@ extern const char  *heterodbLicenseDecrypt(const char *path);
 extern int			heterodbValidateDevice(const char *gpu_device_name,
 										   const char *gpu_device_uuid);
 extern const char  *heterodbInitOptimalGpus(const char *manual_config);
-extern int64_t		heterodbGetOptimalGpus(const char *path,
+extern gpumask_t	heterodbGetOptimalGpus(const char *path,
 										   const char *policy);
 extern bool			gpuDirectInitDriver(void);
 extern bool			gpuDirectOpenDriver(void);
