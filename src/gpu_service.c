@@ -131,6 +131,12 @@ gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
 						__basename(__FILE__),					\
 						__LINE__, __FUNCTION__,					\
 						##__VA_ARGS__)
+#define __gsLog2(fmt,dindex, ...)								\
+	gpuservLoggerReport("GPU%d|LOG|%s|%d|%s|" fmt "\n",			\
+						(dindex),								\
+						__basename(__FILE__),					\
+						__LINE__, __FUNCTION__,					\
+						##__VA_ARGS__)
 #define __gsDebug(fmt, ...)										\
 	do {														\
 		if (gpuserv_shared_state &&								\
@@ -2239,8 +2245,9 @@ TEMPLATE_XPU_CONNECT_RECEIVE_COMMANDS(__gpuService)
  * expandCudaStackLimit
  */
 static bool
-expandCudaStackLimit(gpuContext *gcontext, kern_session_info *session,
-					 char *emsg, size_t emsg_sz)
+expandCudaStackLimit(gpuClient *gclient,
+					 gpuContext *gcontext,
+					 kern_session_info *session)
 {
 	uint32_t	cuda_stack_size = session->cuda_stack_size;
 	uint32_t	cuda_stack_limit;
@@ -2251,25 +2258,38 @@ expandCudaStackLimit(gpuContext *gcontext, kern_session_info *session,
 		cuda_stack_limit = TYPEALIGN(1024, cuda_stack_size);
 		if (cuda_stack_limit > (__pgstrom_cuda_stack_limit_kb << 10))
 		{
-			snprintf(emsg, emsg_sz, "CUDA stack size %u is larger than the configured limitation %ukB by pg_strom.cuda_stack_limit",
-					 cuda_stack_size, __pgstrom_cuda_stack_limit_kb);
+			gpuClientELog(gclient, "CUDA stack size %u is larger than the configured limitation %ukB by pg_strom.cuda_stack_limit",
+						  cuda_stack_size, __pgstrom_cuda_stack_limit_kb);
 			return false;
 		}
 
 		pthreadMutexLock(&gcontext->cuda_setlimit_lock);
 		if (cuda_stack_size > gcontext->cuda_stack_limit)
 		{
+			rc = cuCtxPushCurrent(gcontext->cuda_context);
+			if (rc != CUDA_SUCCESS)
+			{
+				pthreadMutexUnlock(&gcontext->cuda_setlimit_lock);
+				gpuClientELog(gclient, "failed on cuCtxPushCurrent: %s",
+							  cuStrError(rc));
+				return false;
+			}
 			rc = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, cuda_stack_limit);
 			if (rc != CUDA_SUCCESS)
 			{
-				snprintf(emsg, emsg_sz, "failed on cuCtxSetLimit: %s",
-						 cuStrError(rc));
 				pthreadMutexUnlock(&gcontext->cuda_setlimit_lock);
+				gpuClientELog(gclient, "failed on cuCtxSetLimit: %s",
+							  cuStrError(rc));
 				return false;
 			}
-			__gsLog("CUDA stack size expanded %u -> %u bytes",
-					gcontext->cuda_stack_limit,
-					cuda_stack_limit);
+			rc = cuCtxPopCurrent(NULL);
+			if (rc != CUDA_SUCCESS)
+				__FATAL("failed on cuCtxPopCurrent: %s", cuStrError(rc));
+
+			__gsLog2("CUDA stack size expanded %u -> %u bytes",
+					 gcontext->cuda_dindex,
+					 gcontext->cuda_stack_limit,
+					 cuda_stack_limit);
 			gcontext->cuda_stack_limit = cuda_stack_limit;
 		}
 		pthreadMutexUnlock(&gcontext->cuda_setlimit_lock);
@@ -2281,10 +2301,10 @@ expandCudaStackLimit(gpuContext *gcontext, kern_session_info *session,
  * gpuservHandleOpenSession
  */
 static bool
-__lookupDeviceTypeOper(gpuContext *gcontext,
+__lookupDeviceTypeOper(gpuClient *gclient,
+					   gpuContext *gcontext,
 					   const xpu_datum_operators **p_expr_ops,
-					   TypeOpCode type_code,
-					   char *emsg, size_t emsg_sz)
+					   TypeOpCode type_code)
 {
 	xpu_type_catalog_entry *xpu_type;
 
@@ -2293,9 +2313,8 @@ __lookupDeviceTypeOper(gpuContext *gcontext,
 						   HASH_FIND, NULL);
 	if (!xpu_type)
 	{
-		snprintf(emsg, emsg_sz,
-				 "device type pointer for opcode:%u not found.",
-				 (int)type_code);
+		gpuClientELog(gclient, "device type pointer for opcode:%u not found.",
+					  (int)type_code);
 		return false;
 	}
 	*p_expr_ops = xpu_type->type_ops;
@@ -2303,10 +2322,10 @@ __lookupDeviceTypeOper(gpuContext *gcontext,
 }
 
 static bool
-__lookupDeviceFuncDptr(gpuContext *gcontext,
+__lookupDeviceFuncDptr(gpuClient *gclient,
+					   gpuContext *gcontext,
 					   xpu_function_t *p_func_dptr,
-					   FuncOpCode func_code,
-					   char *emsg, size_t emsg_sz)
+					   FuncOpCode func_code)
 {
 	xpu_function_catalog_entry *xpu_func;
 
@@ -2315,9 +2334,8 @@ __lookupDeviceFuncDptr(gpuContext *gcontext,
 						   HASH_FIND, NULL);
 	if (!xpu_func)
 	{
-		snprintf(emsg, emsg_sz,
-				 "device function pointer for opcode:%u not found.",
-				 (int)func_code);
+		gpuClientELog(gclient, "device function pointer for opcode:%u not found.",
+					  (int)func_code);
 		return false;
 	}
 	*p_func_dptr = xpu_func->func_dptr;
@@ -2325,23 +2343,23 @@ __lookupDeviceFuncDptr(gpuContext *gcontext,
 }
 
 static bool
-__resolveDevicePointersWalker(gpuContext *gcontext,
-							  kern_expression *kexp,
-							  char *emsg, size_t emsg_sz)
+__resolveDevicePointersWalker(gpuClient *gclient,
+							  gpuContext *gcontext,
+							  kern_expression *kexp)
 {
 	kern_expression *karg;
 	int		i;
 
-	if (!__lookupDeviceFuncDptr(gcontext,
+	if (!__lookupDeviceFuncDptr(gclient,
+								gcontext,
 								&kexp->fn_dptr,
-								kexp->opcode,
-								emsg, emsg_sz))
+								kexp->opcode))
 		return false;
 
-	if (!__lookupDeviceTypeOper(gcontext,
+	if (!__lookupDeviceTypeOper(gclient,
+								gcontext,
 								&kexp->expr_ops,
-								kexp->exptype,
-								emsg, emsg_sz))
+								kexp->exptype))
 		return false;
 
 	/* some special cases */
@@ -2354,8 +2372,8 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 					((char *)kexp + kexp->u.casewhen.case_comp);
 				if (!__KEXP_IS_VALID(kexp,karg))
 					goto corruption;
-				if (!__resolveDevicePointersWalker(gcontext, karg,
-												   emsg, emsg_sz))
+				if (!__resolveDevicePointersWalker(gclient,
+												   gcontext, karg))
 					return false;
 			}
 			if (kexp->u.casewhen.case_else)
@@ -2364,8 +2382,8 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 					((char *)kexp + kexp->u.casewhen.case_else);
 				if (!__KEXP_IS_VALID(kexp,karg))
 					goto corruption;
-				if (!__resolveDevicePointersWalker(gcontext, karg,
-												   emsg, emsg_sz))
+				if (!__resolveDevicePointersWalker(gclient,
+												   gcontext, karg))
 					return false;
 			}
 			break;
@@ -2376,8 +2394,8 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 					((char *)kexp + kexp->u.proj.hash);
 				if (!__KEXP_IS_VALID(kexp,karg))
 					goto corruption;
-				if (!__resolveDevicePointersWalker(gcontext, karg,
-												   emsg, emsg_sz))
+				if (!__resolveDevicePointersWalker(gclient,
+												   gcontext, karg))
 					return false;
 			}
 			break;
@@ -2392,20 +2410,21 @@ __resolveDevicePointersWalker(gpuContext *gcontext,
 	{
 		if (!__KEXP_IS_VALID(kexp,karg))
 			goto corruption;
-		if (!__resolveDevicePointersWalker(gcontext, karg, emsg, emsg_sz))
+		if (!__resolveDevicePointersWalker(gclient,
+										   gcontext, karg))
 			return false;
 	}
 	return true;
 
 corruption:
-	snprintf(emsg, emsg_sz, "XPU code corruption at kexp (%d)", kexp->opcode);
+	gpuClientELog(gclient, "XPU code corruption at kexp (%d)", kexp->opcode);
 	return false;
 }
 
 static bool
-__resolveDevicePointers(gpuContext *gcontext,
-						kern_session_info *session,
-						char *emsg, size_t emsg_sz)
+__resolveDevicePointers(gpuClient *gclient,
+						gpuContext *gcontext,
+						kern_session_info *session)
 {
 	kern_varslot_desc *kvslot_desc = SESSION_KVARS_SLOT_DESC(session);
 	xpu_encode_info *encode = SESSION_ENCODE(session);
@@ -2426,23 +2445,23 @@ __resolveDevicePointers(gpuContext *gcontext,
 
 	for (int i=0; i < nitems; i++)
 	{
-		if (__kexp[i] && !__resolveDevicePointersWalker(gcontext,
-														__kexp[i],
-														emsg, emsg_sz))
+		if (__kexp[i] && !__resolveDevicePointersWalker(gclient,
+														gcontext,
+														__kexp[i]))
 			return false;
 	}
 
 	/* fixup kern_varslot_desc also */
 	for (int i=0; i < session->kcxt_kvars_nslots; i++)
 	{
-		if (!__lookupDeviceTypeOper(gcontext,
+		if (!__lookupDeviceTypeOper(gclient,
+									gcontext,
 									&kvslot_desc[i].vs_ops,
-									kvslot_desc[i].vs_type_code,
-									emsg, emsg_sz))
+									kvslot_desc[i].vs_type_code))
 			return false;
 	}
 
-	/**/
+	/* encoding catalog */
 	if (encode)
 	{
 		xpu_encode_info *catalog = gcontext->cuda_encode_catalog;
@@ -2451,8 +2470,8 @@ __resolveDevicePointers(gpuContext *gcontext,
 		{
 			if (!catalog[i].enc_mblen || catalog[i].enc_maxlen < 1)
 			{
-				snprintf(emsg, emsg_sz,
-						 "encode [%s] was not found.", encode->encname);
+				gpuClientELog(gclient, "encode [%s] was not found.",
+							  encode->encname);
 				return false;
 			}
 			if (strcmp(encode->encname, catalog[i].encname) == 0)
@@ -2474,7 +2493,6 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	dlist_iter		iter;
 	kern_data_store *kds_final_head = NULL;
 	XpuCommand		resp;
-	char			emsg[512];
 	struct iovec	iov;
 
 	if (gclient->optimal_gpus != 0)
@@ -2508,19 +2526,15 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 		__session = (kern_session_info *)__chunk->m_devptr;
 		memcpy(__session, session, session_sz);
 		/* expand CUDA thread stack limit on demand */
-		if (!expandCudaStackLimit(__gcontext, __session,
-								  emsg, sizeof(emsg)))
-		{
-			gpuClientELog(gclient, "%s", emsg);
+		if (!expandCudaStackLimit(gclient,
+								  __gcontext,
+								  __session))
 			goto error;
-		}
 		/* resolve device pointers */
-		if (!__resolveDevicePointers(__gcontext, __session,
-									 emsg, sizeof(emsg)))
-		{
-			gpuClientELog(gclient, "%s", emsg);
+		if (!__resolveDevicePointers(gclient,
+									 __gcontext,
+									 __session))
 			goto error;
-		}
 	}
 	/* setup per-cliend GPU buffer */
 	if (session->groupby_kds_final != 0)
@@ -3034,7 +3048,7 @@ resume_kernel:
 								 kgtask,
 								 npages_direct_read,
 								 npages_vfs_read,
-								 GQBUF_KDS_FALLBACK(gq_buf) ? NULL : kds_dst);
+								 GQBUF_KDS_FINAL(gq_buf) ? NULL : kds_dst);
 	}
 	else if (kgtask->kerror.errcode == ERRCODE_SUSPEND_NO_SPACE ||
 			 (kgtask->kerror.errcode == ERRCODE_SUSPEND_FALLBACK &&
@@ -3148,7 +3162,7 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	iov->iov_base = &resp;
 	iov->iov_len  = resp_sz;
 
-	if (kfin->final_this_device)
+//	if (kfin->final_this_device)
 	{
 		/*
 		 * Is the outer-join-map written back to the host buffer?
