@@ -3817,33 +3817,14 @@ __gpucacheExecDropUnload(GpuCacheControlCommand *cmd)
 void
 gpucacheManagerEventLoop(int cuda_dindex,
 						 CUcontext cuda_context,
-						 CUmodule cuda_module)
+						 CUfunction cufn_gpucache_apply_redo,
+						 CUfunction cufn_gpucache_compaction)
 {
 	pthread_mutex_t *cmd_mutex = &gcache_shared_head->gcache_cmd_mutex;
 	pthread_cond_t *cmd_cond = &gcache_shared_head->gpus[cuda_dindex].cond;
 	dlist_head	   *cmd_queue = &gcache_shared_head->gpus[cuda_dindex].queue;
-	CUfunction		f_gcache_apply_redo;
-	CUfunction		f_gcache_compaction;
-	CUresult		rc;
 	GpuCacheControlCommand *cmd;
 
-	rc = cuModuleGetFunction(&f_gcache_apply_redo,
-							 cuda_module,
-							 "kern_gpucache_apply_redo");
-	if (rc != CUDA_SUCCESS)
-	{
-		fprintf(stderr, "gpucache: unable to lookup gpucache_apply_redo\n");
-		return;
-	}
-	rc = cuModuleGetFunction(&f_gcache_compaction,
-							 cuda_module,
-							 "kern_gpucache_compaction");
-	if (rc != CUDA_SUCCESS)
-	{
-		fprintf(stderr, "gpucache: unable to lookup gpucache_compaction\n");
-		return;
-	}
-	
 	pthreadMutexLock(cmd_mutex);
 	while (!gpuServiceGoingTerminate())
 	{
@@ -3868,11 +3849,12 @@ gpucacheManagerEventLoop(int cuda_dindex,
 		{
 			case GCACHE_CONTROL_CMD__APPLY_REDO:
 				status = __gpucacheExecApplyRedo(cmd,
-												 f_gcache_apply_redo,
-												 f_gcache_compaction);
+												 cufn_gpucache_apply_redo,
+												 cufn_gpucache_compaction);
 				break;
 			case GCACHE_CONTROL_CMD__COMPACTION:
-				status = __gpucacheExecCompaction(cmd, f_gcache_compaction);
+				status = __gpucacheExecCompaction(cmd,
+												  cufn_gpucache_compaction);
 				break;
 			case GCACHE_CONTROL_CMD__DROP_UNLOAD:
 				status = __gpucacheExecDropUnload(cmd);

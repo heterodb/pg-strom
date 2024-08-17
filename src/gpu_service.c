@@ -36,13 +36,17 @@ struct gpuContext
 	CUmodule		cuda_module;
 	HTAB		   *cuda_type_htab;
 	HTAB		   *cuda_func_htab;
+	CUfunction		cufn_kern_gpumain;
+	CUfunction		cufn_prep_gistindex;
+	CUfunction		cufn_gpucache_apply_redo;
+	CUfunction		cufn_gpucache_compaction;
+	int				gpumain_shmem_sz_limit;
 	xpu_encode_info *cuda_encode_catalog;
 	gpuMemoryPool	pool_raw;
 	gpuMemoryPool	pool_managed;
 	bool			cuda_profiler_started;
 	volatile uint32_t cuda_stack_limit;	/* current configuration */
 	pthread_mutex_t	cuda_setlimit_lock;
-	int				gpumain_shmem_sz_dynamic;
 	/* GPU workers */
 	pthread_mutex_t	worker_lock;
 	dlist_head		worker_list;
@@ -97,13 +101,13 @@ typedef struct
 /*
  * variables
  */
-static __thread int			MY_DINDEX_PER_THREAD = -1;
-static __thread CUdevice	MY_DEVICE_PER_THREAD = -1;
-static __thread CUcontext	MY_CONTEXT_PER_THREAD = NULL;
-static __thread CUmodule	MY_MODULE_PER_THREAD = NULL;
-static __thread CUstream	MY_STREAM_PER_THREAD = NULL;
-static __thread CUevent		MY_EVENT_PER_THREAD = NULL;
-static __thread gpuContext *GpuWorkerCurrentContext = NULL;
+static __thread CUevent			__MY_EVENTS_PER_THREAD_ARRAY[HETERODB_EXTRA_MAX_GPUS];
+static __thread gpuContext		*GpuWorkerCurrentContext = NULL;
+#define MY_DINDEX_PER_THREAD	(GpuWorkerCurrentContext->cuda_dindex)
+#define MY_DEVICE_PER_THREAD	(GpuWorkerCurrentContext->cuda_device)
+#define MY_CONTEXT_PER_THREAD	(GpuWorkerCurrentContext->cuda_context)
+#define MY_STREAM_PER_THREAD	CU_STREAM_PER_THREAD 
+#define MY_EVENT_PER_THREAD		(__MY_EVENTS_PER_THREAD_ARRAY[MY_DINDEX_PER_THREAD])
 static volatile int			gpuserv_bgworker_got_signal = 0;
 static dlist_head			gpuserv_gpucontext_list;
 static int					gpuserv_epoll_fdesc = -1;
@@ -1415,8 +1419,8 @@ static bool
 __setupGpuQueryJoinGiSTIndexBuffer(gpuClient *gclient,
 								   gpuQueryBuffer *gq_buf)
 {
+	gpuContext *gcontext = GpuWorkerCurrentContext;
 	kern_multirels *h_kmrels = gq_buf->h_kmrels;
-	CUfunction	f_prep_gist = NULL;
 	CUresult	rc;
 	int			grid_sz;
 	int			block_sz;
@@ -1427,30 +1431,20 @@ __setupGpuQueryJoinGiSTIndexBuffer(gpuClient *gclient,
 	{
 		if (h_kmrels->chunks[depth-1].gist_offset == 0)
 			continue;
-		if (!f_prep_gist)
+
+		Assert(gcontext && gcontext->cufn_prep_gistindex);
+		rc = gpuOptimalBlockSize(&grid_sz,
+								 &block_sz,
+								 gcontext->cufn_prep_gistindex, 0);
+		if (rc != CUDA_SUCCESS)
 		{
-			rc = cuModuleGetFunction(&f_prep_gist,
-									 MY_MODULE_PER_THREAD,
-									 "gpujoin_prep_gistindex");
-			if (rc != CUDA_SUCCESS)
-			{
-				gpuClientELog(gclient, "failed on cuModuleGetFunction: %s",
-							  cuStrError(rc));
-				return false;
-			}
-			rc = gpuOptimalBlockSize(&grid_sz,
-									 &block_sz,
-									 f_prep_gist, 0);
-			if (rc != CUDA_SUCCESS)
-			{
-				gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
-							  cuStrError(rc));
-				return false;
-			}
+			gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
+						  cuStrError(rc));
+			return false;
 		}
 		kern_args[0] = &gq_buf->m_kmrels;
 		kern_args[1] = &depth;
-		rc = cuLaunchKernel(f_prep_gist,
+		rc = cuLaunchKernel(gcontext->cufn_prep_gistindex,
 							grid_sz, 1, 1,
 							block_sz, 1, 1,
 							0,
@@ -2744,7 +2738,6 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	int				num_inner_rels = 0;
 	uint32_t		npages_direct_read = 0;
 	uint32_t		npages_vfs_read = 0;
-	CUfunction		f_kern_gpuscan;
 	void		   *gc_lmap = NULL;
 	gpuMemChunk	   *s_chunk = NULL;		/* for kds_src */
 	gpuMemChunk	   *t_chunk = NULL;		/* for kern_gputask */
@@ -2856,19 +2849,10 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		num_inner_rels = h_kmrels->num_rels;
 	}
 
-	rc = cuModuleGetFunction(&f_kern_gpuscan,
-							 MY_MODULE_PER_THREAD,
-							 "kern_gpujoin_main");
-	if (rc != CUDA_SUCCESS)
-	{
-		gpuClientFatal(gclient, "failed on cuModuleGetFunction: %s",
-					   cuStrError(rc));
-		goto bailout;
-	}
 	shmem_dynamic_sz = __KERN_WARP_CONTEXT_BASESZ(session->kcxt_kvecs_ndims);
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
-							 f_kern_gpuscan,
+							 gcontext->cufn_kern_gpumain,
 							 shmem_dynamic_sz);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -2884,7 +2868,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		__expand_gpupreagg_prepfunc_buffer(session,
 										   grid_sz, block_sz,
 										   shmem_dynamic_sz,
-										   gcontext->gpumain_shmem_sz_dynamic,
+										   gcontext->gpumain_shmem_sz_limit,
 										   &groupby_prepfn_bufsz,
 										   &groupby_prepfn_nbufs);
 	/*
@@ -3008,7 +2992,7 @@ resume_kernel:
 	kern_args[5] = &kds_dst;
 	kern_args[6] = &kds_fallback;
 
-	rc = cuLaunchKernel(f_kern_gpuscan,
+	rc = cuLaunchKernel(gcontext->cufn_kern_gpumain,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
 						shmem_dynamic_sz,
@@ -3095,19 +3079,18 @@ gpuservGpuCacheManager(void *__arg)
 {
 	gpuWorker  *gworker = (gpuWorker *)__arg;
 	gpuContext *gcontext = gworker->gcontext;
+	CUevent		cuda_event;
 	CUresult	rc;
 
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuCtxSetCurrent: %s", cuStrError(rc));
+	rc = cuEventCreate(&cuda_event, CU_EVENT_BLOCKING_SYNC);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuEventCreate: %s", cuStrError(rc));
 
 	GpuWorkerCurrentContext	= gcontext;
-	MY_DINDEX_PER_THREAD	= gcontext->cuda_dindex;
-	MY_DEVICE_PER_THREAD	= gcontext->cuda_device;
-	MY_CONTEXT_PER_THREAD	= gcontext->cuda_context;
-	MY_MODULE_PER_THREAD	= gcontext->cuda_module;
-	MY_STREAM_PER_THREAD	= CU_STREAM_LEGACY;
-	MY_EVENT_PER_THREAD		= NULL;
+	memset(__MY_EVENTS_PER_THREAD_ARRAY, 0, sizeof(__MY_EVENTS_PER_THREAD_ARRAY));
 	pg_memory_barrier();
 
 	__gsDebug("GPU-%d GpuCache manager thread launched.",
@@ -3115,7 +3098,8 @@ gpuservGpuCacheManager(void *__arg)
 	
 	gpucacheManagerEventLoop(gcontext->cuda_dindex,
 							 gcontext->cuda_context,
-							 gcontext->cuda_module);
+							 gcontext->cufn_gpucache_apply_redo,
+							 gcontext->cufn_gpucache_compaction);
 
 	/* delete gpuWorker from the gpuContext */
 	pthreadMutexLock(&gcontext->worker_lock);
@@ -3249,27 +3233,30 @@ gpuservGpuWorkerMain(void *__arg)
 	gpuWorker  *gworker = (gpuWorker *)__arg;
 	gpuContext *gcontext = gworker->gcontext;
 	gpuClient  *gclient;
-	CUstream	cuda_stream;
 	CUevent		cuda_event;
 	CUresult	rc;
+	dlist_iter	iter;
 
+	/* per-thread / per-device event object */
+	memset(__MY_EVENTS_PER_THREAD_ARRAY, 0, sizeof(__MY_EVENTS_PER_THREAD_ARRAY));
+	dlist_foreach (iter, &gpuserv_gpucontext_list)
+	{
+		gpuContext *__gcontext = dlist_container(gpuContext, chain, iter.cur);
+
+		rc = cuCtxSetCurrent(__gcontext->cuda_context);
+		if (rc != CUDA_SUCCESS)
+			__FATAL("failed on cuCtxSetCurrent: %s", cuStrError(rc));
+		rc = cuEventCreate(&cuda_event, CU_EVENT_BLOCKING_SYNC);
+		if (rc != CUDA_SUCCESS)
+			__FATAL("failed on cuEventCreate: %s", cuStrError(rc));
+		__MY_EVENTS_PER_THREAD_ARRAY[__gcontext->cuda_dindex] = cuda_event;
+	}
+	/* set primary working context */
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 		__FATAL("failed on cuCtxSetCurrent: %s", cuStrError(rc));
-	rc = cuStreamCreate(&cuda_stream, CU_STREAM_NON_BLOCKING);
-	if (rc != CUDA_SUCCESS)
-		 __FATAL("failed on cuStreamCreate: %s", cuStrError(rc));
-	rc = cuEventCreate(&cuda_event, CU_EVENT_BLOCKING_SYNC);
-	if (rc != CUDA_SUCCESS)
-		__FATAL("failed on cuEventCreate: %s", cuStrError(rc));
 
 	GpuWorkerCurrentContext = gcontext;
-	MY_DINDEX_PER_THREAD	= gcontext->cuda_dindex;
-	MY_DEVICE_PER_THREAD	= gcontext->cuda_device;
-	MY_CONTEXT_PER_THREAD	= gcontext->cuda_context;
-	MY_MODULE_PER_THREAD	= gcontext->cuda_module;
-	MY_STREAM_PER_THREAD	= cuda_stream;
-	MY_EVENT_PER_THREAD		= cuda_event;
 	pg_memory_barrier();
 
 	__gsDebug("GPU-%d worker thread launched", MY_DINDEX_PER_THREAD);
@@ -3333,8 +3320,12 @@ gpuservGpuWorkerMain(void *__arg)
 	dlist_delete(&gworker->chain);
 	pthreadMutexUnlock(&gcontext->worker_lock);
 	/* release */
-	cuEventDestroy(cuda_event);
-	cuStreamDestroy(cuda_stream);
+	for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
+	{
+		cuda_event = __MY_EVENTS_PER_THREAD_ARRAY[__dindex];
+		if (cuda_event)
+			cuEventDestroy(cuda_event);
+	}
 	free(gworker);
 
 	__gsDebug("GPU-%d worker thread launched", MY_DINDEX_PER_THREAD);
@@ -3572,10 +3563,10 @@ __setupDevEncodeLinkageCatalog(CUmodule cuda_module)
 }
 
 /*
- * __setupGpuKernelsSharedMemoryConfig
+ * __setupGpuKernelFunctionsAndParams
  */
 static void
-__setupGpuKernelsSharedMemoryConfig(gpuContext *gcontext)
+__setupGpuKernelFunctionsAndParams(gpuContext *gcontext)
 {
 	GpuDevAttributes *dattrs = &gpuDevAttrs[gcontext->cuda_dindex];
 	CUmodule	cuda_module = gcontext->cuda_module;
@@ -3583,13 +3574,16 @@ __setupGpuKernelsSharedMemoryConfig(gpuContext *gcontext)
 	CUresult	rc;
 	int			shmem_sz_static;
 	int			shmem_sz_dynamic;
-	const char *fname = "kern_gpujoin_main";
+	const char *func_name;
 
 	Assert(gcontext->cuda_dindex < numGpuDevAttrs);
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, fname);
+	/* ------ kern_gpujoin_main ------ */
+	func_name = "kern_gpujoin_main";
+	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 fname, cuStrError(rc));
+			 func_name, cuStrError(rc));
+	gcontext->cufn_kern_gpumain = cuda_function;
 
 	rc = cuFuncGetAttribute(&shmem_sz_static,
 							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
@@ -3597,19 +3591,39 @@ __setupGpuKernelsSharedMemoryConfig(gpuContext *gcontext)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuFuncGetAttribute(SHARED_SIZE_BYTES): %s",
 			 cuStrError(rc));
-
 	shmem_sz_dynamic = (dattrs->MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
 						- TYPEALIGN(1024, shmem_sz_static)
 						- 8192);	/* margin for L1-cache */
-
 	rc = cuFuncSetAttribute(cuda_function,
 							CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
 							shmem_sz_dynamic);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES, %d): %s",
+        elog(ERROR, "failed on cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES, %d): %s",
 			 shmem_sz_dynamic, cuStrError(rc));
+	gcontext->gpumain_shmem_sz_limit = shmem_sz_dynamic;
 
-	gcontext->gpumain_shmem_sz_dynamic = shmem_sz_dynamic;
+	/* ------ gpujoin_prep_gistindex ------*/
+	func_name = "gpujoin_prep_gistindex";
+    rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
+			 func_name, cuStrError(rc));
+	gcontext->cufn_prep_gistindex = cuda_function;
+
+	/* ------ kern_gpucache_apply_redo ------ */
+	func_name = "kern_gpucache_apply_redo";
+	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
+			 func_name, cuStrError(rc));
+	gcontext->cufn_gpucache_apply_redo = cuda_function;
+	/* ------ kern_gpucache_compaction ------ */
+	func_name = "kern_gpucache_compaction";
+	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
+			 func_name, cuStrError(rc));
+	gcontext->cufn_gpucache_compaction = cuda_function;
 }
 
 /*
@@ -3632,8 +3646,8 @@ gpuservSetupGpuModule(gpuContext *gcontext)
 	gcontext->cuda_encode_catalog = __setupDevEncodeLinkageCatalog(cuda_module);
 	gcontext->cuda_module = cuda_module;
 
-	/* adjust shared memory configuration */
-	__setupGpuKernelsSharedMemoryConfig(gcontext);
+	/* lookup CUDA functions and setup parameters */
+	__setupGpuKernelFunctionsAndParams(gcontext);
 }
 
 /*

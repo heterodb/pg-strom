@@ -782,7 +782,8 @@ extern void		pgstromGpuCacheExplain(pgstromTaskState *pts,
 									   List *dcontext);
 extern void		gpucacheManagerEventLoop(int cuda_dindex,
 										 CUcontext cuda_context,
-										 CUmodule cuda_module);
+										 CUfunction cufn_gpucache_apply_redo,
+										 CUfunction cufn_gpucache_compaction);
 extern void		gpucacheManagerWakeUp(int cuda_dindex);
 
 extern void	   *gpuCacheGetDeviceBuffer(const GpuCacheIdent *ident,
