@@ -26,8 +26,9 @@ execGpuJoinNestLoop(kern_context *kcxt,
 					bool	   &matched)
 {
 	const kern_expression *kexp;
-	kern_data_store *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
-	bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth-1);
+	kern_data_store *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	bool	   *oj_map = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kmrels, depth,
+														   kcxt->session->cuda_dindex);
 	uint32_t	rd_pos;
 	uint32_t	wr_pos;
 	uint32_t	count;
@@ -176,8 +177,9 @@ execGpuJoinHashJoin(kern_context *kcxt,
 					uint64_t   &l_state,
 					bool	   &matched)
 {
-	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
-	bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth-1);
+	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	bool	   *oj_map = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kmrels, depth,
+														   kcxt->session->cuda_dindex);
 	kern_expression *kexp = NULL;
 	kern_hashitem *khitem = NULL;
 	uint32_t	rd_pos;
@@ -354,8 +356,8 @@ execGpuJoinHashJoin(kern_context *kcxt,
 KERNEL_FUNCTION(void)
 gpujoin_prep_gistindex(kern_multirels *kmrels, int depth)
 {
-	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
-	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth-1);
+	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth);
 	BlockNumber		block_nr;
 	OffsetNumber	i, maxoff;
 
@@ -420,8 +422,8 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 					uint64_t   &l_state,
 					bool       &matched)
 {
-	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
-	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth-1);
+	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth);
 	int				gist_depth = kexp_gist->u.gist.gist_depth;
 	uint32_t		count;
 	uint32_t		rd_pos;

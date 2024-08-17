@@ -2090,6 +2090,7 @@ innerPreloadAllocHostBuffer(pgstromTaskState *pts)
 	kern_multirels	   *h_kmrels = NULL;
 	kern_data_store	   *kds = NULL;
 	size_t				offset;
+	size_t				ojmap_sz;
 
 	/* other backend already setup the buffer metadata */
 	if (ps_state->preload_shmem_length > 0)
@@ -2101,27 +2102,27 @@ innerPreloadAllocHostBuffer(pgstromTaskState *pts)
 	 */
 again:
 	offset = MAXALIGN(offsetof(kern_multirels, chunks[pts->num_rels]));
-	for (int i=0; i < pts->num_rels; i++)
+	for (int depth=1; depth <= pts->num_rels; depth++)
 	{
-		pgstromTaskInnerState *istate = &pts->inners[i];
+		pgstromTaskInnerState *istate = &pts->inners[depth-1];
 		TupleDesc	tupdesc = istate->ps->ps_ResultTupleDesc;
 		uint64_t	nrooms;
 		uint64_t	usage;
 		size_t		nbytes;
 
-		nrooms = pg_atomic_read_u64(&ps_state->inners[i].inner_nitems);
-		usage  = pg_atomic_read_u64(&ps_state->inners[i].inner_usage);
+		nrooms = pg_atomic_read_u64(&ps_state->inners[depth-1].inner_nitems);
+		usage  = pg_atomic_read_u64(&ps_state->inners[depth-1].inner_usage);
 		if (nrooms >= UINT_MAX)
 			elog(ERROR, "GpuJoin: Inner Relation[%d] has %lu tuples, too large",
-				 i+1, nrooms);
+				 depth, nrooms);
 
 		if (istate->inner_pinned_buffer)
 		{
 			if (h_kmrels)
 			{
-				h_kmrels->chunks[i].pinned_buffer = true;
-				h_kmrels->chunks[i].buffer_id = istate->inner_buffer_id;
-				h_kmrels->chunks[i].optimal_gpus = istate->inner_optimal_gpus;
+				h_kmrels->chunks[depth-1].pinned_buffer = true;
+				h_kmrels->chunks[depth-1].buffer_id = istate->inner_buffer_id;
+				h_kmrels->chunks[depth-1].optimal_gpus = istate->inner_optimal_gpus;
 			}
 		}
 		else if (istate->hash_inner_keys != NIL &&
@@ -2137,7 +2138,7 @@ again:
 			if (h_kmrels)
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
-				h_kmrels->chunks[i].kds_offset = offset;
+				h_kmrels->chunks[depth-1].kds_offset = offset;
 
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
@@ -2163,7 +2164,7 @@ again:
 			if (h_kmrels)
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
-				h_kmrels->chunks[i].kds_offset = offset;
+				h_kmrels->chunks[depth-1].kds_offset = offset;
 
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
@@ -2179,7 +2180,7 @@ again:
 			if (h_kmrels)
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
-				h_kmrels->chunks[i].gist_offset = offset;
+				h_kmrels->chunks[depth-1].gist_offset = offset;
 
 				setup_kern_data_store(kds, i_tupdesc, nbytes,
 									  KDS_FORMAT_BLOCK);
@@ -2218,50 +2219,66 @@ again:
 			if (h_kmrels)
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
-				h_kmrels->chunks[i].kds_offset = offset;
+				h_kmrels->chunks[depth-1].kds_offset = offset;
 
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_ROW);
-				h_kmrels->chunks[i].is_nestloop = true;
+				h_kmrels->chunks[depth-1].is_nestloop = true;
 			}
 			offset += nbytes;
 		}
+	}
+
+	/*
+	 * Parameters for OUTER JOIN
+	 */
+	offset = PAGE_ALIGN(offset);
+	ojmap_sz = 0;
+	for (int depth=1; depth <= pts->num_rels; depth++)
+	{
+		pgstromTaskInnerState *istate = &pts->inners[depth-1];
+		uint64_t	nrooms;
+		size_t		nbytes;
 
 		if (istate->join_type == JOIN_RIGHT ||
 			istate->join_type == JOIN_FULL)
-		{
+        {
+			nrooms = pg_atomic_read_u64(&ps_state->inners[depth-1].inner_nitems);
 			nbytes = MAXALIGN(sizeof(bool) * nrooms);
 			if (h_kmrels)
 			{
-				h_kmrels->chunks[i].right_outer = true;
-				h_kmrels->chunks[i].ojmap_offset = offset;
+				h_kmrels->chunks[depth-1].right_outer = true;
+				h_kmrels->chunks[depth-1].ojmap_offset = offset;
 				memset((char *)h_kmrels + offset, 0, nbytes);
 			}
 			offset += nbytes;
+			ojmap_sz += nbytes;
 		}
 		if (istate->join_type == JOIN_LEFT ||
 			istate->join_type == JOIN_FULL)
 		{
 			if (h_kmrels)
-				h_kmrels->chunks[i].left_outer = true;
-		}
+				h_kmrels->chunks[depth-1].left_outer = true;
+        }
 	}
+	offset = PAGE_ALIGN(offset);
 
 	/*
 	 * allocation of the host inner-buffer
 	 */
 	if (!h_kmrels)
 	{
-		size_t		shmem_length = PAGE_ALIGN(offset);
+
 
 		Assert(ps_state->preload_shmem_handle != 0);
 		h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
-							   shmem_length, pts->ds_entry);
+							   offset, pts->ds_entry);
 		memset(h_kmrels, 0, offsetof(kern_multirels,
 									 chunks[pts->num_rels]));
 		h_kmrels->length = offset;
+		h_kmrels->ojmap_sz = PAGE_ALIGN(ojmap_sz);
 		h_kmrels->num_rels = pts->num_rels;
-		ps_state->preload_shmem_length = shmem_length;
+		ps_state->preload_shmem_length = offset;
 		goto again;
 	}
 	pts->h_kmrels = h_kmrels;
@@ -2474,11 +2491,11 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 											pts->ds_entry);
 			}
 
-			for (int i=0; i < leader->num_rels; i++)
+			for (int depth=1; depth <= leader->num_rels; depth++)
 			{
-				pgstromTaskInnerState *istate = &leader->inners[i];
+				pgstromTaskInnerState *istate = &leader->inners[depth-1];
 				inner_preload_buffer *preload_buf = istate->preload_buffer;
-				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, i);
+				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, depth);
 				uint64_t	base_nitems;
 				uint64_t	base_usage;
 

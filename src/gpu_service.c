@@ -63,7 +63,8 @@ struct gpuClient
 {
 	struct gpuContext *gcontext;/* per-device status */
 	dlist_node		chain;		/* gcontext->client_list */
-	int64_t			optimal_gpus; /* candidate GPUs for scheduling */
+	gpumask_t		optimal_gpus; /* candidate GPUs for scheduling */
+	uint32_t		xpu_task_flags; /* copy from session->xpu_task_flags */
 	struct gpuQueryBuffer *gq_buf; /* per query join/preagg device buffer */
 	pg_atomic_uint32 refcnt;	/* odd number, if error status */
 	pthread_mutex_t	mutex;		/* mutex to write the socket */
@@ -1522,9 +1523,17 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 					  namebuf, mmap_sz);
 		goto error;
 	}
-
+	/*
+	 * MEMO: The outer-join-map locates on the tail of h_kmrels,
+	 * and the host-buffer has only one set of the OJMap, however,
+	 * it shoud be prepared for each device because concurrent
+	 * writes to OJMap by multiple GPUs will cause huge slashing.
+	 * So, we setup mutiple OJMap on the device memory for each
+	 * GPUs, then consolidate them in the final request handler.
+	 */
 	rc = cuMemAllocManaged((CUdeviceptr *)&m_kmrels,
-						   mmap_sz,
+						   mmap_sz +
+						   h_kmrels->ojmap_sz * (numGpuDevAttrs - 1),
 						   CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -1579,10 +1588,6 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 			m_kmrels->chunks[i].kds_devptr = __m_kds_final;
 		}
 	}
-	//FIXME: add read-only attributes here
-	(void)cuMemPrefetchAsync((CUdeviceptr)m_kmrels, mmap_sz,
-							 MY_DEVICE_PER_THREAD,
-							 MY_STREAM_PER_THREAD);
 	gq_buf->m_kmrels = (CUdeviceptr)m_kmrels;
 	gq_buf->h_kmrels = h_kmrels;
 	gq_buf->kmrels_sz = mmap_sz;
@@ -1590,6 +1595,24 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 	/* preparation of GiST-index buffer, if any */
 	if (!__setupGpuQueryJoinGiSTIndexBuffer(gclient, gq_buf))
 		goto error;
+
+	/*
+	 * MEMO: kern_multirels deploys the outer-join map (that is only read-writable
+	 * portion on the m_kmrels buffer) at tail of the m_kmrels buffer.
+	 * So, we expect the CUDA unified memory system distributes the read-only
+	 * portion for each devices on the demand.
+	 * cuMemAdvise() allows to give driver a hint for this purpose.
+	 */
+	assert(h_kmrels->ojmap_sz < h_kmrels->length);
+	rc = cuMemAdvise((CUdeviceptr)m_kmrels,
+					 h_kmrels->length - h_kmrels->ojmap_sz,
+					 CU_MEM_ADVISE_SET_READ_MOSTLY,
+					 -1);	/* 4th argument should be ignored */
+	if (rc != CUDA_SUCCESS)
+		__gsLog("failed on cuMemAdvise (%p-%p; CU_MEM_ADVISE_SET_READ_MOSTLY): %s",
+				(char *)m_kmrels,
+				(char *)m_kmrels + (h_kmrels->length - h_kmrels->ojmap_sz),
+				cuStrError(rc));
 	/* OK */
 	close(fdesc);
 	return true;
@@ -2500,7 +2523,8 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 		return false;
 	}
 
-	gclient->optimal_gpus = xcmd->u.session.optimal_gpus;
+	gclient->optimal_gpus   = session->optimal_gpus;
+	gclient->xpu_task_flags = session->xpu_task_flags;
 	dlist_foreach (iter, &gpuserv_gpucontext_list)
 	{
 		gpuContext *__gcontext = dlist_container(gpuContext, chain, iter.cur);
@@ -2519,6 +2543,7 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 		gclient->__session[__cuda_dindex] = __chunk;
 		__session = (kern_session_info *)__chunk->m_devptr;
 		memcpy(__session, session, session_sz);
+		__session->cuda_dindex = __cuda_dindex;
 		/* expand CUDA thread stack limit on demand */
 		if (!expandCudaStackLimit(gclient,
 								  __gcontext,
@@ -3125,7 +3150,6 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 {
 	kern_final_task *kfin = &xcmd->u.fin;
 	gpuQueryBuffer *gq_buf = gclient->gq_buf;
-	kern_session_info *session;
 	struct iovec   *iov_array;
 	struct iovec   *iov;
 	int				iovcnt = 0;
@@ -3133,8 +3157,6 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	XpuCommand		resp;
 	size_t			resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
 
-	session = (kern_session_info *)
-		gclient->__session[gcontext->cuda_dindex]->m_devptr;
 	memset(&resp, 0, sizeof(XpuCommand));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag   = XpuCommandTag__Success;
@@ -3146,71 +3168,72 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	iov->iov_base = &resp;
 	iov->iov_len  = resp_sz;
 
-//	if (kfin->final_this_device)
+	/*
+	 * Is the outer-join-map written back to the host buffer?
+	 */
+	if (gq_buf->m_kmrels != 0UL &&
+		gq_buf->h_kmrels != NULL)
 	{
-		/*
-		 * Is the outer-join-map written back to the host buffer?
-		 */
-		if (gq_buf->m_kmrels != 0UL &&
-			gq_buf->h_kmrels != NULL)
-		{
-			kern_multirels *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
-			kern_multirels *h_kmrels = (kern_multirels *)gq_buf->h_kmrels;
+		kern_multirels *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
+		kern_multirels *h_kmrels = (kern_multirels *)gq_buf->h_kmrels;
 
-			//FIXME: must be merged per device ojmap
-			for (int i=0; i < d_kmrels->num_rels; i++)
+		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
+		{
+			if ((gclient->optimal_gpus & (1UL<<__dindex)) == 0)
+				continue;
+			for (int depth=1; depth <= d_kmrels->num_rels; depth++)
 			{
-				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(h_kmrels, i);
-				bool   *d_ojmap = KERN_MULTIRELS_OUTER_JOIN_MAP(d_kmrels, i);
-				bool   *h_ojmap = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, i);
+				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
+				bool   *d_ojmap = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(d_kmrels, depth, __dindex);
+				bool   *h_ojmap = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
 
 				if (d_ojmap && h_ojmap)
 				{
 					for (uint32_t j=0; j < kds->nitems; j++)
 						h_ojmap[j] |= d_ojmap[j];
-					pg_memory_barrier();
 				}
 			}
+			pg_memory_barrier();
 		}
-		/*
-		 * Is the CPU-Fallback buffer written back?
-		 */
-		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
-		{
-			kern_data_store *kds_fallback = (kern_data_store *)
-				gq_buf->gpus[__dindex].m_kds_fallback;
+	}
+	/*
+	 * Is the CPU-Fallback buffer written back?
+	 */
+	for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
+	{
+		kern_data_store *kds_fallback = (kern_data_store *)
+			gq_buf->gpus[__dindex].m_kds_fallback;
 
-			if (kds_fallback)
-			{
-				iovcnt += __gpuClientWriteBackOneChunk(gclient,
-													   iov_array+iovcnt,
-													   kds_fallback);
-				resp.u.results.chunks_nitems++;
-			}
+		if (kds_fallback && kds_fallback->nitems > 0)
+		{
+			iovcnt += __gpuClientWriteBackOneChunk(gclient,
+												   iov_array+iovcnt,
+												   kds_fallback);
+			resp.u.results.chunks_nitems++;
 		}
+	}
 
-		/*
-		 * Is the GpuPreAgg final buffer written back?
-		 */
-		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
+	/*
+	 * Is the GpuPreAgg final buffer written back?
+	 */
+	for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
+	{
+		kern_data_store *kds_final = (kern_data_store *)
+			gq_buf->gpus[__dindex].m_kds_final;
+
+		if (kds_final && kds_final->nitems > 0 &&
+			(gclient->xpu_task_flags & DEVTASK__PREAGG) != 0)
 		{
-			kern_data_store *kds_final = (kern_data_store *)
-				gq_buf->gpus[__dindex].m_kds_final;
-			if (kds_final != NULL &&
-				kds_final->nitems > 0 &&
-				(session->xpu_task_flags & DEVTASK__PREAGG) != 0)
-			{
-				iovcnt += __gpuClientWriteBackOneChunk(gclient,
-													   iov_array+iovcnt,
-													   kds_final);
-				resp.u.results.chunks_nitems++;
-				resp.u.results.final_nitems += kds_final->nitems;
-				resp.u.results.final_usage  += kds_final->usage;
-				resp.u.results.final_total  += KDS_HEAD_LENGTH(kds_final)
-					+ sizeof(uint64_t) * (kds_final->hash_nslots +
-										  kds_final->nitems)
-					+ kds_final->usage;
-			}
+			iovcnt += __gpuClientWriteBackOneChunk(gclient,
+												   iov_array+iovcnt,
+												   kds_final);
+			resp.u.results.chunks_nitems++;
+			resp.u.results.final_nitems += kds_final->nitems;
+			resp.u.results.final_usage  += kds_final->usage;
+			resp.u.results.final_total  += KDS_HEAD_LENGTH(kds_final)
+				+ sizeof(uint64_t) * (kds_final->hash_nslots +
+									  kds_final->nitems)
+				+ kds_final->usage;
 		}
 	}
 	resp.u.results.final_this_device = kfin->final_this_device;

@@ -1769,8 +1769,8 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 {
 	kern_session_info  *session = dclient->session;
 	kern_multirels	   *kmrels = dclient->kmrels;
-	kern_data_store	   *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels,depth-1);
-	bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels,depth-1);
+	kern_data_store	   *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels,depth);
+	bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels,depth);
 	kern_expression	   *kexp_load_vars = SESSION_KEXP_LOAD_VARS(session,depth);
 	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth);
 	bool				matched = false;
@@ -1843,8 +1843,8 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 {
 	kern_session_info  *session = dclient->session;
 	kern_multirels	   *kmrels = dclient->kmrels;
-	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
-	bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth-1);
+	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
 	kern_expression	   *kexp_load_vars = SESSION_KEXP_LOAD_VARS(session,depth);
 	kern_expression	   *kexp_join_quals = SESSION_KEXP_JOIN_QUALS(session,depth);
 	kern_expression	   *kexp_hash_value = SESSION_KEXP_HASH_VALUE(session,depth);
@@ -2181,10 +2181,10 @@ dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 	{
 		uint32_t	ojmap_length = 0;
 
-		for (int i=0; i < kmrels->num_rels; i++)
+		for (int depth=1; depth <= kmrels->num_rels; depth++)
 		{
-			kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, i);
-			bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, i);
+			kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+			bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
 
 			if (oj_map)
 			{

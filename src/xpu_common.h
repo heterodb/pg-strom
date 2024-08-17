@@ -2435,6 +2435,7 @@ typedef struct kern_session_info
 	uint32_t	cuda_stack_size;	/* estimated stack size */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
 	int64_t		optimal_gpus;		/* mask of schedulable GPUs */
+	int			cuda_dindex;		/* to be set by GPU-Service */
 	/* xpucode for this session */
 	uint32_t	xpucode_load_vars_packed;
 	uint32_t	xpucode_move_vars_packed;
@@ -3034,7 +3035,8 @@ pg_hash_merge(uint32_t hash_prev, uint32_t hash_next)
  */
 struct kern_multirels
 {
-	size_t		length;
+	size_t		length;				/* total length of kern_multirels */
+	size_t		ojmap_sz;			/* length of outer-join map */
 	uint32_t	num_rels;
 	struct
 	{
@@ -3053,35 +3055,49 @@ struct kern_multirels
 typedef struct kern_multirels	kern_multirels;
 
 INLINE_FUNCTION(kern_data_store *)
-KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int dindex)
+KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int depth)
 {
 	uint64_t	pos;
 
-	assert(dindex >= 0 && dindex < kmrels->num_rels);
-	pos = kmrels->chunks[dindex].kds_devptr;
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	pos = kmrels->chunks[depth-1].kds_devptr;
 	if (pos != 0)
 		return (kern_data_store *)pos;
-	pos = kmrels->chunks[dindex].kds_offset;
+	pos = kmrels->chunks[depth-1].kds_offset;
 	return (kern_data_store *)(pos == 0 ? NULL : ((char *)kmrels + pos));
 }
 
 INLINE_FUNCTION(bool *)
-KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int dindex)
+KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth)
 {
 	uint64_t	offset;
 
-	assert(dindex >= 0 && dindex < kmrels->num_rels);
-	offset = kmrels->chunks[dindex].ojmap_offset;
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	offset = kmrels->chunks[depth-1].ojmap_offset;
 	return (bool *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
 
-INLINE_FUNCTION(kern_data_store *)
-KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int dindex)
+INLINE_FUNCTION(bool *)
+KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth, int cuda_dindex)
 {
 	uint64_t	offset;
 
-	assert(dindex >= 0 && dindex < kmrels->num_rels);
-	offset = kmrels->chunks[dindex].gist_offset;
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	offset = kmrels->chunks[depth-1].ojmap_offset;
+	if (offset == 0)
+		return NULL;
+	assert(cuda_dindex >= 0);
+	offset += kmrels->ojmap_sz * cuda_dindex;
+	return (bool *)((char *)kmrels + offset);
+}
+
+INLINE_FUNCTION(kern_data_store *)
+KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int depth)
+{
+	uint64_t	offset;
+
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	offset = kmrels->chunks[depth-1].gist_offset;
 	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
 
