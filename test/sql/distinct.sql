@@ -8,6 +8,7 @@ SET max_parallel_workers_per_gather = 0;
 ---
 --- Scan + Distinct
 ---
+VACUUM ANALYZE;
 explain (verbose, costs off)
 select distinct s_city, s_nation
   from supplier
@@ -23,6 +24,7 @@ select distinct s_city, s_nation
 --
 -- Join + Distinct
 --
+VACUUM ANALYZE;
 explain (verbose, costs off)
 select distinct c_nation, lo_orderpriority
   from lineorder, customer
@@ -41,6 +43,7 @@ select distinct c_nation, lo_orderpriority
 --
 -- partial distinct
 --
+VACUUM ANALYZE;
 explain (verbose, costs off)
 select distinct on (p_type) p_type, p_color, p_size
   into pg_temp.test01g

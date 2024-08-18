@@ -1,0 +1,170 @@
+---
+--- Test for ScalarArrayOp expression
+---
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+DROP SCHEMA IF EXISTS regtest_dexpr_scalar_array_op_temp CASCADE;
+CREATE SCHEMA regtest_dexpr_scalar_array_op_temp;
+RESET client_min_messages;
+SET search_path = regtest_dexpr_scalar_array_op_temp,public;
+CREATE TABLE regtest_data (
+  id    int,
+  x     int[],
+  y     numeric[],
+  z     text[]
+);
+SELECT pgstrom.random_setseed(20190630);
+ random_setseed 
+----------------
+ 
+(1 row)
+
+INSERT INTO regtest_data (
+  SELECT x, array[pgstrom.random_int(2,0,1000),
+                  pgstrom.random_int(2,0,1000),
+                  pgstrom.random_int(2,0,1000)],
+            array[pgstrom.random_float(2,0.0,100.0)::numeric(9,2),
+                  pgstrom.random_float(2,0.0,100.0)::numeric(9,2),
+                  pgstrom.random_float(2,0.0,100.0)::numeric(9,2)],
+            array[pgstrom.random_text(2,'k***'),
+                  pgstrom.random_text(2,'k***'),
+                  pgstrom.random_text(2,'k***')]
+    FROM generate_series(1,5000) x
+);
+UPDATE regtest_data
+   SET x = array_append(x, pgstrom.random_int(2,0,1000)::int),
+       y = array_append(y, pgstrom.random_float(2,0.0,100.0)::numeric(9,2)),
+       z = array_append(z, pgstrom.random_text(2,'k***'))
+ WHERE id % 7 = 3;
+UPDATE regtest_data
+   SET x = array_append(x, pgstrom.random_int(2,0,1000)::int),
+       y = array_append(y, pgstrom.random_float(2,0.0,100.0)::numeric(9,2)),
+       z = array_append(z, pgstrom.random_text(2,'k***'))
+ WHERE id % 14 = 6;
+UPDATE regtest_data
+   SET x = array_append(x, pgstrom.random_int(2,0,1000)::int),
+       y = array_append(y, pgstrom.random_float(2,0.0,100.0)::numeric(9,2)),
+       z = array_append(z, pgstrom.random_text(2,'k***'))
+ WHERE id % 31 = 6;
+--- force to use GpuScan
+SET enable_seqscan = off;
+-- ScalarArrayOp test
+SET pg_strom.enabled = on;
+VACUUM ANALYZE regtest_data;
+EXPLAIN (costs off, verbose)
+SELECT id,x INTO test01g FROM regtest_data
+ WHERE 72 = ANY(x);
+                                                                                                       QUERY PLAN                                                                                                       
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dexpr_scalar_array_op_temp.regtest_data
+   Output: id, x
+   GPU Projection: id, x
+   GPU Scan Quals: (72 = ANY (x)) [rows: 5000 -> 17]
+   KVars-Slot: <slot=0, type='int4', expr='NULL::integer'>, <slot=1, type='array(int4)', expr='x', kv_off=0x0000>, <slot=2, type='int4', expr='id', kv_off=0x3410>
+   KVecs-Buffer: nbytes: 18448, ndims: 2, items=[kvec0=<0x0000-340f, type='array', expr='x'>, kvec1=<0x3410-480f, type='int4', expr='id'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=2, type='int4' resno=1(id)>, <slot=1, type='array' resno=2(x)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0000-340f, type='array', expr='x'>, <slot=2, offset=0x3410-480f, type='int4', expr='id'>]}}}
+   Scan Quals OpCode: {ScalarArrayOpAny: elem=<slot=0, type='int4'> args=[{Var(array): slot=1, expr='x'}, {Func(bool)::int4eq args=[{Const(int4): value='72'}, {Var(int4): slot=0, expr='NULL::integer'}]}]}
+   Projection OpCode: {Projection: layout=<2,1> args=[{SaveExpr: <slot=2, type='int4'> arg={Var(int4): kvec=0x3410-4810, expr='id'}}, {SaveExpr: <slot=1, type='array'> arg={Var(array): kvec=0x0000-3410, expr='x'}}]}
+   Fallback-desc: [<dest='0', expr='id', depth=0:1>, <dest='1', expr='x', depth=0:1>]
+   CUDA Stack Size: 3936
+(12 rows)
+
+SELECT id,x INTO test01g FROM regtest_data
+ WHERE 72 = ANY(x);
+SET pg_strom.enabled = off;
+SELECT id,x INTO test01p FROM regtest_data
+ WHERE 72 = ANY(x);
+(SELECT * FROM test01g EXCEPT SELECT * FROM test01p);
+ id | x 
+----+---
+(0 rows)
+
+(SELECT * FROM test01p EXCEPT SELECT * FROM test01g);
+ id | x 
+----+---
+(0 rows)
+
+SET pg_strom.enabled = on;
+VACUUM ANALYZE regtest_data;
+EXPLAIN (costs off, verbose)
+SELECT id,y INTO test02g FROM regtest_data
+ WHERE 75.96 = ANY(y);
+                                                                                                         QUERY PLAN                                                                                                          
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dexpr_scalar_array_op_temp.regtest_data
+   Output: id, y
+   GPU Projection: id, y
+   GPU Scan Quals: (75.96 = ANY (y)) [rows: 5000 -> 2]
+   KVars-Slot: <slot=0, type='numeric', expr='NULL::numeric'>, <slot=1, type='array(numeric)', expr='y', kv_off=0x0000>, <slot=2, type='int4', expr='id', kv_off=0x3410>
+   KVecs-Buffer: nbytes: 18448, ndims: 2, items=[kvec0=<0x0000-340f, type='array', expr='y'>, kvec1=<0x3410-480f, type='int4', expr='id'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=2, type='int4' resno=1(id)>, <slot=1, type='array' resno=3(y)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0000-340f, type='array', expr='y'>, <slot=2, offset=0x3410-480f, type='int4', expr='id'>]}}}
+   Scan Quals OpCode: {ScalarArrayOpAny: elem=<slot=0, type='numeric'> args=[{Var(array): slot=1, expr='y'}, {Func(bool)::numeric_eq args=[{Const(numeric): value='75.96'}, {Var(numeric): slot=0, expr='NULL::numeric'}]}]}
+   Projection OpCode: {Projection: layout=<2,1> args=[{SaveExpr: <slot=2, type='int4'> arg={Var(int4): kvec=0x3410-4810, expr='id'}}, {SaveExpr: <slot=1, type='array'> arg={Var(array): kvec=0x0000-3410, expr='y'}}]}
+   Fallback-desc: [<dest='0', expr='id', depth=0:1>, <dest='1', expr='y', depth=0:1>]
+   CUDA Stack Size: 3936
+(12 rows)
+
+SELECT id,y INTO test02g FROM regtest_data
+ WHERE 75.96 = ANY(y);
+SET pg_strom.enabled = off;
+SELECT id,y INTO test02p FROM regtest_data
+ WHERE 75.96 = ANY(y);
+(SELECT * FROM test02g EXCEPT SELECT * FROM test02p);
+ id | y 
+----+---
+(0 rows)
+
+(SELECT * FROM test02p EXCEPT SELECT * FROM test02g);
+ id | y 
+----+---
+(0 rows)
+
+SET pg_strom.enabled = on;
+VACUUM ANALYZE regtest_data;
+EXPLAIN (costs off, verbose)
+SELECT id,z INTO test03g FROM regtest_data
+  WHERE 'kVOV' = ANY (z);
+                                                                                                       QUERY PLAN                                                                                                       
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on regtest_dexpr_scalar_array_op_temp.regtest_data
+   Output: id, z
+   GPU Projection: id, z
+   GPU Scan Quals: ('kVOV'::text = ANY (z)) [rows: 5000 -> 1]
+   KVars-Slot: <slot=0, type='text', expr='NULL::text'>, <slot=1, type='array(text)', expr='z', kv_off=0x0000>, <slot=2, type='int4', expr='id', kv_off=0x3410>
+   KVecs-Buffer: nbytes: 18448, ndims: 2, items=[kvec0=<0x0000-340f, type='array', expr='z'>, kvec1=<0x3410-480f, type='int4', expr='id'>]
+   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=2, type='int4' resno=1(id)>, <slot=1, type='array' resno=4(z)>]}}
+   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0000-340f, type='array', expr='z'>, <slot=2, offset=0x3410-480f, type='int4', expr='id'>]}}}
+   Scan Quals OpCode: {ScalarArrayOpAny: elem=<slot=0, type='text'> args=[{Var(array): slot=1, expr='z'}, {Func(bool)::texteq args=[{Const(text): value='kVOV'}, {Var(text): slot=0, expr='NULL::text'}]}]}
+   Projection OpCode: {Projection: layout=<2,1> args=[{SaveExpr: <slot=2, type='int4'> arg={Var(int4): kvec=0x3410-4810, expr='id'}}, {SaveExpr: <slot=1, type='array'> arg={Var(array): kvec=0x0000-3410, expr='z'}}]}
+   Fallback-desc: [<dest='0', expr='id', depth=0:1>, <dest='1', expr='z', depth=0:1>]
+   CUDA Stack Size: 3936
+(12 rows)
+
+SELECT id,z INTO test03g FROM regtest_data
+  WHERE 'kVOV' = ANY (z);
+SET pg_strom.enabled = off;
+SELECT id,z INTO test03p FROM regtest_data
+  WHERE 'kVOV' = ANY (z);
+(SELECT * FROM test03g EXCEPT SELECT * FROM test03p);
+ id | z 
+----+---
+(0 rows)
+
+(SELECT * FROM test03p EXCEPT SELECT * FROM test03g);
+ id | z 
+----+---
+(0 rows)
+
+-- TODO: array operation on fdw_arrow
+-- should be empty result
+SET pg_strom.enabled = off;
+SELECT * FROM regtest_data WHERE null = ANY (x);
+ id | x | y | z 
+----+---+---+---
+(0 rows)
+
+-- cleanup
+SET client_min_messages = error;
+DROP SCHEMA regtest_dexpr_scalar_array_op_temp CASCADE;

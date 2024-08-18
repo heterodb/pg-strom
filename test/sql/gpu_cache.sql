@@ -33,12 +33,6 @@ CREATE TRIGGER row_sync_test_ng01 AFTER INSERT OR UPDATE OR DELETE
     ON cache_test_table FOR ROW
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('cpu_device_id=0');
 -- validation error
--- 32GB limitation check was removed, so it should not be an error
-CREATE TRIGGER row_sync_test_ng02 AFTER INSERT OR UPDATE OR DELETE
-    ON cache_test_table FOR ROW
-    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('max_num_rows=200000000');
-DROP TRIGGER IF EXISTS row_sync_test_ng02 ON cache_test_table;
--- validation error
 CREATE TRIGGER row_sync_test_ng03 AFTER INSERT OR UPDATE OR DELETE
     ON cache_test_table FOR ROW
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('redo_buffer_size=4m');

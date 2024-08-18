@@ -1,0 +1,76 @@
+--
+-- validation of the default GUC paremeter setting
+--
+\t
+SHOW pg_strom.enabled;
+ on
+
+SHOW pg_strom.enable_gpuscan;
+ on
+
+SHOW pg_strom.enable_gpuhashjoin;
+ on
+
+SHOW pg_strom.enable_gpugistindex;
+ on
+
+SHOW pg_strom.enable_gpujoin;
+ on
+
+SHOW pg_strom.enable_gpupreagg;
+ on
+
+SHOW pg_strom.enable_numeric_aggfuncs;
+ on
+
+SHOW pg_strom.enable_brin;
+ on
+
+SHOW pg_strom.cpu_fallback;
+ notice
+
+SHOW pg_strom.gpu_setup_cost;
+ 100
+
+SHOW pg_strom.gpu_tuple_cost;
+ 0.01
+
+SHOW pg_strom.gpu_operator_cost;
+ 0.00015625
+
+SHOW pg_strom.max_async_tasks;
+ 12
+
+SHOW pg_strom.gpu_direct_seq_page_cost;
+ 0.25
+
+SHOW arrow_fdw.enabled;
+ on
+
+SHOW arrow_fdw.stats_hint_enabled;
+ on
+
+SHOW arrow_fdw.metadata_cache_size;
+ 512MB
+
+SHOW pg_strom.enable_gpucache;
+ on
+
+SHOW pg_strom.gpucache_auto_preload;
+ 
+
+SHOW pg_strom.gpu_mempool_segment_sz;
+ 1GB
+
+SHOW pg_strom.gpu_mempool_max_ratio;
+ 0.5
+
+SHOW pg_strom.gpu_mempool_min_ratio;
+ 0.05
+
+SHOW pg_strom.gpu_mempool_release_delay;
+ 5s
+
+SHOW pg_strom.gpuserv_debug_output;
+ off
+
