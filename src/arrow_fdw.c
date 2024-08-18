@@ -3455,8 +3455,7 @@ static ArrowFdwState *
 __arrowFdwExecInit(ScanState *ss,
 				   List *outer_quals,
 				   const Bitmapset *outer_refs,
-				   gpumask_t *p_optimal_gpus,
-				   const DpuStorageEntry **p_ds_entry)
+				   pgstromTaskState *pts)
 {
 	Relation		frel = ss->ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
@@ -3499,26 +3498,29 @@ __arrowFdwExecInit(ScanState *ss,
 		if (af_state)
 		{
 			rb_nrooms += list_length(af_state->rb_list);
-			if (p_optimal_gpus)
+			if (pts)
 			{
-				gpumask_t	__optimal_gpus = GetOptimalGpuForFile(fname);
-
-				if (af_states_list == NIL)
-					optimal_gpus = __optimal_gpus;
-				else
-					optimal_gpus &= __optimal_gpus;
-			}
-			if (p_ds_entry)
-			{
-				const DpuStorageEntry *ds_temp;
-
-				if (af_states_list == NIL)
-					ds_entry = GetOptimalDpuForFile(fname, &af_state->dpu_path);
-				else if (ds_entry)
+				if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 				{
-					ds_temp = GetOptimalDpuForFile(fname, &af_state->dpu_path);
-					if (!DpuStorageEntryIsEqual(ds_entry, ds_temp))
-						ds_entry = NULL;
+					gpumask_t	__optimal_gpus = GetOptimalGpuForFile(fname);
+
+					if (af_states_list == NIL)
+						optimal_gpus = __optimal_gpus;
+					else
+						optimal_gpus &= __optimal_gpus;
+				}
+				else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
+				{
+					const DpuStorageEntry *ds_temp;
+
+					if (af_states_list == NIL)
+						ds_entry = GetOptimalDpuForFile(fname, &af_state->dpu_path);
+					else if (ds_entry)
+					{
+						ds_temp = GetOptimalDpuForFile(fname, &af_state->dpu_path);
+						if (!DpuStorageEntryIsEqual(ds_entry, ds_temp))
+							ds_entry = NULL;
+					}
 				}
 			}
 			af_states_list = lappend(af_states_list, af_state);
@@ -3552,11 +3554,29 @@ __arrowFdwExecInit(ScanState *ss,
 	Assert(rb_nrooms == rb_nitems);
 	arrow_state->rb_nitems = rb_nitems;
 
-	if (p_optimal_gpus)
-		*p_optimal_gpus = optimal_gpus;
-	if (p_ds_entry)
-		*p_ds_entry = ds_entry;
-
+	if (pts)
+	{
+		if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
+		{
+			if (optimal_gpus != 0)
+			{
+				pts->xpu_task_flags |= DEVTASK__USED_GPUDIRECT;
+				pts->optimal_gpus = optimal_gpus;
+			}
+			else
+			{
+				pts->optimal_gpus = GetSystemAvailableGpus();
+			}
+		}
+		else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
+		{
+			pts->ds_entry = ds_entry;
+		}
+		else
+		{
+			elog(ERROR, "ExecPlan is neither GPU nor DPU");
+		}
+	}
 	return arrow_state;
 }
 
@@ -3576,10 +3596,7 @@ pgstromArrowFdwExecInit(pgstromTaskState *pts,
 		arrow_state = __arrowFdwExecInit(&pts->css.ss,
 										 outer_quals,
 										 outer_refs,
-										 (pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0
-											? &pts->optimal_gpus : NULL,
-										 (pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0
-											? &pts->ds_entry : NULL);
+										 pts);
 	}
 	pts->arrow_state = arrow_state;
 	return (pts->arrow_state != NULL);
@@ -3604,8 +3621,7 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 	node->fdw_state = __arrowFdwExecInit(&node->ss,
 										 fscan->scan.plan.qual,
 										 referenced,
-										 NULL,	/* no GPU */
-										 NULL);	/* no DPU */
+										 NULL);
 }
 
 /*
