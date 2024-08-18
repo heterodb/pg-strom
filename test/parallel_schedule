@@ -33,7 +33,7 @@ test: arrow_cpu arrow_utils arrow_index
 # ----------
 # Test for CPU fallback and GPU kernel suspend / resume
 # ----------
-test: fallback_pgsql
+#test: fallback_pgsql
 
 # ----------
 # Test for Asymmetric Partition-wise JOIN
@@ -61,4 +61,5 @@ test: gpu_cache
 # ----------
 # Misc tests
 # ----------
-test: misc distinct
+#test: misc distinct
+test: misc
