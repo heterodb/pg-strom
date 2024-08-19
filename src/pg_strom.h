@@ -265,6 +265,7 @@ typedef struct
 	int				gist_height;	/* index tree height, or -1 if unknown */
 	/* inner pinned buffer? */
 	bool			inner_pinned_buffer;
+	int				inner_partitions_divisor;
 } pgstromPlanInnerInfo;
 
 typedef struct
@@ -312,6 +313,7 @@ typedef struct
 	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */
 	/* pinned inner buffer stuff */
 	List	   *projection_hashkeys;
+	int			projection_partitions_divisor;
 	/* inner relations */
 	int			sibling_param_id;
 	int			num_rels;

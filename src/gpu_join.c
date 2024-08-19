@@ -24,6 +24,7 @@ static bool					pgstrom_enable_gpuhashjoin = false;	/* GUC */
 static bool					pgstrom_enable_gpugistindex = false;/* GUC */
 static bool					pgstrom_enable_partitionwise_gpujoin = false;
 static int					__pinned_inner_buffer_threshold_mb = 0; /* GUC */
+static int					__pinned_inner_buffer_partition_size_mb = 0; /* GUC */
 static CustomPathMethods	dpujoin_path_methods;
 static CustomScanMethods	dpujoin_plan_methods;
 static CustomExecMethods	dpujoin_exec_methods;
@@ -186,14 +187,16 @@ try_fetch_xpujoin_planinfo(const Path *path)
  */
 static Path *
 tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
+							 pgstromPlanInnerInfo *pp_inner,
 							 Path *inner_path,
 							 Cost *p_inner_final_cost)
 {
-	pgstromPlanInnerInfo *pp_inner = &pp_info->inners[pp_info->num_rels-1];
 	PathTarget *inner_target;
 	size_t		inner_threshold_sz;
+	size_t		inner_partition_sz;
 	int			nattrs;
 	int			unitsz;
+	int			partitions_divisor = 0;
 	double		bufsz;
 
 	/*
@@ -239,6 +242,10 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 	bufsz += unitsz * inner_path->rows;
 	if (bufsz < inner_threshold_sz)
 		return NULL;
+	/* Does it need virtual partition? */
+	inner_partition_sz = (size_t)__pinned_inner_buffer_partition_size_mb << 20;
+	if (bufsz > inner_partition_sz)
+		partitions_divisor = (bufsz + inner_partition_sz - 1) / inner_partition_sz;
 
 	/* Ok, this inner path can use pinned-buffer */
 	if (pgstrom_is_gpuscan_path(inner_path) ||
@@ -249,7 +256,13 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 
 		pp_temp = copy_pgstrom_plan_info(pp_temp);
 		pp_temp->projection_hashkeys = pp_inner->hash_inner_keys;
+		pp_temp->projection_partitions_divisor = partitions_divisor;
 		cpath->custom_private = list_make1(pp_temp);
+
+		/* turn on inner_pinned_buffer */
+		pp_inner->inner_pinned_buffer = true;
+		pp_inner->inner_partitions_divisor = partitions_divisor;
+
 		*p_inner_final_cost = pp_temp->final_cost;
 		return (Path *)cpath;
 	}
@@ -555,13 +568,11 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	 * Try pinned inner buffer
 	 */
 	temp_path = tryPinnedInnerJoinBufferPath(pp_info,
+											 pp_inner,
 											 inner_path,
 											 &inner_final_cost);
 	if (temp_path)
-	{
 		llast(inner_paths_list) = inner_path = temp_path;
-		pp_inner->inner_pinned_buffer = true;
-	}
 
 	/*
 	 * Cost estimation
@@ -2667,13 +2678,40 @@ pgstrom_init_gpu_join(void)
 							 NULL, NULL, NULL);
 	/* threshold of pinned inner buffer of GpuJoin */
 	DefineCustomIntVariable("pg_strom.pinned_inner_buffer_threshold",
-							"Threshold of the inner buffer of GpuJoin",
+							"Threshold of pinned inner buffer of GpuJoin",
 							NULL,
 							&__pinned_inner_buffer_threshold_mb,
 							0,		/* disabled */
 							0,		/* 0 means disabled */
 							INT_MAX,
-							PGC_USERSET,
+							PGC_SUSET,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
+							NULL, NULL, NULL);
+	/* virtual partition size of the pinned inner buffer of GpuJoin
+	 * default: 90% of usable DRAM for high-end GPUs,
+	 *          80% of usable DRAM for middle-end GPUs.
+	 */
+	for (int i=0; i < numGpuDevAttrs; i++)
+	{
+		size_t		dram_sz = gpuDevAttrs[i].DEV_TOTAL_MEMSZ;
+		size_t		part_sz;
+
+		if (dram_sz >= (32UL<<30))
+			part_sz = ((dram_sz - (2UL<<30)) * 9 / 10) >> 20;
+		else
+			part_sz = ((dram_sz - (1UL<<30)) * 4 /  5) >> 20;
+		part_sz = Max(part_sz, 4096);	/* at least 4GB */
+		if (i==0 || part_sz < __pinned_inner_buffer_partition_size_mb)
+			__pinned_inner_buffer_partition_size_mb = part_sz;
+	}
+	DefineCustomIntVariable("pg_strom.pinned_inner_buffer_partition_size",
+							"Virtual partition size of pinned inner buffer of GpuJoin",
+							NULL,
+							&__pinned_inner_buffer_partition_size_mb,
+							__pinned_inner_buffer_partition_size_mb,
+							4096,	/* 4GB at least */
+							INT_MAX,
+							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
 							NULL, NULL, NULL);
 	/* setup path methods */
