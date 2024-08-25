@@ -709,6 +709,14 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
 		session->groupby_ngroups_estimation = pts->css.ss.ps.plan->plan_rows;
 	}
+	/* partitioned-projection buffer */
+	if (pts->proj_kbuf_parts)
+	{
+		size_t	__sz = offsetof(kern_buffer_partitions,
+								parts[pts->proj_kbuf_parts->nitems]);
+		session->projection_buffer_partitions
+			= __appendBinaryStringInfo(&buf, pts->proj_kbuf_parts, __sz);
+	}
 	/* CPU fallback related */
 	if (pgstrom_cpu_fallback_elevel < ERROR)
 	{
@@ -1156,6 +1164,111 @@ pgstromExecFinalChunk(pgstromTaskState *pts,
 }
 
 /*
+ * __setupProjectionBufferPartition
+ */
+static int
+__random_assign_one_gpu(gpumask_t optimal_gpus)
+{
+	float8		__rand = DatumGetFloat8(OidFunctionCall0(F_RANDOM));
+	int			__ncount = get_bitcount(optimal_gpus);
+	int			__dcount = floor((double)__ncount * __rand);
+	gpumask_t	__optimal_gpus = optimal_gpus;
+
+	Assert(__optimal_gpus != 0);
+	Assert(__dcount >= 0 && __dcount < __ncount);
+	for (int k=0; __optimal_gpus != 0; k++)
+	{
+		gpumask_t	__mask = (1UL << k);
+
+		if ((__optimal_gpus & __mask) != 0)
+		{
+			if (__dcount == 0)
+				return k;
+			__optimal_gpus &= ~__mask;
+			__dcount--;
+		}
+	}
+	elog(ERROR, "Unable assign a particular device from GPU-mask: %08lx", optimal_gpus);
+}
+
+static void
+__setupProjectionBufferPartition(pgstromTaskState *pts,
+								 pgstromPlanInfo *pp_info)
+{
+	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0 ||
+		pp_info->projection_hashkeys == NIL)
+		return;
+
+	if (pp_info->projection_hash_divisor == 0)
+	{
+		/*
+		 * Even if kds_final buffer is retained on GPU (as a pinned
+		 * inner buffer) without virtual hash partitioning, it should
+		 * be processed on a particular GPU device.
+		 * So, we randomly choose one of the optimal-gpus.
+		 */
+		if (get_bitcount(pts->optimal_gpus) > 1)
+		{
+			int		__dindex = __random_assign_one_gpu(pts->optimal_gpus);
+
+			pts->optimal_gpus = (1UL << __dindex);
+		}
+	}
+	else
+	{
+		/*
+		 * In case when the kds_final buffer is partitioned and distributed
+		 * to multiple GPU devices, we have to determine the relation between
+		 * particular device and hash-remainder.
+		 * For the case when num of optimal-GPUs are larger than the hash-
+		 * divisor, we have to reduce optimal-GPUs to avoid task-requests
+		 * are scheduled to unrelated GPUs.
+		 * If num of optimal-GPUs are equal to or less than the hash-divisor,
+		 * the GPU-task shall be scheduled one of the destination GPUs, then
+		 * it switches to other GPUs by itself.
+		 */
+		kern_buffer_partitions *proj_kbuf_parts;
+		int			hash_divisor = pp_info->projection_hash_divisor;
+		gpumask_t	__optimal_gpus = pts->optimal_gpus;
+		gpumask_t	__other_gpus = (GetSystemAvailableGpus() & ~__optimal_gpus);
+
+		//FIXME: currently, we don't support hash_divisor > numGpuDevAttrs
+		Assert(hash_divisor > 1 && hash_divisor <= numGpuDevAttrs);
+		proj_kbuf_parts = palloc0(offsetof(kern_buffer_partitions,
+										   parts[hash_divisor]));
+		proj_kbuf_parts->hash_divisor = hash_divisor;
+		proj_kbuf_parts->nitems       = hash_divisor;
+
+		pts->optimal_gpus = 0;
+		for (int i=0; i < hash_divisor; i++)
+		{
+			int		__dindex;
+
+			if (__optimal_gpus != 0)
+			{
+				__dindex = __random_assign_one_gpu(__optimal_gpus);
+				__optimal_gpus &= ~(1UL << __dindex);
+				pts->optimal_gpus |= (1UL << __dindex);
+			}
+			else if (__other_gpus != 0)
+			{
+				__dindex = __random_assign_one_gpu(__other_gpus);
+				__other_gpus &= ~(1UL << __dindex);
+			}
+			else
+			{
+				elog(ERROR, "Unable assign a device for hash-remainder %d from GPU-mask: %08lx",
+					 i, pts->optimal_gpus);
+			}
+			proj_kbuf_parts->parts[i].hash_remainder = i;
+			proj_kbuf_parts->parts[i].buffer_dindex = __dindex;
+			proj_kbuf_parts->parts[i].available_gpus = (1UL << __dindex);
+		}
+		pts->proj_kbuf_parts = proj_kbuf_parts;
+	}
+}
+
+/*
  * __setupTaskStateRequestBuffer
  */
 static void
@@ -1520,7 +1633,13 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 						  &TTSOpsHeapTuple);
 	ExecAssignScanProjectionInfoWithVarno(&pts->css.ss, INDEX_VAR);
 #endif
-
+	/*
+	 * Setup kernel buffer partitioning strategy, and update optimal_gpus
+	 * if this node is a source of pinned inner buffer to be distributed
+	 * to multiple GPU devices.
+	 */
+	__setupProjectionBufferPartition(pts, pp_info);
+	
 	/*
 	 * Initialize the CPU Fallback stuff
 	 */
@@ -2339,6 +2458,20 @@ pgstromExplainTaskState(CustomScanState *node,
 							 final_nitems,
 							 format_bytesz(final_usage),
 							 format_bytesz(final_total));
+		}
+		if (pts->proj_kbuf_parts)
+		{
+			kern_buffer_partitions *kbuf_parts = pts->proj_kbuf_parts;
+
+			appendStringInfo(&buf, ", partitions [divisor=%u",
+							 kbuf_parts->nitems);
+			for (int i=0; i < kbuf_parts->nitems; i++)
+			{
+				appendStringInfo(&buf, ", part%d=GPU%u",
+								 kbuf_parts->parts[i].hash_remainder,
+								 kbuf_parts->parts[i].buffer_dindex);
+			}
+			appendStringInfo(&buf, ")");
 		}
 		snprintf(label, sizeof(label),
 				 "%s Pinned Buffer", xpu_label);

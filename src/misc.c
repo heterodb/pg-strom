@@ -165,7 +165,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, pp_info->groupby_actions);
 	privs = lappend(privs, makeInteger(pp_info->groupby_prepfn_bufsz));
 	exprs = lappend(exprs, pp_info->projection_hashkeys);
-	privs = lappend(privs, makeInteger(pp_info->projection_partitions_divisor));
+	privs = lappend(privs, makeInteger(pp_info->projection_hash_divisor));
 	/* inner relations */
 	privs = lappend(privs, makeInteger(pp_info->sibling_param_id));
 	privs = lappend(privs, makeInteger(pp_info->num_rels));
@@ -273,7 +273,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.groupby_actions = list_nth(privs, pindex++);
 	pp_data.groupby_prepfn_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.projection_hashkeys = list_nth(exprs, eindex++);
-	pp_data.projection_partitions_divisor = intVal(list_nth(privs, pindex++));
+	pp_data.projection_hash_divisor = intVal(list_nth(privs, pindex++));
 	/* inner relations */
 	pp_data.sibling_param_id = intVal(list_nth(privs, pindex++));
 	pp_data.num_rels = intVal(list_nth(privs, pindex++));

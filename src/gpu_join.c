@@ -196,7 +196,7 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 	size_t		inner_partition_sz;
 	int			nattrs;
 	int			unitsz;
-	int			partitions_divisor = 0;
+	int			projection_hash_divisor = 0;
 	double		bufsz;
 
 	/*
@@ -240,13 +240,27 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 		bufsz += sizeof(uint64_t) * Max(inner_path->rows, 320.0);
 	bufsz += sizeof(uint64_t) * inner_path->rows;
 	bufsz += unitsz * inner_path->rows;
+
 	if (bufsz < inner_threshold_sz)
 		return NULL;
 	/* Does it need virtual partition? */
+#if 1
+	projection_hash_divisor = 2;
+#else
 	inner_partition_sz = (size_t)__pinned_inner_buffer_partition_size_mb << 20;
 	if (bufsz > inner_partition_sz)
-		partitions_divisor = (bufsz + inner_partition_sz - 1) / inner_partition_sz;
-
+	{
+		projection_hash_divisor = (bufsz + inner_partition_sz - 1) / inner_partition_sz;
+		//FIXME: repeating GpuJoin allocs projection_hash_divisor is larger than
+		//       numGpuDevAttrs
+		if (projection_hash_divisor > numGpuDevAttrs)
+		{
+			elog(DEBUG2, "pinned inner buffer must be partitioned to %d GPUs, but system has only %d GPUs",
+				 projection_hash_divisor, numGpuDevAttrs);
+			return NULL;
+		}
+	}
+#endif
 	/* Ok, this inner path can use pinned-buffer */
 	if (pgstrom_is_gpuscan_path(inner_path) ||
 		pgstrom_is_gpujoin_path(inner_path))
@@ -256,12 +270,12 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 
 		pp_temp = copy_pgstrom_plan_info(pp_temp);
 		pp_temp->projection_hashkeys = pp_inner->hash_inner_keys;
-		pp_temp->projection_partitions_divisor = partitions_divisor;
+		pp_temp->projection_hash_divisor = projection_hash_divisor;
 		cpath->custom_private = list_make1(pp_temp);
 
 		/* turn on inner_pinned_buffer */
 		pp_inner->inner_pinned_buffer = true;
-		pp_inner->inner_partitions_divisor = partitions_divisor;
+		pp_inner->inner_partitions_divisor = projection_hash_divisor;
 
 		*p_inner_final_cost = pp_temp->final_cost;
 		return (Path *)cpath;
@@ -1741,9 +1755,12 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	{
 		/* build device projection */
 		List   *proj_hash = pp_info->projection_hashkeys;
+		int		proj_divisor = pp_info->projection_hash_divisor;
 
 		pgstrom_build_join_tlist_dev(context, root, joinrel, tlist);
-		pp_info->kexp_projection = codegen_build_projection(context, proj_hash);
+		pp_info->kexp_projection = codegen_build_projection(context,
+															proj_hash,
+															proj_divisor);
 	}
 	pull_varattnos((Node *)context->tlist_dev,
 				   pp_info->scan_relid,

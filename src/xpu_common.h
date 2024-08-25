@@ -182,6 +182,12 @@ typedef unsigned int		Oid;
 #define __MAXALIGNED__		__attribute__((aligned(MAXIMUM_ALIGNOF)));
 #define MAXIMUM_ALIGNOF_SHIFT 3
 
+#ifndef HAS_GPUMASK_TYPEDEF
+#define HAS_GPUMASK_TYPEDEF
+#define INVALID_GPUMASK		(~0UL)
+typedef int64_t				gpumask_t;
+#endif	/* HAS_GPUMASK_TYPEDEF */
+
 /* Definition of several primitive types */
 typedef __int128	int128_t;
 #include "float2.h"
@@ -2330,6 +2336,7 @@ struct kern_expression
 		} pagg;		/* PreAggs */
 		struct {
 			uint32_t	hash;			/* kexp for hash-value calculation */
+			int			hash_divisor;	/* hash-divisor, if virtual partition is used */
 			int			nattrs;
 			uint16_t	slot_id[1];
 		} proj;		/* Projection */
@@ -2457,8 +2464,8 @@ typedef struct kern_session_info
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
 	int32_t		session_currency_frac_digits;	/* copy of lconv::frac_digits */
-	uint32_t	session_kds_final;	/* header portion of kds_final; used when
-									 * query results shall be retained in GPU */
+//	uint32_t	session_kds_final;	/* header portion of kds_final; used when
+//									 * query results shall be retained in GPU */
 	/* join inner buffer */
 	uint32_t	pgsql_port_number;	/* = PostPortNumber */
 	uint32_t	pgsql_plan_node_id;	/* = Plan->plan_node_id */
@@ -2469,6 +2476,9 @@ typedef struct kern_session_info
 	uint32_t	groupby_prepfn_bufsz; /* buffer size for preagg functions */
 	float4_t	groupby_ngroups_estimation; /* planne's estimation of ngroups */
 
+	/* projection final buffer */
+	uint32_t	projection_buffer_partitions; /* valid if projection results are
+											   * distributed to multiple GPUs */
 	/* fallback buffer */
 	uint32_t	fallback_kds_head;		/* offset to kds_fallback (header) */
 	uint32_t	fallback_desc_defs;		/* offset to kern_fallback_desc array */
@@ -2525,6 +2535,17 @@ typedef struct
 	uint32_t			npages_vfs_read;
 	kern_data_store		kds_src;
 } kern_cpu_fallback;
+
+typedef struct
+{
+	uint32_t		hash_divisor;
+	uint32_t		nitems;
+	struct {
+		int32_t		hash_remainder;
+		int32_t		buffer_dindex;
+		gpumask_t	available_gpus;
+	} parts[1];
+} kern_buffer_partitions;
 
 #ifndef ILIST_H
 typedef struct dlist_node

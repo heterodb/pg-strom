@@ -19,8 +19,11 @@
 #define HETERODB_EXTRA_FILENAME		"heterodb_extra.so"
 #define HETERODB_EXTRA_PATHNAME		"/usr/lib64/" HETERODB_EXTRA_FILENAME
 #define HETERODB_EXTRA_MAX_GPUS		63
+#ifndef HAS_GPUMASK_TYPEDEF
+#define HAS_GPUMASK_TYPEDEF
 #define INVALID_GPUMASK				(~0UL)
 typedef int64_t						gpumask_t;
+#endif	/* HAS_GPUMASK_TYPEDEF */
 
 #define HETERODB_LICENSE_PATHNAME	"/etc/heterodb.license"
 /* fixed length of the license key (2048bits) */

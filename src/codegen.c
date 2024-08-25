@@ -3376,7 +3376,9 @@ codegen_build_packed_gistevals(codegen_context *context,
  * codegen_build_projection
  */
 bytea *
-codegen_build_projection(codegen_context *context, List *proj_hash)
+codegen_build_projection(codegen_context *context,
+						 List *proj_hash,
+						 int proj_hash_divisor)
 {
 	kern_expression	*kexp;
 	StringInfoData buf;
@@ -3428,7 +3430,10 @@ codegen_build_projection(codegen_context *context, List *proj_hash)
 										 proj_hash,
 										 context->num_rels+1);
 		if (khash)
+		{
 			kexp->u.proj.hash = __appendBinaryStringInfo(&buf, khash, khash->len);
+			kexp->u.proj.hash_divisor = proj_hash_divisor;
+		}
 	}
 	Assert(nattrs == kexp->u.proj.nattrs);
 	kexp->exptype = TypeOpCode__int4;
@@ -4269,6 +4274,8 @@ __xpucode_projection_cstring(StringInfo buf,
 			((const char *)kexp + kexp->u.proj.hash);
 		appendStringInfo(buf, ", Hash=");
 		__xpucode_to_cstring(buf, khash, css, es, dcontext);
+		if (kexp->u.proj.hash_divisor > 1)
+			appendStringInfo(buf, ", HashDivisor=%d", kexp->u.proj.hash_divisor);
 	}
 }
 

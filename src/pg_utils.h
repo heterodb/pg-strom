@@ -98,6 +98,32 @@ get_next_log2(Size size)
 }
 
 /*
+ * get_next_log2
+ *
+ * It returns N of the least 2^N value that is larger than or equal to
+ * the supplied value.
+ */
+static inline int
+get_bitcount(unsigned long val)
+{
+#ifdef	__GNUC__
+	return __builtin_popcountl(val);
+#else
+	static int __bitcount_4bit[16] = {
+		0,1,1,2, 1,2,2,3, 1,2,2,3, 2,3,3,4
+	};
+	int		count = 0;
+
+	while (val != 0)
+	{
+		count += __bitcount_4bit[(val & 0x0f)];
+		val >>= 4;
+	}
+	return count;
+#endif	/* !__GNUC__ */
+}
+
+/*
  * __trim - remove whitespace at the head/tail of cstring
  */
 static inline char *
