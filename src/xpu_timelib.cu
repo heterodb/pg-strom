@@ -2780,9 +2780,12 @@ pgfn_interval_um(XPU_PGFUNCTION_ARGS)
 		result->value.month = -ival.value.month;
 		result->value.day   = -ival.value.day;
 		result->value.time  = -ival.value.time;
-		if (result->value.time != 0 && SAMESIGN(ival.value.time, result->value.time) ||
-			result->value.day != 0 && SAMESIGN(ival.value.day, result->value.day) ||
-			result->value.month != 0 && SAMESIGN(ival.value.month, result->value.month))
+		if ((result->value.time  != 0 && SAMESIGN(ival.value.time,
+												  result->value.time)) ||
+			(result->value.day   != 0 && SAMESIGN(ival.value.day,
+												  result->value.day)) ||
+			(result->value.month != 0 && SAMESIGN(ival.value.month,
+												  result->value.month)))
 		{
 			STROM_ELOG(kcxt, "interval out of range");
 			return false;

@@ -12,7 +12,6 @@
  */
 #ifndef HETERODB_EXTRA_H
 #define HETERODB_EXTRA_H
-#include <cuda.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -75,6 +74,10 @@ extern int			heterodbValidateDevice(const char *gpu_device_name,
 extern const char  *heterodbInitOptimalGpus(const char *manual_config);
 extern int64_t		heterodbGetOptimalGpus(const char *path,
 										   const char *policy);
+/*
+ * GPU related stuff must include <cuda.h> first, but DPU stuff skips them
+ */
+#ifdef __cuda_cuda_h__
 extern bool			gpuDirectInitDriver(void);
 extern bool			gpuDirectOpenDriver(void);
 extern bool			gpuDirectCloseDriver(void);
@@ -101,6 +104,7 @@ extern bool			gpuDirectFileReadAsyncIOV(const char *pathname,
 											  uint32_t *p_error_code_async,
 											  uint32_t *p_npages_direct_read,
 											  uint32_t *p_npages_vfs_read);
+#endif	/* __cuda_cuda_h__ */
 extern const char  *gpuDirectGetProperty(void);
 extern bool			gpuDirectSetProperty(const char *key,
 										 const char *value);

@@ -483,6 +483,7 @@ typedef struct
 			assert(vs_ops->xpu_type_alignof <= 16);						\
 			KCXT->kvars_slot[__i] = (struct xpu_datum_t *)				\
 				alloca(vs_ops->xpu_type_sizeof);						\
+			KCXT->kvars_slot[__i]->expr_ops = NULL;						\
 		}													   			\
 		KCXT->kvars_desc = __vs_desc;									\
 		KCXT->vlpos = KCXT->vlbuf;										\
