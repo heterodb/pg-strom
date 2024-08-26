@@ -3706,12 +3706,22 @@ try_inject_groupby_expression(codegen_context *context,
 	{
 		const kern_aggregate_desc *desc = &kexp_pagg->u.pagg.desc[i];
 
-		if (desc->arg0_slot_id == kvdef->kv_slot_id ||
-			(desc->action == KAGG_ACTION__COVAR &&
-			 desc->arg1_slot_id == kvdef->kv_slot_id))
+		if (desc->action == KAGG_ACTION__COVAR)
 		{
-			buf->len = pos;
-			goto bailout;
+			if (desc->arg0_slot_id == kvdef->kv_slot_id ||
+				desc->arg1_slot_id == kvdef->kv_slot_id)
+			{
+				buf->len = pos;
+				goto bailout;
+			}
+		}
+		else if (desc->action != KAGG_ACTION__NROWS_ANY)
+		{
+			if (desc->arg0_slot_id == kvdef->kv_slot_id)
+			{
+				buf->len = pos;
+				goto bailout;
+			}
 		}
 	}
 	kexp_pagg->nr_args++;
