@@ -2337,7 +2337,6 @@ struct kern_expression
 		} pagg;		/* PreAggs */
 		struct {
 			uint32_t	hash;			/* kexp for hash-value calculation */
-			int			hash_divisor;	/* hash-divisor, if virtual partition is used */
 			int			nattrs;
 			uint16_t	slot_id[1];
 		} proj;		/* Projection */

@@ -313,7 +313,6 @@ typedef struct
 	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */
 	/* pinned inner buffer stuff */
 	List	   *projection_hashkeys;
-	int			projection_hash_divisor;
 	/* inner relations */
 	int			sibling_param_id;
 	int			num_rels;
@@ -455,7 +454,6 @@ struct pgstromTaskState
 	pg_atomic_uint32   *gcache_fetch_count;
 	kern_multirels	   *h_kmrels;		/* host inner buffer (if JOIN) */
 	const char		   *kds_pathname;	/* pathname to be used for KDS setup */
-	kern_buffer_partitions *proj_kbuf_parts;
 	/* current chunk (already processed by the device) */
 	XpuCommand		   *curr_resp;
 	HeapTupleData		curr_htup;
@@ -587,8 +585,7 @@ extern bytea   *codegen_build_packed_hashkeys(codegen_context *context,
 extern void		codegen_build_packed_gistevals(codegen_context *context,
 											   pgstromPlanInfo *pp_info);
 extern bytea   *codegen_build_projection(codegen_context *context,
-										 List *proj_hash,
-										 int proj_hash_divisor);
+										 List *proj_hash);
 extern void		codegen_build_groupby_actions(codegen_context *context,
 											  pgstromPlanInfo *pp_info);
 

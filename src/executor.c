@@ -709,14 +709,6 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
 		session->groupby_ngroups_estimation = pts->css.ss.ps.plan->plan_rows;
 	}
-	/* partitioned-projection buffer */
-	if (pts->proj_kbuf_parts)
-	{
-		size_t	__sz = offsetof(kern_buffer_partitions,
-								parts[pts->proj_kbuf_parts->nitems]);
-		session->projection_buffer_partitions
-			= __appendBinaryStringInfo(&buf, pts->proj_kbuf_parts, __sz);
-	}
 	/* CPU fallback related */
 	if (pgstrom_cpu_fallback_elevel < ERROR)
 	{
@@ -1163,6 +1155,7 @@ pgstromExecFinalChunk(pgstromTaskState *pts,
 	return xcmd;
 }
 
+#if 0
 /*
  * __setupProjectionBufferPartition
  */
@@ -1267,6 +1260,7 @@ __setupProjectionBufferPartition(pgstromTaskState *pts,
 		pts->proj_kbuf_parts = proj_kbuf_parts;
 	}
 }
+#endif
 
 /*
  * __setupTaskStateRequestBuffer
@@ -1633,13 +1627,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 						  &TTSOpsHeapTuple);
 	ExecAssignScanProjectionInfoWithVarno(&pts->css.ss, INDEX_VAR);
 #endif
-	/*
-	 * Setup kernel buffer partitioning strategy, and update optimal_gpus
-	 * if this node is a source of pinned inner buffer to be distributed
-	 * to multiple GPU devices.
-	 */
-	__setupProjectionBufferPartition(pts, pp_info);
-	
 	/*
 	 * Initialize the CPU Fallback stuff
 	 */
@@ -2458,20 +2445,6 @@ pgstromExplainTaskState(CustomScanState *node,
 							 final_nitems,
 							 format_bytesz(final_usage),
 							 format_bytesz(final_total));
-		}
-		if (pts->proj_kbuf_parts)
-		{
-			kern_buffer_partitions *kbuf_parts = pts->proj_kbuf_parts;
-
-			appendStringInfo(&buf, ", partitions [divisor=%u",
-							 kbuf_parts->nitems);
-			for (int i=0; i < kbuf_parts->nitems; i++)
-			{
-				appendStringInfo(&buf, ", part%d=GPU%u",
-								 kbuf_parts->parts[i].hash_remainder,
-								 kbuf_parts->parts[i].buffer_dindex);
-			}
-			appendStringInfo(&buf, ")");
 		}
 		snprintf(label, sizeof(label),
 				 "%s Pinned Buffer", xpu_label);

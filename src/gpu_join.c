@@ -24,7 +24,6 @@ static bool					pgstrom_enable_gpuhashjoin = false;	/* GUC */
 static bool					pgstrom_enable_gpugistindex = false;/* GUC */
 static bool					pgstrom_enable_partitionwise_gpujoin = false;
 static int					__pinned_inner_buffer_threshold_mb = 0; /* GUC */
-static int					__pinned_inner_buffer_partition_size_mb = 0; /* GUC */
 static CustomPathMethods	dpujoin_path_methods;
 static CustomScanMethods	dpujoin_plan_methods;
 static CustomExecMethods	dpujoin_exec_methods;
@@ -193,7 +192,6 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 {
 	PathTarget *inner_target;
 	size_t		inner_threshold_sz;
-	size_t		inner_partition_sz;
 	int			nattrs;
 	int			unitsz;
 	int			projection_hash_divisor = 0;
@@ -243,24 +241,6 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 
 	if (bufsz < inner_threshold_sz)
 		return NULL;
-	/* Does it need virtual partition? */
-#if 1
-	projection_hash_divisor = 2;
-#else
-	inner_partition_sz = (size_t)__pinned_inner_buffer_partition_size_mb << 20;
-	if (bufsz > inner_partition_sz)
-	{
-		projection_hash_divisor = (bufsz + inner_partition_sz - 1) / inner_partition_sz;
-		//FIXME: repeating GpuJoin allocs projection_hash_divisor is larger than
-		//       numGpuDevAttrs
-		if (projection_hash_divisor > numGpuDevAttrs)
-		{
-			elog(DEBUG2, "pinned inner buffer must be partitioned to %d GPUs, but system has only %d GPUs",
-				 projection_hash_divisor, numGpuDevAttrs);
-			return NULL;
-		}
-	}
-#endif
 	/* Ok, this inner path can use pinned-buffer */
 	if (pgstrom_is_gpuscan_path(inner_path) ||
 		pgstrom_is_gpujoin_path(inner_path))
@@ -270,7 +250,6 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 
 		pp_temp = copy_pgstrom_plan_info(pp_temp);
 		pp_temp->projection_hashkeys = pp_inner->hash_inner_keys;
-		pp_temp->projection_hash_divisor = projection_hash_divisor;
 		cpath->custom_private = list_make1(pp_temp);
 
 		/* turn on inner_pinned_buffer */
@@ -1755,12 +1734,10 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	{
 		/* build device projection */
 		List   *proj_hash = pp_info->projection_hashkeys;
-		int		proj_divisor = pp_info->projection_hash_divisor;
 
 		pgstrom_build_join_tlist_dev(context, root, joinrel, tlist);
 		pp_info->kexp_projection = codegen_build_projection(context,
-															proj_hash,
-															proj_divisor);
+															proj_hash);
 	}
 	pull_varattnos((Node *)context->tlist_dev,
 				   pp_info->scan_relid,
@@ -2700,33 +2677,6 @@ pgstrom_init_gpu_join(void)
 							&__pinned_inner_buffer_threshold_mb,
 							0,		/* disabled */
 							0,		/* 0 means disabled */
-							INT_MAX,
-							PGC_SUSET,
-							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
-							NULL, NULL, NULL);
-	/* virtual partition size of the pinned inner buffer of GpuJoin
-	 * default: 90% of usable DRAM for high-end GPUs,
-	 *          80% of usable DRAM for middle-end GPUs.
-	 */
-	for (int i=0; i < numGpuDevAttrs; i++)
-	{
-		size_t		dram_sz = gpuDevAttrs[i].DEV_TOTAL_MEMSZ;
-		size_t		part_sz;
-
-		if (dram_sz >= (32UL<<30))
-			part_sz = ((dram_sz - (2UL<<30)) * 9 / 10) >> 20;
-		else
-			part_sz = ((dram_sz - (1UL<<30)) * 4 /  5) >> 20;
-		part_sz = Max(part_sz, 4096);	/* at least 4GB */
-		if (i==0 || part_sz < __pinned_inner_buffer_partition_size_mb)
-			__pinned_inner_buffer_partition_size_mb = part_sz;
-	}
-	DefineCustomIntVariable("pg_strom.pinned_inner_buffer_partition_size",
-							"Virtual partition size of pinned inner buffer of GpuJoin",
-							NULL,
-							&__pinned_inner_buffer_partition_size_mb,
-							__pinned_inner_buffer_partition_size_mb,
-							4096,	/* 4GB at least */
 							INT_MAX,
 							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
