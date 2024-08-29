@@ -2464,8 +2464,7 @@ typedef struct kern_session_info
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
 	int32_t		session_currency_frac_digits;	/* copy of lconv::frac_digits */
-//	uint32_t	session_kds_final;	/* header portion of kds_final; used when
-//									 * query results shall be retained in GPU */
+
 	/* join inner buffer */
 	uint32_t	pgsql_port_number;	/* = PostPortNumber */
 	uint32_t	pgsql_plan_node_id;	/* = Plan->plan_node_id */
@@ -2476,9 +2475,6 @@ typedef struct kern_session_info
 	uint32_t	groupby_prepfn_bufsz; /* buffer size for preagg functions */
 	float4_t	groupby_ngroups_estimation; /* planne's estimation of ngroups */
 
-	/* projection final buffer */
-	uint32_t	projection_buffer_partitions; /* valid if projection results are
-											   * distributed to multiple GPUs */
 	/* fallback buffer */
 	uint32_t	fallback_kds_head;		/* offset to kds_fallback (header) */
 	uint32_t	fallback_desc_defs;		/* offset to kern_fallback_desc array */
@@ -2498,19 +2494,11 @@ typedef struct {
 } kern_exec_task;
 
 typedef struct {
-	bool		final_plan_node;
-	bool		final_this_device;
-	char		data[1]				__MAXALIGNED__;
-} kern_final_task;
-
-typedef struct {
 	uint32_t	chunks_offset;		/* offset of kds_dst array */
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
 	uint32_t	ojmap_offset;		/* offset of outer-join-map */
 	uint32_t	ojmap_length;		/* length of outer-join-map */
-	kern_final_task kfin;			/* copy from XpuTaskFinal if any */
-	bool		final_plan_node;
-	bool		final_this_device;
+	bool		final_plan_task;	/* true, if it is final response */
 	uint32_t	final_nitems;		/* final buffer's nitems, if any */
 	uint64_t	final_usage;		/* final buffer's usage, if any */
 	uint64_t	final_total;		/* final buffer's total size, if any */
@@ -2536,17 +2524,6 @@ typedef struct
 	kern_data_store		kds_src;
 } kern_cpu_fallback;
 
-typedef struct
-{
-	uint32_t		hash_divisor;
-	uint32_t		nitems;
-	struct {
-		int32_t		hash_remainder;
-		int32_t		buffer_dindex;
-		gpumask_t	available_gpus;
-	} parts[1];
-} kern_buffer_partitions;
-
 #ifndef ILIST_H
 typedef struct dlist_node
 {
@@ -2570,7 +2547,6 @@ typedef struct
 		kern_errorbuf		error;
 		kern_session_info	session;
 		kern_exec_task		task;
-		kern_final_task		fin;
 		kern_exec_results	results;
 		kern_cpu_fallback	fallback;
 	} u;
@@ -3061,7 +3037,7 @@ struct kern_multirels
 	uint32_t	num_rels;
 	struct
 	{
-		uint64_t	kds_devptr;		/* pointer to KDS (GPU service only) */
+		uint64_t	kds_devptr;		/* pointer to KDS (if non-partitioned) */
 		uint64_t	kds_offset;		/* offset to KDS */
 		uint64_t	ojmap_offset;	/* offset to outer-join map, if any */
 		uint64_t	gist_offset;	/* offset to GiST-index pages, if any */
@@ -3070,10 +3046,24 @@ struct kern_multirels
 		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
 		bool		pinned_buffer;	/* true, if it uses pinned-buffer */
 		uint64_t	buffer_id;		/* key to lookup pinned inner-buffer */
-		int64_t		optimal_gpus;	/* key to lookup pinned inner-buffer */
+		uint64_t	part_offset;	/* offset to kern_buffer_partitions
+									 * if pinned inner-buffer is partitioned */
 	} chunks[1];
 };
 typedef struct kern_multirels	kern_multirels;
+
+typedef struct
+{
+	int32_t			inner_depth;
+	int32_t			hash_divisor;	/* divisor for the hash-value */
+	int32_t			remainder_head;	/* smallest remainder to be processed */
+	int32_t			remainder_tail;	/* largest remainder to be processed */
+	struct {
+		int32_t		hash_remainder;	/* remainder value for this GPU */
+		int32_t		__padding__;
+		uint64_t	kds_devptr;		/* used by GPU-Service */
+	} gpus[1];		/* array length equals numGpuDevAttrs */
+} kern_buffer_partitions;
 
 INLINE_FUNCTION(kern_data_store *)
 KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int depth)

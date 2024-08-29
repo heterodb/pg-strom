@@ -1546,6 +1546,8 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 	{
 		if (m_kmrels->chunks[i].pinned_buffer)
 		{
+			//TODO: reconstruct pinned inner buffer if distributed to
+			//      multiple GPU devices
 			gpuQueryBuffer *__gq_buf;
 			CUdeviceptr		__m_kds_final = 0UL;
 
@@ -1620,6 +1622,7 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 error:
 	for (int i=0; i < gq_buf->nr_subbuffers; i++)
 		putGpuQueryBuffer(gq_buf->subbuffers[i]);
+	gq_buf->nr_subbuffers = 0;
 	if (m_kmrels)
 		cuMemFree((CUdeviceptr)m_kmrels);
 	if (h_kmrels != NULL &&
@@ -1802,7 +1805,7 @@ __getGpuQueryBuffer(uint64_t buffer_id, bool may_create)
 	dlist_foreach(iter, &gpu_query_buffer_hslot[hindex])
 	{
 		gq_buf = dlist_container(gpuQueryBuffer, chain, iter.cur);
-		if (gq_buf->buffer_id   == buffer_id)
+		if (gq_buf->buffer_id == buffer_id)
 		{
 			gq_buf->refcnt++;
 
@@ -3148,7 +3151,6 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 						  gpuClient *gclient,
 						  XpuCommand *xcmd)
 {
-	kern_final_task *kfin = &xcmd->u.fin;
 	gpuQueryBuffer *gq_buf = gclient->gq_buf;
 	struct iovec   *iov_array;
 	struct iovec   *iov;
@@ -3221,13 +3223,15 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 		kern_data_store *kds_final = (kern_data_store *)
 			gq_buf->gpus[__dindex].m_kds_final;
 
-		if (kds_final && kds_final->nitems > 0 &&
-			(gclient->xpu_task_flags & DEVTASK__PREAGG) != 0)
+		if (kds_final && kds_final->nitems > 0)
 		{
-			iovcnt += __gpuClientWriteBackOneChunk(gclient,
-												   iov_array+iovcnt,
-												   kds_final);
-			resp.u.results.chunks_nitems++;
+			if ((gclient->xpu_task_flags & DEVTASK__PREAGG) != 0)
+			{
+				iovcnt += __gpuClientWriteBackOneChunk(gclient,
+													   iov_array+iovcnt,
+													   kds_final);
+				resp.u.results.chunks_nitems++;
+			}
 			resp.u.results.final_nitems += kds_final->nitems;
 			resp.u.results.final_usage  += kds_final->usage;
 			resp.u.results.final_total  += KDS_HEAD_LENGTH(kds_final)
@@ -3236,8 +3240,7 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 				+ kds_final->usage;
 		}
 	}
-	resp.u.results.final_this_device = kfin->final_this_device;
-	resp.u.results.final_plan_node = kfin->final_plan_node;
+	resp.u.results.final_plan_task = true;
 
 	for (int i=1; i < iovcnt; i++)
 		resp_sz += iov_array[i].iov_len;

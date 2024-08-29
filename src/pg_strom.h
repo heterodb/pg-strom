@@ -345,6 +345,7 @@ typedef struct
 {
 	pg_atomic_uint64	inner_nitems;
 	pg_atomic_uint64	inner_usage;
+	pg_atomic_uint64	inner_total;
 	pg_atomic_uint64	stats_gist;			/* only GiST-index */
 	pg_atomic_uint64	stats_join;			/* # of tuples by this join */
 	pg_atomic_uint64	fallback_nitems;	/* # of fallback tuples */
@@ -410,7 +411,6 @@ typedef struct
 	void		   *preload_buffer;
 	bool			inner_pinned_buffer;
 	uint64_t		inner_buffer_id;	/* buffer-id if ZC mode */
-	gpumask_t		inner_optimal_gpus;	/* optimal-gpus if ZC mode */
 
 	/*
 	 * join properties (common)
@@ -490,7 +490,6 @@ struct pgstromTaskState
 	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts,
 									   struct iovec *xcmd_iov, int *xcmd_iovcnt);
 	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts,
-										kern_final_task *fin,
 										struct iovec *xcmd_iov, int *xcmd_iovcnt);
 	/* inner relations state (if JOIN) */
 	int					num_rels;
@@ -702,8 +701,8 @@ extern TupleTableSlot *pgstromExecTaskState(CustomScanState *node);
 extern void		execInnerPreLoadPinnedOneDepth(pgstromTaskState *pts,
 											   pg_atomic_uint64 *p_inner_nitems,
 											   pg_atomic_uint64 *p_inner_usage,
-											   uint64_t *p_inner_buffer_id,
-											   gpumask_t *p_inner_optimal_gpus);
+											   pg_atomic_uint64 *p_inner_total,
+											   uint64_t *p_inner_buffer_id);
 extern void		pgstromExecEndTaskState(CustomScanState *node);
 extern void		pgstromExecResetTaskState(CustomScanState *node);
 extern Size		pgstromSharedStateEstimateDSM(CustomScanState *node,
