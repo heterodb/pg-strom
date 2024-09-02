@@ -2115,7 +2115,7 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 	{
 		int		divisor = (largest_sz + partition_sz - 1) / partition_sz;
 		size_t	kbuf_parts_sz = MAXALIGN(offsetof(kern_buffer_partitions,
-												  gpus[numGpuDevAttrs]));
+												  parts[divisor]));
 		//TODO: Phase-3 allows divisor > numGPUs
 		if (divisor > numGpuDevAttrs)
 			elog(ERROR, "pinned inner-buffer partitions divisor %d larger than number of GPU devices (%d) is not supported right now", divisor, numGpuDevAttrs);
@@ -2126,9 +2126,7 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 				((char *)h_kmrels + offset);
 			gpumask_t	optimal_gpus = pts->optimal_gpus;
 			gpumask_t	other_gpus = (GetSystemAvailableGpus() & ~optimal_gpus);
-			int			optimal_dindex = 0;
-			int			other_dindex = 0;
-			int			remainder = 0;
+			int			remainder_count = 0;
 
 			memset(kbuf_parts, 0, kbuf_parts_sz);
 			kbuf_parts->inner_depth = largest_depth;
@@ -2138,25 +2136,24 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 			/* assign GPUs */
 			Assert(get_bitcount(optimal_gpus | other_gpus) == numGpuDevAttrs);
 			do {
+				gpumask_t	__mask = 1UL;
+				int			__part_id = (remainder_count++ % divisor);
+
 				if (optimal_gpus != 0)
 				{
 					/* optimal GPUs first */
-					while ((optimal_gpus & (1UL<<optimal_dindex)) == 0)
-						optimal_dindex++;
-					Assert(optimal_dindex < numGpuDevAttrs);
-					kbuf_parts->gpus[optimal_dindex].hash_remainder
-						= (remainder++ % divisor);
-					optimal_gpus &= ~(1UL<<optimal_dindex);
+					while ((optimal_gpus & __mask) == 0)
+						__mask <<= 1;
+					kbuf_parts->parts[__part_id].available_gpus |= __mask;
+					optimal_gpus &= ~__mask;
 				}
 				else if (other_gpus != 0)
 				{
 					/* elsewhere, other GPUs also */
-					while ((other_gpus & (1UL<<other_dindex)) == 0)
-						other_dindex++;
-					Assert(other_dindex < numGpuDevAttrs);
-					kbuf_parts->gpus[other_dindex].hash_remainder
-						= (remainder++ % divisor);
-					other_gpus &= ~(1UL<<other_dindex);
+					while ((other_gpus & __mask) == 0)
+						__mask <<= 1;
+					kbuf_parts->parts[__part_id].available_gpus |= __mask;
+					other_gpus &= ~__mask;
 				}
 				else
 				{
@@ -2167,8 +2164,8 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 			elog(INFO, "pinned inner-buffer partitions (depth=%d, divisor=%d)",
 				 kbuf_parts->inner_depth,
 				 kbuf_parts->hash_divisor);
-			for (int i=0; i < numGpuDevAttrs; i++)
-				elog(INFO, "GPU%d - partition-%d", i, kbuf_parts->gpus[i].hash_remainder);
+			for (int k=0; k < kbuf_parts->hash_divisor; k++)
+				elog(INFO, "partition-%d (GPUs: %08lx)", k, kbuf_parts->parts[k].available_gpus);
 			/* offset to the partition descriptor */
 			h_kmrels->chunks[largest_depth-1].part_offset = offset;
 		}

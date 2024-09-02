@@ -13,6 +13,76 @@
 #include "cuda_common.h"
 
 /*
+ * GPU Buffer Partitioning
+ */
+KERNEL_FUNCTION(void)
+kern_buffer_partitioning(kern_data_store *kds_dst,
+						 const kern_data_store *__restrict__ kds_src,
+						 uint32_t hash_divisor,
+						 uint32_t hash_remainder)
+{
+	uint64_t   *rowindex = KDS_GET_ROWINDEX(kds_src);
+	uint32_t	base;
+	__shared__ uint32_t base_rowid;
+	__shared__ uint32_t base_usage;
+
+	for (base = get_global_base();
+		 base < kds_src->nitems;
+		 base += get_global_size())
+	{
+		const kern_hashitem *hitem = NULL;
+		uint32_t	index = base + get_local_id();
+		uint32_t	tupsz = 0;
+		uint32_t	row_id;
+		uint32_t	offset;
+		uint32_t	count;
+		uint32_t	total_sz;
+
+		if (index < kds_src->nitems)
+		{
+			hitem = (kern_hashitem *)((char *)kds_src + kds_src->length
+									  - rowindex[index]
+									  - offsetof(kern_hashitem, t));
+			if (hash_divisor == 0 ||
+				(hitem->hash % hash_divisor) == hash_remainder)
+				tupsz = MAXALIGN(offsetof(kern_hashitem,
+										  t.htup) + hitem->t.t_len);
+			else
+				hitem = NULL;
+		}
+		/* allocation of the destination buffer */
+		row_id = pgstrom_stair_sum_binary(tupsz > 0, &count);
+		offset = pgstrom_stair_sum_uint32(tupsz, &total_sz);
+		if (get_local_id() == 0)
+		{
+			base_rowid = __atomic_add_uint32(&kds_dst->nitems, count);
+			base_usage = __atomic_add_uint64(&kds_dst->usage, total_sz);
+		}
+		__syncthreads();
+		/* put tuples on the destination */
+		row_id += base_rowid;
+		offset += base_usage;
+		if (tupsz > 0)
+		{
+			kern_hashitem  *__hitem = (kern_hashitem *)
+				((char *)kds_dst + kds_dst->length - offset);
+			uint64_t	   *__hslots = KDS_GET_HASHSLOT(kds_dst, hitem->hash);
+
+			__hitem->hash = hitem->hash;
+			__hitem->next = __atomic_exchange_uint64(__hslots, offset);
+			__hitem->t.rowid = row_id;
+			__hitem->t.t_len = hitem->t.t_len;
+			memcpy(&__hitem->t.htup, &hitem->t.htup, hitem->t.t_len);
+			__threadfence();
+			KDS_GET_ROWINDEX(kds_dst)[row_id] = ((char *)kds_dst
+												 + kds_dst->length
+												 - (char *)&__hitem->t);
+		}
+		__syncthreads();
+	}
+}
+
+/*
  * GPU Nested-Loop
  */
 STATIC_FUNCTION(int)

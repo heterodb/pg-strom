@@ -31,6 +31,7 @@ struct gpuContext
 	dlist_node		chain;
 	int				serv_fd;		/* for accept(2) */
 	int				cuda_dindex;
+	gpumask_t		cuda_dmask;		/* = (1UL<<cuda_dindex) */
 	CUdevice		cuda_device;
 	CUcontext		cuda_context;
 	CUmodule		cuda_module;
@@ -38,6 +39,7 @@ struct gpuContext
 	HTAB		   *cuda_func_htab;
 	CUfunction		cufn_kern_gpumain;
 	CUfunction		cufn_prep_gistindex;
+	CUfunction		cufn_kbuf_partitioning;
 	CUfunction		cufn_gpucache_apply_redo;
 	CUfunction		cufn_gpucache_compaction;
 	int				gpumain_shmem_sz_limit;
@@ -1370,11 +1372,36 @@ __putGpuQueryBufferNoLock(gpuQueryBuffer *gq_buf)
 	{
 		CUresult	rc;
 
-		for (int i=0; i < gq_buf->nr_subbuffers; i++)
-			__putGpuQueryBufferNoLock(gq_buf->subbuffers[i]);
-
+		if (gq_buf->subbuffers)
+		{
+			for (int i=0; i < gq_buf->nr_subbuffers; i++)
+				__putGpuQueryBufferNoLock(gq_buf->subbuffers[i]);
+			free(gq_buf->subbuffers);
+		}
 		if (gq_buf->m_kmrels)
 		{
+			kern_multirels *m_kmrels = (kern_multirels *)gq_buf->m_kmrels;
+
+			for (int depth=1; depth <= m_kmrels->num_rels; depth++)
+			{
+				kern_buffer_partitions *kbuf_parts
+					= KERN_MULTIRELS_PARTITION_DESC(m_kmrels, depth);
+				if (kbuf_parts)
+				{
+					for (int k=0; k < kbuf_parts->hash_divisor; k++)
+					{
+						CUdeviceptr	m_kds_in = kbuf_parts->parts[k].kds_devptr;
+
+						if (m_kds_in != 0UL)
+						{
+							rc = cuMemFree(m_kds_in);
+							if (rc != CUDA_SUCCESS)
+								__gsDebug("failed on cuMemFree: %s",
+										  cuStrError(rc));
+						}
+					}
+				}
+			}
 			rc = cuMemFree(gq_buf->m_kmrels);
 			if (rc != CUDA_SUCCESS)
 				__gsDebug("failed on cuMemFree: %s", cuStrError(rc));
@@ -1481,6 +1508,337 @@ __setupGpuQueryJoinGiSTIndexBuffer(gpuClient *gclient,
 	return true;
 }
 
+static CUdeviceptr
+__setupGpuJoinPinnedInnerBufferCommon(gpuClient *gclient,
+									  gpuContext *gcontext,
+									  gpuQueryBuffer *gq_src,
+									  int hash_divisor,
+									  int hash_remainder)
+{
+	kern_data_store *kds_head = NULL;
+	uint64_t	kds_nitems = 0;
+	uint64_t	kds_nslots = 0;
+	uint64_t	kds_usage = 0;
+	size_t		kds_length = 0;
+	int			grid_sz;
+	int			block_sz;
+	CUdeviceptr	m_kds_dst;
+	CUresult	rc;
+	void	   *kern_args[10];
+
+	/* Switch CUDA context to the destination */
+	rc = cuCtxPushCurrent(gcontext->cuda_context);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuCtxPushCurrent: %s", cuStrError(rc));
+
+	/* Allocation of the destination buffer */
+	for (int i=0; i < numGpuDevAttrs; i++)
+	{
+		kern_data_store *__kds = (kern_data_store *)gq_src->gpus[i].m_kds_final;
+
+		if (__kds)
+		{
+			if (!kds_head)
+			{
+				kds_head = alloca(KDS_HEAD_LENGTH(__kds));
+				memcpy(kds_head, __kds, KDS_HEAD_LENGTH(__kds));
+			}
+			kds_nitems += __kds->nitems;
+			kds_usage  += __kds->usage;
+		}
+	}
+	assert(kds_head != NULL);
+	kds_nslots = KDS_GET_HASHSLOT_WIDTH(kds_nitems) + 127;
+	kds_length = KDS_HEAD_LENGTH(kds_head)
+		+ sizeof(uint64_t) * kds_nslots		/* hash-slots */
+		+ sizeof(uint64_t) * kds_nitems		/* row-index */
+		+ (1UL<<30) + kds_usage;			/* tuples (with 1GB margin) */
+
+	rc = cuMemAllocManaged(&m_kds_dst, kds_length,
+						   CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuMemAllocManaged(%lu): %s",
+					  kds_length, cuStrError(rc));
+		goto error_1;
+	}
+	kds_head->length = kds_length;
+	kds_head->usage  = 0;
+	kds_head->nitems = 0;
+	kds_head->hash_nslots = kds_nslots;
+	memcpy((void *)m_kds_dst, kds_head, KDS_HEAD_LENGTH(kds_head));
+
+	/* launch kernel functions for each source buffer */
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 gcontext->cufn_kbuf_partitioning, 0);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
+					  cuStrError(rc));
+		goto error_2;
+	}
+
+	for (int dindex=0; dindex < numGpuDevAttrs; dindex++)
+	{
+		CUdeviceptr	m_kds_src = gq_src->gpus[dindex].m_kds_final;
+
+		if (m_kds_src == 0UL)
+			continue;
+		kern_args[0] = &m_kds_dst;
+		kern_args[1] = &m_kds_src;
+		kern_args[2] = &hash_divisor;
+		kern_args[3] = &hash_remainder;
+		rc = cuLaunchKernel(gcontext->cufn_kbuf_partitioning,
+							grid_sz, 1, 1,
+							block_sz, 1, 1,
+							0,
+							MY_STREAM_PER_THREAD,
+							kern_args,
+							0);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+						  cuStrError(rc));
+			goto error_3;
+		}
+	}
+	rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+					  cuStrError(rc));
+		goto error_2;
+	}
+	/* set read-only attribute */
+	rc = cuMemAdvise(m_kds_dst, kds_length,
+					 CU_MEM_ADVISE_SET_READ_MOSTLY, -1);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuMemAdvise(SET_READ_MOSTLY): %s",
+					  cuStrError(rc));
+		goto error_2;
+	}
+	/* restore the CUDA context */
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuCtxPopCurrent: %s", cuStrError(rc));
+
+	return m_kds_dst;
+
+error_3:
+	rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuStreamSynchronize: %s", cuStrError(rc));
+error_2:
+	rc = cuMemFree(m_kds_dst);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuMemFree: %s", cuStrError(rc));
+error_1:
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		__FATAL("failed on cuCtxPopCurrent: %s", cuStrError(rc));
+	return 0UL;
+}
+
+static int
+__setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
+										   gpuQueryBuffer *gq_buf,
+										   kern_multirels *m_kmrels,
+										   int depth,
+										   kern_buffer_partitions *kbuf_parts)
+{
+	gpuQueryBuffer *gq_src = NULL;
+	uint64_t	buffer_id = m_kmrels->chunks[depth-1].buffer_id;
+	int			hash_divisor = kbuf_parts->hash_divisor;
+	gpuContext **part_gcontexts = alloca(sizeof(gpuContext *) * hash_divisor);
+	dlist_iter	iter;
+
+	/* determine the destination devices for each partition */
+	memset(part_gcontexts, 0, sizeof(gpuContext *) * hash_divisor);
+	for (int k=0; k < hash_divisor; k++)
+	{
+		gpuContext *gcontext = NULL;
+		gpumask_t	part_mask = kbuf_parts->parts[k].available_gpus;
+		double		part_score = -1.0;	/* randomizatino */
+
+		dlist_foreach (iter, &gpuserv_gpucontext_list)
+		{
+			gpuContext *__gcontext = dlist_container(gpuContext,
+													 chain, iter.cur);
+			double		__score = drand48();
+
+			if ((part_mask & __gcontext->cuda_dmask) == 0)
+				continue;
+			if (!gcontext ||
+				/* optimal GPUs are preferable than others */
+				((gclient->optimal_gpus & gcontext->cuda_dmask)   == 0 &&
+				 (gclient->optimal_gpus & __gcontext->cuda_dmask) != 0) ||
+				/* both GPUs are optimal and higher randomization score */
+				((gclient->optimal_gpus & gcontext->cuda_dmask)   != 0 &&
+				 (gclient->optimal_gpus & __gcontext->cuda_dmask) != 0 &&
+				 __score > part_score) ||
+				/* both GPUs are non-optimal and higher randomization score */
+				((gclient->optimal_gpus & gcontext->cuda_dmask)   == 0 &&
+				 (gclient->optimal_gpus & __gcontext->cuda_dmask) == 0 &&
+				 __score > part_score))
+			{
+				gcontext   = __gcontext;
+				part_score = __score;
+			}
+		}
+		part_gcontexts[k] = gcontext;
+	}
+
+	/* lookup the result buffer in the previous step */
+	gq_src = __getGpuQueryBuffer(buffer_id, false);
+	if (!gq_src)
+	{
+		gpuClientELog(gclient, "pinned inner buffer[%d] was not found", depth);
+		goto error;
+	}
+
+	/* setup partitioned inner-buffer for each */
+	for (int k=0; k < hash_divisor; k++)
+	{
+		gpuContext *gcontext = part_gcontexts[k];
+		CUdeviceptr	m_kds_in;
+
+		m_kds_in = __setupGpuJoinPinnedInnerBufferCommon(gclient,
+														 gcontext,
+														 gq_src,
+														 hash_divisor,
+														 k);
+		if (m_kds_in == 0UL)
+			goto error;
+		kbuf_parts->parts[k].kds_devptr = m_kds_in;
+	}
+	return true;
+
+error:
+	for (int k=0; k < hash_divisor; k++)
+	{
+		CUdeviceptr	m_kds_in = kbuf_parts->parts[k].kds_devptr;
+		CUresult	rc;
+
+		if (m_kds_in != 0UL)
+		{
+			rc = cuMemFree(m_kds_in);
+			if (rc != CUDA_SUCCESS)
+				__FATAL("failed on cuMemFree(%p): %s",
+						(void *)m_kds_in, cuStrError(rc));
+		}
+		kbuf_parts->parts[k].kds_devptr = 0UL;
+	}
+	if (gq_src)
+		putGpuQueryBuffer(gq_src);
+	return false;
+}
+
+static bool
+__setupGpuJoinPinnedInnerBufferSingle(gpuClient *gclient,
+									  gpuQueryBuffer *gq_buf,
+									  kern_multirels *m_kmrels,
+									  int depth)
+{
+	gpuQueryBuffer *gq_src = NULL;
+	kern_data_store *kds_src = NULL;
+	uint64_t	buffer_id = m_kmrels->chunks[depth-1].buffer_id;
+	int			kds_nchunks = 0;
+
+	/* lookup the result buffer in the previous step */
+	gq_src = __getGpuQueryBuffer(buffer_id, false);
+	if (!gq_src)
+	{
+		gpuClientELog(gclient, "pinned inner buffer[%d] was not found", depth);
+		return false;
+	}
+
+	/*
+	 * Even if non-partitioned inner buffer case, we have to
+	 * consolidate the buffer if multiple source buffers are
+	 * distributed to multiple GPUs.
+	 */
+	for (int i=0; i < numGpuDevAttrs; i++)
+	{
+		kern_data_store	*__kds = (kern_data_store *)gq_src->gpus[i].m_kds_final;
+
+		if (__kds)
+		{
+			if (kds_src == NULL)
+				kds_src = __kds;
+			kds_nchunks++;
+		}
+	}
+
+	if (kds_nchunks == 0)
+	{
+		gpuClientELog(gclient, "No pinned inner buffer[%d] was found", depth);
+		goto error;
+	}
+	else if (kds_nchunks == 1)
+	{
+		/*
+		 * Single input buffer with no partitioning can be reused as-is.
+		 */
+		if (!gq_buf->subbuffers)
+		{
+			gq_buf->subbuffers = calloc(m_kmrels->num_rels,
+										sizeof(gpuQueryBuffer *));
+			if (!gq_buf->subbuffers)
+			{
+				gpuClientELog(gclient, "out of memory");
+				goto error;
+			}
+			gq_buf->nr_subbuffers = 0;
+		}
+		gq_buf->subbuffers[gq_buf->nr_subbuffers++] = gq_src;
+		m_kmrels->chunks[depth-1].kds_devptr = (CUdeviceptr)kds_src;
+	}
+	else
+	{
+		/*
+		 * Elsewhere, reconstruct the pinned-inner buffers
+		 */
+		gpuContext *gcontext = NULL;
+		double		rand_score = -1.0;
+		dlist_iter	iter;
+		CUdeviceptr	m_kds_in;
+
+		Assert(gclient->optimal_gpus != 0);
+		dlist_foreach (iter, &gpuserv_gpucontext_list)
+		{
+			gpuContext *__gcontext = dlist_container(gpuContext,
+													 chain, iter.cur);
+
+			if ((gclient->optimal_gpus & __gcontext->cuda_dmask) != 0)
+			{
+				double	__score = drand48();
+
+				if (!gcontext || rand_score < __score)
+				{
+					gcontext = __gcontext;
+					rand_score = __score;
+				}
+			}
+		}
+		Assert(gcontext != NULL);
+		m_kds_in = __setupGpuJoinPinnedInnerBufferCommon(gclient,
+														 gcontext,
+														 gq_src,
+														 0, 0);	/* no partitions */
+		if (m_kds_in == 0UL)
+			goto error;
+		m_kmrels->chunks[depth-1].kds_devptr = m_kds_in;
+		putGpuQueryBuffer(gq_src);
+	}
+	return true;
+
+error:
+	putGpuQueryBuffer(gq_src);
+	return false;
+}
+
 static bool
 __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 							   gpuQueryBuffer *gq_buf,
@@ -1542,52 +1900,37 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 		goto error;
 	}
 	memcpy(m_kmrels, h_kmrels, mmap_sz);
-	for (int i=0; i < m_kmrels->num_rels; i++)
+	for (int depth=1; depth <= m_kmrels->num_rels; depth++)
 	{
-		if (m_kmrels->chunks[i].pinned_buffer)
-		{
-			//TODO: reconstruct pinned inner buffer if distributed to
-			//      multiple GPU devices
-			gpuQueryBuffer *__gq_buf;
-			CUdeviceptr		__m_kds_final = 0UL;
+		kern_buffer_partitions *kbuf_parts;
+		struct timeval	tv1, tv2;
 
-			if (!gq_buf->subbuffers)
+		if (m_kmrels->chunks[depth-1].pinned_buffer)
+		{
+			gettimeofday(&tv1, NULL);
+			kbuf_parts = KERN_MULTIRELS_PARTITION_DESC(m_kmrels, depth);
+			if (kbuf_parts)
 			{
-				gq_buf->subbuffers = calloc(m_kmrels->num_rels,
-											sizeof(gpuQueryBuffer *));
-				if (!gq_buf->subbuffers)
-				{
-					gpuClientELog(gclient, "out of memory");
+				if (!__setupGpuJoinPinnedInnerBufferPartitioned(gclient,
+                                                                gq_buf,
+                                                                m_kmrels,
+																depth,
+                                                                kbuf_parts))
 					goto error;
-				}
-				gq_buf->nr_subbuffers = 0;
 			}
-			__gq_buf = __getGpuQueryBuffer(m_kmrels->chunks[i].buffer_id, false);
-			if (!__gq_buf)
+			else
 			{
-				gpuClientELog(gclient, "pinned inner buffer[%d] was not found", i+1);
-				goto error;
+				if (!__setupGpuJoinPinnedInnerBufferSingle(gclient,
+														   gq_buf,
+														   m_kmrels,
+														   depth))
+					goto error;
 			}
-			gq_buf->subbuffers[gq_buf->nr_subbuffers++] = __gq_buf;
-			for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
-			{
-				if (__gq_buf->gpus[__dindex].m_kds_final != 0UL)
-				{
-					if (__m_kds_final == 0UL)
-						__m_kds_final = __gq_buf->gpus[__dindex].m_kds_final;
-					else
-					{
-						gpuClientELog(gclient, "pinned inner buffer was distributed multiple GPUs");
-						goto error;
-					}
-				}
-			}
-			if (__m_kds_final == 0UL)
-			{
-				gpuClientELog(gclient, "No pinned inner buffer[%d] was found", i+1);
-				goto error;
-			}
-			m_kmrels->chunks[i].kds_devptr = __m_kds_final;
+			gettimeofday(&tv2, NULL);
+			fprintf(stderr, "pinned inner buffer [%d] reconstruction: %.3fms\n",
+					depth,
+					(double)((tv2.tv_sec  - tv1.tv_sec)  * 1000 +
+							 (tv2.tv_usec - tv1.tv_usec) / 1000) / 1000.0);
 		}
 	}
 	gq_buf->m_kmrels = (CUdeviceptr)m_kmrels;
@@ -1624,7 +1967,22 @@ error:
 		putGpuQueryBuffer(gq_buf->subbuffers[i]);
 	gq_buf->nr_subbuffers = 0;
 	if (m_kmrels)
+	{
+		for (int depth=1; depth <= m_kmrels->num_rels; depth++)
+		{
+			kern_buffer_partitions *kbuf_parts
+				= KERN_MULTIRELS_PARTITION_DESC(m_kmrels, depth);
+			if (!kbuf_parts)
+				continue;
+			for (int k=0; k < kbuf_parts->hash_divisor; k++)
+			{
+				CUdeviceptr	m_kds_in = kbuf_parts->parts[k].kds_devptr;
+				if (m_kds_in != 0UL)
+					cuMemFree(m_kds_in);
+			}
+		}
 		cuMemFree((CUdeviceptr)m_kmrels);
+	}
 	if (h_kmrels != NULL &&
 		h_kmrels != MAP_FAILED)
 		munmap(h_kmrels, mmap_sz);
@@ -3628,14 +3986,20 @@ __setupGpuKernelFunctionsAndParams(gpuContext *gcontext)
 			 shmem_sz_dynamic, cuStrError(rc));
 	gcontext->gpumain_shmem_sz_limit = shmem_sz_dynamic;
 
-	/* ------ gpujoin_prep_gistindex ------*/
+	/* ------ gpujoin_prep_gistindex ------ */
 	func_name = "gpujoin_prep_gistindex";
     rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
 			 func_name, cuStrError(rc));
 	gcontext->cufn_prep_gistindex = cuda_function;
-
+	/* ------ kern_buffer_partitioning ------ */
+	func_name = "kern_buffer_partitioning";
+	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
+			 func_name, cuStrError(rc));
+	gcontext->cufn_kbuf_partitioning = cuda_function;
 	/* ------ kern_gpucache_apply_redo ------ */
 	func_name = "kern_gpucache_apply_redo";
 	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
@@ -3825,6 +4189,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 		elog(ERROR, "out of memory");
 	gcontext->serv_fd = -1;
 	gcontext->cuda_dindex = cuda_dindex;
+	gcontext->cuda_dmask = (1UL << cuda_dindex);
 	pthreadMutexInit(&gcontext->cuda_setlimit_lock);
 	pthreadMutexInit(&gcontext->worker_lock);
 	dlist_init(&gcontext->worker_list);
@@ -3985,7 +4350,8 @@ gpuservBgWorkerMain(Datum arg)
 	rc = cuInit(0);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuInit: %s", cuStrError(rc));
-
+	/* Misc init */
+	srand48(time(NULL) ^ getpid());
 	PG_TRY();
 	{
 		for (dindex=0; dindex < numGpuDevAttrs; dindex++)

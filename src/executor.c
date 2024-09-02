@@ -680,14 +680,8 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 			double	final_nrows = pp_info->final_nrows;
 			size_t	unit_sz;
 
-			if (final_nrows <= 5000.0)
-				hash_nslots = 20000;
-			else if (final_nrows <= 4000000.0)
-				hash_nslots = 20000 + (int)(2.0 * final_nrows);
-			else
-				hash_nslots = 8020000 + final_nrows;
-
 			format = KDS_FORMAT_HASH;
+			hash_nslots = KDS_GET_HASHSLOT_WIDTH(final_nrows);
 			unit_sz = offsetof(kern_hashitem, t.htup) +
 				MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
 						 BITMAPLEN(kds_final_tdesc->natts)) +

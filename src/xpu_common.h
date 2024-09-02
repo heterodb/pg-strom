@@ -1244,6 +1244,16 @@ __KDS_CHECK_OVERFLOW(const kern_data_store *kds, uint32_t nitems, uint64_t usage
  *
  * ------------------------------------------------
  */
+INLINE_FUNCTION(uint64_t)
+KDS_GET_HASHSLOT_WIDTH(uint64_t nitems)
+{
+	if (nitems <= 5000)
+		return 20000UL;
+	if (nitems <= 4000000)
+		return 20000UL + 2 * nitems;
+	return 8020000UL + nitems;
+}
+
 INLINE_FUNCTION(uint64_t *)
 KDS_GET_HASHSLOT_BASE(const kern_data_store *kds)
 {
@@ -3059,10 +3069,9 @@ typedef struct
 	int32_t			remainder_head;	/* smallest remainder to be processed */
 	int32_t			remainder_tail;	/* largest remainder to be processed */
 	struct {
-		int32_t		hash_remainder;	/* remainder value for this GPU */
-		int32_t		__padding__;
-		uint64_t	kds_devptr;		/* used by GPU-Service */
-	} gpus[1];		/* array length equals numGpuDevAttrs */
+		gpumask_t	available_gpus;	/* set of GPUs for this partition */
+		uint64_t	kds_devptr;		/* used by GPU-service */
+	} parts[1];
 } kern_buffer_partitions;
 
 INLINE_FUNCTION(kern_data_store *)
@@ -3110,6 +3119,16 @@ KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int depth)
 	assert(depth > 0 && depth <= kmrels->num_rels);
 	offset = kmrels->chunks[depth-1].gist_offset;
 	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+}
+
+INLINE_FUNCTION(kern_buffer_partitions *)
+KERN_MULTIRELS_PARTITION_DESC(kern_multirels *kmrels, int depth)
+{
+	uint64_t	offset;
+
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	offset = kmrels->chunks[depth-1].part_offset;
+	return (kern_buffer_partitions *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
 
 /* ----------------------------------------------------------------
