@@ -3168,6 +3168,7 @@ out:
 static void
 gpuservAcceptClient(gpuContext *gcontext)
 {
+	pthread_attr_t th_attr;
 	gpuClient  *gclient;
 	pgsocket	sockfd;
 	int			errcode;
@@ -3194,7 +3195,14 @@ gpuservAcceptClient(gpuContext *gcontext)
 	pthreadMutexInit(&gclient->mutex);
 	gclient->sockfd = sockfd;
 
-	if ((errcode = pthread_create(&gclient->worker, NULL,
+	/* launch workers */
+	if (pthread_attr_init(&th_attr) != 0)
+		__FATAL("failed on pthread_attr_init");
+	if (pthread_attr_setdetachstate(&th_attr, PTHREAD_CREATE_DETACHED) != 0)
+		__FATAL("failed on pthread_attr_setdetachstate");
+
+	if ((errcode = pthread_create(&gclient->worker,
+								  &th_attr,
 								  gpuservMonitorClient,
 								  gclient)) != 0)
 	{
@@ -3770,7 +3778,8 @@ gpuservBgWorkerMain(Datum arg)
 		/* ready to accept connection from the PostgreSQL backend */
 		gpuserv_shared_state->gpuserv_ready_accept = true;
 
-		gpuDirectOpenDriver();
+		if (!gpuDirectOpenDriver())
+			heterodbExtraEreport(true);
 		while (!gpuServiceGoingTerminate())
 		{
 			struct epoll_event	ep_ev;
@@ -3817,7 +3826,8 @@ gpuservBgWorkerMain(Datum arg)
 			gpuContext *gcontext = dlist_container(gpuContext, chain, dnode);
 			gpuservCleanupGpuContext(gcontext);
 		}
-		gpuDirectCloseDriver();
+		if (!gpuDirectCloseDriver())
+			heterodbExtraEreport(false);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -3831,7 +3841,8 @@ gpuservBgWorkerMain(Datum arg)
 		gpuContext *gcontext = dlist_container(gpuContext, chain, dnode);
 		gpuservCleanupGpuContext(gcontext);
 	}
-	gpuDirectCloseDriver();
+	if (!gpuDirectCloseDriver())
+		heterodbExtraEreport(false);
 
 	/*
 	 * If it received only SIGHUP (no SIGTERM), try to restart rather than

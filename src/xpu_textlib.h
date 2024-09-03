@@ -32,7 +32,7 @@ struct xpu_encode_info {
 };
 typedef struct xpu_encode_info	xpu_encode_info;
 
-EXTERN_DATA xpu_encode_info		xpu_encode_catalog[];
+EXTERN_DATA(xpu_encode_info, xpu_encode_catalog[]);
 
 /*
  * validation checkers

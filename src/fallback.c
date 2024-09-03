@@ -472,10 +472,16 @@ execCpuFallbackOneTuple(pgstromTaskState *pts,
 	ExprContext	   *econtext = pts->css.ss.ps.ps_ExprContext;
 	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
 
+	/*
+	 * scan_slot must be set on the ecxt_scantuple prior to
+	 * any ExecQual() because Var node is modified to reference
+	 * INDEX_VAR.
+	 */
+	econtext->ecxt_scantuple = scan_slot;
+
 	/* check WHERE-clause if any */
 	if (depth == 0)
 	{
-
 		Assert(l_state == 0 && !matched);
 		econtext->ecxt_scantuple = scan_slot;
 		if (pts->base_quals)

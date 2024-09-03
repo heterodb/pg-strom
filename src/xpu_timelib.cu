@@ -871,19 +871,19 @@ PGSTROM_SQLTYPE_OPERATORS(timestamptz, true, 8, sizeof(TimestampTz));
  */
 
 /* definition copied from datetime.c */
-STATIC_DATA const int day_tab[2][13] =
+STATIC_DATA(const int, day_tab[2][13]) =
 {
     {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 0},
     {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 0}
 };
 
 /* definition copied from pgtime.h */
-STATIC_DATA const int mon_lengths[2][MONSPERYEAR] = {
+STATIC_DATA(const int, mon_lengths[2][MONSPERYEAR]) = {
     {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31},
     {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
 };
 
-STATIC_DATA const int year_lengths[2] = {
+STATIC_DATA(const int, year_lengths[2]) = {
     DAYSPERNYEAR, DAYSPERLYEAR
 };
 
@@ -2780,9 +2780,12 @@ pgfn_interval_um(XPU_PGFUNCTION_ARGS)
 		result->value.month = -ival.value.month;
 		result->value.day   = -ival.value.day;
 		result->value.time  = -ival.value.time;
-		if (result->value.time != 0 && SAMESIGN(ival.value.time, result->value.time) ||
-			result->value.day != 0 && SAMESIGN(ival.value.day, result->value.day) ||
-			result->value.month != 0 && SAMESIGN(ival.value.month, result->value.month))
+		if ((result->value.time  != 0 && SAMESIGN(ival.value.time,
+												  result->value.time)) ||
+			(result->value.day   != 0 && SAMESIGN(ival.value.day,
+												  result->value.day)) ||
+			(result->value.month != 0 && SAMESIGN(ival.value.month,
+												  result->value.month)))
 		{
 			STROM_ELOG(kcxt, "interval out of range");
 			return false;
@@ -3103,7 +3106,7 @@ typedef struct
 } datetkn;
 #define TOKMAXLEN		10
 
-STATIC_DATA const datetkn deltatktbl[] = {
+STATIC_DATA(const datetkn, deltatktbl[]) = {
 	/* token, type, value */
 	{"@",		IGNORE_DTF, 0},		/* postgres relative prefix */
 	{"ago",		AGO, 0},			/* "ago" indicates negative time offset */
@@ -3178,7 +3181,7 @@ STATIC_DATA const datetkn deltatktbl[] = {
 #define AD      0
 #define BC      1
 
-STATIC_DATA const datetkn datetktbl[] = {
+STATIC_DATA(const datetkn, datetktbl[]) = {
     /* token, type, value */
 	{"-infinity",	RESERV, DTK_EARLY},
 	{"ad",			ADBC, AD},           /* "ad" for years > 0 */

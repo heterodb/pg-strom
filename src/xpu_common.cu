@@ -2580,7 +2580,7 @@ PGSTROM_SQLTYPE_OPERATORS(internal,true,8,8);
  */
 #define TYPE_OPCODE(NAME,a,b)					\
 	{ TypeOpCode__##NAME, &xpu_##NAME##_ops },
-PUBLIC_DATA xpu_type_catalog_entry builtin_xpu_types_catalog[] = {
+PUBLIC_DATA(xpu_type_catalog_entry, builtin_xpu_types_catalog[]) = {
 #include "xpu_opcodes.h"
 	//{ TypeOpCode__composite, &xpu_composite_ops },
 	{ TypeOpCode__array, &xpu_array_ops },
@@ -2595,7 +2595,7 @@ PUBLIC_DATA xpu_type_catalog_entry builtin_xpu_types_catalog[] = {
 	{FuncOpCode__##NAME, pgfn_##NAME},
 #define DEVONLY_FUNC_OPCODE(a,NAME,b,c,d)	\
 	{FuncOpCode__##NAME, pgfn_##NAME},
-PUBLIC_DATA xpu_function_catalog_entry builtin_xpu_functions_catalog[] = {
+PUBLIC_DATA(xpu_function_catalog_entry, builtin_xpu_functions_catalog[]) = {
 	{FuncOpCode__ConstExpr, 				pgfn_ConstExpr },
 	{FuncOpCode__ParamExpr, 				pgfn_ParamExpr },
 	{FuncOpCode__VarExpr,					pgfn_VarExpr },

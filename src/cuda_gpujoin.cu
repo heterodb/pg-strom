@@ -787,6 +787,13 @@ execGpuJoinProjection(kern_context *kcxt,
 }
 
 /*
+ * NOTE: It is a threshold value for stack-overflow checks, and very
+ * critical property because it must be accessible even if the 'kcxt'
+ * variable is not accessible.
+ */
+PUBLIC_SHARED_DATA(uint32_t, pgstrom_cuda_stack_size);
+
+/*
  * kern_gpujoin_main
  */
 KERNEL_FUNCTION(void)
@@ -813,6 +820,9 @@ kern_gpujoin_main(kern_session_info *session,
 		   kgtask->kvecs_ndims  >= n_rels &&
 		   kgtask->n_rels       == n_rels &&
 		   get_local_size()     <= CUDA_MAXTHREADS_PER_BLOCK);
+	/* save the pre-configured CUDA stack limit for overflow checks */
+	if (get_local_id() == 0)
+		pgstrom_cuda_stack_size = session->cuda_stack_size;
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session, kds_fallback);
 	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(kgtask->kvecs_ndims);

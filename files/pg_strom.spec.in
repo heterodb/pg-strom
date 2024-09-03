@@ -254,6 +254,16 @@ fi
 %endif
 
 %changelog
+* Sun Jul 28 2024 KaiGai Kohei <kaigai@heterodb.com> - 5.2-2
+- fixed two critical bugs (#817, #812)
+
+* Sun Jul 14 2024 KaiGai Kohei <kaigai@heterodb.com> - 5.2-1
+- Support of pinned-inner-buffer for large tables GpuJoin
+- Per-tuple CPU-fallback, and CPU-fallback in GpuPreAgg
+- 64bit GPU Buffer representation
+- Improved GPU-Direct SQL performance using device primary context
+- various bug fixes
+
 * Thu May  2 2024 KaiGai Kohei <kaigai@heterodb.com> - 5.1-2
 - RPM specfile is revised (-PGxx is now built as sub-package)
 - various bug fixes

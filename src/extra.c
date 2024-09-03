@@ -10,15 +10,124 @@
  * it under the terms of the PostgreSQL License.
  */
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#ifdef __PGSTROM_MODULE__
 #include "pg_strom.h"
-
+#else
+#include "heterodb_extra.h"
+#endif
 
 #define GPUDIRECT_DRIVER__CUFILE		'n'
 #define GPUDIRECT_DRIVER__NVME_STROM	'h'
 #define GPUDIRECT_DRIVER__VFS			'v'
+#define GPUDIRECT_DRIVER__NONE			0
 static int		gpudirect_driver_kind;
 static __thread void   *gpudirect_vfs_dma_buffer = NULL;
 static __thread size_t	gpudirect_vfs_dma_buffer_sz = 0UL;
+
+/*
+ * Error Handling
+ */
+static __thread int		stub_error_code = 0;
+static __thread const char *stub_error_filename = NULL;
+static __thread unsigned int stub_error_lineno = 0;
+static __thread const char *stub_error_funcname = NULL;
+static __thread char	stub_error_message[1000];
+
+#define __Elog(fmt,...)									\
+	do {												\
+		int		___errno_saved___ = errno;				\
+														\
+		heterodbExtraSetError(errno ? errno : -1,		\
+							  __FILE__, __LINE__,		\
+							  __FUNCTION__,				\
+							  "heterodb_extra: " fmt,	\
+							  ##__VA_ARGS__);			\
+		errno = ___errno_saved___;						\
+	} while(0)
+
+/*
+ * heterodbExtraSetError / heterodbExtraGetError
+ */
+static void (*p_heterodb_extra_set_error)(int errcode,
+										  const char *filename,
+										  unsigned int lineno,
+										  const char *funcname,
+										  const char *fmt, va_list ap) = NULL;
+static int (*p_heterodb_extra_get_error)(const char **p_filename,
+										 unsigned int *p_lineno,
+										 const char **p_funcname,
+										 char *buffer, size_t buffer_sz) = NULL;
+void
+heterodbExtraSetError(int errcode,
+                      const char *filename,
+                      unsigned int lineno,
+                      const char *funcname,
+                      const char *fmt, ...)
+{
+	va_list		ap;
+
+	va_start(ap, fmt);
+	if (p_heterodb_extra_get_error &&
+		p_heterodb_extra_set_error)
+	{
+		p_heterodb_extra_set_error(errcode,
+								   filename,
+								   lineno,
+								   funcname,
+								   fmt, ap);
+	}
+	else if (errcode != 0)
+	{
+		stub_error_code = errcode;
+		stub_error_filename = filename;
+		stub_error_lineno = lineno;
+		stub_error_funcname = funcname;
+		vsnprintf(stub_error_message,
+				  sizeof(stub_error_message)-1, fmt, ap);
+	}
+	va_end(ap);
+}
+
+int
+heterodbExtraGetError(const char **p_filename,
+					  unsigned int *p_lineno,
+					  const char **p_funcname,
+					  char *buffer, size_t buffer_sz)
+{
+	int		errcode = 0;
+
+	if (p_heterodb_extra_get_error &&
+		p_heterodb_extra_set_error)
+	{
+		errcode = p_heterodb_extra_get_error(p_filename,
+											 p_lineno,
+											 p_funcname,
+											 buffer, buffer_sz);
+	}
+	else if (stub_error_code != 0)
+	{
+		if (p_filename)
+			*p_filename = stub_error_filename;
+		if (p_lineno)
+			*p_lineno   = stub_error_lineno;
+		if (p_funcname)
+			*p_funcname = stub_error_funcname;
+		if (buffer && buffer_sz > 0)
+		{
+			strncpy(buffer, stub_error_message, buffer_sz);
+			buffer[buffer_sz-1] = '\0';
+		}
+		errcode = stub_error_code;
+	}
+	return errcode;
+}
 
 /*
  * heterodbExtraModuleInfo
@@ -28,89 +137,45 @@ static char *(*p_heterodb_extra_module_init)(unsigned int pg_version_num) = NULL
 static char *
 heterodbExtraModuleInit(void)
 {
-	char   *res;
-
 	if (!p_heterodb_extra_module_init)
-		elog(ERROR, "HeteroDB Extra module is not loaded yet");
-	res = p_heterodb_extra_module_init(PG_VERSION_NUM);
-	if (!res)
-		elog(ERROR, "out of memory");
-	return res;
-}
-
-/*
- * heterodbExtraEreport
- */
-static int (*p_heterodb_extra_get_error)(const char **p_filename,
-                                         unsigned int *p_lineno,
-                                         const char **p_funcname,
-                                         char *buffer, size_t buffer_sz) = NULL;
-int
-heterodbExtraGetError(const char **p_filename,
-					  unsigned int *p_lineno,
-					  const char **p_funcname,
-					  char *buffer, size_t buffer_sz)
-{
-	int		errcode = 0;
-
-	if (p_heterodb_extra_get_error)
+		__Elog("HeteroDB Extra module is not loaded yet");
+	else
 	{
-		const char *filename;
-		unsigned int lineno;
-		const char *funcname;
-
-		errcode = p_heterodb_extra_get_error(&filename,
-											 &lineno,
-											 &funcname,
-											 buffer, buffer_sz);
-		if (errcode != 0)
-		{
-			if (p_filename)
-				*p_filename = filename;
-			if (p_lineno)
-				*p_lineno = lineno;
-			if (p_funcname)
-				*p_funcname = funcname;
-		}
+#ifndef PG_VERSION_NUM
+		unsigned int PG_VERSION_NUM = 150000;
+#endif
+		char   *signature = p_heterodb_extra_module_init(PG_VERSION_NUM);
+		if (signature)
+			return signature;
+		__Elog("out of memory");
 	}
-	return errcode;
-}
-
-static void
-heterodbExtraEreport(int elevel)
-{
-	int			errcode;
-	const char *filename;
-	unsigned int lineno;
-	const char *funcname;
-	char		buffer[2000];
-
-	errcode = heterodbExtraGetError(&filename,
-									&lineno,
-									&funcname,
-									buffer, sizeof(buffer));
-	if (errcode)
-	{
-		elog(elevel, "(%s:%u) %s [%s]",
-			 filename,
-			 lineno,
-			 buffer,
-			 funcname);
-	}
-	else if (elevel >= ERROR)
-		elog(ERROR, "something failed around heterodbExtraEreport");
+	return NULL;
 }
 
 /*
  * heterodbLicenseReload
  */
 static int	(*p_heterodb_license_reload)(void) = NULL;
-static int
+int
 heterodbLicenseReload(void)
 {
-	if (!p_heterodb_license_reload)
-		return -1;
-	return p_heterodb_license_reload();
+	if (p_heterodb_license_reload)
+		return p_heterodb_license_reload();
+	__Elog("heterodbLicenseReload() is not ready");
+	return -1;
+}
+
+/*
+ * heterodbLicenseReloadPath
+ */
+static int  (*p_heterodb_license_reload_path)(const char *path) = NULL;
+int
+heterodbLicenseReloadPath(const char *path)
+{
+	if (p_heterodb_license_reload_path)
+		return p_heterodb_license_reload_path(path);
+	__Elog("heterodbLicenseReloadPath() is not ready");
+	return -1;
 }
 
 /*
@@ -120,12 +185,27 @@ static ssize_t (*p_heterodb_license_query)(
 	char *buf,
 	size_t bufsz) = NULL;
 
-static ssize_t
+ssize_t
 heterodbLicenseQuery(char *buf, size_t bufsz)
 {
-	if (!p_heterodb_license_query)
-		return -1;
-	return p_heterodb_license_query(buf, bufsz);
+	if (p_heterodb_license_query)
+		return p_heterodb_license_query(buf, bufsz);
+	__Elog("heterodbLicenseQuery() is not ready");
+	return -1;
+}
+
+/*
+ * heterodbLicenseDecrypt
+ */
+static const char *(*p_heterodb_license_decrypt)(const char *path) = NULL;
+
+const char *
+heterodbLicenseDecrypt(const char *path)
+{
+	if (p_heterodb_license_decrypt)
+		return p_heterodb_license_decrypt(path);
+	__Elog("heterodbLicenseDecrypt() is not ready");
+	return NULL;
 }
 
 /*
@@ -137,10 +217,11 @@ int
 heterodbValidateDevice(const char *gpu_device_name,
 					   const char *gpu_device_uuid)
 {
-	if (!p_heterodb_validate_device_v2)
-		return -1;
-	return (p_heterodb_validate_device_v2(gpu_device_name,
-										  gpu_device_uuid));
+	if (p_heterodb_validate_device_v2)
+		return p_heterodb_validate_device_v2(gpu_device_name,
+											 gpu_device_uuid);
+	__Elog("heterodbValidateDevice() is not ready");
+	return -1;
 }
 
 /*
@@ -151,82 +232,48 @@ static const char *(*p_heterodb_init_optimal_gpus)(const char *manual_config) = 
 const char *
 heterodbInitOptimalGpus(const char *manual_config)
 {
-	const char *json = NULL;
-
 	if (p_heterodb_init_optimal_gpus)
-	{
-		json = p_heterodb_init_optimal_gpus(manual_config);
-		if (!json)
-			heterodbExtraEreport(ERROR);
-	}
-	return json;
+		return p_heterodb_init_optimal_gpus(manual_config);
+	__Elog("heterodbInitOptimalGpus() is not ready");
+	return NULL;
 }
 
 /*
  * heterodbGetOptimalGpus
  */
 static int64_t (*p_heterodb_get_optimal_gpus)(const char *path) = NULL;
-
+static int64_t (*p_heterodb_get_optimal_gpus_v2)(const char *path,
+												 const char *policy) = NULL;
 int64_t
-heterodbGetOptimalGpus(const char *path)
+heterodbGetOptimalGpus(const char *path, const char *policy)
 {
-	if (p_heterodb_get_optimal_gpus)
-		return p_heterodb_get_optimal_gpus(path);
-	return 0;
-}
-
-/*
- * pgstrom_license_query
- */
-PG_FUNCTION_INFO_V1(pgstrom_license_query);
-static char *
-__heterodb_license_query(void)
-{
-	char	   *buf;
-	size_t		bufsz;
-	ssize_t		nbytes;
-
-	if (heterodbLicenseReload() <= 0)
-		return NULL;
-
-	bufsz = 2048;
-retry:
-	buf = alloca(bufsz);
-	nbytes = heterodbLicenseQuery(buf, bufsz);
-	if (nbytes < 0)
-		return NULL;
-	if (nbytes < bufsz)
-		return pstrdup(buf);
-	bufsz += bufsz;
-	goto retry;
-}
-
-PUBLIC_FUNCTION(Datum)
-pgstrom_license_query(PG_FUNCTION_ARGS)
-{
-	char	   *license;
-
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 (errmsg("only superuser can query commercial license"))));
-	license = __heterodb_license_query();
-	if (!license)
-		PG_RETURN_NULL();
-
-	PG_RETURN_DATUM(DirectFunctionCall1(json_in, PointerGetDatum(license)));
+	if (p_heterodb_get_optimal_gpus_v2)
+		return p_heterodb_get_optimal_gpus_v2(path, policy);
+	else if (p_heterodb_get_optimal_gpus)
+	{
+		if (!policy || strcmp(policy, "optimal") == 0)
+			return p_heterodb_get_optimal_gpus(path);
+		__Elog("Unknown GPUs allocation policy [%s]", policy);
+	}
+	else
+		__Elog("heterodbGetOptimalGpus() is not ready");
+	return -1;
 }
 
 /*
  * gpuDirectInitDriver
  */
 static void	  (*p_gpudirect__driver_init_v2)(void) = NULL;
-static void
+bool
 gpuDirectInitDriver(void)
 {
-	if (!p_gpudirect__driver_init_v2)
-		elog(ERROR, "heterodb_extra: gpudirect__driver_init_v2 is missing");
-	p_gpudirect__driver_init_v2();
+	if (p_gpudirect__driver_init_v2)
+	{
+		p_gpudirect__driver_init_v2();
+		return true;
+	}
+	__Elog("gpuDirectInitDriver() is not ready");
+	return false;
 }
 
 /*
@@ -235,27 +282,29 @@ gpuDirectInitDriver(void)
 static int	  (*p_cufile__driver_open_v2)(void) = NULL;
 static int	  (*p_nvme_strom__driver_open)(void) = NULL;
 
-void
+bool
 gpuDirectOpenDriver(void)
 {
 	switch (gpudirect_driver_kind)
 	{
 		case GPUDIRECT_DRIVER__CUFILE:
-			if (!p_cufile__driver_open_v2)
-				elog(ERROR, "cuFile is not available");
-			if (p_cufile__driver_open_v2() != 0)
-				heterodbExtraEreport(ERROR);
+			if (p_cufile__driver_open_v2)
+				return (p_cufile__driver_open_v2() == 0);
+			__Elog("cuFile is not available");
 			break;
 
 		case GPUDIRECT_DRIVER__NVME_STROM:
-			if (!p_nvme_strom__driver_open)
-				elog(ERROR, "nvme_strom is not available");
-			if (p_nvme_strom__driver_open() != 0)
-				heterodbExtraEreport(ERROR);
+			if (p_nvme_strom__driver_open)
+				return (p_nvme_strom__driver_open() == 0);
+			__Elog("nvme_strom is not available");
 			break;
+		case GPUDIRECT_DRIVER__VFS:
+			return true;
 		default:
+			__Elog("unknown GPU-Direct SQL driver");
 			break;
 	}
+	return false;
 }
 
 /*
@@ -264,27 +313,28 @@ gpuDirectOpenDriver(void)
 static int	  (*p_cufile__driver_close_v2)(void) = NULL;
 static int	  (*p_nvme_strom__driver_close)(void) = NULL;
 
-void
+bool
 gpuDirectCloseDriver(void)
 {
 	switch (gpudirect_driver_kind)
 	{
 		case GPUDIRECT_DRIVER__CUFILE:
-			if (!p_cufile__driver_close_v2)
-				elog(ERROR, "cuFile is not available");
-			if (p_cufile__driver_close_v2() != 0)
-				heterodbExtraEreport(ERROR);
+			if (p_cufile__driver_close_v2)
+				return (p_cufile__driver_close_v2() == 0);
+			__Elog("cuFile is not available");
 			break;
 
 		case GPUDIRECT_DRIVER__NVME_STROM:
-			if (!p_nvme_strom__driver_close)
-				elog(ERROR, "nvme_strom is not available");
-			if (p_nvme_strom__driver_close() != 0)
-				heterodbExtraEreport(ERROR);
+			if (p_nvme_strom__driver_close)
+				return (p_nvme_strom__driver_close() == 0);
+			__Elog("nvme_strom is not available");
 			break;
+		case GPUDIRECT_DRIVER__VFS:
+			return true;
 		default:
-			break;
+			__Elog("unknown GPU-Direct SQL driver");
 	}
+	return false;
 }
 
 /*
@@ -401,8 +451,11 @@ __gpuDirectAllocDMABufferOnDemand(void)
 
 	if (!gpudirect_vfs_dma_buffer)
 	{
+#ifdef PGSTROM_CHUNK_SIZE
 		size_t	bufsz = PGSTROM_CHUNK_SIZE + (8UL<<20);
-
+#else
+		size_t	bufsz = (80UL << 20);
+#endif
 		rc = cuMemAllocHost(&gpudirect_vfs_dma_buffer, bufsz);
 		if (rc != CUDA_SUCCESS)
 			return false;
@@ -424,20 +477,24 @@ __fallbackFileReadIOV(const char *pathname,
 					  uint32_t *p_npages_direct_read,
 					  uint32_t *p_npages_vfs_read)
 {
+	static __thread long PAGE_SIZE = 0;
 	int			fdesc;
 	uint32_t	nr_pages = 0;
 	struct stat	stat_buf;
 
+	if (PAGE_SIZE == 0)
+		PAGE_SIZE = sysconf(_SC_PAGESIZE);
+
 	fdesc = open(pathname, O_RDONLY);
 	if (fdesc < 0)
 	{
-		fprintf(stderr, "failed on open('%s'): %m\n", pathname);
+		__Elog("failed on open('%s'): %m\n", pathname);
 		goto error_0;
 	}
 
 	if (fstat(fdesc, &stat_buf) != 0)
 	{
-		fprintf(stderr, "failed on fstat('%s'): %m\n", pathname);
+		__Elog("failed on fstat('%s'): %m\n", pathname);
 		goto error_1;
 	}
 
@@ -458,19 +515,21 @@ __fallbackFileReadIOV(const char *pathname,
 
 		while (remained > 0)
 		{
-			sz = Min(remained, vfs_dma_buffer_sz);
+			sz = remained;
+			if (sz > vfs_dma_buffer_sz)
+				sz = vfs_dma_buffer_sz;
 			nbytes = pread(fdesc, vfs_dma_buffer, sz, file_pos);
 			if (nbytes <= 0)
 			{
 				if (errno == EINTR)
 					continue;
-				fprintf(stderr, "failed on pread: %m\n");
+				__Elog("failed on pread: %m\n");
 				goto error_1;
 			}
 			rc = cuMemcpyHtoD(m_segment + dest_pos, vfs_dma_buffer, nbytes);
 			if (rc != CUDA_SUCCESS)
 			{
-				fprintf(stderr, "failed on cuMemcpyHtoD\n");
+				__Elog("failed on cuMemcpyHtoD\n");
 				goto error_1;
 			}
 			file_pos += nbytes;
@@ -665,16 +724,36 @@ gpuDirectFileReadAsyncIOV(const char *pathname,
  */
 static int	(*p_cufile__get_property_v2)(char *buffer,
 										 size_t buffer_sz) = NULL;
-char *
+const char *
 gpuDirectGetProperty(void)
 {
-	char	buffer[2000];
+	char   *result = NULL;
 
-	if (!p_cufile__get_property_v2)
-		elog(ERROR, "heterodb_extra: cufile__get_property_v2 is missing");
-	if (p_cufile__get_property_v2(buffer, sizeof(buffer)) < 0)
-		heterodbExtraEreport(ERROR);
-	return pstrdup(buffer);
+	if (p_cufile__get_property_v2)
+	{
+		for (size_t bufsz = 2000; ; bufsz += bufsz)
+		{
+			char   *buffer = alloca(bufsz+1);
+			ssize_t	nbytes;
+
+			nbytes = p_cufile__get_property_v2(buffer, bufsz);
+			if (nbytes < 0)
+				break;
+			if (nbytes < bufsz)
+			{
+				buffer[nbytes] = '\0';
+				result = strdup(buffer);
+				if (!result)
+					__Elog("out of memory");
+				break;
+			}
+		}
+	}
+	else
+	{
+		__Elog("gpuDirectGetProperty() is not ready");
+	}
+	return result;
 }
 
 /*
@@ -682,13 +761,37 @@ gpuDirectGetProperty(void)
  */
 static int	(*p_cufile__set_property_v2)(const char *key,
 										 const char *value) = NULL;
-void
+bool
 gpuDirectSetProperty(const char *key, const char *value)
 {
-	if (!p_cufile__set_property_v2)
-		elog(ERROR, "heterodb_extra: cufile__set_property_v2 is missing");
-	if (p_cufile__set_property_v2(key, value) != 0)
-		heterodbExtraEreport(ERROR);
+	if (p_cufile__set_property_v2)
+		return (p_cufile__set_property_v2(key, value) == 0);
+	__Elog("gpuDirectSetProperty() is not ready");
+	return false;
+}
+
+/*
+ * heterodbCloudGetVMInfo
+ */
+static int (*p_heterodb_extra_get_cloud_vm_info)(const char *cloud_name,
+												 const char **p_vm_type,
+												 const char **p_vm_image,
+												 const char **p_vm_ident) = NULL;
+bool
+heterodbExtraCloudGetVMInfo(const char *cloud_name,
+							const char **p_vm_type,
+							const char **p_vm_image,
+							const char **p_vm_ident)
+{
+	if (p_heterodb_extra_get_cloud_vm_info)
+	{
+		return (p_heterodb_extra_get_cloud_vm_info(cloud_name,
+												   p_vm_type,
+												   p_vm_image,
+												   p_vm_ident) == 0);
+	}
+	__Elog("heterodbExtraCloudGetVMInfo() is not ready");
+	return false;
 }
 
 /*
@@ -708,6 +811,226 @@ gpuDirectCleanUpOnThreadTerminate(void)
 		gpudirect_vfs_dma_buffer = NULL;
 		gpudirect_vfs_dma_buffer_sz = 0UL;
 	}
+}
+
+/*
+ * heterodb_extra_parse_signature
+ */
+bool
+heterodb_extra_parse_signature(const char *extra_module_info,
+							   uint32_t *p_api_version,
+							   bool *p_has_cufile,
+							   bool *p_has_nvme_strom)
+{
+	char   *buffer;
+	long	api_version = 0;
+	bool	has_cufile = false;
+	bool	has_nvme_strom = false;
+	char   *tok, *pos, *end;
+
+	buffer = alloca(strlen(extra_module_info) + 1);
+	strcpy(buffer, extra_module_info);
+	for (tok = strtok_r(buffer, ",", &pos);
+		 tok != NULL;
+		 tok = strtok_r(NULL, ",", &pos))
+	{
+		if (strncmp(tok, "api_version=", 12) == 0)
+		{
+			api_version = strtol(tok+12, &end, 10);
+			if (api_version < 0 || *end != '\0')
+			{
+				__Elog("invalid extra module token [%s]", tok);
+				return false;
+			}
+		}
+		else if (strncmp(tok, "cufile=", 7) == 0)
+		{
+			if (strcmp(tok+7, "on") == 0)
+				has_cufile = true;
+			else if (strcmp(tok+7, "off") == 0)
+				has_cufile = false;
+			else
+			{
+				__Elog("invalid extra module token [%s]", tok);
+				return false;
+			}
+		}
+		else if (strncmp(tok, "nvme_strom=", 11) == 0)
+		{
+			if (strcmp(tok+11, "on") == 0)
+				has_nvme_strom = true;
+			else if (strcmp(tok+11, "off") == 0)
+				has_nvme_strom = false;
+			else
+			{
+				__Elog("invalid extra module token [%s]", tok);
+				return false;
+			}
+		}
+	}
+	if (api_version < HETERODB_EXTRA_OLDEST_API_VERSION)
+	{
+		__Elog("HeteroDB Extra module API-version [%08ld] is too old.", api_version);
+		return false;
+	}
+	*p_api_version		= api_version;
+	*p_has_cufile		= has_cufile;
+	*p_has_nvme_strom   = has_nvme_strom;
+	return true;
+}
+
+/*
+ * heterodb_extra_init_module
+ */
+const char *
+heterodb_extra_init_module(const char *__extra_pathname)
+{
+	const char *extra_pathname = __extra_pathname;
+	void	   *handle;
+	const char *signature;
+	uint32_t	api_version = 0;
+	bool		has_cufile = false;
+	bool		has_nvme_strom = false;
+
+	/* load the extra module */
+	if (!extra_pathname)
+		extra_pathname = HETERODB_EXTRA_FILENAME;
+	handle = dlopen(extra_pathname,
+					RTLD_NOW | RTLD_LOCAL);
+	if (!handle && !__extra_pathname)
+	{
+		handle = dlopen(HETERODB_EXTRA_PATHNAME,
+						RTLD_NOW | RTLD_LOCAL);
+	}
+	if (!handle)
+	{
+		__Elog("HeteroDB Extra module is not available");
+		return NULL;
+	}
+
+#define LOOKUP_HETERODB_EXTRA_FUNCTION(symbol)					\
+	do {														\
+		void   *fn_addr = dlsym(handle, #symbol);				\
+		if (!fn_addr)											\
+		{														\
+			__Elog("could not find extra symbol \"%s\" - %s",	\
+				   #symbol, dlerror());							\
+			goto bailout;										\
+		}														\
+		p_##symbol = fn_addr;									\
+	} while(0)
+
+	/* lookup extra symbols */
+	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_module_init);
+	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_get_error);
+	signature = heterodbExtraModuleInit();
+	if (!heterodb_extra_parse_signature(signature,
+										&api_version,
+										&has_cufile,
+										&has_nvme_strom))
+		goto bailout;
+	LOOKUP_HETERODB_EXTRA_FUNCTION(gpudirect__driver_init_v2);
+	if (has_cufile)
+	{
+		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__driver_open_v2);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__driver_close_v2);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__map_gpu_memory_v2);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__unmap_gpu_memory_v2);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__register_stream_v3);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__deregister_stream_v3);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__read_file_iov_v3);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__read_file_async_iov_v3);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__get_property_v2);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__set_property_v2);
+	}
+	if (has_nvme_strom)
+	{
+		LOOKUP_HETERODB_EXTRA_FUNCTION(nvme_strom__driver_open);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(nvme_strom__driver_close);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(nvme_strom__map_gpu_memory);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(nvme_strom__unmap_gpu_memory);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(nvme_strom__read_file_iov);
+	}
+	LOOKUP_HETERODB_EXTRA_FUNCTION(vfs_fallback__read_file_iov);
+	if (has_cufile || has_nvme_strom)
+		gpuDirectInitDriver();
+	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_reload);
+	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_reload_path);
+	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_query);
+	if (api_version >= 20240720)
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_decrypt);
+	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_validate_device_v2);
+	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_init_optimal_gpus);
+	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_get_optimal_gpus);
+	if (api_version >= 20240725)
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_get_optimal_gpus_v2);
+	if (api_version >= 20240720)
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_get_cloud_vm_info);
+	return signature;
+
+bailout:
+	dlclose(handle);
+	/* reset function pointers */
+	p_heterodb_extra_module_init        = NULL;
+	p_heterodb_extra_set_error          = NULL;
+	p_heterodb_extra_get_error          = NULL;
+	p_gpudirect__driver_init_v2         = NULL;
+	p_cufile__driver_open_v2            = NULL;
+	p_cufile__driver_close_v2           = NULL;
+	p_cufile__map_gpu_memory_v2         = NULL;
+	p_cufile__unmap_gpu_memory_v2       = NULL;
+	p_cufile__register_stream_v3        = NULL;
+	p_cufile__deregister_stream_v3      = NULL;
+	p_cufile__read_file_iov_v3          = NULL;
+	p_cufile__read_file_async_iov_v3    = NULL;
+	p_cufile__get_property_v2           = NULL;
+	p_cufile__set_property_v2           = NULL;
+	p_nvme_strom__driver_open           = NULL;
+	p_nvme_strom__driver_close          = NULL;
+	p_nvme_strom__map_gpu_memory        = NULL;
+	p_nvme_strom__unmap_gpu_memory      = NULL;
+	p_nvme_strom__read_file_iov         = NULL;
+	p_vfs_fallback__read_file_iov       = NULL;
+	p_heterodb_license_reload           = NULL;
+	p_heterodb_license_reload_path      = NULL;
+	p_heterodb_license_query            = NULL;
+	p_heterodb_license_decrypt          = NULL;
+	p_heterodb_validate_device_v2       = NULL;
+	p_heterodb_init_optimal_gpus        = NULL;
+	p_heterodb_get_optimal_gpus         = NULL;
+	p_heterodb_get_optimal_gpus_v2      = NULL;
+	p_heterodb_extra_get_cloud_vm_info  = NULL;
+	return NULL;
+}
+
+#ifdef __PGSTROM_MODULE__
+/*
+ * heterodbExtraEreport
+ */
+void
+heterodbExtraEreport(int elevel)
+{
+	int			errcode;
+	const char *filename;
+	unsigned int lineno;
+	const char *funcname;
+	char		buffer[2000];
+
+	errcode = heterodbExtraGetError(&filename,
+									&lineno,
+									&funcname,
+									buffer, sizeof(buffer));
+	if (errcode)
+	{
+		elog(elevel,
+			 "(%s:%u) %s [%s]",
+			 filename,
+			 lineno,
+			 buffer,
+			 funcname);
+	}
+	else if (elevel >= ERROR)
+		elog(elevel, "unknown error around heterodb-extra module");
 }
 
 /*
@@ -741,73 +1064,47 @@ gpuDirectIsAvailable(void)
 	return has_gpudirectsql_supported;
 }
 
-/* lookup_heterodb_extra_function */
-static void *
-lookup_heterodb_extra_function(void *handle, const char *symbol)
-{
-	void   *fn_addr;
-
-	fn_addr = dlsym(handle, symbol);
-	if (!fn_addr)
-		elog(ERROR, "could not find extra symbol \"%s\" - %s",
-			 symbol, dlerror());
-	return fn_addr;
-}
-#define LOOKUP_HETERODB_EXTRA_FUNCTION(symbol)	\
-	p_##symbol = lookup_heterodb_extra_function(handle, #symbol)
-
 /*
- * parse_heterodb_extra_module_info
+ * pgstrom_license_query
  */
-static void
-parse_heterodb_extra_module_info(const char *extra_module_info,
-								 uint32 *p_api_version,
-								 bool *p_has_cufile,
-								 bool *p_has_nvme_strom)
+PG_FUNCTION_INFO_V1(pgstrom_license_query);
+static char *
+__heterodb_license_query(void)
 {
-	char   *buffer;
-	long	api_version = 0;
-	bool	has_cufile = false;
-	bool	has_nvme_strom = false;
-	char   *tok, *pos, *end;
+	char	   *buf;
+	size_t		bufsz;
+	ssize_t		nbytes;
 
-	buffer = alloca(strlen(extra_module_info) + 1);
-	strcpy(buffer, extra_module_info);
-	for (tok = strtok_r(buffer, ",", &pos);
-		 tok != NULL;
-		 tok = strtok_r(NULL, ",", &pos))
+	if (heterodbLicenseReload() <= 0)
+		return NULL;
+
+	bufsz = 2048;
+	for (;;)
 	{
-		if (strncmp(tok, "api_version=", 12) == 0)
-		{
-			api_version = strtol(tok+12, &end, 10);
-			if (api_version < 0 || *end != '\0')
-				elog(ERROR, "invalid extra module token [%s]", tok);
-		}
-		else if (strncmp(tok, "cufile=", 7) == 0)
-		{
-			if (strcmp(tok+7, "on") == 0)
-				has_cufile = true;
-			else if (strcmp(tok+7, "off") == 0)
-				has_cufile = false;
-			else
-				elog(ERROR, "invalid extra module token [%s]", tok);
-		}
-		else if (strncmp(tok, "nvme_strom=", 11) == 0)
-		{
-			if (strcmp(tok+11, "on") == 0)
-				has_nvme_strom = true;
-			else if (strcmp(tok+11, "off") == 0)
-				has_nvme_strom = false;
-			else
-				elog(ERROR, "invalid extra module token [%s]", tok);
-		}
+		buf = alloca(bufsz);
+		nbytes = heterodbLicenseQuery(buf, bufsz);
+		if (nbytes < 0)
+			return NULL;
+		if (nbytes < bufsz)
+			return pstrdup(buf);
+		bufsz += bufsz;
 	}
-	if (api_version < HETERODB_EXTRA_API_VERSION)
-		elog(ERROR, "HeteroDB Extra Module has Unsupported API version [%08lu]",
-			 api_version);
-	*p_api_version		= api_version;
-	*p_has_cufile		= has_cufile;
-	*p_has_nvme_strom   = has_nvme_strom;
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_license_query(PG_FUNCTION_ARGS)
+{
+	char	   *license;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 (errmsg("only superuser can query commercial license"))));
+	license = __heterodb_license_query();
+	if (!license)
+		PG_RETURN_NULL();
+
+	PG_RETURN_DATUM(DirectFunctionCall1(json_in, PointerGetDatum(license)));
 }
 
 /*
@@ -816,86 +1113,48 @@ parse_heterodb_extra_module_info(const char *extra_module_info,
 void
 pgstrom_init_extra(void)
 {
-	void	   *handle;
+	const char *signature = heterodb_extra_init_module(NULL);
 	char	   *license;
-	char	   *extra_module_info;
 	uint32_t	api_version = 0;
 	bool		has_cufile = false;
 	bool		has_nvme_strom = false;
 	int			enum_index = 0;
 	static struct config_enum_entry enum_options[4];
 
-	/* load the extra module */
-	handle = dlopen(HETERODB_EXTRA_FILENAME,
-					RTLD_NOW | RTLD_LOCAL);
-	if (!handle)
-	{
-		handle = dlopen(HETERODB_EXTRA_PATHNAME, RTLD_NOW | RTLD_LOCAL);
-		if (!handle)
-		{
-			elog(LOG, "HeteroDB Extra module is not available");
-			return;
-		}
-	}
-
-	/* lookup extra symbols */
-	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_module_init);
-	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_get_error);
-	extra_module_info = heterodbExtraModuleInit();
-	parse_heterodb_extra_module_info(extra_module_info,
-									 &api_version,
-									 &has_cufile,
-									 &has_nvme_strom);
-	LOOKUP_HETERODB_EXTRA_FUNCTION(gpudirect__driver_init_v2);
-	if (has_cufile)
-	{
-		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__driver_open_v2);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__driver_close_v2);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__map_gpu_memory_v2);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__unmap_gpu_memory_v2);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__register_stream_v3);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__deregister_stream_v3);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__read_file_iov_v3);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__read_file_async_iov_v3);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__get_property_v2);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(cufile__set_property_v2);
-	}
-	if (has_nvme_strom)
-	{
-		LOOKUP_HETERODB_EXTRA_FUNCTION(nvme_strom__driver_open);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(nvme_strom__driver_close);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(nvme_strom__map_gpu_memory);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(nvme_strom__unmap_gpu_memory);
-		LOOKUP_HETERODB_EXTRA_FUNCTION(nvme_strom__read_file_iov);
-	}
-	LOOKUP_HETERODB_EXTRA_FUNCTION(vfs_fallback__read_file_iov);
-	if (has_cufile || has_nvme_strom)
-		gpuDirectInitDriver();
-	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_reload);
-	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_query);
-	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_validate_device_v2);
-	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_init_optimal_gpus);
-	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_get_optimal_gpus);
-	elog(LOG, "HeteroDB Extra module loaded [%s]", extra_module_info);
-
 	memset(enum_options, 0, sizeof(enum_options));
-	if (has_cufile)
+	if (!signature)
 	{
-		enum_options[enum_index].name = "cufile";
-		enum_options[enum_index].val  = GPUDIRECT_DRIVER__CUFILE;
+		elog(LOG, "HeteroDB Extra module is missing");
+		enum_options[enum_index].name = "none";
+		enum_options[enum_index].val  = GPUDIRECT_DRIVER__NONE;
 		enum_index++;
 	}
-	if (has_nvme_strom)
+	else
 	{
-		enum_options[enum_index].name = "nvme_strom";
-		enum_options[enum_index].val  = GPUDIRECT_DRIVER__NVME_STROM;
+		elog(LOG, "HeteroDB Extra module loaded [%s]", signature);
+		if (!heterodb_extra_parse_signature(signature,
+											&api_version,
+											&has_cufile,
+											&has_nvme_strom))
+			heterodbExtraEreport(true);
+		if (has_cufile)
+		{
+			enum_options[enum_index].name = "cufile";
+			enum_options[enum_index].val  = GPUDIRECT_DRIVER__CUFILE;
+			enum_index++;
+		}
+		if (has_nvme_strom)
+		{
+			enum_options[enum_index].name = "nvme_strom";
+			enum_options[enum_index].val  = GPUDIRECT_DRIVER__NVME_STROM;
+			enum_index++;
+		}
+		enum_options[enum_index].name = "vfs";
+		enum_options[enum_index].val  = GPUDIRECT_DRIVER__VFS;
 		enum_index++;
 	}
-	enum_options[enum_index].name = "vfs";
-	enum_options[enum_index].val  = GPUDIRECT_DRIVER__VFS;
-	enum_index++;
-
-	/* MEMO: Since PGv16, GUC variable must be initialized with the boot
+	/*
+	 * MEMO: Since PGv16, GUC variable must be initialized with the boot
 	 * value to pass assertion checks.
 	 */
 	gpudirect_driver_kind = enum_options[0].val;
@@ -916,3 +1175,4 @@ pgstrom_init_extra(void)
 		pfree(license);
 	}
 }
+#endif
