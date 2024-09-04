@@ -347,6 +347,14 @@ INLINE_FUNCTION(uint32_t) TotalShmemSize(void)
 #endif		/* __CUDACC__ */
 
 /*
+ * Current GPU-Task specific run-time properties
+ */
+EXTERN_SHARED_DATA(uint32_t, stromTaskProp__cuda_dindex);
+EXTERN_SHARED_DATA(uint32_t, stromTaskProp__cuda_stack_limit);
+EXTERN_SHARED_DATA(uint32_t, stromTaskProp__partition_divisor);
+EXTERN_SHARED_DATA(uint32_t, stromTaskProp__partition_reminder);
+
+/*
  * TypeOpCode / FuncOpCode
  */
 #define TYPE_OPCODE(NAME,a,b)		TypeOpCode__##NAME,
@@ -585,8 +593,6 @@ __strncpy(char *d, const char *s, uint32_t n)
  *
  * ----------------------------------------------------------------
  */
-EXTERN_SHARED_DATA(uint32_t, pgstrom_cuda_stack_size);
-
 INLINE_FUNCTION(bool)
 CHECK_CUDA_STACK_OVERFLOW(void)
 {
@@ -601,7 +607,7 @@ CHECK_CUDA_STACK_OVERFLOW(void)
 	asm volatile("stacksave.u32 %0;" : "=r"(sp) );
 
 	/* 256b margin for the stack boundary */
-	return (sp + pgstrom_cuda_stack_size < 0x00ffff00U);
+	return (sp + stromTaskProp__cuda_stack_limit < 0x00ffff00U);
 #else
 	return false;
 #endif
@@ -2451,8 +2457,7 @@ typedef struct kern_session_info
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	cuda_stack_size;	/* estimated stack size */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
-	int64_t		optimal_gpus;		/* mask of schedulable GPUs */
-	int			cuda_dindex;		/* to be set by GPU-Service */
+	gpumask_t	optimal_gpus;		/* mask of schedulable GPUs */
 	/* xpucode for this session */
 	uint32_t	xpucode_load_vars_packed;
 	uint32_t	xpucode_move_vars_packed;
@@ -3040,6 +3045,18 @@ pg_hash_merge(uint32_t hash_prev, uint32_t hash_next)
  *
  * ----------------------------------------------------------------
  */
+typedef struct
+{
+	int32_t			inner_depth;
+	int32_t			hash_divisor;	/* divisor for the hash-value */
+	int32_t			remainder_head;	/* smallest remainder to be processed */
+	int32_t			remainder_tail;	/* largest remainder to be processed */
+	struct {
+		gpumask_t	available_gpus;	/* set of GPUs for this partition */
+		kern_data_store *kds_in;	/* used by GPU-service */
+	} parts[1];
+} kern_buffer_partitions;
+
 struct kern_multirels
 {
 	size_t		length;				/* total length of kern_multirels */
@@ -3047,7 +3064,9 @@ struct kern_multirels
 	uint32_t	num_rels;
 	struct
 	{
-		uint64_t	kds_devptr;		/* pointer to KDS (if non-partitioned) */
+		kern_data_store *kds_in;	/* pointer to KDS-inner (if non-partitioned) */
+		kern_buffer_partitions *kbuf_parts; /* partition descriptor */
+		/* --- aboves are valid only GPU-service --- */
 		uint64_t	kds_offset;		/* offset to KDS */
 		uint64_t	ojmap_offset;	/* offset to outer-join map, if any */
 		uint64_t	gist_offset;	/* offset to GiST-index pages, if any */
@@ -3062,29 +3081,34 @@ struct kern_multirels
 };
 typedef struct kern_multirels	kern_multirels;
 
-typedef struct
-{
-	int32_t			inner_depth;
-	int32_t			hash_divisor;	/* divisor for the hash-value */
-	int32_t			remainder_head;	/* smallest remainder to be processed */
-	int32_t			remainder_tail;	/* largest remainder to be processed */
-	struct {
-		gpumask_t	available_gpus;	/* set of GPUs for this partition */
-		uint64_t	kds_devptr;		/* used by GPU-service */
-	} parts[1];
-} kern_buffer_partitions;
-
 INLINE_FUNCTION(kern_data_store *)
 KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int depth)
 {
+#ifdef __CUDACC__
+	kern_data_store *kds_in;
+
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	kds_in = kmrels->chunks[depth-1].kds_in;
+	if (!kds_in)
+	{
+		kern_buffer_partitions *kbuf_parts = kmrels->chunks[depth-1].kbuf_parts;
+
+		if (kbuf_parts)
+		{
+			int		reminder = stromTaskProp__partition_reminder;
+
+			assert(reminder >= 0 && reminder < kbuf_parts->hash_divisor);
+			kds_in = kbuf_parts->parts[reminder].kds_in;
+		}
+	}
+	return kds_in;
+#else
 	uint64_t	pos;
 
 	assert(depth > 0 && depth <= kmrels->num_rels);
-	pos = kmrels->chunks[depth-1].kds_devptr;
-	if (pos != 0)
-		return (kern_data_store *)pos;
 	pos = kmrels->chunks[depth-1].kds_offset;
 	return (kern_data_store *)(pos == 0 ? NULL : ((char *)kmrels + pos));
+#endif
 }
 
 INLINE_FUNCTION(bool *)
@@ -3098,7 +3122,8 @@ KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth)
 }
 
 INLINE_FUNCTION(bool *)
-KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth, int cuda_dindex)
+KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth,
+								  uint32_t cuda_dindex)
 {
 	uint64_t	offset;
 
@@ -3106,7 +3131,6 @@ KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth, int cuda_di
 	offset = kmrels->chunks[depth-1].ojmap_offset;
 	if (offset == 0)
 		return NULL;
-	assert(cuda_dindex >= 0);
 	offset += kmrels->ojmap_sz * cuda_dindex;
 	return (bool *)((char *)kmrels + offset);
 }

@@ -24,7 +24,7 @@ kern_buffer_partitioning(kern_data_store *kds_dst,
 	uint64_t   *rowindex = KDS_GET_ROWINDEX(kds_src);
 	uint32_t	base;
 	__shared__ uint32_t base_rowid;
-	__shared__ uint32_t base_usage;
+	__shared__ uint64_t base_usage;
 
 	for (base = get_global_base();
 		 base < kds_src->nitems;
@@ -34,9 +34,9 @@ kern_buffer_partitioning(kern_data_store *kds_dst,
 		uint32_t	index = base + get_local_id();
 		uint32_t	tupsz = 0;
 		uint32_t	row_id;
-		uint32_t	offset;
 		uint32_t	count;
-		uint32_t	total_sz;
+		uint64_t	offset;
+		uint64_t	total_sz;
 
 		if (index < kds_src->nitems)
 		{
@@ -52,7 +52,7 @@ kern_buffer_partitioning(kern_data_store *kds_dst,
 		}
 		/* allocation of the destination buffer */
 		row_id = pgstrom_stair_sum_binary(tupsz > 0, &count);
-		offset = pgstrom_stair_sum_uint32(tupsz, &total_sz);
+		offset = pgstrom_stair_sum_uint64(tupsz, &total_sz);
 		if (get_local_id() == 0)
 		{
 			base_rowid = __atomic_add_uint32(&kds_dst->nitems, count);
@@ -73,6 +73,7 @@ kern_buffer_partitioning(kern_data_store *kds_dst,
 			__hitem->t.rowid = row_id;
 			__hitem->t.t_len = hitem->t.t_len;
 			memcpy(&__hitem->t.htup, &hitem->t.htup, hitem->t.t_len);
+			assert(offsetof(kern_hashitem, t.htup) + hitem->t.t_len <= tupsz);
 			__threadfence();
 			KDS_GET_ROWINDEX(kds_dst)[row_id] = ((char *)kds_dst
 												 + kds_dst->length
@@ -98,7 +99,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 	const kern_expression *kexp;
 	kern_data_store *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	bool	   *oj_map = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kmrels, depth,
-														   kcxt->session->cuda_dindex);
+														   stromTaskProp__cuda_dindex);
 	uint32_t	rd_pos;
 	uint32_t	wr_pos;
 	uint32_t	count;
@@ -249,7 +250,7 @@ execGpuJoinHashJoin(kern_context *kcxt,
 {
 	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	bool	   *oj_map = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kmrels, depth,
-														   kcxt->session->cuda_dindex);
+														   stromTaskProp__cuda_dindex);
 	kern_expression *kexp = NULL;
 	kern_hashitem *khitem = NULL;
 	uint32_t	rd_pos;
@@ -859,11 +860,12 @@ execGpuJoinProjection(kern_context *kcxt,
 }
 
 /*
- * NOTE: It is a threshold value for stack-overflow checks, and very
- * critical property because it must be accessible even if the 'kcxt'
- * variable is not accessible.
+ * GPU-Task specific read-only properties.
  */
-PUBLIC_SHARED_DATA(uint32_t, pgstrom_cuda_stack_size);
+PUBLIC_SHARED_DATA(uint32_t, stromTaskProp__cuda_dindex);
+PUBLIC_SHARED_DATA(uint32_t, stromTaskProp__cuda_stack_limit);
+PUBLIC_SHARED_DATA(uint32_t, stromTaskProp__partition_divisor);
+PUBLIC_SHARED_DATA(uint32_t, stromTaskProp__partition_reminder);
 
 /*
  * kern_gpujoin_main
@@ -892,9 +894,14 @@ kern_gpujoin_main(kern_session_info *session,
 		   kgtask->kvecs_ndims  >= n_rels &&
 		   kgtask->n_rels       == n_rels &&
 		   get_local_size()     <= CUDA_MAXTHREADS_PER_BLOCK);
-	/* save the pre-configured CUDA stack limit for overflow checks */
+	/* save the GPU-Task specific read-only properties */
 	if (get_local_id() == 0)
-		pgstrom_cuda_stack_size = session->cuda_stack_size;
+	{
+		stromTaskProp__cuda_dindex        = kgtask->cuda_dindex;
+		stromTaskProp__cuda_stack_limit   = kgtask->cuda_stack_limit;
+		stromTaskProp__partition_divisor  = kgtask->partition_divisor;
+		stromTaskProp__partition_reminder = kgtask->partition_reminder;
+	}
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session, kds_fallback);
 	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(kgtask->kvecs_ndims);

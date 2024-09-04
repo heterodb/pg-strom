@@ -727,7 +727,6 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->query_plan_id = ps_state->query_plan_id;
 	session->xpu_task_flags = pts->xpu_task_flags;
 	session->optimal_gpus = pts->optimal_gpus;
-	session->cuda_dindex = -1;		/* to be set by GPU-Service */
 	session->kcxt_kvecs_bufsz = pp_info->kvecs_bufsz;
 	session->kcxt_kvecs_ndims = pp_info->kvecs_ndims;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
