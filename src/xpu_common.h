@@ -3047,7 +3047,7 @@ pg_hash_merge(uint32_t hash_prev, uint32_t hash_next)
  */
 typedef struct
 {
-	int32_t			inner_depth;
+	int32_t			inner_depth;	/* partitioned depth */
 	int32_t			hash_divisor;	/* divisor for the hash-value */
 	int32_t			remainder_head;	/* smallest remainder to be processed */
 	int32_t			remainder_tail;	/* largest remainder to be processed */
@@ -3061,6 +3061,7 @@ struct kern_multirels
 {
 	size_t		length;				/* total length of kern_multirels */
 	size_t		ojmap_sz;			/* length of outer-join map */
+	uint64_t	kbuf_part_offset;	/* offset to kern_buffer_partitions, if any */
 	uint32_t	num_rels;
 	struct
 	{
@@ -3075,8 +3076,6 @@ struct kern_multirels
 		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
 		bool		pinned_buffer;	/* true, if it uses pinned-buffer */
 		uint64_t	buffer_id;		/* key to lookup pinned inner-buffer */
-		uint64_t	part_offset;	/* offset to kern_buffer_partitions
-									 * if pinned inner-buffer is partitioned */
 	} chunks[1];
 };
 typedef struct kern_multirels	kern_multirels;
@@ -3148,11 +3147,17 @@ KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int depth)
 INLINE_FUNCTION(kern_buffer_partitions *)
 KERN_MULTIRELS_PARTITION_DESC(kern_multirels *kmrels, int depth)
 {
-	uint64_t	offset;
+	uint64_t	offset = kmrels->kbuf_part_offset;
 
-	assert(depth > 0 && depth <= kmrels->num_rels);
-	offset = kmrels->chunks[depth-1].part_offset;
-	return (kern_buffer_partitions *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+	assert(depth < 0 || (depth > 0 && depth <= kmrels->num_rels));
+	if (offset > 0)
+	{
+		kern_buffer_partitions *kbuf_parts
+			= (kern_buffer_partitions *)((char *)kmrels + offset);
+		if (depth < 0 || kbuf_parts->inner_depth == depth)
+			return kbuf_parts;
+	}
+	return NULL;
 }
 
 /* ----------------------------------------------------------------

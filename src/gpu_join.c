@@ -2167,7 +2167,7 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 			for (int k=0; k < kbuf_parts->hash_divisor; k++)
 				elog(INFO, "partition-%d (GPUs: %08lx)", k, kbuf_parts->parts[k].available_gpus);
 			/* offset to the partition descriptor */
-			h_kmrels->chunks[largest_depth-1].part_offset = offset;
+			h_kmrels->kbuf_part_offset = offset;
 		}
 		return kbuf_parts_sz;
 	}
