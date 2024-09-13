@@ -1834,6 +1834,7 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 	{
 		gpuClientOpenSession(pts, session);
+		GpuJoinInnerPreloadAfterWorks(pts);
 	}
 	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 	{

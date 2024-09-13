@@ -2692,6 +2692,46 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 }
 
 /*
+ * GpuJoinInnerPreload
+ */
+void
+GpuJoinInnerPreloadAfterWorks(pgstromTaskState *pts)
+{
+	for (int i=0; i < pts->num_rels; i++)
+	{
+		pgstromTaskInnerState *istate = &pts->inners[i];
+
+		/*
+		 * Once inner hash/heap join buffer was built, we no longer need
+		 * the final buffer of the inner child GpuScan/GpuJoin, because
+		 * it is already reconstructed as a part of partitioned inner-buffer,
+		 * or parent GpuJoin acquired gpuQueryBuffer if zero-copy mode.
+		 *
+		 * Even though the final buffer is allocated as CUDA managed memory,
+		 * some portion still occupies device memory, and eviction consumes
+		 * unnecessary host memory and PCI-E bandwidth, so early release will
+		 * reduce host/device memory pressure.
+		 *
+		 * But here is one exception. When divisor of inner-buffer partitions
+		 * is larger than the number of GPU devices, this final buffer shall
+		 * be reused for the inner buffer reconstruction.
+		 */
+		if (istate->inner_pinned_buffer)
+		{
+			pgstromTaskState   *i_pts = (pgstromTaskState *)istate->ps;
+
+			Assert(pgstrom_is_gpuscan_state(istate->ps) ||
+				   pgstrom_is_gpujoin_state(istate->ps));
+			if (i_pts->conn)
+			{
+				xpuClientCloseSession(i_pts->conn);
+				i_pts->conn = NULL;
+			}
+		}
+	}
+}
+
+/*
  * __pgstrom_init_xpujoin_common
  */
 static void
