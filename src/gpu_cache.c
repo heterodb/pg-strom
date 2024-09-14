@@ -2862,8 +2862,8 @@ pgstromGpuCacheExplain(pgstromTaskState *pts,
 					 gpuDevAttrs[gc_options->cuda_dindex].DEV_NAME,
 					 phase,
 					 gc_options->max_num_rows,
-					 format_numeric(gpu_main_size),
-					 format_numeric(gpu_extra_size));
+					 format_bytesz(gpu_main_size),
+					 format_bytesz(gpu_extra_size));
 		}
 		else
 		{

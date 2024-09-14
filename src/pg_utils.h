@@ -236,46 +236,40 @@ initStringInfoCxt(MemoryContext memcxt, StringInfo buf)
 }
 
 /*
- * formater of numeric/bytesz/millisec
+ * formater of bytesz/millisec
  */
 static inline char *
-format_numeric(int64 value)
-{
-	if (value > 8000000000000L   || value < -8000000000000L)
-		return psprintf("%.2fT", (double)value / 1000000000000.0);
-	else if (value > 8000000000L || value < -8000000000L)
-		return psprintf("%.2fG", (double)value / 1000000000.0);
-	else if (value > 8000000L    || value < -8000000L)
-		return psprintf("%.2fM", (double)value / 1000000.0);
-	else if (value > 8000L       || value < -8000L)
-		return psprintf("%.2fK", (double)value / 1000.0);
-	else
-		return psprintf("%ld", value);
-}
-
-static inline char *
-format_bytesz(size_t nbytes)
+__format_bytesz(char *buffer, size_t bufsz, size_t nbytes)
 {
 	if (nbytes > (1UL<<43))
-		return psprintf("%.2fTB", (double)nbytes / (double)(1UL<<40));
+		snprintf(buffer, bufsz, "%.2fTB", (double)nbytes / (double)(1UL<<40));
 	else if (nbytes > (1UL<<33))
-		return psprintf("%.2fGB", (double)nbytes / (double)(1UL<<30));
+		snprintf(buffer, bufsz, "%.2fGB", (double)nbytes / (double)(1UL<<30));
 	else if (nbytes > (1UL<<23))
-		return psprintf("%.2fMB", (double)nbytes / (double)(1UL<<20));
+		snprintf(buffer, bufsz, "%.2fMB", (double)nbytes / (double)(1UL<<20));
 	else if (nbytes > (1UL<<13))
-		return psprintf("%.2fKB", (double)nbytes / (double)(1UL<<10));
-	return psprintf("%uB", (unsigned int)nbytes);
+		snprintf(buffer, bufsz, "%.2fKB", (double)nbytes / (double)(1UL<<10));
+	else
+		snprintf(buffer, bufsz, "%uB", (unsigned int)nbytes);
+	return buffer;
 }
+#define format_bytesz(nbytes)	\
+	__format_bytesz(alloca(40), 40, (nbytes))
 
 static inline char *
-format_millisec(double milliseconds)
+__format_millisec(char *buffer, size_t bufsz, double msec)
 {
-	if (milliseconds > 300000.0)    /* more then 5min */
-		return psprintf("%.2fmin", milliseconds / 60000.0);
-	else if (milliseconds > 8000.0) /* more than 8sec */
-		return psprintf("%.2fsec", milliseconds / 1000.0);
-	return psprintf("%.2fms", milliseconds);
+	if (msec > 300000.0)	/* more than 5min */
+		snprintf(buffer, bufsz, "%.2fmin", msec / 60000.0);
+	else if (msec > 8000.0)
+		snprintf(buffer, bufsz, "%.2fsec", msec / 1000.0);
+	else
+		snprintf(buffer, bufsz, "%.0fmsec", msec);
+
+	return buffer;
 }
+#define format_millisec(msec)					\
+	__format_millisec(alloca(40), 40, (msec))
 
 /*
  * pmemdup

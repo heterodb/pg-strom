@@ -132,18 +132,26 @@ static const char  *pgstrom_fatbin_image_filename = "/dev/null";
 static void
 gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
 
-#define __gsLog(fmt, ...)										\
-	gpuservLoggerReport("GPU%d|LOG|%s|%d|%s|" fmt "\n",	\
-						MY_DINDEX_PER_THREAD,					\
-						__basename(__FILE__),					\
-						__LINE__, __FUNCTION__,					\
-						##__VA_ARGS__)
-#define __gsLog2(fmt,dindex, ...)								\
-	gpuservLoggerReport("GPU%d|LOG|%s|%d|%s|" fmt "\n",			\
-						(int)(dindex),							\
-						__basename(__FILE__),					\
-						__LINE__, __FUNCTION__,					\
-						##__VA_ARGS__)
+#define __gsLogCxt(gcontext,fmt,...)							\
+	do {														\
+		if (!gcontext)											\
+			gpuservLoggerReport("GPU*|LOG|%s|%d|%s|" fmt "\n",	\
+								__basename(__FILE__),			\
+								__LINE__,						\
+								__FUNCTION__,					\
+								##__VA_ARGS__);					\
+		else													\
+			gpuservLoggerReport("GPU%d|LOG|%s|%d|%s|" fmt "\n",	\
+								gcontext->cuda_dindex,			\
+								__basename(__FILE__),			\
+								__LINE__,						\
+								__FUNCTION__,					\
+								##__VA_ARGS__);					\
+	} while(0)
+
+#define __gsLog(fmt, ...)									\
+	__gsLogCxt(GpuWorkerCurrentContext,fmt,##__VA_ARGS__)
+
 #define __gsDebug(fmt, ...)										\
 	do {														\
 		if (gpuserv_shared_state &&								\
@@ -369,7 +377,7 @@ static void
 gpuservLoggerReport(const char *fmt, ...)
 {
 	va_list		ap;
-	
+
 	va_start(ap, fmt);
 	vfprintf(gpuserv_logger_filp, fmt, ap);
 	va_end(ap);
@@ -1686,17 +1694,16 @@ __setupGpuJoinPinnedInnerBufferCommon(gpuClient *gclient,
 		curr_nitems = ((kern_data_store *)m_kds_in)->nitems;
 		curr_nslots = ((kern_data_store *)m_kds_in)->hash_nslots;
 		curr_usage  = ((kern_data_store *)m_kds_in)->usage;
-		consumption = KDS_HEAD_LENGTH(kds_head)
-			+ sizeof(uint64_t) * kds_nslots
-			+ sizeof(uint64_t) * kds_nitems
-			+ curr_usage;
-		fprintf(stderr, "GPU%d inner-buffer partition (%u of %d, nitems=%u, nslots=%u, usage=%s, consumption=%s)\n",
-				 gcontext->cuda_dindex,
-				 k, hash_divisor,
-				 curr_nitems,
-				 curr_nslots,
-				 format_bytesz(curr_usage),
-				 format_bytesz(consumption));
+		consumption = (KDS_HEAD_LENGTH(kds_head)
+					   + sizeof(uint64_t) * kds_nslots
+					   + sizeof(uint64_t) * kds_nitems
+					   + curr_usage);
+		__gsLogCxt(gcontext, "inner-buffer partition (%u of %d, nitems=%u, nslots=%u, usage=%s, consumption=%s)",
+				   k, hash_divisor,
+				   curr_nitems,
+				   curr_nslots,
+				   format_bytesz(curr_usage),
+				   format_bytesz(consumption));
 #endif
 		rc = cuCtxPopCurrent(NULL);
 		if (rc != CUDA_SUCCESS)
@@ -1738,12 +1745,11 @@ __setupGpuJoinPinnedInnerBufferCommon(gpuClient *gclient,
 	}
 #endif
 	gettimeofday(&tv2, NULL);
-
-	consumption = KDS_HEAD_LENGTH(kds_head)
-		+ sizeof(uint64_t) * kds_nslots
-		+ sizeof(uint64_t) * kds_nitems
-		+ kds_usage;
-	fprintf(stderr, "pinned inner buffer reconstruction (total: nitems=%lu, usage=%s, consumption=%s; divisor=%u): %.3fsec\n",
+	consumption = (KDS_HEAD_LENGTH(kds_head)
+				   + sizeof(uint64_t) * kds_nslots
+				   + sizeof(uint64_t) * kds_nitems
+				   + kds_usage);
+	__gsLog("pinned inner buffer reconstruction (total: nitems=%lu, usage=%s, consumption=%s; divisor=%u): %.3fsec\n",
 			kds_nitems,
 			format_bytesz(kds_usage),
 			format_bytesz(consumption),
@@ -1850,8 +1856,9 @@ __setupGpuJoinPinnedInnerBufferSingle(gpuClient *gclient,
 	gpuQueryBuffer *gq_src = NULL;
 	kern_data_store *kds_src = NULL;
 	uint64_t	buffer_id = m_kmrels->chunks[depth-1].buffer_id;
-	int			kds_src_dindex = -1;
+	gpuContext *kds_src_gcontext = NULL;
 	int			kds_nchunks = 0;
+	size_t		consumption;
 
 	/* lookup the result buffer in the previous step */
 	gq_src = __getGpuQueryBuffer(buffer_id, false);
@@ -1875,7 +1882,7 @@ __setupGpuJoinPinnedInnerBufferSingle(gpuClient *gclient,
 			if (kds_src == NULL)
 			{
 				kds_src = __kds;
-				kds_src_dindex = i;
+				kds_src_gcontext = &gpuserv_gpucontext_array[i];
 			}
 			kds_nchunks++;
 		}
@@ -1904,15 +1911,15 @@ __setupGpuJoinPinnedInnerBufferSingle(gpuClient *gclient,
 		}
 		gq_buf->subbuffers[gq_buf->nr_subbuffers++] = gq_src;
 		m_kmrels->chunks[depth-1].kds_in = kds_src;
-
-		fprintf(stderr, "GPU%d pinned inner buffer zero-copy (total: nitems=%u, usage=%s, consumption=%s)\n",
-				kds_src_dindex,
-				kds_src->nitems,
-				format_bytesz(kds_src->usage),
-				format_bytesz(KDS_HEAD_LENGTH(kds_src) +
-							  sizeof(uint64_t) * kds_src->nitems +
-							  sizeof(uint64_t) * kds_src->hash_nslots +
-							  kds_src->usage));
+		consumption = (KDS_HEAD_LENGTH(kds_src) +
+					   sizeof(uint64_t) * kds_src->nitems +
+					   sizeof(uint64_t) * kds_src->hash_nslots +
+					   kds_src->usage);
+		__gsLogCxt(kds_src_gcontext,
+				   "pinned inner buffer zero-copy (total: nitems=%u, usage=%s, consumption=%s)",
+				   kds_src->nitems,
+				   format_bytesz(kds_src->usage),
+				   format_bytesz(consumption));
 	}
 	else
 	{
@@ -2777,10 +2784,9 @@ expandCudaStackLimit(gpuClient *gclient,
 			if (rc != CUDA_SUCCESS)
 				__FATAL("failed on cuCtxPopCurrent: %s", cuStrError(rc));
 
-			__gsLog2("CUDA stack size expanded %u -> %u bytes",
-					 gcontext->cuda_dindex,
-					 gcontext->cuda_stack_limit,
-					 cuda_stack_limit);
+			__gsLogCxt(gcontext, "CUDA stack size expanded %u -> %u bytes",
+					   gcontext->cuda_stack_limit,
+					   cuda_stack_limit);
 			gcontext->cuda_stack_limit = cuda_stack_limit;
 		}
 		pthreadMutexUnlock(&gcontext->cuda_setlimit_lock);
