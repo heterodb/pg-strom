@@ -365,6 +365,44 @@ estimate_kern_data_store(TupleDesc tupdesc)
  *
  * ----------------------------------------------------------------
  */
+static inline void
+__relScanInitStartBlock(pgstromTaskState *pts)
+{
+	Relation		relation = pts->css.ss.ss_currentRelation;
+	HeapScanDesc	h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
+
+	if (!h_scan->rs_inited)
+	{
+		if (h_scan->rs_base.rs_parallel)
+		{
+			/* see table_block_parallelscan_startblock_init */
+			ParallelBlockTableScanDesc pb_scan =
+				(ParallelBlockTableScanDesc)h_scan->rs_base.rs_parallel;
+			BlockNumber start_block = InvalidBlockNumber;
+		retry_parallel_init:
+			SpinLockAcquire(&pb_scan->phs_mutex);
+			if (pb_scan->phs_startblock == InvalidBlockNumber)
+			{
+				if (!pb_scan->base.phs_syncscan)
+					pb_scan->phs_startblock = 0;
+				else if (start_block != InvalidBlockNumber)
+					pb_scan->phs_startblock = start_block;
+				else
+				{
+					SpinLockRelease(&pb_scan->phs_mutex);
+					start_block = ss_get_location(relation, pb_scan->phs_nblocks);
+					Assert(start_block != InvalidBlockNumber);
+					goto retry_parallel_init;
+				}
+			}
+			h_scan->rs_nblocks = pb_scan->phs_nblocks;
+			h_scan->rs_startblock = pb_scan->phs_startblock;
+			SpinLockRelease(&pb_scan->phs_mutex);
+		}
+		h_scan->rs_inited = true;
+	}
+}
+
 #define __XCMD_KDS_SRC_OFFSET(buf)							\
 	(((XpuCommand *)((buf)->data))->u.task.kds_src_offset)
 #define __XCMD_GET_KDS_SRC(buf)								\
@@ -563,6 +601,10 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	uint32_t		kds_src_pathname = 0;
 	uint32_t		kds_src_iovec = 0;
 	uint32_t		kds_nrooms;
+	int32_t			scan_repeat_id = -1;
+	uint64_t		scan_block_limit;
+
+	__relScanInitStartBlock(pts);
 
 	kds = __XCMD_GET_KDS_SRC(&pts->xcmd_buf);
 	kds_nrooms = (PGSTROM_CHUNK_SIZE -
@@ -581,6 +623,9 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	strom_iovec->nr_chunks = 0;
 	strom_blknums = alloca(sizeof(BlockNumber) * kds_nrooms);
 	strom_nblocks = 0;
+
+	scan_block_limit = ((uint64_t)h_scan->rs_nblocks *
+						(uint64_t)pts->num_scan_repeats);
 	while (!pts->scan_done)
 	{
 		while (pts->curr_block_num < pts->curr_block_tail &&
@@ -617,7 +662,17 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				}
 				LWLockRelease(bufLock);
 			}
-			
+
+			/*
+			 * MEMO: When multiple scans are needed (pts->num_scan_repeats > 0),
+			 * kds_src should not mixture the blocks come from different scans,
+			 * because it shall be JOIN'ed on different partitions.
+			 */
+			if (scan_repeat_id < 0)
+				scan_repeat_id = pts->curr_block_num / h_scan->rs_nblocks;
+			else if (scan_repeat_id != pts->curr_block_num / h_scan->rs_nblocks)
+				goto out;
+
 			/*
 			 * MEMO: right now, we allow GPU Direct SQL for the all-visible
 			 * pages only, due to the restrictions about MVCC checks.
@@ -685,25 +740,23 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 		}
 		else if (pts->br_state)
 		{
-			if (!pgstromBrinIndexNextChunk(pts))
+			int		__next_repeat_id = pgstromBrinIndexNextChunk(pts);
+
+			if (__next_repeat_id < 0)
 				pts->scan_done = true;
+			else if (scan_repeat_id < 0 ||
+					 scan_repeat_id != __next_repeat_id)
+				break;
 		}
 		else if (!h_scan->rs_base.rs_parallel)
 		{
 			/* single process scan */
 			BlockNumber		num_blocks = kds_nrooms - kds->nitems;
 
-			if (!h_scan->rs_inited)
-			{
-				h_scan->rs_cblock = 0;
-				h_scan->rs_inited = true;
-			}
-			pts->curr_block_num = h_scan->rs_cblock;
-			if (pts->curr_block_num >= h_scan->rs_nblocks)
+			if (pts->curr_block_num >= scan_block_limit)
 				pts->scan_done = true;
-			else if (pts->curr_block_num + num_blocks > h_scan->rs_nblocks)
+			else if (pts->curr_block_num + num_blocks > scan_block_limit)
 				num_blocks = h_scan->rs_nblocks - pts->curr_block_num;
-			h_scan->rs_cblock += num_blocks;
 			pts->curr_block_tail = pts->curr_block_num + num_blocks;
 		}
 		else
@@ -713,36 +766,11 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 				(ParallelBlockTableScanDesc)h_scan->rs_base.rs_parallel;
 			BlockNumber		num_blocks = kds_nrooms - kds->nitems;
 
-			if (!h_scan->rs_inited)
-			{
-				/* see table_block_parallelscan_startblock_init */
-				BlockNumber	start_block = InvalidBlockNumber;
-
-			retry_parallel_init:
-				SpinLockAcquire(&pb_scan->phs_mutex);
-				if (pb_scan->phs_startblock == InvalidBlockNumber)
-				{
-					if (!pb_scan->base.phs_syncscan)
-						pb_scan->phs_startblock = 0;
-					else if (start_block != InvalidBlockNumber)
-						pb_scan->phs_startblock = start_block;
-					else
-					{
-						SpinLockRelease(&pb_scan->phs_mutex);
-						start_block = ss_get_location(relation, pb_scan->phs_nblocks);
-						goto retry_parallel_init;
-					}
-				}
-				h_scan->rs_nblocks = pb_scan->phs_nblocks;
-				h_scan->rs_startblock = pb_scan->phs_startblock;
-				SpinLockRelease(&pb_scan->phs_mutex);
-				h_scan->rs_inited = true;
-			}
 			pts->curr_block_num = pg_atomic_fetch_add_u64(&pb_scan->phs_nallocated,
 														  num_blocks);
-			if (pts->curr_block_num >= h_scan->rs_nblocks)
+			if (pts->curr_block_num >= scan_block_limit)
 				pts->scan_done = true;
-			else if (pts->curr_block_num + num_blocks > h_scan->rs_nblocks)
+			else if (pts->curr_block_num + num_blocks > scan_block_limit)
 				num_blocks = h_scan->rs_nblocks - pts->curr_block_num;
 			pts->curr_block_tail = pts->curr_block_num + num_blocks;
 		}
@@ -754,6 +782,7 @@ out:
 	kds->length = kds->block_offset + BLCKSZ * kds->nitems;
 	if (kds->nitems == 0)
 		return NULL;
+	Assert(scan_repeat_id >= 0);
 	if (strom_nblocks > 0)
 	{
 		memcpy(&KDS_BLOCK_BLCKNR(kds, kds->block_nloaded),
@@ -783,6 +812,7 @@ out:
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
 	xcmd->u.task.kds_src_pathname = kds_src_pathname;
 	xcmd->u.task.kds_src_iovec = kds_src_iovec;
+	xcmd->u.task.scan_repeat_id = scan_repeat_id;
 	xcmd->length = pts->xcmd_buf.len;
 
 	xcmd_iov[0].iov_base = xcmd;
@@ -828,12 +858,14 @@ XpuCommand *
 pgstromRelScanChunkNormal(pgstromTaskState *pts,
 						  struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
-	EState		   *estate = pts->css.ss.ps.state;
-	TableScanDesc	scan = pts->css.ss.ss_currentScanDesc;
+	HeapScanDesc	h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
 	TupleTableSlot *slot = pts->base_slot;
 	kern_data_store *kds;
 	XpuCommand	   *xcmd;
+	int				kds_repeat_id = -1;
 	size_t			sz1, sz2;
+
+	__relScanInitStartBlock(pts);
 
 	pts->xcmd_buf.len = __XCMD_KDS_SRC_OFFSET(&pts->xcmd_buf) + PGSTROM_CHUNK_SIZE;
 	enlargeStringInfo(&pts->xcmd_buf, 0);
@@ -842,53 +874,108 @@ pgstromRelScanChunkNormal(pgstromTaskState *pts,
 	kds->usage = 0;
 	kds->length = PGSTROM_CHUNK_SIZE;
 
-	if (pts->br_state)
+	while (!pts->scan_done)
 	{
-		/* scan by BRIN index */
-		while (!pts->scan_done)
+		if (!TTS_EMPTY(slot))
 		{
-			if (!pts->curr_tbm)
-			{
-				TBMIterateResult *next_tbm = pgstromBrinIndexNextBlock(pts);
+			Assert(pts->curr_repeat_id >= 0);
+			if (!__kds_row_insert_tuple(kds, slot))
+				break;
+			if (kds_repeat_id < 0)
+				kds_repeat_id = pts->curr_repeat_id;
+		}
+		Assert(TTS_EMPTY(slot));
 
-				if (!next_tbm)
+		if (pts->curr_repeat_id < 0)
+		{
+			/* scan by BRIN index */
+			if (pts->br_state)
+			{
+				TBMIterateResult *tbm = pts->curr_tbm;
+				uint64_t	raw_index = pts->curr_block_num++;
+
+				if (raw_index >= pts->curr_block_tail)
+				{
+					int		__repeat_id = pgstromBrinIndexNextChunk(pts);
+
+					if (__repeat_id < 0)
+					{
+						pts->scan_done = true;
+						break;
+					}
+					raw_index = pts->curr_block_num++;
+				}
+				tbm->blockno = (raw_index + h_scan->rs_startblock) % h_scan->rs_nblocks;
+				tbm->ntuples = -1;
+				tbm->recheck = true;
+				if (!table_scan_bitmap_next_block(&h_scan->rs_base, tbm))
+					continue;
+				pts->curr_repeat_id = (raw_index / h_scan->rs_nblocks);
+			}
+			else if (!h_scan->rs_base.rs_parallel)
+			{
+				/* single process scan */
+				uint64_t    raw_index = pts->curr_block_num++;
+
+                if (raw_index < ((uint64_t)h_scan->rs_nblocks *
+								 (uint64_t)pts->num_scan_repeats))
+				{
+					TBMIterateResult *tbm = pts->curr_tbm;
+
+					tbm->blockno = (raw_index % h_scan->rs_nblocks);
+					tbm->ntuples = -1;
+					tbm->recheck = true;
+					if (!table_scan_bitmap_next_block(&h_scan->rs_base, tbm))
+						continue;
+					pts->curr_repeat_id = (raw_index / h_scan->rs_nblocks);
+				}
+				else
 				{
 					pts->scan_done = true;
 					break;
 				}
-				if (!table_scan_bitmap_next_block(scan, next_tbm))
-					elog(ERROR, "failed on table_scan_bitmap_next_block");
-				pts->curr_tbm = next_tbm;
 			}
-			if (!TTS_EMPTY(slot) &&
-				!__kds_row_insert_tuple(kds, slot))
-				break;
-			if (!table_scan_bitmap_next_tuple(scan, pts->curr_tbm, slot))
-				pts->curr_tbm = NULL;
-			else if (!__kds_row_insert_tuple(kds, slot))
-				break;
-		}
-	}
-	else
-	{
-		/* full table scan */
-		while (!pts->scan_done)
-		{
-			if (!TTS_EMPTY(slot) &&
-				!__kds_row_insert_tuple(kds, slot))
-				break;
-			if (!table_scan_getnextslot(scan, estate->es_direction, slot))
+			else
 			{
-				pts->scan_done = true;
-				break;
-			}
-			if (!__kds_row_insert_tuple(kds, slot))
-				break;
-		}
-	}
+				/* parallel process scan */
+				ParallelBlockTableScanDesc pb_scan =
+					(ParallelBlockTableScanDesc)h_scan->rs_base.rs_parallel;
+				uint64_t	raw_index = pg_atomic_fetch_add_u64(&pb_scan->phs_nallocated, 1);
 
+				if (raw_index < ((uint64_t)h_scan->rs_nblocks *
+								 (uint64_t)pts->num_scan_repeats))
+				{
+					TBMIterateResult *tbm = pts->curr_tbm;
+
+					tbm->blockno = (raw_index % h_scan->rs_nblocks);
+					tbm->ntuples = -1;
+					tbm->recheck = true;
+					if (!table_scan_bitmap_next_block(&h_scan->rs_base, tbm))
+						continue;
+					pts->curr_repeat_id = (raw_index / h_scan->rs_nblocks);
+				}
+				else
+				{
+					pts->scan_done = true;
+					break;
+				}
+			}
+		}
+		Assert(pts->curr_repeat_id >= 0);
+		if (kds_repeat_id >= 0 && kds_repeat_id != pts->curr_repeat_id)
+			break;		/* never mixture different repeat_id in same KDS */
+		if (!table_scan_bitmap_next_tuple(&h_scan->rs_base,
+										  pts->curr_tbm,
+										  slot))
+			pts->curr_repeat_id = -1;	/* load next */
+		else if (!__kds_row_insert_tuple(kds, slot))
+			break;		/* KDS fill up */
+		else if (kds_repeat_id < 0)
+			kds_repeat_id = pts->curr_repeat_id;
+	}
 	if (kds->nitems == 0)
 		return NULL;
+	Assert(kds_repeat_id >= 0);
 
 	/* setup iovec that may skip the hole between row-index and tuples-buffer */
 	sz1 = ((KDS_BODY_ADDR(kds) - pts->xcmd_buf.data) +
@@ -898,6 +985,7 @@ pgstromRelScanChunkNormal(pgstromTaskState *pts,
 	kds->length = (KDS_HEAD_LENGTH(kds) +
 				   MAXALIGN(sizeof(uint64_t) * kds->nitems) + sz2);
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
+	xcmd->u.task.scan_repeat_id = kds_repeat_id;
 	xcmd->length = sz1 + sz2;
 	xcmd_iov[0].iov_base = xcmd;
 	xcmd_iov[0].iov_len  = sz1;

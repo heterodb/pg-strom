@@ -462,6 +462,7 @@ struct pgstromTaskState
 	int64_t				curr_index;
 	bool				scan_done;
 	bool				final_done;
+	uint32_t			num_scan_repeats;
 
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
@@ -474,16 +475,17 @@ struct pgstromTaskState
 	size_t				fallback_usage;
 	size_t				fallback_bufsz;
 	char			   *fallback_buffer;
-	TupleTableSlot	   *fallback_slot;	/* host-side kvars-slot */
+	TupleTableSlot	   *fallback_slot;		/* host-side kvars-slot */
 	List			   *fallback_proj;
 	List			   *fallback_load_src;	/* source resno of base-rel */
 	List			   *fallback_load_dst;	/* dest resno of fallback-slot */
 	bytea			   *kern_fallback_desc;
 	/* request command buffer (+ status for table scan) */
 	TBMIterateResult   *curr_tbm;
+	int32_t				curr_repeat_id;		/* for KDS_FORMAT_ROW */
 	Buffer				curr_vm_buffer;		/* for visibility-map */
-	BlockNumber			curr_block_num;		/* for KDS_FORMAT_BLOCK */
-	BlockNumber			curr_block_tail;	/* for KDS_FORMAT_BLOCK */
+	uint64_t			curr_block_num;		/* for KDS_FORMAT_BLOCK */
+	uint64_t			curr_block_tail;	/* for KDS_FORMAT_BLOCK */
 	StringInfoData		xcmd_buf;
 	/* callbacks */
 	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
@@ -631,8 +633,7 @@ extern void		pgstromBrinIndexExecBegin(pgstromTaskState *pts,
 										  Oid index_oid,
 										  List *index_conds,
 										  List *index_quals);
-extern bool		pgstromBrinIndexNextChunk(pgstromTaskState *pts);
-extern TBMIterateResult *pgstromBrinIndexNextBlock(pgstromTaskState *pts);
+extern int		pgstromBrinIndexNextChunk(pgstromTaskState *pts);
 extern void		pgstromBrinIndexExecEnd(pgstromTaskState *pts);
 extern void		pgstromBrinIndexExecReset(pgstromTaskState *pts);
 extern Size		pgstromBrinIndexEstimateDSM(pgstromTaskState *pts);

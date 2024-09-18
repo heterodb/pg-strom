@@ -2505,6 +2505,7 @@ typedef struct {
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
 	uint32_t	kds_dst_offset;		/* offset to kds_dst */
+	int32_t		scan_repeat_id;		/* current repeat count */
 	char		data[1]				__MAXALIGNED__;
 } kern_exec_task;
 

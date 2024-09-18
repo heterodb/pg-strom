@@ -3628,15 +3628,22 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
  * ExecArrowScanChunk
  */
 static inline RecordBatchState *
-__arrowFdwNextRecordBatch(ArrowFdwState *arrow_state)
+__arrowFdwNextRecordBatch(ArrowFdwState *arrow_state,
+						  int32_t num_scan_repeats,
+						  int32_t *p_scan_repeat_id)
 {
 	RecordBatchState *rb_state;
+	uint32_t	raw_index;
 	uint32_t	rb_index;
 
+	Assert(num_scan_repeats > 0);
 retry:
-	rb_index = pg_atomic_fetch_add_u32(arrow_state->rbatch_index, 1);
-	if (rb_index >= arrow_state->rb_nitems)
+	raw_index = pg_atomic_fetch_add_u32(arrow_state->rbatch_index, 1);
+	if (raw_index >= arrow_state->rb_nitems * num_scan_repeats)
 		return NULL;	/* no more chunks to load */
+	rb_index = (raw_index % num_scan_repeats);
+	if (p_scan_repeat_id)
+		*p_scan_repeat_id = (raw_index / num_scan_repeats);
 	rb_state = arrow_state->rb_states[rb_index];
 	if (arrow_state->stats_hint)
 	{
@@ -3662,12 +3669,15 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	RecordBatchState *rb_state;
 	ArrowFileState *af_state;
 	strom_io_vector *iovec;
-	XpuCommand	   *xcmd;
-	uint32_t		kds_src_offset;
-	uint32_t		kds_src_iovec;
-	uint32_t		kds_src_pathname;
+	XpuCommand *xcmd;
+	uint32_t	kds_src_offset;
+	uint32_t	kds_src_iovec;
+	uint32_t	kds_src_pathname;
+	int32_t		scan_repeat_id;
 
-	rb_state = __arrowFdwNextRecordBatch(arrow_state);
+	rb_state = __arrowFdwNextRecordBatch(arrow_state,
+										 pts->num_scan_repeats,
+										 &scan_repeat_id);
 	if (!rb_state)
 	{
 		pts->scan_done = true;
@@ -3704,6 +3714,7 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	xcmd->u.task.kds_src_pathname = kds_src_pathname;
 	xcmd->u.task.kds_src_iovec    = kds_src_iovec;
 	xcmd->u.task.kds_src_offset   = kds_src_offset;
+	xcmd->u.task.scan_repeat_id   = scan_repeat_id;
 
 	xcmd_iov->iov_base = xcmd;
 	xcmd_iov->iov_len  = xcmd->length;
@@ -3729,7 +3740,7 @@ ArrowIterateForeignScan(ForeignScanState *node)
 
 		arrow_state->curr_index = 0;
 		arrow_state->curr_kds = NULL;
-		rb_state = __arrowFdwNextRecordBatch(arrow_state);
+		rb_state = __arrowFdwNextRecordBatch(arrow_state, 1, NULL);
 		if (!rb_state)
 			return NULL;
 		arrow_state->curr_kds

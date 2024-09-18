@@ -449,7 +449,7 @@ typedef struct
 	volatile int	build_status;
 	slock_t			lock;	/* once 'build_status' is set, no need to take
 							 * this lock again. */
-	pg_atomic_uint32 index;
+	pg_atomic_uint64 index;
 	uint32_t		nitems;
 	BlockNumber		chunks[FLEXIBLE_ARRAY_MEMBER];
 } BrinIndexResults;
@@ -567,7 +567,7 @@ pgstromBrinIndexExecReset(pgstromTaskState *pts)
 
 	br_results->build_status = 0;
 	br_results->nitems   = 0;
-	pg_atomic_init_u32(&br_results->index, 0);
+	pg_atomic_init_u64(&br_results->index, 0);
 }
 
 /*
@@ -913,54 +913,29 @@ __BrinIndexGetResults(pgstromTaskState *pts)
 	return br_results;
 }
 
-TBMIterateResult *
-pgstromBrinIndexNextBlock(pgstromTaskState *pts)
-{
-	BrinIndexState *br_state = pts->br_state;
-	BrinIndexResults *br_results = __BrinIndexGetResults(pts);
-	uint32_t		index;
-	BlockNumber		blockno;
-
-	if (br_state->curr_block_id >= br_state->pagesPerRange)
-	{
-		index = pg_atomic_fetch_add_u32(&br_results->index, 1);
-		if (index >= br_results->nitems)
-			return NULL;
-		br_state->curr_chunk_id = br_results->chunks[index];
-		br_state->curr_block_id = 0;
-	}
-	blockno = (br_state->curr_chunk_id * br_state->pagesPerRange +
-			   br_state->curr_block_id++);
-	if (blockno >= br_state->nblocks)
-		return NULL;
-
-	br_state->tbmres.blockno = blockno;
-	br_state->tbmres.ntuples = -1;
-	br_state->tbmres.recheck = true;
-	return &br_state->tbmres;
-}
-
-bool
+int
 pgstromBrinIndexNextChunk(pgstromTaskState *pts)
 {
 	BrinIndexState *br_state = pts->br_state;
 	BrinIndexResults *br_results = __BrinIndexGetResults(pts);
-	uint32_t		index;
+	uint64_t	raw_index;
 
-	index = pg_atomic_fetch_add_u32(&br_results->index, 1);
-	if (index < br_results->nitems)
+again:
+	raw_index = pg_atomic_fetch_add_u64(&br_results->index, 1);
+	if (raw_index < br_results->nitems * pts->num_scan_repeats)
 	{
 		BlockNumber	pagesPerRange = br_state->pagesPerRange;
+		uint32_t	index = (raw_index % br_results->nitems);
 
 		pts->curr_block_num  = br_results->chunks[index] * pagesPerRange;
 		pts->curr_block_tail = pts->curr_block_num + pagesPerRange;
 		if (pts->curr_block_num >= br_state->nblocks)
-			return false;
+			goto again;
 		if (pts->curr_block_tail > br_state->nblocks)
 			pts->curr_block_tail = br_state->nblocks;
-		return true;
+		return (raw_index / br_results->nitems);
 	}
-	return false;
+	return -1;
 }
 
 void

@@ -2470,6 +2470,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 {
 	pgstromTaskState   *leader = pts;
 	pgstromSharedState *ps_state;
+	kern_buffer_partitions *kbuf_parts;
 	MemoryContext		memcxt;
 
 	//pick up leader's ps_state if partitionwise plan
@@ -2677,8 +2678,17 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 											pts->ds_entry);
 			}
 
-			//TODO: send the shmem handle to the GPU server or DPU server
-
+			/*
+			 * Inner-buffer partitioning often requires multiple outer-scan,
+			 * if number of partitions is larger than the number of GPU devices.
+			 */
+			kbuf_parts = KERN_MULTIRELS_PARTITION_DESC(pts->h_kmrels, -1);
+			if (kbuf_parts)
+			{
+				pts->num_scan_repeats = (kbuf_parts->hash_divisor +
+										 numGpuDevAttrs - 1) / numGpuDevAttrs;
+				assert(pts->num_scan_repeats > 0);
+			}
 			break;
 
 		default:
