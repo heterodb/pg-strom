@@ -762,9 +762,23 @@ static bool
 pgstromTaskStateBeginScan(pgstromTaskState *pts)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
+	HeapScanDesc	h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
 	XpuConnection  *conn = pts->conn;
 	uint32_t		curval, newval;
+	uint32_t		block_nums = 0;
+	uint32_t		block_start = 0;
 
+	/* init heap-scan position, if any */
+	if (h_scan)
+	{
+		block_nums	= h_scan->rs_nblocks;
+		block_start	= h_scan->rs_startblock;
+	}
+	pg_atomic_init_u64(&ps_state->scan_block_count, 0);
+	ps_state->scan_block_nums  = block_nums;
+	ps_state->scan_block_start = block_start;
+
+	/* update the parallel_task_control */
 	Assert(conn != NULL);
 	curval = pg_atomic_read_u32(&ps_state->parallel_task_control);
 	do {
@@ -794,42 +808,6 @@ pgstromTaskStateEndScan(pgstromTaskState *pts)
 	} while (!pg_atomic_compare_exchange_u32(&ps_state->parallel_task_control,
 											 &curval, newval));
 	return (newval == 1);
-}
-
-/*
- * pgstromTaskStateResetScan
- */
-static void
-pgstromTaskStateResetScan(pgstromTaskState *pts)
-{
-	pgstromSharedState *ps_state = pts->ps_state;
-
-	/*
-	 * pgstromExecTaskState() is never called on the single process
-	 * execution, thus we have no state to reset.
-	 */
-	if (!ps_state)
-		return;
-
-	pg_atomic_write_u32(&ps_state->parallel_task_control, 0);
-	if (pts->arrow_state)
-	{
-		pgstromArrowFdwExecReset(pts->arrow_state);
-	}
-	else if (ps_state->ss_handle == DSM_HANDLE_INVALID)
-	{
-		TableScanDesc scan = pts->css.ss.ss_currentScanDesc;
-
-		table_rescan(scan, NULL);
-	}
-	else
-	{
-		Relation	rel = pts->css.ss.ss_currentRelation;
-		ParallelTableScanDesc pscan = (ParallelTableScanDesc)
-			((char *)ps_state + ps_state->parallel_scan_desc_offset);
-
-		table_parallelscan_reinitialize(rel, pscan);
-	}
 }
 
 /*
@@ -2017,17 +1995,26 @@ void
 pgstromExecResetTaskState(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
+	pgstromSharedState *ps_state = pts->ps_state;
+	Relation	rel = node->ss.ss_currentRelation;
+	TableScanDesc scan = node->ss.ss_currentScanDesc;
 
 	if (pts->conn)
 	{
 		xpuClientCloseSession(pts->conn);
 		pts->conn = NULL;
 	}
-	pgstromTaskStateResetScan(pts);
+	/* reset status */
 	if (pts->br_state)
 		pgstromBrinIndexExecReset(pts);
 	if (pts->arrow_state)
 		pgstromArrowFdwExecReset(pts->arrow_state);
+	if (!scan->rs_parallel)
+		table_rescan(scan, NULL);
+	else
+		table_parallelscan_reinitialize(rel, scan->rs_parallel);
+	if (ps_state)
+		pg_atomic_write_u64(&ps_state->scan_block_count, 0);
 }
 
 /*
@@ -2115,7 +2102,6 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	}
 	ps_state->query_plan_id = ((uint64_t)MyProcPid) << 32 |
 		(uint64_t)pts->css.ss.ps.plan->plan_node_id;
-	pg_atomic_init_u32(&ps_state->device_selection_hint, UINT_MAX);
 	ps_state->num_rels = num_rels;
 	ConditionVariableInit(&ps_state->preload_cond);
 	SpinLockInit(&ps_state->preload_mutex);

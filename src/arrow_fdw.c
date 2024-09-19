@@ -3720,6 +3720,14 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	xcmd_iov->iov_len  = xcmd->length;
 	*xcmd_iovcnt = 1;
 
+	/* XXX - debug message */
+    if (scan_repeat_id > 0 && scan_repeat_id != pts->last_repeat_id)
+        elog(NOTICE, "arrow scan on '%s' moved into %dth loop for inner-buffer partitions (pid: %u)",
+             RelationGetRelationName(pts->css.ss.ss_currentRelation),
+			 scan_repeat_id+1,
+			 MyProcPid);
+    pts->last_repeat_id = scan_repeat_id;
+
 	return xcmd;
 }
 

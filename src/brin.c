@@ -472,7 +472,6 @@ struct BrinIndexState
 	BrinIndexResults *brinResults;
 	uint32_t		curr_chunk_id;
 	uint32_t		curr_block_id;
-	TBMIterateResult tbmres;	/* must be tail */
 };
 
 /*
@@ -496,8 +495,8 @@ pgstromBrinIndexExecBegin(pgstromTaskState *pts,
 		Assert(index_conds == NIL && index_quals == NIL);
 		return;
 	}
-	br_state = palloc0(offsetof(BrinIndexState, tbmres.offsets) +
-					   sizeof(BlockNumber) * MaxHeapTuplesPerPage);
+	br_state = palloc0(sizeof(BrinIndexState));
+
 	/*
 	 * open the index relation
 	 */

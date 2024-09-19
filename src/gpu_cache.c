@@ -2721,13 +2721,15 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 {
 	Relation	rel = pts->css.ss.ss_currentRelation;
 	GpuCacheDesc *gc_desc = pts->gcache_desc;
+	uint32_t	repeat_id;
 	XpuCommand *xcmd = NULL;
 
 	if (!gc_desc)
 		elog(ERROR, "Bug? no GpuCacheDesc is assigned");
 	if (!initialLoadGpuCache(gc_desc, rel))
 		elog(ERROR, "GpuCache is now corrupted, try the query again");
-	if (pg_atomic_fetch_add_u32(pts->gcache_fetch_count, 1) == 0)
+	repeat_id = pg_atomic_fetch_add_u32(pts->gcache_fetch_count, 1);
+	if (repeat_id < pts->num_scan_repeats)
 	{
 		GpuCacheSharedState *gc_sstate = gc_desc->gc_lmap->gc_sstate;
 		uint64_t	write_pos;
@@ -2758,6 +2760,7 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 			gpuCacheInvokeApplyRedo(gc_desc, sync_pos, true);
 		}
 		xcmd = (XpuCommand *)pts->xcmd_buf.data;
+		xcmd->u.task.scan_repeat_id = repeat_id;
 		Assert(xcmd->length == pts->xcmd_buf.len);
 		xcmd_iov->iov_base = pts->xcmd_buf.data;
 		xcmd_iov->iov_len  = pts->xcmd_buf.len;
@@ -2767,6 +2770,12 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 	{
 		pts->scan_done = true;
 	}
+	/* XXX - debug message */
+	if (repeat_id > 0 && repeat_id != pts->last_repeat_id)
+		elog(NOTICE, "gpucache on '%s' moved into %dth loop for inner-buffer partitions (pid: %u)",
+			 RelationGetRelationName(rel), repeat_id+1, MyProcPid);
+	pts->last_repeat_id = repeat_id;
+
 	return xcmd;
 }
 

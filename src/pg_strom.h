@@ -357,8 +357,10 @@ typedef struct
 	uint32_t			ss_length;			/* length of the SharedState */
 	/* pg-strom's unique plan-id */
 	uint64_t			query_plan_id;
-	/* hint for device selection, if necessary */
-	pg_atomic_uint32	device_selection_hint;
+	/* scan */
+	pg_atomic_uint64	scan_block_count;	/* scan counter */
+	uint32_t			scan_block_nums;	/* = HeapScanDesc::rs_numblocks */
+	uint32_t			scan_block_start;	/* = HeapScanDesc::rs_startblock */
 	/* control variables to detect the last plan-node at parallel execution */
 	pg_atomic_uint32	parallel_task_control;
 	/* statistics */
@@ -486,6 +488,7 @@ struct pgstromTaskState
 	Buffer				curr_vm_buffer;		/* for visibility-map */
 	uint64_t			curr_block_num;		/* for KDS_FORMAT_BLOCK */
 	uint64_t			curr_block_tail;	/* for KDS_FORMAT_BLOCK */
+	int32_t				last_repeat_id;		/* for debug */
 	StringInfoData		xcmd_buf;
 	/* callbacks */
 	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
