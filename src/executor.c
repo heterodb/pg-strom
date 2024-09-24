@@ -2311,7 +2311,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			uint64_t	final_nitems = pg_atomic_read_u64(&ps_state->final_nitems);
 			uint64_t	final_usage  = pg_atomic_read_u64(&ps_state->final_usage);
 			uint64_t	final_total  = pg_atomic_read_u64(&ps_state->final_total);
-
+			
 			appendStringInfo(&buf, "nitems: %lu, usage: %s, total: %s",
 							 final_nitems,
 							 format_bytesz(final_usage),

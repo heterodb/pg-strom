@@ -2118,7 +2118,7 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 												  parts[divisor]));
 		//TODO: Phase-3 allows divisor > numGPUs restructions
 		if (divisor > numGpuDevAttrs)
-			elog(ERROR, "pinned inner-buffer partitions divisor %d larger than number of GPU devices (%d) is not supported right now", divisor, numGpuDevAttrs);
+			elog(ERROR, "pinned inner-buffer partitions divisor %d larger than number of GPU devices (%d) is not supported right now\n  largest_sz=%zu largest_depth=%d", divisor, numGpuDevAttrs,   largest_sz, largest_depth);
 		if (h_kmrels)
 		{
 			kern_buffer_partitions *kbuf_parts = (kern_buffer_partitions *)
