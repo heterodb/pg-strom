@@ -1613,27 +1613,27 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 										   kern_buffer_partitions *kbuf_parts)
 {
 	uint32_t	hash_divisor = kbuf_parts->hash_divisor;
+	size_t		kds_length = kds_head->length;
 	CUresult	rc;
 	struct timeval	tv1, tv2, tv3, tv4;
 
 	/* allocation of kds_in for each partition */
-	gettimeofday(&tv1, NULL);
 	for (int i=0; i < hash_divisor; i++)
 	{
 		CUdeviceptr	m_kds_in;
 
-		rc = allocGpuQueryBuffer(gq_buf, &m_kds_in, kds_head->length);
+		rc = allocGpuQueryBuffer(gq_buf, &m_kds_in, kds_length);
 		if (rc != CUDA_SUCCESS)
 		{
 			gpuClientELog(gclient, "failed on allocGpuQueryBuffer(sz=%lu): %s",
-						  kds_head->length, cuStrError(rc));
+						  kds_length, cuStrError(rc));
 			return false;
 		}
 		memcpy((void *)m_kds_in, kds_head, KDS_HEAD_LENGTH(kds_head));
 		kbuf_parts->parts[i].kds_in = (kern_data_store *)m_kds_in;
 	}
 	/* partitioning for each GPU device */
-	gettimeofday(&tv2, NULL);
+	gettimeofday(&tv1, NULL);
 	for (int i=0; i < numGpuDevAttrs; i++)
 	{
 		gpuContext *gcontext = &gpuserv_gpucontext_array[i];
@@ -1687,18 +1687,20 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 			__FATAL("failed on cuCtxPopCurrent: %s", cuStrError(rc));
 	}
 	/* setup memory attribute for each partition */
-	gettimeofday(&tv3, NULL);
-	for (int i=hash_divisor; i > 0; i--)
+	gettimeofday(&tv2, NULL);
+	for (int i=hash_divisor-1; i >= 0; i--)
 	{
-		kern_data_store *kds_in = kbuf_parts->parts[i-1].kds_in;
-		gpumask_t	available_gpus = kbuf_parts->parts[i-1].available_gpus;
-		size_t		consumed;
-#if 0
-		/* migrate the inner-buffer to be used after the 2nd repeat */
+		kern_data_store *kds_in = kbuf_parts->parts[i].kds_in;
+		gpumask_t	available_gpus = kbuf_parts->parts[i].available_gpus;
+
+		/*
+		 * migrate the inner-buffer partitions to be used in the 2nd
+		 * or later repeats into the host-memory
+		 */
 		if (i > numGpuDevAttrs)
 		{
 			rc = cuMemPrefetchAsync((CUdeviceptr)kds_in,
-									kds_head->length,
+									kds_length,
 									CU_DEVICE_CPU,
 									MY_STREAM_PER_THREAD);
 			if (rc != CUDA_SUCCESS)
@@ -1707,11 +1709,53 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 							  cuStrError(rc));
 				return false;
 			}
+			continue;
 		}
-#endif
+		/*
+		 * migrate the inner-buffer partitions to the primary GPU device.
+		 */
+		for (int k=0; k < numGpuDevAttrs; k++)
+		{
+			gpuContext *gcontext = &gpuserv_gpucontext_array[k];
+
+			if ((available_gpus & (1UL << k)) != 0)
+			{
+				/* Switch CUDA context to the working one */
+				rc = cuCtxPushCurrent(gcontext->cuda_context);
+				if (rc != CUDA_SUCCESS)
+					__FATAL("failed on cuCtxPushCurrent: %s", cuStrError(rc));
+				/* Prefetch the inner-buffer */
+				rc = cuMemPrefetchAsync((CUdeviceptr)kds_in,
+										kds_length,
+										gcontext->cuda_device,
+										MY_STREAM_PER_THREAD);
+				if (rc != CUDA_SUCCESS)
+					gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
+								  cuStrError(rc));
+				/* Revert CUDA context */
+				rc = cuCtxPopCurrent(NULL);
+				if (rc != CUDA_SUCCESS)
+					__FATAL("failed on cuCtxPopCurrent: %s", cuStrError(rc));
+				break;
+			}
+		}
+	}
+	gettimeofday(&tv3, NULL);
+
+	/*
+	 * Change the memory policy, and distribute inner-buffers to the
+	 * secondary devices.
+	 */
+	for (int i=0; i < hash_divisor; i++)
+	{
+		kern_data_store *kds_in = kbuf_parts->parts[i].kds_in;
+		gpumask_t	available_gpus = kbuf_parts->parts[i].available_gpus;
+
 		/* set read-only attribute */
+		fprintf(stderr, "kds_in = %p len=%zu\n", kds_in, kds_length);
+
 		rc = cuMemAdvise((CUdeviceptr)kds_in,
-						 kds_head->length,
+						 kds_length,
 						 CU_MEM_ADVISE_SET_READ_MOSTLY, -1);
 		if (rc != CUDA_SUCCESS)
 		{
@@ -1719,43 +1763,52 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 						  cuStrError(rc));
 			return false;
 		}
-		/* prefetch the inner-buffer to available GPUs */
-		if (i <= numGpuDevAttrs)
+		/* make duplications if any */
+		if (i < numGpuDevAttrs)
 		{
+			bool	meet_first = false;
+
 			for (int k=0; k < numGpuDevAttrs; k++)
 			{
 				gpuContext *gcontext = &gpuserv_gpucontext_array[k];
 
-				if ((available_gpus & (1UL<<k)) == 0)
+				if ((available_gpus & gcontext->cuda_dmask) == 0)
 					continue;
-#if 1
-				/* Switch CUDA context to the working one */
-				rc = cuCtxPushCurrent(gcontext->cuda_context);
-				if (rc != CUDA_SUCCESS)
-					__FATAL("failed on cuCtxPushCurrent: %s", cuStrError(rc));
-#endif
-#if 1
-				/* Prefetch the inner-buffer */
-				rc = cuMemPrefetchAsync((CUdeviceptr)kds_in,
-										kds_head->length,
-										gcontext->cuda_device,
-										MY_STREAM_PER_THREAD);
-				if (rc != CUDA_SUCCESS)
-					gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
-								  cuStrError(rc));
-#endif
-#if 1
-				/* Revert CUDA context */
-				rc = cuCtxPopCurrent(NULL);
-				if (rc != CUDA_SUCCESS)
-					__FATAL("failed on cuCtxPopCurrent: %s", cuStrError(rc));
-#endif
+				if (!meet_first)
+					meet_first = true;
+				else
+				{
+					/* Switch CUDA context to the working one */
+					rc = cuCtxPushCurrent(gcontext->cuda_context);
+					if (rc != CUDA_SUCCESS)
+						__FATAL("failed on cuCtxPushCurrent: %s", cuStrError(rc));
+					/* Prefetch the inner-buffer */
+					rc = cuMemPrefetchAsync((CUdeviceptr)kds_in,
+											kds_length,
+											gcontext->cuda_device,
+											MY_STREAM_PER_THREAD);
+					if (rc != CUDA_SUCCESS)
+						gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
+									  cuStrError(rc));
+					/* Revert CUDA context */
+					rc = cuCtxPopCurrent(NULL);
+					if (rc != CUDA_SUCCESS)
+						__FATAL("failed on cuCtxPopCurrent: %s", cuStrError(rc));
+				}
 			}
 		}
-		consumed = (KDS_HEAD_LENGTH(kds_in)
-					+ sizeof(uint64_t) * kds_in->hash_nslots
-					+ sizeof(uint64_t) * kds_in->nitems
-					+ kds_in->usage);
+	}
+	gettimeofday(&tv4, NULL);
+
+	/* print partition information */
+	for (int i=0; i < hash_divisor; i++)
+	{
+		kern_data_store	*kds_in = kbuf_parts->parts[i].kds_in;
+		size_t		consumed
+			= (KDS_HEAD_LENGTH(kds_in)
+			   + sizeof(uint64_t) * kds_in->hash_nslots
+			   + sizeof(uint64_t) * kds_in->nitems
+			   + kds_in->usage);
 		__gsLog("inner-buffer partition (%u of %d, nitems=%u, nslots=%u, usage=%s, consumed=%s)",
 				i, hash_divisor,
 				kds_in->nitems,
@@ -1763,8 +1816,7 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 				format_bytesz(kds_in->usage),
 				format_bytesz(consumed));
 	}
-	gettimeofday(&tv4, NULL);
-	__gsLog("inner-buffer partitioning (alloc: %s, rebuild: %s, prefetch: %s)",
+	__gsLog("inner-buffer partitioning (rebuild: %s, prefetch: %s, set-policy: %s)",
 			format_millisec((double)((tv2.tv_sec  - tv1.tv_sec)  * 1000 +
 									 (tv2.tv_usec - tv1.tv_usec) / 1000)),
 			format_millisec((double)((tv3.tv_sec  - tv2.tv_sec)  * 1000 +
