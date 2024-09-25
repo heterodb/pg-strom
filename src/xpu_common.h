@@ -3050,8 +3050,6 @@ typedef struct
 {
 	int32_t			inner_depth;	/* partitioned depth */
 	int32_t			hash_divisor;	/* divisor for the hash-value */
-	int32_t			remainder_head;	/* smallest remainder to be processed */
-	int32_t			remainder_tail;	/* largest remainder to be processed */
 	struct {
 		gpumask_t	available_gpus;	/* set of GPUs for this partition */
 		kern_data_store *kds_in;	/* used by GPU-service */

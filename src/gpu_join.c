@@ -2116,26 +2116,21 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 		int		divisor = (largest_sz + partition_sz - 1) / partition_sz;
 		size_t	kbuf_parts_sz = MAXALIGN(offsetof(kern_buffer_partitions,
 												  parts[divisor]));
-		//TODO: Phase-3 allows divisor > numGPUs restructions
-		if (divisor > numGpuDevAttrs)
-			elog(ERROR, "pinned inner-buffer partitions divisor %d larger than number of GPU devices (%d) is not supported right now\n  largest_sz=%zu largest_depth=%d", divisor, numGpuDevAttrs,   largest_sz, largest_depth);
 		if (h_kmrels)
 		{
 			kern_buffer_partitions *kbuf_parts = (kern_buffer_partitions *)
 				((char *)h_kmrels + offset);
 
 			memset(kbuf_parts, 0, kbuf_parts_sz);
-			kbuf_parts->inner_depth = largest_depth;
+			kbuf_parts->inner_depth  = largest_depth;
 			kbuf_parts->hash_divisor = divisor;
-			kbuf_parts->remainder_head = 0;
-			kbuf_parts->remainder_tail = Min(divisor, numGpuDevAttrs);
 			/* assign GPUs for each partition */
 			for (int base=0; base < divisor; base += numGpuDevAttrs)
 			{
 				gpumask_t	optimal_gpus = pts->optimal_gpus;
 				gpumask_t	other_gpus = (GetSystemAvailableGpus() & ~optimal_gpus);
 				int			count = 0;
-				int			unitsz = Min(divisor, numGpuDevAttrs);
+				int			unitsz = Min(divisor-base, numGpuDevAttrs);
 
 				while ((optimal_gpus | other_gpus) != 0)
 				{

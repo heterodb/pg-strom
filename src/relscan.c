@@ -550,7 +550,6 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 {
 	pgstromSharedState *ps_state = pts->ps_state;
 	Relation		relation = pts->css.ss.ss_currentRelation;
-	HeapScanDesc    h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
 	SMgrRelation	smgr = RelationGetSmgr(relation);
 	XpuCommand	   *xcmd;
 	kern_data_store *kds;
@@ -589,7 +588,8 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			   kds->nitems < kds_nrooms)
 		{
 			BlockNumber		block_num
-				= (pts->curr_block_num + h_scan->rs_startblock) % h_scan->rs_nblocks;
+				= (pts->curr_block_num +
+				   ps_state->scan_block_start) % ps_state->scan_block_nums;
 			/*
 			 * MEMO: Usually, CPU is (much) more powerful than DPUs.
 			 * In case when the source cache is already on the shared-
@@ -626,8 +626,8 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			 * because it shall be JOIN'ed on different partitions.
 			 */
 			if (scan_repeat_id < 0)
-				scan_repeat_id = pts->curr_block_num / h_scan->rs_nblocks;
-			else if (scan_repeat_id != pts->curr_block_num / h_scan->rs_nblocks)
+				scan_repeat_id = pts->curr_block_num / ps_state->scan_block_nums;
+			else if (scan_repeat_id != pts->curr_block_num / ps_state->scan_block_nums)
 				goto out;
 
 			/*
@@ -712,16 +712,18 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			uint32_t	num_blocks = kds_nrooms - kds->nitems;
 			uint64_t	scan_block_limit = (ps_state->scan_block_nums *
 											pts->num_scan_repeats);
+			uint64_t	scan_block_count;
 
-			pts->curr_block_num = pg_atomic_fetch_add_u64(&ps_state->scan_block_count,
-														  num_blocks);
-			if (pts->curr_block_num >= scan_block_limit)
+			scan_block_count = pg_atomic_fetch_add_u64(&ps_state->scan_block_count,
+													   num_blocks);
+			if (scan_block_count >= scan_block_limit)
 				pts->scan_done = true;
 			else
 			{
-				if (pts->curr_block_num + num_blocks > scan_block_limit)
-					num_blocks = h_scan->rs_nblocks - pts->curr_block_num;
+				pts->curr_block_num = (scan_block_count % ps_state->scan_block_nums);
 				pts->curr_block_tail = pts->curr_block_num + num_blocks;
+				if (pts->curr_block_tail > ps_state->scan_block_nums)
+					pts->curr_block_tail = ps_state->scan_block_nums;
 			}
 		}
 	}
@@ -735,9 +737,16 @@ out:
 	Assert(scan_repeat_id >= 0);
 	/* XXX - debug message */
 	if (scan_repeat_id > 0 && scan_repeat_id != pts->last_repeat_id)
-		elog(NOTICE, "direct scan on '%s' moved into %dth loop for inner-buffer partitions (pid: %u)",
+		elog(NOTICE, "direct scan on '%s' moved into %dth loop for inner-buffer partitions (pid: %u)  scan_block_count=%lu scan_block_nums=%u scan_block_start=%u num_scan_repeats=%u curr_repeat_id=%d curr_block_num=%lu curr_block_tail=%lu",
 			 RelationGetRelationName(pts->css.ss.ss_currentRelation),
-			 scan_repeat_id+1, MyProcPid);
+			 scan_repeat_id+1, MyProcPid,
+			 pg_atomic_read_u64(&ps_state->scan_block_count),
+			 ps_state->scan_block_nums,
+			 ps_state->scan_block_start,
+			 pts->num_scan_repeats,
+			 pts->curr_repeat_id,
+			 pts->curr_block_num,
+			 pts->curr_block_tail);
 	pts->last_repeat_id = scan_repeat_id;
 
 	if (strom_nblocks > 0)

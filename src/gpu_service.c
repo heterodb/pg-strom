@@ -1576,7 +1576,6 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 										   kern_buffer_partitions *kbuf_parts)
 {
 	uint32_t	hash_divisor = kbuf_parts->hash_divisor;
-	size_t		kds_length = kds_head->length;
 	CUresult	rc;
 	struct timeval	tv1, tv2, tv3, tv4;
 
@@ -1585,11 +1584,11 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 	{
 		CUdeviceptr	m_kds_in;
 
-		rc = allocGpuQueryBuffer(gq_buf, &m_kds_in, kds_length);
+		rc = allocGpuQueryBuffer(gq_buf, &m_kds_in, kds_head->length);
 		if (rc != CUDA_SUCCESS)
 		{
 			gpuClientELog(gclient, "failed on allocGpuQueryBuffer(sz=%lu): %s",
-						  kds_length, cuStrError(rc));
+						  kds_head->length, cuStrError(rc));
 			return false;
 		}
 		memcpy((void *)m_kds_in, kds_head, KDS_HEAD_LENGTH(kds_head));
@@ -1663,15 +1662,18 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 	{
 		kern_data_store *kds_in = kbuf_parts->parts[i].kds_in;
 		gpumask_t	available_gpus = kbuf_parts->parts[i].available_gpus;
-
+		size_t		head_sz = (KDS_HEAD_LENGTH(kds_in) +
+							   sizeof(uint64_t) * kds_in->hash_nslots +
+							   sizeof(uint64_t) * kds_in->nitems);
 		/*
 		 * migrate the inner-buffer partitions to be used in the 2nd
 		 * or later repeats into the host-memory
 		 */
 		if (i > numGpuDevAttrs)
 		{
+#if 1
 			rc = cuMemPrefetchAsync((CUdeviceptr)kds_in,
-									kds_length,
+									head_sz,
 									CU_DEVICE_CPU,
 									MY_STREAM_PER_THREAD);
 			if (rc != CUDA_SUCCESS)
@@ -1680,6 +1682,19 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 							  cuStrError(rc));
 				return false;
 			}
+			rc = cuMemPrefetchAsync((CUdeviceptr)kds_in
+									+ kds_in->length
+									- kds_in->usage,
+									kds_in->usage,
+									CU_DEVICE_CPU,
+									MY_STREAM_PER_THREAD);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuMemPrefetchAsync(CPU): %s",
+							  cuStrError(rc));
+				return false;
+			}
+#endif
 			continue;
 		}
 		/*
@@ -1697,7 +1712,16 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 					__FATAL("failed on cuCtxPushCurrent: %s", cuStrError(rc));
 				/* Prefetch the inner-buffer */
 				rc = cuMemPrefetchAsync((CUdeviceptr)kds_in,
-										kds_length,
+										head_sz,
+										gcontext->cuda_device,
+										MY_STREAM_PER_THREAD);
+				if (rc != CUDA_SUCCESS)
+					gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
+								  cuStrError(rc));
+				rc = cuMemPrefetchAsync((CUdeviceptr)kds_in
+										+ kds_in->length
+										- kds_in->usage,
+										kds_in->usage,
 										gcontext->cuda_device,
 										MY_STREAM_PER_THREAD);
 				if (rc != CUDA_SUCCESS)
@@ -1721,10 +1745,13 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 	{
 		kern_data_store *kds_in = kbuf_parts->parts[i].kds_in;
 		gpumask_t	available_gpus = kbuf_parts->parts[i].available_gpus;
-
+		size_t		head_sz = (KDS_HEAD_LENGTH(kds_in) +
+							   sizeof(uint64_t) * kds_in->hash_nslots +
+							   sizeof(uint64_t) * kds_in->nitems);
+#if 1
 		/* set read-only attribute */
 		rc = cuMemAdvise((CUdeviceptr)kds_in,
-						 kds_length,
+						 head_sz,
 						 CU_MEM_ADVISE_SET_READ_MOSTLY, -1);
 		if (rc != CUDA_SUCCESS)
 		{
@@ -1732,6 +1759,18 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 						  cuStrError(rc));
 			return false;
 		}
+		rc = cuMemAdvise((CUdeviceptr)kds_in
+						 + kds_in->length
+						 - kds_in->usage,
+						 kds_in->usage,
+						 CU_MEM_ADVISE_SET_READ_MOSTLY, -1);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuMemAdvise(SET_READ_MOSTLY): %s",
+						  cuStrError(rc));
+			return false;
+		}
+#endif
 		/* make duplications if any */
 		if (i < numGpuDevAttrs)
 		{
@@ -1753,7 +1792,16 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 						__FATAL("failed on cuCtxPushCurrent: %s", cuStrError(rc));
 					/* Prefetch the inner-buffer */
 					rc = cuMemPrefetchAsync((CUdeviceptr)kds_in,
-											kds_length,
+											head_sz,
+											gcontext->cuda_device,
+											MY_STREAM_PER_THREAD);
+					if (rc != CUDA_SUCCESS)
+						gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
+									  cuStrError(rc));
+					rc = cuMemPrefetchAsync((CUdeviceptr)kds_in
+											+ kds_in->length
+											- kds_in->usage,
+											kds_in->usage,
 											gcontext->cuda_device,
 											MY_STREAM_PER_THREAD);
 					if (rc != CUDA_SUCCESS)
@@ -3673,9 +3721,6 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	/*
 	 * Build GPU kernel execution plan, if pinned inner-buffer is
 	 * partitioned to multiple GPUs.
-	 *
-	 *
-	 *
 	 */
 	if (gq_buf && gq_buf->h_kmrels)
 	{
@@ -3685,11 +3730,16 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 
 		if (kbuf_parts)
 		{
+			int32_t		repeat_id = xcmd->u.task.scan_repeat_id;
+			int32_t		start = repeat_id * numGpuDevAttrs;
+			int32_t		end = Min(start + numGpuDevAttrs,
+								  kbuf_parts->hash_divisor);
 			part_divisor = kbuf_parts->hash_divisor;
 			part_gcontexts = alloca(sizeof(gpuContext *) * part_divisor);
 			part_reminders = alloca(sizeof(uint32_t) * part_divisor);
 
-			for (int k=0; k < part_divisor; k++)
+			assert(start < end);
+			for (int k=start; k < end; k++)
 			{
 				gpumask_t	part_mask = kbuf_parts->parts[k].available_gpus;
 
