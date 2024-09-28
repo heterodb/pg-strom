@@ -946,8 +946,8 @@ execGpuJoinProjection(kern_context *kcxt,
  */
 PUBLIC_SHARED_DATA(uint32_t, stromTaskProp__cuda_dindex);
 PUBLIC_SHARED_DATA(uint32_t, stromTaskProp__cuda_stack_limit);
-PUBLIC_SHARED_DATA(uint32_t, stromTaskProp__partition_divisor);
-PUBLIC_SHARED_DATA(uint32_t, stromTaskProp__partition_reminder);
+PUBLIC_SHARED_DATA(int32_t,  stromTaskProp__partition_divisor);
+PUBLIC_SHARED_DATA(int32_t,  stromTaskProp__partition_reminder);
 
 /*
  * kern_gpujoin_main

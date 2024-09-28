@@ -351,8 +351,8 @@ INLINE_FUNCTION(uint32_t) TotalShmemSize(void)
  */
 EXTERN_SHARED_DATA(uint32_t, stromTaskProp__cuda_dindex);
 EXTERN_SHARED_DATA(uint32_t, stromTaskProp__cuda_stack_limit);
-EXTERN_SHARED_DATA(uint32_t, stromTaskProp__partition_divisor);
-EXTERN_SHARED_DATA(uint32_t, stromTaskProp__partition_reminder);
+EXTERN_SHARED_DATA(int32_t,  stromTaskProp__partition_divisor);
+EXTERN_SHARED_DATA(int32_t,  stromTaskProp__partition_reminder);
 
 /*
  * TypeOpCode / FuncOpCode
