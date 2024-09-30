@@ -959,6 +959,7 @@ __gpuMemAllocFromSegment(gpuMemoryPool *pool,
 					return NULL;	/* out of memory */
 				}
 				chunk->__length -= surplus;
+				chunk->m_devptr = (chunk->__base + chunk->__offset);
 
 				buddy->mseg   = mseg;
 				buddy->__base = mseg->devptr;
@@ -3695,7 +3696,6 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 							  cuStrError(rc));
 				return;
 			}
-			fprintf(stderr, "HOGEHOGEHOGE");
 			m_kds_src = (CUdeviceptr)kds_src;
 		}
 	}
@@ -3837,29 +3837,32 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 			{
 				assert(s_chunk->mseg->pool->gcontext == __gcontext_prev);
 				assert(m_kds_extra == 0UL);
-				n_chunk = gpuMemAlloc(kds_src->length);
+				n_chunk = gpuMemAlloc(s_chunk->__length);
 				if (!n_chunk)
 				{
 					gpuClientFatal(gclient, "failed on gpuMemAlloc: %s",
 								   cuStrError(rc));
 					break;
 				}
-				rc = cuMemcpyPeer(n_chunk->m_devptr,
-								  __gcontext->cuda_context,
-								  m_kds_src,
-								  __gcontext_prev->cuda_context,
-								  kds_src->length);
+#if 1
+				rc = cuMemcpyPeerAsync(n_chunk->m_devptr,
+									   __gcontext->cuda_context,
+									   m_kds_src,
+									   __gcontext_prev->cuda_context,
+									   kds_src->length,
+									   MY_STREAM_PER_THREAD);
+#else
+				rc = cuMemcpyPeerAsync((n_chunk->__base + n_chunk->__offset),
+									   __gcontext->cuda_context,
+									   (s_chunk->__base + s_chunk->__offset),
+									   __gcontext_prev->cuda_context,
+									   (s_chunk->__length),
+									   MY_STREAM_PER_THREAD);
+#endif
 				if (rc != CUDA_SUCCESS)
 				{
 					gpuMemFree(n_chunk);
-					gpuClientFatal(gclient, "cuMemcpyPeer(D%d:%p-%p <- S%d:%p-%p): %s",
-								   __gcontext->cuda_dindex,
-								   (void *)(n_chunk->m_devptr),
-								   (void *)(n_chunk->m_devptr +
-											kds_src->length),
-								   __gcontext_prev->cuda_dindex,
-								   (void *)(m_kds_src),
-								   (void *)(m_kds_src + kds_src->length),
+					gpuClientFatal(gclient, "failed on cuMemcpyPeerAsync: %s",
 								   cuStrError(rc));
 					break;
 				}
