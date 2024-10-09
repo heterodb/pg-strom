@@ -774,7 +774,6 @@ pgstromTaskStateBeginScan(pgstromTaskState *pts)
 		block_nums	= h_scan->rs_nblocks;
 		block_start	= h_scan->rs_startblock;
 	}
-	pg_atomic_init_u64(&ps_state->scan_block_count, 0);
 	ps_state->scan_block_nums  = block_nums;
 	ps_state->scan_block_start = block_start;
 
