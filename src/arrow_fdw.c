@@ -3641,9 +3641,9 @@ retry:
 	raw_index = pg_atomic_fetch_add_u32(arrow_state->rbatch_index, 1);
 	if (raw_index >= arrow_state->rb_nitems * num_scan_repeats)
 		return NULL;	/* no more chunks to load */
-	rb_index = (raw_index % num_scan_repeats);
+	rb_index = (raw_index % arrow_state->rb_nitems);
 	if (p_scan_repeat_id)
-		*p_scan_repeat_id = (raw_index / num_scan_repeats);
+		*p_scan_repeat_id = (raw_index / arrow_state->rb_nitems);
 	rb_state = arrow_state->rb_states[rb_index];
 	if (arrow_state->stats_hint)
 	{
