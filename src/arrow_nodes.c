@@ -1032,9 +1032,17 @@ __arrowFieldTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 					return false;
 			}
 			break;
+		case ArrowNodeTag__Bool:
 		case ArrowNodeTag__Utf8:
 		case ArrowNodeTag__Binary:
-		case ArrowNodeTag__Bool:
+		case ArrowNodeTag__LargeUtf8:
+		case ArrowNodeTag__LargeBinary:
+			break;
+
+		case ArrowNodeTag__FixedSizeBinary:
+			if (a->type.FixedSizeBinary.byteWidth !=
+				b->type.FixedSizeBinary.byteWidth)
+				return false;
 			break;
 
 		case ArrowNodeTag__Decimal:
@@ -1082,6 +1090,7 @@ __arrowFieldTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 			break;
 
 		case ArrowNodeTag__List:
+		case ArrowNodeTag__LargeList:
 			if (depth > 0)
 				Elog("arrow_fdw: nested array types are not supported");
 			if (a->_num_children != 1 || b->_num_children != 1)
@@ -1094,7 +1103,7 @@ __arrowFieldTypeIsEqual(ArrowField *a, ArrowField *b, int depth)
 
 		default:
 			Elog("'%s' of arrow type is not supported",
-				 a->node.tagName);
+				 a->type.node.tagName);
 	}
 	return true;
 }
