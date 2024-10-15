@@ -245,7 +245,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 		{
 			kern_tupitem *tupitem;
 			uint64_t	offset = KDS_GET_ROWINDEX(kds_heap)[index];
-			xpu_int4_t	status;
+			int			status;
 
 			tupitem = (kern_tupitem *)((char *)kds_heap
 									   + kds_heap->length
@@ -253,12 +253,11 @@ execGpuJoinNestLoop(kern_context *kcxt,
 			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, &tupitem->htup);
 			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
-			if (EXEC_KERN_EXPRESSION(kcxt, kexp, &status))
+			if (ExecGpuJoinQuals(kcxt, kexp, &status))
 			{
-				assert(!XPU_DATUM_ISNULL(&status));
-				if (status.value > 0)
+				if (status > 0)
 					tuple_is_valid = true;
-				if (status.value != 0)
+				if (status != 0)
 				{
 					assert(tupitem->rowid < kds_heap->nitems);
 					if (oj_map)
@@ -273,10 +272,19 @@ execGpuJoinNestLoop(kern_context *kcxt,
 		}
 		else if (left_outer && index >= kds_heap->nitems && !matched)
 		{
+			bool		status;
 			/* fill up NULL fields, if FULL/LEFT OUTER JOIN */
 			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, NULL);
-			tuple_is_valid = true;
+			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
+			if (ExecGpuJoinOtherQuals(kcxt, kexp, &status))
+			{
+				tuple_is_valid = status;
+			}
+			else
+			{
+				HandleErrorIfCpuFallback(kcxt, depth, index, matched);
+			}
 			l_state = ULONG_MAX;
 		}
 		else
@@ -438,18 +446,17 @@ execGpuJoinHashJoin(kern_context *kcxt,
 
 	if (khitem)
 	{
-		xpu_int4_t	status;
+		int		status;
 
 		l_state = ((char *)khitem - (char *)kds_hash);
 		kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 		ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, &khitem->t.htup);
 		kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
-		if (EXEC_KERN_EXPRESSION(kcxt, kexp, &status))
+		if (ExecGpuJoinQuals(kcxt, kexp, &status))
 		{
-			assert(!XPU_DATUM_ISNULL(&status));
-			if (status.value > 0)
+			if (status > 0)
 				tuple_is_valid = true;
-			if (status.value != 0)
+			if (status != 0)
 			{
 				assert(khitem->t.rowid < kds_hash->nitems);
 				if (oj_map)
@@ -467,10 +474,19 @@ execGpuJoinHashJoin(kern_context *kcxt,
 		if (kmrels->chunks[depth-1].left_outer &&
 			l_state != ULONG_MAX && !matched)
 		{
+			bool	status;
 			/* load NULL values on the inner portion */
-			 kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
-			 ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, NULL);
-			 tuple_is_valid = true;
+			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
+			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, NULL);
+			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
+			if (ExecGpuJoinOtherQuals(kcxt, kexp, &status))
+			{
+				tuple_is_valid = status;
+			}
+			else
+			{
+				HandleErrorIfCpuFallback(kcxt, depth, l_state, matched);
+			}
 		}
 		l_state = ULONG_MAX;
 	}

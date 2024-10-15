@@ -2985,6 +2985,14 @@ ExecMoveKernelVariables(kern_context *kcxt,
 						const kern_expression *kexp_move_vars,
                         char *dst_kvec_buffer,
                         int dst_kvec_id);
+EXTERN_FUNCTION(bool)
+ExecGpuJoinQuals(kern_context *kcxt,
+				 const kern_expression *kexp_join_quals,
+				 int *p_status);
+EXTERN_FUNCTION(bool)
+ExecGpuJoinOtherQuals(kern_context *kcxt,
+					  const kern_expression *kexp_join_quals,
+					  bool *p_status);
 EXTERN_FUNCTION(uint64_t)
 ExecGiSTIndexGetNext(kern_context *kcxt,
 					 const kern_data_store *kds_hash,
