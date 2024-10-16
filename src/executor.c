@@ -1640,7 +1640,6 @@ static TupleTableSlot *
 pgstromExecScanAccess(pgstromTaskState *pts)
 {
 	TupleTableSlot *slot;
-	XpuCommand	   *resp;
 
 	slot = pgstromFetchFallbackTuple(pts);
 	if (slot)
@@ -1652,11 +1651,12 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 		if (pts->curr_resp)
 			xpuClientPutResponse(pts->curr_resp);
 		pts->curr_resp = __fetchNextXpuCommand(pts);
-		if (!pts->curr_resp)
-			return pgstromFetchFallbackTuple(pts);
-		resp = pts->curr_resp;
-		if (resp->tag == XpuCommandTag__Success)
+		if (pts->curr_resp)
 		{
+			XpuCommand *resp = pts->curr_resp;
+
+			if (resp->tag != XpuCommandTag__Success)
+				elog(ERROR, "unknown response tag: %u", resp->tag);
 			if (resp->u.results.final_plan_task)
 			{
 				ExecFallbackCpuJoinOuterJoinMap(pts, resp);
@@ -1673,7 +1673,7 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 		}
 		else
 		{
-			elog(ERROR, "unknown response tag: %u", resp->tag);
+			return pgstromFetchFallbackTuple(pts);
 		}
 	}
 	slot_getallattrs(slot);
