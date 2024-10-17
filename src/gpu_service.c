@@ -782,7 +782,7 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 	int		count;
 	int		status;
 
-	strcpy(workdir, "/tmp/.pgstrom_fatbin_build_XXXXXX");
+	strcpy(workdir, ".pgstrom_fatbin_build_XXXXXX");
 	if (!mkdtemp(workdir))
 		elog(ERROR, "unable to create work directory for fatbin rebuild");
 
@@ -866,6 +866,13 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 	status = system(cmd.data);
 	if (status != 0)
 		elog(ERROR, "failed on shell command: %s", cmd.data);
+
+	/* cleanup working directory */
+	resetStringInfo(&cmd);
+	appendStringInfo(&cmd, "rm -rf '%s'", workdir);
+	status = system(cmd.data);
+	if (status != 0)
+		elog(ERROR, "failed on shell command: %s", cmd.data);
 }
 
 static void
@@ -883,8 +890,33 @@ gpuservSetupFatbin(void)
 		if (!__validate_gpu_fatbin_file(fatbin_dir,
 										fatbin_file))
 		{
-			__rebuild_gpu_fatbin_file(fatbin_dir,
-									  fatbin_file);
+			MemoryContext	curctx = CurrentMemoryContext;
+
+			PG_TRY();
+			{
+				__rebuild_gpu_fatbin_file(fatbin_dir,
+										  fatbin_file);
+			}
+			PG_FINALLY();
+			{
+				MemoryContext oldcxt = MemoryContextSwitchTo(curctx);
+				ErrorData  *edata = CopyErrorData();
+
+				if (edata->elevel >= ERROR)
+				{
+					elog(LOG, "[%s:%d] GPU code build error: %s",
+						 edata->filename,
+						 edata->lineno,
+						 edata->message);
+					/*
+					 * We shall not restart again, until source code
+					 * problems are fixed.
+					 */
+					proc_exit(0);
+				}
+				MemoryContextSwitchTo(oldcxt);
+			}
+			PG_END_TRY();
 		}
 	}
 	path = alloca(strlen(fatbin_dir) +
