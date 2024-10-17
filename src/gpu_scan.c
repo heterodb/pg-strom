@@ -517,7 +517,6 @@ __try_add_partitioned_scan_path(PlannerInfo *root,
 								bool be_parallel)
 {
 	List   *results = NIL;
-	List   *temp;
 
 	for (int k=0; k < baserel->nparts; k++)
 	{
@@ -526,18 +525,7 @@ __try_add_partitioned_scan_path(PlannerInfo *root,
 			RelOptInfo *leaf_rel = baserel->part_rels[k];
 			RangeTblEntry *rte = root->simple_rte_array[leaf_rel->relid];
 
-			if (rte->inh &&
-				rte->relkind == RELKIND_PARTITIONED_TABLE)
-			{
-				temp = __try_add_partitioned_scan_path(root,
-													   leaf_rel,
-													   xpu_task_flags,
-													   be_parallel);
-				if (temp == NIL)
-					return NIL;
-				results = list_concat(results, temp);
-			}
-			else
+			if (!rte->inh)
 			{
 				pgstromOuterPathLeafInfo *op_leaf;
 
@@ -551,6 +539,18 @@ __try_add_partitioned_scan_path(PlannerInfo *root,
 				if (op_leaf->pp_info->host_quals != NIL)
 					return NIL;
 				results = lappend(results, op_leaf);
+			}
+			else if (rte->relkind == RELKIND_PARTITIONED_TABLE)
+			{
+				List   *temp;
+
+				temp = __try_add_partitioned_scan_path(root,
+													   leaf_rel,
+													   xpu_task_flags,
+													   be_parallel);
+				if (temp == NIL)
+					return NIL;
+				results = list_concat(results, temp);
 			}
 		}
 	}
@@ -588,15 +588,7 @@ __xpuScanAddScanPathCommon(PlannerInfo *root,
 	/* Creation of GpuScan path */
 	for (int try_parallel=0; try_parallel < 2; try_parallel++)
 	{
-		if (rte->inh &&
-			rte->relkind == RELKIND_PARTITIONED_TABLE)
-		{
-			try_add_partitioned_scan_path(root,
-										  baserel,
-										  xpu_task_flags,
-										  (try_parallel > 0));
-		}
-		else
+		if (!rte->inh)
 		{
 			try_add_simple_scan_path(root,
 									 baserel,
@@ -606,6 +598,13 @@ __xpuScanAddScanPathCommon(PlannerInfo *root,
 									 true,	/* allow host quals */
 									 false,	/* disallow no device quals*/
 									 xpuscan_path_methods);
+		}
+		else if (rte->relkind == RELKIND_PARTITIONED_TABLE)
+		{
+			try_add_partitioned_scan_path(root,
+										  baserel,
+										  xpu_task_flags,
+										  (try_parallel > 0));
 		}
 		if (!baserel->consider_parallel)
 			break;
