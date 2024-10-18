@@ -1209,6 +1209,72 @@ __fixup_fallback_projection(Node *node, void *__data)
 }
 
 /*
+ * fixup_fallback_expression
+ */
+static Node *
+__fixup_fallback_expression_walker(Node *node, void *data)
+{
+	List       *kvars_deflist = (List *)data;
+	ListCell   *lc;
+
+	if (!node)
+		return NULL;
+
+	foreach (lc, kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+
+		if (equal(node, kvdef->kv_expr))
+		{
+			Assert(exprType(node) == kvdef->kv_type_oid);
+			return (Node *)makeVar(INDEX_VAR,
+								   kvdef->kv_slot_id,
+								   exprType(node),
+								   exprTypmod(node),
+								   exprCollation(node),
+								   0);
+		}
+	}
+	if (IsA(node, Var))
+		elog(ERROR, "unexpected Var-node in fallback expression: %s",
+			 nodeToString(node));
+	return expression_tree_mutator(node, __fixup_fallback_expression_walker, data);
+}
+
+/*
+ * __execInitCpuFallbackExprs
+ */
+static ExprState *
+__execInitCpuFallbackExprs(List *qual, pgstromTaskState *pts)
+{
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	List	   *kvars_deflist = NIL;
+	ListCell   *lc;
+
+	/* quick bailout */
+	if (qual == NIL)
+		return NULL;
+
+	foreach (lc, pp_info->kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+
+		if (kvdef->kv_depth >= 0 &&
+			kvdef->kv_depth <= pts->num_rels &&
+			kvdef->kv_resno > 0)
+		{
+			kvdef = pmemdup(kvdef, sizeof(codegen_kvar_defitem));
+			kvdef->kv_expr = fixup_scanstate_expr(&pts->css.ss, kvdef->kv_expr);
+			kvars_deflist = lappend(kvars_deflist, kvdef);
+		}
+	}
+	qual = fixup_scanstate_quals(&pts->css.ss, qual);
+	qual = (List *)__fixup_fallback_expression_walker((Node *)qual,
+													  kvars_deflist);
+	return ExecInitQual(qual, &pts->css.ss.ps);
+}
+
+/*
  * fallback_varload_mapping
  */
 static int
@@ -1304,7 +1370,7 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 			}
 			fallback_proj = lappend(fallback_proj, NULL);
 		}
-		else
+		else if (!tle->resjunk)
 		{
 			Node	   *expr;
 
@@ -1314,6 +1380,10 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 			state = ExecInitExpr((Expr *)expr, &pts->css.ss.ps);
 			compatible = false;
 			fallback_proj = lappend(fallback_proj, state);
+		}
+		else
+		{
+			fallback_proj = lappend(fallback_proj, NULL);
 		}
 	}
 	if (!compatible)
@@ -1506,10 +1576,9 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		istate->econtext = CreateExprContext(estate);
 		istate->depth = depth_index + 1;
 		istate->join_type = pp_inner->join_type;
-		istate->join_quals = ExecInitQual(pp_inner->join_quals,
-										  &pts->css.ss.ps);
-		istate->other_quals = ExecInitQual(pp_inner->other_quals,
-										   &pts->css.ss.ps);
+
+		istate->join_quals = __execInitCpuFallbackExprs(pp_inner->join_quals, pts);
+		istate->other_quals = __execInitCpuFallbackExprs(pp_inner->other_quals, pts);
 
 		foreach (cell, pp_inner->hash_outer_keys)
 		{
@@ -1547,6 +1616,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		{
 			istate->gist_irel = index_open(pp_inner->gist_index_oid,
 										   AccessShareLock);
+			// XXX - needs to fixup by __execInitCpuFallbackExprs()?
 			istate->gist_clause = ExecInitExpr((Expr *)pp_inner->gist_clause,
 											   &pts->css.ss.ps);
 			istate->gist_ctid_resno = pp_inner->gist_ctid_resno;

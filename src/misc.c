@@ -391,13 +391,22 @@ __fixup_customscan_expressions_walker(Node *node, void *__priv)
 	return expression_tree_mutator(node, __fixup_customscan_expressions_walker, __priv);
 }
 
-List *
-fixup_scanstate_expressions(ScanState *ss, List *expressions)
+Expr *
+fixup_scanstate_expr(ScanState *ss, Expr *expr)
 {
 	if (IsA(ss, CustomScanState))
-		return (List *)__fixup_customscan_expressions_walker((Node *)expressions,
-															 ss->ps.plan);
-	return expressions;
+		return (Expr *)
+			__fixup_customscan_expressions_walker((Node *)expr, ss->ps.plan);
+	return expr;
+}
+
+List *
+fixup_scanstate_quals(ScanState *ss, List *quals)
+{
+	if (IsA(ss, CustomScanState))
+		return (List *)
+			__fixup_customscan_expressions_walker((Node *)quals, ss->ps.plan);
+	return quals;
 }
 
 /*
