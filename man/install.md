@@ -200,7 +200,7 @@ The command below adds the kernel boot option.
 
 例えば、以下のような設定となるはずです。
 }
-
+@en{
 Open `/etc/default/grub` with an editor and add the above option to the `GRUB_CMDLINE_LINUX_DEFAULT=` line.
 
 For example, the settings should look like this:
@@ -217,13 +217,14 @@ GRUB_CMDLINE_LINUX="rhgb quiet amd_iommu=off"
 Run the following commands to apply the configuration to the kernel bool options.
 }
 ```
-# update-grub
+-- for BIOS based system
+# grub2-mkconfig -o /boot/grub2/grub.cfg
+# shutdown -r now
+
+-- for UEFI based system
+# grub2-mkconfig -o /boot/efi/EFI/redhat/grub.cfg
 # shutdown -r now
 ```
-
-
-
-
 
 @ja:### 追加リポジトリの有効化
 @en:### Enables extra repositories
