@@ -175,13 +175,12 @@
 <li>CUDA Toolkit 12.2 以降</li>
 <li>CUDA ToolkitのサポートするLinuxディストリビューション</li>
 <li>Intel x86 64bit アーキテクチャ(x86_64)</li>
-<li>NVIDIA GPU CC 6.0 以降 (Pascal以降; Turing以降を推奨)</li>
+<li>NVIDIA GPU CC 6.0 以降 (Pascal以降必須; Turing以降を推奨)</li>
 </ul>
 <h2 id="gpujoin-pinned-inner-buffer">GpuJoin Pinned Inner Buffer</h2>
 <p>PG-StromのGpuJoinは、Hash-Joinアルゴリズムを基にGPUで並列にJOIN処理を行えるように設計されています。Hash-Joinアルゴリズムの性質上、INNER側のテーブルはJOINの実行前に予めバッファ上に読み出されている必要がありますが、これまでは、GpuJoinはPostgreSQLの内部APIを介して下位の実行プランから一行ずつINNER側テーブルの内容を読み出していました。</p>
 <p>この設計は、INNER側が巨大なテーブルを読み出すGpuScanである場合に無駄の多いものでした。</p>
-<p>例えば、以下のようなクエリを想定してみる事にします。このクエリは<code>lineitem</code>(882GB)と、<code>orders</code>(205GB)の約1/4をJOINする処理が含まれています。
-JOINを含むGpuPreAggの下位ノードにはGpuScanが存在しており、これが<code>orders</code>テーブルをINNERバッファへ読み出すのですが、これには約3.6億回のGpuScan呼び出しが必要となり、また30GBものINNERバッファをGPUに送出しなければいけませんでした。</p>
+<p>例えば、以下のようなクエリを想定してみる事にします。このクエリは<code>lineitem</code>(882GB)と、<code>orders</code>(205GB)の約1/4をJOINする処理が含まれています。 JOINを含むGpuPreAggの下位ノードにはGpuScanが存在しており、これが<code>orders</code>テーブルをINNERバッファへ読み出すのですが、これには約3.6億回のGpuScan呼び出しが必要となり、また30GBものINNERバッファをGPUに送出しなければいけませんでした。</p>
 <pre><code>=# explain select l_shipmode, o_shippriority, sum(l_extendedprice)
              from lineitem, orders
             where l_orderkey = o_orderkey
@@ -203,10 +202,9 @@ JOINを含むGpuPreAggの下位ノードにはGpuScanが存在しており、こ
                GPU Scan Quals: (o_orderdate &gt;= '1997-01-01'::date) [rows: 1499973000 -&gt; 363551200]
                GPU-Direct SQL: enabled (GPU-0)
 (13 rows)
-
 </code></pre>
 <p>v5.2では、GpuJoinのINNERバッファ初期セットアッププロセスはより無駄の少ないものに再設計されています。</p>
-<p><img alt="GpuJoin Pinned Inner Buffer" src="../img/release_5_2a.png" /></p>
+<p><img alt="GpuJoin pinned inner buffer" src="../img/release_5_2a.png" /></p>
 <p>GpuScanはテーブルから読み出した行にWHERE句のチェックを行い、それをホスト側（PostgreSQLバックエンドプロセス）へ書き戻すという役割を担っています。GpuJoinはその結果を読み出してINNERバッファを構築し、これをGPU側へとコピーするわけですが、元々はGpuScanがINNER側テーブルを処理した時点で必要なデータは全てGPUに載っており、これをわざわざホスト側に書き戻し、再びGPU側へコピーする合理性はあまり大きくありません。</p>
 <p>GpuJoin Pinned Inner Bufferは、GpuJoinの下位ノードがGpuScanである場合、その処理結果をホスト側に戻すのではなく、次のGpuJoinに備えてGpuScanの処理結果をGPUに留置しておくというものです。これにより、INNER側テーブルのサイズが非常に大きい場合にGpuJoinの初期セットアップ時間を大きく節約する事が可能となります。</p>
 <p>一方で、ホスト側でINNERバッファのセットアップ作業を行わないという事は、GpuJoinのINNERバッファが物理的にCPUメモリ上には存在しないという事になり、CPU Fallback処理を必要とする場合には、SQL全体をエラーによってアボートする必要があります。</p>
@@ -215,33 +213,35 @@ JOINを含むGpuPreAggの下位ノードにはGpuScanが存在しており、こ
 SET
 </code></pre>
 <h2 id="cpu-fallback">行ごとのCPU-Fallback</h2>
-<p>GPUでSQLワークロードを処理する場合、原理的にGPUでの実行が不可能なパターンのデータが入力される場合があります。
-例えば、長い可変長データがPostgreSQLブロックの大きさに収まらず、断片化して外部テーブルに保存される場合（TOAST機構とよばれます）には、外部テーブルのデータを持たないGPUでは処理を継続する事ができません。</p>
-<p>PG-StromにはCPU-Fallbackという仕組みが備わっており、こういったデータに対する処理をCPU側で行う仕組みが備わっています。
-通常、GpuJoinやGpuPreAggなどの各種処理ロジックは、64MB分のデータ（チャンクと呼ぶ）をテーブルから読み出し、これに対してSQLワークロードを処理するためにGPUカーネルを起動します。</p>
-<p>以前の実装では、SQLワークロードの処理中にCPU-Fallbackエラーが発生すると、そのチャンク全体のGPU処理をキャンセルしてCPU側に書き戻すという処理を行っていました。しかし、この戦略は２つの点において問題がありました。
-一つは、通常、数十万行のデータを含むチャンクにたった1個の不良データが存在しただけでチャンク全体がGPUでの処理をキャンセルされてしまう事。もう一つは、GpuPreAggのように集計バッファを更新し続けるワークロードにおいては「どこまで集計表に反映されたか分からない」という状態が起こり得る事です。（したがって、v5.1以前ではGpuPreAggのCPU-Fallbackはエラー扱いとなっていました）</p>
-<p><img alt="Per-tuple CPU-Fallback" src="../img/release_5_2b.png" /></p>
+<p>GPUでSQLワークロードを処理する場合、原理的にGPUでの実行が不可能なパターンのデータが入力される場合があります。 例えば、長い可変長データがPostgreSQLブロックの大きさに収まらず、断片化して外部テーブルに保存される場合（TOAST機構とよばれます）には、外部テーブルのデータを持たないGPUでは処理を継続する事ができません。</p>
+<p>PG-StromにはCPU-Fallbackという仕組みが備わっており、こういったデータに対する処理をCPU側で行う仕組みが備わっています。 通常、GpuJoinやGpuPreAggなどの各種処理ロジックは、64MB分のデータ（チャンクと呼ぶ）をテーブルから読み出し、これに対してSQLワークロードを処理するためにGPUカーネルを起動します。</p>
+<p>以前の実装では、SQLワークロードの処理中にCPU-Fallbackエラーが発生すると、そのチャンク全体のGPU処理をキャンセルしてCPU側に書き戻すという処理を行っていました。しかし、この戦略は２つの点において問題がありました。 一つは、通常、数十万行のデータを含むチャンクにたった1個の不良データが存在しただけでチャンク全体がGPUでの処理をキャンセルされてしまう事。もう一つは、GpuPreAggのように集計バッファを更新し続けるワークロードにおいては「どこまで集計表に反映されたか分からない」という状態が起こり得る事です。（したがって、v5.1以前ではGpuPreAggのCPU-Fallbackはエラー扱いとなっていました）</p>
+<p><img alt="Pe-tuple CPU Fallback" src="../img/release_5_2b.png" /></p>
 <p>PG-Strom v5.2では、これらの問題を解決するためにCPU-Fallbackの実装が改良されています。</p>
-<p>CPU-Fallbackエラーが発生した場合、従来のようにチャンク全体の処理をキャンセルするのではなく、通常の処理結果を書き出す「Destination Buffer」の他に「Fallback Buffer」を用意してCPU-Fallbackエラーを起こしたタプルだけを書き込むようにします。
-「Fallback Buffer」の内容は後でまとめてCPU側に書き戻され、改めてCPUで評価が行われます。そのため、必要最小限のタプルだけをCPU-Fallback処理すれば良いだけでなく、GpuPreAggの集計バッファが重複して更新されてしまう心配もありません。</p>
+<p>CPU-Fallbackエラーが発生した場合、従来のようにチャンク全体の処理をキャンセルするのではなく、通常の処理結果を書き出す「Destination Buffer」の他に「Fallback Buffer」を用意してCPU-Fallbackエラーを起こしたタプルだけを書き込むようにします。 「Fallback Buffer」の内容は後でまとめてCPU側に書き戻され、改めてCPUで評価が行われます。そのため、必要最小限のタプルだけをCPU-Fallback処理すれば良いだけでなく、GpuPreAggの集計バッファが重複して更新されてしまう心配もありません。</p>
 <h2 id="gpu64bit">GPUバッファの64bit化</h2>
-<p>現在でこそ、48GBや80GBといったメモリを搭載したGPUが販売されていますが、PG-Stromが内部的に使用するGPUバッファのデータ形式を設計したのはv2.0の開発中である2017年頃。つまり、ハイエンドGPUでも16GBや24GB、それ以外では8GB以下というのが一般的でした。
-そういった前提では、物理的にあり得ない大容量のデータを過不足なく表現できるよりも、メモリ使用量を削る事のできるデータ形式が優先でした。</p>
+<p>現在でこそ、48GBや80GBといったメモリを搭載したGPUが販売されていますが、PG-Stromが内部的に使用するGPUバッファのデータ形式を設計したのはv2.0の開発中である2017年頃。つまり、ハイエンドGPUでも16GBや24GB、それ以外では8GB以下というのが一般的でした。 そういった前提では、物理的にあり得ない大容量のデータを過不足なく表現できるよりも、メモリ使用量を削る事のできるデータ形式が優先でした。</p>
+<p>PG-StromのGPUバッファにロードされたタプルは常に8バイト境界にアラインされているため、32bitのオフセット値を3bitだけシフトしてやれば、実質的に35bit (= 32GB)分のアドレス幅を表現する事が可能でした。2020年に40GBのメモリを搭載したNVIDIA A100が発表されましたが、32GBのバッファ長制限というのは実質的には無意味な制限事項ではありました。</p>
+<p>なぜなら、PG-Stromは64MBのチャンク単位でストレージからデータを読み出すため、GPUバッファのサイズが32GBを超えるというケースはほとんどあり得ない状況であったわけです。</p>
+<p>しかしながら、以下の状況において、非常に大きな結果バッファを想定する必要が出てきました。</p>
+<ul>
+<li>GPUキャッシュが非常に巨大なデータを保持している場合。</li>
+<li>GpuJoinのINNERバッファが巨大なサイズに膨れ上がったケース。</li>
+<li>GROUP BY または SELECT DISTINCT の結果として生じる行数が大幅に増加した場合。</li>
+</ul>
+<p>PG-Strom v5.2においては、GPUバッファ上の全てのオフセット値は64bit表現に置き換えられました。結果として、32GBより大きなGPUバッファを扱うことができるようになり、これら前述のワークロードもGPUの物理RAMサイズの範囲まで扱えるようになりました。</p>
 <h2 id="_3">その他の新機能</h2>
 <h3 id="gpu-direct-sql">GPU-Direct SQLの性能改善</h3>
 <p>NVIDIAのcuFileライブラリは、内部的にDevive Primary Contextを仮定していました。そのため、独自に生成したCUDA Contextを使用していたPG-Strom GPU ServiceからのAPI呼出しに対して、CUDA Contextを切り替えるコストが発生していました。</p>
 <p>PG-Strom v5.2では、GPU ServiceもDevice Primary Contextを使用するように設計変更を行い、cuFileライブラリ内のスイッチングコストとそれに付随するCPUのBusy Loopを無くすことで、およそ10%程度の性能改善が行われています。</p>
 <h3 id="select-distinct">SELECT DISTINCT句のサポート</h3>
-<p>PG-Strom v5.2では<code>SELECT DISTINCT ...</code>句がサポートされました。
-以前のバージョンでは、これを<code>GROUP BY</code>句に書き直す必要がありました。</p>
+<p>PG-Strom v5.2では<code>SELECT DISTINCT ...</code>句がサポートされました。 以前のバージョンでは、これを<code>GROUP BY</code>句に書き直す必要がありました。</p>
 <h3 id="pg2arrow">pg2arrow並列モードの性能改善</h3>
 <p><code>pg2arrow</code>コマンドで<code>-t</code>オプションと<code>-n</code>オプションを併用した場合、読出し対象のテーブルサイズを調べ、各ワーカースレッドが重複してテーブルを読み出さないようにスキャン範囲を調整してクエリを発行します。</p>
 <h3 id="import-foreign-schema">IMPORT FOREIGN SCHEMAで重複列に別名</h3>
 <p><code>IMPORT FOREIGN SCHEMA</code>や<code>pgstrom.arrow_fdw_import_file()</code>関数を用いてArrowファイルをインポートする際、Fieldが重複した名前を持っていた場合、重複した名前を持つ2番目以降の列には別名を付けるようになりました。</p>
 <h3 id="_4">部分的な処理結果の返却</h3>
-<p>GpuJoinやGpuPreAggなど各種の処理でDestination Bufferを使い尽くした場合、GPUカーネルの実行を一時停止し、部分的な処理結果をバックエンドプロセスに返却してから、再度GPUカーネルの実行を再開するようになりました。
-これまではDestination Bufferを拡大してチャンクの処理結果を全て保持するような構造になっていたため、入力に対して結果セットが巨大である場合には、CPUやGPUのメモリを過剰に消費してシステムが不安定になるという問題がありました。</p>
+<p>GpuJoinやGpuPreAggなど各種の処理でDestination Bufferを使い尽くした場合、GPUカーネルの実行を一時停止し、部分的な処理結果をバックエンドプロセスに返却してから、再度GPUカーネルの実行を再開するようになりました。 これまではDestination Bufferを拡大してチャンクの処理結果を全て保持するような構造になっていたため、入力に対して結果セットが巨大である場合には、CPUやGPUのメモリを過剰に消費してシステムが不安定になるという問題がありました。</p>
 <h2 id="_5">累積的なバグの修正</h2>
 <ul>
 <li>[#664] Too much CPU consumption ratio with cuFile/GDS on many threads</li>
