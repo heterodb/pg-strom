@@ -712,19 +712,14 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 			uint32_t	num_blocks = kds_nrooms - kds->nitems;
 			uint64_t	scan_block_limit = (ps_state->scan_block_nums *
 											pts->num_scan_repeats);
-			uint64_t	scan_block_count;
 
-			scan_block_count = pg_atomic_fetch_add_u64(&ps_state->scan_block_count,
-													   num_blocks);
-			if (scan_block_count >= scan_block_limit)
+			pts->curr_block_num  = pg_atomic_fetch_add_u64(&ps_state->scan_block_count,
+														   num_blocks);
+			pts->curr_block_tail = pts->curr_block_num + num_blocks;
+			if (pts->curr_block_num >= scan_block_limit)
 				pts->scan_done = true;
-			else
-			{
-				pts->curr_block_num = (scan_block_count % ps_state->scan_block_nums);
-				pts->curr_block_tail = pts->curr_block_num + num_blocks;
-				if (pts->curr_block_tail > ps_state->scan_block_nums)
-					pts->curr_block_tail = ps_state->scan_block_nums;
-			}
+			if (pts->curr_block_tail > scan_block_limit)
+				pts->curr_block_tail = scan_block_limit;
 		}
 	}
 out:

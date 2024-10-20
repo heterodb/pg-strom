@@ -268,6 +268,7 @@ __gpuscan_load_source_row(kern_context *kcxt,
 		wp->smx_row_count++;
 		WARP_WRITE_POS(wp,0) += count;
 	}
+	__syncthreads();
 	/* move to the next depth, if more than blockSize tuples were fetched. */
 	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + get_local_size() ? 1 : 0);
 }
@@ -472,6 +473,7 @@ __gpuscan_load_source_arrow(kern_context *kcxt,
 		wp->smx_row_count++;
 		WARP_WRITE_POS(wp,0) += count;
 	}
+	__syncthreads();
 	/* move to the next depth, if more than blockSize rows were fetched. */
 	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + get_local_size() ? 1 : 0);
 }
@@ -596,6 +598,7 @@ __gpuscan_load_source_column(kern_context *kcxt,
 		wp->smx_row_count++;
 		WARP_WRITE_POS(wp,0) += count;
 	}
+	__syncthreads();
 	/* move to the next depth if more than 32 htuples were fetched */
 	return (WARP_WRITE_POS(wp,0) >= WARP_READ_POS(wp,0) + get_local_size() ? 1 : 0);
 }

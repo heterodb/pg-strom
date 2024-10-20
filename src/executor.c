@@ -762,20 +762,8 @@ static bool
 pgstromTaskStateBeginScan(pgstromTaskState *pts)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	HeapScanDesc	h_scan = (HeapScanDesc)pts->css.ss.ss_currentScanDesc;
 	XpuConnection  *conn = pts->conn;
 	uint32_t		curval, newval;
-	uint32_t		block_nums = 0;
-	uint32_t		block_start = 0;
-
-	/* init heap-scan position, if any */
-	if (h_scan)
-	{
-		block_nums	= h_scan->rs_nblocks;
-		block_start	= h_scan->rs_startblock;
-	}
-	ps_state->scan_block_nums  = block_nums;
-	ps_state->scan_block_start = block_start;
 
 	/* update the parallel_task_control */
 	Assert(conn != NULL);
@@ -2153,6 +2141,8 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 			table_parallelscan_initialize(relation, pdesc, snapshot);
 			scan = table_beginscan_parallel(relation, pdesc);
 			ps_state->parallel_scan_desc_offset = ((char *)pdesc - (char *)ps_state);
+			ps_state->scan_block_nums  = ((HeapScanDesc)scan)->rs_nblocks;
+			ps_state->scan_block_start = ((HeapScanDesc)scan)->rs_startblock;
 		}
 	}
 	else
@@ -2167,7 +2157,11 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		if (pts->arrow_state)
 			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
 		else
+		{
 			scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
+			ps_state->scan_block_nums  = ((HeapScanDesc)scan)->rs_nblocks;
+			ps_state->scan_block_start = ((HeapScanDesc)scan)->rs_startblock;
+		}
 	}
 	ps_state->query_plan_id = ((uint64_t)MyProcPid) << 32 |
 		(uint64_t)pts->css.ss.ps.plan->plan_node_id;
