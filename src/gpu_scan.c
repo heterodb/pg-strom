@@ -846,7 +846,7 @@ assign_custom_cscan_tlist(List *tlist_dev, pgstromPlanInfo *pp_info)
 				kvdef->kv_resno >  0 &&
 				equal(tle->expr, kvdef->kv_expr))
 			{
-				kvdef->kv_fallback = tle->resno - 1;
+				kvdef->kv_fallback = tle->resno;
 				tle->resorigtbl = (Oid)kvdef->kv_depth;
 				tle->resorigcol = kvdef->kv_resno;
 				break;

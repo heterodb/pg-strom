@@ -1161,42 +1161,6 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 }
 
 /*
- * __fixup_fallback_projection
- */
-static Node *
-__fixup_fallback_projection(Node *node, void *__data)
-{
-	List	   *custom_scan_tlist = __data;
-	ListCell   *lc;
-
-	if (!node)
-		return NULL;
-	foreach (lc, custom_scan_tlist)
-	{
-		TargetEntry *tle = lfirst(lc);
-
-		if (tle->resorigtbl != (Oid)UINT_MAX &&
-			equal(tle->expr, node))
-		{
-			return (Node *)makeVar(INDEX_VAR,
-								   tle->resno,
-								   exprType(node),
-								   exprTypmod(node),
-								   exprCollation(node),
-								   0);
-		}
-	}
-
-	if (IsA(node, Var))
-	{
-		return (Node *)makeNullConst(exprType(node),
-									 exprTypmod(node),
-									 exprCollation(node));
-	}
-	return expression_tree_mutator(node, __fixup_fallback_projection, __data);
-}
-
-/*
  * fixup_fallback_expression
  */
 static Node *
@@ -1216,7 +1180,7 @@ __fixup_fallback_expression_walker(Node *node, void *data)
 		{
 			Assert(exprType(node) == kvdef->kv_type_oid);
 			return (Node *)makeVar(INDEX_VAR,
-								   kvdef->kv_slot_id,
+								   kvdef->kv_fallback,
 								   exprType(node),
 								   exprTypmod(node),
 								   exprCollation(node),
@@ -1229,37 +1193,49 @@ __fixup_fallback_expression_walker(Node *node, void *data)
 	return expression_tree_mutator(node, __fixup_fallback_expression_walker, data);
 }
 
-/*
- * __execInitCpuFallbackExprs
- */
-static ExprState *
-__execInitCpuFallbackExprs(List *qual, pgstromTaskState *pts)
+static Node *
+fixup_fallback_expression(Node *node, pgstromTaskState *pts)
 {
 	pgstromPlanInfo *pp_info = pts->pp_info;
 	List	   *kvars_deflist = NIL;
 	ListCell   *lc;
 
-	/* quick bailout */
-	if (qual == NIL)
+	if (!node)
 		return NULL;
-
 	foreach (lc, pp_info->kvars_deflist)
 	{
 		codegen_kvar_defitem *kvdef = lfirst(lc);
 
-		if (kvdef->kv_depth >= 0 &&
-			kvdef->kv_depth <= pts->num_rels &&
-			kvdef->kv_resno > 0)
+		if (kvdef->kv_fallback > 0)
 		{
 			kvdef = pmemdup(kvdef, sizeof(codegen_kvar_defitem));
 			kvdef->kv_expr = fixup_scanstate_expr(&pts->css.ss, kvdef->kv_expr);
 			kvars_deflist = lappend(kvars_deflist, kvdef);
 		}
 	}
-	qual = fixup_scanstate_quals(&pts->css.ss, qual);
-	qual = (List *)__fixup_fallback_expression_walker((Node *)qual,
-													  kvars_deflist);
-	return ExecInitQual(qual, &pts->css.ss.ps);
+	return __fixup_fallback_expression_walker(node, kvars_deflist);
+}
+
+/*
+ * __execInitCpuFallbackQuals / __execInitCpuFallbackExpr
+ */
+static inline ExprState *
+__execInitCpuFallbackQuals(List *quals, pgstromTaskState *pts)
+{
+	if (quals == NIL)
+		return NULL;
+	quals = fixup_scanstate_quals(&pts->css.ss, quals);
+	quals = (List *)fixup_fallback_expression((Node *)quals, pts);
+	return ExecInitQual(quals, &pts->css.ss.ps);
+}
+
+static inline ExprState *
+__execInitCpuFallbackExpr(Expr *expr, pgstromTaskState *pts)
+{
+	if (!expr)
+		return NULL;
+	expr = (Expr *)fixup_fallback_expression((Node *)expr, pts);
+	return ExecInitExpr(expr, &pts->css.ss.ps);
 }
 
 /*
@@ -1360,12 +1336,8 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 		}
 		else if (!tle->resjunk)
 		{
-			Node	   *expr;
-
 			Assert(tle->resorigtbl == (Oid)UINT_MAX);
-			expr = __fixup_fallback_projection((Node *)tle->expr,
-											   cscan->custom_scan_tlist);
-			state = ExecInitExpr((Expr *)expr, &pts->css.ss.ps);
+			state = __execInitCpuFallbackExpr(tle->expr, pts);
 			compatible = false;
 			fallback_proj = lappend(fallback_proj, state);
 		}
@@ -1565,8 +1537,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		istate->depth = depth_index + 1;
 		istate->join_type = pp_inner->join_type;
 
-		istate->join_quals = __execInitCpuFallbackExprs(pp_inner->join_quals, pts);
-		istate->other_quals = __execInitCpuFallbackExprs(pp_inner->other_quals, pts);
+		istate->join_quals = __execInitCpuFallbackQuals(pp_inner->join_quals, pts);
+		istate->other_quals = __execInitCpuFallbackQuals(pp_inner->other_quals, pts);
 
 		foreach (cell, pp_inner->hash_outer_keys)
 		{
