@@ -2769,6 +2769,7 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 	else
 	{
 		pts->scan_done = true;
+		return NULL;
 	}
 	/* XXX - debug message */
 	if (repeat_id > 0 && repeat_id != pts->last_repeat_id)

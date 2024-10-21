@@ -1961,8 +1961,8 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 {
 	const kvec_internal_t *kvecs;
 	HeapTupleHeaderData *htup;
-	xpu_bool_t		status;
 	uint32_t		slot_id;
+	int				status;
 
 	/* fetch the inner heap tuple */
 	assert(kexp_gist->opcode == FuncOpCode__GiSTEval);
@@ -1984,13 +1984,13 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 	}
 	/* run the join quals */
 	kcxt_reset(kcxt);
-	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join, &status))
+	if (!ExecGpuJoinQuals(kcxt, kexp_join, &status))
 	{
 		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		return false;
 	}
-	//CHECK CPU FALLBACK
-	return (!XPU_DATUM_ISNULL(&status) && status.value);
+	//XXX - CHECK CPU FALLBACK?
+	return (status > 0);
 }
 
 /* ----------------------------------------------------------------

@@ -33,12 +33,6 @@ CREATE TRIGGER row_sync_test_ng01 AFTER INSERT OR UPDATE OR DELETE
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('cpu_device_id=0');
 ERROR:  gpucache: unknown option [cpu_device_id]=[0]
 -- validation error
--- 32GB limitation check was removed, so it should not be an error
-CREATE TRIGGER row_sync_test_ng02 AFTER INSERT OR UPDATE OR DELETE
-    ON cache_test_table FOR ROW
-    EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('max_num_rows=200000000');
-DROP TRIGGER IF EXISTS row_sync_test_ng02 ON cache_test_table;
--- validation error
 CREATE TRIGGER row_sync_test_ng03 AFTER INSERT OR UPDATE OR DELETE
     ON cache_test_table FOR ROW
     EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('redo_buffer_size=4m');
@@ -709,6 +703,8 @@ SELECT * FROM cache_corruption_test WHERE b%3=0;
    Output: id, a, b, c, d, e, f, g, h, i, j
    GPU Projection: id, a, b, c, d, e, f, g, h, i, j
    GPU Scan Quals: (((b)::integer % 3) = 0) [rows: 4000 -> 20]
+   GPU Cache: GPU0 [phase: corrupted, max_num_rows: 5000]
+   GPU Cache Options: gpu_device_id=0,max_num_rows=5000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
    KVars-Slot: <slot=0, type='int2', expr='b', kv_off=0x0000>, <slot=1, type='int4', expr='id', kv_off=0x0c00>, <slot=2, type='int1', expr='a', kv_off=0x2000>, <slot=3, type='int4', expr='c', kv_off=0x2800>, <slot=4, type='int8', expr='d', kv_off=0x3c00>, <slot=5, type='float2', expr='e', kv_off=0x6000>, <slot=6, type='float4', expr='f', kv_off=0x6c00>, <slot=7, type='float8', expr='g', kv_off=0x8000>, <slot=8, type='text', expr='h', kv_off=0xa400>, <slot=9, type='text', expr='i', kv_off=0xd800>, <slot=10, type='bpchar', expr='j', kv_off=0x10c00>
    KVecs-Buffer: nbytes: 81920, ndims: 2, items=[kvec0=<0x0000-0bff, type='int2', expr='b'>, kvec1=<0x0c00-1fff, type='int4', expr='id'>, kvec2=<0x2000-27ff, type='int1', expr='a'>, kvec3=<0x2800-3bff, type='int4', expr='c'>, kvec4=<0x3c00-5fff, type='int8', expr='d'>, kvec5=<0x6000-6bff, type='float2', expr='e'>, kvec6=<0x6c00-7fff, type='float4', expr='f'>, kvec7=<0x8000-a3ff, type='float8', expr='g'>, kvec8=<0xa400-d7ff, type='text', expr='h'>, kvec9=<0xd800-10bff, type='text', expr='i'>, kvec10=<0x10c00-13fff, type='bpchar', expr='j'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=2, type='int1' resno=2(a)>, <slot=0, type='int2' resno=3(b)>, <slot=3, type='int4' resno=4(c)>, <slot=4, type='int8' resno=5(d)>, <slot=5, type='float2' resno=6(e)>, <slot=6, type='float4' resno=7(f)>, <slot=7, type='float8' resno=8(g)>, <slot=8, type='text' resno=9(h)>, <slot=9, type='text' resno=10(i)>, <slot=10, type='bpchar' resno=11(j)>]}}
