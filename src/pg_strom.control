@@ -1,6 +1,6 @@
 # pg_strom extension
 comment = 'PG-Strom - big-data processing acceleration using GPU and NVME'
 directory = 'pg_strom'
-default_version = '5.1'
+default_version = '5.3'
 module_pathname = '$libdir/pg_strom'
 relocatable = false

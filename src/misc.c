@@ -916,6 +916,308 @@ pgstrom_copy_pathnode(const Path *pathnode)
 }
 
 /*
+ * pathNameMatchByPattern
+ *
+ * It excludes the path-names which don't match with the given pattern.
+ * The pattern can use the following special characters as wildcard. 
+ *
+ * '?' : any character
+ * '*' : any characters (more than 0-length)
+ * '\' : escape character
+ * '${KEY}' : this token is considered as a content of the KEY attribute.
+ * '@{KEY}' : this token is considered as a content of the KEY attribute (only numeric)
+ *
+ * Entire logic is similar to textlike(), see MatchText() in like_match.c
+ */
+#define LIKE_TRUE		1
+#define LIKE_FALSE		0
+#define LIKE_ABORT		(-1)
+
+#define NextByte(p,plen)	((p)++, (plen)--)
+#define NextChar(p,plen)	\
+	do { int __l = pg_mblen(p); (p) +=__l; (plen) -=__l; } while(0)
+static inline int
+CHAREQ(const char *p1, const char *p2)
+{
+	int		p1_len;
+
+	/* Optimization:  quickly compare the first byte. */
+	if (*p1 != *p2)
+		return 0;
+
+	p1_len = pg_mblen(p1);
+	if (pg_mblen(p2) != p1_len)
+		return 0;
+
+	/* They are the same length */
+	while (p1_len--)
+	{
+		if (*p1++ != *p2++)
+			return 0;
+	}
+	return 1;
+}
+
+static int
+__fetchWildCard(const char *p, int plen, char *keybuf)
+{
+	if (*p == '*')
+	{
+		return 1;
+	}
+	else if (*p == '$' || *p == '@')
+	{
+		const char *start = p;
+
+		NextByte(p, plen);
+		if (plen <= 0 || *p != '{')
+			elog(ERROR, "Path pattern contains wrong wildcard");
+		NextByte(p, plen);
+		while (plen > 0 && *p != '}')
+		{
+			if (*p == '\\')
+			{
+				NextByte(p, plen);
+				if (plen <= 0)
+					elog(ERROR, "Path pattern must not end with escape character");
+			}
+			for (int cnt = pg_mblen(p); cnt > 0; cnt--)
+			{
+				*keybuf++ = *p;
+				NextByte(p, plen);
+			}
+		}
+		if (plen <= 0)
+			elog(ERROR, "Path pattern contains unclosed key phrase");
+		*keybuf++ = '\0';
+		Assert(*p == '}');
+		NextByte(p, plen);
+		return (p - start);
+	}
+	return 0;
+}
+
+static int
+__matchByPattern(const char *t, int tlen,
+				 const char *p, int plen,
+				 List **p_attrKeys,
+				 List **p_attrValues)
+{
+	char   *keybuf = alloca(plen+10);
+	List   *attrKeys = NIL;
+	List   *attrValues = NIL;
+	int		cnt;
+
+	/* Since this function recurses, it could be driven to stack overflow */
+	check_stack_depth();
+
+	/*
+	 * In this loop, we advance by char when matching wildcards (and thus on
+	 * recursive entry to this function we are properly char-synced). On other
+	 * occasions it is safe to advance by byte, as the text and pattern will
+	 * be in lockstep. This allows us to perform all comparisons between the
+	 * text and pattern on a byte by byte basis, even for multi-byte
+	 * encodings.
+	 */
+	while (tlen > 0 && plen > 0)
+	{
+		if (*p == '\\')
+		{
+			/* Next pattern byte must match literally, whatever it is */
+			NextByte(p, plen);
+			/* ... and there had better be one, per SQL standard */
+			if (plen <= 0)
+				elog(ERROR, "Path pattern must not end with escape character");
+			if (*p != *t)
+			{
+				list_free_deep(attrKeys);
+				list_free_deep(attrValues);
+				return LIKE_FALSE;
+			}
+		}
+		else if ((cnt = __fetchWildCard(p, plen, keybuf)) > 0)
+		{
+			const char *t_base = t;
+			char	wildcard = *p;
+
+			Assert(wildcard == '*' || wildcard == '$' || wildcard == '@');
+			Assert(cnt <= plen);
+			p += cnt;
+			plen -= cnt;
+
+			/*
+			 * If we're at end of pattern, match: we have a trailing % which
+			 * matches any remaining text string.
+			 * In case of '${KEY}' wildcard, remained characters must be numeric.
+			 */
+			if (plen <= 0)
+			{
+				if (wildcard == '@')
+				{
+					const char *__t = t;
+					int			__tlen = tlen;
+
+					while (tlen > 0)
+					{
+						if (*t < '0' || *t > '9')
+						{
+							list_free_deep(attrKeys);
+							list_free_deep(attrValues);
+							return LIKE_FALSE;
+						}
+						NextByte(t, tlen);
+					}
+					attrKeys   = lappend(attrKeys,   pstrdup(keybuf));
+					attrValues = lappend(attrValues, pnstrdup(__t, __tlen));
+				}
+				else if (wildcard == '$')
+				{
+					attrKeys   = lappend(attrKeys,   pstrdup(keybuf));
+					attrValues = lappend(attrValues, pnstrdup(t, tlen));
+				}
+				*p_attrKeys   = attrKeys;
+				*p_attrValues = attrValues;
+				return LIKE_TRUE;
+			}
+
+			/*
+			 * Otherwise, scan for a text position at which we can match the
+			 * rest of the pattern.  The first remaining pattern char is known
+			 * to be a regular or escaped literal character, so we can compare
+			 * the first pattern byte to each text byte to avoid recursing
+			 * more than we have to.  This fact also guarantees that we don't
+			 * have to consider a match to the zero-length substring at the
+			 * end of the text.
+			 */
+			while (tlen > 0)
+			{
+				List   *__attrKeys = NIL;
+				List   *__attrValues = NIL;
+				int		status = __matchByPattern(t, tlen,
+												  p, plen,
+												  &__attrKeys,
+												  &__attrValues);
+				if (status == LIKE_TRUE)
+				{
+					attrKeys   = lappend(attrKeys,   pstrdup(keybuf));
+					attrValues = lappend(attrValues, (t == t_base
+													  ? NULL
+													  : pnstrdup(t_base, t - t_base)));
+					*p_attrKeys   = list_concat(attrKeys,   __attrKeys);
+					*p_attrValues = list_concat(attrValues, __attrValues);
+					list_free(__attrKeys);
+					list_free(__attrValues);
+					return LIKE_TRUE;
+				}
+				else
+				{
+					list_free_deep(__attrKeys);
+					list_free_deep(__attrValues);
+					if (status == LIKE_ABORT)
+						return status;
+					if (wildcard == '@' && !isdigit(*t))
+						return LIKE_FALSE;
+				}
+				NextChar(t, tlen);
+			}
+			/*
+			 * End of text with no match, so no point in trying later places
+			 * to start matching this pattern.
+			 */
+			list_free_deep(attrKeys);
+			list_free_deep(attrValues);
+			return LIKE_ABORT;
+		}
+		else if (*p == '?')
+		{
+			/* '?' matches any single character, and we know there is one */
+			NextChar(t, tlen);
+			NextByte(p, plen);
+			continue;
+		}
+		else if (*p != *t)
+		{
+			/* non-wildcard pattern char fails to match text char */
+			list_free_deep(attrKeys);
+			list_free_deep(attrValues);
+			return LIKE_FALSE;
+		}
+
+		/*
+		 * Pattern and text match, so advance.
+		 *
+		 * It is safe to use NextByte instead of NextChar here, even for
+		 * multi-byte character sets, because we are not following immediately
+		 * after a wildcard character. If we are in the middle of a multibyte
+		 * character, we must already have matched at least one byte of the
+		 * character from both text and pattern; so we cannot get out-of-sync
+		 * on character boundaries.  And we know that no backend-legal
+		 * encoding allows ASCII characters such as '%' to appear as non-first
+		 * bytes of characters, so we won't mistakenly detect a new wildcard.
+		 */
+		NextByte(t, tlen);
+		NextByte(p, plen);
+	}
+	if (tlen > 0)
+	{
+		list_free_deep(attrKeys);
+		list_free_deep(attrValues);
+		return LIKE_FALSE;		/* end of pattern, but not of text */
+	}
+
+	/*
+	 * End of text, but perhaps not of pattern.  Match iff the remaining
+	 * pattern can match a zero-length string, ie, it's zero or more %'s.
+	 */
+	while (plen > 0 && *p == '*')
+		NextByte(p, plen);
+	if (plen <= 0)
+	{
+		*p_attrKeys   = attrKeys;
+		*p_attrValues = attrValues;
+		return LIKE_TRUE;
+	}
+	/*
+	 * End of text with no match, so no point in trying later places to start
+	 * matching this pattern.
+	 */
+	list_free_deep(attrKeys);
+	list_free_deep(attrValues);
+	return LIKE_ABORT;
+}
+
+bool
+pathNameMatchByPattern(const char *pathname,
+					   const char *pattern,
+					   List **p_attrKeys,
+					   List **p_attrValues)
+{
+	char	   *namebuf = alloca(strlen(pathname) + 10);
+	char	   *filename;
+	List	   *attrKeys = NIL;
+	List	   *attrValues = NIL;
+
+	strcpy(namebuf, pathname);
+	filename = basename(namebuf);
+	if (__matchByPattern(filename, strlen(filename),
+						 pattern,  strlen(pattern),
+						 &attrKeys,
+						 &attrValues) == LIKE_TRUE)
+	{
+		if (p_attrKeys)
+			*p_attrKeys = attrKeys;
+		else
+			list_free_deep(attrKeys);
+		if (p_attrValues)
+			*p_attrValues = attrValues;
+		else
+			list_free_deep(attrValues);
+		return true;
+	}
+	return false;
+}
+
+/*
  * ----------------------------------------------------------------
  *
  * SQL functions to support regression test

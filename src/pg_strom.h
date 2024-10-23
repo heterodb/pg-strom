@@ -973,6 +973,10 @@ extern void	   *__mmapShmem(uint32_t shmem_handle,
 extern bool		__munmapShmem(void *mmap_addr);
 
 extern Path	   *pgstrom_copy_pathnode(const Path *pathnode);
+extern bool		pathNameMatchByPattern(const char *pathname,
+									   const char *pattern,
+									   List **p_attrKeys,
+									   List **p_attrValues);
 
 /*
  * githash.c (auto-generated)
