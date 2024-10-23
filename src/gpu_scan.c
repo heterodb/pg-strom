@@ -843,7 +843,7 @@ assign_custom_cscan_tlist(List *tlist_dev, pgstromPlanInfo *pp_info)
 
 			if (kvdef->kv_depth >= 0 &&
 				kvdef->kv_depth <= pp_info->num_rels &&
-				kvdef->kv_resno >  0 &&
+				kvdef->kv_resno != InvalidAttrNumber &&
 				equal(tle->expr, kvdef->kv_expr))
 			{
 				kvdef->kv_fallback = tle->resno;
