@@ -3354,7 +3354,7 @@ gpuservLoadKdsArrow(gpuClient *gclient,
 	size_t		base_offset;
 
 	Assert(kds->format == KDS_FORMAT_ARROW);
-	base_offset = KDS_HEAD_LENGTH(kds);
+	base_offset = KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
 	return __gpuservLoadKdsCommon(gclient,
 								  kds,
 								  base_offset,

@@ -290,14 +290,25 @@ kern_extract_arrow_tuple(kern_context *kcxt,
 		const kern_colmeta *cmeta = &kds->colmeta[vl_desc->vl_resno-1];
 		uint16_t	slot_id = vl_desc->vl_slot_id;
 
-		if (!__kern_extract_arrow_field(kcxt,
-										kds,
-										cmeta,
-										kds_index,
-										&kcxt->kvars_desc[slot_id],
-										kcxt->kvars_slot[slot_id]))
-			return false;
+		if (cmeta->virtual_offset != 0)
+		{
+			/* virtual column is immutable for each KDS */
+			const char *addr = NULL;
 
+			if (cmeta->virtual_offset > 0)
+				addr = ((char *)kds + cmeta->virtual_offset);
+			if (!__extract_heap_tuple_attr(kcxt, slot_id, addr))
+				return false;
+		}
+		else if (!__kern_extract_arrow_field(kcxt,
+											 kds,
+											 cmeta,
+											 kds_index,
+											 &kcxt->kvars_desc[slot_id],
+											 kcxt->kvars_slot[slot_id]))
+		{
+			return false;
+		}
 		vl_desc++;
 		vload_count++;
 	}

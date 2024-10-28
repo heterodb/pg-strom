@@ -75,7 +75,8 @@ typedef struct ArrowFileState
 	uint32_t	ncols;
 	struct {
 		int		field_index;		/* PG-column <-> Arrow-field mapping */
-		const char *virtual_value;	/* virtual value, if any */
+		bool	virtual_isnull;		/* virtual isnull, if any */
+		Datum	virtual_datum;		/* virtual datum, if any */
 	} attrs[FLEXIBLE_ARRAY_MEMBER];
 } ArrowFileState;
 
@@ -1046,7 +1047,7 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 
 		opcode = get_opfamily_member(opfamily, var->vartype,
 									 exprType((Node *)arg),
-									 BTLessEqualStrategyNumber);
+									 BTLessStrategyNumber);
 		expr = make_opclause(opcode,
 							 op->opresulttype,
 							 op->opretset,
@@ -1116,6 +1117,7 @@ static bool
 execCheckArrowStatsHint(arrowStatsHint *stats_hint,
 						RecordBatchState *rb_state)
 {
+	ArrowFileState *af_state = rb_state->af_state;
 	ExprContext	   *econtext = stats_hint->econtext;
 	TupleTableSlot *min_values = econtext->ecxt_innertuple;
 	TupleTableSlot *max_values = econtext->ecxt_outertuple;
@@ -1130,24 +1132,44 @@ execCheckArrowStatsHint(arrowStatsHint *stats_hint,
 		 anum >= 0;
 		 anum = bms_next_member(stats_hint->load_attrs, anum))
 	{
-		RecordBatchFieldState *rb_field = &rb_state->fields[anum-1];
+		int		field_index;
 
-		Assert(anum > 0 && anum <= rb_state->nfields);
-		if (!rb_field->stat_datum.isnull)
+		Assert(anum > 0 && anum <= af_state->ncols);
+		field_index = af_state->attrs[anum-1].field_index;
+		if (field_index < 0)
 		{
-			min_values->tts_isnull[anum-1] = false;
-			max_values->tts_isnull[anum-1] = false;
-			if (rb_field->atttypid == NUMERICOID)
+			bool	virtual_isnull = af_state->attrs[anum-1].virtual_isnull;
+			Datum	virtual_datum  = af_state->attrs[anum-1].virtual_datum;
+
+			min_values->tts_isnull[anum-1] = virtual_isnull;
+			max_values->tts_isnull[anum-1] = virtual_isnull;
+			if (!virtual_isnull)
 			{
-				min_values->tts_values[anum-1]
-					= PointerGetDatum(&rb_field->stat_datum.min.numeric);
-				max_values->tts_values[anum-1]
-					= PointerGetDatum(&rb_field->stat_datum.max.numeric);
+				min_values->tts_values[anum-1] = virtual_datum;
+				max_values->tts_values[anum-1] = virtual_datum;
 			}
-			else
+		}
+		else
+		{
+			RecordBatchFieldState *rb_field = &rb_state->fields[field_index];
+
+			Assert(field_index < rb_state->nfields);
+			if (!rb_field->stat_datum.isnull)
 			{
-				min_values->tts_values[anum-1] = rb_field->stat_datum.min.datum;
-				max_values->tts_values[anum-1] = rb_field->stat_datum.max.datum;
+				min_values->tts_isnull[anum-1] = false;
+				max_values->tts_isnull[anum-1] = false;
+				if (rb_field->atttypid == NUMERICOID)
+				{
+					min_values->tts_values[anum-1]
+						= PointerGetDatum(&rb_field->stat_datum.min.numeric);
+					max_values->tts_values[anum-1]
+						= PointerGetDatum(&rb_field->stat_datum.max.numeric);
+				}
+				else
+				{
+					min_values->tts_values[anum-1] = rb_field->stat_datum.min.datum;
+					max_values->tts_values[anum-1] = rb_field->stat_datum.max.datum;
+				}
 			}
 		}
 	}
@@ -2057,7 +2079,8 @@ BuildArrowFileState(Relation frel,
 
 		if (virtual_key)
 		{
-			const char *virtual_value = NULL;
+			Datum	datum;
+			bool	found = false;
 
 			Assert(!field_name);
 			foreach (lc2, fvirt_attrs)
@@ -2066,16 +2089,27 @@ BuildArrowFileState(Relation frel,
 
 				if (strcmp(kv->key, virtual_key) == 0)
 				{
-					virtual_value = pstrdup(kv->value);
+					Oid		type_input;
+					Oid		type_ioparam;
+
+					getTypeInputInfo(attr->atttypid,
+									 &type_input,
+									 &type_ioparam);
+					datum = OidInputFunctionCall(type_input,
+												 (char *)kv->value,
+												 type_ioparam,
+												 attr->atttypmod);
+					found = true;
 					break;
 				}
 			}
-			if (!virtual_value)
+			if (!found)
 				elog(ERROR, "arrow_fdw: virtual column '%s' key '%s' not found",
 					 NameStr(attr->attname),
 					 virtual_key);
 			af_state->attrs[j].field_index = -1;
-			af_state->attrs[j].virtual_value = virtual_value;
+			af_state->attrs[j].virtual_isnull = false;
+			af_state->attrs[j].virtual_datum = datum;
 			/*
 			 * The virtual value is immutable to a particular record-batch,
 			 * so we can consider it also works as min/max statistics to skip
@@ -2083,7 +2117,6 @@ BuildArrowFileState(Relation frel,
 			 */
 			stat_pg_attrs = bms_add_member(stat_pg_attrs, attr->attnum -
 										   FirstLowInvalidHeapAttributeNumber);
-			//elog(INFO, "[%d] %s -> virtual key='%s' value='%s'", j, NameStr(attr->attname), virtual_key, virtual_value);
 		}
 		else
 		{
@@ -2117,12 +2150,12 @@ BuildArrowFileState(Relation frel,
 					 RelationGetRelationName(frel),
 					 filename);
 			af_state->attrs[j].field_index = field_index;
-			af_state->attrs[j].virtual_value = NULL;
+			af_state->attrs[j].virtual_isnull = true;
+			af_state->attrs[j].virtual_datum = 0;
 
 			if (bms_is_member(field_index, stat_arrow_attrs))
 				stat_pg_attrs = bms_add_member(stat_pg_attrs, attr->attnum -
 											   FirstLowInvalidHeapAttributeNumber);
-			//elog(INFO, "[%d] %s -> field=%s index=%d", j, NameStr(attr->attname), field_name, field_index);
 		}
 	}
 	bms_free(stat_arrow_attrs);
@@ -2587,30 +2620,43 @@ arrowFdwSetupIOvector(RecordBatchState *rb_state,
 					  Bitmapset *referenced,
 					  kern_data_store *kds)
 {
+	ArrowFileState *af_state = rb_state->af_state;
 	arrowFdwSetupIOContext *con;
 	strom_io_vector *iovec;
 	unsigned int	nr_chunks = 0;
 
 	Assert(kds->format == KDS_FORMAT_ARROW &&
-		   kds->ncols <= kds->nr_colmeta &&
-		   kds->ncols == rb_state->nfields);
+		   kds->ncols <= kds->nr_colmeta);
 	con = alloca(offsetof(arrowFdwSetupIOContext,
 						  ioc[3 * kds->nr_colmeta]));
 	con->rb_offset = rb_state->rb_offset;
 	con->f_offset  = ~0UL;	/* invalid offset */
 	con->m_offset  = 0;
-	con->kds_head_sz = KDS_HEAD_LENGTH(kds);
+	con->kds_head_sz = KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
 	con->depth = 0;
 	con->io_index = -1;		/* invalid index */
 	for (int j=0; j < kds->ncols; j++)
 	{
-		RecordBatchFieldState *rb_field = &rb_state->fields[j];
 		kern_colmeta *cmeta = &kds->colmeta[j];
 		int			attidx = j + 1 - FirstLowInvalidHeapAttributeNumber;
 
 		if (bms_is_member(attidx, referenced) ||
 			bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
-			arrowFdwSetupIOvectorField(con, rb_field, kds, cmeta);
+		{
+			int		field_index = af_state->attrs[j].field_index;
+
+			if (field_index < 0)
+			{
+				/* !!!virtual column!!! */
+				Assert(cmeta->virtual_offset != 0);
+			}
+			else
+			{
+				RecordBatchFieldState *rb_field = &rb_state->fields[field_index];
+
+				arrowFdwSetupIOvectorField(con, rb_field, kds, cmeta);
+			}
+		}
 		else
 			cmeta->atttypkind = TYPE_KIND__NULL;	/* unreferenced */
 	}
@@ -2700,30 +2746,96 @@ __arrowKdsAssignAttrOptions(kern_data_store *kds,
 	}
 }
 
+static void
+__arrowKdsAssignVirtualColumns(kern_data_store *kds,
+							   kern_colmeta *cmeta,
+							   bool virtual_isnull,
+							   Datum virtual_datum,
+							   StringInfo chunk_buffer)
+{
+	if (virtual_isnull)
+	{
+		cmeta->virtual_offset = -1;
+	}
+	else
+	{
+		Assert(chunk_buffer->len == MAXALIGN(chunk_buffer->len));
+		cmeta->virtual_offset = (chunk_buffer->data +
+								 chunk_buffer->len - (char *)kds);
+		if (cmeta->attbyval)
+		{
+			appendBinaryStringInfo(chunk_buffer,
+								   (char *)&virtual_datum,
+								   cmeta->attlen);
+		}
+		else if (cmeta->attlen > 0)
+		{
+			appendBinaryStringInfo(chunk_buffer,
+								   DatumGetPointer(virtual_datum),
+								   cmeta->attlen);
+		}
+		else if (cmeta->attlen == -1)
+		{
+			appendBinaryStringInfo(chunk_buffer,
+								   DatumGetPointer(virtual_datum),
+								   VARSIZE_ANY(virtual_datum));
+		}
+		else
+		{
+			elog(ERROR, "unknown type length: %d", cmeta->attlen);
+		}
+		__appendZeroStringInfo(chunk_buffer, 0);
+	}
+}
+
 static strom_io_vector *
 arrowFdwLoadRecordBatch(Relation relation,
 						Bitmapset *referenced,
 						RecordBatchState *rb_state,
 						StringInfo chunk_buffer)
 {
+	ArrowFileState *af_state = rb_state->af_state;
 	TupleDesc	tupdesc = RelationGetDescr(relation);
-	size_t		head_sz = estimate_kern_data_store(tupdesc);
+	size_t		head_off = chunk_buffer->len;
 	kern_data_store *kds;
 
 	/* setup KDS and I/O-vector */
-	enlargeStringInfo(chunk_buffer, head_sz);
-	kds = (kern_data_store *)(chunk_buffer->data +
-							  chunk_buffer->len);
+	enlargeStringInfo(chunk_buffer, estimate_kern_data_store(tupdesc));
+	kds = (kern_data_store *)(chunk_buffer->data + head_off);
 	setup_kern_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW);
 	kds->nitems = rb_state->rb_nitems;
 	kds->table_oid = RelationGetRelid(relation);
-	Assert(kds->ncols == rb_state->nfields);
-	for (int j=0; j < kds->ncols; j++)
-		__arrowKdsAssignAttrOptions(kds,
-									&kds->colmeta[j],
-									&rb_state->fields[j]);
-	chunk_buffer->len += head_sz;
+	chunk_buffer->len += KDS_HEAD_LENGTH(kds);
 
+	Assert(kds->ncols == af_state->ncols);
+	for (int j=0; j < kds->ncols; j++)
+	{
+		int		field_index = af_state->attrs[j].field_index;
+
+		if (field_index < 0)
+		{
+			__arrowKdsAssignVirtualColumns(kds,
+										   &kds->colmeta[j],
+										   af_state->attrs[j].virtual_isnull,
+										   af_state->attrs[j].virtual_datum,
+										   chunk_buffer);
+			/*
+			 * 'chunk_buffer' may be expanded during assignment of virtual
+			 * columns, because repalloc() may change the base address,
+			 * so kds must be refreshed.
+			 */
+			kds = (kern_data_store *)(chunk_buffer->data + head_off);
+		}
+		else
+		{
+			Assert(field_index < rb_state->nfields);
+			__arrowKdsAssignAttrOptions(kds,
+										&kds->colmeta[j],
+										&rb_state->fields[field_index]);
+		}
+	}
+	kds->arrow_virtual_usage = (chunk_buffer->len
+								- (head_off + KDS_HEAD_LENGTH(kds)));
 	return arrowFdwSetupIOvector(rb_state, referenced, kds);
 }
 
@@ -2748,7 +2860,7 @@ arrowFdwFillupRecordBatch(Relation relation,
 	enlargeStringInfo(chunk_buffer, kds->length);
 	kds = (kern_data_store *)chunk_buffer->data;
 	filp = PathNameOpenFile(af_state->filename, O_RDONLY | PG_BINARY);
-	base = (char *)kds + KDS_HEAD_LENGTH(kds);
+	base = (char *)kds + KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
 	for (int i=0; i < iovec->nr_chunks; i++)
 	{
 		strom_io_chunk *ioc = &iovec->ioc[i];
@@ -3495,6 +3607,29 @@ pg_datum_arrow_ref(kern_data_store *kds,
 	Datum		datum = 0;
 	bool		isnull = false;
 
+	if (cmeta->virtual_offset != 0)
+	{
+		if (cmeta->virtual_offset < 0)
+			isnull = true;
+		else if (cmeta->attbyval)
+		{
+			void   *addr = ((char *)kds + cmeta->virtual_offset);
+
+			switch (cmeta->attlen)
+			{
+				case 1:	datum = *((uint8_t  *)addr); break;
+				case 2: datum = *((uint16_t *)addr); break;
+				case 4: datum = *((uint32_t *)addr); break;
+				case 8: datum = *((uint64_t *)addr); break;
+				default:
+					elog(ERROR, "unexpected inline type length: %d", cmeta->attlen);
+			}
+		}
+		else
+			datum = PointerGetDatum((char *)kds + cmeta->virtual_offset);
+		goto out;
+	}
+
 	if (KDS_ARROW_CHECK_ISNULL(kds, cmeta, index))
 	{
 		isnull = true;
@@ -4214,9 +4349,11 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 					continue;
 				i = af_state->attrs[j-1].field_index;
 				if (i >= 0 && i < rb_state->nfields)
+				{
 					sz = __recordBatchFieldLength(&rb_state->fields[j]);
-				read_sz += sz;
-				chunk_sz[j] += sz;
+					read_sz += sz;
+					chunk_sz[j] += sz;
+				}
 			}
 		}
 
