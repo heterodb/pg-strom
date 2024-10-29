@@ -2097,16 +2097,37 @@ BuildArrowFileState(Relation frel,
 
 				if (strcmp(vcdef->key, virtual_key) == 0)
 				{
+					MemoryContext oldcxt = CurrentMemoryContext;
 					Oid		type_input;
 					Oid		type_ioparam;
 
 					getTypeInputInfo(attr->atttypid,
 									 &type_input,
 									 &type_ioparam);
-					datum = OidInputFunctionCall(type_input,
-												 vcdef->value,
-												 type_ioparam,
-												 attr->atttypmod);
+					PG_TRY();
+					{
+						datum = OidInputFunctionCall(type_input,
+													 vcdef->value,
+													 type_ioparam,
+													 attr->atttypmod);
+					}
+					PG_CATCH();
+					{
+						MemoryContext errcxt = MemoryContextSwitchTo(oldcxt);
+						ErrorData  *edata = CopyErrorData();
+
+						ereport(Max(ERROR, edata->elevel),
+								errmsg("(%s:%d) %s",
+									   edata->filename,
+									   edata->lineno,
+									   edata->message),
+								errdetail("arrow_fdw: processing virtual column '%s' of the file '%s' at the attribute '%s' of foreign table '%s'",
+										  vcdef->key, filename,
+										  NameStr(attr->attname),
+										  RelationGetRelationName(frel)));
+						MemoryContextSwitchTo(errcxt);
+					}
+					PG_END_TRY();
 					found = true;
 					break;
 				}

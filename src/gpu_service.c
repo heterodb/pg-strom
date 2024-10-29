@@ -916,24 +916,23 @@ gpuservSetupFatbin(void)
 				__rebuild_gpu_fatbin_file(fatbin_dir,
 										  fatbin_file);
 			}
-			PG_FINALLY();
+			PG_CATCH();
 			{
-				MemoryContext oldcxt = MemoryContextSwitchTo(curctx);
-				ErrorData  *edata = CopyErrorData();
+				ErrorData  *edata;
 
-				if (edata->elevel >= ERROR)
-				{
-					elog(LOG, "[%s:%d] GPU code build error: %s",
-						 edata->filename,
-						 edata->lineno,
-						 edata->message);
-					/*
-					 * We shall not restart again, until source code
-					 * problems are fixed.
-					 */
-					proc_exit(0);
-				}
-				MemoryContextSwitchTo(oldcxt);
+				MemoryContextSwitchTo(curctx);
+				edata = CopyErrorData();
+				FlushErrorState();
+
+				elog(LOG, "[%s:%d] GPU code build error: %s",
+					 edata->filename,
+					 edata->lineno,
+					 edata->message);
+				/*
+				 * We shall not restart again, until source code
+				 * problems are fixed.
+				 */
+				proc_exit(0);
 			}
 			PG_END_TRY();
 		}
