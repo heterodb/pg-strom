@@ -66,6 +66,14 @@ typedef struct RecordBatchState
 	RecordBatchFieldState fields[FLEXIBLE_ARRAY_MEMBER];
 } RecordBatchState;
 
+typedef struct virtualColumnDef
+{
+	char		kind;
+	char	   *key;
+	char	   *value;
+	char		buf[FLEXIBLE_ARRAY_MEMBER];
+} virtualColumnDef;
+
 typedef struct ArrowFileState
 {
 	const char *filename;
@@ -1984,7 +1992,7 @@ __buildArrowMetadataCacheNoLock(ArrowFileState *af_state)
 static ArrowFileState *
 BuildArrowFileState(Relation frel,
 					const char *filename,
-					List *fvirt_attrs,
+					List *virtual_columns,
 					Bitmapset **p_stat_pg_attrs)
 {
 	Oid				frelid = RelationGetRelid(frel);
@@ -2083,11 +2091,11 @@ BuildArrowFileState(Relation frel,
 			bool	found = false;
 
 			Assert(!field_name);
-			foreach (lc2, fvirt_attrs)
+			foreach (lc2, virtual_columns)
 			{
-				ArrowKeyValue *kv = lfirst(lc2);
+				virtualColumnDef *vcdef = lfirst(lc2);
 
-				if (strcmp(kv->key, virtual_key) == 0)
+				if (strcmp(vcdef->key, virtual_key) == 0)
 				{
 					Oid		type_input;
 					Oid		type_ioparam;
@@ -2096,7 +2104,7 @@ BuildArrowFileState(Relation frel,
 									 &type_input,
 									 &type_ioparam);
 					datum = OidInputFunctionCall(type_input,
-												 (char *)kv->value,
+												 vcdef->value,
 												 type_ioparam,
 												 attr->atttypmod);
 					found = true;
@@ -2276,46 +2284,45 @@ arrowFdwExcludeFileNamesByPattern(List *filesList,
 	foreach (lc, filesList)
 	{
 		String *path = lfirst(lc);
+		List   *attrKinds = NIL;
 		List   *attrKeys = NIL;
 		List   *attrValues = NIL;
 
 		if (pathNameMatchByPattern(strVal(path),
 								   pattern,
+								   &attrKinds,
 								   &attrKeys,
 								   &attrValues))
 		{
 			if (p_virtAttrsList)
 			{
-				ListCell   *lc1, *lc2;
-				List	   *kv_list = NIL;
+				List	   *vcdef_list = NIL;
+				ListCell   *lc1, *lc2, *lc3;
 
-				forboth (lc1, attrKeys,
-						 lc2, attrValues)
+				forthree (lc1, attrKinds,
+						  lc2, attrKeys,
+						  lc3, attrValues)
 				{
-					const char *key   = lfirst(lc1);
-					const char *value = lfirst(lc2);
-					int			key_len = strlen(key);
-					int			value_len = strlen(value);
+					int			kind  = lfirst_int(lc1);
+					const char *key   = lfirst(lc2);
+					const char *value = lfirst(lc3);
 					char	   *pos;
-					ArrowKeyValue *kv;
+					virtualColumnDef *vcdef;
 
-					kv = palloc(MAXALIGN(sizeof(ArrowKeyValue)) +
-								MAXALIGN(key_len+1) +
-								MAXALIGN(value_len+1));
-					__initArrowNode(&kv->node, ArrowNodeTag__KeyValue);
-					pos = ((char *)kv + MAXALIGN(sizeof(ArrowKeyValue)));
+					vcdef = palloc(offsetof(virtualColumnDef, buf) +
+								   strlen(key) + strlen(value) + 2);
+					vcdef->kind = kind;
+					pos = vcdef->buf;
 					strcpy(pos, key);
-					kv->key = pos;
-					kv->_key_len = key_len;
+					vcdef->key = pos;
 
-					pos += MAXALIGN(key_len+1);
+					pos += strlen(key) + 1;
 					strcpy(pos, value);
-					kv->value = pos;
-					kv->_value_len = value_len;
+					vcdef->value = pos;
 
-					kv_list = lappend(kv_list, kv);
+					vcdef_list = lappend(vcdef_list, vcdef);
 				}
-				attrsList = lappend(attrsList, kv_list);
+				attrsList = lappend(attrsList, vcdef_list);
 			}
 			results = lappend(results, path);
 
@@ -2934,7 +2941,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	ForeignTable   *ft = GetForeignTable(foreigntableid);
 	Relation		frel = table_open(foreigntableid, NoLock);
 	List		   *filesList;
-	List		   *virtAttrsList;
+	List		   *virtualColumnsList;
 	List		   *results = NIL;
 	Bitmapset	   *referenced = NULL;
 	ListCell	   *lc1, *lc2;
@@ -2953,18 +2960,18 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 
 	/* read arrow-file metadta */
 	filesList = arrowFdwExtractFilesList(ft->options,
-										 &virtAttrsList,
+										 &virtualColumnsList,
 										 &parallel_nworkers);
 	forboth (lc1, filesList,
-			 lc2, virtAttrsList)
+			 lc2, virtualColumnsList)
 	{
 		ArrowFileState *af_state;
 		const char *fname = strVal(lfirst(lc1));
-		List	   *fvirt_attrs = lfirst(lc2);
+		List	   *virtual_columns = lfirst(lc2);
 		ListCell   *cell;
 
 		af_state = BuildArrowFileState(frel, fname,
-									   fvirt_attrs, NULL);
+									   virtual_columns, NULL);
 		if (!af_state)
 			continue;
 
@@ -3003,7 +3010,6 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 		results = lappend(results, af_state);
 	}
 	table_close(frel, NoLock);
-	list_free_deep(virtAttrsList);
 
 	/* setup baserel */
 	baserel->rel_parallel_workers = parallel_nworkers;
@@ -3819,7 +3825,7 @@ __arrowFdwExecInit(ScanState *ss,
 	const DpuStorageEntry *ds_entry = NULL;
 	bool			whole_row_ref = false;
 	List		   *filesList;
-	List		   *virtAttrsList;
+	List		   *virtualColumnsList;
 	List		   *af_states_list = NIL;
 	uint32_t		rb_nrooms = 0;
 	uint32_t		rb_nitems = 0;
@@ -3843,16 +3849,16 @@ __arrowFdwExecInit(ScanState *ss,
 
 	/* setup ArrowFileState */
 	filesList = arrowFdwExtractFilesList(ft->options,
-										 &virtAttrsList, NULL);
+										 &virtualColumnsList, NULL);
 	forboth (lc1, filesList,
-			 lc2, virtAttrsList)
+			 lc2, virtualColumnsList)
 	{
 		char	   *fname = strVal(lfirst(lc1));
-		List	   *fvirt_attrs = lfirst(lc2);
+		List	   *virtual_columns = lfirst(lc2);
 		ArrowFileState *af_state;
 
 		af_state = BuildArrowFileState(frel, fname,
-									   fvirt_attrs,
+									   virtual_columns,
 									   &stat_attrs);
 		if (af_state)
 		{
@@ -3885,7 +3891,6 @@ __arrowFdwExecInit(ScanState *ss,
 			af_states_list = lappend(af_states_list, af_state);
 		}
 	}
-	list_free_deep(virtAttrsList);
 
 	/* setup ArrowFdwState */
 	arrow_state = palloc0(offsetof(ArrowFdwState, rb_states[rb_nrooms]));
@@ -4481,7 +4486,7 @@ ArrowAcquireSampleRows(Relation relation,
 {
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
 	List		   *filesList;
-	List		   *virtAttrsList;
+	List		   *virtualColumnsList;
 	List		   *rb_state_list = NIL;
 	ListCell	   *lc1, *lc2;
 	int64			total_nrows = 0;
@@ -4490,17 +4495,17 @@ ArrowAcquireSampleRows(Relation relation,
 	int				nitems = 0;
 
 	filesList = arrowFdwExtractFilesList(ft->options,
-										 &virtAttrsList, NULL);
+										 &virtualColumnsList, NULL);
 	forboth (lc1, filesList,
-			 lc2, virtAttrsList)
+			 lc2, virtualColumnsList)
 	{
 		ArrowFileState *af_state;
 		char	   *fname = strVal(lfirst(lc1));
-		List	   *fvirt_attrs = lfirst(lc2);
+		List	   *virtual_columns = lfirst(lc2);
 		ListCell   *cell;
 
 		af_state = BuildArrowFileState(relation, fname,
-									   fvirt_attrs, NULL);
+									   virtual_columns, NULL);
 		if (!af_state)
 			continue;
 		foreach (cell, af_state->rb_list)
@@ -4514,7 +4519,6 @@ ArrowAcquireSampleRows(Relation relation,
 		}
 	}
 	nrooms = Min(nrooms, total_nrows);
-	list_free_deep(virtAttrsList);
 
 	/* fetch samples for each record-batch */
 	foreach (lc1, rb_state_list)
@@ -4549,12 +4553,12 @@ ArrowAnalyzeForeignTable(Relation frel,
 {
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
 	List		   *filesList;
-	List		   *virtAttrsList;
+	List		   *virtualColumnsList;
 	ListCell	   *lc;
 	size_t			totalpages = 0;
 
 	filesList = arrowFdwExtractFilesList(ft->options,
-										 &virtAttrsList, NULL);
+										 &virtualColumnsList, NULL);
 	foreach (lc, filesList)
 	{
 		const char	   *fname = strVal(lfirst(lc));
@@ -4581,12 +4585,15 @@ ArrowAnalyzeForeignTable(Relation frel,
  * ensureUniqueFieldNames
  */
 static const char **
-ensureUniqueFieldNames(ArrowSchema *schema)
+ensureUniqueFieldNames(ArrowSchema *schema, List *virtual_columns)
 {
-	const char **column_names = palloc0(sizeof(char *) * schema->_num_fields);
-	int		count = 2;
+	const char **column_names;
+	int			k, count = 2;
+	ListCell   *lc;
 
-	for (int k=0; k < schema->_num_fields; k++)
+	column_names = palloc0(sizeof(char *) * (schema->_num_fields + 1 +
+											 list_length(virtual_columns)));
+	for (k=0; k < schema->_num_fields; k++)
 	{
 		const char *cname = schema->fields[k].name;
 	retry:
@@ -4603,6 +4610,26 @@ ensureUniqueFieldNames(ArrowSchema *schema)
 				 k, schema->fields[k].name, cname);
 		column_names[k] = cname;
 	}
+
+	foreach (lc, virtual_columns)
+	{
+		virtualColumnDef *vcdef = lfirst(lc);
+		const char *cname = vcdef->key;
+	again:
+		for (int j=0; j < k; j++)
+		{
+			if (strcasecmp(cname, column_names[j]) == 0)
+			{
+				cname = psprintf("__%s_%d", vcdef->key, count++);
+				goto again;
+			}
+		}
+		if (vcdef->key != cname)
+			elog(NOTICE, "Arrow virtual column '%s' meets a duplicated field name, so renamed to '%s'",
+				 vcdef->key, cname);
+		column_names[k++] = cname;
+	}
+	Assert(column_names[k] == NULL);
 	return column_names;
 }
 
@@ -4613,10 +4640,12 @@ static List *
 ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 {
 	ArrowSchema	schema;
+	List	   *virtual_columns_prime = NIL;
 	List	   *filesList;
-	List	   *virtAttrsList;
-	ListCell   *lc;
+	List	   *virtualColumnsList;
+	ListCell   *lc1, *lc2;
 	const char **column_names;
+	int			i;
 	StringInfoData	cmd;
 
 	/* sanity checks */
@@ -4635,7 +4664,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			break;
 	}
 	filesList = arrowFdwExtractFilesList(stmt->options,
-										 &virtAttrsList, NULL);
+										 &virtualColumnsList, NULL);
 	if (filesList == NIL)
 		ereport(ERROR,
 				(errmsg("No valid apache arrow files are specified"),
@@ -4643,15 +4672,17 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 
 	/* read the schema */
 	memset(&schema, 0, sizeof(ArrowSchema));
-	foreach (lc, filesList)
+	forboth (lc1, filesList,
+			 lc2, virtualColumnsList)
 	{
 		ArrowFileInfo af_info;
-		const char *fname = strVal(lfirst(lc));
+		const char *fname = strVal(lfirst(lc1));
 
 		readArrowFile(fname, &af_info, false);
-		if (lc == list_head(filesList))
+		if (lc1 == list_head(filesList))
 		{
 			copyArrowNode(&schema.node, &af_info.footer.schema.node);
+			virtual_columns_prime = lfirst(lc2);
 		}
 		else
 		{
@@ -4663,22 +4694,40 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 				elog(ERROR, "file '%s' has incompatible schema definition", fname);
 			for (int j=0; j < schema._num_fields; j++)
 			{
-				if (!arrowFieldTypeIsEqual(&schema.fields[j],
-										   &stemp->fields[j]))
-					elog(ERROR, "file '%s' has incompatible schema definition", fname);
+				bool	found = false;
+
+				for (int k=0; k < stemp->_num_fields; k++)
+				{
+					if (strcmp(schema.fields[j].name,
+							   stemp->fields[k].name) == 0)
+					{
+						if (arrowFieldTypeIsEqual(&schema.fields[j],
+												  &stemp->fields[k]))
+						{
+							found = true;
+							break;
+						}
+						elog(ERROR, "field '%s' of '%s' has incompatible data type",
+							 schema.fields[j].name, fname);
+					}
+				}
+
+				if (!found)
+					elog(ERROR, "field '%s' was not found in the file '%s'",
+						 schema.fields[j].name, fname);
 			}
 		}
 	}
 	/* ensure the field-names are unique */
-	column_names = ensureUniqueFieldNames(&schema);
+	column_names = ensureUniqueFieldNames(&schema, virtual_columns_prime);
 
 	/* makes a command to define foreign table */
 	initStringInfo(&cmd);
 	appendStringInfo(&cmd, "CREATE FOREIGN TABLE %s (\n",
 					 quote_identifier(stmt->remote_schema));
-	for (int j=0; j < schema._num_fields; j++)
+	for (i=0; i < schema._num_fields; i++)
 	{
-		ArrowField *field = &schema.fields[j];
+		ArrowField *field = &schema.fields[i];
 		Oid				type_oid;
 		int32			type_mod;
 		char		   *schema;
@@ -4695,12 +4744,12 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		schema = get_namespace_name(__type->typnamespace);
 		if (!schema)
 			elog(ERROR, "cache lookup failed for schema %u", __type->typnamespace);
-		if (j > 0)
+		if (i > 0)
 			appendStringInfo(&cmd, ",\n");
 		if (type_mod < 0)
 		{
 			appendStringInfo(&cmd, "  %s %s.%s",
-							 quote_identifier(column_names[j]),
+							 quote_identifier(column_names[i]),
 							 quote_identifier(schema),
 							 NameStr(__type->typname));
 		}
@@ -4708,22 +4757,47 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		{
 			Assert(type_mod >= VARHDRSZ);
 			appendStringInfo(&cmd, "  %s %s.%s(%d)",
-							 quote_identifier(column_names[j]),
+							 quote_identifier(column_names[i]),
 							 quote_identifier(schema),
 							 NameStr(__type->typname),
 							 type_mod - VARHDRSZ);
 		}
+		if (field->name != column_names[i])
+			appendStringInfo(&cmd, " options (field '%s')", field->name);		
 		ReleaseSysCache(htup);
 	}
+
+	foreach (lc1,  virtual_columns_prime)
+	{
+		virtualColumnDef *vcdef = lfirst(lc1);
+		const char	   *label;
+
+		Assert(column_names[i] != NULL);
+		if (i > 0)
+			appendStringInfo(&cmd, ",\n");
+		if (vcdef->kind == '@')
+			label = "pg_catalog.int8";
+		else if (vcdef->kind == '$')
+			label = "pg_catalog.text";
+		else
+			 elog(ERROR, "arrow_fdw: Bug? unknown virtual column type '%c'", vcdef->kind);
+
+		appendStringInfo(&cmd, "  %s %s options(virtual '%s')",
+						 quote_identifier(column_names[i]),
+						 label,
+						 vcdef->key);
+		i++;
+	}
+	Assert(column_names[i] == NULL);
 	appendStringInfo(&cmd,
 					 "\n"
 					 ") SERVER %s\n"
 					 "  OPTIONS (", stmt->server_name);
-	foreach (lc, stmt->options)
+	foreach (lc1, stmt->options)
 	{
-		DefElem	   *defel = lfirst(lc);
+		DefElem	   *defel = lfirst(lc1);
 
-		if (lc != list_head(stmt->options))
+		if (lc1 != list_head(stmt->options))
 			appendStringInfo(&cmd, ",\n           ");
 		appendStringInfo(&cmd, "%s '%s'",
 						 defel->defname,
@@ -4846,7 +4920,7 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 	if (schema._num_fields > SHRT_MAX)
 		Elog("Arrow file '%s' has too much fields: %d",
 			 file_name, schema._num_fields);
-	column_names = ensureUniqueFieldNames(&schema);
+	column_names = ensureUniqueFieldNames(&schema, NIL);
 
 	/* setup CreateForeignTableStmt */
 	memset(&stmt, 0, sizeof(CreateForeignTableStmt));
@@ -4941,11 +5015,11 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 	if (catalog == ForeignTableRelationId)
 	{
 		List	   *filesList;
-		List	   *virtAttrsList;
+		List	   *virtualColumnsList;
 		ListCell   *lc;
 
 		filesList = arrowFdwExtractFilesList(options,
-											 &virtAttrsList, NULL);
+											 &virtualColumnsList, NULL);
 		foreach (lc, filesList)
 		{
 			const char *fname = strVal(lfirst(lc));
@@ -5054,20 +5128,18 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 	{
 		ForeignTable *ft = GetForeignTable(RelationGetRelid(frel));
 		List	   *filesList;
-		List	   *virtAttrsList;
+		List	   *virtualColumnsList;
 
 		filesList = arrowFdwExtractFilesList(ft->options,
-											 &virtAttrsList, NULL);
+											 &virtualColumnsList, NULL);
 		forboth (lc1, filesList,
-				 lc2, virtAttrsList)
+				 lc2, virtualColumnsList)
 		{
 			const char *fname = strVal(lfirst(lc1));
-			List	   *fvirt_attrs = lfirst(lc2);
+			List	   *virtual_columns = lfirst(lc2);
 
-			(void)BuildArrowFileState(frel, fname,
-									  fvirt_attrs, NULL);
+			(void)BuildArrowFileState(frel, fname, virtual_columns, NULL);
 		}
-		list_free_deep(virtAttrsList);
 	}
 	if (frel)
 		relation_close(frel, NoLock);
@@ -5083,14 +5155,16 @@ pgstrom_arrow_fdw_check_pattern(PG_FUNCTION_ARGS)
 {
 	text	   *t = PG_GETARG_TEXT_P(0);
 	text	   *p = PG_GETARG_TEXT_P(1);
+	List	   *attrKinds = NIL;
 	List	   *attrKeys = NIL;
 	List	   *attrValues = NIL;
-	ListCell   *lc1, *lc2;
+	ListCell   *lc1, *lc2, *lc3;
 	bool		retval;
 	StringInfoData buf;
 
 	retval = pathNameMatchByPattern(text_to_cstring(t),
 									text_to_cstring(p),
+									&attrKinds,
 									&attrKeys,
 									&attrValues);
 	initStringInfo(&buf);
@@ -5099,16 +5173,18 @@ pgstrom_arrow_fdw_check_pattern(PG_FUNCTION_ARGS)
 		bool	need_comma = false;
 
 		appendStringInfo(&buf, "true");
-		forboth (lc1, attrKeys,
-				 lc2, attrValues)
+		forthree (lc1, attrKinds,
+				  lc2, attrKeys,
+				  lc3, attrValues)
 		{
 			if (!need_comma)
 				appendStringInfo(&buf, " {");
 			else
 				appendStringInfo(&buf, ", ");
-			appendStringInfo(&buf, "[%s]=[%s]",
-							 (char *)lfirst(lc1),
-							 (char *)lfirst(lc2));
+			appendStringInfo(&buf, "%c[%s]=[%s]",
+							 (int)lfirst_int(lc1),
+							 (char *)lfirst(lc2),
+							 (char *)lfirst(lc3));
 			need_comma = true;
 		}
 		if (need_comma)
