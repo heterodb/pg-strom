@@ -4376,7 +4376,7 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 				i = af_state->attrs[j-1].field_index;
 				if (i >= 0 && i < rb_state->nfields)
 				{
-					sz = __recordBatchFieldLength(&rb_state->fields[j]);
+					sz = __recordBatchFieldLength(&rb_state->fields[i]);
 					read_sz += sz;
 					chunk_sz[j] += sz;
 				}
