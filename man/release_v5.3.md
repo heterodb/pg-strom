@@ -9,6 +9,11 @@
 @ja{
 PG-Strom v5.3における主要な変更は点は以下の通りです。
 
+- GpuJoin Partitioned Pinned Inner Buffer
+- Arrow_Fdw Virtual Columns
+
+
+
 - GpuJoin Pinned Inner Buffer
 - GPU-Direct SQLの性能改善
 - GPUバッファの64bit化
@@ -47,6 +52,17 @@ Major changes in PG-Strom v5.3 are as follows:
 - Intel x86 64bit architecture (x86_64)
 - NVIDIA GPU CC 6.0 or later (Pascal at least; Turing or newer is recommended)
 }
+
+
+
+
+@ja:##Arrow_Fdw仮想列
+@en:##Arrow_Fdw Virtual Columns
+
+注意、外部テーブル定義と1:1マップだったけど、フィールド名と対応付けになっている。
+
+
+
 
 
 @ja:##累積的なバグの修正

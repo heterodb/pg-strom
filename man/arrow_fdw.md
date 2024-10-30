@@ -126,7 +126,9 @@ OPTIONS (file '/path/to/logdata.arrow');
 @en:###Foreign table options
 
 @ja{
-Arrow_Fdwは以下のオプションに対応しています。現状、全てのオプションは外部テーブルに対して指定するものです。
+Arrow_Fdwは以下のオプションに対応しています。
+
+####外部テーブルに対するオプション
 
 `file=PATHNAME`
 :   外部テーブルにマップするArrowファイルを1個指定します。
@@ -143,11 +145,30 @@ Arrow_Fdwは以下のオプションに対応しています。現状、全て�
 `parallel_workers=N_WORKERS`
 :   この外部テーブルの並列スキャンに使用する並列ワーカープロセスの数を指定します。一般的なテーブルにおける`parallel_workers`ストレージパラメータと同等の意味を持ちます。
 
-`writable=(true|false)`
-:   この外部テーブルに対する`INSERT`文の実行を許可します。詳細は『書き込み可能Arrow_Fdw』の節を参照してください。
+`pattern=PATTERN`
+:   `file`、`files`、または`dir`オプションで指定されたファイルのうち、ワイルドカードを含む`PATTERN`にマッチしたものだけを外部テーブルにマップします。
+:   ワイルドカードには以下のものを利用することができます。
+:   - `?` ... 任意の1文字にマッチする。
+:   - `*` ... 任意の0文字以上の文字列にマッチする。
+:   - `${KEY}` ... 任意の0文字以上の文字列にマッチする。
+:   - `@\{KEY}` ... 任意の0文字以上の数値列にマッチする。
+:   
+:   このオプションには面白い使い方があり、ワイルドカードの`${KEY}`や`@\{KEY}`でマッチしたファイル名の一部分を、仮想列として参照することができます。詳しくは、'''Arrow_Fdwの仮想列'''を参照してください。
+
+####カラムに対するオプション
+
+`field=FIELD`
+:   そのカラムにマップするArrowファイルのフィールド名を指定します。
+:   デフォルトでは、この外部テーブルの列名と同じフィールドのうち、最も最初に出現したフィールドをマップします。
+
+`virtual=KEY`
+:   そのカラムが仮想列である事を指定します。`KEY`はテーブルオプションの`pattern`オプションで指定されたパターン中のワイルドカードのキー名を指定します。
+:   仮想列はファイル名パターンのうち`KEY`にマッチした部分をクエリで参照することができます。
 }
 @en{
-Arrow_Fdw supports the options below. Right now, all the options are for foreign tables.
+Arrow_Fdw supports the options below.
+
+####Foreign Table Options
 
 `file=PATHNAME`
 :   It maps an Arrow file specified on the foreign table.
@@ -164,8 +185,25 @@ Arrow_Fdw supports the options below. Right now, all the options are for foreign
 `parallel_workers=N_WORKERS`
 :   It tells the number of workers that should be used to assist a parallel scan of this foreign table; equivalent to `parallel_workers` storage parameter at normal tables.
 
-`writable=(true|false)`
-:   It allows execution of `INSERT` command on the foreign table. See the section of "Writable Arrow_Fdw"
+`pattern=PATTERN`
+:   Maps only files specified by the `file`, `files`, or `dir` option that match the `PATTERN`, including wildcards, to the foreign table.
+:   The following wildcards can be used:
+:   - `?` ... matches any 1 character.
+:   - `*` ... matches any string of 0 or more characters.
+:   - `${KEY}` ... matches any string of 0 or more characters.
+:   - `@\{KEY}` ... matches any numeric string of 0 or more characters.
+:   
+:   An interesting use of this option is to refer to a portion of a file name matched by the wildcard `${KEY}` or `@\{KEY}` as a virtual column. For more information, see the '''Arrow_Fdw virtual column''' section below.
+
+####Foreign Column Options
+
+`field=FIELD`
+:   It specifies the field name of the Arrow file to map to that column.
+:   In the default, Arrow_Fdw maps the first occurrence of a field that has the same column name as this foreign table's column name.
+
+`virtual=KEY`
+:   It configures the column is a virtual column. `KEY` specifies the wildcard key name in the pattern specified by the `pattern` option of the foreign table option.
+:   A virtual column allows to refer to the part of the file name pattern that matches `KEY` in a query.
 }
 
 @ja:###データ型の対応
@@ -365,6 +403,192 @@ VERBOSE option outputs more detailed information.
 @en{
 The verbose output additionally displays amount of column-data to be loaded on reference of columns. The load of `lo_orderdate`, `lo_quantity`, `lo_extendedprice` and `lo_discount` columns needs to read 89.41GB in total. It is 17.8% towards the filesize (502.93GB).
 }
+
+@ja:##Arrow_Fdwの仮想列
+@en:##Arrow_Fdw Virtual Column
+
+@ja{
+Arrow_Fdwはスキーマ構造に互換性のある複数のApache Arrowを一個の外部テーブルにマッピングすることができます。例えば、外部テーブルオプションに`dir '/opt/arrow/mydata'`を指定すると、そのディレクトリ配下に存在する全てのファイルをマッピングするようになります。
+
+トランザクショナルなデータベースの内容をApache Arrowファイルに変換するときに年月や特定のカテゴリ毎に分けてファイル化し、それらを反映したファイル名を付けて保存する事はしばしば行われています。
+
+例えば、以下の例をご覧ください。トランザクショナルなテーブルである`lineorder`を`lo_orderdate`の年単位、および`lo_shipmode`のカテゴリ毎にArrowファイルへと変換しています。
+}
+@en{
+Arrow_Fdw allows to map multiple Apache Arrow files with compatible schema structures to a single foreign table. For example, if `dir '/opt/arrow/mydata' is configured for foreign table option, all files under that directory will be mapped.
+
+When you are converting the contents of a transactional database into an Apache Arrow file, we often dump them to separate files by year and month or specific categories, and its file names reflects these properties.
+
+The example below shows an example to convert the transactional table `lineorder` into Arrow files by year of `lo_orderdate` and by category of `lo_shipmode`.
+}
+
+```
+$ for s in RAIL AIR TRUCK SHIP FOB MAIL;
+  do
+    for y in 1993 1994 1995 1996 1997;
+    do
+      pg2arrow -d ssbm -c "SELECT * FROM lineorder_small \
+                            WHERE lo_orderdate between ${y}0101 and ${y}1231 \
+                              AND lo_shipmode = '${s}'" \
+               -o /opt/arrow/mydata/f_lineorder_${y}_${s}.arrow
+    done
+  done
+$ ls /opt/arrow/mydata/
+f_lineorder_1993_AIR.arrow    f_lineorder_1995_RAIL.arrow
+f_lineorder_1993_FOB.arrow    f_lineorder_1995_SHIP.arrow
+f_lineorder_1993_MAIL.arrow   f_lineorder_1995_TRUCK.arrow
+f_lineorder_1993_RAIL.arrow   f_lineorder_1996_AIR.arrow
+f_lineorder_1993_SHIP.arrow   f_lineorder_1996_FOB.arrow
+f_lineorder_1993_TRUCK.arrow  f_lineorder_1996_MAIL.arrow
+f_lineorder_1994_AIR.arrow    f_lineorder_1996_RAIL.arrow
+f_lineorder_1994_FOB.arrow    f_lineorder_1996_SHIP.arrow
+f_lineorder_1994_MAIL.arrow   f_lineorder_1996_TRUCK.arrow
+f_lineorder_1994_RAIL.arrow   f_lineorder_1997_AIR.arrow
+f_lineorder_1994_SHIP.arrow   f_lineorder_1997_FOB.arrow
+f_lineorder_1994_TRUCK.arrow  f_lineorder_1997_MAIL.arrow
+f_lineorder_1995_AIR.arrow    f_lineorder_1997_RAIL.arrow
+f_lineorder_1995_FOB.arrow    f_lineorder_1997_SHIP.arrow
+f_lineorder_1995_MAIL.arrow   f_lineorder_1997_TRUCK.arrow
+```
+
+@ja{
+これらのApache Arrowファイルは全て同じスキーマ構造を持っており、`dir`オプションを用いて1個の外部テーブルにマッピングできます。
+また、データの生成時に絞り込みを行っているため、ファイル名に1995を含むファイルには`lo_orderdate`が19950101～19951231の範囲のレコードしか含まれておらず、ファイル名に`RAIL`を含むファイルには`lo_shipmode`が`RAIL`のレコードしか含まれていません。
+
+つまり、これら複数のArrowファイルをマップしたArrow_Fdw外部テーブルを定義したとしても、ファイル名に1995を含むファイルからデータを読み出している時には、`lo_orderdate`の値が19950101～19951231の範囲であることが事前に分かっており、それを利用した最適化が可能です。
+
+Arrow_Fdwでは、外部テーブルオプション`pattern`を使用する事でファイル名の一部を列として参照する事ができます。これを仮想列と呼び、以下のように設定します。
+}
+@en{
+All these Apache Arrow files have the same schema structure and can be mapped to a single foreign table using the `dir` option.
+
+Also, the Arrow file that has '1995' token in the file name only contains records with `lo_orderdate` in the range 19950101 to 19951231. The Arrow file that has 'RAIL' token in the file name only contains records with `lo_shipmode` of `RAIL`.
+
+In other words, even if you define the Arrow_Fdw foreign  table that maps these multiple Arrow files, when reading data from a file whose file name includes 1995, it is assumed that the value of `lo_orderdate` is in the range of 19950101 to 19951231. It is possible for the optimizer to utilize this knowledge.
+
+In Arrow_Fdw, you can refer to part of the file name as a column by using the foreign table option `pattern`. This is called a virtual column and is configured as follows.
+}
+
+```
+=# IMPORT FOREIGN SCHEMA f_lineorder
+     FROM SERVER arrow_fdw INTO public
+  OPTIONS (dir '/opt/arrow/mydata', pattern 'f_lineorder_@{year}_${shipping}.arrow');
+IMPORT FOREIGN SCHEMA
+
+=# \d f_lineorder
+                             Foreign table "public.f_lineorder"
+       Column       |     Type      | Collation | Nullable | Default |     FDW options
+--------------------+---------------+-----------+----------+---------+----------------------
+ lo_orderkey        | numeric       |           |          |         |
+ lo_linenumber      | integer       |           |          |         |
+ lo_custkey         | numeric       |           |          |         |
+ lo_partkey         | integer       |           |          |         |
+ lo_suppkey         | numeric       |           |          |         |
+ lo_orderdate       | integer       |           |          |         |
+ lo_orderpriority   | character(15) |           |          |         |
+ lo_shippriority    | character(1)  |           |          |         |
+ lo_quantity        | numeric       |           |          |         |
+ lo_extendedprice   | numeric       |           |          |         |
+ lo_ordertotalprice | numeric       |           |          |         |
+ lo_discount        | numeric       |           |          |         |
+ lo_revenue         | numeric       |           |          |         |
+ lo_supplycost      | numeric       |           |          |         |
+ lo_tax             | numeric       |           |          |         |
+ lo_commit_date     | character(8)  |           |          |         |
+ lo_shipmode        | character(10) |           |          |         |
+ year               | bigint        |           |          |         | (virtual 'year')
+ shipping           | text          |           |          |         | (virtual 'shipping')
+Server: arrow_fdw
+FDW options: (dir '/opt/arrow/mydata', pattern 'f_lineorder_@\{year}_${shipping}.arrow')
+```
+
+@ja{
+この外部テーブルオプション`pattern`には2つのワイルドカードが含まれています。
+0文字以上の数字列にマッチする`@\{year}`と、0文字以上の文字列にマッチする`${shipping}`です。
+ファイル名のうち、この部分にマッチしたパターンは、それぞれ列オプションの`virtual`で指定した部分で参照することができます。
+この場合、`IMPORT FOREIGN SCHEMA`が自動的に列定義を加え、Arrowファイル自体に含まれているフィールドに加えて、ワイルドカード`@\{year}`を参照する仮想列`year`（数値列であるため`bigint`データ型）と、`${shipping}`を参照する仮想列`shipping`を追加しています。
+
+これらの仮想列に対応するフィールドはArrowファイルには存在しませんが、例えば、ファイル`f_lineorder_1994_AIR.arrow`から読みだした行を処理するときには`year`列の値は1994に、`shipping`列の値は'AIR'になるわけです。
+}
+@en{
+This foreign table option `pattern` contains two wildcards.
+`@\{year}` matches a numeric string larger than or equal to 0 characters, and `${shipping}` matches a string larger than or equal to 0 characters.
+The patterns that match this part of the file name can be referenced in the part specified by the `virtual` column option.
+
+In this case, `IMPORT FOREIGN SCHEMA` automatically adds column definitions, in addition to the fields contained in the Arrow file itself, as well as the virtual column `year` (a `bigint` column) that references the wildcard `@\{year}`, and the virtual column `shipping` that references the wildcard `${shipping}`.
+}
+
+```
+=# SELECT lo_orderkey, lo_orderdate, lo_shipmode, year, shipping
+     FROM f_lineorder
+    WHERE year = 1995 AND shipping = 'AIR'
+    LIMIT 10;
+ lo_orderkey | lo_orderdate | lo_shipmode | year | shipping
+-------------+--------------+-------------+------+----------
+      637892 |     19950512 | AIR         | 1995 | AIR
+      638243 |     19950930 | AIR         | 1995 | AIR
+      638273 |     19951214 | AIR         | 1995 | AIR
+      637443 |     19950805 | AIR         | 1995 | AIR
+      637444 |     19950803 | AIR         | 1995 | AIR
+      637510 |     19950831 | AIR         | 1995 | AIR
+      637504 |     19950726 | AIR         | 1995 | AIR
+      637863 |     19950802 | AIR         | 1995 | AIR
+      637892 |     19950512 | AIR         | 1995 | AIR
+      637987 |     19950211 | AIR         | 1995 | AIR
+(10 rows)
+```
+
+@ja{
+これは言い換えれば、Arrow_Fdw外部テーブルがマップしたArrowファイルを実際に読む前に、仮想列がどのような値になっているのかを知る事ができるという事です。この特徴を使えば、あるArrowファイルの読み出しの前に、検索条件から1件もマッチしない事が明らかである場合には、ファイルの読み出し自体をスキップする事が可能であるという事になります。
+
+以下のクエリとその`EXPLAIN ANALYZE`出力をご覧ください。
+
+この集計クエリは`f_lineorder`外部テーブルを読み出し、いくつかの条件で絞り込んだ後、`lo_extendedprice * lo_discount`の合計値を集計します。
+その時、`WHERE year = 1994`という条件句が付加されています。これは実質的には`WHERE lo_orderdate BETWEEN 19940101 AND 19942131`と同じですが、`year`は仮想列であるため、Arrowファイルを読み出す前にマッチする行が存在するかどうかを判定する事ができます。
+
+実際、`Stats-Hint:`行を見ると、`(year = 1994)`という条件によって12個のRecord-Batchがロードされたものの、48個のRecord-Batchはスキップされています。これは単純ですがI/Oの負荷を軽減する手段として極めて有効です。
+}
+@en{
+In other words, you can know what values the virtual columns have before reading the Arrow file mapped by the Arrow_Fdw foreign table. By this feature, if it is obvious that there is no match at all from the search conditions before reading a certain Arrow file, it is possible to skip reading the file itself.
+
+See the query and its `EXPLAIN ANALYZE` output below.
+
+This aggregation query reads the `f_lineorder` foreign table, filters it by some conditions, and then aggregates the total value of `lo_extendedprice * lo_discount`.
+At that time, the conditional clause `WHERE year = 1994` is added. This is effectively the same as `WHERE lo_orderdate BETWEEN 19940101 AND 19942131`, but since `year` is a virtual column, you can determine whether a matching row exists before reading the Arrow files.
+
+In fact, looking at the `Stats-Hint:` line, 12 Record-Batches were loaded due to the condition `(year = 1994)`, but 48 Record-Batches were skipped. This is a simple but extremely effective means of reducing I/O load.
+}
+
+```
+=# EXPLAIN ANALYZE
+   SELECT sum(lo_extendedprice*lo_discount) as revenue
+     FROM f_lineorder
+    WHERE year = 1994
+      AND lo_discount between 1 and 3
+      AND lo_quantity < 25;
+                                               QUERY PLAN
+--------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=421987.07..421987.08 rows=1 width=32) (actual time=82.914..82.915 rows=1 loops=1)
+   ->  Custom Scan (GpuPreAgg) on f_lineorder  (cost=421987.05..421987.06 rows=1 width=32)      \
+                                               (actual time=82.901..82.903 rows=2 loops=1)
+         GPU Projection: pgstrom.psum(((lo_extendedprice * lo_discount))::double precision)
+         GPU Scan Quals: ((year = 1994) AND (lo_discount <= '3'::numeric) AND                   \
+                          (lo_quantity < '25'::numeric) AND                                     \
+                          (lo_discount >= '1'::numeric)) [plan: 65062080 -> 542, exec: 13001908 -> 1701726]
+         referenced: lo_quantity, lo_extendedprice, lo_discount, year
+         Stats-Hint: (year = 1994)  [loaded: 12, skipped: 48]
+         file0: /opt/arrow/mydata/f_lineorder_1996_MAIL.arrow (read: 99.53MB, size: 427.16MB)
+         file1: /opt/arrow/mydata/f_lineorder_1996_SHIP.arrow (read: 99.52MB, size: 427.13MB)
+         file2: /opt/arrow/mydata/f_lineorder_1994_FOB.arrow (read: 99.18MB, size: 425.67MB)
+              :                :                                       :             :
+         file27: /opt/arrow/mydata/f_lineorder_1997_MAIL.arrow (read: 99.23MB, size: 425.87MB)
+         file28: /opt/arrow/mydata/f_lineorder_1995_MAIL.arrow (read: 99.16MB, size: 425.58MB)
+         file29: /opt/arrow/mydata/f_lineorder_1993_TRUCK.arrow (read: 99.24MB, size: 425.91MB)
+         GPU-Direct SQL: enabled (N=2,GPU0,1; direct=76195, ntuples=13001908)
+ Planning Time: 2.402 ms
+ Execution Time: 83.857 ms
+(39 rows)
+```
 
 @ja:##Arrowファイルの作成方法
 @en:##How to make Arrow files
