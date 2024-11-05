@@ -11,6 +11,7 @@ SELECT current_database();
 \getenv regress_dataset_revision REGRESS_DATASET_REVISION
 SELECT pgstrom.regression_testdb_revision() = cast(:regress_dataset_revision as text) revision_check_result
 \gset
+SET client_min_messages TO WARNING;
 \if :revision_check_result
 ---
 --- OK, regression test database is the latest revision
