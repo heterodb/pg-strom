@@ -1166,11 +1166,27 @@ pgfn_SaveExpr(XPU_PGFUNCTION_ARGS)
 STATIC_FUNCTION(bool)
 pgfn_JoinQuals(XPU_PGFUNCTION_ARGS)
 {
-	const kern_expression *karg;
-	xpu_int4_t *result = (xpu_int4_t *)__result;
-	int			i, status = 1;
+	STROM_ELOG(kcxt, "pgfn_JoinQuals should not be called as a normal kernel expression");
+	return false;
+}
 
-	assert(kexp->exptype == TypeOpCode__bool);
+/*
+ * ExecGpuJoinQuals - runs JoinQuals operator.
+ *   result =  1 : matched to JoinQuals
+ *          =  0 : unmatched to JoinQuals
+ *          = -1 : matched to JoinQuals, but unmatched to any of other quals
+ *                 --> don't generate inner join row, but set outer-join-map.
+ */
+PUBLIC_FUNCTION(bool)
+ExecGpuJoinQuals(kern_context *kcxt,
+				 const kern_expression *kexp,
+				 int *p_status)
+{
+	const kern_expression *karg;
+	int		i, status = 1;
+
+	assert(kexp->opcode  == FuncOpCode__JoinQuals &&
+		   kexp->exptype == TypeOpCode__bool);
 	for (i=0, karg = KEXP_FIRST_ARG(kexp);
 		 i < kexp->nr_args;
 		 i++, karg = KEXP_NEXT_ARG(karg))
@@ -1198,8 +1214,42 @@ pgfn_JoinQuals(XPU_PGFUNCTION_ARGS)
 			status = -1;
 		}
 	}
-	result->expr_ops = kexp->expr_ops;
-	result->value = status;
+	*p_status = status;
+	return true;
+}
+
+/*
+ * ExecGpuJoinOtherQuals - runs OtherQuals in the JoinQuals if any.
+ *   it is usually used in validation of RIGHT OUTER JOIN row.
+ */
+PUBLIC_FUNCTION(bool)
+ExecGpuJoinOtherQuals(kern_context *kcxt,
+					  const kern_expression *kexp,
+					  bool *p_status)
+{
+	const kern_expression *karg;
+	bool	status = true;
+	int		i;
+
+	assert(kexp->opcode  == FuncOpCode__JoinQuals &&
+		   kexp->exptype == TypeOpCode__bool);
+	for (i=0, karg = KEXP_FIRST_ARG(kexp);
+		 i < kexp->nr_args;
+		 i++, karg = KEXP_NEXT_ARG(karg))
+	{
+		xpu_bool_t	datum;
+
+		if ((karg->expflags & KEXP_FLAG__IS_PUSHED_DOWN) == 0)
+			continue;
+		if (!EXEC_KERN_EXPRESSION(kcxt, karg, &datum))
+			return false;
+		if (XPU_DATUM_ISNULL(&datum) || !datum.value)
+		{
+			status = false;
+			break;
+		}
+	}
+	*p_status = status;
 	return true;
 }
 
@@ -1911,8 +1961,8 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 {
 	const kvec_internal_t *kvecs;
 	HeapTupleHeaderData *htup;
-	xpu_bool_t		status;
 	uint32_t		slot_id;
+	int				status;
 
 	/* fetch the inner heap tuple */
 	assert(kexp_gist->opcode == FuncOpCode__GiSTEval);
@@ -1934,13 +1984,13 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 	}
 	/* run the join quals */
 	kcxt_reset(kcxt);
-	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join, &status))
+	if (!ExecGpuJoinQuals(kcxt, kexp_join, &status))
 	{
 		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		return false;
 	}
-	//CHECK CPU FALLBACK
-	return (!XPU_DATUM_ISNULL(&status) && status.value);
+	//XXX - CHECK CPU FALLBACK?
+	return (status > 0);
 }
 
 /* ----------------------------------------------------------------

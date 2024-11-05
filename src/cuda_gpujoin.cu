@@ -13,6 +13,159 @@
 #include "cuda_common.h"
 
 /*
+ * GPU Buffer Reconstruction
+ */
+KERNEL_FUNCTION(void)
+kern_buffer_reconstruction(kern_data_store *kds_dst,
+						   const kern_data_store *__restrict__ kds_src)
+{
+	uint64_t   *rowindex = KDS_GET_ROWINDEX(kds_src);
+	uint32_t	base;
+	__shared__ uint32_t base_rowid;
+	__shared__ uint64_t base_usage;
+
+	for (base = get_global_base();
+		 base < kds_src->nitems;
+		 base += get_global_size())
+	{
+		const kern_hashitem *hitem = NULL;
+		uint32_t	index = base + get_local_id();
+		uint32_t	tupsz = 0;
+		uint32_t	row_id;
+		uint32_t	count;
+		uint64_t	offset;
+		uint64_t	total_sz;
+
+		if (index < kds_src->nitems)
+		{
+			hitem = (kern_hashitem *)((char *)kds_src + kds_src->length
+									  - rowindex[index]
+									  - offsetof(kern_hashitem, t));
+			tupsz = MAXALIGN(offsetof(kern_hashitem,
+									  t.htup) + hitem->t.t_len);
+		}
+		/* allocation of the destination buffer */
+		row_id = pgstrom_stair_sum_binary(tupsz > 0, &count);
+		offset = pgstrom_stair_sum_uint64(tupsz, &total_sz);
+		if (get_local_id() == 0)
+		{
+			base_rowid = __atomic_add_uint32(&kds_dst->nitems, count);
+			base_usage = __atomic_add_uint64(&kds_dst->usage,  total_sz);
+		}
+		__syncthreads();
+		/* put tuples on the destination */
+		row_id += base_rowid;
+		offset += base_usage;
+		if (tupsz > 0)
+		{
+			kern_hashitem  *__hitem = (kern_hashitem *)
+				((char *)kds_dst + kds_dst->length - offset);
+			uint64_t	   *__hslots = KDS_GET_HASHSLOT(kds_dst, hitem->hash);
+
+			__hitem->hash = hitem->hash;
+			__hitem->next = __atomic_exchange_uint64(__hslots, offset);
+			__hitem->t.rowid = row_id;
+			__hitem->t.t_len = hitem->t.t_len;
+			memcpy(&__hitem->t.htup, &hitem->t.htup, hitem->t.t_len);
+			assert(offsetof(kern_hashitem, t.htup) + hitem->t.t_len <= tupsz);
+			__threadfence();
+			KDS_GET_ROWINDEX(kds_dst)[row_id] = ((char *)kds_dst
+												 + kds_dst->length
+												 - (char *)&__hitem->t);
+		}
+		__syncthreads();
+	}
+}
+
+/*
+ * GPU Buffer Partitioning
+ */
+KERNEL_FUNCTION(void)
+kern_buffer_partitioning(kern_buffer_partitions *kbuf_parts,
+						 const kern_data_store *__restrict__ kds_src)
+{
+	uint64_t   *rowindex = KDS_GET_ROWINDEX(kds_src);
+	uint32_t	hash_divisor = kbuf_parts->hash_divisor;
+	uint64_t   *kpart_usage = (uint64_t *)SHARED_WORKMEM(0);
+	uint32_t   *kpart_nitems = (uint32_t *)(kpart_usage + hash_divisor);
+	uint32_t	base;
+
+	assert(hash_divisor >= 2);
+	for (base = get_global_base();
+		 base < kds_src->nitems;
+		 base += get_global_size())
+	{
+		const kern_hashitem *hitem = NULL;
+		kern_data_store *kds_in = NULL;
+		uint32_t	index = base + get_local_id();
+		uint32_t	tupsz = 0;
+		int			part_id;
+		uint32_t	row_id;
+		uint64_t	offset;
+
+		/* reset buffer */
+		for (int p=get_local_id(); p < hash_divisor; p += get_local_size())
+		{
+			kpart_usage[p] = 0;
+			kpart_nitems[p] = 0;
+		}
+		__syncthreads();
+
+		/* fetch row from kds_src */
+		if (index < kds_src->nitems)
+		{
+			hitem = (kern_hashitem *)((char *)kds_src + kds_src->length
+									  - rowindex[index]
+									  - offsetof(kern_hashitem, t));
+			tupsz   = MAXALIGN(offsetof(kern_hashitem,
+										t.htup) + hitem->t.t_len);
+			part_id = hitem->hash % hash_divisor;
+			row_id = __atomic_add_uint32(&kpart_nitems[part_id], 1);
+			offset = __atomic_add_uint64(&kpart_usage[part_id], tupsz);
+		}
+		__syncthreads();
+
+		/* allocation of the destination buffer */
+		if (get_local_id() < hash_divisor)
+		{
+			int		p = get_local_id();
+
+			kds_in = kbuf_parts->parts[p].kds_in;
+			kpart_nitems[p] = __atomic_add_uint32(&kds_in->nitems, kpart_nitems[p]);
+			kpart_usage[p]  = __atomic_add_uint64(&kds_in->usage,  kpart_usage[p]);
+		}
+		__syncthreads();
+
+		/* write out to the position */
+		if (hitem)
+		{
+			kern_hashitem  *__hitem;
+			uint64_t	   *__hslots;
+
+			assert(part_id >= 0 && part_id < hash_divisor);
+			kds_in = kbuf_parts->parts[part_id].kds_in;
+			row_id += kpart_nitems[part_id];
+			offset += kpart_usage[part_id] + tupsz;
+
+			__hslots = KDS_GET_HASHSLOT(kds_in, hitem->hash);
+			__hitem = (kern_hashitem *)
+				((char *)kds_in + kds_in->length - offset);
+			__hitem->hash = hitem->hash;
+			__hitem->next = __atomic_exchange_uint64(__hslots, offset);
+			__hitem->t.rowid = row_id;
+			__hitem->t.t_len = hitem->t.t_len;
+			memcpy(&__hitem->t.htup, &hitem->t.htup, hitem->t.t_len);
+			assert(offsetof(kern_hashitem, t.htup) + hitem->t.t_len <= tupsz);
+			__threadfence();
+			KDS_GET_ROWINDEX(kds_in)[row_id] = ((char *)kds_in
+												+ kds_in->length
+												- (char *)&__hitem->t);
+		}
+		__syncthreads();
+	}
+}
+
+/*
  * GPU Nested-Loop
  */
 STATIC_FUNCTION(int)
@@ -26,8 +179,9 @@ execGpuJoinNestLoop(kern_context *kcxt,
 					bool	   &matched)
 {
 	const kern_expression *kexp;
-	kern_data_store *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
-	bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth-1);
+	kern_data_store *kds_heap = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	bool	   *oj_map = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kmrels, depth,
+														   stromTaskProp__cuda_dindex);
 	uint32_t	rd_pos;
 	uint32_t	wr_pos;
 	uint32_t	count;
@@ -91,7 +245,7 @@ execGpuJoinNestLoop(kern_context *kcxt,
 		{
 			kern_tupitem *tupitem;
 			uint64_t	offset = KDS_GET_ROWINDEX(kds_heap)[index];
-			xpu_int4_t	status;
+			int			status;
 
 			tupitem = (kern_tupitem *)((char *)kds_heap
 									   + kds_heap->length
@@ -99,12 +253,11 @@ execGpuJoinNestLoop(kern_context *kcxt,
 			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, &tupitem->htup);
 			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
-			if (EXEC_KERN_EXPRESSION(kcxt, kexp, &status))
+			if (ExecGpuJoinQuals(kcxt, kexp, &status))
 			{
-				assert(!XPU_DATUM_ISNULL(&status));
-				if (status.value > 0)
+				if (status > 0)
 					tuple_is_valid = true;
-				if (status.value != 0)
+				if (status != 0)
 				{
 					assert(tupitem->rowid < kds_heap->nitems);
 					if (oj_map)
@@ -119,10 +272,19 @@ execGpuJoinNestLoop(kern_context *kcxt,
 		}
 		else if (left_outer && index >= kds_heap->nitems && !matched)
 		{
+			bool		status;
 			/* fill up NULL fields, if FULL/LEFT OUTER JOIN */
 			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_heap, NULL);
-			tuple_is_valid = true;
+			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
+			if (ExecGpuJoinOtherQuals(kcxt, kexp, &status))
+			{
+				tuple_is_valid = status;
+			}
+			else
+			{
+				HandleErrorIfCpuFallback(kcxt, depth, index, matched);
+			}
 			l_state = ULONG_MAX;
 		}
 		else
@@ -176,8 +338,9 @@ execGpuJoinHashJoin(kern_context *kcxt,
 					uint64_t   &l_state,
 					bool	   &matched)
 {
-	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
-	bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth-1);
+	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	bool	   *oj_map = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kmrels, depth,
+														   stromTaskProp__cuda_dindex);
 	kern_expression *kexp = NULL;
 	kern_hashitem *khitem = NULL;
 	uint32_t	rd_pos;
@@ -283,18 +446,17 @@ execGpuJoinHashJoin(kern_context *kcxt,
 
 	if (khitem)
 	{
-		xpu_int4_t	status;
+		int		status;
 
 		l_state = ((char *)khitem - (char *)kds_hash);
 		kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
 		ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, &khitem->t.htup);
 		kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
-		if (EXEC_KERN_EXPRESSION(kcxt, kexp, &status))
+		if (ExecGpuJoinQuals(kcxt, kexp, &status))
 		{
-			assert(!XPU_DATUM_ISNULL(&status));
-			if (status.value > 0)
+			if (status > 0)
 				tuple_is_valid = true;
-			if (status.value != 0)
+			if (status != 0)
 			{
 				assert(khitem->t.rowid < kds_hash->nitems);
 				if (oj_map)
@@ -312,10 +474,19 @@ execGpuJoinHashJoin(kern_context *kcxt,
 		if (kmrels->chunks[depth-1].left_outer &&
 			l_state != ULONG_MAX && !matched)
 		{
+			bool	status;
 			/* load NULL values on the inner portion */
-			 kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
-			 ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, NULL);
-			 tuple_is_valid = true;
+			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
+			ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_hash, NULL);
+			kexp = SESSION_KEXP_JOIN_QUALS(kcxt->session, depth);
+			if (ExecGpuJoinOtherQuals(kcxt, kexp, &status))
+			{
+				tuple_is_valid = status;
+			}
+			else
+			{
+				HandleErrorIfCpuFallback(kcxt, depth, l_state, matched);
+			}
 		}
 		l_state = ULONG_MAX;
 	}
@@ -354,8 +525,8 @@ execGpuJoinHashJoin(kern_context *kcxt,
 KERNEL_FUNCTION(void)
 gpujoin_prep_gistindex(kern_multirels *kmrels, int depth)
 {
-	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
-	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth-1);
+	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth);
 	BlockNumber		block_nr;
 	OffsetNumber	i, maxoff;
 
@@ -420,8 +591,8 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
 					uint64_t   &l_state,
 					bool       &matched)
 {
-	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth-1);
-	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth-1);
+	kern_data_store *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	kern_data_store *kds_gist = KERN_MULTIRELS_GIST_INDEX(kmrels, depth);
 	int				gist_depth = kexp_gist->u.gist.gist_depth;
 	uint32_t		count;
 	uint32_t		rd_pos;
@@ -787,11 +958,12 @@ execGpuJoinProjection(kern_context *kcxt,
 }
 
 /*
- * NOTE: It is a threshold value for stack-overflow checks, and very
- * critical property because it must be accessible even if the 'kcxt'
- * variable is not accessible.
+ * GPU-Task specific read-only properties.
  */
-PUBLIC_SHARED_DATA(uint32_t, pgstrom_cuda_stack_size);
+PUBLIC_SHARED_DATA(uint32_t, stromTaskProp__cuda_dindex);
+PUBLIC_SHARED_DATA(uint32_t, stromTaskProp__cuda_stack_limit);
+PUBLIC_SHARED_DATA(int32_t,  stromTaskProp__partition_divisor);
+PUBLIC_SHARED_DATA(int32_t,  stromTaskProp__partition_reminder);
 
 /*
  * kern_gpujoin_main
@@ -820,9 +992,14 @@ kern_gpujoin_main(kern_session_info *session,
 		   kgtask->kvecs_ndims  >= n_rels &&
 		   kgtask->n_rels       == n_rels &&
 		   get_local_size()     <= CUDA_MAXTHREADS_PER_BLOCK);
-	/* save the pre-configured CUDA stack limit for overflow checks */
+	/* save the GPU-Task specific read-only properties */
 	if (get_local_id() == 0)
-		pgstrom_cuda_stack_size = session->cuda_stack_size;
+	{
+		stromTaskProp__cuda_dindex        = kgtask->cuda_dindex;
+		stromTaskProp__cuda_stack_limit   = kgtask->cuda_stack_limit;
+		stromTaskProp__partition_divisor  = kgtask->partition_divisor;
+		stromTaskProp__partition_reminder = kgtask->partition_reminder;
+	}
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session, kds_fallback);
 	wp_base_sz = __KERN_WARP_CONTEXT_BASESZ(kgtask->kvecs_ndims);

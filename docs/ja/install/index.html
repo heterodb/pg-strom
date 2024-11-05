@@ -292,15 +292,17 @@ EOF
 <h4 id="rhel8">RHEL8における設定</h4>
 <p>エディタで<code>/etc/default/grub</code>を編集し、<code>GRUB_CMDLINE_LINUX_DEFAULT=</code>行に上記のオプションを付加してください。</p>
 <p>例えば、以下のような設定となるはずです。</p>
-<p>Open <code>/etc/default/grub</code> with an editor and add the above option to the <code>GRUB_CMDLINE_LINUX_DEFAULT=</code> line.</p>
-<p>For example, the settings should look like this:
-}</p>
 <pre><code>  :
 GRUB_CMDLINE_LINUX=&quot;rhgb quiet amd_iommu=off&quot;
   :
 </code></pre>
 <p>以下のコマンドを実行し、この設定をカーネル起動オプションに反映します。</p>
-<pre><code># update-grub
+<pre><code>-- for BIOS based system
+# grub2-mkconfig -o /boot/grub2/grub.cfg
+# shutdown -r now
+
+-- for UEFI based system
+# grub2-mkconfig -o /boot/efi/EFI/redhat/grub.cfg
 # shutdown -r now
 </code></pre>
 <h3 id="_4">追加リポジトリの有効化</h3>

@@ -290,14 +290,18 @@ EOF
 </code></pre>
 <h4 id="configuration-at-rhel8">Configuration at RHEL8</h4>
 <p>Open <code>/etc/default/grub</code> with an editor and add the above option to the <code>GRUB_CMDLINE_LINUX_DEFAULT=</code> line.</p>
-<p>For example, the settings should look like this:
-}</p>
+<p>For example, the settings should look like this:</p>
 <pre><code>  :
 GRUB_CMDLINE_LINUX=&quot;rhgb quiet amd_iommu=off&quot;
   :
 </code></pre>
 <p>Run the following commands to apply the configuration to the kernel bool options.</p>
-<pre><code># update-grub
+<pre><code>-- for BIOS based system
+# grub2-mkconfig -o /boot/grub2/grub.cfg
+# shutdown -r now
+
+-- for UEFI based system
+# grub2-mkconfig -o /boot/efi/EFI/redhat/grub.cfg
 # shutdown -r now
 </code></pre>
 <h3 id="enables-extra-repositories">Enables extra repositories</h3>

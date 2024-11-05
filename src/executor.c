@@ -18,8 +18,6 @@
 struct XpuConnection
 {
 	dlist_node		chain;	/* link to gpuserv_connection_slots */
-	char			devname[32];
-	int				dev_index;		/* cuda_dindex or dpu_endpoint_id */
 	volatile pgsocket sockfd;
 	volatile int	terminated;		/* positive: normal exit
 									 * negative: exit by errors */
@@ -113,8 +111,8 @@ __xpuConnectSessionWorker(void *__priv)
 		{
 			if (errno == EINTR)
 				continue;
-			fprintf(stderr, "[%s; %s:%d] failed on poll(2): %m\n",
-					conn->devname, __FILE_NAME__, __LINE__);
+			fprintf(stderr, "[%s:%d] failed on poll(2): %m\n",
+					__FILE_NAME__, __LINE__);
 			break;
 		}
 		else if (nevents > 0)
@@ -148,8 +146,7 @@ __xpuConnectSessionWorker(void *__priv)
 					pg_usleep(2000L);
 				}
 				else if (__xpuConnectReceiveCommands(conn->sockfd,
-													 conn,
-													 conn->devname) < 0)
+													 conn) < 0)
 				{
 					break;
 				}
@@ -683,14 +680,8 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 			double	final_nrows = pp_info->final_nrows;
 			size_t	unit_sz;
 
-			if (final_nrows <= 5000.0)
-				hash_nslots = 20000;
-			else if (final_nrows <= 4000000.0)
-				hash_nslots = 20000 + (int)(2.0 * final_nrows);
-			else
-				hash_nslots = 8020000 + final_nrows;
-
 			format = KDS_FORMAT_HASH;
+			hash_nslots = KDS_GET_HASHSLOT_WIDTH(final_nrows);
 			unit_sz = offsetof(kern_hashitem, t.htup) +
 				MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
 						 BITMAPLEN(kds_final_tdesc->natts)) +
@@ -735,6 +726,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	/* other database session information */
 	session->query_plan_id = ps_state->query_plan_id;
 	session->xpu_task_flags = pts->xpu_task_flags;
+	session->optimal_gpus = pts->optimal_gpus;
 	session->kcxt_kvecs_bufsz = pp_info->kvecs_bufsz;
 	session->kcxt_kvecs_ndims = pp_info->kvecs_ndims;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
@@ -773,6 +765,7 @@ pgstromTaskStateBeginScan(pgstromTaskState *pts)
 	XpuConnection  *conn = pts->conn;
 	uint32_t		curval, newval;
 
+	/* update the parallel_task_control */
 	Assert(conn != NULL);
 	curval = pg_atomic_read_u32(&ps_state->parallel_task_control);
 	do {
@@ -781,7 +774,6 @@ pgstromTaskStateBeginScan(pgstromTaskState *pts)
 		newval = curval + 2;
 	} while (!pg_atomic_compare_exchange_u32(&ps_state->parallel_task_control,
 											 &curval, newval));
-	pg_atomic_fetch_add_u32(&pts->rjoin_devs_count[conn->dev_index], 1);
 	return true;
 }
 
@@ -789,74 +781,20 @@ pgstromTaskStateBeginScan(pgstromTaskState *pts)
  * pgstromTaskStateEndScan
  */
 static bool
-pgstromTaskStateEndScan(pgstromTaskState *pts, kern_final_task *kfin)
+pgstromTaskStateEndScan(pgstromTaskState *pts)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
 	XpuConnection  *conn = pts->conn;
 	uint32_t		curval, newval;
 
 	Assert(conn != NULL);
-	memset(kfin, 0, sizeof(kern_final_task));
 	curval = pg_atomic_read_u32(&ps_state->parallel_task_control);
 	do {
 		Assert(curval >= 2);
 		newval = ((curval - 2) | 1);
 	} while (!pg_atomic_compare_exchange_u32(&ps_state->parallel_task_control,
 											 &curval, newval));
-	if (newval == 1)
-		kfin->final_plan_node = true;
-
-	if (pg_atomic_sub_fetch_u32(&pts->rjoin_devs_count[conn->dev_index], 1) == 0)
-		kfin->final_this_device = true;
-
-	return (kfin->final_plan_node | kfin->final_this_device);
-}
-
-/*
- * pgstromTaskStateResetScan
- */
-static void
-pgstromTaskStateResetScan(pgstromTaskState *pts)
-{
-	pgstromSharedState *ps_state = pts->ps_state;
-	int		num_devs = 0;
-
-	/*
-	 * pgstromExecTaskState() is never called on the single process
-	 * execution, thus we have no state to reset.
-	 */
-	if (!ps_state)
-		return;
-
-	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
-		num_devs = numGpuDevAttrs;
-	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-		num_devs = DpuStorageEntryCount();
-	else
-		elog(ERROR, "Bug? no GPU/DPUs are in use");
-
-	pg_atomic_write_u32(&ps_state->parallel_task_control, 0);
-	pg_atomic_write_u32(pts->rjoin_exit_count, 0);
-	for (int i=0; i < num_devs; i++)
-		pg_atomic_write_u32(pts->rjoin_devs_count + i, 0);
-	if (pts->arrow_state)
-	{
-		pgstromArrowFdwExecReset(pts->arrow_state);
-	}
-	else if (ps_state->ss_handle == DSM_HANDLE_INVALID)
-	{
-		TableScanDesc scan = pts->css.ss.ss_currentScanDesc;
-
-		table_rescan(scan, NULL);
-	}
-	else
-	{
-		Relation	rel = pts->css.ss.ss_currentRelation;
-		ParallelTableScanDesc pscan = (ParallelTableScanDesc)
-			((char *)ps_state + ps_state->parallel_scan_desc_offset);
-
-		table_parallelscan_reinitialize(rel, pscan);
-	}
+	return (newval == 1);
 }
 
 /*
@@ -886,7 +824,7 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 									xcmd->u.results.stats[i].nitems_out);
 		}
 		pg_atomic_fetch_add_u64(&ps_state->result_ntuples, xcmd->u.results.nitems_out);
-		if (xcmd->u.results.final_this_device)
+		if (xcmd->u.results.final_plan_task)
 		{
 			pg_atomic_fetch_add_u64(&ps_state->final_nitems,
 									xcmd->u.results.final_nitems);
@@ -941,10 +879,7 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 					 errmsg("%s:%d  %s",
 							conn->errorbuf.filename,
 							conn->errorbuf.lineno,
-							conn->errorbuf.message),
-					 errhint("device at %s, function at %s",
-							 conn->devname,
-							 conn->errorbuf.funcname)));
+							conn->errorbuf.message)));
 
 		}
 		if (!dlist_is_empty(&conn->ready_cmds_list))
@@ -962,14 +897,12 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 			pthreadMutexUnlock(&conn->mutex);
 			if (!pts->final_done)
 			{
-				kern_final_task	kfin;
-
 				pts->final_done = true;
 				if (try_final_callback &&
-					pgstromTaskStateEndScan(pts, &kfin) &&
+					pgstromTaskStateEndScan(pts) &&
 					pts->cb_final_chunk != NULL)
 				{
-					xcmd = pts->cb_final_chunk(pts, &kfin, xcmd_iov, &xcmd_iovcnt);
+					xcmd = pts->cb_final_chunk(pts, xcmd_iov, &xcmd_iovcnt);
 					if (xcmd)
 					{
 						xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
@@ -1023,10 +956,7 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 					 errmsg("%s:%d  %s",
 							conn->errorbuf.filename,
 							conn->errorbuf.lineno,
-							conn->errorbuf.message),
-					 errhint("device at %s, function at %s",
-							 conn->devname,
-							 conn->errorbuf.funcname)));
+							conn->errorbuf.message)));
 		}
 
 		if ((conn->num_running_cmds + conn->num_ready_cmds) < max_async_tasks &&
@@ -1155,23 +1085,21 @@ pgstromScanNextTuple(pgstromTaskState *pts)
  */
 static XpuCommand *
 pgstromExecFinalChunk(pgstromTaskState *pts,
-					  kern_final_task *kfin,
 					  struct iovec *xcmd_iov, int *xcmd_iovcnt)
 {
 	XpuCommand	   *xcmd;
 
-	pts->xcmd_buf.len = offsetof(XpuCommand, u.fin.data);
+	pts->xcmd_buf.len = offsetof(XpuCommand, u);
 	enlargeStringInfo(&pts->xcmd_buf, 0);
 
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
 	memset(xcmd, 0, sizeof(XpuCommand));
 	xcmd->magic  = XpuCommandMagicNumber;
 	xcmd->tag    = XpuCommandTag__XpuTaskFinal;
-	xcmd->length = offsetof(XpuCommand, u.fin.data);
-	memcpy(&xcmd->u.fin, kfin, sizeof(kern_final_task));
+	xcmd->length = offsetof(XpuCommand, u);
 
 	xcmd_iov[0].iov_base = xcmd;
-	xcmd_iov[0].iov_len  = offsetof(XpuCommand, u.fin.data);
+	xcmd_iov[0].iov_len  = offsetof(XpuCommand, u);
 	*xcmd_iovcnt = 1;
 
 	return xcmd;
@@ -1233,39 +1161,81 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 }
 
 /*
- * __fixup_fallback_projection
+ * fixup_fallback_expression
  */
 static Node *
-__fixup_fallback_projection(Node *node, void *__data)
+__fixup_fallback_expression_walker(Node *node, void *data)
 {
-	List	   *custom_scan_tlist = __data;
+	List       *kvars_deflist = (List *)data;
 	ListCell   *lc;
 
 	if (!node)
 		return NULL;
-	foreach (lc, custom_scan_tlist)
-	{
-		TargetEntry *tle = lfirst(lc);
 
-		if (tle->resorigtbl != (Oid)UINT_MAX &&
-			equal(tle->expr, node))
+	foreach (lc, kvars_deflist)
+	{
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+
+		if (equal(node, kvdef->kv_expr))
 		{
+			Assert(exprType(node) == kvdef->kv_type_oid);
 			return (Node *)makeVar(INDEX_VAR,
-								   tle->resno,
+								   kvdef->kv_fallback,
 								   exprType(node),
 								   exprTypmod(node),
 								   exprCollation(node),
 								   0);
 		}
 	}
-
 	if (IsA(node, Var))
+		elog(ERROR, "unexpected Var-node in fallback expression: %s",
+			 nodeToString(node));
+	return expression_tree_mutator(node, __fixup_fallback_expression_walker, data);
+}
+
+static Node *
+fixup_fallback_expression(Node *node, pgstromTaskState *pts)
+{
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	List	   *kvars_deflist = NIL;
+	ListCell   *lc;
+
+	if (!node)
+		return NULL;
+	foreach (lc, pp_info->kvars_deflist)
 	{
-		return (Node *)makeNullConst(exprType(node),
-									 exprTypmod(node),
-									 exprCollation(node));
+		codegen_kvar_defitem *kvdef = lfirst(lc);
+
+		if (kvdef->kv_fallback > 0)
+		{
+			kvdef = pmemdup(kvdef, sizeof(codegen_kvar_defitem));
+			kvdef->kv_expr = fixup_scanstate_expr(&pts->css.ss, kvdef->kv_expr);
+			kvars_deflist = lappend(kvars_deflist, kvdef);
+		}
 	}
-	return expression_tree_mutator(node, __fixup_fallback_projection, __data);
+	return __fixup_fallback_expression_walker(node, kvars_deflist);
+}
+
+/*
+ * __execInitCpuFallbackQuals / __execInitCpuFallbackExpr
+ */
+static inline ExprState *
+__execInitCpuFallbackQuals(List *quals, pgstromTaskState *pts)
+{
+	if (quals == NIL)
+		return NULL;
+	quals = fixup_scanstate_quals(&pts->css.ss, quals);
+	quals = (List *)fixup_fallback_expression((Node *)quals, pts);
+	return ExecInitQual(quals, &pts->css.ss.ps);
+}
+
+static inline ExprState *
+__execInitCpuFallbackExpr(Expr *expr, pgstromTaskState *pts)
+{
+	if (!expr)
+		return NULL;
+	expr = (Expr *)fixup_fallback_expression((Node *)expr, pts);
+	return ExecInitExpr(expr, &pts->css.ss.ps);
 }
 
 /*
@@ -1364,16 +1334,16 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 			}
 			fallback_proj = lappend(fallback_proj, NULL);
 		}
-		else
+		else if (!tle->resjunk)
 		{
-			Node	   *expr;
-
 			Assert(tle->resorigtbl == (Oid)UINT_MAX);
-			expr = __fixup_fallback_projection((Node *)tle->expr,
-											   cscan->custom_scan_tlist);
-			state = ExecInitExpr((Expr *)expr, &pts->css.ss.ps);
+			state = __execInitCpuFallbackExpr(tle->expr, pts);
 			compatible = false;
 			fallback_proj = lappend(fallback_proj, state);
+		}
+		else
+		{
+			fallback_proj = lappend(fallback_proj, NULL);
 		}
 	}
 	if (!compatible)
@@ -1443,7 +1413,11 @@ pgstromCreateTaskState(CustomScan *cscan,
 	pts->xpu_task_flags = pp_info->xpu_task_flags;
 	pts->pp_info = pp_info;
 	Assert(pp_info->num_rels == num_rels);
+	pts->num_scan_repeats = 1;
 	pts->num_rels = num_rels;
+	pts->curr_tbm = palloc0(offsetof(TBMIterateResult, offsets) +
+							sizeof(OffsetNumber) * MaxHeapTuplesPerPage);
+	pts->curr_repeat_id = -1;
 
 	return (Node *)pts;
 }
@@ -1484,11 +1458,11 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		if (am_oid != HEAP_TABLE_AM_OID)
 			elog(ERROR, "PG-Strom does not support table access method: %s",
 				 get_am_name(am_oid));
-		/* setup GpuCache if any */
-		if (pp_info->gpu_cache_dindex >= 0)
-			pts->gcache_desc = pgstromGpuCacheExecInit(pts);
-		/* elsewhere, no GpuCache is valid */
-		if (!pts->gcache_desc)
+		/* Is GPU-Cache available? */
+		pts->gcache_desc = pgstromGpuCacheExecInit(pts);
+		if (pts->gcache_desc)
+			pts->xpu_task_flags |= DEVTASK__USED_GPUCACHE;
+		else
 		{
 			/* setup BRIN-index if any */
 			pgstromBrinIndexExecBegin(pts,
@@ -1496,7 +1470,21 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  pp_info->brin_index_conds,
 									  pp_info->brin_index_quals);
 			if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
+			{
 				pts->optimal_gpus = GetOptimalGpuForRelation(rel);
+				if (pts->optimal_gpus)
+				{
+					/*
+					 * If particular GPUs are optimal, we can use
+					 * GPU-Direct SQL for the table scan.
+					 */
+					pts->xpu_task_flags |= DEVTASK__USED_GPUDIRECT;
+				}
+				else
+				{
+					pts->optimal_gpus = GetSystemAvailableGpus();
+				}
+			}
 			if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 				pts->ds_entry = GetOptimalDpuForRelation(rel, &kds_pathname);
 		}
@@ -1528,7 +1516,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 						  &TTSOpsHeapTuple);
 	ExecAssignScanProjectionInfoWithVarno(&pts->css.ss, INDEX_VAR);
 #endif
-
 	/*
 	 * Initialize the CPU Fallback stuff
 	 */
@@ -1549,10 +1536,9 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		istate->econtext = CreateExprContext(estate);
 		istate->depth = depth_index + 1;
 		istate->join_type = pp_inner->join_type;
-		istate->join_quals = ExecInitQual(pp_inner->join_quals,
-										  &pts->css.ss.ps);
-		istate->other_quals = ExecInitQual(pp_inner->other_quals,
-										   &pts->css.ss.ps);
+
+		istate->join_quals = __execInitCpuFallbackQuals(pp_inner->join_quals, pts);
+		istate->other_quals = __execInitCpuFallbackQuals(pp_inner->other_quals, pts);
 
 		foreach (cell, pp_inner->hash_outer_keys)
 		{
@@ -1590,6 +1576,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		{
 			istate->gist_irel = index_open(pp_inner->gist_index_oid,
 										   AccessShareLock);
+			// XXX - needs to fixup by __execInitCpuFallbackExprs()?
 			istate->gist_clause = ExecInitExpr((Expr *)pp_inner->gist_clause,
 											   &pts->css.ss.ps);
 			istate->gist_ctid_resno = pp_inner->gist_ctid_resno;
@@ -1635,8 +1622,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  tupdesc_dst,
 									  KDS_FORMAT_COLUMN);
 	}
-	else if (!bms_is_empty(pts->optimal_gpus) ||	/* GPU-Direct SQL */
-			 pts->ds_entry)							/* DPU Storage */
+	else if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0 ||
+			 pts->ds_entry)
 	{
 		pts->cb_next_chunk = pgstromRelScanChunkDirect;
 		pts->cb_next_tuple = pgstromScanNextTuple;
@@ -1683,7 +1670,6 @@ static TupleTableSlot *
 pgstromExecScanAccess(pgstromTaskState *pts)
 {
 	TupleTableSlot *slot;
-	XpuCommand	   *resp;
 
 	slot = pgstromFetchFallbackTuple(pts);
 	if (slot)
@@ -1695,15 +1681,17 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 		if (pts->curr_resp)
 			xpuClientPutResponse(pts->curr_resp);
 		pts->curr_resp = __fetchNextXpuCommand(pts);
-		if (!pts->curr_resp)
-			return pgstromFetchFallbackTuple(pts);
-		resp = pts->curr_resp;
-		if (resp->tag == XpuCommandTag__Success)
+		if (pts->curr_resp)
 		{
-			if (resp->u.results.final_this_device)
+			XpuCommand *resp = pts->curr_resp;
+
+			if (resp->tag != XpuCommandTag__Success)
+				elog(ERROR, "unknown response tag: %u", resp->tag);
+			if (resp->u.results.final_plan_task)
+			{
 				ExecFallbackCpuJoinOuterJoinMap(pts, resp);
-			if (resp->u.results.final_plan_node)
 				ExecFallbackCpuJoinRightOuter(pts);
+			}
 			if (resp->u.results.chunks_nitems == 0)
 				goto next_chunks;
 			pts->curr_kds = (kern_data_store *)
@@ -1715,7 +1703,7 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 		}
 		else
 		{
-			elog(ERROR, "unknown response tag: %u", resp->tag);
+			return pgstromFetchFallbackTuple(pts);
 		}
 	}
 	slot_getallattrs(slot);
@@ -1857,6 +1845,7 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 	{
 		gpuClientOpenSession(pts, session);
+		GpuJoinInnerPreloadAfterWorks(pts);
 	}
 	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 	{
@@ -1941,8 +1930,8 @@ void
 execInnerPreLoadPinnedOneDepth(pgstromTaskState *pts,
 							   pg_atomic_uint64 *p_inner_nitems,
 							   pg_atomic_uint64 *p_inner_usage,
-							   uint64_t *p_inner_buffer_id,
-							   uint32_t *p_inner_dev_index)
+							   pg_atomic_uint64 *p_inner_total,
+							   uint64_t *p_inner_buffer_id)
 {
 	XpuCommand *resp;
 	uint64_t	ival;
@@ -1977,9 +1966,10 @@ execInnerPreLoadPinnedOneDepth(pgstromTaskState *pts,
 	pg_atomic_write_u64(p_inner_nitems, ival);
 	ival = pg_atomic_read_u64(&pts->ps_state->final_usage);
 	pg_atomic_write_u64(p_inner_usage,  ival);
+	ival = pg_atomic_read_u64(&pts->ps_state->final_total);
+	pg_atomic_write_u64(p_inner_total,  ival);
 skip:
-	*p_inner_buffer_id = pts->ps_state->query_plan_id;
-	*p_inner_dev_index = pts->conn->dev_index;
+	*p_inner_buffer_id    = pts->ps_state->query_plan_id;
 
 	if (pts->css.ss.ps.instrument)
 		InstrStopNode(pts->css.ss.ps.instrument, -1.0);
@@ -2034,17 +2024,26 @@ void
 pgstromExecResetTaskState(CustomScanState *node)
 {
 	pgstromTaskState *pts = (pgstromTaskState *) node;
+	pgstromSharedState *ps_state = pts->ps_state;
+	Relation	rel = node->ss.ss_currentRelation;
+	TableScanDesc scan = node->ss.ss_currentScanDesc;
 
 	if (pts->conn)
 	{
 		xpuClientCloseSession(pts->conn);
 		pts->conn = NULL;
 	}
-	pgstromTaskStateResetScan(pts);
+	/* reset status */
 	if (pts->br_state)
 		pgstromBrinIndexExecReset(pts);
 	if (pts->arrow_state)
 		pgstromArrowFdwExecReset(pts->arrow_state);
+	if (!scan->rs_parallel)
+		table_rescan(scan, NULL);
+	else
+		table_parallelscan_reinitialize(rel, scan->rs_parallel);
+	if (ps_state)
+		pg_atomic_write_u64(&ps_state->scan_block_count, 0);
 }
 
 /*
@@ -2059,18 +2058,11 @@ pgstromSharedStateEstimateDSM(CustomScanState *node,
 	EState	   *estate   = node->ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
 	int			num_rels = list_length(node->custom_ps);
-	int			num_devs = 0;
 	Size		len = 0;
 
 	if (pts->br_state)
 		len += pgstromBrinIndexEstimateDSM(pts);
 	len += MAXALIGN(offsetof(pgstromSharedState, inners[num_rels]));
-
-	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
-		num_devs = numGpuDevAttrs;
-	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-		num_devs = DpuStorageEntryCount();
-	len += MAXALIGN(sizeof(pg_atomic_uint32) * num_devs);
 
 	if (!pts->arrow_state)
 		len += table_parallelscan_estimate(relation, snapshot);
@@ -2091,17 +2083,12 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	EState	   *estate   = node->ss.ps.state;
 	Snapshot	snapshot = estate->es_snapshot;
 	int			num_rels = list_length(node->custom_ps);
-	int			num_devs = 0;
 	size_t		dsm_length = offsetof(pgstromSharedState, inners[num_rels]);
 	char	   *dsm_addr = coordinate;
 	pgstromSharedState *ps_state;
 	TableScanDesc scan = NULL;
 
 	Assert(!AmBackgroundWorkerProcess());
-	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
-		num_devs = numGpuDevAttrs;
-	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-		num_devs = DpuStorageEntryCount();
 
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexInitDSM(pts, dsm_addr);
@@ -2113,12 +2100,6 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		ps_state->ss_handle = dsm_segment_handle(pcxt->seg);
 		ps_state->ss_length = dsm_length;
 		dsm_addr += MAXALIGN(dsm_length);
-
-		/* control variables for parallel tasks */
-		pts->rjoin_devs_count  = (pg_atomic_uint32 *)dsm_addr;
-		memset(dsm_addr, 0, sizeof(pg_atomic_uint32) * num_devs);
-		dsm_addr += MAXALIGN(sizeof(pg_atomic_uint32) * num_devs);
-		pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
 
 		/* parallel scan descriptor */
 		if (pts->gcache_desc)
@@ -2132,6 +2113,8 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 			table_parallelscan_initialize(relation, pdesc, snapshot);
 			scan = table_beginscan_parallel(relation, pdesc);
 			ps_state->parallel_scan_desc_offset = ((char *)pdesc - (char *)ps_state);
+			ps_state->scan_block_nums  = ((HeapScanDesc)scan)->rs_nblocks;
+			ps_state->scan_block_start = ((HeapScanDesc)scan)->rs_startblock;
 		}
 	}
 	else
@@ -2140,23 +2123,20 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 		ps_state->ss_handle = DSM_HANDLE_INVALID;
 		ps_state->ss_length = dsm_length;
 
-		/* control variables for scan/rjoin */
-		pts->rjoin_devs_count = (pg_atomic_uint32 *)
-			MemoryContextAllocZero(estate->es_query_cxt,
-								   sizeof(pg_atomic_uint32 *) * num_devs);
-		pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
-
 		/* scan descriptor */
 		if (pts->gcache_desc)
 			pgstromGpuCacheInitDSM(pts, ps_state);
 		if (pts->arrow_state)
 			pgstromArrowFdwInitDSM(pts->arrow_state, ps_state);
 		else
+		{
 			scan = table_beginscan(relation, estate->es_snapshot, 0, NULL);
+			ps_state->scan_block_nums  = ((HeapScanDesc)scan)->rs_nblocks;
+			ps_state->scan_block_start = ((HeapScanDesc)scan)->rs_startblock;
+		}
 	}
 	ps_state->query_plan_id = ((uint64_t)MyProcPid) << 32 |
 		(uint64_t)pts->css.ss.ps.plan->plan_node_id;
-	pg_atomic_init_u32(&ps_state->device_selection_hint, UINT_MAX);
 	ps_state->num_rels = num_rels;
 	ConditionVariableInit(&ps_state->preload_cond);
 	SpinLockInit(&ps_state->preload_mutex);
@@ -2178,22 +2158,12 @@ pgstromSharedStateAttachDSM(CustomScanState *node,
 	pgstromSharedState *ps_state;
 	char	   *dsm_addr = coordinate;
 	int			num_rels = list_length(pts->css.custom_ps);
-	int			num_devs = 0;
-
-	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
-		num_devs = numGpuDevAttrs;
-	else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
-		num_devs = DpuStorageEntryCount();
 
 	if (pts->br_state)
 		dsm_addr += pgstromBrinIndexAttachDSM(pts, dsm_addr);
 	pts->ps_state = ps_state = (pgstromSharedState *)dsm_addr;
 	Assert(ps_state->num_rels == num_rels);
 	dsm_addr += MAXALIGN(offsetof(pgstromSharedState, inners[num_rels]));
-
-	pts->rjoin_exit_count = &ps_state->__rjoin_exit_count;
-	pts->rjoin_devs_count = (pg_atomic_uint32 *)dsm_addr;
-	dsm_addr += MAXALIGN(sizeof(pg_atomic_uint32) * num_devs);
 
 	if (pts->gcache_desc)
 		pgstromGpuCacheAttachDSM(pts, pts->ps_state);
@@ -2246,66 +2216,63 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 	StringInfoData		buf;
 
 	initStringInfo(&buf);
-	if (!es->analyze || !ps_state)
+	if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) == 0)
 	{
-		if (bms_is_empty(pts->optimal_gpus))
-		{
-			appendStringInfo(&buf, "disabled");
-		}
-		else if (pgstrom_regression_test_mode)
-		{
-			appendStringInfo(&buf, "enabled");
-		}
-		else
-		{
-			bool	is_first = true;
-			int		k;
-
-			appendStringInfo(&buf, "enabled (");
-			for (k = bms_next_member(pts->optimal_gpus, -1);
-				 k >= 0;
-				 k = bms_next_member(pts->optimal_gpus, k))
-			{
-				if (!is_first)
-					appendStringInfo(&buf, ", ");
-				appendStringInfo(&buf, "GPU-%d", k);
-				is_first = false;
-			}
-			appendStringInfo(&buf, ")");
-		}
+		appendStringInfo(&buf, "disabled");
 	}
 	else
 	{
-		XpuConnection  *conn = pts->conn;
-		uint64			count;
-		int				pos;
+		int		head = -1;
+		int		base;
+		uint64	count;
 
-		appendStringInfo(&buf, "%s (", (bms_is_empty(pts->optimal_gpus)
-										? "disabled"
-										: "enabled"));
-		if (!pgstrom_regression_test_mode && conn)
-			appendStringInfo(&buf, "%s; ", conn->devname);
-		pos = buf.len;
+		appendStringInfo(&buf, "enabled (N=%d,", numGpuDevAttrs);
+		base = buf.len;
+		for (int k=0; k <= numGpuDevAttrs; k++)
+		{
+			if (k < numGpuDevAttrs &&
+				(pts->optimal_gpus & (1UL<<k)) != 0)
+			{
+				if (head < 0)
+				{
+					appendStringInfo(&buf, "%s%d",
+									 buf.len == base ? "GPU" : ",", k);
+					head = k;
+				}
+			}
+			else if (head >= 0)
+			{
+				if (head + 2 == k)
+					appendStringInfo(&buf, ",%d", k-1);
+				else if (head + 2 > k)
+					appendStringInfo(&buf, "-%d", k-1);
+				head = -1;
+			}
+		}
+		if (es->analyze && ps_state)
+		{
+			base = buf.len;
 
-		count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
-		if (count)
-			appendStringInfo(&buf, "%sbuffer=%lu",
-							 (buf.len > pos ? ", " : ""),
-							 count / PAGES_PER_BLOCK);
-		count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
-		if (count)
-			appendStringInfo(&buf, "%svfs=%lu",
-							 (buf.len > pos ? ", " : ""),
-							 count / PAGES_PER_BLOCK);
-		count = pg_atomic_read_u64(&ps_state->npages_direct_read);
-		if (count)
-			appendStringInfo(&buf, "%sdirect=%lu",
-							 (buf.len > pos ? ", " : ""),
-							 count / PAGES_PER_BLOCK);
-		count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
-		appendStringInfo(&buf, "%sntuples=%lu",
-						 (buf.len > pos ? ", " : ""),
-						 count);
+			count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
+			if (count)
+				appendStringInfo(&buf, "%sbuffer=%lu",
+								 (buf.len > base ? ", " : "; "),
+								 count / PAGES_PER_BLOCK);
+			count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
+			if (count)
+				appendStringInfo(&buf, "%svfs=%lu",
+								 (buf.len > base ? ", " : "; "),
+								 count / PAGES_PER_BLOCK);
+			count = pg_atomic_read_u64(&ps_state->npages_direct_read);
+			if (count)
+				appendStringInfo(&buf, "%sdirect=%lu",
+								 (buf.len > base ? ", " : "; "),
+								 count / PAGES_PER_BLOCK);
+			count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
+			appendStringInfo(&buf, "%sntuples=%lu",
+							 (buf.len > base ? ", " : "; "),
+							 count);
+		}
 		appendStringInfo(&buf, ")");
 	}
 	if (!pgstrom_regression_test_mode)
@@ -2379,7 +2346,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			uint64_t	final_nitems = pg_atomic_read_u64(&ps_state->final_nitems);
 			uint64_t	final_usage  = pg_atomic_read_u64(&ps_state->final_usage);
 			uint64_t	final_total  = pg_atomic_read_u64(&ps_state->final_total);
-
+			
 			appendStringInfo(&buf, "nitems: %lu, usage: %s, total: %s",
 							 final_nitems,
 							 format_bytesz(final_usage),
@@ -2593,7 +2560,7 @@ pgstromExplainTaskState(CustomScanState *node,
 		/* GPU-Cache */
 		pgstromGpuCacheExplain(pts, es, dcontext);
 	}
-	else if (!bms_is_empty(pts->optimal_gpus))
+	else if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0)
 	{
 		/* GPU-Direct */
 		pgstromGpuDirectExplain(pts, es, dcontext);
@@ -2668,9 +2635,7 @@ pgstromExplainTaskState(CustomScanState *node,
 void
 __xpuClientOpenSession(pgstromTaskState *pts,
 					   const XpuCommand *session,
-					   pgsocket sockfd,
-					   const char *devname,
-					   int dev_index)
+					   pgsocket sockfd)
 {
 	XpuConnection  *conn;
 	XpuCommand	   *resp;
@@ -2683,8 +2648,6 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 		close(sockfd);
 		elog(ERROR, "out of memory");
 	}
-	strncpy(conn->devname, devname, 32);
-	conn->dev_index = dev_index;
 	conn->sockfd = sockfd;
 	conn->resowner = CurrentResourceOwner;
 	conn->worker = pthread_self();	/* to be over-written by worker's-id */
@@ -2711,10 +2674,9 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 	xpuClientSendCommand(conn, session);
 	resp = __waitAndFetchNextXpuCommand(pts, false);
 	if (!resp)
-		elog(ERROR, "Bug? %s:OpenSession response is missing", conn->devname);
+		elog(ERROR, "Bug? OpenSession response is missing");
 	if (resp->tag != XpuCommandTag__Success)
-		elog(ERROR, "%s:OpenSession failed - %s (%s:%d %s)",
-			 conn->devname,
+		elog(ERROR, "OpenSession failed - %s (%s:%d %s)",
 			 resp->u.error.message,
 			 resp->u.error.filename,
 			 resp->u.error.lineno,

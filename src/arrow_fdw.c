@@ -1073,7 +1073,7 @@ execInitArrowStatsHint(ScanState *ss, List *outer_quals, Bitmapset *stat_attrs)
 	Expr		   *eval_expr;
 	ListCell	   *lc;
 
-	outer_quals = fixup_scanstate_expressions(ss, outer_quals);
+	outer_quals = fixup_scanstate_quals(ss, outer_quals);
 	as_hint = palloc0(sizeof(arrowStatsHint));
 	as_hint->stat_attrs = stat_attrs;
 	foreach (lc, outer_quals)
@@ -2056,11 +2056,11 @@ RelationIsArrowFdw(Relation frel)
 /*
  * GetOptimalGpusForArrowFdw
  */
-const Bitmapset *
+gpumask_t
 GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 {
 	List	   *priv_list = (List *)baserel->fdw_private;
-	Bitmapset  *optimal_gpus = NULL;
+	gpumask_t	optimal_gpus = 0;
 
 	if (baseRelIsArrowFdw(baserel) &&
 		IsA(priv_list, List) && list_length(priv_list) == 2)
@@ -2071,13 +2071,13 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 		foreach (lc, af_list)
 		{
 			ArrowFileState *af_state = lfirst(lc);
-			const Bitmapset *__optimal_gpus;
+			gpumask_t	__optimal_gpus;
 
 			__optimal_gpus = GetOptimalGpuForFile(af_state->filename);
 			if (lc == list_head(af_list))
-				optimal_gpus = bms_copy(__optimal_gpus);
+				optimal_gpus = __optimal_gpus;
 			else
-				optimal_gpus = bms_intersect(optimal_gpus, __optimal_gpus);
+				optimal_gpus &= __optimal_gpus;
 		}
 	}
 	return optimal_gpus;
@@ -2114,18 +2114,89 @@ GetOptimalDpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 }
 
 /*
+ * arrowFdwExcludeFileNamesByPattern
+ */
+static List *
+arrowFdwExcludeFileNamesByPattern(List *filesList,
+								  const char *pattern,
+								  List **p_filesAttrsList)
+{
+	List	   *results = NIL;	/* only valid files */
+	List	   *attrsList = NIL;
+	ListCell   *lc;
+
+	foreach (lc, filesList)
+	{
+		String *path = lfirst(lc);
+		List   *attrKeys = NIL;
+		List   *attrValues = NIL;
+
+		if (pathNameMatchByPattern(strVal(path),
+								   pattern,
+								   &attrKeys,
+								   &attrValues))
+		{
+			if (p_filesAttrsList)
+			{
+				ListCell   *lc1, *lc2;
+				List	   *kv_list = NIL;
+
+				forboth (lc1, attrKeys,
+						 lc2, attrValues)
+				{
+					const char *key   = lfirst(lc1);
+					const char *value = lfirst(lc2);
+					int			key_len = strlen(key);
+					int			value_len = strlen(value);
+					char	   *pos;
+					ArrowKeyValue *kv;
+
+					kv = palloc(MAXALIGN(sizeof(ArrowKeyValue)) +
+								MAXALIGN(key_len+1) +
+								MAXALIGN(value_len+1));
+					__initArrowNode(&kv->node, ArrowNodeTag__KeyValue);
+					pos = ((char *)kv + MAXALIGN(sizeof(ArrowKeyValue)));
+					strcpy(pos, key);
+					kv->key = pos;
+					kv->_key_len = key_len;
+
+					pos += MAXALIGN(key_len+1);
+					strcpy(pos, value);
+					kv->value = pos;
+					kv->_value_len = value_len;
+
+					kv_list = lappend(kv_list, kv);
+				}
+				attrsList = lappend(attrsList, kv_list);
+			}
+			results = lappend(results, path);
+
+			list_free_deep(attrKeys);
+			list_free_deep(attrValues);
+		}
+	}
+	if (p_filesAttrsList)
+	{
+		Assert(list_length(results) == list_length(attrsList));
+		*p_filesAttrsList = attrsList;
+	}
+	return results;
+}
+
+/*
  * arrowFdwExtractFilesList
  */
 static List *
 arrowFdwExtractFilesList(List *options_list,
+						 List **p_filesAttrList,
 						 int *p_parallel_nworkers)
 {
-
-	ListCell   *lc;
 	List	   *filesList = NIL;
 	char	   *dir_path = NULL;
 	char	   *dir_suffix = NULL;
+	char	   *pattern = NULL;
 	int			parallel_nworkers = -1;
+	ListCell   *lc;
 
 	foreach (lc, options_list)
 	{
@@ -2174,6 +2245,12 @@ arrowFdwExtractFilesList(List *options_list,
 				elog(ERROR, "'parallel_workers' appeared twice");
 			parallel_nworkers = atoi(strVal(defel->arg));
 		}
+		else if (strcmp(defel->defname, "pattern") == 0)
+		{
+			if (pattern)
+				elog(ERROR, "'pattern' appeared twice");
+			pattern = strVal(defel->arg);
+		}
 		else
 			elog(ERROR, "arrow: unknown option (%s)", defel->defname);
 	}
@@ -2209,7 +2286,21 @@ arrowFdwExtractFilesList(List *options_list,
 		}
 		FreeDir(dir);
 	}
+	/* exclude the file names by pattern */
+	if (pattern)
+	{
+		filesList = arrowFdwExcludeFileNamesByPattern(filesList, pattern,
+													  p_filesAttrList);
+	}
+	else if (p_filesAttrList)
+	{
+		/* add empty file attributes list for forboth() macro */
+		List   *filesAttrList = NIL;
 
+		foreach (lc, filesList)
+			filesAttrList = lappend(filesAttrList, NULL);
+		*p_filesAttrList = filesAttrList;
+	}
 	if (p_parallel_nworkers)
 		*p_parallel_nworkers = parallel_nworkers;
 	return filesList;
@@ -2633,7 +2724,8 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	referenced = pickup_outer_referenced(root, baserel, referenced);
 
 	/* read arrow-file metadta */
-	filesList = arrowFdwExtractFilesList(ft->options, &parallel_nworkers);
+	filesList = arrowFdwExtractFilesList(ft->options, NULL,
+										 &parallel_nworkers);
 	foreach (lc1, filesList)
 	{
 		ArrowFileState *af_state;
@@ -3455,22 +3547,22 @@ static ArrowFdwState *
 __arrowFdwExecInit(ScanState *ss,
 				   List *outer_quals,
 				   const Bitmapset *outer_refs,
-				   const Bitmapset **p_optimal_gpus,
-				   const DpuStorageEntry **p_ds_entry)
+				   pgstromTaskState *pts)
 {
 	Relation		frel = ss->ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
 	Bitmapset	   *referenced = NULL;
 	Bitmapset	   *stat_attrs = NULL;
-	Bitmapset	   *optimal_gpus = NULL;
+	gpumask_t		optimal_gpus = 0UL;
 	const DpuStorageEntry *ds_entry = NULL;
 	bool			whole_row_ref = false;
 	List		   *filesList;
+	List		   *filesAttrList;
 	List		   *af_states_list = NIL;
 	uint32_t		rb_nrooms = 0;
 	uint32_t		rb_nitems = 0;
-	ArrowFdwState *arrow_state;
+	ArrowFdwState  *arrow_state;
 	ListCell	   *lc1, *lc2;
 
 	Assert(RelationIsArrowFdw(frel));
@@ -3489,7 +3581,7 @@ __arrowFdwExecInit(ScanState *ss,
 	}
 
 	/* setup ArrowFileState */
-	filesList = arrowFdwExtractFilesList(ft->options, NULL);
+	filesList = arrowFdwExtractFilesList(ft->options, &filesAttrList, NULL);
 	foreach (lc1, filesList)
 	{
 		char	   *fname = strVal(lfirst(lc1));
@@ -3499,26 +3591,29 @@ __arrowFdwExecInit(ScanState *ss,
 		if (af_state)
 		{
 			rb_nrooms += list_length(af_state->rb_list);
-			if (p_optimal_gpus)
+			if (pts)
 			{
-				const Bitmapset  *__optimal_gpus = GetOptimalGpuForFile(fname);
-
-				if (af_states_list == NIL)
-					optimal_gpus = bms_copy(__optimal_gpus);
-				else
-					optimal_gpus = bms_intersect(optimal_gpus, __optimal_gpus);
-			}
-			if (p_ds_entry)
-			{
-				const DpuStorageEntry *ds_temp;
-
-				if (af_states_list == NIL)
-					ds_entry = GetOptimalDpuForFile(fname, &af_state->dpu_path);
-				else if (ds_entry)
+				if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 				{
-					ds_temp = GetOptimalDpuForFile(fname, &af_state->dpu_path);
-					if (!DpuStorageEntryIsEqual(ds_entry, ds_temp))
-						ds_entry = NULL;
+					gpumask_t	__optimal_gpus = GetOptimalGpuForFile(fname);
+
+					if (af_states_list == NIL)
+						optimal_gpus = __optimal_gpus;
+					else
+						optimal_gpus &= __optimal_gpus;
+				}
+				else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
+				{
+					const DpuStorageEntry *ds_temp;
+
+					if (af_states_list == NIL)
+						ds_entry = GetOptimalDpuForFile(fname, &af_state->dpu_path);
+					else if (ds_entry)
+					{
+						ds_temp = GetOptimalDpuForFile(fname, &af_state->dpu_path);
+						if (!DpuStorageEntryIsEqual(ds_entry, ds_temp))
+							ds_entry = NULL;
+					}
 				}
 			}
 			af_states_list = lappend(af_states_list, af_state);
@@ -3552,11 +3647,29 @@ __arrowFdwExecInit(ScanState *ss,
 	Assert(rb_nrooms == rb_nitems);
 	arrow_state->rb_nitems = rb_nitems;
 
-	if (p_optimal_gpus)
-		*p_optimal_gpus = optimal_gpus;
-	if (p_ds_entry)
-		*p_ds_entry = ds_entry;
-
+	if (pts)
+	{
+		if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
+		{
+			if (optimal_gpus != 0)
+			{
+				pts->xpu_task_flags |= DEVTASK__USED_GPUDIRECT;
+				pts->optimal_gpus = optimal_gpus;
+			}
+			else
+			{
+				pts->optimal_gpus = GetSystemAvailableGpus();
+			}
+		}
+		else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
+		{
+			pts->ds_entry = ds_entry;
+		}
+		else
+		{
+			elog(ERROR, "ExecPlan is neither GPU nor DPU");
+		}
+	}
 	return arrow_state;
 }
 
@@ -3576,10 +3689,7 @@ pgstromArrowFdwExecInit(pgstromTaskState *pts,
 		arrow_state = __arrowFdwExecInit(&pts->css.ss,
 										 outer_quals,
 										 outer_refs,
-										 (pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0
-											? &pts->optimal_gpus : NULL,
-										 (pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0
-											? &pts->ds_entry : NULL);
+										 pts);
 	}
 	pts->arrow_state = arrow_state;
 	return (pts->arrow_state != NULL);
@@ -3604,23 +3714,29 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
 	node->fdw_state = __arrowFdwExecInit(&node->ss,
 										 fscan->scan.plan.qual,
 										 referenced,
-										 NULL,	/* no GPU */
-										 NULL);	/* no DPU */
+										 NULL);
 }
 
 /*
  * ExecArrowScanChunk
  */
 static inline RecordBatchState *
-__arrowFdwNextRecordBatch(ArrowFdwState *arrow_state)
+__arrowFdwNextRecordBatch(ArrowFdwState *arrow_state,
+						  int32_t num_scan_repeats,
+						  int32_t *p_scan_repeat_id)
 {
 	RecordBatchState *rb_state;
+	uint32_t	raw_index;
 	uint32_t	rb_index;
 
+	Assert(num_scan_repeats > 0);
 retry:
-	rb_index = pg_atomic_fetch_add_u32(arrow_state->rbatch_index, 1);
-	if (rb_index >= arrow_state->rb_nitems)
+	raw_index = pg_atomic_fetch_add_u32(arrow_state->rbatch_index, 1);
+	if (raw_index >= arrow_state->rb_nitems * num_scan_repeats)
 		return NULL;	/* no more chunks to load */
+	rb_index = (raw_index % arrow_state->rb_nitems);
+	if (p_scan_repeat_id)
+		*p_scan_repeat_id = (raw_index / arrow_state->rb_nitems);
 	rb_state = arrow_state->rb_states[rb_index];
 	if (arrow_state->stats_hint)
 	{
@@ -3646,12 +3762,15 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	RecordBatchState *rb_state;
 	ArrowFileState *af_state;
 	strom_io_vector *iovec;
-	XpuCommand	   *xcmd;
-	uint32_t		kds_src_offset;
-	uint32_t		kds_src_iovec;
-	uint32_t		kds_src_pathname;
+	XpuCommand *xcmd;
+	uint32_t	kds_src_offset;
+	uint32_t	kds_src_iovec;
+	uint32_t	kds_src_pathname;
+	int32_t		scan_repeat_id;
 
-	rb_state = __arrowFdwNextRecordBatch(arrow_state);
+	rb_state = __arrowFdwNextRecordBatch(arrow_state,
+										 pts->num_scan_repeats,
+										 &scan_repeat_id);
 	if (!rb_state)
 	{
 		pts->scan_done = true;
@@ -3688,10 +3807,19 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	xcmd->u.task.kds_src_pathname = kds_src_pathname;
 	xcmd->u.task.kds_src_iovec    = kds_src_iovec;
 	xcmd->u.task.kds_src_offset   = kds_src_offset;
+	xcmd->u.task.scan_repeat_id   = scan_repeat_id;
 
 	xcmd_iov->iov_base = xcmd;
 	xcmd_iov->iov_len  = xcmd->length;
 	*xcmd_iovcnt = 1;
+
+	/* XXX - debug message */
+    if (scan_repeat_id > 0 && scan_repeat_id != pts->last_repeat_id)
+        elog(NOTICE, "arrow scan on '%s' moved into %dth loop for inner-buffer partitions (pid: %u)",
+             RelationGetRelationName(pts->css.ss.ss_currentRelation),
+			 scan_repeat_id+1,
+			 MyProcPid);
+    pts->last_repeat_id = scan_repeat_id;
 
 	return xcmd;
 }
@@ -3713,7 +3841,7 @@ ArrowIterateForeignScan(ForeignScanState *node)
 
 		arrow_state->curr_index = 0;
 		arrow_state->curr_kds = NULL;
-		rb_state = __arrowFdwNextRecordBatch(arrow_state);
+		rb_state = __arrowFdwNextRecordBatch(arrow_state, 1, NULL);
 		if (!rb_state)
 			return NULL;
 		arrow_state->curr_kds
@@ -4082,7 +4210,8 @@ ArrowAcquireSampleRows(Relation relation,
 					   double *p_totaldeadrows)
 {
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
-	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL);
+	List		   *filesList;
+	List		   *filesAttrList;
 	List		   *rb_state_list = NIL;
 	ListCell	   *lc1, *lc2;
 	int64			total_nrows = 0;
@@ -4090,6 +4219,7 @@ ArrowAcquireSampleRows(Relation relation,
 	int				nsamples_min = nrooms / 100;
 	int				nitems = 0;
 
+	filesList = arrowFdwExtractFilesList(ft->options, &filesAttrList, NULL);
 	foreach (lc1, filesList)
 	{
 		ArrowFileState *af_state;
@@ -4142,10 +4272,12 @@ ArrowAnalyzeForeignTable(Relation frel,
 						 BlockNumber *p_totalpages)
 {
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
-	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL);
+	List		   *filesList;
+	List		   *filesAttrList;
 	ListCell	   *lc;
 	size_t			totalpages = 0;
 
+	filesList = arrowFdwExtractFilesList(ft->options, &filesAttrList, NULL);
 	foreach (lc, filesList)
 	{
 		const char	   *fname = strVal(lfirst(lc));
@@ -4205,6 +4337,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 {
 	ArrowSchema	schema;
 	List	   *filesList;
+	List	   *filesAttrList;
 	ListCell   *lc;
 	const char **column_names;
 	StringInfoData	cmd;
@@ -4224,7 +4357,7 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			elog(ERROR, "arrow_fdw: Bug? unknown list-type");
 			break;
 	}
-	filesList = arrowFdwExtractFilesList(stmt->options, NULL);
+	filesList = arrowFdwExtractFilesList(stmt->options, &filesAttrList, NULL);
 	if (filesList == NIL)
 		ereport(ERROR,
 				(errmsg("No valid apache arrow files are specified"),
@@ -4529,9 +4662,11 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 
 	if (catalog == ForeignTableRelationId)
 	{
-		List	   *filesList = arrowFdwExtractFilesList(options, NULL);
+		List	   *filesList;
+		List	   *filesAttrList;
 		ListCell   *lc;
 
+		filesList = arrowFdwExtractFilesList(options, &filesAttrList, NULL);
 		foreach (lc, filesList)
 		{
 			const char *fname = strVal(lfirst(lc));
@@ -4621,8 +4756,10 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 	if (check_schema_compatibility)
 	{
 		ForeignTable *ft = GetForeignTable(RelationGetRelid(frel));
-		List	   *filesList = arrowFdwExtractFilesList(ft->options, NULL);
+		List	   *filesList;
+		List	   *filesAttrList;
 
+		filesList = arrowFdwExtractFilesList(ft->options, &filesAttrList, NULL);
 		foreach (lc, filesList)
 		{
 			const char *fname = strVal(lfirst(lc));
@@ -4633,6 +4770,53 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 	if (frel)
 		relation_close(frel, NoLock);
 	PG_RETURN_NULL();
+}
+
+/*
+ * pgstrom_check_pattern
+ */
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_check_pattern);
+PUBLIC_FUNCTION(Datum)
+pgstrom_arrow_fdw_check_pattern(PG_FUNCTION_ARGS)
+{
+	text	   *t = PG_GETARG_TEXT_P(0);
+	text	   *p = PG_GETARG_TEXT_P(1);
+	List	   *attrKeys = NIL;
+	List	   *attrValues = NIL;
+	ListCell   *lc1, *lc2;
+	bool		retval;
+	StringInfoData buf;
+
+	retval = pathNameMatchByPattern(text_to_cstring(t),
+									text_to_cstring(p),
+									&attrKeys,
+									&attrValues);
+	initStringInfo(&buf);
+	if (retval)
+	{
+		bool	need_comma = false;
+
+		appendStringInfo(&buf, "true");
+		forboth (lc1, attrKeys,
+				 lc2, attrValues)
+		{
+			if (!need_comma)
+				appendStringInfo(&buf, " {");
+			else
+				appendStringInfo(&buf, ", ");
+			appendStringInfo(&buf, "[%s]=[%s]",
+							 (char *)lfirst(lc1),
+							 (char *)lfirst(lc2));
+			need_comma = true;
+		}
+		if (need_comma)
+			appendStringInfo(&buf, "}");
+	}
+	else
+	{
+		appendStringInfo(&buf, "false");
+	}
+	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
 }
 
 /*

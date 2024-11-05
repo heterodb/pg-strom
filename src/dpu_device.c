@@ -310,7 +310,6 @@ DpuClientOpenSession(pgstromTaskState *pts,
 {
 	const DpuStorageEntry *ds_entry = pts->ds_entry;
     pgsocket    sockfd;
-    char        namebuf[32];
 
 	if (!ds_entry)
 		elog(ERROR, "Bug? no DPU device is configured");
@@ -325,9 +324,7 @@ DpuClientOpenSession(pgstromTaskState *pts,
 		close(sockfd);
 		elog(ERROR, "failed on connect('%s'): %m", ds_entry->config_host);
 	}
-	snprintf(namebuf, sizeof(namebuf), "DPU-%u", ds_entry->endpoint_id);
-
-	__xpuClientOpenSession(pts, session, sockfd, namebuf, ds_entry->endpoint_id);
+	__xpuClientOpenSession(pts, session, sockfd);
 }
 
 /*

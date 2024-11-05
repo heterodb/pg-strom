@@ -1059,8 +1059,6 @@ sqldb_begin_query(void *sqldb_state,
 	pgstate->res = res;
 	pgstate->nitems = PQntuples(res);
 	pgstate->index  = 0;
-	if (pgstate->nitems == 0)
-		Elog("SQL query has empty results: %s", sqldb_command);
 
 	for (int depth=1; depth <= pgstate->n_depth; depth++)
 	{

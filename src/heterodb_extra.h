@@ -18,6 +18,11 @@
 #define HETERODB_EXTRA_FILENAME		"heterodb_extra.so"
 #define HETERODB_EXTRA_PATHNAME		"/usr/lib64/" HETERODB_EXTRA_FILENAME
 #define HETERODB_EXTRA_MAX_GPUS		63
+#ifndef HAS_GPUMASK_TYPEDEF
+#define HAS_GPUMASK_TYPEDEF
+#define INVALID_GPUMASK				(~0UL)
+typedef int64_t						gpumask_t;
+#endif	/* HAS_GPUMASK_TYPEDEF */
 
 #define HETERODB_LICENSE_PATHNAME	"/etc/heterodb.license"
 /* fixed length of the license key (2048bits) */
@@ -72,7 +77,7 @@ extern const char  *heterodbLicenseDecrypt(const char *path);
 extern int			heterodbValidateDevice(const char *gpu_device_name,
 										   const char *gpu_device_uuid);
 extern const char  *heterodbInitOptimalGpus(const char *manual_config);
-extern int64_t		heterodbGetOptimalGpus(const char *path,
+extern gpumask_t	heterodbGetOptimalGpus(const char *path,
 										   const char *policy);
 /*
  * GPU related stuff must include <cuda.h> first, but DPU stuff skips them

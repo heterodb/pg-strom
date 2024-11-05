@@ -1604,6 +1604,14 @@ int main(int argc, char * const argv[])
 										0);
 		sql_table_clear(table);
 	}
+
+	/* check whether any results were written */
+	if (table->numRecordBatches == 0)
+	{
+		if (!append_filename)
+			unlink(table->filename);
+		Elog("SQL query has empty results: %s", sqldb_command);
+	}
 	/* write out footer portion */
 	writeArrowFooter(table);
 

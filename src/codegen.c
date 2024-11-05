@@ -3376,7 +3376,8 @@ codegen_build_packed_gistevals(codegen_context *context,
  * codegen_build_projection
  */
 bytea *
-codegen_build_projection(codegen_context *context, List *proj_hash)
+codegen_build_projection(codegen_context *context,
+						 List *proj_hash)
 {
 	kern_expression	*kexp;
 	StringInfoData buf;

@@ -184,26 +184,6 @@ on AFTER INSERT OR UPDATE OR DELETE for each row.</p>
                   execute function pgstrom.gpucache_sync_trigger();
 =# alter table dpoints_even enable always trigger row_sync;
 </code></pre>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>Additional configuration at PostgreSQL v12 or prior.</p>
-<p>In case when GPU Cache is used at PostgreSQL v12 or prior, you need to configure
-an additional BEFORE TRUNCATE statement trigger that executes <code>pgstrom.gpucache_sync_trigger()</code> function.
-If you want to use the GPU Cache on the replication slave, </p>
-<p>If you use GPU Cache at the PostgreSQL v12 or prior, in a similar way, invocation mode of this trigger must have <code>ALWAYS</code>.</p>
-<p>PostgreSQL v13 enhanced its object-access-hook mechanism, so allows extension modules
-to capture execution of TRUNCATE without triggers configuration.
-On the other hand, the prior version still needs the BEFORE TRUNCATE statement trigger to keep consistency
-of GPU Cache by capture of TRUNCATE.</p>
-</div>
-<p>Below is an example to configure GPU Cache on the <code>dpoints</code> table at PostgreSQL v12 or prior.</p>
-<pre><code>=# create trigger row_sync after insert or update or delete on dpoints_even for row
-                  execute function pgstrom.gpucache_sync_trigger();
-=# create trigger stmt_sync before truncate on dpoints_even for statement
-                  execute function pgstrom.gpucache_sync_trigger();
-=# alter table dpoints_even enable always trigger row_sync;
-=# alter table dpoints_even enable always trigger stmt_sync;
-</code></pre>
 <h3 id="gpu-cache-customize">GPU Cache Customize</h3>
 <p>You can customize GPU Cache by specifying an optional string in the form of KEY=VALUE as an argument to GPU Cache line trigger. Please note that where you should specify is not to the syntax trigger.
 The following SQL statement is an example of creating a GPU Cache whose maximum row count is 2.5 million rows and the size of the REDO Log Buffer is 100MB.</p>

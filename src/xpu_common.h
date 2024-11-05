@@ -182,6 +182,12 @@ typedef unsigned int		Oid;
 #define __MAXALIGNED__		__attribute__((aligned(MAXIMUM_ALIGNOF)));
 #define MAXIMUM_ALIGNOF_SHIFT 3
 
+#ifndef HAS_GPUMASK_TYPEDEF
+#define HAS_GPUMASK_TYPEDEF
+#define INVALID_GPUMASK		(~0UL)
+typedef int64_t				gpumask_t;
+#endif	/* HAS_GPUMASK_TYPEDEF */
+
 /* Definition of several primitive types */
 typedef __int128	int128_t;
 #include "float2.h"
@@ -339,6 +345,14 @@ INLINE_FUNCTION(uint32_t) TotalShmemSize(void)
 	return rv;
 }
 #endif		/* __CUDACC__ */
+
+/*
+ * Current GPU-Task specific run-time properties
+ */
+EXTERN_SHARED_DATA(uint32_t, stromTaskProp__cuda_dindex);
+EXTERN_SHARED_DATA(uint32_t, stromTaskProp__cuda_stack_limit);
+EXTERN_SHARED_DATA(int32_t,  stromTaskProp__partition_divisor);
+EXTERN_SHARED_DATA(int32_t,  stromTaskProp__partition_reminder);
 
 /*
  * TypeOpCode / FuncOpCode
@@ -579,8 +593,6 @@ __strncpy(char *d, const char *s, uint32_t n)
  *
  * ----------------------------------------------------------------
  */
-EXTERN_SHARED_DATA(uint32_t, pgstrom_cuda_stack_size);
-
 INLINE_FUNCTION(bool)
 CHECK_CUDA_STACK_OVERFLOW(void)
 {
@@ -595,7 +607,7 @@ CHECK_CUDA_STACK_OVERFLOW(void)
 	asm volatile("stacksave.u32 %0;" : "=r"(sp) );
 
 	/* 256b margin for the stack boundary */
-	return (sp + pgstrom_cuda_stack_size < 0x00ffff00U);
+	return (sp + stromTaskProp__cuda_stack_limit < 0x00ffff00U);
 #else
 	return false;
 #endif
@@ -1238,6 +1250,16 @@ __KDS_CHECK_OVERFLOW(const kern_data_store *kds, uint32_t nitems, uint64_t usage
  *
  * ------------------------------------------------
  */
+INLINE_FUNCTION(uint64_t)
+KDS_GET_HASHSLOT_WIDTH(uint64_t nitems)
+{
+	if (nitems <= 5000)
+		return 20000UL;
+	if (nitems <= 4000000)
+		return 20000UL + 2 * nitems;
+	return 8020000UL + nitems;
+}
+
 INLINE_FUNCTION(uint64_t *)
 KDS_GET_HASHSLOT_BASE(const kern_data_store *kds)
 {
@@ -2028,7 +2050,8 @@ typedef struct
 #define DEVTYPE__HAS_COMPARE		0x00000800U	/* Device type has compare handler */
 #define DEVTASK__PINNED_HASH_RESULTS 0x00001000U/* Pinned results in HASH format */
 #define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
-
+#define DEVTASK__USED_GPUDIRECT		0x00004000U	/* Task used GPU-Direct SQL */
+#define DEVTASK__USED_GPUCACHE		0x00008000U	/* Task used GPU-Cache */
 
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
@@ -2434,6 +2457,7 @@ typedef struct kern_session_info
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
 	uint32_t	cuda_stack_size;	/* estimated stack size */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
+	gpumask_t	optimal_gpus;		/* mask of schedulable GPUs */
 	/* xpucode for this session */
 	uint32_t	xpucode_load_vars_packed;
 	uint32_t	xpucode_move_vars_packed;
@@ -2455,8 +2479,7 @@ typedef struct kern_session_info
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
 	int32_t		session_currency_frac_digits;	/* copy of lconv::frac_digits */
-	uint32_t	session_kds_final;	/* header portion of kds_final; used when
-									 * query results shall be retained in GPU */
+
 	/* join inner buffer */
 	uint32_t	pgsql_port_number;	/* = PostPortNumber */
 	uint32_t	pgsql_plan_node_id;	/* = Plan->plan_node_id */
@@ -2482,23 +2505,16 @@ typedef struct {
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
 	uint32_t	kds_dst_offset;		/* offset to kds_dst */
+	int32_t		scan_repeat_id;		/* current repeat count */
 	char		data[1]				__MAXALIGNED__;
 } kern_exec_task;
-
-typedef struct {
-	bool		final_plan_node;
-	bool		final_this_device;
-	char		data[1]				__MAXALIGNED__;
-} kern_final_task;
 
 typedef struct {
 	uint32_t	chunks_offset;		/* offset of kds_dst array */
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
 	uint32_t	ojmap_offset;		/* offset of outer-join-map */
 	uint32_t	ojmap_length;		/* length of outer-join-map */
-	kern_final_task kfin;			/* copy from XpuTaskFinal if any */
-	bool		final_plan_node;
-	bool		final_this_device;
+	bool		final_plan_task;	/* true, if it is final response */
 	uint32_t	final_nitems;		/* final buffer's nitems, if any */
 	uint64_t	final_usage;		/* final buffer's usage, if any */
 	uint64_t	final_total;		/* final buffer's total size, if any */
@@ -2547,7 +2563,6 @@ typedef struct
 		kern_errorbuf		error;
 		kern_session_info	session;
 		kern_exec_task		task;
-		kern_final_task		fin;
 		kern_exec_results	results;
 		kern_cpu_fallback	fallback;
 	} u;
@@ -2799,9 +2814,7 @@ SESSION_ENCODE(kern_session_info *session)
  */
 #define TEMPLATE_XPU_CONNECT_RECEIVE_COMMANDS(__XPU_PREFIX)				\
 	static int															\
-	__XPU_PREFIX##ReceiveCommands(int sockfd,							\
-								  void *priv,							\
-								  const char *error_label)				\
+	__XPU_PREFIX##ReceiveCommands(int sockfd, void *priv)				\
 	{																	\
 		char		buffer_local[10000];								\
 		char	   *buffer;												\
@@ -2845,7 +2858,7 @@ SESSION_ENCODE(kern_session_info *session)
 					continue;											\
 				}														\
 				fprintf(stderr, "[%s] failed on recv(2): %m\n",			\
-						error_label);									\
+						__FUNCTION__);									\
 				return -1;												\
 			}															\
 			else if (nbytes == 0)										\
@@ -2854,7 +2867,7 @@ SESSION_ENCODE(kern_session_info *session)
 				if (curr || offset > 0)									\
 				{														\
 					fprintf(stderr, "[%s] connection closed in the halfway through XpuCommands read\n", \
-							error_label);								\
+							__FUNCTION__);								\
 					return -1;											\
 				}														\
 				return count;											\
@@ -2884,7 +2897,7 @@ SESSION_ENCODE(kern_session_info *session)
 					if (!xcmd)											\
 					{													\
 						fprintf(stderr, "[%s] out of memory (sz=%lu): %m\n", \
-								error_label, temp->length);				\
+								__FUNCTION__, temp->length);			\
 						return -1;										\
 					}													\
 					memcpy(xcmd, temp, temp->length);					\
@@ -2904,7 +2917,7 @@ SESSION_ENCODE(kern_session_info *session)
 					if (!curr)											\
 					{													\
 						fprintf(stderr, "[%s] out of memory (sz=%lu): %m\n", \
-								error_label, temp->length);				\
+								__FUNCTION__, temp->length);			\
 						return -1;										\
 					}													\
 					memcpy(curr, temp, offset);							\
@@ -2923,7 +2936,7 @@ SESSION_ENCODE(kern_session_info *session)
 			}															\
 		}																\
 		fprintf(stderr, "[%s] Bug? unexpected loop break\n",			\
-				error_label);											\
+				__FUNCTION__);											\
 		return -1;														\
 	}
 
@@ -2972,6 +2985,14 @@ ExecMoveKernelVariables(kern_context *kcxt,
 						const kern_expression *kexp_move_vars,
                         char *dst_kvec_buffer,
                         int dst_kvec_id);
+EXTERN_FUNCTION(bool)
+ExecGpuJoinQuals(kern_context *kcxt,
+				 const kern_expression *kexp_join_quals,
+				 int *p_status);
+EXTERN_FUNCTION(bool)
+ExecGpuJoinOtherQuals(kern_context *kcxt,
+					  const kern_expression *kexp_join_quals,
+					  bool *p_status);
 EXTERN_FUNCTION(uint64_t)
 ExecGiSTIndexGetNext(kern_context *kcxt,
 					 const kern_data_store *kds_hash,
@@ -3033,13 +3054,27 @@ pg_hash_merge(uint32_t hash_prev, uint32_t hash_next)
  *
  * ----------------------------------------------------------------
  */
+typedef struct
+{
+	int32_t			inner_depth;	/* partitioned depth */
+	int32_t			hash_divisor;	/* divisor for the hash-value */
+	struct {
+		gpumask_t	available_gpus;	/* set of GPUs for this partition */
+		kern_data_store *kds_in;	/* used by GPU-service */
+	} parts[1];
+} kern_buffer_partitions;
+
 struct kern_multirels
 {
-	size_t		length;
+	size_t		length;				/* total length of kern_multirels */
+	size_t		ojmap_sz;			/* length of outer-join map */
+	uint64_t	kbuf_part_offset;	/* offset to kern_buffer_partitions, if any */
 	uint32_t	num_rels;
 	struct
 	{
-		uint64_t	kds_devptr;		/* pointer to KDS (GPU service only) */
+		kern_data_store *kds_in;	/* pointer to KDS-inner (if non-partitioned) */
+		kern_buffer_partitions *kbuf_parts; /* partition descriptor */
+		/* --- aboves are valid only GPU-service --- */
 		uint64_t	kds_offset;		/* offset to KDS */
 		uint64_t	ojmap_offset;	/* offset to outer-join map, if any */
 		uint64_t	gist_offset;	/* offset to GiST-index pages, if any */
@@ -3048,42 +3083,88 @@ struct kern_multirels
 		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
 		bool		pinned_buffer;	/* true, if it uses pinned-buffer */
 		uint64_t	buffer_id;		/* key to lookup pinned inner-buffer */
-		uint32_t	dev_index;		/* key to lookup pinned inner-buffer */
 	} chunks[1];
 };
 typedef struct kern_multirels	kern_multirels;
 
 INLINE_FUNCTION(kern_data_store *)
-KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int dindex)
+KERN_MULTIRELS_INNER_KDS(kern_multirels *kmrels, int depth)
 {
+#ifdef __CUDACC__
+	kern_data_store *kds_in;
+
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	kds_in = kmrels->chunks[depth-1].kds_in;
+	if (!kds_in)
+	{
+		kern_buffer_partitions *kbuf_parts = kmrels->chunks[depth-1].kbuf_parts;
+
+		if (kbuf_parts)
+		{
+			int		reminder = stromTaskProp__partition_reminder;
+
+			assert(reminder >= 0 && reminder < kbuf_parts->hash_divisor);
+			kds_in = kbuf_parts->parts[reminder].kds_in;
+		}
+	}
+	return kds_in;
+#else
 	uint64_t	pos;
 
-	assert(dindex >= 0 && dindex < kmrels->num_rels);
-	pos = kmrels->chunks[dindex].kds_devptr;
-	if (pos != 0)
-		return (kern_data_store *)pos;
-	pos = kmrels->chunks[dindex].kds_offset;
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	pos = kmrels->chunks[depth-1].kds_offset;
 	return (kern_data_store *)(pos == 0 ? NULL : ((char *)kmrels + pos));
+#endif
 }
 
 INLINE_FUNCTION(bool *)
-KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int dindex)
+KERN_MULTIRELS_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth)
 {
 	uint64_t	offset;
 
-	assert(dindex >= 0 && dindex < kmrels->num_rels);
-	offset = kmrels->chunks[dindex].ojmap_offset;
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	offset = kmrels->chunks[depth-1].ojmap_offset;
 	return (bool *)(offset == 0 ? NULL : ((char *)kmrels + offset));
 }
 
-INLINE_FUNCTION(kern_data_store *)
-KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int dindex)
+INLINE_FUNCTION(bool *)
+KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kern_multirels *kmrels, int depth,
+								  uint32_t cuda_dindex)
 {
 	uint64_t	offset;
 
-	assert(dindex >= 0 && dindex < kmrels->num_rels);
-	offset = kmrels->chunks[dindex].gist_offset;
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	offset = kmrels->chunks[depth-1].ojmap_offset;
+	if (offset == 0)
+		return NULL;
+	offset += kmrels->ojmap_sz * cuda_dindex;
+	return (bool *)((char *)kmrels + offset);
+}
+
+INLINE_FUNCTION(kern_data_store *)
+KERN_MULTIRELS_GIST_INDEX(kern_multirels *kmrels, int depth)
+{
+	uint64_t	offset;
+
+	assert(depth > 0 && depth <= kmrels->num_rels);
+	offset = kmrels->chunks[depth-1].gist_offset;
 	return (kern_data_store *)(offset == 0 ? NULL : ((char *)kmrels + offset));
+}
+
+INLINE_FUNCTION(kern_buffer_partitions *)
+KERN_MULTIRELS_PARTITION_DESC(kern_multirels *kmrels, int depth)
+{
+	uint64_t	offset = kmrels->kbuf_part_offset;
+
+	assert(depth < 0 || (depth > 0 && depth <= kmrels->num_rels));
+	if (offset > 0)
+	{
+		kern_buffer_partitions *kbuf_parts
+			= (kern_buffer_partitions *)((char *)kmrels + offset);
+		if (depth < 0 || kbuf_parts->inner_depth == depth)
+			return kbuf_parts;
+	}
+	return NULL;
 }
 
 /* ----------------------------------------------------------------

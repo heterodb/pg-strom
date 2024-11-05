@@ -24,6 +24,7 @@ static bool					pgstrom_enable_gpuhashjoin = false;	/* GUC */
 static bool					pgstrom_enable_gpugistindex = false;/* GUC */
 static bool					pgstrom_enable_partitionwise_gpujoin = false;
 static int					__pinned_inner_buffer_threshold_mb = 0; /* GUC */
+static int					__pinned_inner_buffer_partition_size_mb = 0; /* GUC */
 static CustomPathMethods	dpujoin_path_methods;
 static CustomScanMethods	dpujoin_plan_methods;
 static CustomExecMethods	dpujoin_exec_methods;
@@ -186,14 +187,15 @@ try_fetch_xpujoin_planinfo(const Path *path)
  */
 static Path *
 tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
+							 pgstromPlanInnerInfo *pp_inner,
 							 Path *inner_path,
 							 Cost *p_inner_final_cost)
 {
-	pgstromPlanInnerInfo *pp_inner = &pp_info->inners[pp_info->num_rels-1];
 	PathTarget *inner_target;
 	size_t		inner_threshold_sz;
 	int			nattrs;
 	int			unitsz;
+	int			projection_hash_divisor = 0;
 	double		bufsz;
 
 	/*
@@ -237,9 +239,9 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 		bufsz += sizeof(uint64_t) * Max(inner_path->rows, 320.0);
 	bufsz += sizeof(uint64_t) * inner_path->rows;
 	bufsz += unitsz * inner_path->rows;
+
 	if (bufsz < inner_threshold_sz)
 		return NULL;
-
 	/* Ok, this inner path can use pinned-buffer */
 	if (pgstrom_is_gpuscan_path(inner_path) ||
 		pgstrom_is_gpujoin_path(inner_path))
@@ -250,6 +252,11 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 		pp_temp = copy_pgstrom_plan_info(pp_temp);
 		pp_temp->projection_hashkeys = pp_inner->hash_inner_keys;
 		cpath->custom_private = list_make1(pp_temp);
+
+		/* turn on inner_pinned_buffer */
+		pp_inner->inner_pinned_buffer = true;
+		pp_inner->inner_partitions_divisor = projection_hash_divisor;
+
 		*p_inner_final_cost = pp_temp->final_cost;
 		return (Path *)cpath;
 	}
@@ -555,13 +562,11 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	 * Try pinned inner buffer
 	 */
 	temp_path = tryPinnedInnerJoinBufferPath(pp_info,
+											 pp_inner,
 											 inner_path,
 											 &inner_final_cost);
 	if (temp_path)
-	{
 		llast(inner_paths_list) = inner_path = temp_path;
-		pp_inner->inner_pinned_buffer = true;
-	}
 
 	/*
 	 * Cost estimation
@@ -1732,7 +1737,8 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 		List   *proj_hash = pp_info->projection_hashkeys;
 
 		pgstrom_build_join_tlist_dev(context, root, joinrel, tlist);
-		pp_info->kexp_projection = codegen_build_projection(context, proj_hash);
+		pp_info->kexp_projection = codegen_build_projection(context,
+															proj_hash);
 	}
 	pull_varattnos((Node *)context->tlist_dev,
 				   pp_info->scan_relid,
@@ -2079,6 +2085,94 @@ innerPreloadSetupGiSTIndex(Relation i_rel, kern_data_store *kds_gist)
 }
 
 /*
+ * innerPreloadSetupPinnedInnerBufferPartitions
+ */
+static size_t
+innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
+											 pgstromTaskState *pts,
+											 size_t offset)
+{
+	pgstromSharedState *ps_state = pts->ps_state;
+	size_t		partition_sz = (size_t)__pinned_inner_buffer_partition_size_mb << 20;
+	size_t		largest_sz = 0;
+	int			largest_depth = -1;
+
+	for (int depth=1; depth <= pts->num_rels; depth++)
+	{
+		if (pts->inners[depth-1].inner_pinned_buffer)
+		{
+			size_t	sz = pg_atomic_read_u64(&ps_state->inners[depth-1].inner_total);
+
+			if (largest_depth < 0 || sz > largest_sz)
+			{
+				largest_sz = sz;
+				largest_depth = depth;
+			}
+		}
+	}
+
+	if (largest_depth > 0 && largest_sz > partition_sz)
+	{
+		int		divisor = (largest_sz + partition_sz - 1) / partition_sz;
+		size_t	kbuf_parts_sz = MAXALIGN(offsetof(kern_buffer_partitions,
+												  parts[divisor]));
+		if (h_kmrels)
+		{
+			kern_buffer_partitions *kbuf_parts = (kern_buffer_partitions *)
+				((char *)h_kmrels + offset);
+
+			memset(kbuf_parts, 0, kbuf_parts_sz);
+			kbuf_parts->inner_depth  = largest_depth;
+			kbuf_parts->hash_divisor = divisor;
+			/* assign GPUs for each partition */
+			for (int base=0; base < divisor; base += numGpuDevAttrs)
+			{
+				gpumask_t	optimal_gpus = pts->optimal_gpus;
+				gpumask_t	other_gpus = (GetSystemAvailableGpus() & ~optimal_gpus);
+				int			count = 0;
+				int			unitsz = Min(divisor-base, numGpuDevAttrs);
+
+				while ((optimal_gpus | other_gpus) != 0)
+				{
+					int			__part_id = (count++ % unitsz) + base;
+					gpumask_t	__mask = 1UL;
+
+					if (optimal_gpus != 0)
+					{
+						/* optimal GPUs first */
+						while ((optimal_gpus & __mask) == 0)
+							__mask <<= 1;
+						kbuf_parts->parts[__part_id].available_gpus |= __mask;
+						optimal_gpus &= ~__mask;
+					}
+					else if (other_gpus != 0)
+					{
+						/* elsewhere, other GPUs */
+						while ((other_gpus & __mask) == 0)
+							__mask <<= 1;
+						kbuf_parts->parts[__part_id].available_gpus |= __mask;
+						other_gpus &= ~__mask;
+					}
+					else
+					{
+						elog(ERROR, "Bug? pinned inner-buffer partitions tries to distribute tuples more GPUs than the installed devices");
+					}
+				}
+			}
+			elog(NOTICE, "pinned inner-buffer partitions (depth=%d, divisor=%d)",
+				 kbuf_parts->inner_depth,
+				 kbuf_parts->hash_divisor);
+			for (int k=0; k < kbuf_parts->hash_divisor; k++)
+				elog(NOTICE, "partition-%d (GPUs: %08lx)", k, kbuf_parts->parts[k].available_gpus);
+			/* offset to the partition descriptor */
+			h_kmrels->kbuf_part_offset = offset;
+		}
+		return kbuf_parts_sz;
+	}
+	return 0;
+}
+
+/*
  * innerPreloadAllocHostBuffer
  *
  * NOTE: This function is called with preload_mutex locked
@@ -2090,38 +2184,40 @@ innerPreloadAllocHostBuffer(pgstromTaskState *pts)
 	kern_multirels	   *h_kmrels = NULL;
 	kern_data_store	   *kds = NULL;
 	size_t				offset;
+	size_t				ojmap_sz;
 
 	/* other backend already setup the buffer metadata */
 	if (ps_state->preload_shmem_length > 0)
 		return;
-	
+
 	/*
 	 * 1st pass: calculation of the buffer length
 	 * 2nd pass: initialization of buffer metadata
 	 */
 again:
 	offset = MAXALIGN(offsetof(kern_multirels, chunks[pts->num_rels]));
-	for (int i=0; i < pts->num_rels; i++)
+	offset += innerPreloadSetupPinnedInnerBufferPartitions(h_kmrels, pts, offset);
+	for (int depth=1; depth <= pts->num_rels; depth++)
 	{
-		pgstromTaskInnerState *istate = &pts->inners[i];
+		pgstromTaskInnerState *istate = &pts->inners[depth-1];
 		TupleDesc	tupdesc = istate->ps->ps_ResultTupleDesc;
 		uint64_t	nrooms;
 		uint64_t	usage;
 		size_t		nbytes;
 
-		nrooms = pg_atomic_read_u64(&ps_state->inners[i].inner_nitems);
-		usage  = pg_atomic_read_u64(&ps_state->inners[i].inner_usage);
+		nrooms = pg_atomic_read_u64(&ps_state->inners[depth-1].inner_nitems);
+		usage  = pg_atomic_read_u64(&ps_state->inners[depth-1].inner_usage);
 		if (nrooms >= UINT_MAX)
 			elog(ERROR, "GpuJoin: Inner Relation[%d] has %lu tuples, too large",
-				 i+1, nrooms);
+				 depth, nrooms);
 
 		if (istate->inner_pinned_buffer)
 		{
 			if (h_kmrels)
 			{
-				h_kmrels->chunks[i].pinned_buffer = true;
-				h_kmrels->chunks[i].buffer_id = istate->inner_buffer_id;
-				h_kmrels->chunks[i].dev_index = istate->inner_dev_index;
+				//TODO: buffer partitioning
+				h_kmrels->chunks[depth-1].pinned_buffer = true;
+				h_kmrels->chunks[depth-1].buffer_id = istate->inner_buffer_id;
 			}
 		}
 		else if (istate->hash_inner_keys != NIL &&
@@ -2137,7 +2233,7 @@ again:
 			if (h_kmrels)
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
-				h_kmrels->chunks[i].kds_offset = offset;
+				h_kmrels->chunks[depth-1].kds_offset = offset;
 
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
@@ -2163,7 +2259,7 @@ again:
 			if (h_kmrels)
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
-				h_kmrels->chunks[i].kds_offset = offset;
+				h_kmrels->chunks[depth-1].kds_offset = offset;
 
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
@@ -2179,7 +2275,7 @@ again:
 			if (h_kmrels)
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
-				h_kmrels->chunks[i].gist_offset = offset;
+				h_kmrels->chunks[depth-1].gist_offset = offset;
 
 				setup_kern_data_store(kds, i_tupdesc, nbytes,
 									  KDS_FORMAT_BLOCK);
@@ -2218,50 +2314,64 @@ again:
 			if (h_kmrels)
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
-				h_kmrels->chunks[i].kds_offset = offset;
+				h_kmrels->chunks[depth-1].kds_offset = offset;
 
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_ROW);
-				h_kmrels->chunks[i].is_nestloop = true;
+				h_kmrels->chunks[depth-1].is_nestloop = true;
 			}
 			offset += nbytes;
 		}
+	}
+
+	/*
+	 * Parameters for OUTER JOIN
+	 */
+	offset = PAGE_ALIGN(offset);
+	ojmap_sz = 0;
+	for (int depth=1; depth <= pts->num_rels; depth++)
+	{
+		pgstromTaskInnerState *istate = &pts->inners[depth-1];
+		uint64_t	nrooms;
+		size_t		nbytes;
 
 		if (istate->join_type == JOIN_RIGHT ||
 			istate->join_type == JOIN_FULL)
-		{
+        {
+			nrooms = pg_atomic_read_u64(&ps_state->inners[depth-1].inner_nitems);
 			nbytes = MAXALIGN(sizeof(bool) * nrooms);
 			if (h_kmrels)
 			{
-				h_kmrels->chunks[i].right_outer = true;
-				h_kmrels->chunks[i].ojmap_offset = offset;
+				h_kmrels->chunks[depth-1].right_outer = true;
+				h_kmrels->chunks[depth-1].ojmap_offset = offset;
 				memset((char *)h_kmrels + offset, 0, nbytes);
 			}
 			offset += nbytes;
+			ojmap_sz += nbytes;
 		}
 		if (istate->join_type == JOIN_LEFT ||
 			istate->join_type == JOIN_FULL)
 		{
 			if (h_kmrels)
-				h_kmrels->chunks[i].left_outer = true;
-		}
+				h_kmrels->chunks[depth-1].left_outer = true;
+        }
 	}
+	offset = PAGE_ALIGN(offset);
 
 	/*
 	 * allocation of the host inner-buffer
 	 */
 	if (!h_kmrels)
 	{
-		size_t		shmem_length = PAGE_ALIGN(offset);
-
 		Assert(ps_state->preload_shmem_handle != 0);
 		h_kmrels = __mmapShmem(ps_state->preload_shmem_handle,
-							   shmem_length, pts->ds_entry);
+							   offset, pts->ds_entry);
 		memset(h_kmrels, 0, offsetof(kern_multirels,
 									 chunks[pts->num_rels]));
 		h_kmrels->length = offset;
+		h_kmrels->ojmap_sz = PAGE_ALIGN(ojmap_sz);
 		h_kmrels->num_rels = pts->num_rels;
-		ps_state->preload_shmem_length = shmem_length;
+		ps_state->preload_shmem_length = offset;
 		goto again;
 	}
 	pts->h_kmrels = h_kmrels;
@@ -2355,6 +2465,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 {
 	pgstromTaskState   *leader = pts;
 	pgstromSharedState *ps_state;
+	kern_buffer_partitions *kbuf_parts;
 	MemoryContext		memcxt;
 
 	//pick up leader's ps_state if partitionwise plan
@@ -2397,8 +2508,8 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 					execInnerPreLoadPinnedOneDepth((pgstromTaskState *)istate->ps,
 												   &ps_state->inners[i].inner_nitems,
 												   &ps_state->inners[i].inner_usage,
-												   &pts->inners[i].inner_buffer_id,
-												   &pts->inners[i].inner_dev_index);
+												   &ps_state->inners[i].inner_total,
+												   &pts->inners[i].inner_buffer_id);
 				}
 				else
 				{
@@ -2474,11 +2585,11 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 											pts->ds_entry);
 			}
 
-			for (int i=0; i < leader->num_rels; i++)
+			for (int depth=1; depth <= leader->num_rels; depth++)
 			{
-				pgstromTaskInnerState *istate = &leader->inners[i];
+				pgstromTaskInnerState *istate = &leader->inners[depth-1];
 				inner_preload_buffer *preload_buf = istate->preload_buffer;
-				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, i);
+				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, depth);
 				uint64_t	base_nitems;
 				uint64_t	base_usage;
 
@@ -2562,8 +2673,17 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 											pts->ds_entry);
 			}
 
-			//TODO: send the shmem handle to the GPU server or DPU server
-
+			/*
+			 * Inner-buffer partitioning often requires multiple outer-scan,
+			 * if number of partitions is larger than the number of GPU devices.
+			 */
+			kbuf_parts = KERN_MULTIRELS_PARTITION_DESC(pts->h_kmrels, -1);
+			if (kbuf_parts)
+			{
+				pts->num_scan_repeats = (kbuf_parts->hash_divisor +
+										 numGpuDevAttrs - 1) / numGpuDevAttrs;
+				assert(pts->num_scan_repeats > 0);
+			}
 			break;
 
 		default:
@@ -2577,6 +2697,46 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 	Assert(pts->h_kmrels != NULL);
 
 	return ps_state->preload_shmem_handle;
+}
+
+/*
+ * GpuJoinInnerPreload
+ */
+void
+GpuJoinInnerPreloadAfterWorks(pgstromTaskState *pts)
+{
+	for (int i=0; i < pts->num_rels; i++)
+	{
+		pgstromTaskInnerState *istate = &pts->inners[i];
+
+		/*
+		 * Once inner hash/heap join buffer was built, we no longer need
+		 * the final buffer of the inner child GpuScan/GpuJoin, because
+		 * it is already reconstructed as a part of partitioned inner-buffer,
+		 * or parent GpuJoin acquired gpuQueryBuffer if zero-copy mode.
+		 *
+		 * Even though the final buffer is allocated as CUDA managed memory,
+		 * some portion still occupies device memory, and eviction consumes
+		 * unnecessary host memory and PCI-E bandwidth, so early release will
+		 * reduce host/device memory pressure.
+		 *
+		 * But here is one exception. When divisor of inner-buffer partitions
+		 * is larger than the number of GPU devices, this final buffer shall
+		 * be reused for the inner buffer reconstruction.
+		 */
+		if (istate->inner_pinned_buffer)
+		{
+			pgstromTaskState   *i_pts = (pgstromTaskState *)istate->ps;
+
+			Assert(pgstrom_is_gpuscan_state(istate->ps) ||
+				   pgstrom_is_gpujoin_state(istate->ps));
+			if (i_pts->conn)
+			{
+				xpuClientCloseSession(i_pts->conn);
+				i_pts->conn = NULL;
+			}
+		}
+	}
 }
 
 /*
@@ -2650,14 +2810,40 @@ pgstrom_init_gpu_join(void)
 							 NULL, NULL, NULL);
 	/* threshold of pinned inner buffer of GpuJoin */
 	DefineCustomIntVariable("pg_strom.pinned_inner_buffer_threshold",
-							"Threshold of the inner buffer of GpuJoin",
+							"Threshold of pinned inner buffer of GpuJoin",
 							NULL,
 							&__pinned_inner_buffer_threshold_mb,
 							0,		/* disabled */
 							0,		/* 0 means disabled */
 							INT_MAX,
-							PGC_USERSET,
+							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
+							NULL, NULL, NULL);
+	/* unit size of partitioned pinned inner buffer of GpuJoin
+	 * default: 90% of usable DRAM for high-end GPUs,
+	 *          80% of usable DRAM for middle-end GPUs.
+	 */
+	for (int i=0; i < numGpuDevAttrs; i++)
+	{
+		size_t	dram_sz = gpuDevAttrs[i].DEV_TOTAL_MEMSZ;
+		size_t	part_sz;
+
+		if (dram_sz >= (32UL<<30))
+			part_sz = ((dram_sz - (2UL<<30)) * 9 / 10) >> 20;
+		else
+			part_sz = ((dram_sz - (1UL<<30)) * 8 / 10) >> 20;
+		if (i==0 || part_sz < __pinned_inner_buffer_partition_size_mb)
+			__pinned_inner_buffer_partition_size_mb = part_sz;
+	}
+	DefineCustomIntVariable("pg_strom.pinned_inner_buffer_partition_size",
+							"Unit size of partitioned pinned inner buffer of GpuJoin",
+							NULL,
+							&__pinned_inner_buffer_partition_size_mb,
+							__pinned_inner_buffer_partition_size_mb,
+							1024,	/* 1GB */
+							INT_MAX,
+							PGC_SUSET,
+							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
 							NULL, NULL, NULL);
 	/* setup path methods */
 	memset(&gpujoin_path_methods, 0, sizeof(CustomPathMethods));

@@ -101,7 +101,7 @@ pgstrom_partial_nrows(PG_FUNCTION_ARGS)
 
 	for (i=0; i < PG_NARGS(); i++)
 	{
-		if (PG_ARGISNULL(i) || !PG_GETARG_BOOL(i))
+		if (PG_ARGISNULL(i))
 			PG_RETURN_INT64(0);
 	}
 	PG_RETURN_INT64(1);

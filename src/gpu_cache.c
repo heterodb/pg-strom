@@ -2709,7 +2709,7 @@ pgstromGpuCacheExecInit(pgstromTaskState *pts)
 	 */
 	Assert(gc_options.cuda_dindex >= 0 &&
 		   gc_options.cuda_dindex < numGpuDevAttrs);
-	pts->optimal_gpus = bms_make_singleton(gc_options.cuda_dindex);
+	pts->optimal_gpus = (1UL << gc_options.cuda_dindex);
 
 	return lookupGpuCacheDesc(rel);
 }
@@ -2721,13 +2721,15 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 {
 	Relation	rel = pts->css.ss.ss_currentRelation;
 	GpuCacheDesc *gc_desc = pts->gcache_desc;
+	uint32_t	repeat_id;
 	XpuCommand *xcmd = NULL;
 
 	if (!gc_desc)
 		elog(ERROR, "Bug? no GpuCacheDesc is assigned");
 	if (!initialLoadGpuCache(gc_desc, rel))
 		elog(ERROR, "GpuCache is now corrupted, try the query again");
-	if (pg_atomic_fetch_add_u32(pts->gcache_fetch_count, 1) == 0)
+	repeat_id = pg_atomic_fetch_add_u32(pts->gcache_fetch_count, 1);
+	if (repeat_id < pts->num_scan_repeats)
 	{
 		GpuCacheSharedState *gc_sstate = gc_desc->gc_lmap->gc_sstate;
 		uint64_t	write_pos;
@@ -2758,6 +2760,7 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 			gpuCacheInvokeApplyRedo(gc_desc, sync_pos, true);
 		}
 		xcmd = (XpuCommand *)pts->xcmd_buf.data;
+		xcmd->u.task.scan_repeat_id = repeat_id;
 		Assert(xcmd->length == pts->xcmd_buf.len);
 		xcmd_iov->iov_base = pts->xcmd_buf.data;
 		xcmd_iov->iov_len  = pts->xcmd_buf.len;
@@ -2766,7 +2769,14 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 	else
 	{
 		pts->scan_done = true;
+		return NULL;
 	}
+	/* XXX - debug message */
+	if (repeat_id > 0 && repeat_id != pts->last_repeat_id)
+		elog(NOTICE, "gpucache on '%s' moved into %dth loop for inner-buffer partitions (pid: %u)",
+			 RelationGetRelationName(rel), repeat_id+1, MyProcPid);
+	pts->last_repeat_id = repeat_id;
+
 	return xcmd;
 }
 
@@ -2862,8 +2872,8 @@ pgstromGpuCacheExplain(pgstromTaskState *pts,
 					 gpuDevAttrs[gc_options->cuda_dindex].DEV_NAME,
 					 phase,
 					 gc_options->max_num_rows,
-					 format_numeric(gpu_main_size),
-					 format_numeric(gpu_extra_size));
+					 format_bytesz(gpu_main_size),
+					 format_bytesz(gpu_extra_size));
 		}
 		else
 		{
@@ -3817,33 +3827,14 @@ __gpucacheExecDropUnload(GpuCacheControlCommand *cmd)
 void
 gpucacheManagerEventLoop(int cuda_dindex,
 						 CUcontext cuda_context,
-						 CUmodule cuda_module)
+						 CUfunction cufn_gpucache_apply_redo,
+						 CUfunction cufn_gpucache_compaction)
 {
 	pthread_mutex_t *cmd_mutex = &gcache_shared_head->gcache_cmd_mutex;
 	pthread_cond_t *cmd_cond = &gcache_shared_head->gpus[cuda_dindex].cond;
 	dlist_head	   *cmd_queue = &gcache_shared_head->gpus[cuda_dindex].queue;
-	CUfunction		f_gcache_apply_redo;
-	CUfunction		f_gcache_compaction;
-	CUresult		rc;
 	GpuCacheControlCommand *cmd;
 
-	rc = cuModuleGetFunction(&f_gcache_apply_redo,
-							 cuda_module,
-							 "kern_gpucache_apply_redo");
-	if (rc != CUDA_SUCCESS)
-	{
-		fprintf(stderr, "gpucache: unable to lookup gpucache_apply_redo\n");
-		return;
-	}
-	rc = cuModuleGetFunction(&f_gcache_compaction,
-							 cuda_module,
-							 "kern_gpucache_compaction");
-	if (rc != CUDA_SUCCESS)
-	{
-		fprintf(stderr, "gpucache: unable to lookup gpucache_compaction\n");
-		return;
-	}
-	
 	pthreadMutexLock(cmd_mutex);
 	while (!gpuServiceGoingTerminate())
 	{
@@ -3868,11 +3859,12 @@ gpucacheManagerEventLoop(int cuda_dindex,
 		{
 			case GCACHE_CONTROL_CMD__APPLY_REDO:
 				status = __gpucacheExecApplyRedo(cmd,
-												 f_gcache_apply_redo,
-												 f_gcache_compaction);
+												 cufn_gpucache_apply_redo,
+												 cufn_gpucache_compaction);
 				break;
 			case GCACHE_CONTROL_CMD__COMPACTION:
-				status = __gpucacheExecCompaction(cmd, f_gcache_compaction);
+				status = __gpucacheExecCompaction(cmd,
+												  cufn_gpucache_compaction);
 				break;
 			case GCACHE_CONTROL_CMD__DROP_UNLOAD:
 				status = __gpucacheExecDropUnload(cmd);

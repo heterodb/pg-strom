@@ -132,8 +132,6 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 {
 	RangeTblEntry  *rte = root->simple_rte_array[baserel->relid];
 	pgstromPlanInfo *pp_info;
-	int				gpu_cache_dindex = -1;
-	const Bitmapset *gpu_direct_devs = NULL;
 	const DpuStorageEntry *ds_entry = NULL;
 	Bitmapset	   *outer_refs = NULL;
 	IndexOptInfo   *indexOpt = NULL;
@@ -190,17 +188,23 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 		xpu_ratio = pgstrom_gpu_operator_ratio();
 		xpu_tuple_cost = pgstrom_gpu_tuple_cost;
 		startup_cost += pgstrom_gpu_setup_cost;
-		/* Is GPU-Cache available? */
-		gpu_cache_dindex = baseRelHasGpuCache(root, baserel);
-		/* Is GPU-Direct SQL available? */
-		gpu_direct_devs = GetOptimalGpuForBaseRel(root, baserel);
-		if (gpu_cache_dindex >= 0)
+
+		if (baseRelHasGpuCache(root, baserel) >= 0)
+		{
+			/* assume GPU-Cache is available */
 			avg_seq_page_cost = 0;
-		else if (gpu_direct_devs)
+		}
+		else if (GetOptimalGpuForBaseRel(root, baserel) != 0UL)
+		{
+			/* assume GPU-Direct SQL is available */
 			avg_seq_page_cost = spc_seq_page_cost * (1.0 - baserel->allvisfrac) +
 				pgstrom_gpu_direct_seq_page_cost * baserel->allvisfrac;
+		}
 		else
+		{
+			/* elsewhere, use PostgreSQL's storage layer */
 			avg_seq_page_cost = spc_seq_page_cost;
+		}
 	}
 	else if ((xpu_task_flags & DEVKIND__ANY) == DEVKIND__NVIDIA_DPU)
 	{
@@ -303,8 +307,6 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 	/* Setup the result */
 	pp_info = palloc0(sizeof(pgstromPlanInfo));
 	pp_info->xpu_task_flags = xpu_task_flags;
-	pp_info->gpu_cache_dindex = gpu_cache_dindex;
-	pp_info->gpu_direct_devs = gpu_direct_devs;
 	pp_info->ds_entry = ds_entry;
 	pp_info->scan_relid = baserel->relid;
 	pp_info->host_quals = extract_actual_clauses(host_quals, false);
@@ -515,7 +517,6 @@ __try_add_partitioned_scan_path(PlannerInfo *root,
 								bool be_parallel)
 {
 	List   *results = NIL;
-	List   *temp;
 
 	for (int k=0; k < baserel->nparts; k++)
 	{
@@ -524,18 +525,7 @@ __try_add_partitioned_scan_path(PlannerInfo *root,
 			RelOptInfo *leaf_rel = baserel->part_rels[k];
 			RangeTblEntry *rte = root->simple_rte_array[leaf_rel->relid];
 
-			if (rte->inh &&
-				rte->relkind == RELKIND_PARTITIONED_TABLE)
-			{
-				temp = __try_add_partitioned_scan_path(root,
-													   leaf_rel,
-													   xpu_task_flags,
-													   be_parallel);
-				if (temp == NIL)
-					return NIL;
-				results = list_concat(results, temp);
-			}
-			else
+			if (!rte->inh)
 			{
 				pgstromOuterPathLeafInfo *op_leaf;
 
@@ -549,6 +539,18 @@ __try_add_partitioned_scan_path(PlannerInfo *root,
 				if (op_leaf->pp_info->host_quals != NIL)
 					return NIL;
 				results = lappend(results, op_leaf);
+			}
+			else if (rte->relkind == RELKIND_PARTITIONED_TABLE)
+			{
+				List   *temp;
+
+				temp = __try_add_partitioned_scan_path(root,
+													   leaf_rel,
+													   xpu_task_flags,
+													   be_parallel);
+				if (temp == NIL)
+					return NIL;
+				results = list_concat(results, temp);
 			}
 		}
 	}
@@ -586,15 +588,7 @@ __xpuScanAddScanPathCommon(PlannerInfo *root,
 	/* Creation of GpuScan path */
 	for (int try_parallel=0; try_parallel < 2; try_parallel++)
 	{
-		if (rte->inh &&
-			rte->relkind == RELKIND_PARTITIONED_TABLE)
-		{
-			try_add_partitioned_scan_path(root,
-										  baserel,
-										  xpu_task_flags,
-										  (try_parallel > 0));
-		}
-		else
+		if (!rte->inh)
 		{
 			try_add_simple_scan_path(root,
 									 baserel,
@@ -604,6 +598,13 @@ __xpuScanAddScanPathCommon(PlannerInfo *root,
 									 true,	/* allow host quals */
 									 false,	/* disallow no device quals*/
 									 xpuscan_path_methods);
+		}
+		else if (rte->relkind == RELKIND_PARTITIONED_TABLE)
+		{
+			try_add_partitioned_scan_path(root,
+										  baserel,
+										  xpu_task_flags,
+										  (try_parallel > 0));
 		}
 		if (!baserel->consider_parallel)
 			break;
@@ -842,10 +843,10 @@ assign_custom_cscan_tlist(List *tlist_dev, pgstromPlanInfo *pp_info)
 
 			if (kvdef->kv_depth >= 0 &&
 				kvdef->kv_depth <= pp_info->num_rels &&
-				kvdef->kv_resno >  0 &&
+				kvdef->kv_resno != InvalidAttrNumber &&
 				equal(tle->expr, kvdef->kv_expr))
 			{
-				kvdef->kv_fallback = tle->resno - 1;
+				kvdef->kv_fallback = tle->resno;
 				tle->resorigtbl = (Oid)kvdef->kv_depth;
 				tle->resorigcol = kvdef->kv_resno;
 				break;
@@ -881,7 +882,8 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	pp_info->kexp_scan_quals = codegen_build_scan_quals(context, pp_info->scan_quals);
 	/* code generation for the Projection */
 	context->tlist_dev = gpuscan_build_projection(baserel, pp_info, tlist);
-	pp_info->kexp_projection = codegen_build_projection(context, proj_hash);
+	pp_info->kexp_projection = codegen_build_projection(context,
+														proj_hash);
 	/* VarLoads for each depth */
 	codegen_build_packed_kvars_load(context, pp_info);
 	/* VarMoves for each depth (only GPUs) */

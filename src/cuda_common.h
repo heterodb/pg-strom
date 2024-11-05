@@ -135,6 +135,11 @@ typedef struct {
 	uint32_t		n_rels;			/* >0, if JOIN is involved */
 	uint32_t		groupby_prepfn_bufsz;
 	uint32_t		groupby_prepfn_nbufs;
+	/* GPU-task specific read-only properties. */
+	uint32_t		cuda_dindex;
+	uint32_t		cuda_stack_limit;
+	int32_t			partition_divisor;
+	int32_t			partition_reminder;
 	/* suspend/resume support */
 	bool			resume_context;
 	uint32_t		suspend_count;
