@@ -36,6 +36,7 @@ typedef struct
 typedef struct RecordBatchFieldState
 {
 	/* common fields with cache */
+	char		attname[NAMEDATALEN];
 	Oid			atttypid;
 	int			atttypmod;
 	ArrowTypeOptions attopts;
@@ -65,12 +66,26 @@ typedef struct RecordBatchState
 	RecordBatchFieldState fields[FLEXIBLE_ARRAY_MEMBER];
 } RecordBatchState;
 
+typedef struct virtualColumnDef
+{
+	char		kind;
+	char	   *key;
+	char	   *value;
+	char		buf[FLEXIBLE_ARRAY_MEMBER];
+} virtualColumnDef;
+
 typedef struct ArrowFileState
 {
 	const char *filename;
 	const char *dpu_path;	/* relative pathname, if DPU */
 	struct stat	stat_buf;
 	List	   *rb_list;	/* list of RecordBatchState */
+	uint32_t	ncols;
+	struct {
+		int		field_index;		/* PG-column <-> Arrow-field mapping */
+		bool	virtual_isnull;		/* virtual isnull, if any */
+		Datum	virtual_datum;		/* virtual datum, if any */
+	} attrs[FLEXIBLE_ARRAY_MEMBER];
 } ArrowFileState;
 
 /*
@@ -127,6 +142,7 @@ struct arrowMetadataFieldCache
 	arrowMetadataCacheBlock *owner;
 	dlist_node	chain;				/* link to free/fields[children] list */
 	/* common fields with cache */
+	char		attname[NAMEDATALEN];
 	Oid			atttypid;
 	int			atttypmod;
 	ArrowTypeOptions attopts;
@@ -850,7 +866,7 @@ buildArrowStatsBinary(const ArrowFooter *footer, Bitmapset **p_stat_attrs)
 										 footer->_num_recordBatches))
 		{
 			if (p_stat_attrs)
-				*p_stat_attrs = bms_add_member(*p_stat_attrs, j+1);
+				*p_stat_attrs = bms_add_member(*p_stat_attrs, j);
 			found = true;
 		}
 	}
@@ -923,7 +939,7 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	Oid			opfamily = InvalidOid;
 	StrategyNumber strategy = InvalidStrategy;
 	CatCList   *catlist;
-	int			i;
+	int			i, anum;
 
 	if (!reverse)
 	{
@@ -948,7 +964,8 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 		return false;
 	if (var->varnosyn != scan->scanrelid)
 		return false;
-	if (!bms_is_member(var->varattnosyn, as_hint->stat_attrs))
+	anum = var->varattnosyn - FirstLowInvalidHeapAttributeNumber;
+	if (!bms_is_member(anum, as_hint->stat_attrs))
 		return false;
 	if (contain_var_clause(arg) ||
 		contain_volatile_functions(arg))
@@ -1038,7 +1055,7 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 
 		opcode = get_opfamily_member(opfamily, var->vartype,
 									 exprType((Node *)arg),
-									 BTLessEqualStrategyNumber);
+									 BTLessStrategyNumber);
 		expr = make_opclause(opcode,
 							 op->opresulttype,
 							 op->opretset,
@@ -1108,6 +1125,7 @@ static bool
 execCheckArrowStatsHint(arrowStatsHint *stats_hint,
 						RecordBatchState *rb_state)
 {
+	ArrowFileState *af_state = rb_state->af_state;
 	ExprContext	   *econtext = stats_hint->econtext;
 	TupleTableSlot *min_values = econtext->ecxt_innertuple;
 	TupleTableSlot *max_values = econtext->ecxt_outertuple;
@@ -1122,24 +1140,44 @@ execCheckArrowStatsHint(arrowStatsHint *stats_hint,
 		 anum >= 0;
 		 anum = bms_next_member(stats_hint->load_attrs, anum))
 	{
-		RecordBatchFieldState *rb_field = &rb_state->fields[anum-1];
+		int		field_index;
 
-		Assert(anum > 0 && anum <= rb_state->nfields);
-		if (!rb_field->stat_datum.isnull)
+		Assert(anum > 0 && anum <= af_state->ncols);
+		field_index = af_state->attrs[anum-1].field_index;
+		if (field_index < 0)
 		{
-			min_values->tts_isnull[anum-1] = false;
-			max_values->tts_isnull[anum-1] = false;
-			if (rb_field->atttypid == NUMERICOID)
+			bool	virtual_isnull = af_state->attrs[anum-1].virtual_isnull;
+			Datum	virtual_datum  = af_state->attrs[anum-1].virtual_datum;
+
+			min_values->tts_isnull[anum-1] = virtual_isnull;
+			max_values->tts_isnull[anum-1] = virtual_isnull;
+			if (!virtual_isnull)
 			{
-				min_values->tts_values[anum-1]
-					= PointerGetDatum(&rb_field->stat_datum.min.numeric);
-				max_values->tts_values[anum-1]
-					= PointerGetDatum(&rb_field->stat_datum.max.numeric);
+				min_values->tts_values[anum-1] = virtual_datum;
+				max_values->tts_values[anum-1] = virtual_datum;
 			}
-			else
+		}
+		else
+		{
+			RecordBatchFieldState *rb_field = &rb_state->fields[field_index];
+
+			Assert(field_index < rb_state->nfields);
+			if (!rb_field->stat_datum.isnull)
 			{
-				min_values->tts_values[anum-1] = rb_field->stat_datum.min.datum;
-				max_values->tts_values[anum-1] = rb_field->stat_datum.max.datum;
+				min_values->tts_isnull[anum-1] = false;
+				max_values->tts_isnull[anum-1] = false;
+				if (rb_field->atttypid == NUMERICOID)
+				{
+					min_values->tts_values[anum-1]
+						= PointerGetDatum(&rb_field->stat_datum.min.numeric);
+					max_values->tts_values[anum-1]
+						= PointerGetDatum(&rb_field->stat_datum.max.numeric);
+				}
+				else
+				{
+					min_values->tts_values[anum-1] = rb_field->stat_datum.min.datum;
+					max_values->tts_values[anum-1] = rb_field->stat_datum.max.datum;
+				}
 			}
 		}
 	}
@@ -1176,6 +1214,7 @@ static void
 __buildRecordBatchFieldStateByCache(RecordBatchFieldState *rb_field,
 									arrowMetadataFieldCache *fcache)
 {
+	strcpy(rb_field->attname, fcache->attname);
 	rb_field->atttypid       = fcache->atttypid;
 	rb_field->atttypmod      = fcache->atttypmod;
 	rb_field->attopts        = fcache->attopts;
@@ -1212,15 +1251,18 @@ __buildRecordBatchFieldStateByCache(RecordBatchFieldState *rb_field,
 }
 
 static ArrowFileState *
-__buildArrowFileStateByCache(const char *filename,
+__buildArrowFileStateByCache(Relation frel,
+							 const char *filename,
 							 arrowMetadataCache *mcache,
 							 Bitmapset **p_stat_attrs)
 {
-	ArrowFileState	   *af_state;
+	int		ncols = RelationGetNumberOfAttributes(frel);
+	ArrowFileState *af_state;
 
-	af_state = palloc0(sizeof(ArrowFileState));
+	af_state = palloc0(offsetof(ArrowFileState, attrs[ncols]));
 	af_state->filename = pstrdup(filename);
 	memcpy(&af_state->stat_buf, &mcache->stat_buf, sizeof(struct stat));
+	af_state->ncols = ncols;
 
 	while (mcache)
 	{
@@ -1242,7 +1284,7 @@ __buildArrowFileStateByCache(const char *filename,
 
 			fcache = dlist_container(arrowMetadataFieldCache, chain, iter.cur);
 			if (p_stat_attrs && !fcache->stat_datum.isnull)
-				*p_stat_attrs = bms_add_member(*p_stat_attrs, j+1);
+				*p_stat_attrs = bms_add_member(*p_stat_attrs, j);
 			__buildRecordBatchFieldStateByCache(&rb_state->fields[j++], fcache);
 		}
 		Assert(j == rb_state->nfields);
@@ -1629,6 +1671,8 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 	if (con->fnode_curr >= con->fnode_tail)
 		elog(ERROR, "RecordBatch has less ArrowFieldNode than expected");
 	fnode = con->fnode_curr++;
+	strncpy(rb_field->attname, field->name, NAMEDATALEN);
+	rb_field->attname[NAMEDATALEN-1] = '\0';
 	rb_field->atttypid    = InvalidOid;
 	rb_field->atttypmod   = -1;
 	rb_field->nitems      = fnode->length;
@@ -1801,8 +1845,11 @@ readArrowFile(const char *filename, ArrowFileInfo *af_info, bool missing_ok)
 }
 
 static ArrowFileState *
-__buildArrowFileStateByFile(const char *filename, Bitmapset **p_stat_attrs)
+__buildArrowFileStateByFile(Relation frel,
+							const char *filename,
+							Bitmapset **p_stat_attrs)
 {
+	int		ncols = RelationGetNumberOfAttributes(frel);
 	ArrowFileInfo af_info;
 	ArrowFileState *af_state;
 	arrowStatsBinary *arrow_bstats;
@@ -1818,9 +1865,10 @@ __buildArrowFileStateByFile(const char *filename, Bitmapset **p_stat_attrs)
 		return NULL;
 	}
 	/* allocate ArrowFileState */
-	af_state = palloc0(sizeof(ArrowFileInfo));
+	af_state = palloc0(offsetof(ArrowFileState, attrs[ncols]));
 	af_state->filename = pstrdup(filename);
 	memcpy(&af_state->stat_buf, &af_info.stat_buf, sizeof(struct stat));
+	af_state->ncols = ncols;
 
 	arrow_bstats = buildArrowStatsBinary(&af_info.footer, p_stat_attrs);
 	for (int i=0; i < af_info.footer._num_recordBatches; i++)
@@ -1840,7 +1888,6 @@ __buildArrowFileStateByFile(const char *filename, Bitmapset **p_stat_attrs)
 	return af_state;
 }
 
-
 static arrowMetadataFieldCache *
 __buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field)
 {
@@ -1849,6 +1896,7 @@ __buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field)
 	fcache = __allocMetadataFieldCache();
 	if (!fcache)
 		return NULL;
+	strcpy(fcache->attname, rb_field->attname);
 	fcache->atttypid = rb_field->atttypid;
 	fcache->atttypmod = rb_field->atttypmod;
 	memcpy(&fcache->attopts, &rb_field->attopts, sizeof(ArrowTypeOptions));
@@ -1942,13 +1990,19 @@ __buildArrowMetadataCacheNoLock(ArrowFileState *af_state)
 }
 
 static ArrowFileState *
-BuildArrowFileState(Relation frel, const char *filename, Bitmapset **p_stat_attrs)
+BuildArrowFileState(Relation frel,
+					const char *filename,
+					List *virtual_columns,
+					Bitmapset **p_stat_pg_attrs)
 {
+	Oid				frelid = RelationGetRelid(frel);
+	TupleDesc		tupdesc = RelationGetDescr(frel);
 	arrowMetadataCache *mcache;
 	ArrowFileState *af_state;
 	RecordBatchState *rb_state;
+	Bitmapset	   *stat_arrow_attrs = NULL;
+	Bitmapset	   *stat_pg_attrs = NULL;
 	struct stat		stat_buf;
-	TupleDesc		tupdesc;
 
 	if (stat(filename, &stat_buf) != 0)
 		elog(ERROR, "failed on stat('%s'): %m", filename);
@@ -1957,15 +2011,19 @@ BuildArrowFileState(Relation frel, const char *filename, Bitmapset **p_stat_attr
 	if (mcache)
 	{
 		/* found a valid metadata-cache */
-		af_state = __buildArrowFileStateByCache(filename, mcache,
-												p_stat_attrs);
+		af_state = __buildArrowFileStateByCache(frel,
+												filename,
+												mcache,
+												&stat_arrow_attrs);
 	}
 	else
 	{
 		LWLockRelease(&arrow_metadata_cache->mutex);
 
 		/* here is no valid metadata-cache, so build it from the raw file */
-		af_state = __buildArrowFileStateByFile(filename, p_stat_attrs);
+		af_state = __buildArrowFileStateByFile(frel,
+											   filename,
+											   &stat_arrow_attrs);
 		if (!af_state)
 			return NULL;	/* file not found? */
 
@@ -1976,45 +2034,164 @@ BuildArrowFileState(Relation frel, const char *filename, Bitmapset **p_stat_attr
 	}
 	LWLockRelease(&arrow_metadata_cache->mutex);
 
-	/* compatibility checks */
+	/*
+	 * Maps PG-attribute on a particular Arrow-field, or virtual-column
+	 * according to the column option
+	 */
 	rb_state = linitial(af_state->rb_list);
-	tupdesc = RelationGetDescr(frel);
-	if (tupdesc->natts != rb_state->nfields)
-		elog(ERROR, "arrow_fdw: foreign table '%s' is not compatible to '%s'",
-			 RelationGetRelationName(frel), filename);
+	Assert(af_state->ncols == tupdesc->natts);
 	for (int j=0; j < tupdesc->natts; j++)
 	{
-		Form_pg_attribute	attr = TupleDescAttr(tupdesc, j);
-		RecordBatchFieldState *rb_field = &rb_state->fields[j];
-		bool		compatible = false;
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
+		List	   *options = GetForeignColumnOptions(frelid, attr->attnum);
+		const char *field_name = NULL;
+		const char *virtual_key = NULL;
+		ListCell   *lc1, *lc2;
 
-		if (attr->atttypid == rb_field->atttypid)
-			compatible = true;
-		else
+		if (attr->attisdropped)
 		{
-			/* check for binary compatible data types */
-			HeapTuple	htup;
+			af_state->attrs[j].field_index = -1;
+			continue;
+		}
 
-			htup = SearchSysCache2(CASTSOURCETARGET,
-								   ObjectIdGetDatum(rb_field->atttypid),
-								   ObjectIdGetDatum(attr->atttypid));
-			if (HeapTupleIsValid(htup))
+		/* check column options */
+		foreach (lc1, options)
+		{
+			DefElem *defel = lfirst(lc1);
+
+			if (strcmp(defel->defname, "field") == 0)
 			{
-				Form_pg_cast cast = (Form_pg_cast) GETSTRUCT(htup);
-
-				if (cast->castmethod == COERCION_METHOD_BINARY)
-					compatible = true;
-				ReleaseSysCache(htup);
+				if (virtual_key)
+					elog(ERROR, "arrow_fdw: 'field' and 'virtual' must not be used together in '%s' of '%s'",
+						 NameStr(attr->attname),
+						 RelationGetRelationName(frel));
+				Assert(IsA(defel->arg, String));
+				field_name = strVal(defel->arg);
+			}
+			else if (strcmp(defel->defname, "virtual") == 0)
+			{
+				if (field_name)
+					elog(ERROR, "arrow_fdw: 'field' and 'virtual' must not be used together in '%s' of '%s'",
+						 NameStr(attr->attname),
+						 RelationGetRelationName(frel));
+				Assert(IsA(defel->arg, String));
+				virtual_key = strVal(defel->arg);
+			}
+			else
+			{
+				elog(ERROR, "unknown foreign table options in '%s' of '%s'",
+					 NameStr(attr->attname),
+					 RelationGetRelationName(frel));
 			}
 		}
-		if (!compatible)
-			elog(ERROR, "arrow_fdw: foreign table '%s' column '%s' (%s) is not compatible to the arrow field (%s) in the '%s'",
-				 RelationGetRelationName(frel),
-				 NameStr(attr->attname),
-				 format_type_be(attr->atttypid),
-				 format_type_be(rb_field->atttypid),
-				 filename);
+
+		if (virtual_key)
+		{
+			Datum	datum;
+			bool	found = false;
+
+			Assert(!field_name);
+			foreach (lc2, virtual_columns)
+			{
+				virtualColumnDef *vcdef = lfirst(lc2);
+
+				if (strcmp(vcdef->key, virtual_key) == 0)
+				{
+					MemoryContext oldcxt = CurrentMemoryContext;
+					Oid		type_input;
+					Oid		type_ioparam;
+
+					getTypeInputInfo(attr->atttypid,
+									 &type_input,
+									 &type_ioparam);
+					PG_TRY();
+					{
+						datum = OidInputFunctionCall(type_input,
+													 vcdef->value,
+													 type_ioparam,
+													 attr->atttypmod);
+					}
+					PG_CATCH();
+					{
+						MemoryContext errcxt = MemoryContextSwitchTo(oldcxt);
+						ErrorData  *edata = CopyErrorData();
+
+						ereport(Max(ERROR, edata->elevel),
+								errmsg("(%s:%d) %s",
+									   edata->filename,
+									   edata->lineno,
+									   edata->message),
+								errdetail("arrow_fdw: processing virtual column '%s' of the file '%s' at the attribute '%s' of foreign table '%s'",
+										  vcdef->key, filename,
+										  NameStr(attr->attname),
+										  RelationGetRelationName(frel)));
+						MemoryContextSwitchTo(errcxt);
+					}
+					PG_END_TRY();
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				elog(ERROR, "arrow_fdw: virtual column '%s' key '%s' not found",
+					 NameStr(attr->attname),
+					 virtual_key);
+			af_state->attrs[j].field_index = -1;
+			af_state->attrs[j].virtual_isnull = false;
+			af_state->attrs[j].virtual_datum = datum;
+			/*
+			 * The virtual value is immutable to a particular record-batch,
+			 * so we can consider it also works as min/max statistics to skip
+			 * obviously unmatched record-batches.
+			 */
+			stat_pg_attrs = bms_add_member(stat_pg_attrs, attr->attnum -
+										   FirstLowInvalidHeapAttributeNumber);
+		}
+		else
+		{
+			int		field_index = -1;
+
+			if (!field_name)
+				field_name = NameStr(attr->attname);
+			for (int k=0; k < rb_state->nfields; k++)
+			{
+				RecordBatchFieldState *field = &rb_state->fields[k];
+
+				if (strcmp(field->attname, field_name) == 0)
+				{
+					/* also checks data type compatibility */
+					if (IsBinaryCoercible(field->atttypid,
+										  attr->atttypid))
+					{
+						field_index = k;
+						break;
+					}
+					elog(ERROR, "arrow_fdw: foreign table '%s' of '%s' is not compatible to '%s' of '%s'",
+						 NameStr(attr->attname),
+						 RelationGetRelationName(frel),
+						 field->attname,
+						 filename);
+				}
+			}
+			if (field_index < 0)
+				elog(ERROR, "arrow_fdw: foreign table '%s' of '%s' could not find out the field on '%s' to be mapped on",
+					 NameStr(attr->attname),
+					 RelationGetRelationName(frel),
+					 filename);
+			af_state->attrs[j].field_index = field_index;
+			af_state->attrs[j].virtual_isnull = true;
+			af_state->attrs[j].virtual_datum = 0;
+
+			if (bms_is_member(field_index, stat_arrow_attrs))
+				stat_pg_attrs = bms_add_member(stat_pg_attrs, attr->attnum -
+											   FirstLowInvalidHeapAttributeNumber);
+		}
 	}
+	bms_free(stat_arrow_attrs);
+	if (p_stat_pg_attrs)
+		*p_stat_pg_attrs = stat_pg_attrs;
+	else
+		bms_free(stat_pg_attrs);
 	return af_state;
 }
 
@@ -2119,7 +2296,7 @@ GetOptimalDpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 static List *
 arrowFdwExcludeFileNamesByPattern(List *filesList,
 								  const char *pattern,
-								  List **p_filesAttrsList)
+								  List **p_virtAttrsList)
 {
 	List	   *results = NIL;	/* only valid files */
 	List	   *attrsList = NIL;
@@ -2128,46 +2305,45 @@ arrowFdwExcludeFileNamesByPattern(List *filesList,
 	foreach (lc, filesList)
 	{
 		String *path = lfirst(lc);
+		List   *attrKinds = NIL;
 		List   *attrKeys = NIL;
 		List   *attrValues = NIL;
 
 		if (pathNameMatchByPattern(strVal(path),
 								   pattern,
+								   &attrKinds,
 								   &attrKeys,
 								   &attrValues))
 		{
-			if (p_filesAttrsList)
+			if (p_virtAttrsList)
 			{
-				ListCell   *lc1, *lc2;
-				List	   *kv_list = NIL;
+				List	   *vcdef_list = NIL;
+				ListCell   *lc1, *lc2, *lc3;
 
-				forboth (lc1, attrKeys,
-						 lc2, attrValues)
+				forthree (lc1, attrKinds,
+						  lc2, attrKeys,
+						  lc3, attrValues)
 				{
-					const char *key   = lfirst(lc1);
-					const char *value = lfirst(lc2);
-					int			key_len = strlen(key);
-					int			value_len = strlen(value);
+					int			kind  = lfirst_int(lc1);
+					const char *key   = lfirst(lc2);
+					const char *value = lfirst(lc3);
 					char	   *pos;
-					ArrowKeyValue *kv;
+					virtualColumnDef *vcdef;
 
-					kv = palloc(MAXALIGN(sizeof(ArrowKeyValue)) +
-								MAXALIGN(key_len+1) +
-								MAXALIGN(value_len+1));
-					__initArrowNode(&kv->node, ArrowNodeTag__KeyValue);
-					pos = ((char *)kv + MAXALIGN(sizeof(ArrowKeyValue)));
+					vcdef = palloc(offsetof(virtualColumnDef, buf) +
+								   strlen(key) + strlen(value) + 2);
+					vcdef->kind = kind;
+					pos = vcdef->buf;
 					strcpy(pos, key);
-					kv->key = pos;
-					kv->_key_len = key_len;
+					vcdef->key = pos;
 
-					pos += MAXALIGN(key_len+1);
+					pos += strlen(key) + 1;
 					strcpy(pos, value);
-					kv->value = pos;
-					kv->_value_len = value_len;
+					vcdef->value = pos;
 
-					kv_list = lappend(kv_list, kv);
+					vcdef_list = lappend(vcdef_list, vcdef);
 				}
-				attrsList = lappend(attrsList, kv_list);
+				attrsList = lappend(attrsList, vcdef_list);
 			}
 			results = lappend(results, path);
 
@@ -2175,10 +2351,10 @@ arrowFdwExcludeFileNamesByPattern(List *filesList,
 			list_free_deep(attrValues);
 		}
 	}
-	if (p_filesAttrsList)
+	if (p_virtAttrsList)
 	{
 		Assert(list_length(results) == list_length(attrsList));
-		*p_filesAttrsList = attrsList;
+		*p_virtAttrsList = attrsList;
 	}
 	return results;
 }
@@ -2188,7 +2364,7 @@ arrowFdwExcludeFileNamesByPattern(List *filesList,
  */
 static List *
 arrowFdwExtractFilesList(List *options_list,
-						 List **p_filesAttrList,
+						 List **p_virtAttrsList,
 						 int *p_parallel_nworkers)
 {
 	List	   *filesList = NIL;
@@ -2290,16 +2466,16 @@ arrowFdwExtractFilesList(List *options_list,
 	if (pattern)
 	{
 		filesList = arrowFdwExcludeFileNamesByPattern(filesList, pattern,
-													  p_filesAttrList);
+													  p_virtAttrsList);
 	}
-	else if (p_filesAttrList)
+	else if (p_virtAttrsList)
 	{
 		/* add empty file attributes list for forboth() macro */
-		List   *filesAttrList = NIL;
+		List   *virtAttrsList = NIL;
 
 		foreach (lc, filesList)
-			filesAttrList = lappend(filesAttrList, NULL);
-		*p_filesAttrList = filesAttrList;
+			virtAttrsList = lappend(virtAttrsList, NULL);
+		*p_virtAttrsList = virtAttrsList;
 	}
 	if (p_parallel_nworkers)
 		*p_parallel_nworkers = parallel_nworkers;
@@ -2472,30 +2648,43 @@ arrowFdwSetupIOvector(RecordBatchState *rb_state,
 					  Bitmapset *referenced,
 					  kern_data_store *kds)
 {
+	ArrowFileState *af_state = rb_state->af_state;
 	arrowFdwSetupIOContext *con;
 	strom_io_vector *iovec;
 	unsigned int	nr_chunks = 0;
 
 	Assert(kds->format == KDS_FORMAT_ARROW &&
-		   kds->ncols <= kds->nr_colmeta &&
-		   kds->ncols == rb_state->nfields);
+		   kds->ncols <= kds->nr_colmeta);
 	con = alloca(offsetof(arrowFdwSetupIOContext,
 						  ioc[3 * kds->nr_colmeta]));
 	con->rb_offset = rb_state->rb_offset;
 	con->f_offset  = ~0UL;	/* invalid offset */
 	con->m_offset  = 0;
-	con->kds_head_sz = KDS_HEAD_LENGTH(kds);
+	con->kds_head_sz = KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
 	con->depth = 0;
 	con->io_index = -1;		/* invalid index */
 	for (int j=0; j < kds->ncols; j++)
 	{
-		RecordBatchFieldState *rb_field = &rb_state->fields[j];
 		kern_colmeta *cmeta = &kds->colmeta[j];
 		int			attidx = j + 1 - FirstLowInvalidHeapAttributeNumber;
 
 		if (bms_is_member(attidx, referenced) ||
 			bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
-			arrowFdwSetupIOvectorField(con, rb_field, kds, cmeta);
+		{
+			int		field_index = af_state->attrs[j].field_index;
+
+			if (field_index < 0)
+			{
+				/* !!!virtual column!!! */
+				Assert(cmeta->virtual_offset != 0);
+			}
+			else
+			{
+				RecordBatchFieldState *rb_field = &rb_state->fields[field_index];
+
+				arrowFdwSetupIOvectorField(con, rb_field, kds, cmeta);
+			}
+		}
 		else
 			cmeta->atttypkind = TYPE_KIND__NULL;	/* unreferenced */
 	}
@@ -2585,30 +2774,96 @@ __arrowKdsAssignAttrOptions(kern_data_store *kds,
 	}
 }
 
+static void
+__arrowKdsAssignVirtualColumns(kern_data_store *kds,
+							   kern_colmeta *cmeta,
+							   bool virtual_isnull,
+							   Datum virtual_datum,
+							   StringInfo chunk_buffer)
+{
+	if (virtual_isnull)
+	{
+		cmeta->virtual_offset = -1;
+	}
+	else
+	{
+		Assert(chunk_buffer->len == MAXALIGN(chunk_buffer->len));
+		cmeta->virtual_offset = (chunk_buffer->data +
+								 chunk_buffer->len - (char *)kds);
+		if (cmeta->attbyval)
+		{
+			appendBinaryStringInfo(chunk_buffer,
+								   (char *)&virtual_datum,
+								   cmeta->attlen);
+		}
+		else if (cmeta->attlen > 0)
+		{
+			appendBinaryStringInfo(chunk_buffer,
+								   DatumGetPointer(virtual_datum),
+								   cmeta->attlen);
+		}
+		else if (cmeta->attlen == -1)
+		{
+			appendBinaryStringInfo(chunk_buffer,
+								   DatumGetPointer(virtual_datum),
+								   VARSIZE_ANY(virtual_datum));
+		}
+		else
+		{
+			elog(ERROR, "unknown type length: %d", cmeta->attlen);
+		}
+		__appendZeroStringInfo(chunk_buffer, 0);
+	}
+}
+
 static strom_io_vector *
 arrowFdwLoadRecordBatch(Relation relation,
 						Bitmapset *referenced,
 						RecordBatchState *rb_state,
 						StringInfo chunk_buffer)
 {
+	ArrowFileState *af_state = rb_state->af_state;
 	TupleDesc	tupdesc = RelationGetDescr(relation);
-	size_t		head_sz = estimate_kern_data_store(tupdesc);
+	size_t		head_off = chunk_buffer->len;
 	kern_data_store *kds;
 
 	/* setup KDS and I/O-vector */
-	enlargeStringInfo(chunk_buffer, head_sz);
-	kds = (kern_data_store *)(chunk_buffer->data +
-							  chunk_buffer->len);
+	enlargeStringInfo(chunk_buffer, estimate_kern_data_store(tupdesc));
+	kds = (kern_data_store *)(chunk_buffer->data + head_off);
 	setup_kern_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW);
 	kds->nitems = rb_state->rb_nitems;
 	kds->table_oid = RelationGetRelid(relation);
-	Assert(kds->ncols == rb_state->nfields);
-	for (int j=0; j < kds->ncols; j++)
-		__arrowKdsAssignAttrOptions(kds,
-									&kds->colmeta[j],
-									&rb_state->fields[j]);
-	chunk_buffer->len += head_sz;
+	chunk_buffer->len += KDS_HEAD_LENGTH(kds);
 
+	Assert(kds->ncols == af_state->ncols);
+	for (int j=0; j < kds->ncols; j++)
+	{
+		int		field_index = af_state->attrs[j].field_index;
+
+		if (field_index < 0)
+		{
+			__arrowKdsAssignVirtualColumns(kds,
+										   &kds->colmeta[j],
+										   af_state->attrs[j].virtual_isnull,
+										   af_state->attrs[j].virtual_datum,
+										   chunk_buffer);
+			/*
+			 * 'chunk_buffer' may be expanded during assignment of virtual
+			 * columns, because repalloc() may change the base address,
+			 * so kds must be refreshed.
+			 */
+			kds = (kern_data_store *)(chunk_buffer->data + head_off);
+		}
+		else
+		{
+			Assert(field_index < rb_state->nfields);
+			__arrowKdsAssignAttrOptions(kds,
+										&kds->colmeta[j],
+										&rb_state->fields[field_index]);
+		}
+	}
+	kds->arrow_virtual_usage = (chunk_buffer->len
+								- (head_off + KDS_HEAD_LENGTH(kds)));
 	return arrowFdwSetupIOvector(rb_state, referenced, kds);
 }
 
@@ -2633,7 +2888,7 @@ arrowFdwFillupRecordBatch(Relation relation,
 	enlargeStringInfo(chunk_buffer, kds->length);
 	kds = (kern_data_store *)chunk_buffer->data;
 	filp = PathNameOpenFile(af_state->filename, O_RDONLY | PG_BINARY);
-	base = (char *)kds + KDS_HEAD_LENGTH(kds);
+	base = (char *)kds + KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
 	for (int i=0; i < iovec->nr_chunks; i++)
 	{
 		strom_io_chunk *ioc = &iovec->ioc[i];
@@ -2707,6 +2962,7 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	ForeignTable   *ft = GetForeignTable(foreigntableid);
 	Relation		frel = table_open(foreigntableid, NoLock);
 	List		   *filesList;
+	List		   *virtualColumnsList;
 	List		   *results = NIL;
 	Bitmapset	   *referenced = NULL;
 	ListCell	   *lc1, *lc2;
@@ -2724,23 +2980,30 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	referenced = pickup_outer_referenced(root, baserel, referenced);
 
 	/* read arrow-file metadta */
-	filesList = arrowFdwExtractFilesList(ft->options, NULL,
+	filesList = arrowFdwExtractFilesList(ft->options,
+										 &virtualColumnsList,
 										 &parallel_nworkers);
-	foreach (lc1, filesList)
+	forboth (lc1, filesList,
+			 lc2, virtualColumnsList)
 	{
 		ArrowFileState *af_state;
-		char	   *fname = strVal(lfirst(lc1));
+		const char *fname = strVal(lfirst(lc1));
+		List	   *virtual_columns = lfirst(lc2);
+		ListCell   *cell;
 
-		af_state = BuildArrowFileState(frel, fname, NULL);
+		af_state = BuildArrowFileState(frel, fname,
+									   virtual_columns, NULL);
 		if (!af_state)
 			continue;
 
 		/*
 		 * Size calculation based the record-batch metadata
 		 */
-		foreach (lc2, af_state->rb_list)
+		foreach (cell, af_state->rb_list)
 		{
-			RecordBatchState *rb_state = lfirst(lc2);
+			RecordBatchState *rb_state = lfirst(cell);
+
+			//XXX - fix to support column-field mapping
 
 			/* whole-row reference? */
 			if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
@@ -2749,16 +3012,18 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 			}
 			else
 			{
-				int		j, k;
+				int		i, j, k;
 
 				for (k = bms_next_member(referenced, -1);
 					 k >= 0;
 					 k = bms_next_member(referenced, k))
 				{
 					j = k + FirstLowInvalidHeapAttributeNumber;
-					if (j <= 0 || j > rb_state->nfields)
+					if (j <= 0 || j > af_state->ncols)
 						continue;
-					totalLen += __recordBatchFieldLength(&rb_state->fields[j-1]);
+					i = af_state->attrs[j-1].field_index;
+					if (i >= 0 && i < rb_state->nfields)
+						totalLen += __recordBatchFieldLength(&rb_state->fields[i]);
 				}
 			}
 			ntuples += rb_state->rb_nitems;
@@ -3369,6 +3634,29 @@ pg_datum_arrow_ref(kern_data_store *kds,
 	Datum		datum = 0;
 	bool		isnull = false;
 
+	if (cmeta->virtual_offset != 0)
+	{
+		if (cmeta->virtual_offset < 0)
+			isnull = true;
+		else if (cmeta->attbyval)
+		{
+			void   *addr = ((char *)kds + cmeta->virtual_offset);
+
+			switch (cmeta->attlen)
+			{
+				case 1:	datum = *((uint8_t  *)addr); break;
+				case 2: datum = *((uint16_t *)addr); break;
+				case 4: datum = *((uint32_t *)addr); break;
+				case 8: datum = *((uint64_t *)addr); break;
+				default:
+					elog(ERROR, "unexpected inline type length: %d", cmeta->attlen);
+			}
+		}
+		else
+			datum = PointerGetDatum((char *)kds + cmeta->virtual_offset);
+		goto out;
+	}
+
 	if (KDS_ARROW_CHECK_ISNULL(kds, cmeta, index))
 	{
 		isnull = true;
@@ -3558,7 +3846,7 @@ __arrowFdwExecInit(ScanState *ss,
 	const DpuStorageEntry *ds_entry = NULL;
 	bool			whole_row_ref = false;
 	List		   *filesList;
-	List		   *filesAttrList;
+	List		   *virtualColumnsList;
 	List		   *af_states_list = NIL;
 	uint32_t		rb_nrooms = 0;
 	uint32_t		rb_nitems = 0;
@@ -3581,13 +3869,18 @@ __arrowFdwExecInit(ScanState *ss,
 	}
 
 	/* setup ArrowFileState */
-	filesList = arrowFdwExtractFilesList(ft->options, &filesAttrList, NULL);
-	foreach (lc1, filesList)
+	filesList = arrowFdwExtractFilesList(ft->options,
+										 &virtualColumnsList, NULL);
+	forboth (lc1, filesList,
+			 lc2, virtualColumnsList)
 	{
 		char	   *fname = strVal(lfirst(lc1));
+		List	   *virtual_columns = lfirst(lc2);
 		ArrowFileState *af_state;
 
-		af_state = BuildArrowFileState(frel, fname, &stat_attrs);
+		af_state = BuildArrowFileState(frel, fname,
+									   virtual_columns,
+									   &stat_attrs);
 		if (af_state)
 		{
 			rb_nrooms += list_length(af_state->rb_list);
@@ -4002,7 +4295,7 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 	size_t	   *chunk_sz;
 	ListCell   *lc1, *lc2;
 	int			fcount = 0;
-	int			j, k;
+	int			i, j, k;
 	char		label[100];
 	StringInfoData	buf;
 
@@ -4070,17 +4363,20 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 			{
 				/* whole-row reference */
 				read_sz += rb_state->rb_length;
+				continue;
 			}
-			else
+
+			for (k = bms_next_member(arrow_state->referenced, -1);
+				 k >= 0;
+				 k = bms_next_member(arrow_state->referenced, k))
 			{
-				for (k = bms_next_member(arrow_state->referenced, -1);
-					 k >= 0;
-					 k = bms_next_member(arrow_state->referenced, k))
+				j = k + FirstLowInvalidHeapAttributeNumber - 1;
+				if (j <= 0 || j > af_state->ncols)
+					continue;
+				i = af_state->attrs[j-1].field_index;
+				if (i >= 0 && i < rb_state->nfields)
 				{
-					j = k + FirstLowInvalidHeapAttributeNumber - 1;
-					if (j < 0 || j >=  tupdesc->natts)
-						continue;
-					sz = __recordBatchFieldLength(&rb_state->fields[j]);
+					sz = __recordBatchFieldLength(&rb_state->fields[i]);
 					read_sz += sz;
 					chunk_sz[j] += sz;
 				}
@@ -4211,7 +4507,7 @@ ArrowAcquireSampleRows(Relation relation,
 {
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
 	List		   *filesList;
-	List		   *filesAttrList;
+	List		   *virtualColumnsList;
 	List		   *rb_state_list = NIL;
 	ListCell	   *lc1, *lc2;
 	int64			total_nrows = 0;
@@ -4219,18 +4515,23 @@ ArrowAcquireSampleRows(Relation relation,
 	int				nsamples_min = nrooms / 100;
 	int				nitems = 0;
 
-	filesList = arrowFdwExtractFilesList(ft->options, &filesAttrList, NULL);
-	foreach (lc1, filesList)
+	filesList = arrowFdwExtractFilesList(ft->options,
+										 &virtualColumnsList, NULL);
+	forboth (lc1, filesList,
+			 lc2, virtualColumnsList)
 	{
 		ArrowFileState *af_state;
 		char	   *fname = strVal(lfirst(lc1));
+		List	   *virtual_columns = lfirst(lc2);
+		ListCell   *cell;
 
-		af_state = BuildArrowFileState(relation, fname, NULL);
+		af_state = BuildArrowFileState(relation, fname,
+									   virtual_columns, NULL);
 		if (!af_state)
 			continue;
-		foreach (lc2, af_state->rb_list)
+		foreach (cell, af_state->rb_list)
 		{
-			RecordBatchState *rb_state = lfirst(lc2);
+			RecordBatchState *rb_state = lfirst(cell);
 
 			if (rb_state->rb_nitems == 0)
 				continue;	/* not reasonable to sample, skipped */
@@ -4273,11 +4574,12 @@ ArrowAnalyzeForeignTable(Relation frel,
 {
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
 	List		   *filesList;
-	List		   *filesAttrList;
+	List		   *virtualColumnsList;
 	ListCell	   *lc;
 	size_t			totalpages = 0;
 
-	filesList = arrowFdwExtractFilesList(ft->options, &filesAttrList, NULL);
+	filesList = arrowFdwExtractFilesList(ft->options,
+										 &virtualColumnsList, NULL);
 	foreach (lc, filesList)
 	{
 		const char	   *fname = strVal(lfirst(lc));
@@ -4304,12 +4606,15 @@ ArrowAnalyzeForeignTable(Relation frel,
  * ensureUniqueFieldNames
  */
 static const char **
-ensureUniqueFieldNames(ArrowSchema *schema)
+ensureUniqueFieldNames(ArrowSchema *schema, List *virtual_columns)
 {
-	const char **column_names = palloc0(sizeof(char *) * schema->_num_fields);
-	int		count = 2;
+	const char **column_names;
+	int			k, count = 2;
+	ListCell   *lc;
 
-	for (int k=0; k < schema->_num_fields; k++)
+	column_names = palloc0(sizeof(char *) * (schema->_num_fields + 1 +
+											 list_length(virtual_columns)));
+	for (k=0; k < schema->_num_fields; k++)
 	{
 		const char *cname = schema->fields[k].name;
 	retry:
@@ -4326,6 +4631,26 @@ ensureUniqueFieldNames(ArrowSchema *schema)
 				 k, schema->fields[k].name, cname);
 		column_names[k] = cname;
 	}
+
+	foreach (lc, virtual_columns)
+	{
+		virtualColumnDef *vcdef = lfirst(lc);
+		const char *cname = vcdef->key;
+	again:
+		for (int j=0; j < k; j++)
+		{
+			if (strcasecmp(cname, column_names[j]) == 0)
+			{
+				cname = psprintf("__%s_%d", vcdef->key, count++);
+				goto again;
+			}
+		}
+		if (vcdef->key != cname)
+			elog(NOTICE, "Arrow virtual column '%s' meets a duplicated field name, so renamed to '%s'",
+				 vcdef->key, cname);
+		column_names[k++] = cname;
+	}
+	Assert(column_names[k] == NULL);
 	return column_names;
 }
 
@@ -4336,10 +4661,12 @@ static List *
 ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 {
 	ArrowSchema	schema;
+	List	   *virtual_columns_prime = NIL;
 	List	   *filesList;
-	List	   *filesAttrList;
-	ListCell   *lc;
+	List	   *virtualColumnsList;
+	ListCell   *lc1, *lc2;
 	const char **column_names;
+	int			i;
 	StringInfoData	cmd;
 
 	/* sanity checks */
@@ -4357,7 +4684,8 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			elog(ERROR, "arrow_fdw: Bug? unknown list-type");
 			break;
 	}
-	filesList = arrowFdwExtractFilesList(stmt->options, &filesAttrList, NULL);
+	filesList = arrowFdwExtractFilesList(stmt->options,
+										 &virtualColumnsList, NULL);
 	if (filesList == NIL)
 		ereport(ERROR,
 				(errmsg("No valid apache arrow files are specified"),
@@ -4365,15 +4693,17 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 
 	/* read the schema */
 	memset(&schema, 0, sizeof(ArrowSchema));
-	foreach (lc, filesList)
+	forboth (lc1, filesList,
+			 lc2, virtualColumnsList)
 	{
 		ArrowFileInfo af_info;
-		const char *fname = strVal(lfirst(lc));
+		const char *fname = strVal(lfirst(lc1));
 
 		readArrowFile(fname, &af_info, false);
-		if (lc == list_head(filesList))
+		if (lc1 == list_head(filesList))
 		{
 			copyArrowNode(&schema.node, &af_info.footer.schema.node);
+			virtual_columns_prime = lfirst(lc2);
 		}
 		else
 		{
@@ -4385,22 +4715,40 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 				elog(ERROR, "file '%s' has incompatible schema definition", fname);
 			for (int j=0; j < schema._num_fields; j++)
 			{
-				if (!arrowFieldTypeIsEqual(&schema.fields[j],
-										   &stemp->fields[j]))
-					elog(ERROR, "file '%s' has incompatible schema definition", fname);
+				bool	found = false;
+
+				for (int k=0; k < stemp->_num_fields; k++)
+				{
+					if (strcmp(schema.fields[j].name,
+							   stemp->fields[k].name) == 0)
+					{
+						if (arrowFieldTypeIsEqual(&schema.fields[j],
+												  &stemp->fields[k]))
+						{
+							found = true;
+							break;
+						}
+						elog(ERROR, "field '%s' of '%s' has incompatible data type",
+							 schema.fields[j].name, fname);
+					}
+				}
+
+				if (!found)
+					elog(ERROR, "field '%s' was not found in the file '%s'",
+						 schema.fields[j].name, fname);
 			}
 		}
 	}
 	/* ensure the field-names are unique */
-	column_names = ensureUniqueFieldNames(&schema);
+	column_names = ensureUniqueFieldNames(&schema, virtual_columns_prime);
 
 	/* makes a command to define foreign table */
 	initStringInfo(&cmd);
 	appendStringInfo(&cmd, "CREATE FOREIGN TABLE %s (\n",
 					 quote_identifier(stmt->remote_schema));
-	for (int j=0; j < schema._num_fields; j++)
+	for (i=0; i < schema._num_fields; i++)
 	{
-		ArrowField *field = &schema.fields[j];
+		ArrowField *field = &schema.fields[i];
 		Oid				type_oid;
 		int32			type_mod;
 		char		   *schema;
@@ -4417,12 +4765,12 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		schema = get_namespace_name(__type->typnamespace);
 		if (!schema)
 			elog(ERROR, "cache lookup failed for schema %u", __type->typnamespace);
-		if (j > 0)
+		if (i > 0)
 			appendStringInfo(&cmd, ",\n");
 		if (type_mod < 0)
 		{
 			appendStringInfo(&cmd, "  %s %s.%s",
-							 quote_identifier(column_names[j]),
+							 quote_identifier(column_names[i]),
 							 quote_identifier(schema),
 							 NameStr(__type->typname));
 		}
@@ -4430,22 +4778,47 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		{
 			Assert(type_mod >= VARHDRSZ);
 			appendStringInfo(&cmd, "  %s %s.%s(%d)",
-							 quote_identifier(column_names[j]),
+							 quote_identifier(column_names[i]),
 							 quote_identifier(schema),
 							 NameStr(__type->typname),
 							 type_mod - VARHDRSZ);
 		}
+		if (field->name != column_names[i])
+			appendStringInfo(&cmd, " options (field '%s')", field->name);		
 		ReleaseSysCache(htup);
 	}
+
+	foreach (lc1,  virtual_columns_prime)
+	{
+		virtualColumnDef *vcdef = lfirst(lc1);
+		const char	   *label;
+
+		Assert(column_names[i] != NULL);
+		if (i > 0)
+			appendStringInfo(&cmd, ",\n");
+		if (vcdef->kind == '@')
+			label = "pg_catalog.int8";
+		else if (vcdef->kind == '$')
+			label = "pg_catalog.text";
+		else
+			 elog(ERROR, "arrow_fdw: Bug? unknown virtual column type '%c'", vcdef->kind);
+
+		appendStringInfo(&cmd, "  %s %s options(virtual '%s')",
+						 quote_identifier(column_names[i]),
+						 label,
+						 vcdef->key);
+		i++;
+	}
+	Assert(column_names[i] == NULL);
 	appendStringInfo(&cmd,
 					 "\n"
 					 ") SERVER %s\n"
 					 "  OPTIONS (", stmt->server_name);
-	foreach (lc, stmt->options)
+	foreach (lc1, stmt->options)
 	{
-		DefElem	   *defel = lfirst(lc);
+		DefElem	   *defel = lfirst(lc1);
 
-		if (lc != list_head(stmt->options))
+		if (lc1 != list_head(stmt->options))
 			appendStringInfo(&cmd, ",\n           ");
 		appendStringInfo(&cmd, "%s '%s'",
 						 defel->defname,
@@ -4568,7 +4941,7 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 	if (schema._num_fields > SHRT_MAX)
 		Elog("Arrow file '%s' has too much fields: %d",
 			 file_name, schema._num_fields);
-	column_names = ensureUniqueFieldNames(&schema);
+	column_names = ensureUniqueFieldNames(&schema, NIL);
 
 	/* setup CreateForeignTableStmt */
 	memset(&stmt, 0, sizeof(CreateForeignTableStmt));
@@ -4663,16 +5036,38 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 	if (catalog == ForeignTableRelationId)
 	{
 		List	   *filesList;
-		List	   *filesAttrList;
+		List	   *virtualColumnsList;
 		ListCell   *lc;
 
-		filesList = arrowFdwExtractFilesList(options, &filesAttrList, NULL);
+		filesList = arrowFdwExtractFilesList(options,
+											 &virtualColumnsList, NULL);
 		foreach (lc, filesList)
 		{
 			const char *fname = strVal(lfirst(lc));
 			ArrowFileInfo af_info;
 
 			readArrowFile(fname, &af_info, true);
+		}
+	}
+	else if (catalog == AttributeRelationId)
+	{
+		ListCell   *lc;
+
+		foreach (lc, options)
+		{
+			DefElem	   *defel = lfirst(lc);
+
+			if (strcmp(defel->defname, "field") == 0)
+			{
+				if (strlen(strVal(defel->arg)) >= NAMEDATALEN-1)
+					elog(ERROR, "arrow_fdw: column option '%s' is too long [%s]",
+						 defel->defname, strVal(defel->arg));
+			}
+			else if (strcmp(defel->defname, "virtual") != 0)
+			{
+				elog(ERROR, "arrow_fdw: column option '%s' is unknown",
+					 defel->defname);
+			}
 		}
 	}
 	else if (options != NIL)
@@ -4689,9 +5084,6 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 				break;
 			case UserMappingRelationId:
 				label = "USER MAPPING";
-				break;
-			case AttributeRelationId:
-				label = "attribute of FOREIGN TABLE";
 				break;
 			default:
 				label = "????";
@@ -4711,7 +5103,7 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 {
 	EventTriggerData *trigdata;
 	Relation	frel = NULL;
-	ListCell   *lc;
+	ListCell   *lc1, *lc2;
 	bool		check_schema_compatibility = false;
 
 	if (!CALLED_AS_EVENT_TRIGGER(fcinfo))
@@ -4738,9 +5130,9 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 		frel = relation_openrv_extended(stmt->relation, NoLock, true);
 		if (frel && RelationIsArrowFdw(frel))
 		{
-			foreach (lc, stmt->cmds)
+			foreach (lc1, stmt->cmds)
 			{
-				AlterTableCmd  *cmd = lfirst(lc);
+				AlterTableCmd  *cmd = lfirst(lc1);
 
 				if (cmd->subtype == AT_AddColumn ||
 					cmd->subtype == AT_DropColumn ||
@@ -4757,14 +5149,17 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 	{
 		ForeignTable *ft = GetForeignTable(RelationGetRelid(frel));
 		List	   *filesList;
-		List	   *filesAttrList;
+		List	   *virtualColumnsList;
 
-		filesList = arrowFdwExtractFilesList(ft->options, &filesAttrList, NULL);
-		foreach (lc, filesList)
+		filesList = arrowFdwExtractFilesList(ft->options,
+											 &virtualColumnsList, NULL);
+		forboth (lc1, filesList,
+				 lc2, virtualColumnsList)
 		{
-			const char *fname = strVal(lfirst(lc));
+			const char *fname = strVal(lfirst(lc1));
+			List	   *virtual_columns = lfirst(lc2);
 
-			(void)BuildArrowFileState(frel, fname, NULL);
+			(void)BuildArrowFileState(frel, fname, virtual_columns, NULL);
 		}
 	}
 	if (frel)
@@ -4781,14 +5176,16 @@ pgstrom_arrow_fdw_check_pattern(PG_FUNCTION_ARGS)
 {
 	text	   *t = PG_GETARG_TEXT_P(0);
 	text	   *p = PG_GETARG_TEXT_P(1);
+	List	   *attrKinds = NIL;
 	List	   *attrKeys = NIL;
 	List	   *attrValues = NIL;
-	ListCell   *lc1, *lc2;
+	ListCell   *lc1, *lc2, *lc3;
 	bool		retval;
 	StringInfoData buf;
 
 	retval = pathNameMatchByPattern(text_to_cstring(t),
 									text_to_cstring(p),
+									&attrKinds,
 									&attrKeys,
 									&attrValues);
 	initStringInfo(&buf);
@@ -4797,16 +5194,18 @@ pgstrom_arrow_fdw_check_pattern(PG_FUNCTION_ARGS)
 		bool	need_comma = false;
 
 		appendStringInfo(&buf, "true");
-		forboth (lc1, attrKeys,
-				 lc2, attrValues)
+		forthree (lc1, attrKinds,
+				  lc2, attrKeys,
+				  lc3, attrValues)
 		{
 			if (!need_comma)
 				appendStringInfo(&buf, " {");
 			else
 				appendStringInfo(&buf, ", ");
-			appendStringInfo(&buf, "[%s]=[%s]",
-							 (char *)lfirst(lc1),
-							 (char *)lfirst(lc2));
+			appendStringInfo(&buf, "%c[%s]=[%s]",
+							 (int)lfirst_int(lc1),
+							 (char *)lfirst(lc2),
+							 (char *)lfirst(lc3));
 			need_comma = true;
 		}
 		if (need_comma)

@@ -679,8 +679,13 @@ struct kern_colmeta {
 	 * @attoptions keeps extra information of Apache Arrow type. Unlike
 	 * PostgreSQL types, it can have variation of data accuracy in time
 	 * related data types, or precision in decimal data type.
+	 *
+	 * 'virtual_offset' is not zero if this is a virtual column.
+	 * if negative, it means NULL. Elsewhere, it points contents of the
+	 * virtual column in the format of PostgreSQL datum.
 	 */
 	ArrowTypeOptions attopts;
+	int64_t			virtual_offset;
 	uint64_t		nullmap_offset;
 	uint64_t		nullmap_length;
 	uint64_t		values_offset;
@@ -715,6 +720,8 @@ struct kern_data_store {
 	uint32_t		block_nloaded;	/* number of blocks already loaded by CPU */
 	/* only KDS_FORMAT_COLUMN */
 	uint32_t		column_nrooms;	/* = max_num_rows parameter */
+	/* only KDS_FORMAT_ARROW */
+	uint32_t		arrow_virtual_usage; /* usage of virtual column buffer */
 	/* column definition */
 	uint32_t		nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */

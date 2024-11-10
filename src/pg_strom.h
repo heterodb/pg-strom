@@ -88,6 +88,7 @@
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
+#include "parser/parse_coerce.h"
 #include "parser/parse_func.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/postmaster.h"
@@ -975,6 +976,7 @@ extern bool		__munmapShmem(void *mmap_addr);
 extern Path	   *pgstrom_copy_pathnode(const Path *pathnode);
 extern bool		pathNameMatchByPattern(const char *pathname,
 									   const char *pattern,
+									   List **p_attrKinds,
 									   List **p_attrKeys,
 									   List **p_attrValues);
 

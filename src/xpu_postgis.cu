@@ -6311,13 +6311,14 @@ pgfn_st_crosses(XPU_PGFUNCTION_ARGS)
 			{
 				result->expr_ops = &xpu_bool_ops;
 				result->value = ((status & IM__INTER_INTER_2D) != 0 &&
-								(status & IM__EXTER_INTER_2D) != 0);
+								 (status & IM__EXTER_INTER_2D) != 0);
 			}
 			else if (geom2.type == GEOM_LINETYPE ||
 					 geom2.type == GEOM_MULTILINETYPE)
 			{
 				result->expr_ops = &xpu_bool_ops;
-				result->value = ((status & IM__INTER_INTER_2D)==IM__INTER_INTER_0D);
+				result->value = ((status & IM__INTER_INTER_2D) == IM__INTER_INTER_0D &&
+								 (status & IM__BOUND_BOUND_2D) == 0);
 			}
 			else if (geom2.type == GEOM_TRIANGLETYPE ||
 					 geom2.type == GEOM_POLYGONTYPE ||
@@ -6339,7 +6340,7 @@ pgfn_st_crosses(XPU_PGFUNCTION_ARGS)
 			{
 				result->expr_ops = &xpu_bool_ops;
 				result->value = ((status & IM__INTER_INTER_2D) != 0 &&
-								(status & IM__EXTER_INTER_2D) != 0);
+								 (status & IM__EXTER_INTER_2D) != 0);
 			}
 		}
 	}

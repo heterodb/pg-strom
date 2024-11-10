@@ -1163,7 +1163,7 @@ __update_groupby__pmax_fp64(kern_context *kcxt,
 			(kagg_state__pminmax_fp64_packed *)buffer;
 
 		__atomic_add_uint32(&r->nitems, 1);
-		__atomic_min_fp64(&r->value, fval);
+		__atomic_max_fp64(&r->value, fval);
 	}
 	return sizeof(kagg_state__pminmax_fp64_packed);
 }
