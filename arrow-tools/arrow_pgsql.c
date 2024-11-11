@@ -506,9 +506,11 @@ put_float64_value(SQLfield *column, const char *addr, int sz)
 /* parameters of Numeric type */
 #define NUMERIC_DSCALE_MASK	0x3FFF
 #define NUMERIC_SIGN_MASK	0xC000
-#define NUMERIC_POS         0x0000
+#define NUMERIC_POS			0x0000
 #define NUMERIC_NEG         0x4000
-#define NUMERIC_NAN         0xC000
+#define NUMERIC_NAN			0xC000
+#define NUMERIC_PINF		0xD000
+#define NUMERIC_NINF		0xF000
 
 #define NBASE				10000
 #define HALF_NBASE			5000
@@ -606,8 +608,8 @@ put_decimal_value(SQLfield *column, const char *addr, int sz)
 		nv.dscale	= __fetch_16bit(&rawdata->dscale);
 		nv.digits	= rawdata->digits;
 #endif	/* __PGSTROM_MODULE__ */
-		if ((nv.sign & NUMERIC_SIGN_MASK) == NUMERIC_NAN)
-			Elog("Decimal128 cannot map NaN in PostgreSQL Numeric");
+		if ((nv.sign & NUMERIC_SIGN_MASK) == NUMERIC_SIGN_MASK)
+			Elog("Decimal128 cannot map NaN, +Inf or -Inf in PostgreSQL Numeric");
 		/* makes integer portion first */
 		for (d=0; d <= nv.weight; d++)
 		{
