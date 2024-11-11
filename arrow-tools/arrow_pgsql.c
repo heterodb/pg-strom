@@ -146,6 +146,15 @@ static inline uint16_t __fetch_16bit(const void *addr)
 #endif
 }
 
+static inline int16_t __fetch_16bit_signed(const void *addr)
+{
+#ifdef __PGSTROM_MODULE__
+	return *((int16_t *)addr);
+#else
+	return (int16_t)be16toh(*((uint16_t *)addr));
+#endif
+}
+
 static inline uint32_t __fetch_32bit(const void *addr)
 {
 #ifdef __PGSTROM_MODULE__
@@ -592,14 +601,13 @@ put_decimal_value(SQLfield *column, const char *addr, int sz)
 			NumericDigit digits[FLEXIBLE_ARRAY_MEMBER];
 		}  *rawdata = (void *)addr;
 		nv.ndigits	= __fetch_16bit(&rawdata->ndigits);
-		nv.weight	= __fetch_16bit(&rawdata->weight);
+		nv.weight	= __fetch_16bit_signed(&rawdata->weight);
 		nv.sign		= __fetch_16bit(&rawdata->sign);
 		nv.dscale	= __fetch_16bit(&rawdata->dscale);
 		nv.digits	= rawdata->digits;
 #endif	/* __PGSTROM_MODULE__ */
 		if ((nv.sign & NUMERIC_SIGN_MASK) == NUMERIC_NAN)
 			Elog("Decimal128 cannot map NaN in PostgreSQL Numeric");
-
 		/* makes integer portion first */
 		for (d=0; d <= nv.weight; d++)
 		{
