@@ -2187,8 +2187,10 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__PMAX_FP64		404		/* <int4>,<float8> - max value */
 #define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
 #define KAGG_ACTION__PSUM_FP		503		/* <float8> - sum of values */
+#define KAGG_ACTION__PSUM_NUMERIC	504		/* <int4>,<int8+8> - sum of values */
 #define KAGG_ACTION__PAVG_INT		601		/* <int4>,<int8> - NROWS+PSUM */
 #define KAGG_ACTION__PAVG_FP		602		/* <int4>,<float8> - NROWS+PSUM */
+#define KAGG_ACTION__PAVG_NUMERIC	603		/* <int4>,<int8+8> - NROWS+PSUM */
 #define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
 #define KAGG_ACTION__COVAR			801		/* <int4>,<float8>x5 - covariance */
 
@@ -2219,6 +2221,25 @@ typedef struct
 	uint32_t	nitems;
 	float8_t	sum;
 } kagg_state__psum_fp_packed;
+
+#define __PAGG_NUMERIC_ATTRS__WEIGHT	0x00ffffU
+#define __PAGG_NUMERIC_ATTRS__NAN		0x010000U	/* NaN */
+#define __PAGG_NUMERIC_ATTRS__PINF		0x020000U	/* +Inf */
+#define __PAGG_NUMERIC_ATTRS__NINF		0x040000U	/* -Inf */
+#define __PAGG_NUMERIC_ATTRS__MASK		0x070000U	/* Nan|+Inf|-Inf */
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	attrs;
+	uint64_t	nitems;
+	union {
+		struct {
+			uint64_t	lo;
+			uint64_t	hi;
+		} u64;
+		int128_t		i128;
+	} u;		/* value */
+} kagg_state__psum_numeric_packed;
 
 typedef struct
 {
