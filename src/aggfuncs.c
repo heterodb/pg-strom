@@ -335,7 +335,7 @@ pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS)
 	{
 		Assert(num.kind == XPU_NUMERIC_KIND__VALID);
 		r->attrs |= ((uint32_t)num.weight & __PAGG_NUMERIC_ATTRS__WEIGHT);
-		r->u.i128 = num.u.value;
+		r->sum.i128 = num.u.value;
 	}
 	r->nitems = 1;
 	SET_VARSIZE(r, sizeof(kagg_state__psum_numeric_packed));
@@ -419,7 +419,28 @@ pgstrom_fsum_trans_numeric(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_numeric_packed *state;
 	kagg_state__psum_numeric_packed *arg;
-	MemoryContext	aggcxt;
+	MemoryContext		aggcxt;
+	static uint64_t		__pow10[] = {
+		1UL,						/* 10^0 */
+		10UL,						/* 10^1 */
+		100UL,						/* 10^2 */
+		1000UL,						/* 10^3 */
+		10000UL,					/* 10^4 */
+		100000UL,					/* 10^5 */
+		1000000UL,					/* 10^6 */
+		10000000UL,					/* 10^7 */
+		100000000UL,				/* 10^8 */
+		1000000000UL,				/* 10^9 */
+		10000000000UL,				/* 10^10 */
+		100000000000UL,				/* 10^11 */
+		1000000000000UL,			/* 10^12 */
+		10000000000000UL,			/* 10^13 */
+		100000000000000UL,			/* 10^14 */
+		1000000000000000UL,			/* 10^15 */
+		10000000000000000UL,		/* 10^16 */
+		100000000000000000UL,		/* 10^17 */
+		1000000000000000000UL,		/* 10^18 */
+	};
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
@@ -446,27 +467,33 @@ pgstrom_fsum_trans_numeric(PG_FUNCTION_ARGS)
 			{
 				int16_t		weight_s = (int16_t)(state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
 				int16_t		weight_a = (int16_t)(arg->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+				int128_t	ival = arg->sum.i128;
 
-				if (weight_s == weight_a)
-					state->u.i128 += arg->u.i128;
-				else if (weight_s > weight_a)
+				if (weight_s > weight_a)
 				{
-					int128_t	ival = arg->u.i128;
+					int		shift = (weight_s - weight_a);
 
-					for (int shift = (weight_s - weight_a); shift > 0; shift--)
-						ival *= 10;
-					state->u.i128 += ival;
+					while (shift > 0)
+					{
+						int		k = Min(shift, 18);
+
+						ival *= (int128_t)__pow10[k];
+						shift -= k;
+					}
 				}
-				else
+				else if (weight_s < weight_a)
 				{
-					int128_t	ival = state->u.i128;
+					int		shift = (weight_a - weight_s);
 
-					for (int shift = (weight_a - weight_s); shift > 0; shift--)
-						ival *= 10;
-					state->u.i128 = ival + arg->u.i128;
-					state->attrs = ((uint32_t)weight_a |
-									(state->attrs & __PAGG_NUMERIC_ATTRS__MASK));
+					while (shift > 0)
+					{
+						int		k = Min(shift, 18);
+
+						ival /= (int128_t)__pow10[k];
+						shift -= k;
+					}
 				}
+				state->sum.i128 += ival;
 			}
 			state->nitems += arg->nitems;
 		}
@@ -564,10 +591,10 @@ pgstrom_fsum_final_numeric(PG_FUNCTION_ARGS)
 	else
 	{
 		int16_t		weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
-		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, state->u.i128);
+		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, state->sum.i128);
 		char	   *buf = palloc(bufsz);
 
-		__xpu_numeric_to_varlena(buf, weight, state->u.i128);
+		__xpu_numeric_to_varlena(buf, weight, state->sum.i128);
 		datum = PointerGetDatum(buf);
 	}
 	PG_RETURN_DATUM(datum);
@@ -639,11 +666,11 @@ pgstrom_favg_final_numeric(PG_FUNCTION_ARGS)
 	else
 	{
 		int16_t		weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
-		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, state->u.i128);
+		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, state->sum.i128);
 		Numeric		sum = palloc(bufsz);
 		Numeric		div = int64_to_numeric(state->nitems);
 
-		__xpu_numeric_to_varlena((char *)sum, weight, state->u.i128);
+		__xpu_numeric_to_varlena((char *)sum, weight, state->sum.i128);
 		datum = DirectFunctionCall2(numeric_div,
 									NumericGetDatum(sum),
 									NumericGetDatum(div));

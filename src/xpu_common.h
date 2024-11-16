@@ -157,6 +157,12 @@
 #ifndef Abs
 #define Abs(x)				((x) >= 0 ? (x) : -(x))
 #endif
+#ifndef And
+#define And(a,b)			((a) & (b))
+#endif
+#ifndef Or
+#define Or(a,b)				((a) | (b))
+#endif
 #ifndef POSTGRES_H
 typedef uint64_t			Datum;
 typedef unsigned int		Oid;
@@ -190,6 +196,14 @@ typedef int64_t				gpumask_t;
 
 /* Definition of several primitive types */
 typedef __int128	int128_t;
+typedef union
+{
+	struct {
+		uint64_t	lo;
+		uint64_t	hi;
+	} u64;
+	int128_t		i128;
+} int128_packed_t;
 #include "float2.h"
 
 #ifndef __FILE_NAME__
@@ -2232,13 +2246,7 @@ typedef struct
 	int32_t		vl_len_;
 	uint32_t	attrs;
 	uint64_t	nitems;
-	union {
-		struct {
-			uint64_t	lo;
-			uint64_t	hi;
-		} u64;
-		int128_t		i128;
-	} u;		/* value */
+	int128_packed_t sum;	/* int128 or uint64 x2 */
 } kagg_state__psum_numeric_packed;
 
 typedef struct
@@ -2263,6 +2271,7 @@ typedef struct
 typedef struct
 {
 	uint32_t	action;			/* any of KAGG_ACTION__* */
+	int32_t		typmod;			/* typmod of 1st arg - used for numeric */
 	int32_t		arg0_slot_id;
 	int32_t		arg1_slot_id;
 } kern_aggregate_desc;

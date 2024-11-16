@@ -212,6 +212,8 @@ EXTERN_FUNCTION(int64_t)
 pgstrom_stair_sum_int64(int64_t value, int64_t *p_total_count);
 EXTERN_FUNCTION(float8_t)
 pgstrom_stair_sum_fp64(float8_t value, float8_t *p_total_count);
+EXTERN_FUNCTION(int128_t)
+pgstrom_stair_sum_int128(int128_t value, int128_t *p_total_count);
 EXTERN_FUNCTION(int32_t)
 pgstrom_local_min_int32(int32_t my_value);
 EXTERN_FUNCTION(int32_t)
@@ -224,6 +226,8 @@ EXTERN_FUNCTION(float8_t)
 pgstrom_local_min_fp64(float8_t my_value);
 EXTERN_FUNCTION(float8_t)
 pgstrom_local_max_fp64(float8_t my_value);
+EXTERN_FUNCTION(uint32_t)
+pgstrom_local_or_uint32(uint32_t my_value);
 
 EXTERN_FUNCTION(int)
 execGpuScanLoadSource(kern_context *kcxt,

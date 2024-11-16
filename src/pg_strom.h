@@ -311,6 +311,7 @@ typedef struct
 	uint32_t	cuda_stack_size;/* estimated stack consumption */
 	/* group-by parameters */
 	List	   *groupby_actions;		/* list of KAGG_ACTION__* on the kds_final */
+	List	   *groupby_typmods;		/* typmod if KAGG_ACTION__* needs it */
 	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */
 	/* pinned inner buffer stuff */
 	List	   *projection_hashkeys;

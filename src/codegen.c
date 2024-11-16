@@ -3736,7 +3736,7 @@ __codegen_build_groupby_actions(codegen_context *context,
 	int			nattrs = list_length(pp_info->groupby_actions);
 	size_t		head_sz = MAXALIGN(offsetof(kern_expression, u.pagg.desc[nattrs]));
 	bytea	   *xpucode;
-	ListCell   *lc1, *lc2;
+	ListCell   *lc1, *lc2, *lc3;
 	kern_expression *kexp;
 
 	kexp = alloca(head_sz);
@@ -3749,11 +3749,13 @@ __codegen_build_groupby_actions(codegen_context *context,
 
 	initStringInfo(&buf);
 	buf.len = head_sz;
-	forboth (lc1, context->tlist_dev,
-			 lc2, pp_info->groupby_actions)
+	forthree (lc1, context->tlist_dev,
+			  lc2, pp_info->groupby_actions,
+			  lc3, pp_info->groupby_typmods)
 	{
 		TargetEntry *tle = lfirst(lc1);
 		int			action = lfirst_int(lc2);
+		int			typmod = lfirst_int(lc3);
 		kern_aggregate_desc *desc = &kexp->u.pagg.desc[kexp->u.pagg.nattrs];
 		codegen_kvar_defitem *kvdef;
 
@@ -3766,6 +3768,7 @@ __codegen_build_groupby_actions(codegen_context *context,
 												  &buf,
 												  tle->expr);
 			desc->action = KAGG_ACTION__VREF;
+			desc->typmod = typmod;
             desc->arg0_slot_id = kvdef->kv_slot_id;
 		}
 		else
@@ -3776,6 +3779,7 @@ __codegen_build_groupby_actions(codegen_context *context,
 
 			Assert(IsA(func, FuncExpr) && list_length(func->args) <= 2);
 			desc->action = action;
+			desc->typmod = typmod;
 			foreach (cell, func->args)
 			{
 				Expr   *fn_arg = lfirst(cell);
@@ -4215,6 +4219,14 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
+			case KAGG_ACTION__PSUM_NUMERIC:
+				appendStringInfo(buf, "psum::numeric(%d)[slot=%d, expr='%s']",
+								 __numeric_typmod_weight(desc->typmod),
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
+
 			case KAGG_ACTION__PAVG_INT:
 				appendStringInfo(buf, "pavg::int[slot=%d, expr='%s']",
 								 desc->arg0_slot_id,
@@ -4223,6 +4235,13 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 				break;
 			case KAGG_ACTION__PAVG_FP:
 				appendStringInfo(buf, "pavg::fp[slot=%d, expr='%s']",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
+			case KAGG_ACTION__PAVG_NUMERIC:
+				appendStringInfo(buf, "pavg::numeric(%d)[slot=%d, expr='%s']",
+								 __numeric_typmod_weight(desc->typmod),
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));

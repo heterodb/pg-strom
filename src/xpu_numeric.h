@@ -334,6 +334,43 @@ __xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 	return len;
 }
 
+INLINE_FUNCTION(bool)
+xpu_numeric_validate(kern_context *kcxt, xpu_numeric_t *num)
+{
+	assert(num->expr_ops == &xpu_numeric_ops);
+	if (num->kind == XPU_NUMERIC_KIND__VARLENA)
+	{
+		const varlena  *vl_addr = num->u.vl_addr;
+		const char	   *errmsg;
+
+		errmsg = __xpu_numeric_from_varlena(num, vl_addr);
+		if (errmsg)
+		{
+			STROM_ELOG(kcxt, errmsg);
+			return false;
+		}
+		assert(num->kind != XPU_NUMERIC_KIND__VARLENA);
+	}
+	return true;
+}
+
+/*
+ * for fixed-point numeric, the logic come from 'numeric_typmod_scale' in numeric.c
+ */
+INLINE_FUNCTION(int)
+__numeric_typmod_weight(int32_t typmod)
+{
+	int		weight = __DBL_DIG__;	/* default if typmod < 0 */
+
+	if (typmod >= 0)
+	{
+		weight = (((typmod - VARHDRSZ) & 0x7ff) ^ 1024) - 1024;
+		weight = Max(weight, 0);			/* never negative */
+		weight = Min(weight, __DBL_DIG__);	/* upper limit */
+	}
+	return weight;
+}
+
 EXTERN_FUNCTION(int)
 pg_numeric_to_cstring(kern_context *kcxt,
 					  varlena *numeric,

@@ -232,9 +232,9 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 KAGG_ACTION__PSUM_FP, false
 	},
 	{"sum(numeric)",
-	 "s:sum_fp_num(bytea)",
-	 "s:psum(float8)",
-	 KAGG_ACTION__PSUM_FP, true
+	 "s:sum_numeric(bytea)",
+	 "s:psum(numeric)",
+	 KAGG_ACTION__PSUM_NUMERIC, true
 	},
 	{"sum(money)",
 	 "s:sum_cash(bytea)",
@@ -280,9 +280,9 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 KAGG_ACTION__PAVG_FP, false
 	},
 	{"avg(numeric)",
-	 "s:avg_num(bytea)",
-	 "s:pavg(float8)",
-	 KAGG_ACTION__PAVG_FP, true
+	 "s:avg_numeric(bytea)",
+	 "s:pavg(numeric)",
+	 KAGG_ACTION__PAVG_NUMERIC, true
 	},
 	/*
 	 * STDDEV(X) = EX_STDDEV_SAMP(NROWS(),PSUM(X),PSUM(X*X))
@@ -755,7 +755,13 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 			type_oid = BYTEAOID;
 			partfn_bufsz = sizeof(kagg_state__psum_fp_packed);
 			break;
-			
+		case KAGG_ACTION__PAVG_NUMERIC:
+		case KAGG_ACTION__PSUM_NUMERIC:
+			func_nargs = 1;
+			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__psum_numeric_packed);
+			break;
+
 		case KAGG_ACTION__STDDEV:
 			func_nargs = 1;
 			type_oid = BYTEAOID;
@@ -999,7 +1005,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 	Form_pg_proc proc;
 	Form_pg_aggregate agg;
 	ListCell   *lc;
-	int			j;
+	int32_t		j, groupby_typmod = -1;
 
 	if (aggref->aggorder != NIL || aggref->aggdistinct != NIL)
 	{
@@ -1058,6 +1064,8 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 			return NULL;
 		}
 		partfn_args = lappend(partfn_args, expr);
+		if (lc == list_head(aggref->args))
+			groupby_typmod = exprTypmod((Node *)expr);
 	}
 	ReleaseSysCache(htup);
 
@@ -1073,6 +1081,8 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 		add_column_to_pathtarget(target_partial, partfn, 0);
 		pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
 											   aggfn_cat->partial_func_action);
+		pp_info->groupby_typmods = lappend_int(pp_info->groupby_typmods,
+											   groupby_typmod);
 		pp_info->groupby_prepfn_bufsz += aggfn_cat->partial_func_bufsz;
 	}
 
@@ -1322,6 +1332,8 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 											   keyref == 0
 											   ? KAGG_ACTION__VREF_NOKEY
 											   : KAGG_ACTION__VREF);
+		pp_info->groupby_typmods = lappend_int(pp_info->groupby_typmods,
+											   exprTypmod((Node *)key));
 	}
 	set_pathtarget_cost_width(root, con->target_final);
 	set_pathtarget_cost_width(root, con->target_partial);

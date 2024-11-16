@@ -12,26 +12,6 @@
 #include "xpu_common.h"
 #include <math.h>
 
-INLINE_FUNCTION(bool)
-xpu_numeric_validate(kern_context *kcxt, xpu_numeric_t *num)
-{
-	assert(num->expr_ops == &xpu_numeric_ops);
-	if (num->kind == XPU_NUMERIC_KIND__VARLENA)
-	{
-		const varlena  *vl_addr = num->u.vl_addr;
-		const char	   *errmsg;
-
-		errmsg = __xpu_numeric_from_varlena(num, vl_addr);
-		if (errmsg)
-		{
-			STROM_ELOG(kcxt, errmsg);
-			return false;
-		}
-		assert(num->kind != XPU_NUMERIC_KIND__VARLENA);
-	}
-	return true;
-}
-
 INLINE_FUNCTION(int)
 xpu_numeric_sign(xpu_numeric_t *num)
 {

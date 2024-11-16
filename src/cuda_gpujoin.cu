@@ -1009,7 +1009,6 @@ kern_gpujoin_main(kern_session_info *session,
 								&l_state,
 								&matched);
 	setupGpuPreAggGroupByBuffer(kcxt, kgtask, SHARED_WORKMEM(wp_base_sz));
-
 	kvec_buffer_base = (char *)wp_saved + wp_base_sz;
 	kvec_buffer_size = TYPEALIGN(CUDA_L1_CACHELINE_SZ, kcxt->kvecs_bufsz);
 #define __KVEC_BUFFER(__depth)							\

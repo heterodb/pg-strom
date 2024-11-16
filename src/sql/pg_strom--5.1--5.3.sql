@@ -15,6 +15,11 @@ CREATE FUNCTION pgstrom.arrow_fdw_check_pattern(text, text)
 --- Functions to support 128bit fixed-point numeric aggregation
 --- related to the issue #806
 ---
+CREATE FUNCTION pgstrom.psum(numeric)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_numeric'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
 CREATE FUNCTION pgstrom.pavg(numeric)
   RETURNS bytea
   AS 'MODULE_PATHNAME','pgstrom_partial_sum_numeric'

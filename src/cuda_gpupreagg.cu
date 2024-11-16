@@ -13,6 +13,84 @@
 #include "float2.h"
 
 /*
+ * __atomic_add_int128
+ *
+ * atomically increment packed int128 value using 64bit atomic operation.
+ */
+INLINE_FUNCTION(void)
+__atomic_add_int128(int128_packed_t *ptr, const int128_packed_t *ival)
+{
+	uint64_t	old_lo;
+	uint64_t	new_hi;
+	uint64_t	temp	__attribute__((unused));
+
+	old_lo = atomicAdd((unsigned long long *)&ptr->u64.lo, ival->u64.lo);
+	asm volatile("add.cc.u64 %0, %2, %3;\n"
+				 "addc.u64   %1, %4, %5;\n"
+				 : "=l"(temp),  "=l"(new_hi)
+				 : "l"(old_lo), "l"(ival->u64.lo),
+				   "n"(0),      "l"(ival->u64.hi));
+	/* new_hi = ival_hi + carry bit of (old_lo + ival_lo) */
+	if (new_hi != 0)
+		atomicAdd((unsigned long long *)&ptr->u64.hi, new_hi);
+}
+
+/*
+ * __normalize_numeric_int128
+ */
+STATIC_FUNCTION(int128_t)
+__normalize_numeric_int128(int16_t weight_d, int16_t weight_s, int128_t ival)
+{
+	static uint64_t		__pow10[] = {
+		1UL,						/* 10^0 */
+		10UL,						/* 10^1 */
+		100UL,						/* 10^2 */
+		1000UL,						/* 10^3 */
+		10000UL,					/* 10^4 */
+		100000UL,					/* 10^5 */
+		1000000UL,					/* 10^6 */
+		10000000UL,					/* 10^7 */
+		100000000UL,				/* 10^8 */
+		1000000000UL,				/* 10^9 */
+		10000000000UL,				/* 10^10 */
+		100000000000UL,				/* 10^11 */
+		1000000000000UL,			/* 10^12 */
+		10000000000000UL,			/* 10^13 */
+		100000000000000UL,			/* 10^14 */
+		1000000000000000UL,			/* 10^15 */
+		10000000000000000UL,		/* 10^16 */
+		100000000000000000UL,		/* 10^17 */
+		1000000000000000000UL,		/* 10^18 */
+	};
+
+	if (weight_d > weight_s)
+	{
+		int		shift = (weight_d - weight_s);
+
+		while (shift > 0)
+		{
+			int		k = Min(shift, 18);
+
+			ival *= (int128_t)__pow10[k];
+			shift -= k;
+		}
+	}
+	else if (weight_d < weight_s)
+	{
+		int		shift = (weight_s - weight_d);
+
+		while (shift > 0)
+		{
+			int		k = Min(shift, 18);
+
+			ival /= (int128_t)__pow10[k];
+			shift -= k;
+		}
+	}
+	return ival;
+}
+
+/*
  * __writeOutOneTuplePreAgg
  */
 STATIC_FUNCTION(int32_t)
@@ -157,6 +235,20 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				{
 					memset(buffer, 0, sizeof(kagg_state__psum_fp_packed));
 					SET_VARSIZE(buffer, sizeof(kagg_state__psum_fp_packed));
+				}
+				t_infomask |= HEAP_HASVARWIDTH;
+				break;
+
+			case KAGG_ACTION__PSUM_NUMERIC:
+			case KAGG_ACTION__PAVG_NUMERIC:
+				nbytes = sizeof(kagg_state__psum_numeric_packed);
+				if (buffer)
+				{
+					kagg_state__psum_numeric_packed *r =
+						(kagg_state__psum_numeric_packed *)buffer;
+					memset(r, 0, sizeof(kagg_state__psum_numeric_packed));
+					r->attrs = __numeric_typmod_weight(desc->typmod);
+					SET_VARSIZE(buffer, sizeof(kagg_state__psum_numeric_packed));
 				}
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
@@ -595,6 +687,88 @@ __update_nogroups__psum_fp(kern_context *kcxt,
 }
 
 /*
+ * __update_nogroups__psum_numeric
+ */
+INLINE_FUNCTION(void)
+__update_nogroups__psum_numeric(kern_context *kcxt,
+								char *buffer,
+								kern_colmeta *cmeta,
+								kern_aggregate_desc *desc,
+								bool source_is_valid)
+{
+	xpu_numeric_t  *xnum = NULL;
+	int			count;
+
+	if (source_is_valid)
+	{
+		xnum = (xpu_numeric_t *)kcxt->kvars_slot[desc->arg0_slot_id];
+
+		if (xnum->expr_ops != &xpu_numeric_ops)
+			xnum = NULL;
+		else if (!xpu_numeric_validate(kcxt, xnum))
+			xnum = NULL;
+		//XXX - TODO: Error handling if we could not transform varlena numeric
+		//            to int128 form
+	}
+	count = __syncthreads_count(xnum != NULL);
+	if (count > 0)
+	{
+		kagg_state__psum_numeric_packed *r =
+			(kagg_state__psum_numeric_packed *)buffer;
+		int128_t	ival = 0;
+		uint32_t	special = 0;
+
+		if (xnum)
+		{
+			if (xnum->kind == XPU_NUMERIC_KIND__VALID)
+			{
+				int16_t	weight = (int16_t)(r->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+
+				ival = __normalize_numeric_int128(weight, xnum->weight, xnum->u.value);
+			}
+			else if (xnum->kind == XPU_NUMERIC_KIND__POS_INF)
+				special = __PAGG_NUMERIC_ATTRS__PINF;
+			else if (xnum->kind == XPU_NUMERIC_KIND__NEG_INF)
+				special = __PAGG_NUMERIC_ATTRS__NINF;
+			else
+				special = XPU_NUMERIC_KIND__NAN;
+		}
+
+		if (__syncthreads_count(special != 0) > 0)
+		{
+			/* Special case handling for Nan,+/-Inf */
+			special = pgstrom_local_or_uint32(special);
+			if (get_local_id() == 0)
+				__atomic_or_uint32(&r->attrs, (special & __PAGG_NUMERIC_ATTRS__MASK));
+		}
+		else
+		{
+			/* Elsewhere, it is finite values */
+			int128_packed_t		sum;
+
+			pgstrom_stair_sum_int128(ival, &sum.i128);
+			if (get_local_id() == 0)
+			{
+				if (__isShared(r))
+				{
+					int128_packed_t	__temp;
+
+					r->nitems += count;
+					memcpy(&__temp, &r->sum, sizeof(int128_packed_t));
+					__temp.i128 += sum.i128;
+					memcpy(&r->sum, &__temp, sizeof(int128_packed_t));
+				}
+				else
+				{
+					__atomic_add_uint64(&r->nitems, count);
+					__atomic_add_int128(&r->sum, &sum);
+				}
+			}
+		}
+	}
+}
+
+/*
  * __update_nogroups__pstddev
  */
 INLINE_FUNCTION(void)
@@ -801,6 +975,15 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 										   cmeta, desc,
 										   source_is_valid);
 				break;
+
+			case KAGG_ACTION__PAVG_NUMERIC:
+			case KAGG_ACTION__PSUM_NUMERIC:
+				assert((uintptr_t)buffer == MAXALIGN((uintptr_t)buffer));
+				__update_nogroups__psum_numeric(kcxt, buffer,
+												cmeta, desc,
+												source_is_valid);
+				break;
+
 			case KAGG_ACTION__STDDEV:
 				__update_nogroups__pstddev(kcxt, buffer,
 										   cmeta, desc,
@@ -1209,6 +1392,44 @@ __update_groupby__psum_fp(kern_context *kcxt,
 }
 
 INLINE_FUNCTION(int)
+__update_groupby__psum_numeric(kern_context *kcxt,
+							   char *buffer,
+							   const kern_colmeta *cmeta,
+							   const kern_aggregate_desc *desc)
+{
+	xpu_numeric_t *xnum = (xpu_numeric_t *)kcxt->kvars_slot[desc->arg0_slot_id];
+
+	if (xnum->expr_ops == &xpu_numeric_ops &&
+		xpu_numeric_validate(kcxt, xnum))
+	{
+		kagg_state__psum_numeric_packed *r =
+			(kagg_state__psum_numeric_packed *)buffer;
+		if (xnum->kind == XPU_NUMERIC_KIND__VALID)
+		{
+			int16_t		weight = (int16_t)(r->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+			int128_packed_t ival;
+
+			ival.i128 = __normalize_numeric_int128(weight, xnum->weight, xnum->u.value);
+			__atomic_add_uint64(&r->nitems, 1);
+			__atomic_add_int128(&r->sum, &ival);
+		}
+		else
+		{
+			uint32_t	special;
+
+			if (xnum->kind == XPU_NUMERIC_KIND__POS_INF)
+				special = __PAGG_NUMERIC_ATTRS__PINF;
+			else if (xnum->kind == XPU_NUMERIC_KIND__NEG_INF)
+				special = __PAGG_NUMERIC_ATTRS__NINF;
+			else
+				special = XPU_NUMERIC_KIND__NAN;
+			__atomic_or_uint32(&r->attrs, special);
+		}
+	}
+	return sizeof(kagg_state__psum_numeric_packed);
+}
+
+INLINE_FUNCTION(int)
 __update_groupby__pstddev(kern_context *kcxt,
 						  char *buffer,
 						  const kern_colmeta *cmeta,
@@ -1325,6 +1546,10 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 			case KAGG_ACTION__PAVG_FP:
 			case KAGG_ACTION__PSUM_FP:
 				curr += __update_groupby__psum_fp(kcxt, curr, cmeta, desc);
+				break;
+			case KAGG_ACTION__PAVG_NUMERIC:
+			case KAGG_ACTION__PSUM_NUMERIC:
+				curr += __update_groupby__psum_numeric(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__STDDEV:
 				curr += __update_groupby__pstddev(kcxt, curr, cmeta, desc);
@@ -1579,6 +1804,18 @@ __setupGpuPreAggGroupByBufferOne(kern_context *kcxt,
 				pos += sizeof(kagg_state__psum_fp_packed);
 				break;
 
+			case KAGG_ACTION__PSUM_NUMERIC:
+			case KAGG_ACTION__PAVG_NUMERIC:
+				{
+					kagg_state__psum_numeric_packed *r =
+						(kagg_state__psum_numeric_packed *)pos;
+					memset(r, 0, sizeof(kagg_state__psum_numeric_packed));
+					r->attrs = __numeric_typmod_weight(desc->typmod);
+					SET_VARSIZE(r, sizeof(kagg_state__psum_numeric_packed));
+					pos += sizeof(kagg_state__psum_numeric_packed);
+				}
+				break;
+
 			case KAGG_ACTION__STDDEV:
 				memset(pos, 0, sizeof(kagg_state__stddev_packed));
 				SET_VARSIZE(pos, sizeof(kagg_state__stddev_packed));
@@ -1772,6 +2009,28 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 						__atomic_add_fp64(&r->sum, s->sum);
 					}
 					nbytes = sizeof(kagg_state__psum_fp_packed);
+				}
+				break;
+
+			case KAGG_ACTION__PSUM_NUMERIC:
+			case KAGG_ACTION__PAVG_NUMERIC:
+				{
+					const kagg_state__psum_numeric_packed *s =
+						(const kagg_state__psum_numeric_packed *)pos;
+                    kagg_state__psum_numeric_packed *r =
+                        (kagg_state__psum_numeric_packed *)((char *)htup + t_hoff);
+					if (s->nitems > 0)
+					{
+						/* weight must be equal */
+						uint32_t	special = (s->attrs & __PAGG_NUMERIC_ATTRS__MASK);
+
+						assert((s->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT) ==
+							   (r->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT));
+						__atomic_or_uint32(&r->attrs, special);
+						__atomic_add_uint64(&r->nitems, s->nitems);
+						__atomic_add_int128(&r->sum, &s->sum);
+					}
+					nbytes = sizeof(kagg_state__psum_numeric_packed);
 				}
 				break;
 
