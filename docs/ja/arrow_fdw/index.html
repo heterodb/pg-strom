@@ -394,7 +394,7 @@ f_lineorder_1995_MAIL.arrow   f_lineorder_1997_TRUCK.arrow
 <p>Arrow_Fdwでは、外部テーブルオプション<code>pattern</code>を使用する事でファイル名の一部を列として参照する事ができます。これを仮想列と呼び、以下のように設定します。</p>
 <pre><code>=# IMPORT FOREIGN SCHEMA f_lineorder
      FROM SERVER arrow_fdw INTO public
-  OPTIONS (dir '/opt/arrow/mydata', pattern 'f_lineorder__${shipping}.arrow');
+  OPTIONS (dir '/opt/arrow/mydata', pattern 'f_lineorder_@{year}_${shipping}.arrow');
 IMPORT FOREIGN SCHEMA
 
 =# \d f_lineorder

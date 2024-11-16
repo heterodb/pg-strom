@@ -472,7 +472,7 @@ In Arrow_Fdw, you can refer to part of the file name as a column by using the fo
 ```
 =# IMPORT FOREIGN SCHEMA f_lineorder
      FROM SERVER arrow_fdw INTO public
-  OPTIONS (dir '/opt/arrow/mydata', pattern 'f_lineorder_@{year}_${shipping}.arrow');
+  OPTIONS (dir '/opt/arrow/mydata', pattern 'f_lineorder_@\{year}_${shipping}.arrow');
 IMPORT FOREIGN SCHEMA
 
 =# \d f_lineorder

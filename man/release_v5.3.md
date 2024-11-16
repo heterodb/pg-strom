@@ -11,7 +11,7 @@ PG-Strom v5.3における主要な変更は点は以下の通りです。
 
 - GpuJoin Partitioned Pinned Inner Buffer
 - Arrow_Fdw Virtual Columns
-
+- AVG(numeric), SUM(numeric)の誤差問題
 
 
 - GpuJoin Pinned Inner Buffer
