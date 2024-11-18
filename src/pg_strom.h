@@ -980,7 +980,63 @@ extern bool		pathNameMatchByPattern(const char *pathname,
 									   List **p_attrKinds,
 									   List **p_attrKeys,
 									   List **p_attrValues);
-
+/*
+ * extra.c (copied from heterodb-extra)
+ */
+extern const char  *heterodb_extra_init_module(const char *extra_pathname);
+extern void			heterodbExtraSetError(int errcode,
+										  const char *filename,
+										  unsigned int lineno,
+										  const char *funcname,
+										  const char *fmt, ...)
+					pg_attribute_printf(5,6);
+extern int			heterodbExtraGetError(const char **p_filename,
+										  unsigned int *p_lineno,
+										  const char **p_funcname,
+										  char *buffer, size_t buffer_sz);
+extern int			heterodbLicenseReload(void);
+extern int			heterodbLicenseReloadPath(const char *path);
+extern ssize_t		heterodbLicenseQuery(char *buf, size_t bufsz);
+extern const char  *heterodbLicenseDecrypt(const char *path);
+extern int			heterodbValidateDevice(const char *gpu_device_name,
+										   const char *gpu_device_uuid);
+extern const char  *heterodbInitOptimalGpus(const char *manual_config);
+extern gpumask_t	heterodbGetOptimalGpus(const char *path,
+										   const char *policy);
+extern bool			gpuDirectInitDriver(void);
+extern bool			gpuDirectOpenDriver(void);
+extern bool			gpuDirectCloseDriver(void);
+extern bool			gpuDirectMapGpuMemory(CUdeviceptr m_segment,
+										  size_t segment_sz,
+										  unsigned long *p_iomap_handle);
+extern bool			gpuDirectUnmapGpuMemory(CUdeviceptr m_segment,
+											unsigned long iomap_handle);
+extern bool			gpuDirectRegisterStream(CUstream cuda_stream);
+extern bool			gpuDirectDeregisterStream(CUstream cuda_stream);
+extern bool			gpuDirectFileReadIOV(const char *pathname,
+										 CUdeviceptr m_segment,
+										 off_t m_offset,
+										 unsigned long iomap_handle,
+										 const strom_io_vector *iovec,
+										 uint32_t *p_npages_direct_read,
+										 uint32_t *p_npages_vfs_read);
+extern bool			gpuDirectFileReadAsyncIOV(const char *pathname,
+											  CUdeviceptr m_segment,
+											  off_t m_offset,
+											  unsigned long iomap_handle,
+											  const strom_io_vector *iovec,
+											  CUstream cuda_stream,
+											  uint32_t *p_error_code_async,
+											  uint32_t *p_npages_direct_read,
+											  uint32_t *p_npages_vfs_read);
+extern const char  *gpuDirectGetProperty(void);
+extern bool			gpuDirectSetProperty(const char *key,
+										 const char *value);
+extern void			gpuDirectCleanUpOnThreadTerminate(void);
+extern bool			heterodbExtraCloudGetVMInfo(const char *cloud_name,
+												const char **p_vm_type,
+												const char **p_vm_image,
+												const char **p_vm_ident);
 /*
  * githash.c (auto-generated)
  */
