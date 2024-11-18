@@ -285,12 +285,29 @@ receiveGpuDevAttrs(int fdesc)
 		{
 			memcpy(&devNotValidated, &dtemp, sizeof(GpuDevAttributes));
 		}
+		else
+		{
+			elog(LOG, "GPU%d %s (%d SMs; %dMHz, L2 %dkB) WAS NOT VALIDATED",
+				 dtemp.DEV_ID,
+				 dtemp.DEV_NAME,
+				 dtemp.MULTIPROCESSOR_COUNT,
+				 dtemp.CLOCK_RATE / 1000,
+				 dtemp.L2_CACHE_SIZE >> 10);
+		}
 	}
 
 	if (devAttrs)
 	{
 		numGpuDevAttrs = nitems;
 		gpuDevAttrs = devAttrs;
+
+		if (num_not_validated > 0)
+			elog(LOG, "GPU%d %s (%d SMs; %dMHz, L2 %dkB) WAS NOT VALIDATED",
+				 devNotValidated.DEV_ID,
+				 devNotValidated.DEV_NAME,
+				 devNotValidated.MULTIPROCESSOR_COUNT,
+				 devNotValidated.CLOCK_RATE / 1000,
+				 devNotValidated.L2_CACHE_SIZE >> 10);
 	}
 	else if (num_not_validated > 0)
 	{
