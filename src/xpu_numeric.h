@@ -248,13 +248,46 @@ __xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 	NumericDigit	n_data[PG_MAX_DATA];
 	int				ndigits;
 	int				len;
-	uint16_t		n_header = Max(weight, 0);
 	bool			is_negative = false;
 
 	if (value < 0)
 	{
 		is_negative = true;
 		value = -value;
+	}
+
+	/* cut down the weight if precision is too large */
+	while (weight > 0)
+	{
+		if (weight >= 5 && (value % 100000) == 0)
+		{
+			value  /= 100000;
+			weight -= 5;
+		}
+		else if (weight >= 4 && (value % 10000) == 0)
+		{
+			value  /= 10000;
+			weight -= 4;
+		}
+		else if (weight >= 3 && (value % 1000) == 0)
+		{
+			value  /= 1000;
+			weight -= 3;
+		}
+		else if (weight >= 2 && (value % 100) == 0)
+		{
+			value  /= 100;
+			weight -= 2;
+		}
+		else if (weight >= 1 && (value % 10) == 0)
+		{
+			value /= 10;
+			weight -= 1;
+		}
+		else
+		{
+			break;
+		}
 	}
 
 	/* special case handling for the least digits */
@@ -317,6 +350,8 @@ __xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 		len += sizeof(NumericDigit) * (-weight / PG_DEC_DIGITS);
 	if (buffer)
 	{
+		uint16_t	n_header = Max(weight, 0);
+
 		if (ndigits > 0)
 			memcpy(numBody->n_data,
 				   n_data + PG_MAX_DATA - ndigits,
