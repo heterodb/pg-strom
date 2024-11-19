@@ -1681,7 +1681,7 @@ __lookupOneRandomGpuContext(gpumask_t candidate_gpus)
 	int		nitems = 0;
 	int		index;
 
-	for (int dindex=0; candidate_gpus != 0; dindex++)
+	for (int dindex=0; candidate_gpus != 0 && dindex < numGpuDevAttrs; dindex++)
 	{
 		gpumask_t	__mask = (1UL << dindex);
 
@@ -3182,12 +3182,12 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 		gpuClientELog(gclient, "OpenSession is called twice");
 		return false;
 	}
-	if (session->optimal_gpus == 0)
+	gcontext_home = __lookupOneRandomGpuContext(session->optimal_gpus);
+	if (!gcontext_home)
 	{
-		gpuClientELog(gclient, "GPU-client must have at least one schedulable GPUs");
+		gpuClientELog(gclient, "GPU-client must have at least one schedulable GPUs: %08lx", session->optimal_gpus);
 		return false;
 	}
-	gcontext_home = __lookupOneRandomGpuContext(session->optimal_gpus);
 	gcontext_prev = gpuContextSwitchTo(gcontext_home);
 
 	gclient->optimal_gpus   = session->optimal_gpus;

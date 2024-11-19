@@ -20,7 +20,7 @@
 #define HETERODB_EXTRA_MAX_GPUS		63
 #ifndef HAS_GPUMASK_TYPEDEF
 #define HAS_GPUMASK_TYPEDEF
-#define INVALID_GPUMASK				(~0UL)
+#define INVALID_GPUMASK				(-1L)
 typedef int64_t						gpumask_t;
 #endif	/* HAS_GPUMASK_TYPEDEF */
 

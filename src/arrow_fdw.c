@@ -2251,6 +2251,8 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 			gpumask_t	__optimal_gpus;
 
 			__optimal_gpus = GetOptimalGpuForFile(af_state->filename);
+			if (__optimal_gpus == INVALID_GPUMASK)
+				return 0;
 			if (lc == list_head(af_list))
 				optimal_gpus = __optimal_gpus;
 			else
@@ -3890,7 +3892,9 @@ __arrowFdwExecInit(ScanState *ss,
 				{
 					gpumask_t	__optimal_gpus = GetOptimalGpuForFile(fname);
 
-					if (af_states_list == NIL)
+					if (__optimal_gpus == INVALID_GPUMASK)
+						optimal_gpus = 0;
+					else if (af_states_list == NIL)
 						optimal_gpus = __optimal_gpus;
 					else
 						optimal_gpus &= __optimal_gpus;

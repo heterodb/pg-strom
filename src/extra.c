@@ -241,10 +241,10 @@ heterodbInitOptimalGpus(const char *manual_config)
 /*
  * heterodbGetOptimalGpus
  */
-static int64_t (*p_heterodb_get_optimal_gpus)(const char *path) = NULL;
-static int64_t (*p_heterodb_get_optimal_gpus_v2)(const char *path,
-												 const char *policy) = NULL;
-int64_t
+static gpumask_t  (*p_heterodb_get_optimal_gpus)(const char *path) = NULL;
+static gpumask_t  (*p_heterodb_get_optimal_gpus_v2)(const char *path,
+													const char *policy) = NULL;
+gpumask_t
 heterodbGetOptimalGpus(const char *path, const char *policy)
 {
 	if (p_heterodb_get_optimal_gpus_v2)

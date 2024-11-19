@@ -626,13 +626,16 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 gpumask_t
 GetOptimalGpuForRelation(Relation relation)
 {
-	Oid		tablespace_oid;
+	Oid			tablespace_oid;
+	gpumask_t	optimal_gpus;
 
 	/* only heap relation */
 	Assert(RelationGetForm(relation)->relam == HEAP_TABLE_AM_OID);
 	tablespace_oid = RelationGetForm(relation)->reltablespace;
 
-	return GetOptimalGpuForTablespace(tablespace_oid);
+	if ((optimal_gpus = GetOptimalGpuForTablespace(tablespace_oid)) == INVALID_GPUMASK)
+		return 0;
+	return optimal_gpus;
 }
 
 /*
@@ -658,7 +661,7 @@ GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 		return 0UL;		/* table is too small */
 
 	optimal_gpus = GetOptimalGpuForTablespace(baserel->reltablespace);
-	if (optimal_gpus != 0)
+	if (optimal_gpus != INVALID_GPUMASK)
 	{
 		RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
 		char	relpersistence = get_rel_persistence(rte->relid);
