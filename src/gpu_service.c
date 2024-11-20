@@ -3630,13 +3630,16 @@ resume_kernel:
 			gpuClientFatal(gclient, "GpuService is going to terminate during kernel suspend/resume");
 			goto bailout;
 		}
+		__gsDebug("suspend / resume by %s at %s:%d (%s)",
+				  kgtask->kerror.errcode == ERRCODE_SUSPEND_NO_SPACE
+				  ? "Buffer no space"
+				  : "CPU fallback",
+				  kgtask->kerror.filename,
+				  kgtask->kerror.lineno,
+				  kgtask->kerror.message);
 		last_kernel_errcode = kgtask->kerror.errcode;
 		kgtask->kerror.errcode = 0;
 		kgtask->resume_context = true;
-		__gsDebug("suspend / resume by %s",
-				  kgtask->kerror.errcode == ERRCODE_SUSPEND_NO_SPACE
-				  ? "buffer no space"
-				  : "CPU fallback");
 		goto resume_kernel;
 	}
 	else

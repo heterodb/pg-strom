@@ -16,6 +16,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
@@ -3579,8 +3580,6 @@ __preagg_fetch_xdatum_as_float64(float8_t *p_fval, const xpu_datum_t *xdatum)
  *
  * ----------------------------------------------------------------
  */
-#include <stdio.h>
-
 INLINE_FUNCTION(void)
 print_kern_data_store(const kern_data_store *kds)
 {

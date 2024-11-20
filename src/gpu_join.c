@@ -2276,6 +2276,7 @@ again:
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
 				h_kmrels->chunks[depth-1].gist_offset = offset;
+				nbytes = block_offset + BLCKSZ * nblocks;
 
 				setup_kern_data_store(kds, i_tupdesc, nbytes,
 									  KDS_FORMAT_BLOCK);
@@ -2298,12 +2299,12 @@ again:
 
 					UnlockReleaseBuffer(buffer);
 				}
-				kds->length = block_offset + BLCKSZ * nblocks;
+				kds->length = nbytes;
 				kds->nitems = nblocks;
 				kds->block_nloaded = nblocks;
 				innerPreloadSetupGiSTIndex(i_rel, kds);
 			}
-			offset += (block_offset + BLCKSZ * nblocks);
+			offset += nbytes;
 		}
 		else
 		{

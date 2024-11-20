@@ -1904,6 +1904,13 @@ restart:
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg_gist, &status))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			/*
+			 * XXX - right now, we don't support CPU fallback in the GiST-Join
+			 *       index qualifiers. So, we just rewrite error code to stop
+			 *       execution.
+			 */
+			if (kcxt->errcode == ERRCODE_SUSPEND_FALLBACK)
+				kcxt->errcode = ERRCODE_DEVICE_ERROR;
 			return ULONG_MAX;
 		}
 		/* check result */
@@ -1997,10 +2004,10 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 	kcxt_reset(kcxt);
 	if (!ExecGpuJoinQuals(kcxt, kexp_join, &status))
 	{
-		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		if (!HandleErrorIfCpuFallback(kcxt, depth, 0, false))
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		return false;
 	}
-	//XXX - CHECK CPU FALLBACK?
 	return (status > 0);
 }
 
