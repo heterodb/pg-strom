@@ -6294,31 +6294,34 @@ pgfn_st_crosses(XPU_PGFUNCTION_ARGS)
 		if (geom1.type == GEOM_POINTTYPE ||
 			geom1.type == GEOM_MULTIPOINTTYPE)
 		{
+			result->expr_ops = &xpu_bool_ops;
 			if (geom2.type == GEOM_LINETYPE ||
 				geom2.type == GEOM_MULTILINETYPE ||
 				geom2.type == GEOM_TRIANGLETYPE ||
 				geom2.type == GEOM_POLYGONTYPE ||
 				geom2.type == GEOM_MULTIPOLYGONTYPE)
 			{
-				result->expr_ops = &xpu_bool_ops;
 				result->value = ((status & IM__INTER_INTER_2D) != 0 &&
 								 (status & IM__INTER_EXTER_2D) != 0);
+			}
+			else
+			{
+				result->value = false;
 			}
 		}
 		else if (geom1.type == GEOM_LINETYPE ||
 				 geom1.type == GEOM_MULTILINETYPE)
 		{
+			result->expr_ops = &xpu_bool_ops;
 			if (geom2.type == GEOM_POINTTYPE ||
 				geom2.type == GEOM_MULTIPOINTTYPE)
 			{
-				result->expr_ops = &xpu_bool_ops;
 				result->value = ((status & IM__INTER_INTER_2D) != 0 &&
 								 (status & IM__EXTER_INTER_2D) != 0);
 			}
 			else if (geom2.type == GEOM_LINETYPE ||
 					 geom2.type == GEOM_MULTILINETYPE)
 			{
-				result->expr_ops = &xpu_bool_ops;
 				result->value = ((status & IM__INTER_INTER_2D) == IM__INTER_INTER_0D &&
 								 (status & IM__BOUND_BOUND_2D) == 0);
 			}
@@ -6326,23 +6329,30 @@ pgfn_st_crosses(XPU_PGFUNCTION_ARGS)
 					 geom2.type == GEOM_POLYGONTYPE ||
 					 geom2.type == GEOM_MULTIPOLYGONTYPE)
 			{
-				result->expr_ops = &xpu_bool_ops;
 				result->value = ((status & IM__INTER_INTER_2D) != 0 &&
 								 (status & IM__INTER_EXTER_2D) != 0);
+			}
+			else
+			{
+				result->value = false;
 			}
 		}
 		else if (geom1.type == GEOM_TRIANGLETYPE ||
 				 geom1.type == GEOM_POLYGONTYPE ||
 				 geom1.type == GEOM_MULTIPOLYGONTYPE)
 		{
+			result->expr_ops = &xpu_bool_ops;
 			if (geom2.type == GEOM_POINTTYPE ||
 				geom2.type == GEOM_MULTIPOINTTYPE ||
 				geom2.type == GEOM_LINETYPE ||
 				geom2.type == GEOM_MULTILINETYPE)
 			{
-				result->expr_ops = &xpu_bool_ops;
 				result->value = ((status & IM__INTER_INTER_2D) != 0 &&
 								 (status & IM__EXTER_INTER_2D) != 0);
+			}
+			else
+			{
+				result->value = false;
 			}
 		}
 	}
