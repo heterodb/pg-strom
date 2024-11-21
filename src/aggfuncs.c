@@ -317,25 +317,30 @@ PUBLIC_FUNCTION(Datum)
 pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_numeric_packed *r;
-	xpu_numeric_t	num;
+	uint8_t		kind;
+	int16_t		weight;
+	int128_t	value;
 	const char	   *emsg;
 
-	emsg = __xpu_numeric_from_varlena(&num, (varlena *)PG_GETARG_NUMERIC(0));
+	emsg = __xpu_numeric_from_varlena(&kind,
+									  &weight,
+									  &value,
+									  (varlena *)PG_GETARG_NUMERIC(0));
 	if (emsg)
 		elog(ERROR, "%s: %s", __FUNCTION__, emsg);
 
 	r = palloc0(sizeof(kagg_state__psum_numeric_packed));
-	if (num.kind == XPU_NUMERIC_KIND__NAN)
+	if (kind == XPU_NUMERIC_KIND__NAN)
 		r->attrs |= __PAGG_NUMERIC_ATTRS__NAN;
-	else if (num.kind == XPU_NUMERIC_KIND__POS_INF)
+	else if (kind == XPU_NUMERIC_KIND__POS_INF)
 		r->attrs |= __PAGG_NUMERIC_ATTRS__PINF;
-	else if (num.kind == XPU_NUMERIC_KIND__NEG_INF)
+	else if (kind == XPU_NUMERIC_KIND__NEG_INF)
 		r->attrs |= __PAGG_NUMERIC_ATTRS__NINF;
 	else
 	{
-		Assert(num.kind == XPU_NUMERIC_KIND__VALID);
-		r->attrs |= ((uint32_t)num.weight & __PAGG_NUMERIC_ATTRS__WEIGHT);
-		r->sum.i128 = num.u.value;
+		Assert(kind == XPU_NUMERIC_KIND__VALID);
+		r->attrs |= ((uint32_t)weight & __PAGG_NUMERIC_ATTRS__WEIGHT);
+		r->sum.i128 = value;
 	}
 	r->nitems = 1;
 	SET_VARSIZE(r, sizeof(kagg_state__psum_numeric_packed));

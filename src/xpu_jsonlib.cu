@@ -281,7 +281,7 @@ __xpu_jsonb_comp_hash(kern_context *kcxt, JsonbContainer *jc)
 			const char	   *error_msg;
 
 			data = base + INTALIGN(getJsonbOffset(jc, index));
-			error_msg = __xpu_numeric_from_varlena(&num, (varlena *)data);
+			error_msg = xpu_numeric_from_varlena(&num, (varlena *)data);
 			if (error_msg)
 			{
 				STROM_ELOG(kcxt, error_msg);
@@ -1056,7 +1056,7 @@ pgfn_jsonb_object_field_as_numeric(XPU_PGFUNCTION_ARGS)
 					datalen = getJsonbLength(jc, index);
 
 					assert(VARSIZE_ANY(data) <= datalen);
-					error_msg = __xpu_numeric_from_varlena(result, (varlena *)data);
+					error_msg = xpu_numeric_from_varlena(result, (varlena *)data);
 					if (error_msg)
 					{
 						STROM_ELOG(kcxt, error_msg);
@@ -1179,7 +1179,7 @@ pgfn_jsonb_array_element_as_numeric(XPU_PGFUNCTION_ARGS)
 					datalen = getJsonbLength(jc, index);
 
 					assert(VARSIZE_ANY(data) <= datalen);
-					error_msg = __xpu_numeric_from_varlena(result, (varlena *)data);
+					error_msg = xpu_numeric_from_varlena(result, (varlena *)data);
 					if (error_msg)
 					{
 						STROM_ELOG(kcxt, error_msg);

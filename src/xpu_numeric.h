@@ -163,26 +163,58 @@ NUMERIC_WEIGHT(NumericChoice *nc, uint16_t n_head)
 }
 
 INLINE_FUNCTION(void)
-set_normalized_numeric(xpu_numeric_t *result, int128_t value, int16_t weight)
+__xpu_numeric_normalize(int16_t *p_weight,
+						int128_t *p_value)
 {
+	int16_t		weight = *p_weight;
+	int128_t	value  = *p_value;
+
 	if (value == 0)
 		weight = 0;
 	else
 	{
-		while (value % 10 == 0)
+		while (weight > 0)
 		{
-			value /= 10;
-			weight--;
+			if (weight >= 5 && (value % 100000) == 0)
+			{
+				value  /= 100000;
+				weight -= 5;
+			}
+			else if (weight >= 4 && (value % 10000) == 0)
+			{
+				value  /= 10000;
+				weight -= 4;
+			}
+			else if (weight >= 3 && (value % 1000) == 0)
+			{
+				value  /= 1000;
+				weight -= 3;
+			}
+			else if (weight >= 2 && (value % 100) == 0)
+			{
+				value  /= 100;
+				weight -= 2;
+			}
+			else if (weight >= 1 && (value % 10) == 0)
+			{
+				value  /= 10;
+				weight -= 1;
+			}
+			else
+			{
+				break;
+			}
 		}
 	}
-	result->expr_ops = &xpu_numeric_ops;
-	result->kind     = XPU_NUMERIC_KIND__VALID;
-	result->weight   = weight;
-	result->u.value  = value;
+	*p_weight = weight;
+	*p_value  = value;
 }
 
 INLINE_FUNCTION(const char *)
-__xpu_numeric_from_varlena(xpu_numeric_t *result, const varlena *addr)
+__xpu_numeric_from_varlena(uint8_t  *p_kind,
+						   int16_t  *p_weight,
+						   int128_t *p_value,
+						   const varlena *addr)
 {
 	uint32_t		len;
 
@@ -196,25 +228,24 @@ __xpu_numeric_from_varlena(xpu_numeric_t *result, const varlena *addr)
 		if (NUMERIC_IS_SPECIAL(n_head))
 		{
 			if (NUMERIC_IS_NAN(n_head))
-				result->kind = XPU_NUMERIC_KIND__NAN;
+				*p_kind = XPU_NUMERIC_KIND__NAN;
 			else if (NUMERIC_IS_PINF(n_head))
-				result->kind = XPU_NUMERIC_KIND__POS_INF;
+				*p_kind = XPU_NUMERIC_KIND__POS_INF;
 			else if (NUMERIC_IS_NINF(n_head))
-				result->kind = XPU_NUMERIC_KIND__NEG_INF;
+				*p_kind = XPU_NUMERIC_KIND__NEG_INF;
 			else
-				goto error;
-
-			result->weight  = 0;
-			result->u.value = 0;
+				return "unknown special numeric value";
+			*p_weight = 0;
+			*p_value  = 0;
 		}
 		else
 		{
 			NumericDigit *digits = NUMERIC_DIGITS(nc, n_head);
-			int			weight  = NUMERIC_WEIGHT(nc, n_head) + 1;
-			int			i, ndigits = NUMERIC_NDIGITS(n_head, len);
+			int16_t		weight  = NUMERIC_WEIGHT(nc, n_head) + 1;
+			int			ndigits = NUMERIC_NDIGITS(n_head, len);
 			int128_t	value = 0;
 
-			for (i=0; i < ndigits; i++)
+			for (int i=0; i < ndigits; i++)
 			{
 				NumericDigit dig = __Fetch(&digits[i]);
 
@@ -231,14 +262,18 @@ __xpu_numeric_from_varlena(xpu_numeric_t *result, const varlena *addr)
 			if (NUMERIC_SIGN(n_head) == NUMERIC_NEG)
 				value = -value;
 			weight = PG_DEC_DIGITS * (ndigits - weight);
+			__xpu_numeric_normalize(&weight, &value);
 
-			set_normalized_numeric(result, value, weight);
+			*p_kind   = XPU_NUMERIC_KIND__VALID;
+			*p_weight = weight;
+			*p_value  = value;
 		}
 		return NULL;
 	}
-error:
 	return "corrupted numeric header";
 }
+EXTERN_FUNCTION(const char *)
+xpu_numeric_from_varlena(xpu_numeric_t *result, const varlena *addr);
 
 INLINE_FUNCTION(int)
 __xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
@@ -246,7 +281,7 @@ __xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 	NumericData	   *numData = (NumericData *)buffer;
 	NumericLong	   *numBody = &numData->choice.n_long;
 	NumericDigit	n_data[PG_MAX_DATA];
-	int				ndigits;
+	int				ndigits = 0;
 	int				len;
 	bool			is_negative = false;
 
@@ -255,43 +290,9 @@ __xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 		is_negative = true;
 		value = -value;
 	}
-
-	/* cut down the weight if precision is too large */
-	while (weight > 0)
-	{
-		if (weight >= 5 && (value % 100000) == 0)
-		{
-			value  /= 100000;
-			weight -= 5;
-		}
-		else if (weight >= 4 && (value % 10000) == 0)
-		{
-			value  /= 10000;
-			weight -= 4;
-		}
-		else if (weight >= 3 && (value % 1000) == 0)
-		{
-			value  /= 1000;
-			weight -= 3;
-		}
-		else if (weight >= 2 && (value % 100) == 0)
-		{
-			value  /= 100;
-			weight -= 2;
-		}
-		else if (weight >= 1 && (value % 10) == 0)
-		{
-			value /= 10;
-			weight -= 1;
-		}
-		else
-		{
-			break;
-		}
-	}
+	__xpu_numeric_normalize(&weight, &value);
 
 	/* special case handling for the least digits */
-	ndigits = 0;
 	if (value != 0)
 	{
 		int		mod = -1;
@@ -378,7 +379,7 @@ xpu_numeric_validate(kern_context *kcxt, xpu_numeric_t *num)
 		const varlena  *vl_addr = num->u.vl_addr;
 		const char	   *errmsg;
 
-		errmsg = __xpu_numeric_from_varlena(num, vl_addr);
+		errmsg = xpu_numeric_from_varlena(num, vl_addr);
 		if (errmsg)
 		{
 			STROM_ELOG(kcxt, errmsg);
