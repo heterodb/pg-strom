@@ -556,6 +556,7 @@ typedef struct
 	uint32_t	extra_bufsz;
 	uint32_t	device_cost;
 	uint32_t	kexp_flags;
+	uint32_t	stack_usage;
 	List	   *kvars_deflist;
 	List	   *tlist_dev;
 	int			kvecs_ndims;

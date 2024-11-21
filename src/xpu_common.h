@@ -2069,6 +2069,7 @@ typedef struct
 												 * no locale configuration */
 #define DEVKERN__SESSION_TIMEZONE	0x00000200U	/* Device function needs session
 												 * timezone */
+#define DEVFUNC__HAS_RECURSION		0x00000400U	/* Device function has recursive calls */
 #define DEVTYPE__HAS_COMPARE		0x00000800U	/* Device type has compare handler */
 #define DEVTASK__PINNED_HASH_RESULTS 0x00001000U/* Pinned results in HASH format */
 #define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
