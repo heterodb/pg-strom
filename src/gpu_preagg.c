@@ -1346,12 +1346,35 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
  */
 static void
 try_add_final_groupby_paths(xpugroupby_build_path_context *con,
-							Path *part_path)
+							Path *part_path,
+							bool be_parallel)
 {
 	Query	   *parse = con->root->parse;
 	Path	   *agg_path;
 	Path	   *dummy_path;
 
+	/*
+	 * try injection of window-function optimal final-aggregation
+	 */
+	try_add_final_aggsorted_paths(con->root,
+								  con->group_rel,
+								  con->target_final,
+								  (List *)con->havingQual,
+								  part_path,
+								  con->num_groups);
+
+	/* inject Gather path if parallel-aware */
+	if (be_parallel)
+	{
+		part_path = (Path *)
+			create_gather_path(con->root,
+							   con->group_rel,
+							   part_path,
+                               part_path->pathtarget,
+                               NULL,
+							   &con->num_groups);
+	}
+	/* put final Aggregation path */
 	if (parse->groupClause)
 	{
 		Assert(grouping_is_hashable(parse->groupClause));
@@ -1547,20 +1570,8 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	if (!xpugroupby_build_path_target(&con))
 		return;
 	part_path = (Path *)__buildXpuPreAggCustomPath(&con);
-
-	/* inject Gather path if parallel-aware */
-	if (be_parallel)
-	{
-		part_path = (Path *)
-			create_gather_path(root,
-							   group_rel,
-							   part_path,
-							   part_path->pathtarget,
-							   NULL,
-							   &num_groups);
-	}
 	/* try add final groupby path */
-	try_add_final_groupby_paths(&con, part_path);
+	try_add_final_groupby_paths(&con, part_path, be_parallel);
 }
 
 static void
@@ -1675,20 +1686,8 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 						   try_parallel_path,
 						   total_nrows);
 	part_path->pathtarget = part_target;
-
-	/* put Gather path if parallel-aware */
-	if (try_parallel_path)
-	{
-		part_path = (Path *)
-			create_gather_path(root,
-							   group_rel,
-							   part_path,
-							   part_path->pathtarget,
-							   NULL,
-							   &total_nrows);
-	}
 	/* try add final groupby path */
-	try_add_final_groupby_paths(&con, part_path);
+	try_add_final_groupby_paths(&con, part_path, try_parallel_path);
 }
 
 static void

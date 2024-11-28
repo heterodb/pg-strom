@@ -896,7 +896,18 @@ extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 									  kern_data_store *kds,
 									  size_t index,
 									  const Bitmapset *referenced);
-extern void pgstrom_init_arrow_fdw(void);
+extern void		pgstrom_init_arrow_fdw(void);
+
+/*
+ * aggsorted.c
+ */
+extern void		try_add_final_aggsorted_paths(PlannerInfo *root,
+											  RelOptInfo *group_rel,
+											  PathTarget *target_final,
+											  List *having_quals,
+											  Path *part_path,
+											  double num_groups);
+extern void		pgstrom_init_aggsorted(void);
 
 /*
  * fallback.c
