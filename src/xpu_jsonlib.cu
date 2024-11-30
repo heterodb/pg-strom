@@ -327,6 +327,7 @@ xpu_jsonb_datum_hash(kern_context*kcxt,
 
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(jsonb)
 
 STATIC_FUNCTION(bool)
 xpu_jsonb_datum_comp(kern_context*kcxt,

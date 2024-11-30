@@ -1865,6 +1865,23 @@ struct xpu_datum_operators {
 		.xpu_datum_comp       = xpu_##NAME##_datum_comp,			\
 	}
 
+#define PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(NAME)			\
+	PUBLIC_FUNCTION(bool)										\
+	pgfn_##NAME##_devhash(XPU_PGFUNCTION_ARGS)					\
+	{															\
+		uint32_t	hash;										\
+		KEXP_PROCESS_ARGS2(int8, NAME, arg, int8, seed);		\
+																\
+		if (!xpu_##NAME##_datum_hash(kcxt, &hash,				\
+									 (xpu_datum_t *)&arg))		\
+			return false;										\
+		if (!XPU_DATUM_ISNULL(&seed))							\
+			hash = pg_hash_merge((uint32_t)seed.value, hash);	\
+		result->expr_ops = &xpu_int8_ops;						\
+		result->value = hash;									\
+		return true;											\
+	}
+
 #include "xpu_basetype.h"
 #include "xpu_numeric.h"
 #include "xpu_textlib.h"
@@ -2060,26 +2077,27 @@ typedef struct
  * Definition of device flags
  *
  * ---------------------------------------------------------------- */
-#define DEVKIND__NONE				0x00000000U	/* no accelerator device */
-#define DEVKIND__NVIDIA_GPU			0x00000001U	/* for CUDA-based GPU */
-#define DEVKIND__NVIDIA_DPU			0x00000002U	/* for BlueField-X DPU */
-#define DEVKIND__ANY				0x00000003U	/* Both of GPU and DPU */
-#define DEVFUNC__LOCALE_AWARE		0x00000100U	/* Device function is locale aware,
-												 * thus, available only if "C" or
-												 * no locale configuration */
-#define DEVKERN__SESSION_TIMEZONE	0x00000200U	/* Device function needs session
-												 * timezone */
-#define DEVFUNC__HAS_RECURSION		0x00000400U	/* Device function has recursive calls */
-#define DEVTYPE__HAS_COMPARE		0x00000800U	/* Device type has compare handler */
-#define DEVTASK__PINNED_HASH_RESULTS 0x00001000U/* Pinned results in HASH format */
-#define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
-#define DEVTASK__USED_GPUDIRECT		0x00004000U	/* Task used GPU-Direct SQL */
-#define DEVTASK__USED_GPUCACHE		0x00008000U	/* Task used GPU-Cache */
+#define DEVKIND__NONE					0x00000000U	/* no accelerator device */
+#define DEVKIND__NVIDIA_GPU				0x00000001U	/* for CUDA-based GPU */
+#define DEVKIND__NVIDIA_DPU				0x00000002U	/* for BlueField-X DPU */
+#define DEVKIND__ANY					0x00000003U	/* Both of GPU and DPU */
+#define DEVFUNC__LOCALE_AWARE			0x00000100U	/* Device function is locale aware,
+													 * thus, available only if "C" or
+													 * no locale configuration */
+#define DEVKERN__SESSION_TIMEZONE		0x00000200U	/* Device function needs session
+													 * timezone */
+#define DEVFUNC__HAS_RECURSION			0x00000400U	/* Device function has recursive calls */
+#define DEVTYPE__HAS_COMPARE			0x00000800U	/* Device type has compare handler */
+#define DEVTYPE__HAS_DEVHASH			0x00001000U	/* Device type has its hash function */
+#define DEVTASK__PINNED_HASH_RESULTS	0x00010000U	/* Pinned results in HASH format */
+#define DEVTASK__PINNED_ROW_RESULTS		0x00020000U	/* Pinned results in ROW format */
+#define DEVTASK__USED_GPUDIRECT			0x00040000U	/* Task used GPU-Direct SQL */
+#define DEVTASK__USED_GPUCACHE			0x00080000U	/* Task used GPU-Cache */
 
-#define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
-#define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
-#define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
-#define DEVTASK__MASK				0x70000000U	/* mask of avove workloads */
+#define DEVTASK__SCAN					0x10000000U	/* xPU-Scan */
+#define DEVTASK__JOIN					0x20000000U	/* xPU-Join */
+#define DEVTASK__PREAGG					0x40000000U	/* xPU-PreAgg */
+#define DEVTASK__MASK					0x70000000U	/* mask of avove workloads */
 
 #define TASK_KIND__GPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_GPU)
 #define TASK_KIND__GPUJOIN		(DEVTASK__JOIN   | DEVKIND__NVIDIA_GPU)

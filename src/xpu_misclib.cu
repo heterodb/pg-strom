@@ -661,6 +661,7 @@ xpu_money_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(Cash));
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(money)
 
 STATIC_FUNCTION(bool)
 xpu_money_datum_comp(kern_context *kcxt,
@@ -793,6 +794,7 @@ xpu_uuid_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(arg->value.data, UUID_LEN);
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(uuid)
 
 INLINE_FUNCTION(int)
 uuid_cmp_internal(const xpu_uuid_t *datum_a,
@@ -975,6 +977,7 @@ xpu_macaddr_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(macaddr));
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(macaddr)
 
 INLINE_FUNCTION(int)
 macaddr_cmp_internal(const xpu_macaddr_t *datum_a, const xpu_macaddr_t *datum_b)
@@ -1287,6 +1290,8 @@ xpu_inet_datum_hash(kern_context *kcxt,
 	}
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(inet)
+
 /* see utils/adt/network.c */
 INLINE_FUNCTION(int)
 bitncmp(const unsigned char *l, const unsigned char *r, int n)

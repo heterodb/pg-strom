@@ -192,6 +192,7 @@ xpu_date_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(DateADT));
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(date)
 
 STATIC_FUNCTION(bool)
 xpu_date_datum_comp(kern_context *kcxt,
@@ -372,6 +373,7 @@ xpu_time_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(TimeADT));
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(time)
 
 STATIC_FUNCTION(bool)
 xpu_time_datum_comp(kern_context *kcxt,
@@ -494,6 +496,7 @@ xpu_timetz_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, SizeOfTimeTzADT);
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(timetz)
 
 STATIC_FUNCTION(bool)
 xpu_timetz_datum_comp(kern_context *kcxt,
@@ -665,6 +668,7 @@ xpu_timestamp_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(Timestamp));
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(timestamp)
 
 STATIC_FUNCTION(bool)
 xpu_timestamp_datum_comp(kern_context *kcxt,
@@ -845,6 +849,7 @@ xpu_timestamptz_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(TimestampTz));
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(timestamptz)
 
 STATIC_FUNCTION(bool)
 xpu_timestamptz_datum_comp(kern_context *kcxt,
@@ -1026,6 +1031,7 @@ xpu_interval_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(Interval));
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(interval)
 
 INLINE_FUNCTION(int128_t)
 interval_cmp_value(const Interval *ival)

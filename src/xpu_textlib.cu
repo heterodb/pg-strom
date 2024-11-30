@@ -199,6 +199,7 @@ xpu_bpchar_datum_hash(kern_context*kcxt,
 		return false;
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(bpchar)
 
 STATIC_FUNCTION(bool)
 xpu_bpchar_datum_comp(kern_context *kcxt,
@@ -359,6 +360,7 @@ xpu_text_datum_hash(kern_context *kcxt,
 		return false;
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(text)
 
 STATIC_FUNCTION(bool)
 xpu_text_datum_comp(kern_context *kcxt,
@@ -518,6 +520,7 @@ xpu_bytea_datum_hash(kern_context *kcxt,
 		return false;
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(bytea)
 
 STATIC_FUNCTION(bool)
 xpu_bytea_datum_comp(kern_context *kcxt,

@@ -209,6 +209,7 @@ xpu_numeric_datum_hash(kern_context *kcxt,
 				   pg_hash_any(&arg->u.value, sizeof(int128_t)));
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(numeric)
 
 STATIC_FUNCTION(int)
 __numeric_compare(const xpu_numeric_t *a, const xpu_numeric_t *b);

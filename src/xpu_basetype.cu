@@ -126,6 +126,7 @@ xpu_bool_datum_hash(kern_context *kcxt,
 		*p_hash = pg_hash_any(&arg->value, sizeof(bool));
 	return true;
 }
+PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(bool)
 
 STATIC_FUNCTION(bool)
 xpu_bool_datum_comp(kern_context *kcxt,
@@ -238,6 +239,7 @@ PGSTROM_SQLTYPE_OPERATORS(bool,true,1,sizeof(bool));
 			*p_comp = 0;												\
 		return true;													\
 	}																	\
+	PGSTROM_SQLTYPE_DEVHASH_FUNCTION_TEMPLATE(NAME)						\
 	PGSTROM_SQLTYPE_OPERATORS(NAME,true,sizeof(BASETYPE),sizeof(BASETYPE))
 
 #define PGSTROM_SIMPLE_INTEGER_TEMPLATE(NAME,BASETYPE)					\

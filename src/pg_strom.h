@@ -213,6 +213,7 @@ typedef struct devtype_info
 	/* oid of type related functions */
 	Oid			type_eqfunc;
 	Oid			type_cmpfunc;
+	Oid			type_devhash;
 	/* alias type, if any */
 	struct devtype_info *type_alias;
 	/* element type of array, if type is array */

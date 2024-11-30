@@ -166,6 +166,41 @@ get_cube_type_oid(bool missing_ok)
 }
 
 /*
+ * lookup_device_hash_function
+ */
+static Oid
+lookup_device_hash_function(const char *type_name, Oid type_oid)
+{
+	char	   *func_name = alloca(NAMEDATALEN);
+	oidvector  *func_args = alloca(offsetof(oidvector, values[2]));
+	Oid			func_namespace = get_namespace_oid("pgstrom", true);
+	Oid			func_oid = InvalidOid;
+	HeapTuple	tup;
+
+	snprintf(func_name, NAMEDATALEN-1, "%s_devhash", type_name);
+
+	SET_VARSIZE(func_args, offsetof(oidvector, values[2]));
+	func_args->ndim = 1;
+	func_args->dataoffset = 0;
+	func_args->elemtype = OIDOID;
+	func_args->dim1 = 2;
+	func_args->lbound1 = 0;
+	func_args->values[0] = type_oid;
+	func_args->values[1] = INT8OID;
+
+	tup = SearchSysCache3(PROCNAMEARGSNSP,
+						  PointerGetDatum(func_name),
+						  PointerGetDatum(func_args),
+						  ObjectIdGetDatum(func_namespace));
+	if (HeapTupleIsValid(tup))
+	{
+		func_oid = ((Form_pg_proc) GETSTRUCT(tup))->oid;
+		ReleaseSysCache(tup);
+	}
+	return func_oid;
+}
+
+/*
  * build_basic_devtype_info
  */
 static devtype_info *
@@ -219,6 +254,7 @@ build_basic_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 			/* type equality functions */
 			dtype->type_eqfunc = get_opcode(tcache->eq_opr);
 			dtype->type_cmpfunc = tcache->cmp_proc;
+			dtype->type_devhash = lookup_device_hash_function(__type_name, tcache->type_id);
 			MemoryContextSwitchTo(oldcxt);
 
 			return dtype;
@@ -274,6 +310,7 @@ build_composite_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	dtype->type_hashfunc = NULL; //devtype_composite_hash;
 	dtype->type_eqfunc = get_opcode(tcache->eq_opr);
 	dtype->type_cmpfunc = tcache->cmp_proc;
+	dtype->type_devhash = InvalidOid;
 	dtype->comp_nfields = tupdesc->natts;
 	memcpy(dtype->comp_subtypes, subtypes,
 		   sizeof(devtype_info *) * tupdesc->natts);
@@ -316,6 +353,7 @@ build_array_devtype_info(TypeCacheEntry *tcache, const char *ext_name)
 	/* type equality functions */
 	dtype->type_eqfunc = get_opcode(tcache->eq_opr);
 	dtype->type_cmpfunc = tcache->cmp_proc;
+	dtype->type_devhash = InvalidOid;
 
 	MemoryContextSwitchTo(oldcxt);
 
@@ -573,6 +611,22 @@ devtype_get_kvec_sizeof_by_opcode(TypeOpCode type_code)
 /*
  * Built-in device type hash functions
  */
+#define DEVHASH_SQL_FUNCTION_TEMPLATE(NAME)								\
+	PG_FUNCTION_INFO_V1(pgstrom_##NAME##_devhash);						\
+	Datum																\
+	pgstrom_##NAME##_devhash(PG_FUNCTION_ARGS)							\
+	{																	\
+		int64	seed = (PG_ARGISNULL(1) ? 0 : PG_GETARG_INT64(1));		\
+		uint32	hash;													\
+																		\
+		if (PG_ARGISNULL(0))											\
+			hash = devtype_##NAME##_hash(true, 0);						\
+		else															\
+			hash = devtype_##NAME##_hash(false, PG_GETARG_DATUM(0));	\
+																		\
+		PG_RETURN_INT64(pg_hash_merge((uint32_t)seed, hash));			\
+	}
+
 static uint32_t
 devtype_bool_hash(bool isnull, Datum value)
 {
@@ -583,6 +637,7 @@ devtype_bool_hash(bool isnull, Datum value)
 	bval = DatumGetBool(value) ? true : false;
 	return hash_any((unsigned char *)&bval, sizeof(bool));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(bool)
 
 static inline uint32_t
 __devtype_simple_hash(bool isnull, Datum value, int sz)
@@ -597,42 +652,49 @@ devtype_int1_hash(bool isnull, Datum value)
 {
 	return __devtype_simple_hash(isnull, value, sizeof(int8_t));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(int1)
 
 static uint32_t
 devtype_int2_hash(bool isnull, Datum value)
 {
 	return __devtype_simple_hash(isnull, value, sizeof(int16_t));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(int2)
 
 static uint32_t
 devtype_int4_hash(bool isnull, Datum value)
 {
 	return __devtype_simple_hash(isnull, value, sizeof(int32_t));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(int4)
 
 static uint32_t
 devtype_int8_hash(bool isnull, Datum value)
 {
 	return __devtype_simple_hash(isnull, value, sizeof(int64_t));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(int8)
 
 static uint32_t
 devtype_float2_hash(bool isnull, Datum value)
 {
 	return __devtype_simple_hash(isnull, value, sizeof(float2_t));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(float2)
 
 static uint32_t
 devtype_float4_hash(bool isnull, Datum value)
 {
 	return __devtype_simple_hash(isnull, value, sizeof(float4_t));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(float4)
 
 static uint32_t
 devtype_float8_hash(bool isnull, Datum value)
 {
 	return __devtype_simple_hash(isnull, value, sizeof(float8_t));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(float8)
 
 static uint32_t
 devtype_numeric_hash(bool isnull, Datum value)
@@ -677,6 +739,7 @@ devtype_numeric_hash(bool isnull, Datum value)
 	}
 	elog(ERROR, "corrupted numeric header");
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(numeric)
 
 static uint32_t
 devtype_bytea_hash(bool isnull, Datum value)
@@ -685,6 +748,7 @@ devtype_bytea_hash(bool isnull, Datum value)
 		return 0;
 	return hash_any((unsigned char *)VARDATA_ANY(value), VARSIZE_ANY_EXHDR(value));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(bytea)
 
 static uint32_t
 devtype_text_hash(bool isnull, Datum value)
@@ -693,6 +757,7 @@ devtype_text_hash(bool isnull, Datum value)
 		return 0;
 	return hash_any((unsigned char *)VARDATA_ANY(value), VARSIZE_ANY_EXHDR(value));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(text)
 
 static uint32_t
 devtype_bpchar_hash(bool isnull, Datum value)
@@ -707,18 +772,21 @@ devtype_bpchar_hash(bool isnull, Datum value)
 	}
 	return 0;
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(bpchar)
 
 static uint32_t
 devtype_date_hash(bool isnull, Datum value)
 {
 	return __devtype_simple_hash(isnull, value, sizeof(DateADT));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(date)
 
 static uint32_t
 devtype_time_hash(bool isnull, Datum value)
 {
 	return __devtype_simple_hash(isnull, value, sizeof(TimeADT));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(time)
 
 static uint32_t
 devtype_timetz_hash(bool isnull, Datum value)
@@ -732,18 +800,21 @@ devtype_timetz_hash(bool isnull, Datum value)
 	}
 	return 0;
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(timetz)
 
 static uint32_t
 devtype_timestamp_hash(bool isnull, Datum value)
 {
 	return __devtype_simple_hash(isnull, value, sizeof(Timestamp));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(timestamp)
 
 static uint32_t
 devtype_timestamptz_hash(bool isnull, Datum value)
 {
 	return __devtype_simple_hash(isnull, value, sizeof(TimestampTz));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(timestamptz)
 
 static uint32_t
 devtype_interval_hash(bool isnull, Datum value)
@@ -756,12 +827,14 @@ devtype_interval_hash(bool isnull, Datum value)
 	}
 	return 0;
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(interval)
 
 static uint32_t
 devtype_money_hash(bool isnull, Datum value)
 {
 	return __devtype_simple_hash(isnull, value, sizeof(int64_t));
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(money)
 
 static uint32_t
 devtype_uuid_hash(bool isnull, Datum value)
@@ -774,6 +847,7 @@ devtype_uuid_hash(bool isnull, Datum value)
 	}
 	return 0;
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(uuid)
 
 static uint32_t
 devtype_macaddr_hash(bool isnull, Datum value)
@@ -786,6 +860,7 @@ devtype_macaddr_hash(bool isnull, Datum value)
 	}
 	return 0;
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(macaddr)
 
 static uint32_t
 devtype_inet_hash(bool isnull, Datum value)
@@ -805,6 +880,7 @@ devtype_inet_hash(bool isnull, Datum value)
 	}
 	return 0;
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(inet)
 
 static uint32_t
 __devtype_jsonb_hash(JsonbContainer *jc)
@@ -887,6 +963,7 @@ devtype_jsonb_hash(bool isnull, Datum value)
 	}
 	return 0;
 }
+DEVHASH_SQL_FUNCTION_TEMPLATE(jsonb)
 
 static uint32_t
 devtype_geometry_hash(bool isnull, Datum value)
