@@ -27,67 +27,103 @@ static CustomPathMethods	aggsorted_path_methods;
 static CustomScanMethods	aggsorted_plan_methods;
 static CustomExecMethods	aggsorted_exec_methods;
 
-
-
 /*
- * try_add_one_final_aggsorted_path
+ * create_aggsorted_path
  */
-static void
-try_add_one_final_aggsorted_path(PlannerInfo *root,
-								 RelOptInfo *group_rel,
-								 PathTarget *target_final,
-								 List *having_quals,
-								 List *window_pathkeys,
-								 Path *part_path)
+static Path *
+create_aggsorted_path(PlannerInfo *root,
+					  RelOptInfo *group_rel,
+					  Path *part_path,
+					  PathTarget *target_final,
+					  List *having_quals,
+					  double num_groups,
+					  int hash_key,
+					  List *sort_keys)
 {
-	
-	
+	return NULL;
 }
 
 /*
- * validate_window_function_pathkeys
+ * __build_aggsorted_hashfunc
  */
-static bool
-validate_window_pathkeys(PlannerInfo *root,
-						 List *window_pathkeys,
-						 List *window_clauses,
-						 PathTarget *target_partial)
+static Expr *
+__build_aggsorted_hashfunc(PlannerInfo *root,
+						   List *window_pathkeys,
+						   List *window_clauses,
+						   Path *part_path,
+						   List **p_sort_keys)
 {
 	WindowClause *wc;
 	ListCell   *lc1, *lc2;
+	FuncExpr   *hash_func = NULL;
+	List	   *sort_keys = NIL;
 
 	if (window_clauses == NIL)
-		return false;
+		return NULL;		/* no window function */
 	wc = (WindowClause *)linitial(window_clauses);
 	if (list_length(wc->partitionClause) +
 		list_length(wc->orderClause) != list_length(window_pathkeys))
-		return false;	/* not consistent */
+		return NULL;		/* not consistent */
 
 	foreach (lc1, window_pathkeys)
 	{
-		PathKey	   *pkey = lfirst(lc1);
+		PathTarget	   *part_target = part_path->pathtarget;
+		PathKey		   *pkey = lfirst(lc1);
 		EquivalenceClass *ec = pkey->pk_eclass;
 		EquivalenceMember *em;
+		int				part_attnum = 1;
+		Expr		   *em_expr;
+		List		   *func_args;
 
 		if (list_length(ec->ec_members) != 1 ||
 			ec->ec_sources != NIL ||
 			ec->ec_derives != NIL)
-			return false;	/* not supported */
+			return NULL;		/* not supported */
 		em = (EquivalenceMember *)linitial(ec->ec_members);
-		foreach (lc2, target_partial->exprs)
-		{
-			Expr   *expr = lfirst(lc2);
+		/* strip Relabel for equal() comparison */
+		for (em_expr = em->em_expr;
+			 IsA(em_expr, RelabelType);
+			 em_expr = ((RelabelType *)em_expr)->arg);
 
-			if (equal(expr, em->em_expr))
-			{
-				//XXX - check hash-function
-				break;
-			}
+		foreach (lc2, part_target->exprs)
+		{
+			Expr		   *expr = lfirst(lc2);
+
+			if (equal(expr, em_expr))
+				goto found;
+			part_attnum++;
 		}
-		if (!lc2)
-			return false;	/* not found */
+		return NULL;		/* not found */
+	found:
+		if (list_length(sort_keys) < list_length(wc->partitionClause))
+		{
+			Oid		type_oid = exprType((Node *)em_expr);
+			devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
+
+			if (!dtype || !OidIsValid(dtype->type_devhash))
+				return NULL;	/* not supported */
+			if (!hash_func)
+				hash_func = (FuncExpr *)makeConst(INT8OID,
+												  -1,
+												  InvalidOid,
+												  sizeof(int64),
+												  (Datum) 0,
+												  false,	/* isnull */
+												  true);	/* byval */
+			func_args = list_make2(copyObject(em_expr),
+								   hash_func);
+			hash_func = makeFuncExpr(dtype->type_devhash,
+									 INT8OID,
+									 func_args,
+									 InvalidOid,
+									 InvalidOid,
+									 COERCE_IMPLICIT_CAST);
+		}
+		sort_keys = lappend_int(sort_keys, part_attnum);
 	}
-	return true;
+	if (p_sort_keys)
+		*p_sort_keys = sort_keys;
+	return (Expr *)hash_func;
 }
 
 /*
@@ -101,43 +137,60 @@ try_add_final_aggsorted_paths(PlannerInfo *root,
 							  Path *part_path,
 							  double num_groups)
 {
-	PlannerInfo	   *parent_root = root->parent_root;
-	ListCell	   *lc1, *lc2;
+	PlannerInfo *parent_root = root->parent_root;
+	List	   *window_pathkeys;
+	List	   *window_clause;
+	Expr	   *hash_expr;
+	List	   *sort_keys;
+	int			hash_key;
+	Path	   *aggsorted_path;
 
 	if (!pgstrom_enable_aggsorted)
 		return;		/* aggsorted disabled */
 
+	Assert(root->parse->groupClause == NIL);	/* No GROUPING SET */
+	Assert(pgstrom_is_gpupreagg_path(part_path));
 	if (root->window_pathkeys != NIL)
 	{
-		Query  *parse = root->parse;
-
-		if (validate_window_pathkeys(root,
-									 root->window_pathkeys,
-									 parse->windowClause,
-									 part_path->pathtarget))
-			try_add_one_final_aggsorted_path(root,
-											 group_rel,
-											 target_final,
-											 having_quals,
-											 root->window_pathkeys,
-											 part_path);
+		window_pathkeys = root->window_pathkeys;
+		window_clause = root->parse->windowClause;
 	}
 	else if (parent_root &&
-			 parent_root->window_pathkeys != NIL)
+             parent_root->window_pathkeys != NIL)
 	{
-		Query  *parse = parent_root->parse;
-
-		if (validate_window_pathkeys(root,
-									 root->query_pathkeys,
-									 parse->windowClause,
-									 part_path->pathtarget))
-			try_add_one_final_aggsorted_path(root,
-											 group_rel,
-											 target_final,
-											 having_quals,
-											 root->query_pathkeys,
-											 part_path);
+		window_pathkeys = root->query_pathkeys;
+		window_clause = parent_root->parse->windowClause;
 	}
+	else
+	{
+		return;		/* unsupported */
+	}
+	hash_expr = __build_aggsorted_hashfunc(root,
+										   window_pathkeys,
+										   window_clause,
+										   part_path,
+										   &sort_keys);
+	if (!hash_expr)
+		return;		/* unsupported */
+
+	/* duplicate part_path (no need to copy recursive) */
+	part_path = pmemdup(part_path, sizeof(CustomPath));
+	part_path->pathtarget = copy_pathtarget(part_path->pathtarget);
+	part_path->pathtarget->exprs = lappend(part_path->pathtarget->exprs,
+										   hash_expr);
+	hash_key = list_length(part_path->pathtarget->exprs);
+
+	/* creation of aggsorted path */
+	aggsorted_path = create_aggsorted_path(root,
+										   group_rel,
+										   part_path,
+										   target_final,
+										   having_quals,
+										   num_groups,
+										   hash_key,
+										   sort_keys);
+	if (aggsorted_path)
+		add_path(group_rel, aggsorted_path);
 }
 
 /*
