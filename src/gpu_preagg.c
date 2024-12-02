@@ -961,6 +961,7 @@ typedef struct
 	RelOptInfo	   *input_rel;
 	ParamPathInfo  *param_info;
 	double			num_groups;
+	double			input_nrows;
 	bool			try_parallel;
 	PathTarget	   *target_upper;
 	PathTarget	   *target_partial;
@@ -1404,10 +1405,12 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 	try_add_final_aggsorted_paths(con->root,
 								  con->group_rel,
 								  con->target_final,
+								  &con->final_clause_costs,
 								  (List *)con->havingQual,
 								  part_path,
-								  con->num_groups);
-
+								  be_parallel,
+								  con->num_groups,
+                                  con->input_nrows);
 	/* inject Gather path if parallel-aware */
 	if (be_parallel)
 	{
@@ -1602,6 +1605,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	con.group_rel      = group_rel;
 	con.input_rel      = input_rel;
 	con.param_info     = op_leaf->leaf_param;
+	con.input_nrows    = op_leaf->leaf_nrows;
 	con.num_groups     = num_groups;
 	con.try_parallel   = be_parallel;
 	con.target_upper   = root->upper_targets[upper_stage];
@@ -1682,6 +1686,7 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 		con.input_rel      = op_leaf->leaf_rel;
 		con.param_info     = op_leaf->leaf_param;
 		con.num_groups     = num_groups;
+		con.input_nrows    = op_leaf->leaf_nrows;
 		con.try_parallel   = try_parallel_path;
 		con.target_upper   = root->upper_targets[upper_stage];
 		con.target_partial = create_empty_pathtarget();

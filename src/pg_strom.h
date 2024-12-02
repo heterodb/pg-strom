@@ -905,12 +905,16 @@ extern void		pgstrom_init_arrow_fdw(void);
 /*
  * aggsorted.c
  */
-extern void		try_add_final_aggsorted_paths(PlannerInfo *root,
-											  RelOptInfo *group_rel,
-											  PathTarget *target_final,
-											  List *having_quals,
-											  Path *part_path,
-											  double num_groups);
+extern void
+try_add_final_aggsorted_paths(PlannerInfo *root,
+                              RelOptInfo *group_rel,
+                              PathTarget *target_final,
+                              AggClauseCosts *agg_clause_costs,
+                              List *having_quals,
+                              Path *preagg_path,
+                              bool be_parallel,
+                              double num_groups,
+                              double input_nrows);
 extern void		pgstrom_init_aggsorted(void);
 
 /*

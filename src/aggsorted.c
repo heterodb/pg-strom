@@ -12,7 +12,16 @@
  */
 #include "pg_strom.h"
 
-
+typedef struct
+{
+	Expr	   *hash_expr;
+	int			hash_anum;
+	List	   *sort_keys;
+	List	   *having_quals;
+	double		num_groups;
+	double		num_partitions;
+	double		input_nrows;
+} AggSortedPlanInfo;
 
 typedef struct
 {
@@ -28,19 +37,141 @@ static CustomScanMethods	aggsorted_plan_methods;
 static CustomExecMethods	aggsorted_exec_methods;
 
 /*
+ * form_aggsorted_plan_info
+ */
+static void
+form_aggsorted_plan_info(CustomScan *cscan, AggSortedPlanInfo *asp_info)
+{
+	List	   *privs = NIL;
+	List	   *exprs = NIL;
+
+	exprs = lappend(exprs, asp_info->hash_expr);
+	privs = lappend(privs, makeInteger(asp_info->hash_anum));
+	privs = lappend(privs, asp_info->sort_keys);
+	exprs = lappend(exprs, asp_info->having_quals);
+	privs = lappend(privs, __makeFloat(asp_info->num_groups));
+	privs = lappend(privs, __makeFloat(asp_info->num_partitions));
+	privs = lappend(privs, __makeFloat(asp_info->input_nrows));
+
+	cscan->custom_exprs = exprs;
+	cscan->custom_private = privs;
+}
+
+/*
+ * deform_aggsorted_plan_info
+ */
+static AggSortedPlanInfo *
+deform_aggsorted_plan_info(CustomScan *cscan)
+{
+	AggSortedPlanInfo *asp_info = palloc0(sizeof(AggSortedPlanInfo));
+	List	   *privs = cscan->custom_private;
+	List	   *exprs = cscan->custom_exprs;
+	int			pindex = 0;
+	int			eindex = 0;
+
+	asp_info->hash_expr = list_nth(exprs, eindex++);
+	asp_info->hash_anum = intVal(list_nth(privs, pindex++));
+	asp_info->sort_keys = list_nth(privs, pindex++);
+	asp_info->having_quals = list_nth(exprs, eindex++);
+	asp_info->num_groups = floatVal(list_nth(privs, pindex++));
+	asp_info->num_partitions = floatVal(list_nth(privs, pindex++));
+	asp_info->input_nrows = floatVal(list_nth(privs, pindex++));
+
+	return asp_info;
+}
+
+/*
  * create_aggsorted_path
  */
+#define LOG2(x) 	(log(x) / 0.693147180559945)
+
 static Path *
 create_aggsorted_path(PlannerInfo *root,
 					  RelOptInfo *group_rel,
-					  Path *part_path,
 					  PathTarget *target_final,
+					  AggClauseCosts *agg_clause_costs,
 					  List *having_quals,
+					  List *window_pathkeys,
+					  Path *sub_path,
 					  double num_groups,
-					  int hash_key,
-					  List *sort_keys)
+					  double num_partitions,
+					  double input_nrows,
+					  Expr *hash_expr,
+					  int hash_anum,
+					  List *sort_keys,
+					  List *part_keys)
 {
-	return NULL;
+	AggSortedPlanInfo *asp_info;
+	CustomPath *cpath;
+	double		output_nrows = num_groups;
+	double		partition_sz;
+	Cost		startup_cost = sub_path->total_cost;
+	Cost		run_cost = 0.0;
+	Cost		comp_cost = 2.0 * cpu_operator_cost;
+	Cost		sort_cost;
+
+	/* cost estimation for hash-based aggreagation */
+	/* (should be filly on-memory, so ignore disk cost here) */
+	startup_cost += agg_clause_costs->transCost.startup;
+	startup_cost += agg_clause_costs->transCost.per_tuple * num_groups;
+
+	/* cost of computing hash value */
+	startup_cost += (cpu_operator_cost * (list_length(sort_keys) -
+										  list_length(part_keys))) * num_groups;
+	startup_cost += agg_clause_costs->finalCost.startup;
+	run_cost = cpu_tuple_cost * num_groups;
+
+	/* cost for HAVING quals */
+	if (having_quals)
+	{
+		QualCost	qual_cost;
+
+		cost_qual_eval(&qual_cost, having_quals, root);
+		startup_cost += qual_cost.startup;
+		run_cost += output_nrows * qual_cost.per_tuple;
+
+		output_nrows = clamp_row_est(output_nrows *
+									 clauselist_selectivity(root,
+															having_quals,
+															0,
+															JOIN_INNER,
+															NULL));
+	}
+
+	/* cost for SORT portion */
+	partition_sz = Max(num_groups / num_partitions, 1.0);
+	sort_cost = comp_cost * num_groups * LOG2(partition_sz);
+	startup_cost += sort_cost / num_partitions;
+	run_cost     += (sort_cost - sort_cost / num_partitions);
+
+	/* build Agg::Sorted CustomPath */
+	asp_info = palloc0(sizeof(AggSortedPlanInfo));
+	asp_info->hash_expr          = hash_expr;
+	asp_info->hash_anum          = hash_anum;
+	asp_info->sort_keys          = sort_keys;
+	asp_info->having_quals       = having_quals;
+	asp_info->num_groups         = num_groups;
+	asp_info->num_partitions     = num_partitions;
+	asp_info->input_nrows        = input_nrows;
+
+	cpath = makeNode(CustomPath);
+	cpath->path.pathtype         = T_CustomScan;
+	cpath->path.parent           = group_rel;
+	cpath->path.pathtarget       = target_final;
+	cpath->path.param_info       = NULL;
+	cpath->path.parallel_aware   = false;
+	cpath->path.parallel_safe    = (group_rel->consider_parallel &&
+									sub_path->parallel_safe);
+	cpath->path.parallel_workers = sub_path->parallel_workers;
+	cpath->path.rows             = num_groups;
+	cpath->path.startup_cost     = startup_cost;
+	cpath->path.total_cost       = startup_cost + run_cost;
+	cpath->path.pathkeys         = window_pathkeys;
+	cpath->custom_paths          = list_make1(sub_path);
+	cpath->custom_private        = list_make1(asp_info);
+	cpath->methods               = &aggsorted_path_methods;
+
+	return &cpath->path;
 }
 
 /*
@@ -50,12 +181,14 @@ static Expr *
 __build_aggsorted_hashfunc(PlannerInfo *root,
 						   List *window_pathkeys,
 						   List *window_clauses,
-						   Path *part_path,
-						   List **p_sort_keys)
+						   PathTarget *preagg_target,
+						   List **p_sort_keys,
+						   List **p_part_keys)
 {
 	WindowClause *wc;
 	ListCell   *lc1, *lc2;
 	FuncExpr   *hash_func = NULL;
+	List	   *part_keys = NIL;
 	List	   *sort_keys = NIL;
 
 	if (window_clauses == NIL)
@@ -67,7 +200,6 @@ __build_aggsorted_hashfunc(PlannerInfo *root,
 
 	foreach (lc1, window_pathkeys)
 	{
-		PathTarget	   *part_target = part_path->pathtarget;
 		PathKey		   *pkey = lfirst(lc1);
 		EquivalenceClass *ec = pkey->pk_eclass;
 		EquivalenceMember *em;
@@ -85,7 +217,7 @@ __build_aggsorted_hashfunc(PlannerInfo *root,
 			 IsA(em_expr, RelabelType);
 			 em_expr = ((RelabelType *)em_expr)->arg);
 
-		foreach (lc2, part_target->exprs)
+		foreach (lc2, preagg_target->exprs)
 		{
 			Expr		   *expr = lfirst(lc2);
 
@@ -95,9 +227,9 @@ __build_aggsorted_hashfunc(PlannerInfo *root,
 		}
 		return NULL;		/* not found */
 	found:
-		if (list_length(sort_keys) < list_length(wc->partitionClause))
+		if (list_length(part_keys) < list_length(wc->partitionClause))
 		{
-			Oid		type_oid = exprType((Node *)em_expr);
+			Oid				type_oid = exprType((Node *)em_expr);
 			devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
 
 			if (!dtype || !OidIsValid(dtype->type_devhash))
@@ -118,11 +250,14 @@ __build_aggsorted_hashfunc(PlannerInfo *root,
 									 InvalidOid,
 									 InvalidOid,
 									 COERCE_IMPLICIT_CAST);
+			part_keys = lappend(part_keys, em_expr);
 		}
 		sort_keys = lappend_int(sort_keys, part_attnum);
 	}
 	if (p_sort_keys)
 		*p_sort_keys = sort_keys;
+	if (p_part_keys)
+		*p_part_keys = part_keys;
 	return (Expr *)hash_func;
 }
 
@@ -133,23 +268,28 @@ void
 try_add_final_aggsorted_paths(PlannerInfo *root,
 							  RelOptInfo *group_rel,
 							  PathTarget *target_final,
+							  AggClauseCosts *agg_clause_costs,
 							  List *having_quals,
-							  Path *part_path,
-							  double num_groups)
+							  Path *preagg_path,
+							  bool be_parallel,
+							  double num_groups,
+							  double input_nrows)
 {
 	PlannerInfo *parent_root = root->parent_root;
+	Path	   *sub_path = preagg_path;
 	List	   *window_pathkeys;
 	List	   *window_clause;
 	Expr	   *hash_expr;
 	List	   *sort_keys;
-	int			hash_key;
+	List	   *part_keys;
+	int			hash_anum;
+	double		num_partitions;
 	Path	   *aggsorted_path;
 
 	if (!pgstrom_enable_aggsorted)
 		return;		/* aggsorted disabled */
 
-	Assert(root->parse->groupClause == NIL);	/* No GROUPING SET */
-	Assert(pgstrom_is_gpupreagg_path(part_path));
+	Assert(pgstrom_is_gpupreagg_path(preagg_path));
 	if (root->window_pathkeys != NIL)
 	{
 		window_pathkeys = root->window_pathkeys;
@@ -168,27 +308,52 @@ try_add_final_aggsorted_paths(PlannerInfo *root,
 	hash_expr = __build_aggsorted_hashfunc(root,
 										   window_pathkeys,
 										   window_clause,
-										   part_path,
-										   &sort_keys);
+										   preagg_path->pathtarget,
+										   &sort_keys,
+										   &part_keys);
 	if (!hash_expr)
 		return;		/* unsupported */
+	Assert(list_length(sort_keys) > list_length(part_keys));
 
-	/* duplicate part_path (no need to copy recursive) */
-	part_path = pmemdup(part_path, sizeof(CustomPath));
-	part_path->pathtarget = copy_pathtarget(part_path->pathtarget);
-	part_path->pathtarget->exprs = lappend(part_path->pathtarget->exprs,
-										   hash_expr);
-	hash_key = list_length(part_path->pathtarget->exprs);
+	/* estimate number of partitions */
+	num_partitions = estimate_num_groups(root, part_keys,
+										 input_nrows,
+										 NULL, NULL);
+
+	/* duplicate sub_path (no need to copy recursive) */
+	preagg_path = pmemdup(preagg_path, sizeof(CustomPath));
+	preagg_path->pathtarget = copy_pathtarget(preagg_path->pathtarget);
+	preagg_path->pathtarget->exprs = lappend(preagg_path->pathtarget->exprs,
+											 hash_expr);
+	hash_anum = list_length(sub_path->pathtarget->exprs);
+
+	/* inject parallel Gather node */
+	if (be_parallel)
+	{
+		sub_path = (Path *)
+			create_gather_path(root,
+							   group_rel,
+							   preagg_path,
+							   preagg_path->pathtarget,
+							   NULL,
+							   &num_groups);
+	}
 
 	/* creation of aggsorted path */
 	aggsorted_path = create_aggsorted_path(root,
 										   group_rel,
-										   part_path,
 										   target_final,
+										   agg_clause_costs,
 										   having_quals,
+										   window_pathkeys,
+										   sub_path,
 										   num_groups,
-										   hash_key,
-										   sort_keys);
+										   num_partitions,
+										   input_nrows,
+										   hash_expr,
+										   hash_anum,
+										   sort_keys,
+										   part_keys);
 	if (aggsorted_path)
 		add_path(group_rel, aggsorted_path);
 }
@@ -198,13 +363,22 @@ try_add_final_aggsorted_paths(PlannerInfo *root,
  */
 static Plan *
 PlanAggSortedPath(PlannerInfo *root,
-				RelOptInfo *rel,
-				CustomPath *best_path,
-				List *tlist,
-				List *clauses,
-				List *custom_plans)
+				  RelOptInfo *rel,
+				  CustomPath *best_path,
+				  List *tlist,
+				  List *clauses,
+				  List *custom_plans)
 {
-	return NULL;
+	CustomScan *cscan = makeNode(CustomScan);
+	AggSortedPlanInfo *asp_info = linitial(best_path->custom_private);
+
+	cscan->scan.plan.targetlist = tlist;
+	//cscan->scan.plan.qual = having;
+	cscan->flags = 0;
+	cscan->methods = &aggsorted_plan_methods;
+	form_aggsorted_plan_info(cscan, asp_info);
+
+	return &cscan->scan.plan;
 }
 
 /*
