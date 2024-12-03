@@ -18,21 +18,22 @@
  * atomically increment packed int128 value using 64bit atomic operation.
  */
 INLINE_FUNCTION(void)
-__atomic_add_int128(int128_packed_t *ptr, const int128_packed_t *ival)
+__atomic_add_int128(int128_packed_t *ptr, int128_t ival)
 {
 	uint64_t	old_lo;
 	uint64_t	new_hi;
 	uint64_t	temp	__attribute__((unused));
 
-	old_lo = atomicAdd((unsigned long long *)&ptr->u64.lo, ival->u64.lo);
+	old_lo = atomicAdd((unsigned long long *)&ptr->u64_lo,
+					   (uint64_t)(ival & ULONG_MAX));
 	asm volatile("add.cc.u64 %0, %2, %3;\n"
 				 "addc.u64   %1, %4, %5;\n"
 				 : "=l"(temp),  "=l"(new_hi)
-				 : "l"(old_lo), "l"(ival->u64.lo),
-				   "n"(0),      "l"(ival->u64.hi));
+				 : "l"(old_lo), "l"((uint64_t)(ival & ULONG_MAX)),
+				   "n"(0),      "l"((uint64_t)((ival>>64) & ULONG_MAX)));
 	/* new_hi = ival_hi + carry bit of (old_lo + ival_lo) */
 	if (new_hi != 0)
-		atomicAdd((unsigned long long *)&ptr->u64.hi, new_hi);
+		atomicAdd((unsigned long long *)&ptr->u64_hi, new_hi);
 }
 
 /*
@@ -744,24 +745,21 @@ __update_nogroups__psum_numeric(kern_context *kcxt,
 		else
 		{
 			/* Elsewhere, it is finite values */
-			int128_packed_t		sum;
+			int128_t	sum, __temp;
 
-			pgstrom_stair_sum_int128(ival, &sum.i128);
+			pgstrom_stair_sum_int128(ival, &sum);
 			if (get_local_id() == 0)
 			{
 				if (__isShared(r))
 				{
-					int128_packed_t	__temp;
-
 					r->nitems += count;
-					memcpy(&__temp, &r->sum, sizeof(int128_packed_t));
-					__temp.i128 += sum.i128;
-					memcpy(&r->sum, &__temp, sizeof(int128_packed_t));
+					__temp = __fetch_int128_packed(&r->sum);
+					__store_int128_packed(&r->sum, __temp + sum);
 				}
 				else
 				{
 					__atomic_add_uint64(&r->nitems, count);
-					__atomic_add_int128(&r->sum, &sum);
+					__atomic_add_int128(&r->sum, sum);
 				}
 			}
 		}
@@ -1407,11 +1405,11 @@ __update_groupby__psum_numeric(kern_context *kcxt,
 		if (xnum->kind == XPU_NUMERIC_KIND__VALID)
 		{
 			int16_t		weight = (int16_t)(r->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
-			int128_packed_t ival;
-
-			ival.i128 = __normalize_numeric_int128(weight, xnum->weight, xnum->u.value);
+			int128_t	ival = __normalize_numeric_int128(weight,
+														  xnum->weight,
+														  xnum->u.value);
 			__atomic_add_uint64(&r->nitems, 1);
-			__atomic_add_int128(&r->sum, &ival);
+			__atomic_add_int128(&r->sum, ival);
 		}
 		else
 		{
@@ -2028,7 +2026,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 							   (r->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT));
 						__atomic_or_uint32(&r->attrs, special);
 						__atomic_add_uint64(&r->nitems, s->nitems);
-						__atomic_add_int128(&r->sum, &s->sum);
+						__atomic_add_int128(&r->sum, __fetch_int128_packed(&s->sum));
 					}
 					nbytes = sizeof(kagg_state__psum_numeric_packed);
 				}

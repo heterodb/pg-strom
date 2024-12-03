@@ -197,14 +197,23 @@ typedef int64_t				gpumask_t;
 
 /* Definition of several primitive types */
 typedef __int128	int128_t;
-typedef union
+typedef struct
 {
-	struct {
-		uint64_t	lo;
-		uint64_t	hi;
-	} u64;
-	int128_t		i128;
+	uint64_t	u64_lo;
+	uint64_t	u64_hi;
 } int128_packed_t;
+
+INLINE_FUNCTION(int128_t)
+__fetch_int128_packed(const int128_packed_t *addr)
+{
+	return ((int128_t)addr->u64_hi << 64) | ((int128_t)addr->u64_lo);
+}
+INLINE_FUNCTION(void)
+__store_int128_packed(int128_packed_t *addr, int128_t ival)
+{
+	addr->u64_lo = (uint64_t)(ival & ULONG_MAX);
+	addr->u64_hi = (uint64_t)((ival >> 64) & ULONG_MAX);
+}
 #include "float2.h"
 
 #ifndef __FILE_NAME__

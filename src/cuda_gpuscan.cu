@@ -60,33 +60,37 @@ __stair_sum_warp_common(int128_t my_value)
 	int128_packed_t		curr, temp;
 
 	assert(__activemask() == ~0U);
-	curr.i128 = my_value;
-	temp.u64.lo = __shfl_sync(__activemask(), curr.u64.lo, (LaneId() & ~0x01));
-	temp.u64.hi = __shfl_sync(__activemask(), curr.u64.hi, (LaneId() & ~0x01));
+	__store_int128_packed(&curr, my_value);
+	temp.u64_lo = __shfl_sync(__activemask(), curr.u64_lo, (LaneId() & ~0x01));
+	temp.u64_hi = __shfl_sync(__activemask(), curr.u64_hi, (LaneId() & ~0x01));
 	if ((LaneId() & 0x01) != 0)
-		curr.i128 += temp.i128;
+		__store_int128_packed(&curr, (__fetch_int128_packed(&curr) +
+									  __fetch_int128_packed(&temp)));
 
-	temp.u64.lo = __shfl_sync(__activemask(), curr.u64.lo, (LaneId() & ~0x03) | 0x01);
-	temp.u64.hi = __shfl_sync(__activemask(), curr.u64.hi, (LaneId() & ~0x03) | 0x01);
+	temp.u64_lo = __shfl_sync(__activemask(), curr.u64_lo, (LaneId() & ~0x03) | 0x01);
+	temp.u64_hi = __shfl_sync(__activemask(), curr.u64_hi, (LaneId() & ~0x03) | 0x01);
 	if ((LaneId() & 0x02) != 0)
-		curr.i128 += temp.i128;
+		__store_int128_packed(&curr, (__fetch_int128_packed(&curr) +
+									  __fetch_int128_packed(&temp)));
 
-	temp.u64.lo = __shfl_sync(__activemask(), curr.u64.lo, (LaneId() & ~0x07) | 0x03);
-	temp.u64.hi = __shfl_sync(__activemask(), curr.u64.hi, (LaneId() & ~0x07) | 0x03);
+	temp.u64_lo = __shfl_sync(__activemask(), curr.u64_lo, (LaneId() & ~0x07) | 0x03);
+	temp.u64_hi = __shfl_sync(__activemask(), curr.u64_hi, (LaneId() & ~0x07) | 0x03);
 	if ((LaneId() & 0x04) != 0)
-		curr.i128 += temp.i128;
+		__store_int128_packed(&curr, (__fetch_int128_packed(&curr) +
+									  __fetch_int128_packed(&temp)));
 
-	temp.u64.lo = __shfl_sync(__activemask(), curr.u64.lo, (LaneId() & ~0x0f) | 0x07);
-	temp.u64.hi = __shfl_sync(__activemask(), curr.u64.hi, (LaneId() & ~0x0f) | 0x07);
+	temp.u64_lo = __shfl_sync(__activemask(), curr.u64_lo, (LaneId() & ~0x0f) | 0x07);
+	temp.u64_hi = __shfl_sync(__activemask(), curr.u64_hi, (LaneId() & ~0x0f) | 0x07);
 	if ((LaneId() & 0x08) != 0)
-		curr.i128 += temp.i128;
+		__store_int128_packed(&curr, (__fetch_int128_packed(&curr) +
+									  __fetch_int128_packed(&temp)));
 
-	temp.u64.lo = __shfl_sync(__activemask(), curr.u64.lo, (LaneId() & ~0x1f) | 0x0f);
-	temp.u64.hi = __shfl_sync(__activemask(), curr.u64.hi, (LaneId() & ~0x1f) | 0x0f);
+	temp.u64_lo = __shfl_sync(__activemask(), curr.u64_lo, (LaneId() & ~0x1f) | 0x0f);
+	temp.u64_hi = __shfl_sync(__activemask(), curr.u64_hi, (LaneId() & ~0x1f) | 0x0f);
 	if ((LaneId() & 0x10) != 0)
-		curr.i128 += temp.i128;
-
-	return curr.i128;
+		__store_int128_packed(&curr, (__fetch_int128_packed(&curr) +
+									  __fetch_int128_packed(&temp)));
+	return __fetch_int128_packed(&curr);
 }
 
 PUBLIC_FUNCTION(uint32_t)
