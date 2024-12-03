@@ -320,7 +320,7 @@ pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS)
 	uint8_t		kind;
 	int16_t		weight;
 	int128_t	value;
-	const char	   *emsg;
+	const char *emsg;
 
 	emsg = __xpu_numeric_from_varlena(&kind,
 									  &weight,
@@ -340,7 +340,7 @@ pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS)
 	{
 		Assert(kind == XPU_NUMERIC_KIND__VALID);
 		r->attrs |= ((uint32_t)weight & __PAGG_NUMERIC_ATTRS__WEIGHT);
-		r->sum.i128 = value;
+		__store_int128_packed(&r->sum, value);
 	}
 	r->nitems = 1;
 	SET_VARSIZE(r, sizeof(kagg_state__psum_numeric_packed));
@@ -472,7 +472,7 @@ pgstrom_fsum_trans_numeric(PG_FUNCTION_ARGS)
 			{
 				int16_t		weight_s = (int16_t)(state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
 				int16_t		weight_a = (int16_t)(arg->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
-				int128_t	ival = arg->sum.i128;
+				int128_t	ival = __fetch_int128_packed(&arg->sum);
 
 				if (weight_s > weight_a)
 				{
@@ -498,7 +498,8 @@ pgstrom_fsum_trans_numeric(PG_FUNCTION_ARGS)
 						shift -= k;
 					}
 				}
-				state->sum.i128 += ival;
+				__store_int128_packed(&state->sum, ival +
+									  __fetch_int128_packed(&state->sum));
 			}
 			state->nitems += arg->nitems;
 		}
@@ -596,10 +597,11 @@ pgstrom_fsum_final_numeric(PG_FUNCTION_ARGS)
 	else
 	{
 		int16_t		weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
-		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, state->sum.i128);
+		int128_t	ival = __fetch_int128_packed(&state->sum);
+		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, ival);
 		char	   *buf = palloc(bufsz);
 
-		__xpu_numeric_to_varlena(buf, weight, state->sum.i128);
+		__xpu_numeric_to_varlena(buf, weight, ival);
 		datum = PointerGetDatum(buf);
 	}
 	PG_RETURN_DATUM(datum);
@@ -671,11 +673,12 @@ pgstrom_favg_final_numeric(PG_FUNCTION_ARGS)
 	else
 	{
 		int16_t		weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
-		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, state->sum.i128);
+		int128_t	ival = __fetch_int128_packed(&state->sum);
+		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, ival);
 		Numeric		sum = palloc(bufsz);
 		Numeric		div = int64_to_numeric(state->nitems);
 
-		__xpu_numeric_to_varlena((char *)sum, weight, state->sum.i128);
+		__xpu_numeric_to_varlena((char *)sum, weight, ival);
 		datum = DirectFunctionCall2(numeric_div,
 									NumericGetDatum(sum),
 									NumericGetDatum(div));
