@@ -26,7 +26,7 @@ typedef struct
 typedef struct
 {
 	CustomScanState		css;
-
+	AggSortedPlanInfo  *asp_info;
 } AggSortedState;
 
 
@@ -371,11 +371,14 @@ PlanAggSortedPath(PlannerInfo *root,
 {
 	CustomScan *cscan = makeNode(CustomScan);
 	AggSortedPlanInfo *asp_info = linitial(best_path->custom_private);
+	Plan	   *sub_plan = linitial(custom_plans);
 
 	cscan->scan.plan.targetlist = tlist;
 	//cscan->scan.plan.qual = having;
+	cscan->scan.plan.lefttree = sub_plan;
 	cscan->flags = 0;
 	cscan->methods = &aggsorted_plan_methods;
+	cscan->custom_scan_tlist = sub_plan->targetlist;
 	form_aggsorted_plan_info(cscan, asp_info);
 
 	return &cscan->scan.plan;
@@ -393,6 +396,7 @@ CreateAggSortedState(CustomScan *cscan)
 	NodeSetTag(ass, T_CustomScanState);
 	ass->css.flags = cscan->flags;
 	ass->css.methods = &aggsorted_exec_methods;
+	ass->asp_info = deform_aggsorted_plan_info(cscan);
 
 	return (Node *)ass;
 }
