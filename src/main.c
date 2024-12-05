@@ -689,7 +689,7 @@ _PG_init(void)
 		pgstrom_init_dpu_preagg();
 	}
 	/* other misc stuff */
-	pgstrom_init_aggsorted();
+	pgstrom_init_hashed_sort();
 	/* callback for the extension checker */
 	CacheRegisterSyscacheCallback(NAMESPACEOID, pgstrom_extension_checker_callback, 0);
 	/* dummy custom-scan node */

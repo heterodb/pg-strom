@@ -857,12 +857,8 @@ extern int		pgstrom_hll_register_bits;		//deprecated
 extern bool		pgstrom_is_gpupreagg_path(const Path *path);
 extern bool		pgstrom_is_gpupreagg_plan(const Plan *plan);
 extern bool		pgstrom_is_gpupreagg_state(const PlanState *ps);
-extern void		xpupreagg_add_custompath(PlannerInfo *root,
-										 RelOptInfo *input_rel,
-										 RelOptInfo *group_rel,
-										 void *extra,
-										 uint32_t task_kind,
-										 const CustomPathMethods *methods);
+extern Path	   *xpupreagg_path_attach_nokey(const CustomPath *preagg_path,
+											Expr *nokey_expr);
 extern bool		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
 									  int depth,
 									  uint64_t l_state,
@@ -903,19 +899,15 @@ extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 extern void		pgstrom_init_arrow_fdw(void);
 
 /*
- * aggsorted.c
+ * hashed_sort.c
  */
-extern void
-try_add_final_aggsorted_paths(PlannerInfo *root,
-                              RelOptInfo *group_rel,
-                              PathTarget *target_final,
-                              AggClauseCosts *agg_clause_costs,
-                              List *having_quals,
-                              Path *preagg_path,
-                              bool be_parallel,
-                              double num_groups,
-                              double input_nrows);
-extern void		pgstrom_init_aggsorted(void);
+extern void		try_add_hashed_sort_path(PlannerInfo *root,
+										 RelOptInfo *group_rel,
+										 AggPath *final_path,
+										 CustomPath *preagg_path,
+										 bool be_parallel,
+										 double input_nrows);
+extern void		pgstrom_init_hashed_sort(void);
 
 /*
  * fallback.c

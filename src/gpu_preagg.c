@@ -1396,30 +1396,19 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 							bool be_parallel)
 {
 	Query	   *parse = con->root->parse;
+	Path	   *sub_path = part_path;
 	Path	   *agg_path;
 	Path	   *dummy_path;
 
-	/*
-	 * try injection of window-function optimal final-aggregation
-	 */
-	try_add_final_aggsorted_paths(con->root,
-								  con->group_rel,
-								  con->target_final,
-								  &con->final_clause_costs,
-								  (List *)con->havingQual,
-								  part_path,
-								  be_parallel,
-								  con->num_groups,
-                                  con->input_nrows);
 	/* inject Gather path if parallel-aware */
 	if (be_parallel)
 	{
-		part_path = (Path *)
+		sub_path = (Path *)
 			create_gather_path(con->root,
 							   con->group_rel,
 							   part_path,
-                               part_path->pathtarget,
-                               NULL,
+							   part_path->pathtarget,
+							   NULL,
 							   &con->num_groups);
 	}
 	/* put final Aggregation path */
@@ -1428,7 +1417,7 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 		Assert(grouping_is_hashable(parse->groupClause));
 		agg_path = (Path *)create_agg_path(con->root,
 										   con->group_rel,
-										   part_path,
+										   sub_path,
 										   con->target_final,
 										   AGG_HASHED,
 										   AGGSPLIT_SIMPLE,
@@ -1437,7 +1426,13 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 										   &con->final_clause_costs,
 										   con->num_groups);
 		dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
-
+		/* try add hashed-sort for window-functions */
+		try_add_hashed_sort_path(con->root,
+								 con->group_rel,
+								 (AggPath *)agg_path,
+								 (CustomPath *)part_path,
+								 be_parallel,
+								 con->input_nrows);
 		add_path(con->group_rel, dummy_path);
 	}
 	else if (parse->distinctClause)
@@ -1445,7 +1440,7 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 		Assert(grouping_is_hashable(parse->distinctClause));
 		agg_path = (Path *)create_agg_path(con->root,
 										   con->group_rel,
-										   part_path,
+										   sub_path,
 										   con->target_final,
 										   AGG_HASHED,
 										   AGGSPLIT_SIMPLE,
@@ -1459,7 +1454,7 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 	{
 		agg_path = (Path *)create_agg_path(con->root,
 										   con->group_rel,
-										   part_path,
+										   sub_path,
 										   con->target_final,
 										   AGG_PLAIN,
 										   AGGSPLIT_SIMPLE,
@@ -1866,6 +1861,35 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 										   TASK_KIND__DPUPREAGG,
 										   pgstrom_enable_partitionwise_dpupreagg);
 	}
+}
+
+/*
+ * xpupreagg_path_attach_nokey
+ *
+ * It appends a nokey expression at tail of the target-list and returns a duplication
+ * of the PreAgg-Path
+ */
+Path *
+xpupreagg_path_attach_nokey(const CustomPath *preagg_path, Expr *nokey_expr)
+{
+	CustomPath *cpath;
+	pgstromPlanInfo *pp_info;
+
+	Assert(pgstrom_is_gpupreagg_path(&preagg_path->path));
+	cpath = pmemdup(preagg_path, sizeof(CustomPath));
+	pp_info = linitial(preagg_path->custom_private);
+	pp_info = copy_pgstrom_plan_info(pp_info);
+
+	cpath->path.pathtarget = copy_pathtarget(preagg_path->path.pathtarget);
+	cpath->path.pathtarget->exprs = lappend(cpath->path.pathtarget->exprs,
+											nokey_expr);
+	pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
+										   KAGG_ACTION__VREF_NOKEY);
+	pp_info->groupby_typmods = lappend_int(pp_info->groupby_typmods,
+										   exprTypmod((Node *)nokey_expr));
+	cpath->custom_private = list_make1(pp_info);
+
+	return &cpath->path;
 }
 
 /*
