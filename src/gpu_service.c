@@ -1142,6 +1142,11 @@ __gpuMemAllocCommon(gpuMemoryPool *pool, size_t bytesize)
 		if (mseg)
 			chunk = __gpuMemAllocFromSegment(pool, mseg, bytesize);
 	}
+	else
+	{
+		__gsDebug("Raw memory pool exceeds the hard limit (%zu + %zu of %zu) ",
+				  pool->total_sz, segment_sz, pool->hard_limit);
+	}
 out_unlock:	
 	pthreadMutexUnlock(&pool->lock);
 
@@ -3282,8 +3287,13 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 	chunk = gpuMemAlloc(gap + kds->length);
 	if (!chunk)
 	{
-		gpuClientELog(gclient, "failed on gpuMemAlloc(%zu)", kds->length);
-		return NULL;
+		chunk = gpuMemAllocManaged(gap + kds->length);
+		if (!chunk)
+		{
+			gpuClientELog(gclient, "failed on gpuMemAlloc(%zu+%zu)",
+						  gap, kds->length);
+			return NULL;
+		}
 	}
 	chunk->m_devptr = chunk->__base + chunk->__offset + gap;
 
