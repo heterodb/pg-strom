@@ -38,9 +38,9 @@ function main(){
     fi
 
     # check the disk availability
-    check_disk_availability $@
+    check_disk_availability $1 $2
     if [[ $? -ne 0 ]]; then
-        echo "ERROR: disk space is not enough."
+        echo "ERROR: temporary disk space is not enough."
         exit 1
     fi
 
@@ -50,6 +50,13 @@ function main(){
     # remove the first two parameters
     shift
     shift
+
+    data_directory_path=$(echo "SHOW data_directory;" | psql -t $@ | grep -v '^\s*$')
+    check_disk_availability ${data_directory_path} ${size}
+    if [[ $? -ne 0 ]]; then
+        echo "ERROR: DB disk space is not enough."
+        exit 1
+    fi
 
     # PostgreSQL is running?
     psql $@ -c "SELECT 1" 2>&1 > /dev/null 
@@ -88,6 +95,23 @@ EOL
     grep "CREATE TABLE" ${tpch_dir_path}/tpch-ddl.sql | awk '{print $3}' | while read table_name; do
         echo "\COPY tpch.${table_name} FROM '${temporary_dir_path}/${table_name}.tbl' DELIMITER '|' CSV;"
     done | psql $@
+
+
+    # add BRIN orders table
+    {
+        echo "SELECT * INTO tpch.orders_brin FROM tpch.orders ORDER BY o_orderdate;"
+        echo "CREATE INDEX orders_brin_orderdate_idx ON tpch.orders_brin USING BRIN(o_orderdate);"
+    } | psql $@
+
+    # add arrow_fdw table
+    arrow_tools_dir_path="$(cd $(dirname $0); pwd)/../../arrow-tools"
+    pg2arrow_cmd_path="${arrow_tools_dir_path}/pg2arrow"
+    [[ ! -e ${pg2arrow_cmd_path} ]] && make -C ${arrow_tools_dir_path} pg2arrow
+    arrow_file_path="${data_directory_path}/orders.arrow"
+
+    ${pg2arrow_cmd_path} -s 16m --set=timezone:Asia/Tokyo -c 'SELECT * FROM tpch.orders ORDER BY o_orderdate' -o ${arrow_file_path} --stat=o_orderdate $@
+
+    echo "IMPORT FOREIGN SCHEMA orders_arrow FROM SERVER arrow_fdw INTO tpch OPTIONS (file '${arrow_file_path}');" | psql $@
 
     # remove the temporary directory
     rm -rf ${temporary_dir_path}

@@ -16,4 +16,3 @@ Example: to generate 10GB data and load it to PostgreSQL.
 bash load.sh /tmp 10 postgres
 ```
 
-## Run queries.
