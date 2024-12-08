@@ -17,13 +17,33 @@ typedef struct
 	Expr	   *hash_expr;
 	int			hash_anum;
 	List	   *sort_keys;
+	List	   *sort_operators;
+	List	   *sort_collations;
+	List	   *sort_nulls_first;
 	double		num_partitions;
 } HashedSortPlanInfo;
 
 typedef struct
 {
+	dlist_node		chain;
+	int64_t			hash;
+	List		   *tuples;
+} HashedSortTupleCluster;
+
+typedef struct
+{
 	CustomScanState		css;
-	HashedSortPlanInfo  *hsp_info;
+	int					hash_anum;
+	int64_t				hash_nslots;
+	int64_t				hash_index;
+	dlist_head		   *hash_slots;
+	Tuplesortstate	   *sort_state;
+	bool				sort_is_ready;
+	int					sortNumCols;
+	AttrNumber		   *sortColIndexes;
+	Oid				   *sortOperators;
+	Oid				   *sortCollations;
+	bool			   *sortNullsFirst;
 } HashedSortState;
 
 
@@ -45,6 +65,9 @@ form_hashedsort_plan_info(CustomScan *cscan, HashedSortPlanInfo *hsp_info)
 	exprs = lappend(exprs, hsp_info->hash_expr);
 	privs = lappend(privs, makeInteger(hsp_info->hash_anum));
 	exprs = lappend(exprs, hsp_info->sort_keys);
+	privs = lappend(privs, hsp_info->sort_operators);
+	privs = lappend(privs, hsp_info->sort_collations);
+	privs = lappend(privs, hsp_info->sort_nulls_first);
 	privs = lappend(privs, __makeFloat(hsp_info->num_partitions));
 
 	cscan->custom_exprs = exprs;
@@ -66,6 +89,9 @@ deform_hashedsort_plan_info(CustomScan *cscan)
 	hsp_info->hash_expr = list_nth(exprs, eindex++);
 	hsp_info->hash_anum = intVal(list_nth(privs, pindex++));
 	hsp_info->sort_keys = list_nth(exprs, eindex++);
+	hsp_info->sort_operators = list_nth(privs, pindex++);
+	hsp_info->sort_collations = list_nth(privs, pindex++);
+	hsp_info->sort_nulls_first = list_nth(privs, pindex++);
 	hsp_info->num_partitions = floatVal(list_nth(privs, pindex++));
 
 	return hsp_info;
@@ -82,13 +108,9 @@ create_hashed_sort_path(PlannerInfo *root,
 						List *window_pathkeys,
 						PathTarget *target_final,
 						Path *sub_path,
-						int hash_anum,
-						Expr *hash_expr,
-						List *sort_keys,
-						double num_partitions)
+						HashedSortPlanInfo *hsp_info)
 {
-	HashedSortPlanInfo *hsp_info;
-	CustomPath *cpath;
+	CustomPath *cpath = makeNode(CustomPath);
 	double		num_groups = sub_path->rows;
 	double		partition_sz;
 	Cost		startup_cost = sub_path->total_cost;
@@ -99,17 +121,13 @@ create_hashed_sort_path(PlannerInfo *root,
 	/* cost to store the input */
 	startup_cost += cpu_tuple_cost * num_groups;
 	/* cost for sort portion */
-	partition_sz = Max(num_groups / num_partitions, 1.0);
+	partition_sz = Max(num_groups / hsp_info->num_partitions, 1.0);
 	sort_cost = comp_cost * num_groups * LOG2(partition_sz);
-	startup_cost += sort_cost / num_partitions;
-	run_cost += sort_cost - (sort_cost / num_partitions);
+	startup_cost += sort_cost / hsp_info->num_partitions;
+	run_cost += sort_cost - (sort_cost / hsp_info->num_partitions);
 
-	/* setup HashedSortPlanInfo */
-	hsp_info = palloc0(sizeof(HashedSortPlanInfo));
-	hsp_info->hash_expr          = hash_expr;
-	hsp_info->hash_anum          = hash_anum;
-	hsp_info->sort_keys          = sort_keys;
-	hsp_info->num_partitions     = num_partitions;
+	/* copy HashedSortPlanInfo */
+	hsp_info = pmemdup(hsp_info, sizeof(HashedSortPlanInfo));
 
 	cpath = makeNode(CustomPath);
 	cpath->path.pathtype         = T_CustomScan;
@@ -140,14 +158,13 @@ __build_partial_key_hashfunc(PlannerInfo *root,
 							 List *window_pathkeys,
 							 List *window_clauses,
 							 PathTarget *path_target,
-							 List **p_sort_keys,
-							 List **p_part_keys)
+							 double input_num_rows,
+							 HashedSortPlanInfo *hsp_info)
 {
 	WindowClause *wc;
 	ListCell   *lc1, *lc2;
 	FuncExpr   *hash_func = NULL;
 	List	   *part_keys = NIL;
-	List	   *sort_keys = NIL;
 
 	if (window_clauses == NIL)
 		return NULL;		/* no window function */
@@ -161,9 +178,9 @@ __build_partial_key_hashfunc(PlannerInfo *root,
 		PathKey		   *pkey = lfirst(lc1);
 		EquivalenceClass *ec = pkey->pk_eclass;
 		EquivalenceMember *em;
-		int				sort_attnum = 1;
 		Expr		   *em_expr;
 		List		   *func_args;
+		Oid				sortop;
 
 		if (list_length(ec->ec_members) != 1 ||
 			ec->ec_sources != NIL ||
@@ -181,7 +198,6 @@ __build_partial_key_hashfunc(PlannerInfo *root,
 
 			if (equal(expr, em_expr))
 				goto found;
-			sort_attnum++;
 		}
 		return NULL;		/* not found */
 	found:
@@ -210,12 +226,31 @@ __build_partial_key_hashfunc(PlannerInfo *root,
 									 COERCE_EXPLICIT_CALL);
 			part_keys = lappend(part_keys, em_expr);
 		}
-		sort_keys = lappend(sort_keys, em_expr);
+		/*
+		 * Look up the correct sort operator from the PathKey's slightly
+		 * abstracted representation.
+		 */
+		sortop = get_opfamily_member(pkey->pk_opfamily,
+									 em->em_datatype,
+									 em->em_datatype,
+									 pkey->pk_strategy);
+		if (!OidIsValid(sortop))	/* should not happen */
+			elog(ERROR, "missing operator %d(%u,%u) in opfamily %u",
+				 pkey->pk_strategy,
+				 em->em_datatype,
+				 em->em_datatype,
+				 pkey->pk_opfamily);
+		/* Save the sort key properties */
+		hsp_info->sort_keys = lappend(hsp_info->sort_keys, em_expr);
+		hsp_info->sort_operators = lappend_oid(hsp_info->sort_operators, sortop);
+		hsp_info->sort_collations = lappend_oid(hsp_info->sort_collations,
+												ec->ec_collation);
+		hsp_info->sort_nulls_first = lappend_int(hsp_info->sort_nulls_first,
+												 pkey->pk_nulls_first);
 	}
-	if (p_sort_keys)
-		*p_sort_keys = sort_keys;
-	if (p_part_keys)
-		*p_part_keys = part_keys;
+	hsp_info->num_partitions = estimate_num_groups(root, part_keys,
+												   input_num_rows,
+												   NULL, NULL);
 	return (Expr *)hash_func;
 }
 
@@ -234,14 +269,11 @@ try_add_hashed_sort_path(PlannerInfo *root,
 	List	   *window_pathkeys;
 	List	   *window_clause;
 	Expr	   *hash_expr;
-	List	   *sort_keys;
-	List	   *part_keys;
-	int			hash_anum;
-	double		num_partitions;
 	double		num_groups = final_path->path.rows;
 	Path	   *sub_path;
 	AggPath	   *agg_path;
 	CustomPath *cpath;
+	HashedSortPlanInfo hsp_data;
 
 	if (!pgstrom_enable_clustered_windowagg)
 		return;
@@ -262,19 +294,15 @@ try_add_hashed_sort_path(PlannerInfo *root,
 	{
 		return;		/* unsupported */
 	}
+	memset(&hsp_data, 0, sizeof(HashedSortPlanInfo));
 	hash_expr = __build_partial_key_hashfunc(root,
 											 window_pathkeys,
 											 window_clause,
 											 preagg_path->path.pathtarget,
-											 &sort_keys,
-											 &part_keys);
+											 input_nrows,
+											 &hsp_data);
 	if (!hash_expr)
 		return;
-	Assert(list_length(sort_keys) > list_length(part_keys));
-	num_partitions = estimate_num_groups(root, part_keys,
-										 input_nrows,
-										 NULL, NULL);
-
 	/* attach hash_expr as nokey item on the PreAggPath */
 	sub_path = xpupreagg_path_attach_nokey(preagg_path, hash_expr);
 
@@ -294,8 +322,9 @@ try_add_hashed_sort_path(PlannerInfo *root,
 	agg_path->path.pathtarget = copy_pathtarget(agg_path->path.pathtarget);
 	agg_path->path.pathtarget->exprs = lappend(agg_path->path.pathtarget->exprs,
 											   hash_expr);
-	hash_anum = list_length(agg_path->path.pathtarget->exprs);
 	agg_path->subpath = sub_path;
+	hsp_data.hash_expr = hash_expr;
+	hsp_data.hash_anum = list_length(agg_path->path.pathtarget->exprs);
 
 	/* creation of hashed-sort path (no need to copy recursively) */
 	cpath = create_hashed_sort_path(root,
@@ -303,10 +332,7 @@ try_add_hashed_sort_path(PlannerInfo *root,
 									window_pathkeys,
 									final_path->path.pathtarget,
 									&agg_path->path,
-									hash_anum,
-									hash_expr,
-									sort_keys,
-									num_partitions);
+									&hsp_data);
 	if (cpath)
 		add_path(group_rel, (Path *)cpath);
 }
@@ -327,7 +353,7 @@ PlanHashedSortPath(PlannerInfo *root,
 	Plan	   *sub_plan = linitial(custom_plans);
 	List	   *cs_tlist = list_copy(tlist);
 	TargetEntry *tle;
-
+	
 	tle = makeTargetEntry(hsp_info->hash_expr,
 						  list_length(cs_tlist),
 						  NULL,
@@ -352,13 +378,61 @@ static Node *
 CreateHashedSortState(CustomScan *cscan)
 {
 	HashedSortState	   *hss = palloc0(sizeof(HashedSortState));
+	HashedSortPlanInfo *hsp_info = deform_hashedsort_plan_info(cscan);
+	int			sortNumCols = list_length(hsp_info->sort_keys);
+	Var		   *hash;
+	ListCell   *lc1, *lc2, *lc3, *lc4;
+	int			k = 0;
 
 	Assert(cscan->methods == &hashedsort_plan_methods);
 	NodeSetTag(hss, T_CustomScanState);
 	hss->css.flags = cscan->flags;
 	hss->css.methods = &hashedsort_exec_methods;
-	hss->hsp_info = deform_hashedsort_plan_info(cscan);
+	hss->sortNumCols = sortNumCols;
+	hss->sortColIndexes = palloc0(sizeof(AttrNumber) * sortNumCols);
+	hss->sortOperators = palloc0(sizeof(Oid) * sortNumCols);
+	hss->sortCollations = palloc0(sizeof(Oid) * sortNumCols);
+	hss->sortNullsFirst = palloc0(sizeof(bool) * sortNumCols);
 
+	hash = (Var *)hsp_info->hash_expr;
+	if (!IsA(hash, Var) ||
+		hash->varno != INDEX_VAR ||
+		hash->varattno < 1 ||
+		hash->varattno >= list_length(cscan->custom_scan_tlist) ||
+		hash->vartype != INT8OID ||
+		hash->vartypmod != -1 ||
+		OidIsValid(hash->varcollid))
+		elog(ERROR, "Bug? hashed-sort hash is unexpected expression: %s",
+			 nodeToString(hash));
+	hss->hash_anum = hash->varattno;
+	hss->hash_nslots = (int64_t)(2.0 * hsp_info->num_partitions);
+	hss->hash_index = 0;
+	hss->hash_slots = palloc(sizeof(dlist_head) * hss->hash_nslots);
+	for (int64_t i=0; i < hss->hash_nslots; i++)
+		dlist_init(&hss->hash_slots[i]);
+
+	Assert(list_length(hsp_info->sort_keys) == list_length(hsp_info->sort_operators) &&
+		   list_length(hsp_info->sort_keys) == list_length(hsp_info->sort_collations) &&
+		   list_length(hsp_info->sort_keys) == list_length(hsp_info->sort_nulls_first));
+	forfour (lc1, hsp_info->sort_keys,
+			 lc2, hsp_info->sort_operators,
+			 lc3, hsp_info->sort_collations,
+			 lc4, hsp_info->sort_nulls_first)
+	{
+		Var	   *key = lfirst(lc1);
+
+		if (!IsA(key, Var) ||
+			hash->varno != INDEX_VAR ||
+			hash->varattno < 1 ||
+			hash->varattno >= list_length(cscan->custom_scan_tlist))
+			elog(ERROR, "Bug? hashed-sort key is unexpected expression: %s",
+				 nodeToString(key));
+		hss->sortColIndexes[k] = key->varattno;
+		hss->sortOperators[k] = lfirst_oid(lc2);
+		hss->sortCollations[k] = lfirst_oid(lc3);
+		hss->sortNullsFirst[k] = lfirst_oid(lc4);
+		k++;
+	}
 	return (Node *)hss;
 }
 
@@ -369,10 +443,13 @@ static void
 BeginHashSorted(CustomScanState *node, EState *estate, int eflags)
 {
 	HashedSortState	   *hss = (HashedSortState *)node;
-	HashedSortPlanInfo *hsp_info = hss->hsp_info;
 	CustomScan		   *cscan = (CustomScan *)hss->css.ss.ps.plan;
 
-	hss->css.ss.ps.lefttree = ExecInitNode(cscan->scan.plan.lefttree, estate, eflags);
+	outerPlanState(hss) = ExecInitNode(outerPlan(cscan), estate, eflags);
+	/* initialize result slot, type and projection again */
+	ExecInitResultTupleSlotTL(&hss->css.ss.ps, &TTSOpsMinimalTuple);
+	ExecAssignScanProjectionInfoWithVarno(&hss->css.ss, INDEX_VAR);
+
 }
 
 /*
@@ -381,6 +458,112 @@ BeginHashSorted(CustomScanState *node, EState *estate, int eflags)
 static TupleTableSlot *
 ExecHashSorted(CustomScanState *node)
 {
+	HashedSortState	   *hss = (HashedSortState *)node;
+	EState			   *estate = hss->css.ss.ps.state;
+
+	if (!hss->sort_state)
+	{
+		TupleDesc		tupdesc = ExecGetResultType(outerPlanState(hss));
+		MemoryContext	oldcxt;
+		int				nclusters = 0;
+
+		/* setup Tuplesortstate */
+		oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+		hss->sort_state = tuplesort_begin_heap(tupdesc,
+											   hss->sortNumCols,
+											   hss->sortColIndexes,
+											   hss->sortOperators,
+											   hss->sortCollations,
+											   hss->sortNullsFirst,
+											   work_mem,
+											   NULL,
+											   TUPLESORT_NONE);
+		MemoryContextSwitchTo(oldcxt);
+		
+		/* read outer sub-plan first */
+		for (;;)
+		{
+			HashedSortTupleCluster *tcluster;
+			TupleTableSlot *outer_slot;
+			dlist_iter		iter;
+			Datum			hash;
+			bool			isnull;
+			int64_t			hindex;
+			MinimalTuple	mtup;
+
+			outer_slot = ExecProcNode(outerPlanState(hss));
+			if (TupIsNull(outer_slot))
+				break;
+			hash = slot_getattr(outer_slot, hss->hash_anum, &isnull);
+			if (isnull)
+				elog(ERROR, "Bug? grouping hash was NULL");
+			hindex = (DatumGetInt64(hash) % hss->hash_nslots);
+			dlist_foreach(iter, &hss->hash_slots[hindex])
+			{
+				tcluster = dlist_container(HashedSortTupleCluster,
+										   chain, iter.cur);
+				if (tcluster->hash == hash)
+					goto found;
+			}
+			/* new tuples cluster */
+			tcluster = MemoryContextAlloc(estate->es_query_cxt,
+										  sizeof(HashedSortTupleCluster));
+			tcluster->hash = hash;
+			tcluster->tuples = NIL;
+			dlist_push_tail(&hss->hash_slots[hindex], &tcluster->chain);
+			nclusters++;
+		found:
+			oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+			mtup = ExecCopySlotMinimalTuple(outer_slot);
+			tcluster->tuples = lappend(tcluster->tuples, mtup);
+			MemoryContextSwitchTo(oldcxt);
+		}
+		elog(INFO, "nclusters = %d", nclusters);
+	}
+again:
+	if (hss->sort_is_ready)
+	{
+		TupleTableSlot	   *slot = hss->css.ss.ps.ps_ResultTupleSlot;
+
+		tuplesort_gettupleslot(hss->sort_state,
+							   true,	/* forward */
+							   false,	/* no copy */
+							   slot,
+							   NULL);
+		return slot;
+	}
+
+	while (hss->hash_index < hss->hash_nslots)
+	{
+		dlist_head	   *dhead = &hss->hash_slots[hss->hash_index];
+
+		if (dlist_is_empty(dhead))
+			hss->hash_index++;
+		else
+		{
+			HashedSortTupleCluster *tcluster
+				= dlist_container(HashedSortTupleCluster, chain,
+								  dlist_pop_head_node(dhead));
+			TupleTableSlot *mini_slot = hss->css.ss.ps.ps_ResultTupleSlot;
+			ListCell	   *lc;
+			int count=0;
+
+			tuplesort_reset(hss->sort_state);
+			foreach (lc, tcluster->tuples)
+			{
+				MinimalTuple	mtup = lfirst(lc);
+
+				ExecStoreMinimalTuple(mtup, mini_slot, true);
+				tuplesort_puttupleslot(hss->sort_state, mini_slot);
+				count++;
+			}
+			tuplesort_performsort(hss->sort_state);
+			list_free(tcluster->tuples);
+			pfree(tcluster);
+			hss->sort_is_ready = true;
+			goto again;
+		}
+	}
 	return NULL;
 }
 
@@ -391,8 +574,10 @@ static void
 EndHashSorted(CustomScanState *node)
 {
 	HashedSortState	   *hss = (HashedSortState *)node;
-	
-	ExecEndNode(hss->css.ss.ps.lefttree);
+
+	if (hss->sort_state)
+		tuplesort_end(hss->sort_state);
+	ExecEndNode(outerPlanState(hss));
 }
 
 /*
@@ -400,7 +585,16 @@ EndHashSorted(CustomScanState *node)
  */
 static void
 ReScanHashSorted(CustomScanState *node)
-{}
+{
+	HashedSortState	   *hss = (HashedSortState *)node;
+
+	if (hss->sort_state)
+		tuplesort_end(hss->sort_state);
+	hss->sort_state = NULL;
+	hss->hash_index = 0;
+
+	ExecReScan(outerPlanState(hss));
+}
 
 /*
  * ExplainHashSorted
@@ -411,8 +605,8 @@ ExplainHashSorted(CustomScanState *node,
 				  ExplainState *es)
 {
 	HashedSortState	   *hss = (HashedSortState *)node;
-	HashedSortPlanInfo *hsp_info = hss->hsp_info;
 	CustomScan		   *cscan = (CustomScan *)node->ss.ps.plan;
+	HashedSortPlanInfo *hsp_info = deform_hashedsort_plan_info(cscan);
 	List			   *dcontext;
 	TargetEntry		   *tle;
 	char			   *str;
@@ -439,14 +633,6 @@ ExplainHashSorted(CustomScanState *node,
 		if (lc != list_head(hsp_info->sort_keys))
             appendStringInfo(&buf, ", ");
 		appendStringInfoString(&buf, str);
-#if 0
-		Assert(key > 0 && key <= list_length(cscan->custom_scan_tlist));
-		tle = list_nth(cscan->custom_scan_tlist, key - 1);
-		if (lc != list_head(hsp_info->sort_keys))
-			appendStringInfo(&buf, ", ");
-		str = deparse_expression((Node *)tle->expr, dcontext, es->verbose, true);
-		appendStringInfoString(&buf, str);
-#endif
 	}
 	ExplainPropertyText("Sort Keys", buf.data, es);
 	pfree(buf.data);
