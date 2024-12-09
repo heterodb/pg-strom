@@ -3640,7 +3640,8 @@ codegen_build_groupby_keyhash(codegen_context *context,
 		TargetEntry *tle = lfirst(lc1);
 		int		action = lfirst_int(lc2);
 
-		if (action == KAGG_ACTION__VREF)
+		if (action == KAGG_ACTION__VREF ||
+			action == KAGG_ACTION__VREF_NOKEY)
 		{
 			codegen_kvar_defitem *kvdef;
 
@@ -3686,7 +3687,8 @@ codegen_build_groupby_keyload(codegen_context *context,
 		TargetEntry *tle = lfirst(lc1);
 		int		action = lfirst_int(lc2);
 
-		if (!tle->resjunk && action == KAGG_ACTION__VREF)
+		if (!tle->resjunk && (action == KAGG_ACTION__VREF ||
+							  action == KAGG_ACTION__VREF_NOKEY))
 		{
 			codegen_kvar_defitem *kvdef;
 			devtype_info *dtype;

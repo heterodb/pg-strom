@@ -36,6 +36,7 @@ typedef struct
 	int					hash_anum;
 	int64_t				hash_nslots;
 	int64_t				hash_index;
+	int64_t				hash_nitems;
 	dlist_head		   *hash_slots;
 	Tuplesortstate	   *sort_state;
 	bool				sort_is_ready;
@@ -355,7 +356,7 @@ PlanHashedSortPath(PlannerInfo *root,
 	TargetEntry *tle;
 	
 	tle = makeTargetEntry(hsp_info->hash_expr,
-						  list_length(cs_tlist),
+						  list_length(cs_tlist) + 1,
 						  NULL,
 						  false);
 	cs_tlist = lappend(cs_tlist, tle);
@@ -398,7 +399,7 @@ CreateHashedSortState(CustomScan *cscan)
 	if (!IsA(hash, Var) ||
 		hash->varno != INDEX_VAR ||
 		hash->varattno < 1 ||
-		hash->varattno >= list_length(cscan->custom_scan_tlist) ||
+		hash->varattno > list_length(cscan->custom_scan_tlist) ||
 		hash->vartype != INT8OID ||
 		hash->vartypmod != -1 ||
 		OidIsValid(hash->varcollid))
@@ -424,7 +425,7 @@ CreateHashedSortState(CustomScan *cscan)
 		if (!IsA(key, Var) ||
 			hash->varno != INDEX_VAR ||
 			hash->varattno < 1 ||
-			hash->varattno >= list_length(cscan->custom_scan_tlist))
+			hash->varattno > list_length(cscan->custom_scan_tlist))
 			elog(ERROR, "Bug? hashed-sort key is unexpected expression: %s",
 				 nodeToString(key));
 		hss->sortColIndexes[k] = key->varattno;
@@ -465,7 +466,6 @@ ExecHashSorted(CustomScanState *node)
 	{
 		TupleDesc		tupdesc = ExecGetResultType(outerPlanState(hss));
 		MemoryContext	oldcxt;
-		int				nclusters = 0;
 
 		/* setup Tuplesortstate */
 		oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
@@ -511,26 +511,25 @@ ExecHashSorted(CustomScanState *node)
 			tcluster->hash = hash;
 			tcluster->tuples = NIL;
 			dlist_push_tail(&hss->hash_slots[hindex], &tcluster->chain);
-			nclusters++;
+			hss->hash_nitems++;
 		found:
 			oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
 			mtup = ExecCopySlotMinimalTuple(outer_slot);
 			tcluster->tuples = lappend(tcluster->tuples, mtup);
 			MemoryContextSwitchTo(oldcxt);
 		}
-		elog(INFO, "nclusters = %d", nclusters);
 	}
 again:
 	if (hss->sort_is_ready)
 	{
 		TupleTableSlot	   *slot = hss->css.ss.ps.ps_ResultTupleSlot;
 
-		tuplesort_gettupleslot(hss->sort_state,
-							   true,	/* forward */
-							   false,	/* no copy */
-							   slot,
-							   NULL);
-		return slot;
+		if (tuplesort_gettupleslot(hss->sort_state,
+								   true,	/* forward */
+								   false,	/* no copy */
+								   slot,
+								   NULL))
+			return slot;
 	}
 
 	while (hss->hash_index < hss->hash_nslots)
@@ -605,10 +604,10 @@ ExplainHashSorted(CustomScanState *node,
 				  ExplainState *es)
 {
 	HashedSortState	   *hss = (HashedSortState *)node;
-	CustomScan		   *cscan = (CustomScan *)node->ss.ps.plan;
+	CustomScan		   *cscan = (CustomScan *)hss->css.ss.ps.plan;
 	HashedSortPlanInfo *hsp_info = deform_hashedsort_plan_info(cscan);
 	List			   *dcontext;
-	TargetEntry		   *tle;
+	Var				   *hash;
 	char			   *str;
 	ListCell		   *lc;
 	StringInfoData		buf;
@@ -617,12 +616,19 @@ ExplainHashSorted(CustomScanState *node,
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
 										node->ss.ps.plan,
 										ancestors);
-	Assert(hsp_info->hash_anum > 0 &&
-		   hsp_info->hash_anum <= list_length(cscan->custom_scan_tlist));
-	tle = list_nth(cscan->custom_scan_tlist,
-				   hsp_info->hash_anum - 1);
-	str = deparse_expression((Node *)tle->expr, dcontext, es->verbose, true);
+	hash = (Var *)hsp_info->hash_expr;
+	Assert(IsA(hash, Var) &&
+		   hash->varno == INDEX_VAR &&
+		   hash->varattno > 0 &&
+		   hash->varattno <= list_length(cscan->custom_scan_tlist) &&
+		   hash->vartype == INT8OID &&
+		   hash->vartypmod == -1 &&
+		   !OidIsValid(hash->varcollid));
+	str = deparse_expression((Node *)hash, dcontext, es->verbose, true);
 	ExplainPropertyText("Hash Key", str, es);
+
+	if (es->analyze)
+		ExplainPropertyInteger("Num Clusters", NULL, hss->hash_nitems, es);
 
 	initStringInfo(&buf);
 	foreach (lc, hsp_info->sort_keys)
