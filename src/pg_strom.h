@@ -859,6 +859,12 @@ extern bool		pgstrom_is_gpupreagg_plan(const Plan *plan);
 extern bool		pgstrom_is_gpupreagg_state(const PlanState *ps);
 extern Path	   *xpupreagg_path_attach_nokey(const CustomPath *preagg_path,
 											Expr *nokey_expr);
+extern void		xpupreagg_add_custompath(PlannerInfo *root,
+										 RelOptInfo *input_rel,
+										 RelOptInfo *group_rel,
+										 void *extra,
+										 uint32_t task_kind,
+										 const CustomPathMethods *methods);
 extern bool		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
 									  int depth,
 									  uint64_t l_state,
