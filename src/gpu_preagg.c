@@ -26,6 +26,51 @@ static bool					pgstrom_enable_partitionwise_gpupreagg = false;
 static bool					pgstrom_enable_numeric_aggfuncs;
 
 /*
+ * pgstrom_is_gpupreagg_path
+ */
+bool
+pgstrom_is_gpupreagg_path(const Path *path)
+{
+	if (IsA(path, CustomPath))
+	{
+		const CustomPath *cpath = (const CustomPath *)path;
+
+		return (cpath->methods == &gpupreagg_path_methods);
+	}
+	return false;
+}
+
+/*
+ * pgstrom_is_gpupreagg_plan
+ */
+bool
+pgstrom_is_gpupreagg_plan(const Plan *plan)
+{
+	if (IsA(plan, CustomScan))
+	{
+		const CustomScan *cscan = (const CustomScan *)plan;
+
+		return (cscan->methods == &gpupreagg_plan_methods);
+	}
+	return false;
+}
+
+/*
+ * pgstrom_is_gpupreagg_state
+ */
+bool
+pgstrom_is_gpupreagg_state(const PlanState *ps)
+{
+	if (IsA(ps, CustomScanState))
+	{
+		const CustomScanState *css = (const CustomScanState *)ps;
+
+		return (css->methods == &gpupreagg_exec_methods);
+	}
+	return false;
+}
+
+/*
  * List of supported aggregate functions
  */
 typedef struct

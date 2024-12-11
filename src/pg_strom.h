@@ -852,7 +852,10 @@ extern void		pgstrom_init_dpu_join(void);
 /*
  * gpu_preagg.c
  */
-extern int		pgstrom_hll_register_bits;
+extern int		pgstrom_hll_register_bits;		//deprecated
+extern bool		pgstrom_is_gpupreagg_path(const Path *path);
+extern bool		pgstrom_is_gpupreagg_plan(const Plan *plan);
+extern bool		pgstrom_is_gpupreagg_state(const PlanState *ps);
 extern void		xpupreagg_add_custompath(PlannerInfo *root,
 										 RelOptInfo *input_rel,
 										 RelOptInfo *group_rel,

@@ -1524,22 +1524,32 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 static void
 pgstrom_build_groupby_tlist_dev(codegen_context *context,
 								PlannerInfo *root,
-								List *tlist)
+								List *tlist,
+								List *groupby_actions)
 {
 	ListCell   *lc1, *lc2;
 
 	context->tlist_dev = copyObject(tlist);
-	foreach (lc1, tlist)
+	forboth (lc1, tlist,
+			 lc2, groupby_actions)
 	{
 		TargetEntry *tle = lfirst(lc1);
+		int		action = lfirst_int(lc2);
 
-		if (IsA(tle->expr, FuncExpr))
+		if (action == KAGG_ACTION__VREF ||
+			action == KAGG_ACTION__VREF_NOKEY ||
+			!IsA(tle->expr, FuncExpr))
+		{
+			Assert(tlist_member(tle->expr, context->tlist_dev));
+		}
+		else
 		{
 			FuncExpr   *f = (FuncExpr *)tle->expr;
+			ListCell   *cell;
 
-			foreach (lc2, f->args)
+			foreach (cell, f->args)
 			{
-				Expr   *arg = lfirst(lc2);
+				Expr   *arg = lfirst(cell);
 				int		resno = list_length(context->tlist_dev) + 1;
 
 				if (!tlist_member(arg, context->tlist_dev))
@@ -1549,10 +1559,6 @@ pgstrom_build_groupby_tlist_dev(codegen_context *context,
 					context->tlist_dev = lappend(context->tlist_dev, __tle);
 				}
 			}
-		}
-		else
-		{
-			Assert(tlist_member(tle->expr, context->tlist_dev));
 		}
 	}
 }
@@ -1728,7 +1734,8 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	{
 		Relids	leaf_relids = cpath->path.parent->relids;
 		tlist = fixup_expression_by_partition_leaf(root, leaf_relids, tlist);
-		pgstrom_build_groupby_tlist_dev(context, root, tlist);
+		pgstrom_build_groupby_tlist_dev(context, root, tlist,
+										pp_info->groupby_actions);
 		codegen_build_groupby_actions(context, pp_info);
 	}
 	else
