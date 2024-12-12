@@ -86,3 +86,19 @@ CREATE AGGREGATE pgstrom.avg_int64(bytea)
   finalfunc = pgstrom.favg_final_numeric,
   parallel = safe
 );
+
+---
+--- BUGFIX: corr(X,Y) has been defined incorrectly.
+---
+CREATE FUNCTION pgstrom.correlation_final(bytea)
+  RETURNS float8
+  AS 'MODULE_PATHNAME','pgstrom_correlation_final'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE AGGREGATE pgstrom.corr(bytea)
+(
+  sfunc = pgstrom.covar_accum,
+  stype = bytea,
+  finalfunc = pgstrom.correlation_final,
+  parallel = safe
+);

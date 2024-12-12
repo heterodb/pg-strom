@@ -4299,6 +4299,12 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
+			case KAGG_ACTION__PSUM_INT64:
+				appendStringInfo(buf, "psum::int64[slot=%d, expr='%s']",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
 			case KAGG_ACTION__PSUM_FP:
 				appendStringInfo(buf, "psum::fp[slot=%d, expr='%s']",
 								 desc->arg0_slot_id,
@@ -4312,9 +4318,14 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
-
 			case KAGG_ACTION__PAVG_INT:
 				appendStringInfo(buf, "pavg::int[slot=%d, expr='%s']",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
+			case KAGG_ACTION__PAVG_INT64:
+				appendStringInfo(buf, "pavg::int64[slot=%d, expr='%s']",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
@@ -4339,7 +4350,7 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__COVAR:
-				appendStringInfo(buf, "stddev[slot0=%d, expr0='%s', slot1=%d, expr1='%s']",
+				appendStringInfo(buf, "covar[slotX=%d, exprX='%s', slotY=%d, exprY='%s']",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id),

@@ -65,6 +65,7 @@ PG_FUNCTION_INFO_V1(pgstrom_var_popf_final);
 
 PG_FUNCTION_INFO_V1(pgstrom_partial_covar);
 PG_FUNCTION_INFO_V1(pgstrom_covar_accum);
+PG_FUNCTION_INFO_V1(pgstrom_correlation_final);
 PG_FUNCTION_INFO_V1(pgstrom_covar_samp_final);
 PG_FUNCTION_INFO_V1(pgstrom_covar_pop_final);
 
@@ -707,6 +708,7 @@ pgstrom_partial_variance(PG_FUNCTION_ARGS)
 	kagg_state__stddev_packed *r = palloc(sizeof(kagg_state__stddev_packed));
 	float8_t	fval = PG_GETARG_FLOAT8(0);
 
+	r->attrs = 0;
 	r->nitems = 1;
 	r->sum_x2 = fval * fval;
 	SET_VARSIZE(r, sizeof(kagg_state__stddev_packed));
@@ -738,6 +740,7 @@ pgstrom_stddev_trans(PG_FUNCTION_ARGS)
 		{
 			arg = (kagg_state__stddev_packed *)PG_GETARG_BYTEA_P(1);
 
+			state->attrs  |= arg->attrs;
 			state->nitems += arg->nitems;
 			state->sum_x  += arg->sum_x;
 			state->sum_x2 += arg->sum_x2;
@@ -846,6 +849,7 @@ pgstrom_partial_covar(PG_FUNCTION_ARGS)
 	float8_t	x = PG_GETARG_FLOAT8(0);
 	float8_t	y = PG_GETARG_FLOAT8(1);
 
+	r->attrs  = 0;
 	r->nitems = 1;
 	r->sum_x  = x;
 	r->sum_xx = x * x;
@@ -881,6 +885,7 @@ pgstrom_covar_accum(PG_FUNCTION_ARGS)
 		{
 			arg = (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(1);
 
+			state->attrs  |= arg->attrs;
 			state->nitems += arg->nitems;
 			state->sum_x  += arg->sum_x;
 			state->sum_xx += arg->sum_xx;
@@ -893,19 +898,29 @@ pgstrom_covar_accum(PG_FUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(Datum)
+pgstrom_correlation_final(PG_FUNCTION_ARGS)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
+
+	if (state->nitems < 1 ||
+		state->sum_xx == 0.0 ||
+		state->sum_yy == 0.0)
+		PG_RETURN_NULL();
+
+	PG_RETURN_FLOAT8(state->sum_xy / sqrt(state->sum_xx * state->sum_yy));
+}
+
+PUBLIC_FUNCTION(Datum)
 pgstrom_covar_samp_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
 		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
 
-	if (state->nitems > 1)
-	{
-		float8_t	N = (float8_t)state->nitems;
-		float8_t	fval = N * state->sum_xy - state->sum_x * state->sum_y;
+	if (state->nitems < 2)
+		PG_RETURN_NULL();
 
-		PG_RETURN_FLOAT8(fval / (N * (N - 1.0)));
-	}
-	PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(state->sum_xy / (double)(state->nitems - 1));
 }
 
 PUBLIC_FUNCTION(Datum)
@@ -914,14 +929,10 @@ pgstrom_covar_pop_final(PG_FUNCTION_ARGS)
 	kagg_state__covar_packed *state
 		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
 
-	if (state->nitems > 0)
-	{
-		float8_t	N = (float8_t)state->nitems;
-		float8_t	fval = N * state->sum_xy - state->sum_x * state->sum_y;
+	if (state->nitems < 1)
+		PG_RETURN_NULL();
 
-		PG_RETURN_FLOAT8(fval / (N * N));
-	}
-	PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(state->sum_xy / (double)state->nitems);
 }
 
 PUBLIC_FUNCTION(Datum)
@@ -929,13 +940,10 @@ pgstrom_regr_avgx_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
 		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems > 0)
-	{
-		float8_t	N = (float8_t)state->nitems;
 
-		PG_RETURN_FLOAT8(state->sum_x / N);
-	}
-	PG_RETURN_NULL();
+	if (state->nitems < 1)
+		PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(state->sum_x / (double)state->nitems);
 }
 
 PUBLIC_FUNCTION(Datum)
@@ -943,13 +951,9 @@ pgstrom_regr_avgy_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
 		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems > 0)
-	{
-		float8_t	N = (float8_t)state->nitems;
-
-		PG_RETURN_FLOAT8(state->sum_y / N);
-	}
-	PG_RETURN_NULL();
+	if (state->nitems < 1)
+		PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(state->sum_y / (double)state->nitems);
 }
 
 PUBLIC_FUNCTION(Datum)
@@ -958,7 +962,7 @@ pgstrom_regr_count_final(PG_FUNCTION_ARGS)
 	kagg_state__covar_packed *state
 		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
 
-	PG_RETURN_FLOAT8((float8_t)state->nitems);
+	PG_RETURN_FLOAT8((double)state->nitems);
 }
 
 PUBLIC_FUNCTION(Datum)
@@ -966,14 +970,12 @@ pgstrom_regr_intercept_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
 		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems > 0 && state->sum_xx != 0.0)
-	{
-		float8_t	N = (float8_t)state->nitems;
-		
-		PG_RETURN_FLOAT8((state->sum_y -
-						  state->sum_x * state->sum_xy / state->sum_xx) / N);
-	}
-	PG_RETURN_NULL();
+
+	if (state->nitems < 1 || state->sum_xx == 0.0)
+		PG_RETURN_NULL();
+
+	PG_RETURN_FLOAT8((state->sum_y -
+					  state->sum_x * state->sum_xy / state->sum_xx) / (double)state->nitems);
 }
 
 PUBLIC_FUNCTION(Datum)

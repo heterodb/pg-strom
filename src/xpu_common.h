@@ -2240,7 +2240,7 @@ typedef struct
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	attrs;		/* reserved for future use */
+	uint32_t	attrs;			/* reserved for future use */
 	int64_t		nitems;
 	int64_t		sum;
 } kagg_state__psum_int_packed;
@@ -2248,7 +2248,7 @@ typedef struct
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	attrs;		/* reserved for future use */
+	uint32_t	attrs;			/* reserved for future use */
 	int64_t		nitems;
 	float8_t	sum;
 } kagg_state__psum_fp_packed;
@@ -2263,13 +2263,14 @@ typedef struct
 	int32_t		vl_len_;
 	uint32_t	attrs;
 	uint64_t	nitems;
-	int128_packed_t sum;	/* int128 or uint64 x2 */
+	int128_packed_t sum;		/* int128 or uint64 x2 */
 } kagg_state__psum_numeric_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	float8_t	sum_x;
 	float8_t	sum_x2;
 } kagg_state__stddev_packed;
@@ -2277,7 +2278,8 @@ typedef struct
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	float8_t	sum_x;
 	float8_t	sum_xx;
 	float8_t	sum_y;

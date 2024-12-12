@@ -859,7 +859,7 @@ __update_nogroups__pstddev(kern_context *kcxt,
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, count);
+				__atomic_add_int64(&r->nitems, count);
 				__atomic_add_fp64(&r->sum_x,  sum_x);
 				__atomic_add_fp64(&r->sum_x2, sum_x2);
 			}
@@ -901,7 +901,7 @@ __update_nogroups__pcovar(kern_context *kcxt,
 		pgstrom_stair_sum_fp64(yval * yval, &sum_yy);
 		pgstrom_stair_sum_fp64(xval * yval, &sum_xy);
 
-		if (get_global_id() == 0)
+		if (get_local_id() == 0)
 		{
 			kagg_state__covar_packed *r =
 				(kagg_state__covar_packed *)buffer;
@@ -916,7 +916,7 @@ __update_nogroups__pcovar(kern_context *kcxt,
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, count);
+				__atomic_add_int64(&r->nitems, count);
 				__atomic_add_fp64(&r->sum_x,  sum_x);
 				__atomic_add_fp64(&r->sum_xx, sum_xx);
 				__atomic_add_fp64(&r->sum_y,  sum_y);
@@ -1520,7 +1520,7 @@ __update_groupby__pstddev(kern_context *kcxt,
 		kagg_state__stddev_packed *r =
 			(kagg_state__stddev_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_fp64(&r->sum_x,  fval);
 		__atomic_add_fp64(&r->sum_x2, fval * fval);
 	}
@@ -1543,7 +1543,7 @@ __update_groupby__pcovar(kern_context *kcxt,
 		kagg_state__covar_packed *r =
 			(kagg_state__covar_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_fp64(&r->sum_x,  xval);
 		__atomic_add_fp64(&r->sum_xx, xval * xval);
 		__atomic_add_fp64(&r->sum_y,  yval);
@@ -2132,7 +2132,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 						(kagg_state__stddev_packed *)((char *)htup + t_hoff);
 					if (s->nitems > 0)
 					{
-						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_add_int64(&r->nitems, s->nitems);
 						__atomic_add_fp64(&r->sum_x,  s->sum_x);
 						__atomic_add_fp64(&r->sum_x2, s->sum_x2);
 					}
@@ -2148,7 +2148,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 						(kagg_state__covar_packed *)((char *)htup + t_hoff);
 					if (s->nitems > 0)
 					{
-						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_add_int64(&r->nitems, s->nitems);
 						__atomic_add_fp64(&r->sum_x,  s->sum_x);
 						__atomic_add_fp64(&r->sum_xx, s->sum_xx);
 						__atomic_add_fp64(&r->sum_y,  s->sum_y);

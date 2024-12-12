@@ -593,7 +593,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 *                          PCOV_XY(X,Y))
 	 */
 	{"corr(float8,float8)",
-	 "s:covar_samp(bytea)",
+	 "s:corr(bytea)",
 	 "s:pcovar(float8,float8)",
 	 KAGG_ACTION__COVAR, false
 	},
