@@ -171,7 +171,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				{
 					kagg_state__pminmax_int64_packed *r =
 						(kagg_state__pminmax_int64_packed *)buffer;
-					r->nitems = 0;
+					r->attrs = 0;
 					r->value = LONG_MAX;
 					SET_VARSIZE(r, sizeof(kagg_state__pminmax_int64_packed));
 				}
@@ -185,7 +185,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				{
 					kagg_state__pminmax_int64_packed *r =
 						(kagg_state__pminmax_int64_packed *)buffer;
-					r->nitems = 0;
+					r->attrs = 0;
 					r->value = LONG_MIN;
 					SET_VARSIZE(r, sizeof(kagg_state__pminmax_int64_packed));
 				}
@@ -198,7 +198,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				{
 					kagg_state__pminmax_fp64_packed *r =
 						(kagg_state__pminmax_fp64_packed *)buffer;
-					r->nitems = 0;
+					r->attrs = 0;
 					r->value = DBL_MAX;
 					SET_VARSIZE(r, sizeof(kagg_state__pminmax_fp64_packed));
 				}
@@ -211,7 +211,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				{
 					kagg_state__pminmax_fp64_packed *r =
 						(kagg_state__pminmax_fp64_packed *)buffer;
-					r->nitems = 0;
+					r->attrs = 0;
 					r->value = -DBL_MAX;
 					SET_VARSIZE(r, sizeof(kagg_state__pminmax_fp64_packed));
 				}
@@ -225,6 +225,20 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				{
 					memset(buffer, 0, sizeof(kagg_state__psum_int_packed));
 					SET_VARSIZE(buffer, sizeof(kagg_state__psum_int_packed));
+				}
+				t_infomask |= HEAP_HASVARWIDTH;
+				break;
+
+			case KAGG_ACTION__PSUM_INT64:
+			case KAGG_ACTION__PAVG_INT64:
+				nbytes = sizeof(kagg_state__psum_numeric_packed);
+				if (buffer)
+				{
+					kagg_state__psum_numeric_packed *r =
+						(kagg_state__psum_numeric_packed *)buffer;
+					memset(r, 0, sizeof(kagg_state__psum_numeric_packed));
+					/* weight is always 0, unlike numeric */
+                    SET_VARSIZE(buffer, sizeof(kagg_state__psum_numeric_packed));
 				}
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
@@ -354,7 +368,6 @@ __update_nogroups__pmin_int32(kern_context *kcxt,
 							  bool source_is_valid)
 {
 	int32_t		ival;
-	int			count;
 
 	if (source_is_valid)
 	{
@@ -363,8 +376,8 @@ __update_nogroups__pmin_int32(kern_context *kcxt,
 		if (!__preagg_fetch_xdatum_as_int32(&ival, xdatum))
 			source_is_valid = false;
 	}
-	count = __syncthreads_count(source_is_valid);
-	if (count > 0)
+
+	if (__syncthreads_count(source_is_valid) > 0)
 	{
 		ival = pgstrom_local_min_int32(source_is_valid ? ival : INT_MAX);
 		if (get_local_id() == 0)
@@ -373,13 +386,13 @@ __update_nogroups__pmin_int32(kern_context *kcxt,
 				(kagg_state__pminmax_int64_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += count;
+				r->attrs |= __PAGG_MINMAX_ATTRS__VALID;
 				if (r->value > ival)
 					r->value = ival;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, count);
+				__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 				__atomic_min_int64(&r->value, (int64_t)ival);
 			}
 		}
@@ -397,7 +410,6 @@ __update_nogroups__pmin_int64(kern_context *kcxt,
 							  bool source_is_valid)
 {
 	int64_t		ival;
-	int			count;
 
 	if (source_is_valid)
 	{
@@ -406,8 +418,8 @@ __update_nogroups__pmin_int64(kern_context *kcxt,
 		if (!__preagg_fetch_xdatum_as_int64(&ival, xdatum))
 			source_is_valid = false;
 	}
-	count = __syncthreads_count(source_is_valid);
-	if (count > 0)
+
+	if (__syncthreads_count(source_is_valid) > 0)
 	{
 		ival = pgstrom_local_min_int64(source_is_valid ? ival : LONG_MAX);
 		if (get_local_id() == 0)
@@ -416,13 +428,13 @@ __update_nogroups__pmin_int64(kern_context *kcxt,
 				(kagg_state__pminmax_int64_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += count;
+				r->attrs |= __PAGG_MINMAX_ATTRS__VALID;
 				if (r->value > ival)
 					r->value = ival;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, count);
+				__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 				__atomic_min_int64(&r->value, ival);
 			}
 		}
@@ -440,7 +452,6 @@ __update_nogroups__pmax_int32(kern_context *kcxt,
 							  bool source_is_valid)
 {
 	int32_t		ival;
-	int			count;
 
 	if (source_is_valid)
 	{
@@ -449,8 +460,8 @@ __update_nogroups__pmax_int32(kern_context *kcxt,
 		if (!__preagg_fetch_xdatum_as_int32(&ival, xdatum))
 			source_is_valid = false;
 	}
-	count = __syncthreads_count(source_is_valid);
-	if (count > 0)
+
+	if (__syncthreads_count(source_is_valid) > 0)
 	{
 		ival = pgstrom_local_max_int64(source_is_valid ? ival : INT_MIN);
 		if (get_local_id() == 0)
@@ -459,13 +470,13 @@ __update_nogroups__pmax_int32(kern_context *kcxt,
 				(kagg_state__pminmax_int64_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += count;
+				r->attrs |= __PAGG_MINMAX_ATTRS__VALID;
 				if (r->value < ival)
 					r->value = ival;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, count);
+				__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 				__atomic_max_int64(&r->value, (int64_t)ival);
 			}
 		}
@@ -483,7 +494,6 @@ __update_nogroups__pmax_int64(kern_context *kcxt,
 							  bool source_is_valid)
 {
 	int64_t		ival;
-	int			count;
 
 	if (source_is_valid)
 	{
@@ -492,8 +502,8 @@ __update_nogroups__pmax_int64(kern_context *kcxt,
 		if (!__preagg_fetch_xdatum_as_int64(&ival, xdatum))
 			source_is_valid = false;
 	}
-	count = __syncthreads_count(source_is_valid);
-	if (count > 0)
+
+	if (__syncthreads_count(source_is_valid) > 0)
 	{
 		ival = pgstrom_local_max_int64(source_is_valid ? ival : LONG_MIN);
 		if (get_local_id() == 0)
@@ -502,13 +512,13 @@ __update_nogroups__pmax_int64(kern_context *kcxt,
 				(kagg_state__pminmax_int64_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += count;
+				r->attrs |= __PAGG_MINMAX_ATTRS__VALID;
 				if (r->value < ival)
 					r->value = ival;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, count);
+				__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 				__atomic_max_int64(&r->value, ival);
 			}
 		}
@@ -526,7 +536,6 @@ __update_nogroups__pmin_fp64(kern_context *kcxt,
 							 bool source_is_valid)
 {
 	float8_t	fval;
-	int			count;
 
 	if (source_is_valid)
 	{
@@ -535,8 +544,8 @@ __update_nogroups__pmin_fp64(kern_context *kcxt,
 		if (!__preagg_fetch_xdatum_as_float64(&fval, xdatum))
 			source_is_valid = false;
 	}
-	count = __syncthreads_count(source_is_valid);
-	if (count > 0)
+
+	if (__syncthreads_count(source_is_valid) > 0)
 	{
 		fval = pgstrom_local_min_fp64(source_is_valid ? fval : DBL_MAX);
 		if (get_local_id() == 0)
@@ -545,13 +554,13 @@ __update_nogroups__pmin_fp64(kern_context *kcxt,
 				(kagg_state__pminmax_fp64_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += count;
+				r->attrs |= __PAGG_MINMAX_ATTRS__VALID;
 				if (r->value > fval)
 					r->value = fval;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, count);
+				__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 				__atomic_min_fp64(&r->value, fval);
 			}
 		}
@@ -569,7 +578,6 @@ __update_nogroups__pmax_fp64(kern_context *kcxt,
 							 bool source_is_valid)
 {
 	float8_t	fval;
-	int			count;
 
 	if (source_is_valid)
 	{
@@ -578,8 +586,8 @@ __update_nogroups__pmax_fp64(kern_context *kcxt,
 		if (!__preagg_fetch_xdatum_as_float64(&fval, xdatum))
 			source_is_valid = false;
 	}
-	count = __syncthreads_count(source_is_valid);
-	if (count > 0)
+
+	if (__syncthreads_count(source_is_valid) > 0)
 	{
 		fval = pgstrom_local_max_fp64(source_is_valid ? fval : -DBL_MAX);
 		if (get_local_id() == 0)
@@ -588,13 +596,13 @@ __update_nogroups__pmax_fp64(kern_context *kcxt,
 				(kagg_state__pminmax_fp64_packed *)buffer;
 			if (__isShared(r))
 			{
-				r->nitems += count;
+				r->attrs |= __PAGG_MINMAX_ATTRS__VALID;
 				if (r->value < fval)
 					r->value = fval;
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, count);
+				__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 				__atomic_min_fp64(&r->value, fval);
 			}
 		}
@@ -637,8 +645,53 @@ __update_nogroups__psum_int(kern_context *kcxt,
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, count);
+				__atomic_add_int64(&r->nitems, count);
 				__atomic_add_int64(&r->sum, sum);
+			}
+		}
+	}
+}
+
+/*
+ * __update_nogroups__psum_int64
+ */
+INLINE_FUNCTION(void)
+__update_nogroups__psum_int64(kern_context *kcxt,
+							  char *buffer,
+							  kern_colmeta *cmeta,
+							  kern_aggregate_desc *desc,
+							  bool source_is_valid)
+{
+	int64_t		ival = 0;
+	int			count;
+
+	if (source_is_valid)
+	{
+		const xpu_datum_t *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+
+		if (!__preagg_fetch_xdatum_as_int64(&ival, xdatum))
+			source_is_valid = false;
+	}
+	count = __syncthreads_count(source_is_valid);
+	if (count > 0)
+	{
+		kagg_state__psum_numeric_packed *r =
+			(kagg_state__psum_numeric_packed *)buffer;
+		int128_t	sum, __temp;
+
+		pgstrom_stair_sum_int128(ival, &sum);
+		if (get_local_id() == 0)
+		{
+			if (__isShared(r))
+			{
+				r->nitems += count;
+				__temp = __fetch_int128_packed(&r->sum);
+				__store_int128_packed(&r->sum, __temp + sum);
+			}
+			else
+			{
+				__atomic_add_uint64(&r->nitems, count);
+				__atomic_add_int128(&r->sum, sum);
 			}
 		}
 	}
@@ -680,7 +733,7 @@ __update_nogroups__psum_fp(kern_context *kcxt,
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, count);
+				__atomic_add_int64(&r->nitems, count);
 				__atomic_add_fp64(&r->sum, sum);
 			}
 		}
@@ -806,7 +859,7 @@ __update_nogroups__pstddev(kern_context *kcxt,
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, count);
+				__atomic_add_int64(&r->nitems, count);
 				__atomic_add_fp64(&r->sum_x,  sum_x);
 				__atomic_add_fp64(&r->sum_x2, sum_x2);
 			}
@@ -848,7 +901,7 @@ __update_nogroups__pcovar(kern_context *kcxt,
 		pgstrom_stair_sum_fp64(yval * yval, &sum_yy);
 		pgstrom_stair_sum_fp64(xval * yval, &sum_xy);
 
-		if (get_global_id() == 0)
+		if (get_local_id() == 0)
 		{
 			kagg_state__covar_packed *r =
 				(kagg_state__covar_packed *)buffer;
@@ -863,7 +916,7 @@ __update_nogroups__pcovar(kern_context *kcxt,
 			}
 			else
 			{
-				__atomic_add_uint32(&r->nitems, count);
+				__atomic_add_int64(&r->nitems, count);
 				__atomic_add_fp64(&r->sum_x,  sum_x);
 				__atomic_add_fp64(&r->sum_xx, sum_xx);
 				__atomic_add_fp64(&r->sum_y,  sum_y);
@@ -966,6 +1019,12 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 				__update_nogroups__psum_int(kcxt, buffer,
 											cmeta, desc,
 											source_is_valid);
+				break;
+			case KAGG_ACTION__PSUM_INT64:
+			case KAGG_ACTION__PAVG_INT64:
+				__update_nogroups__psum_int64(kcxt, buffer,
+											  cmeta, desc,
+											  source_is_valid);
 				break;
 			case KAGG_ACTION__PAVG_FP:
 			case KAGG_ACTION__PSUM_FP:
@@ -1243,7 +1302,7 @@ __update_groupby__pmin_int32(kern_context *kcxt,
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_min_int64(&r->value, ival);
 	}
 	return sizeof(kagg_state__pminmax_int64_packed);
@@ -1263,7 +1322,7 @@ __update_groupby__pmin_int64(kern_context *kcxt,
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_min_int64(&r->value, ival);
 	}
 	return sizeof(kagg_state__pminmax_int64_packed);
@@ -1283,7 +1342,7 @@ __update_groupby__pmax_int32(kern_context *kcxt,
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_max_int64(&r->value, ival);
 	}
 	return sizeof(kagg_state__pminmax_int64_packed);
@@ -1303,7 +1362,7 @@ __update_groupby__pmax_int64(kern_context *kcxt,
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_max_int64(&r->value, ival);
 	}
 	return sizeof(kagg_state__pminmax_int64_packed);
@@ -1323,7 +1382,7 @@ __update_groupby__pmin_fp64(kern_context *kcxt,
 		kagg_state__pminmax_fp64_packed *r =
 			(kagg_state__pminmax_fp64_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_min_fp64(&r->value, fval);
 	}
 	return sizeof(kagg_state__pminmax_fp64_packed);
@@ -1343,7 +1402,7 @@ __update_groupby__pmax_fp64(kern_context *kcxt,
 		kagg_state__pminmax_fp64_packed *r =
 			(kagg_state__pminmax_fp64_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_max_fp64(&r->value, fval);
 	}
 	return sizeof(kagg_state__pminmax_fp64_packed);
@@ -1363,10 +1422,30 @@ __update_groupby__psum_int(kern_context *kcxt,
 		kagg_state__psum_int_packed *r =
 			(kagg_state__psum_int_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_int64(&r->sum, ival);
 	}
 	return sizeof(kagg_state__psum_int_packed);
+}
+
+INLINE_FUNCTION(int)
+__update_groupby__psum_int64(kern_context *kcxt,
+							 char *buffer,
+							 const kern_colmeta *cmeta,
+							 const kern_aggregate_desc *desc)
+{
+	const xpu_datum_t *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	int64_t		ival;
+
+	if (__preagg_fetch_xdatum_as_int64(&ival, xdatum))
+	{
+		kagg_state__psum_numeric_packed *r =
+			(kagg_state__psum_numeric_packed *)buffer;
+
+		__atomic_add_uint64(&r->nitems, 1);
+		__atomic_add_int128(&r->sum, ival);
+	}
+	return sizeof(kagg_state__psum_numeric_packed);
 }
 
 INLINE_FUNCTION(int)
@@ -1383,7 +1462,7 @@ __update_groupby__psum_fp(kern_context *kcxt,
 		kagg_state__psum_fp_packed *r =
 			(kagg_state__psum_fp_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_fp64(&r->sum, fval);
 	}
 	return sizeof(kagg_state__psum_fp_packed);
@@ -1441,7 +1520,7 @@ __update_groupby__pstddev(kern_context *kcxt,
 		kagg_state__stddev_packed *r =
 			(kagg_state__stddev_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_fp64(&r->sum_x,  fval);
 		__atomic_add_fp64(&r->sum_x2, fval * fval);
 	}
@@ -1464,7 +1543,7 @@ __update_groupby__pcovar(kern_context *kcxt,
 		kagg_state__covar_packed *r =
 			(kagg_state__covar_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_fp64(&r->sum_x,  xval);
 		__atomic_add_fp64(&r->sum_xx, xval * xval);
 		__atomic_add_fp64(&r->sum_y,  yval);
@@ -1540,6 +1619,10 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 			case KAGG_ACTION__PAVG_INT:
 			case KAGG_ACTION__PSUM_INT:
 				curr += __update_groupby__psum_int(kcxt, curr, cmeta, desc);
+				break;
+			case KAGG_ACTION__PAVG_INT64:
+			case KAGG_ACTION__PSUM_INT64:
+				curr += __update_groupby__psum_int64(kcxt, curr, cmeta, desc);
 				break;
 			case KAGG_ACTION__PAVG_FP:
 			case KAGG_ACTION__PSUM_FP:
@@ -1747,8 +1830,8 @@ __setupGpuPreAggGroupByBufferOne(kern_context *kcxt,
 				{
 					kagg_state__pminmax_int64_packed *r =
 						(kagg_state__pminmax_int64_packed *)pos;
-					r->nitems = 0;
-					r->value  = LONG_MAX;
+					r->attrs = 0;
+					r->value = LONG_MAX;
 					SET_VARSIZE(r, sizeof(kagg_state__pminmax_int64_packed));
 					pos += sizeof(kagg_state__pminmax_int64_packed);
 				}
@@ -1759,7 +1842,7 @@ __setupGpuPreAggGroupByBufferOne(kern_context *kcxt,
 				{
 					kagg_state__pminmax_int64_packed *r =
 						(kagg_state__pminmax_int64_packed *)pos;
-					r->nitems = 0;
+					r->attrs = 0;
 					r->value = LONG_MIN;
 					SET_VARSIZE(r, sizeof(kagg_state__pminmax_int64_packed));
 					pos += sizeof(kagg_state__pminmax_int64_packed);
@@ -1770,7 +1853,7 @@ __setupGpuPreAggGroupByBufferOne(kern_context *kcxt,
 				{
 					kagg_state__pminmax_fp64_packed *r =
 						(kagg_state__pminmax_fp64_packed *)pos;
-					r->nitems = 0;
+					r->attrs = 0;
 					r->value = DBL_MAX;
 					SET_VARSIZE(r, sizeof(kagg_state__pminmax_fp64_packed));
 					pos += sizeof(kagg_state__pminmax_fp64_packed);
@@ -1781,7 +1864,7 @@ __setupGpuPreAggGroupByBufferOne(kern_context *kcxt,
 				{
 					kagg_state__pminmax_fp64_packed *r =
                         (kagg_state__pminmax_fp64_packed *)pos;
-                    r->nitems = 0;
+                    r->attrs = 0;
                     r->value = -DBL_MAX;
                     SET_VARSIZE(r, sizeof(kagg_state__pminmax_fp64_packed));
 					pos += sizeof(kagg_state__pminmax_fp64_packed);
@@ -1793,6 +1876,13 @@ __setupGpuPreAggGroupByBufferOne(kern_context *kcxt,
 				memset(pos, 0, sizeof(kagg_state__psum_int_packed));
 				SET_VARSIZE(pos, sizeof(kagg_state__psum_int_packed));
 				pos += sizeof(kagg_state__psum_int_packed);
+				break;
+
+			case KAGG_ACTION__PSUM_INT64:
+			case KAGG_ACTION__PAVG_INT64:
+				memset(pos, 0, sizeof(kagg_state__psum_numeric_packed));
+				SET_VARSIZE(pos, sizeof(kagg_state__psum_numeric_packed));
+				pos += sizeof(kagg_state__psum_numeric_packed);
 				break;
 
 			case KAGG_ACTION__PSUM_FP:
@@ -1923,9 +2013,9 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 						(const kagg_state__pminmax_int64_packed *)pos;
 					kagg_state__pminmax_int64_packed *r =
 						(kagg_state__pminmax_int64_packed *)((char *)htup + t_hoff);
-					if (s->nitems > 0)
+					if ((s->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
 					{
-						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_or_uint32(&r->attrs, s->attrs);
 						__atomic_min_int64(&r->value, s->value);
 					}
 					nbytes = sizeof(kagg_state__pminmax_int64_packed);
@@ -1939,9 +2029,9 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 						(const kagg_state__pminmax_int64_packed *)pos;
 					kagg_state__pminmax_int64_packed *r =
 						(kagg_state__pminmax_int64_packed *)((char *)htup + t_hoff);
-					if (s->nitems > 0)
+					if ((s->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
 					{
-						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_or_uint32(&r->attrs, s->attrs);
 						__atomic_max_int64(&r->value, s->value);
 					}
 					nbytes = sizeof(kagg_state__pminmax_int64_packed);
@@ -1954,9 +2044,9 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 						(const kagg_state__pminmax_fp64_packed *)pos;
 					kagg_state__pminmax_fp64_packed *r =
 						(kagg_state__pminmax_fp64_packed *)((char *)htup + t_hoff);
-					if (s->nitems > 0)
+					if ((s->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
 					{
-						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_or_uint32(&r->attrs, s->attrs);
 						__atomic_min_fp64(&r->value, s->value);
 					}
 					nbytes = sizeof(kagg_state__pminmax_fp64_packed);
@@ -1969,9 +2059,9 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 						(const kagg_state__pminmax_fp64_packed *)pos;
 					kagg_state__pminmax_fp64_packed *r =
 						(kagg_state__pminmax_fp64_packed *)((char *)htup + t_hoff);
-					if (s->nitems > 0)
+					if ((s->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
 					{
-						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_or_uint32(&r->attrs, s->attrs);
 						__atomic_max_fp64(&r->value, s->value);
 					}
 					nbytes = sizeof(kagg_state__pminmax_fp64_packed);
@@ -1987,7 +2077,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 						(kagg_state__psum_int_packed *)((char *)htup + t_hoff);
 					if (s->nitems > 0)
 					{
-						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_add_int64(&r->nitems, s->nitems);
 						__atomic_add_int64(&r->sum, s->sum);
 					}
 					nbytes = sizeof(kagg_state__psum_int_packed);
@@ -2003,13 +2093,15 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 						(kagg_state__psum_fp_packed *)((char *)htup + t_hoff);
 					if (s->nitems > 0)
 					{
-						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_add_int64(&r->nitems, s->nitems);
 						__atomic_add_fp64(&r->sum, s->sum);
 					}
 					nbytes = sizeof(kagg_state__psum_fp_packed);
 				}
 				break;
 
+			case KAGG_ACTION__PSUM_INT64:
+			case KAGG_ACTION__PAVG_INT64:
 			case KAGG_ACTION__PSUM_NUMERIC:
 			case KAGG_ACTION__PAVG_NUMERIC:
 				{
@@ -2040,7 +2132,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 						(kagg_state__stddev_packed *)((char *)htup + t_hoff);
 					if (s->nitems > 0)
 					{
-						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_add_int64(&r->nitems, s->nitems);
 						__atomic_add_fp64(&r->sum_x,  s->sum_x);
 						__atomic_add_fp64(&r->sum_x2, s->sum_x2);
 					}
@@ -2056,7 +2148,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 						(kagg_state__covar_packed *)((char *)htup + t_hoff);
 					if (s->nitems > 0)
 					{
-						__atomic_add_uint32(&r->nitems, s->nitems);
+						__atomic_add_int64(&r->nitems, s->nitems);
 						__atomic_add_fp64(&r->sum_x,  s->sum_x);
 						__atomic_add_fp64(&r->sum_xx, s->sum_xx);
 						__atomic_add_fp64(&r->sum_y,  s->sum_y);

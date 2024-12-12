@@ -2229,39 +2229,45 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__PMAX_INT64		403		/* <int4>,<int8> - max value */
 #define KAGG_ACTION__PMAX_FP64		404		/* <int4>,<float8> - max value */
 #define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
+#define KAGG_ACTION__PSUM_INT64		502		/* <int8>,<int8+8> */
 #define KAGG_ACTION__PSUM_FP		503		/* <float8> - sum of values */
 #define KAGG_ACTION__PSUM_NUMERIC	504		/* <int4>,<int8+8> - sum of values */
 #define KAGG_ACTION__PAVG_INT		601		/* <int4>,<int8> - NROWS+PSUM */
-#define KAGG_ACTION__PAVG_FP		602		/* <int4>,<float8> - NROWS+PSUM */
-#define KAGG_ACTION__PAVG_NUMERIC	603		/* <int4>,<int8+8> - NROWS+PSUM */
+#define KAGG_ACTION__PAVG_INT64		602		/* <int8>,<int8+8> */
+#define KAGG_ACTION__PAVG_FP		603		/* <int4>,<float8> - NROWS+PSUM */
+#define KAGG_ACTION__PAVG_NUMERIC	604		/* <int4>,<int8+8> - NROWS+PSUM */
 #define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
 #define KAGG_ACTION__COVAR			801		/* <int4>,<float8>x5 - covariance */
+
+#define __PAGG_MINMAX_ATTRS__VALID	0x0001	/* value is not empty */
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;
 	int64_t		value;
 } kagg_state__pminmax_int64_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;
 	float8_t	value;
 } kagg_state__pminmax_fp64_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	int64_t		sum;
 } kagg_state__psum_int_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	float8_t	sum;
 } kagg_state__psum_fp_packed;
 
@@ -2275,13 +2281,14 @@ typedef struct
 	int32_t		vl_len_;
 	uint32_t	attrs;
 	uint64_t	nitems;
-	int128_packed_t sum;	/* int128 or uint64 x2 */
+	int128_packed_t sum;		/* int128 or uint64 x2 */
 } kagg_state__psum_numeric_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	float8_t	sum_x;
 	float8_t	sum_x2;
 } kagg_state__stddev_packed;
@@ -2289,7 +2296,8 @@ typedef struct
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	float8_t	sum_x;
 	float8_t	sum_xx;
 	float8_t	sum_y;

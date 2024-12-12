@@ -4374,7 +4374,7 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 				 k >= 0;
 				 k = bms_next_member(arrow_state->referenced, k))
 			{
-				j = k + FirstLowInvalidHeapAttributeNumber - 1;
+				j = k + FirstLowInvalidHeapAttributeNumber;
 				if (j <= 0 || j > af_state->ncols)
 					continue;
 				i = af_state->attrs[j-1].field_index;
@@ -4428,7 +4428,7 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 		{
 			Form_pg_attribute attr;
 
-			j = k + FirstLowInvalidHeapAttributeNumber - 1;
+			j = k + FirstLowInvalidHeapAttributeNumber;
 			if (j < 0 || j >= tupdesc->natts)
 				continue;
 			attr = TupleDescAttr(tupdesc, j);
