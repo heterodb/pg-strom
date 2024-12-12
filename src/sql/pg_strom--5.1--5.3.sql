@@ -55,3 +55,34 @@ CREATE AGGREGATE pgstrom.avg_numeric(bytea)
   finalfunc = pgstrom.favg_final_numeric,
   parallel = safe
 );
+---
+--- Functions to support 128bit SUM(int8) AVG(int8) aggregation related to
+--- the issue #860
+---
+
+-- SUM(int8) --> numeric
+CREATE FUNCTION pgstrom.psum64(int8)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE AGGREGATE pgstrom.sum_int64(bytea)
+(
+  sfunc = pgstrom.fsum_trans_numeric,
+  stype = bytea,
+  finalfunc = pgstrom.fsum_final_numeric,
+  parallel = safe
+);
+-- AVG(int8) --> numeric
+CREATE FUNCTION pgstrom.pavg64(int8)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE AGGREGATE pgstrom.avg_int64(bytea)
+(
+  sfunc = pgstrom.fsum_trans_numeric,
+  stype = bytea,
+  finalfunc = pgstrom.favg_final_numeric,
+  parallel = safe
+);

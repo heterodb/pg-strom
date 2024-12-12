@@ -257,9 +257,9 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(int8)",
-	 "s:sum_int_num(bytea)",
-	 "s:psum(int8)",
-	 KAGG_ACTION__PSUM_INT,  false
+	 "s:sum_int64(bytea)",
+	 "s:psum64(int8)",
+	 KAGG_ACTION__PSUM_INT64,  false
 	},
 	{"sum(float2)",
 	 "s:sum_fp64(bytea)",
@@ -305,9 +305,9 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 KAGG_ACTION__PAVG_INT, false
 	},
 	{"avg(int8)",
-	 "s:avg_int(bytea)",
-	 "s:pavg(int8)",
-	 KAGG_ACTION__PAVG_INT, false
+	 "s:avg_int64(bytea)",
+	 "s:pavg64(int8)",
+	 KAGG_ACTION__PAVG_INT64, false
 	},
 	{"avg(float2)",
 	 "s:avg_fp(bytea)",
@@ -800,6 +800,9 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 			type_oid = BYTEAOID;
 			partfn_bufsz = sizeof(kagg_state__psum_fp_packed);
 			break;
+
+		case KAGG_ACTION__PAVG_INT64:
+		case KAGG_ACTION__PSUM_INT64:
 		case KAGG_ACTION__PAVG_NUMERIC:
 		case KAGG_ACTION__PSUM_NUMERIC:
 			func_nargs = 1;

@@ -2975,7 +2975,7 @@ CREATE AGGREGATE pgstrom.sum_int(bytea)
   finalfunc = pgstrom.fsum_final_int,
   parallel = safe
 );
--- SUM(int8) --> numeric
+-- SUM(int8) --> numeric (DEPRECATED))
 CREATE AGGREGATE pgstrom.sum_int_num(bytea)
 (
   sfunc = pgstrom.fsum_trans_int,

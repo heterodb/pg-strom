@@ -33,6 +33,7 @@ PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_fp64);
 PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_numeric);
 
 PG_FUNCTION_INFO_V1(pgstrom_partial_sum_int);
+PG_FUNCTION_INFO_V1(pgstrom_partial_sum_int64);
 PG_FUNCTION_INFO_V1(pgstrom_partial_sum_fp);
 PG_FUNCTION_INFO_V1(pgstrom_partial_sum_numeric);
 PG_FUNCTION_INFO_V1(pgstrom_partial_sum_cash);
@@ -295,6 +296,19 @@ pgstrom_partial_sum_int(PG_FUNCTION_ARGS)
 	r->nitems = 1;
 	r->sum = PG_GETARG_INT64(0);
 	SET_VARSIZE(r, sizeof(kagg_state__psum_int_packed));
+
+	PG_RETURN_POINTER(r);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_partial_sum_int64(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_numeric_packed *r = palloc(sizeof(kagg_state__psum_numeric_packed));
+
+	r->attrs = 0;
+	r->nitems = 1;
+	__store_int128_packed(&r->sum, PG_GETARG_INT64(0));
+	SET_VARSIZE(r, sizeof(kagg_state__psum_numeric_packed));
 
 	PG_RETURN_POINTER(r);
 }
@@ -614,7 +628,7 @@ pgstrom_favg_final_int(PG_FUNCTION_ARGS)
 	state = (kagg_state__psum_int_packed *)PG_GETARG_BYTEA_P(0);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
-	n = DirectFunctionCall1(int4_numeric, Int32GetDatum(state->nitems));
+	n = DirectFunctionCall1(int8_numeric, Int64GetDatum(state->nitems));
 	sum = DirectFunctionCall1(int8_numeric, Int64GetDatum(state->sum));
 
 	PG_RETURN_DATUM(DirectFunctionCall2(numeric_div, sum, n));
@@ -640,7 +654,7 @@ pgstrom_favg_final_num(PG_FUNCTION_ARGS)
 	state = (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(0);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
-	n = DirectFunctionCall1(int4_numeric, Int32GetDatum(state->nitems));
+	n = DirectFunctionCall1(int8_numeric, Int64GetDatum(state->nitems));
 	sum = DirectFunctionCall1(float8_numeric, Float8GetDatum(state->sum));
 
 	PG_RETURN_DATUM(DirectFunctionCall2(numeric_div, sum, n));
