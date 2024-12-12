@@ -2219,17 +2219,19 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
 #define KAGG_ACTION__COVAR			801		/* <int4>,<float8>x5 - covariance */
 
+#define __PAGG_MINMAX_ATTRS__VALID	0x0001	/* value is not empty */
+
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;
 	int64_t		value;
 } kagg_state__pminmax_int64_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;
 	float8_t	value;
 } kagg_state__pminmax_fp64_packed;
 

@@ -17,9 +17,7 @@
  */
 PG_FUNCTION_INFO_V1(pgstrom_partial_nrows);
 
-PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_int32);
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_int64);
-PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_fp32);
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_fp64);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_int64);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_fp64);
@@ -120,8 +118,8 @@ pgstrom_partial_minmax_int64(PG_FUNCTION_ARGS)
 	kagg_state__pminmax_int64_packed *r;
 
 	r = palloc(sizeof(kagg_state__pminmax_int64_packed));
-	r->nitems = 1;
-	r->value  = PG_GETARG_INT64(0);
+	r->attrs = __PAGG_MINMAX_ATTRS__VALID;
+	r->value = PG_GETARG_INT64(0);
 	SET_VARSIZE(r, sizeof(kagg_state__pminmax_int64_packed));
 
 	PG_RETURN_POINTER(r);
@@ -133,8 +131,8 @@ pgstrom_partial_minmax_fp64(PG_FUNCTION_ARGS)
 	kagg_state__pminmax_fp64_packed *r;
 
 	r = palloc(sizeof(kagg_state__pminmax_fp64_packed));
-	r->nitems = 1;
-	r->value  = PG_GETARG_FLOAT8(0);
+	r->attrs = __PAGG_MINMAX_ATTRS__VALID;
+	r->value = PG_GETARG_FLOAT8(0);
 	SET_VARSIZE(r, sizeof(kagg_state__pminmax_fp64_packed));
 
 	PG_RETURN_POINTER(r);
@@ -164,9 +162,9 @@ pgstrom_partial_minmax_fp64(PG_FUNCTION_ARGS)
 		{																\
 			arg = (kagg_state__pminmax_##TYPE##_packed *)				\
 				PG_GETARG_BYTEA_P(1);									\
-			if (arg->nitems > 0)										\
+			if ((arg->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)			\
 			{															\
-				if (state->nitems == 0)									\
+				if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)	\
 					memcpy(state, arg, sizeof(*state));					\
 				else													\
 					state->value = OPER(state->value, arg->value);		\
@@ -204,7 +202,7 @@ pgstrom_fminmax_final_int8(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *state
 		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	if (state->value < SCHAR_MIN || state->value > SCHAR_MAX)
 		elog(ERROR, "min(int8) out of range");
@@ -216,7 +214,7 @@ pgstrom_fminmax_final_int16(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *state
 		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	if (state->value < SHRT_MIN || state->value > SHRT_MAX)
 		elog(ERROR, "min(int16) out of range");
@@ -228,7 +226,7 @@ pgstrom_fminmax_final_int32(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *state
 		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	if (state->value < INT_MIN || state->value > INT_MAX)
 		elog(ERROR, "min(int32) out of range");
@@ -240,7 +238,7 @@ pgstrom_fminmax_final_int64(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *state
 		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	PG_RETURN_INT64(state->value);
 }
@@ -250,7 +248,7 @@ pgstrom_fminmax_final_fp16(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *state
 		= (kagg_state__pminmax_fp64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	PG_RETURN_UINT16(__half_as_short__(fp64_to_fp16(state->value)));
 }
@@ -260,7 +258,7 @@ pgstrom_fminmax_final_fp32(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *state
 		= (kagg_state__pminmax_fp64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	PG_RETURN_FLOAT4(state->value);
 }
@@ -270,7 +268,7 @@ pgstrom_fminmax_final_fp64(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *state
 		= (kagg_state__pminmax_fp64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(state->value);
 }
@@ -280,7 +278,7 @@ pgstrom_fminmax_final_numeric(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *state
 		= (kagg_state__pminmax_fp64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	return DirectFunctionCall1(float8_numeric,
 							   Float8GetDatum(state->value));
