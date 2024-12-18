@@ -123,23 +123,15 @@ struct ArrowFdwState
 /*
  * Metadata Cache (on shared memory)
  */
-#define ARROW_METADATA_BLOCKSZ		(128 * 1024)	/* 128kB */
-typedef struct
-{
-	dlist_node	chain;		/* link to free_blocks; NULL if active */
-	int32_t		unitsz;		/* unit size of slab items  */
-	int32_t		n_actives;	/* number of active items */
-	char		data[FLEXIBLE_ARRAY_MEMBER];
-} arrowMetadataCacheBlock;
-#define ARROW_METADATA_CACHE_FREE_MAGIC		(0xdeadbeafU)
-#define ARROW_METADATA_CACHE_ACTIVE_MAGIC	(0xcafebabeU)
-
-typedef struct arrowMetadataFieldCache	arrowMetadataFieldCache;
+typedef struct arrowMetadataCacheBlock	arrowMetadataCacheBlock;
 typedef struct arrowMetadataCache		arrowMetadataCache;
+typedef struct arrowMetadataFieldCache	arrowMetadataFieldCache;
 
+/*
+ * arrowMetadataFieldCache - metadata for a particular field in record-batch
+ */
 struct arrowMetadataFieldCache
 {
-	arrowMetadataCacheBlock *owner;
 	dlist_node	chain;				/* link to free/fields[children] list */
 	/* common fields with cache */
 	char		attname[NAMEDATALEN];
@@ -158,17 +150,14 @@ struct arrowMetadataFieldCache
 	/* sub-fields if any */
 	int			num_children;
 	dlist_head	children;
-	uint32_t	magic;
 };
 
+/*
+ * arrowMetadataCache - metadata for a particular record-batch
+ */
 struct arrowMetadataCache
 {
-	arrowMetadataCacheBlock *owner;
-	dlist_node	chain;		/* link to free/hash list */
-	dlist_node	lru_chain;	/* link to lru_list */
-	struct timeval lru_tv;	/* last access time */
 	arrowMetadataCache *next; /* next record-batch if any */
-	struct stat stat_buf;	/* result of stat(2) */
 	int			rb_index;	/* index number in a file */
 	off_t		rb_offset;	/* offset from the head */
 	size_t		rb_length;	/* length of the entire RecordBatch */
@@ -176,8 +165,25 @@ struct arrowMetadataCache
 	/* per column information */
 	int			nfields;
 	dlist_head	fields;		/* list of arrowMetadataFieldCache */
-	uint32_t	magic;
 };
+
+/*
+ * arrowMetadataCacheBlock - metadata for a particular arrow file, and
+ *                           allocation unit
+ */
+#define ARROW_METADATA_BLOCKSZ		(128 * 1024)	/* 128kB */
+typedef struct arrowMetadataCacheBlock
+{
+	arrowMetadataCacheBlock *next;
+	uint32_t	usage;
+	/* <---- the fields below are valid only the first block ----> */
+	dlist_node	chain;		/* link to free/hash list */
+	dlist_node	lru_chain;	/* link to lru_list */
+	struct timeval lru_tv;	/* last access time */
+	struct stat	stat_buf;	/* result of stat(2) */
+	arrowMetadataCache mcache_head;	/* the first arrowMetadataCache (record batch)
+									 * in this file */
+} arrowMetadataCacheBlock;
 
 /*
  * Metadata cache management
@@ -189,8 +195,6 @@ typedef struct
 	slock_t		lru_lock;		/* protect lru related stuff */
 	dlist_head	lru_list;
 	dlist_head	free_blocks;	/* list of arrowMetadataCacheBlock */
-	dlist_head	free_mcaches;	/* list of arrowMetadataCache */
-	dlist_head	free_fcaches;	/* list of arrowMetadataFieldCache */
 	dlist_head	hash_slots[ARROW_METADATA_HASH_NSLOTS];
 } arrowMetadataCacheHead;
 
@@ -310,126 +314,53 @@ arrowFieldGetPGTypeHint(const ArrowField *field)
  * ------------------------------------------------
  */
 static void
-__releaseMetadataFieldCache(arrowMetadataFieldCache *fcache)
+__releaseMetadataCacheBlock(arrowMetadataCacheBlock *mc_block_curr)
 {
-	arrowMetadataCacheBlock *mc_block = fcache->owner;
-
-	Assert(fcache->magic == ARROW_METADATA_CACHE_ACTIVE_MAGIC);
-	/* also release sub-fields if any */
-	while (!dlist_is_empty(&fcache->children))
+	if (mc_block_curr)
 	{
-		arrowMetadataFieldCache	*__fcache
-			= dlist_container(arrowMetadataFieldCache, chain,
-							  dlist_pop_head_node(&fcache->children));
-		__releaseMetadataFieldCache(__fcache);
-	}
-	fcache->magic = ARROW_METADATA_CACHE_FREE_MAGIC;
-	dlist_push_tail(&arrow_metadata_cache->free_fcaches,
-					&fcache->chain);
+		arrowMetadataCacheBlock *mc_block_next = mc_block_curr->next;
 
-	/* also back the owner block if all slabs become free */
-	Assert(mc_block->n_actives > 0);
-	if (--mc_block->n_actives == 0)
-	{
-		char   *pos = mc_block->data;
-		char   *end = (char *)mc_block + ARROW_METADATA_BLOCKSZ;
+		/* must be already detached */
+		Assert(!mc_block_curr->chain.prev &&
+			   !mc_block_curr->chain.prev &&
+			   !mc_block_curr->lru_chain.prev  &&
+			   !mc_block_curr->lru_chain.next);
 
-		Assert(mc_block->unitsz == MAXALIGN(sizeof(arrowMetadataFieldCache)));
-		while (pos + mc_block->unitsz <= end)
+		while (mc_block_curr != NULL)
 		{
-			arrowMetadataFieldCache *__fcache = (arrowMetadataFieldCache *)pos;
-			Assert(__fcache->owner == mc_block &&
-				   __fcache->magic == ARROW_METADATA_CACHE_FREE_MAGIC);
-			dlist_delete(&__fcache->chain);
-			pos += mc_block->unitsz;
+			dlist_push_head(&arrow_metadata_cache->free_blocks,
+							&mc_block_curr->chain);
+			mc_block_curr = mc_block_next;
+			mc_block_next = mc_block_curr->next;
 		}
-		Assert(!mc_block->chain.prev &&
-			   !mc_block->chain.next);	/* must be active block */
-		dlist_push_tail(&arrow_metadata_cache->free_blocks,
-						&mc_block->chain);
-	}
-}
-
-static void
-__releaseMetadataCache(arrowMetadataCache *mcache)
-{
-	while (mcache)
-	{
-		arrowMetadataCacheBlock *mc_block = mcache->owner;
-		arrowMetadataCache   *__mcache_next = mcache->next;
-
-		Assert(mcache->magic == ARROW_METADATA_CACHE_ACTIVE_MAGIC);
-		/*
-		 * MEMO: Caller already detach the leader mcache from the hash-
-		 * slot and the LRU-list. The follower mcaches should never be
-		 * linked to hash-slot and LRU-list.
-		 * So, we just put Assert() here.
-		 */
-		Assert(!mcache->chain.prev && !mcache->chain.next &&
-			   !mcache->lru_chain.prev && !mcache->lru_chain.next);
-
-		/* also release arrowMetadataFieldCache */
-		while (!dlist_is_empty(&mcache->fields))
-		{
-			arrowMetadataFieldCache *fcache
-				= dlist_container(arrowMetadataFieldCache, chain,
-								  dlist_pop_head_node(&mcache->fields));
-			__releaseMetadataFieldCache(fcache);
-		}
-		mcache->magic = ARROW_METADATA_CACHE_FREE_MAGIC;
-		dlist_push_tail(&arrow_metadata_cache->free_mcaches,
-						&mcache->chain);
-		/* also back the owner block if all slabs become free */
-		Assert(mc_block->n_actives > 0);
-		if (--mc_block->n_actives == 0)
-		{
-			char   *pos = mc_block->data;
-			char   *end = (char *)mc_block + ARROW_METADATA_BLOCKSZ;
-
-			Assert(mc_block->unitsz == MAXALIGN(sizeof(arrowMetadataCache)));
-			while (pos + mc_block->unitsz <= end)
-			{
-				arrowMetadataCache *__mcache = (arrowMetadataCache *)pos;
-
-				Assert(__mcache->owner == mc_block &&
-					   __mcache->magic == ARROW_METADATA_CACHE_FREE_MAGIC);
-				dlist_delete(&__mcache->chain);
-				pos += mc_block->unitsz;
-			}
-			Assert(!mc_block->chain.prev &&
-				   !mc_block->chain.next);	/* must be active block */
-			dlist_push_tail(&arrow_metadata_cache->free_blocks,
-							&mc_block->chain);
-		}
-		mcache = __mcache_next;
 	}
 }
 
 static bool
-__reclaimMetadataCache(void)
+__reclaimMetadataCacheBlock(void)
 {
 	SpinLockAcquire(&arrow_metadata_cache->lru_lock);
 	if (!dlist_is_empty(&arrow_metadata_cache->lru_list))
 	{
-		arrowMetadataCache *mcache;
+		arrowMetadataCacheBlock *mc_block;
 		dlist_node	   *dnode;
 		struct timeval	curr_tv;
 		int64_t			elapsed;
 
 		gettimeofday(&curr_tv, NULL);
 		dnode = dlist_tail_node(&arrow_metadata_cache->lru_list);
-		mcache = dlist_container(arrowMetadataCache, lru_chain, dnode);
-		elapsed = ((curr_tv.tv_sec - mcache->lru_tv.tv_sec) * 1000000 +
-				   (curr_tv.tv_usec - mcache->lru_tv.tv_usec));
+		mc_block = dlist_container(arrowMetadataCacheBlock, lru_chain, dnode);
+		elapsed = ((curr_tv.tv_sec - mc_block->lru_tv.tv_sec) * 1000000 +
+				   (curr_tv.tv_usec - mc_block->lru_tv.tv_usec));
 		if (elapsed > 30000000UL)	/* > 30s */
 		{
-			dlist_delete(&mcache->lru_chain);
-			memset(&mcache->lru_chain, 0, sizeof(dlist_node));
+			dlist_delete(&mc_block->lru_chain);
+			memset(&mc_block->lru_chain, 0, sizeof(dlist_node));
 			SpinLockRelease(&arrow_metadata_cache->lru_lock);
-			dlist_delete(&mcache->chain);
-			memset(&mcache->chain, 0, sizeof(dlist_node));
+			dlist_delete(&mc_block->chain);
+			memset(&mc_block->chain, 0, sizeof(dlist_node));
 
-			__releaseMetadataCache(mcache);
+			__releaseMetadataCacheBlock(mc_block);
 			return true;
 		}
 	}
@@ -437,86 +368,65 @@ __reclaimMetadataCache(void)
 	return false;
 }
 
-static arrowMetadataFieldCache *
-__allocMetadataFieldCache(void)
+static arrowMetadataCacheBlock *
+__allocMetadataCacheBlock(void)
 {
-	arrowMetadataFieldCache *fcache;
-	dlist_node *dnode;
+	arrowMetadataCacheBlock *mc_block;
+	dlist_node	   *dnode;
 
-	while (dlist_is_empty(&arrow_metadata_cache->free_fcaches))
+	if (dlist_is_empty(&arrow_metadata_cache->free_blocks))
 	{
-		arrowMetadataCacheBlock *mc_block;
-		char   *pos, *end;
-
-		while (dlist_is_empty(&arrow_metadata_cache->free_blocks))
-		{
-			if (!__reclaimMetadataCache())
-				return NULL;
-		}
-		dnode = dlist_pop_head_node(&arrow_metadata_cache->free_blocks);
-		mc_block = dlist_container(arrowMetadataCacheBlock, chain, dnode);
-		memset(mc_block, 0, offsetof(arrowMetadataCacheBlock, data));
-		mc_block->unitsz = MAXALIGN(sizeof(arrowMetadataFieldCache));
-		for (pos = mc_block->data, end = (char *)mc_block + ARROW_METADATA_BLOCKSZ;
-			 pos + mc_block->unitsz <= end;
-			 pos += mc_block->unitsz)
-		{
-			fcache = (arrowMetadataFieldCache *)pos;
-			fcache->owner = mc_block;
-			fcache->magic = ARROW_METADATA_CACHE_FREE_MAGIC;
-			dlist_push_tail(&arrow_metadata_cache->free_fcaches,
-							&fcache->chain);
-		}
+		if (!__reclaimMetadataCacheBlock())
+			return NULL;
+		Assert(!dlist_is_empty(&arrow_metadata_cache->free_blocks));
 	}
-	dnode = dlist_pop_head_node(&arrow_metadata_cache->free_fcaches);
-	fcache = dlist_container(arrowMetadataFieldCache, chain, dnode);
-	fcache->owner->n_actives++;
-	Assert(fcache->magic == ARROW_METADATA_CACHE_FREE_MAGIC);
-	memset(&fcache->chain, 0, (offsetof(arrowMetadataFieldCache, magic) -
-							   offsetof(arrowMetadataFieldCache, chain)));
-	fcache->magic = ARROW_METADATA_CACHE_ACTIVE_MAGIC;
-	return fcache;
+	dnode = dlist_pop_head_node(&arrow_metadata_cache->free_blocks);
+	mc_block = dlist_container(arrowMetadataCacheBlock, chain, dnode);
+	memset(mc_block, 0, offsetof(arrowMetadataCacheBlock,
+								 usage) + sizeof(uint32_t));
+	mc_block->usage = MAXALIGN(offsetof(arrowMetadataCacheBlock,
+										usage) + sizeof(uint32_t));
+	return mc_block;
+}
+
+static void *
+__allocMetadataCacheCommon(arrowMetadataCacheBlock **p_mc_block, size_t sz)
+{
+	arrowMetadataCacheBlock *mc_block = *p_mc_block;
+	char	   *pos;
+
+	if (mc_block->usage + MAXALIGN(sz) > ARROW_METADATA_BLOCKSZ)
+	{
+		if (offsetof(arrowMetadataCacheBlock,
+					 chain) + MAXALIGN(sz) > ARROW_METADATA_BLOCKSZ)
+			return NULL;	/* too large */
+		mc_block = __allocMetadataCacheBlock();
+		if (!mc_block)
+			return NULL;
+		mc_block->next = NULL;
+		mc_block->usage = offsetof(arrowMetadataCacheBlock, chain);
+		Assert(!(*p_mc_block)->next);
+		(*p_mc_block)->next = mc_block;
+		(*p_mc_block) = mc_block;
+	}
+	pos = ((char *)mc_block + mc_block->usage);
+	mc_block->usage += MAXALIGN(sz);
+
+	return pos;
+}
+
+static arrowMetadataFieldCache *
+__allocMetadataFieldCache(arrowMetadataCacheBlock **p_mc_block)
+{
+	return (arrowMetadataFieldCache *)
+		__allocMetadataCacheCommon(p_mc_block, sizeof(arrowMetadataFieldCache));
 }
 
 static arrowMetadataCache *
-__allocMetadataCache(void)
+__allocMetadataCache(arrowMetadataCacheBlock **p_mc_block)
 {
-	arrowMetadataCache *mcache;
-	dlist_node *dnode;
-
-	if (dlist_is_empty(&arrow_metadata_cache->free_mcaches))
-	{
-		arrowMetadataCacheBlock *mc_block;
-		char   *pos, *end;
-
-		while (dlist_is_empty(&arrow_metadata_cache->free_blocks))
-		{
-			if (!__reclaimMetadataCache())
-				return NULL;
-		}
-		dnode = dlist_pop_head_node(&arrow_metadata_cache->free_blocks);
-		mc_block = dlist_container(arrowMetadataCacheBlock, chain, dnode);
-		memset(mc_block, 0, offsetof(arrowMetadataCacheBlock, data));
-		mc_block->unitsz = MAXALIGN(sizeof(arrowMetadataCache));
-		for (pos = mc_block->data, end = (char *)mc_block + ARROW_METADATA_BLOCKSZ;
-			 pos + mc_block->unitsz <= end;
-			 pos += mc_block->unitsz)
-		{
-			mcache = (arrowMetadataCache *)pos;
-			mcache->owner = mc_block;
-			mcache->magic = ARROW_METADATA_CACHE_FREE_MAGIC;
-			dlist_push_tail(&arrow_metadata_cache->free_mcaches,
-							&mcache->chain);
-		}
-	}
-	dnode = dlist_pop_head_node(&arrow_metadata_cache->free_mcaches);
-	mcache = dlist_container(arrowMetadataCache, chain, dnode);
-	mcache->owner->n_actives++;
-	Assert(mcache->magic == ARROW_METADATA_CACHE_FREE_MAGIC);
-	memset(&mcache->chain, 0, (offsetof(arrowMetadataCache, magic) -
-							   offsetof(arrowMetadataCache, chain)));
-	mcache->magic = ARROW_METADATA_CACHE_ACTIVE_MAGIC;
-	return mcache;
+	return (arrowMetadataCache *)
+		__allocMetadataCacheCommon(p_mc_block, sizeof(arrowMetadataCache));
 }
 
 /*
@@ -540,35 +450,34 @@ arrowMetadataHashIndex(struct stat *stat_buf)
 	return hash % ARROW_METADATA_HASH_NSLOTS;
 }
 
-static arrowMetadataCache *
+static arrowMetadataCacheBlock *
 lookupArrowMetadataCache(struct stat *stat_buf, bool has_exclusive)
 {
-	arrowMetadataCache *mcache;
-	uint32_t	hindex;
+	uint32_t	hindex = arrowMetadataHashIndex(stat_buf);
 	dlist_mutable_iter iter;
 
-	hindex = arrowMetadataHashIndex(stat_buf);
 	dlist_foreach_modify(iter, &arrow_metadata_cache->hash_slots[hindex])
 	{
-		mcache = dlist_container(arrowMetadataCache, chain, iter.cur);
+		arrowMetadataCacheBlock *mc_block
+			= dlist_container(arrowMetadataCacheBlock, chain, iter.cur);
 
-		if (stat_buf->st_dev == mcache->stat_buf.st_dev &&
-			stat_buf->st_ino == mcache->stat_buf.st_ino)
+		if (stat_buf->st_dev == mc_block->stat_buf.st_dev &&
+			stat_buf->st_ino == mc_block->stat_buf.st_ino)
 		{
 			/*
 			 * Is the metadata cache still valid?
 			 */
-			if (stat_buf->st_mtim.tv_sec < mcache->stat_buf.st_mtim.tv_sec ||
-				(stat_buf->st_mtim.tv_sec == mcache->stat_buf.st_mtim.tv_sec &&
-				 stat_buf->st_mtim.tv_nsec <= mcache->stat_buf.st_mtim.tv_nsec))
+			if (stat_buf->st_mtim.tv_sec < mc_block->stat_buf.st_mtim.tv_sec ||
+				(stat_buf->st_mtim.tv_sec == mc_block->stat_buf.st_mtim.tv_sec &&
+				 stat_buf->st_mtim.tv_nsec <= mc_block->stat_buf.st_mtim.tv_nsec))
 			{
 				/* ok, found */
 				SpinLockAcquire(&arrow_metadata_cache->lru_lock);
-				gettimeofday(&mcache->lru_tv, NULL);
+				gettimeofday(&mc_block->lru_tv, NULL);
 				dlist_move_head(&arrow_metadata_cache->lru_list,
-								&mcache->lru_chain);
+								&mc_block->lru_chain);
 				SpinLockRelease(&arrow_metadata_cache->lru_lock);
-				return mcache;
+				return mc_block;
 			}
 			else if (has_exclusive)
 			{
@@ -577,13 +486,13 @@ lookupArrowMetadataCache(struct stat *stat_buf, bool has_exclusive)
 				 * If caller has exclusive lock, we release it.
 				 */
 				SpinLockAcquire(&arrow_metadata_cache->lru_lock);
-				dlist_delete(&mcache->lru_chain);
-				memset(&mcache->lru_chain, 0, sizeof(dlist_node));
+				dlist_delete(&mc_block->lru_chain);
+				memset(&mc_block->lru_chain, 0, sizeof(dlist_node));
 				SpinLockRelease(&arrow_metadata_cache->lru_lock);
-				dlist_delete(&mcache->chain);
-				memset(&mcache->chain, 0, sizeof(dlist_node));
+				dlist_delete(&mc_block->chain);
+				memset(&mc_block->chain, 0, sizeof(dlist_node));
 
-				__releaseMetadataCache(mcache);
+				__releaseMetadataCacheBlock(mc_block);
 			}
 		}
 	}
@@ -1253,15 +1162,16 @@ __buildRecordBatchFieldStateByCache(RecordBatchFieldState *rb_field,
 static ArrowFileState *
 __buildArrowFileStateByCache(Relation frel,
 							 const char *filename,
-							 arrowMetadataCache *mcache,
+							 arrowMetadataCacheBlock *mc_block,
 							 Bitmapset **p_stat_attrs)
 {
 	int		ncols = RelationGetNumberOfAttributes(frel);
+	arrowMetadataCache *mcache = &mc_block->mcache_head;
 	ArrowFileState *af_state;
 
 	af_state = palloc0(offsetof(ArrowFileState, attrs[ncols]));
 	af_state->filename = pstrdup(filename);
-	memcpy(&af_state->stat_buf, &mcache->stat_buf, sizeof(struct stat));
+	memcpy(&af_state->stat_buf, &mc_block->stat_buf, sizeof(struct stat));
 	af_state->ncols = ncols;
 
 	while (mcache)
@@ -1889,11 +1799,12 @@ __buildArrowFileStateByFile(Relation frel,
 }
 
 static arrowMetadataFieldCache *
-__buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field)
+__buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field,
+							   arrowMetadataCacheBlock **p_mc_block)
 {
 	arrowMetadataFieldCache *fcache;
 
-	fcache = __allocMetadataFieldCache();
+	fcache = __allocMetadataFieldCache(p_mc_block);
 	if (!fcache)
 		return NULL;
 	strcpy(fcache->attname, rb_field->attname);
@@ -1916,12 +1827,9 @@ __buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field)
 	{
 		arrowMetadataFieldCache *__fcache;
 
-		__fcache = __buildArrowMetadataFieldCache(&rb_field->children[j]);
+		__fcache = __buildArrowMetadataFieldCache(&rb_field->children[j], p_mc_block);
 		if (!__fcache)
-		{
-			__releaseMetadataFieldCache(fcache);
 			return NULL;
-		}
 		dlist_push_tail(&fcache->children, &__fcache->chain);
 	}
 	return fcache;
@@ -1936,43 +1844,58 @@ __buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field)
 static void
 __buildArrowMetadataCacheNoLock(ArrowFileState *af_state)
 {
-	arrowMetadataCache *mcache_head = NULL;
+	arrowMetadataCacheBlock *mc_block_head = NULL;
+	arrowMetadataCacheBlock *mc_block_curr;
 	arrowMetadataCache *mcache_prev = NULL;
 	arrowMetadataCache *mcache;
 	uint32_t	hindex;
 	ListCell   *lc;
 
+	Assert(list_length(af_state->rb_list) > 0);
 	foreach (lc, af_state->rb_list)
 	{
 		RecordBatchState *rb_state = lfirst(lc);
 
-		mcache = __allocMetadataCache();
-		if (!mcache)
+		if (!mc_block_head)
 		{
-			__releaseMetadataCache(mcache_head);
-			return;
+			mc_block_head = __allocMetadataCacheBlock();
+			if (!mc_block_head)
+				return;
+			mc_block_curr = mc_block_head;
+			memcpy(&mc_block_head->stat_buf,
+				   &af_state->stat_buf, sizeof(struct stat));
+			mc_block_head->usage = MAXALIGN(offsetof(arrowMetadataCacheBlock,
+													 mcache_head) +
+											sizeof(arrowMetadataCache));
+			mcache = &mc_block_head->mcache_head;
 		}
-		memcpy(&mcache->stat_buf,
-			   &af_state->stat_buf, sizeof(struct stat));
+		else
+		{
+			mcache = __allocMetadataCache(&mc_block_curr);
+			if (!mcache)
+			{
+				__releaseMetadataCacheBlock(mc_block_head);
+				return;
+			}
+		}
+		memset(mcache, 0, sizeof(arrowMetadataCache));
 		mcache->rb_index  = rb_state->rb_index;
 		mcache->rb_offset = rb_state->rb_offset;
 		mcache->rb_length = rb_state->rb_length;
 		mcache->rb_nitems = rb_state->rb_nitems;
 		mcache->nfields   = rb_state->nfields;
 		dlist_init(&mcache->fields);
-		if (!mcache_head)
-			mcache_head = mcache;
-		else
+		if (mcache_prev)
 			mcache_prev->next = mcache;
-
 		for (int j=0; j < rb_state->nfields; j++)
 		{
 			arrowMetadataFieldCache *fcache;
 
-			fcache = __buildArrowMetadataFieldCache(&rb_state->fields[j]);
+			fcache = __buildArrowMetadataFieldCache(&rb_state->fields[j],
+													&mc_block_curr);
 			if (!fcache)
 			{
-				__releaseMetadataCache(mcache_head);
+				__releaseMetadataCacheBlock(mc_block_head);
 				return;
 			}
 			dlist_push_tail(&mcache->fields, &fcache->chain);
@@ -1982,11 +1905,12 @@ __buildArrowMetadataCacheNoLock(ArrowFileState *af_state)
 	/* chain to the list */
 	hindex = arrowMetadataHashIndex(&af_state->stat_buf);
 	dlist_push_tail(&arrow_metadata_cache->hash_slots[hindex],
-					&mcache_head->chain );
+					&mc_block_head->chain );
 	SpinLockAcquire(&arrow_metadata_cache->lru_lock);
-	gettimeofday(&mcache_head->lru_tv, NULL);
-	dlist_push_head(&arrow_metadata_cache->lru_list, &mcache_head->lru_chain);
+	gettimeofday(&mc_block_head->lru_tv, NULL);
+	dlist_push_head(&arrow_metadata_cache->lru_list, &mc_block_head->lru_chain);
 	SpinLockRelease(&arrow_metadata_cache->lru_lock);
+	return;
 }
 
 static ArrowFileState *
@@ -1997,7 +1921,7 @@ BuildArrowFileState(Relation frel,
 {
 	Oid				frelid = RelationGetRelid(frel);
 	TupleDesc		tupdesc = RelationGetDescr(frel);
-	arrowMetadataCache *mcache;
+	arrowMetadataCacheBlock *mc_block;
 	ArrowFileState *af_state;
 	RecordBatchState *rb_state;
 	Bitmapset	   *stat_arrow_attrs = NULL;
@@ -2007,13 +1931,13 @@ BuildArrowFileState(Relation frel,
 	if (stat(filename, &stat_buf) != 0)
 		elog(ERROR, "failed on stat('%s'): %m", filename);
 	LWLockAcquire(&arrow_metadata_cache->mutex, LW_SHARED);
-	mcache = lookupArrowMetadataCache(&stat_buf, false);
-	if (mcache)
+	mc_block = lookupArrowMetadataCache(&stat_buf, false);
+	if (mc_block)
 	{
 		/* found a valid metadata-cache */
 		af_state = __buildArrowFileStateByCache(frel,
 												filename,
-												mcache,
+												mc_block,
 												&stat_arrow_attrs);
 	}
 	else
@@ -2028,8 +1952,8 @@ BuildArrowFileState(Relation frel,
 			return NULL;	/* file not found? */
 
 		LWLockAcquire(&arrow_metadata_cache->mutex, LW_EXCLUSIVE);
-		mcache = lookupArrowMetadataCache(&af_state->stat_buf, true);
-		if (!mcache)
+		mc_block = lookupArrowMetadataCache(&af_state->stat_buf, true);
+		if (!mc_block)
 			__buildArrowMetadataCacheNoLock(af_state);
 	}
 	LWLockRelease(&arrow_metadata_cache->mutex);
@@ -5243,10 +5167,9 @@ pgstrom_request_arrow_fdw(void)
 static void
 pgstrom_startup_arrow_fdw(void)
 {
-	bool	found;
-	size_t	sz;
-	char   *buffer;
-	int		i, n;
+	char	   *buffer;
+	bool		found;
+	size_t		n, sz;
 
 	if (shmem_startup_next)
 		(*shmem_startup_next)();
@@ -5255,29 +5178,25 @@ pgstrom_startup_arrow_fdw(void)
 										   MAXALIGN(sizeof(arrowMetadataCacheHead)),
 										   &found);
 	Assert(!found);
-	
+
 	LWLockInitialize(&arrow_metadata_cache->mutex, LWLockNewTrancheId());
 	SpinLockInit(&arrow_metadata_cache->lru_lock);
 	dlist_init(&arrow_metadata_cache->lru_list);
 	dlist_init(&arrow_metadata_cache->free_blocks);
-	dlist_init(&arrow_metadata_cache->free_mcaches);
-	dlist_init(&arrow_metadata_cache->free_fcaches);
-	for (i=0; i < ARROW_METADATA_HASH_NSLOTS; i++)
+	for (int i=0; i < ARROW_METADATA_HASH_NSLOTS; i++)
 		dlist_init(&arrow_metadata_cache->hash_slots[i]);
-
-	/* slab allocator */
+	/* arrowMetadataCacheBlock allocation  */
 	sz = TYPEALIGN(ARROW_METADATA_BLOCKSZ,
 				   (size_t)arrow_metadata_cache_size_kb << 10);
 	n = sz / ARROW_METADATA_BLOCKSZ;
 	buffer = ShmemInitStruct("arrowMetadataCache(body)", sz, &found);
 	Assert(!found);
-	for (i=0; i < n; i++)
+	for (int i=0; i < n; i++)
 	{
 		arrowMetadataCacheBlock *mc_block = (arrowMetadataCacheBlock *)buffer;
 
-		memset(mc_block, 0, offsetof(arrowMetadataCacheBlock, data));
+		memset(mc_block, 0, offsetof(arrowMetadataCacheBlock, mcache_head));
 		dlist_push_tail(&arrow_metadata_cache->free_blocks, &mc_block->chain);
-
 		buffer += ARROW_METADATA_BLOCKSZ;
 	}
 }
