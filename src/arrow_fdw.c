@@ -126,6 +126,20 @@ struct ArrowFdwState
 typedef struct arrowMetadataCacheBlock	arrowMetadataCacheBlock;
 typedef struct arrowMetadataCache		arrowMetadataCache;
 typedef struct arrowMetadataFieldCache	arrowMetadataFieldCache;
+typedef struct arrowMetadataKeyValueCache arrowMetadataKeyValueCache;
+
+/*
+ * arrowMetadataKeyValueCache
+ */
+struct arrowMetadataKeyValueCache
+{
+	arrowMetadataKeyValueCache *next;
+	const char *key;
+	const char *value;
+	int			_key_len;
+	int			_value_len;
+	char		data[FLEXIBLE_ARRAY_MEMBER];
+};
 
 /*
  * arrowMetadataFieldCache - metadata for a particular field in record-batch
@@ -147,6 +161,7 @@ struct arrowMetadataFieldCache
 	off_t		extra_offset;
 	size_t		extra_length;
 	MinMaxStatDatum stat_datum;
+	arrowMetadataKeyValueCache *custom_metadata;	/* valid only in RecordBatch-0 */
 	/* sub-fields if any */
 	int			num_children;
 	dlist_head	children;
@@ -181,6 +196,7 @@ typedef struct arrowMetadataCacheBlock
 	dlist_node	lru_chain;	/* link to lru_list */
 	struct timeval lru_tv;	/* last access time */
 	struct stat	stat_buf;	/* result of stat(2) */
+	arrowMetadataKeyValueCache *custom_metadata;
 	arrowMetadataCache mcache_head;	/* the first arrowMetadataCache (record batch)
 									 * in this file */
 } arrowMetadataCacheBlock;
@@ -413,6 +429,34 @@ __allocMetadataCacheCommon(arrowMetadataCacheBlock **p_mc_block, size_t sz)
 	mc_block->usage += MAXALIGN(sz);
 
 	return pos;
+}
+
+static arrowMetadataKeyValueCache *
+__allocMetadataKeyValueCache(arrowMetadataCacheBlock **p_mc_block,
+							 ArrowKeyValue *kv)
+{
+	arrowMetadataKeyValueCache *mc_kv;
+	size_t		sz = (offsetof(arrowMetadataKeyValueCache,data)
+					  + kv->_key_len + 1
+					  + kv->_value_len + 1);
+	mc_kv = __allocMetadataCacheCommon(p_mc_block, sz);
+	if (mc_kv)
+	{
+		char   *pos = mc_kv->data;
+
+		mc_kv->next = NULL;
+		mc_kv->key = pos;
+		mc_kv->_key_len = kv->_key_len;
+		strncpy(pos, kv->key, kv->_key_len);
+		pos[kv->_key_len] = '\0';
+		pos += kv->_key_len + 1;
+
+		mc_kv->value = pos;
+		mc_kv->_value_len = kv->_value_len;
+		strncpy(pos, kv->value, kv->_value_len);
+		pos[kv->_value_len] = '\0';
+   }
+   return mc_kv;
 }
 
 static arrowMetadataFieldCache *
@@ -1757,19 +1801,19 @@ readArrowFile(const char *filename, ArrowFileInfo *af_info, bool missing_ok)
 static ArrowFileState *
 __buildArrowFileStateByFile(Relation frel,
 							const char *filename,
+							ArrowFileInfo *af_info,
 							Bitmapset **p_stat_attrs)
 {
 	int		ncols = RelationGetNumberOfAttributes(frel);
-	ArrowFileInfo af_info;
 	ArrowFileState *af_state;
 	arrowStatsBinary *arrow_bstats;
 
-	if (!readArrowFile(filename, &af_info, true))
+	if (!readArrowFile(filename, af_info, true))
 	{
 		elog(DEBUG2, "file '%s' is missing: %m", filename);
 		return NULL;
 	}
-	if (af_info.recordBatches == NULL)
+	if (af_info->recordBatches == NULL)
 	{
 		elog(DEBUG2, "arrow file '%s' contains no RecordBatch", filename);
 		return NULL;
@@ -1777,17 +1821,17 @@ __buildArrowFileStateByFile(Relation frel,
 	/* allocate ArrowFileState */
 	af_state = palloc0(offsetof(ArrowFileState, attrs[ncols]));
 	af_state->filename = pstrdup(filename);
-	memcpy(&af_state->stat_buf, &af_info.stat_buf, sizeof(struct stat));
+	memcpy(&af_state->stat_buf, &af_info->stat_buf, sizeof(struct stat));
 	af_state->ncols = ncols;
 
-	arrow_bstats = buildArrowStatsBinary(&af_info.footer, p_stat_attrs);
-	for (int i=0; i < af_info.footer._num_recordBatches; i++)
+	arrow_bstats = buildArrowStatsBinary(&af_info->footer, p_stat_attrs);
+	for (int i=0; i < af_info->footer._num_recordBatches; i++)
 	{
-		ArrowBlock	     *block  = &af_info.footer.recordBatches[i];
-		ArrowRecordBatch *rbatch = &af_info.recordBatches[i].body.recordBatch;
+		ArrowBlock	     *block  = &af_info->footer.recordBatches[i];
+		ArrowRecordBatch *rbatch = &af_info->recordBatches[i].body.recordBatch;
 		RecordBatchState *rb_state;
 
-		rb_state = __buildRecordBatchStateOne(&af_info.footer.schema,
+		rb_state = __buildRecordBatchStateOne(&af_info->footer.schema,
 											  af_state, i, block, rbatch);
 		if (arrow_bstats)
 			applyArrowStatsBinary(rb_state, arrow_bstats);
@@ -1800,9 +1844,12 @@ __buildArrowFileStateByFile(Relation frel,
 
 static arrowMetadataFieldCache *
 __buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field,
+							   ArrowField *arrow_field,
+							   arrowMetadataFieldCache *fcache_prev,
 							   arrowMetadataCacheBlock **p_mc_block)
 {
 	arrowMetadataFieldCache *fcache;
+	dlist_node	   *__dnode_prev = NULL;
 
 	fcache = __allocMetadataFieldCache(p_mc_block);
 	if (!fcache)
@@ -1821,13 +1868,51 @@ __buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field,
 	fcache->extra_length = rb_field->extra_length;
 	memcpy(&fcache->stat_datum,
 		   &rb_field->stat_datum, sizeof(MinMaxStatDatum));
+	/* custom-metadata can be reused for the record-batch > 0 */
+	if (fcache_prev)
+		fcache->custom_metadata = fcache_prev->custom_metadata;
+	else
+	{
+		arrowMetadataKeyValueCache *mc_kv_prev = NULL;
+		arrowMetadataKeyValueCache *mc_kv;
+
+		fcache->custom_metadata = NULL;
+		for (int k=0; k < arrow_field->_num_custom_metadata; k++)
+		{
+			mc_kv = __allocMetadataKeyValueCache(p_mc_block,
+												 &arrow_field->custom_metadata[k]);
+			if (!mc_kv)
+				return NULL;
+			if (mc_kv_prev)
+				mc_kv_prev->next = mc_kv;
+			else
+				fcache->custom_metadata = mc_kv;
+			mc_kv_prev = mc_kv;
+		}
+	}
+
+	/* walk down the child fields if any */
 	fcache->num_children = rb_field->num_children;
-	dlist_init(&fcache->children);
+		dlist_init(&fcache->children);
 	for (int j=0; j < rb_field->num_children; j++)
 	{
+		arrowMetadataFieldCache *__fcache_prev = NULL;
 		arrowMetadataFieldCache *__fcache;
 
-		__fcache = __buildArrowMetadataFieldCache(&rb_field->children[j], p_mc_block);
+		if (fcache_prev)
+		{
+			if (!__dnode_prev)
+				__dnode_prev = dlist_head_node(&fcache_prev->children);
+			else
+				__dnode_prev = dlist_next_node(&fcache_prev->children,
+											   __dnode_prev);
+			__fcache_prev = dlist_container(arrowMetadataFieldCache,
+											chain, __dnode_prev);
+		}
+		__fcache = __buildArrowMetadataFieldCache(&rb_field->children[j],
+												  &arrow_field->children[j],
+												  __fcache_prev,
+												  p_mc_block);
 		if (!__fcache)
 			return NULL;
 		dlist_push_tail(&fcache->children, &__fcache->chain);
@@ -1842,8 +1927,10 @@ __buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field,
  * ArrowFileState
  */
 static void
-__buildArrowMetadataCacheNoLock(ArrowFileState *af_state)
+__buildArrowMetadataCacheNoLock(ArrowFileState *af_state,
+								ArrowFileInfo *af_info)
 {
+	ArrowSchema	   *schema = &af_info->footer.schema;
 	arrowMetadataCacheBlock *mc_block_head = NULL;
 	arrowMetadataCacheBlock *mc_block_curr;
 	arrowMetadataCache *mcache_prev = NULL;
@@ -1855,28 +1942,43 @@ __buildArrowMetadataCacheNoLock(ArrowFileState *af_state)
 	foreach (lc, af_state->rb_list)
 	{
 		RecordBatchState *rb_state = lfirst(lc);
+		dlist_node	   *dnode_prev = NULL;
 
 		if (!mc_block_head)
 		{
+			arrowMetadataKeyValueCache *mc_kv_prev = NULL;
+			arrowMetadataKeyValueCache *mc_kv;
+
 			mc_block_head = __allocMetadataCacheBlock();
 			if (!mc_block_head)
 				return;
-			mc_block_curr = mc_block_head;
 			memcpy(&mc_block_head->stat_buf,
 				   &af_state->stat_buf, sizeof(struct stat));
 			mc_block_head->usage = MAXALIGN(offsetof(arrowMetadataCacheBlock,
 													 mcache_head) +
 											sizeof(arrowMetadataCache));
+			mc_block_curr = mc_block_head;
+			/* custom-metadata; must be setup after usage assignment */
+			for (int k=0; k < schema->_num_custom_metadata; k++)
+			{
+				mc_kv = __allocMetadataKeyValueCache(&mc_block_curr,
+													 &schema->custom_metadata[k]);
+				if (!mc_kv)
+					goto bailout;
+				if (mc_kv_prev)
+					mc_kv_prev->next = mc_kv;
+				else
+					mc_block_head->custom_metadata = mc_kv;
+				mc_kv_prev = mc_kv;
+			}
+			/* metadata-cache for the first record-batch */
 			mcache = &mc_block_head->mcache_head;
 		}
 		else
 		{
 			mcache = __allocMetadataCache(&mc_block_curr);
 			if (!mcache)
-			{
-				__releaseMetadataCacheBlock(mc_block_head);
-				return;
-			}
+				goto bailout;
 		}
 		memset(mcache, 0, sizeof(arrowMetadataCache));
 		mcache->rb_index  = rb_state->rb_index;
@@ -1889,15 +1991,26 @@ __buildArrowMetadataCacheNoLock(ArrowFileState *af_state)
 			mcache_prev->next = mcache;
 		for (int j=0; j < rb_state->nfields; j++)
 		{
+			arrowMetadataFieldCache *fcache_prev = NULL;
 			arrowMetadataFieldCache *fcache;
 
+			if (mcache_prev)
+			{
+				if (!dnode_prev)
+					dnode_prev = dlist_head_node(&mcache_prev->fields);
+				else
+					dnode_prev = dlist_next_node(&mcache_prev->fields,
+												 dnode_prev);
+				fcache_prev = dlist_container(arrowMetadataFieldCache,
+											  chain, dnode_prev);
+			}
+			Assert(j < schema->_num_fields);
 			fcache = __buildArrowMetadataFieldCache(&rb_state->fields[j],
+													&schema->fields[j],
+													fcache_prev,
 													&mc_block_curr);
 			if (!fcache)
-			{
-				__releaseMetadataCacheBlock(mc_block_head);
-				return;
-			}
+				goto bailout;
 			dlist_push_tail(&mcache->fields, &fcache->chain);
 		}
 		mcache_prev = mcache;
@@ -1911,6 +2024,10 @@ __buildArrowMetadataCacheNoLock(ArrowFileState *af_state)
 	dlist_push_head(&arrow_metadata_cache->lru_list, &mc_block_head->lru_chain);
 	SpinLockRelease(&arrow_metadata_cache->lru_lock);
 	return;
+
+bailout:
+	if (mc_block_head)
+		__releaseMetadataCacheBlock(mc_block_head);
 }
 
 static ArrowFileState *
@@ -1942,11 +2059,14 @@ BuildArrowFileState(Relation frel,
 	}
 	else
 	{
+		ArrowFileInfo af_info;
+
 		LWLockRelease(&arrow_metadata_cache->mutex);
 
 		/* here is no valid metadata-cache, so build it from the raw file */
 		af_state = __buildArrowFileStateByFile(frel,
 											   filename,
+											   &af_info,
 											   &stat_arrow_attrs);
 		if (!af_state)
 			return NULL;	/* file not found? */
@@ -1954,7 +2074,7 @@ BuildArrowFileState(Relation frel,
 		LWLockAcquire(&arrow_metadata_cache->mutex, LW_EXCLUSIVE);
 		mc_block = lookupArrowMetadataCache(&af_state->stat_buf, true);
 		if (!mc_block)
-			__buildArrowMetadataCacheNoLock(af_state);
+			__buildArrowMetadataCacheNoLock(af_state, &af_info);
 	}
 	LWLockRelease(&arrow_metadata_cache->mutex);
 
@@ -5144,6 +5264,180 @@ pgstrom_arrow_fdw_check_pattern(PG_FUNCTION_ARGS)
 		appendStringInfo(&buf, "false");
 	}
 	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+}
+
+/*
+ * pgstrom_arrow_fdw_metadata_info
+ */
+typedef struct arrowFdwMetadataInfo
+{
+	dlist_node	chain;
+	Oid			frelid;
+	text	   *filename;
+	text	   *field;
+	text	   *key;
+	text	   *value;
+} arrowFdwMetadataInfo;
+
+static void
+__build_arrow_fdw_metadata_info(dlist_head *md_info_dlist,
+								Oid frelid, const char *filename,
+								arrowMetadataFieldCache *fcache,
+								const char *prefix,
+								arrowMetadataKeyValueCache *custom_metadata)
+{
+	arrowFdwMetadataInfo *md_info;
+	arrowMetadataKeyValueCache *mc_kv;
+
+	for (mc_kv = custom_metadata; mc_kv != NULL; mc_kv = mc_kv->next)
+	{
+		md_info = palloc0(sizeof(arrowFdwMetadataInfo));
+		md_info->frelid = frelid;
+		md_info->filename = cstring_to_text(filename);
+		if (fcache)
+		{
+			char   *s = psprintf("XXXX%s%s", prefix, fcache->attname);
+			md_info->field = (text *)s;
+			SET_VARSIZE(md_info->field, strlen(s));
+		}
+		md_info->key = cstring_to_text(mc_kv->key);
+		md_info->value = cstring_to_text(mc_kv->value);
+		dlist_push_tail(md_info_dlist, &md_info->chain);
+	}
+
+	if (fcache)
+	{
+		dlist_iter	iter;
+		char	   *__prefix = NULL;
+
+		dlist_foreach (iter, &fcache->children)
+		{
+			arrowMetadataFieldCache *__fcache =
+				dlist_container(arrowMetadataFieldCache, chain, iter.cur);
+			if (!__prefix)
+			{
+				__prefix = alloca(strlen(prefix) +
+								  strlen(fcache->attname) + 10);
+				sprintf(__prefix, "%s%s.", prefix, fcache->attname);
+			}
+			__build_arrow_fdw_metadata_info(md_info_dlist,
+											frelid, filename,
+											__fcache,
+											__prefix,
+											fcache->custom_metadata);
+		}
+	}
+}
+
+static dlist_head *
+__setup_arrow_fdw_metadata_info(Oid frelid)
+{
+	ForeignTable   *ft = GetForeignTable(frelid);
+	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL, NULL);
+	ListCell	   *lc;
+	dlist_head	   *md_info_dlist = palloc(sizeof(dlist_head));
+
+	dlist_init(md_info_dlist);
+	foreach (lc, filesList)
+	{
+		const char *filename = strVal(lfirst(lc));
+		struct stat	stat_buf;
+		dlist_iter	iter;
+		arrowMetadataCacheBlock *mc_block;
+
+		if (stat(filename, &stat_buf) != 0)
+		{
+			if (errno == ENOENT)
+				continue;	/* file might be removed concurrently */
+			elog(ERROR, "failed on stat('%s'): %m", filename);
+		}
+		LWLockAcquire(&arrow_metadata_cache->mutex, LW_SHARED);
+		mc_block = lookupArrowMetadataCache(&stat_buf, false);
+		if (mc_block)
+		{
+			__build_arrow_fdw_metadata_info(md_info_dlist,
+											frelid,
+											filename,
+											NULL, "",
+											mc_block->custom_metadata);
+			dlist_foreach (iter, &mc_block->mcache_head.fields)
+			{
+				arrowMetadataFieldCache *fcache
+					= dlist_container(arrowMetadataFieldCache,
+									  chain, iter.cur);
+				__build_arrow_fdw_metadata_info(md_info_dlist,
+												frelid,
+												filename,
+												fcache, "",
+												fcache->custom_metadata);
+			}
+		}
+		else
+		{
+			elog(ERROR, "metadata cache not found to be implimented");
+		}
+
+
+		LWLockRelease(&arrow_metadata_cache->mutex);
+	}
+	return md_info_dlist;
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_metadata_info);
+PUBLIC_FUNCTION(Datum)
+pgstrom_arrow_fdw_metadata_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *fncxt;
+	arrowFdwMetadataInfo *md_info;
+	Datum		values[5];
+	bool		isnull[5];
+	HeapTuple	tuple;
+	dlist_head *md_info_dlist;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		Oid				frelid = PG_GETARG_OID(0);
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(5);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "relid",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "filename",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "field",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "key",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "value",
+						   TEXTOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+
+		fncxt->user_fctx = __setup_arrow_fdw_metadata_info(frelid);
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+	md_info_dlist = fncxt->user_fctx;
+	if (dlist_is_empty(md_info_dlist))
+		SRF_RETURN_DONE(fncxt);
+	md_info = dlist_container(arrowFdwMetadataInfo, chain,
+							  dlist_pop_head_node(md_info_dlist));
+
+	memset(isnull, 0, sizeof(isnull));
+	values[0] = ObjectIdGetDatum(md_info->frelid);
+	values[1] = PointerGetDatum(md_info->filename);
+	if (md_info->field)
+		values[2] = PointerGetDatum(md_info->field);
+	else
+		isnull[2] = true;
+	values[3] = PointerGetDatum(md_info->key);
+	values[4] = PointerGetDatum(md_info->value);
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
 
 /*

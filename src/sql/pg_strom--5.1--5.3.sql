@@ -12,6 +12,22 @@ CREATE FUNCTION pgstrom.arrow_fdw_check_pattern(text, text)
   LANGUAGE C STRICT;
 
 ---
+--- A set-returning function to get custom-metadata of Arrow_Fdw tables
+--- related to the issue #863
+---
+CREATE TYPE pgstrom.__arrow_fdw_metadata_info AS (
+  relid     regclass,
+  filename  text,
+  field     text,
+  key       text,
+  value     text
+);
+CREATE FUNCTION pgstrom.arrow_fdw_metadata_info(regclass)
+  RETURNS SETOF pgstrom.__arrow_fdw_metadata_info
+  AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_metadata_info'
+  LANGUAGE C STRICT;
+
+---
 --- Functions to support 128bit fixed-point numeric aggregation
 --- related to the issue #806
 ---
