@@ -1203,20 +1203,13 @@ __buildRecordBatchFieldStateByCache(RecordBatchFieldState *rb_field,
 	}
 }
 
-static ArrowFileState *
-__buildArrowFileStateByCache(Relation frel,
+static bool
+__setupArrowFileStateByCache(ArrowFileState *af_state,
 							 const char *filename,
 							 arrowMetadataCacheBlock *mc_block,
 							 Bitmapset **p_stat_attrs)
 {
-	int		ncols = RelationGetNumberOfAttributes(frel);
 	arrowMetadataCache *mcache = &mc_block->mcache_head;
-	ArrowFileState *af_state;
-
-	af_state = palloc0(offsetof(ArrowFileState, attrs[ncols]));
-	af_state->filename = pstrdup(filename);
-	memcpy(&af_state->stat_buf, &mc_block->stat_buf, sizeof(struct stat));
-	af_state->ncols = ncols;
 
 	while (mcache)
 	{
@@ -1246,7 +1239,7 @@ __buildArrowFileStateByCache(Relation frel,
 
 		mcache = mcache->next;
 	}
-	return af_state;
+	return true;
 }
 
 /*
@@ -1798,32 +1791,25 @@ readArrowFile(const char *filename, ArrowFileInfo *af_info, bool missing_ok)
 	return true;
 }
 
-static ArrowFileState *
-__buildArrowFileStateByFile(Relation frel,
+static bool
+__setupArrowFileStateByFile(ArrowFileState *af_state,
 							const char *filename,
 							ArrowFileInfo *af_info,
 							Bitmapset **p_stat_attrs)
 {
-	int		ncols = RelationGetNumberOfAttributes(frel);
-	ArrowFileState *af_state;
 	arrowStatsBinary *arrow_bstats;
 
 	if (!readArrowFile(filename, af_info, true))
 	{
 		elog(DEBUG2, "file '%s' is missing: %m", filename);
-		return NULL;
+		return false;
 	}
 	if (af_info->recordBatches == NULL)
 	{
 		elog(DEBUG2, "arrow file '%s' contains no RecordBatch", filename);
-		return NULL;
+		return false;
 	}
-	/* allocate ArrowFileState */
-	af_state = palloc0(offsetof(ArrowFileState, attrs[ncols]));
-	af_state->filename = pstrdup(filename);
-	memcpy(&af_state->stat_buf, &af_info->stat_buf, sizeof(struct stat));
-	af_state->ncols = ncols;
-
+	/* set up ArrowFileState */
 	arrow_bstats = buildArrowStatsBinary(&af_info->footer, p_stat_attrs);
 	for (int i=0; i < af_info->footer._num_recordBatches; i++)
 	{
@@ -1839,7 +1825,7 @@ __buildArrowFileStateByFile(Relation frel,
 	}
 	releaseArrowStatsBinary(arrow_bstats);
 
-	return af_state;
+	return true;
 }
 
 static arrowMetadataFieldCache *
@@ -1926,7 +1912,7 @@ __buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field,
  * it builds arrowMetadataCache entries according to the supplied
  * ArrowFileState
  */
-static void
+static arrowMetadataCacheBlock *
 __buildArrowMetadataCacheNoLock(ArrowFileState *af_state,
 								ArrowFileInfo *af_info)
 {
@@ -1951,7 +1937,7 @@ __buildArrowMetadataCacheNoLock(ArrowFileState *af_state,
 
 			mc_block_head = __allocMetadataCacheBlock();
 			if (!mc_block_head)
-				return;
+				goto bailout;
 			memcpy(&mc_block_head->stat_buf,
 				   &af_state->stat_buf, sizeof(struct stat));
 			mc_block_head->usage = MAXALIGN(offsetof(arrowMetadataCacheBlock,
@@ -2023,11 +2009,12 @@ __buildArrowMetadataCacheNoLock(ArrowFileState *af_state,
 	gettimeofday(&mc_block_head->lru_tv, NULL);
 	dlist_push_head(&arrow_metadata_cache->lru_list, &mc_block_head->lru_chain);
 	SpinLockRelease(&arrow_metadata_cache->lru_lock);
-	return;
+	return mc_block_head;
 
 bailout:
 	if (mc_block_head)
 		__releaseMetadataCacheBlock(mc_block_head);
+	return NULL;
 }
 
 static ArrowFileState *
@@ -2047,15 +2034,20 @@ BuildArrowFileState(Relation frel,
 
 	if (stat(filename, &stat_buf) != 0)
 		elog(ERROR, "failed on stat('%s'): %m", filename);
+	af_state = palloc0(offsetof(ArrowFileState, attrs[tupdesc->natts]));
+	af_state->filename = pstrdup(filename);
+	memcpy(&af_state->stat_buf, &stat_buf, sizeof(struct stat));
+	af_state->ncols = tupdesc->natts;
+	
 	LWLockAcquire(&arrow_metadata_cache->mutex, LW_SHARED);
 	mc_block = lookupArrowMetadataCache(&stat_buf, false);
 	if (mc_block)
 	{
 		/* found a valid metadata-cache */
-		af_state = __buildArrowFileStateByCache(frel,
-												filename,
-												mc_block,
-												&stat_arrow_attrs);
+		__setupArrowFileStateByCache(af_state,
+									 filename,
+									 mc_block,
+									 &stat_arrow_attrs);
 	}
 	else
 	{
@@ -2064,13 +2056,11 @@ BuildArrowFileState(Relation frel,
 		LWLockRelease(&arrow_metadata_cache->mutex);
 
 		/* here is no valid metadata-cache, so build it from the raw file */
-		af_state = __buildArrowFileStateByFile(frel,
-											   filename,
-											   &af_info,
-											   &stat_arrow_attrs);
-		if (!af_state)
+		if (!__setupArrowFileStateByFile(af_state,
+										 filename,
+										 &af_info,
+										 &stat_arrow_attrs))
 			return NULL;	/* file not found? */
-
 		LWLockAcquire(&arrow_metadata_cache->mutex, LW_EXCLUSIVE);
 		mc_block = lookupArrowMetadataCache(&af_state->stat_buf, true);
 		if (!mc_block)
@@ -5353,31 +5343,49 @@ __setup_arrow_fdw_metadata_info(Oid frelid)
 		}
 		LWLockAcquire(&arrow_metadata_cache->mutex, LW_SHARED);
 		mc_block = lookupArrowMetadataCache(&stat_buf, false);
-		if (mc_block)
+		/* if not built yet, construct a metadata cache entry */
+		if (!mc_block)
 		{
+			ArrowFileInfo	af_info;
+			ArrowFileState	af_state;
+
+			LWLockRelease(&arrow_metadata_cache->mutex);
+
+			memset(&af_state, 0, sizeof(af_state));
+			af_state.filename = filename;
+			memcpy(&af_state.stat_buf, &stat_buf, sizeof(struct stat));
+
+			if (!__setupArrowFileStateByFile(&af_state,
+											 filename,
+											 &af_info,
+											 NULL))
+				elog(ERROR, "unable to read the arrow file '%s'", filename);
+			LWLockAcquire(&arrow_metadata_cache->mutex, LW_EXCLUSIVE);
+			mc_block = lookupArrowMetadataCache(&af_state.stat_buf, true);
+			if (!mc_block)
+			{
+				mc_block = __buildArrowMetadataCacheNoLock(&af_state, &af_info);
+				if (!mc_block)
+					elog(ERROR, "unable to build arrow metadata cache, consider to expand 'arrow_fdw.metadata_cache_size'");
+			}
+		}
+		/* copy the metadata info */
+		__build_arrow_fdw_metadata_info(md_info_dlist,
+										frelid,
+										filename,
+										NULL, "",
+										mc_block->custom_metadata);
+		dlist_foreach (iter, &mc_block->mcache_head.fields)
+		{
+			arrowMetadataFieldCache *fcache
+				= dlist_container(arrowMetadataFieldCache,
+								  chain, iter.cur);
 			__build_arrow_fdw_metadata_info(md_info_dlist,
 											frelid,
 											filename,
-											NULL, "",
-											mc_block->custom_metadata);
-			dlist_foreach (iter, &mc_block->mcache_head.fields)
-			{
-				arrowMetadataFieldCache *fcache
-					= dlist_container(arrowMetadataFieldCache,
-									  chain, iter.cur);
-				__build_arrow_fdw_metadata_info(md_info_dlist,
-												frelid,
-												filename,
-												fcache, "",
-												fcache->custom_metadata);
-			}
+											fcache, "",
+											fcache->custom_metadata);
 		}
-		else
-		{
-			elog(ERROR, "metadata cache not found to be implimented");
-		}
-
-
 		LWLockRelease(&arrow_metadata_cache->mutex);
 	}
 	return md_info_dlist;
