@@ -1047,48 +1047,55 @@ __buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
 							   ScanState *ss,
 							   ScalarArrayOpExpr *sa_op)
 {
-	Scan	   *scan = (Scan *)ss->ps.plan;
-	Oid			opcode;
+	Oid			opcode = sa_op->opno;
 	Var		   *var;
-	Node	   *arg;
+	Const	   *con;
 	Expr	   *expr;
+	Oid			elem_oid;
+	int16		elem_typlen;
+	bool		elem_typbyval;
+	Datum		elem_datum;
+	bool		elem_isnull;
 	Oid			opfamily = InvalidOid;
 	StrategyNumber strategy = InvalidStrategy;
+	ArrayType  *arr;
+	ArrayIterator iter;
 	CatCList   *catlist;
-	int			i, anum;
+	List	   *result_args = NIL;
+	bool		retval = false;
+	int			anum;
 
-	if (!reverse)
-	{
-		opcode = op->opno;
-		var = linitial(op->args);
-		arg = lsecond(op->args);
-	}
-	else
-	{
-		opcode = get_commutator(op->opno);
-		var = lsecond(op->args);
-		arg = linitial(op->args);
-	}
+	if (list_length(sa_op->args) != 2)
+		return false;
+	var = linitial(sa_op->args);
+	con = lsecond(sa_op->args);
+
 	/*
-	 * Is it VAR <OPER> ARG form?
+	 * Is it VAR <OPER> ARRAY form?
 	 *
 	 * MEMO: expression nodes (like Var) might be rewritten to INDEX_VAR +
 	 * resno on the custom_scan_tlist by setrefs.c, so we should reference
 	 * Var::varnosyn and ::varattnosyn, instead of ::varno and ::varattno.
 	 */
-	if (!IsA(var, Var) || !OidIsValid(opcode))
+	if (!OidIsValid(opcode) ||
+		!IsA(var, Var) ||
+		!IsA(con, Const) ||
+		con->constisnull)
 		return false;
-	if (var->varnosyn != scan->scanrelid)
+	elem_oid = get_element_type(con->consttype);
+	if (!OidIsValid(elem_oid))
 		return false;
+	get_typlenbyval(elem_oid, &elem_typlen, &elem_typbyval);
+
 	anum = var->varattnosyn - FirstLowInvalidHeapAttributeNumber;
 	if (!bms_is_member(anum, as_hint->stat_attrs))
 		return false;
-	if (contain_var_clause(arg) ||
-		contain_volatile_functions(arg))
-		return false;
 
-	catlist = SearchSysCacheList1(AMOPOPID, ObjectIdGetDatum(opcode));
-	for (i=0; i < catlist->n_members; i++)
+	/*
+	 * Identify the comparison strategy
+	 */
+	catlist = SearchSysCacheList1(AMOPOPID, ObjectIdGetDatum(sa_op->opno));
+	for (int i=0; i < catlist->n_members; i++)
 	{
 		HeapTuple	tuple = &catlist->members[i]->tuple;
 		Form_pg_amop amop = (Form_pg_amop) GETSTRUCT(tuple);
@@ -1102,99 +1109,149 @@ __buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
 	}
 	ReleaseSysCacheList(catlist);
 
-	if (strategy == BTLessStrategyNumber ||
-		strategy == BTLessEqualStrategyNumber)
+	/*
+	 * Iterate for each array element
+	 */
+	arr = DatumGetArrayTypeP(con->constvalue);
+	iter = array_create_iterator(arr, 0, NULL);
+	while (array_iterate(iter, &elem_datum, &elem_isnull))
 	{
-		/* if (VAR < ARG) --> (Min >= ARG), can be skipped */
-		/* if (VAR <= ARG) --> (Min > ARG), can be skipped */
-		opcode = get_negator(opcode);
-		if (!OidIsValid(opcode))
-			return false;
-		expr = make_opclause(opcode,
-							 op->opresulttype,
-							 op->opretset,
-							 (Expr *)makeVar(INNER_VAR,
-											 var->varattno,
-											 var->vartype,
-											 var->vartypmod,
-											 var->varcollid,
-											 0),
-							 (Expr *)copyObject(arg),
-							 op->opcollid,
-							 op->inputcollid);
-		set_opfuncid((OpExpr *)expr);
-		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
-	}
-	else if (strategy == BTGreaterEqualStrategyNumber ||
-			 strategy == BTGreaterStrategyNumber)
-	{
-		/* if (VAR > ARG) --> (Max <= ARG), can be skipped */
-		/* if (VAR >= ARG) --> (Max < ARG), can be skipped */
-		opcode = get_negator(opcode);
-		if (!OidIsValid(opcode))
-			return false;
-		expr = make_opclause(opcode,
-							 op->opresulttype,
-							 op->opretset,
-							 (Expr *)makeVar(OUTER_VAR,
-											 var->varattno,
-											 var->vartype,
-											 var->vartypmod,
-											 var->varcollid,
-											 0),
-							 (Expr *)copyObject(arg),
-							 op->opcollid,
-							 op->inputcollid);
-		set_opfuncid((OpExpr *)expr);
-		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
-	}
-	else if (strategy == BTEqualStrategyNumber)
-	{
-		/* (VAR = ARG) --> (Min > ARG) || (Max < ARG), can be skipped */
-		opcode = get_opfamily_member(opfamily, var->vartype,
-									 exprType((Node *)arg),
-									 BTGreaterStrategyNumber);
-		expr = make_opclause(opcode,
-							 op->opresulttype,
-							 op->opretset,
-							 (Expr *)makeVar(INNER_VAR,
-											 var->varattno,
-											 var->vartype,
-											 var->vartypmod,
-											 var->varcollid,
-											 0),
-							 (Expr *)copyObject(arg),
-							 op->opcollid,
-							 op->inputcollid);
-		set_opfuncid((OpExpr *)expr);
-		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+		if (strategy == BTLessStrategyNumber ||
+			strategy == BTLessEqualStrategyNumber)
+		{
+			/*
+			 * if (VAR < ARG) --> (Min >= ARG), can be skipped
+			 * if (VAR <= ARG) --> (Min > ARG), can be skipped
+			 */
+			Oid		negator = get_negator(opcode);
 
-		opcode = get_opfamily_member(opfamily, var->vartype,
-									 exprType((Node *)arg),
-									 BTLessStrategyNumber);
-		expr = make_opclause(opcode,
-							 op->opresulttype,
-							 op->opretset,
-							 (Expr *)makeVar(OUTER_VAR,
-											 var->varattno,
-											 var->vartype,
-											 var->vartypmod,
-											 var->varcollid,
-											 0),
-							 (Expr *)copyObject(arg),
-							 op->opcollid,
-							 op->inputcollid);
-		set_opfuncid((OpExpr *)expr);
-		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+			if (!OidIsValid(negator))
+				goto bailout;
+			expr = make_opclause(negator,
+								 get_op_rettype(negator),
+								 false,
+								 (Expr *)makeVar(INNER_VAR,
+												 var->varattno,
+												 var->vartype,
+												 var->vartypmod,
+												 var->varcollid,
+												 0),
+								 (Expr *)makeConst(elem_oid,
+												   con->consttypmod,
+												   con->constcollid,
+												   elem_typlen,
+												   elem_datum,
+												   elem_isnull,
+												   elem_typbyval),
+								 InvalidOid,
+								 sa_op->inputcollid);
+			set_opfuncid((OpExpr *)expr);
+			result_args = lappend(result_args, expr);
+		}
+		else if (strategy == BTGreaterEqualStrategyNumber ||
+				 strategy == BTGreaterStrategyNumber)
+		{
+			/* if (VAR > ARG) --> (Max <= ARG), can be skipped */
+			/* if (VAR >= ARG) --> (Max < ARG), can be skipped */
+			Oid		negator = get_negator(opcode);
+
+			if (!OidIsValid(negator))
+				goto bailout;
+			expr = make_opclause(negator,
+								 get_op_rettype(negator),
+								 false,
+								 (Expr *)makeVar(OUTER_VAR,
+												 var->varattno,
+												 var->vartype,
+												 var->vartypmod,
+												 var->varcollid,
+												 0),
+								 (Expr *)makeConst(elem_oid,
+												   con->consttypmod,
+												   con->constcollid,
+												   elem_typlen,
+												   elem_datum,
+												   elem_isnull,
+												   elem_typbyval),
+								 InvalidOid,
+								 sa_op->inputcollid);
+			set_opfuncid((OpExpr *)expr);
+			result_args = lappend(result_args, expr);
+		}
+		else if (strategy == BTEqualStrategyNumber)
+		{
+			/* (VAR = ARG) --> (Min > ARG) || (Max < ARG), can be skipped */
+			Oid		gt_opcode;
+			Oid		lt_opcode;
+			Expr   *gt_expr;
+			Expr   *lt_expr;
+
+			gt_opcode = get_opfamily_member(opfamily, var->vartype,
+											elem_oid,
+											BTGreaterStrategyNumber);
+			gt_expr = make_opclause(gt_opcode,
+									get_op_rettype(gt_opcode),
+									false,
+									(Expr *)makeVar(INNER_VAR,
+													var->varattno,
+													var->vartype,
+													var->vartypmod,
+													var->varcollid,
+													0),
+									(Expr *)makeConst(elem_oid,
+													  con->consttypmod,
+													  con->constcollid,
+													  elem_typlen,
+													  elem_datum,
+													  elem_isnull,
+													  elem_typbyval),
+									InvalidOid,
+									sa_op->inputcollid);
+			set_opfuncid((OpExpr *)gt_expr);
+
+			lt_opcode = get_opfamily_member(opfamily, var->vartype,
+											elem_oid,
+											BTLessStrategyNumber);
+			lt_expr = make_opclause(lt_opcode,
+									get_op_rettype(lt_opcode),
+									false,
+									(Expr *)makeVar(OUTER_VAR,
+													var->varattno,
+													var->vartype,
+													var->vartypmod,
+													var->varcollid,
+													0),
+									(Expr *)makeConst(elem_oid,
+													  con->consttypmod,
+													  con->constcollid,
+													  elem_typlen,
+													  elem_datum,
+													  elem_isnull,
+													  elem_typbyval),
+									InvalidOid,
+									sa_op->inputcollid);
+			set_opfuncid((OpExpr *)lt_expr);
+
+			expr = makeBoolExpr(OR_EXPR,
+								list_make2(gt_expr, lt_expr),
+								-1);
+			result_args = lappend(result_args, expr);
+		}
+		else
+		{
+			goto bailout;
+		}
 	}
-	else
-	{
-		return false;
-	}
+	as_hint->eval_quals = lappend(as_hint->eval_quals,
+								  makeBoolExpr(sa_op->useOr ? AND_EXPR : OR_EXPR,
+											   result_args,
+											   -1));
 	as_hint->load_attrs = bms_add_member(as_hint->load_attrs, var->varattno);
+	retval = true;
+bailout:
+	array_free_iterator(iter);
 
-	return true;
-
+	return retval;
 }
 
 static arrowStatsHint *
@@ -1210,23 +1267,21 @@ execInitArrowStatsHint(ScanState *ss, List *outer_quals, Bitmapset *stat_attrs)
 	outer_quals = fixup_scanstate_quals(ss, outer_quals);
 	as_hint = palloc0(sizeof(arrowStatsHint));
 	as_hint->stat_attrs = stat_attrs;
-	elog(INFO, "outer_quals => %s", nodeToString(outer_quals));
-	foreach (lc, outer _quals)
+	foreach (lc, outer_quals)
 	{
 		Expr   *expr = lfirst(lc);
 
 		if (IsA(expr, OpExpr) &&
-			list_length((OpExpr *)->args) == 2 &&
 			(__buildArrowStatsOper(as_hint, ss, (OpExpr *)expr, false) ||
 			 __buildArrowStatsOper(as_hint, ss, (OpExpr *)expr, true)))
 		{
-			as_hint->orig_quals = lappend(as_hint->orig_quals, op);
+			as_hint->orig_quals = lappend(as_hint->orig_quals, expr);
 		}
 		else if (IsA(expr, ScalarArrayOpExpr) &&
 				 __buildArrowStatsScalarArrayOp(as_hint, ss,
 												(ScalarArrayOpExpr *)expr))
 		{
-			as_hint->orig_quals = lappend(as_hint->orig_quals, op);
+			as_hint->orig_quals = lappend(as_hint->orig_quals, expr);
 		}
 	}
 	if (as_hint->eval_quals == NIL)
