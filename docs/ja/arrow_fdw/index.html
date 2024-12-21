@@ -255,6 +255,13 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dt><code>virtual=KEY</code></dt>
 <dd>そのカラムが仮想列である事を指定します。<code>KEY</code>はテーブルオプションの<code>pattern</code>オプションで指定されたパターン中のワイルドカードのキー名を指定します。</dd>
 <dd>仮想列はファイル名パターンのうち<code>KEY</code>にマッチした部分をクエリで参照することができます。</dd>
+<dt><code>virtual_metadata=KEY</code></dt>
+<dd>そのカラムが仮想列である事を指定します。<code>KEY</code>はArrowファイルのCustomMetadataフィールドに埋め込まれたKEY-VALUEペアを指定します。指定したKEY-VALUEペアが見つからない場合、このカラムはNULL値を返します。</dd>
+<dd>ArrowファイルのCustomMetadataには、スキーマ（PostgreSQLのテーブルに相当）に埋め込まれるものと、フィールド（PostgreSQLの列に相当）に埋め込まれるものの二種類があります。</dd>
+<dd>例えば、<code>lo_orderdate.max_values</code>のように、KEY値の前に<code>.</code>文字で区切られたフィールド名を記述する事で、フィールドに埋め込まれたCustomMetadataを参照する事が出来ます。フィールド名がない場合は、スキーマに埋め込まれたKEY-VALUEペアであるとして扱われます。</dd>
+<dt><code>virtual_metadata_split=KEY</code></dt>
+<dd>そのカラムが仮想列である事を指定します。<code>KEY</code>はArrowファイルのCustomMetadataフィールドに埋め込まれたKEY-VALUEペアを指定します。指定したKEY-VALUEペアが見つからない場合、このカラムはNULL値を返します。</dd>
+<dd><code>virtual_metadata</code>との違いは、CustomMetadataフィールドの値をデリミタ（<code>,</code>）で区切り、それを個々のRecord Batchに先頭から順に当てはめて行くことです。例えば、指定したCustomMetadataの値が<code>Tokyo,Osaka,Kyoto,Yokohama</code>であった場合、RecordBatch-0から読み出した行では<code>'Tokyo'</code>が、RecordBatch-1から読み出した行では<code>'Osaka'</code>が、RecordBatch-2から読み出した行では<code>'Osaka'</code>がこの仮想列の値として表示されます。</dd>
 </dl>
 <h3 id="_7">データ型の対応</h3>
 <p>Arrow形式のデータ型と、PostgreSQLのデータ型は以下のように対応しています。</p>
@@ -266,7 +273,9 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dt><code>FloatingPoint</code></dt>
 <dd><code>precision</code>属性の値に応じて、それぞれ<code>float2</code>、<code>float4</code>、<code>float8</code>のいずれかに対応。</dd>
 <dd><code>float2</code>はPG-Stromによる独自拡張</dd>
-<dt><code>Binary</code></dt>
+<dt><code>Utf8</code>, <code>LargeUtf8</code></dt>
+<dd><code>text</code>型に対応</dd>
+<dt><code>Binary</code>, <code>LargeBinary</code></dt>
 <dd><code>bytea</code>型に対応</dd>
 <dt><code>Decimal</code></dt>
 <dd><code>numeric</code>型に対応</dd>
@@ -278,14 +287,14 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dd><code>timestamp</code>型に対応。<code>unit=MicroSecond</code>相当になるように補正される。</dd>
 <dt><code>Interval</code></dt>
 <dd><code>interval</code>型に対応</dd>
-<dt><code>List</code></dt>
+<dt><code>List</code>, <code>LargeList</code></dt>
 <dd>要素型の1次元配列型として表現される。</dd>
 <dt><code>Struct</code></dt>
 <dd>複合型として表現される。対応する複合型は予め定義されていなければならない。</dd>
 <dt><code>FixedSizeBinary</code></dt>
 <dd><code>byteWidth</code>属性の値に応じて <code>char(n)</code> として表現される。</dd>
 <dd>メタデータ <code>pg_type=TYPENAME</code> が指定されている場合、該当するデータ型を割り当てる場合がある。現時点では、<code>inet</code>および<code>macaddr</code>型。</dd>
-<dt><code>Union</code>、<code>Map</code>、<code>Duration</code>、<code>LargeBinary</code>、<code>LargeUtf8</code>、<code>LargeList</code></dt>
+<dt><code>Union</code>、<code>Map</code>、<code>Duration</code></dt>
 <dd>現時点ではPostgreSQLデータ型への対応はなし。</dd>
 </dl>
 <h3 id="explain">EXPLAIN出力の読み方</h3>

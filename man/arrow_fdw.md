@@ -164,6 +164,15 @@ Arrow_Fdwは以下のオプションに対応しています。
 `virtual=KEY`
 :   そのカラムが仮想列である事を指定します。`KEY`はテーブルオプションの`pattern`オプションで指定されたパターン中のワイルドカードのキー名を指定します。
 :   仮想列はファイル名パターンのうち`KEY`にマッチした部分をクエリで参照することができます。
+
+`virtual_metadata=KEY`
+:   そのカラムが仮想列である事を指定します。`KEY`はArrowファイルのCustomMetadataフィールドに埋め込まれたKEY-VALUEペアを指定します。指定したKEY-VALUEペアが見つからない場合、このカラムはNULL値を返します。
+:   ArrowファイルのCustomMetadataには、スキーマ（PostgreSQLのテーブルに相当）に埋め込まれるものと、フィールド（PostgreSQLの列に相当）に埋め込まれるものの二種類があります。
+:   例えば、`lo_orderdate.max_values`のように、KEY値の前に`.`文字で区切られたフィールド名を記述する事で、フィールドに埋め込まれたCustomMetadataを参照する事が出来ます。フィールド名がない場合は、スキーマに埋め込まれたKEY-VALUEペアであるとして扱われます。
+
+`virtual_metadata_split=KEY`
+:   そのカラムが仮想列である事を指定します。`KEY`はArrowファイルのCustomMetadataフィールドに埋め込まれたKEY-VALUEペアを指定します。指定したKEY-VALUEペアが見つからない場合、このカラムはNULL値を返します。
+:    `virtual_metadata`との違いは、CustomMetadataフィールドの値をデリミタ（`,`）で区切り、それを個々のRecord Batchに先頭から順に当てはめて行くことです。例えば、指定したCustomMetadataの値が`Tokyo,Osaka,Kyoto,Yokohama`であった場合、RecordBatch-0から読み出した行では`'Tokyo'`が、RecordBatch-1から読み出した行では`'Osaka'`が、RecordBatch-2から読み出した行では`'Osaka'`がこの仮想列の値として表示されます。
 }
 @en{
 Arrow_Fdw supports the options below.
@@ -204,6 +213,15 @@ Arrow_Fdw supports the options below.
 `virtual=KEY`
 :   It configures the column is a virtual column. `KEY` specifies the wildcard key name in the pattern specified by the `pattern` option of the foreign table option.
 :   A virtual column allows to refer to the part of the file name pattern that matches `KEY` in a query.
+
+`virtual_metadata=KEY`
+:   It specifies that the column is a virtual column. `KEY` specifies a KEY-VALUE pair embedded in the CustomMetadata field of the Arrow file. If the specified KEY-VALUE pair is not found, the column returns a NULL value.
+:   There are two types of CustomMetadata in Arrow files: embedded in the schema (corresponding to a PostgreSQL table) and embedded in the field (corresponding to a PostgreSQL column).
+:   For example, you can reference CustomMetadata embedded in a field by writing the field name separated by the `.` character before the KEY value, such as `lo_orderdate.max_values`. If there is no field name, it will be treated as a KEY-VALUE pair embedded in the schema.
+
+`virtual_metadata_split=KEY`
+:   It specifies that the column is a virtual column. `KEY` specifies the KEY-VALUE pair embedded in the CustomMetadata field of the Arrow file. If the specified KEY-VALUE pair is not found, this column returns a NULL value.
+:   The difference from `virtual_metadata` is that the values of the CustomMetadata field are separated by a delimiter(`,`) and applied to each Record Batch in order from the beginning. For example, if the specified CustomMetadata value is `Tokyo,Osaka,Kyoto,Yokohama`, the row read from RecordBatch-0 will display `'Tokyo'`, the row read from RecordBatch-1 will display `'Osaka'`, and the row read from RecordBatch-2 will display `'Osaka'` as the value of this virtual column.
 }
 
 @ja:###データ型の対応
@@ -221,7 +239,10 @@ Arrow形式のデータ型と、PostgreSQLのデータ型は以下のように�
 :   `precision`属性の値に応じて、それぞれ`float2`、`float4`、`float8`のいずれかに対応。
 :   `float2`はPG-Stromによる独自拡張
 
-`Binary`
+`Utf8`, `LargeUtf8`
+:   `text`型に対応
+
+`Binary`, `LargeBinary`
 :   `bytea`型に対応
 
 `Decimal`
@@ -239,7 +260,7 @@ Arrow形式のデータ型と、PostgreSQLのデータ型は以下のように�
 `Interval`
 :   `interval`型に対応
 
-`List`
+`List`, `LargeList`
 :   要素型の1次元配列型として表現される。
 
 `Struct`
@@ -249,7 +270,7 @@ Arrow形式のデータ型と、PostgreSQLのデータ型は以下のように�
 :   `byteWidth`属性の値に応じて `char(n)` として表現される。
 :   メタデータ `pg_type=TYPENAME` が指定されている場合、該当するデータ型を割り当てる場合がある。現時点では、`inet`および`macaddr`型。
 
-`Union`、`Map`、`Duration`、`LargeBinary`、`LargeUtf8`、`LargeList`
+`Union`、`Map`、`Duration`
 :   現時点ではPostgreSQLデータ型への対応はなし。
 }
 @en{
@@ -264,7 +285,10 @@ Arrow data types are mapped on PostgreSQL data types as follows.
 :   mapped to either of `float2`, `float4` or `float8` according to the `precision` attribute.
 :   `float2` is an enhanced data type by PG-Strom.
 
-`Binary`
+`Utf8`, `LargeUtf8`
+:   mapped to `text` data type
+
+`Binary`, `LargeBinary`
 :   mapped to `bytea` data type
 
 `Decimal`
@@ -282,7 +306,7 @@ Arrow data types are mapped on PostgreSQL data types as follows.
 `Interval`
 :   mapped to `interval` data type.
 
-`List`
+`List`, `LargeList`
 :   mapped to 1-dimensional array of the element data type.
 
 `Struct`
@@ -292,7 +316,7 @@ Arrow data types are mapped on PostgreSQL data types as follows.
 :   mapped to `char(n)` data type according to the `byteWidth` attribute.
 :   If `pg_type=TYPENAME` is configured, PG-Strom may assign the configured data type. Right now, `inet` and `macaddr` are supported.
 
-`Union`, `Map`, `Duration`, `LargeBinary`, `LargeUtf8`, `LargeList`
+`Union`, `Map`, `Duration`
 :   Right now, PG-Strom cannot map these Arrow data types onto any of PostgreSQL data types.
 }
 

@@ -899,6 +899,10 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	CatCList   *catlist;
 	int			i, anum;
 
+	/* quick bailout if not binary operator */
+	if (list_length(op->args) != 2)
+		return false;
+
 	if (!reverse)
 	{
 		opcode = op->opno;
@@ -1038,6 +1042,161 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	return true;
 }
 
+static bool
+__buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
+							   ScanState *ss,
+							   ScalarArrayOpExpr *sa_op)
+{
+	Scan	   *scan = (Scan *)ss->ps.plan;
+	Oid			opcode;
+	Var		   *var;
+	Node	   *arg;
+	Expr	   *expr;
+	Oid			opfamily = InvalidOid;
+	StrategyNumber strategy = InvalidStrategy;
+	CatCList   *catlist;
+	int			i, anum;
+
+	if (!reverse)
+	{
+		opcode = op->opno;
+		var = linitial(op->args);
+		arg = lsecond(op->args);
+	}
+	else
+	{
+		opcode = get_commutator(op->opno);
+		var = lsecond(op->args);
+		arg = linitial(op->args);
+	}
+	/*
+	 * Is it VAR <OPER> ARG form?
+	 *
+	 * MEMO: expression nodes (like Var) might be rewritten to INDEX_VAR +
+	 * resno on the custom_scan_tlist by setrefs.c, so we should reference
+	 * Var::varnosyn and ::varattnosyn, instead of ::varno and ::varattno.
+	 */
+	if (!IsA(var, Var) || !OidIsValid(opcode))
+		return false;
+	if (var->varnosyn != scan->scanrelid)
+		return false;
+	anum = var->varattnosyn - FirstLowInvalidHeapAttributeNumber;
+	if (!bms_is_member(anum, as_hint->stat_attrs))
+		return false;
+	if (contain_var_clause(arg) ||
+		contain_volatile_functions(arg))
+		return false;
+
+	catlist = SearchSysCacheList1(AMOPOPID, ObjectIdGetDatum(opcode));
+	for (i=0; i < catlist->n_members; i++)
+	{
+		HeapTuple	tuple = &catlist->members[i]->tuple;
+		Form_pg_amop amop = (Form_pg_amop) GETSTRUCT(tuple);
+
+		if (amop->amopmethod == BRIN_AM_OID)
+		{
+			opfamily = amop->amopfamily;
+			strategy = amop->amopstrategy;
+			break;
+		}
+	}
+	ReleaseSysCacheList(catlist);
+
+	if (strategy == BTLessStrategyNumber ||
+		strategy == BTLessEqualStrategyNumber)
+	{
+		/* if (VAR < ARG) --> (Min >= ARG), can be skipped */
+		/* if (VAR <= ARG) --> (Min > ARG), can be skipped */
+		opcode = get_negator(opcode);
+		if (!OidIsValid(opcode))
+			return false;
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(INNER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+	}
+	else if (strategy == BTGreaterEqualStrategyNumber ||
+			 strategy == BTGreaterStrategyNumber)
+	{
+		/* if (VAR > ARG) --> (Max <= ARG), can be skipped */
+		/* if (VAR >= ARG) --> (Max < ARG), can be skipped */
+		opcode = get_negator(opcode);
+		if (!OidIsValid(opcode))
+			return false;
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(OUTER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+	}
+	else if (strategy == BTEqualStrategyNumber)
+	{
+		/* (VAR = ARG) --> (Min > ARG) || (Max < ARG), can be skipped */
+		opcode = get_opfamily_member(opfamily, var->vartype,
+									 exprType((Node *)arg),
+									 BTGreaterStrategyNumber);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(INNER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+
+		opcode = get_opfamily_member(opfamily, var->vartype,
+									 exprType((Node *)arg),
+									 BTLessStrategyNumber);
+		expr = make_opclause(opcode,
+							 op->opresulttype,
+							 op->opretset,
+							 (Expr *)makeVar(OUTER_VAR,
+											 var->varattno,
+											 var->vartype,
+											 var->vartypmod,
+											 var->varcollid,
+											 0),
+							 (Expr *)copyObject(arg),
+							 op->opcollid,
+							 op->inputcollid);
+		set_opfuncid((OpExpr *)expr);
+		as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+	}
+	else
+	{
+		return false;
+	}
+	as_hint->load_attrs = bms_add_member(as_hint->load_attrs, var->varattno);
+
+	return true;
+
+}
+
 static arrowStatsHint *
 execInitArrowStatsHint(ScanState *ss, List *outer_quals, Bitmapset *stat_attrs)
 {
@@ -1051,13 +1210,21 @@ execInitArrowStatsHint(ScanState *ss, List *outer_quals, Bitmapset *stat_attrs)
 	outer_quals = fixup_scanstate_quals(ss, outer_quals);
 	as_hint = palloc0(sizeof(arrowStatsHint));
 	as_hint->stat_attrs = stat_attrs;
-	foreach (lc, outer_quals)
+	elog(INFO, "outer_quals => %s", nodeToString(outer_quals));
+	foreach (lc, outer _quals)
 	{
-		OpExpr *op = lfirst(lc);
+		Expr   *expr = lfirst(lc);
 
-		if (IsA(op, OpExpr) && list_length(op->args) == 2 &&
-			(__buildArrowStatsOper(as_hint, ss, op, false) ||
-			 __buildArrowStatsOper(as_hint, ss, op, true)))
+		if (IsA(expr, OpExpr) &&
+			list_length((OpExpr *)->args) == 2 &&
+			(__buildArrowStatsOper(as_hint, ss, (OpExpr *)expr, false) ||
+			 __buildArrowStatsOper(as_hint, ss, (OpExpr *)expr, true)))
+		{
+			as_hint->orig_quals = lappend(as_hint->orig_quals, op);
+		}
+		else if (IsA(expr, ScalarArrayOpExpr) &&
+				 __buildArrowStatsScalarArrayOp(as_hint, ss,
+												(ScalarArrayOpExpr *)expr))
 		{
 			as_hint->orig_quals = lappend(as_hint->orig_quals, op);
 		}
@@ -2113,8 +2280,8 @@ __fetchVirtualSourceByCache(arrowMetadataCacheBlock *mc_block,
 				}
 			}
 		}
-		else if (strncmp(src, "metadata-file:", 14) == 0 ||
-				 strncmp(src, "metadata-rb:", 12) == 0)
+		else if (strncmp(src, "metadata:", 9) == 0 ||
+				 strncmp(src, "metadata-split:", 15) == 0)
 		{
 			char   *key = alloca(strlen(src));
 			char   *pos;
@@ -2198,8 +2365,8 @@ __fetchVirtualSourceByFile(ArrowFileInfo *af_info,
 				}
 			}
 		}
-		else if (strncmp(src, "metadata-file:", 14) == 0 ||
-				 strncmp(src, "metadata-rb:", 12) == 0)
+		else if (strncmp(src, "metadata:", 9) == 0 ||
+				 strncmp(src, "metadata-split:", 15) == 0)
 		{
 			ArrowSchema	*schema = &af_info->footer.schema;
 			char   *key = alloca(strlen(src));
@@ -2376,7 +2543,7 @@ BuildArrowFileState(Relation frel,
 											   FirstLowInvalidHeapAttributeNumber);
 		}
 		else if (vsource && (strncmp(sfield, "virtual:", 8) == 0 ||
-							 strncmp(sfield, "metadata-file:", 14) == 0))
+							 strncmp(sfield, "metadata:", 9) == 0))
 		{
 			Datum	datum = __processVirtualColumn(attr,
 												   sfield,
@@ -2393,7 +2560,7 @@ BuildArrowFileState(Relation frel,
 			stat_pg_attrs = bms_add_member(stat_pg_attrs, attr->attnum -
 										   FirstLowInvalidHeapAttributeNumber);
 		}
-		else if (vsource && strncmp(sfield, "metadata-rb:", 12) == 0)
+		else if (vsource && strncmp(sfield, "metadata-split:", 15) == 0)
 		{
 			ListCell   *cell;
 			char	   *buffer = pstrdup(vsource);
@@ -2753,8 +2920,8 @@ arrowFdwExtractSourceFields(Relation frel)
 		ListCell   *lc;
 		const char *field_name = NULL;
 		const char *virtual_key = NULL;
-		const char *virtual_file_metadata = NULL;
-		const char *virtual_rb_metadata = NULL;
+		const char *virtual_metadata = NULL;
+		const char *virtual_metadata_split = NULL;
 
 		if (attr->attisdropped)
 		{
@@ -2772,10 +2939,10 @@ arrowFdwExtractSourceFields(Relation frel)
 				field_name = strVal(defel->arg);
 			else if (strcmp(defel->defname, "virtual") == 0)
 				virtual_key = strVal(defel->arg);
-			else if (strcmp(defel->defname, "virtual_file_metadata") == 0)
-				virtual_file_metadata = strVal(defel->arg);
-			else if (strcmp(defel->defname, "virtual_rb_metadata") == 0)
-				virtual_rb_metadata = strVal(defel->arg);
+			else if (strcmp(defel->defname, "virtual_metadata") == 0)
+				virtual_metadata = strVal(defel->arg);
+			else if (strcmp(defel->defname, "virtual_metadata_split") == 0)
+				virtual_metadata_split = strVal(defel->arg);
 			else
 			{
 				elog(ERROR, "unknown foreign table options in '%s' of '%s'",
@@ -2785,16 +2952,16 @@ arrowFdwExtractSourceFields(Relation frel)
 		}
 		if ((field_name != NULL ? 1 : 0) +
 			(virtual_key != NULL ? 1 : 0) +
-			(virtual_file_metadata != NULL ? 1 : 0) +
-			(virtual_rb_metadata != NULL ? 1 : 0) > 1)
-			elog(ERROR, "arrow_fdw: column option 'field', 'virtual', 'virtual_file_metadata' and 'virtual_rb_metadata' must be mutually exclusive");
+			(virtual_metadata != NULL ? 1 : 0) +
+			(virtual_metadata_split != NULL ? 1 : 0) > 1)
+			elog(ERROR, "arrow_fdw: column option 'field', 'virtual', 'virtual_metadata' and 'virtual_metadata_split' must be mutually exclusive");
 
 		if (virtual_key)
 			results = lappend(results, psprintf("virtual:%s", virtual_key));
-		else if (virtual_file_metadata)
-			results = lappend(results, psprintf("metadata-file:%s", virtual_file_metadata));
-		else if (virtual_rb_metadata)
-			results = lappend(results, psprintf("metadata-rb:%s", virtual_rb_metadata));
+		else if (virtual_metadata)
+			results = lappend(results, psprintf("metadata:%s", virtual_metadata));
+		else if (virtual_metadata_split)
+			results = lappend(results, psprintf("metadata-split:%s", virtual_metadata_split));
 		else
 		{
 			if (!field_name)
@@ -5401,8 +5568,8 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 	{
 		bool		meet_field = false;
 		bool		meet_virtual = false;
-		bool		meet_virtual_file_metadata = false;
-		bool		meet_virtual_rb_metadata = false;
+		bool		meet_virtual_metadata = false;
+		bool		meet_virtual_metadata_split = false;
 		ListCell   *lc;
 
 		foreach (lc, options)
@@ -5418,10 +5585,10 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 			}
 			else if (strcmp(defel->defname, "virtual") == 0)
 				meet_virtual = true;
-			else if (strcmp(defel->defname, "virtual_file_metadata") == 0)
-				meet_virtual_file_metadata = true;
-			else if (strcmp(defel->defname, "virtual_rb_metadata") == 0)
-				meet_virtual_rb_metadata = true;
+			else if (strcmp(defel->defname, "virtual_metadata") == 0)
+				meet_virtual_metadata = true;
+			else if (strcmp(defel->defname, "virtual_metadata_split") == 0)
+				meet_virtual_metadata_split = true;
 			else
 			{
 				elog(ERROR, "arrow_fdw: column option '%s' is unknown",
@@ -5430,9 +5597,9 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 		}
 		if ((meet_field ? 1 : 0) +
 			(meet_virtual ? 1 : 0) +
-			(meet_virtual_file_metadata ? 1 : 0) +
-			(meet_virtual_rb_metadata ? 1 : 0) > 1)
-			elog(ERROR, "arrow_fdw: column option 'field', 'virtual', 'virtual_file_metadata' and 'virtual_rb_metadata' are mutually exclusive");
+			(meet_virtual_metadata ? 1 : 0) +
+			(meet_virtual_metadata_split ? 1 : 0) > 1)
+			elog(ERROR, "arrow_fdw: column option 'field', 'virtual', 'virtual_metadata' and 'virtual_metadata_split' are mutually exclusive");
 	}
 	else if (options != NIL)
 	{
