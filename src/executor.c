@@ -557,7 +557,7 @@ __build_session_lconvert(kern_session_info *session)
 const XpuCommand *
 pgstromBuildSessionInfo(pgstromTaskState *pts,
 						uint32_t join_inner_handle,
-						TupleDesc kds_final_tdesc)
+						TupleDesc kds_dst_tdesc)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
 	pgstromPlanInfo *pp_info = pts->pp_info;
@@ -667,42 +667,54 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-	if (kds_final_tdesc)
+	/*
+	 * KDS header portion of usual GpuProjection; because kds_dst_tdesc is a copy
+	 * of scandesc of CustomScan, it is compatible to kds_final_tdesc if GpuPreAgg.
+	 * However, GpuPreAgg also needs some adjustment for hashing.
+	 */
+	if (kds_dst_tdesc)
 	{
-		size_t		head_sz = estimate_kern_data_store(kds_final_tdesc);
+		size_t		head_sz = estimate_kern_data_store(kds_dst_tdesc);
 		kern_data_store *kds_temp = (kern_data_store *)alloca(head_sz);
-		char		format = KDS_FORMAT_ROW;
-		uint32_t	hash_nslots = 0;
-		size_t		kds_length = (4UL << 20);	/* 4MB */
 
-		if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
+		setup_kern_data_store(kds_temp, kds_dst_tdesc, 0, KDS_FORMAT_ROW);
+		session->projection_kds_dst =
+			__appendBinaryStringInfo(&buf, kds_temp, head_sz);
+		/*
+		 * kds_final buffer has identical schema definitions, however,
+		 * it preset some attributes (hash_nslots, kds_length, ...)
+		 */
+		if ((pts->xpu_task_flags & (DEVTASK__PINNED_ROW_RESULTS |
+									DEVTASK__PINNED_HASH_RESULTS)) != 0)
 		{
-			double	final_nrows = pp_info->final_nrows;
-			size_t	unit_sz;
+			size_t		kds_length = (4UL << 20);	/* 4MB */
 
-			format = KDS_FORMAT_HASH;
-			hash_nslots = KDS_GET_HASHSLOT_WIDTH(final_nrows);
-			unit_sz = offsetof(kern_hashitem, t.htup) +
-				MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
-						 BITMAPLEN(kds_final_tdesc->natts)) +
-				pts->css.ss.ps.plan->plan_width;
+			if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
+			{
+				uint64_t	hash_nslots = KDS_GET_HASHSLOT_WIDTH(pp_info->final_nrows);
+				uint32_t	unitsz = (offsetof(kern_hashitem, t.htup) +
+									  MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
+											   BITMAPLEN(kds_dst_tdesc->natts)) +
+									  pts->css.ss.ps.plan->plan_width);
+				kds_length = (head_sz +
+							  sizeof(uint64_t) * hash_nslots +		/* hash-slots */
+							  sizeof(uint64_t) * 2 * hash_nslots +	/* row-index */
+							  unitsz * 2 * hash_nslots);
+				if (kds_length < (1UL<<30))
+					kds_length = (1UL<<30);		/* 1GB at least */
+				else
+					kds_length = TYPEALIGN(1024, kds_length);
 
-			/* kds_final->length with margin */
-			kds_length = (head_sz +
-						  sizeof(uint64_t) * hash_nslots +	/* hash-slots */
-						  sizeof(uint64_t) * 2 * hash_nslots +	/* row-index */
-						  unit_sz * 2 * hash_nslots);
-			if (kds_length < (1UL<<30))
-				kds_length = (1UL<<30);		/* 1GB at least */
-			else
-				kds_length = TYPEALIGN(1024, kds_length);	/* alignment */
+				kds_temp->hash_nslots = hash_nslots;
+				kds_temp->format = KDS_FORMAT_HASH;
+			}
+			kds_temp->length = kds_length;
+			session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, head_sz);
+			session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
+			session->groupby_ngroups_estimation = pts->css.ss.ps.plan->plan_rows;
 		}
-		setup_kern_data_store(kds_temp, kds_final_tdesc, kds_length, format);
-		kds_temp->hash_nslots = hash_nslots;
-		session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, head_sz);
-		session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
-		session->groupby_ngroups_estimation = pts->css.ss.ps.plan->plan_rows;
 	}
+	
 	/* CPU fallback related */
 	if (pgstrom_cpu_fallback_elevel < ERROR)
 	{
@@ -1801,7 +1813,7 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 {
 	const XpuCommand *session;
 	uint32_t	inner_handle = 0;
-	TupleDesc	kds_final_tupdesc = NULL;
+	TupleDesc	kds_dst_tupdesc = NULL;
 
 	/* attach pgstromSharedState, if none */
 	if (!pts->ps_state)
@@ -1813,9 +1825,8 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 		if (inner_handle == 0)
 			return false;
 	}
-	/* XPU-PreAgg needs tupdesc of kds_final */
-	if ((pts->xpu_task_flags & (DEVTASK__PINNED_HASH_RESULTS |
-								DEVTASK__PINNED_ROW_RESULTS)) != 0)
+	/* Build GPU-Projection / GPU-PreAgg TupleDesc */
+	if (pts->css.ss.ps.scandesc)
 	{
 		CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
 		ListCell   *lc;
@@ -1829,7 +1840,7 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 		 * length of BITMAPLEN(kds->ncols) and may expand the starting
 		 * point of t_hoff for all the tuples.
 		 */
-		kds_final_tupdesc = CreateTupleDescCopy(pts->css.ss.ps.scandesc);
+		kds_dst_tupdesc = CreateTupleDescCopy(pts->css.ss.ps.scandesc);
 		foreach (lc, cscan->custom_scan_tlist)
 		{
 			TargetEntry *tle = lfirst(lc);
@@ -1837,11 +1848,11 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 			if (!tle->resjunk)
 				nvalids = tle->resno;
 		}
-		Assert(nvalids <= kds_final_tupdesc->natts);
-		kds_final_tupdesc->natts = nvalids;
+		Assert(nvalids <= kds_dst_tupdesc->natts);
+		kds_dst_tupdesc->natts = nvalids;
 	}
 	/* build the session information */
-	session = pgstromBuildSessionInfo(pts, inner_handle, kds_final_tupdesc);
+	session = pgstromBuildSessionInfo(pts, inner_handle, kds_dst_tupdesc);
 	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 	{
 		gpuClientOpenSession(pts, session);

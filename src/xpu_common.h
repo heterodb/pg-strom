@@ -2535,6 +2535,8 @@ typedef struct kern_session_info
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
 	int32_t		session_currency_frac_digits;	/* copy of lconv::frac_digits */
+	/* projection kds definition */
+	uint32_t	projection_kds_dst;		/* header portion of kds_dst */
 
 	/* join inner buffer */
 	uint32_t	pgsql_port_number;	/* = PostPortNumber */
