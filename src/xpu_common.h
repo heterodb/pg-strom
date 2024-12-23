@@ -2562,7 +2562,6 @@ typedef struct {
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
-	uint32_t	kds_dst_offset;		/* offset to kds_dst */
 	int32_t		scan_repeat_id;		/* current repeat count */
 	char		data[1]				__MAXALIGNED__;
 } kern_exec_task;
@@ -2629,6 +2628,18 @@ typedef struct
 /*
  * kern_session_info utility functions.
  */
+INLINE_FUNCTION(const kern_data_store *)
+SESSION_KDS_DST_HEAD(const kern_session_info *session)
+{
+	const kern_data_store *kds_dst_head = NULL;
+
+	if (session->projection_kds_dst > 0)
+		kds_dst_head = (const kern_data_store *)
+			((char *)session + session->projection_kds_dst);
+
+	return kds_dst_head;
+}
+
 INLINE_FUNCTION(kern_varslot_desc *)
 SESSION_KVARS_SLOT_DESC(const kern_session_info *session)
 {

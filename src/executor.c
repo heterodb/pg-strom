@@ -1123,7 +1123,6 @@ pgstromExecFinalChunk(pgstromTaskState *pts,
 static void
 __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 							  TupleDesc tdesc_src,
-							  TupleDesc tdesc_dst,
 							  char format)
 {
 	XpuCommand	   *xcmd;
@@ -1137,8 +1136,6 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 		bufsz += MAXALIGN(sizeof(GpuCacheIdent));
 	if (tdesc_src)
 		bufsz += estimate_kern_data_store(tdesc_src);
-	if (tdesc_dst)
-		bufsz += estimate_kern_data_store(tdesc_dst);
 	enlargeStringInfo(&pts->xcmd_buf, bufsz);
 
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
@@ -1150,12 +1147,6 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 
 		memcpy((char *)xcmd + off, ident, sizeof(GpuCacheIdent));
 		off += MAXALIGN(sizeof(GpuCacheIdent));
-	}
-	if (tdesc_dst)
-	{
-		xcmd->u.task.kds_dst_offset = off;
-		kds  = (kern_data_store *)((char *)xcmd + off);
-		off += setup_kern_data_store(kds, tdesc_dst, 0, KDS_FORMAT_ROW);
 	}
 	if (tdesc_src)
 	{
@@ -1445,7 +1436,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
 	Relation	rel = pts->css.ss.ss_currentRelation;
 	TupleDesc	tupdesc_src = RelationGetDescr(rel);
-	TupleDesc	tupdesc_dst;
 	int			depth_index = 0;
 	ListCell   *lc;
 
@@ -1515,8 +1505,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			 RelationGetRelationName(rel));
 	}
 
-	/* TupleDesc according to GpuProjection */
-	tupdesc_dst = pts->css.ss.ps.scandesc;
 #if PG_VERSION_NUM < 160000
 	/*
 	 * PG16 adds CustomScanState::slotOps to initialize scan-tuple-slot
@@ -1524,7 +1512,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	 * GPU projection returns tuples in heap-format, so we prefer
 	 * TTSOpsHeapTuple, instead of the TTSOpsVirtual.
 	 */
-	ExecInitScanTupleSlot(estate, &pts->css.ss, tupdesc_dst,
+	ExecInitScanTupleSlot(estate, &pts->css.ss,
+						  pts->css.ss.ps.scandesc,
 						  &TTSOpsHeapTuple);
 	ExecAssignScanProjectionInfoWithVarno(&pts->css.ss, INDEX_VAR);
 #endif
@@ -1622,7 +1611,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		pts->cb_next_tuple = pgstromScanNextTuple;
 	    __setupTaskStateRequestBuffer(pts,
 									  NULL,
-									  tupdesc_dst,
 									  KDS_FORMAT_ARROW);
 	}
 	else if (pts->gcache_desc)		/* GPU-Cache */
@@ -1631,7 +1619,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		pts->cb_next_tuple = pgstromScanNextTuple;
 		__setupTaskStateRequestBuffer(pts,
 									  NULL,
-									  tupdesc_dst,
 									  KDS_FORMAT_COLUMN);
 	}
 	else if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0 ||
@@ -1641,7 +1628,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		pts->cb_next_tuple = pgstromScanNextTuple;
 		__setupTaskStateRequestBuffer(pts,
 									  tupdesc_src,
-									  tupdesc_dst,
 									  KDS_FORMAT_BLOCK);
 	}
 	else						/* Slow normal heap storage */
@@ -1650,7 +1636,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		pts->cb_next_tuple = pgstromScanNextTuple;
 		__setupTaskStateRequestBuffer(pts,
 									  tupdesc_src,
-									  tupdesc_dst,
 									  KDS_FORMAT_ROW);
 	}
 

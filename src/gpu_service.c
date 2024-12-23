@@ -3674,7 +3674,6 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	const char		*kds_src_pathname = NULL;
 	strom_io_vector *kds_src_iovec = NULL;
 	kern_data_store	*kds_src = NULL;
-	kern_data_store *kds_dst_head = NULL;
 	kern_data_store *kds_dst = NULL;
 	CUdeviceptr		m_kds_src = 0UL;
 	CUdeviceptr		m_kds_extra = 0UL;
@@ -3702,8 +3701,6 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.task.kds_src_iovec);
 	if (xcmd->u.task.kds_src_offset)
 		kds_src = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_src_offset);
-	if (xcmd->u.task.kds_dst_offset)
-		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_dst_offset);
 	if (!kds_src)
 	{
 		const GpuCacheIdent *ident = (GpuCacheIdent *)xcmd->u.task.data;
@@ -3805,6 +3802,8 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	 */
 	if (!GQBUF_KDS_FINAL(gq_buf))
 	{
+		const kern_data_store *kds_dst_head = SESSION_KDS_DST_HEAD(gclient->h_session);
+
 		sz = (KDS_HEAD_LENGTH(kds_dst_head) +
 			  PGSTROM_CHUNK_SIZE);
 		d_chunk = gpuMemAllocManaged(sz);
@@ -3907,21 +3906,12 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 								   cuStrError(rc));
 					break;
 				}
-#if 1
 				rc = cuMemcpyPeerAsync(n_chunk->m_devptr,
 									   __gcontext->cuda_context,
 									   m_kds_src,
 									   __gcontext_prev->cuda_context,
 									   kds_src->length,
 									   MY_STREAM_PER_THREAD);
-#else
-				rc = cuMemcpyPeerAsync((n_chunk->__base + n_chunk->__offset),
-									   __gcontext->cuda_context,
-									   (s_chunk->__base + s_chunk->__offset),
-									   __gcontext_prev->cuda_context,
-									   (s_chunk->__length),
-									   MY_STREAM_PER_THREAD);
-#endif
 				if (rc != CUDA_SUCCESS)
 				{
 					gpuMemFree(n_chunk);
