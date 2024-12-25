@@ -2571,6 +2571,7 @@ typedef struct {
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
 	uint32_t	ojmap_offset;		/* offset of outer-join-map */
 	uint32_t	ojmap_length;		/* length of outer-join-map */
+	bool		right_outer_join;	/* true, if CPU should exex RIGHT-OUTER-JOIN */
 	bool		final_plan_task;	/* true, if it is final response */
 	uint32_t	final_nitems;		/* final buffer's nitems, if any */
 	uint64_t	final_usage;		/* final buffer's usage, if any */
@@ -2583,6 +2584,7 @@ typedef struct {
 	uint32_t	nitems_out;		/* # of result rows in final depth before host quals */
 	uint32_t	num_rels;
 	struct {
+		uint32_t	nitems_roj;	/* # of generated rows by RIGHT-OUTER-JOIN (if any) */
 		uint32_t	nitems_gist;/* # of results rows by GiST index (if any) */
 		uint32_t	nitems_out;	/* # of results rows by JOIN in this depth */
 	} stats[1];
@@ -2638,6 +2640,12 @@ SESSION_KDS_DST_HEAD(const kern_session_info *session)
 			((char *)session + session->projection_kds_dst);
 
 	return kds_dst_head;
+}
+
+INLINE_FUNCTION(bool)
+SESSION_SUPPORTS_CPU_FALLBACK(const kern_session_info *session)
+{
+	return (session->fallback_kds_head != 0);
 }
 
 INLINE_FUNCTION(kern_varslot_desc *)

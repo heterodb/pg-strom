@@ -830,6 +830,8 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 								xcmd->u.results.nitems_in);
 		for (int i=0; i < n_rels; i++)
 		{
+			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_roj,
+                                    xcmd->u.results.stats[i].nitems_roj);
 			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_gist,
 									xcmd->u.results.stats[i].nitems_gist);
 			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_join,
@@ -1684,8 +1686,9 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 
 			if (resp->tag != XpuCommandTag__Success)
 				elog(ERROR, "unknown response tag: %u", resp->tag);
-			if (resp->u.results.final_plan_task)
+			if (resp->u.results.right_outer_join)
 			{
+				Assert(resp->u.results.final_plan_task);
 				ExecFallbackCpuJoinOuterJoinMap(pts, resp);
 				ExecFallbackCpuJoinRightOuter(pts);
 			}
@@ -2431,12 +2434,27 @@ pgstromExplainTaskState(CustomScanState *node,
 			else
 			{
 				uint64_t	next_ntuples;
+				uint64_t	roj_ntuples;
 
 				next_ntuples = pg_atomic_read_u64(&ps_state->inners[i].stats_join);
-				appendStringInfo(&buf, " ... [plan: %.0f -> %.0f, exec: %lu -> %lu]",
-								 ntuples, pp_inner->join_nrows,
-								 stat_ntuples,
-								 next_ntuples);
+				roj_ntuples = pg_atomic_read_u64(&ps_state->inners[i].stats_roj);
+				if (roj_ntuples == 0)
+				{
+					appendStringInfo(&buf,
+									 " ... [plan: %.0f -> %.0f, exec: %lu -> %lu]",
+									 ntuples, pp_inner->join_nrows,
+									 stat_ntuples,
+									 next_ntuples);
+				}
+				else
+				{
+					appendStringInfo(&buf,
+									 " ... [plan: %.0f -> %.0f, exec: %lu+%lu -> %lu]",
+									 ntuples, pp_inner->join_nrows,
+									 stat_ntuples,
+									 roj_ntuples,
+									 next_ntuples);
+				}
 				stat_ntuples = next_ntuples;
 			}
 			switch (pp_inner->join_type)

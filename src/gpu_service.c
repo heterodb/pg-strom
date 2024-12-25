@@ -39,6 +39,7 @@ struct gpuContext
 	HTAB		   *cuda_func_htab;
 	CUfunction		cufn_kern_gpumain;
 	CUfunction		cufn_prep_gistindex;
+	CUfunction		cufn_merge_outer_join_map;
 	CUfunction		cufn_kbuf_partitioning;
 	CUfunction		cufn_kbuf_reconstruction;
 	CUfunction		cufn_gpucache_apply_redo;
@@ -3443,6 +3444,7 @@ __gpuservLaunchGpuTaskExecKernel(gpuContext *gcontext,
 								 kern_data_store *kds_dst,
 								 int part_divisor,
 								 int part_reminder,
+								 int right_outer_depth,
 								 kern_exec_results *kern_stats)
 {
 	kern_session_info *session = gclient->h_session;
@@ -3521,6 +3523,7 @@ __gpuservLaunchGpuTaskExecKernel(gpuContext *gcontext,
 	kgtask->cuda_stack_limit   = GpuWorkerCurrentContext->cuda_stack_limit;
 	kgtask->partition_divisor  = part_divisor;
 	kgtask->partition_reminder = part_reminder;
+	kgtask->right_outer_depth  = right_outer_depth;
 
 	/*
 	 * Allocation of the destination buffer
@@ -3625,6 +3628,7 @@ resume_kernel:
 		kern_stats->nitems_out += kgtask->nitems_out;
 		for (int j=0; j < kgtask->n_rels; j++)
 		{
+			kern_stats->stats[j].nitems_roj  += kgtask->stats[j].nitems_roj;
 			kern_stats->stats[j].nitems_gist += kgtask->stats[j].nitems_gist;
 			kern_stats->stats[j].nitems_out  += kgtask->stats[j].nitems_out;
 		}
@@ -3878,6 +3882,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 										 kds_dst,
 										 part_divisor,
 										 curr_reminder,
+										 0,
 										 kern_stats))
 	{
 		/* for each inner-buffer partitions if any */
@@ -3930,6 +3935,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 												  kds_dst,
 												  part_divisor,
 												  __reminder,
+												  0,
 												  kern_stats))
 			{
 				if (n_chunk != NULL)
@@ -3992,6 +3998,155 @@ gpuservGpuCacheManager(void *__arg)
 
 /* ----------------------------------------------------------------
  *
+ * gpuservHandleRightOuterJoin
+ *
+ * ----------------------------------------------------------------
+ */
+static bool
+__execMergeRightOuterJoinMap(gpuClient *gclient,
+                            gpuContext *dst_gcontext,
+                            kern_multirels *d_kmrels,
+                            int depth,
+                            int src_dindex)
+{
+	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(d_kmrels, depth);
+	uint32_t	nitems_in = (kds_in->nitems + sizeof(uint32_t) - 1) / sizeof(uint32_t);
+	bool	   *src_ojmap;
+	bool	   *dst_ojmap;
+	int			grid_sz;
+	int			block_sz;
+	void	   *kern_args[4];
+	CUresult	rc;
+
+	src_ojmap = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(d_kmrels, depth, src_dindex);
+	dst_ojmap = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(d_kmrels, depth,
+												  dst_gcontext->cuda_dindex);
+	Assert(dst_ojmap != NULL && src_ojmap != NULL);
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 dst_gcontext->cufn_merge_outer_join_map, 0);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
+					  cuStrError(rc));
+		return false;
+	}
+	grid_sz = Min(grid_sz, (nitems_in + block_sz - 1) / block_sz);
+
+	kern_args[0] = &dst_ojmap;
+	kern_args[1] = &src_ojmap;
+	kern_args[2] = &nitems_in;
+	rc = cuLaunchKernel(dst_gcontext->cufn_merge_outer_join_map,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						MY_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuLaunchKernel(grid_sz=%d, block_sz=%d): %s",
+					  grid_sz, block_sz, cuStrError(rc));
+		return false;
+	}
+	return true;
+}
+
+static bool
+gpuservHandleRightOuterJoin(gpuClient *gclient,
+							gpuContext *gcontext,
+							kern_exec_results *kern_stats)
+{
+	gpuQueryBuffer	   *gq_buf = gclient->gq_buf;
+	kern_multirels	   *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
+	kern_data_store	   *kds_dst = GQBUF_KDS_FINAL(gq_buf);
+	gpuMemChunk		   *d_chunk = NULL;
+	size_t				sz;
+	bool				retval = false;
+
+	for (int depth=1; depth <= d_kmrels->num_rels; depth++)
+	{
+		if (!d_kmrels->chunks[depth-1].right_outer)
+			continue;
+
+		if (!kds_dst)
+		{
+			const kern_data_store *kds_head;
+
+			Assert(!GQBUF_KDS_FINAL(gq_buf));
+			kds_head = SESSION_KDS_DST_HEAD(gclient->h_session);
+			sz = KDS_HEAD_LENGTH(kds_head) + PGSTROM_CHUNK_SIZE;
+
+			d_chunk = gpuMemAllocManaged(sz);
+			if (!d_chunk)
+			{
+				gpuClientELog(gclient, "failed on gpuMemAllocManaged(%lu)", sz);
+				goto bailout;
+			}
+			kds_dst = (kern_data_store *)d_chunk->m_devptr;
+			memcpy(kds_dst, kds_head, KDS_HEAD_LENGTH(kds_head));
+			kds_dst->length = sz;
+		}
+
+		if (!d_kmrels->chunks[depth-1].pinned_buffer)
+		{
+			/*
+			 * merge the outer-join map to the currend device.
+			 */
+			for (int dindex=0; dindex < numGpuDevAttrs; dindex++)
+			{
+				if (dindex == gcontext->cuda_dindex)
+					continue;
+				if (!__execMergeRightOuterJoinMap(gclient,
+												  gcontext,
+												  d_kmrels,
+												  depth,
+												  dindex))
+					goto bailout;
+			}
+			/*
+			 * Runs the right-outer-join from this depth
+			 * and, continue to return partial results.
+			 * kds_dst should be allocated here?
+			 */
+			if (!__gpuservLaunchGpuTaskExecKernel(gcontext,
+												  gclient,
+												  0UL,
+												  0UL,
+												  gq_buf->m_kmrels,
+												  kds_dst,
+												  0, 0,
+												  depth,
+												  kern_stats))
+				goto bailout;
+		}
+		else
+		{
+			//merge ojmap for each partition leaf
+			//in case when n_parts < n_gpus
+			//runs outer join for each partition
+			gpuClientELog(gclient, "RIGHT OUTER  Pinned Inner is not implemented yet");
+			goto bailout;
+		}
+	}
+
+	/*
+	 * If any results, send back to the client as a partial response
+	 */
+	if (!GQBUF_KDS_FINAL(gq_buf) &&
+		kds_dst && kds_dst->nitems > 0)
+	{
+		gpuClientWriteBackPartial(gclient, kds_dst);
+	}
+	retval = true;
+bailout:
+   if (d_chunk)
+       gpuMemFree(d_chunk);
+  return retval;
+}
+
+/* ----------------------------------------------------------------
+ *
  * gpuservHandleGpuTaskFinal
  *
  * ----------------------------------------------------------------
@@ -4002,69 +4157,92 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 						  XpuCommand *xcmd)
 {
 	gpuQueryBuffer *gq_buf = gclient->gq_buf;
+	kern_multirels *h_kmrels = (kern_multirels *)gq_buf->h_kmrels;
 	struct iovec   *iov_array;
 	struct iovec   *iov;
 	int				iovcnt = 0;
 	int				iovmax = (6 * numGpuDevAttrs + 10);
-	XpuCommand		resp;
-	size_t			resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
-
-	memset(&resp, 0, sizeof(XpuCommand));
-	resp.magic = XpuCommandMagicNumber;
-	resp.tag   = XpuCommandTag__Success;
-	resp.u.results.chunks_nitems = 0;
-	resp.u.results.chunks_offset = resp_sz;
+	int				num_rels = (h_kmrels ? h_kmrels->num_rels : 0);
+	XpuCommand	   *resp;
+	size_t			resp_sz = MAXALIGN(offsetof(XpuCommand,
+												u.results.stats[num_rels]));
+	/* setup final response message */
+	resp = alloca(resp_sz);
+	memset(resp, 0, resp_sz);
+	resp->magic = XpuCommandMagicNumber;
+	resp->tag   = XpuCommandTag__Success;
+	resp->u.results.chunks_nitems = 0;
+	resp->u.results.chunks_offset = resp_sz;
+	resp->u.results.num_rels = num_rels;
 
 	iov_array = alloca(sizeof(struct iovec) * iovmax);
 	iov = &iov_array[iovcnt++];
-	iov->iov_base = &resp;
+	iov->iov_base = resp;
 	iov->iov_len  = resp_sz;
 
 	/*
 	 * Is the outer-join-map written back to the host buffer?
 	 */
-	if (gq_buf->m_kmrels != 0UL &&
-		gq_buf->h_kmrels != NULL)
+	if (SESSION_SUPPORTS_CPU_FALLBACK(gclient->h_session))
 	{
 		kern_multirels *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
-		kern_multirels *h_kmrels = (kern_multirels *)gq_buf->h_kmrels;
 
-		for (int dindex=0; dindex < numGpuDevAttrs; dindex++)
+		/* Merge RIGHT-OUTER-JOIN Map to the shared host buffer */
+		if (h_kmrels && d_kmrels)
 		{
-			if ((gclient->optimal_gpus & (1UL<<dindex)) == 0)
-				continue;
-			for (int depth=1; depth <= d_kmrels->num_rels; depth++)
+			for (int dindex=0; dindex < numGpuDevAttrs; dindex++)
 			{
-				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
-				bool   *d_ojmap;
-				bool   *h_ojmap;
-
-				d_ojmap = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(d_kmrels, depth, dindex);
-				h_ojmap = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
-				if (d_ojmap && h_ojmap)
+				if ((gclient->optimal_gpus & (1UL<<dindex)) == 0)
+					continue;
+				for (int depth=1; depth <= d_kmrels->num_rels; depth++)
 				{
-					for (uint32_t j=0; j < kds->nitems; j++)
-						h_ojmap[j] |= d_ojmap[j];
+					kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
+					bool   *d_ojmap;
+					bool   *h_ojmap;
+
+					d_ojmap = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(d_kmrels, depth, dindex);
+					h_ojmap = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
+					if (d_ojmap && h_ojmap)
+					{
+						for (uint32_t j=0; j < kds->nitems; j++)
+							h_ojmap[j] |= d_ojmap[j];
+					}
 				}
+				pg_memory_barrier();
 			}
-			pg_memory_barrier();
+			/* kick CPU fallback for RIGHT-OUTER-JOIN */
+			resp->u.results.right_outer_join = true;
+		}
+
+		/*
+		 * Is the CPU-Fallback buffer must be written back?
+		 */
+		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
+		{
+			kern_data_store *kds_fallback = (kern_data_store *)
+				gq_buf->gpus[__dindex].m_kds_fallback;
+
+			if (kds_fallback && kds_fallback->nitems > 0)
+			{
+				iovcnt += __gpuClientWriteBackOneChunk(gclient,
+													   iov_array+iovcnt,
+													   kds_fallback);
+				resp->u.results.chunks_nitems++;
+			}
 		}
 	}
-	/*
-	 * Is the CPU-Fallback buffer written back?
-	 */
-	for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
+	else
 	{
-		kern_data_store *kds_fallback = (kern_data_store *)
-			gq_buf->gpus[__dindex].m_kds_fallback;
-
-		if (kds_fallback && kds_fallback->nitems > 0)
-		{
-			iovcnt += __gpuClientWriteBackOneChunk(gclient,
-												   iov_array+iovcnt,
-												   kds_fallback);
-			resp.u.results.chunks_nitems++;
-		}
+		/*
+		 * If we have no CPU fallback events in the past and future (during RIGHT OUTER
+		 * JOIN handling), we can run RIGHT OUTER JOIN on the GPU device without data
+		 * migration.
+		 */
+		if (!gpuservHandleRightOuterJoin(gclient, gcontext, &resp->u.results))
+			return;
+		/* this code path should never have CPU-Fallback buffer */
+		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
+			Assert(gq_buf->gpus[__dindex].m_kds_fallback == 0UL);
 	}
 
 	/*
@@ -4082,21 +4260,21 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 				iovcnt += __gpuClientWriteBackOneChunk(gclient,
 													   iov_array+iovcnt,
 													   kds_final);
-				resp.u.results.chunks_nitems++;
+				resp->u.results.chunks_nitems++;
 			}
-			resp.u.results.final_nitems += kds_final->nitems;
-			resp.u.results.final_usage  += kds_final->usage;
-			resp.u.results.final_total  += KDS_HEAD_LENGTH(kds_final)
+			resp->u.results.final_nitems += kds_final->nitems;
+			resp->u.results.final_usage  += kds_final->usage;
+			resp->u.results.final_total  += KDS_HEAD_LENGTH(kds_final)
 				+ sizeof(uint64_t) * (kds_final->hash_nslots +
 									  kds_final->nitems)
 				+ kds_final->usage;
 		}
 	}
-	resp.u.results.final_plan_task = true;
+	resp->u.results.final_plan_task = true;
 
 	for (int i=1; i < iovcnt; i++)
 		resp_sz += iov_array[i].iov_len;
-	resp.length = resp_sz;
+	resp->length = resp_sz;
 
 	assert(iovcnt <= iovmax);
 	__gpuClientWriteBack(gclient, iov_array, iovcnt);
@@ -4459,6 +4637,13 @@ __setupGpuKernelFunctionsAndParams(gpuContext *gcontext)
 		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
 			 func_name, cuStrError(rc));
 	gcontext->cufn_prep_gistindex = cuda_function;
+	/* ------ gpujoin_merge_outer_join_map ------ */
+	func_name = "gpujoin_merge_outer_join_map";
+	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
+			 func_name, cuStrError(rc));
+	gcontext->cufn_merge_outer_join_map = cuda_function;
 	/* ------ kern_buffer_partitioning ------ */
 	func_name = "kern_buffer_partitioning";
 	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
