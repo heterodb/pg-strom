@@ -4004,23 +4004,29 @@ gpuservGpuCacheManager(void *__arg)
  */
 static bool
 __execMergeRightOuterJoinMap(gpuClient *gclient,
-                            gpuContext *dst_gcontext,
-                            kern_multirels *d_kmrels,
-                            int depth,
-                            int src_dindex)
+							 gpuContext *dst_gcontext,
+							 gpuContext *src_gcontext,
+							 kern_multirels *d_kmrels,
+							 int depth)
 {
+	gpuContext *old_gcontext = NULL;
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(d_kmrels, depth);
-	uint32_t	nitems_in = (kds_in->nitems + sizeof(uint32_t) - 1) / sizeof(uint32_t);
+	uint32_t	nitems_in = (kds_in->nitems + sizeof(uint32_t)-1) / sizeof(uint32_t);
 	bool	   *src_ojmap;
 	bool	   *dst_ojmap;
 	int			grid_sz;
 	int			block_sz;
 	void	   *kern_args[4];
 	CUresult	rc;
+	bool		retval = false;
 
-	src_ojmap = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(d_kmrels, depth, src_dindex);
+	if (dst_gcontext != GpuWorkerCurrentContext)
+		old_gcontext = gpuContextSwitchTo(dst_gcontext);
+
 	dst_ojmap = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(d_kmrels, depth,
 												  dst_gcontext->cuda_dindex);
+	src_ojmap = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(d_kmrels, depth,
+												  src_gcontext->cuda_dindex);
 	Assert(dst_ojmap != NULL && src_ojmap != NULL);
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
@@ -4029,7 +4035,7 @@ __execMergeRightOuterJoinMap(gpuClient *gclient,
 	{
 		gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
 					  cuStrError(rc));
-		return false;
+		goto bailout;
 	}
 	grid_sz = Min(grid_sz, (nitems_in + block_sz - 1) / block_sz);
 
@@ -4047,9 +4053,13 @@ __execMergeRightOuterJoinMap(gpuClient *gclient,
 	{
 		gpuClientELog(gclient, "failed on cuLaunchKernel(grid_sz=%d, block_sz=%d): %s",
 					  grid_sz, block_sz, cuStrError(rc));
-		return false;
+		goto bailout;
 	}
-	return true;
+	retval = true;
+bailout:
+	if (old_gcontext)
+		gpuContextSwitchTo(old_gcontext);
+	return retval;
 }
 
 static bool
@@ -4061,17 +4071,19 @@ gpuservHandleRightOuterJoin(gpuClient *gclient,
 	kern_multirels	   *d_kmrels = (kern_multirels *)gq_buf->m_kmrels;
 	kern_data_store	   *kds_dst = GQBUF_KDS_FINAL(gq_buf);
 	gpuMemChunk		   *d_chunk = NULL;
-	size_t				sz;
 	bool				retval = false;
 
 	for (int depth=1; depth <= d_kmrels->num_rels; depth++)
 	{
+		kern_buffer_partitions *kbuf_parts;
+
 		if (!d_kmrels->chunks[depth-1].right_outer)
 			continue;
 
 		if (!kds_dst)
 		{
 			const kern_data_store *kds_head;
+			size_t		sz;
 
 			Assert(!GQBUF_KDS_FINAL(gq_buf));
 			kds_head = SESSION_KDS_DST_HEAD(gclient->h_session);
@@ -4088,20 +4100,23 @@ gpuservHandleRightOuterJoin(gpuClient *gclient,
 			kds_dst->length = sz;
 		}
 
-		if (!d_kmrels->chunks[depth-1].pinned_buffer)
+		kbuf_parts = d_kmrels->chunks[depth-1].kbuf_parts;
+		if (!kbuf_parts)
 		{
 			/*
-			 * merge the outer-join map to the currend device.
+			 * merge the outer-join-map to the currend device.
 			 */
 			for (int dindex=0; dindex < numGpuDevAttrs; dindex++)
 			{
+				gpuContext *gcontext_src = &gpuserv_gpucontext_array[dindex];
+
 				if (dindex == gcontext->cuda_dindex)
 					continue;
 				if (!__execMergeRightOuterJoinMap(gclient,
 												  gcontext,
+												  gcontext_src,
 												  d_kmrels,
-												  depth,
-												  dindex))
+												  depth))
 					goto bailout;
 			}
 			/*
@@ -4120,14 +4135,84 @@ gpuservHandleRightOuterJoin(gpuClient *gclient,
 												  kern_stats))
 				goto bailout;
 		}
+		else if (kbuf_parts->hash_divisor <= numGpuDevAttrs)
+		{
+			uint32_t	hash_divisor = kbuf_parts->hash_divisor;
+			gpuContext **gcontext_parts;
+
+			gcontext_parts = alloca(sizeof(gpuContext *) * hash_divisor);
+			memset(gcontext_parts, 0, sizeof(gpuContext *) * hash_divisor);
+			/*
+			 * merge the outer-join-map to the device that is responsible
+			 * to the partition. (If exact 1-partition 1-GPU mapping, it
+			 * does not run outer-join-map merging.
+			 */
+			for (int dindex=0; dindex < numGpuDevAttrs; dindex++)
+			{
+				gpuContext *gcontext_curr = &gpuserv_gpucontext_array[dindex];
+				gpumask_t	cuda_dmask = (1UL<<dindex);
+				bool		ojmap_merged = false;
+
+				for (int k=0; k < hash_divisor; k++)
+				{
+					if ((kbuf_parts->parts[k].available_gpus & cuda_dmask) != 0)
+					{
+						if (gcontext_parts[k])
+						{
+							if (!__execMergeRightOuterJoinMap(gclient,
+															  gcontext_parts[k],
+															  gcontext_curr,
+															  d_kmrels,
+															  depth))
+								goto bailout;
+						}
+						else
+						{
+							gcontext_parts[k] = gcontext_curr;
+						}
+						ojmap_merged = true;
+					}
+				}
+				if (!ojmap_merged)
+				{
+					gpuClientELog(gclient, "Unable to merge OUTER-JOIN-MAP at GPU-%d",
+								  dindex);
+					goto bailout;
+				}
+			}
+			/*
+			 * Runs the right-outer-join for each pinned-inner-buffer
+			 * partitions on the responsible device.
+			 */
+			for (int k=0; k < hash_divisor; k++)
+			{
+				if (!__gpuservLaunchGpuTaskExecKernel(gcontext_parts[k],
+													  gclient,
+													  0UL,
+													  0UL,
+													  gq_buf->m_kmrels,
+													  kds_dst,
+													  hash_divisor,
+													  k,
+													  depth,
+													  kern_stats))
+					goto bailout;
+			}
+		}
 		else
 		{
-			//merge ojmap for each partition leaf
-			//in case when n_parts < n_gpus
-			//runs outer join for each partition
-			gpuClientELog(gclient, "RIGHT OUTER  Pinned Inner is not implemented yet");
+			/*
+			 * MEMO: If number of pinned inner buffer partitions are
+			 * larger than the number of GPU devices, we have to send
+			 * a special request to run RIGHT-OUTER-JOIN on the partition
+			 * at the end of OUTER-SCAN, prior to switch the repeat_id.
+			 * On the other hands, we have no reliable way to run the
+			 * special request command on the timing.
+			 * It is a future To-Do item.
+			 */
+			gpuClientELog(gclient, "RIGHT/FULL OUTER JOIN performing on the pinned inner buffer partitioned to multiple chunks more than the number of GPU devices are not implemented right now.");
 			goto bailout;
-		}
+        }
 	}
 
 	/*
