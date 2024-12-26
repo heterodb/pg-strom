@@ -19,6 +19,9 @@ static CustomExecMethods	gpupreagg_exec_methods;
 static CustomPathMethods	dpupreagg_path_methods;
 static CustomScanMethods	dpupreagg_plan_methods;
 static CustomExecMethods	dpupreagg_exec_methods;
+static CustomPathMethods	gpuagg_path_methods;
+static CustomScanMethods	gpuagg_plan_methods;
+static CustomExecMethods	gpuagg_exec_methods;
 static bool					pgstrom_enable_dpupreagg = false;
 static bool					pgstrom_enable_partitionwise_dpupreagg = false;
 static bool					pgstrom_enable_gpupreagg = false;
@@ -83,8 +86,9 @@ typedef struct
 	 * c: pg_catalog ... the system default
 	 * s: pgstrom    ... PG-Strom's special ones
 	 */
-	const char *finalfn_signature;
-	const char *partfn_signature;
+	const char *finalfn_agg_signature;		/* used by Agg(CPU) */
+	const char *partfn_signature;			/* used by GpuPreAgg */
+	const char *finalfn_proj_signature;		/* used by GpuAgg */
 	int			partfn_action;	/* any of KAGG_ACTION__* */
 	bool		numeric_aware;	/* ignored, if !enable_numeric_aggfuncs */
 } aggfunc_catalog_t;
@@ -94,12 +98,14 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"count()",
 	 "s:fcount(int8)",
 	 "s:nrows()",
+	 NULL,		/* use nrows() as is */
 	 KAGG_ACTION__NROWS_ANY, false
 	},
 	/* COUNT(X) = SUM(NROWS(X)) */
 	{"count(any)",
 	 "s:fcount(int8)",
 	 "s:nrows(any)",
+	 NULL,		/* use nrows() as is */
 	 KAGG_ACTION__NROWS_COND, false
 	},
 	/*
@@ -108,66 +114,80 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"min(int1)",
 	 "s:min_i1(bytea)",
 	 "s:pmin(int4)",
+	 "s:fmin_i1(bytea)",
 	 KAGG_ACTION__PMIN_INT32, false
 	},
 	{"min(int2)",
 	 "s:min_i2(bytea)",
 	 "s:pmin(int4)",
+	 "s:fmin_i2(bytea)",
 	 KAGG_ACTION__PMIN_INT32, false
 	},
 	{"min(int4)",
 	 "s:min_i4(bytea)",
 	 "s:pmin(int4)",
+	 "s:fmin_i4(bytea)",
 	 KAGG_ACTION__PMIN_INT32, false
 	},
 	{"min(int8)",
 	 "s:min_i8(bytea)",
 	 "s:pmin(int8)",
+	 "s:fmin_i8(bytea)",
 	 KAGG_ACTION__PMIN_INT64, false
 	},
 	{"min(float2)",
 	 "s:min_f2(bytea)",
 	 "s:pmin(float8)",
+	 "s:fmin_f2(bytea)",
 	 KAGG_ACTION__PMIN_FP64, false
 	},
 	{"min(float4)",
 	 "s:min_f4(bytea)",
 	 "s:pmin(float8)",
+	 "s:fmin_f4(bytea)",
+
 	 KAGG_ACTION__PMIN_FP64, false
 	},
 	{"min(float8)",
 	 "s:min_f8(bytea)",
 	 "s:pmin(float8)",
+	 "s:fmin_f8(bytea)",
 	 KAGG_ACTION__PMIN_FP64, false
 	},
 	{"min(numeric)",
 	 "s:min_num(bytea)",
 	 "s:pmin(float8)",
+	 "s:fmin_num(bytea)",
 	 KAGG_ACTION__PMIN_FP64, true
 	},
 	{"min(money)",
 	 "s:min_cash(bytea)",
 	 "s:pmin(money)",
+	 "s:fmin_cash(bytea)",
 	 KAGG_ACTION__PMIN_INT64, false
 	},
 	{"min(date)",
 	 "s:min_date(bytea)",
 	 "s:pmin(date)",
+	 "s:fmin_date(bytea)",
 	 KAGG_ACTION__PMIN_INT32, false
 	},
 	{"min(time)",
 	 "s:min_time(bytea)",
 	 "s:pmin(time)",
+	 "s:fmin_time(bytea)",
 	 KAGG_ACTION__PMIN_INT64, false
 	},
 	{"min(timestamp)",
 	 "s:min_ts(bytea)",
 	 "s:pmin(timestamp)",
+	 "s:fmin_ts(bytea)",
 	 KAGG_ACTION__PMIN_INT64, false
 	},
 	{"min(timestamptz)",
 	 "s:min_tstz(bytea)",
 	 "s:pmin(timestamptz)",
+	 "s:fmin_tstz(bytea)",
 	 KAGG_ACTION__PMIN_INT64, false
 	},
 	/*
@@ -176,66 +196,79 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"max(int1)",
 	 "s:max_i1(bytea)",
 	 "s:pmax(int4)",
+	 "s:fmax_i1(bytea)",
 	 KAGG_ACTION__PMAX_INT32, false
 	},
 	{"max(int2)",
 	 "s:max_i2(bytea)",
 	 "s:pmax(int4)",
+	 "s:fmax_i2(bytea)",
 	 KAGG_ACTION__PMAX_INT32, false
 	},
 	{"max(int4)",
 	 "s:max_i4(bytea)",
 	 "s:pmax(int4)",
+	 "s:fmax_i4(bytea)",
 	 KAGG_ACTION__PMAX_INT32, false
 	},
 	{"max(int8)",
 	 "s:max_i8(bytea)",
 	 "s:pmax(int8)",
+	 "s:fmax_i8(bytea)",
 	 KAGG_ACTION__PMAX_INT64, false
 	},
 	{"max(float2)",
 	 "s:max_f2(bytea)",
 	 "s:pmax(float8)",
+	 "s:fmax_f2(bytea)",
 	 KAGG_ACTION__PMAX_FP64, false
 	},
 	{"max(float4)",
 	 "s:max_f4(bytea)",
 	 "s:pmax(float8)",
+	 "s:fmax_f4(bytea)",
 	 KAGG_ACTION__PMAX_FP64, false
 	},
 	{"max(float8)",
 	 "s:max_f8(bytea)",
 	 "s:pmax(float8)",
+	 "s:fmax_f84(bytea)",
 	 KAGG_ACTION__PMAX_FP64, false
 	},
 	{"max(numeric)",
 	 "s:max_num(bytea)",
 	 "s:pmax(float8)",
+	 "s:fmax_num(bytea)",
 	 KAGG_ACTION__PMAX_FP64, true
 	},
 	{"max(money)",
 	 "s:max_cash(bytea)",
 	 "s:pmax(money)",
+	 "s:fmax_cash(bytea)",
 	 KAGG_ACTION__PMAX_INT64, false
 	},
 	{"max(date)",
 	 "s:max_date(bytea)",
 	 "s:pmax(date)",
+	 "s:fmax_date(bytea)",
 	 KAGG_ACTION__PMAX_INT32, false
 	},
 	{"max(time)",
 	 "s:max_time(bytea)",
 	 "s:pmax(time)",
+	 "s:fmax_time(bytea)",
 	 KAGG_ACTION__PMAX_INT64, false
 	},
 	{"max(timestamp)",
 	 "s:max_ts(bytea)",
 	 "s:pmax(timestamp)",
+	 "s:fmax_ts(timestamp)",
 	 KAGG_ACTION__PMAX_INT64, false
 	},
 	{"max(timestamptz)",
 	 "s:max_tstz(bytea)",
 	 "s:pmax(timestamptz)",
+	 "s:fmax_tstz(timestamp)",
 	 KAGG_ACTION__PMAX_INT64, false
 	},
 	/*
@@ -244,46 +277,55 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"sum(int1)",
 	 "s:sum_int(bytea)",
 	 "s:psum(int8)",
+	 "s:fsum_int(bytea)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(int2)",
 	 "s:sum_int(bytea)",
 	 "s:psum(int8)",
+	 "s:fsum_int(bytea)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(int4)",
 	 "s:sum_int(bytea)",
 	 "s:psum(int8)",
+	 "s:fsum_int(bytea)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	{"sum(int8)",
 	 "s:sum_int64(bytea)",
 	 "s:psum64(int8)",
+	 "s:fsum_int64(bytea)",
 	 KAGG_ACTION__PSUM_INT64,  false
 	},
 	{"sum(float2)",
 	 "s:sum_fp64(bytea)",
 	 "s:psum(float8)",
+	 "s:fsum_fp64(bytea)",
 	 KAGG_ACTION__PSUM_FP, false
 	},
 	{"sum(float4)",
 	 "s:sum_fp32(bytea)",
 	 "s:psum(float8)",
+	 "s:fsum_fp32(bytea)",
 	 KAGG_ACTION__PSUM_FP, false
 	},
 	{"sum(float8)",
 	 "s:sum_fp64(bytea)",
 	 "s:psum(float8)",
+	 "s:fsum_fp64(bytea)",
 	 KAGG_ACTION__PSUM_FP, false
 	},
 	{"sum(numeric)",
 	 "s:sum_numeric(bytea)",
 	 "s:psum(numeric)",
+	 "s:fsum_numeric(bytea)",
 	 KAGG_ACTION__PSUM_NUMERIC, true
 	},
 	{"sum(money)",
 	 "s:sum_cash(bytea)",
 	 "s:psum(money)",
+	 "s:fsum_cach(bytea)",
 	 KAGG_ACTION__PSUM_INT,  false
 	},
 	/*
@@ -292,41 +334,49 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"avg(int1)",
 	 "s:avg_int(bytea)",
 	 "s:pavg(int8)",
+	 "s:favg_int(bytea)",
 	 KAGG_ACTION__PAVG_INT, false
 	},
 	{"avg(int2)",
 	 "s:avg_int(bytea)",
 	 "s:pavg(int8)",
+	 "s:favg_int(bytea)",
 	 KAGG_ACTION__PAVG_INT, false
 	},
 	{"avg(int4)",
 	 "s:avg_int(bytea)",
 	 "s:pavg(int8)",
+	 "s:favg_int(bytea)",
 	 KAGG_ACTION__PAVG_INT, false
 	},
 	{"avg(int8)",
 	 "s:avg_int64(bytea)",
 	 "s:pavg64(int8)",
+	 "s:favg_int64(bytea)",
 	 KAGG_ACTION__PAVG_INT64, false
 	},
 	{"avg(float2)",
 	 "s:avg_fp(bytea)",
 	 "s:pavg(float8)",
+	 "s:favg_fp(bytea)",
 	 KAGG_ACTION__PAVG_FP, false
 	},
 	{"avg(float4)",
 	 "s:avg_fp(bytea)",
 	 "s:pavg(float8)",
+	 "s:favg_fp(bytea)",
 	 KAGG_ACTION__PAVG_FP, false
 	},
 	{"avg(float8)",
 	 "s:avg_fp(bytea)",
 	 "s:pavg(float8)",
+	 "s:favg_fp(bytea)",
 	 KAGG_ACTION__PAVG_FP, false
 	},
 	{"avg(numeric)",
 	 "s:avg_numeric(bytea)",
 	 "s:pavg(numeric)",
+	 "s:favg_numeric(bytea)",
 	 KAGG_ACTION__PAVG_NUMERIC, true
 	},
 	/*
@@ -335,41 +385,49 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"stddev(int1)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev(int2)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev(int4)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev(int8)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev(float2)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_sampf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev(float4)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_sampf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev(float8)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_sampf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev(numeric)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_samp(bytea)",
 	 KAGG_ACTION__STDDEV, true
 	},
 	/*
@@ -378,41 +436,49 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"stddev_samp(int1)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_samp(int2)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_samp(int4)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_samp(int8)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_samp(float2)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_sampf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_samp(float4)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_sampf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_samp(float8)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_sampf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_samp(numeric)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_samp(bytea)",
 	 KAGG_ACTION__STDDEV, true
 	},
 	/*
@@ -421,41 +487,49 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"stddev_pop(int1)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_pop(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_pop(int2)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_pop(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_pop(int4)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_pop(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_pop(int8)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_pop(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_pop(float2)",
 	 "s:stddev_popf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_popf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_pop(float4)",
 	 "s:stddev_popf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_popf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_pop(float8)",
 	 "s:stddev_popf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_popf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"stddev_pop(numeric)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fstddev_pop(bytea)",
 	 KAGG_ACTION__STDDEV, true
 	},
 	/*
@@ -464,41 +538,49 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"variance(int1)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"variance(int2)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"variance(int4)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"variance(int8)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"variance(float2)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_sampf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"variance(float4)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_sampf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"variance(float8)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_sampf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"variance(numeric)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_samp(bytea)",
 	 KAGG_ACTION__STDDEV, true
 	},
 	/*
@@ -507,41 +589,49 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"var_samp(int1)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_samp(int2)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_samp(int4)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_samp(int8)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_samp(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_samp(float2)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_sampf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_samp(float4)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_sampf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_samp(float8)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_sampf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_samp(numeric)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_samp(bytea)",
 	 KAGG_ACTION__STDDEV, true
 	},
 	/*
@@ -550,40 +640,48 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"var_pop(int1)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_pop(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_pop(int2)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_pop(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_pop(int4)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_pop(bytea)",
 	 KAGG_ACTION__STDDEV, false},
 	{"var_pop(int8)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_pop(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_pop(float2)",
 	 "s:var_popf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_popf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_pop(float4)",
 	 "s:var_popf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_popf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_pop(float8)",
 	 "s:var_popf(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_popf(bytea)",
 	 KAGG_ACTION__STDDEV, false
 	},
 	{"var_pop(numeric)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
+	 "s:fvar_pop(bytea)",
 	 KAGG_ACTION__STDDEV, true
 	},
 	/*
@@ -595,16 +693,19 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"corr(float8,float8)",
 	 "s:corr(bytea)",
 	 "s:pcovar(float8,float8)",
+	 "s:fcorr(bytea)",
 	 KAGG_ACTION__COVAR, false
 	},
 	{"covar_samp(float8,float8)",
 	 "s:covar_samp(bytea)",
 	 "s:pcovar(float8,float8)",
+	 "s:fcovar_samp(bytea)",
 	 KAGG_ACTION__COVAR, false
 	},
 	{"covar_pop(float8,float8)",
 	 "s:covar_pop(bytea)",
 	 "s:pcovar(float8,float8)",
+	 "s:fcovar_pop(bytea)",
 	 KAGG_ACTION__COVAR, false
 	},
 	/*
@@ -616,49 +717,58 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"regr_avgx(float8,float8)",
 	 "s:regr_avgx(bytea)",
 	 "s:pcovar(float8,float8)",
+	 "s:fregr_avgx(bytea)",
 	 KAGG_ACTION__COVAR, false
 	},
 	{"regr_avgy(float8,float8)",
 	 "s:regr_avgy(bytea)",
 	 "s:pcovar(float8,float8)",
+	 "s:fregr_avgy(bytea)",
 	 KAGG_ACTION__COVAR, false
 	},
 	{"regr_count(float8,float8)",
 	 "s:regr_count(bytea)",
 	 "s:pcovar(float8,float8)",
+	 "s:fregr_count(bytea)",
 	 KAGG_ACTION__COVAR, false
 	},
 	{"regr_intercept(float8,float8)",
 	 "s:regr_intercept(bytea)",
 	 "s:pcovar(float8,float8)",
+	 "s:fregr_intercept(bytea)",
 	 KAGG_ACTION__COVAR, false
 	},
 	{"regr_r2(float8,float8)",
 	 "s:regr_r2(bytea)",
 	 "s:pcovar(float8,float8)",
+	 "s:fregr_r2(bytea)",
 	 KAGG_ACTION__COVAR, false
 	},
 	{"regr_slope(float8,float8)",
 	 "s:regr_slope(bytea)",
 	 "s:pcovar(float8,float8)",
+	 "s:fregr_slope(bytea)",
 	 KAGG_ACTION__COVAR, false
 	},
 	{"regr_sxx(float8,float8)",
 	 "s:regr_sxx(bytea)",
 	 "s:pcovar(float8,float8)",
+	 "s:fregr_sxx(bytea)",
 	 KAGG_ACTION__COVAR, false
 	},
 	{"regr_sxy(float8,float8)",
 	 "s:regr_sxy(bytea)",
 	 "s:pcovar(float8,float8)",
+	 "s:fregr_sxy(bytea)",
 	 KAGG_ACTION__COVAR, false
 	},
 	{"regr_syy(float8,float8)",
 	 "s:regr_syy(bytea)",
 	 "s:pcovar(float8,float8)",
+	 "s:fregr_syy(bytea)",
 	 KAGG_ACTION__COVAR, false
 	},
-	{ NULL, NULL, NULL, -1, false },
+	{ NULL, NULL, NULL, NULL, -1, false },
 };
 
 /*
@@ -667,7 +777,8 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 typedef struct
 {
 	Oid		aggfn_oid;
-	Oid		final_func_oid;
+	Oid		final_agg_func_oid;
+	Oid		final_proj_func_oid;
 	Oid		partial_func_oid;
 	Oid		partial_func_rettype;
 	int		partial_func_nargs;
@@ -838,16 +949,24 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 }
 
 static void
-__aggfunc_resolve_final_func(aggfunc_catalog_entry *entry,
-							 const char *finalfn_signature,
-							 Oid agg_rettype)
+__setup_aggfunc_catalog_entry(aggfunc_catalog_entry *entry,
+							  const aggfunc_catalog_t *cat,
+							  Form_pg_proc agg_proc)
 {
-	Oid			func_oid = __aggfunc_resolve_func_signature(finalfn_signature);
+	Oid			func_oid;
 	HeapTuple	htup;
 	Form_pg_proc proc;
 
+	/* partial agg function */
+	__aggfunc_resolve_partial_func(entry,
+								   cat->partfn_signature,
+								   cat->partfn_action);
+
+	/* final agg function (used by Agg node) */
+	Assert(cat->finalfn_agg_signature != NULL);
+	func_oid = __aggfunc_resolve_func_signature(cat->finalfn_agg_signature);
 	if (!SearchSysCacheExists1(AGGFNOID, ObjectIdGetDatum(func_oid)) ||
-		get_func_rettype(func_oid) != agg_rettype)
+		get_func_rettype(func_oid) != agg_proc->prorettype)
 		elog(ERROR, "Catalog corruption? final function mismatch: %s",
 			 format_procedure(func_oid));
 	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
@@ -860,8 +979,16 @@ __aggfunc_resolve_final_func(aggfunc_catalog_entry *entry,
 		elog(ERROR, "Catalog corruption? final function mismatch: %s",
 			 format_procedure(func_oid));
 	ReleaseSysCache(htup);
+	entry->final_agg_func_oid = func_oid;
 
-	entry->final_func_oid = func_oid;
+	/* final cscan function (usec by GpuAgg node) */
+	if (cat->finalfn_proj_signature != NULL)
+		func_oid = __aggfunc_resolve_func_signature(cat->finalfn_proj_signature);
+	else
+		func_oid = InvalidOid;
+	entry->final_proj_func_oid = func_oid;
+	entry->numeric_aware = cat->numeric_aware;
+	entry->is_valid_entry = true;
 }
 
 static const aggfunc_catalog_entry *
@@ -924,14 +1051,7 @@ aggfunc_catalog_lookup_by_oid(Oid aggfn_oid)
 
 					if (strcmp(buf, cat->aggfn_signature) == 0)
 					{
-						__aggfunc_resolve_partial_func(entry,
-													   cat->partfn_signature,
-													   cat->partfn_action);
-						__aggfunc_resolve_final_func(entry,
-													 cat->finalfn_signature,
-													 proc->prorettype);
-						entry->numeric_aware = cat->numeric_aware;
-						entry->is_valid_entry = true;
+						__setup_aggfunc_catalog_entry(entry, cat, proc);
 						break;
 					}
 				}
@@ -1137,7 +1257,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 	/*
 	 * Build final-aggregate function
 	 */
-	func_oid = aggfn_cat->final_func_oid;
+	func_oid = aggfn_cat->final_agg_func_oid;
 	htup = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(func_oid));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for pg_aggregate %u", func_oid);
@@ -1961,7 +2081,7 @@ __pgstrom_init_xpupreagg_common(void)
 void
 pgstrom_init_gpu_preagg(void)
 {
-	/* turn on/off gpu_groupby */
+	/* turn on/off GpuPreAgg */
 	DefineCustomBoolVariable("pg_strom.enable_gpupreagg",
 							 "Enables the use of GPU-PreAgg",
 							 NULL,
@@ -1994,11 +2114,20 @@ pgstrom_init_gpu_preagg(void)
 	gpupreagg_path_methods.CustomName          = "GpuPreAgg";
 	gpupreagg_path_methods.PlanCustomPath      = PlanGpuPreAggPath;
 
+	memcpy(&gpuagg_path_methods,
+		   &gpupreagg_path_methods, sizeof(CustomPathMethods));
+	gpupreagg_path_methods.CustomName = "GpuAgg";
+
 	/* initialization of plan method table */
 	memset(&gpupreagg_plan_methods, 0, sizeof(CustomScanMethods));
 	gpupreagg_plan_methods.CustomName          = "GpuPreAgg";
 	gpupreagg_plan_methods.CreateCustomScanState = CreateGpuPreAggScanState;
 	RegisterCustomScanMethods(&gpupreagg_plan_methods);
+
+	memcpy(&gpuagg_plan_methods,
+		   &gpupreagg_plan_methods, sizeof(CustomScanMethods));
+	gpuagg_plan_methods.CustomName = "GpuAgg";
+	RegisterCustomScanMethods(&gpuagg_plan_methods);
 
 	/* initialization of exec method table */
 	memset(&gpupreagg_exec_methods, 0, sizeof(CustomExecMethods));
@@ -2012,6 +2141,11 @@ pgstrom_init_gpu_preagg(void)
 	gpupreagg_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	gpupreagg_exec_methods.ShutdownCustomScan  = pgstromSharedStateShutdownDSM;
 	gpupreagg_exec_methods.ExplainCustomScan   = pgstromExplainTaskState;
+
+	memcpy(&gpuagg_exec_methods,
+		   &gpupreagg_exec_methods, sizeof(CustomExecMethods));
+	gpuagg_exec_methods.CustomName = "GpuAgg";
+
 	/* common portion */
 	__pgstrom_init_xpupreagg_common();
 }
