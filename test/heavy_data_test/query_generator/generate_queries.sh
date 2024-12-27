@@ -11,16 +11,14 @@ function convert_query(){
 
 function run_all(){
     script_dir_path="$(cd $(dirname $0); pwd)"
-    queries_dir_path="${script_dir_path}/queries"
+    patterns_path="${script_dir_path}/query_patterns"
     conditions_dir_path="${script_dir_path}/conditions"
-    result_log_path="${script_dir_path}/results"
-    mkdir -p ${result_log_path}
+    query_path="${script_dir_path}/.."
 
-    find ${queries_dir_path} -type f -name "*.sql" | sort -n | while read file; do
+    find ${patterns_path} -type f -name "*.sql" | sort -n | while read file; do
         find ${conditions_dir_path} -type f -name "*.sh" | sort -n | while read condition; do
             condition_label=$(basename ${condition} .sh)
             file_label=$(basename ${file} .sql)
-            echo "processing ${condition_label} - ${file_label}"
             source ${condition}
             {
                 echo "SET search_path=tpch;"
@@ -30,7 +28,7 @@ function run_all(){
                 # change table name
                 sed "s/{{{ORDERS_TABLE_NAME}}}/${ORDERS_TABLE_NAME}/" $file
                 echo "select * from result_store;"
-            } | psql $@ 2>&1 | tee "${result_log_path}/${condition_label}_${file_label}.log"
+            } > ${query_path}/${condition_label}_${file_label}.sql
         done
     done
 }
