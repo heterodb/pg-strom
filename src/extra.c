@@ -241,10 +241,10 @@ heterodbInitOptimalGpus(const char *manual_config)
 /*
  * heterodbGetOptimalGpus
  */
-static int64_t (*p_heterodb_get_optimal_gpus)(const char *path) = NULL;
-static int64_t (*p_heterodb_get_optimal_gpus_v2)(const char *path,
-												 const char *policy) = NULL;
-int64_t
+static gpumask_t  (*p_heterodb_get_optimal_gpus)(const char *path) = NULL;
+static gpumask_t  (*p_heterodb_get_optimal_gpus_v2)(const char *path,
+													const char *policy) = NULL;
+gpumask_t
 heterodbGetOptimalGpus(const char *path, const char *policy)
 {
 	if (p_heterodb_get_optimal_gpus_v2)
@@ -816,7 +816,7 @@ gpuDirectCleanUpOnThreadTerminate(void)
 /*
  * heterodb_extra_parse_signature
  */
-bool
+static bool
 heterodb_extra_parse_signature(const char *extra_module_info,
 							   uint32_t *p_api_version,
 							   bool *p_has_cufile,
@@ -922,6 +922,7 @@ heterodb_extra_init_module(const char *__extra_pathname)
 
 	/* lookup extra symbols */
 	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_module_init);
+	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_set_error);
 	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_get_error);
 	signature = heterodbExtraModuleInit();
 	if (!heterodb_extra_parse_signature(signature,

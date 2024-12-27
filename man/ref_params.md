@@ -69,12 +69,12 @@ This session introduces PG-Strom's configuration parameters.
 @ja{
 `pg_strom.enable_numeric_aggfuncs` [型: `bool` / 初期値: `on]`
 :   `numeric`データ型を引数に取る集約演算をGPUで処理するかどうかを制御する。
-:   GPUでの集約演算において`numeric`データ型は倍精度浮動小数点数にマッピングされるため、計算誤差にセンシティブな用途の場合は、この設定値を `off` にしてCPUで集約演算を実行し、計算誤差の発生を抑えることができます。
+:   GPUでの集約演算において`numeric`データ型は128bit固定小数点変数にマッピングされるため、極端に大きな数、あるいは高精度な数の集計を行う場合はエラーとなってしまいます。そのようなワークロードに対しては、この設定値を `off` にしてCPUで集約演算を実行するよう強制する事ができます。
 }
 @en{
 `pg_strom.enable_numeric_aggfuncs` [type: `bool` / default: `on]`
 :   Enables/disables support of aggregate function that takes `numeric` data type.
-:   Note that aggregated function at GPU mapps `numeric` data type to double precision floating point values. So, if you are sensitive to calculation errors, you can turn off this configuration to suppress the calculation errors by the operations on CPU.
+:   Note that aggregated function at GPU mapps `numeric` data type to 128bit fixed-point variable, so it raises an error if you run the aggregate functions with extremely large or highly-precise values. You can turn off this configuration to enforce the aggregate functions being operated by CPU.
 }
 
 @ja{

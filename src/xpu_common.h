@@ -16,6 +16,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
@@ -157,6 +158,12 @@
 #ifndef Abs
 #define Abs(x)				((x) >= 0 ? (x) : -(x))
 #endif
+#ifndef And
+#define And(a,b)			((a) & (b))
+#endif
+#ifndef Or
+#define Or(a,b)				((a) | (b))
+#endif
 #ifndef POSTGRES_H
 typedef uint64_t			Datum;
 typedef unsigned int		Oid;
@@ -190,6 +197,23 @@ typedef int64_t				gpumask_t;
 
 /* Definition of several primitive types */
 typedef __int128	int128_t;
+typedef struct
+{
+	uint64_t	u64_lo;
+	uint64_t	u64_hi;
+} int128_packed_t;
+
+INLINE_FUNCTION(int128_t)
+__fetch_int128_packed(const int128_packed_t *addr)
+{
+	return ((int128_t)addr->u64_hi << 64) | ((int128_t)addr->u64_lo);
+}
+INLINE_FUNCTION(void)
+__store_int128_packed(int128_packed_t *addr, int128_t ival)
+{
+	addr->u64_lo = (uint64_t)(ival & ULONG_MAX);
+	addr->u64_hi = (uint64_t)((ival >> 64) & ULONG_MAX);
+}
 #include "float2.h"
 
 #ifndef __FILE_NAME__
@@ -679,8 +703,13 @@ struct kern_colmeta {
 	 * @attoptions keeps extra information of Apache Arrow type. Unlike
 	 * PostgreSQL types, it can have variation of data accuracy in time
 	 * related data types, or precision in decimal data type.
+	 *
+	 * 'virtual_offset' is not zero if this is a virtual column.
+	 * if negative, it means NULL. Elsewhere, it points contents of the
+	 * virtual column in the format of PostgreSQL datum.
 	 */
 	ArrowTypeOptions attopts;
+	int64_t			virtual_offset;
 	uint64_t		nullmap_offset;
 	uint64_t		nullmap_length;
 	uint64_t		values_offset;
@@ -715,6 +744,8 @@ struct kern_data_store {
 	uint32_t		block_nloaded;	/* number of blocks already loaded by CPU */
 	/* only KDS_FORMAT_COLUMN */
 	uint32_t		column_nrooms;	/* = max_num_rows parameter */
+	/* only KDS_FORMAT_ARROW */
+	uint32_t		arrow_virtual_usage; /* usage of virtual column buffer */
 	/* column definition */
 	uint32_t		nr_colmeta;	/* number of colmeta[] array elements;
 								 * maybe, >= ncols, if any composite types */
@@ -2047,6 +2078,7 @@ typedef struct
 												 * no locale configuration */
 #define DEVKERN__SESSION_TIMEZONE	0x00000200U	/* Device function needs session
 												 * timezone */
+#define DEVFUNC__HAS_RECURSION		0x00000400U	/* Device function has recursive calls */
 #define DEVTYPE__HAS_COMPARE		0x00000800U	/* Device type has compare handler */
 #define DEVTASK__PINNED_HASH_RESULTS 0x00001000U/* Pinned results in HASH format */
 #define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
@@ -2179,44 +2211,66 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__PMAX_INT64		403		/* <int4>,<int8> - max value */
 #define KAGG_ACTION__PMAX_FP64		404		/* <int4>,<float8> - max value */
 #define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
+#define KAGG_ACTION__PSUM_INT64		502		/* <int8>,<int8+8> */
 #define KAGG_ACTION__PSUM_FP		503		/* <float8> - sum of values */
+#define KAGG_ACTION__PSUM_NUMERIC	504		/* <int4>,<int8+8> - sum of values */
 #define KAGG_ACTION__PAVG_INT		601		/* <int4>,<int8> - NROWS+PSUM */
-#define KAGG_ACTION__PAVG_FP		602		/* <int4>,<float8> - NROWS+PSUM */
+#define KAGG_ACTION__PAVG_INT64		602		/* <int8>,<int8+8> */
+#define KAGG_ACTION__PAVG_FP		603		/* <int4>,<float8> - NROWS+PSUM */
+#define KAGG_ACTION__PAVG_NUMERIC	604		/* <int4>,<int8+8> - NROWS+PSUM */
 #define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
 #define KAGG_ACTION__COVAR			801		/* <int4>,<float8>x5 - covariance */
+
+#define __PAGG_MINMAX_ATTRS__VALID	0x0001	/* value is not empty */
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;
 	int64_t		value;
 } kagg_state__pminmax_int64_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;
 	float8_t	value;
 } kagg_state__pminmax_fp64_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	int64_t		sum;
 } kagg_state__psum_int_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	float8_t	sum;
 } kagg_state__psum_fp_packed;
+
+#define __PAGG_NUMERIC_ATTRS__WEIGHT	0x00ffffU
+#define __PAGG_NUMERIC_ATTRS__NAN		0x010000U	/* NaN */
+#define __PAGG_NUMERIC_ATTRS__PINF		0x020000U	/* +Inf */
+#define __PAGG_NUMERIC_ATTRS__NINF		0x040000U	/* -Inf */
+#define __PAGG_NUMERIC_ATTRS__MASK		0x070000U	/* Nan|+Inf|-Inf */
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	attrs;
+	uint64_t	nitems;
+	int128_packed_t sum;		/* int128 or uint64 x2 */
+} kagg_state__psum_numeric_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	float8_t	sum_x;
 	float8_t	sum_x2;
 } kagg_state__stddev_packed;
@@ -2224,7 +2278,8 @@ typedef struct
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	float8_t	sum_x;
 	float8_t	sum_xx;
 	float8_t	sum_y;
@@ -2235,6 +2290,7 @@ typedef struct
 typedef struct
 {
 	uint32_t	action;			/* any of KAGG_ACTION__* */
+	int32_t		typmod;			/* typmod of 1st arg - used for numeric */
 	int32_t		arg0_slot_id;
 	int32_t		arg1_slot_id;
 } kern_aggregate_desc;
@@ -2479,6 +2535,8 @@ typedef struct kern_session_info
 	uint32_t	session_encode;		/* offset to xpu_encode_info;
 									 * !! function pointer must be set by server */
 	int32_t		session_currency_frac_digits;	/* copy of lconv::frac_digits */
+	/* projection kds definition */
+	uint32_t	projection_kds_dst;		/* header portion of kds_dst */
 
 	/* join inner buffer */
 	uint32_t	pgsql_port_number;	/* = PostPortNumber */
@@ -2504,7 +2562,6 @@ typedef struct {
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
-	uint32_t	kds_dst_offset;		/* offset to kds_dst */
 	int32_t		scan_repeat_id;		/* current repeat count */
 	char		data[1]				__MAXALIGNED__;
 } kern_exec_task;
@@ -2514,6 +2571,7 @@ typedef struct {
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
 	uint32_t	ojmap_offset;		/* offset of outer-join-map */
 	uint32_t	ojmap_length;		/* length of outer-join-map */
+	bool		right_outer_join;	/* true, if CPU should exex RIGHT-OUTER-JOIN */
 	bool		final_plan_task;	/* true, if it is final response */
 	uint32_t	final_nitems;		/* final buffer's nitems, if any */
 	uint64_t	final_usage;		/* final buffer's usage, if any */
@@ -2526,6 +2584,7 @@ typedef struct {
 	uint32_t	nitems_out;		/* # of result rows in final depth before host quals */
 	uint32_t	num_rels;
 	struct {
+		uint32_t	nitems_roj;	/* # of generated rows by RIGHT-OUTER-JOIN (if any) */
 		uint32_t	nitems_gist;/* # of results rows by GiST index (if any) */
 		uint32_t	nitems_out;	/* # of results rows by JOIN in this depth */
 	} stats[1];
@@ -2571,6 +2630,24 @@ typedef struct
 /*
  * kern_session_info utility functions.
  */
+INLINE_FUNCTION(const kern_data_store *)
+SESSION_KDS_DST_HEAD(const kern_session_info *session)
+{
+	const kern_data_store *kds_dst_head = NULL;
+
+	if (session->projection_kds_dst > 0)
+		kds_dst_head = (const kern_data_store *)
+			((char *)session + session->projection_kds_dst);
+
+	return kds_dst_head;
+}
+
+INLINE_FUNCTION(bool)
+SESSION_SUPPORTS_CPU_FALLBACK(const kern_session_info *session)
+{
+	return (session->fallback_kds_head != 0);
+}
+
 INLINE_FUNCTION(kern_varslot_desc *)
 SESSION_KVARS_SLOT_DESC(const kern_session_info *session)
 {
@@ -3542,8 +3619,6 @@ __preagg_fetch_xdatum_as_float64(float8_t *p_fval, const xpu_datum_t *xdatum)
  *
  * ----------------------------------------------------------------
  */
-#include <stdio.h>
-
 INLINE_FUNCTION(void)
 print_kern_data_store(const kern_data_store *kds)
 {

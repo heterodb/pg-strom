@@ -787,10 +787,12 @@ dpuservLoadKdsArrow(dpuClient *dclient,
 					const strom_io_vector *kds_iovec,
 					char **p_base_addr)
 {
+	size_t		preload_sz = (KDS_HEAD_LENGTH(kds_head) +
+							  kds_head->arrow_virtual_usage);
 	Assert(kds_head->format == KDS_FORMAT_ARROW);
 	return __dpuservLoadKdsCommon(dclient,
 								  kds_head,
-								  KDS_HEAD_LENGTH(kds_head),
+								  preload_sz,
 								  pathname,
 								  kds_iovec,
 								  p_base_addr);

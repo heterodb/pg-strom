@@ -71,7 +71,7 @@ SELECT count(*)
                                                                    QUERY PLAN                                                                    
 -------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
          GPU Projection: pgstrom.nrows()
          GPU Scan Quals: ((date_num >= '04-14-2019'::date) AND (date_num <= '05-23-2023'::date)) [plan: 1000000 -> 5000, exec: 621378 -> 374353]
          referenced: date_num
@@ -285,7 +285,7 @@ SELECT count(*)
                                                                     QUERY PLAN                                                                    
 --------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
          GPU Projection: pgstrom.nrows()
          GPU Scan Quals: ((decimal_num >= '-5000'::numeric) AND (decimal_num <= '5000'::numeric)) [plan: 1000000 -> 5000, exec: 932067 -> 500583]
          referenced: decimal_num
@@ -339,7 +339,7 @@ SELECT count(*)
                                                                                    QUERY PLAN                                                                                    
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
          GPU Projection: pgstrom.nrows()
          GPU Scan Quals: ((time_num >= '09:00:00'::time without time zone) AND (time_num <= '17:00:00'::time without time zone)) [plan: 1000000 -> 5000, exec: 621378 -> 333443]
          referenced: time_num
@@ -393,7 +393,7 @@ SELECT count(*)
                                                                                                              QUERY PLAN                                                                                                              
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
-   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=2 loops=1)
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
          GPU Projection: pgstrom.nrows()
          GPU Scan Quals: ((timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone) AND (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)) [plan: 1000000 -> 5000, exec: 621378 -> 410884]
          referenced: timestamp_num

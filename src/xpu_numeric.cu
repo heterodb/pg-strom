@@ -12,26 +12,6 @@
 #include "xpu_common.h"
 #include <math.h>
 
-INLINE_FUNCTION(bool)
-xpu_numeric_validate(kern_context *kcxt, xpu_numeric_t *num)
-{
-	assert(num->expr_ops == &xpu_numeric_ops);
-	if (num->kind == XPU_NUMERIC_KIND__VARLENA)
-	{
-		const varlena  *vl_addr = num->u.vl_addr;
-		const char	   *errmsg;
-
-		errmsg = __xpu_numeric_from_varlena(num, vl_addr);
-		if (errmsg)
-		{
-			STROM_ELOG(kcxt, errmsg);
-			return false;
-		}
-		assert(num->kind != XPU_NUMERIC_KIND__VARLENA);
-	}
-	return true;
-}
-
 INLINE_FUNCTION(int)
 xpu_numeric_sign(xpu_numeric_t *num)
 {
@@ -87,11 +67,17 @@ xpu_numeric_datum_arrow_read(kern_context *kcxt,
 	addr = (const int128_t *)KDS_ARROW_REF_SIMPLE_DATUM(kds, cmeta,
 														kds_index,
 														sizeof(int128_t));
-	if (addr)
-		set_normalized_numeric(result, *addr,
-							   cmeta->attopts.decimal.scale);
-	else
+	if (!addr)
 		result->expr_ops = NULL;
+	else
+	{
+		result->expr_ops = &xpu_numeric_ops;
+		result->kind = XPU_NUMERIC_KIND__VALID;
+		result->weight = cmeta->attopts.decimal.scale;
+		result->u.value = *addr;
+		__xpu_numeric_normalize(&result->weight,
+								&result->u.value);
+	}
 	return true;
 }
 
@@ -245,6 +231,28 @@ xpu_numeric_datum_comp(kern_context *kcxt,
 	return true;
 }
 PGSTROM_SQLTYPE_OPERATORS(numeric, false, 4, -1);
+
+INLINE_FUNCTION(void)
+set_normalized_numeric(xpu_numeric_t *result, int128_t value, int16_t weight)
+{
+	__xpu_numeric_normalize(&weight, &value);
+	result->expr_ops = &xpu_numeric_ops;
+	result->kind     = XPU_NUMERIC_KIND__VALID;
+	result->weight   = weight;
+	result->u.value  = value;
+}
+
+PUBLIC_FUNCTION(const char *)
+xpu_numeric_from_varlena(xpu_numeric_t *result, const varlena *addr)
+{
+	const char *emsg = __xpu_numeric_from_varlena(&result->kind,
+												  &result->weight,
+												  &result->u.value,
+												  addr);
+	if (!emsg)
+		result->expr_ops = &xpu_numeric_ops;
+	return emsg;
+}
 
 PUBLIC_FUNCTION(bool)
 __xpu_numeric_to_int64(kern_context *kcxt,
@@ -424,7 +432,11 @@ PG_NUMERIC_TO_FLOAT_TEMPLATE(float8, __to_fp64)
 		else														\
 		{															\
 			result->expr_ops = &xpu_numeric_ops;					\
-			set_normalized_numeric(result, ival.value, 0);			\
+			result->kind = XPU_NUMERIC_KIND__VALID;					\
+			result->weight = 0;										\
+			result->u.value = ival.value;							\
+			__xpu_numeric_normalize(&result->weight,				\
+									&result->u.value);				\
 		}															\
 		return true;												\
 	}
@@ -448,8 +460,11 @@ pgfn_money_to_numeric(XPU_PGFUNCTION_ARGS)
 			fpoint = 2;
 
 		result->expr_ops = &xpu_numeric_ops;
-		set_normalized_numeric(result, ival.value, 0);
-		result->weight += fpoint;
+		result->kind = XPU_NUMERIC_KIND__VALID;
+		result->weight = fpoint;
+		result->u.value = ival.value;
+		__xpu_numeric_normalize(&result->weight,
+								&result->u.value);
 	}
 	return true;
 }

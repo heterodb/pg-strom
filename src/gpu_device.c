@@ -285,12 +285,29 @@ receiveGpuDevAttrs(int fdesc)
 		{
 			memcpy(&devNotValidated, &dtemp, sizeof(GpuDevAttributes));
 		}
+		else
+		{
+			elog(LOG, "GPU%d %s (%d SMs; %dMHz, L2 %dkB) WAS NOT VALIDATED",
+				 dtemp.DEV_ID,
+				 dtemp.DEV_NAME,
+				 dtemp.MULTIPROCESSOR_COUNT,
+				 dtemp.CLOCK_RATE / 1000,
+				 dtemp.L2_CACHE_SIZE >> 10);
+		}
 	}
 
 	if (devAttrs)
 	{
 		numGpuDevAttrs = nitems;
 		gpuDevAttrs = devAttrs;
+
+		if (num_not_validated > 0)
+			elog(LOG, "GPU%d %s (%d SMs; %dMHz, L2 %dkB) WAS NOT VALIDATED",
+				 devNotValidated.DEV_ID,
+				 devNotValidated.DEV_NAME,
+				 devNotValidated.MULTIPROCESSOR_COUNT,
+				 devNotValidated.CLOCK_RATE / 1000,
+				 devNotValidated.L2_CACHE_SIZE >> 10);
 	}
 	else if (num_not_validated > 0)
 	{
@@ -609,13 +626,16 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 gpumask_t
 GetOptimalGpuForRelation(Relation relation)
 {
-	Oid		tablespace_oid;
+	Oid			tablespace_oid;
+	gpumask_t	optimal_gpus;
 
 	/* only heap relation */
 	Assert(RelationGetForm(relation)->relam == HEAP_TABLE_AM_OID);
 	tablespace_oid = RelationGetForm(relation)->reltablespace;
 
-	return GetOptimalGpuForTablespace(tablespace_oid);
+	if ((optimal_gpus = GetOptimalGpuForTablespace(tablespace_oid)) == INVALID_GPUMASK)
+		return 0;
+	return optimal_gpus;
 }
 
 /*
@@ -641,7 +661,7 @@ GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 		return 0UL;		/* table is too small */
 
 	optimal_gpus = GetOptimalGpuForTablespace(baserel->reltablespace);
-	if (optimal_gpus != 0)
+	if (optimal_gpus != INVALID_GPUMASK)
 	{
 		RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
 		char	relpersistence = get_rel_persistence(rte->relid);

@@ -79,12 +79,20 @@
     <li class="toctree-l3"><a class="reference internal" href="#_3">外部テーブルの定義</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#_4">外部テーブルオプション</a>
+        <ul>
+    <li class="toctree-l4"><a class="reference internal" href="#_5">外部テーブルに対するオプション</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#_5">データ型の対応</a>
+    <li class="toctree-l4"><a class="reference internal" href="#_6">カラムに対するオプション</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#_7">データ型の対応</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#explain">EXPLAIN出力の読み方</a>
     </li>
         </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw">Arrow_Fdwの仮想列</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#arrow">Arrowファイルの作成方法</a>
         <ul>
@@ -94,11 +102,11 @@
     </li>
         </ul>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#_6">先進的な使い方</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_8">先進的な使い方</a>
         <ul>
     <li class="toctree-l3"><a class="reference internal" href="#ssdtogpusql">SSDtoGPUダイレクトSQL</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#_7">パーティション設定</a>
+    <li class="toctree-l3"><a class="reference internal" href="#_9">パーティション設定</a>
     </li>
         </ul>
     </li>
@@ -200,7 +208,8 @@
 OPTIONS (file '/path/to/logdata.arrow');
 </code></pre>
 <h3 id="_4">外部テーブルオプション</h3>
-<p>Arrow_Fdwは以下のオプションに対応しています。現状、全てのオプションは外部テーブルに対して指定するものです。</p>
+<p>Arrow_Fdwは以下のオプションに対応しています。</p>
+<h4 id="_5">外部テーブルに対するオプション</h4>
 <dl>
 <dt><code>file=PATHNAME</code></dt>
 <dd>外部テーブルにマップするArrowファイルを1個指定します。</dd>
@@ -212,10 +221,49 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dd><code>dir</code>オプションの指定時、例えば<code>.arrow</code>など、特定の接尾句を持つファイルだけをマップします。</dd>
 <dt><code>parallel_workers=N_WORKERS</code></dt>
 <dd>この外部テーブルの並列スキャンに使用する並列ワーカープロセスの数を指定します。一般的なテーブルにおける<code>parallel_workers</code>ストレージパラメータと同等の意味を持ちます。</dd>
-<dt><code>writable=(true|false)</code></dt>
-<dd>この外部テーブルに対する<code>INSERT</code>文の実行を許可します。詳細は『書き込み可能Arrow_Fdw』の節を参照してください。</dd>
+<dt><code>pattern=PATTERN</code></dt>
+<dd><code>file</code>、<code>files</code>、または<code>dir</code>オプションで指定されたファイルのうち、ワイルドカードを含む<code>PATTERN</code>にマッチしたものだけを外部テーブルにマップします。</dd>
+<dd>ワイルドカードには以下のものを利用することができます。</dd>
+<dd>
+<ul>
+<li><code>?</code> ... 任意の1文字にマッチする。</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>*</code> ... 任意の0文字以上の文字列にマッチする。</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>${KEY}</code> ... 任意の0文字以上の文字列にマッチする。</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>@{KEY}</code> ... 任意の0文字以上の数値列にマッチする。</li>
+</ul>
+</dd>
+<dd></dd>
+<dd>このオプションには面白い使い方があり、ワイルドカードの<code>${KEY}</code>や<code>@{KEY}</code>でマッチしたファイル名の一部分を、仮想列として参照することができます。詳しくは、'''Arrow_Fdwの仮想列'''を参照してください。</dd>
 </dl>
-<h3 id="_5">データ型の対応</h3>
+<h4 id="_6">カラムに対するオプション</h4>
+<dl>
+<dt><code>field=FIELD</code></dt>
+<dd>そのカラムにマップするArrowファイルのフィールド名を指定します。</dd>
+<dd>デフォルトでは、この外部テーブルの列名と同じフィールドのうち、最も最初に出現したフィールドをマップします。</dd>
+<dt><code>virtual=KEY</code></dt>
+<dd>そのカラムが仮想列である事を指定します。<code>KEY</code>はテーブルオプションの<code>pattern</code>オプションで指定されたパターン中のワイルドカードのキー名を指定します。</dd>
+<dd>仮想列はファイル名パターンのうち<code>KEY</code>にマッチした部分をクエリで参照することができます。</dd>
+<dt><code>virtual_metadata=KEY</code></dt>
+<dd>そのカラムが仮想列である事を指定します。<code>KEY</code>はArrowファイルのCustomMetadataフィールドに埋め込まれたKEY-VALUEペアを指定します。指定したKEY-VALUEペアが見つからない場合、このカラムはNULL値を返します。</dd>
+<dd>ArrowファイルのCustomMetadataには、スキーマ（PostgreSQLのテーブルに相当）に埋め込まれるものと、フィールド（PostgreSQLの列に相当）に埋め込まれるものの二種類があります。</dd>
+<dd>例えば、<code>lo_orderdate.max_values</code>のように、KEY値の前に<code>.</code>文字で区切られたフィールド名を記述する事で、フィールドに埋め込まれたCustomMetadataを参照する事が出来ます。フィールド名がない場合は、スキーマに埋め込まれたKEY-VALUEペアであるとして扱われます。</dd>
+<dt><code>virtual_metadata_split=KEY</code></dt>
+<dd>そのカラムが仮想列である事を指定します。<code>KEY</code>はArrowファイルのCustomMetadataフィールドに埋め込まれたKEY-VALUEペアを指定します。指定したKEY-VALUEペアが見つからない場合、このカラムはNULL値を返します。</dd>
+<dd><code>virtual_metadata</code>との違いは、CustomMetadataフィールドの値をデリミタ（<code>,</code>）で区切り、それを個々のRecord Batchに先頭から順に当てはめて行くことです。例えば、指定したCustomMetadataの値が<code>Tokyo,Osaka,Kyoto,Yokohama</code>であった場合、RecordBatch-0から読み出した行では<code>'Tokyo'</code>が、RecordBatch-1から読み出した行では<code>'Osaka'</code>が、RecordBatch-2から読み出した行では<code>'Osaka'</code>がこの仮想列の値として表示されます。</dd>
+</dl>
+<h3 id="_7">データ型の対応</h3>
 <p>Arrow形式のデータ型と、PostgreSQLのデータ型は以下のように対応しています。</p>
 <dl>
 <dt><code>Int</code></dt>
@@ -225,7 +273,9 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dt><code>FloatingPoint</code></dt>
 <dd><code>precision</code>属性の値に応じて、それぞれ<code>float2</code>、<code>float4</code>、<code>float8</code>のいずれかに対応。</dd>
 <dd><code>float2</code>はPG-Stromによる独自拡張</dd>
-<dt><code>Binary</code></dt>
+<dt><code>Utf8</code>, <code>LargeUtf8</code></dt>
+<dd><code>text</code>型に対応</dd>
+<dt><code>Binary</code>, <code>LargeBinary</code></dt>
 <dd><code>bytea</code>型に対応</dd>
 <dt><code>Decimal</code></dt>
 <dd><code>numeric</code>型に対応</dd>
@@ -237,14 +287,14 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dd><code>timestamp</code>型に対応。<code>unit=MicroSecond</code>相当になるように補正される。</dd>
 <dt><code>Interval</code></dt>
 <dd><code>interval</code>型に対応</dd>
-<dt><code>List</code></dt>
+<dt><code>List</code>, <code>LargeList</code></dt>
 <dd>要素型の1次元配列型として表現される。</dd>
 <dt><code>Struct</code></dt>
 <dd>複合型として表現される。対応する複合型は予め定義されていなければならない。</dd>
 <dt><code>FixedSizeBinary</code></dt>
 <dd><code>byteWidth</code>属性の値に応じて <code>char(n)</code> として表現される。</dd>
 <dd>メタデータ <code>pg_type=TYPENAME</code> が指定されている場合、該当するデータ型を割り当てる場合がある。現時点では、<code>inet</code>および<code>macaddr</code>型。</dd>
-<dt><code>Union</code>、<code>Map</code>、<code>Duration</code>、<code>LargeBinary</code>、<code>LargeUtf8</code>、<code>LargeList</code></dt>
+<dt><code>Union</code>、<code>Map</code>、<code>Duration</code></dt>
 <dd>現時点ではPostgreSQLデータ型への対応はなし。</dd>
 </dl>
 <h3 id="explain">EXPLAIN出力の読み方</h3>
@@ -316,6 +366,129 @@ OPTIONS (file '/path/to/logdata.arrow');
 (28 rows)
 </code></pre>
 <p>被参照列をロードする際に読み出すべき列データの大きさを、列ごとに表示しています。 <code>lo_orderdate</code>、<code>lo_quantity</code>、<code>lo_extendedprice</code>および<code>lo_discount</code>列のロードには合計で89.41GBの読み出しが必要で、これはファイルサイズ502.93GBの17.8%に相当します。</p>
+<h2 id="arrow_fdw">Arrow_Fdwの仮想列</h2>
+<p>Arrow_Fdwはスキーマ構造に互換性のある複数のApache Arrowを一個の外部テーブルにマッピングすることができます。例えば、外部テーブルオプションに<code>dir '/opt/arrow/mydata'</code>を指定すると、そのディレクトリ配下に存在する全てのファイルをマッピングするようになります。</p>
+<p>トランザクショナルなデータベースの内容をApache Arrowファイルに変換するときに年月や特定のカテゴリ毎に分けてファイル化し、それらを反映したファイル名を付けて保存する事はしばしば行われています。</p>
+<p>例えば、以下の例をご覧ください。トランザクショナルなテーブルである<code>lineorder</code>を<code>lo_orderdate</code>の年単位、および<code>lo_shipmode</code>のカテゴリ毎にArrowファイルへと変換しています。</p>
+<pre><code>$ for s in RAIL AIR TRUCK SHIP FOB MAIL;
+  do
+    for y in 1993 1994 1995 1996 1997;
+    do
+      pg2arrow -d ssbm -c &quot;SELECT * FROM lineorder_small \
+                            WHERE lo_orderdate between ${y}0101 and ${y}1231 \
+                              AND lo_shipmode = '${s}'&quot; \
+               -o /opt/arrow/mydata/f_lineorder_${y}_${s}.arrow
+    done
+  done
+$ ls /opt/arrow/mydata/
+f_lineorder_1993_AIR.arrow    f_lineorder_1995_RAIL.arrow
+f_lineorder_1993_FOB.arrow    f_lineorder_1995_SHIP.arrow
+f_lineorder_1993_MAIL.arrow   f_lineorder_1995_TRUCK.arrow
+f_lineorder_1993_RAIL.arrow   f_lineorder_1996_AIR.arrow
+f_lineorder_1993_SHIP.arrow   f_lineorder_1996_FOB.arrow
+f_lineorder_1993_TRUCK.arrow  f_lineorder_1996_MAIL.arrow
+f_lineorder_1994_AIR.arrow    f_lineorder_1996_RAIL.arrow
+f_lineorder_1994_FOB.arrow    f_lineorder_1996_SHIP.arrow
+f_lineorder_1994_MAIL.arrow   f_lineorder_1996_TRUCK.arrow
+f_lineorder_1994_RAIL.arrow   f_lineorder_1997_AIR.arrow
+f_lineorder_1994_SHIP.arrow   f_lineorder_1997_FOB.arrow
+f_lineorder_1994_TRUCK.arrow  f_lineorder_1997_MAIL.arrow
+f_lineorder_1995_AIR.arrow    f_lineorder_1997_RAIL.arrow
+f_lineorder_1995_FOB.arrow    f_lineorder_1997_SHIP.arrow
+f_lineorder_1995_MAIL.arrow   f_lineorder_1997_TRUCK.arrow
+</code></pre>
+<p>これらのApache Arrowファイルは全て同じスキーマ構造を持っており、<code>dir</code>オプションを用いて1個の外部テーブルにマッピングできます。
+また、データの生成時に絞り込みを行っているため、ファイル名に1995を含むファイルには<code>lo_orderdate</code>が19950101～19951231の範囲のレコードしか含まれておらず、ファイル名に<code>RAIL</code>を含むファイルには<code>lo_shipmode</code>が<code>RAIL</code>のレコードしか含まれていません。</p>
+<p>つまり、これら複数のArrowファイルをマップしたArrow_Fdw外部テーブルを定義したとしても、ファイル名に1995を含むファイルからデータを読み出している時には、<code>lo_orderdate</code>の値が19950101～19951231の範囲であることが事前に分かっており、それを利用した最適化が可能です。</p>
+<p>Arrow_Fdwでは、外部テーブルオプション<code>pattern</code>を使用する事でファイル名の一部を列として参照する事ができます。これを仮想列と呼び、以下のように設定します。</p>
+<pre><code>=# IMPORT FOREIGN SCHEMA f_lineorder
+     FROM SERVER arrow_fdw INTO public
+  OPTIONS (dir '/opt/arrow/mydata', pattern 'f_lineorder_@{year}_${shipping}.arrow');
+IMPORT FOREIGN SCHEMA
+
+=# \d f_lineorder
+                             Foreign table &quot;public.f_lineorder&quot;
+       Column       |     Type      | Collation | Nullable | Default |     FDW options
+--------------------+---------------+-----------+----------+---------+----------------------
+ lo_orderkey        | numeric       |           |          |         |
+ lo_linenumber      | integer       |           |          |         |
+ lo_custkey         | numeric       |           |          |         |
+ lo_partkey         | integer       |           |          |         |
+ lo_suppkey         | numeric       |           |          |         |
+ lo_orderdate       | integer       |           |          |         |
+ lo_orderpriority   | character(15) |           |          |         |
+ lo_shippriority    | character(1)  |           |          |         |
+ lo_quantity        | numeric       |           |          |         |
+ lo_extendedprice   | numeric       |           |          |         |
+ lo_ordertotalprice | numeric       |           |          |         |
+ lo_discount        | numeric       |           |          |         |
+ lo_revenue         | numeric       |           |          |         |
+ lo_supplycost      | numeric       |           |          |         |
+ lo_tax             | numeric       |           |          |         |
+ lo_commit_date     | character(8)  |           |          |         |
+ lo_shipmode        | character(10) |           |          |         |
+ year               | bigint        |           |          |         | (virtual 'year')
+ shipping           | text          |           |          |         | (virtual 'shipping')
+Server: arrow_fdw
+FDW options: (dir '/opt/arrow/mydata', pattern 'f_lineorder_@{year}_${shipping}.arrow')
+</code></pre>
+<p>この外部テーブルオプション<code>pattern</code>には2つのワイルドカードが含まれています。
+0文字以上の数字列にマッチする<code>@{year}</code>と、0文字以上の文字列にマッチする<code>${shipping}</code>です。
+ファイル名のうち、この部分にマッチしたパターンは、それぞれ列オプションの<code>virtual</code>で指定した部分で参照することができます。
+この場合、<code>IMPORT FOREIGN SCHEMA</code>が自動的に列定義を加え、Arrowファイル自体に含まれているフィールドに加えて、ワイルドカード<code>@{year}</code>を参照する仮想列<code>year</code>（数値列であるため<code>bigint</code>データ型）と、<code>${shipping}</code>を参照する仮想列<code>shipping</code>を追加しています。</p>
+<p>これらの仮想列に対応するフィールドはArrowファイルには存在しませんが、例えば、ファイル<code>f_lineorder_1994_AIR.arrow</code>から読みだした行を処理するときには<code>year</code>列の値は1994に、<code>shipping</code>列の値は'AIR'になるわけです。</p>
+<pre><code>=# SELECT lo_orderkey, lo_orderdate, lo_shipmode, year, shipping
+     FROM f_lineorder
+    WHERE year = 1995 AND shipping = 'AIR'
+    LIMIT 10;
+ lo_orderkey | lo_orderdate | lo_shipmode | year | shipping
+-------------+--------------+-------------+------+----------
+      637892 |     19950512 | AIR         | 1995 | AIR
+      638243 |     19950930 | AIR         | 1995 | AIR
+      638273 |     19951214 | AIR         | 1995 | AIR
+      637443 |     19950805 | AIR         | 1995 | AIR
+      637444 |     19950803 | AIR         | 1995 | AIR
+      637510 |     19950831 | AIR         | 1995 | AIR
+      637504 |     19950726 | AIR         | 1995 | AIR
+      637863 |     19950802 | AIR         | 1995 | AIR
+      637892 |     19950512 | AIR         | 1995 | AIR
+      637987 |     19950211 | AIR         | 1995 | AIR
+(10 rows)
+</code></pre>
+<p>これは言い換えれば、Arrow_Fdw外部テーブルがマップしたArrowファイルを実際に読む前に、仮想列がどのような値になっているのかを知る事ができるという事です。この特徴を使えば、あるArrowファイルの読み出しの前に、検索条件から1件もマッチしない事が明らかである場合には、ファイルの読み出し自体をスキップする事が可能であるという事になります。</p>
+<p>以下のクエリとその<code>EXPLAIN ANALYZE</code>出力をご覧ください。</p>
+<p>この集計クエリは<code>f_lineorder</code>外部テーブルを読み出し、いくつかの条件で絞り込んだ後、<code>lo_extendedprice * lo_discount</code>の合計値を集計します。
+その時、<code>WHERE year = 1994</code>という条件句が付加されています。これは実質的には<code>WHERE lo_orderdate BETWEEN 19940101 AND 19942131</code>と同じですが、<code>year</code>は仮想列であるため、Arrowファイルを読み出す前にマッチする行が存在するかどうかを判定する事ができます。</p>
+<p>実際、<code>Stats-Hint:</code>行を見ると、<code>(year = 1994)</code>という条件によって12個のRecord-Batchがロードされたものの、48個のRecord-Batchはスキップされています。これは単純ですがI/Oの負荷を軽減する手段として極めて有効です。</p>
+<pre><code>=# EXPLAIN ANALYZE
+   SELECT sum(lo_extendedprice*lo_discount) as revenue
+     FROM f_lineorder
+    WHERE year = 1994
+      AND lo_discount between 1 and 3
+      AND lo_quantity &lt; 25;
+                                               QUERY PLAN
+--------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=421987.07..421987.08 rows=1 width=32) (actual time=82.914..82.915 rows=1 loops=1)
+   -&gt;  Custom Scan (GpuPreAgg) on f_lineorder  (cost=421987.05..421987.06 rows=1 width=32)      \
+                                               (actual time=82.901..82.903 rows=2 loops=1)
+         GPU Projection: pgstrom.psum(((lo_extendedprice * lo_discount))::double precision)
+         GPU Scan Quals: ((year = 1994) AND (lo_discount &lt;= '3'::numeric) AND                   \
+                          (lo_quantity &lt; '25'::numeric) AND                                     \
+                          (lo_discount &gt;= '1'::numeric)) [plan: 65062080 -&gt; 542, exec: 13001908 -&gt; 1701726]
+         referenced: lo_quantity, lo_extendedprice, lo_discount, year
+         Stats-Hint: (year = 1994)  [loaded: 12, skipped: 48]
+         file0: /opt/arrow/mydata/f_lineorder_1996_MAIL.arrow (read: 99.53MB, size: 427.16MB)
+         file1: /opt/arrow/mydata/f_lineorder_1996_SHIP.arrow (read: 99.52MB, size: 427.13MB)
+         file2: /opt/arrow/mydata/f_lineorder_1994_FOB.arrow (read: 99.18MB, size: 425.67MB)
+              :                :                                       :             :
+         file27: /opt/arrow/mydata/f_lineorder_1997_MAIL.arrow (read: 99.23MB, size: 425.87MB)
+         file28: /opt/arrow/mydata/f_lineorder_1995_MAIL.arrow (read: 99.16MB, size: 425.58MB)
+         file29: /opt/arrow/mydata/f_lineorder_1993_TRUCK.arrow (read: 99.24MB, size: 425.91MB)
+         GPU-Direct SQL: enabled (N=2,GPU0,1; direct=76195, ntuples=13001908)
+ Planning Time: 2.402 ms
+ Execution Time: 83.857 ms
+(39 rows)
+</code></pre>
 <h2 id="arrow">Arrowファイルの作成方法</h2>
 <p>本節では、既にPostgreSQLデータベースに格納されているデータをApache Arrow形式に変換する方法を説明します。</p>
 <h3 id="pyarrowpandas">PyArrow+Pandas</h3>
@@ -378,7 +551,7 @@ Report bugs to &lt;pgstrom@heterodbcom&gt;.
 </code></pre>
 <p>開発者向けオプションですが、<code>--dump &lt;filename&gt;</code>でArrow形式ファイルのスキーマ定義やレコードバッチの位置とサイズを可読な形式で出力する事もできます。</p>
 <p><code>--progress</code>オプションを指定すると、処理の途中経過を表示する事が可能です。これは巨大なテーブルをApache Arrow形式に変換する際に有用です。</p>
-<h2 id="_6">先進的な使い方</h2>
+<h2 id="_8">先進的な使い方</h2>
 <h3 id="ssdtogpusql">SSDtoGPUダイレクトSQL</h3>
 <p>Arrow_Fdw外部テーブルにマップされた全てのArrow形式ファイルが以下の条件を満たす場合には、列データの読み出しにSSD-to-GPUダイレクトSQLを使用する事ができます。</p>
 <ul>
@@ -386,7 +559,7 @@ Report bugs to &lt;pgstrom@heterodbcom&gt;.
 <li>NVME-SSD区画はExt4ファイルシステムで構築されている。</li>
 <li>Arrow形式ファイルの総計が<code>pg_strom.nvme_strom_threshold</code>設定を上回っている。</li>
 </ul>
-<h3 id="_7">パーティション設定</h3>
+<h3 id="_9">パーティション設定</h3>
 <p>Arrow_Fdw外部テーブルを、パーティションの一部として利用する事ができます。 通常のPostgreSQLテーブルと混在する事も可能ですが、Arrow_Fdw外部テーブルは書き込みに対応していない事に注意してください。 また、マップされたArrow形式ファイルに含まれるデータは、パーティションの境界条件と矛盾しないように設定してください。これはデータベース管理者の責任です。</p>
 <p><img alt="Example of partition configuration" src="../img/partition-logdata.png" /></p>
 <p>典型的な利用シーンは、長期間にわたり蓄積したログデータの処理です。</p>

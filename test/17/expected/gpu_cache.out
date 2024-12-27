@@ -103,7 +103,7 @@ UPDATE cache_test_table SET a = (a+1) % 127 WHERE a%97=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-07ff, type='int1', expr='a'>, <slot=2, offset=0x0800-2bff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='97'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,2> args=[{SaveExpr: <slot=1, type='int1'> arg={Func(int1)::int1 arg={Func(int4)::int4mod args=[{Func(int4)::int14pl args=[{Var(int1): kvec=0x0000-0800, expr='a'}, {Const(int4): value='1'}]}, {Const(int4): value='127'}]}}}, {SaveExpr: <slot=2, type='internal'> arg={Var(internal): kvec=0x0800-2c00, expr='ctid'}}]}
-         Fallback-desc: [<dest='2', expr='a', depth=0:1>]
+         Fallback-desc: [<dest='1', expr='ctid', depth=0:1>, <dest='2', expr='a', depth=0:1>]
          CUDA Stack Size: 3936
 
 UPDATE cache_test_table SET a = (a+1) % 127 WHERE a%97=0;
@@ -123,7 +123,7 @@ UPDATE cache_test_table SET b = (b+1) % 32767 WHERE a%89=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x0800-13ff, type='int2', expr='b'>, <slot=3, offset=0x1400-37ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='89'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,3> args=[{SaveExpr: <slot=1, type='int2'> arg={Func(int2)::int2 arg={Func(int4)::int4mod args=[{Func(int4)::int24pl args=[{Var(int2): kvec=0x0800-1400, expr='b'}, {Const(int4): value='1'}]}, {Const(int4): value='32767'}]}}}, {SaveExpr: <slot=3, type='internal'> arg={Var(internal): kvec=0x1400-3800, expr='ctid'}}]}
-         Fallback-desc: [<dest='2', expr='a', depth=0:0>, <dest='3', expr='b', depth=0:1>]
+         Fallback-desc: [<dest='1', expr='ctid', depth=0:1>, <dest='2', expr='a', depth=0:0>, <dest='3', expr='b', depth=0:1>]
          CUDA Stack Size: 3952
 
 UPDATE cache_test_table SET b = (b+1) % 32767 WHERE a%89=0;
@@ -143,7 +143,7 @@ UPDATE cache_test_table SET c = (c+1) % 2147483647 WHERE a%83=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x0800-1bff, type='int4', expr='c'>, <slot=3, offset=0x1c00-3fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='83'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,3> args=[{SaveExpr: <slot=1, type='int4'> arg={Func(int4)::int4mod args=[{Func(int4)::int4pl args=[{Var(int4): kvec=0x0800-1c00, expr='c'}, {Const(int4): value='1'}]}, {Const(int4): value='2147483647'}]}}, {SaveExpr: <slot=3, type='internal'> arg={Var(internal): kvec=0x1c00-4000, expr='ctid'}}]}
-         Fallback-desc: [<dest='2', expr='a', depth=0:0>, <dest='3', expr='c', depth=0:1>]
+         Fallback-desc: [<dest='1', expr='ctid', depth=0:1>, <dest='2', expr='a', depth=0:0>, <dest='3', expr='c', depth=0:1>]
          CUDA Stack Size: 3952
 
 UPDATE cache_test_table SET c = (c+1) % 2147483647 WHERE a%83=0;
@@ -163,7 +163,7 @@ UPDATE cache_test_table SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x0800-2bff, type='int8', expr='d'>, <slot=3, offset=0x2c00-4fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='79'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,3> args=[{SaveExpr: <slot=1, type='int8'> arg={Func(int8)::int8mod args=[{Func(int8)::int84pl args=[{Var(int8): kvec=0x0800-2c00, expr='d'}, {Const(int4): value='1'}]}, {Const(int8): value='9223372036854775807'}]}}, {SaveExpr: <slot=3, type='internal'> arg={Var(internal): kvec=0x2c00-5000, expr='ctid'}}]}
-         Fallback-desc: [<dest='2', expr='a', depth=0:0>, <dest='3', expr='d', depth=0:1>]
+         Fallback-desc: [<dest='1', expr='ctid', depth=0:1>, <dest='2', expr='a', depth=0:0>, <dest='3', expr='d', depth=0:1>]
          CUDA Stack Size: 3952
 
 UPDATE cache_test_table SET d = (d+1) % 9223372036854775807 WHERE a%79=0;
@@ -183,7 +183,7 @@ UPDATE cache_test_table SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x0800-13ff, type='float2', expr='e'>, <slot=3, offset=0x1400-37ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='73'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,3> args=[{SaveExpr: <slot=1, type='float2'> arg={Func(float2)::float2 arg={Func(numeric)::numeric_mod args=[{Func(numeric)::numeric arg={Func(float8)::float28pl args=[{Var(float2): kvec=0x0800-1400, expr='e'}, {Const(float8): value='0.5'}]}}, {Const(numeric): value='999999'}]}}}, {SaveExpr: <slot=3, type='internal'> arg={Var(internal): kvec=0x1400-3800, expr='ctid'}}]}
-         Fallback-desc: [<dest='2', expr='a', depth=0:0>, <dest='3', expr='e', depth=0:1>]
+         Fallback-desc: [<dest='1', expr='ctid', depth=0:1>, <dest='2', expr='a', depth=0:0>, <dest='3', expr='e', depth=0:1>]
          CUDA Stack Size: 3952
 
 UPDATE cache_test_table SET e = (e+0.5)::numeric % 999999 WHERE a%73=0;
@@ -203,7 +203,7 @@ UPDATE cache_test_table SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x0800-1bff, type='float4', expr='f'>, <slot=3, offset=0x1c00-3fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='71'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,3> args=[{SaveExpr: <slot=1, type='float4'> arg={Func(float4)::float4 arg={Func(numeric)::numeric_mod args=[{Func(numeric)::numeric arg={Func(float8)::float48pl args=[{Var(float4): kvec=0x0800-1c00, expr='f'}, {Const(float8): value='0.5'}]}}, {Const(numeric): value='999999'}]}}}, {SaveExpr: <slot=3, type='internal'> arg={Var(internal): kvec=0x1c00-4000, expr='ctid'}}]}
-         Fallback-desc: [<dest='2', expr='a', depth=0:0>, <dest='3', expr='f', depth=0:1>]
+         Fallback-desc: [<dest='1', expr='ctid', depth=0:1>, <dest='2', expr='a', depth=0:0>, <dest='3', expr='f', depth=0:1>]
          CUDA Stack Size: 3952
 
 UPDATE cache_test_table SET f = (f+0.5)::numeric % 999999 WHERE a%71=0;
@@ -223,7 +223,7 @@ UPDATE cache_test_table SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=2, offset=0x0800-2bff, type='float8', expr='g'>, <slot=3, offset=0x2c00-4fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='67'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1,3> args=[{SaveExpr: <slot=1, type='float8'> arg={Func(float8)::float8 arg={Func(numeric)::numeric_mod args=[{Func(numeric)::numeric arg={Func(float8)::float8pl args=[{Var(float8): kvec=0x0800-2c00, expr='g'}, {Const(float8): value='0.5'}]}}, {Const(numeric): value='999999'}]}}}, {SaveExpr: <slot=3, type='internal'> arg={Var(internal): kvec=0x2c00-5000, expr='ctid'}}]}
-         Fallback-desc: [<dest='2', expr='a', depth=0:0>, <dest='3', expr='g', depth=0:1>]
+         Fallback-desc: [<dest='1', expr='ctid', depth=0:1>, <dest='2', expr='a', depth=0:0>, <dest='3', expr='g', depth=0:1>]
          CUDA Stack Size: 3952
 
 UPDATE cache_test_table SET g = (g+0.5)::numeric % 999999 WHERE a%67=0;
@@ -243,7 +243,7 @@ UPDATE cache_test_table SET h = 'delete' WHERE a%103=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0800-2bff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='103'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x0800-2c00, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='a', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='a', depth=0:0>]
          CUDA Stack Size: 3904
 
 UPDATE cache_test_table SET h = 'delete' WHERE a%103=0;
@@ -263,7 +263,7 @@ UPDATE cache_test_table SET i = 'delete' WHERE a%107=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0800-2bff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='107'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x0800-2c00, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='a', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='a', depth=0:0>]
          CUDA Stack Size: 3904
 
 UPDATE cache_test_table SET i = 'delete' WHERE a%107=0;
@@ -283,7 +283,7 @@ UPDATE cache_test_table SET j = 'delete' WHERE a%109=0;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0800-2bff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='109'}]}, {Const(int4): value='0'}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x0800-2c00, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='a', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='a', depth=0:0>]
          CUDA Stack Size: 3904
 
 UPDATE cache_test_table SET j = 'delete' WHERE a%109=0;
@@ -306,7 +306,7 @@ DELETE FROM cache_test_table WHERE a%101=0 OR a IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0800-2bff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int1): slot=0, expr='a'}}, {Const(int4): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(int1): slot=0, expr='a'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x0800-2c00, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='a', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='a', depth=0:0>]
          CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE a%101=0 OR a IS NULL;
@@ -326,7 +326,7 @@ DELETE FROM cache_test_table WHERE b%101=0 OR b IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0c00-2fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Func(int4)::int4 arg={Var(int2): slot=0, expr='b'}}, {Const(int4): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(int2): slot=0, expr='b'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x0c00-3000, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='b', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='b', depth=0:0>]
          CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE b%101=0 OR b IS NULL;
@@ -346,7 +346,7 @@ DELETE FROM cache_test_table WHERE c%101=0 OR c IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1400-37ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int4eq args=[{Func(int4)::int4mod args=[{Var(int4): slot=0, expr='c'}, {Const(int4): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(int4): slot=0, expr='c'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x1400-3800, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='c', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='c', depth=0:0>]
          CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE c%101=0 OR c IS NULL;
@@ -366,7 +366,7 @@ DELETE FROM cache_test_table WHERE d%101=0 OR d IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x2400-47ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int84eq args=[{Func(int8)::int8mod args=[{Var(int8): slot=0, expr='d'}, {Const(int8): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(int8): slot=0, expr='d'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x2400-4800, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='d', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='d', depth=0:0>]
          CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE d%101=0 OR d IS NULL;
@@ -386,7 +386,7 @@ DELETE FROM cache_test_table WHERE e::int8%101=0 OR e IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x0c00-2fff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int84eq args=[{Func(int8)::int8mod args=[{Func(int8)::int8 arg={Var(float2): slot=0, expr='e'}}, {Const(int8): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(float2): slot=0, expr='e'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x0c00-3000, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='e', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='e', depth=0:0>]
          CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE e::int8%101=0 OR e IS NULL;
@@ -406,7 +406,7 @@ DELETE FROM cache_test_table WHERE f::int8%101=0 OR f IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x1400-37ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int84eq args=[{Func(int8)::int8mod args=[{Func(int8)::int8 arg={Var(float4): slot=0, expr='f'}}, {Const(int8): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(float4): slot=0, expr='f'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x1400-3800, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='f', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='f', depth=0:0>]
          CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE f::int8%101=0 OR f IS NULL;
@@ -426,7 +426,7 @@ DELETE FROM cache_test_table WHERE g::int8%101=0 OR g IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x2400-47ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::int84eq args=[{Func(int8)::int8mod args=[{Func(int8)::int8 arg={Var(float8): slot=0, expr='g'}}, {Const(int8): value='101'}]}, {Const(int4): value='0'}]}, {IsNull arg={Var(float8): slot=0, expr='g'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x2400-4800, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='g', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='g', depth=0:0>]
          CUDA Stack Size: 3904
 
 DELETE FROM cache_test_table WHERE g::int8%101=0 OR g IS NULL;
@@ -446,7 +446,7 @@ DELETE FROM cache_test_table WHERE h='delete' OR h IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x3400-57ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::texteq args=[{Var(text): slot=0, expr='h'}, {Const(text): value='delete'}]}, {IsNull arg={Var(text): slot=0, expr='h'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x3400-5800, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='h', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='h', depth=0:0>]
          CUDA Stack Size: 3920
 
 DELETE FROM cache_test_table WHERE h='delete' OR h IS NULL;
@@ -466,7 +466,7 @@ DELETE FROM cache_test_table WHERE i='delete' OR i IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x3400-57ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::texteq args=[{Var(text): slot=0, expr='i'}, {Const(text): value='delete'}]}, {IsNull arg={Var(text): slot=0, expr='i'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x3400-5800, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='i', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='i', depth=0:0>]
          CUDA Stack Size: 3920
 
 DELETE FROM cache_test_table WHERE i='delete' OR i IS NULL;
@@ -486,7 +486,7 @@ DELETE FROM cache_test_table WHERE j='delete' OR j IS NULL;
          MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=1, offset=0x3400-57ff, type='internal', expr='ctid'>]}}}
          Scan Quals OpCode: {Bool::OR args=[{Func(bool)::bpchareq args=[{Var(bpchar): slot=0, expr='j'}, {Const(bpchar): value='delete'}]}, {IsNull arg={Var(bpchar): slot=0, expr='j'}}]}
          Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='internal'> arg={Var(internal): kvec=0x3400-5800, expr='ctid'}}}
-         Fallback-desc: [<dest='1', expr='j', depth=0:0>]
+         Fallback-desc: [<dest='0', expr='ctid', depth=0:1>, <dest='1', expr='j', depth=0:0>]
          CUDA Stack Size: 3920
 
 DELETE FROM cache_test_table WHERE j='delete' OR j IS NULL;
@@ -703,6 +703,8 @@ SELECT * FROM cache_corruption_test WHERE b%3=0;
    Output: id, a, b, c, d, e, f, g, h, i, j
    GPU Projection: id, a, b, c, d, e, f, g, h, i, j
    GPU Scan Quals: (((b)::integer % 3) = 0) [rows: 4000 -> 20]
+   GPU Cache: GPU0 [phase: corrupted, max_num_rows: 5000]
+   GPU Cache Options: gpu_device_id=0,max_num_rows=5000,redo_buffer_size=157286400,gpu_sync_interval=4000000,gpu_sync_threshold=10485760
    KVars-Slot: <slot=0, type='int2', expr='b', kv_off=0x0000>, <slot=1, type='int4', expr='id', kv_off=0x0c00>, <slot=2, type='int1', expr='a', kv_off=0x2000>, <slot=3, type='int4', expr='c', kv_off=0x2800>, <slot=4, type='int8', expr='d', kv_off=0x3c00>, <slot=5, type='float2', expr='e', kv_off=0x6000>, <slot=6, type='float4', expr='f', kv_off=0x6c00>, <slot=7, type='float8', expr='g', kv_off=0x8000>, <slot=8, type='text', expr='h', kv_off=0xa400>, <slot=9, type='text', expr='i', kv_off=0xd800>, <slot=10, type='bpchar', expr='j', kv_off=0x10c00>
    KVecs-Buffer: nbytes: 81920, ndims: 2, items=[kvec0=<0x0000-0bff, type='int2', expr='b'>, kvec1=<0x0c00-1fff, type='int4', expr='id'>, kvec2=<0x2000-27ff, type='int1', expr='a'>, kvec3=<0x2800-3bff, type='int4', expr='c'>, kvec4=<0x3c00-5fff, type='int8', expr='d'>, kvec5=<0x6000-6bff, type='float2', expr='e'>, kvec6=<0x6c00-7fff, type='float4', expr='f'>, kvec7=<0x8000-a3ff, type='float8', expr='g'>, kvec8=<0xa400-d7ff, type='text', expr='h'>, kvec9=<0xd800-10bff, type='text', expr='i'>, kvec10=<0x10c00-13fff, type='bpchar', expr='j'>]
    LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=2, type='int1' resno=2(a)>, <slot=0, type='int2' resno=3(b)>, <slot=3, type='int4' resno=4(c)>, <slot=4, type='int8' resno=5(d)>, <slot=5, type='float2' resno=6(e)>, <slot=6, type='float4' resno=7(f)>, <slot=7, type='float8' resno=8(g)>, <slot=8, type='text' resno=9(h)>, <slot=9, type='text' resno=10(i)>, <slot=10, type='bpchar' resno=11(j)>]}}

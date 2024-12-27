@@ -958,6 +958,95 @@ execGpuJoinProjection(kern_context *kcxt,
 }
 
 /*
+ * Load RIGHT OUTER values
+ */
+PUBLIC_FUNCTION(int)
+loadGpuJoinRightOuter(kern_context *kcxt,
+					  kern_warp_context *wp,
+					  kern_multirels *kmrels,
+					  int depth,
+					  char *dst_kvecs_buffer)
+{
+	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+	bool	   *oj_map = KERN_MULTIRELS_GPU_OUTER_JOIN_MAP(kmrels, depth,
+														   stromTaskProp__cuda_dindex);
+	uint32_t	count;
+	uint32_t	index;
+	uint32_t	wr_pos;
+	kern_tupitem *tupitem = NULL;
+
+	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + get_local_size())
+	{
+		/*
+		 * Current depth already keeps blockSize or more pending tuples,
+		 * so wipe out these tuples first.
+		 */
+		return depth+1;
+	}
+	/* fetch the next row-index from the kds_in */
+	index = get_global_size() * wp->smx_row_count + get_global_base();
+	if (index >= kds_in->nitems)
+	{
+		if (get_local_id() == 0)
+			wp->scan_done = depth+1;
+		__syncthreads();
+		return depth+1;
+	}
+	index += get_local_id();
+
+	/*
+	 * fetch the inner tuple that has not matched any outer tuples
+	 */
+	assert(oj_map != NULL);
+	if (index < kds_in->nitems && !oj_map[index])
+	{
+		assert(kds_in->format == KDS_FORMAT_ROW ||
+			   kds_in->format == KDS_FORMAT_HASH);
+		tupitem = KDS_GET_TUPITEM(kds_in, index);
+	}
+
+	/*
+	 * load the inner tuple and fill up other outer slots by NULLs
+	 */
+	wr_pos = WARP_WRITE_POS(wp,depth);
+	wr_pos += pgstrom_stair_sum_binary(tupitem != NULL, &count);
+	if (tupitem != NULL)
+	{
+		const kern_expression *kexp;
+
+		for (int __depth=0; __depth < depth; __depth++)
+		{
+			kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, __depth);
+			ExecLoadVarsHeapTuple(kcxt, kexp, __depth, kds_in, NULL);
+		}
+		kexp = SESSION_KEXP_LOAD_VARS(kcxt->session, depth);
+		ExecLoadVarsHeapTuple(kcxt, kexp, depth, kds_in, &tupitem->htup);
+
+		kexp = SESSION_KEXP_MOVE_VARS(kcxt->session, depth);
+		if (!ExecMoveKernelVariables(kcxt,
+									 kexp,
+									 dst_kvecs_buffer,
+									 (wr_pos % KVEC_UNITSZ)))
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		}
+	}
+	/* error checks */
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+		return -1;
+	/* make advance the position */
+	if (get_local_id() == 0)
+	{
+		wp->smx_row_count++;
+		WARP_WRITE_POS(wp,depth) += count;
+	}
+	__syncthreads();
+	if (WARP_WRITE_POS(wp,depth) >= WARP_READ_POS(wp,depth) + get_local_size())
+		return depth+1;
+	return depth;
+}
+
+/*
  * GPU-Task specific read-only properties.
  */
 PUBLIC_SHARED_DATA(uint32_t, stromTaskProp__cuda_dindex);
@@ -987,11 +1076,13 @@ kern_gpujoin_main(kern_session_info *session,
 	uint32_t			n_rels = (kmrels ? kmrels->num_rels : 0);
 	int					depth;
 
+	/* sanity checks */
 	assert(kgtask->kvars_nslots == session->kcxt_kvars_nslots &&
 		   kgtask->kvecs_bufsz  == session->kcxt_kvecs_bufsz &&
 		   kgtask->kvecs_ndims  >= n_rels &&
 		   kgtask->n_rels       == n_rels &&
 		   get_local_size()     <= CUDA_MAXTHREADS_PER_BLOCK);
+	assert(kgtask->right_outer_depth == 0 ? kds_src != NULL : kds_src == NULL);
 	/* save the GPU-Task specific read-only properties */
 	if (get_local_id() == 0)
 	{
@@ -1009,7 +1100,6 @@ kern_gpujoin_main(kern_session_info *session,
 								&l_state,
 								&matched);
 	setupGpuPreAggGroupByBuffer(kcxt, kgtask, SHARED_WORKMEM(wp_base_sz));
-
 	kvec_buffer_base = (char *)wp_saved + wp_base_sz;
 	kvec_buffer_size = TYPEALIGN(CUDA_L1_CACHELINE_SZ, kcxt->kvecs_bufsz);
 #define __KVEC_BUFFER(__depth)							\
@@ -1025,7 +1115,12 @@ kern_gpujoin_main(kern_session_info *session,
 	{
 		/* zero clear the wp */
 		if (get_local_id() == 0)
+		{
 			memset(wp, 0, wp_base_sz);
+			/* Set RIGHT-OUTER-JOIN special starting point */
+			if (kgtask->right_outer_depth > 0)
+				wp->depth = wp->scan_done = kgtask->right_outer_depth;
+		}
 		for (int d=0; d < kgtask->n_rels; d++)
 		{
 			l_state[d * get_global_size() + get_global_id()] = 0;
@@ -1075,6 +1170,14 @@ kern_gpujoin_main(kern_session_info *session,
 											 kds_dst,
 											 __KVEC_BUFFER(n_rels));
 			}
+		}
+		else if (depth == kgtask->right_outer_depth)
+		{
+			/* Load RIGHT-OUTER Tuples */
+			depth = loadGpuJoinRightOuter(kcxt, wp,
+										  kmrels,
+										  depth,
+										  __KVEC_BUFFER(depth));
 		}
 		else if (kmrels->chunks[depth-1].is_nestloop)
 		{
@@ -1139,13 +1242,27 @@ kern_gpujoin_main(kern_session_info *session,
 	{
 		if (depth < 0 && WARP_READ_POS(wp,n_rels) >= WARP_WRITE_POS(wp,n_rels))
 		{
-			/* number of raw-tuples fetched from the heap block */
-			if (kds_src->format == KDS_FORMAT_BLOCK)
-				atomicAdd(&kgtask->nitems_raw, wp->lp_wr_pos);
-			else if (get_global_id() == 0)
-				atomicAdd(&kgtask->nitems_raw, kds_src->nitems);
-			atomicAdd(&kgtask->nitems_in, WARP_WRITE_POS(wp, 0));
-			for (int i=0; i < n_rels; i++)
+			int		start = 0;
+
+			if (kgtask->right_outer_depth == 0)
+			{
+				assert(kds_src != NULL);
+				/* number of raw-tuples fetched from the source KDS */
+				if (kds_src->format == KDS_FORMAT_BLOCK)
+					atomicAdd(&kgtask->nitems_raw, wp->lp_wr_pos);
+				else if (get_global_id() == 0)
+					atomicAdd(&kgtask->nitems_raw, kds_src->nitems);
+				atomicAdd(&kgtask->nitems_in, WARP_WRITE_POS(wp, 0));
+			}
+			else
+			{
+				assert(kds_src == NULL);
+				/* number of the generated RIGHT-OUTER-JOIN tuples */
+				start = kgtask->right_outer_depth;
+				atomicAdd(&kgtask->stats[start-1].nitems_roj,
+						  WARP_WRITE_POS(wp,start));
+			}
+			for (int i=start; i < n_rels; i++)
 			{
 				const kern_expression *kexp_gist
 					= SESSION_KEXP_GIST_EVALS(session, i+1);
@@ -1167,4 +1284,22 @@ kern_gpujoin_main(kern_session_info *session,
 		memcpy(wp_saved, wp, wp_base_sz);
 	}
 	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
+}
+
+/*
+ * kern_gpujoin_main
+ */
+KERNEL_FUNCTION(void)
+gpujoin_merge_outer_join_map(uint32_t *dst_ojmap,
+							 const uint32_t *src_ojmap,
+							 uint32_t nitems)
+{
+	uint32_t	index;
+
+	for (index = get_global_id();
+		 index < nitems;
+		 index += get_global_size())
+	{
+		dst_ojmap[index] |= src_ojmap[index];
+	}
 }

@@ -161,7 +161,7 @@
 <dd>Enables/disables GpuPreAgg</dd>
 <dt><code>pg_strom.enable_numeric_aggfuncs</code> [type: <code>bool</code> / default: <code>on]</code></dt>
 <dd>Enables/disables support of aggregate function that takes <code>numeric</code> data type.</dd>
-<dd>Note that aggregated function at GPU mapps <code>numeric</code> data type to double precision floating point values. So, if you are sensitive to calculation errors, you can turn off this configuration to suppress the calculation errors by the operations on CPU.</dd>
+<dd>Note that aggregated function at GPU mapps <code>numeric</code> data type to 128bit fixed-point variable, so it raises an error if you run the aggregate functions with extremely large or highly-precise values. You can turn off this configuration to enforce the aggregate functions being operated by CPU.</dd>
 <dt><code>pg_strom.enable_brin</code> [type: <code>bool</code> / default: <code>on]</code></dt>
 <dd>Enables/disables BRIN index support on tables scan</dd>
 <dt><code>pg_strom.cpu_fallback</code> [type: <code>enum</code> / default: <code>notice</code>]</dt>

@@ -36,6 +36,7 @@ typedef struct
 typedef struct RecordBatchFieldState
 {
 	/* common fields with cache */
+	char		attname[NAMEDATALEN];
 	Oid			atttypid;
 	int			atttypmod;
 	ArrowTypeOptions attopts;
@@ -60,17 +61,36 @@ typedef struct RecordBatchState
 	off_t		rb_offset;	/* offset from the head */
 	size_t		rb_length;	/* length of the entire RecordBatch */
 	int64		rb_nitems;	/* number of items */
+	/* virtual column per record-batch */
+	Datum		virtual_datum;
+	bool		virtual_isnull;
 	/* per column information */
 	int			nfields;
 	RecordBatchFieldState fields[FLEXIBLE_ARRAY_MEMBER];
 } RecordBatchState;
 
+typedef struct virtualColumnDef
+{
+	char		kind;
+	char	   *key;
+	char	   *value;
+	char		buf[FLEXIBLE_ARRAY_MEMBER];
+} virtualColumnDef;
+
+#define __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE				(-1)
+#define __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH		(-2)
 typedef struct ArrowFileState
 {
 	const char *filename;
 	const char *dpu_path;	/* relative pathname, if DPU */
 	struct stat	stat_buf;
 	List	   *rb_list;	/* list of RecordBatchState */
+	uint32_t	ncols;
+	struct {
+		int		field_index;		/* PG-column <-> Arrow-field mapping */
+		bool	virtual_isnull;		/* virtual isnull, if any */
+		Datum	virtual_datum;		/* virtual datum, if any */
+	} attrs[FLEXIBLE_ARRAY_MEMBER];
 } ArrowFileState;
 
 /*
@@ -108,25 +128,32 @@ struct ArrowFdwState
 /*
  * Metadata Cache (on shared memory)
  */
-#define ARROW_METADATA_BLOCKSZ		(128 * 1024)	/* 128kB */
-typedef struct
-{
-	dlist_node	chain;		/* link to free_blocks; NULL if active */
-	int32_t		unitsz;		/* unit size of slab items  */
-	int32_t		n_actives;	/* number of active items */
-	char		data[FLEXIBLE_ARRAY_MEMBER];
-} arrowMetadataCacheBlock;
-#define ARROW_METADATA_CACHE_FREE_MAGIC		(0xdeadbeafU)
-#define ARROW_METADATA_CACHE_ACTIVE_MAGIC	(0xcafebabeU)
-
-typedef struct arrowMetadataFieldCache	arrowMetadataFieldCache;
+typedef struct arrowMetadataCacheBlock	arrowMetadataCacheBlock;
 typedef struct arrowMetadataCache		arrowMetadataCache;
+typedef struct arrowMetadataFieldCache	arrowMetadataFieldCache;
+typedef struct arrowMetadataKeyValueCache arrowMetadataKeyValueCache;
 
+/*
+ * arrowMetadataKeyValueCache
+ */
+struct arrowMetadataKeyValueCache
+{
+	arrowMetadataKeyValueCache *next;
+	const char *key;
+	const char *value;
+	int			_key_len;
+	int			_value_len;
+	char		data[FLEXIBLE_ARRAY_MEMBER];
+};
+
+/*
+ * arrowMetadataFieldCache - metadata for a particular field in record-batch
+ */
 struct arrowMetadataFieldCache
 {
-	arrowMetadataCacheBlock *owner;
 	dlist_node	chain;				/* link to free/fields[children] list */
 	/* common fields with cache */
+	char		attname[NAMEDATALEN];
 	Oid			atttypid;
 	int			atttypmod;
 	ArrowTypeOptions attopts;
@@ -139,20 +166,18 @@ struct arrowMetadataFieldCache
 	off_t		extra_offset;
 	size_t		extra_length;
 	MinMaxStatDatum stat_datum;
+	arrowMetadataKeyValueCache *custom_metadata;	/* valid only in RecordBatch-0 */
 	/* sub-fields if any */
 	int			num_children;
 	dlist_head	children;
-	uint32_t	magic;
 };
 
+/*
+ * arrowMetadataCache - metadata for a particular record-batch
+ */
 struct arrowMetadataCache
 {
-	arrowMetadataCacheBlock *owner;
-	dlist_node	chain;		/* link to free/hash list */
-	dlist_node	lru_chain;	/* link to lru_list */
-	struct timeval lru_tv;	/* last access time */
 	arrowMetadataCache *next; /* next record-batch if any */
-	struct stat stat_buf;	/* result of stat(2) */
 	int			rb_index;	/* index number in a file */
 	off_t		rb_offset;	/* offset from the head */
 	size_t		rb_length;	/* length of the entire RecordBatch */
@@ -160,8 +185,26 @@ struct arrowMetadataCache
 	/* per column information */
 	int			nfields;
 	dlist_head	fields;		/* list of arrowMetadataFieldCache */
-	uint32_t	magic;
 };
+
+/*
+ * arrowMetadataCacheBlock - metadata for a particular arrow file, and
+ *                           allocation unit
+ */
+#define ARROW_METADATA_BLOCKSZ		(128 * 1024)	/* 128kB */
+typedef struct arrowMetadataCacheBlock
+{
+	arrowMetadataCacheBlock *next;
+	uint32_t	usage;
+	/* <---- the fields below are valid only the first block ----> */
+	dlist_node	chain;		/* link to free/hash list */
+	dlist_node	lru_chain;	/* link to lru_list */
+	struct timeval lru_tv;	/* last access time */
+	struct stat	stat_buf;	/* result of stat(2) */
+	arrowMetadataKeyValueCache *custom_metadata;
+	arrowMetadataCache mcache_head;	/* the first arrowMetadataCache (record batch)
+									 * in this file */
+} arrowMetadataCacheBlock;
 
 /*
  * Metadata cache management
@@ -173,8 +216,6 @@ typedef struct
 	slock_t		lru_lock;		/* protect lru related stuff */
 	dlist_head	lru_list;
 	dlist_head	free_blocks;	/* list of arrowMetadataCacheBlock */
-	dlist_head	free_mcaches;	/* list of arrowMetadataCache */
-	dlist_head	free_fcaches;	/* list of arrowMetadataFieldCache */
 	dlist_head	hash_slots[ARROW_METADATA_HASH_NSLOTS];
 } arrowMetadataCacheHead;
 
@@ -294,126 +335,53 @@ arrowFieldGetPGTypeHint(const ArrowField *field)
  * ------------------------------------------------
  */
 static void
-__releaseMetadataFieldCache(arrowMetadataFieldCache *fcache)
+__releaseMetadataCacheBlock(arrowMetadataCacheBlock *mc_block_curr)
 {
-	arrowMetadataCacheBlock *mc_block = fcache->owner;
-
-	Assert(fcache->magic == ARROW_METADATA_CACHE_ACTIVE_MAGIC);
-	/* also release sub-fields if any */
-	while (!dlist_is_empty(&fcache->children))
+	if (mc_block_curr)
 	{
-		arrowMetadataFieldCache	*__fcache
-			= dlist_container(arrowMetadataFieldCache, chain,
-							  dlist_pop_head_node(&fcache->children));
-		__releaseMetadataFieldCache(__fcache);
-	}
-	fcache->magic = ARROW_METADATA_CACHE_FREE_MAGIC;
-	dlist_push_tail(&arrow_metadata_cache->free_fcaches,
-					&fcache->chain);
+		arrowMetadataCacheBlock *mc_block_next = mc_block_curr->next;
 
-	/* also back the owner block if all slabs become free */
-	Assert(mc_block->n_actives > 0);
-	if (--mc_block->n_actives == 0)
-	{
-		char   *pos = mc_block->data;
-		char   *end = (char *)mc_block + ARROW_METADATA_BLOCKSZ;
+		/* must be already detached */
+		Assert(!mc_block_curr->chain.prev &&
+			   !mc_block_curr->chain.prev &&
+			   !mc_block_curr->lru_chain.prev  &&
+			   !mc_block_curr->lru_chain.next);
 
-		Assert(mc_block->unitsz == MAXALIGN(sizeof(arrowMetadataFieldCache)));
-		while (pos + mc_block->unitsz <= end)
+		while (mc_block_curr != NULL)
 		{
-			arrowMetadataFieldCache *__fcache = (arrowMetadataFieldCache *)pos;
-			Assert(__fcache->owner == mc_block &&
-				   __fcache->magic == ARROW_METADATA_CACHE_FREE_MAGIC);
-			dlist_delete(&__fcache->chain);
-			pos += mc_block->unitsz;
+			dlist_push_head(&arrow_metadata_cache->free_blocks,
+							&mc_block_curr->chain);
+			mc_block_curr = mc_block_next;
+			mc_block_next = mc_block_curr->next;
 		}
-		Assert(!mc_block->chain.prev &&
-			   !mc_block->chain.next);	/* must be active block */
-		dlist_push_tail(&arrow_metadata_cache->free_blocks,
-						&mc_block->chain);
-	}
-}
-
-static void
-__releaseMetadataCache(arrowMetadataCache *mcache)
-{
-	while (mcache)
-	{
-		arrowMetadataCacheBlock *mc_block = mcache->owner;
-		arrowMetadataCache   *__mcache_next = mcache->next;
-
-		Assert(mcache->magic == ARROW_METADATA_CACHE_ACTIVE_MAGIC);
-		/*
-		 * MEMO: Caller already detach the leader mcache from the hash-
-		 * slot and the LRU-list. The follower mcaches should never be
-		 * linked to hash-slot and LRU-list.
-		 * So, we just put Assert() here.
-		 */
-		Assert(!mcache->chain.prev && !mcache->chain.next &&
-			   !mcache->lru_chain.prev && !mcache->lru_chain.next);
-
-		/* also release arrowMetadataFieldCache */
-		while (!dlist_is_empty(&mcache->fields))
-		{
-			arrowMetadataFieldCache *fcache
-				= dlist_container(arrowMetadataFieldCache, chain,
-								  dlist_pop_head_node(&mcache->fields));
-			__releaseMetadataFieldCache(fcache);
-		}
-		mcache->magic = ARROW_METADATA_CACHE_FREE_MAGIC;
-		dlist_push_tail(&arrow_metadata_cache->free_mcaches,
-						&mcache->chain);
-		/* also back the owner block if all slabs become free */
-		Assert(mc_block->n_actives > 0);
-		if (--mc_block->n_actives == 0)
-		{
-			char   *pos = mc_block->data;
-			char   *end = (char *)mc_block + ARROW_METADATA_BLOCKSZ;
-
-			Assert(mc_block->unitsz == MAXALIGN(sizeof(arrowMetadataCache)));
-			while (pos + mc_block->unitsz <= end)
-			{
-				arrowMetadataCache *__mcache = (arrowMetadataCache *)pos;
-
-				Assert(__mcache->owner == mc_block &&
-					   __mcache->magic == ARROW_METADATA_CACHE_FREE_MAGIC);
-				dlist_delete(&__mcache->chain);
-				pos += mc_block->unitsz;
-			}
-			Assert(!mc_block->chain.prev &&
-				   !mc_block->chain.next);	/* must be active block */
-			dlist_push_tail(&arrow_metadata_cache->free_blocks,
-							&mc_block->chain);
-		}
-		mcache = __mcache_next;
 	}
 }
 
 static bool
-__reclaimMetadataCache(void)
+__reclaimMetadataCacheBlock(void)
 {
 	SpinLockAcquire(&arrow_metadata_cache->lru_lock);
 	if (!dlist_is_empty(&arrow_metadata_cache->lru_list))
 	{
-		arrowMetadataCache *mcache;
+		arrowMetadataCacheBlock *mc_block;
 		dlist_node	   *dnode;
 		struct timeval	curr_tv;
 		int64_t			elapsed;
 
 		gettimeofday(&curr_tv, NULL);
 		dnode = dlist_tail_node(&arrow_metadata_cache->lru_list);
-		mcache = dlist_container(arrowMetadataCache, lru_chain, dnode);
-		elapsed = ((curr_tv.tv_sec - mcache->lru_tv.tv_sec) * 1000000 +
-				   (curr_tv.tv_usec - mcache->lru_tv.tv_usec));
+		mc_block = dlist_container(arrowMetadataCacheBlock, lru_chain, dnode);
+		elapsed = ((curr_tv.tv_sec - mc_block->lru_tv.tv_sec) * 1000000 +
+				   (curr_tv.tv_usec - mc_block->lru_tv.tv_usec));
 		if (elapsed > 30000000UL)	/* > 30s */
 		{
-			dlist_delete(&mcache->lru_chain);
-			memset(&mcache->lru_chain, 0, sizeof(dlist_node));
+			dlist_delete(&mc_block->lru_chain);
+			memset(&mc_block->lru_chain, 0, sizeof(dlist_node));
 			SpinLockRelease(&arrow_metadata_cache->lru_lock);
-			dlist_delete(&mcache->chain);
-			memset(&mcache->chain, 0, sizeof(dlist_node));
+			dlist_delete(&mc_block->chain);
+			memset(&mc_block->chain, 0, sizeof(dlist_node));
 
-			__releaseMetadataCache(mcache);
+			__releaseMetadataCacheBlock(mc_block);
 			return true;
 		}
 	}
@@ -421,86 +389,93 @@ __reclaimMetadataCache(void)
 	return false;
 }
 
-static arrowMetadataFieldCache *
-__allocMetadataFieldCache(void)
+static arrowMetadataCacheBlock *
+__allocMetadataCacheBlock(void)
 {
-	arrowMetadataFieldCache *fcache;
-	dlist_node *dnode;
+	arrowMetadataCacheBlock *mc_block;
+	dlist_node	   *dnode;
 
-	while (dlist_is_empty(&arrow_metadata_cache->free_fcaches))
+	if (dlist_is_empty(&arrow_metadata_cache->free_blocks))
 	{
-		arrowMetadataCacheBlock *mc_block;
-		char   *pos, *end;
-
-		while (dlist_is_empty(&arrow_metadata_cache->free_blocks))
-		{
-			if (!__reclaimMetadataCache())
-				return NULL;
-		}
-		dnode = dlist_pop_head_node(&arrow_metadata_cache->free_blocks);
-		mc_block = dlist_container(arrowMetadataCacheBlock, chain, dnode);
-		memset(mc_block, 0, offsetof(arrowMetadataCacheBlock, data));
-		mc_block->unitsz = MAXALIGN(sizeof(arrowMetadataFieldCache));
-		for (pos = mc_block->data, end = (char *)mc_block + ARROW_METADATA_BLOCKSZ;
-			 pos + mc_block->unitsz <= end;
-			 pos += mc_block->unitsz)
-		{
-			fcache = (arrowMetadataFieldCache *)pos;
-			fcache->owner = mc_block;
-			fcache->magic = ARROW_METADATA_CACHE_FREE_MAGIC;
-			dlist_push_tail(&arrow_metadata_cache->free_fcaches,
-							&fcache->chain);
-		}
+		if (!__reclaimMetadataCacheBlock())
+			return NULL;
+		Assert(!dlist_is_empty(&arrow_metadata_cache->free_blocks));
 	}
-	dnode = dlist_pop_head_node(&arrow_metadata_cache->free_fcaches);
-	fcache = dlist_container(arrowMetadataFieldCache, chain, dnode);
-	fcache->owner->n_actives++;
-	Assert(fcache->magic == ARROW_METADATA_CACHE_FREE_MAGIC);
-	memset(&fcache->chain, 0, (offsetof(arrowMetadataFieldCache, magic) -
-							   offsetof(arrowMetadataFieldCache, chain)));
-	fcache->magic = ARROW_METADATA_CACHE_ACTIVE_MAGIC;
-	return fcache;
+	dnode = dlist_pop_head_node(&arrow_metadata_cache->free_blocks);
+	mc_block = dlist_container(arrowMetadataCacheBlock, chain, dnode);
+	memset(mc_block, 0, offsetof(arrowMetadataCacheBlock,
+								 usage) + sizeof(uint32_t));
+	mc_block->usage = MAXALIGN(offsetof(arrowMetadataCacheBlock,
+										usage) + sizeof(uint32_t));
+	return mc_block;
+}
+
+static void *
+__allocMetadataCacheCommon(arrowMetadataCacheBlock **p_mc_block, size_t sz)
+{
+	arrowMetadataCacheBlock *mc_block = *p_mc_block;
+	char	   *pos;
+
+	if (mc_block->usage + MAXALIGN(sz) > ARROW_METADATA_BLOCKSZ)
+	{
+		if (offsetof(arrowMetadataCacheBlock,
+					 chain) + MAXALIGN(sz) > ARROW_METADATA_BLOCKSZ)
+			return NULL;	/* too large */
+		mc_block = __allocMetadataCacheBlock();
+		if (!mc_block)
+			return NULL;
+		mc_block->next = NULL;
+		mc_block->usage = offsetof(arrowMetadataCacheBlock, chain);
+		Assert(!(*p_mc_block)->next);
+		(*p_mc_block)->next = mc_block;
+		(*p_mc_block) = mc_block;
+	}
+	pos = ((char *)mc_block + mc_block->usage);
+	mc_block->usage += MAXALIGN(sz);
+
+	return pos;
+}
+
+static arrowMetadataKeyValueCache *
+__allocMetadataKeyValueCache(arrowMetadataCacheBlock **p_mc_block,
+							 ArrowKeyValue *kv)
+{
+	arrowMetadataKeyValueCache *mc_kv;
+	size_t		sz = (offsetof(arrowMetadataKeyValueCache,data)
+					  + kv->_key_len + 1
+					  + kv->_value_len + 1);
+	mc_kv = __allocMetadataCacheCommon(p_mc_block, sz);
+	if (mc_kv)
+	{
+		char   *pos = mc_kv->data;
+
+		mc_kv->next = NULL;
+		mc_kv->key = pos;
+		mc_kv->_key_len = kv->_key_len;
+		strncpy(pos, kv->key, kv->_key_len);
+		pos[kv->_key_len] = '\0';
+		pos += kv->_key_len + 1;
+
+		mc_kv->value = pos;
+		mc_kv->_value_len = kv->_value_len;
+		strncpy(pos, kv->value, kv->_value_len);
+		pos[kv->_value_len] = '\0';
+   }
+   return mc_kv;
+}
+
+static arrowMetadataFieldCache *
+__allocMetadataFieldCache(arrowMetadataCacheBlock **p_mc_block)
+{
+	return (arrowMetadataFieldCache *)
+		__allocMetadataCacheCommon(p_mc_block, sizeof(arrowMetadataFieldCache));
 }
 
 static arrowMetadataCache *
-__allocMetadataCache(void)
+__allocMetadataCache(arrowMetadataCacheBlock **p_mc_block)
 {
-	arrowMetadataCache *mcache;
-	dlist_node *dnode;
-
-	if (dlist_is_empty(&arrow_metadata_cache->free_mcaches))
-	{
-		arrowMetadataCacheBlock *mc_block;
-		char   *pos, *end;
-
-		while (dlist_is_empty(&arrow_metadata_cache->free_blocks))
-		{
-			if (!__reclaimMetadataCache())
-				return NULL;
-		}
-		dnode = dlist_pop_head_node(&arrow_metadata_cache->free_blocks);
-		mc_block = dlist_container(arrowMetadataCacheBlock, chain, dnode);
-		memset(mc_block, 0, offsetof(arrowMetadataCacheBlock, data));
-		mc_block->unitsz = MAXALIGN(sizeof(arrowMetadataCache));
-		for (pos = mc_block->data, end = (char *)mc_block + ARROW_METADATA_BLOCKSZ;
-			 pos + mc_block->unitsz <= end;
-			 pos += mc_block->unitsz)
-		{
-			mcache = (arrowMetadataCache *)pos;
-			mcache->owner = mc_block;
-			mcache->magic = ARROW_METADATA_CACHE_FREE_MAGIC;
-			dlist_push_tail(&arrow_metadata_cache->free_mcaches,
-							&mcache->chain);
-		}
-	}
-	dnode = dlist_pop_head_node(&arrow_metadata_cache->free_mcaches);
-	mcache = dlist_container(arrowMetadataCache, chain, dnode);
-	mcache->owner->n_actives++;
-	Assert(mcache->magic == ARROW_METADATA_CACHE_FREE_MAGIC);
-	memset(&mcache->chain, 0, (offsetof(arrowMetadataCache, magic) -
-							   offsetof(arrowMetadataCache, chain)));
-	mcache->magic = ARROW_METADATA_CACHE_ACTIVE_MAGIC;
-	return mcache;
+	return (arrowMetadataCache *)
+		__allocMetadataCacheCommon(p_mc_block, sizeof(arrowMetadataCache));
 }
 
 /*
@@ -524,35 +499,34 @@ arrowMetadataHashIndex(struct stat *stat_buf)
 	return hash % ARROW_METADATA_HASH_NSLOTS;
 }
 
-static arrowMetadataCache *
+static arrowMetadataCacheBlock *
 lookupArrowMetadataCache(struct stat *stat_buf, bool has_exclusive)
 {
-	arrowMetadataCache *mcache;
-	uint32_t	hindex;
+	uint32_t	hindex = arrowMetadataHashIndex(stat_buf);
 	dlist_mutable_iter iter;
 
-	hindex = arrowMetadataHashIndex(stat_buf);
 	dlist_foreach_modify(iter, &arrow_metadata_cache->hash_slots[hindex])
 	{
-		mcache = dlist_container(arrowMetadataCache, chain, iter.cur);
+		arrowMetadataCacheBlock *mc_block
+			= dlist_container(arrowMetadataCacheBlock, chain, iter.cur);
 
-		if (stat_buf->st_dev == mcache->stat_buf.st_dev &&
-			stat_buf->st_ino == mcache->stat_buf.st_ino)
+		if (stat_buf->st_dev == mc_block->stat_buf.st_dev &&
+			stat_buf->st_ino == mc_block->stat_buf.st_ino)
 		{
 			/*
 			 * Is the metadata cache still valid?
 			 */
-			if (stat_buf->st_mtim.tv_sec < mcache->stat_buf.st_mtim.tv_sec ||
-				(stat_buf->st_mtim.tv_sec == mcache->stat_buf.st_mtim.tv_sec &&
-				 stat_buf->st_mtim.tv_nsec <= mcache->stat_buf.st_mtim.tv_nsec))
+			if (stat_buf->st_mtim.tv_sec < mc_block->stat_buf.st_mtim.tv_sec ||
+				(stat_buf->st_mtim.tv_sec == mc_block->stat_buf.st_mtim.tv_sec &&
+				 stat_buf->st_mtim.tv_nsec <= mc_block->stat_buf.st_mtim.tv_nsec))
 			{
 				/* ok, found */
 				SpinLockAcquire(&arrow_metadata_cache->lru_lock);
-				gettimeofday(&mcache->lru_tv, NULL);
+				gettimeofday(&mc_block->lru_tv, NULL);
 				dlist_move_head(&arrow_metadata_cache->lru_list,
-								&mcache->lru_chain);
+								&mc_block->lru_chain);
 				SpinLockRelease(&arrow_metadata_cache->lru_lock);
-				return mcache;
+				return mc_block;
 			}
 			else if (has_exclusive)
 			{
@@ -561,13 +535,13 @@ lookupArrowMetadataCache(struct stat *stat_buf, bool has_exclusive)
 				 * If caller has exclusive lock, we release it.
 				 */
 				SpinLockAcquire(&arrow_metadata_cache->lru_lock);
-				dlist_delete(&mcache->lru_chain);
-				memset(&mcache->lru_chain, 0, sizeof(dlist_node));
+				dlist_delete(&mc_block->lru_chain);
+				memset(&mc_block->lru_chain, 0, sizeof(dlist_node));
 				SpinLockRelease(&arrow_metadata_cache->lru_lock);
-				dlist_delete(&mcache->chain);
-				memset(&mcache->chain, 0, sizeof(dlist_node));
+				dlist_delete(&mc_block->chain);
+				memset(&mc_block->chain, 0, sizeof(dlist_node));
 
-				__releaseMetadataCache(mcache);
+				__releaseMetadataCacheBlock(mc_block);
 			}
 		}
 	}
@@ -850,7 +824,7 @@ buildArrowStatsBinary(const ArrowFooter *footer, Bitmapset **p_stat_attrs)
 										 footer->_num_recordBatches))
 		{
 			if (p_stat_attrs)
-				*p_stat_attrs = bms_add_member(*p_stat_attrs, j+1);
+				*p_stat_attrs = bms_add_member(*p_stat_attrs, j);
 			found = true;
 		}
 	}
@@ -923,7 +897,11 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	Oid			opfamily = InvalidOid;
 	StrategyNumber strategy = InvalidStrategy;
 	CatCList   *catlist;
-	int			i;
+	int			i, anum;
+
+	/* quick bailout if not binary operator */
+	if (list_length(op->args) != 2)
+		return false;
 
 	if (!reverse)
 	{
@@ -948,7 +926,8 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 		return false;
 	if (var->varnosyn != scan->scanrelid)
 		return false;
-	if (!bms_is_member(var->varattnosyn, as_hint->stat_attrs))
+	anum = var->varattnosyn - FirstLowInvalidHeapAttributeNumber;
+	if (!bms_is_member(anum, as_hint->stat_attrs))
 		return false;
 	if (contain_var_clause(arg) ||
 		contain_volatile_functions(arg))
@@ -1038,7 +1017,7 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 
 		opcode = get_opfamily_member(opfamily, var->vartype,
 									 exprType((Node *)arg),
-									 BTLessEqualStrategyNumber);
+									 BTLessStrategyNumber);
 		expr = make_opclause(opcode,
 							 op->opresulttype,
 							 op->opretset,
@@ -1063,6 +1042,218 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 	return true;
 }
 
+static bool
+__buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
+							   ScanState *ss,
+							   ScalarArrayOpExpr *sa_op)
+{
+	Oid			opcode = sa_op->opno;
+	Var		   *var;
+	Const	   *con;
+	Expr	   *expr;
+	Oid			elem_oid;
+	int16		elem_typlen;
+	bool		elem_typbyval;
+	Datum		elem_datum;
+	bool		elem_isnull;
+	Oid			opfamily = InvalidOid;
+	StrategyNumber strategy = InvalidStrategy;
+	ArrayType  *arr;
+	ArrayIterator iter;
+	CatCList   *catlist;
+	List	   *result_args = NIL;
+	bool		retval = false;
+	int			anum;
+
+	if (list_length(sa_op->args) != 2)
+		return false;
+	var = linitial(sa_op->args);
+	con = lsecond(sa_op->args);
+
+	/*
+	 * Is it VAR <OPER> ARRAY form?
+	 *
+	 * MEMO: expression nodes (like Var) might be rewritten to INDEX_VAR +
+	 * resno on the custom_scan_tlist by setrefs.c, so we should reference
+	 * Var::varnosyn and ::varattnosyn, instead of ::varno and ::varattno.
+	 */
+	if (!OidIsValid(opcode) ||
+		!IsA(var, Var) ||
+		!IsA(con, Const) ||
+		con->constisnull)
+		return false;
+	elem_oid = get_element_type(con->consttype);
+	if (!OidIsValid(elem_oid))
+		return false;
+	get_typlenbyval(elem_oid, &elem_typlen, &elem_typbyval);
+
+	anum = var->varattnosyn - FirstLowInvalidHeapAttributeNumber;
+	if (!bms_is_member(anum, as_hint->stat_attrs))
+		return false;
+
+	/*
+	 * Identify the comparison strategy
+	 */
+	catlist = SearchSysCacheList1(AMOPOPID, ObjectIdGetDatum(sa_op->opno));
+	for (int i=0; i < catlist->n_members; i++)
+	{
+		HeapTuple	tuple = &catlist->members[i]->tuple;
+		Form_pg_amop amop = (Form_pg_amop) GETSTRUCT(tuple);
+
+		if (amop->amopmethod == BRIN_AM_OID)
+		{
+			opfamily = amop->amopfamily;
+			strategy = amop->amopstrategy;
+			break;
+		}
+	}
+	ReleaseSysCacheList(catlist);
+
+	/*
+	 * Iterate for each array element
+	 */
+	arr = DatumGetArrayTypeP(con->constvalue);
+	iter = array_create_iterator(arr, 0, NULL);
+	while (array_iterate(iter, &elem_datum, &elem_isnull))
+	{
+		if (strategy == BTLessStrategyNumber ||
+			strategy == BTLessEqualStrategyNumber)
+		{
+			/*
+			 * if (VAR < ARG) --> (Min >= ARG), can be skipped
+			 * if (VAR <= ARG) --> (Min > ARG), can be skipped
+			 */
+			Oid		negator = get_negator(opcode);
+
+			if (!OidIsValid(negator))
+				goto bailout;
+			expr = make_opclause(negator,
+								 get_op_rettype(negator),
+								 false,
+								 (Expr *)makeVar(INNER_VAR,
+												 var->varattno,
+												 var->vartype,
+												 var->vartypmod,
+												 var->varcollid,
+												 0),
+								 (Expr *)makeConst(elem_oid,
+												   con->consttypmod,
+												   con->constcollid,
+												   elem_typlen,
+												   elem_datum,
+												   elem_isnull,
+												   elem_typbyval),
+								 InvalidOid,
+								 sa_op->inputcollid);
+			set_opfuncid((OpExpr *)expr);
+			result_args = lappend(result_args, expr);
+		}
+		else if (strategy == BTGreaterEqualStrategyNumber ||
+				 strategy == BTGreaterStrategyNumber)
+		{
+			/* if (VAR > ARG) --> (Max <= ARG), can be skipped */
+			/* if (VAR >= ARG) --> (Max < ARG), can be skipped */
+			Oid		negator = get_negator(opcode);
+
+			if (!OidIsValid(negator))
+				goto bailout;
+			expr = make_opclause(negator,
+								 get_op_rettype(negator),
+								 false,
+								 (Expr *)makeVar(OUTER_VAR,
+												 var->varattno,
+												 var->vartype,
+												 var->vartypmod,
+												 var->varcollid,
+												 0),
+								 (Expr *)makeConst(elem_oid,
+												   con->consttypmod,
+												   con->constcollid,
+												   elem_typlen,
+												   elem_datum,
+												   elem_isnull,
+												   elem_typbyval),
+								 InvalidOid,
+								 sa_op->inputcollid);
+			set_opfuncid((OpExpr *)expr);
+			result_args = lappend(result_args, expr);
+		}
+		else if (strategy == BTEqualStrategyNumber)
+		{
+			/* (VAR = ARG) --> (Min > ARG) || (Max < ARG), can be skipped */
+			Oid		gt_opcode;
+			Oid		lt_opcode;
+			Expr   *gt_expr;
+			Expr   *lt_expr;
+
+			gt_opcode = get_opfamily_member(opfamily, var->vartype,
+											elem_oid,
+											BTGreaterStrategyNumber);
+			gt_expr = make_opclause(gt_opcode,
+									get_op_rettype(gt_opcode),
+									false,
+									(Expr *)makeVar(INNER_VAR,
+													var->varattno,
+													var->vartype,
+													var->vartypmod,
+													var->varcollid,
+													0),
+									(Expr *)makeConst(elem_oid,
+													  con->consttypmod,
+													  con->constcollid,
+													  elem_typlen,
+													  elem_datum,
+													  elem_isnull,
+													  elem_typbyval),
+									InvalidOid,
+									sa_op->inputcollid);
+			set_opfuncid((OpExpr *)gt_expr);
+
+			lt_opcode = get_opfamily_member(opfamily, var->vartype,
+											elem_oid,
+											BTLessStrategyNumber);
+			lt_expr = make_opclause(lt_opcode,
+									get_op_rettype(lt_opcode),
+									false,
+									(Expr *)makeVar(OUTER_VAR,
+													var->varattno,
+													var->vartype,
+													var->vartypmod,
+													var->varcollid,
+													0),
+									(Expr *)makeConst(elem_oid,
+													  con->consttypmod,
+													  con->constcollid,
+													  elem_typlen,
+													  elem_datum,
+													  elem_isnull,
+													  elem_typbyval),
+									InvalidOid,
+									sa_op->inputcollid);
+			set_opfuncid((OpExpr *)lt_expr);
+
+			expr = makeBoolExpr(OR_EXPR,
+								list_make2(gt_expr, lt_expr),
+								-1);
+			result_args = lappend(result_args, expr);
+		}
+		else
+		{
+			goto bailout;
+		}
+	}
+	as_hint->eval_quals = lappend(as_hint->eval_quals,
+								  makeBoolExpr(sa_op->useOr ? AND_EXPR : OR_EXPR,
+											   result_args,
+											   -1));
+	as_hint->load_attrs = bms_add_member(as_hint->load_attrs, var->varattno);
+	retval = true;
+bailout:
+	array_free_iterator(iter);
+
+	return retval;
+}
+
 static arrowStatsHint *
 execInitArrowStatsHint(ScanState *ss, List *outer_quals, Bitmapset *stat_attrs)
 {
@@ -1078,13 +1269,19 @@ execInitArrowStatsHint(ScanState *ss, List *outer_quals, Bitmapset *stat_attrs)
 	as_hint->stat_attrs = stat_attrs;
 	foreach (lc, outer_quals)
 	{
-		OpExpr *op = lfirst(lc);
+		Expr   *expr = lfirst(lc);
 
-		if (IsA(op, OpExpr) && list_length(op->args) == 2 &&
-			(__buildArrowStatsOper(as_hint, ss, op, false) ||
-			 __buildArrowStatsOper(as_hint, ss, op, true)))
+		if (IsA(expr, OpExpr) &&
+			(__buildArrowStatsOper(as_hint, ss, (OpExpr *)expr, false) ||
+			 __buildArrowStatsOper(as_hint, ss, (OpExpr *)expr, true)))
 		{
-			as_hint->orig_quals = lappend(as_hint->orig_quals, op);
+			as_hint->orig_quals = lappend(as_hint->orig_quals, expr);
+		}
+		else if (IsA(expr, ScalarArrayOpExpr) &&
+				 __buildArrowStatsScalarArrayOp(as_hint, ss,
+												(ScalarArrayOpExpr *)expr))
+		{
+			as_hint->orig_quals = lappend(as_hint->orig_quals, expr);
 		}
 	}
 	if (as_hint->eval_quals == NIL)
@@ -1108,6 +1305,7 @@ static bool
 execCheckArrowStatsHint(arrowStatsHint *stats_hint,
 						RecordBatchState *rb_state)
 {
+	ArrowFileState *af_state = rb_state->af_state;
 	ExprContext	   *econtext = stats_hint->econtext;
 	TupleTableSlot *min_values = econtext->ecxt_innertuple;
 	TupleTableSlot *max_values = econtext->ecxt_outertuple;
@@ -1122,25 +1320,62 @@ execCheckArrowStatsHint(arrowStatsHint *stats_hint,
 		 anum >= 0;
 		 anum = bms_next_member(stats_hint->load_attrs, anum))
 	{
-		RecordBatchFieldState *rb_field = &rb_state->fields[anum-1];
+		int		field_index;
 
-		Assert(anum > 0 && anum <= rb_state->nfields);
-		if (!rb_field->stat_datum.isnull)
+		Assert(anum > 0 && anum <= af_state->ncols);
+		field_index = af_state->attrs[anum-1].field_index;
+		if (field_index >= 0)
 		{
-			min_values->tts_isnull[anum-1] = false;
-			max_values->tts_isnull[anum-1] = false;
-			if (rb_field->atttypid == NUMERICOID)
+			RecordBatchFieldState *rb_field = &rb_state->fields[field_index];
+
+			Assert(field_index < rb_state->nfields);
+			if (!rb_field->stat_datum.isnull)
 			{
-				min_values->tts_values[anum-1]
-					= PointerGetDatum(&rb_field->stat_datum.min.numeric);
-				max_values->tts_values[anum-1]
-					= PointerGetDatum(&rb_field->stat_datum.max.numeric);
+				min_values->tts_isnull[anum-1] = false;
+				max_values->tts_isnull[anum-1] = false;
+				if (rb_field->atttypid == NUMERICOID)
+				{
+					min_values->tts_values[anum-1]
+						= PointerGetDatum(&rb_field->stat_datum.min.numeric);
+					max_values->tts_values[anum-1]
+						= PointerGetDatum(&rb_field->stat_datum.max.numeric);
+				}
+				else
+				{
+					min_values->tts_values[anum-1] = rb_field->stat_datum.min.datum;
+					max_values->tts_values[anum-1] = rb_field->stat_datum.max.datum;
+				}
 			}
-			else
+		}
+		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE)
+		{
+			bool	virtual_isnull = af_state->attrs[anum-1].virtual_isnull;
+			Datum	virtual_datum  = af_state->attrs[anum-1].virtual_datum;
+
+			min_values->tts_isnull[anum-1] = virtual_isnull;
+			max_values->tts_isnull[anum-1] = virtual_isnull;
+			if (!virtual_isnull)
 			{
-				min_values->tts_values[anum-1] = rb_field->stat_datum.min.datum;
-				max_values->tts_values[anum-1] = rb_field->stat_datum.max.datum;
+				min_values->tts_values[anum-1] = virtual_datum;
+				max_values->tts_values[anum-1] = virtual_datum;
 			}
+		}
+		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH)
+		{
+			bool	virtual_isnull = rb_state->virtual_isnull;
+			Datum	virtual_datum  = rb_state->virtual_datum;
+
+			min_values->tts_isnull[anum-1] = virtual_isnull;
+			max_values->tts_isnull[anum-1] = virtual_isnull;
+			if (!virtual_isnull)
+			{
+				min_values->tts_values[anum-1] = virtual_datum;
+				max_values->tts_values[anum-1] = virtual_datum;
+			}
+		}
+		else
+		{
+			elog(ERROR, "Bug? unexpected field-index (%d)", field_index);
 		}
 	}
 	datum = ExecEvalExprSwitchContext(stats_hint->eval_state, econtext, &isnull);
@@ -1176,6 +1411,7 @@ static void
 __buildRecordBatchFieldStateByCache(RecordBatchFieldState *rb_field,
 									arrowMetadataFieldCache *fcache)
 {
+	strcpy(rb_field->attname, fcache->attname);
 	rb_field->atttypid       = fcache->atttypid;
 	rb_field->atttypmod      = fcache->atttypmod;
 	rb_field->attopts        = fcache->attopts;
@@ -1211,16 +1447,13 @@ __buildRecordBatchFieldStateByCache(RecordBatchFieldState *rb_field,
 	}
 }
 
-static ArrowFileState *
-__buildArrowFileStateByCache(const char *filename,
-							 arrowMetadataCache *mcache,
+static bool
+__setupArrowFileStateByCache(ArrowFileState *af_state,
+							 const char *filename,
+							 arrowMetadataCacheBlock *mc_block,
 							 Bitmapset **p_stat_attrs)
 {
-	ArrowFileState	   *af_state;
-
-	af_state = palloc0(sizeof(ArrowFileState));
-	af_state->filename = pstrdup(filename);
-	memcpy(&af_state->stat_buf, &mcache->stat_buf, sizeof(struct stat));
+	arrowMetadataCache *mcache = &mc_block->mcache_head;
 
 	while (mcache)
 	{
@@ -1242,7 +1475,7 @@ __buildArrowFileStateByCache(const char *filename,
 
 			fcache = dlist_container(arrowMetadataFieldCache, chain, iter.cur);
 			if (p_stat_attrs && !fcache->stat_datum.isnull)
-				*p_stat_attrs = bms_add_member(*p_stat_attrs, j+1);
+				*p_stat_attrs = bms_add_member(*p_stat_attrs, j);
 			__buildRecordBatchFieldStateByCache(&rb_state->fields[j++], fcache);
 		}
 		Assert(j == rb_state->nfields);
@@ -1250,7 +1483,7 @@ __buildArrowFileStateByCache(const char *filename,
 
 		mcache = mcache->next;
 	}
-	return af_state;
+	return true;
 }
 
 /*
@@ -1629,6 +1862,8 @@ __buildRecordBatchFieldState(setupRecordBatchContext *con,
 	if (con->fnode_curr >= con->fnode_tail)
 		elog(ERROR, "RecordBatch has less ArrowFieldNode than expected");
 	fnode = con->fnode_curr++;
+	strncpy(rb_field->attname, field->name, NAMEDATALEN);
+	rb_field->attname[NAMEDATALEN-1] = '\0';
 	rb_field->atttypid    = InvalidOid;
 	rb_field->atttypmod   = -1;
 	rb_field->nitems      = fnode->length;
@@ -1800,36 +2035,33 @@ readArrowFile(const char *filename, ArrowFileInfo *af_info, bool missing_ok)
 	return true;
 }
 
-static ArrowFileState *
-__buildArrowFileStateByFile(const char *filename, Bitmapset **p_stat_attrs)
+static bool
+__setupArrowFileStateByFile(ArrowFileState *af_state,
+							const char *filename,
+							ArrowFileInfo *af_info,
+							Bitmapset **p_stat_attrs)
 {
-	ArrowFileInfo af_info;
-	ArrowFileState *af_state;
 	arrowStatsBinary *arrow_bstats;
 
-	if (!readArrowFile(filename, &af_info, true))
+	if (!readArrowFile(filename, af_info, true))
 	{
 		elog(DEBUG2, "file '%s' is missing: %m", filename);
-		return NULL;
+		return false;
 	}
-	if (af_info.recordBatches == NULL)
+	if (af_info->recordBatches == NULL)
 	{
 		elog(DEBUG2, "arrow file '%s' contains no RecordBatch", filename);
-		return NULL;
+		return false;
 	}
-	/* allocate ArrowFileState */
-	af_state = palloc0(sizeof(ArrowFileInfo));
-	af_state->filename = pstrdup(filename);
-	memcpy(&af_state->stat_buf, &af_info.stat_buf, sizeof(struct stat));
-
-	arrow_bstats = buildArrowStatsBinary(&af_info.footer, p_stat_attrs);
-	for (int i=0; i < af_info.footer._num_recordBatches; i++)
+	/* set up ArrowFileState */
+	arrow_bstats = buildArrowStatsBinary(&af_info->footer, p_stat_attrs);
+	for (int i=0; i < af_info->footer._num_recordBatches; i++)
 	{
-		ArrowBlock	     *block  = &af_info.footer.recordBatches[i];
-		ArrowRecordBatch *rbatch = &af_info.recordBatches[i].body.recordBatch;
+		ArrowBlock	     *block  = &af_info->footer.recordBatches[i];
+		ArrowRecordBatch *rbatch = &af_info->recordBatches[i].body.recordBatch;
 		RecordBatchState *rb_state;
 
-		rb_state = __buildRecordBatchStateOne(&af_info.footer.schema,
+		rb_state = __buildRecordBatchStateOne(&af_info->footer.schema,
 											  af_state, i, block, rbatch);
 		if (arrow_bstats)
 			applyArrowStatsBinary(rb_state, arrow_bstats);
@@ -1837,18 +2069,22 @@ __buildArrowFileStateByFile(const char *filename, Bitmapset **p_stat_attrs)
 	}
 	releaseArrowStatsBinary(arrow_bstats);
 
-	return af_state;
+	return true;
 }
 
-
 static arrowMetadataFieldCache *
-__buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field)
+__buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field,
+							   ArrowField *arrow_field,
+							   arrowMetadataFieldCache *fcache_prev,
+							   arrowMetadataCacheBlock **p_mc_block)
 {
 	arrowMetadataFieldCache *fcache;
+	dlist_node	   *__dnode_prev = NULL;
 
-	fcache = __allocMetadataFieldCache();
+	fcache = __allocMetadataFieldCache(p_mc_block);
 	if (!fcache)
 		return NULL;
+	strcpy(fcache->attname, rb_field->attname);
 	fcache->atttypid = rb_field->atttypid;
 	fcache->atttypmod = rb_field->atttypmod;
 	memcpy(&fcache->attopts, &rb_field->attopts, sizeof(ArrowTypeOptions));
@@ -1862,18 +2098,53 @@ __buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field)
 	fcache->extra_length = rb_field->extra_length;
 	memcpy(&fcache->stat_datum,
 		   &rb_field->stat_datum, sizeof(MinMaxStatDatum));
+	/* custom-metadata can be reused for the record-batch > 0 */
+	if (fcache_prev)
+		fcache->custom_metadata = fcache_prev->custom_metadata;
+	else
+	{
+		arrowMetadataKeyValueCache *mc_kv_prev = NULL;
+		arrowMetadataKeyValueCache *mc_kv;
+
+		fcache->custom_metadata = NULL;
+		for (int k=0; k < arrow_field->_num_custom_metadata; k++)
+		{
+			mc_kv = __allocMetadataKeyValueCache(p_mc_block,
+												 &arrow_field->custom_metadata[k]);
+			if (!mc_kv)
+				return NULL;
+			if (mc_kv_prev)
+				mc_kv_prev->next = mc_kv;
+			else
+				fcache->custom_metadata = mc_kv;
+			mc_kv_prev = mc_kv;
+		}
+	}
+
+	/* walk down the child fields if any */
 	fcache->num_children = rb_field->num_children;
-	dlist_init(&fcache->children);
+		dlist_init(&fcache->children);
 	for (int j=0; j < rb_field->num_children; j++)
 	{
+		arrowMetadataFieldCache *__fcache_prev = NULL;
 		arrowMetadataFieldCache *__fcache;
 
-		__fcache = __buildArrowMetadataFieldCache(&rb_field->children[j]);
-		if (!__fcache)
+		if (fcache_prev)
 		{
-			__releaseMetadataFieldCache(fcache);
-			return NULL;
+			if (!__dnode_prev)
+				__dnode_prev = dlist_head_node(&fcache_prev->children);
+			else
+				__dnode_prev = dlist_next_node(&fcache_prev->children,
+											   __dnode_prev);
+			__fcache_prev = dlist_container(arrowMetadataFieldCache,
+											chain, __dnode_prev);
 		}
+		__fcache = __buildArrowMetadataFieldCache(&rb_field->children[j],
+												  &arrow_field->children[j],
+												  __fcache_prev,
+												  p_mc_block);
+		if (!__fcache)
+			return NULL;
 		dlist_push_tail(&fcache->children, &__fcache->chain);
 	}
 	return fcache;
@@ -1885,48 +2156,91 @@ __buildArrowMetadataFieldCache(RecordBatchFieldState *rb_field)
  * it builds arrowMetadataCache entries according to the supplied
  * ArrowFileState
  */
-static void
-__buildArrowMetadataCacheNoLock(ArrowFileState *af_state)
+static arrowMetadataCacheBlock *
+__buildArrowMetadataCacheNoLock(ArrowFileState *af_state,
+								ArrowFileInfo *af_info)
 {
-	arrowMetadataCache *mcache_head = NULL;
+	ArrowSchema	   *schema = &af_info->footer.schema;
+	arrowMetadataCacheBlock *mc_block_head = NULL;
+	arrowMetadataCacheBlock *mc_block_curr;
 	arrowMetadataCache *mcache_prev = NULL;
 	arrowMetadataCache *mcache;
 	uint32_t	hindex;
 	ListCell   *lc;
 
+	Assert(list_length(af_state->rb_list) > 0);
 	foreach (lc, af_state->rb_list)
 	{
 		RecordBatchState *rb_state = lfirst(lc);
+		dlist_node	   *dnode_prev = NULL;
 
-		mcache = __allocMetadataCache();
-		if (!mcache)
+		if (!mc_block_head)
 		{
-			__releaseMetadataCache(mcache_head);
-			return;
+			arrowMetadataKeyValueCache *mc_kv_prev = NULL;
+			arrowMetadataKeyValueCache *mc_kv;
+
+			mc_block_head = __allocMetadataCacheBlock();
+			if (!mc_block_head)
+				goto bailout;
+			memcpy(&mc_block_head->stat_buf,
+				   &af_state->stat_buf, sizeof(struct stat));
+			mc_block_head->usage = MAXALIGN(offsetof(arrowMetadataCacheBlock,
+													 mcache_head) +
+											sizeof(arrowMetadataCache));
+			mc_block_curr = mc_block_head;
+			/* custom-metadata; must be setup after usage assignment */
+			for (int k=0; k < schema->_num_custom_metadata; k++)
+			{
+				mc_kv = __allocMetadataKeyValueCache(&mc_block_curr,
+													 &schema->custom_metadata[k]);
+				if (!mc_kv)
+					goto bailout;
+				if (mc_kv_prev)
+					mc_kv_prev->next = mc_kv;
+				else
+					mc_block_head->custom_metadata = mc_kv;
+				mc_kv_prev = mc_kv;
+			}
+			/* metadata-cache for the first record-batch */
+			mcache = &mc_block_head->mcache_head;
 		}
-		memcpy(&mcache->stat_buf,
-			   &af_state->stat_buf, sizeof(struct stat));
+		else
+		{
+			mcache = __allocMetadataCache(&mc_block_curr);
+			if (!mcache)
+				goto bailout;
+		}
+		memset(mcache, 0, sizeof(arrowMetadataCache));
 		mcache->rb_index  = rb_state->rb_index;
 		mcache->rb_offset = rb_state->rb_offset;
 		mcache->rb_length = rb_state->rb_length;
 		mcache->rb_nitems = rb_state->rb_nitems;
 		mcache->nfields   = rb_state->nfields;
 		dlist_init(&mcache->fields);
-		if (!mcache_head)
-			mcache_head = mcache;
-		else
+		if (mcache_prev)
 			mcache_prev->next = mcache;
-
 		for (int j=0; j < rb_state->nfields; j++)
 		{
+			arrowMetadataFieldCache *fcache_prev = NULL;
 			arrowMetadataFieldCache *fcache;
 
-			fcache = __buildArrowMetadataFieldCache(&rb_state->fields[j]);
-			if (!fcache)
+			if (mcache_prev)
 			{
-				__releaseMetadataCache(mcache_head);
-				return;
+				if (!dnode_prev)
+					dnode_prev = dlist_head_node(&mcache_prev->fields);
+				else
+					dnode_prev = dlist_next_node(&mcache_prev->fields,
+												 dnode_prev);
+				fcache_prev = dlist_container(arrowMetadataFieldCache,
+											  chain, dnode_prev);
 			}
+			Assert(j < schema->_num_fields);
+			fcache = __buildArrowMetadataFieldCache(&rb_state->fields[j],
+													&schema->fields[j],
+													fcache_prev,
+													&mc_block_curr);
+			if (!fcache)
+				goto bailout;
 			dlist_push_tail(&mcache->fields, &fcache->chain);
 		}
 		mcache_prev = mcache;
@@ -1934,87 +2248,424 @@ __buildArrowMetadataCacheNoLock(ArrowFileState *af_state)
 	/* chain to the list */
 	hindex = arrowMetadataHashIndex(&af_state->stat_buf);
 	dlist_push_tail(&arrow_metadata_cache->hash_slots[hindex],
-					&mcache_head->chain );
+					&mc_block_head->chain );
 	SpinLockAcquire(&arrow_metadata_cache->lru_lock);
-	gettimeofday(&mcache_head->lru_tv, NULL);
-	dlist_push_head(&arrow_metadata_cache->lru_list, &mcache_head->lru_chain);
+	gettimeofday(&mc_block_head->lru_tv, NULL);
+	dlist_push_head(&arrow_metadata_cache->lru_list, &mc_block_head->lru_chain);
 	SpinLockRelease(&arrow_metadata_cache->lru_lock);
+	return mc_block_head;
+
+bailout:
+	if (mc_block_head)
+		__releaseMetadataCacheBlock(mc_block_head);
+	return NULL;
+}
+
+/*
+ * __processVirtualColumn - process one token of the virtual token cstring
+ */
+static Datum
+__processVirtualColumn(Form_pg_attribute attr,
+					   char *vc_key,
+					   char *vc_value,
+					   Relation frel,
+					   const char *filename)
+{
+	MemoryContext oldcxt = CurrentMemoryContext;
+	Oid		type_input;
+	Oid		type_ioparam;
+	Datum	datum;
+
+	getTypeInputInfo(attr->atttypid,
+					 &type_input,
+					 &type_ioparam);
+	PG_TRY();
+	{
+		datum = OidInputFunctionCall(type_input,
+									 vc_value,
+									 type_ioparam,
+									 attr->atttypmod);
+	}
+	PG_CATCH();
+	{
+		MemoryContext errcxt = MemoryContextSwitchTo(oldcxt);
+		ErrorData  *edata = CopyErrorData();
+
+		ereport(Max(ERROR, edata->elevel),
+				errmsg("(%s:%d) %s",
+					   edata->filename,
+					   edata->lineno,
+					   edata->message),
+				errdetail("arrow_fdw: processing virtual column '%s' of the file '%s' at the attribute '%s' of foreign table '%s'",
+						  vc_key, filename,
+						  NameStr(attr->attname),
+						  RelationGetRelationName(frel)));
+		MemoryContextSwitchTo(errcxt);
+	}
+	PG_END_TRY();
+
+	return datum;
+}
+
+static List *
+__fetchVirtualSourceByCache(arrowMetadataCacheBlock *mc_block,
+							List *virtual_columns,
+							List *source_fields)
+{
+	List	   *results = NIL;
+	ListCell   *lc1, *lc2;
+
+	foreach (lc1, source_fields)
+	{
+		const char *src = lfirst(lc1);
+		const char *value = NULL;
+
+		if (strncmp(src, "virtual:", 8) == 0)
+		{
+			const char *key = src + 8;
+
+			foreach (lc2, virtual_columns)
+			{
+				virtualColumnDef *vcdef = lfirst(lc2);
+
+				if (strcmp(key, vcdef->key) == 0)
+				{
+					value = vcdef->value;
+					goto found;
+				}
+			}
+		}
+		else if (strncmp(src, "metadata:", 9) == 0 ||
+				 strncmp(src, "metadata-split:", 15) == 0)
+		{
+			char   *key = alloca(strlen(src));
+			char   *pos;
+
+			strcpy(key, strchr(src, ':') + 1);
+			pos = strchr(key, '.');
+			if (pos)
+				*pos++ = '\0';
+			if (!pos)
+			{
+				/* fetch custom-metadata from Schema */
+				arrowMetadataKeyValueCache *mc_kv = mc_block->custom_metadata;
+
+				while (mc_kv)
+				{
+					if (strcmp(mc_kv->key, key) == 0)
+					{
+						value = mc_kv->value;
+						goto found;
+					}
+					mc_kv = mc_kv->next;
+				}
+			}
+			else
+			{
+				/* fetch custom-metadata from Fields */
+				dlist_iter	iter;
+
+				dlist_foreach (iter, &mc_block->mcache_head.fields)
+				{
+					arrowMetadataFieldCache *fcache = dlist_container(arrowMetadataFieldCache,
+																	  chain, iter.cur);
+					if (strcmp(fcache->attname, key) == 0)
+					{
+						arrowMetadataKeyValueCache *mc_kv = fcache->custom_metadata;
+
+						while (mc_kv)
+						{
+							if (strcmp(mc_kv->key, pos) == 0)
+							{
+								value = mc_kv->value;
+								goto found;
+							}
+							mc_kv = mc_kv->next;
+						}
+					}
+				}
+			}
+		}
+	found:
+		results = lappend(results, value ? pstrdup(value) : NULL);
+	}
+	return results;
+}
+
+static List *
+__fetchVirtualSourceByFile(ArrowFileInfo *af_info,
+						   List *virtual_columns,
+						   List *source_fields)
+{
+	List	   *results = NIL;
+	ListCell   *lc1, *lc2;
+
+	foreach (lc1, source_fields)
+	{
+		const char *src = lfirst(lc1);
+		const char *value = NULL;
+
+		if (strncmp(src, "virtual:", 8) == 0)
+		{
+			const char *key = src + 8;
+
+			foreach (lc2, virtual_columns)
+			{
+				virtualColumnDef *vcdef = lfirst(lc2);
+
+				if (strcmp(key, vcdef->key) == 0)
+				{
+					value = vcdef->value;
+					goto found;
+				}
+			}
+		}
+		else if (strncmp(src, "metadata:", 9) == 0 ||
+				 strncmp(src, "metadata-split:", 15) == 0)
+		{
+			ArrowSchema	*schema = &af_info->footer.schema;
+			char   *key = alloca(strlen(src));
+			char   *pos;
+
+			strcpy(key, strchr(src, ':') + 1);
+			pos = strchr(key, '.');
+			if (pos)
+				*pos++ = '\0';
+
+			if (!pos)
+			{
+				/* fetch custom-metadata from Schema */
+				for (int i=0; i < schema->_num_custom_metadata; i++)
+				{
+					ArrowKeyValue  *kv = &schema->custom_metadata[i];
+
+					if (strcmp(kv->key, key) == 0)
+					{
+						value = kv->value;
+						goto found;
+					}
+				}
+			}
+			else
+			{
+				/* fetch custom-metadata from Fields */
+				for (int i=0; i < schema->_num_fields; i++)
+				{
+					ArrowField *field = &schema->fields[i];
+
+					if (strcmp(field->name, key) == 0)
+					{
+						for (int k=0; k < field->_num_custom_metadata; k++)
+						{
+							ArrowKeyValue  *kv = &field->custom_metadata[k];
+
+							if (strcmp(kv->key, pos) == 0)
+							{
+								value = kv->value;
+								goto found;
+							}
+						}
+					}
+				}
+			}
+		}
+	found:
+		results = lappend(results, value ? pstrdup(value) : NULL);
+	}
+	return results;
 }
 
 static ArrowFileState *
-BuildArrowFileState(Relation frel, const char *filename, Bitmapset **p_stat_attrs)
+BuildArrowFileState(Relation frel,
+					const char *filename,
+					List *source_fields,
+					List *virtual_columns,
+					Bitmapset **p_stat_pg_attrs)
 {
-	arrowMetadataCache *mcache;
+	TupleDesc		tupdesc = RelationGetDescr(frel);
+	arrowMetadataCacheBlock *mc_block;
 	ArrowFileState *af_state;
 	RecordBatchState *rb_state;
+	Bitmapset	   *stat_arrow_attrs = NULL;
+	Bitmapset	   *stat_pg_attrs = NULL;
 	struct stat		stat_buf;
-	TupleDesc		tupdesc;
+	List		   *virtual_sources = NIL;
+	ListCell	   *lc1, *lc2;
+	int				j;
 
 	if (stat(filename, &stat_buf) != 0)
 		elog(ERROR, "failed on stat('%s'): %m", filename);
+	af_state = palloc0(offsetof(ArrowFileState, attrs[tupdesc->natts]));
+	af_state->filename = pstrdup(filename);
+	memcpy(&af_state->stat_buf, &stat_buf, sizeof(struct stat));
+	af_state->ncols = tupdesc->natts;
+	
 	LWLockAcquire(&arrow_metadata_cache->mutex, LW_SHARED);
-	mcache = lookupArrowMetadataCache(&stat_buf, false);
-	if (mcache)
+	mc_block = lookupArrowMetadataCache(&stat_buf, false);
+	if (mc_block)
 	{
 		/* found a valid metadata-cache */
-		af_state = __buildArrowFileStateByCache(filename, mcache,
-												p_stat_attrs);
+		__setupArrowFileStateByCache(af_state,
+									 filename,
+									 mc_block,
+									 &stat_arrow_attrs);
+		/* extract virtual column source info */
+		virtual_sources = __fetchVirtualSourceByCache(mc_block,
+													  virtual_columns,
+													  source_fields);
 	}
 	else
 	{
+		ArrowFileInfo af_info;
+
 		LWLockRelease(&arrow_metadata_cache->mutex);
-
 		/* here is no valid metadata-cache, so build it from the raw file */
-		af_state = __buildArrowFileStateByFile(filename, p_stat_attrs);
-		if (!af_state)
+		if (!__setupArrowFileStateByFile(af_state,
+										 filename,
+										 &af_info,
+										 &stat_arrow_attrs))
 			return NULL;	/* file not found? */
-
+		/* extract virtual column source info */
+		virtual_sources = __fetchVirtualSourceByFile(&af_info,
+													 virtual_columns,
+													 source_fields);
 		LWLockAcquire(&arrow_metadata_cache->mutex, LW_EXCLUSIVE);
-		mcache = lookupArrowMetadataCache(&af_state->stat_buf, true);
-		if (!mcache)
-			__buildArrowMetadataCacheNoLock(af_state);
+		mc_block = lookupArrowMetadataCache(&af_state->stat_buf, true);
+		if (!mc_block)
+			__buildArrowMetadataCacheNoLock(af_state, &af_info);
 	}
 	LWLockRelease(&arrow_metadata_cache->mutex);
 
-	/* compatibility checks */
+	/*
+	 * Maps PG-attribute on a particular Arrow-field, or virtual-column
+	 * according to the column option
+	 */
 	rb_state = linitial(af_state->rb_list);
-	tupdesc = RelationGetDescr(frel);
-	if (tupdesc->natts != rb_state->nfields)
-		elog(ERROR, "arrow_fdw: foreign table '%s' is not compatible to '%s'",
-			 RelationGetRelationName(frel), filename);
-	for (int j=0; j < tupdesc->natts; j++)
+	Assert(tupdesc->natts == af_state->ncols &&
+		   tupdesc->natts == list_length(source_fields) &&
+		   tupdesc->natts == list_length(virtual_sources));
+	j = 0;
+	forboth (lc1, source_fields,
+			 lc2, virtual_sources)
 	{
-		Form_pg_attribute	attr = TupleDescAttr(tupdesc, j);
-		RecordBatchFieldState *rb_field = &rb_state->fields[j];
-		bool		compatible = false;
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
+		char	   *sfield = lfirst(lc1);
+		char	   *vsource = lfirst(lc2);
 
-		if (attr->atttypid == rb_field->atttypid)
-			compatible = true;
+		if (attr->attisdropped)
+		{
+			af_state->attrs[j].field_index = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE;
+			af_state->attrs[j].virtual_isnull = true;
+			af_state->attrs[j].virtual_datum = 0;
+		}
+		else if (strncmp(sfield, "field:", 6) == 0)
+		{
+			const char *field_name = sfield + 6;
+			int			field_index = -1;
+
+			for (int k=0; k < rb_state->nfields; k++)
+			{
+				RecordBatchFieldState *field = &rb_state->fields[k];
+
+				if (strcmp(field->attname, field_name) == 0)
+				{
+					/* also checks data type compatibility */
+					if (IsBinaryCoercible(field->atttypid,
+										  attr->atttypid))
+					{
+						field_index = k;
+						break;
+					}
+					elog(ERROR, "arrow_fdw: foreign table '%s' of '%s' is not compatible to '%s' of '%s'",
+						 NameStr(attr->attname),
+						 RelationGetRelationName(frel),
+						 field->attname,
+						 filename);
+				}
+			}
+			if (field_index < 0)
+				elog(ERROR, "arrow_fdw: foreign table '%s' of '%s' could not find out the field '%s' on the arrow file '%s'",
+					 NameStr(attr->attname),
+					 RelationGetRelationName(frel),
+					 field_name,
+					 filename);
+			af_state->attrs[j].field_index = field_index;
+			af_state->attrs[j].virtual_isnull = true;
+			af_state->attrs[j].virtual_datum = 0;
+
+			if (bms_is_member(field_index, stat_arrow_attrs))
+				stat_pg_attrs = bms_add_member(stat_pg_attrs, attr->attnum -
+											   FirstLowInvalidHeapAttributeNumber);
+		}
+		else if (vsource && (strncmp(sfield, "virtual:", 8) == 0 ||
+							 strncmp(sfield, "metadata:", 9) == 0))
+		{
+			Datum	datum = __processVirtualColumn(attr,
+												   sfield,
+												   vsource,
+												   frel, filename);
+			af_state->attrs[j].field_index = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE;
+			af_state->attrs[j].virtual_isnull = false;
+			af_state->attrs[j].virtual_datum = datum;
+			/*
+			 * The virtual value is immutable to a particular record-batch,
+			 * so we can consider it also works as min/max statistics to skip
+			 * obviously unmatched record-batches.
+			 */
+			stat_pg_attrs = bms_add_member(stat_pg_attrs, attr->attnum -
+										   FirstLowInvalidHeapAttributeNumber);
+		}
+		else if (vsource && strncmp(sfield, "metadata-split:", 15) == 0)
+		{
+			ListCell   *cell;
+			char	   *buffer = pstrdup(vsource);
+			char	   *tok, *pos;
+
+			tok = strtok_r(buffer, ",", &pos);
+			foreach (cell, af_state->rb_list)
+			{
+				RecordBatchState *__rb_state = lfirst(cell);
+
+				if (!tok)
+				{
+					__rb_state->virtual_isnull = true;
+					__rb_state->virtual_datum = 0;
+				}
+				else
+				{
+					Datum	datum = __processVirtualColumn(attr,
+														   sfield,
+														   tok,
+														   frel,
+														   filename);
+					__rb_state->virtual_datum = datum;
+					__rb_state->virtual_isnull = false;
+					tok = strtok_r(NULL, ",", &pos);
+				}
+			}
+			af_state->attrs[j].field_index = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH;
+			af_state->attrs[j].virtual_isnull = true;
+			af_state->attrs[j].virtual_datum = 0;
+			/* see the comment above */
+			stat_pg_attrs = bms_add_member(stat_pg_attrs, attr->attnum -
+										   FirstLowInvalidHeapAttributeNumber);
+			/* cleanup */
+			pfree(buffer);
+		}
 		else
 		{
-			/* check for binary compatible data types */
-			HeapTuple	htup;
-
-			htup = SearchSysCache2(CASTSOURCETARGET,
-								   ObjectIdGetDatum(rb_field->atttypid),
-								   ObjectIdGetDatum(attr->atttypid));
-			if (HeapTupleIsValid(htup))
-			{
-				Form_pg_cast cast = (Form_pg_cast) GETSTRUCT(htup);
-
-				if (cast->castmethod == COERCION_METHOD_BINARY)
-					compatible = true;
-				ReleaseSysCache(htup);
-			}
+			/* just put a virtual NULL */
+			af_state->attrs[j].field_index = __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE;
+			af_state->attrs[j].virtual_isnull = true;
+			af_state->attrs[j].virtual_datum = 0;
 		}
-		if (!compatible)
-			elog(ERROR, "arrow_fdw: foreign table '%s' column '%s' (%s) is not compatible to the arrow field (%s) in the '%s'",
-				 RelationGetRelationName(frel),
-				 NameStr(attr->attname),
-				 format_type_be(attr->atttypid),
-				 format_type_be(rb_field->atttypid),
-				 filename);
+		j++;
 	}
+	bms_free(stat_arrow_attrs);
+	if (p_stat_pg_attrs)
+		*p_stat_pg_attrs = stat_pg_attrs;
+	else
+		bms_free(stat_pg_attrs);
 	return af_state;
 }
 
@@ -2074,6 +2725,8 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 			gpumask_t	__optimal_gpus;
 
 			__optimal_gpus = GetOptimalGpuForFile(af_state->filename);
+			if (__optimal_gpus == INVALID_GPUMASK)
+				return 0;
 			if (lc == list_head(af_list))
 				optimal_gpus = __optimal_gpus;
 			else
@@ -2119,7 +2772,7 @@ GetOptimalDpuForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 static List *
 arrowFdwExcludeFileNamesByPattern(List *filesList,
 								  const char *pattern,
-								  List **p_filesAttrsList)
+								  List **p_virtAttrsList)
 {
 	List	   *results = NIL;	/* only valid files */
 	List	   *attrsList = NIL;
@@ -2128,46 +2781,45 @@ arrowFdwExcludeFileNamesByPattern(List *filesList,
 	foreach (lc, filesList)
 	{
 		String *path = lfirst(lc);
+		List   *attrKinds = NIL;
 		List   *attrKeys = NIL;
 		List   *attrValues = NIL;
 
 		if (pathNameMatchByPattern(strVal(path),
 								   pattern,
+								   &attrKinds,
 								   &attrKeys,
 								   &attrValues))
 		{
-			if (p_filesAttrsList)
+			if (p_virtAttrsList)
 			{
-				ListCell   *lc1, *lc2;
-				List	   *kv_list = NIL;
+				List	   *vcdef_list = NIL;
+				ListCell   *lc1, *lc2, *lc3;
 
-				forboth (lc1, attrKeys,
-						 lc2, attrValues)
+				forthree (lc1, attrKinds,
+						  lc2, attrKeys,
+						  lc3, attrValues)
 				{
-					const char *key   = lfirst(lc1);
-					const char *value = lfirst(lc2);
-					int			key_len = strlen(key);
-					int			value_len = strlen(value);
+					int			kind  = lfirst_int(lc1);
+					const char *key   = lfirst(lc2);
+					const char *value = lfirst(lc3);
 					char	   *pos;
-					ArrowKeyValue *kv;
+					virtualColumnDef *vcdef;
 
-					kv = palloc(MAXALIGN(sizeof(ArrowKeyValue)) +
-								MAXALIGN(key_len+1) +
-								MAXALIGN(value_len+1));
-					__initArrowNode(&kv->node, ArrowNodeTag__KeyValue);
-					pos = ((char *)kv + MAXALIGN(sizeof(ArrowKeyValue)));
+					vcdef = palloc(offsetof(virtualColumnDef, buf) +
+								   strlen(key) + strlen(value) + 2);
+					vcdef->kind = kind;
+					pos = vcdef->buf;
 					strcpy(pos, key);
-					kv->key = pos;
-					kv->_key_len = key_len;
+					vcdef->key = pos;
 
-					pos += MAXALIGN(key_len+1);
+					pos += strlen(key) + 1;
 					strcpy(pos, value);
-					kv->value = pos;
-					kv->_value_len = value_len;
+					vcdef->value = pos;
 
-					kv_list = lappend(kv_list, kv);
+					vcdef_list = lappend(vcdef_list, vcdef);
 				}
-				attrsList = lappend(attrsList, kv_list);
+				attrsList = lappend(attrsList, vcdef_list);
 			}
 			results = lappend(results, path);
 
@@ -2175,10 +2827,10 @@ arrowFdwExcludeFileNamesByPattern(List *filesList,
 			list_free_deep(attrValues);
 		}
 	}
-	if (p_filesAttrsList)
+	if (p_virtAttrsList)
 	{
 		Assert(list_length(results) == list_length(attrsList));
-		*p_filesAttrsList = attrsList;
+		*p_virtAttrsList = attrsList;
 	}
 	return results;
 }
@@ -2188,7 +2840,7 @@ arrowFdwExcludeFileNamesByPattern(List *filesList,
  */
 static List *
 arrowFdwExtractFilesList(List *options_list,
-						 List **p_filesAttrList,
+						 List **p_virtAttrsList,
 						 int *p_parallel_nworkers)
 {
 	List	   *filesList = NIL;
@@ -2290,20 +2942,89 @@ arrowFdwExtractFilesList(List *options_list,
 	if (pattern)
 	{
 		filesList = arrowFdwExcludeFileNamesByPattern(filesList, pattern,
-													  p_filesAttrList);
+													  p_virtAttrsList);
 	}
-	else if (p_filesAttrList)
+	else if (p_virtAttrsList)
 	{
 		/* add empty file attributes list for forboth() macro */
-		List   *filesAttrList = NIL;
+		List   *virtAttrsList = NIL;
 
 		foreach (lc, filesList)
-			filesAttrList = lappend(filesAttrList, NULL);
-		*p_filesAttrList = filesAttrList;
+			virtAttrsList = lappend(virtAttrsList, NULL);
+		*p_virtAttrsList = virtAttrsList;
 	}
 	if (p_parallel_nworkers)
 		*p_parallel_nworkers = parallel_nworkers;
 	return filesList;
+}
+
+/*
+ * arrowFdwExtractSourceFields
+ */
+static List *
+arrowFdwExtractSourceFields(Relation frel)
+{
+	Oid			frelid = RelationGetRelid(frel);
+	TupleDesc	tupdesc = RelationGetDescr(frel);
+	List	   *results = NIL;
+
+	for (int j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, j);
+		List	   *options = GetForeignColumnOptions(frelid, attr->attnum);
+		ListCell   *lc;
+		const char *field_name = NULL;
+		const char *virtual_key = NULL;
+		const char *virtual_metadata = NULL;
+		const char *virtual_metadata_split = NULL;
+
+		if (attr->attisdropped)
+		{
+			/* always NULL */
+			results = lappend(results, "none");
+			continue;
+		}
+		/* check column options to identify the source */
+		foreach (lc, options)
+		{
+			DefElem *defel = lfirst(lc);
+
+			Assert(IsA(defel->arg, String));
+			if (strcmp(defel->defname, "field") == 0)
+				field_name = strVal(defel->arg);
+			else if (strcmp(defel->defname, "virtual") == 0)
+				virtual_key = strVal(defel->arg);
+			else if (strcmp(defel->defname, "virtual_metadata") == 0)
+				virtual_metadata = strVal(defel->arg);
+			else if (strcmp(defel->defname, "virtual_metadata_split") == 0)
+				virtual_metadata_split = strVal(defel->arg);
+			else
+			{
+				elog(ERROR, "unknown foreign table options in '%s' of '%s'",
+					 NameStr(attr->attname),
+					 RelationGetRelationName(frel));
+			}
+		}
+		if ((field_name != NULL ? 1 : 0) +
+			(virtual_key != NULL ? 1 : 0) +
+			(virtual_metadata != NULL ? 1 : 0) +
+			(virtual_metadata_split != NULL ? 1 : 0) > 1)
+			elog(ERROR, "arrow_fdw: column option 'field', 'virtual', 'virtual_metadata' and 'virtual_metadata_split' must be mutually exclusive");
+
+		if (virtual_key)
+			results = lappend(results, psprintf("virtual:%s", virtual_key));
+		else if (virtual_metadata)
+			results = lappend(results, psprintf("metadata:%s", virtual_metadata));
+		else if (virtual_metadata_split)
+			results = lappend(results, psprintf("metadata-split:%s", virtual_metadata_split));
+		else
+		{
+			if (!field_name)
+				field_name = NameStr(attr->attname);
+			results = lappend(results, psprintf("field:%s", field_name));
+		}
+	}
+	return results;
 }
 
 /* ----------------------------------------------------------------
@@ -2472,30 +3193,43 @@ arrowFdwSetupIOvector(RecordBatchState *rb_state,
 					  Bitmapset *referenced,
 					  kern_data_store *kds)
 {
+	ArrowFileState *af_state = rb_state->af_state;
 	arrowFdwSetupIOContext *con;
 	strom_io_vector *iovec;
 	unsigned int	nr_chunks = 0;
 
 	Assert(kds->format == KDS_FORMAT_ARROW &&
-		   kds->ncols <= kds->nr_colmeta &&
-		   kds->ncols == rb_state->nfields);
+		   kds->ncols <= kds->nr_colmeta);
 	con = alloca(offsetof(arrowFdwSetupIOContext,
 						  ioc[3 * kds->nr_colmeta]));
 	con->rb_offset = rb_state->rb_offset;
 	con->f_offset  = ~0UL;	/* invalid offset */
 	con->m_offset  = 0;
-	con->kds_head_sz = KDS_HEAD_LENGTH(kds);
+	con->kds_head_sz = KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
 	con->depth = 0;
 	con->io_index = -1;		/* invalid index */
 	for (int j=0; j < kds->ncols; j++)
 	{
-		RecordBatchFieldState *rb_field = &rb_state->fields[j];
 		kern_colmeta *cmeta = &kds->colmeta[j];
 		int			attidx = j + 1 - FirstLowInvalidHeapAttributeNumber;
 
 		if (bms_is_member(attidx, referenced) ||
 			bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
-			arrowFdwSetupIOvectorField(con, rb_field, kds, cmeta);
+		{
+			int		field_index = af_state->attrs[j].field_index;
+
+			if (field_index < 0)
+			{
+				/* !!!virtual column!!! */
+				Assert(cmeta->virtual_offset != 0);
+			}
+			else
+			{
+				RecordBatchFieldState *rb_field = &rb_state->fields[field_index];
+
+				arrowFdwSetupIOvectorField(con, rb_field, kds, cmeta);
+			}
+		}
 		else
 			cmeta->atttypkind = TYPE_KIND__NULL;	/* unreferenced */
 	}
@@ -2585,30 +3319,110 @@ __arrowKdsAssignAttrOptions(kern_data_store *kds,
 	}
 }
 
+static void
+__arrowKdsAssignVirtualColumns(kern_data_store *kds,
+							   kern_colmeta *cmeta,
+							   bool virtual_isnull,
+							   Datum virtual_datum,
+							   StringInfo chunk_buffer)
+{
+	if (virtual_isnull)
+	{
+		cmeta->virtual_offset = -1;
+	}
+	else
+	{
+		Assert(chunk_buffer->len == MAXALIGN(chunk_buffer->len));
+		cmeta->virtual_offset = (chunk_buffer->data +
+								 chunk_buffer->len - (char *)kds);
+		if (cmeta->attbyval)
+		{
+			appendBinaryStringInfo(chunk_buffer,
+								   (char *)&virtual_datum,
+								   cmeta->attlen);
+		}
+		else if (cmeta->attlen > 0)
+		{
+			appendBinaryStringInfo(chunk_buffer,
+								   DatumGetPointer(virtual_datum),
+								   cmeta->attlen);
+		}
+		else if (cmeta->attlen == -1)
+		{
+			appendBinaryStringInfo(chunk_buffer,
+								   DatumGetPointer(virtual_datum),
+								   VARSIZE_ANY(virtual_datum));
+		}
+		else
+		{
+			elog(ERROR, "unknown type length: %d", cmeta->attlen);
+		}
+		__appendZeroStringInfo(chunk_buffer, 0);
+	}
+}
+
 static strom_io_vector *
 arrowFdwLoadRecordBatch(Relation relation,
 						Bitmapset *referenced,
 						RecordBatchState *rb_state,
 						StringInfo chunk_buffer)
 {
+	ArrowFileState *af_state = rb_state->af_state;
 	TupleDesc	tupdesc = RelationGetDescr(relation);
-	size_t		head_sz = estimate_kern_data_store(tupdesc);
+	size_t		head_off = chunk_buffer->len;
 	kern_data_store *kds;
 
 	/* setup KDS and I/O-vector */
-	enlargeStringInfo(chunk_buffer, head_sz);
-	kds = (kern_data_store *)(chunk_buffer->data +
-							  chunk_buffer->len);
+	enlargeStringInfo(chunk_buffer, estimate_kern_data_store(tupdesc));
+	kds = (kern_data_store *)(chunk_buffer->data + head_off);
 	setup_kern_data_store(kds, tupdesc, 0, KDS_FORMAT_ARROW);
 	kds->nitems = rb_state->rb_nitems;
 	kds->table_oid = RelationGetRelid(relation);
-	Assert(kds->ncols == rb_state->nfields);
-	for (int j=0; j < kds->ncols; j++)
-		__arrowKdsAssignAttrOptions(kds,
-									&kds->colmeta[j],
-									&rb_state->fields[j]);
-	chunk_buffer->len += head_sz;
+	chunk_buffer->len += KDS_HEAD_LENGTH(kds);
 
+	Assert(kds->ncols == af_state->ncols);
+	for (int j=0; j < kds->ncols; j++)
+	{
+		int		field_index = af_state->attrs[j].field_index;
+
+		if (field_index >= 0)
+		{
+			Assert(field_index < rb_state->nfields);
+			__arrowKdsAssignAttrOptions(kds,
+										&kds->colmeta[j],
+										&rb_state->fields[field_index]);
+		}
+		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_FILE)
+		{
+			__arrowKdsAssignVirtualColumns(kds,
+										   &kds->colmeta[j],
+										   af_state->attrs[j].virtual_isnull,
+										   af_state->attrs[j].virtual_datum,
+										   chunk_buffer);
+			/*
+			 * 'chunk_buffer' may be expanded during assignment of virtual
+			 * columns, because repalloc() may change the base address,
+			 * so kds must be refreshed.
+			 */
+			kds = (kern_data_store *)(chunk_buffer->data + head_off);
+		}
+		else if (field_index == __FIELD_INDEX_SPECIAL__VIRTUAL_PER_RECORD_BATCH)
+		{
+			__arrowKdsAssignVirtualColumns(kds,
+										   &kds->colmeta[j],
+										   rb_state->virtual_isnull,
+										   rb_state->virtual_datum,
+										   chunk_buffer);
+			/* see the comment above */
+			kds = (kern_data_store *)(chunk_buffer->data + head_off);
+		}
+		else
+		{
+			elog(ERROR, "Bug? unexpected field-index (%d)", field_index);
+		}
+	}
+	kds->arrow_virtual_usage = (chunk_buffer->len
+								- (head_off + KDS_HEAD_LENGTH(kds)));
 	return arrowFdwSetupIOvector(rb_state, referenced, kds);
 }
 
@@ -2633,7 +3447,7 @@ arrowFdwFillupRecordBatch(Relation relation,
 	enlargeStringInfo(chunk_buffer, kds->length);
 	kds = (kern_data_store *)chunk_buffer->data;
 	filp = PathNameOpenFile(af_state->filename, O_RDONLY | PG_BINARY);
-	base = (char *)kds + KDS_HEAD_LENGTH(kds);
+	base = (char *)kds + KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
 	for (int i=0; i < iovec->nr_chunks; i++)
 	{
 		strom_io_chunk *ioc = &iovec->ioc[i];
@@ -2707,6 +3521,8 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	ForeignTable   *ft = GetForeignTable(foreigntableid);
 	Relation		frel = table_open(foreigntableid, NoLock);
 	List		   *filesList;
+	List		   *sourceFields;
+	List		   *virtualColumnsList;
 	List		   *results = NIL;
 	Bitmapset	   *referenced = NULL;
 	ListCell	   *lc1, *lc2;
@@ -2724,23 +3540,32 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 	referenced = pickup_outer_referenced(root, baserel, referenced);
 
 	/* read arrow-file metadta */
-	filesList = arrowFdwExtractFilesList(ft->options, NULL,
+	filesList = arrowFdwExtractFilesList(ft->options,
+										 &virtualColumnsList,
 										 &parallel_nworkers);
-	foreach (lc1, filesList)
+	sourceFields = arrowFdwExtractSourceFields(frel);
+	forboth (lc1, filesList,
+			 lc2, virtualColumnsList)
 	{
 		ArrowFileState *af_state;
-		char	   *fname = strVal(lfirst(lc1));
+		const char *fname = strVal(lfirst(lc1));
+		List	   *virtual_columns = lfirst(lc2);
+		ListCell   *cell;
 
-		af_state = BuildArrowFileState(frel, fname, NULL);
+		af_state = BuildArrowFileState(frel, fname,
+									   sourceFields,
+									   virtual_columns, NULL);
 		if (!af_state)
 			continue;
 
 		/*
 		 * Size calculation based the record-batch metadata
 		 */
-		foreach (lc2, af_state->rb_list)
+		foreach (cell, af_state->rb_list)
 		{
-			RecordBatchState *rb_state = lfirst(lc2);
+			RecordBatchState *rb_state = lfirst(cell);
+
+			//XXX - fix to support column-field mapping
 
 			/* whole-row reference? */
 			if (bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced))
@@ -2749,16 +3574,18 @@ ArrowGetForeignRelSize(PlannerInfo *root,
 			}
 			else
 			{
-				int		j, k;
+				int		i, j, k;
 
 				for (k = bms_next_member(referenced, -1);
 					 k >= 0;
 					 k = bms_next_member(referenced, k))
 				{
 					j = k + FirstLowInvalidHeapAttributeNumber;
-					if (j <= 0 || j > rb_state->nfields)
+					if (j <= 0 || j > af_state->ncols)
 						continue;
-					totalLen += __recordBatchFieldLength(&rb_state->fields[j-1]);
+					i = af_state->attrs[j-1].field_index;
+					if (i >= 0 && i < rb_state->nfields)
+						totalLen += __recordBatchFieldLength(&rb_state->fields[i]);
 				}
 			}
 			ntuples += rb_state->rb_nitems;
@@ -3369,6 +4196,29 @@ pg_datum_arrow_ref(kern_data_store *kds,
 	Datum		datum = 0;
 	bool		isnull = false;
 
+	if (cmeta->virtual_offset != 0)
+	{
+		if (cmeta->virtual_offset < 0)
+			isnull = true;
+		else if (cmeta->attbyval)
+		{
+			void   *addr = ((char *)kds + cmeta->virtual_offset);
+
+			switch (cmeta->attlen)
+			{
+				case 1:	datum = *((uint8_t  *)addr); break;
+				case 2: datum = *((uint16_t *)addr); break;
+				case 4: datum = *((uint32_t *)addr); break;
+				case 8: datum = *((uint64_t *)addr); break;
+				default:
+					elog(ERROR, "unexpected inline type length: %d", cmeta->attlen);
+			}
+		}
+		else
+			datum = PointerGetDatum((char *)kds + cmeta->virtual_offset);
+		goto out;
+	}
+
 	if (KDS_ARROW_CHECK_ISNULL(kds, cmeta, index))
 	{
 		isnull = true;
@@ -3558,7 +4408,8 @@ __arrowFdwExecInit(ScanState *ss,
 	const DpuStorageEntry *ds_entry = NULL;
 	bool			whole_row_ref = false;
 	List		   *filesList;
-	List		   *filesAttrList;
+	List		   *sourceFields;
+	List		   *virtualColumnsList;
 	List		   *af_states_list = NIL;
 	uint32_t		rb_nrooms = 0;
 	uint32_t		rb_nitems = 0;
@@ -3581,13 +4432,20 @@ __arrowFdwExecInit(ScanState *ss,
 	}
 
 	/* setup ArrowFileState */
-	filesList = arrowFdwExtractFilesList(ft->options, &filesAttrList, NULL);
-	foreach (lc1, filesList)
+	filesList = arrowFdwExtractFilesList(ft->options,
+										 &virtualColumnsList, NULL);
+	sourceFields = arrowFdwExtractSourceFields(frel);
+	forboth (lc1, filesList,
+			 lc2, virtualColumnsList)
 	{
 		char	   *fname = strVal(lfirst(lc1));
+		List	   *virtual_columns = lfirst(lc2);
 		ArrowFileState *af_state;
 
-		af_state = BuildArrowFileState(frel, fname, &stat_attrs);
+		af_state = BuildArrowFileState(frel, fname,
+									   sourceFields,
+									   virtual_columns,
+									   &stat_attrs);
 		if (af_state)
 		{
 			rb_nrooms += list_length(af_state->rb_list);
@@ -3597,7 +4455,9 @@ __arrowFdwExecInit(ScanState *ss,
 				{
 					gpumask_t	__optimal_gpus = GetOptimalGpuForFile(fname);
 
-					if (af_states_list == NIL)
+					if (__optimal_gpus == INVALID_GPUMASK)
+						optimal_gpus = 0;
+					else if (af_states_list == NIL)
 						optimal_gpus = __optimal_gpus;
 					else
 						optimal_gpus &= __optimal_gpus;
@@ -4002,7 +4862,7 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 	size_t	   *chunk_sz;
 	ListCell   *lc1, *lc2;
 	int			fcount = 0;
-	int			j, k;
+	int			i, j, k;
 	char		label[100];
 	StringInfoData	buf;
 
@@ -4070,17 +4930,20 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 			{
 				/* whole-row reference */
 				read_sz += rb_state->rb_length;
+				continue;
 			}
-			else
+
+			for (k = bms_next_member(arrow_state->referenced, -1);
+				 k >= 0;
+				 k = bms_next_member(arrow_state->referenced, k))
 			{
-				for (k = bms_next_member(arrow_state->referenced, -1);
-					 k >= 0;
-					 k = bms_next_member(arrow_state->referenced, k))
+				j = k + FirstLowInvalidHeapAttributeNumber;
+				if (j <= 0 || j > af_state->ncols)
+					continue;
+				i = af_state->attrs[j-1].field_index;
+				if (i >= 0 && i < rb_state->nfields)
 				{
-					j = k + FirstLowInvalidHeapAttributeNumber - 1;
-					if (j < 0 || j >=  tupdesc->natts)
-						continue;
-					sz = __recordBatchFieldLength(&rb_state->fields[j]);
+					sz = __recordBatchFieldLength(&rb_state->fields[i]);
 					read_sz += sz;
 					chunk_sz[j] += sz;
 				}
@@ -4128,7 +4991,7 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 		{
 			Form_pg_attribute attr;
 
-			j = k + FirstLowInvalidHeapAttributeNumber - 1;
+			j = k + FirstLowInvalidHeapAttributeNumber;
 			if (j < 0 || j >= tupdesc->natts)
 				continue;
 			attr = TupleDescAttr(tupdesc, j);
@@ -4211,7 +5074,8 @@ ArrowAcquireSampleRows(Relation relation,
 {
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(relation));
 	List		   *filesList;
-	List		   *filesAttrList;
+	List		   *virtualColumnsList;
+	List		   *sourceFields;
 	List		   *rb_state_list = NIL;
 	ListCell	   *lc1, *lc2;
 	int64			total_nrows = 0;
@@ -4219,18 +5083,25 @@ ArrowAcquireSampleRows(Relation relation,
 	int				nsamples_min = nrooms / 100;
 	int				nitems = 0;
 
-	filesList = arrowFdwExtractFilesList(ft->options, &filesAttrList, NULL);
-	foreach (lc1, filesList)
+	filesList = arrowFdwExtractFilesList(ft->options,
+										 &virtualColumnsList, NULL);
+	sourceFields = arrowFdwExtractSourceFields(relation);
+	forboth (lc1, filesList,
+			 lc2, virtualColumnsList)
 	{
 		ArrowFileState *af_state;
 		char	   *fname = strVal(lfirst(lc1));
+		List	   *virtual_columns = lfirst(lc2);
+		ListCell   *cell;
 
-		af_state = BuildArrowFileState(relation, fname, NULL);
+		af_state = BuildArrowFileState(relation, fname,
+									   sourceFields,
+									   virtual_columns, NULL);
 		if (!af_state)
 			continue;
-		foreach (lc2, af_state->rb_list)
+		foreach (cell, af_state->rb_list)
 		{
-			RecordBatchState *rb_state = lfirst(lc2);
+			RecordBatchState *rb_state = lfirst(cell);
 
 			if (rb_state->rb_nitems == 0)
 				continue;	/* not reasonable to sample, skipped */
@@ -4273,11 +5144,12 @@ ArrowAnalyzeForeignTable(Relation frel,
 {
 	ForeignTable   *ft = GetForeignTable(RelationGetRelid(frel));
 	List		   *filesList;
-	List		   *filesAttrList;
+	List		   *virtualColumnsList;
 	ListCell	   *lc;
 	size_t			totalpages = 0;
 
-	filesList = arrowFdwExtractFilesList(ft->options, &filesAttrList, NULL);
+	filesList = arrowFdwExtractFilesList(ft->options,
+										 &virtualColumnsList, NULL);
 	foreach (lc, filesList)
 	{
 		const char	   *fname = strVal(lfirst(lc));
@@ -4304,12 +5176,15 @@ ArrowAnalyzeForeignTable(Relation frel,
  * ensureUniqueFieldNames
  */
 static const char **
-ensureUniqueFieldNames(ArrowSchema *schema)
+ensureUniqueFieldNames(ArrowSchema *schema, List *virtual_columns)
 {
-	const char **column_names = palloc0(sizeof(char *) * schema->_num_fields);
-	int		count = 2;
+	const char **column_names;
+	int			k, count = 2;
+	ListCell   *lc;
 
-	for (int k=0; k < schema->_num_fields; k++)
+	column_names = palloc0(sizeof(char *) * (schema->_num_fields + 1 +
+											 list_length(virtual_columns)));
+	for (k=0; k < schema->_num_fields; k++)
 	{
 		const char *cname = schema->fields[k].name;
 	retry:
@@ -4326,6 +5201,26 @@ ensureUniqueFieldNames(ArrowSchema *schema)
 				 k, schema->fields[k].name, cname);
 		column_names[k] = cname;
 	}
+
+	foreach (lc, virtual_columns)
+	{
+		virtualColumnDef *vcdef = lfirst(lc);
+		const char *cname = vcdef->key;
+	again:
+		for (int j=0; j < k; j++)
+		{
+			if (strcasecmp(cname, column_names[j]) == 0)
+			{
+				cname = psprintf("__%s_%d", vcdef->key, count++);
+				goto again;
+			}
+		}
+		if (vcdef->key != cname)
+			elog(NOTICE, "Arrow virtual column '%s' meets a duplicated field name, so renamed to '%s'",
+				 vcdef->key, cname);
+		column_names[k++] = cname;
+	}
+	Assert(column_names[k] == NULL);
 	return column_names;
 }
 
@@ -4336,10 +5231,12 @@ static List *
 ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 {
 	ArrowSchema	schema;
+	List	   *virtual_columns_prime = NIL;
 	List	   *filesList;
-	List	   *filesAttrList;
-	ListCell   *lc;
+	List	   *virtualColumnsList;
+	ListCell   *lc1, *lc2;
 	const char **column_names;
+	int			i;
 	StringInfoData	cmd;
 
 	/* sanity checks */
@@ -4357,7 +5254,8 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			elog(ERROR, "arrow_fdw: Bug? unknown list-type");
 			break;
 	}
-	filesList = arrowFdwExtractFilesList(stmt->options, &filesAttrList, NULL);
+	filesList = arrowFdwExtractFilesList(stmt->options,
+										 &virtualColumnsList, NULL);
 	if (filesList == NIL)
 		ereport(ERROR,
 				(errmsg("No valid apache arrow files are specified"),
@@ -4365,15 +5263,17 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 
 	/* read the schema */
 	memset(&schema, 0, sizeof(ArrowSchema));
-	foreach (lc, filesList)
+	forboth (lc1, filesList,
+			 lc2, virtualColumnsList)
 	{
 		ArrowFileInfo af_info;
-		const char *fname = strVal(lfirst(lc));
+		const char *fname = strVal(lfirst(lc1));
 
 		readArrowFile(fname, &af_info, false);
-		if (lc == list_head(filesList))
+		if (lc1 == list_head(filesList))
 		{
 			copyArrowNode(&schema.node, &af_info.footer.schema.node);
+			virtual_columns_prime = lfirst(lc2);
 		}
 		else
 		{
@@ -4385,22 +5285,40 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 				elog(ERROR, "file '%s' has incompatible schema definition", fname);
 			for (int j=0; j < schema._num_fields; j++)
 			{
-				if (!arrowFieldTypeIsEqual(&schema.fields[j],
-										   &stemp->fields[j]))
-					elog(ERROR, "file '%s' has incompatible schema definition", fname);
+				bool	found = false;
+
+				for (int k=0; k < stemp->_num_fields; k++)
+				{
+					if (strcmp(schema.fields[j].name,
+							   stemp->fields[k].name) == 0)
+					{
+						if (arrowFieldTypeIsEqual(&schema.fields[j],
+												  &stemp->fields[k]))
+						{
+							found = true;
+							break;
+						}
+						elog(ERROR, "field '%s' of '%s' has incompatible data type",
+							 schema.fields[j].name, fname);
+					}
+				}
+
+				if (!found)
+					elog(ERROR, "field '%s' was not found in the file '%s'",
+						 schema.fields[j].name, fname);
 			}
 		}
 	}
 	/* ensure the field-names are unique */
-	column_names = ensureUniqueFieldNames(&schema);
+	column_names = ensureUniqueFieldNames(&schema, virtual_columns_prime);
 
 	/* makes a command to define foreign table */
 	initStringInfo(&cmd);
 	appendStringInfo(&cmd, "CREATE FOREIGN TABLE %s (\n",
 					 quote_identifier(stmt->remote_schema));
-	for (int j=0; j < schema._num_fields; j++)
+	for (i=0; i < schema._num_fields; i++)
 	{
-		ArrowField *field = &schema.fields[j];
+		ArrowField *field = &schema.fields[i];
 		Oid				type_oid;
 		int32			type_mod;
 		char		   *schema;
@@ -4417,12 +5335,12 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		schema = get_namespace_name(__type->typnamespace);
 		if (!schema)
 			elog(ERROR, "cache lookup failed for schema %u", __type->typnamespace);
-		if (j > 0)
+		if (i > 0)
 			appendStringInfo(&cmd, ",\n");
 		if (type_mod < 0)
 		{
 			appendStringInfo(&cmd, "  %s %s.%s",
-							 quote_identifier(column_names[j]),
+							 quote_identifier(column_names[i]),
 							 quote_identifier(schema),
 							 NameStr(__type->typname));
 		}
@@ -4430,22 +5348,47 @@ ArrowImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		{
 			Assert(type_mod >= VARHDRSZ);
 			appendStringInfo(&cmd, "  %s %s.%s(%d)",
-							 quote_identifier(column_names[j]),
+							 quote_identifier(column_names[i]),
 							 quote_identifier(schema),
 							 NameStr(__type->typname),
 							 type_mod - VARHDRSZ);
 		}
+		if (field->name != column_names[i])
+			appendStringInfo(&cmd, " options (field '%s')", field->name);		
 		ReleaseSysCache(htup);
 	}
+
+	foreach (lc1,  virtual_columns_prime)
+	{
+		virtualColumnDef *vcdef = lfirst(lc1);
+		const char	   *label;
+
+		Assert(column_names[i] != NULL);
+		if (i > 0)
+			appendStringInfo(&cmd, ",\n");
+		if (vcdef->kind == '@')
+			label = "pg_catalog.int8";
+		else if (vcdef->kind == '$')
+			label = "pg_catalog.text";
+		else
+			 elog(ERROR, "arrow_fdw: Bug? unknown virtual column type '%c'", vcdef->kind);
+
+		appendStringInfo(&cmd, "  %s %s options(virtual '%s')",
+						 quote_identifier(column_names[i]),
+						 label,
+						 vcdef->key);
+		i++;
+	}
+	Assert(column_names[i] == NULL);
 	appendStringInfo(&cmd,
 					 "\n"
 					 ") SERVER %s\n"
 					 "  OPTIONS (", stmt->server_name);
-	foreach (lc, stmt->options)
+	foreach (lc1, stmt->options)
 	{
-		DefElem	   *defel = lfirst(lc);
+		DefElem	   *defel = lfirst(lc1);
 
-		if (lc != list_head(stmt->options))
+		if (lc1 != list_head(stmt->options))
 			appendStringInfo(&cmd, ",\n           ");
 		appendStringInfo(&cmd, "%s '%s'",
 						 defel->defname,
@@ -4568,7 +5511,7 @@ pgstrom_arrow_fdw_import_file(PG_FUNCTION_ARGS)
 	if (schema._num_fields > SHRT_MAX)
 		Elog("Arrow file '%s' has too much fields: %d",
 			 file_name, schema._num_fields);
-	column_names = ensureUniqueFieldNames(&schema);
+	column_names = ensureUniqueFieldNames(&schema, NIL);
 
 	/* setup CreateForeignTableStmt */
 	memset(&stmt, 0, sizeof(CreateForeignTableStmt));
@@ -4663,10 +5606,11 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 	if (catalog == ForeignTableRelationId)
 	{
 		List	   *filesList;
-		List	   *filesAttrList;
+		List	   *virtualColumnsList;
 		ListCell   *lc;
 
-		filesList = arrowFdwExtractFilesList(options, &filesAttrList, NULL);
+		filesList = arrowFdwExtractFilesList(options,
+											 &virtualColumnsList, NULL);
 		foreach (lc, filesList)
 		{
 			const char *fname = strVal(lfirst(lc));
@@ -4674,6 +5618,43 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 
 			readArrowFile(fname, &af_info, true);
 		}
+	}
+	else if (catalog == AttributeRelationId)
+	{
+		bool		meet_field = false;
+		bool		meet_virtual = false;
+		bool		meet_virtual_metadata = false;
+		bool		meet_virtual_metadata_split = false;
+		ListCell   *lc;
+
+		foreach (lc, options)
+		{
+			DefElem	   *defel = lfirst(lc);
+
+			if (strcmp(defel->defname, "field") == 0)
+			{
+				if (strlen(strVal(defel->arg)) >= NAMEDATALEN-1)
+					elog(ERROR, "arrow_fdw: column option '%s' is too long [%s]",
+						 defel->defname, strVal(defel->arg));
+				meet_field = true;
+			}
+			else if (strcmp(defel->defname, "virtual") == 0)
+				meet_virtual = true;
+			else if (strcmp(defel->defname, "virtual_metadata") == 0)
+				meet_virtual_metadata = true;
+			else if (strcmp(defel->defname, "virtual_metadata_split") == 0)
+				meet_virtual_metadata_split = true;
+			else
+			{
+				elog(ERROR, "arrow_fdw: column option '%s' is unknown",
+					 defel->defname);
+			}
+		}
+		if ((meet_field ? 1 : 0) +
+			(meet_virtual ? 1 : 0) +
+			(meet_virtual_metadata ? 1 : 0) +
+			(meet_virtual_metadata_split ? 1 : 0) > 1)
+			elog(ERROR, "arrow_fdw: column option 'field', 'virtual', 'virtual_metadata' and 'virtual_metadata_split' are mutually exclusive");
 	}
 	else if (options != NIL)
 	{
@@ -4689,9 +5670,6 @@ pgstrom_arrow_fdw_validator(PG_FUNCTION_ARGS)
 				break;
 			case UserMappingRelationId:
 				label = "USER MAPPING";
-				break;
-			case AttributeRelationId:
-				label = "attribute of FOREIGN TABLE";
 				break;
 			default:
 				label = "????";
@@ -4711,7 +5689,7 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 {
 	EventTriggerData *trigdata;
 	Relation	frel = NULL;
-	ListCell   *lc;
+	ListCell   *lc1, *lc2;
 	bool		check_schema_compatibility = false;
 
 	if (!CALLED_AS_EVENT_TRIGGER(fcinfo))
@@ -4738,9 +5716,9 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 		frel = relation_openrv_extended(stmt->relation, NoLock, true);
 		if (frel && RelationIsArrowFdw(frel))
 		{
-			foreach (lc, stmt->cmds)
+			foreach (lc1, stmt->cmds)
 			{
-				AlterTableCmd  *cmd = lfirst(lc);
+				AlterTableCmd  *cmd = lfirst(lc1);
 
 				if (cmd->subtype == AT_AddColumn ||
 					cmd->subtype == AT_DropColumn ||
@@ -4757,14 +5735,21 @@ pgstrom_arrow_fdw_precheck_schema(PG_FUNCTION_ARGS)
 	{
 		ForeignTable *ft = GetForeignTable(RelationGetRelid(frel));
 		List	   *filesList;
-		List	   *filesAttrList;
+		List	   *sourceFields;
+		List	   *virtualColumnsList;
 
-		filesList = arrowFdwExtractFilesList(ft->options, &filesAttrList, NULL);
-		foreach (lc, filesList)
+		filesList = arrowFdwExtractFilesList(ft->options,
+											 &virtualColumnsList, NULL);
+		sourceFields = arrowFdwExtractSourceFields(frel);
+		forboth (lc1, filesList,
+				 lc2, virtualColumnsList)
 		{
-			const char *fname = strVal(lfirst(lc));
+			const char *fname = strVal(lfirst(lc1));
+			List	   *virtual_columns = lfirst(lc2);
 
-			(void)BuildArrowFileState(frel, fname, NULL);
+			(void)BuildArrowFileState(frel, fname,
+									  sourceFields,
+									  virtual_columns, NULL);
 		}
 	}
 	if (frel)
@@ -4781,14 +5766,16 @@ pgstrom_arrow_fdw_check_pattern(PG_FUNCTION_ARGS)
 {
 	text	   *t = PG_GETARG_TEXT_P(0);
 	text	   *p = PG_GETARG_TEXT_P(1);
+	List	   *attrKinds = NIL;
 	List	   *attrKeys = NIL;
 	List	   *attrValues = NIL;
-	ListCell   *lc1, *lc2;
+	ListCell   *lc1, *lc2, *lc3;
 	bool		retval;
 	StringInfoData buf;
 
 	retval = pathNameMatchByPattern(text_to_cstring(t),
 									text_to_cstring(p),
+									&attrKinds,
 									&attrKeys,
 									&attrValues);
 	initStringInfo(&buf);
@@ -4797,16 +5784,18 @@ pgstrom_arrow_fdw_check_pattern(PG_FUNCTION_ARGS)
 		bool	need_comma = false;
 
 		appendStringInfo(&buf, "true");
-		forboth (lc1, attrKeys,
-				 lc2, attrValues)
+		forthree (lc1, attrKinds,
+				  lc2, attrKeys,
+				  lc3, attrValues)
 		{
 			if (!need_comma)
 				appendStringInfo(&buf, " {");
 			else
 				appendStringInfo(&buf, ", ");
-			appendStringInfo(&buf, "[%s]=[%s]",
-							 (char *)lfirst(lc1),
-							 (char *)lfirst(lc2));
+			appendStringInfo(&buf, "%c[%s]=[%s]",
+							 (int)lfirst_int(lc1),
+							 (char *)lfirst(lc2),
+							 (char *)lfirst(lc3));
 			need_comma = true;
 		}
 		if (need_comma)
@@ -4817,6 +5806,198 @@ pgstrom_arrow_fdw_check_pattern(PG_FUNCTION_ARGS)
 		appendStringInfo(&buf, "false");
 	}
 	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+}
+
+/*
+ * pgstrom_arrow_fdw_metadata_info
+ */
+typedef struct arrowFdwMetadataInfo
+{
+	dlist_node	chain;
+	Oid			frelid;
+	text	   *filename;
+	text	   *field;
+	text	   *key;
+	text	   *value;
+} arrowFdwMetadataInfo;
+
+static void
+__build_arrow_fdw_metadata_info(dlist_head *md_info_dlist,
+								Oid frelid, const char *filename,
+								arrowMetadataFieldCache *fcache,
+								const char *prefix,
+								arrowMetadataKeyValueCache *custom_metadata)
+{
+	arrowFdwMetadataInfo *md_info;
+	arrowMetadataKeyValueCache *mc_kv;
+
+	for (mc_kv = custom_metadata; mc_kv != NULL; mc_kv = mc_kv->next)
+	{
+		md_info = palloc0(sizeof(arrowFdwMetadataInfo));
+		md_info->frelid = frelid;
+		md_info->filename = cstring_to_text(filename);
+		if (fcache)
+		{
+			char   *s = psprintf("XXXX%s%s", prefix, fcache->attname);
+			md_info->field = (text *)s;
+			SET_VARSIZE(md_info->field, strlen(s));
+		}
+		md_info->key = cstring_to_text(mc_kv->key);
+		md_info->value = cstring_to_text(mc_kv->value);
+		dlist_push_tail(md_info_dlist, &md_info->chain);
+	}
+
+	if (fcache)
+	{
+		dlist_iter	iter;
+		char	   *__prefix = NULL;
+
+		dlist_foreach (iter, &fcache->children)
+		{
+			arrowMetadataFieldCache *__fcache =
+				dlist_container(arrowMetadataFieldCache, chain, iter.cur);
+			if (!__prefix)
+			{
+				__prefix = alloca(strlen(prefix) +
+								  strlen(fcache->attname) + 10);
+				sprintf(__prefix, "%s%s.", prefix, fcache->attname);
+			}
+			__build_arrow_fdw_metadata_info(md_info_dlist,
+											frelid, filename,
+											__fcache,
+											__prefix,
+											fcache->custom_metadata);
+		}
+	}
+}
+
+static dlist_head *
+__setup_arrow_fdw_metadata_info(Oid frelid)
+{
+	ForeignTable   *ft = GetForeignTable(frelid);
+	List		   *filesList = arrowFdwExtractFilesList(ft->options, NULL, NULL);
+	ListCell	   *lc;
+	dlist_head	   *md_info_dlist = palloc(sizeof(dlist_head));
+
+	dlist_init(md_info_dlist);
+	foreach (lc, filesList)
+	{
+		const char *filename = strVal(lfirst(lc));
+		struct stat	stat_buf;
+		dlist_iter	iter;
+		arrowMetadataCacheBlock *mc_block;
+
+		if (stat(filename, &stat_buf) != 0)
+		{
+			if (errno == ENOENT)
+				continue;	/* file might be removed concurrently */
+			elog(ERROR, "failed on stat('%s'): %m", filename);
+		}
+		LWLockAcquire(&arrow_metadata_cache->mutex, LW_SHARED);
+		mc_block = lookupArrowMetadataCache(&stat_buf, false);
+		/* if not built yet, construct a metadata cache entry */
+		if (!mc_block)
+		{
+			ArrowFileInfo	af_info;
+			ArrowFileState	af_state;
+
+			LWLockRelease(&arrow_metadata_cache->mutex);
+
+			memset(&af_state, 0, sizeof(af_state));
+			af_state.filename = filename;
+			memcpy(&af_state.stat_buf, &stat_buf, sizeof(struct stat));
+
+			if (!__setupArrowFileStateByFile(&af_state,
+											 filename,
+											 &af_info,
+											 NULL))
+				elog(ERROR, "unable to read the arrow file '%s'", filename);
+			LWLockAcquire(&arrow_metadata_cache->mutex, LW_EXCLUSIVE);
+			mc_block = lookupArrowMetadataCache(&af_state.stat_buf, true);
+			if (!mc_block)
+			{
+				mc_block = __buildArrowMetadataCacheNoLock(&af_state, &af_info);
+				if (!mc_block)
+					elog(ERROR, "unable to build arrow metadata cache, consider to expand 'arrow_fdw.metadata_cache_size'");
+			}
+		}
+		/* copy the metadata info */
+		__build_arrow_fdw_metadata_info(md_info_dlist,
+										frelid,
+										filename,
+										NULL, "",
+										mc_block->custom_metadata);
+		dlist_foreach (iter, &mc_block->mcache_head.fields)
+		{
+			arrowMetadataFieldCache *fcache
+				= dlist_container(arrowMetadataFieldCache,
+								  chain, iter.cur);
+			__build_arrow_fdw_metadata_info(md_info_dlist,
+											frelid,
+											filename,
+											fcache, "",
+											fcache->custom_metadata);
+		}
+		LWLockRelease(&arrow_metadata_cache->mutex);
+	}
+	return md_info_dlist;
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_metadata_info);
+PUBLIC_FUNCTION(Datum)
+pgstrom_arrow_fdw_metadata_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *fncxt;
+	arrowFdwMetadataInfo *md_info;
+	Datum		values[5];
+	bool		isnull[5];
+	HeapTuple	tuple;
+	dlist_head *md_info_dlist;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		Oid				frelid = PG_GETARG_OID(0);
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(5);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "relid",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "filename",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "field",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "key",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "value",
+						   TEXTOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+
+		fncxt->user_fctx = __setup_arrow_fdw_metadata_info(frelid);
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+	md_info_dlist = fncxt->user_fctx;
+	if (dlist_is_empty(md_info_dlist))
+		SRF_RETURN_DONE(fncxt);
+	md_info = dlist_container(arrowFdwMetadataInfo, chain,
+							  dlist_pop_head_node(md_info_dlist));
+
+	memset(isnull, 0, sizeof(isnull));
+	values[0] = ObjectIdGetDatum(md_info->frelid);
+	values[1] = PointerGetDatum(md_info->filename);
+	if (md_info->field)
+		values[2] = PointerGetDatum(md_info->field);
+	else
+		isnull[2] = true;
+	values[3] = PointerGetDatum(md_info->key);
+	values[4] = PointerGetDatum(md_info->value);
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
 
 /*
@@ -4840,10 +6021,9 @@ pgstrom_request_arrow_fdw(void)
 static void
 pgstrom_startup_arrow_fdw(void)
 {
-	bool	found;
-	size_t	sz;
-	char   *buffer;
-	int		i, n;
+	char	   *buffer;
+	bool		found;
+	size_t		n, sz;
 
 	if (shmem_startup_next)
 		(*shmem_startup_next)();
@@ -4852,29 +6032,25 @@ pgstrom_startup_arrow_fdw(void)
 										   MAXALIGN(sizeof(arrowMetadataCacheHead)),
 										   &found);
 	Assert(!found);
-	
+
 	LWLockInitialize(&arrow_metadata_cache->mutex, LWLockNewTrancheId());
 	SpinLockInit(&arrow_metadata_cache->lru_lock);
 	dlist_init(&arrow_metadata_cache->lru_list);
 	dlist_init(&arrow_metadata_cache->free_blocks);
-	dlist_init(&arrow_metadata_cache->free_mcaches);
-	dlist_init(&arrow_metadata_cache->free_fcaches);
-	for (i=0; i < ARROW_METADATA_HASH_NSLOTS; i++)
+	for (int i=0; i < ARROW_METADATA_HASH_NSLOTS; i++)
 		dlist_init(&arrow_metadata_cache->hash_slots[i]);
-
-	/* slab allocator */
+	/* arrowMetadataCacheBlock allocation  */
 	sz = TYPEALIGN(ARROW_METADATA_BLOCKSZ,
 				   (size_t)arrow_metadata_cache_size_kb << 10);
 	n = sz / ARROW_METADATA_BLOCKSZ;
 	buffer = ShmemInitStruct("arrowMetadataCache(body)", sz, &found);
 	Assert(!found);
-	for (i=0; i < n; i++)
+	for (int i=0; i < n; i++)
 	{
 		arrowMetadataCacheBlock *mc_block = (arrowMetadataCacheBlock *)buffer;
 
-		memset(mc_block, 0, offsetof(arrowMetadataCacheBlock, data));
+		memset(mc_block, 0, offsetof(arrowMetadataCacheBlock, mcache_head));
 		dlist_push_tail(&arrow_metadata_cache->free_blocks, &mc_block->chain);
-
 		buffer += ARROW_METADATA_BLOCKSZ;
 	}
 }

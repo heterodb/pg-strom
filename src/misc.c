@@ -163,6 +163,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
 	privs = lappend(privs, makeInteger(pp_info->cuda_stack_size));
 	privs = lappend(privs, pp_info->groupby_actions);
+	privs = lappend(privs, pp_info->groupby_typmods);
 	privs = lappend(privs, makeInteger(pp_info->groupby_prepfn_bufsz));
 	exprs = lappend(exprs, pp_info->projection_hashkeys);
 	/* inner relations */
@@ -270,6 +271,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.cuda_stack_size = intVal(list_nth(privs, pindex++));
 	pp_data.groupby_actions = list_nth(privs, pindex++);
+	pp_data.groupby_typmods = list_nth(privs, pindex++);
 	pp_data.groupby_prepfn_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.projection_hashkeys = list_nth(exprs, eindex++);
 	/* inner relations */
@@ -338,6 +340,7 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 	}
 	pp_dest->kvars_deflist    = kvars_deflist;
 	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
+	pp_dest->groupby_typmods  = list_copy(pp_dest->groupby_typmods);
 	pp_dest->projection_hashkeys = copyObject(pp_dest->projection_hashkeys);
 	for (int j=0; j < pp_orig->num_rels; j++)
 	{
@@ -1000,10 +1003,12 @@ __fetchWildCard(const char *p, int plen, char *keybuf)
 static int
 __matchByPattern(const char *t, int tlen,
 				 const char *p, int plen,
+				 List **p_attrKinds,
 				 List **p_attrKeys,
 				 List **p_attrValues)
 {
 	char   *keybuf = alloca(plen+10);
+	List   *attrKinds = NIL;
 	List   *attrKeys = NIL;
 	List   *attrValues = NIL;
 	int		cnt;
@@ -1030,6 +1035,7 @@ __matchByPattern(const char *t, int tlen,
 				elog(ERROR, "Path pattern must not end with escape character");
 			if (*p != *t)
 			{
+				list_free(attrKinds);
 				list_free_deep(attrKeys);
 				list_free_deep(attrValues);
 				return LIKE_FALSE;
@@ -1061,20 +1067,24 @@ __matchByPattern(const char *t, int tlen,
 					{
 						if (*t < '0' || *t > '9')
 						{
+							list_free(attrKinds);
 							list_free_deep(attrKeys);
 							list_free_deep(attrValues);
 							return LIKE_FALSE;
 						}
 						NextByte(t, tlen);
 					}
+					attrKinds  = lappend_int(attrKinds, wildcard);
 					attrKeys   = lappend(attrKeys,   pstrdup(keybuf));
 					attrValues = lappend(attrValues, pnstrdup(__t, __tlen));
 				}
 				else if (wildcard == '$')
 				{
+					attrKinds  = lappend_int(attrKinds, wildcard);
 					attrKeys   = lappend(attrKeys,   pstrdup(keybuf));
 					attrValues = lappend(attrValues, pnstrdup(t, tlen));
 				}
+				*p_attrKinds  = attrKinds;
 				*p_attrKeys   = attrKeys;
 				*p_attrValues = attrValues;
 				return LIKE_TRUE;
@@ -1091,26 +1101,30 @@ __matchByPattern(const char *t, int tlen,
 			 */
 			while (tlen > 0)
 			{
+				List   *__attrKinds = NIL;
 				List   *__attrKeys = NIL;
 				List   *__attrValues = NIL;
 				int		status = __matchByPattern(t, tlen,
 												  p, plen,
+												  &__attrKinds,
 												  &__attrKeys,
 												  &__attrValues);
 				if (status == LIKE_TRUE)
 				{
+					attrKinds  = lappend_int(attrKinds, wildcard);
 					attrKeys   = lappend(attrKeys,   pstrdup(keybuf));
-					attrValues = lappend(attrValues, (t == t_base
-													  ? NULL
-													  : pnstrdup(t_base, t - t_base)));
+					attrValues = lappend(attrValues, pnstrdup(t_base, t - t_base));
+					*p_attrKinds  = list_concat(attrKinds,  __attrKinds);
 					*p_attrKeys   = list_concat(attrKeys,   __attrKeys);
 					*p_attrValues = list_concat(attrValues, __attrValues);
+					list_free(__attrKinds);
 					list_free(__attrKeys);
 					list_free(__attrValues);
 					return LIKE_TRUE;
 				}
 				else
 				{
+					list_free(__attrKinds);
 					list_free_deep(__attrKeys);
 					list_free_deep(__attrValues);
 					if (status == LIKE_ABORT)
@@ -1124,6 +1138,7 @@ __matchByPattern(const char *t, int tlen,
 			 * End of text with no match, so no point in trying later places
 			 * to start matching this pattern.
 			 */
+			list_free(attrKinds);
 			list_free_deep(attrKeys);
 			list_free_deep(attrValues);
 			return LIKE_ABORT;
@@ -1138,6 +1153,7 @@ __matchByPattern(const char *t, int tlen,
 		else if (*p != *t)
 		{
 			/* non-wildcard pattern char fails to match text char */
+			list_free(attrKinds);
 			list_free_deep(attrKeys);
 			list_free_deep(attrValues);
 			return LIKE_FALSE;
@@ -1160,6 +1176,7 @@ __matchByPattern(const char *t, int tlen,
 	}
 	if (tlen > 0)
 	{
+		list_free(attrKinds);
 		list_free_deep(attrKeys);
 		list_free_deep(attrValues);
 		return LIKE_FALSE;		/* end of pattern, but not of text */
@@ -1173,6 +1190,7 @@ __matchByPattern(const char *t, int tlen,
 		NextByte(p, plen);
 	if (plen <= 0)
 	{
+		*p_attrKinds  = attrKinds;
 		*p_attrKeys   = attrKeys;
 		*p_attrValues = attrValues;
 		return LIKE_TRUE;
@@ -1181,6 +1199,7 @@ __matchByPattern(const char *t, int tlen,
 	 * End of text with no match, so no point in trying later places to start
 	 * matching this pattern.
 	 */
+	list_free(attrKinds);
 	list_free_deep(attrKeys);
 	list_free_deep(attrValues);
 	return LIKE_ABORT;
@@ -1189,11 +1208,13 @@ __matchByPattern(const char *t, int tlen,
 bool
 pathNameMatchByPattern(const char *pathname,
 					   const char *pattern,
+					   List **p_attrKinds,
 					   List **p_attrKeys,
 					   List **p_attrValues)
 {
 	char	   *namebuf = alloca(strlen(pathname) + 10);
 	char	   *filename;
+	List	   *attrKinds = NIL;
 	List	   *attrKeys = NIL;
 	List	   *attrValues = NIL;
 
@@ -1201,9 +1222,14 @@ pathNameMatchByPattern(const char *pathname,
 	filename = basename(namebuf);
 	if (__matchByPattern(filename, strlen(filename),
 						 pattern,  strlen(pattern),
+						 &attrKinds,
 						 &attrKeys,
 						 &attrValues) == LIKE_TRUE)
 	{
+		if (p_attrKinds)
+			*p_attrKinds = attrKinds;
+		else
+			list_free(attrKinds);
 		if (p_attrKeys)
 			*p_attrKeys = attrKeys;
 		else

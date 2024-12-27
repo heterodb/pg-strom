@@ -79,12 +79,20 @@
     <li class="toctree-l3"><a class="reference internal" href="#creation-of-foreign-tables">Creation of foreign tables</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#foreign-table-options">Foreign table options</a>
+        <ul>
+    <li class="toctree-l4"><a class="reference internal" href="#foreign-table-options_1">Foreign Table Options</a>
+    </li>
+    <li class="toctree-l4"><a class="reference internal" href="#foreign-column-options">Foreign Column Options</a>
+    </li>
+        </ul>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#data-type-mapping">Data type mapping</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#how-to-read-explain">How to read EXPLAIN</a>
     </li>
         </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw-virtual-column">Arrow_Fdw Virtual Column</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#how-to-make-arrow-files">How to make Arrow files</a>
         <ul>
@@ -200,7 +208,8 @@
 OPTIONS (file '/path/to/logdata.arrow');
 </code></pre>
 <h3 id="foreign-table-options">Foreign table options</h3>
-<p>Arrow_Fdw supports the options below. Right now, all the options are for foreign tables.</p>
+<p>Arrow_Fdw supports the options below.</p>
+<h4 id="foreign-table-options_1">Foreign Table Options</h4>
 <dl>
 <dt><code>file=PATHNAME</code></dt>
 <dd>It maps an Arrow file specified on the foreign table.</dd>
@@ -212,8 +221,47 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dd><code>When</code>dir<code>option is given, it maps only files with the specified suffix, like</code>.arrow` for example.</dd>
 <dt><code>parallel_workers=N_WORKERS</code></dt>
 <dd>It tells the number of workers that should be used to assist a parallel scan of this foreign table; equivalent to <code>parallel_workers</code> storage parameter at normal tables.</dd>
-<dt><code>writable=(true|false)</code></dt>
-<dd>It allows execution of <code>INSERT</code> command on the foreign table. See the section of "Writable Arrow_Fdw"</dd>
+<dt><code>pattern=PATTERN</code></dt>
+<dd>Maps only files specified by the <code>file</code>, <code>files</code>, or <code>dir</code> option that match the <code>PATTERN</code>, including wildcards, to the foreign table.</dd>
+<dd>The following wildcards can be used:</dd>
+<dd>
+<ul>
+<li><code>?</code> ... matches any 1 character.</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>*</code> ... matches any string of 0 or more characters.</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>${KEY}</code> ... matches any string of 0 or more characters.</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>@{KEY}</code> ... matches any numeric string of 0 or more characters.</li>
+</ul>
+</dd>
+<dd></dd>
+<dd>An interesting use of this option is to refer to a portion of a file name matched by the wildcard <code>${KEY}</code> or <code>@{KEY}</code> as a virtual column. For more information, see the '''Arrow_Fdw virtual column''' section below.</dd>
+</dl>
+<h4 id="foreign-column-options">Foreign Column Options</h4>
+<dl>
+<dt><code>field=FIELD</code></dt>
+<dd>It specifies the field name of the Arrow file to map to that column.</dd>
+<dd>In the default, Arrow_Fdw maps the first occurrence of a field that has the same column name as this foreign table's column name.</dd>
+<dt><code>virtual=KEY</code></dt>
+<dd>It configures the column is a virtual column. <code>KEY</code> specifies the wildcard key name in the pattern specified by the <code>pattern</code> option of the foreign table option.</dd>
+<dd>A virtual column allows to refer to the part of the file name pattern that matches <code>KEY</code> in a query.</dd>
+<dt><code>virtual_metadata=KEY</code></dt>
+<dd>It specifies that the column is a virtual column. <code>KEY</code> specifies a KEY-VALUE pair embedded in the CustomMetadata field of the Arrow file. If the specified KEY-VALUE pair is not found, the column returns a NULL value.</dd>
+<dd>There are two types of CustomMetadata in Arrow files: embedded in the schema (corresponding to a PostgreSQL table) and embedded in the field (corresponding to a PostgreSQL column).</dd>
+<dd>For example, you can reference CustomMetadata embedded in a field by writing the field name separated by the <code>.</code> character before the KEY value, such as <code>lo_orderdate.max_values</code>. If there is no field name, it will be treated as a KEY-VALUE pair embedded in the schema.</dd>
+<dt><code>virtual_metadata_split=KEY</code></dt>
+<dd>It specifies that the column is a virtual column. <code>KEY</code> specifies the KEY-VALUE pair embedded in the CustomMetadata field of the Arrow file. If the specified KEY-VALUE pair is not found, this column returns a NULL value.</dd>
+<dd>The difference from <code>virtual_metadata</code> is that the values of the CustomMetadata field are separated by a delimiter(<code>,</code>) and applied to each Record Batch in order from the beginning. For example, if the specified CustomMetadata value is <code>Tokyo,Osaka,Kyoto,Yokohama</code>, the row read from RecordBatch-0 will display <code>'Tokyo'</code>, the row read from RecordBatch-1 will display <code>'Osaka'</code>, and the row read from RecordBatch-2 will display <code>'Osaka'</code> as the value of this virtual column.</dd>
 </dl>
 <h3 id="data-type-mapping">Data type mapping</h3>
 <p>Arrow data types are mapped on PostgreSQL data types as follows.</p>
@@ -225,7 +273,9 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dt><code>FloatingPoint</code></dt>
 <dd>mapped to either of <code>float2</code>, <code>float4</code> or <code>float8</code> according to the <code>precision</code> attribute.</dd>
 <dd><code>float2</code> is an enhanced data type by PG-Strom.</dd>
-<dt><code>Binary</code></dt>
+<dt><code>Utf8</code>, <code>LargeUtf8</code></dt>
+<dd>mapped to <code>text</code> data type</dd>
+<dt><code>Binary</code>, <code>LargeBinary</code></dt>
 <dd>mapped to <code>bytea</code> data type</dd>
 <dt><code>Decimal</code></dt>
 <dd>mapped to <code>numeric</code> data type</dd>
@@ -237,14 +287,14 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dd>mapped to <code>timestamp</code> data type; to be adjusted as if it has <code>unit=MicroSecond</code> precision.</dd>
 <dt><code>Interval</code></dt>
 <dd>mapped to <code>interval</code> data type.</dd>
-<dt><code>List</code></dt>
+<dt><code>List</code>, <code>LargeList</code></dt>
 <dd>mapped to 1-dimensional array of the element data type.</dd>
 <dt><code>Struct</code></dt>
 <dd>mapped to compatible composite data type; that shall be defined preliminary.</dd>
 <dt><code>FixedSizeBinary</code></dt>
 <dd>mapped to <code>char(n)</code> data type according to the <code>byteWidth</code> attribute.</dd>
 <dd>If <code>pg_type=TYPENAME</code> is configured, PG-Strom may assign the configured data type. Right now, <code>inet</code> and <code>macaddr</code> are supported.</dd>
-<dt><code>Union</code>, <code>Map</code>, <code>Duration</code>, <code>LargeBinary</code>, <code>LargeUtf8</code>, <code>LargeList</code></dt>
+<dt><code>Union</code>, <code>Map</code>, <code>Duration</code></dt>
 <dd>Right now, PG-Strom cannot map these Arrow data types onto any of PostgreSQL data types.</dd>
 </dl>
 <h3 id="how-to-read-explain">How to read EXPLAIN</h3>
@@ -316,6 +366,128 @@ OPTIONS (file '/path/to/logdata.arrow');
 (28 rows)
 </code></pre>
 <p>The verbose output additionally displays amount of column-data to be loaded on reference of columns. The load of <code>lo_orderdate</code>, <code>lo_quantity</code>, <code>lo_extendedprice</code> and <code>lo_discount</code> columns needs to read 89.41GB in total. It is 17.8% towards the filesize (502.93GB).</p>
+<h2 id="arrow_fdw-virtual-column">Arrow_Fdw Virtual Column</h2>
+<p>Arrow_Fdw allows to map multiple Apache Arrow files with compatible schema structures to a single foreign table. For example, if `dir '/opt/arrow/mydata' is configured for foreign table option, all files under that directory will be mapped.</p>
+<p>When you are converting the contents of a transactional database into an Apache Arrow file, we often dump them to separate files by year and month or specific categories, and its file names reflects these properties.</p>
+<p>The example below shows an example to convert the transactional table <code>lineorder</code> into Arrow files by year of <code>lo_orderdate</code> and by category of <code>lo_shipmode</code>.</p>
+<pre><code>$ for s in RAIL AIR TRUCK SHIP FOB MAIL;
+  do
+    for y in 1993 1994 1995 1996 1997;
+    do
+      pg2arrow -d ssbm -c &quot;SELECT * FROM lineorder_small \
+                            WHERE lo_orderdate between ${y}0101 and ${y}1231 \
+                              AND lo_shipmode = '${s}'&quot; \
+               -o /opt/arrow/mydata/f_lineorder_${y}_${s}.arrow
+    done
+  done
+$ ls /opt/arrow/mydata/
+f_lineorder_1993_AIR.arrow    f_lineorder_1995_RAIL.arrow
+f_lineorder_1993_FOB.arrow    f_lineorder_1995_SHIP.arrow
+f_lineorder_1993_MAIL.arrow   f_lineorder_1995_TRUCK.arrow
+f_lineorder_1993_RAIL.arrow   f_lineorder_1996_AIR.arrow
+f_lineorder_1993_SHIP.arrow   f_lineorder_1996_FOB.arrow
+f_lineorder_1993_TRUCK.arrow  f_lineorder_1996_MAIL.arrow
+f_lineorder_1994_AIR.arrow    f_lineorder_1996_RAIL.arrow
+f_lineorder_1994_FOB.arrow    f_lineorder_1996_SHIP.arrow
+f_lineorder_1994_MAIL.arrow   f_lineorder_1996_TRUCK.arrow
+f_lineorder_1994_RAIL.arrow   f_lineorder_1997_AIR.arrow
+f_lineorder_1994_SHIP.arrow   f_lineorder_1997_FOB.arrow
+f_lineorder_1994_TRUCK.arrow  f_lineorder_1997_MAIL.arrow
+f_lineorder_1995_AIR.arrow    f_lineorder_1997_RAIL.arrow
+f_lineorder_1995_FOB.arrow    f_lineorder_1997_SHIP.arrow
+f_lineorder_1995_MAIL.arrow   f_lineorder_1997_TRUCK.arrow
+</code></pre>
+<p>All these Apache Arrow files have the same schema structure and can be mapped to a single foreign table using the <code>dir</code> option.</p>
+<p>Also, the Arrow file that has '1995' token in the file name only contains records with <code>lo_orderdate</code> in the range 19950101 to 19951231. The Arrow file that has 'RAIL' token in the file name only contains records with <code>lo_shipmode</code> of <code>RAIL</code>.</p>
+<p>In other words, even if you define the Arrow_Fdw foreign  table that maps these multiple Arrow files, when reading data from a file whose file name includes 1995, it is assumed that the value of <code>lo_orderdate</code> is in the range of 19950101 to 19951231. It is possible for the optimizer to utilize this knowledge.</p>
+<p>In Arrow_Fdw, you can refer to part of the file name as a column by using the foreign table option <code>pattern</code>. This is called a virtual column and is configured as follows.</p>
+<pre><code>=# IMPORT FOREIGN SCHEMA f_lineorder
+     FROM SERVER arrow_fdw INTO public
+  OPTIONS (dir '/opt/arrow/mydata', pattern 'f_lineorder_@{year}_${shipping}.arrow');
+IMPORT FOREIGN SCHEMA
+
+=# \d f_lineorder
+                             Foreign table &quot;public.f_lineorder&quot;
+       Column       |     Type      | Collation | Nullable | Default |     FDW options
+--------------------+---------------+-----------+----------+---------+----------------------
+ lo_orderkey        | numeric       |           |          |         |
+ lo_linenumber      | integer       |           |          |         |
+ lo_custkey         | numeric       |           |          |         |
+ lo_partkey         | integer       |           |          |         |
+ lo_suppkey         | numeric       |           |          |         |
+ lo_orderdate       | integer       |           |          |         |
+ lo_orderpriority   | character(15) |           |          |         |
+ lo_shippriority    | character(1)  |           |          |         |
+ lo_quantity        | numeric       |           |          |         |
+ lo_extendedprice   | numeric       |           |          |         |
+ lo_ordertotalprice | numeric       |           |          |         |
+ lo_discount        | numeric       |           |          |         |
+ lo_revenue         | numeric       |           |          |         |
+ lo_supplycost      | numeric       |           |          |         |
+ lo_tax             | numeric       |           |          |         |
+ lo_commit_date     | character(8)  |           |          |         |
+ lo_shipmode        | character(10) |           |          |         |
+ year               | bigint        |           |          |         | (virtual 'year')
+ shipping           | text          |           |          |         | (virtual 'shipping')
+Server: arrow_fdw
+FDW options: (dir '/opt/arrow/mydata', pattern 'f_lineorder_@{year}_${shipping}.arrow')
+</code></pre>
+<p>This foreign table option <code>pattern</code> contains two wildcards.
+<code>@{year}</code> matches a numeric string larger than or equal to 0 characters, and <code>${shipping}</code> matches a string larger than or equal to 0 characters.
+The patterns that match this part of the file name can be referenced in the part specified by the <code>virtual</code> column option.</p>
+<p>In this case, <code>IMPORT FOREIGN SCHEMA</code> automatically adds column definitions, in addition to the fields contained in the Arrow file itself, as well as the virtual column <code>year</code> (a <code>bigint</code> column) that references the wildcard <code>@{year}</code>, and the virtual column <code>shipping</code> that references the wildcard <code>${shipping}</code>.</p>
+<pre><code>=# SELECT lo_orderkey, lo_orderdate, lo_shipmode, year, shipping
+     FROM f_lineorder
+    WHERE year = 1995 AND shipping = 'AIR'
+    LIMIT 10;
+ lo_orderkey | lo_orderdate | lo_shipmode | year | shipping
+-------------+--------------+-------------+------+----------
+      637892 |     19950512 | AIR         | 1995 | AIR
+      638243 |     19950930 | AIR         | 1995 | AIR
+      638273 |     19951214 | AIR         | 1995 | AIR
+      637443 |     19950805 | AIR         | 1995 | AIR
+      637444 |     19950803 | AIR         | 1995 | AIR
+      637510 |     19950831 | AIR         | 1995 | AIR
+      637504 |     19950726 | AIR         | 1995 | AIR
+      637863 |     19950802 | AIR         | 1995 | AIR
+      637892 |     19950512 | AIR         | 1995 | AIR
+      637987 |     19950211 | AIR         | 1995 | AIR
+(10 rows)
+</code></pre>
+<p>In other words, you can know what values the virtual columns have before reading the Arrow file mapped by the Arrow_Fdw foreign table. By this feature, if it is obvious that there is no match at all from the search conditions before reading a certain Arrow file, it is possible to skip reading the file itself.</p>
+<p>See the query and its <code>EXPLAIN ANALYZE</code> output below.</p>
+<p>This aggregation query reads the <code>f_lineorder</code> foreign table, filters it by some conditions, and then aggregates the total value of <code>lo_extendedprice * lo_discount</code>.
+At that time, the conditional clause <code>WHERE year = 1994</code> is added. This is effectively the same as <code>WHERE lo_orderdate BETWEEN 19940101 AND 19942131</code>, but since <code>year</code> is a virtual column, you can determine whether a matching row exists before reading the Arrow files.</p>
+<p>In fact, looking at the <code>Stats-Hint:</code> line, 12 Record-Batches were loaded due to the condition <code>(year = 1994)</code>, but 48 Record-Batches were skipped. This is a simple but extremely effective means of reducing I/O load.</p>
+<pre><code>=# EXPLAIN ANALYZE
+   SELECT sum(lo_extendedprice*lo_discount) as revenue
+     FROM f_lineorder
+    WHERE year = 1994
+      AND lo_discount between 1 and 3
+      AND lo_quantity &lt; 25;
+                                               QUERY PLAN
+--------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=421987.07..421987.08 rows=1 width=32) (actual time=82.914..82.915 rows=1 loops=1)
+   -&gt;  Custom Scan (GpuPreAgg) on f_lineorder  (cost=421987.05..421987.06 rows=1 width=32)      \
+                                               (actual time=82.901..82.903 rows=2 loops=1)
+         GPU Projection: pgstrom.psum(((lo_extendedprice * lo_discount))::double precision)
+         GPU Scan Quals: ((year = 1994) AND (lo_discount &lt;= '3'::numeric) AND                   \
+                          (lo_quantity &lt; '25'::numeric) AND                                     \
+                          (lo_discount &gt;= '1'::numeric)) [plan: 65062080 -&gt; 542, exec: 13001908 -&gt; 1701726]
+         referenced: lo_quantity, lo_extendedprice, lo_discount, year
+         Stats-Hint: (year = 1994)  [loaded: 12, skipped: 48]
+         file0: /opt/arrow/mydata/f_lineorder_1996_MAIL.arrow (read: 99.53MB, size: 427.16MB)
+         file1: /opt/arrow/mydata/f_lineorder_1996_SHIP.arrow (read: 99.52MB, size: 427.13MB)
+         file2: /opt/arrow/mydata/f_lineorder_1994_FOB.arrow (read: 99.18MB, size: 425.67MB)
+              :                :                                       :             :
+         file27: /opt/arrow/mydata/f_lineorder_1997_MAIL.arrow (read: 99.23MB, size: 425.87MB)
+         file28: /opt/arrow/mydata/f_lineorder_1995_MAIL.arrow (read: 99.16MB, size: 425.58MB)
+         file29: /opt/arrow/mydata/f_lineorder_1993_TRUCK.arrow (read: 99.24MB, size: 425.91MB)
+         GPU-Direct SQL: enabled (N=2,GPU0,1; direct=76195, ntuples=13001908)
+ Planning Time: 2.402 ms
+ Execution Time: 83.857 ms
+(39 rows)
+</code></pre>
 <h2 id="how-to-make-arrow-files">How to make Arrow files</h2>
 <p>This section introduces the way to transform dataset already stored in PostgreSQL database system into Apache Arrow file.</p>
 <h3 id="using-pyarrowpandas">Using PyArrow+Pandas</h3>
