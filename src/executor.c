@@ -2531,6 +2531,33 @@ pgstromExplainTaskState(CustomScanState *node,
 		ExplainPropertyInteger("Inner Siblings-Id", NULL,
 							   pp_info->sibling_param_id, es);
 	/*
+	 * xPU-PreAgg
+	 */
+	if ((pp_info->xpu_task_flags & DEVTASK__PREAGG) != 0)
+	{
+		ListCell   *lc1, *lc2;
+
+		resetStringInfo(&buf);
+		forboth (lc1, pp_info->groupby_actions,
+				 lc2, cscan->custom_scan_tlist)
+		{
+			int		action = lfirst_int(lc1);
+			TargetEntry *tle = lfirst(lc2);
+
+			if (action != KAGG_ACTION__VREF)
+				continue;
+			if (buf.len > 0)
+				appendStringInfoString(&buf, ", ");
+			str = deparse_expression((Node *)tle->expr,
+									 dcontext, verbose, true);
+			appendStringInfoString(&buf, str);
+		}
+		snprintf(label, sizeof(label),
+				 "%s Group Key", xpu_label);
+		ExplainPropertyText(label, buf.data, es);
+	}
+
+	/*
 	 * CPU Fallback
 	 */
 	if (es->analyze && ps_state)

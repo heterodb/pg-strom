@@ -1,5 +1,5 @@
 /*
- * gpu_groupby.c
+ * gpu_preagg.c
  *
  * Aggregation and Group-By with GPU acceleration
  * ----
@@ -19,9 +19,6 @@ static CustomExecMethods	gpupreagg_exec_methods;
 static CustomPathMethods	dpupreagg_path_methods;
 static CustomScanMethods	dpupreagg_plan_methods;
 static CustomExecMethods	dpupreagg_exec_methods;
-static CustomPathMethods	gpuagg_path_methods;
-static CustomScanMethods	gpuagg_plan_methods;
-static CustomExecMethods	gpuagg_exec_methods;
 static bool					pgstrom_enable_dpupreagg = false;
 static bool					pgstrom_enable_partitionwise_dpupreagg = false;
 static bool					pgstrom_enable_gpupreagg = false;
@@ -1087,15 +1084,18 @@ typedef struct
 	bool			try_parallel;
 	PathTarget	   *target_upper;
 	PathTarget	   *target_partial;
-	PathTarget	   *target_final;
-	AggClauseCosts	final_clause_costs;
+	PathTarget	   *target_agg_final;
+	PathTarget	   *target_proj_final;
+	AggClauseCosts	final_agg_clause_costs;
+	QualCost		final_proj_clause_costs;
 	pgstromPlanInfo *pp_info;
 	int				sibling_param_id;
 	List		   *inner_paths_list;
 	List		   *inner_target_list;
 	List		   *groupby_keys;
 	List		   *groupby_keys_refno;
-	Node		   *havingQual;
+	List		   *havingAggQuals;		/* only if GpuPreAgg + Agg */
+	List		   *havingProjQuals;	/* only if GpuAgg */
 } xpugroupby_build_path_context;
 
 /*
@@ -1160,18 +1160,19 @@ make_expr_typecast(Expr *expr, Oid target_type)
  * Aggref, and append its arguments on the target_partial/target_device.
  */
 static Node *
-make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
+make_alternative_aggref(xpugroupby_build_path_context *con,
+						Aggref *aggref,
+						bool final_function_by_aggregate)
 {
 	const aggfunc_catalog_entry *aggfn_cat;
 	PathTarget *target_partial = con->target_partial;
 	pgstromPlanInfo *pp_info = con->pp_info;
 	List	   *partfn_args = NIL;
 	Expr	   *partfn;
-	Aggref	   *aggref_alt;
+	Node	   *final_fn;
 	Oid			func_oid;
 	HeapTuple	htup;
 	Form_pg_proc proc;
-	Form_pg_aggregate agg;
 	ListCell   *lc;
 	int32_t		j, groupby_typmod = -1;
 
@@ -1199,13 +1200,13 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 		return NULL;
 	}
 	/* sanity checks */
-	Assert(aggref->aggkind == AGGKIND_NORMAL &&
-		   !aggref->aggvariadic);
+	Assert(aggref->aggkind == AGGKIND_NORMAL && !aggref->aggvariadic);
 
 	/*
 	 * Build partial-aggregate function
 	 */
-	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(aggfn_cat->partial_func_oid));
+	func_oid = aggfn_cat->partial_func_oid;
+	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for function %u",
 			 aggfn_cat->partial_func_oid);
@@ -1229,7 +1230,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 		{
 			elog(DEBUG2, "Partial aggregate argument is not executable: %s",
 				 nodeToString(expr));
-			return NULL;
+			return false;
 		}
 		partfn_args = lappend(partfn_args, expr);
 		if (lc == list_head(aggref->args))
@@ -1254,82 +1255,109 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 		pp_info->groupby_prepfn_bufsz += aggfn_cat->partial_func_bufsz;
 	}
 
-	/*
-	 * Build final-aggregate function
-	 */
-	func_oid = aggfn_cat->final_agg_func_oid;
-	htup = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(func_oid));
-	if (!HeapTupleIsValid(htup))
-		elog(ERROR, "cache lookup failed for pg_aggregate %u", func_oid);
-	agg = (Form_pg_aggregate) GETSTRUCT(htup);
+	if (final_function_by_aggregate)
+	{
+		/*
+		 * Build final-aggregate function (for GpuPreAgg + Agg)
+		 */
+		Form_pg_aggregate agg;
+		Aggref	   *__aggref;
+		Oid			__argtype = exprType((Node *)partfn);
+		TargetEntry *__tle = makeTargetEntry(partfn, 1, NULL, false);
 
-	aggref_alt = makeNode(Aggref);
-	aggref_alt->aggfnoid      = func_oid;
-	aggref_alt->aggtype       = aggref->aggtype;
-	aggref_alt->aggcollid     = aggref->aggcollid;
-	aggref_alt->inputcollid   = aggref->inputcollid;
-	aggref_alt->aggtranstype  = agg->aggtranstype;
-	aggref_alt->aggargtypes   = list_make1_oid(exprType((Node *)partfn));
-	aggref_alt->aggdirectargs = NIL;	/* see sanity checks */
-	aggref_alt->args          = list_make1(makeTargetEntry(partfn, 1, NULL, false));
-	aggref_alt->aggorder      = NIL;  /* see sanity check */
-	aggref_alt->aggdistinct   = NIL;  /* see sanity check */
-	aggref_alt->aggfilter     = NULL; /* processed in partial-function */
-	aggref_alt->aggstar       = false;
-	aggref_alt->aggvariadic   = false;
-	aggref_alt->aggkind       = AGGKIND_NORMAL;   /* see sanity check */
-	aggref_alt->agglevelsup   = 0;
-	aggref_alt->aggsplit      = AGGSPLIT_SIMPLE;
-	aggref_alt->aggno         = aggref->aggno;
-	aggref_alt->aggtransno    = aggref->aggno;
-	aggref_alt->location      = aggref->location;
-	/*
-	 * MEMO: nodeAgg.c creates AggStatePerTransData for each aggtransno (that is
-	 * unique ID of transition state in the Agg). This is a kind of optimization
-	 * for the case when multiple aggregate function has identical transition state.
-	 * However, its impact is not large for GpuPreAgg because most of reduction
-	 * works are already executed at the xPU device side.
-	 * So, we simply assign aggref->aggno (unique ID within the Agg node) to
-	 * construct transition state for each alternative aggregate function.
-	 *
-	 * See the issue #614 to reproduce the problem in the future version.
-	 */
+		func_oid = aggfn_cat->final_agg_func_oid;
+		htup = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(func_oid));
+		if (!HeapTupleIsValid(htup))
+			elog(ERROR, "cache lookup failed for pg_aggregate %u", func_oid);
+		agg = (Form_pg_aggregate) GETSTRUCT(htup);
 
-	/*
-	 * Update the cost factor
-	 */
-	if (OidIsValid(agg->aggtransfn))
-		add_function_cost(con->root,
-						  agg->aggtransfn,
-						  NULL,
-						  &con->final_clause_costs.transCost);
-	if (OidIsValid(agg->aggfinalfn))
-		add_function_cost(con->root,
-						  agg->aggfinalfn,
-						  NULL,
-						  &con->final_clause_costs.finalCost);
-	ReleaseSysCache(htup);
+		__aggref = makeNode(Aggref);
+		__aggref->aggfnoid      = func_oid;
+		__aggref->aggtype       = aggref->aggtype;
+		__aggref->aggcollid     = aggref->aggcollid;
+		__aggref->inputcollid   = aggref->inputcollid;
+		__aggref->aggtranstype  = agg->aggtranstype;
+		__aggref->aggargtypes   = list_make1_oid(__argtype);
+		__aggref->aggdirectargs = NIL;	/* see sanity checks */
+		__aggref->args          = list_make1(__tle);
+		__aggref->aggorder      = NIL;  /* see sanity check */
+		__aggref->aggdistinct   = NIL;  /* see sanity check */
+		__aggref->aggfilter     = NULL; /* processed in partial-function */
+		__aggref->aggstar       = false;
+		__aggref->aggvariadic   = false;
+		__aggref->aggkind       = AGGKIND_NORMAL;   /* see sanity check */
+		__aggref->agglevelsup   = 0;
+		__aggref->aggsplit      = AGGSPLIT_SIMPLE;
+		__aggref->aggno         = aggref->aggno;
+		__aggref->aggtransno    = aggref->aggno;
+		__aggref->location      = aggref->location;
+		/*
+		 * MEMO: nodeAgg.c creates AggStatePerTransData for each aggtransno
+		 * (that is unique ID of transition state in the Agg). This is a kind
+		 * of optimization for the case when multiple aggregate function has
+		 * identical transition state.
+		 * However, its impact is not large for GpuPreAgg because most of
+		 * reduction works are already executed at the xPU device side.
+		 * So, we simply assign aggref->aggno (unique ID within the Agg node)
+		 * to construct transition state for each alternative aggregate function.
+		 *
+		 * See the issue #614 to reproduce the problem in the future version.
+		 */
 
-	return (Node *)aggref_alt;
+		/*
+		 * Update the cost factor
+		 */
+		if (OidIsValid(agg->aggtransfn))
+			add_function_cost(con->root,
+							  agg->aggtransfn,
+							  NULL,
+							  &con->final_agg_clause_costs.transCost);
+		if (OidIsValid(agg->aggfinalfn))
+			add_function_cost(con->root,
+							  agg->aggfinalfn,
+							  NULL,
+							  &con->final_agg_clause_costs.finalCost);
+		ReleaseSysCache(htup);
+
+		final_fn = (Node *)__aggref;
+	}
+	else
+	{
+		/*
+		 * Build final-scalar function (for GpuAgg)
+		 */
+		func_oid = aggfn_cat->final_proj_func_oid;
+		if (!OidIsValid(func_oid))
+			final_fn = (Node *)partfn;
+		else
+		{
+			final_fn = (Node *)makeFuncExpr(func_oid,
+											aggref->aggtype,
+											list_make1(partfn),
+											aggref->aggcollid,
+											aggref->inputcollid,
+											COERCE_EXPLICIT_CALL);
+			cost_qual_eval_node(&con->final_proj_clause_costs,
+								final_fn, con->root);
+		}
+	}
+	return final_fn;
 }
 
+/*
+ * replace_expression_by_[agg|proj]_altfuncs
+ */
 static Node *
-replace_expression_by_altfunc(Node *node, xpugroupby_build_path_context *con)
+__replace_expression_by_altfunc_common(Node *node, void *__priv,
+									   tree_mutator_callback walker)
 {
-	PathTarget *target_input = con->input_rel->reltarget;
-	Node	   *aggfn;
+	xpugroupby_build_path_context *con = __priv;
+	RelOptInfo *input_rel = con->input_rel;
+	PathTarget *target_input = input_rel->reltarget;
 	ListCell   *lc;
 
-	if (!node)
-		return NULL;
-	/* aggregate function? */
-	if (IsA(node, Aggref))
-	{
-		aggfn = make_alternative_aggref(con, (Aggref *)node);
-		if (!aggfn)
-			con->device_executable = false;
-		return aggfn;
-	}
+	/* must be processed in the early half */
+	Assert(node != NULL && !IsA(node, Aggref));
 	/* grouping key? */
 	foreach (lc, con->groupby_keys)
 	{
@@ -1367,7 +1395,41 @@ replace_expression_by_altfunc(Node *node, xpugroupby_build_path_context *con)
 		elog(ERROR, "Bug? referenced variable is grouping-key nor its dependent key: %s",
 			 nodeToString(node));
 	}
-	return expression_tree_mutator(node, replace_expression_by_altfunc, con);
+	return expression_tree_mutator(node, walker, con);
+}
+
+static Node *
+replace_expression_by_agg_altfuncs(Node *node, void *__priv)
+{
+	if (!node)
+		return NULL;
+	if (IsA(node, Aggref))
+	{
+		xpugroupby_build_path_context *con = __priv;
+		Node   *aggfn = make_alternative_aggref(con, (Aggref *)node, true);
+
+		if (!aggfn)
+			con->device_executable = false;
+		return aggfn;
+	}
+	return __replace_expression_by_altfunc_common(node, __priv, replace_expression_by_agg_altfuncs);
+}
+
+static Node *
+replace_expression_by_proj_altfuncs(Node *node, void *__priv)
+{
+	if (!node)
+		return NULL;
+	if (IsA(node, Aggref))
+	{
+		xpugroupby_build_path_context *con = __priv;
+		Node   *aggfn = make_alternative_aggref(con, (Aggref *)node, false);
+
+		if (!aggfn)
+			con->device_executable = false;
+		return aggfn;
+	}
+	return __replace_expression_by_altfunc_common(node, __priv, replace_expression_by_proj_altfuncs);
 }
 
 static bool
@@ -1377,7 +1439,6 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 	Query		   *parse = root->parse;
 	pgstromPlanInfo *pp_info = con->pp_info;
 	PathTarget	   *target_upper = con->target_upper;
-	Node		   *havingQual = NULL;
 	ListCell	   *lc1, *lc2;
 	int				i = 0;
 
@@ -1430,7 +1491,8 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 					 nodeToString(expr));
 				return false;
 			}
-			add_column_to_pathtarget(con->target_final, expr, sortgroupref);
+			add_column_to_pathtarget(con->target_agg_final, expr, sortgroupref);
+			add_column_to_pathtarget(con->target_proj_final, expr, sortgroupref);
 			/* to be attached to target-partial later */
 			con->groupby_keys = lappend(con->groupby_keys, expr);
 			con->groupby_keys_refno = lappend_int(con->groupby_keys_refno,
@@ -1438,26 +1500,33 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 		}
 		else if (IsA(expr, Aggref))
 		{
-			Expr   *altfn;
+			Aggref *aggref = (Aggref *)expr;
+			Expr   *altfn_agg;
+			Expr   *altfn_proj;
 
-			altfn = (Expr *)make_alternative_aggref(con, (Aggref *)expr);
-			if (!altfn)
+			altfn_agg  = (Expr *)make_alternative_aggref(con, aggref, true);
+			altfn_proj = (Expr *)make_alternative_aggref(con, aggref, false);
+			if (!altfn_agg || !altfn_proj)
 			{
 				elog(DEBUG2, "No alternative aggregation: %s",
 					 nodeToString(expr));
 				return false;
 			}
-			if (exprType((Node *)expr) != exprType((Node *)altfn))
+			if (exprType((Node *)aggref) != exprType((Node *)altfn_agg) ||
+				exprType((Node *)aggref) != exprType((Node *)altfn_proj))
 			{
-				elog(ERROR, "Bug? XpuGroupBy catalog is not consistent: %s --> %s",
-					 nodeToString(expr),
-					 nodeToString(altfn));
+				elog(ERROR, "Bug? XpuGroupBy catalog is not consistent: %s --> agg:[%s] proj:[%s]",
+					 nodeToString(aggref),
+					 nodeToString(altfn_agg),
+					 nodeToString(altfn_proj));
 			}
-			add_column_to_pathtarget(con->target_final, altfn, 0);
+			add_column_to_pathtarget(con->target_agg_final,  altfn_agg,  0);
+			add_column_to_pathtarget(con->target_proj_final, altfn_proj, 0);
 		}
 		else if (parse->distinctClause)
 		{
-			add_column_to_pathtarget(con->target_final, expr, 0);
+			add_column_to_pathtarget(con->target_agg_final, expr, 0);
+			add_column_to_pathtarget(con->target_proj_final, expr, 0);
 			/* add VREF_NOKEY entries */
 			con->groupby_keys = lappend(con->groupby_keys, expr);
 			con->groupby_keys_refno = lappend_int(con->groupby_keys_refno, 0);
@@ -1475,15 +1544,20 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 	 */
 	if (parse->havingQual)
 	{
-		havingQual = replace_expression_by_altfunc(parse->havingQual, con);
-		if (!con->device_executable)
+		Assert(IsA(parse->havingQual, List));
+		con->havingAggQuals = (List *)
+			replace_expression_by_agg_altfuncs(parse->havingQual, con);
+		con->havingProjQuals = (List *)
+			replace_expression_by_proj_altfuncs(parse->havingQual, con);
+		if (con->havingAggQuals == NIL ||
+			con->havingProjQuals == NIL ||
+			!con->device_executable)
 		{
 			elog(DEBUG2, "unable to replace HAVING to alternative aggregation: %s",
 				 nodeToString(parse->havingQual));
 			return false;
 		}
 	}
-	con->havingQual = havingQual;
 
 	/*
 	 * Due to data alignment on the tuple on the kds_final, grouping-keys must
@@ -1503,7 +1577,8 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 		pp_info->groupby_typmods = lappend_int(pp_info->groupby_typmods,
 											   exprTypmod((Node *)key));
 	}
-	set_pathtarget_cost_width(root, con->target_final);
+	set_pathtarget_cost_width(root, con->target_proj_final);
+	set_pathtarget_cost_width(root, con->target_agg_final);
 	set_pathtarget_cost_width(root, con->target_partial);
 
 	return true;
@@ -1513,8 +1588,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
  * try_add_final_groupby_paths
  */
 static void
-try_add_final_groupby_paths(xpugroupby_build_path_context *con,
-							Path *part_path)
+try_add_final_groupby_paths(xpugroupby_build_path_context *con, Path *part_path)
 {
 	Query	   *parse = con->root->parse;
 	Path	   *agg_path;
@@ -1526,12 +1600,12 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 		agg_path = (Path *)create_agg_path(con->root,
 										   con->group_rel,
 										   part_path,
-										   con->target_final,
+										   con->target_agg_final,
 										   AGG_HASHED,
 										   AGGSPLIT_SIMPLE,
 										   parse->groupClause,
-										   (List *)con->havingQual,
-										   &con->final_clause_costs,
+										   con->havingAggQuals,
+										   &con->final_agg_clause_costs,
 										   con->num_groups);
 		dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
 
@@ -1543,12 +1617,12 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 		agg_path = (Path *)create_agg_path(con->root,
 										   con->group_rel,
 										   part_path,
-										   con->target_final,
+										   con->target_agg_final,
 										   AGG_HASHED,
 										   AGGSPLIT_SIMPLE,
 										   parse->distinctClause,
-										   (List *)con->havingQual,
-										   &con->final_clause_costs,
+										   con->havingAggQuals,
+										   &con->final_agg_clause_costs,
 										   con->num_groups);
 		add_path(con->group_rel, agg_path);
 	}
@@ -1557,12 +1631,12 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 		agg_path = (Path *)create_agg_path(con->root,
 										   con->group_rel,
 										   part_path,
-										   con->target_final,
+										   con->target_agg_final,
 										   AGG_PLAIN,
 										   AGGSPLIT_SIMPLE,
 										   parse->groupClause,
-										   (List *)con->havingQual,
-										   &con->final_clause_costs,
+										   con->havingAggQuals,
+										   &con->final_agg_clause_costs,
 										   con->num_groups);
 		dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
 		add_path(con->group_rel, dummy_path);
@@ -1645,7 +1719,7 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	cpath->path.total_cost       = startup_cost + run_cost;
 	cpath->path.pathkeys         = NIL;
 	cpath->custom_paths          = con->inner_paths_list;
-	cpath->custom_private        = list_make1(pp_info);
+	cpath->custom_private        = list_make3(pp_info, NULL, NULL);
 	cpath->methods               = xpu_cpath_methods;
 	return cpath;
 }
@@ -1664,7 +1738,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	Query	   *parse = root->parse;
 	List	   *inner_target_list = NIL;
 	ListCell   *lc;
-	Path	   *part_path;
+	CustomPath *cpath;
 	double		num_groups = 1.0;
 
 	/* estimate number of groups */
@@ -1706,7 +1780,8 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	con.try_parallel   = be_parallel;
 	con.target_upper   = root->upper_targets[upper_stage];
 	con.target_partial = create_empty_pathtarget();
-	con.target_final   = create_empty_pathtarget();
+	con.target_agg_final = create_empty_pathtarget();
+	con.target_proj_final = create_empty_pathtarget();
 	con.pp_info        = op_leaf->pp_info;
 	con.sibling_param_id = -1;
 	con.inner_paths_list = op_leaf->inner_paths_list;
@@ -1714,21 +1789,57 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
 		return;
-	part_path = (Path *)__buildXpuPreAggCustomPath(&con);
+	/* build GpuPreAgg path */
+	cpath = __buildXpuPreAggCustomPath(&con);
 
-	/* inject Gather path if parallel-aware */
-	if (be_parallel)
+	/* Agg(CPU) [+ Gather] + GpuPreAgg, if CPU fallback may happen */
+	/* Elsewhere, no Agg(CPU) is needed */
+	if (pgstrom_cpu_fallback_elevel < ERROR)
 	{
-		part_path = (Path *)
-			create_gather_path(root,
-							   group_rel,
-							   part_path,
-							   part_path->pathtarget,
-							   NULL,
-							   &num_groups);
+		Path   *__path = &cpath->path;
+
+		if (be_parallel)
+		{
+			__path = (Path *)
+				create_gather_path(root,
+								   group_rel,
+								   __path,
+								   __path->pathtarget,
+								   NULL,
+								   &num_groups);
+		}
+		try_add_final_groupby_paths(&con, __path);
 	}
-	/* try add final groupby path */
-	try_add_final_groupby_paths(&con, part_path);
+	else
+	{
+		pgstromPlanInfo	*pp_info = linitial(cpath->custom_private);
+		Path   *__path = &cpath->path;
+
+		/* mark as final-merged GpuPreAgg  */
+		pp_info->xpu_task_flags |= DEVTASK__PREAGG_FINAL_MERGE;
+
+		/* save a few extra properties */
+		lsecond(cpath->custom_private) = con.target_proj_final;
+		lthird(cpath->custom_private) = con.havingProjQuals;
+
+		/* attach Projection path */
+		__path = (Path *)
+			create_projection_path(root,
+								   group_rel,
+								   __path,
+								   con.target_proj_final);
+		if (be_parallel)
+		{
+			__path = (Path *)
+				create_gather_path(root,
+								   group_rel,
+								   __path,
+								   __path->pathtarget,
+								   NULL,
+								   &num_groups);
+		}
+		add_path(group_rel, __path);
+	}
 }
 
 static void
@@ -1797,7 +1908,8 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 		con.try_parallel   = try_parallel_path;
 		con.target_upper   = root->upper_targets[upper_stage];
 		con.target_partial = create_empty_pathtarget();
-		con.target_final   = create_empty_pathtarget();
+		con.target_agg_final = create_empty_pathtarget();
+		con.target_proj_final = create_empty_pathtarget();
 		con.pp_info        = op_leaf->pp_info;
 		con.sibling_param_id = sibling_param_id;
 		con.inner_paths_list = op_leaf->inner_paths_list;
@@ -1844,7 +1956,7 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 						   total_nrows);
 	part_path->pathtarget = part_target;
 
-	/* put Gather path if parallel-aware */
+	/* attach Gather path if parallel-aware */
 	if (try_parallel_path)
 	{
 		part_path = (Path *)
@@ -1855,7 +1967,6 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 							   NULL,
 							   &total_nrows);
 	}
-	/* try add final groupby path */
 	try_add_final_groupby_paths(&con, part_path);
 }
 
@@ -2008,6 +2119,15 @@ PlanGpuPreAggPath(PlannerInfo *root,
 								  custom_plans,
 								  pp_info,
 								  &gpupreagg_plan_methods);
+	if ((pp_info->xpu_task_flags & DEVTASK__PREAGG_FINAL_MERGE) != 0)
+	{
+		//PathTarget *target_proj_final = lsecond(cpath->custom_private);
+		List	   *having_proj_quals = lthird(cpath->custom_private);
+
+		/* HAVING clause */
+		//TODO: having quals in the device code - the blocker of GpuSort
+		cscan->scan.plan.qual = having_proj_quals;
+	}
 	form_pgstrom_plan_info(cscan, pp_info);
 	return &cscan->scan.plan;
 }
@@ -2114,20 +2234,11 @@ pgstrom_init_gpu_preagg(void)
 	gpupreagg_path_methods.CustomName          = "GpuPreAgg";
 	gpupreagg_path_methods.PlanCustomPath      = PlanGpuPreAggPath;
 
-	memcpy(&gpuagg_path_methods,
-		   &gpupreagg_path_methods, sizeof(CustomPathMethods));
-	gpupreagg_path_methods.CustomName = "GpuAgg";
-
 	/* initialization of plan method table */
 	memset(&gpupreagg_plan_methods, 0, sizeof(CustomScanMethods));
 	gpupreagg_plan_methods.CustomName          = "GpuPreAgg";
 	gpupreagg_plan_methods.CreateCustomScanState = CreateGpuPreAggScanState;
 	RegisterCustomScanMethods(&gpupreagg_plan_methods);
-
-	memcpy(&gpuagg_plan_methods,
-		   &gpupreagg_plan_methods, sizeof(CustomScanMethods));
-	gpuagg_plan_methods.CustomName = "GpuAgg";
-	RegisterCustomScanMethods(&gpuagg_plan_methods);
 
 	/* initialization of exec method table */
 	memset(&gpupreagg_exec_methods, 0, sizeof(CustomExecMethods));
@@ -2141,10 +2252,6 @@ pgstrom_init_gpu_preagg(void)
 	gpupreagg_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	gpupreagg_exec_methods.ShutdownCustomScan  = pgstromSharedStateShutdownDSM;
 	gpupreagg_exec_methods.ExplainCustomScan   = pgstromExplainTaskState;
-
-	memcpy(&gpuagg_exec_methods,
-		   &gpupreagg_exec_methods, sizeof(CustomExecMethods));
-	gpuagg_exec_methods.CustomName = "GpuAgg";
 
 	/* common portion */
 	__pgstrom_init_xpupreagg_common();
