@@ -934,30 +934,16 @@ STATIC_FUNCTION(void)
 __updateOneTupleNoGroups(kern_context *kcxt,
 						 kern_data_store *kds_final,
 						 bool source_is_valid,
-						 HeapTupleHeaderData *htup,
+						 kern_tupitem *tupitem,
 						 kern_expression *kexp_groupby_actions)
 {
 	char	   *buffer;
 
-	assert((char *)htup >  (char*)kds_final &&
-		   (char *)htup <= (char *)kds_final + kds_final->length);
+	assert(__KDS_TUPITEM_CHECK_VALID(kds_final, tupitem));
 	if (kcxt->groupby_prepfn_buffer)
-	{
 		buffer = kcxt->groupby_prepfn_buffer;
-	}
 	else
-	{
-		int			nattrs = (htup->t_infomask2 & HEAP_NATTS_MASK);
-		bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
-		uint32_t	t_hoff;
-
-		t_hoff = offsetof(HeapTupleHeaderData, t_bits);
-		if (heap_hasnull)
-			t_hoff += BITMAPLEN(nattrs);
-		t_hoff = MAXALIGN(t_hoff);
-
-		buffer = ((char *)htup + t_hoff);
-	}
+		buffer = (char *)&tupitem->htup + tupitem->htup.t_hoff;
 	assert((uintptr_t)buffer == MAXALIGN((uintptr_t)buffer));
 
 	for (int j=0; j < kexp_groupby_actions->u.pagg.nattrs; j++)
@@ -1104,11 +1090,11 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 	return tupitem;
 }
 
-STATIC_FUNCTION(bool)
+STATIC_FUNCTION(kern_tupitem *)
 __execGpuPreAggNoGroups(kern_context *kcxt,
 						kern_data_store *kds_final,
 						bool source_is_valid,
-						int depth,
+						int final_depth,
 						kern_expression *kexp_groupby_actions)
 {
 	__shared__ kern_tupitem *tupitem;
@@ -1165,17 +1151,12 @@ __execGpuPreAggNoGroups(kern_context *kcxt,
 		}
 		/* error & suspend checks */
 		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
-			return false;
+			return NULL;
 		/* is the destination tuple ready? */
 		if (tupitem)
-			break;
+			return tupitem;
 	}
-	/* update partial aggregation */
-	__updateOneTupleNoGroups(kcxt, kds_final,
-							 source_is_valid,
-							 &tupitem->htup,
-							 kexp_groupby_actions);
-	return true;
+	return NULL;
 }
 
 /*
@@ -1559,23 +1540,21 @@ __update_groupby__pcovar(kern_context *kcxt,
 STATIC_FUNCTION(void)
 __updateOneTupleGroupBy(kern_context *kcxt,
 						kern_data_store *kds_final,
-						HeapTupleHeaderData *htup,
-						char *groupby_prepfn_buffer,
+						kern_tupitem *tupitem,
 						const kern_expression *kexp_groupby_actions)
 {
+	char	   *groupby_prepfn_buffer;
 	char	   *curr;
 
-	if (!groupby_prepfn_buffer)
+	if (kcxt->groupby_prepfn_buffer &&
+		tupitem->rowid < kcxt->groupby_prepfn_nbufs)
 	{
-		int			nattrs = (htup->t_infomask2 & HEAP_NATTS_MASK);
-		bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
-		uint32_t	t_hoff;
-
-		t_hoff = offsetof(HeapTupleHeaderData, t_bits);
-		if (heap_hasnull)
-			t_hoff += BITMAPLEN(nattrs);
-		t_hoff = MAXALIGN(t_hoff);
-		groupby_prepfn_buffer = (char *)htup + t_hoff;
+		groupby_prepfn_buffer = (kcxt->groupby_prepfn_buffer +
+								 tupitem->rowid * kcxt->groupby_prepfn_bufsz);
+	}
+	else
+	{
+		groupby_prepfn_buffer = (char *)&tupitem->htup + tupitem->htup.t_hoff;
 	}
 	assert((uintptr_t)groupby_prepfn_buffer == MAXALIGN(groupby_prepfn_buffer));
 
@@ -1649,49 +1628,26 @@ bailout:
 	assert(curr == groupby_prepfn_buffer + kcxt->groupby_prepfn_bufsz);
 }
 
-STATIC_FUNCTION(int)
-__execGpuPreAggGroupBy(kern_context *kcxt,
-					   kern_data_store *kds_final,
-					   bool source_is_valid,
-					   int depth,
-					   kern_expression *kexp_groupby_keyhash,
-					   kern_expression *kexp_groupby_keyload,
-					   kern_expression *kexp_groupby_keycomp,
-					   kern_expression *kexp_groupby_actions)
+STATIC_FUNCTION(kern_tupitem *)
+__execGpuPreAggGroupByHash(kern_context *kcxt,
+						   kern_data_store *kds_final,
+						   xpu_int4_t *hash,
+						   int final_depth,
+						   kern_expression *kexp_groupby_keyhash,
+						   kern_expression *kexp_groupby_keyload,
+						   kern_expression *kexp_groupby_keycomp,
+						   kern_expression *kexp_groupby_actions)
 {
 	kern_hashitem *hitem = NULL;
-	xpu_int4_t	hash;
-
-	assert(kds_final->format == KDS_FORMAT_HASH);
-	/*
-	 * compute hash value of the grouping keys
-	 */
-	memset(&hash, 0, sizeof(hash));
-	if (source_is_valid)
-	{
-		if (EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keyhash, &hash))
-		{
-			assert(!XPU_DATUM_ISNULL(&hash));
-		}
-		else if (HandleErrorIfCpuFallback(kcxt, depth, 0, false))
-		{
-			memset(&hash, 0, sizeof(hash));
-		}
-		else
-		{
-			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
-		}
-	}
-	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
-		return false;
 
 	/*
 	 * lookup the destination grouping tuple. if not found, create a new one.
 	 */
+	assert(kds_final->format == KDS_FORMAT_HASH);
 	do {
-		if (!XPU_DATUM_ISNULL(&hash) && !hitem)
+		if (!XPU_DATUM_ISNULL(hash) && !hitem)
 		{
-			uint64_t   *hslot = KDS_GET_HASHSLOT(kds_final, hash.value);
+			uint64_t   *hslot = KDS_GET_HASHSLOT(kds_final, hash->value);
 			uint64_t	hoffset;
 			uint64_t	saved;
 			bool		has_lock = false;
@@ -1705,7 +1661,7 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 			{
 				bool	saved_compare_nulls = kcxt->kmode_compare_nulls;
 
-				if (hitem->hash != hash.value)
+				if (hitem->hash != hash->value)
 					continue;
 				kcxt->kmode_compare_nulls = true;
 				ExecLoadVarsHeapTuple(kcxt, kexp_groupby_keyload,
@@ -1716,20 +1672,21 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 				{
 					kcxt->kmode_compare_nulls = saved_compare_nulls;
 					if (!XPU_DATUM_ISNULL(&status) && status.value)
-						break;
+						break;	/* found */
 				}
 				else
 				{
 					kcxt->kmode_compare_nulls = saved_compare_nulls;
-					if (HandleErrorIfCpuFallback(kcxt, depth, 0, false))
-						memset(&hash, 0, sizeof(hash));
+					if (HandleErrorIfCpuFallback(kcxt, final_depth, 0, false))
+						memset(hash, 0, sizeof(xpu_int4_t));
 					else
 						assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 					hitem = NULL;
-					break;
+					goto skip;
 				}
 			}
 
+			/* if not found, insert a new empty one under the exclusive lock */
 			if (!hitem)
 			{
 				if (!has_lock)
@@ -1753,7 +1710,7 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 						/* insert and unlock */
 						uint64_t	__offset;
 
-						hitem->hash = hash.value;
+						hitem->hash = hash->value;
 						hitem->next = saved;
 						__threadfence();
 						__offset = ((char *)kds_final
@@ -1776,31 +1733,57 @@ __execGpuPreAggGroupBy(kern_context *kcxt,
 				__atomic_write_uint64(hslot, saved);
 			}
 		}
+	skip:
 		/* error & suspend checks */
 		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
-			return false;
+			return NULL;
 		/* retry, if any threads are not ready yet */
-	} while (__syncthreads_count(!XPU_DATUM_ISNULL(&hash) && !hitem) > 0);
+	} while (__syncthreads_count(!XPU_DATUM_ISNULL(hash) && !hitem) > 0);
+
+	return (hitem ? &hitem->t : NULL);
+}
+
+INLINE_FUNCTION(kern_tupitem *)
+__execGpuPreAggGroupBy(kern_context *kcxt,
+					   kern_data_store *kds_final,
+					   bool source_is_valid,
+					   int final_depth,
+					   kern_expression *kexp_groupby_keyhash,
+					   kern_expression *kexp_groupby_keyload,
+					   kern_expression *kexp_groupby_keycomp,
+					   kern_expression *kexp_groupby_actions)
+{
+	xpu_int4_t	hash;
 
 	/*
-	 * update the partial aggregation
+	 * compute hash value of the grouping keys
 	 */
-	if (hitem)
+	memset(&hash, 0, sizeof(hash));
+	if (source_is_valid)
 	{
-		char   *prepfn_buffer = NULL;
-
-		if (kcxt->groupby_prepfn_buffer &&
-			hitem->t.rowid < kcxt->groupby_prepfn_nbufs)
+		if (EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keyhash, &hash))
 		{
-			prepfn_buffer = kcxt->groupby_prepfn_buffer
-				+ hitem->t.rowid * kcxt->groupby_prepfn_bufsz;
+			assert(!XPU_DATUM_ISNULL(&hash));
 		}
-		__updateOneTupleGroupBy(kcxt, kds_final,
-								&hitem->t.htup,
-								prepfn_buffer,
-								kexp_groupby_actions);
+		else if (HandleErrorIfCpuFallback(kcxt, final_depth, 0, false))
+		{
+			memset(&hash, 0, sizeof(hash));
+		}
+		else
+		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		}
 	}
-	return true;
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+		return NULL;
+	return __execGpuPreAggGroupByHash(kcxt,
+									  kds_final,
+									  &hash,
+									  final_depth,
+									  kexp_groupby_keyhash,
+									  kexp_groupby_keyload,
+									  kexp_groupby_keycomp,
+									  kexp_groupby_actions);
 }
 
 /*
@@ -2260,9 +2243,8 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	kern_expression *karg;
 	uint32_t	rd_pos = WARP_READ_POS(wp,n_rels);
 	uint32_t	wr_pos = WARP_WRITE_POS(wp,n_rels);
-	bool		status;
-	int			i;
-	
+	kern_tupitem *tupitem = NULL;
+
 	/*
 	 * The previous depth still may produce new tuples, and number of
 	 * the current result tuples is not sufficient to run projection.
@@ -2281,6 +2263,8 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 	 */
 	if (rd_pos < wr_pos)
 	{
+		int		i;
+
 		for (i=0, karg = KEXP_FIRST_ARG(kexp_groupby_actions);
 			 i < kexp_groupby_actions->nr_args;
 			 i++, karg = KEXP_NEXT_ARG(karg))
@@ -2304,22 +2288,31 @@ execGpuPreAggGroupBy(kern_context *kcxt,
 		kexp_groupby_keyload &&
 		kexp_groupby_keycomp)
 	{
-		status = __execGpuPreAggGroupBy(kcxt, kds_final,
-										(rd_pos < wr_pos),
-										n_rels + 1,
-										kexp_groupby_keyhash,
-										kexp_groupby_keyload,
-										kexp_groupby_keycomp,
-										kexp_groupby_actions);
+		tupitem = __execGpuPreAggGroupBy(kcxt, kds_final,
+										 (rd_pos < wr_pos),
+										 n_rels + 1,
+										 kexp_groupby_keyhash,
+										 kexp_groupby_keyload,
+										 kexp_groupby_keycomp,
+										 kexp_groupby_actions);
+		if (tupitem)
+			__updateOneTupleGroupBy(kcxt, kds_final,
+									tupitem,
+									kexp_groupby_actions);
 	}
 	else
 	{
-		status = __execGpuPreAggNoGroups(kcxt, kds_final,
-										 (rd_pos < wr_pos),
-										 n_rels + 1,
-										 kexp_groupby_actions);
+		tupitem = __execGpuPreAggNoGroups(kcxt, kds_final,
+										  (rd_pos < wr_pos),
+										  n_rels + 1,
+										  kexp_groupby_actions);
+		if (tupitem)
+			__updateOneTupleNoGroups(kcxt, kds_final,
+									 (rd_pos < wr_pos),
+									 tupitem,
+									 kexp_groupby_actions);
 	}
-	if (__syncthreads_count(!status) > 0)
+	if (__syncthreads_count(!tupitem) > 0)
 		return -1;
 
 	/*
@@ -2341,4 +2334,111 @@ skip_reduction:
 			return -1;		/* ok, end of GpuPreAgg */
 	}
 	return n_rels + 1;		/* elsewhere, try again? */
+}
+
+/*
+ * kern_gpupreagg_final_merge
+ */
+KERNEL_FUNCTION(void)
+kern_gpupreagg_final_merge(kern_session_info *session,
+						   kern_gputask *kgtask,
+						   kern_data_store *kds_src,
+						   kern_data_store *kds_dst)
+{
+	kern_context    *kcxt;
+	kern_expression *kexp_groupby_keyhash = SESSION_KEXP_GROUPBY_KEYHASH(session);
+	kern_expression *kexp_groupby_keyload = SESSION_KEXP_GROUPBY_KEYLOAD(session);
+	kern_expression *kexp_groupby_keycomp = SESSION_KEXP_GROUPBY_KEYCOMP(session);
+	kern_expression *kexp_groupby_actions = SESSION_KEXP_GROUPBY_ACTIONS(session);
+	int			final_depth = kgtask->n_rels + 1;
+	uint32_t	base;
+
+	/* sanity checks */
+	assert(kgtask->right_outer_depth == 0 ? kds_src != NULL : kds_src == NULL);
+	/* save the GPU-Task specific read-only properties */
+	if (get_local_id() == 0)
+	{
+		stromTaskProp__cuda_dindex        = kgtask->cuda_dindex;
+		stromTaskProp__cuda_stack_limit   = kgtask->cuda_stack_limit;
+		stromTaskProp__partition_divisor  = kgtask->partition_divisor;
+		stromTaskProp__partition_reminder = kgtask->partition_reminder;
+	}
+	/* setup execution context */
+	INIT_KERNEL_CONTEXT(kcxt, session, NULL);
+	kcxt->groupby_prepfn_bufsz = session->groupby_prepfn_bufsz;
+
+	for (base = get_global_base(); base < kds_src->nitems; base += get_global_size())
+	{
+		kern_tupitem *tupitem_src = NULL;
+		kern_tupitem *tupitem_dst = NULL;
+		uint32_t	index = base + get_local_id();
+
+		/*
+		 * Extract the source tuple to the current kvars_slot
+		 */
+		if (index < kds_src->nitems)
+			tupitem_src = KDS_GET_TUPITEM(kds_src, index);
+		ExecLoadKeysFromGroupByFinal(kcxt, kds_src, tupitem_src,
+									 kexp_groupby_actions);
+		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+			break;
+		/*
+		 * Merge the final results on the destination buffer
+		 */
+		if (kexp_groupby_keyhash &&
+			kexp_groupby_keyload &&
+			kexp_groupby_keycomp)
+		{
+			xpu_int4_t	hash;
+
+			if (!tupitem_src)
+				memset(&hash, 0, sizeof(xpu_int4_t));	/* NULL */
+			else
+			{
+				kern_hashitem *hitem = (kern_hashitem *)
+					((char *)tupitem_src - offsetof(kern_hashitem, t));
+				hash.expr_ops = &xpu_int4_ops;
+				hash.value = hitem->hash;
+			}
+			tupitem_dst = __execGpuPreAggGroupByHash(kcxt, kds_dst,
+													 &hash,
+													 final_depth,
+													 kexp_groupby_keyhash,
+													 kexp_groupby_keyload,
+													 kexp_groupby_keycomp,
+													 kexp_groupby_actions);
+			if (tupitem_src && tupitem_dst)
+			{
+				const char *prepfn_buffer
+					= (char *)&tupitem_src->htup + tupitem_src->htup.t_hoff;
+				__mergeGpuPreAggGroupByBufferOne(kcxt, kds_dst,
+												 &tupitem_dst->htup,
+												 kexp_groupby_actions,
+												 prepfn_buffer);
+				KDS_GET_ROWINDEX(kds_src)[index] = 0UL;	/* invalidate source */
+			}
+		}
+		else
+		{
+			tupitem_dst = __execGpuPreAggNoGroups(kcxt, kds_dst,
+												  (tupitem_src != NULL),
+												  final_depth,
+												  kexp_groupby_actions);
+			/* merge the final results */
+			if (tupitem_src && tupitem_dst)
+			{
+				const char *prepfn_buffer
+					= (char *)&tupitem_src->htup + tupitem_src->htup.t_hoff;
+				__mergeGpuPreAggGroupByBufferOne(kcxt, kds_dst,
+												 &tupitem_dst->htup,
+												 kexp_groupby_actions,
+												 prepfn_buffer);
+				KDS_GET_ROWINDEX(kds_src)[index] = 0UL;	/* invalidate source */
+			}
+		}
+		/* error checks */
+		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+			break;
+	}
+	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
 }

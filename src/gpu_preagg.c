@@ -1828,6 +1828,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 								   group_rel,
 								   __path,
 								   con.target_proj_final);
+		/* attach Gather path, if parallel */
 		if (be_parallel)
 		{
 			__path = (Path *)
@@ -1838,6 +1839,9 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 								   NULL,
 								   &num_groups);
 		}
+		/* inject dummy path to resolve outer-reference by Aggref or others */
+		__path = pgstrom_create_dummy_path(root, __path);
+
 		add_path(group_rel, __path);
 	}
 }

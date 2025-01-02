@@ -3060,6 +3060,11 @@ ExecLoadVarsOuterColumn(kern_context *kcxt,
 						const kern_data_store *kds,
 						const kern_data_extra *extra,
 						uint32_t kds_index);
+PUBLIC_FUNCTION(bool)
+ExecLoadKeysFromGroupByFinal(kern_context *kcxt,
+							 const kern_data_store *kds_final,
+							 const kern_tupitem *tupitem,
+							 const kern_expression *kexp_groupby_actions);
 EXTERN_FUNCTION(bool)
 ExecMoveKernelVariables(kern_context *kcxt,
 						const kern_expression *kexp_move_vars,
