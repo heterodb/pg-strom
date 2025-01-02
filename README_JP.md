@@ -14,14 +14,15 @@ Software is fully open source, distributed under PostgreSQL License.
 PG-Strom + GPU Direct Storage Quickstart
 ========================================
 このドキュメントはPG-Stromの導入から、GPU Direct Storageまでの設定を説明するものです。
-本書はLocal NVMe SSDをGPU Direct Storageとして利用する例を説明しています。
+本書はLocal NVMe SSDをGPU Direct Storage向けに利用する例を説明しています。
 
 RHEL9向けに書かれていますが、[RHEL]と見出しに書かれている部分以外はRocky LinuxなどのRHELクローンOSと概ね共通なので参考になると思います。
 
 それではこのガイドに従って環境構築して、PG-Stromの世界に足を踏み入れてみてください。
 
 
-## [RHEL]バージョン指定
+## [RHEL]バージョン固定
+
 RHELではリリースバージョンを変更できます。インストールするCUDAに合わせて、リリースバージョンを固定化すると良いでしょう。CUDAとMOFED、Linuxのバージョンを適切かつ自由に選択できる場合はこの設定は不要です。
 
 (rhel9)
@@ -60,15 +61,13 @@ $ sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-
 ```
 
 ## 開発ツールなどのインストール
-開発ツールと、この後のセットアップで利用するパッケージをインストールしておきます。
 
 ```
 $ sudo dnf install wget git-core -y
 $ sudo dnf groupinstall 'Development Tools' -y
 ```
 
-## IOMMUをオフ
-システムのIOMMUはオフにしてください。
+## IOMMUの無効化
 
 (rhel9)
 
@@ -81,7 +80,6 @@ $ sudo grub2-mkconfig -o /boot/grub2/grub.cfg
 ```
 
 ## Nouveauドライバーの無効化
-Linuxデフォルトで有効化されているドライバーの無効化が必要です。
 
 ```
 # cat > /etc/modprobe.d/disable-nouveau.conf <<EOF
@@ -90,15 +88,18 @@ options nouveau modeset=0
 EOF
 ```
 
-## 再起動とカーネルヘッダーなどのインストール
+## システム再起動
+
+```
+# shutdown -r now
+```
+
+## カーネルヘッダーなどのインストール
 再起動後に、現在利用しているLinuxカーネルバージョン用のヘッダーなどをインストールします。
 
 ```
-$ sudo reboot
-...
 $ sudo dnf install -y kernel-devel-$(uname -r) kernel-headers-$(uname -r)
 ```
-
 
 ## MOFEDのインストール
 ダウンロードURLから、利用予定のCUDAバージョンとLinuxディストリビューション、Linuxカーネルのバージョンに対応したMOFEDをダウンロードします。
@@ -373,7 +374,7 @@ or
 
 $ sudo firewall-cmd --add-port=5432/tcp --permanent 
 
-&
+then
 
 $ sudo firewall-cmd --reload
 ```
