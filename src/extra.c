@@ -20,7 +20,7 @@
 #ifdef __PGSTROM_MODULE__
 #include "pg_strom.h"
 #else
-#include "heterodb_extra.h"
+#include "heterodb_extra_internal.h"
 #endif
 
 #define GPUDIRECT_DRIVER__CUFILE		'n'
@@ -40,20 +40,17 @@ static __thread unsigned int stub_error_lineno = 0;
 static __thread const char *stub_error_funcname = NULL;
 static __thread char	stub_error_message[1000];
 
-#define __Elog(fmt,...)									\
-	do {												\
-		int		___errno_saved___ = errno;				\
-														\
-		heterodbExtraSetError(errno ? errno : -1,		\
-							  __FILE__, __LINE__,		\
-							  __FUNCTION__,				\
-							  "heterodb_extra: " fmt,	\
-							  ##__VA_ARGS__);			\
-		errno = ___errno_saved___;						\
+#define __Ereport(fmt,...)									\
+	do {													\
+		int		___errno_saved___ = errno;					\
+															\
+		fprintf(stderr, "extra: " fmt " (%s:%d)\n",			\
+				##__VA_ARGS__, __FILE__, __LINE__);			\
+		errno = ___errno_saved___;							\
 	} while(0)
 
 /*
- * heterodbExtraSetError / heterodbExtraGetError
+ * heterodbExtraSetError / heterodbExtraGetError (deprecated)
  */
 static void (*p_heterodb_extra_set_error)(int errcode,
 										  const char *filename,
@@ -130,6 +127,21 @@ heterodbExtraGetError(const char **p_filename,
 }
 
 /*
+ * heterodbExtraRegisterEreportCallback
+ */
+static heterodb_extra_ereport_callback_type
+	(*p_heterodb_extra_register_ereport_callback)
+		(heterodb_extra_ereport_callback_type callback_new) = NULL;
+
+heterodb_extra_ereport_callback_type
+heterodbExtraRegisterEreportCallback(heterodb_extra_ereport_callback_type callback)
+{
+	if (p_heterodb_extra_register_ereport_callback)
+		return p_heterodb_extra_register_ereport_callback(callback);
+	return NULL;
+}
+
+/*
  * heterodbExtraModuleInfo
  */
 static char *(*p_heterodb_extra_module_init)(unsigned int pg_version_num) = NULL;
@@ -138,7 +150,7 @@ static char *
 heterodbExtraModuleInit(void)
 {
 	if (!p_heterodb_extra_module_init)
-		__Elog("HeteroDB Extra module is not loaded yet");
+		__Ereport("HeteroDB Extra module is not loaded yet");
 	else
 	{
 #ifndef PG_VERSION_NUM
@@ -147,7 +159,7 @@ heterodbExtraModuleInit(void)
 		char   *signature = p_heterodb_extra_module_init(PG_VERSION_NUM);
 		if (signature)
 			return signature;
-		__Elog("out of memory");
+		__Ereport("out of memory");
 	}
 	return NULL;
 }
@@ -161,7 +173,7 @@ heterodbLicenseReload(void)
 {
 	if (p_heterodb_license_reload)
 		return p_heterodb_license_reload();
-	__Elog("heterodbLicenseReload() is not ready");
+	__Ereport("heterodbLicenseReload() is not ready");
 	return -1;
 }
 
@@ -174,7 +186,7 @@ heterodbLicenseReloadPath(const char *path)
 {
 	if (p_heterodb_license_reload_path)
 		return p_heterodb_license_reload_path(path);
-	__Elog("heterodbLicenseReloadPath() is not ready");
+	__Ereport("heterodbLicenseReloadPath() is not ready");
 	return -1;
 }
 
@@ -190,7 +202,7 @@ heterodbLicenseQuery(char *buf, size_t bufsz)
 {
 	if (p_heterodb_license_query)
 		return p_heterodb_license_query(buf, bufsz);
-	__Elog("heterodbLicenseQuery() is not ready");
+	__Ereport("heterodbLicenseQuery() is not ready");
 	return -1;
 }
 
@@ -204,7 +216,7 @@ heterodbLicenseDecrypt(const char *path)
 {
 	if (p_heterodb_license_decrypt)
 		return p_heterodb_license_decrypt(path);
-	__Elog("heterodbLicenseDecrypt() is not ready");
+	__Ereport("heterodbLicenseDecrypt() is not ready");
 	return NULL;
 }
 
@@ -220,7 +232,7 @@ heterodbValidateDevice(const char *gpu_device_name,
 	if (p_heterodb_validate_device_v2)
 		return p_heterodb_validate_device_v2(gpu_device_name,
 											 gpu_device_uuid);
-	__Elog("heterodbValidateDevice() is not ready");
+	__Ereport("heterodbValidateDevice() is not ready");
 	return -1;
 }
 
@@ -234,17 +246,17 @@ heterodbInitOptimalGpus(const char *manual_config)
 {
 	if (p_heterodb_init_optimal_gpus)
 		return p_heterodb_init_optimal_gpus(manual_config);
-	__Elog("heterodbInitOptimalGpus() is not ready");
+	__Ereport("heterodbInitOptimalGpus() is not ready");
 	return NULL;
 }
 
 /*
  * heterodbGetOptimalGpus
  */
-static gpumask_t  (*p_heterodb_get_optimal_gpus)(const char *path) = NULL;
-static gpumask_t  (*p_heterodb_get_optimal_gpus_v2)(const char *path,
-													const char *policy) = NULL;
-gpumask_t
+static int64_t (*p_heterodb_get_optimal_gpus)(const char *path) = NULL;
+static int64_t (*p_heterodb_get_optimal_gpus_v2)(const char *path,
+												 const char *policy) = NULL;
+int64_t
 heterodbGetOptimalGpus(const char *path, const char *policy)
 {
 	if (p_heterodb_get_optimal_gpus_v2)
@@ -253,10 +265,10 @@ heterodbGetOptimalGpus(const char *path, const char *policy)
 	{
 		if (!policy || strcmp(policy, "optimal") == 0)
 			return p_heterodb_get_optimal_gpus(path);
-		__Elog("Unknown GPUs allocation policy [%s]", policy);
+		__Ereport("Unknown GPUs allocation policy [%s]", policy);
 	}
 	else
-		__Elog("heterodbGetOptimalGpus() is not ready");
+		__Ereport("heterodbGetOptimalGpus() is not ready");
 	return -1;
 }
 
@@ -272,7 +284,7 @@ gpuDirectInitDriver(void)
 		p_gpudirect__driver_init_v2();
 		return true;
 	}
-	__Elog("gpuDirectInitDriver() is not ready");
+	__Ereport("gpuDirectInitDriver() is not ready");
 	return false;
 }
 
@@ -290,18 +302,18 @@ gpuDirectOpenDriver(void)
 		case GPUDIRECT_DRIVER__CUFILE:
 			if (p_cufile__driver_open_v2)
 				return (p_cufile__driver_open_v2() == 0);
-			__Elog("cuFile is not available");
+			__Ereport("cuFile is not available");
 			break;
 
 		case GPUDIRECT_DRIVER__NVME_STROM:
 			if (p_nvme_strom__driver_open)
 				return (p_nvme_strom__driver_open() == 0);
-			__Elog("nvme_strom is not available");
+			__Ereport("nvme_strom is not available");
 			break;
 		case GPUDIRECT_DRIVER__VFS:
 			return true;
 		default:
-			__Elog("unknown GPU-Direct SQL driver");
+			__Ereport("unknown GPU-Direct SQL driver");
 			break;
 	}
 	return false;
@@ -321,18 +333,18 @@ gpuDirectCloseDriver(void)
 		case GPUDIRECT_DRIVER__CUFILE:
 			if (p_cufile__driver_close_v2)
 				return (p_cufile__driver_close_v2() == 0);
-			__Elog("cuFile is not available");
+			__Ereport("cuFile is not available");
 			break;
 
 		case GPUDIRECT_DRIVER__NVME_STROM:
 			if (p_nvme_strom__driver_close)
 				return (p_nvme_strom__driver_close() == 0);
-			__Elog("nvme_strom is not available");
+			__Ereport("nvme_strom is not available");
 			break;
 		case GPUDIRECT_DRIVER__VFS:
 			return true;
 		default:
-			__Elog("unknown GPU-Direct SQL driver");
+			__Ereport("unknown GPU-Direct SQL driver");
 	}
 	return false;
 }
@@ -488,13 +500,13 @@ __fallbackFileReadIOV(const char *pathname,
 	fdesc = open(pathname, O_RDONLY);
 	if (fdesc < 0)
 	{
-		__Elog("failed on open('%s'): %m\n", pathname);
+		__Ereport("failed on open('%s'): %m", pathname);
 		goto error_0;
 	}
 
 	if (fstat(fdesc, &stat_buf) != 0)
 	{
-		__Elog("failed on fstat('%s'): %m\n", pathname);
+		__Ereport("failed on fstat('%s'): %m", pathname);
 		goto error_1;
 	}
 
@@ -523,13 +535,13 @@ __fallbackFileReadIOV(const char *pathname,
 			{
 				if (errno == EINTR)
 					continue;
-				__Elog("failed on pread: %m\n");
+				__Ereport("failed on pread: %m");
 				goto error_1;
 			}
 			rc = cuMemcpyHtoD(m_segment + dest_pos, vfs_dma_buffer, nbytes);
 			if (rc != CUDA_SUCCESS)
 			{
-				__Elog("failed on cuMemcpyHtoD\n");
+				__Ereport("failed on cuMemcpyHtoD");
 				goto error_1;
 			}
 			file_pos += nbytes;
@@ -744,14 +756,14 @@ gpuDirectGetProperty(void)
 				buffer[nbytes] = '\0';
 				result = strdup(buffer);
 				if (!result)
-					__Elog("out of memory");
+					__Ereport("out of memory");
 				break;
 			}
 		}
 	}
 	else
 	{
-		__Elog("gpuDirectGetProperty() is not ready");
+		__Ereport("gpuDirectGetProperty() is not ready");
 	}
 	return result;
 }
@@ -766,7 +778,7 @@ gpuDirectSetProperty(const char *key, const char *value)
 {
 	if (p_cufile__set_property_v2)
 		return (p_cufile__set_property_v2(key, value) == 0);
-	__Elog("gpuDirectSetProperty() is not ready");
+	__Ereport("gpuDirectSetProperty() is not ready");
 	return false;
 }
 
@@ -790,7 +802,7 @@ heterodbExtraCloudGetVMInfo(const char *cloud_name,
 												   p_vm_image,
 												   p_vm_ident) == 0);
 	}
-	__Elog("heterodbExtraCloudGetVMInfo() is not ready");
+	__Ereport("heterodbExtraCloudGetVMInfo() is not ready");
 	return false;
 }
 
@@ -839,7 +851,7 @@ heterodb_extra_parse_signature(const char *extra_module_info,
 			api_version = strtol(tok+12, &end, 10);
 			if (api_version < 0 || *end != '\0')
 			{
-				__Elog("invalid extra module token [%s]", tok);
+				__Ereport("invalid extra module token [%s]", tok);
 				return false;
 			}
 		}
@@ -851,7 +863,7 @@ heterodb_extra_parse_signature(const char *extra_module_info,
 				has_cufile = false;
 			else
 			{
-				__Elog("invalid extra module token [%s]", tok);
+				__Ereport("invalid extra module token [%s]", tok);
 				return false;
 			}
 		}
@@ -863,14 +875,14 @@ heterodb_extra_parse_signature(const char *extra_module_info,
 				has_nvme_strom = false;
 			else
 			{
-				__Elog("invalid extra module token [%s]", tok);
+				__Ereport("invalid extra module token [%s]", tok);
 				return false;
 			}
 		}
 	}
 	if (api_version < HETERODB_EXTRA_OLDEST_API_VERSION)
 	{
-		__Elog("HeteroDB Extra module API-version [%08ld] is too old.", api_version);
+		__Ereport("HeteroDB Extra module API-version [%08ld] is too old.", api_version);
 		return false;
 	}
 	*p_api_version		= api_version;
@@ -904,20 +916,20 @@ heterodb_extra_init_module(const char *__extra_pathname)
 	}
 	if (!handle)
 	{
-		__Elog("HeteroDB Extra module is not available");
+		__Ereport("HeteroDB Extra module is not available");
 		return NULL;
 	}
 
-#define LOOKUP_HETERODB_EXTRA_FUNCTION(symbol)					\
-	do {														\
-		void   *fn_addr = dlsym(handle, #symbol);				\
-		if (!fn_addr)											\
-		{														\
-			__Elog("could not find extra symbol \"%s\" - %s",	\
-				   #symbol, dlerror());							\
-			goto bailout;										\
-		}														\
-		p_##symbol = fn_addr;									\
+#define LOOKUP_HETERODB_EXTRA_FUNCTION(symbol)						\
+	do {															\
+		void   *fn_addr = dlsym(handle, #symbol);					\
+		if (!fn_addr)												\
+		{															\
+			__Ereport("could not find extra symbol \"%s\" - %s",	\
+					  #symbol, dlerror());							\
+			goto bailout;											\
+		}															\
+		p_##symbol = fn_addr;										\
 	} while(0)
 
 	/* lookup extra symbols */
@@ -967,6 +979,8 @@ heterodb_extra_init_module(const char *__extra_pathname)
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_get_optimal_gpus_v2);
 	if (api_version >= 20240720)
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_get_cloud_vm_info);
+	if (api_version >= 20250105)
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_register_ereport_callback);
 	return signature;
 
 bailout:
@@ -1001,12 +1015,13 @@ bailout:
 	p_heterodb_get_optimal_gpus         = NULL;
 	p_heterodb_get_optimal_gpus_v2      = NULL;
 	p_heterodb_extra_get_cloud_vm_info  = NULL;
+	p_heterodb_extra_register_ereport_callback = NULL;
 	return NULL;
 }
 
 #ifdef __PGSTROM_MODULE__
 /*
- * heterodbExtraEreport
+ * heterodbExtraEreport (legacy)
  */
 void
 heterodbExtraEreport(int elevel)
@@ -1032,6 +1047,33 @@ heterodbExtraEreport(int elevel)
 	}
 	else if (elevel >= ERROR)
 		elog(elevel, "unknown error around heterodb-extra module");
+}
+
+/*
+ * heterodbExtraEreportCallback
+ */
+static void
+heterodbExtraEreportCallback(char ereport_class,
+							 const char *filename,
+							 unsigned int lineno,
+							 const char *function,
+							 const char *format,
+							 va_list va_args)
+{
+	StringInfoData	buf;
+
+	initStringInfo(&buf);
+	if (ereport_class == 'E')
+		appendStringInfo(&buf, "heterodb-extra: [error] ");
+	else
+		appendStringInfo(&buf, "heterodb-extra: [%s] ",
+						 ereport_class == 'I' ? "info" : "debug");
+	appendStringInfoVA(&buf, format, va_args);
+	if (ereport_class == 'E')
+		appendStringInfo(&buf, " (%s:%d)", filename, lineno);
+	elog(LOG, "%s", buf.data);
+
+	pfree(buf.data);
 }
 
 /*
@@ -1121,6 +1163,9 @@ pgstrom_init_extra(void)
 	bool		has_nvme_strom = false;
 	int			enum_index = 0;
 	static struct config_enum_entry enum_options[4];
+
+	/* Register Ereport Callback */
+	heterodbExtraRegisterEreportCallback(heterodbExtraEreportCallback);
 
 	memset(enum_options, 0, sizeof(enum_options));
 	if (!signature)

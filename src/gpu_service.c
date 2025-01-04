@@ -407,6 +407,34 @@ gpuservLoggerReport(const char *fmt, ...)
 }
 
 /*
+ * gpuservWorkerEreportCallback
+ */
+static void
+gpuservWorkerEreportCallback(char ereport_class,
+							 const char *filename,
+							 unsigned int lineno,
+							 const char *function,
+							 const char *format,
+							 va_list va_args)
+{
+	const char *__label = (ereport_class == 'E' ? "error" :
+						   ereport_class == 'I' ? "info" : "debug");
+	char	   *__format = alloca(strlen(format) +
+								  strlen(filename) +
+								  strlen(function) + 200);
+	if (!GpuWorkerCurrentContext)
+		sprintf(__format, "GPU-Serv|LOG|%s|%d|%s|heterodb-extra: [%s] %%s",
+				__basename(filename), lineno, function, __label);
+	else
+		sprintf(__format, "GPU%d|LOG|%s|%d|%s|heterodb-extra: [%s] %%s",
+				GpuWorkerCurrentContext->cuda_dindex,
+				__basename(filename), lineno, function, __label);
+	/* push error reports from heterodb-extra */
+	vfprintf(gpuserv_logger_filp, __format, va_args);
+	fflush(gpuserv_logger_filp);
+}
+
+/*
  * cuStrError
  */
 const char *
@@ -3976,6 +4004,9 @@ gpuservGpuCacheManager(void *__arg)
 	gpuWorker  *gworker = (gpuWorker *)__arg;
 	gpuContext *gcontext = gworker->gcontext;
 
+	/* switch heterodb-extra ereport callback */
+	heterodbExtraRegisterEreportCallback(gpuservWorkerEreportCallback);
+
 	gpuContextSwitchTo(gcontext);
 
 	__gsDebug("GPU-%d GpuCache manager thread launched.",
@@ -4515,6 +4546,9 @@ gpuservGpuWorkerMain(void *__arg)
 	gpuContext *gcontext = gworker->gcontext;
 	gpuClient  *gclient;
 
+	/* switch heterodb-extra ereport callback */
+	heterodbExtraRegisterEreportCallback(gpuservWorkerEreportCallback);
+
 	/* set primary working context */
 	gpuContextSwitchTo(gcontext);
 
@@ -4593,6 +4627,9 @@ gpuservMonitorClient(void *__priv)
 	gpuContext *gcontext;
 	pgsocket	sockfd = gclient->sockfd;
 	CUresult	rc;
+
+	/* switch heterodb-extra ereport callback */
+	heterodbExtraRegisterEreportCallback(gpuservWorkerEreportCallback);
 
 	if (dlist_is_empty(&gpuserv_gpucontext_list))
 	{

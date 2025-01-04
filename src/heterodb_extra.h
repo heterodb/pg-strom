@@ -12,6 +12,7 @@
  */
 #ifndef HETERODB_EXTRA_H
 #define HETERODB_EXTRA_H
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -29,7 +30,7 @@ typedef int64_t						gpumask_t;
 #define HETERODB_LICENSE_KEYLEN		256
 #define HETERODB_LICENSE_KEYBITS	(8 * HETERODB_LICENSE_KEYLEN)
 
-#define HETERODB_EXTRA_CURRENT_API_VERSION	20240725
+#define HETERODB_EXTRA_CURRENT_API_VERSION	20250105
 #define HETERODB_EXTRA_OLDEST_API_VERSION	20240418
 
 /* cufile.c */
@@ -47,4 +48,11 @@ typedef struct
 	strom_io_chunk	ioc[1];
 } strom_io_vector;
 
+/* error report callback routine */
+typedef void (*heterodb_extra_ereport_callback_type)(char ereport_class,
+													 const char *filename,
+													 unsigned int lineno,
+													 const char *function,
+													 const char *format,
+													 va_list va_args);
 #endif	/* HETERODB_EXTRA_H */

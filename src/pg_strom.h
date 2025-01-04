@@ -521,6 +521,8 @@ extern long		PAGES_PER_BLOCK;	/* (BLCKSZ / PAGE_SIZE) */
  * extra.c
  */
 extern void		heterodbExtraEreport(int elevel);
+extern heterodb_extra_ereport_callback_type
+	heterodbExtraRegisterEreportCallback(heterodb_extra_ereport_callback_type callback);
 extern bool		gpuDirectIsAvailable(void);
 extern void		pgstrom_init_extra(void);
 
