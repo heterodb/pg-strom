@@ -423,12 +423,12 @@ gpuservWorkerEreportCallback(char ereport_class,
 								  strlen(filename) +
 								  strlen(function) + 200);
 	if (!GpuWorkerCurrentContext)
-		sprintf(__format, "GPU-Serv|LOG|%s|%d|%s|heterodb-extra: [%s] %%s",
-				__basename(filename), lineno, function, __label);
+		sprintf(__format, "GPU-Serv|LOG|%s|%d|%s|heterodb-extra: [%s] %s\n",
+				__basename(filename), lineno, function, __label, format);
 	else
-		sprintf(__format, "GPU%d|LOG|%s|%d|%s|heterodb-extra: [%s] %%s",
+		sprintf(__format, "GPU%d|LOG|%s|%d|%s|heterodb-extra: [%s] %s\n",
 				GpuWorkerCurrentContext->cuda_dindex,
-				__basename(filename), lineno, function, __label);
+				__basename(filename), lineno, function, __label, format);
 	/* push error reports from heterodb-extra */
 	vfprintf(gpuserv_logger_filp, __format, va_args);
 	fflush(gpuserv_logger_filp);

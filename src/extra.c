@@ -1150,20 +1150,61 @@ pgstrom_license_query(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(DirectFunctionCall1(json_in, PointerGetDatum(license)));
 }
 
+/* GUC: heterodb_extra.ereport_level */
+int		heterodb_extra_ereport_level;
+
 /*
  * pgstrom_init_extra
  */
 void
 pgstrom_init_extra(void)
 {
-	const char *signature = heterodb_extra_init_module(NULL);
+	const char *signature;
 	char	   *license;
 	uint32_t	api_version = 0;
 	bool		has_cufile = false;
 	bool		has_nvme_strom = false;
 	int			enum_index = 0;
 	static struct config_enum_entry enum_options[4];
+	static int	__heterodb_extra_ereport_level = -1;
 
+	/* set error reporting level in heterodb-extra module */
+	DefineCustomIntVariable("heterodb_extra.ereport_level",
+							"heterodb_extra module's error report level",
+							NULL,
+							&__heterodb_extra_ereport_level,
+							-1,
+							-1,		/* system defaults */
+							2,		/* error, info, and debug */
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
+							NULL, NULL, NULL);
+	if (__heterodb_extra_ereport_level < 0)
+	{
+		const char *val = getenv("HETERODB_EXTRA_EREPORT_LEVEL");
+
+		if (!val)
+			heterodb_extra_ereport_level = 0;
+		else
+		{
+			heterodb_extra_ereport_level = atoi(val);
+			if (heterodb_extra_ereport_level < 0)
+				heterodb_extra_ereport_level = 0;
+			if (heterodb_extra_ereport_level > 2)
+				heterodb_extra_ereport_level = 2;
+		}
+	}
+	else
+	{
+		const char *__label[] = {"0","1","2"};
+
+		if (setenv("HETERODB_EXTRA_EREPORT_LEVEL",
+				   __label[__heterodb_extra_ereport_level], 1) != 0)
+			elog(ERROR, "failed on setenv('HETERODB_EXTRA_EREPORT_LEVEL')");
+		heterodb_extra_ereport_level = __heterodb_extra_ereport_level;
+	}
+	/* Load heterodb-extra module */
+	signature = heterodb_extra_init_module(NULL);
 	/* Register Ereport Callback */
 	heterodbExtraRegisterEreportCallback(heterodbExtraEreportCallback);
 
