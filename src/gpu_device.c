@@ -49,6 +49,17 @@ static struct {
 #undef DEV_ATTR
 };
 
+#define __Info(format,...)											\
+	do {															\
+		if (heterodb_extra_ereport_level >= 1)						\
+			elog(LOG, "gpu-device: [info]" format, ##__VA_ARGS__);	\
+	} while(0)
+#define __Debug(format,...)											\
+	do {															\
+		if (heterodb_extra_ereport_level >= 2)						\
+			elog(LOG, "gpu-device: [debug]" format, ##__VA_ARGS__);	\
+	} while(0)
+
 static const char *
 sysfs_read_line(const char *path)
 {
@@ -477,6 +488,7 @@ typedef struct
 typedef struct
 {
 	Oid			tablespace_oid;
+	char		tablespace_name[NAMEDATALEN];
 	gpumask_t	optimal_gpus;
 } tablespace_optimal_gpu_entry;
 
@@ -574,7 +586,10 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 	bool	found;
 
     if (!pgstrom_gpudirect_enabled)
+	{
+		__Info("GPU-Direct SQL disabled: pg_strom.gpudirect_enabled = off");
 		return 0UL;
+	}
 
 	if (!OidIsValid(tablespace_oid))
 		tablespace_oid = MyDatabaseTableSpace;
@@ -600,11 +615,18 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 	if (!found)
 	{
 		char	   *path;
+		char	   *name;
 
 		Assert(hentry->tablespace_oid == tablespace_oid);
 		PG_TRY();
 		{
+			name = get_tablespace_name(tablespace_oid);
+
 			path = GetDatabasePath(MyDatabaseId, tablespace_oid);
+			if (name)
+				strncpy(hentry->tablespace_name, name, NAMEDATALEN);
+			else
+				sprintf(hentry->tablespace_name, "tablespace-%u", tablespace_oid);
 			hentry->optimal_gpus = GetOptimalGpuForFile(path);
 		}
 		PG_CATCH();
@@ -616,6 +638,15 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
+	}
+	else
+	{
+		if (hentry->optimal_gpus == 0)
+			__Info("GPU-Direct SQL disabled: no assinable GPUs on the tablespace '%s'",
+				   hentry->tablespace_name);
+		else
+			__Info("GPU-Direct SQL: tablespace='%s' optimal-GPUs=%08lx",
+				   hentry->tablespace_name, hentry->optimal_gpus);
 	}
 	return hentry->optimal_gpus;
 }
@@ -649,16 +680,22 @@ GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 	double		total_sz;
 
 	if (!pgstrom_gpudirect_enabled)
-		return 0UL;
-	if (baseRelIsArrowFdw(baserel))
 	{
-		if (pgstrom_gpudirect_enabled)
-			return GetOptimalGpusForArrowFdw(root, baserel);
+		__Info("GPU-Direct SQL disabled: pg_strom.gpudirect_enabled = off");
 		return 0UL;
 	}
+	if (baseRelIsArrowFdw(baserel))
+		return GetOptimalGpusForArrowFdw(root, baserel);
+
 	total_sz = (size_t)baserel->pages * (size_t)BLCKSZ;
 	if (total_sz < pgstrom_gpudirect_threshold)
+	{
+		__Info("GPU-Direct SQL disabled: estimated relation size (%s; %s) is smaller than the threshold (%s)",
+			   getRelOptInfoName(root, baserel),
+			   format_bytesz(total_sz),
+			   format_bytesz(pgstrom_gpudirect_threshold));
 		return 0UL;		/* table is too small */
+	}
 
 	optimal_gpus = GetOptimalGpuForTablespace(baserel->reltablespace);
 	if (optimal_gpus != INVALID_GPUMASK)
@@ -669,7 +706,10 @@ GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 		/* temporary table is not supported by GPU-Direct SQL */
 		if (relpersistence != RELPERSISTENCE_PERMANENT &&
 			relpersistence != RELPERSISTENCE_UNLOGGED)
+		{
 			optimal_gpus = 0;
+			__Info("GPU-Direct SQL disabled: not supported on temporary tables");
+		}
 	}
 	return optimal_gpus;
 }

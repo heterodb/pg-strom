@@ -1463,6 +1463,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			elog(ERROR, "PG-Strom does not support table access method: %s",
 				 get_am_name(am_oid));
 		/* Is GPU-Cache available? */
+		//FIXME: Try GpuCache only when DEVTASK__USED_GPUCACHE is set by planner
 		pts->gcache_desc = pgstromGpuCacheExecInit(pts);
 		if (pts->gcache_desc)
 			pts->xpu_task_flags |= DEVTASK__USED_GPUCACHE;
@@ -1475,6 +1476,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  pp_info->brin_index_quals);
 			if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 			{
+				//FIXME: Try GPU-Direct SQL only when DEVTASK__USED_GPUDIRECT is
+				//       set by planner
 				pts->optimal_gpus = GetOptimalGpuForRelation(rel);
 				if (pts->optimal_gpus)
 				{

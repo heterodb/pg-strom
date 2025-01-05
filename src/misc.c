@@ -614,6 +614,94 @@ get_relation_am(Oid rel_oid, bool missing_ok)
 }
 
 /*
+ * __getRelOptInfoName
+ */
+char *
+__getRelOptInfoName(char *buffer, size_t bufsz,
+					PlannerInfo *root, RelOptInfo *rel)
+{
+	if (IS_JOIN_REL(rel))
+	{
+		char   *pos = buffer;
+		bool	need_comma = false;
+		int		k, nbytes;
+
+		for (k = bms_next_member(rel->relids, -1);
+			 k >= 0;
+			 k = bms_next_member(rel->relids, k))
+		{
+			RelOptInfo *__rel = root->simple_rel_array[k];
+			char	   *prev = pos;
+
+			if (need_comma)
+			{
+				nbytes = snprintf(pos, bufsz, ",");
+				pos += nbytes;
+				bufsz -= nbytes;
+			}
+			pos = __getRelOptInfoName(pos, bufsz, root, __rel);
+			pos = strchr(pos, '\0');
+			Assert(pos != NULL && pos >= prev && pos - prev <= bufsz);
+			bufsz -= (pos - prev);
+
+			need_comma = true;
+		}
+	}
+	else if (IS_SIMPLE_REL(rel))
+	{
+		RangeTblEntry  *rte = root->simple_rte_array[rel->relid];
+		/* see get_rte_alias() */
+		if (rte->alias != NULL)
+		{
+			if (rte->rtekind == RTE_RELATION)
+				snprintf(buffer, bufsz, "%s as %s",
+						 get_rel_name(rte->relid),
+						 rte->alias->aliasname);
+			else
+				snprintf(buffer, bufsz, "%s",
+						 rte->alias->aliasname);
+		}
+		else if (rte->rtekind == RTE_RELATION)
+			snprintf(buffer, bufsz, "%s",
+					 get_rel_name(rte->relid));
+		else if (rte->eref != NULL)
+			snprintf(buffer, bufsz, "%s",
+					 rte->eref->aliasname);
+		else
+			snprintf(buffer, bufsz, "base:relid=%u", rte->relid);
+	}
+	else
+	{
+		static const char *upper_labels[] = {
+			"upper:setop",
+			"upper:partial-group-agg",
+			"upper:window",
+			"upper:partial-distinct",
+			"upper:ordered",
+			"upper:final"
+		};
+		Assert(IS_UPPER_REL(rel));
+		for (int k=UPPERREL_SETOP; k <= UPPERREL_FINAL; k++)
+		{
+			ListCell   *lc;
+
+			foreach (lc, root->upper_rels[k])
+			{
+				RelOptInfo *upper_rel = lfirst(lc);
+
+				if (upper_rel == rel)
+				{
+					snprintf(buffer, bufsz, "(%s)", upper_labels[k]);
+					return buffer;
+				}
+			}
+		}
+		snprintf(buffer, bufsz, "(unknown-upper)");
+	}
+	return buffer;
+}
+
+/*
  * Bitmapset <-> numeric List transition
  */
 List *

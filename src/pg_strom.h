@@ -965,6 +965,10 @@ extern Oid		get_type_namespace(Oid type_oid);
 extern char	   *get_type_extension_name(Oid type_oid);
 extern char	   *get_func_extension_name(Oid func_oid);
 extern Oid		get_relation_am(Oid rel_oid, bool missing_ok);
+extern char	   *__getRelOptInfoName(char *buffer, size_t bufsz,
+									PlannerInfo *root, RelOptInfo *rel);
+#define getRelOptInfoName(__root,__rel)						\
+	__getRelOptInfoName(alloca(512),512,(__root),(__rel))
 extern List	   *bms_to_pglist(const Bitmapset *bms);
 extern Bitmapset *bms_from_pglist(List *pglist);
 extern Float   *__makeFloat(double fval);
