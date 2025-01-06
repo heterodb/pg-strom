@@ -588,11 +588,15 @@ pgstrom_fsum_final_fp64_as_numeric(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_fsum_final_numeric(PG_FUNCTION_ARGS)
 {
-	kagg_state__psum_numeric_packed *state
-		= (kagg_state__psum_numeric_packed *)PG_GETARG_BYTEA_P(0);
-	uint32_t	special = (state->attrs & __PAGG_NUMERIC_ATTRS__MASK);
+	kagg_state__psum_numeric_packed *state;
+	uint32_t	special;
 	Datum		datum;
 
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+
+	state = (kagg_state__psum_numeric_packed *)PG_GETARG_BYTEA_P(0);
+	special = (state->attrs & __PAGG_NUMERIC_ATTRS__MASK);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
 	if (special != 0)
@@ -664,11 +668,15 @@ pgstrom_favg_final_num(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_favg_final_numeric(PG_FUNCTION_ARGS)
 {
-	kagg_state__psum_numeric_packed *state
-		= (kagg_state__psum_numeric_packed *)PG_GETARG_BYTEA_P(0);
-	uint32_t	special = (state->attrs & __PAGG_NUMERIC_ATTRS__MASK);
+	kagg_state__psum_numeric_packed *state;
+	uint32_t	special;
 	Datum		datum;
 
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+
+	state = (kagg_state__psum_numeric_packed *)PG_GETARG_BYTEA_P(0);
+	special = (state->attrs & __PAGG_NUMERIC_ATTRS__MASK);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
 	if (special != 0)
@@ -752,14 +760,17 @@ pgstrom_stddev_trans(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_var_sampf_final(PG_FUNCTION_ARGS)
 {
-	kagg_state__stddev_packed *state
-		= (kagg_state__stddev_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems > 1)
+	if (!PG_ARGISNULL(0))
 	{
-		float8_t	N = (double)state->nitems;
-		float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
+		kagg_state__stddev_packed *state
+			= (kagg_state__stddev_packed *)PG_GETARG_BYTEA_P(0);
+		if (state->nitems > 1)
+		{
+			float8_t	N = (double)state->nitems;
+			float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
 
-		PG_RETURN_FLOAT8(fval / (N * (N - 1.0)));
+			PG_RETURN_FLOAT8(fval / (N * (N - 1.0)));
+		}
 	}
 	PG_RETURN_NULL();
 }
@@ -777,14 +788,17 @@ pgstrom_var_samp_final(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_var_popf_final(PG_FUNCTION_ARGS)
 {
-	kagg_state__stddev_packed *state
-		= (kagg_state__stddev_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems > 0)
+	if (!PG_ARGISNULL(0))
 	{
-		float8_t	N = (double)state->nitems;
-		float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
+		kagg_state__stddev_packed *state
+			= (kagg_state__stddev_packed *)PG_GETARG_BYTEA_P(0);
+		if (state->nitems > 0)
+		{
+			float8_t	N = (double)state->nitems;
+			float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
 
-		PG_RETURN_FLOAT8(fval / (N * N));
+			PG_RETURN_FLOAT8(fval / (N * N));
+		}
 	}
 	PG_RETURN_NULL();
 }
