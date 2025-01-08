@@ -743,7 +743,6 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->kcxt_kvecs_ndims = pp_info->kvecs_ndims;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
 	session->cuda_stack_size  = pp_info->cuda_stack_size;
-	session->xpu_task_flags = pts->xpu_task_flags;
 	session->hostEpochTimestamp = SetEpochTimestamp();
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	session->session_xact_state = __build_session_xact_state(&buf);
@@ -1463,7 +1462,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			elog(ERROR, "PG-Strom does not support table access method: %s",
 				 get_am_name(am_oid));
 		/* Is GPU-Cache available? */
-		//FIXME: Try GpuCache only when DEVTASK__USED_GPUCACHE is set by planner
 		pts->gcache_desc = pgstromGpuCacheExecInit(pts);
 		if (pts->gcache_desc)
 			pts->xpu_task_flags |= DEVTASK__USED_GPUCACHE;
@@ -1476,10 +1474,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  pp_info->brin_index_quals);
 			if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 			{
-				//FIXME: Try GPU-Direct SQL only when DEVTASK__USED_GPUDIRECT is
-				//       set by planner
 				pts->optimal_gpus = GetOptimalGpuForRelation(rel);
-				if (pts->optimal_gpus)
+				if (pts->optimal_gpus != 0)
 				{
 					/*
 					 * If particular GPUs are optimal, we can use
@@ -2224,31 +2220,17 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 	}
 	else
 	{
-		int		head = -1;
 		int		base;
 		uint64	count;
 
-		appendStringInfo(&buf, "enabled (N=%d,", numGpuDevAttrs);
+		appendStringInfo(&buf, "enabled (N=%d,", get_bitcount(pts->optimal_gpus));
 		base = buf.len;
 		for (int k=0; k <= numGpuDevAttrs; k++)
 		{
-			if (k < numGpuDevAttrs &&
-				(pts->optimal_gpus & (1UL<<k)) != 0)
+			if ((pts->optimal_gpus & (1UL<<k)) != 0)
 			{
-				if (head < 0)
-				{
-					appendStringInfo(&buf, "%s%d",
-									 buf.len == base ? "GPU" : ",", k);
-					head = k;
-				}
-			}
-			else if (head >= 0)
-			{
-				if (head + 2 == k)
-					appendStringInfo(&buf, ",%d", k-1);
-				else if (head + 2 > k)
-					appendStringInfo(&buf, "-%d", k-1);
-				head = -1;
+				appendStringInfo(&buf, "%s%d",
+								 base == buf.len ? "GPU" : ",", k);
 			}
 		}
 		if (es->analyze && ps_state)

@@ -2716,21 +2716,33 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 	if (baseRelIsArrowFdw(baserel) &&
 		IsA(priv_list, List) && list_length(priv_list) == 2)
 	{
-		List	   *af_list = linitial(priv_list);
+		const char *relname = getRelOptInfoName(root, baserel);
+		List	   *arrow_files_list = linitial(priv_list);
 		ListCell   *lc;
 
-		foreach (lc, af_list)
+		foreach (lc, arrow_files_list)
 		{
 			ArrowFileState *af_state = lfirst(lc);
-			gpumask_t	__optimal_gpus;
+			gpumask_t		__optimal_gpus;
 
 			__optimal_gpus = GetOptimalGpuForFile(af_state->filename);
 			if (__optimal_gpus == INVALID_GPUMASK)
-				return 0;
-			if (lc == list_head(af_list))
+				__optimal_gpus = 0;
+			if (lc == list_head(arrow_files_list))
+			{
 				optimal_gpus = __optimal_gpus;
+				if (optimal_gpus == 0)
+					__hdbxLogDebug("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", relname, af_state->filename);
+			}
 			else
-				optimal_gpus &= __optimal_gpus;
+			{
+				__optimal_gpus &= optimal_gpus;
+				if (optimal_gpus != __optimal_gpus)
+					__hdbxLogDebug("foreign-table='%s' arrow-file='%s' reduced GPUs-set %08lx => %08lx", relname, af_state->filename, optimal_gpus, __optimal_gpus);
+				optimal_gpus = __optimal_gpus;
+			}
+			if (optimal_gpus == 0)
+				break;
 		}
 	}
 	return optimal_gpus;
@@ -4457,10 +4469,19 @@ __arrowFdwExecInit(ScanState *ss,
 
 					if (__optimal_gpus == INVALID_GPUMASK)
 						optimal_gpus = 0;
-					else if (af_states_list == NIL)
+					if (af_states_list == NIL)
+					{
 						optimal_gpus = __optimal_gpus;
+						if (optimal_gpus == 0)
+							__hdbxLogDebug("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", RelationGetRelationName(frel), fname);
+					}
 					else
-						optimal_gpus &= __optimal_gpus;
+					{
+						__optimal_gpus &= optimal_gpus;
+						if (optimal_gpus != __optimal_gpus)
+							__hdbxLogDebug("foreign-table='%s' arrow-file='%s' reduced GPUs-Set %08lx -> %08lx", RelationGetRelationName(frel), fname, optimal_gpus, __optimal_gpus);
+						optimal_gpus = __optimal_gpus;
+					}
 				}
 				else if ((pts->xpu_task_flags & DEVKIND__NVIDIA_DPU) != 0)
 				{

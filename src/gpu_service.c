@@ -141,25 +141,27 @@ static const char  *pgstrom_fatbin_image_filename = "/dev/null";
 static void
 gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
 
-#define __gsLogCxt(gcontext,fmt,...)								\
-	do {															\
-		if (!gcontext)												\
-			gpuservLoggerReport("GPU-Serv|LOG|%s|%d|%s|" fmt "\n",	\
-								__basename(__FILE__),				\
-								__LINE__,							\
-								__FUNCTION__,						\
-								##__VA_ARGS__);						\
-		else														\
-			gpuservLoggerReport("GPU%d|LOG|%s|%d|%s|" fmt "\n",		\
-								gcontext->cuda_dindex,				\
-								__basename(__FILE__),				\
-								__LINE__,							\
-								__FUNCTION__,						\
-								##__VA_ARGS__);						\
-	} while(0)
+#define __gsLogNoCxt(fmt,...)										\
+	gpuservLoggerReport("GPU-Serv|LOG|%s|%d|%s|" fmt "\n",			\
+						__basename(__FILE__),						\
+						__LINE__,									\
+						__FUNCTION__,								\
+						##__VA_ARGS__)
 
-#define __gsLog(fmt, ...)									\
-	__gsLogCxt(GpuWorkerCurrentContext,fmt,##__VA_ARGS__)
+#define __gsLogCxt(gcontext,fmt,...)								\
+	gpuservLoggerReport("GPU%d|LOG|%s|%d|%s|" fmt "\n",				\
+						gcontext->cuda_dindex,						\
+						__basename(__FILE__),						\
+						__LINE__,									\
+						__FUNCTION__,								\
+						##__VA_ARGS__)
+#define __gsLog(fmt, ...)											\
+	do {															\
+		if (GpuWorkerCurrentContext)								\
+			__gsLogCxt(GpuWorkerCurrentContext,fmt,##__VA_ARGS__);	\
+		else														\
+			__gsLogNoCxt(fmt,##__VA_ARGS__);						\
+	} while(0)
 
 #define __gsDebug(fmt, ...)										\
 	do {														\
@@ -3286,7 +3288,9 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	iov.iov_base = &resp;
 	iov.iov_len  = resp.length;
 	__gpuClientWriteBack(gclient, &iov, 1);
-
+	__gsLogNoCxt("Open session (GPUs-set: %08lx, Task-flags: %08x)",
+				 gclient->optimal_gpus,
+				 gclient->xpu_task_flags);
 	return true;
 
 error:

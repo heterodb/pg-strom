@@ -521,6 +521,20 @@ extern long		PAGES_PER_BLOCK;	/* (BLCKSZ / PAGE_SIZE) */
  * extra.c
  */
 extern int		heterodb_extra_ereport_level;
+#define __hdbxLogError(fmt,...)											\
+	do {																\
+		elog(LOG, __FILE__ ": [error] " fmt, ##__VA_ARGS__);		\
+	} while(0)
+#define __hdbxLogInfo(fmt,...)											\
+	do {																\
+		if (heterodb_extra_ereport_level >= 1)							\
+			elog(LOG, __FILE__ ": [info] " fmt, ##__VA_ARGS__);	\
+	} while(0)
+#define __hdbxLogDebug(fmt,...)											\
+	do {																\
+		if (heterodb_extra_ereport_level >= 2)							\
+			elog(LOG, __FILE__ ": [error] " fmt, ##__VA_ARGS__); \
+	} while(0)
 extern void		heterodbExtraEreport(int elevel);
 extern heterodb_extra_ereport_callback_type
 	heterodbExtraRegisterEreportCallback(heterodb_extra_ereport_callback_type callback);
