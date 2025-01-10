@@ -285,7 +285,7 @@ RHELおよびRHELクローンOSはPostgreSQLパッケージを提供していま
 $ sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
 ```
 
-PostgreSQLパッケージのインストールをします。本書を書いた時点ではPostgreSQL 15位以降のバージョンに対応しています。PostgreSQL 16をインストールする場合は次のように実行します。
+PostgreSQLパッケージのインストールをします。本書を書いた時点ではPostgreSQL 15以降のバージョンに対応しています。PostgreSQL 16をインストールする場合は次のように実行します。
 
 ```
 $ sudo dnf -qy module disable postgresql && sudo dnf install -y postgresql16-server postgresql16-devel
