@@ -28,8 +28,8 @@ PCAP2ARROW_OBJS  = pcap2arrow.o arrow_nodes.o arrow_write.o
 VCF2ARROW_OBJS = vcf2arrow.o arrow_nodes.o arrow_write.o
 ARROW2CSV_OBJS   = arrow2csv.o arrow_nodes.o
 CLEAN_OBJS = $(PG2ARROW_OBJS) $(MYSQL2ARROW_OBJS) \
-             $(PCAP2ARROW_OBJS) $(ARROW2CSV_OBJS) \
-             pcap2arrow arrow2csv pg2arrow mysql2arrow
+             $(PCAP2ARROW_OBJS) $(VCF2ARROW_OBJS) $(ARROW2CSV_OBJS) \
+             pcap2arrow arrow2csv pg2arrow mysql2arrow vcf2arrow
 
 CFLAGS = -O2 -fPIC -g -Wall -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64
 ifeq ($(HAS_PG_CONFIG),yes)
@@ -37,6 +37,9 @@ CFLAGS += -I $(shell $(PG_CONFIG) --includedir)
 endif
 ifeq ($(HAS_MYSQL_CONFIG),yes)
 CFLAGS += $(shell $(MYSQL_CONFIG) --include)
+endif
+ifeq ($(DEBUG),1)
+CFLAGS += -g -O0
 endif
 
 PREFIX		?= /usr/local

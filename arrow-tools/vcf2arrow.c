@@ -19,20 +19,6 @@
 #include <getopt.h>
 #include "arrow_ipc.h"
 
-typedef struct
-{
-	char	   *chrom;
-	char	   *pos;
-	char	   *id;
-	char	   *ref;
-	char	   *alt;
-	char	   *qual;
-	char	   *filter;
-	char	   *info;
-	char	   *format;
-	char	   *variants[1];
-} VCFLineItem;
-
 static char		   *output_filename = NULL;
 static const char **input_filename = NULL;
 static FILE		  **input_filedesc = NULL;
@@ -56,12 +42,41 @@ static int			customMetadata_nitems = 0;
 static const char **variantNames = NULL;
 static int			variantNames_nitems = 0;
 static int			variantNames_nrooms = 0;
-static int64_t		lineitem_nrooms = 0;
-static int64_t		lineitem_nitems = 0;
-static VCFLineItem *lineitem = NULL;
 
+#define Max(a,b)	((a) > (b) ? (a) : (b))
+#define Min(a,b)	((a) < (b) ? (a) : (b))
 #define Info(fmt,...)													\
 	fprintf(stderr, "%s:%d [info] " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+
+#define VCF_ARROW_ANUM__CHROME		0
+#define VCF_ARROW_ANUM__POS			1
+#define VCF_ARROW_ANUM__ID			2
+#define VCF_ARROW_ANUM__REF			3
+#define VCF_ARROW_ANUM__ALT			4
+#define VCF_ARROW_ANUM__QUAL		5
+#define VCF_ARROW_ANUM__FILTER		6
+#define VCF_ARROW_ANUM__INFO		7
+#define VCF_ARROW_ANUM__FORMAT		8
+#define VCF_ARROW_ANUM__VARIANT		9
+#define VCF_ARROW_NUM_FIELDS		(VCF_ARROW_ANUM__VARIANT+1)
+
+static struct {
+	ArrowTypeTag	type;
+	const char	   *name;
+	int				anum;
+} vcf_arrow_column_defs[] = {
+	{ArrowNodeTag__Utf8, "chrom",	VCF_ARROW_ANUM__CHROME},
+	{ArrowType__Int,     "pos",		VCF_ARROW_ANUM__POS},
+	{ArrowNodeTag__Utf8, "id",		VCF_ARROW_ANUM__ID},
+	{ArrowNodeTag__Utf8, "ref",		VCF_ARROW_ANUM__REF},
+	{ArrowNodeTag__Utf8, "alt",		VCF_ARROW_ANUM__ALT},
+	{ArrowNodeTag__Utf8, "qual",	VCF_ARROW_ANUM__QUAL},
+	{ArrowNodeTag__Utf8, "filter",	VCF_ARROW_ANUM__FILTER},
+	{ArrowNodeTag__Utf8, "info",	VCF_ARROW_ANUM__INFO},
+	{ArrowNodeTag__Utf8, "format",	VCF_ARROW_ANUM__FORMAT},
+	{ArrowNodeTag__Utf8, "variant_value", VCF_ARROW_ANUM__VARIANT},
+	{-1,NULL},
+};
 
 /*
  * __trim
@@ -469,6 +484,7 @@ preprocess_vcf_file(const char *fname,
 				 strcasecmp(second, "POS") == 0)
 		{
 			__preprocess_vcf_fields(fname, &pos);
+			break;
 		}
 	}
 
@@ -517,19 +533,21 @@ __stats_update_int64(SQLfield *column, int64_t value)
 }
 
 static size_t
-put_int64_value(SQLfield *column, const char *addr, int sz)
+vcf_put_int64_value(SQLfield *column, const char *addr, int sz)
 {
 	size_t		row_index = column->nitems++;
 	int64_t		value;
+	char	   *end;
 
 	if (!addr)
 		__put_inline_null_value(column, row_index, sizeof(int64_t));
 	else
 	{
-		assert(sz == sizeof(int64_t));
-		value = *((int64_t *)addr);
+		value = strtol(addr, &end, 10);
+		if (*end != '\0')
+			Elog("wrong integer literal [%s]", addr);
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->values, &value, sz);
+		sql_buffer_append(&column->values, &value, sizeof(int64_t));
 
 		__stats_update_int64(column, value);
     }
@@ -537,7 +555,7 @@ put_int64_value(SQLfield *column, const char *addr, int sz)
 }
 
 static size_t
-move_int64_value(SQLfield *dest, const SQLfield *src, long sindex)
+vcf_move_int64_value(SQLfield *dest, const SQLfield *src, long sindex)
 {
 	size_t	dindex = dest->nitems++;
 
@@ -557,15 +575,15 @@ move_int64_value(SQLfield *dest, const SQLfield *src, long sindex)
 }
 
 static int
-write_int64_stat(SQLfield *attr, char *buf, size_t len,
-                 const SQLstat__datum *datum)
+vcf_write_int64_stat(SQLfield *attr, char *buf, size_t len,
+					 const SQLstat__datum *datum)
 {
 	return snprintf(buf, len, "%ld", datum->i64);
 }
 
 static size_t
-put_variable_value(SQLfield *column,
-                   const char *addr, int sz)
+vcf_put_variable_value(SQLfield *column,
+					   const char *addr, int sz)
 {
 	size_t	row_index = column->nitems++;
 
@@ -581,7 +599,7 @@ put_variable_value(SQLfield *column,
 	else
 	{
 		sql_buffer_setbit(&column->nullmap, row_index);
-		sql_buffer_append(&column->extra, addr, sz);
+		sql_buffer_append(&column->extra, addr, strlen(addr));
 		sql_buffer_append(&column->values,
 						  &column->extra.usage, sizeof(uint32_t));
 	}
@@ -589,7 +607,7 @@ put_variable_value(SQLfield *column,
 }
 
 static size_t
-move_variable_value(SQLfield *dest, const SQLfield *src, long sindex)
+vcf_move_variable_value(SQLfield *dest, const SQLfield *src, long sindex)
 {
 	const char *addr = NULL;
 	int		sz = 0;
@@ -605,7 +623,7 @@ move_variable_value(SQLfield *dest, const SQLfield *src, long sindex)
 		addr = src->extra.data + head;
 		sz   = tail - head;
 	}
-	return put_variable_value(dest, addr, sz);
+	return vcf_put_variable_value(dest, addr, sz);
 }
 
 /*
@@ -620,9 +638,10 @@ __setup_vcf_column_int_buffer(SQLtable *table,
 	initArrowNode(&column->arrow_type, Int);
 	column->arrow_type.Int.is_signed = true;
 	column->arrow_type.Int.bitWidth = 64;
-	column->put_value = put_int64_value;
-	column->move_value = move_int64_value;
-	column->write_stat = write_int64_stat;
+	column->put_value = vcf_put_int64_value;
+	column->move_value = vcf_move_int64_value;
+	column->write_stat = vcf_write_int64_stat;
+	column->stat_enabled = true;
 	return 2;	/* nullmap + values */
 }
 
@@ -636,8 +655,10 @@ __setup_vcf_column_utf8_buffer(SQLtable *table,
 {
 	column->field_name = pstrdup(field_name);
 	initArrowNode(&column->arrow_type, Utf8);
-	column->put_value = put_variable_value;
-	column->move_value = move_variable_value;
+	column->put_value = vcf_put_variable_value;
+	column->move_value = vcf_move_variable_value;
+	column->write_stat = NULL;
+	column->stat_enabled = false;
 	return 3;	/* nullmap + index + extra */
 }
 
@@ -647,46 +668,50 @@ __setup_vcf_column_utf8_buffer(SQLtable *table,
 static SQLtable *
 __build_vcf_table_buffer(void)
 {
-	SQLtable   *table = palloc0(offsetof(SQLtable, columns[10]));
-	static struct {
-		ArrowTypeTag	type;
-		const char	   *name;
-	} column_defs[] = {
-		{ArrowNodeTag__Utf8, "chrom"},
-		{ArrowType__Int,     "pos"},
-		{ArrowNodeTag__Utf8, "id"},
-		{ArrowNodeTag__Utf8, "ref"},
-		{ArrowNodeTag__Utf8, "alt"},
-		{ArrowNodeTag__Utf8, "qual"},
-		{ArrowNodeTag__Utf8, "filter"},
-		{ArrowNodeTag__Utf8, "info"},
-		{ArrowNodeTag__Utf8, "format"},
-		{ArrowNodeTag__Utf8, "variant"},
-		{-1,NULL},
-	};
+	SQLtable   *table;
 
-	for (int j=0; column_defs[j].name != NULL; j++)
+	/*
+	 * For the multi-variable VCF files, we have secondary (or more) buffer
+	 * after the vcf_table->columns[10], and switch them when we write out
+	 * buffered values to Apache Arrow.
+	 */
+	assert(variantNames_nitems > 0);
+	table = palloc0(offsetof(SQLtable, columns[VCF_ARROW_ANUM__VARIANT +
+											   variantNames_nitems]));
+	for (int j=0; j < VCF_ARROW_NUM_FIELDS; j++)
 	{
-		switch (column_defs[j].type)
+		const char	   *arrow_name = vcf_arrow_column_defs[j].name;
+		ArrowTypeTag	arrow_type = vcf_arrow_column_defs[j].type;
+
+		switch (arrow_type)
 		{
 			case ArrowType__Int:
 				table->numBuffers +=
 					__setup_vcf_column_int_buffer(table,
 												  &table->columns[j],
-												  column_defs[j].name);
+												  arrow_name);
 				break;
 			case ArrowNodeTag__Utf8:
 				table->numBuffers +=
 					__setup_vcf_column_utf8_buffer(table,
 												   &table->columns[j],
-												   column_defs[j].name);
+												   arrow_name);
 				break;
 			default:
 				Elog("Bug? unexpected Arrow type tag for VCF conversion");
 		}
-		table->nfields++;
-		table->numFieldNodes++;
 	}
+	/* extend the "variant" field if multiple fields */
+	for (int j=1; j < variantNames_nitems; j++)
+	{
+		SQLfield   *column = &table->columns[VCF_ARROW_ANUM__VARIANT+j];
+		const char *name = vcf_arrow_column_defs[VCF_ARROW_ANUM__VARIANT].name;
+
+		__setup_vcf_column_utf8_buffer(table, column, name);
+	}
+	table->nfields = VCF_ARROW_NUM_FIELDS;
+	table->numFieldNodes = VCF_ARROW_NUM_FIELDS;	/* no nested fields */
+	table->has_statistics = true;
 	/* custom-metadata */
 	table->customMetadata    = customMetadata;
 	table->numCustomMetadata = customMetadata_nitems;
@@ -695,7 +720,7 @@ __build_vcf_table_buffer(void)
 }
 
 /*
- * setup_vcf_metadata
+ * setup_vcf_table_buffer
  */
 static void setup_vcf_table_buffer(void)
 {
@@ -757,6 +782,121 @@ static void setup_vcf_table_buffer(void)
 }
 
 /*
+ * __flush_vcf_arrow_file
+ */
+static void
+__flush_vcf_arrow_file(SQLtable *table, StringInfo buf)
+{
+	SQLfield	variant_column_saved;
+	SQLstat		stat_datum_saved;
+
+	if (table->nitems == 0)
+		return;		/* skip */
+
+	for (int k=0; k < variantNames_nitems; k++)
+	{
+		ArrowBlock	__block;
+		int			__rb_index;
+
+		if (k == 0)
+		{
+			/*
+			 * NOTE: ad-hoc hack - writeArrowRecordBatch clears the stat_datum,
+			 * however, it must be reused for each variants in vcf2arrow.
+			 */
+			memcpy(&stat_datum_saved,
+				   &table->columns[VCF_ARROW_ANUM__POS].stat_datum,
+				   sizeof(SQLstat));
+			__rb_index = writeArrowRecordBatch(table, &__block);
+			memcpy(&variant_column_saved,
+				   &table->columns[VCF_ARROW_ANUM__VARIANT], sizeof(SQLfield));
+		}
+		else
+		{
+			memcpy(&table->columns[VCF_ARROW_ANUM__POS].stat_datum,
+				   &stat_datum_saved,
+				   sizeof(SQLstat));
+			memcpy(&table->columns[VCF_ARROW_ANUM__VARIANT],
+				   &table->columns[VCF_ARROW_ANUM__VARIANT+k], sizeof(SQLfield));
+			__rb_index = writeArrowRecordBatch(table, &__block);
+		}
+		if (buf->len != 0)
+			appendStringInfo(buf, ",");
+		appendStringInfo(buf, "%s", variantNames[k]);
+
+		if (shows_progress)
+		{
+			time_t		tv = time(NULL);
+			struct tm	tm;
+
+			localtime_r(&tv, &tm);
+			printf("%04d-%02d-%02d %02d:%02d:%02d "
+				   "RecordBatch[%d]: "
+				   "offset=%lu length=%lu (meta=%u, body=%lu) nitems=%zu\n",
+				   tm.tm_year + 1900,
+				   tm.tm_mon + 1,
+				   tm.tm_mday,
+				   tm.tm_hour,
+				   tm.tm_min,
+				   tm.tm_sec,
+				   __rb_index,
+				   __block.offset,
+				   __block.metaDataLength + __block.bodyLength,
+				   __block.metaDataLength,
+				   __block.bodyLength,
+				   table->nitems);
+		}
+	}
+	if (variantNames_nitems > 1)
+		memcpy(&table->columns[VCF_ARROW_ANUM__VARIANT],
+			   &variant_column_saved, sizeof(SQLfield));
+	/* clear the buffer */
+	for (int k=1; k < variantNames_nitems; k++)
+		sql_field_clear(&vcf_table->columns[VCF_ARROW_ANUM__VARIANT+k]);
+	sql_table_clear(vcf_table);
+}
+
+/*
+ * convert_vcf_file
+ */
+static void
+convert_vcf_file(const char *fname, FILE *filp, long *p_lineno, StringInfo buf)
+{
+	char	   *line = NULL;
+	size_t		bufsz = 0;
+	ssize_t		nbytes;
+	int			vcf_nattrs = VCF_ARROW_ANUM__VARIANT + variantNames_nitems;
+
+	while ((nbytes = getline(&line, &bufsz, filp)) > 0)
+	{
+		char   *tok, *pos;
+		int		anum;
+		size_t	usage_base = 0;
+		bool	flush_buffer = false;
+
+		(*p_lineno)++;
+		for (tok = __strtok(line, VCF_WHITESPACE, &pos), anum=0;
+			 anum < vcf_nattrs;
+			 tok = __strtok(NULL, VCF_WHITESPACE, &pos), anum++)
+		{
+			SQLfield   *column = &vcf_table->columns[anum];
+			size_t		__usage;
+
+			__usage = sql_field_put_value(column, tok, -1);
+			if (anum < VCF_ARROW_ANUM__VARIANT)
+				usage_base += __usage;
+			else if (usage_base + __usage >= batch_segment_sz)
+				flush_buffer = true;
+		}
+		vcf_table->nitems++;
+		if (flush_buffer)
+			__flush_vcf_arrow_file(vcf_table, buf);
+	}
+	if (line)
+		free(line);
+}
+
+/*
  * usage
  */
 static void usage(const char *format, ...)
@@ -779,7 +919,7 @@ static void usage(const char *format, ...)
 		  "  -s|--segment-sz SIZE : size of record batch (default: 240MB)\n"
 		  "  -E|--embedded-headers=HEADERS : comma separated header names list to be embedded.\n"
 		  "                        (default: 'fileformat,reference,info,filter,format')\n"
-		  "     --user-metadata=KEY=VALUE : a custom key-value pair to be embedded\n"
+		  "  -m|--user-metadata=KEY=VALUE : a custom key-value pair to be embedded\n"
 		  "     --sort-by-pos     : sort by the POS (optimization for min/max stats)\n"
 		  "                        (*) note that this option preload entire VCF file once.\n"
 		  "     --progress        : shows progress of VCF conversion.\n"
@@ -799,7 +939,7 @@ static void parse_options(int argc, char * const argv[])
 		{"output",           required_argument, NULL, 'o'},
 		{"segment-sz",       required_argument, NULL, 's'},
 		{"embedded-headers", required_argument, NULL, 'E'},
-		{"user-metadata",    required_argument, NULL, 1001},
+		{"user-metadata",    required_argument, NULL, 'm'},
 		{"sort-by-pos",      no_argument,       NULL, 1002},
 		{"progress",         no_argument,       NULL, 1003},
 		{"help",             no_argument,       NULL, 'h'},
@@ -809,7 +949,7 @@ static void parse_options(int argc, char * const argv[])
 	int		user_metadata_nrooms = 0;
 	int		c;
 
-	while ((c = getopt_long(argc, argv, "fo:s:E:hv",
+	while ((c = getopt_long(argc, argv, "fo:s:E:mhv",
 							long_options, NULL)) >= 0)
 	{
 		switch (c)
@@ -880,7 +1020,7 @@ static void parse_options(int argc, char * const argv[])
 					embedded_headers_nitems = __nitems;
 				}
 				break;
-			case 1001:	/* --user-metadata */
+			case 'm':	/* --user-metadata */
 				{
 					char   *temp = alloca(strlen(optarg) + 1);
 					char   *pos;
@@ -964,6 +1104,7 @@ static void parse_options(int argc, char * const argv[])
 			kv->_key_len = strlen(kv->key);
 			kv->_value_len = strlen(kv->value);
 		}
+		customMetadata_nitems = user_metadata_nitems;
 	}
 }
 
@@ -972,10 +1113,31 @@ static void parse_options(int argc, char * const argv[])
  */
 int main(int argc, char * const argv[])
 {
+	StringInfoData	buf;
+
 	parse_options(argc, argv);
 	setup_vcf_table_buffer();
+	initStringInfo(&buf);	/* metadata for each variant-key */
+	for (int i=0; i < input_file_nitems; i++)
+		convert_vcf_file(input_filename[i],
+						 input_filedesc[i],
+						 &input_fileline[i],
+						 &buf);
+	__flush_vcf_arrow_file(vcf_table, &buf);
+	if (vcf_table->numRecordBatches > 0)
+	{
+		ArrowKeyValue *kv;
 
-	/* write out the footer portion */
+		vcf_table->customMetadata = repalloc(vcf_table->customMetadata,
+											 sizeof(ArrowKeyValue) *
+											 (vcf_table->numCustomMetadata + 1));
+		kv = &vcf_table->customMetadata[vcf_table->numCustomMetadata++];
+		initArrowNode(kv, KeyValue);
+		kv->key = "variant_key";
+		kv->value = buf.data;
+		kv->_key_len = strlen(kv->key);
+		kv->_value_len = strlen(kv->value);
+	}
 	writeArrowFooter(vcf_table);
 	return 0;
 }
