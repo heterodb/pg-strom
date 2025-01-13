@@ -949,7 +949,7 @@ static void parse_options(int argc, char * const argv[])
 	int		user_metadata_nrooms = 0;
 	int		c;
 
-	while ((c = getopt_long(argc, argv, "fo:s:E:mhv",
+	while ((c = getopt_long(argc, argv, "fo:s:E:m:hv",
 							long_options, NULL)) >= 0)
 	{
 		switch (c)
