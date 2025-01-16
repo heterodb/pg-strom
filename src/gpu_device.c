@@ -578,7 +578,7 @@ GetOptimalGpuForTablespace(Oid tablespace_oid, const char *relname)
 
     if (!pgstrom_gpudirect_enabled)
 	{
-		__hdbxLogInfo("GPU-Direct SQL disabled: pg_strom.gpudirect_enabled = off");
+		__Info("GPU-Direct SQL disabled: pg_strom.gpudirect_enabled = off");
 		return 0UL;
 	}
 
@@ -633,10 +633,10 @@ GetOptimalGpuForTablespace(Oid tablespace_oid, const char *relname)
 	if (optimal_gpus == INVALID_GPUMASK)
 		optimal_gpus = 0UL;
 	if (optimal_gpus == 0)
-		__hdbxLogInfo("GPU-Direct SQL disabled: no schedulable GPUs for '%s' on top of the tablespace '%s'",
+		__Info("GPU-Direct SQL disabled: no schedulable GPUs for '%s' on top of the tablespace '%s'",
 			   relname, hentry->tablespace_name);
 	else
-		__hdbxLogInfo("GPU-Direct SQL: relation='%s' tablespace='%s' optimal-GPUs=%08lx",
+		__Info("GPU-Direct SQL: relation='%s' tablespace='%s' optimal-GPUs=%08lx",
 			   relname, hentry->tablespace_name, optimal_gpus);
 	return optimal_gpus;
 }
@@ -668,7 +668,7 @@ GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 
 	if (!pgstrom_gpudirect_enabled)
 	{
-		__hdbxLogInfo("GPU-Direct SQL disabled: pg_strom.gpudirect_enabled = off");
+		__Info("GPU-Direct SQL disabled: pg_strom.gpudirect_enabled = off");
 		return 0UL;
 	}
 	if (baseRelIsArrowFdw(baserel))
@@ -677,7 +677,7 @@ GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 	total_sz = (size_t)baserel->pages * (size_t)BLCKSZ;
 	if (total_sz < pgstrom_gpudirect_threshold)
 	{
-		__hdbxLogInfo("GPU-Direct SQL disabled: estimated relation size (%s; %s) is smaller than the threshold (%s)",
+		__Info("GPU-Direct SQL disabled: estimated relation size (%s; %s) is smaller than the threshold (%s)",
 			   getRelOptInfoName(root, baserel),
 			   format_bytesz(total_sz),
 			   format_bytesz(pgstrom_gpudirect_threshold));
@@ -695,7 +695,7 @@ GetOptimalGpuForBaseRel(PlannerInfo *root, RelOptInfo *baserel)
 			relpersistence != RELPERSISTENCE_UNLOGGED)
 		{
 			optimal_gpus = 0;
-			__hdbxLogInfo("GPU-Direct SQL disabled: not supported on temporary tables");
+			__Info("GPU-Direct SQL disabled: not supported on temporary tables");
 		}
 	}
 	return optimal_gpus;

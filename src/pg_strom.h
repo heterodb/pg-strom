@@ -518,30 +518,6 @@ extern long		PAGES_PER_BLOCK;	/* (BLCKSZ / PAGE_SIZE) */
 #define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
 
 /*
- * extra.c
- */
-extern int		heterodb_extra_ereport_level;
-#define __hdbxLogError(fmt,...)											\
-	do {																\
-		elog(LOG, __FILE__ ": [error] " fmt, ##__VA_ARGS__);		\
-	} while(0)
-#define __hdbxLogInfo(fmt,...)											\
-	do {																\
-		if (heterodb_extra_ereport_level >= 1)							\
-			elog(LOG, __FILE__ ": [info] " fmt, ##__VA_ARGS__);	\
-	} while(0)
-#define __hdbxLogDebug(fmt,...)											\
-	do {																\
-		if (heterodb_extra_ereport_level >= 2)							\
-			elog(LOG, __FILE__ ": [error] " fmt, ##__VA_ARGS__); \
-	} while(0)
-extern void		heterodbExtraEreport(int elevel);
-extern heterodb_extra_ereport_callback_type
-	heterodbExtraRegisterEreportCallback(heterodb_extra_ereport_callback_type callback);
-extern bool		gpuDirectIsAvailable(void);
-extern void		pgstrom_init_extra(void);
-
-/*
  * codegen.c
  */
 typedef struct
@@ -1007,62 +983,28 @@ extern bool		pathNameMatchByPattern(const char *pathname,
 									   List **p_attrKeys,
 									   List **p_attrValues);
 /*
- * extra.c (copied from heterodb-extra)
+ * extra.c
  */
-extern const char  *heterodb_extra_init_module(const char *extra_pathname);
-extern void			heterodbExtraSetError(int errcode,
-										  const char *filename,
-										  unsigned int lineno,
-										  const char *funcname,
-										  const char *fmt, ...)
-					pg_attribute_printf(5,6);
-extern int			heterodbExtraGetError(const char **p_filename,
-										  unsigned int *p_lineno,
-										  const char **p_funcname,
-										  char *buffer, size_t buffer_sz);
-extern int			heterodbLicenseReload(void);
-extern int			heterodbLicenseReloadPath(const char *path);
-extern ssize_t		heterodbLicenseQuery(char *buf, size_t bufsz);
-extern const char  *heterodbLicenseDecrypt(const char *path);
-extern int			heterodbValidateDevice(const char *gpu_device_name,
-										   const char *gpu_device_uuid);
-extern const char  *heterodbInitOptimalGpus(const char *manual_config);
-extern gpumask_t	heterodbGetOptimalGpus(const char *path,
-										   const char *policy);
-extern bool			gpuDirectInitDriver(void);
-extern bool			gpuDirectOpenDriver(void);
-extern bool			gpuDirectCloseDriver(void);
-extern bool			gpuDirectMapGpuMemory(CUdeviceptr m_segment,
-										  size_t segment_sz,
-										  unsigned long *p_iomap_handle);
-extern bool			gpuDirectUnmapGpuMemory(CUdeviceptr m_segment,
-											unsigned long iomap_handle);
-extern bool			gpuDirectRegisterStream(CUstream cuda_stream);
-extern bool			gpuDirectDeregisterStream(CUstream cuda_stream);
-extern bool			gpuDirectFileReadIOV(const char *pathname,
-										 CUdeviceptr m_segment,
-										 off_t m_offset,
-										 unsigned long iomap_handle,
-										 const strom_io_vector *iovec,
-										 uint32_t *p_npages_direct_read,
-										 uint32_t *p_npages_vfs_read);
-extern bool			gpuDirectFileReadAsyncIOV(const char *pathname,
-											  CUdeviceptr m_segment,
-											  off_t m_offset,
-											  unsigned long iomap_handle,
-											  const strom_io_vector *iovec,
-											  CUstream cuda_stream,
-											  uint32_t *p_error_code_async,
-											  uint32_t *p_npages_direct_read,
-											  uint32_t *p_npages_vfs_read);
-extern const char  *gpuDirectGetProperty(void);
-extern bool			gpuDirectSetProperty(const char *key,
-										 const char *value);
-extern void			gpuDirectCleanUpOnThreadTerminate(void);
-extern bool			heterodbExtraCloudGetVMInfo(const char *cloud_name,
-												const char **p_vm_type,
-												const char **p_vm_image,
-												const char **p_vm_ident);
+#define __Info(fmt,...)									\
+	do {												\
+		if (heterodbExtraEreportLevel() >= 1)			\
+			ereport(LOG,								\
+					(errhidestmt(true),					\
+					 errmsg("[info] " fmt " (%s:%d)",	\
+							##__VA_ARGS__,				\
+							__FILE__, __LINE__)));		\
+	} while(0)
+#define __Debug(fmt,...)								\
+	do {												\
+		if (heterodbExtraEreportLevel() >= 2)			\
+			ereport(LOG,								\
+					(errhidestmt(true),					\
+					 errmsg("[debug] " fmt " (%s:%d)",	\
+							##__VA_ARGS__,				\
+							__FILE__, __LINE__)));		\
+	} while(0)
+extern void			pgstrom_init_extra(void);
+
 /*
  * githash.c (auto-generated)
  */

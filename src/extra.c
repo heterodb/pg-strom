@@ -31,15 +31,6 @@ static int		gpudirect_driver_kind;
 static __thread void   *gpudirect_vfs_dma_buffer = NULL;
 static __thread size_t	gpudirect_vfs_dma_buffer_sz = 0UL;
 
-/*
- * Error Handling
- */
-static __thread int		stub_error_code = 0;
-static __thread const char *stub_error_filename = NULL;
-static __thread unsigned int stub_error_lineno = 0;
-static __thread const char *stub_error_funcname = NULL;
-static __thread char	stub_error_message[1000];
-
 #define __Ereport(fmt,...)									\
 	do {													\
 		int		___errno_saved___ = errno;					\
@@ -48,6 +39,16 @@ static __thread char	stub_error_message[1000];
 				##__VA_ARGS__, __FILE__, __LINE__);			\
 		errno = ___errno_saved___;							\
 	} while(0)
+
+#if 0
+/*
+ * Error Handling
+ */
+static __thread int		stub_error_code = 0;
+static __thread const char *stub_error_filename = NULL;
+static __thread unsigned int stub_error_lineno = 0;
+static __thread const char *stub_error_funcname = NULL;
+static __thread char	stub_error_message[1000];
 
 /*
  * heterodbExtraSetError / heterodbExtraGetError (deprecated)
@@ -125,6 +126,7 @@ heterodbExtraGetError(const char **p_filename,
 	}
 	return errcode;
 }
+#endif
 
 /*
  * heterodbExtraRegisterEreportCallback
@@ -138,6 +140,19 @@ heterodbExtraRegisterEreportCallback(heterodb_extra_ereport_callback_type callba
 {
 	if (p_heterodb_extra_register_ereport_callback)
 		return p_heterodb_extra_register_ereport_callback(callback);
+	return NULL;
+}
+
+/*
+ * heterodbExtraRegisterEreportLevel
+ */
+static int *(*p_heterodb_extra_register_ereport_level)(int *p_ereport_level) = NULL;
+
+int *
+heterodbExtraRegisterEreportLevel(int *p_ereport_level)
+{
+	if (p_heterodb_extra_register_ereport_level)
+		return p_heterodb_extra_register_ereport_level(p_ereport_level);
 	return NULL;
 }
 
@@ -882,7 +897,7 @@ heterodb_extra_parse_signature(const char *extra_module_info,
 	}
 	if (api_version < HETERODB_EXTRA_OLDEST_API_VERSION)
 	{
-		__Ereport("HeteroDB Extra module API-version [%08ld] is too old.", api_version);
+		__Ereport("HeteroDB Extra module API-version [%08ld] is too old, update to the latest version.", api_version);
 		return false;
 	}
 	*p_api_version		= api_version;
@@ -934,8 +949,8 @@ heterodb_extra_init_module(const char *__extra_pathname)
 
 	/* lookup extra symbols */
 	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_module_init);
-	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_set_error);
-	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_get_error);
+//	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_set_error);
+//	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_get_error);
 	signature = heterodbExtraModuleInit();
 	if (!heterodb_extra_parse_signature(signature,
 										&api_version,
@@ -979,16 +994,19 @@ heterodb_extra_init_module(const char *__extra_pathname)
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_get_optimal_gpus_v2);
 	if (api_version >= 20240720)
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_get_cloud_vm_info);
-	if (api_version >= 20250105)
+	if (api_version >= 20250115)
+	{
 		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_register_ereport_callback);
+		LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_extra_register_ereport_level);
+	}
 	return signature;
 
 bailout:
 	dlclose(handle);
 	/* reset function pointers */
 	p_heterodb_extra_module_init        = NULL;
-	p_heterodb_extra_set_error          = NULL;
-	p_heterodb_extra_get_error          = NULL;
+//	p_heterodb_extra_set_error          = NULL;
+//	p_heterodb_extra_get_error          = NULL;
 	p_gpudirect__driver_init_v2         = NULL;
 	p_cufile__driver_open_v2            = NULL;
 	p_cufile__driver_close_v2           = NULL;
@@ -1021,35 +1039,6 @@ bailout:
 
 #ifdef __PGSTROM_MODULE__
 /*
- * heterodbExtraEreport (legacy)
- */
-void
-heterodbExtraEreport(int elevel)
-{
-	int			errcode;
-	const char *filename;
-	unsigned int lineno;
-	const char *funcname;
-	char		buffer[2000];
-
-	errcode = heterodbExtraGetError(&filename,
-									&lineno,
-									&funcname,
-									buffer, sizeof(buffer));
-	if (errcode)
-	{
-		elog(elevel,
-			 "(%s:%u) %s [%s]",
-			 filename,
-			 lineno,
-			 buffer,
-			 funcname);
-	}
-	else if (elevel >= ERROR)
-		elog(elevel, "unknown error around heterodb-extra module");
-}
-
-/*
  * heterodbExtraEreportCallback
  */
 static void
@@ -1057,23 +1046,58 @@ heterodbExtraEreportCallback(char ereport_class,
 							 const char *filename,
 							 unsigned int lineno,
 							 const char *function,
-							 const char *format,
-							 va_list va_args)
+							 const char *message)
 {
-	StringInfoData	buf;
+	const char *label = (ereport_class == 'E' ? "error" :
+						 ereport_class == 'I' ? "info" :
+						 ereport_class == 'D' ? "debug" : "???");
+	ereport(LOG, (errhidestmt(true),
+				  errmsg("heterodb-extra: [%s] %s (%s:%d)",
+						 label, message, filename, lineno)));
+}
 
-	initStringInfo(&buf);
-	if (ereport_class == 'E')
-		appendStringInfo(&buf, "heterodb-extra: [error] ");
-	else
-		appendStringInfo(&buf, "heterodb-extra: [%s] ",
-						 ereport_class == 'I' ? "info" : "debug");
-	appendStringInfoVA(&buf, format, va_args);
-	if (ereport_class == 'E')
-		appendStringInfo(&buf, " (%s:%d)", filename, lineno);
-	elog(LOG, "%s", buf.data);
+/*
+ * heterodbExtraEreportLevel
+ */
+static shmem_request_hook_type shmem_request_next = NULL;
+static shmem_startup_hook_type shmem_startup_next = NULL;
+static int		__pgstrom_extra_ereport_level_data = 0;
+static int	   *pgstrom_extra_ereport_level = &__pgstrom_extra_ereport_level_data;
 
-	pfree(buf.data);
+int
+heterodbExtraEreportLevel(void)
+{
+	return *pgstrom_extra_ereport_level;
+}
+
+static void
+pgstrom_request_extra_ereport(void)
+{
+	if (shmem_request_next)
+		(*shmem_request_next)();
+	RequestAddinShmemSpace(MAXALIGN(sizeof(unsigned int)));
+}
+
+static void
+pgstrom_startup_extra_ereport(void)
+{
+	bool	found;
+
+	if (shmem_startup_next)
+		(*shmem_startup_next)();
+	pgstrom_extra_ereport_level = ShmemInitStruct("pg_strom.extra_ereport_level",
+												  MAXALIGN(sizeof(unsigned int)),
+												  &found);
+	*pgstrom_extra_ereport_level = __pgstrom_extra_ereport_level_data;
+	pg_memory_barrier();
+	heterodbExtraRegisterEreportLevel(pgstrom_extra_ereport_level);
+}
+
+static void
+extra_ereport_level_assign(int newval, void *extra)
+{
+	*pgstrom_extra_ereport_level = newval;
+	pg_memory_barrier();
 }
 
 /*
@@ -1164,45 +1188,41 @@ pgstrom_init_extra(void)
 	uint32_t	api_version = 0;
 	bool		has_cufile = false;
 	bool		has_nvme_strom = false;
+	const char *eval;
+	int			__extra_ereport_level_default = 0;
+	const char *__extra_ereport_level_cstring[] = {"0","1","2",NULL};
 	int			enum_index = 0;
 	static struct config_enum_entry enum_options[4];
-	static int	__heterodb_extra_ereport_level = -1;
 
+	/*
+	 * pg_strom.extra_ereport_level
+	 *
+	 * debug log output level including heterodb-extra module.
+	 */
+	eval =  getenv("HETERODB_EXTRA_EREPORT_LEVEL");
+	if (eval)
+	{
+		__extra_ereport_level_default = atoi(eval);
+		if (__extra_ereport_level_default < 0)
+			__extra_ereport_level_default = 0;
+		if (__extra_ereport_level_default > 2)
+			__extra_ereport_level_default = 2;
+	}
 	/* set error reporting level in heterodb-extra module */
-	DefineCustomIntVariable("heterodb_extra.ereport_level",
-							"heterodb_extra module's error report level",
+	DefineCustomIntVariable("pg_strom.extra_ereport_level",
+							"PG-Strom's extra error reporting level",
 							NULL,
-							&__heterodb_extra_ereport_level,
-							-1,
-							-1,		/* system defaults */
-							2,		/* error, info, and debug */
-							PGC_POSTMASTER,
-							GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
-							NULL, NULL, NULL);
-	if (__heterodb_extra_ereport_level < 0)
-	{
-		const char *val = getenv("HETERODB_EXTRA_EREPORT_LEVEL");
+							&__pgstrom_extra_ereport_level_data,
+							__extra_ereport_level_default,
+							0,
+							2,
+							PGC_SUSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL, &extra_ereport_level_assign, NULL);
+	if (setenv("HETERODB_EXTRA_EREPORT_LEVEL",
+			   __extra_ereport_level_cstring[__pgstrom_extra_ereport_level_data], 1) != 0)
+		elog(ERROR, "failed on setenv('HETERODB_EXTRA_EREPORT_LEVEL'): %m");
 
-		if (!val)
-			heterodb_extra_ereport_level = 0;
-		else
-		{
-			heterodb_extra_ereport_level = atoi(val);
-			if (heterodb_extra_ereport_level < 0)
-				heterodb_extra_ereport_level = 0;
-			if (heterodb_extra_ereport_level > 2)
-				heterodb_extra_ereport_level = 2;
-		}
-	}
-	else
-	{
-		const char *__label[] = {"0","1","2"};
-
-		if (setenv("HETERODB_EXTRA_EREPORT_LEVEL",
-				   __label[__heterodb_extra_ereport_level], 1) != 0)
-			elog(ERROR, "failed on setenv('HETERODB_EXTRA_EREPORT_LEVEL')");
-		heterodb_extra_ereport_level = __heterodb_extra_ereport_level;
-	}
 	/* Load heterodb-extra module */
 	signature = heterodb_extra_init_module(NULL);
 	/* Register Ereport Callback */
@@ -1223,7 +1243,7 @@ pgstrom_init_extra(void)
 											&api_version,
 											&has_cufile,
 											&has_nvme_strom))
-			heterodbExtraEreport(true);
+			elog(ERROR, "failed on heterodb_extra_parse_signature('%s')", signature);
 		if (has_cufile)
 		{
 			enum_options[enum_index].name = "cufile";
@@ -1261,5 +1281,10 @@ pgstrom_init_extra(void)
 		elog(LOG, "HeteroDB License: %s", license);
 		pfree(license);
 	}
+	/* shared memory segment */
+	shmem_request_next = shmem_request_hook;
+	shmem_request_hook = pgstrom_request_extra_ereport;
+	shmem_startup_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_extra_ereport;
 }
 #endif
