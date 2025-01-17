@@ -13,17 +13,17 @@ Software is fully open source, distributed under PostgreSQL License.
 
 PG-Strom + GPU Direct Storage Quickstart
 ========================================
-���̃h�L�������g��PG-Strom�̓�������AGPU Direct Storage�܂ł̐ݒ�����������̂ł��B
-�{����Local NVMe SSD��GPU Direct Storage�����ɗ��p������������Ă��܂��B
+このドキュメントはPG-Stromの導入から、GPU Direct Storageまでの設定を説明するものです。
+本書はLocal NVMe SSDをGPU Direct Storage向けに利用する例を説明しています。
 
-RHEL9�����ɏ�����Ă��܂����A[RHEL]�ƌ��o���ɏ�����Ă��镔���ȊO��Rocky Linux�Ȃǂ�RHEL�N���[��OS�ƊT�ˋ��ʂȂ̂ŎQ�l�ɂȂ�Ǝv���܂��B
+RHEL9向けに書かれていますが、[RHEL]と見出しに書かれている部分以外はRocky LinuxなどのRHELクローンOSと概ね共通なので参考になると思います。
 
-����ł͂��̃K�C�h�ɏ]���Ċ��\�z���āAPG-Strom�̐��E�ɑ��𓥂ݓ���Ă݂Ă��������B
+それではこのガイドに従って環境構築して、PG-Stromの世界に足を踏み入れてみてください。
 
 
-## [RHEL]�o�[�W�����Œ�
+## [RHEL]バージョン固定
 
-RHEL�ł̓����[�X�o�[�W������ύX�ł��܂��B�C���X�g�[������CUDA�ɍ��킹�āA�����[�X�o�[�W�������Œ艻����Ɨǂ��ł��傤�BCUDA��MOFED�ALinux�̃o�[�W������K�؂����R�ɑI���ł���ꍇ�͂��̐ݒ�͕s�v�ł��B
+RHELではリリースバージョンを変更できます。インストールするCUDAに合わせて、リリースバージョンを固定化すると良いでしょう。CUDAとMOFED、Linuxのバージョンを適切かつ自由に選択できる場合はこの設定は不要です。
 
 (rhel9)
 
@@ -31,15 +31,15 @@ RHEL�ł̓����[�X�o�[�W������ύX�ł��܂��B�C���X�g�[������CUDA�ɍ��킹�āA�����[
 $ sudo subscription-manager release --set=9.4
 ```
 
-## �\�t�g�E�F�A�A�b�v�f�[�g�̎��{
-�\�t�g�E�F�A�A�b�v�f�[�g�����s���܂��B
+## ソフトウェアアップデートの実施
+ソフトウェアアップデートを実行します。
 
 ```
 $ sudo dnf update -y
 ```
 
-## [RHEL]EUS���|�W�g���[�̗L����
-RHEL�ł̓V�X�e���ւ̉����X�V�T�|�[�g (EUS)�����p�ł��܂��BEUS�͒ʏ�̃T�|�[�g���Ԃ�蒷�����ԁA�}�C�i�[�o�[�W�����̃����e�i���X�A�b�v�f�[�g���󂯂��܂��B�����Ԃ̈��肵�����p��K�v�Ƃ���ꍇ�͓K�p���Ă��������BCUDA��MOFED�ALinux�̃o�[�W������K�؂����R�ɑI���ł���ꍇ�͂��̐ݒ�͕s�v�ł��B
+## [RHEL]EUSリポジトリーの有効化
+RHELではシステムへの延長更新サポート (EUS)が利用できます。EUSは通常のサポート期間より長い期間、マイナーバージョンのメンテナンスアップデートを受けられます。長期間の安定した利用を必要とする場合は適用してください。CUDAとMOFED、Linuxのバージョンを適切かつ自由に選択できる場合はこの設定は不要です。
 
 (rhel9)
 
@@ -47,10 +47,10 @@ RHEL�ł̓V�X�e���ւ̉����X�V�T�|�[�g (EUS)�����p�ł��܂��BEUS�͒ʏ�̃T�|�[�g���
 $ sudo subscription-manager repos --enable rhel-9-for-x86_64-appstream-eus-rpms --enable rhel-9-for-x86_64-baseos-eus-rpms
 ```
 
-EPEL��CodeReady Linux Builder�iPowerTools�j�̗L����
-EPEL�̗��p�ɂ͊J���Ŏg���p�b�P�[�W�Z�b�g���|�W�g���[�iCodeReady Linux Builder�j�̗L�������K�v�ł��B�f�B�X�g���r���[�V�����ɂ���āA���|�W�g���[�̖��̂��قȂ邱�Ƃ�����܂��B
+## EPELとCodeReady Linux Builder（PowerTools）の有効化
+EPELの利用には開発で使うパッケージセットリポジトリー（CodeReady Linux Builder）の有効化が必要です。ディストリビューションによって、リポジトリーの名称が異なることがあります。
 
-�ڍׂ̓A�b�v�X�g���[���̃h�L�������g���m�F���Ă��������B
+詳細はアップストリームのドキュメントを確認してください。
 
 - https://docs.fedoraproject.org/en-US/epel/getting-started/
 
@@ -60,14 +60,14 @@ EPEL�̗��p�ɂ͊J���Ŏg���p�b�P�[�W�Z�b�g���|�W�g���[�iCodeReady Linux Builder�j�
 $ sudo subscription-manager repos --enable codeready-builder-for-rhel-9-$(arch)-rpms && sudo dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
 ```
 
-## �J���c�[���Ȃǂ̃C���X�g�[��
+## 開発ツールなどのインストール
 
 ```
 $ sudo dnf install wget git-core -y
 $ sudo dnf groupinstall 'Development Tools' -y
 ```
 
-## IOMMU�̖�����
+## IOMMUの無効化
 
 (rhel9)
 
@@ -79,34 +79,34 @@ $ sudo vi /etc/default/grub
 $ sudo grub2-mkconfig -o /boot/grub2/grub.cfg
 ```
 
-## Nouveau�h���C�o�[�̖�����
+## Nouveauドライバーの無効化
 
 ```
-# cat > /etc/modprobe.d/disable-nouveau.conf <<EOF
+$ sudo sh -c "cat > /etc/modprobe.d/disable-nouveau.conf <<EOF
 blacklist nouveau
 options nouveau modeset=0
-EOF
+EOF"
 ```
 
-## �V�X�e���ċN��
+## システム再起動
 
 ```
-# shutdown -r now
+$ sudo reboot
 ```
 
-## �J�[�l���w�b�_�[�Ȃǂ̃C���X�g�[��
-�ċN����ɁA���ݗ��p���Ă���Linux�J�[�l���o�[�W�����p�̃w�b�_�[�Ȃǂ��C���X�g�[�����܂��B
+## カーネルヘッダーなどのインストール
+再起動後に、現在利用しているLinuxカーネルバージョン用のヘッダーなどをインストールします。
 
 ```
 $ sudo dnf install -y kernel-devel-$(uname -r) kernel-headers-$(uname -r)
 ```
 
-## MOFED�̃C���X�g�[��
-�_�E�����[�hURL����A���p�\���CUDA�o�[�W������Linux�f�B�X�g���r���[�V�����ALinux�J�[�l���̃o�[�W�����ɑΉ�����MOFED���_�E�����[�h���܂��B
+## MOFEDのインストール
+ダウンロードURLから、利用予定のCUDAバージョンとLinuxディストリビューション、Linuxカーネルのバージョンに対応したMOFEDをダウンロードします。
 
 - https://network.nvidia.com/products/infiniband-drivers/linux/mlnx_ofed/
 
-���O�ɕK�v�ȃp�b�P�[�W���C���X�g�[������B����RHEL9�̗�B�o�[�W�����ɂ���ĕK�v�ȃp�b�P�[�W�͈قȂ�܂��B�r���h���ɕs�����Ă���Ƃ������b�Z�[�W���o����A�p�b�P�[�W��ǉ����܂��B
+事前に必要なパッケージをインストールする。次はRHEL9の例。バージョンによって必要なパッケージは異なります。ビルド時に不足しているというメッセージが出たら、パッケージを追加します。
 
 (rhel9)
 
@@ -114,7 +114,7 @@ $ sudo dnf install -y kernel-devel-$(uname -r) kernel-headers-$(uname -r)
 $ sudo dnf install kernel-modules-extra kernel-rpm-macros lsof pciutils createrepo tk tcl gcc-gfortran perl-sigtrap
 ```
 
-�W�J���ăr���h&�C���X�g�[�����܂��B
+展開してビルド&インストールします。
 
 (rhel9)
 
@@ -124,8 +124,8 @@ $ cd  /mnt
 $ sudo ./mlnxofedinstall --with-nvmf --with-nfsrdma --enable-gds --add-kernel-support && sudo dracut -f
 ```
 
-## DNF�ݒ�ύX
-MOFED�p�b�P�[�W���V�X�e���̃p�b�P�[�W�ŏ㏑�����Ȃ��悤�ɁAexcludepkgs�Ŏw�肵�܂��B
+## DNF設定変更
+MOFEDパッケージをシステムのパッケージで上書きしないように、excludepkgsで指定します。
 
 ```
 $ sudo vi /etc/dnf/dnf.conf
@@ -135,18 +135,18 @@ $ sudo vi /etc/dnf/dnf.conf
 excludepkgs=mstflint,openmpi,perftest,mpitests_openmpi,mlnx-*,ofed-*
 ```
 
-`ofed_rpm_info`�R�}���h�ŏo�Ă���p�b�P�[�W��u�������Ȃ��悤�ɐݒ肷�邱�ƁI
-MOFED�̃o�[�W�����A�b�v��폜���ɂ͎�菜�����ƁB
+`ofed_rpm_info`コマンドで出てくるパッケージを置き換えないように設定すること！
+MOFEDのバージョンアップや削除時には取り除くこと。
 
-��U�A�ċN�����܂��B
+一旦、再起動します。
 
 ```
 $ sudo reboot
 ```
 
 
-## Local NVMe����̐ݒ�
-MOFED�ŃC���X�g�[���������W���[�����m�F���܂��B`extra`�ȉ��̃p�X�ɂ���΁ALinux�J�[�l���O���̃��W���[�����g�����Ԃł��B
+## Local NVMe周りの設定
+MOFEDでインストールしたモジュールを確認します。`extra`以下のパスにあれば、Linuxカーネル外部のモジュールが使える状態です。
 
 ```
 $ modinfo nvme
@@ -158,7 +158,7 @@ rhelversion:    9.4
 ...
 ```
 
-���W���[����ǂݍ��݂܂��B
+モジュールを読み込みます。
 
 ```
 $ sudo su -
@@ -166,20 +166,20 @@ $ sudo su -
 # echo nvme > /etc/modules-load.d/nvme.conf
 ```
 
-�f�o�C�X�̐����m�F���܂��B
+デバイスの数を確認します。
 
 ```
-$ ls /dev |grep nvme
+# ls /dev |grep nvme
 ```
 
-�f�o�C�X�̐��ɍ��킹�āA�\�t�g�E�F�ARAID�̐ݒ�(-n��NVMe SSD�f�o�C�X�����w��)���s���܂��B
+デバイスの数に合わせて、ソフトウェアRAIDの設定(-nでNVMe SSDデバイス数を指定)を行います。
  
 ```
 # mdadm -C /dev/md0 -c 128 -l 0 -n 4 /dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1
 # mdadm --detail --scan > /etc/mdadm.conf
 ```
 
-RAID �{�����[���� udev ���[����`--no-devices`���w�肳�ꂽ�s�̓��e���C�����܂��B
+RAID ボリュームの udev ルールの`--no-devices`が指定された行の内容を修正します。
 
 ```
 # vi /lib/udev/rules.d/63-md-raid-arrays.rules
@@ -188,7 +188,7 @@ RAID �{�����[���� udev ���[����`--no-devices`���w�肳�ꂽ�s�̓��e���C�����܂��B
 IMPORT{program}="/usr/sbin/mdadm --detail --export $devnode"
 ```
 
-parted�R�}���h���g���āA�p�[�e�B�V�����쐬���s���܂��B�t�@�C���V�X�e����ext4���w�肵�܂��B
+partedコマンドを使って、パーティション作成を行います。ファイルシステムはext4を指定します。
 
 ```
 # parted /dev/md0
@@ -217,13 +217,13 @@ Number  Start   End     Size    File system  Name               Flags
 Information: You may need to update /etc/fstab.
 ```
 
-�t�@�C���V�X�e�����쐬���܂��B
+ファイルシステムを作成します。
 
 ```
 # mkfs.ext4 /dev/md0p1
 ```
 
-�}�E���g���܂��B�X�g���[�W���i�������邽�߂ɁA`/etc/fstab`�ɋL�q���܂��B
+マウントします。ストレージを永続化するために、`/etc/fstab`に記述します。
 
 ```
 # mkdir -p /opt/nvme
@@ -233,19 +233,19 @@ Information: You may need to update /etc/fstab.
 /dev/md0p1  /opt/nvme ext4 data=ordered 0 0
 ```
 
-## CUDA�̃C���X�g�[��
-PG-Strom 5.x��CUDA 12.2�ȍ~�������_�̍Œ�v���ɂȂ�܂��B�K�؂�OS��J�[�l���o�[�W������p�ӂ�����őΉ�����CUDA���C���X�g�[�����܂��B
+## CUDAのインストール
+PG-Strom 5.xはCUDA 12.2以降が現時点の最低要件になります。適切なOSやカーネルバージョンを用意した上で対応するCUDAをインストールします。
 
 - https://developer.nvidia.com/cuda-toolkit-archive
 
 
-���O��dkms�p�b�P�[�W�����Ă����ƕ֗��ł��B���̃p�b�P�[�W��EPEL���|�W�g���[�ɂ���܂��B
+事前にdkmsパッケージを入れておくと便利です。このパッケージはEPELリポジトリーにあります。
 
 ```
 $ sudo dnf install -y dkms
 ```
 
-���|�W�g���[��ǉ����܂��B
+リポジトリーを追加します。
 
 (rhel9)
 
@@ -253,29 +253,29 @@ $ sudo dnf install -y dkms
 $ sudo dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
 ```
 
-�p�b�P�[�W��CUDA���C���X�g�[������Ƃ��́A�o�[�W�������w�肵�܂��B
+パッケージでCUDAをインストールするときは、バージョンを指定します。
 
 ```
-sudo dnf install -y cuda-toolkit-12-3
+$ sudo dnf install -y cuda-toolkit-12-3
 ```
 
-GPU�h���C�o�[���C���X�g�[�����܂��BCUDA�o�[�W�����ɂ���ă��K�V�[�h���C�o�[��Open�h���C�o�[�����݂��܂����ACUDA 12.3�ȍ~��Open�h���C�o�[���C���X�g�[������Ă��Ȃ���GDS�����p�ł��܂���B�܂��AOpen�h���C�o�[��Turing����ȍ~��GPU�ɂ����Ή����Ă��܂���̂ŁA�Ή�����GPU��p�ӂ��邩�ACUDA 12.2GA��������12.2 Update1�܂ł̃o�[�W���������p�\��GPU�Ɗ���p�ӂ��Ă��������B
+GPUドライバーをインストールします。CUDAバージョンによってレガシードライバーとOpenドライバーが存在しますが、CUDA 12.3以降はOpenドライバーがインストールされていないとGDSが利用できません。また、OpenドライバーはTuring世代以降のGPUにしか対応していませんので、対応するGPUを用意するか、CUDA 12.2GAもしくは12.2 Update1までのバージョンが利用可能なGPUと環境を用意してください。
 
 ```
-sudo dnf module install -y nvidia-driver:open-dkms
+$ sudo dnf module install -y nvidia-driver:open-dkms
 ```
 
 Note:
-CUDA 12.2 Update2�ȍ~��GDS�̎d�l�ύX��GPU��GPU�h���C�o�[�̑g�ݍ��킹���d�v�ɂȂ�BTuring�����iP,V�j�̐���ł�12.2 Update1�𗘗p���邱�ƁBTuring�ȍ~�ł�Open GPU�h���C�o�[���K�v�B
+CUDA 12.2 Update2以降はGDSの仕様変更でGPUとGPUドライバーの組み合わせが重要になる。Turing未満（P,V）の世代では12.2 Update1を利用すること。Turing以降ではOpen GPUドライバーが必要。
 
-MOFED����ꂽ���ƁACUDA�Ɠ����o�[�W������nvidia-gds�p�b�P�[�W���C���X�g�[�����܂��B
+MOFEDを入れたあと、CUDAと同じバージョンのnvidia-gdsパッケージをインストールします。
 
 ```
-sudo dnf install -y nvidia-gds-12-3
+$ sudo dnf install -y nvidia-gds-12-3
 ```
 
-## PostgreSQL�̃C���X�g�[��
-RHEL�����RHEL�N���[��OS��PostgreSQL�p�b�P�[�W��񋟂��Ă��܂����A�񋟂����p�b�P�[�W��r���h�|���V�[���قȂ邽�߂ɁA�኱����ɈႢ���������邱�Ƃ�����܂��B�{���ł�PostgreSQL�R�~���j�e�B���񋟂���p�b�P�[�W�𗘗p����O��ŉ�����Ă��܂��B
+## PostgreSQLのインストール
+RHELおよびRHELクローンOSはPostgreSQLパッケージを提供していますが、提供されるパッケージやビルドポリシーが異なるために、若干動作に違いが発生することがあります。本書ではPostgreSQLコミュニティが提供するパッケージを利用する前提で解説しています。
 
 - https://www.postgresql.org/download/
 
@@ -285,26 +285,26 @@ RHEL�����RHEL�N���[��OS��PostgreSQL�p�b�P�[�W��񋟂��Ă��܂����A�񋟂����p�b
 $ sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
 ```
 
-PostgreSQL�p�b�P�[�W�̃C���X�g�[�������܂��B�{�������������_�ł�PostgreSQL 15�ʈȍ~�̃o�[�W�����ɑΉ����Ă��܂��BPostgreSQL 16���C���X�g�[������ꍇ�͎��̂悤�Ɏ��s���܂��B
+PostgreSQLパッケージのインストールをします。本書を書いた時点ではPostgreSQL 15以降のバージョンに対応しています。PostgreSQL 16をインストールする場合は次のように実行します。
 
 ```
 $ sudo dnf -qy module disable postgresql && sudo dnf install -y postgresql16-server postgresql16-devel
 ```
 
-PostgreSQL�̏������ƃT�[�r�X�̋N����ݒ肵�܂��B
+PostgreSQLの初期化とサービスの起動を設定します。
 
 ```
 $ sudo /usr/pgsql-16/bin/postgresql-16-setup initdb && sudo systemctl enable --now postgresql-16
 ```
 
-SELinux��������s���܂��B���ۗ��p����p�X�ɒu�������Ď��s���Ă��������B
+SELinux周りを実行します。実際利用するパスに置き換えて実行してください。
 
 ```
 $ sudo chown postgres:postgres -R /opt/nvme && sudo chcon -R system_u:object_r:postgresql_db_t:s0 /opt/nvme/
 ```
 
-## HereroDB���|�W�g���[�̒ǉ�
-HeteroDB Software Distribution Center���烊�|�W�g���[RPM�p�b�P�[�W���_�E�����[�h���āA`heterodb-extra`�p�b�P�[�W���C���X�g�[�����܂��B
+## HereroDBリポジトリーの追加
+HeteroDB Software Distribution CenterからリポジトリーRPMパッケージをダウンロードして、`heterodb-extra`パッケージをインストールします。
 
 - [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)
 
@@ -315,7 +315,7 @@ $ sudo dnf install -y https://heterodb.github.io/swdc/yum/rhel9-noarch/heterodb-
 $ sudo dnf install -y heterodb-extra
 ```
 
-���肵�����C�Z���X�����蓖�Ă܂��B
+入手したライセンスを割り当てます。
 
 ```
 $ sudo sh -c "cat heterodb.license > /etc/heterodb.license"
@@ -323,18 +323,18 @@ $ sudo systemctl restart postgresql-16
 ```
 
 
-## PG-Strom �̃C���X�g�[��
-�����܂ŏ������ł�����A[�C���X�g�[���K�C�h](https://heterodb.github.io/pg-strom/ja/install/)�ɏ]���āAPG-Strom�̃C���X�g�[���A�ݒ���s���܂��B
+## PG-Strom のインストール
+ここまで準備ができたら、[インストールガイド](https://heterodb.github.io/pg-strom/ja/install/)に従って、PG-Stromのインストール、設定を行います。
 
 
-## ���̑��̐ݒ�
-�M�҂��悭�s���ݒ���܂Ƃ߂܂����B�K�v�ɉ����Đݒ肵�܂��B
+## その他の設定
+筆者がよく行う設定をまとめました。必要に応じて設定します。
 
-### PostgreSQL + PG-Strom�����O���N���C�A���g���痘�p����
-�O���N���C�A���g���痘�p����PG-Strom���փA�N�Z�X�������ꍇ�́APostgreSQL�̐ݒ�̕ύX���K�v�ł��B
-���̂悤�ȕ��@�őΉ����Ă��������B
+### PostgreSQL + PG-Strom環境を外部クライアントから利用する
+外部クライアントから利用するPG-Strom環境へアクセスしたい場合は、PostgreSQLの設定の変更が必要です。
+次のような方法で対応してください。
 
-���b�X���A�h���X�̐ݒ��ύX���܂��B
+リッスンアドレスの設定を変更します。
 
 ```
 sudo su - postgres
@@ -343,28 +343,28 @@ vi /var/lib/pgsql/16/data/postgresql.conf
 listen_addresses = '*'
 ```
 
-�����[�g�A�N�Z�X�������郆�[�U�[���쐬���܂��B���[�U�[�ɂ̓A�N�Z�X�ɓK�؂ȃ��[����ݒ肵�܂��B�ȉ��͂��Ȃ�ɂ��ݒ�ł��B�ݒ���e�̏ڍׂɂ��Ă͐ݒ�t�@�C���̃R�����g���m�F���Ă��������B
+リモートアクセスを許可するユーザーを作成します。ユーザーにはアクセスに適切なロールを設定します。以下はかなり緩い設定です。設定内容の詳細については設定ファイルのコメントを確認してください。
 
 ```
 $ createuser -d -r -s -P pguser01
-Enter password for new role:  <�p�X���[�h��ݒ�>
-��vi /var/lib/pgsql/16/data/pg_hba.conf
-�i�ǋL�j
+Enter password for new role:  <パスワードを設定>
+＄vi /var/lib/pgsql/16/data/pg_hba.conf
+（追記）
 host    all    pguser01    127.0.0.1/32     scram-sha-256
 host    all    pguser01    172.16.0.0/16    scram-sha-256
 host    all    pguser01    172.17.0.0/16    scram-sha-256
 $ exit
 ```
 
-�T�[�r�X���ċN�����܂��B
+サービスを再起動します。
 
 ```
 $ sudo systemctl restart postgresql-16.service
 $ journalctl -u postgresql-16
 ```
 
-�t�@�C�A�E�H�[���|�[�g�J��
-�����[�g�A�N�Z�X��������ɂ̓|�[�g�J�����K�v�ł��BFirewalld�����p����Ă�����ł͈ȉ��̂����ꂩ�̕��@�ŕK�v�ȃ|�[�g��������܂��B�ݒ肵�Ă���|�[�g��5432�ł͂Ȃ��ꍇ�́A�K�؂ȃ|�[�g���w�肵�Ă��������B
+ファイアウォールポート開放
+リモートアクセスを許可するにはポート開放が必要です。Firewalldが利用されている環境では以下のいずれかの方法で必要なポートを解放します。設定しているポートが5432ではない場合は、適切なポートを指定してください。
 
 
 ```
@@ -380,16 +380,16 @@ $ sudo firewall-cmd --reload
 ```
 
 
-### GDS�̈�Ƀf�[�^�x�[�X���쐬����
-PG-Strom�ɂƂ��āAGPUDirect Storage�͏d�v�ȃR���|�[�l���g�̈�ł��B
-GPUDirect Storage�̊��������Ă��APostgreSQL�̃f�[�^��GPUDirect Storage���L���ȃX�g���[�W�ɂȂ��ƁA�\���Ȑ��\���o�����Ƃ��ł��܂���B���̂悤�ȕ��@�Ńf�[�^�x�[�X�ƃe�[�u�����쐬������ŁA�f�[�^����舵���Ă��������B
+### GDS領域にデータベースを作成する
+PG-Stromにとって、GPUDirect Storageは重要なコンポーネントの一つです。
+GPUDirect Storageの環境が整っても、PostgreSQLのデータがGPUDirect Storageが有効なストレージにないと、十分な性能を出すことができません。次のような方法でデータベースとテーブルを作成した上で、データを取り扱ってください。
 
 ```
 CREATE TABLESPACE nvme LOCATION '/opt/nvme';
 CREATE DATABASE testdb TABLESPACE nvme;
 ```
 
-�e�[�u����Ԃɂ��Ă̏ڍׂ́A�A�b�v�X�g���[���̃h�L�������g���m�F���Ă��������B
+テーブル空間についての詳細は、アップストリームのドキュメントを確認してください。
 
 - https://www.postgresql.jp/document/16/html/manage-ag-tablespaces.html
 
