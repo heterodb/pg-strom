@@ -2157,7 +2157,7 @@ __arrowFileWriteChunk(VALUE __args)
 	else
 		arrowFileSetupAppend(args->table);
 	/* write out a new record-batch */
-	writeArrowRecordBatch(table);
+	writeArrowRecordBatch(table, NULL);
 	/* write out a new footer */
 	writeArrowFooter(table);
 	/* close the file, and unlock */
