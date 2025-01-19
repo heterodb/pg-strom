@@ -835,6 +835,9 @@ try_add_xpujoin_simple_path(PlannerInfo *root,
 							   join_rel,
 							   op_leaf,
 							   try_parallel_path);
+	/* try sorted GPU-Join, if it makes sense */
+	try_add_sorted_gpujoin_path(root, join_rel, cpath, try_parallel_path);
+
 	if (!try_parallel_path)
 		add_path(join_rel, &cpath->path);
 	else

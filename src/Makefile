@@ -8,7 +8,7 @@ include ../Makefile.common
 #
 STROM_OBJS = main.o githash.o extra.o codegen.o executor.o fallback.o \
              gpu_device.o gpu_service.o dpu_device.o \
-             gpu_scan.o gpu_join.o gpu_preagg.o \
+             gpu_scan.o gpu_join.o gpu_preagg.o gpu_sort.o \
              relscan.o brin.o gist.o gpu_cache.o \
              arrow_fdw.o arrow_nodes.o \
              misc.o float2.o tinyint.o aggfuncs.o

@@ -864,6 +864,19 @@ extern void		pgstrom_init_gpu_preagg(void);
 extern void		pgstrom_init_dpu_preagg(void);
 
 /*
+ * gpu_sort.c
+ */
+extern void		try_add_sorted_gpujoin_path(PlannerInfo *root,
+											RelOptInfo *join_rel,
+											CustomPath *join_path,
+											bool be_parallel);
+extern void		try_add_sorted_groupby_path(PlannerInfo *root,
+											RelOptInfo *group_rel,
+											Path *sub_path,
+											CustomPath *preagg_path);
+extern void		pgstrom_init_gpu_sort(void);
+
+/*
  * arrow_fdw.c and arrow_read.c
  */
 extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
