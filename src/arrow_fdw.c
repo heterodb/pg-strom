@@ -337,7 +337,7 @@ arrowFieldGetPGTypeHint(const ArrowField *field)
 static void
 __releaseMetadataCacheBlock(arrowMetadataCacheBlock *mc_block_curr)
 {
-	if (mc_block_curr)
+	while (mc_block_curr)
 	{
 		arrowMetadataCacheBlock *mc_block_next = mc_block_curr->next;
 
@@ -346,14 +346,9 @@ __releaseMetadataCacheBlock(arrowMetadataCacheBlock *mc_block_curr)
 			   !mc_block_curr->chain.prev &&
 			   !mc_block_curr->lru_chain.prev  &&
 			   !mc_block_curr->lru_chain.next);
-
-		while (mc_block_curr != NULL)
-		{
-			dlist_push_head(&arrow_metadata_cache->free_blocks,
-							&mc_block_curr->chain);
-			mc_block_curr = mc_block_next;
-			mc_block_next = mc_block_curr->next;
-		}
+		dlist_push_head(&arrow_metadata_cache->free_blocks,
+						&mc_block_curr->chain);
+		mc_block_curr = mc_block_next;
 	}
 }
 
