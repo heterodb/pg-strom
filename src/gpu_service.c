@@ -135,7 +135,6 @@ static gpuServSharedState *gpuserv_shared_state = NULL;
 static int			__pgstrom_max_async_tasks_dummy;
 static int			__pgstrom_cuda_stack_limit_kb;
 static char		   *pgstrom_cuda_toolkit_basedir = CUDA_TOOLKIT_BASEDIR; /* GUC */
-static char		   *pgstrom_host_compiler_binpath = HOST_COMPILER_BINPATH; /* GUC */
 static const char  *pgstrom_fatbin_image_filename = "/dev/null";
 
 static void
@@ -815,7 +814,6 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 " /bin/sh -x -c '%s/bin/nvcc"
 						 " --maxrregcount=%d"
 						 " --source-in-ptx -lineinfo"
-						 " --compiler-bindir '%s'"
 						 " -I. -I%s "
 						 " -DHAVE_FLOAT2 "
 						 " -DCUDA_MAXTHREADS_PER_BLOCK=%u "
@@ -825,7 +823,6 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 " %s/pg_strom/%s.cu' > %s.log 2>&1",
 						 pgstrom_cuda_toolkit_basedir,
 						 CUDA_MAXREGCOUNT,
-						 pgstrom_host_compiler_binpath,
 						 PGINCLUDEDIR,
 						 CUDA_MAXTHREADS_PER_BLOCK,
 						 tok,
@@ -834,13 +831,11 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 	appendStringInfo(&cmd,
 					 ") && wait;"
 					 " /bin/sh -x -c '%s/bin/nvcc"
-					 " --compiler-bindir '%s'"
 					 " -Xnvlink --suppress-stack-size-warning"
 					 " -arch=native --threads 4"
 					 " --device-link --fatbin"
 					 " -o '%s'",
 					 pgstrom_cuda_toolkit_basedir,
-					 pgstrom_host_compiler_binpath,
 					 fatbin_file);
 	strcpy(namebuf, CUDA_CORE_FILES);
 	for (tok = strtok_r(namebuf, " ", &pos);
@@ -5407,18 +5402,6 @@ pgstrom_init_gpu_service(void)
 							   NULL,
 							   &pgstrom_cuda_toolkit_basedir,
 							   CUDA_TOOLKIT_BASEDIR,
-							   PGC_POSTMASTER,
-							   GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
-	DefineCustomStringVariable("pg_strom.host_compiler_binpath",
-							   "path to the host C compiler when nvcc launched",
-							   NULL,
-							   &pgstrom_host_compiler_binpath,
-#ifdef HOST_COMPILER_BINPATH
-							   HOST_COMPILER_BINPATH,
-#else
-							   "/usr/bin",
-#endif
 							   PGC_POSTMASTER,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
