@@ -427,6 +427,7 @@ typedef enum {
 	FuncOpCode__SaveExpr,
 	FuncOpCode__AggFuncs,
 	FuncOpCode__Projection,
+	FuncOpCode__SortKeys,
 	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
 	FuncOpCode__BuiltInMax,
 } FuncOpCode;
@@ -2298,6 +2299,46 @@ typedef struct
 	int32_t		arg1_slot_id;
 } kern_aggregate_desc;
 
+#define KSORT_KEY_KIND__VREF				0
+#define KSORT_KEY_KIND__PMINMAX_INT64		1
+#define KSORT_KEY_KIND__PMINMAX_FP64		2
+#define KSORT_KEY_KIND__PSUM_INT64			3
+#define KSORT_KEY_KIND__PSUM_INT128			4
+#define KSORT_KEY_KIND__PSUM_FP64			5
+#define KSORT_KEY_KIND__PSUM_NUMERIC		6
+#define KSORT_KEY_KIND__PAVG_INT64			7
+#define KSORT_KEY_KIND__PAVG_INT128			8
+#define KSORT_KEY_KIND__PAVG_FP64			9
+#define KSORT_KEY_KIND__PAVG_NUMERIC		10
+#define KSORT_KEY_KIND__PVARIANCE_SAMP		11
+#define KSORT_KEY_KIND__PVARIANCE_POP		12
+#define KSORT_KEY_KIND__PCOVAR_CORR			13
+#define KSORT_KEY_KIND__PCOVAR_SAMP			14
+#define KSORT_KEY_KIND__PCOVAR_POP			15
+#define KSORT_KEY_KIND__PCOVAR_AVGX			16
+#define KSORT_KEY_KIND__PCOVAR_AVGY			17
+#define KSORT_KEY_KIND__PCOVAR_COUNT		18
+#define KSORT_KEY_KIND__PCOVAR_REGR_R2		19
+#define KSORT_KEY_KIND__PCOVAR_REGR_SLOPE	20
+#define KSORT_KEY_KIND__PCOVAR_REGR_SXX		21
+#define KSORT_KEY_KIND__PCOVAR_REGR_SXY		22
+#define KSORT_KEY_KIND__PCOVAR_REGR_SYY		23
+
+typedef struct
+{
+	uint16_t	key_kind;		/* any of KSORT_KEY_KIND__* */
+	int8_t		nulls_first;	/* true, if NULLs first */
+	int8_t		sort_order;		/* true, if smaller is first */
+	int32_t		source;			/* if >0, attribute number of the KDS.
+								 * elsewhere, it means the offset of temporary
+								 * calculated sorting key, according to the key_kind.
+								 * location is:
+								 * ((char *)&tupitem->htup + tupitem->t_len - source)
+								 */
+	int32_t		slot0_id;		/* slot-id to store the key0 */
+	int32_t		slot1_id;		/* slot-id to store the key1 */
+} kern_sortkey_desc;
+
 typedef struct
 {
 	int16_t		vl_resno;		/* resno of the source */
@@ -2415,6 +2456,10 @@ struct kern_expression
 			int			nattrs;
 			uint16_t	slot_id[1];
 		} proj;		/* Projection */
+		struct {
+			int			nkeys;
+			kern_sortkey_desc desc[1];
+		} sort;		/* Sort */
 		struct {
 			uint32_t	npacked;	/* number of packed sub-expressions; including
 									 * logical NULLs (npacked may be larger than

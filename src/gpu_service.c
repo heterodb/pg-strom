@@ -29,6 +29,7 @@ typedef struct
 struct gpuContext
 {
 	dlist_node		chain;
+	char			gpu_label[8];	/* for debug output */
 	int				serv_fd;		/* for accept(2) */
 	int				cuda_dindex;
 	gpumask_t		cuda_dmask;		/* = (1UL<<cuda_dindex) */
@@ -108,7 +109,6 @@ typedef struct
 #define MAX_ASYNC_TASKS_BITS	10
 #define MAX_ASYNC_TASKS_MASK	((1UL<<MAX_ASYNC_TASKS_BITS)-1)
 	pg_atomic_uint64	max_async_tasks;
-	pg_atomic_uint32	gpuserv_debug_output;
 } gpuServSharedState;
 
 /*
@@ -134,89 +134,52 @@ static shmem_startup_hook_type shmem_startup_next = NULL;
 static gpuServSharedState *gpuserv_shared_state = NULL;
 static int			__pgstrom_max_async_tasks_dummy;
 static int			__pgstrom_cuda_stack_limit_kb;
-static bool			__gpuserv_debug_output_dummy;
 static char		   *pgstrom_cuda_toolkit_basedir = CUDA_TOOLKIT_BASEDIR; /* GUC */
+static char		   *pgstrom_host_compiler_binpath = HOST_COMPILER_BINPATH; /* GUC */
 static const char  *pgstrom_fatbin_image_filename = "/dev/null";
 
 static void
 gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
 
-#define __gsLogNoCxt(fmt,...)										\
-	gpuservLoggerReport("GPU-Serv|LOG|%s|%d|%s|" fmt "\n",			\
-						__basename(__FILE__),						\
-						__LINE__,									\
-						__FUNCTION__,								\
+#define __gsLogCxt(gpu_label,fmt,...)					\
+	gpuservLoggerReport("%s|LOG|%s|%d|%s|" fmt "\n",	\
+						gpu_label,						\
+						__basename(__FILE__),			\
+						__LINE__,						\
+						__FUNCTION__,					\
 						##__VA_ARGS__)
+#define __gsLogNoCxt(fmt,...)						\
+	__gsLogCxt("GPU-Serv",fmt,##__VA_ARGS__)
+#define __gsLog(fmt,...)							\
+	__gsLogCxt(GpuWorkerCurrentContext->gpu_label,fmt,##__VA_ARGS__)
 
-#define __gsLogCxt(gcontext,fmt,...)								\
-	gpuservLoggerReport("GPU%d|LOG|%s|%d|%s|" fmt "\n",				\
-						gcontext->cuda_dindex,						\
-						__basename(__FILE__),						\
-						__LINE__,									\
-						__FUNCTION__,								\
-						##__VA_ARGS__)
-#define __gsLog(fmt, ...)											\
-	do {															\
-		if (GpuWorkerCurrentContext)								\
-			__gsLogCxt(GpuWorkerCurrentContext,fmt,##__VA_ARGS__);	\
-		else														\
-			__gsLogNoCxt(fmt,##__VA_ARGS__);						\
+#define __gsError(fmt, ...)								\
+	__gsLog("[error] " fmt, ##__VA_ARGS__);
+#define __gsErrorCxt(gcontext,fmt, ...)					\
+	__gsLogCxt((gcontext)->gpu_label,					\
+			   "[error] " fmt, ##__VA_ARGS__);
+#define __gsInfo(fmt, ...)								\
+	do {												\
+		if (heterodbExtraEreportLevel() >= 1)			\
+			__gsLog("[info] " fmt, ##__VA_ARGS__);		\
 	} while(0)
-
-#define __gsDebug(fmt, ...)										\
-	do {														\
-		if (gpuserv_shared_state &&								\
-			pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0) \
-			__gsLog(fmt, ##__VA_ARGS__);						\
+#define __gsInfoCxt(gcontext,fmt,...)					\
+	do {												\
+		if (heterodbExtraEreportLevel() >= 1)			\
+			__gsLogCxt((gcontext)->gpu_label,			\
+					   "[info] " fmt, ##__VA_ARGS__);	\
 	} while(0)
-
-#define __gsDebugExtra(fmt, ...)										\
-	do {																\
-		if (gpuserv_shared_state &&										\
-			pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0) \
-		{																\
-			const char *filename;										\
-			uint32_t	lineno;											\
-			int			errcode;										\
-			char		buffer[2048];									\
-																		\
-			errcode = heterodbExtraGetError(&filename,					\
-											&lineno,					\
-											NULL,						\
-											buffer,						\
-											sizeof(buffer));			\
-			if (errcode == 0)											\
-				__gsLog("heterodb-extra: " fmt, ##__VA_ARGS__);			\
-			else														\
-				__gsLog("heterodb-extra: " fmt " [%s] (code=%d, %s:%d)", \
-						##__VA_ARGS__, buffer, errcode,					\
-						__basename(filename), lineno);					\
-		}																\
+#define __gsDebug(fmt, ...)								\
+	do {												\
+		if (heterodbExtraEreportLevel() >= 2)			\
+			__gsLog("[debug] " fmt, ##__VA_ARGS__);		\
 	} while(0)
-
-static void
-gpuserv_debug_output_assign(bool newval, void *extra)
-{
-	uint32_t	ival = (newval ? 1 : 0);
-
-	if (gpuserv_shared_state)
-		pg_atomic_write_u32(&gpuserv_shared_state->gpuserv_debug_output, ival);
-	else
-		__gpuserv_debug_output_dummy = ival;
-}
-
-static const char *
-gpuserv_debug_output_show(void)
-{
-	if (gpuserv_shared_state)
-	{
-		if (pg_atomic_read_u32(&gpuserv_shared_state->gpuserv_debug_output) != 0)
-			return "on";
-		else
-			return "off";
-	}
-	return (__gpuserv_debug_output_dummy ? "on" : "off");
-}
+#define __gsDebugCxt(gcontext,fmt, ...)					\
+	do {												\
+		if (heterodbExtraEreportLevel() >= 2)			\
+			__gsLogCxt((gcontext)->gpu_label,			\
+					   "[debug] " fmt, ##__VA_ARGS__);	\
+	} while(0)
 
 static void
 pgstrom_max_async_tasks_assign(int newval, void *extra)
@@ -416,23 +379,21 @@ gpuservWorkerEreportCallback(char ereport_class,
 							 const char *filename,
 							 unsigned int lineno,
 							 const char *function,
-							 const char *format,
-							 va_list va_args)
+							 const char *message)
 {
-	const char *__label = (ereport_class == 'E' ? "error" :
-						   ereport_class == 'I' ? "info" : "debug");
-	char	   *__format = alloca(strlen(format) +
-								  strlen(filename) +
-								  strlen(function) + 200);
+	const char *label = (ereport_class == 'E' ? "error" :
+						 ereport_class == 'I' ? "info" :
+						 ereport_class == 'D' ? "debug" : "???");
+
 	if (!GpuWorkerCurrentContext)
-		sprintf(__format, "GPU-Serv|LOG|%s|%d|%s|heterodb-extra: [%s] %s\n",
-				__basename(filename), lineno, function, __label, format);
+		fprintf(gpuserv_logger_filp,
+				"GPU-Serv|LOG|%s|%d|%s|heterodb-extra: [%s] %s\n",
+				__basename(filename), lineno, function, label, message);
 	else
-		sprintf(__format, "GPU%d|LOG|%s|%d|%s|heterodb-extra: [%s] %s\n",
+		fprintf(gpuserv_logger_filp,
+				"GPU%d|LOG|%s|%d|%s|heterodb-extra: [%s] %s\n",
 				GpuWorkerCurrentContext->cuda_dindex,
-				__basename(filename), lineno, function, __label, format);
-	/* push error reports from heterodb-extra */
-	vfprintf(gpuserv_logger_filp, __format, va_args);
+				__basename(filename), lineno, function, label, message);
 	fflush(gpuserv_logger_filp);
 }
 
@@ -854,6 +815,7 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 " /bin/sh -x -c '%s/bin/nvcc"
 						 " --maxrregcount=%d"
 						 " --source-in-ptx -lineinfo"
+						 " --compiler-bindir '%s'"
 						 " -I. -I%s "
 						 " -DHAVE_FLOAT2 "
 						 " -DCUDA_MAXTHREADS_PER_BLOCK=%u "
@@ -863,6 +825,7 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 						 " %s/pg_strom/%s.cu' > %s.log 2>&1",
 						 pgstrom_cuda_toolkit_basedir,
 						 CUDA_MAXREGCOUNT,
+						 pgstrom_host_compiler_binpath,
 						 PGINCLUDEDIR,
 						 CUDA_MAXTHREADS_PER_BLOCK,
 						 tok,
@@ -871,11 +834,13 @@ __rebuild_gpu_fatbin_file(const char *fatbin_dir,
 	appendStringInfo(&cmd,
 					 ") && wait;"
 					 " /bin/sh -x -c '%s/bin/nvcc"
+					 " --compiler-bindir '%s'"
 					 " -Xnvlink --suppress-stack-size-warning"
 					 " -arch=native --threads 4"
 					 " --device-link --fatbin"
 					 " -o '%s'",
 					 pgstrom_cuda_toolkit_basedir,
+					 pgstrom_host_compiler_binpath,
 					 fatbin_file);
 	strcpy(namebuf, CUDA_CORE_FILES);
 	for (tok = strtok_r(namebuf, " ", &pos);
@@ -1108,7 +1073,7 @@ __gpuMemAllocNewSegment(gpuMemoryPool *pool, size_t segment_sz)
 								   mseg->segment_sz,
 								   &mseg->iomap_handle))
 		{
-			__gsDebugExtra("failed on gpuDirectMapGpuMemory");
+			__gsDebug("failed on gpuDirectMapGpuMemory");
 			goto error_1;
 		}
 	}
@@ -1469,29 +1434,6 @@ __gpuClientELog(gpuClient *gclient,
 	}
 }
 
-static void
-gpuClientELogByExtraModule(gpuClient *gclient)
-{
-	int				errcode;
-	const char	   *filename;
-	unsigned int	lineno;
-	const char	   *funcname;
-	char			buffer[2000];
-
-	errcode = heterodbExtraGetError(&filename,
-									&lineno,
-									&funcname,
-									buffer, sizeof(buffer));
-	if (errcode == 0)
-		gpuClientELog(gclient, "Bug? %s is called but no error status", __FUNCTION__);
-	else
-		__gpuClientELog(gclient,
-						errcode,
-						filename, lineno,
-						funcname,
-						"extra-module: %s", buffer);
-}
-
 /* ----------------------------------------------------------------
  *
  * Session buffer support routines
@@ -1576,8 +1518,8 @@ allocGpuQueryBuffer(gpuQueryBuffer *gq_buf,
 	gq_buf->gpumem_devptrs[gq_buf->gpumem_nitems++] = m_devptr;
 	*p_devptr = m_devptr;
 
-	__gsLog("Query buffer allocation at %p (sz=%s)",
-			(void *)m_devptr, format_bytesz(bytesize));
+	__gsInfo("Query buffer allocation at %p (sz=%s)",
+			 (void *)m_devptr, format_bytesz(bytesize));
 
 	return CUDA_SUCCESS;
 }
@@ -1597,8 +1539,8 @@ releaseGpuQueryBufferOne(gpuQueryBuffer *gq_buf,
 			if (rc != CUDA_SUCCESS)
 				__FATAL("failed on cuMemFree(%p): %s",
 						(void *)m_devptr, cuStrError(rc));
-			__gsLog("Query buffer release one at %p",
-					(void *)m_devptr);
+			__gsInfo("Query buffer release one at %p",
+					 (void *)m_devptr);
 			return true;
 		}
 	}
@@ -1620,8 +1562,8 @@ releaseGpuQueryBufferAll(gpuQueryBuffer *gq_buf)
 			if (rc != CUDA_SUCCESS)
 				__FATAL("failed on cuMemFree(%p): %s",
 						(void *)m_devptr, cuStrError(rc));
-			__gsLog("Query buffer release all at %p",
-					(void *)m_devptr);
+			__gsInfo("Query buffer release all at %p",
+					 (void *)m_devptr);
 		}
 	}
 	gq_buf->gpumem_nitems = 0;
@@ -1944,20 +1886,20 @@ __setupGpuJoinPinnedInnerBufferPartitioned(gpuClient *gclient,
 			   + sizeof(uint64_t) * kds_in->hash_nslots
 			   + sizeof(uint64_t) * kds_in->nitems
 			   + kds_in->usage);
-		__gsLog("inner-buffer partition (%u of %d, nitems=%u, nslots=%u, usage=%s, consumed=%s)",
-				i, hash_divisor,
-				kds_in->nitems,
-				kds_in->hash_nslots,
-				format_bytesz(kds_in->usage),
-				format_bytesz(consumed));
+		__gsInfo("inner-buffer partition (%u of %d, nitems=%u, nslots=%u, usage=%s, consumed=%s)",
+				 i, hash_divisor,
+				 kds_in->nitems,
+				 kds_in->hash_nslots,
+				 format_bytesz(kds_in->usage),
+				 format_bytesz(consumed));
 	}
-	__gsLog("inner-buffer partitioning (rebuild: %s, prefetch: %s, set-policy: %s)",
-			format_millisec((double)((tv2.tv_sec  - tv1.tv_sec)  * 1000 +
-									 (tv2.tv_usec - tv1.tv_usec) / 1000)),
-			format_millisec((double)((tv3.tv_sec  - tv2.tv_sec)  * 1000 +
-									 (tv3.tv_usec - tv2.tv_usec) / 1000)),
-			format_millisec((double)((tv4.tv_sec  - tv3.tv_sec)  * 1000 +
-									 (tv4.tv_usec - tv3.tv_usec) / 1000)));
+	__gsInfo("inner-buffer partitioning (rebuild: %s, prefetch: %s, set-policy: %s)",
+			 format_millisec((double)((tv2.tv_sec  - tv1.tv_sec)  * 1000 +
+									  (tv2.tv_usec - tv1.tv_usec) / 1000)),
+			 format_millisec((double)((tv3.tv_sec  - tv2.tv_sec)  * 1000 +
+									  (tv3.tv_usec - tv2.tv_usec) / 1000)),
+			 format_millisec((double)((tv4.tv_sec  - tv3.tv_sec)  * 1000 +
+									  (tv4.tv_usec - tv3.tv_usec) / 1000)));
 	return true;
 
 error:
@@ -2066,14 +2008,14 @@ __setupGpuJoinPinnedInnerBufferReconstruct(gpuClient *gclient,
 	gettimeofday(&tv2, NULL);
 	m_kmrels->chunks[depth-1].kds_in = (kern_data_store *)m_kds_in;
 
-	__gsLog("inner-buffer reconstruction (%u GPUs, nitems=%u, nslots=%u, usage=%s, consumption=%s): %s",
-			gpu_count,
-			((kern_data_store *)m_kds_in)->nitems,
-			((kern_data_store *)m_kds_in)->hash_nslots,
-			format_bytesz(((kern_data_store *)m_kds_in)->usage),
-			format_bytesz(kds_head->length),
-			format_millisec((double)((tv2.tv_sec  - tv1.tv_sec)  * 1000 +
-									 (tv2.tv_usec - tv1.tv_usec) / 1000)));
+	__gsInfo("inner-buffer reconstruction (%u GPUs, nitems=%u, nslots=%u, usage=%s, consumption=%s): %s",
+			 gpu_count,
+			 ((kern_data_store *)m_kds_in)->nitems,
+			 ((kern_data_store *)m_kds_in)->hash_nslots,
+			 format_bytesz(((kern_data_store *)m_kds_in)->usage),
+			 format_bytesz(kds_head->length),
+			 format_millisec((double)((tv2.tv_sec  - tv1.tv_sec)  * 1000 +
+									  (tv2.tv_usec - tv1.tv_usec) / 1000)));
 	return true;
 }
 
@@ -2101,11 +2043,11 @@ __setupGpuJoinPinnedInnerBufferZeroCopy(gpuClient *gclient,
 						sizeof(uint64_t) * kds_src->nitems +
 						sizeof(uint64_t) * kds_src->hash_nslots +
 						kds_src->usage);
-			__gsLog("pinned inner buffer zero-copy (total: nitems=%u, usage=%s, consumption=%s of %s allocated)",
-					kds_src->nitems,
-					format_bytesz(kds_src->usage),
-					format_bytesz(consumed),
-					format_bytesz(kds_src->length));
+			__gsInfo("pinned inner buffer zero-copy (total: nitems=%u, usage=%s, consumption=%s of %s allocated)",
+					 kds_src->nitems,
+					 format_bytesz(kds_src->usage),
+					 format_bytesz(consumed),
+					 format_bytesz(kds_src->length));
 			return true;
 		}
 	}
@@ -2315,10 +2257,10 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 					 CU_MEM_ADVISE_SET_READ_MOSTLY,
 					 -1);	/* 4th argument should be ignored */
 	if (rc != CUDA_SUCCESS)
-		__gsLog("failed on cuMemAdvise (%p-%p; CU_MEM_ADVISE_SET_READ_MOSTLY): %s",
-				(char *)m_kmrels,
-				(char *)m_kmrels + (h_kmrels->length - h_kmrels->ojmap_sz),
-				cuStrError(rc));
+		__gsInfo("failed on cuMemAdvise (%p-%p; CU_MEM_ADVISE_SET_READ_MOSTLY): %s",
+				 (char *)m_kmrels,
+				 (char *)m_kmrels + (h_kmrels->length - h_kmrels->ojmap_sz),
+				 cuStrError(rc));
 	/* OK */
 	close(fdesc);
 	return true;
@@ -3004,7 +2946,8 @@ expandCudaStackLimit(gpuClient *gclient,
 			}
 			gpuContextSwitchTo(gcontext_prev);
 
-			__gsLogCxt(gcontext, "CUDA stack size expanded %u -> %u bytes",
+			__gsInfoCxt(gcontext,
+					   "CUDA stack size expanded %u -> %u bytes",
 					   gcontext->cuda_stack_limit,
 					   cuda_stack_limit);
 			gcontext->cuda_stack_limit = cuda_stack_limit;
@@ -3288,9 +3231,9 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	iov.iov_base = &resp;
 	iov.iov_len  = resp.length;
 	__gpuClientWriteBack(gclient, &iov, 1);
-	__gsLogNoCxt("Open session (GPUs-set: %08lx, Task-flags: %08x)",
-				 gclient->optimal_gpus,
-				 gclient->xpu_task_flags);
+	__gsInfo("Open session (GPUs-set: %08lx, Task-flags: %08x)",
+			 gclient->optimal_gpus,
+			 gclient->xpu_task_flags);
 	return true;
 
 error:
@@ -3345,7 +3288,8 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 							  p_npages_direct_read,
 							  p_npages_vfs_read))
 	{
-		gpuClientELogByExtraModule(gclient);
+		gpuClientELog(gclient, "failed on gpuDirectFileReadIOV(path='%s')",
+					  pathname);
 		goto error;
 	}
 	return chunk;
@@ -4637,7 +4581,7 @@ gpuservMonitorClient(void *__priv)
 
 	if (dlist_is_empty(&gpuserv_gpucontext_list))
 	{
-		__gsLog("No GPU context is available");
+		__gsError("No GPU context is available");
 		goto out;
 	}
 	gcontext = dlist_container(gpuContext, chain,
@@ -4645,7 +4589,7 @@ gpuservMonitorClient(void *__priv)
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 	{
-		__gsDebug("failed on cuCtxSetCurrent: %s",
+		__gsError("failed on cuCtxSetCurrent: %s",
 				  cuStrError(rc));
 		goto out;
 	}
@@ -5125,6 +5069,7 @@ gpuservSetupGpuContext(int cuda_dindex)
 	CUresult	rc;
 
 	/* gpuContext initialization */
+	sprintf(gcontext->gpu_label, "GPU%d", cuda_dindex);
 	gcontext->serv_fd = -1;
 	gcontext->cuda_dindex = cuda_dindex;
 	gcontext->cuda_dmask = (1UL << cuda_dindex);
@@ -5294,7 +5239,7 @@ gpuservBgWorkerMain(Datum arg)
 		gpuserv_shared_state->gpuserv_ready_accept = true;
 
 		if (!gpuDirectOpenDriver())
-			heterodbExtraEreport(true);
+			elog(ERROR, "failed on gpuDirectOpenDriver");
 		while (!gpuServiceGoingTerminate())
 		{
 			struct epoll_event	ep_ev;
@@ -5342,7 +5287,7 @@ gpuservBgWorkerMain(Datum arg)
 			gpuservCleanupGpuContext(gcontext);
 		}
 		if (!gpuDirectCloseDriver())
-			heterodbExtraEreport(false);
+			elog(ERROR, "failed on gpuDirectCloseDriver()");
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -5357,7 +5302,7 @@ gpuservBgWorkerMain(Datum arg)
 		gpuservCleanupGpuContext(gcontext);
 	}
 	if (!gpuDirectCloseDriver())
-		heterodbExtraEreport(false);
+		elog(ERROR, "failed on gpuDirectCloseDriver()");
 
 	/*
 	 * If it received only SIGHUP (no SIGTERM), try to restart rather than
@@ -5394,8 +5339,6 @@ pgstrom_startup_executor(void)
 	memset(gpuserv_shared_state, 0, sizeof(gpuServSharedState));
 	pg_atomic_init_u64(&gpuserv_shared_state->max_async_tasks,
 					   __pgstrom_max_async_tasks_dummy | (1UL<<MAX_ASYNC_TASKS_BITS));
-	pg_atomic_init_u32(&gpuserv_shared_state->gpuserv_debug_output,
-					   __gpuserv_debug_output_dummy);
 }
 
 /*
@@ -5467,6 +5410,18 @@ pgstrom_init_gpu_service(void)
 							   PGC_POSTMASTER,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_strom.host_compiler_binpath",
+							   "path to the host C compiler when nvcc launched",
+							   NULL,
+							   &pgstrom_host_compiler_binpath,
+#ifdef HOST_COMPILER_BINPATH
+							   HOST_COMPILER_BINPATH,
+#else
+							   "/usr/bin",
+#endif
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.cuda_stack_limit",
 							"Limit of adaptive cuda stack size per thread",
 							NULL,
@@ -5477,16 +5432,6 @@ pgstrom_init_gpu_service(void)
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
-	DefineCustomBoolVariable("pg_strom.gpuserv_debug_output",
-							 "enables to generate debug message of GPU service",
-							 NULL,
-							 &__gpuserv_debug_output_dummy,
-							 false,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
-							 NULL,
-							 gpuserv_debug_output_assign,
-							 gpuserv_debug_output_show);
 	for (int i=0; i < GPU_QUERY_BUFFER_NSLOTS; i++)
 		dlist_init(&gpu_query_buffer_hslot[i]);
 

@@ -8,7 +8,7 @@ include ../Makefile.common
 #
 STROM_OBJS = main.o githash.o extra.o codegen.o executor.o fallback.o \
              gpu_device.o gpu_service.o dpu_device.o \
-             gpu_scan.o gpu_join.o gpu_preagg.o \
+             gpu_scan.o gpu_join.o gpu_preagg.o gpu_sort.o \
              relscan.o brin.o gist.o gpu_cache.o \
              arrow_fdw.o arrow_nodes.o \
              misc.o float2.o tinyint.o aggfuncs.o
@@ -57,7 +57,9 @@ PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"   \
         -DCUDA_MAXTHREADS_PER_BLOCK=$(MAXTHREADS_PER_BLOCK) \
         -DCUDA_CORE_FILES="\"$(__CUDA_CORE_FILES)\""      \
         -DCUDA_CORE_HEADERS="\"$(__CUDA_CORE_HEADERS)\""  \
-        -DCUDA_TOOLKIT_BASEDIR="\"$(CUDA_PATH)\""
+        -DCUDA_TOOLKIT_BASEDIR="\"$(CUDA_PATH)\""         \
+        -DHOST_COMPILER_BINPATH="\"$(shell dirname $(shell which $(CC)))\""
+
 #
 # Pre-built Fatbin (only debugging purpose)
 #

@@ -61,6 +61,15 @@
 #endif
 
 /*
+ * MEMO: PostgreSQL v16 defined function pointer type for expression
+ * tree walker/mutator
+ */
+#if PG_VERSION_NUM < 160000
+typedef bool (*tree_walker_callback) (Node *node, void *context);
+typedef Node *(*tree_mutator_callback) (Node *node, void *context);
+#endif
+
+/*
  * MEMO: PostgreSQL v17 removed 'snapshot' argument from the
  * brinRevmapInitialize().
  */

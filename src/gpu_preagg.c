@@ -1841,7 +1841,9 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 		}
 		/* inject dummy path to resolve outer-reference by Aggref or others */
 		__path = pgstrom_create_dummy_path(root, __path);
-
+		/* try GPU-Sort if it makes sense */
+		try_add_sorted_groupby_path(root, group_rel, __path, cpath);
+		/* add fully-work */
 		add_path(group_rel, __path);
 	}
 }

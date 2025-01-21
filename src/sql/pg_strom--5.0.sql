@@ -3235,47 +3235,47 @@ CREATE AGGREGATE pgstrom.covar_pop(bytea)
 );
 
 CREATE FUNCTION pgstrom.regr_avgx_final(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_avgx_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.regr_avgy_final(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_avgy_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.regr_count_final(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_count_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.regr_intercept_final(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_intercept_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.regr_r2_final(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_r2_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.regr_slope_final(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_slope_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.regr_sxx_final(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_sxx_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.regr_sxy_final(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_sxy_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.regr_syy_final(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_syy_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 

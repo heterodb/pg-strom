@@ -337,7 +337,7 @@ arrowFieldGetPGTypeHint(const ArrowField *field)
 static void
 __releaseMetadataCacheBlock(arrowMetadataCacheBlock *mc_block_curr)
 {
-	if (mc_block_curr)
+	while (mc_block_curr)
 	{
 		arrowMetadataCacheBlock *mc_block_next = mc_block_curr->next;
 
@@ -346,14 +346,9 @@ __releaseMetadataCacheBlock(arrowMetadataCacheBlock *mc_block_curr)
 			   !mc_block_curr->chain.prev &&
 			   !mc_block_curr->lru_chain.prev  &&
 			   !mc_block_curr->lru_chain.next);
-
-		while (mc_block_curr != NULL)
-		{
-			dlist_push_head(&arrow_metadata_cache->free_blocks,
-							&mc_block_curr->chain);
-			mc_block_curr = mc_block_next;
-			mc_block_next = mc_block_curr->next;
-		}
+		dlist_push_head(&arrow_metadata_cache->free_blocks,
+						&mc_block_curr->chain);
+		mc_block_curr = mc_block_next;
 	}
 }
 
@@ -2732,13 +2727,13 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 			{
 				optimal_gpus = __optimal_gpus;
 				if (optimal_gpus == 0)
-					__hdbxLogDebug("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", relname, af_state->filename);
+					__Debug("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", relname, af_state->filename);
 			}
 			else
 			{
 				__optimal_gpus &= optimal_gpus;
 				if (optimal_gpus != __optimal_gpus)
-					__hdbxLogDebug("foreign-table='%s' arrow-file='%s' reduced GPUs-set %08lx => %08lx", relname, af_state->filename, optimal_gpus, __optimal_gpus);
+					__Debug("foreign-table='%s' arrow-file='%s' reduced GPUs-set %08lx => %08lx", relname, af_state->filename, optimal_gpus, __optimal_gpus);
 				optimal_gpus = __optimal_gpus;
 			}
 			if (optimal_gpus == 0)
@@ -4473,13 +4468,13 @@ __arrowFdwExecInit(ScanState *ss,
 					{
 						optimal_gpus = __optimal_gpus;
 						if (optimal_gpus == 0)
-							__hdbxLogDebug("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", RelationGetRelationName(frel), fname);
+							__Debug("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", RelationGetRelationName(frel), fname);
 					}
 					else
 					{
 						__optimal_gpus &= optimal_gpus;
 						if (optimal_gpus != __optimal_gpus)
-							__hdbxLogDebug("foreign-table='%s' arrow-file='%s' reduced GPUs-Set %08lx -> %08lx", RelationGetRelationName(frel), fname, optimal_gpus, __optimal_gpus);
+							__Debug("foreign-table='%s' arrow-file='%s' reduced GPUs-Set %08lx -> %08lx", RelationGetRelationName(frel), fname, optimal_gpus, __optimal_gpus);
 						optimal_gpus = __optimal_gpus;
 					}
 				}

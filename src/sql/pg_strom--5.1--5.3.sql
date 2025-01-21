@@ -373,46 +373,46 @@ CREATE FUNCTION pgstrom.fcovar_pop(bytea)
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.fregr_avgx(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_avgx_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.fregr_avgy(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_avgy_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.fregr_count(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_count_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.fregr_intercept(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_intercept_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.fregr_r2(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_r2_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.fregr_slope(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_slope_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.fregr_sxx(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_sxx_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.fregr_sxy(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_sxy_final'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.fregr_syy(bytea)
-  RETURNS bytea
+  RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_syy_final'
   LANGUAGE C STRICT PARALLEL SAFE;
