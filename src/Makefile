@@ -57,7 +57,9 @@ PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"   \
         -DCUDA_MAXTHREADS_PER_BLOCK=$(MAXTHREADS_PER_BLOCK) \
         -DCUDA_CORE_FILES="\"$(__CUDA_CORE_FILES)\""      \
         -DCUDA_CORE_HEADERS="\"$(__CUDA_CORE_HEADERS)\""  \
-        -DCUDA_TOOLKIT_BASEDIR="\"$(CUDA_PATH)\""
+        -DCUDA_TOOLKIT_BASEDIR="\"$(CUDA_PATH)\""         \
+        -DHOST_COMPILER_BINPATH="\"$(shell dirname $(shell which $(CC)))\""
+
 #
 # Pre-built Fatbin (only debugging purpose)
 #
