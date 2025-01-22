@@ -313,6 +313,8 @@ typedef struct
 	List	   *groupby_actions;		/* list of KAGG_ACTION__* on the kds_final */
 	List	   *groupby_typmods;		/* typmod if KAGG_ACTION__* needs it */
 	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */
+	/* gpusort keys */
+	List	   *gpusort_final_keys;		/* expression list for GpuSort */
 	/* pinned inner buffer stuff */
 	List	   *projection_hashkeys;
 	/* inner relations */
@@ -733,6 +735,8 @@ extern double	pgstrom_gpu_tuple_cost;		/* GUC */
 extern double	pgstrom_gpu_operator_cost;	/* GUC */
 extern double	pgstrom_gpu_direct_seq_page_cost; /* GUC */
 extern double	pgstrom_gpu_operator_ratio(void);
+extern size_t	GetGpuMinimalDeviceMemorySize(void);
+extern size_t	GetGpuTotalDeviceMemorySize(void);
 extern gpumask_t	GetOptimalGpuForFile(const char *pathname);
 extern gpumask_t	GetOptimalGpuForRelation(Relation relation);
 extern gpumask_t	GetOptimalGpuForBaseRel(PlannerInfo *root,
@@ -866,10 +870,6 @@ extern void		pgstrom_init_dpu_preagg(void);
 /*
  * gpu_sort.c
  */
-extern void		try_add_sorted_gpujoin_path(PlannerInfo *root,
-											RelOptInfo *join_rel,
-											CustomPath *join_path,
-											bool be_parallel);
 extern void		try_add_sorted_groupby_path(PlannerInfo *root,
 											RelOptInfo *group_rel,
 											Path *sub_path,

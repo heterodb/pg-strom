@@ -24,6 +24,7 @@ static bool					pgstrom_enable_partitionwise_dpupreagg = false;
 static bool					pgstrom_enable_gpupreagg = false;
 static bool					pgstrom_enable_partitionwise_gpupreagg = false;
 static bool					pgstrom_enable_numeric_aggfuncs;
+static bool					pgstrom_enable_gpusort = false;
 
 /*
  * pgstrom_is_gpupreagg_path
@@ -1724,6 +1725,212 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	return cpath;
 }
 
+/*
+ * consider_sorted_groupby_path
+ */
+#define LOG2(x)		(log(x) / 0.693147180559945)
+
+static inline List *
+__pickup_upper_sortkeys(PlannerInfo *root)
+{
+	if (!pgstrom_enable_gpusort)
+		return NIL;
+	if (root->window_pathkeys != NIL)
+		return root->window_pathkeys;
+	else if (root->distinct_pathkeys != NIL)
+		return root->distinct_pathkeys;
+	else if (root->sort_pathkeys != NIL)
+		return root->sort_pathkeys;
+	else if (root->query_pathkeys != NIL)
+		return root->query_pathkeys;
+	return NIL;
+}
+
+static bool
+consider_sorted_groupby_path(PlannerInfo *root,
+							 PathTarget *upper_target,
+							 PathTarget *final_target,
+							 double ntuples,
+							 List **p_sortkeys_upper,
+							 List **p_sortkeys_final,
+							 Cost *p_gpusort_cost)
+{
+	Cost		comparison_cost = (2.0 * pgstrom_gpu_operator_cost);
+	List	   *sortkeys_upper = __pickup_upper_sortkeys(root);
+	List	   *sortkeys_final = NIL;
+	ListCell   *cell;
+	ListCell   *lc1, *lc2;
+
+	if (sortkeys_upper == NIL)
+		return false;
+	foreach (cell, sortkeys_upper)
+	{
+		PathKey	   *pk = lfirst(cell);
+		EquivalenceClass *ec = pk->pk_eclass;
+		EquivalenceMember *em;
+		Expr	   *em_expr;
+		bool		found = false;
+
+		if (list_length(ec->ec_members) != 1 ||
+			ec->ec_sources != NIL ||
+			ec->ec_derives != NIL)
+			return false;		/* not supported */
+		em = (EquivalenceMember *)linitial(ec->ec_members);
+		/* strip Relabel for equal() comparison */
+		for (em_expr = em->em_expr;
+			 IsA(em_expr, RelabelType);
+			 em_expr = ((RelabelType *)em_expr)->arg);
+		/* lookup the sorting key */
+		forboth (lc1, upper_target->exprs,
+				 lc2, final_target->exprs)
+		{
+			Node   *u_expr = lfirst(lc1);
+			Node   *f_expr = lfirst(lc2);
+			devtype_info *dtype;
+			devfunc_info *dfunc;
+
+			if (equal(u_expr, em_expr))
+			{
+				dtype = pgstrom_devtype_lookup(exprType(f_expr));
+				if (!dtype)
+					return false;
+				dfunc = devtype_lookup_compare_func(dtype, exprCollation(f_expr));
+				if (!dfunc)
+					return false;
+				sortkeys_final = lappend(sortkeys_final, f_expr);
+				found = true;
+			}
+		}
+		if (!found)
+			return false;	/* not found */
+	}
+	*p_sortkeys_upper = sortkeys_upper;
+	*p_sortkeys_final = sortkeys_final;
+	*p_gpusort_cost   = comparison_cost * ntuples * LOG2(ntuples);
+	return true;
+}
+
+/*
+ * try_add_sorted_gpujoin_path
+ */
+static Path *
+try_add_sorted_gpujoin_path(PlannerInfo *root,
+							RelOptInfo *upper_rel,
+							Path *input_path)
+{
+	if (!pgstrom_enable_gpusort)
+		return NULL;
+	if (!input_path)
+		return NULL;
+	
+	if (IsA(input_path, GatherPath))
+	{
+		GatherPath *gpath = (GatherPath *)input_path;
+		Path	   *sub_path;
+
+		sub_path = try_add_sorted_gpujoin_path(root,
+											   upper_rel,
+											   gpath->subpath);
+		if (sub_path)
+		{
+			return (Path *)
+				create_gather_path(root,
+								   gpath->path.parent,
+								   sub_path,
+								   gpath->path.pathtarget,
+								   NULL,
+								   &gpath->path.rows);
+		}
+	}
+#if 0
+	else if (IsA(input_path, AppendPath))
+	{
+		/* how to implement partitioned GpuJoin/GpuScan? */
+	}
+#endif
+	else if (pgstrom_is_gpuscan_path(input_path) ||
+			 pgstrom_is_gpujoin_path(input_path))
+	{
+		CustomPath *cpath = (CustomPath *)input_path;
+		pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
+		PathTarget *final_target = cpath->path.pathtarget;
+		List	   *sortkeys_upper = __pickup_upper_sortkeys(root);
+		List	   *sortkeys_final = NIL;
+		double		ntuples = input_path->rows;
+		Cost		comparison_cost = (2.0 * pgstrom_gpu_operator_cost);
+		Cost		gpusort_cost = comparison_cost * ntuples * LOG2(ntuples);
+		int			nattrs = list_length(final_target->exprs);
+		size_t		unitsz;
+		size_t		buffer_sz;
+		ListCell   *lc1, *lc2;
+
+		/*
+		 * estimate buffer size, and check whether it fits a single GPU
+		 * device memory.
+		 */
+		unitsz = offsetof(kern_tupitem, htup) +
+			MAXALIGN(offsetof(HeapTupleHeaderData,
+							  t_bits) + BITMAPLEN(nattrs)) +
+			MAXALIGN(final_target->width);
+		buffer_sz = MAXALIGN(offsetof(kern_data_store, colmeta[nattrs])) +
+			sizeof(uint64_t) * cpath->path.rows +
+			unitsz * cpath->path.rows;
+		if (buffer_sz > GetGpuMinimalDeviceMemorySize())
+			return NULL;	/* too large */
+		/* check whether the sorting key is supported */
+		foreach (lc1, sortkeys_upper)
+		{
+			PathKey	   *pk = lfirst(lc1);
+			EquivalenceClass *ec = pk->pk_eclass;
+			EquivalenceMember *em;
+			Expr	   *em_expr;
+			bool		found = false;
+
+			if (list_length(ec->ec_members) != 1 ||
+				ec->ec_sources != NIL ||
+				ec->ec_derives != NIL)
+				return NULL;	/* not supported */
+			/* strip Relabel for equal() comparison */
+			em = (EquivalenceMember *)linitial(ec->ec_members);
+			for (em_expr = em->em_expr;
+				 IsA(em_expr, RelabelType);
+				 em_expr = ((RelabelType *)em_expr)->arg);
+			/* lookup the sorting keys */
+			foreach (lc2, final_target->exprs)
+			{
+				Node   *f_expr = lfirst(lc2);
+				devtype_info *dtype;
+				devfunc_info *dfunc;
+
+				if (equal(f_expr, em_expr))
+				{
+					dtype = pgstrom_devtype_lookup(exprType(f_expr));
+					if (!dtype)
+						return NULL;
+					dfunc = devtype_lookup_compare_func(dtype, exprCollation(f_expr));
+					if (!dfunc)
+						return NULL;
+					sortkeys_final = lappend(sortkeys_final, f_expr);
+					found = true;
+				}
+			}
+			if (!found)
+				return NULL;	/* not found */
+		}
+		cpath = (CustomPath *)pgstrom_copy_pathnode(&cpath->path);
+		pp_info = copy_pgstrom_plan_info(pp_info);
+		pp_info->gpusort_final_keys = sortkeys_final;
+		linitial(cpath->custom_private) = pp_info;
+		cpath->path.startup_cost += gpusort_cost;
+		cpath->path.total_cost   += gpusort_cost;
+		return &cpath->path;
+	}
+	return NULL;
+}
+
+/*
+ * __try_add_xpupreagg_normal_path
+ */
 static void
 __try_add_xpupreagg_normal_path(PlannerInfo *root,
 								UpperRelationKind upper_stage,
@@ -1814,6 +2021,9 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	{
 		pgstromPlanInfo	*pp_info = linitial(cpath->custom_private);
 		Path   *__path = &cpath->path;
+		List   *__sortkeys_upper = NIL;
+		List   *__sortkeys_final = NIL;
+		Cost	__gpusort_cost = 0.0;
 
 		/* mark as final-merged GpuPreAgg  */
 		pp_info->xpu_task_flags |= DEVTASK__PREAGG_FINAL_MERGE;
@@ -1821,13 +2031,15 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 		/* save a few extra properties */
 		lsecond(cpath->custom_private) = con.target_proj_final;
 		lthird(cpath->custom_private) = con.havingProjQuals;
-
+	retry_gpusort:
 		/* attach Projection path */
 		__path = (Path *)
 			create_projection_path(root,
 								   group_rel,
 								   __path,
 								   con.target_proj_final);
+		__path->pathkeys = __sortkeys_upper;
+
 		/* attach Gather path, if parallel */
 		if (be_parallel)
 		{
@@ -1838,16 +2050,40 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 								   __path->pathtarget,
 								   NULL,
 								   &num_groups);
+			__path->pathkeys = __sortkeys_upper;
 		}
 		/* inject dummy path to resolve outer-reference by Aggref or others */
 		__path = pgstrom_create_dummy_path(root, __path);
-		/* try GPU-Sort if it makes sense */
-		try_add_sorted_groupby_path(root, group_rel, __path, cpath);
 		/* add fully-work */
 		add_path(group_rel, __path);
+		/*
+		 * consider the Sorted GPU-PreAgg Path opportunity, if available
+		 */
+		if (__sortkeys_upper == NIL &&
+			__sortkeys_final == NIL &&
+			consider_sorted_groupby_path(root,
+										 group_rel->reltarget,
+										 con.target_proj_final,
+										 num_groups,
+										 &__sortkeys_upper,
+										 &__sortkeys_final,
+										 &__gpusort_cost))
+		{
+			cpath = (CustomPath *)pgstrom_copy_pathnode(&cpath->path);
+			pp_info = copy_pgstrom_plan_info(pp_info);
+			pp_info->gpusort_final_keys = __sortkeys_final;
+			linitial(cpath->custom_private) = pp_info;
+			cpath->path.startup_cost += __gpusort_cost;
+			cpath->path.total_cost   += __gpusort_cost;
+			__path = &cpath->path;
+			goto retry_gpusort;
+		}
 	}
 }
 
+/*
+ * __try_add_xpupreagg_partition_path
+ */
 static void
 __try_add_xpupreagg_partition_path(PlannerInfo *root,
 								   UpperRelationKind upper_stage,
@@ -2081,26 +2317,38 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 								input_rel,
 								group_rel,
 								extra);
-	if (pgstrom_enabled() &&
-		(upper_stage == UPPERREL_GROUP_AGG ||
-		 upper_stage == UPPERREL_DISTINCT))
+	if (pgstrom_enabled())
 	{
-		if (pgstrom_enable_gpupreagg && gpuserv_ready_accept())
-			__xpuPreAggAddCustomPathCommon(root,
-										   upper_stage,
-										   input_rel,
-										   group_rel,
-										   extra,
-										   TASK_KIND__GPUPREAGG,
-										   pgstrom_enable_partitionwise_gpupreagg);
-		if (pgstrom_enable_dpupreagg)
-			__xpuPreAggAddCustomPathCommon(root,
-										   upper_stage,
-										   input_rel,
-										   group_rel,
-										   extra,
-										   TASK_KIND__DPUPREAGG,
-										   pgstrom_enable_partitionwise_dpupreagg);
+		if (upper_stage == UPPERREL_GROUP_AGG ||
+			upper_stage == UPPERREL_DISTINCT)
+		{
+			if (pgstrom_enable_gpupreagg && gpuserv_ready_accept())
+				__xpuPreAggAddCustomPathCommon(root,
+											   upper_stage,
+											   input_rel,
+											   group_rel,
+											   extra,
+											   TASK_KIND__GPUPREAGG,
+											   pgstrom_enable_partitionwise_gpupreagg);
+			if (pgstrom_enable_dpupreagg)
+				__xpuPreAggAddCustomPathCommon(root,
+											   upper_stage,
+											   input_rel,
+											   group_rel,
+											   extra,
+											   TASK_KIND__DPUPREAGG,
+											   pgstrom_enable_partitionwise_dpupreagg);
+		}
+		/* try sorted GPU-Join/GPU-Scan paths, if available */
+		if (pgstrom_enable_gpupreagg && gpuserv_ready_accept() && input_rel)
+		{
+			Path   *input_path = input_rel->cheapest_total_path;
+			Path   *sorted_path = try_add_sorted_gpujoin_path(root,
+															  group_rel,
+															  input_path);
+			if (sorted_path)
+				add_path(group_rel, sorted_path);
+		}
 	}
 }
 
@@ -2234,7 +2482,15 @@ pgstrom_init_gpu_preagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-
+	/* turn on/off GPU-Sort */
+	DefineCustomBoolVariable("pg_strom.enable_gpusort",
+							 "Enables to use GPU-Sort on top of GPU-Projection/PreAgg",
+							 NULL,
+							 &pgstrom_enable_gpusort,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* initialization of path method table */
 	memset(&gpupreagg_path_methods, 0, sizeof(CustomPathMethods));
 	gpupreagg_path_methods.CustomName          = "GpuPreAgg";

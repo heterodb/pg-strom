@@ -2605,6 +2605,24 @@ pgstromExplainTaskState(CustomScanState *node,
 		pgstromBrinIndexExplain(pts, dcontext, es);
 
 	/*
+	 * GPU-Sorting
+	 */
+	if (pp_info->gpusort_final_keys != NIL)
+	{
+		resetStringInfo(&buf);
+		foreach (lc, pp_info->gpusort_final_keys)
+		{
+			Node   *sortkey = lfirst(lc);
+
+			if (buf.len > 0)
+				appendStringInfoString(&buf, ", ");
+			str = deparse_expression(sortkey, dcontext, verbose, true);
+			appendStringInfoString(&buf, str);
+		}
+		ExplainPropertyText("GPU-Sort keys", buf.data, es);
+	}
+
+	/*
 	 * Dump the XPU code (only if verbose)
 	 */
 	if (es->verbose)

@@ -679,7 +679,6 @@ _PG_init(void)
 		pgstrom_init_gpu_scan();
 		pgstrom_init_gpu_join();
 		pgstrom_init_gpu_preagg();
-		pgstrom_init_gpu_sort();
 		pgstrom_init_gpu_cache();
 	}
 	/* init DPU related stuff */

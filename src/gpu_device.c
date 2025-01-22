@@ -716,6 +716,36 @@ GetSystemAvailableGpus(void)
 }
 
 /*
+ * GetGpuMinimalDeviceMemorySize
+ */
+size_t
+GetGpuMinimalDeviceMemorySize(void)
+{
+	size_t	total_sz = 0;
+
+	for (int dindex=0; dindex < numGpuDevAttrs; dindex++)
+	{
+		size_t	dmem_sz = gpuDevAttrs[dindex].DEV_TOTAL_MEMSZ;
+
+		total_sz = (dindex == 0 ? dmem_sz : Min(total_sz, dmem_sz));
+	}
+	return total_sz;
+}
+
+/*
+ * GetGpuTotalDeviceMemorySize
+ */
+size_t
+GetGpuTotalDeviceMemorySize(void)
+{
+	size_t	total_sz = 0;
+
+	for (int dindex=0; dindex < numGpuDevAttrs; dindex++)
+		total_sz += gpuDevAttrs[dindex].DEV_TOTAL_MEMSZ;
+	return total_sz;
+}
+
+/*
  * __fetchJsonField/Element - NULL aware thin-wrapper
  */
 static Datum
