@@ -487,8 +487,9 @@ try_add_simple_scan_path(PlannerInfo *root,
 			cpath->flags            = CUSTOMPATH_SUPPORT_PROJECTION;
 			cpath->custom_paths     = NIL;
 			cpath->custom_private   = list_make1(pp_info);
-			cpath->methods = xpuscan_path_methods;
-
+			cpath->methods			= xpuscan_path_methods;
+			/* try attach GPU-Sorted version */
+			try_add_sorted_gpujoin_path(root, baserel, cpath, be_parallel);
 			if (be_parallel == 0)
 				add_path(baserel, &cpath->path);
 			else
@@ -884,6 +885,8 @@ PlanXpuScanPathCommon(PlannerInfo *root,
 	context->tlist_dev = gpuscan_build_projection(baserel, pp_info, tlist);
 	pp_info->kexp_projection = codegen_build_projection(context,
 														proj_hash);
+	/* code generation for GPU-Sort */
+	pp_info->kexp_gpusort_keydesc = codegen_build_gpusort_keydesc(context, pp_info);
 	/* VarLoads for each depth */
 	codegen_build_packed_kvars_load(context, pp_info);
 	/* VarMoves for each depth (only GPUs) */

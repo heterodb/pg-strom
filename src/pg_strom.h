@@ -304,6 +304,7 @@ typedef struct
 	bytea	   *kexp_groupby_keyload;
 	bytea	   *kexp_groupby_keycomp;
 	bytea	   *kexp_groupby_actions;
+	bytea	   *kexp_gpusort_keydesc;
 	List	   *kvars_deflist;
 	uint32_t	kvecs_bufsz;	/* unit size of vectorized kernel values */
 	uint32_t	kvecs_ndims;
@@ -314,7 +315,10 @@ typedef struct
 	List	   *groupby_typmods;		/* typmod if KAGG_ACTION__* needs it */
 	int			groupby_prepfn_bufsz;	/* buffer-size for GpuPreAgg shared memory */
 	/* gpusort keys */
-	List	   *gpusort_final_keys;		/* expression list for GpuSort */
+	List	   *gpusort_keys_expr;		/* expression list for GpuSort */
+	List	   *gpusort_keys_kind;		/* set of KSORT_KEY_KIND__* for GpuSort */
+	int			gpusort_htup_margin;	/* required margin at the tail of htuple on
+										 * the kds_final buffer for temporary value. */
 	/* pinned inner buffer stuff */
 	List	   *projection_hashkeys;
 	/* inner relations */
@@ -591,7 +595,8 @@ extern bytea   *codegen_build_projection(codegen_context *context,
 										 List *proj_hash);
 extern void		codegen_build_groupby_actions(codegen_context *context,
 											  pgstromPlanInfo *pp_info);
-
+extern bytea   *codegen_build_gpusort_keydesc(codegen_context *context,
+											  pgstromPlanInfo *pp_info);
 extern void		codegen_build_packed_kvars_load(codegen_context *context,
 												pgstromPlanInfo *pp_info);
 extern void		codegen_build_packed_kvars_move(codegen_context *context,
@@ -826,6 +831,10 @@ extern bool		pgstrom_is_gpujoin_path(const Path *path);
 extern bool		pgstrom_is_gpujoin_plan(const Plan *plan);
 extern bool		pgstrom_is_gpujoin_state(const PlanState *ps);
 extern pgstromPlanInfo *try_fetch_xpujoin_planinfo(const Path *path);
+extern void		try_add_sorted_gpujoin_path(PlannerInfo *root,
+											RelOptInfo *join_rel,
+											CustomPath *cpath,
+											bool be_parallel);
 extern List	   *buildOuterJoinPlanInfo(PlannerInfo *root,
 									   RelOptInfo *outer_rel,
 									   uint32_t xpu_task_flags,
@@ -851,6 +860,7 @@ extern void		pgstrom_init_dpu_join(void);
  * gpu_preagg.c
  */
 extern int		pgstrom_hll_register_bits;		//deprecated
+extern bool		pgstrom_enable_gpusort;
 extern bool		pgstrom_is_gpupreagg_path(const Path *path);
 extern bool		pgstrom_is_gpupreagg_plan(const Plan *plan);
 extern bool		pgstrom_is_gpupreagg_state(const PlanState *ps);

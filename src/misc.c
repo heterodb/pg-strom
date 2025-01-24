@@ -144,6 +144,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keyload));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keycomp));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_actions));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_gpusort_keydesc));
 	/* Kvars definitions */
 	foreach (lc, pp_info->kvars_deflist)
 	{
@@ -165,7 +166,9 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, pp_info->groupby_actions);
 	privs = lappend(privs, pp_info->groupby_typmods);
 	privs = lappend(privs, makeInteger(pp_info->groupby_prepfn_bufsz));
-	exprs = lappend(exprs, pp_info->gpusort_final_keys);
+	exprs = lappend(exprs, pp_info->gpusort_keys_expr);
+	privs = lappend(privs, pp_info->gpusort_keys_kind);
+	privs = lappend(privs, makeInteger(pp_info->gpusort_htup_margin));
 	exprs = lappend(exprs, pp_info->projection_hashkeys);
 	/* inner relations */
 	privs = lappend(privs, makeInteger(pp_info->sibling_param_id));
@@ -254,6 +257,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.kexp_groupby_keyload   = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_groupby_keycomp   = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_groupby_actions   = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_gpusort_keydesc   = __getByteaConst(list_nth(privs, pindex++));
 	/* Kvars definitions */
 	kvars_deflist_privs = list_nth(privs, pindex++);
 	kvars_deflist_exprs = list_nth(exprs, eindex++);
@@ -274,7 +278,9 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.groupby_actions = list_nth(privs, pindex++);
 	pp_data.groupby_typmods = list_nth(privs, pindex++);
 	pp_data.groupby_prepfn_bufsz = intVal(list_nth(privs, pindex++));
-	pp_data.gpusort_final_keys = list_nth(exprs, eindex++);
+	pp_data.gpusort_keys_expr = list_nth(exprs, eindex++);
+	pp_data.gpusort_keys_kind = list_nth(privs, pindex++);
+	pp_data.gpusort_htup_margin = intVal(list_nth(privs, pindex++));
 	pp_data.projection_hashkeys = list_nth(exprs, eindex++);
 	/* inner relations */
 	pp_data.sibling_param_id = intVal(list_nth(privs, pindex++));

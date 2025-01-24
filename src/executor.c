@@ -2607,10 +2607,10 @@ pgstromExplainTaskState(CustomScanState *node,
 	/*
 	 * GPU-Sorting
 	 */
-	if (pp_info->gpusort_final_keys != NIL)
+	if (pp_info->gpusort_keys_expr != NIL)
 	{
 		resetStringInfo(&buf);
-		foreach (lc, pp_info->gpusort_final_keys)
+		foreach (lc, pp_info->gpusort_keys_expr)
 		{
 			Node   *sortkey = lfirst(lc);
 
@@ -2662,6 +2662,9 @@ pgstromExplainTaskState(CustomScanState *node,
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Partial Aggregation OpCode",
 								pp_info->kexp_groupby_actions);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"GPU-Sort KeyDesc OpCode",
+								pp_info->kexp_gpusort_keydesc);
 		pgstrom_explain_fallback_desc(pts, es, dcontext);
 		if (pp_info->groupby_prepfn_bufsz > 0)
 			ExplainPropertyInteger("Partial Function BufSz", NULL,

@@ -3918,6 +3918,193 @@ codegen_build_groupby_actions(codegen_context *context,
 }
 
 /*
+ * codegen_build_gpusort_keydesc
+ */
+bytea *
+codegen_build_gpusort_keydesc(codegen_context *context,
+							  pgstromPlanInfo *pp_info)
+{
+	StringInfoData buf;
+	int			i, nkeys = list_length(pp_info->gpusort_keys_expr);
+	int			usage = 0;
+	size_t		sz;
+	ListCell   *lc1, *lc2;
+	kern_expression *kexp;
+
+	Assert(nkeys == list_length(pp_info->gpusort_keys_kind));
+	if (nkeys == 0)
+		return NULL;	/* quick bailout */
+	initStringInfo(&buf);
+	sz = VARHDRSZ + offsetof(kern_expression, u.sort.desc[nkeys]);
+	enlargeStringInfo(&buf, sz);
+	memset(buf.data, 0, sz);
+	kexp = (kern_expression *)(buf.data + VARHDRSZ);
+	kexp->exptype = TypeOpCode__int4;
+	kexp->opcode = FuncOpCode__SortKeys;
+	kexp->u.sort.nkeys = nkeys;
+
+	i = 0;
+	forboth (lc1, pp_info->gpusort_keys_expr,
+			 lc2, pp_info->gpusort_keys_kind)
+	{
+		kern_sortkey_desc *keydesc = &kexp->u.sort.desc[i++];
+		Expr	   *expr = lfirst(lc1);
+		int			ival = lfirst_int(lc2);
+		int			kind = (ival & KSORT_KEY_KIND__MASK);
+		devtype_info *dtype;
+
+		keydesc->kind = kind;
+		keydesc->nulls_first = ((ival & KSORT_KEY_ATTR__NULLS_FIRST) != 0);
+		keydesc->desc_order  = ((ival & KSORT_KEY_ATTR__DESC_ORDER)  != 0);
+		if (kind == KSORT_KEY_KIND__VREF)
+		{
+			Var	   *var = (Var *)expr;
+
+			if (!IsA(var, Var))
+				elog(ERROR, "Bug? unexpected GPU-SortKey: %s", nodeToString(var));
+			else if (var->varno == INDEX_VAR)
+				keydesc->src_anum = var->varattno;
+			else if (var->varno == pp_info->scan_relid)
+			{
+				ListCell   *cell;
+				bool		found = false;
+
+				foreach (cell, context->tlist_dev)
+				{
+					TargetEntry *tle = lfirst(cell);
+
+					if (tle->resjunk)
+						continue;
+					if (equal(var, tle->expr))
+					{
+						keydesc->src_anum = tle->resno;
+						found = true;
+						break;
+					}
+				}
+				if (!found)
+					elog(ERROR, "Bug? GPU-SortKey (%s) is missing", nodeToString(var));
+			}
+			else
+				elog(ERROR, "Bug? unexpected GPU-SortKey: %s", nodeToString(var));
+			keydesc->buf_offset = 0;
+			dtype = pgstrom_devtype_lookup(var->vartype);
+			if (!dtype)
+				elog(ERROR, "Bug? GPU-SortKey does not have device supported type: %s",
+					 nodeToString(expr));
+			keydesc->key_type_code = dtype->type_code;
+		}
+		else if (kind == KSORT_KEY_KIND__COUNT)
+		{
+			ListCell   *cell;
+			bool		found = false;
+
+			foreach (cell, context->tlist_dev)
+			{
+				TargetEntry *tle = lfirst(cell);
+
+				if (tle->resjunk)
+					continue;
+				if (equal(expr, tle->expr))
+				{
+					keydesc->src_anum = tle->resno;
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				elog(ERROR, "Bug? GPU-SortKey (%s) is missing", nodeToString(expr));
+			keydesc->buf_offset = 0;
+			keydesc->key_type_code = TypeOpCode__int8;
+		}
+		else
+		{
+			FuncExpr   *func = (FuncExpr *)expr;
+			Var		   *var;
+
+			if (!IsA(func, FuncExpr) || list_length(func->args) > 1)
+				elog(ERROR, "Bug? GPU-SortKey is not unexpected expression: %s",
+					 nodeToString(expr));
+			if (func->args == 0)
+				keydesc->src_anum = 0;
+			else
+			{
+				var = linitial(func->args);
+				if (!IsA(var, Var) || var->varno != INDEX_VAR)
+					elog(ERROR, "Bug? GPU-SortKey must be a simple reference: %s",
+						 nodeToString(expr));
+				keydesc->src_anum = var->varattno;
+			}
+			switch (kind)
+			{
+				case KSORT_KEY_KIND__PMINMAX_INT64:
+				case KSORT_KEY_KIND__PSUM_INT64:
+					keydesc->buf_offset = 0;	/* no finalization */
+					keydesc->key_type_code = TypeOpCode__int8;
+					break;
+				case KSORT_KEY_KIND__PMINMAX_FP64:
+				case KSORT_KEY_KIND__PSUM_FP64:
+					keydesc->buf_offset = 0;	/* no finalization */
+					keydesc->key_type_code = TypeOpCode__float8;
+					break;
+					/* finalization to int64 */
+				case KSORT_KEY_KIND__PAVG_INT64:
+					keydesc->buf_offset = usage;
+					usage += sizeof(bool) + sizeof(int64_t);
+					keydesc->key_type_code = TypeOpCode__int8;
+					break;
+					/* finalization to fp64 */
+				case KSORT_KEY_KIND__PAVG_FP64:
+					keydesc->buf_offset = usage;
+					usage += (sizeof(bool) + sizeof(float8));
+					keydesc->key_type_code = TypeOpCode__float8;
+					break;
+					/* finalization to numeric */
+				case KSORT_KEY_KIND__PSUM_INT128:
+				case KSORT_KEY_KIND__PAVG_INT128:
+				case KSORT_KEY_KIND__PSUM_NUMERIC:
+				case KSORT_KEY_KIND__PAVG_NUMERIC:
+					keydesc->buf_offset = usage;
+					usage += (sizeof(bool)     + sizeof(uint8_t) +
+							  sizeof(uint16_t) + sizeof(int128_t));
+					keydesc->key_type_code = TypeOpCode__numeric;
+					break;
+					/* finalization to fp64 */
+				case KSORT_KEY_KIND__PVARIANCE_SAMP:
+				case KSORT_KEY_KIND__PVARIANCE_POP:
+				case KSORT_KEY_KIND__PCOVAR_CORR:
+				case KSORT_KEY_KIND__PCOVAR_SAMP:
+				case KSORT_KEY_KIND__PCOVAR_POP:
+				case KSORT_KEY_KIND__PCOVAR_AVGX:
+				case KSORT_KEY_KIND__PCOVAR_AVGY:
+				case KSORT_KEY_KIND__PCOVAR_COUNT:
+				case KSORT_KEY_KIND__PCOVAR_INTERCEPT:
+				case KSORT_KEY_KIND__PCOVAR_REGR_R2:
+				case KSORT_KEY_KIND__PCOVAR_REGR_SLOPE:
+				case KSORT_KEY_KIND__PCOVAR_REGR_SXX:
+				case KSORT_KEY_KIND__PCOVAR_REGR_SXY:
+					keydesc->buf_offset = usage;
+					usage += (sizeof(bool) + sizeof(float8));
+					keydesc->key_type_code = TypeOpCode__float8;
+					break;
+				default:
+					elog(ERROR, "Bug? unknown KSORT_KEY_KIND: %d", kind);
+			}
+		}
+	}
+	__appendKernExpMagicAndLength(&buf, VARHDRSZ);
+	SET_VARSIZE(buf.data, buf.len);
+	/*
+	 * This FuncOpCode__SortKeys operation needs 'usage' bytes of margin
+	 * after the kern_tupitem on the kds_final buffer for finalization.
+	 * (used to calculate temporary value like average)
+	 */
+	pp_info->gpusort_htup_margin = usage;
+
+	return (bytea *)buf.data;
+}
+
+/*
  * pgstrom_xpu_expression
  *
  * checks whether the expression is executable on GPU/DPU devices.
@@ -4373,6 +4560,78 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 }
 
 static void
+__xpucode_sortkeys_cstring(StringInfo buf,
+						   const kern_expression *kexp,
+						   const CustomScanState *css,	/* optional */
+						   ExplainState *es,			/* optional */
+						   List *dcontext)
+{
+	static const char *label[] = {
+		"vref",				/* KSORT_KEY_KIND__VREF */
+		"count",			/* KSORT_KEY_KIND__COUNT */
+		"min/max[int64]",	/* KSORT_KEY_KIND__PMINMAX_INT64 */
+		"min/max[fp64]",	/* KSORT_KEY_KIND__PMINMAX_FP64 */
+		"sum[int64]",		/* KSORT_KEY_KIND__PSUM_INT64 */
+		"sum[int128]",		/* KSORT_KEY_KIND__PSUM_INT128 */
+		"sum[fp64]",		/* KSORT_KEY_KIND__PSUM_FP64 */
+		"sum[numeric]",		/* KSORT_KEY_KIND__PSUM_NUMERIC */
+		"avg[int64]",		/* KSORT_KEY_KIND__PAVG_INT64 */
+		"avg[int128]",		/* KSORT_KEY_KIND__PAVG_INT128 */
+		"avg[fp64]",		/* KSORT_KEY_KIND__PAVG_FP64 */
+		"avg[numeric]",		/* KSORT_KEY_KIND__PAVG_NUMERIC */
+		"var[samp]",		/* KSORT_KEY_KIND__PVARIANCE_SAMP */
+		"var[pop]",			/* KSORT_KEY_KIND__PVARIANCE_POP */
+		"corr",				/* KSORT_KEY_KIND__PCOVAR_CORR */
+		"cov[samp]",		/* KSORT_KEY_KIND__PCOVAR_SAMP */
+		"cov[pop]",			/* KSORT_KEY_KIND__PCOVAR_POP */
+		"cov[avgx]",		/* KSORT_KEY_KIND__PCOVAR_AVGX */
+		"cov[avgy]",		/* KSORT_KEY_KIND__PCOVAR_AVGY */
+		"cov[count]",		/* KSORT_KEY_KIND__PCOVAR_COUNT */
+		"cov[intercept]",	/* KSORT_KEY_KIND__PCOVAR_INTERCEPT */
+		"regr[r2]",			/* KSORT_KEY_KIND__PCOVAR_REGR_R2 */
+		"regr[slope]",		/* KSORT_KEY_KIND__PCOVAR_REGR_SLOPE */
+		"regr[sxx]",		/* KSORT_KEY_KIND__PCOVAR_REGR_SXX */
+		"regr[sxy]",		/* KSORT_KEY_KIND__PCOVAR_REGR_SXY */
+		"regr[syy]",		/* KSORT_KEY_KIND__PCOVAR_REGR_SYY */
+		NULL,
+	};
+
+	appendStringInfo(buf, "{AggFuncs");
+	for (int i=0; i < kexp->u.sort.nkeys; i++)
+	{
+		const kern_sortkey_desc *desc = &kexp->u.sort.desc[i];
+
+		appendStringInfo(buf, "%s <", i==0 ? "" : ",");
+		if (desc->kind < KSORT_KEY_KIND__NITEMS)
+			appendStringInfoString(buf, label[desc->kind]);
+		else
+			appendStringInfo(buf, "unknown-%u", desc->kind);
+		if (css)
+		{
+			CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
+			const char *str;
+
+			if (desc->src_anum > 0 &&
+				desc->src_anum <= list_length(cscan->custom_scan_tlist))
+			{
+				TargetEntry *tle = list_nth(cscan->custom_scan_tlist,
+											desc->src_anum - 1);
+				str = deparse_expression((Node *)tle->expr,
+										 dcontext,
+										 false,
+										 false);
+				appendStringInfo(buf, "; key=%s", str);
+			}
+			else if (desc->src_anum != 0)
+				appendStringInfo(buf, "; key=(out of range)");
+		}
+		appendStringInfo(buf, "; nulls %s; %s order>",
+						 desc->nulls_first ? "first" : "last",
+						 desc->desc_order ? "desc" : "asc");
+	}
+}
+
+static void
 __xpucode_projection_cstring(StringInfo buf,
 							 const kern_expression *kexp,
 							 const CustomScanState *css,
@@ -4482,6 +4741,9 @@ __xpucode_to_cstring(StringInfo buf,
 			}
 			appendStringInfo(buf, "}");
 			return;
+		case FuncOpCode__SortKeys:
+			__xpucode_sortkeys_cstring(buf, kexp, css, es, dcontext);
+			break;
 		case FuncOpCode__BoolExpr_And:
 			appendStringInfo(buf, "{Bool::AND");
 			break;

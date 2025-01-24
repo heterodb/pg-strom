@@ -2299,44 +2299,52 @@ typedef struct
 	int32_t		arg1_slot_id;
 } kern_aggregate_desc;
 
+
+#define KSORT_KEY_ATTR__NULLS_FIRST			0x0400U
+#define KSORT_KEY_ATTR__DESC_ORDER			0x8000U
+#define KSORT_KEY_KIND__MASK				0x03ffU
+#define KSORT_KEY_KIND__SHIFT				16
 #define KSORT_KEY_KIND__VREF				0
-#define KSORT_KEY_KIND__PMINMAX_INT64		1
-#define KSORT_KEY_KIND__PMINMAX_FP64		2
-#define KSORT_KEY_KIND__PSUM_INT64			3
-#define KSORT_KEY_KIND__PSUM_INT128			4
-#define KSORT_KEY_KIND__PSUM_FP64			5
-#define KSORT_KEY_KIND__PSUM_NUMERIC		6
-#define KSORT_KEY_KIND__PAVG_INT64			7
-#define KSORT_KEY_KIND__PAVG_INT128			8
-#define KSORT_KEY_KIND__PAVG_FP64			9
-#define KSORT_KEY_KIND__PAVG_NUMERIC		10
-#define KSORT_KEY_KIND__PVARIANCE_SAMP		11
-#define KSORT_KEY_KIND__PVARIANCE_POP		12
-#define KSORT_KEY_KIND__PCOVAR_CORR			13
-#define KSORT_KEY_KIND__PCOVAR_SAMP			14
-#define KSORT_KEY_KIND__PCOVAR_POP			15
-#define KSORT_KEY_KIND__PCOVAR_AVGX			16
-#define KSORT_KEY_KIND__PCOVAR_AVGY			17
-#define KSORT_KEY_KIND__PCOVAR_COUNT		18
-#define KSORT_KEY_KIND__PCOVAR_REGR_R2		19
-#define KSORT_KEY_KIND__PCOVAR_REGR_SLOPE	20
-#define KSORT_KEY_KIND__PCOVAR_REGR_SXX		21
-#define KSORT_KEY_KIND__PCOVAR_REGR_SXY		22
-#define KSORT_KEY_KIND__PCOVAR_REGR_SYY		23
+#define KSORT_KEY_KIND__COUNT				1
+#define KSORT_KEY_KIND__PMINMAX_INT64		2
+#define KSORT_KEY_KIND__PMINMAX_FP64		3
+#define KSORT_KEY_KIND__PSUM_INT64			4
+#define KSORT_KEY_KIND__PSUM_INT128			5
+#define KSORT_KEY_KIND__PSUM_FP64			6
+#define KSORT_KEY_KIND__PSUM_NUMERIC		7
+#define KSORT_KEY_KIND__PAVG_INT64			8
+#define KSORT_KEY_KIND__PAVG_INT128			9
+#define KSORT_KEY_KIND__PAVG_FP64			10
+#define KSORT_KEY_KIND__PAVG_NUMERIC		11
+#define KSORT_KEY_KIND__PVARIANCE_SAMP		12
+#define KSORT_KEY_KIND__PVARIANCE_POP		13
+#define KSORT_KEY_KIND__PCOVAR_CORR			14
+#define KSORT_KEY_KIND__PCOVAR_SAMP			15
+#define KSORT_KEY_KIND__PCOVAR_POP			16
+#define KSORT_KEY_KIND__PCOVAR_AVGX			17
+#define KSORT_KEY_KIND__PCOVAR_AVGY			18
+#define KSORT_KEY_KIND__PCOVAR_COUNT		19
+#define KSORT_KEY_KIND__PCOVAR_INTERCEPT	20
+#define KSORT_KEY_KIND__PCOVAR_REGR_R2		21
+#define KSORT_KEY_KIND__PCOVAR_REGR_SLOPE	22
+#define KSORT_KEY_KIND__PCOVAR_REGR_SXX		23
+#define KSORT_KEY_KIND__PCOVAR_REGR_SXY		24
+#define KSORT_KEY_KIND__PCOVAR_REGR_SYY		25
+#define KSORT_KEY_KIND__NITEMS				26
 
 typedef struct
 {
-	uint16_t	key_kind;		/* any of KSORT_KEY_KIND__* */
+	uint16_t	kind;			/* any of KSORT_KEY_KIND__* */
 	int8_t		nulls_first;	/* true, if NULLs first */
-	int8_t		sort_order;		/* true, if smaller is first */
-	int32_t		source;			/* if >0, attribute number of the KDS.
-								 * elsewhere, it means the offset of temporary
-								 * calculated sorting key, according to the key_kind.
+	int8_t		desc_order;		/* true, if smaller is first */
+	uint16_t	src_anum;		/* source attribute number of KDS */
+	uint16_t	buf_offset;		/* if not KSORT_KEY_KIND__VREF, it means offset of
+								 * the temporary calculated sorting key.
 								 * location is:
-								 * ((char *)&tupitem->htup + tupitem->t_len - source)
+								 * ((char *)&tupitem->htup + tupitem->t_len + key_offset)
 								 */
-	int32_t		slot0_id;		/* slot-id to store the key0 */
-	int32_t		slot1_id;		/* slot-id to store the key1 */
+	TypeOpCode	key_type_code;
+	const struct xpu_datum_operators *key_ops;
 } kern_sortkey_desc;
 
 typedef struct
