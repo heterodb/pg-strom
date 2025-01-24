@@ -1542,6 +1542,60 @@ ExecLoadVarsOuterColumn(kern_context *kcxt,
 	return true;
 }
 
+PUBLIC_FUNCTION(bool)
+ExecLoadKeysFromGroupByFinal(kern_context *kcxt,
+							 const kern_data_store *kds_final,
+							 const kern_tupitem *tupitem,
+							 const kern_expression *kexp_groupby_actions)
+{
+	const char *pos = NULL;
+	const uint8_t *nullmap = NULL;
+	int			ncols = 0;
+
+	if (tupitem)
+	{
+		if ((tupitem->htup.t_infomask & HEAP_HASNULL) != 0)
+			nullmap = tupitem->htup.t_bits;
+		ncols = (tupitem->htup.t_infomask2 & HEAP_NATTS_MASK);
+		pos = (const char *)&tupitem->htup + tupitem->htup.t_hoff;
+	}
+	ncols = Min(kds_final->ncols, ncols);
+	for (int j=0; j < kexp_groupby_actions->u.pagg.nattrs; j++)
+	{
+		const kern_aggregate_desc *desc = &kexp_groupby_actions->u.pagg.desc[j];
+		const kern_colmeta *cmeta = &kds_final->colmeta[j];
+
+		if (j >= ncols || (nullmap && att_isnull(j, nullmap)))
+		{
+			if (desc->action == KAGG_ACTION__VREF)
+			{
+				if (!__extract_heap_tuple_attr(kcxt, desc->arg0_slot_id, NULL))
+					return false;
+			}
+		}
+		else
+		{
+			assert(pos != NULL);
+			pos = (char *)TYPEALIGN(cmeta->attalign, pos);
+			if (desc->action == KAGG_ACTION__VREF)
+			{
+				if (!__extract_heap_tuple_attr(kcxt, desc->arg0_slot_id, pos))
+					return false;
+			}
+			if (cmeta->attlen > 0)
+				pos += cmeta->attlen;
+			else if (cmeta->attlen == -1)
+				pos += VARSIZE_ANY(pos);
+			else
+			{
+				STROM_ELOG(kcxt, "unknown attribute length");
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
 /* ------------------------------------------------------------
  *
  * MoveVars - that moves values in kvars-slot or vectorized kernel variables buffer
@@ -1904,6 +1958,13 @@ restart:
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg_gist, &status))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			/*
+			 * XXX - right now, we don't support CPU fallback in the GiST-Join
+			 *       index qualifiers. So, we just rewrite error code to stop
+			 *       execution.
+			 */
+			if (kcxt->errcode == ERRCODE_SUSPEND_FALLBACK)
+				kcxt->errcode = ERRCODE_DEVICE_ERROR;
 			return ULONG_MAX;
 		}
 		/* check result */
@@ -1997,10 +2058,10 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 	kcxt_reset(kcxt);
 	if (!ExecGpuJoinQuals(kcxt, kexp_join, &status))
 	{
-		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		if (!HandleErrorIfCpuFallback(kcxt, depth, 0, false))
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		return false;
 	}
-	//XXX - CHECK CPU FALLBACK?
 	return (status > 0);
 }
 

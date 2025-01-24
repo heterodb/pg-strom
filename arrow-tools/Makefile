@@ -18,16 +18,18 @@ endif
 ifeq ($(HAS_PF_RING),yes)
 ALL_PROGS += pcap2arrow
 endif
+ALL_PROGS += vcf2arrow
 
 PG2ARROW_OBJS    = __pgsql2arrow.o pgsql_client.o \
                    arrow_nodes.o arrow_write.o arrow_pgsql.o
 MYSQL2ARROW_OBJS = __mysql2arrow.o mysql_client.o \
                    arrow_nodes.o arrow_write.o
 PCAP2ARROW_OBJS  = pcap2arrow.o arrow_nodes.o arrow_write.o
+VCF2ARROW_OBJS = vcf2arrow.o arrow_nodes.o arrow_write.o
 ARROW2CSV_OBJS   = arrow2csv.o arrow_nodes.o
 CLEAN_OBJS = $(PG2ARROW_OBJS) $(MYSQL2ARROW_OBJS) \
-             $(PCAP2ARROW_OBJS) $(ARROW2CSV_OBJS) \
-             pcap2arrow arrow2csv pg2arrow mysql2arrow
+             $(PCAP2ARROW_OBJS) $(VCF2ARROW_OBJS) $(ARROW2CSV_OBJS) \
+             pcap2arrow arrow2csv pg2arrow mysql2arrow vcf2arrow
 
 CFLAGS = -O2 -fPIC -g -Wall -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64
 ifeq ($(HAS_PG_CONFIG),yes)
@@ -35,6 +37,9 @@ CFLAGS += -I $(shell $(PG_CONFIG) --includedir)
 endif
 ifeq ($(HAS_MYSQL_CONFIG),yes)
 CFLAGS += $(shell $(MYSQL_CONFIG) --include)
+endif
+ifeq ($(DEBUG),1)
+CFLAGS += -g -O0
 endif
 
 PREFIX		?= /usr/local
@@ -87,6 +92,16 @@ install-pcap2arrow: pcap2arrow
 	mkdir -p $(DESTDIR)$(BINDIR) && \
 	install -m 0755 pcap2arrow $(DESTDIR)$(BINDIR)
 endif
+
+#
+# VCF2Arrow
+#
+vcf2arrow: $(VCF2ARROW_OBJS)
+	$(CC) -o $@ $(VCF2ARROW_OBJS)
+
+install-vcf2arrow: vcf2arrow
+	mkdir -p $(DESTDIR)$(BINDIR) && \
+	install -m 0755 vcf2arrow $(DESTDIR)$(BINDIR)
 
 #
 # Arrow2CSV

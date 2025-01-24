@@ -17,9 +17,7 @@
  */
 PG_FUNCTION_INFO_V1(pgstrom_partial_nrows);
 
-PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_int32);
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_int64);
-PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_fp32);
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_fp64);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_int64);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_fp64);
@@ -35,19 +33,24 @@ PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_fp64);
 PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_numeric);
 
 PG_FUNCTION_INFO_V1(pgstrom_partial_sum_int);
+PG_FUNCTION_INFO_V1(pgstrom_partial_sum_int64);
 PG_FUNCTION_INFO_V1(pgstrom_partial_sum_fp);
+PG_FUNCTION_INFO_V1(pgstrom_partial_sum_numeric);
 PG_FUNCTION_INFO_V1(pgstrom_partial_sum_cash);
 PG_FUNCTION_INFO_V1(pgstrom_fsum_trans_int);
 PG_FUNCTION_INFO_V1(pgstrom_fsum_trans_fp);
+PG_FUNCTION_INFO_V1(pgstrom_fsum_trans_numeric);
 PG_FUNCTION_INFO_V1(pgstrom_fsum_final_int);
 PG_FUNCTION_INFO_V1(pgstrom_fsum_final_int_as_numeric);
 PG_FUNCTION_INFO_V1(pgstrom_fsum_final_int_as_cash);
 PG_FUNCTION_INFO_V1(pgstrom_fsum_final_fp32);
 PG_FUNCTION_INFO_V1(pgstrom_fsum_final_fp64);
 PG_FUNCTION_INFO_V1(pgstrom_fsum_final_fp64_as_numeric);
+PG_FUNCTION_INFO_V1(pgstrom_fsum_final_numeric);
 PG_FUNCTION_INFO_V1(pgstrom_favg_final_int);
 PG_FUNCTION_INFO_V1(pgstrom_favg_final_fp);
 PG_FUNCTION_INFO_V1(pgstrom_favg_final_num);
+PG_FUNCTION_INFO_V1(pgstrom_favg_final_numeric);
 
 PG_FUNCTION_INFO_V1(pgstrom_partial_variance);
 PG_FUNCTION_INFO_V1(pgstrom_stddev_trans);
@@ -62,6 +65,7 @@ PG_FUNCTION_INFO_V1(pgstrom_var_popf_final);
 
 PG_FUNCTION_INFO_V1(pgstrom_partial_covar);
 PG_FUNCTION_INFO_V1(pgstrom_covar_accum);
+PG_FUNCTION_INFO_V1(pgstrom_correlation_final);
 PG_FUNCTION_INFO_V1(pgstrom_covar_samp_final);
 PG_FUNCTION_INFO_V1(pgstrom_covar_pop_final);
 
@@ -116,8 +120,8 @@ pgstrom_partial_minmax_int64(PG_FUNCTION_ARGS)
 	kagg_state__pminmax_int64_packed *r;
 
 	r = palloc(sizeof(kagg_state__pminmax_int64_packed));
-	r->nitems = 1;
-	r->value  = PG_GETARG_INT64(0);
+	r->attrs = __PAGG_MINMAX_ATTRS__VALID;
+	r->value = PG_GETARG_INT64(0);
 	SET_VARSIZE(r, sizeof(kagg_state__pminmax_int64_packed));
 
 	PG_RETURN_POINTER(r);
@@ -129,8 +133,8 @@ pgstrom_partial_minmax_fp64(PG_FUNCTION_ARGS)
 	kagg_state__pminmax_fp64_packed *r;
 
 	r = palloc(sizeof(kagg_state__pminmax_fp64_packed));
-	r->nitems = 1;
-	r->value  = PG_GETARG_FLOAT8(0);
+	r->attrs = __PAGG_MINMAX_ATTRS__VALID;
+	r->value = PG_GETARG_FLOAT8(0);
 	SET_VARSIZE(r, sizeof(kagg_state__pminmax_fp64_packed));
 
 	PG_RETURN_POINTER(r);
@@ -160,9 +164,9 @@ pgstrom_partial_minmax_fp64(PG_FUNCTION_ARGS)
 		{																\
 			arg = (kagg_state__pminmax_##TYPE##_packed *)				\
 				PG_GETARG_BYTEA_P(1);									\
-			if (arg->nitems > 0)										\
+			if ((arg->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)			\
 			{															\
-				if (state->nitems == 0)									\
+				if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)	\
 					memcpy(state, arg, sizeof(*state));					\
 				else													\
 					state->value = OPER(state->value, arg->value);		\
@@ -200,7 +204,7 @@ pgstrom_fminmax_final_int8(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *state
 		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	if (state->value < SCHAR_MIN || state->value > SCHAR_MAX)
 		elog(ERROR, "min(int8) out of range");
@@ -212,7 +216,7 @@ pgstrom_fminmax_final_int16(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *state
 		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	if (state->value < SHRT_MIN || state->value > SHRT_MAX)
 		elog(ERROR, "min(int16) out of range");
@@ -224,7 +228,7 @@ pgstrom_fminmax_final_int32(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *state
 		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	if (state->value < INT_MIN || state->value > INT_MAX)
 		elog(ERROR, "min(int32) out of range");
@@ -236,7 +240,7 @@ pgstrom_fminmax_final_int64(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_int64_packed *state
 		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	PG_RETURN_INT64(state->value);
 }
@@ -246,7 +250,7 @@ pgstrom_fminmax_final_fp16(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *state
 		= (kagg_state__pminmax_fp64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	PG_RETURN_UINT16(__half_as_short__(fp64_to_fp16(state->value)));
 }
@@ -256,7 +260,7 @@ pgstrom_fminmax_final_fp32(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *state
 		= (kagg_state__pminmax_fp64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	PG_RETURN_FLOAT4(state->value);
 }
@@ -266,7 +270,7 @@ pgstrom_fminmax_final_fp64(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *state
 		= (kagg_state__pminmax_fp64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(state->value);
 }
@@ -276,7 +280,7 @@ pgstrom_fminmax_final_numeric(PG_FUNCTION_ARGS)
 {
 	kagg_state__pminmax_fp64_packed *state
 		= (kagg_state__pminmax_fp64_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems == 0)
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
 	return DirectFunctionCall1(float8_numeric,
 							   Float8GetDatum(state->value));
@@ -298,6 +302,19 @@ pgstrom_partial_sum_int(PG_FUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(Datum)
+pgstrom_partial_sum_int64(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_numeric_packed *r = palloc(sizeof(kagg_state__psum_numeric_packed));
+
+	r->attrs = 0;
+	r->nitems = 1;
+	__store_int128_packed(&r->sum, PG_GETARG_INT64(0));
+	SET_VARSIZE(r, sizeof(kagg_state__psum_numeric_packed));
+
+	PG_RETURN_POINTER(r);
+}
+
+PUBLIC_FUNCTION(Datum)
 pgstrom_partial_sum_fp(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_fp_packed *r = palloc(sizeof(kagg_state__psum_fp_packed));
@@ -306,6 +323,40 @@ pgstrom_partial_sum_fp(PG_FUNCTION_ARGS)
 	r->sum = PG_GETARG_FLOAT8(0);
 	SET_VARSIZE(r, sizeof(kagg_state__psum_fp_packed));
 
+	PG_RETURN_POINTER(r);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_numeric_packed *r;
+	uint8_t		kind;
+	int16_t		weight;
+	int128_t	value;
+	const char *emsg;
+
+	emsg = __xpu_numeric_from_varlena(&kind,
+									  &weight,
+									  &value,
+									  (varlena *)PG_GETARG_NUMERIC(0));
+	if (emsg)
+		elog(ERROR, "%s: %s", __FUNCTION__, emsg);
+
+	r = palloc0(sizeof(kagg_state__psum_numeric_packed));
+	if (kind == XPU_NUMERIC_KIND__NAN)
+		r->attrs |= __PAGG_NUMERIC_ATTRS__NAN;
+	else if (kind == XPU_NUMERIC_KIND__POS_INF)
+		r->attrs |= __PAGG_NUMERIC_ATTRS__PINF;
+	else if (kind == XPU_NUMERIC_KIND__NEG_INF)
+		r->attrs |= __PAGG_NUMERIC_ATTRS__NINF;
+	else
+	{
+		Assert(kind == XPU_NUMERIC_KIND__VALID);
+		r->attrs |= ((uint32_t)weight & __PAGG_NUMERIC_ATTRS__WEIGHT);
+		__store_int128_packed(&r->sum, value);
+	}
+	r->nitems = 1;
+	SET_VARSIZE(r, sizeof(kagg_state__psum_numeric_packed));
 	PG_RETURN_POINTER(r);
 }
 
@@ -382,6 +433,94 @@ pgstrom_fsum_trans_fp(PG_FUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(Datum)
+pgstrom_fsum_trans_numeric(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_numeric_packed *state;
+	kagg_state__psum_numeric_packed *arg;
+	MemoryContext		aggcxt;
+	static uint64_t		__pow10[] = {
+		1UL,						/* 10^0 */
+		10UL,						/* 10^1 */
+		100UL,						/* 10^2 */
+		1000UL,						/* 10^3 */
+		10000UL,					/* 10^4 */
+		100000UL,					/* 10^5 */
+		1000000UL,					/* 10^6 */
+		10000000UL,					/* 10^7 */
+		100000000UL,				/* 10^8 */
+		1000000000UL,				/* 10^9 */
+		10000000000UL,				/* 10^10 */
+		100000000000UL,				/* 10^11 */
+		1000000000000UL,			/* 10^12 */
+		10000000000000UL,			/* 10^13 */
+		100000000000000UL,			/* 10^14 */
+		1000000000000000UL,			/* 10^15 */
+		10000000000000000UL,		/* 10^16 */
+		100000000000000000UL,		/* 10^17 */
+		1000000000000000000UL,		/* 10^18 */
+	};
+
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+	if (PG_ARGISNULL(0))
+	{
+		if (PG_ARGISNULL(1))
+			PG_RETURN_NULL();
+		arg = (kagg_state__psum_numeric_packed *)PG_GETARG_BYTEA_P(1);
+		state = MemoryContextAlloc(aggcxt, sizeof(*state));
+		memcpy(state, arg, sizeof(*state));
+	}
+	else
+	{
+		uint32_t	special;
+
+		state = (kagg_state__psum_numeric_packed *)PG_GETARG_BYTEA_P(0);
+		if (!PG_ARGISNULL(1))
+		{
+			arg = (kagg_state__psum_numeric_packed *)PG_GETARG_BYTEA_P(1);
+			special = (arg->attrs & __PAGG_NUMERIC_ATTRS__MASK);
+			if (special != 0)
+				state->attrs |= special;
+			else
+			{
+				int16_t		weight_s = (int16_t)(state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+				int16_t		weight_a = (int16_t)(arg->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+				int128_t	ival = __fetch_int128_packed(&arg->sum);
+
+				if (weight_s > weight_a)
+				{
+					int		shift = (weight_s - weight_a);
+
+					while (shift > 0)
+					{
+						int		k = Min(shift, 18);
+
+						ival *= (int128_t)__pow10[k];
+						shift -= k;
+					}
+				}
+				else if (weight_s < weight_a)
+				{
+					int		shift = (weight_a - weight_s);
+
+					while (shift > 0)
+					{
+						int		k = Min(shift, 18);
+
+						ival /= (int128_t)__pow10[k];
+						shift -= k;
+					}
+				}
+				__store_int128_packed(&state->sum, ival +
+									  __fetch_int128_packed(&state->sum));
+			}
+			state->nitems += arg->nitems;
+		}
+	}
+	PG_RETURN_POINTER(state);
+}
+
+PUBLIC_FUNCTION(Datum)
 pgstrom_fsum_final_int(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_int_packed *state;
@@ -447,6 +586,45 @@ pgstrom_fsum_final_fp64_as_numeric(PG_FUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(Datum)
+pgstrom_fsum_final_numeric(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_numeric_packed *state;
+	uint32_t	special;
+	Datum		datum;
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+
+	state = (kagg_state__psum_numeric_packed *)PG_GETARG_BYTEA_P(0);
+	special = (state->attrs & __PAGG_NUMERIC_ATTRS__MASK);
+	if (state->nitems == 0)
+		PG_RETURN_NULL();
+	if (special != 0)
+	{
+		const char *str;
+
+		if (special == __PAGG_NUMERIC_ATTRS__PINF)
+			str = "+Inf";
+		else if (special == __PAGG_NUMERIC_ATTRS__NINF)
+			str = "-Inf";
+		else
+			str = "NaN";
+		datum = DirectFunctionCall1(numeric_in, CStringGetDatum(str));
+	}
+	else
+	{
+		int16_t		weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+		int128_t	ival = __fetch_int128_packed(&state->sum);
+		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, ival);
+		char	   *buf = palloc(bufsz);
+
+		__xpu_numeric_to_varlena(buf, weight, ival);
+		datum = PointerGetDatum(buf);
+	}
+	PG_RETURN_DATUM(datum);
+}
+
+PUBLIC_FUNCTION(Datum)
 pgstrom_favg_final_int(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_int_packed *state;
@@ -455,7 +633,7 @@ pgstrom_favg_final_int(PG_FUNCTION_ARGS)
 	state = (kagg_state__psum_int_packed *)PG_GETARG_BYTEA_P(0);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
-	n = DirectFunctionCall1(int4_numeric, Int32GetDatum(state->nitems));
+	n = DirectFunctionCall1(int8_numeric, Int64GetDatum(state->nitems));
 	sum = DirectFunctionCall1(int8_numeric, Int64GetDatum(state->sum));
 
 	PG_RETURN_DATUM(DirectFunctionCall2(numeric_div, sum, n));
@@ -481,10 +659,52 @@ pgstrom_favg_final_num(PG_FUNCTION_ARGS)
 	state = (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(0);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
-	n = DirectFunctionCall1(int4_numeric, Int32GetDatum(state->nitems));
+	n = DirectFunctionCall1(int8_numeric, Int64GetDatum(state->nitems));
 	sum = DirectFunctionCall1(float8_numeric, Float8GetDatum(state->sum));
 
 	PG_RETURN_DATUM(DirectFunctionCall2(numeric_div, sum, n));
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_favg_final_numeric(PG_FUNCTION_ARGS)
+{
+	kagg_state__psum_numeric_packed *state;
+	uint32_t	special;
+	Datum		datum;
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+
+	state = (kagg_state__psum_numeric_packed *)PG_GETARG_BYTEA_P(0);
+	special = (state->attrs & __PAGG_NUMERIC_ATTRS__MASK);
+	if (state->nitems == 0)
+		PG_RETURN_NULL();
+	if (special != 0)
+	{
+		const char *str;
+
+		if (special == __PAGG_NUMERIC_ATTRS__PINF)
+			str = "+Inf";
+		else if (special == __PAGG_NUMERIC_ATTRS__NINF)
+			str = "-Inf";
+		else
+			str = "NaN";
+		datum = DirectFunctionCall1(numeric_in, CStringGetDatum(str));
+	}
+	else
+	{
+		int16_t		weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+		int128_t	ival = __fetch_int128_packed(&state->sum);
+		int			bufsz = __xpu_numeric_to_varlena(NULL, weight, ival);
+		Numeric		sum = palloc(bufsz);
+		Numeric		div = int64_to_numeric(state->nitems);
+
+		__xpu_numeric_to_varlena((char *)sum, weight, ival);
+		datum = DirectFunctionCall2(numeric_div,
+									NumericGetDatum(sum),
+									NumericGetDatum(div));
+	}
+	PG_RETURN_DATUM(datum);
 }
 
 /*
@@ -496,6 +716,7 @@ pgstrom_partial_variance(PG_FUNCTION_ARGS)
 	kagg_state__stddev_packed *r = palloc(sizeof(kagg_state__stddev_packed));
 	float8_t	fval = PG_GETARG_FLOAT8(0);
 
+	r->attrs = 0;
 	r->nitems = 1;
 	r->sum_x2 = fval * fval;
 	SET_VARSIZE(r, sizeof(kagg_state__stddev_packed));
@@ -527,6 +748,7 @@ pgstrom_stddev_trans(PG_FUNCTION_ARGS)
 		{
 			arg = (kagg_state__stddev_packed *)PG_GETARG_BYTEA_P(1);
 
+			state->attrs  |= arg->attrs;
 			state->nitems += arg->nitems;
 			state->sum_x  += arg->sum_x;
 			state->sum_x2 += arg->sum_x2;
@@ -538,14 +760,17 @@ pgstrom_stddev_trans(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_var_sampf_final(PG_FUNCTION_ARGS)
 {
-	kagg_state__stddev_packed *state
-		= (kagg_state__stddev_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems > 1)
+	if (!PG_ARGISNULL(0))
 	{
-		float8_t	N = (double)state->nitems;
-		float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
+		kagg_state__stddev_packed *state
+			= (kagg_state__stddev_packed *)PG_GETARG_BYTEA_P(0);
+		if (state->nitems > 1)
+		{
+			float8_t	N = (double)state->nitems;
+			float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
 
-		PG_RETURN_FLOAT8(fval / (N * (N - 1.0)));
+			PG_RETURN_FLOAT8(fval / (N * (N - 1.0)));
+		}
 	}
 	PG_RETURN_NULL();
 }
@@ -563,14 +788,17 @@ pgstrom_var_samp_final(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_var_popf_final(PG_FUNCTION_ARGS)
 {
-	kagg_state__stddev_packed *state
-		= (kagg_state__stddev_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems > 0)
+	if (!PG_ARGISNULL(0))
 	{
-		float8_t	N = (double)state->nitems;
-		float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
+		kagg_state__stddev_packed *state
+			= (kagg_state__stddev_packed *)PG_GETARG_BYTEA_P(0);
+		if (state->nitems > 0)
+		{
+			float8_t	N = (double)state->nitems;
+			float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
 
-		PG_RETURN_FLOAT8(fval / (N * N));
+			PG_RETURN_FLOAT8(fval / (N * N));
+		}
 	}
 	PG_RETURN_NULL();
 }
@@ -635,6 +863,7 @@ pgstrom_partial_covar(PG_FUNCTION_ARGS)
 	float8_t	x = PG_GETARG_FLOAT8(0);
 	float8_t	y = PG_GETARG_FLOAT8(1);
 
+	r->attrs  = 0;
 	r->nitems = 1;
 	r->sum_x  = x;
 	r->sum_xx = x * x;
@@ -670,6 +899,7 @@ pgstrom_covar_accum(PG_FUNCTION_ARGS)
 		{
 			arg = (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(1);
 
+			state->attrs  |= arg->attrs;
 			state->nitems += arg->nitems;
 			state->sum_x  += arg->sum_x;
 			state->sum_xx += arg->sum_xx;
@@ -682,19 +912,29 @@ pgstrom_covar_accum(PG_FUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(Datum)
+pgstrom_correlation_final(PG_FUNCTION_ARGS)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
+
+	if (state->nitems < 1 ||
+		state->sum_xx == 0.0 ||
+		state->sum_yy == 0.0)
+		PG_RETURN_NULL();
+
+	PG_RETURN_FLOAT8(state->sum_xy / sqrt(state->sum_xx * state->sum_yy));
+}
+
+PUBLIC_FUNCTION(Datum)
 pgstrom_covar_samp_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
 		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
 
-	if (state->nitems > 1)
-	{
-		float8_t	N = (float8_t)state->nitems;
-		float8_t	fval = N * state->sum_xy - state->sum_x * state->sum_y;
+	if (state->nitems < 2)
+		PG_RETURN_NULL();
 
-		PG_RETURN_FLOAT8(fval / (N * (N - 1.0)));
-	}
-	PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(state->sum_xy / (double)(state->nitems - 1));
 }
 
 PUBLIC_FUNCTION(Datum)
@@ -703,14 +943,10 @@ pgstrom_covar_pop_final(PG_FUNCTION_ARGS)
 	kagg_state__covar_packed *state
 		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
 
-	if (state->nitems > 0)
-	{
-		float8_t	N = (float8_t)state->nitems;
-		float8_t	fval = N * state->sum_xy - state->sum_x * state->sum_y;
+	if (state->nitems < 1)
+		PG_RETURN_NULL();
 
-		PG_RETURN_FLOAT8(fval / (N * N));
-	}
-	PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(state->sum_xy / (double)state->nitems);
 }
 
 PUBLIC_FUNCTION(Datum)
@@ -718,13 +954,10 @@ pgstrom_regr_avgx_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
 		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems > 0)
-	{
-		float8_t	N = (float8_t)state->nitems;
 
-		PG_RETURN_FLOAT8(state->sum_x / N);
-	}
-	PG_RETURN_NULL();
+	if (state->nitems < 1)
+		PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(state->sum_x / (double)state->nitems);
 }
 
 PUBLIC_FUNCTION(Datum)
@@ -732,13 +965,9 @@ pgstrom_regr_avgy_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
 		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems > 0)
-	{
-		float8_t	N = (float8_t)state->nitems;
-
-		PG_RETURN_FLOAT8(state->sum_y / N);
-	}
-	PG_RETURN_NULL();
+	if (state->nitems < 1)
+		PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(state->sum_y / (double)state->nitems);
 }
 
 PUBLIC_FUNCTION(Datum)
@@ -747,7 +976,7 @@ pgstrom_regr_count_final(PG_FUNCTION_ARGS)
 	kagg_state__covar_packed *state
 		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
 
-	PG_RETURN_FLOAT8((float8_t)state->nitems);
+	PG_RETURN_FLOAT8((double)state->nitems);
 }
 
 PUBLIC_FUNCTION(Datum)
@@ -755,14 +984,12 @@ pgstrom_regr_intercept_final(PG_FUNCTION_ARGS)
 {
 	kagg_state__covar_packed *state
 		= (kagg_state__covar_packed *)PG_GETARG_BYTEA_P(0);
-	if (state->nitems > 0 && state->sum_xx != 0.0)
-	{
-		float8_t	N = (float8_t)state->nitems;
-		
-		PG_RETURN_FLOAT8((state->sum_y -
-						  state->sum_x * state->sum_xy / state->sum_xx) / N);
-	}
-	PG_RETURN_NULL();
+
+	if (state->nitems < 1 || state->sum_xx == 0.0)
+		PG_RETURN_NULL();
+
+	PG_RETURN_FLOAT8((state->sum_y -
+					  state->sum_x * state->sum_xy / state->sum_xx) / (double)state->nitems);
 }
 
 PUBLIC_FUNCTION(Datum)

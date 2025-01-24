@@ -66,8 +66,13 @@ TYPE_ALIAS(earth, "earthdistance", cube, "cube")
 #define __FUNC_OPCODE(FUNC_NAME,FUNC_ARGS,FUNC_COST,EXTENSION)			\
 	FUNC_OPCODE(FUNC_NAME,FUNC_ARGS,DEVKIND__ANY,FUNC_NAME,FUNC_COST,EXTENSION)
 #define __FUNC_LOCALE_OPCODE(FUNC_NAME,FUNC_ARGS,FUNC_COST,EXTENSION)	\
-	FUNC_OPCODE(FUNC_NAME,FUNC_ARGS,DEVFUNC__LOCALE_AWARE|DEVKIND__ANY,FUNC_NAME,FUNC_COST,EXTENSION)
-
+	FUNC_OPCODE(FUNC_NAME, FUNC_ARGS,									\
+				DEVFUNC__LOCALE_AWARE | DEVKIND__ANY,					\
+				FUNC_NAME, FUNC_COST, EXTENSION)
+#define __FUNC_RECURSIVE_OPCODE(FUNC_NAME,FUNC_ARGS,FUNC_COST,EXTENSION) \
+	FUNC_OPCODE(FUNC_NAME, FUNC_ARGS,									\
+				DEVFUNC__HAS_RECURSION | DEVKIND__ANY,					\
+				FUNC_NAME,FUNC_COST,EXTENSION)
 /* type cast functions */
 FUNC_OPCODE(bool, int4,   DEVKIND__ANY, int4_to_bool, 1, NULL)
 FUNC_OPCODE(int1, int2,   DEVKIND__ANY, int2_to_int1, 1, "pg_strom")
@@ -685,16 +690,16 @@ __FUNC_LOCALE_OPCODE(text_ge, text/text, 99, NULL)
 FUNC_OPCODE(length, text, DEVKIND__ANY, textlen, 99, NULL)
 
 /* LIKE operators */
-__FUNC_OPCODE(like, text/text, 800, NULL)
-__FUNC_OPCODE(textlike, text/text, 800, NULL)
-__FUNC_OPCODE(bpcharlike, bpchar/text, 800, NULL)
-__FUNC_OPCODE(notlike, text/text, 800, NULL)
-__FUNC_OPCODE(textnlike, text/text, 800, NULL)
-__FUNC_OPCODE(bpcharnlike, bpchar/text, 800, NULL)	
-__FUNC_OPCODE(texticlike, text/text, 800, NULL)
-__FUNC_OPCODE(bpchariclike, bpchar/text, 800, NULL)
-__FUNC_OPCODE(texticnlike, text/text, 800, NULL)
-__FUNC_OPCODE(bpcharicnlike, bpchar/text, 800, NULL)
+__FUNC_RECURSIVE_OPCODE(like, text/text, 800, NULL)
+__FUNC_RECURSIVE_OPCODE(textlike, text/text, 800, NULL)
+__FUNC_RECURSIVE_OPCODE(bpcharlike, bpchar/text, 800, NULL)
+__FUNC_RECURSIVE_OPCODE(notlike, text/text, 800, NULL)
+__FUNC_RECURSIVE_OPCODE(textnlike, text/text, 800, NULL)
+__FUNC_RECURSIVE_OPCODE(bpcharnlike, bpchar/text, 800, NULL)
+__FUNC_RECURSIVE_OPCODE(texticlike, text/text, 800, NULL)
+__FUNC_RECURSIVE_OPCODE(bpchariclike, bpchar/text, 800, NULL)
+__FUNC_RECURSIVE_OPCODE(texticnlike, text/text, 800, NULL)
+__FUNC_RECURSIVE_OPCODE(bpcharicnlike, bpchar/text, 800, NULL)
 
 /* String operations */
 FUNC_OPCODE(substr,    text/int4/int4, DEVKIND__ANY, substr,    20, NULL)
@@ -770,12 +775,12 @@ FUNC_OPCODE(st_makepoint, float8/float8,               DEVKIND__ANY, st_makepoin
 FUNC_OPCODE(st_makepoint, float8/float8/float8,        DEVKIND__ANY, st_makepoint3, 5, "postgis")
 FUNC_OPCODE(st_makepoint, float8/float8/float8/float8, DEVKIND__ANY, st_makepoint4, 5, "postgis")
 __FUNC_OPCODE(st_setsrid,        geometry/int4,             5, "postgis")
-__FUNC_OPCODE(st_distance,       geometry/geometry,        99, "postgis")
-__FUNC_OPCODE(st_dwithin,        geometry/geometry/float8, 99, "postgis")
+__FUNC_RECURSIVE_OPCODE(st_distance,       geometry/geometry,        99, "postgis")
+__FUNC_RECURSIVE_OPCODE(st_dwithin,        geometry/geometry/float8, 99, "postgis")
 __FUNC_OPCODE(st_linecrossingdirection, geometry/geometry, 99, "postgis")
-__FUNC_OPCODE(st_relate,         geometry/geometry,        99, "postgis")
-__FUNC_OPCODE(st_contains,       geometry/geometry,        99, "postgis")
-__FUNC_OPCODE(st_crosses,        geometry/geometry,        99, "postgis")
+__FUNC_RECURSIVE_OPCODE(st_relate,         geometry/geometry,        99, "postgis")
+__FUNC_RECURSIVE_OPCODE(st_contains,       geometry/geometry,        99, "postgis")
+__FUNC_RECURSIVE_OPCODE(st_crosses,        geometry/geometry,        99, "postgis")
 __FUNC_OPCODE(geometry_overlaps, geometry/geometry,        99, "postgis")
 __FUNC_OPCODE(geometry_contains, geometry/geometry,        99, "postgis")
 __FUNC_OPCODE(geometry_within,   geometry/geometry,        99, "postgis")

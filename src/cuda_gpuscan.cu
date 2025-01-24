@@ -20,6 +20,7 @@ static __shared__ union {
 	int32_t		i32[WARPSIZE];
 	int64_t		i64[WARPSIZE];
 	float8_t	fp64[WARPSIZE];
+	int128_t	i128[WARPSIZE];
 } __stair_sum_buffer;
 
 template <typename T>
@@ -51,6 +52,45 @@ __stair_sum_warp_common(T my_value)
 		curr += temp;
 
 	return curr;
+}
+
+INLINE_FUNCTION(int128_t)
+__stair_sum_warp_common(int128_t my_value)
+{
+	int128_packed_t		curr, temp;
+
+	assert(__activemask() == ~0U);
+	__store_int128_packed(&curr, my_value);
+	temp.u64_lo = __shfl_sync(__activemask(), curr.u64_lo, (LaneId() & ~0x01));
+	temp.u64_hi = __shfl_sync(__activemask(), curr.u64_hi, (LaneId() & ~0x01));
+	if ((LaneId() & 0x01) != 0)
+		__store_int128_packed(&curr, (__fetch_int128_packed(&curr) +
+									  __fetch_int128_packed(&temp)));
+
+	temp.u64_lo = __shfl_sync(__activemask(), curr.u64_lo, (LaneId() & ~0x03) | 0x01);
+	temp.u64_hi = __shfl_sync(__activemask(), curr.u64_hi, (LaneId() & ~0x03) | 0x01);
+	if ((LaneId() & 0x02) != 0)
+		__store_int128_packed(&curr, (__fetch_int128_packed(&curr) +
+									  __fetch_int128_packed(&temp)));
+
+	temp.u64_lo = __shfl_sync(__activemask(), curr.u64_lo, (LaneId() & ~0x07) | 0x03);
+	temp.u64_hi = __shfl_sync(__activemask(), curr.u64_hi, (LaneId() & ~0x07) | 0x03);
+	if ((LaneId() & 0x04) != 0)
+		__store_int128_packed(&curr, (__fetch_int128_packed(&curr) +
+									  __fetch_int128_packed(&temp)));
+
+	temp.u64_lo = __shfl_sync(__activemask(), curr.u64_lo, (LaneId() & ~0x0f) | 0x07);
+	temp.u64_hi = __shfl_sync(__activemask(), curr.u64_hi, (LaneId() & ~0x0f) | 0x07);
+	if ((LaneId() & 0x08) != 0)
+		__store_int128_packed(&curr, (__fetch_int128_packed(&curr) +
+									  __fetch_int128_packed(&temp)));
+
+	temp.u64_lo = __shfl_sync(__activemask(), curr.u64_lo, (LaneId() & ~0x1f) | 0x0f);
+	temp.u64_hi = __shfl_sync(__activemask(), curr.u64_hi, (LaneId() & ~0x1f) | 0x0f);
+	if ((LaneId() & 0x10) != 0)
+		__store_int128_packed(&curr, (__fetch_int128_packed(&curr) +
+									  __fetch_int128_packed(&temp)));
+	return __fetch_int128_packed(&curr);
 }
 
 PUBLIC_FUNCTION(uint32_t)
@@ -120,6 +160,7 @@ pgstrom_stair_sum_binary(bool predicate, uint32_t *p_total_count)
 PGSTROM_STAIR_SUM_TEMPLATE(uint32, uint32_t, u32)
 PGSTROM_STAIR_SUM_TEMPLATE(uint64, uint64_t, u64)
 PGSTROM_STAIR_SUM_TEMPLATE(int64,  int64_t,  i64)
+PGSTROM_STAIR_SUM_TEMPLATE(int128, int128_t, i128)
 PGSTROM_STAIR_SUM_TEMPLATE(fp64,   float8_t, fp64)
 
 #define PGSTROM_LOCAL_MINMAX_TEMPLATE(SUFFIX, BASETYPE, FIELD, OPER, INVAL)	\
@@ -178,6 +219,7 @@ PGSTROM_LOCAL_MINMAX_TEMPLATE(min_int64, int64_t, i64,  Min,  LONG_MAX)
 PGSTROM_LOCAL_MINMAX_TEMPLATE(max_int64, int64_t, i64,  Max,  LONG_MIN)
 PGSTROM_LOCAL_MINMAX_TEMPLATE(min_fp64, float8_t, fp64, Min,  DBL_MAX)
 PGSTROM_LOCAL_MINMAX_TEMPLATE(max_fp64, float8_t, fp64, Max, -DBL_MAX)
+PGSTROM_LOCAL_MINMAX_TEMPLATE(or_uint32, uint32_t, u32, Or, 0)
 
 /* ----------------------------------------------------------------
  *

@@ -161,7 +161,7 @@
 <dd>GpuPreAggによる集約処理を有効化/無効化する。</dd>
 <dt><code>pg_strom.enable_numeric_aggfuncs</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
 <dd><code>numeric</code>データ型を引数に取る集約演算をGPUで処理するかどうかを制御する。</dd>
-<dd>GPUでの集約演算において<code>numeric</code>データ型は倍精度浮動小数点数にマッピングされるため、計算誤差にセンシティブな用途の場合は、この設定値を <code>off</code> にしてCPUで集約演算を実行し、計算誤差の発生を抑えることができます。</dd>
+<dd>GPUでの集約演算において<code>numeric</code>データ型は128bit固定小数点変数にマッピングされるため、極端に大きな数、あるいは高精度な数の集計を行う場合はエラーとなってしまいます。そのようなワークロードに対しては、この設定値を <code>off</code> にしてCPUで集約演算を実行するよう強制する事ができます。</dd>
 <dt><code>pg_strom.enable_brin</code> [型: <code>bool</code> / 初期値: <code>on]</code></dt>
 <dd>BRINインデックスを使ったテーブルスキャンを有効化/無効化する。</dd>
 <dt><code>pg_strom.cpu_fallback</code> [型: <code>enum</code> / 初期値: <code>notice</code>]</dt>

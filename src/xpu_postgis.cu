@@ -6041,29 +6041,29 @@ pgfn_st_relate(XPU_PGFUNCTION_ARGS)
 
 		status = geom_relate_internal(kcxt, &geom1, &geom2);
 		if (status < 0)
-			result->expr_ops = NULL;
-		else
 		{
-			pos = (char *)kcxt_alloc(kcxt, VARHDRSZ + 9);
-			if (!pos)
-			{
-				STROM_ELOG(kcxt, "out of memory");
-				return false;
-			}
-			result->expr_ops = &xpu_text_ops;
-			result->length = -1;
-			result->value = pos;
-			SET_VARSIZE(pos, VARHDRSZ + 9);
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			return false;
+		}
+		pos = (char *)kcxt_alloc(kcxt, VARHDRSZ + 9);
+		if (!pos)
+		{
+			STROM_ELOG(kcxt, "out of memory");
+			return false;
+		}
+		result->expr_ops = &xpu_text_ops;
+		result->length = -1;
+		result->value = pos;
+		SET_VARSIZE(pos, VARHDRSZ + 9);
 
-			pos += VARHDRSZ;
-			for (int i=0; i < 9; i++, status >>= 3)
-			{
-				int		mask = (status & 0x7);
+		pos += VARHDRSZ;
+		for (int i=0; i < 9; i++, status >>= 3)
+		{
+			int		mask = (status & 0x7);
 
-				*pos++ = ((mask & 0x04) != 0 ? '2' :
-						  (mask & 0x02) != 0 ? '1' :
-						  (mask & 0x01) != 0 ? '0' : 'F');
-			}
+			*pos++ = ((mask & 0x04) != 0 ? '2' :
+					  (mask & 0x02) != 0 ? '1' :
+					  (mask & 0x01) != 0 ? '0' : 'F');
 		}
 	}
 	return true;
@@ -6206,17 +6206,15 @@ pgfn_st_contains(XPU_PGFUNCTION_ARGS)
 
 		/* elsewhere, use st_relate and DE9-IM */
 		status = geom_relate_internal(kcxt, &geom1, &geom2);
-		if (status >= 0)
+		if (status < 0)
 		{
-			result->expr_ops = &xpu_bool_ops;
-			result->value = ((status & IM__INTER_INTER_2D) != 0 &&
-							 (status & IM__EXTER_INTER_2D) == 0 &&
-							 (status & IM__EXTER_BOUND_2D) == 0);
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			return false;
 		}
-		else
-		{
-			result->expr_ops = NULL;
-		}
+		result->expr_ops = &xpu_bool_ops;
+		result->value = ((status & IM__INTER_INTER_2D) != 0 &&
+						 (status & IM__EXTER_INTER_2D) == 0 &&
+						 (status & IM__EXTER_BOUND_2D) == 0);
 	}
 	return true;
 }
@@ -6288,35 +6286,42 @@ pgfn_st_crosses(XPU_PGFUNCTION_ARGS)
 #endif
 		status = geom_relate_internal(kcxt, &geom1, &geom2);
 		if (status < 0)
-			result->expr_ops = NULL;
-		else if (geom1.type == GEOM_POINTTYPE ||
-				 geom1.type == GEOM_MULTIPOINTTYPE)
 		{
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			return false;
+		}
+
+		if (geom1.type == GEOM_POINTTYPE ||
+			geom1.type == GEOM_MULTIPOINTTYPE)
+		{
+			result->expr_ops = &xpu_bool_ops;
 			if (geom2.type == GEOM_LINETYPE ||
 				geom2.type == GEOM_MULTILINETYPE ||
 				geom2.type == GEOM_TRIANGLETYPE ||
 				geom2.type == GEOM_POLYGONTYPE ||
 				geom2.type == GEOM_MULTIPOLYGONTYPE)
 			{
-				result->expr_ops = &xpu_bool_ops;
 				result->value = ((status & IM__INTER_INTER_2D) != 0 &&
 								 (status & IM__INTER_EXTER_2D) != 0);
+			}
+			else
+			{
+				result->value = false;
 			}
 		}
 		else if (geom1.type == GEOM_LINETYPE ||
 				 geom1.type == GEOM_MULTILINETYPE)
 		{
+			result->expr_ops = &xpu_bool_ops;
 			if (geom2.type == GEOM_POINTTYPE ||
 				geom2.type == GEOM_MULTIPOINTTYPE)
 			{
-				result->expr_ops = &xpu_bool_ops;
 				result->value = ((status & IM__INTER_INTER_2D) != 0 &&
 								 (status & IM__EXTER_INTER_2D) != 0);
 			}
 			else if (geom2.type == GEOM_LINETYPE ||
 					 geom2.type == GEOM_MULTILINETYPE)
 			{
-				result->expr_ops = &xpu_bool_ops;
 				result->value = ((status & IM__INTER_INTER_2D) == IM__INTER_INTER_0D &&
 								 (status & IM__BOUND_BOUND_2D) == 0);
 			}
@@ -6324,23 +6329,30 @@ pgfn_st_crosses(XPU_PGFUNCTION_ARGS)
 					 geom2.type == GEOM_POLYGONTYPE ||
 					 geom2.type == GEOM_MULTIPOLYGONTYPE)
 			{
-				result->expr_ops = &xpu_bool_ops;
 				result->value = ((status & IM__INTER_INTER_2D) != 0 &&
 								 (status & IM__INTER_EXTER_2D) != 0);
+			}
+			else
+			{
+				result->value = false;
 			}
 		}
 		else if (geom1.type == GEOM_TRIANGLETYPE ||
 				 geom1.type == GEOM_POLYGONTYPE ||
 				 geom1.type == GEOM_MULTIPOLYGONTYPE)
 		{
+			result->expr_ops = &xpu_bool_ops;
 			if (geom2.type == GEOM_POINTTYPE ||
 				geom2.type == GEOM_MULTIPOINTTYPE ||
 				geom2.type == GEOM_LINETYPE ||
 				geom2.type == GEOM_MULTILINETYPE)
 			{
-				result->expr_ops = &xpu_bool_ops;
 				result->value = ((status & IM__INTER_INTER_2D) != 0 &&
 								 (status & IM__EXTER_INTER_2D) != 0);
+			}
+			else
+			{
+				result->value = false;
 			}
 		}
 	}

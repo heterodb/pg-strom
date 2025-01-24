@@ -144,6 +144,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keyload));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_keycomp));
 	privs = lappend(privs, __makeByteaConst(pp_info->kexp_groupby_actions));
+	privs = lappend(privs, __makeByteaConst(pp_info->kexp_gpusort_keydesc));
 	/* Kvars definitions */
 	foreach (lc, pp_info->kvars_deflist)
 	{
@@ -163,7 +164,11 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
 	privs = lappend(privs, makeInteger(pp_info->cuda_stack_size));
 	privs = lappend(privs, pp_info->groupby_actions);
+	privs = lappend(privs, pp_info->groupby_typmods);
 	privs = lappend(privs, makeInteger(pp_info->groupby_prepfn_bufsz));
+	exprs = lappend(exprs, pp_info->gpusort_keys_expr);
+	privs = lappend(privs, pp_info->gpusort_keys_kind);
+	privs = lappend(privs, makeInteger(pp_info->gpusort_htup_margin));
 	exprs = lappend(exprs, pp_info->projection_hashkeys);
 	/* inner relations */
 	privs = lappend(privs, makeInteger(pp_info->sibling_param_id));
@@ -252,6 +257,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.kexp_groupby_keyload   = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_groupby_keycomp   = __getByteaConst(list_nth(privs, pindex++));
 	pp_data.kexp_groupby_actions   = __getByteaConst(list_nth(privs, pindex++));
+	pp_data.kexp_gpusort_keydesc   = __getByteaConst(list_nth(privs, pindex++));
 	/* Kvars definitions */
 	kvars_deflist_privs = list_nth(privs, pindex++);
 	kvars_deflist_exprs = list_nth(exprs, eindex++);
@@ -270,7 +276,11 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.cuda_stack_size = intVal(list_nth(privs, pindex++));
 	pp_data.groupby_actions = list_nth(privs, pindex++);
+	pp_data.groupby_typmods = list_nth(privs, pindex++);
 	pp_data.groupby_prepfn_bufsz = intVal(list_nth(privs, pindex++));
+	pp_data.gpusort_keys_expr = list_nth(exprs, eindex++);
+	pp_data.gpusort_keys_kind = list_nth(privs, pindex++);
+	pp_data.gpusort_htup_margin = intVal(list_nth(privs, pindex++));
 	pp_data.projection_hashkeys = list_nth(exprs, eindex++);
 	/* inner relations */
 	pp_data.sibling_param_id = intVal(list_nth(privs, pindex++));
@@ -338,6 +348,7 @@ copy_pgstrom_plan_info(const pgstromPlanInfo *pp_orig)
 	}
 	pp_dest->kvars_deflist    = kvars_deflist;
 	pp_dest->groupby_actions  = list_copy(pp_dest->groupby_actions);
+	pp_dest->groupby_typmods  = list_copy(pp_dest->groupby_typmods);
 	pp_dest->projection_hashkeys = copyObject(pp_dest->projection_hashkeys);
 	for (int j=0; j < pp_orig->num_rels; j++)
 	{
@@ -608,6 +619,94 @@ get_relation_am(Oid rel_oid, bool missing_ok)
 	ReleaseSysCache(tup);
 
 	return relam;
+}
+
+/*
+ * __getRelOptInfoName
+ */
+char *
+__getRelOptInfoName(char *buffer, size_t bufsz,
+					PlannerInfo *root, RelOptInfo *rel)
+{
+	if (IS_JOIN_REL(rel))
+	{
+		char   *pos = buffer;
+		bool	need_comma = false;
+		int		k, nbytes;
+
+		for (k = bms_next_member(rel->relids, -1);
+			 k >= 0;
+			 k = bms_next_member(rel->relids, k))
+		{
+			RelOptInfo *__rel = root->simple_rel_array[k];
+			char	   *prev = pos;
+
+			if (need_comma)
+			{
+				nbytes = snprintf(pos, bufsz, ",");
+				pos += nbytes;
+				bufsz -= nbytes;
+			}
+			pos = __getRelOptInfoName(pos, bufsz, root, __rel);
+			pos = strchr(pos, '\0');
+			Assert(pos != NULL && pos >= prev && pos - prev <= bufsz);
+			bufsz -= (pos - prev);
+
+			need_comma = true;
+		}
+	}
+	else if (IS_SIMPLE_REL(rel))
+	{
+		RangeTblEntry  *rte = root->simple_rte_array[rel->relid];
+		/* see get_rte_alias() */
+		if (rte->alias != NULL)
+		{
+			if (rte->rtekind == RTE_RELATION)
+				snprintf(buffer, bufsz, "%s as %s",
+						 get_rel_name(rte->relid),
+						 rte->alias->aliasname);
+			else
+				snprintf(buffer, bufsz, "%s",
+						 rte->alias->aliasname);
+		}
+		else if (rte->rtekind == RTE_RELATION)
+			snprintf(buffer, bufsz, "%s",
+					 get_rel_name(rte->relid));
+		else if (rte->eref != NULL)
+			snprintf(buffer, bufsz, "%s",
+					 rte->eref->aliasname);
+		else
+			snprintf(buffer, bufsz, "base:relid=%u", rte->relid);
+	}
+	else
+	{
+		static const char *upper_labels[] = {
+			"upper:setop",
+			"upper:partial-group-agg",
+			"upper:window",
+			"upper:partial-distinct",
+			"upper:ordered",
+			"upper:final"
+		};
+		Assert(IS_UPPER_REL(rel));
+		for (int k=UPPERREL_SETOP; k <= UPPERREL_FINAL; k++)
+		{
+			ListCell   *lc;
+
+			foreach (lc, root->upper_rels[k])
+			{
+				RelOptInfo *upper_rel = lfirst(lc);
+
+				if (upper_rel == rel)
+				{
+					snprintf(buffer, bufsz, "(%s)", upper_labels[k]);
+					return buffer;
+				}
+			}
+		}
+		snprintf(buffer, bufsz, "(unknown-upper)");
+	}
+	return buffer;
 }
 
 /*

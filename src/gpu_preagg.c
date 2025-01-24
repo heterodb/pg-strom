@@ -1,5 +1,5 @@
 /*
- * gpu_groupby.c
+ * gpu_preagg.c
  *
  * Aggregation and Group-By with GPU acceleration
  * ----
@@ -24,6 +24,52 @@ static bool					pgstrom_enable_partitionwise_dpupreagg = false;
 static bool					pgstrom_enable_gpupreagg = false;
 static bool					pgstrom_enable_partitionwise_gpupreagg = false;
 static bool					pgstrom_enable_numeric_aggfuncs;
+bool						pgstrom_enable_gpusort = false;
+
+/*
+ * pgstrom_is_gpupreagg_path
+ */
+bool
+pgstrom_is_gpupreagg_path(const Path *path)
+{
+	if (IsA(path, CustomPath))
+	{
+		const CustomPath *cpath = (const CustomPath *)path;
+
+		return (cpath->methods == &gpupreagg_path_methods);
+	}
+	return false;
+}
+
+/*
+ * pgstrom_is_gpupreagg_plan
+ */
+bool
+pgstrom_is_gpupreagg_plan(const Plan *plan)
+{
+	if (IsA(plan, CustomScan))
+	{
+		const CustomScan *cscan = (const CustomScan *)plan;
+
+		return (cscan->methods == &gpupreagg_plan_methods);
+	}
+	return false;
+}
+
+/*
+ * pgstrom_is_gpupreagg_state
+ */
+bool
+pgstrom_is_gpupreagg_state(const PlanState *ps)
+{
+	if (IsA(ps, CustomScanState))
+	{
+		const CustomScanState *css = (const CustomScanState *)ps;
+
+		return (css->methods == &gpupreagg_exec_methods);
+	}
+	return false;
+}
 
 /*
  * List of supported aggregate functions
@@ -38,10 +84,12 @@ typedef struct
 	 * c: pg_catalog ... the system default
 	 * s: pgstrom    ... PG-Strom's special ones
 	 */
-	const char *finalfn_signature;
-	const char *partfn_signature;
+	const char *finalfn_agg_signature;		/* used by Agg(CPU) */
+	const char *partfn_signature;			/* used by GpuPreAgg */
+	const char *finalfn_proj_signature;		/* used by GpuAgg */
 	int			partfn_action;	/* any of KAGG_ACTION__* */
 	bool		numeric_aware;	/* ignored, if !enable_numeric_aggfuncs */
+	int			gpusort_keykind;			/* used by GPU-Sort */
 } aggfunc_catalog_t;
 
 static aggfunc_catalog_t	aggfunc_catalog_array[] = {
@@ -49,13 +97,17 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"count()",
 	 "s:fcount(int8)",
 	 "s:nrows()",
-	 KAGG_ACTION__NROWS_ANY, false
+	 NULL,		/* use nrows() as is */
+	 KAGG_ACTION__NROWS_ANY, false,
+	 KSORT_KEY_KIND__COUNT
 	},
 	/* COUNT(X) = SUM(NROWS(X)) */
 	{"count(any)",
 	 "s:fcount(int8)",
 	 "s:nrows(any)",
-	 KAGG_ACTION__NROWS_COND, false
+	 NULL,		/* use nrows() as is */
+	 KAGG_ACTION__NROWS_COND, false,
+	 KSORT_KEY_KIND__COUNT
 	},
 	/*
 	 * MIN(X) = MIN(PMIN(X))
@@ -63,67 +115,93 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"min(int1)",
 	 "s:min_i1(bytea)",
 	 "s:pmin(int4)",
-	 KAGG_ACTION__PMIN_INT32, false
+	 "s:fmin_i1(bytea)",
+	 KAGG_ACTION__PMIN_INT32, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(int2)",
 	 "s:min_i2(bytea)",
 	 "s:pmin(int4)",
-	 KAGG_ACTION__PMIN_INT32, false
+	 "s:fmin_i2(bytea)",
+	 KAGG_ACTION__PMIN_INT32, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(int4)",
 	 "s:min_i4(bytea)",
 	 "s:pmin(int4)",
-	 KAGG_ACTION__PMIN_INT32, false
+	 "s:fmin_i4(bytea)",
+	 KAGG_ACTION__PMIN_INT32, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(int8)",
 	 "s:min_i8(bytea)",
 	 "s:pmin(int8)",
-	 KAGG_ACTION__PMIN_INT64, false
+	 "s:fmin_i8(bytea)",
+	 KAGG_ACTION__PMIN_INT64, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(float2)",
 	 "s:min_f2(bytea)",
 	 "s:pmin(float8)",
-	 KAGG_ACTION__PMIN_FP64, false
+	 "s:fmin_f2(bytea)",
+	 KAGG_ACTION__PMIN_FP64, false,
+	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"min(float4)",
 	 "s:min_f4(bytea)",
 	 "s:pmin(float8)",
-	 KAGG_ACTION__PMIN_FP64, false
+	 "s:fmin_f4(bytea)",
+	 KAGG_ACTION__PMIN_FP64, false,
+	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"min(float8)",
 	 "s:min_f8(bytea)",
 	 "s:pmin(float8)",
-	 KAGG_ACTION__PMIN_FP64, false
+	 "s:fmin_f8(bytea)",
+	 KAGG_ACTION__PMIN_FP64, false,
+	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"min(numeric)",
 	 "s:min_num(bytea)",
 	 "s:pmin(float8)",
-	 KAGG_ACTION__PMIN_FP64, true
+	 "s:fmin_num(bytea)",
+	 KAGG_ACTION__PMIN_FP64, true,
+	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"min(money)",
 	 "s:min_cash(bytea)",
 	 "s:pmin(money)",
-	 KAGG_ACTION__PMIN_INT64, false
+	 "s:fmin_cash(bytea)",
+	 KAGG_ACTION__PMIN_INT64, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(date)",
 	 "s:min_date(bytea)",
 	 "s:pmin(date)",
-	 KAGG_ACTION__PMIN_INT32, false
+	 "s:fmin_date(bytea)",
+	 KAGG_ACTION__PMIN_INT32, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(time)",
 	 "s:min_time(bytea)",
 	 "s:pmin(time)",
-	 KAGG_ACTION__PMIN_INT64, false
+	 "s:fmin_time(bytea)",
+	 KAGG_ACTION__PMIN_INT64, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(timestamp)",
 	 "s:min_ts(bytea)",
 	 "s:pmin(timestamp)",
-	 KAGG_ACTION__PMIN_INT64, false
+	 "s:fmin_ts(bytea)",
+	 KAGG_ACTION__PMIN_INT64, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(timestamptz)",
 	 "s:min_tstz(bytea)",
 	 "s:pmin(timestamptz)",
-	 KAGG_ACTION__PMIN_INT64, false
+	 "s:fmin_tstz(bytea)",
+	 KAGG_ACTION__PMIN_INT64, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	/*
 	 * MAX(X) = MAX(PMAX(X))
@@ -131,67 +209,93 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"max(int1)",
 	 "s:max_i1(bytea)",
 	 "s:pmax(int4)",
-	 KAGG_ACTION__PMAX_INT32, false
+	 "s:fmax_i1(bytea)",
+	 KAGG_ACTION__PMAX_INT32, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(int2)",
 	 "s:max_i2(bytea)",
 	 "s:pmax(int4)",
-	 KAGG_ACTION__PMAX_INT32, false
+	 "s:fmax_i2(bytea)",
+	 KAGG_ACTION__PMAX_INT32, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(int4)",
 	 "s:max_i4(bytea)",
 	 "s:pmax(int4)",
-	 KAGG_ACTION__PMAX_INT32, false
+	 "s:fmax_i4(bytea)",
+	 KAGG_ACTION__PMAX_INT32, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(int8)",
 	 "s:max_i8(bytea)",
 	 "s:pmax(int8)",
-	 KAGG_ACTION__PMAX_INT64, false
+	 "s:fmax_i8(bytea)",
+	 KAGG_ACTION__PMAX_INT64, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(float2)",
 	 "s:max_f2(bytea)",
 	 "s:pmax(float8)",
-	 KAGG_ACTION__PMAX_FP64, false
+	 "s:fmax_f2(bytea)",
+	 KAGG_ACTION__PMAX_FP64, false,
+	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"max(float4)",
 	 "s:max_f4(bytea)",
 	 "s:pmax(float8)",
-	 KAGG_ACTION__PMAX_FP64, false
+	 "s:fmax_f4(bytea)",
+	 KAGG_ACTION__PMAX_FP64, false,
+	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"max(float8)",
 	 "s:max_f8(bytea)",
 	 "s:pmax(float8)",
-	 KAGG_ACTION__PMAX_FP64, false
+	 "s:fmax_f84(bytea)",
+	 KAGG_ACTION__PMAX_FP64, false,
+	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"max(numeric)",
 	 "s:max_num(bytea)",
 	 "s:pmax(float8)",
-	 KAGG_ACTION__PMAX_FP64, true
+	 "s:fmax_num(bytea)",
+	 KAGG_ACTION__PMAX_FP64, true,
+	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"max(money)",
 	 "s:max_cash(bytea)",
 	 "s:pmax(money)",
-	 KAGG_ACTION__PMAX_INT64, false
+	 "s:fmax_cash(bytea)",
+	 KAGG_ACTION__PMAX_INT64, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(date)",
 	 "s:max_date(bytea)",
 	 "s:pmax(date)",
-	 KAGG_ACTION__PMAX_INT32, false
+	 "s:fmax_date(bytea)",
+	 KAGG_ACTION__PMAX_INT32, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(time)",
 	 "s:max_time(bytea)",
 	 "s:pmax(time)",
-	 KAGG_ACTION__PMAX_INT64, false
+	 "s:fmax_time(bytea)",
+	 KAGG_ACTION__PMAX_INT64, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(timestamp)",
 	 "s:max_ts(bytea)",
 	 "s:pmax(timestamp)",
-	 KAGG_ACTION__PMAX_INT64, false
+	 "s:fmax_ts(timestamp)",
+	 KAGG_ACTION__PMAX_INT64, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(timestamptz)",
 	 "s:max_tstz(bytea)",
 	 "s:pmax(timestamptz)",
-	 KAGG_ACTION__PMAX_INT64, false
+	 "s:fmax_tstz(timestamp)",
+	 KAGG_ACTION__PMAX_INT64, false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	/*
 	 * SUM(X) = SUM(PSUM(X))
@@ -199,47 +303,65 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"sum(int1)",
 	 "s:sum_int(bytea)",
 	 "s:psum(int8)",
-	 KAGG_ACTION__PSUM_INT,  false
+	 "s:fsum_int(bytea)",
+	 KAGG_ACTION__PSUM_INT,  false,
+	 KSORT_KEY_KIND__PSUM_INT64
 	},
 	{"sum(int2)",
 	 "s:sum_int(bytea)",
 	 "s:psum(int8)",
-	 KAGG_ACTION__PSUM_INT,  false
+	 "s:fsum_int(bytea)",
+	 KAGG_ACTION__PSUM_INT,  false,
+	 KSORT_KEY_KIND__PSUM_INT64
 	},
 	{"sum(int4)",
 	 "s:sum_int(bytea)",
 	 "s:psum(int8)",
-	 KAGG_ACTION__PSUM_INT,  false
+	 "s:fsum_int(bytea)",
+	 KAGG_ACTION__PSUM_INT,  false,
+	 KSORT_KEY_KIND__PSUM_INT64
 	},
 	{"sum(int8)",
-	 "s:sum_int_num(bytea)",
-	 "s:psum(int8)",
-	 KAGG_ACTION__PSUM_INT,  false
+	 "s:sum_int64(bytea)",
+	 "s:psum64(int8)",
+	 "s:fsum_int64(bytea)",
+	 KAGG_ACTION__PSUM_INT64,  false,
+	 KSORT_KEY_KIND__PSUM_INT128
 	},
 	{"sum(float2)",
 	 "s:sum_fp64(bytea)",
 	 "s:psum(float8)",
-	 KAGG_ACTION__PSUM_FP, false
+	 "s:fsum_fp64(bytea)",
+	 KAGG_ACTION__PSUM_FP, false,
+	 KSORT_KEY_KIND__PSUM_FP64
 	},
 	{"sum(float4)",
 	 "s:sum_fp32(bytea)",
 	 "s:psum(float8)",
-	 KAGG_ACTION__PSUM_FP, false
+	 "s:fsum_fp32(bytea)",
+	 KAGG_ACTION__PSUM_FP, false,
+	 KSORT_KEY_KIND__PSUM_FP64
 	},
 	{"sum(float8)",
 	 "s:sum_fp64(bytea)",
 	 "s:psum(float8)",
-	 KAGG_ACTION__PSUM_FP, false
+	 "s:fsum_fp64(bytea)",
+	 KAGG_ACTION__PSUM_FP, false,
+	 KSORT_KEY_KIND__PSUM_FP64
 	},
 	{"sum(numeric)",
-	 "s:sum_fp_num(bytea)",
-	 "s:psum(float8)",
-	 KAGG_ACTION__PSUM_FP, true
+	 "s:sum_numeric(bytea)",
+	 "s:psum(numeric)",
+	 "s:fsum_numeric(bytea)",
+	 KAGG_ACTION__PSUM_NUMERIC, true,
+	 KSORT_KEY_KIND__PSUM_NUMERIC
 	},
 	{"sum(money)",
 	 "s:sum_cash(bytea)",
 	 "s:psum(money)",
-	 KAGG_ACTION__PSUM_INT,  false
+	 "s:fsum_cach(bytea)",
+	 KAGG_ACTION__PSUM_INT,  false,
+	 KSORT_KEY_KIND__PSUM_INT64
 	},
 	/*
 	 * AVG(X) = EX_AVG(NROWS(X), PSUM(X))
@@ -247,42 +369,58 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"avg(int1)",
 	 "s:avg_int(bytea)",
 	 "s:pavg(int8)",
-	 KAGG_ACTION__PAVG_INT, false
+	 "s:favg_int(bytea)",
+	 KAGG_ACTION__PAVG_INT, false,
+	 KSORT_KEY_KIND__PAVG_INT64
 	},
 	{"avg(int2)",
 	 "s:avg_int(bytea)",
 	 "s:pavg(int8)",
-	 KAGG_ACTION__PAVG_INT, false
+	 "s:favg_int(bytea)",
+	 KAGG_ACTION__PAVG_INT, false,
+	 KSORT_KEY_KIND__PAVG_INT64
 	},
 	{"avg(int4)",
 	 "s:avg_int(bytea)",
 	 "s:pavg(int8)",
-	 KAGG_ACTION__PAVG_INT, false
+	 "s:favg_int(bytea)",
+	 KAGG_ACTION__PAVG_INT, false,
+	 KSORT_KEY_KIND__PAVG_INT64
 	},
 	{"avg(int8)",
-	 "s:avg_int(bytea)",
-	 "s:pavg(int8)",
-	 KAGG_ACTION__PAVG_INT, false
+	 "s:avg_int64(bytea)",
+	 "s:pavg64(int8)",
+	 "s:favg_int64(bytea)",
+	 KAGG_ACTION__PAVG_INT64, false,
+	 KSORT_KEY_KIND__PAVG_INT128
 	},
 	{"avg(float2)",
 	 "s:avg_fp(bytea)",
 	 "s:pavg(float8)",
-	 KAGG_ACTION__PAVG_FP, false
+	 "s:favg_fp(bytea)",
+	 KAGG_ACTION__PAVG_FP, false,
+	 KSORT_KEY_KIND__PAVG_FP64
 	},
 	{"avg(float4)",
 	 "s:avg_fp(bytea)",
 	 "s:pavg(float8)",
-	 KAGG_ACTION__PAVG_FP, false
+	 "s:favg_fp(bytea)",
+	 KAGG_ACTION__PAVG_FP, false,
+	 KSORT_KEY_KIND__PAVG_FP64
 	},
 	{"avg(float8)",
 	 "s:avg_fp(bytea)",
 	 "s:pavg(float8)",
-	 KAGG_ACTION__PAVG_FP, false
+	 "s:favg_fp(bytea)",
+	 KAGG_ACTION__PAVG_FP, false,
+	 KSORT_KEY_KIND__PAVG_FP64
 	},
 	{"avg(numeric)",
-	 "s:avg_num(bytea)",
-	 "s:pavg(float8)",
-	 KAGG_ACTION__PAVG_FP, true
+	 "s:avg_numeric(bytea)",
+	 "s:pavg(numeric)",
+	 "s:favg_numeric(bytea)",
+	 KAGG_ACTION__PAVG_NUMERIC, true,
+	 KSORT_KEY_KIND__PAVG_NUMERIC
 	},
 	/*
 	 * STDDEV(X) = EX_STDDEV_SAMP(NROWS(),PSUM(X),PSUM(X*X))
@@ -290,42 +428,58 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"stddev(int1)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(int2)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(int4)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(int8)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(float2)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_sampf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(float4)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_sampf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(float8)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_sampf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(numeric)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, true
+	 "s:fstddev_samp(bytea)",
+	 KAGG_ACTION__STDDEV, true,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	/*
 	 * STDDEV_SAMP(X) = EX_STDDEV_SAMP(NROWS(),PSUM(X),PSUM(X*X))
@@ -333,42 +487,58 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"stddev_samp(int1)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(int2)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(int4)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(int8)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(float2)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_sampf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(float4)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_sampf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(float8)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_sampf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(numeric)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, true
+	 "s:fstddev_samp(bytea)",
+	 KAGG_ACTION__STDDEV, true,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	/*
 	 * STDDEV_POP(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X))
@@ -376,42 +546,58 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"stddev_pop(int1)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_pop(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP,
 	},
 	{"stddev_pop(int2)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_pop(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"stddev_pop(int4)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_pop(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"stddev_pop(int8)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_pop(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"stddev_pop(float2)",
 	 "s:stddev_popf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_popf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"stddev_pop(float4)",
 	 "s:stddev_popf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_popf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"stddev_pop(float8)",
 	 "s:stddev_popf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fstddev_popf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"stddev_pop(numeric)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, true
+	 "s:fstddev_pop(bytea)",
+	 KAGG_ACTION__STDDEV, true,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	/*
 	 * VARIANCE(X) = VAR_SAMP(NROWS(), PSUM(X),PSUM(X^2))
@@ -419,42 +605,58 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"variance(int1)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(int2)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(int4)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(int8)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(float2)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_sampf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(float4)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_sampf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(float8)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_sampf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(numeric)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, true
+	 "s:fvar_samp(bytea)",
+	 KAGG_ACTION__STDDEV, true,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	/*
 	 * VAR_SAMP(X) = VAR_SAMP(NROWS(), PSUM(X),PSUM(X^2))
@@ -462,42 +664,58 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"var_samp(int1)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(int2)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(int4)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(int8)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_samp(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(float2)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_sampf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(float4)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_sampf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(float8)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_sampf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(numeric)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, true
+	 "s:fvar_samp(bytea)",
+	 KAGG_ACTION__STDDEV, true,
+	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	/*
 	 * VAR_POP(X)  = VAR_POP(NROWS(), PSUM(X),PSUM(X^2))
@@ -505,41 +723,58 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"var_pop(int1)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_pop(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(int2)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_pop(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(int4)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false},
+	 "s:fvar_pop(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
+	},
 	{"var_pop(int8)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_pop(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(float2)",
 	 "s:var_popf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_popf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(float4)",
 	 "s:var_popf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_popf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(float8)",
 	 "s:var_popf(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, false
+	 "s:fvar_popf(bytea)",
+	 KAGG_ACTION__STDDEV, false,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(numeric)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
-	 KAGG_ACTION__STDDEV, true
+	 "s:fvar_pop(bytea)",
+	 KAGG_ACTION__STDDEV, true,
+	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	/*
 	 * CORR(X,Y) = PGSTROM.CORR(NROWS(X,Y),
@@ -548,19 +783,25 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 *                          PCOV_XY(X,Y))
 	 */
 	{"corr(float8,float8)",
-	 "s:covar_samp(bytea)",
+	 "s:corr(bytea)",
 	 "s:pcovar(float8,float8)",
-	 KAGG_ACTION__COVAR, false
+	 "s:fcorr(bytea)",
+	 KAGG_ACTION__COVAR, false,
+	 KSORT_KEY_KIND__PCOVAR_CORR
 	},
 	{"covar_samp(float8,float8)",
 	 "s:covar_samp(bytea)",
 	 "s:pcovar(float8,float8)",
-	 KAGG_ACTION__COVAR, false
+	 "s:fcovar_samp(bytea)",
+	 KAGG_ACTION__COVAR, false,
+	 KSORT_KEY_KIND__PCOVAR_SAMP
 	},
 	{"covar_pop(float8,float8)",
 	 "s:covar_pop(bytea)",
 	 "s:pcovar(float8,float8)",
-	 KAGG_ACTION__COVAR, false
+	 "s:fcovar_pop(bytea)",
+	 KAGG_ACTION__COVAR, false,
+	 KSORT_KEY_KIND__PCOVAR_POP
 	},
 	/*
 	 * Aggregation to support least squares method
@@ -571,49 +812,67 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"regr_avgx(float8,float8)",
 	 "s:regr_avgx(bytea)",
 	 "s:pcovar(float8,float8)",
-	 KAGG_ACTION__COVAR, false
+	 "s:fregr_avgx(bytea)",
+	 KAGG_ACTION__COVAR, false,
+	 KSORT_KEY_KIND__PCOVAR_AVGX
 	},
 	{"regr_avgy(float8,float8)",
 	 "s:regr_avgy(bytea)",
 	 "s:pcovar(float8,float8)",
-	 KAGG_ACTION__COVAR, false
+	 "s:fregr_avgy(bytea)",
+	 KAGG_ACTION__COVAR, false,
+	 KSORT_KEY_KIND__PCOVAR_AVGY
 	},
 	{"regr_count(float8,float8)",
 	 "s:regr_count(bytea)",
 	 "s:pcovar(float8,float8)",
-	 KAGG_ACTION__COVAR, false
+	 "s:fregr_count(bytea)",
+	 KAGG_ACTION__COVAR, false,
+	 KSORT_KEY_KIND__PCOVAR_COUNT
 	},
 	{"regr_intercept(float8,float8)",
 	 "s:regr_intercept(bytea)",
 	 "s:pcovar(float8,float8)",
-	 KAGG_ACTION__COVAR, false
+	 "s:fregr_intercept(bytea)",
+	 KAGG_ACTION__COVAR, false,
+	 
 	},
 	{"regr_r2(float8,float8)",
 	 "s:regr_r2(bytea)",
 	 "s:pcovar(float8,float8)",
-	 KAGG_ACTION__COVAR, false
+	 "s:fregr_r2(bytea)",
+	 KAGG_ACTION__COVAR, false,
+	 KSORT_KEY_KIND__PCOVAR_REGR_R2
 	},
 	{"regr_slope(float8,float8)",
 	 "s:regr_slope(bytea)",
 	 "s:pcovar(float8,float8)",
-	 KAGG_ACTION__COVAR, false
+	 "s:fregr_slope(bytea)",
+	 KAGG_ACTION__COVAR, false,
+	 KSORT_KEY_KIND__PCOVAR_REGR_SLOPE
 	},
 	{"regr_sxx(float8,float8)",
 	 "s:regr_sxx(bytea)",
 	 "s:pcovar(float8,float8)",
-	 KAGG_ACTION__COVAR, false
+	 "s:fregr_sxx(bytea)",
+	 KAGG_ACTION__COVAR, false,
+	 KSORT_KEY_KIND__PCOVAR_REGR_SXX
 	},
 	{"regr_sxy(float8,float8)",
 	 "s:regr_sxy(bytea)",
 	 "s:pcovar(float8,float8)",
-	 KAGG_ACTION__COVAR, false
+	 "s:fregr_sxy(bytea)",
+	 KAGG_ACTION__COVAR, false,
+	 KSORT_KEY_KIND__PCOVAR_REGR_SXY
 	},
 	{"regr_syy(float8,float8)",
 	 "s:regr_syy(bytea)",
 	 "s:pcovar(float8,float8)",
-	 KAGG_ACTION__COVAR, false
+	 "s:fregr_syy(bytea)",
+	 KAGG_ACTION__COVAR, false,
+	 KSORT_KEY_KIND__PCOVAR_REGR_SYY
 	},
-	{ NULL, NULL, NULL, -1, false },
+	{ NULL, NULL, NULL, NULL, -1, false },
 };
 
 /*
@@ -622,7 +881,8 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 typedef struct
 {
 	Oid		aggfn_oid;
-	Oid		final_func_oid;
+	Oid		final_agg_func_oid;
+	Oid		final_proj_func_oid;
 	Oid		partial_func_oid;
 	Oid		partial_func_rettype;
 	int		partial_func_nargs;
@@ -755,7 +1015,16 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 			type_oid = BYTEAOID;
 			partfn_bufsz = sizeof(kagg_state__psum_fp_packed);
 			break;
-			
+
+		case KAGG_ACTION__PAVG_INT64:
+		case KAGG_ACTION__PSUM_INT64:
+		case KAGG_ACTION__PAVG_NUMERIC:
+		case KAGG_ACTION__PSUM_NUMERIC:
+			func_nargs = 1;
+			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(kagg_state__psum_numeric_packed);
+			break;
+
 		case KAGG_ACTION__STDDEV:
 			func_nargs = 1;
 			type_oid = BYTEAOID;
@@ -784,16 +1053,24 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 }
 
 static void
-__aggfunc_resolve_final_func(aggfunc_catalog_entry *entry,
-							 const char *finalfn_signature,
-							 Oid agg_rettype)
+__setup_aggfunc_catalog_entry(aggfunc_catalog_entry *entry,
+							  const aggfunc_catalog_t *cat,
+							  Form_pg_proc agg_proc)
 {
-	Oid			func_oid = __aggfunc_resolve_func_signature(finalfn_signature);
+	Oid			func_oid;
 	HeapTuple	htup;
 	Form_pg_proc proc;
 
+	/* partial agg function */
+	__aggfunc_resolve_partial_func(entry,
+								   cat->partfn_signature,
+								   cat->partfn_action);
+
+	/* final agg function (used by Agg node) */
+	Assert(cat->finalfn_agg_signature != NULL);
+	func_oid = __aggfunc_resolve_func_signature(cat->finalfn_agg_signature);
 	if (!SearchSysCacheExists1(AGGFNOID, ObjectIdGetDatum(func_oid)) ||
-		get_func_rettype(func_oid) != agg_rettype)
+		get_func_rettype(func_oid) != agg_proc->prorettype)
 		elog(ERROR, "Catalog corruption? final function mismatch: %s",
 			 format_procedure(func_oid));
 	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
@@ -806,8 +1083,16 @@ __aggfunc_resolve_final_func(aggfunc_catalog_entry *entry,
 		elog(ERROR, "Catalog corruption? final function mismatch: %s",
 			 format_procedure(func_oid));
 	ReleaseSysCache(htup);
+	entry->final_agg_func_oid = func_oid;
 
-	entry->final_func_oid = func_oid;
+	/* final cscan function (usec by GpuAgg node) */
+	if (cat->finalfn_proj_signature != NULL)
+		func_oid = __aggfunc_resolve_func_signature(cat->finalfn_proj_signature);
+	else
+		func_oid = InvalidOid;
+	entry->final_proj_func_oid = func_oid;
+	entry->numeric_aware = cat->numeric_aware;
+	entry->is_valid_entry = true;
 }
 
 static const aggfunc_catalog_entry *
@@ -870,14 +1155,7 @@ aggfunc_catalog_lookup_by_oid(Oid aggfn_oid)
 
 					if (strcmp(buf, cat->aggfn_signature) == 0)
 					{
-						__aggfunc_resolve_partial_func(entry,
-													   cat->partfn_signature,
-													   cat->partfn_action);
-						__aggfunc_resolve_final_func(entry,
-													 cat->finalfn_signature,
-													 proc->prorettype);
-						entry->numeric_aware = cat->numeric_aware;
-						entry->is_valid_entry = true;
+						__setup_aggfunc_catalog_entry(entry, cat, proc);
 						break;
 					}
 				}
@@ -913,15 +1191,18 @@ typedef struct
 	bool			try_parallel;
 	PathTarget	   *target_upper;
 	PathTarget	   *target_partial;
-	PathTarget	   *target_final;
-	AggClauseCosts	final_clause_costs;
+	PathTarget	   *target_agg_final;
+	PathTarget	   *target_proj_final;
+	AggClauseCosts	final_agg_clause_costs;
+	QualCost		final_proj_clause_costs;
 	pgstromPlanInfo *pp_info;
 	int				sibling_param_id;
 	List		   *inner_paths_list;
 	List		   *inner_target_list;
 	List		   *groupby_keys;
 	List		   *groupby_keys_refno;
-	Node		   *havingQual;
+	List		   *havingAggQuals;		/* only if GpuPreAgg + Agg */
+	List		   *havingProjQuals;	/* only if GpuAgg */
 } xpugroupby_build_path_context;
 
 /*
@@ -986,20 +1267,21 @@ make_expr_typecast(Expr *expr, Oid target_type)
  * Aggref, and append its arguments on the target_partial/target_device.
  */
 static Node *
-make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
+make_alternative_aggref(xpugroupby_build_path_context *con,
+						Aggref *aggref,
+						bool final_function_by_aggregate)
 {
 	const aggfunc_catalog_entry *aggfn_cat;
 	PathTarget *target_partial = con->target_partial;
 	pgstromPlanInfo *pp_info = con->pp_info;
 	List	   *partfn_args = NIL;
 	Expr	   *partfn;
-	Aggref	   *aggref_alt;
+	Node	   *final_fn;
 	Oid			func_oid;
 	HeapTuple	htup;
 	Form_pg_proc proc;
-	Form_pg_aggregate agg;
 	ListCell   *lc;
-	int			j;
+	int32_t		j, groupby_typmod = -1;
 
 	if (aggref->aggorder != NIL || aggref->aggdistinct != NIL)
 	{
@@ -1025,13 +1307,13 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 		return NULL;
 	}
 	/* sanity checks */
-	Assert(aggref->aggkind == AGGKIND_NORMAL &&
-		   !aggref->aggvariadic);
+	Assert(aggref->aggkind == AGGKIND_NORMAL && !aggref->aggvariadic);
 
 	/*
 	 * Build partial-aggregate function
 	 */
-	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(aggfn_cat->partial_func_oid));
+	func_oid = aggfn_cat->partial_func_oid;
+	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for function %u",
 			 aggfn_cat->partial_func_oid);
@@ -1055,9 +1337,11 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 		{
 			elog(DEBUG2, "Partial aggregate argument is not executable: %s",
 				 nodeToString(expr));
-			return NULL;
+			return false;
 		}
 		partfn_args = lappend(partfn_args, expr);
+		if (lc == list_head(aggref->args))
+			groupby_typmod = exprTypmod((Node *)expr);
 	}
 	ReleaseSysCache(htup);
 
@@ -1073,85 +1357,114 @@ make_alternative_aggref(xpugroupby_build_path_context *con, Aggref *aggref)
 		add_column_to_pathtarget(target_partial, partfn, 0);
 		pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
 											   aggfn_cat->partial_func_action);
+		pp_info->groupby_typmods = lappend_int(pp_info->groupby_typmods,
+											   groupby_typmod);
 		pp_info->groupby_prepfn_bufsz += aggfn_cat->partial_func_bufsz;
 	}
 
-	/*
-	 * Build final-aggregate function
-	 */
-	func_oid = aggfn_cat->final_func_oid;
-	htup = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(func_oid));
-	if (!HeapTupleIsValid(htup))
-		elog(ERROR, "cache lookup failed for pg_aggregate %u", func_oid);
-	agg = (Form_pg_aggregate) GETSTRUCT(htup);
+	if (final_function_by_aggregate)
+	{
+		/*
+		 * Build final-aggregate function (for GpuPreAgg + Agg)
+		 */
+		Form_pg_aggregate agg;
+		Aggref	   *__aggref;
+		Oid			__argtype = exprType((Node *)partfn);
+		TargetEntry *__tle = makeTargetEntry(partfn, 1, NULL, false);
 
-	aggref_alt = makeNode(Aggref);
-	aggref_alt->aggfnoid      = func_oid;
-	aggref_alt->aggtype       = aggref->aggtype;
-	aggref_alt->aggcollid     = aggref->aggcollid;
-	aggref_alt->inputcollid   = aggref->inputcollid;
-	aggref_alt->aggtranstype  = agg->aggtranstype;
-	aggref_alt->aggargtypes   = list_make1_oid(exprType((Node *)partfn));
-	aggref_alt->aggdirectargs = NIL;	/* see sanity checks */
-	aggref_alt->args          = list_make1(makeTargetEntry(partfn, 1, NULL, false));
-	aggref_alt->aggorder      = NIL;  /* see sanity check */
-	aggref_alt->aggdistinct   = NIL;  /* see sanity check */
-	aggref_alt->aggfilter     = NULL; /* processed in partial-function */
-	aggref_alt->aggstar       = false;
-	aggref_alt->aggvariadic   = false;
-	aggref_alt->aggkind       = AGGKIND_NORMAL;   /* see sanity check */
-	aggref_alt->agglevelsup   = 0;
-	aggref_alt->aggsplit      = AGGSPLIT_SIMPLE;
-	aggref_alt->aggno         = aggref->aggno;
-	aggref_alt->aggtransno    = aggref->aggno;
-	aggref_alt->location      = aggref->location;
-	/*
-	 * MEMO: nodeAgg.c creates AggStatePerTransData for each aggtransno (that is
-	 * unique ID of transition state in the Agg). This is a kind of optimization
-	 * for the case when multiple aggregate function has identical transition state.
-	 * However, its impact is not large for GpuPreAgg because most of reduction
-	 * works are already executed at the xPU device side.
-	 * So, we simply assign aggref->aggno (unique ID within the Agg node) to
-	 * construct transition state for each alternative aggregate function.
-	 *
-	 * See the issue #614 to reproduce the problem in the future version.
-	 */
+		func_oid = aggfn_cat->final_agg_func_oid;
+		htup = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(func_oid));
+		if (!HeapTupleIsValid(htup))
+			elog(ERROR, "cache lookup failed for pg_aggregate %u", func_oid);
+		agg = (Form_pg_aggregate) GETSTRUCT(htup);
 
-	/*
-	 * Update the cost factor
-	 */
-	if (OidIsValid(agg->aggtransfn))
-		add_function_cost(con->root,
-						  agg->aggtransfn,
-						  NULL,
-						  &con->final_clause_costs.transCost);
-	if (OidIsValid(agg->aggfinalfn))
-		add_function_cost(con->root,
-						  agg->aggfinalfn,
-						  NULL,
-						  &con->final_clause_costs.finalCost);
-	ReleaseSysCache(htup);
+		__aggref = makeNode(Aggref);
+		__aggref->aggfnoid      = func_oid;
+		__aggref->aggtype       = aggref->aggtype;
+		__aggref->aggcollid     = aggref->aggcollid;
+		__aggref->inputcollid   = aggref->inputcollid;
+		__aggref->aggtranstype  = agg->aggtranstype;
+		__aggref->aggargtypes   = list_make1_oid(__argtype);
+		__aggref->aggdirectargs = NIL;	/* see sanity checks */
+		__aggref->args          = list_make1(__tle);
+		__aggref->aggorder      = NIL;  /* see sanity check */
+		__aggref->aggdistinct   = NIL;  /* see sanity check */
+		__aggref->aggfilter     = NULL; /* processed in partial-function */
+		__aggref->aggstar       = false;
+		__aggref->aggvariadic   = false;
+		__aggref->aggkind       = AGGKIND_NORMAL;   /* see sanity check */
+		__aggref->agglevelsup   = 0;
+		__aggref->aggsplit      = AGGSPLIT_SIMPLE;
+		__aggref->aggno         = aggref->aggno;
+		__aggref->aggtransno    = aggref->aggno;
+		__aggref->location      = aggref->location;
+		/*
+		 * MEMO: nodeAgg.c creates AggStatePerTransData for each aggtransno
+		 * (that is unique ID of transition state in the Agg). This is a kind
+		 * of optimization for the case when multiple aggregate function has
+		 * identical transition state.
+		 * However, its impact is not large for GpuPreAgg because most of
+		 * reduction works are already executed at the xPU device side.
+		 * So, we simply assign aggref->aggno (unique ID within the Agg node)
+		 * to construct transition state for each alternative aggregate function.
+		 *
+		 * See the issue #614 to reproduce the problem in the future version.
+		 */
 
-	return (Node *)aggref_alt;
+		/*
+		 * Update the cost factor
+		 */
+		if (OidIsValid(agg->aggtransfn))
+			add_function_cost(con->root,
+							  agg->aggtransfn,
+							  NULL,
+							  &con->final_agg_clause_costs.transCost);
+		if (OidIsValid(agg->aggfinalfn))
+			add_function_cost(con->root,
+							  agg->aggfinalfn,
+							  NULL,
+							  &con->final_agg_clause_costs.finalCost);
+		ReleaseSysCache(htup);
+
+		final_fn = (Node *)__aggref;
+	}
+	else
+	{
+		/*
+		 * Build final-scalar function (for GpuAgg)
+		 */
+		func_oid = aggfn_cat->final_proj_func_oid;
+		if (!OidIsValid(func_oid))
+			final_fn = (Node *)partfn;
+		else
+		{
+			final_fn = (Node *)makeFuncExpr(func_oid,
+											aggref->aggtype,
+											list_make1(partfn),
+											aggref->aggcollid,
+											aggref->inputcollid,
+											COERCE_EXPLICIT_CALL);
+			cost_qual_eval_node(&con->final_proj_clause_costs,
+								final_fn, con->root);
+		}
+	}
+	return final_fn;
 }
 
+/*
+ * replace_expression_by_[agg|proj]_altfuncs
+ */
 static Node *
-replace_expression_by_altfunc(Node *node, xpugroupby_build_path_context *con)
+__replace_expression_by_altfunc_common(Node *node, void *__priv,
+									   tree_mutator_callback walker)
 {
-	PathTarget *target_input = con->input_rel->reltarget;
-	Node	   *aggfn;
+	xpugroupby_build_path_context *con = __priv;
+	RelOptInfo *input_rel = con->input_rel;
+	PathTarget *target_input = input_rel->reltarget;
 	ListCell   *lc;
 
-	if (!node)
-		return NULL;
-	/* aggregate function? */
-	if (IsA(node, Aggref))
-	{
-		aggfn = make_alternative_aggref(con, (Aggref *)node);
-		if (!aggfn)
-			con->device_executable = false;
-		return aggfn;
-	}
+	/* must be processed in the early half */
+	Assert(node != NULL && !IsA(node, Aggref));
 	/* grouping key? */
 	foreach (lc, con->groupby_keys)
 	{
@@ -1189,7 +1502,41 @@ replace_expression_by_altfunc(Node *node, xpugroupby_build_path_context *con)
 		elog(ERROR, "Bug? referenced variable is grouping-key nor its dependent key: %s",
 			 nodeToString(node));
 	}
-	return expression_tree_mutator(node, replace_expression_by_altfunc, con);
+	return expression_tree_mutator(node, walker, con);
+}
+
+static Node *
+replace_expression_by_agg_altfuncs(Node *node, void *__priv)
+{
+	if (!node)
+		return NULL;
+	if (IsA(node, Aggref))
+	{
+		xpugroupby_build_path_context *con = __priv;
+		Node   *aggfn = make_alternative_aggref(con, (Aggref *)node, true);
+
+		if (!aggfn)
+			con->device_executable = false;
+		return aggfn;
+	}
+	return __replace_expression_by_altfunc_common(node, __priv, replace_expression_by_agg_altfuncs);
+}
+
+static Node *
+replace_expression_by_proj_altfuncs(Node *node, void *__priv)
+{
+	if (!node)
+		return NULL;
+	if (IsA(node, Aggref))
+	{
+		xpugroupby_build_path_context *con = __priv;
+		Node   *aggfn = make_alternative_aggref(con, (Aggref *)node, false);
+
+		if (!aggfn)
+			con->device_executable = false;
+		return aggfn;
+	}
+	return __replace_expression_by_altfunc_common(node, __priv, replace_expression_by_proj_altfuncs);
 }
 
 static bool
@@ -1199,7 +1546,6 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 	Query		   *parse = root->parse;
 	pgstromPlanInfo *pp_info = con->pp_info;
 	PathTarget	   *target_upper = con->target_upper;
-	Node		   *havingQual = NULL;
 	ListCell	   *lc1, *lc2;
 	int				i = 0;
 
@@ -1252,7 +1598,8 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 					 nodeToString(expr));
 				return false;
 			}
-			add_column_to_pathtarget(con->target_final, expr, sortgroupref);
+			add_column_to_pathtarget(con->target_agg_final, expr, sortgroupref);
+			add_column_to_pathtarget(con->target_proj_final, expr, sortgroupref);
 			/* to be attached to target-partial later */
 			con->groupby_keys = lappend(con->groupby_keys, expr);
 			con->groupby_keys_refno = lappend_int(con->groupby_keys_refno,
@@ -1260,26 +1607,33 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 		}
 		else if (IsA(expr, Aggref))
 		{
-			Expr   *altfn;
+			Aggref *aggref = (Aggref *)expr;
+			Expr   *altfn_agg;
+			Expr   *altfn_proj;
 
-			altfn = (Expr *)make_alternative_aggref(con, (Aggref *)expr);
-			if (!altfn)
+			altfn_agg  = (Expr *)make_alternative_aggref(con, aggref, true);
+			altfn_proj = (Expr *)make_alternative_aggref(con, aggref, false);
+			if (!altfn_agg || !altfn_proj)
 			{
 				elog(DEBUG2, "No alternative aggregation: %s",
 					 nodeToString(expr));
 				return false;
 			}
-			if (exprType((Node *)expr) != exprType((Node *)altfn))
+			if (exprType((Node *)aggref) != exprType((Node *)altfn_agg) ||
+				exprType((Node *)aggref) != exprType((Node *)altfn_proj))
 			{
-				elog(ERROR, "Bug? XpuGroupBy catalog is not consistent: %s --> %s",
-					 nodeToString(expr),
-					 nodeToString(altfn));
+				elog(ERROR, "Bug? XpuGroupBy catalog is not consistent: %s --> agg:[%s] proj:[%s]",
+					 nodeToString(aggref),
+					 nodeToString(altfn_agg),
+					 nodeToString(altfn_proj));
 			}
-			add_column_to_pathtarget(con->target_final, altfn, 0);
+			add_column_to_pathtarget(con->target_agg_final,  altfn_agg,  0);
+			add_column_to_pathtarget(con->target_proj_final, altfn_proj, 0);
 		}
 		else if (parse->distinctClause)
 		{
-			add_column_to_pathtarget(con->target_final, expr, 0);
+			add_column_to_pathtarget(con->target_agg_final, expr, 0);
+			add_column_to_pathtarget(con->target_proj_final, expr, 0);
 			/* add VREF_NOKEY entries */
 			con->groupby_keys = lappend(con->groupby_keys, expr);
 			con->groupby_keys_refno = lappend_int(con->groupby_keys_refno, 0);
@@ -1297,15 +1651,20 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 	 */
 	if (parse->havingQual)
 	{
-		havingQual = replace_expression_by_altfunc(parse->havingQual, con);
-		if (!con->device_executable)
+		Assert(IsA(parse->havingQual, List));
+		con->havingAggQuals = (List *)
+			replace_expression_by_agg_altfuncs(parse->havingQual, con);
+		con->havingProjQuals = (List *)
+			replace_expression_by_proj_altfuncs(parse->havingQual, con);
+		if (con->havingAggQuals == NIL ||
+			con->havingProjQuals == NIL ||
+			!con->device_executable)
 		{
 			elog(DEBUG2, "unable to replace HAVING to alternative aggregation: %s",
 				 nodeToString(parse->havingQual));
 			return false;
 		}
 	}
-	con->havingQual = havingQual;
 
 	/*
 	 * Due to data alignment on the tuple on the kds_final, grouping-keys must
@@ -1322,8 +1681,11 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 											   keyref == 0
 											   ? KAGG_ACTION__VREF_NOKEY
 											   : KAGG_ACTION__VREF);
+		pp_info->groupby_typmods = lappend_int(pp_info->groupby_typmods,
+											   exprTypmod((Node *)key));
 	}
-	set_pathtarget_cost_width(root, con->target_final);
+	set_pathtarget_cost_width(root, con->target_proj_final);
+	set_pathtarget_cost_width(root, con->target_agg_final);
 	set_pathtarget_cost_width(root, con->target_partial);
 
 	return true;
@@ -1333,8 +1695,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
  * try_add_final_groupby_paths
  */
 static void
-try_add_final_groupby_paths(xpugroupby_build_path_context *con,
-							Path *part_path)
+try_add_final_groupby_paths(xpugroupby_build_path_context *con, Path *part_path)
 {
 	Query	   *parse = con->root->parse;
 	Path	   *agg_path;
@@ -1346,12 +1707,12 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 		agg_path = (Path *)create_agg_path(con->root,
 										   con->group_rel,
 										   part_path,
-										   con->target_final,
+										   con->target_agg_final,
 										   AGG_HASHED,
 										   AGGSPLIT_SIMPLE,
 										   parse->groupClause,
-										   (List *)con->havingQual,
-										   &con->final_clause_costs,
+										   con->havingAggQuals,
+										   &con->final_agg_clause_costs,
 										   con->num_groups);
 		dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
 
@@ -1363,12 +1724,12 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 		agg_path = (Path *)create_agg_path(con->root,
 										   con->group_rel,
 										   part_path,
-										   con->target_final,
+										   con->target_agg_final,
 										   AGG_HASHED,
 										   AGGSPLIT_SIMPLE,
 										   parse->distinctClause,
-										   (List *)con->havingQual,
-										   &con->final_clause_costs,
+										   con->havingAggQuals,
+										   &con->final_agg_clause_costs,
 										   con->num_groups);
 		add_path(con->group_rel, agg_path);
 	}
@@ -1377,12 +1738,12 @@ try_add_final_groupby_paths(xpugroupby_build_path_context *con,
 		agg_path = (Path *)create_agg_path(con->root,
 										   con->group_rel,
 										   part_path,
-										   con->target_final,
+										   con->target_agg_final,
 										   AGG_PLAIN,
 										   AGGSPLIT_SIMPLE,
 										   parse->groupClause,
-										   (List *)con->havingQual,
-										   &con->final_clause_costs,
+										   con->havingAggQuals,
+										   &con->final_agg_clause_costs,
 										   con->num_groups);
 		dummy_path = pgstrom_create_dummy_path(con->root, agg_path);
 		add_path(con->group_rel, dummy_path);
@@ -1465,11 +1826,215 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	cpath->path.total_cost       = startup_cost + run_cost;
 	cpath->path.pathkeys         = NIL;
 	cpath->custom_paths          = con->inner_paths_list;
-	cpath->custom_private        = list_make1(pp_info);
+	cpath->custom_private        = list_make3(pp_info, NULL, NULL);
 	cpath->methods               = xpu_cpath_methods;
 	return cpath;
 }
 
+/*
+ * lookup_gpusort_keykind
+ */
+static int
+lookup_gpusort_keykind(Node *f_expr, PathTarget *part_target)
+{
+	ListCell	   *lc;
+
+	/* whether it is a final function? */
+	if (IsA(f_expr, FuncExpr))
+	{
+		FuncExpr   *func = (FuncExpr *)f_expr;
+		Node	   *farg = NULL;
+		Oid			fnsp;
+		char		namebuf[NAMEDATALEN * 2 + 64];
+		int			off = 0;
+
+		if (list_length(func->args) > 1)
+			goto skip;
+		fnsp = get_func_namespace(func->funcid);
+		if (list_length(func->args) == 1)
+			farg = linitial(func->args);
+		/* setup signature */
+		if (fnsp == PG_CATALOG_NAMESPACE)
+			off += sprintf(namebuf+off, "c:");
+		else if (fnsp == get_namespace_oid("pgstrom", false))
+			off += sprintf(namebuf+off, "s:");
+		else
+			goto skip;
+		off += sprintf(namebuf+off, "%s(", get_func_name(func->funcid));
+		if (farg)
+		{
+			char   *type_name = get_type_name(exprType(farg), true);
+
+			if (type_name)
+				off += sprintf(namebuf+off, "%s", type_name);
+		}
+		off += sprintf(namebuf+off, ")");
+		/* lookup catalog */
+		//TODO: make a hash table
+		for (int i=0; aggfunc_catalog_array[i].aggfn_signature != NULL; i++)
+		{
+			const char *signature = aggfunc_catalog_array[i].finalfn_proj_signature;
+
+			/*
+			 * count(*) does not use CPU-final function (final-projection == NULL),
+			 * and it is identical to the partial function nrows(). in this case,
+			 * we use signature of the partial function.
+			 */
+			if (!signature)
+				signature = aggfunc_catalog_array[i].partfn_signature;
+			if (strcmp(namebuf, signature) == 0)
+				return aggfunc_catalog_array[i].gpusort_keykind;
+		}
+	}
+skip:
+	/* elsewhere, f_expr exactly matches any of part_target? */
+	foreach (lc, part_target->exprs)
+	{
+		Node   *p_expr = lfirst(lc);
+
+		if (equal(f_expr, p_expr))
+			return KSORT_KEY_KIND__VREF;
+	}
+	return -1;
+}
+
+/*
+ * consider_sorted_groupby_path
+ */
+#define LOG2(x)		(log(x) / 0.693147180559945)
+static bool
+consider_sorted_groupby_path(PlannerInfo *root,
+							 CustomPath *cpath,
+							 PathTarget *upper_target,
+							 PathTarget *final_target,
+							 double ntuples,
+							 List **p_sortkeys_upper,
+							 List **p_sortkeys_expr,
+							 List **p_sortkeys_kind,
+							 Cost *p_gpusort_cost)
+{
+	pgstromPlanInfo	*pp_info = linitial(cpath->custom_private);
+	Cost		comparison_cost = (2.0 * pgstrom_gpu_operator_cost);
+	List	   *sortkeys_upper = NIL;
+	List	   *sortkeys_expr = NIL;
+	List	   *sortkeys_kind = NIL;
+	List	   *inner_target_list = NIL;
+	ListCell   *cell;
+	ListCell   *lc1, *lc2;
+
+	if (!pgstrom_enable_gpusort)
+	{
+		elog(DEBUG1, "gpusort: disabled by pg_strom.enable_gpusort");
+		return false;
+	}
+	/* pick up upper sortkeys */
+	if (root->window_pathkeys != NIL)
+		sortkeys_upper = root->window_pathkeys;
+	else if (root->distinct_pathkeys != NIL)
+		sortkeys_upper = root->distinct_pathkeys;
+	else if (root->sort_pathkeys != NIL)
+		sortkeys_upper = root->sort_pathkeys;
+	else if (root->query_pathkeys != NIL)
+		sortkeys_upper = root->query_pathkeys;
+	else
+	{
+		elog(DEBUG1, "gpusort: disabled because no sortable pathkeys");
+		return false;
+	}
+	/* preparation for pgstrom_xpu_expression */
+	foreach (cell, cpath->custom_paths)
+	{
+		inner_target_list = lappend(inner_target_list,
+									((Path *)lfirst(cell))->pathtarget);
+	}
+
+	foreach (cell, sortkeys_upper)
+	{
+		PathKey	   *pk = lfirst(cell);
+		EquivalenceClass *ec = pk->pk_eclass;
+		EquivalenceMember *em;
+		Expr	   *em_expr;
+		bool		found = false;
+
+		if (list_length(ec->ec_members) != 1 ||
+			ec->ec_sources != NIL ||
+			ec->ec_derives != NIL)
+		{
+			elog(DEBUG1, "gpusort: unexpected EquivalenceClass properties");
+			return false;		/* not supported */
+		}
+		em = (EquivalenceMember *)linitial(ec->ec_members);
+		/* strip Relabel for equal() comparison */
+		for (em_expr = em->em_expr;
+			 IsA(em_expr, RelabelType);
+			 em_expr = ((RelabelType *)em_expr)->arg);
+
+		/* ok, lookup the sorting key */
+		forboth (lc1, upper_target->exprs,
+				 lc2, final_target->exprs)
+		{
+			Node   *u_expr = lfirst(lc1);
+			Node   *f_expr = lfirst(lc2);
+
+			if (equal(u_expr, em_expr))
+			{
+				int		kind = lookup_gpusort_keykind(f_expr, cpath->path.pathtarget);
+
+				if (kind < 0)
+					return false;	/* not supported */
+				/* check whether the referenced raw key is device executable */
+				if (kind == KSORT_KEY_KIND__VREF)
+				{
+					devtype_info *dtype;
+
+					if (!pgstrom_xpu_expression((Expr *)f_expr,
+												pp_info->xpu_task_flags,
+												pp_info->scan_relid,
+												inner_target_list,
+												NULL))
+					{
+						elog(DEBUG1, "gpusort: key expression is not device executable: %s",
+							 nodeToString(f_expr));
+						return false;
+					}
+					/* check compare functions */
+					dtype = pgstrom_devtype_lookup(exprType((Node *)em_expr));
+					if (!dtype || (dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
+					{
+						elog(DEBUG1, "gpusort: type '%s' is not device supported",
+							 format_type_be(exprType((Node *)em_expr)));
+						return false;
+					}
+				}
+				if (pk->pk_nulls_first)
+					kind |= KSORT_KEY_ATTR__NULLS_FIRST;
+				if (pk->pk_strategy == BTGreaterStrategyNumber)
+					kind |= KSORT_KEY_ATTR__DESC_ORDER;
+				else if (pk->pk_strategy != BTLessStrategyNumber)
+					return false;	/* should not happen */
+
+				sortkeys_expr = lappend(sortkeys_expr, f_expr);
+				sortkeys_kind = lappend_int(sortkeys_kind, kind);
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+		{
+			elog(DEBUG1, "gpusort: sort-key was not found in the result set");
+			return false;	/* not found */
+		}
+	}
+	*p_sortkeys_upper = sortkeys_upper;
+	*p_sortkeys_expr  = sortkeys_expr;
+	*p_sortkeys_kind  = sortkeys_kind;
+	*p_gpusort_cost   = comparison_cost * ntuples * LOG2(ntuples);
+	return true;
+}
+
+/*
+ * __try_add_xpupreagg_normal_path
+ */
 static void
 __try_add_xpupreagg_normal_path(PlannerInfo *root,
 								UpperRelationKind upper_stage,
@@ -1484,7 +2049,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	Query	   *parse = root->parse;
 	List	   *inner_target_list = NIL;
 	ListCell   *lc;
-	Path	   *part_path;
+	CustomPath *cpath;
 	double		num_groups = 1.0;
 
 	/* estimate number of groups */
@@ -1526,7 +2091,8 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	con.try_parallel   = be_parallel;
 	con.target_upper   = root->upper_targets[upper_stage];
 	con.target_partial = create_empty_pathtarget();
-	con.target_final   = create_empty_pathtarget();
+	con.target_agg_final = create_empty_pathtarget();
+	con.target_proj_final = create_empty_pathtarget();
 	con.pp_info        = op_leaf->pp_info;
 	con.sibling_param_id = -1;
 	con.inner_paths_list = op_leaf->inner_paths_list;
@@ -1534,23 +2100,97 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
 		return;
-	part_path = (Path *)__buildXpuPreAggCustomPath(&con);
+	/* build GpuPreAgg path */
+	cpath = __buildXpuPreAggCustomPath(&con);
 
-	/* inject Gather path if parallel-aware */
-	if (be_parallel)
+	/* Agg(CPU) [+ Gather] + GpuPreAgg, if CPU fallback may happen */
+	/* Elsewhere, no Agg(CPU) is needed */
+	if (pgstrom_cpu_fallback_elevel < ERROR)
 	{
-		part_path = (Path *)
-			create_gather_path(root,
-							   group_rel,
-							   part_path,
-							   part_path->pathtarget,
-							   NULL,
-							   &num_groups);
+		Path   *__path = &cpath->path;
+
+		if (be_parallel)
+		{
+			__path = (Path *)
+				create_gather_path(root,
+								   group_rel,
+								   __path,
+								   __path->pathtarget,
+								   NULL,
+								   &num_groups);
+		}
+		try_add_final_groupby_paths(&con, __path);
 	}
-	/* try add final groupby path */
-	try_add_final_groupby_paths(&con, part_path);
+	else
+	{
+		pgstromPlanInfo	*pp_info = linitial(cpath->custom_private);
+		Path   *__path = &cpath->path;
+		List   *__sortkeys_upper = NIL;
+		List   *__sortkeys_expr = NIL;
+		List   *__sortkeys_kind = NIL;
+		Cost	__gpusort_cost = 0.0;
+
+		/* mark as final-merged GpuPreAgg  */
+		pp_info->xpu_task_flags |= DEVTASK__PREAGG_FINAL_MERGE;
+
+		/* save a few extra properties */
+		lsecond(cpath->custom_private) = con.target_proj_final;
+		lthird(cpath->custom_private) = con.havingProjQuals;
+	retry_gpusort:
+		/* attach Projection path */
+		__path = (Path *)
+			create_projection_path(root,
+								   group_rel,
+								   __path,
+								   con.target_proj_final);
+		__path->pathkeys = __sortkeys_upper;
+
+		/* attach Gather path, if parallel */
+		if (be_parallel)
+		{
+			__path = (Path *)
+				create_gather_path(root,
+								   group_rel,
+								   __path,
+								   __path->pathtarget,
+								   NULL,
+								   &num_groups);
+			__path->pathkeys = __sortkeys_upper;
+		}
+		/* inject dummy path to resolve outer-reference by Aggref or others */
+		__path = pgstrom_create_dummy_path(root, __path);
+		/* add fully-work */
+		add_path(group_rel, __path);
+		/*
+		 * consider the Sorted GPU-PreAgg Path opportunity, if available
+		 */
+		if (__sortkeys_upper == NIL &&
+			consider_sorted_groupby_path(root,
+										 cpath,
+										 group_rel->reltarget,
+										 con.target_proj_final,
+										 num_groups,
+										 &__sortkeys_upper,
+										 &__sortkeys_expr,
+										 &__sortkeys_kind,
+										 &__gpusort_cost))
+		{
+			cpath = (CustomPath *)pgstrom_copy_pathnode(&cpath->path);
+			pp_info = copy_pgstrom_plan_info(pp_info);
+			pp_info->gpusort_keys_expr = __sortkeys_expr;
+			pp_info->gpusort_keys_kind = __sortkeys_kind;
+			linitial(cpath->custom_private) = pp_info;
+			cpath->path.startup_cost += __gpusort_cost;
+			cpath->path.total_cost   += __gpusort_cost;
+			__path = &cpath->path;
+			goto retry_gpusort;
+		}
+	}
 }
 
+/*
+ * __try_add_xpupreagg_partition_path
+ */
 static void
 __try_add_xpupreagg_partition_path(PlannerInfo *root,
 								   UpperRelationKind upper_stage,
@@ -1617,7 +2257,8 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 		con.try_parallel   = try_parallel_path;
 		con.target_upper   = root->upper_targets[upper_stage];
 		con.target_partial = create_empty_pathtarget();
-		con.target_final   = create_empty_pathtarget();
+		con.target_agg_final = create_empty_pathtarget();
+		con.target_proj_final = create_empty_pathtarget();
 		con.pp_info        = op_leaf->pp_info;
 		con.sibling_param_id = sibling_param_id;
 		con.inner_paths_list = op_leaf->inner_paths_list;
@@ -1664,7 +2305,7 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 						   total_nrows);
 	part_path->pathtarget = part_target;
 
-	/* put Gather path if parallel-aware */
+	/* attach Gather path if parallel-aware */
 	if (try_parallel_path)
 	{
 		part_path = (Path *)
@@ -1675,7 +2316,6 @@ __try_add_xpupreagg_partition_path(PlannerInfo *root,
 							   NULL,
 							   &total_nrows);
 	}
-	/* try add final groupby path */
 	try_add_final_groupby_paths(&con, part_path);
 }
 
@@ -1784,9 +2424,8 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 								input_rel,
 								group_rel,
 								extra);
-	if (pgstrom_enabled() &&
-		(upper_stage == UPPERREL_GROUP_AGG ||
-		 upper_stage == UPPERREL_DISTINCT))
+	if (pgstrom_enabled() && (upper_stage == UPPERREL_GROUP_AGG ||
+							  upper_stage == UPPERREL_DISTINCT))
 	{
 		if (pgstrom_enable_gpupreagg && gpuserv_ready_accept())
 			__xpuPreAggAddCustomPathCommon(root,
@@ -1828,6 +2467,15 @@ PlanGpuPreAggPath(PlannerInfo *root,
 								  custom_plans,
 								  pp_info,
 								  &gpupreagg_plan_methods);
+	if ((pp_info->xpu_task_flags & DEVTASK__PREAGG_FINAL_MERGE) != 0)
+	{
+		//PathTarget *target_proj_final = lsecond(cpath->custom_private);
+		List	   *having_proj_quals = lthird(cpath->custom_private);
+
+		/* HAVING clause */
+		//TODO: having quals in the device code - the blocker of GpuSort
+		cscan->scan.plan.qual = having_proj_quals;
+	}
 	form_pgstrom_plan_info(cscan, pp_info);
 	return &cscan->scan.plan;
 }
@@ -1901,7 +2549,7 @@ __pgstrom_init_xpupreagg_common(void)
 void
 pgstrom_init_gpu_preagg(void)
 {
-	/* turn on/off gpu_groupby */
+	/* turn on/off GpuPreAgg */
 	DefineCustomBoolVariable("pg_strom.enable_gpupreagg",
 							 "Enables the use of GPU-PreAgg",
 							 NULL,
@@ -1928,7 +2576,15 @@ pgstrom_init_gpu_preagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-
+	/* turn on/off GPU-Sort */
+	DefineCustomBoolVariable("pg_strom.enable_gpusort",
+							 "Enables to use GPU-Sort on top of GPU-Projection/PreAgg",
+							 NULL,
+							 &pgstrom_enable_gpusort,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* initialization of path method table */
 	memset(&gpupreagg_path_methods, 0, sizeof(CustomPathMethods));
 	gpupreagg_path_methods.CustomName          = "GpuPreAgg";
@@ -1952,6 +2608,7 @@ pgstrom_init_gpu_preagg(void)
 	gpupreagg_exec_methods.InitializeWorkerCustomScan = pgstromSharedStateAttachDSM;
 	gpupreagg_exec_methods.ShutdownCustomScan  = pgstromSharedStateShutdownDSM;
 	gpupreagg_exec_methods.ExplainCustomScan   = pgstromExplainTaskState;
+
 	/* common portion */
 	__pgstrom_init_xpupreagg_common();
 }

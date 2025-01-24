@@ -255,6 +255,13 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dt><code>virtual=KEY</code></dt>
 <dd>It configures the column is a virtual column. <code>KEY</code> specifies the wildcard key name in the pattern specified by the <code>pattern</code> option of the foreign table option.</dd>
 <dd>A virtual column allows to refer to the part of the file name pattern that matches <code>KEY</code> in a query.</dd>
+<dt><code>virtual_metadata=KEY</code></dt>
+<dd>It specifies that the column is a virtual column. <code>KEY</code> specifies a KEY-VALUE pair embedded in the CustomMetadata field of the Arrow file. If the specified KEY-VALUE pair is not found, the column returns a NULL value.</dd>
+<dd>There are two types of CustomMetadata in Arrow files: embedded in the schema (corresponding to a PostgreSQL table) and embedded in the field (corresponding to a PostgreSQL column).</dd>
+<dd>For example, you can reference CustomMetadata embedded in a field by writing the field name separated by the <code>.</code> character before the KEY value, such as <code>lo_orderdate.max_values</code>. If there is no field name, it will be treated as a KEY-VALUE pair embedded in the schema.</dd>
+<dt><code>virtual_metadata_split=KEY</code></dt>
+<dd>It specifies that the column is a virtual column. <code>KEY</code> specifies the KEY-VALUE pair embedded in the CustomMetadata field of the Arrow file. If the specified KEY-VALUE pair is not found, this column returns a NULL value.</dd>
+<dd>The difference from <code>virtual_metadata</code> is that the values of the CustomMetadata field are separated by a delimiter(<code>,</code>) and applied to each Record Batch in order from the beginning. For example, if the specified CustomMetadata value is <code>Tokyo,Osaka,Kyoto,Yokohama</code>, the row read from RecordBatch-0 will display <code>'Tokyo'</code>, the row read from RecordBatch-1 will display <code>'Osaka'</code>, and the row read from RecordBatch-2 will display <code>'Osaka'</code> as the value of this virtual column.</dd>
 </dl>
 <h3 id="data-type-mapping">Data type mapping</h3>
 <p>Arrow data types are mapped on PostgreSQL data types as follows.</p>
@@ -266,7 +273,9 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dt><code>FloatingPoint</code></dt>
 <dd>mapped to either of <code>float2</code>, <code>float4</code> or <code>float8</code> according to the <code>precision</code> attribute.</dd>
 <dd><code>float2</code> is an enhanced data type by PG-Strom.</dd>
-<dt><code>Binary</code></dt>
+<dt><code>Utf8</code>, <code>LargeUtf8</code></dt>
+<dd>mapped to <code>text</code> data type</dd>
+<dt><code>Binary</code>, <code>LargeBinary</code></dt>
 <dd>mapped to <code>bytea</code> data type</dd>
 <dt><code>Decimal</code></dt>
 <dd>mapped to <code>numeric</code> data type</dd>
@@ -278,14 +287,14 @@ OPTIONS (file '/path/to/logdata.arrow');
 <dd>mapped to <code>timestamp</code> data type; to be adjusted as if it has <code>unit=MicroSecond</code> precision.</dd>
 <dt><code>Interval</code></dt>
 <dd>mapped to <code>interval</code> data type.</dd>
-<dt><code>List</code></dt>
+<dt><code>List</code>, <code>LargeList</code></dt>
 <dd>mapped to 1-dimensional array of the element data type.</dd>
 <dt><code>Struct</code></dt>
 <dd>mapped to compatible composite data type; that shall be defined preliminary.</dd>
 <dt><code>FixedSizeBinary</code></dt>
 <dd>mapped to <code>char(n)</code> data type according to the <code>byteWidth</code> attribute.</dd>
 <dd>If <code>pg_type=TYPENAME</code> is configured, PG-Strom may assign the configured data type. Right now, <code>inet</code> and <code>macaddr</code> are supported.</dd>
-<dt><code>Union</code>, <code>Map</code>, <code>Duration</code>, <code>LargeBinary</code>, <code>LargeUtf8</code>, <code>LargeList</code></dt>
+<dt><code>Union</code>, <code>Map</code>, <code>Duration</code></dt>
 <dd>Right now, PG-Strom cannot map these Arrow data types onto any of PostgreSQL data types.</dd>
 </dl>
 <h3 id="how-to-read-explain">How to read EXPLAIN</h3>
@@ -394,7 +403,7 @@ f_lineorder_1995_MAIL.arrow   f_lineorder_1997_TRUCK.arrow
 <p>In Arrow_Fdw, you can refer to part of the file name as a column by using the foreign table option <code>pattern</code>. This is called a virtual column and is configured as follows.</p>
 <pre><code>=# IMPORT FOREIGN SCHEMA f_lineorder
      FROM SERVER arrow_fdw INTO public
-  OPTIONS (dir '/opt/arrow/mydata', pattern 'f_lineorder__${shipping}.arrow');
+  OPTIONS (dir '/opt/arrow/mydata', pattern 'f_lineorder_@{year}_${shipping}.arrow');
 IMPORT FOREIGN SCHEMA
 
 =# \d f_lineorder

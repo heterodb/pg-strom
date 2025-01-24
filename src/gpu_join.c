@@ -842,6 +842,148 @@ try_add_xpujoin_simple_path(PlannerInfo *root,
 }
 
 /*
+ * try_add_sorted_gpujoin_path
+ */
+#define LOG2(x)		(log(x) / 0.693147180559945)
+
+void
+try_add_sorted_gpujoin_path(PlannerInfo *root,
+							RelOptInfo *join_rel,
+							CustomPath *cpath,
+							bool be_parallel)
+{
+	pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
+	PathTarget *final_target = cpath->path.pathtarget;
+	List	   *sortkeys_upper = NIL;
+	List	   *sortkeys_expr = NIL;
+	List	   *sortkeys_kind = NIL;
+	List	   *inner_target_list = NIL;
+	ListCell   *lc1, *lc2;
+	size_t		unitsz, buffer_sz;
+	int			nattrs;
+	Cost		gpusort_cost;
+
+	if (!pgstrom_enable_gpusort)
+		return;
+	if ((pp_info->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0)
+		return;		/* feture available on GPU only */
+
+	/* pick up upper sortkeys */
+	if (root->window_pathkeys != NIL)
+        sortkeys_upper = root->window_pathkeys;
+    else if (root->distinct_pathkeys != NIL)
+        sortkeys_upper = root->distinct_pathkeys;
+    else if (root->sort_pathkeys != NIL)
+        sortkeys_upper = root->sort_pathkeys;
+    else if (root->query_pathkeys != NIL)
+        sortkeys_upper = root->query_pathkeys;
+	else
+		return;		/* no upper sortkeys */
+
+	/*
+	 * buffer size estimation, because GPU-Sort needs kds_final buffer to save
+	 * the result of GPU-Projection until Bitonic-sorting.
+	 */
+	nattrs = list_length(final_target->exprs);
+	unitsz = offsetof(kern_tupitem, htup) +
+		MAXALIGN(offsetof(HeapTupleHeaderData,
+						  t_bits) + BITMAPLEN(nattrs)) +
+		MAXALIGN(final_target->width);
+	buffer_sz = MAXALIGN(offsetof(kern_data_store, colmeta[nattrs])) +
+		sizeof(uint64_t) * pp_info->final_nrows +
+		unitsz * pp_info->final_nrows;
+	if (buffer_sz > GetGpuMinimalDeviceMemorySize())
+		return;		/* too large */
+
+	/* preparation for pgstrom_xpu_expression */
+	foreach (lc1, cpath->custom_paths)
+	{
+		inner_target_list = lappend(inner_target_list,
+									((Path *)lfirst(lc1))->pathtarget);
+	}
+	/* check whether the sorting key is supported */
+	foreach (lc1, sortkeys_upper)
+	{
+		PathKey	   *pk = lfirst(lc1);
+		EquivalenceClass *ec = pk->pk_eclass;
+		EquivalenceMember *em;
+		Expr	   *em_expr;
+		devtype_info *dtype;
+		bool		found = false;
+
+		if (list_length(ec->ec_members) != 1 ||
+			ec->ec_sources != NIL ||
+			ec->ec_derives != NIL)
+			return;		/* not supported */
+
+		/* strip Relabel for equal() comparison */
+		em = (EquivalenceMember *)linitial(ec->ec_members);
+		for (em_expr = em->em_expr;
+			 IsA(em_expr, RelabelType);
+			 em_expr = ((RelabelType *)em_expr)->arg);
+		/* check whether the em_expr is fully executable on device */
+		if (!pgstrom_xpu_expression(em_expr,
+									pp_info->xpu_task_flags,
+									pp_info->scan_relid,
+									inner_target_list, NULL))
+			return;		/* not supported */
+		dtype = pgstrom_devtype_lookup(exprType((Node *)em_expr));
+		if (!dtype || (dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
+			return;		/* not supported */
+		/* lookup the sorting keys */
+		foreach (lc2, final_target->exprs)
+		{
+			Node   *f_expr = lfirst(lc2);
+
+			if (equal(f_expr, em_expr))
+			{
+				int		kind = KSORT_KEY_KIND__VREF;
+
+				if (pk->pk_nulls_first)
+					kind |= KSORT_KEY_ATTR__NULLS_FIRST;
+				if (pk->pk_strategy == BTGreaterStrategyNumber)
+					kind |= KSORT_KEY_ATTR__DESC_ORDER;
+				else if (pk->pk_strategy != BTLessStrategyNumber)
+					return;		/* should not happen */
+				sortkeys_expr = lappend(sortkeys_expr, f_expr);
+				sortkeys_kind = lappend_int(sortkeys_kind, kind);
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			return;		/* not found */
+	}
+	/* duplicate GpuScan/GpuJoin path and attach GPU-Sort */
+	gpusort_cost = (2.0 * pgstrom_gpu_operator_cost *
+					cpath->path.rows *
+					LOG2(cpath->path.rows));
+	cpath = (CustomPath *)pgstrom_copy_pathnode(&cpath->path);
+	pp_info = copy_pgstrom_plan_info(pp_info);
+	pp_info->gpusort_keys_expr = sortkeys_expr;
+	pp_info->gpusort_keys_kind = sortkeys_kind;
+	linitial(cpath->custom_private) = pp_info;
+	cpath->path.startup_cost += gpusort_cost;
+	cpath->path.total_cost   += gpusort_cost;
+
+	/* add path */
+	if (!be_parallel)
+		add_path(join_rel, &cpath->path);
+	else
+	{
+		GatherPath *gpath = create_gather_path(root,
+											   cpath->path.parent,
+											   &cpath->path,
+											   cpath->path.pathtarget,
+											   NULL,
+											   &cpath->path.rows);
+		gpath->path.pathkeys = sortkeys_upper;
+
+		add_path(join_rel, &gpath->path);
+	}
+}
+
+/*
  * __build_child_join_sjinfo
  */
 static SpecialJoinInfo *
@@ -1524,22 +1666,32 @@ pgstrom_build_join_tlist_dev(codegen_context *context,
 static void
 pgstrom_build_groupby_tlist_dev(codegen_context *context,
 								PlannerInfo *root,
-								List *tlist)
+								List *tlist,
+								List *groupby_actions)
 {
 	ListCell   *lc1, *lc2;
 
 	context->tlist_dev = copyObject(tlist);
-	foreach (lc1, tlist)
+	forboth (lc1, tlist,
+			 lc2, groupby_actions)
 	{
 		TargetEntry *tle = lfirst(lc1);
+		int		action = lfirst_int(lc2);
 
-		if (IsA(tle->expr, FuncExpr))
+		if (action == KAGG_ACTION__VREF ||
+			action == KAGG_ACTION__VREF_NOKEY ||
+			!IsA(tle->expr, FuncExpr))
+		{
+			Assert(tlist_member(tle->expr, context->tlist_dev));
+		}
+		else
 		{
 			FuncExpr   *f = (FuncExpr *)tle->expr;
+			ListCell   *cell;
 
-			foreach (lc2, f->args)
+			foreach (cell, f->args)
 			{
-				Expr   *arg = lfirst(lc2);
+				Expr   *arg = lfirst(cell);
 				int		resno = list_length(context->tlist_dev) + 1;
 
 				if (!tlist_member(arg, context->tlist_dev))
@@ -1549,10 +1701,6 @@ pgstrom_build_groupby_tlist_dev(codegen_context *context,
 					context->tlist_dev = lappend(context->tlist_dev, __tle);
 				}
 			}
-		}
-		else
-		{
-			Assert(tlist_member(tle->expr, context->tlist_dev));
 		}
 	}
 }
@@ -1728,7 +1876,8 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 	{
 		Relids	leaf_relids = cpath->path.parent->relids;
 		tlist = fixup_expression_by_partition_leaf(root, leaf_relids, tlist);
-		pgstrom_build_groupby_tlist_dev(context, root, tlist);
+		pgstrom_build_groupby_tlist_dev(context, root, tlist,
+										pp_info->groupby_actions);
 		codegen_build_groupby_actions(context, pp_info);
 	}
 	else
@@ -1744,7 +1893,9 @@ PlanXpuJoinPathCommon(PlannerInfo *root,
 				   pp_info->scan_relid,
 				   &outer_refs);
 	build_explain_tlist_junks(context, pp_info, outer_refs);
-
+	/* attach GPU-Sort key definitions, if any */
+	pp_info->kexp_gpusort_keydesc = codegen_build_gpusort_keydesc(context, pp_info);
+	
 	/* assign remaining PlanInfo members */
 	pp_info->kexp_join_quals_packed
 		= codegen_build_packed_joinquals(context,
@@ -2276,6 +2427,7 @@ again:
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
 				h_kmrels->chunks[depth-1].gist_offset = offset;
+				nbytes = block_offset + BLCKSZ * nblocks;
 
 				setup_kern_data_store(kds, i_tupdesc, nbytes,
 									  KDS_FORMAT_BLOCK);
@@ -2298,12 +2450,12 @@ again:
 
 					UnlockReleaseBuffer(buffer);
 				}
-				kds->length = block_offset + BLCKSZ * nblocks;
+				kds->length = nbytes;
 				kds->nitems = nblocks;
 				kds->block_nloaded = nblocks;
 				innerPreloadSetupGiSTIndex(i_rel, kds);
 			}
-			offset += (block_offset + BLCKSZ * nblocks);
+			offset += nbytes;
 		}
 		else
 		{
