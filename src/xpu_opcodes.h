@@ -806,6 +806,10 @@ __FUNC_OPCODE(cube_contains,  cube/cube, 10, "cube")
 __FUNC_OPCODE(cube_contained, cube/cube, 10, "cube")
 __FUNC_OPCODE(cube_ll_coord,  cube/int4, 10, "cube")
 
+/* vcf2arrow */
+__FUNC_OPCODE(vcf_variant_getattr, text/text, 10, "pg_strom")
+__FUNC_OPCODE(vcf_info_getattr,    text/text, 10, "pg_strom")
+
 #undef TYPE_OPCODE
 #undef TYPE_ALIAS
 #undef FUNC_OPCODE

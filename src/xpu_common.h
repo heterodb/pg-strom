@@ -317,6 +317,23 @@ __strcmp(const char *s1, const char *s2)
 	return c1 - c2;
 }
 
+INLINE_FUNCTION(int)
+__strncmp(const char *s1, const char *s2, int n)
+{
+	unsigned char	c1, c2;
+
+	while (n > 0)
+	{
+		c1 = (unsigned char) *s1++;
+		c2 = (unsigned char) *s2++;
+
+		if (c1 == '\0' || c1 != c2)
+			return c1 - c2;
+		n--;
+	}
+	return 0;
+}
+
 /* ----------------------------------------------------------------
  *
  * Fundamental CUDA definitions
