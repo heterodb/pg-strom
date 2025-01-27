@@ -864,3 +864,63 @@ PG_BITWISE_OPERATOR_TEMPLATE(int1shl,int1,int1,int4,<<)
 PG_BITWISE_OPERATOR_TEMPLATE(int2shl,int2,int2,int4,<<)
 PG_BITWISE_OPERATOR_TEMPLATE(int4shl,int4,int4,int4,<<)
 PG_BITWISE_OPERATOR_TEMPLATE(int8shl,int8,int8,int4,<<)
+
+/*
+ * Device only type cast functions instead of CoerceViaIO
+ */
+#define PG_DEVCAST_TEXT_TO_INT_TEMPLATE(XTYPE,BTYPE,__MIN,__MAX)		\
+	PUBLIC_FUNCTION(bool)												\
+	pgfn_devcast_text_to_##XTYPE(XPU_PGFUNCTION_ARGS)					\
+	{																	\
+		KEXP_PROCESS_ARGS1(XTYPE,text,arg);								\
+																		\
+		if (XPU_DATUM_ISNULL(&arg))										\
+			result->expr_ops = NULL;									\
+		else if (!xpu_text_is_valid(kcxt, &arg))						\
+			return false;												\
+		else															\
+		{																\
+			const char *str = arg.value;								\
+			int			len = arg.length;								\
+			BTYPE		ival = 0;										\
+			bool		negative = false;								\
+																		\
+			if (*str == '-')											\
+			{															\
+				str++;													\
+				len--;													\
+				negative = true;										\
+			}															\
+			while (len-- > 0)											\
+			{															\
+				int		c = *str++;										\
+																		\
+				if (c < '0' || c > '9')									\
+				{														\
+					STROM_ELOG(kcxt, "invalid input for int1");			\
+					return false;										\
+				}														\
+				if (ival > (__MAX/10) ||								\
+					(ival == (__MAX/10) && c > (negative ? '8' : '7')))	\
+				{														\
+					STROM_ELOG(kcxt, #XTYPE ": out of range");			\
+					return false;										\
+				}														\
+				ival = 10 * ival + (c - '0');							\
+			}															\
+			if (negative)												\
+				ival = -ival;											\
+			assert(ival >= __MIN && ival <= __MAX);						\
+			result->expr_ops = &xpu_##XTYPE##_ops;						\
+			result->value = ival;										\
+		}																\
+		return true;													\
+	 }
+PG_DEVCAST_TEXT_TO_INT_TEMPLATE(int1,int32_t,SCHAR_MIN,SCHAR_MAX)
+PG_DEVCAST_TEXT_TO_INT_TEMPLATE(int2,int32_t,SHRT_MIN,SHRT_MAX)
+PG_DEVCAST_TEXT_TO_INT_TEMPLATE(int4,int32_t,INT_MIN,INT_MAX)
+PG_DEVCAST_TEXT_TO_INT_TEMPLATE(int8,int64_t,LONG_MIN,LONG_MAX)
+
+//DEVONLY_FUNC_OPCODE(float2,  devcast_text_to_float2,  text, DEVKIND__ANY, 12)
+//DEVONLY_FUNC_OPCODE(float4,  devcast_text_to_float4,  text, DEVKIND__ANY, 12)
+//DEVONLY_FUNC_OPCODE(float8,  devcast_text_to_float8,  text, DEVKIND__ANY, 12)

@@ -2076,9 +2076,9 @@ codegen_booleantest_expression(codegen_context *context,
  * So, we add a special optimization for the numeric jsonb key references.
  */
 static int
-codegen_coerceviaio_expression(codegen_context *context,
-							   StringInfo buf, int curr_depth,
-							   CoerceViaIO *cvio)
+__codegen_coerceviaio_jsonbref_expression(codegen_context *context,
+										  StringInfo buf, int curr_depth,
+										  CoerceViaIO *cvio)
 {
 	static struct {
 		Oid			func_oid;
@@ -2141,7 +2141,6 @@ codegen_coerceviaio_expression(codegen_context *context,
 	Oid			func_oid = InvalidOid;
 	List	   *func_args = NIL;
 	devtype_info *dtype;
-	kern_expression kexp;
 
 	/* check special case if jsonb key reference */
 	if (IsA(cvio->arg, FuncExpr))
@@ -2158,30 +2157,31 @@ codegen_coerceviaio_expression(codegen_context *context,
 		func_oid  = get_opcode(op->opno);
 		func_args = op->args;
 	}
-	if (func_oid == F_JSONB_OBJECT_FIELD_TEXT)
-	{
-		/* sanity checks */
-		if (list_length(func_args) != 2 ||
-			exprType(linitial(func_args)) != JSONBOID ||
-			exprType(lsecond(func_args))  != TEXTOID)
-			__Elog("Not expected arguments of %s", format_procedure(func_oid));
-	}
-	else if (func_oid == F_JSONB_ARRAY_ELEMENT_TEXT)
-	{
-		/* sanity checks */
-		if (list_length(func_args) != 2 ||
-			exprType(linitial(func_args)) != JSONBOID ||
-			exprType(lsecond(func_args))  != INT4OID)
-			__Elog("Not expected arguments of %s", format_procedure(func_oid));
-	}
 	else
-		__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+		return -1;
+
+	switch (func_oid)
+	{
+		case F_JSONB_OBJECT_FIELD_TEXT:
+			if (list_length(func_args) == 2 &&
+				exprType(linitial(func_args)) == JSONBOID &&
+				exprType(lsecond(func_args)) == TEXTOID)
+				break;
+			return -1;
+		case F_JSONB_ARRAY_ELEMENT_TEXT:
+			if (list_length(func_args) == 2 &&
+				exprType(linitial(func_args)) == JSONBOID &&
+				exprType(lsecond(func_args)) == INT4OID)
+				break;
+			return -1;
+		default:
+			return -1;
+	}
 
 	dtype = pgstrom_devtype_lookup(cvio->resulttype);
 	if (!dtype)
-		__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+		return -1;
 
-	memset(&kexp, 0, sizeof(kexp));
 	for (int i=0; jsonref_catalog[i].type_name != NULL; i++)
 	{
 		if (func_oid == jsonref_catalog[i].func_oid &&
@@ -2192,11 +2192,13 @@ codegen_coerceviaio_expression(codegen_context *context,
 			 : (dtype->type_extension == NULL &&
 				dtype->type_namespace == PG_CATALOG_NAMESPACE)))
 		{
-			ListCell   *lc;
+			kern_expression kexp;
 			uint32_t	stack_usage_saved = context->stack_usage;
 			uint32_t	stack_usage_max = stack_usage_saved;
+			ListCell   *lc;
 			int			pos = -1;
 
+			memset(&kexp, 0, sizeof(kexp));
 			kexp.opcode = jsonref_catalog[i].opcode;
 			kexp.exptype = dtype->type_code;
 			kexp.expflags = context->kexp_flags;
@@ -2209,7 +2211,11 @@ codegen_coerceviaio_expression(codegen_context *context,
 				Expr   *arg = lfirst(lc);
 
 				if (codegen_expression_walker(context, buf, curr_depth, arg) < 0)
+				{
+					if (buf)
+						buf->len = pos;
 					return -1;
+				}
 				stack_usage_max = Max(stack_usage_max, context->stack_usage);
 				context->stack_usage = stack_usage_saved;
 			}
@@ -2219,8 +2225,77 @@ codegen_coerceviaio_expression(codegen_context *context,
 			return 0;
 		}
 	}
-	__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
 	return -1;
+}
+
+static int
+codegen_coerceviaio_expression(codegen_context *context,
+							   StringInfo buf, int curr_depth,
+							   CoerceViaIO *cvio)
+{
+	static struct
+	{
+		FuncOpCode	opcode;
+		const char *source_name;
+		const char *source_extension;
+		const char *dest_name;
+		const char *dest_extension;
+	}	coerce_viaio_catalog[] = {
+		{FuncOpCode__devcast_text_to_int1, "text", NULL, "int1", "pg_strom"},
+		{FuncOpCode__devcast_text_to_int2, "text", NULL, "int2", NULL},
+		{FuncOpCode__devcast_text_to_int4, "text", NULL, "int4", NULL},
+		{FuncOpCode__devcast_text_to_int8, "text", NULL, "int8", NULL},
+		{FuncOpCode__Invalid, NULL, NULL, NULL, NULL},
+	};
+	devtype_info   *stype;
+	devtype_info   *dtype;
+
+	if (__codegen_coerceviaio_jsonbref_expression(context, buf,
+												  curr_depth,
+												  cvio) == 0)
+		return 0;		/* OK, cvio is JSONB field reference */
+
+	dtype = pgstrom_devtype_lookup(cvio->resulttype);
+	if (!dtype)
+		__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+	stype = pgstrom_devtype_lookup(exprType((Node *)cvio->arg));
+	if (!stype)
+		__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+
+	for (int i=0; coerce_viaio_catalog[i].opcode != FuncOpCode__Invalid; i++)
+	{
+		if (strcmp(coerce_viaio_catalog[i].source_name, stype->type_name) == 0 &&
+			((coerce_viaio_catalog[i].source_extension != NULL &&
+			  stype->type_extension != NULL &&
+			  strcmp(coerce_viaio_catalog[i].source_extension,
+					 stype->type_extension) == 0) ||
+			 (!coerce_viaio_catalog[i].source_extension && !stype->type_extension)) &&
+			strcmp(coerce_viaio_catalog[i].dest_name, dtype->type_name) == 0 &&
+			((coerce_viaio_catalog[i].dest_extension != NULL &&
+			  dtype->type_extension != NULL &&
+			  strcmp(coerce_viaio_catalog[i].dest_extension,
+					 dtype->type_extension) == 0) ||
+			 (!coerce_viaio_catalog[i].dest_extension && !dtype->type_extension)))
+		{
+			kern_expression kexp;
+			int		pos = -1;
+
+			memset(&kexp, 0, sizeof(kexp));
+			kexp.opcode = coerce_viaio_catalog[i].opcode;
+			kexp.exptype = dtype->type_code;
+			kexp.expflags = context->kexp_flags;
+			kexp.nr_args = 1;
+			kexp.args_offset = SizeOfKernExpr(0);
+			if (buf)
+				pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+			if (codegen_expression_walker(context, buf, curr_depth, cvio->arg) < 0)
+				return -1;
+			if (buf)
+				__appendKernExpMagicAndLength(buf, pos);
+			return 0;
+		}
+	}
+	__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
 }
 
 /*

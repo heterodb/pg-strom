@@ -124,6 +124,16 @@ FUNC_OPCODE(float8, int8, DEVKIND__ANY, int8_to_float8, 1, NULL)
 FUNC_OPCODE(float8, float2, DEVKIND__ANY, float2_to_float8, 1, "pg_strom")
 FUNC_OPCODE(float8, float4, DEVKIND__ANY, float4_to_float8, 1, NULL)
 
+/* device only functions instead of CoerceViaIO */
+DEVONLY_FUNC_OPCODE(int1,    devcast_text_to_int1,    text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(int2,    devcast_text_to_int2,    text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(int4,    devcast_text_to_int4,    text, DEVKIND__ANY, 10)
+DEVONLY_FUNC_OPCODE(int8,    devcast_text_to_int8,    text, DEVKIND__ANY, 10)
+//DEVONLY_FUNC_OPCODE(float2,  devcast_text_to_float2,  text, DEVKIND__ANY, 12)
+//DEVONLY_FUNC_OPCODE(float4,  devcast_text_to_float4,  text, DEVKIND__ANY, 12)
+//DEVONLY_FUNC_OPCODE(float8,  devcast_text_to_float8,  text, DEVKIND__ANY, 12)
+//DEVONLY_FUNC_OPCODE(numeric, devcast_text_to_numeric, text, DEVKIND__ANY, 15)
+
 /* '+' : add operators */
 __FUNC_OPCODE(int1pl,  int1/int1, 1, "pg_strom")
 __FUNC_OPCODE(int12pl, int1/int2, 1, "pg_strom")
