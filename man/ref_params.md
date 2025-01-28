@@ -108,6 +108,14 @@ This session introduces PG-Strom's configuration parameters.
 `pg_strom.regression_test_mode` [type: `bool` / default: `off]`
 :   It disables some `EXPLAIN` command output that depends on software execution platform, like GPU model name. It avoid "false-positive" on the regression test, so use usually don't tough this configuration.
 }
+@ja{
+`pg_strom.explain_developer_mode` [型: `bool` / 初期値: `off]`
+:   EXPLAIN VERBOSEで表示される様々な情報のうち、開発者向けに有用な情報を表示します。これらは一般ユーザやDB管理者にとっては煩雑な情報であるため、通常は初期値のまま利用する事をお勧めします。
+}
+@en{
+`pg_strom.explain_developer_mode` [型: `bool` / 初期値: `off]`
+:   Among the various information displayed by EXPLAIN VERBOSE, this option displays information that is useful for developers. Since this information is cumbersome for general users and DB administrators, we recommend that you usually leave it at the default value.
+}
 
 @ja:## オプティマイザに関する設定
 @en:## Optimizer Configuration

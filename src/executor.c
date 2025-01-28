@@ -2625,7 +2625,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	/*
 	 * Dump the XPU code (only if verbose)
 	 */
-	if (es->verbose)
+	if (es->verbose && pgstrom_explain_developer_mode)
 	{
 		pgstrom_explain_kvars_slot(&pts->css, es, dcontext);
 		pgstrom_explain_kvecs_buffer(&pts->css, es, dcontext);
