@@ -2245,6 +2245,10 @@ codegen_coerceviaio_expression(codegen_context *context,
 		{FuncOpCode__devcast_text_to_int2, "text", NULL, "int2", NULL},
 		{FuncOpCode__devcast_text_to_int4, "text", NULL, "int4", NULL},
 		{FuncOpCode__devcast_text_to_int8, "text", NULL, "int8", NULL},
+		{FuncOpCode__devcast_text_to_float2, "text", NULL, "float2", "pg_strom"},
+		{FuncOpCode__devcast_text_to_float4, "text", NULL, "float4", NULL},
+		{FuncOpCode__devcast_text_to_float8, "text", NULL, "float8", NULL},
+		{FuncOpCode__devcast_text_to_numeric, "text", NULL, "numeric", NULL},
 		{FuncOpCode__Invalid, NULL, NULL, NULL, NULL},
 	};
 	devtype_info   *stype;
