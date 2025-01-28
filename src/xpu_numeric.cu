@@ -1385,7 +1385,7 @@ not_finite:
 }
 
 PUBLIC_FUNCTION(bool)
-devcast_text_to_numeric(XPU_PGFUNCTION_ARGS)
+pgfn_devcast_text_to_numeric(XPU_PGFUNCTION_ARGS)
 {
 	KEXP_PROCESS_ARGS1(numeric,text,arg);
 
