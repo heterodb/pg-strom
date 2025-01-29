@@ -859,15 +859,26 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 	List	   *sortkeys_kind = NIL;
 	List	   *inner_target_list = NIL;
 	ListCell   *lc1, *lc2;
-	size_t		unitsz, buffer_sz;
+	size_t		unitsz, buffer_sz, devmem_sz;
 	int			nattrs;
 	Cost		gpusort_cost;
 
 	if (!pgstrom_enable_gpusort)
+	{
+		elog(DEBUG1, "gpusort: disabled by pg_strom.enable_gpusort");
 		return;
+	}
+	if (pgstrom_cpu_fallback_elevel < ERROR)
+	{
+		elog(DEBUG1, "gpusort: disabled by pgstrom.cpu_fallback");
+		return;
+	}
 	if ((pp_info->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0)
+	{
+		elog(DEBUG1, "gpusort: disabled, because only GPUs are supported (flags: %08x)",
+			 pp_info->xpu_task_flags);
 		return;		/* feture available on GPU only */
-
+	}
 	/* pick up upper sortkeys */
 	if (root->window_pathkeys != NIL)
         sortkeys_upper = root->window_pathkeys;
@@ -878,7 +889,10 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
     else if (root->query_pathkeys != NIL)
         sortkeys_upper = root->query_pathkeys;
 	else
+	{
+		elog(DEBUG1, "gpusort: disabled because no sortable pathkeys");
 		return;		/* no upper sortkeys */
+	}
 
 	/*
 	 * buffer size estimation, because GPU-Sort needs kds_final buffer to save
@@ -892,9 +906,14 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 	buffer_sz = MAXALIGN(offsetof(kern_data_store, colmeta[nattrs])) +
 		sizeof(uint64_t) * pp_info->final_nrows +
 		unitsz * pp_info->final_nrows;
-	if (buffer_sz > GetGpuMinimalDeviceMemorySize())
+	devmem_sz = GetGpuMinimalDeviceMemorySize();
+	if (buffer_sz > devmem_sz)
+	{
+		elog(DEBUG1, "gpusort: disabled by too large final buffer (expected: %s, physical: %s)",
+			 format_bytesz(buffer_sz),
+			 format_bytesz(devmem_sz));
 		return;		/* too large */
-
+	}
 	/* preparation for pgstrom_xpu_expression */
 	foreach (lc1, cpath->custom_paths)
 	{

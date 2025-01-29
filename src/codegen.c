@@ -4035,45 +4035,8 @@ codegen_build_gpusort_keydesc(codegen_context *context,
 		keydesc->kind = kind;
 		keydesc->nulls_first = ((ival & KSORT_KEY_ATTR__NULLS_FIRST) != 0);
 		keydesc->desc_order  = ((ival & KSORT_KEY_ATTR__DESC_ORDER)  != 0);
-		if (kind == KSORT_KEY_KIND__VREF)
-		{
-			Var	   *var = (Var *)expr;
-
-			if (!IsA(var, Var))
-				elog(ERROR, "Bug? unexpected GPU-SortKey: %s", nodeToString(var));
-			else if (var->varno == INDEX_VAR)
-				keydesc->src_anum = var->varattno;
-			else if (var->varno == pp_info->scan_relid)
-			{
-				ListCell   *cell;
-				bool		found = false;
-
-				foreach (cell, context->tlist_dev)
-				{
-					TargetEntry *tle = lfirst(cell);
-
-					if (tle->resjunk)
-						continue;
-					if (equal(var, tle->expr))
-					{
-						keydesc->src_anum = tle->resno;
-						found = true;
-						break;
-					}
-				}
-				if (!found)
-					elog(ERROR, "Bug? GPU-SortKey (%s) is missing", nodeToString(var));
-			}
-			else
-				elog(ERROR, "Bug? unexpected GPU-SortKey: %s", nodeToString(var));
-			keydesc->buf_offset = 0;
-			dtype = pgstrom_devtype_lookup(var->vartype);
-			if (!dtype)
-				elog(ERROR, "Bug? GPU-SortKey does not have device supported type: %s",
-					 nodeToString(expr));
-			keydesc->key_type_code = dtype->type_code;
-		}
-		else if (kind == KSORT_KEY_KIND__COUNT)
+		if (kind == KSORT_KEY_KIND__VREF ||
+			kind == KSORT_KEY_KIND__COUNT)
 		{
 			ListCell   *cell;
 			bool		found = false;
@@ -4092,14 +4055,18 @@ codegen_build_gpusort_keydesc(codegen_context *context,
 				}
 			}
 			if (!found)
-				elog(ERROR, "Bug? GPU-SortKey (%s) is missing", nodeToString(expr));
+				elog(ERROR, "Bug? GPU-SortKey (%s) is missing",
+					 nodeToString((Node *)expr));
 			keydesc->buf_offset = 0;
-			keydesc->key_type_code = TypeOpCode__int8;
+			dtype = pgstrom_devtype_lookup(exprType((Node *)expr));
+			if (!dtype)
+				elog(ERROR, "Bug? GPU-SortKey does not have device supported type: %s",
+					 nodeToString((Node *)expr));
+			keydesc->key_type_code = dtype->type_code;
 		}
 		else
 		{
 			FuncExpr   *func = (FuncExpr *)expr;
-			Var		   *var;
 
 			if (!IsA(func, FuncExpr) || list_length(func->args) > 1)
 				elog(ERROR, "Bug? GPU-SortKey is not unexpected expression: %s",
@@ -4108,11 +4075,25 @@ codegen_build_gpusort_keydesc(codegen_context *context,
 				keydesc->src_anum = 0;
 			else
 			{
-				var = linitial(func->args);
-				if (!IsA(var, Var) || var->varno != INDEX_VAR)
-					elog(ERROR, "Bug? GPU-SortKey must be a simple reference: %s",
-						 nodeToString(expr));
-				keydesc->src_anum = var->varattno;
+				ListCell   *cell;
+				Expr	   *farg = linitial(func->args);
+				bool		found = false;
+
+				foreach (cell, context->tlist_dev)
+				{
+					TargetEntry *tle = lfirst(cell);
+
+					if (tle->resjunk)
+						continue;
+					if (equal(farg, tle->expr))
+					{
+						keydesc->src_anum = tle->resno;
+						found = true;
+						break;
+					}
+				}
+				if (!found)
+					elog(ERROR, "Bug? GPU-SortKey (%s) is missing", nodeToString(expr));
 			}
 			switch (kind)
 			{

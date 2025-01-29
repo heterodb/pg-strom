@@ -1927,6 +1927,17 @@ consider_sorted_groupby_path(PlannerInfo *root,
 		elog(DEBUG1, "gpusort: disabled by pg_strom.enable_gpusort");
 		return false;
 	}
+	if (pgstrom_cpu_fallback_elevel < ERROR)
+	{
+		elog(DEBUG1, "gpusort: disabled by pgstrom.cpu_fallback");
+		return false;
+	}
+	if ((pp_info->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0)
+	{
+		elog(DEBUG1, "gpusort: disabled, because only GPUs are supported (flags: %08x)",
+			 pp_info->xpu_task_flags);
+		return;		/* feture available on GPU only */
+	}
 	/* pick up upper sortkeys */
 	if (root->window_pathkeys != NIL)
 		sortkeys_upper = root->window_pathkeys;
