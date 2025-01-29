@@ -816,7 +816,8 @@ execGpuJoinProjection(kern_context *kcxt,
 		}
 		else if (kds_dst->format == KDS_FORMAT_ROW)
 		{
-			tupsz = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
+			tupsz = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz
+							 + kcxt->session->gpusort_htup_margin);
 		}
 		else
 		{
@@ -837,7 +838,8 @@ execGpuJoinProjection(kern_context *kcxt,
 					STROM_ELOG(kcxt, "unable to compute hash-value");
 				else
 					hash_value = status.value;
-				tupsz = MAXALIGN(offsetof(kern_hashitem, t.htup) + tupsz);
+				tupsz = MAXALIGN(offsetof(kern_hashitem, t.htup) + tupsz
+								 + kcxt->session->gpusort_htup_margin);
 			}
 			else if (HandleErrorIfCpuFallback(kcxt, n_rels+1, 0, false))
 			{

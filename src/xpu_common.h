@@ -301,22 +301,6 @@ __memcmp(const void *__s1, const void *__s2, size_t n)
 	return 0;
 }
 
-INLINE_FUNCTION(int)
-__strcmp(const char *s1, const char *s2)
-{
-	unsigned char	c1, c2;
-
-	do {
-		c1 = (unsigned char) *s1++;
-		c2 = (unsigned char) *s2++;
-
-		if (c1 == '\0')
-			return c1 - c2;
-	} while (c1 == c2);
-
-	return c1 - c2;
-}
-
 /* ----------------------------------------------------------------
  *
  * Fundamental CUDA definitions
@@ -2582,28 +2566,32 @@ typedef struct kern_session_info
 	uint32_t	xpucode_groupby_keyload;
 	uint32_t	xpucode_groupby_keycomp;
 	uint32_t	xpucode_groupby_actions;
+	uint32_t	xpucode_gpusort_keydesc;
 
 	/* database session info */
-	int64_t		hostEpochTimestamp;	/* = SetEpochTimestamp() */
-	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
-	uint32_t	session_xact_state;	/* offset to SerializedTransactionState */
-	uint32_t	session_timezone;	/* offset to pg_tz */
-	uint32_t	session_encode;		/* offset to xpu_encode_info;
-									 * !! function pointer must be set by server */
+	int64_t		hostEpochTimestamp;		/* = SetEpochTimestamp() */
+	uint64_t	xactStartTimestamp;		/* timestamp when transaction start */
+	uint32_t	session_xact_state;		/* offset to SerializedTransactionState */
+	uint32_t	session_timezone;		/* offset to pg_tz */
+	uint32_t	session_encode;			/* offset to xpu_encode_info;
+										 * !! function pointer must be set by server */
 	int32_t		session_currency_frac_digits;	/* copy of lconv::frac_digits */
 	/* projection kds definition */
 	uint32_t	projection_kds_dst;		/* header portion of kds_dst */
 
 	/* join inner buffer */
-	uint32_t	pgsql_port_number;	/* = PostPortNumber */
-	uint32_t	pgsql_plan_node_id;	/* = Plan->plan_node_id */
-	uint32_t	join_inner_handle;	/* key of join inner buffer */
+	uint32_t	pgsql_port_number;		/* = PostPortNumber */
+	uint32_t	pgsql_plan_node_id;		/* = Plan->plan_node_id */
+	uint32_t	join_inner_handle;		/* key of join inner buffer */
 
 	/* group-by final buffer */
-	uint32_t	groupby_kds_final;	/* header portion of kds_final */
-	uint32_t	groupby_prepfn_bufsz; /* buffer size for preagg functions */
+	uint32_t	groupby_kds_final;		/* header portion of kds_final */
+	uint32_t	groupby_prepfn_bufsz;	/* buffer size for preagg functions */
 	float4_t	groupby_ngroups_estimation; /* planne's estimation of ngroups */
 
+	/* gpu-sort final buffer */
+	uint32_t	gpusort_htup_margin;	/* extra space at tail of the final
+										 * kern_tupitem for finalization */
 	/* fallback buffer */
 	uint32_t	fallback_kds_head;		/* offset to kds_fallback (header) */
 	uint32_t	fallback_desc_defs;		/* offset to kern_fallback_desc array */

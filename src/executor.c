@@ -667,6 +667,19 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
 	}
+	if (pp_info->kexp_gpusort_keydesc)
+	{
+		xpucode = pp_info->kexp_gpusort_keydesc;
+		session->xpucode_gpusort_keydesc =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+		session->gpusort_htup_margin = pp_info->gpusort_htup_margin;
+	}
+	else
+	{
+		Assert(pp_info->gpusort_htup_margin == 0);
+	}
 	/*
 	 * KDS header portion of usual GpuProjection; because kds_dst_tdesc is a copy
 	 * of scandesc of CustomScan, it is compatible to kds_final_tdesc if GpuPreAgg.
@@ -2619,13 +2632,15 @@ pgstromExplainTaskState(CustomScanState *node,
 			str = deparse_expression(sortkey, dcontext, verbose, true);
 			appendStringInfoString(&buf, str);
 		}
+		if (pgstrom_explain_developer_mode)
+			appendStringInfo(&buf, " [htup-margin: %d]", pp_info->gpusort_htup_margin);
 		ExplainPropertyText("GPU-Sort keys", buf.data, es);
 	}
 
 	/*
 	 * Dump the XPU code (only if verbose)
 	 */
-	if (es->verbose)
+	if (es->verbose && pgstrom_explain_developer_mode)
 	{
 		pgstrom_explain_kvars_slot(&pts->css, es, dcontext);
 		pgstrom_explain_kvecs_buffer(&pts->css, es, dcontext);

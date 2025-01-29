@@ -416,3 +416,18 @@ CREATE FUNCTION pgstrom.fregr_syy(bytea)
   RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_regr_syy_final'
   LANGUAGE C STRICT PARALLEL SAFE;
+
+--- ================================================================
+---
+--- utility function related to vcf2arrow
+---
+--- ================================================================
+CREATE FUNCTION public.vcf_variant_getattr(text,text)
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_fetch_token_by_colon'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION public.vcf_info_getattr(text,text)
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_fetch_token_by_semicolon'
+  LANGUAGE C STRICT PARALLEL SAFE;

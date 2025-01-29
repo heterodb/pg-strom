@@ -1039,6 +1039,7 @@ extern const char *pgstrom_githash_cstring;
 extern bool		pgstrom_enabled(void);
 extern int		pgstrom_cpu_fallback_elevel;
 extern bool		pgstrom_regression_test_mode;
+extern bool		pgstrom_explain_developer_mode;
 extern void		pgstrom_remember_op_normal(PlannerInfo *root,
 										   RelOptInfo *outer_rel,
 										   pgstromOuterPathLeafInfo *op_leaf,

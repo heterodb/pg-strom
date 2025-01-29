@@ -1965,6 +1965,111 @@ pgstrom_abort_if(PG_FUNCTION_ARGS)
 }
 
 /*
+ * pgstrom_fetch_token_by_(colon|semicolon|comma)
+ */
+static text *
+__fetch_token_by_delim(text *__str, text *__key, char delim)
+{
+	const char *str = VARDATA_ANY(__str);
+	const char *key = VARDATA_ANY(__key);
+	size_t		strlen = VARSIZE_ANY_EXHDR(__str);
+	size_t		keylen = VARSIZE_ANY_EXHDR(__key);
+	const char *end, *pos, *base;
+
+	/*
+	 * triming whitespaces of the key head/tail
+	 */
+	while (keylen > 0 && isspace(*key))
+	{
+		key++;
+		keylen--;
+	}
+	if (keylen == 0)
+		return NULL;
+	while (keylen > 0 && isspace(key[keylen-1]))
+		keylen--;
+	if (keylen == 0)
+		return NULL;
+	/*
+	 * split a token by the delimiter for each
+	 */
+	if (strlen == 0)
+		return NULL;
+	end = str + strlen - 1;
+	pos = base = str;
+	while (pos <= end)
+	{
+		if (*pos == delim || pos == end)
+		{
+			if (pos - base >= keylen && strncmp(base, key, keylen) == 0)
+			{
+				const char *__k = (base + keylen);
+
+				while (isspace(*__k) && __k < pos)
+					__k++;
+				if (__k < pos && *__k == '=')
+				{
+					size_t	len = (pos - __k) - 1;
+					text   *t = palloc(VARHDRSZ + len + 1);
+
+					if (len > 0)
+						memcpy(t->vl_dat, __k+1, len);
+					t->vl_dat[len] = '\0';
+					SET_VARSIZE(t, VARHDRSZ + len);
+					return t;
+				}
+			}
+			base = pos + 1;
+		}
+		else if (pos == base && isspace(*pos))
+		{
+			base++;
+		}
+		pos++;
+	}
+	return NULL;
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_fetch_token_by_colon);
+PUBLIC_FUNCTION(Datum)
+pgstrom_fetch_token_by_colon(PG_FUNCTION_ARGS)
+{
+	text   *str = PG_GETARG_TEXT_PP(0);
+	text   *key = PG_GETARG_TEXT_PP(1);
+	text   *result = __fetch_token_by_delim(str, key, ':');
+
+	if (!result)
+		PG_RETURN_NULL();
+	PG_RETURN_POINTER(result);
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_fetch_token_by_semicolon);
+PUBLIC_FUNCTION(Datum)
+pgstrom_fetch_token_by_semicolon(PG_FUNCTION_ARGS)
+{
+	text   *str = PG_GETARG_TEXT_PP(0);
+	text   *key = PG_GETARG_TEXT_PP(1);
+	text   *result = __fetch_token_by_delim(str, key, ';');
+
+	if (!result)
+		PG_RETURN_NULL();
+    PG_RETURN_POINTER(result);
+}
+
+PG_FUNCTION_INFO_V1(pgstrom_fetch_token_by_comma);
+PUBLIC_FUNCTION(Datum)
+pgstrom_fetch_token_by_comma(PG_FUNCTION_ARGS)
+{
+	text   *str = PG_GETARG_TEXT_PP(0);
+	text   *key = PG_GETARG_TEXT_PP(1);
+	text   *result = __fetch_token_by_delim(str, key, ',');
+
+	if (!result)
+		PG_RETURN_NULL();
+	PG_RETURN_POINTER(result);
+}
+
+/*
  * Simple wrapper for read(2) and write(2) to ensure full-buffer read and
  * write, regardless of i/o-size and signal interrupts.
  */

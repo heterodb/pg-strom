@@ -4877,6 +4877,7 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 	TupleDesc	tupdesc = RelationGetDescr(frel);
 	size_t	   *chunk_sz;
 	ListCell   *lc1, *lc2;
+	int			nfiles = 0;
 	int			fcount = 0;
 	int			i, j, k;
 	char		label[100];
@@ -4929,6 +4930,7 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 	/* shows files on behalf of the foreign table */
 	chunk_sz = alloca(sizeof(size_t) * tupdesc->natts);
 	memset(chunk_sz, 0, sizeof(size_t) * tupdesc->natts);
+	nfiles = list_length(arrow_state->af_states_list);
 	foreach (lc1, arrow_state->af_states_list)
 	{
 		ArrowFileState *af_state = lfirst(lc1);
@@ -4971,7 +4973,13 @@ pgstromArrowFdwExplain(ArrowFdwState *arrow_state,
 			filename = basename(pstrdup(filename));
 
 		/* file size and read size */
-		if (es->format == EXPLAIN_FORMAT_TEXT)
+		if (!pgstrom_explain_developer_mode &&
+			nfiles >= 6 && fcount >= 2 && fcount < nfiles-2)
+		{
+			if (es->format == EXPLAIN_FORMAT_TEXT && fcount == 2)
+				ExplainPropertyText("    :\t\t\t", "\t\t\t:", es);
+		}
+		else if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
 			resetStringInfo(&buf);
 			appendStringInfo(&buf, "%s (read: %s, size: %s)",

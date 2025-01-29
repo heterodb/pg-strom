@@ -1071,7 +1071,8 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 									 kexp_groupby_actions);
 	assert(tupsz > 0);
 	required = TYPEALIGN(CUDA_L1_CACHELINE_SZ,
-						 offsetof(kern_tupitem, htup) + tupsz);
+						 offsetof(kern_tupitem, htup) + tupsz
+						 + kcxt->session->gpusort_htup_margin);
 	offset = __atomic_add_uint64(&kds_final->usage, required);
 	if (!__KDS_CHECK_OVERFLOW(kds_final, 1, offset + required))
 		return NULL;	/* out of memory */
@@ -1193,7 +1194,8 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 	 * written by other threads.
 	 */
 	tupsz = TYPEALIGN(CUDA_L1_CACHELINE_SZ,
-					  offsetof(kern_hashitem, t.htup) + tupsz);
+					  offsetof(kern_hashitem, t.htup) + tupsz
+					  + kcxt->session->gpusort_htup_margin);
 	for (;;)
 	{
 		__nitems = __volatileRead(&kds_final->nitems);
