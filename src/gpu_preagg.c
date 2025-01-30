@@ -1936,7 +1936,7 @@ consider_sorted_groupby_path(PlannerInfo *root,
 	{
 		elog(DEBUG1, "gpusort: disabled, because only GPUs are supported (flags: %08x)",
 			 pp_info->xpu_task_flags);
-		return;		/* feture available on GPU only */
+		return false;	/* feture available on GPU only */
 	}
 	/* pick up upper sortkeys */
 	if (root->window_pathkeys != NIL)
