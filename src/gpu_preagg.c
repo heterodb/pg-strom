@@ -1632,6 +1632,18 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 		}
 		else if (parse->distinctClause)
 		{
+			/* non-key distinct results must be a simple Var or device executable  */
+			if (!IsA(expr, Var) &&
+				!pgstrom_xpu_expression(expr,
+										pp_info->xpu_task_flags,
+										pp_info->scan_relid,
+										con->inner_target_list,
+										NULL))
+			{
+				elog(DEBUG2, "Distinct output must be a smple Var or device executable: %s",
+					 nodeToString(expr));
+				return false;
+			}
 			add_column_to_pathtarget(con->target_agg_final, expr, 0);
 			add_column_to_pathtarget(con->target_proj_final, expr, 0);
 			/* add VREF_NOKEY entries */
