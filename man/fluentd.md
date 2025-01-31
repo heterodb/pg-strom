@@ -48,7 +48,7 @@ PG-Strom can handle two types of data formats: PostgreSQL Heap format (transacti
 
 @ja{
 以下では、Fluentdが収集したログデータをApache Arrow形式ファイルとして出力し、これをPG-Stromで参照するというアプローチについて説明します。
-また、Fluentdのパッケージには、Treasure Data社の提供する安定版`td-agent`を使用するものとします。
+また、Fluentdのパッケージには、Treasure Data社の提供する安定版`fluentd`を使用するものとします。
 
 PG-Stromに同梱のFluentd向けOutputプラグインの`fluent-plugin-arrow-file`モジュールを利用すると、Fluentdが収集したログデータを、指定したスキーマ構造を持つApache Arrow形式ファイルとして書き出すことができます。PG-StromのArrow_Fdw機能を使用すればこのApache Arrow形式ファイルを外部テーブルとして参照する事ができ、また保存先のストレージが適切に設定されていれば、GPU-Direct SQLを用いた高速な読み出しも可能です。
 
@@ -62,7 +62,7 @@ PG-Stromに同梱のFluentd向けOutputプラグインの`fluent-plugin-arrow-fi
 
 @en{
 This chapter describes the approach to write out the log data collected by Fluentd in Apache Arrow format, and to refere it with PG-Strom.
-We assume `td-agent` here, that is a stable version of Fluentd provided by Treasure Data.
+We assume `fluentd` here, that is a stable version of Fluentd provided by Treasure Data.
 
 PG-Strom includes the `fluent-plugin-arrow-file` module. This allows Fluentd to write out the log data it collects as an Apache Arrow format file with a specified schema structure.
 Using PG-Strom's Arrow_Fdw, this Apache Arrow format file can be accessed as an foreign table.
@@ -113,20 +113,20 @@ Therefore, the output destination file name and schema definition information (m
 @en:##Installation
 
 @ja{
-使用しているLinuxディストリビューション用の`td-agent`パッケージをインストールします。
+使用しているLinuxディストリビューション用の`fluentd`パッケージをインストールします。
 また、arrow-fileプラグインのインストールには`rake-compiler`モジュールが必要ですので、予めインストールしておきます。
 
 詳しくは[こちら](https://docs.fluentd.org/installation/install-by-rpm)を参照してください。
 }
 @en{
-Install the `td-agent` package for Linux distribution you are using.
+Install the `fluentd` package for Linux distribution you are using.
 The `rake-compiler` module is required to install the arrow-file plugin, so please install it before.
 }
 
 ```
-$ curl -L https://toolbelt.treasuredata.com/sh/install-redhat-td-agent4.sh | sh
+$ curl -fsSL https://toolbelt.treasuredata.com/sh/install-redhat-fluent-package5-lts.sh | sh
 
-$ sudo /opt/td-agent/bin/fluent-gem install rake-compiler
+$ sudo /opt/fluent/bin/fluent-gem install rake-compiler
 ```
 
 @ja{
@@ -139,8 +139,8 @@ Next, download the source code for PG-Strom and build arrow-file plugin in the `
 ```
 $ git clone https://github.com/heterodb/pg-strom.git
 $ cd pg-strom/fluentd
-$ make TD_AGENT=1 gem
-$ sudo make TD_AGENT=1 install
+$ make FLUENT=1 gem
+$ sudo make FLUENT=1 install
 ```
 
 @ja{
@@ -151,8 +151,8 @@ To confirm that the Fluentd plugin is installed, run the following command.
 }
 
 ```
-$ /opt/td-agent/bin/fluent-gem list | grep arrow
-fluent-plugin-arrow-file (0.2)
+$ /opt/fluent/bin/fluent-gem list | grep arrow
+fluent-plugin-arrow-file (0.3)
 ```
 
 @ja:##設定
@@ -339,13 +339,13 @@ The fields are then passed to the arrow-file plugin as an associative array. In 
 For simplicity of explanation, the chunk size is set to a maximum of 4MB / 200 lines in the `<buffer>` tag, and it is set to pass to the Output plugin in 10 seconds at most.
 }
 
-@ja: `/etc/td-agent/td-agent.conf`の設定例
-@en: ***Example configuration of `/etc/td-agent/td-agent.conf`***
+@ja: `/etc/fluent/fluentd.conf`の設定例
+@en: ***Example configuration of `/etc/fluent/fluentd.conf`***
 ```
 <source>
   @type  tail
   path /var/log/httpd/access_log
-  pos_file /var/log/td-agent/httpd_access.pos
+  pos_file /var/log/fluent/httpd_access.pos
   tag httpd
   format apache2
   <parse>
@@ -369,13 +369,13 @@ For simplicity of explanation, the chunk size is set to a maximum of 4MB / 200 l
 ```
 
 @ja{
-`td-agent`を起動します。
+`fluentd`を起動します。
 }
 @en{
-Start the `td-agent` service.
+Start the `fluentd` service.
 }
 ```
-$ sudo systemctl start td-agent
+$ sudo systemctl start fluentd
 ```
 
 @ja{
