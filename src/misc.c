@@ -836,6 +836,7 @@ pgstrom_copy_pathnode(const Path *pathnode)
 					subpaths = lappend(subpaths, sp);
 				}
 				b->custom_paths = subpaths;
+				b->custom_private = list_copy(a->custom_private);
 				return &b->path;
 			}
 		case T_NestPath:

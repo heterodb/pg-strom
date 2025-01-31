@@ -99,7 +99,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:nrows()",
 	 NULL,		/* use nrows() as is */
 	 KAGG_ACTION__NROWS_ANY, false,
-	 KSORT_KEY_KIND__COUNT
+	 KSORT_KEY_KIND__VREF
 	},
 	/* COUNT(X) = SUM(NROWS(X)) */
 	{"count(any)",
@@ -107,7 +107,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:nrows(any)",
 	 NULL,		/* use nrows() as is */
 	 KAGG_ACTION__NROWS_COND, false,
-	 KSORT_KEY_KIND__COUNT
+	 KSORT_KEY_KIND__VREF
 	},
 	/*
 	 * MIN(X) = MIN(PMIN(X))
@@ -326,7 +326,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:psum64(int8)",
 	 "s:fsum_int64(bytea)",
 	 KAGG_ACTION__PSUM_INT64,  false,
-	 KSORT_KEY_KIND__PSUM_INT128
+	 KSORT_KEY_KIND__PSUM_NUMERIC
 	},
 	{"sum(float2)",
 	 "s:sum_fp64(bytea)",
@@ -392,7 +392,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:pavg64(int8)",
 	 "s:favg_int64(bytea)",
 	 KAGG_ACTION__PAVG_INT64, false,
-	 KSORT_KEY_KIND__PAVG_INT128
+	 KSORT_KEY_KIND__PAVG_NUMERIC
 	},
 	{"avg(float2)",
 	 "s:avg_fp(bytea)",
@@ -2051,7 +2051,7 @@ consider_sorted_groupby_path(PlannerInfo *root,
 	*p_sortkeys_upper = sortkeys_upper;
 	*p_sortkeys_expr  = sortkeys_expr;
 	*p_sortkeys_kind  = sortkeys_kind;
-	*p_gpusort_cost   = comparison_cost * ntuples * LOG2(ntuples);
+	*p_gpusort_cost   = 10.0 + comparison_cost * ntuples * LOG2(ntuples);
 	return true;
 }
 
@@ -2184,6 +2184,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 		__path = pgstrom_create_dummy_path(root, __path);
 		/* add fully-work */
 		add_path(group_rel, __path);
+
 		/*
 		 * consider the Sorted GPU-PreAgg Path opportunity, if available
 		 */

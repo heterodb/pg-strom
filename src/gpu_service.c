@@ -42,6 +42,8 @@ struct gpuContext
 	CUfunction		cufn_prep_gistindex;
 	CUfunction		cufn_merge_outer_join_map;
 	CUfunction		cufn_merge_gpupreagg_buffer;
+	CUfunction		cufn_gpusort_finalize_buffer;
+	CUfunction		cufn_gpusort_exec_bitonic;
 	CUfunction		cufn_kbuf_partitioning;
 	CUfunction		cufn_kbuf_reconstruction;
 	CUfunction		cufn_gpucache_apply_redo;
@@ -3055,6 +3057,19 @@ __resolveDevicePointersWalker(gpuClient *gclient,
 			}
 			break;
 
+		case FuncOpCode__SortKeys:
+			for (i=0; i < kexp->u.sort.nkeys; i++)
+			{
+				kern_sortkey_desc *sdesc = &kexp->u.sort.desc[i];
+
+				if (!__lookupDeviceTypeOper(gclient,
+											gcontext,
+											&sdesc->key_ops,
+											sdesc->key_type_code))
+					return false;
+			}
+			break;
+			
 		default:
 			break;
 	}
@@ -3097,6 +3112,7 @@ __resolveDevicePointers(gpuClient *gclient,
 	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYLOAD(session);
 	__kexp[nitems++] = SESSION_KEXP_GROUPBY_KEYCOMP(session);
 	__kexp[nitems++] = SESSION_KEXP_GROUPBY_ACTIONS(session);
+	__kexp[nitems++] = SESSION_KEXP_GPUSORT_KEYDESC(session);
 
 	for (int i=0; i < nitems; i++)
 	{
@@ -4297,6 +4313,95 @@ bailout:
 
 /* ----------------------------------------------------------------
  *
+ * gpuservSortingFinalBuffer
+ *
+ * ----------------------------------------------------------------
+ */
+static bool
+gpuservSortingFinalBuffer(gpuClient *gclient,
+						  gpuContext *gcontext,
+						  kern_data_store *kds_final)
+{
+	kern_session_info *session = gclient->h_session;
+	kern_expression *kexp_gpusort = SESSION_KEXP_GPUSORT_KEYDESC(session);
+	gpuContext	   *old_gcontext = NULL;
+	int				grid_sz, block_sz;
+	gpuMemChunk	   *t_chunk = NULL;
+	kern_gputask   *kgtask;
+	CUdeviceptr		m_session;
+	void		   *kern_args[4];
+	CUresult		rc;
+	bool			retval = false;
+
+	if (!kexp_gpusort || !kexp_gpusort->u.sort.needs_finalization)
+		return true;	/* nothing to do */
+
+	if (gcontext != GpuWorkerCurrentContext)
+		old_gcontext = gpuContextSwitchTo(gcontext);
+
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 gcontext->cufn_gpusort_finalize_buffer, 0);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
+					  cuStrError(rc));
+		goto bailout;
+	}
+	grid_sz = Min(grid_sz, (kds_final->nitems + block_sz - 1) / block_sz);
+
+	/*
+	 * Setup the control structure
+	 */
+	t_chunk = gpuMemAllocManaged(sizeof(kern_gputask));
+	if (!t_chunk)
+	{
+		gpuClientFatal(gclient, "failed on gpuMemAllocManaged: %lu",
+					   sizeof(kern_gputask));
+		goto bailout;
+	}
+	kgtask = (kern_gputask *)t_chunk->m_devptr;
+	memset(kgtask, 0, sizeof(kern_gputask));
+	kgtask->grid_sz      = grid_sz;
+	kgtask->block_sz     = block_sz;
+	kgtask->cuda_dindex  = MY_DINDEX_PER_THREAD;
+	kgtask->cuda_stack_limit = GpuWorkerCurrentContext->cuda_stack_limit;
+
+	m_session = gclient->__session[MY_DINDEX_PER_THREAD]->m_devptr;
+	kern_args[0] = &m_session;
+	kern_args[1] = &kgtask;
+	kern_args[2] = &kds_final;
+
+	rc = cuLaunchKernel(gcontext->cufn_gpusort_finalize_buffer,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						MY_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuLaunchKernel(grid_sz=%d, block_sz=%d): %s",
+					  grid_sz, block_sz, cuStrError(rc));
+		goto bailout;
+	}
+	rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+					  cuStrError(rc));
+		goto bailout;
+	}
+	//TODO: Expand kds_final_dst if overflow
+	retval = true;
+bailout:
+	if (old_gcontext)
+		gpuContextSwitchTo(old_gcontext);
+	return retval;
+}
+
+/* ----------------------------------------------------------------
+ *
  * gpuservHandleGpuTaskFinal
  *
  * ----------------------------------------------------------------
@@ -4457,6 +4562,11 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 		}
 		if (kds_prime)
 		{
+			/* final sorting if any */
+			if (!gpuservSortingFinalBuffer(gclient,
+										   gcontext_prime,
+										   kds_prime))
+				return;
 			iovcnt += __gpuClientWriteBackOneChunk(gclient,
 												   iov_array+iovcnt,
 												   kds_prime);
@@ -4856,6 +4966,20 @@ __setupGpuKernelFunctionsAndParams(gpuContext *gcontext)
 		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
 			 func_name, cuStrError(rc));
 	gcontext->cufn_merge_gpupreagg_buffer = cuda_function;
+	/* ------ kern_gpusort_finalize_buffer ------ */
+	func_name = "kern_gpusort_finalize_buffer";
+	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
+			 func_name, cuStrError(rc));
+	gcontext->cufn_gpusort_finalize_buffer = cuda_function;
+	/* ------ kern_gpusort_exec_bitonic ------ */
+	func_name = "kern_gpusort_exec_bitonic";
+	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
+			 func_name, cuStrError(rc));
+	gcontext->cufn_gpusort_exec_bitonic = cuda_function;
 	/* ------ kern_buffer_partitioning ------ */
 	func_name = "kern_buffer_partitioning";
 	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);

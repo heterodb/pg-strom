@@ -1098,6 +1098,70 @@ kern_estimate_heaptuple(kern_context *kcxt,
 	return MAXALIGN(offsetof(kern_tupitem, htup) + sz);
 }
 
+/*
+ * kern_fetch_heaptuple_addr
+ */
+PUBLIC_FUNCTION(const void *)
+kern_fetch_heaptuple_attr(kern_context *kcxt,
+						  const kern_data_store *kds,
+						  const kern_tupitem *titem, int anum)
+{
+	const HeapTupleHeaderData *htup = &titem->htup;
+	const uint8_t  *nullmap = NULL;
+	uint32_t		ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
+
+	/* special case if system attribute reference */
+	if (anum < 0)
+	{
+		switch (anum)
+		{
+			case SelfItemPointerAttributeNumber:
+				return &htup->t_ctid;
+			case MinTransactionIdAttributeNumber:
+				return &htup->t_choice.t_heap.t_xmin;
+			case MinCommandIdAttributeNumber:
+			case MaxCommandIdAttributeNumber:
+				return &htup->t_choice.t_heap.t_field3.t_cid;
+			case MaxTransactionIdAttributeNumber:
+				return &htup->t_choice.t_heap.t_xmax;
+			case TableOidAttributeNumber:
+				return &kds->table_oid;
+			default:
+				return NULL;
+		}
+	}
+	/* walk on the user columns */
+	ncols = Min(ncols, kds->ncols);
+	if ((htup->t_infomask & HEAP_HASNULL) != 0)
+		nullmap = htup->t_bits;
+	if (anum > 0 && anum <= ncols)
+	{
+		uint32_t	offset = htup->t_hoff;
+		const char *addr;
+
+		anum--;
+		for (int j=0; j <= anum; j++)
+		{
+			const kern_colmeta *cmeta = &kds->colmeta[j];
+
+			if (nullmap && att_isnull(j, nullmap))
+				continue;
+			if (cmeta->attlen > 0)
+				offset = TYPEALIGN(cmeta->attalign, offset);
+			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
+				offset = TYPEALIGN(cmeta->attalign, offset);
+			addr = ((const char *)htup + offset);
+			if (j == anum)
+				return addr;
+			if (cmeta->attlen > 0)
+				offset += cmeta->attlen;
+			else
+				offset += VARSIZE_ANY(addr);
+		}
+	}
+	return NULL;
+}
+
 STATIC_FUNCTION(bool)
 pgfn_Projection(XPU_PGFUNCTION_ARGS)
 {
@@ -1282,6 +1346,13 @@ STATIC_FUNCTION(bool)
 pgfn_AggFuncs(XPU_PGFUNCTION_ARGS)
 {
 	STROM_ELOG(kcxt, "pgfn_AggFuncs should not be called as a normal kernel expression");
+	return false;
+}
+
+STATIC_FUNCTION(bool)
+pgfn_SortKeys(XPU_PGFUNCTION_ARGS)
+{
+	STROM_ELOG(kcxt, "pgfn_SortKeys should not be called as a normal kernel expression");
 	return false;
 }
 
@@ -2741,6 +2812,7 @@ PUBLIC_DATA(xpu_function_catalog_entry, builtin_xpu_functions_catalog[]) = {
 	{FuncOpCode__ScalarArrayOpAll,			pgfn_ScalarArrayOp},
 #include "xpu_opcodes.h"
 	{FuncOpCode__Projection,                pgfn_Projection},
+	{FuncOpCode__SortKeys,					pgfn_SortKeys},
 	{FuncOpCode__LoadVars,                  pgfn_LoadVars},
 	{FuncOpCode__MoveVars,					pgfn_MoveVars},
 	{FuncOpCode__HashValue,                 pgfn_HashValue},

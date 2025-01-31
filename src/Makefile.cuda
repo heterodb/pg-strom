@@ -49,7 +49,7 @@ NVCC_CFLAGS  = $(__NVCC_CFLAGS)  $(NVCC_FLAGS_CUSTOM) $(NVCC_CFLAGS_CUSTOM)
 NVCC_LDFLAGS = $(__NVCC_LDFLAGS) $(NVCC_FLAGS_CUSTOM) $(NVCC_LDFLAGS_CUSTOM)
 
 # PG-Strom GPU Code
-__CUDA_CORE_FILES = xpu_common cuda_gpuscan cuda_gpujoin cuda_gpupreagg \
+__CUDA_CORE_FILES = xpu_common cuda_gpuscan cuda_gpujoin cuda_gpupreagg cuda_gpusort \
                     xpu_basetype xpu_numeric xpu_timelib xpu_textlib \
                     xpu_misclib  xpu_jsonlib xpu_postgis
 __CUDA_CORE_HEADERS = cuda_common.h xpu_common.h xpu_opcodes.h xpu_basetype.h \

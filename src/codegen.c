@@ -4021,6 +4021,7 @@ codegen_build_gpusort_keydesc(codegen_context *context,
 	kexp->exptype = TypeOpCode__int4;
 	kexp->opcode = FuncOpCode__SortKeys;
 	kexp->u.sort.nkeys = nkeys;
+	buf.len = sz;
 
 	i = 0;
 	forboth (lc1, pp_info->gpusort_keys_expr,
@@ -4035,8 +4036,7 @@ codegen_build_gpusort_keydesc(codegen_context *context,
 		keydesc->kind = kind;
 		keydesc->nulls_first = ((ival & KSORT_KEY_ATTR__NULLS_FIRST) != 0);
 		keydesc->desc_order  = ((ival & KSORT_KEY_ATTR__DESC_ORDER)  != 0);
-		if (kind == KSORT_KEY_KIND__VREF ||
-			kind == KSORT_KEY_KIND__COUNT)
+		if (kind == KSORT_KEY_KIND__VREF)
 		{
 			ListCell   *cell;
 			bool		found = false;
@@ -4071,6 +4071,7 @@ codegen_build_gpusort_keydesc(codegen_context *context,
 			if (!IsA(func, FuncExpr) || list_length(func->args) > 1)
 				elog(ERROR, "Bug? GPU-SortKey is not unexpected expression: %s",
 					 nodeToString(expr));
+			kexp->u.sort.needs_finalization = true;
 			if (func->args == 0)
 				keydesc->src_anum = 0;
 			else
@@ -4107,27 +4108,17 @@ codegen_build_gpusort_keydesc(codegen_context *context,
 					keydesc->buf_offset = 0;	/* no finalization */
 					keydesc->key_type_code = TypeOpCode__float8;
 					break;
-					/* finalization to int64 */
-				case KSORT_KEY_KIND__PAVG_INT64:
-					keydesc->buf_offset = usage;
-					usage += sizeof(bool) + sizeof(int64_t);
-					keydesc->key_type_code = TypeOpCode__int8;
+				case KSORT_KEY_KIND__PSUM_NUMERIC:
+					keydesc->buf_offset = 0;	/* no finalization */
+					keydesc->key_type_code = TypeOpCode__numeric;
 					break;
 					/* finalization to fp64 */
+				case KSORT_KEY_KIND__PAVG_INT64:
 				case KSORT_KEY_KIND__PAVG_FP64:
+				case KSORT_KEY_KIND__PAVG_NUMERIC:
 					keydesc->buf_offset = usage;
 					usage += (sizeof(bool) + sizeof(float8));
 					keydesc->key_type_code = TypeOpCode__float8;
-					break;
-					/* finalization to numeric */
-				case KSORT_KEY_KIND__PSUM_INT128:
-				case KSORT_KEY_KIND__PAVG_INT128:
-				case KSORT_KEY_KIND__PSUM_NUMERIC:
-				case KSORT_KEY_KIND__PAVG_NUMERIC:
-					keydesc->buf_offset = usage;
-					usage += (sizeof(bool)     + sizeof(uint8_t) +
-							  sizeof(uint16_t) + sizeof(int128_t));
-					keydesc->key_type_code = TypeOpCode__numeric;
 					break;
 					/* finalization to fp64 */
 				case KSORT_KEY_KIND__PVARIANCE_SAMP:
@@ -4628,15 +4619,12 @@ __xpucode_sortkeys_cstring(StringInfo buf,
 {
 	static const char *label[] = {
 		"vref",				/* KSORT_KEY_KIND__VREF */
-		"count",			/* KSORT_KEY_KIND__COUNT */
 		"min/max[int64]",	/* KSORT_KEY_KIND__PMINMAX_INT64 */
 		"min/max[fp64]",	/* KSORT_KEY_KIND__PMINMAX_FP64 */
 		"sum[int64]",		/* KSORT_KEY_KIND__PSUM_INT64 */
-		"sum[int128]",		/* KSORT_KEY_KIND__PSUM_INT128 */
 		"sum[fp64]",		/* KSORT_KEY_KIND__PSUM_FP64 */
 		"sum[numeric]",		/* KSORT_KEY_KIND__PSUM_NUMERIC */
 		"avg[int64]",		/* KSORT_KEY_KIND__PAVG_INT64 */
-		"avg[int128]",		/* KSORT_KEY_KIND__PAVG_INT128 */
 		"avg[fp64]",		/* KSORT_KEY_KIND__PAVG_FP64 */
 		"avg[numeric]",		/* KSORT_KEY_KIND__PAVG_NUMERIC */
 		"var[samp]",		/* KSORT_KEY_KIND__PVARIANCE_SAMP */
@@ -4656,7 +4644,7 @@ __xpucode_sortkeys_cstring(StringInfo buf,
 		NULL,
 	};
 
-	appendStringInfo(buf, "{AggFuncs");
+	appendStringInfo(buf, "{SortKeys");
 	for (int i=0; i < kexp->u.sort.nkeys; i++)
 	{
 		const kern_sortkey_desc *desc = &kexp->u.sort.desc[i];

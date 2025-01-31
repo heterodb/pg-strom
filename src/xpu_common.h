@@ -2289,32 +2289,29 @@ typedef struct
 #define KSORT_KEY_KIND__MASK				0x03ffU
 #define KSORT_KEY_KIND__SHIFT				16
 #define KSORT_KEY_KIND__VREF				0
-#define KSORT_KEY_KIND__COUNT				1
-#define KSORT_KEY_KIND__PMINMAX_INT64		2
-#define KSORT_KEY_KIND__PMINMAX_FP64		3
-#define KSORT_KEY_KIND__PSUM_INT64			4
-#define KSORT_KEY_KIND__PSUM_INT128			5
-#define KSORT_KEY_KIND__PSUM_FP64			6
-#define KSORT_KEY_KIND__PSUM_NUMERIC		7
-#define KSORT_KEY_KIND__PAVG_INT64			8
-#define KSORT_KEY_KIND__PAVG_INT128			9
-#define KSORT_KEY_KIND__PAVG_FP64			10
-#define KSORT_KEY_KIND__PAVG_NUMERIC		11
-#define KSORT_KEY_KIND__PVARIANCE_SAMP		12
-#define KSORT_KEY_KIND__PVARIANCE_POP		13
-#define KSORT_KEY_KIND__PCOVAR_CORR			14
-#define KSORT_KEY_KIND__PCOVAR_SAMP			15
-#define KSORT_KEY_KIND__PCOVAR_POP			16
-#define KSORT_KEY_KIND__PCOVAR_AVGX			17
-#define KSORT_KEY_KIND__PCOVAR_AVGY			18
-#define KSORT_KEY_KIND__PCOVAR_COUNT		19
-#define KSORT_KEY_KIND__PCOVAR_INTERCEPT	20
-#define KSORT_KEY_KIND__PCOVAR_REGR_R2		21
-#define KSORT_KEY_KIND__PCOVAR_REGR_SLOPE	22
-#define KSORT_KEY_KIND__PCOVAR_REGR_SXX		23
-#define KSORT_KEY_KIND__PCOVAR_REGR_SXY		24
-#define KSORT_KEY_KIND__PCOVAR_REGR_SYY		25
-#define KSORT_KEY_KIND__NITEMS				26
+#define KSORT_KEY_KIND__PMINMAX_INT64		1
+#define KSORT_KEY_KIND__PMINMAX_FP64		2
+#define KSORT_KEY_KIND__PSUM_INT64			3
+#define KSORT_KEY_KIND__PSUM_FP64			4
+#define KSORT_KEY_KIND__PSUM_NUMERIC		5
+#define KSORT_KEY_KIND__PAVG_INT64			6
+#define KSORT_KEY_KIND__PAVG_FP64			7
+#define KSORT_KEY_KIND__PAVG_NUMERIC		8
+#define KSORT_KEY_KIND__PVARIANCE_SAMP		9
+#define KSORT_KEY_KIND__PVARIANCE_POP		10
+#define KSORT_KEY_KIND__PCOVAR_CORR			11
+#define KSORT_KEY_KIND__PCOVAR_SAMP			12
+#define KSORT_KEY_KIND__PCOVAR_POP			13
+#define KSORT_KEY_KIND__PCOVAR_AVGX			14
+#define KSORT_KEY_KIND__PCOVAR_AVGY			15
+#define KSORT_KEY_KIND__PCOVAR_COUNT		16
+#define KSORT_KEY_KIND__PCOVAR_INTERCEPT	17
+#define KSORT_KEY_KIND__PCOVAR_REGR_R2		18
+#define KSORT_KEY_KIND__PCOVAR_REGR_SLOPE	19
+#define KSORT_KEY_KIND__PCOVAR_REGR_SXX		20
+#define KSORT_KEY_KIND__PCOVAR_REGR_SXY		21
+#define KSORT_KEY_KIND__PCOVAR_REGR_SYY		22
+#define KSORT_KEY_KIND__NITEMS				23
 
 typedef struct
 {
@@ -2450,6 +2447,7 @@ struct kern_expression
 		} proj;		/* Projection */
 		struct {
 			int			nkeys;
+			bool		needs_finalization;
 			kern_sortkey_desc desc[1];
 		} sort;		/* Sort */
 		struct {
@@ -2891,6 +2889,21 @@ SESSION_KEXP_GROUPBY_ACTIONS(const kern_session_info *session)
 	return kexp;
 }
 
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GPUSORT_KEYDESC(const kern_session_info *session)
+{
+	kern_expression *kexp = NULL;
+
+	if (session->xpucode_gpusort_keydesc)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_gpusort_keydesc);
+		assert(kexp->opcode == FuncOpCode__SortKeys &&
+			   kexp->exptype == TypeOpCode__int4);
+	}
+	return kexp;
+}
+
 /* see access/transam/xact.c */
 typedef struct
 {
@@ -3076,6 +3089,10 @@ EXTERN_FUNCTION(int)
 kern_estimate_heaptuple(kern_context *kcxt,
 						const kern_expression *kproj,
 						const kern_data_store *kds_dst);
+EXTERN_FUNCTION(const void *)
+kern_fetch_heaptuple_attr(kern_context *kcxt,
+						  const kern_data_store *kds,
+						  const kern_tupitem *titem, int anum);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsHeapTuple(kern_context *kcxt,
 					  const kern_expression *kexp_load_vars,
