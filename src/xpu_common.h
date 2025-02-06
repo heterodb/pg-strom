@@ -2285,7 +2285,7 @@ typedef struct
 
 
 #define KSORT_KEY_ATTR__NULLS_FIRST			0x0400U
-#define KSORT_KEY_ATTR__DESC_ORDER			0x8000U
+#define KSORT_KEY_ATTR__ORDER_ASC			0x8000U
 #define KSORT_KEY_KIND__MASK				0x03ffU
 #define KSORT_KEY_KIND__SHIFT				16
 #define KSORT_KEY_KIND__VREF				0
@@ -2317,7 +2317,7 @@ typedef struct
 {
 	uint16_t	kind;			/* any of KSORT_KEY_KIND__* */
 	int8_t		nulls_first;	/* true, if NULLs first */
-	int8_t		desc_order;		/* true, if smaller is first */
+	int8_t		order_asc;		/* true, if ORDER ASC */
 	uint16_t	src_anum;		/* source attribute number of KDS */
 	uint16_t	buf_offset;		/* if not KSORT_KEY_KIND__VREF, it means offset of
 								 * the temporary calculated sorting key.

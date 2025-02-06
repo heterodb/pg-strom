@@ -4035,7 +4035,7 @@ codegen_build_gpusort_keydesc(codegen_context *context,
 
 		keydesc->kind = kind;
 		keydesc->nulls_first = ((ival & KSORT_KEY_ATTR__NULLS_FIRST) != 0);
-		keydesc->desc_order  = ((ival & KSORT_KEY_ATTR__DESC_ORDER)  != 0);
+		keydesc->order_asc   = ((ival & KSORT_KEY_ATTR__ORDER_ASC)  != 0);
 		if (kind == KSORT_KEY_KIND__VREF)
 		{
 			ListCell   *cell;
@@ -4673,9 +4673,9 @@ __xpucode_sortkeys_cstring(StringInfo buf,
 			else if (desc->src_anum != 0)
 				appendStringInfo(buf, "; key=(out of range)");
 		}
-		appendStringInfo(buf, "; nulls %s; %s order>",
-						 desc->nulls_first ? "first" : "last",
-						 desc->desc_order ? "desc" : "asc");
+		appendStringInfo(buf, "[%s;%s]",
+						 desc->nulls_first ? "NF" : "NL",
+						 desc->order_asc ? "ASC" : "DESC");
 	}
 }
 

@@ -2031,8 +2031,8 @@ consider_sorted_groupby_path(PlannerInfo *root,
 				}
 				if (pk->pk_nulls_first)
 					kind |= KSORT_KEY_ATTR__NULLS_FIRST;
-				if (pk->pk_strategy == BTGreaterStrategyNumber)
-					kind |= KSORT_KEY_ATTR__DESC_ORDER;
+				if (pk->pk_strategy == BTLessStrategyNumber)
+					kind |= KSORT_KEY_ATTR__ORDER_ASC;
 				else if (pk->pk_strategy != BTLessStrategyNumber)
 					return false;	/* should not happen */
 
