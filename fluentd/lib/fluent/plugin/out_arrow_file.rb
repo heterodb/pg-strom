@@ -11,8 +11,8 @@ module Fluent
       desc "The Path of the arrow file"
       config_param :path, :string
       config_param :schema_defs, :string
-      config_param :ts_column, :string, default: NIL
-      config_param :tag_column, :string, default: NIL
+      config_param :ts_column, :string, default: nil
+      config_param :tag_column, :string, default: nil
       config_param :filesize_threshold, :integer, default: 10000
 
       config_section :buffer do
