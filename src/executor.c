@@ -1615,7 +1615,13 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		depth_index++;
 	}
 	Assert(depth_index == pts->num_rels);
-	
+
+	/*
+	 * GPU-Sort needs per-session kds_final buffer.
+	 */
+	if (pp_info->gpusort_keys_expr != 0)
+		pts->xpu_task_flags |= DEVTASK__PINNED_ROW_RESULTS;
+
 	/*
 	 * Setup request buffer
 	 */

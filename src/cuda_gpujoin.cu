@@ -13,7 +13,66 @@
 #include "cuda_common.h"
 
 /*
- * GPU Buffer Reconstruction
+ * GPU Buffer consolidation (ROW-format)
+ */
+KERNEL_FUNCTION(void)
+kern_buffer_consolidation(kern_data_store *kds_dst,
+						  const kern_data_store *__restrict__ kds_src)
+{
+	__shared__ uint32_t base_rowid;
+	__shared__ uint64_t base_usage;
+	uint32_t	base;
+
+	assert(kds_dst->format == KDS_FORMAT_ROW &&
+		   kds_src->format == KDS_FORMAT_ROW);
+	for (base = get_global_base();
+		 base < kds_src->nitems;
+		 base += get_global_size())
+	{
+		const kern_tupitem *titem = NULL;
+		uint32_t	index = base + get_local_id();
+		uint32_t	tupsz = 0;
+		uint32_t	row_id;
+		uint32_t	count;
+		uint64_t	offset;
+		uint64_t	total_sz;
+
+		if (index < kds_src->nitems)
+		{
+			titem = KDS_GET_TUPITEM(kds_src, index);
+			tupsz = MAXALIGN(offsetof(kern_tupitem, htup) + titem->t_len);
+		}
+		/* allocation of the destination buffer */
+		row_id = pgstrom_stair_sum_binary(tupsz > 0, &count);
+		offset = pgstrom_stair_sum_uint64(tupsz, &total_sz);
+		if (get_local_id() == 0)
+		{
+			base_rowid = __atomic_add_uint32(&kds_dst->nitems, count);
+			base_usage = __atomic_add_uint64(&kds_dst->usage,  total_sz);
+		}
+		__syncthreads();
+		/* put tuples on the destination */
+		row_id += base_rowid;
+		offset += base_usage;
+		if (tupsz > 0)
+		{
+			kern_tupitem   *__titem = (kern_tupitem *)
+				((char *)kds_dst + kds_dst->length - offset);
+			__titem->rowid = row_id;
+			__titem->t_len = titem->t_len;
+			memcpy(&__titem->htup, &titem->htup, titem->t_len);
+			assert(offsetof(kern_tupitem, htup) + titem->t_len <= tupsz);
+			__threadfence();
+			KDS_GET_ROWINDEX(kds_dst)[row_id] = ((char *)kds_dst
+												 + kds_dst->length
+												 - (char *)__titem);
+		}
+		__syncthreads();
+	}
+}
+
+/*
+ * GPU Buffer reconstruction (HASH-format)
  */
 KERNEL_FUNCTION(void)
 kern_buffer_reconstruction(kern_data_store *kds_dst,
@@ -24,6 +83,8 @@ kern_buffer_reconstruction(kern_data_store *kds_dst,
 	__shared__ uint32_t base_rowid;
 	__shared__ uint64_t base_usage;
 
+	assert(kds_dst->format == KDS_FORMAT_HASH &&
+		   kds_src->format == KDS_FORMAT_HASH);
 	for (base = get_global_base();
 		 base < kds_src->nitems;
 		 base += get_global_size())
