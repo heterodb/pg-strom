@@ -1337,6 +1337,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 		{
 			elog(DEBUG2, "Partial aggregate argument is not executable: %s",
 				 nodeToString(expr));
+			ReleaseSysCache(htup);
 			return false;
 		}
 		partfn_args = lappend(partfn_args, expr);
