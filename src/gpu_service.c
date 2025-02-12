@@ -44,6 +44,7 @@ struct gpuContext
 	CUfunction		cufn_merge_gpupreagg_buffer;
 	CUfunction		cufn_gpusort_prep_buffer;
 	CUfunction		cufn_gpusort_exec_bitonic;
+	CUfunction		cufn_kbuf_simple_limit;
 	CUfunction		cufn_kbuf_consolidation;
 	CUfunction		cufn_kbuf_partitioning;
 	CUfunction		cufn_kbuf_reconstruction;
@@ -4237,12 +4238,17 @@ gpuservMergeGpuJoinFinalBuffer(gpuClient *gclient,
 							   uint64_t kds_prime_usage,
 							   CUdeviceptr *p_kds_prime_temp)
 {
+	kern_session_info *session = gclient->h_session;
 	gpuQueryBuffer *gq_buf = gclient->gq_buf;
 	gpuContext *gcontext_prev = NULL;
 	CUdeviceptr	m_devptr = 0UL;
 	CUresult	rc;
 	void	   *kern_args[2];
 	bool		retval = false;
+
+	/* additional buffer margin, if simple LIMIT clause */
+	if (session->gpusort_limit_count > 0)
+		kds_prime_usage += BLCKSZ * session->gpusort_limit_count;
 
 	/* expand kds_prime, if kds_prime is not sufficient */
 	if (!__KDS_CHECK_OVERFLOW(kds_prime,
@@ -4558,6 +4564,52 @@ gpuservSortingFinalBuffer(gpuClient *gclient,
 		memcpy(KDS_GET_ROWINDEX(kds_final),
 			   (void *)m_rowindex,
 			   sizeof(uint64_t) * kds_final->nitems);
+	}
+
+	/*
+	 * Simple GPU-Sort + Limit (optional)
+	 */
+	if (session->gpusort_limit_count > 0)
+	{
+		uint64_t	old_length = kds_final->length;
+
+		rc = gpuOptimalBlockSize(&grid_sz,
+								 &block_sz,
+								 gcontext->cufn_kbuf_simple_limit, 0);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s",
+						  cuStrError(rc));
+			goto bailout;
+		}
+		/* reset kds_final buffer */
+		kds_final->length = kds_final->length - kds_final->usage;
+		kds_final->nitems = Min(kds_final->nitems, session->gpusort_limit_count);
+		kds_final->usage  = 0;
+		/* launch kernel */
+		grid_sz = Min(grid_sz, (kds_final->nitems + block_sz - 1) / block_sz);
+		kern_args[0] = &kds_final;
+		kern_args[1] = &old_length;
+		rc = cuLaunchKernel(gcontext->cufn_kbuf_simple_limit,
+							grid_sz, 1, 1,
+							block_sz, 1, 1,
+							0,
+							MY_STREAM_PER_THREAD,
+							kern_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+						  cuStrError(rc));
+			goto bailout;
+		}
+		rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+						  cuStrError(rc));
+			goto bailout;
+		}
 	}
 	retval = true;
 bailout:
@@ -5173,6 +5225,13 @@ __setupGpuKernelFunctionsAndParams(gpuContext *gcontext)
 		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
 			 func_name, cuStrError(rc));
 	gcontext->cufn_gpusort_exec_bitonic = cuda_function;
+	/* ------ kern_buffer_simple_limit ------ */
+	func_name = "kern_buffer_simple_limit";
+	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
+			 func_name, cuStrError(rc));
+	gcontext->cufn_kbuf_simple_limit = cuda_function;
 	/* ------ kern_buffer_consolidation ------ */
 	func_name = "kern_buffer_consolidation";
 	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);

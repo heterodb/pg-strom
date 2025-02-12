@@ -1777,8 +1777,6 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	double		xpu_ratio;
 	Cost		xpu_operator_cost;
 	Cost		xpu_tuple_cost;
-	Cost		startup_cost = 0.0;
-	Cost		run_cost = 0.0;
 	const CustomPathMethods *xpu_cpath_methods;
 
 	/*
@@ -1812,19 +1810,21 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	pp_info->final_nrows = con->num_groups;
 
 	/* No tuples shall be generated until child JOIN/SCAN path completion */
-	startup_cost = (pp_info->startup_cost +
-					pp_info->inner_cost +
-					pp_info->run_cost);
+	pp_info->startup_cost = (pp_info->startup_cost +
+							 pp_info->inner_cost +
+							 pp_info->run_cost);
 	/* Cost estimation for grouping */
 	num_group_keys = list_length(parse->groupClause);
-	startup_cost += (xpu_operator_cost *
-					 num_group_keys *
-					 input_nrows);
+	pp_info->startup_cost += (xpu_operator_cost *
+							  num_group_keys *
+							  input_nrows);
 	/* Cost estimation for aggregate function */
-	startup_cost += (target_partial->cost.per_tuple * input_nrows +
-					 target_partial->cost.startup) * xpu_ratio;
-	/* Cost estimation to fetch results */
-	run_cost = xpu_tuple_cost * con->num_groups;
+	pp_info->startup_cost += (target_partial->cost.per_tuple * input_nrows +
+							  target_partial->cost.startup) * xpu_ratio;
+	/* Cost for DMA receive (xPU --> Host) */
+	pp_info->run_cost = (con->target_partial->cost.per_tuple +
+						 xpu_tuple_cost) * con->num_groups / pp_info->parallel_divisor;
+	pp_info->final_cost = 0.0;
 
 	cpath->path.pathtype         = T_CustomScan;
 	cpath->path.parent           = con->input_rel;
@@ -1834,8 +1834,10 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	cpath->path.parallel_safe    = con->input_rel->consider_parallel;
 	cpath->path.parallel_workers = pp_info->parallel_nworkers;
 	cpath->path.rows             = con->num_groups;
-	cpath->path.startup_cost     = startup_cost;
-	cpath->path.total_cost       = startup_cost + run_cost;
+	cpath->path.startup_cost     = pp_info->startup_cost;
+	cpath->path.total_cost       = (pp_info->startup_cost +
+									pp_info->run_cost +
+									pp_info->final_cost);
 	cpath->path.pathkeys         = NIL;
 	cpath->custom_paths          = con->inner_paths_list;
 	cpath->custom_private        = list_make3(pp_info, NULL, NULL);
@@ -2199,13 +2201,18 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 										 &__sortkeys_kind,
 										 &__gpusort_cost))
 		{
+			Cost	__per_tuple = (cpath->path.pathtarget->cost.per_tuple +
+								   pgstrom_gpu_tuple_cost);
 			cpath = (CustomPath *)pgstrom_copy_pathnode(&cpath->path);
 			pp_info = copy_pgstrom_plan_info(pp_info);
 			pp_info->gpusort_keys_expr = __sortkeys_expr;
 			pp_info->gpusort_keys_kind = __sortkeys_kind;
 			linitial(cpath->custom_private) = pp_info;
-			cpath->path.startup_cost += __gpusort_cost;
-			cpath->path.total_cost   += __gpusort_cost;
+			cpath->path.startup_cost = (cpath->path.total_cost
+										- __per_tuple * cpath->path.rows / 2.0
+										+ __gpusort_cost);
+			cpath->path.total_cost = (cpath->path.startup_cost
+									  + __per_tuple * cpath->path.rows / 2.0);
 			__path = &cpath->path;
 			goto retry_gpusort;
 		}
@@ -2433,6 +2440,136 @@ __xpuPreAggAddCustomPathCommon(PlannerInfo *root,
 }
 
 /*
+ * tryGpuSortWithLimitPath
+ */
+static Path *
+__tryGpuSortWithLimitPath(PlannerInfo *root, Path *path, uint32_t limit_count)
+{
+	Path   *subpath;
+
+	switch (path->type)
+	{
+		case T_GatherPath:
+			subpath = ((GatherPath *)path)->subpath;
+			subpath = __tryGpuSortWithLimitPath(root, subpath, limit_count);
+			if (subpath)
+			{
+				GatherPath *gpath
+					= create_gather_path(root,
+										 path->parent,
+										 subpath,
+										 path->pathtarget,
+										 NULL,
+										 &subpath->rows);
+				gpath->path.pathkeys = path->pathkeys;
+				//elog(INFO, "Gpath startup=%f total=%f rows=%.0f", gpath->path.startup_cost, gpath->path.total_cost, gpath->path.rows);
+				return &gpath->path;
+			}
+			break;
+
+		case T_GatherMergePath:
+			subpath = ((GatherMergePath *)path)->subpath;
+			subpath = __tryGpuSortWithLimitPath(root, subpath, limit_count);
+			if (subpath)
+			{
+				GatherPath *gpath
+					= create_gather_path(root,
+										 path->parent,
+										 subpath,
+										 path->pathtarget,
+										 NULL,
+										 &subpath->rows);
+				gpath->path.pathkeys = path->pathkeys;
+				//elog(INFO, "Gpath startup=%f total=%f rows=%.0f", gpath->path.startup_cost, gpath->path.total_cost, gpath->path.rows);
+				return &gpath->path;
+			}
+			break;
+
+		case T_ProjectionPath:
+			subpath = ((ProjectionPath *)path)->subpath;
+			subpath = __tryGpuSortWithLimitPath(root, subpath, limit_count);
+			if (subpath)
+			{
+				ProjectionPath *ppath
+					= create_projection_path(root,
+											 path->parent,
+											 subpath,
+											 path->pathtarget);
+				ppath->path.pathkeys = path->pathkeys;
+				//elog(INFO, "Proj-path startup=%f total=%f rows=%.0f", ppath->path.startup_cost, ppath->path.total_cost, ppath->path.rows);
+				return &ppath->path;
+			}
+			break;
+
+		case T_CustomPath:
+			if (pgstrom_is_gpuscan_path(path) ||
+				pgstrom_is_gpujoin_path(path) ||
+				pgstrom_is_gpupreagg_path(path))
+			{
+				CustomPath *cpath = (CustomPath *)path;
+				pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
+				Cost		__startup_cost;
+				Cost		__per_tuple = (cpath->path.pathtarget->cost.per_tuple +
+										   pgstrom_gpu_tuple_cost);
+				if (pp_info->gpusort_keys_expr == NIL ||
+					pp_info->gpusort_keys_kind == NIL)
+					return NULL;	/* no sort */
+				if (pp_info->final_nrows <= limit_count)
+					return NULL;	/* makes no sense */
+				/* duplicate CustomPath */
+				cpath = pmemdup(cpath, sizeof(CustomPath));
+				cpath->custom_private = list_copy(cpath->custom_private);
+				pp_info = copy_pgstrom_plan_info(pp_info);
+				pp_info->gpusort_limit_count = limit_count;
+				linitial(cpath->custom_private) = pp_info;
+				/* adjust the final cost factor */
+				__startup_cost = cpath->path.total_cost
+					- __per_tuple * cpath->path.rows
+					+ __per_tuple * (double)limit_count / 2.0;
+				cpath->path.startup_cost = __startup_cost;
+				cpath->path.total_cost = __startup_cost
+					+ __per_tuple * (double)limit_count / 2.0;
+				cpath->path.rows = (double)limit_count;
+				return &cpath->path;
+			}
+			break;
+
+		default:
+			break;
+	}
+	return NULL;
+}
+
+static Path *
+tryGpuSortWithLimitPath(PlannerInfo *root, Path *path)
+{
+	Query	   *parse = root->parse;
+	Const	   *con = (Const *)parse->limitCount;
+
+	if (con && IsA(con, Const) &&
+		con->consttype == INT8OID &&
+		!con->constisnull)
+	{
+		int64_t		limit_count = DatumGetInt64(con->constvalue);
+
+		if (parse->limitOffset)
+		{
+			con = (Const *)parse->limitOffset;
+			if (IsA(con, Const) &&
+				con->consttype == INT8OID &&
+				!con->constisnull)
+				limit_count += DatumGetInt64(con->constvalue);
+			else
+				return NULL;
+		}
+
+		if (limit_count > 0 && limit_count < INT_MAX)
+			return __tryGpuSortWithLimitPath(root, path, limit_count);
+	}
+	return NULL;
+}
+
+/*
  * XpuPreAggAddCustomPath
  */
 static void
@@ -2448,8 +2585,9 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 								input_rel,
 								group_rel,
 								extra);
-	if (pgstrom_enabled() && (upper_stage == UPPERREL_GROUP_AGG ||
-							  upper_stage == UPPERREL_DISTINCT))
+	if (!pgstrom_enabled())
+		return;
+	if (upper_stage == UPPERREL_GROUP_AGG || upper_stage == UPPERREL_DISTINCT)
 	{
 		if (pgstrom_enable_gpupreagg && gpuserv_ready_accept())
 			__xpuPreAggAddCustomPathCommon(root,
@@ -2467,6 +2605,19 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 										   extra,
 										   TASK_KIND__DPUPREAGG,
 										   pgstrom_enable_partitionwise_dpupreagg);
+	}
+	else if (upper_stage == UPPERREL_FINAL && pgstrom_enable_gpusort)
+	{
+		ListCell   *lc;
+
+		foreach (lc, input_rel->pathlist)
+		{
+			Path   *__path = lfirst(lc);
+
+			__path = tryGpuSortWithLimitPath(root, __path);
+			if (__path)
+				add_path(group_rel, __path);
+		}
 	}
 }
 

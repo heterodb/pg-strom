@@ -281,7 +281,7 @@ __buildSimpleScanPlanInfo(PlannerInfo *root,
 	 * Cost for DMA receive (xPU-->Host)
 	 */
 	final_cost += xpu_tuple_cost * ntuples;
-	
+
 	/*
 	 * Cost for host qualifiers
 	 */

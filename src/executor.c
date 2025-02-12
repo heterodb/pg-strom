@@ -675,6 +675,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
 		session->gpusort_htup_margin = pp_info->gpusort_htup_margin;
+		session->gpusort_limit_count = pp_info->gpusort_limit_count;
 	}
 	else
 	{
@@ -2639,8 +2640,12 @@ pgstromExplainTaskState(CustomScanState *node,
 			appendStringInfoString(&buf, str);
 		}
 		if (pgstrom_explain_developer_mode)
-			appendStringInfo(&buf, " [htup-margin: %d]", pp_info->gpusort_htup_margin);
+			appendStringInfo(&buf, " [htup-margin: %d]",
+							 pp_info->gpusort_htup_margin);
 		ExplainPropertyText("GPU-Sort keys", buf.data, es);
+		if (pp_info->gpusort_limit_count > 0)
+			ExplainPropertyInteger("GPU-Sort Limit", NULL,
+								   pp_info->gpusort_limit_count, es);
 	}
 
 	/*

@@ -665,7 +665,7 @@ __buildXpuJoinPlanInfo(PlannerInfo *root,
 	/* discount if CPU parallel is enabled */
 	run_cost += (comp_cost / pp_info->parallel_divisor);
 	/* cost for DMA receive (xPU --> Host) */
-	final_cost += (xpu_tuple_cost * joinrel->rows) / pp_info->parallel_divisor;
+	run_cost += (xpu_tuple_cost * joinrel->rows) / pp_info->parallel_divisor;
 	/* cost for host projection */
 	final_cost += (joinrel->reltarget->cost.per_tuple *
 				   joinrel->rows / pp_info->parallel_divisor);
@@ -861,6 +861,7 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 	ListCell   *lc1, *lc2;
 	size_t		unitsz, buffer_sz, devmem_sz;
 	int			nattrs;
+	Cost		per_tuple_cost;
 	Cost		gpusort_cost;
 
 	if (!pgstrom_enable_gpusort)
@@ -982,9 +983,13 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 	pp_info->gpusort_keys_expr = sortkeys_expr;
 	pp_info->gpusort_keys_kind = sortkeys_kind;
 	linitial(cpath->custom_private) = pp_info;
-	cpath->path.startup_cost += gpusort_cost;
-	cpath->path.total_cost   += gpusort_cost;
-
+	per_tuple_cost = (cpath->path.pathtarget->cost.per_tuple +
+					  pgstrom_gpu_tuple_cost);
+	cpath->path.startup_cost = (cpath->path.total_cost
+								- per_tuple_cost * cpath->path.rows / 2.0
+								+ gpusort_cost);
+	cpath->path.total_cost   = (cpath->path.startup_cost
+								+ per_tuple_cost * cpath->path.rows / 2.0);
 	/* add path */
 	if (!be_parallel)
 		add_path(join_rel, &cpath->path);

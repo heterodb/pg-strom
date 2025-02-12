@@ -13,6 +13,60 @@
 #include "cuda_common.h"
 
 /*
+ * Simple GPU-Sort + LIMIT clause
+ */
+KERNEL_FUNCTION(void)
+kern_buffer_simple_limit(kern_data_store *kds_final, uint64_t old_length)
+{
+	uint64_t   *row_index = KDS_GET_ROWINDEX(kds_final);
+	uint32_t	base;
+	__shared__ uint64_t base_usage;
+
+	assert(kds_final->format == KDS_FORMAT_ROW);
+	for (base = get_global_base();
+		 base < kds_final->nitems;
+		 base += get_global_size())
+	{
+		const kern_tupitem *titem = NULL;
+		uint32_t	index = base + get_local_id();
+		uint32_t	tupsz = 0;
+		uint64_t	offset;
+		uint64_t	total_sz;
+
+		if (index < kds_final->nitems)
+		{
+			// XXX - must not use KDS_GET_TUPITEM() because kds_final->length
+			//       is already truncated.
+			assert(row_index[index] != 0);
+			titem = (const kern_tupitem *)
+				((char *)kds_final + old_length - row_index[index]);
+			tupsz = MAXALIGN(offsetof(kern_tupitem, htup) + titem->t_len);
+		}
+		/* allocation of the destination buffer */
+		offset = pgstrom_stair_sum_uint64(tupsz, &total_sz);
+		if (get_local_id() == 0)
+			base_usage = __atomic_add_uint64(&kds_final->usage,  total_sz);
+		__syncthreads();
+		/* put tuples on the destination */
+		offset += base_usage;
+		if (tupsz > 0)
+		{
+			kern_tupitem   *__titem = (kern_tupitem *)
+				((char *)kds_final + kds_final->length - offset);
+			__titem->rowid = index;
+			__titem->t_len = titem->t_len;
+			memcpy(&__titem->htup, &titem->htup, titem->t_len);
+			assert(offsetof(kern_tupitem, htup) + titem->t_len <= tupsz);
+			__threadfence();
+			row_index[index] = ((char *)kds_final
+								+ kds_final->length
+								- (char *)__titem);
+		}
+		__syncthreads();
+	}
+}
+
+/*
  * GPU Buffer consolidation (ROW-format)
  */
 KERNEL_FUNCTION(void)

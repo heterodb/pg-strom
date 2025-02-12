@@ -319,6 +319,7 @@ typedef struct
 	List	   *gpusort_keys_kind;		/* set of KSORT_KEY_KIND__* for GpuSort */
 	int			gpusort_htup_margin;	/* required margin at the tail of htuple on
 										 * the kds_final buffer for temporary value. */
+	uint32_t	gpusort_limit_count;	/* GPU-Sort + LIMIT clause, if any */
 	/* pinned inner buffer stuff */
 	List	   *projection_hashkeys;
 	/* inner relations */

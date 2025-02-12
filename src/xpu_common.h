@@ -2590,6 +2590,7 @@ typedef struct kern_session_info
 	/* gpu-sort final buffer */
 	uint32_t	gpusort_htup_margin;	/* extra space at tail of the final
 										 * kern_tupitem for finalization */
+	uint32_t	gpusort_limit_count;	/* limit-pushdown, if positive */
 	/* fallback buffer */
 	uint32_t	fallback_kds_head;		/* offset to kds_fallback (header) */
 	uint32_t	fallback_desc_defs;		/* offset to kern_fallback_desc array */
