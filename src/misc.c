@@ -1975,38 +1975,38 @@ __fetch_token_by_delim(text *__str, text *__key, char delim)
 {
 	const char *str = VARDATA_ANY(__str);
 	const char *key = VARDATA_ANY(__key);
-	size_t		strlen = VARSIZE_ANY_EXHDR(__str);
-	size_t		keylen = VARSIZE_ANY_EXHDR(__key);
+	size_t		str_len = VARSIZE_ANY_EXHDR(__str);
+	size_t		key_len = VARSIZE_ANY_EXHDR(__key);
 	const char *end, *pos, *base;
 
 	/*
 	 * triming whitespaces of the key head/tail
 	 */
-	while (keylen > 0 && isspace(*key))
+	while (key_len > 0 && isspace(*key))
 	{
 		key++;
-		keylen--;
+		key_len--;
 	}
-	if (keylen == 0)
+	if (key_len == 0)
 		return NULL;
-	while (keylen > 0 && isspace(key[keylen-1]))
-		keylen--;
-	if (keylen == 0)
+	while (key_len > 0 && isspace(key[key_len-1]))
+		key_len--;
+	if (key_len == 0)
 		return NULL;
 	/*
 	 * split a token by the delimiter for each
 	 */
-	if (strlen == 0)
+	if (str_len == 0)
 		return NULL;
-	end = str + strlen - 1;
+	end = str + str_len - 1;
 	pos = base = str;
 	while (pos <= end)
 	{
 		if (*pos == delim || pos == end)
 		{
-			if (pos - base >= keylen && strncmp(base, key, keylen) == 0)
+			if (pos - base >= key_len && strncmp(base, key, key_len) == 0)
 			{
-				const char *__k = (base + keylen);
+				const char *__k = (base + key_len);
 
 				while (isspace(*__k) && __k < pos)
 					__k++;
