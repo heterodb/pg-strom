@@ -1038,6 +1038,72 @@ __buildArrowStatsOper(arrowStatsHint *as_hint,
 }
 
 static bool
+__buildArrowStatsBoolOp(arrowStatsHint *as_hint,
+						ScanState *ss, Expr *expr)
+{
+	Scan   *scan = (Scan *)ss->ps.plan;
+
+	if (IsA(expr, BoolExpr))
+	{
+		BoolExpr   *b = (BoolExpr *)expr;
+
+		if (b->boolop == NOT_EXPR && list_length(b->args) == 1)
+		{
+			Var	   *var = (Var *)linitial(b->args);
+
+			if (IsA(var, Var) &&
+				var->vartype == BOOLOID &&
+				var->varnosyn == scan->scanrelid)
+			{
+				/*
+				 * WHERE NOT <BOOL_VAL>
+				 *  --> If MIN_VALUE == true, no chance to match
+				 */
+				int		anum = var->varattnosyn - FirstLowInvalidHeapAttributeNumber;
+
+				if (!bms_is_member(anum, as_hint->stat_attrs))
+					return false;
+				expr = (Expr *)makeVar(INNER_VAR,
+									   var->varattno,
+									   var->vartype,
+									   var->vartypmod,
+									   var->varcollid, 0);
+				as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+				as_hint->load_attrs = bms_add_member(as_hint->load_attrs, var->varattno);
+				return true;
+			}
+		}
+	}
+	else if (IsA(expr, Var))
+	{
+		Var	   *var = (Var *)expr;
+
+		if (IsA(var, Var) &&
+			var->vartype == BOOLOID &&
+			var->varnosyn == scan->scanrelid)
+		{
+			/*
+			 * WHERE <BOOL_VAL>
+			 *  --> If MAX_VALUE == false, no change to match
+			 */
+			int		anum = var->varattnosyn - FirstLowInvalidHeapAttributeNumber;
+
+			if (!bms_is_member(anum, as_hint->stat_attrs))
+				return false;
+			expr = make_notclause((Expr *)makeVar(OUTER_VAR,
+												  var->varattno,
+												  var->vartype,
+												  var->vartypmod,
+												  var->varcollid, 0));
+			as_hint->eval_quals = lappend(as_hint->eval_quals, expr);
+			as_hint->load_attrs = bms_add_member(as_hint->load_attrs, var->varattno);
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool
 __buildArrowStatsScalarArrayOp(arrowStatsHint *as_hint,
 							   ScanState *ss,
 							   ScalarArrayOpExpr *sa_op)
@@ -1275,6 +1341,10 @@ execInitArrowStatsHint(ScanState *ss, List *outer_quals, Bitmapset *stat_attrs)
 		else if (IsA(expr, ScalarArrayOpExpr) &&
 				 __buildArrowStatsScalarArrayOp(as_hint, ss,
 												(ScalarArrayOpExpr *)expr))
+		{
+			as_hint->orig_quals = lappend(as_hint->orig_quals, expr);
+		}
+		else if (__buildArrowStatsBoolOp(as_hint, ss, expr))
 		{
 			as_hint->orig_quals = lappend(as_hint->orig_quals, expr);
 		}
