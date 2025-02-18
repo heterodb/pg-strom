@@ -2186,6 +2186,7 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME4))			\
 		return false
 
+#define __KAGG_ACTION__USE_FILTER	8192	/* only used in optimizer */
 #define KAGG_ACTION__VREF			101		/* simple var copy */
 #define KAGG_ACTION__VREF_NOKEY		102		/* simple var copy; but not a grouping-
 											 * key, if GROUP-BY primary key.
@@ -2277,10 +2278,11 @@ typedef struct
 
 typedef struct
 {
-	uint32_t	action;			/* any of KAGG_ACTION__* */
+	uint16_t	action;			/* any of KAGG_ACTION__* */
+	int16_t		arg0_slot_id;	/* arg0 of partial aggregate function */
+	int16_t		arg1_slot_id;	/* arg1 of partial aggregate function */
+	int16_t		filter_slot_id;	/* if non-negative, slot-id of the filter */
 	int32_t		typmod;			/* typmod of 1st arg - used for numeric */
-	int32_t		arg0_slot_id;
-	int32_t		arg1_slot_id;
 } kern_aggregate_desc;
 
 

@@ -884,6 +884,7 @@ typedef struct
 	Oid		final_agg_func_oid;
 	Oid		final_proj_func_oid;
 	Oid		partial_func_oid;
+	Oid		partial_func_filtered_oid;
 	Oid		partial_func_rettype;
 	int		partial_func_nargs;
 	int		partial_func_action;
@@ -902,7 +903,7 @@ aggfunc_catalog_htable_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 }
 
 static Oid
-__aggfunc_resolve_func_signature(const char *signature)
+__aggfunc_resolve_func_signature(const char *signature, bool with_filtered_clause)
 {
 	char	   *fn_name = alloca(strlen(signature));
 	Oid			fn_namespace;
@@ -947,6 +948,8 @@ __aggfunc_resolve_func_signature(const char *signature)
 			elog(ERROR, "cache lookup failed for type '%s'", tok);
 		fn_argtypes->values[fn_nargs++] = type_oid;
 	}
+	if (with_filtered_clause)
+		fn_argtypes->values[fn_nargs++] = BOOLOID;
 	fn_argtypes->dim1 = fn_nargs;
 	SET_VARSIZE(fn_argtypes, offsetof(oidvector, values[fn_nargs]));
 
@@ -969,7 +972,8 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 							   const char *partfn_signature,
 							   int partfn_action)
 {
-	Oid		func_oid = __aggfunc_resolve_func_signature(partfn_signature);
+	Oid		func_oid = __aggfunc_resolve_func_signature(partfn_signature, false);
+	Oid		func_filtered_oid = __aggfunc_resolve_func_signature(partfn_signature, true);
 	Oid		type_oid;
 	int		func_nargs;
 	int		partfn_bufsz;
@@ -1040,6 +1044,7 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 			break;
 	}
 	entry->partial_func_oid = func_oid;
+	entry->partial_func_filtered_oid = func_filtered_oid;
 	entry->partial_func_rettype = get_func_rettype(func_oid);
 	entry->partial_func_nargs = get_func_nargs(func_oid);
 	entry->partial_func_action = partfn_action;
@@ -1065,10 +1070,9 @@ __setup_aggfunc_catalog_entry(aggfunc_catalog_entry *entry,
 	__aggfunc_resolve_partial_func(entry,
 								   cat->partfn_signature,
 								   cat->partfn_action);
-
 	/* final agg function (used by Agg node) */
 	Assert(cat->finalfn_agg_signature != NULL);
-	func_oid = __aggfunc_resolve_func_signature(cat->finalfn_agg_signature);
+	func_oid = __aggfunc_resolve_func_signature(cat->finalfn_agg_signature, false);
 	if (!SearchSysCacheExists1(AGGFNOID, ObjectIdGetDatum(func_oid)) ||
 		get_func_rettype(func_oid) != agg_proc->prorettype)
 		elog(ERROR, "Catalog corruption? final function mismatch: %s",
@@ -1087,7 +1091,7 @@ __setup_aggfunc_catalog_entry(aggfunc_catalog_entry *entry,
 
 	/* final cscan function (usec by GpuAgg node) */
 	if (cat->finalfn_proj_signature != NULL)
-		func_oid = __aggfunc_resolve_func_signature(cat->finalfn_proj_signature);
+		func_oid = __aggfunc_resolve_func_signature(cat->finalfn_proj_signature, false);
 	else
 		func_oid = InvalidOid;
 	entry->final_proj_func_oid = func_oid;
@@ -1277,7 +1281,7 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 	List	   *partfn_args = NIL;
 	Expr	   *partfn;
 	Node	   *final_fn;
-	Oid			func_oid;
+	Oid			partial_func_oid;
 	HeapTuple	htup;
 	Form_pg_proc proc;
 	ListCell   *lc;
@@ -1312,13 +1316,19 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 	/*
 	 * Build partial-aggregate function
 	 */
-	func_oid = aggfn_cat->partial_func_oid;
-	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
+	if (!aggref->aggfilter)
+		partial_func_oid = aggfn_cat->partial_func_oid;
+	else
+		partial_func_oid = aggfn_cat->partial_func_filtered_oid;
+	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(partial_func_oid));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for function %u",
-			 aggfn_cat->partial_func_oid);
+			 partial_func_oid);
 	proc = (Form_pg_proc) GETSTRUCT(htup);
-	Assert(list_length(aggref->args) == proc->pronargs);
+	Assert(!aggref->aggfilter
+		   ? proc->pronargs == list_length(aggref->args)
+		   : proc->pronargs == list_length(aggref->args) + 1);
+	Assert(proc->prorettype == aggfn_cat->partial_func_rettype);
 	j = 0;
 	foreach (lc, aggref->args)
 	{
@@ -1338,26 +1348,45 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 			elog(DEBUG2, "Partial aggregate argument is not executable: %s",
 				 nodeToString(expr));
 			ReleaseSysCache(htup);
-			return false;
+			return NULL;
 		}
 		partfn_args = lappend(partfn_args, expr);
 		if (lc == list_head(aggref->args))
 			groupby_typmod = exprTypmod((Node *)expr);
 	}
-	ReleaseSysCache(htup);
-
-	partfn = (Expr *)makeFuncExpr(aggfn_cat->partial_func_oid,
-								  aggfn_cat->partial_func_rettype,
+	/* last argument for filtering */
+	if (aggref->aggfilter)
+	{
+		if (!pgstrom_xpu_expression(aggref->aggfilter,
+									pp_info->xpu_task_flags,
+									pp_info->scan_relid,
+									con->inner_target_list,
+									NULL))
+		{
+			elog(DEBUG2, "FILTER-clause of aggregate function is not executable: %s",
+				 nodeToString(aggref->aggfilter));
+			ReleaseSysCache(htup);
+			return NULL;
+		}
+		partfn_args = lappend(partfn_args, aggref->aggfilter);
+	}
+	partfn = (Expr *)makeFuncExpr(partial_func_oid,
+								  proc->prorettype,
 								  partfn_args,
 								  aggref->aggcollid,
 								  aggref->inputcollid,
 								  COERCE_EXPLICIT_CALL);
+	ReleaseSysCache(htup);
 	/* see add_new_column_to_pathtarget */
 	if (!list_member(target_partial->exprs, partfn))
 	{
+		int		__action = aggfn_cat->partial_func_action;
+
+		if (aggref->aggfilter)
+			__action |= __KAGG_ACTION__USE_FILTER;
 		add_column_to_pathtarget(target_partial, partfn, 0);
 		pp_info->groupby_actions = lappend_int(pp_info->groupby_actions,
-											   aggfn_cat->partial_func_action);
+											   __action);
 		pp_info->groupby_typmods = lappend_int(pp_info->groupby_typmods,
 											   groupby_typmod);
 		pp_info->groupby_prepfn_bufsz += aggfn_cat->partial_func_bufsz;
@@ -1373,14 +1402,13 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 		Oid			__argtype = exprType((Node *)partfn);
 		TargetEntry *__tle = makeTargetEntry(partfn, 1, NULL, false);
 
-		func_oid = aggfn_cat->final_agg_func_oid;
-		htup = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(func_oid));
+		htup = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggfn_cat->final_agg_func_oid));
 		if (!HeapTupleIsValid(htup))
-			elog(ERROR, "cache lookup failed for pg_aggregate %u", func_oid);
+			elog(ERROR, "cache lookup failed for pg_aggregate %u", aggfn_cat->final_agg_func_oid);
 		agg = (Form_pg_aggregate) GETSTRUCT(htup);
 
 		__aggref = makeNode(Aggref);
-		__aggref->aggfnoid      = func_oid;
+		__aggref->aggfnoid      = aggfn_cat->final_agg_func_oid;
 		__aggref->aggtype       = aggref->aggtype;
 		__aggref->aggcollid     = aggref->aggcollid;
 		__aggref->inputcollid   = aggref->inputcollid;
@@ -1434,12 +1462,12 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 		/*
 		 * Build final-scalar function (for GpuAgg)
 		 */
-		func_oid = aggfn_cat->final_proj_func_oid;
-		if (!OidIsValid(func_oid))
+		Oid		final_proj_func_oid = aggfn_cat->final_proj_func_oid;
+		if (!OidIsValid(final_proj_func_oid))
 			final_fn = (Node *)partfn;
 		else
 		{
-			final_fn = (Node *)makeFuncExpr(func_oid,
+			final_fn = (Node *)makeFuncExpr(final_proj_func_oid,
 											aggref->aggtype,
 											list_make1(partfn),
 											aggref->aggcollid,

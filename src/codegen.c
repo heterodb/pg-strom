@@ -3915,8 +3915,10 @@ __codegen_build_groupby_actions(codegen_context *context,
 			  lc3, pp_info->groupby_typmods)
 	{
 		TargetEntry *tle = lfirst(lc1);
-		int			action = lfirst_int(lc2);
-		int			typmod = lfirst_int(lc3);
+		int		__action_flags = lfirst_int(lc2);
+		int		action = (__action_flags & ~__KAGG_ACTION__USE_FILTER);
+		bool	use_filter = ((__action_flags & __KAGG_ACTION__USE_FILTER) != 0);
+		int		typmod = lfirst_int(lc3);
 		kern_aggregate_desc *desc = &kexp->u.pagg.desc[kexp->u.pagg.nattrs];
 		codegen_kvar_defitem *kvdef;
 
@@ -3929,8 +3931,11 @@ __codegen_build_groupby_actions(codegen_context *context,
 												  &buf,
 												  tle->expr);
 			desc->action = KAGG_ACTION__VREF;
+			desc->arg0_slot_id = -1;
+			desc->arg1_slot_id = -1;
+			desc->filter_slot_id = -1;
 			desc->typmod = typmod;
-            desc->arg0_slot_id = kvdef->kv_slot_id;
+			desc->arg0_slot_id = kvdef->kv_slot_id;
 		}
 		else
 		{
@@ -3938,8 +3943,11 @@ __codegen_build_groupby_actions(codegen_context *context,
 			FuncExpr   *func = (FuncExpr *)tle->expr;
 			ListCell   *cell;
 
-			Assert(IsA(func, FuncExpr) && list_length(func->args) <= 2);
+			Assert(IsA(func, FuncExpr) && list_length(func->args) <= (!use_filter ? 2 : 3));
 			desc->action = action;
+			desc->arg0_slot_id = -1;
+			desc->arg1_slot_id = -1;
+			desc->filter_slot_id = -1;
 			desc->typmod = typmod;
 			foreach (cell, func->args)
 			{
@@ -3949,12 +3957,17 @@ __codegen_build_groupby_actions(codegen_context *context,
 													  kexp,
 													  &buf,
 													  fn_arg);
-				if (cell == list_head(func->args))
+				if (use_filter && cell == list_tail(func->args))
+				{
+					desc->filter_slot_id = kvdef->kv_slot_id;
+				}
+				else if (cell == list_head(func->args))
 				{
 					desc->arg0_slot_id = kvdef->kv_slot_id;
 				}
 				else
 				{
+					Assert(action == KAGG_ACTION__COVAR);
 					desc->arg1_slot_id = kvdef->kv_slot_id;
 				}
 			}
@@ -4481,114 +4494,114 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 		switch (desc->action)
 		{
 			case KAGG_ACTION__VREF:
-				appendStringInfo(buf, "vref[slot=%d, expr='%s']",
+				appendStringInfo(buf, "vref[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__NROWS_ANY:
-				appendStringInfo(buf, "nrows[*]");
+				appendStringInfo(buf, "nrows[*");
 				break;
 			case KAGG_ACTION__NROWS_COND:
-				appendStringInfo(buf, "nrows[slot=%d, expr='%s']",
+				appendStringInfo(buf, "nrows[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PMIN_INT32:
-				appendStringInfo(buf, "pmin::int32[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pmin::int32[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PMIN_INT64:
-				appendStringInfo(buf, "pmin::int64[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pmin::int64[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PMIN_FP64:
-				appendStringInfo(buf, "pmin::fp64[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pmin::fp64[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PMAX_INT32:
-				appendStringInfo(buf, "pmax::int32[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pmax::int32[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PMAX_INT64:
-				appendStringInfo(buf, "pmax::int64[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pmax::int64[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PMAX_FP64:
-				appendStringInfo(buf, "pmax::fp64[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pmax::fp64[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PSUM_INT:
-				appendStringInfo(buf, "psum::int[slot=%d, expr='%s']",
+				appendStringInfo(buf, "psum::int[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PSUM_INT64:
-				appendStringInfo(buf, "psum::int64[slot=%d, expr='%s']",
+				appendStringInfo(buf, "psum::int64[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PSUM_FP:
-				appendStringInfo(buf, "psum::fp[slot=%d, expr='%s']",
+				appendStringInfo(buf, "psum::fp[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PSUM_NUMERIC:
-				appendStringInfo(buf, "psum::numeric(%d)[slot=%d, expr='%s']",
+				appendStringInfo(buf, "psum::numeric(%d)[slot=%d, expr='%s'",
 								 __numeric_typmod_weight(desc->typmod),
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PAVG_INT:
-				appendStringInfo(buf, "pavg::int[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pavg::int[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PAVG_INT64:
-				appendStringInfo(buf, "pavg::int64[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pavg::int64[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PAVG_FP:
-				appendStringInfo(buf, "pavg::fp[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pavg::fp[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PAVG_NUMERIC:
-				appendStringInfo(buf, "pavg::numeric(%d)[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pavg::numeric(%d)[slot=%d, expr='%s'",
 								 __numeric_typmod_weight(desc->typmod),
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__STDDEV:
-				appendStringInfo(buf, "stddev[slot=%d, expr='%s']",
+				appendStringInfo(buf, "stddev[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__COVAR:
-				appendStringInfo(buf, "covar[slotX=%d, exprX='%s', slotY=%d, exprY='%s']",
+				appendStringInfo(buf, "covar[slotX=%d, exprX='%s', slotY=%d, exprY='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id),
@@ -4597,7 +4610,7 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 														  desc->arg1_slot_id));
 				break;
 			default:
-				appendStringInfo(buf, "unknown[slot0=%d, expr0='%s', slot1=%d, expr1='%s']",
+				appendStringInfo(buf, "unknown[slot0=%d, expr0='%s', slot1=%d, expr1='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id),
@@ -4606,6 +4619,12 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 														  desc->arg1_slot_id));
 				break;
 		}
+		if (desc->filter_slot_id >= 0)
+			appendStringInfo(buf, ", filter='%s; slot=%u'",
+							 __get_expression_cstring(css, dcontext,
+													  desc->filter_slot_id),
+							 desc->filter_slot_id);
+		appendStringInfo(buf, "]");
 	}
 	appendStringInfo(buf, ">");
 }

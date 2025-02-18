@@ -928,6 +928,27 @@ __update_nogroups__pcovar(kern_context *kcxt,
 }
 
 /*
+ * __checkAggFuncFilter
+ */
+INLINE_FUNCTION(bool)
+__checkAggFuncFilter(kern_context *kcxt,
+					 const kern_aggregate_desc *desc)
+{
+	if (desc->filter_slot_id >= 0)
+	{
+		xpu_bool_t *xdatum = (xpu_bool_t *)
+			kcxt->kvars_slot[desc->filter_slot_id];
+		assert(desc->filter_slot_id < kcxt->kvars_nslots);
+		if (XPU_DATUM_ISNULL(xdatum))
+			return false;
+		assert(xdatum->expr_ops == &xpu_bool_ops);
+		if (!xdatum->value)
+			return false;
+	}
+	return true;
+}
+
+/*
  * __updateOneTupleNoGroups
  */
 STATIC_FUNCTION(void)
@@ -950,6 +971,7 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 	{
 		kern_aggregate_desc *desc = &kexp_groupby_actions->u.pagg.desc[j];
 		kern_colmeta   *cmeta = &kds_final->colmeta[j];
+		bool			item_is_valid = source_is_valid;
 
 		/* usually, 'buffer' shall never be mis-aligned */
 		if (cmeta->attlen > 0)
@@ -957,89 +979,91 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 		else if (!VARATT_NOT_PAD_BYTE(buffer))
 			buffer = (char *)TYPEALIGN(cmeta->attalign, buffer);
 
+		/* check aggregate functions filter, if any */
+		if (item_is_valid && !__checkAggFuncFilter(kcxt, desc))
+			item_is_valid = false;
+
 		switch (desc->action)
 		{
 			case KAGG_ACTION__NROWS_ANY:
 				__update_nogroups__nrows_any(kcxt, buffer,
 											 cmeta, desc,
-											 source_is_valid);
+											 item_is_valid);
 				break;
 			case KAGG_ACTION__NROWS_COND:
 				__update_nogroups__nrows_cond(kcxt, buffer,
 											  cmeta, desc,
-											  source_is_valid);
+											  item_is_valid);
 				break;
 			case KAGG_ACTION__PMIN_INT32:
 				__update_nogroups__pmin_int32(kcxt, buffer,
 											  cmeta, desc,
-											  source_is_valid);
+											  item_is_valid);
 				break;
 			case KAGG_ACTION__PMIN_INT64:
 				__update_nogroups__pmin_int64(kcxt, buffer,
 											  cmeta, desc,
-											  source_is_valid);
+											  item_is_valid);
 				break;
 			case KAGG_ACTION__PMAX_INT32:
 				__update_nogroups__pmax_int32(kcxt, buffer,
 											  cmeta, desc,
-											  source_is_valid);
+											  item_is_valid);
 				break;
 			case KAGG_ACTION__PMAX_INT64:
 				__update_nogroups__pmax_int64(kcxt, buffer,
 											  cmeta, desc,
-											  source_is_valid);
+											  item_is_valid);
 				break;
 			case KAGG_ACTION__PMIN_FP64:
 				__update_nogroups__pmin_fp64(kcxt, buffer,
 											 cmeta, desc,
-											 source_is_valid);
+											 item_is_valid);
 				break;
 			case KAGG_ACTION__PMAX_FP64:
 				__update_nogroups__pmax_fp64(kcxt, buffer,
 											 cmeta, desc,
-											 source_is_valid);
+											 item_is_valid);
 				break;
-
 			case KAGG_ACTION__PSUM_INT:
 			case KAGG_ACTION__PAVG_INT:
 				__update_nogroups__psum_int(kcxt, buffer,
 											cmeta, desc,
-											source_is_valid);
+											item_is_valid);
 				break;
 			case KAGG_ACTION__PSUM_INT64:
 			case KAGG_ACTION__PAVG_INT64:
 				__update_nogroups__psum_int64(kcxt, buffer,
 											  cmeta, desc,
-											  source_is_valid);
+											  item_is_valid);
 				break;
 			case KAGG_ACTION__PAVG_FP:
 			case KAGG_ACTION__PSUM_FP:
 				__update_nogroups__psum_fp(kcxt, buffer,
 										   cmeta, desc,
-										   source_is_valid);
+										   item_is_valid);
 				break;
-
 			case KAGG_ACTION__PAVG_NUMERIC:
 			case KAGG_ACTION__PSUM_NUMERIC:
 				assert((uintptr_t)buffer == MAXALIGN((uintptr_t)buffer));
 				__update_nogroups__psum_numeric(kcxt, buffer,
 												cmeta, desc,
-												source_is_valid);
+												item_is_valid);
 				break;
-
 			case KAGG_ACTION__STDDEV:
 				__update_nogroups__pstddev(kcxt, buffer,
 										   cmeta, desc,
-										   source_is_valid);
+										   item_is_valid);
 				break;
 			case KAGG_ACTION__COVAR:
 				__update_nogroups__pcovar(kcxt, buffer,
 										  cmeta, desc,
-										  source_is_valid);
+										  item_is_valid);
 				break;
 			default:
 				/*
-				 * No more partial aggregation exists after grouping-keys
+				 * No more partial aggregation exists after
+				 * the grouping-keys
 				 */
 				return;
 		}
@@ -1248,30 +1272,30 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 /*
  * __update_groupby__nrows_any
  */
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__nrows_any(kern_context *kcxt,
 							char *buffer,
 							const kern_colmeta *cmeta,
 							const kern_aggregate_desc *desc)
 {
 	__atomic_add_uint64((uint64_t *)buffer, 1);
-	return sizeof(uint64_t);
+	assert(cmeta->attlen == sizeof(uint64_t));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__nrows_cond(kern_context *kcxt,
 							 char *buffer,
 							 const kern_colmeta *cmeta,
 							 const kern_aggregate_desc *desc)
 {
-	xpu_datum_t	   *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
 
 	if (!XPU_DATUM_ISNULL(xdatum))
 		__atomic_add_uint64((uint64_t *)buffer, 1);
-	return sizeof(uint64_t);
+	assert(cmeta->attlen == sizeof(uint64_t));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__pmin_int32(kern_context *kcxt,
 							 char *buffer,
 							 const kern_colmeta *cmeta,
@@ -1288,10 +1312,11 @@ __update_groupby__pmin_int32(kern_context *kcxt,
 		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_min_int64(&r->value, ival);
 	}
-	return sizeof(kagg_state__pminmax_int64_packed);
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__pminmax_int64_packed));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__pmin_int64(kern_context *kcxt,
 							 char *buffer,
 							 const kern_colmeta *cmeta,
@@ -1308,10 +1333,11 @@ __update_groupby__pmin_int64(kern_context *kcxt,
 		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_min_int64(&r->value, ival);
 	}
-	return sizeof(kagg_state__pminmax_int64_packed);
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__pminmax_int64_packed));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__pmax_int32(kern_context *kcxt,
 							 char *buffer,
 							 const kern_colmeta *cmeta,
@@ -1328,10 +1354,11 @@ __update_groupby__pmax_int32(kern_context *kcxt,
 		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_max_int64(&r->value, ival);
 	}
-	return sizeof(kagg_state__pminmax_int64_packed);
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__pminmax_int64_packed));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__pmax_int64(kern_context *kcxt,
 							 char *buffer,
 							 const kern_colmeta *cmeta,
@@ -1348,10 +1375,11 @@ __update_groupby__pmax_int64(kern_context *kcxt,
 		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_max_int64(&r->value, ival);
 	}
-	return sizeof(kagg_state__pminmax_int64_packed);
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__pminmax_int64_packed));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__pmin_fp64(kern_context *kcxt,
 							char *buffer,
 							const kern_colmeta *cmeta,
@@ -1368,10 +1396,11 @@ __update_groupby__pmin_fp64(kern_context *kcxt,
 		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_min_fp64(&r->value, fval);
 	}
-	return sizeof(kagg_state__pminmax_fp64_packed);
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__pminmax_fp64_packed));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__pmax_fp64(kern_context *kcxt,
 							char *buffer,
 							const kern_colmeta *cmeta,
@@ -1388,10 +1417,11 @@ __update_groupby__pmax_fp64(kern_context *kcxt,
 		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_max_fp64(&r->value, fval);
 	}
-	return sizeof(kagg_state__pminmax_fp64_packed);
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__pminmax_fp64_packed));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__psum_int(kern_context *kcxt,
 						   char *buffer,
 						   const kern_colmeta *cmeta,
@@ -1408,10 +1438,11 @@ __update_groupby__psum_int(kern_context *kcxt,
 		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_int64(&r->sum, ival);
 	}
-	return sizeof(kagg_state__psum_int_packed);
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__psum_int_packed));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__psum_int64(kern_context *kcxt,
 							 char *buffer,
 							 const kern_colmeta *cmeta,
@@ -1428,10 +1459,11 @@ __update_groupby__psum_int64(kern_context *kcxt,
 		__atomic_add_uint64(&r->nitems, 1);
 		__atomic_add_int128(&r->sum, ival);
 	}
-	return sizeof(kagg_state__psum_numeric_packed);
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__psum_numeric_packed));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__psum_fp(kern_context *kcxt,
 						  char *buffer,
 						  const kern_colmeta *cmeta,
@@ -1448,10 +1480,11 @@ __update_groupby__psum_fp(kern_context *kcxt,
 		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_fp64(&r->sum, fval);
 	}
-	return sizeof(kagg_state__psum_fp_packed);
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__psum_fp_packed));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__psum_numeric(kern_context *kcxt,
 							   char *buffer,
 							   const kern_colmeta *cmeta,
@@ -1486,10 +1519,11 @@ __update_groupby__psum_numeric(kern_context *kcxt,
 			__atomic_or_uint32(&r->attrs, special);
 		}
 	}
-	return sizeof(kagg_state__psum_numeric_packed);
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__psum_numeric_packed));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__pstddev(kern_context *kcxt,
 						  char *buffer,
 						  const kern_colmeta *cmeta,
@@ -1507,10 +1541,11 @@ __update_groupby__pstddev(kern_context *kcxt,
 		__atomic_add_fp64(&r->sum_x,  fval);
 		__atomic_add_fp64(&r->sum_x2, fval * fval);
 	}
-	return sizeof(kagg_state__stddev_packed);
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__stddev_packed));
 }
 
-INLINE_FUNCTION(int)
+INLINE_FUNCTION(void)
 __update_groupby__pcovar(kern_context *kcxt,
 						 char *buffer,
 						 const kern_colmeta *cmeta,
@@ -1533,7 +1568,8 @@ __update_groupby__pcovar(kern_context *kcxt,
 		__atomic_add_fp64(&r->sum_yy, yval * yval);
 		__atomic_add_fp64(&r->sum_xy, xval * yval);
 	}
-	return sizeof(kagg_state__covar_packed);
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__covar_packed));
 }
 
 /*
@@ -1571,60 +1607,69 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 		else if (!VARATT_NOT_PAD_BYTE(curr))
 			curr = (char *)TYPEALIGN(cmeta->attalign, curr);
 
-		switch (desc->action)
+		/* check FILTER clause of aggregate functions, if any */
+		if (__checkAggFuncFilter(kcxt, desc))
 		{
-			case KAGG_ACTION__NROWS_ANY:
-				curr += __update_groupby__nrows_any(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__NROWS_COND:
-				curr += __update_groupby__nrows_cond(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__PMIN_INT32:
-				curr += __update_groupby__pmin_int32(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__PMIN_INT64:
-				curr += __update_groupby__pmin_int64(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__PMAX_INT32:
-				curr += __update_groupby__pmax_int32(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__PMAX_INT64:
-				curr += __update_groupby__pmax_int64(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__PMIN_FP64:
-				curr += __update_groupby__pmin_fp64(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__PMAX_FP64:
-				curr += __update_groupby__pmax_fp64(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__PAVG_INT:
-			case KAGG_ACTION__PSUM_INT:
-				curr += __update_groupby__psum_int(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__PAVG_INT64:
-			case KAGG_ACTION__PSUM_INT64:
-				curr += __update_groupby__psum_int64(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__PAVG_FP:
-			case KAGG_ACTION__PSUM_FP:
-				curr += __update_groupby__psum_fp(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__PAVG_NUMERIC:
-			case KAGG_ACTION__PSUM_NUMERIC:
-				curr += __update_groupby__psum_numeric(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__STDDEV:
-				curr += __update_groupby__pstddev(kcxt, curr, cmeta, desc);
-				break;
-			case KAGG_ACTION__COVAR:
-				curr += __update_groupby__pcovar(kcxt, curr, cmeta, desc);
-				break;
-			default:
-				/*
-				 * No more partial aggregation exists after grouping-keys
-				 */
-				goto bailout;
+			switch (desc->action)
+			{
+				case KAGG_ACTION__NROWS_ANY:
+					__update_groupby__nrows_any(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__NROWS_COND:
+					__update_groupby__nrows_cond(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__PMIN_INT32:
+					__update_groupby__pmin_int32(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__PMIN_INT64:
+					__update_groupby__pmin_int64(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__PMAX_INT32:
+					__update_groupby__pmax_int32(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__PMAX_INT64:
+					__update_groupby__pmax_int64(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__PMIN_FP64:
+					__update_groupby__pmin_fp64(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__PMAX_FP64:
+					__update_groupby__pmax_fp64(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__PAVG_INT:
+				case KAGG_ACTION__PSUM_INT:
+					__update_groupby__psum_int(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__PAVG_INT64:
+				case KAGG_ACTION__PSUM_INT64:
+					__update_groupby__psum_int64(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__PAVG_FP:
+				case KAGG_ACTION__PSUM_FP:
+					__update_groupby__psum_fp(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__PAVG_NUMERIC:
+				case KAGG_ACTION__PSUM_NUMERIC:
+					__update_groupby__psum_numeric(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__STDDEV:
+					__update_groupby__pstddev(kcxt, curr, cmeta, desc);
+					break;
+				case KAGG_ACTION__COVAR:
+					__update_groupby__pcovar(kcxt, curr, cmeta, desc);
+					break;
+				default:
+					/*
+					 * No more partial aggregation exists after grouping-keys
+					 */
+					goto bailout;
+			}
 		}
+		/* move to the next */
+		if (cmeta->attlen > 0)
+			curr += cmeta->attlen;
+		else
+			curr += VARSIZE_ANY(curr);
 	}
 bailout:
 	assert(curr == groupby_prepfn_buffer + kcxt->groupby_prepfn_bufsz);

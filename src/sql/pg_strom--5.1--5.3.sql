@@ -419,6 +419,142 @@ CREATE FUNCTION pgstrom.fregr_syy(bytea)
 
 --- ================================================================
 ---
+--- Partial Aggregate Functions with FILTER clause at the last argument
+---
+--- ================================================================
+
+-- NROWS
+CREATE FUNCTION pgstrom.nrows(bool)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_partial_nrows_filtered'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.nrows("any", bool)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_partial_nrows_filtered'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+-- PMIN
+CREATE FUNCTION pgstrom.pmin(int4,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmin(int8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmin(float8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_fp64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmin(money,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmin(date,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmin(time,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmin(timestamp,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmin(timestamptz,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+--- PMAX
+CREATE FUNCTION pgstrom.pmax(int4,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(int8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(float8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_fp64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(money,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(date,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(time,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(timestamp,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(timestamptz,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+--- PSUM
+CREATE FUNCTION pgstrom.psum(int8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_int'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.psum64(int8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.psum(float8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_fp'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.psum(numeric,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_numeric'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.psum(money,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_cash'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+--- PAVG
+CREATE FUNCTION pgstrom.pavg(int8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_int'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pavg64(int8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pavg(float8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_fp'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pavg(numeric,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_sum_numeric'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+--- VAR/STDDEV/COVAR
+CREATE FUNCTION pgstrom.pvariance(float8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_variance'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pcovar(float8,float8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_covar'
+  LANGUAGE C STRICT;
+
+
+--- ================================================================
+---
 --- utility function related to vcf2arrow
 ---
 --- ================================================================
