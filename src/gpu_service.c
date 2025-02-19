@@ -549,6 +549,10 @@ __gpu_archtecture_label(int major_cc, int minor_cc)
 			return "sm_89";
 		case 900:	/* NVIDIA H100 */
 			return "sm_90";
+		case 1000:	/* NVIDIA B100? */
+			return "sm_100";
+		case 1200:	/* NVIDIA B40? */
+			return "sm_120";
 		default:
 			elog(ERROR, "unsupported compute capability (%d.%d)",
 				 major_cc, minor_cc);
