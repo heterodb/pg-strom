@@ -5157,116 +5157,50 @@ static void
 __setupGpuKernelFunctionsAndParams(gpuContext *gcontext)
 {
 	GpuDevAttributes *dattrs = &gpuDevAttrs[gcontext->cuda_dindex];
-	CUmodule	cuda_module = gcontext->cuda_module;
-	CUfunction	cuda_function;
 	CUresult	rc;
 	int			shmem_sz_static;
 	int			shmem_sz_dynamic;
-	const char *func_name;
 
 	Assert(gcontext->cuda_dindex < numGpuDevAttrs);
 	/* ------ kern_gpujoin_main ------ */
-	func_name = "kern_gpujoin_main";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_kern_gpumain = cuda_function;
+#define __GPU_KERNEL_RESOLVE_FUNCTION(KFUNC_NAME, KFUNC_VARIABLE)		\
+	do {																\
+		rc = cuModuleGetFunction(&gcontext->KFUNC_VARIABLE,				\
+								 gcontext->cuda_module, #KFUNC_NAME);	\
+		if (rc != CUDA_SUCCESS)											\
+			elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",		\
+				 #KFUNC_NAME, cuStrError(rc));							\
+	} while(0)
 
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpujoin_main, cufn_kern_gpumain);
 	rc = cuFuncGetAttribute(&shmem_sz_static,
 							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
-							cuda_function);
+							gcontext->cufn_kern_gpumain);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuFuncGetAttribute(SHARED_SIZE_BYTES): %s",
 			 cuStrError(rc));
 	shmem_sz_dynamic = (dattrs->MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
 						- TYPEALIGN(1024, shmem_sz_static)
 						- 8192);	/* margin for L1-cache */
-	rc = cuFuncSetAttribute(cuda_function,
+	rc = cuFuncSetAttribute(gcontext->cufn_kern_gpumain,
 							CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
 							shmem_sz_dynamic);
 	if (rc != CUDA_SUCCESS)
         elog(ERROR, "failed on cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES, %d): %s",
 			 shmem_sz_dynamic, cuStrError(rc));
 	gcontext->gpumain_shmem_sz_limit = shmem_sz_dynamic;
-
-	/* ------ gpujoin_prep_gistindex ------ */
-	func_name = "gpujoin_prep_gistindex";
-    rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_prep_gistindex = cuda_function;
-	/* ------ gpujoin_merge_outer_join_map ------ */
-	func_name = "gpujoin_merge_outer_join_map";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_merge_outer_join_map = cuda_function;
-	/* ------ kern_gpupreagg_final_merge ------ */
-	func_name = "kern_gpupreagg_final_merge";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_merge_gpupreagg_buffer = cuda_function;
-	/* ------ kern_gpusort_prep_buffer ------ */
-	func_name = "kern_gpusort_prep_buffer";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_gpusort_prep_buffer = cuda_function;
-	/* ------ kern_gpusort_exec_bitonic ------ */
-	func_name = "kern_gpusort_exec_bitonic";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_gpusort_exec_bitonic = cuda_function;
-	/* ------ kern_buffer_simple_limit ------ */
-	func_name = "kern_buffer_simple_limit";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_kbuf_simple_limit = cuda_function;
-	/* ------ kern_buffer_consolidation ------ */
-	func_name = "kern_buffer_consolidation";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_kbuf_consolidation = cuda_function;
-	/* ------ kern_buffer_partitioning ------ */
-	func_name = "kern_buffer_partitioning";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_kbuf_partitioning = cuda_function;
-	/* ------ kern_buffer_reconstruction ------ */
-	func_name = "kern_buffer_reconstruction";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_kbuf_reconstruction = cuda_function;
-	/* ------ kern_gpucache_apply_redo ------ */
-	func_name = "kern_gpucache_apply_redo";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_gpucache_apply_redo = cuda_function;
-	/* ------ kern_gpucache_compaction ------ */
-	func_name = "kern_gpucache_compaction";
-	rc = cuModuleGetFunction(&cuda_function, cuda_module, func_name);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction('%s'): %s",
-			 func_name, cuStrError(rc));
-	gcontext->cufn_gpucache_compaction = cuda_function;
+	/* ------ other kernel functions ------ */
+	__GPU_KERNEL_RESOLVE_FUNCTION(gpujoin_prep_gistindex,       cufn_prep_gistindex);
+	__GPU_KERNEL_RESOLVE_FUNCTION(gpujoin_merge_outer_join_map, cufn_merge_outer_join_map);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpupreagg_final_merge,   cufn_merge_gpupreagg_buffer);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpusort_prep_buffer,     cufn_gpusort_prep_buffer);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpusort_exec_bitonic,    cufn_gpusort_exec_bitonic);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_simple_limit,     cufn_kbuf_simple_limit);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_consolidation,    cufn_kbuf_consolidation);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_partitioning,     cufn_kbuf_partitioning);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_reconstruction,   cufn_kbuf_reconstruction);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpucache_apply_redo,     cufn_gpucache_apply_redo);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpucache_compaction,     cufn_gpucache_compaction);
 }
 
 /*
