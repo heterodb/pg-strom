@@ -5151,18 +5151,30 @@ __setupDevEncodeLinkageCatalog(CUmodule cuda_module)
 }
 
 /*
- * __setupGpuKernelFunctionsAndParams
+ * gpuservSetupGpuModule
  */
 static void
-__setupGpuKernelFunctionsAndParams(gpuContext *gcontext)
+gpuservSetupGpuModule(gpuContext *gcontext)
 {
 	GpuDevAttributes *dattrs = &gpuDevAttrs[gcontext->cuda_dindex];
+	CUmodule	cuda_module;
 	CUresult	rc;
 	int			shmem_sz_static;
 	int			shmem_sz_dynamic;
 
 	Assert(gcontext->cuda_dindex < numGpuDevAttrs);
-	/* ------ kern_gpujoin_main ------ */
+	rc = cuModuleLoad(&cuda_module, pgstrom_fatbin_image_filename);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleLoad('%s'): %s",
+			 pgstrom_fatbin_image_filename,
+			 cuStrError(rc));
+	/* setup XPU linkage hash tables */
+	gcontext->cuda_type_htab = __setupDevTypeLinkageTable(cuda_module);
+	gcontext->cuda_func_htab = __setupDevFuncLinkageTable(cuda_module);
+	gcontext->cuda_encode_catalog = __setupDevEncodeLinkageCatalog(cuda_module);
+	gcontext->cuda_module = cuda_module;
+
+	/* lookup CUDA functions */
 #define __GPU_KERNEL_RESOLVE_FUNCTION(KFUNC_NAME, KFUNC_VARIABLE)		\
 	do {																\
 		rc = cuModuleGetFunction(&gcontext->KFUNC_VARIABLE,				\
@@ -5172,7 +5184,20 @@ __setupGpuKernelFunctionsAndParams(gpuContext *gcontext)
 				 #KFUNC_NAME, cuStrError(rc));							\
 	} while(0)
 
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpujoin_main, cufn_kern_gpumain);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpujoin_main,            cufn_kern_gpumain);
+	__GPU_KERNEL_RESOLVE_FUNCTION(gpujoin_prep_gistindex,       cufn_prep_gistindex);
+	__GPU_KERNEL_RESOLVE_FUNCTION(gpujoin_merge_outer_join_map, cufn_merge_outer_join_map);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpupreagg_final_merge,   cufn_merge_gpupreagg_buffer);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpusort_prep_buffer,     cufn_gpusort_prep_buffer);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpusort_exec_bitonic,    cufn_gpusort_exec_bitonic);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_simple_limit,     cufn_kbuf_simple_limit);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_consolidation,    cufn_kbuf_consolidation);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_partitioning,     cufn_kbuf_partitioning);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_reconstruction,   cufn_kbuf_reconstruction);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpucache_apply_redo,     cufn_gpucache_apply_redo);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpucache_compaction,     cufn_gpucache_compaction);
+#undef __GPU_KERNEL_RESOLVE_FUNCTION
+	/* setup CUDA shared memory parameters */
 	rc = cuFuncGetAttribute(&shmem_sz_static,
 							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
 							gcontext->cufn_kern_gpumain);
@@ -5186,45 +5211,9 @@ __setupGpuKernelFunctionsAndParams(gpuContext *gcontext)
 							CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
 							shmem_sz_dynamic);
 	if (rc != CUDA_SUCCESS)
-        elog(ERROR, "failed on cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES, %d): %s",
+		elog(ERROR, "failed on cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES, %d): %s",
 			 shmem_sz_dynamic, cuStrError(rc));
 	gcontext->gpumain_shmem_sz_limit = shmem_sz_dynamic;
-	/* ------ other kernel functions ------ */
-	__GPU_KERNEL_RESOLVE_FUNCTION(gpujoin_prep_gistindex,       cufn_prep_gistindex);
-	__GPU_KERNEL_RESOLVE_FUNCTION(gpujoin_merge_outer_join_map, cufn_merge_outer_join_map);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpupreagg_final_merge,   cufn_merge_gpupreagg_buffer);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpusort_prep_buffer,     cufn_gpusort_prep_buffer);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpusort_exec_bitonic,    cufn_gpusort_exec_bitonic);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_simple_limit,     cufn_kbuf_simple_limit);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_consolidation,    cufn_kbuf_consolidation);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_partitioning,     cufn_kbuf_partitioning);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_buffer_reconstruction,   cufn_kbuf_reconstruction);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpucache_apply_redo,     cufn_gpucache_apply_redo);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpucache_compaction,     cufn_gpucache_compaction);
-}
-
-/*
- * gpuservSetupGpuModule
- */
-static void
-gpuservSetupGpuModule(gpuContext *gcontext)
-{
-	CUmodule	cuda_module;
-	CUresult	rc;
-
-	rc = cuModuleLoad(&cuda_module, pgstrom_fatbin_image_filename);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleLoad('%s'): %s",
-			 pgstrom_fatbin_image_filename,
-			 cuStrError(rc));
-	/* setup XPU linkage hash tables */
-	gcontext->cuda_type_htab = __setupDevTypeLinkageTable(cuda_module);
-	gcontext->cuda_func_htab = __setupDevFuncLinkageTable(cuda_module);
-	gcontext->cuda_encode_catalog = __setupDevEncodeLinkageCatalog(cuda_module);
-	gcontext->cuda_module = cuda_module;
-
-	/* lookup CUDA functions and setup parameters */
-	__setupGpuKernelFunctionsAndParams(gcontext);
 }
 
 /*
