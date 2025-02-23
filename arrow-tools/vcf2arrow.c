@@ -65,15 +65,15 @@ static struct {
 	const char	   *name;
 	int				anum;
 } vcf_arrow_column_defs[] = {
-	{ArrowNodeTag__Utf8, "chrom",	VCF_ARROW_ANUM__CHROME},
-	{ArrowType__Int,     "pos",		VCF_ARROW_ANUM__POS},
-	{ArrowNodeTag__Utf8, "id",		VCF_ARROW_ANUM__ID},
-	{ArrowNodeTag__Utf8, "ref",		VCF_ARROW_ANUM__REF},
-	{ArrowNodeTag__Utf8, "alt",		VCF_ARROW_ANUM__ALT},
-	{ArrowNodeTag__Utf8, "qual",	VCF_ARROW_ANUM__QUAL},
-	{ArrowNodeTag__Utf8, "filter",	VCF_ARROW_ANUM__FILTER},
-	{ArrowNodeTag__Utf8, "info",	VCF_ARROW_ANUM__INFO},
-	{ArrowNodeTag__Utf8, "format",	VCF_ARROW_ANUM__FORMAT},
+	{ArrowType__Utf8, "chrom",	VCF_ARROW_ANUM__CHROME},
+	{ArrowType__Int,  "pos",	VCF_ARROW_ANUM__POS},
+	{ArrowType__Utf8, "id",		VCF_ARROW_ANUM__ID},
+	{ArrowType__Utf8, "ref",	VCF_ARROW_ANUM__REF},
+	{ArrowType__Utf8, "alt",	VCF_ARROW_ANUM__ALT},
+	{ArrowType__Utf8, "qual",	VCF_ARROW_ANUM__QUAL},
+	{ArrowType__Utf8, "filter",	VCF_ARROW_ANUM__FILTER},
+	{ArrowType__Utf8, "info",	VCF_ARROW_ANUM__INFO},
+	{ArrowType__Utf8, "format",	VCF_ARROW_ANUM__FORMAT},
 	{-1,NULL},
 };
 
@@ -692,7 +692,7 @@ __build_vcf_table_buffer(void)
 												  &table->columns[j],
 												  arrow_name);
 				break;
-			case ArrowNodeTag__Utf8:
+			case ArrowType__Utf8:
 				table->numBuffers +=
 					__setup_vcf_column_utf8_buffer(table,
 												   &table->columns[j],
@@ -937,8 +937,8 @@ static void usage(const char *format, ...)
 		  "  -m|--user-metadata=KEY=VALUE : a custom key-value pair to be embedded\n"
 		  "     --raw-format      : saves format and variant columns in raw string.\n"
 		  "                        (*) in default, it transformed to KEY=VALUE form.\n"
-		  "     --sort-by-pos     : sort by the POS (optimization for min/max stats)\n"
-		  "                        (*) note that this option preload entire VCF file once.\n"
+//		  "     --sort-by-pos     : sort by the POS (optimization for min/max stats)\n"
+//		  "                        (*) note that this option preload entire VCF file once.\n"
 		  "     --progress        : shows progress of VCF conversion.\n"
 		  "  -h|--help            : print this message.\n"
 		  "  -v|--verbose         : verbose output mode (for software debug)\n",
@@ -958,7 +958,7 @@ static void parse_options(int argc, char * const argv[])
 		{"embedded-headers", required_argument, NULL, 'E'},
 		{"user-metadata",    required_argument, NULL, 'm'},
 		{"raw-format",       no_argument,       NULL, 1001},
-		{"sort-by-pos",      no_argument,       NULL, 1002},
+//		{"sort-by-pos",      no_argument,       NULL, 1002},
 		{"progress",         no_argument,       NULL, 1003},
 		{"help",             no_argument,       NULL, 'h'},
 		{"verbose",          no_argument,       NULL, 'v'},
