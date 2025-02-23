@@ -2372,8 +2372,28 @@ __processVirtualColumn(Form_pg_attribute attr,
 	return datum;
 }
 
+static inline const char *
+__fetchVirtualSourceSpecial(ArrowFileState *af_state, const char *key)
+{
+	if (*key == '@')
+	{
+		if (strcmp(key, "@pathname") == 0)
+			return af_state->filename;
+		else if (strcmp(key, "@filename") == 0)
+		{
+			const char *pos = strrchr(af_state->filename, '/');
+
+			if (pos)
+				return pos+1;
+			return af_state->filename;
+		}
+	}
+	return NULL;
+}
+
 static List *
-__fetchVirtualSourceByCache(arrowMetadataCacheBlock *mc_block,
+__fetchVirtualSourceByCache(ArrowFileState *af_state,
+							arrowMetadataCacheBlock *mc_block,
 							List *virtual_columns,
 							List *source_fields)
 {
@@ -2389,6 +2409,9 @@ __fetchVirtualSourceByCache(arrowMetadataCacheBlock *mc_block,
 		{
 			const char *key = src + 8;
 
+			value = __fetchVirtualSourceSpecial(af_state, key);
+			if (value)
+				goto found;
 			foreach (lc2, virtual_columns)
 			{
 				virtualColumnDef *vcdef = lfirst(lc2);
@@ -2458,7 +2481,8 @@ __fetchVirtualSourceByCache(arrowMetadataCacheBlock *mc_block,
 }
 
 static List *
-__fetchVirtualSourceByFile(ArrowFileInfo *af_info,
+__fetchVirtualSourceByFile(ArrowFileState *af_state,
+						   ArrowFileInfo *af_info,
 						   List *virtual_columns,
 						   List *source_fields)
 {
@@ -2474,6 +2498,9 @@ __fetchVirtualSourceByFile(ArrowFileInfo *af_info,
 		{
 			const char *key = src + 8;
 
+			value = __fetchVirtualSourceSpecial(af_state, key);
+			if (value)
+				goto found;
 			foreach (lc2, virtual_columns)
 			{
 				virtualColumnDef *vcdef = lfirst(lc2);
@@ -2575,7 +2602,8 @@ BuildArrowFileState(Relation frel,
 									 mc_block,
 									 &stat_arrow_attrs);
 		/* extract virtual column source info */
-		virtual_sources = __fetchVirtualSourceByCache(mc_block,
+		virtual_sources = __fetchVirtualSourceByCache(af_state,
+													  mc_block,
 													  virtual_columns,
 													  source_fields);
 	}
@@ -2591,7 +2619,8 @@ BuildArrowFileState(Relation frel,
 										 &stat_arrow_attrs))
 			return NULL;	/* file not found? */
 		/* extract virtual column source info */
-		virtual_sources = __fetchVirtualSourceByFile(&af_info,
+		virtual_sources = __fetchVirtualSourceByFile(af_state,
+													 &af_info,
 													 virtual_columns,
 													 source_fields);
 		LWLockAcquire(&arrow_metadata_cache->mutex, LW_EXCLUSIVE);
