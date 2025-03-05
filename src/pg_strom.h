@@ -48,6 +48,7 @@
 #include "catalog/pg_user_mapping.h"
 #include "catalog/pg_extension.h"
 #include "catalog/pg_namespace.h"
+#include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_tablespace_d.h"
@@ -317,9 +318,14 @@ typedef struct
 	/* gpusort keys */
 	List	   *gpusort_keys_expr;		/* expression list for GpuSort */
 	List	   *gpusort_keys_kind;		/* set of KSORT_KEY_KIND__* for GpuSort */
+	List	   *gpusort_keys_refs;		/* original tleSortGroupRef of the sort-keys */
 	int			gpusort_htup_margin;	/* required margin at the tail of htuple on
 										 * the kds_final buffer for temporary value. */
-	uint32_t	gpusort_limit_count;	/* GPU-Sort + LIMIT clause, if any */
+	int			gpusort_limit_count;	/* GPU-Sort + LIMIT clause, if any */
+	int			window_rank_func;		/* GPU-Sort + Rank() function, if any */
+	int			window_rank_limit;		/* GPU-Sort + Rank() limit, if any */
+  	int			window_partby_nkeys;	/* GPU-Sort + Rank() - # of partition keys */
+	int			window_orderby_nkeys;	/* GPU-Sort + Rank() - # of ordering keys */
 	/* pinned inner buffer stuff */
 	List	   *projection_hashkeys;
 	/* inner relations */
@@ -1056,6 +1062,7 @@ extern List	   *pgstrom_find_op_leafs(PlannerInfo *root,
 									  RelOptInfo *outer_rel,
 									  bool be_parallel,
 									  bool *p_identical_inners);
+extern bool		pgstrom_is_dummy_path(const Path *path);
 extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);
 extern void		_PG_init(void);
 

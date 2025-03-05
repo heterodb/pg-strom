@@ -413,6 +413,9 @@ typedef enum {
 	FuncOpCode__Projection,
 	FuncOpCode__SortKeys,
 	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
+	FuncOpCode__WindowFuncRowNumber,
+	FuncOpCode__WindowFuncRank,
+	FuncOpCode__WindowFuncDenseRank,
 	FuncOpCode__BuiltInMax,
 } FuncOpCode;
 
