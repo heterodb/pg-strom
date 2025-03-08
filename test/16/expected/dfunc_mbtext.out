@@ -23,21 +23,13 @@ SELECT id, line
   INTO test01g
   FROM rt_mbtext
  WHERE line like '%メロス%セリヌンティウス%';
-                                                                                                       QUERY PLAN                                                                                                        
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_mbtext_temp.rt_mbtext
    Output: id, line
    GPU Projection: id, line
    GPU Scan Quals: (line ~~ '%メロス%セリヌンティウス%'::text) [rows: 1270 -> 1]
-   KVars-Slot: <slot=0, type='text', expr='line', kv_off=0x0000>, <slot=1, type='int4', expr='id', kv_off=0x3400>
-   KVecs-Buffer: nbytes: 18432, ndims: 2, items=[kvec0=<0x0000-33ff, type='text', expr='line'>, kvec1=<0x3400-47ff, type='int4', expr='id'>]
-   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=1, type='int4' resno=1(id)>, <slot=0, type='text' resno=2(line)>]}}
-   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-33ff, type='text', expr='line'>, <slot=1, offset=0x3400-47ff, type='int4', expr='id'>]}}}
-   Scan Quals OpCode: {Func(bool)::textlike args=[{Var(text): slot=0, expr='line'}, {Const(text): value='%メロス%セリヌンティウス%'}]}
-   Projection OpCode: {Projection: layout=<1,0> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x3400-4800, expr='id'}}, {SaveExpr: <slot=0, type='text'> arg={Var(text): kvec=0x0000-3400, expr='line'}}]}
-   Fallback-desc: [<dest='0', expr='id', depth=0:1>, <dest='1', expr='line', depth=0:1>]
-   CUDA Stack Size: 3920
-(12 rows)
+(4 rows)
 
 SELECT id, line
   INTO test01g
@@ -67,21 +59,13 @@ SELECT id, substring(line, id % 20, id % 10 + 5) v1,
   INTO test02g
   FROM rt_mbtext
  WHERE id > 0;
-                                                                                                                                                                                                                                                                                              QUERY PLAN                                                                                                                                                                                                                                                                                              
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                  QUERY PLAN                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_mbtext_temp.rt_mbtext
    Output: id, ("substring"(line, (id % 20), ((id % 10) + 5))), ("substring"(line, (id % 30), 10) || "substring"(line, ((id % 20) + 30), 10))
    GPU Projection: id, "substring"(line, (id % 20), ((id % 10) + 5)), line
    GPU Scan Quals: (id > 0) [rows: 76 -> 76]
-   KVars-Slot: <slot=0, type='int4', expr='id', kv_off=0x0000>, <slot=1, type='text', expr='("substring"(line, (id % 20), ((id % 10) + 5)))'>, <slot=2, type='text', expr='line', kv_off=0x1400>
-   KVecs-Buffer: nbytes: 18432, ndims: 2, items=[kvec0=<0x0000-13ff, type='int4', expr='id'>, kvec1=<0x1400-47ff, type='text', expr='line'>]
-   LoadVars OpCode: {Packed items[0]={LoadVars(depth=0): kvars=[<slot=0, type='int4' resno=1(id)>, <slot=2, type='text' resno=2(line)>]}}
-   MoveVars OpCode: {Packed items[0]={MoveVars(depth=0): items=[<slot=0, offset=0x0000-13ff, type='int4', expr='id'>, <slot=2, offset=0x1400-47ff, type='text', expr='line'>]}}}
-   Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='id'}, {Const(int4): value='0'}]}
-   Projection OpCode: {Projection: layout=<0,1,2> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-1400, expr='id'}}, {SaveExpr: <slot=1, type='text'> arg={Func(text)::substring args=[{Var(text): kvec=0x1400-4800, expr='line'}, {Func(int4)::int4mod args=[{Var(int4): kvec=0x0000-1400, expr='id'}, {Const(int4): value='20'}]}, {Func(int4)::int4pl args=[{Func(int4)::int4mod args=[{Var(int4): kvec=0x0000-1400, expr='id'}, {Const(int4): value='10'}]}, {Const(int4): value='5'}]}]}}, {SaveExpr: <slot=2, type='text'> arg={Var(text): kvec=0x1400-4800, expr='line'}}]}
-   Fallback-desc: [<dest='0', expr='id', depth=0:1>, <dest='2', expr='line', depth=0:1>]
-   CUDA Stack Size: 3968
-(12 rows)
+(4 rows)
 
 SELECT id, substring(line, id % 20, id % 10 + 5) v1,
            substring(line, id % 30, 10) || substring(line, id % 20 + 30, 10) v2

@@ -25,4 +25,4 @@ SHOW pg_strom.gpu_mempool_segment_sz;
 SHOW pg_strom.gpu_mempool_max_ratio;
 SHOW pg_strom.gpu_mempool_min_ratio;
 SHOW pg_strom.gpu_mempool_release_delay;
-SHOW pg_strom.gpuserv_debug_output;
+SHOW pg_strom.explain_developer_mode;
