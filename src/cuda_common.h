@@ -140,6 +140,8 @@ typedef struct {
 	uint32_t		cuda_stack_limit;
 	int32_t			partition_divisor;
 	int32_t			partition_reminder;
+	/* RIGHT OUTER JOIN */
+	uint32_t		right_outer_depth;
 	/* suspend/resume support */
 	bool			resume_context;
 	uint32_t		suspend_count;
@@ -150,6 +152,7 @@ typedef struct {
 	uint32_t		nitems_in;		/* nitems after the scan_quals */
 	uint32_t		nitems_out;		/* nitems of final results */
 	struct {
+		uint32_t	nitems_roj;		/* nitems of RIGHT-OUTER-JOIN tuples */
 		uint32_t	nitems_gist;	/* nitems picked up by GiST index */
 		uint32_t	nitems_out;		/* nitems after this depth */
 	} stats[1];		/* 'n_rels' items */
@@ -212,6 +215,8 @@ EXTERN_FUNCTION(int64_t)
 pgstrom_stair_sum_int64(int64_t value, int64_t *p_total_count);
 EXTERN_FUNCTION(float8_t)
 pgstrom_stair_sum_fp64(float8_t value, float8_t *p_total_count);
+EXTERN_FUNCTION(int128_t)
+pgstrom_stair_sum_int128(int128_t value, int128_t *p_total_count);
 EXTERN_FUNCTION(int32_t)
 pgstrom_local_min_int32(int32_t my_value);
 EXTERN_FUNCTION(int32_t)
@@ -224,6 +229,8 @@ EXTERN_FUNCTION(float8_t)
 pgstrom_local_min_fp64(float8_t my_value);
 EXTERN_FUNCTION(float8_t)
 pgstrom_local_max_fp64(float8_t my_value);
+EXTERN_FUNCTION(uint32_t)
+pgstrom_local_or_uint32(uint32_t my_value);
 
 EXTERN_FUNCTION(int)
 execGpuScanLoadSource(kern_context *kcxt,
@@ -322,24 +329,5 @@ typedef struct {
 	uint32_t		nitems;
 	uint32_t		redo_items[1];
 } kern_gpucache_redolog;
-
-/*
- * GPU Kernel Entrypoint
- */
-KERNEL_FUNCTION(void)
-kern_gpuscan_main(kern_session_info *session,
-				  kern_gputask *kgtask,
-				  kern_multirels *__kmrels,	/* always null */
-				  kern_data_store *kds_src,
-				  kern_data_extra *kds_extra,
-				  kern_data_store *kds_dst);
-KERNEL_FUNCTION(void)
-kern_gpujoin_main(kern_session_info *session,
-				  kern_gputask *kgtask,
-				  kern_multirels *kmrels,
-				  kern_data_store *kds_src,
-				  kern_data_extra *kds_extra,
-				  kern_data_store *kds_dst,
-				  kern_data_store *kds_fallback);
 
 #endif	/* CUDA_COMMON_H */

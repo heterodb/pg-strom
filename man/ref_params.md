@@ -69,12 +69,12 @@ This session introduces PG-Strom's configuration parameters.
 @ja{
 `pg_strom.enable_numeric_aggfuncs` [型: `bool` / 初期値: `on]`
 :   `numeric`データ型を引数に取る集約演算をGPUで処理するかどうかを制御する。
-:   GPUでの集約演算において`numeric`データ型は倍精度浮動小数点数にマッピングされるため、計算誤差にセンシティブな用途の場合は、この設定値を `off` にしてCPUで集約演算を実行し、計算誤差の発生を抑えることができます。
+:   GPUでの集約演算において`numeric`データ型は128bit固定小数点変数にマッピングされるため、極端に大きな数、あるいは高精度な数の集計を行う場合はエラーとなってしまいます。そのようなワークロードに対しては、この設定値を `off` にしてCPUで集約演算を実行するよう強制する事ができます。
 }
 @en{
 `pg_strom.enable_numeric_aggfuncs` [type: `bool` / default: `on]`
 :   Enables/disables support of aggregate function that takes `numeric` data type.
-:   Note that aggregated function at GPU mapps `numeric` data type to double precision floating point values. So, if you are sensitive to calculation errors, you can turn off this configuration to suppress the calculation errors by the operations on CPU.
+:   Note that aggregated function at GPU mapps `numeric` data type to 128bit fixed-point variable, so it raises an error if you run the aggregate functions with extremely large or highly-precise values. You can turn off this configuration to enforce the aggregate functions being operated by CPU.
 }
 
 @ja{
@@ -107,6 +107,14 @@ This session introduces PG-Strom's configuration parameters.
 @en{
 `pg_strom.regression_test_mode` [type: `bool` / default: `off]`
 :   It disables some `EXPLAIN` command output that depends on software execution platform, like GPU model name. It avoid "false-positive" on the regression test, so use usually don't tough this configuration.
+}
+@ja{
+`pg_strom.explain_developer_mode` [型: `bool` / 初期値: `off]`
+:   EXPLAIN VERBOSEで表示される様々な情報のうち、開発者向けに有用な情報を表示します。これらは一般ユーザやDB管理者にとっては煩雑な情報であるため、通常は初期値のまま利用する事をお勧めします。
+}
+@en{
+`pg_strom.explain_developer_mode` [型: `bool` / 初期値: `off]`
+:   Among the various information displayed by EXPLAIN VERBOSE, this option displays information that is useful for developers. Since this information is cumbersome for general users and DB administrators, we recommend that you usually leave it at the default value.
 }
 
 @ja:## オプティマイザに関する設定

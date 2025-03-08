@@ -1637,6 +1637,9 @@ found:
  *
  * ----------------------------------------------------------------
  */
+#define XPUCODE_STACK_USAGE_NORMAL		128		/* stack usage by normal function calls */
+#define XPUCODE_STACK_USAGE_RECURSIVE	2048	/* stack usage by recursive function calls */
+
 #define __Elog(fmt,...)													\
 	do {																\
 		ereport(context->elevel,										\
@@ -1845,6 +1848,8 @@ __codegen_func_expression(codegen_context *context,
 	devtype_info   *dtype;
 	kern_expression	kexp;
 	int				pos = -1;
+	uint32_t		stack_usage_saved = context->stack_usage;
+	uint32_t		stack_usage_max = stack_usage_saved;
 	ListCell	   *lc;
 
 	dfunc = pgstrom_devfunc_lookup(func_oid, func_args, func_collid);
@@ -1869,7 +1874,12 @@ __codegen_func_expression(codegen_context *context,
 
 		if (codegen_expression_walker(context, buf, curr_depth, arg) < 0)
 			return -1;
+		stack_usage_max = Max(stack_usage_max, context->stack_usage);
+		context->stack_usage = stack_usage_saved;
 	}
+	context->stack_usage = stack_usage_max;
+	if ((dfunc->func_flags & DEVFUNC__HAS_RECURSION) != 0)
+		context->stack_usage += XPUCODE_STACK_USAGE_RECURSIVE;
 	if (buf)
 		__appendKernExpMagicAndLength(buf, pos);
 	return 0;
@@ -1931,8 +1941,10 @@ codegen_bool_expression(codegen_context *context,
 						BoolExpr *b)
 {
 	kern_expression	kexp;
-	int				pos = -1;
-	ListCell	   *lc;
+	uint32_t	stack_usage_saved = context->stack_usage;
+	uint32_t	stack_usage_max = stack_usage_saved;
+	int			pos = -1;
+	ListCell   *lc;
 
 	memset(&kexp, 0, sizeof(kexp));
 	switch (b->boolop)
@@ -1969,7 +1981,10 @@ codegen_bool_expression(codegen_context *context,
 
 		if (codegen_expression_walker(context, buf, curr_depth, arg) < 0)
 			return -1;
+		stack_usage_max = Max(stack_usage_max, context->stack_usage);
+		context->stack_usage = stack_usage_saved;
 	}
+	context->stack_usage = stack_usage_max;
 	if (buf)
 		__appendKernExpMagicAndLength(buf, pos);
 	return 0;
@@ -2061,9 +2076,9 @@ codegen_booleantest_expression(codegen_context *context,
  * So, we add a special optimization for the numeric jsonb key references.
  */
 static int
-codegen_coerceviaio_expression(codegen_context *context,
-							   StringInfo buf, int curr_depth,
-							   CoerceViaIO *cvio)
+__codegen_coerceviaio_jsonbref_expression(codegen_context *context,
+										  StringInfo buf, int curr_depth,
+										  CoerceViaIO *cvio)
 {
 	static struct {
 		Oid			func_oid;
@@ -2126,7 +2141,6 @@ codegen_coerceviaio_expression(codegen_context *context,
 	Oid			func_oid = InvalidOid;
 	List	   *func_args = NIL;
 	devtype_info *dtype;
-	kern_expression kexp;
 
 	/* check special case if jsonb key reference */
 	if (IsA(cvio->arg, FuncExpr))
@@ -2143,30 +2157,31 @@ codegen_coerceviaio_expression(codegen_context *context,
 		func_oid  = get_opcode(op->opno);
 		func_args = op->args;
 	}
-	if (func_oid == F_JSONB_OBJECT_FIELD_TEXT)
-	{
-		/* sanity checks */
-		if (list_length(func_args) != 2 ||
-			exprType(linitial(func_args)) != JSONBOID ||
-			exprType(lsecond(func_args))  != TEXTOID)
-			__Elog("Not expected arguments of %s", format_procedure(func_oid));
-	}
-	else if (func_oid == F_JSONB_ARRAY_ELEMENT_TEXT)
-	{
-		/* sanity checks */
-		if (list_length(func_args) != 2 ||
-			exprType(linitial(func_args)) != JSONBOID ||
-			exprType(lsecond(func_args))  != INT4OID)
-			__Elog("Not expected arguments of %s", format_procedure(func_oid));
-	}
 	else
-		__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+		return -1;
+
+	switch (func_oid)
+	{
+		case F_JSONB_OBJECT_FIELD_TEXT:
+			if (list_length(func_args) == 2 &&
+				exprType(linitial(func_args)) == JSONBOID &&
+				exprType(lsecond(func_args)) == TEXTOID)
+				break;
+			return -1;
+		case F_JSONB_ARRAY_ELEMENT_TEXT:
+			if (list_length(func_args) == 2 &&
+				exprType(linitial(func_args)) == JSONBOID &&
+				exprType(lsecond(func_args)) == INT4OID)
+				break;
+			return -1;
+		default:
+			return -1;
+	}
 
 	dtype = pgstrom_devtype_lookup(cvio->resulttype);
 	if (!dtype)
-		__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+		return -1;
 
-	memset(&kexp, 0, sizeof(kexp));
 	for (int i=0; jsonref_catalog[i].type_name != NULL; i++)
 	{
 		if (func_oid == jsonref_catalog[i].func_oid &&
@@ -2177,9 +2192,13 @@ codegen_coerceviaio_expression(codegen_context *context,
 			 : (dtype->type_extension == NULL &&
 				dtype->type_namespace == PG_CATALOG_NAMESPACE)))
 		{
+			kern_expression kexp;
+			uint32_t	stack_usage_saved = context->stack_usage;
+			uint32_t	stack_usage_max = stack_usage_saved;
 			ListCell   *lc;
 			int			pos = -1;
 
+			memset(&kexp, 0, sizeof(kexp));
 			kexp.opcode = jsonref_catalog[i].opcode;
 			kexp.exptype = dtype->type_code;
 			kexp.expflags = context->kexp_flags;
@@ -2192,15 +2211,95 @@ codegen_coerceviaio_expression(codegen_context *context,
 				Expr   *arg = lfirst(lc);
 
 				if (codegen_expression_walker(context, buf, curr_depth, arg) < 0)
+				{
+					if (buf)
+						buf->len = pos;
 					return -1;
+				}
+				stack_usage_max = Max(stack_usage_max, context->stack_usage);
+				context->stack_usage = stack_usage_saved;
 			}
+			context->stack_usage = stack_usage_max;
+			if (buf)
+				__appendKernExpMagicAndLength(buf, pos);
+			return 0;
+		}
+	}
+	return -1;
+}
+
+static int
+codegen_coerceviaio_expression(codegen_context *context,
+							   StringInfo buf, int curr_depth,
+							   CoerceViaIO *cvio)
+{
+	static struct
+	{
+		FuncOpCode	opcode;
+		const char *source_name;
+		const char *source_extension;
+		const char *dest_name;
+		const char *dest_extension;
+	}	coerce_viaio_catalog[] = {
+		{FuncOpCode__devcast_text_to_int1, "text", NULL, "int1", "pg_strom"},
+		{FuncOpCode__devcast_text_to_int2, "text", NULL, "int2", NULL},
+		{FuncOpCode__devcast_text_to_int4, "text", NULL, "int4", NULL},
+		{FuncOpCode__devcast_text_to_int8, "text", NULL, "int8", NULL},
+		{FuncOpCode__devcast_text_to_float2, "text", NULL, "float2", "pg_strom"},
+		{FuncOpCode__devcast_text_to_float4, "text", NULL, "float4", NULL},
+		{FuncOpCode__devcast_text_to_float8, "text", NULL, "float8", NULL},
+		{FuncOpCode__devcast_text_to_numeric, "text", NULL, "numeric", NULL},
+		{FuncOpCode__Invalid, NULL, NULL, NULL, NULL},
+	};
+	devtype_info   *stype;
+	devtype_info   *dtype;
+
+	if (__codegen_coerceviaio_jsonbref_expression(context, buf,
+												  curr_depth,
+												  cvio) == 0)
+		return 0;		/* OK, cvio is JSONB field reference */
+
+	dtype = pgstrom_devtype_lookup(cvio->resulttype);
+	if (!dtype)
+		__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+	stype = pgstrom_devtype_lookup(exprType((Node *)cvio->arg));
+	if (!stype)
+		__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+
+	for (int i=0; coerce_viaio_catalog[i].opcode != FuncOpCode__Invalid; i++)
+	{
+		if (strcmp(coerce_viaio_catalog[i].source_name, stype->type_name) == 0 &&
+			((coerce_viaio_catalog[i].source_extension != NULL &&
+			  stype->type_extension != NULL &&
+			  strcmp(coerce_viaio_catalog[i].source_extension,
+					 stype->type_extension) == 0) ||
+			 (!coerce_viaio_catalog[i].source_extension && !stype->type_extension)) &&
+			strcmp(coerce_viaio_catalog[i].dest_name, dtype->type_name) == 0 &&
+			((coerce_viaio_catalog[i].dest_extension != NULL &&
+			  dtype->type_extension != NULL &&
+			  strcmp(coerce_viaio_catalog[i].dest_extension,
+					 dtype->type_extension) == 0) ||
+			 (!coerce_viaio_catalog[i].dest_extension && !dtype->type_extension)))
+		{
+			kern_expression kexp;
+			int		pos = -1;
+
+			memset(&kexp, 0, sizeof(kexp));
+			kexp.opcode = coerce_viaio_catalog[i].opcode;
+			kexp.exptype = dtype->type_code;
+			kexp.expflags = context->kexp_flags;
+			kexp.nr_args = 1;
+			kexp.args_offset = SizeOfKernExpr(0);
+			if (buf)
+				pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+			if (codegen_expression_walker(context, buf, curr_depth, cvio->arg) < 0)
+				return -1;
 			if (buf)
 				__appendKernExpMagicAndLength(buf, pos);
 			return 0;
 		}
 	}
 	__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
-	return -1;
 }
 
 /*
@@ -2214,6 +2313,8 @@ codegen_coalesce_expression(codegen_context *context,
 	devtype_info   *dtype, *__dtype;
 	kern_expression	kexp;
 	int				pos = -1;
+	uint32_t		stack_usage_saved = context->stack_usage;
+	uint32_t		stack_usage_max = stack_usage_saved;
 	ListCell	   *lc;
 
 	dtype = pgstrom_devtype_lookup(cl->coalescetype);
@@ -2241,7 +2342,10 @@ codegen_coalesce_expression(codegen_context *context,
 				   nodeToString(cl));
 		if (codegen_expression_walker(context, buf, curr_depth, expr) < 0)
 			return -1;
+		stack_usage_max = Max(stack_usage_max, context->stack_usage);
+		context->stack_usage = stack_usage_saved;
 	}
+	context->stack_usage = stack_usage_max;
 	if (buf)
 		__appendKernExpMagicAndLength(buf, pos);
 	return 0;
@@ -2258,6 +2362,8 @@ codegen_minmax_expression(codegen_context *context,
 	devtype_info   *dtype, *__dtype;
 	kern_expression	kexp;
 	int				pos = -1;
+	uint32_t		stack_usage_saved = context->stack_usage;
+	uint32_t		stack_usage_max = stack_usage_saved;
 	ListCell	   *lc;
 
 	dtype = pgstrom_devtype_lookup(mm->minmaxtype);
@@ -2290,7 +2396,10 @@ codegen_minmax_expression(codegen_context *context,
 				   nodeToString(mm));
 		if (codegen_expression_walker(context, buf, curr_depth, expr) < 0)
 			return -1;
+		stack_usage_max = Max(stack_usage_max, context->stack_usage);
+		context->stack_usage = stack_usage_saved;
 	}
+	context->stack_usage = stack_usage_max;
 	if (buf)
 		__appendKernExpMagicAndLength(buf, pos);
 	return 0;
@@ -2376,6 +2485,8 @@ codegen_casewhen_expression(codegen_context *context,
 	kern_expression	kexp;
 	devtype_info *dtype;
 	ListCell   *lc;
+	uint32_t	stack_usage_saved = context->stack_usage;
+	uint32_t	stack_usage_max = stack_usage_saved;
 	int			pos = -1;
 	int			saved_casetest_key_slot_id = codegen_casetest_key_slot_id;
 
@@ -2413,6 +2524,8 @@ codegen_casewhen_expression(codegen_context *context,
 		if (buf)
 			kexp.args_offset = (__appendZeroStringInfo(buf, 0) - pos);
 
+		stack_usage_max = Max(stack_usage_max, context->stack_usage);
+		context->stack_usage = stack_usage_saved;
 		codegen_casetest_key_slot_id = kvdef->kv_slot_id;
 	}
 
@@ -2428,10 +2541,15 @@ codegen_casewhen_expression(codegen_context *context,
 										  curr_depth,
 										  casewhen->expr) < 0)
 				return -1;
+			stack_usage_max = Max(stack_usage_max, context->stack_usage);
+			context->stack_usage = stack_usage_saved;
+
 			if (codegen_expression_walker(context, buf,
 										  curr_depth,
 										  casewhen->result) < 0)
 				return -1;
+			stack_usage_max = Max(stack_usage_max, context->stack_usage);
+			context->stack_usage = stack_usage_saved;
 		}
 		/* ELSE <expression> */
 		if (caseexpr->defresult)
@@ -2443,7 +2561,10 @@ codegen_casewhen_expression(codegen_context *context,
 										  curr_depth,
 										  caseexpr->defresult) < 0)
 				return -1;
+			stack_usage_max = Max(stack_usage_max, context->stack_usage);
+			context->stack_usage = stack_usage_saved;
 		}
+		context->stack_usage = stack_usage_max;
 	}
 	PG_CATCH();
 	{
@@ -2615,6 +2736,7 @@ codegen_expression_walker(codegen_context *context,
 	if (!expr)
 		return 0;
 
+	context->stack_usage += XPUCODE_STACK_USAGE_NORMAL;
 	switch (nodeTag(expr))
 	{
 		case T_Const:
@@ -2912,6 +3034,7 @@ codegen_build_scan_quals(codegen_context *context, List *dev_quals)
 	StringInfoData buf;
 	bytea	   *xpucode = NULL;
 	Expr	   *expr;
+	uint32_t	stack_usage_saved = context->stack_usage;
 	int			saved_depth = context->curr_depth;
 
 	Assert(context->elevel >= ERROR);
@@ -2924,12 +3047,14 @@ codegen_build_scan_quals(codegen_context *context, List *dev_quals)
 
 	initStringInfo(&buf);
 	context->curr_depth = 0;
+	context->stack_usage = 0;
 	if (codegen_expression_walker(context, &buf, 0, expr) == 0)
 	{
 		xpucode = palloc(VARHDRSZ+buf.len);
 		memcpy(xpucode->vl_dat, buf.data, buf.len);
 		SET_VARSIZE(xpucode, VARHDRSZ+buf.len);
 	}
+	context->stack_usage = Max(stack_usage_saved, context->stack_usage);
 	pfree(buf.data);
 	context->curr_depth = saved_depth;
 
@@ -2976,6 +3101,8 @@ __codegen_build_joinquals(codegen_context *context,
 	StringInfoData	buf;
 	kern_expression	kexp;
 	ListCell	   *lc;
+	uint32_t		stack_usage_saved = context->stack_usage;
+	uint32_t		stack_usage_max = stack_usage_saved;
 	uint32_t		kexp_flags__saved;
 
 	if (join_quals == NIL && other_quals == NIL)
@@ -2998,6 +3125,8 @@ __codegen_build_joinquals(codegen_context *context,
 			elog(ERROR, "Bub? JOIN quals must be boolean");
 		if (codegen_expression_walker(context, &buf, curr_depth, qual) < 0)
 			return NULL;
+		stack_usage_max = Max(stack_usage_max, context->stack_usage);
+		context->stack_usage = stack_usage_saved;
 	}
 
 	kexp_flags__saved = context->kexp_flags;
@@ -3010,7 +3139,10 @@ __codegen_build_joinquals(codegen_context *context,
 			elog(ERROR, "Bub? JOIN quals must be boolean");
 		if (codegen_expression_walker(context, &buf, curr_depth, qual) < 0)
 			return NULL;
+		stack_usage_max = Max(stack_usage_max, context->stack_usage);
+		context->stack_usage = stack_usage_saved;
 	}
+	context->stack_usage = stack_usage_max;
 	context->kexp_flags = kexp_flags__saved;
 	__appendKernExpMagicAndLength(&buf, 0);
 
@@ -3030,6 +3162,8 @@ codegen_build_packed_joinquals(codegen_context *context,
 	int			depth;
 	int			nrels;
 	size_t		sz;
+	uint32_t	stack_usage_saved = context->stack_usage;
+	uint32_t	stack_usage_max = stack_usage_saved;
 	ListCell   *lc1, *lc2;
 	char	   *result = NULL;
 
@@ -3066,7 +3200,11 @@ codegen_build_packed_joinquals(codegen_context *context,
 			pfree(karg);
 		}
 		depth++;
+
+		stack_usage_max = Max(stack_usage_max, context->stack_usage);
+		context->stack_usage = stack_usage_saved;
 	}
+	context->stack_usage = stack_usage_max;
 	Assert(depth == nrels+1);
 
 	if (kexp->nr_args > 0)
@@ -3092,6 +3230,8 @@ __codegen_build_hash_value(codegen_context *context,
 	kern_expression *kexp;
 	StringInfoData buf;
 	size_t		sz = MAXALIGN(SizeOfKernExpr(0));
+	uint32_t	stack_usage_saved = context->stack_usage;
+	uint32_t	stack_usage_max = stack_usage_saved;
 	ListCell   *lc;
 
 	if (hash_keys == NIL)
@@ -3112,7 +3252,12 @@ __codegen_build_hash_value(codegen_context *context,
 		Expr   *expr = lfirst(lc);
 
 		codegen_expression_walker(context, &buf, curr_depth, expr);
+
+		stack_usage_max = Max(stack_usage_max, context->stack_usage);
+		context->stack_usage = stack_usage_saved;
 	}
+	context->stack_usage = stack_usage_max;
+
 	memcpy(buf.data, kexp, sz);
 	__appendKernExpMagicAndLength(&buf, 0);
 
@@ -3128,6 +3273,7 @@ codegen_build_packed_hashkeys(codegen_context *context,
 	int			depth;
 	int			nrels;
 	size_t		sz;
+	uint32_t	stack_usage_max = context->stack_usage;
 	ListCell   *lc;
 	char	   *result = NULL;
 
@@ -3150,6 +3296,7 @@ codegen_build_packed_hashkeys(codegen_context *context,
 		kern_expression *karg;
 		List   *hash_keys = lfirst(lc);
 
+		context->stack_usage = 0;
 		karg = __codegen_build_hash_value(context, hash_keys, depth);
 		if (karg)
 		{
@@ -3157,8 +3304,10 @@ codegen_build_packed_hashkeys(codegen_context *context,
 				= __appendBinaryStringInfo(&buf, karg, karg->len);
 			kexp->nr_args++;
 		}
+		stack_usage_max = Max(stack_usage_max, context->stack_usage);
 		depth++;
 	}
+	context->stack_usage = stack_usage_max;
 	Assert(depth == nrels+1);
 
 	if (kexp->nr_args > 0)
@@ -3301,6 +3450,8 @@ codegen_build_packed_gistevals(codegen_context *context,
 	StringInfoData	buf;
 	kern_expression	*kexp;
 	size_t			head_sz;
+	uint32_t		stack_usage_saved = context->stack_usage;
+	uint32_t		stack_usage_max = stack_usage_saved;
 	bytea		   *result = NULL;
 
 	head_sz = MAXALIGN(offsetof(kern_expression,
@@ -3357,7 +3508,11 @@ codegen_build_packed_gistevals(codegen_context *context,
 											gist_func_arg);
 		kexp->u.pack.offset[i+1] = off;
 		kexp->nr_args++;
+
+		stack_usage_max = Max(stack_usage_max, context->stack_usage);
+		context->stack_usage = stack_usage_saved;
 	}
+	context->stack_usage = stack_usage_max;
 
 	if (buf.len > head_sz)
 	{
@@ -3385,6 +3540,7 @@ codegen_build_projection(codegen_context *context,
 	bool		meet_resjunk = false;
 	int			nattrs = 0;
 	int			sz;
+	uint32_t	stack_usage_max = context->stack_usage;
 	ListCell   *lc;
 
 	/* count nattrs */
@@ -3420,7 +3576,12 @@ codegen_build_projection(codegen_context *context,
 												 &buf,
 												 tle->expr);
 		kexp->u.proj.slot_id[kexp->u.proj.nattrs++] = kvdef->kv_slot_id;
+
+		stack_usage_max = Max(stack_usage_max, context->stack_usage);
+		context->stack_usage = 0;
 	}
+	context->stack_usage = stack_usage_max;
+
 	/* hash-value (optional; for pinned inner buffer) */
 	if (proj_hash != NIL)
 	{
@@ -3736,7 +3897,7 @@ __codegen_build_groupby_actions(codegen_context *context,
 	int			nattrs = list_length(pp_info->groupby_actions);
 	size_t		head_sz = MAXALIGN(offsetof(kern_expression, u.pagg.desc[nattrs]));
 	bytea	   *xpucode;
-	ListCell   *lc1, *lc2;
+	ListCell   *lc1, *lc2, *lc3;
 	kern_expression *kexp;
 
 	kexp = alloca(head_sz);
@@ -3749,11 +3910,15 @@ __codegen_build_groupby_actions(codegen_context *context,
 
 	initStringInfo(&buf);
 	buf.len = head_sz;
-	forboth (lc1, context->tlist_dev,
-			 lc2, pp_info->groupby_actions)
+	forthree (lc1, context->tlist_dev,
+			  lc2, pp_info->groupby_actions,
+			  lc3, pp_info->groupby_typmods)
 	{
 		TargetEntry *tle = lfirst(lc1);
-		int			action = lfirst_int(lc2);
+		int		__action_flags = lfirst_int(lc2);
+		int		action = (__action_flags & ~__KAGG_ACTION__USE_FILTER);
+		bool	use_filter = ((__action_flags & __KAGG_ACTION__USE_FILTER) != 0);
+		int		typmod = lfirst_int(lc3);
 		kern_aggregate_desc *desc = &kexp->u.pagg.desc[kexp->u.pagg.nattrs];
 		codegen_kvar_defitem *kvdef;
 
@@ -3766,7 +3931,11 @@ __codegen_build_groupby_actions(codegen_context *context,
 												  &buf,
 												  tle->expr);
 			desc->action = KAGG_ACTION__VREF;
-            desc->arg0_slot_id = kvdef->kv_slot_id;
+			desc->arg0_slot_id = -1;
+			desc->arg1_slot_id = -1;
+			desc->filter_slot_id = -1;
+			desc->typmod = typmod;
+			desc->arg0_slot_id = kvdef->kv_slot_id;
 		}
 		else
 		{
@@ -3774,8 +3943,12 @@ __codegen_build_groupby_actions(codegen_context *context,
 			FuncExpr   *func = (FuncExpr *)tle->expr;
 			ListCell   *cell;
 
-			Assert(IsA(func, FuncExpr) && list_length(func->args) <= 2);
+			Assert(IsA(func, FuncExpr) && list_length(func->args) <= (!use_filter ? 2 : 3));
 			desc->action = action;
+			desc->arg0_slot_id = -1;
+			desc->arg1_slot_id = -1;
+			desc->filter_slot_id = -1;
+			desc->typmod = typmod;
 			foreach (cell, func->args)
 			{
 				Expr   *fn_arg = lfirst(cell);
@@ -3784,12 +3957,17 @@ __codegen_build_groupby_actions(codegen_context *context,
 													  kexp,
 													  &buf,
 													  fn_arg);
-				if (cell == list_head(func->args))
+				if (use_filter && cell == list_tail(func->args))
+				{
+					desc->filter_slot_id = kvdef->kv_slot_id;
+				}
+				else if (cell == list_head(func->args))
 				{
 					desc->arg0_slot_id = kvdef->kv_slot_id;
 				}
 				else
 				{
+					Assert(action == KAGG_ACTION__COVAR);
 					desc->arg1_slot_id = kvdef->kv_slot_id;
 				}
 			}
@@ -3823,10 +4001,171 @@ codegen_build_groupby_actions(codegen_context *context,
 	groupby_keys_final = codegen_build_groupby_keyload(context, pp_info);
 	if (groupby_keys_input != NIL &&
 		groupby_keys_final != NIL)
+	{
 		codegen_build_groupby_keycomp(context, pp_info,
 									  groupby_keys_input,
 									  groupby_keys_final);
+	}
 	__codegen_build_groupby_actions(context, pp_info);
+}
+
+/*
+ * codegen_build_gpusort_keydesc
+ */
+bytea *
+codegen_build_gpusort_keydesc(codegen_context *context,
+							  pgstromPlanInfo *pp_info)
+{
+	StringInfoData buf;
+	int			i, nkeys = list_length(pp_info->gpusort_keys_expr);
+	int			usage = 0;
+	size_t		sz;
+	ListCell   *lc1, *lc2;
+	kern_expression *kexp;
+
+	Assert(nkeys == list_length(pp_info->gpusort_keys_kind));
+	if (nkeys == 0)
+		return NULL;	/* quick bailout */
+	initStringInfo(&buf);
+	sz = VARHDRSZ + offsetof(kern_expression, u.sort.desc[nkeys]);
+	enlargeStringInfo(&buf, sz);
+	memset(buf.data, 0, sz);
+	kexp = (kern_expression *)(buf.data + VARHDRSZ);
+	kexp->exptype = TypeOpCode__int4;
+	kexp->opcode = FuncOpCode__SortKeys;
+	kexp->u.sort.nkeys = nkeys;
+	buf.len = sz;
+
+	i = 0;
+	forboth (lc1, pp_info->gpusort_keys_expr,
+			 lc2, pp_info->gpusort_keys_kind)
+	{
+		kern_sortkey_desc *keydesc = &kexp->u.sort.desc[i++];
+		Expr	   *expr = lfirst(lc1);
+		int			ival = lfirst_int(lc2);
+		int			kind = (ival & KSORT_KEY_KIND__MASK);
+		devtype_info *dtype;
+
+		keydesc->kind = kind;
+		keydesc->nulls_first = ((ival & KSORT_KEY_ATTR__NULLS_FIRST) != 0);
+		keydesc->order_asc   = ((ival & KSORT_KEY_ATTR__ORDER_ASC)  != 0);
+		if (kind == KSORT_KEY_KIND__VREF)
+		{
+			ListCell   *cell;
+			bool		found = false;
+
+			foreach (cell, context->tlist_dev)
+			{
+				TargetEntry *tle = lfirst(cell);
+
+				if (tle->resjunk)
+					continue;
+				if (equal(expr, tle->expr))
+				{
+					keydesc->src_anum = tle->resno;
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				elog(ERROR, "Bug? GPU-SortKey (%s) is missing",
+					 nodeToString((Node *)expr));
+			keydesc->buf_offset = 0;
+			dtype = pgstrom_devtype_lookup(exprType((Node *)expr));
+			if (!dtype)
+				elog(ERROR, "Bug? GPU-SortKey does not have device supported type: %s",
+					 nodeToString((Node *)expr));
+			keydesc->key_type_code = dtype->type_code;
+		}
+		else
+		{
+			FuncExpr   *func = (FuncExpr *)expr;
+
+			if (!IsA(func, FuncExpr) || list_length(func->args) > 1)
+				elog(ERROR, "Bug? GPU-SortKey is not unexpected expression: %s",
+					 nodeToString(expr));
+			kexp->u.sort.needs_finalization = true;
+			if (func->args == 0)
+				keydesc->src_anum = 0;
+			else
+			{
+				ListCell   *cell;
+				Expr	   *farg = linitial(func->args);
+				bool		found = false;
+
+				foreach (cell, context->tlist_dev)
+				{
+					TargetEntry *tle = lfirst(cell);
+
+					if (tle->resjunk)
+						continue;
+					if (equal(farg, tle->expr))
+					{
+						keydesc->src_anum = tle->resno;
+						found = true;
+						break;
+					}
+				}
+				if (!found)
+					elog(ERROR, "Bug? GPU-SortKey (%s) is missing", nodeToString(expr));
+			}
+			switch (kind)
+			{
+				case KSORT_KEY_KIND__PMINMAX_INT64:
+				case KSORT_KEY_KIND__PSUM_INT64:
+					keydesc->buf_offset = 0;	/* no finalization */
+					keydesc->key_type_code = TypeOpCode__int8;
+					break;
+				case KSORT_KEY_KIND__PMINMAX_FP64:
+				case KSORT_KEY_KIND__PSUM_FP64:
+					keydesc->buf_offset = 0;	/* no finalization */
+					keydesc->key_type_code = TypeOpCode__float8;
+					break;
+				case KSORT_KEY_KIND__PSUM_NUMERIC:
+					keydesc->buf_offset = 0;	/* no finalization */
+					keydesc->key_type_code = TypeOpCode__numeric;
+					break;
+					/* finalization to fp64 */
+				case KSORT_KEY_KIND__PAVG_INT64:
+				case KSORT_KEY_KIND__PAVG_FP64:
+				case KSORT_KEY_KIND__PAVG_NUMERIC:
+					keydesc->buf_offset = usage;
+					usage += (sizeof(bool) + sizeof(float8));
+					keydesc->key_type_code = TypeOpCode__float8;
+					break;
+					/* finalization to fp64 */
+				case KSORT_KEY_KIND__PVARIANCE_SAMP:
+				case KSORT_KEY_KIND__PVARIANCE_POP:
+				case KSORT_KEY_KIND__PCOVAR_CORR:
+				case KSORT_KEY_KIND__PCOVAR_SAMP:
+				case KSORT_KEY_KIND__PCOVAR_POP:
+				case KSORT_KEY_KIND__PCOVAR_AVGX:
+				case KSORT_KEY_KIND__PCOVAR_AVGY:
+				case KSORT_KEY_KIND__PCOVAR_COUNT:
+				case KSORT_KEY_KIND__PCOVAR_INTERCEPT:
+				case KSORT_KEY_KIND__PCOVAR_REGR_R2:
+				case KSORT_KEY_KIND__PCOVAR_REGR_SLOPE:
+				case KSORT_KEY_KIND__PCOVAR_REGR_SXX:
+				case KSORT_KEY_KIND__PCOVAR_REGR_SXY:
+					keydesc->buf_offset = usage;
+					usage += (sizeof(bool) + sizeof(float8));
+					keydesc->key_type_code = TypeOpCode__float8;
+					break;
+				default:
+					elog(ERROR, "Bug? unknown KSORT_KEY_KIND: %d", kind);
+			}
+		}
+	}
+	__appendKernExpMagicAndLength(&buf, VARHDRSZ);
+	SET_VARSIZE(buf.data, buf.len);
+	/*
+	 * This FuncOpCode__SortKeys operation needs 'usage' bytes of margin
+	 * after the kern_tupitem on the kds_final buffer for finalization.
+	 * (used to calculate temporary value like average)
+	 */
+	pp_info->gpusort_htup_margin = usage;
+
+	return (bytea *)buf.data;
 }
 
 /*
@@ -3899,6 +4238,8 @@ estimate_cuda_stack_size(codegen_context *context)
 		stack_sz += TYPEALIGN(CUDA_ALLOCA_ALIGN,
 							  kvdef->kv_xdatum_sizeof);
 	}
+	/* other expressions */
+	stack_sz += context->stack_usage;
 	return stack_sz;
 #undef CUDA_ALLOCA_ALIGN
 }
@@ -4153,88 +4494,114 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 		switch (desc->action)
 		{
 			case KAGG_ACTION__VREF:
-				appendStringInfo(buf, "vref[slot=%d, expr='%s']",
+				appendStringInfo(buf, "vref[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__NROWS_ANY:
-				appendStringInfo(buf, "nrows[*]");
+				appendStringInfo(buf, "nrows[*");
 				break;
 			case KAGG_ACTION__NROWS_COND:
-				appendStringInfo(buf, "nrows[slot=%d, expr='%s']",
+				appendStringInfo(buf, "nrows[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PMIN_INT32:
-				appendStringInfo(buf, "pmin::int32[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pmin::int32[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PMIN_INT64:
-				appendStringInfo(buf, "pmin::int64[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pmin::int64[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PMIN_FP64:
-				appendStringInfo(buf, "pmin::fp64[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pmin::fp64[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PMAX_INT32:
-				appendStringInfo(buf, "pmax::int32[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pmax::int32[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PMAX_INT64:
-				appendStringInfo(buf, "pmax::int64[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pmax::int64[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PMAX_FP64:
-				appendStringInfo(buf, "pmax::fp64[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pmax::fp64[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PSUM_INT:
-				appendStringInfo(buf, "psum::int[slot=%d, expr='%s']",
+				appendStringInfo(buf, "psum::int[slot=%d, expr='%s'",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
+			case KAGG_ACTION__PSUM_INT64:
+				appendStringInfo(buf, "psum::int64[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PSUM_FP:
-				appendStringInfo(buf, "psum::fp[slot=%d, expr='%s']",
+				appendStringInfo(buf, "psum::fp[slot=%d, expr='%s'",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
+			case KAGG_ACTION__PSUM_NUMERIC:
+				appendStringInfo(buf, "psum::numeric(%d)[slot=%d, expr='%s'",
+								 __numeric_typmod_weight(desc->typmod),
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PAVG_INT:
-				appendStringInfo(buf, "pavg::int[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pavg::int[slot=%d, expr='%s'",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
+			case KAGG_ACTION__PAVG_INT64:
+				appendStringInfo(buf, "pavg::int64[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__PAVG_FP:
-				appendStringInfo(buf, "pavg::fp[slot=%d, expr='%s']",
+				appendStringInfo(buf, "pavg::fp[slot=%d, expr='%s'",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
+			case KAGG_ACTION__PAVG_NUMERIC:
+				appendStringInfo(buf, "pavg::numeric(%d)[slot=%d, expr='%s'",
+								 __numeric_typmod_weight(desc->typmod),
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__STDDEV:
-				appendStringInfo(buf, "stddev[slot=%d, expr='%s']",
+				appendStringInfo(buf, "stddev[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
 			case KAGG_ACTION__COVAR:
-				appendStringInfo(buf, "stddev[slot0=%d, expr0='%s', slot1=%d, expr1='%s']",
+				appendStringInfo(buf, "covar[slotX=%d, exprX='%s', slotY=%d, exprY='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id),
@@ -4243,7 +4610,7 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 														  desc->arg1_slot_id));
 				break;
 			default:
-				appendStringInfo(buf, "unknown[slot0=%d, expr0='%s', slot1=%d, expr1='%s']",
+				appendStringInfo(buf, "unknown[slot0=%d, expr0='%s', slot1=%d, expr1='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id),
@@ -4252,8 +4619,83 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 														  desc->arg1_slot_id));
 				break;
 		}
+		if (desc->filter_slot_id >= 0)
+			appendStringInfo(buf, ", filter='%s; slot=%u'",
+							 __get_expression_cstring(css, dcontext,
+													  desc->filter_slot_id),
+							 desc->filter_slot_id);
+		appendStringInfo(buf, "]");
 	}
 	appendStringInfo(buf, ">");
+}
+
+static void
+__xpucode_sortkeys_cstring(StringInfo buf,
+						   const kern_expression *kexp,
+						   const CustomScanState *css,	/* optional */
+						   ExplainState *es,			/* optional */
+						   List *dcontext)
+{
+	static const char *label[] = {
+		"vref",				/* KSORT_KEY_KIND__VREF */
+		"min/max[int64]",	/* KSORT_KEY_KIND__PMINMAX_INT64 */
+		"min/max[fp64]",	/* KSORT_KEY_KIND__PMINMAX_FP64 */
+		"sum[int64]",		/* KSORT_KEY_KIND__PSUM_INT64 */
+		"sum[fp64]",		/* KSORT_KEY_KIND__PSUM_FP64 */
+		"sum[numeric]",		/* KSORT_KEY_KIND__PSUM_NUMERIC */
+		"avg[int64]",		/* KSORT_KEY_KIND__PAVG_INT64 */
+		"avg[fp64]",		/* KSORT_KEY_KIND__PAVG_FP64 */
+		"avg[numeric]",		/* KSORT_KEY_KIND__PAVG_NUMERIC */
+		"var[samp]",		/* KSORT_KEY_KIND__PVARIANCE_SAMP */
+		"var[pop]",			/* KSORT_KEY_KIND__PVARIANCE_POP */
+		"corr",				/* KSORT_KEY_KIND__PCOVAR_CORR */
+		"cov[samp]",		/* KSORT_KEY_KIND__PCOVAR_SAMP */
+		"cov[pop]",			/* KSORT_KEY_KIND__PCOVAR_POP */
+		"cov[avgx]",		/* KSORT_KEY_KIND__PCOVAR_AVGX */
+		"cov[avgy]",		/* KSORT_KEY_KIND__PCOVAR_AVGY */
+		"cov[count]",		/* KSORT_KEY_KIND__PCOVAR_COUNT */
+		"cov[intercept]",	/* KSORT_KEY_KIND__PCOVAR_INTERCEPT */
+		"regr[r2]",			/* KSORT_KEY_KIND__PCOVAR_REGR_R2 */
+		"regr[slope]",		/* KSORT_KEY_KIND__PCOVAR_REGR_SLOPE */
+		"regr[sxx]",		/* KSORT_KEY_KIND__PCOVAR_REGR_SXX */
+		"regr[sxy]",		/* KSORT_KEY_KIND__PCOVAR_REGR_SXY */
+		"regr[syy]",		/* KSORT_KEY_KIND__PCOVAR_REGR_SYY */
+		NULL,
+	};
+
+	appendStringInfo(buf, "{SortKeys");
+	for (int i=0; i < kexp->u.sort.nkeys; i++)
+	{
+		const kern_sortkey_desc *desc = &kexp->u.sort.desc[i];
+
+		appendStringInfo(buf, "%s <", i==0 ? "" : ",");
+		if (desc->kind < KSORT_KEY_KIND__NITEMS)
+			appendStringInfoString(buf, label[desc->kind]);
+		else
+			appendStringInfo(buf, "unknown-%u", desc->kind);
+		if (css)
+		{
+			CustomScan *cscan = (CustomScan *)css->ss.ps.plan;
+			const char *str;
+
+			if (desc->src_anum > 0 &&
+				desc->src_anum <= list_length(cscan->custom_scan_tlist))
+			{
+				TargetEntry *tle = list_nth(cscan->custom_scan_tlist,
+											desc->src_anum - 1);
+				str = deparse_expression((Node *)tle->expr,
+										 dcontext,
+										 false,
+										 false);
+				appendStringInfo(buf, "; key=%s", str);
+			}
+			else if (desc->src_anum != 0)
+				appendStringInfo(buf, "; key=(out of range)");
+		}
+		appendStringInfo(buf, "[%s;%s]",
+						 desc->nulls_first ? "NF" : "NL",
+						 desc->order_asc ? "ASC" : "DESC");
+	}
 }
 
 static void
@@ -4366,6 +4808,9 @@ __xpucode_to_cstring(StringInfo buf,
 			}
 			appendStringInfo(buf, "}");
 			return;
+		case FuncOpCode__SortKeys:
+			__xpucode_sortkeys_cstring(buf, kexp, css, es, dcontext);
+			break;
 		case FuncOpCode__BoolExpr_And:
 			appendStringInfo(buf, "{Bool::AND");
 			break;

@@ -70,4 +70,105 @@ xpu_bytea_is_valid(kern_context *kcxt, const xpu_bytea_t *arg)
 	return true;
 }
 
+/*
+ * Functions in string.h
+ */
+#define __UPPER(x)		(((x) >= 'a' && (x) <= 'z') ? 'A' + ((x) - 'a') : (x))
+#define __LOWER(x)		(((x) >= 'A' && (x) <= 'Z') ? 'a' + ((X) - 'A') : (x))
+
+INLINE_FUNCTION(int)
+__strcmp(const char *s1, const char *s2)
+{
+	for (;;)
+	{
+		char	c1 = *s1++;
+		char	c2 = *s2++;
+		int		diff = c1 - c2;
+
+		if (c1 == '\0' || diff != 0)
+			return diff;
+	}
+}
+
+INLINE_FUNCTION(int)
+__strncmp(const char *s1, const char *s2, int n)
+{
+	while (n > 0)
+	{
+		char	c1 = (unsigned char) *s1++;
+		char	c2 = (unsigned char) *s2++;
+
+		if (c1 == '\0' || c1 != c2)
+			return c1 - c2;
+		n--;
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__strcasecmp(const char *s1, const char *s2)
+{
+	for (;;)
+	{
+		char	c1 = *s1++;
+		char	c2 = *s2++;
+		int		diff = __UPPER(c1) - __UPPER(c2);
+
+		if (c1 == '\0' || diff != 0)
+			return diff;
+	}
+}
+
+INLINE_FUNCTION(int)
+__strncasecmp(const char *s1, const char *s2, int n)
+{
+	int		diff;
+
+	while (n > 0)
+	{
+		char	c1 = *s1++;
+		char	c2 = *s2++;
+
+		diff = __UPPER(c1) - __UPPER(c2);
+		if (c1 == '\0' || diff != 0)
+			return diff;
+		n--;
+	} while (diff == 0);
+
+	return diff;
+}
+
+/*
+ * functions in ctype.h
+ */
+INLINE_FUNCTION(bool)
+__isspace(int c)
+{
+	return (c == ' ' || c == '\t' || c == '\n' || c == '\r');
+}
+
+INLINE_FUNCTION(bool)
+__isupper(int c)
+{
+	return (c >= 'A' && c <= 'Z');
+}
+
+INLINE_FUNCTION(bool)
+__islower(int c)
+{
+	return (c >= 'a' && c <= 'z');
+}
+
+INLINE_FUNCTION(bool)
+__isdigit(int c)
+{
+	return (c >= '0' && c <= '9');
+}
+
+INLINE_FUNCTION(bool)
+__isxdigit(int c)
+{
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
 #endif  /* XPU_TEXTLIB_H */

@@ -146,6 +146,15 @@ static inline uint16_t __fetch_16bit(const void *addr)
 #endif
 }
 
+static inline int16_t __fetch_16bit_signed(const void *addr)
+{
+#ifdef __PGSTROM_MODULE__
+	return *((int16_t *)addr);
+#else
+	return (int16_t)be16toh(*((uint16_t *)addr));
+#endif
+}
+
 static inline uint32_t __fetch_32bit(const void *addr)
 {
 #ifdef __PGSTROM_MODULE__
@@ -497,9 +506,11 @@ put_float64_value(SQLfield *column, const char *addr, int sz)
 /* parameters of Numeric type */
 #define NUMERIC_DSCALE_MASK	0x3FFF
 #define NUMERIC_SIGN_MASK	0xC000
-#define NUMERIC_POS         0x0000
+#define NUMERIC_POS			0x0000
 #define NUMERIC_NEG         0x4000
-#define NUMERIC_NAN         0xC000
+#define NUMERIC_NAN			0xC000
+#define NUMERIC_PINF		0xD000
+#define NUMERIC_NINF		0xF000
 
 #define NBASE				10000
 #define HALF_NBASE			5000
@@ -592,14 +603,13 @@ put_decimal_value(SQLfield *column, const char *addr, int sz)
 			NumericDigit digits[FLEXIBLE_ARRAY_MEMBER];
 		}  *rawdata = (void *)addr;
 		nv.ndigits	= __fetch_16bit(&rawdata->ndigits);
-		nv.weight	= __fetch_16bit(&rawdata->weight);
+		nv.weight	= __fetch_16bit_signed(&rawdata->weight);
 		nv.sign		= __fetch_16bit(&rawdata->sign);
 		nv.dscale	= __fetch_16bit(&rawdata->dscale);
 		nv.digits	= rawdata->digits;
 #endif	/* __PGSTROM_MODULE__ */
-		if ((nv.sign & NUMERIC_SIGN_MASK) == NUMERIC_NAN)
-			Elog("Decimal128 cannot map NaN in PostgreSQL Numeric");
-
+		if ((nv.sign & NUMERIC_SIGN_MASK) == NUMERIC_SIGN_MASK)
+			Elog("Decimal128 cannot map NaN, +Inf or -Inf in PostgreSQL Numeric");
 		/* makes integer portion first */
 		for (d=0; d <= nv.weight; d++)
 		{
@@ -662,8 +672,8 @@ put_decimal_value(SQLfield *column, const char *addr, int sz)
 	}
 MOVE_SCALAR_TEMPLATE(int8,     int8_t,  i8)
 MOVE_SCALAR_TEMPLATE(uint8,   uint8_t,  u8)
-MOVE_SCALAR_TEMPLATE(int16,   int32_t, i32)
-MOVE_SCALAR_TEMPLATE(uint16, uint32_t, u32)
+MOVE_SCALAR_TEMPLATE(int16,   int16_t, i16)
+MOVE_SCALAR_TEMPLATE(uint16, uint16_t, u16)
 MOVE_SCALAR_TEMPLATE(int32,   int32_t, i32)
 MOVE_SCALAR_TEMPLATE(uint32, uint32_t, u32)
 MOVE_SCALAR_TEMPLATE(int64,   int64_t, i64)

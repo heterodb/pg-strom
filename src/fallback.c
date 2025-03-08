@@ -240,7 +240,9 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 	ExprContext    *econtext = pts->css.ss.ps.ps_ExprContext;
 	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
 
-	Assert(kds_in->format == KDS_FORMAT_ROW);
+	// MEMO: GiST-Join uses KDS_FORMAT_HASH but for ItemPointers.
+	//       So, we deal with this buffer as KDS_FORMAT_ROW.
+	// Assert(kds_in->format == KDS_FORMAT_ROW);
 	for (uint32_t index=l_state; index < kds_in->nitems; index++)
 	{
 		kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds_in, index);
@@ -449,7 +451,8 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts,
 
 		kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 		oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
-		if (h_kmrels->chunks[depth-1].is_nestloop)
+		if (h_kmrels->chunks[depth-1].is_nestloop ||
+			h_kmrels->chunks[depth-1].gist_offset != 0)
 		{
 			__execFallbackCpuNestLoop(pts, kds_in, oj_map, depth, l_state, matched);
 		}

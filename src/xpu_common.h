@@ -16,6 +16,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <string.h>
@@ -157,6 +158,12 @@
 #ifndef Abs
 #define Abs(x)				((x) >= 0 ? (x) : -(x))
 #endif
+#ifndef And
+#define And(a,b)			((a) & (b))
+#endif
+#ifndef Or
+#define Or(a,b)				((a) | (b))
+#endif
 #ifndef POSTGRES_H
 typedef uint64_t			Datum;
 typedef unsigned int		Oid;
@@ -190,6 +197,23 @@ typedef int64_t				gpumask_t;
 
 /* Definition of several primitive types */
 typedef __int128	int128_t;
+typedef struct
+{
+	uint64_t	u64_lo;
+	uint64_t	u64_hi;
+} int128_packed_t;
+
+INLINE_FUNCTION(int128_t)
+__fetch_int128_packed(const int128_packed_t *addr)
+{
+	return ((int128_t)addr->u64_hi << 64) | ((int128_t)addr->u64_lo);
+}
+INLINE_FUNCTION(void)
+__store_int128_packed(int128_packed_t *addr, int128_t ival)
+{
+	addr->u64_lo = (uint64_t)(ival & ULONG_MAX);
+	addr->u64_hi = (uint64_t)((ival >> 64) & ULONG_MAX);
+}
 #include "float2.h"
 
 #ifndef __FILE_NAME__
@@ -275,22 +299,6 @@ __memcmp(const void *__s1, const void *__s2, size_t n)
 			return 1;
 	}
 	return 0;
-}
-
-INLINE_FUNCTION(int)
-__strcmp(const char *s1, const char *s2)
-{
-	unsigned char	c1, c2;
-
-	do {
-		c1 = (unsigned char) *s1++;
-		c2 = (unsigned char) *s2++;
-
-		if (c1 == '\0')
-			return c1 - c2;
-	} while (c1 == c2);
-
-	return c1 - c2;
 }
 
 /* ----------------------------------------------------------------
@@ -403,6 +411,7 @@ typedef enum {
 	FuncOpCode__SaveExpr,
 	FuncOpCode__AggFuncs,
 	FuncOpCode__Projection,
+	FuncOpCode__SortKeys,
 	FuncOpCode__Packed,		/* place-holder for the stacked expressions */
 	FuncOpCode__BuiltInMax,
 } FuncOpCode;
@@ -2054,15 +2063,19 @@ typedef struct
 												 * no locale configuration */
 #define DEVKERN__SESSION_TIMEZONE	0x00000200U	/* Device function needs session
 												 * timezone */
+#define DEVFUNC__HAS_RECURSION		0x00000400U	/* Device function has recursive calls */
 #define DEVTYPE__HAS_COMPARE		0x00000800U	/* Device type has compare handler */
 #define DEVTASK__PINNED_HASH_RESULTS 0x00001000U/* Pinned results in HASH format */
 #define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
 #define DEVTASK__USED_GPUDIRECT		0x00004000U	/* Task used GPU-Direct SQL */
 #define DEVTASK__USED_GPUCACHE		0x00008000U	/* Task used GPU-Cache */
+#define DEVTASK__PREAGG_FINAL_MERGE	0x00010000U	/* PreAgg final buffer should be merged
+												 * on the xPU device side */
 
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
 #define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
+#define DEVTASK__SORT				0x80000000U	/* GPU-Sort */
 #define DEVTASK__MASK				0x70000000U	/* mask of avove workloads */
 
 #define TASK_KIND__GPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_GPU)
@@ -2173,6 +2186,7 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 	if (!EXEC_KERN_EXPRESSION(kcxt, karg, &ARGNAME4))			\
 		return false
 
+#define __KAGG_ACTION__USE_FILTER	8192	/* only used in optimizer */
 #define KAGG_ACTION__VREF			101		/* simple var copy */
 #define KAGG_ACTION__VREF_NOKEY		102		/* simple var copy; but not a grouping-
 											 * key, if GROUP-BY primary key.
@@ -2186,44 +2200,66 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__PMAX_INT64		403		/* <int4>,<int8> - max value */
 #define KAGG_ACTION__PMAX_FP64		404		/* <int4>,<float8> - max value */
 #define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
+#define KAGG_ACTION__PSUM_INT64		502		/* <int8>,<int8+8> */
 #define KAGG_ACTION__PSUM_FP		503		/* <float8> - sum of values */
+#define KAGG_ACTION__PSUM_NUMERIC	504		/* <int4>,<int8+8> - sum of values */
 #define KAGG_ACTION__PAVG_INT		601		/* <int4>,<int8> - NROWS+PSUM */
-#define KAGG_ACTION__PAVG_FP		602		/* <int4>,<float8> - NROWS+PSUM */
+#define KAGG_ACTION__PAVG_INT64		602		/* <int8>,<int8+8> */
+#define KAGG_ACTION__PAVG_FP		603		/* <int4>,<float8> - NROWS+PSUM */
+#define KAGG_ACTION__PAVG_NUMERIC	604		/* <int4>,<int8+8> - NROWS+PSUM */
 #define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
 #define KAGG_ACTION__COVAR			801		/* <int4>,<float8>x5 - covariance */
+
+#define __PAGG_MINMAX_ATTRS__VALID	0x0001	/* value is not empty */
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;
 	int64_t		value;
 } kagg_state__pminmax_int64_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;
 	float8_t	value;
 } kagg_state__pminmax_fp64_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	int64_t		sum;
 } kagg_state__psum_int_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	float8_t	sum;
 } kagg_state__psum_fp_packed;
+
+#define __PAGG_NUMERIC_ATTRS__WEIGHT	0x00ffffU
+#define __PAGG_NUMERIC_ATTRS__NAN		0x010000U	/* NaN */
+#define __PAGG_NUMERIC_ATTRS__PINF		0x020000U	/* +Inf */
+#define __PAGG_NUMERIC_ATTRS__NINF		0x040000U	/* -Inf */
+#define __PAGG_NUMERIC_ATTRS__MASK		0x070000U	/* Nan|+Inf|-Inf */
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	attrs;
+	uint64_t	nitems;
+	int128_packed_t sum;		/* int128 or uint64 x2 */
+} kagg_state__psum_numeric_packed;
 
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	float8_t	sum_x;
 	float8_t	sum_x2;
 } kagg_state__stddev_packed;
@@ -2231,7 +2267,8 @@ typedef struct
 typedef struct
 {
 	int32_t		vl_len_;
-	uint32_t	nitems;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
 	float8_t	sum_x;
 	float8_t	sum_xx;
 	float8_t	sum_y;
@@ -2241,10 +2278,57 @@ typedef struct
 
 typedef struct
 {
-	uint32_t	action;			/* any of KAGG_ACTION__* */
-	int32_t		arg0_slot_id;
-	int32_t		arg1_slot_id;
+	uint16_t	action;			/* any of KAGG_ACTION__* */
+	int16_t		arg0_slot_id;	/* arg0 of partial aggregate function */
+	int16_t		arg1_slot_id;	/* arg1 of partial aggregate function */
+	int16_t		filter_slot_id;	/* if non-negative, slot-id of the filter */
+	int32_t		typmod;			/* typmod of 1st arg - used for numeric */
 } kern_aggregate_desc;
+
+
+#define KSORT_KEY_ATTR__NULLS_FIRST			0x0400U
+#define KSORT_KEY_ATTR__ORDER_ASC			0x8000U
+#define KSORT_KEY_KIND__MASK				0x03ffU
+#define KSORT_KEY_KIND__SHIFT				16
+#define KSORT_KEY_KIND__VREF				0
+#define KSORT_KEY_KIND__PMINMAX_INT64		1
+#define KSORT_KEY_KIND__PMINMAX_FP64		2
+#define KSORT_KEY_KIND__PSUM_INT64			3
+#define KSORT_KEY_KIND__PSUM_FP64			4
+#define KSORT_KEY_KIND__PSUM_NUMERIC		5
+#define KSORT_KEY_KIND__PAVG_INT64			6
+#define KSORT_KEY_KIND__PAVG_FP64			7
+#define KSORT_KEY_KIND__PAVG_NUMERIC		8
+#define KSORT_KEY_KIND__PVARIANCE_SAMP		9
+#define KSORT_KEY_KIND__PVARIANCE_POP		10
+#define KSORT_KEY_KIND__PCOVAR_CORR			11
+#define KSORT_KEY_KIND__PCOVAR_SAMP			12
+#define KSORT_KEY_KIND__PCOVAR_POP			13
+#define KSORT_KEY_KIND__PCOVAR_AVGX			14
+#define KSORT_KEY_KIND__PCOVAR_AVGY			15
+#define KSORT_KEY_KIND__PCOVAR_COUNT		16
+#define KSORT_KEY_KIND__PCOVAR_INTERCEPT	17
+#define KSORT_KEY_KIND__PCOVAR_REGR_R2		18
+#define KSORT_KEY_KIND__PCOVAR_REGR_SLOPE	19
+#define KSORT_KEY_KIND__PCOVAR_REGR_SXX		20
+#define KSORT_KEY_KIND__PCOVAR_REGR_SXY		21
+#define KSORT_KEY_KIND__PCOVAR_REGR_SYY		22
+#define KSORT_KEY_KIND__NITEMS				23
+
+typedef struct
+{
+	uint16_t	kind;			/* any of KSORT_KEY_KIND__* */
+	int8_t		nulls_first;	/* true, if NULLs first */
+	int8_t		order_asc;		/* true, if ORDER ASC */
+	uint16_t	src_anum;		/* source attribute number of KDS */
+	uint16_t	buf_offset;		/* if not KSORT_KEY_KIND__VREF, it means offset of
+								 * the temporary calculated sorting key.
+								 * location is:
+								 * ((char *)&tupitem->htup + tupitem->t_len + key_offset)
+								 */
+	TypeOpCode	key_type_code;
+	const struct xpu_datum_operators *key_ops;
+} kern_sortkey_desc;
 
 typedef struct
 {
@@ -2364,6 +2448,11 @@ struct kern_expression
 			uint16_t	slot_id[1];
 		} proj;		/* Projection */
 		struct {
+			int			nkeys;
+			bool		needs_finalization;
+			kern_sortkey_desc desc[1];
+		} sort;		/* Sort */
+		struct {
 			uint32_t	npacked;	/* number of packed sub-expressions; including
 									 * logical NULLs (npacked may be larger than
 									 * nr_args) */
@@ -2477,26 +2566,33 @@ typedef struct kern_session_info
 	uint32_t	xpucode_groupby_keyload;
 	uint32_t	xpucode_groupby_keycomp;
 	uint32_t	xpucode_groupby_actions;
+	uint32_t	xpucode_gpusort_keydesc;
 
 	/* database session info */
-	int64_t		hostEpochTimestamp;	/* = SetEpochTimestamp() */
-	uint64_t	xactStartTimestamp;	/* timestamp when transaction start */
-	uint32_t	session_xact_state;	/* offset to SerializedTransactionState */
-	uint32_t	session_timezone;	/* offset to pg_tz */
-	uint32_t	session_encode;		/* offset to xpu_encode_info;
-									 * !! function pointer must be set by server */
+	int64_t		hostEpochTimestamp;		/* = SetEpochTimestamp() */
+	uint64_t	xactStartTimestamp;		/* timestamp when transaction start */
+	uint32_t	session_xact_state;		/* offset to SerializedTransactionState */
+	uint32_t	session_timezone;		/* offset to pg_tz */
+	uint32_t	session_encode;			/* offset to xpu_encode_info;
+										 * !! function pointer must be set by server */
 	int32_t		session_currency_frac_digits;	/* copy of lconv::frac_digits */
+	/* projection kds definition */
+	uint32_t	projection_kds_dst;		/* header portion of kds_dst */
 
 	/* join inner buffer */
-	uint32_t	pgsql_port_number;	/* = PostPortNumber */
-	uint32_t	pgsql_plan_node_id;	/* = Plan->plan_node_id */
-	uint32_t	join_inner_handle;	/* key of join inner buffer */
+	uint32_t	pgsql_port_number;		/* = PostPortNumber */
+	uint32_t	pgsql_plan_node_id;		/* = Plan->plan_node_id */
+	uint32_t	join_inner_handle;		/* key of join inner buffer */
 
 	/* group-by final buffer */
-	uint32_t	groupby_kds_final;	/* header portion of kds_final */
-	uint32_t	groupby_prepfn_bufsz; /* buffer size for preagg functions */
+	uint32_t	groupby_kds_final;		/* header portion of kds_final */
+	uint32_t	groupby_prepfn_bufsz;	/* buffer size for preagg functions */
 	float4_t	groupby_ngroups_estimation; /* planne's estimation of ngroups */
 
+	/* gpu-sort final buffer */
+	uint32_t	gpusort_htup_margin;	/* extra space at tail of the final
+										 * kern_tupitem for finalization */
+	uint32_t	gpusort_limit_count;	/* limit-pushdown, if positive */
 	/* fallback buffer */
 	uint32_t	fallback_kds_head;		/* offset to kds_fallback (header) */
 	uint32_t	fallback_desc_defs;		/* offset to kern_fallback_desc array */
@@ -2511,7 +2607,6 @@ typedef struct {
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
-	uint32_t	kds_dst_offset;		/* offset to kds_dst */
 	int32_t		scan_repeat_id;		/* current repeat count */
 	char		data[1]				__MAXALIGNED__;
 } kern_exec_task;
@@ -2521,6 +2616,7 @@ typedef struct {
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
 	uint32_t	ojmap_offset;		/* offset of outer-join-map */
 	uint32_t	ojmap_length;		/* length of outer-join-map */
+	bool		right_outer_join;	/* true, if CPU should exex RIGHT-OUTER-JOIN */
 	bool		final_plan_task;	/* true, if it is final response */
 	uint32_t	final_nitems;		/* final buffer's nitems, if any */
 	uint64_t	final_usage;		/* final buffer's usage, if any */
@@ -2533,6 +2629,7 @@ typedef struct {
 	uint32_t	nitems_out;		/* # of result rows in final depth before host quals */
 	uint32_t	num_rels;
 	struct {
+		uint32_t	nitems_roj;	/* # of generated rows by RIGHT-OUTER-JOIN (if any) */
 		uint32_t	nitems_gist;/* # of results rows by GiST index (if any) */
 		uint32_t	nitems_out;	/* # of results rows by JOIN in this depth */
 	} stats[1];
@@ -2578,6 +2675,24 @@ typedef struct
 /*
  * kern_session_info utility functions.
  */
+INLINE_FUNCTION(const kern_data_store *)
+SESSION_KDS_DST_HEAD(const kern_session_info *session)
+{
+	const kern_data_store *kds_dst_head = NULL;
+
+	if (session->projection_kds_dst > 0)
+		kds_dst_head = (const kern_data_store *)
+			((char *)session + session->projection_kds_dst);
+
+	return kds_dst_head;
+}
+
+INLINE_FUNCTION(bool)
+SESSION_SUPPORTS_CPU_FALLBACK(const kern_session_info *session)
+{
+	return (session->fallback_kds_head != 0);
+}
+
 INLINE_FUNCTION(kern_varslot_desc *)
 SESSION_KVARS_SLOT_DESC(const kern_session_info *session)
 {
@@ -2777,6 +2892,21 @@ SESSION_KEXP_GROUPBY_ACTIONS(const kern_session_info *session)
 	return kexp;
 }
 
+INLINE_FUNCTION(kern_expression *)
+SESSION_KEXP_GPUSORT_KEYDESC(const kern_session_info *session)
+{
+	kern_expression *kexp = NULL;
+
+	if (session->xpucode_gpusort_keydesc)
+	{
+		kexp = (kern_expression *)
+			((char *)session + session->xpucode_gpusort_keydesc);
+		assert(kexp->opcode == FuncOpCode__SortKeys &&
+			   kexp->exptype == TypeOpCode__int4);
+	}
+	return kexp;
+}
+
 /* see access/transam/xact.c */
 typedef struct
 {
@@ -2962,6 +3092,10 @@ EXTERN_FUNCTION(int)
 kern_estimate_heaptuple(kern_context *kcxt,
 						const kern_expression *kproj,
 						const kern_data_store *kds_dst);
+EXTERN_FUNCTION(const void *)
+kern_fetch_heaptuple_attr(kern_context *kcxt,
+						  const kern_data_store *kds,
+						  const kern_tupitem *titem, int anum);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsHeapTuple(kern_context *kcxt,
 					  const kern_expression *kexp_load_vars,
@@ -2987,6 +3121,11 @@ ExecLoadVarsOuterColumn(kern_context *kcxt,
 						const kern_data_store *kds,
 						const kern_data_extra *extra,
 						uint32_t kds_index);
+PUBLIC_FUNCTION(bool)
+ExecLoadKeysFromGroupByFinal(kern_context *kcxt,
+							 const kern_data_store *kds_final,
+							 const kern_tupitem *tupitem,
+							 const kern_expression *kexp_groupby_actions);
 EXTERN_FUNCTION(bool)
 ExecMoveKernelVariables(kern_context *kcxt,
 						const kern_expression *kexp_move_vars,
@@ -3549,8 +3688,6 @@ __preagg_fetch_xdatum_as_float64(float8_t *p_fval, const xpu_datum_t *xdatum)
  *
  * ----------------------------------------------------------------
  */
-#include <stdio.h>
-
 INLINE_FUNCTION(void)
 print_kern_data_store(const kern_data_store *kds)
 {

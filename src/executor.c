@@ -557,7 +557,7 @@ __build_session_lconvert(kern_session_info *session)
 const XpuCommand *
 pgstromBuildSessionInfo(pgstromTaskState *pts,
 						uint32_t join_inner_handle,
-						TupleDesc kds_final_tdesc)
+						TupleDesc kds_dst_tdesc)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
 	pgstromPlanInfo *pp_info = pts->pp_info;
@@ -667,42 +667,68 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 									 VARDATA(xpucode),
 									 VARSIZE(xpucode) - VARHDRSZ);
 	}
-	if (kds_final_tdesc)
+	if (pp_info->kexp_gpusort_keydesc)
 	{
-		size_t		head_sz = estimate_kern_data_store(kds_final_tdesc);
-		kern_data_store *kds_temp = (kern_data_store *)alloca(head_sz);
-		char		format = KDS_FORMAT_ROW;
-		uint32_t	hash_nslots = 0;
-		size_t		kds_length = (4UL << 20);	/* 4MB */
-
-		if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
-		{
-			double	final_nrows = pp_info->final_nrows;
-			size_t	unit_sz;
-
-			format = KDS_FORMAT_HASH;
-			hash_nslots = KDS_GET_HASHSLOT_WIDTH(final_nrows);
-			unit_sz = offsetof(kern_hashitem, t.htup) +
-				MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
-						 BITMAPLEN(kds_final_tdesc->natts)) +
-				pts->css.ss.ps.plan->plan_width;
-
-			/* kds_final->length with margin */
-			kds_length = (head_sz +
-						  sizeof(uint64_t) * hash_nslots +	/* hash-slots */
-						  sizeof(uint64_t) * 2 * hash_nslots +	/* row-index */
-						  unit_sz * 2 * hash_nslots);
-			if (kds_length < (1UL<<30))
-				kds_length = (1UL<<30);		/* 1GB at least */
-			else
-				kds_length = TYPEALIGN(1024, kds_length);	/* alignment */
-		}
-		setup_kern_data_store(kds_temp, kds_final_tdesc, kds_length, format);
-		kds_temp->hash_nslots = hash_nslots;
-		session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, head_sz);
-		session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
-		session->groupby_ngroups_estimation = pts->css.ss.ps.plan->plan_rows;
+		xpucode = pp_info->kexp_gpusort_keydesc;
+		session->xpucode_gpusort_keydesc =
+			__appendBinaryStringInfo(&buf,
+									 VARDATA(xpucode),
+									 VARSIZE(xpucode) - VARHDRSZ);
+		session->gpusort_htup_margin = pp_info->gpusort_htup_margin;
+		session->gpusort_limit_count = pp_info->gpusort_limit_count;
 	}
+	else
+	{
+		Assert(pp_info->gpusort_htup_margin == 0);
+	}
+	/*
+	 * KDS header portion of usual GpuProjection; because kds_dst_tdesc is a copy
+	 * of scandesc of CustomScan, it is compatible to kds_final_tdesc if GpuPreAgg.
+	 * However, GpuPreAgg also needs some adjustment for hashing.
+	 */
+	if (kds_dst_tdesc)
+	{
+		size_t		head_sz = estimate_kern_data_store(kds_dst_tdesc);
+		kern_data_store *kds_temp = (kern_data_store *)alloca(head_sz);
+
+		setup_kern_data_store(kds_temp, kds_dst_tdesc, 0, KDS_FORMAT_ROW);
+		session->projection_kds_dst =
+			__appendBinaryStringInfo(&buf, kds_temp, head_sz);
+		/*
+		 * kds_final buffer has identical schema definitions, however,
+		 * it preset some attributes (hash_nslots, kds_length, ...)
+		 */
+		if ((pts->xpu_task_flags & (DEVTASK__PINNED_ROW_RESULTS |
+									DEVTASK__PINNED_HASH_RESULTS)) != 0)
+		{
+			size_t		kds_length = (4UL << 20);	/* 4MB */
+
+			if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
+			{
+				uint64_t	hash_nslots = KDS_GET_HASHSLOT_WIDTH(pp_info->final_nrows);
+				uint32_t	unitsz = (offsetof(kern_hashitem, t.htup) +
+									  MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
+											   BITMAPLEN(kds_dst_tdesc->natts)) +
+									  pts->css.ss.ps.plan->plan_width);
+				kds_length = (head_sz +
+							  sizeof(uint64_t) * hash_nslots +		/* hash-slots */
+							  sizeof(uint64_t) * 2 * hash_nslots +	/* row-index */
+							  unitsz * 2 * hash_nslots);
+				if (kds_length < (1UL<<30))
+					kds_length = (1UL<<30);		/* 1GB at least */
+				else
+					kds_length = TYPEALIGN(1024, kds_length);
+
+				kds_temp->hash_nslots = hash_nslots;
+				kds_temp->format = KDS_FORMAT_HASH;
+			}
+			kds_temp->length = kds_length;
+			session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, head_sz);
+			session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
+			session->groupby_ngroups_estimation = pts->css.ss.ps.plan->plan_rows;
+		}
+	}
+	
 	/* CPU fallback related */
 	if (pgstrom_cpu_fallback_elevel < ERROR)
 	{
@@ -731,7 +757,6 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->kcxt_kvecs_ndims = pp_info->kvecs_ndims;
 	session->kcxt_extra_bufsz = pp_info->extra_bufsz;
 	session->cuda_stack_size  = pp_info->cuda_stack_size;
-	session->xpu_task_flags = pts->xpu_task_flags;
 	session->hostEpochTimestamp = SetEpochTimestamp();
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	session->session_xact_state = __build_session_xact_state(&buf);
@@ -818,6 +843,8 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 								xcmd->u.results.nitems_in);
 		for (int i=0; i < n_rels; i++)
 		{
+			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_roj,
+                                    xcmd->u.results.stats[i].nitems_roj);
 			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_gist,
 									xcmd->u.results.stats[i].nitems_gist);
 			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_join,
@@ -1111,7 +1138,6 @@ pgstromExecFinalChunk(pgstromTaskState *pts,
 static void
 __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 							  TupleDesc tdesc_src,
-							  TupleDesc tdesc_dst,
 							  char format)
 {
 	XpuCommand	   *xcmd;
@@ -1125,8 +1151,6 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 		bufsz += MAXALIGN(sizeof(GpuCacheIdent));
 	if (tdesc_src)
 		bufsz += estimate_kern_data_store(tdesc_src);
-	if (tdesc_dst)
-		bufsz += estimate_kern_data_store(tdesc_dst);
 	enlargeStringInfo(&pts->xcmd_buf, bufsz);
 
 	xcmd = (XpuCommand *)pts->xcmd_buf.data;
@@ -1138,12 +1162,6 @@ __setupTaskStateRequestBuffer(pgstromTaskState *pts,
 
 		memcpy((char *)xcmd + off, ident, sizeof(GpuCacheIdent));
 		off += MAXALIGN(sizeof(GpuCacheIdent));
-	}
-	if (tdesc_dst)
-	{
-		xcmd->u.task.kds_dst_offset = off;
-		kds  = (kern_data_store *)((char *)xcmd + off);
-		off += setup_kern_data_store(kds, tdesc_dst, 0, KDS_FORMAT_ROW);
 	}
 	if (tdesc_src)
 	{
@@ -1433,7 +1451,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
 	Relation	rel = pts->css.ss.ss_currentRelation;
 	TupleDesc	tupdesc_src = RelationGetDescr(rel);
-	TupleDesc	tupdesc_dst;
 	int			depth_index = 0;
 	ListCell   *lc;
 
@@ -1472,7 +1489,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 			{
 				pts->optimal_gpus = GetOptimalGpuForRelation(rel);
-				if (pts->optimal_gpus)
+				if (pts->optimal_gpus != 0)
 				{
 					/*
 					 * If particular GPUs are optimal, we can use
@@ -1503,8 +1520,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			 RelationGetRelationName(rel));
 	}
 
-	/* TupleDesc according to GpuProjection */
-	tupdesc_dst = pts->css.ss.ps.scandesc;
 #if PG_VERSION_NUM < 160000
 	/*
 	 * PG16 adds CustomScanState::slotOps to initialize scan-tuple-slot
@@ -1512,7 +1527,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	 * GPU projection returns tuples in heap-format, so we prefer
 	 * TTSOpsHeapTuple, instead of the TTSOpsVirtual.
 	 */
-	ExecInitScanTupleSlot(estate, &pts->css.ss, tupdesc_dst,
+	ExecInitScanTupleSlot(estate, &pts->css.ss,
+						  pts->css.ss.ps.scandesc,
 						  &TTSOpsHeapTuple);
 	ExecAssignScanProjectionInfoWithVarno(&pts->css.ss, INDEX_VAR);
 #endif
@@ -1600,7 +1616,13 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		depth_index++;
 	}
 	Assert(depth_index == pts->num_rels);
-	
+
+	/*
+	 * GPU-Sort needs per-session kds_final buffer.
+	 */
+	if (pp_info->gpusort_keys_expr != 0)
+		pts->xpu_task_flags |= DEVTASK__PINNED_ROW_RESULTS;
+
 	/*
 	 * Setup request buffer
 	 */
@@ -1610,7 +1632,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		pts->cb_next_tuple = pgstromScanNextTuple;
 	    __setupTaskStateRequestBuffer(pts,
 									  NULL,
-									  tupdesc_dst,
 									  KDS_FORMAT_ARROW);
 	}
 	else if (pts->gcache_desc)		/* GPU-Cache */
@@ -1619,7 +1640,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		pts->cb_next_tuple = pgstromScanNextTuple;
 		__setupTaskStateRequestBuffer(pts,
 									  NULL,
-									  tupdesc_dst,
 									  KDS_FORMAT_COLUMN);
 	}
 	else if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0 ||
@@ -1629,7 +1649,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		pts->cb_next_tuple = pgstromScanNextTuple;
 		__setupTaskStateRequestBuffer(pts,
 									  tupdesc_src,
-									  tupdesc_dst,
 									  KDS_FORMAT_BLOCK);
 	}
 	else						/* Slow normal heap storage */
@@ -1638,7 +1657,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		pts->cb_next_tuple = pgstromScanNextTuple;
 		__setupTaskStateRequestBuffer(pts,
 									  tupdesc_src,
-									  tupdesc_dst,
 									  KDS_FORMAT_ROW);
 	}
 
@@ -1687,8 +1705,9 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 
 			if (resp->tag != XpuCommandTag__Success)
 				elog(ERROR, "unknown response tag: %u", resp->tag);
-			if (resp->u.results.final_plan_task)
+			if (resp->u.results.right_outer_join)
 			{
+				Assert(resp->u.results.final_plan_task);
 				ExecFallbackCpuJoinOuterJoinMap(pts, resp);
 				ExecFallbackCpuJoinRightOuter(pts);
 			}
@@ -1801,7 +1820,7 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 {
 	const XpuCommand *session;
 	uint32_t	inner_handle = 0;
-	TupleDesc	kds_final_tupdesc = NULL;
+	TupleDesc	kds_dst_tupdesc = NULL;
 
 	/* attach pgstromSharedState, if none */
 	if (!pts->ps_state)
@@ -1813,9 +1832,8 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 		if (inner_handle == 0)
 			return false;
 	}
-	/* XPU-PreAgg needs tupdesc of kds_final */
-	if ((pts->xpu_task_flags & (DEVTASK__PINNED_HASH_RESULTS |
-								DEVTASK__PINNED_ROW_RESULTS)) != 0)
+	/* Build GPU-Projection / GPU-PreAgg TupleDesc */
+	if (pts->css.ss.ps.scandesc)
 	{
 		CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
 		ListCell   *lc;
@@ -1829,7 +1847,7 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 		 * length of BITMAPLEN(kds->ncols) and may expand the starting
 		 * point of t_hoff for all the tuples.
 		 */
-		kds_final_tupdesc = CreateTupleDescCopy(pts->css.ss.ps.scandesc);
+		kds_dst_tupdesc = CreateTupleDescCopy(pts->css.ss.ps.scandesc);
 		foreach (lc, cscan->custom_scan_tlist)
 		{
 			TargetEntry *tle = lfirst(lc);
@@ -1837,11 +1855,11 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 			if (!tle->resjunk)
 				nvalids = tle->resno;
 		}
-		Assert(nvalids <= kds_final_tupdesc->natts);
-		kds_final_tupdesc->natts = nvalids;
+		Assert(nvalids <= kds_dst_tupdesc->natts);
+		kds_dst_tupdesc->natts = nvalids;
 	}
 	/* build the session information */
-	session = pgstromBuildSessionInfo(pts, inner_handle, kds_final_tupdesc);
+	session = pgstromBuildSessionInfo(pts, inner_handle, kds_dst_tupdesc);
 	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 	{
 		gpuClientOpenSession(pts, session);
@@ -2222,31 +2240,17 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 	}
 	else
 	{
-		int		head = -1;
 		int		base;
 		uint64	count;
 
-		appendStringInfo(&buf, "enabled (N=%d,", numGpuDevAttrs);
+		appendStringInfo(&buf, "enabled (N=%d,", get_bitcount(pts->optimal_gpus));
 		base = buf.len;
 		for (int k=0; k <= numGpuDevAttrs; k++)
 		{
-			if (k < numGpuDevAttrs &&
-				(pts->optimal_gpus & (1UL<<k)) != 0)
+			if ((pts->optimal_gpus & (1UL<<k)) != 0)
 			{
-				if (head < 0)
-				{
-					appendStringInfo(&buf, "%s%d",
-									 buf.len == base ? "GPU" : ",", k);
-					head = k;
-				}
-			}
-			else if (head >= 0)
-			{
-				if (head + 2 == k)
-					appendStringInfo(&buf, ",%d", k-1);
-				else if (head + 2 > k)
-					appendStringInfo(&buf, "-%d", k-1);
-				head = -1;
+				appendStringInfo(&buf, "%s%d",
+								 base == buf.len ? "GPU" : ",", k);
 			}
 		}
 		if (es->analyze && ps_state)
@@ -2435,12 +2439,27 @@ pgstromExplainTaskState(CustomScanState *node,
 			else
 			{
 				uint64_t	next_ntuples;
+				uint64_t	roj_ntuples;
 
 				next_ntuples = pg_atomic_read_u64(&ps_state->inners[i].stats_join);
-				appendStringInfo(&buf, " ... [plan: %.0f -> %.0f, exec: %lu -> %lu]",
-								 ntuples, pp_inner->join_nrows,
-								 stat_ntuples,
-								 next_ntuples);
+				roj_ntuples = pg_atomic_read_u64(&ps_state->inners[i].stats_roj);
+				if (roj_ntuples == 0)
+				{
+					appendStringInfo(&buf,
+									 " ... [plan: %.0f -> %.0f, exec: %lu -> %lu]",
+									 ntuples, pp_inner->join_nrows,
+									 stat_ntuples,
+									 next_ntuples);
+				}
+				else
+				{
+					appendStringInfo(&buf,
+									 " ... [plan: %.0f -> %.0f, exec: %lu+%lu -> %lu]",
+									 ntuples, pp_inner->join_nrows,
+									 stat_ntuples,
+									 roj_ntuples,
+									 next_ntuples);
+				}
 				stat_ntuples = next_ntuples;
 			}
 			switch (pp_inner->join_type)
@@ -2517,6 +2536,33 @@ pgstromExplainTaskState(CustomScanState *node,
 		ExplainPropertyInteger("Inner Siblings-Id", NULL,
 							   pp_info->sibling_param_id, es);
 	/*
+	 * xPU-PreAgg
+	 */
+	if ((pp_info->xpu_task_flags & DEVTASK__PREAGG) != 0)
+	{
+		ListCell   *lc1, *lc2;
+
+		resetStringInfo(&buf);
+		forboth (lc1, pp_info->groupby_actions,
+				 lc2, cscan->custom_scan_tlist)
+		{
+			int		action = lfirst_int(lc1);
+			TargetEntry *tle = lfirst(lc2);
+
+			if (action != KAGG_ACTION__VREF)
+				continue;
+			if (buf.len > 0)
+				appendStringInfoString(&buf, ", ");
+			str = deparse_expression((Node *)tle->expr,
+									 dcontext, verbose, true);
+			appendStringInfoString(&buf, str);
+		}
+		snprintf(label, sizeof(label),
+				 "%s Group Key", xpu_label);
+		ExplainPropertyText(label, buf.data, es);
+	}
+
+	/*
 	 * CPU Fallback
 	 */
 	if (es->analyze && ps_state)
@@ -2579,9 +2625,33 @@ pgstromExplainTaskState(CustomScanState *node,
 		pgstromBrinIndexExplain(pts, dcontext, es);
 
 	/*
+	 * GPU-Sorting
+	 */
+	if (pp_info->gpusort_keys_expr != NIL)
+	{
+		resetStringInfo(&buf);
+		foreach (lc, pp_info->gpusort_keys_expr)
+		{
+			Node   *sortkey = lfirst(lc);
+
+			if (buf.len > 0)
+				appendStringInfoString(&buf, ", ");
+			str = deparse_expression(sortkey, dcontext, verbose, true);
+			appendStringInfoString(&buf, str);
+		}
+		if (pgstrom_explain_developer_mode)
+			appendStringInfo(&buf, " [htup-margin: %d]",
+							 pp_info->gpusort_htup_margin);
+		ExplainPropertyText("GPU-Sort keys", buf.data, es);
+		if (pp_info->gpusort_limit_count > 0)
+			ExplainPropertyInteger("GPU-Sort Limit", NULL,
+								   pp_info->gpusort_limit_count, es);
+	}
+
+	/*
 	 * Dump the XPU code (only if verbose)
 	 */
-	if (es->verbose)
+	if (es->verbose && pgstrom_explain_developer_mode)
 	{
 		pgstrom_explain_kvars_slot(&pts->css, es, dcontext);
 		pgstrom_explain_kvecs_buffer(&pts->css, es, dcontext);
@@ -2618,6 +2688,9 @@ pgstromExplainTaskState(CustomScanState *node,
 		pgstrom_explain_xpucode(&pts->css, es, dcontext,
 								"Partial Aggregation OpCode",
 								pp_info->kexp_groupby_actions);
+		pgstrom_explain_xpucode(&pts->css, es, dcontext,
+								"GPU-Sort KeyDesc OpCode",
+								pp_info->kexp_gpusort_keydesc);
 		pgstrom_explain_fallback_desc(pts, es, dcontext);
 		if (pp_info->groupby_prepfn_bufsz > 0)
 			ExplainPropertyInteger("Partial Function BufSz", NULL,

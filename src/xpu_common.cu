@@ -1098,6 +1098,70 @@ kern_estimate_heaptuple(kern_context *kcxt,
 	return MAXALIGN(offsetof(kern_tupitem, htup) + sz);
 }
 
+/*
+ * kern_fetch_heaptuple_addr
+ */
+PUBLIC_FUNCTION(const void *)
+kern_fetch_heaptuple_attr(kern_context *kcxt,
+						  const kern_data_store *kds,
+						  const kern_tupitem *titem, int anum)
+{
+	const HeapTupleHeaderData *htup = &titem->htup;
+	const uint8_t  *nullmap = NULL;
+	uint32_t		ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
+
+	/* special case if system attribute reference */
+	if (anum < 0)
+	{
+		switch (anum)
+		{
+			case SelfItemPointerAttributeNumber:
+				return &htup->t_ctid;
+			case MinTransactionIdAttributeNumber:
+				return &htup->t_choice.t_heap.t_xmin;
+			case MinCommandIdAttributeNumber:
+			case MaxCommandIdAttributeNumber:
+				return &htup->t_choice.t_heap.t_field3.t_cid;
+			case MaxTransactionIdAttributeNumber:
+				return &htup->t_choice.t_heap.t_xmax;
+			case TableOidAttributeNumber:
+				return &kds->table_oid;
+			default:
+				return NULL;
+		}
+	}
+	/* walk on the user columns */
+	ncols = Min(ncols, kds->ncols);
+	if ((htup->t_infomask & HEAP_HASNULL) != 0)
+		nullmap = htup->t_bits;
+	if (anum > 0 && anum <= ncols)
+	{
+		uint32_t	offset = htup->t_hoff;
+		const char *addr;
+
+		anum--;
+		for (int j=0; j <= anum; j++)
+		{
+			const kern_colmeta *cmeta = &kds->colmeta[j];
+
+			if (nullmap && att_isnull(j, nullmap))
+				continue;
+			if (cmeta->attlen > 0)
+				offset = TYPEALIGN(cmeta->attalign, offset);
+			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
+				offset = TYPEALIGN(cmeta->attalign, offset);
+			addr = ((const char *)htup + offset);
+			if (j == anum)
+				return addr;
+			if (cmeta->attlen > 0)
+				offset += cmeta->attlen;
+			else
+				offset += VARSIZE_ANY(addr);
+		}
+	}
+	return NULL;
+}
+
 STATIC_FUNCTION(bool)
 pgfn_Projection(XPU_PGFUNCTION_ARGS)
 {
@@ -1282,6 +1346,13 @@ STATIC_FUNCTION(bool)
 pgfn_AggFuncs(XPU_PGFUNCTION_ARGS)
 {
 	STROM_ELOG(kcxt, "pgfn_AggFuncs should not be called as a normal kernel expression");
+	return false;
+}
+
+STATIC_FUNCTION(bool)
+pgfn_SortKeys(XPU_PGFUNCTION_ARGS)
+{
+	STROM_ELOG(kcxt, "pgfn_SortKeys should not be called as a normal kernel expression");
 	return false;
 }
 
@@ -1538,6 +1609,60 @@ ExecLoadVarsOuterColumn(kern_context *kcxt,
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		}
 		return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+ExecLoadKeysFromGroupByFinal(kern_context *kcxt,
+							 const kern_data_store *kds_final,
+							 const kern_tupitem *tupitem,
+							 const kern_expression *kexp_groupby_actions)
+{
+	const char *pos = NULL;
+	const uint8_t *nullmap = NULL;
+	int			ncols = 0;
+
+	if (tupitem)
+	{
+		if ((tupitem->htup.t_infomask & HEAP_HASNULL) != 0)
+			nullmap = tupitem->htup.t_bits;
+		ncols = (tupitem->htup.t_infomask2 & HEAP_NATTS_MASK);
+		pos = (const char *)&tupitem->htup + tupitem->htup.t_hoff;
+	}
+	ncols = Min(kds_final->ncols, ncols);
+	for (int j=0; j < kexp_groupby_actions->u.pagg.nattrs; j++)
+	{
+		const kern_aggregate_desc *desc = &kexp_groupby_actions->u.pagg.desc[j];
+		const kern_colmeta *cmeta = &kds_final->colmeta[j];
+
+		if (j >= ncols || (nullmap && att_isnull(j, nullmap)))
+		{
+			if (desc->action == KAGG_ACTION__VREF)
+			{
+				if (!__extract_heap_tuple_attr(kcxt, desc->arg0_slot_id, NULL))
+					return false;
+			}
+		}
+		else
+		{
+			assert(pos != NULL);
+			pos = (char *)TYPEALIGN(cmeta->attalign, pos);
+			if (desc->action == KAGG_ACTION__VREF)
+			{
+				if (!__extract_heap_tuple_attr(kcxt, desc->arg0_slot_id, pos))
+					return false;
+			}
+			if (cmeta->attlen > 0)
+				pos += cmeta->attlen;
+			else if (cmeta->attlen == -1)
+				pos += VARSIZE_ANY(pos);
+			else
+			{
+				STROM_ELOG(kcxt, "unknown attribute length");
+				return false;
+			}
+		}
 	}
 	return true;
 }
@@ -1904,6 +2029,13 @@ restart:
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg_gist, &status))
 		{
 			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+			/*
+			 * XXX - right now, we don't support CPU fallback in the GiST-Join
+			 *       index qualifiers. So, we just rewrite error code to stop
+			 *       execution.
+			 */
+			if (kcxt->errcode == ERRCODE_SUSPEND_FALLBACK)
+				kcxt->errcode = ERRCODE_DEVICE_ERROR;
 			return ULONG_MAX;
 		}
 		/* check result */
@@ -1997,10 +2129,10 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 	kcxt_reset(kcxt);
 	if (!ExecGpuJoinQuals(kcxt, kexp_join, &status))
 	{
-		assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
+		if (!HandleErrorIfCpuFallback(kcxt, depth, 0, false))
+			assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
 		return false;
 	}
-	//XXX - CHECK CPU FALLBACK?
 	return (status > 0);
 }
 
@@ -2680,6 +2812,7 @@ PUBLIC_DATA(xpu_function_catalog_entry, builtin_xpu_functions_catalog[]) = {
 	{FuncOpCode__ScalarArrayOpAll,			pgfn_ScalarArrayOp},
 #include "xpu_opcodes.h"
 	{FuncOpCode__Projection,                pgfn_Projection},
+	{FuncOpCode__SortKeys,					pgfn_SortKeys},
 	{FuncOpCode__LoadVars,                  pgfn_LoadVars},
 	{FuncOpCode__MoveVars,					pgfn_MoveVars},
 	{FuncOpCode__HashValue,                 pgfn_HashValue},
