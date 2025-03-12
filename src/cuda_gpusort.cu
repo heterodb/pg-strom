@@ -811,21 +811,19 @@ kern_gpusort_prep_buffer(kern_session_info *session,
 }
 
 /*
- * kern_windowrank_exec_main
+ * kern_windowrank_exec_row_number
  */
 KERNEL_FUNCTION(void)
-kern_windowrank_exec_main(kern_session_info *session,
-						  kern_gputask *kgtask,
-						  kern_data_store *kds_final,
-						  uint32_t *partition_hash_array,
-						  uint64_t *windowrank_row_index)
+kern_windowrank_exec_row_number(kern_session_info *session,
+								kern_data_store *kds_final,
+								uint32_t *partition_hash_array,
+								uint64_t *windowrank_row_index)
 {
 	const kern_expression *sort_kexp = SESSION_KEXP_GPUSORT_KEYDESC(session);
 	uint32_t   *orderby_hash_array = partition_hash_array + kds_final->nitems;
 	uint32_t   *results_array = orderby_hash_array + kds_final->nitems;
 	uint32_t	index;
 
-	//FIXME - support rank() and dense_rank()
 	assert(sort_kexp->u.sort.window_rank_func == KSORT_WINDOW_FUNC__ROW_NUMBER);
 	for (index = get_global_id();
 		 index < kds_final->nitems;
@@ -859,6 +857,244 @@ kern_windowrank_exec_main(kern_session_info *session,
 }
 
 /*
+ * kern_windowrank_exec_rank
+ */
+KERNEL_FUNCTION(void)
+kern_windowrank_exec_rank(kern_session_info *session,
+						  kern_data_store *kds_final,
+						  uint32_t *partition_hash_array,
+						  uint64_t *windowrank_row_index)
+{
+	const kern_expression *sort_kexp = SESSION_KEXP_GPUSORT_KEYDESC(session);
+	uint32_t   *orderby_hash_array = partition_hash_array + kds_final->nitems;
+	uint32_t   *results_array = orderby_hash_array + kds_final->nitems;
+	uint32_t	index;
+
+	assert(sort_kexp->u.sort.window_rank_func == KSORT_WINDOW_FUNC__RANK);
+	for (index = get_global_id();
+		 index < kds_final->nitems;
+		 index += get_global_size())
+	{
+		uint32_t	my_hash = partition_hash_array[index];
+		uint32_t	start = 0;
+		uint32_t	end = index;
+		uint32_t	part_leader;
+
+		while (start != end)
+		{
+			uint32_t	curr = (start + end) / 2;
+
+			if (partition_hash_array[curr] == my_hash)
+				end = curr;
+			else
+				start = curr + 1;
+		}
+		assert(partition_hash_array[start] == my_hash);
+		part_leader = start;
+		end = index;
+		my_hash = orderby_hash_array[index];
+		while (start != end)
+		{
+			uint32_t	curr = (start + end) / 2;
+
+			if (orderby_hash_array[curr] == my_hash)
+				end = curr;
+			else
+				start = curr + 1;
+		}
+		assert(orderby_hash_array[start] == my_hash);
+		assert(part_leader <= start && start <= index);
+		if (start - part_leader < sort_kexp->u.sort.window_rank_limit - 1)
+		{
+			//printf("RANK-FOUND (%u %u %u) delta=%u %u\n", part_leader, start, index, start - part_leader, index - start);
+			results_array[index] = 1;
+			windowrank_row_index[index] = KDS_GET_ROWINDEX(kds_final)[index];
+		}
+		else
+		{
+			results_array[index] = 0;
+			windowrank_row_index[index] = 0UL;
+		}
+	}
+}
+
+/*
+ * internal APIs to load sorting keys
+ */
+INLINE_FUNCTION(bool)
+__gpusort_load_rawkey(kern_context *kcxt,
+					  const kern_sortkey_desc *sdesc,
+					  const kern_data_store *kds_final,
+					  const kern_tupitem *titem,
+					  xpu_datum_t *xdatum)
+{
+	const void *addr = kern_fetch_heaptuple_attr(kcxt, kds_final,
+												 titem, sdesc->src_anum);
+	if (addr)
+	{
+		const xpu_datum_operators *key_ops = sdesc->key_ops;
+
+		if (key_ops->xpu_datum_heap_read(kcxt, addr, xdatum))
+			return true;
+	}
+	xdatum->expr_ops = NULL;
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+__gpusort_load_pminmax_int64(kern_context *kcxt,
+							 const kern_sortkey_desc *sdesc,
+							 const kern_data_store *kds_final,
+							 const kern_tupitem *titem,
+							 xpu_datum_t *__xdatum)
+{
+	const kagg_state__pminmax_int64_packed *x = (const kagg_state__pminmax_int64_packed *)
+		kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+	assert(sdesc->key_ops == &xpu_int8_ops);
+	if (x && (x->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
+	{
+		xpu_int8_t *xdatum = (xpu_int8_t *)__xdatum;
+		xdatum->expr_ops = &xpu_int8_ops;
+		xdatum->value = x->value;
+	}
+	else
+	{
+		__xdatum->expr_ops = NULL;
+	}
+	return true;
+
+}
+
+INLINE_FUNCTION(bool)
+__gpusort_load_pminmax_fp64(kern_context *kcxt,
+							const kern_sortkey_desc *sdesc,
+							const kern_data_store *kds_final,
+							const kern_tupitem *titem,
+							xpu_datum_t *__xdatum)
+{
+	const kagg_state__pminmax_fp64_packed *x = (const kagg_state__pminmax_fp64_packed *)
+		kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+	assert(sdesc->key_ops == &xpu_float8_ops);
+	if (x && (x->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
+	{
+		xpu_float8_t *xdatum = (xpu_float8_t *)__xdatum;
+		xdatum->expr_ops = &xpu_float8_ops;
+		xdatum->value = x->value;
+	}
+	else
+	{
+		__xdatum->expr_ops = NULL;
+	}
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+__gpusort_load_psum_int64(kern_context *kcxt,
+						  const kern_sortkey_desc *sdesc,
+						  const kern_data_store *kds_final,
+						  const kern_tupitem *titem,
+						  xpu_datum_t *__xdatum)
+{
+	const kagg_state__psum_int_packed *x = (const kagg_state__psum_int_packed *)
+		kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+	assert(sdesc->key_ops == &xpu_int8_ops);
+	if (x && x->nitems > 0)
+	{
+		xpu_int8_t *xdatum = (xpu_int8_t *)__xdatum;
+		xdatum->expr_ops = &xpu_int8_ops;
+		xdatum->value = x->sum;
+	}
+	else
+	{
+		__xdatum->expr_ops = NULL;
+	}
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+__gpusort_load_psum_fp64(kern_context *kcxt,
+						 const kern_sortkey_desc *sdesc,
+						 const kern_data_store *kds_final,
+						 const kern_tupitem *titem,
+						 xpu_datum_t *__xdatum)
+{
+	const kagg_state__psum_fp_packed *x = (const kagg_state__psum_fp_packed *)
+		kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+	assert(sdesc->key_ops == &xpu_float8_ops);
+	if (x && x->nitems > 0)
+	{
+		xpu_float8_t *xdatum = (xpu_float8_t *)__xdatum;
+		xdatum->expr_ops = &xpu_float8_ops;
+		xdatum->value = x->sum;
+	}
+	else
+	{
+		__xdatum->expr_ops = NULL;
+	}
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+__gpusort_load_psum_numeric(kern_context *kcxt,
+							const kern_sortkey_desc *sdesc,
+							const kern_data_store *kds_final,
+							const kern_tupitem *titem,
+							xpu_datum_t *__xdatum)
+{
+	const kagg_state__psum_numeric_packed *x = (const kagg_state__psum_numeric_packed *)
+        kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+	assert(sdesc->key_ops == &xpu_numeric_ops);
+	if (x && x->nitems > 0)
+	{
+		xpu_numeric_t *xdatum = (xpu_numeric_t *)__xdatum;
+		int		special = (x->attrs & __PAGG_NUMERIC_ATTRS__MASK);
+
+		if (special == 0)
+		{
+			xdatum->kind = XPU_NUMERIC_KIND__VALID;
+			xdatum->weight = (int16_t)(x->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+			xdatum->u.value = __fetch_int128_packed(&x->sum);
+		}
+		else if (special == __PAGG_NUMERIC_ATTRS__PINF)
+			xdatum->kind = XPU_NUMERIC_KIND__POS_INF;
+		else if (special == __PAGG_NUMERIC_ATTRS__NINF)
+			xdatum->kind = XPU_NUMERIC_KIND__NEG_INF;
+		else
+			xdatum->kind = XPU_NUMERIC_KIND__NAN;
+		xdatum->expr_ops = &xpu_numeric_ops;
+	}
+	else
+	{
+		__xdatum->expr_ops = NULL;
+	}
+	return true;
+}
+
+INLINE_FUNCTION(bool)
+__gpusort_load_precomp_fp64(kern_context *kcxt,
+							const kern_sortkey_desc *sdesc,
+							const kern_data_store *kds_final,
+							const kern_tupitem *titem,
+							xpu_datum_t *__xdatum)
+{
+	const char *addr = ((char *)&titem->htup + titem->t_len + sdesc->buf_offset);
+	bool		notnull = *addr++;
+
+	assert(sdesc->key_ops == &xpu_float8_ops);
+	if (notnull)
+	{
+		xpu_float8_t *xdatum = (xpu_float8_t *)__xdatum;
+		xdatum->expr_ops = &xpu_float8_ops;
+		memcpy(&xdatum->value, addr, sizeof(float8_t));
+	}
+	else
+	{
+		__xdatum->expr_ops = NULL;
+	}
+	return true;
+}
+
+/*
  * kern_windowrank_prep_hash
  */
 KERNEL_FUNCTION(void)
@@ -868,8 +1104,8 @@ kern_windowrank_prep_hash(kern_session_info *session,
 						  uint32_t *partition_hash_array)
 {
 	const kern_expression *sort_kexp = SESSION_KEXP_GPUSORT_KEYDESC(session);
-	kern_context   *kcxt;
 	uint32_t	   *orderby_hash_array = partition_hash_array + kds_final->nitems;
+	kern_context   *kcxt;
 	uint32_t		index, sz = 0;
 	xpu_datum_t	   *xdatum;
 
@@ -892,6 +1128,8 @@ kern_windowrank_prep_hash(kern_session_info *session,
 	}
 	xdatum = (xpu_datum_t *)alloca(sz);
 
+	assert(sort_kexp->u.sort.window_partby_nkeys > 0);
+	assert(sort_kexp->u.sort.window_orderby_nkeys > 0);
 	for (index = get_global_id();
 		 index < kds_final->nitems;
 		 index += get_global_size())
@@ -899,19 +1137,91 @@ kern_windowrank_prep_hash(kern_session_info *session,
 		kern_tupitem *titem = KDS_GET_TUPITEM(kds_final, index);
 		uint32_t	hash = 0;
 
-		for (int anum=1; anum < sort_kexp->u.sort.nkeys; anum++)
+		for (int anum=1; anum <= sort_kexp->u.sort.nkeys; anum++)
 		{
-			const kern_sortkey_desc	   *sdesc = &sort_kexp->u.sort.desc[anum-1];
+			const kern_sortkey_desc *sdesc = &sort_kexp->u.sort.desc[anum-1];
 			const xpu_datum_operators  *key_ops = sdesc->key_ops;
-			const void *addr;
 			uint32_t	__hash;
 
-			addr = kern_fetch_heaptuple_attr(kcxt,
-											 kds_final,
-											 titem,
-											 sdesc->src_anum);
-			if (!key_ops->xpu_datum_heap_read(kcxt, addr, xdatum) ||
-				!key_ops->xpu_datum_hash(kcxt, &__hash, xdatum))
+			switch (sdesc->kind)
+			{
+				case KSORT_KEY_KIND__VREF:
+					if (!__gpusort_load_rawkey(kcxt,
+											   sdesc,
+											   kds_final,
+											   titem,
+											   xdatum))
+						goto bailout;
+					break;
+				case KSORT_KEY_KIND__PMINMAX_INT64:
+					if (!__gpusort_load_pminmax_int64(kcxt,
+													  sdesc,
+													  kds_final,
+													  titem,
+													  xdatum))
+						goto bailout;
+					break;
+				case KSORT_KEY_KIND__PMINMAX_FP64:
+					if (!__gpusort_load_pminmax_fp64(kcxt,
+													 sdesc,
+													 kds_final,
+													 titem,
+													 xdatum))
+						goto bailout;
+					break;
+				case KSORT_KEY_KIND__PSUM_INT64:
+					if (!__gpusort_load_psum_int64(kcxt,
+												   sdesc,
+												   kds_final,
+												   titem,
+												   xdatum))
+						goto bailout;
+					break;
+				case KSORT_KEY_KIND__PSUM_FP64:
+					if (!__gpusort_load_psum_fp64(kcxt,
+												  sdesc,
+												  kds_final,
+												  titem,
+												  xdatum))
+						goto bailout;
+					break;
+				case KSORT_KEY_KIND__PSUM_NUMERIC:
+					if (!__gpusort_load_psum_numeric(kcxt,
+													 sdesc,
+													 kds_final,
+													 titem,
+													 xdatum))
+                        goto bailout;
+					break;
+				case KSORT_KEY_KIND__PAVG_INT64:
+				case KSORT_KEY_KIND__PAVG_FP64:
+				case KSORT_KEY_KIND__PAVG_NUMERIC:
+				case KSORT_KEY_KIND__PVARIANCE_SAMP:
+				case KSORT_KEY_KIND__PVARIANCE_POP:
+				case KSORT_KEY_KIND__PCOVAR_CORR:
+				case KSORT_KEY_KIND__PCOVAR_SAMP:
+				case KSORT_KEY_KIND__PCOVAR_POP:
+				case KSORT_KEY_KIND__PCOVAR_AVGX:
+				case KSORT_KEY_KIND__PCOVAR_AVGY:
+				case KSORT_KEY_KIND__PCOVAR_COUNT:
+				case KSORT_KEY_KIND__PCOVAR_INTERCEPT:
+				case KSORT_KEY_KIND__PCOVAR_REGR_R2:
+				case KSORT_KEY_KIND__PCOVAR_REGR_SLOPE:
+				case KSORT_KEY_KIND__PCOVAR_REGR_SXX:
+				case KSORT_KEY_KIND__PCOVAR_REGR_SXY:
+				case KSORT_KEY_KIND__PCOVAR_REGR_SYY:
+					if (!__gpusort_load_precomp_fp64(kcxt,
+													 sdesc,
+													 kds_final,
+													 titem,
+													 xdatum))
+						goto bailout;
+					break;
+				default:
+					STROM_ELOG(kcxt, "unknown sorting key kind");
+					goto bailout;
+			}
+			if (!key_ops->xpu_datum_hash(kcxt, &__hash, xdatum))
 				goto bailout;
 			hash = ((hash >> 27) | (hash << 27)) ^ __hash;
 			if (anum == sort_kexp->u.sort.window_partby_nkeys)
