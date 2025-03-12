@@ -221,6 +221,176 @@ PGSTROM_LOCAL_MINMAX_TEMPLATE(min_fp64, float8_t, fp64, Min,  DBL_MAX)
 PGSTROM_LOCAL_MINMAX_TEMPLATE(max_fp64, float8_t, fp64, Max, -DBL_MAX)
 PGSTROM_LOCAL_MINMAX_TEMPLATE(or_uint32, uint32_t, u32, Or, 0)
 
+/*
+ * pgstrom_global_stair_sum_u32
+ *
+ * nitems <= 2^11 : 1-step
+ * nitems <= 2^22 : 2-step
+ * nitems <= 2^33 : 3-step
+ */
+template <typename T>
+INLINE_FUNCTION(void)
+__stair_sum_warp_common64(T &value0, T &value1)
+{
+	T	temp;
+
+	value1 += value0;
+
+	assert(__activemask() == ~0U);
+	temp = __shfl_sync(__activemask(), value1, (LaneId() & ~0x01));
+	if ((LaneId() & 0x01) != 0)
+	{
+		value0 += temp;
+		value1 += temp;
+	}
+	temp = __shfl_sync(__activemask(), value1, (LaneId() & ~0x03) | 0x01);
+	if ((LaneId() & 0x02) != 0)
+	{
+		value0 += temp;
+		value1 += temp;
+	}
+	temp = __shfl_sync(__activemask(), value1, (LaneId() & ~0x07) | 0x03);
+	if ((LaneId() & 0x04) != 0)
+	{
+		value0 += temp;
+		value1 += temp;
+	}
+	temp = __shfl_sync(__activemask(), value1, (LaneId() & ~0x0f) | 0x07);
+	if ((LaneId() & 0x08) != 0)
+	{
+		value0 += temp;
+		value1 += temp;
+	}
+	temp = __shfl_sync(__activemask(), value1, (LaneId() & ~0x1f) | 0x0f);
+	if ((LaneId() & 0x10) != 0)
+	{
+		value0 += temp;
+		value1 += temp;
+	}
+}
+
+KERNEL_FUNCTION(void)
+kern_global_stair_sum_u32(uint32_t *values, uint32_t nitems, uint32_t step)
+{
+	uint32_t   *upper;
+	uint32_t	upper_nitems;
+	uint32_t	reverse;
+
+	assert(get_local_size() == 512 && __activemask() == ~0U);
+	if (nitems <= (1U<<11))			/* <= 2048 */
+	{
+		upper = values + nitems;
+		upper_nitems = 1;
+		if (step > 0)
+			return;		/* nothing to do */
+		reverse = 0;
+	}
+	else if (nitems <= (1U<<22))	/* <= 4194304 */
+	{
+		upper = values + nitems;
+		upper_nitems = (nitems + 2047) >> 11;
+		if (step == 1)
+		{
+			values = upper;
+			nitems = upper_nitems;
+			upper = values + nitems;
+			upper_nitems = 1;
+		}
+		else if (step > 2)
+			return;		/* nothing to do */
+		reverse = 1;
+	}
+	else
+	{
+		upper = values + nitems;
+		upper_nitems = (nitems + 2047) >> 11;
+		if (step >= 1 && step <= 3)
+		{
+			values = upper;
+			nitems = upper_nitems;
+			upper = values + nitems;
+			upper_nitems = (nitems + 2047) >> 11;
+			if (step == 2)
+			{
+				values = upper;
+				nitems = upper_nitems;
+				upper = values + nitems;
+				upper_nitems = 1;
+			}
+		}
+		else if (step > 4)
+			return;		/* nothing to do */
+		reverse = 2;
+	}
+	/* run the main stair-like sum */
+	if (step <= reverse)
+	{
+		uint32_t	group_id;
+
+		for (group_id = get_group_id();
+			 (group_id << 11) < nitems;
+			 group_id += get_num_groups())
+		{
+			uint32_t	warp_id0 = get_local_id() / warpSize;
+			uint32_t	warp_id1 = warp_id0 + (get_local_size() / warpSize);
+			uint32_t	index0 = (group_id << 11) + 2 * get_local_id();
+			uint32_t	index1 = index0 + 2 * get_local_size();
+			uint32_t	x0, y0, x1, y1, temp;
+
+			/* calculation of the first half */
+			x0 = (index0   < nitems ? values[index0]   : 0);
+			y0 = (index0+1 < nitems ? values[index0+1] : 0);
+			__stair_sum_warp_common64(x0, y0);
+			if (LaneId() == warpSize-1)
+				__stair_sum_buffer.u32[warp_id0] = y0;
+			/* calculation of the second half */
+			x1 = (index1   < nitems ? values[index1]   : 0);
+			y1 = (index1+1 < nitems ? values[index1+1] : 0);
+			__stair_sum_warp_common64(x1, y1);
+			if (LaneId() == warpSize-1)
+				__stair_sum_buffer.u32[warp_id1] = y1;
+			/* summarization of the 32 items */
+			__syncthreads();
+			if (get_local_id() < warpSize)
+			{
+				temp = __stair_sum_buffer.u32[LaneId()];
+				__stair_sum_buffer.u32[LaneId()] = __stair_sum_warp_common(temp);
+			}
+			__syncthreads();
+			temp = (warp_id0 > 0 ? __stair_sum_buffer.u32[warp_id0-1] : 0);
+			x0 += temp;
+			y0 += temp;
+			temp = (warp_id1 > 0 ? __stair_sum_buffer.u32[warp_id1-1] : 0);
+			x1 += temp;
+			y1 += temp;
+			/* write back results */
+			if (index0 < nitems)
+				values[index0] = x0;
+			if (index0+1 < nitems)
+				values[index0+1] = y0;
+			if (index1 < nitems)
+				values[index1] = x1;
+			if (index1+1 < nitems)
+				values[index1+1] = y1;
+			assert(group_id < upper_nitems);
+			if (get_local_id()+1 == get_local_size())
+				upper[group_id] = y1;
+		}
+	}
+	if (step >= reverse)
+	{
+		uint32_t	index;
+
+		for (index = get_global_id(); index < nitems; index += get_global_size())
+		{
+			uint32_t	upper_id = (index >> 11);
+
+			if (upper_id > 0)
+				values[index] += upper[upper_id-1];
+		}
+	}
+}
+
 /* ----------------------------------------------------------------
  *
  * execGpuScanLoadSource and related

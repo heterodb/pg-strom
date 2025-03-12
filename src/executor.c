@@ -2646,7 +2646,7 @@ pgstromExplainTaskState(CustomScanState *node,
 		if (pp_info->gpusort_limit_count > 0)
 			ExplainPropertyInteger("GPU-Sort Limit", NULL,
 								   pp_info->gpusort_limit_count, es);
-		if (pp_info->window_rank_func != FuncOpCode__Invalid)
+		if (pp_info->window_rank_func)
 		{
 			int		keycnt = 0;
 			bool	needs_comma = false;
@@ -2654,13 +2654,13 @@ pgstromExplainTaskState(CustomScanState *node,
 			resetStringInfo(&buf);
 			switch (pp_info->window_rank_func)
 			{
-				case FuncOpCode__WindowFuncRowNumber:
+				case KSORT_WINDOW_FUNC__ROW_NUMBER:
 					appendStringInfo(&buf, "row_number() over(");
 					break;
-				case FuncOpCode__WindowFuncRank:
+				case KSORT_WINDOW_FUNC__RANK:
 					appendStringInfo(&buf, "rank() over(");
 					break;
-				case FuncOpCode__WindowFuncDenseRank:
+				case KSORT_WINDOW_FUNC__DENSE_RANK:
 					appendStringInfo(&buf, "dense_rank() over(");
 					break;
 				default:

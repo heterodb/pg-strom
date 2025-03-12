@@ -809,3 +809,183 @@ kern_gpusort_prep_buffer(kern_session_info *session,
 			KDS_GET_ROWINDEX(kds_final)[index] = NULL;
 	}
 }
+
+/*
+ * kern_windowrank_exec_main
+ */
+KERNEL_FUNCTION(void)
+kern_windowrank_exec_main(kern_session_info *session,
+						  kern_gputask *kgtask,
+						  kern_data_store *kds_final,
+						  uint32_t *partition_hash_array,
+						  uint64_t *windowrank_row_index)
+{
+	const kern_expression *sort_kexp = SESSION_KEXP_GPUSORT_KEYDESC(session);
+	uint32_t   *orderby_hash_array = partition_hash_array + kds_final->nitems;
+	uint32_t   *results_array = orderby_hash_array + kds_final->nitems;
+	uint32_t	index;
+
+	//FIXME - support rank() and dense_rank()
+	assert(sort_kexp->u.sort.window_rank_func == KSORT_WINDOW_FUNC__ROW_NUMBER);
+	for (index = get_global_id();
+		 index < kds_final->nitems;
+		 index += get_global_size())
+	{
+		uint32_t	my_hash = partition_hash_array[index];
+		uint32_t	start = 0;
+		uint32_t	end = index;
+
+		while (start != end)
+		{
+			uint32_t	curr = (start + end) / 2;
+
+			if (partition_hash_array[curr] == my_hash)
+				end = curr;
+			else
+				start = curr + 1;
+		}
+		assert(partition_hash_array[start] == my_hash);
+		if (index - start < sort_kexp->u.sort.window_rank_limit - 1)
+		{
+			results_array[index] = 1;
+			windowrank_row_index[index] = KDS_GET_ROWINDEX(kds_final)[index];
+		}
+		else
+		{
+			results_array[index] = 0;
+			windowrank_row_index[index] = 0UL;
+		}
+	}
+}
+
+/*
+ * kern_windowrank_prep_hash
+ */
+KERNEL_FUNCTION(void)
+kern_windowrank_prep_hash(kern_session_info *session,
+						  kern_gputask *kgtask,
+						  kern_data_store *kds_final,
+						  uint32_t *partition_hash_array)
+{
+	const kern_expression *sort_kexp = SESSION_KEXP_GPUSORT_KEYDESC(session);
+	kern_context   *kcxt;
+	uint32_t	   *orderby_hash_array = partition_hash_array + kds_final->nitems;
+	uint32_t		index, sz = 0;
+	xpu_datum_t	   *xdatum;
+
+	/* save the GPU-Task specific read-only properties */
+	if (get_local_id() == 0)
+	{
+		stromTaskProp__cuda_dindex        = kgtask->cuda_dindex;
+		stromTaskProp__cuda_stack_limit   = kgtask->cuda_stack_limit;
+		stromTaskProp__partition_divisor  = kgtask->partition_divisor;
+		stromTaskProp__partition_reminder = kgtask->partition_reminder;
+	}
+	/* setup execution context */
+	INIT_KERNEL_CONTEXT(kcxt, session, NULL);
+	/* allocation of xdatum */
+	for (int j=0; j < sort_kexp->u.sort.nkeys; j++)
+	{
+		const kern_sortkey_desc *sdesc = &sort_kexp->u.sort.desc[j];
+
+		sz = Max(sdesc->key_ops->xpu_type_sizeof, sz);
+	}
+	xdatum = (xpu_datum_t *)alloca(sz);
+
+	for (index = get_global_id();
+		 index < kds_final->nitems;
+		 index += get_global_size())
+	{
+		kern_tupitem *titem = KDS_GET_TUPITEM(kds_final, index);
+		uint32_t	hash = 0;
+
+		for (int anum=1; anum < sort_kexp->u.sort.nkeys; anum++)
+		{
+			const kern_sortkey_desc	   *sdesc = &sort_kexp->u.sort.desc[anum-1];
+			const xpu_datum_operators  *key_ops = sdesc->key_ops;
+			const void *addr;
+			uint32_t	__hash;
+
+			addr = kern_fetch_heaptuple_attr(kcxt,
+											 kds_final,
+											 titem,
+											 sdesc->src_anum);
+			if (!key_ops->xpu_datum_heap_read(kcxt, addr, xdatum) ||
+				!key_ops->xpu_datum_hash(kcxt, &__hash, xdatum))
+				goto bailout;
+			hash = ((hash >> 27) | (hash << 27)) ^ __hash;
+			if (anum == sort_kexp->u.sort.window_partby_nkeys)
+				partition_hash_array[index] = hash;
+			if (anum == (sort_kexp->u.sort.window_partby_nkeys +
+						 sort_kexp->u.sort.window_orderby_nkeys))
+			{
+				orderby_hash_array[index] = hash;
+				break;
+			}
+		}
+	}
+bailout:
+	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
+}
+
+/*
+ * kern_windowrank_finalize
+ */
+KERNEL_FUNCTION(void)
+kern_windowrank_finalize(kern_data_store *kds_final,
+						 uint64_t old_length,
+						 uint32_t old_nitems,
+						 const uint32_t *results_array,
+						 const uint64_t *windowrank_row_index)
+{
+	uint64_t	__nrooms = GPUSORT_WINDOWRANK_RESULTS_NROOMS(old_nitems);
+	uint32_t	new_nitems = (__nrooms > 0 ? results_array[__nrooms-1] : 0);
+	uint32_t	base;
+	__shared__ uint64_t base_usage;
+
+	for (base = get_global_base();
+		 base < old_nitems;
+		 base += get_global_size())
+	{
+		const kern_tupitem *titem = NULL;
+		uint32_t	index = base + get_local_id();
+		uint32_t	tupsz = 0;
+		uint64_t	offset;
+		uint64_t	total_sz;
+
+		if (index < old_nitems && windowrank_row_index[index] != 0)
+		{
+			titem = (const kern_tupitem *)
+				((char *)kds_final
+				 + old_length
+				 - windowrank_row_index[index]);
+			tupsz = MAXALIGN(offsetof(kern_tupitem, htup) + titem->t_len);
+		}
+		/* allocation of the destination buffer */
+		offset = pgstrom_stair_sum_uint64(tupsz, &total_sz);
+		if (get_local_id() == 0)
+			base_usage = __atomic_add_uint64(&kds_final->usage,  total_sz);
+		__syncthreads();
+		/* put tuples on the destination */
+		offset += base_usage;
+		if (tupsz > 0)
+		{
+			kern_tupitem   *__titem = (kern_tupitem *)
+				((char *)kds_final + kds_final->length - offset);
+			uint32_t		__index = results_array[index] - 1;
+
+			assert(__index < new_nitems);
+			__titem->rowid = __index;
+			__titem->t_len = titem->t_len;
+			memcpy(&__titem->htup, &titem->htup, titem->t_len);
+			assert(offsetof(kern_tupitem, htup) + titem->t_len <= tupsz);
+			__threadfence();
+			KDS_GET_ROWINDEX(kds_final)[__index] = ((char *)kds_final
+													+ kds_final->length
+													- (char *)__titem);
+		}
+		__syncthreads();
+	}
+	if (get_global_id() == 0)
+		kds_final->nitems = new_nitems;
+}

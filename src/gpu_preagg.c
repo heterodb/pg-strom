@@ -2623,7 +2623,7 @@ __attachGpuSortWithWindowRankPath(PlannerInfo *root,
 								  CustomPath *cpath)
 {
 	pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
-	FuncOpCode	window_func = FuncOpCode__Invalid;
+	int			window_func = 0;
 	int64_t		window_limit = -1;
 	int			window_partby_nkeys = 0;
 	int			window_orderby_nkeys = 0;
@@ -2693,19 +2693,19 @@ __attachGpuSortWithWindowRankPath(PlannerInfo *root,
 
 		if (IsA(func, WindowFunc) && IsA(con, Const) && !con->constisnull)
 		{
-			FuncOpCode	__window_func;
+			int			__window_func;
 			int64_t		__window_limit;
 
 			switch (func->winfnoid)
 			{
 				case F_ROW_NUMBER:
-					__window_func = FuncOpCode__WindowFuncRowNumber;
+					__window_func = KSORT_WINDOW_FUNC__ROW_NUMBER;
 					break;
 				case F_RANK_:
-					__window_func = FuncOpCode__WindowFuncRank;
+					__window_func = KSORT_WINDOW_FUNC__RANK;
 					break;
 				case F_DENSE_RANK_:
-					__window_func = FuncOpCode__WindowFuncDenseRank;
+					__window_func = KSORT_WINDOW_FUNC__DENSE_RANK;
 					break;
 				default:
 					goto skip;
@@ -2746,7 +2746,7 @@ __attachGpuSortWithWindowRankPath(PlannerInfo *root,
 				}
 			}
 
-			if (window_func == FuncOpCode__Invalid)
+			if (window_func == 0)
 			{
 				window_func  = __window_func;
 				window_limit = __window_limit;
@@ -2766,7 +2766,7 @@ __attachGpuSortWithWindowRankPath(PlannerInfo *root,
 		;
 	}
 
-	if (window_func != FuncOpCode__Invalid)
+	if (window_func)
 	{
 		double	ngroups;
 		double	nrows;
