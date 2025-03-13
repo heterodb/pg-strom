@@ -829,10 +829,11 @@ kern_windowrank_exec_row_number(kern_session_info *session,
 		 index < kds_final->nitems;
 		 index += get_global_size())
 	{
-		uint32_t	my_hash = partition_hash_array[index];
 		uint32_t	start = 0;
 		uint32_t	end = index;
+		uint32_t	my_hash;
 
+		my_hash = partition_hash_array[index];
 		while (start != end)
 		{
 			uint32_t	curr = (start + end) / 2;
@@ -875,11 +876,12 @@ kern_windowrank_exec_rank(kern_session_info *session,
 		 index < kds_final->nitems;
 		 index += get_global_size())
 	{
-		uint32_t	my_hash = partition_hash_array[index];
 		uint32_t	start = 0;
 		uint32_t	end = index;
+		uint32_t	my_hash;
 		uint32_t	part_leader;
 
+		my_hash = partition_hash_array[index];
 		while (start != end)
 		{
 			uint32_t	curr = (start + end) / 2;
@@ -914,6 +916,77 @@ kern_windowrank_exec_rank(kern_session_info *session,
 		{
 			results_array[index] = 0;
 			windowrank_row_index[index] = 0UL;
+		}
+	}
+}
+
+/*
+ * kern_windowrank_exec_dense_rank
+ */
+KERNEL_FUNCTION(void)
+kern_windowrank_exec_dense_rank(kern_session_info *session,
+								kern_data_store *kds_final,
+								uint32_t *partition_hash_array,
+								uint64_t *windowrank_row_index,
+								int phase)
+{
+	const kern_expression *sort_kexp = SESSION_KEXP_GPUSORT_KEYDESC(session);
+	uint32_t   *orderby_hash_array = partition_hash_array + kds_final->nitems;
+	uint32_t   *results_array = orderby_hash_array + kds_final->nitems;
+	uint32_t	index;
+
+	assert(sort_kexp->u.sort.window_rank_func == KSORT_WINDOW_FUNC__DENSE_RANK);
+	for (index = get_global_id();
+		 index < kds_final->nitems;
+		 index += get_global_size())
+	{
+		if (phase == 0)
+		{
+			if (index == 0 ||
+				partition_hash_array[index] != partition_hash_array[index-1] ||
+				orderby_hash_array[index] != orderby_hash_array[index-1])
+			{
+				results_array[index] = 1;
+			}
+			else
+			{
+				results_array[index] = 0;
+			}
+		}
+		else if (phase == 1)
+		{
+			uint32_t	start = 0;
+			uint32_t	end = index;
+			uint32_t	my_hash = partition_hash_array[index];;
+
+			while (start != end)
+			{
+				uint32_t	curr = (start + end) / 2;
+
+				if (partition_hash_array[curr] == my_hash)
+					end = curr;
+				else
+					start = curr + 1;
+			}
+			assert(start <= index);
+			assert(partition_hash_array[start] == my_hash);
+			if (results_array[index] -
+				results_array[start] < sort_kexp->u.sort.window_rank_limit - 1)
+			{
+				windowrank_row_index[index] = KDS_GET_ROWINDEX(kds_final)[index];
+			}
+			else
+			{
+				windowrank_row_index[index] = 0UL;
+			}
+		}
+		else if (phase == 2)
+		{
+			results_array[index] = (windowrank_row_index[index] != 0UL);
+		}
+		else
+		{
+			break;		/* should not happen */
 		}
 	}
 }
