@@ -345,9 +345,9 @@ typedef struct {
  */
 #define GPUSORT_WINDOWRANK_RESULTS_NROOMS(nitems)						\
 	((nitems) +															\
-	 ((nitems) > (2<<11) ? (((nitems) + ((2<<11)-1)) >> 11) : 0) +		\
-	 ((nitems) > (2<<22) ? (((nitems) + ((2<<22)-1)) >> 22) : 0))
+	 ((nitems) > (1<<11) ? (((nitems) + ((1<<11)-1)) >> 11) : 0) +		\
+	 ((nitems) > (1<<22) ? (((nitems) + ((1<<22)-1)) >> 22) : 0))
 #define GPUSORT_WINDOWRANK_RESULTS_NSTEPS(nitems)						\
-	((nitems) <= (2<<11) ? 1 : ((nitems) <= (2<<22) ? 3 : 5))
+	((nitems) <= (1<<11) ? 1 : ((nitems) <= (1<<22) ? 3 : 5))
 
 #endif	/* CUDA_COMMON_H */

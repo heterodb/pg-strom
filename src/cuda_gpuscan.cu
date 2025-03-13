@@ -385,6 +385,7 @@ kern_global_stair_sum_u32(uint32_t *values, uint32_t nitems, uint32_t step)
 		{
 			uint32_t	upper_id = (index >> 11);
 
+			assert(upper_id < upper_nitems);
 			if (upper_id > 0)
 				values[index] += upper[upper_id-1];
 		}
