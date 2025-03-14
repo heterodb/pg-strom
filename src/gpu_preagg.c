@@ -251,7 +251,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"max(float8)",
 	 "s:max_f8(bytea)",
 	 "s:pmax(float8)",
-	 "s:fmax_f84(bytea)",
+	 "s:fmax_f8(bytea)",
 	 KAGG_ACTION__PMAX_FP64, false,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
