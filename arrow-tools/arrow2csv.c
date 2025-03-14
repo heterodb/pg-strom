@@ -1139,8 +1139,6 @@ setupArrowColumn(arrowColumn *column, ArrowField *field, int buffer_index)
 					Elog("custom-metadata pg_type=%s is only supported with Arrow::Binary or Arrow::LargeBinary", kv->value);
 				pg_type = "cube";
 			}
-			else
-				Elog("unknown 'pg_type' custom-metadata [%s]", kv->value);
 		}
 	}
 
