@@ -1174,9 +1174,6 @@ pgstrom_license_query(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(DirectFunctionCall1(json_in, PointerGetDatum(license)));
 }
 
-/* GUC: heterodb_extra.ereport_level */
-int		heterodb_extra_ereport_level;
-
 /*
  * pgstrom_init_extra
  */

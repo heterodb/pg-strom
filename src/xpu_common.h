@@ -2315,6 +2315,10 @@ typedef struct
 #define KSORT_KEY_KIND__PCOVAR_REGR_SYY		22
 #define KSORT_KEY_KIND__NITEMS				23
 
+#define KSORT_WINDOW_FUNC__ROW_NUMBER		'n'
+#define KSORT_WINDOW_FUNC__RANK				'r'
+#define KSORT_WINDOW_FUNC__DENSE_RANK		'd'
+
 typedef struct
 {
 	uint16_t	kind;			/* any of KSORT_KEY_KIND__* */
@@ -2450,6 +2454,10 @@ struct kern_expression
 		struct {
 			int			nkeys;
 			bool		needs_finalization;
+			char		window_rank_func;		/* one of KSORT_WINDOW_FUNC__* */
+			uint32_t	window_rank_limit;		/* rank() limit, if any */
+			uint16_t	window_partby_nkeys;	/* # of partition keys */
+			uint16_t	window_orderby_nkeys;	/* # of order-by keys */
 			kern_sortkey_desc desc[1];
 		} sort;		/* Sort */
 		struct {

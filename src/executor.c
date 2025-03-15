@@ -2646,6 +2646,59 @@ pgstromExplainTaskState(CustomScanState *node,
 		if (pp_info->gpusort_limit_count > 0)
 			ExplainPropertyInteger("GPU-Sort Limit", NULL,
 								   pp_info->gpusort_limit_count, es);
+		if (pp_info->window_rank_func)
+		{
+			int		keycnt = 0;
+			bool	needs_comma = false;
+
+			resetStringInfo(&buf);
+			switch (pp_info->window_rank_func)
+			{
+				case KSORT_WINDOW_FUNC__ROW_NUMBER:
+					appendStringInfo(&buf, "row_number() over(");
+					break;
+				case KSORT_WINDOW_FUNC__RANK:
+					appendStringInfo(&buf, "rank() over(");
+					break;
+				case KSORT_WINDOW_FUNC__DENSE_RANK:
+					appendStringInfo(&buf, "dense_rank() over(");
+					break;
+				default:
+					appendStringInfo(&buf, "?unknown?() over(");
+					break;
+			}
+			foreach (lc, pp_info->gpusort_keys_expr)
+			{
+				Node   *sortkey = lfirst(lc);
+
+				if (keycnt == 0)
+				{
+					appendStringInfo(&buf, "PARTITION BY");
+					needs_comma = false;
+				}
+				if (keycnt == pp_info->window_partby_nkeys)
+				{
+					appendStringInfo(&buf, " ORDER BY");
+					needs_comma = false;
+				}
+				else if (keycnt >= (pp_info->window_partby_nkeys +
+									pp_info->window_orderby_nkeys))
+				{
+					break;
+				}
+				str = deparse_expression(sortkey,
+										 dcontext,
+										 verbose, true);
+				if (needs_comma)
+					appendStringInfoChar(&buf, ',');
+				appendStringInfo(&buf, " %s", str);
+				keycnt++;
+				needs_comma = true;
+			}
+			appendStringInfo(&buf, ") < %u", pp_info->window_rank_limit);
+
+			ExplainPropertyText("Window-Rank Filter", buf.data, es);
+		}
 	}
 
 	/*

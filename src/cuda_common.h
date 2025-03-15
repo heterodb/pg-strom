@@ -330,4 +330,24 @@ typedef struct {
 	uint32_t		redo_items[1];
 } kern_gpucache_redolog;
 
+/*
+ * GPU-Sort + Window-Rank function control structure
+ *
+ * +-------------------------------+
+ * | Partition-Hash (u32) * NITEMS |
+ * +-------------------------------+
+ * | OrderBy-Hash (u32) * NITEMS   |
+ * +-------------------------------+
+ * | Results Array * (NITEMS +...) |
+ * =                               =
+ * |                               |
+ * +-------------------------------+
+ */
+#define GPUSORT_WINDOWRANK_RESULTS_NROOMS(nitems)						\
+	((nitems) +															\
+	 ((nitems) > (1<<11) ? (((nitems) + ((1<<11)-1)) >> 11) : 0) +		\
+	 ((nitems) > (1<<22) ? (((nitems) + ((1<<22)-1)) >> 22) : 0))
+#define GPUSORT_WINDOWRANK_RESULTS_NSTEPS(nitems)						\
+	((nitems) <= (1<<11) ? 1 : ((nitems) <= (1<<22) ? 3 : 5))
+
 #endif	/* CUDA_COMMON_H */

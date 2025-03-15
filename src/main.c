@@ -141,6 +141,18 @@ pgstrom_init_gucs(void)
  * add/remove dummy plan node
  *
  * -------------------------------------------------------------------------------- */
+bool
+pgstrom_is_dummy_path(const Path *path)
+{
+	if (IsA(path, CustomPath))
+	{
+		const CustomPath *cpath = (const CustomPath *)path;
+
+		return (cpath->methods == &pgstrom_dummy_path_methods);
+	}
+	return false;
+}
+
 Path *
 pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath)
 {
