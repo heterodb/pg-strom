@@ -80,4 +80,17 @@ typedef Node *(*tree_mutator_callback) (Node *node, void *context);
 	brinGetTupleForHeapBlock((a),(b),(c),(d),(e),(f), estate->es_snapshot)
 #endif
 
+/*
+ * MEMO: PostgreSQL v17 adds 'runCondition' to the create_windowagg_path().
+ * It had been attached from WindowClause later on the Path -> Plan
+ * tranformation phase. (So, WindowAggPath does not have 'runCondition').
+ */
+#if PG_VERSION_NUM < 170000
+#define create_windowagg_path(a,b,c,d,e,f,g,h,i)	\
+	create_windowagg_path((a),(b),(c),(d),(e),(g),(h),(i))
+#define __windowAggPathGetRunCondition(wpath)	((wpath)->winclause->runCondition)
+#else
+#define __windowAggPathGetRunCondition(wpath)	((wpath)->runCondition)
+#endif
+
 #endif	/* PG_COMPAT_H */
