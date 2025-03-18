@@ -120,5 +120,6 @@ extern bool			heterodbExtraCloudGetVMInfo(const char *cloud_name,
 												const char **p_vm_type,
 												const char **p_vm_image,
 												const char **p_vm_ident);
+extern const char  *heterodbExtraCloudGetSignature(void);
 extern const char  *heterodb_extra_init_module(const char *__extra_pathname);
 #endif	/* HETERODB_EXTRA_H */
