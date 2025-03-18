@@ -1634,7 +1634,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  NULL,
 									  KDS_FORMAT_ARROW);
 	}
-	else if (pts->gcache_desc)		/* GPU-Cache */
+	else if (pts->gcache_desc)	/* GPU-Cache */
 	{
 		pts->cb_next_chunk = pgstromScanChunkGpuCache;
 		pts->cb_next_tuple = pgstromScanNextTuple;
@@ -1642,8 +1642,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  NULL,
 									  KDS_FORMAT_COLUMN);
 	}
-	else if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0 ||
-			 pts->ds_entry)
+	else						/* GPU-Direct (incl. VFS fallback) */
 	{
 		pts->cb_next_chunk = pgstromRelScanChunkDirect;
 		pts->cb_next_tuple = pgstromScanNextTuple;
@@ -1651,15 +1650,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  tupdesc_src,
 									  KDS_FORMAT_BLOCK);
 	}
-	else						/* Slow normal heap storage */
-	{
-		pts->cb_next_chunk = pgstromRelScanChunkNormal;
-		pts->cb_next_tuple = pgstromScanNextTuple;
-		__setupTaskStateRequestBuffer(pts,
-									  tupdesc_src,
-									  KDS_FORMAT_ROW);
-	}
-
 	/*
 	 * workload specific callback routines
 	 */
@@ -2231,57 +2221,65 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 						ExplainState *es, List *dcontext)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	StringInfoData		buf;
+	StringInfoData buf;
+	int			n_gpus;
+	int			base;
+	uint64		count;
 
 	initStringInfo(&buf);
 	if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) == 0)
-	{
-		appendStringInfo(&buf, "disabled");
-	}
+		appendStringInfo(&buf, "VFS");
 	else
-	{
-		int		base;
-		uint64	count;
+		appendStringInfo(&buf, "GPU-Direct");
 
-		appendStringInfo(&buf, "enabled (N=%d,", get_bitcount(pts->optimal_gpus));
-		base = buf.len;
-		for (int k=0; k <= numGpuDevAttrs; k++)
+	n_gpus = get_bitcount(pts->optimal_gpus);
+	base = buf.len;
+	for (int k=0; k < numGpuDevAttrs; k++)
+	{
+		if ((pts->optimal_gpus & (1UL<<k)) != 0)
 		{
-			if ((pts->optimal_gpus & (1UL<<k)) != 0)
+			if (n_gpus > 1)
 			{
-				appendStringInfo(&buf, "%s%d",
-								 base == buf.len ? "GPU" : ",", k);
+				if (base == buf.len)
+					appendStringInfo(&buf, " with %d GPUs <%d", n_gpus, k);
+				else
+					appendStringInfo(&buf, ",%d", k);
+			}
+			else
+			{
+				appendStringInfo(&buf, " with GPU%d", k);
+				break;
 			}
 		}
-		if (es->analyze && ps_state)
-		{
-			base = buf.len;
+		if (n_gpus > 1)
+			appendStringInfo(&buf, ">");
+	}
+	if (es->analyze && ps_state)
+	{
+		base = buf.len;
 
-			count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
-			if (count)
-				appendStringInfo(&buf, "%sbuffer=%lu",
-								 (buf.len > base ? ", " : "; "),
-								 count / PAGES_PER_BLOCK);
-			count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
-			if (count)
-				appendStringInfo(&buf, "%svfs=%lu",
-								 (buf.len > base ? ", " : "; "),
-								 count / PAGES_PER_BLOCK);
-			count = pg_atomic_read_u64(&ps_state->npages_direct_read);
-			if (count)
-				appendStringInfo(&buf, "%sdirect=%lu",
-								 (buf.len > base ? ", " : "; "),
-								 count / PAGES_PER_BLOCK);
-			count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
-			appendStringInfo(&buf, "%sntuples=%lu",
+		count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
+		if (count)
+			appendStringInfo(&buf, "%sbuffer=%lu",
 							 (buf.len > base ? ", " : "; "),
-							 count);
-		}
-		appendStringInfo(&buf, ")");
+							 count / PAGES_PER_BLOCK);
+		count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
+		if (count)
+			appendStringInfo(&buf, "%svfs=%lu",
+							 (buf.len > base ? ", " : "; "),
+							 count / PAGES_PER_BLOCK);
+		count = pg_atomic_read_u64(&ps_state->npages_direct_read);
+		if (count)
+			appendStringInfo(&buf, "%sdirect=%lu",
+							 (buf.len > base ? ", " : "; "),
+							 count / PAGES_PER_BLOCK);
+		count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
+		appendStringInfo(&buf, "%sntuples=%lu",
+						 (buf.len > base ? ", " : "; "),
+						 count);
 	}
 	if (!pgstrom_regression_test_mode)
-		ExplainPropertyText("GPU-Direct SQL", buf.data, es);
-
+		ExplainPropertyText("Read-engine", buf.data, es);
 	pfree(buf.data);
 }
 
@@ -2606,11 +2604,6 @@ pgstromExplainTaskState(CustomScanState *node,
 		/* GPU-Cache */
 		pgstromGpuCacheExplain(pts, es, dcontext);
 	}
-	else if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0)
-	{
-		/* GPU-Direct */
-		pgstromGpuDirectExplain(pts, es, dcontext);
-	}
 	else if (pts->ds_entry)
 	{
 		/* DPU-Entry */
@@ -2618,7 +2611,8 @@ pgstromExplainTaskState(CustomScanState *node,
 	}
 	else
 	{
-		/* Normal Heap Storage */
+		/* GPU-Direct or VFS Heap Read */
+		pgstromGpuDirectExplain(pts, es, dcontext);
 	}
 	/* State of BRIN-index */
 	if (pts->br_state)

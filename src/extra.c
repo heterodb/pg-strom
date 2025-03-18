@@ -26,7 +26,6 @@
 #define GPUDIRECT_DRIVER__CUFILE		'n'
 #define GPUDIRECT_DRIVER__NVME_STROM	'h'
 #define GPUDIRECT_DRIVER__VFS			'v'
-#define GPUDIRECT_DRIVER__NONE			0
 static int		gpudirect_driver_kind;
 static __thread void   *gpudirect_vfs_dma_buffer = NULL;
 static __thread size_t	gpudirect_vfs_dma_buffer_sz = 0UL;
@@ -596,16 +595,6 @@ static int	(*p_nvme_strom__read_file_iov)(
 	const strom_io_vector *iovec,
 	uint32_t *p_npages_direct_read,
 	uint32_t *p_npages_vfs_read) = NULL;
-static int	(*p_vfs_fallback__read_file_iov)(
-	const char *pathname,
-	CUdeviceptr m_segment,
-	off_t m_offset,
-	void *dma_buffer,
-	size_t dma_buffer_sz,
-	CUstream cuda_stream,
-	const strom_io_vector *iovec,
-	uint32_t *p_npages_direct_read,
-	uint32_t *p_npages_vfs_read) = NULL;
 
 bool
 gpuDirectFileReadIOV(const char *pathname,
@@ -613,49 +602,37 @@ gpuDirectFileReadIOV(const char *pathname,
 					 off_t m_offset,
 					 unsigned long iomap_handle,
 					 const strom_io_vector *iovec,
+					 bool try_gpudirect_mode,
 					 uint32_t *p_npages_direct_read,
 					 uint32_t *p_npages_vfs_read)
 {
-	switch (gpudirect_driver_kind)
+	if (try_gpudirect_mode)
 	{
-		case GPUDIRECT_DRIVER__CUFILE:
-			if (p_cufile__read_file_iov_v3)
-				return (p_cufile__read_file_iov_v3(pathname,
-												   m_segment,
-												   m_offset,
-												   iovec,
-												   p_npages_direct_read,
-												   p_npages_vfs_read) == 0);
-			break;
-		case GPUDIRECT_DRIVER__NVME_STROM:
-			if (p_nvme_strom__read_file_iov)
-				return (p_nvme_strom__read_file_iov(pathname,
-													iomap_handle,
-													m_offset,
-													iovec,
-													p_npages_direct_read,
-													p_npages_vfs_read) == 0);
-			break;
-		case GPUDIRECT_DRIVER__VFS:
-			if (p_vfs_fallback__read_file_iov)
-			{
-				if (!__gpuDirectAllocDMABufferOnDemand())
-					return false;
-				return (p_vfs_fallback__read_file_iov(pathname,
-													  m_segment,
-													  m_offset,
-													  gpudirect_vfs_dma_buffer,
-													  gpudirect_vfs_dma_buffer_sz,
-													  NULL,
-													  iovec,
-													  p_npages_direct_read,
-													  p_npages_vfs_read) == 0);
-			}
-			break;
-		default:
-			break;
+		switch (gpudirect_driver_kind)
+		{
+			case GPUDIRECT_DRIVER__CUFILE:
+				if (p_cufile__read_file_iov_v3)
+					return (p_cufile__read_file_iov_v3(pathname,
+													   m_segment,
+													   m_offset,
+													   iovec,
+													   p_npages_direct_read,
+													   p_npages_vfs_read) == 0);
+				break;
+			case GPUDIRECT_DRIVER__NVME_STROM:
+				if (p_nvme_strom__read_file_iov)
+					return (p_nvme_strom__read_file_iov(pathname,
+														iomap_handle,
+														m_offset,
+														iovec,
+														p_npages_direct_read,
+														p_npages_vfs_read) == 0);
+				break;
+			default:
+				assert(gpudirect_driver_kind == GPUDIRECT_DRIVER__VFS);
+		}
 	}
-	/* fallback using regular filesystem */
+	/* GPUDIRECT_DRIVER__VFS, or fallback using VFS I/O */
 	if (!__gpuDirectAllocDMABufferOnDemand())
 		return false;
 	return __fallbackFileReadIOV(pathname,
@@ -688,52 +665,40 @@ gpuDirectFileReadAsyncIOV(const char *pathname,
 						  unsigned long iomap_handle,
 						  const strom_io_vector *iovec,
 						  CUstream cuda_stream,
+						  bool try_gpudirect_mode,
 						  uint32_t *p_error_code_async,
 						  uint32_t *p_npages_direct_read,
 						  uint32_t *p_npages_vfs_read)
 {
-	switch (gpudirect_driver_kind)
+	if (try_gpudirect_mode)
 	{
-		case GPUDIRECT_DRIVER__CUFILE:
-			if (p_cufile__read_file_iov_v3)
-				return (p_cufile__read_file_async_iov_v3(pathname,
-														 m_segment,
-														 m_offset,
-														 iovec,
-														 cuda_stream,
-														 p_error_code_async,
-														 p_npages_direct_read,
-														 p_npages_vfs_read) == 0);
-			break;
-		case GPUDIRECT_DRIVER__NVME_STROM:
-			if (p_nvme_strom__read_file_iov)
-				return (p_nvme_strom__read_file_iov(pathname,
-													iomap_handle,
-													m_offset,
-													iovec,
-													p_npages_direct_read,
-													p_npages_vfs_read) == 0);
-			break;
-		case GPUDIRECT_DRIVER__VFS:
-			if (p_vfs_fallback__read_file_iov)
-			{
-				if (!__gpuDirectAllocDMABufferOnDemand())
-					return false;
-				return (p_vfs_fallback__read_file_iov(pathname,
-													  m_segment,
-													  m_offset,
-													  gpudirect_vfs_dma_buffer,
-													  gpudirect_vfs_dma_buffer_sz,
-                                                      cuda_stream,
-                                                      iovec,
-													  p_npages_direct_read,
-                                                      p_npages_vfs_read) == 0);
-			}
-			break;
-        default:
-			break;
+		switch (gpudirect_driver_kind)
+		{
+			case GPUDIRECT_DRIVER__CUFILE:
+				if (p_cufile__read_file_iov_v3)
+					return (p_cufile__read_file_async_iov_v3(pathname,
+															 m_segment,
+															 m_offset,
+															 iovec,
+															 cuda_stream,
+															 p_error_code_async,
+															 p_npages_direct_read,
+															 p_npages_vfs_read) == 0);
+				break;
+			case GPUDIRECT_DRIVER__NVME_STROM:
+				if (p_nvme_strom__read_file_iov)
+					return (p_nvme_strom__read_file_iov(pathname,
+														iomap_handle,
+														m_offset,
+														iovec,
+														p_npages_direct_read,
+														p_npages_vfs_read) == 0);
+				break;
+			default:
+				break;
+		}
 	}
-	/* fallback using regular filesystem */
+	/* GPUDIRECT_DRIVER__VFS, or fallback using VFS I/O */
 	if (!__gpuDirectAllocDMABufferOnDemand())
 		return false;
 	return __fallbackFileReadIOV(pathname,
@@ -979,7 +944,7 @@ heterodb_extra_init_module(const char *__extra_pathname)
 		LOOKUP_HETERODB_EXTRA_FUNCTION(nvme_strom__unmap_gpu_memory);
 		LOOKUP_HETERODB_EXTRA_FUNCTION(nvme_strom__read_file_iov);
 	}
-	LOOKUP_HETERODB_EXTRA_FUNCTION(vfs_fallback__read_file_iov);
+	//LOOKUP_HETERODB_EXTRA_FUNCTION(vfs_fallback__read_file_iov);
 	if (has_cufile || has_nvme_strom)
 		gpuDirectInitDriver();
 	LOOKUP_HETERODB_EXTRA_FUNCTION(heterodb_license_reload);
@@ -1023,7 +988,7 @@ bailout:
 	p_nvme_strom__map_gpu_memory        = NULL;
 	p_nvme_strom__unmap_gpu_memory      = NULL;
 	p_nvme_strom__read_file_iov         = NULL;
-	p_vfs_fallback__read_file_iov       = NULL;
+	//p_vfs_fallback__read_file_iov       = NULL;
 	p_heterodb_license_reload           = NULL;
 	p_heterodb_license_reload_path      = NULL;
 	p_heterodb_license_query            = NULL;
@@ -1229,8 +1194,8 @@ pgstrom_init_extra(void)
 	if (!signature)
 	{
 		elog(LOG, "HeteroDB Extra module is missing");
-		enum_options[enum_index].name = "none";
-		enum_options[enum_index].val  = GPUDIRECT_DRIVER__NONE;
+		enum_options[enum_index].name = "vfs";
+		enum_options[enum_index].val  = GPUDIRECT_DRIVER__VFS;
 		enum_index++;
 	}
 	else

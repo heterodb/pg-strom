@@ -3283,6 +3283,7 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 	CUresult	rc;
 	off_t		off = PAGE_ALIGN(base_offset);
 	size_t		gap = off - base_offset;
+	bool		try_gpudirect_mode = ((gclient->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0);
 
 	chunk = gpuMemAlloc(gap + kds->length);
 	if (!chunk)
@@ -3308,6 +3309,7 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 							  chunk->__offset + off,
 							  chunk->mseg->iomap_handle,
 							  kds_iovec,
+							  try_gpudirect_mode,
 							  p_npages_direct_read,
 							  p_npages_vfs_read))
 	{
