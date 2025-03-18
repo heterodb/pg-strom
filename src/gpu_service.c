@@ -147,21 +147,10 @@ static int			__pgstrom_cuda_stack_limit_kb;
 static char		   *pgstrom_cuda_toolkit_basedir = CUDA_TOOLKIT_BASEDIR; /* GUC */
 static const char  *pgstrom_fatbin_image_filename = "/dev/null";
 
-static void
-gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
-
-#define __gsLogCxt(gpu_label,fmt,...)					\
-	gpuservLoggerReport("%s|LOG|%s|%d|%s|" fmt "\n",	\
-						gpu_label,						\
-						__basename(__FILE__),			\
-						__LINE__,						\
-						__FUNCTION__,					\
-						##__VA_ARGS__)
-#define __gsLogNoCxt(fmt,...)						\
-	__gsLogCxt("GPU-Serv",fmt,##__VA_ARGS__)
 #define __gsLog(fmt,...)							\
 	__gsLogCxt(GpuWorkerCurrentContext->gpu_label,fmt,##__VA_ARGS__)
-
+#define __gsLogNoCxt(fmt,...)					\
+	__gsLogCxt("GPU-Serv",fmt,##__VA_ARGS__)
 #define __gsError(fmt, ...)								\
 	__gsLog("[error] " fmt, ##__VA_ARGS__);
 #define __gsErrorCxt(gcontext,fmt, ...)					\
@@ -190,6 +179,18 @@ gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
 					   "[debug] " fmt, ##__VA_ARGS__);	\
 	} while(0)
 
+/*
+ * isGpuServWorkerThread
+ */
+bool
+isGpuServWorkerThread(void)
+{
+	return (GpuWorkerCurrentContext != NULL);
+}
+
+/*
+ * pg_strom.max_async_tasks and related
+ */
 static void
 pgstrom_max_async_tasks_assign(int newval, void *extra)
 {
@@ -369,7 +370,7 @@ gpuservLoggerDispatch(void)
 /*
  * gpuservLoggerReport
  */
-static void
+void
 gpuservLoggerReport(const char *fmt, ...)
 {
 	va_list		ap;
