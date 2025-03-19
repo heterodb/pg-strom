@@ -2251,9 +2251,10 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 				break;
 			}
 		}
-		if (n_gpus > 1)
-			appendStringInfo(&buf, ">");
 	}
+	if (n_gpus > 1 && buf.len > base)
+		appendStringInfo(&buf, ">");
+
 	if (es->analyze && ps_state)
 	{
 		base = buf.len;
