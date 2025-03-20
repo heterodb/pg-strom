@@ -958,26 +958,25 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 						 kern_tupitem *tupitem,
 						 kern_expression *kexp_groupby_actions)
 {
-	char	   *buffer;
+	char   *buffer;
+	char   *curr;
 
 	assert(__KDS_TUPITEM_CHECK_VALID(kds_final, tupitem));
 	if (kcxt->groupby_prepfn_buffer)
 		buffer = kcxt->groupby_prepfn_buffer;
 	else
 		buffer = (char *)&tupitem->htup + tupitem->htup.t_hoff;
-	assert((uintptr_t)buffer == MAXALIGN((uintptr_t)buffer));
+	assert((uintptr_t)buffer == MAXALIGN(buffer));
 
+	curr = buffer;
 	for (int j=0; j < kexp_groupby_actions->u.pagg.nattrs; j++)
 	{
 		kern_aggregate_desc *desc = &kexp_groupby_actions->u.pagg.desc[j];
 		kern_colmeta   *cmeta = &kds_final->colmeta[j];
 		bool			item_is_valid = source_is_valid;
 
-		/* usually, 'buffer' shall never be mis-aligned */
-		if (cmeta->attlen > 0)
-			buffer = (char *)TYPEALIGN(cmeta->attalign, buffer);
-		else if (!VARATT_NOT_PAD_BYTE(buffer))
-			buffer = (char *)TYPEALIGN(cmeta->attalign, buffer);
+		/* usually, buffer shall never be mis-aligned before grouping-keys */
+		assert((uintptr_t)curr == TYPEALIGN(cmeta->attalign, curr));
 
 		/* check aggregate functions filter, if any */
 		if (item_is_valid && !__checkAggFuncFilter(kcxt, desc))
@@ -986,77 +985,77 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 		switch (desc->action)
 		{
 			case KAGG_ACTION__NROWS_ANY:
-				__update_nogroups__nrows_any(kcxt, buffer,
+				__update_nogroups__nrows_any(kcxt, curr,
 											 cmeta, desc,
 											 item_is_valid);
 				break;
 			case KAGG_ACTION__NROWS_COND:
-				__update_nogroups__nrows_cond(kcxt, buffer,
+				__update_nogroups__nrows_cond(kcxt, curr,
 											  cmeta, desc,
 											  item_is_valid);
 				break;
 			case KAGG_ACTION__PMIN_INT32:
-				__update_nogroups__pmin_int32(kcxt, buffer,
+				__update_nogroups__pmin_int32(kcxt, curr,
 											  cmeta, desc,
 											  item_is_valid);
 				break;
 			case KAGG_ACTION__PMIN_INT64:
-				__update_nogroups__pmin_int64(kcxt, buffer,
+				__update_nogroups__pmin_int64(kcxt, curr,
 											  cmeta, desc,
 											  item_is_valid);
 				break;
 			case KAGG_ACTION__PMAX_INT32:
-				__update_nogroups__pmax_int32(kcxt, buffer,
+				__update_nogroups__pmax_int32(kcxt, curr,
 											  cmeta, desc,
 											  item_is_valid);
 				break;
 			case KAGG_ACTION__PMAX_INT64:
-				__update_nogroups__pmax_int64(kcxt, buffer,
+				__update_nogroups__pmax_int64(kcxt, curr,
 											  cmeta, desc,
 											  item_is_valid);
 				break;
 			case KAGG_ACTION__PMIN_FP64:
-				__update_nogroups__pmin_fp64(kcxt, buffer,
+				__update_nogroups__pmin_fp64(kcxt, curr,
 											 cmeta, desc,
 											 item_is_valid);
 				break;
 			case KAGG_ACTION__PMAX_FP64:
-				__update_nogroups__pmax_fp64(kcxt, buffer,
+				__update_nogroups__pmax_fp64(kcxt, curr,
 											 cmeta, desc,
 											 item_is_valid);
 				break;
 			case KAGG_ACTION__PSUM_INT:
 			case KAGG_ACTION__PAVG_INT:
-				__update_nogroups__psum_int(kcxt, buffer,
+				__update_nogroups__psum_int(kcxt, curr,
 											cmeta, desc,
 											item_is_valid);
 				break;
 			case KAGG_ACTION__PSUM_INT64:
 			case KAGG_ACTION__PAVG_INT64:
-				__update_nogroups__psum_int64(kcxt, buffer,
+				__update_nogroups__psum_int64(kcxt, curr,
 											  cmeta, desc,
 											  item_is_valid);
 				break;
 			case KAGG_ACTION__PAVG_FP:
 			case KAGG_ACTION__PSUM_FP:
-				__update_nogroups__psum_fp(kcxt, buffer,
+				__update_nogroups__psum_fp(kcxt, curr,
 										   cmeta, desc,
 										   item_is_valid);
 				break;
 			case KAGG_ACTION__PAVG_NUMERIC:
 			case KAGG_ACTION__PSUM_NUMERIC:
-				assert((uintptr_t)buffer == MAXALIGN((uintptr_t)buffer));
-				__update_nogroups__psum_numeric(kcxt, buffer,
+				assert((uintptr_t)curr == MAXALIGN(curr));
+				__update_nogroups__psum_numeric(kcxt, curr,
 												cmeta, desc,
 												item_is_valid);
 				break;
 			case KAGG_ACTION__STDDEV:
-				__update_nogroups__pstddev(kcxt, buffer,
+				__update_nogroups__pstddev(kcxt, curr,
 										   cmeta, desc,
 										   item_is_valid);
 				break;
 			case KAGG_ACTION__COVAR:
-				__update_nogroups__pcovar(kcxt, buffer,
+				__update_nogroups__pcovar(kcxt, curr,
 										  cmeta, desc,
 										  item_is_valid);
 				break;
@@ -1065,14 +1064,19 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 				 * No more partial aggregation exists after
 				 * the grouping-keys
 				 */
-				return;
+				goto bailout;
 		}
 		/* move to the next */
 		if (cmeta->attlen > 0)
-			buffer += cmeta->attlen;
+			curr += cmeta->attlen;
         else
-			buffer += VARSIZE_ANY(buffer);
+		{
+			assert(cmeta->attlen == -1);
+			curr += VARSIZE_ANY(curr);
+		}
 	}
+bailout:
+	assert(curr == buffer + kcxt->groupby_prepfn_bufsz);
 }
 
 /*
@@ -1581,31 +1585,35 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 						kern_tupitem *tupitem,
 						const kern_expression *kexp_groupby_actions)
 {
-	char	   *groupby_prepfn_buffer;
-	char	   *curr;
+	char   *buffer;
+	char   *curr;
 
 	if (kcxt->groupby_prepfn_buffer &&
 		tupitem->rowid < kcxt->groupby_prepfn_nbufs)
 	{
-		groupby_prepfn_buffer = (kcxt->groupby_prepfn_buffer +
-								 tupitem->rowid * kcxt->groupby_prepfn_bufsz);
+		buffer = (kcxt->groupby_prepfn_buffer +
+				  tupitem->rowid * kcxt->groupby_prepfn_bufsz);
 	}
 	else
 	{
-		groupby_prepfn_buffer = (char *)&tupitem->htup + tupitem->htup.t_hoff;
+		buffer = (char *)&tupitem->htup + tupitem->htup.t_hoff;
 	}
-	assert((uintptr_t)groupby_prepfn_buffer == MAXALIGN(groupby_prepfn_buffer));
+	assert((uintptr_t)buffer == MAXALIGN(buffer));
 
-	curr = groupby_prepfn_buffer;
+	curr = buffer;
 	for (int j=0; j < kexp_groupby_actions->u.pagg.nattrs; j++)
 	{
 		const kern_aggregate_desc *desc = &kexp_groupby_actions->u.pagg.desc[j];
 		const kern_colmeta *cmeta = &kds_final->colmeta[j];
 
-		if (cmeta->attlen > 0)
-			curr = (char *)TYPEALIGN(cmeta->attalign, curr);
-		else if (!VARATT_NOT_PAD_BYTE(curr))
-			curr = (char *)TYPEALIGN(cmeta->attalign, curr);
+		/*
+		 * PreAgg tuple has strictly aligned partial aggregate function on its earlier
+		 * half, so we don't need to align t_hoff here.
+		 * In case when 'groupby_prepfn_buffer' is on the kcxt->groupby_prepfn_buffer
+		 * (SM's shared memory), its grouping-key portion is not cached. So, alignment
+		 * towards varlena datum may cause overrun.
+		 */
+		assert((uintptr_t)curr == TYPEALIGN(cmeta->attalign, curr));
 
 		/* check FILTER clause of aggregate functions, if any */
 		if (__checkAggFuncFilter(kcxt, desc))
@@ -1660,7 +1668,7 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 					break;
 				default:
 					/*
-					 * No more partial aggregation exists after grouping-keys
+					 * No partial aggregate function exits after grouping-keys
 					 */
 					goto bailout;
 			}
@@ -1669,10 +1677,13 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 		if (cmeta->attlen > 0)
 			curr += cmeta->attlen;
 		else
+		{
+			assert(cmeta->attlen == -1);
 			curr += VARSIZE_ANY(curr);
+		}
 	}
 bailout:
-	assert(curr == groupby_prepfn_buffer + kcxt->groupby_prepfn_bufsz);
+	assert(curr == buffer + kcxt->groupby_prepfn_bufsz);
 }
 
 STATIC_FUNCTION(kern_tupitem *)
