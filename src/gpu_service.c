@@ -3388,10 +3388,9 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 								   int grid_sz, int block_sz,
 								   unsigned int __shmem_dynamic_sz,
 								   unsigned int shmem_dynamic_limit,
-								   unsigned int *p_groupby_prepfn_bufsz,
 								   unsigned int *p_groupby_prepfn_nbufs)
 {
-	unsigned int	shmem_dynamic_sz = TYPEALIGN(1024, __shmem_dynamic_sz);
+	size_t		shmem_dynamic_sz = TYPEALIGN(1024, __shmem_dynamic_sz);
 
 	if (session->groupby_prepfn_bufsz == 0 || shmem_dynamic_sz >= shmem_dynamic_limit)
 		goto no_prepfunc_buffer;
@@ -3401,8 +3400,8 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 		session->xpucode_groupby_keycomp)
 	{
 		/* GROUP-BY */
-		int		num_buffers = 2 * session->groupby_ngroups_estimation + 100;
-		int		prepfn_usage = session->groupby_prepfn_bufsz * num_buffers;
+		size_t	num_buffers = Min(2 * session->groupby_ngroups_estimation + 100, INT_MAX);
+		size_t	prepfn_usage = (size_t)session->groupby_prepfn_bufsz * num_buffers;
 
 		if (shmem_dynamic_sz + prepfn_usage > shmem_dynamic_limit)
 		{
@@ -3412,25 +3411,19 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 			prepfn_usage = session->groupby_prepfn_bufsz * num_buffers;
 		}
 		Assert(shmem_dynamic_sz + prepfn_usage <= shmem_dynamic_limit);
-		if (num_buffers >= 32)
-		{
-			*p_groupby_prepfn_bufsz = session->groupby_prepfn_bufsz;
-			*p_groupby_prepfn_nbufs = num_buffers;
-			return shmem_dynamic_sz + prepfn_usage;
-		}
+		*p_groupby_prepfn_nbufs = num_buffers;
+		return shmem_dynamic_sz + prepfn_usage;
 	}
 	else if (session->xpucode_groupby_actions)
 	{
 		/* NO-GROUPS */
 		if (shmem_dynamic_sz + session->groupby_prepfn_bufsz <= shmem_dynamic_limit)
 		{
-			*p_groupby_prepfn_bufsz = session->groupby_prepfn_bufsz;
 			*p_groupby_prepfn_nbufs = 1;
 			return shmem_dynamic_sz + session->groupby_prepfn_bufsz;
 		}
 	}
 no_prepfunc_buffer:
-	*p_groupby_prepfn_bufsz = 0;
 	*p_groupby_prepfn_nbufs = 0;
 	return __shmem_dynamic_sz;		/* unaligned original size */
 }
@@ -3462,7 +3455,6 @@ __gpuservLaunchGpuTaskExecKernel(gpuContext *gcontext,
 	int				grid_sz;
 	int				block_sz;
 	unsigned int	shmem_dynamic_sz;
-	unsigned int	groupby_prepfn_bufsz = 0;
 	unsigned int	groupby_prepfn_nbufs = 0;
 	size_t			kds_final_length = 0;
 	uint32_t		kds_fallback_revision = 0;
@@ -3498,7 +3490,6 @@ __gpuservLaunchGpuTaskExecKernel(gpuContext *gcontext,
 										   grid_sz, block_sz,
 										   shmem_dynamic_sz,
 										   gcontext->gpumain_shmem_sz_limit,
-										   &groupby_prepfn_bufsz,
 										   &groupby_prepfn_nbufs);
 	/*
 	 * Allocation of the control structure
@@ -3520,7 +3511,6 @@ __gpuservLaunchGpuTaskExecKernel(gpuContext *gcontext,
 	kgtask->kvecs_bufsz  = session->kcxt_kvecs_bufsz;
 	kgtask->kvecs_ndims  = session->kcxt_kvecs_ndims;
 	kgtask->n_rels       = num_inner_rels;
-	kgtask->groupby_prepfn_bufsz = groupby_prepfn_bufsz;
 	kgtask->groupby_prepfn_nbufs = groupby_prepfn_nbufs;
 	kgtask->cuda_dindex        = MY_DINDEX_PER_THREAD;
 	kgtask->cuda_stack_limit   = GpuWorkerCurrentContext->cuda_stack_limit;

@@ -496,6 +496,7 @@ typedef struct
 		KCXT->kvecs_ndims  = (SESSION)->kcxt_kvecs_ndims;				\
 		KCXT->kvecs_curr_buffer = NULL;									\
 		KCXT->kvecs_curr_id = 0;										\
+		KCXT->groupby_prepfn_bufsz = (SESSION)->groupby_prepfn_bufsz;	\
 		KCXT->kvars_slot = (struct xpu_datum_t **)						\
 			alloca(sizeof(struct xpu_datum_t *) * KCXT->kvars_nslots);	\
 		__vs_desc = SESSION_KVARS_SLOT_DESC(SESSION);					\

@@ -1975,22 +1975,20 @@ setupGpuPreAggGroupByBuffer(kern_context *kcxt,
 	const kern_expression	*kexp_actions = SESSION_KEXP_GROUPBY_ACTIONS(session);
 
 	if (kexp_actions != NULL &&
-		kgtask->groupby_prepfn_bufsz > 0 &&
 		kgtask->groupby_prepfn_nbufs > 0)
 	{
-		assert(kgtask->groupby_prepfn_bufsz == session->groupby_prepfn_bufsz);
+		assert(kcxt->groupby_prepfn_bufsz == session->groupby_prepfn_bufsz);
 		if (SESSION_KEXP_GROUPBY_KEYHASH(session) &&
 			SESSION_KEXP_GROUPBY_KEYLOAD(session) &&
 			SESSION_KEXP_GROUPBY_KEYCOMP(session))
 		{
 			uint32_t		index;
 
-			kcxt->groupby_prepfn_bufsz = kgtask->groupby_prepfn_bufsz;
 			kcxt->groupby_prepfn_nbufs = kgtask->groupby_prepfn_nbufs;
 			kcxt->groupby_prepfn_buffer = groupby_prepfn_buffer;
 
 			for (index = get_local_id();
-				 index < kgtask->groupby_prepfn_nbufs;
+				 index < kcxt->groupby_prepfn_nbufs;
 				 index += get_local_size())
 			{
 				char   *pos = (kcxt->groupby_prepfn_buffer +
@@ -2001,7 +1999,6 @@ setupGpuPreAggGroupByBuffer(kern_context *kcxt,
 		else
 		{
 			assert(kgtask->groupby_prepfn_nbufs == 1);
-			kcxt->groupby_prepfn_bufsz = kgtask->groupby_prepfn_bufsz;
 			kcxt->groupby_prepfn_nbufs = 1;
 			kcxt->groupby_prepfn_buffer = groupby_prepfn_buffer;
 			if (get_local_id() == 0)
@@ -2423,7 +2420,6 @@ kern_gpupreagg_final_merge(kern_session_info *session,
 	}
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session, NULL);
-	kcxt->groupby_prepfn_bufsz = session->groupby_prepfn_bufsz;
 
 	for (base = get_global_base(); base < kds_src->nitems; base += get_global_size())
 	{

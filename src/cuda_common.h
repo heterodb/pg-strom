@@ -133,8 +133,7 @@ typedef struct {
 	uint32_t		kvecs_ndims;	/* number of kvecs buffers for each warp */
 	uint32_t		extra_sz;
 	uint32_t		n_rels;			/* >0, if JOIN is involved */
-	uint32_t		groupby_prepfn_bufsz;
-	uint32_t		groupby_prepfn_nbufs;
+	uint32_t		groupby_prepfn_nbufs;	/* >0, if prep-func buffer is used */
 	/* GPU-task specific read-only properties. */
 	uint32_t		cuda_dindex;
 	uint32_t		cuda_stack_limit;
