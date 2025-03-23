@@ -147,21 +147,10 @@ static int			__pgstrom_cuda_stack_limit_kb;
 static char		   *pgstrom_cuda_toolkit_basedir = CUDA_TOOLKIT_BASEDIR; /* GUC */
 static const char  *pgstrom_fatbin_image_filename = "/dev/null";
 
-static void
-gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
-
-#define __gsLogCxt(gpu_label,fmt,...)					\
-	gpuservLoggerReport("%s|LOG|%s|%d|%s|" fmt "\n",	\
-						gpu_label,						\
-						__basename(__FILE__),			\
-						__LINE__,						\
-						__FUNCTION__,					\
-						##__VA_ARGS__)
-#define __gsLogNoCxt(fmt,...)						\
-	__gsLogCxt("GPU-Serv",fmt,##__VA_ARGS__)
 #define __gsLog(fmt,...)							\
 	__gsLogCxt(GpuWorkerCurrentContext->gpu_label,fmt,##__VA_ARGS__)
-
+#define __gsLogNoCxt(fmt,...)					\
+	__gsLogCxt("GPU-Serv",fmt,##__VA_ARGS__)
 #define __gsError(fmt, ...)								\
 	__gsLog("[error] " fmt, ##__VA_ARGS__);
 #define __gsErrorCxt(gcontext,fmt, ...)					\
@@ -190,6 +179,18 @@ gpuservLoggerReport(const char *fmt, ...)	pg_attribute_printf(1, 2);
 					   "[debug] " fmt, ##__VA_ARGS__);	\
 	} while(0)
 
+/*
+ * isGpuServWorkerThread
+ */
+bool
+isGpuServWorkerThread(void)
+{
+	return (GpuWorkerCurrentContext != NULL);
+}
+
+/*
+ * pg_strom.max_async_tasks and related
+ */
 static void
 pgstrom_max_async_tasks_assign(int newval, void *extra)
 {
@@ -369,7 +370,7 @@ gpuservLoggerDispatch(void)
 /*
  * gpuservLoggerReport
  */
-static void
+void
 gpuservLoggerReport(const char *fmt, ...)
 {
 	va_list		ap;
@@ -3283,6 +3284,7 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 	CUresult	rc;
 	off_t		off = PAGE_ALIGN(base_offset);
 	size_t		gap = off - base_offset;
+	bool		try_gpudirect_mode = ((gclient->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0);
 
 	chunk = gpuMemAlloc(gap + kds->length);
 	if (!chunk)
@@ -3308,6 +3310,7 @@ __gpuservLoadKdsCommon(gpuClient *gclient,
 							  chunk->__offset + off,
 							  chunk->mseg->iomap_handle,
 							  kds_iovec,
+							  try_gpudirect_mode,
 							  p_npages_direct_read,
 							  p_npages_vfs_read))
 	{
@@ -3385,10 +3388,9 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 								   int grid_sz, int block_sz,
 								   unsigned int __shmem_dynamic_sz,
 								   unsigned int shmem_dynamic_limit,
-								   unsigned int *p_groupby_prepfn_bufsz,
 								   unsigned int *p_groupby_prepfn_nbufs)
 {
-	unsigned int	shmem_dynamic_sz = TYPEALIGN(1024, __shmem_dynamic_sz);
+	size_t		shmem_dynamic_sz = TYPEALIGN(1024, __shmem_dynamic_sz);
 
 	if (session->groupby_prepfn_bufsz == 0 || shmem_dynamic_sz >= shmem_dynamic_limit)
 		goto no_prepfunc_buffer;
@@ -3398,8 +3400,8 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 		session->xpucode_groupby_keycomp)
 	{
 		/* GROUP-BY */
-		int		num_buffers = 2 * session->groupby_ngroups_estimation + 100;
-		int		prepfn_usage = session->groupby_prepfn_bufsz * num_buffers;
+		size_t	num_buffers = Min(2 * session->groupby_ngroups_estimation + 100, INT_MAX);
+		size_t	prepfn_usage = (size_t)session->groupby_prepfn_bufsz * num_buffers;
 
 		if (shmem_dynamic_sz + prepfn_usage > shmem_dynamic_limit)
 		{
@@ -3409,25 +3411,19 @@ __expand_gpupreagg_prepfunc_buffer(kern_session_info *session,
 			prepfn_usage = session->groupby_prepfn_bufsz * num_buffers;
 		}
 		Assert(shmem_dynamic_sz + prepfn_usage <= shmem_dynamic_limit);
-		if (num_buffers >= 32)
-		{
-			*p_groupby_prepfn_bufsz = session->groupby_prepfn_bufsz;
-			*p_groupby_prepfn_nbufs = num_buffers;
-			return shmem_dynamic_sz + prepfn_usage;
-		}
+		*p_groupby_prepfn_nbufs = num_buffers;
+		return shmem_dynamic_sz + prepfn_usage;
 	}
 	else if (session->xpucode_groupby_actions)
 	{
 		/* NO-GROUPS */
 		if (shmem_dynamic_sz + session->groupby_prepfn_bufsz <= shmem_dynamic_limit)
 		{
-			*p_groupby_prepfn_bufsz = session->groupby_prepfn_bufsz;
 			*p_groupby_prepfn_nbufs = 1;
 			return shmem_dynamic_sz + session->groupby_prepfn_bufsz;
 		}
 	}
 no_prepfunc_buffer:
-	*p_groupby_prepfn_bufsz = 0;
 	*p_groupby_prepfn_nbufs = 0;
 	return __shmem_dynamic_sz;		/* unaligned original size */
 }
@@ -3459,7 +3455,6 @@ __gpuservLaunchGpuTaskExecKernel(gpuContext *gcontext,
 	int				grid_sz;
 	int				block_sz;
 	unsigned int	shmem_dynamic_sz;
-	unsigned int	groupby_prepfn_bufsz = 0;
 	unsigned int	groupby_prepfn_nbufs = 0;
 	size_t			kds_final_length = 0;
 	uint32_t		kds_fallback_revision = 0;
@@ -3495,7 +3490,6 @@ __gpuservLaunchGpuTaskExecKernel(gpuContext *gcontext,
 										   grid_sz, block_sz,
 										   shmem_dynamic_sz,
 										   gcontext->gpumain_shmem_sz_limit,
-										   &groupby_prepfn_bufsz,
 										   &groupby_prepfn_nbufs);
 	/*
 	 * Allocation of the control structure
@@ -3517,7 +3511,6 @@ __gpuservLaunchGpuTaskExecKernel(gpuContext *gcontext,
 	kgtask->kvecs_bufsz  = session->kcxt_kvecs_bufsz;
 	kgtask->kvecs_ndims  = session->kcxt_kvecs_ndims;
 	kgtask->n_rels       = num_inner_rels;
-	kgtask->groupby_prepfn_bufsz = groupby_prepfn_bufsz;
 	kgtask->groupby_prepfn_nbufs = groupby_prepfn_nbufs;
 	kgtask->cuda_dindex        = MY_DINDEX_PER_THREAD;
 	kgtask->cuda_stack_limit   = GpuWorkerCurrentContext->cuda_stack_limit;

@@ -2619,10 +2619,13 @@ tryGpuSortWithLimitPath(PlannerInfo *root, Path *path)
  */
 static Path *
 __attachGpuSortWithWindowRankPath(PlannerInfo *root,
-								  WindowClause *wc,
+								  WindowAggPath *wpath,
+								  //WindowClause *wc,
 								  CustomPath *cpath)
 {
 	pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
+	WindowClause *wc = wpath->winclause;
+	List	   *runCondition = __windowAggPathGetRunCondition(wpath);
 	int			window_func = 0;
 	int64_t		window_limit = -1;
 	int			window_partby_nkeys = 0;
@@ -2664,7 +2667,7 @@ __attachGpuSortWithWindowRankPath(PlannerInfo *root,
 	/*
 	 * Check whether the 'runCondition' contains supported filter
 	 */
-	foreach (lc, wc->runCondition)
+	foreach (lc, runCondition)
 	{
 		OpExpr	   *op = lfirst(lc);
 		WindowFunc *func = NULL;
@@ -2804,14 +2807,17 @@ __attachGpuSortWithWindowRankPath(PlannerInfo *root,
 		return &cpath->path;
 	}
 
-	if (wc->runCondition != NIL)
+	if (runCondition != NIL)
 		elog(DEBUG2, "window-rank: not supported run-condition of the first window-agg node: %s",
-			 nodeToString(wc->runCondition));
+			 nodeToString(runCondition));
 	return NULL;
 }
 
 static Path *
-tryGpuSortWithWindowRankPath(PlannerInfo *root, WindowClause *wc, Path *__path)
+tryGpuSortWithWindowRankPath(PlannerInfo *root,
+							 WindowAggPath *wpath,
+							 //WindowClause *wc,
+							 Path *__path)
 {
 	Path   *subpath;
 
@@ -2819,10 +2825,12 @@ tryGpuSortWithWindowRankPath(PlannerInfo *root, WindowClause *wc, Path *__path)
 	{
 		case T_WindowAggPath:
 			{
-				WindowAggPath  *wpath = (WindowAggPath *)__path;
-				WindowClause   *__wc = wpath->winclause;
+				WindowAggPath  *__wpath = (WindowAggPath *)__path;
+				WindowClause   *__wc = __wpath->winclause;
 
-				subpath = tryGpuSortWithWindowRankPath(root, __wc, wpath->subpath);
+				subpath = tryGpuSortWithWindowRankPath(root,
+													   __wpath,
+													   __wpath->subpath);
 				if (subpath)
 				{
 					Query	   *parse = root->parse;
@@ -2830,13 +2838,14 @@ tryGpuSortWithWindowRankPath(PlannerInfo *root, WindowClause *wc, Path *__path)
 						= find_window_functions((Node *)root->processed_tlist,
 												list_length(parse->windowClause));
 					wpath = create_windowagg_path(root,
-												  wpath->path.parent,
+												  __wpath->path.parent,
 												  subpath,
-												  wpath->path.pathtarget,
+												  __wpath->path.pathtarget,
 												  wflists->windowFuncs[__wc->winref],
+												  __wpath->runCondition,
 												  __wc,
-												  wpath->qual,
-												  wpath->topwindow);
+												  __wpath->qual,
+												  __wpath->topwindow);
 					return &wpath->path;
 				}
 			}
@@ -2844,7 +2853,7 @@ tryGpuSortWithWindowRankPath(PlannerInfo *root, WindowClause *wc, Path *__path)
 
 		case T_GatherPath:
 			subpath = ((GatherPath *)__path)->subpath;
-			subpath = tryGpuSortWithWindowRankPath(root, wc, subpath);
+			subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath);
 			if (subpath)
 			{
 				GatherPath *gpath
@@ -2862,7 +2871,7 @@ tryGpuSortWithWindowRankPath(PlannerInfo *root, WindowClause *wc, Path *__path)
 
 		case T_GatherMergePath:
 			subpath = ((GatherMergePath *)__path)->subpath;
-			subpath = tryGpuSortWithWindowRankPath(root, wc, subpath);
+			subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath);
 			if (subpath)
 			{
 				GatherPath *gpath
@@ -2880,7 +2889,7 @@ tryGpuSortWithWindowRankPath(PlannerInfo *root, WindowClause *wc, Path *__path)
 
 		case T_ProjectionPath:
 			subpath = ((ProjectionPath *)__path)->subpath;
-			subpath = tryGpuSortWithWindowRankPath(root, wc, subpath);
+			subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath);
 			if (subpath)
 			{
 				ProjectionPath *ppath
@@ -2900,17 +2909,17 @@ tryGpuSortWithWindowRankPath(PlannerInfo *root, WindowClause *wc, Path *__path)
 				CustomPath *cpath = (CustomPath *)__path;
 
 				subpath = linitial(cpath->custom_paths);
-				subpath = tryGpuSortWithWindowRankPath(root, wc, subpath);
+				subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath);
 				if (subpath)
 					return pgstrom_create_dummy_path(root, subpath);
 			}
-			else if (wc && (pgstrom_is_gpuscan_path(__path) ||
-							pgstrom_is_gpujoin_path(__path) ||
-							pgstrom_is_gpupreagg_path(__path)))
+			else if (wpath && (pgstrom_is_gpuscan_path(__path) ||
+							   pgstrom_is_gpujoin_path(__path) ||
+							   pgstrom_is_gpupreagg_path(__path)))
 			{
 				CustomPath *cpath = (CustomPath *)__path;
 
-				return __attachGpuSortWithWindowRankPath(root, wc, cpath);
+				return __attachGpuSortWithWindowRankPath(root, wpath, cpath);
 			}
 			break;
 

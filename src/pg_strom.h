@@ -768,6 +768,64 @@ extern bool		pgstrom_init_gpu_device(void);
 typedef struct gpuContext	gpuContext;
 typedef struct gpuClient	gpuClient;
 
+extern bool		isGpuServWorkerThread(void);
+extern void		gpuservLoggerReport(const char *fmt, ...)
+					pg_attribute_printf(1, 2);
+#define __gsLogCxt(LABEL,fmt,...)							\
+	gpuservLoggerReport("%s|LOG|%s|%d|%s|" fmt "\n",		\
+						LABEL,								\
+						__basename(__FILE__),				\
+						__LINE__,							\
+						__FUNCTION__,						\
+						##__VA_ARGS__)
+
+#define __Elog(fmt,...)										\
+	do {													\
+		int		__errno_saved = errno;						\
+		if (isGpuServWorkerThread())						\
+			__gsLogCxt("[error]",fmt,##__VA_ARGS__);		\
+		else												\
+			ereport(LOG,									\
+					(errhidestmt(true),						\
+					 errmsg("[error] " fmt " (%s:%d)",		\
+							##__VA_ARGS__,					\
+							__FILE__, __LINE__)));			\
+		errno = __errno_saved;								\
+	} while(0)
+
+#define __Info(fmt,...)										\
+	do {													\
+		int		__errno_saved = errno;						\
+		if (heterodbExtraEreportLevel() >= 1)				\
+		{													\
+			if (isGpuServWorkerThread())					\
+				__gsLogCxt("[info]",fmt,##__VA_ARGS__);		\
+			else											\
+				ereport(LOG,								\
+						(errhidestmt(true),					\
+						 errmsg("[info] " fmt " (%s:%d)",	\
+								##__VA_ARGS__,				\
+								__FILE__, __LINE__)));		\
+		}													\
+		errno = __errno_saved;								\
+	} while(0)
+#define __Debug(fmt,...)									\
+	do {													\
+		int		__errno_saved = errno;						\
+		if (heterodbExtraEreportLevel() >= 2)				\
+		{													\
+			if (isGpuServWorkerThread())					\
+				__gsLogCxt("[debug]",fmt,##__VA_ARGS__);	\
+			else											\
+				ereport(LOG,								\
+						(errhidestmt(true),					\
+						 errmsg("[debug] " fmt " (%s:%d)",	\
+								##__VA_ARGS__,				\
+								__FILE__, __LINE__)));		\
+		}													\
+		errno = __errno_saved;								\
+	} while(0)
+
 extern int		pgstrom_max_async_tasks(void);
 extern bool		gpuserv_ready_accept(void);
 extern const char *cuStrError(CUresult rc);
@@ -1015,24 +1073,6 @@ extern bool		pathNameMatchByPattern(const char *pathname,
 /*
  * extra.c
  */
-#define __Info(fmt,...)									\
-	do {												\
-		if (heterodbExtraEreportLevel() >= 1)			\
-			ereport(LOG,								\
-					(errhidestmt(true),					\
-					 errmsg("[info] " fmt " (%s:%d)",	\
-							##__VA_ARGS__,				\
-							__FILE__, __LINE__)));		\
-	} while(0)
-#define __Debug(fmt,...)								\
-	do {												\
-		if (heterodbExtraEreportLevel() >= 2)			\
-			ereport(LOG,								\
-					(errhidestmt(true),					\
-					 errmsg("[debug] " fmt " (%s:%d)",	\
-							##__VA_ARGS__,				\
-							__FILE__, __LINE__)));		\
-	} while(0)
 extern void			pgstrom_init_extra(void);
 
 /*

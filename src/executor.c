@@ -1634,7 +1634,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  NULL,
 									  KDS_FORMAT_ARROW);
 	}
-	else if (pts->gcache_desc)		/* GPU-Cache */
+	else if (pts->gcache_desc)	/* GPU-Cache */
 	{
 		pts->cb_next_chunk = pgstromScanChunkGpuCache;
 		pts->cb_next_tuple = pgstromScanNextTuple;
@@ -1642,8 +1642,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  NULL,
 									  KDS_FORMAT_COLUMN);
 	}
-	else if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0 ||
-			 pts->ds_entry)
+	else						/* GPU-Direct (incl. VFS fallback) */
 	{
 		pts->cb_next_chunk = pgstromRelScanChunkDirect;
 		pts->cb_next_tuple = pgstromScanNextTuple;
@@ -1651,15 +1650,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  tupdesc_src,
 									  KDS_FORMAT_BLOCK);
 	}
-	else						/* Slow normal heap storage */
-	{
-		pts->cb_next_chunk = pgstromRelScanChunkNormal;
-		pts->cb_next_tuple = pgstromScanNextTuple;
-		__setupTaskStateRequestBuffer(pts,
-									  tupdesc_src,
-									  KDS_FORMAT_ROW);
-	}
-
 	/*
 	 * workload specific callback routines
 	 */
@@ -2231,57 +2221,66 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 						ExplainState *es, List *dcontext)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	StringInfoData		buf;
+	StringInfoData buf;
+	int			n_gpus;
+	int			base;
+	uint64		count;
 
 	initStringInfo(&buf);
 	if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) == 0)
-	{
-		appendStringInfo(&buf, "disabled");
-	}
+		appendStringInfo(&buf, "VFS");
 	else
-	{
-		int		base;
-		uint64	count;
+		appendStringInfo(&buf, "GPU-Direct");
 
-		appendStringInfo(&buf, "enabled (N=%d,", get_bitcount(pts->optimal_gpus));
-		base = buf.len;
-		for (int k=0; k <= numGpuDevAttrs; k++)
+	n_gpus = get_bitcount(pts->optimal_gpus);
+	base = buf.len;
+	for (int k=0; k < numGpuDevAttrs; k++)
+	{
+		if ((pts->optimal_gpus & (1UL<<k)) != 0)
 		{
-			if ((pts->optimal_gpus & (1UL<<k)) != 0)
+			if (n_gpus > 1)
 			{
-				appendStringInfo(&buf, "%s%d",
-								 base == buf.len ? "GPU" : ",", k);
+				if (base == buf.len)
+					appendStringInfo(&buf, " with %d GPUs <%d", n_gpus, k);
+				else
+					appendStringInfo(&buf, ",%d", k);
+			}
+			else
+			{
+				appendStringInfo(&buf, " with GPU%d", k);
+				break;
 			}
 		}
-		if (es->analyze && ps_state)
-		{
-			base = buf.len;
+	}
+	if (n_gpus > 1 && buf.len > base)
+		appendStringInfo(&buf, ">");
 
-			count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
-			if (count)
-				appendStringInfo(&buf, "%sbuffer=%lu",
-								 (buf.len > base ? ", " : "; "),
-								 count / PAGES_PER_BLOCK);
-			count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
-			if (count)
-				appendStringInfo(&buf, "%svfs=%lu",
-								 (buf.len > base ? ", " : "; "),
-								 count / PAGES_PER_BLOCK);
-			count = pg_atomic_read_u64(&ps_state->npages_direct_read);
-			if (count)
-				appendStringInfo(&buf, "%sdirect=%lu",
-								 (buf.len > base ? ", " : "; "),
-								 count / PAGES_PER_BLOCK);
-			count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
-			appendStringInfo(&buf, "%sntuples=%lu",
+	if (es->analyze && ps_state)
+	{
+		base = buf.len;
+
+		count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
+		if (count)
+			appendStringInfo(&buf, "%sbuffer=%lu",
 							 (buf.len > base ? ", " : "; "),
-							 count);
-		}
-		appendStringInfo(&buf, ")");
+							 count / PAGES_PER_BLOCK);
+		count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
+		if (count)
+			appendStringInfo(&buf, "%svfs=%lu",
+							 (buf.len > base ? ", " : "; "),
+							 count / PAGES_PER_BLOCK);
+		count = pg_atomic_read_u64(&ps_state->npages_direct_read);
+		if (count)
+			appendStringInfo(&buf, "%sdirect=%lu",
+							 (buf.len > base ? ", " : "; "),
+							 count / PAGES_PER_BLOCK);
+		count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
+		appendStringInfo(&buf, "%sntuples=%lu",
+						 (buf.len > base ? ", " : "; "),
+						 count);
 	}
 	if (!pgstrom_regression_test_mode)
-		ExplainPropertyText("GPU-Direct SQL", buf.data, es);
-
+		ExplainPropertyText("Scan-Engine", buf.data, es);
 	pfree(buf.data);
 }
 
@@ -2297,7 +2296,6 @@ pgstromExplainTaskState(CustomScanState *node,
 	pgstromSharedState *ps_state = pts->ps_state;
 	pgstromPlanInfo	   *pp_info = pts->pp_info;
 	CustomScan		   *cscan = (CustomScan *)node->ss.ps.plan;
-	bool				verbose = (cscan->custom_plans != NIL);
 	List			   *dcontext;
 	StringInfoData		buf;
 	ListCell		   *lc;
@@ -2306,6 +2304,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	char			   *str;
 	double				ntuples;
 	uint64_t			stat_ntuples = 0;
+	uint64_t			prev_ntuples = 0;
 
 	/* setup deparse context */
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
@@ -2326,7 +2325,7 @@ pgstromExplainTaskState(CustomScanState *node,
 
 		if (tle->resjunk)
 			continue;
-		str = deparse_expression((Node *)tle->expr, dcontext, verbose, true);
+		str = deparse_expression((Node *)tle->expr, dcontext, es->verbose, true);
 		if (buf.len > 0)
 			appendStringInfoString(&buf, ", ");
 		appendStringInfoString(&buf, str);
@@ -2363,7 +2362,10 @@ pgstromExplainTaskState(CustomScanState *node,
 
 	/* xPU Scan Quals */
 	if (ps_state)
+	{
 		stat_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_in);
+		prev_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
+	}
 	if (pp_info->scan_quals)
 	{
 		List   *scan_quals = pp_info->scan_quals;
@@ -2374,25 +2376,25 @@ pgstromExplainTaskState(CustomScanState *node,
 			expr = make_andclause(scan_quals);
 		else
 			expr = linitial(scan_quals);
-		str = deparse_expression((Node *)expr, dcontext, verbose, true);
+		str = deparse_expression((Node *)expr, dcontext, es->verbose, true);
 		appendStringInfoString(&buf, str);
-		if (!es->analyze)
+		if (es->analyze || es->costs)
 		{
-			appendStringInfo(&buf, " [rows: %.0f -> %.0f]",
-							 pp_info->scan_tuples,
-							 pp_info->scan_nrows);
-		}
-		else
-		{
-			uint64_t		prev_ntuples = 0;
-
-			if (ps_state)
-				prev_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
-			appendStringInfo(&buf, " [plan: %.0f -> %.0f, exec: %lu -> %lu]",
-							 pp_info->scan_tuples,
-							 pp_info->scan_nrows,
-							 prev_ntuples,
-							 stat_ntuples);
+			appendStringInfoString(&buf, " [");
+			if (es->costs)
+			{
+				appendStringInfo(&buf, "plan: %.0f -> %.0f",
+								 pp_info->scan_tuples,
+								 pp_info->scan_nrows);
+			}
+			if (ps_state && es->analyze)
+			{
+				appendStringInfo(&buf, "%sexec: %lu -> %lu",
+								 es->costs ? ", " : "",
+								 prev_ntuples,
+								 stat_ntuples);
+			}
+			appendStringInfoString(&buf, "]");
 		}
 		snprintf(label, sizeof(label), "%s Scan Quals", xpu_label);
 		ExplainPropertyText(label, buf.data, es);
@@ -2414,7 +2416,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			{
 				Node   *expr = lfirst(lc);
 
-				str = deparse_expression(expr, dcontext, verbose, true);
+				str = deparse_expression(expr, dcontext, es->verbose, true);
 				if (buf.len > 0)
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, str);
@@ -2425,42 +2427,44 @@ pgstromExplainTaskState(CustomScanState *node,
 				{
 					Node   *expr = lfirst(lc);
 
-					str = deparse_expression(expr, dcontext, verbose, true);
+					str = deparse_expression(expr, dcontext, es->verbose, true);
 					if (buf.len > 0)
 						appendStringInfoString(&buf, ", ");
 					appendStringInfo(&buf, "[%s]", str);
 				}
 			}
-			if (!es->analyze || !ps_state)
+			if (es->analyze || es->costs)
 			{
-				appendStringInfo(&buf, " ... [nrows: %.0f -> %.0f]",
-								 ntuples, pp_inner->join_nrows);
-			}
-			else
-			{
-				uint64_t	next_ntuples;
-				uint64_t	roj_ntuples;
-
-				next_ntuples = pg_atomic_read_u64(&ps_state->inners[i].stats_join);
-				roj_ntuples = pg_atomic_read_u64(&ps_state->inners[i].stats_roj);
-				if (roj_ntuples == 0)
+				appendStringInfoString(&buf, " [");
+				if (es->costs)
 				{
-					appendStringInfo(&buf,
-									 " ... [plan: %.0f -> %.0f, exec: %lu -> %lu]",
-									 ntuples, pp_inner->join_nrows,
-									 stat_ntuples,
-									 next_ntuples);
+					appendStringInfo(&buf, "plan: %.0f -> %.0f",
+									 ntuples,
+									 pp_inner->join_nrows);
 				}
-				else
+				if (ps_state && es->analyze)
 				{
-					appendStringInfo(&buf,
-									 " ... [plan: %.0f -> %.0f, exec: %lu+%lu -> %lu]",
-									 ntuples, pp_inner->join_nrows,
-									 stat_ntuples,
-									 roj_ntuples,
-									 next_ntuples);
+					uint64_t	next_ntuples
+						= pg_atomic_read_u64(&ps_state->inners[i].stats_join);
+					uint64_t	roj_ntuples
+						= pg_atomic_read_u64(&ps_state->inners[i].stats_roj);
+					if (roj_ntuples == 0)
+					{
+						appendStringInfo(&buf, "%sexec: %lu -> %lu",
+										 es->costs ? ", " : "",
+										 stat_ntuples,
+										 next_ntuples);
+					}
+					else
+					{
+						appendStringInfo(&buf, "%sexec: %lu+%lu -> %lu",
+										 es->costs ? ", " : "",
+										 stat_ntuples,
+										 roj_ntuples,
+										 next_ntuples);
+					}
+					stat_ntuples = next_ntuples;
 				}
-				stat_ntuples = next_ntuples;
 			}
 			switch (pp_inner->join_type)
 			{
@@ -2485,7 +2489,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			{
 				Node   *expr = lfirst(lc);
 
-				str = deparse_expression(expr, dcontext, verbose, true);
+				str = deparse_expression(expr, dcontext, es->verbose, true);
 				if (buf.len > 0)
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, str);
@@ -2501,7 +2505,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			{
 				Node   *expr = lfirst(lc);
 
-				str = deparse_expression(expr, dcontext, verbose, true);
+				str = deparse_expression(expr, dcontext, es->verbose, true);
 				if (buf.len > 0)
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, str);
@@ -2518,7 +2522,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			resetStringInfo(&buf);
 
 			str = deparse_expression((Node *)pp_inner->gist_clause,
-									 dcontext, verbose, true);
+									 dcontext, es->verbose, true);
 			appendStringInfoString(&buf, str);
 			if (idxname && colname)
 				appendStringInfo(&buf, " on %s (%s)", idxname, colname);
@@ -2554,7 +2558,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
 			str = deparse_expression((Node *)tle->expr,
-									 dcontext, verbose, true);
+									 dcontext, es->verbose, true);
 			appendStringInfoString(&buf, str);
 		}
 		snprintf(label, sizeof(label),
@@ -2606,11 +2610,6 @@ pgstromExplainTaskState(CustomScanState *node,
 		/* GPU-Cache */
 		pgstromGpuCacheExplain(pts, es, dcontext);
 	}
-	else if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0)
-	{
-		/* GPU-Direct */
-		pgstromGpuDirectExplain(pts, es, dcontext);
-	}
 	else if (pts->ds_entry)
 	{
 		/* DPU-Entry */
@@ -2618,7 +2617,8 @@ pgstromExplainTaskState(CustomScanState *node,
 	}
 	else
 	{
-		/* Normal Heap Storage */
+		/* GPU-Direct or VFS Heap Read */
+		pgstromGpuDirectExplain(pts, es, dcontext);
 	}
 	/* State of BRIN-index */
 	if (pts->br_state)
@@ -2636,7 +2636,7 @@ pgstromExplainTaskState(CustomScanState *node,
 
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
-			str = deparse_expression(sortkey, dcontext, verbose, true);
+			str = deparse_expression(sortkey, dcontext, es->verbose, true);
 			appendStringInfoString(&buf, str);
 		}
 		if (pgstrom_explain_developer_mode)
@@ -2688,7 +2688,7 @@ pgstromExplainTaskState(CustomScanState *node,
 				}
 				str = deparse_expression(sortkey,
 										 dcontext,
-										 verbose, true);
+										 es->verbose, true);
 				if (needs_comma)
 					appendStringInfoChar(&buf, ',');
 				appendStringInfo(&buf, " %s", str);

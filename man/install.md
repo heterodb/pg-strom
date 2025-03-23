@@ -558,6 +558,29 @@ Mon Jun  3 09:56:41 2024
 +-----------------------------------------------------------------------------------------+
 ```
 
+@ja{
+!!! Tips
+    **NVSwitch搭載システムの追加設定**
+    
+    複数のGPUを搭載し、それらのインターコネクトにNVSwitchを使用するシステムでは、`nvidia-fabricmanager`モジュールの追加インストールが必要です。このパッケージがインストールされていない場合、CUDAの初期化を行う`cuInit()`が`CUDA_ERROR_SYSTEM_NOT_READY`エラーで失敗し、PG-Stromを起動する事ができません。
+    以下のコマンドで`nvidia-fabricmanager`を追加インストールしてください。
+    [(参考情報)](https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#cuda-error-system-not-ready-after-installation)
+}
+@en{
+!!! Tips
+    **Additional configurations for systems with NVSwitch**
+
+    For systems with multiple GPUs that use NVSwitch for interconnect them, the `nvidia-fabricmanager` module must be installed.
+    If this package is not installed, `cuInit()`, which initializes CUDA, will fail with the `CUDA_ERROR_SYSTEM_NOT_READY` error, and PG-Strom will not start. 
+    Run the following commands to install the `nvidia-fabricmanager` package.
+    [(source)](https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#cuda-error-system-not-ready-after-installation)
+}
+```
+# dnf install nvidia-fabricmanager
+# systemctl enable nvidia-fabricmanager.service
+# systemctl start nvidia-fabricmanager.service
+```
+
 @ja:### GPUDirect Storageの確認
 @en:### Check GPUDirect Storage status
 
@@ -1263,17 +1286,33 @@ $ sudo dpkg -i heterodb-extra_5.4-1_amd64.deb
 PG-Stromはソースコードをチェックアウトしてインストールします。
 この時、ターゲットとするPostgreSQLの`pg_config`を指定するのを忘れないようにしてください。
 
-インストール後の設定は Red Hat Enterprise Linux や Rocky Linux の場合と同じです。
+インストール後の設定は Red Hat Enterprise Linux や Rocky Linux の場合とほぼ同じです。
 }
 @en{
 Checkout the source code of PG-Strom, build and install as follows.
 At this time, do not forget to specify the target PostgreSQL by `pg_config`.
 
-Post-installation configuration is the same as for Red Hat Enterprise Linux or Rocky Linux.
+Post-installation configuration is almost same as for Red Hat Enterprise Linux or Rocky Linux.
 }
 ```
 $ git clone https://github.com/heterodb/pg-strom.git
 $ cd pg-strom/src
 $ make PG_CONFIG=/path/to/pgsql/bin/pg_config -j 8
 $ sudo make PG_CONFIG=/path/to/pgsql/bin/pg_config install
+```
+@ja{
+ただし、パッケージインストールしたPostgreSQLを使用してsystemctl経由でこれを起動する場合、PATH環境変数がクリアされてしまいます。（これはおそらくセキュリティ面での理由でしょう）
+そのため、初回起動時にGPUバイナリをビルドするために起動したスクリプトが正しく動作しません。
+これを避けるため、Ubuntu Linuxを利用する場合は`/etc/postgresql/PGVERSION/main/environment`に以下の内容を追記してください。
+}
+@en{
+However, if you use a packaged PostgreSQL and start it via systemctl, the PATH environment variable will be cleared (probably for security reasons).
+As a result, the script launched to build the GPU binary on the first startup will not work properly.
+To avoid this, if you are using Ubuntu Linux, add the following line to `/etc/postgresql/main/PGVERSION/environment`.
+}
+```
+/etc/postgresql/PGVERSION/main/environment:
+
+
+PATH='/usr/local/cuda/bin:/usr/bin:/bin'
 ```
