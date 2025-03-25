@@ -4157,7 +4157,8 @@ codegen_build_gpusort_keydesc(codegen_context *context,
 		}
 	}
 	/* GPU-Sort + Window-Rank() functions, if any */
-	Assert(pp_info->gpusort_limit_count == 0);
+	Assert(pp_info->gpusort_limit_count == 0 ||
+		   pp_info->window_rank_func == 0);		/* mutually exclusive */
 	kexp->u.sort.window_rank_func		= pp_info->window_rank_func;
 	kexp->u.sort.window_rank_limit		= pp_info->window_rank_limit;
 	kexp->u.sort.window_partby_nkeys	= pp_info->window_partby_nkeys;
