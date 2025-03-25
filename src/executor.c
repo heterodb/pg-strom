@@ -888,8 +888,6 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 {
 	XpuConnection  *conn = pts->conn;
 	XpuCommand	   *xcmd;
-	struct iovec	xcmd_iov[10];
-	int				xcmd_iovcnt;
 	int				ev;
 
 	pthreadMutexLock(&conn->mutex);
@@ -926,15 +924,17 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 			{
 				pts->final_done = true;
 				if (try_final_callback &&
-					pgstromTaskStateEndScan(pts) &&
-					pts->cb_final_chunk != NULL)
+					pgstromTaskStateEndScan(pts))
 				{
-					xcmd = pts->cb_final_chunk(pts, xcmd_iov, &xcmd_iovcnt);
-					if (xcmd)
-					{
-						xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
-						continue;
-					}
+					/* send XpuTaskFinal if we are actually the final one */
+					XpuCommand	__xcmd;
+
+					memset(&__xcmd, 0, sizeof(XpuCommand));
+					__xcmd.magic  = XpuCommandMagicNumber;
+					__xcmd.tag    = XpuCommandTag__XpuTaskFinal;
+					__xcmd.length = offsetof(XpuCommand, u);
+					xpuClientSendCommand(conn, &__xcmd);
+					continue;
 				}
 			}
 			return NULL;
@@ -1105,31 +1105,6 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 	} while (tryExecCpuFallbackChunks(pts) > 0);
 
 	return NULL;
-}
-
-/*
- * pgstromExecFinalChunk
- */
-static XpuCommand *
-pgstromExecFinalChunk(pgstromTaskState *pts,
-					  struct iovec *xcmd_iov, int *xcmd_iovcnt)
-{
-	XpuCommand	   *xcmd;
-
-	pts->xcmd_buf.len = offsetof(XpuCommand, u);
-	enlargeStringInfo(&pts->xcmd_buf, 0);
-
-	xcmd = (XpuCommand *)pts->xcmd_buf.data;
-	memset(xcmd, 0, sizeof(XpuCommand));
-	xcmd->magic  = XpuCommandMagicNumber;
-	xcmd->tag    = XpuCommandTag__XpuTaskFinal;
-	xcmd->length = offsetof(XpuCommand, u);
-
-	xcmd_iov[0].iov_base = xcmd;
-	xcmd_iov[0].iov_len  = offsetof(XpuCommand, u);
-	*xcmd_iovcnt = 1;
-
-	return xcmd;
 }
 
 /*
@@ -1650,23 +1625,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  tupdesc_src,
 									  KDS_FORMAT_BLOCK);
 	}
-	/*
-	 * workload specific callback routines
-	 */
-	if ((pts->xpu_task_flags & DEVTASK__SCAN) != 0)
-	{
-		pts->cb_final_chunk = pgstromExecFinalChunk;
-	}
-	else if ((pts->xpu_task_flags & DEVTASK__JOIN) != 0)
-	{
-		pts->cb_final_chunk = pgstromExecFinalChunk;
-	}
-	else if ((pts->xpu_task_flags & DEVTASK__PREAGG) != 0)
-	{
-		pts->cb_final_chunk = pgstromExecFinalChunk;
-	}
-	else
-		elog(ERROR, "Bug? unknown DEVTASK");
 	/* other fields init */
 	pts->curr_vm_buffer = InvalidBuffer;
 }
@@ -1991,6 +1949,7 @@ pgstromExecEndTaskState(CustomScanState *node)
 {
 	pgstromTaskState   *pts = (pgstromTaskState *)node;
 	pgstromSharedState *ps_state = pts->ps_state;
+	TableScanDesc scan = pts->css.ss.ss_currentScanDesc;
 	ListCell   *lc;
 
 	if (pts->curr_vm_buffer != InvalidBuffer)
@@ -2005,8 +1964,8 @@ pgstromExecEndTaskState(CustomScanState *node)
 		pgstromArrowFdwExecEnd(pts->arrow_state);
 	if (pts->base_slot)
 		ExecDropSingleTupleTableSlot(pts->base_slot);
-	if (pts->css.ss.ss_currentScanDesc)
-		table_endscan(pts->css.ss.ss_currentScanDesc);
+	if (scan)
+		table_endscan(scan);
 	for (int i=0; i < pts->num_rels; i++)
 	{
 		pgstromTaskInnerState *istate = &pts->inners[i];
@@ -2035,23 +1994,68 @@ pgstromExecResetTaskState(CustomScanState *node)
 	pgstromSharedState *ps_state = pts->ps_state;
 	Relation	rel = node->ss.ss_currentRelation;
 	TableScanDesc scan = node->ss.ss_currentScanDesc;
+	ListCell   *lc;
 
+	/* reset connections */
 	if (pts->conn)
 	{
 		xpuClientCloseSession(pts->conn);
 		pts->conn = NULL;
+		if (pts->curr_resp)
+			xpuClientPutResponse(pts->curr_resp);
+		pts->curr_resp = NULL;
+		pts->curr_kds = NULL;
+		pts->curr_chunk = 0;
+		pts->curr_index = 0;
+		pts->scan_done = false;
+		pts->final_done = false;
 	}
-	/* reset status */
+	else
+	{
+		Assert(!pts->curr_resp &&
+			   !pts->curr_kds &&
+			   !pts->curr_chunk &&
+			   !pts->curr_index &&
+			   !pts->scan_done &&
+			   !pts->final_done);
+	}
+	/* reset related stuff */
 	if (pts->br_state)
 		pgstromBrinIndexExecReset(pts);
 	if (pts->arrow_state)
 		pgstromArrowFdwExecReset(pts->arrow_state);
-	if (!scan->rs_parallel)
-		table_rescan(scan, NULL);
-	else
-		table_parallelscan_reinitialize(rel, scan->rs_parallel);
+	if (scan)
+	{
+		if (!scan->rs_parallel)
+			table_rescan(scan, NULL);
+		else
+			table_parallelscan_reinitialize(rel, scan->rs_parallel);
+	}
 	if (ps_state)
+	{
 		pg_atomic_write_u64(&ps_state->scan_block_count, 0);
+		pg_atomic_write_u32(&ps_state->parallel_task_control, 0);
+		for (int i=0; i < ps_state->num_rels; i++)
+		{
+			pgstromSharedInnerState *istate = &ps_state->inners[i];
+
+			pg_atomic_write_u64(&istate->inner_nitems, 0);
+			pg_atomic_write_u64(&istate->inner_usage, 0);
+			pg_atomic_write_u64(&istate->inner_total, 0);
+		}
+		ps_state->preload_phase = 0;
+		ps_state->preload_nr_scanning = 0;
+		ps_state->preload_nr_setup = 0;
+		ps_state->preload_shmem_length = 0;
+	}
+	if (pts->h_kmrels)
+	{
+		__munmapShmem(pts->h_kmrels);
+		pts->h_kmrels = NULL;
+	}
+	/* reset child plans */
+	foreach (lc, pts->css.custom_ps)
+		ExecReScan((PlanState *) lfirst(lc));
 }
 
 /*
