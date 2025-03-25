@@ -171,6 +171,8 @@
 <dd><code>off</code>, <code>false</code> ... エラーを発生させCPUでの再実行を行わない</dd>
 <dt><code>pg_strom.regression_test_mode</code> [型: <code>bool</code> / 初期値: <code>off]</code></dt>
 <dd>GPUモデル名など、実行環境に依存して表示が変わる可能性のある<code>EXPLAIN</code>コマンドの出力を抑制します。これはリグレッションテストにおける偽陽性を防ぐための設定で、通常は利用者が操作する必要はありません。</dd>
+<dt><code>pg_strom.explain_developer_mode</code> [型: <code>bool</code> / 初期値: <code>off]</code></dt>
+<dd>EXPLAIN VERBOSEで表示される様々な情報のうち、開発者向けに有用な情報を表示します。これらは一般ユーザやDB管理者にとっては煩雑な情報であるため、通常は初期値のまま利用する事をお勧めします。</dd>
 </dl>
 <h2 id="_2">オプティマイザに関する設定</h2>
 <dl>

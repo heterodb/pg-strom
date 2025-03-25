@@ -171,6 +171,8 @@
 <dd><code>off</code>, <code>false</code> ... Disabled CPU fallback operations with an error</dd>
 <dt><code>pg_strom.regression_test_mode</code> [type: <code>bool</code> / default: <code>off]</code></dt>
 <dd>It disables some <code>EXPLAIN</code> command output that depends on software execution platform, like GPU model name. It avoid "false-positive" on the regression test, so use usually don't tough this configuration.</dd>
+<dt><code>pg_strom.explain_developer_mode</code> [型: <code>bool</code> / 初期値: <code>off]</code></dt>
+<dd>Among the various information displayed by EXPLAIN VERBOSE, this option displays information that is useful for developers. Since this information is cumbersome for general users and DB administrators, we recommend that you usually leave it at the default value.</dd>
 </dl>
 <h2 id="optimizer-configuration">Optimizer Configuration</h2>
 <dl>

@@ -157,7 +157,7 @@ Fluentd allows customization of the input/output and processing of log data by a
 <p>PG-Strom can handle two types of data formats: PostgreSQL Heap format (transactional row data) and Apache Arrow format (structured column data). The Apache Arrow format is suitable for workloads like those in the IoT/M2M, where huge amounts of data are generated time-by-time.</p>
 <h2 id="arrow-file-plugin">arrow-file plugin</h2>
 <p>This chapter describes the approach to write out the log data collected by Fluentd in Apache Arrow format, and to refere it with PG-Strom.
-We assume <code>td-agent</code> here, that is a stable version of Fluentd provided by Treasure Data.</p>
+We assume <code>fluentd</code> here, that is a stable version of Fluentd provided by Treasure Data.</p>
 <p>PG-Strom includes the <code>fluent-plugin-arrow-file</code> module. This allows Fluentd to write out the log data it collects as an Apache Arrow format file with a specified schema structure.
 Using PG-Strom's Arrow_Fdw, this Apache Arrow format file can be accessed as an foreign table.
 In addition, GPU-Direct SQL allows to load these files extremely fast, if the storage system is appropriately configured.</p>
@@ -178,21 +178,21 @@ The arrow-file plugin is categorized as Output plugin. It writes out a "chunk" o
 The arrow-file plugin writes to an Apache Arrow format file with the <code>tag</code> and <code>time</code> fields and each element of the <code>record</code> associative array as a column (some may be omitted).
 Therefore, the output destination file name and schema definition information (mapping of associative array elements to columns/types) are mandatory configuration parameters.</p>
 <h2 id="installation">Installation</h2>
-<p>Install the <code>td-agent</code> package for Linux distribution you are using.
+<p>Install the <code>fluentd</code> package for Linux distribution you are using.
 The <code>rake-compiler</code> module is required to install the arrow-file plugin, so please install it before.</p>
-<pre><code>$ curl -L https://toolbelt.treasuredata.com/sh/install-redhat-td-agent4.sh | sh
+<pre><code>$ curl -fsSL https://toolbelt.treasuredata.com/sh/install-redhat-fluent-package5-lts.sh | sh
 
-$ sudo /opt/td-agent/bin/fluent-gem install rake-compiler
+$ sudo /opt/fluent/bin/fluent-gem install rake-compiler
 </code></pre>
 <p>Next, download the source code for PG-Strom and build arrow-file plugin in the <code>fluentd</code> directory.</p>
 <pre><code>$ git clone https://github.com/heterodb/pg-strom.git
 $ cd pg-strom/fluentd
-$ make TD_AGENT=1 gem
-$ sudo make TD_AGENT=1 install
+$ make FLUENT=1 gem
+$ sudo make FLUENT=1 install
 </code></pre>
 <p>To confirm that the Fluentd plugin is installed, run the following command.</p>
-<pre><code>$ /opt/td-agent/bin/fluent-gem list | grep arrow
-fluent-plugin-arrow-file (0.2)
+<pre><code>$ /opt/fluent/bin/fluent-gem list | grep arrow
+fluent-plugin-arrow-file (0.3)
 </code></pre>
 <h2 id="configuration">Configuration</h2>
 <p>As mentioned above, the arrow-file plugin requires the output path of the file and the schema definition at least.</p>
@@ -336,11 +336,11 @@ Therefore, the buffer size of the Buffer plugin should be set with the size of t
 <p>By setting <code>&lt;source&gt;</code>, <code>/var/log/httpd/access_log</code> will be the data source. Then, the <code>apache2</code> Parse plugin will cut out the fields: host, user, time, method, path, code, size, referer, agent.</p>
 <p>The fields are then passed to the arrow-file plugin as an associative array. In <code>schema_defs</code> in <code>&lt;match&gt;</code>, the column definitions of the Apache Arrow file corresponding to the fields are set.
 For simplicity of explanation, the chunk size is set to a maximum of 4MB / 200 lines in the <code>&lt;buffer&gt;</code> tag, and it is set to pass to the Output plugin in 10 seconds at most.</p>
-<p><strong><em>Example configuration of <code>/etc/td-agent/td-agent.conf</code></em></strong></p>
+<p><strong><em>Example configuration of <code>/etc/fluent/fluentd.conf</code></em></strong></p>
 <pre><code>&lt;source&gt;
   @type tail
   path /var/log/httpd/access_log
-  pos_file /var/log/td-agent/httpd_access.pos
+  pos_file /var/log/fluent/httpd_access.pos
   tag httpd
   format apache2
   &lt;parse&gt;
@@ -362,8 +362,8 @@ For simplicity of explanation, the chunk size is set to a maximum of 4MB / 200 l
   &lt;/buffer&gt;
 &lt;/match&gt;
 </code></pre>
-<p>Start the <code>td-agent</code> service.</p>
-<pre><code>$ sudo systemctl start td-agent
+<p>Start the <code>fluentd</code> service.</p>
+<pre><code>$ sudo systemctl start fluentd
 </code></pre>
 <p>See the following output. The placeholder for <code>/tmp/mytest%Y%m%d.%p.arrow</code> set in <code>path</code> is replaced and the Apache Httpd log is written to <code>/tmp/mytest20220124.3206341.arrow</code>.</p>
 <pre><code>$ arrow2csv /tmp/mytest20220124.3206341.arrow --head --offset 300 --limit 10

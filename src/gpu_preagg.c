@@ -2775,11 +2775,21 @@ __attachGpuSortWithWindowRankPath(PlannerInfo *root,
 		double	nrows;
 		Cost	__startup_cost;
 		Cost	__per_tuple;
+		List   *__partby_keys = NIL;
+		int		__count = 0;
 
+		foreach (lc, pp_info->gpusort_keys_expr)
+		{
+			if (__count++ >= window_partby_nkeys)
+				break;
+			__partby_keys = lappend(__partby_keys, lfirst(lc));
+		}
 		ngroups = estimate_num_groups(root,
-									  pp_info->gpusort_keys_expr,
+									  __partby_keys,
 									  cpath->path.rows,
 									  NULL, NULL);
+		list_free(__partby_keys);
+
 		nrows = (double)window_limit * ngroups;
 		if (nrows >= cpath->path.rows)
 		{
