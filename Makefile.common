@@ -1,6 +1,6 @@
 PG_CONFIG ?= pg_config
-VERSION ?= 5.2
-RELEASE ?= 2
+VERSION ?= 6.0
+RELEASE ?= 1
 GITHASH_IF_NOT_GIVEN := HEAD
 
 #
