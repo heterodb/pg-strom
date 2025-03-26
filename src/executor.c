@@ -2469,6 +2469,7 @@ pgstromExplainTaskState(CustomScanState *node,
 					}
 					stat_ntuples = next_ntuples;
 				}
+				appendStringInfoString(&buf, "]");
 			}
 			switch (pp_inner->join_type)
 			{
