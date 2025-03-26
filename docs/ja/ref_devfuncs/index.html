@@ -107,6 +107,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#cube">CUBE型関数</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#vcf">VCF検索関数</a>
+    </li>
     </ul>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
@@ -553,6 +555,27 @@ PG-Stromは<code>jsonb -&gt;&gt; KEY</code>演算子による参照とテキス�
 <dt><code>float8 cube_ll_coord(cube, int4)</code></dt>
 <dd>立体の左下隅のn次座標の値を返します。</dd>
 </dl>
+<h2 id="vcf">VCF検索関数</h2>
+<dl>
+<dt><code>text vcf_variant_getattr(text, text)</code></dt>
+<dd>第一引数を':'区切りのトークン列と見なして、第二引数で指定された<code>KEY=</code>以降の文字列を返す。</dd>
+</dl>
+<pre><code>=# SELECT vcf_variant_getattr('ABC=123:NM=this is a pen:XYZ=3.1415', 'NM');
+ vcf_variant_getattr
+---------------------
+ this is a pen
+(1 row)
+</code></pre>
+<dl>
+<dt><code>text vcf_info_getattr(text, text)</code></dt>
+<dd>第一引数を';'区切りのトークン列と見なして、第二引数で指定された<code>KEY=</code>以降の文字列を返す。</dd>
+</dl>
+<pre><code>=# SELECT vcf_info_getattr('ABC=123;NM=this is a pen;XYZ=3.1415', 'XYZ');
+ vcf_info_getattr
+------------------
+ 3.141
+(1 row)
+</code></pre>
               
             </div>
           </div><footer>

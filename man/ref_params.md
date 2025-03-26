@@ -67,6 +67,17 @@ This session introduces PG-Strom's configuration parameters.
 }
 
 @ja{
+`pg_strom.enable_gpusort` [型: `bool` / 初期値: `on]`
+:   GPU-Sortによるソートを有効化/無効化する。
+:   GPU-Sortの詳細は(こちら)[gpusort.md]を参照してください。
+}
+@en{
+`pg_strom.enable_gpusort` [type: `bool` / default: `on]`
+:   Enables/disables GPU-Sort
+:   Check (here)[gpusort.md] to know the detail of GPU-Sort.
+}
+
+@ja{
 `pg_strom.enable_numeric_aggfuncs` [型: `bool` / 初期値: `on]`
 :   `numeric`データ型を引数に取る集約演算をGPUで処理するかどうかを制御する。
 :   GPUでの集約演算において`numeric`データ型は128bit固定小数点変数にマッピングされるため、極端に大きな数、あるいは高精度な数の集計を行う場合はエラーとなってしまいます。そのようなワークロードに対しては、この設定値を `off` にしてCPUで集約演算を実行するよう強制する事ができます。
@@ -116,6 +127,7 @@ This session introduces PG-Strom's configuration parameters.
 `pg_strom.explain_developer_mode` [型: `bool` / 初期値: `off]`
 :   Among the various information displayed by EXPLAIN VERBOSE, this option displays information that is useful for developers. Since this information is cumbersome for general users and DB administrators, we recommend that you usually leave it at the default value.
 }
+
 
 @ja:## オプティマイザに関する設定
 @en:## Optimizer Configuration
@@ -173,6 +185,28 @@ This session introduces PG-Strom's configuration parameters.
 `pg_strom.pinned_inner_buffer_threshold` [type: `int` / 初期値: `0`]
 :    If the INNER table of GpuJoin is either GpuScan or GpuJoin, and the estimated size of its processing result is larger than this configured value, the result is retained on the GPU device without being returned to the CPU, and then reused as a part of the INNER buffer of the subsequent GpuJoin.
 :    If the configured value is `0`, this function will be disabled.
+}
+
+@ja{
+`pg_strom.pinned_inner_buffer_partition_size` [型: `int` / 初期値: 自動]
+:    GPU-JoinでPinned Inner Bufferを使用する場合、バッファのサイズがこのパラメータで指定した閾値を越えると、バッファを複数個に分割するよう試みます。このパラメータはGPUメモリの70%～80%程度に自動設定され、通常はユーザが指定する必要はありません。
+:    詳しくは(こちら)[operations.md#gpujoininner-pinned-buffer]を参照してください。
+}
+@en{
+`pg_strom.pinned_inner_buffer_partition_size` [type: `int` / default: auto]
+:    When using Pinned Inner Buffer with GPU-Join, if the buffer size exceeds the threshold specified by this parameter, it will attempt to split the buffer into multiple pieces. This parameter is automatically set to about 70% to 80% of the GPU memory, and usually does not need to be specified by the user.
+:    Check (here)[http://buri.heterodb.in/operations/#inner-pinned-buffer-of-gpujoin] for more information.
+}
+
+@ja{
+`pg_strom.extra_ereport_level` [型: `int` / 初期値: 自動]
+:    heterodb-extraモジュールが報告するエラーのレベルを0～2で指定します。
+:    初期値は環境変数`HETERODB_EXTRA_EREPORT_LEVEL`の値により設定され、未設定の場合は`0`となります。
+}
+@en{
+`pg_strom.extra_ereport_level` [type: `int` / default: auto]
+:    Specifies the error level reported by the heterodb-extra module from 0 to 2.
+:    The initial value is set by the value of the environment variable `HETERODB_EXTRA_EREPORT_LEVEL`, and if not set, it will be `0`.
 }
 
 @ja:## エグゼキュータに関する設定
@@ -309,24 +343,6 @@ This session introduces PG-Strom's configuration parameters.
 :   If this parameter is '*', PG-Strom tries to load all the configured tables onto GPU Cache sequentially.
 }
 
-<!--
-@ja:##HyperLogLogの設定
-@en:##HyperLogLog configuration
-@ja{
-`pg_strom.hll_registers_bits` [型: `int` / 初期値: `9`]
-:    HyperLogLogで使用する HLL Sketch の幅を指定します。
-:    実行時に`2^pg_strom.hll_registers_bits`個のレジスタを割当て、ハッシュ値の下位`pg_strom.hll_registers_bits`ビットをレジスタのセレクタとして使用します。設定可能な値は4～15の範囲内です。
-:    PG-StromのHyperLogLog機能について、詳しくは[HyperLogLog](hll_count.md)を参照してください。
-}
-@en{
-`pg_strom.hll_registers_bits` [type: `int` / default: `9`]
-:    It specifies the width of HLL Sketch used for HyperLogLog.
-:    PG-Strom allocates `2^pg_strom.hll_registers_bits` registers for HLL Sketch, then uses the latest `pg_strom.hll_registers_bits` bits of hash-values as register selector. It must be configured between 4 and 15.
-:    See [HyperLogLog](hll_count.md) for more details of HyperLogLog functionality of PG-Strom.
-}
--->
-
-
 @ja:## GPUデバイスに関連する設定
 @en:## GPU Device Configuration
 
@@ -375,12 +391,23 @@ This session introduces PG-Strom's configuration parameters.
 }
 
 @ja{
-`pg_strom.gpuserv_debug_output` [型: `bool` / 初期値: `false`]
-:   GPU Serviceのデバッグメッセージ出力を有効化/無効化します。このメッセージはデバッグにおいて有効である場合がありますが、通常は初期値のまま変更しないで下さい。
+`pg_strom.cuda_toolkit_basedir` [型: `text` / 初期値: `/usr/local/cuda`]
+:   PG-Stromは起動時にCUDA Toolkitを使用してGPUコードをビルドしますが、その際に利用するCUDA Toolkitのインストールパスを指定します。通常は`/usr/local/cuda`配下にCUDAツールがインストールされますが、異なるディレクトリを使用する場合は本パラメータを使って設定を変更できます。
 }
 @en{
-`pg_strom.gpuserv_debug_output` [type: `bool` / default: `false`]
-:   Enable/disable GPU Service debug message output. This message may be useful for debugging, but normally you should not change it from the default value.
+`pg_strom.cuda_toolkit_basedir` [type: `text` / default: `/usr/local/cuda`]
+:   PG-Strom uses the CUDA Toolkit to build GPU code on its start-up. Specify the installation path of the CUDA Toolkit to be used at that time. Normally, the CUDA toolkit is installed under `/usr/local/cuda`, but if you want to use a different directory, you can change the setting with this parameter.
+}
+
+@ja{
+`pg_strom.cuda_stack_limit` [型: `int` / 初期値: `32`]
+:   PG-StromがSQLワークロードをGPUで実行する際、処理の複雑さに応じてGPUスレッドの使用するスタック領域の大きさを自動的に設定します。例えば、PostGIS関数や再帰呼び出しを含む式表現には比較的大きめのスタックを割り当てます。
+:   このパラメータは、その場合の上限値をkB単位で指定します。
+}
+@en{
+`pg_strom.cuda_stack_limit` [type: `int` / default: `32`]
+:   When PG-Strom executes SQL workloads on the GPU, it automatically configures the size of the stack space used by GPU threads depending on the complexity of the processing. For example, it allocates a relatively large stack for PostGIS functions or expressions that include recursive calls.
+:   This parameter specifies the upper limit in kB in that case.
 }
 
 @ja{

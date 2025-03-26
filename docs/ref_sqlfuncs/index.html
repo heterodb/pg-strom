@@ -210,6 +210,34 @@ So, <code>pgstrom.device_info</code> system view identifies the target property 
 <dd>FDW options validation function of Arrow_Fdw. Usually, users don't need to invoke this function.</dd>
 <dt><code>event_trigger pgstrom.arrow_fdw_precheck_schema()</code></dt>
 <dd>Event trigger function to validate schema definition of Arrow files. Usually, users don't need to invoke this function.</dd>
+<dt><code>text pgstrom.arrow_fdw_check_pattern(text, text)</code></dt>
+<dd>Checks whether the file name given in the first argument matches the pattern given in the second argument. This is useful for checking how wildcards work when using the <code>pattern</code> option of Arrow_Fdw.</dd>
+</dl>
+<pre><code>=# select pgstrom.arrow_fdw_check_pattern('data_202408_tokyo.data', 'data__${region}.data');
+          arrow_fdw_check_pattern
+-------------------------------------------
+ true {@ymd]=[202408], $[region]=[tokyo]}
+(1 row)
+</code></pre>
+<p>_${region}.data'<code>のうち、ワイルドカード``に相当する部分が</code>202408<code>にマッチし、</code>${region}<code>に相当する部分が</code>tokyo`にマッチしています。
+}</p>
+<p>In the above example, for the file name <code>data_202408_tokyo.data</code>, the part of the pattern <code>'data_@ymd_${region}.data'</code> that corresponds to the wildcard <code>` matches</code>202408<code>, and the part that corresponds to</code>${region}<code>matches</code>tokyo`.
+}</p>
+<dl>
+<dt><code>record pgstrom.arrow_fdw_metadata_info(regclass)</code></dt>
+<dd>Displays the metadata (CustomMetadata) embedded in the supplied Arrow file.</dd>
+</dl>
+<pre><code>postgres=# select relid, filename, field, key, substring(value, 0, 64) from pgstrom.arrow_fdw_metadata_info('f_lineorder');
+    relid    |              filename               |    field     |     key     |                            substring
+-------------+-------------------------------------+--------------+-------------+-----------------------------------------------------------------
+ f_lineorder | /opt/arrow/f_lineorder_sorted.arrow |              | sql_command | select * from v_lineorder order by lo_orderdate
+ f_lineorder | /opt/arrow/f_lineorder_sorted.arrow | lo_orderdate | min_values  | 19920101,19920102,19920103,19920104,19920105,19920107,19920108,
+ f_lineorder | /opt/arrow/f_lineorder_sorted.arrow | lo_orderdate | max_values  | 19920102,19920103,19920104,19920105,19920107,19920108,19920109,
+(3 rows)
+</code></pre>
+<p>In the above example, the metadata (CustomMetadata) embedded in the <code>f_lineorder</code> foreign table managed by Arrow_Fdw is output in KEY=VALUE form.</p>
+<p>Metadata embedded in the schema has the <code>field</code> column set to NULL. Otherwise, the column name is displayed. In this case, you can see that the <code>sql_command</code> metadata is embedded in the schema, and the <code>min_values</code> and <code>max_values</code> are embedded in the <code>lo_orderdate</code> column.</p>
+<dl>
 <dt><code>void pgstrom.arrow_fdw_import_file(text, text, text = null)</code></dt>
 <dd>
 <p>This function tries to import Apache Arrow file, and defines a new foreign table. Its first argument is name of the new foreign table, the second argument is path of the Apache Arrow file, and the optional third argument is the schema name.</p>

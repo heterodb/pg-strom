@@ -161,6 +161,9 @@
 <dd>Enables/disables entire GpuJoin features (including GpuHashJoin and GpuGiSTIndex)</dd>
 <dt><code>pg_strom.enable_gpupreagg</code> [type: <code>bool</code> / default: <code>on]</code></dt>
 <dd>Enables/disables GpuPreAgg</dd>
+<dt><code>pg_strom.enable_gpusort</code> [type: <code>bool</code> / default: <code>on]</code></dt>
+<dd>Enables/disables GPU-Sort</dd>
+<dd>Check (here)[gpusort.md] to know the detail of GPU-Sort.</dd>
 <dt><code>pg_strom.enable_numeric_aggfuncs</code> [type: <code>bool</code> / default: <code>on]</code></dt>
 <dd>Enables/disables support of aggregate function that takes <code>numeric</code> data type.</dd>
 <dd>Note that aggregated function at GPU mapps <code>numeric</code> data type to 128bit fixed-point variable, so it raises an error if you run the aggregate functions with extremely large or highly-precise values. You can turn off this configuration to enforce the aggregate functions being operated by CPU.</dd>
@@ -191,6 +194,12 @@
 <dt><code>pg_strom.pinned_inner_buffer_threshold</code> [type: <code>int</code> / 初期値: <code>0</code>]</dt>
 <dd>If the INNER table of GpuJoin is either GpuScan or GpuJoin, and the estimated size of its processing result is larger than this configured value, the result is retained on the GPU device without being returned to the CPU, and then reused as a part of the INNER buffer of the subsequent GpuJoin.</dd>
 <dd>If the configured value is <code>0</code>, this function will be disabled.</dd>
+<dt><code>pg_strom.pinned_inner_buffer_partition_size</code> [type: <code>int</code> / default: auto]</dt>
+<dd>When using Pinned Inner Buffer with GPU-Join, if the buffer size exceeds the threshold specified by this parameter, it will attempt to split the buffer into multiple pieces. This parameter is automatically set to about 70% to 80% of the GPU memory, and usually does not need to be specified by the user.</dd>
+<dd>Check (here)[http://buri.heterodb.in/operations/#inner-pinned-buffer-of-gpujoin] for more information.</dd>
+<dt><code>pg_strom.extra_ereport_level</code> [type: <code>int</code> / default: auto]</dt>
+<dd>Specifies the error level reported by the heterodb-extra module from 0 to 2.</dd>
+<dd>The initial value is set by the value of the environment variable <code>HETERODB_EXTRA_EREPORT_LEVEL</code>, and if not set, it will be <code>0</code>.</dd>
 </dl>
 <h2 id="executor-configuration">Executor Configuration</h2>
 <dl>
@@ -253,17 +262,6 @@
 <dd>Initial-loading of GPU Cache usually takes a lot of time. So, preloading enables to avoid delay of response time of search/analytic queries on the first time.</dd>
 <dd>If this parameter is '*', PG-Strom tries to load all the configured tables onto GPU Cache sequentially.</dd>
 </dl>
-<!--
-##HyperLogLog configuration
-
-
-`pg_strom.hll_registers_bits` [type: `int` / default: `9`]
-:    It specifies the width of HLL Sketch used for HyperLogLog.
-:    PG-Strom allocates `2^pg_strom.hll_registers_bits` registers for HLL Sketch, then uses the latest `pg_strom.hll_registers_bits` bits of hash-values as register selector. It must be configured between 4 and 15.
-:    See [HyperLogLog](hll_count.md) for more details of HyperLogLog functionality of PG-Strom.
-
--->
-
 <h2 id="gpu-device-configuration">GPU Device Configuration</h2>
 <dl>
 <dt><code>pg_strom.gpu_mempool_segment_sz</code> [type: <code>int</code> / default: <code>1GB</code>]</dt>
@@ -278,8 +276,11 @@
 <dt><code>pg_strom.gpu_mempool_release_delay</code> [type: <code>int</code> / default: <code>5000</code>]</dt>
 <dd>GPU Service does not release a segment of a memory pool immediately, even if it becomes empty. When the time specified by this parameter (in milliseconds) has elapsed since the segment was last used, it is released and returned to the system.</dd>
 <dd>By inserting a certain delay, you can reduce the frequency of GPU device memory allocation/release.</dd>
-<dt><code>pg_strom.gpuserv_debug_output</code> [type: <code>bool</code> / default: <code>false</code>]</dt>
-<dd>Enable/disable GPU Service debug message output. This message may be useful for debugging, but normally you should not change it from the default value.</dd>
+<dt><code>pg_strom.cuda_toolkit_basedir</code> [type: <code>text</code> / default: <code>/usr/local/cuda</code>]</dt>
+<dd>PG-Strom uses the CUDA Toolkit to build GPU code on its start-up. Specify the installation path of the CUDA Toolkit to be used at that time. Normally, the CUDA toolkit is installed under <code>/usr/local/cuda</code>, but if you want to use a different directory, you can change the setting with this parameter.</dd>
+<dt><code>pg_strom.cuda_stack_limit</code> [type: <code>int</code> / default: <code>32</code>]</dt>
+<dd>When PG-Strom executes SQL workloads on the GPU, it automatically configures the size of the stack space used by GPU threads depending on the complexity of the processing. For example, it allocates a relatively large stack for PostGIS functions or expressions that include recursive calls.</dd>
+<dd>This parameter specifies the upper limit in kB in that case.</dd>
 <dt><code>pg_strom.cuda_visible_devices</code> [type: <code>text</code> / default: <code>null</code>]</dt>
 <dd>List of GPU device numbers in comma separated, if you want to recognize particular GPUs on PostgreSQL startup.</dd>
 <dd>It is equivalent to the environment variable <code>CUDAVISIBLE_DEVICES</code></dd>

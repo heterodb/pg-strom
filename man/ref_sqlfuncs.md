@@ -73,6 +73,47 @@ postgres=# select * from pgstrom.gpu_device_info limit 10;
 @ja:: Arrowファイルのスキーマ定義をチェックするためのイベントトリガ関数です。通常、ユーザがこの関数を使用する必要はありません。
 @en:: Event trigger function to validate schema definition of Arrow files. Usually, users don't need to invoke this function.
 
+`text pgstrom.arrow_fdw_check_pattern(text, text)`
+@ja:: 第一引数で与えたファイル名が、第二引数で与えたパターンにマッチするかどうかを検査します。Arrow_Fdwの`pattern`オプションを用いる場合に、ワイルドカードがどのように働くのかを検査するのに便利です。
+@en:: Checks whether the file name given in the first argument matches the pattern given in the second argument. This is useful for checking how wildcards work when using the `pattern` option of Arrow_Fdw.
+
+```
+=# select pgstrom.arrow_fdw_check_pattern('data_202408_tokyo.data', 'data_@{ymd}_${region}.data');
+          arrow_fdw_check_pattern
+-------------------------------------------
+ true {@[ymd]=[202408], $[region]=[tokyo]}
+(1 row)
+```
+@ja{
+上記の例では、ファイル名`data_202408_tokyo.data`に対して、パターン`'data_@{ymd}_${region}.data'`のうち、ワイルドカード`@{ymd}`に相当する部分が`202408`にマッチし、`${region}`に相当する部分が`tokyo`にマッチしています。
+}
+@en{
+In the above example, for the file name `data_202408_tokyo.data`, the part of the pattern `'data_@{ymd}_${region}.data'` that corresponds to the wildcard `@{ymd}` matches `202408`, and the part that corresponds to `${region}` matches `tokyo`.
+}
+
+`record pgstrom.arrow_fdw_metadata_info(regclass)`
+@ja:: Arrowファイルに埋め込まれているメタデータ（CustomMetadata）を表示します。
+@en:: Displays the metadata (CustomMetadata) embedded in the supplied Arrow file.
+
+```
+postgres=# select relid, filename, field, key, substring(value, 0, 64) from pgstrom.arrow_fdw_metadata_info('f_lineorder');
+    relid    |              filename               |    field     |     key     |                            substring
+-------------+-------------------------------------+--------------+-------------+-----------------------------------------------------------------
+ f_lineorder | /opt/arrow/f_lineorder_sorted.arrow |              | sql_command | select * from v_lineorder order by lo_orderdate
+ f_lineorder | /opt/arrow/f_lineorder_sorted.arrow | lo_orderdate | min_values  | 19920101,19920102,19920103,19920104,19920105,19920107,19920108,
+ f_lineorder | /opt/arrow/f_lineorder_sorted.arrow | lo_orderdate | max_values  | 19920102,19920103,19920104,19920105,19920107,19920108,19920109,
+(3 rows)
+```
+@ja{
+上記の例では、Arrow_Fdw管理下の外部テーブルである`f_lineorder`に埋め込まれているメタデータ（CustomMetadata）を、それぞれKEY=VALUE形式で出力しています。
+スキーマに埋め込まれたメタデータは`field`列がNULLとなっています。そうでなければ列名が表示され、この場合、`sql_command`メタデータがスキーマに埋め込まれ、また、`min_values`および`max_values`が`lo_orderdate`列に埋め込まれている事がわかります。
+}
+@en{
+In the above example, the metadata (CustomMetadata) embedded in the `f_lineorder` foreign table managed by Arrow_Fdw is output in KEY=VALUE form.
+
+Metadata embedded in the schema has the `field` column set to NULL. Otherwise, the column name is displayed. In this case, you can see that the `sql_command` metadata is embedded in the schema, and the `min_values` and `max_values` are embedded in the `lo_orderdate` column.
+}
+
 `void pgstrom.arrow_fdw_import_file(text, text, text = null)`
 @ja{
 : Apache Arrow形式ファイルをインポートし、新たに外部テーブル(foreign table)を定義します。第一引数は外部テーブルの名前、第二引数はApache Arrow形式ファイルのパス、省略可能な第三引数はスキーマ名です。

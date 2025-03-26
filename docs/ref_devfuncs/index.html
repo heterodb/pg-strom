@@ -107,6 +107,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#cube-type-functions">CUBE Type Functions</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#vcf-support-functions">VCF Support Functions</a>
+    </li>
     </ul>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQL Objects</a>
@@ -553,6 +555,27 @@ PG-Strom optimizes the GPU code using a special device function to fetch a numer
 <dt><code>float8 cube_ll_coord(cube, int4)</code></dt>
 <dd></dd>
 </dl>
+<h2 id="vcf-support-functions">VCF Support Functions</h2>
+<dl>
+<dt><code>text vcf_variant_getattr(text, text)</code></dt>
+<dd>It regards the first argument as a string of tokens separated by ':' and returns the string after <code>KEY=</code> specified in the second argument.</dd>
+</dl>
+<pre><code>=# SELECT vcf_variant_getattr('ABC=123:NM=this is a pen:XYZ=3.1415', 'NM');
+ vcf_variant_getattr
+---------------------
+ this is a pen
+(1 row)
+</code></pre>
+<dl>
+<dt><code>text vcf_info_getattr(text, text)</code></dt>
+<dd>It regards the first argument as a string of tokens separated by ';' and returns the string after <code>KEY=</code> specified in the second argument.</dd>
+</dl>
+<pre><code>=# SELECT vcf_info_getattr('ABC=123;NM=this is a pen;XYZ=3.1415', 'XYZ');
+ vcf_info_getattr
+------------------
+ 3.141
+(1 row)
+</code></pre>
               
             </div>
           </div><footer>
