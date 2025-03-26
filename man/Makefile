@@ -12,6 +12,7 @@ __DOC_FILES :=	index.md	\
 		ssd2gpu.md	\
 		arrow_fdw.md	\
 		gpucache.md	\
+		gpusort.md	\
 		fluentd.md	\
 		ref_types.md	\
 		ref_devfuncs.md	\

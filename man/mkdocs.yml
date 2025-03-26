@@ -18,6 +18,7 @@ nav:
     - 'BRIN Index' : 'brin.md'
     - 'Partitioning' : 'partition.md'
     - 'PostGIS' : 'postgis.md'
+    - 'GPU-Sort' : 'gpusort.md'
     - 'Trouble Shooting' : 'troubles.md'
 - 'Advanced Features' :
     - 'GPUDirect SQL' : 'ssd2gpu.md'
@@ -46,6 +47,7 @@ nav:
     - 'BRINインデックス' : 'brin.md'
     - 'パーティション' : 'partition.md'
     - 'GPU版PostGIS' : 'postgis.md'
+    - 'GPUソート' : 'gpusort.md'
     - 'トラブルシューティング' : 'troubles.md'
 - '先進機能' :
     - 'GPUダイレクトSQL' : 'ssd2gpu.md'
