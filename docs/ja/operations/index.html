@@ -57,13 +57,15 @@
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#gpu">GPUオフロードの確認</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#pg-strom">PG-Stromの有効化/無効化</a>
+    </li>
     <li class="toctree-l2"><a class="reference internal" href="#cpugpu">CPU+GPUハイブリッド並列</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#_2">下位プランの統合</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">並列度の指定</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#gpujoininner-pinned-buffer">GpuJoinにおけるInner Pinned Buffer</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">下位プランの統合</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#_3">ナレッジベース</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_4">ナレッジベース</a>
     </li>
     </ul>
                   </li>
@@ -85,6 +87,8 @@
                   <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pinned_buffer/">Pinned Inner Buffer</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
                   </li>
@@ -188,6 +192,24 @@ CustomScan機構を用いてGpuJoinおよびGpuPreAggが実装されています
 <p>ワークロードをGPUで実行するためには、少なくとも演算式または関数、および使用されているデータ型がPG-Stromでサポートされている必要があります。
 <code>int</code>や<code>float</code>といった数値型、<code>date</code>や<code>timestamp</code>といった日付時刻型、<code>text</code>のような文字列型がサポートされており、また、四則演算や大小比較といった数多くのビルトイン演算子がサポートされています。
 詳細な一覧に関しては<a href="../ref_devfuncs/">リファレンス</a>を参照してください。</p>
+<h2 id="pg-strom">PG-Stromの有効化/無効化</h2>
+<p>PG-Stromはユーザから与えられたSQLを解析し、それがGPUで実行できる場合には、WHERE句やJOIN検索条件に該当する命令コードを生成して透過的にGPUで実行します。</p>
+<p>これらのプロセスは自動的に行われますが、以下のコマンドによって明示的にPG-Stromを無効化し、オリジナルのPostgreSQLと同じように動作させる事もできます。</p>
+<pre><code>=# set pg_strom.enabled = off;
+SET
+</code></pre>
+<p>これ以外にも、以下のパラメータを用いて個別の機能単位で有効/無効を切り替える事ができます。</p>
+<ul>
+<li><code>pg_strom.enable_gpuscan</code></li>
+<li><code>pg_strom.enable_gpujoin</code></li>
+<li><code>pg_strom.enable_gpuhashjoin</code></li>
+<li><code>pg_strom.enable_gpugistindex</code></li>
+<li><code>pg_strom.enable_gpupreagg</code></li>
+<li><code>pg_strom.enable_gpusort</code></li>
+<li><code>pg_strom.enable_brin</code></li>
+<li><code>pg_strom.enable_partitionwise_gpujoin</code></li>
+<li><code>pg_strom.enable_partitionwise_gpupreagg</code></li>
+</ul>
 <h2 id="cpugpu">CPU+GPUハイブリッド並列</h2>
 <p>PG-StromはPostgreSQLのCPU並列実行に対応しています。</p>
 <p>PostgreSQLのCPU並列実行は、Gatherノードがいくつかのバックグラウンドワーカプロセスを起動し、各バックグラウンドワーカが"部分的に"実行したクエリの結果を後で結合する形で実装されています。
@@ -233,7 +255,26 @@ select sum(lo_revenue), d_year, p_brand1
                -&gt;  Parallel Seq Scan on date1  (cost=0.00..62.04 rows=1504 width=8)
 (24 rows)
 </code></pre>
-<h2 id="_2">下位プランの統合</h2>
+<h2 id="_2">並列度の指定</h2>
+<p>PostgreSQLにおける並列度とは、あるクエリを実行するために複数のワーカープロセスを用いて並列動作する時のプロセス数です。これは実行計画の上ではGatherノードが起動するプロセス数で、主に<code>max_parallel_workers_per_gather</code>パラメータによって制御する事ができます。</p>
+<p>PG-Stromにおいても、並列ワーカープロセスの存在は重要です。たとえストレージからのデータ読み出しの大半はGPU-Direct SQL機構によって行われるためCPUの負荷は大きくないとはいえ、読み出すべきブロックの可視性をチェックしたり、ダーティなバッファの内容をコピーするのはCPUの仕事です。</p>
+<p>加えて、PG-Stromにはもう一つ処理の並列度を考慮すべきポイントが存在します。それは、GPU-Serviceにおけるワーカースレッドの数です。</p>
+<p><img alt="PG-Strom process model" src="../img/pgstrom_process_model.png" /></p>
+<p>上記の図は、PG-Stromのアーキテクチャを模式的に表したものです。</p>
+<p>クライアントがPostgreSQLに接続すると、各プロセスを統括するpostmasterプロセスは、接続ごとにPostgreSQL Backendプロセスを起動します。このプロセスがクライアントからのSQLを受け取り、場合によってはParallel Workerプロセスの手助けを借りながら、実行計画に基づいてクエリを実行していきます。</p>
+<p>クエリの実行にPG-Stromを用いる場合、これらのプロセスはUNIXドメインソケットを介して常駐プロセスであるPG-Strom GPU Serviceへコネクションを開きます。そして、実行すべき命令コードと、読み出すべきストレージの情報（おおむね64MBのチャン単位）をペアにしてリクエストを次々と送出します。
+PG-Strom GPU Serviceはマルチスレッド化されており、各ワーカースレッドはこれらのリクエストを受け取ると次々と実行に移していきます。典型的なリクエストの処理は、ストレージの読み出し、GPU Kernelの起動、処理結果の回収と応答リクエストの送出、という流れになっています。
+これらの処理は容易に多重化できるため、例えば、スレッドAがストレージからの読み出しを待機している間にも、スレッドBがGPU Kernelを実行するなど、リソースを遊ばせないために十分な数のスレッドを立ち上げておく事が必要です。</p>
+<p>このワーカースレッドの数を変更するには、<code>pg_strom.max_async_tasks</code>パラメータを使用します。
+GPU 1台につき、このパラメータで指定した数のスレッドが起動してPostgreSQLバックエンド/ワーカープロセスからのリクエストを待ち受けます。</p>
+<pre><code>=# SET pg_strom.max_async_tasks = 24;
+SET
+</code></pre>
+<p>このパラメータの設定は即座に反映され、例えばデフォルトである<code>16</code>から<code>24</code>に増やした場合、各GPUごとに8個のワーカースレッドを追加で起動します。数秒後には以下のようなログが出力されるでしょう。</p>
+<pre><code>LOG:  GPU0 workers - 8 startup, 0 terminate
+LOG:  GPU1 workers - 8 startup, 0 terminate
+</code></pre>
+<h2 id="_3">下位プランの統合</h2>
 <p>PG-StromはSCAN、JOIN、GROUP BY、SORTの各処理をGPUで実行する事が可能ですが、これに対応するPostgreSQL標準の処理を単純に置き換えただけでは困った事態が発生します。
 SCANが終わった後のデータをいったんホスト側のバッファに書き戻し、次にそれをJOINするために再びGPUへとコピーし、さらにGROUP BYを実行する前に再びホスト側のバッファに書き戻し・・・といった形で、CPUとGPUの間でデータのピンポンが発生してしまいます。</p>
 <p>CPUのメモリ上でデータ（行）を交換するのと比較して、CPUとGPUの間はPCI-Eバスで結ばれているため、どうしてもデータ転送には大きなコストが発生してしまいます。これを避けるには、SCAN、JOIN、GROUP BY、SORTといった一連のGPU対応タスクが連続して実行可能である場合には、できる限りGPUメモリ上でデータ交換を行い、CPUへデータを書き戻すのは最小限に留めるべきであるという事です。</p>
@@ -318,56 +359,7 @@ EXPLAINの出力に付随する各種のパラメータを読むと、このGPU-
          -&gt;  Seq Scan on date1  (cost=0.00..72.56 rows=2556 width=8)
 (22 rows)
 </code></pre>
-<h2 id="gpujoininner-pinned-buffer">GpuJoinにおけるInner Pinned Buffer</h2>
-<p>以下の実行計画を見てください。
-PG-Stromがテーブルを結合する際、通常は最もサイズの大きなテーブル（この場合は<code>lineorder</code>で、OUTER表と呼びます）を非同期的に読み込みながら、他のテーブルとの結合処理および集計処理を進めます。
-JOINアルゴリズムの制約上、予めそれ以外のテーブル（この場合は<code>date1</code>、<code>part</code>、<code>supplier</code>で、INNER表と呼びます）をメモリ上に読み出し、またJOINキーのハッシュ値を計算する必要があります。これらのテーブルはOUTER表ほど大きなサイズではないものの、数GBを越えるようなINNERバッファの準備は相応に重い処理となります。</p>
-<p>GpuJoinは通常、PostgreSQLのAPIを通してINNER表を一行ごとに読み出し、そのハッシュ値を計算するとともに共有メモリ上のINNERバッファに書き込みます。GPU-Serviceプロセスは、このINNERバッファをGPUメモリに転送し、そこではじめてOUTER表を読み出してJOIN処理を開始する事ができるようになります。
-INNER表が相応に大きくGPUで実行可能な検索条件を含む場合、以下の実行計画のように、GpuJoinの配下にGpuScanが存在するケースがあり得ます。この場合、INNER表はいったんGpuScanによってGPUで処理された後、その実行結果をCPU側に戻し、さらにINNERバッファに書き込まれた後でもう一度GPUへロードされます。ずいぶんと無駄なデータの流れが存在するように見えます。</p>
-<pre><code>=# explain
-   select sum(lo_revenue), d_year, p_brand1
-     from lineorder, date1, part, supplier
-    where lo_orderdate = d_datekey
-      and lo_partkey = p_partkey
-      and lo_suppkey = s_suppkey
-      and p_brand1 between 'MFGR#2221' and 'MFGR#2228'
-      and s_region = 'ASIA'
-    group by d_year, p_brand1;
-                                                  QUERY PLAN
----------------------------------------------------------------------------------------------------------------
- GroupAggregate  (cost=31007186.70..31023043.21 rows=6482 width=46)
-   Group Key: date1.d_year, part.p_brand1
-   -&gt;  Sort  (cost=31007186.70..31011130.57 rows=1577548 width=20)
-         Sort Key: date1.d_year, part.p_brand1
-         -&gt;  Custom Scan (GpuJoin) on lineorder  (cost=275086.19..30844784.03 rows=1577548 width=20)
-               GPU Projection: date1.d_year, part.p_brand1, lineorder.lo_revenue
-               GPU Join Quals [1]: (part.p_partkey = lineorder.lo_partkey) ... [nrows: 5994236000 -&gt; 7804495]
-               GPU Outer Hash [1]: lineorder.lo_partkey
-               GPU Inner Hash [1]: part.p_partkey
-               GPU Join Quals [2]: (supplier.s_suppkey = lineorder.lo_suppkey) ... [nrows: 7804495 -&gt; 1577548]
-               GPU Outer Hash [2]: lineorder.lo_suppkey
-               GPU Inner Hash [2]: supplier.s_suppkey
-               GPU Join Quals [3]: (date1.d_datekey = lineorder.lo_orderdate) ... [nrows: 1577548 -&gt; 1577548]
-               GPU Outer Hash [3]: lineorder.lo_orderdate
-               GPU Inner Hash [3]: date1.d_datekey
-               GPU-Direct SQL: enabled (GPU-0)
-               -&gt;  Seq Scan on part  (cost=0.00..59258.00 rows=2604 width=14)
-                     Filter: ((p_brand1 &gt;= 'MFGR#2221'::bpchar) AND (p_brand1 &lt;= 'MFGR#2228'::bpchar))
-               -&gt;  Custom Scan (GpuScan) on supplier  (cost=100.00..190348.83 rows=2019384 width=6)
-                     GPU Projection: s_suppkey
-                     GPU Pinned Buffer: enabled
-                     GPU Scan Quals: (s_region = 'ASIA'::bpchar) [rows: 9990357 -&gt; 2019384]
-                     GPU-Direct SQL: enabled (GPU-0)
-               -&gt;  Seq Scan on date1  (cost=0.00..72.56 rows=2556 width=8)
-(24 rows)
-</code></pre>
-<p>このように、INNER表の読出しやINNERバッファの構築の際にCPUとGPUの間でデータのピンポンが発生する場合、<strong><em>Pinned Inner Buffer</em></strong>を使用するよう設定する事で、GpuJoinの実行開始リードタイムの短縮や、メモリ使用量を削減する事ができます。
-上の実行計画では、<code>supplier</code>表の読出しがGpuScanにより行われる事になっており、統計情報によれば約200万行が読み出されると推定されています。その一方で、<code>GPU Pinned Buffer: enabled</code>の出力に注目してください。これは、INNER表の推定サイズが<code>pg_strom.pinned_inner_buffer_threshold</code>の設定値を越える場合、GpuScanの処理結果をそのままGPUメモリに残しておき、それを次のGpuJoinでINNERバッファの一部として利用するという機能です（必要であればハッシュ値の計算もGPUで行います）。
-そのため、<code>supplier</code>表の内容はGPU-Direct SQLによってストレージからGPUへと読み出された後、CPU側に戻されたり、再度GPUへロードされたりすることなく、次のGpuJoinで利用される事になります。</p>
-<p>一方でPinned Inner Bufferの使用には若干のトレードオフもあるため、デフォルトでは無効化されています。
-本機能を使用する場合には、明示的に<code>pg_strom.pinned_inner_buffer_threshold</code>パラメータを設定する必要があります。</p>
-<p>Pinned Inner Bufferを使用した場合、CPU側はINNERバッファの内容を完全には保持していません。そのため、TOAST化された可変長データをGPUで参照した場合など、CPU Fallback処理を行う事ができずエラーを発生させます。また、CPU Fallbackを利用して実装されているRIGHT/FULL OUTER JOINも同様の理由でPinned Inner Bufferと共存する事ができません。</p>
-<h2 id="_3">ナレッジベース</h2>
+<h2 id="_4">ナレッジベース</h2>
 <p>PG-Stromプロジェクトのwikiサイトには、ノートと呼ばれる詳細な技術情報が公開されています。</p>
 <p><a href="https://github.com/heterodb/pg-strom/wiki">https://github.com/heterodb/pg-strom/wiki</a></p>
               

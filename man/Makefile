@@ -13,6 +13,7 @@ __DOC_FILES :=	index.md	\
 		arrow_fdw.md	\
 		gpucache.md	\
 		gpusort.md	\
+		pinned_buffer.md \
 		fluentd.md	\
 		ref_types.md	\
 		ref_devfuncs.md	\

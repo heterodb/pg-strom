@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Pinned Inner Buffer - PG-Strom Manual</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
+        <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
+        <link href="../custom.css" rel="stylesheet" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Pinned Inner Buffer";
+        var mkdocs_page_input_path = "pinned_buffer.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> PG-Strom Manual
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+  [<strong>Japanese</strong> | <a href="../../pinned_buffer/"    style="color: #cccccc">English</a>]
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">はじめに</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../install/">インストール</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">利用ガイド</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../operations/">基本的な操作</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../brin/">BRINインデックス</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpusort/">GPUソート</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">先進機能</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../ssd2gpu/">GPUダイレクトSQL</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Pinned Inner Buffer</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_1">概要</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpu">マルチGPUの場合</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">リファレンス</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_types/">データ型</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../ref_params/">GUCパラメータ</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">リリースノート</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v5.0/">PG-Strom v5.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v3.0/">PG-Strom v3.0</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.3/">PG-Strom v2.3</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.2/">PG-Strom v2.2</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v2.0/">PG-Strom v2.0</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">PG-Strom Manual</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">先進機能</li>
+      <li class="breadcrumb-item active">Pinned Inner Buffer</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="pinned-inner-buffer">Pinned Inner Buffer</h1>
+<p>本章では、GPU-Joinでサイズの大きなテーブル同士を結合する際の処理効率を向上させるための技術であるPinned Inner Buffer機能について説明します。</p>
+<h2 id="_1">概要</h2>
+<p>以下の実行計画を見てください。
+PG-Stromがテーブルを結合する際、通常は最もサイズの大きなテーブル（この場合は<code>lineorder</code>で、OUTER表と呼びます）を非同期的に読み込みながら、他のテーブルとの結合処理および集計処理を進めます。
+JOINアルゴリズムの制約上、予めそれ以外のテーブル（この場合は<code>date1</code>、<code>part</code>、<code>supplier</code>で、INNER表と呼びます）をメモリ上に読み出し、またJOINキーのハッシュ値を計算する必要があります。これらのテーブルはOUTER表ほど大きなサイズではないものの、数GBを越えるようなINNERバッファの準備は相応に重い処理となります。</p>
+<pre><code>=# explain
+   select sum(lo_revenue), d_year, p_brand1
+     from lineorder, date1, part, supplier
+    where lo_orderdate = d_datekey
+      and lo_partkey = p_partkey
+      and lo_suppkey = s_suppkey
+      and p_brand1 between 'MFGR#2221' and 'MFGR#2228'
+      and s_region = 'ASIA'
+    group by d_year, p_brand1;
+                                                  QUERY PLAN
+---------------------------------------------------------------------------------------------------------------
+ GroupAggregate  (cost=31007186.70..31023043.21 rows=6482 width=46)
+   Group Key: date1.d_year, part.p_brand1
+   -&gt;  Sort  (cost=31007186.70..31011130.57 rows=1577548 width=20)
+         Sort Key: date1.d_year, part.p_brand1
+         -&gt;  Custom Scan (GpuJoin) on lineorder  (cost=275086.19..30844784.03 rows=1577548 width=20)
+               GPU Projection: date1.d_year, part.p_brand1, lineorder.lo_revenue
+               GPU Join Quals [1]: (part.p_partkey = lineorder.lo_partkey) ... [nrows: 5994236000 -&gt; 7804495]
+               GPU Outer Hash [1]: lineorder.lo_partkey
+               GPU Inner Hash [1]: part.p_partkey
+               GPU Join Quals [2]: (supplier.s_suppkey = lineorder.lo_suppkey) ... [nrows: 7804495 -&gt; 1577548]
+               GPU Outer Hash [2]: lineorder.lo_suppkey
+               GPU Inner Hash [2]: supplier.s_suppkey
+               GPU Join Quals [3]: (date1.d_datekey = lineorder.lo_orderdate) ... [nrows: 1577548 -&gt; 1577548]
+               GPU Outer Hash [3]: lineorder.lo_orderdate
+               GPU Inner Hash [3]: date1.d_datekey
+               GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on part  (cost=0.00..59258.00 rows=2604 width=14)
+                     Filter: ((p_brand1 &gt;= 'MFGR#2221'::bpchar) AND (p_brand1 &lt;= 'MFGR#2228'::bpchar))
+               -&gt;  Custom Scan (GpuScan) on supplier  (cost=100.00..190348.83 rows=2019384 width=6)
+                     GPU Projection: s_suppkey
+                     GPU Pinned Buffer: enabled
+                     GPU Scan Quals: (s_region = 'ASIA'::bpchar) [rows: 9990357 -&gt; 2019384]
+                     GPU-Direct SQL: enabled (GPU-0)
+               -&gt;  Seq Scan on date1  (cost=0.00..72.56 rows=2556 width=8)
+(24 rows)
+</code></pre>
+<p>GpuJoinは通常、PostgreSQLのAPIを通してINNER表を一行ごとに読み出し、そのハッシュ値を計算するとともに共有メモリ上のINNERバッファに書き込みます。GPU-Serviceプロセスは、このINNERバッファをGPUメモリに転送し、そこではじめてOUTER表を読み出してJOIN処理を開始する事ができるようになります。
+INNER表が相応に大きくGPUで実行可能な検索条件を含む場合、以下の実行計画のように、GpuJoinの配下にGpuScanが存在するケースがあり得ます。この場合、INNER表はいったんGpuScanによってGPUで処理された後、その実行結果をCPU側に戻し、さらにINNERバッファに書き込まれた後でもう一度GPUへロードされます。ずいぶんと無駄なデータの流れが存在するように見えます。</p>
+<p><img alt="GPU-Join Pinned-Inner-Buffer" src="../img/pinned_inner_buffer_00.png" /></p>
+<p>このように、INNER表の読出しやINNERバッファの構築の際にCPUとGPUの間でデータのピンポンが発生する場合、<strong><em>Pinned Inner Buffer</em></strong>を使用することで、GpuJoinの実行開始リードタイムの短縮や、メモリ使用量を削減する事ができます。
+上の実行計画では、<code>supplier</code>表の読出しがGpuScanにより行われる事になっており、統計情報によれば約200万行が読み出されると推定されています。その一方で、<code>GPU Pinned Buffer: enabled</code>の出力に注目してください。これは、INNER表の推定サイズが<code>pg_strom.pinned_inner_buffer_threshold</code>の設定値を越える場合、GpuScanの処理結果をそのままGPUメモリに残しておき、それを次のGpuJoinでINNERバッファの一部として利用するという機能です（必要であればハッシュ値の計算もGPUで行います）。
+そのため、<code>supplier</code>表の内容はGPU-Direct SQLによってストレージからGPUへと読み出された後、CPU側に戻されたり、再度GPUへロードされたりすることなく、次のGpuJoinで利用される事になります。</p>
+<p>一方で注意すべき点もあります。
+Pinned Inner Bufferを使用するには、CPU-Fallbackを無効化する必要があります。</p>
+<p>CPU-Fallbackとは、GPUでは処理できなかったデータをCPUに書き戻して再実行するための機能で、例えばTOAST化された可変長データを参照する条件式は原理上GPUで実行できないため、CPUに書き戻して再実行するために用いている機能です。しかしGpuScanを実行中にCPU-Fallbackが発生すると、GPUメモリ上の結果バッファ（これはGpuJoinのINNERバッファとして使用される）が完全な結果セットである事を保証できません。
+また、Pinned Inner Bufferを使用するGpuJoinの実行にCPU-Fallbackが発生した場合、そもそもCPUはJOINに必要なINNERバッファを持っていないためにフォールバック処理を実行する事ができません。</p>
+<p>そのため、Pinned Inner Bufferを使用するには<code>SET pg_strom.cpu_fallback = off</code>を指定してCPU-Fallbackを無効化する必要があります。
+これは<a href="../gpusort/">GPU-Sort</a>でもCPU-Fallback処理の無効化を要求している理由と同じです。</p>
+<h2 id="gpu">マルチGPUの場合</h2>
+<p>多くのシステムではサーバ本体のRAMと比較してGPU搭載RAMの容量は限定的で、ハッシュ表のサイズにも制約があります。
+複数のGPUにハッシュ表を分割配置する事でこの制限を緩和する事ができますが、あるGPU上でJOINの実行中に別のGPU上に配置されているINNER行を参照してしまうと、GPUメモリのスラッシングと呼ばれる現象が発生し強烈な速度低下を招いてしまうため、GPU-Joinの実行中にはメモリアクセスの局所性を確保できる仕組みが必要です。</p>
+<p>マルチGPUシステムにおいて、Pinned Inner Bufferは次のように動作します。</p>
+<p>GPU-Joinに先立ってINNER側テーブルのスキャン処理を複数のGPUで実行し、その処理結果をGPUメモリ上に留置してハッシュ表を構築した場合、それぞれのGPUにどのような行が載っているかは完全にランダムです。
+次ステップのHash-Join処理でOUTER側から読み出した行が、最初にGPU1上のINNER行と結合し、次にGPU2上のINNER行と、最後にGPU0上のINNER行と結合するといった形になってしまうと、極端なスラッシングが発生し強烈な性能低下を引き起こします。</p>
+<p>そのため、マルチGPUでのPinned-Inner-Buffer利用時には再構築（reconstruction）処理を挟み、ハッシュ表を適切なGPU上に再配置します。</p>
+<p>例えば3台のGPUを搭載しているシステムで、ほぼハッシュ表の大きさが3台のGPU搭載RAMに収まる場合、INNER側テーブルのGPU-Scan終了後、次のGPU-Joinで利用する結合キーのハッシュ値を計算し、それを3で割った剰余が0の場合はGPU0に、1の場合はGPU1に、2の場合はGPU2にという再配置を行います。</p>
+<p>この処理を挟む事で、GPU-JoinをGPU0上で実行した場合にハッシュ表にはハッシュ値を3で割った剰余が0であるINNER行しか存在せず、同様にGPU1にはハッシュ値を3で割った剰余が1であるINNER行しか存在しないという状態を作ることができます。</p>
+<p><img alt="Multi-GPUs-Join Pinned-Inner-Buffer" src="../img/pinned_inner_buffer_01.png" /></p>
+<p>次にこの分割されたハッシュ表を用いてGPU-Joinを実行する場合、最初にOUTER側のテーブルからデータをロードしたGPU（ここではGPU2としましょう）がハッシュ表を参照する際、OUTER側の行から計算したハッシュ値を3で割った剰余が2以外であると、そのGPU上でマッチするINNER側の行は明らかに存在しません。
+そのため、GPU2ではハッシュ値を3で割った剰余が2であるものだけから成る結合結果が生成されます。次に、このOUTER側のデータはGPU-to-GPU CopyによってGPU1へと転送され、そこではハッシュ値を3で割った剰余が1であるものだけから成る結合結果が生成されます。</p>
+<p>これを繰り返すと、各GPU上で「部分的なHash-Joinの結果」が生成されますが、これらを統合したものは完全なHash-Joinの結果と等しくなり、結果としてGPU搭載RAMよりも大きなサイズのINNER側ハッシュ表であってもGPU-Joinを実行する事ができるようになりました。</p>
+<p><img alt="Multi-GPUs-Join Pinned-Inner-Buffer" src="../img/pinned_inner_buffer_02.png" /></p>
+<p>本機能に関連して、<code>pg_strom.pinned_inner_buffer_partition_size</code>パラメータが追加されました。
+これはPinned-Inner-Bufferを複数のGPUに分割する際の閾値となるサイズを指定するもので、初期値としてGPU搭載メモリの80～90%程度の値が設定されていますので、通常は管理者がこれを変更する必要はありません。</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../gpucache/" class="btn btn-neutral float-left" title="GPUキャッシュ"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../fluentd/" class="btn btn-neutral float-right" title="Fluentd連携">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../gpucache/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../fluentd/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
