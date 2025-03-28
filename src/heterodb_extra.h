@@ -88,6 +88,7 @@ extern gpumask_t	heterodbGetOptimalGpus(const char *path, const char *policy);
 extern bool			gpuDirectInitDriver(void);
 extern bool			gpuDirectOpenDriver(void);
 extern bool			gpuDirectCloseDriver(void);
+#ifdef __cuda_cuda_h__
 extern bool			gpuDirectMapGpuMemory(CUdeviceptr m_segment,
 										  size_t segment_sz,
 										  unsigned long *p_iomap_handle);
@@ -115,6 +116,7 @@ extern bool			gpuDirectFileReadAsyncIOV(const char *pathname,
 											  uint32_t *p_npages_vfs_read);
 extern const char  *gpuDirectGetProperty(void);
 extern bool			gpuDirectSetProperty(const char *key, const char *value);
+#endif	/* __cuda_cuda_h__ */
 extern void			gpuDirectCleanUpOnThreadTerminate(void);
 extern bool			heterodbExtraCloudGetVMInfo(const char *cloud_name,
 												const char **p_vm_type,

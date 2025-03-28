@@ -52,7 +52,7 @@ static xpu_func_hash_table *dpuserv_func_htable = NULL;
 struct dpuTaskExecState
 {
 	kern_errorbuf	kerror;
-	kern_data_store *kds_dst_head;
+	const kern_data_store *kds_dst_head;
 	kern_data_store *kds_dst;
 	kern_data_store **kds_dst_array;
 	bool		   (*handleDpuTaskFinalDepth)(dpuClient *dclient,
@@ -970,7 +970,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				{
 					kagg_state__pminmax_int64_packed *r =
 						(kagg_state__pminmax_int64_packed *)buffer;
-					r->nitems = 0;
+					r->attrs = 0;
 					r->value = LONG_MAX;
 					SET_VARSIZE(r, sizeof(kagg_state__pminmax_int64_packed));
 				}
@@ -984,7 +984,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				{
 					kagg_state__pminmax_int64_packed *r =
 						(kagg_state__pminmax_int64_packed *)buffer;
-					r->nitems = 0;
+					r->attrs = 0;
 					r->value = LONG_MIN;
 					SET_VARSIZE(r, sizeof(kagg_state__pminmax_int64_packed));
 				}
@@ -997,7 +997,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				{
 					kagg_state__pminmax_fp64_packed *r =
 						(kagg_state__pminmax_fp64_packed *)buffer;
-					r->nitems = 0;
+					r->attrs = 0;
 					r->value = DBL_MAX;
 					SET_VARSIZE(r, sizeof(kagg_state__pminmax_fp64_packed));
 				}
@@ -1010,7 +1010,7 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				{
 					kagg_state__pminmax_fp64_packed *r =
 						(kagg_state__pminmax_fp64_packed *)buffer;
-					r->nitems = 0;
+					r->attrs = 0;
 					r->value = -DBL_MAX;
 					SET_VARSIZE(r, sizeof(kagg_state__pminmax_fp64_packed));
 				}
@@ -1225,7 +1225,7 @@ __update_preagg__pmin_int32(kern_context *kcxt,
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_min_int64(&r->value, ival);
 	}
 }
@@ -1244,7 +1244,7 @@ __update_preagg__pmin_int64(kern_context *kcxt,
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_min_int64(&r->value, ival);
 	}
 }
@@ -1266,7 +1266,7 @@ __update_preagg__pmax_int32(kern_context *kcxt,
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_max_int64(&r->value, ival);
 	}
 }
@@ -1285,7 +1285,7 @@ __update_preagg__pmax_int64(kern_context *kcxt,
 		kagg_state__pminmax_int64_packed *r =
 			(kagg_state__pminmax_int64_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_max_int64(&r->value, ival);
 	}
 }
@@ -1307,7 +1307,7 @@ __update_preagg__pmin_fp64(kern_context *kcxt,
 		kagg_state__pminmax_fp64_packed *r =
 			(kagg_state__pminmax_fp64_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_min_fp64(&r->value, fval);
 	}
 }
@@ -1329,7 +1329,7 @@ __update_preagg__pmax_fp64(kern_context *kcxt,
 		kagg_state__pminmax_fp64_packed *r =
 			(kagg_state__pminmax_fp64_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_or_uint32(&r->attrs, __PAGG_MINMAX_ATTRS__VALID);
 		__atomic_max_fp64(&r->value, fval);
 	}
 }
@@ -1351,7 +1351,7 @@ __update_preagg__psum_int(kern_context *kcxt,
 		kagg_state__psum_int_packed *r =
 			(kagg_state__psum_int_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_int64(&r->sum, ival);
 	}
 }
@@ -1373,7 +1373,7 @@ __update_preagg__psum_fp(kern_context *kcxt,
 		kagg_state__psum_fp_packed *r =
 			(kagg_state__psum_fp_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_fp64(&r->sum, fval);
 	}
 }
@@ -1395,7 +1395,7 @@ __update_preagg__pstddev(kern_context *kcxt,
 		kagg_state__stddev_packed *r =
 			(kagg_state__stddev_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_fp64(&r->sum_x,  fval);
 		__atomic_add_fp64(&r->sum_x2, fval * fval);
 	}
@@ -1420,7 +1420,7 @@ __update_preagg__pcovar(kern_context *kcxt,
 		kagg_state__covar_packed *r =
 			(kagg_state__covar_packed *)buffer;
 
-		__atomic_add_uint32(&r->nitems, 1);
+		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_fp64(&r->sum_x,  xval);
 		__atomic_add_fp64(&r->sum_xx, xval * xval);
 		__atomic_add_fp64(&r->sum_y,  yval);
@@ -2071,8 +2071,8 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.task.kds_src_iovec);
 	if (xcmd->u.task.kds_src_offset)
 		kds_src_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_src_offset);
-	if (xcmd->u.task.kds_dst_offset)
-		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_dst_offset);
+//	if (xcmd->u.task.kds_dst_offset)
+//		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_dst_offset);
 	if (!kds_src_pathname || !kds_src_iovec || !kds_src_head || !kds_dst_head)
 	{
 		dpuClientElog(dclient, "kern_data_store is corrupted");
@@ -2084,7 +2084,7 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 	sz = offsetof(dpuTaskExecState, stats[num_rels]);
 	dtes = alloca(sz);
 	memset(dtes, 0, sz);
-	dtes->kds_dst_head = kds_dst_head;
+	dtes->kds_dst_head = SESSION_KDS_DST_HEAD(session);
 	dtes->num_rels = num_rels;
 	if (session->xpucode_groupby_actions == 0)
 	{
@@ -2179,7 +2179,7 @@ dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 	/*
 	 * Pack outer join map if this is the final call on this device
 	 */
-	if (xcmd->u.fin.final_this_device && kmrels)
+	if (kmrels)
 	{
 		uint32_t	ojmap_length = 0;
 
@@ -2201,7 +2201,7 @@ dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 		}
 		if (ojmap_length > 0)
 		{
-			resp.u.results.final_this_device = true;
+			resp.u.results.final_plan_task = true;
 			resp.u.results.ojmap_offset = resp_sz;
 			resp.u.results.ojmap_length = ojmap_length;
 			resp_sz += ojmap_length;
@@ -2211,7 +2211,7 @@ dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 	/*
 	 * KDS-Final buffer if DpuPreAgg
 	 */
-	if (xcmd->u.fin.final_plan_node && gf_buf)
+	if (gf_buf)
 	{
 		kern_data_store *kds_final;
 		size_t		sz1, sz2, sz3;
@@ -2287,7 +2287,7 @@ dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 				kds_final->length = sz1 + kds_final->usage;
 			}
 		}
-		resp.u.results.final_plan_node = true;
+		resp.u.results.final_plan_task = true;
 		resp.u.results.chunks_nitems = 1;
 		resp.u.results.chunks_offset = resp_sz;
 		resp_sz += kds_final->length;
@@ -2476,8 +2476,7 @@ dpuservMonitorClient(void *__priv)
 			assert(rv == 1);
 			if (pfd.revents == POLLIN)
 			{
-				if (__dpuServReceiveCommands(dclient->sockfd, dclient,
-											 dclient->peer_addr) < 0)
+				if (__dpuServReceiveCommands(dclient->sockfd, dclient) < 0)
 					break;
 			}
 			else if (pfd.revents & ~POLLIN)
