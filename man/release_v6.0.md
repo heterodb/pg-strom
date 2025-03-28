@@ -199,11 +199,11 @@ In addition, in this query, filtering is performed using the window function `ra
 @en:##Multi-GPUs Pinned Inner Buffer
 
 @ja{
-PG-Strom v5.2で[GPU-JoinのPinned Inner Buffer](operations.md#gpujoininner-pinned-buffer)がサポートされました。
+PG-Strom v5.2で[GPU-JoinのPinned Inner Buffer](pinned_buffer.md)がサポートされました。
 この機能は、GPU-JoinのINNER側下位プランとしてGPU-ScanやGPU-Joinが接続されており、その処理結果をそのまま並列化HashJoinの一つであるGPU-Joinのハッシュテーブルとして利用できる場合にハッシュ表の構築を高速化するものです。従来はGPU-ScanやGPU-Joinの処理結果を一度CPU側に戻してハッシュ表を構築していたところ、これをGPUメモリ上に留置しておき、後続のGPU-Joinで利用するというもので、GPU->CPU、再びCPU->GPUへとデータ移動する事を防げるため、とりわけINNER側のサイズが大きい場合に処理速度改善の恩恵が大きくなります。
 }
 @en{
-PG-Strom v5.2 supported [GPU-Join's Pinned Inner Buffer](operations.md#inner-pinned-buffer-of-gpujoin).
+PG-Strom v5.2 supported [GPU-Join's Pinned Inner Buffer](pinned_buffer.md).
 This feature speeds up the construction of a hash table when GPU-Scan or GPU-Join is connected as an INNER lower plan of GPU-Join, and the processing results can be used as a hash table for GPU-Join, which is one of the parallelized HashJoins. Previously, the processing results of GPU-Scan or GPU-Join were sent back to the CPU to construct a hash table, but now the results are stored in GPU memory and used in the subsequent GPU-Join. This prevents data from moving from GPU to CPU and back again, which improves processing speed, especially when the size of the INNER side is large.
 }
 

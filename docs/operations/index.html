@@ -65,6 +65,8 @@
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#consolidation-of-sub-plans">Consolidation of sub-plans</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#special-logging">Special Logging</a>
+    </li>
     <li class="toctree-l2"><a class="reference internal" href="#knowledge-base">Knowledge base</a>
     </li>
     </ul>
@@ -360,6 +362,120 @@ On the other hand, in PG-Strom, these elements are also executed without any omi
                Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
          -&gt;  Seq Scan on date1  (cost=0.00..72.56 rows=2556 width=8)
 (22 rows)
+</code></pre>
+<h2 id="special-logging">Special Logging</h2>
+<p>For example, when PG-Strom does not behave as expected, log output is important to find out why it is not working as expected.
+In this section, we will explain how to output information specific to PG-Strom.</p>
+<p>When PG-Strom checks a given query and evaluates whether it can be executed on the GPU and what additional features are available, please increase the log output level to <code>DEBUG2</code>.</p>
+<p>If the condition expression contains an operator that is determined to be unable to be executed on the GPU and the data type is included, PG-Strom will output this information in the log.</p>
+<p>See the example below. Currently, PG-Strom does not support GPU execution of <code>to_hex()</code> function, so it has given up on generating CustomScan(GpuScan) because the WHERE clause contains this function.</p>
+<pre><code>=# SET client_min_messages = DEBUG2;
+SET
+=# explain select count(*), lo_shipmode from lineorder where to_hex(lo_orderdate) like '%34' group by lo_shipmode;
+DEBUG:  (__codegen_func_expression:1858) function to_hex(integer) is not supported on the target device
+DETAIL:  problematic expression: {OPEXPR :opno 1209 :opfuncid 850 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 100 :args ({FUNCEXPR :funcid 2089 :funcresulttype 25 :funcretset false :funcvariadic false :funcformat 0 :funccollid 100 :inputcollid 0 :args ({VAR :varno 1 :varattno 6 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varnosyn 1 :varattnosyn 6 :location 65}) :location 58} {CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 :constbyval false :constisnull false :location 84 :constvalue 7 [ 28 0 0 0 37 51 52 ]}) :location 79}
+DEBUG:  (__codegen_func_expression:1858) function to_hex(integer) is not supported on the target device
+DETAIL:  problematic expression: {OPEXPR :opno 1209 :opfuncid 850 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 100 :args ({FUNCEXPR :funcid 2089 :funcresulttype 25 :funcretset false :funcvariadic false :funcformat 0 :funccollid 100 :inputcollid 0 :args ({VAR :varno 1 :varattno 6 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varnosyn 1 :varattnosyn 6 :location 65}) :location 58} {CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 :constbyval false :constisnull false :location 84 :constvalue 7 [ 28 0 0 0 37 51 52 ]}) :location 79}
+                                               QUERY PLAN
+---------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=15197201.22..15197203.00 rows=7 width=19)
+   Group Key: lo_shipmode
+   -&gt;  Gather Merge  (cost=15197201.22..15197202.86 rows=14 width=19)
+         Workers Planned: 2
+         -&gt;  Sort  (cost=15196201.20..15196201.22 rows=7 width=19)
+               Sort Key: lo_shipmode
+               -&gt;  Partial HashAggregate  (cost=15196201.03..15196201.10 rows=7 width=19)
+                     Group Key: lo_shipmode
+                     -&gt;  Parallel Seq Scan on lineorder  (cost=0.00..15146197.20 rows=10000766 width=11)
+                           Filter: (to_hex(lo_orderdate) ~~ '%34'::text)
+(10 rows)
+</code></pre>
+<p>The output is intended for developers, so it's not necessarily easy to understand, but it shows that the <code>to_hex(integer)</code> function is not supported.</p>
+<p>Using this as a reference, you can rewrite the condition clause to achieve the same effect (of course, there may be cases where rewriting is not possible).</p>
+<pre><code>postgres=# explain select count(*), lo_shipmode from lineorder where lo_orderdate % 256 = 34 group by lo_shipmode;
+DEBUG:  gpusort: disabled by pg_strom.cpu_fallback
+DEBUG:  gpusort: disabled by pg_strom.cpu_fallback
+DEBUG:  gpucache: table 'lineorder' is not configured - check row/statement triggers with pgstrom.gpucache_sync_trigger()
+                                                QUERY PLAN
+----------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=1221119.96..1221120.03 rows=7 width=19)
+   Group Key: lo_shipmode
+   -&gt;  Gather  (cost=1221119.19..1221119.93 rows=7 width=19)
+         Workers Planned: 2
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on lineorder  (cost=1220119.19..1220119.23 rows=7 width=19)
+               GPU Projection: pgstrom.nrows(), lo_shipmode
+               GPU Scan Quals: ((lo_orderdate % 256) = 34) [plan: 600046000 -&gt; 1250096]
+               GPU Group Key: lo_shipmode
+               Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+(9 rows)
+</code></pre>
+<p>In this way, an execution plan for GPU-PreAgg with a filter based on the WHERE clause was generated.</p>
+<p>It also shows that although the use of GPU-Sort and GPU-Cache was considered, they were not available (<code>pg_strom.cpu_fallback</code> is enabled) and were not configured (<code>lineorder</code> has no GPU-Cache setting).</p>
+<p>In this way, an execution plan for GPU-PreAgg with a filter based on the WHERE clause was generated.</p>
+<p>It also shows that although the use of GPU-Sort and GPU-Cache was considered, they were not available (<code>pg_strom.cpu_fallback</code> is enabled) and were not configured (<code>lineorder</code> has no GPU-Cache setting).</p>
+<!--
+
+プラン生成中のパスを出力するための設定も。
+pg_strom.debug_xpujoinpath はやや壊れ気味。
+
+-->
+
+<p>When PG-Strom uses GPU-Direct SQL, it uses the <code>heterodb-extra</code> extension module.</p>
+<p>To control the output of logs from the <code>heterodb-extra</code> extension module, use the <code>pg_strom.extra_ereport_level</code> parameter.</p>
+<p>The setting value ranges from 0 to 2, and is roughly classified as follows:</p>
+<ul>
+<li>0 ... Only output clear errors</li>
+<li>1 ... Output logs related to internal conditional branching</li>
+<li>2 ... Output detailed messages for debugging</li>
+</ul>
+<p>See the example below.</p>
+<pre><code>=# import foreign schema f_customer from server arrow_fdw into public options (file '/tmp/f_customer.arrow');
+IMPORT FOREIGN SCHEMA
+=# set pg_strom.extra_ereport_level = 1;
+SET
+=# explain select count(*), c_name from f_customer group by c_name;
+                                               QUERY PLAN
+---------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=38597.46..38599.46 rows=200 width=40)
+   Group Key: c_name
+   -&gt;  Gather  (cost=38575.42..38596.46 rows=200 width=40)
+         Workers Planned: 2
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on f_customer  (cost=37575.42..37576.46 rows=200 width=40)
+               GPU Projection: pgstrom.nrows(), c_name
+               GPU Group Key: c_name
+               referenced: c_name
+               file0: /tmp/f_customer.arrow (read: 629.43MB, size: 3404.59MB)
+               Scan-Engine: VFS with 2 GPUs &lt;0,1&gt;
+(10 rows)
+</code></pre>
+<p>As you can see, aggregation queries that reference <code>/tmp/f_customer.arrow</code> cannot use GPU-Direct SQL.</p>
+<p>If you check the logs to see why, you will see the following message:</p>
+<pre><code> LOG:  heterodb-extra: [info] path='/tmp/f_customer.arrow' on 'sdb3 (8,19)' optimal_gpus=00000000 numa_gpus=00000000 system_gpus=00000003 license-validation='-' policy='optimal' (pcie.c:1738)
+ LOG:  [info] foreign-table='f_customer' arrow-file='/tmp/f_customer.arrow' has no schedulable GPUs (arrow_fdw.c:2829)
+</code></pre>
+<p>It turns out that <code>/dev/sdb3</code> where <code>/tmp/f_customer.arrow</code> is located is not an NVME-SSD, and therefore there is no GPU that can be scheduled, so GPU-Direct SQL cannot be invoked.
+So, copy <code>/tmp/f_customer.arrow</code> to a partition on the NVME-SSD and run it again.</p>
+<pre><code>=# import foreign schema f_customer from server arrow_fdw into public options (file '/opt/arrow/f_customer.arrow');
+IMPORT FOREIGN SCHEMA
+=# explain select count(*), c_name from f_customer group by c_name;
+                                               QUERY PLAN
+---------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=38597.46..38599.46 rows=200 width=40)
+   Group Key: c_name
+   -&gt;  Gather  (cost=38575.42..38596.46 rows=200 width=40)
+         Workers Planned: 2
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on f_customer  (cost=37575.42..37576.46 rows=200 width=40)
+               GPU Projection: pgstrom.nrows(), c_name
+               GPU Group Key: c_name
+               referenced: c_name
+               file0: /opt/arrow/f_customer.arrow (read: 629.43MB, size: 3404.59MB)
+               Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+(10 rows)
+</code></pre>
+<p>In this way, we were able to successfully enable GPU-Direct SQL and run GpuPreAgg.</p>
+<p>Note that when referencing <code>/opt/arrow/mytest.arrow</code>, the log shows that <code>optimal_gpus=00000003 numa_gpus=00000003</code>, which means that it can be scheduled on GPU0 and GPU1.</p>
+<pre><code> LOG:  heterodb-extra: [info] path='/opt/arrow/mytest.arrow' on 'md127p1 (259,9)' optimal_gpus=00000003 numa_gpus=00000003 system_gpus=00000003 license-validation='Y' policy='optimal' (pcie.c:1738)
+
 </code></pre>
 <h2 id="knowledge-base">Knowledge base</h2>
 <p>We publish several articles, just called "notes", on the project wiki-site of PG-Strom.</p>

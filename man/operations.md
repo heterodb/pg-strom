@@ -220,7 +220,7 @@ The diagram above shows a schematic of the PG-Strom architecture.
 When a client connects to PostgreSQL, the postmaster process, which manages all processes, starts a PostgreSQL Backend process for each connection. This process receives SQL from the client and executes the query based on the execution plan, possibly with the help of a Parallel Worker process.
 }
 @ja{
-クエリの実行にPG-Stromを用いる場合、これらのプロセスはUNIXドメインソケットを介して常駐プロセスであるPG-Strom GPU Serviceへコネクションを開きます。そして、実行すべき命令コードと、読み出すべきストレージの情報（おおむね64MBのチャン単位）をペアにしてリクエストを次々と送出します。
+クエリの実行にPG-Stromを用いる場合、これらのプロセスはUNIXドメインソケットを介して常駐プロセスであるPG-Strom GPU Serviceへコネクションを開きます。そして、実行すべき命令コードと、読み出すべきストレージの情報（おおむね64MBのチャンク単位）をペアにしてリクエストを次々と送出します。
 PG-Strom GPU Serviceはマルチスレッド化されており、各ワーカースレッドはこれらのリクエストを受け取ると次々と実行に移していきます。典型的なリクエストの処理は、ストレージの読み出し、GPU Kernelの起動、処理結果の回収と応答リクエストの送出、という流れになっています。
 これらの処理は容易に多重化できるため、例えば、スレッドAがストレージからの読み出しを待機している間にも、スレッドBがGPU Kernelを実行するなど、リソースを遊ばせないために十分な数のスレッドを立ち上げておく事が必要です。
 }
@@ -384,15 +384,211 @@ On the other hand, in PG-Strom, these elements are also executed without any omi
 (22 rows)
 ```
 
+@ja:##固有ログの出力
+@en:##Special Logging
 
+@ja{
+例えばPG-Stromが期待通りの動作をしない時、それがなぜ期待通りの動作をしないのか探るため、ログの出力は重要です。
+本節では、PG-Stromに固有の情報を出力させるための方法について説明します。
+}
+@en{
+For example, when PG-Strom does not behave as expected, log output is important to find out why it is not working as expected.
+In this section, we will explain how to output information specific to PG-Strom.
+}
 
+@ja{
+PG-Stromが与えられたクエリをチェックし、それがGPUで実行できるかどうか、どのような付加機能が利用できるかを評価する際には、ログ出力レベルを`DEBUG2`まで引き上げてください。
 
+条件式の中でGPU実行ができないと判定された演算子がデータ型が存在した場合、PG-Stromはその旨をログに出力します。
+以下の例を参照してください。現在のところ、PG-Stromは`to_hex()`関数のGPU実行をサポートしていないため、WHERE句にこの関数を含んでいる事を理由にCustomScan(GpuScan)の生成を断念しています。
+}
+@en{
+When PG-Strom checks a given query and evaluates whether it can be executed on the GPU and what additional features are available, please increase the log output level to `DEBUG2`.
 
+If the condition expression contains an operator that is determined to be unable to be executed on the GPU and the data type is included, PG-Strom will output this information in the log.
 
+See the example below. Currently, PG-Strom does not support GPU execution of `to_hex()` function, so it has given up on generating CustomScan(GpuScan) because the WHERE clause contains this function.
+}
+```
+=# SET client_min_messages = DEBUG2;
+SET
+=# explain select count(*), lo_shipmode from lineorder where to_hex(lo_orderdate) like '%34' group by lo_shipmode;
+DEBUG:  (__codegen_func_expression:1858) function to_hex(integer) is not supported on the target device
+DETAIL:  problematic expression: {OPEXPR :opno 1209 :opfuncid 850 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 100 :args ({FUNCEXPR :funcid 2089 :funcresulttype 25 :funcretset false :funcvariadic false :funcformat 0 :funccollid 100 :inputcollid 0 :args ({VAR :varno 1 :varattno 6 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varnosyn 1 :varattnosyn 6 :location 65}) :location 58} {CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 :constbyval false :constisnull false :location 84 :constvalue 7 [ 28 0 0 0 37 51 52 ]}) :location 79}
+DEBUG:  (__codegen_func_expression:1858) function to_hex(integer) is not supported on the target device
+DETAIL:  problematic expression: {OPEXPR :opno 1209 :opfuncid 850 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 100 :args ({FUNCEXPR :funcid 2089 :funcresulttype 25 :funcretset false :funcvariadic false :funcformat 0 :funccollid 100 :inputcollid 0 :args ({VAR :varno 1 :varattno 6 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varnosyn 1 :varattnosyn 6 :location 65}) :location 58} {CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 :constbyval false :constisnull false :location 84 :constvalue 7 [ 28 0 0 0 37 51 52 ]}) :location 79}
+                                               QUERY PLAN
+---------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=15197201.22..15197203.00 rows=7 width=19)
+   Group Key: lo_shipmode
+   ->  Gather Merge  (cost=15197201.22..15197202.86 rows=14 width=19)
+         Workers Planned: 2
+         ->  Sort  (cost=15196201.20..15196201.22 rows=7 width=19)
+               Sort Key: lo_shipmode
+               ->  Partial HashAggregate  (cost=15196201.03..15196201.10 rows=7 width=19)
+                     Group Key: lo_shipmode
+                     ->  Parallel Seq Scan on lineorder  (cost=0.00..15146197.20 rows=10000766 width=11)
+                           Filter: (to_hex(lo_orderdate) ~~ '%34'::text)
+(10 rows)
+```
 
+@ja{
+出力内容は開発者を想定したものなので、必ずしも分かりやすいとは言い難いですが、`to_hex(integer)`関数がサポートされていない事が分かります。
 
+これを参考に、同じ効果を発揮するよう条件句を書き換えます（もちろん、書き換えで対応できない場合もあります）。
+}
+@en{
+The output is intended for developers, so it's not necessarily easy to understand, but it shows that the `to_hex(integer)` function is not supported.
 
+Using this as a reference, you can rewrite the condition clause to achieve the same effect (of course, there may be cases where rewriting is not possible).
+}
+```
+postgres=# explain select count(*), lo_shipmode from lineorder where lo_orderdate % 256 = 34 group by lo_shipmode;
+DEBUG:  gpusort: disabled by pg_strom.cpu_fallback
+DEBUG:  gpusort: disabled by pg_strom.cpu_fallback
+DEBUG:  gpucache: table 'lineorder' is not configured - check row/statement triggers with pgstrom.gpucache_sync_trigger()
+                                                QUERY PLAN
+----------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=1221119.96..1221120.03 rows=7 width=19)
+   Group Key: lo_shipmode
+   ->  Gather  (cost=1221119.19..1221119.93 rows=7 width=19)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (GpuPreAgg) on lineorder  (cost=1220119.19..1220119.23 rows=7 width=19)
+               GPU Projection: pgstrom.nrows(), lo_shipmode
+               GPU Scan Quals: ((lo_orderdate % 256) = 34) [plan: 600046000 -> 1250096]
+               GPU Group Key: lo_shipmode
+               Scan-Engine: GPU-Direct with 2 GPUs <0,1>
+(9 rows)
+```
+@ja{
+このように、WHERE句によるフィルタ付きのGPU-PreAggの実行計画が生成されました。
 
+また付随して、GPU-SortやGPU-Cacheの利用を検討したものの、利用できる条件にない（`pg_strom.cpu_fallback`が有効になっている）ことや、設定がなされていない（`lineorder`にはGPU-Cacheの設定がない）ことが分かります。
+}
+@en{
+In this way, an execution plan for GPU-PreAgg with a filter based on the WHERE clause was generated.
+
+It also shows that although the use of GPU-Sort and GPU-Cache was considered, they were not available (`pg_strom.cpu_fallback` is enabled) and were not configured (`lineorder` has no GPU-Cache setting).
+}
+@ja{
+このように、WHERE句によるフィルタ付きのGPU-PreAggの実行計画が生成されました。
+
+また付随して、GPU-SortやGPU-Cacheの利用を検討したものの、利用できる条件にない（`pg_strom.cpu_fallback`が有効になっている）ことや、設定がなされていない（`lineorder`にはGPU-Cacheの設定がない）ことが分かります。
+}
+@en{
+In this way, an execution plan for GPU-PreAgg with a filter based on the WHERE clause was generated.
+
+It also shows that although the use of GPU-Sort and GPU-Cache was considered, they were not available (`pg_strom.cpu_fallback` is enabled) and were not configured (`lineorder` has no GPU-Cache setting).
+}
+
+<!--
+
+プラン生成中のパスを出力するための設定も。
+pg_strom.debug_xpujoinpath はやや壊れ気味。
+
+-->
+
+@ja{
+PG-StromがGPU-Direct SQLを利用する際には`heterodb-extra`拡張モジュールを使用します。
+
+`heterodb-extra`拡張モジュールに由来するログの出力を制御するには、`pg_strom.extra_ereport_level`パラメータを使用します。
+設定値の範囲は0～2で、おおむね以下のように分類されています。
+- 0 ... 明確なエラーのみ出力する
+- 1 ... 内部的な条件分岐に関わるログを出力する
+- 2 ... デバッグ用の詳細なメッセージを出力する
+
+以下の例を見てください。
+}
+@en{
+When PG-Strom uses GPU-Direct SQL, it uses the `heterodb-extra` extension module.
+
+To control the output of logs from the `heterodb-extra` extension module, use the `pg_strom.extra_ereport_level` parameter.
+
+The setting value ranges from 0 to 2, and is roughly classified as follows:
+
+- 0 ... Only output clear errors
+- 1 ... Output logs related to internal conditional branching
+- 2 ... Output detailed messages for debugging
+
+See the example below.
+}
+```
+=# import foreign schema f_customer from server arrow_fdw into public options (file '/tmp/f_customer.arrow');
+IMPORT FOREIGN SCHEMA
+=# set pg_strom.extra_ereport_level = 1;
+SET
+=# explain select count(*), c_name from f_customer group by c_name;
+                                               QUERY PLAN
+---------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=38597.46..38599.46 rows=200 width=40)
+   Group Key: c_name
+   ->  Gather  (cost=38575.42..38596.46 rows=200 width=40)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (GpuPreAgg) on f_customer  (cost=37575.42..37576.46 rows=200 width=40)
+               GPU Projection: pgstrom.nrows(), c_name
+               GPU Group Key: c_name
+               referenced: c_name
+               file0: /tmp/f_customer.arrow (read: 629.43MB, size: 3404.59MB)
+               Scan-Engine: VFS with 2 GPUs <0,1>
+(10 rows)
+```
+@ja{
+このように、`/tmp/f_customer.arrow`を参照する集計クエリはGPU-Direct SQLを使用できません。
+
+これはなぜかとログを確認してみると、次のようなメッセージが出力されています。
+}
+@en{
+As you can see, aggregation queries that reference `/tmp/f_customer.arrow` cannot use GPU-Direct SQL.
+
+If you check the logs to see why, you will see the following message:
+}
+
+```
+ LOG:  heterodb-extra: [info] path='/tmp/f_customer.arrow' on 'sdb3 (8,19)' optimal_gpus=00000000 numa_gpus=00000000 system_gpus=00000003 license-validation='-' policy='optimal' (pcie.c:1738)
+ LOG:  [info] foreign-table='f_customer' arrow-file='/tmp/f_customer.arrow' has no schedulable GPUs (arrow_fdw.c:2829)
+```
+
+@ja{
+どうやら、`/tmp/f_customer.arrow`を配置した`/dev/sdb3`はNVME-SSDではなく、よってスケジュール可能なGPUも存在しないため、GPU-Direct SQLが発動しないという事が分かりました。
+そこで、`/tmp/f_customer.arrow`をNVME-SSD上の区画にコピーして再実行します。
+}
+@en{
+It turns out that `/dev/sdb3` where `/tmp/f_customer.arrow` is located is not an NVME-SSD, and therefore there is no GPU that can be scheduled, so GPU-Direct SQL cannot be invoked.
+So, copy `/tmp/f_customer.arrow` to a partition on the NVME-SSD and run it again.
+}
+```
+=# import foreign schema f_customer from server arrow_fdw into public options (file '/opt/arrow/f_customer.arrow');
+IMPORT FOREIGN SCHEMA
+=# explain select count(*), c_name from f_customer group by c_name;
+                                               QUERY PLAN
+---------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=38597.46..38599.46 rows=200 width=40)
+   Group Key: c_name
+   ->  Gather  (cost=38575.42..38596.46 rows=200 width=40)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (GpuPreAgg) on f_customer  (cost=37575.42..37576.46 rows=200 width=40)
+               GPU Projection: pgstrom.nrows(), c_name
+               GPU Group Key: c_name
+               referenced: c_name
+               file0: /opt/arrow/f_customer.arrow (read: 629.43MB, size: 3404.59MB)
+               Scan-Engine: GPU-Direct with 2 GPUs <0,1>
+(10 rows)
+```
+
+@ja{
+このように、無事にGPU-Direct SQLを有効にしてGpuPreAggを実行する事ができました。
+
+なお、ログには以下のように`/opt/arrow/mytest.arrow`を参照する時に`optimal_gpus=00000003 numa_gpus=00000003`であり、つまりGPU0とGPU1にスケジュール可能であると出力されています。
+}
+@en{
+In this way, we were able to successfully enable GPU-Direct SQL and run GpuPreAgg.
+
+Note that when referencing `/opt/arrow/mytest.arrow`, the log shows that `optimal_gpus=00000003 numa_gpus=00000003`, which means that it can be scheduled on GPU0 and GPU1.
+}
+```
+ LOG:  heterodb-extra: [info] path='/opt/arrow/mytest.arrow' on 'md127p1 (259,9)' optimal_gpus=00000003 numa_gpus=00000003 system_gpus=00000003 license-validation='Y' policy='optimal' (pcie.c:1738)
+
+```
 
 @ja:##ナレッジベース
 @en:##Knowledge base
@@ -404,16 +600,4 @@ PG-Stromプロジェクトのwikiサイトには、ノートと呼ばれる詳�
 We publish several articles, just called "notes", on the project wiki-site of PG-Strom.
 }
 [https://github.com/heterodb/pg-strom/wiki](https://github.com/heterodb/pg-strom/wiki)
-
-
-
-
-
-
-
-
-
-
-
-
 

@@ -28,13 +28,13 @@ At this time, the GPU memory used for Scan/Join processing is released and reuse
 一方、GPU-PreAggの場合は異なります。ワークロードの性質上、GPU上に集計処理の結果を溜め込み（Dam execution）、最後にそれをまとめてCPUへ書き戻します。そのため、GPU-PreAggが実行完了した段階でGPUメモリ上にはほぼ全てのデータが載っている事になります。
 
 ソートという処理の特性上、GPU-Sortを実行するには並び替えるデータが全てGPUにロードされていなければなりません。
-つまり、集約演算を伴わないGPU-ScanやGPU-Joinのみを下位ノードとして持つGPU-Sortの場合は、GPU-PreAggのように実行結果をいったんGPUメモリ上に溜めこむ必要があります。これは[GpuJoinにおけるInner Pinned Buffer](operations.md#gpujoininner-pinned-buffer)で用いている実行方式と同一で、GPU-Scan/Joinの処理結果を次ステップで使用する場合、これをCPUに戻すのではなくGPUメモリ上に留置します。
+つまり、集約演算を伴わないGPU-ScanやGPU-Joinのみを下位ノードとして持つGPU-Sortの場合は、GPU-PreAggのように実行結果をいったんGPUメモリ上に溜めこむ必要があります。これは[GpuJoinにおけるInner Pinned Buffer](pinned_buffer.md)で用いている実行方式と同一で、GPU-Scan/Joinの処理結果を次ステップで使用する場合、これをCPUに戻すのではなくGPUメモリ上に留置します。
 }
 @en{
 On the other hand, GPU-PreAgg is different. Due to the nature of the workload, the results of the aggregation process are stored on the GPU (Dam execution), and then written back to the CPU in one go. Therefore, when GPU-PreAgg is completed, almost all of the data is in the GPU memory.
 
 Due to the nature of the sorting process, all of the data to be sorted must be loaded onto the GPU in order to execute GPU-Sort.
-In other words, in the case of GPU-Sort, which does not involve aggregation operations and has only GPU-Scan and GPU-Join as its lower nodes, the execution results must be stored in the GPU memory as in GPU-PreAgg. This is the same execution method used in [Inner Pinned Buffer in GpuJoin](operations.md#inner-pinned-buffer-of-gpujoin), and when the results of GPU-Scan/Join are used in the next step, they are kept in the GPU memory instead of being returned to the CPU.
+In other words, in the case of GPU-Sort, which does not involve aggregation operations and has only GPU-Scan and GPU-Join as its lower nodes, the execution results must be stored in the GPU memory as in GPU-PreAgg. This is the same execution method used in [Inner Pinned Buffer in GpuJoin](pinned_buffer.md), and when the results of GPU-Scan/Join are used in the next step, they are kept in the GPU memory instead of being returned to the CPU.
 }
 
 @ja:##GPU-Sortの有効化

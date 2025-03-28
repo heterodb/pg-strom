@@ -239,7 +239,7 @@ SET
 これは、<code>GpuPreAgg</code>が完全な集約をGPU上で作成し、更にそれをソートして出力する事を示しています。
 さらにこのクエリの場合、Window関数である<code>rank()</code>による絞り込みが行われています。この条件を下位ノードである<code>GpuPreAgg</code>にプッシュダウンする事で、予めフィルタされる事が分かっている行を結果セットから除去し、GPU-&gt;CPUへのデータ転送量と、CPUがコピーすべき行数を削減しています。これらの処理はGPUメモリ上で並列に処理されるため、一般的にはCPUが処理するより高速です。</p>
 <h2 id="gpupinned-inner-buffer">マルチGPUのPinned Inner Buffer</h2>
-<p>PG-Strom v5.2で<a href="../operations/#gpujoininner-pinned-buffer">GPU-JoinのPinned Inner Buffer</a>がサポートされました。
+<p>PG-Strom v5.2で<a href="../pinned_buffer/">GPU-JoinのPinned Inner Buffer</a>がサポートされました。
 この機能は、GPU-JoinのINNER側下位プランとしてGPU-ScanやGPU-Joinが接続されており、その処理結果をそのまま並列化HashJoinの一つであるGPU-Joinのハッシュテーブルとして利用できる場合にハッシュ表の構築を高速化するものです。従来はGPU-ScanやGPU-Joinの処理結果を一度CPU側に戻してハッシュ表を構築していたところ、これをGPUメモリ上に留置しておき、後続のGPU-Joinで利用するというもので、GPU-&gt;CPU、再びCPU-&gt;GPUへとデータ移動する事を防げるため、とりわけINNER側のサイズが大きい場合に処理速度改善の恩恵が大きくなります。</p>
 <p><img alt="GPU-Join Pinned-Inner-Buffer" src="../img/pinned_inner_buffer_00.png" /></p>
 <p>しかし、多くのシステムではサーバ本体のRAMと比較してGPU搭載RAMの容量は限定的で、ハッシュ表のサイズにも制約があります。複数のGPUにハッシュ表を分割配置する事でこの制約を緩和する事ができますが、あるGPU上でHashJoinの実行中に別のGPU上に配置されているINNER行を参照してしまうと、GPUメモリのスラッシングと呼ばれる現象が発生し強烈な速度低下を招いてしまうため、HashJoinの実行中にはメモリアクセスの局所性を確保できる仕組みが必要でした。</p>

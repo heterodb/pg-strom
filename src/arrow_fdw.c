@@ -2826,13 +2826,13 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 			{
 				optimal_gpus = __optimal_gpus;
 				if (optimal_gpus == 0)
-					__Debug("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", relname, af_state->filename);
+					__Info("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", relname, af_state->filename);
 			}
 			else
 			{
 				__optimal_gpus &= optimal_gpus;
 				if (optimal_gpus != __optimal_gpus)
-					__Debug("foreign-table='%s' arrow-file='%s' reduced GPUs-set %08lx => %08lx", relname, af_state->filename, optimal_gpus, __optimal_gpus);
+					__Info("foreign-table='%s' arrow-file='%s' reduced GPUs-set %08lx => %08lx", relname, af_state->filename, optimal_gpus, __optimal_gpus);
 				optimal_gpus = __optimal_gpus;
 			}
 			if (optimal_gpus == 0)

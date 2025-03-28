@@ -86,7 +86,13 @@
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#guc">GUCパラメータによる制御</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#gpusql_1">GPUダイレクトSQL実行の利用を確認する</a>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpu">GPU選択ポリシー</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_6">諸注意</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#gpusql_1">GPUダイレクトSQLの利用を確認する</a>
     </li>
     <li class="toctree-l3"><a class="reference internal" href="#visibility-map">Visibility Mapに関する注意事項</a>
     </li>
@@ -155,19 +161,18 @@
           <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
             <div class="section" itemprop="articleBody">
               
-                <h1 id="gpusql">GPUダイレクトSQL実行</h1>
+                <h1 id="gpusql">GPUダイレクトSQL</h1>
 <h2 id="_1">概要</h2>
 <p>SQLワークロードを高速に処理するには、プロセッサが効率よく処理を行うのと同様に、ストレージやメモリからプロセッサへ高速にデータを供給する事が重要です。処理すべきデータがプロセッサに届いていなければ、プロセッサは手持ち無沙汰になってしまいます。</p>
-<p>GPUダイレクトSQL実行機能は、PCIeバスに直結する事で高速なI/O処理を実現するNVMe-SSDと、同じPCIeバス上に接続されたGPUをダイレクトに接続し、ハードウェア限界に近い速度でデータをプロセッサに供給する事でSQLワークロードを高速に処理するための機能です。</p>
+<p>GPUダイレクトSQL機能は、PCIeバスに直結する事で高速なI/O処理を実現するNVMe-SSDと、同じPCIeバス上に接続されたGPUをダイレクトに接続し、ハードウェア限界に近い速度でデータをプロセッサに供給する事でSQLワークロードを高速に処理するための機能です。</p>
 <p>通常、ストレージ上に格納されたPostgreSQLデータブロックは、PCIeバスを通していったんCPU/RAMへとロードされます。その後、クエリ実行計画にしたがってWHERE句によるフィルタリングやJOIN/GROUP BYといった処理を行うわけですが、集計系ワークロードの特性上、入力するデータ件数より出力するデータ件数の方がはるかに少ない件数となります。例えば数十億行を読み出した結果をGROUP BYで集約した結果が高々数百行という事も珍しくありません。</p>
 <p>言い換えれば、我々はゴミデータを運ぶためにPCIeバス上の帯域を消費しているとも言えますが、CPUがレコードの中身を調べるまでは、その要不要を判断できないため、一般的な実装ではこれは不可避と言えます。</p>
 <p><img alt="SSD2GPU Direct SQL Execution Overview" src="../img/ssd2gpu-overview.png" /></p>
 <p>GPUダイレクトSQL実行はデータの流れを変え、ストレージ上のデータブロックをPCIeバス上のP2P DMAを用いてGPUに直接転送し、GPUでSQLワークロードを処理する事でCPUが処理すべきレコード数を減らすための機能です。いわば、ストレージとCPU/RAMの間に位置してSQLを処理するためのプリプロセッサとしてGPUを活用し、結果としてI/O処理を高速化するためのアプローチです。</p>
 <p>本機能は、内部的にNVIDIA GPUDirect Storageモジュール（<code>nvidia-fs</code>）を使用して、GPUデバイスメモリとNVMEストレージとの間でP2Pのデータ転送を行います。
 したがって、本機能を利用するには、PostgreSQLの拡張モジュールであるPG-Stromだけではなく、上記のLinux kernelモジュールが必要です。</p>
-<p>また、本機能が対応しているのはNVME仕様のSSDや、NVME-oFで接続されたリモートデバイスのみです。
-SASやSATAといったインターフェースで接続された旧式のストレージには対応していません。
-今までに動作実績のあるNVME-SSDについては <a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list">002: HW Validation List</a> が参考になるでしょう。</p>
+<p>また、ストレージ装置としてはNVME仕様のSSDが必要ですが、それ以外にもNVIDIA GPUDirect Storageが対応しているストレージシステム（NVME-oFやNFS-over-RDMAで接続されたリモートディスクなど）が利用可能です。
+しかし、十分に検証されているとは言い難いため、利用に際しては別途動作検証を行った方が良いでしょう。</p>
 <h2 id="_2">初期設定</h2>
 <h3 id="_3">ドライバのインストール</h3>
 <p>以前のPG-Stromでは、GPUダイレクトSQLの利用にはHeteroDB社の開発した独自のLinux kernelドライバが必要でしたが、v3.0以降ではNVIDIAの提供するGPUDirect Storageを利用するように設計を変更しています。GPUDirect Storage用のLinux kernelドライバ（<code>nvidia-fs</code>）はCUDA Toolkitのインストールプロセスに統合され、本マニュアルの「インストール」の章に記載の手順でシステムをセットアップした場合、特に追加の設定は必要ではありません。</p>
@@ -196,23 +201,27 @@ nvidia               8822784  43 nvidia_uvm,nvidia_fs
 drm                   741376  2 drm_kms_helper,nvidia
 </code></pre>
 <h3 id="_4">テーブルスペースの設計</h3>
-<p>GPUダイレクトSQL実行は以下の条件で発動します。</p>
+<p>GPUダイレクトSQLは以下の条件で発動します。</p>
 <ul>
 <li>スキャン対象のテーブルがNVMe-SSDで構成された区画に配置されている。<ul>
 <li><code>/dev/nvmeXXXX</code>ブロックデバイス、または<code>/dev/nvmeXXXX</code>ブロックデバイスのみから構成されたmd-raid0区画が対象です。</li>
 </ul>
 </li>
+<li>または、スキャン対象のテーブルが<code>pg_strom.manual_optimal_gpus</code>で明示的に指定されたディレクトリに配置されている。<ul>
+<li>NFS-over-RDMAなど高速ネットワークを介して接続するリモートストレージを利用する場合は必須の設定です。</li>
+</ul>
+</li>
 <li>テーブルサイズが<code>pg_strom.gpudirect_threshold</code>よりも大きい事。<ul>
-<li>この設定値は任意に変更可能ですが、デフォルト値は本体搭載物理メモリに<code>shared_buffers</code>の設定値の1/3を加えた大きさです。</li>
+<li>この設定値は任意に変更可能で、デフォルトは<code>2GB</code>に設定されています。かつてのPG-Stromよりもかなり小さな値になっています。</li>
 </ul>
 </li>
 </ul>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>md-raid0を用いて複数のNVMe-SSD区画からストライピング読出しを行うには、HeteroDB社の提供するエンタープライズサブスクリプションの適用が必要です。</p>
+<p>md-raid0を用いた複数のNVME-SSD区画からのストライピング読出しや、高速ネットワークを介したリモートディスクからの読み出しには、HeteroDB社の提供するエンタープライズサブスクリプションの適用が必要です。</p>
 </div>
-<p>テーブルをNVMe-SSDで構成された区画に配置するには、データベースクラスタ全体をNVMe-SSDボリュームに格納する以外にも、PostgreSQLのテーブルスペース機能を用いて特定のテーブルや特定のデータベースのみをNVMe-SSDボリュームに配置する事ができます。</p>
-<p>例えば <code>/opt/nvme</code> にNVMe-SSDボリュームがマウントされている場合、以下のようにテーブルスペースを作成する事ができます。
+<p>テーブルをNVME-SSDで構成された区画に配置するには、データベースクラスタ全体をNVME-SSDボリュームに格納する以外にも、PostgreSQLのテーブルスペース機能を用いて特定のテーブルや特定のデータベースのみをNVME-SSDボリュームに配置する事ができます。</p>
+<p>例えば <code>/opt/nvme</code> にNVME-SSDボリュームがマウントされている場合、以下のようにテーブルスペースを作成する事ができます。
 PostgreSQLのサーバプロセスの権限で当該ディレクトリ配下のファイルを読み書きできるようパーミッションが設定されている必要がある事に留意してください。</p>
 <pre><code>CREATE TABLESPACE my_nvme LOCATION '/opt/nvme';
 </code></pre>
@@ -226,47 +235,123 @@ PostgreSQLのサーバプロセスの権限で当該ディレクトリ配下の�
 <h2 id="_5">運用</h2>
 <h3 id="gpunvme-ssd">GPUとNVME-SSD間の距離</h3>
 <p>サーバの選定とGPUおよびNVME-SSDの搭載にあたり、デバイスの持つ性能を最大限に引き出すには、デバイス間の距離を意識したコンフィグが必要です。</p>
-<p>GPUダイレクトSQL機能がその基盤として使用している<a href="https://docs.nvidia.com/cuda/gpudirect-rdma/">NVIDIA GPUDirect RDMA</a>は、P2P DMAを実行するには互いのデバイスが同じPCIe root complexの配下に接続されている事を要求しています。つまり、デュアルCPUシステムでNVME-SSDがCPU1に、GPUがCPU2に接続されており、P2P DMAがCPU間のQPIを横切るよう構成する事はできません。</p>
-<p>また、性能の観点からはCPU内蔵のPCIeコントローラよりも、専用のPCIeスイッチを介して互いのデバイスを接続する方が推奨されています。</p>
-<p>以下の写真はHPC向けサーバのマザーボードで、8本のPCIe x16スロットがPCIeスイッチを介して互いに対となるスロットと接続されています。また、写真の左側のスロットはCPU1に、右側のスロットはCPU2に接続されています。</p>
-<p>例えば、SSD-2上に構築されたテーブルをGPUダイレクトSQLを用いてスキャンする場合、最適なGPUの選択はGPU-2でしょう。またGPU-1を使用する事も可能ですが、GPUDirect RDMAの制約から、GPU-3とGPU-4の使用は避けねばなりません。</p>
+<p>NVME-SSD（やリモート読み出しに使用する高速NIC）からの読み出しと、GPUへの直接ロードという処理は、2つの異なるPCI-Eデバイス間でデータを転送するという処理と同義です。PCI-Eバスを一種のツリー状のネットワークであると考えれば、ネットワーク的な距離が近く帯域の太い方がデータ転送に適しているという理解は直感的でしょう。</p>
+<p>以下の写真はHPC向けサーバのマザーボードで、8本のPCI-E x16スロットがPCI-Eスイッチを介して互いに対となるスロットと接続されています。また、写真の左側のスロットはCPU1に、右側のスロットはCPU2に接続されています。</p>
+<p>一般にCPU内蔵のPCI-Eコントローラよりも専用のPCI-Eスイッチの方が高速ですので、例えば、SSD-2上に構築されたテーブルをGPUダイレクトSQLを用いてスキャンする場合、最適なGPUの選択はGPU-2でしょう。また、同じCPUの配下に接続されているGPU-1を使用する事も可能ですが、NUMA跨ぎとなりCPU-CPU間の通信を伴うGPU-3とGPU-4の使用は避けた方が良いかもしれません。</p>
 <p><img alt="Motherboard of HPC Server" src="../img/pcie-hpc-server.png" /></p>
-<p>PG-Stromは起動時にシステムのPCIeバストポロジ情報を取得し、GPUとNVME-SSD間の論理的な距離を算出します。
-これは以下のように起動時のログに記録されており、例えば<code>/dev/nvme2</code>をスキャンする時はGPU1といった具合に、各NVME-SSDごとに最も距離の近いGPUを優先して使用するようになります。</p>
+<p>PG-Stromは起動時にシステムのPCI-Eバストポロジ情報を取得し、GPUとNVME-SSD間の論理的な距離を算出します。
+これは以下のように起動時のログに記録されており、例えば<code>/dev/nvme2</code>をスキャンする時はGPU1といった具合に、デフォルトでは各NVME-SSDごとに最も距離の近いGPUを優先して使用するようになります。</p>
 <pre><code>$ pg_ctl restart
      :
-LOG:  PG-Strom: GPU0 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.50GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
-LOG:  [0000:41:00:0] GPU0 (NVIDIA A100-PCIE-40GB; GPU-13943bfd-5b30-38f5-0473-78&gt;
-LOG:  [0000:81:00:0] nvme0 (NGD-IN2500-080T4-C) --&gt; GPU0 [dist=9]
-LOG:  [0000:82:00:0] nvme2 (INTEL SSDPF2KX038TZ) --&gt; GPU0 [dist=9]
-LOG:  [0000:c2:00:0] nvme3 (INTEL SSDPF2KX038TZ) --&gt; GPU0 [dist=9]
-LOG:  [0000:c6:00:0] nvme5 (Corsair MP600 CORE) --&gt; GPU0 [dist=9]
-LOG:  [0000:c3:00:0] nvme4 (INTEL SSDPF2KX038TZ) --&gt; GPU0 [dist=9]
-LOG:  [0000:c1:00:0] nvme1 (INTEL SSDPF2KX038TZ) --&gt; GPU0 [dist=9]
-LOG:  [0000:c4:00:0] nvme6 (NGD-IN2500-080T4-C) --&gt; GPU0 [dist=9]
+ LOG:  PG-Strom version 6.0.1 built for PostgreSQL 16 (githash: 1fe955f845063236725631c83434b00f68a8d4cf)
+ LOG:  PG-Strom binary built for CUDA 12.6 (CUDA runtime 12.4)
+ LOG:  PG-Strom: GPU0 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.38GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
+ LOG:  PG-Strom: GPU1 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.38GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
+ LOG:  [0000:41:00:0] GPU1 (NVIDIA A100-PCIE-40GB; GPU-13943bfd-5b30-38f5-0473-78979c134606)
+ LOG:  [0000:01:00:0] GPU0 (NVIDIA A100-PCIE-40GB; GPU-cca38cf1-ddcc-6230-57fe-d42ad0dc3315)
+ LOG:  [0000:c3:00:0] nvme2 (INTEL SSDPF2KX038TZ) --&gt; GPU0,GPU1 [dist=130]
+ LOG:  [0000:c1:00:0] nvme0 (INTEL SSDPF2KX038TZ) --&gt; GPU0,GPU1 [dist=130]
+ LOG:  [0000:c2:00:0] nvme1 (INTEL SSDPF2KX038TZ) --&gt; GPU0,GPU1 [dist=130]
+ LOG:  [0000:82:00:0] nvme4 (INTEL SSDPF2KX038TZ) --&gt; GPU0,GPU1 [dist=130]
+ LOG:  [0000:c6:00:0] nvme3 (Corsair MP600 CORE) --&gt; GPU0,GPU1 [dist=130]
+     :
 </code></pre>
-<p>通常は自動設定で問題ありません。
-ただ、NVME-over-Fabric(RDMA)を使用する場合はPCIeバス上のnvmeデバイスの位置を取得できないため、手動でNVME-SSDとGPUの位置関係を設定する必要があります。</p>
-<p>例えば<code>nvme1</code>には<code>gpu2</code>を、<code>nvme2</code>と<code>nvme3</code>には<code>gpu1</code>を割り当てる場合、以下の設定を<code>postgresql.conf</code>へ記述します。この手動設定は、自動設定よりも優先する事に留意してください。</p>
-<pre><code>pg_strom.nvme_distance_map = 'nvme1=gpu2,nvme2=gpu1,nvme3=gpu1'
-</code></pre>
-<p>ローカルのNVME-SSDデバイス以外、例えば100Gbイーサネットで接続されたストレージサーバからGPU-Direct SQLを実行する場合など、PCI-Eバス上の距離の概念が当てはまらない場合は、ストレージがマウントされたディレクトリと、そこに関連付けるGPUを指定する事もできます。
-以下は設定例です。</p>
-<pre><code>pg_strom.nvme_distance_map = '/mnt/0=gpu0,/mnt/1=gpu1'
+<p>シングルソケット構成のサーバーで、PCI-Eスイッチも搭載されていない、というような小規模システムであれば、自動設定で問題ありません。</p>
+<p>ただ、GPUとNVME-SSDが異なるCPUに接続されていたり、高速ネットワーク経由でリモートのストレージ（NVME-oFやNFS-over-RDMAなど）に接続する場合、PCI-Eバス上のストレージの位置を自動では検出できないため、手動でそれらの対応関係を設定する必要があります。</p>
+<p>例えば、<code>nvme3</code>には<code>gpu2</code>と<code>gpu3</code>を、リモートのストレージを<code>/mnt/nfs</code>にマウントしそれを<code>gpu1</code>に割り当てる場合、以下の設定を<code>postgresql.conf</code>へ記述します。この手動設定は、自動設定よりも優先する事に留意してください。</p>
+<pre><code>pg_strom.manual_optimal_gpus = 'nvme3=gpu2:gpu3,/mnt/nfs=gpu1'
 </code></pre>
 <h3 id="guc">GUCパラメータによる制御</h3>
-<p>GPUダイレクトSQL実行に関連するGUCパラメータは2つあります。</p>
-<p>一つは<code>pg_strom.gpudirect_enabled</code>で、GPUダイレクト機能の有効/無効を単純にon/offします。
-本パラメータが<code>off</code>になっていると、テーブルのサイズや物理配置とは無関係にGPUダイレクトSQL実行は使用されません。デフォルト値は<code>on</code>です。</p>
-<p>もう一つのパラメータは<code>pg_strom.gpudirect_threshold</code>で、GPUダイレクトSQL実行が使われるべき最小のテーブルサイズを指定します。</p>
-<p>テーブルの物理配置がNVME-SSD区画（または、NVME-SSDのみで構成されたmd-raid0区画）上に存在し、かつ、テーブルのサイズが本パラメータの指定値よりも大きな場合、PG-StromはGPUダイレクトSQL実行を選択します。
-本パラメータのデフォルト値は<code>2GB</code>です。つまり、明らかに小さなテーブルに対してはGPUダイレクトSQLではなく、PostgreSQLのバッファから読み出す事を優先します。</p>
-<p>これは、一回の読み出しであればGPUダイレクトSQL実行に優位性があったとしても、オンメモリ処理ができる程度のテーブルに対しては、二回目以降のディスクキャッシュ利用を考慮すると、必ずしも優位とは言えないという仮定に立っているという事です。</p>
-<p>ワークロードの特性によっては必ずしもこの設定が正しいとは限りません。</p>
-<h3 id="gpusql_1">GPUダイレクトSQL実行の利用を確認する</h3>
+<p>GPUダイレクトSQL実行に関連するGUCパラメータは4つあります。</p>
+<dl>
+<dt><code>pg_strom.gpudirect_enabled</code></dt>
+<dd>
+<p>このパラメータはGPUダイレクト機能の有効/無効を単純にon/offします。デフォルト値は<code>on</code>です。</p>
+</dd>
+<dt><code>pg_strom.gpudirect_driver</code></dt>
+<dd>
+<p>GPUダイレクト実行の利用するドライバを指定する事ができます。</p>
+</dd>
+<dd>
+<p><code>heterodb-extra</code>モジュールがインストールされていれば、システムの状態に応じて<code>cufile</code>、<code>nvme_strom</code>、あるいはCPUによるGPUダイレクトSQLのエミュレーションである<code>vfs</code>のいずれかの値が初期設定されています。当該モジュールがインストールされていない場合、<code>vfs</code>のみとなります。</p>
+</dd>
+<dd>
+<p><code>nvme_strom</code>は、以前にRHEL7/8環境でGPUダイレクトSQLを使用するために用いていた独自のLinux kernel moduleで、現在では非推奨です。</p>
+</dd>
+<dt><code>pg_strom.gpudirect_threshold</code></dt>
+<dd>GPUダイレクトSQLが使われるべき最小のテーブルサイズを指定します。</dd>
+<dd>テーブルの物理配置がGPUダイレクトSQLの前提条件を満たし、かつテーブルサイズが本パラメータの設定値よりも大きな場合、PG-StromはGPUダイレクトSQL実行を選択します。</dd>
+<dd>本パラメータのデフォルト値は<code>2GB</code>です。つまり、明らかに小さなテーブルに対してはGPUダイレクトSQLではなく、PostgreSQLのバッファから読み出す事を優先します。</dd>
+<dd>これは、一回の読み出しであればGPUダイレクトSQL実行に優位性があったとしても、オンメモリ処理ができる程度のテーブルに対しては、二回目以降のディスクキャッシュ利用を考慮すると、必ずしも優位とは言えないという仮定に立っているという事です。</dd>
+<dt><code>pg_strom.gpu_selection_policy</code></dt>
+<dd>
+<p>GPUダイレクトSQLを利用する場合、（マニュアルでの設定がない場合は）対象テーブルの位置から選択されたGPUを使用する事になりますが、その選択ポリシーを指定します。指定可能なポリシーは以下の３つです。</p>
+</dd>
+<dd>
+<ul>
+<li><code>optimal</code> (default) ... 最も近傍のGPUを使用する</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>numa</code> ... 同じNUMAノードに属するGPUを使用する</li>
+</ul>
+</dd>
+<dd>
+<ul>
+<li><code>system</code> ... システムに搭載されているGPUを全て使用する</li>
+</ul>
+</dd>
+<dd>
+<p>詳しくは次節で説明します。</p>
+</dd>
+</dl>
+<h2 id="gpu">GPU選択ポリシー</h2>
+<p>以下のログはPostgreSQL(PG-Strom)起動時のものですが、システムの認識したGPUとNVME-SSDがそれぞれ表示されています。
+各NVME-SSDの行には、デバイスの名称と共に、最も近傍に位置するGPUの一覧とその物理的な距離が出力されています。このサーバは比較的小規模であり、全てのNVME-SSDが等距離でGPU0とGPU1に接続されていますが、大規模なサーバではGPU毎にNVME-SSDとの距離が異なるものも存在します。</p>
+<p>本節では、GPUとNVME-SSDとの距離に基づくGPU選択ポリシーについて説明します。</p>
+<pre><code>$ pg_ctl restart
+     :
+ LOG:  PG-Strom version 6.0.1 built for PostgreSQL 16 (githash: 1fe955f845063236725631c83434b00f68a8d4cf)
+ LOG:  PG-Strom binary built for CUDA 12.6 (CUDA runtime 12.4)
+ LOG:  PG-Strom: GPU0 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.38GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
+ LOG:  PG-Strom: GPU1 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.38GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
+ LOG:  [0000:41:00:0] GPU1 (NVIDIA A100-PCIE-40GB; GPU-13943bfd-5b30-38f5-0473-78979c134606)
+ LOG:  [0000:01:00:0] GPU0 (NVIDIA A100-PCIE-40GB; GPU-cca38cf1-ddcc-6230-57fe-d42ad0dc3315)
+ LOG:  [0000:c3:00:0] nvme2 (INTEL SSDPF2KX038TZ) --&gt; GPU0,GPU1 [dist=130]
+ LOG:  [0000:c1:00:0] nvme0 (INTEL SSDPF2KX038TZ) --&gt; GPU0,GPU1 [dist=130]
+ LOG:  [0000:c2:00:0] nvme1 (INTEL SSDPF2KX038TZ) --&gt; GPU0,GPU1 [dist=130]
+ LOG:  [0000:82:00:0] nvme4 (INTEL SSDPF2KX038TZ) --&gt; GPU0,GPU1 [dist=130]
+ LOG:  [0000:c6:00:0] nvme3 (Corsair MP600 CORE) --&gt; GPU0,GPU1 [dist=130]
+     :
+</code></pre>
+<p>以下の図は、デュアルソケットでPCI-Eスイッチを内蔵する大規模なGPUサーバのブロックダイアグラムです。</p>
+<p>例えばSSD3からデータを読み出してどこかのGPUにロードする場合、PCI-Eデバイス間の距離の観点から最も「近い」GPUはGPU1となります。
+この場合、設定パラメータ<code>pg_strom.gpu_selection_policy=optimal</code>を指定するとGPU-Direct SQLで使用するGPUはGPU1のみとなり、他のGPUはSSD3上に配置されているテーブルのスキャンには関与しません。</p>
+<p><img alt="Large GPU Server Block Diagram" src="../img/gpu_selection_policy.png" /></p>
+<p>一方、それでは困った事になる場合もあります。
+md-raidによりSSD0, SSD1, SSD4, SSD5を論理ボリュームとして構成し、その上にテーブルを構築した場合を考えてみる事にします。
+SSD0とSSD1の最近傍GPUはGPU0で、SSD4とSSD5の最近傍GPUはGPU2となり、GPU選択ポリシーが<code>optimal</code>であると当該md-raid区画には最適なGPUが存在しない事になってしまいます。この場合、対象となるGPUが存在しないためGPU-Direct SQLを利用しないという判断になります。</p>
+<p>これを変更するには、<code>pg_strom.gpu_selection_policy=numa</code>を設定します。
+このポリシーは同じNUMAノードに属するGPUをGPU-Direct SQLの対象として選択します。
+GPU選択ポリシーが<code>numa</code>である場合、md-raid区画に含まれる全てのSSD（SSD0, SSD1, SSD4, SSD5）にとってスケジュール可能なGPUは共通してGPU0～GPU3となります。そのため、md-raid区画からの読み出しは、これら4つのGPUに均等に分散される事になります。</p>
+<p>SSDからGPUへの通信がCPUのPCI-Eコントローラを経由するため、スループットが若干低下する可能性がありますが、PCI-E4.0以降に対応した最近のCPUではそれほど大きな速度差が見られる事は多くないようです。</p>
+<p>最後に、<code>pg_strom.gpu_selection_policy=system</code>を説明します。
+このポリシーはPCI-Eデバイスの距離に関わらず全てのGPUをGPU-Direct SQLにおけるスケジュール対象として選択するものです。
+例えば極端なケースでは、SSD0～SSD15の全てのGPUを一個のmd-raid区画として構成した場合、全てのSSDにとって共通して「望ましい」GPUというのは存在しない事になります。そこで、CPU-CPU間のデータ通信がある程度は発生する事は織り込んだ上で、全てのGPUをGPU-Direct SQLにおいてスケジュール可能とする選択ポリシーが用意されています。</p>
+<p>まとめると、PG-StromはGPUダイレクトSQLで使用するGPUを次のように決定します。</p>
+<ol>
+<li>スキャンすべきテーブルやArrowファイルのファイルパスを特定する。</li>
+<li><code>pg_strom.manual_optimal_gpus</code>に当該パス（または、それを含むディレクトリ）とGPUの組み合わせが記述されていれば、そのGPUを使用する。</li>
+<li>当該ファイルを保存しているNVME-SSDを特定する。md-raid区画の上に保存されている場合は、RAIDを構成する全てのNVME-SSDが対象となる。</li>
+<li><code>pg_strom.gpu_selection_policy</code>に従い、各NVME-SSDにスケジュール可能なGPUのセットを導出する。NVME-SSDが複数存在する場合は、これらの論理積（AND）をスケジュール可能なGPUとする。</li>
+<li>スケジュール可能なGPUが存在しない場合、GPU-Direct SQLは使用されない。これには、テーブルがNVME-SSD上に構築されていない場合も含まれる。</li>
+</ol>
+<h2 id="_6">諸注意</h2>
+<h3 id="gpusql_1">GPUダイレクトSQLの利用を確認する</h3>
 <p><code>EXPLAIN</code>コマンドを実行すると、当該クエリでGPUダイレクトSQL実行が利用されるのかどうかを確認する事ができます。</p>
-<p>以下のクエリの例では、<code>Custom Scan (GpuJoin)</code>による<code>lineorder</code>テーブルに対するスキャンに<code>NVMe-Strom: enabled</code>との表示が出ています。この場合、<code>lineorder</code>テーブルからの読出しにはGPUダイレクトSQL実行が利用されます。</p>
-<pre><code># explain (costs off)
+<p>以下のクエリの例では、<code>Custom Scan (GpuPreAgg)</code>による<code>lineorder</code>テーブルに対するスキャンに<code>GPU-Direct with 2 GPUs &lt;0,1&gt;</code>との表示が出ています。この場合、<code>lineorder</code>テーブルからの読出しにはGPU0およびGPU1に対するGPUダイレクトSQL実行が利用されます。</p>
+<pre><code>ssbm=# explain
 select sum(lo_revenue), d_year, p_brand1
 from lineorder, date1, part, supplier
 where lo_orderdate = d_datekey
@@ -274,46 +359,40 @@ and lo_partkey = p_partkey
 and lo_suppkey = s_suppkey
 and p_category = 'MFGR#12'
 and s_region = 'AMERICA'
-  group by d_year, p_brand1
-  order by d_year, p_brand1;
-                                          QUERY PLAN
-----------------------------------------------------------------------------------------------
- GroupAggregate
+  group by d_year, p_brand1;
+                                                  QUERY PLAN
+---------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=13806407.68..13806495.18 rows=7000 width=46)
    Group Key: date1.d_year, part.p_brand1
-   -&gt;  Sort
-         Sort Key: date1.d_year, part.p_brand1
-         -&gt;  Custom Scan (GpuPreAgg)
-               Reduction: Local
-               GPU Projection: pgstrom.psum((lo_revenue)::double precision), d_year, p_brand1
-               Combined GpuJoin: enabled
-               -&gt;  Custom Scan (GpuJoin) on lineorder
-                     GPU Projection: date1.d_year, part.p_brand1, lineorder.lo_revenue
-                     Outer Scan: lineorder
-                     Depth 1: GpuHashJoin  (nrows 2406009600...97764190)
-                              HashKeys: lineorder.lo_partkey
-                              JoinQuals: (lineorder.lo_partkey = part.p_partkey)
-                              KDS-Hash (size: 10.67MB)
-                     Depth 2: GpuHashJoin  (nrows 97764190...18544060)
-                              HashKeys: lineorder.lo_suppkey
-                              JoinQuals: (lineorder.lo_suppkey = supplier.s_suppkey)
-                              KDS-Hash (size: 131.59MB)
-                     Depth 3: GpuHashJoin  (nrows 18544060...18544060)
-                              HashKeys: lineorder.lo_orderdate
-                              JoinQuals: (lineorder.lo_orderdate = date1.d_datekey)
-                              KDS-Hash (size: 461.89KB)
-                     NVMe-Strom: enabled
-                     -&gt;  Custom Scan (GpuScan) on part
-                           GPU Projection: p_brand1, p_partkey
-                           GPU Filter: (p_category = 'MFGR#12'::bpchar)
-                     -&gt;  Custom Scan (GpuScan) on supplier
-                           GPU Projection: s_suppkey
-                           GPU Filter: (s_region = 'AMERICA'::bpchar)
-                     -&gt;  Seq Scan on date1
-(31 rows)
+   -&gt;  Gather  (cost=13805618.73..13806355.18 rows=7000 width=46)
+         Workers Planned: 2
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on lineorder  (cost=13804618.73..13804655.18 rows=7000 width=46)
+               GPU Projection: pgstrom.psum(lo_revenue), d_year, p_brand1
+               GPU Join Quals [1]: (p_partkey = lo_partkey) [plan: 2500011000 -&gt; 98584180 ]
+               GPU Outer Hash [1]: lo_partkey
+               GPU Inner Hash [1]: p_partkey
+               GPU Join Quals [2]: (s_suppkey = lo_suppkey) [plan: 98584180 -&gt; 19644550 ]
+               GPU Outer Hash [2]: lo_suppkey
+               GPU Inner Hash [2]: s_suppkey
+               GPU Join Quals [3]: (d_datekey = lo_orderdate) [plan: 19644550 -&gt; 19644550 ]
+               GPU Outer Hash [3]: lo_orderdate
+               GPU Inner Hash [3]: d_datekey
+               GPU Group Key: d_year, p_brand1
+               Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+               -&gt;  Parallel Custom Scan (GpuScan) on part  (cost=100.00..12682.86 rows=32861 width=14)
+                     GPU Projection: p_brand1, p_partkey
+                     GPU Scan Quals: (p_category = 'MFGR#12'::bpchar) [plan: 2000000 -&gt; 32861]
+                     Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+               -&gt;  Parallel Custom Scan (GpuScan) on supplier  (cost=100.00..78960.47 rows=830255 width=6)
+                     GPU Projection: s_suppkey
+                     GPU Scan Quals: (s_region = 'AMERICA'::bpchar) [plan: 9999718 -&gt; 830255]
+                     Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+               -&gt;  Parallel Seq Scan on date1  (cost=0.00..62.04 rows=1504 width=8)
+(26 rows)
 </code></pre>
 <h3 id="visibility-map">Visibility Mapに関する注意事項</h3>
 <p>現在のところ、PG-StromのGPU側処理では行単位のMVCC可視性チェックを行う事ができません。これは、可視性チェックを行うために必要なデータ構造がホスト側だけに存在するためですが、ストレージ上のブロックを直接GPUに転送する場合、少々厄介な問題が生じます。</p>
-<p>NVMe-SSDにP2P DMAを要求する時点では、ストレージブロックの内容はまだCPU/RAMへと読み出されていないため、具体的にどの行が可視であるのか、どの行が不可視であるのかを判別する事ができません。これは、PostgreSQLがレコードをストレージへ書き出す際にMVCC関連の属性と共に書き込んでいるためで、似たような問題がIndexOnlyScanを実装する際に表面化しました。</p>
+<p>NVMD-SSDにP2P DMAを要求する時点では、ストレージブロックの内容はまだCPU/RAMへと読み出されていないため、具体的にどの行が可視であるのか、どの行が不可視であるのかを判別する事ができません。これは、PostgreSQLがレコードをストレージへ書き出す際にMVCC関連の属性と共に書き込んでいるためで、似たような問題がIndexOnlyScanを実装する際に表面化しました。</p>
 <p>これに対処するため、PostgreSQLはVisibility Mapと呼ばれるインフラを持っています。これは、あるデータブロック中に存在するレコードが全てのトランザクションから可視である事が明らかであれば、該当するビットを立てる事で、データブロックを読むことなく当該ブロックにMVCC不可視なレコードが存在するか否かを判定する事を可能とするものです。</p>
 <p>GPUダイレクトSQL実行はこのインフラを利用しています。つまり、Visibility Mapがセットされており、"all-visible"であるブロックだけがP2P DMAで読み出すようリクエストが送出されます。</p>
 <p>Visibility MapはVACUUMのタイミングで作成されるため、以下のように明示的にVACUUMを実行する事で強制的にVisibility Mapを構築する事ができます。</p>

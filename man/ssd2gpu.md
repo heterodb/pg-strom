@@ -1,5 +1,5 @@
-@ja:#GPUダイレクトSQL実行
-@en:#GPU Direct SQL Execution
+@ja:#GPUダイレクトSQL
+@en:#GPU-Direct SQL
 
 @ja:##概要
 @en:##Overview
@@ -7,7 +7,7 @@
 @ja{
 SQLワークロードを高速に処理するには、プロセッサが効率よく処理を行うのと同様に、ストレージやメモリからプロセッサへ高速にデータを供給する事が重要です。処理すべきデータがプロセッサに届いていなければ、プロセッサは手持ち無沙汰になってしまいます。
 
-GPUダイレクトSQL実行機能は、PCIeバスに直結する事で高速なI/O処理を実現するNVMe-SSDと、同じPCIeバス上に接続されたGPUをダイレクトに接続し、ハードウェア限界に近い速度でデータをプロセッサに供給する事でSQLワークロードを高速に処理するための機能です。
+GPUダイレクトSQL機能は、PCIeバスに直結する事で高速なI/O処理を実現するNVMe-SSDと、同じPCIeバス上に接続されたGPUをダイレクトに接続し、ハードウェア限界に近い速度でデータをプロセッサに供給する事でSQLワークロードを高速に処理するための機能です。
 }
 @en{
 For the fast execution of SQL workloads, it needs to provide processors rapid data stream from storage or memory, in addition to processor's execution efficiency. Processor will run idle if data stream would not be delivered.
@@ -40,17 +40,15 @@ GPU Direct SQL Execution changes the flow to read blocks from the storage sequen
 本機能は、内部的にNVIDIA GPUDirect Storageモジュール（`nvidia-fs`）を使用して、GPUデバイスメモリとNVMEストレージとの間でP2Pのデータ転送を行います。
 したがって、本機能を利用するには、PostgreSQLの拡張モジュールであるPG-Stromだけではなく、上記のLinux kernelモジュールが必要です。
 
-また、本機能が対応しているのはNVME仕様のSSDや、NVME-oFで接続されたリモートデバイスのみです。
-SASやSATAといったインターフェースで接続された旧式のストレージには対応していません。
-今までに動作実績のあるNVME-SSDについては [002: HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list) が参考になるでしょう。
+また、ストレージ装置としてはNVME仕様のSSDが必要ですが、それ以外にもNVIDIA GPUDirect Storageが対応しているストレージシステム（NVME-oFやNFS-over-RDMAで接続されたリモートディスクなど）が利用可能です。
+しかし、十分に検証されているとは言い難いため、利用に際しては別途動作検証を行った方が良いでしょう。
 }
 @en{
 This feature internally uses the NVIDIA GPUDirect Storage module (`nvidia-fs`) to coordinate P2P data transfer from NVME storage to GPU device memory.
 So, this feature requires this Linux kernel module, in addition to PG-Strom as an extension of PostgreSQL.
 
-Also note that this feature supports only NVME-SSD or NVME-oF remove devices.
-It does not support legacy storages like SAS or SATA-SSD.
-We have tested several NVMD-SSD models. You can refer [002: HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list) for your information.
+In addition, an NVME-compatible SSD is required as a storage device, but other storage systems supported by NVIDIA GPUDirect Storage (such as remote disks connected via NVME-oF or NFS-over-RDMA) can also be used.
+However, it cannot be said that these have been sufficiently tested, so it is best to perform separate operation testing before use.
 }
 
 @ja:##初期設定
@@ -99,43 +97,47 @@ drm                   741376  2 drm_kms_helper,nvidia
 @en:###Designing Tablespace
 
 @ja{
-GPUダイレクトSQL実行は以下の条件で発動します。
+GPUダイレクトSQLは以下の条件で発動します。
 
 - スキャン対象のテーブルがNVMe-SSDで構成された区画に配置されている。
     - `/dev/nvmeXXXX`ブロックデバイス、または`/dev/nvmeXXXX`ブロックデバイスのみから構成されたmd-raid0区画が対象です。
+- または、スキャン対象のテーブルが`pg_strom.manual_optimal_gpus`で明示的に指定されたディレクトリに配置されている。
+    - NFS-over-RDMAなど高速ネットワークを介して接続するリモートストレージを利用する場合は必須の設定です。
 - テーブルサイズが`pg_strom.gpudirect_threshold`よりも大きい事。
-    - この設定値は任意に変更可能ですが、デフォルト値は本体搭載物理メモリに`shared_buffers`の設定値の1/3を加えた大きさです。
+    - この設定値は任意に変更可能で、デフォルトは`2GB`に設定されています。かつてのPG-Stromよりもかなり小さな値になっています。
 }
 @en{
 GPU Direct SQL Execution shall be invoked in the following case.
 
 - The target table to be scanned locates on the partition being consist of NVMe-SSD.
     - `/dev/nvmeXXXX` block device, or md-raid0 volume which consists of NVMe-SSDs only.
+- Or, the table to be scanned is located in a directory explicitly specified by `pg_strom.manual_optimal_gpus`.
+    - This setting is required when using remote storage connected via a high-speed network such as NFS-over-RDMA.
 - The target table size is larger than `pg_strom.gpudirect_threshold`.
     - You can adjust this configuration. Its default is physical RAM size of the system plus 1/3 of `shared_buffers` configuration.
 }
 
 @ja{
 !!! Note
-    md-raid0を用いて複数のNVMe-SSD区画からストライピング読出しを行うには、HeteroDB社の提供するエンタープライズサブスクリプションの適用が必要です。
+    md-raid0を用いた複数のNVME-SSD区画からのストライピング読出しや、高速ネットワークを介したリモートディスクからの読み出しには、HeteroDB社の提供するエンタープライズサブスクリプションの適用が必要です。
 }
 @en{
 !!! Note
-    Striped read from multiple NVMe-SSD using md-raid0 requires the enterprise subscription provided by HeteroDB,Inc.
+    Striping reads from multiple NVME-SSD volumes using md-raid0 or reading from remote disks over high-speed network requires the enterprise subscription provided by HeteroDB,Inc.
 }
 
 @ja{
-テーブルをNVMe-SSDで構成された区画に配置するには、データベースクラスタ全体をNVMe-SSDボリュームに格納する以外にも、PostgreSQLのテーブルスペース機能を用いて特定のテーブルや特定のデータベースのみをNVMe-SSDボリュームに配置する事ができます。
+テーブルをNVME-SSDで構成された区画に配置するには、データベースクラスタ全体をNVME-SSDボリュームに格納する以外にも、PostgreSQLのテーブルスペース機能を用いて特定のテーブルや特定のデータベースのみをNVME-SSDボリュームに配置する事ができます。
 }
 @en{
-In order to deploy the tables on the partition consists of NVMe-SSD, you can use the tablespace function of PostgreSQL to specify particular tables or databases to place them on NVMe-SSD volume, in addition to construction of the entire database cluster on the NVMe-SSD volume.
+In order to deploy the tables on the partition consists of NVME-SSD, you can use the tablespace function of PostgreSQL to specify particular tables or databases to place them on NVME-SSD volume, in addition to construction of the entire database cluster on the NVME-SSD volume.
 }
 @ja{
-例えば `/opt/nvme` にNVMe-SSDボリュームがマウントされている場合、以下のようにテーブルスペースを作成する事ができます。
+例えば `/opt/nvme` にNVME-SSDボリュームがマウントされている場合、以下のようにテーブルスペースを作成する事ができます。
 PostgreSQLのサーバプロセスの権限で当該ディレクトリ配下のファイルを読み書きできるようパーミッションが設定されている必要がある事に留意してください。
 }
 @en{
-For example, you can create a new tablespace below, if NVMe-SSD is mounted at `/opt/nvme`.
+For example, you can create a new tablespace below, if NVME-SSD is mounted at `/opt/nvme`.
 }
 ```
 CREATE TABLESPACE my_nvme LOCATION '/opt/nvme';
@@ -168,142 +170,260 @@ ALTER DATABASE my_database SET TABLESPACE my_nvme;
 @en:##Operations
 
 @ja:###GPUとNVME-SSD間の距離
-@en:###Distance between GPU and NVME-SSD
+@en:###Distance between GPU and NVME
 
 @ja{
 サーバの選定とGPUおよびNVME-SSDの搭載にあたり、デバイスの持つ性能を最大限に引き出すには、デバイス間の距離を意識したコンフィグが必要です。
 
-GPUダイレクトSQL機能がその基盤として使用している[NVIDIA GPUDirect RDMA](https://docs.nvidia.com/cuda/gpudirect-rdma/)は、P2P DMAを実行するには互いのデバイスが同じPCIe root complexの配下に接続されている事を要求しています。つまり、デュアルCPUシステムでNVME-SSDがCPU1に、GPUがCPU2に接続されており、P2P DMAがCPU間のQPIを横切るよう構成する事はできません。
-
-また、性能の観点からはCPU内蔵のPCIeコントローラよりも、専用のPCIeスイッチを介して互いのデバイスを接続する方が推奨されています。
+NVME-SSD（やリモート読み出しに使用する高速NIC）からの読み出しと、GPUへの直接ロードという処理は、2つの異なるPCI-Eデバイス間でデータを転送するという処理と同義です。PCI-Eバスを一種のツリー状のネットワークであると考えれば、ネットワーク的な距離が近く帯域の太い方がデータ転送に適しているという理解は直感的でしょう。
 }
 @en{
 On selection of server hardware and installation of GPU and NVME-SSD, hardware configuration needs to pay attention to the distance between devices, to pull out maximum performance of the device.
 
-[NVIDIA GPUDirect RDMA](https://docs.nvidia.com/cuda/gpudirect-rdma/), basis of the GPU Direct SQL mechanism, requires both of the edge devices of P2P DMA are connected on the same PCIe root complex. In the other words, unable to configure the P2P DMA traverses QPI between CPUs when NVME-SSD is attached on CPU1 and GPU is attached on CPU2 at dual socket system.
-
-From standpoint of the performance, it is recommended to use dedicated PCIe-switch to connect both of the devices more than the PCIe controller built in CPU.
+The process of reading from an NVME-SSD (or a high-speed NIC used for remote reading) and loading directly to a GPU is synonymous with the process of transferring data between two different PCI-E devices. If you think of the PCI-E bus as a kind of tree-shaped network, it is intuitive to understand that the device with a closer network distance and wider bandwidth is more suitable for data transfer.
 }
 
 @ja{
-以下の写真はHPC向けサーバのマザーボードで、8本のPCIe x16スロットがPCIeスイッチを介して互いに対となるスロットと接続されています。また、写真の左側のスロットはCPU1に、右側のスロットはCPU2に接続されています。
+以下の写真はHPC向けサーバのマザーボードで、8本のPCI-E x16スロットがPCI-Eスイッチを介して互いに対となるスロットと接続されています。また、写真の左側のスロットはCPU1に、右側のスロットはCPU2に接続されています。
 
-例えば、SSD-2上に構築されたテーブルをGPUダイレクトSQLを用いてスキャンする場合、最適なGPUの選択はGPU-2でしょう。またGPU-1を使用する事も可能ですが、GPUDirect RDMAの制約から、GPU-3とGPU-4の使用は避けねばなりません。
+一般にCPU内蔵のPCI-Eコントローラよりも専用のPCI-Eスイッチの方が高速ですので、例えば、SSD-2上に構築されたテーブルをGPUダイレクトSQLを用いてスキャンする場合、最適なGPUの選択はGPU-2でしょう。また、同じCPUの配下に接続されているGPU-1を使用する事も可能ですが、NUMA跨ぎとなりCPU-CPU間の通信を伴うGPU-3とGPU-4の使用は避けた方が良いかもしれません。
 }
 @en{
-The photo below is a motherboard of HPC server. It has 8 of PCIe x16 slots, and each pair is linked to the other over the PCIe switch. The slots in the left-side of the photo are connected to CPU1, and right-side are connected to CPU2.
+The photo below shows the motherboard of an HPC server, with eight PCI-E x16 slots connected to their counterparts via a PCI-E switch. The slot on the left side of the photo is connected to CPU1, and the slot on the right side is connected to CPU2.
 
-When a table on SSD-2 is scanned using GPU Direct SQL, the optimal GPU choice is GPU-2, and it may be able to use GPU1. However, we have to avoid to choose GPU-3 and GPU-4 due to the restriction of GPUDirect RDMA.
+In general, a dedicated PCI-E switch is faster than a PCI-E controller built into the CPU, so for example, when scanning a table built on SSD-2 using GPU Direct SQL, the optimal GPU selection would be GPU-2. It is also possible to use GPU-1, which is connected under the same CPU, but it may be better to avoid using GPU-3 and GPU-4, which cross NUMA and involve CPU-to-CPU communication.
 }
 
 ![Motherboard of HPC Server](./img/pcie-hpc-server.png)
 
 @ja{
-PG-Stromは起動時にシステムのPCIeバストポロジ情報を取得し、GPUとNVME-SSD間の論理的な距離を算出します。
-これは以下のように起動時のログに記録されており、例えば`/dev/nvme2`をスキャンする時はGPU1といった具合に、各NVME-SSDごとに最も距離の近いGPUを優先して使用するようになります。
+PG-Stromは起動時にシステムのPCI-Eバストポロジ情報を取得し、GPUとNVME-SSD間の論理的な距離を算出します。
+これは以下のように起動時のログに記録されており、例えば`/dev/nvme2`をスキャンする時はGPU1といった具合に、デフォルトでは各NVME-SSDごとに最も距離の近いGPUを優先して使用するようになります。
 }
 @en{
 PG-Strom calculate logical distances on any pairs of GPU and NVME-SSD using PCIe bus topology information of the system on startup time.
-It is displayed at the start up log. Each NVME-SSD determines the preferable GPU based on the distance, for example, `GPU1` shall be used on scan of the `/dev/nvme2`.
+It is displayed at the start up log. Each NVME-SSD determines the preferable GPU based on the distance, for example, `GPU1` shall be used on scan of the `/dev/nvme2` in the default.
 }
 
 ```
 $ pg_ctl restart
      :
-LOG:  PG-Strom: GPU0 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.50GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
-LOG:  [0000:41:00:0] GPU0 (NVIDIA A100-PCIE-40GB; GPU-13943bfd-5b30-38f5-0473-78>
-LOG:  [0000:81:00:0] nvme0 (NGD-IN2500-080T4-C) --> GPU0 [dist=9]
-LOG:  [0000:82:00:0] nvme2 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=9]
-LOG:  [0000:c2:00:0] nvme3 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=9]
-LOG:  [0000:c6:00:0] nvme5 (Corsair MP600 CORE) --> GPU0 [dist=9]
-LOG:  [0000:c3:00:0] nvme4 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=9]
-LOG:  [0000:c1:00:0] nvme1 (INTEL SSDPF2KX038TZ) --> GPU0 [dist=9]
-LOG:  [0000:c4:00:0] nvme6 (NGD-IN2500-080T4-C) --> GPU0 [dist=9]
+ LOG:  PG-Strom version 6.0.1 built for PostgreSQL 16 (githash: 1fe955f845063236725631c83434b00f68a8d4cf)
+ LOG:  PG-Strom binary built for CUDA 12.6 (CUDA runtime 12.4)
+ LOG:  PG-Strom: GPU0 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.38GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
+ LOG:  PG-Strom: GPU1 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.38GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
+ LOG:  [0000:41:00:0] GPU1 (NVIDIA A100-PCIE-40GB; GPU-13943bfd-5b30-38f5-0473-78979c134606)
+ LOG:  [0000:01:00:0] GPU0 (NVIDIA A100-PCIE-40GB; GPU-cca38cf1-ddcc-6230-57fe-d42ad0dc3315)
+ LOG:  [0000:c3:00:0] nvme2 (INTEL SSDPF2KX038TZ) --> GPU0,GPU1 [dist=130]
+ LOG:  [0000:c1:00:0] nvme0 (INTEL SSDPF2KX038TZ) --> GPU0,GPU1 [dist=130]
+ LOG:  [0000:c2:00:0] nvme1 (INTEL SSDPF2KX038TZ) --> GPU0,GPU1 [dist=130]
+ LOG:  [0000:82:00:0] nvme4 (INTEL SSDPF2KX038TZ) --> GPU0,GPU1 [dist=130]
+ LOG:  [0000:c6:00:0] nvme3 (Corsair MP600 CORE) --> GPU0,GPU1 [dist=130]
+     :
 ```
-
 @ja{
-通常は自動設定で問題ありません。
-ただ、NVME-over-Fabric(RDMA)を使用する場合はPCIeバス上のnvmeデバイスの位置を取得できないため、手動でNVME-SSDとGPUの位置関係を設定する必要があります。
+シングルソケット構成のサーバーで、PCI-Eスイッチも搭載されていない、というような小規模システムであれば、自動設定で問題ありません。
 
-例えば`nvme1`には`gpu2`を、`nvme2`と`nvme3`には`gpu1`を割り当てる場合、以下の設定を`postgresql.conf`へ記述します。この手動設定は、自動設定よりも優先する事に留意してください。
+ただ、GPUとNVME-SSDが異なるCPUに接続されていたり、高速ネットワーク経由でリモートのストレージ（NVME-oFやNFS-over-RDMAなど）に接続する場合、PCI-Eバス上のストレージの位置を自動では検出できないため、手動でそれらの対応関係を設定する必要があります。
+
+例えば、`nvme3`には`gpu2`と`gpu3`を、リモートのストレージを`/mnt/nfs`にマウントしそれを`gpu1`に割り当てる場合、以下の設定を`postgresql.conf`へ記述します。この手動設定は、自動設定よりも優先する事に留意してください。
 }
 @en{
-Usually automatic configuration works well.
-In case when NVME-over-Fabric(RDMA) is used, unable to identify the location of nvme device on the PCIe-bus, so you need to configure the logical distance between NVME-SSD and GPU manually.
+For small systems such as single-socket servers without PCI-E switches, the automatic configuration is fine.
 
-The example below shows the configuration of `gpu2` for `nvme1`, and `gpu1` for `nvme2` and `nvme3`.
-It shall be added to `postgresql.conf`. Please note than manual configuration takes priority than the automatic configuration.
-}
-```
-pg_strom.nvme_distance_map = 'nvme1=gpu2,nvme2=gpu1,nvme3=gpu1'
-```
+However, if the GPU and NVME-SSD are connected to different CPUs, or if you connect to remote storage (NVME-oF or NFS-over-RDMA, etc.) via a high-speed network, the location of the storage on the PCI-E bus cannot be detected automatically, so you must manually configure their correspondence.
 
-@ja{
-ローカルのNVME-SSDデバイス以外、例えば100Gbイーサネットで接続されたストレージサーバからGPU-Direct SQLを実行する場合など、PCI-Eバス上の距離の概念が当てはまらない場合は、ストレージがマウントされたディレクトリと、そこに関連付けるGPUを指定する事もできます。
-以下は設定例です。
-}
-@en{
-If the concept of distance on the PCI-E bus is not suitable, such as when running GPU-Direct SQL from a storage server connected via 100Gb Ethernet, other than a local NVME-SSD device, you can specify the directory where the storage is mounted, and the preferable GPU devices to be associated with.
-Below is a setting example.
+For example, if you want to assign `gpu2` and `gpu3` to `nvme3`, and mount remote storage to `/mnt/nfs` and assign it to `gpu1`, write the following settings in `postgresql.conf`. Note that this manual configuration takes precedence over the automatic configuration.
 }
 ```
-pg_strom.nvme_distance_map = '/mnt/0=gpu0,/mnt/1=gpu1'
+pg_strom.manual_optimal_gpus = 'nvme3=gpu2:gpu3,/mnt/nfs=gpu1'
 ```
 
 @ja:###GUCパラメータによる制御
 @en:###Controls using GUC parameters
 
 @ja{
-GPUダイレクトSQL実行に関連するGUCパラメータは2つあります。
+GPUダイレクトSQL実行に関連するGUCパラメータは4つあります。
 }
 @en{
-There are two GPU parameters related to GPU Direct SQL Execution.
+There are four GPU parameters related to GPU Direct SQL Execution.
+}
+`pg_strom.gpudirect_enabled`
+@ja{
+:    このパラメータはGPUダイレクト機能の有効/無効を単純にon/offします。デフォルト値は`on`です。
+}
+@en{
+:    This parameter turn on/off the functionality of GPU-Direct SQL. Default is `on`.
+}
+
+`pg_strom.gpudirect_driver`
+@ja{
+:   GPUダイレクト実行の利用するドライバを指定する事ができます。
+:    `heterodb-extra`モジュールがインストールされていれば、システムの状態に応じて`cufile`、`nvme_strom`、あるいはCPUによるGPUダイレクトSQLのエミュレーションである`vfs`のいずれかの値が初期設定されています。当該モジュールがインストールされていない場合、`vfs`のみとなります。
+:   `nvme_strom`は、以前にRHEL7/8環境でGPUダイレクトSQLを使用するために用いていた独自のLinux kernel moduleで、現在では非推奨です。
+}
+@en{
+:   You can specify the driver to be used for GPU Direct Execution.
+:   If the `heterodb-extra` module is installed, the default value will be `cufile`, `nvme_strom`, or `vfs`, which is an emulation of GPU Direct SQL by CPU, depending on the system state. If the module is not installed, only `vfs` will be used.
+:  `nvme_strom` is a proprietary Linux kernel module that was previously used to use GPU Direct SQL in RHEL7/8 environments, and is now deprecated.
+}
+
+@ja{
+`pg_strom.gpudirect_threshold`
+:    GPUダイレクトSQLが使われるべき最小のテーブルサイズを指定します。
+:    テーブルの物理配置がGPUダイレクトSQLの前提条件を満たし、かつテーブルサイズが本パラメータの設定値よりも大きな場合、PG-StromはGPUダイレクトSQL実行を選択します。
+:    本パラメータのデフォルト値は`2GB`です。つまり、明らかに小さなテーブルに対してはGPUダイレクトSQLではなく、PostgreSQLのバッファから読み出す事を優先します。
+:    これは、一回の読み出しであればGPUダイレクトSQL実行に優位性があったとしても、オンメモリ処理ができる程度のテーブルに対しては、二回目以降のディスクキャッシュ利用を考慮すると、必ずしも優位とは言えないという仮定に立っているという事です。
+}
+@en{
+`pg_strom.gpudirect_threshold`
+:   Specifies the minimum table size for which GPU -Direct SQL should be used.
+:   If the physical layout of the table satisfies the prerequisites for GPU Direct SQL and the table size is larger than the value of this parameter, PG-Strom will select GPU Direct SQL Execution.
+:   The default value of this parameter is `2GB`. In other words, for obviously small tables, it prioritizes reading from PostgreSQL buffers rather than GPU Direct SQL.
+:   This is based on the assumption that even if GPU Direct SQL Execution has an advantage for one read, it is not necessarily advantageous for tables that can be processed on memory, considering the use of disk cache from the second time onwards.
+}
+
+`pg_strom.gpu_selection_policy`
+@ja{
+:   GPUダイレクトSQLを利用する場合、（マニュアルでの設定がない場合は）対象テーブルの位置から選択されたGPUを使用する事になりますが、その選択ポリシーを指定します。指定可能なポリシーは以下の３つです。
+:   - `optimal` (default) ... 最も近傍のGPUを使用する
+:   - `numa` ... 同じNUMAノードに属するGPUを使用する
+:   - `system` ... システムに搭載されているGPUを全て使用する
+:   詳しくは次節で説明します。
+}
+@en{
+:   When using GPU Direct SQL, the GPU selected from the location of the target table will be used (unless manually configured), but specify the selection policy. There are three policies that can be specified:
+:   - `optimal` (default) ... Use the nearest GPU
+:   - `numa` ... Use GPUs that belong to the same NUMA node
+:   - `system` ... Use all GPUs installed in the system
+:   Details will be explained in the next section.
+}
+
+@ja:##GPU選択ポリシー
+@en:##GPU Selection Policy
+
+@ja{
+以下のログはPostgreSQL(PG-Strom)起動時のものですが、システムの認識したGPUとNVME-SSDがそれぞれ表示されています。
+各NVME-SSDの行には、デバイスの名称と共に、最も近傍に位置するGPUの一覧とその物理的な距離が出力されています。このサーバは比較的小規模であり、全てのNVME-SSDが等距離でGPU0とGPU1に接続されていますが、大規模なサーバではGPU毎にNVME-SSDとの距離が異なるものも存在します。
+
+本節では、GPUとNVME-SSDとの距離に基づくGPU選択ポリシーについて説明します。
+}
+@en{
+The following log was taken when PostgreSQL (PG-Strom) was started, and shows the GPUs and NVME-SSDs recognized by the system.
+
+In the line for each NVME-SSD, the name of the device is output along with a list of the nearest GPUs and their physical distance. This server is relatively small, and all NVME-SSDs are connected to GPU0 and GPU1 at equal distances, but on larger servers, the distance between each GPU and the NVME-SSD may vary.
+
+In this section, we explain the GPU selection policy based on the distance between the GPU and the NVME-SSD.
+}
+
+```
+$ pg_ctl restart
+     :
+ LOG:  PG-Strom version 6.0.1 built for PostgreSQL 16 (githash: 1fe955f845063236725631c83434b00f68a8d4cf)
+ LOG:  PG-Strom binary built for CUDA 12.6 (CUDA runtime 12.4)
+ LOG:  PG-Strom: GPU0 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.38GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
+ LOG:  PG-Strom: GPU1 NVIDIA A100-PCIE-40GB (108 SMs; 1410MHz, L2 40960kB), RAM 39.38GB (5120bits, 1.16GHz), PCI-E Bar1 64GB, CC 8.0
+ LOG:  [0000:41:00:0] GPU1 (NVIDIA A100-PCIE-40GB; GPU-13943bfd-5b30-38f5-0473-78979c134606)
+ LOG:  [0000:01:00:0] GPU0 (NVIDIA A100-PCIE-40GB; GPU-cca38cf1-ddcc-6230-57fe-d42ad0dc3315)
+ LOG:  [0000:c3:00:0] nvme2 (INTEL SSDPF2KX038TZ) --> GPU0,GPU1 [dist=130]
+ LOG:  [0000:c1:00:0] nvme0 (INTEL SSDPF2KX038TZ) --> GPU0,GPU1 [dist=130]
+ LOG:  [0000:c2:00:0] nvme1 (INTEL SSDPF2KX038TZ) --> GPU0,GPU1 [dist=130]
+ LOG:  [0000:82:00:0] nvme4 (INTEL SSDPF2KX038TZ) --> GPU0,GPU1 [dist=130]
+ LOG:  [0000:c6:00:0] nvme3 (Corsair MP600 CORE) --> GPU0,GPU1 [dist=130]
+     :
+```
+
+@ja{
+以下の図は、デュアルソケットでPCI-Eスイッチを内蔵する大規模なGPUサーバのブロックダイアグラムです。
+
+例えばSSD3からデータを読み出してどこかのGPUにロードする場合、PCI-Eデバイス間の距離の観点から最も「近い」GPUはGPU1となります。
+この場合、設定パラメータ`pg_strom.gpu_selection_policy=optimal`を指定するとGPU-Direct SQLで使用するGPUはGPU1のみとなり、他のGPUはSSD3上に配置されているテーブルのスキャンには関与しません。
+}
+@en{
+The following figure is a block diagram of a large-scale GPU server with dual sockets and a built-in PCI-E switch.
+
+For example, when reading data from SSD3 and loading it to a GPU somewhere, the GPU that is "closest" in terms of distance between PCI-E devices is GPU1.
+
+In this case, if you specify the configuration parameter `pg_strom.gpu_selection_policy=optimal`, only GPU1 will be used for GPU-Direct SQL, and other GPUs will not be involved in scanning tables located on SSD3.
+}
+
+![Large GPU Server Block Diagram](./img/gpu_selection_policy.png)
+
+@ja{
+一方、それでは困った事になる場合もあります。
+md-raidによりSSD0, SSD1, SSD4, SSD5を論理ボリュームとして構成し、その上にテーブルを構築した場合を考えてみる事にします。
+SSD0とSSD1の最近傍GPUはGPU0で、SSD4とSSD5の最近傍GPUはGPU2となり、GPU選択ポリシーが`optimal`であると当該md-raid区画には最適なGPUが存在しない事になってしまいます。この場合、対象となるGPUが存在しないためGPU-Direct SQLを利用しないという判断になります。
+}
+@en{
+However, this can sometimes lead to problems.
+Let's consider the case where SSD0, SSD1, SSD4 and SSD5 are configured as a logical volume using md-raid, and a table is built on top of the RAID volume.
+The nearest GPU for SSD0 and SSD1 is GPU0, and the nearest GPU for SSD4 and SSD5 is GPU2. If the GPU selection policy is `optimal`, there will be no optimal GPU for the md-raid volumn. In this case, since there is no target GPU, it will be decided not to use GPU-Direct SQL.
 }
 @ja{
-一つは`pg_strom.gpudirect_enabled`で、GPUダイレクト機能の有効/無効を単純にon/offします。
-本パラメータが`off`になっていると、テーブルのサイズや物理配置とは無関係にGPUダイレクトSQL実行は使用されません。デフォルト値は`on`です。
+これを変更するには、`pg_strom.gpu_selection_policy=numa`を設定します。
+このポリシーは同じNUMAノードに属するGPUをGPU-Direct SQLの対象として選択します。
+GPU選択ポリシーが`numa`である場合、md-raid区画に含まれる全てのSSD（SSD0, SSD1, SSD4, SSD5）にとってスケジュール可能なGPUは共通してGPU0～GPU3となります。そのため、md-raid区画からの読み出しは、これら4つのGPUに均等に分散される事になります。
+
+SSDからGPUへの通信がCPUのPCI-Eコントローラを経由するため、スループットが若干低下する可能性がありますが、PCI-E4.0以降に対応した最近のCPUではそれほど大きな速度差が見られる事は多くないようです。
 }
 @en{
-The first is `pg_strom.gpudirect_enabled` that simply turn on/off the function of GPU Direct SQL Execution.
-If `off`, GPU Direct SQL Execution should not be used regardless of the table size or physical location. Default is `on`.
+To change this, set `pg_strom.gpu_selection_policy=numa`.
+This policy selects GPUs belonging to the same NUMA node as targets for GPU-Direct SQL.
+When the GPU selection policy is `numa`, the schedulable GPUs for all SSDs (SSD0, SSD1, SSD4, SSD5) included in the md-raid partition are GPU0 to GPU3 in common. Therefore, reads from the md-raid partition are evenly distributed to these four GPUs.
+
+Because communication from the SSD to the GPU goes through the CPU's PCI-E controller, throughput may decrease slightly, but with recent CPUs that support PCI-E4.0 or later, there does not seem to be much difference in speed.
 }
+
 @ja{
-もう一つのパラメータは`pg_strom.gpudirect_threshold`で、GPUダイレクトSQL実行が使われるべき最小のテーブルサイズを指定します。
-
-テーブルの物理配置がNVME-SSD区画（または、NVME-SSDのみで構成されたmd-raid0区画）上に存在し、かつ、テーブルのサイズが本パラメータの指定値よりも大きな場合、PG-StromはGPUダイレクトSQL実行を選択します。
-本パラメータのデフォルト値は`2GB`です。つまり、明らかに小さなテーブルに対してはGPUダイレクトSQLではなく、PostgreSQLのバッファから読み出す事を優先します。
-
-これは、一回の読み出しであればGPUダイレクトSQL実行に優位性があったとしても、オンメモリ処理ができる程度のテーブルに対しては、二回目以降のディスクキャッシュ利用を考慮すると、必ずしも優位とは言えないという仮定に立っているという事です。
-
-ワークロードの特性によっては必ずしもこの設定が正しいとは限りません。
+最後に、`pg_strom.gpu_selection_policy=system`を説明します。
+このポリシーはPCI-Eデバイスの距離に関わらず全てのGPUをGPU-Direct SQLにおけるスケジュール対象として選択するものです。
+例えば極端なケースでは、SSD0～SSD15の全てのGPUを一個のmd-raid区画として構成した場合、全てのSSDにとって共通して「望ましい」GPUというのは存在しない事になります。そこで、CPU-CPU間のデータ通信がある程度は発生する事は織り込んだ上で、全てのGPUをGPU-Direct SQLにおいてスケジュール可能とする選択ポリシーが用意されています。
 }
 @en{
-The other one is `pg_strom.gpudirect_threshold` which specifies the least table size to invoke GPU Direct SQL Execution.
-
-PG-Strom will choose GPU Direct SQL Execution when target table is located on NVME-SSD volume (or md-raid0 volume which consists of NVME-SSD only), and the table size is larger than this parameter.
-Its default configuration is `2GB`. In other words, for obviously small tables, priority is given to reading from PostgreSQL's buffer rather than GPU-Direct SQL.
-
-Even if GPU Direct SQL Execution has advantages on a single table scan workload, usage of disk cache may work better on the second or later trial for the tables which are available to load onto the main memory.
-
-On course, this assumption is not always right depending on the workload charasteristics.
+Finally, we will explain `pg_strom.gpu_selection_policy=system`.
+This policy selects all GPUs as targets for scheduling in GPU-Direct SQL, regardless of the distance of the PCI-E device.
+For example, in an extreme case, if all GPUs from SSD0 to SSD15 are configured as a single md-raid partition, there will be no GPU that is commonly "preferred" for all SSDs. Therefore, a selection policy is provided that allows all GPUs to be scheduled in GPU-Direct SQL, taking into account the fact that some data communication between CPUs will occur.
 }
 
-@ja:###GPUダイレクトSQL実行の利用を確認する
-@en:###Ensure usage of GPU Direct SQL Execution
+@ja{
+まとめると、PG-StromはGPUダイレクトSQLで使用するGPUを次のように決定します。
+
+1. スキャンすべきテーブルやArrowファイルのファイルパスを特定する。
+2. `pg_strom.manual_optimal_gpus`に当該パス（または、それを含むディレクトリ）とGPUの組み合わせが記述されていれば、そのGPUを使用する。
+3. 当該ファイルを保存しているNVME-SSDを特定する。md-raid区画の上に保存されている場合は、RAIDを構成する全てのNVME-SSDが対象となる。
+4. `pg_strom.gpu_selection_policy`に従い、各NVME-SSDにスケジュール可能なGPUのセットを導出する。NVME-SSDが複数存在する場合は、これらの論理積（AND）をスケジュール可能なGPUとする。
+5. スケジュール可能なGPUが存在しない場合、GPU-Direct SQLは使用されない。これには、テーブルがNVME-SSD上に構築されていない場合も含まれる。
+
+}
+@en{
+In summary, PG-Strom determines the GPU to be used for GPU Direct SQL as follows:
+
+1. Identify the file path of the table or Arrow file to be scanned.
+2. If the path (or the directory containing it) and the GPU combination are described in `pg_strom.manual_optimal_gpus`, use that GPU.
+3. Identify the NVME-SSD that stores the file. If the file is stored on an md-raid partition, all NVME-SSDs that make up the RAID are targeted.
+4. Derive a set of GPUs that can be scheduled for each NVME-SSD according to `pg_strom.gpu_selection_policy`. If there are multiple NVME-SSDs, the logical AND of these GPUs is the schedulable GPU.
+5. If there is no schedulable GPU, GPU-Direct SQL is not used. This includes the case where the table is not built on an NVME-SSD.
+}
+
+@ja:##諸注意
+@en:##Miscellaneous
+
+@ja:###GPUダイレクトSQLの利用を確認する
+@en:###Ensure usage of GPU Direct SQL
 
 @ja{
 `EXPLAIN`コマンドを実行すると、当該クエリでGPUダイレクトSQL実行が利用されるのかどうかを確認する事ができます。
 
-以下のクエリの例では、`Custom Scan (GpuJoin)`による`lineorder`テーブルに対するスキャンに`NVMe-Strom: enabled`との表示が出ています。この場合、`lineorder`テーブルからの読出しにはGPUダイレクトSQL実行が利用されます。
+以下のクエリの例では、`Custom Scan (GpuPreAgg)`による`lineorder`テーブルに対するスキャンに`GPU-Direct with 2 GPUs <0,1>`との表示が出ています。この場合、`lineorder`テーブルからの読出しにはGPU0およびGPU1に対するGPUダイレクトSQL実行が利用されます。
 }
 @en{
 `EXPLAIN` command allows to ensure whether GPU Direct SQL Execution shall be used in the target query, or not.
 
-In the example below, a scan on the `lineorder` table by `Custom Scan (GpuJoin)` shows `NVMe-Strom: enabled`. In this case, GPU Direct SQL Execution shall be used to read from the `lineorder` table.
+In the example below, a scan on the `lineorder` table by `Custom Scan (GpuPreAgg)` shows `GPU-Direct with 2 GPUs <0,1>`. In this case, GPU-Direct SQL shall be used to scan from the `lineorder` table with GPU0 and GPU1.
 }
 
 ```
-# explain (costs off)
+ssbm=# explain
 select sum(lo_revenue), d_year, p_brand1
 from lineorder, date1, part, supplier
 where lo_orderdate = d_datekey
@@ -311,42 +431,36 @@ and lo_partkey = p_partkey
 and lo_suppkey = s_suppkey
 and p_category = 'MFGR#12'
 and s_region = 'AMERICA'
-  group by d_year, p_brand1
-  order by d_year, p_brand1;
-                                          QUERY PLAN
-----------------------------------------------------------------------------------------------
- GroupAggregate
+  group by d_year, p_brand1;
+                                                  QUERY PLAN
+---------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=13806407.68..13806495.18 rows=7000 width=46)
    Group Key: date1.d_year, part.p_brand1
-   ->  Sort
-         Sort Key: date1.d_year, part.p_brand1
-         ->  Custom Scan (GpuPreAgg)
-               Reduction: Local
-               GPU Projection: pgstrom.psum((lo_revenue)::double precision), d_year, p_brand1
-               Combined GpuJoin: enabled
-               ->  Custom Scan (GpuJoin) on lineorder
-                     GPU Projection: date1.d_year, part.p_brand1, lineorder.lo_revenue
-                     Outer Scan: lineorder
-                     Depth 1: GpuHashJoin  (nrows 2406009600...97764190)
-                              HashKeys: lineorder.lo_partkey
-                              JoinQuals: (lineorder.lo_partkey = part.p_partkey)
-                              KDS-Hash (size: 10.67MB)
-                     Depth 2: GpuHashJoin  (nrows 97764190...18544060)
-                              HashKeys: lineorder.lo_suppkey
-                              JoinQuals: (lineorder.lo_suppkey = supplier.s_suppkey)
-                              KDS-Hash (size: 131.59MB)
-                     Depth 3: GpuHashJoin  (nrows 18544060...18544060)
-                              HashKeys: lineorder.lo_orderdate
-                              JoinQuals: (lineorder.lo_orderdate = date1.d_datekey)
-                              KDS-Hash (size: 461.89KB)
-                     NVMe-Strom: enabled
-                     ->  Custom Scan (GpuScan) on part
-                           GPU Projection: p_brand1, p_partkey
-                           GPU Filter: (p_category = 'MFGR#12'::bpchar)
-                     ->  Custom Scan (GpuScan) on supplier
-                           GPU Projection: s_suppkey
-                           GPU Filter: (s_region = 'AMERICA'::bpchar)
-                     ->  Seq Scan on date1
-(31 rows)
+   ->  Gather  (cost=13805618.73..13806355.18 rows=7000 width=46)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (GpuPreAgg) on lineorder  (cost=13804618.73..13804655.18 rows=7000 width=46)
+               GPU Projection: pgstrom.psum(lo_revenue), d_year, p_brand1
+               GPU Join Quals [1]: (p_partkey = lo_partkey) [plan: 2500011000 -> 98584180 ]
+               GPU Outer Hash [1]: lo_partkey
+               GPU Inner Hash [1]: p_partkey
+               GPU Join Quals [2]: (s_suppkey = lo_suppkey) [plan: 98584180 -> 19644550 ]
+               GPU Outer Hash [2]: lo_suppkey
+               GPU Inner Hash [2]: s_suppkey
+               GPU Join Quals [3]: (d_datekey = lo_orderdate) [plan: 19644550 -> 19644550 ]
+               GPU Outer Hash [3]: lo_orderdate
+               GPU Inner Hash [3]: d_datekey
+               GPU Group Key: d_year, p_brand1
+               Scan-Engine: GPU-Direct with 2 GPUs <0,1>
+               ->  Parallel Custom Scan (GpuScan) on part  (cost=100.00..12682.86 rows=32861 width=14)
+                     GPU Projection: p_brand1, p_partkey
+                     GPU Scan Quals: (p_category = 'MFGR#12'::bpchar) [plan: 2000000 -> 32861]
+                     Scan-Engine: GPU-Direct with 2 GPUs <0,1>
+               ->  Parallel Custom Scan (GpuScan) on supplier  (cost=100.00..78960.47 rows=830255 width=6)
+                     GPU Projection: s_suppkey
+                     GPU Scan Quals: (s_region = 'AMERICA'::bpchar) [plan: 9999718 -> 830255]
+                     Scan-Engine: GPU-Direct with 2 GPUs <0,1>
+               ->  Parallel Seq Scan on date1  (cost=0.00..62.04 rows=1504 width=8)
+(26 rows)
 ```
 
 
@@ -360,14 +474,14 @@ and s_region = 'AMERICA'
 Right now, GPU routines of PG-Strom cannot run MVCC visibility checks per row, because only host code has a special data structure for visibility checks. It also leads a problem.
 }
 @ja{
-NVMe-SSDにP2P DMAを要求する時点では、ストレージブロックの内容はまだCPU/RAMへと読み出されていないため、具体的にどの行が可視であるのか、どの行が不可視であるのかを判別する事ができません。これは、PostgreSQLがレコードをストレージへ書き出す際にMVCC関連の属性と共に書き込んでいるためで、似たような問題がIndexOnlyScanを実装する際に表面化しました。
+NVMD-SSDにP2P DMAを要求する時点では、ストレージブロックの内容はまだCPU/RAMへと読み出されていないため、具体的にどの行が可視であるのか、どの行が不可視であるのかを判別する事ができません。これは、PostgreSQLがレコードをストレージへ書き出す際にMVCC関連の属性と共に書き込んでいるためで、似たような問題がIndexOnlyScanを実装する際に表面化しました。
 
 これに対処するため、PostgreSQLはVisibility Mapと呼ばれるインフラを持っています。これは、あるデータブロック中に存在するレコードが全てのトランザクションから可視である事が明らかであれば、該当するビットを立てる事で、データブロックを読むことなく当該ブロックにMVCC不可視なレコードが存在するか否かを判定する事を可能とするものです。
 
 GPUダイレクトSQL実行はこのインフラを利用しています。つまり、Visibility Mapがセットされており、"all-visible"であるブロックだけがP2P DMAで読み出すようリクエストが送出されます。
 }
 @en{
-We cannot know which row is visible, or invisible at the time when PG-Strom requires P2P DMA for NVMe-SSD, because contents of the storage blocks are not yet loaded to CPU/RAM, and MVCC related attributes are written with individual records. PostgreSQL had similar problem when it supports IndexOnlyScan.
+We cannot know which row is visible, or invisible at the time when PG-Strom requires P2P DMA for NVME-SSD, because contents of the storage blocks are not yet loaded to CPU/RAM, and MVCC related attributes are written with individual records. PostgreSQL had similar problem when it supports IndexOnlyScan.
 
 To address the problem, PostgreSQL has an infrastructure of visibility map which is a bunch of flags to indicate whether any records in a particular data block are visible from all the transactions. If associated bit is set, we can know the associated block has no invisible records without reading the block itself.
 

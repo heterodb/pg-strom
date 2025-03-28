@@ -871,7 +871,7 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 	}
 	if (pgstrom_cpu_fallback_elevel < ERROR)
 	{
-		elog(DEBUG1, "gpusort: disabled by pgstrom.cpu_fallback");
+		elog(DEBUG1, "gpusort: disabled by pg_strom.cpu_fallback");
 		return;
 	}
 	if ((pp_info->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0)
