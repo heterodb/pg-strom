@@ -114,6 +114,62 @@ In the above example, the metadata (CustomMetadata) embedded in the `f_lineorder
 Metadata embedded in the schema has the `field` column set to NULL. Otherwise, the column name is displayed. In this case, you can see that the `sql_command` metadata is embedded in the schema, and the `min_values` and `max_values` are embedded in the `lo_orderdate` column.
 }
 
+`json pgstrom.arrow_fdw_metadata_stats()`
+@ja:: Arrow_Fdwのメタデータキャッシュの統計情報を表示します
+@en:: Displays the statistics of the Arrow_Fdw metadata-cache
+
+@ja{
+Arrow_Fdwは何らかの形で一度参照したArrowファイルのメタデータ（スキーマ定義やデータ配置など）を共有メモリ上に記憶しており、次回以降にArrow_Fdw外部テーブルを参照する際の応答性を改善する事ができます。
+
+この関数は、共有メモリ上のメタデータキャッシュに関する統計情報を表示する事ができます。
+メタデータキャッシュが不足すると、Arrow_Fdw外部テーブルの参照応答性が低下する事がありますので、その場合は`arrow_fdw.metadata_cache_size`を拡大してメタデータキャッシュを拡大する事が必要になります。
+}
+@en{
+Arrow_Fdw somehow remembers the metadata (schema definition, data placement, etc.) of an Arrow file that has been referenced once in shared memory, and can improve responsiveness when referencing an Arrow_Fdw foreign table from the next time onwards.
+
+This function can display statistical information about the metadata cache in shared memory.
+
+If the metadata cache is insufficient, the reference responsiveness of Arrow_Fdw foreign tables may decrease. In that case, it is necessary to enlarge the metadata cache by increasing `arrow_fdw.metadata_cache_size`.
+}
+
+```
+s=# select pgstrom.arrow_fdw_metadata_stats();
+
+       arrow_fdw_metadata_stats
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ { "total_cache_sz" : 536870912, "total_cache_allocated" : 9568256, "total_cache_usage" : 9354072, "num_file_entries" : 2, "cache_usage_efficiency" : 0.977615, "cache_num_blocks" : 4096, "cache_active_blocks" : 73, "cache_free_blocks" : 4023, "cache_used_ratio" : 0.017822 "last_allocate_timestamp" : "2025-03-29 13:24:44.447" }
+(1 row)
+```
+@ja{
+上記の例のように統計情報はJSON形式で表示され、各フィールドの意味は以下の通りです。
+}
+@en{
+As in the example above, the statistics are displayed in JSON format, with the meaning of each field as follows:
+}
+- total_cache_sz
+    - @ja{メタデータキャッシュの総容量（バイト単位）}@en{The total size of the metadata cache (in bytes)}
+- total_cache_allocated
+    - @ja{割り当て済みのメタデータキャッシュサイズ（バイト単位）}@en{Allocated metadata cache size (in bytes)}
+- total_cache_usage
+    - @ja{使用済みのメタデータキャッシュサイズ（バイト単位）}@en{Used metadata cache size (in bytes)}
+- num_file_entries
+    - @ja{キャッシュが保持されているArrowファイルの個数}@en{Number of Arrow files that are cached}
+- cache_usage_efficiency
+    - @ja{割り当て済みメタデータキャッシュに占める使用済みメタデータキャッシュの比率}@en{The ratio of used metadata cache to the allocated metadata cache}
+- cache_num_blocks
+    - @ja{メタデータキャッシュのブロック数（128kB単位）}@en{Number of blocks in the metadata cache (in 128kB units)}
+- cache_active_blocks
+    - @ja{割り当て済みのメタデータキャッシュブロック数}@en{Number of allocated metadata cache blocks}
+- cache_free_blocks
+    - @ja{空いているメタデータキャッシュブロック数}@en{Number of free metadata cache blocks}
+- cache_used_ratio
+    - @ja{割り当て済みのメタデータキャッシュブロックの比率}@en{Percentage of metadata cache blocks allocated}
+- last_allocate_timestamp
+    - @ja{最後にメタデータキャッシュを割り当てた時のタイムスタンプ}@en{The timestamp of the last metadata cache allocation}
+- last_reclaim_timestamp
+    - @ja{最後にメタデータキャッシュが回収された時のタイムスタンプ}@en{The timestamp when the metadata cache was last cleared}
+
 `void pgstrom.arrow_fdw_import_file(text, text, text = null)`
 @ja{
 : Apache Arrow形式ファイルをインポートし、新たに外部テーブル(foreign table)を定義します。第一引数は外部テーブルの名前、第二引数はApache Arrow形式ファイルのパス、省略可能な第三引数はスキーマ名です。

@@ -240,6 +240,68 @@ So, <code>pgstrom.device_info</code> system view identifies the target property 
 <p>In the above example, the metadata (CustomMetadata) embedded in the <code>f_lineorder</code> foreign table managed by Arrow_Fdw is output in KEY=VALUE form.</p>
 <p>Metadata embedded in the schema has the <code>field</code> column set to NULL. Otherwise, the column name is displayed. In this case, you can see that the <code>sql_command</code> metadata is embedded in the schema, and the <code>min_values</code> and <code>max_values</code> are embedded in the <code>lo_orderdate</code> column.</p>
 <dl>
+<dt><code>json pgstrom.arrow_fdw_metadata_stats()</code></dt>
+<dd>Displays the statistics of the Arrow_Fdw metadata-cache</dd>
+</dl>
+<p>Arrow_Fdw somehow remembers the metadata (schema definition, data placement, etc.) of an Arrow file that has been referenced once in shared memory, and can improve responsiveness when referencing an Arrow_Fdw foreign table from the next time onwards.</p>
+<p>This function can display statistical information about the metadata cache in shared memory.</p>
+<p>If the metadata cache is insufficient, the reference responsiveness of Arrow_Fdw foreign tables may decrease. In that case, it is necessary to enlarge the metadata cache by increasing <code>arrow_fdw.metadata_cache_size</code>.</p>
+<pre><code>s=# select pgstrom.arrow_fdw_metadata_stats();
+
+       arrow_fdw_metadata_stats
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ { &quot;total_cache_sz&quot; : 536870912, &quot;total_cache_allocated&quot; : 9568256, &quot;total_cache_usage&quot; : 9354072, &quot;num_file_entries&quot; : 2, &quot;cache_usage_efficiency&quot; : 0.977615, &quot;cache_num_blocks&quot; : 4096, &quot;cache_active_blocks&quot; : 73, &quot;cache_free_blocks&quot; : 4023, &quot;cache_used_ratio&quot; : 0.017822 &quot;last_allocate_timestamp&quot; : &quot;2025-03-29 13:24:44.447&quot; }
+(1 row)
+</code></pre>
+<p>As in the example above, the statistics are displayed in JSON format, with the meaning of each field as follows:</p>
+<ul>
+<li>total_cache_sz<ul>
+<li>The total size of the metadata cache (in bytes)</li>
+</ul>
+</li>
+<li>total_cache_allocated<ul>
+<li>Allocated metadata cache size (in bytes)</li>
+</ul>
+</li>
+<li>total_cache_usage<ul>
+<li>Used metadata cache size (in bytes)</li>
+</ul>
+</li>
+<li>num_file_entries<ul>
+<li>Number of Arrow files that are cached</li>
+</ul>
+</li>
+<li>cache_usage_efficiency<ul>
+<li>The ratio of used metadata cache to the allocated metadata cache</li>
+</ul>
+</li>
+<li>cache_num_blocks<ul>
+<li>Number of blocks in the metadata cache (in 128kB units)</li>
+</ul>
+</li>
+<li>cache_active_blocks<ul>
+<li>Number of allocated metadata cache blocks</li>
+</ul>
+</li>
+<li>cache_free_blocks<ul>
+<li>Number of free metadata cache blocks</li>
+</ul>
+</li>
+<li>cache_used_ratio<ul>
+<li>Percentage of metadata cache blocks allocated</li>
+</ul>
+</li>
+<li>last_allocate_timestamp<ul>
+<li>The timestamp of the last metadata cache allocation</li>
+</ul>
+</li>
+<li>last_reclaim_timestamp<ul>
+<li>The timestamp when the metadata cache was last cleared</li>
+</ul>
+</li>
+</ul>
+<dl>
 <dt><code>void pgstrom.arrow_fdw_import_file(text, text, text = null)</code></dt>
 <dd>
 <p>This function tries to import Apache Arrow file, and defines a new foreign table. Its first argument is name of the new foreign table, the second argument is path of the Apache Arrow file, and the optional third argument is the schema name.</p>

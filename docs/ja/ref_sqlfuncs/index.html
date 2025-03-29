@@ -240,6 +240,68 @@ _${region}.data'` that corresponds to the wildcard</code> matches <code>202408</
 <p>上記の例では、Arrow_Fdw管理下の外部テーブルである<code>f_lineorder</code>に埋め込まれているメタデータ（CustomMetadata）を、それぞれKEY=VALUE形式で出力しています。
 スキーマに埋め込まれたメタデータは<code>field</code>列がNULLとなっています。そうでなければ列名が表示され、この場合、<code>sql_command</code>メタデータがスキーマに埋め込まれ、また、<code>min_values</code>および<code>max_values</code>が<code>lo_orderdate</code>列に埋め込まれている事がわかります。</p>
 <dl>
+<dt><code>json pgstrom.arrow_fdw_metadata_stats()</code></dt>
+<dd>Arrow_Fdwのメタデータキャッシュの統計情報を表示します</dd>
+</dl>
+<p>Arrow_Fdwは何らかの形で一度参照したArrowファイルのメタデータ（スキーマ定義やデータ配置など）を共有メモリ上に記憶しており、次回以降にArrow_Fdw外部テーブルを参照する際の応答性を改善する事ができます。</p>
+<p>この関数は、共有メモリ上のメタデータキャッシュに関する統計情報を表示する事ができます。
+メタデータキャッシュが不足すると、Arrow_Fdw外部テーブルの参照応答性が低下する事がありますので、その場合は<code>arrow_fdw.metadata_cache_size</code>を拡大してメタデータキャッシュを拡大する事が必要になります。</p>
+<pre><code>s=# select pgstrom.arrow_fdw_metadata_stats();
+
+       arrow_fdw_metadata_stats
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ { &quot;total_cache_sz&quot; : 536870912, &quot;total_cache_allocated&quot; : 9568256, &quot;total_cache_usage&quot; : 9354072, &quot;num_file_entries&quot; : 2, &quot;cache_usage_efficiency&quot; : 0.977615, &quot;cache_num_blocks&quot; : 4096, &quot;cache_active_blocks&quot; : 73, &quot;cache_free_blocks&quot; : 4023, &quot;cache_used_ratio&quot; : 0.017822 &quot;last_allocate_timestamp&quot; : &quot;2025-03-29 13:24:44.447&quot; }
+(1 row)
+</code></pre>
+<p>上記の例のように統計情報はJSON形式で表示され、各フィールドの意味は以下の通りです。</p>
+<ul>
+<li>total_cache_sz<ul>
+<li>メタデータキャッシュの総容量（バイト単位）</li>
+</ul>
+</li>
+<li>total_cache_allocated<ul>
+<li>割り当て済みのメタデータキャッシュサイズ（バイト単位）</li>
+</ul>
+</li>
+<li>total_cache_usage<ul>
+<li>使用済みのメタデータキャッシュサイズ（バイト単位）</li>
+</ul>
+</li>
+<li>num_file_entries<ul>
+<li>キャッシュが保持されているArrowファイルの個数</li>
+</ul>
+</li>
+<li>cache_usage_efficiency<ul>
+<li>割り当て済みメタデータキャッシュに占める使用済みメタデータキャッシュの比率</li>
+</ul>
+</li>
+<li>cache_num_blocks<ul>
+<li>メタデータキャッシュのブロック数（128kB単位）</li>
+</ul>
+</li>
+<li>cache_active_blocks<ul>
+<li>割り当て済みのメタデータキャッシュブロック数</li>
+</ul>
+</li>
+<li>cache_free_blocks<ul>
+<li>空いているメタデータキャッシュブロック数</li>
+</ul>
+</li>
+<li>cache_used_ratio<ul>
+<li>割り当て済みのメタデータキャッシュブロックの比率</li>
+</ul>
+</li>
+<li>last_allocate_timestamp<ul>
+<li>最後にメタデータキャッシュを割り当てた時のタイムスタンプ</li>
+</ul>
+</li>
+<li>last_reclaim_timestamp<ul>
+<li>最後にメタデータキャッシュが回収された時のタイムスタンプ</li>
+</ul>
+</li>
+</ul>
+<dl>
 <dt><code>void pgstrom.arrow_fdw_import_file(text, text, text = null)</code></dt>
 <dd>
 <p>Apache Arrow形式ファイルをインポートし、新たに外部テーブル(foreign table)を定義します。第一引数は外部テーブルの名前、第二引数はApache Arrow形式ファイルのパス、省略可能な第三引数はスキーマ名です。</p>
