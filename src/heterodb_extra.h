@@ -74,7 +74,6 @@ extern heterodb_extra_ereport_callback_type
 					heterodbExtraRegisterEreportCallback(heterodb_extra_ereport_callback_type callback);
 extern int		   *heterodbExtraRegisterEreportLevel(int *p_new_ereport_level);
 extern int			heterodbExtraEreportLevel(void);
-extern bool			gpuDirectIsAvailable(void);
 
 extern int			heterodbLicenseReload(void);
 extern int			heterodbLicenseReloadPath(const char *path);
@@ -123,5 +122,8 @@ extern bool			heterodbExtraCloudGetVMInfo(const char *cloud_name,
 												const char **p_vm_image,
 												const char **p_vm_ident);
 extern const char  *heterodbExtraCloudGetSignature(void);
+#ifdef	__PGSTROM_MODULE__
+extern bool			gpuDirectIsSupported(const void *__gpuDevAttr);
 extern const char  *heterodb_extra_init_module(const char *__extra_pathname);
+#endif
 #endif	/* HETERODB_EXTRA_H */

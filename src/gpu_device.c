@@ -24,6 +24,21 @@ static bool		pgstrom_gpudirect_enabled;			/* GUC */
 static int		__pgstrom_gpudirect_threshold_kb;	/* GUC */
 #define pgstrom_gpudirect_threshold		((size_t)__pgstrom_gpudirect_threshold_kb << 10)
 static char	   *pgstrom_gpu_selection_policy = "optimal";
+static gpumask_t gpudirect_supported_gpus = 0UL;
+
+/*
+ * checker for pg_strom.gpudirect_enabled
+ */
+static bool
+pgstrom_gpudirect_enabled_checker(bool *newval, void **extra, GucSource source)
+{
+	if (*newval && gpudirect_supported_gpus == 0UL)
+	{
+		elog(ERROR, "unable to turn on pg_strom.gpudirect_enabled without any GPU device that supports GPU-Direct SQL");
+		return false;
+	}
+	return true;
+}
 
 /* catalog of device attributes */
 typedef enum {
@@ -179,12 +194,7 @@ __collectGpuDevAttrs(GpuDevAttributes *dattrs, CUdevice cuda_device)
 	/*
 	 * GPU-Direct SQL is supported?
 	 */
-	if (dattrs->GPU_DIRECT_RDMA_SUPPORTED)
-	{
-		if (dattrs->DEV_BAR1_MEMSZ == 0 /* unknown */ ||
-			dattrs->DEV_BAR1_MEMSZ > (256UL << 20))
-			dattrs->DEV_SUPPORT_GPUDIRECTSQL = true;
-	}
+	dattrs->GPU_DIRECT_RDMA_SUPPORTED = gpuDirectIsSupported(dattrs);
 }
 
 static int
@@ -280,6 +290,8 @@ receiveGpuDevAttrs(int fdesc)
 				nrooms = __nrooms;
 			}
 			memcpy(&devAttrs[dindex], &dtemp, sizeof(GpuDevAttributes));
+			if (dtemp.GPU_DIRECT_RDMA_SUPPORTED)
+				gpudirect_supported_gpus |= (1UL << dindex);
 			nitems = Max(nitems, dindex+1);
 		}
 		else if (num_not_validated++ == 0)
@@ -561,7 +573,8 @@ GetOptimalGpuForFile(const char *pathname)
 		Assert(hentry->file_dev == stat_buf.st_dev &&
 			   hentry->file_ino == stat_buf.st_ino);
 		memcpy(&hentry->file_ctime, &stat_buf.st_ctim, sizeof(struct timespec));
-		hentry->optimal_gpus = heterodbGetOptimalGpus(pathname, policy);
+		hentry->optimal_gpus = (heterodbGetOptimalGpus(pathname, policy) &
+								gpudirect_supported_gpus);
 	}
 	return hentry->optimal_gpus;
 }
@@ -927,8 +940,6 @@ pgstrom_print_gpu_properties(const char *manual_config)
 static void
 pgstrom_init_gpu_options(void)
 {
-	bool	has_gpudirectsql = gpuDirectIsAvailable();
-
 	/* cost factor for GPU setup */
 	DefineCustomRealVariable("pg_strom.gpu_setup_cost",
 							 "Cost to setup GPU device to run",
@@ -974,14 +985,15 @@ pgstrom_init_gpu_options(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* on/off GPU-Direct SQL */
+	fprintf(stderr, "gpudirect_supported_gpus = %lu\n", gpudirect_supported_gpus);
 	DefineCustomBoolVariable("pg_strom.gpudirect_enabled",
 							 "enables GPUDirect SQL",
 							 NULL,
 							 &pgstrom_gpudirect_enabled,
-							 (has_gpudirectsql ? true : false),
-							 (has_gpudirectsql ? PGC_SUSET : PGC_POSTMASTER),
+							 (gpudirect_supported_gpus != 0UL),
+							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
+							 pgstrom_gpudirect_enabled_checker, NULL, NULL);
 	/* table size threshold for GPU-Direct SQL */
 	DefineCustomIntVariable("pg_strom.gpudirect_threshold",
 							"table-size threshold to use GPU-Direct SQL",

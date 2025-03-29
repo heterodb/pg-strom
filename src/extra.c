@@ -1060,31 +1060,35 @@ extra_ereport_level_assign(int newval, void *extra)
  * gpuDirectIsSupported
  */
 bool
-gpuDirectIsAvailable(void)
+gpuDirectIsSupported(const void *__gpuDevAttrs)
 {
-	bool	has_gpudirectsql_supported = false;
+	const GpuDevAttributes *gpuDevAttrs = __gpuDevAttrs;
 
-	if ((p_cufile__driver_open_v2 &&
-		 p_cufile__driver_close_v2 &&
-		 p_cufile__map_gpu_memory_v2 &&
-		 p_cufile__unmap_gpu_memory_v2 &&
-		 p_cufile__read_file_iov_v3) ||
-		(p_nvme_strom__driver_open &&
-		 p_nvme_strom__driver_close &&
-		 p_nvme_strom__map_gpu_memory &&
-		 p_nvme_strom__unmap_gpu_memory &&
-		 p_nvme_strom__read_file_iov))
+	switch (gpudirect_driver_kind)
 	{
-		for (int i=0; i < numGpuDevAttrs; i++)
-		{
-			if (gpuDevAttrs[i].DEV_SUPPORT_GPUDIRECTSQL)
-			{
-				has_gpudirectsql_supported = true;
-				break;
-			}
-		}
+		case GPUDIRECT_DRIVER__CUFILE:
+			if (p_cufile__driver_open_v2 &&
+				p_cufile__driver_close_v2 &&
+				p_cufile__map_gpu_memory_v2 &&
+				p_cufile__unmap_gpu_memory_v2 &&
+				p_cufile__read_file_iov_v3)
+				return gpuDevAttrs->GPU_DIRECT_RDMA_SUPPORTED;
+			break;
+		case GPUDIRECT_DRIVER__NVME_STROM:
+			if (p_nvme_strom__driver_open &&
+				p_nvme_strom__driver_close &&
+				p_nvme_strom__map_gpu_memory &&
+				p_nvme_strom__unmap_gpu_memory &&
+				p_nvme_strom__read_file_iov &&
+				(gpuDevAttrs->DEV_BAR1_MEMSZ == 0 /* unknown */ ||
+				 gpuDevAttrs->DEV_BAR1_MEMSZ > (256UL << 20)))
+				return gpuDevAttrs->GPU_DIRECT_RDMA_SUPPORTED;
+			break;
+		default:
+			/* elsewhere, no GPU-Direct SQL capability */
+			break;
 	}
-	return has_gpudirectsql_supported;
+	return false;
 }
 
 /*
