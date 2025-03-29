@@ -117,3 +117,17 @@ rpm-pcap2arrow: tarball
 		awk 'BEGIN {flag=0;} /^%changelog$$/{flag=1; next;} { if (flag>0) print; }' >> \
 		$(__SPECDIR)/mysql2arrow.spec
 	rpmbuild -ba $(__SPECDIR)/pcap2arrow.spec
+
+deb:
+	@which fakeroot >&/dev/null || (echo "Run, sudo dnf install fakeroot"; exit 1)
+	@which dpkg-deb >&/dev/null || (echo "Run, sudo dnf install dpkg"; exit 1)
+	WORK=`mktemp -d` && mkdir -p $${WORK}/DEBIAN &&		\
+	(cat files/pg-strom.control.in |			\
+	 sed -e 's/@@PG_MAJORVERSION@@/$(PG_MAJORVERSION)/g'	\
+	     -e 's/@@PG_MINORVERSION@@/$(PG_MINORVERSION)/g'	\
+	     -e 's/@@PGSTROM_VERSION@@/$(PGSTROM_VERSION)/g'	\
+	) > $${WORK}/DEBIAN/control &&				\
+	make -C src DEST=$${WORK} clean &&			\
+	make -C src DEST=$${WORK} -j 8  &&			\
+	make -C src DEST=$${WORK} install &&			\
+	fakeroot dpkg-deb --build $${WORK} .
