@@ -1990,7 +1990,8 @@ consider_sorted_groupby_path(PlannerInfo *root,
 		sortkeys_upper = root->distinct_pathkeys;
 	else if (root->sort_pathkeys != NIL)
 		sortkeys_upper = root->sort_pathkeys;
-	else if (root->query_pathkeys != NIL)
+	else if (root->query_pathkeys != NIL &&
+			 root->query_pathkeys != root->group_pathkeys)
 		sortkeys_upper = root->query_pathkeys;
 	else
 	{
