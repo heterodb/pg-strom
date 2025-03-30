@@ -1579,6 +1579,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 
 			Assert(pgstrom_is_gpuscan_state(istate->ps) ||
 				   pgstrom_is_gpujoin_state(istate->ps));
+			Assert(pp_info->gpusort_keys_expr == NIL);
 			if (pp_inner->hash_inner_keys != NIL &&
 				pp_inner->hash_outer_keys != NIL)
 				i_pts->xpu_task_flags |= DEVTASK__PINNED_HASH_RESULTS;
@@ -1591,12 +1592,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		depth_index++;
 	}
 	Assert(depth_index == pts->num_rels);
-
-	/*
-	 * GPU-Sort needs per-session kds_final buffer.
-	 */
-	if (pp_info->gpusort_keys_expr != 0)
-		pts->xpu_task_flags |= DEVTASK__PINNED_ROW_RESULTS;
 
 	/*
 	 * Setup request buffer

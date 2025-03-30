@@ -980,6 +980,8 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 					LOG2(cpath->path.rows));
 	cpath = (CustomPath *)pgstrom_copy_pathnode(&cpath->path);
 	pp_info = copy_pgstrom_plan_info(pp_info);
+	pp_info->xpu_task_flags |= (DEVTASK__PINNED_ROW_RESULTS |
+								DEVTASK__MERGE_FINAL_BUFFER);
 	pp_info->gpusort_keys_expr = sortkeys_expr;
 	pp_info->gpusort_keys_kind = sortkeys_kind;
 	linitial(cpath->custom_private) = pp_info;

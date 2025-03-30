@@ -2070,13 +2070,13 @@ typedef struct
 #define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
 #define DEVTASK__USED_GPUDIRECT		0x00004000U	/* Task used GPU-Direct SQL */
 #define DEVTASK__USED_GPUCACHE		0x00008000U	/* Task used GPU-Cache */
-#define DEVTASK__PREAGG_FINAL_MERGE	0x00010000U	/* PreAgg final buffer should be merged
-												 * on the xPU device side */
-
+#define DEVTASK__MERGE_FINAL_BUFFER	0x00010000U	/* Final buffer (GPU-PreAgg or pinned
+												 * inner buffer by GPU-Join/Scan) must
+												 * be merged to a single buffer, for
+												 * complete-aggregation or GPU-Sort */
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
 #define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
-#define DEVTASK__SORT				0x80000000U	/* GPU-Sort */
 #define DEVTASK__MASK				0x70000000U	/* mask of avove workloads */
 
 #define TASK_KIND__GPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_GPU)

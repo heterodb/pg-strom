@@ -2190,8 +2190,11 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 		List   *__sortkeys_refs = NIL;
 		Cost	__gpusort_cost = 0.0;
 
-		/* mark as final-merged GpuPreAgg  */
-		pp_info->xpu_task_flags |= DEVTASK__PREAGG_FINAL_MERGE;
+		/*
+		 * final buffer should be merged for both of complete aggregation
+		 * or GPU-Sorting.
+		 */
+		pp_info->xpu_task_flags |= DEVTASK__MERGE_FINAL_BUFFER;
 
 		/* save a few extra properties */
 		lsecond(cpath->custom_private) = con.target_proj_final;
@@ -2226,6 +2229,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 		 * consider the Sorted GPU-PreAgg Path opportunity, if available
 		 */
 		if (__sortkeys_upper == NIL &&
+			con.havingProjQuals == NIL &&
 			consider_sorted_groupby_path(root,
 										 cpath,
 										 group_rel->reltarget,
@@ -3026,13 +3030,13 @@ PlanGpuPreAggPath(PlannerInfo *root,
 								  custom_plans,
 								  pp_info,
 								  &gpupreagg_plan_methods);
-	if ((pp_info->xpu_task_flags & DEVTASK__PREAGG_FINAL_MERGE) != 0)
+	if ((pp_info->xpu_task_flags & DEVTASK__MERGE_FINAL_BUFFER) != 0)
 	{
-		//PathTarget *target_proj_final = lsecond(cpath->custom_private);
 		List	   *having_proj_quals = lthird(cpath->custom_private);
 
 		/* HAVING clause */
-		//TODO: having quals in the device code - the blocker of GpuSort
+		if (having_proj_quals && pp_info->gpusort_keys_expr)
+			elog(ERROR, "Bug? GPU-Sort and HAVING clause are not usable together");
 		cscan->scan.plan.qual = having_proj_quals;
 	}
 	form_pgstrom_plan_info(cscan, pp_info);

@@ -5043,8 +5043,7 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 			}
 		}
 	}
-	else if ((gclient->xpu_task_flags & (DEVTASK__PINNED_ROW_RESULTS |
-										 DEVTASK__PINNED_HASH_RESULTS)) != 0)
+	else if ((gclient->xpu_task_flags & DEVTASK__MERGE_FINAL_BUFFER) != 0)
 	{
 		/*
 		 * If we have no CPU fallback events during execution,
@@ -5059,6 +5058,8 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 		uint64_t	kds_prime_nitems = 0;
 		uint64_t	kds_prime_usage = 0;
 
+		Assert((gclient->xpu_task_flags & (DEVTASK__PINNED_ROW_RESULTS |
+										   DEVTASK__PINNED_HASH_RESULTS)) != 0);
 		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
 		{
 			kern_data_store *__kds = (kern_data_store *)
@@ -5114,6 +5115,30 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 									  kds_prime->nitems)
 				+ kds_prime->usage;
 		}
+	}
+	else if ((gclient->xpu_task_flags & (DEVTASK__PINNED_ROW_RESULTS |
+										 DEVTASK__PINNED_HASH_RESULTS)) != 0)
+	{
+		/* just write back statistics */
+		uint64_t	kds_final_nitems = 0;
+		uint64_t	kds_final_usage = 0;
+		uint64_t	kds_final_total = 0;
+
+		for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
+        {
+            kern_data_store *__kds = (kern_data_store *)
+                gq_buf->gpus[__dindex].m_kds_final;
+
+			kds_final_nitems += __kds->nitems;
+			kds_final_usage  += __kds->usage;
+			kds_final_total  += KDS_HEAD_LENGTH(__kds)
+				+ sizeof(uint64_t) * (__kds->hash_nslots +
+									  __kds->nitems)
+				+ __kds->usage;
+		}
+		resp->u.results.final_nitems = kds_final_nitems;
+		resp->u.results.final_usage  = kds_final_usage;
+		resp->u.results.final_total  = kds_final_total;
 	}
 	resp->u.results.final_plan_task = true;
 
