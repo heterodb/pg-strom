@@ -2295,6 +2295,7 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 												  parts[divisor]));
 		if (h_kmrels)
 		{
+			PlanState  *__inner_ps = pts->inners[largest_depth-1].ps;
 			kern_buffer_partitions *kbuf_parts = (kern_buffer_partitions *)
 				((char *)h_kmrels + offset);
 
@@ -2343,6 +2344,14 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 				elog(NOTICE, "partition-%d (GPUs: %08lx)", k, kbuf_parts->parts[k].available_gpus);
 			/* offset to the partition descriptor */
 			h_kmrels->kbuf_part_offset = offset;
+			/* record partition size for EXPLAIN output */
+			if (pgstrom_is_gpuscan_state(__inner_ps) ||
+				pgstrom_is_gpujoin_state(__inner_ps))
+			{
+				pgstromTaskState   *inner_pts = (pgstromTaskState *)__inner_ps;
+
+				inner_pts->pinned_buffer_divisor = kbuf_parts->hash_divisor;
+			}
 		}
 		return kbuf_parts_sz;
 	}

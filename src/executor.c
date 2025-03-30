@@ -2336,7 +2336,8 @@ pgstromExplainTaskState(CustomScanState *node,
 	/* Pinned Inner Buffer */
 	if ((pts->xpu_task_flags & (DEVTASK__PINNED_HASH_RESULTS |
 								DEVTASK__PINNED_ROW_RESULTS)) != 0 &&
-		(pts->xpu_task_flags & DEVTASK__PREAGG) == 0)
+		(pts->xpu_task_flags & DEVTASK__PREAGG) == 0 &&				/* GPU-Join/Scan */
+		(pts->xpu_task_flags & DEVTASK__MERGE_FINAL_BUFFER) == 0)	/* not GPU-Sort */
 	{
 		resetStringInfo(&buf);
 		if (!es->analyze)
@@ -2353,6 +2354,9 @@ pgstromExplainTaskState(CustomScanState *node,
 							 final_nitems,
 							 format_bytesz(final_usage),
 							 format_bytesz(final_total));
+			if (pts->pinned_buffer_divisor > 0)
+				appendStringInfo(&buf, ", num-partitions: %d",
+								 pts->pinned_buffer_divisor);
 		}
 		snprintf(label, sizeof(label),
 				 "%s Pinned Buffer", xpu_label);

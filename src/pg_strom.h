@@ -510,6 +510,8 @@ struct pgstromTaskState
 	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
 	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts,
 									   struct iovec *xcmd_iov, int *xcmd_iovcnt);
+	/* uncategorized fields */
+	int					pinned_buffer_divisor;	/* for EXPLAIN */
 	/* inner relations state (if JOIN) */
 	int					num_rels;
 	pgstromTaskInnerState inners[FLEXIBLE_ARRAY_MEMBER];
