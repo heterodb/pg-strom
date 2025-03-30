@@ -2541,6 +2541,9 @@ pgstromExplainTaskState(CustomScanState *node,
 			ExplainPropertyText(label, buf.data, es);
 		}
 	}
+	if (ps_state && ps_state->preload_shmem_length > 0)
+		ExplainPropertyText("GpuJoin buffer usage",
+							format_bytesz(ps_state->preload_shmem_length), es);
 	if (pp_info->sibling_param_id >= 0)
 		ExplainPropertyInteger("Inner Siblings-Id", NULL,
 							   pp_info->sibling_param_id, es);
