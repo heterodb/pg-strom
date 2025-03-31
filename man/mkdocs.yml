@@ -32,6 +32,7 @@ nav:
     - 'SQL Objects' : 'ref_sqlfuncs.md'
     - 'GUC Parameters' : 'ref_params.md'
 - 'Release Note' :
+    - 'PG-Strom v6.0' : 'release_v6.0.md'
     - 'PG-Strom v5.2' : 'release_v5.2.md'
     - 'PG-Strom v5.1' : 'release_v5.1.md'
     - 'PG-Strom v5.0' : 'release_v5.0.md'
@@ -62,6 +63,7 @@ nav:
     - 'SQLオブジェクト' : 'ref_sqlfuncs.md'
     - 'GUCパラメータ' : 'ref_params.md'
 - 'リリースノート' :
+    - 'PG-Strom v6.0' : 'release_v6.0.md'
     - 'PG-Strom v5.2' : 'release_v5.2.md'
     - 'PG-Strom v5.1' : 'release_v5.1.md'
     - 'PG-Strom v5.0' : 'release_v5.0.md'

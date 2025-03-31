@@ -5,7 +5,7 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="author" content="PG-Strom Development Team" />
       <link rel="shortcut icon" href="../img/favicon.ico" />
-    <title>PG-Strom v6.0リリース - PG-Strom Manual</title>
+    <title>PG-Strom v6.0 - PG-Strom Manual</title>
     <link rel="stylesheet" href="../css/theme.css" />
     <link rel="stylesheet" href="../css/theme_extra.css" />
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
@@ -15,7 +15,7 @@
     
       <script>
         // Current page data
-        var mkdocs_page_name = "PG-Strom v6.0\u30ea\u30ea\u30fc\u30b9";
+        var mkdocs_page_name = "PG-Strom v6.0";
         var mkdocs_page_input_path = "release_v6.0.md";
         var mkdocs_page_url = null;
       </script>
@@ -91,7 +91,29 @@
                   </li>
               </ul>
               <p class="caption"><span class="caption-text">リリースノート</span></p>
-              <ul>
+              <ul class="current">
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">PG-Strom v6.0</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#_1">概要</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">動作環境</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpu-sortwindow">GPU-Sortと一部のWindow関数対応</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpupinned-inner-buffer">マルチGPUのPinned Inner Buffer</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#arrow_fdw">Arrow_Fdw 仮想列</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#avgnumericsumnumeric">AVG(numeric)、SUM(numeric)の精度改善</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#gpupreagggpu">GpuPreAggの最終マージをGPU上で実行可能に</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">その他の新機能</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_4">累積的なバグの修正</a>
+    </li>
+    </ul>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
@@ -121,7 +143,8 @@
         <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
     <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
-      <li class="breadcrumb-item active">PG-Strom v6.0リリース</li>
+          <li class="breadcrumb-item">リリースノート</li>
+      <li class="breadcrumb-item active">PG-Strom v6.0</li>
     <li class="wy-breadcrumbs-aside">
     </li>
   </ul>
@@ -582,6 +605,10 @@ SET
               
             </div>
           </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../ref_params/" class="btn btn-neutral float-left" title="GUCパラメータ"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../release_v5.2/" class="btn btn-neutral float-right" title="PG-Strom v5.2">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
 
   <hr/>
 
@@ -603,6 +630,10 @@ SET
   <span class="rst-current-version" data-toggle="rst-current-version">
     
     
+      <span><a href="../ref_params/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../release_v5.2/" style="color: #fcfcfc">Next &raquo;</a></span>
     
   </span>
 </div>
