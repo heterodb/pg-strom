@@ -2349,8 +2349,10 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 				pgstrom_is_gpujoin_state(__inner_ps))
 			{
 				pgstromTaskState   *inner_pts = (pgstromTaskState *)__inner_ps;
-
-				inner_pts->pinned_buffer_divisor = kbuf_parts->hash_divisor;
+				pgstromSharedState *inner_ps_state = inner_pts->ps_state;
+				if (inner_ps_state)
+					pg_atomic_fetch_add_u32(&inner_ps_state->pinned_buffer_divisor,
+											kbuf_parts->hash_divisor);
 			}
 		}
 		return kbuf_parts_sz;

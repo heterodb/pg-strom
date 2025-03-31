@@ -390,6 +390,7 @@ typedef struct
 	pg_atomic_uint64	final_nitems;		/* # of tuples in final buffer if any */
 	pg_atomic_uint64	final_usage;		/* usage bytes of final buffer if any */
 	pg_atomic_uint64	final_total;		/* total usage of final buffer if any */
+	pg_atomic_uint32	pinned_buffer_divisor; /* # of pinned-inner-buffer partitions */
 	/* for parallel-scan */
 	uint32_t			parallel_scan_desc_offset;
 	/* for arrow_fdw */
@@ -510,8 +511,6 @@ struct pgstromTaskState
 	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
 	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts,
 									   struct iovec *xcmd_iov, int *xcmd_iovcnt);
-	/* uncategorized fields */
-	int					pinned_buffer_divisor;	/* for EXPLAIN */
 	/* inner relations state (if JOIN) */
 	int					num_rels;
 	pgstromTaskInnerState inners[FLEXIBLE_ARRAY_MEMBER];

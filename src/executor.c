@@ -2349,14 +2349,18 @@ pgstromExplainTaskState(CustomScanState *node,
 			uint64_t	final_nitems = pg_atomic_read_u64(&ps_state->final_nitems);
 			uint64_t	final_usage  = pg_atomic_read_u64(&ps_state->final_usage);
 			uint64_t	final_total  = pg_atomic_read_u64(&ps_state->final_total);
-			
+
 			appendStringInfo(&buf, "nitems: %lu, usage: %s, total: %s",
 							 final_nitems,
 							 format_bytesz(final_usage),
 							 format_bytesz(final_total));
-			if (pts->pinned_buffer_divisor > 0)
-				appendStringInfo(&buf, ", num-partitions: %d",
-								 pts->pinned_buffer_divisor);
+			if (ps_state)
+			{
+				uint32_t	num_partitions
+					= pg_atomic_read_u32(&ps_state->pinned_buffer_divisor);
+				if (num_partitions > 0)
+					appendStringInfo(&buf, ", num-partitions: %d", num_partitions);
+			}
 		}
 		snprintf(label, sizeof(label),
 				 "%s Pinned Buffer", xpu_label);
