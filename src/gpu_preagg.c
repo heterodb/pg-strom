@@ -2038,7 +2038,11 @@ consider_sorted_groupby_path(PlannerInfo *root,
 				int		kind = lookup_gpusort_keykind(f_expr, cpath->path.pathtarget);
 
 				if (kind < 0)
+				{
+					elog(DEBUG1, "gpusort: key expression is not supported: %s",
+						 nodeToString(f_expr));
 					return false;	/* not supported */
+				}
 				/* check whether the referenced raw key is device executable */
 				if (kind == KSORT_KEY_KIND__VREF)
 				{
@@ -2068,8 +2072,11 @@ consider_sorted_groupby_path(PlannerInfo *root,
 				if (pk->pk_strategy == BTLessStrategyNumber)
 					kind |= KSORT_KEY_ATTR__ORDER_ASC;
 				else if (pk->pk_strategy != BTLessStrategyNumber)
+				{
+					elog(DEBUG1, "Bug? PathKey has unexpected pk_strategy (%d)",
+						 (int)pk->pk_strategy);
 					return false;	/* should not happen */
-
+				}
 				sortkeys_expr = lappend(sortkeys_expr, f_expr);
 				sortkeys_kind = lappend_int(sortkeys_kind, kind);
 				sortkeys_refs = lappend_int(sortkeys_refs, ec->ec_sortref);

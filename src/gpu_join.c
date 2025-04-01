@@ -835,6 +835,8 @@ try_add_xpujoin_simple_path(PlannerInfo *root,
 							   join_rel,
 							   op_leaf,
 							   try_parallel_path);
+	/* try attach GPU-Sorted Path, if any */
+	try_add_sorted_gpujoin_path(root, join_rel, cpath, try_parallel_path);
 	if (!try_parallel_path)
 		add_path(join_rel, &cpath->path);
 	else
@@ -894,7 +896,6 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 		elog(DEBUG1, "gpusort: disabled because no sortable pathkeys");
 		return;		/* no upper sortkeys */
 	}
-
 	/*
 	 * buffer size estimation, because GPU-Sort needs kds_final buffer to save
 	 * the result of GPU-Projection until Bitonic-sorting.
@@ -929,12 +930,17 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 		EquivalenceMember *em;
 		Expr	   *em_expr;
 		devtype_info *dtype;
+		Oid			type_oid;
 		bool		found = false;
 
 		if (list_length(ec->ec_members) != 1 ||
 			ec->ec_sources != NIL ||
 			ec->ec_derives != NIL)
+		{
+			elog(DEBUG1, "gpusort: EquivalenceClass has not a supported form: %s",
+				 nodeToString(ec));
 			return;		/* not supported */
+		}
 
 		/* strip Relabel for equal() comparison */
 		em = (EquivalenceMember *)linitial(ec->ec_members);
@@ -946,10 +952,19 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 									pp_info->xpu_task_flags,
 									pp_info->scan_relid,
 									inner_target_list, NULL))
+		{
+			elog(DEBUG1, "gpusort: expression '%s' is not device executable",
+				 nodeToString(em_expr));
 			return;		/* not supported */
-		dtype = pgstrom_devtype_lookup(exprType((Node *)em_expr));
+		}
+		type_oid = exprType((Node *)em_expr);
+		dtype = pgstrom_devtype_lookup(type_oid);
 		if (!dtype || (dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
+		{
+			elog(DEBUG1, "gpusort: type '%s' has no device executable compare handler",
+				 format_type_be(type_oid));
 			return;		/* not supported */
+		}
 		/* lookup the sorting keys */
 		foreach (lc2, final_target->exprs)
 		{
@@ -964,7 +979,11 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 				if (pk->pk_strategy == BTLessStrategyNumber)
 					kind |= KSORT_KEY_ATTR__ORDER_ASC;
 				else if (pk->pk_strategy != BTLessStrategyNumber)
+				{
+					elog(DEBUG1, "Bug? PathKey has unexpected pk_strategy (%d)",
+						 (int)pk->pk_strategy);
 					return;		/* should not happen */
+				}
 				sortkeys_expr = lappend(sortkeys_expr, f_expr);
 				sortkeys_kind = lappend_int(sortkeys_kind, kind);
 				found = true;
@@ -972,7 +991,11 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 			}
 		}
 		if (!found)
+		{
+			elog(DEBUG1, "gpusort: sortkey '%s' was not found on the final targetlist",
+				 nodeToString(em_expr));
 			return;		/* not found */
+		}
 	}
 	/* duplicate GpuScan/GpuJoin path and attach GPU-Sort */
 	gpusort_cost = (2.0 * pgstrom_gpu_operator_cost *
