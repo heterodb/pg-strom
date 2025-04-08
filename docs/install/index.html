@@ -141,6 +141,8 @@
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../postgis/">PostGIS</a>
                   </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpusort/">GPU-Sort</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../troubles/">Trouble Shooting</a>
                   </li>
               </ul>
@@ -151,6 +153,8 @@
                   <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPU Cache</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pinned_buffer/">Pinned Inner Buffer</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../fluentd/">connect with Fluentd</a>
                   </li>
@@ -168,6 +172,8 @@
               </ul>
               <p class="caption"><span class="caption-text">Release Note</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v6.0/">PG-Strom v6.0</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
@@ -445,6 +451,18 @@ Mon Jun  3 09:56:41 2024
 |=========================================================================================|
 |  No running processes found                                                             |
 +-----------------------------------------------------------------------------------------+
+</code></pre>
+<div class="admonition tips">
+<p class="admonition-title">Tips</p>
+<p><strong>Additional configurations for systems with NVSwitch</strong></p>
+<p>For systems with multiple GPUs that use NVSwitch for interconnect them, the <code>nvidia-fabricmanager</code> module must be installed.
+If this package is not installed, <code>cuInit()</code>, which initializes CUDA, will fail with the <code>CUDA_ERROR_SYSTEM_NOT_READY</code> error, and PG-Strom will not start. 
+Run the following commands to install the <code>nvidia-fabricmanager</code> package.
+<a href="https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/index.html#cuda-error-system-not-ready-after-installation">(source)</a></p>
+</div>
+<pre><code># dnf install nvidia-fabricmanager
+# systemctl enable nvidia-fabricmanager.service
+# systemctl start nvidia-fabricmanager.service
 </code></pre>
 <h3 id="check-gpudirect-storage-status">Check GPUDirect Storage status</h3>
 <p>After the installation of CUDA Toolkit according to the steps above, your system will become ready for the GPUDirect Storage.
@@ -781,11 +799,19 @@ $ sudo dpkg -i heterodb-extra_5.4-1_amd64.deb
 </code></pre>
 <p>Checkout the source code of PG-Strom, build and install as follows.
 At this time, do not forget to specify the target PostgreSQL by <code>pg_config</code>.</p>
-<p>Post-installation configuration is the same as for Red Hat Enterprise Linux or Rocky Linux.</p>
+<p>Post-installation configuration is almost same as for Red Hat Enterprise Linux or Rocky Linux.</p>
 <pre><code>$ git clone https://github.com/heterodb/pg-strom.git
 $ cd pg-strom/src
 $ make PG_CONFIG=/path/to/pgsql/bin/pg_config -j 8
 $ sudo make PG_CONFIG=/path/to/pgsql/bin/pg_config install
+</code></pre>
+<p>However, if you use a packaged PostgreSQL and start it via systemctl, the PATH environment variable will be cleared (probably for security reasons).
+As a result, the script launched to build the GPU binary on the first startup will not work properly.
+To avoid this, if you are using Ubuntu Linux, add the following line to <code>/etc/postgresql/main/PGVERSION/environment</code>.</p>
+<pre><code>/etc/postgresql/PGVERSION/main/environment:
+
+
+PATH='/usr/local/cuda/bin:/usr/bin:/bin'
 </code></pre>
               
             </div>

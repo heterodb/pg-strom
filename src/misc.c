@@ -168,8 +168,13 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, makeInteger(pp_info->groupby_prepfn_bufsz));
 	exprs = lappend(exprs, pp_info->gpusort_keys_expr);
 	privs = lappend(privs, pp_info->gpusort_keys_kind);
+	privs = lappend(privs, pp_info->gpusort_keys_refs);
 	privs = lappend(privs, makeInteger(pp_info->gpusort_htup_margin));
 	privs = lappend(privs, makeInteger(pp_info->gpusort_limit_count));
+	privs = lappend(privs, makeInteger(pp_info->window_rank_func));
+	privs = lappend(privs, makeInteger(pp_info->window_rank_limit));
+	privs = lappend(privs, makeInteger(pp_info->window_partby_nkeys));
+	privs = lappend(privs, makeInteger(pp_info->window_orderby_nkeys));
 	exprs = lappend(exprs, pp_info->projection_hashkeys);
 	/* inner relations */
 	privs = lappend(privs, makeInteger(pp_info->sibling_param_id));
@@ -281,8 +286,13 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.groupby_prepfn_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.gpusort_keys_expr = list_nth(exprs, eindex++);
 	pp_data.gpusort_keys_kind = list_nth(privs, pindex++);
+	pp_data.gpusort_keys_refs = list_nth(privs, pindex++);
 	pp_data.gpusort_htup_margin = intVal(list_nth(privs, pindex++));
 	pp_data.gpusort_limit_count = intVal(list_nth(privs, pindex++));
+	pp_data.window_rank_func = intVal(list_nth(privs, pindex++));
+	pp_data.window_rank_limit = intVal(list_nth(privs, pindex++));
+	pp_data.window_partby_nkeys = intVal(list_nth(privs, pindex++));
+	pp_data.window_orderby_nkeys = intVal(list_nth(privs, pindex++));
 	pp_data.projection_hashkeys = list_nth(exprs, eindex++);
 	/* inner relations */
 	pp_data.sibling_param_id = intVal(list_nth(privs, pindex++));

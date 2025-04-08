@@ -251,7 +251,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	{"max(float8)",
 	 "s:max_f8(bytea)",
 	 "s:pmax(float8)",
-	 "s:fmax_f84(bytea)",
+	 "s:fmax_f8(bytea)",
 	 KAGG_ACTION__PMAX_FP64, false,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
@@ -1954,6 +1954,7 @@ consider_sorted_groupby_path(PlannerInfo *root,
 							 List **p_sortkeys_upper,
 							 List **p_sortkeys_expr,
 							 List **p_sortkeys_kind,
+							 List **p_sortkeys_refs,
 							 Cost *p_gpusort_cost)
 {
 	pgstromPlanInfo	*pp_info = linitial(cpath->custom_private);
@@ -1961,6 +1962,7 @@ consider_sorted_groupby_path(PlannerInfo *root,
 	List	   *sortkeys_upper = NIL;
 	List	   *sortkeys_expr = NIL;
 	List	   *sortkeys_kind = NIL;
+	List	   *sortkeys_refs = NIL;
 	List	   *inner_target_list = NIL;
 	ListCell   *cell;
 	ListCell   *lc1, *lc2;
@@ -1972,7 +1974,7 @@ consider_sorted_groupby_path(PlannerInfo *root,
 	}
 	if (pgstrom_cpu_fallback_elevel < ERROR)
 	{
-		elog(DEBUG1, "gpusort: disabled by pgstrom.cpu_fallback");
+		elog(DEBUG1, "gpusort: disabled by pg_strom.cpu_fallback");
 		return false;
 	}
 	if ((pp_info->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0)
@@ -1988,7 +1990,8 @@ consider_sorted_groupby_path(PlannerInfo *root,
 		sortkeys_upper = root->distinct_pathkeys;
 	else if (root->sort_pathkeys != NIL)
 		sortkeys_upper = root->sort_pathkeys;
-	else if (root->query_pathkeys != NIL)
+	else if (root->query_pathkeys != NIL &&
+			 root->query_pathkeys != root->group_pathkeys)
 		sortkeys_upper = root->query_pathkeys;
 	else
 	{
@@ -2035,7 +2038,11 @@ consider_sorted_groupby_path(PlannerInfo *root,
 				int		kind = lookup_gpusort_keykind(f_expr, cpath->path.pathtarget);
 
 				if (kind < 0)
+				{
+					elog(DEBUG1, "gpusort: key expression is not supported: %s",
+						 nodeToString(f_expr));
 					return false;	/* not supported */
+				}
 				/* check whether the referenced raw key is device executable */
 				if (kind == KSORT_KEY_KIND__VREF)
 				{
@@ -2065,10 +2072,14 @@ consider_sorted_groupby_path(PlannerInfo *root,
 				if (pk->pk_strategy == BTLessStrategyNumber)
 					kind |= KSORT_KEY_ATTR__ORDER_ASC;
 				else if (pk->pk_strategy != BTLessStrategyNumber)
+				{
+					elog(DEBUG1, "Bug? PathKey has unexpected pk_strategy (%d)",
+						 (int)pk->pk_strategy);
 					return false;	/* should not happen */
-
+				}
 				sortkeys_expr = lappend(sortkeys_expr, f_expr);
 				sortkeys_kind = lappend_int(sortkeys_kind, kind);
+				sortkeys_refs = lappend_int(sortkeys_refs, ec->ec_sortref);
 				found = true;
 				break;
 			}
@@ -2082,6 +2093,7 @@ consider_sorted_groupby_path(PlannerInfo *root,
 	*p_sortkeys_upper = sortkeys_upper;
 	*p_sortkeys_expr  = sortkeys_expr;
 	*p_sortkeys_kind  = sortkeys_kind;
+	*p_sortkeys_refs  = sortkeys_refs;
 	*p_gpusort_cost   = 10.0 + comparison_cost * ntuples * LOG2(ntuples);
 	return true;
 }
@@ -2182,10 +2194,14 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 		List   *__sortkeys_upper = NIL;
 		List   *__sortkeys_expr = NIL;
 		List   *__sortkeys_kind = NIL;
+		List   *__sortkeys_refs = NIL;
 		Cost	__gpusort_cost = 0.0;
 
-		/* mark as final-merged GpuPreAgg  */
-		pp_info->xpu_task_flags |= DEVTASK__PREAGG_FINAL_MERGE;
+		/*
+		 * final buffer should be merged for both of complete aggregation
+		 * or GPU-Sorting.
+		 */
+		pp_info->xpu_task_flags |= DEVTASK__MERGE_FINAL_BUFFER;
 
 		/* save a few extra properties */
 		lsecond(cpath->custom_private) = con.target_proj_final;
@@ -2220,6 +2236,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 		 * consider the Sorted GPU-PreAgg Path opportunity, if available
 		 */
 		if (__sortkeys_upper == NIL &&
+			con.havingProjQuals == NIL &&
 			consider_sorted_groupby_path(root,
 										 cpath,
 										 group_rel->reltarget,
@@ -2228,6 +2245,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 										 &__sortkeys_upper,
 										 &__sortkeys_expr,
 										 &__sortkeys_kind,
+										 &__sortkeys_refs,
 										 &__gpusort_cost))
 		{
 			Cost	__per_tuple = (cpath->path.pathtarget->cost.per_tuple +
@@ -2236,6 +2254,7 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 			pp_info = copy_pgstrom_plan_info(pp_info);
 			pp_info->gpusort_keys_expr = __sortkeys_expr;
 			pp_info->gpusort_keys_kind = __sortkeys_kind;
+			pp_info->gpusort_keys_refs = __sortkeys_refs;
 			linitial(cpath->custom_private) = pp_info;
 			cpath->path.startup_cost = (cpath->path.total_cost
 										- __per_tuple * cpath->path.rows / 2.0
@@ -2531,9 +2550,18 @@ __tryGpuSortWithLimitPath(PlannerInfo *root, Path *path, uint32_t limit_count)
 			break;
 
 		case T_CustomPath:
-			if (pgstrom_is_gpuscan_path(path) ||
-				pgstrom_is_gpujoin_path(path) ||
-				pgstrom_is_gpupreagg_path(path))
+			if (pgstrom_is_dummy_path(path))
+			{
+				CustomPath *cpath = (CustomPath *)path;
+
+				subpath = linitial(cpath->custom_paths);
+				subpath = __tryGpuSortWithLimitPath(root, subpath, limit_count);
+				if (subpath)
+					return pgstrom_create_dummy_path(root, subpath);
+			}
+			else if (pgstrom_is_gpuscan_path(path) ||
+					 pgstrom_is_gpujoin_path(path) ||
+					 pgstrom_is_gpupreagg_path(path))
 			{
 				CustomPath *cpath = (CustomPath *)path;
 				pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
@@ -2599,20 +2627,345 @@ tryGpuSortWithLimitPath(PlannerInfo *root, Path *path)
 }
 
 /*
+ * tryGpuSortWithWindowRankPath
+ */
+static Path *
+__attachGpuSortWithWindowRankPath(PlannerInfo *root,
+								  WindowAggPath *wpath,
+								  //WindowClause *wc,
+								  CustomPath *cpath)
+{
+	pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
+	WindowClause *wc = wpath->winclause;
+	List	   *runCondition = __windowAggPathGetRunCondition(wpath);
+	int			window_func = 0;
+	int64_t		window_limit = -1;
+	int			window_partby_nkeys = 0;
+	int			window_orderby_nkeys = 0;
+	ListCell   *lc, *cell;
+
+	if (pp_info->gpusort_keys_expr == NIL ||
+		pp_info->gpusort_keys_kind == NIL)
+		return NULL;	/* no sort */
+	/*
+	 * Check whether the partition-by / order-by fits sorting keys
+	 */
+	cell = list_head(pp_info->gpusort_keys_refs);
+	foreach (lc, wc->partitionClause)
+	{
+		SortGroupClause *sgc = lfirst(lc);
+
+		if (!cell || lfirst_int(cell) != sgc->tleSortGroupRef)
+		{
+			elog(DEBUG2, "window-rank: GPU-Sort partition-keys mismatch");
+			return NULL;
+		}
+		window_partby_nkeys++;
+		cell = lnext(pp_info->gpusort_keys_refs, cell);
+	}
+	foreach (lc, wc->orderClause)
+	{
+		SortGroupClause *sgc = lfirst(lc);
+
+		if (!cell || lfirst_int(cell) != sgc->tleSortGroupRef)
+		{
+			elog(DEBUG2, "window-rank: GPU-Sort ordering-keys mismatch");
+			return NULL;
+		}
+		window_orderby_nkeys++;
+		cell = lnext(pp_info->gpusort_keys_refs, cell);
+	}
+
+	/*
+	 * Check whether the 'runCondition' contains supported filter
+	 */
+	foreach (lc, runCondition)
+	{
+		OpExpr	   *op = lfirst(lc);
+		WindowFunc *func = NULL;
+		Const	   *con = NULL;
+		StrategyNumber strategy;
+
+		if (!IsA(op, OpExpr) || list_length(op->args) != 2)
+			continue;
+		strategy = get_op_opfamily_strategy(op->opno, INTEGER_BTREE_FAM_OID);
+		if (strategy ==  BTLessStrategyNumber ||
+			strategy ==  BTLessEqualStrategyNumber)
+		{
+			func = linitial(op->args);
+			con  = lsecond(op->args);
+		}
+		else if (strategy == BTGreaterStrategyNumber ||
+				 strategy == BTGreaterEqualStrategyNumber)
+		{
+			con  = linitial(op->args);
+			func = lsecond(op->args);
+		}
+		else
+		{
+			continue;
+		}
+
+		if (IsA(func, WindowFunc) && IsA(con, Const) && !con->constisnull)
+		{
+			int			__window_func;
+			int64_t		__window_limit;
+
+			switch (func->winfnoid)
+			{
+				case F_ROW_NUMBER:
+					__window_func = KSORT_WINDOW_FUNC__ROW_NUMBER;
+					break;
+				case F_RANK_:
+					__window_func = KSORT_WINDOW_FUNC__RANK;
+					break;
+				case F_DENSE_RANK_:
+					__window_func = KSORT_WINDOW_FUNC__DENSE_RANK;
+					break;
+				default:
+					goto skip;
+			}
+
+			switch (con->consttype)
+			{
+				case INT2OID:
+					__window_limit = DatumGetInt16(con->constvalue);
+					break;
+				case INT4OID:
+					__window_limit = DatumGetInt32(con->constvalue);
+					break;
+				case INT8OID:
+					__window_limit = DatumGetInt64(con->constvalue);
+					break;
+				default:
+					goto skip;
+			}
+
+			if (strategy == BTLessEqualStrategyNumber ||
+				strategy == BTGreaterEqualStrategyNumber)
+			{
+				if (__window_limit <= 0)
+				{
+					//XXX to be replaced to empty results?
+					elog(DEBUG2, "window-rank: rank() less than or equal to zero or negative shall always generate empty results");
+					return NULL;
+				}
+				__window_limit++;
+			}
+			else
+			{
+				if (__window_limit <= 1)
+				{
+					elog(DEBUG2, "window-rank: rank() less than zero or negative shall always generate empty results");
+					return NULL;
+				}
+			}
+
+			if (window_func == 0)
+			{
+				window_func  = __window_func;
+				window_limit = __window_limit;
+			}
+			else if (window_func == __window_func)
+			{
+				if (window_limit > __window_limit)
+					window_limit = __window_limit;
+			}
+			else
+			{
+				elog(DEBUG2, "window-rank: different rank() functions are mixed, so unable to determine how much rows shall be filtered out");
+				return NULL;
+			}
+		}
+	skip:
+		;
+	}
+
+	if (window_func)
+	{
+		double	ngroups;
+		double	nrows;
+		Cost	__startup_cost;
+		Cost	__per_tuple;
+		List   *__partby_keys = NIL;
+		int		__count = 0;
+
+		foreach (lc, pp_info->gpusort_keys_expr)
+		{
+			if (__count++ >= window_partby_nkeys)
+				break;
+			__partby_keys = lappend(__partby_keys, lfirst(lc));
+		}
+		ngroups = estimate_num_groups(root,
+									  __partby_keys,
+									  cpath->path.rows,
+									  NULL, NULL);
+		list_free(__partby_keys);
+
+		nrows = (double)window_limit * ngroups;
+		if (nrows >= cpath->path.rows)
+		{
+			elog(DEBUG2, "window-rank: estimated number of tuples reduction is not sufficient (partitions: %.0f, input-rows: %.0f, output-rows: %.0f",
+				 ngroups, cpath->path.rows, nrows);
+			return NULL;		/* no benefit */
+		}
+		cpath = pmemdup(cpath, sizeof(CustomPath));
+		cpath->custom_private = list_copy(cpath->custom_private);
+		pp_info = copy_pgstrom_plan_info(pp_info);
+		pp_info->window_rank_func  = window_func;
+		pp_info->window_rank_limit = window_limit;
+		pp_info->window_partby_nkeys = window_partby_nkeys;
+		pp_info->window_orderby_nkeys = window_orderby_nkeys;
+		linitial(cpath->custom_private) = pp_info;
+
+		__per_tuple = cpath->path.pathtarget->cost.per_tuple + pgstrom_gpu_tuple_cost;
+		__startup_cost = cpath->path.total_cost
+			- cpath->path.rows * __per_tuple
+			+ cpath->path.rows * pgstrom_gpu_operator_cost
+			+ nrows * __per_tuple;
+		cpath->path.startup_cost = __startup_cost;
+        cpath->path.total_cost = __startup_cost + __per_tuple * nrows;
+		cpath->path.rows = nrows;
+		return &cpath->path;
+	}
+
+	if (runCondition != NIL)
+		elog(DEBUG2, "window-rank: not supported run-condition of the first window-agg node: %s",
+			 nodeToString(runCondition));
+	return NULL;
+}
+
+static Path *
+tryGpuSortWithWindowRankPath(PlannerInfo *root,
+							 WindowAggPath *wpath,
+							 //WindowClause *wc,
+							 Path *__path)
+{
+	Path   *subpath;
+
+	switch (__path->type)
+	{
+		case T_WindowAggPath:
+			{
+				WindowAggPath  *__wpath = (WindowAggPath *)__path;
+				WindowClause   *__wc = __wpath->winclause;
+
+				subpath = tryGpuSortWithWindowRankPath(root,
+													   __wpath,
+													   __wpath->subpath);
+				if (subpath)
+				{
+					Query	   *parse = root->parse;
+					WindowFuncLists *wflists
+						= find_window_functions((Node *)root->processed_tlist,
+												list_length(parse->windowClause));
+					wpath = create_windowagg_path(root,
+												  __wpath->path.parent,
+												  subpath,
+												  __wpath->path.pathtarget,
+												  wflists->windowFuncs[__wc->winref],
+												  __wpath->runCondition,
+												  __wc,
+												  __wpath->qual,
+												  __wpath->topwindow);
+					return &wpath->path;
+				}
+			}
+			break;
+
+		case T_GatherPath:
+			subpath = ((GatherPath *)__path)->subpath;
+			subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath);
+			if (subpath)
+			{
+				GatherPath *gpath
+					= create_gather_path(root,
+										 __path->parent,
+										 subpath,
+										 __path->pathtarget,
+										 NULL,
+										 &subpath->rows);
+				gpath->path.pathkeys = __path->pathkeys;
+				//elog(INFO, "Gpath startup=%f total=%f rows=%.0f", gpath->path.startup_cost, gpath->path.total_cost, gpath->path.rows);
+				return &gpath->path;
+			}
+			break;
+
+		case T_GatherMergePath:
+			subpath = ((GatherMergePath *)__path)->subpath;
+			subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath);
+			if (subpath)
+			{
+				GatherPath *gpath
+					= create_gather_path(root,
+										 __path->parent,
+										 subpath,
+										 __path->pathtarget,
+										 NULL,
+										 &subpath->rows);
+				gpath->path.pathkeys = __path->pathkeys;
+				//elog(INFO, "Gpath startup=%f total=%f rows=%.0f", gpath->path.startup_cost, gpath->path.total_cost, gpath->path.rows);
+				return &gpath->path;
+			}
+			break;
+
+		case T_ProjectionPath:
+			subpath = ((ProjectionPath *)__path)->subpath;
+			subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath);
+			if (subpath)
+			{
+				ProjectionPath *ppath
+					= create_projection_path(root,
+											 __path->parent,
+											 subpath,
+											 __path->pathtarget);
+				ppath->path.pathkeys = __path->pathkeys;
+				//elog(INFO, "Proj-path startup=%f total=%f rows=%.0f", ppath->path.startup_cost, ppath->path.total_cost, ppath->path.rows);
+				return &ppath->path;
+			}
+			break;
+
+		case T_CustomPath:
+			if (pgstrom_is_dummy_path(__path))
+			{
+				CustomPath *cpath = (CustomPath *)__path;
+
+				subpath = linitial(cpath->custom_paths);
+				subpath = tryGpuSortWithWindowRankPath(root, wpath, subpath);
+				if (subpath)
+					return pgstrom_create_dummy_path(root, subpath);
+			}
+			else if (wpath && (pgstrom_is_gpuscan_path(__path) ||
+							   pgstrom_is_gpujoin_path(__path) ||
+							   pgstrom_is_gpupreagg_path(__path)))
+			{
+				CustomPath *cpath = (CustomPath *)__path;
+
+				return __attachGpuSortWithWindowRankPath(root, wpath, cpath);
+			}
+			break;
+
+		default:
+			break;
+	}
+	return NULL;
+}
+
+/*
  * XpuPreAggAddCustomPath
  */
 static void
 XpuPreAggAddCustomPath(PlannerInfo *root,
 					   UpperRelationKind upper_stage,
 					   RelOptInfo *input_rel,
-					   RelOptInfo *group_rel,
+					   RelOptInfo *upper_rel,
 					   void *extra)
 {
 	if (create_upper_paths_next)
 		create_upper_paths_next(root,
 								upper_stage,
 								input_rel,
-								group_rel,
+								upper_rel,
 								extra);
 	if (!pgstrom_enabled())
 		return;
@@ -2622,7 +2975,7 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 			__xpuPreAggAddCustomPathCommon(root,
 										   upper_stage,
 										   input_rel,
-										   group_rel,
+										   upper_rel,
 										   extra,
 										   TASK_KIND__GPUPREAGG,
 										   pgstrom_enable_partitionwise_gpupreagg);
@@ -2630,10 +2983,23 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 			__xpuPreAggAddCustomPathCommon(root,
 										   upper_stage,
 										   input_rel,
-										   group_rel,
+										   upper_rel,
 										   extra,
 										   TASK_KIND__DPUPREAGG,
 										   pgstrom_enable_partitionwise_dpupreagg);
+	}
+	else if (upper_stage == UPPERREL_WINDOW && pgstrom_enable_gpusort)
+	{
+		ListCell   *lc;
+
+		foreach (lc, upper_rel->pathlist)
+		{
+			Path   *__path = lfirst(lc);
+
+			__path = tryGpuSortWithWindowRankPath(root, NULL, __path);
+			if (__path)
+				add_path(upper_rel, __path);
+		}
 	}
 	else if (upper_stage == UPPERREL_FINAL && pgstrom_enable_gpusort)
 	{
@@ -2645,7 +3011,7 @@ XpuPreAggAddCustomPath(PlannerInfo *root,
 
 			__path = tryGpuSortWithLimitPath(root, __path);
 			if (__path)
-				add_path(group_rel, __path);
+				add_path(upper_rel, __path);
 		}
 	}
 }
@@ -2671,13 +3037,13 @@ PlanGpuPreAggPath(PlannerInfo *root,
 								  custom_plans,
 								  pp_info,
 								  &gpupreagg_plan_methods);
-	if ((pp_info->xpu_task_flags & DEVTASK__PREAGG_FINAL_MERGE) != 0)
+	if ((pp_info->xpu_task_flags & DEVTASK__MERGE_FINAL_BUFFER) != 0)
 	{
-		//PathTarget *target_proj_final = lsecond(cpath->custom_private);
 		List	   *having_proj_quals = lthird(cpath->custom_private);
 
 		/* HAVING clause */
-		//TODO: having quals in the device code - the blocker of GpuSort
+		if (having_proj_quals && pp_info->gpusort_keys_expr)
+			elog(ERROR, "Bug? GPU-Sort and HAVING clause are not usable together");
 		cscan->scan.plan.qual = having_proj_quals;
 	}
 	form_pgstrom_plan_info(cscan, pp_info);

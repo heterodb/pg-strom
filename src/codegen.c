@@ -1640,7 +1640,7 @@ found:
 #define XPUCODE_STACK_USAGE_NORMAL		128		/* stack usage by normal function calls */
 #define XPUCODE_STACK_USAGE_RECURSIVE	2048	/* stack usage by recursive function calls */
 
-#define __Elog(fmt,...)													\
+#define __Ereport(fmt,...)													\
 	do {																\
 		ereport(context->elevel,										\
 				(errcode(ERRCODE_INTERNAL_ERROR),						\
@@ -1711,13 +1711,13 @@ codegen_const_expression(codegen_context *context,
 		typtype != TYPTYPE_ENUM &&
 		typtype != TYPTYPE_RANGE &&
 		typtype != TYPTYPE_DOMAIN)
-		__Elog("unable to use type %s in Const expression (class: %c)",
-			   format_type_be(con->consttype), typtype);
+		__Ereport("unable to use type %s in Const expression (class: %c)",
+				  format_type_be(con->consttype), typtype);
 
 	dtype = pgstrom_devtype_lookup(con->consttype);
 	if (!dtype)
-		__Elog("type %s is not device supported",
-			   format_type_be(con->consttype));
+		__Ereport("type %s is not device supported",
+				  format_type_be(con->consttype));
 	if (buf)
 	{
 		kern_expression kexp;
@@ -1762,21 +1762,21 @@ codegen_param_expression(codegen_context *context,
 	char			typtype;
 
 	if (param->paramkind != PARAM_EXTERN)
-		__Elog("Only PARAM_EXTERN is supported on device: %d",
-			   (int)param->paramkind);
+		__Ereport("Only PARAM_EXTERN is supported on device: %d",
+				  (int)param->paramkind);
 
 	typtype = get_typtype(param->paramtype);
 	if (typtype != TYPTYPE_BASE &&
 		typtype != TYPTYPE_ENUM &&
 		typtype != TYPTYPE_RANGE &&
 		typtype != TYPTYPE_DOMAIN)
-		__Elog("unable to use type %s in Param expression (class: %c)",
-			   format_type_be(param->paramtype), typtype);
+		__Ereport("unable to use type %s in Param expression (class: %c)",
+				  format_type_be(param->paramtype), typtype);
 
 	dtype = pgstrom_devtype_lookup(param->paramtype);
 	if (!dtype)
-		__Elog("type %s is not device supported",
-			   format_type_be(param->paramtype));
+		__Ereport("type %s is not device supported",
+				  format_type_be(param->paramtype));
 	if (buf)
 	{
 		kern_expression	kexp;
@@ -1855,8 +1855,8 @@ __codegen_func_expression(codegen_context *context,
 	dfunc = pgstrom_devfunc_lookup(func_oid, func_args, func_collid);
 	if (!dfunc ||
 		(dfunc->func_flags & context->xpu_task_flags & DEVKIND__ANY) == 0)
-		__Elog("function %s is not supported on the target device",
-			   format_procedure(func_oid));
+		__Ereport("function %s is not supported on the target device",
+				  format_procedure(func_oid));
 	dtype = dfunc->func_rettype;
 	context->device_cost += dfunc->func_cost;
 
@@ -1953,22 +1953,22 @@ codegen_bool_expression(codegen_context *context,
 			kexp.opcode = FuncOpCode__BoolExpr_And;
 			kexp.nr_args = list_length(b->args);
 			if (kexp.nr_args < 2)
-				__Elog("BoolExpr(AND) must have 2 or more arguments");
+				__Ereport("BoolExpr(AND) must have 2 or more arguments");
 			break;
 		case OR_EXPR:
 			kexp.opcode = FuncOpCode__BoolExpr_Or;
 			kexp.nr_args = list_length(b->args);
 			if (kexp.nr_args < 2)
-				__Elog("BoolExpr(OR) must have 2 or more arguments");
+				__Ereport("BoolExpr(OR) must have 2 or more arguments");
 			break;
 		case NOT_EXPR:
 			kexp.opcode = FuncOpCode__BoolExpr_Not;
 			kexp.nr_args = list_length(b->args);
 			if (kexp.nr_args != 1)
-				__Elog("BoolExpr(OR) must not have multiple arguments");
+				__Ereport("BoolExpr(OR) must not have multiple arguments");
 			break;
 		default:
-			__Elog("BoolExpr has unknown bool operation (%d)", (int)b->boolop);
+			__Ereport("BoolExpr has unknown bool operation (%d)", (int)b->boolop);
 	}
 	kexp.exptype = TypeOpCode__bool;
 	kexp.expflags = context->kexp_flags;
@@ -2008,7 +2008,7 @@ codegen_nulltest_expression(codegen_context *context,
 			kexp.opcode = FuncOpCode__NullTestExpr_IsNotNull;
 			break;
 		default:
-			__Elog("NullTest has unknown NullTestType (%d)", (int)nt->nulltesttype);
+			__Ereport("NullTest has unknown NullTestType (%d)", (int)nt->nulltesttype);
 	}
 	kexp.exptype = TypeOpCode__bool;
 	kexp.expflags = context->kexp_flags;
@@ -2053,8 +2053,8 @@ codegen_booleantest_expression(codegen_context *context,
 			kexp.opcode = FuncOpCode__BoolTestExpr_IsNotUnknown;
 			break;
 		default:
-			__Elog("BooleanTest has unknown BoolTestType (%d)",
-				   (int)bt->booltesttype);
+			__Ereport("BooleanTest has unknown BoolTestType (%d)",
+					  (int)bt->booltesttype);
 	}
 	kexp.exptype = TypeOpCode__bool;
 	kexp.expflags = context->kexp_flags;
@@ -2261,10 +2261,10 @@ codegen_coerceviaio_expression(codegen_context *context,
 
 	dtype = pgstrom_devtype_lookup(cvio->resulttype);
 	if (!dtype)
-		__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+		__Ereport("Not a supported CoerceViaIO: %s", nodeToString(cvio));
 	stype = pgstrom_devtype_lookup(exprType((Node *)cvio->arg));
 	if (!stype)
-		__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+		__Ereport("Not a supported CoerceViaIO: %s", nodeToString(cvio));
 
 	for (int i=0; coerce_viaio_catalog[i].opcode != FuncOpCode__Invalid; i++)
 	{
@@ -2299,7 +2299,7 @@ codegen_coerceviaio_expression(codegen_context *context,
 			return 0;
 		}
 	}
-	__Elog("Not a supported CoerceViaIO: %s", nodeToString(cvio));
+	__Ereport("Not a supported CoerceViaIO: %s", nodeToString(cvio));
 }
 
 /*
@@ -2319,8 +2319,8 @@ codegen_coalesce_expression(codegen_context *context,
 
 	dtype = pgstrom_devtype_lookup(cl->coalescetype);
 	if (!dtype)
-		__Elog("Coalesce with type '%s' is not supported",
-			   format_type_be(cl->coalescetype));
+		__Ereport("Coalesce with type '%s' is not supported",
+				  format_type_be(cl->coalescetype));
 
 	memset(&kexp, 0, sizeof(kexp));
 	kexp.exptype = dtype->type_code;
@@ -2338,8 +2338,8 @@ codegen_coalesce_expression(codegen_context *context,
 
 		__dtype = pgstrom_devtype_lookup(type_oid);
 		if (!__dtype || dtype->type_code != __dtype->type_code)
-			__Elog("Coalesce argument has incompatible type: %s",
-				   nodeToString(cl));
+			__Ereport("Coalesce argument has incompatible type: %s",
+					  nodeToString(cl));
 		if (codegen_expression_walker(context, buf, curr_depth, expr) < 0)
 			return -1;
 		stack_usage_max = Max(stack_usage_max, context->stack_usage);
@@ -2368,8 +2368,8 @@ codegen_minmax_expression(codegen_context *context,
 
 	dtype = pgstrom_devtype_lookup(mm->minmaxtype);
 	if (!dtype || (dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
-		__Elog("Least/Greatest with type '%s' is not supported",
-			   format_type_be(mm->minmaxtype));
+		__Ereport("Least/Greatest with type '%s' is not supported",
+				  format_type_be(mm->minmaxtype));
 
 	memset(&kexp, 0, sizeof(kexp));
 	kexp.exptype = dtype->type_code;
@@ -2379,7 +2379,7 @@ codegen_minmax_expression(codegen_context *context,
 	else if (mm->op == IS_LEAST)
 		kexp.opcode = FuncOpCode__LeastExpr;
 	else
-		__Elog("unknown MinMaxExpr operator: %s", nodeToString(mm));
+		__Ereport("unknown MinMaxExpr operator: %s", nodeToString(mm));
 	kexp.nr_args = list_length(mm->args);
 	kexp.args_offset = SizeOfKernExpr(0);
 	if (buf)
@@ -2392,8 +2392,8 @@ codegen_minmax_expression(codegen_context *context,
 
 		__dtype = pgstrom_devtype_lookup(type_oid);
 		if (!__dtype || dtype->type_code != __dtype->type_code)
-			__Elog("Least/Greatest argument has incompatible type: %s",
-				   nodeToString(mm));
+			__Ereport("Least/Greatest argument has incompatible type: %s",
+					  nodeToString(mm));
 		if (codegen_expression_walker(context, buf, curr_depth, expr) < 0)
 			return -1;
 		stack_usage_max = Max(stack_usage_max, context->stack_usage);
@@ -2419,19 +2419,19 @@ codegen_relabel_expression(codegen_context *context,
 
 	dtype = pgstrom_devtype_lookup(relabel->resulttype);
 	if (!dtype)
-		__Elog("device type '%s' is not supported",
-			   format_type_be(relabel->resulttype));
+		__Ereport("device type '%s' is not supported",
+				  format_type_be(relabel->resulttype));
 	type_code = dtype->type_code;
 
 	type_oid = exprType((Node *)relabel->arg);
 	dtype = pgstrom_devtype_lookup(type_oid);
 	if (!dtype)
-		__Elog("device type '%s' is not supported",
-			   format_type_be(type_oid));
+		__Ereport("device type '%s' is not supported",
+				  format_type_be(type_oid));
 	if (dtype->type_code != type_code)
-		__Elog("device type '%s' -> '%s' is not binary convertible",
-			   format_type_be(type_oid),
-			   format_type_be(relabel->resulttype));
+		__Ereport("device type '%s' -> '%s' is not binary convertible",
+				  format_type_be(type_oid),
+				  format_type_be(relabel->resulttype));
 
 	return codegen_expression_walker(context, buf, curr_depth, relabel->arg);
 }
@@ -2450,7 +2450,7 @@ codegen_casetest_expression(codegen_context *context,
 
 	if (codegen_casetest_key_slot_id < 0 ||
 		codegen_casetest_key_slot_id >= list_length(context->kvars_deflist))
-		__Elog("Bug? CaseTestExpr is used out of CaseWhen");
+		__Ereport("Bug? CaseTestExpr is used out of CaseWhen");
 	kvdef = list_nth(context->kvars_deflist, codegen_casetest_key_slot_id);
 
 	if (buf)
@@ -2493,8 +2493,8 @@ codegen_casewhen_expression(codegen_context *context,
 	/* check result type */
 	dtype = pgstrom_devtype_lookup(caseexpr->casetype);
 	if (!dtype)
-		__Elog("device type '%s' is not supported",
-			   format_type_be(caseexpr->casetype));
+		__Ereport("device type '%s' is not supported",
+				  format_type_be(caseexpr->casetype));
 	/* setup kexp */
 	memset(&kexp, 0, sizeof(kexp));
 	kexp.exptype = dtype->type_code;
@@ -2603,20 +2603,20 @@ codegen_scalar_array_op_expression(codegen_context *context,
 
 	if (list_length(sa_op->args) != 2)
 	{
-		__Elog("ScalarArrayOpExpr is not binary operator, not supported");
+		__Ereport("ScalarArrayOpExpr is not binary operator, not supported");
 		return -1;
 	}
 	expr_a = linitial(sa_op->args);
 	type_oid = exprType((Node *)expr_a);
 	dtype_a = pgstrom_devtype_lookup(type_oid);
 	if (!dtype_a)
-		__Elog("type %s is not device supported", format_type_be(type_oid));
+		__Ereport("type %s is not device supported", format_type_be(type_oid));
 
 	expr_s = lsecond(sa_op->args);
 	type_oid = exprType((Node *)expr_s);
 	dtype_s = pgstrom_devtype_lookup(type_oid);
 	if (!dtype_s)
-		__Elog("type %s is not device supported", format_type_be(type_oid));
+		__Ereport("type %s is not device supported", format_type_be(type_oid));
 
 	if (dtype_s->type_element == NULL &&
 		dtype_a->type_element != NULL)
@@ -2640,8 +2640,8 @@ codegen_scalar_array_op_expression(codegen_context *context,
 	}
 	else
 	{
-		__Elog("ScalarArrayOpExpr must be 'SCALAR = %s ARRAY' form",
-			   sa_op->useOr ? "ANY" : "ALL");
+		__Ereport("ScalarArrayOpExpr must be 'SCALAR = %s ARRAY' form",
+				  sa_op->useOr ? "ANY" : "ALL");
 	}
 	dtype_e = dtype_a->type_element;
 	argtypes[0] = dtype_s->type_oid;
@@ -2650,12 +2650,12 @@ codegen_scalar_array_op_expression(codegen_context *context,
 									 2, argtypes,
 									 sa_op->inputcollid);
 	if (!dfunc)
-		__Elog("function %s is not device supported",
-			   format_procedure(func_oid));
+		__Ereport("function %s is not device supported",
+				  format_procedure(func_oid));
 	if (dfunc->func_rettype->type_oid != BOOLOID ||
 		dfunc->func_nargs != 2)
-		__Elog("function %s is not a binary boolean function",
-			   format_procedure(func_oid));
+		__Ereport("function %s is not a binary boolean function",
+				  format_procedure(func_oid));
 	/* allocation of kvar-slot for the temporary element variables */
 	kvdef = palloc0(sizeof(codegen_kvar_defitem));
 	kvdef->kv_slot_id = list_length(context->kvars_deflist);
@@ -2789,11 +2789,11 @@ codegen_expression_walker(codegen_context *context,
 													  (ScalarArrayOpExpr *)expr);
 		case T_CoerceToDomain:
 		default:
-			__Elog("not a supported expression type: %s", nodeToString(expr));
+			__Ereport("not a supported expression type: %s", nodeToString(expr));
 	}
 	return -1;
 }
-#undef __Elog
+#undef __Ereport
 
 /*
  * codegen_build_loadvars
@@ -4156,6 +4156,15 @@ codegen_build_gpusort_keydesc(codegen_context *context,
 			}
 		}
 	}
+	/* GPU-Sort + Window-Rank() functions, if any */
+	Assert(pp_info->gpusort_limit_count == 0 ||
+		   pp_info->window_rank_func == 0);		/* mutually exclusive */
+	kexp->u.sort.window_rank_func		= pp_info->window_rank_func;
+	kexp->u.sort.window_rank_limit		= pp_info->window_rank_limit;
+	kexp->u.sort.window_partby_nkeys	= pp_info->window_partby_nkeys;
+	kexp->u.sort.window_orderby_nkeys	= pp_info->window_orderby_nkeys;
+
+	/* Put MAGIC */
 	__appendKernExpMagicAndLength(&buf, VARHDRSZ);
 	SET_VARSIZE(buf.data, buf.len);
 	/*

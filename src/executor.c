@@ -888,8 +888,6 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 {
 	XpuConnection  *conn = pts->conn;
 	XpuCommand	   *xcmd;
-	struct iovec	xcmd_iov[10];
-	int				xcmd_iovcnt;
 	int				ev;
 
 	pthreadMutexLock(&conn->mutex);
@@ -926,15 +924,17 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 			{
 				pts->final_done = true;
 				if (try_final_callback &&
-					pgstromTaskStateEndScan(pts) &&
-					pts->cb_final_chunk != NULL)
+					pgstromTaskStateEndScan(pts))
 				{
-					xcmd = pts->cb_final_chunk(pts, xcmd_iov, &xcmd_iovcnt);
-					if (xcmd)
-					{
-						xpuClientSendCommandIOV(conn, xcmd_iov, xcmd_iovcnt);
-						continue;
-					}
+					/* send XpuTaskFinal if we are actually the final one */
+					XpuCommand	__xcmd;
+
+					memset(&__xcmd, 0, sizeof(XpuCommand));
+					__xcmd.magic  = XpuCommandMagicNumber;
+					__xcmd.tag    = XpuCommandTag__XpuTaskFinal;
+					__xcmd.length = offsetof(XpuCommand, u);
+					xpuClientSendCommand(conn, &__xcmd);
+					continue;
 				}
 			}
 			return NULL;
@@ -1105,31 +1105,6 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 	} while (tryExecCpuFallbackChunks(pts) > 0);
 
 	return NULL;
-}
-
-/*
- * pgstromExecFinalChunk
- */
-static XpuCommand *
-pgstromExecFinalChunk(pgstromTaskState *pts,
-					  struct iovec *xcmd_iov, int *xcmd_iovcnt)
-{
-	XpuCommand	   *xcmd;
-
-	pts->xcmd_buf.len = offsetof(XpuCommand, u);
-	enlargeStringInfo(&pts->xcmd_buf, 0);
-
-	xcmd = (XpuCommand *)pts->xcmd_buf.data;
-	memset(xcmd, 0, sizeof(XpuCommand));
-	xcmd->magic  = XpuCommandMagicNumber;
-	xcmd->tag    = XpuCommandTag__XpuTaskFinal;
-	xcmd->length = offsetof(XpuCommand, u);
-
-	xcmd_iov[0].iov_base = xcmd;
-	xcmd_iov[0].iov_len  = offsetof(XpuCommand, u);
-	*xcmd_iovcnt = 1;
-
-	return xcmd;
 }
 
 /*
@@ -1604,6 +1579,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 
 			Assert(pgstrom_is_gpuscan_state(istate->ps) ||
 				   pgstrom_is_gpujoin_state(istate->ps));
+			Assert(pp_info->gpusort_keys_expr == NIL);
 			if (pp_inner->hash_inner_keys != NIL &&
 				pp_inner->hash_outer_keys != NIL)
 				i_pts->xpu_task_flags |= DEVTASK__PINNED_HASH_RESULTS;
@@ -1618,12 +1594,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	Assert(depth_index == pts->num_rels);
 
 	/*
-	 * GPU-Sort needs per-session kds_final buffer.
-	 */
-	if (pp_info->gpusort_keys_expr != 0)
-		pts->xpu_task_flags |= DEVTASK__PINNED_ROW_RESULTS;
-
-	/*
 	 * Setup request buffer
 	 */
 	if (pts->arrow_state)		/* Apache Arrow */
@@ -1634,7 +1604,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  NULL,
 									  KDS_FORMAT_ARROW);
 	}
-	else if (pts->gcache_desc)		/* GPU-Cache */
+	else if (pts->gcache_desc)	/* GPU-Cache */
 	{
 		pts->cb_next_chunk = pgstromScanChunkGpuCache;
 		pts->cb_next_tuple = pgstromScanNextTuple;
@@ -1642,8 +1612,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  NULL,
 									  KDS_FORMAT_COLUMN);
 	}
-	else if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0 ||
-			 pts->ds_entry)
+	else						/* GPU-Direct (incl. VFS fallback) */
 	{
 		pts->cb_next_chunk = pgstromRelScanChunkDirect;
 		pts->cb_next_tuple = pgstromScanNextTuple;
@@ -1651,32 +1620,6 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 									  tupdesc_src,
 									  KDS_FORMAT_BLOCK);
 	}
-	else						/* Slow normal heap storage */
-	{
-		pts->cb_next_chunk = pgstromRelScanChunkNormal;
-		pts->cb_next_tuple = pgstromScanNextTuple;
-		__setupTaskStateRequestBuffer(pts,
-									  tupdesc_src,
-									  KDS_FORMAT_ROW);
-	}
-
-	/*
-	 * workload specific callback routines
-	 */
-	if ((pts->xpu_task_flags & DEVTASK__SCAN) != 0)
-	{
-		pts->cb_final_chunk = pgstromExecFinalChunk;
-	}
-	else if ((pts->xpu_task_flags & DEVTASK__JOIN) != 0)
-	{
-		pts->cb_final_chunk = pgstromExecFinalChunk;
-	}
-	else if ((pts->xpu_task_flags & DEVTASK__PREAGG) != 0)
-	{
-		pts->cb_final_chunk = pgstromExecFinalChunk;
-	}
-	else
-		elog(ERROR, "Bug? unknown DEVTASK");
 	/* other fields init */
 	pts->curr_vm_buffer = InvalidBuffer;
 }
@@ -2001,6 +1944,7 @@ pgstromExecEndTaskState(CustomScanState *node)
 {
 	pgstromTaskState   *pts = (pgstromTaskState *)node;
 	pgstromSharedState *ps_state = pts->ps_state;
+	TableScanDesc scan = pts->css.ss.ss_currentScanDesc;
 	ListCell   *lc;
 
 	if (pts->curr_vm_buffer != InvalidBuffer)
@@ -2015,8 +1959,8 @@ pgstromExecEndTaskState(CustomScanState *node)
 		pgstromArrowFdwExecEnd(pts->arrow_state);
 	if (pts->base_slot)
 		ExecDropSingleTupleTableSlot(pts->base_slot);
-	if (pts->css.ss.ss_currentScanDesc)
-		table_endscan(pts->css.ss.ss_currentScanDesc);
+	if (scan)
+		table_endscan(scan);
 	for (int i=0; i < pts->num_rels; i++)
 	{
 		pgstromTaskInnerState *istate = &pts->inners[i];
@@ -2045,23 +1989,68 @@ pgstromExecResetTaskState(CustomScanState *node)
 	pgstromSharedState *ps_state = pts->ps_state;
 	Relation	rel = node->ss.ss_currentRelation;
 	TableScanDesc scan = node->ss.ss_currentScanDesc;
+	ListCell   *lc;
 
+	/* reset connections */
 	if (pts->conn)
 	{
 		xpuClientCloseSession(pts->conn);
 		pts->conn = NULL;
+		if (pts->curr_resp)
+			xpuClientPutResponse(pts->curr_resp);
+		pts->curr_resp = NULL;
+		pts->curr_kds = NULL;
+		pts->curr_chunk = 0;
+		pts->curr_index = 0;
+		pts->scan_done = false;
+		pts->final_done = false;
 	}
-	/* reset status */
+	else
+	{
+		Assert(!pts->curr_resp &&
+			   !pts->curr_kds &&
+			   !pts->curr_chunk &&
+			   !pts->curr_index &&
+			   !pts->scan_done &&
+			   !pts->final_done);
+	}
+	/* reset related stuff */
 	if (pts->br_state)
 		pgstromBrinIndexExecReset(pts);
 	if (pts->arrow_state)
 		pgstromArrowFdwExecReset(pts->arrow_state);
-	if (!scan->rs_parallel)
-		table_rescan(scan, NULL);
-	else
-		table_parallelscan_reinitialize(rel, scan->rs_parallel);
+	if (scan)
+	{
+		if (!scan->rs_parallel)
+			table_rescan(scan, NULL);
+		else
+			table_parallelscan_reinitialize(rel, scan->rs_parallel);
+	}
 	if (ps_state)
+	{
 		pg_atomic_write_u64(&ps_state->scan_block_count, 0);
+		pg_atomic_write_u32(&ps_state->parallel_task_control, 0);
+		for (int i=0; i < ps_state->num_rels; i++)
+		{
+			pgstromSharedInnerState *istate = &ps_state->inners[i];
+
+			pg_atomic_write_u64(&istate->inner_nitems, 0);
+			pg_atomic_write_u64(&istate->inner_usage, 0);
+			pg_atomic_write_u64(&istate->inner_total, 0);
+		}
+		ps_state->preload_phase = 0;
+		ps_state->preload_nr_scanning = 0;
+		ps_state->preload_nr_setup = 0;
+		ps_state->preload_shmem_length = 0;
+	}
+	if (pts->h_kmrels)
+	{
+		__munmapShmem(pts->h_kmrels);
+		pts->h_kmrels = NULL;
+	}
+	/* reset child plans */
+	foreach (lc, pts->css.custom_ps)
+		ExecReScan((PlanState *) lfirst(lc));
 }
 
 /*
@@ -2231,57 +2220,66 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 						ExplainState *es, List *dcontext)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	StringInfoData		buf;
+	StringInfoData buf;
+	int			n_gpus;
+	int			base;
+	uint64		count;
 
 	initStringInfo(&buf);
 	if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) == 0)
-	{
-		appendStringInfo(&buf, "disabled");
-	}
+		appendStringInfo(&buf, "VFS");
 	else
-	{
-		int		base;
-		uint64	count;
+		appendStringInfo(&buf, "GPU-Direct");
 
-		appendStringInfo(&buf, "enabled (N=%d,", get_bitcount(pts->optimal_gpus));
-		base = buf.len;
-		for (int k=0; k <= numGpuDevAttrs; k++)
+	n_gpus = get_bitcount(pts->optimal_gpus);
+	base = buf.len;
+	for (int k=0; k < numGpuDevAttrs; k++)
+	{
+		if ((pts->optimal_gpus & (1UL<<k)) != 0)
 		{
-			if ((pts->optimal_gpus & (1UL<<k)) != 0)
+			if (n_gpus > 1)
 			{
-				appendStringInfo(&buf, "%s%d",
-								 base == buf.len ? "GPU" : ",", k);
+				if (base == buf.len)
+					appendStringInfo(&buf, " with %d GPUs <%d", n_gpus, k);
+				else
+					appendStringInfo(&buf, ",%d", k);
+			}
+			else
+			{
+				appendStringInfo(&buf, " with GPU%d", k);
+				break;
 			}
 		}
-		if (es->analyze && ps_state)
-		{
-			base = buf.len;
+	}
+	if (n_gpus > 1 && buf.len > base)
+		appendStringInfo(&buf, ">");
 
-			count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
-			if (count)
-				appendStringInfo(&buf, "%sbuffer=%lu",
-								 (buf.len > base ? ", " : "; "),
-								 count / PAGES_PER_BLOCK);
-			count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
-			if (count)
-				appendStringInfo(&buf, "%svfs=%lu",
-								 (buf.len > base ? ", " : "; "),
-								 count / PAGES_PER_BLOCK);
-			count = pg_atomic_read_u64(&ps_state->npages_direct_read);
-			if (count)
-				appendStringInfo(&buf, "%sdirect=%lu",
-								 (buf.len > base ? ", " : "; "),
-								 count / PAGES_PER_BLOCK);
-			count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
-			appendStringInfo(&buf, "%sntuples=%lu",
+	if (es->analyze && ps_state)
+	{
+		base = buf.len;
+
+		count = pg_atomic_read_u64(&ps_state->npages_buffer_read);
+		if (count)
+			appendStringInfo(&buf, "%sbuffer=%lu",
 							 (buf.len > base ? ", " : "; "),
-							 count);
-		}
-		appendStringInfo(&buf, ")");
+							 count / PAGES_PER_BLOCK);
+		count = pg_atomic_read_u64(&ps_state->npages_vfs_read);
+		if (count)
+			appendStringInfo(&buf, "%svfs=%lu",
+							 (buf.len > base ? ", " : "; "),
+							 count / PAGES_PER_BLOCK);
+		count = pg_atomic_read_u64(&ps_state->npages_direct_read);
+		if (count)
+			appendStringInfo(&buf, "%sdirect=%lu",
+							 (buf.len > base ? ", " : "; "),
+							 count / PAGES_PER_BLOCK);
+		count = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
+		appendStringInfo(&buf, "%sntuples=%lu",
+						 (buf.len > base ? ", " : "; "),
+						 count);
 	}
 	if (!pgstrom_regression_test_mode)
-		ExplainPropertyText("GPU-Direct SQL", buf.data, es);
-
+		ExplainPropertyText("Scan-Engine", buf.data, es);
 	pfree(buf.data);
 }
 
@@ -2297,7 +2295,6 @@ pgstromExplainTaskState(CustomScanState *node,
 	pgstromSharedState *ps_state = pts->ps_state;
 	pgstromPlanInfo	   *pp_info = pts->pp_info;
 	CustomScan		   *cscan = (CustomScan *)node->ss.ps.plan;
-	bool				verbose = (cscan->custom_plans != NIL);
 	List			   *dcontext;
 	StringInfoData		buf;
 	ListCell		   *lc;
@@ -2306,6 +2303,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	char			   *str;
 	double				ntuples;
 	uint64_t			stat_ntuples = 0;
+	uint64_t			prev_ntuples = 0;
 
 	/* setup deparse context */
 	dcontext = set_deparse_context_plan(es->deparse_cxt,
@@ -2326,7 +2324,7 @@ pgstromExplainTaskState(CustomScanState *node,
 
 		if (tle->resjunk)
 			continue;
-		str = deparse_expression((Node *)tle->expr, dcontext, verbose, true);
+		str = deparse_expression((Node *)tle->expr, dcontext, es->verbose, true);
 		if (buf.len > 0)
 			appendStringInfoString(&buf, ", ");
 		appendStringInfoString(&buf, str);
@@ -2338,7 +2336,8 @@ pgstromExplainTaskState(CustomScanState *node,
 	/* Pinned Inner Buffer */
 	if ((pts->xpu_task_flags & (DEVTASK__PINNED_HASH_RESULTS |
 								DEVTASK__PINNED_ROW_RESULTS)) != 0 &&
-		(pts->xpu_task_flags & DEVTASK__PREAGG) == 0)
+		(pts->xpu_task_flags & DEVTASK__PREAGG) == 0 &&				/* GPU-Join/Scan */
+		(pts->xpu_task_flags & DEVTASK__MERGE_FINAL_BUFFER) == 0)	/* not GPU-Sort */
 	{
 		resetStringInfo(&buf);
 		if (!es->analyze)
@@ -2350,11 +2349,18 @@ pgstromExplainTaskState(CustomScanState *node,
 			uint64_t	final_nitems = pg_atomic_read_u64(&ps_state->final_nitems);
 			uint64_t	final_usage  = pg_atomic_read_u64(&ps_state->final_usage);
 			uint64_t	final_total  = pg_atomic_read_u64(&ps_state->final_total);
-			
+
 			appendStringInfo(&buf, "nitems: %lu, usage: %s, total: %s",
 							 final_nitems,
 							 format_bytesz(final_usage),
 							 format_bytesz(final_total));
+			if (ps_state)
+			{
+				uint32_t	num_partitions
+					= pg_atomic_read_u32(&ps_state->pinned_buffer_divisor);
+				if (num_partitions > 0)
+					appendStringInfo(&buf, ", num-partitions: %d", num_partitions);
+			}
 		}
 		snprintf(label, sizeof(label),
 				 "%s Pinned Buffer", xpu_label);
@@ -2363,7 +2369,10 @@ pgstromExplainTaskState(CustomScanState *node,
 
 	/* xPU Scan Quals */
 	if (ps_state)
+	{
 		stat_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_in);
+		prev_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
+	}
 	if (pp_info->scan_quals)
 	{
 		List   *scan_quals = pp_info->scan_quals;
@@ -2374,25 +2383,25 @@ pgstromExplainTaskState(CustomScanState *node,
 			expr = make_andclause(scan_quals);
 		else
 			expr = linitial(scan_quals);
-		str = deparse_expression((Node *)expr, dcontext, verbose, true);
+		str = deparse_expression((Node *)expr, dcontext, es->verbose, true);
 		appendStringInfoString(&buf, str);
-		if (!es->analyze)
+		if (es->analyze || es->costs)
 		{
-			appendStringInfo(&buf, " [rows: %.0f -> %.0f]",
-							 pp_info->scan_tuples,
-							 pp_info->scan_nrows);
-		}
-		else
-		{
-			uint64_t		prev_ntuples = 0;
-
-			if (ps_state)
-				prev_ntuples = pg_atomic_read_u64(&ps_state->source_ntuples_raw);
-			appendStringInfo(&buf, " [plan: %.0f -> %.0f, exec: %lu -> %lu]",
-							 pp_info->scan_tuples,
-							 pp_info->scan_nrows,
-							 prev_ntuples,
-							 stat_ntuples);
+			appendStringInfoString(&buf, " [");
+			if (es->costs)
+			{
+				appendStringInfo(&buf, "plan: %.0f -> %.0f",
+								 pp_info->scan_tuples,
+								 pp_info->scan_nrows);
+			}
+			if (ps_state && es->analyze)
+			{
+				appendStringInfo(&buf, "%sexec: %lu -> %lu",
+								 es->costs ? ", " : "",
+								 prev_ntuples,
+								 stat_ntuples);
+			}
+			appendStringInfoString(&buf, "]");
 		}
 		snprintf(label, sizeof(label), "%s Scan Quals", xpu_label);
 		ExplainPropertyText(label, buf.data, es);
@@ -2414,7 +2423,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			{
 				Node   *expr = lfirst(lc);
 
-				str = deparse_expression(expr, dcontext, verbose, true);
+				str = deparse_expression(expr, dcontext, es->verbose, true);
 				if (buf.len > 0)
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, str);
@@ -2425,42 +2434,45 @@ pgstromExplainTaskState(CustomScanState *node,
 				{
 					Node   *expr = lfirst(lc);
 
-					str = deparse_expression(expr, dcontext, verbose, true);
+					str = deparse_expression(expr, dcontext, es->verbose, true);
 					if (buf.len > 0)
 						appendStringInfoString(&buf, ", ");
 					appendStringInfo(&buf, "[%s]", str);
 				}
 			}
-			if (!es->analyze || !ps_state)
+			if (es->analyze || es->costs)
 			{
-				appendStringInfo(&buf, " ... [nrows: %.0f -> %.0f]",
-								 ntuples, pp_inner->join_nrows);
-			}
-			else
-			{
-				uint64_t	next_ntuples;
-				uint64_t	roj_ntuples;
-
-				next_ntuples = pg_atomic_read_u64(&ps_state->inners[i].stats_join);
-				roj_ntuples = pg_atomic_read_u64(&ps_state->inners[i].stats_roj);
-				if (roj_ntuples == 0)
+				appendStringInfoString(&buf, " [");
+				if (es->costs)
 				{
-					appendStringInfo(&buf,
-									 " ... [plan: %.0f -> %.0f, exec: %lu -> %lu]",
-									 ntuples, pp_inner->join_nrows,
-									 stat_ntuples,
-									 next_ntuples);
+					appendStringInfo(&buf, "plan: %.0f -> %.0f",
+									 ntuples,
+									 pp_inner->join_nrows);
 				}
-				else
+				if (ps_state && es->analyze)
 				{
-					appendStringInfo(&buf,
-									 " ... [plan: %.0f -> %.0f, exec: %lu+%lu -> %lu]",
-									 ntuples, pp_inner->join_nrows,
-									 stat_ntuples,
-									 roj_ntuples,
-									 next_ntuples);
+					uint64_t	next_ntuples
+						= pg_atomic_read_u64(&ps_state->inners[i].stats_join);
+					uint64_t	roj_ntuples
+						= pg_atomic_read_u64(&ps_state->inners[i].stats_roj);
+					if (roj_ntuples == 0)
+					{
+						appendStringInfo(&buf, "%sexec: %lu -> %lu",
+										 es->costs ? ", " : "",
+										 stat_ntuples,
+										 next_ntuples);
+					}
+					else
+					{
+						appendStringInfo(&buf, "%sexec: %lu+%lu -> %lu",
+										 es->costs ? ", " : "",
+										 stat_ntuples,
+										 roj_ntuples,
+										 next_ntuples);
+					}
+					stat_ntuples = next_ntuples;
 				}
-				stat_ntuples = next_ntuples;
+				appendStringInfoString(&buf, "]");
 			}
 			switch (pp_inner->join_type)
 			{
@@ -2485,7 +2497,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			{
 				Node   *expr = lfirst(lc);
 
-				str = deparse_expression(expr, dcontext, verbose, true);
+				str = deparse_expression(expr, dcontext, es->verbose, true);
 				if (buf.len > 0)
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, str);
@@ -2501,7 +2513,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			{
 				Node   *expr = lfirst(lc);
 
-				str = deparse_expression(expr, dcontext, verbose, true);
+				str = deparse_expression(expr, dcontext, es->verbose, true);
 				if (buf.len > 0)
 					appendStringInfoString(&buf, ", ");
 				appendStringInfoString(&buf, str);
@@ -2518,7 +2530,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			resetStringInfo(&buf);
 
 			str = deparse_expression((Node *)pp_inner->gist_clause,
-									 dcontext, verbose, true);
+									 dcontext, es->verbose, true);
 			appendStringInfoString(&buf, str);
 			if (idxname && colname)
 				appendStringInfo(&buf, " on %s (%s)", idxname, colname);
@@ -2532,6 +2544,9 @@ pgstromExplainTaskState(CustomScanState *node,
 			ExplainPropertyText(label, buf.data, es);
 		}
 	}
+	if (ps_state && ps_state->preload_shmem_length > 0)
+		ExplainPropertyText("GpuJoin buffer usage",
+							format_bytesz(ps_state->preload_shmem_length), es);
 	if (pp_info->sibling_param_id >= 0)
 		ExplainPropertyInteger("Inner Siblings-Id", NULL,
 							   pp_info->sibling_param_id, es);
@@ -2554,7 +2569,7 @@ pgstromExplainTaskState(CustomScanState *node,
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
 			str = deparse_expression((Node *)tle->expr,
-									 dcontext, verbose, true);
+									 dcontext, es->verbose, true);
 			appendStringInfoString(&buf, str);
 		}
 		snprintf(label, sizeof(label),
@@ -2606,11 +2621,6 @@ pgstromExplainTaskState(CustomScanState *node,
 		/* GPU-Cache */
 		pgstromGpuCacheExplain(pts, es, dcontext);
 	}
-	else if ((pts->xpu_task_flags & DEVTASK__USED_GPUDIRECT) != 0)
-	{
-		/* GPU-Direct */
-		pgstromGpuDirectExplain(pts, es, dcontext);
-	}
 	else if (pts->ds_entry)
 	{
 		/* DPU-Entry */
@@ -2618,7 +2628,8 @@ pgstromExplainTaskState(CustomScanState *node,
 	}
 	else
 	{
-		/* Normal Heap Storage */
+		/* GPU-Direct or VFS Heap Read */
+		pgstromGpuDirectExplain(pts, es, dcontext);
 	}
 	/* State of BRIN-index */
 	if (pts->br_state)
@@ -2636,7 +2647,7 @@ pgstromExplainTaskState(CustomScanState *node,
 
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
-			str = deparse_expression(sortkey, dcontext, verbose, true);
+			str = deparse_expression(sortkey, dcontext, es->verbose, true);
 			appendStringInfoString(&buf, str);
 		}
 		if (pgstrom_explain_developer_mode)
@@ -2646,6 +2657,59 @@ pgstromExplainTaskState(CustomScanState *node,
 		if (pp_info->gpusort_limit_count > 0)
 			ExplainPropertyInteger("GPU-Sort Limit", NULL,
 								   pp_info->gpusort_limit_count, es);
+		if (pp_info->window_rank_func)
+		{
+			int		keycnt = 0;
+			bool	needs_comma = false;
+
+			resetStringInfo(&buf);
+			switch (pp_info->window_rank_func)
+			{
+				case KSORT_WINDOW_FUNC__ROW_NUMBER:
+					appendStringInfo(&buf, "row_number() over(");
+					break;
+				case KSORT_WINDOW_FUNC__RANK:
+					appendStringInfo(&buf, "rank() over(");
+					break;
+				case KSORT_WINDOW_FUNC__DENSE_RANK:
+					appendStringInfo(&buf, "dense_rank() over(");
+					break;
+				default:
+					appendStringInfo(&buf, "?unknown?() over(");
+					break;
+			}
+			foreach (lc, pp_info->gpusort_keys_expr)
+			{
+				Node   *sortkey = lfirst(lc);
+
+				if (keycnt == 0)
+				{
+					appendStringInfo(&buf, "PARTITION BY");
+					needs_comma = false;
+				}
+				if (keycnt == pp_info->window_partby_nkeys)
+				{
+					appendStringInfo(&buf, " ORDER BY");
+					needs_comma = false;
+				}
+				else if (keycnt >= (pp_info->window_partby_nkeys +
+									pp_info->window_orderby_nkeys))
+				{
+					break;
+				}
+				str = deparse_expression(sortkey,
+										 dcontext,
+										 es->verbose, true);
+				if (needs_comma)
+					appendStringInfoChar(&buf, ',');
+				appendStringInfo(&buf, " %s", str);
+				keycnt++;
+				needs_comma = true;
+			}
+			appendStringInfo(&buf, ") < %u", pp_info->window_rank_limit);
+
+			ExplainPropertyText("Window-Rank Filter", buf.data, es);
+		}
 	}
 
 	/*

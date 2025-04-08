@@ -835,6 +835,8 @@ try_add_xpujoin_simple_path(PlannerInfo *root,
 							   join_rel,
 							   op_leaf,
 							   try_parallel_path);
+	/* try attach GPU-Sorted Path, if any */
+	try_add_sorted_gpujoin_path(root, join_rel, cpath, try_parallel_path);
 	if (!try_parallel_path)
 		add_path(join_rel, &cpath->path);
 	else
@@ -871,7 +873,7 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 	}
 	if (pgstrom_cpu_fallback_elevel < ERROR)
 	{
-		elog(DEBUG1, "gpusort: disabled by pgstrom.cpu_fallback");
+		elog(DEBUG1, "gpusort: disabled by pg_strom.cpu_fallback");
 		return;
 	}
 	if ((pp_info->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0)
@@ -894,7 +896,6 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 		elog(DEBUG1, "gpusort: disabled because no sortable pathkeys");
 		return;		/* no upper sortkeys */
 	}
-
 	/*
 	 * buffer size estimation, because GPU-Sort needs kds_final buffer to save
 	 * the result of GPU-Projection until Bitonic-sorting.
@@ -929,12 +930,17 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 		EquivalenceMember *em;
 		Expr	   *em_expr;
 		devtype_info *dtype;
+		Oid			type_oid;
 		bool		found = false;
 
 		if (list_length(ec->ec_members) != 1 ||
 			ec->ec_sources != NIL ||
 			ec->ec_derives != NIL)
+		{
+			elog(DEBUG1, "gpusort: EquivalenceClass has not a supported form: %s",
+				 nodeToString(ec));
 			return;		/* not supported */
+		}
 
 		/* strip Relabel for equal() comparison */
 		em = (EquivalenceMember *)linitial(ec->ec_members);
@@ -946,10 +952,19 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 									pp_info->xpu_task_flags,
 									pp_info->scan_relid,
 									inner_target_list, NULL))
+		{
+			elog(DEBUG1, "gpusort: expression '%s' is not device executable",
+				 nodeToString(em_expr));
 			return;		/* not supported */
-		dtype = pgstrom_devtype_lookup(exprType((Node *)em_expr));
+		}
+		type_oid = exprType((Node *)em_expr);
+		dtype = pgstrom_devtype_lookup(type_oid);
 		if (!dtype || (dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
+		{
+			elog(DEBUG1, "gpusort: type '%s' has no device executable compare handler",
+				 format_type_be(type_oid));
 			return;		/* not supported */
+		}
 		/* lookup the sorting keys */
 		foreach (lc2, final_target->exprs)
 		{
@@ -964,7 +979,11 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 				if (pk->pk_strategy == BTLessStrategyNumber)
 					kind |= KSORT_KEY_ATTR__ORDER_ASC;
 				else if (pk->pk_strategy != BTLessStrategyNumber)
+				{
+					elog(DEBUG1, "Bug? PathKey has unexpected pk_strategy (%d)",
+						 (int)pk->pk_strategy);
 					return;		/* should not happen */
+				}
 				sortkeys_expr = lappend(sortkeys_expr, f_expr);
 				sortkeys_kind = lappend_int(sortkeys_kind, kind);
 				found = true;
@@ -972,7 +991,11 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 			}
 		}
 		if (!found)
+		{
+			elog(DEBUG1, "gpusort: sortkey '%s' was not found on the final targetlist",
+				 nodeToString(em_expr));
 			return;		/* not found */
+		}
 	}
 	/* duplicate GpuScan/GpuJoin path and attach GPU-Sort */
 	gpusort_cost = (2.0 * pgstrom_gpu_operator_cost *
@@ -980,6 +1003,8 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 					LOG2(cpath->path.rows));
 	cpath = (CustomPath *)pgstrom_copy_pathnode(&cpath->path);
 	pp_info = copy_pgstrom_plan_info(pp_info);
+	pp_info->xpu_task_flags |= (DEVTASK__PINNED_ROW_RESULTS |
+								DEVTASK__MERGE_FINAL_BUFFER);
 	pp_info->gpusort_keys_expr = sortkeys_expr;
 	pp_info->gpusort_keys_kind = sortkeys_kind;
 	linitial(cpath->custom_private) = pp_info;
@@ -2293,6 +2318,7 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 												  parts[divisor]));
 		if (h_kmrels)
 		{
+			PlanState  *__inner_ps = pts->inners[largest_depth-1].ps;
 			kern_buffer_partitions *kbuf_parts = (kern_buffer_partitions *)
 				((char *)h_kmrels + offset);
 
@@ -2341,6 +2367,16 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 				elog(NOTICE, "partition-%d (GPUs: %08lx)", k, kbuf_parts->parts[k].available_gpus);
 			/* offset to the partition descriptor */
 			h_kmrels->kbuf_part_offset = offset;
+			/* record partition size for EXPLAIN output */
+			if (pgstrom_is_gpuscan_state(__inner_ps) ||
+				pgstrom_is_gpujoin_state(__inner_ps))
+			{
+				pgstromTaskState   *inner_pts = (pgstromTaskState *)__inner_ps;
+				pgstromSharedState *inner_ps_state = inner_pts->ps_state;
+				if (inner_ps_state)
+					pg_atomic_fetch_add_u32(&inner_ps_state->pinned_buffer_divisor,
+											kbuf_parts->hash_divisor);
+			}
 		}
 		return kbuf_parts_sz;
 	}

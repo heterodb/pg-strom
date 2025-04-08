@@ -57,13 +57,17 @@
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#gpu">GPUオフロードの確認</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#pg-strom">PG-Stromの有効化/無効化</a>
+    </li>
     <li class="toctree-l2"><a class="reference internal" href="#cpugpu">CPU+GPUハイブリッド並列</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#_2">下位プランの引き上げ</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_2">並列度の指定</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#gpujoininner-pinned-buffer">GpuJoinにおけるInner Pinned Buffer</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_3">下位プランの統合</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#_3">ナレッジベース</a>
+    <li class="toctree-l2"><a class="reference internal" href="#_4">固有ログの出力</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#_5">ナレッジベース</a>
     </li>
     </ul>
                   </li>
@@ -72,6 +76,8 @@
                   <li class="toctree-l1"><a class="reference internal" href="../partition/">パーティション</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpusort/">GPUソート</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
                   </li>
@@ -83,6 +89,8 @@
                   <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pinned_buffer/">Pinned Inner Buffer</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
                   </li>
@@ -100,6 +108,8 @@
               </ul>
               <p class="caption"><span class="caption-text">リリースノート</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v6.0/">PG-Strom v6.0</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
@@ -144,207 +154,328 @@
 <p>クエリがGPUで実行されるかどうかを確認するには<code>EXPLAIN</code>コマンドを使用します。
 SQL処理は内部的にいくつかの要素に分解され処理されますが、PG-StromがGPUを適用して並列処理を行うのはSCAN、JOIN、GROUP BYの各ワークロードです。標準でPostgreSQLが提供している各処理の代わりに、GpuScan、GpuJoin、GpuPreAggが表示された場合、そのクエリはGPUによって処理される事となります。</p>
 <p>以下は<code>EXPLAIN</code>コマンドの実行例です。</p>
-<pre><code>postgres=# EXPLAIN SELECT cat,count(*),avg(ax)
-                     FROM t0 NATURAL JOIN t1 NATURAL JOIN t2
-                    GROUP BY cat;
-                                  QUERY PLAN
---------------------------------------------------------------------------------
- GroupAggregate  (cost=989186.82..989190.94 rows=27 width=20)
-   Group Key: t0.cat
-   -&gt;  Sort  (cost=989186.82..989187.29 rows=189 width=44)
-         Sort Key: t0.cat
-         -&gt;  Custom Scan (GpuPreAgg)  (cost=989175.89..989179.67 rows=189 width=44)
-               Reduction: Local
-               GPU Projection: cat, pgstrom.nrows(), pgstrom.nrows((ax IS NOT NULL)), pgstrom.psum(ax)
-               Combined GpuJoin: enabled
-               -&gt;  Custom Scan (GpuJoin) on t0  (cost=14744.40..875804.46 rows=99996736 width=12)
-                     GPU Projection: t0.cat, t1.ax
-                     Outer Scan: t0  (cost=0.00..1833360.36 rows=99996736 width=12)
-                     Depth 1: GpuHashJoin  (nrows 99996736...99996736)
-                              HashKeys: t0.aid
-                              JoinQuals: (t0.aid = t1.aid)
-                              KDS-Hash (size: 10.39MB)
-                     Depth 2: GpuHashJoin  (nrows 99996736...99996736)
-                              HashKeys: t0.bid
-                              JoinQuals: (t0.bid = t2.bid)
-                              KDS-Hash (size: 10.78MB)
-                     -&gt;  Seq Scan on t1  (cost=0.00..1972.85 rows=103785 width=12)
-                     -&gt;  Seq Scan on t2  (cost=0.00..1935.00 rows=100000 width=4)
-(21 rows)
+<pre><code>=# explain
+    select sum(lo_revenue), d_year, p_brand1
+      from lineorder, date1, part, supplier
+     where lo_orderdate = d_datekey
+       and lo_partkey = p_partkey
+       and lo_suppkey = s_suppkey
+       and p_brand1 between 'MFGR#2221' and 'MFGR#2228'
+       and s_region = 'ASIA'
+     group by d_year, p_brand1;
+                                           QUERY PLAN
+-------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=2924539.01..2924612.42 rows=5873 width=46)
+   Group Key: date1.d_year, part.p_brand1
+   -&gt;  Custom Scan (GpuPreAgg) on lineorder  (cost=2924421.55..2924494.96 rows=5873 width=46)
+         GPU Projection: pgstrom.psum(lo_revenue), d_year, p_brand1
+         GPU Join Quals [1]: (lo_partkey = p_partkey) [plan: 600046000 -&gt; 783060 ]
+         GPU Outer Hash [1]: lo_partkey
+         GPU Inner Hash [1]: p_partkey
+         GPU Join Quals [2]: (lo_suppkey = s_suppkey) [plan: 783060 -&gt; 157695 ]
+         GPU Outer Hash [2]: lo_suppkey
+         GPU Inner Hash [2]: s_suppkey
+         GPU Join Quals [3]: (lo_orderdate = d_datekey) [plan: 157695 -&gt; 157695 ]
+         GPU Outer Hash [3]: lo_orderdate
+         GPU Inner Hash [3]: d_datekey
+         GPU Group Key: d_year, p_brand1
+         Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+         -&gt;  Seq Scan on part  (cost=0.00..41481.00 rows=1827 width=14)
+               Filter: ((p_brand1 &gt;= 'MFGR#2221'::bpchar) AND (p_brand1 &lt;= 'MFGR#2228'::bpchar))
+         -&gt;  Custom Scan (GpuScan) on supplier  (cost=100.00..19001.67 rows=203767 width=6)
+               GPU Projection: s_suppkey
+               GPU Scan Quals: (s_region = 'ASIA'::bpchar) [plan: 1000000 -&gt; 203767]
+               Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+         -&gt;  Seq Scan on date1  (cost=0.00..72.56 rows=2556 width=8)
+(22 rows)
 </code></pre>
 <p>実行計画の中に見慣れない処理が含まれている事に気が付かれたでしょう。
-CustomScan機構を用いてGpuJoinおよびGpuPreAggが実装されています。ここでGpuJoinは<code>t0</code>と<code>t1</code>、および<code>t2</code>とのJOIN処理を実行し、その結果を受け取るGpuPreAggは列<code>cat</code>によるGROUP BY処理をGPUで実行します。</p>
+CustomScan機構を用いてGpuJoinおよびGpuPreAggが実装されています。ここでGpuJoinは<code>lineorder</code>と<code>date1</code>、<code>part</code>および<code>supplier</code>とのJOIN処理を実行し、その結果を受け取るGpuPreAggは列<code>d_year</code>と<code>p_brand1</code>によるGROUP BY処理をGPUで実行します。</p>
 <p>PostgreSQLがクエリ実行計画を構築する過程でPG-Stromはオプティマイザに介入し、SCAN、JOIN、GROUP BYの各ワークロードをGPUで実行可能である場合、そのコストを算出してPostgreSQLのオプティマイザに実行計画の候補を提示します。
 推定されたコスト値がCPUで実行する他の実行計画よりも小さな値である場合、GPUを用いた代替の実行計画が採用される事になります。</p>
 <p>ワークロードをGPUで実行するためには、少なくとも演算式または関数、および使用されているデータ型がPG-Stromでサポートされている必要があります。
 <code>int</code>や<code>float</code>といった数値型、<code>date</code>や<code>timestamp</code>といった日付時刻型、<code>text</code>のような文字列型がサポートされており、また、四則演算や大小比較といった数多くのビルトイン演算子がサポートされています。
 詳細な一覧に関しては<a href="../ref_devfuncs/">リファレンス</a>を参照してください。</p>
+<h2 id="pg-strom">PG-Stromの有効化/無効化</h2>
+<p>PG-Stromはユーザから与えられたSQLを解析し、それがGPUで実行できる場合には、WHERE句やJOIN検索条件に該当する命令コードを生成して透過的にGPUで実行します。</p>
+<p>これらのプロセスは自動的に行われますが、以下のコマンドによって明示的にPG-Stromを無効化し、オリジナルのPostgreSQLと同じように動作させる事もできます。</p>
+<pre><code>=# set pg_strom.enabled = off;
+SET
+</code></pre>
+<p>これ以外にも、以下のパラメータを用いて個別の機能単位で有効/無効を切り替える事ができます。</p>
+<ul>
+<li><code>pg_strom.enable_gpuscan</code></li>
+<li><code>pg_strom.enable_gpujoin</code></li>
+<li><code>pg_strom.enable_gpuhashjoin</code></li>
+<li><code>pg_strom.enable_gpugistindex</code></li>
+<li><code>pg_strom.enable_gpupreagg</code></li>
+<li><code>pg_strom.enable_gpusort</code></li>
+<li><code>pg_strom.enable_brin</code></li>
+<li><code>pg_strom.enable_partitionwise_gpujoin</code></li>
+<li><code>pg_strom.enable_partitionwise_gpupreagg</code></li>
+</ul>
 <h2 id="cpugpu">CPU+GPUハイブリッド並列</h2>
 <p>PG-StromはPostgreSQLのCPU並列実行に対応しています。</p>
 <p>PostgreSQLのCPU並列実行は、Gatherノードがいくつかのバックグラウンドワーカプロセスを起動し、各バックグラウンドワーカが"部分的に"実行したクエリの結果を後で結合する形で実装されています。
 GpuJoinやGpuPreAggといったPG-Stromの処理はバックグラウンドワーカ側での実行に対応しており、個々のプロセスが互いにGPUを使用して処理を進めます。通常、GPUへデータを供給するために個々のCPUコアがバッファをセットアップするための処理速度は、GPUでのSQLワークロードの処理速度に比べてずっと遅いため、CPU並列とGPU並列をハイブリッドで利用する事で処理速度の向上が期待できます。
-ただし、GPUを利用するために必要なCUDAコンテキストは各プロセスごとに作成され、CUDAコンテキストを生成するたびにある程度のGPUリソースが消費されるため、常にCPU並列度が高ければ良いという訳ではありません。</p>
+ただし、GPUを利用するためにはバックグラウンドで動作するPG-Strom GPU Serviceに接続してセッション毎の初期化が必要になりますので、常にCPU並列度が高ければ良いというわけではありません。</p>
 <p>以下の実行計画を見てください。
-Gather以下の実行計画はバックグラウンドワーカーが実行可能なものです。1億行を保持する<code>t0</code>テーブルを4プロセスのバックグラウンドワーカとコーディネータプロセスでスキャンするため、プロセスあたり2000万行をGpuJoinおよびGpuPreAggで処理し、その結果をGatherノードで結合します。</p>
-<pre><code># EXPLAIN SELECT cat,count(*),avg(ax)
-            FROM t0 NATURAL JOIN t1
-           GROUP by cat;
-                                   QUERY PLAN
---------------------------------------------------------------------------------
- GroupAggregate  (cost=955705.47..955720.93 rows=27 width=20)
-   Group Key: t0.cat
-   -&gt;  Sort  (cost=955705.47..955707.36 rows=756 width=44)
-         Sort Key: t0.cat
-         -&gt;  Gather  (cost=955589.95..955669.33 rows=756 width=44)
-               Workers Planned: 4
-               -&gt;  Parallel Custom Scan (GpuPreAgg)  (cost=954589.95..954593.73 rows=189 width=44)
-                     Reduction: Local
-                     GPU Projection: cat, pgstrom.nrows(), pgstrom.nrows((ax IS NOT NULL)), pgstrom.psum(ax)
-                     Combined GpuJoin: enabled
-                     -&gt;  Parallel Custom Scan (GpuJoin) on t0  (cost=27682.82..841218.52 rows=99996736 width=12)
-                           GPU Projection: t0.cat, t1.ax
-                           Outer Scan: t0  (cost=0.00..1083384.84 rows=24999184 width=8)
-                           Depth 1: GpuHashJoin  (nrows 24999184...99996736)
-                                    HashKeys: t0.aid
-                                    JoinQuals: (t0.aid = t1.aid)
-                                    KDS-Hash (size: 10.39MB)
-                           -&gt;  Seq Scan on t1  (cost=0.00..1972.85 rows=103785 width=12)
-(18 rows)
-</code></pre>
-<h2 id="_2">下位プランの引き上げ</h2>
-<p>※本節の内容は有効ではありません。最新の実装を踏まえた書き直しが必要です。</p>
-<p>PG-StromはSCAN、JOIN、GROUP BYの各処理をGPUで実行する事が可能ですが、これに対応するPostgreSQL標準の処理を単純に置き換えただけでは困った事態が発生します。
-SCANが終わった後のデータをいったんホスト側のバッファに書き戻し、次にそれをJOINするために再びGPUへとコピーし、さらにGROUP BYを実行する前に再びホスト側のバッファに書き戻し・・・といった形で、CPUとGPUの間でデータのピンポンが発生してしまうのです。</p>
-<p>これを避けるために、PG-Stromは下位プランを引き上げて一度のGPU Kernelの実行で処理してしまうというモードを持っています。
-以下のパターンで下位プランの引き上げが発生する可能性があります。</p>
-<ul>
-<li>SCAN + JOIN</li>
-<li>SCAN + GROUP BY</li>
-<li>SCAN + JOIN + GROUP BY</li>
-</ul>
-<p><img alt="combined gpu kernel" src="../img/combined-kernel-overview.png" /></p>
-<p>以下の実行計画は、下位プランの引き上げを全く行わないケースです。</p>
-<p>GpuScanの実行結果をGpuJoinが受取り、さらにその実行結果をGpuPreAggが受け取って最終結果を生成する事が分かります。</p>
-<pre><code># EXPLAIN SELECT cat,count(*),avg(ax)
-            FROM t0 NATURAL JOIN t1
-           WHERE aid &lt; bid
-           GROUP BY cat;
-                              QUERY PLAN
-
---------------------------------------------------------------------------------
- GroupAggregate  (cost=1239991.03..1239995.15 rows=27 width=20)
-   Group Key: t0.cat
-   -&gt;  Sort  (cost=1239991.03..1239991.50 rows=189 width=44)
-         Sort Key: t0.cat
-         -&gt;  Custom Scan (GpuPreAgg)  (cost=1239980.10..1239983.88 rows=189 width=44)
-               Reduction: Local
-               GPU Projection: cat, pgstrom.nrows(), pgstrom.nrows((ax IS NOT NULL)), pgstrom.psum(ax)
-               -&gt;  Custom Scan (GpuJoin)  (cost=50776.43..1199522.96 rows=33332245 width=12)
-                     GPU Projection: t0.cat, t1.ax
-                     Depth 1: GpuHashJoin  (nrows 33332245...33332245)
-                              HashKeys: t0.aid
-                              JoinQuals: (t0.aid = t1.aid)
-                              KDS-Hash (size: 10.39MB)
-                     -&gt;  Custom Scan (GpuScan) on t0  (cost=12634.49..1187710.85 rows=33332245 width=8)
-                           GPU Projection: cat, aid
-                           GPU Filter: (aid &lt; bid)
-                     -&gt;  Seq Scan on t1  (cost=0.00..1972.85 rows=103785 width=12)
-(18 rows)
-</code></pre>
-<p>この場合、各実行ステージにおいてGPUとホストバッファの間でデータのピンポンが発生するため、実行効率はよくありません。</p>
-<p>一方、以下の実行計画は、下位ノードの引き上げを行ったものです。</p>
-<pre><code># EXPLAIN ANALYZE SELECT cat,count(*),avg(ax)
-                    FROM t0 NATURAL JOIN t1
-                   WHERE aid &lt; bid
-                   GROUP BY cat;
-                              QUERY PLAN
---------------------------------------------------------------------------------
- GroupAggregate  (cost=903669.50..903673.62 rows=27 width=20)
-                 (actual time=7761.630..7761.644 rows=27 loops=1)
-   Group Key: t0.cat
-   -&gt;  Sort  (cost=903669.50..903669.97 rows=189 width=44)
-             (actual time=7761.621..7761.626 rows=27 loops=1)
-         Sort Key: t0.cat
-         Sort Method: quicksort  Memory: 28kB
-         -&gt;  Custom Scan (GpuPreAgg)  (cost=903658.57..903662.35 rows=189 width=44)
-                                      (actual time=7761.531..7761.540 rows=27 loops=1)
-               Reduction: Local
-               GPU Projection: cat, pgstrom.nrows(), pgstrom.nrows((ax IS NOT NULL)), pgstrom.psum(ax)
-               Combined GpuJoin: enabled
-               -&gt;  Custom Scan (GpuJoin) on t0  (cost=12483.41..863201.43 rows=33332245 width=12)
-                                                (never executed)
-                     GPU Projection: t0.cat, t1.ax
-                     Outer Scan: t0  (cost=12634.49..1187710.85 rows=33332245 width=8)
-                                     (actual time=59.623..5557.052 rows=100000000 loops=1)
-                     Outer Scan Filter: (aid &lt; bid)
-                     Rows Removed by Outer Scan Filter: 50002874
-                     Depth 1: GpuHashJoin  (plan nrows: 33332245...33332245, actual nrows: 49997126...49997126)
-                              HashKeys: t0.aid
-                              JoinQuals: (t0.aid = t1.aid)
-                              KDS-Hash (size plan: 10.39MB, exec: 64.00MB)
-                     -&gt;  Seq Scan on t1  (cost=0.00..1972.85 rows=103785 width=12)
-                                         (actual time=0.013..15.303 rows=100000 loops=1)
- Planning time: 0.506 ms
- Execution time: 8495.391 ms
-(21 rows)
-</code></pre>
-<p>まず、テーブル<code>t0</code>へのスキャンがGpuJoinの実行計画に埋め込まれ、GpuScanが消えている事にお気付きでしょう。
-これはGpuJoinが配下のGpuScanを引き上げ、一体化したGPUカーネル関数でWHERE句の処理も行った事を意味しています。</p>
-<p>加えて奇妙なことに、<code>EXPLAIN ANALYZE</code>の結果にはGpuJoinが(never executed)と表示されています。
-これはGpuPreAggが配下のGpuJoinを引き上げ、一体化したGPUカーネル関数でJOINとGROUP BYを実行した事を意味しています。</p>
-<p>SCAN処理の引き上げは<code>pg_strom.pullup_outer_scan</code>パラメータによって制御できます。
-また、JOIN処理の引き上げは<code>pg_strom.pullup_outer_join</code>パラメータによって制御できます。
-いずれのパラメータもデフォルトでは<code>on</code>に設定されており、通常はこれを無効化する必要はありませんが、トラブル時の問題切り分け手段の一つとして利用する事ができます。</p>
-<h2 id="gpujoininner-pinned-buffer">GpuJoinにおけるInner Pinned Buffer</h2>
-<p>以下の実行計画を見てください。
-PG-Stromがテーブルを結合する際、通常は最もサイズの大きなテーブル（この場合は<code>lineorder</code>で、OUTER表と呼びます）を非同期的に読み込みながら、他のテーブルとの結合処理および集計処理を進めます。
-JOINアルゴリズムの制約上、予めそれ以外のテーブル（この場合は<code>date1</code>、<code>part</code>、<code>supplier</code>で、INNER表と呼びます）をメモリ上に読み出し、またJOINキーのハッシュ値を計算する必要があります。これらのテーブルはOUTER表ほど大きなサイズではないものの、数GBを越えるようなINNERバッファの準備は相応に重い処理となります。</p>
-<p>GpuJoinは通常、PostgreSQLのAPIを通してINNER表を一行ごとに読み出し、そのハッシュ値を計算するとともに共有メモリ上のINNERバッファに書き込みます。GPU-Serviceプロセスは、このINNERバッファをGPUメモリに転送し、そこではじめてOUTER表を読み出してJOIN処理を開始する事ができるようになります。
-INNER表が相応に大きくGPUで実行可能な検索条件を含む場合、以下の実行計画のように、GpuJoinの配下にGpuScanが存在するケースがあり得ます。この場合、INNER表はいったんGpuScanによってGPUで処理された後、その実行結果をCPU側に戻し、さらにINNERバッファに書き込まれた後でもう一度GPUへロードされます。ずいぶんと無駄なデータの流れが存在するように見えます。</p>
+Gather以下の実行計画はバックグラウンドワーカーが実行可能なものです。6億行を保持する<code>lineorder</code>テーブルを2プロセスのバックグラウンドワーカとコーディネータプロセスでスキャンするため、プロセスあたり約2億行をGpuPreAggで処理し、その結果をGatherおよびHashAggregateノードで結合します。</p>
 <pre><code>=# explain
-   select sum(lo_revenue), d_year, p_brand1
-     from lineorder, date1, part, supplier
-    where lo_orderdate = d_datekey
-      and lo_partkey = p_partkey
-      and lo_suppkey = s_suppkey
-      and p_brand1 between 'MFGR#2221' and 'MFGR#2228'
-      and s_region = 'ASIA'
-    group by d_year, p_brand1;
-                                                  QUERY PLAN
----------------------------------------------------------------------------------------------------------------
- GroupAggregate  (cost=31007186.70..31023043.21 rows=6482 width=46)
+select sum(lo_revenue), d_year, p_brand1
+  from lineorder, date1, part, supplier
+  where lo_orderdate = d_datekey
+    and lo_partkey = p_partkey
+    and lo_suppkey = s_suppkey
+    and p_brand1 between
+           'MFGR#2221' and 'MFGR#2228'
+    and s_region = 'ASIA'
+  group by d_year, p_brand1;
+                                                 QUERY PLAN
+-------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=1265644.05..1265717.46 rows=5873 width=46)
    Group Key: date1.d_year, part.p_brand1
-   -&gt;  Sort  (cost=31007186.70..31011130.57 rows=1577548 width=20)
-         Sort Key: date1.d_year, part.p_brand1
-         -&gt;  Custom Scan (GpuJoin) on lineorder  (cost=275086.19..30844784.03 rows=1577548 width=20)
-               GPU Projection: date1.d_year, part.p_brand1, lineorder.lo_revenue
-               GPU Join Quals [1]: (part.p_partkey = lineorder.lo_partkey) ... [nrows: 5994236000 -&gt; 7804495]
-               GPU Outer Hash [1]: lineorder.lo_partkey
-               GPU Inner Hash [1]: part.p_partkey
-               GPU Join Quals [2]: (supplier.s_suppkey = lineorder.lo_suppkey) ... [nrows: 7804495 -&gt; 1577548]
-               GPU Outer Hash [2]: lineorder.lo_suppkey
-               GPU Inner Hash [2]: supplier.s_suppkey
-               GPU Join Quals [3]: (date1.d_datekey = lineorder.lo_orderdate) ... [nrows: 1577548 -&gt; 1577548]
-               GPU Outer Hash [3]: lineorder.lo_orderdate
-               GPU Inner Hash [3]: date1.d_datekey
-               GPU-Direct SQL: enabled (GPU-0)
-               -&gt;  Seq Scan on part  (cost=0.00..59258.00 rows=2604 width=14)
+   -&gt;  Gather  (cost=1264982.11..1265600.00 rows=5873 width=46)
+         Workers Planned: 2
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on lineorder  (cost=1263982.11..1264012.70 rows=5873 width=46)
+               GPU Projection: pgstrom.psum(lo_revenue), d_year, p_brand1
+               GPU Join Quals [1]: (lo_partkey = p_partkey) [plan: 250019100 -&gt; 326275 ]
+               GPU Outer Hash [1]: lo_partkey
+               GPU Inner Hash [1]: p_partkey
+               GPU Join Quals [2]: (lo_suppkey = s_suppkey) [plan: 326275 -&gt; 65706 ]
+               GPU Outer Hash [2]: lo_suppkey
+               GPU Inner Hash [2]: s_suppkey
+               GPU Join Quals [3]: (lo_orderdate = d_datekey) [plan: 65706 -&gt; 65706 ]
+               GPU Outer Hash [3]: lo_orderdate
+               GPU Inner Hash [3]: d_datekey
+               GPU Group Key: d_year, p_brand1
+               Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+               -&gt;  Parallel Seq Scan on part  (cost=0.00..29231.00 rows=761 width=14)
                      Filter: ((p_brand1 &gt;= 'MFGR#2221'::bpchar) AND (p_brand1 &lt;= 'MFGR#2228'::bpchar))
-               -&gt;  Custom Scan (GpuScan) on supplier  (cost=100.00..190348.83 rows=2019384 width=6)
+               -&gt;  Parallel Custom Scan (GpuScan) on supplier  (cost=100.00..8002.40 rows=84903 width=6)
                      GPU Projection: s_suppkey
-                     GPU Pinned Buffer: enabled
-                     GPU Scan Quals: (s_region = 'ASIA'::bpchar) [rows: 9990357 -&gt; 2019384]
-                     GPU-Direct SQL: enabled (GPU-0)
-               -&gt;  Seq Scan on date1  (cost=0.00..72.56 rows=2556 width=8)
+                     GPU Scan Quals: (s_region = 'ASIA'::bpchar) [plan: 1000000 -&gt; 84903]
+                     Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+               -&gt;  Parallel Seq Scan on date1  (cost=0.00..62.04 rows=1504 width=8)
 (24 rows)
 </code></pre>
-<p>このように、INNER表の読出しやINNERバッファの構築の際にCPUとGPUの間でデータのピンポンが発生する場合、<strong><em>Pinned Inner Buffer</em></strong>を使用するよう設定する事で、GpuJoinの実行開始リードタイムの短縮や、メモリ使用量を削減する事ができます。
-上の実行計画では、<code>supplier</code>表の読出しがGpuScanにより行われる事になっており、統計情報によれば約200万行が読み出されると推定されています。その一方で、<code>GPU Pinned Buffer: enabled</code>の出力に注目してください。これは、INNER表の推定サイズが<code>pg_strom.pinned_inner_buffer_threshold</code>の設定値を越える場合、GpuScanの処理結果をそのままGPUメモリに残しておき、それを次のGpuJoinでINNERバッファの一部として利用するという機能です（必要であればハッシュ値の計算もGPUで行います）。
-そのため、<code>supplier</code>表の内容はGPU-Direct SQLによってストレージからGPUへと読み出された後、CPU側に戻されたり、再度GPUへロードされたりすることなく、次のGpuJoinで利用される事になります。</p>
-<p>一方でPinned Inner Bufferの使用には若干のトレードオフもあるため、デフォルトでは無効化されています。
-本機能を使用する場合には、明示的に<code>pg_strom.pinned_inner_buffer_threshold</code>パラメータを設定する必要があります。</p>
-<p>Pinned Inner Bufferを使用した場合、CPU側はINNERバッファの内容を完全には保持していません。そのため、TOAST化された可変長データをGPUで参照した場合など、CPU Fallback処理を行う事ができずエラーを発生させます。また、CPU Fallbackを利用して実装されているRIGHT/FULL OUTER JOINも同様の理由でPinned Inner Bufferと共存する事ができません。</p>
-<h2 id="_3">ナレッジベース</h2>
+<h2 id="_2">並列度の指定</h2>
+<p>PostgreSQLにおける並列度とは、あるクエリを実行するために複数のワーカープロセスを用いて並列動作する時のプロセス数です。これは実行計画の上ではGatherノードが起動するプロセス数で、主に<code>max_parallel_workers_per_gather</code>パラメータによって制御する事ができます。</p>
+<p>PG-Stromにおいても、並列ワーカープロセスの存在は重要です。たとえストレージからのデータ読み出しの大半はGPU-Direct SQL機構によって行われるためCPUの負荷は大きくないとはいえ、読み出すべきブロックの可視性をチェックしたり、ダーティなバッファの内容をコピーするのはCPUの仕事です。</p>
+<p>加えて、PG-Stromにはもう一つ処理の並列度を考慮すべきポイントが存在します。それは、GPU-Serviceにおけるワーカースレッドの数です。</p>
+<p><img alt="PG-Strom process model" src="../img/pgstrom_process_model.png" /></p>
+<p>上記の図は、PG-Stromのアーキテクチャを模式的に表したものです。</p>
+<p>クライアントがPostgreSQLに接続すると、各プロセスを統括するpostmasterプロセスは、接続ごとにPostgreSQL Backendプロセスを起動します。このプロセスがクライアントからのSQLを受け取り、場合によってはParallel Workerプロセスの手助けを借りながら、実行計画に基づいてクエリを実行していきます。</p>
+<p>クエリの実行にPG-Stromを用いる場合、これらのプロセスはUNIXドメインソケットを介して常駐プロセスであるPG-Strom GPU Serviceへコネクションを開きます。そして、実行すべき命令コードと、読み出すべきストレージの情報（おおむね64MBのチャンク単位）をペアにしてリクエストを次々と送出します。
+PG-Strom GPU Serviceはマルチスレッド化されており、各ワーカースレッドはこれらのリクエストを受け取ると次々と実行に移していきます。典型的なリクエストの処理は、ストレージの読み出し、GPU Kernelの起動、処理結果の回収と応答リクエストの送出、という流れになっています。
+これらの処理は容易に多重化できるため、例えば、スレッドAがストレージからの読み出しを待機している間にも、スレッドBがGPU Kernelを実行するなど、リソースを遊ばせないために十分な数のスレッドを立ち上げておく事が必要です。</p>
+<p>このワーカースレッドの数を変更するには、<code>pg_strom.max_async_tasks</code>パラメータを使用します。
+GPU 1台につき、このパラメータで指定した数のスレッドが起動してPostgreSQLバックエンド/ワーカープロセスからのリクエストを待ち受けます。</p>
+<pre><code>=# SET pg_strom.max_async_tasks = 24;
+SET
+</code></pre>
+<p>このパラメータの設定は即座に反映され、例えばデフォルトである<code>16</code>から<code>24</code>に増やした場合、各GPUごとに8個のワーカースレッドを追加で起動します。数秒後には以下のようなログが出力されるでしょう。</p>
+<pre><code>LOG:  GPU0 workers - 8 startup, 0 terminate
+LOG:  GPU1 workers - 8 startup, 0 terminate
+</code></pre>
+<h2 id="_3">下位プランの統合</h2>
+<p>PG-StromはSCAN、JOIN、GROUP BY、SORTの各処理をGPUで実行する事が可能ですが、これに対応するPostgreSQL標準の処理を単純に置き換えただけでは困った事態が発生します。
+SCANが終わった後のデータをいったんホスト側のバッファに書き戻し、次にそれをJOINするために再びGPUへとコピーし、さらにGROUP BYを実行する前に再びホスト側のバッファに書き戻し・・・といった形で、CPUとGPUの間でデータのピンポンが発生してしまいます。</p>
+<p>CPUのメモリ上でデータ（行）を交換するのと比較して、CPUとGPUの間はPCI-Eバスで結ばれているため、どうしてもデータ転送には大きなコストが発生してしまいます。これを避けるには、SCAN、JOIN、GROUP BY、SORTといった一連のGPU対応タスクが連続して実行可能である場合には、できる限りGPUメモリ上でデータ交換を行い、CPUへデータを書き戻すのは最小限に留めるべきであるという事です。</p>
+<p><img alt="combined gpu kernel" src="../img/combined-kernel-overview.png" /></p>
+<p>以下の実行計画は、SCAN、JOIN、GROUP BYの複合ワークロードをPostgreSQLで実行する場合のものです。
+最もサイズの大きな<code>lineorder</code>テーブルを軸に、<code>part</code>、<code>supplier</code>、<code>date1</code>の各テーブルをHashJoinを用いて結合し、最後に集計処理を行うAggregateが登場している事が分かります。</p>
+<pre><code>=# explain
+select sum(lo_revenue), d_year, p_brand1
+  from lineorder, date1, part, supplier
+  where lo_orderdate = d_datekey
+    and lo_partkey = p_partkey
+    and lo_suppkey = s_suppkey
+    and p_brand1 between
+           'MFGR#2221' and 'MFGR#2228'
+    and s_region = 'ASIA'
+  group by d_year, p_brand1;
+                                                          QUERY PLAN
+-------------------------------------------------------------------------------------------------------------------------------
+ Finalize HashAggregate  (cost=14892768.98..14892842.39 rows=5873 width=46)
+   Group Key: date1.d_year, part.p_brand1
+   -&gt;  Gather  (cost=14891403.50..14892651.52 rows=11746 width=46)
+         Workers Planned: 2
+         -&gt;  Partial HashAggregate  (cost=14890403.50..14890476.92 rows=5873 width=46)
+               Group Key: date1.d_year, part.p_brand1
+               -&gt;  Hash Join  (cost=52477.64..14889910.71 rows=65706 width=20)
+                     Hash Cond: (lineorder.lo_orderdate = date1.d_datekey)
+                     -&gt;  Parallel Hash Join  (cost=52373.13..14888902.74 rows=65706 width=20)
+                           Hash Cond: (lineorder.lo_suppkey = supplier.s_suppkey)
+                           -&gt;  Parallel Hash Join  (cost=29240.51..14864272.81 rows=326275 width=26)
+                                 Hash Cond: (lineorder.lo_partkey = part.p_partkey)
+                                 -&gt;  Parallel Seq Scan on lineorder  (cost=0.00..13896101.47 rows=250019147 width=20)
+                                 -&gt;  Parallel Hash  (cost=29231.00..29231.00 rows=761 width=14)
+                                       -&gt;  Parallel Seq Scan on part  (cost=0.00..29231.00 rows=761 width=14)
+                                             Filter: ((p_brand1 &gt;= 'MFGR#2221'::bpchar) AND (p_brand1 &lt;= 'MFGR#2228'::bpchar))
+                           -&gt;  Parallel Hash  (cost=22071.33..22071.33 rows=84903 width=6)
+                                 -&gt;  Parallel Seq Scan on supplier  (cost=0.00..22071.33 rows=84903 width=6)
+                                       Filter: (s_region = 'ASIA'::bpchar)
+                     -&gt;  Hash  (cost=72.56..72.56 rows=2556 width=8)
+                           -&gt;  Seq Scan on date1  (cost=0.00..72.56 rows=2556 width=8)
+(21 rows)
+</code></pre>
+<p>一方、PG-Stromを用いた場合はずいぶんと様子が異なります。
+結果の射影処理を行うResultノードの除けば、全ての処理がCustom Scan (GpuPreAgg)で実行されています。
+（※なお、この実行計画では、結果を最大限にシンプルにするため、CPU並列とCPU-Fallbackは無効化しています）</p>
+<p>しかしGPU-PreAggとはいえ、この処理はGROUP BYだけを行っている訳ではありません。
+EXPLAINの出力に付随する各種のパラメータを読むと、このGPU-PreAggは最もサイズの大きな<code>lineorder</code>テーブルをスキャンしつつ、下位ノードで<code>part</code>、<code>supplier</code>、<code>date1</code>テーブルを読み出してこれとJOIN処理を行います。そして<code>d_year</code>と<code>p_brand1</code>によるグループ化そ行った上で、同じキーによるソート処理を行った上で、処理結果をCPUに戻しています。</p>
+<p>PostgreSQLにおいては、複雑なクエリはある程度多くの要素に分解され、数多くの処理ステップを含む実行計画が生成される事が多くなります。
+一方、PG-Stromにおいてもこれらの要素は抜け漏れなく実行されるのですが、できる限り一個のプランに統合された形になっている方が、基本的には効率の良い実行計画であると言えます。</p>
+<pre><code>=# explain
+    select sum(lo_revenue), d_year, p_brand1
+      from lineorder, date1, part, supplier
+     where lo_orderdate = d_datekey
+       and lo_partkey = p_partkey
+       and lo_suppkey = s_suppkey
+       and p_brand1 between 'MFGR#2221' and 'MFGR#2228'
+       and s_region = 'ASIA'
+     group by d_year, p_brand1
+     order by d_year, p_brand1;
+                                           QUERY PLAN
+-------------------------------------------------------------------------------------------------
+ Result  (cost=3111326.30..3111451.10 rows=5873 width=46)
+   -&gt;  Custom Scan (GpuPreAgg) on lineorder  (cost=3111326.30..3111363.01 rows=5873 width=46)
+         GPU Projection: pgstrom.psum(lo_revenue), d_year, p_brand1
+         GPU Join Quals [1]: (lo_partkey = p_partkey) [plan: 600046000 -&gt; 783060 ]
+         GPU Outer Hash [1]: lo_partkey
+         GPU Inner Hash [1]: p_partkey
+         GPU Join Quals [2]: (lo_suppkey = s_suppkey) [plan: 783060 -&gt; 157695 ]
+         GPU Outer Hash [2]: lo_suppkey
+         GPU Inner Hash [2]: s_suppkey
+         GPU Join Quals [3]: (lo_orderdate = d_datekey) [plan: 157695 -&gt; 157695 ]
+         GPU Outer Hash [3]: lo_orderdate
+         GPU Inner Hash [3]: d_datekey
+         GPU Group Key: d_year, p_brand1
+         Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+         GPU-Sort keys: d_year, p_brand1
+         -&gt;  Seq Scan on part  (cost=0.00..41481.00 rows=1827 width=14)
+               Filter: ((p_brand1 &gt;= 'MFGR#2221'::bpchar) AND (p_brand1 &lt;= 'MFGR#2228'::bpchar))
+         -&gt;  Custom Scan (GpuScan) on supplier  (cost=100.00..19156.92 rows=203767 width=6)
+               GPU Projection: s_suppkey
+               GPU Scan Quals: (s_region = 'ASIA'::bpchar) [plan: 1000000 -&gt; 203767]
+               Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+         -&gt;  Seq Scan on date1  (cost=0.00..72.56 rows=2556 width=8)
+(22 rows)
+</code></pre>
+<h2 id="_4">固有ログの出力</h2>
+<p>例えばPG-Stromが期待通りの動作をしない時、それがなぜ期待通りの動作をしないのか探るため、ログの出力は重要です。
+本節では、PG-Stromに固有の情報を出力させるための方法について説明します。</p>
+<p>PG-Stromが与えられたクエリをチェックし、それがGPUで実行できるかどうか、どのような付加機能が利用できるかを評価する際には、ログ出力レベルを<code>DEBUG2</code>まで引き上げてください。</p>
+<p>条件式の中でGPU実行ができないと判定された演算子がデータ型が存在した場合、PG-Stromはその旨をログに出力します。
+以下の例を参照してください。現在のところ、PG-Stromは<code>to_hex()</code>関数のGPU実行をサポートしていないため、WHERE句にこの関数を含んでいる事を理由にCustomScan(GpuScan)の生成を断念しています。</p>
+<pre><code>=# SET client_min_messages = DEBUG2;
+SET
+=# explain select count(*), lo_shipmode from lineorder where to_hex(lo_orderdate) like '%34' group by lo_shipmode;
+DEBUG:  (__codegen_func_expression:1858) function to_hex(integer) is not supported on the target device
+DETAIL:  problematic expression: {OPEXPR :opno 1209 :opfuncid 850 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 100 :args ({FUNCEXPR :funcid 2089 :funcresulttype 25 :funcretset false :funcvariadic false :funcformat 0 :funccollid 100 :inputcollid 0 :args ({VAR :varno 1 :varattno 6 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varnosyn 1 :varattnosyn 6 :location 65}) :location 58} {CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 :constbyval false :constisnull false :location 84 :constvalue 7 [ 28 0 0 0 37 51 52 ]}) :location 79}
+DEBUG:  (__codegen_func_expression:1858) function to_hex(integer) is not supported on the target device
+DETAIL:  problematic expression: {OPEXPR :opno 1209 :opfuncid 850 :opresulttype 16 :opretset false :opcollid 0 :inputcollid 100 :args ({FUNCEXPR :funcid 2089 :funcresulttype 25 :funcretset false :funcvariadic false :funcformat 0 :funccollid 100 :inputcollid 0 :args ({VAR :varno 1 :varattno 6 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varnosyn 1 :varattnosyn 6 :location 65}) :location 58} {CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 :constbyval false :constisnull false :location 84 :constvalue 7 [ 28 0 0 0 37 51 52 ]}) :location 79}
+                                               QUERY PLAN
+---------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=15197201.22..15197203.00 rows=7 width=19)
+   Group Key: lo_shipmode
+   -&gt;  Gather Merge  (cost=15197201.22..15197202.86 rows=14 width=19)
+         Workers Planned: 2
+         -&gt;  Sort  (cost=15196201.20..15196201.22 rows=7 width=19)
+               Sort Key: lo_shipmode
+               -&gt;  Partial HashAggregate  (cost=15196201.03..15196201.10 rows=7 width=19)
+                     Group Key: lo_shipmode
+                     -&gt;  Parallel Seq Scan on lineorder  (cost=0.00..15146197.20 rows=10000766 width=11)
+                           Filter: (to_hex(lo_orderdate) ~~ '%34'::text)
+(10 rows)
+</code></pre>
+<p>出力内容は開発者を想定したものなので、必ずしも分かりやすいとは言い難いですが、<code>to_hex(integer)</code>関数がサポートされていない事が分かります。</p>
+<p>これを参考に、同じ効果を発揮するよう条件句を書き換えます（もちろん、書き換えで対応できない場合もあります）。</p>
+<pre><code>postgres=# explain select count(*), lo_shipmode from lineorder where lo_orderdate % 256 = 34 group by lo_shipmode;
+DEBUG:  gpusort: disabled by pg_strom.cpu_fallback
+DEBUG:  gpusort: disabled by pg_strom.cpu_fallback
+DEBUG:  gpucache: table 'lineorder' is not configured - check row/statement triggers with pgstrom.gpucache_sync_trigger()
+                                                QUERY PLAN
+----------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=1221119.96..1221120.03 rows=7 width=19)
+   Group Key: lo_shipmode
+   -&gt;  Gather  (cost=1221119.19..1221119.93 rows=7 width=19)
+         Workers Planned: 2
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on lineorder  (cost=1220119.19..1220119.23 rows=7 width=19)
+               GPU Projection: pgstrom.nrows(), lo_shipmode
+               GPU Scan Quals: ((lo_orderdate % 256) = 34) [plan: 600046000 -&gt; 1250096]
+               GPU Group Key: lo_shipmode
+               Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+(9 rows)
+</code></pre>
+<p>このように、WHERE句によるフィルタ付きのGPU-PreAggの実行計画が生成されました。</p>
+<p>また付随して、GPU-SortやGPU-Cacheの利用を検討したものの、利用できる条件にない（<code>pg_strom.cpu_fallback</code>が有効になっている）ことや、設定がなされていない（<code>lineorder</code>にはGPU-Cacheの設定がない）ことが分かります。</p>
+<p>このように、WHERE句によるフィルタ付きのGPU-PreAggの実行計画が生成されました。</p>
+<p>また付随して、GPU-SortやGPU-Cacheの利用を検討したものの、利用できる条件にない（<code>pg_strom.cpu_fallback</code>が有効になっている）ことや、設定がなされていない（<code>lineorder</code>にはGPU-Cacheの設定がない）ことが分かります。</p>
+<!--
+
+プラン生成中のパスを出力するための設定も。
+pg_strom.debug_xpujoinpath はやや壊れ気味。
+
+-->
+
+<p>PG-StromがGPU-Direct SQLを利用する際には<code>heterodb-extra</code>拡張モジュールを使用します。</p>
+<p><code>heterodb-extra</code>拡張モジュールに由来するログの出力を制御するには、<code>pg_strom.extra_ereport_level</code>パラメータを使用します。
+設定値の範囲は0～2で、おおむね以下のように分類されています。
+- 0 ... 明確なエラーのみ出力する
+- 1 ... 内部的な条件分岐に関わるログを出力する
+- 2 ... デバッグ用の詳細なメッセージを出力する</p>
+<p>以下の例を見てください。</p>
+<pre><code>=# import foreign schema f_customer from server arrow_fdw into public options (file '/tmp/f_customer.arrow');
+IMPORT FOREIGN SCHEMA
+=# set pg_strom.extra_ereport_level = 1;
+SET
+=# explain select count(*), c_name from f_customer group by c_name;
+                                               QUERY PLAN
+---------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=38597.46..38599.46 rows=200 width=40)
+   Group Key: c_name
+   -&gt;  Gather  (cost=38575.42..38596.46 rows=200 width=40)
+         Workers Planned: 2
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on f_customer  (cost=37575.42..37576.46 rows=200 width=40)
+               GPU Projection: pgstrom.nrows(), c_name
+               GPU Group Key: c_name
+               referenced: c_name
+               file0: /tmp/f_customer.arrow (read: 629.43MB, size: 3404.59MB)
+               Scan-Engine: VFS with 2 GPUs &lt;0,1&gt;
+(10 rows)
+</code></pre>
+<p>このように、<code>/tmp/f_customer.arrow</code>を参照する集計クエリはGPU-Direct SQLを使用できません。</p>
+<p>これはなぜかとログを確認してみると、次のようなメッセージが出力されています。</p>
+<pre><code> LOG:  heterodb-extra: [info] path='/tmp/f_customer.arrow' on 'sdb3 (8,19)' optimal_gpus=00000000 numa_gpus=00000000 system_gpus=00000003 license-validation='-' policy='optimal' (pcie.c:1738)
+ LOG:  [info] foreign-table='f_customer' arrow-file='/tmp/f_customer.arrow' has no schedulable GPUs (arrow_fdw.c:2829)
+</code></pre>
+<p>どうやら、<code>/tmp/f_customer.arrow</code>を配置した<code>/dev/sdb3</code>はNVME-SSDではなく、よってスケジュール可能なGPUも存在しないため、GPU-Direct SQLが発動しないという事が分かりました。
+そこで、<code>/tmp/f_customer.arrow</code>をNVME-SSD上の区画にコピーして再実行します。</p>
+<pre><code>=# import foreign schema f_customer from server arrow_fdw into public options (file '/opt/arrow/f_customer.arrow');
+IMPORT FOREIGN SCHEMA
+=# explain select count(*), c_name from f_customer group by c_name;
+                                               QUERY PLAN
+---------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=38597.46..38599.46 rows=200 width=40)
+   Group Key: c_name
+   -&gt;  Gather  (cost=38575.42..38596.46 rows=200 width=40)
+         Workers Planned: 2
+         -&gt;  Parallel Custom Scan (GpuPreAgg) on f_customer  (cost=37575.42..37576.46 rows=200 width=40)
+               GPU Projection: pgstrom.nrows(), c_name
+               GPU Group Key: c_name
+               referenced: c_name
+               file0: /opt/arrow/f_customer.arrow (read: 629.43MB, size: 3404.59MB)
+               Scan-Engine: GPU-Direct with 2 GPUs &lt;0,1&gt;
+(10 rows)
+</code></pre>
+<p>このように、無事にGPU-Direct SQLを有効にしてGpuPreAggを実行する事ができました。</p>
+<p>なお、ログには以下のように<code>/opt/arrow/mytest.arrow</code>を参照する時に<code>optimal_gpus=00000003 numa_gpus=00000003</code>であり、つまりGPU0とGPU1にスケジュール可能であると出力されています。</p>
+<pre><code> LOG:  heterodb-extra: [info] path='/opt/arrow/mytest.arrow' on 'md127p1 (259,9)' optimal_gpus=00000003 numa_gpus=00000003 system_gpus=00000003 license-validation='Y' policy='optimal' (pcie.c:1738)
+
+</code></pre>
+<h2 id="_5">ナレッジベース</h2>
 <p>PG-Stromプロジェクトのwikiサイトには、ノートと呼ばれる詳細な技術情報が公開されています。</p>
 <p><a href="https://github.com/heterodb/pg-strom/wiki">https://github.com/heterodb/pg-strom/wiki</a></p>
               

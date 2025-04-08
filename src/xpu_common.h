@@ -496,6 +496,7 @@ typedef struct
 		KCXT->kvecs_ndims  = (SESSION)->kcxt_kvecs_ndims;				\
 		KCXT->kvecs_curr_buffer = NULL;									\
 		KCXT->kvecs_curr_id = 0;										\
+		KCXT->groupby_prepfn_bufsz = (SESSION)->groupby_prepfn_bufsz;	\
 		KCXT->kvars_slot = (struct xpu_datum_t **)						\
 			alloca(sizeof(struct xpu_datum_t *) * KCXT->kvars_nslots);	\
 		__vs_desc = SESSION_KVARS_SLOT_DESC(SESSION);					\
@@ -2069,13 +2070,13 @@ typedef struct
 #define DEVTASK__PINNED_ROW_RESULTS	0x00002000U	/* Pinned results in ROW format */
 #define DEVTASK__USED_GPUDIRECT		0x00004000U	/* Task used GPU-Direct SQL */
 #define DEVTASK__USED_GPUCACHE		0x00008000U	/* Task used GPU-Cache */
-#define DEVTASK__PREAGG_FINAL_MERGE	0x00010000U	/* PreAgg final buffer should be merged
-												 * on the xPU device side */
-
+#define DEVTASK__MERGE_FINAL_BUFFER	0x00010000U	/* Final buffer (GPU-PreAgg or pinned
+												 * inner buffer by GPU-Join/Scan) must
+												 * be merged to a single buffer, for
+												 * complete-aggregation or GPU-Sort */
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
 #define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
-#define DEVTASK__SORT				0x80000000U	/* GPU-Sort */
 #define DEVTASK__MASK				0x70000000U	/* mask of avove workloads */
 
 #define TASK_KIND__GPUSCAN		(DEVTASK__SCAN   | DEVKIND__NVIDIA_GPU)
@@ -2315,6 +2316,10 @@ typedef struct
 #define KSORT_KEY_KIND__PCOVAR_REGR_SYY		22
 #define KSORT_KEY_KIND__NITEMS				23
 
+#define KSORT_WINDOW_FUNC__ROW_NUMBER		'n'
+#define KSORT_WINDOW_FUNC__RANK				'r'
+#define KSORT_WINDOW_FUNC__DENSE_RANK		'd'
+
 typedef struct
 {
 	uint16_t	kind;			/* any of KSORT_KEY_KIND__* */
@@ -2450,6 +2455,10 @@ struct kern_expression
 		struct {
 			int			nkeys;
 			bool		needs_finalization;
+			char		window_rank_func;		/* one of KSORT_WINDOW_FUNC__* */
+			uint32_t	window_rank_limit;		/* rank() limit, if any */
+			uint16_t	window_partby_nkeys;	/* # of partition keys */
+			uint16_t	window_orderby_nkeys;	/* # of order-by keys */
 			kern_sortkey_desc desc[1];
 		} sort;		/* Sort */
 		struct {

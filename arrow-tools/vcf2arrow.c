@@ -396,31 +396,38 @@ __preprocess_vcf_fields(int file_index, const char *fname, char **saveptr)
 		!alt    || strcasecmp(alt,    "ALT") != 0 ||
 		!qual   || strcasecmp(qual,   "QUAL") != 0 ||
 		!filter || strcasecmp(filter, "FILTER") != 0 ||
-		!info   || strcasecmp(info,   "INFO") != 0 ||
-		!format || strcasecmp(format, "FORMAT") != 0)
+		!info   || strcasecmp(info,   "INFO") != 0)
 	{
 		Elog("VCF file '%s' corrupted? mandatory fields missing", fname);
 	}
-
-	while ((tok = __strtok(NULL, VCF_WHITESPACE, saveptr)) != NULL)
+	if (format)
 	{
-		if (j == sampleNames_nrooms)
-		{
-			int		new_nrooms = 2 * sampleNames_nrooms + 16;
+		if (strcasecmp(format, "FORMAT") != 0)
+			Elog("VCF file '%s' corrupted? not an expected field [%s]", fname, format);
 
-			for (int k=0; k < input_file_nitems; k++)
+		while ((tok = __strtok(NULL, VCF_WHITESPACE, saveptr)) != NULL)
+		{
+			if (j == sampleNames_nrooms)
 			{
-				sampleNames[k] = (const char **)
-					repalloc(sampleNames[k],
-							 sizeof(const char **) * new_nrooms);
-				for (int i=sampleNames_nrooms; i < new_nrooms; i++)
-					sampleNames[k][i] = NULL;
+				int		new_nrooms = 2 * sampleNames_nrooms + 16;
+
+				for (int k=0; k < input_file_nitems; k++)
+				{
+					sampleNames[k] = (const char **)
+						repalloc(sampleNames[k],
+								 sizeof(const char **) * new_nrooms);
+					for (int i=sampleNames_nrooms; i < new_nrooms; i++)
+						sampleNames[k][i] = NULL;
+				}
+				sampleNames_nrooms = new_nrooms;
 			}
-			sampleNames_nrooms = new_nrooms;
+			sampleNames[file_index][j++] = pstrdup(tok);
 		}
-		sampleNames[file_index][j++] = pstrdup(tok);
+		sampleNames_nitems = Max(sampleNames_nitems, j);
 	}
-	sampleNames_nitems = Max(sampleNames_nitems, j);
+	else if (by_raw_format)
+		Elog("VCF file '%s' has no FORMAT field in spite of --raw-format option", fname);
+		
 }
 
 static void
@@ -858,6 +865,7 @@ convert_vcf_file(int file_index)
 	{
 		char	   *tok, *pos;
 		const char *format = NULL;;
+		bool		meet_format = false;
 		int			anum, j=0;
 		size_t		usage = 0;
 
@@ -874,9 +882,10 @@ convert_vcf_file(int file_index)
 			{
 				usage += sql_field_put_value(&vcf_table->columns[j++], tok, -1);
 			}
-			else if (!format)
+			else if (!meet_format)
 			{
 				format = tok;
+				meet_format = true;
 			}
 			else
 			{

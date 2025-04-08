@@ -48,6 +48,7 @@
 #include "catalog/pg_user_mapping.h"
 #include "catalog/pg_extension.h"
 #include "catalog/pg_namespace.h"
+#include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_tablespace_d.h"
@@ -317,9 +318,14 @@ typedef struct
 	/* gpusort keys */
 	List	   *gpusort_keys_expr;		/* expression list for GpuSort */
 	List	   *gpusort_keys_kind;		/* set of KSORT_KEY_KIND__* for GpuSort */
+	List	   *gpusort_keys_refs;		/* original tleSortGroupRef of the sort-keys */
 	int			gpusort_htup_margin;	/* required margin at the tail of htuple on
 										 * the kds_final buffer for temporary value. */
-	uint32_t	gpusort_limit_count;	/* GPU-Sort + LIMIT clause, if any */
+	int			gpusort_limit_count;	/* GPU-Sort + LIMIT clause, if any */
+	int			window_rank_func;		/* GPU-Sort + Rank() function, if any */
+	int			window_rank_limit;		/* GPU-Sort + Rank() limit, if any */
+  	int			window_partby_nkeys;	/* GPU-Sort + Rank() - # of partition keys */
+	int			window_orderby_nkeys;	/* GPU-Sort + Rank() - # of ordering keys */
 	/* pinned inner buffer stuff */
 	List	   *projection_hashkeys;
 	/* inner relations */
@@ -384,6 +390,7 @@ typedef struct
 	pg_atomic_uint64	final_nitems;		/* # of tuples in final buffer if any */
 	pg_atomic_uint64	final_usage;		/* usage bytes of final buffer if any */
 	pg_atomic_uint64	final_total;		/* total usage of final buffer if any */
+	pg_atomic_uint32	pinned_buffer_divisor; /* # of pinned-inner-buffer partitions */
 	/* for parallel-scan */
 	uint32_t			parallel_scan_desc_offset;
 	/* for arrow_fdw */
@@ -504,8 +511,6 @@ struct pgstromTaskState
 	TupleTableSlot	 *(*cb_next_tuple)(struct pgstromTaskState *pts);
 	XpuCommand		 *(*cb_next_chunk)(struct pgstromTaskState *pts,
 									   struct iovec *xcmd_iov, int *xcmd_iovcnt);
-	XpuCommand		 *(*cb_final_chunk)(struct pgstromTaskState *pts,
-										struct iovec *xcmd_iov, int *xcmd_iovcnt);
 	/* inner relations state (if JOIN) */
 	int					num_rels;
 	pgstromTaskInnerState inners[FLEXIBLE_ARRAY_MEMBER];
@@ -762,6 +767,64 @@ extern bool		pgstrom_init_gpu_device(void);
 typedef struct gpuContext	gpuContext;
 typedef struct gpuClient	gpuClient;
 
+extern bool		isGpuServWorkerThread(void);
+extern void		gpuservLoggerReport(const char *fmt, ...)
+					pg_attribute_printf(1, 2);
+#define __gsLogCxt(LABEL,fmt,...)							\
+	gpuservLoggerReport("%s|LOG|%s|%d|%s|" fmt "\n",		\
+						LABEL,								\
+						__basename(__FILE__),				\
+						__LINE__,							\
+						__FUNCTION__,						\
+						##__VA_ARGS__)
+
+#define __Elog(fmt,...)										\
+	do {													\
+		int		__errno_saved = errno;						\
+		if (isGpuServWorkerThread())						\
+			__gsLogCxt("[error]",fmt,##__VA_ARGS__);		\
+		else												\
+			ereport(LOG,									\
+					(errhidestmt(true),						\
+					 errmsg("[error] " fmt " (%s:%d)",		\
+							##__VA_ARGS__,					\
+							__FILE__, __LINE__)));			\
+		errno = __errno_saved;								\
+	} while(0)
+
+#define __Info(fmt,...)										\
+	do {													\
+		int		__errno_saved = errno;						\
+		if (heterodbExtraEreportLevel() >= 1)				\
+		{													\
+			if (isGpuServWorkerThread())					\
+				__gsLogCxt("[info]",fmt,##__VA_ARGS__);		\
+			else											\
+				ereport(LOG,								\
+						(errhidestmt(true),					\
+						 errmsg("[info] " fmt " (%s:%d)",	\
+								##__VA_ARGS__,				\
+								__FILE__, __LINE__)));		\
+		}													\
+		errno = __errno_saved;								\
+	} while(0)
+#define __Debug(fmt,...)									\
+	do {													\
+		int		__errno_saved = errno;						\
+		if (heterodbExtraEreportLevel() >= 2)				\
+		{													\
+			if (isGpuServWorkerThread())					\
+				__gsLogCxt("[debug]",fmt,##__VA_ARGS__);	\
+			else											\
+				ereport(LOG,								\
+						(errhidestmt(true),					\
+						 errmsg("[debug] " fmt " (%s:%d)",	\
+								##__VA_ARGS__,				\
+								__FILE__, __LINE__)));		\
+		}													\
+		errno = __errno_saved;								\
+	} while(0)
+
 extern int		pgstrom_max_async_tasks(void);
 extern bool		gpuserv_ready_accept(void);
 extern const char *cuStrError(CUresult rc);
@@ -1009,24 +1072,6 @@ extern bool		pathNameMatchByPattern(const char *pathname,
 /*
  * extra.c
  */
-#define __Info(fmt,...)									\
-	do {												\
-		if (heterodbExtraEreportLevel() >= 1)			\
-			ereport(LOG,								\
-					(errhidestmt(true),					\
-					 errmsg("[info] " fmt " (%s:%d)",	\
-							##__VA_ARGS__,				\
-							__FILE__, __LINE__)));		\
-	} while(0)
-#define __Debug(fmt,...)								\
-	do {												\
-		if (heterodbExtraEreportLevel() >= 2)			\
-			ereport(LOG,								\
-					(errhidestmt(true),					\
-					 errmsg("[debug] " fmt " (%s:%d)",	\
-							##__VA_ARGS__,				\
-							__FILE__, __LINE__)));		\
-	} while(0)
 extern void			pgstrom_init_extra(void);
 
 /*
@@ -1056,6 +1101,7 @@ extern List	   *pgstrom_find_op_leafs(PlannerInfo *root,
 									  RelOptInfo *outer_rel,
 									  bool be_parallel,
 									  bool *p_identical_inners);
+extern bool		pgstrom_is_dummy_path(const Path *path);
 extern Path	   *pgstrom_create_dummy_path(PlannerInfo *root, Path *subpath);
 extern void		_PG_init(void);
 

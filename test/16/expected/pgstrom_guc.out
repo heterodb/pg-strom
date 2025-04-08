@@ -71,6 +71,6 @@ SHOW pg_strom.gpu_mempool_min_ratio;
 SHOW pg_strom.gpu_mempool_release_delay;
  5s
 
-SHOW pg_strom.gpuserv_debug_output;
+SHOW pg_strom.explain_developer_mode;
  off
 

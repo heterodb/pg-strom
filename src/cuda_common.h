@@ -133,8 +133,7 @@ typedef struct {
 	uint32_t		kvecs_ndims;	/* number of kvecs buffers for each warp */
 	uint32_t		extra_sz;
 	uint32_t		n_rels;			/* >0, if JOIN is involved */
-	uint32_t		groupby_prepfn_bufsz;
-	uint32_t		groupby_prepfn_nbufs;
+	uint32_t		groupby_prepfn_nbufs;	/* >0, if prep-func buffer is used */
 	/* GPU-task specific read-only properties. */
 	uint32_t		cuda_dindex;
 	uint32_t		cuda_stack_limit;
@@ -329,5 +328,25 @@ typedef struct {
 	uint32_t		nitems;
 	uint32_t		redo_items[1];
 } kern_gpucache_redolog;
+
+/*
+ * GPU-Sort + Window-Rank function control structure
+ *
+ * +-------------------------------+
+ * | Partition-Hash (u32) * NITEMS |
+ * +-------------------------------+
+ * | OrderBy-Hash (u32) * NITEMS   |
+ * +-------------------------------+
+ * | Results Array * (NITEMS +...) |
+ * =                               =
+ * |                               |
+ * +-------------------------------+
+ */
+#define GPUSORT_WINDOWRANK_RESULTS_NROOMS(nitems)						\
+	((nitems) +															\
+	 ((nitems) > (1<<11) ? (((nitems) + ((1<<11)-1)) >> 11) : 0) +		\
+	 ((nitems) > (1<<22) ? (((nitems) + ((1<<22)-1)) >> 22) : 0))
+#define GPUSORT_WINDOWRANK_RESULTS_NSTEPS(nitems)						\
+	((nitems) <= (1<<11) ? 1 : ((nitems) <= (1<<22) ? 3 : 5))
 
 #endif	/* CUDA_COMMON_H */

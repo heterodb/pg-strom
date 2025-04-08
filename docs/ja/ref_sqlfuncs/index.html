@@ -61,6 +61,8 @@
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
                   </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpusort/">GPUソート</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
                   </li>
               </ul>
@@ -71,6 +73,8 @@
                   <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pinned_buffer/">Pinned Inner Buffer</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../fluentd/">Fluentd連携</a>
                   </li>
@@ -100,6 +104,8 @@
               </ul>
               <p class="caption"><span class="caption-text">リリースノート</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v6.0/">PG-Strom v6.0</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
@@ -208,6 +214,96 @@
 <dd>Arrow_FdwのFDWオプション検証用関数です。通常、ユーザがこの関数を使用する必要はありません。</dd>
 <dt><code>event_trigger pgstrom.arrow_fdw_precheck_schema()</code></dt>
 <dd>Arrowファイルのスキーマ定義をチェックするためのイベントトリガ関数です。通常、ユーザがこの関数を使用する必要はありません。</dd>
+<dt><code>text pgstrom.arrow_fdw_check_pattern(text, text)</code></dt>
+<dd>第一引数で与えたファイル名が、第二引数で与えたパターンにマッチするかどうかを検査します。Arrow_Fdwの<code>pattern</code>オプションを用いる場合に、ワイルドカードがどのように働くのかを検査するのに便利です。</dd>
+</dl>
+<pre><code>=# select pgstrom.arrow_fdw_check_pattern('data_202408_tokyo.data', 'data__${region}.data');
+          arrow_fdw_check_pattern
+-------------------------------------------
+ true {@ymd]=[202408], $[region]=[tokyo]}
+(1 row)
+</code></pre>
+<p>上記の例では、ファイル名<code>data_202408_tokyo.data</code>に対して、パターン<code>'data_@ymd_${region}.data'</code>のうち、ワイルドカード<code>に相当する部分が`202408`にマッチし、`${region}`に相当する部分が`tokyo`にマッチしています。
+}
+_${region}.data'` that corresponds to the wildcard</code> matches <code>202408</code>, and the part that corresponds to <code>${region}</code> matches <code>tokyo</code>.
+}</p>
+<dl>
+<dt><code>record pgstrom.arrow_fdw_metadata_info(regclass)</code></dt>
+<dd>Arrowファイルに埋め込まれているメタデータ（CustomMetadata）を表示します。</dd>
+</dl>
+<pre><code>postgres=# select relid, filename, field, key, substring(value, 0, 64) from pgstrom.arrow_fdw_metadata_info('f_lineorder');
+    relid    |              filename               |    field     |     key     |                            substring
+-------------+-------------------------------------+--------------+-------------+-----------------------------------------------------------------
+ f_lineorder | /opt/arrow/f_lineorder_sorted.arrow |              | sql_command | select * from v_lineorder order by lo_orderdate
+ f_lineorder | /opt/arrow/f_lineorder_sorted.arrow | lo_orderdate | min_values  | 19920101,19920102,19920103,19920104,19920105,19920107,19920108,
+ f_lineorder | /opt/arrow/f_lineorder_sorted.arrow | lo_orderdate | max_values  | 19920102,19920103,19920104,19920105,19920107,19920108,19920109,
+(3 rows)
+</code></pre>
+<p>上記の例では、Arrow_Fdw管理下の外部テーブルである<code>f_lineorder</code>に埋め込まれているメタデータ（CustomMetadata）を、それぞれKEY=VALUE形式で出力しています。
+スキーマに埋め込まれたメタデータは<code>field</code>列がNULLとなっています。そうでなければ列名が表示され、この場合、<code>sql_command</code>メタデータがスキーマに埋め込まれ、また、<code>min_values</code>および<code>max_values</code>が<code>lo_orderdate</code>列に埋め込まれている事がわかります。</p>
+<dl>
+<dt><code>json pgstrom.arrow_fdw_metadata_stats()</code></dt>
+<dd>Arrow_Fdwのメタデータキャッシュの統計情報を表示します</dd>
+</dl>
+<p>Arrow_Fdwは何らかの形で一度参照したArrowファイルのメタデータ（スキーマ定義やデータ配置など）を共有メモリ上に記憶しており、次回以降にArrow_Fdw外部テーブルを参照する際の応答性を改善する事ができます。</p>
+<p>この関数は、共有メモリ上のメタデータキャッシュに関する統計情報を表示する事ができます。
+メタデータキャッシュが不足すると、Arrow_Fdw外部テーブルの参照応答性が低下する事がありますので、その場合は<code>arrow_fdw.metadata_cache_size</code>を拡大してメタデータキャッシュを拡大する事が必要になります。</p>
+<pre><code>s=# select pgstrom.arrow_fdw_metadata_stats();
+
+       arrow_fdw_metadata_stats
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ { &quot;total_cache_sz&quot; : 536870912, &quot;total_cache_allocated&quot; : 9568256, &quot;total_cache_usage&quot; : 9354072, &quot;num_file_entries&quot; : 2, &quot;cache_usage_efficiency&quot; : 0.977615, &quot;cache_num_blocks&quot; : 4096, &quot;cache_active_blocks&quot; : 73, &quot;cache_free_blocks&quot; : 4023, &quot;cache_used_ratio&quot; : 0.017822 &quot;last_allocate_timestamp&quot; : &quot;2025-03-29 13:24:44.447&quot; }
+(1 row)
+</code></pre>
+<p>上記の例のように統計情報はJSON形式で表示され、各フィールドの意味は以下の通りです。</p>
+<ul>
+<li>total_cache_sz<ul>
+<li>メタデータキャッシュの総容量（バイト単位）</li>
+</ul>
+</li>
+<li>total_cache_allocated<ul>
+<li>割り当て済みのメタデータキャッシュサイズ（バイト単位）</li>
+</ul>
+</li>
+<li>total_cache_usage<ul>
+<li>使用済みのメタデータキャッシュサイズ（バイト単位）</li>
+</ul>
+</li>
+<li>num_file_entries<ul>
+<li>キャッシュが保持されているArrowファイルの個数</li>
+</ul>
+</li>
+<li>cache_usage_efficiency<ul>
+<li>割り当て済みメタデータキャッシュに占める使用済みメタデータキャッシュの比率</li>
+</ul>
+</li>
+<li>cache_num_blocks<ul>
+<li>メタデータキャッシュのブロック数（128kB単位）</li>
+</ul>
+</li>
+<li>cache_active_blocks<ul>
+<li>割り当て済みのメタデータキャッシュブロック数</li>
+</ul>
+</li>
+<li>cache_free_blocks<ul>
+<li>空いているメタデータキャッシュブロック数</li>
+</ul>
+</li>
+<li>cache_used_ratio<ul>
+<li>割り当て済みのメタデータキャッシュブロックの比率</li>
+</ul>
+</li>
+<li>last_allocate_timestamp<ul>
+<li>最後にメタデータキャッシュを割り当てた時のタイムスタンプ</li>
+</ul>
+</li>
+<li>last_reclaim_timestamp<ul>
+<li>最後にメタデータキャッシュが回収された時のタイムスタンプ</li>
+</ul>
+</li>
+</ul>
+<dl>
 <dt><code>void pgstrom.arrow_fdw_import_file(text, text, text = null)</code></dt>
 <dd>
 <p>Apache Arrow形式ファイルをインポートし、新たに外部テーブル(foreign table)を定義します。第一引数は外部テーブルの名前、第二引数はApache Arrow形式ファイルのパス、省略可能な第三引数はスキーマ名です。</p>

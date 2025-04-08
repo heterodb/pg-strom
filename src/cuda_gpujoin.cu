@@ -22,7 +22,8 @@ kern_buffer_simple_limit(kern_data_store *kds_final, uint64_t old_length)
 	uint32_t	base;
 	__shared__ uint64_t base_usage;
 
-	assert(kds_final->format == KDS_FORMAT_ROW);
+	assert(kds_final->format == KDS_FORMAT_ROW ||
+		   kds_final->format == KDS_FORMAT_HASH);
 	for (base = get_global_base();
 		 base < kds_final->nitems;
 		 base += get_global_size())

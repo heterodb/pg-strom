@@ -61,6 +61,8 @@
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
                   </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../gpusort/">GPUソート</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../troubles/">トラブルシューティング</a>
                   </li>
               </ul>
@@ -71,6 +73,8 @@
                   <li class="toctree-l1"><a class="reference internal" href="../arrow_fdw/">Apache Arrow</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../gpucache/">GPUキャッシュ</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pinned_buffer/">Pinned Inner Buffer</a>
                   </li>
                   <li class="toctree-l1 current"><a class="reference internal current" href="#">Fluentd連携</a>
     <ul class="current">
@@ -104,6 +108,8 @@
               </ul>
               <p class="caption"><span class="caption-text">リリースノート</span></p>
               <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../release_v6.0/">PG-Strom v6.0</a>
+                  </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.2/">PG-Strom v5.2</a>
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../release_v5.1/">PG-Strom v5.1</a>
@@ -156,7 +162,7 @@ Rubyで記述されたプラグインの追加により、ログデータの入�
 <p>PG-Stromが取り扱うことのできるデータ形式は、PostgreSQL Heap形式（トランザクショナル行データ）とApache Arrow形式（構造化列データ）の２種類ですが、IoT/M2M領域で想定されるような、時々刻々と大量のデータが発生するようなワークロードに対しては、Apache Arrow形式を用いた方が合理的です。</p>
 <h2 id="arrow-file">arrow-file プラグイン</h2>
 <p>以下では、Fluentdが収集したログデータをApache Arrow形式ファイルとして出力し、これをPG-Stromで参照するというアプローチについて説明します。
-また、Fluentdのパッケージには、Treasure Data社の提供する安定版<code>td-agent</code>を使用するものとします。</p>
+また、Fluentdのパッケージには、Treasure Data社の提供する安定版<code>fluentd</code>を使用するものとします。</p>
 <p>PG-Stromに同梱のFluentd向けOutputプラグインの<code>fluent-plugin-arrow-file</code>モジュールを利用すると、Fluentdが収集したログデータを、指定したスキーマ構造を持つApache Arrow形式ファイルとして書き出すことができます。PG-StromのArrow_Fdw機能を使用すればこのApache Arrow形式ファイルを外部テーブルとして参照する事ができ、また保存先のストレージが適切に設定されていれば、GPU-Direct SQLを用いた高速な読み出しも可能です。</p>
 <p>この方法には以下のメリットがあります。
 - Fluentd が出力したデータをそのままPG-Stromで読み出せるため、改めてDBへデータをインポートする必要がない。
@@ -172,22 +178,22 @@ Rubyで記述されたプラグインの追加により、ログデータの入�
 <p>arrow-fileプラグインは、<code>tag</code>、<code>time</code>の各フィールドと、<code>record</code>連想配列の各要素（一部を省略することも可能）を列として持つApache Arrow形式ファイルへの書き出しを行います。
 そのため、出力先のファイル名とスキーマ定義情報（連想配列の要素と列/型のマッピング）は必須の設定パラメータです。</p>
 <h2 id="_3">インストール</h2>
-<p>使用しているLinuxディストリビューション用の<code>td-agent</code>パッケージをインストールします。
+<p>使用しているLinuxディストリビューション用の<code>fluentd</code>パッケージをインストールします。
 また、arrow-fileプラグインのインストールには<code>rake-compiler</code>モジュールが必要ですので、予めインストールしておきます。</p>
 <p>詳しくは<a href="https://docs.fluentd.org/installation/install-by-rpm">こちら</a>を参照してください。</p>
-<pre><code>$ curl -L https://toolbelt.treasuredata.com/sh/install-redhat-td-agent4.sh | sh
+<pre><code>$ curl -fsSL https://toolbelt.treasuredata.com/sh/install-redhat-fluent-package5-lts.sh | sh
 
-$ sudo /opt/td-agent/bin/fluent-gem install rake-compiler
+$ sudo /opt/fluent/bin/fluent-gem install rake-compiler
 </code></pre>
 <p>次に、PG-Stromのソースコードをダウンロードし、<code>fluentd</code> ディレクトリ以下の物件をビルドします。</p>
 <pre><code>$ git clone https://github.com/heterodb/pg-strom.git
 $ cd pg-strom/fluentd
-$ make TD_AGENT=1 gem
-$ sudo make TD_AGENT=1 install
+$ make FLUENT=1 gem
+$ sudo make FLUENT=1 install
 </code></pre>
 <p>Fluentdのプラグインがインストールされている事を確認するため、以下のコマンドを実行します。</p>
-<pre><code>$ /opt/td-agent/bin/fluent-gem list | grep arrow
-fluent-plugin-arrow-file (0.2)
+<pre><code>$ /opt/fluent/bin/fluent-gem list | grep arrow
+fluent-plugin-arrow-file (0.3)
 </code></pre>
 <h2 id="_4">設定</h2>
 <p>前述の通り、arrow-fileプラグインを動作させるには、出力先のパス名とスキーマ定義を設定することが最低限必要です。</p>
@@ -331,11 +337,11 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
 <p><code>&lt;source&gt;</code>で<code>/var/log/httpd/access_log</code>をデータソースとして指定しているほか、<code>apache2</code>のParseプラグインを用いて、host, user, time, method, path, code, size, referer, agentの各フィールドを切り出しています。</p>
 <p>これらはarrow-fileプラグインに連想配列として渡され、<code>&lt;match&gt;</code>内の<code>schema_defs</code>には、これらのフィールドに対応するApache Arrowファイルの列定義を記述しています。</p>
 <p>また、ここでは簡単な使用例を示すことが目的ですので、<code>&lt;buffer&gt;</code>タグでチャンクサイズを最大4MB / 200行に縮小し、最大でも10秒でOutputプラグインに渡すよう設定しています。</p>
-<p><code>/etc/td-agent/td-agent.conf</code>の設定例</p>
+<p><code>/etc/fluent/fluentd.conf</code>の設定例</p>
 <pre><code>&lt;source&gt;
   @type tail
   path /var/log/httpd/access_log
-  pos_file /var/log/td-agent/httpd_access.pos
+  pos_file /var/log/fluent/httpd_access.pos
   tag httpd
   format apache2
   &lt;parse&gt;
@@ -357,8 +363,8 @@ arrow-fileプラグインは、Bufferプラグインから渡されるchunkご�
   &lt;/buffer&gt;
 &lt;/match&gt;
 </code></pre>
-<p><code>td-agent</code>を起動します。</p>
-<pre><code>$ sudo systemctl start td-agent
+<p><code>fluentd</code>を起動します。</p>
+<pre><code>$ sudo systemctl start fluentd
 </code></pre>
 <p>以下のように、Apache Httpdのログが <code>path</code> で設定した <code>/tmp/mytest%Y%m%d.%p.arrow</code> が展開された先である <code>/tmp/mytest20220124.3206341.arrow</code> に書き出されています。</p>
 <pre><code>$ arrow2csv /tmp/mytest20220124.3206341.arrow --head --offset 300 --limit 10
@@ -403,7 +409,7 @@ postgres=# EXPLAIN SELECT ts, host, path FROM mytest WHERE code = 404;
             </div>
           </div><footer>
     <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
-        <a href="../gpucache/" class="btn btn-neutral float-left" title="GPUキャッシュ"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../pinned_buffer/" class="btn btn-neutral float-left" title="Pinned Inner Buffer"><span class="icon icon-circle-arrow-left"></span> Previous</a>
         <a href="../ref_types/" class="btn btn-neutral float-right" title="データ型">Next <span class="icon icon-circle-arrow-right"></span></a>
     </div>
 
@@ -427,7 +433,7 @@ postgres=# EXPLAIN SELECT ts, host, path FROM mytest WHERE code = 404;
   <span class="rst-current-version" data-toggle="rst-current-version">
     
     
-      <span><a href="../gpucache/" style="color: #fcfcfc">&laquo; Previous</a></span>
+      <span><a href="../pinned_buffer/" style="color: #fcfcfc">&laquo; Previous</a></span>
     
     
       <span><a href="../ref_types/" style="color: #fcfcfc">Next &raquo;</a></span>

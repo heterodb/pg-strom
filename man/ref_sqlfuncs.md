@@ -73,6 +73,103 @@ postgres=# select * from pgstrom.gpu_device_info limit 10;
 @ja:: Arrowファイルのスキーマ定義をチェックするためのイベントトリガ関数です。通常、ユーザがこの関数を使用する必要はありません。
 @en:: Event trigger function to validate schema definition of Arrow files. Usually, users don't need to invoke this function.
 
+`text pgstrom.arrow_fdw_check_pattern(text, text)`
+@ja:: 第一引数で与えたファイル名が、第二引数で与えたパターンにマッチするかどうかを検査します。Arrow_Fdwの`pattern`オプションを用いる場合に、ワイルドカードがどのように働くのかを検査するのに便利です。
+@en:: Checks whether the file name given in the first argument matches the pattern given in the second argument. This is useful for checking how wildcards work when using the `pattern` option of Arrow_Fdw.
+
+```
+=# select pgstrom.arrow_fdw_check_pattern('data_202408_tokyo.data', 'data_@{ymd}_${region}.data');
+          arrow_fdw_check_pattern
+-------------------------------------------
+ true {@[ymd]=[202408], $[region]=[tokyo]}
+(1 row)
+```
+@ja{
+上記の例では、ファイル名`data_202408_tokyo.data`に対して、パターン`'data_@{ymd}_${region}.data'`のうち、ワイルドカード`@{ymd}`に相当する部分が`202408`にマッチし、`${region}`に相当する部分が`tokyo`にマッチしています。
+}
+@en{
+In the above example, for the file name `data_202408_tokyo.data`, the part of the pattern `'data_@{ymd}_${region}.data'` that corresponds to the wildcard `@{ymd}` matches `202408`, and the part that corresponds to `${region}` matches `tokyo`.
+}
+
+`record pgstrom.arrow_fdw_metadata_info(regclass)`
+@ja:: Arrowファイルに埋め込まれているメタデータ（CustomMetadata）を表示します。
+@en:: Displays the metadata (CustomMetadata) embedded in the supplied Arrow file.
+
+```
+postgres=# select relid, filename, field, key, substring(value, 0, 64) from pgstrom.arrow_fdw_metadata_info('f_lineorder');
+    relid    |              filename               |    field     |     key     |                            substring
+-------------+-------------------------------------+--------------+-------------+-----------------------------------------------------------------
+ f_lineorder | /opt/arrow/f_lineorder_sorted.arrow |              | sql_command | select * from v_lineorder order by lo_orderdate
+ f_lineorder | /opt/arrow/f_lineorder_sorted.arrow | lo_orderdate | min_values  | 19920101,19920102,19920103,19920104,19920105,19920107,19920108,
+ f_lineorder | /opt/arrow/f_lineorder_sorted.arrow | lo_orderdate | max_values  | 19920102,19920103,19920104,19920105,19920107,19920108,19920109,
+(3 rows)
+```
+@ja{
+上記の例では、Arrow_Fdw管理下の外部テーブルである`f_lineorder`に埋め込まれているメタデータ（CustomMetadata）を、それぞれKEY=VALUE形式で出力しています。
+スキーマに埋め込まれたメタデータは`field`列がNULLとなっています。そうでなければ列名が表示され、この場合、`sql_command`メタデータがスキーマに埋め込まれ、また、`min_values`および`max_values`が`lo_orderdate`列に埋め込まれている事がわかります。
+}
+@en{
+In the above example, the metadata (CustomMetadata) embedded in the `f_lineorder` foreign table managed by Arrow_Fdw is output in KEY=VALUE form.
+
+Metadata embedded in the schema has the `field` column set to NULL. Otherwise, the column name is displayed. In this case, you can see that the `sql_command` metadata is embedded in the schema, and the `min_values` and `max_values` are embedded in the `lo_orderdate` column.
+}
+
+`json pgstrom.arrow_fdw_metadata_stats()`
+@ja:: Arrow_Fdwのメタデータキャッシュの統計情報を表示します
+@en:: Displays the statistics of the Arrow_Fdw metadata-cache
+
+@ja{
+Arrow_Fdwは何らかの形で一度参照したArrowファイルのメタデータ（スキーマ定義やデータ配置など）を共有メモリ上に記憶しており、次回以降にArrow_Fdw外部テーブルを参照する際の応答性を改善する事ができます。
+
+この関数は、共有メモリ上のメタデータキャッシュに関する統計情報を表示する事ができます。
+メタデータキャッシュが不足すると、Arrow_Fdw外部テーブルの参照応答性が低下する事がありますので、その場合は`arrow_fdw.metadata_cache_size`を拡大してメタデータキャッシュを拡大する事が必要になります。
+}
+@en{
+Arrow_Fdw somehow remembers the metadata (schema definition, data placement, etc.) of an Arrow file that has been referenced once in shared memory, and can improve responsiveness when referencing an Arrow_Fdw foreign table from the next time onwards.
+
+This function can display statistical information about the metadata cache in shared memory.
+
+If the metadata cache is insufficient, the reference responsiveness of Arrow_Fdw foreign tables may decrease. In that case, it is necessary to enlarge the metadata cache by increasing `arrow_fdw.metadata_cache_size`.
+}
+
+```
+s=# select pgstrom.arrow_fdw_metadata_stats();
+
+       arrow_fdw_metadata_stats
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ { "total_cache_sz" : 536870912, "total_cache_allocated" : 9568256, "total_cache_usage" : 9354072, "num_file_entries" : 2, "cache_usage_efficiency" : 0.977615, "cache_num_blocks" : 4096, "cache_active_blocks" : 73, "cache_free_blocks" : 4023, "cache_used_ratio" : 0.017822 "last_allocate_timestamp" : "2025-03-29 13:24:44.447" }
+(1 row)
+```
+@ja{
+上記の例のように統計情報はJSON形式で表示され、各フィールドの意味は以下の通りです。
+}
+@en{
+As in the example above, the statistics are displayed in JSON format, with the meaning of each field as follows:
+}
+- total_cache_sz
+    - @ja{メタデータキャッシュの総容量（バイト単位）}@en{The total size of the metadata cache (in bytes)}
+- total_cache_allocated
+    - @ja{割り当て済みのメタデータキャッシュサイズ（バイト単位）}@en{Allocated metadata cache size (in bytes)}
+- total_cache_usage
+    - @ja{使用済みのメタデータキャッシュサイズ（バイト単位）}@en{Used metadata cache size (in bytes)}
+- num_file_entries
+    - @ja{キャッシュが保持されているArrowファイルの個数}@en{Number of Arrow files that are cached}
+- cache_usage_efficiency
+    - @ja{割り当て済みメタデータキャッシュに占める使用済みメタデータキャッシュの比率}@en{The ratio of used metadata cache to the allocated metadata cache}
+- cache_num_blocks
+    - @ja{メタデータキャッシュのブロック数（128kB単位）}@en{Number of blocks in the metadata cache (in 128kB units)}
+- cache_active_blocks
+    - @ja{割り当て済みのメタデータキャッシュブロック数}@en{Number of allocated metadata cache blocks}
+- cache_free_blocks
+    - @ja{空いているメタデータキャッシュブロック数}@en{Number of free metadata cache blocks}
+- cache_used_ratio
+    - @ja{割り当て済みのメタデータキャッシュブロックの比率}@en{Percentage of metadata cache blocks allocated}
+- last_allocate_timestamp
+    - @ja{最後にメタデータキャッシュを割り当てた時のタイムスタンプ}@en{The timestamp of the last metadata cache allocation}
+- last_reclaim_timestamp
+    - @ja{最後にメタデータキャッシュが回収された時のタイムスタンプ}@en{The timestamp when the metadata cache was last cleared}
+
 `void pgstrom.arrow_fdw_import_file(text, text, text = null)`
 @ja{
 : Apache Arrow形式ファイルをインポートし、新たに外部テーブル(foreign table)を定義します。第一引数は外部テーブルの名前、第二引数はApache Arrow形式ファイルのパス、省略可能な第三引数はスキーマ名です。

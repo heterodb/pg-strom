@@ -783,6 +783,10 @@ out:
 	return xcmd;
 }
 
+#if 0
+/*
+ * KDS_FORMAT_ROW is no longer used for the outer scan format
+ */
 static bool
 __kds_row_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 {
@@ -934,6 +938,7 @@ pgstromRelScanChunkNormal(pgstromTaskState *pts,
 
 	return xcmd;
 }
+#endif
 
 void
 pgstrom_init_relscan(void)

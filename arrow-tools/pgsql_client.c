@@ -639,7 +639,10 @@ pgsql_setup_composite_type(PGconn *conn,
 		if (index < 1 || index > nfields)
 			Elog("attribute number is out of range");
 		if (arrow_field)
+		{
 			sub_field = &arrow_field->children[index-1];
+			attname = arrow_field->name;	/* keep the original field name */
+		}
 		pgsql_setup_attribute(conn,
 							  root,
 							  &subfields[index-1],
@@ -675,6 +678,7 @@ pgsql_setup_array_element(PGconn *conn,
 	SQLfield	   *element = palloc0(sizeof(SQLfield));
 	PGresult	   *res;
 	char			query[4096];
+	const char	   *attname;
 	const char     *nspname;
 	const char	   *typname;
 	const char	   *typemod;
@@ -735,16 +739,23 @@ pgsql_setup_array_element(PGconn *conn,
 	typelem  = PQgetvalue(res, 0, 8);
 	extname  = (PQgetisnull(res, 0, 9) ? NULL : PQgetvalue(res, 0, 9));
 
-	if (arrow_field)
+	if (!arrow_field)
+	{
+		char   *namebuf = alloca(strlen(attr->field_name) + 2);
+		sprintf(namebuf, "_%s", attr->field_name);
+		attname = namebuf;
+	}
+	else
 	{
 		if (arrow_field->_num_children != 1)
 			Elog("unexpected number of child fields in ArrowField");
 		elem_field = &arrow_field->children[0];
+		attname = elem_field->name;		/* keep the original field name */
 	}
 	pgsql_setup_attribute(conn,
 						  root,
 						  element,
-						  typname,
+						  attname,
 						  typelemid,
 						  atoi(typemod),
 						  atoi(typlen),
@@ -878,8 +889,15 @@ pgsql_create_buffer(PGSTATE *pgstate,
 		extname  = (PQgetisnull(__res, 0, 9) ? NULL : PQgetvalue(__res, 0, 9));
 
 		if (af_info)
+		{
 			arrow_field = &af_info->footer.schema.fields[j];
-
+			if (strcmp(arrow_field->name, attname) != 0)
+			{
+				fprintf(stderr, "Query results field '%s' has incompatible name with Arrow field '%s', keep the original one.\n",
+						attname, arrow_field->name);
+				attname = arrow_field->name;
+			}
+		}
 		pgsql_setup_attribute(conn,
 							  table,
 							  &table->columns[i],

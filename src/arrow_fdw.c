@@ -217,6 +217,12 @@ typedef struct
 	dlist_head	lru_list;
 	dlist_head	free_blocks;	/* list of arrowMetadataCacheBlock */
 	dlist_head	hash_slots[ARROW_METADATA_HASH_NSLOTS];
+	/* statistics */
+	size_t		total_cache_usage;
+	uint32_t	num_active_blocks;
+	uint32_t	num_file_entries;
+	struct timeval tm_last_allocate;
+	struct timeval tm_last_reclaimed;
 } arrowMetadataCacheHead;
 
 /*
@@ -346,6 +352,10 @@ __releaseMetadataCacheBlock(arrowMetadataCacheBlock *mc_block_curr)
 			   !mc_block_curr->chain.prev &&
 			   !mc_block_curr->lru_chain.prev  &&
 			   !mc_block_curr->lru_chain.next);
+		/* update statistics */
+		arrow_metadata_cache->total_cache_usage -= mc_block_curr->usage;
+		arrow_metadata_cache->num_active_blocks--;
+		/* back to the free list */
 		dlist_push_head(&arrow_metadata_cache->free_blocks,
 						&mc_block_curr->chain);
 		mc_block_curr = mc_block_next;
@@ -377,6 +387,9 @@ __reclaimMetadataCacheBlock(void)
 			memset(&mc_block->chain, 0, sizeof(dlist_node));
 
 			__releaseMetadataCacheBlock(mc_block);
+			/* update statistics */
+			arrow_metadata_cache->num_file_entries--;
+			gettimeofday(&arrow_metadata_cache->tm_last_reclaimed, NULL);
 			return true;
 		}
 	}
@@ -398,10 +411,10 @@ __allocMetadataCacheBlock(void)
 	}
 	dnode = dlist_pop_head_node(&arrow_metadata_cache->free_blocks);
 	mc_block = dlist_container(arrowMetadataCacheBlock, chain, dnode);
-	memset(mc_block, 0, offsetof(arrowMetadataCacheBlock,
-								 usage) + sizeof(uint32_t));
-	mc_block->usage = MAXALIGN(offsetof(arrowMetadataCacheBlock,
-										usage) + sizeof(uint32_t));
+	memset(mc_block, 0, offsetof(arrowMetadataCacheBlock, chain));
+	/* update statistics */
+	arrow_metadata_cache->num_active_blocks++;
+	gettimeofday(&arrow_metadata_cache->tm_last_allocate, NULL);
 	return mc_block;
 }
 
@@ -411,10 +424,11 @@ __allocMetadataCacheCommon(arrowMetadataCacheBlock **p_mc_block, size_t sz)
 	arrowMetadataCacheBlock *mc_block = *p_mc_block;
 	char	   *pos;
 
-	if (mc_block->usage + MAXALIGN(sz) > ARROW_METADATA_BLOCKSZ)
+	sz = MAXALIGN(sz);
+	if (mc_block->usage + sz > ARROW_METADATA_BLOCKSZ)
 	{
 		if (offsetof(arrowMetadataCacheBlock,
-					 chain) + MAXALIGN(sz) > ARROW_METADATA_BLOCKSZ)
+					 chain) + sz > ARROW_METADATA_BLOCKSZ)
 			return NULL;	/* too large */
 		mc_block = __allocMetadataCacheBlock();
 		if (!mc_block)
@@ -424,9 +438,13 @@ __allocMetadataCacheCommon(arrowMetadataCacheBlock **p_mc_block, size_t sz)
 		Assert(!(*p_mc_block)->next);
 		(*p_mc_block)->next = mc_block;
 		(*p_mc_block) = mc_block;
+		/* update statistics */
+		arrow_metadata_cache->total_cache_usage += mc_block->usage;
 	}
 	pos = ((char *)mc_block + mc_block->usage);
-	mc_block->usage += MAXALIGN(sz);
+	mc_block->usage += sz;
+	/* update statistics */
+	arrow_metadata_cache->total_cache_usage += sz;
 
 	return pos;
 }
@@ -2252,7 +2270,9 @@ __buildArrowMetadataCacheNoLock(ArrowFileState *af_state,
 			mc_block_head->usage = MAXALIGN(offsetof(arrowMetadataCacheBlock,
 													 mcache_head) +
 											sizeof(arrowMetadataCache));
+			arrow_metadata_cache->total_cache_usage += mc_block_head->usage;
 			mc_block_curr = mc_block_head;
+
 			/* custom-metadata; must be setup after usage assignment */
 			for (int k=0; k < schema->_num_custom_metadata; k++)
 			{
@@ -2318,6 +2338,8 @@ __buildArrowMetadataCacheNoLock(ArrowFileState *af_state,
 	gettimeofday(&mc_block_head->lru_tv, NULL);
 	dlist_push_head(&arrow_metadata_cache->lru_list, &mc_block_head->lru_chain);
 	SpinLockRelease(&arrow_metadata_cache->lru_lock);
+	/* update statistics */
+	arrow_metadata_cache->num_file_entries++;
 	return mc_block_head;
 
 bailout:
@@ -2826,13 +2848,13 @@ GetOptimalGpusForArrowFdw(PlannerInfo *root, RelOptInfo *baserel)
 			{
 				optimal_gpus = __optimal_gpus;
 				if (optimal_gpus == 0)
-					__Debug("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", relname, af_state->filename);
+					__Info("foreign-table='%s' arrow-file='%s' has no schedulable GPUs", relname, af_state->filename);
 			}
 			else
 			{
 				__optimal_gpus &= optimal_gpus;
 				if (optimal_gpus != __optimal_gpus)
-					__Debug("foreign-table='%s' arrow-file='%s' reduced GPUs-set %08lx => %08lx", relname, af_state->filename, optimal_gpus, __optimal_gpus);
+					__Info("foreign-table='%s' arrow-file='%s' reduced GPUs-set %08lx => %08lx", relname, af_state->filename, optimal_gpus, __optimal_gpus);
 				optimal_gpus = __optimal_gpus;
 			}
 			if (optimal_gpus == 0)
@@ -6123,6 +6145,96 @@ pgstrom_arrow_fdw_metadata_info(PG_FUNCTION_ARGS)
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
 
+PG_FUNCTION_INFO_V1(pgstrom_arrow_fdw_metadata_stats);
+PUBLIC_FUNCTION(Datum)
+pgstrom_arrow_fdw_metadata_stats(PG_FUNCTION_ARGS)
+{
+	StringInfoData buf;
+	size_t		total_cache_sz;
+	size_t		total_cache_alloc;
+	size_t		total_cache_usage;
+	uint32_t	num_total_blocks;
+    uint32_t	num_active_blocks;
+    uint32_t	num_file_entries;
+    struct timeval tm_last_allocate;
+    struct timeval tm_last_reclaimed;
+	struct tm *tm;
+
+	/* fetch statistics */
+	total_cache_sz = TYPEALIGN(ARROW_METADATA_BLOCKSZ,
+							   (size_t)arrow_metadata_cache_size_kb << 10);
+	num_total_blocks = total_cache_sz / ARROW_METADATA_BLOCKSZ;
+	LWLockAcquire(&arrow_metadata_cache->mutex, LW_SHARED);
+	total_cache_usage = arrow_metadata_cache->total_cache_usage;
+	num_active_blocks = arrow_metadata_cache->num_active_blocks;
+	num_file_entries  = arrow_metadata_cache->num_file_entries;
+	total_cache_alloc = ARROW_METADATA_BLOCKSZ * (size_t)num_active_blocks;
+	memcpy(&tm_last_allocate,
+		   &arrow_metadata_cache->tm_last_allocate,
+		   sizeof(struct timeval));
+	memcpy(&tm_last_reclaimed,
+		   &arrow_metadata_cache->tm_last_reclaimed,
+		   sizeof(struct timeval));
+	LWLockRelease(&arrow_metadata_cache->mutex);
+	/* build the result JSON */
+	initStringInfo(&buf);
+	appendStringInfoSpaces(&buf, VARHDRSZ);
+	appendStringInfo(&buf,
+					 "{ \"total_cache_sz\" : %lu"
+					 ", \"total_cache_allocated\" : %lu"
+					 ", \"total_cache_usage\" : %lu"
+					 ", \"num_file_entries\" : %u"
+					 ", \"cache_usage_efficiency\" : %.6f"
+					 ", \"cache_num_blocks\" : %u"
+					 ", \"cache_active_blocks\" : %u"
+					 ", \"cache_free_blocks\" : %u"
+					 ", \"cache_used_ratio\" : %.6f",
+					 total_cache_sz,
+					 total_cache_alloc,
+					 total_cache_usage,
+					 num_file_entries,
+					 (total_cache_alloc > 0
+					  ? (double)total_cache_usage / (double)total_cache_alloc
+					  : 1.0),
+					 num_total_blocks,
+					 num_active_blocks,
+					 num_total_blocks - num_active_blocks,
+					 (num_total_blocks > 0
+					  ? (double)num_active_blocks / (double)num_total_blocks
+					  : 0.0));
+	if (tm_last_allocate.tv_sec != 0)
+	{
+		tm = localtime(&tm_last_allocate.tv_sec);
+		appendStringInfo(&buf,
+						 " \"last_allocate_timestamp\""
+						 " : \"%04d-%02d-%02d %02d:%02d:%02d.%03d\"",
+						 tm->tm_year+1900,
+						 tm->tm_mon+1,
+						 tm->tm_mday,
+						 tm->tm_hour,
+						 tm->tm_min,
+						 tm->tm_sec,
+						 (int)(tm_last_allocate.tv_usec / 1000));
+	}
+	if (tm_last_reclaimed.tv_sec != 0)
+	{
+		tm = localtime(&tm_last_reclaimed.tv_sec);
+		appendStringInfo(&buf,
+						 " \"last_reclaim_timestamp\""
+						 " : \"%04d-%02d-%02d %02d:%02d:%02d.%03d\"",
+						 tm->tm_year+1900,
+						 tm->tm_mon+1,
+						 tm->tm_mday,
+						 tm->tm_hour,
+						 tm->tm_min,
+						 tm->tm_sec,
+						 (int)(tm_last_allocate.tv_usec / 1000));
+	}
+	appendStringInfo(&buf, " }");
+	SET_VARSIZE(buf.data, buf.len);
+	PG_RETURN_POINTER(buf.data);
+}
+
 /*
  * pgstrom_request_arrow_fdw
  */
@@ -6156,6 +6268,7 @@ pgstrom_startup_arrow_fdw(void)
 										   &found);
 	Assert(!found);
 
+	memset(arrow_metadata_cache, 0, sizeof(arrowMetadataCacheHead));
 	LWLockInitialize(&arrow_metadata_cache->mutex, LWLockNewTrancheId());
 	SpinLockInit(&arrow_metadata_cache->lru_lock);
 	dlist_init(&arrow_metadata_cache->lru_list);

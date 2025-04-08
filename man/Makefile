@@ -12,6 +12,8 @@ __DOC_FILES :=	index.md	\
 		ssd2gpu.md	\
 		arrow_fdw.md	\
 		gpucache.md	\
+		gpusort.md	\
+		pinned_buffer.md \
 		fluentd.md	\
 		ref_types.md	\
 		ref_devfuncs.md	\
@@ -24,7 +26,7 @@ __DOC_FILES :=	index.md	\
 		release_v5.0.md \
 		release_v5.1.md	\
 		release_v5.2.md \
-		release_v5.3.md
+		release_v6.0.md
 
 DOC_FILES := $(addprefix ./, $(__DOC_FILES))
 

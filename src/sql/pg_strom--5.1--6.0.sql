@@ -28,6 +28,14 @@ CREATE FUNCTION pgstrom.arrow_fdw_metadata_info(regclass)
   LANGUAGE C STRICT;
 
 ---
+--- A system function to observe current state of the arrow_fdw metadata cache
+---
+CREATE FUNCTION pgstrom.arrow_fdw_metadata_stats()
+  RETURNS JSON
+  AS 'MODULE_PATHNAME','pgstrom_arrow_fdw_metadata_stats'
+  LANGUAGE C STRICT;
+
+---
 --- Functions to support 128bit fixed-point numeric aggregation
 --- related to the issue #806
 ---
