@@ -624,7 +624,7 @@ __setup_vcf_column_int_buffer(SQLtable *table,
 	column->put_value = vcf_put_int64_value;
 	column->move_value = vcf_move_int64_value;
 	column->write_stat = vcf_write_int64_stat;
-	column->stat_enabled = true;
+	column->stat_enabled = sort_by_pos;
 	return 2;	/* nullmap + values */
 }
 
