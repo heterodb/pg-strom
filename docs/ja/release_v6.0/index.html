@@ -8,7 +8,7 @@
     <title>PG-Strom v6.0 - PG-Strom Manual</title>
     <link rel="stylesheet" href="../css/theme.css" />
     <link rel="stylesheet" href="../css/theme_extra.css" />
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
         <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
         <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
         <link href="../custom.css" rel="stylesheet" />
@@ -20,11 +20,12 @@
         var mkdocs_page_url = null;
       </script>
     
+    <script src="../js/jquery-3.6.0.min.js" defer></script>
     <!--[if lt IE 9]>
       <script src="../js/html5shiv.min.js"></script>
     <![endif]-->
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
-      <script>hljs.highlightAll();</script> 
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
+      <script>hljs.initHighlightingOnLoad();</script> 
 </head>
 
 <body class="wy-body-for-nav" role="document">
@@ -92,7 +93,7 @@
               </ul>
               <p class="caption"><span class="caption-text">リリースノート</span></p>
               <ul class="current">
-                  <li class="toctree-l1 current"><a class="reference internal current" href="#">PG-Strom v6.0</a>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="./">PG-Strom v6.0</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#_1">概要</a>
     </li>
@@ -142,9 +143,9 @@
       <div class="wy-nav-content">
         <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
-    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
-          <li class="breadcrumb-item">リリースノート</li>
-      <li class="breadcrumb-item active">PG-Strom v6.0</li>
+    <li><a href=".." class="icon icon-home" alt="Docs"></a> &raquo;</li>
+          <li>リリースノート &raquo;</li>
+      <li>PG-Strom v6.0</li>
     <li class="wy-breadcrumbs-aside">
     </li>
   </ul>
@@ -410,7 +411,7 @@ and lo_quantity &lt; 25;
 <h2 id="avgnumericsumnumeric">AVG(numeric)、SUM(numeric)の精度改善</h2>
 <p>GPUのAtomic演算に関する制限（浮動小数点型の<code>atomicAdd()</code>は64bitまで対応）から、これまでnumeric型の集計処理は浮動小数点型（float8）へのキャストを行って実装されてきました。
 しかしこの場合、わずか53bitしか仮数部を持たない倍精度型浮動小数点データを数百万回も加算するという事になり、計算誤差の蓄積がかなり酷いものになるという課題がありました。そのため、numeric型集計関数のGPUでの実行を抑止するというオプションをわざわざ用意したほどです。（<code>pg_strom.enable_numeric_aggfuncs</code>オプション）</p>
-<p>v6.6では、numericデータ型のGPU内部実装である128bit固定小数点表現を利用して集計処理を行うよう改良されました。計算誤差が全く発生しなくなったわけではありませんが、実数を表現する桁数が増えた分、計算誤差はかなりマイルドになっています。</p>
+<p>v6.0では、numericデータ型のGPU内部実装である128bit固定小数点表現を利用して集計処理を行うよう改良されました。計算誤差が全く発生しなくなったわけではありませんが、実数を表現する桁数が増えた分、計算誤差はかなりマイルドになっています。</p>
 <pre><code>### by CPU(PostgreSQL)
 
 postgres=# select count(*), sum(x) from t;
@@ -637,15 +638,14 @@ SET
     
   </span>
 </div>
-    <script src="../js/jquery-3.6.0.min.js"></script>
-    <script>var base_url = "..";</script>
-    <script src="../js/theme_extra.js"></script>
-    <script src="../js/theme.js"></script>
-      <script src="../search/main.js"></script>
-    <script>
-        jQuery(function () {
+    <script>var base_url = '..';</script>
+    <script src="../js/theme_extra.js" defer></script>
+    <script src="../js/theme.js" defer></script>
+      <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
             SphinxRtdTheme.Navigation.enable(true);
-        });
+        };
     </script>
 
 </body>

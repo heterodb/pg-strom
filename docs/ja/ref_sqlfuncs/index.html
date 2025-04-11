@@ -8,7 +8,7 @@
     <title>SQLオブジェクト - PG-Strom Manual</title>
     <link rel="stylesheet" href="../css/theme.css" />
     <link rel="stylesheet" href="../css/theme_extra.css" />
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
         <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
         <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
         <link href="../custom.css" rel="stylesheet" />
@@ -20,11 +20,12 @@
         var mkdocs_page_url = null;
       </script>
     
+    <script src="../js/jquery-3.6.0.min.js" defer></script>
     <!--[if lt IE 9]>
       <script src="../js/html5shiv.min.js"></script>
     <![endif]-->
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
-      <script>hljs.highlightAll();</script> 
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
+      <script>hljs.initHighlightingOnLoad();</script> 
 </head>
 
 <body class="wy-body-for-nav" role="document">
@@ -85,7 +86,7 @@
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../ref_devfuncs/">関数と演算子</a>
                   </li>
-                  <li class="toctree-l1 current"><a class="reference internal current" href="#">SQLオブジェクト</a>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="./">SQLオブジェクト</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#_1">システム情報</a>
     </li>
@@ -134,9 +135,9 @@
       <div class="wy-nav-content">
         <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
-    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
-          <li class="breadcrumb-item">リファレンス</li>
-      <li class="breadcrumb-item active">SQLオブジェクト</li>
+    <li><a href=".." class="icon icon-home" alt="Docs"></a> &raquo;</li>
+          <li>リファレンス &raquo;</li>
+      <li>SQLオブジェクト</li>
     <li class="wy-breadcrumbs-aside">
     </li>
   </ul>
@@ -160,31 +161,31 @@
 <table>
 <thead>
 <tr>
-<th style="text-align: left;">name</th>
-<th style="text-align: left;">type</th>
-<th style="text-align: left;">description</th>
+<th align="left">name</th>
+<th align="left">type</th>
+<th align="left">description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td style="text-align: left;">gpu_id</td>
-<td style="text-align: left;"><code>int</code></td>
-<td style="text-align: left;">GPUデバイス番号</td>
+<td align="left">gpu_id</td>
+<td align="left"><code>int</code></td>
+<td align="left">GPUデバイス番号</td>
 </tr>
 <tr>
-<td style="text-align: left;">att_name</td>
-<td style="text-align: left;"><code>text</code></td>
-<td style="text-align: left;">デバイス属性名</td>
+<td align="left">att_name</td>
+<td align="left"><code>text</code></td>
+<td align="left">デバイス属性名</td>
 </tr>
 <tr>
-<td style="text-align: left;">att_value</td>
-<td style="text-align: left;"><code>text</code></td>
-<td style="text-align: left;">デバイス属性値</td>
+<td align="left">att_value</td>
+<td align="left"><code>text</code></td>
+<td align="left">デバイス属性値</td>
 </tr>
 <tr>
-<td style="text-align: left;">att_desc</td>
-<td style="text-align: left;"><code>text</code></td>
-<td style="text-align: left;">デバイス属性の説明</td>
+<td align="left">att_desc</td>
+<td align="left"><code>text</code></td>
+<td align="left">デバイス属性の説明</td>
 </tr>
 </tbody>
 </table>
@@ -367,110 +368,110 @@ ERROR:  target lists can have at most 1664 entries
 <table>
 <thead>
 <tr>
-<th style="text-align: left;">name</th>
-<th style="text-align: left;">type</th>
+<th align="left">name</th>
+<th align="left">type</th>
 <th>description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td style="text-align: left;"><code>database_oid</code></td>
-<td style="text-align: left;"><code>oid</code></td>
+<td align="left"><code>database_oid</code></td>
+<td align="left"><code>oid</code></td>
 <td>GPUキャッシュを設定したテーブルの属するデータベースのOIDです</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>database_name</code></td>
-<td style="text-align: left;"><code>text</code></td>
+<td align="left"><code>database_name</code></td>
+<td align="left"><code>text</code></td>
 <td>GPUキャッシュを設定したテーブルの属するデータベースの名前です</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>table_oid</code></td>
-<td style="text-align: left;"><code>oid</code></td>
+<td align="left"><code>table_oid</code></td>
+<td align="left"><code>oid</code></td>
 <td>GPUキャッシュを設定したテーブルのOIDです。必ずしも現在のデータベースとは限らない事に留意してください。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>table_name</code></td>
-<td style="text-align: left;"><code>text</code></td>
+<td align="left"><code>table_name</code></td>
+<td align="left"><code>text</code></td>
 <td>GPUキャッシュを設定したテーブルの名前です。必ずしも現在のデータベースとは限らない事に留意してください。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>signature</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>signature</code></td>
+<td align="left"><code>int8</code></td>
 <td>GPUキャッシュの一意性を示すハッシュ値です。例えば<code>ALTER TABLE</code>の前後などでこの値が変わる場合があります。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>phase</code></td>
-<td style="text-align: left;"><code>text</code></td>
+<td align="left"><code>phase</code></td>
+<td align="left"><code>text</code></td>
 <td>GPUキャッシュ構築の段階を示します。<code>not_built</code>, <code>is_empty</code>, <code>is_loading</code>, <code>is_ready</code>, <code>corrupted</code>のいずれかです。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>rowid_num_used</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>rowid_num_used</code></td>
+<td align="left"><code>int8</code></td>
 <td>割当て済みの行IDの数です。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>rowid_num_free</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>rowid_num_free</code></td>
+<td align="left"><code>int8</code></td>
 <td>未割当の行IDの数です。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>gpu_main_sz</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>gpu_main_sz</code></td>
+<td align="left"><code>int8</code></td>
 <td>GPUキャッシュ上の固定長データ用の領域のサイズです。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>gpu_main_nitems</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>gpu_main_nitems</code></td>
+<td align="left"><code>int8</code></td>
 <td>GPUキャッシュ上のタプル数です。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>gpu_extra_sz</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>gpu_extra_sz</code></td>
+<td align="left"><code>int8</code></td>
 <td>GPUキャッシュ上の可変長データ用の領域のサイズです。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>gpu_extra_usage</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>gpu_extra_usage</code></td>
+<td align="left"><code>int8</code></td>
 <td>GPUキャッシュ上の可変長データ領域の使用済みサイズです。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>gpu_extra_dead</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>gpu_extra_dead</code></td>
+<td align="left"><code>int8</code></td>
 <td>GPUキャッシュ上の可変長データ領域の未使用サイズです。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>redo_write_ts</code></td>
-<td style="text-align: left;"><code>timestamptz</code></td>
+<td align="left"><code>redo_write_ts</code></td>
+<td align="left"><code>timestamptz</code></td>
 <td>REDOログバッファを最後に更新した時刻です。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>redo_write_nitems</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>redo_write_nitems</code></td>
+<td align="left"><code>int8</code></td>
 <td>REDOログバッファに書き込まれたREDOログの総数です。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>redo_write_pos</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>redo_write_pos</code></td>
+<td align="left"><code>int8</code></td>
 <td>REDOログバッファに書き込まれたREDOログの総バイト数です。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>redo_read_nitems</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>redo_read_nitems</code></td>
+<td align="left"><code>int8</code></td>
 <td>REDOログバッファから読み出し、GPUに適用されたREDOログの総数です。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>redo_read_pos</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>redo_read_pos</code></td>
+<td align="left"><code>int8</code></td>
 <td>REDOログバッファから読み出し、GPUに適用されたREDOログの総バイト数です。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>redo_sync_pos</code></td>
-<td style="text-align: left;"><code>int8</code></td>
+<td align="left"><code>redo_sync_pos</code></td>
+<td align="left"><code>int8</code></td>
 <td>REDOログバッファ書き込まれたREDOログのうち、既にGPUキャッシュへの適用をバックグラウンドワーカにリクエストした位置です。REDOログバッファの残り容量が逼迫してきた際に、多数のセッションが同時に非同期のリクエストを発生させる事を避けるため、内部的に使用されます。</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>config_options</code></td>
-<td style="text-align: left;"><code>text</code></td>
+<td align="left"><code>config_options</code></td>
+<td align="left"><code>text</code></td>
 <td>GPUキャッシュのオプション文字列です。</td>
 </tr>
 </tbody>
@@ -617,15 +618,14 @@ redo_sync_pos |                                                   config_options
     
   </span>
 </div>
-    <script src="../js/jquery-3.6.0.min.js"></script>
-    <script>var base_url = "..";</script>
-    <script src="../js/theme_extra.js"></script>
-    <script src="../js/theme.js"></script>
-      <script src="../search/main.js"></script>
-    <script>
-        jQuery(function () {
+    <script>var base_url = '..';</script>
+    <script src="../js/theme_extra.js" defer></script>
+    <script src="../js/theme.js" defer></script>
+      <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
             SphinxRtdTheme.Navigation.enable(true);
-        });
+        };
     </script>
 
 </body>

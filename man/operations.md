@@ -264,14 +264,14 @@ PG-StromはSCAN、JOIN、GROUP BY、SORTの各処理をGPUで実行する事が�
 SCANが終わった後のデータをいったんホスト側のバッファに書き戻し、次にそれをJOINするために再びGPUへとコピーし、さらにGROUP BYを実行する前に再びホスト側のバッファに書き戻し・・・といった形で、CPUとGPUの間でデータのピンポンが発生してしまいます。
 }
 @en{
-PG-Strom can execute SCAN, JOIN, GROUP BY, and SORT processes on the GPU. However, if you simply replace the corresponding standard PostgreSQL processes with GPU processes, you will encounter problems.
-After SCAN, the data is written back to the host buffer, then copied back to the GPU for JOIN, and then written back to the host buffer again before executing GROUP BY, resulting in data ping-pong between the CPU and GPU.
+PG-Strom can execute SCAN, JOIN, GROUP BY and SORT processes on the GPU. However, if you simply replace the corresponding standard PostgreSQL processes with GPU processes, you will run into problems.
+After SCAN, the data is written back to the host buffer, then copied back to the GPU for JOIN, and then written back to the host buffer again before GROUP BY is executed, resulting in data ping-ponging between the CPU and GPU.
 }
 @ja{
 CPUのメモリ上でデータ（行）を交換するのと比較して、CPUとGPUの間はPCI-Eバスで結ばれているため、どうしてもデータ転送には大きなコストが発生してしまいます。これを避けるには、SCAN、JOIN、GROUP BY、SORTといった一連のGPU対応タスクが連続して実行可能である場合には、できる限りGPUメモリ上でデータ交換を行い、CPUへデータを書き戻すのは最小限に留めるべきであるという事です。
 }
 @en{
-Compared to exchanging data (rows) in CPU memory, the CPU and GPU are connected by a PCI-E bus, so data transfer inevitably incurs a large cost. To avoid this, when a series of GPU-compatible tasks such as SCAN, JOIN, GROUP BY, and SORT can be executed consecutively, data should be exchanged in GPU memory as much as possible and writing data back to the CPU should be minimized.
+Compared to exchanging data (rows) in CPU memory, the CPU and GPU are connected by a PCI-E bus, so data transfer inevitably incurs a large cost. To avoid this, if a series of GPU-compatible tasks such as SCAN, JOIN, GROUP BY and SORT can be performed consecutively, data should be exchanged as much as possible in GPU memory, and writing data back to the CPU should be minimised.
 }
 ![combined gpu kernel](./img/combined-kernel-overview.png)
 
@@ -326,17 +326,17 @@ select sum(lo_revenue), d_year, p_brand1
 （※なお、この実行計画では、結果を最大限にシンプルにするため、CPU並列とCPU-Fallbackは無効化しています）
 }
 @en{
-On the other hand, when using PG-Strom, the situation is quite different.
-Except for the Result node which projects the results, all processing is executed by Custom Scan (GpuPreAgg).
+Conversely, when utilizing PG-Strom, the scenario is notably distinct.
+With the exception of the Result node, which is responsible for displaying the results, all processing is executed by Custom Scan (GpuPreAgg).
 (Note: In this execution plan, CPU parallelism and CPU-Fallback are disabled to keep the results as simple as possible.)
 }
 @ja{
 しかしGPU-PreAggとはいえ、この処理はGROUP BYだけを行っている訳ではありません。
-EXPLAINの出力に付随する各種のパラメータを読むと、このGPU-PreAggは最もサイズの大きな`lineorder`テーブルをスキャンしつつ、下位ノードで`part`、`supplier`、`date1`テーブルを読み出してこれとJOIN処理を行います。そして`d_year`と`p_brand1`によるグループ化そ行った上で、同じキーによるソート処理を行った上で、処理結果をCPUに戻しています。
+EXPLAINの出力に付随する各種のパラメータを読むと、このGPU-PreAggは最もサイズの大きな`lineorder`テーブルをスキャンしつつ、下位ノードで`part`、`supplier`、`date1`テーブルを読み出してこれとJOIN処理を行います。そして`d_year`と`p_brand1`によるグループ化を行った上で、同じキーによるソート処理を行った上で、処理結果をCPUに戻しています。
 }
 @en{
-However, even though it is GPU-PreAgg, this processing does not only perform GROUP BY.
-Reading the various parameters accompanying the EXPLAIN output, we can see that this GPU-PreAgg scans the `lineorder` table, which is the largest, while reading the `part`, `supplier`, and `date1` tables at the lower nodes and performing JOIN processing with these. It then groups by `d_year` and `p_brand1`, sorts by the same keys, and returns the processing results to the CPU.
+However, despite being designated as GPU-PreAgg, this processing does not exclusively perform GROUP BY.
+According to the EXPLAIN output, this GPU-PreAgg scans the lineorder table, which is the largest, while reading the part, supplier, and date1 tables at the lower nodes and performing JOIN processing with these. It then groups by `d_year` and `p_brand1`, sorts by the same keys, and returns the processing results to the CPU.
 }
 @ja{
 PostgreSQLにおいては、複雑なクエリはある程度多くの要素に分解され、数多くの処理ステップを含む実行計画が生成される事が多くなります。
@@ -476,8 +476,8 @@ It also shows that although the use of GPU-Sort and GPU-Cache was considered, th
 また付随して、GPU-SortやGPU-Cacheの利用を検討したものの、利用できる条件にない（`pg_strom.cpu_fallback`が有効になっている）ことや、設定がなされていない（`lineorder`にはGPU-Cacheの設定がない）ことが分かります。
 }
 @en{
-In this way, an execution plan for GPU-PreAgg with a filter based on the WHERE clause was generated.
-
+Consequently, an execution plan for GPU-PreAgg with a filter based on the WHERE clause was generated.
+ 
 It also shows that although the use of GPU-Sort and GPU-Cache was considered, they were not available (`pg_strom.cpu_fallback` is enabled) and were not configured (`lineorder` has no GPU-Cache setting).
 }
 
@@ -583,7 +583,7 @@ IMPORT FOREIGN SCHEMA
 @en{
 In this way, we were able to successfully enable GPU-Direct SQL and run GpuPreAgg.
 
-Note that when referencing `/opt/arrow/mytest.arrow`, the log shows that `optimal_gpus=00000003 numa_gpus=00000003`, which means that it can be scheduled on GPU0 and GPU1.
+the log outputs `optimal_gpus=00000003 numa_gpus=00000003` when referring to `/opt/arrow/mytest.arrow` as follows, i.e. it is possible to schedule to GPU0 and GPU1.
 }
 ```
  LOG:  heterodb-extra: [info] path='/opt/arrow/mytest.arrow' on 'md127p1 (259,9)' optimal_gpus=00000003 numa_gpus=00000003 system_gpus=00000003 license-validation='Y' policy='optimal' (pcie.c:1738)
