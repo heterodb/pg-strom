@@ -52,16 +52,17 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 ------------------------------------------------------------------------------------------------------
  Gather (actual rows=269 loops=1)
    Workers Planned: 2
+   Params Evaluated: $0
    Workers Launched: 2
-   InitPlan 1
+   InitPlan 1 (returns $0)
      ->  Seq Scan on target_num (actual rows=1 loops=1)
    ->  Parallel Foreign Scan on regtest_arrow (actual rows=90 loops=3)
-         Filter: (date_num = (InitPlan 1).col1)
+         Filter: (date_num = $0)
          Rows Removed by Filter: 103473
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: (date_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(11 rows)
+(12 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT count(*)
@@ -106,16 +107,17 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 ------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
+   Params Evaluated: $0
    Workers Launched: 2
-   InitPlan 1
+   InitPlan 1 (returns $0)
      ->  Seq Scan on target_num (actual rows=1 loops=1)
    ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
-         Filter: (int_num = (InitPlan 1).col1)
+         Filter: (int_num = $0)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: (int_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(11 rows)
+(12 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT count(*)
@@ -160,16 +162,17 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 ------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
+   Params Evaluated: $0
    Workers Launched: 2
-   InitPlan 1
+   InitPlan 1 (returns $0)
      ->  Seq Scan on target_num (actual rows=1 loops=1)
    ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
-         Filter: (float_num = (InitPlan 1).col1)
+         Filter: (float_num = $0)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: (float_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(11 rows)
+(12 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT count(*)
@@ -214,15 +217,16 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 ------------------------------------------------------------------------------------------------------
  Gather (actual rows=15 loops=1)
    Workers Planned: 2
+   Params Evaluated: $0
    Workers Launched: 2
-   InitPlan 1
+   InitPlan 1 (returns $0)
      ->  Seq Scan on target_num (actual rows=1 loops=1)
    ->  Parallel Foreign Scan on regtest_arrow (actual rows=5 loops=3)
-         Filter: (half_num = (InitPlan 1).col1)
+         Filter: (half_num = $0)
          Rows Removed by Filter: 333328
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(10 rows)
+(11 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT count(*)
@@ -266,16 +270,17 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 ------------------------------------------------------------------------------------------------------
  Gather (actual rows=0 loops=1)
    Workers Planned: 2
+   Params Evaluated: $0
    Workers Launched: 2
-   InitPlan 1
+   InitPlan 1 (returns $0)
      ->  Seq Scan on target_num (actual rows=1 loops=1)
    ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
-         Filter: (decimal_num = (InitPlan 1).col1)
+         Filter: (decimal_num = $0)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: (decimal_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(11 rows)
+(12 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT count(*)
@@ -320,16 +325,17 @@ SELECT * FROM regtest_arrow_index_temp.regtest_arrow
 ------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
+   Params Evaluated: $0
    Workers Launched: 2
-   InitPlan 1
+   InitPlan 1 (returns $0)
      ->  Seq Scan on target_num (actual rows=1 loops=1)
    ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
-         Filter: (time_num = (InitPlan 1).col1)
+         Filter: (time_num = $0)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: (time_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(11 rows)
+(12 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT count(*)
@@ -374,16 +380,17 @@ WHERE timestamp_num=(SELECT timestamp_num FROM regtest_arrow_index_temp.target_n
 ------------------------------------------------------------------------------------------------------
  Gather (actual rows=1 loops=1)
    Workers Planned: 2
+   Params Evaluated: $0
    Workers Launched: 2
-   InitPlan 1
+   InitPlan 1 (returns $0)
      ->  Seq Scan on target_num (actual rows=1 loops=1)
    ->  Parallel Foreign Scan on regtest_arrow (actual rows=0 loops=3)
-         Filter: (timestamp_num = (InitPlan 1).col1)
+         Filter: (timestamp_num = $0)
          Rows Removed by Filter: 103563
          referenced: id, int_num, float_num, half_num, decimal_num, date_num, time_num, timestamp_num
          Stats-Hint: (timestamp_num = $0)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 51.50MB, size: 51.50MB)
-(11 rows)
+(12 rows)
 
 EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF)
 SELECT count(*)
