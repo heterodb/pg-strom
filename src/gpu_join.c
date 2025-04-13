@@ -194,7 +194,7 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 	PathTarget *inner_target;
 	size_t		inner_threshold_sz;
 	int			nattrs;
-	int			unitsz;
+	int			unitsz = 0;
 	int			projection_hash_divisor = 0;
 	double		bufsz;
 
@@ -228,11 +228,10 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 					? inner_path->pathtarget
 					: inner_path->parent->reltarget);
 	nattrs = list_length(inner_target->exprs);
-	unitsz = ((pp_inner->hash_inner_keys != NIL
-			   ? offsetof(kern_hashitem, t.htup)
-			   : offsetof(kern_tupitem, htup)) +
-			  MAXALIGN(offsetof(HeapTupleHeaderData,
-								t_bits) + BITMAPLEN(nattrs)) +
+	unitsz = (MAXALIGN((pp_inner->hash_inner_keys != NIL
+						? offsetof(kern_hashitem, t.t_bits)
+						: offsetof(kern_tupitem, t_bits)) +
+					   BITMAPLEN(nattrs)) +
 			  MAXALIGN(inner_target->width));
 	bufsz = MAXALIGN(offsetof(kern_data_store, colmeta[nattrs]));
 	if (pp_inner->hash_inner_keys != NIL)
@@ -901,10 +900,8 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 	 * the result of GPU-Projection until Bitonic-sorting.
 	 */
 	nattrs = list_length(final_target->exprs);
-	unitsz = offsetof(kern_tupitem, htup) +
-		MAXALIGN(offsetof(HeapTupleHeaderData,
-						  t_bits) + BITMAPLEN(nattrs)) +
-		MAXALIGN(final_target->width);
+	unitsz = (MAXALIGN(offsetof(kern_tupitem, t_bits) + BITMAPLEN(nattrs)) +
+			  MAXALIGN(final_target->width));
 	buffer_sz = MAXALIGN(offsetof(kern_data_store, colmeta[nattrs])) +
 		sizeof(uint64_t) * pp_info->final_nrows +
 		unitsz * pp_info->final_nrows;
@@ -2069,10 +2066,7 @@ typedef struct
 	uint32_t		nitems;
 	uint32_t		nrooms;
 	size_t			usage;
-	struct {
-		HeapTuple	htup;
-		uint32_t	hash;		/* if hash-join or gist-join */
-	} rows[1];
+	MinimalTuple	rows[1];
 } inner_preload_buffer;
 
 static uint32_t
@@ -2138,7 +2132,7 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
 	{
 		TupleTableSlot *slot;
 		TupleDesc		tupdesc;
-		HeapTuple		htup;
+		MinimalTuple	mtup;
 		uint32_t		index;
 
 		CHECK_FOR_INTERRUPTS();
@@ -2163,9 +2157,9 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
 				slot->tts_values[j] = (Datum)PG_DETOAST_DATUM(slot->tts_values[j]);
 		}
 		oldcxt = MemoryContextSwitchTo(memcxt);
-		htup = heap_form_tuple(slot->tts_tupleDescriptor,
-							   slot->tts_values,
-							   slot->tts_isnull);
+		mtup = heap_form_minimal_tuple(slot->tts_tupleDescriptor,
+									   slot->tts_values,
+									   slot->tts_isnull);
 		if (preload_buf->nitems >= preload_buf->nrooms)
 		{
 			uint32_t	nrooms_new = 2 * preload_buf->nrooms + 4000;
@@ -2178,37 +2172,32 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
 
 		if (istate->hash_inner_keys != NIL)
 		{
-			uint32_t	hash = get_tuple_hashvalue(pts, istate, slot);
-
-			preload_buf->rows[index].htup = htup;
-			preload_buf->rows[index].hash = hash;
-			preload_buf->usage += MAXALIGN(offsetof(kern_hashitem,
-													t.htup) + htup->t_len);
+			((kern_tupitem *)mtup)->hash = get_tuple_hashvalue(pts, istate, slot);
+			preload_buf->rows[index] = mtup;
+			preload_buf->usage += MAXALIGN(offsetof(kern_hashitem, t)
+										   + mtup->t_len
+										   + ROWID_SIZE);
 		}
 		else if (istate->gist_irel)
 		{
 			ItemPointer	ctid;
-			uint32_t	hash;
 			bool		isnull;
 
 			ctid = (ItemPointer)
 				slot_getattr(slot, istate->gist_ctid_resno, &isnull);
 			if (isnull)
 				elog(ERROR, "Unable to build GiST-index buffer with NULL-ctid");
-			ItemPointerCopy(ctid, &htup->t_self);
-			hash = hash_any((unsigned char *)ctid, sizeof(ItemPointerData));
-
-			preload_buf->rows[index].htup = htup;
-			preload_buf->rows[index].hash = hash;
-			preload_buf->usage += MAXALIGN(offsetof(kern_hashitem,
-													t.htup) + htup->t_len);
+			((kern_tupitem *)mtup)->hash = hash_any((unsigned char *)ctid,
+													sizeof(ItemPointerData));
+			preload_buf->rows[index] = mtup;
+			preload_buf->usage += MAXALIGN(offsetof(kern_hashitem, t)
+										   + mtup->t_len
+										   + ROWID_SIZE);
 		}
 		else
 		{
-			preload_buf->rows[index].htup = htup;
-			preload_buf->rows[index].hash = 0;
-			preload_buf->usage += MAXALIGN(offsetof(kern_tupitem,
-													htup) + htup->t_len);
+			preload_buf->rows[index] = mtup;
+			preload_buf->usage += MAXALIGN(mtup->t_len + ROWID_SIZE);
 		}
 		MemoryContextSwitchTo(oldcxt);
 	}
@@ -2471,6 +2460,7 @@ again:
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
 				h_kmrels->chunks[depth-1].kds_offset = offset;
+				h_kmrels->chunks[depth-1].gist_ctid_resno = istate->gist_ctid_resno;
 
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
@@ -2606,19 +2596,16 @@ __innerPreloadSetupHeapBuffer(kern_data_store *kds,
 	
 	for (uint32_t index=0; index < preload_buf->nitems; index++)
 	{
-		HeapTuple	htup = preload_buf->rows[index].htup;
-		size_t		sz;
+		MinimalTuple mtup = preload_buf->rows[index];
 		kern_tupitem *titem;
 
-		sz = MAXALIGN(offsetof(kern_tupitem, htup) + htup->t_len);
-		curr_pos -= sz;
+		curr_pos -= MAXALIGN(mtup->t_len + ROWID_SIZE);
+		memcpy(curr_pos, mtup, mtup->t_len);
 		titem = (kern_tupitem *)curr_pos;
-		titem->t_len = htup->t_len;
-		titem->rowid = rowid;
-		memcpy(&titem->htup, htup->t_data, htup->t_len);
-		memcpy(&titem->htup.t_ctid, &htup->t_self, sizeof(ItemPointerData));
-
+		titem->t_len += ROWID_SIZE;
+		KERN_TUPITEM_SET_ROWID(titem, rowid);
 		row_index[rowid++] = (tail_pos - curr_pos);
+		__KDS_TUPITEM_CHECK_VALID(kds, titem);
 	}
 }
 
@@ -2640,31 +2627,26 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 
 	for (uint32_t index=0; index < preload_buf->nitems; index++)
 	{
-		HeapTuple	htup = preload_buf->rows[index].htup;
-		uint32_t	hash = preload_buf->rows[index].hash;
+		MinimalTuple mtup = preload_buf->rows[index];
+		uint32_t	hash = ((kern_tupitem *)mtup)->hash;
 		uint32_t	hindex = hash % kds->hash_nslots;
 		uint64_t	next, self;
-		size_t		sz;
 		kern_hashitem *hitem;
 
-		sz = MAXALIGN(offsetof(kern_hashitem, t.htup) + htup->t_len);
-		curr_pos -= sz;
+		curr_pos -= MAXALIGN(offsetof(kern_hashitem, t) +
+							 mtup->t_len +
+							 ROWID_SIZE);
 		self = (tail_pos - curr_pos);
-
 		next = __atomic_exchange_uint64(&hash_slot[hindex], self);
+
 		hitem = (kern_hashitem *)curr_pos;
 		hitem->next = next;
-		hitem->hash = hash;
-		hitem->__padding__ = 0;
-		hitem->t.t_len = htup->t_len;
-		hitem->t.rowid = rowid;
-		memcpy(&hitem->t.htup, htup->t_data, htup->t_len);
-		memcpy(&hitem->t.htup.t_ctid, &htup->t_self, sizeof(ItemPointerData));
+		memcpy(&hitem->t, mtup, mtup->t_len);
+		hitem->t.t_len += ROWID_SIZE;
+		KERN_TUPITEM_SET_ROWID(&hitem->t, rowid);
 
 		row_index[rowid++] = (tail_pos - (char *)&hitem->t);
-		Assert(curr_pos >= ((char *)kds
-							+ KDS_HEAD_LENGTH(kds)
-							+ sizeof(uint64_t) * (kds->hash_nslots + rowid)));
+		Assert(__KDS_TUPITEM_CHECK_VALID(kds, &hitem->t));
 	}
 }
 

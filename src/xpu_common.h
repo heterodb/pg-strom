@@ -1166,11 +1166,57 @@ GistFollowRight(PageHeaderData *page)
  */
 struct kern_tupitem
 {
-	uint32_t		t_len;		/* length of tuple */
-	uint32_t		rowid;		/* unique Id of this item */
-	HeapTupleHeaderData	htup;
+	uint32_t		t_len;			/* actual length of minimal tuple */
+	uint32_t		hash;			/* hash value of this item */
+	uint16_t		__padding__;
+	uint16_t		t_infomask2;	/* number of attributes + various flags */
+	uint16_t		t_infomask;		/* various flag bits, see below */
+	uint8_t			t_hoff;			/* sizeof header incl. bitmap, padding */
+	/* ^ - 23 bytes - ^ */
+	uint8_t			t_bits[1];		/* null bitmap */
+	/*
+	 * +----------------+
+	 * | NULL-bitmap    |
+	 * +----------------+ <-- ((char *)titem + titem->t_hoff
+	 * |       :        |      - MINIMAL_TUPLE_OFFSET)
+	 * | Data Payload   |
+	 * |       :        |
+	 * +----------------+
+	 * | row-id (32bit) |
+	 * +----------------+ <-- (char *)titem + titem->t_len
+	 */
 };
 typedef struct kern_tupitem		kern_tupitem;
+#ifndef MINIMAL_TUPLE_OFFSET
+#define MINIMAL_TUPLE_OFFSET	(offsetof(HeapTupleHeaderData, t_infomask2) - \
+								 offsetof(kern_tupitem, t_infomask2))
+#endif
+#define ROWID_SIZE				sizeof(uint32_t)
+
+INLINE_FUNCTION(char *)
+KERN_TUPITEM_GET_PAYLOAD(const kern_tupitem *titem)
+{
+	return ((char *)titem + titem->t_hoff - MINIMAL_TUPLE_OFFSET);
+}
+
+INLINE_FUNCTION(uint32_t)
+KERN_TUPITEM_GET_ROWID(const kern_tupitem *titem)
+{
+	uint32_t	rowid;
+
+	memcpy(&rowid, ((const char *)titem
+					+ titem->t_len
+					- ROWID_SIZE), ROWID_SIZE);
+	return rowid;
+}
+
+INLINE_FUNCTION(void)
+KERN_TUPITEM_SET_ROWID(kern_tupitem *titem, uint32_t rowid)
+{
+	memcpy((char *)titem
+		   + titem->t_len
+		   - ROWID_SIZE, &rowid, ROWID_SIZE);
+}
 
 /*
  * kern_hashitem - individual items for KDS_FORMAT_HASH
@@ -1178,9 +1224,6 @@ typedef struct kern_tupitem		kern_tupitem;
 struct kern_hashitem
 {
 	uint64_t		next;		/* offset of the next entry */
-	uint32_t		hash;		/* 32-bit hash value */
-	uint32_t		__padding__;
-	/* HeapTuple of this entry */
 	kern_tupitem	t	__MAXALIGNED__;
 };
 typedef struct kern_hashitem	kern_hashitem;
@@ -1190,12 +1233,10 @@ typedef struct kern_hashitem	kern_hashitem;
  */
 struct kern_fallbackitem
 {
-	uint32_t		t_len;
-	uint16_t		depth;
-	uint8_t			__reserved__;
-	uint8_t			matched;
 	uint64_t		l_state;
-	HeapTupleHeaderData htup;
+	uint16_t		depth;
+	uint8_t			matched;
+	kern_tupitem	t	__MAXALIGNED__;
 };
 typedef struct kern_fallbackitem	kern_fallbackitem;
 
@@ -1299,7 +1340,7 @@ __KDS_HASH_ITEM_CHECK_VALID(const kern_data_store *kds, kern_hashitem *hitem)
 	char   *head = (KDS_BODY_ADDR(kds) + sizeof(uint64_t) * (kds->hash_nslots +
 															 kds->nitems));
 	return ((char *)hitem >= head &&
-			(char *)&hitem->t.htup + hitem->t.t_len <= tail);
+			(char *)&hitem->t + hitem->t.t_len <= tail);
 }
 #include <stdio.h>
 
@@ -1330,6 +1371,25 @@ KDS_HASH_NEXT_ITEM(const kern_data_store *kds, uint64_t hnext_offset)
 		return hnext;
 	}
 	return NULL;
+}
+
+/* ------------------------------------------------
+ *
+ * access functions for KDS_FORMAT_FALLBACK
+ *
+ * ------------------------------------------------
+ */
+INLINE_FUNCTION(kern_fallbackitem *)
+KDS_GET_FALLBACK_ITEM(const kern_data_store *kds, uint32_t kds_index)
+{
+	uint64_t    offset = __volatileRead(KDS_GET_ROWINDEX(kds) + kds_index);
+
+	if (!offset)
+		return NULL;
+	return (kern_fallbackitem *)
+		((const char *)kds + kds->length
+		 - offset
+		 - offsetof(kern_fallbackitem, t));
 }
 
 /* ------------------------------------------------
@@ -3093,30 +3153,30 @@ SESSION_ENCODE(kern_session_info *session)
  * ----------------------------------------------------------------
  */
 EXTERN_FUNCTION(int)
-kern_form_heaptuple(kern_context *kcxt,
-					const kern_expression *kproj,
-					const kern_data_store *kds_dst,
-					HeapTupleHeaderData *htup);
-EXTERN_FUNCTION(int)
-kern_estimate_heaptuple(kern_context *kcxt,
+kern_form_minimal_tuple(kern_context *kcxt,
 						const kern_expression *kproj,
-						const kern_data_store *kds_dst);
+						const kern_data_store *kds_dst,
+						kern_tupitem *titem,
+						uint32_t rowid);
+EXTERN_FUNCTION(int)
+kern_estimate_minimal_tuple(kern_context *kcxt,
+							const kern_expression *kproj,
+							const kern_data_store *kds_dst);
 EXTERN_FUNCTION(const void *)
-kern_fetch_heaptuple_attr(kern_context *kcxt,
-						  const kern_data_store *kds,
-						  const kern_tupitem *titem, int anum);
+kern_fetch_minimal_tuple_attr(const kern_data_store *kds,
+							  const kern_tupitem *titem, int anum);
 EXTERN_FUNCTION(bool)
-ExecLoadVarsHeapTuple(kern_context *kcxt,
+ExecLoadVarsMinimalTuple(kern_context *kcxt,
+						 const kern_expression *kexp_load_vars,
+						 int depth,
+						 const kern_data_store *kds,
+						 const kern_tupitem *titem);
+EXTERN_FUNCTION(bool)
+ExecLoadVarsOuterHeap(kern_context *kcxt,
 					  const kern_expression *kexp_load_vars,
-					  int depth,
-					  const kern_data_store *kds,
+					  const kern_expression *kexp_scan_quals,
+					  const kern_data_store *kds_src,
 					  const HeapTupleHeaderData *htup);
-EXTERN_FUNCTION(bool)
-ExecLoadVarsOuterRow(kern_context *kcxt,
-					 const kern_expression *kexp_load_vars,
-					 const kern_expression *kexp_scan_quals,
-					 const kern_data_store *kds_src,
-					 const HeapTupleHeaderData *htup);
 EXTERN_FUNCTION(bool)
 ExecLoadVarsOuterArrow(kern_context *kcxt,
 					   const kern_expression *kexp_load_vars,
@@ -3233,6 +3293,7 @@ struct kern_multirels
 		uint64_t	kds_offset;		/* offset to KDS */
 		uint64_t	ojmap_offset;	/* offset to outer-join map, if any */
 		uint64_t	gist_offset;	/* offset to GiST-index pages, if any */
+		int16_t		gist_ctid_resno;/* CTID resno of inner tuples */
 		bool		is_nestloop;	/* true, if NestLoop */
 		bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */

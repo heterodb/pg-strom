@@ -815,9 +815,9 @@ __handleDpuTaskExecProjection(dpuClient *dclient,
 
 	assert(kexp_projection != NULL &&
 		   kexp_projection->opcode  == FuncOpCode__Projection);
-	tupsz = kern_estimate_heaptuple(kcxt,
-									kexp_projection,
-									dtes->kds_dst_head);
+	tupsz = kern_estimate_minimal_tuple(kcxt,
+										kexp_projection,
+										dtes->kds_dst_head);
 	if (tupsz > 0)
 	{
 		kern_data_store *kds_dst = dtes->kds_dst;
@@ -876,11 +876,11 @@ __handleDpuTaskExecProjection(dpuClient *dclient,
 		KDS_GET_ROWINDEX(kds_dst)[rowid] = kds_dst->usage;
 		tupitem = (kern_tupitem *)
 			((char *)kds_dst + kds_dst->length - offset);
-		tupitem->rowid = rowid;
-		tupitem->t_len = kern_form_heaptuple(kcxt,
-											 kexp_projection,
-											 kds_dst,
-											 &tupitem->htup);
+		kern_form_minimal_tuple(kcxt,
+								kexp_projection,
+								kds_dst,
+								tupitem,
+								rowid);
 		dtes->nitems_out++;
 		return true;
 	}

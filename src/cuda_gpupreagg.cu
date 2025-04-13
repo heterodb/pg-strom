@@ -97,7 +97,7 @@ __normalize_numeric_int128(int16_t weight_d, int16_t weight_s, int128_t ival)
 STATIC_FUNCTION(int32_t)
 __writeOutOneTuplePreAgg(kern_context *kcxt,
 						 kern_data_store *kds_final,
-						 HeapTupleHeaderData *htup,
+						 kern_tupitem *titem,
 						 const kern_expression *kexp_actions)
 {
 	int			nattrs = Min(kds_final->ncols, kexp_actions->u.pagg.nattrs);
@@ -105,18 +105,13 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 	uint16_t	t_infomask = HEAP_HASNULL;
 	char	   *buffer = NULL;
 
-	t_hoff = MAXALIGN(offsetof(HeapTupleHeaderData,
+	t_hoff = MAXALIGN(offsetof(kern_tupitem,
 							   t_bits) + BITMAPLEN(nattrs));
-	if (htup)
+	if (titem)
 	{
-		memset(htup, 0, t_hoff);
-		htup->t_choice.t_datum.datum_typmod = kds_final->tdtypmod;
-		htup->t_choice.t_datum.datum_typeid = kds_final->tdtypeid;
-		htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
-		htup->t_ctid.ip_blkid.bi_lo = 0xffff;
-		htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
-		htup->t_infomask2 = (nattrs & HEAP_NATTS_MASK);
-		htup->t_hoff = t_hoff;
+		memset(titem, 0, t_hoff);
+		titem->t_infomask2 = (nattrs & HEAP_NATTS_MASK);
+		titem->t_hoff = t_hoff + MINIMAL_TUPLE_OFFSET;
 	}
 	/* walk on the columns */
 	for (int j=0; j < nattrs; j++)
@@ -130,11 +125,11 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 			   (char *)cmeta < (char *)kds_final + kds_final->length);
 		assert(cmeta->attalign > 0 && cmeta->attalign <= 8);
 		t_next = TYPEALIGN(cmeta->attalign, t_hoff);
-		if (htup)
+		if (titem)
 		{
 			if (t_next > t_hoff)
-				memset((char *)htup + t_hoff, 0, t_next - t_hoff);
-			buffer = (char *)htup + t_next;
+				memset((char *)titem + t_hoff, 0, t_next - t_hoff);
+			buffer = (char *)titem + t_next;
 		}
 
 		switch (desc->action)
@@ -292,13 +287,17 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				STROM_ELOG(kcxt, "unknown xpuPreAgg action");
 				return -1;
 		}
-		if (htup && nbytes > 0)
-			htup->t_bits[j>>3] |= (1<<(j&7));
+		if (titem && nbytes > 0)
+			titem->t_bits[j>>3] |= (1<<(j&7));
 		t_hoff = t_next + nbytes;
 	}
-
-	if (htup)
-		htup->t_infomask = t_infomask;
+	t_hoff += ROWID_SIZE;
+	
+	if (titem)
+	{
+		titem->t_len = t_hoff;
+		titem->t_infomask = t_infomask;
+	}
 	return t_hoff;
 }
 
@@ -965,7 +964,7 @@ __updateOneTupleNoGroups(kern_context *kcxt,
 	if (kcxt->groupby_prepfn_buffer)
 		buffer = kcxt->groupby_prepfn_buffer;
 	else
-		buffer = (char *)&tupitem->htup + tupitem->htup.t_hoff;
+		buffer = KERN_TUPITEM_GET_PAYLOAD(tupitem);
 	assert((uintptr_t)buffer == MAXALIGN(buffer));
 
 	curr = buffer;
@@ -1099,8 +1098,7 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 									 kexp_groupby_actions);
 	assert(tupsz > 0);
 	required = TYPEALIGN(CUDA_L1_CACHELINE_SZ,
-						 offsetof(kern_tupitem, htup) + tupsz
-						 + kcxt->session->gpusort_htup_margin);
+						 tupsz + kcxt->session->gpusort_htup_margin);
 	offset = __atomic_add_uint64(&kds_final->usage, required);
 	if (!__KDS_CHECK_OVERFLOW(kds_final, 1, offset + required))
 		return NULL;	/* out of memory */
@@ -1108,10 +1106,9 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 	tupitem = (kern_tupitem *)((char *)kds_final
 							   + kds_final->length
 							   - offset);
-	tupitem->rowid = 0;
-	tupitem->t_len = __writeOutOneTuplePreAgg(kcxt, kds_final,
-											  &tupitem->htup,
-											  kexp_groupby_actions);
+	__writeOutOneTuplePreAgg(kcxt, kds_final, tupitem,
+							 kexp_groupby_actions);
+	KERN_TUPITEM_SET_ROWID(tupitem, 0);
 	assert(tupitem->t_len == tupsz);
 	__threadfence();
 	__atomic_write_uint64(KDS_GET_ROWINDEX(kds_final), offset);
@@ -1222,7 +1219,7 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 	 * written by other threads.
 	 */
 	tupsz = TYPEALIGN(CUDA_L1_CACHELINE_SZ,
-					  offsetof(kern_hashitem, t.htup) + tupsz
+					  offsetof(kern_hashitem, t) + tupsz
 					  + kcxt->session->gpusort_htup_margin);
 	for (;;)
 	{
@@ -1256,17 +1253,16 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 							  + kds_final->length
 							  - __usage
 							  - tupsz);
-	hitem->t.rowid = __nitems;
-	hitem->t.t_len = __writeOutOneTuplePreAgg(kcxt, kds_final,
-											  &hitem->t.htup,
-											  kexp_groupby_actions);
-	assert(offsetof(kern_hashitem, t.htup) + hitem->t.t_len <= tupsz);
+	__writeOutOneTuplePreAgg(kcxt, kds_final, &hitem->t,
+							 kexp_groupby_actions);
+	KERN_TUPITEM_SET_ROWID(&hitem->t, __nitems);
+	assert(offsetof(kern_hashitem, t) + hitem->t.t_len <= tupsz);
 	/*
 	 * all setup stuff must be completed before its row-index is visible
 	 * to other threads in the device.
 	 */
 	__threadfence();
-	KDS_GET_ROWINDEX(kds_final)[hitem->t.rowid]
+	KDS_GET_ROWINDEX(kds_final)[__nitems]
 		= ((char *)kds_final
 		   + kds_final->length
 		   - (char *)&hitem->t);
@@ -1585,18 +1581,19 @@ __updateOneTupleGroupBy(kern_context *kcxt,
 						kern_tupitem *tupitem,
 						const kern_expression *kexp_groupby_actions)
 {
-	char   *buffer;
-	char   *curr;
+	uint32_t	rowid = KERN_TUPITEM_GET_ROWID(tupitem);
+	char	   *buffer;
+	char	   *curr;
 
 	if (kcxt->groupby_prepfn_buffer &&
-		tupitem->rowid < kcxt->groupby_prepfn_nbufs)
+		rowid < kcxt->groupby_prepfn_nbufs)
 	{
 		buffer = (kcxt->groupby_prepfn_buffer +
-				  tupitem->rowid * kcxt->groupby_prepfn_bufsz);
+				  rowid * kcxt->groupby_prepfn_bufsz);
 	}
 	else
 	{
-		buffer = (char *)&tupitem->htup + tupitem->htup.t_hoff;
+		buffer = KERN_TUPITEM_GET_PAYLOAD(tupitem);
 	}
 	assert((uintptr_t)buffer == MAXALIGN(buffer));
 
@@ -1719,16 +1716,27 @@ __execGpuPreAggGroupByHash(kern_context *kcxt,
 			{
 				bool	saved_compare_nulls = kcxt->kmode_compare_nulls;
 
-				if (hitem->hash != hash->value)
+				if (hitem->t.hash != hash->value)
 					continue;
 				kcxt->kmode_compare_nulls = true;
-				ExecLoadVarsHeapTuple(kcxt, kexp_groupby_keyload,
-									  -2,
-									  kds_final,
-									  &hitem->t.htup);
+				ExecLoadVarsMinimalTuple(kcxt, kexp_groupby_keyload,
+										 -2,
+										 kds_final,
+										 &hitem->t);
 				if (EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keycomp, &status))
 				{
 					kcxt->kmode_compare_nulls = saved_compare_nulls;
+#if 0
+					printf("[%d](%c) = [%d](%c) [%.12s](%c) <-> [%.12s](%c)\n",
+						   ((xpu_int4_t *)kcxt->kvars_slot[0])->value,
+						   XPU_DATUM_ISNULL(kcxt->kvars_slot[0]) ? '*' : '-',
+						   ((xpu_int4_t *)kcxt->kvars_slot[2])->value,
+						   XPU_DATUM_ISNULL(kcxt->kvars_slot[2]) ? '*' : '-',
+						   ((xpu_bpchar_t *)kcxt->kvars_slot[1])->value,
+						   XPU_DATUM_ISNULL(kcxt->kvars_slot[1]) ? '*' : '-',
+						   ((xpu_bpchar_t *)kcxt->kvars_slot[3])->value,
+						   XPU_DATUM_ISNULL(kcxt->kvars_slot[3]) ? '*' : '-');
+#endif
 					if (!XPU_DATUM_ISNULL(&status) && status.value)
 						break;	/* found */
 				}
@@ -1768,8 +1776,8 @@ __execGpuPreAggGroupByHash(kern_context *kcxt,
 						/* insert and unlock */
 						uint64_t	__offset;
 
-						hitem->hash = hash->value;
 						hitem->next = saved;
+						hitem->t.hash = hash->value;
 						__threadfence();
 						__offset = ((char *)kds_final
 									+ kds_final->length
@@ -2014,16 +2022,16 @@ setupGpuPreAggGroupByBuffer(kern_context *kcxt,
 STATIC_FUNCTION(void)
 __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 								 kern_data_store *kds_final,
-								 HeapTupleHeaderData *htup,
+								 kern_tupitem *tupitem,
 								 const kern_expression *kexp_actions,
 								 const char *prepfn_buffer)
 {
 	int			nattrs = Min(kds_final->ncols, kexp_actions->u.pagg.nattrs);
-	uint32_t	t_hoff, nbytes;
+	int			t_hoff = 0;
+	char	   *base = KERN_TUPITEM_GET_PAYLOAD(tupitem);
 	const char *pos = prepfn_buffer;
+	uint32_t	nbytes;
 
-	t_hoff = MAXALIGN(offsetof(HeapTupleHeaderData,
-							   t_bits) + BITMAPLEN(nattrs));
 	/* walk on the columns */
 	for (int j=0; j < nattrs; j++)
 	{
@@ -2039,7 +2047,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 					uint64_t	ival = *((const uint64_t *)pos);
 
 					if (ival > 0)
-						__atomic_add_uint64((uint64_t *)((char *)htup + t_hoff), ival);
+						__atomic_add_uint64((uint64_t *)(base + t_hoff), ival);
 					nbytes = sizeof(int64_t);
 				}
 				break;
@@ -2050,7 +2058,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 					const kagg_state__pminmax_int64_packed *s =
 						(const kagg_state__pminmax_int64_packed *)pos;
 					kagg_state__pminmax_int64_packed *r =
-						(kagg_state__pminmax_int64_packed *)((char *)htup + t_hoff);
+						(kagg_state__pminmax_int64_packed *)(base + t_hoff);
 					if ((s->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
 					{
 						__atomic_or_uint32(&r->attrs, s->attrs);
@@ -2066,7 +2074,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 					const kagg_state__pminmax_int64_packed *s =
 						(const kagg_state__pminmax_int64_packed *)pos;
 					kagg_state__pminmax_int64_packed *r =
-						(kagg_state__pminmax_int64_packed *)((char *)htup + t_hoff);
+						(kagg_state__pminmax_int64_packed *)(base + t_hoff);
 					if ((s->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
 					{
 						__atomic_or_uint32(&r->attrs, s->attrs);
@@ -2081,7 +2089,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 					const kagg_state__pminmax_fp64_packed *s =
 						(const kagg_state__pminmax_fp64_packed *)pos;
 					kagg_state__pminmax_fp64_packed *r =
-						(kagg_state__pminmax_fp64_packed *)((char *)htup + t_hoff);
+						(kagg_state__pminmax_fp64_packed *)(base + t_hoff);
 					if ((s->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
 					{
 						__atomic_or_uint32(&r->attrs, s->attrs);
@@ -2096,7 +2104,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 					const kagg_state__pminmax_fp64_packed *s =
 						(const kagg_state__pminmax_fp64_packed *)pos;
 					kagg_state__pminmax_fp64_packed *r =
-						(kagg_state__pminmax_fp64_packed *)((char *)htup + t_hoff);
+						(kagg_state__pminmax_fp64_packed *)(base + t_hoff);
 					if ((s->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
 					{
 						__atomic_or_uint32(&r->attrs, s->attrs);
@@ -2112,7 +2120,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 					const kagg_state__psum_int_packed *s =
 						(const kagg_state__psum_int_packed *)pos;
 					kagg_state__psum_int_packed *r =
-						(kagg_state__psum_int_packed *)((char *)htup + t_hoff);
+						(kagg_state__psum_int_packed *)(base + t_hoff);
 					if (s->nitems > 0)
 					{
 						__atomic_add_int64(&r->nitems, s->nitems);
@@ -2128,7 +2136,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 					const kagg_state__psum_fp_packed *s =
 						(const kagg_state__psum_fp_packed *)pos;
 					kagg_state__psum_fp_packed *r =
-						(kagg_state__psum_fp_packed *)((char *)htup + t_hoff);
+						(kagg_state__psum_fp_packed *)(base + t_hoff);
 					if (s->nitems > 0)
 					{
 						__atomic_add_int64(&r->nitems, s->nitems);
@@ -2146,7 +2154,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 					const kagg_state__psum_numeric_packed *s =
 						(const kagg_state__psum_numeric_packed *)pos;
                     kagg_state__psum_numeric_packed *r =
-                        (kagg_state__psum_numeric_packed *)((char *)htup + t_hoff);
+                        (kagg_state__psum_numeric_packed *)(base + t_hoff);
 					if (s->nitems > 0)
 					{
 						/* weight must be equal */
@@ -2167,7 +2175,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 					const kagg_state__stddev_packed *s =
 						(const kagg_state__stddev_packed *)pos;
 					kagg_state__stddev_packed *r =
-						(kagg_state__stddev_packed *)((char *)htup + t_hoff);
+						(kagg_state__stddev_packed *)(base + t_hoff);
 					if (s->nitems > 0)
 					{
 						__atomic_add_int64(&r->nitems, s->nitems);
@@ -2183,7 +2191,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 					const kagg_state__covar_packed *s =
 						(const kagg_state__covar_packed *)pos;
 					kagg_state__covar_packed *r =
-						(kagg_state__covar_packed *)((char *)htup + t_hoff);
+						(kagg_state__covar_packed *)(base + t_hoff);
 					if (s->nitems > 0)
 					{
 						__atomic_add_int64(&r->nitems, s->nitems);
@@ -2261,7 +2269,7 @@ mergeGpuPreAggGroupByBuffer(kern_context *kcxt,
 			if (!tupitem)
 				continue;
 			__mergeGpuPreAggGroupByBufferOne(kcxt, kds_final,
-											 &tupitem->htup,
+											 tupitem,
 											 kexp_groupby_actions,
 											 pos);
 		}
@@ -2276,7 +2284,7 @@ mergeGpuPreAggGroupByBuffer(kern_context *kcxt,
 			kern_tupitem *tupitem = KDS_GET_TUPITEM(kds_final, 0);
 
 			__mergeGpuPreAggGroupByBufferOne(kcxt, kds_final,
-											 &tupitem->htup,
+											 tupitem,
 											 kexp_groupby_actions,
 											 kcxt->groupby_prepfn_buffer);
 		}
@@ -2452,7 +2460,7 @@ kern_gpupreagg_final_merge(kern_session_info *session,
 				kern_hashitem *hitem = (kern_hashitem *)
 					((char *)tupitem_src - offsetof(kern_hashitem, t));
 				hash.expr_ops = &xpu_int4_ops;
-				hash.value = hitem->hash;
+				hash.value = hitem->t.hash;
 			}
 			tupitem_dst = __execGpuPreAggGroupByHash(kcxt, kds_dst,
 													 &hash,
@@ -2464,9 +2472,9 @@ kern_gpupreagg_final_merge(kern_session_info *session,
 			if (tupitem_src && tupitem_dst)
 			{
 				const char *prepfn_buffer
-					= (char *)&tupitem_src->htup + tupitem_src->htup.t_hoff;
+					= KERN_TUPITEM_GET_PAYLOAD(tupitem_src);
 				__mergeGpuPreAggGroupByBufferOne(kcxt, kds_dst,
-												 &tupitem_dst->htup,
+												 tupitem_dst,
 												 kexp_groupby_actions,
 												 prepfn_buffer);
 				KDS_GET_ROWINDEX(kds_src)[index] = 0UL;	/* invalidate source */
@@ -2482,9 +2490,9 @@ kern_gpupreagg_final_merge(kern_session_info *session,
 			if (tupitem_src && tupitem_dst)
 			{
 				const char *prepfn_buffer
-					= (char *)&tupitem_src->htup + tupitem_src->htup.t_hoff;
+					= KERN_TUPITEM_GET_PAYLOAD(tupitem_src);
 				__mergeGpuPreAggGroupByBufferOne(kcxt, kds_dst,
-												 &tupitem_dst->htup,
+												 tupitem_dst,
 												 kexp_groupby_actions,
 												 prepfn_buffer);
 				KDS_GET_ROWINDEX(kds_src)[index] = 0UL;	/* invalidate source */

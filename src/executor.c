@@ -706,10 +706,10 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 			if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
 			{
 				uint64_t	hash_nslots = KDS_GET_HASHSLOT_WIDTH(pp_info->final_nrows);
-				uint32_t	unitsz = (offsetof(kern_hashitem, t.htup) +
-									  MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
-											   BITMAPLEN(kds_dst_tdesc->natts)) +
-									  pts->css.ss.ps.plan->plan_width);
+				uint32_t	unitsz = (MAXALIGN(offsetof(kern_hashitem, t.t_bits) +
+											  BITMAPLEN(kds_dst_tdesc->natts)) +
+									  MAXALIGN(pts->css.ss.ps.plan->plan_width +
+											   ROWID_SIZE));
 				kds_length = (head_sz +
 							  sizeof(uint64_t) * hash_nslots +		/* hash-slots */
 							  sizeof(uint64_t) * 2 * hash_nslots +	/* row-index */
@@ -723,7 +723,8 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 				kds_temp->format = KDS_FORMAT_HASH;
 			}
 			kds_temp->length = kds_length;
-			session->groupby_kds_final = __appendBinaryStringInfo(&buf, kds_temp, head_sz);
+			session->groupby_kds_final
+				= __appendBinaryStringInfo(&buf, kds_temp, head_sz);
 			session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
 			session->groupby_ngroups_estimation = pts->css.ss.ps.plan->plan_rows;
 		}
@@ -1088,14 +1089,9 @@ pgstromScanNextTuple(pgstromTaskState *pts)
 
 		if (index < kds->nitems)
 		{
-			kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds, index);
-
-			pts->curr_htup.t_len = tupitem->t_len;
-			memcpy(&pts->curr_htup.t_self,
-				   &tupitem->htup.t_ctid,
-				   sizeof(ItemPointerData));
-			pts->curr_htup.t_data = &tupitem->htup;
-			return ExecStoreHeapTuple(&pts->curr_htup, slot, false);
+			kern_tupitem   *titem = KDS_GET_TUPITEM(kds, index);
+			/* kern_tupitem and MinimalTuple are binary compatible */
+			return ExecStoreMinimalTuple((MinimalTuple)titem, slot, false);
 		}
 		if (++pts->curr_chunk >= pts->curr_resp->u.results.chunks_nitems)
 			break;
@@ -1401,7 +1397,7 @@ pgstromCreateTaskState(CustomScan *cscan,
 	pts->css.flags = cscan->flags;
 	pts->css.methods = methods;
 #if PG_VERSION_NUM >= 160000
-	pts->css.slotOps = &TTSOpsHeapTuple;
+	pts->css.slotOps = &TTSOpsMinimalTuple;
 #endif
 	pts->xpu_task_flags = pp_info->xpu_task_flags;
 	pts->pp_info = pp_info;
@@ -1504,7 +1500,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 	 */
 	ExecInitScanTupleSlot(estate, &pts->css.ss,
 						  pts->css.ss.ps.scandesc,
-						  &TTSOpsHeapTuple);
+						  &TTSOpsMinimalTuple);
 	ExecAssignScanProjectionInfoWithVarno(&pts->css.ss, INDEX_VAR);
 #endif
 	/*
@@ -1725,15 +1721,10 @@ pgstromExecScanReCheck(pgstromTaskState *pts, EPQState *epqstate)
 				pts->fallback_nitems > __fallback_nitems &&
 				pts->fallback_usage  > __fallback_usage)
 			{
-				HeapTupleData	htup;
 				kern_tupitem   *titem = (kern_tupitem *)
 					(pts->fallback_buffer +
 					 pts->fallback_tuples[pts->fallback_index]);
-
-				htup.t_len = titem->t_len;
-				htup.t_data = &titem->htup;
-				scan_slot = pts->css.ss.ss_ScanTupleSlot;
-				ExecForceStoreHeapTuple(&htup, scan_slot, false);
+				ExecStoreMinimalTuple((MinimalTuple)titem, scan_slot, false);
 			}
 			else
 			{
