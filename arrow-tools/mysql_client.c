@@ -1073,8 +1073,7 @@ sqldb_server_connect(const char *sqldb_hostname,
 					 const char *sqldb_username,
 					 const char *sqldb_password,
 					 const char *sqldb_database,
-					 userConfigOption *sqldb_session_configs,
-					 nestLoopOption *nestloop_option_list)
+					 userConfigOption *sqldb_session_configs)
 {
 	MYSTATE	   *mystate = palloc0(sizeof(MYSTATE));
 	MYSQL	   *conn;
@@ -1084,9 +1083,6 @@ sqldb_server_connect(const char *sqldb_hostname,
 	userConfigOption *conf;
 	const char *query;
 
-	if (nestloop_option_list != NULL)
-		Elog("Bug? mysql2arrow does not support --inner-join/--outer-join");
-	
 	conn = mysql_init(NULL);
 	if (!conn)
 		Elog("failed on mysql_init");

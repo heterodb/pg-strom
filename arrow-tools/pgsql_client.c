@@ -28,31 +28,12 @@ static void		pgsql_setup_array_element(PGconn *conn,
 										  ArrowField *arrow_field,
 										  int *p_numFieldNode,
 										  int *p_numBuffers);
-
-typedef struct
-{
-	char			pstmt[32];
-	const char	   *command;
-	bool			prepared;
-	bool			outer_join;
-	PGresult	   *res;
-	uint32_t		nitems;
-	uint32_t		index;
-	int				n_params;
-	int			   *p_depth;
-	int			   *p_resno;
-	const char	  **p_names;
-} PGSTATE_NL;
-
 typedef struct
 {
 	PGconn	   *conn;
 	PGresult   *res;
 	uint32_t	nitems;
 	uint32_t	index;
-	/* if --nestloop is given */
-	uint32_t	n_depth;
-	PGSTATE_NL	nestloop[1];
 } PGSTATE;
 
 static inline bool
@@ -140,243 +121,39 @@ pgsql_server_connect(const char *sqldb_hostname,
 }
 
 /*
- * pgsql_exec_nestloop
- */
-static PGresult *
-pgsql_exec_nestloop(PGSTATE *pgstate, int depth)
-{
-	PGSTATE_NL *nl = &pgstate->nestloop[depth-1];
-	PGresult   *res;
-	const char **param_values = alloca(sizeof(char *) * nl->n_params);
-	int		   *param_length = alloca(sizeof(int) * nl->n_params);
-	int		   *param_format = alloca(sizeof(int) * nl->n_params);
-	int			i, j, k;
-
-	if (!nl->prepared)
-	{
-		Oid	   *param_types = alloca(sizeof(Oid) * nl->n_params);
-
-		for (i = 0; i < nl->n_params; i++)
-		{
-			const char *pname = nl->p_names[i];
-
-			for (k = 0; k <= depth; k++)
-			{
-				if (k == 0)
-					res = pgstate->res;
-				else
-					res = pgstate->nestloop[k-1].res;
-				assert(res != NULL);
-
-				j = PQfnumber(res, pname);
-				if (j >= 0)
-				{
-					param_types[i] = PQftype(res, j);
-					nl->p_depth[i] = k;
-					nl->p_resno[i] = j;
-					break;
-				}
-			}
-			if (k > depth)
-				Elog("could not find nestloop parameter: $(%s)", pname);
-		}
-		res = PQprepare(pgstate->conn,
-						nl->pstmt,
-						nl->command,
-						nl->n_params,
-						param_types);
-		if (PQresultStatus(res) != PGRES_COMMAND_OK)
-			Elog("failed on PQprepare: %s", PQerrorMessage(pgstate->conn));
-		
-		nl->prepared = true;
-	}
-	memset(param_values, 0, sizeof(char *) * nl->n_params);
-	memset(param_length, 0, sizeof(int)    * nl->n_params);
-	memset(param_format, 0, sizeof(int)    * nl->n_params);
-
-	for (i=0; i < nl->n_params; i++)
-	{
-		k = nl->p_depth[i];
-		j = nl->p_resno[i];
-
-		if (k == 0)
-		{
-			if (pgstate->index >= pgstate->nitems ||
-				PQgetisnull(pgstate->res, pgstate->index, j))
-				continue;
-			param_values[i] = PQgetvalue(pgstate->res,
-										 pgstate->index, j);
-			param_length[i] = PQgetlength(pgstate->res,
-										  pgstate->index, j);
-			param_format[i] = PQfformat(pgstate->res, j);
-		}
-		else
-		{
-			PGSTATE_NL *curr = &pgstate->nestloop[k-1];
-
-			if (curr->index >= curr->nitems ||
-				PQgetisnull(curr->res, curr->index, j))
-				continue;
-			param_values[i] = PQgetvalue(curr->res,
-										 curr->index, j);
-			param_length[i] = PQgetlength(curr->res,
-										  curr->index, j);
-			param_format[i] = PQfformat(curr->res, j);
-		}
-	}
-	/* Ok, exec prepared statement */
-	res = PQexecPrepared(pgstate->conn,
-						 nl->pstmt,
-						 nl->n_params,
-						 param_values,
-						 param_length,
-						 param_format,
-						 1);
-	if (PQresultStatus(res) != PGRES_TUPLES_OK)
-		Elog("SQL execution failed: %s", PQresultErrorMessage(res));
-	return res;
-}
-
-/*
- * __pgsql_rewind_nestloop
- */
-static inline void
-__pgsql_rewind_nestloop(PGSTATE *pgstate, int depth)
-{
-	int		i;
-
-	for (i=depth; i < pgstate->n_depth; i++)
-	{
-		PGSTATE_NL *nl = &pgstate->nestloop[i];
-
-		if (nl->res)
-			PQclear(nl->res);
-		nl->res = NULL;
-		nl->nitems = 0;
-		nl->index = 0;
-	}
-}
-
-/*
- * pgsql_move_nestloop_next
- */
-static int
-pgsql_move_nestloop_next(PGSTATE *pgstate, int depth, uint32_t *rows_index)
-{
-	PGSTATE_NL *nl = &pgstate->nestloop[depth - 1];
-
-	assert(depth > 0 && depth <= pgstate->n_depth);
-	if (!nl->res)
-	{
-		nl->res = pgsql_exec_nestloop(pgstate, depth);
-		nl->nitems = PQntuples(nl->res);
-		nl->index = 0;
-	}
-
-	if (pgstate->n_depth == depth)
-	{
-		if (nl->index < nl->nitems)
-		{
-			if (rows_index)
-				rows_index[depth] = nl->index++;
-			return 1;		/* ok, a valid tuple */
-		}
-		else if (nl->outer_join &&
-				 nl->nitems == 0 &&
-				 nl->index == 0)
-		{
-			if (rows_index)
-				rows_index[depth] = UINT_MAX;
-			nl->index++;
-			return 0;		/* ok, null-tuple by OUTER-JOIN */
-		}
-	}
-	else
-	{
-		while (nl->index < nl->nitems)
-		{
-			if (pgsql_move_nestloop_next(pgstate, depth+1, rows_index) >= 0)
-			{
-				if (rows_index)
-					rows_index[depth] = nl->index;
-				return 1;	/* ok, a valid tuple */
-			}
-			nl->index++;
-			__pgsql_rewind_nestloop(pgstate, depth);
-		}
-		if (nl->outer_join &&
-			nl->nitems == 0 &&
-			nl->index == 0)
-		{
-			if (pgsql_move_nestloop_next(pgstate, depth+1, rows_index) >= 0)
-			{
-				if (rows_index)
-					rows_index[depth] = UINT_MAX;
-				return 0;	/* ok, null-tuple by OUTER-JOIN */
-			}
-			nl->index++;
-		}
-	}
-	/* no more tuples */
-	PQclear(nl->res);
-	nl->res = NULL;
-	return -1;
-}
-
-/*
  * pgsql_move_next
  */
 static bool
-pgsql_move_next(PGSTATE *pgstate, uint32_t *rows_index)
+pgsql_move_next(PGSTATE *pgstate)
 {
 	PGconn	   *conn = pgstate->conn;
 	PGresult   *res;
 
-	for (;;)
+	if (pgstate->index >= pgstate->nitems)
 	{
-		if (pgstate->index >= pgstate->nitems)
-		{
-			const char *query = "FETCH FORWARD 500000 FROM " CURSOR_NAME;
+		const char *query = "FETCH FORWARD 500000 FROM " CURSOR_NAME;
 
-			if (pgstate->res)
-				PQclear(pgstate->res);
+		if (pgstate->res)
+			PQclear(pgstate->res);
 
-			res = PQexecParams(conn, query,
-							   0, NULL, NULL, NULL, NULL,
-							   1);	/* results in binary mode */
-			if (PQresultStatus(res) != PGRES_TUPLES_OK)
-				Elog("SQL execution failed: %s",
-					 PQresultErrorMessage(res));
-			pgstate->res = res;
-			pgstate->nitems = PQntuples(res);
-			pgstate->index  = 0;
+		res = PQexecParams(conn, query,
+						   0, NULL, NULL, NULL, NULL,
+						   1);	/* results in binary mode */
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			Elog("SQL execution failed: %s",
+				 PQresultErrorMessage(res));
+		pgstate->res = res;
+		pgstate->nitems = PQntuples(res);
+		pgstate->index  = 0;
 
-			if (pgstate->nitems == 0)
-			{
-				PQclear(pgstate->res);
-				pgstate->res = NULL;
-				return false;	/* no more tuples */
-			}
-		}
-
-		if (pgstate->n_depth == 0)
+		if (pgstate->nitems == 0)
 		{
-			if (rows_index)
-				rows_index[0] = pgstate->index++;
-			return true;
-		}
-		else if (pgsql_move_nestloop_next(pgstate, 1, rows_index) >= 0)
-		{
-			if (rows_index)
-				rows_index[0] = pgstate->index;
-			return true;
-		}
-		else
-		{
-			pgstate->index++;
-			__pgsql_rewind_nestloop(pgstate, 0);
+			PQclear(pgstate->res);
+			pgstate->res = NULL;
+			return false;	/* no more tuples */
 		}
 	}
+	return true;
 }
 
 /*
@@ -784,20 +561,9 @@ pgsql_create_buffer(PGSTATE *pgstate,
 	PGconn	   *conn = pgstate->conn;
 	PGresult   *res = pgstate->res;
 	SQLtable   *table;
-	int			i, j;
-	int			depth = 0;
 	int			nfields = PQnfields(res);
 
-	for (i=0; i < pgstate->n_depth; i++)
-	{
-		PGSTATE_NL *nl = &pgstate->nestloop[i];
-		int		count;
-
-		count = PQnfields(nl->res);
-		if (count == 0)
-			Elog("sub-command contains no fields: %s", nl->command);
-		nfields += count;
-	}
+	//TODO: expand nfields if --
 	table = palloc0(offsetof(SQLtable, columns[nfields]));
 	table->nitems = 0;
 	table->nfields = nfields;
@@ -807,11 +573,11 @@ pgsql_create_buffer(PGSTATE *pgstate,
 		af_info->footer.schema._num_fields != nfields)
 		Elog("number of the fields mismatch");
 
-	for (i=0, j=0; i < nfields; i++, j++)
+	for (int j=0; j < nfields; j++)
 	{
-		const char *attname;
-		Oid			atttypid;
-		int			atttypmod;
+		const char *attname = PQfname(res, j);
+		Oid			atttypid = PQftype(res, j);
+		int			atttypmod = PQfmod(res, j);
 		PGresult   *__res;
 		char		query[4096];
 		const char *typlen;
@@ -825,16 +591,6 @@ pgsql_create_buffer(PGSTATE *pgstate,
 		const char *typtypmod;
 		const char *extname;
 		ArrowField *arrow_field = NULL;
-
-		if (j == PQnfields(res))
-		{
-			assert(depth < pgstate->n_depth);
-			res = pgstate->nestloop[depth++].res;
-			j = 0;
-		}
-		attname = PQfname(res, j);
-		atttypid = PQftype(res, j);
-		atttypmod = PQfmod(res, j);
 
 		snprintf(query, sizeof(query),
 				 WITH_RECURSIVE_PG_BASE_TYPE
@@ -900,7 +656,7 @@ pgsql_create_buffer(PGSTATE *pgstate,
 		}
 		pgsql_setup_attribute(conn,
 							  table,
-							  &table->columns[i],
+							  &table->columns[j],
 							  attname,
 							  atttypid,
 							  atttypmod,
@@ -930,16 +686,13 @@ sqldb_server_connect(const char *sqldb_hostname,
                      const char *sqldb_username,
                      const char *sqldb_password,
                      const char *sqldb_database,
-                     userConfigOption *session_config_list,
-					 nestLoopOption *sqldb_nestloop_list)
+                     userConfigOption *session_config_list)
 {
 	PGSTATE	   *pgstate;
 	PGconn	   *conn;
 	PGresult   *res;
 	const char *query;
-	int			i, n_depth = 0;
 	userConfigOption *conf;
-	nestLoopOption *nlopt;
 
 	conn = pgsql_server_connect(sqldb_hostname,
 								sqldb_port_num,
@@ -982,27 +735,10 @@ sqldb_server_connect(const char *sqldb_hostname,
 	if (!server_timezone)
 		Elog("out of memory");
 
-	/* setup state object */
-	for (nlopt = sqldb_nestloop_list; nlopt; nlopt = nlopt->next)
-		n_depth++;
-
-	pgstate = palloc0(offsetof(PGSTATE, nestloop[n_depth]));
+	/* allocate PGSTATE */
+	pgstate = palloc0(sizeof(PGSTATE));
 	pgstate->conn = conn;
 	pgstate->res  = NULL;
-	pgstate->n_depth = n_depth;
-	for (nlopt = sqldb_nestloop_list, i=0; nlopt; nlopt = nlopt->next, i++)
-	{
-		PGSTATE_NL *nl = &pgstate->nestloop[i];
-
-		sprintf(nl->pstmt, "pstmt_nl%d", i+1);
-		nl->command = nlopt->sub_command;
-		nl->outer_join = nlopt->outer_join;
-		nl->n_params = nlopt->n_params;
-		nl->p_depth = palloc0(sizeof(int) * nlopt->n_params);
-		nl->p_resno = palloc0(sizeof(int) * nlopt->n_params);
-		nl->p_names = palloc0(sizeof(char *) * nlopt->n_params);
-		memcpy(nl->p_names, nlopt->pnames, sizeof(char *) * nlopt->n_params);
-	}
 	return pgstate;
 }
 
@@ -1078,14 +814,6 @@ sqldb_begin_query(void *sqldb_state,
 	pgstate->nitems = PQntuples(res);
 	pgstate->index  = 0;
 
-	for (int depth=1; depth <= pgstate->n_depth; depth++)
-	{
-		PGSTATE_NL *nl = &pgstate->nestloop[depth - 1];
-
-		nl->res = pgsql_exec_nestloop(pgstate, depth);
-		nl->nitems = PQntuples(nl->res);
-		nl->index = 0;
-	}
 	return pgsql_create_buffer(pgstate,
 							   af_info,
 							   dictionary_list);
@@ -1099,38 +827,22 @@ sqldb_fetch_results(void *sqldb_state, SQLtable *table)
 {
 	PGSTATE	   *pgstate = sqldb_state;
 	PGresult   *res;
-	uint32_t   *rows_index;
 	uint32_t	index;
-	int			depth = 0;
-	int			i, j, ncols;
 	size_t		usage = 0;
 
-	rows_index = alloca(sizeof(uint32_t) * (pgstate->n_depth + 1));
-	if (!pgsql_move_next(pgstate, rows_index))
+	if (!pgsql_move_next(pgstate))
 		return false;		/* end of the scan */
 
 	res = pgstate->res;
-	ncols = PQnfields(res);
-	index = rows_index[0];
-	for (i=0, j=0; i < table->nfields; i++, j++)
+	index = pgstate->index++;
+	for (int j=0; j < table->nfields; j++)
 	{
-		SQLfield   *column = &table->columns[i];
+		SQLfield   *column = &table->columns[j];
 		const char *addr;
 		size_t		sz;
 
-		/* switch to the next depth, if any */
-		while (j == ncols)
-		{
-			PGSTATE_NL *nl = &pgstate->nestloop[depth++];
-
-			assert(depth <= pgstate->n_depth);
-			res = nl->res;
-			ncols = PQnfields(res);
-			index = rows_index[depth];
-			j = 0;
-		}
 		/* data must be binary format */
-		if (index == UINT_MAX || PQgetisnull(res, index, j))
+		if (j >= PQnfields(res) || PQgetisnull(res, index, j))
 		{
 			addr = NULL;
 			sz = 0;
@@ -1143,8 +855,6 @@ sqldb_fetch_results(void *sqldb_state, SQLtable *table)
 		}
 		usage += sql_field_put_value(column, addr, sz);
 	}
-	assert(depth == pgstate->n_depth);
-
 	table->usage = usage;
 	table->nitems++;
 
@@ -1157,17 +867,9 @@ sqldb_close_connection(void *sqldb_state)
 	PGSTATE	   *pgstate = sqldb_state;
 	PGconn	   *conn = pgstate->conn;
 	PGresult   *res;
-	int			i;
 
 	if (pgstate->res)
 		PQclear(pgstate->res);
-	for (i=0; i < pgstate->n_depth; i++)
-	{
-		PGSTATE_NL *nl = &pgstate->nestloop[i];
-
-		if (nl->res)
-			PQclear(nl->res);
-	}
 	/* close the cursor */
 	res = PQexec(conn, "CLOSE " CURSOR_NAME);
 	if (PQresultStatus(res) != PGRES_COMMAND_OK)

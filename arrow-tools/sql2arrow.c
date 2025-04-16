@@ -37,7 +37,6 @@ static int		num_worker_threads = 0;
 static char	   *parallel_dist_keys = NULL;
 static int		shows_progress = 0;
 static userConfigOption *sqldb_session_configs = NULL;
-static nestLoopOption *sqldb_nestloop_options = NULL;
 
 /*
  * Per-worker state variables
@@ -654,68 +653,6 @@ read_sql_command_from_file(const char *filename)
 	return buffer;
 }
 
-#ifdef __PG2ARROW__
-static nestLoopOption *
-parseNestLoopOption(const char *command, bool outer_join)
-{
-	nestLoopOption *nlopt = palloc0(offsetof(nestLoopOption, pnames[10]));
-	const char *pos;
-	const char *end;
-	const char *sub_command;
-	char	   *dest;
-
-	if (strncmp(command, "file://", 7) == 0)
-		command = read_sql_command_from_file(command + 7);
-
-	sub_command = dest = palloc0(strlen(command) + 100);
-
-	for (pos = command; *pos != '\0'; pos++)
-	{
-		if (*pos == '\\')
-		{
-			pos++;
-			*dest++ = *pos;
-			if (*pos == '\0')
-				Elog("syntax error in: %s", command);
-		}
-		else if (*pos != '$')
-		{
-			*dest++ = *pos;
-		}
-		else
-		{
-			char	   *pname, *c;
-			size_t		sz;
-
-			pos++;
-			if (*pos != '(')
-				Elog("syntax error in: %s", command);
-			end = strchr(pos, ')');
-			if (!end)
-				Elog("syntax error in: %s", command);
-			pname = strndup(pos+1, end - (pos + 1));
-			for (c = pname; *c != '\0'; c++)
-			{
-				if (!isalnum(*c) && *c != '_')
-					Elog("--nestloop: field reference name should be '[0-9a-zA-Z_]+'");
-			}
-			sz = offsetof(nestLoopOption, pnames[nlopt->n_params + 1]);
-			nlopt = repalloc(nlopt, sz);
-			nlopt->pnames[nlopt->n_params++] = pname;
-
-			dest += sprintf(dest, "$%d", nlopt->n_params);
-			pos = end;
-		}
-	}
-	*dest = '\0';
-
-	nlopt->sub_command = sub_command;
-	nlopt->outer_join = outer_join;
-
-	return nlopt;
-}
-#endif	/* __PG2ARROW__ */
-
 int
 parseParallelDistKeys(const char *parallel_dist_keys, const char *delim)
 {
@@ -846,8 +783,6 @@ usage(void)
 		  "      (-n and -k are exclusive, either of them can be give if parallel dump.\n"
 		  "       It is user's responsibility to avoid data duplication.)\n"
 #ifdef __PG2ARROW__
-		  "      --inner-join=SUB_COMMAND\n"
-		  "      --outer-join=SUB_COMMAND\n"
 #endif
 		  "  -o, --output=FILENAME result file in Apache Arrow format\n"
 		  "      --append=FILENAME result Apache Arrow file to be appended\n"
@@ -921,7 +856,6 @@ parse_options(int argc, char * const argv[])
 	int			c;
 	int			password_prompt = 0;
 	userConfigOption *last_user_config = NULL;
-	nestLoopOption *last_nest_loop __attribute__((unused)) = NULL;
 
 	while ((c = getopt_long(argc, argv,
 							"d:c:t:o:s:h:p:u:"
@@ -1100,20 +1034,6 @@ parse_options(int argc, char * const argv[])
 					last_user_config = conf;
 				}
 				break;
-#ifdef __PG2ARROW__
-			case 1004:		/* --inner-join */
-			case 1005:		/* --outer-join */
-				{
-					nestLoopOption *nlopt = parseNestLoopOption(optarg, c == 1005);
-
-					if (last_nest_loop)
-						last_nest_loop->next = nlopt;
-					else
-						sqldb_nestloop_options = nlopt;
-					last_nest_loop = nlopt;
-				}
-				break;
-#endif	/* __PG2ARROW__ */
 			case 1006:		/* --schema */
 				if (dump_arrow_filename)
 					Elog("--dump and --schema are exclusive");
@@ -1455,8 +1375,7 @@ worker_main(void *__worker_id)
 									  sqldb_username,
 									  sqldb_password,
 									  sqldb_database,
-									  sqldb_session_configs,
-									  sqldb_nestloop_options);
+									  sqldb_session_configs);
 	worker_command = sqldb_command_apply_worker_id(sqldb_command, worker_id);
 	if (shows_progress)
 		printf("worker:%lu SQL=[%s]\n", worker_id, worker_command);
@@ -1526,8 +1445,7 @@ int main(int argc, char * const argv[])
 									  sqldb_username,
 									  sqldb_password,
 									  sqldb_database,
-									  sqldb_session_configs,
-									  sqldb_nestloop_options);
+									  sqldb_session_configs);
 	/* read the original arrow file, if --append mode */
 	if (append_filename)
 	{
