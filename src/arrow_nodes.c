@@ -846,9 +846,8 @@ copyArrowNode(ArrowNode *dest, const ArrowNode *src)
 }
 
 const char *
-arrowNodeName(ArrowNode *node)
+__arrowNodeName(const ArrowNode *node, char *buf, size_t bufsz)
 {
-	static __thread char buf[128];
 	ArrowPrecision	prep;
 	ArrowDateUnit	d_unit;
 	ArrowTimeUnit	t_unit;
@@ -859,149 +858,137 @@ arrowNodeName(ArrowNode *node)
 	switch (node->tag)
 	{
 		case ArrowNodeTag__Null:
-			return "Arrow::Null";
-
+			snprintf(buf, bufsz, "Arrow::Null");
+			break;
 		case ArrowNodeTag__Int:
-			snprintf(buf, sizeof(buf), "Arrow::%s%d",
+			snprintf(buf, bufsz, "Arrow::%s%d",
 					 ((ArrowTypeInt *)node)->is_signed ? "Int" : "Uint",
 					 ((ArrowTypeInt *)node)->bitWidth);
-			return buf;
-
+			break;
 		case ArrowNodeTag__FloatingPoint:
 			prep = ((ArrowTypeFloatingPoint*)node)->precision;
-			snprintf(buf, sizeof(buf), "Arrow::Float%s",
+			snprintf(buf, bufsz, "Arrow::Float%s",
 					 ArrowPrecisionAsCstring(prep));
-			return buf;
-
+			break;
 		case ArrowNodeTag__Utf8:
-			return "Arrow::Utf8";
-
+			snprintf(buf, bufsz, "Arrow::Utf8");
+			break;
 		case ArrowNodeTag__Binary:
-			return "Arrow::Binary";
-
+			snprintf(buf, bufsz, "Arrow::Binary");
+			break;
 		case ArrowNodeTag__Bool:
-			return "Arrow::Bool";
-
+			snprintf(buf, bufsz, "Arrow::Bool");
+			break;
 		case ArrowNodeTag__Decimal:
 			if (((ArrowTypeDecimal *)node)->scale == 0)
-				snprintf(buf, sizeof(buf), "Arrow::Decimal%d(%d)",
+				snprintf(buf, bufsz, "Arrow::Decimal%d(%d)",
 						 ((ArrowTypeDecimal *)node)->bitWidth,
 						 ((ArrowTypeDecimal *)node)->precision);
 			else
-				snprintf(buf, sizeof(buf), "Arrow::Decimal%d(%d,%d)",
+				snprintf(buf, bufsz, "Arrow::Decimal%d(%d,%d)",
 						 ((ArrowTypeDecimal *)node)->bitWidth,
 						 ((ArrowTypeDecimal *)node)->precision,
 						 ((ArrowTypeDecimal *)node)->scale);
-			return buf;
-
+			break;
 		case ArrowNodeTag__Date:
 			d_unit = ((ArrowTypeDate *)node)->unit;
-			snprintf(buf, sizeof(buf), "Arrow::Date[%s]",
+			snprintf(buf, bufsz, "Arrow::Date[%s]",
 					 ArrowDateUnitAsCstring(d_unit));
-			return buf;
-
+			break;
 		case ArrowNodeTag__Time:
 			t_unit = ((ArrowTypeTime *)node)->unit;
-			snprintf(buf, sizeof(buf), "Arrow::Time%d%s",
+			snprintf(buf, bufsz, "Arrow::Time%d%s",
 					 ((ArrowTypeTime *)node)->bitWidth,
 					 ArrowTimeUnitAsCstring(t_unit));
-			return buf;
-
+			break;
 		case ArrowNodeTag__Timestamp:
 			t_unit = ((ArrowTypeTimestamp *)node)->unit;
 			timezone = ((ArrowTypeTimestamp *)node)->timezone;
-			off = snprintf(buf, sizeof(buf), "Arrow::Timestamp%s",
+			off = snprintf(buf, bufsz, "Arrow::Timestamp%s",
 						   ArrowTimeUnitAsCstring(t_unit));
 			if (timezone)
 				snprintf(buf+off, sizeof(buf)-off, " <%s>", timezone);
-			return buf;
-			
+			break;
 		case ArrowNodeTag__Interval:
 			i_unit = ((ArrowTypeInterval *)node)->unit;
-			snprintf(buf, sizeof(buf), "Arrow::Interval[%s]",
+			snprintf(buf, bufsz, "Arrow::Interval[%s]",
 					 ArrowIntervalUnitAsCstring(i_unit));
-			return buf;
-
+			break;
 		case ArrowNodeTag__List:
-			return "Arrow::List";
-
+			snprintf(buf, bufsz, "Arrow::List");
+			break;
 		case ArrowNodeTag__Struct:
-			return "Arrow::Struct";
-
+			snprintf(buf, bufsz, "Arrow::Struct");
+			break;
 		case ArrowNodeTag__Union:
-			return "Arrow::Union";
-
+			snprintf(buf, bufsz, "Arrow::Union");
+			break;
 		case ArrowNodeTag__FixedSizeBinary:
-			snprintf(buf, sizeof(buf), "Arrow::FixedSizeBinary<%d>",
+			snprintf(buf, bufsz, "Arrow::FixedSizeBinary<%d>",
 					 ((ArrowTypeFixedSizeBinary *)node)->byteWidth);
-			return buf;
-
+			break;
 		case ArrowNodeTag__FixedSizeList:
-			snprintf(buf, sizeof(buf), "Arrow::FixedSizeList<%d>",
+			snprintf(buf, bufsz, "Arrow::FixedSizeList<%d>",
 					 ((ArrowTypeFixedSizeList *)node)->listSize);
-			return buf;
-
+			break;
 		case ArrowNodeTag__Map:
-			return "Arrow::Map";
-
+			snprintf(buf, bufsz, "Arrow::Map");
+			break;
 		case ArrowNodeTag__Duration:
 			t_unit = ((ArrowTypeDuration *)node)->unit;
-			snprintf(buf, sizeof(buf), "Arrow::Duration%s",
-					 t_unit == ArrowTimeUnit__Second ? "" :
-					 t_unit == ArrowTimeUnit__MilliSecond ? "[ms]" :
-					 t_unit == ArrowTimeUnit__MicroSecond ? "[us]" :
-					 t_unit == ArrowTimeUnit__NanoSecond ? "[ns]" : "[??]");
-			return buf;
-
+			snprintf(buf, bufsz, "Arrow::Duration%s",
+					 ArrowTimeUnitAsCstring(t_unit));
+			break;
 		case ArrowNodeTag__LargeBinary:
-			return "Arrow::LargeBinary";
-
+			snprintf(buf, bufsz, "Arrow::LargeBinary");
+			break;
 		case ArrowNodeTag__LargeUtf8:
-			return "Arrow::LargeUtf8";
-
+			snprintf(buf, bufsz, "Arrow::LargeUtf8");
+			break;
 		case ArrowNodeTag__LargeList:
-			return "Arrow::LargeList";
-
+			snprintf(buf, bufsz, "Arrow::LargeList");
+			break;
 		case ArrowNodeTag__KeyValue:
-			return "Arrow::KeyValue";
-
+			snprintf(buf, bufsz, "Arrow::KeyValue");
+			break;
 		case ArrowNodeTag__DictionaryEncoding:
-			return "Arrow::DictionaryEncoding";
-
+			snprintf(buf, bufsz, "Arrow::DictionaryEncoding");
+			break;
 		case ArrowNodeTag__Field:
-			return "Arrow::Field";
-
+			snprintf(buf, bufsz, "Arrow::Field");
+			break;
 		case ArrowNodeTag__FieldNode:
-			return "Arrow::FieldNode";
-
+			snprintf(buf, bufsz, "Arrow::FieldNode");
+			break;
 		case ArrowNodeTag__Buffer:
-			return "Arrow::Buffer";
-
+			snprintf(buf, bufsz, "Arrow::Buffer");
+			break;
 		case ArrowNodeTag__Schema:
-			return "Arrow::Schema";
-
+			snprintf(buf, bufsz, "Arrow::Schema");
+			break;
 		case ArrowNodeTag__RecordBatch:
-			return "Arrow::RecordBatch";
-
+			snprintf(buf, bufsz, "Arrow::RecordBatch");
+			break;
 		case ArrowNodeTag__DictionaryBatch:
-			return "Arrow::DictionaryBatch";
-
+			snprintf(buf, bufsz, "Arrow::DictionaryBatch");
+			break;
 		case ArrowNodeTag__Message:
-			return "Arrow::Message";
-
+			snprintf(buf, bufsz, "Arrow::Message");
+			break;
 		case ArrowNodeTag__Block:
-			return "Arrow::Block";
-
+			snprintf(buf, bufsz, "Arrow::Block");
+			break;
 		case ArrowNodeTag__Footer:
-			return "Arrow::Footer";
-
+			snprintf(buf, bufsz, "Arrow::Footer");
+			break;
 		case ArrowNodeTag__BodyCompression:
-			return "Arrow::BodyCompression";
-
+			snprintf(buf, bufsz, "Arrow::BodyCompression");
+			break;
 		default:
+			snprintf(buf, bufsz, "Unknown");
 			break;
 	}
-	return "Unknown";
+	return buf;
 }
 
 /* ------------------------------------------------

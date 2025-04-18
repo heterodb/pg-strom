@@ -21,8 +21,8 @@ sqldb_server_connect(const char *sqldb_hostname,
 extern SQLtable *
 sqldb_begin_query(void *sqldb_state,
 				  const char *sqldb_command,
-				  ArrowFileInfo *af_info,
-				  SQLdictionary *dictionary_list);
+				  SQLdictionary *dictionary_list,
+				  const char *flatten_composite_columns);
 extern bool
 sqldb_fetch_results(void *sqldb_state, SQLtable *table);
 
@@ -41,4 +41,18 @@ extern char	   *pstrdup(const char *str);
 extern void	   *repalloc(void *ptr, size_t sz);
 extern uint32_t	hash_any(const unsigned char *k, int keylen);
 
+/*
+ * __trim
+ */
+static inline char *
+__trim(char *token)
+{
+	char   *tail = token + strlen(token) - 1;
+
+	while (*token == ' ' || *token == '\t')
+		token++;
+	while (tail >= token && (*tail == ' ' || *tail == '\t'))
+		*tail-- = '\0';
+	return token;
+}
 #endif	/* SQL2ARROW_H */

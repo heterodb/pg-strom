@@ -142,7 +142,7 @@ struct SQLfield
 	SQLtype		sql_type;		/* attributes of SQL type */
 	SQLfield   *element;		/* valid, if array type */
 	int			nfields;		/* # of sub-fields of composite type */
-	SQLfield   *subfields;	/* valid, if composite type */
+	SQLfield   *subfields;		/* valid, if composite type */
 	SQLdictionary *enumdict;	/* valid, if enum type */
 
 	ArrowType	arrow_type;		/* type in apache arrow */
@@ -260,7 +260,8 @@ extern char	   *dumpArrowNode(ArrowNode *node);
 extern void		copyArrowNode(ArrowNode *dest, const ArrowNode *src);
 extern void		readArrowFileDesc(int fdesc, ArrowFileInfo *af_info);
 extern bool		arrowFieldTypeIsEqual(ArrowField *a, ArrowField *b);
-extern const char *arrowNodeName(ArrowNode *node);
+extern const char *__arrowNodeName(const ArrowNode *node, char *buf, size_t bufsz);
+#define arrowNodeName(node)		__arrowNodeName((node), alloca(100), 100)
 
 /* arrow_pgsql.c */
 extern int		assignArrowTypePgSQL(SQLfield *column,

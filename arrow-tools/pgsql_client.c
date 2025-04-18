@@ -551,30 +551,75 @@ pgsql_setup_array_element(PGconn *conn,
 }
 
 /*
+ * is_flatten_composite_field
+ */
+static __thread SQLfield **flatten_composite_fields = NULL;
+
+static bool
+is_flatten_composite_field(SQLtable *table, int col_index,
+						   const char *flatten_composite_colnames)
+{
+	SQLfield   *column = &table->columns[col_index];
+
+	if (flatten_composite_colnames &&
+		column->arrow_type.node.tag == ArrowNodeTag__Struct)
+	{
+		bool	be_flatten = false;
+
+		if (strcmp("*", flatten_composite_colnames) == 0)
+			be_flatten = true;
+		else
+		{
+			char   *temp = alloca(strlen(flatten_composite_colnames) + 1);
+			char   *tok, *pos;
+
+			strcpy(temp, flatten_composite_colnames);
+			for (tok = strtok_r(temp, ",", &pos);
+				 tok != NULL;
+				 tok = strtok_r(NULL, ",", &pos))
+			{
+				if (strcmp(column->field_name, __trim(tok)) == 0)
+				{
+					be_flatten = true;
+					break;
+				}
+			}
+		}
+
+		if (be_flatten)
+		{
+			if (flatten_composite_fields == NULL)
+				flatten_composite_fields = palloc0(sizeof(SQLfield *) * table->nfields);
+			flatten_composite_fields[col_index] = column;
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
  * pgsql_create_buffer
  */
 static SQLtable *
 pgsql_create_buffer(PGSTATE *pgstate,
-					ArrowFileInfo *af_info,
-					SQLdictionary *sql_dict_list)
+					SQLdictionary *sql_dict_list,
+					const char *flatten_composite_colnames)
 {
 	PGconn	   *conn = pgstate->conn;
 	PGresult   *res = pgstate->res;
 	SQLtable   *table;
 	int			nfields = PQnfields(res);
+	int			nfields_flatten = 0;
+	int			i, j, k;
 
-	//TODO: expand nfields if --
 	table = palloc0(offsetof(SQLtable, columns[nfields]));
 	table->nitems = 0;
 	table->nfields = nfields;
 	table->sql_dict_list = sql_dict_list;
 
-	if (af_info &&
-		af_info->footer.schema._num_fields != nfields)
-		Elog("number of the fields mismatch");
-
-	for (int j=0; j < nfields; j++)
+	for (j=0; j < nfields; j++)
 	{
+		SQLfield   *column = &table->columns[j];
 		const char *attname = PQfname(res, j);
 		Oid			atttypid = PQftype(res, j);
 		int			atttypmod = PQfmod(res, j);
@@ -644,19 +689,9 @@ pgsql_create_buffer(PGSTATE *pgstate,
 		}
 		extname  = (PQgetisnull(__res, 0, 9) ? NULL : PQgetvalue(__res, 0, 9));
 
-		if (af_info)
-		{
-			arrow_field = &af_info->footer.schema.fields[j];
-			if (strcmp(arrow_field->name, attname) != 0)
-			{
-				fprintf(stderr, "Query results field '%s' has incompatible name with Arrow field '%s', keep the original one.\n",
-						attname, arrow_field->name);
-				attname = arrow_field->name;
-			}
-		}
 		pgsql_setup_attribute(conn,
 							  table,
-							  &table->columns[j],
+							  column,
 							  attname,
 							  atttypid,
 							  atttypmod,
@@ -673,6 +708,45 @@ pgsql_create_buffer(PGSTATE *pgstate,
 							  &table->numFieldNodes,
 							  &table->numBuffers);
 		PQclear(__res);
+		/* Mark the columns to be flatten */
+		if (is_flatten_composite_field(table, j, flatten_composite_colnames))
+			nfields_flatten += column->nfields;
+	}
+
+	/*
+	 * pull-up subfields of composite values, if flatten
+	 */
+	if (flatten_composite_fields)
+	{
+		SQLtable   *__table = palloc0(offsetof(SQLtable, columns[nfields + nfields_flatten]));
+
+		__table->numFieldNodes = table->numFieldNodes;
+		__table->numBuffers    = table->numBuffers;
+		__table->sql_dict_list = sql_dict_list;
+		for (j=0, k=0; j < nfields; j++)
+		{
+			SQLfield   *comp = flatten_composite_fields[j];
+
+			if (comp)
+			{
+				int		base = k;
+
+				assert(comp->arrow_type.node.tag == ArrowNodeTag__Struct);
+				for (i=0; i < comp->nfields; i++)
+					memcpy(&__table->columns[k++], &comp->subfields[i], sizeof(SQLfield));
+				comp->subfields = __table->columns + base;
+				/* Struct field has gone */
+				__table->numFieldNodes--;
+				__table->numBuffers--;
+			}
+			else
+			{
+				memcpy(&__table->columns[k++], &table->columns[j], sizeof(SQLfield));
+			}
+		}
+		assert(k <= nfields + nfields_flatten);
+		__table->nfields = k;
+		table = __table;
 	}
 	return table;
 }
@@ -748,8 +822,8 @@ sqldb_server_connect(const char *sqldb_hostname,
 SQLtable *
 sqldb_begin_query(void *sqldb_state,
                   const char *sqldb_command,
-                  ArrowFileInfo *af_info,
-                  SQLdictionary *dictionary_list)
+                  SQLdictionary *dictionary_list,
+				  const char *flatten_composite_columns)
 {
 	static char *snapshot_identifier = NULL;
 	PGSTATE	   *pgstate = sqldb_state;
@@ -815,8 +889,8 @@ sqldb_begin_query(void *sqldb_state,
 	pgstate->index  = 0;
 
 	return pgsql_create_buffer(pgstate,
-							   af_info,
-							   dictionary_list);
+							   dictionary_list,
+							   flatten_composite_columns);
 }
 
 /*
@@ -827,33 +901,53 @@ sqldb_fetch_results(void *sqldb_state, SQLtable *table)
 {
 	PGSTATE	   *pgstate = sqldb_state;
 	PGresult   *res;
-	uint32_t	index;
+	uint32_t	row_index;
+	int			field_index = 0;
+	int			ncols;
 	size_t		usage = 0;
 
 	if (!pgsql_move_next(pgstate))
 		return false;		/* end of the scan */
 
 	res = pgstate->res;
-	index = pgstate->index++;
-	for (int j=0; j < table->nfields; j++)
+	ncols = PQnfields(res);
+	row_index = pgstate->index++;
+	for (int j=0; j < ncols; j++)
 	{
-		SQLfield   *column = &table->columns[j];
-		const char *addr;
-		size_t		sz;
+		const char *addr = NULL;
+		size_t		sz = 0;
 
 		/* data must be binary format */
-		if (j >= PQnfields(res) || PQgetisnull(res, index, j))
+		if (PQgetisnull(res, row_index, j) == 0)
 		{
-			addr = NULL;
-			sz = 0;
+			assert(PQfformat(res, j) == 1);
+			addr = PQgetvalue(res, row_index, j);
+			sz = PQgetlength(res, row_index, j);
+		}
+		if (flatten_composite_fields && flatten_composite_fields[j])
+		{
+			SQLfield   *comp = flatten_composite_fields[j];
+
+			/* sql_table_clear() does not clear the dummy composite field
+			 * so, we rewind the comp->nitems to stop over-consumption of
+			 * the NULL-bitmap. */
+			comp->nitems = table->nitems;
+			usage += sql_field_put_value(comp, addr, sz);
+			field_index += comp->nfields;
 		}
 		else
 		{
-			assert(PQfformat(res, j) == 1);
-			addr = PQgetvalue(res, index, j);
-			sz = PQgetlength(res, index, j);
+			SQLfield   *column = &table->columns[field_index++];
+
+			usage += sql_field_put_value(column, addr, sz);
 		}
-		usage += sql_field_put_value(column, addr, sz);
+	}
+	/* fillup remained fields by NULL */
+	while (field_index < table->nfields)
+	{
+		SQLfield   *column = &table->columns[field_index++];
+
+		usage += sql_field_put_value(column, NULL, 0);
 	}
 	table->usage = usage;
 	table->nitems++;
