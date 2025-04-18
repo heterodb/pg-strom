@@ -448,7 +448,7 @@ and lo_quantity < 25;
 GPUのAtomic演算に関する制限（浮動小数点型の<code>atomicAdd()</code>は64bitまで対応）から、これまでnumeric型の集計処理は浮動小数点型（float8）へのキャストを行って実装されてきました。
 しかしこの場合、わずか53bitしか仮数部を持たない倍精度型浮動小数点データを数百万回も加算するという事になり、計算誤差の蓄積がかなり酷いものになるという課題がありました。そのため、numeric型集計関数のGPUでの実行を抑止するというオプションをわざわざ用意したほどです。（`pg_strom.enable_numeric_aggfuncs`オプション）
 
-v6.6では、numericデータ型のGPU内部実装である128bit固定小数点表現を利用して集計処理を行うよう改良されました。計算誤差が全く発生しなくなったわけではありませんが、実数を表現する桁数が増えた分、計算誤差はかなりマイルドになっています。
+v6.0では、numericデータ型のGPU内部実装である128bit固定小数点表現を利用して集計処理を行うよう改良されました。計算誤差が全く発生しなくなったわけではありませんが、実数を表現する桁数が増えた分、計算誤差はかなりマイルドになっています。
 }
 @en{
 Due to limitations on atomic operations on GPUs (floating-point type <code>atomicAdd()</code> only supports up to 64 bits), numeric aggregation has previously been implemented with values tranformed to 64bit floating-point type (float8).

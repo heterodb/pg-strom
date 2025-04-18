@@ -8,7 +8,7 @@
     <title>GPUソート - PG-Strom Manual</title>
     <link rel="stylesheet" href="../css/theme.css" />
     <link rel="stylesheet" href="../css/theme_extra.css" />
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/styles/github.min.css" />
         <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet" />
         <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet" />
         <link href="../custom.css" rel="stylesheet" />
@@ -20,11 +20,12 @@
         var mkdocs_page_url = null;
       </script>
     
+    <script src="../js/jquery-3.6.0.min.js" defer></script>
     <!--[if lt IE 9]>
       <script src="../js/html5shiv.min.js"></script>
     <![endif]-->
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
-      <script>hljs.highlightAll();</script> 
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/10.5.0/highlight.min.js"></script>
+      <script>hljs.initHighlightingOnLoad();</script> 
 </head>
 
 <body class="wy-body-for-nav" role="document">
@@ -61,7 +62,7 @@
                   </li>
                   <li class="toctree-l1"><a class="reference internal" href="../postgis/">GPU版PostGIS</a>
                   </li>
-                  <li class="toctree-l1 current"><a class="reference internal current" href="#">GPUソート</a>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="./">GPUソート</a>
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#gpu">GPUタスクの実行方式</a>
     </li>
@@ -130,9 +131,9 @@
       <div class="wy-nav-content">
         <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
   <ul class="wy-breadcrumbs">
-    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
-          <li class="breadcrumb-item">利用ガイド</li>
-      <li class="breadcrumb-item active">GPUソート</li>
+    <li><a href=".." class="icon icon-home" alt="Docs"></a> &raquo;</li>
+          <li>利用ガイド &raquo;</li>
+      <li>GPUソート</li>
     <li class="wy-breadcrumbs-aside">
     </li>
   </ul>
@@ -236,9 +237,11 @@ SET
 <h2 id="gpu-sort_2">GPU-Sortによる行数削減</h2>
 <p>GPU-Sortが発動するにはいくつかの条件が必要です。
 前節で説明した通り、まずCPU-Fallbackが無効化されている事が大前提です。</p>
-<p>オプティマイザがGPU-Sortを挿入するのは以下のような場合です。
-- ORDER BY句などで、上位ノードがソート済み結果を要求している。
-- Window関数が使用されており、上位ノードがソート済み結果を要求している。</p>
+<p>オプティマイザがGPU-Sortを挿入するのは以下のような場合です。</p>
+<ul>
+<li>ORDER BY句などで、上位ノードがソート済み結果を要求している。</li>
+<li>Window関数が使用されており、上位ノードがソート済み結果を要求している。</li>
+</ul>
 <p>これらのワークロードに対して、PG-StromはGPU-Sort付きのGPU-PreAgg/Join/Scanの実行計画を生成します。</p>
 <p>加えて、以下のような場合には、GPU上でソート処理まで完結してしまう事によって、副次的にGPUからCPUに返却する行数を削減する事が可能です。
 - ORDER BYにLIMIT句が付加されており、最大で何件の行を出力すればよいか事前に分かっている場合。
@@ -343,15 +346,14 @@ SET
     
   </span>
 </div>
-    <script src="../js/jquery-3.6.0.min.js"></script>
-    <script>var base_url = "..";</script>
-    <script src="../js/theme_extra.js"></script>
-    <script src="../js/theme.js"></script>
-      <script src="../search/main.js"></script>
-    <script>
-        jQuery(function () {
+    <script>var base_url = '..';</script>
+    <script src="../js/theme_extra.js" defer></script>
+    <script src="../js/theme.js" defer></script>
+      <script src="../search/main.js" defer></script>
+    <script defer>
+        window.onload = function () {
             SphinxRtdTheme.Navigation.enable(true);
-        });
+        };
     </script>
 
 </body>
