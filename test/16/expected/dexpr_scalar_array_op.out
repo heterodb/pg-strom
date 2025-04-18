@@ -58,8 +58,8 @@ SELECT id,x INTO test01g FROM regtest_data
 --------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dexpr_scalar_array_op_temp.regtest_data
    Output: id, x
-   GPU Projection: id, x
-   GPU Scan Quals: (72 = ANY (x)) [rows: 5000 -> 17]
+   GPU Projection: regtest_data.id, regtest_data.x
+   GPU Scan Quals: (72 = ANY (regtest_data.x))
 (4 rows)
 
 SELECT id,x INTO test01g FROM regtest_data
@@ -86,8 +86,8 @@ SELECT id,y INTO test02g FROM regtest_data
 --------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dexpr_scalar_array_op_temp.regtest_data
    Output: id, y
-   GPU Projection: id, y
-   GPU Scan Quals: (75.96 = ANY (y)) [rows: 5000 -> 2]
+   GPU Projection: regtest_data.id, regtest_data.y
+   GPU Scan Quals: (75.96 = ANY (regtest_data.y))
 (4 rows)
 
 SELECT id,y INTO test02g FROM regtest_data
@@ -114,8 +114,8 @@ SELECT id,z INTO test03g FROM regtest_data
 --------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dexpr_scalar_array_op_temp.regtest_data
    Output: id, z
-   GPU Projection: id, z
-   GPU Scan Quals: ('kVOV'::text = ANY (z)) [rows: 5000 -> 1]
+   GPU Projection: regtest_data.id, regtest_data.z
+   GPU Scan Quals: ('kVOV'::text = ANY (regtest_data.z))
 (4 rows)
 
 SELECT id,z INTO test03g FROM regtest_data
