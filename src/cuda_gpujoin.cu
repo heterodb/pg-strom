@@ -114,9 +114,7 @@ kern_buffer_consolidation(kern_data_store *kds_dst,
 			memcpy(__titem, titem, titem->t_len);
 			KERN_TUPITEM_SET_ROWID(__titem, row_id);
 			__threadfence();
-			KDS_GET_ROWINDEX(kds_dst)[row_id] = ((char *)kds_dst
-												 + kds_dst->length
-												 - (char *)__titem);
+			KDS_GET_ROWINDEX(kds_dst)[row_id] = offset;
 		}
 		__syncthreads();
 	}
@@ -177,9 +175,7 @@ kern_buffer_reconstruction(kern_data_store *kds_dst,
 			__hitem->next = __atomic_exchange_uint64(__hslots, offset);
 			KERN_TUPITEM_SET_ROWID(&__hitem->t, row_id);
 			__threadfence();
-			KDS_GET_ROWINDEX(kds_dst)[row_id] = ((char *)kds_dst
-												 + kds_dst->length
-												 - (char *)&__hitem->t);
+			KDS_GET_ROWINDEX(kds_dst)[row_id] = (offset - offsetof(kern_hashitem, t));
 		}
 		__syncthreads();
 	}
@@ -259,10 +255,9 @@ kern_buffer_partitioning(kern_buffer_partitions *kbuf_parts,
 				((char *)kds_in + kds_in->length - offset);
 			__hitem->next = __atomic_exchange_uint64(__hslots, offset);
 			memcpy(&__hitem->t, &hitem->t, hitem->t.t_len);
+			KERN_TUPITEM_SET_ROWID(&__hitem->t, row_id);
 			__threadfence();
-			KDS_GET_ROWINDEX(kds_in)[row_id] = ((char *)kds_in
-												+ kds_in->length
-												- (char *)&__hitem->t);
+			KDS_GET_ROWINDEX(kds_in)[row_id] = (offset - offsetof(kern_hashitem, t));
 		}
 		__syncthreads();
 	}

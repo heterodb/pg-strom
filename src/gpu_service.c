@@ -1160,16 +1160,28 @@ out_unlock:
 	return (chunk ? chunk : NULL);
 }
 
-static gpuMemChunk *
-gpuMemAlloc(size_t bytesize)
+static inline gpuMemChunk *
+__gpuMemAlloc(gpuContext *gcontext, size_t bytesize)
 {
-	return __gpuMemAllocCommon(&GpuWorkerCurrentContext->pool_raw, bytesize);
+	return __gpuMemAllocCommon(&gcontext->pool_raw, bytesize);
 }
 
-static gpuMemChunk *
+static inline gpuMemChunk *
+gpuMemAlloc(size_t bytesize)
+{
+	return __gpuMemAlloc(GpuWorkerCurrentContext, bytesize);
+}
+
+static inline gpuMemChunk *
+__gpuMemAllocManaged(gpuContext *gcontext, size_t bytesize)
+{
+	return __gpuMemAllocCommon(&gcontext->pool_managed, bytesize);
+}
+
+static inline gpuMemChunk *
 gpuMemAllocManaged(size_t bytesize)
 {
-	return __gpuMemAllocCommon(&GpuWorkerCurrentContext->pool_managed, bytesize);
+	return __gpuMemAllocManaged(GpuWorkerCurrentContext, bytesize);
 }
 
 static void
@@ -3377,6 +3389,107 @@ gpuservLoadKdsArrow(gpuClient *gclient,
 								  p_npages_vfs_read);
 }
 
+/*
+ * gpuservMigrationKdsBuffer
+ *
+ * Migrate a KDS buffer to other GPU
+ */
+static bool
+gpuservMigrationKdsBuffer(gpuClient *gclient,
+						  gpuContext *gcontext_dst,
+						  gpuMemChunk **p_chunk)
+{
+	gpuMemChunk	   *s_chunk = *p_chunk;
+	gpuMemChunk	   *n_chunk = NULL;
+	CUresult		rc;
+
+	if (!s_chunk->mseg->pool->is_managed)
+	{
+		/* try raw-device memory to raw-device memory (fastest) */
+		n_chunk = __gpuMemAlloc(gcontext_dst, s_chunk->__length);
+		if (n_chunk)
+		{
+			rc = cuMemcpyPeer(n_chunk->m_devptr,
+							  n_chunk->mseg->pool->gcontext->cuda_context,
+							  s_chunk->m_devptr,
+							  s_chunk->mseg->pool->gcontext->cuda_context,
+							  s_chunk->__length);
+			if (rc != CUDA_SUCCESS)
+			{
+				gpuClientELog(gclient, "failed on cuMemcpyPeer: %s",
+							  cuStrError(rc));
+				goto error;
+			}
+			gpuMemFree(s_chunk);
+			*p_chunk = n_chunk;
+			return true;
+		}
+		/* try managed-memory as a secondary choice */
+		n_chunk = __gpuMemAllocManaged(gcontext_dst, s_chunk->__length);
+		if (n_chunk)
+		{
+			rc = cuMemcpyDtoDAsync(n_chunk->m_devptr,
+								   s_chunk->m_devptr,
+								   s_chunk->__length,
+								   MY_STREAM_PER_THREAD);
+            if (rc != CUDA_SUCCESS)
+            {
+                gpuClientELog(gclient, "failed on cuMemcpyDtoH: %s",
+							  cuStrError(rc));
+                goto error;
+            }
+			rc = cuMemPrefetchAsync(n_chunk->m_devptr,
+									n_chunk->__length,
+									gcontext_dst->cuda_device,
+									MY_STREAM_PER_THREAD);
+            if (rc != CUDA_SUCCESS)
+            {
+                gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
+							  cuStrError(rc));
+                goto error;
+            }
+			rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+            if (rc != CUDA_SUCCESS)
+            {
+                gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+							  cuStrError(rc));
+                goto error;
+            }
+            gpuMemFree(s_chunk);
+            *p_chunk = n_chunk;
+            return true;
+		}
+		/* unable to allocate device memory */
+        gpuClientELog(gclient, "out of GPU%d device memory", gcontext_dst->cuda_dindex);
+	}
+	else
+	{
+		/* kds_src is already on the managed memory */
+		rc = cuMemPrefetchAsync(s_chunk->m_devptr,
+								s_chunk->__length,
+								gcontext_dst->cuda_device,
+								MY_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
+						  cuStrError(rc));
+			goto error;
+		}
+		rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+						  cuStrError(rc));
+			goto error;
+		}
+		return true;
+	}
+error:
+	if (n_chunk)
+		gpuMemFree(n_chunk);
+	return false;
+}
+
 /* ----------------------------------------------------------------
  *
  * gpuservHandleGpuTaskExec
@@ -3878,51 +3991,29 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 										 0,
 										 kern_stats))
 	{
+		gpuContext *__gcontext_saved = GpuWorkerCurrentContext;
+
 		/* for each inner-buffer partitions if any */
-		gpuContext *__gcontext_prev = GpuWorkerCurrentContext;
-		int		k;
-
-		for (k=0; k < part_nitems; k++)
+		for (int k=0; k < part_nitems; k++)
 		{
-			uint32_t	__reminder = part_reminders[k];
-			gpuContext *__gcontext = part_gcontexts[k];
-			gpuMemChunk *n_chunk = NULL;
-			CUdeviceptr	m_kds_src_dup = m_kds_src;
+			uint32_t		__reminder = part_reminders[k];
+			gpuContext	   *__gcontext = part_gcontexts[k];
 
-			/* switch gpuContext */
-			gpuContextSwitchTo(__gcontext);
-
-			/* copy kds_src if raw device memory */
-			if (s_chunk != NULL)
+			/* migrate KDS to the next GPU device */
+			if (s_chunk)
 			{
-				assert(s_chunk->mseg->pool->gcontext == __gcontext_prev);
-				assert(m_kds_extra == 0UL);
-				n_chunk = gpuMemAlloc(s_chunk->__length);
-				if (!n_chunk)
+				if (!gpuservMigrationKdsBuffer(gclient, __gcontext, &s_chunk))
 				{
-					gpuClientFatal(gclient, "failed on gpuMemAlloc: %s",
-								   cuStrError(rc));
-					break;
+					gpuContextSwitchTo(__gcontext_saved);
+					goto bailout;
 				}
-				rc = cuMemcpyPeerAsync(n_chunk->m_devptr,
-									   __gcontext->cuda_context,
-									   m_kds_src,
-									   __gcontext_prev->cuda_context,
-									   kds_src->length,
-									   MY_STREAM_PER_THREAD);
-				if (rc != CUDA_SUCCESS)
-				{
-					gpuMemFree(n_chunk);
-					gpuClientFatal(gclient, "failed on cuMemcpyPeerAsync: %s",
-								   cuStrError(rc));
-					break;
-				}
-				m_kds_src_dup = n_chunk->m_devptr;
+				m_kds_src = s_chunk->m_devptr;
 			}
 			/* launch GPU Kernel for other inner buffer partitions */
+			gpuContextSwitchTo(__gcontext);
 			if (!__gpuservLaunchGpuTaskExecKernel(__gcontext,
 												  gclient,
-												  m_kds_src_dup,
+												  m_kds_src,
 												  m_kds_extra,
 												  m_kmrels,
 												  kds_dst,
@@ -3931,17 +4022,12 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 												  0,
 												  kern_stats))
 			{
-				if (n_chunk != NULL)
-					gpuMemFree(n_chunk);
-				break;
+				gpuContextSwitchTo(__gcontext_saved);
+				goto bailout;
 			}
-			if (n_chunk != NULL)
-				gpuMemFree(n_chunk);
 		}
-		gpuContextSwitchTo(__gcontext_prev);
-		/* returns the success status, if OK */
-		if (k == part_nitems)
-			gpuClientWriteBackNormal(gclient, kern_stats, kds_dst);
+		gpuContextSwitchTo(__gcontext_saved);
+		gpuClientWriteBackNormal(gclient, kern_stats, kds_dst);
 	}
 bailout:
 	THREAD_GPU_CONTEXT_VALIDATION_CHECK(gcontext);
