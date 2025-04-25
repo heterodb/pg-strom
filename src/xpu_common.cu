@@ -138,7 +138,6 @@ kern_extract_minimal_tuple(kern_context *kcxt,
 {
 	const uint8_t *nullmap = NULL;
 	int		ncols = Min(titem->t_infomask2 & HEAP_NATTS_MASK, kds->ncols);
-	bool	hoge;
 
 	if ((titem->t_infomask & HEAP_HASNULL) != 0)
 		nullmap = titem->t_bits;

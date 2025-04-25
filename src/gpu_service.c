@@ -2120,6 +2120,9 @@ __setupGpuJoinPinnedInnerBufferCommon(gpuClient *gclient,
 			kds_usage  += __kds->usage;
 		}
 	}
+	kds_nslots = KDS_GET_HASHSLOT_WIDTH(kds_nitems);
+	if (kbuf_parts)
+		kds_nslots /= kbuf_parts->hash_divisor;
 
 	if (!kds_src)
 	{
@@ -2128,8 +2131,6 @@ __setupGpuJoinPinnedInnerBufferCommon(gpuClient *gclient,
 		return false;
 	}
 	kds_head = alloca(KDS_HEAD_LENGTH(kds_src));
-	kds_nslots = KDS_GET_HASHSLOT_WIDTH(kds_nitems);
-
 	memcpy(kds_head, kds_src, KDS_HEAD_LENGTH(kds_src));
 	kds_length = KDS_HEAD_LENGTH(kds_head)
 		+ sizeof(uint64_t) * kds_nslots		/* hash-nslots */
