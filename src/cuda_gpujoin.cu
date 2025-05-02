@@ -185,79 +185,61 @@ kern_buffer_reconstruction(kern_data_store *kds_dst,
  * GPU Buffer Partitioning
  */
 KERNEL_FUNCTION(void)
-kern_buffer_partitioning(kern_buffer_partitions *kbuf_parts,
-						 const kern_data_store *__restrict__ kds_src)
+kern_buffer_partitioning(kern_data_store *kds_dst,
+						 const kern_data_store *__restrict__ kds_src,
+						 uint32_t hash_remainder,
+						 uint32_t hash_divisor)
 {
-	uint64_t   *rowindex = KDS_GET_ROWINDEX(kds_src);
-	uint32_t	hash_divisor = kbuf_parts->hash_divisor;
-	uint64_t   *kpart_usage = (uint64_t *)SHARED_WORKMEM(0);
-	uint32_t   *kpart_nitems = (uint32_t *)(kpart_usage + hash_divisor);
+	__shared__ uint32_t base_rowid;
+	__shared__ uint64_t base_usage;
 	uint32_t	base;
 
 	assert(hash_divisor >= 2);
+	assert(hash_remainder < hash_divisor);
+	assert(kds_src->format == KDS_FORMAT_HASH &&
+		   kds_dst->format == KDS_FORMAT_HASH &&
+		   kds_dst->hash_nslots > 0);
 	for (base = get_global_base();
 		 base < kds_src->nitems;
 		 base += get_global_size())
 	{
-		const kern_hashitem *hitem = NULL;
-		kern_data_store *kds_in = NULL;
+		const kern_tupitem *titem = NULL;
 		uint32_t	index = base + get_local_id();
 		uint32_t	tupsz = 0;
-		int			part_id;
 		uint32_t	row_id;
+		uint32_t	count;
 		uint64_t	offset;
-
-		/* reset buffer */
-		for (int p=get_local_id(); p < hash_divisor; p += get_local_size())
-		{
-			kpart_usage[p] = 0;
-			kpart_nitems[p] = 0;
-		}
-		__syncthreads();
+		uint64_t	total_sz;
 
 		/* fetch row from kds_src */
 		if (index < kds_src->nitems)
 		{
-			hitem = (kern_hashitem *)((char *)kds_src + kds_src->length
-									  - rowindex[index]
-									  - offsetof(kern_hashitem, t));
-			tupsz   = MAXALIGN(offsetof(kern_hashitem, t) + hitem->t.t_len);
-			part_id = hitem->t.hash % hash_divisor;
-			row_id = __atomic_add_uint32(&kpart_nitems[part_id], 1);
-			offset = __atomic_add_uint64(&kpart_usage[part_id], tupsz);
+			titem = KDS_GET_TUPITEM(kds_src, index);
+			if ((titem->hash % hash_divisor) == hash_remainder)
+				tupsz = MAXALIGN(offsetof(kern_hashitem, t) + titem->t_len);
 		}
-		__syncthreads();
-
 		/* allocation of the destination buffer */
-		if (get_local_id() < hash_divisor)
+		row_id = pgstrom_stair_sum_binary(tupsz > 0, &count);
+		offset = pgstrom_stair_sum_uint64(tupsz, &total_sz);
+		if (get_local_id() == 0)
 		{
-			int		p = get_local_id();
-
-			kds_in = kbuf_parts->parts[p].kds_in;
-			kpart_nitems[p] = __atomic_add_uint32(&kds_in->nitems, kpart_nitems[p]);
-			kpart_usage[p]  = __atomic_add_uint64(&kds_in->usage,  kpart_usage[p]);
+			base_rowid = __atomic_add_uint32(&kds_dst->nitems, count);
+			base_usage = __atomic_add_uint64(&kds_dst->usage,  total_sz);
 		}
 		__syncthreads();
-
-		/* write out to the position */
-		if (hitem)
+		/* put tuples on the destination */
+		row_id += base_rowid;
+		offset += base_usage;
+		if (tupsz > 0)
 		{
-			kern_hashitem  *__hitem;
-			uint64_t	   *__hslots;
-
-			assert(part_id >= 0 && part_id < hash_divisor);
-			kds_in = kbuf_parts->parts[part_id].kds_in;
-			row_id += kpart_nitems[part_id];
-			offset += kpart_usage[part_id] + tupsz;
-
-			__hslots = KDS_GET_HASHSLOT(kds_in, hitem->t.hash);
-			__hitem = (kern_hashitem *)
-				((char *)kds_in + kds_in->length - offset);
-			__hitem->next = __atomic_exchange_uint64(__hslots, offset);
-			memcpy(&__hitem->t, &hitem->t, hitem->t.t_len);
-			KERN_TUPITEM_SET_ROWID(&__hitem->t, row_id);
+			uint64_t	   *hslot = KDS_GET_HASHSLOT(kds_dst, titem->hash);
+			kern_hashitem  *hitem = (kern_hashitem *)
+				((char *)kds_dst + kds_dst->length - offset);
+			hitem->next = __atomic_exchange_uint64(hslot, offset);
+			memcpy(&hitem->t, titem, titem->t_len);
+			KERN_TUPITEM_SET_ROWID(&hitem->t, row_id);
 			__threadfence();
-			KDS_GET_ROWINDEX(kds_in)[row_id] = (offset - offsetof(kern_hashitem, t));
+			KDS_GET_ROWINDEX(kds_dst)[row_id] = (offset - offsetof(kern_hashitem, t));
 		}
 		__syncthreads();
 	}

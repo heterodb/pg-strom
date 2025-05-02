@@ -701,28 +701,44 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		if ((pts->xpu_task_flags & (DEVTASK__PINNED_ROW_RESULTS |
 									DEVTASK__PINNED_HASH_RESULTS)) != 0)
 		{
-			size_t		kds_length = (4UL << 20);	/* 4MB */
-
-			if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
+			if ((pts->xpu_task_flags & DEVTASK__PREAGG) == 0 &&
+				!pp_info->kexp_gpusort_keydesc)
 			{
-				uint64_t	hash_nslots = KDS_GET_HASHSLOT_WIDTH(pp_info->final_nrows);
-				uint32_t	unitsz = (MAXALIGN(offsetof(kern_hashitem, t.t_bits) +
-											  BITMAPLEN(kds_dst_tdesc->natts)) +
-									  MAXALIGN(pts->css.ss.ps.plan->plan_width +
-											   ROWID_SIZE));
-				kds_length = (head_sz +
-							  sizeof(uint64_t) * hash_nslots +		/* hash-slots */
-							  sizeof(uint64_t) * 2 * hash_nslots +	/* row-index */
-							  unitsz * 2 * hash_nslots);
-				if (kds_length < (1UL<<30))
-					kds_length = (1UL<<30);		/* 1GB at least */
-				else
-					kds_length = TYPEALIGN(1024, kds_length);
-
-				kds_temp->hash_nslots = hash_nslots;
-				kds_temp->format = KDS_FORMAT_HASH;
+				/* Pinned Inner Buffer - Thus, buffer should be small pieces */
+				if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
+				{
+					kds_temp->hash_nslots = 137;
+					kds_temp->format = KDS_FORMAT_HASH;
+				}
+				kds_temp->length = (512UL << 20);	/* 512MB per buffer */
 			}
-			kds_temp->length = kds_length;
+			else if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
+			{
+				uint64_t	nslots = KDS_GET_HASHSLOT_WIDTH(pp_info->final_nrows);
+				size_t		length;
+				size_t		unitsz;
+
+				unitsz = (MAXALIGN(offsetof(kern_hashitem, t.t_bits) +
+								   BITMAPLEN(kds_dst_tdesc->natts)) +
+						  MAXALIGN(pts->css.ss.ps.plan->plan_width + ROWID_SIZE));
+				length = (head_sz +
+						  sizeof(uint64_t) * nslots +
+						  sizeof(uint64_t) * 2 * nslots +
+						  unitsz * 2 * nslots);
+				if (length < (1UL<<30))
+					length = (1UL<<30);		/* 1G at least */
+				else
+					length = TYPEALIGN(1024, length);
+
+				kds_temp->length = length;
+				kds_temp->format = KDS_FORMAT_HASH;
+				kds_temp->hash_nslots = nslots;
+			}
+			else
+			{
+				/* nogroup aggregation will use very small portion */
+				kds_temp->length = (4UL<<20);	/* 4MB */
+			}
 			session->groupby_kds_final
 				= __appendBinaryStringInfo(&buf, kds_temp, head_sz);
 			session->groupby_prepfn_bufsz = pp_info->groupby_prepfn_bufsz;
