@@ -2676,7 +2676,7 @@ typedef struct {
 	uint32_t	kds_src_pathname;	/* offset to const char *pathname */
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
-	int32_t		scan_repeat_id;		/* current repeat count */
+	int32_t		scan_repeat_id;		/* current repeat-id */
 	char		data[1]				__MAXALIGNED__;
 } kern_exec_task;
 
@@ -2685,6 +2685,7 @@ typedef struct {
 	uint32_t	chunks_nitems;		/* number of kds_dst items */
 	uint32_t	ojmap_offset;		/* offset of outer-join-map */
 	uint32_t	ojmap_length;		/* length of outer-join-map */
+	int32_t		scan_repeat_id;		/* repeat-id in the request kern_exec_task */
 	bool		right_outer_join;	/* true, if CPU should exex RIGHT-OUTER-JOIN */
 	bool		final_plan_task;	/* true, if it is final response */
 	uint32_t	final_nitems;		/* final buffer's nitems, if any */

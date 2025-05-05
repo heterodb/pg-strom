@@ -1477,6 +1477,7 @@ struct gpuQueryBuffer
 	void		   *h_kmrels;		/* GpuJoin inner buffer (host) */
 	size_t			kmrels_sz;		/* GpuJoin inner buffer size */
 	pthread_rwlock_t m_kds_rwlock;	/* RWLock for the final/fallback buffer */
+	int32_t			curr_repeat_id;
 	int				gpumem_nitems;
 	int				gpumem_nrooms;
 	CUdeviceptr	   *gpumem_devptrs;
@@ -2755,6 +2756,7 @@ gpuClientWriteBackPartial(gpuClient  *gclient,
 	resp.tag    = XpuCommandTag__SuccessHalfWay;
 	resp.u.results.chunks_nitems = 1;
 	resp.u.results.chunks_offset = resp_sz;
+	resp.u.results.scan_repeat_id = -1;		/* should not be checked */
 
 	iov = &iov_array[iovcnt++];
 	iov->iov_base = &resp;
@@ -2778,7 +2780,8 @@ gpuClientWriteBackPartial(gpuClient  *gclient,
 static void
 gpuClientWriteBackNormal(gpuClient  *gclient,
 						 kern_exec_results *kern_stats,
-						 kern_data_store *kds)
+						 kern_data_store *kds,
+						 int32_t scan_repeat_id)
 {
 	struct iovec	iov_array[10];
 	struct iovec   *iov;
@@ -2794,6 +2797,7 @@ gpuClientWriteBackNormal(gpuClient  *gclient,
 	resp->tag    = XpuCommandTag__Success;
 	memcpy(&resp->u.results, kern_stats,
 		   offsetof(kern_exec_results, stats[kern_stats->num_rels]));
+	resp->u.results.scan_repeat_id = scan_repeat_id;
 	/* sanity checks */
 	assert(resp->u.results.chunks_offset == 0 &&
 		   resp->u.results.chunks_nitems == 0 &&
@@ -3529,6 +3533,150 @@ no_prepfunc_buffer:
 }
 
 /*
+ * setup_gpujoin_inner_partitioned_buffer
+ */
+static int
+__setup_gpujoin_inner_partitioned_buffer(gpuContext *gcontext,
+										 gpuClient *gclient,
+										 gpuQueryBuffer *gq_buf,
+										 kern_buffer_partitions *kbuf_parts,
+										 int32_t scan_repeat_id,
+										 gpuContext **part_gcontexts,
+										 uint32_t *part_reminders)
+{
+	int32_t		start = scan_repeat_id * numGpuDevAttrs;
+	int32_t		end = Min(start + numGpuDevAttrs, kbuf_parts->hash_divisor);
+	int32_t		curr_reminder = -1;
+	int32_t		part_nitems = 0;
+	bool		has_exclusive_lock = false;
+	CUresult	rc;
+
+	/* assign GPUs to execute this GpuTask */
+	for (int k=start; k < end; k++)
+	{
+		gpumask_t	part_mask = kbuf_parts->parts[k].available_gpus;
+
+		if ((part_mask & gcontext->cuda_dmask) != 0)
+		{
+			curr_reminder = k;
+		}
+		else
+		{
+			gpuContext *__gcontext = __lookupOneRandomGpuContext(part_mask);
+
+			Assert(__gcontext != NULL);
+			part_gcontexts[part_nitems] = __gcontext;
+			part_reminders[part_nitems] = k;
+			part_nitems++;
+		}
+	}
+	assert(curr_reminder >= 0);
+
+	/*
+	 * switch partitioned inner-buffer if repeat-id was changed.
+	 */
+	pthreadRWLockReadLock(&gq_buf->m_kds_rwlock);
+again:
+	if (scan_repeat_id != gq_buf->curr_repeat_id)
+	{
+		assert(scan_repeat_id > gq_buf->curr_repeat_id);
+		if (!has_exclusive_lock)
+		{
+			pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+			pthreadRWLockWriteLock(&gq_buf->m_kds_rwlock);
+			has_exclusive_lock = true;
+			goto again;
+		}
+		/* TODO: Run RIGHT-OUTER-JOIN Here */
+
+		/* release buffers */
+		for (int k=0; k < start; k++)
+		{
+			kern_data_store *kds_in;
+
+			if (k >= kbuf_parts->hash_divisor)
+				break;
+			kds_in = kbuf_parts->parts[k].kds_in;
+			if (kds_in)
+			{
+				if (!releaseGpuQueryBufferOne(gq_buf, (CUdeviceptr)kds_in))
+				{
+					pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+					gpuClientELog(gclient, "failed on releaseGpuQueryBufferOne");
+					return -1;
+				}
+				kbuf_parts->parts[k].kds_in = NULL;
+			}
+		}
+		/* prefetch buffers & set policy */
+		for (int k=start; k < end; k++)
+		{
+			kern_data_store *kds_in = kbuf_parts->parts[k].kds_in;
+			gpumask_t	part_mask = kbuf_parts->parts[k].available_gpus;
+			gpuContext *__gcontext = NULL;
+
+			for (int d=0; d < numGpuDevAttrs; d++)
+			{
+				if ((part_mask & (1UL<<d)) != 0)
+				{
+					__gcontext = &gpuserv_gpucontext_array[d];
+					break;
+				}
+			}
+			Assert(__gcontext != NULL);
+
+			rc = cuMemPrefetchAsync((CUdeviceptr)kds_in,
+									(KDS_HEAD_LENGTH(kds_in) +
+									 sizeof(uint64_t) * kds_in->hash_nslots +
+									 sizeof(uint64_t) * kds_in->nitems),
+									__gcontext->cuda_device,
+									MY_STREAM_PER_THREAD);
+			if (rc != CUDA_SUCCESS)
+			{
+				pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+				gpuClientELog(gclient, "failed on cuMemPrefetchAsync(%d): %s",
+							  (int)__gcontext->cuda_device,
+							  cuStrError(rc));
+				return -1;
+			}
+			rc = cuMemPrefetchAsync((CUdeviceptr)kds_in
+									+ kds_in->length
+									- kds_in->usage,
+									kds_in->usage,
+									__gcontext->cuda_device,
+									MY_STREAM_PER_THREAD);
+			if (rc != CUDA_SUCCESS)
+			{
+				pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+				gpuClientELog(gclient, "failed on cuMemPrefetchAsync: %s",
+							  cuStrError(rc));
+				return -1;
+			}
+			if (get_bitcount(part_mask) > 1)
+			{
+				rc = cuMemAdvise((CUdeviceptr)kds_in,
+								 kds_in->length,
+								 CU_MEM_ADVISE_SET_READ_MOSTLY,
+								 -1);
+				if (rc != CUDA_SUCCESS)
+				{
+					pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+					gpuClientELog(gclient, "failed on cuMemAdvise(SET_READ_MOSTLY): %s",
+								  cuStrError(rc));
+					return -1;
+				}
+			}
+		}
+		__gsInfo("GPU-Service: repeat-id changed %u -> %u\n",
+				 gq_buf->curr_repeat_id, scan_repeat_id);
+		gq_buf->curr_repeat_id = scan_repeat_id;
+	}
+	pthreadRWLockUnlock(&gq_buf->m_kds_rwlock);
+
+	return curr_reminder;
+}
+
+/*
  * __gpuservLaunchGpuTaskExecKernel
  */
 static bool
@@ -3922,43 +4070,29 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 	 */
 	if (gq_buf && gq_buf->h_kmrels)
 	{
-		kern_multirels *h_kmrels = (kern_multirels *)gq_buf->h_kmrels;
-		kern_buffer_partitions *kbuf_parts
-			= KERN_MULTIRELS_PARTITION_DESC(h_kmrels, -1);
+		kern_multirels *h_kmrels = gq_buf->h_kmrels;
+		kern_buffer_partitions *kbuf_parts;
 
+		m_kmrels = gq_buf->m_kmrels;
+		num_inner_rels = h_kmrels->num_rels;
+
+		kbuf_parts = KERN_MULTIRELS_PARTITION_DESC((kern_multirels *)m_kmrels, -1);
 		if (kbuf_parts)
 		{
 			int32_t		repeat_id = xcmd->u.task.scan_repeat_id;
-			int32_t		start = repeat_id * numGpuDevAttrs;
-			int32_t		end = Min(start + numGpuDevAttrs,
-								  kbuf_parts->hash_divisor);
-			part_divisor = kbuf_parts->hash_divisor;
-			part_gcontexts = alloca(sizeof(gpuContext *) * part_divisor);
-			part_reminders = alloca(sizeof(uint32_t) * part_divisor);
 
-			assert(start < end);
-			for (int k=start; k < end; k++)
-			{
-				gpumask_t	part_mask = kbuf_parts->parts[k].available_gpus;
-
-				if ((part_mask & gcontext->cuda_dmask) != 0)
-				{
-					curr_reminder = k;
-				}
-				else
-				{
-					gpuContext *__gcontext = __lookupOneRandomGpuContext(part_mask);
-
-					Assert(__gcontext != NULL);
-					part_gcontexts[part_nitems] = __gcontext;
-					part_reminders[part_nitems] = k;
-					part_nitems++;
-				}
-			}
-			assert(curr_reminder >= 0);
+			part_gcontexts = alloca(sizeof(gpuContext *) * kbuf_parts->hash_divisor);
+			part_reminders = alloca(sizeof(uint32_t) * kbuf_parts->hash_divisor);
+			curr_reminder = __setup_gpujoin_inner_partitioned_buffer(gcontext,
+																	 gclient,
+																	 gq_buf,
+																	 kbuf_parts,
+																	 repeat_id,
+																	 part_gcontexts,
+																	 part_reminders);
+			if (curr_reminder < 0)
+				goto bailout;
 		}
-		m_kmrels = gq_buf->m_kmrels;
-		num_inner_rels = h_kmrels->num_rels;
 	}
 	/* statistics buffer */
 	sz = offsetof(kern_exec_results, stats[num_inner_rels]);
@@ -4016,7 +4150,8 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 			}
 		}
 		gpuContextSwitchTo(__gcontext_saved);
-		gpuClientWriteBackNormal(gclient, kern_stats, kds_dst);
+		gpuClientWriteBackNormal(gclient, kern_stats, kds_dst,
+								 xcmd->u.task.scan_repeat_id);
 	}
 bailout:
 	THREAD_GPU_CONTEXT_VALIDATION_CHECK(gcontext);
@@ -5018,6 +5153,7 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	resp->tag   = XpuCommandTag__Success;
 	resp->u.results.chunks_nitems = 0;
 	resp->u.results.chunks_offset = resp_sz;
+	resp->u.results.scan_repeat_id = INT_MAX;	/* repeat-id of the final command */
 	resp->u.results.num_rels = num_rels;
 
 	iov_array = alloca(sizeof(struct iovec) * iovmax);

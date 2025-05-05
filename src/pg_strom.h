@@ -377,6 +377,8 @@ typedef struct
 	pg_atomic_uint64	scan_block_count;	/* scan counter */
 	uint32_t			scan_block_nums;	/* = HeapScanDesc::rs_numblocks */
 	uint32_t			scan_block_start;	/* = HeapScanDesc::rs_startblock */
+	pg_atomic_uint64	scan_repeat_sync_control; /* sync variable when repeat_id is
+												   * incremented to the next loop. */
 	/* control variables to detect the last plan-node at parallel execution */
 	pg_atomic_uint32	parallel_task_control;
 	/* statistics */
