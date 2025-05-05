@@ -16,7 +16,7 @@ PG_MODULE_MAGIC;
 /* misc variables */
 static Oid	__pgstrom_namespace_oid = UINT_MAX;
 static bool	__pgstrom_enabled_guc = true;			/* GUC */
-int			pgstrom_cpu_fallback_elevel = NOTICE;	/* GUC */
+int			pgstrom_cpu_fallback_elevel = ERROR;	/* GUC */
 bool		pgstrom_regression_test_mode = false;	/* GUC */
 bool		pgstrom_explain_developer_mode = false;	/* GUC */
 long		PAGE_SIZE;
@@ -111,7 +111,7 @@ pgstrom_init_gucs(void)
 							 "Enables CPU fallback if xPU required re-run",
 							 NULL,
 							 &pgstrom_cpu_fallback_elevel,
-							 NOTICE,
+							 ERROR,
 							 __cpu_fallback_options,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,

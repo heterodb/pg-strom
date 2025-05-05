@@ -199,6 +199,12 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 	double		bufsz;
 
 	/*
+	 * pinned inner buffer should not be used with CPU-fallback
+	 */
+	if (pgstrom_cpu_fallback_elevel < ERROR)
+		return NULL;
+
+	/*
 	 * should not have RIGHT/FULL OUTER JOIN before pinned inner buffer
 	 * (including the current-depth itself)
 	 */
