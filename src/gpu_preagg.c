@@ -2071,7 +2071,7 @@ consider_sorted_groupby_path(PlannerInfo *root,
 					kind |= KSORT_KEY_ATTR__NULLS_FIRST;
 				if (pk->pk_strategy == BTLessStrategyNumber)
 					kind |= KSORT_KEY_ATTR__ORDER_ASC;
-				else if (pk->pk_strategy != BTLessStrategyNumber)
+				else if (pk->pk_strategy != BTGreaterStrategyNumber)
 				{
 					elog(DEBUG1, "Bug? PathKey has unexpected pk_strategy (%d)",
 						 (int)pk->pk_strategy);

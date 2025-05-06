@@ -2751,15 +2751,24 @@ pgstromExplainTaskState(CustomScanState *node,
 	 */
 	if (pp_info->gpusort_keys_expr != NIL)
 	{
+		ListCell   *lc1, *lc2;
+
 		resetStringInfo(&buf);
-		foreach (lc, pp_info->gpusort_keys_expr)
+		forboth (lc1, pp_info->gpusort_keys_expr,
+				 lc2, pp_info->gpusort_keys_kind)
 		{
-			Node   *sortkey = lfirst(lc);
+			Node   *sortkey = lfirst(lc1);
+			int		kind = lfirst_int(lc2);
 
 			if (buf.len > 0)
 				appendStringInfoString(&buf, ", ");
 			str = deparse_expression(sortkey, dcontext, es->verbose, true);
-			appendStringInfoString(&buf, str);
+			if (!es->verbose)
+				appendStringInfoString(&buf, str);
+			else
+				appendStringInfo(&buf, "%s %s NULLS %s", str,
+								 (kind & KSORT_KEY_ATTR__ORDER_ASC) != 0 ? "ASC" : "DESC",
+								 (kind & KSORT_KEY_ATTR__NULLS_FIRST) != 0 ? "FIRST" : "LAST");
 		}
 		if (pgstrom_explain_developer_mode)
 			appendStringInfo(&buf, " [htup-margin: %d]",
