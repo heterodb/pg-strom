@@ -1695,7 +1695,7 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 
 			Assert(pgstrom_is_gpuscan_state(istate->ps) ||
 				   pgstrom_is_gpujoin_state(istate->ps));
-			Assert(pp_info->gpusort_keys_expr == NIL);
+			Assert(i_pts->pp_info->gpusort_keys_expr == NIL);
 			if (pp_inner->hash_inner_keys != NIL &&
 				pp_inner->hash_outer_keys != NIL)
 				i_pts->xpu_task_flags |= DEVTASK__PINNED_HASH_RESULTS;
