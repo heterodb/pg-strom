@@ -56,9 +56,9 @@ __xpuConnectAttachCommand(void *__priv, XpuCommand *xcmd)
 
 	xcmd->priv = conn;
 	pthreadMutexLock(&conn->mutex);
-	Assert(conn->num_running_cmds > 0);
 	if (xcmd->tag == XpuCommandTag__Error)
 	{
+		Assert(conn->num_running_cmds > 0);
 		conn->num_running_cmds--;
 		if (conn->errorbuf.errcode == ERRCODE_STROM_SUCCESS)
 		{
@@ -73,6 +73,7 @@ __xpuConnectAttachCommand(void *__priv, XpuCommand *xcmd)
 		{
 			uint64_t	control;
 
+			Assert(conn->num_running_cmds > 0);
 			conn->num_running_cmds--;
 			/*
 			 * NOTE: When repeating the outer scan multiple times, it is prohibited
@@ -805,8 +806,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		if ((pts->xpu_task_flags & (DEVTASK__PINNED_ROW_RESULTS |
 									DEVTASK__PINNED_HASH_RESULTS)) != 0)
 		{
-			if ((pts->xpu_task_flags & DEVTASK__PREAGG) == 0 &&
-				!pp_info->kexp_gpusort_keydesc)
+			if ((pts->xpu_task_flags & DEVTASK__PREAGG) == 0)
 			{
 				/* Pinned Inner Buffer - Thus, buffer should be small pieces */
 				if ((pts->xpu_task_flags & DEVTASK__PINNED_HASH_RESULTS) != 0)
@@ -884,6 +884,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
 	__build_session_lconvert(session);
+	session->pinned_inner_buffer_partition_size = pgstrom_pinned_inner_buffer_partition_size();
 	session->pgsql_port_number = PostPortNumber;
 	session->pgsql_plan_node_id = pts->css.ss.ps.plan->plan_node_id;
 	session->join_inner_handle = join_inner_handle;

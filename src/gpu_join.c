@@ -183,6 +183,15 @@ try_fetch_xpujoin_planinfo(const Path *path)
 }
 
 /*
+ * pgstrom_pinned_inner_buffer_partition_size
+ */
+size_t
+pgstrom_pinned_inner_buffer_partition_size(void)
+{
+	return (size_t)__pinned_inner_buffer_partition_size_mb << 20;
+}
+
+/*
  * tryPinnedInnerJoinBufferPath
  */
 static Path *
@@ -864,6 +873,7 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 	List	   *sortkeys_upper = NIL;
 	List	   *sortkeys_expr = NIL;
 	List	   *sortkeys_kind = NIL;
+	List	   *sortkeys_refs = NIL;
 	List	   *inner_target_list = NIL;
 	ListCell   *lc1, *lc2;
 	size_t		unitsz, buffer_sz, devmem_sz;
@@ -989,14 +999,15 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 				}
 				sortkeys_expr = lappend(sortkeys_expr, f_expr);
 				sortkeys_kind = lappend_int(sortkeys_kind, kind);
+				sortkeys_refs = lappend_int(sortkeys_refs, ec->ec_sortref);
 				found = true;
 				break;
 			}
 		}
 		if (!found)
 		{
-			elog(DEBUG1, "gpusort: sortkey '%s' was not found on the final targetlist",
-				 nodeToString(em_expr));
+			elog(DEBUG1, "gpusort: sortkey '%s' was not found on the final targetlist (%s)",
+				 nodeToString(em_expr), nodeToString(final_target->exprs));
 			return;		/* not found */
 		}
 	}
@@ -1010,6 +1021,7 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 								DEVTASK__MERGE_FINAL_BUFFER);
 	pp_info->gpusort_keys_expr = sortkeys_expr;
 	pp_info->gpusort_keys_kind = sortkeys_kind;
+	pp_info->gpusort_keys_refs = sortkeys_refs;
 	linitial(cpath->custom_private) = pp_info;
 	per_tuple_cost = (cpath->path.pathtarget->cost.per_tuple +
 					  pgstrom_gpu_tuple_cost);
@@ -2288,7 +2300,7 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 											 size_t offset)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	size_t		partition_sz = (size_t)__pinned_inner_buffer_partition_size_mb << 20;
+	size_t		partition_sz = pgstrom_pinned_inner_buffer_partition_size();
 	size_t		largest_sz = 0;
 	int			largest_depth = -1;
 
@@ -2972,6 +2984,8 @@ __pgstrom_init_xpujoin_common(void)
 void
 pgstrom_init_gpu_join(void)
 {
+	size_t		dram_sz = 0;
+
 	/* turn on/off gpujoin */
 	DefineCustomBoolVariable("pg_strom.enable_gpujoin",
 							 "Enables the use of GpuJoin logic",
@@ -3020,21 +3034,18 @@ pgstrom_init_gpu_join(void)
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
 							NULL, NULL, NULL);
 	/* unit size of partitioned pinned inner buffer of GpuJoin
-	 * default: 90% of usable DRAM for high-end GPUs,
-	 *          80% of usable DRAM for middle-end GPUs.
+	 * default: 90% of (usable DRAM - 6GB) for high-end GPUs,
+	 *          75% of usable DRAM for other GPUs
 	 */
 	for (int i=0; i < numGpuDevAttrs; i++)
 	{
-		size_t	dram_sz = gpuDevAttrs[i].DEV_TOTAL_MEMSZ;
-		size_t	part_sz;
-
-		if (dram_sz >= (32UL<<30))
-			part_sz = ((dram_sz - (2UL<<30)) * 9 / 10) >> 20;
-		else
-			part_sz = ((dram_sz - (1UL<<30)) * 8 / 10) >> 20;
-		if (i==0 || part_sz < __pinned_inner_buffer_partition_size_mb)
-			__pinned_inner_buffer_partition_size_mb = part_sz;
+		if (i == 0 || dram_sz > gpuDevAttrs[i].DEV_TOTAL_MEMSZ)
+			dram_sz = gpuDevAttrs[i].DEV_TOTAL_MEMSZ;
 	}
+	__pinned_inner_buffer_partition_size_mb = Max((dram_sz >= (20UL<<30)	/* >= 20G */
+												   ? ((dram_sz - (6UL<<30)) * 9 / 10)
+												   : (dram_sz * 3 / 4)) >> 20,
+												  1024);
 	DefineCustomIntVariable("pg_strom.pinned_inner_buffer_partition_size",
 							"Unit size of partitioned pinned inner buffer of GpuJoin",
 							NULL,

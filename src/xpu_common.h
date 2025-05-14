@@ -2645,6 +2645,7 @@ typedef struct kern_session_info
 	uint32_t	session_encode;			/* offset to xpu_encode_info;
 										 * !! function pointer must be set by server */
 	int32_t		session_currency_frac_digits;	/* copy of lconv::frac_digits */
+	uint64_t	pinned_inner_buffer_partition_size; /* copy of pg_strom.pinned_inner_buffer_partition_size */
 	/* projection kds definition */
 	uint32_t	projection_kds_dst;		/* header portion of kds_dst */
 

@@ -2657,6 +2657,8 @@ __attachGpuSortWithWindowRankPath(PlannerInfo *root,
 
 		if (!cell || lfirst_int(cell) != sgc->tleSortGroupRef)
 		{
+			elog(INFO, "gpusort_keys_refs = %s", nodeToString(pp_info->gpusort_keys_refs));
+			elog(INFO, "partitionClause = %s", nodeToString(wc->partitionClause));
 			elog(DEBUG2, "window-rank: GPU-Sort partition-keys mismatch");
 			return NULL;
 		}

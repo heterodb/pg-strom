@@ -896,6 +896,7 @@ extern void		pgstrom_init_dpu_scan(void);
 extern bool		pgstrom_is_gpujoin_path(const Path *path);
 extern bool		pgstrom_is_gpujoin_plan(const Plan *plan);
 extern bool		pgstrom_is_gpujoin_state(const PlanState *ps);
+extern size_t	pgstrom_pinned_inner_buffer_partition_size(void);
 extern pgstromPlanInfo *try_fetch_xpujoin_planinfo(const Path *path);
 extern void		try_add_sorted_gpujoin_path(PlannerInfo *root,
 											RelOptInfo *join_rel,
