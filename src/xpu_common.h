@@ -2692,6 +2692,9 @@ typedef struct {
 	uint32_t	final_nitems;		/* final buffer's nitems, if any */
 	uint64_t	final_usage;		/* final buffer's usage, if any */
 	uint64_t	final_total;		/* final buffer's total size, if any */
+	uint32_t	final_sorting_msec;			/* usec for final buffer sorting */
+	uint32_t	final_reconstruction_msec;	/* usec for final buffer reconstruction */
+	uint32_t	join_reconstruction_msec;	/* usec for inner buffer reconstruction */
 	/* statistics */
 	uint32_t	npages_direct_read;	/* # of pages read by GPU-Direct Storage */
 	uint32_t	npages_vfs_read;	/* # of pages read by VFS (fallback) */

@@ -2219,7 +2219,8 @@ error:
 static bool
 __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 							   gpuQueryBuffer *gq_buf,
-							   uint32_t kmrels_handle)
+							   uint32_t kmrels_handle,
+							   uint32_t *p_join_reconstruction_msec)
 {
 	kern_multirels *h_kmrels = NULL;
 	kern_multirels *m_kmrels = NULL;
@@ -2228,10 +2229,12 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 	struct stat	stat_buf;
 	char		namebuf[100];
 	size_t		mmap_sz = 0;
+	struct timeval tv1, tv2;
 
 	if (kmrels_handle == 0)
 		return true;
 
+	gettimeofday(&tv1, NULL);
 	snprintf(namebuf, sizeof(namebuf),
 			 ".pgstrom_shmbuf_%u_%d",
 			 PostPortNumber, kmrels_handle);
@@ -2323,6 +2326,9 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 				 cuStrError(rc));
 	/* OK */
 	close(fdesc);
+	gettimeofday(&tv2, NULL);
+	*p_join_reconstruction_msec = ((tv2.tv_sec  - tv1.tv_sec)  * 1000L +
+								   (tv2.tv_usec - tv1.tv_usec) / 1000L);
 	return true;
 
 error:
@@ -2617,14 +2623,16 @@ static gpuQueryBuffer *
 getGpuQueryBuffer(gpuClient *gclient,
 				  uint64_t buffer_id,
 				  uint32_t kmrels_handle,
-				  kern_data_store *kds_final_head)
+				  kern_data_store *kds_final_head,
+				  uint32_t *p_join_reconstruction_msec)
 {
 	gpuQueryBuffer *gq_buf = __getGpuQueryBuffer(buffer_id, true);
 
 	if (gq_buf && gq_buf->phase == 0)
 	{
 		/* needs buffer initialization */
-		if (__setupGpuQueryJoinInnerBuffer(gclient, gq_buf, kmrels_handle) &&
+		if (__setupGpuQueryJoinInnerBuffer(gclient, gq_buf, kmrels_handle,
+										   p_join_reconstruction_msec) &&
 			__setupGpuQueryFinalResultsBuffer(gclient, gq_buf, kds_final_head))
 		{
 			/* ok, buffer is now ready */
@@ -3289,6 +3297,7 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	gpuContext	   *gcontext_prev;
 	dlist_iter		iter;
 	kern_data_store *kds_final_head = NULL;
+	uint32_t		join_reconstruction_msec = 0;
 	XpuCommand		resp;
 	struct iovec	iov;
 
@@ -3353,7 +3362,8 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	gclient->gq_buf = getGpuQueryBuffer(gclient,
 										session->query_plan_id,
 										session->join_inner_handle,
-										kds_final_head);
+										kds_final_head,
+										&join_reconstruction_msec);
 	if (!gclient->gq_buf)
 		goto error;
 
@@ -3362,6 +3372,7 @@ gpuservHandleOpenSession(gpuClient *gclient, XpuCommand *xcmd)
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag = XpuCommandTag__Success;
 	resp.length = offsetof(XpuCommand, u.results.stats);
+	resp.u.results.join_reconstruction_msec = join_reconstruction_msec;
 
 	iov.iov_base = &resp;
 	iov.iov_len  = resp.length;
@@ -5336,9 +5347,9 @@ gpuservSortingFinalBufferMulti(gpuClient *gclient,
 		con->gcontext  = &gpuserv_gpucontext_array[k];
 		con->kds_final = kds_final_array[k];
 
-		fprintf(stderr, "kick GPU-Sort KDS[%d] nitems=%u usage=%s\n", k,
-				con->kds_final->nitems,
-				format_bytesz(con->kds_final->usage));
+		__gsInfo("GPU-Sort buffer-%u (nitems=%u, usage=%s) was kicked",
+				 k, con->kds_final->nitems,
+				 format_bytesz(con->kds_final->usage));
 		if ((errno = pthread_create(&con->thread, NULL,
 									__sortingFinalBufferMTWorker, con)) != 0)
 			__FATAL("failed on pthread_create: %m");
@@ -5379,7 +5390,9 @@ __gpuservHandleGpuPreAggFinal(gpuClient *gclient,
 	kern_data_store *kds_prime = NULL;
 	gpuMemChunk		*t_chunk = NULL;
 	bool			retval = false;
+	struct timeval	tv1, tv2, tv3;
 
+	gettimeofday(&tv1, NULL);
 	for (int __dindex=0; __dindex < numGpuDevAttrs; __dindex++)
 	{
 		kern_data_store *__kds = (kern_data_store *)
@@ -5464,6 +5477,9 @@ __gpuservHandleGpuPreAggFinal(gpuClient *gclient,
 			//TODO: Expand kds_prime if overflow
 		}
 	}
+	gettimeofday(&tv2, NULL);
+	resp->u.results.final_reconstruction_msec = ((tv2.tv_sec  - tv1.tv_sec)  * 1000 +
+												 (tv2.tv_usec - tv1.tv_usec) / 1000);
 	/* send back the response message */
 	if (kds_prime)
 	{
@@ -5472,6 +5488,9 @@ __gpuservHandleGpuPreAggFinal(gpuClient *gclient,
 									   gcontext,
 									   kds_prime))
 			goto bailout;
+		gettimeofday(&tv3, NULL);
+		resp->u.results.final_sorting_msec = ((tv3.tv_sec  - tv2.tv_sec)  * 1000 +
+											  (tv3.tv_usec - tv2.tv_usec) / 1000);
 		(void)gpuMemoryPrefetchKDS(kds_prime, CU_DEVICE_CPU);
 		gpuClientWriteBackPartial(gclient, kds_prime);
 	}
@@ -5498,8 +5517,10 @@ __gpuservHandleGpuScanJoinFinal(gpuClient *gclient,
 	uint64_t		kds_final_usage = 0;
 	int				kds_final_nchunks = 0;
 	kern_data_store **kds_final_array = NULL;
+	struct timeval	tv1, tv2, tv3;
 
 	Assert(kexp_gpusort != NULL);
+	gettimeofday(&tv1, NULL);
 	for (int i=0; i < gq_buf->gpumem_nitems; i++)
 	{
 		kern_data_store *__kds = (kern_data_store *)gq_buf->gpumem_devptrs[i];
@@ -5564,6 +5585,9 @@ __gpuservHandleGpuScanJoinFinal(gpuClient *gclient,
 		kds_final_array = &kds_prime;
 		kds_final_nchunks = 1;
 	}
+	gettimeofday(&tv2, NULL);
+	resp->u.results.final_reconstruction_msec = ((tv2.tv_sec  - tv1.tv_sec)  * 1000 +
+												 (tv2.tv_usec - tv1.tv_usec) / 1000);
 	/*
 	 * Runs final sorting and so on
 	 */
@@ -5584,6 +5608,9 @@ __gpuservHandleGpuScanJoinFinal(gpuClient *gclient,
 			releaseGpuQueryBufferOne(gq_buf, (CUdeviceptr)kds_final);
 		}
 	}
+	gettimeofday(&tv3, NULL);
+	resp->u.results.final_sorting_msec = ((tv3.tv_sec  - tv2.tv_sec)  * 1000 +
+										  (tv3.tv_usec - tv2.tv_usec) / 1000);
 	return true;
 }
 

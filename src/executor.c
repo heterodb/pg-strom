@@ -973,15 +973,24 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 									xcmd->u.results.stats[i].nitems_out);
 		}
 		pg_atomic_fetch_add_u64(&ps_state->result_ntuples, xcmd->u.results.nitems_out);
-		if (xcmd->u.results.final_plan_task)
-		{
+		if (xcmd->u.results.final_nitems > 0)
 			pg_atomic_fetch_add_u64(&ps_state->final_nitems,
 									xcmd->u.results.final_nitems);
+		if (xcmd->u.results.final_usage > 0)
 			pg_atomic_fetch_add_u64(&ps_state->final_usage,
 									xcmd->u.results.final_usage);
+		if (xcmd->u.results.final_total > 0)
 			pg_atomic_fetch_add_u64(&ps_state->final_total,
 									xcmd->u.results.final_total);
-		}
+		if (xcmd->u.results.final_sorting_msec > 0)
+			pg_atomic_fetch_add_u32(&ps_state->final_sorting_msec,
+									xcmd->u.results.final_sorting_msec);
+		if (xcmd->u.results.final_reconstruction_msec > 0)
+			pg_atomic_fetch_add_u32(&ps_state->final_reconstruction_msec,
+									xcmd->u.results.final_reconstruction_msec);
+		if (xcmd->u.results.join_reconstruction_msec > 0)
+			pg_atomic_fetch_add_u32(&ps_state->join_reconstruction_msec,
+									xcmd->u.results.join_reconstruction_msec);
 	}
 }
 
@@ -2753,6 +2762,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	if (pp_info->gpusort_keys_expr != NIL)
 	{
 		ListCell   *lc1, *lc2;
+		int64_t		final_nfiltered = -1;
 
 		resetStringInfo(&buf);
 		forboth (lc1, pp_info->gpusort_keys_expr,
@@ -2774,10 +2784,27 @@ pgstromExplainTaskState(CustomScanState *node,
 		if (pgstrom_explain_developer_mode)
 			appendStringInfo(&buf, " [htup-margin: %d]",
 							 pp_info->gpusort_htup_margin);
+		if (es->analyze && ps_state)
+		{
+			pgstromSharedInnerState *istate = &ps_state->inners[pp_info->num_rels - 1];
+
+			appendStringInfo(&buf, " [buffer reconstruction: %umsec, GPU-sorting %umsec]",
+							 pg_atomic_read_u32(&ps_state->final_reconstruction_msec),
+							 pg_atomic_read_u32(&ps_state->final_sorting_msec));
+			final_nfiltered = (pg_atomic_read_u64(&istate->stats_join) +
+							   pg_atomic_read_u64(&istate->stats_roj) -
+							   pg_atomic_read_u64(&ps_state->final_nitems));
+		}
 		ExplainPropertyText("GPU-Sort keys", buf.data, es);
+		
 		if (pp_info->gpusort_limit_count > 0)
-			ExplainPropertyInteger("GPU-Sort Limit", NULL,
-								   pp_info->gpusort_limit_count, es);
+		{
+			resetStringInfo(&buf);
+			appendStringInfo(&buf, "%d", pp_info->gpusort_limit_count);
+			if (final_nfiltered >= 0)
+				appendStringInfo(&buf, ", %ld rows filtered", final_nfiltered);
+			ExplainPropertyText("GPU-Sort Limit", buf.data, es);
+		}
 		if (pp_info->window_rank_func)
 		{
 			int		keycnt = 0;
@@ -2828,7 +2855,9 @@ pgstromExplainTaskState(CustomScanState *node,
 				needs_comma = true;
 			}
 			appendStringInfo(&buf, ") < %u", pp_info->window_rank_limit);
-
+			if (final_nfiltered >= 0)
+				appendStringInfo(&buf, " [%ld rows filtered by window function]",
+								 final_nfiltered);
 			ExplainPropertyText("Window-Rank Filter", buf.data, es);
 		}
 	}
