@@ -772,7 +772,7 @@ typedef struct gpuClient	gpuClient;
 extern bool		isGpuServWorkerThread(void);
 extern void		gpuservLoggerReport(const char *fmt, ...)
 					pg_attribute_printf(1, 2);
-#define __gsLogCxt(LABEL,fmt,...)							\
+#define __gsLogLabel(LABEL,fmt,...)							\
 	gpuservLoggerReport("%s|LOG|%s|%d|%s|" fmt "\n",		\
 						LABEL,								\
 						__basename(__FILE__),				\
@@ -784,7 +784,7 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 	do {													\
 		int		__errno_saved = errno;						\
 		if (isGpuServWorkerThread())						\
-			__gsLogCxt("[error]",fmt,##__VA_ARGS__);		\
+			__gsLogLabel("[error]",fmt,##__VA_ARGS__);		\
 		else												\
 			ereport(LOG,									\
 					(errhidestmt(true),						\
@@ -800,7 +800,7 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 		if (heterodbExtraEreportLevel() >= 1)				\
 		{													\
 			if (isGpuServWorkerThread())					\
-				__gsLogCxt("[info]",fmt,##__VA_ARGS__);		\
+				__gsLogLabel("[info]",fmt,##__VA_ARGS__);	\
 			else											\
 				ereport(LOG,								\
 						(errhidestmt(true),					\
@@ -816,7 +816,7 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 		if (heterodbExtraEreportLevel() >= 2)				\
 		{													\
 			if (isGpuServWorkerThread())					\
-				__gsLogCxt("[debug]",fmt,##__VA_ARGS__);	\
+				__gsLogLabel("[debug]",fmt,##__VA_ARGS__);	\
 			else											\
 				ereport(LOG,								\
 						(errhidestmt(true),					\
