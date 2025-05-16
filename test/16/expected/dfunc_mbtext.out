@@ -23,12 +23,12 @@ SELECT id, line
   INTO test01g
   FROM rt_mbtext
  WHERE line like '%メロス%セリヌンティウス%';
-                                   QUERY PLAN                                    
----------------------------------------------------------------------------------
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_mbtext_temp.rt_mbtext
    Output: id, line
-   GPU Projection: id, line
-   GPU Scan Quals: (line ~~ '%メロス%セリヌンティウス%'::text) [rows: 1270 -> 1]
+   GPU Projection: rt_mbtext.id, rt_mbtext.line
+   GPU Scan Quals: (rt_mbtext.line ~~ '%メロス%セリヌンティウス%'::text)
 (4 rows)
 
 SELECT id, line
@@ -63,8 +63,8 @@ SELECT id, substring(line, id % 20, id % 10 + 5) v1,
 ----------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_mbtext_temp.rt_mbtext
    Output: id, ("substring"(line, (id % 20), ((id % 10) + 5))), ("substring"(line, (id % 30), 10) || "substring"(line, ((id % 20) + 30), 10))
-   GPU Projection: id, "substring"(line, (id % 20), ((id % 10) + 5)), line
-   GPU Scan Quals: (id > 0) [rows: 76 -> 76]
+   GPU Projection: rt_mbtext.id, "substring"(rt_mbtext.line, (rt_mbtext.id % 20), ((rt_mbtext.id % 10) + 5)), rt_mbtext.line
+   GPU Scan Quals: (rt_mbtext.id > 0)
 (4 rows)
 
 SELECT id, substring(line, id % 20, id % 10 + 5) v1,
