@@ -4311,6 +4311,9 @@ __execMergeRightOuterJoinMap(gpuClient *gclient,
 	CUresult	rc;
 	bool		retval = false;
 
+	if (nitems_in == 0)
+		return true;		/* nothing to do */
+
 	if (dst_gcontext != GpuWorkerCurrentContext)
 		old_gcontext = gpuContextSwitchTo(dst_gcontext);
 
