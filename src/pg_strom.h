@@ -487,10 +487,11 @@ struct pgstromTaskState
 	bool				scan_done;
 	bool				final_done;
 	uint32_t			num_scan_repeats;
-
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
+	/* SELECT INTO direct mode */
+	DestReceiver	   *select_into_dest;
 	/* CPU fallback support */
 	off_t			   *fallback_tuples;
 	size_t				fallback_index;

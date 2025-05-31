@@ -870,6 +870,48 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 									 sizeof(kern_fallback_desc) * nitems);
 		session->fallback_desc_nitems = nitems;
 	}
+
+	/* SELECT INTO direct related */
+	if (pts->select_into_dest)
+	{
+		/* see DR_intorel definition in commands/createas.c */
+		struct {
+			DestReceiver	pub;		/* publicly-known function pointers */
+			IntoClause	   *into;		/* target relation specification */
+			/* These fields are filled by intorel_startup: */
+			Relation		rel;		/* relation to write to */
+			ObjectAddress	reladdr;	/* address of rel, for ExecCreateTableAs */
+			CommandId		output_cid;	/* cmin to insert in output tuples */
+			int				ti_options;	/* table_tuple_insert performance options */
+			BulkInsertState	bistate;	/* bulk insert state */
+		}  *dest = (void *)pts->select_into_dest;
+		Relation			drel;
+		LOCKTAG				locktag;
+
+		Assert(dest->pub.mydest == DestIntoRel);
+		drel = dest->rel;
+		SET_LOCKTAG_RELATION(locktag, MyDatabaseId, RelationGetRelid(drel));
+		if (!LockHeldByMe(&locktag, AccessExclusiveLock) &&
+			!LockHeldByMe(&locktag, ExclusiveLock))
+		{
+			elog(DEBUG2, "SELECT INTO Direct disabled, because of not sufficient table lock level");
+			pts->select_into_dest = NULL;
+		}
+		else if (RelationNeedsWAL(drel))
+		{
+			elog(DEBUG2, "SELECT INTO Direct disabled, because the table is neither temporary nor unlogged");
+			pts->select_into_dest = NULL;
+		}
+		else if (RelationGetForm(drel)->relam != HEAP_TABLE_AM_OID)
+		{
+			elog(DEBUG2, "SELECT INTO Direct disabled, because table access method is not 'heap'");
+			pts->select_into_dest = NULL;
+		}
+		else
+		{
+			//do setup
+		}
+	}
 	/* other database session information */
 	session->query_plan_id = ps_state->query_plan_id;
 	session->xpu_task_flags = pts->xpu_task_flags;
@@ -2860,6 +2902,14 @@ pgstromExplainTaskState(CustomScanState *node,
 								 final_nfiltered);
 			ExplainPropertyText("Window-Rank Filter", buf.data, es);
 		}
+	}
+
+	/*
+	 * SELECT INTO direct mode
+	 */
+	if (pts->select_into_dest)
+	{
+		ExplainPropertyText("SELECT-INTO Direct", "possible", es);
 	}
 
 	/*

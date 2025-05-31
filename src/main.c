@@ -24,10 +24,12 @@ long		PAGE_MASK;
 int			PAGE_SHIFT;
 long		PHYS_PAGES;
 long		PAGES_PER_BLOCK;
+static bool	pgstrom_enable_select_into_direct;		/* GUC */
 
 static planner_hook_type	planner_hook_next = NULL;
 static CustomPathMethods	pgstrom_dummy_path_methods;
 static CustomScanMethods	pgstrom_dummy_plan_methods;
+static ExecutorStart_hook_type	executor_start_hook_next = NULL;
 
 /* pg_strom.githash() */
 PG_FUNCTION_INFO_V1(pgstrom_githash);
@@ -131,6 +133,15 @@ pgstrom_init_gucs(void)
 							 NULL,
 							 &pgstrom_explain_developer_mode,
 							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* turns on/off SELECT INTO direct mode */
+	DefineCustomBoolVariable("pg_strom.enable_select_into_direct",
+							 "Enables SELECT INTO direct mode",
+							 NULL,
+							 &pgstrom_enable_select_into_direct,
+							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
@@ -649,6 +660,100 @@ pgstrom_post_planner(Query *parse,
 }
 
 /*
+ * pgstrom_executor_start
+ */
+static void
+pgstrom_executor_start(QueryDesc *queryDesc, int eflags)
+{
+	if (executor_start_hook_next)
+		executor_start_hook_next(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
+	/*
+	 * check whether SELECT INTO direct mode is possible, or not.
+	 * also, see ExecCreateTableAs() for the related initializations.
+	 */
+	if (!pgstrom_enable_select_into_direct)
+		elog(DEBUG2, "SELECT INTO Direct disabled: because of pg_strom.enable_select_into_direct parameter");
+	else if (queryDesc->dest->mydest != DestIntoRel)
+		elog(DEBUG2, "SELECT INTO Direct disabled: because dest-receiver is not DestIntoRel");
+	else if (!pgstrom_is_gpuscan_state(queryDesc->planstate) &&
+			 !pgstrom_is_gpujoin_state(queryDesc->planstate) &&
+			 !pgstrom_is_gpupreagg_state(queryDesc->planstate))
+		elog(DEBUG2, "SELECT INTO Direct disabled: because top-level plan is not GPU-aware");
+	else if (pgstrom_cpu_fallback_elevel < ERROR)
+		elog(DEBUG2, "SELECT INTO Direct disabled: because CPU-fallback is enabled");
+	else
+	{
+		pgstromTaskState *pts = (pgstromTaskState *)queryDesc->planstate;
+
+		/*
+		 * Even if ProjectionInfo would be assigned on the planstate,
+		 * we check whether it is actually incompatible or not.
+		 */
+		if (pts->css.ss.ps.ps_ProjInfo)
+		{
+			ProjectionInfo *projInfo = pts->css.ss.ps.ps_ProjInfo;
+			CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
+			List	   *tlist_cpu = (List *)projInfo->pi_state.expr;
+			ListCell   *lc;
+			int			nvalids = 0;
+			int			anum = 1;
+			bool		meet_resjunk = false;
+
+			Assert(IsA(cscan, CustomScan));
+			foreach (lc, cscan->custom_scan_tlist)
+			{
+				TargetEntry *tle = lfirst(lc);
+
+				if (tle->resjunk)
+					meet_resjunk = true;
+				else if (!meet_resjunk)
+					nvalids++;
+				else
+				{
+					elog(DEBUG2, "Bug? CustomScan has valid TLEs after junks: %s",
+						 nodeToString(cscan->custom_scan_tlist));
+					return;
+				}
+			}
+			if (list_length(tlist_cpu) != nvalids)
+			{
+				elog(DEBUG2, "SELECT INTO Direct disabled: because of CPU projection (%d -> %d attributes)",
+					 nvalids, list_length(tlist_cpu));
+				return;
+			}
+			foreach (lc, tlist_cpu)
+			{
+				TargetEntry *tle = lfirst(lc);
+				Var	   *var = (Var *)tle->expr;
+
+				if (tle->resjunk ||
+					!IsA(var, Var) ||
+					var->varno != INDEX_VAR ||
+					var->varattno != anum)
+				{
+					elog(DEBUG2, "SELECT INTO Direct disabled: because of CPU projection: %s",
+						 nodeToString(tle->expr));
+					return;
+				}
+				anum++;
+			}
+		}
+		/*
+		 * This GPU-task can potentially run SELECT INTO direct mode.
+		 * After the DestReceiver::rStartup invocation at ExecutorRun(),
+		 * we must have the final check of ...
+		 * - whether the relation is unlogged or temporary
+		 * - whether the EXCLUSIVE lock is held
+		 * - whether the TAM (Table Access Method) is heap
+		 * at the first invocation of execution.
+		 */
+		pts->select_into_dest = queryDesc->dest;
+	}
+}
+
+/*
  * pgstrom_sigpoll_handler
  */
 static void
@@ -724,6 +829,10 @@ _PG_init(void)
 	/* post planner hook */
 	planner_hook_next = (planner_hook ? planner_hook : standard_planner);
 	planner_hook = pgstrom_post_planner;
+	/* executor hook */
+	executor_start_hook_next = ExecutorStart_hook;
+	ExecutorStart_hook = pgstrom_executor_start;
+
 	/* signal handler for wake up */
 	pqsignal(SIGPOLL, pgstrom_sigpoll_handler);
 }
