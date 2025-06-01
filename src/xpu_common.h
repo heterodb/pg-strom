@@ -3703,6 +3703,16 @@ __atomic_cas_uint64(uint64_t *ptr, uint64_t comp, uint64_t newval)
 #endif
 }
 
+INLINE_FUNCTION(void)
+__atomic_thread_fense(void)
+{
+#ifdef __CUDACC__
+	__threadfence();
+#else
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+#endif
+}
+
 /* ----------------------------------------------------------------
  *
  * xPU PreAgg common utility functions

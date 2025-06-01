@@ -896,7 +896,7 @@ __handleDpuTaskExecProjection(dpuClient *dclient,
 static int32_t
 __writeOutOneTuplePreAgg(kern_context *kcxt,
 						 kern_data_store *kds_final,
-						 HeapTupleHeaderData *htup,
+						 kern_tupitem *titem,
 						 kern_expression *kexp_actions)
 {
 	int			nattrs = Min(kds_final->ncols, kexp_actions->u.pagg.nattrs);
@@ -904,18 +904,13 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 	uint16_t	t_infomask = HEAP_HASNULL;
 	char	   *buffer = NULL;
 
-	t_hoff = MAXALIGN(offsetof(HeapTupleHeaderData,
+	t_hoff = MAXALIGN(offsetof(kern_tupitem,
 							   t_bits) + BITMAPLEN(nattrs));
-	if (htup)
+	if (titem)
 	{
-		memset(htup, 0, t_hoff);
-		htup->t_choice.t_datum.datum_typmod = kds_final->tdtypmod;
-		htup->t_choice.t_datum.datum_typeid = kds_final->tdtypeid;
-		htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
-		htup->t_ctid.ip_blkid.bi_lo = 0xffff;
-		htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
-		htup->t_infomask2 = (nattrs & HEAP_NATTS_MASK);
-		htup->t_hoff = t_hoff;
+		memset(titem, 0, t_hoff);
+		titem->t_infomask2 = (nattrs & HEAP_NATTS_MASK);
+		titem->t_hoff = t_hoff + MINIMAL_TUPLE_OFFSET;
 	}
 	/* walk on the columns */
 	for (int j=0; j < nattrs; j++)
@@ -929,11 +924,11 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 			   (char *)cmeta < (char *)kds_final + kds_final->length);
 		assert(cmeta->attalign > 0 && cmeta->attalign <= 8);
 		t_next = TYPEALIGN(cmeta->attalign, t_hoff);
-		if (htup)
+		if (titem)
 		{
 			if (t_next > t_hoff)
-				memset((char *)htup + t_hoff, 0, t_next - t_hoff);
-			buffer = (char *)htup + t_next;
+				memset((char *)titem + t_hoff, 0, t_next - t_hoff);
+			buffer = (char *)titem + t_next;
 		}
 
 		switch (desc->action)
@@ -1028,6 +1023,19 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
 
+			case KAGG_ACTION__PSUM_INT64:
+			case KAGG_ACTION__PAVG_INT64:
+				nbytes = sizeof(kagg_state__psum_numeric_packed);
+				if (buffer)
+				{
+					kagg_state__psum_numeric_packed *r =
+						(kagg_state__psum_numeric_packed *)buffer;
+					memset(r, 0, sizeof(kagg_state__psum_numeric_packed));
+					SET_VARSIZE(r, sizeof(kagg_state__psum_numeric_packed));
+				}
+				t_infomask |= HEAP_HASVARWIDTH;
+				break;
+
 			case KAGG_ACTION__PSUM_FP:
 			case KAGG_ACTION__PAVG_FP:
 				nbytes = sizeof(kagg_state__psum_fp_packed);
@@ -1035,6 +1043,20 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 				{
 					memset(buffer, 0, sizeof(kagg_state__psum_fp_packed));
 					SET_VARSIZE(buffer, sizeof(kagg_state__psum_fp_packed));
+				}
+				t_infomask |= HEAP_HASVARWIDTH;
+				break;
+
+			case KAGG_ACTION__PSUM_NUMERIC:
+			case KAGG_ACTION__PAVG_NUMERIC:
+				nbytes = sizeof(kagg_state__psum_numeric_packed);
+				if (buffer)
+				{
+					kagg_state__psum_numeric_packed *r =
+						(kagg_state__psum_numeric_packed *)buffer;
+					memset(r, 0, sizeof(kagg_state__psum_numeric_packed));
+					r->attrs = __numeric_typmod_weight(desc->typmod);
+					SET_VARSIZE(r, sizeof(kagg_state__psum_numeric_packed));
 				}
 				t_infomask |= HEAP_HASVARWIDTH;
 				break;
@@ -1064,12 +1086,17 @@ __writeOutOneTuplePreAgg(kern_context *kcxt,
 						(int)desc->action);
 				return -1;
 		}
-		if (htup && nbytes > 0)
-			htup->t_bits[j>>3] |= (1<<(j&7));
+		if (titem && nbytes > 0)
+			titem->t_bits[j>>3] |= (1<<(j&7));
 		t_hoff = t_next + nbytes;
 	}
-	if (htup)
-		htup->t_infomask = t_infomask;
+	t_hoff += ROWID_SIZE;
+
+	if (titem)
+	{
+		titem->t_len = t_hoff;
+		titem->t_infomask = t_infomask;
+	}
 	return t_hoff;
 }
 
@@ -1083,47 +1110,33 @@ __insertOneTupleNoGroups(kern_context *kcxt,
 {
 	kern_tupitem   *tupitem;
 	int32_t			tupsz;
-	int32_t			required;
-	uint64_t		__usage;
-	uint32_t		__nitems_old;
-	uint32_t		__nitems_cur;
-	uint32_t		__nitems_new;
+	uint32_t		rowid;
+	uint64_t		offset;
 
 	assert(kds_final->format == KDS_FORMAT_ROW &&
-		   kds_final->nitems == 0 &&
 		   kds_final->hash_nslots == 0);
 	/* estimate length */
 	tupsz = __writeOutOneTuplePreAgg(kcxt, kds_final, NULL,
 									 kexp_groupby_actions);
 	assert(tupsz > 0);
-	required = MAXALIGN(offsetof(kern_tupitem, htup) + tupsz);
 	/* expand kds_final */
-	__usage = __atomic_add_uint64(&kds_final->usage, required);
-	__nitems_cur = __volatileRead(&kds_final->nitems);
-	do {
-		__nitems_old = __nitems_cur;
-		__nitems_new = __nitems_cur + 1;
-		if (!__KDS_CHECK_OVERFLOW(kds_final,
-								  __nitems_new,
-								  __usage + required))
-			return NULL;    /* out of memory */
-	} while ((__nitems_cur = __atomic_cas_uint32(&kds_final->nitems,
-												 __nitems_old,
-												 __nitems_new)) != __nitems_old);
-    /* ok, both nitems and usage are valid to write */
+	offset = __atomic_add_uint64(&kds_final->usage, tupsz);
+	if (!__KDS_CHECK_OVERFLOW(kds_final, 1, offset + tupsz))
+		return NULL;	/* out of memory */
+	offset += tupsz;
+	rowid = __atomic_add_uint32(&kds_final->nitems, 1);
+	assert(rowid == 0);
+	/* ok, both nitems and usage are valid to write */
 	tupitem = (kern_tupitem *)((char *)kds_final
 							   + kds_final->length
-							   - __usage
-							   - required);
-	__writeOutOneTuplePreAgg(kcxt, kds_final,
-							 &tupitem->htup,
+							   - offset);
+	__writeOutOneTuplePreAgg(kcxt, kds_final, tupitem,
 							 kexp_groupby_actions);
-	tupitem->t_len = tupsz;
-	tupitem->rowid = __nitems_new - 1;
-	KDS_GET_ROWINDEX(kds_final)[tupitem->rowid]
-		= (uint64_t)((char *)kds_final
-					 + kds_final->length
-					 - (char *)tupitem);
+	KERN_TUPITEM_SET_ROWID(tupitem, rowid);
+	assert(tupitem->t_len == tupsz);
+	__atomic_thread_fense();
+	__atomic_write_uint64(KDS_GET_ROWINDEX(kds_final), offset);
+
 	return tupitem;
 }
 
@@ -1137,11 +1150,9 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 {
 	kern_hashitem  *hitem;
 	int32_t			tupsz;
-	int32_t			required;
-	uint64_t		__usage;
+	uint64_t		__offset;
 	uint32_t		__nitems_old;
 	uint32_t		__nitems_cur;
-	uint32_t		__nitems_new;
 
 	assert(kds_final->format == KDS_FORMAT_HASH &&
 		   kds_final->hash_nslots > 0);
@@ -1149,35 +1160,33 @@ __insertOneTupleGroupBy(kern_context *kcxt,
 	tupsz = __writeOutOneTuplePreAgg(kcxt, kds_final, NULL,
 									 kexp_groupby_actions);
 	assert(tupsz > 0);
-	required = MAXALIGN(offsetof(kern_hashitem, t.htup) + tupsz);
-
 	/* expand kds_final */
-	__usage = __atomic_add_uint64(&kds_final->usage, required);
+	__offset = __atomic_add_uint64(&kds_final->usage,
+								   offsetof(kern_hashitem, t) + tupsz);
+	__offset += offsetof(kern_hashitem, t) + tupsz;
 	__nitems_cur = __volatileRead(&kds_final->nitems);
 	do {
-		__nitems_old = __nitems_cur;
-		__nitems_new = __nitems_cur + 1;
 		if (!__KDS_CHECK_OVERFLOW(kds_final,
-								  __nitems_new,
-								  __usage + required))
+								  __nitems_cur + 1,
+								  __offset))
 			return NULL;	/* out of memory */
+		__nitems_old = __nitems_cur;
 	} while ((__nitems_cur = __atomic_cas_uint32(&kds_final->nitems,
 												 __nitems_old,
-												 __nitems_new)) != __nitems_old);
+												 __nitems_old + 1)) != __nitems_old);
 	/* ok, both nitems and usage are valid to write */
 	hitem = (kern_hashitem *)((char *)kds_final
 							  + kds_final->length
-							  - __usage
-							  - required);
+							  - __offset);
 	__writeOutOneTuplePreAgg(kcxt, kds_final,
-							 &hitem->t.htup,
+							 &hitem->t,
 							 kexp_groupby_actions);
-	hitem->t.t_len = tupsz;
-	hitem->t.rowid = __nitems_new - 1;
-	KDS_GET_ROWINDEX(kds_final)[hitem->t.rowid]
-		= ((char *)kds_final
-		   + kds_final->length
-		   - (char *)&hitem->t);
+	assert(hitem->t.t_len == tupsz);
+	KERN_TUPITEM_SET_ROWID(&hitem->t, __nitems_old);
+	__atomic_write_uint64(KDS_GET_ROWINDEX(kds_final) + __nitems_old,
+						  ((char *)kds_final
+						   + kds_final->length
+						   - (char *)&hitem->t));
 	return hitem;
 }
 
@@ -1435,15 +1444,15 @@ __update_preagg__pcovar(kern_context *kcxt,
 static void
 __updateOneTupleDpuPreAgg(kern_context *kcxt,
 						  kern_data_store *kds_final,
-						  HeapTupleHeaderData *htup,
+						  kern_tupitem *tupitem,
 						  kern_expression *kexp_groupby_actions)
 {
-	int			nattrs = (htup->t_infomask2 & HEAP_NATTS_MASK);
-	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+	int			nattrs = (tupitem->t_infomask2 & HEAP_NATTS_MASK);
+	bool		heap_hasnull = ((tupitem->t_infomask & HEAP_HASNULL) != 0);
 	uint32_t	t_hoff;
 	char	   *buffer = NULL;
 
-	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
+	t_hoff = offsetof(kern_tupitem, t_bits);
 	if (heap_hasnull)
 		t_hoff += BITMAPLEN(nattrs);
 	t_hoff = MAXALIGN(t_hoff);
@@ -1453,7 +1462,7 @@ __updateOneTupleDpuPreAgg(kern_context *kcxt,
 		kern_aggregate_desc *desc = &kexp_groupby_actions->u.pagg.desc[j];
 		kern_colmeta   *cmeta = &kds_final->colmeta[j];
 
-		if (heap_hasnull && att_isnull(j, htup->t_bits))
+		if (heap_hasnull && att_isnull(j, tupitem->t_bits))
 		{
 			/* only grouping-key may have NULL */
 			assert(desc->action == KAGG_ACTION__VREF);
@@ -1462,9 +1471,9 @@ __updateOneTupleDpuPreAgg(kern_context *kcxt,
 
 		if (cmeta->attlen > 0)
 			t_hoff = TYPEALIGN(cmeta->attalign, t_hoff);
-		else if (!VARATT_NOT_PAD_BYTE((char *)htup + t_hoff))
+		else if (!VARATT_NOT_PAD_BYTE((char *)tupitem + t_hoff))
 			t_hoff = TYPEALIGN(cmeta->attalign, t_hoff);
-		buffer = ((char *)htup + t_hoff);
+		buffer = ((char *)tupitem + t_hoff);
 		if (cmeta->attlen > 0)
 			t_hoff += cmeta->attlen;
 		else
@@ -1616,7 +1625,7 @@ __handleDpuTaskExecNoGroupPreAgg(dpuClient *dclient,
 	}
 	/* update the partial aggregation */
 	__updateOneTupleDpuPreAgg(kcxt, kds_final,
-							  &tupitem->htup,
+							  tupitem,
 							  kexp_groupby_actions);
 	pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
 	return true;
@@ -1686,15 +1695,15 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 		{
 			bool	saved_compare_nulls = kcxt->kmode_compare_nulls;
 
-			if (hitem->hash != hash.value)
+			if (hitem->t.hash != hash.value)
 				continue;
 
 			kcxt->kmode_compare_nulls = true;
-			ExecLoadVarsHeapTuple(kcxt,
-								  kexp_groupby_keyload,
-								  -2,
-								  kds_final,
-								  &hitem->t.htup);
+			ExecLoadVarsMinimalTuple(kcxt,
+									 kexp_groupby_keyload,
+									 -2,
+									 kds_final,
+									 &hitem->t);
 			if (EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keycomp, &status))
 			{
 				kcxt->kmode_compare_nulls = saved_compare_nulls;
@@ -1711,8 +1720,8 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 											kexp_groupby_actions);
 			if (hitem)
 			{
-				hitem->hash = hash.value;
 				hitem->next = saved;
+				hitem->t.hash = hash.value;
 				hoffset = ((char *)kds_final
 						   + kds_final->length
 						   - (char *)hitem);
@@ -1744,7 +1753,7 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 	} while (!hitem);
 	/* update the partial aggregation */
 	__updateOneTupleDpuPreAgg(kcxt, kds_final,
-							  &hitem->t.htup,
+							  &hitem->t,
 							  kexp_groupby_actions);
 	pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
 
@@ -1783,8 +1792,8 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 		xpu_int4_t		status;
 
 		kcxt_reset(kcxt);
-		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
-							  kds_heap, &tupitem->htup);
+		ExecLoadVarsMinimalTuple(kcxt, kexp_load_vars, depth,
+								 kds_heap, tupitem);
 		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
 			return false;
 		assert(!XPU_DATUM_ISNULL(&status));
@@ -1816,8 +1825,8 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 	/* LEFT OUTER if needed */
 	if (kmrels->chunks[depth-1].left_outer && !matched)
 	{
-		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
-							  kds_heap, NULL);
+		ExecLoadVarsMinimalTuple(kcxt, kexp_load_vars, depth,
+								 kds_heap, NULL);
 		if (depth >= kmrels->num_rels)
 		{
 			if (!dtes->handleDpuTaskFinalDepth(dclient, dtes, kcxt))
@@ -1862,10 +1871,10 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 		 khitem != NULL;
 		 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next))
 	{
-		if (khitem->hash != hash.value)
+		if (khitem->t.hash != hash.value)
 			continue;
-		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
-							  kds_hash, &khitem->t.htup);
+		ExecLoadVarsMinimalTuple(kcxt, kexp_load_vars, depth,
+								 kds_hash, &khitem->t);
 		kcxt_reset(kcxt);
 		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
 			return false;
@@ -1892,14 +1901,17 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 		{
 			matched = true;
 			if (oj_map)
-				oj_map[khitem->t.rowid] = true;
+			{
+				uint32_t	rowid = KERN_TUPITEM_GET_ROWID(&khitem->t);
+				oj_map[rowid] = true;
+			}
 		}
 	}
 	/* LEFT OUTER if needed */
 	if (kmrels->chunks[depth-1].left_outer && !matched)
 	{
-		ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, depth,
-							  kds_hash, NULL);
+		ExecLoadVarsMinimalTuple(kcxt, kexp_load_vars, depth,
+								 kds_hash, NULL);
 		if (depth >= kmrels->num_rels)
 		{
 			if (!dtes->handleDpuTaskFinalDepth(dclient, dtes, kcxt))
@@ -1952,11 +1964,11 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 			htup = (HeapTupleHeaderData *) PageGetItem(page, lpp);
 			dtes->nitems_raw++;
 			kcxt_reset(kcxt);
-			if (ExecLoadVarsOuterRow(kcxt,
-									 kexp_load_vars,
-									 kexp_scan_quals,
-									 kds_src,
-									 htup))
+			if (ExecLoadVarsOuterHeap(kcxt,
+									  kexp_load_vars,
+									  kexp_scan_quals,
+									  kds_src,
+									  htup))
 			{
 				dtes->nitems_in++;
 				if (!kmrels)
@@ -2071,8 +2083,8 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 		kds_src_iovec = (strom_io_vector *)((char *)xcmd + xcmd->u.task.kds_src_iovec);
 	if (xcmd->u.task.kds_src_offset)
 		kds_src_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_src_offset);
-//	if (xcmd->u.task.kds_dst_offset)
-//		kds_dst_head = (kern_data_store *)((char *)xcmd + xcmd->u.task.kds_dst_offset);
+	if (session->projection_kds_dst)
+		kds_dst_head = (kern_data_store *)((char *)session + session->projection_kds_dst);
 	if (!kds_src_pathname || !kds_src_iovec || !kds_src_head || !kds_dst_head)
 	{
 		dpuClientElog(dclient, "kern_data_store is corrupted");
@@ -2171,6 +2183,7 @@ dpuservHandleDpuTaskFinal(dpuClient *dclient, XpuCommand *xcmd)
 	resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats));
 	resp.magic = XpuCommandMagicNumber;
 	resp.tag   = XpuCommandTag__Success;
+	resp.u.results.scan_repeat_id = INT_MAX;
 
 	iov = &iovec_array[iovcnt++];
     iov->iov_base = &resp;
