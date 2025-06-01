@@ -2648,7 +2648,8 @@ typedef struct kern_session_info
 	uint64_t	pinned_inner_buffer_partition_size; /* copy of pg_strom.pinned_inner_buffer_partition_size */
 	/* projection kds definition */
 	uint32_t	projection_kds_dst;		/* header portion of kds_dst */
-
+	/* SELECT INTO direct */
+	uint32_t	select_into_pathname;	/* base pathname of SELECT INTO if possible */
 	/* join inner buffer */
 	uint32_t	pgsql_port_number;		/* = PostPortNumber */
 	uint32_t	pgsql_plan_node_id;		/* = Plan->plan_node_id */

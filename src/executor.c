@@ -909,7 +909,12 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		}
 		else
 		{
-			//do setup
+			Datum	pathname = DirectFunctionCall1(pg_relation_filepath,
+												   RelationGetRelid(drel));
+			session->select_into_pathname =
+				__appendBinaryStringInfo(&buf, VARDATA_ANY(pathname),
+										 VARSIZE_ANY_EXHDR(pathname));
+			appendStringInfoChar(&buf, '\0');
 		}
 	}
 	/* other database session information */
