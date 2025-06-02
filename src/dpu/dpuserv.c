@@ -35,7 +35,7 @@ static char			   *dpuserv_base_directory = NULL;
 static long				dpuserv_num_workers = -1;
 static char			   *dpuserv_identifier = NULL;
 static const char	   *dpuserv_logfile = NULL;
-static bool				verbose = false;
+static int				verbose = 0;
 static bool				use_direct_io = false;
 static pthread_mutex_t	dpu_client_mutex;
 static dlist_head		dpu_client_list;
@@ -58,6 +58,7 @@ struct dpuTaskExecState
 	bool		   (*handleDpuTaskFinalDepth)(dpuClient *dclient,
 											  struct dpuTaskExecState *dtes,
 											  kern_context *kcxt);
+	int32_t			scan_repeat_id;
 	uint32_t		kds_dst_nrooms;
 	uint32_t		kds_dst_nitems;
 	uint32_t		nitems_raw;		/* nitems in the raw data chunk */
@@ -135,6 +136,7 @@ dpuClientWriteBack(dpuClient *dclient,
 	resp->tag   = XpuCommandTag__Success;
 	resp->u.results.chunks_offset = resp_sz;
 	resp->u.results.chunks_nitems = dtes->kds_dst_nitems;
+	resp->u.results.scan_repeat_id = dtes->scan_repeat_id;
 	resp->u.results.nitems_raw = dtes->nitems_raw;
 	resp->u.results.nitems_in  = dtes->nitems_in;
 	resp->u.results.nitems_out = dtes->nitems_out;
@@ -1588,7 +1590,10 @@ __handleDpuTaskExecNoGroupPreAgg(dpuClient *dclient,
 	{
 		assert(karg->opcode == FuncOpCode__SaveExpr);
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, NULL))
+		{
+			__NoticeKexp(kcxt);
 			return false;
+		}
 	}
 
 	pthreadRWLockReadLock(&gf_buf->kds_final_rwlock);
@@ -1619,6 +1624,7 @@ __handleDpuTaskExecNoGroupPreAgg(dpuClient *dclient,
 			{
 				/* out of memory */
 				pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
+				__Notice("out of memory");
 				return false;
 			}
 		}
@@ -1663,16 +1669,24 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 	{
 		assert(karg->opcode == FuncOpCode__SaveExpr);
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, NULL))
+		{
+			__NoticeKexp(kcxt);
 			return false;
+		}
 	}
 	/*
 	 * calculation of GROUP BY key hash-value
 	 */
 	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_groupby_keyhash, &hash))
+	{
+		__NoticeKexp(kcxt);
 		return false;
+	}
 	if (XPU_DATUM_ISNULL(&hash))
+	{
+		__Notice("Bug? Group-By hash was NULL");
 		return false;
-
+	}
 	pthreadRWLockReadLock(&gf_buf->kds_final_rwlock);
 	kds_final = gf_buf->kds_final;
 	assert(kds_final->format == KDS_FORMAT_HASH);
@@ -1710,6 +1724,10 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 				if (!XPU_DATUM_ISNULL(&status) && status.value)
 					break;
 			}
+			else
+			{
+				__NoticeKexp(kcxt);
+			}
 			kcxt->kmode_compare_nulls = saved_compare_nulls;
 		}
 
@@ -1745,6 +1763,7 @@ __handleDpuTaskExecGroupByPreAgg(dpuClient *dclient,
 					if (!expandGroupByFinalBuffer(gf_buf))
 					{
 						pthreadRWLockUnlock(&gf_buf->kds_final_rwlock);
+						__Notice("out of memory");
 						return false;
 					}
 				}
@@ -1789,15 +1808,17 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 	for (uint32_t rowid=0; rowid < kds_heap->nitems; rowid++)
 	{
 		kern_tupitem   *tupitem = KDS_GET_TUPITEM(kds_heap, rowid);
-		xpu_int4_t		status;
+		int				status;
 
 		kcxt_reset(kcxt);
 		ExecLoadVarsMinimalTuple(kcxt, kexp_load_vars, depth,
 								 kds_heap, tupitem);
-		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
+		if (!ExecGpuJoinQuals(kcxt, kexp_join_quals, &status))
+		{
+			__NoticeKexp(kcxt);
 			return false;
-		assert(!XPU_DATUM_ISNULL(&status));
-		if (status.value > 0)
+		}
+		if (status > 0)
 		{
 			if (depth >= kmrels->num_rels)
 			{
@@ -1815,7 +1836,7 @@ __handleDpuTaskExecNestLoop(dpuClient *dclient,
 					return false;
 			}
 		}
-		if (status.value != 0)
+		if (status != 0)
 		{
 			matched = true;
 			if (oj_map)
@@ -1861,25 +1882,31 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 	kern_expression	   *kexp_hash_value = SESSION_KEXP_HASH_VALUE(session,depth);
 	kern_hashitem	   *khitem;
 	xpu_int4_t			hash;
-	xpu_int4_t			status;
 	bool				matched = false;
 
 	if (!EXEC_KERN_EXPRESSION(kcxt, kexp_hash_value, &hash))
+	{
+		__NoticeKexp(kcxt);
 		return false;
+	}
 	assert(!XPU_DATUM_ISNULL(&hash));
 	for (khitem = KDS_HASH_FIRST_ITEM(kds_hash, hash.value);
 		 khitem != NULL;
 		 khitem = KDS_HASH_NEXT_ITEM(kds_hash, khitem->next))
 	{
+		int				status;
+
 		if (khitem->t.hash != hash.value)
 			continue;
 		ExecLoadVarsMinimalTuple(kcxt, kexp_load_vars, depth,
 								 kds_hash, &khitem->t);
 		kcxt_reset(kcxt);
-		if (!EXEC_KERN_EXPRESSION(kcxt, kexp_join_quals, &status))
+		if (!ExecGpuJoinQuals(kcxt, kexp_join_quals, &status))
+		{
+			__NoticeKexp(kcxt);
 			return false;
-		assert(!XPU_DATUM_ISNULL(&status));
-		if (status.value > 0)
+		}
+		if (status > 0)
 		{
 			if (depth >= kmrels->num_rels)
 			{
@@ -1897,7 +1924,7 @@ __handleDpuTaskExecHashJoin(dpuClient *dclient,
 					return false;
 			}
 		}
-		if (status.value != 0)
+		if (status != 0)
 		{
 			matched = true;
 			if (oj_map)
@@ -1997,6 +2024,7 @@ __handleDpuScanExecBlock(dpuClient *dclient,
 								kcxt->error_lineno,
 								kcxt->error_funcname,
 								kcxt->error_message);
+				__NoticeKexp(kcxt);
 				return false;
 			}
 		}
@@ -2096,6 +2124,7 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 	sz = offsetof(dpuTaskExecState, stats[num_rels]);
 	dtes = alloca(sz);
 	memset(dtes, 0, sz);
+	dtes->scan_repeat_id = xcmd->u.task.scan_repeat_id;
 	dtes->kds_dst_head = SESSION_KDS_DST_HEAD(session);
 	dtes->num_rels = num_rels;
 	if (session->xpucode_groupby_actions == 0)
@@ -2129,6 +2158,10 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 				dpuClientWriteBack(dclient, dtes);
 			free(base_addr);
 		}
+		else
+		{
+			__Notice("unable to load KDS_FORMAT_BLOCK buffer");
+		}
 	}
 	else if (kds_src_head->format == KDS_FORMAT_ARROW)
 	{
@@ -2144,6 +2177,10 @@ dpuservHandleDpuTaskExec(dpuClient *dclient, XpuCommand *xcmd)
 			if (__handleDpuScanExecArrow(dclient, dtes, kds_src, NULL))
 				dpuClientWriteBack(dclient, dtes);
 			free(base_addr);
+		}
+		else
+		{
+			__Notice("unable to load KDS_FORMAT_ARROW buffer");
 		}
 	}
 	else
@@ -2364,8 +2401,7 @@ dpuservDpuWorkerMain(void *__priv)
 {
 	long	worker_id = (long)__priv;
 
-	if (verbose)
-		fprintf(stderr, "[worker-%lu] DPU service worker start.\n", worker_id);
+	__Info("[worker-%lu] DPU service worker start.", worker_id);
 	pthreadMutexLock(&dpu_command_mutex);
 	while (!got_sigterm)
 	{
@@ -2390,27 +2426,24 @@ dpuservDpuWorkerMain(void *__priv)
 						if (dpuservHandleOpenSession(dclient, xcmd))
 							xcmd = NULL;	/* session information shall be kept until
 											 * end of the session. */
-						if (verbose)
-							fprintf(stderr, "[DPU-%ld@%s] OpenSession ... %s\n",
-									worker_id, dclient->peer_addr,
-									(xcmd != NULL ? "failed" : "ok"));
+						__Info("[DPU-%ld@%s] OpenSession ... %s",
+							   worker_id, dclient->peer_addr,
+							   (xcmd != NULL ? "failed" : "ok"));
 						break;
 					case XpuCommandTag__XpuTaskExec:
 						dpuservHandleDpuTaskExec(dclient, xcmd);
-						if (verbose)
-							fprintf(stderr, "[DPU-%ld@%s] CMD=XpuTaskExec\n",
-									worker_id, dclient->peer_addr);
+						__Info("[DPU-%ld@%s] CMD=XpuTaskExec",
+							   worker_id, dclient->peer_addr);
 						break;
 					case XpuCommandTag__XpuTaskFinal:
 						dpuservHandleDpuTaskFinal(dclient, xcmd);
-						if (verbose)
-							fprintf(stderr, "[DPU-%ld@%s] CMD=XpuTaskFinal\n",
-									worker_id, dclient->peer_addr);
+						__Info("[DPU-%ld@%s] CMD=XpuTaskFinal",
+							   worker_id, dclient->peer_addr);
 						break;
 					default:
-						fprintf(stderr, "[DPU-%ld@%s] unknown xPU command (tag=%u, len=%ld)\n",
-								worker_id, dclient->peer_addr,
-								xcmd->tag, xcmd->length);
+						__Notice("[DPU-%ld@%s] unknown xPU command (tag=%u, len=%ld)",
+								 worker_id, dclient->peer_addr,
+								 xcmd->tag, xcmd->length);
 						break;
 				}
 			}
@@ -2426,8 +2459,7 @@ dpuservDpuWorkerMain(void *__priv)
 		}
 	}
 	pthreadMutexUnlock(&dpu_command_mutex);
-	if (verbose)
-		fprintf(stderr, "[worker-%lu] DPU service worker terminated.\n", worker_id);
+	__Info("[worker-%lu] DPU service worker terminated.", worker_id);
 	return NULL;
 }
 
@@ -2448,10 +2480,9 @@ __dpuServAttachCommand(void *__priv, XpuCommand *xcmd)
 	getDpuClient(dclient, 2);
 	xcmd->priv = dclient;
 
-	if (verbose)
-		fprintf(stderr, "[%s] received xcmd (tag=%u len=%lu)\n",
-				dclient->peer_addr,
-				xcmd->tag, xcmd->length);
+	__Info("[%s] received xcmd (tag=%u len=%lu)",
+		   dclient->peer_addr,
+		   xcmd->tag, xcmd->length);
 
 	pthreadMutexLock(&dpu_command_mutex);
 	dlist_push_tail(&dpu_command_list, &xcmd->chain);
@@ -2466,8 +2497,7 @@ dpuservMonitorClient(void *__priv)
 {
 	dpuClient  *dclient = (dpuClient *)__priv;
 
-	if (verbose)
-		fprintf(stderr, "[%s] connection start\n", dclient->peer_addr);
+	__Info("[%s] connection start.", dclient->peer_addr);
 	while (!got_sigterm && !dclient->in_termination)
 	{
 		struct pollfd  pfd;
@@ -2494,16 +2524,14 @@ dpuservMonitorClient(void *__priv)
 			}
 			else if (pfd.revents & ~POLLIN)
 			{
-				if (verbose)
-					fprintf(stderr, "[%s] peer socket closed\n", dclient->peer_addr);
+				__Info("[%s] peer socket closed.", dclient->peer_addr);
 				break;
 			}
 		}
 	}
 	dclient->in_termination = true;
 	putDpuClient(dclient, 1);
-	if (verbose)
-		fprintf(stderr, "[%s] connection terminated\n", dclient->peer_addr);
+	__Info("[%s] connection terminated.", dclient->peer_addr);
 	return NULL;
 }
 
@@ -2514,8 +2542,7 @@ dpuserv_signal_handler(int signum)
 
 	if (signum == SIGTERM)
 		got_sigterm = true;
-	if (verbose)
-		fprintf(stderr, "got signal (%d)\n", signum);
+	__Info("got signal (%d)", signum);
 	errno = errno_saved;
 }
 
@@ -2769,7 +2796,7 @@ main(int argc, char *argv[])
 				break;
 
 			case 'v':
-				verbose = true;
+				verbose++;
 				break;
 			default:	/* --help */
 				fputs("usage: dpuserv [OPTIONS]\n"

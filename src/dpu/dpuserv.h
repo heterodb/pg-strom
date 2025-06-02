@@ -36,13 +36,34 @@
 #include "float2.h"
 #include "heterodb_extra.h"
 
-#define __Elog(fmt,...)								\
-	do {											\
-		fprintf(stderr, "[%s @ %s:%d] " fmt "\n",	\
-				__FUNCTION__, __FILE__, __LINE__,	\
-				##__VA_ARGS__);						\
-		exit(1);									\
+#define __Elog(fmt,...)									\
+	do {												\
+		fprintf(stderr, "error (%s:%d): " fmt "\n",		\
+				__FILE__, __LINE__, ##__VA_ARGS__);		\
+		exit(1);										\
 	} while(0)
+#define __Notice(fmt,...)								\
+	fprintf(stderr, "notice (%s:%d): " fmt "\n",		\
+			__FILE__, __LINE__, ##__VA_ARGS__)
+#define __NoticeKexp(kcxt)								\
+	fprintf(stderr, "notice (%s:%d): %s [%s]\n",		\
+			(kcxt)->error_filename,						\
+			(kcxt)->error_lineno,						\
+			(kcxt)->error_message,						\
+			(kcxt)->error_funcname)
+#define __Info(fmt,...)									\
+	do {												\
+		if (verbose > 0)								\
+			fprintf(stderr, "info (%s:%d): " fmt "\n",	\
+					__FILE__, __LINE__, ##__VA_ARGS__);	\
+	} while(0)
+#define __Debug(fmt,...)								\
+	do {												\
+		if (verbose > 1)								\
+			fprintf(stderr, "debug (%s:%d): " fmt "\n",	\
+					__FILE__, __LINE__, ##__VA_ARGS__);	\
+	} while(0)
+
 #define Max(a,b)		((a) > (b) ? (a) : (b))
 #define Min(a,b)		((a) < (b) ? (a) : (b))
 #define Assert(cond)	assert(cond)
