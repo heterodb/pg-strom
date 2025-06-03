@@ -2171,7 +2171,8 @@ __try_add_xpupreagg_normal_path(PlannerInfo *root,
 
 	/* Agg(CPU) [+ Gather] + GpuPreAgg, if CPU fallback may happen */
 	/* Elsewhere, no Agg(CPU) is needed */
-	if (pgstrom_cpu_fallback_elevel < ERROR)
+	if (pgstrom_cpu_fallback_elevel < ERROR ||
+		(xpu_task_flags & DEVKIND__ANY) != DEVKIND__NVIDIA_GPU)
 	{
 		Path   *__path = &cpath->path;
 
@@ -2439,6 +2440,7 @@ __xpuPreAggAddCustomPathCommon(PlannerInfo *root,
 		 */
 		op_leaf = pgstrom_find_op_normal(root,
 										 input_rel,
+										 xpu_task_flags,
 										 (try_parallel > 0));
 		if (op_leaf)
 		{
@@ -2463,6 +2465,7 @@ __xpuPreAggAddCustomPathCommon(PlannerInfo *root,
 
 			op_leaf_list = pgstrom_find_op_leafs(root,
 												 input_rel,
+												 xpu_task_flags,
 												 (try_parallel > 0),
 												 &identical_inners);
 			if (identical_inners)

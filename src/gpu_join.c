@@ -814,7 +814,9 @@ try_add_xpujoin_simple_path(PlannerInfo *root,
 	Path			__outer_path;	/* pseudo outer-path */
 	CustomPath	   *cpath;
 
-	op_prev = pgstrom_find_op_normal(root, outer_rel, try_parallel_path);
+	op_prev = pgstrom_find_op_normal(root, outer_rel,
+									 xpu_task_flags,
+									 try_parallel_path);
 	if (!op_prev)
 		return;
 	memset(&__outer_path, 0, sizeof(Path));
@@ -1277,6 +1279,7 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 
 	op_prev_list = pgstrom_find_op_leafs(root,
 										 outer_rel,
+										 xpu_task_flags,
 										 try_parallel_path,
 										 &identical_inners);
 	if (identical_inners)
@@ -1503,6 +1506,7 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 static void
 __xpuJoinTryAddPartitionLeafs(PlannerInfo *root,
 							  RelOptInfo *joinrel,
+							  uint32_t xpu_task_flags,
 							  bool be_parallel)
 {
 	RelOptInfo *parent;
@@ -1518,7 +1522,9 @@ __xpuJoinTryAddPartitionLeafs(PlannerInfo *root,
 		RelOptInfo *leaf_rel = parent->part_rels[k];
 		pgstromOuterPathLeafInfo *op_leaf;
 
-		op_leaf = pgstrom_find_op_normal(root, leaf_rel, be_parallel);
+		op_leaf = pgstrom_find_op_normal(root, leaf_rel,
+										 xpu_task_flags,
+										 be_parallel);
 		if (!op_leaf)
 			return;
 		op_leaf_list = lappend(op_leaf_list, op_leaf);
@@ -1552,6 +1558,7 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 	if (pgstrom_enabled())
 	{
 		if (pgstrom_enable_gpujoin && gpuserv_ready_accept())
+		{
 			__xpuJoinAddCustomPathCommon(root,
 										 joinrel,
 										 outerrel,
@@ -1561,7 +1568,14 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 										 TASK_KIND__GPUJOIN,
 										 &gpujoin_path_methods,
 										 pgstrom_enable_partitionwise_gpujoin);
+			if (joinrel->reloptkind == RELOPT_OTHER_JOINREL)
+			{
+				__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__GPUJOIN, false);
+				__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__GPUJOIN, true);
+			}
+		}
 		if (pgstrom_enable_dpujoin)
+		{
 			__xpuJoinAddCustomPathCommon(root,
 										 joinrel,
 										 outerrel,
@@ -1571,10 +1585,11 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 										 TASK_KIND__DPUJOIN,
 										 &dpujoin_path_methods,
 										 pgstrom_enable_partitionwise_dpujoin);
-		if (joinrel->reloptkind == RELOPT_OTHER_JOINREL)
-		{
-			__xpuJoinTryAddPartitionLeafs(root, joinrel, false);
-			__xpuJoinTryAddPartitionLeafs(root, joinrel, true);
+			if (joinrel->reloptkind == RELOPT_OTHER_JOINREL)
+			{
+				__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__DPUJOIN, false);
+				__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__DPUJOIN, true);
+			}
 		}
 	}
 }

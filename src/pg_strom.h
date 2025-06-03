@@ -1103,9 +1103,11 @@ extern void		pgstrom_remember_op_leafs(PlannerInfo *root,
 										  bool be_parallel);
 extern pgstromOuterPathLeafInfo *pgstrom_find_op_normal(PlannerInfo *root,
 														RelOptInfo *outer_rel,
+														uint32_t xpu_task_flags,
 														bool be_parallel);
 extern List	   *pgstrom_find_op_leafs(PlannerInfo *root,
 									  RelOptInfo *outer_rel,
+									  uint32_t xpu_task_flags,
 									  bool be_parallel,
 									  bool *p_identical_inners);
 extern bool		pgstrom_is_dummy_path(const Path *path);

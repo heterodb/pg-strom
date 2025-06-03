@@ -371,6 +371,7 @@ typedef struct
 {
 	PlannerInfo *root;
 	Relids		parent_relids;
+	uint32_t	xpu_devkind;	/* one of DEVKIND__* */
 	pgstromOuterPathLeafInfo *op_normal_single;
 	pgstromOuterPathLeafInfo *op_normal_parallel;
 	List	   *op_leaf_single;
@@ -388,7 +389,8 @@ pgstrom_path_entry_hash(const void *key, Size keysize)
 
 	return (hash_bytes((const unsigned char *)&entry->root,
 					   sizeof(PlannerInfo *)) ^
-			bms_hash_value(entry->parent_relids));
+			bms_hash_value(entry->parent_relids) ^
+			entry->xpu_devkind);
 }
 
 static int
@@ -398,10 +400,11 @@ pgstrom_path_entry_match(const void *key1, const void *key2, Size keysize)
 	const pgstromPathEntry *entry2 = key2;
 
 	Assert(keysize == offsetof(pgstromPathEntry,
-							   parent_relids) + sizeof(Relids));
+							   xpu_devkind) + sizeof(uint32_t));
 	return (entry1->root == entry2->root &&
 			bms_equal(entry1->parent_relids,
-					  entry2->parent_relids) ? 0 : -1);
+					  entry2->parent_relids) &&
+			entry1->xpu_devkind == entry2->xpu_devkind ? 0 : -1);
 }
 
 static void
@@ -414,7 +417,7 @@ __pgstrom_build_paths_htable(void)
 		memset(&hctl, 0, sizeof(HASHCTL));
 		hctl.hcxt = CurrentMemoryContext;
 		hctl.keysize = offsetof(pgstromPathEntry,
-								parent_relids) + sizeof(Relids);
+								xpu_devkind) + sizeof(uint32_t);
 		hctl.entrysize = sizeof(pgstromPathEntry);
 		hctl.hash = pgstrom_path_entry_hash;
 		hctl.match = pgstrom_path_entry_match;
@@ -447,6 +450,7 @@ pgstrom_remember_op_normal(PlannerInfo *root,
 	memset(&pp_key, 0, sizeof(pgstromPathEntry));
 	pp_key.root = root;
 	pp_key.parent_relids = outer_rel->relids;
+	pp_key.xpu_devkind = (op_leaf->pp_info->xpu_task_flags & DEVKIND__ANY);
 	pp_entry = (pgstromPathEntry *)
 		hash_search(pgstrom_paths_htable,
 					&pp_key,
@@ -484,6 +488,7 @@ pgstrom_remember_op_leafs(PlannerInfo *root,
 	pgstromPathEntry  pp_key;
 	ListCell   *cell;
 	List	   *inner_paths_list = NIL;
+	uint32_t	xpu_devkind = 0;
 	int			identical_inners = -1;
 	Cost		total_cost = 0.0;
 	bool		found;
@@ -498,6 +503,12 @@ pgstrom_remember_op_leafs(PlannerInfo *root,
 		Assert(list_length(op_leaf->inner_paths_list) == op_leaf->pp_info->num_rels);
 		op_leaf->outer_rel = parent_rel;
 		total_cost += op_leaf->leaf_cost;
+
+		/* check whether all entries have identical xPU device */
+		if (xpu_devkind == 0)
+			xpu_devkind = (op_leaf->pp_info->xpu_task_flags & DEVKIND__ANY);
+		else if (xpu_devkind != (op_leaf->pp_info->xpu_task_flags & DEVKIND__ANY))
+			elog(ERROR, "Bug? different xPU devices are mixtured.");
 
 		if (cell == list_head(op_leaf_list))
 		{
@@ -527,6 +538,7 @@ pgstrom_remember_op_leafs(PlannerInfo *root,
 	memset(&pp_key, 0, sizeof(pgstromPathEntry));
 	pp_key.root = root;
 	pp_key.parent_relids = parent_rel->relids;
+	pp_key.xpu_devkind = xpu_devkind;
 	pp_entry = (pgstromPathEntry *)
 		hash_search(pgstrom_paths_htable,
 					&pp_key,
@@ -565,6 +577,7 @@ pgstrom_remember_op_leafs(PlannerInfo *root,
 pgstromOuterPathLeafInfo *
 pgstrom_find_op_normal(PlannerInfo *root,
 					   RelOptInfo *outer_rel,
+					   uint32_t xpu_task_flags,
 					   bool be_parallel)
 {
 	if (pgstrom_paths_htable)
@@ -575,6 +588,7 @@ pgstrom_find_op_normal(PlannerInfo *root,
 		memset(&pp_key, 0, sizeof(pgstromPathEntry));
 		pp_key.root = root;
 		pp_key.parent_relids = outer_rel->relids;
+		pp_key.xpu_devkind = (xpu_task_flags & DEVKIND__ANY);
 		pp_entry = (pgstromPathEntry *)
 			hash_search(pgstrom_paths_htable,
 						&pp_key,
@@ -591,6 +605,7 @@ pgstrom_find_op_normal(PlannerInfo *root,
 List *
 pgstrom_find_op_leafs(PlannerInfo *root,
 					  RelOptInfo *parent_rel,
+					  uint32_t xpu_task_flags,
 					  bool be_parallel,
 					  bool *p_identical_inners)
 {
@@ -602,6 +617,7 @@ pgstrom_find_op_leafs(PlannerInfo *root,
 		memset(&pp_key, 0, sizeof(pgstromPathEntry));
 		pp_key.root = root;
 		pp_key.parent_relids = parent_rel->relids;
+		pp_key.xpu_devkind = (xpu_task_flags & DEVKIND__ANY);
 		pp_entry = (pgstromPathEntry *)
 			hash_search(pgstrom_paths_htable,
 						&pp_key,
