@@ -13,85 +13,6 @@
 #include "float2.h"
 
 /*
- * __atomic_add_int128
- *
- * atomically increment packed int128 value using 64bit atomic operation.
- */
-INLINE_FUNCTION(void)
-__atomic_add_int128(int128_packed_t *ptr, int128_t ival)
-{
-	uint64_t	old_lo;
-	uint64_t	new_hi;
-	uint64_t	temp	__attribute__((unused));
-
-	old_lo = atomicAdd((unsigned long long *)&ptr->u64_lo,
-					   (uint64_t)(ival & ULONG_MAX));
-	asm volatile("add.cc.u64 %0, %2, %3;\n"
-				 "addc.u64   %1, %4, %5;\n"
-				 : "=l"(temp),  "=l"(new_hi)
-				 : "l"(old_lo), "l"((uint64_t)(ival & ULONG_MAX)),
-				   "n"(0),      "l"((uint64_t)((ival>>64) & ULONG_MAX)));
-	/* new_hi = ival_hi + carry bit of (old_lo + ival_lo) */
-	if (new_hi != 0)
-		atomicAdd((unsigned long long *)&ptr->u64_hi, new_hi);
-}
-
-/*
- * __normalize_numeric_int128
- */
-STATIC_FUNCTION(int128_t)
-__normalize_numeric_int128(int16_t weight_d, int16_t weight_s, int128_t ival)
-{
-	static uint64_t		__pow10[] = {
-		1UL,						/* 10^0 */
-		10UL,						/* 10^1 */
-		100UL,						/* 10^2 */
-		1000UL,						/* 10^3 */
-		10000UL,					/* 10^4 */
-		100000UL,					/* 10^5 */
-		1000000UL,					/* 10^6 */
-		10000000UL,					/* 10^7 */
-		100000000UL,				/* 10^8 */
-		1000000000UL,				/* 10^9 */
-		10000000000UL,				/* 10^10 */
-		100000000000UL,				/* 10^11 */
-		1000000000000UL,			/* 10^12 */
-		10000000000000UL,			/* 10^13 */
-		100000000000000UL,			/* 10^14 */
-		1000000000000000UL,			/* 10^15 */
-		10000000000000000UL,		/* 10^16 */
-		100000000000000000UL,		/* 10^17 */
-		1000000000000000000UL,		/* 10^18 */
-	};
-
-	if (weight_d > weight_s)
-	{
-		int		shift = (weight_d - weight_s);
-
-		while (shift > 0)
-		{
-			int		k = Min(shift, 18);
-
-			ival *= (int128_t)__pow10[k];
-			shift -= k;
-		}
-	}
-	else if (weight_d < weight_s)
-	{
-		int		shift = (weight_s - weight_d);
-
-		while (shift > 0)
-		{
-			int		k = Min(shift, 18);
-
-			ival /= (int128_t)__pow10[k];
-			shift -= k;
-		}
-	}
-	return ival;
-}
-
-/*
  * __writeOutOneTuplePreAgg
  */
 STATIC_FUNCTION(int32_t)
@@ -690,7 +611,7 @@ __update_nogroups__psum_int64(kern_context *kcxt,
 			else
 			{
 				__atomic_add_uint64(&r->nitems, count);
-				__atomic_add_int128(&r->sum, sum);
+				__atomic_add_int128_packed(&r->sum, sum);
 			}
 		}
 	}
@@ -811,7 +732,7 @@ __update_nogroups__psum_numeric(kern_context *kcxt,
 				else
 				{
 					__atomic_add_uint64(&r->nitems, count);
-					__atomic_add_int128(&r->sum, sum);
+					__atomic_add_int128_packed(&r->sum, sum);
 				}
 			}
 		}
@@ -1457,7 +1378,7 @@ __update_groupby__psum_int64(kern_context *kcxt,
 			(kagg_state__psum_numeric_packed *)buffer;
 
 		__atomic_add_uint64(&r->nitems, 1);
-		__atomic_add_int128(&r->sum, ival);
+		__atomic_add_int128_packed(&r->sum, ival);
 	}
 	assert(cmeta->attlen == -1 &&
 		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__psum_numeric_packed));
@@ -1504,7 +1425,7 @@ __update_groupby__psum_numeric(kern_context *kcxt,
 														  xnum->weight,
 														  xnum->u.value);
 			__atomic_add_uint64(&r->nitems, 1);
-			__atomic_add_int128(&r->sum, ival);
+			__atomic_add_int128_packed(&r->sum, ival);
 		}
 		else
 		{
@@ -2164,7 +2085,7 @@ __mergeGpuPreAggGroupByBufferOne(kern_context *kcxt,
 							   (r->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT));
 						__atomic_or_uint32(&r->attrs, special);
 						__atomic_add_uint64(&r->nitems, s->nitems);
-						__atomic_add_int128(&r->sum, __fetch_int128_packed(&s->sum));
+						__atomic_add_int128_packed(&r->sum, __fetch_int128_packed(&s->sum));
 					}
 					nbytes = sizeof(kagg_state__psum_numeric_packed);
 				}

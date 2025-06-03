@@ -1368,6 +1368,27 @@ __update_preagg__psum_int(kern_context *kcxt,
 }
 
 /*
+ * __update_preagg__psum_int64
+ */
+static inline void
+__update_preagg__psum_int64(kern_context *kcxt,
+							char *buffer,
+							kern_colmeta *cmeta,
+							kern_aggregate_desc *desc)
+{
+	const xpu_datum_t  *xdatum = kcxt->kvars_slot[desc->arg0_slot_id];
+	int64_t		ival;
+
+	if (__preagg_fetch_xdatum_as_int64(&ival, xdatum))
+	{
+		kagg_state__psum_numeric_packed *r =
+			(kagg_state__psum_numeric_packed *)buffer;
+		__atomic_add_uint64(&r->nitems, 1);
+		__atomic_add_int128_packed(&r->sum, ival);
+	}
+}
+
+/*
  * __update_preagg__psum_fp
  */
 static inline void
@@ -1387,6 +1408,48 @@ __update_preagg__psum_fp(kern_context *kcxt,
 		__atomic_add_int64(&r->nitems, 1);
 		__atomic_add_fp64(&r->sum, fval);
 	}
+}
+
+/*
+ * __update_preagg__psum_numeric
+ */
+static inline void
+__update_preagg__psum_numeric(kern_context *kcxt,
+							  char *buffer,
+							  kern_colmeta *cmeta,
+							  kern_aggregate_desc *desc)
+{
+	xpu_numeric_t *xnum = (xpu_numeric_t *)kcxt->kvars_slot[desc->arg0_slot_id];
+
+	if (xnum->expr_ops == &xpu_numeric_ops &&
+		xpu_numeric_validate(kcxt, xnum))
+	{
+		kagg_state__psum_numeric_packed *r =
+			(kagg_state__psum_numeric_packed *)buffer;
+		if (xnum->kind == XPU_NUMERIC_KIND__VALID)
+		{
+			int16_t		weight = (int16_t)(r->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+			int128_t	ival = __normalize_numeric_int128(weight,
+														  xnum->weight,
+														  xnum->u.value);
+			__atomic_add_uint64(&r->nitems, 1);
+			__atomic_add_int128_packed(&r->sum, ival);
+		}
+		else
+		{
+			uint32_t	special;
+
+			if (xnum->kind == XPU_NUMERIC_KIND__POS_INF)
+				special = __PAGG_NUMERIC_ATTRS__PINF;
+			else if (xnum->kind == XPU_NUMERIC_KIND__NEG_INF)
+				special = __PAGG_NUMERIC_ATTRS__NINF;
+			else
+				special = XPU_NUMERIC_KIND__NAN;
+			__atomic_or_uint32(&r->attrs, special);
+		}
+	}
+	assert(cmeta->attlen == -1 &&
+		   VARSIZE_ANY(buffer) >= sizeof(kagg_state__psum_numeric_packed));
 }
 
 /*
@@ -1511,9 +1574,17 @@ __updateOneTupleDpuPreAgg(kern_context *kcxt,
 			case KAGG_ACTION__PAVG_INT:
 				__update_preagg__psum_int(kcxt, buffer, cmeta, desc);
 				break;
+			case KAGG_ACTION__PSUM_INT64:
+			case KAGG_ACTION__PAVG_INT64:
+				__update_preagg__psum_int64(kcxt, buffer, cmeta, desc);
+				break;
 			case KAGG_ACTION__PSUM_FP:
 			case KAGG_ACTION__PAVG_FP:
 				__update_preagg__psum_fp(kcxt, buffer, cmeta, desc);
+				break;
+			case KAGG_ACTION__PAVG_NUMERIC:
+			case KAGG_ACTION__PSUM_NUMERIC:
+				__update_preagg__psum_numeric(kcxt, buffer, cmeta, desc);
 				break;
 			case KAGG_ACTION__STDDEV:
 				__update_preagg__pstddev(kcxt, buffer, cmeta, desc);

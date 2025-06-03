@@ -3445,6 +3445,43 @@ __atomic_add_int64(int64_t *ptr, int64_t ival)
 #endif
 }
 
+/*
+ * __atomic_add_int128_packed
+ *
+ * atomically increment packed int128 value using 64bit atomic operation.
+ */
+INLINE_FUNCTION(void)
+__atomic_add_int128_packed(int128_packed_t *ptr, int128_t ival)
+{
+#ifdef __CUDACC__
+	uint64_t	old_lo;
+	uint64_t	new_hi;
+	uint64_t	temp	__attribute__((unused));
+
+	old_lo = atomicAdd((unsigned long long *)&ptr->u64_lo,
+					   (uint64_t)(ival & ULONG_MAX));
+	asm volatile("add.cc.u64 %0, %2, %3;\n"
+				 "addc.u64   %1, %4, %5;\n"
+				 : "=l"(temp),  "=l"(new_hi)
+				 : "l"(old_lo), "l"((uint64_t)(ival & ULONG_MAX)),
+				   "n"(0),      "l"((uint64_t)((ival>>64) & ULONG_MAX)));
+	/* new_hi = ival_hi + carry bit of (old_lo + ival_lo) */
+	if (new_hi != 0)
+		atomicAdd((unsigned long long *)&ptr->u64_hi, new_hi);
+#else
+	uint64_t	val_lo = (uint64_t)(ival & ULONG_MAX);
+	uint64_t	val_hi = (uint64_t)((ival >> 64) & ULONG_MAX);
+	uint64_t	old_lo;
+	uint64_t	temp;
+
+	old_lo = __atomic_add_uint64(&ptr->u64_lo, val_lo);
+	if (__builtin_add_overflow(old_lo, val_lo, &temp))
+		val_hi++;
+	if (val_hi != 0)
+		__atomic_add_uint64(&ptr->u64_hi, val_hi);
+#endif
+}
+
 INLINE_FUNCTION(float8_t)
 __atomic_add_fp64(float8_t *ptr, float8_t fval)
 {

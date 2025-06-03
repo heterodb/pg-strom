@@ -1401,3 +1401,56 @@ pgfn_devcast_text_to_numeric(XPU_PGFUNCTION_ARGS)
 	}
 	return true;
 }
+
+PUBLIC_FUNCTION(int128_t)
+__normalize_numeric_int128(int16_t weight_d,	/* weight of the destination */
+						   int16_t weight_s,	/* weight of the source */
+						   int128_t ival)
+{
+	static uint64_t		__pow10[] = {
+		1UL,					/* 10^0 */
+		10UL,					/* 10^1 */
+		100UL,					/* 10^2 */
+		1000UL,					/* 10^3 */
+		10000UL,				/* 10^4 */
+		100000UL,				/* 10^5 */
+		1000000UL,				/* 10^6 */
+		10000000UL,				/* 10^7 */
+		100000000UL,			/* 10^8 */
+		1000000000UL,			/* 10^9 */
+		10000000000UL,			/* 10^10 */
+		100000000000UL,			/* 10^11 */
+		1000000000000UL,		/* 10^12 */
+		10000000000000UL,		/* 10^13 */
+		100000000000000UL,		/* 10^14 */
+		1000000000000000UL,		/* 10^15 */
+		10000000000000000UL,	/* 10^16 */
+		100000000000000000UL,	/* 10^17 */
+		1000000000000000000UL,	/* 10^18 */
+	};
+	if (weight_d > weight_s)
+	{
+		int		shift = (weight_d - weight_s);
+
+		while (shift > 0)
+		{
+			int		k = Min(shift, 18);
+
+			ival *= (int128_t)__pow10[k];
+			shift -= k;
+		}
+	}
+	else if (weight_d < weight_s)
+	{
+		int		shift = (weight_s - weight_d);
+
+		while (shift > 0)
+		{
+			int		k = Min(shift, 18);
+
+			ival /= (int128_t)__pow10[k];
+			shift -= k;
+		}
+	}
+	return ival;
+}

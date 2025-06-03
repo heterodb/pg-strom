@@ -421,5 +421,8 @@ EXTERN_FUNCTION(bool)
 __xpu_numeric_to_fp64(kern_context *kcxt,
 					  float8_t *p_ival,
 					  xpu_numeric_t *num);
-
+EXTERN_FUNCTION(int128_t)
+__normalize_numeric_int128(int16_t weight_d,
+						   int16_t weight_s,
+						   int128_t ival);
 #endif /* XPU_NUMERIC_H */
