@@ -751,12 +751,12 @@ execGpuJoinGiSTJoin(kern_context *kcxt,
  * GPU Projection
  */
 PUBLIC_FUNCTION(int)
-execGpuJoinProjection(kern_context *kcxt,
-					  kern_warp_context *wp,
-					  int n_rels,	/* index of read/write-pos */
-					  kern_data_store *kds_dst,
-					  kern_expression *kexp_projection,
-					  char *src_kvecs_buffer)
+execGpuJoinProjectionNormal(kern_context *kcxt,
+							kern_warp_context *wp,
+							int n_rels,	/* index of read/write-pos */
+							kern_data_store *kds_dst,
+							kern_expression *kexp_projection,
+							char *src_kvecs_buffer)
 {
 	uint32_t	wr_pos = WARP_WRITE_POS(wp,n_rels);
 	uint32_t	rd_pos = WARP_READ_POS(wp,n_rels);
@@ -922,6 +922,242 @@ execGpuJoinProjection(kern_context *kcxt,
 		assert(WARP_WRITE_POS(wp,n_rels) >= WARP_READ_POS(wp,n_rels));
 	}
 	__syncthreads();
+	if (wp->scan_done <= n_rels)
+	{
+		if (WARP_WRITE_POS(wp,n_rels) < WARP_READ_POS(wp,n_rels) + get_local_size())
+			return n_rels;	/* back to the previous depth */
+	}
+	else
+	{
+		if (WARP_READ_POS(wp,n_rels) >= WARP_WRITE_POS(wp,n_rels))
+			return -1;		/* ok, end of GpuJoin */
+	}
+	return n_rels + 1;		/* elsewhere, try again? */
+}
+
+INLINE_FUNCTION(void)
+__initKdsBlockHeapPage(PageHeaderData *hpage, int lp_index, int lp_usage)
+{
+	assert(offsetof(PageHeaderData, pd_linp[lp_index]) + lp_usage <= BLCKSZ);
+	hpage->pd_checksum = 0;
+	hpage->pd_flags = 0;
+	hpage->pd_lower = offsetof(PageHeaderData, pd_linp[lp_index]);
+	hpage->pd_upper = (BLCKSZ - lp_usage);
+	hpage->pd_special = 0;
+	hpage->pd_pagesize_version = (BLCKSZ | PG_PAGE_LAYOUT_VERSION);
+	hpage->pd_prune_xid = 0;
+}
+
+PUBLIC_FUNCTION(int)
+execGpuJoinProjectionBlock(kern_context *kcxt,
+						   kern_warp_context *wp,
+						   int n_rels,	/* index of read/write-pos */
+						   kern_data_store *kds_dst,
+						   kern_expression *kexp_proj,
+						   char *src_kvecs_buffer)
+{
+	uint32_t	wr_pos = WARP_WRITE_POS(wp,n_rels);
+	uint32_t	rd_pos = WARP_READ_POS(wp,n_rels);
+	uint32_t	nr_input = Min(wr_pos - rd_pos, get_local_size());
+	int32_t		tupsz = 0;
+	uint32_t	offset;
+	uint16_t	lindex;
+	bool		needs_suspend = false;
+	bool		alloc_done = false;
+	__shared__ uint32_t	lp_offset[CUDA_MAXTHREADS_PER_BLOCK];
+	__shared__ int16_t	lp_index[CUDA_MAXTHREADS_PER_BLOCK];
+
+	/*
+	 * The previous depth still may produce new tuples, and number of
+	 * the current result tuples is not sufficient to run projection.
+	 */
+	if (wp->scan_done <= n_rels && rd_pos + get_local_size() > wr_pos)
+		return n_rels;
+	rd_pos += get_local_id();
+
+	kcxt->kvecs_curr_id = (rd_pos % KVEC_UNITSZ);
+	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
+	if (rd_pos < wr_pos)
+	{
+		tupsz = kern_estimate_heap_tuple(kcxt, kexp_proj, kds_dst);
+		if (tupsz < 0)
+		{
+			/* SELECT INTO Direct mode does not allow CPU fallback */
+			STROM_ELOG(kcxt, "unable to compute tuple size");
+		}
+	}
+	lp_offset[get_local_id()] = tupsz;
+	/* error checks */
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+		return -1;
+	/*
+	 * allocation of the destination buffer
+	 */
+	do {
+		if (get_local_id() == 0)
+		{
+			uint32_t	__nitems;
+			uint32_t	__lp_usage;
+			uint32_t	__lp_index;
+
+			__nitems = __volatileRead(&kds_dst->nitems);
+			if (__nitems != UINT_MAX &&
+				__nitems == __atomic_cas_uint32(&kds_dst->nitems,
+												__nitems,
+												UINT_MAX))
+			{
+				/* LOCKED by thread-0 */
+				if (__nitems == 0)
+				{
+					/* exactly an empty table */
+					__lp_index = 0;
+					__lp_usage = 0;
+				}
+				else if (__nitems < RELSEG_SIZE)
+				{
+					/* fetch parameters from the last block */
+					PageHeaderData *hpage = KDS_BLOCK_PGPAGE(kds_dst, __nitems-1);
+					__lp_index = (hpage->pd_lower - SizeOfPageHeaderData) / sizeof(ItemIdData);
+					__lp_usage = (hpage->pd_upper - hpage->pd_lower);
+				}
+				else
+				{
+					/* current segment is already full */
+					SUSPEND_NO_SPACE(kcxt, "heap segment is full");
+					goto out_unlock;
+				}
+				/*
+				 * Runs heap block allocation for each tuple
+				 *
+				 * NOTE: Right now, we have no idea to implement this logic
+				 * without simple loop. So, it tends to use only registers
+				 * and L1 (shared memory) to reduce critical section delay.
+				 */
+				for (int i=0; i < nr_input; i++)
+				{
+					int		__tupsz = lp_offset[i];
+
+					assert(__tupsz == MAXALIGN(__tupsz));
+					if (__tupsz == 0)
+					{
+						/* thread has no tuple */
+						lp_index[i] = -1;
+					}
+					else if (offsetof(PageHeaderData,
+									  pd_linp[__lp_index+1])
+							 + __tupsz
+							 + __lp_usage <= BLCKSZ)
+					{
+						/* tuple can be written to the current page */
+						__lp_usage += __tupsz;
+						lp_offset[i] = __nitems * BLCKSZ + (BLCKSZ - __lp_usage);
+						lp_index[i] = __lp_index++;
+					}
+					else if (offsetof(PageHeaderData,
+									  pd_linp[1])
+							 + __tupsz <= BLCKSZ)
+					{
+						/*
+						 * tuple fits PostgreSQL's heap block size, so enlarge
+						 * next heap block.
+						 * Previous thread has a role to setup the page header
+						 * (if lp_offset[] is odd-number, it initialized the
+						 *  page header.)
+						 */
+						if (i > 0)
+							lp_offset[i-1] |= 1;
+						if (++__nitems < RELSEG_SIZE)
+						{
+							__lp_index = 0;
+							__lp_usage = __tupsz;
+							lp_offset[i] = __nitems * BLCKSZ + (BLCKSZ - __tupsz);
+							lp_index[i] = __lp_index++;
+						}
+						else
+						{
+							/*
+							 * It exceeds end of the current heap segment. We have to
+							 * suspend the GPU kernel, then resume it again, after
+							 * the partial projections.
+							 */
+							for (int k=i; k < nr_input; k++)
+							{
+								lp_offset[k] = 0;
+								lp_index[k] = -1;
+							}
+							nr_input = i;		/* break the loop */
+							needs_suspend = true;
+						}
+					}
+					else
+					{
+						/* tuple is too large */
+						STROM_ELOG(kcxt, "tuple size too large for SELECT INTO Direct");
+						goto out_unlock;
+					}
+				}
+				/*
+				 * Update the last page inside of the critical section.
+				 * Because hpage->pd_lower and pd_upper is used for another
+				 * thread group to determine the location of next write,
+				 * we have to setup the last page header before unlock.
+				 */
+				if (__nitems < RELSEG_SIZE)
+				{
+					PageHeaderData *hpage = KDS_BLOCK_PGPAGE(kds_dst, __nitems);
+					__initKdsBlockHeapPage(hpage, __lp_index, __lp_usage);
+				}
+				alloc_done = true;
+				/* UNLOCK */
+			out_unlock:
+				__atomic_thread_fense();
+				__atomic_exchange_uint32(&kds_dst->nitems, __nitems);
+			}
+		}
+		/* error checks */
+		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
+			return -1;
+	} while (__syncthreads_count(alloc_done) == 0);
+	/*
+	 * initialize the new heap page by the thread responsible
+	 */
+	offset = lp_offset[get_local_id()];
+	lindex = lp_index[get_local_id()];
+	if ((offset & 1U) != 0)
+	{
+		PageHeaderData *hpage = (PageHeaderData *)
+			((char *)kds_dst + kds_dst->block_offset + (offset & ~(BLCKSZ-1)));
+		offset &= 0xfffffffe;	/* clear the flag */
+		__initKdsBlockHeapPage(hpage, lindex, offset & ~(BLCKSZ-1));
+	}
+	__syncthreads();
+	if (tupsz > 0 && offset > 0)
+	{
+		HeapTupleHeaderData *htup = (HeapTupleHeaderData *)
+			((char *)kds_dst + kds_dst->block_offset + offset);
+		PageHeaderData *hpage = (PageHeaderData *)
+			((char *)kds_dst + kds_dst->block_offset + (offset & ~(BLCKSZ-1)));
+		ItemIdData		temp;
+
+		assert(offset > 0);
+		kern_form_heap_tuple(kcxt, kexp_proj, kds_dst, htup);
+		temp.lp_off = (char *)htup - (char *)hpage;
+		temp.lp_flags = LP_NORMAL;
+		temp.lp_len = tupsz;
+		hpage->pd_linp[lindex] = temp;
+	}
+	/* update the read position */
+	if (get_local_id() == 0)
+	{
+		/* nr_input of thread-0 might be decreased if suspend is needed */
+		WARP_READ_POS(wp,n_rels) += nr_input;
+		assert(WARP_WRITE_POS(wp,n_rels) >= WARP_READ_POS(wp,n_rels));
+	}
+	if (__syncthreads_count(needs_suspend) > 0)
+	{
+		SUSPEND_NO_SPACE(kcxt, "heap segment is full");
+		return -1;
+	}
 	if (wp->scan_done <= n_rels)
 	{
 		if (WARP_WRITE_POS(wp,n_rels) < WARP_READ_POS(wp,n_rels) + get_local_size())
@@ -1131,22 +1367,31 @@ kern_gpujoin_main(kern_session_info *session,
 		else if (depth > n_rels)
 		{
 			assert(depth == n_rels+1);
-			if (session->xpucode_projection)
-			{
-				/* PROJECTION */
-				depth = execGpuJoinProjection(kcxt, wp,
-											  n_rels,
-											  kds_dst,
-											  SESSION_KEXP_PROJECTION(session),
-											  __KVEC_BUFFER(n_rels));
-			}
-			else
+			if (!session->xpucode_projection)
 			{
 				/* PRE-AGG */
 				depth = execGpuPreAggGroupBy(kcxt, wp,
 											 n_rels,
 											 kds_dst,
 											 __KVEC_BUFFER(n_rels));
+			}
+			else if (kds_dst->format != KDS_FORMAT_BLOCK)
+			{
+				/* PROJECTION (ROW/HASH) */
+				depth = execGpuJoinProjectionNormal(kcxt, wp,
+													n_rels,
+													kds_dst,
+													SESSION_KEXP_PROJECTION(session),
+													__KVEC_BUFFER(n_rels));
+			}
+			else
+			{
+				/* PROJECTION (BLOCK) */
+				depth = execGpuJoinProjectionBlock(kcxt, wp,
+												   n_rels,
+												   kds_dst,
+												   SESSION_KEXP_PROJECTION(session),
+												   __KVEC_BUFFER(n_rels));
 			}
 		}
 		else if (depth == kgtask->right_outer_depth)

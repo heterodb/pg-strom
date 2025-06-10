@@ -170,6 +170,8 @@ typedef unsigned int		Oid;
 
 #define NAMEDATALEN			64		/* must follow the host configuration */
 #define BLCKSZ				8192	/* must follow the host configuration */
+#define RELSEG_SIZE			131072	/* must follow the host configuration */
+#define PG_PAGE_LAYOUT_VERSION 4	/* must follow the host configuration */
 
 #ifndef lengthof
 #define lengthof(array)		(sizeof (array) / sizeof ((array)[0]))
@@ -3168,6 +3170,15 @@ EXTERN_FUNCTION(int)
 kern_estimate_minimal_tuple(kern_context *kcxt,
 							const kern_expression *kproj,
 							const kern_data_store *kds_dst);
+EXTERN_FUNCTION(int)
+kern_form_heap_tuple(kern_context *kcxt,
+					 const kern_expression *kproj,
+					 const kern_data_store *kds_dst,
+					 HeapTupleHeaderData *htup);
+EXTERN_FUNCTION(int)
+kern_estimate_heap_tuple(kern_context *kcxt,
+						 const kern_expression *kproj,
+						 const kern_data_store *kds_dst);
 EXTERN_FUNCTION(const void *)
 kern_fetch_minimal_tuple_attr(const kern_data_store *kds,
 							  const kern_tupitem *titem, int anum);

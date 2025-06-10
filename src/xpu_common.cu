@@ -979,13 +979,13 @@ pgfn_ScalarArrayOp(XPU_PGFUNCTION_ARGS)
  *
  * ----------------------------------------------------------------
  */
-PUBLIC_FUNCTION(int)
+STATIC_FUNCTION(int)
 __kern_form_minimal_tuple(kern_context *kcxt,
 						  int proj_nattrs,
 						  const uint16_t *proj_slot_id,
 						  const kern_data_store *kds_dst,
 						  kern_tupitem *titem,
-						  uint32_t rowid)
+						  uint32_t rowid)	/* rowid==UINT_MAX means no rowid */
 {
 	/*
 	 * NOTE: the caller must call kern_estimate_minimal_tuple() preliminary
@@ -1065,13 +1065,15 @@ __kern_form_minimal_tuple(kern_context *kcxt,
 			t_hoff = t_next + sz;
 		}
 	}
-	t_hoff += ROWID_SIZE;	/* space for ROWID at the tail */
-	
+	if (rowid != UINT_MAX)
+		t_hoff += ROWID_SIZE;	/* space for ROWID at the tail */
+
 	if (titem)
 	{
 		titem->t_len = t_hoff;
 		titem->t_infomask = t_infomask;
-		KERN_TUPITEM_SET_ROWID(titem, rowid);
+		if (rowid != UINT_MAX)
+			KERN_TUPITEM_SET_ROWID(titem, rowid);
 	}
 	return t_hoff;
 }
@@ -1083,6 +1085,7 @@ kern_form_minimal_tuple(kern_context *kcxt,
 						kern_tupitem *titem,
 						uint32_t rowid)
 {
+	assert(rowid != UINT_MAX);
 	return __kern_form_minimal_tuple(kcxt,
 									 kexp_proj->u.proj.nattrs,
 									 kexp_proj->u.proj.slot_id,
@@ -1091,13 +1094,46 @@ kern_form_minimal_tuple(kern_context *kcxt,
 									 rowid);
 }
 
-EXTERN_FUNCTION(int)
-kern_estimate_minimal_tuple(kern_context *kcxt,
-							const kern_expression *kexp_proj,
-							const kern_data_store *kds_dst)
+PUBLIC_FUNCTION(int)
+kern_form_heap_tuple(kern_context *kcxt,
+					 const kern_expression *kexp_proj,
+					 const kern_data_store *kds_dst,
+					 HeapTupleHeaderData *htup)
+{
+	kern_tupitem *__titem = NULL;
+	int		sz;
+
+	if (htup)
+		__titem = (kern_tupitem *)((char *)htup + MINIMAL_TUPLE_OFFSET);
+	sz = __kern_form_minimal_tuple(kcxt,
+								   kexp_proj->u.proj.nattrs,
+								   kexp_proj->u.proj.slot_id,
+								   kds_dst,
+								   __titem,
+								   UINT_MAX);
+	if (sz >= 0)
+	{
+		sz += MINIMAL_TUPLE_OFFSET;
+		if (htup)
+		{
+			htup->t_choice.t_datum.datum_typmod = kds_dst->tdtypmod;
+			htup->t_choice.t_datum.datum_typeid = kds_dst->tdtypeid;
+			htup->t_ctid.ip_blkid.bi_hi = 0xffff;
+			htup->t_ctid.ip_blkid.bi_lo = 0xffff;
+			htup->t_ctid.ip_posid = 0;
+			SET_VARSIZE(htup, sz);
+		}
+	}
+	return sz;
+}
+
+INLINE_FUNCTION(bool)
+__estimate_tuple_length_prep(kern_context *kcxt,
+							 const kern_expression *kexp_proj,
+							 const kern_data_store *kds_dst)
 {
 	const kern_expression *karg;
-	int		i, sz;
+	int		i;
 
 	/* Run SaveExpr expressions to warm up kcxt->kvars_slot[] */
 	for (i=0, karg=KEXP_FIRST_ARG(kexp_proj);
@@ -1118,10 +1154,37 @@ kern_estimate_minimal_tuple(kern_context *kcxt,
 		assert(slot_id < kcxt->kvars_nslots);
 		xdatum = kcxt->kvars_slot[slot_id];
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, xdatum))
-			return -1;
+			return false;
 	}
-	/* then, estimate the length */
+	return true;
+}
+
+EXTERN_FUNCTION(int)
+kern_estimate_minimal_tuple(kern_context *kcxt,
+							const kern_expression *kexp_proj,
+							const kern_data_store *kds_dst)
+{
+	int		sz;
+
+	if (!__estimate_tuple_length_prep(kcxt, kexp_proj, kds_dst))
+		return -1;
 	sz = kern_form_minimal_tuple(kcxt, kexp_proj, kds_dst, NULL, 0);
+	if (sz < 0)
+		return -1;
+	return MAXALIGN(sz);
+}
+
+
+PUBLIC_FUNCTION(int)
+kern_estimate_heap_tuple(kern_context *kcxt,
+						 const kern_expression *kexp_proj,
+						 const kern_data_store *kds_dst)
+{
+	int		sz;
+
+	if (!__estimate_tuple_length_prep(kcxt, kexp_proj, kds_dst))
+		return -1;
+	sz = kern_form_heap_tuple(kcxt, kexp_proj, kds_dst, NULL);
 	if (sz < 0)
 		return -1;
 	return MAXALIGN(sz);

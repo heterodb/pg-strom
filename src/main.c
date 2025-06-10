@@ -703,6 +703,13 @@ pgstrom_executor_start(QueryDesc *queryDesc, int eflags)
 	{
 		pgstromTaskState *pts = (pgstromTaskState *)queryDesc->planstate;
 
+		/* Only GPU supports SELECT INTO Direct mode */
+		if ((pts->xpu_task_flags & DEVKIND__ANY) != DEVKIND__NVIDIA_GPU)
+		{
+			elog(DEBUG2, "SELECT INTO Direct disabled: because only GPU supports it");
+			return;
+		}
+
 		/*
 		 * Even if ProjectionInfo would be assigned on the planstate,
 		 * we check whether it is actually incompatible or not.
