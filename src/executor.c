@@ -891,8 +891,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		Assert(dest->pub.mydest == DestIntoRel);
 		drel = dest->rel;
 		SET_LOCKTAG_RELATION(locktag, MyDatabaseId, RelationGetRelid(drel));
-		if (!LockHeldByMe(&locktag, AccessExclusiveLock) &&
-			!LockHeldByMe(&locktag, ExclusiveLock))
+		if (!LockHeldByMe(&locktag, AccessExclusiveLock, true))
 		{
 			elog(DEBUG2, "SELECT INTO Direct disabled, because of not sufficient table lock level");
 			pts->select_into_dest = NULL;
