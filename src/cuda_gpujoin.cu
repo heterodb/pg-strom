@@ -936,14 +936,15 @@ execGpuJoinProjectionNormal(kern_context *kcxt,
 }
 
 INLINE_FUNCTION(void)
-__initKdsBlockHeapPage(PageHeaderData *hpage, int lp_index, int lp_usage)
+__initKdsBlockHeapPage(PageHeaderData *hpage, int lp_index, int lp_offset)
 {
-	assert(offsetof(PageHeaderData, pd_linp[lp_index]) + lp_usage <= BLCKSZ);
+	assert(lp_offset <= BLCKSZ &&
+		   offsetof(PageHeaderData, pd_linp[lp_index]) <= lp_offset);
 	hpage->pd_checksum = 0;
 	hpage->pd_flags = 0;
 	hpage->pd_lower = offsetof(PageHeaderData, pd_linp[lp_index]);
-	hpage->pd_upper = (BLCKSZ - lp_usage);
-	hpage->pd_special = 0;
+	hpage->pd_upper = lp_offset;
+	hpage->pd_special = BLCKSZ;
 	hpage->pd_pagesize_version = (BLCKSZ | PG_PAGE_LAYOUT_VERSION);
 	hpage->pd_prune_xid = 0;
 }
@@ -1012,13 +1013,14 @@ execGpuJoinProjectionBlock(kern_context *kcxt,
 					/* exactly an empty table */
 					__lp_index = 0;
 					__lp_usage = 0;
+					__nitems++;
 				}
-				else if (__nitems < RELSEG_SIZE)
+				else if (__nitems <= RELSEG_SIZE)
 				{
 					/* fetch parameters from the last block */
 					PageHeaderData *hpage = KDS_BLOCK_PGPAGE(kds_dst, __nitems-1);
 					__lp_index = (hpage->pd_lower - SizeOfPageHeaderData) / sizeof(ItemIdData);
-					__lp_usage = (hpage->pd_upper - hpage->pd_lower);
+					__lp_usage = BLCKSZ - hpage->pd_upper;
 				}
 				else
 				{
@@ -1050,7 +1052,7 @@ execGpuJoinProjectionBlock(kern_context *kcxt,
 					{
 						/* tuple can be written to the current page */
 						__lp_usage += __tupsz;
-						lp_offset[i] = __nitems * BLCKSZ + (BLCKSZ - __lp_usage);
+						lp_offset[i] = __nitems * BLCKSZ - __lp_usage;
 						lp_index[i] = __lp_index++;
 					}
 					else if (offsetof(PageHeaderData,
@@ -1066,11 +1068,11 @@ execGpuJoinProjectionBlock(kern_context *kcxt,
 						 */
 						if (i > 0)
 							lp_offset[i-1] |= 1;
-						if (++__nitems < RELSEG_SIZE)
+						if (++__nitems <= RELSEG_SIZE)
 						{
 							__lp_index = 0;
 							__lp_usage = __tupsz;
-							lp_offset[i] = __nitems * BLCKSZ + (BLCKSZ - __tupsz);
+							lp_offset[i] = __nitems * BLCKSZ - __lp_usage;
 							lp_index[i] = __lp_index++;
 						}
 						else
@@ -1102,10 +1104,10 @@ execGpuJoinProjectionBlock(kern_context *kcxt,
 				 * thread group to determine the location of next write,
 				 * we have to setup the last page header before unlock.
 				 */
-				if (__nitems < RELSEG_SIZE)
+				if (__nitems <= RELSEG_SIZE)
 				{
-					PageHeaderData *hpage = KDS_BLOCK_PGPAGE(kds_dst, __nitems);
-					__initKdsBlockHeapPage(hpage, __lp_index, __lp_usage);
+					PageHeaderData *hpage = KDS_BLOCK_PGPAGE(kds_dst, __nitems-1);
+					__initKdsBlockHeapPage(hpage, __lp_index, BLCKSZ - __lp_usage);
 				}
 				alloc_done = true;
 				/* UNLOCK */
@@ -1127,8 +1129,8 @@ execGpuJoinProjectionBlock(kern_context *kcxt,
 	{
 		PageHeaderData *hpage = (PageHeaderData *)
 			((char *)kds_dst + kds_dst->block_offset + (offset & ~(BLCKSZ-1)));
-		offset &= 0xfffffffe;	/* clear the flag */
-		__initKdsBlockHeapPage(hpage, lindex, offset & ~(BLCKSZ-1));
+		offset &= 0xfffffffeU;	/* clear the flag */
+		__initKdsBlockHeapPage(hpage, lindex+1, (offset & (BLCKSZ-1)));
 	}
 	__syncthreads();
 	if (tupsz > 0 && offset > 0)
@@ -1139,7 +1141,7 @@ execGpuJoinProjectionBlock(kern_context *kcxt,
 			((char *)kds_dst + kds_dst->block_offset + (offset & ~(BLCKSZ-1)));
 		ItemIdData		temp;
 
-		assert(offset > 0);
+		assert(offset == MAXALIGN(offset));
 		kern_form_heap_tuple(kcxt, kexp_proj, kds_dst, htup);
 		temp.lp_off = (char *)htup - (char *)hpage;
 		temp.lp_flags = LP_NORMAL;

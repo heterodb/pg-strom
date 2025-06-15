@@ -2136,6 +2136,9 @@ typedef struct
 												 * inner buffer by GPU-Join/Scan) must
 												 * be merged to a single buffer, for
 												 * complete-aggregation or GPU-Sort */
+#define DEVTASK__SELECT_INTO_DIRECT	0x00020000U	/* Results shall be written to an empty
+												 * heap table files, without XACT logs.
+												 */
 #define DEVTASK__SCAN				0x10000000U	/* xPU-Scan */
 #define DEVTASK__JOIN				0x20000000U	/* xPU-Join */
 #define DEVTASK__PREAGG				0x40000000U	/* xPU-PreAgg */
@@ -2642,6 +2645,8 @@ typedef struct kern_session_info
 	/* database session info */
 	int64_t		hostEpochTimestamp;		/* = SetEpochTimestamp() */
 	uint64_t	xactStartTimestamp;		/* timestamp when transaction start */
+	uint32_t	session_curr_xid;		/* GetCurrentTransactionId() */
+	uint32_t	session_curr_cid;		/* GetCurrentCommandId() */
 	uint32_t	session_xact_state;		/* offset to SerializedTransactionState */
 	uint32_t	session_timezone;		/* offset to pg_tz */
 	uint32_t	session_encode;			/* offset to xpu_encode_info;

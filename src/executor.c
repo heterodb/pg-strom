@@ -674,6 +674,8 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	XpuCommand	   *xcmd;
 	StringInfoData	buf;
 	bytea		   *xpucode;
+	TransactionId	session_curr_xid = InvalidTransactionId;	/* only if writable */
+	CommandId		session_curr_cid = InvalidCommandId;		/* only if writable */
 
 	initStringInfo(&buf);
 	session_sz = offsetof(kern_session_info, poffset[nparams]);
@@ -914,6 +916,9 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 				__appendBinaryStringInfo(&buf, VARDATA_ANY(pathname),
 										 VARSIZE_ANY_EXHDR(pathname));
 			appendStringInfoChar(&buf, '\0');
+			pts->xpu_task_flags |= DEVTASK__SELECT_INTO_DIRECT;
+			session_curr_xid = GetCurrentTransactionId();
+			session_curr_cid = GetCurrentCommandId(true);
 		}
 	}
 	/* other database session information */
@@ -926,6 +931,8 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	session->cuda_stack_size  = pp_info->cuda_stack_size;
 	session->hostEpochTimestamp = SetEpochTimestamp();
 	session->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
+	session->session_curr_xid = session_curr_xid;
+	session->session_curr_cid = session_curr_cid;
 	session->session_xact_state = __build_session_xact_state(&buf);
 	session->session_timezone = __build_session_timezone(&buf);
 	session->session_encode = __build_session_encode(&buf);
@@ -2913,7 +2920,11 @@ pgstromExplainTaskState(CustomScanState *node,
 	 */
 	if (pts->select_into_dest)
 	{
-		ExplainPropertyText("SELECT-INTO Direct", "possible", es);
+		const char *label = "possible";
+
+		if ((pts->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
+			label = "enabled";
+		ExplainPropertyText("SELECT-INTO Direct", label, es);
 	}
 
 	/*
