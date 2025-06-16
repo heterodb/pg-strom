@@ -19,8 +19,10 @@ __gpusort_comp_rawkey(kern_context *kcxt,
 					  const kern_tupitem *titem_x,
 					  const kern_tupitem *titem_y)
 {
-	const void *addr_x = kern_fetch_heaptuple_attr(kcxt, kds_final, titem_x, sdesc->src_anum);
-	const void *addr_y = kern_fetch_heaptuple_attr(kcxt, kds_final, titem_y, sdesc->src_anum);
+	const void *addr_x = kern_fetch_minimal_tuple_attr(kds_final, titem_x,
+													   sdesc->src_anum);
+	const void *addr_y = kern_fetch_minimal_tuple_attr(kds_final, titem_y,
+													   sdesc->src_anum);
 
 	if (addr_x && addr_y)
 	{
@@ -69,9 +71,9 @@ __gpusort_comp_pminmax_int64(kern_context *kcxt,
 							 const kern_tupitem *titem_y)
 {
 	const kagg_state__pminmax_int64_packed *x = (const kagg_state__pminmax_int64_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem_x, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem_x, sdesc->src_anum);
 	const kagg_state__pminmax_int64_packed *y = (const kagg_state__pminmax_int64_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem_y, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem_y, sdesc->src_anum);
 	if (x && (x->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
 	{
 		if (y && (y->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
@@ -98,9 +100,9 @@ __gpusort_comp_pminmax_fp64(kern_context *kcxt,
 							const kern_tupitem *titem_y)
 {
 	const kagg_state__pminmax_fp64_packed *x = (const kagg_state__pminmax_fp64_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem_x, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem_x, sdesc->src_anum);
 	const kagg_state__pminmax_fp64_packed *y = (const kagg_state__pminmax_fp64_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem_y, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem_y, sdesc->src_anum);
 	if (x && (x->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
 	{
 		if (y && (y->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
@@ -127,9 +129,9 @@ __gpusort_comp_psum_int64(kern_context *kcxt,
 						  const kern_tupitem *titem_y)
 {
 	const kagg_state__psum_int_packed *x = (const kagg_state__psum_int_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem_x, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem_x, sdesc->src_anum);
 	const kagg_state__psum_int_packed *y = (const kagg_state__psum_int_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem_y, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem_y, sdesc->src_anum);
 	if (x && x->nitems > 0)
 	{
 		if (y && y->nitems > 0)
@@ -156,9 +158,9 @@ __gpusort_comp_psum_fp64(kern_context *kcxt,
 						  const kern_tupitem *titem_y)
 {
 	const kagg_state__psum_fp_packed *x = (const kagg_state__psum_fp_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem_x, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem_x, sdesc->src_anum);
 	const kagg_state__psum_fp_packed *y = (const kagg_state__psum_fp_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem_y, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem_y, sdesc->src_anum);
 	if (x && x->nitems > 0)
 	{
 		if (y && y->nitems > 0)
@@ -185,9 +187,9 @@ __gpusort_comp_psum_numeric(kern_context *kcxt,
 							const kern_tupitem *titem_y)
 {
 	const kagg_state__psum_numeric_packed *x = (const kagg_state__psum_numeric_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem_x, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem_x, sdesc->src_anum);
 	const kagg_state__psum_numeric_packed *y = (const kagg_state__psum_numeric_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem_y, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem_y, sdesc->src_anum);
 	if (x && x->nitems > 0)
 	{
 		if (y && y->nitems > 0)
@@ -245,8 +247,8 @@ __gpusort_comp_precomp_fp64(const kern_sortkey_desc *sdesc,
 							const kern_tupitem *titem_x,
 							const kern_tupitem *titem_y)
 {
-	const char *addr_x = ((char *)&titem_x->htup + titem_x->t_len + sdesc->buf_offset);
-	const char *addr_y = ((char *)&titem_y->htup + titem_y->t_len + sdesc->buf_offset);
+	const char *addr_x = ((char *)titem_x + titem_x->t_len + sdesc->buf_offset);
+	const char *addr_y = ((char *)titem_y + titem_y->t_len + sdesc->buf_offset);
 	bool		notnull_x = *addr_x++;
 	bool		notnull_y = *addr_y++;
 	float8_t	fval_x;
@@ -405,8 +407,8 @@ __gpusort_prep_pavg_int64(kern_context *kcxt,
 	const void *addr;
 	char	   *dest;
 
-	dest = ((char *)&titem->htup + titem->t_len + sdesc->buf_offset);
-	addr = kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+	dest = ((char *)titem + titem->t_len + sdesc->buf_offset);
+	addr = kern_fetch_minimal_tuple_attr(kds_final, titem, sdesc->src_anum);
 	if (!addr)
 		*dest++ = false;
 	else
@@ -435,8 +437,8 @@ __gpusort_prep_pavg_fp64(kern_context *kcxt,
 	const void *addr;
 	char	   *dest;
 
-	dest = ((char *)&titem->htup + titem->t_len + sdesc->buf_offset);
-	addr = kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+	dest = ((char *)titem + titem->t_len + sdesc->buf_offset);
+	addr = kern_fetch_minimal_tuple_attr(kds_final, titem, sdesc->src_anum);
 	if (!addr)
 		*dest++ = false;
 	else
@@ -465,8 +467,8 @@ __gpusort_prep_pavg_numeric(kern_context *kcxt,
 	const void *addr;
 	char	   *dest;
 
-	dest = ((char *)&titem->htup + titem->t_len + sdesc->buf_offset);
-	addr = kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+	dest = ((char *)titem + titem->t_len + sdesc->buf_offset);
+	addr = kern_fetch_minimal_tuple_attr(kds_final, titem, sdesc->src_anum);
 	if (!addr)
 		*dest++ = false;
 	else
@@ -549,8 +551,8 @@ __gpusort_prep_pvariance(kern_context *kcxt,
 	const void *addr;
 	char	   *dest;
 
-	dest = ((char *)&titem->htup + titem->t_len + sdesc->buf_offset);
-	addr = kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+	dest = ((char *)titem + titem->t_len + sdesc->buf_offset);
+	addr = kern_fetch_minimal_tuple_attr(kds_final, titem, sdesc->src_anum);
 	if (!addr)
 		*dest++ = false;
 	else
@@ -608,8 +610,8 @@ __gpusort_prep_pcovariance(kern_context *kcxt,
 	const void *addr;
 	char	   *dest;
 
-	dest = ((char *)&titem->htup + titem->t_len + sdesc->buf_offset);
-	addr = kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+	dest = ((char *)titem + titem->t_len + sdesc->buf_offset);
+	addr = kern_fetch_minimal_tuple_attr(kds_final, titem, sdesc->src_anum);
 	if (!addr)
 		*dest++ = false;
 	else
@@ -1001,8 +1003,7 @@ __gpusort_load_rawkey(kern_context *kcxt,
 					  const kern_tupitem *titem,
 					  xpu_datum_t *xdatum)
 {
-	const void *addr = kern_fetch_heaptuple_attr(kcxt, kds_final,
-												 titem, sdesc->src_anum);
+	const void *addr = kern_fetch_minimal_tuple_attr(kds_final, titem, sdesc->src_anum);
 	if (addr)
 	{
 		const xpu_datum_operators *key_ops = sdesc->key_ops;
@@ -1022,7 +1023,7 @@ __gpusort_load_pminmax_int64(kern_context *kcxt,
 							 xpu_datum_t *__xdatum)
 {
 	const kagg_state__pminmax_int64_packed *x = (const kagg_state__pminmax_int64_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem, sdesc->src_anum);
 	assert(sdesc->key_ops == &xpu_int8_ops);
 	if (x && (x->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
 	{
@@ -1046,7 +1047,7 @@ __gpusort_load_pminmax_fp64(kern_context *kcxt,
 							xpu_datum_t *__xdatum)
 {
 	const kagg_state__pminmax_fp64_packed *x = (const kagg_state__pminmax_fp64_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem, sdesc->src_anum);
 	assert(sdesc->key_ops == &xpu_float8_ops);
 	if (x && (x->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
 	{
@@ -1069,7 +1070,7 @@ __gpusort_load_psum_int64(kern_context *kcxt,
 						  xpu_datum_t *__xdatum)
 {
 	const kagg_state__psum_int_packed *x = (const kagg_state__psum_int_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem, sdesc->src_anum);
 	assert(sdesc->key_ops == &xpu_int8_ops);
 	if (x && x->nitems > 0)
 	{
@@ -1092,7 +1093,7 @@ __gpusort_load_psum_fp64(kern_context *kcxt,
 						 xpu_datum_t *__xdatum)
 {
 	const kagg_state__psum_fp_packed *x = (const kagg_state__psum_fp_packed *)
-		kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+		kern_fetch_minimal_tuple_attr(kds_final, titem, sdesc->src_anum);
 	assert(sdesc->key_ops == &xpu_float8_ops);
 	if (x && x->nitems > 0)
 	{
@@ -1115,7 +1116,7 @@ __gpusort_load_psum_numeric(kern_context *kcxt,
 							xpu_datum_t *__xdatum)
 {
 	const kagg_state__psum_numeric_packed *x = (const kagg_state__psum_numeric_packed *)
-        kern_fetch_heaptuple_attr(kcxt, kds_final, titem, sdesc->src_anum);
+        kern_fetch_minimal_tuple_attr(kds_final, titem, sdesc->src_anum);
 	assert(sdesc->key_ops == &xpu_numeric_ops);
 	if (x && x->nitems > 0)
 	{
@@ -1150,7 +1151,7 @@ __gpusort_load_precomp_fp64(kern_context *kcxt,
 							const kern_tupitem *titem,
 							xpu_datum_t *__xdatum)
 {
-	const char *addr = ((char *)&titem->htup + titem->t_len + sdesc->buf_offset);
+	const char *addr = ((char *)titem + titem->t_len + sdesc->buf_offset);
 	bool		notnull = *addr++;
 
 	assert(sdesc->key_ops == &xpu_float8_ops);
@@ -1342,7 +1343,7 @@ kern_windowrank_finalize(kern_data_store *kds_final,
 				((char *)kds_final
 				 + old_length
 				 - windowrank_row_index[index]);
-			tupsz = MAXALIGN(offsetof(kern_tupitem, htup) + titem->t_len);
+			tupsz = MAXALIGN(titem->t_len);
 		}
 		/* allocation of the destination buffer */
 		offset = pgstrom_stair_sum_uint64(tupsz, &total_sz);
@@ -1358,10 +1359,8 @@ kern_windowrank_finalize(kern_data_store *kds_final,
 			uint32_t		__index = results_array[index] - 1;
 
 			assert(__index < new_nitems);
-			__titem->rowid = __index;
-			__titem->t_len = titem->t_len;
-			memcpy(&__titem->htup, &titem->htup, titem->t_len);
-			assert(offsetof(kern_tupitem, htup) + titem->t_len <= tupsz);
+			memcpy(__titem, titem, titem->t_len);
+			KERN_TUPITEM_SET_ROWID(__titem, __index);
 			__threadfence();
 			KDS_GET_ROWINDEX(kds_final)[__index] = ((char *)kds_final
 													+ kds_final->length
@@ -1371,4 +1370,255 @@ kern_windowrank_finalize(kern_data_store *kds_final,
 	}
 	if (get_global_id() == 0)
 		kds_final->nitems = new_nitems;
+}
+
+/*
+ * Simple GPU-Sort + LIMIT clause
+ */
+KERNEL_FUNCTION(void)
+kern_buffer_simple_limit(kern_data_store *kds_final, uint64_t old_length)
+{
+	uint64_t   *row_index = KDS_GET_ROWINDEX(kds_final);
+	uint32_t	base;
+	__shared__ uint64_t base_usage;
+
+	assert(kds_final->format == KDS_FORMAT_ROW ||
+		   kds_final->format == KDS_FORMAT_HASH);
+	for (base = get_global_base();
+		 base < kds_final->nitems;
+		 base += get_global_size())
+	{
+		const kern_tupitem *titem = NULL;
+		uint32_t	index = base + get_local_id();
+		uint32_t	tupsz = 0;
+		uint64_t	offset;
+		uint64_t	total_sz;
+
+		if (index < kds_final->nitems)
+		{
+			// XXX - must not use KDS_GET_TUPITEM() because kds_final->length
+			//       is already truncated.
+			assert(row_index[index] != 0);
+			titem = (const kern_tupitem *)
+				((char *)kds_final + old_length - row_index[index]);
+			tupsz = MAXALIGN(titem->t_len);
+		}
+		/* allocation of the destination buffer */
+		offset = pgstrom_stair_sum_uint64(tupsz, &total_sz);
+		if (get_local_id() == 0)
+			base_usage = __atomic_add_uint64(&kds_final->usage,  total_sz);
+		__syncthreads();
+		/* put tuples on the destination */
+		offset += base_usage;
+		if (tupsz > 0)
+		{
+			kern_tupitem   *__titem = (kern_tupitem *)
+				((char *)kds_final + kds_final->length - offset);
+			memcpy(__titem, titem, titem->t_len);
+			KERN_TUPITEM_SET_ROWID(__titem, index);
+			__threadfence();
+			row_index[index] = ((char *)kds_final
+								+ kds_final->length
+								- (char *)__titem);
+		}
+		__syncthreads();
+	}
+}
+
+/*
+ * GPU Buffer simple reconstruction (ROW-format with PARTITION)
+ */
+KERNEL_FUNCTION(void)
+kern_gpusort_partition_buffer(kern_session_info *session,
+							  kern_gputask *kgtask,
+							  kern_data_store *kds_dst,
+							  kern_data_store *kds_src)
+{
+	const kern_expression *sort_kexp = SESSION_KEXP_GPUSORT_KEYDESC(session);
+	kern_context   *kcxt;
+	uint32_t		base;
+	xpu_datum_t	   *xdatum = NULL;
+	__shared__ uint32_t base_rowid;
+	__shared__ uint64_t base_usage;
+
+	/* save the GPU-Task specific read-only properties */
+	if (get_local_id() == 0)
+	{
+		stromTaskProp__cuda_dindex        = kgtask->cuda_dindex;
+		stromTaskProp__cuda_stack_limit   = kgtask->cuda_stack_limit;
+		stromTaskProp__partition_divisor  = kgtask->partition_divisor;
+		stromTaskProp__partition_reminder = kgtask->partition_reminder;
+	}
+	/* setup execution context */
+	INIT_KERNEL_CONTEXT(kcxt, session, NULL);
+	__syncthreads();
+
+	assert((kds_src->format == KDS_FORMAT_ROW ||
+			kds_src->format == KDS_FORMAT_HASH) &&
+		   (kds_dst->format == KDS_FORMAT_ROW));
+	/* allocation of xdatum */
+	if (sort_kexp && stromTaskProp__partition_divisor > 0)
+	{
+		int		sz = sizeof(xpu_datum_t);
+
+		for (int j=0; j < sort_kexp->u.sort.nkeys; j++)
+		{
+			const kern_sortkey_desc *sdesc = &sort_kexp->u.sort.desc[j];
+
+			sz = Max(sdesc->key_ops->xpu_type_sizeof, sz);
+		}
+		xdatum = (xpu_datum_t *)alloca(sz);
+	}
+
+	for (base = get_global_base();
+		 base < kds_src->nitems;
+		 base += get_global_size())
+	{
+		kern_tupitem *titem = NULL;
+		uint32_t	index = base + get_local_id();
+		uint32_t	tupsz = 0;
+		uint32_t	row_id;
+		uint32_t	count;
+		uint64_t	offset;
+		uint64_t	total_sz;
+
+		if (index < kds_src->nitems)
+		{
+			titem = KDS_GET_TUPITEM(kds_src, index);
+			if (stromTaskProp__partition_divisor == 0)
+			{
+				/*
+				 * Although not currently used, if the divisor is zero, it is
+				 * considered as a simple reconstruction operation without
+				 * partitioning.
+				 */
+				tupsz = MAXALIGN(titem->t_len);
+			}
+			else if (stromTaskProp__partition_reminder == 0)
+			{
+				/*
+				 * When partitioning the buffer, the GPU kernel is called in order,
+				 * starting with the remainder 0 and ending with (divisor-1).
+				 * At this time, the sort key used for the window function is hashed
+				 * and partitioning is performed by this value, but this only needs
+				 * to be calculated once at the beginning; in the case of remainders
+				 * 1, 2, ..., the value is also written to the kds_src side so that
+				 * it is sufficient to refer to kern_tupitem->hash.
+				 */
+				uint32_t	hash = 0;
+
+				for (int anum=1; anum <= sort_kexp->u.sort.nkeys; anum++)
+				{
+					const kern_sortkey_desc *sdesc = &sort_kexp->u.sort.desc[anum-1];
+					const xpu_datum_operators  *key_ops = sdesc->key_ops;
+					uint32_t		__hash;
+
+					assert(sdesc->kind == KSORT_KEY_KIND__VREF);
+					if (sdesc->kind != KSORT_KEY_KIND__VREF)
+					{
+						STROM_ELOG(kcxt, "unexpected sorting key kind");
+						break;
+					}
+					if (!__gpusort_load_rawkey(kcxt,
+											   sdesc,
+											   kds_src,
+											   titem,
+											   xdatum) ||
+						!key_ops->xpu_datum_hash(kcxt,
+												 &__hash,
+												 xdatum))
+						break;
+					hash = ((hash >> 27) | (hash << 27)) ^ __hash;
+					if (anum == sort_kexp->u.sort.window_partby_nkeys)
+					{
+						titem->hash = hash;
+						if ((hash % stromTaskProp__partition_divisor) == stromTaskProp__partition_reminder)
+							tupsz = MAXALIGN(titem->t_len);
+						break;
+					}
+				}
+			}
+			else if ((titem->hash % stromTaskProp__partition_divisor) == stromTaskProp__partition_reminder)
+			{
+				tupsz = MAXALIGN(titem->t_len);
+			}
+		}
+		/* allocation of the destination buffer */
+		row_id = pgstrom_stair_sum_binary(tupsz > 0, &count);
+		offset = pgstrom_stair_sum_uint64(tupsz, &total_sz);
+		if (get_local_id() == 0)
+		{
+			base_rowid = __atomic_add_uint32(&kds_dst->nitems, count);
+			base_usage = __atomic_add_uint64(&kds_dst->usage,  total_sz);
+		}
+		__syncthreads();
+		/* put tuples on the destination */
+		row_id += base_rowid;
+		offset += base_usage;
+		if (tupsz > 0)
+		{
+			kern_tupitem   *__titem = (kern_tupitem *)
+				((char *)kds_dst + kds_dst->length - offset);
+			memcpy(__titem, titem, titem->t_len);
+			KERN_TUPITEM_SET_ROWID(__titem, row_id);
+			__threadfence();
+			KDS_GET_ROWINDEX(kds_dst)[row_id] = offset;
+		}
+		__syncthreads();
+	}
+}
+
+/*
+ * GPU Buffer simple reconstruction (ROW-format by simple consolidation)
+ */
+KERNEL_FUNCTION(void)
+kern_gpusort_consolidate_buffer(kern_data_store *kds_dst,
+								const kern_data_store *__restrict__ kds_src)
+{
+	__shared__ uint32_t base_rowid;
+	__shared__ uint64_t base_usage;
+	uint32_t	base;
+
+	assert(kds_dst->format == KDS_FORMAT_ROW &&
+		   kds_src->format == KDS_FORMAT_ROW);
+	for (base = get_global_base();
+		 base < kds_src->nitems;
+		 base += get_global_size())
+	{
+		const kern_tupitem *titem = NULL;
+		uint32_t	index = base + get_local_id();
+		uint32_t	tupsz = 0;
+		uint32_t	row_id;
+		uint32_t	count;
+		uint64_t	offset;
+		uint64_t	total_sz;
+
+		if (index < kds_src->nitems)
+		{
+			titem = KDS_GET_TUPITEM(kds_src, index);
+			tupsz = MAXALIGN(titem->t_len);
+		}
+		/* allocation of the destination buffer */
+		row_id = pgstrom_stair_sum_binary(tupsz > 0, &count);
+		offset = pgstrom_stair_sum_uint64(tupsz, &total_sz);
+		if (get_local_id() == 0)
+		{
+			base_rowid = __atomic_add_uint32(&kds_dst->nitems, count);
+			base_usage = __atomic_add_uint64(&kds_dst->usage,  total_sz);
+		}
+		__syncthreads();
+		/* put tuples on the destination */
+		row_id += base_rowid;
+		offset += base_usage;
+		if (tupsz > 0)
+		{
+			kern_tupitem   *__titem = (kern_tupitem *)
+				((char *)kds_dst + kds_dst->length - offset);
+			memcpy(__titem, titem, titem->t_len);
+			KERN_TUPITEM_SET_ROWID(__titem, row_id);
+			__threadfence();
+			KDS_GET_ROWINDEX(kds_dst)[row_id] = offset;
+		}
+		__syncthreads();
+	}
 }

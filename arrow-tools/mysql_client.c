@@ -395,6 +395,7 @@ put_date_day_value(SQLfield *column, const char *addr, int sz)
 	return __buffer_usage_inline_type(column);
 }
 
+#if 0
 static size_t
 put_date_ms_value(SQLfield *column, const char *addr, int sz)
 {
@@ -419,7 +420,7 @@ put_date_ms_value(SQLfield *column, const char *addr, int sz)
 	}
 	return __buffer_usage_inline_type(column);
 }
-
+#endif
 /*
  * Time
  */
@@ -655,19 +656,12 @@ move_variable_value(SQLfield *dest, const SQLfield *src, long sindex)
 static int
 mysql_setup_attribute(MYSQL *conn,
 					  MYSQL_FIELD *my_field,
-					  ArrowField *arrow_field,
 					  SQLtable *table,
 					  SQLfield *column,
 					  int attnum)
 {
-	ArrowType  *arrow_type = (arrow_field ? &arrow_field->type : NULL);
 	bool		is_signed = ((my_field->flags & UNSIGNED_FLAG) == 0);
 	bool		is_binary = ((my_field->flags & BINARY_FLAG) != 0);
-//	bool		is_enum   = ((my_field->flags & ENUM_FLAG) != 0);
-	int			bitWidth = -1;
-	int			precision = -1;
-	int			dscale;
-	int			unit;
 	const char *tz_name = NULL;
 	
 	memset(column, 0, sizeof(SQLfield));
@@ -679,173 +673,62 @@ mysql_setup_attribute(MYSQL *conn,
 		 * ArrowTypeInt
 		 */
 		case MYSQL_TYPE_TINY:
-			if (bitWidth < 0)
-			{
-				if (!arrow_type)
-					bitWidth = 8;
-				else if (arrow_type->node.tag == ArrowNodeTag__Int &&
-						 (is_signed
-						  ? arrow_type->Int.is_signed && arrow_type->Int.bitWidth >= 8
-						  : arrow_type->Int.bitWidth > 8))
-				{
-					bitWidth  = arrow_type->Int.bitWidth;
-					is_signed = arrow_type->Int.is_signed;
-				}
-				else
-				{
-					Elog("attribute '%s' is not compatible", my_field->name);
-				}
-			}
+			initArrowNode(&column->arrow_type, Int);
+			column->arrow_type.Int.is_signed = is_signed;
+			column->arrow_type.Int.bitWidth = 8;
+			column->put_value  = (is_signed ? put_int8_value  : put_uint8_value);
+			column->move_value = (is_signed ? move_int8_value : move_uint8_value);
+			return 2;		/* nullmap + values */
 
 		case MYSQL_TYPE_SHORT:
 		case MYSQL_TYPE_YEAR:
-			if (bitWidth < 0)
-			{
-				if (!arrow_type)
-					bitWidth = 16;
-				else if (arrow_type->node.tag == ArrowNodeTag__Int &&
-						 (is_signed
-						  ? arrow_type->Int.is_signed && arrow_type->Int.bitWidth >= 16
-						  : arrow_type->Int.bitWidth > 16))
-				{
-					bitWidth  = arrow_type->Int.bitWidth;
-					is_signed = arrow_type->Int.is_signed;
-				}
-				else
-				{
-					Elog("attribute '%s' is not compatible", my_field->name);
-				}
-			}
+			initArrowNode(&column->arrow_type, Int);
+			column->arrow_type.Int.is_signed = is_signed;
+			column->arrow_type.Int.bitWidth = 16;
+			column->put_value  = (is_signed ? put_int16_value  : put_uint16_value);
+			column->move_value = (is_signed ? move_int16_value : move_uint16_value);
+			return 2;		/* nullmap + values */
 
 		case MYSQL_TYPE_INT24:
 		case MYSQL_TYPE_LONG:
-			if (bitWidth < 0)
-			{
-				if (!arrow_type)
-					bitWidth = 32;
-				else if (arrow_type->node.tag == ArrowNodeTag__Int &&
-						 (is_signed
-						  ? arrow_type->Int.is_signed && arrow_type->Int.bitWidth >= 32
-						  : arrow_type->Int.bitWidth > 32))
-				{
-					bitWidth  = arrow_type->Int.bitWidth;
-					is_signed = arrow_type->Int.is_signed;
-				}
-				else
-				{
-					Elog("attribute '%s' is not compatible", my_field->name);
-				}
-			}
-
-		case MYSQL_TYPE_LONGLONG:
-			if (bitWidth < 0)
-			{
-				if (!arrow_type)
-					bitWidth = 64;
-				else if (arrow_type->node.tag == ArrowNodeTag__Int &&
-						 (is_signed
-						  ? arrow_type->Int.is_signed && arrow_type->Int.bitWidth >= 64
-						  : arrow_type->Int.bitWidth > 64))
-				{
-					bitWidth  = arrow_type->Int.bitWidth;
-					is_signed = arrow_type->Int.is_signed;
-				}
-				else
-				{
-					Elog("attribute '%s' is not compatible", my_field->name);
-				}
-			}
 			initArrowNode(&column->arrow_type, Int);
 			column->arrow_type.Int.is_signed = is_signed;
-			column->arrow_type.Int.bitWidth = bitWidth;
-			switch (bitWidth)
-			{
-				case 8:
-					column->put_value  = (is_signed ? put_int8_value  : put_uint8_value);
-					column->move_value = (is_signed ? move_int8_value : move_uint8_value);
-					break;
-				case 16:
-					column->put_value  = (is_signed ? put_int16_value  : put_uint16_value);
-					column->move_value = (is_signed ? move_int16_value : move_uint16_value);
-					break;
-				case 32:
-					column->put_value  = (is_signed ? put_int32_value  : put_uint32_value);
-					column->move_value = (is_signed ? move_int32_value : move_uint32_value);
-					break;
-				case 64:
-					column->put_value  = (is_signed ? put_int64_value  : put_uint64_value);
-					column->move_value = (is_signed ? move_int64_value : move_uint64_value);
-					break;
-				default:
-					Elog("attribute '%s' try to use unsupported Int::bitWidth(%d)",
-						 my_field->name, bitWidth);
-					break;
-			}
+			column->arrow_type.Int.bitWidth = 32;
+			column->put_value  = (is_signed ? put_int32_value  : put_uint32_value);
+			column->move_value = (is_signed ? move_int32_value : move_uint32_value);
 			return 2;		/* nullmap + values */
 
+		case MYSQL_TYPE_LONGLONG:
+			initArrowNode(&column->arrow_type, Int);
+			column->arrow_type.Int.is_signed = is_signed;
+			column->arrow_type.Int.bitWidth = 64;
+			column->put_value  = (is_signed ? put_int64_value  : put_uint64_value);
+			column->move_value = (is_signed ? move_int64_value : move_uint64_value);
+			return 2;		/* nullmap + values */
 		/*
 		 * ArrowTypeFloatingPoint
 		 */
 		case MYSQL_TYPE_FLOAT:
-			if (precision < 0)
-			{
-				if (!arrow_type)
-					precision = ArrowPrecision__Single;
-				else if (arrow_type->node.tag == ArrowNodeTag__FloatingPoint &&
-						 (arrow_type->FloatingPoint.precision == ArrowPrecision__Single ||
-						  arrow_type->FloatingPoint.precision == ArrowPrecision__Double))
-					precision = arrow_type->FloatingPoint.precision;
-				else
-					Elog("attribute '%s' is not compatible", my_field->name);
-			}
-		case MYSQL_TYPE_DOUBLE:
-			if (precision < 0)
-			{
-				if (!arrow_type)
-					precision = ArrowPrecision__Double;
-				else if (arrow_type->node.tag == ArrowNodeTag__FloatingPoint &&
-						 (arrow_type->FloatingPoint.precision == ArrowPrecision__Single ||
-						  arrow_type->FloatingPoint.precision == ArrowPrecision__Double))
-					precision = arrow_type->FloatingPoint.precision;
-				else
-					Elog("attribute '%s' is not compatible", my_field->name);
-			}
 			initArrowNode(&column->arrow_type, FloatingPoint);
-			column->arrow_type.FloatingPoint.precision = precision;
-			switch (precision)
-			{
-				case ArrowPrecision__Single:
-					column->put_value  = put_float32_value;
-					column->move_value = move_float32_value;
-					break;
-				case ArrowPrecision__Double:
-					column->put_value  = put_float64_value;
-					column->move_value = move_float64_value;
-					break;
-				default:
-					Elog("attribute '%s' try to use unknown FloatingPoint::precision(%d)",
-						 my_field->name, precision);
-					break;
-			}
+			column->arrow_type.FloatingPoint.precision = ArrowPrecision__Single;
+			column->put_value  = put_float32_value;
+			column->move_value = move_float32_value;
+			return 2;		/* nullmap + values */
+
+		case MYSQL_TYPE_DOUBLE:
+			initArrowNode(&column->arrow_type, FloatingPoint);
+			column->arrow_type.FloatingPoint.precision = ArrowPrecision__Double;
+			column->put_value  = put_float64_value;
+			column->move_value = move_float64_value;
 			return 2;		/* nullmap + values */
 		/*
 		 * ArrowTypeDecimal
 		 */
 		case MYSQL_TYPE_DECIMAL:
 		case MYSQL_TYPE_NEWDECIMAL:
-			precision = my_field->max_length;
-			dscale = my_field->decimals;
-			if (arrow_type)
-			{
-				if (arrow_type->node.tag != ArrowNodeTag__Decimal)
-					Elog("attribute %d is not compatible to %s",
-						 attnum, arrow_type->node.tagName);
-				precision = arrow_type->Decimal.precision;
-				dscale = arrow_type->Decimal.scale;
-			}
 			initArrowNode(&column->arrow_type, Decimal);
-			column->arrow_type.Decimal.precision = precision;
-			column->arrow_type.Decimal.scale = dscale;
+			column->arrow_type.Decimal.precision = my_field->max_length;
+			column->arrow_type.Decimal.scale = my_field->decimals;
 			column->put_value = put_decimal_value;
 			column->move_value = move_decimal_value;
 			return 2;		/* nullmap + values */
@@ -853,98 +736,43 @@ mysql_setup_attribute(MYSQL *conn,
 		 * ArrowTypeDate
 		 */
 		case MYSQL_TYPE_DATE:
-			if (!arrow_type)
-				unit = ArrowDateUnit__Day;
-			else if (arrow_type->node.tag == ArrowNodeTag__Date &&
-					 (arrow_type->Date.unit == ArrowDateUnit__Day ||
-					  arrow_type->Date.unit == ArrowDateUnit__MilliSecond))
-				unit = arrow_type->Date.unit;
-			else
-				Elog("attribute '%s' is not compatible", my_field->name);
 			initArrowNode(&column->arrow_type, Date);
-			column->arrow_type.Date.unit = unit;
-			switch (unit)
-			{
-				case ArrowDateUnit__Day:
-					column->put_value  = put_date_day_value;
-					column->move_value = move_int32_value;
-					break;
-				case ArrowDateUnit__MilliSecond:
-					column->put_value  = put_date_ms_value;
-					column->move_value = move_int64_value;
-					break;
-			}
+			column->arrow_type.Date.unit = ArrowDateUnit__Day;
+			column->put_value  = put_date_day_value;
+			column->move_value = move_int32_value;
 			return 2;		/* nullmap + values */
 		/*
 		 * ArrowTypeTime
 		 */
 		case MYSQL_TYPE_TIME:
-			if (!arrow_type)
+			initArrowNode(&column->arrow_type, Time);
+			if (my_field->decimals == 0)
 			{
-				if (my_field->decimals == 0)
-					unit = ArrowTimeUnit__Second;
-				else if (my_field->decimals <= 3)
-					unit = ArrowTimeUnit__MilliSecond;
-				else if (my_field->decimals <= 6)
-					unit = ArrowTimeUnit__MicroSecond;
-				else
-					unit = ArrowTimeUnit__NanoSecond;
+				column->arrow_type.Time.unit = ArrowTimeUnit__Second;
+				column->arrow_type.Time.bitWidth = 32;
+				column->put_value  = put_time_sec_value;
+				column->move_value = move_int32_value;
 			}
-			else if (arrow_type->node.tag == ArrowNodeTag__Time)
+			else if (my_field->decimals <= 3)
 			{
-				switch (arrow_type->Time.unit)
-				{
-					case ArrowTimeUnit__Second:
-					case ArrowTimeUnit__MilliSecond:
-						if (arrow_type->Time.bitWidth != 32)
-							Elog("Arrow::Time has wrong bitWidth (%d)",
-								 arrow_type->Time.bitWidth);
-						break;
-					case ArrowTimeUnit__MicroSecond:
-					case ArrowTimeUnit__NanoSecond:
-						if (arrow_type->Time.bitWidth != 64)
-							Elog("Arrow::Time has wrong bitWidth (%d)",
-								 arrow_type->Time.bitWidth);
-						break;
-					default:
-						Elog("Arrow::Time has unknown unit (%d)",
-							 arrow_type->Time.unit);
-						break;
-				}
-				unit = arrow_type->Time.unit;
+				column->arrow_type.Time.unit = ArrowTimeUnit__MilliSecond;
+				column->arrow_type.Time.bitWidth = 32;
+				column->put_value  = put_time_ms_value;
+				column->move_value = move_int32_value;
+			}
+			else if (my_field->decimals <= 6)
+			{
+				column->arrow_type.Time.unit = ArrowTimeUnit__MicroSecond;
+				column->arrow_type.Time.bitWidth = 64;
+				column->put_value  = put_time_us_value;
+				column->move_value = move_uint64_value;
 			}
 			else
 			{
-				Elog("attribute '%s' is not compatible", my_field->name);
-			}
-
-			initArrowNode(&column->arrow_type, Time);
-			column->arrow_type.Time.unit = unit;
-			switch (unit)
-			{
-				case ArrowTimeUnit__Second:
-					column->arrow_type.Time.bitWidth = 32;
-					column->put_value  = put_time_sec_value;
-					column->move_value = move_int32_value;
-					break;
-				case ArrowTimeUnit__MilliSecond:
-					column->arrow_type.Time.bitWidth = 32;
-					column->put_value  = put_time_ms_value;
-					column->move_value = move_int32_value;
-					break;
-				case ArrowTimeUnit__MicroSecond:
-					column->arrow_type.Time.bitWidth = 64;
-					column->put_value  = put_time_us_value;
-					column->move_value = move_uint64_value;
-					break;
-				case ArrowTimeUnit__NanoSecond:
-					column->arrow_type.Time.bitWidth = 64;
-					column->put_value  = put_time_ns_value;
-					column->move_value = move_uint64_value;
-					break;
-				default:
-					Elog("Bug? unknown Arrow::Time unit (%d)", unit);
-					break;
+				column->arrow_type.Time.unit = ArrowTimeUnit__NanoSecond;
+				column->arrow_type.Time.bitWidth = 64;
+				column->put_value  = put_time_ns_value;
+				column->move_value = move_uint64_value;
 			}
 			return 2;		/* nullmap + values */
 			
@@ -954,58 +782,35 @@ mysql_setup_attribute(MYSQL *conn,
 		case MYSQL_TYPE_TIMESTAMP:
 			tz_name = mysql_timezone;
 		case MYSQL_TYPE_DATETIME:
-			if (!arrow_type)
-			{
-				if (my_field->decimals == 0)
-					unit = ArrowTimeUnit__Second;
-				else if (my_field->decimals <= 3)
-					unit = ArrowTimeUnit__MilliSecond;
-				else if (my_field->decimals <= 6)
-					unit = ArrowTimeUnit__MicroSecond;
-				else
-					unit = ArrowTimeUnit__NanoSecond;
-			}
-			else if (arrow_type->node.tag == ArrowNodeTag__Timestamp)
-			{
-				unit = arrow_type->Timestamp.unit;
-				if (unit != ArrowTimeUnit__Second &&
-					unit != ArrowTimeUnit__MilliSecond &&
-					unit != ArrowTimeUnit__MicroSecond &&
-					unit != ArrowTimeUnit__NanoSecond)
-					Elog("Arrow::Timestamp has unknown unit (%d)", unit);
-			}
-			else
-			{
-				Elog("attribute '%s' is not compatible", my_field->name);
-			}
 			initArrowNode(&column->arrow_type, Timestamp);
-			column->arrow_type.Timestamp.unit = unit;
 			if (tz_name)
 			{
 				column->arrow_type.Timestamp.timezone = pstrdup(tz_name);
 				column->arrow_type.Timestamp._timezone_len = strlen(tz_name);
 			}
-			switch (unit)
+			if (my_field->decimals == 0)
 			{
-				case ArrowTimeUnit__Second:
-					column->put_value  = put_timestamp_sec_value;
-					column->move_value = move_int64_value;
-					break;
-				case ArrowTimeUnit__MilliSecond:
-					column->put_value  = put_timestamp_ms_value;
-					column->move_value = move_int64_value;
-					break;
-				case ArrowTimeUnit__MicroSecond:
-					column->put_value  = put_timestamp_us_value;
-					column->move_value = move_int64_value;
-					break;
-				case ArrowTimeUnit__NanoSecond:
-					column->put_value  = put_timestamp_ns_value;
-					column->move_value = move_int64_value;
-					break;
-				default:
-					Elog("Bug? unknown Arrow::Timestamp unit(%d)", unit);
-					break;
+				column->arrow_type.Timestamp.unit = ArrowTimeUnit__Second;
+				column->put_value  = put_timestamp_sec_value;
+				column->move_value = move_int64_value;
+			}
+			else if (my_field->decimals <= 3)
+			{
+				column->arrow_type.Timestamp.unit = ArrowTimeUnit__MilliSecond;
+				column->put_value  = put_timestamp_ms_value;
+				column->move_value = move_int64_value;
+			}
+			else if (my_field->decimals <= 6)
+			{
+				column->arrow_type.Timestamp.unit = ArrowTimeUnit__MicroSecond;
+				column->put_value  = put_timestamp_us_value;
+				column->move_value = move_int64_value;
+			}
+			else
+			{
+				column->arrow_type.Timestamp.unit = ArrowTimeUnit__NanoSecond;
+				column->put_value  = put_timestamp_ns_value;
+				column->move_value = move_int64_value;
 			}
 			return 2;		/* nullmap + values */
 
@@ -1073,8 +878,7 @@ sqldb_server_connect(const char *sqldb_hostname,
 					 const char *sqldb_username,
 					 const char *sqldb_password,
 					 const char *sqldb_database,
-					 userConfigOption *sqldb_session_configs,
-					 nestLoopOption *nestloop_option_list)
+					 userConfigOption *sqldb_session_configs)
 {
 	MYSTATE	   *mystate = palloc0(sizeof(MYSTATE));
 	MYSQL	   *conn;
@@ -1084,9 +888,6 @@ sqldb_server_connect(const char *sqldb_hostname,
 	userConfigOption *conf;
 	const char *query;
 
-	if (nestloop_option_list != NULL)
-		Elog("Bug? mysql2arrow does not support --inner-join/--outer-join");
-	
 	conn = mysql_init(NULL);
 	if (!conn)
 		Elog("failed on mysql_init");
@@ -1160,8 +961,8 @@ sqldb_server_connect(const char *sqldb_hostname,
 SQLtable *
 sqldb_begin_query(void *sqldb_state,
 				  const char *sqldb_command,
-				  ArrowFileInfo *af_info,
-				  SQLdictionary *sql_dict_list)
+				  SQLdictionary *sql_dict_list,
+				  const char *flatten_composite_columns)
 {
 	MYSTATE	   *mystate = (MYSTATE *)sqldb_state;
 	MYSQL	   *conn = mystate->conn;
@@ -1169,6 +970,10 @@ sqldb_begin_query(void *sqldb_state,
 	SQLtable   *table;
 	int			j, nfields;
 	const char *query;
+
+	/* only pg2arrow supports --flatten */
+	if (flatten_composite_columns)
+		Elog("mysql2arrow does not support --flatten");
 
 	/* start transaction with read-only mode */
 	query = "START TRANSACTION READ ONLY";
@@ -1186,27 +991,18 @@ sqldb_begin_query(void *sqldb_state,
 			 mysql_error(conn));
 	mystate->res = res;
 
-	nfields = mysql_num_fields(res);
-	if (af_info &&
-		af_info->footer.schema._num_fields != nfields)
-		Elog("--append is given, but number of columns are different.");
-	
 	/* create SQLtable buffer */
+	nfields = mysql_num_fields(res);
 	table = palloc0(offsetof(SQLtable, columns[nfields]));
 	table->nfields = nfields;
 	table->sql_dict_list = sql_dict_list;
 	for (j=0; j < nfields; j++)
 	{
 		MYSQL_FIELD *my_field = mysql_fetch_field_direct(res, j);
-		ArrowField	*arrow_field = NULL;
-
-		if (af_info)
-			arrow_field = &af_info->footer.schema.fields[j];
 
 		table->numBuffers +=
 			mysql_setup_attribute(conn,
 								  my_field,
-								  arrow_field,
 								  table,
 								  &table->columns[j],
 								  j+1);

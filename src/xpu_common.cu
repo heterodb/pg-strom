@@ -57,89 +57,32 @@ __fillup_by_null_values(kern_context *kcxt,
 	return true;
 }
 
-INLINE_FUNCTION(bool)
-__extract_heap_tuple_sysattr(kern_context *kcxt,
-							 const kern_data_store *kds,
-							 const HeapTupleHeaderData *htup,
-							 const kern_varload_desc *vl_desc)
-{
-	uint16_t	slot_id = vl_desc->vl_slot_id;
-
-	if (slot_id < kcxt->kvars_nslots)
-	{
-		const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[slot_id];
-		xpu_datum_t	   *xdatum = kcxt->kvars_slot[slot_id];
-		const void	   *addr;
-
-		switch (vl_desc->vl_resno)
-		{
-			case SelfItemPointerAttributeNumber:
-				addr = &htup->t_ctid;
-				break;
-			case MinTransactionIdAttributeNumber:
-				addr = &htup->t_choice.t_heap.t_xmin;
-				break;
-			case MaxTransactionIdAttributeNumber:
-				addr = &htup->t_choice.t_heap.t_xmax;
-				break;
-			case MinCommandIdAttributeNumber:
-			case MaxCommandIdAttributeNumber:
-				addr = &htup->t_choice.t_heap.t_field3.t_cid;
-				break;
-			case TableOidAttributeNumber:
-				addr = &kds->table_oid;
-				break;
-			default:
-				STROM_ELOG(kcxt, "not a supported system attribute reference");
-				return false;
-		}
-		if (vs_desc->vs_ops->xpu_datum_heap_read(kcxt, addr, xdatum))
-		{
-			assert(XPU_DATUM_ISNULL(xdatum) || xdatum->expr_ops == vs_desc->vs_ops);
-			return true;
-		}
-		return false;
-	}
-	STROM_ELOG(kcxt, "kvars slot-id: out of range");
-	return false;
-}
-
 STATIC_FUNCTION(bool)
-kern_extract_heap_tuple(kern_context *kcxt,
-						const kern_data_store *kds,
-						const HeapTupleHeaderData *htup,
-						const kern_varload_desc *vl_desc,
-						int kvload_nitems)
+__kern_extract_common_tuple(kern_context *kcxt,
+							const kern_data_store *kds,
+							int ncols,
+							const uint8_t *nullmap,
+							const char *payload,
+							const kern_varload_desc *vl_desc,
+							int kvload_nitems)
 {
-	uint32_t	offset = htup->t_hoff;
-	int			resno = 1;
-	int			kvload_count = 0;
-	int			ncols = Min(htup->t_infomask2 & HEAP_NATTS_MASK, kds->ncols);
-	bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+	int		offset = 0;
+	int		resno = 1;
 
-	/* extract system attributes, if rquired */
-	while (kvload_count < kvload_nitems &&
-		   vl_desc->vl_resno < 0)
-	{
-		if (!__extract_heap_tuple_sysattr(kcxt, kds, htup, vl_desc))
-			return false;
-		vl_desc++;
-		kvload_count++;
-	}
 	/* try attcacheoff shortcut, if available. */
-	if (!heap_hasnull)
+	if (!nullmap)
 	{
-		while (kvload_count < kvload_nitems &&
+		while (kvload_nitems > 0 &&
 			   vl_desc->vl_resno > 0 &&
 			   vl_desc->vl_resno <= ncols)
 		{
 			const kern_colmeta *cmeta = &kds->colmeta[vl_desc->vl_resno-1];
-			char	   *addr;
+			const char *addr;
 
 			if (cmeta->attcacheoff < 0)
 				break;
-			offset = htup->t_hoff + cmeta->attcacheoff;
-			addr = (char *)htup + offset;
+			offset = cmeta->attcacheoff;
+			addr = payload + offset;
 			if (!__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr))
 				return false;
 			/* next resno */
@@ -149,28 +92,24 @@ kern_extract_heap_tuple(kern_context *kcxt,
 			else
 				offset += VARSIZE_ANY(addr);
 			vl_desc++;
-			kvload_count++;
+			kvload_nitems--;
 		}
 	}
-
 	/* extract slow path */
-	while (resno <= ncols && kvload_count < kvload_nitems)
+	while (resno <= ncols && kvload_nitems > 0)
 	{
 		const kern_colmeta *cmeta = &kds->colmeta[resno-1];
-		char   *addr;
+		const char	   *addr;
 
-		if (heap_hasnull && att_isnull(resno-1, htup->t_bits))
-		{
+		if (nullmap && att_isnull(resno-1, nullmap))
 			addr = NULL;
-		}
 		else
 		{
 			if (cmeta->attlen > 0)
 				offset = TYPEALIGN(cmeta->attalign, offset);
-			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
+			else if (!VARATT_NOT_PAD_BYTE(payload + offset))
 				offset = TYPEALIGN(cmeta->attalign, offset);
-
-			addr = ((char *)htup + offset);
+			addr = (payload + offset);
 			if (cmeta->attlen > 0)
 				offset += cmeta->attlen;
 			else
@@ -182,12 +121,102 @@ kern_extract_heap_tuple(kern_context *kcxt,
 			if (!__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, addr))
 				return false;
 			vl_desc++;
-			kvload_count++;
+			kvload_nitems--;
 		}
 		resno++;
 	}
 	/* fill-up with NULLs for the remained slot */
-	return __fillup_by_null_values(kcxt, vl_desc, kvload_nitems - kvload_count);
+	return __fillup_by_null_values(kcxt, vl_desc, kvload_nitems);
+}
+
+STATIC_FUNCTION(bool)
+kern_extract_minimal_tuple(kern_context *kcxt,
+						   const kern_data_store *kds,
+						   const kern_tupitem *titem,
+						   const kern_varload_desc *vl_desc,
+						   int kvload_nitems)
+{
+	const uint8_t *nullmap = NULL;
+	int		ncols = Min(titem->t_infomask2 & HEAP_NATTS_MASK, kds->ncols);
+
+	if ((titem->t_infomask & HEAP_HASNULL) != 0)
+		nullmap = titem->t_bits;
+	/* assign NULL if system columns */
+	while (kvload_nitems > 0 && vl_desc->vl_resno < 0)
+	{
+		if (!__extract_heap_tuple_attr(kcxt, vl_desc->vl_slot_id, NULL))
+			return false;
+		vl_desc++;
+		kvload_nitems--;
+	}
+	return __kern_extract_common_tuple(kcxt,
+									   kds,
+									   ncols,
+									   nullmap,
+									   KERN_TUPITEM_GET_PAYLOAD(titem),
+									   vl_desc,
+									   kvload_nitems);
+}
+
+STATIC_FUNCTION(bool)
+kern_extract_heap_tuple(kern_context *kcxt,
+						const kern_data_store *kds,
+						const HeapTupleHeaderData *htup,
+						const kern_varload_desc *vl_desc,
+						int kvload_nitems)
+{
+	const uint8_t *nullmap = NULL;
+	int		ncols = Min(htup->t_infomask2 & HEAP_NATTS_MASK, kds->ncols);
+
+	if ((htup->t_infomask & HEAP_HASNULL) != 0)
+		nullmap = htup->t_bits;
+	/* extract system attributes, if rquired */
+	while (kvload_nitems > 0 && vl_desc->vl_resno < 0)
+	{
+		uint16_t	slot_id = vl_desc->vl_slot_id;
+
+		if (slot_id < kcxt->kvars_nslots)
+		{
+			const kern_varslot_desc *vs_desc = &kcxt->kvars_desc[slot_id];
+			xpu_datum_t	   *xdatum = kcxt->kvars_slot[slot_id];
+			const void	   *addr;
+
+			switch (vl_desc->vl_resno)
+			{
+				case SelfItemPointerAttributeNumber:
+					addr = &htup->t_ctid;
+					break;
+				case MinTransactionIdAttributeNumber:
+					addr = &htup->t_choice.t_heap.t_xmin;
+					break;
+				case MaxTransactionIdAttributeNumber:
+					addr = &htup->t_choice.t_heap.t_xmax;
+					break;
+				case MinCommandIdAttributeNumber:
+				case MaxCommandIdAttributeNumber:
+					addr = &htup->t_choice.t_heap.t_field3.t_cid;
+					break;
+				case TableOidAttributeNumber:
+					addr = &kds->table_oid;
+					break;
+				default:
+					STROM_ELOG(kcxt, "not a supported system attribute reference");
+					return false;
+			}
+			if (!vs_desc->vs_ops->xpu_datum_heap_read(kcxt, addr, xdatum))
+				return false;
+			assert(XPU_DATUM_ISNULL(xdatum) || xdatum->expr_ops == vs_desc->vs_ops);
+		}
+		vl_desc++;
+		kvload_nitems--;
+	}
+	return __kern_extract_common_tuple(kcxt,
+									   kds,
+									   ncols,
+									   nullmap,
+									   (char *)htup + htup->t_hoff,
+									   vl_desc,
+									   kvload_nitems);
 }
 
 /*
@@ -950,16 +979,18 @@ pgfn_ScalarArrayOp(XPU_PGFUNCTION_ARGS)
  *
  * ----------------------------------------------------------------
  */
-PUBLIC_FUNCTION(int)
-__kern_form_heaptuple(kern_context *kcxt,
-					  int proj_nattrs,
-					  const uint16_t *proj_slot_id,
-					  const kern_data_store *kds_dst,
-					  HeapTupleHeaderData *htup)
+STATIC_FUNCTION(int)
+__kern_form_minimal_tuple(kern_context *kcxt,
+						  int proj_nattrs,
+						  const uint16_t *proj_slot_id,
+						  const kern_data_store *kds_dst,
+						  kern_tupitem *titem,
+						  uint32_t rowid)	/* rowid==UINT_MAX means no rowid */
 {
 	/*
-	 * NOTE: the caller must call kern_estimate_heaptuple() preliminary to ensure
-	 *       kcxt->kvars_slot[] are filled-up by the scalar values to be written.
+	 * NOTE: the caller must call kern_estimate_minimal_tuple() preliminary
+	 *       to ensure kcxt->kvars_slot[] are filled-up by the scalar values
+	 *       to be written.
 	 */
 	uint32_t	t_hoff;
 	uint16_t	t_infomask = 0;
@@ -981,23 +1012,17 @@ __kern_form_heaptuple(kern_context *kcxt,
 		}
 	}
 	/* set up headers */
-	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
+	t_hoff = offsetof(kern_tupitem, t_bits);
 	if (t_hasnull)
 		t_hoff += BITMAPLEN(proj_nattrs);
 	t_hoff = MAXALIGN(t_hoff);
 
-	if (htup)
+	if (titem)
 	{
-		memset(htup, 0, t_hoff);
-		htup->t_choice.t_datum.datum_typmod = kds_dst->tdtypmod;
-		htup->t_choice.t_datum.datum_typeid = kds_dst->tdtypeid;
-		htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
-		htup->t_ctid.ip_blkid.bi_lo = 0xffff;
-		htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
-		htup->t_infomask2 = (proj_nattrs & HEAP_NATTS_MASK);
-		htup->t_hoff = t_hoff;
+		memset(titem, 0, t_hoff);
+		titem->t_infomask2 = (proj_nattrs & HEAP_NATTS_MASK);
+		titem->t_hoff = t_hoff + MINIMAL_TUPLE_OFFSET;
 	}
-
 	/* walks on the source attributes */
 	for (int j=0; j < proj_nattrs; j++)
 	{
@@ -1014,11 +1039,11 @@ __kern_form_heaptuple(kern_context *kcxt,
 		{
 			/* adjust alignment */
 			t_next = TYPEALIGN(cmeta_dst->attalign, t_hoff);
-			if (htup)
+			if (titem)
 			{
 				if (t_next > t_hoff)
-					memset((char *)htup + t_hoff, 0, t_next - t_hoff);
-				buffer = (char *)htup + t_next;
+					memset((char *)titem + t_hoff, 0, t_next - t_hoff);
+				buffer = (char *)titem + t_next;
 			}
 			/* write-out or estimate length */
 			sz = xdatum->expr_ops->xpu_datum_write(kcxt,
@@ -1035,40 +1060,83 @@ __kern_form_heaptuple(kern_context *kcxt,
 				t_infomask |= HEAP_HASVARWIDTH;
 			}
 			/* set not-null bit, if valid */
-			if (htup && t_hasnull)
-				htup->t_bits[j>>3] |= (1<<(j & 7));
+			if (titem && t_hasnull)
+				titem->t_bits[j>>3] |= (1<<(j & 7));
 			t_hoff = t_next + sz;
 		}
 	}
+	if (rowid != UINT_MAX)
+		t_hoff += ROWID_SIZE;	/* space for ROWID at the tail */
 
-	if (htup)
+	if (titem)
 	{
-		htup->t_infomask = t_infomask;
-		SET_VARSIZE(&htup->t_choice.t_datum, t_hoff);
+		titem->t_len = t_hoff;
+		titem->t_infomask = t_infomask;
+		if (rowid != UINT_MAX)
+			KERN_TUPITEM_SET_ROWID(titem, rowid);
 	}
-	return t_hoff;	
+	return t_hoff;
 }
 
 PUBLIC_FUNCTION(int)
-kern_form_heaptuple(kern_context *kcxt,
-					const kern_expression *kexp_proj,
-					const kern_data_store *kds_dst,
-					HeapTupleHeaderData *htup)
+kern_form_minimal_tuple(kern_context *kcxt,
+						const kern_expression *kexp_proj,
+						const kern_data_store *kds_dst,
+						kern_tupitem *titem,
+						uint32_t rowid)
 {
-	return __kern_form_heaptuple(kcxt,
-								 kexp_proj->u.proj.nattrs,
-								 kexp_proj->u.proj.slot_id,
-								 kds_dst,
-								 htup);
+	assert(rowid != UINT_MAX);
+	return __kern_form_minimal_tuple(kcxt,
+									 kexp_proj->u.proj.nattrs,
+									 kexp_proj->u.proj.slot_id,
+									 kds_dst,
+									 titem,
+									 rowid);
 }
 
-EXTERN_FUNCTION(int)
-kern_estimate_heaptuple(kern_context *kcxt,
-                        const kern_expression *kexp_proj,
-                        const kern_data_store *kds_dst)
+PUBLIC_FUNCTION(int)
+kern_form_heap_tuple(kern_context *kcxt,
+					 const kern_expression *kexp_proj,
+					 const kern_data_store *kds_dst,
+					 HeapTupleHeaderData *htup)
+{
+	kern_tupitem *__titem = NULL;
+	int		sz;
+
+	if (htup)
+		__titem = (kern_tupitem *)((char *)htup + MINIMAL_TUPLE_OFFSET);
+	sz = __kern_form_minimal_tuple(kcxt,
+								   kexp_proj->u.proj.nattrs,
+								   kexp_proj->u.proj.slot_id,
+								   kds_dst,
+								   __titem,
+								   UINT_MAX);
+	if (sz >= 0)
+	{
+		sz += MINIMAL_TUPLE_OFFSET;
+		if (htup)
+		{
+			const kern_session_info *session = kcxt->session;
+
+			htup->t_choice.t_heap.t_xmin = session->session_curr_xid;
+			htup->t_choice.t_heap.t_xmax = InvalidTransactionId;
+			htup->t_choice.t_heap.t_field3.t_cid = session->session_curr_cid;
+			htup->t_choice.t_datum.datum_typeid = kds_dst->tdtypeid;
+			htup->t_ctid.ip_blkid.bi_hi = 0xffff;
+			htup->t_ctid.ip_blkid.bi_lo = 0xffff;
+			htup->t_ctid.ip_posid = 0;
+		}
+	}
+	return sz;
+}
+
+INLINE_FUNCTION(bool)
+__estimate_tuple_length_prep(kern_context *kcxt,
+							 const kern_expression *kexp_proj,
+							 const kern_data_store *kds_dst)
 {
 	const kern_expression *karg;
-	int		i, sz;
+	int		i;
 
 	/* Run SaveExpr expressions to warm up kcxt->kvars_slot[] */
 	for (i=0, karg=KEXP_FIRST_ARG(kexp_proj);
@@ -1089,74 +1157,78 @@ kern_estimate_heaptuple(kern_context *kcxt,
 		assert(slot_id < kcxt->kvars_nslots);
 		xdatum = kcxt->kvars_slot[slot_id];
 		if (!EXEC_KERN_EXPRESSION(kcxt, karg, xdatum))
-			return -1;
+			return false;
 	}
-	/* then, estimate the length */
-	sz = kern_form_heaptuple(kcxt, kexp_proj, kds_dst, NULL);
+	return true;
+}
+
+EXTERN_FUNCTION(int)
+kern_estimate_minimal_tuple(kern_context *kcxt,
+							const kern_expression *kexp_proj,
+							const kern_data_store *kds_dst)
+{
+	int		sz;
+
+	if (!__estimate_tuple_length_prep(kcxt, kexp_proj, kds_dst))
+		return -1;
+	sz = kern_form_minimal_tuple(kcxt, kexp_proj, kds_dst, NULL, 0);
 	if (sz < 0)
 		return -1;
-	return MAXALIGN(offsetof(kern_tupitem, htup) + sz);
+	return MAXALIGN(sz);
+}
+
+
+PUBLIC_FUNCTION(int)
+kern_estimate_heap_tuple(kern_context *kcxt,
+						 const kern_expression *kexp_proj,
+						 const kern_data_store *kds_dst)
+{
+	int		sz;
+
+	if (!__estimate_tuple_length_prep(kcxt, kexp_proj, kds_dst))
+		return -1;
+	sz = kern_form_heap_tuple(kcxt, kexp_proj, kds_dst, NULL);
+	if (sz < 0)
+		return -1;
+	return MAXALIGN(sz);
 }
 
 /*
- * kern_fetch_heaptuple_addr
+ * kern_fetch_minimal_tuple_attr
  */
 PUBLIC_FUNCTION(const void *)
-kern_fetch_heaptuple_attr(kern_context *kcxt,
-						  const kern_data_store *kds,
-						  const kern_tupitem *titem, int anum)
+kern_fetch_minimal_tuple_attr(const kern_data_store *kds,
+							  const kern_tupitem *titem, int anum)
 {
-	const HeapTupleHeaderData *htup = &titem->htup;
-	const uint8_t  *nullmap = NULL;
-	uint32_t		ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
+	int		ncols = Min((titem->t_infomask2 & HEAP_NATTS_MASK), kds->ncols);
+	bool	hasnull = ((titem->t_infomask & HEAP_HASNULL) != 0);
 
-	/* special case if system attribute reference */
-	if (anum < 0)
-	{
-		switch (anum)
-		{
-			case SelfItemPointerAttributeNumber:
-				return &htup->t_ctid;
-			case MinTransactionIdAttributeNumber:
-				return &htup->t_choice.t_heap.t_xmin;
-			case MinCommandIdAttributeNumber:
-			case MaxCommandIdAttributeNumber:
-				return &htup->t_choice.t_heap.t_field3.t_cid;
-			case MaxTransactionIdAttributeNumber:
-				return &htup->t_choice.t_heap.t_xmax;
-			case TableOidAttributeNumber:
-				return &kds->table_oid;
-			default:
-				return NULL;
-		}
-	}
+	/* system attribute reference shall never be happen */
+	if (anum <= 0)
+		return NULL;
 	/* walk on the user columns */
-	ncols = Min(ncols, kds->ncols);
-	if ((htup->t_infomask & HEAP_HASNULL) != 0)
-		nullmap = htup->t_bits;
 	if (anum > 0 && anum <= ncols)
 	{
-		uint32_t	offset = htup->t_hoff;
-		const char *addr;
+		const char *pos = KERN_TUPITEM_GET_PAYLOAD(titem);
 
 		anum--;
+		assert((uintptr_t)pos == MAXALIGN(pos));
 		for (int j=0; j <= anum; j++)
 		{
 			const kern_colmeta *cmeta = &kds->colmeta[j];
 
-			if (nullmap && att_isnull(j, nullmap))
+			if (hasnull && att_isnull(j, titem->t_bits))
 				continue;
 			if (cmeta->attlen > 0)
-				offset = TYPEALIGN(cmeta->attalign, offset);
-			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
-				offset = TYPEALIGN(cmeta->attalign, offset);
-			addr = ((const char *)htup + offset);
+				pos = (const char *)TYPEALIGN(cmeta->attalign, pos);
+			else if (!VARATT_NOT_PAD_BYTE(pos))
+				pos = (const char *)TYPEALIGN(cmeta->attalign, pos);
 			if (j == anum)
-				return addr;
+				return pos;
 			if (cmeta->attlen > 0)
-				offset += cmeta->attlen;
+				pos += cmeta->attlen;
 			else
-				offset += VARSIZE_ANY(addr);
+				pos += VARSIZE_ANY(pos);
 		}
 	}
 	return NULL;
@@ -1166,8 +1238,8 @@ STATIC_FUNCTION(bool)
 pgfn_Projection(XPU_PGFUNCTION_ARGS)
 {
 	/*
-	 * FuncOpExpr_Projection should be handled by kern_estimate_heaptuple()
-	 * and kern_form_heaptuple() by the caller.
+	 * FuncOpExpr_Projection should be handled by kern_estimate_minimal_tuple()
+	 * and kern_form_minimal_tuple() by the caller.
 	 */
 	STROM_ELOG(kcxt, "pgfn_Projection is not implemented");
 	return false;
@@ -1473,11 +1545,11 @@ pgfn_LoadVars(XPU_PGFUNCTION_ARGS)
 }
 
 PUBLIC_FUNCTION(bool)
-ExecLoadVarsHeapTuple(kern_context *kcxt,
-					  const kern_expression *kexp,
-					  int depth,
-					  const kern_data_store *kds,
-					  const HeapTupleHeaderData *htup)	/* htup may be NULL */
+ExecLoadVarsMinimalTuple(kern_context *kcxt,
+						 const kern_expression *kexp,
+						 int depth,
+						 const kern_data_store *kds,
+						 const kern_tupitem *titem)	/* maybe NULL */
 {
 	if (kexp)
 	{
@@ -1485,13 +1557,13 @@ ExecLoadVarsHeapTuple(kern_context *kcxt,
 			   kexp->exptype == TypeOpCode__int4 &&
 			   kexp->nr_args == 0 &&
 			   kexp->u.load.depth == depth);
-		if (htup)
+		if (titem)
 		{
-			if (!kern_extract_heap_tuple(kcxt,
-										 kds,
-										 htup,
-										 kexp->u.load.desc,
-										 kexp->u.load.nitems))
+			if (!kern_extract_minimal_tuple(kcxt,
+											kds,
+											titem,
+											kexp->u.load.desc,
+											kexp->u.load.nitems))
 				return false;
 		}
 		else
@@ -1506,14 +1578,36 @@ ExecLoadVarsHeapTuple(kern_context *kcxt,
 }
 
 PUBLIC_FUNCTION(bool)
-ExecLoadVarsOuterRow(kern_context *kcxt,
-					 const kern_expression *kexp_load_vars,
-					 const kern_expression *kexp_scan_quals,
-					 const kern_data_store *kds,
-					 const HeapTupleHeaderData *htup)
+ExecLoadVarsOuterHeap(kern_context *kcxt,
+					  const kern_expression *kexp_load_vars,
+					  const kern_expression *kexp_scan_quals,
+					  const kern_data_store *kds,
+					  const HeapTupleHeaderData *htup)
 {
-	/* load the one tuple */
-	ExecLoadVarsHeapTuple(kcxt, kexp_load_vars, 0, kds, htup);
+	/* load the one heap-tuple */
+	if (kexp_load_vars)
+	{
+		assert(kexp_load_vars->opcode == FuncOpCode__LoadVars &&
+			   kexp_load_vars->exptype == TypeOpCode__int4 &&
+			   kexp_load_vars->nr_args == 0 &&
+			   kexp_load_vars->u.load.depth == 0);
+		if (htup)
+		{
+			if (!kern_extract_heap_tuple(kcxt,
+										 kds,
+										 htup,
+										 kexp_load_vars->u.load.desc,
+										 kexp_load_vars->u.load.nitems))
+				return false;
+		}
+		else
+		{
+			if (!__fillup_by_null_values(kcxt,
+										 kexp_load_vars->u.load.desc,
+										 kexp_load_vars->u.load.nitems))
+				return false;
+		}
+	}
 	/* check scan quals if given */
 	if (kexp_scan_quals)
 	{
@@ -1625,10 +1719,10 @@ ExecLoadKeysFromGroupByFinal(kern_context *kcxt,
 
 	if (tupitem)
 	{
-		if ((tupitem->htup.t_infomask & HEAP_HASNULL) != 0)
-			nullmap = tupitem->htup.t_bits;
-		ncols = (tupitem->htup.t_infomask2 & HEAP_NATTS_MASK);
-		pos = (const char *)&tupitem->htup + tupitem->htup.t_hoff;
+		if ((tupitem->t_infomask & HEAP_HASNULL) != 0)
+			nullmap = tupitem->t_bits;
+		ncols = (tupitem->t_infomask2 & HEAP_NATTS_MASK);
+		pos = KERN_TUPITEM_GET_PAYLOAD(tupitem);
 	}
 	ncols = Min(kds_final->ncols, ncols);
 	for (int j=0; j < kexp_groupby_actions->u.pagg.nattrs; j++)
@@ -1779,17 +1873,17 @@ __writeOutCpuFallbackTuple(kern_context *kcxt,
 	int			tupsz;
 
 	/* estimate length of the fallback tuple */
-	tupsz = __kern_form_heaptuple(kcxt,
-								  fallback_nattrs,
-								  fallback_slots,
-								  kds_fallback,
-								  NULL);
+	tupsz = __kern_form_minimal_tuple(kcxt,
+									  fallback_nattrs,
+									  fallback_slots,
+									  kds_fallback,
+									  NULL, 0);
 	if (tupsz < 0)
 	{
 		STROM_ELOG(kcxt, "fallback: unable to compute tuple size");
 		return false;
 	}
-	reqsz = MAXALIGN(offsetof(kern_fallbackitem, htup) + tupsz);
+	reqsz = MAXALIGN(offsetof(kern_fallbackitem, t) + tupsz);
 	/* allocation of fallback buffer */
 	__usage = __atomic_add_uint64(&kds_fallback->usage, reqsz);
 	__usage += reqsz;
@@ -1812,17 +1906,17 @@ __writeOutCpuFallbackTuple(kern_context *kcxt,
 	fbitem = (kern_fallbackitem *)((char *)kds_fallback
 								   + kds_fallback->length
 								   - __usage);
-	fbitem->t_len = tupsz;
 	fbitem->depth = depth;
 	fbitem->matched = matched;
 	fbitem->l_state = l_state;
-	__kern_form_heaptuple(kcxt,
-						  fallback_nattrs,
-						  fallback_slots,
-						  kcxt->kds_fallback,
-						  &fbitem->htup);
-	KDS_GET_ROWINDEX(kds_fallback)[__nitems_old] = __usage;
-
+	__kern_form_minimal_tuple(kcxt,
+							  fallback_nattrs,
+							  fallback_slots,
+							  kcxt->kds_fallback,
+							  &fbitem->t,
+							  __nitems_old);
+	KDS_GET_ROWINDEX(kds_fallback)[__nitems_old]
+		= (__usage - offsetof(kern_fallbackitem, t));
 	return true;
 }
 
@@ -2057,7 +2151,7 @@ restart:
 				assert(slot_id < kcxt->kvars_nslots);
 				vs_desc = &kcxt->kvars_desc[slot_id];
 				assert(vs_desc->vs_ops == &xpu_internal_ops);
-				if (!vs_desc->vs_ops->xpu_datum_heap_read(kcxt, &tupitem->htup,
+				if (!vs_desc->vs_ops->xpu_datum_heap_read(kcxt, tupitem,
 														  kcxt->kvars_slot[slot_id]))
 				{
 					assert(kcxt->errcode != ERRCODE_STROM_SUCCESS);
@@ -2103,7 +2197,7 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 					   const kern_expression *kexp_join)
 {
 	const kvec_internal_t *kvecs;
-	HeapTupleHeaderData *htup;
+	kern_tupitem   *titem;
 	uint32_t		slot_id;
 	int				status;
 
@@ -2117,10 +2211,9 @@ ExecGiSTIndexPostQuals(kern_context *kcxt,
 									  kexp_gist->u.gist.htup_offset);
 	assert(kcxt->kvecs_curr_id < KVEC_UNITSZ);
 	assert(!kvecs->isnull[kcxt->kvecs_curr_id]);
-	htup = (HeapTupleHeaderData *)kvecs->values[kcxt->kvecs_curr_id];
-	assert((char *)htup >= (char *)kds_hash &&
-		   (char *)htup <  (char *)kds_hash + kds_hash->length);
-	if (!ExecLoadVarsHeapTuple(kcxt, kexp_load, depth, kds_hash, htup))
+	titem = (kern_tupitem *)kvecs->values[kcxt->kvecs_curr_id];
+	assert(__KDS_TUPITEM_CHECK_VALID(kds_hash, titem));
+	if (!ExecLoadVarsMinimalTuple(kcxt, kexp_load, depth, kds_hash, titem))
 	{
 		STROM_ELOG(kcxt, "Bug? GiST-Index prep fetched corrupted tuple");
 		return false;

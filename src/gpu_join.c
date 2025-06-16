@@ -183,6 +183,15 @@ try_fetch_xpujoin_planinfo(const Path *path)
 }
 
 /*
+ * pgstrom_pinned_inner_buffer_partition_size
+ */
+size_t
+pgstrom_pinned_inner_buffer_partition_size(void)
+{
+	return (size_t)__pinned_inner_buffer_partition_size_mb << 20;
+}
+
+/*
  * tryPinnedInnerJoinBufferPath
  */
 static Path *
@@ -194,9 +203,15 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 	PathTarget *inner_target;
 	size_t		inner_threshold_sz;
 	int			nattrs;
-	int			unitsz;
+	int			unitsz = 0;
 	int			projection_hash_divisor = 0;
 	double		bufsz;
+
+	/*
+	 * pinned inner buffer should not be used with CPU-fallback
+	 */
+	if (pgstrom_cpu_fallback_elevel < ERROR)
+		return NULL;
 
 	/*
 	 * should not have RIGHT/FULL OUTER JOIN before pinned inner buffer
@@ -228,11 +243,10 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 					? inner_path->pathtarget
 					: inner_path->parent->reltarget);
 	nattrs = list_length(inner_target->exprs);
-	unitsz = ((pp_inner->hash_inner_keys != NIL
-			   ? offsetof(kern_hashitem, t.htup)
-			   : offsetof(kern_tupitem, htup)) +
-			  MAXALIGN(offsetof(HeapTupleHeaderData,
-								t_bits) + BITMAPLEN(nattrs)) +
+	unitsz = (MAXALIGN((pp_inner->hash_inner_keys != NIL
+						? offsetof(kern_hashitem, t.t_bits)
+						: offsetof(kern_tupitem, t_bits)) +
+					   BITMAPLEN(nattrs)) +
 			  MAXALIGN(inner_target->width));
 	bufsz = MAXALIGN(offsetof(kern_data_store, colmeta[nattrs]));
 	if (pp_inner->hash_inner_keys != NIL)
@@ -800,7 +814,9 @@ try_add_xpujoin_simple_path(PlannerInfo *root,
 	Path			__outer_path;	/* pseudo outer-path */
 	CustomPath	   *cpath;
 
-	op_prev = pgstrom_find_op_normal(root, outer_rel, try_parallel_path);
+	op_prev = pgstrom_find_op_normal(root, outer_rel,
+									 xpu_task_flags,
+									 try_parallel_path);
 	if (!op_prev)
 		return;
 	memset(&__outer_path, 0, sizeof(Path));
@@ -859,6 +875,7 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 	List	   *sortkeys_upper = NIL;
 	List	   *sortkeys_expr = NIL;
 	List	   *sortkeys_kind = NIL;
+	List	   *sortkeys_refs = NIL;
 	List	   *inner_target_list = NIL;
 	ListCell   *lc1, *lc2;
 	size_t		unitsz, buffer_sz, devmem_sz;
@@ -901,10 +918,8 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 	 * the result of GPU-Projection until Bitonic-sorting.
 	 */
 	nattrs = list_length(final_target->exprs);
-	unitsz = offsetof(kern_tupitem, htup) +
-		MAXALIGN(offsetof(HeapTupleHeaderData,
-						  t_bits) + BITMAPLEN(nattrs)) +
-		MAXALIGN(final_target->width);
+	unitsz = (MAXALIGN(offsetof(kern_tupitem, t_bits) + BITMAPLEN(nattrs)) +
+			  MAXALIGN(final_target->width));
 	buffer_sz = MAXALIGN(offsetof(kern_data_store, colmeta[nattrs])) +
 		sizeof(uint64_t) * pp_info->final_nrows +
 		unitsz * pp_info->final_nrows;
@@ -986,14 +1001,15 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 				}
 				sortkeys_expr = lappend(sortkeys_expr, f_expr);
 				sortkeys_kind = lappend_int(sortkeys_kind, kind);
+				sortkeys_refs = lappend_int(sortkeys_refs, ec->ec_sortref);
 				found = true;
 				break;
 			}
 		}
 		if (!found)
 		{
-			elog(DEBUG1, "gpusort: sortkey '%s' was not found on the final targetlist",
-				 nodeToString(em_expr));
+			elog(DEBUG1, "gpusort: sortkey '%s' was not found on the final targetlist (%s)",
+				 nodeToString(em_expr), nodeToString(final_target->exprs));
 			return;		/* not found */
 		}
 	}
@@ -1007,6 +1023,7 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 								DEVTASK__MERGE_FINAL_BUFFER);
 	pp_info->gpusort_keys_expr = sortkeys_expr;
 	pp_info->gpusort_keys_kind = sortkeys_kind;
+	pp_info->gpusort_keys_refs = sortkeys_refs;
 	linitial(cpath->custom_private) = pp_info;
 	per_tuple_cost = (cpath->path.pathtarget->cost.per_tuple +
 					  pgstrom_gpu_tuple_cost);
@@ -1262,6 +1279,7 @@ try_add_xpujoin_partition_path(PlannerInfo *root,
 
 	op_prev_list = pgstrom_find_op_leafs(root,
 										 outer_rel,
+										 xpu_task_flags,
 										 try_parallel_path,
 										 &identical_inners);
 	if (identical_inners)
@@ -1488,6 +1506,7 @@ __xpuJoinAddCustomPathCommon(PlannerInfo *root,
 static void
 __xpuJoinTryAddPartitionLeafs(PlannerInfo *root,
 							  RelOptInfo *joinrel,
+							  uint32_t xpu_task_flags,
 							  bool be_parallel)
 {
 	RelOptInfo *parent;
@@ -1503,7 +1522,9 @@ __xpuJoinTryAddPartitionLeafs(PlannerInfo *root,
 		RelOptInfo *leaf_rel = parent->part_rels[k];
 		pgstromOuterPathLeafInfo *op_leaf;
 
-		op_leaf = pgstrom_find_op_normal(root, leaf_rel, be_parallel);
+		op_leaf = pgstrom_find_op_normal(root, leaf_rel,
+										 xpu_task_flags,
+										 be_parallel);
 		if (!op_leaf)
 			return;
 		op_leaf_list = lappend(op_leaf_list, op_leaf);
@@ -1537,6 +1558,7 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 	if (pgstrom_enabled())
 	{
 		if (pgstrom_enable_gpujoin && gpuserv_ready_accept())
+		{
 			__xpuJoinAddCustomPathCommon(root,
 										 joinrel,
 										 outerrel,
@@ -1546,7 +1568,14 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 										 TASK_KIND__GPUJOIN,
 										 &gpujoin_path_methods,
 										 pgstrom_enable_partitionwise_gpujoin);
+			if (joinrel->reloptkind == RELOPT_OTHER_JOINREL)
+			{
+				__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__GPUJOIN, false);
+				__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__GPUJOIN, true);
+			}
+		}
 		if (pgstrom_enable_dpujoin)
+		{
 			__xpuJoinAddCustomPathCommon(root,
 										 joinrel,
 										 outerrel,
@@ -1556,10 +1585,11 @@ XpuJoinAddCustomPath(PlannerInfo *root,
 										 TASK_KIND__DPUJOIN,
 										 &dpujoin_path_methods,
 										 pgstrom_enable_partitionwise_dpujoin);
-		if (joinrel->reloptkind == RELOPT_OTHER_JOINREL)
-		{
-			__xpuJoinTryAddPartitionLeafs(root, joinrel, false);
-			__xpuJoinTryAddPartitionLeafs(root, joinrel, true);
+			if (joinrel->reloptkind == RELOPT_OTHER_JOINREL)
+			{
+				__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__DPUJOIN, false);
+				__xpuJoinTryAddPartitionLeafs(root, joinrel, TASK_KIND__DPUJOIN, true);
+			}
 		}
 	}
 }
@@ -2069,10 +2099,7 @@ typedef struct
 	uint32_t		nitems;
 	uint32_t		nrooms;
 	size_t			usage;
-	struct {
-		HeapTuple	htup;
-		uint32_t	hash;		/* if hash-join or gist-join */
-	} rows[1];
+	MinimalTuple	rows[1];
 } inner_preload_buffer;
 
 static uint32_t
@@ -2138,7 +2165,7 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
 	{
 		TupleTableSlot *slot;
 		TupleDesc		tupdesc;
-		HeapTuple		htup;
+		MinimalTuple	mtup;
 		uint32_t		index;
 
 		CHECK_FOR_INTERRUPTS();
@@ -2163,9 +2190,9 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
 				slot->tts_values[j] = (Datum)PG_DETOAST_DATUM(slot->tts_values[j]);
 		}
 		oldcxt = MemoryContextSwitchTo(memcxt);
-		htup = heap_form_tuple(slot->tts_tupleDescriptor,
-							   slot->tts_values,
-							   slot->tts_isnull);
+		mtup = heap_form_minimal_tuple(slot->tts_tupleDescriptor,
+									   slot->tts_values,
+									   slot->tts_isnull);
 		if (preload_buf->nitems >= preload_buf->nrooms)
 		{
 			uint32_t	nrooms_new = 2 * preload_buf->nrooms + 4000;
@@ -2178,37 +2205,32 @@ execInnerPreloadOneDepth(MemoryContext memcxt,
 
 		if (istate->hash_inner_keys != NIL)
 		{
-			uint32_t	hash = get_tuple_hashvalue(pts, istate, slot);
-
-			preload_buf->rows[index].htup = htup;
-			preload_buf->rows[index].hash = hash;
-			preload_buf->usage += MAXALIGN(offsetof(kern_hashitem,
-													t.htup) + htup->t_len);
+			((kern_tupitem *)mtup)->hash = get_tuple_hashvalue(pts, istate, slot);
+			preload_buf->rows[index] = mtup;
+			preload_buf->usage += MAXALIGN(offsetof(kern_hashitem, t)
+										   + mtup->t_len
+										   + ROWID_SIZE);
 		}
 		else if (istate->gist_irel)
 		{
 			ItemPointer	ctid;
-			uint32_t	hash;
 			bool		isnull;
 
 			ctid = (ItemPointer)
 				slot_getattr(slot, istate->gist_ctid_resno, &isnull);
 			if (isnull)
 				elog(ERROR, "Unable to build GiST-index buffer with NULL-ctid");
-			ItemPointerCopy(ctid, &htup->t_self);
-			hash = hash_any((unsigned char *)ctid, sizeof(ItemPointerData));
-
-			preload_buf->rows[index].htup = htup;
-			preload_buf->rows[index].hash = hash;
-			preload_buf->usage += MAXALIGN(offsetof(kern_hashitem,
-													t.htup) + htup->t_len);
+			((kern_tupitem *)mtup)->hash = hash_any((unsigned char *)ctid,
+													sizeof(ItemPointerData));
+			preload_buf->rows[index] = mtup;
+			preload_buf->usage += MAXALIGN(offsetof(kern_hashitem, t)
+										   + mtup->t_len
+										   + ROWID_SIZE);
 		}
 		else
 		{
-			preload_buf->rows[index].htup = htup;
-			preload_buf->rows[index].hash = 0;
-			preload_buf->usage += MAXALIGN(offsetof(kern_tupitem,
-													htup) + htup->t_len);
+			preload_buf->rows[index] = mtup;
+			preload_buf->usage += MAXALIGN(mtup->t_len + ROWID_SIZE);
 		}
 		MemoryContextSwitchTo(oldcxt);
 	}
@@ -2293,7 +2315,7 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 											 size_t offset)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	size_t		partition_sz = (size_t)__pinned_inner_buffer_partition_size_mb << 20;
+	size_t		partition_sz = pgstrom_pinned_inner_buffer_partition_size();
 	size_t		largest_sz = 0;
 	int			largest_depth = -1;
 
@@ -2471,6 +2493,7 @@ again:
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
 				h_kmrels->chunks[depth-1].kds_offset = offset;
+				h_kmrels->chunks[depth-1].gist_ctid_resno = istate->gist_ctid_resno;
 
 				setup_kern_data_store(kds, tupdesc, nbytes,
 									  KDS_FORMAT_HASH);
@@ -2606,19 +2629,16 @@ __innerPreloadSetupHeapBuffer(kern_data_store *kds,
 	
 	for (uint32_t index=0; index < preload_buf->nitems; index++)
 	{
-		HeapTuple	htup = preload_buf->rows[index].htup;
-		size_t		sz;
+		MinimalTuple mtup = preload_buf->rows[index];
 		kern_tupitem *titem;
 
-		sz = MAXALIGN(offsetof(kern_tupitem, htup) + htup->t_len);
-		curr_pos -= sz;
+		curr_pos -= MAXALIGN(mtup->t_len + ROWID_SIZE);
+		memcpy(curr_pos, mtup, mtup->t_len);
 		titem = (kern_tupitem *)curr_pos;
-		titem->t_len = htup->t_len;
-		titem->rowid = rowid;
-		memcpy(&titem->htup, htup->t_data, htup->t_len);
-		memcpy(&titem->htup.t_ctid, &htup->t_self, sizeof(ItemPointerData));
-
+		titem->t_len += ROWID_SIZE;
+		KERN_TUPITEM_SET_ROWID(titem, rowid);
 		row_index[rowid++] = (tail_pos - curr_pos);
+		__KDS_TUPITEM_CHECK_VALID(kds, titem);
 	}
 }
 
@@ -2640,31 +2660,26 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 
 	for (uint32_t index=0; index < preload_buf->nitems; index++)
 	{
-		HeapTuple	htup = preload_buf->rows[index].htup;
-		uint32_t	hash = preload_buf->rows[index].hash;
+		MinimalTuple mtup = preload_buf->rows[index];
+		uint32_t	hash = ((kern_tupitem *)mtup)->hash;
 		uint32_t	hindex = hash % kds->hash_nslots;
 		uint64_t	next, self;
-		size_t		sz;
 		kern_hashitem *hitem;
 
-		sz = MAXALIGN(offsetof(kern_hashitem, t.htup) + htup->t_len);
-		curr_pos -= sz;
+		curr_pos -= MAXALIGN(offsetof(kern_hashitem, t) +
+							 mtup->t_len +
+							 ROWID_SIZE);
 		self = (tail_pos - curr_pos);
-
 		next = __atomic_exchange_uint64(&hash_slot[hindex], self);
+
 		hitem = (kern_hashitem *)curr_pos;
 		hitem->next = next;
-		hitem->hash = hash;
-		hitem->__padding__ = 0;
-		hitem->t.t_len = htup->t_len;
-		hitem->t.rowid = rowid;
-		memcpy(&hitem->t.htup, htup->t_data, htup->t_len);
-		memcpy(&hitem->t.htup.t_ctid, &htup->t_self, sizeof(ItemPointerData));
+		memcpy(&hitem->t, mtup, mtup->t_len);
+		hitem->t.t_len += ROWID_SIZE;
+		KERN_TUPITEM_SET_ROWID(&hitem->t, rowid);
 
 		row_index[rowid++] = (tail_pos - (char *)&hitem->t);
-		Assert(curr_pos >= ((char *)kds
-							+ KDS_HEAD_LENGTH(kds)
-							+ sizeof(uint64_t) * (kds->hash_nslots + rowid)));
+		Assert(__KDS_TUPITEM_CHECK_VALID(kds, &hitem->t));
 	}
 }
 
@@ -2984,6 +2999,8 @@ __pgstrom_init_xpujoin_common(void)
 void
 pgstrom_init_gpu_join(void)
 {
+	size_t		dram_sz = 0;
+
 	/* turn on/off gpujoin */
 	DefineCustomBoolVariable("pg_strom.enable_gpujoin",
 							 "Enables the use of GpuJoin logic",
@@ -3032,21 +3049,18 @@ pgstrom_init_gpu_join(void)
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
 							NULL, NULL, NULL);
 	/* unit size of partitioned pinned inner buffer of GpuJoin
-	 * default: 90% of usable DRAM for high-end GPUs,
-	 *          80% of usable DRAM for middle-end GPUs.
+	 * default: 90% of (usable DRAM - 6GB) for high-end GPUs,
+	 *          75% of usable DRAM for other GPUs
 	 */
 	for (int i=0; i < numGpuDevAttrs; i++)
 	{
-		size_t	dram_sz = gpuDevAttrs[i].DEV_TOTAL_MEMSZ;
-		size_t	part_sz;
-
-		if (dram_sz >= (32UL<<30))
-			part_sz = ((dram_sz - (2UL<<30)) * 9 / 10) >> 20;
-		else
-			part_sz = ((dram_sz - (1UL<<30)) * 8 / 10) >> 20;
-		if (i==0 || part_sz < __pinned_inner_buffer_partition_size_mb)
-			__pinned_inner_buffer_partition_size_mb = part_sz;
+		if (i == 0 || dram_sz > gpuDevAttrs[i].DEV_TOTAL_MEMSZ)
+			dram_sz = gpuDevAttrs[i].DEV_TOTAL_MEMSZ;
 	}
+	__pinned_inner_buffer_partition_size_mb = Max((dram_sz >= (20UL<<30)	/* >= 20G */
+												   ? ((dram_sz - (6UL<<30)) * 9 / 10)
+												   : (dram_sz * 3 / 4)) >> 20,
+												  1024);
 	DefineCustomIntVariable("pg_strom.pinned_inner_buffer_partition_size",
 							"Unit size of partitioned pinned inner buffer of GpuJoin",
 							NULL,

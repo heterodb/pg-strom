@@ -637,45 +637,27 @@ devtype_float8_hash(bool isnull, Datum value)
 static uint32_t
 devtype_numeric_hash(bool isnull, Datum value)
 {
-	uint32_t	len;
+	uint32_t	hash;
+	uint8_t		kind;
+	int16_t		weight;
+	int128_t	num;
+	const char *emsg;
 
 	if (isnull)
 		return 0;
-	len = VARSIZE_ANY_EXHDR(value);
-	if (len >= sizeof(uint16_t))
-	{
-		NumericChoice  *nc = (NumericChoice *)VARDATA_ANY(value);
-		NumericDigit   *digits = NUMERIC_DIGITS(nc, nc->n_header);
-		int				weight = NUMERIC_WEIGHT(nc, nc->n_header) + 1;
-		int				i, ndigits = NUMERIC_NDIGITS(nc->n_header, len);
-		int128_t		value = 0;
+	emsg = __xpu_numeric_from_varlena(&kind,
+									  &weight,
+									  &num,
+									  (varlena *)value);
+	if (emsg)
+		elog(ERROR, "%s", emsg);
+	if (kind == XPU_NUMERIC_KIND__VALID)
+		hash = (hash_any((unsigned char *)&weight, sizeof(int16_t)) ^
+				hash_any((unsigned char *)&num, sizeof(int128_t)));
+	else
+		hash = hash_any((unsigned char *)&kind, sizeof(uint8_t));
 
-		for (i=0; i < ndigits; i++)
-		{
-			NumericDigit dig = digits[i];
-
-			value = value * PG_NBASE + dig;
-			if (value < 0)
-				elog(ERROR, "numeric value is out of range");
-		}
-		if (NUMERIC_SIGN(nc->n_header) == NUMERIC_NEG)
-			value = -value;
-		weight = PG_DEC_DIGITS * (ndigits - weight);
-		/* see, set_normalized_numeric */
-		if (value == 0)
-			weight = 0;
-		else
-		{
-			while (value % 10 == 0)
-			{
-				value /= 10;
-				weight--;
-			}
-		}
-		return (hash_any((unsigned char *)&weight, sizeof(int16_t)) ^
-				hash_any((unsigned char *)&value, sizeof(int128_t)));
-	}
-	elog(ERROR, "corrupted numeric header");
+	return hash;
 }
 
 static uint32_t

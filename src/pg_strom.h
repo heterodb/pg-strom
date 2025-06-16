@@ -377,6 +377,8 @@ typedef struct
 	pg_atomic_uint64	scan_block_count;	/* scan counter */
 	uint32_t			scan_block_nums;	/* = HeapScanDesc::rs_numblocks */
 	uint32_t			scan_block_start;	/* = HeapScanDesc::rs_startblock */
+	pg_atomic_uint64	scan_repeat_sync_control; /* sync variable when repeat_id is
+												   * incremented to the next loop. */
 	/* control variables to detect the last plan-node at parallel execution */
 	pg_atomic_uint32	parallel_task_control;
 	/* statistics */
@@ -390,6 +392,9 @@ typedef struct
 	pg_atomic_uint64	final_nitems;		/* # of tuples in final buffer if any */
 	pg_atomic_uint64	final_usage;		/* usage bytes of final buffer if any */
 	pg_atomic_uint64	final_total;		/* total usage of final buffer if any */
+	pg_atomic_uint32	final_sorting_msec;			/* usec of GPU-sorting */
+	pg_atomic_uint32	final_reconstruction_msec;	/* usec of final buffer reconstruction */
+	pg_atomic_uint32	join_reconstruction_msec;	/* usec of inner buffer reconstruction */
 	pg_atomic_uint32	pinned_buffer_divisor; /* # of pinned-inner-buffer partitions */
 	/* for parallel-scan */
 	uint32_t			parallel_scan_desc_offset;
@@ -482,10 +487,11 @@ struct pgstromTaskState
 	bool				scan_done;
 	bool				final_done;
 	uint32_t			num_scan_repeats;
-
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
+	/* SELECT INTO direct mode */
+	DestReceiver	   *select_into_dest;
 	/* CPU fallback support */
 	off_t			   *fallback_tuples;
 	size_t				fallback_index;
@@ -770,7 +776,7 @@ typedef struct gpuClient	gpuClient;
 extern bool		isGpuServWorkerThread(void);
 extern void		gpuservLoggerReport(const char *fmt, ...)
 					pg_attribute_printf(1, 2);
-#define __gsLogCxt(LABEL,fmt,...)							\
+#define __gsLogLabel(LABEL,fmt,...)							\
 	gpuservLoggerReport("%s|LOG|%s|%d|%s|" fmt "\n",		\
 						LABEL,								\
 						__basename(__FILE__),				\
@@ -782,7 +788,7 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 	do {													\
 		int		__errno_saved = errno;						\
 		if (isGpuServWorkerThread())						\
-			__gsLogCxt("[error]",fmt,##__VA_ARGS__);		\
+			__gsLogLabel("[error]",fmt,##__VA_ARGS__);		\
 		else												\
 			ereport(LOG,									\
 					(errhidestmt(true),						\
@@ -798,7 +804,7 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 		if (heterodbExtraEreportLevel() >= 1)				\
 		{													\
 			if (isGpuServWorkerThread())					\
-				__gsLogCxt("[info]",fmt,##__VA_ARGS__);		\
+				__gsLogLabel("[info]",fmt,##__VA_ARGS__);	\
 			else											\
 				ereport(LOG,								\
 						(errhidestmt(true),					\
@@ -814,7 +820,7 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 		if (heterodbExtraEreportLevel() >= 2)				\
 		{													\
 			if (isGpuServWorkerThread())					\
-				__gsLogCxt("[debug]",fmt,##__VA_ARGS__);	\
+				__gsLogLabel("[debug]",fmt,##__VA_ARGS__);	\
 			else											\
 				ereport(LOG,								\
 						(errhidestmt(true),					\
@@ -894,6 +900,7 @@ extern void		pgstrom_init_dpu_scan(void);
 extern bool		pgstrom_is_gpujoin_path(const Path *path);
 extern bool		pgstrom_is_gpujoin_plan(const Plan *plan);
 extern bool		pgstrom_is_gpujoin_state(const PlanState *ps);
+extern size_t	pgstrom_pinned_inner_buffer_partition_size(void);
 extern pgstromPlanInfo *try_fetch_xpujoin_planinfo(const Path *path);
 extern void		try_add_sorted_gpujoin_path(PlannerInfo *root,
 											RelOptInfo *join_rel,
@@ -1096,9 +1103,11 @@ extern void		pgstrom_remember_op_leafs(PlannerInfo *root,
 										  bool be_parallel);
 extern pgstromOuterPathLeafInfo *pgstrom_find_op_normal(PlannerInfo *root,
 														RelOptInfo *outer_rel,
+														uint32_t xpu_task_flags,
 														bool be_parallel);
 extern List	   *pgstrom_find_op_leafs(PlannerInfo *root,
 									  RelOptInfo *outer_rel,
+									  uint32_t xpu_task_flags,
 									  bool be_parallel,
 									  bool *p_identical_inners);
 extern bool		pgstrom_is_dummy_path(const Path *path);

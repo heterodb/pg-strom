@@ -16,7 +16,7 @@ PG_MODULE_MAGIC;
 /* misc variables */
 static Oid	__pgstrom_namespace_oid = UINT_MAX;
 static bool	__pgstrom_enabled_guc = true;			/* GUC */
-int			pgstrom_cpu_fallback_elevel = NOTICE;	/* GUC */
+int			pgstrom_cpu_fallback_elevel = ERROR;	/* GUC */
 bool		pgstrom_regression_test_mode = false;	/* GUC */
 bool		pgstrom_explain_developer_mode = false;	/* GUC */
 long		PAGE_SIZE;
@@ -24,10 +24,12 @@ long		PAGE_MASK;
 int			PAGE_SHIFT;
 long		PHYS_PAGES;
 long		PAGES_PER_BLOCK;
+static bool	pgstrom_enable_select_into_direct;		/* GUC */
 
 static planner_hook_type	planner_hook_next = NULL;
 static CustomPathMethods	pgstrom_dummy_path_methods;
 static CustomScanMethods	pgstrom_dummy_plan_methods;
+static ExecutorStart_hook_type	executor_start_hook_next = NULL;
 
 /* pg_strom.githash() */
 PG_FUNCTION_INFO_V1(pgstrom_githash);
@@ -111,7 +113,7 @@ pgstrom_init_gucs(void)
 							 "Enables CPU fallback if xPU required re-run",
 							 NULL,
 							 &pgstrom_cpu_fallback_elevel,
-							 NOTICE,
+							 ERROR,
 							 __cpu_fallback_options,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
@@ -131,6 +133,15 @@ pgstrom_init_gucs(void)
 							 NULL,
 							 &pgstrom_explain_developer_mode,
 							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* turns on/off SELECT INTO direct mode */
+	DefineCustomBoolVariable("pg_strom.enable_select_into_direct",
+							 "Enables SELECT INTO direct mode",
+							 NULL,
+							 &pgstrom_enable_select_into_direct,
+							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
@@ -360,6 +371,7 @@ typedef struct
 {
 	PlannerInfo *root;
 	Relids		parent_relids;
+	uint32_t	xpu_devkind;	/* one of DEVKIND__* */
 	pgstromOuterPathLeafInfo *op_normal_single;
 	pgstromOuterPathLeafInfo *op_normal_parallel;
 	List	   *op_leaf_single;
@@ -377,7 +389,8 @@ pgstrom_path_entry_hash(const void *key, Size keysize)
 
 	return (hash_bytes((const unsigned char *)&entry->root,
 					   sizeof(PlannerInfo *)) ^
-			bms_hash_value(entry->parent_relids));
+			bms_hash_value(entry->parent_relids) ^
+			entry->xpu_devkind);
 }
 
 static int
@@ -387,10 +400,11 @@ pgstrom_path_entry_match(const void *key1, const void *key2, Size keysize)
 	const pgstromPathEntry *entry2 = key2;
 
 	Assert(keysize == offsetof(pgstromPathEntry,
-							   parent_relids) + sizeof(Relids));
+							   xpu_devkind) + sizeof(uint32_t));
 	return (entry1->root == entry2->root &&
 			bms_equal(entry1->parent_relids,
-					  entry2->parent_relids) ? 0 : -1);
+					  entry2->parent_relids) &&
+			entry1->xpu_devkind == entry2->xpu_devkind ? 0 : -1);
 }
 
 static void
@@ -403,7 +417,7 @@ __pgstrom_build_paths_htable(void)
 		memset(&hctl, 0, sizeof(HASHCTL));
 		hctl.hcxt = CurrentMemoryContext;
 		hctl.keysize = offsetof(pgstromPathEntry,
-								parent_relids) + sizeof(Relids);
+								xpu_devkind) + sizeof(uint32_t);
 		hctl.entrysize = sizeof(pgstromPathEntry);
 		hctl.hash = pgstrom_path_entry_hash;
 		hctl.match = pgstrom_path_entry_match;
@@ -436,6 +450,7 @@ pgstrom_remember_op_normal(PlannerInfo *root,
 	memset(&pp_key, 0, sizeof(pgstromPathEntry));
 	pp_key.root = root;
 	pp_key.parent_relids = outer_rel->relids;
+	pp_key.xpu_devkind = (op_leaf->pp_info->xpu_task_flags & DEVKIND__ANY);
 	pp_entry = (pgstromPathEntry *)
 		hash_search(pgstrom_paths_htable,
 					&pp_key,
@@ -473,6 +488,7 @@ pgstrom_remember_op_leafs(PlannerInfo *root,
 	pgstromPathEntry  pp_key;
 	ListCell   *cell;
 	List	   *inner_paths_list = NIL;
+	uint32_t	xpu_devkind = 0;
 	int			identical_inners = -1;
 	Cost		total_cost = 0.0;
 	bool		found;
@@ -487,6 +503,12 @@ pgstrom_remember_op_leafs(PlannerInfo *root,
 		Assert(list_length(op_leaf->inner_paths_list) == op_leaf->pp_info->num_rels);
 		op_leaf->outer_rel = parent_rel;
 		total_cost += op_leaf->leaf_cost;
+
+		/* check whether all entries have identical xPU device */
+		if (xpu_devkind == 0)
+			xpu_devkind = (op_leaf->pp_info->xpu_task_flags & DEVKIND__ANY);
+		else if (xpu_devkind != (op_leaf->pp_info->xpu_task_flags & DEVKIND__ANY))
+			elog(ERROR, "Bug? different xPU devices are mixtured.");
 
 		if (cell == list_head(op_leaf_list))
 		{
@@ -516,6 +538,7 @@ pgstrom_remember_op_leafs(PlannerInfo *root,
 	memset(&pp_key, 0, sizeof(pgstromPathEntry));
 	pp_key.root = root;
 	pp_key.parent_relids = parent_rel->relids;
+	pp_key.xpu_devkind = xpu_devkind;
 	pp_entry = (pgstromPathEntry *)
 		hash_search(pgstrom_paths_htable,
 					&pp_key,
@@ -554,6 +577,7 @@ pgstrom_remember_op_leafs(PlannerInfo *root,
 pgstromOuterPathLeafInfo *
 pgstrom_find_op_normal(PlannerInfo *root,
 					   RelOptInfo *outer_rel,
+					   uint32_t xpu_task_flags,
 					   bool be_parallel)
 {
 	if (pgstrom_paths_htable)
@@ -564,6 +588,7 @@ pgstrom_find_op_normal(PlannerInfo *root,
 		memset(&pp_key, 0, sizeof(pgstromPathEntry));
 		pp_key.root = root;
 		pp_key.parent_relids = outer_rel->relids;
+		pp_key.xpu_devkind = (xpu_task_flags & DEVKIND__ANY);
 		pp_entry = (pgstromPathEntry *)
 			hash_search(pgstrom_paths_htable,
 						&pp_key,
@@ -580,6 +605,7 @@ pgstrom_find_op_normal(PlannerInfo *root,
 List *
 pgstrom_find_op_leafs(PlannerInfo *root,
 					  RelOptInfo *parent_rel,
+					  uint32_t xpu_task_flags,
 					  bool be_parallel,
 					  bool *p_identical_inners)
 {
@@ -591,6 +617,7 @@ pgstrom_find_op_leafs(PlannerInfo *root,
 		memset(&pp_key, 0, sizeof(pgstromPathEntry));
 		pp_key.root = root;
 		pp_key.parent_relids = parent_rel->relids;
+		pp_key.xpu_devkind = (xpu_task_flags & DEVKIND__ANY);
 		pp_entry = (pgstromPathEntry *)
 			hash_search(pgstrom_paths_htable,
 						&pp_key,
@@ -646,6 +673,107 @@ pgstrom_post_planner(Query *parse,
 	hash_destroy(pgstrom_paths_htable);
 	pgstrom_paths_htable = saved_paths_htable;
 	return pstmt;
+}
+
+/*
+ * pgstrom_executor_start
+ */
+static void
+pgstrom_executor_start(QueryDesc *queryDesc, int eflags)
+{
+	if (executor_start_hook_next)
+		executor_start_hook_next(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
+	/*
+	 * check whether SELECT INTO direct mode is possible, or not.
+	 * also, see ExecCreateTableAs() for the related initializations.
+	 */
+	if (!pgstrom_enable_select_into_direct)
+		elog(DEBUG2, "SELECT INTO Direct disabled: because of pg_strom.enable_select_into_direct parameter");
+	else if (queryDesc->dest->mydest != DestIntoRel)
+		elog(DEBUG2, "SELECT INTO Direct disabled: because dest-receiver is not DestIntoRel");
+	else if (!pgstrom_is_gpuscan_state(queryDesc->planstate) &&
+			 !pgstrom_is_gpujoin_state(queryDesc->planstate) &&
+			 !pgstrom_is_gpupreagg_state(queryDesc->planstate))
+		elog(DEBUG2, "SELECT INTO Direct disabled: because top-level plan is not GPU-aware");
+	else if (pgstrom_cpu_fallback_elevel < ERROR)
+		elog(DEBUG2, "SELECT INTO Direct disabled: because CPU-fallback is enabled");
+	else
+	{
+		pgstromTaskState *pts = (pgstromTaskState *)queryDesc->planstate;
+
+		/* Only GPU supports SELECT INTO Direct mode */
+		if ((pts->xpu_task_flags & DEVKIND__ANY) != DEVKIND__NVIDIA_GPU)
+		{
+			elog(DEBUG2, "SELECT INTO Direct disabled: because only GPU supports it");
+			return;
+		}
+
+		/*
+		 * Even if ProjectionInfo would be assigned on the planstate,
+		 * we check whether it is actually incompatible or not.
+		 */
+		if (pts->css.ss.ps.ps_ProjInfo)
+		{
+			ProjectionInfo *projInfo = pts->css.ss.ps.ps_ProjInfo;
+			CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
+			List	   *tlist_cpu = (List *)projInfo->pi_state.expr;
+			ListCell   *lc;
+			int			nvalids = 0;
+			int			anum = 1;
+			bool		meet_resjunk = false;
+
+			Assert(IsA(cscan, CustomScan));
+			foreach (lc, cscan->custom_scan_tlist)
+			{
+				TargetEntry *tle = lfirst(lc);
+
+				if (tle->resjunk)
+					meet_resjunk = true;
+				else if (!meet_resjunk)
+					nvalids++;
+				else
+				{
+					elog(DEBUG2, "Bug? CustomScan has valid TLEs after junks: %s",
+						 nodeToString(cscan->custom_scan_tlist));
+					return;
+				}
+			}
+			if (list_length(tlist_cpu) != nvalids)
+			{
+				elog(DEBUG2, "SELECT INTO Direct disabled: because of CPU projection (%d -> %d attributes)",
+					 nvalids, list_length(tlist_cpu));
+				return;
+			}
+			foreach (lc, tlist_cpu)
+			{
+				TargetEntry *tle = lfirst(lc);
+				Var	   *var = (Var *)tle->expr;
+
+				if (tle->resjunk ||
+					!IsA(var, Var) ||
+					var->varno != INDEX_VAR ||
+					var->varattno != anum)
+				{
+					elog(DEBUG2, "SELECT INTO Direct disabled: because of CPU projection: %s",
+						 nodeToString(tle->expr));
+					return;
+				}
+				anum++;
+			}
+		}
+		/*
+		 * This GPU-task can potentially run SELECT INTO direct mode.
+		 * After the DestReceiver::rStartup invocation at ExecutorRun(),
+		 * we must have the final check of ...
+		 * - whether the relation is unlogged or temporary
+		 * - whether the EXCLUSIVE lock is held
+		 * - whether the TAM (Table Access Method) is heap
+		 * at the first invocation of execution.
+		 */
+		pts->select_into_dest = queryDesc->dest;
+	}
 }
 
 /*
@@ -724,6 +852,10 @@ _PG_init(void)
 	/* post planner hook */
 	planner_hook_next = (planner_hook ? planner_hook : standard_planner);
 	planner_hook = pgstrom_post_planner;
+	/* executor hook */
+	executor_start_hook_next = ExecutorStart_hook;
+	ExecutorStart_hook = pgstrom_executor_start;
+
 	/* signal handler for wake up */
 	pqsignal(SIGPOLL, pgstrom_sigpoll_handler);
 }
