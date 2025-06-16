@@ -243,6 +243,59 @@ pgstrom_dummy_create_scan_state(CustomScan *cscan)
 }
 
 /*
+ * fixup_upper_expression_by_customscan
+ *
+ * It transforms an expression that references the outer results using OUTER_VAR
+ * into a new expression that can be pushed down to the outer custom-scan.
+ */
+typedef struct
+{
+	CustomScan *cscan;
+	int			status;
+} __fixup_upper_expression_by_customscan_context;
+
+static Node *
+__fixup_upper_expression_by_customscan_walker(Node *node, void *__data)
+{
+	__fixup_upper_expression_by_customscan_context *con = __data;
+
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		CustomScan *cscan = con->cscan;
+		const Var  *var = (const Var *)node;
+
+		if (var->varno == OUTER_VAR &&
+			var->varattno > 0 &&
+			var->varattno <= list_length(cscan->scan.plan.targetlist))
+		{
+			TargetEntry *tle = list_nth(cscan->scan.plan.targetlist,
+										var->varattno-1);
+			Assert(var->vartype   == exprType((Node *)tle->expr) &&
+				   var->vartypmod == exprTypmod((Node *)tle->expr));
+			return copyObject((Node *)tle->expr);
+		}
+		con->status = -1;
+	}
+	return expression_tree_mutator(node, __fixup_upper_expression_by_customscan_walker, __data);
+}
+
+static Expr *
+fixup_upper_expression_by_customscan(Expr *expr_orig, CustomScan *cscan)
+{
+	__fixup_upper_expression_by_customscan_context con;
+	Node	   *expr_new;
+
+	con.cscan = cscan;
+	con.status = 0;
+	expr_new = __fixup_upper_expression_by_customscan_walker((Node *)expr_orig, &con);
+	if (con.status == 0)
+		return (Expr *)expr_new;
+	return NULL;
+}
+
+/*
  * pgstrom_removal_dummy_plans
  *
  * Due to the interface design of the create_upper_paths_hook, some other path
@@ -307,6 +360,45 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 				SubqueryScan   *sscan = (SubqueryScan *)plan;
 
 				pgstrom_removal_dummy_plans(pstmt, &sscan->subplan);
+			}
+			break;
+
+		case T_Result:
+			/*
+			 * MEMO: When the GPU-PreAgg node is placed directly under the Result
+			 * node, it may be possible to integrate CPU-Projection processing.
+			 * This is because when converting from the GPU-PreAgg Path to a Plan,
+			 * it is necessary to refer to the targetlist to create the tlist_dev,
+			 * so the pushdown of the ProjectionPath by CUSTOMPATH_SUPPORT_PROJECTION
+			 * cannot be used.
+			 */
+			if (pgstrom_is_gpupreagg_plan(outerPlan(plan)) &&
+				((Result *)plan)->resconstantqual == NULL)
+			{
+				CustomScan *cscan = (CustomScan *)outerPlan(plan);
+				ListCell   *cell;
+				List	   *tlist_new = NIL;
+
+				foreach (cell, plan->targetlist)
+				{
+					TargetEntry *tle = lfirst(cell);
+					Expr   *expr_new =
+						fixup_upper_expression_by_customscan(tle->expr, cscan);
+					if (!expr_new)
+						break;
+					tlist_new = lappend(tlist_new,
+										makeTargetEntry(expr_new,
+														tle->resno,
+														tle->resname,
+														tle->resjunk));
+				}
+				if (!cell)
+				{
+					cscan->scan.plan.targetlist = tlist_new;
+					*p_plan = &cscan->scan.plan;
+					pgstrom_removal_dummy_plans(pstmt, p_plan);
+					return;
+				}
 			}
 			break;
 
@@ -658,7 +750,7 @@ pgstrom_post_planner(Query *parse,
 								  query_string,
 								  cursorOptions,
 								  boundParams);
-		/* remove dummy plan */
+		/* remove dummy plan & push-down Result + GpuPreAgg */
 		pgstrom_removal_dummy_plans(pstmt, &pstmt->planTree);
 		foreach (lc, pstmt->subplans)
 			pgstrom_removal_dummy_plans(pstmt, (Plan **)&lfirst(lc));

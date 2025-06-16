@@ -1868,6 +1868,7 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 									pp_info->run_cost +
 									pp_info->final_cost);
 	cpath->path.pathkeys         = NIL;
+	cpath->flags                 = 0;	/* prevent Result pushdown before plan creation */
 	cpath->custom_paths          = con->inner_paths_list;
 	cpath->custom_private        = list_make3(pp_info, NULL, NULL);
 	cpath->methods               = xpu_cpath_methods;
