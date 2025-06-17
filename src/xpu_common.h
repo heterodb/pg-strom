@@ -2276,6 +2276,52 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
 #define KAGG_ACTION__COVAR			801		/* <int4>,<float8>x5 - covariance */
 
+/* identifier of final functions */
+#define KAGG_FINAL__SIMPLE_VREF			1000
+#define KAGG_FINAL__FMINMAX_INT8		1101
+#define KAGG_FINAL__FMINMAX_INT16		1102
+#define KAGG_FINAL__FMINMAX_INT32		1103
+#define KAGG_FINAL__FMINMAX_INT64		1104
+#define KAGG_FINAL__FMINMAX_FP16		1105
+#define KAGG_FINAL__FMINMAX_FP32		1106
+#define KAGG_FINAL__FMINMAX_FP64		1107
+#define KAGG_FINAL__FMINMAX_NUMERIC		1108
+#define KAGG_FINAL__FMINMAX_CASH		1109
+#define KAGG_FINAL__FMINMAX_DATE		1110
+#define KAGG_FINAL__FMINMAX_TIME		1111
+#define KAGG_FINAL__FMINMAX_TIMESTAMP	1112
+#define KAGG_FINAL__FMINMAX_TIMESTAMPTZ	1113
+#define KAGG_FINAL__FSUM_INT			1200
+#define KAGG_FINAL__FSUM_INT64			1201
+#define KAGG_FINAL__FSUM_FP32			1202
+#define KAGG_FINAL__FSUM_FP64			1203
+#define KAGG_FINAL__FSUM_NUMERIC		1204
+#define KAGG_FINAL__FSUM_CASH			1205
+#define KAGG_FINAL__FAVG_INT			1300
+#define KAGG_FINAL__FAVG_INT64			1301
+#define KAGG_FINAL__FAVG_FP64			1302
+#define KAGG_FINAL__FAVG_NUMERIC		1303
+#define KAGG_FINAL__FSTDDEV_SAMP		1400
+#define KAGG_FINAL__FSTDDEV_SAMPF		1401
+#define KAGG_FINAL__FSTDDEV_POP			1402
+#define KAGG_FINAL__FSTDDEV_POPF		1403
+#define KAGG_FINAL__FVAR_SAMP			1500
+#define KAGG_FINAL__FVAR_SAMPF			1501
+#define KAGG_FINAL__FVAR_POP			1502
+#define KAGG_FINAL__FVAR_POPF			1503
+#define KAGG_FINAL__FCORR				1504
+#define KAGG_FINAL__FCOVAR_SAMP			1505
+#define KAGG_FINAL__FCOVAR_POP			1506
+#define KAGG_FINAL__FREGR_AVGX			1507
+#define KAGG_FINAL__FREGR_AVGY			1508
+#define KAGG_FINAL__FREGR_COUNT			1509
+#define KAGG_FINAL__FREGR_INTERCEPT		1510
+#define KAGG_FINAL__FREGR_R2			1511
+#define KAGG_FINAL__FREGR_SLOPE			1512
+#define KAGG_FINAL__FREGR_SXX			1513
+#define KAGG_FINAL__FREGR_SXY			1514
+#define KAGG_FINAL__FREGR_SYY			1515
+
 #define __PAGG_MINMAX_ATTRS__VALID	0x0001	/* value is not empty */
 
 typedef struct
@@ -2439,6 +2485,12 @@ typedef struct
 	int32_t		fb_kvec_offset;	/* kvec's buffer offset */
 } kern_fallback_desc;
 
+typedef struct
+{
+	int16_t		sid_attnum;			/* source attribtue number */
+	int16_t		sid_action;			/* any of KSORT_KEY_KIND__* */
+} kern_select_into_direct_desc;
+
 #define KERN_EXPRESSION_MAGIC			(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
 #define KEXP_FLAG__IS_PUSHED_DOWN		0x0001U
@@ -2526,6 +2578,10 @@ struct kern_expression
 			uint16_t	window_orderby_nkeys;	/* # of order-by keys */
 			kern_sortkey_desc desc[1];
 		} sort;		/* Sort */
+		struct {
+			int			nattrs;
+			kern_select_into_direct_desc desc[1];
+		} select_into;
 		struct {
 			uint32_t	npacked;	/* number of packed sub-expressions; including
 									 * logical NULLs (npacked may be larger than

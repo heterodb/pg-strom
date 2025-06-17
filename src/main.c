@@ -785,86 +785,50 @@ pgstrom_executor_start(QueryDesc *queryDesc, int eflags)
 		elog(DEBUG2, "SELECT INTO Direct disabled: because of pg_strom.enable_select_into_direct parameter");
 	else if (queryDesc->dest->mydest != DestIntoRel)
 		elog(DEBUG2, "SELECT INTO Direct disabled: because dest-receiver is not DestIntoRel");
-	else if (!pgstrom_is_gpuscan_state(queryDesc->planstate) &&
-			 !pgstrom_is_gpujoin_state(queryDesc->planstate) &&
-			 !pgstrom_is_gpupreagg_state(queryDesc->planstate))
-		elog(DEBUG2, "SELECT INTO Direct disabled: because top-level plan is not GPU-aware");
 	else if (pgstrom_cpu_fallback_elevel < ERROR)
 		elog(DEBUG2, "SELECT INTO Direct disabled: because CPU-fallback is enabled");
 	else
 	{
-		pgstromTaskState *pts = (pgstromTaskState *)queryDesc->planstate;
+		PlanState  *pstate = queryDesc->planstate;
 
-		/* Only GPU supports SELECT INTO Direct mode */
-		if ((pts->xpu_task_flags & DEVKIND__ANY) != DEVKIND__NVIDIA_GPU)
+		if (IsA(pstate, GatherState))
 		{
-			elog(DEBUG2, "SELECT INTO Direct disabled: because only GPU supports it");
-			return;
-		}
-
-		/*
-		 * Even if ProjectionInfo would be assigned on the planstate,
-		 * we check whether it is actually incompatible or not.
-		 */
-		if (pts->css.ss.ps.ps_ProjInfo)
-		{
-			ProjectionInfo *projInfo = pts->css.ss.ps.ps_ProjInfo;
-			CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
-			List	   *tlist_cpu = (List *)projInfo->pi_state.expr;
-			ListCell   *lc;
-			int			nvalids = 0;
-			int			anum = 1;
-			bool		meet_resjunk = false;
-
-			Assert(IsA(cscan, CustomScan));
-			foreach (lc, cscan->custom_scan_tlist)
+			if (pstate->ps_ProjInfo)
 			{
-				TargetEntry *tle = lfirst(lc);
-
-				if (tle->resjunk)
-					meet_resjunk = true;
-				else if (!meet_resjunk)
-					nvalids++;
-				else
-				{
-					elog(DEBUG2, "Bug? CustomScan has valid TLEs after junks: %s",
-						 nodeToString(cscan->custom_scan_tlist));
-					return;
-				}
-			}
-			if (list_length(tlist_cpu) != nvalids)
-			{
-				elog(DEBUG2, "SELECT INTO Direct disabled: because of CPU projection (%d -> %d attributes)",
-					 nvalids, list_length(tlist_cpu));
+				elog(DEBUG2, "SELECT INTO Direct disabled: Gather has projection");
 				return;
 			}
-			foreach (lc, tlist_cpu)
-			{
-				TargetEntry *tle = lfirst(lc);
-				Var	   *var = (Var *)tle->expr;
+			pstate = outerPlanState(pstate);
+		}
+		/* check top-level PlanState except for Gather node */
+		if (pgstrom_is_gpuscan_state(pstate) ||
+			pgstrom_is_gpujoin_state(pstate) ||
+			pgstrom_is_gpupreagg_state(pstate))
+		{
+			pgstromTaskState *pts = (pgstromTaskState *)pstate;
 
-				if (tle->resjunk ||
-					!IsA(var, Var) ||
-					var->varno != INDEX_VAR ||
-					var->varattno != anum)
-				{
-					elog(DEBUG2, "SELECT INTO Direct disabled: because of CPU projection: %s",
-						 nodeToString(tle->expr));
-					return;
-				}
-				anum++;
+			if ((pts->xpu_task_flags & DEVKIND__ANY) != DEVKIND__NVIDIA_GPU)
+				elog(DEBUG2, "SELECT INTO Direct disabled: because only GPU supports it");
+			else if (pts->css.ss.ps.qual)
+				elog(DEBUG2, "SELECT INTO Direct disabled: because of host qualifiers");
+			else if (tryAddSelectIntoDirectProjection(pts))
+			{
+				/*
+				 * This GPU-task can potentially run SELECT INTO direct mode.
+				 * After the DestReceiver::rStartup invocation at ExecutorRun(),
+				 * we must have the final check of ...
+				 * - whether the relation is unlogged or temporary
+				 * - whether the EXCLUSIVE lock is held
+				 * - whether the TAM (Table Access Method) is heap
+				 * at the first invocation of execution.
+				 */
+				pts->select_into_dest = queryDesc->dest;
 			}
 		}
-		/*
-		 * This GPU-task can potentially run SELECT INTO direct mode.
-		 * After the DestReceiver::rStartup invocation at ExecutorRun(),
-		 * we must have the final check of ...
-		 * - whether the relation is unlogged or temporary
-		 * - whether the EXCLUSIVE lock is held
-		 * - whether the TAM (Table Access Method) is heap
-		 * at the first invocation of execution.
-		 */
-		pts->select_into_dest = queryDesc->dest;
+		else
+		{
+			elog(DEBUG2, "SELECT INTO Direct disabled: because top-level plan is not GPU-aware");
+		}
 	}
 }
 

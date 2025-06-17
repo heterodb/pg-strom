@@ -492,6 +492,7 @@ struct pgstromTaskState
 	ExprState		   *base_quals;	/* equivalent to device quals */
 	/* SELECT INTO direct mode */
 	DestReceiver	   *select_into_dest;
+	List			   *select_into_proj;	/* projection on SELECT INTO (optional) */
 	/* CPU fallback support */
 	off_t			   *fallback_tuples;
 	size_t				fallback_index;
@@ -941,6 +942,7 @@ extern void		xpupreagg_add_custompath(PlannerInfo *root,
 										 void *extra,
 										 uint32_t task_kind,
 										 const CustomPathMethods *methods);
+extern bool		tryAddSelectIntoDirectProjection(pgstromTaskState *pts);
 extern bool		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
 									  int depth,
 									  uint64_t l_state,

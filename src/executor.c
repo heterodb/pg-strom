@@ -2458,6 +2458,189 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 }
 
 /*
+ * pgstromExplainSelectIntoDirect
+ */
+static void
+pgstromExplainSelectIntoDirect(pgstromTaskState *pts, List *dcontext, ExplainState *es)
+{
+	StringInfoData buf;
+	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
+	ListCell   *lc;
+
+	if (!pts->select_into_dest)
+		return;
+
+	initStringInfo(&buf);
+	if ((pts->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
+		appendStringInfoString(&buf, "enabled");
+	else
+		appendStringInfoString(&buf, "possible");
+
+	if (pts->select_into_proj != NIL)
+	{
+		foreach (lc, pts->select_into_proj)
+		{
+			int		fcode = (lfirst_int(lc) >> 16);
+			int		resno = (lfirst_int(lc) & 0x0000ffffU);
+			char   *str;
+			TargetEntry *tle;
+
+			if (lc == list_head(pts->select_into_proj))
+				appendStringInfo(&buf, "; projection=");
+			else
+				appendStringInfo(&buf, ", ");
+			assert(resno > 0 && resno <= list_length(cscan->custom_scan_tlist));
+			tle = list_nth(cscan->custom_scan_tlist, resno-1);
+			str = deparse_expression((Node *)tle->expr, dcontext, false, false);
+			switch (fcode)
+			{
+				case KAGG_FINAL__SIMPLE_VREF:
+					appendStringInfo(&buf, "%s", str);
+					break;
+				case KAGG_FINAL__FMINMAX_INT8:
+					appendStringInfo(&buf, "fminmax_int8(%s)", str);
+					break;
+				case KAGG_FINAL__FMINMAX_INT16:
+					appendStringInfo(&buf, "fminmax_int16(%s)", str);
+					break;
+				case KAGG_FINAL__FMINMAX_INT32:
+					appendStringInfo(&buf, "fminmax_int32(%s)", str);
+					break;
+				case KAGG_FINAL__FMINMAX_INT64:
+					appendStringInfo(&buf, "fminmax_int64(%s)", str);
+					break;
+				case KAGG_FINAL__FMINMAX_FP16:
+					appendStringInfo(&buf, "fminmax_fp16(%s)", str);
+					break;
+				case KAGG_FINAL__FMINMAX_FP32:
+					appendStringInfo(&buf, "fminmax_fp32(%s)", str);
+					break;
+				case KAGG_FINAL__FMINMAX_FP64:
+					appendStringInfo(&buf, "fminmax_fp64(%s)", str);
+					break;
+				case KAGG_FINAL__FMINMAX_NUMERIC:
+					appendStringInfo(&buf, "fminmax_num(%s)", str);
+					break;
+				case KAGG_FINAL__FMINMAX_CASH:
+					appendStringInfo(&buf, "fminmax_cash(%s)", str);
+					break;
+				case KAGG_FINAL__FMINMAX_DATE:
+					appendStringInfo(&buf, "fminmax_date(%s)", str);
+					break;
+				case KAGG_FINAL__FMINMAX_TIME:
+					appendStringInfo(&buf, "fminmax_time(%s)", str);
+					break;
+				case KAGG_FINAL__FMINMAX_TIMESTAMP:
+					appendStringInfo(&buf, "fminmax_ts(%s)", str);
+					break;
+				case KAGG_FINAL__FMINMAX_TIMESTAMPTZ:
+					appendStringInfo(&buf, "fminmax_tstz(%s)", str);
+					break;
+				case KAGG_FINAL__FSUM_INT:
+					appendStringInfo(&buf, "fsum_int(%s)", str);
+					break;
+				case KAGG_FINAL__FSUM_INT64:
+					appendStringInfo(&buf, "fsum_int64(%s)", str);
+					break;
+				case KAGG_FINAL__FSUM_FP32:
+					appendStringInfo(&buf, "fsum_fp32(%s)", str);
+					break;
+				case KAGG_FINAL__FSUM_FP64:
+					appendStringInfo(&buf, "fsum_fp64(%s)", str);
+					break;
+				case KAGG_FINAL__FSUM_NUMERIC:
+					appendStringInfo(&buf, "fsum_num(%s)", str);
+					break;
+				case KAGG_FINAL__FSUM_CASH:
+					appendStringInfo(&buf, "fsum_cash(%s)", str);
+					break;
+				case KAGG_FINAL__FAVG_INT:
+					appendStringInfo(&buf, "fsum_int(%s)", str);
+					break;
+				case KAGG_FINAL__FAVG_INT64:
+					appendStringInfo(&buf, "fsum_int64(%s)", str);
+					break;
+				case KAGG_FINAL__FAVG_FP64:
+					appendStringInfo(&buf, "fsum_fp64(%s)", str);
+					break;
+				case KAGG_FINAL__FAVG_NUMERIC:
+					appendStringInfo(&buf, "fsum_num(%s)", str);
+					break;
+				case KAGG_FINAL__FSTDDEV_SAMP:
+					appendStringInfo(&buf, "fstddev_samp(%s)", str);
+					break;
+				case KAGG_FINAL__FSTDDEV_SAMPF:
+					appendStringInfo(&buf, "fstddev_sampf(%s)", str);
+					break;
+				case KAGG_FINAL__FSTDDEV_POP:
+					appendStringInfo(&buf, "fstddev_pop(%s)", str);
+					break;
+				case KAGG_FINAL__FSTDDEV_POPF:
+					appendStringInfo(&buf, "fstddev_popf(%s)", str);
+					break;
+				case KAGG_FINAL__FVAR_SAMP:
+					appendStringInfo(&buf, "fvar_samp(%s)", str);
+					break;
+				case KAGG_FINAL__FVAR_SAMPF:
+					appendStringInfo(&buf, "fvar_sampf(%s)", str);
+					break;
+				case KAGG_FINAL__FVAR_POP:
+					appendStringInfo(&buf, "fvar_pop(%s)", str);
+					break;
+				case KAGG_FINAL__FVAR_POPF:
+					appendStringInfo(&buf, "fvar_popf(%s)", str);
+					break;
+				case KAGG_FINAL__FCORR:
+					appendStringInfo(&buf, "fcorr(%s)", str);
+					break;
+				case KAGG_FINAL__FCOVAR_SAMP:
+					appendStringInfo(&buf, "fcovar_samp(%s)", str);
+					break;
+				case KAGG_FINAL__FCOVAR_POP:
+					appendStringInfo(&buf, "fcovar_pop(%s)", str);
+					break;
+				case KAGG_FINAL__FREGR_AVGX:
+					appendStringInfo(&buf, "fregr_avgx(%s)", str);
+					break;
+				case KAGG_FINAL__FREGR_AVGY:
+					appendStringInfo(&buf, "fregr_avgy(%s)", str);
+					break;
+				case KAGG_FINAL__FREGR_COUNT:
+					appendStringInfo(&buf, "fregr_count(%s)", str);
+					break;
+				case KAGG_FINAL__FREGR_INTERCEPT:
+					appendStringInfo(&buf, "fregr_intercept(%s)", str);
+					break;
+				case KAGG_FINAL__FREGR_R2:
+					appendStringInfo(&buf, "fregr_r2(%s)", str);
+					break;
+				case KAGG_FINAL__FREGR_SLOPE:
+					appendStringInfo(&buf, "fregr_slope(%s)", str);
+					break;
+				case KAGG_FINAL__FREGR_SXX:
+					appendStringInfo(&buf, "fregr_sxx(%s)", str);
+					break;
+				case KAGG_FINAL__FREGR_SXY:
+					appendStringInfo(&buf, "fregr_sxy(%s)", str);
+					break;
+				case KAGG_FINAL__FREGR_SYY:
+					appendStringInfo(&buf, "fregr_syy(%s)", str);
+					break;
+				default:
+					elog(ERROR, "Bug? unknown final function code (%d)", fcode);
+					break;
+			}
+		}
+	}
+	else
+	{
+		appendStringInfo(&buf, "; no projection");
+	}
+	ExplainPropertyText("SELECT-INTO Direct", buf.data, es);
+	pfree(buf.data);
+}
+
+/*
  * pgstromExplainTaskState
  */
 void
@@ -2919,13 +3102,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	 * SELECT INTO direct mode
 	 */
 	if (pts->select_into_dest)
-	{
-		const char *label = "possible";
-
-		if ((pts->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
-			label = "enabled";
-		ExplainPropertyText("SELECT-INTO Direct", label, es);
-	}
+		pgstromExplainSelectIntoDirect(pts, dcontext, es);
 
 	/*
 	 * Dump the XPU code (only if verbose)

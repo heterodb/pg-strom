@@ -88,6 +88,7 @@ typedef struct
 	const char *partfn_signature;			/* used by GpuPreAgg */
 	const char *finalfn_proj_signature;		/* used by GpuAgg */
 	int			partfn_action;	/* any of KAGG_ACTION__* */
+	int			finalfn_code;	/* any of KAGG_FINAL__* */
 	bool		numeric_aware;	/* ignored, if !enable_numeric_aggfuncs */
 	int			gpusort_keykind;			/* used by GPU-Sort */
 } aggfunc_catalog_t;
@@ -98,7 +99,9 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:fcount(int8)",
 	 "s:nrows()",
 	 NULL,		/* use nrows() as is */
-	 KAGG_ACTION__NROWS_ANY, false,
+	 KAGG_ACTION__NROWS_ANY,
+	 KAGG_FINAL__SIMPLE_VREF,
+	 false,
 	 KSORT_KEY_KIND__VREF
 	},
 	/* COUNT(X) = SUM(NROWS(X)) */
@@ -106,7 +109,9 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:fcount(int8)",
 	 "s:nrows(any)",
 	 NULL,		/* use nrows() as is */
-	 KAGG_ACTION__NROWS_COND, false,
+	 KAGG_ACTION__NROWS_COND,
+	 KAGG_FINAL__SIMPLE_VREF,
+	 false,
 	 KSORT_KEY_KIND__VREF
 	},
 	/*
@@ -116,91 +121,117 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:min_i1(bytea)",
 	 "s:pmin(int4)",
 	 "s:fmin_i1(bytea)",
-	 KAGG_ACTION__PMIN_INT32, false,
+	 KAGG_ACTION__PMIN_INT32,
+	 KAGG_FINAL__FMINMAX_INT8,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(int2)",
 	 "s:min_i2(bytea)",
 	 "s:pmin(int4)",
 	 "s:fmin_i2(bytea)",
-	 KAGG_ACTION__PMIN_INT32, false,
+	 KAGG_ACTION__PMIN_INT32,
+	 KAGG_FINAL__FMINMAX_INT16,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(int4)",
 	 "s:min_i4(bytea)",
 	 "s:pmin(int4)",
 	 "s:fmin_i4(bytea)",
-	 KAGG_ACTION__PMIN_INT32, false,
+	 KAGG_ACTION__PMIN_INT32,
+	 KAGG_FINAL__FMINMAX_INT32,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(int8)",
 	 "s:min_i8(bytea)",
 	 "s:pmin(int8)",
 	 "s:fmin_i8(bytea)",
-	 KAGG_ACTION__PMIN_INT64, false,
+	 KAGG_ACTION__PMIN_INT64,
+	 KAGG_FINAL__FMINMAX_INT64,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(float2)",
 	 "s:min_f2(bytea)",
 	 "s:pmin(float8)",
 	 "s:fmin_f2(bytea)",
-	 KAGG_ACTION__PMIN_FP64, false,
+	 KAGG_ACTION__PMIN_FP64,
+	 KAGG_FINAL__FMINMAX_FP16,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"min(float4)",
 	 "s:min_f4(bytea)",
 	 "s:pmin(float8)",
 	 "s:fmin_f4(bytea)",
-	 KAGG_ACTION__PMIN_FP64, false,
+	 KAGG_ACTION__PMIN_FP64,
+	 KAGG_FINAL__FMINMAX_FP32,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"min(float8)",
 	 "s:min_f8(bytea)",
 	 "s:pmin(float8)",
 	 "s:fmin_f8(bytea)",
-	 KAGG_ACTION__PMIN_FP64, false,
+	 KAGG_ACTION__PMIN_FP64,
+	 KAGG_FINAL__FMINMAX_FP64,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"min(numeric)",
 	 "s:min_num(bytea)",
 	 "s:pmin(float8)",
 	 "s:fmin_num(bytea)",
-	 KAGG_ACTION__PMIN_FP64, true,
+	 KAGG_ACTION__PMIN_FP64,
+	 KAGG_FINAL__FMINMAX_NUMERIC,
+	 true,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"min(money)",
 	 "s:min_cash(bytea)",
 	 "s:pmin(money)",
 	 "s:fmin_cash(bytea)",
-	 KAGG_ACTION__PMIN_INT64, false,
+	 KAGG_ACTION__PMIN_INT64,
+	 KAGG_FINAL__FMINMAX_CASH,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(date)",
 	 "s:min_date(bytea)",
 	 "s:pmin(date)",
 	 "s:fmin_date(bytea)",
-	 KAGG_ACTION__PMIN_INT32, false,
+	 KAGG_ACTION__PMIN_INT32,
+	 KAGG_FINAL__FMINMAX_DATE,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(time)",
 	 "s:min_time(bytea)",
 	 "s:pmin(time)",
 	 "s:fmin_time(bytea)",
-	 KAGG_ACTION__PMIN_INT64, false,
+	 KAGG_ACTION__PMIN_INT64,
+	 KAGG_FINAL__FMINMAX_TIME,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(timestamp)",
 	 "s:min_ts(bytea)",
 	 "s:pmin(timestamp)",
 	 "s:fmin_ts(bytea)",
-	 KAGG_ACTION__PMIN_INT64, false,
+	 KAGG_ACTION__PMIN_INT64,
+	 KAGG_FINAL__FMINMAX_TIMESTAMP,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"min(timestamptz)",
 	 "s:min_tstz(bytea)",
 	 "s:pmin(timestamptz)",
 	 "s:fmin_tstz(bytea)",
-	 KAGG_ACTION__PMIN_INT64, false,
+	 KAGG_ACTION__PMIN_INT64,
+	 KAGG_FINAL__FMINMAX_TIMESTAMPTZ,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	/*
@@ -210,91 +241,117 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:max_i1(bytea)",
 	 "s:pmax(int4)",
 	 "s:fmax_i1(bytea)",
-	 KAGG_ACTION__PMAX_INT32, false,
+	 KAGG_ACTION__PMAX_INT32,
+	 KAGG_FINAL__FMINMAX_INT8,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(int2)",
 	 "s:max_i2(bytea)",
 	 "s:pmax(int4)",
 	 "s:fmax_i2(bytea)",
-	 KAGG_ACTION__PMAX_INT32, false,
+	 KAGG_ACTION__PMAX_INT32,
+	 KAGG_FINAL__FMINMAX_INT16,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(int4)",
 	 "s:max_i4(bytea)",
 	 "s:pmax(int4)",
 	 "s:fmax_i4(bytea)",
-	 KAGG_ACTION__PMAX_INT32, false,
+	 KAGG_ACTION__PMAX_INT32,
+	 KAGG_FINAL__FMINMAX_INT32,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(int8)",
 	 "s:max_i8(bytea)",
 	 "s:pmax(int8)",
 	 "s:fmax_i8(bytea)",
-	 KAGG_ACTION__PMAX_INT64, false,
+	 KAGG_ACTION__PMAX_INT64,
+	 KAGG_FINAL__FMINMAX_INT64,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(float2)",
 	 "s:max_f2(bytea)",
 	 "s:pmax(float8)",
 	 "s:fmax_f2(bytea)",
-	 KAGG_ACTION__PMAX_FP64, false,
+	 KAGG_ACTION__PMAX_FP64,
+	 KAGG_FINAL__FMINMAX_FP16,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"max(float4)",
 	 "s:max_f4(bytea)",
 	 "s:pmax(float8)",
 	 "s:fmax_f4(bytea)",
-	 KAGG_ACTION__PMAX_FP64, false,
+	 KAGG_ACTION__PMAX_FP64,
+	 KAGG_FINAL__FMINMAX_FP32,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"max(float8)",
 	 "s:max_f8(bytea)",
 	 "s:pmax(float8)",
 	 "s:fmax_f8(bytea)",
-	 KAGG_ACTION__PMAX_FP64, false,
+	 KAGG_ACTION__PMAX_FP64,
+	 KAGG_FINAL__FMINMAX_FP64,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"max(numeric)",
 	 "s:max_num(bytea)",
 	 "s:pmax(float8)",
 	 "s:fmax_num(bytea)",
-	 KAGG_ACTION__PMAX_FP64, true,
+	 KAGG_ACTION__PMAX_FP64,
+	 KAGG_FINAL__FMINMAX_NUMERIC,
+	 true,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"max(money)",
 	 "s:max_cash(bytea)",
 	 "s:pmax(money)",
 	 "s:fmax_cash(bytea)",
-	 KAGG_ACTION__PMAX_INT64, false,
+	 KAGG_ACTION__PMAX_INT64,
+	 KAGG_FINAL__FMINMAX_CASH,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(date)",
 	 "s:max_date(bytea)",
 	 "s:pmax(date)",
 	 "s:fmax_date(bytea)",
-	 KAGG_ACTION__PMAX_INT32, false,
+	 KAGG_ACTION__PMAX_INT32,
+	 KAGG_FINAL__FMINMAX_DATE,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(time)",
 	 "s:max_time(bytea)",
 	 "s:pmax(time)",
 	 "s:fmax_time(bytea)",
-	 KAGG_ACTION__PMAX_INT64, false,
+	 KAGG_ACTION__PMAX_INT64,
+	 KAGG_FINAL__FMINMAX_TIME,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(timestamp)",
 	 "s:max_ts(bytea)",
 	 "s:pmax(timestamp)",
 	 "s:fmax_ts(timestamp)",
-	 KAGG_ACTION__PMAX_INT64, false,
+	 KAGG_ACTION__PMAX_INT64,
+	 KAGG_FINAL__FMINMAX_TIMESTAMP,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	{"max(timestamptz)",
 	 "s:max_tstz(bytea)",
 	 "s:pmax(timestamptz)",
 	 "s:fmax_tstz(timestamp)",
-	 KAGG_ACTION__PMAX_INT64, false,
+	 KAGG_ACTION__PMAX_INT64,
+	 KAGG_FINAL__FMINMAX_TIMESTAMPTZ,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	/*
@@ -304,63 +361,81 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:sum_int(bytea)",
 	 "s:psum(int8)",
 	 "s:fsum_int(bytea)",
-	 KAGG_ACTION__PSUM_INT,  false,
+	 KAGG_ACTION__PSUM_INT,
+	 KAGG_FINAL__FSUM_INT,
+	 false,
 	 KSORT_KEY_KIND__PSUM_INT64
 	},
 	{"sum(int2)",
 	 "s:sum_int(bytea)",
 	 "s:psum(int8)",
 	 "s:fsum_int(bytea)",
-	 KAGG_ACTION__PSUM_INT,  false,
+	 KAGG_ACTION__PSUM_INT,
+	 KAGG_FINAL__FSUM_INT,
+	 false,
 	 KSORT_KEY_KIND__PSUM_INT64
 	},
 	{"sum(int4)",
 	 "s:sum_int(bytea)",
 	 "s:psum(int8)",
 	 "s:fsum_int(bytea)",
-	 KAGG_ACTION__PSUM_INT,  false,
+	 KAGG_ACTION__PSUM_INT,
+	 KAGG_FINAL__FSUM_INT,
+	 false,
 	 KSORT_KEY_KIND__PSUM_INT64
 	},
 	{"sum(int8)",
 	 "s:sum_int64(bytea)",
 	 "s:psum64(int8)",
 	 "s:fsum_int64(bytea)",
-	 KAGG_ACTION__PSUM_INT64,  false,
+	 KAGG_ACTION__PSUM_INT64,
+	 KAGG_FINAL__FSUM_INT64,
+	 false,
 	 KSORT_KEY_KIND__PSUM_NUMERIC
 	},
 	{"sum(float2)",
 	 "s:sum_fp64(bytea)",
 	 "s:psum(float8)",
 	 "s:fsum_fp64(bytea)",
-	 KAGG_ACTION__PSUM_FP, false,
+	 KAGG_ACTION__PSUM_FP,
+	 KAGG_FINAL__FSUM_FP64,
+	 false,
 	 KSORT_KEY_KIND__PSUM_FP64
 	},
 	{"sum(float4)",
 	 "s:sum_fp32(bytea)",
 	 "s:psum(float8)",
 	 "s:fsum_fp32(bytea)",
-	 KAGG_ACTION__PSUM_FP, false,
+	 KAGG_ACTION__PSUM_FP,
+	 KAGG_FINAL__FSUM_FP32,
+	 false,
 	 KSORT_KEY_KIND__PSUM_FP64
 	},
 	{"sum(float8)",
 	 "s:sum_fp64(bytea)",
 	 "s:psum(float8)",
 	 "s:fsum_fp64(bytea)",
-	 KAGG_ACTION__PSUM_FP, false,
+	 KAGG_ACTION__PSUM_FP,
+	 KAGG_FINAL__FSUM_FP64,
+	 false,
 	 KSORT_KEY_KIND__PSUM_FP64
 	},
 	{"sum(numeric)",
 	 "s:sum_numeric(bytea)",
 	 "s:psum(numeric)",
 	 "s:fsum_numeric(bytea)",
-	 KAGG_ACTION__PSUM_NUMERIC, true,
+	 KAGG_ACTION__PSUM_NUMERIC,
+	 KAGG_FINAL__FSUM_NUMERIC,
+	 true,
 	 KSORT_KEY_KIND__PSUM_NUMERIC
 	},
 	{"sum(money)",
 	 "s:sum_cash(bytea)",
 	 "s:psum(money)",
 	 "s:fsum_cach(bytea)",
-	 KAGG_ACTION__PSUM_INT,  false,
+	 KAGG_ACTION__PSUM_INT,
+	 KAGG_FINAL__FSUM_CASH,
+	 false,
 	 KSORT_KEY_KIND__PSUM_INT64
 	},
 	/*
@@ -370,56 +445,72 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:avg_int(bytea)",
 	 "s:pavg(int8)",
 	 "s:favg_int(bytea)",
-	 KAGG_ACTION__PAVG_INT, false,
+	 KAGG_ACTION__PAVG_INT,
+	 KAGG_FINAL__FAVG_INT,
+	 false,
 	 KSORT_KEY_KIND__PAVG_INT64
 	},
 	{"avg(int2)",
 	 "s:avg_int(bytea)",
 	 "s:pavg(int8)",
 	 "s:favg_int(bytea)",
-	 KAGG_ACTION__PAVG_INT, false,
+	 KAGG_ACTION__PAVG_INT,
+	 KAGG_FINAL__FAVG_INT,
+	 false,
 	 KSORT_KEY_KIND__PAVG_INT64
 	},
 	{"avg(int4)",
 	 "s:avg_int(bytea)",
 	 "s:pavg(int8)",
 	 "s:favg_int(bytea)",
-	 KAGG_ACTION__PAVG_INT, false,
+	 KAGG_ACTION__PAVG_INT,
+	 KAGG_FINAL__FAVG_INT,
+	 false,
 	 KSORT_KEY_KIND__PAVG_INT64
 	},
 	{"avg(int8)",
 	 "s:avg_int64(bytea)",
 	 "s:pavg64(int8)",
 	 "s:favg_int64(bytea)",
-	 KAGG_ACTION__PAVG_INT64, false,
+	 KAGG_ACTION__PAVG_INT64,
+	 KAGG_FINAL__FAVG_INT64,
+	 false,
 	 KSORT_KEY_KIND__PAVG_NUMERIC
 	},
 	{"avg(float2)",
 	 "s:avg_fp(bytea)",
 	 "s:pavg(float8)",
 	 "s:favg_fp(bytea)",
-	 KAGG_ACTION__PAVG_FP, false,
+	 KAGG_ACTION__PAVG_FP,
+	 KAGG_FINAL__FAVG_FP64,
+	 false,
 	 KSORT_KEY_KIND__PAVG_FP64
 	},
 	{"avg(float4)",
 	 "s:avg_fp(bytea)",
 	 "s:pavg(float8)",
 	 "s:favg_fp(bytea)",
-	 KAGG_ACTION__PAVG_FP, false,
+	 KAGG_ACTION__PAVG_FP,
+	 KAGG_FINAL__FAVG_FP64,
+	 false,
 	 KSORT_KEY_KIND__PAVG_FP64
 	},
 	{"avg(float8)",
 	 "s:avg_fp(bytea)",
 	 "s:pavg(float8)",
 	 "s:favg_fp(bytea)",
-	 KAGG_ACTION__PAVG_FP, false,
+	 KAGG_ACTION__PAVG_FP,
+	 KAGG_FINAL__FAVG_FP64,
+	 false,
 	 KSORT_KEY_KIND__PAVG_FP64
 	},
 	{"avg(numeric)",
 	 "s:avg_numeric(bytea)",
 	 "s:pavg(numeric)",
 	 "s:favg_numeric(bytea)",
-	 KAGG_ACTION__PAVG_NUMERIC, true,
+	 KAGG_ACTION__PAVG_NUMERIC,
+	 KAGG_FINAL__FAVG_NUMERIC,
+	 true,
 	 KSORT_KEY_KIND__PAVG_NUMERIC
 	},
 	/*
@@ -429,56 +520,72 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(int2)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(int4)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(int8)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(float2)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_sampf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(float4)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_sampf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(float8)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_sampf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev(numeric)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV, true,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMP,
+	 true,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	/*
@@ -488,56 +595,72 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(int2)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(int4)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(int8)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(float2)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_sampf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(float4)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_sampf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(float8)",
 	 "s:stddev_sampf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_sampf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"stddev_samp(numeric)",
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV, true,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_SAMP,
+	 true,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	/*
@@ -547,56 +670,72 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_pop(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_POP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP,
 	},
 	{"stddev_pop(int2)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_pop(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_POP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"stddev_pop(int4)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_pop(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_POP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"stddev_pop(int8)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_pop(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_POP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"stddev_pop(float2)",
 	 "s:stddev_popf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_popf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_POPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"stddev_pop(float4)",
 	 "s:stddev_popf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_popf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_POPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"stddev_pop(float8)",
 	 "s:stddev_popf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_popf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_POPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"stddev_pop(numeric)",
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_pop(bytea)",
-	 KAGG_ACTION__STDDEV, true,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FSTDDEV_POP,
+	 true,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	/*
@@ -606,56 +745,72 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(int2)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(int4)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(int8)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(float2)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_sampf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(float4)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_sampf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(float8)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_sampf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"variance(numeric)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV, true,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMP,
+	 true,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	/*
@@ -665,56 +820,72 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(int2)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(int4)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(int8)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(float2)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_sampf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(float4)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_sampf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(float8)",
 	 "s:var_sampf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_sampf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	{"var_samp(numeric)",
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV, true,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_SAMP,
+	 true,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
 	},
 	/*
@@ -724,56 +895,72 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_pop(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_POP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(int2)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_pop(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_POP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(int4)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_pop(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_POP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(int8)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_pop(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_POP,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(float2)",
 	 "s:var_popf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_popf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_POPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(float4)",
 	 "s:var_popf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_popf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_POPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(float8)",
 	 "s:var_popf(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_popf(bytea)",
-	 KAGG_ACTION__STDDEV, false,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_POPF,
+	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	{"var_pop(numeric)",
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_pop(bytea)",
-	 KAGG_ACTION__STDDEV, true,
+	 KAGG_ACTION__STDDEV,
+	 KAGG_FINAL__FVAR_POP,
+	 true,
 	 KSORT_KEY_KIND__PVARIANCE_POP
 	},
 	/*
@@ -786,21 +973,27 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:corr(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fcorr(bytea)",
-	 KAGG_ACTION__COVAR, false,
+	 KAGG_ACTION__COVAR,
+	 KAGG_FINAL__FCORR,
+	 false,
 	 KSORT_KEY_KIND__PCOVAR_CORR
 	},
 	{"covar_samp(float8,float8)",
 	 "s:covar_samp(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fcovar_samp(bytea)",
-	 KAGG_ACTION__COVAR, false,
+	 KAGG_ACTION__COVAR,
+	 KAGG_FINAL__FCOVAR_SAMP,
+	 false,
 	 KSORT_KEY_KIND__PCOVAR_SAMP
 	},
 	{"covar_pop(float8,float8)",
 	 "s:covar_pop(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fcovar_pop(bytea)",
-	 KAGG_ACTION__COVAR, false,
+	 KAGG_ACTION__COVAR,
+	 KAGG_FINAL__FCOVAR_POP,
+	 false,
 	 KSORT_KEY_KIND__PCOVAR_POP
 	},
 	/*
@@ -813,66 +1006,84 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:regr_avgx(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fregr_avgx(bytea)",
-	 KAGG_ACTION__COVAR, false,
+	 KAGG_ACTION__COVAR,
+	 KAGG_FINAL__FREGR_AVGX,
+	 false,
 	 KSORT_KEY_KIND__PCOVAR_AVGX
 	},
 	{"regr_avgy(float8,float8)",
 	 "s:regr_avgy(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fregr_avgy(bytea)",
-	 KAGG_ACTION__COVAR, false,
+	 KAGG_ACTION__COVAR,
+	 KAGG_FINAL__FREGR_AVGY,
+	 false,
 	 KSORT_KEY_KIND__PCOVAR_AVGY
 	},
 	{"regr_count(float8,float8)",
 	 "s:regr_count(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fregr_count(bytea)",
-	 KAGG_ACTION__COVAR, false,
+	 KAGG_ACTION__COVAR,
+	 KAGG_FINAL__FREGR_COUNT,
+	 false,
 	 KSORT_KEY_KIND__PCOVAR_COUNT
 	},
 	{"regr_intercept(float8,float8)",
 	 "s:regr_intercept(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fregr_intercept(bytea)",
-	 KAGG_ACTION__COVAR, false,
-	 
+	 KAGG_ACTION__COVAR,
+	 KAGG_FINAL__FREGR_INTERCEPT,
+	 false,
+	 KSORT_KEY_KIND__PCOVAR_INTERCEPT
 	},
 	{"regr_r2(float8,float8)",
 	 "s:regr_r2(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fregr_r2(bytea)",
-	 KAGG_ACTION__COVAR, false,
+	 KAGG_ACTION__COVAR,
+	 KAGG_FINAL__FREGR_R2,
+	 false,
 	 KSORT_KEY_KIND__PCOVAR_REGR_R2
 	},
 	{"regr_slope(float8,float8)",
 	 "s:regr_slope(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fregr_slope(bytea)",
-	 KAGG_ACTION__COVAR, false,
+	 KAGG_ACTION__COVAR,
+	 KAGG_FINAL__FREGR_SLOPE,
+	 false,
 	 KSORT_KEY_KIND__PCOVAR_REGR_SLOPE
 	},
 	{"regr_sxx(float8,float8)",
 	 "s:regr_sxx(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fregr_sxx(bytea)",
-	 KAGG_ACTION__COVAR, false,
+	 KAGG_ACTION__COVAR,
+	 KAGG_FINAL__FREGR_SXX,
+	 false,
 	 KSORT_KEY_KIND__PCOVAR_REGR_SXX
 	},
 	{"regr_sxy(float8,float8)",
 	 "s:regr_sxy(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fregr_sxy(bytea)",
-	 KAGG_ACTION__COVAR, false,
+	 KAGG_ACTION__COVAR,
+	 KAGG_FINAL__FREGR_SXY,
+	 false,
 	 KSORT_KEY_KIND__PCOVAR_REGR_SXY
 	},
 	{"regr_syy(float8,float8)",
 	 "s:regr_syy(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fregr_syy(bytea)",
-	 KAGG_ACTION__COVAR, false,
+	 KAGG_ACTION__COVAR,
+	 KAGG_FINAL__FREGR_SYY,
+	 false,
 	 KSORT_KEY_KIND__PCOVAR_REGR_SYY
 	},
-	{ NULL, NULL, NULL, NULL, -1, false },
+	{ NULL, NULL, NULL, NULL, -1, -1, false, -1 },
 };
 
 /*
@@ -893,13 +1104,23 @@ typedef struct
 	bool	is_valid_entry;
 } aggfunc_catalog_entry;
 
+typedef struct
+{
+	Oid		finalfn_oid;
+	int		finalfn_code;
+	bool	is_valid_entry;
+} finalfunc_catalog_entry;
+
 static HTAB	   *aggfunc_catalog_htable = NULL;
+static HTAB	   *finalfunc_catalog_htable = NULL;
 
 static void
 aggfunc_catalog_htable_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 {
 	hash_destroy(aggfunc_catalog_htable);
 	aggfunc_catalog_htable = NULL;
+	hash_destroy(finalfunc_catalog_htable);
+	finalfunc_catalog_htable = NULL;
 }
 
 static Oid
@@ -1114,10 +1335,12 @@ aggfunc_catalog_lookup_by_oid(Oid aggfn_oid)
 		hctl.keysize = sizeof(Oid);
 		hctl.entrysize = sizeof(aggfunc_catalog_entry);
 		hctl.hcxt = CacheMemoryContext;
-		aggfunc_catalog_htable = hash_create("XPU GroupBy Catalog Hash",
+		aggfunc_catalog_htable = hash_create("GROUP-BY Catalog Hash by agg function",
 											 256,
 											 &hctl,
-											 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+											 HASH_ELEM |
+											 HASH_BLOBS |
+											 HASH_CONTEXT);
 	}
 	entry = hash_search(aggfunc_catalog_htable,
 						&aggfn_oid,
@@ -1178,6 +1401,83 @@ aggfunc_catalog_lookup_by_oid(Oid aggfn_oid)
 	if (entry->numeric_aware && !pgstrom_enable_numeric_aggfuncs)
 		return NULL;
 	return entry;
+}
+
+static int
+finalfunc_catalog_lookup_by_oid(Oid func_oid)
+{
+	finalfunc_catalog_entry *entry;
+	bool		found;
+
+	/* fast path by the hashtable */
+	if (!finalfunc_catalog_htable)
+	{
+		HASHCTL		hctl;
+
+		memset(&hctl, 0, sizeof(HASHCTL));
+		hctl.keysize = sizeof(Oid);
+		hctl.entrysize = sizeof(finalfunc_catalog_entry);
+		hctl.hcxt = CacheMemoryContext;
+		finalfunc_catalog_htable = hash_create("GROUP-BY Catalog Hash by final function",
+											   256,
+											   &hctl,
+											   HASH_ELEM |
+											   HASH_BLOBS |
+											   HASH_CONTEXT);
+	}
+	entry = hash_search(finalfunc_catalog_htable,
+						&func_oid,
+						HASH_ENTER,
+						&found);
+	if (!found)
+	{
+		Form_pg_proc proc;
+		HeapTuple htup;
+
+		entry->is_valid_entry = false;
+		entry->finalfn_code = -1;
+		
+		htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
+		if (!HeapTupleIsValid(htup))
+			elog(ERROR, "cache lookup failed for function %u", func_oid);
+		proc = (Form_pg_proc) GETSTRUCT(htup);
+		if ((proc->pronamespace == PG_CATALOG_NAMESPACE ||
+			 proc->pronamespace == get_namespace_oid("pgstrom", false)) &&
+			proc->pronargs <= 2)
+		{
+			char	buf[3*NAMEDATALEN+100];
+			int		off;
+
+			off = sprintf(buf, "%c:%s(",
+						  proc->pronamespace == PG_CATALOG_NAMESPACE ? 'c' : 's',
+						  NameStr(proc->proname));
+			for (int j=0; j < proc->pronargs; j++)
+			{
+				Oid		type_oid = proc->proargtypes.values[j];
+				char   *type_name = get_type_name(type_oid, false);
+
+				if (j > 0)
+					buf[off++] = ',';
+				off += sprintf(buf + off, "%s", type_name);
+			}
+			off += sprintf(buf + off, ")");
+
+			for (int i=0; aggfunc_catalog_array[i].aggfn_signature != NULL; i++)
+			{
+				const aggfunc_catalog_t *cat = &aggfunc_catalog_array[i];
+
+				if (cat->finalfn_proj_signature &&
+					strcmp(buf, cat->finalfn_proj_signature) == 0)
+				{
+					entry->finalfn_code = cat->finalfn_code;
+					entry->is_valid_entry = true;
+					break;
+				}
+			}
+		}
+		ReleaseSysCache(htup);
+	}
+	return (entry->is_valid_entry ? entry->finalfn_code : -1);
 }
 
 /*
@@ -3077,6 +3377,99 @@ PlanDpuPreAggPath(PlannerInfo *root,
 								  &dpupreagg_plan_methods);
 	form_pgstrom_plan_info(cscan, pp_info);
 	return &cscan->scan.plan;
+}
+
+/*
+ * tryAddSelectIntoDirectProjection
+ */
+bool
+tryAddSelectIntoDirectProjection(pgstromTaskState *pts)
+{
+	ProjectionInfo *projInfo = pts->css.ss.ps.ps_ProjInfo;
+	List	   *select_into_proj = NIL;
+
+	if (projInfo)
+	{
+		CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
+		List	   *tlist_cpu = (List *)projInfo->pi_state.expr;
+		ListCell   *lc;
+		int			nvalids = 0;
+		bool		meet_resjunk = false;
+		bool		compatible;
+
+		/* number of valid attributes in tlist_dev */
+		foreach (lc, cscan->custom_scan_tlist)
+		{
+			TargetEntry *tle = lfirst(lc);
+
+			if (tle->resjunk)
+				meet_resjunk = true;
+			else if (!meet_resjunk)
+				nvalids++;
+			else
+				elog(ERROR, "Bug? attribute exists after junks: %s",
+					 nodeToString(cscan->custom_scan_tlist));
+		}
+		/* check for each final projection */
+		compatible = (list_length(tlist_cpu) == nvalids);
+		foreach (lc, tlist_cpu)
+		{
+			TargetEntry *tle = lfirst(lc);
+
+			if (IsA(tle->expr, Var))
+			{
+				Var	   *var = (Var *)tle->expr;
+
+				if (var->varno == INDEX_VAR &&
+					var->varattno > 0 &&
+					var->varattno <= nvalids)
+				{
+					TargetEntry *__tle = list_nth(cscan->custom_scan_tlist, var->varattno-1);
+					int		code = (KAGG_FINAL__SIMPLE_VREF << 16) | var->varattno;
+
+					Assert(var->vartype == exprType((Node *)__tle->expr) &&
+						   var->vartypmod == exprTypmod((Node *)__tle->expr));
+					if (var->varattno != tle->resno)
+						compatible = false;
+					select_into_proj = lappend_int(select_into_proj, code);
+					continue;
+				}
+			}
+			else if (IsA(tle->expr, FuncExpr))
+			{
+				FuncExpr   *func = (FuncExpr *)tle->expr;
+				int			code = finalfunc_catalog_lookup_by_oid(func->funcid);
+
+				if (code >= 0 && list_length(func->args) == 1)
+				{
+					Var	   *var = linitial(func->args);
+
+					if (IsA(var, Var) &&
+						var->varno == INDEX_VAR &&
+						var->varattno > 0 &&
+						var->varattno <= nvalids)
+					{
+						TargetEntry *__tle = list_nth(cscan->custom_scan_tlist,
+													  var->varattno-1);
+						Assert(var->vartype == exprType((Node *)__tle->expr) &&
+							   var->vartypmod == exprTypmod((Node *)__tle->expr));
+						code = (code << 16) | var->varattno;
+						select_into_proj = lappend_int(select_into_proj, code);
+						compatible = false;
+						continue;
+					}
+				}
+			}
+			elog(DEBUG2, "SELECT INTO Direct disabled: not a supported expression: %s",
+				 nodeToString(tle->expr));
+			return false;
+		}
+		/* no need to run heavy projection */
+		if (compatible)
+			select_into_proj = NIL;
+	}
+	pts->select_into_proj = select_into_proj;
+	return true;
 }
 
 /*
