@@ -372,7 +372,8 @@ pgstrom_removal_dummy_plans(PlannedStmt *pstmt, Plan **p_plan)
 			 * so the pushdown of the ProjectionPath by CUSTOMPATH_SUPPORT_PROJECTION
 			 * cannot be used.
 			 */
-			if (pgstrom_is_gpupreagg_plan(outerPlan(plan)) &&
+			if (outerPlan(plan) != NULL &&
+				pgstrom_is_gpupreagg_plan(outerPlan(plan)) &&
 				((Result *)plan)->resconstantqual == NULL)
 			{
 				CustomScan *cscan = (CustomScan *)outerPlan(plan);
