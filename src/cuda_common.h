@@ -268,6 +268,13 @@ EXTERN_FUNCTION(void)
 mergeGpuPreAggGroupByBuffer(kern_context *kcxt,
 							kern_data_store *kds_final);
 
+EXTERN_FUNCTION(bool)
+allocKdsBlockBufferOneTuple(kern_context *kcxt,
+							kern_data_store *kds_dst,
+							uint32_t *p_ntuples,
+							int32_t tupsz,
+							HeapTupleHeaderData **p_htup,
+							bool *p_needs_suspend);
 /*
  * Definitions related to GpuCache
  */

@@ -949,51 +949,28 @@ __initKdsBlockHeapPage(PageHeaderData *hpage, int lp_index, int lp_offset)
 	hpage->pd_prune_xid = 0;
 }
 
-PUBLIC_FUNCTION(int)
-execGpuJoinProjectionBlock(kern_context *kcxt,
-						   kern_warp_context *wp,
-						   int n_rels,	/* index of read/write-pos */
-						   kern_data_store *kds_dst,
-						   kern_expression *kexp_proj,
-						   char *src_kvecs_buffer)
+PUBLIC_FUNCTION(bool)
+allocKdsBlockBufferOneTuple(kern_context *kcxt,
+							kern_data_store *kds_dst,
+							uint32_t *p_ntuples,
+							int32_t tupsz,
+							HeapTupleHeaderData **p_htup,
+							bool *p_needs_suspend)
 {
-	uint32_t	wr_pos = WARP_WRITE_POS(wp,n_rels);
-	uint32_t	rd_pos = WARP_READ_POS(wp,n_rels);
-	uint32_t	nr_input = Min(wr_pos - rd_pos, get_local_size());
-	int32_t		tupsz = 0;
+	uint32_t	ntuples = *p_ntuples;
 	uint32_t	offset;
-	uint16_t	lindex;
-	bool		needs_suspend = false;
+	int16_t		lindex;
 	bool		alloc_done = false;
 	__shared__ uint32_t	lp_offset[CUDA_MAXTHREADS_PER_BLOCK];
 	__shared__ int16_t	lp_index[CUDA_MAXTHREADS_PER_BLOCK];
 
-	/*
-	 * The previous depth still may produce new tuples, and number of
-	 * the current result tuples is not sufficient to run projection.
-	 */
-	if (wp->scan_done <= n_rels && rd_pos + get_local_size() > wr_pos)
-		return n_rels;
-	rd_pos += get_local_id();
-
-	kcxt->kvecs_curr_id = (rd_pos % KVEC_UNITSZ);
-	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
-	if (rd_pos < wr_pos)
-	{
-		tupsz = kern_estimate_heap_tuple(kcxt, kexp_proj, kds_dst);
-		if (tupsz < 0)
-		{
-			/* SELECT INTO Direct mode does not allow CPU fallback */
-			STROM_ELOG(kcxt, "unable to compute tuple size");
-		}
-	}
+	assert(get_local_id() < CUDA_MAXTHREADS_PER_BLOCK &&
+		   ntuples <= CUDA_MAXTHREADS_PER_BLOCK);
 	lp_offset[get_local_id()] = tupsz;
+	lp_index[get_local_id()] = 0;
 	/* error checks */
 	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
 		return -1;
-	/*
-	 * allocation of the destination buffer
-	 */
 	do {
 		if (get_local_id() == 0)
 		{
@@ -1035,7 +1012,7 @@ execGpuJoinProjectionBlock(kern_context *kcxt,
 				 * without simple loop. So, it tends to use only registers
 				 * and L1 (shared memory) to reduce critical section delay.
 				 */
-				for (int i=0; i < nr_input; i++)
+				for (int i=0; i < ntuples; i++)
 				{
 					int		__tupsz = lp_offset[i];
 
@@ -1082,13 +1059,14 @@ execGpuJoinProjectionBlock(kern_context *kcxt,
 							 * suspend the GPU kernel, then resume it again, after
 							 * the partial projections.
 							 */
-							for (int k=i; k < nr_input; k++)
+							for (int k=i; k < ntuples; k++)
 							{
 								lp_offset[k] = 0;
 								lp_index[k] = -1;
 							}
-							nr_input = i;		/* break the loop */
-							needs_suspend = true;
+							*p_ntuples = i;
+							*p_needs_suspend = true;
+							break;
 						}
 					}
 					else
@@ -1118,11 +1096,10 @@ execGpuJoinProjectionBlock(kern_context *kcxt,
 		}
 		/* error checks */
 		if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) > 0)
-			return -1;
+			return false;
 	} while (__syncthreads_count(alloc_done) == 0);
-	/*
-	 * initialize the new heap page by the thread responsible
-	 */
+
+	/* initialization of a new heap page by the responsible thread */
 	offset = lp_offset[get_local_id()];
 	lindex = lp_index[get_local_id()];
 	if ((offset & 1U) != 0)
@@ -1132,7 +1109,6 @@ execGpuJoinProjectionBlock(kern_context *kcxt,
 		offset &= 0xfffffffeU;	/* clear the flag */
 		__initKdsBlockHeapPage(hpage, lindex+1, (offset & (BLCKSZ-1)));
 	}
-	__syncthreads();
 	if (tupsz > 0 && offset > 0)
 	{
 		HeapTupleHeaderData *htup = (HeapTupleHeaderData *)
@@ -1142,17 +1118,72 @@ execGpuJoinProjectionBlock(kern_context *kcxt,
 		ItemIdData		temp;
 
 		assert(offset == MAXALIGN(offset));
-		kern_form_heap_tuple(kcxt, kexp_proj, kds_dst, htup);
 		temp.lp_off = (char *)htup - (char *)hpage;
 		temp.lp_flags = LP_NORMAL;
 		temp.lp_len = tupsz;
 		hpage->pd_linp[lindex] = temp;
+
+		*p_htup = htup;
 	}
+	else
+	{
+		*p_htup = NULL;
+	}
+	__syncthreads();
+	return true;
+}
+
+PUBLIC_FUNCTION(int)
+execGpuJoinProjectionBlock(kern_context *kcxt,
+						   kern_warp_context *wp,
+						   int n_rels,	/* index of read/write-pos */
+						   kern_data_store *kds_dst,
+						   kern_expression *kexp_proj,
+						   char *src_kvecs_buffer)
+{
+	uint32_t	wr_pos = WARP_WRITE_POS(wp,n_rels);
+	uint32_t	rd_pos = WARP_READ_POS(wp,n_rels);
+	uint32_t	ntuples = Min(wr_pos - rd_pos, get_local_size());
+	int32_t		tupsz = 0;
+	HeapTupleHeaderData *htup;
+	bool		needs_suspend = false;
+
+	/*
+	 * The previous depth still may produce new tuples, and number of
+	 * the current result tuples is not sufficient to run projection.
+	 */
+	if (wp->scan_done <= n_rels && rd_pos + get_local_size() > wr_pos)
+		return n_rels;
+	rd_pos += get_local_id();
+
+	kcxt->kvecs_curr_id = (rd_pos % KVEC_UNITSZ);
+	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
+	if (rd_pos < wr_pos)
+	{
+		tupsz = kern_estimate_heap_tuple(kcxt, kexp_proj, kds_dst);
+		if (tupsz < 0)
+		{
+			/* SELECT INTO Direct mode does not allow CPU fallback */
+			STROM_ELOG(kcxt, "unable to compute tuple size");
+		}
+	}
+	/*
+	 * allocation of the destination buffer
+	 */
+	if (!allocKdsBlockBufferOneTuple(kcxt,
+									 kds_dst,
+									 &ntuples,
+									 tupsz,
+									 &htup,
+									 &needs_suspend))
+		return -1;
+	if (htup)
+		kern_form_heap_tuple(kcxt, kexp_proj, kds_dst, htup);
 	/* update the read position */
 	if (get_local_id() == 0)
 	{
 		/* nr_input of thread-0 might be decreased if suspend is needed */
-		WARP_READ_POS(wp,n_rels) += nr_input;
+		WARP_READ_POS(wp,n_rels) += ntuples;
 		assert(WARP_WRITE_POS(wp,n_rels) >= WARP_READ_POS(wp,n_rels));
 	}
 	if (__syncthreads_count(needs_suspend) > 0)

@@ -916,6 +916,27 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 				__appendBinaryStringInfo(&buf, VARDATA_ANY(pathname),
 										 VARSIZE_ANY_EXHDR(pathname));
 			appendStringInfoChar(&buf, '\0');
+			if (pts->select_into_proj != NIL)
+			{
+				kern_select_into_projection_desc *sip_desc;
+				ListCell   *lc;
+				int			nattrs = list_length(pts->select_into_proj);
+				int			j = 0;
+				size_t		length = offsetof(kern_select_into_projection_desc,
+											  desc[nattrs]);
+				sip_desc = alloca(length);
+				sip_desc->nattrs = nattrs;
+				foreach (lc, pts->select_into_proj)
+				{
+					int		code = lfirst_int(lc);
+
+					sip_desc->desc[j].action = (code >> 16);
+					sip_desc->desc[j].resno = (code & 0xffffU);
+					j++;
+				}
+				session->select_into_projdesc =
+					__appendBinaryStringInfo(&buf, sip_desc, length);
+			}
 			pts->xpu_task_flags |= DEVTASK__SELECT_INTO_DIRECT;
 			session_curr_xid = GetCurrentTransactionId();
 			session_curr_cid = GetCurrentCommandId(true);

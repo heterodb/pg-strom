@@ -2487,9 +2487,12 @@ typedef struct
 
 typedef struct
 {
-	int16_t		sid_attnum;			/* source attribtue number */
-	int16_t		sid_action;			/* any of KSORT_KEY_KIND__* */
-} kern_select_into_direct_desc;
+	int			nattrs;
+	struct {
+		int16_t	action;			/* any of KAGG_FINAL__* */
+		int16_t	resno;			/* source attribute number */
+	}			desc[1];
+} kern_select_into_projection_desc;
 
 #define KERN_EXPRESSION_MAGIC			(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
@@ -2578,10 +2581,6 @@ struct kern_expression
 			uint16_t	window_orderby_nkeys;	/* # of order-by keys */
 			kern_sortkey_desc desc[1];
 		} sort;		/* Sort */
-		struct {
-			int			nattrs;
-			kern_select_into_direct_desc desc[1];
-		} select_into;
 		struct {
 			uint32_t	npacked;	/* number of packed sub-expressions; including
 									 * logical NULLs (npacked may be larger than
@@ -2713,6 +2712,7 @@ typedef struct kern_session_info
 	uint32_t	projection_kds_dst;		/* header portion of kds_dst */
 	/* SELECT INTO direct */
 	uint32_t	select_into_pathname;	/* base pathname of SELECT INTO if possible */
+	uint32_t	select_into_projdesc;	/* SELECT INTO projection descriptor, if any */
 	/* join inner buffer */
 	uint32_t	pgsql_port_number;		/* = PostPortNumber */
 	uint32_t	pgsql_plan_node_id;		/* = Plan->plan_node_id */
@@ -3079,6 +3079,23 @@ SESSION_ENCODE(kern_session_info *session)
 	if (session->session_encode == 0)
 		return NULL;
 	return (struct xpu_encode_info *)((char *)session + session->session_encode);
+}
+
+INLINE_FUNCTION(const char *)
+SESSION_SELECT_INTO_PATHNAME(const kern_session_info *session)
+{
+	if (session->select_into_pathname == 0)
+		return NULL;
+	return (const char *)((const char *)session + session->select_into_pathname);
+}
+
+INLINE_FUNCTION(const kern_select_into_projection_desc *)
+SESSION_SELECT_INTO_PROJDESC(const kern_session_info *session)
+{
+	if (session->select_into_projdesc == 0)
+		return NULL;
+	return (const kern_select_into_projection_desc *)
+		((const char *)session + session->select_into_projdesc);
 }
 
 /* ----------------------------------------------------------------
