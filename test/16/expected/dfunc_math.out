@@ -53,12 +53,12 @@ SELECT id, abs(e) f2, abs(f) f4, abs(a) f8, abs(x) i2, abs(y) i4, abs(z) i8, abs
   INTO test01g
   FROM rt_data
  WHERE c BETWEEN -80.0 AND 80.0;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
+                                                                  QUERY PLAN                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
    Output: id, (abs(e)), (abs(f)), (abs(a)), (abs(x)), (abs(y)), (abs(z)), (abs(p))
-   GPU Projection: id, abs(e), abs(f), abs(a), abs(x), abs(y), abs(z), abs(p)
-   GPU Scan Quals: ((c >= '-80'::double precision) AND (c <= '80'::double precision)) [rows: 2000 -> 1588]
+   GPU Projection: rt_data.id, abs(rt_data.e), abs(rt_data.f), abs(rt_data.a), abs(rt_data.x), abs(rt_data.y), abs(rt_data.z), abs(rt_data.p)
+   GPU Scan Quals: ((rt_data.c >= '-80'::double precision) AND (rt_data.c <= '80'::double precision))
 (4 rows)
 
 SELECT id, abs(e) f2, abs(f) f4, abs(a) f8, abs(x) i2, abs(y) i4, abs(z) i8, abs(p) ii
@@ -89,12 +89,12 @@ SELECT id, round(b), dround(c),
   INTO test02g
   FROM rt_data
  WHERE c BETWEEN -40 AND 120;
-                                                 QUERY PLAN                                                 
-------------------------------------------------------------------------------------------------------------
+                                                                          QUERY PLAN                                                                           
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
    Output: id, (round(b)), (dround(c)), (ceil(d)), (ceiling(d)), (floor(d)), (trunc(c)), (dtrunc(d))
-   GPU Projection: id, round(b), dround(c), ceil(d), ceiling(d), floor(d), trunc(c), dtrunc(d)
-   GPU Scan Quals: ((c >= '-40'::double precision) AND (c <= '120'::double precision)) [rows: 2000 -> 1417]
+   GPU Projection: rt_data.id, round(rt_data.b), dround(rt_data.c), ceil(rt_data.d), ceiling(rt_data.d), floor(rt_data.d), trunc(rt_data.c), dtrunc(rt_data.d)
+   GPU Scan Quals: ((rt_data.c >= '-40'::double precision) AND (rt_data.c <= '120'::double precision))
 (4 rows)
 
 SELECT id, round(b), dround(c),
@@ -127,12 +127,12 @@ SELECT id, exp(a), dexp(b), ln(@c), dlog1(@d), log(@c), dlog10(@d),
   INTO test03g
   FROM rt_data
  WHERE c > 0;
-                                                                     QUERY PLAN                                                                      
------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                    QUERY PLAN                                                                                                                     
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
    Output: id, (exp(a)), (dexp(b)), (ln((@ c))), (dlog1((@ d))), (log((@ c))), (dlog10((@ d))), (power((@ b), a)), (pow((@ c), a)), (dpow((@ d), a))
-   GPU Projection: id, exp(a), dexp(b), ln((@ c)), dlog1((@ d)), log((@ c)), dlog10((@ d)), power((@ b), a), pow((@ c), a), dpow((@ d), a)
-   GPU Scan Quals: (c > '0'::double precision) [rows: 2000 -> 1009]
+   GPU Projection: rt_data.id, exp(rt_data.a), dexp(rt_data.b), ln((@ rt_data.c)), dlog1((@ rt_data.d)), log((@ rt_data.c)), dlog10((@ rt_data.d)), power((@ rt_data.b), rt_data.a), pow((@ rt_data.c), rt_data.a), dpow((@ rt_data.d), rt_data.a)
+   GPU Scan Quals: (rt_data.c > '0'::double precision)
 (4 rows)
 
 SELECT id, exp(a), dexp(b), ln(@c), dlog1(@d), log(@c), dlog10(@d),
@@ -167,12 +167,12 @@ SELECT id, sign(a), sqrt(@c), dsqrt(@d), cbrt(d), dcbrt(d)
   INTO test04g
   FROM rt_data
  WHERE d < 0;
-                                  QUERY PLAN                                   
--------------------------------------------------------------------------------
+                                                         QUERY PLAN                                                          
+-----------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
    Output: id, (sign(a)), (sqrt((@ c))), (dsqrt((@ d))), (cbrt(d)), (dcbrt(d))
-   GPU Projection: id, sign(a), sqrt((@ c)), dsqrt((@ d)), cbrt(d), dcbrt(d)
-   GPU Scan Quals: (d < '0'::double precision) [rows: 2000 -> 991]
+   GPU Projection: rt_data.id, sign(rt_data.a), sqrt((@ rt_data.c)), dsqrt((@ rt_data.d)), cbrt(rt_data.d), dcbrt(rt_data.d)
+   GPU Scan Quals: (rt_data.d < '0'::double precision)
 (4 rows)
 
 SELECT id, sign(a), sqrt(@c), dsqrt(@d), cbrt(d), dcbrt(d)
@@ -202,12 +202,12 @@ SELECT id, pi(), degrees(r), radians(d), cos(r), cot(r), sin(r), tan(r)
   INTO test05g
   FROM rt_data
  WHERE r > -360.0 AND r < 360.0;
-                                                       QUERY PLAN                                                        
--------------------------------------------------------------------------------------------------------------------------
+                                                              QUERY PLAN                                                              
+--------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
    Output: id, '3.141592653589793'::double precision, (degrees(r)), (radians(d)), (cos(r)), (cot(r)), (sin(r)), (tan(r))
-   GPU Projection: id, degrees(r), radians(d), cos(r), cot(r), sin(r), tan(r)
-   GPU Scan Quals: ((r > '-360'::double precision) AND (r < '360'::double precision)) [rows: 2000 -> 1988]
+   GPU Projection: rt_data.id, degrees(rt_data.r), radians(rt_data.d), cos(rt_data.r), cot(rt_data.r), sin(rt_data.r), tan(rt_data.r)
+   GPU Scan Quals: ((rt_data.r > '-360'::double precision) AND (rt_data.r < '360'::double precision))
 (4 rows)
 
 SELECT id, pi(), degrees(r), radians(d), cos(r), cot(r), sin(r), tan(r)
@@ -238,12 +238,12 @@ SELECT id, acos(a), asin(a), atan(b), atan2(d,f)
   INTO test06g
   FROM rt_data
  WHERE r > -360.0 AND r < 360.0;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
    Output: id, (acos(a)), (asin(a)), (atan(b)), atan2(d, (f)::double precision)
-   GPU Projection: id, acos(a), asin(a), atan(b), d, f
-   GPU Scan Quals: ((r > '-360'::double precision) AND (r < '360'::double precision)) [rows: 2000 -> 1988]
+   GPU Projection: rt_data.id, acos(rt_data.a), asin(rt_data.a), atan(rt_data.b), rt_data.d, rt_data.f
+   GPU Scan Quals: ((rt_data.r > '-360'::double precision) AND (rt_data.r < '360'::double precision))
 (4 rows)
 
 SELECT id, acos(a), asin(a), atan(b), atan2(d,f)

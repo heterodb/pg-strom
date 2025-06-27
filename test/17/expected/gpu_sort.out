@@ -1,0 +1,193 @@
+---
+--- Test for gpusort
+---
+\t on
+SET pg_strom.regression_test_mode = on;
+SET client_min_messages = error;
+RESET client_min_messages;
+SET search_path = regtest_dtype_range_temp,public;
+-- Generate answer data
+SET pg_strom.enabled = off;
+DROP TABLE IF EXISTS gpusort_answer1;
+NOTICE:  table "gpusort_answer1" does not exist, skipping
+SELECT * INTO gpusort_answer1 FROM (
+    SELECT c_region, c_nation, c_city, SUM(lo_revenue) lo_rev,
+            RANK() OVER(PARTITION BY c_region, c_nation
+                        ORDER BY SUM(lo_revenue)) rank
+        FROM lineorder, customer
+    WHERE lo_custkey = c_custkey
+        AND lo_shipmode IN ('RAIL','SHIP')
+        GROUP BY c_region, c_nation, c_city
+) subqry
+WHERE rank < 4;
+DROP TABLE IF EXISTS gpusort_answer2;
+NOTICE:  table "gpusort_answer2" does not exist, skipping
+SELECT * INTO gpusort_answer2 FROM (
+    SELECT c_region, c_nation, c_city, AVG(lo_revenue) lo_rev,
+            DENSE_RANK() OVER(PARTITION BY c_region, c_nation
+                        ORDER BY AVG(lo_revenue) desc) dense_rank
+        FROM lineorder, customer
+    WHERE lo_custkey = c_custkey
+        AND lo_shipmode IN ('RAIL','SHIP')
+        GROUP BY c_region, c_nation, c_city
+) subqry
+WHERE dense_rank <= 4;
+DROP TABLE IF EXISTS gpusort_answer3;
+NOTICE:  table "gpusort_answer3" does not exist, skipping
+SELECT * INTO gpusort_answer3 FROM (
+    SELECT c_region, c_nation, c_city, MAX(lo_revenue) lo_rev,
+            ROW_NUMBER() OVER(PARTITION BY c_region, c_nation
+                        ORDER BY MAX(lo_revenue)) row_number
+        FROM lineorder, customer
+    WHERE lo_custkey = c_custkey
+        AND lo_shipmode IN ('RAIL','SHIP')
+        GROUP BY c_region, c_nation, c_city
+) subqry
+WHERE row_number <= 4;
+SET pg_strom.enabled = on;
+SET pg_strom.cpu_fallback = off;
+DROP TABLE IF EXISTS gpusort_result1;
+EXPLAIN(costs off, verbose)
+SELECT * INTO gpusort_result1 FROM (
+    SELECT c_region, c_nation, c_city, SUM(lo_revenue) lo_rev,
+            RANK() OVER(PARTITION BY c_region, c_nation
+                        ORDER BY SUM(lo_revenue)) rank
+        FROM lineorder, customer
+    WHERE lo_custkey = c_custkey
+        AND lo_shipmode IN ('RAIL','SHIP')
+        GROUP BY c_region, c_nation, c_city
+) subqry
+WHERE rank < 4;
+ WindowAgg
+   Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue)))), rank() OVER (?)
+   Run Condition: (rank() OVER (?) < 4)
+   ->  Gather
+         Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue))))
+         Workers Planned: 2
+         ->  Result
+               Output: customer.c_region, customer.c_nation, customer.c_city, pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue)))
+               ->  Parallel Custom Scan (GpuPreAgg) on public.lineorder
+                     Output: (pgstrom.psum(lineorder.lo_revenue)), customer.c_region, customer.c_nation, customer.c_city
+                     GPU Projection: pgstrom.psum(lineorder.lo_revenue), customer.c_region, customer.c_nation, customer.c_city
+                     GPU Scan Quals: (lineorder.lo_shipmode = ANY ('{RAIL,SHIP}'::bpchar[]))
+                     GPU Join Quals [1]: (lineorder.lo_custkey = customer.c_custkey)
+                     GPU Outer Hash [1]: lineorder.lo_custkey
+                     GPU Inner Hash [1]: customer.c_custkey
+                     GPU Group Key: customer.c_region, customer.c_nation, customer.c_city
+                     GPU-Sort keys: customer.c_region, customer.c_nation, pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue)))
+                     Window-Rank Filter: rank() over(PARTITION BY customer.c_region, customer.c_nation ORDER BY pgstrom.fsum_numeric((pgstrom.psum(lineorder.lo_revenue)))) < 4
+                     ->  Parallel Seq Scan on public.customer
+                           Output: customer.c_region, customer.c_nation, customer.c_city, customer.c_custkey
+
+SELECT * INTO gpusort_result1 FROM (
+    SELECT c_region, c_nation, c_city, SUM(lo_revenue) lo_rev,
+            RANK() OVER(PARTITION BY c_region, c_nation
+                        ORDER BY SUM(lo_revenue)) rank
+        FROM lineorder, customer
+    WHERE lo_custkey = c_custkey
+        AND lo_shipmode IN ('RAIL','SHIP')
+        GROUP BY c_region, c_nation, c_city
+) subqry
+WHERE rank < 4;
+(SELECT * FROM gpusort_result1 EXCEPT SELECT * FROM gpusort_answer1);
+
+(SELECT * FROM gpusort_answer1 EXCEPT SELECT * FROM gpusort_result1);
+
+DROP TABLE IF EXISTS gpusort_result2;
+EXPLAIN(costs off, verbose)
+SELECT * INTO gpusort_result2 FROM (
+    SELECT c_region, c_nation, c_city, AVG(lo_revenue) lo_rev,
+            DENSE_RANK() OVER(PARTITION BY c_region, c_nation
+                        ORDER BY AVG(lo_revenue) desc) dense_rank
+        FROM lineorder, customer
+    WHERE lo_custkey = c_custkey
+        AND lo_shipmode IN ('RAIL','SHIP')
+        GROUP BY c_region, c_nation, c_city
+) subqry
+WHERE dense_rank <= 4;
+ WindowAgg
+   Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.favg_numeric((pgstrom.pavg(lineorder.lo_revenue)))), dense_rank() OVER (?)
+   Run Condition: (dense_rank() OVER (?) <= 4)
+   ->  Sort
+         Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.favg_numeric((pgstrom.pavg(lineorder.lo_revenue))))
+         Sort Key: customer.c_region, customer.c_nation, (pgstrom.favg_numeric((pgstrom.pavg(lineorder.lo_revenue)))) DESC
+         ->  Gather
+               Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.favg_numeric((pgstrom.pavg(lineorder.lo_revenue))))
+               Workers Planned: 2
+               ->  Result
+                     Output: customer.c_region, customer.c_nation, customer.c_city, pgstrom.favg_numeric((pgstrom.pavg(lineorder.lo_revenue)))
+                     ->  Parallel Custom Scan (GpuPreAgg) on public.lineorder
+                           Output: (pgstrom.pavg(lineorder.lo_revenue)), customer.c_region, customer.c_nation, customer.c_city
+                           GPU Projection: pgstrom.pavg(lineorder.lo_revenue), customer.c_region, customer.c_nation, customer.c_city
+                           GPU Scan Quals: (lineorder.lo_shipmode = ANY ('{RAIL,SHIP}'::bpchar[]))
+                           GPU Join Quals [1]: (lineorder.lo_custkey = customer.c_custkey)
+                           GPU Outer Hash [1]: lineorder.lo_custkey
+                           GPU Inner Hash [1]: customer.c_custkey
+                           GPU Group Key: customer.c_region, customer.c_nation, customer.c_city
+                           ->  Parallel Seq Scan on public.customer
+                                 Output: customer.c_region, customer.c_nation, customer.c_city, customer.c_custkey
+
+SELECT * INTO gpusort_result2 FROM (
+    SELECT c_region, c_nation, c_city, AVG(lo_revenue) lo_rev,
+            DENSE_RANK() OVER(PARTITION BY c_region, c_nation
+                        ORDER BY AVG(lo_revenue) desc) dense_rank
+        FROM lineorder, customer
+    WHERE lo_custkey = c_custkey
+        AND lo_shipmode IN ('RAIL','SHIP')
+        GROUP BY c_region, c_nation, c_city
+) subqry
+WHERE dense_rank <= 4;
+(SELECT * FROM gpusort_result2 EXCEPT SELECT * FROM gpusort_answer2);
+
+(SELECT * FROM gpusort_answer2 EXCEPT SELECT * FROM gpusort_result2);
+
+DROP TABLE IF EXISTS gpusort_result3;
+EXPLAIN(costs off, verbose)
+SELECT * INTO gpusort_result3 FROM (
+    SELECT c_region, c_nation, c_city, MAX(lo_revenue) lo_rev,
+            ROW_NUMBER() OVER(PARTITION BY c_region, c_nation
+                        ORDER BY MAX(lo_revenue)) row_number
+        FROM lineorder, customer
+    WHERE lo_custkey = c_custkey
+        AND lo_shipmode IN ('RAIL','SHIP')
+        GROUP BY c_region, c_nation, c_city
+) subqry
+WHERE row_number <= 4;
+ WindowAgg
+   Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision)))), row_number() OVER (?)
+   Run Condition: (row_number() OVER (?) <= 4)
+   ->  Gather
+         Output: customer.c_region, customer.c_nation, customer.c_city, (pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision))))
+         Workers Planned: 2
+         ->  Result
+               Output: customer.c_region, customer.c_nation, customer.c_city, pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision)))
+               ->  Parallel Custom Scan (GpuPreAgg) on public.lineorder
+                     Output: (pgstrom.pmax((lineorder.lo_revenue)::double precision)), customer.c_region, customer.c_nation, customer.c_city
+                     GPU Projection: pgstrom.pmax((lineorder.lo_revenue)::double precision), customer.c_region, customer.c_nation, customer.c_city
+                     GPU Scan Quals: (lineorder.lo_shipmode = ANY ('{RAIL,SHIP}'::bpchar[]))
+                     GPU Join Quals [1]: (lineorder.lo_custkey = customer.c_custkey)
+                     GPU Outer Hash [1]: lineorder.lo_custkey
+                     GPU Inner Hash [1]: customer.c_custkey
+                     GPU Group Key: customer.c_region, customer.c_nation, customer.c_city
+                     GPU-Sort keys: customer.c_region, customer.c_nation, pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision)))
+                     Window-Rank Filter: row_number() over(PARTITION BY customer.c_region, customer.c_nation ORDER BY pgstrom.fmax_num((pgstrom.pmax((lineorder.lo_revenue)::double precision)))) < 5
+                     ->  Parallel Seq Scan on public.customer
+                           Output: customer.c_region, customer.c_nation, customer.c_city, customer.c_custkey
+
+SELECT * INTO gpusort_result3 FROM (
+    SELECT c_region, c_nation, c_city, MAX(lo_revenue) lo_rev,
+            ROW_NUMBER() OVER(PARTITION BY c_region, c_nation
+                        ORDER BY MAX(lo_revenue)) row_number
+        FROM lineorder, customer
+    WHERE lo_custkey = c_custkey
+        AND lo_shipmode IN ('RAIL','SHIP')
+        GROUP BY c_region, c_nation, c_city
+) subqry
+WHERE row_number <= 4;
+(SELECT * FROM gpusort_result3 EXCEPT SELECT * FROM gpusort_answer3);
+
+(SELECT * FROM gpusort_answer3 EXCEPT SELECT * FROM gpusort_result3);
+
+DROP TABLE gpusort_answer1;
+DROP TABLE gpusort_answer2;
+DROP TABLE gpusort_answer3;

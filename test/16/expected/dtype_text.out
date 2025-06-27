@@ -59,8 +59,8 @@ SELECT id, bc1::text, bc2::varchar,
 ------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_text_temp.rt_text
    Output: id, (bc1)::text, (bc2)::character varying, (vc1)::character(1), ((vc2)::text), (tc1)::character(1), ((tc2)::character varying)
-   GPU Projection: id, bc1, bc2, vc1, (vc2)::text, tc1, (tc2)::character varying
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_text.id, rt_text.bc1, rt_text.bc2, rt_text.vc1, (rt_text.vc2)::text, rt_text.tc1, (rt_text.tc2)::character varying
+   GPU Scan Quals: (rt_text.id > 0)
 (4 rows)
 
 SELECT id, bc1::text, bc2::varchar,
@@ -96,12 +96,12 @@ SELECT id, bc1 = bc2 eq, bc1 <> bc2 ne,
   INTO test10g
   FROM rt_text
  WHERE id > 0;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
+                                                                                                  QUERY PLAN                                                                                                   
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_text_temp.rt_text
    Output: id, ((bc1 = bc2)), ((bc1 <> bc2)), ((bc1 > bc2)), ((bc1 >= bc2)), ((bc1 < bc2)), ((bc1 <= bc2))
-   GPU Projection: id, (bc1 = bc2), (bc1 <> bc2), (bc1 > bc2), (bc1 >= bc2), (bc1 < bc2), (bc1 <= bc2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_text.id, (rt_text.bc1 = rt_text.bc2), (rt_text.bc1 <> rt_text.bc2), (rt_text.bc1 > rt_text.bc2), (rt_text.bc1 >= rt_text.bc2), (rt_text.bc1 < rt_text.bc2), (rt_text.bc1 <= rt_text.bc2)
+   GPU Scan Quals: (rt_text.id > 0)
 (4 rows)
 
 SELECT id, bc1 = bc2 eq, bc1 <> bc2 ne,
@@ -135,12 +135,12 @@ SELECT id, tc1 = tc2 eq, tc1 <> tc2 ne,
   INTO test11g
   FROM rt_text
  WHERE id > 0;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
+                                                                                                  QUERY PLAN                                                                                                   
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_text_temp.rt_text
    Output: id, ((tc1 = tc2)), ((tc1 <> tc2)), ((tc1 > tc2)), ((tc1 >= tc2)), ((tc1 < tc2)), ((tc1 <= tc2))
-   GPU Projection: id, (tc1 = tc2), (tc1 <> tc2), (tc1 > tc2), (tc1 >= tc2), (tc1 < tc2), (tc1 <= tc2)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_text.id, (rt_text.tc1 = rt_text.tc2), (rt_text.tc1 <> rt_text.tc2), (rt_text.tc1 > rt_text.tc2), (rt_text.tc1 >= rt_text.tc2), (rt_text.tc1 < rt_text.tc2), (rt_text.tc1 <= rt_text.tc2)
+   GPU Scan Quals: (rt_text.id > 0)
 (4 rows)
 
 SELECT id, tc1 = tc2 eq, tc1 <> tc2 ne,
@@ -176,12 +176,12 @@ SELECT id, bc1 LIKE '%ab%cd%' v1,
   INTO test20g
   FROM rt_text
  WHERE id > 0;
-                                                          QUERY PLAN                                                          
-------------------------------------------------------------------------------------------------------------------------------
+                                                                              QUERY PLAN                                                                              
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_text_temp.rt_text
    Output: id, ((bc1 ~~ '%ab%cd%'::text)), ((bc2 ~~ '%bc_de%'::text)), ((tc1 ~~ '%ef_gh%'::text)), ((tc2 ~~ '%fg_hi%'::text))
-   GPU Projection: id, (bc1 ~~ '%ab%cd%'::text), (bc2 ~~ '%bc_de%'::text), (tc1 ~~ '%ef_gh%'::text), (tc2 ~~ '%fg_hi%'::text)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_text.id, (rt_text.bc1 ~~ '%ab%cd%'::text), (rt_text.bc2 ~~ '%bc_de%'::text), (rt_text.tc1 ~~ '%ef_gh%'::text), (rt_text.tc2 ~~ '%fg_hi%'::text)
+   GPU Scan Quals: (rt_text.id > 0)
 (4 rows)
 
 SELECT id, bc1 LIKE '%ab%cd%' v1,
@@ -219,12 +219,12 @@ SELECT id, bc1 ILIKE '%ab%cd%' v1,
   INTO test21g
   FROM rt_text
  WHERE id > 0;
-                                                            QUERY PLAN                                                            
-----------------------------------------------------------------------------------------------------------------------------------
+                                                                                QUERY PLAN                                                                                
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_text_temp.rt_text
    Output: id, ((bc1 ~~* '%ab%cd%'::text)), ((bc2 ~~* '%bc_de%'::text)), ((tc1 ~~* '%ef_gh%'::text)), ((tc2 ~~* '%fg_hi%'::text))
-   GPU Projection: id, (bc1 ~~* '%ab%cd%'::text), (bc2 ~~* '%bc_de%'::text), (tc1 ~~* '%ef_gh%'::text), (tc2 ~~* '%fg_hi%'::text)
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_text.id, (rt_text.bc1 ~~* '%ab%cd%'::text), (rt_text.bc2 ~~* '%bc_de%'::text), (rt_text.tc1 ~~* '%ef_gh%'::text), (rt_text.tc2 ~~* '%fg_hi%'::text)
+   GPU Scan Quals: (rt_text.id > 0)
 (4 rows)
 
 SELECT id, bc1 ILIKE '%ab%cd%' v1,
@@ -267,8 +267,8 @@ SELECT id, length(tc1) v1,
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_text_temp.rt_text
    Output: id, (length(tc1)), (tc1 || '_foo'::text), ("substring"(tc1, 1, 10) || '_bar'::text), ((vc1)::text || '_baz'::text), (((vc1)::text || '--'::text) || (vc2)::text)
-   GPU Projection: id, length(tc1), tc1, vc1, vc2
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_text.id, length(rt_text.tc1), rt_text.tc1, rt_text.vc1, rt_text.vc2
+   GPU Scan Quals: (rt_text.id > 0)
 (4 rows)
 
 SELECT id, length(tc1) v1,
@@ -310,8 +310,8 @@ SELECT id, length(tc2) v1,
 -----------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_text_temp.rt_text
    Output: id, (length(tc2)), "substring"((((vc1)::text || '-hoge-'::text) || (vc2)::text), ((id % 15) + 5), 20)
-   GPU Projection: id, length(tc2), vc1, vc2
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_text.id, length(rt_text.tc2), rt_text.vc1, rt_text.vc2
+   GPU Scan Quals: (rt_text.id > 0)
 (4 rows)
 
 SELECT id, length(tc2) v1, 
@@ -350,8 +350,8 @@ SELECT id, length(tc1) v1,
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_text_temp.rt_text
    Output: id, (length(tc1)), concat(tc1, '_foo'), concat("substring"(tc1, 1, 10), '_bar'), concat("substring"(tc1, 1, 8), '--hoge--', "substring"(tc1, 8, 16)), concat("substring"(tc1, 1, 8), "substring"(tc2, 1, 8), vc1, vc2)
-   GPU Projection: id, length(tc1), tc1, tc2, vc1, vc2
-   GPU Scan Quals: (id > 0) [rows: 3000 -> 3000]
+   GPU Projection: rt_text.id, length(rt_text.tc1), rt_text.tc1, rt_text.tc2, rt_text.vc1, rt_text.vc2
+   GPU Scan Quals: (rt_text.id > 0)
 (4 rows)
 
 SELECT id, length(tc1) v1,

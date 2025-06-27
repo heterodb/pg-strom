@@ -44,12 +44,12 @@ SELECT id, COALESCE(a, b, c, d) v1,
   INTO test01g
   FROM regtest_data
  WHERE id > 0;
-                                                                                             QUERY PLAN                                                                                              
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                     QUERY PLAN                                                                                                                                                                                                                                                                                                     
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dexpr_misc_temp.regtest_data
    Output: id, (COALESCE(a, b, c, d)), (GREATEST(a, b, c, d)), (LEAST(a, b, c, d)), (COALESCE((a + b), (b + c), (c + d))), (GREATEST((a + b), (b + c), (c + d))), (LEAST((a + b), (b + c), (c + d)))
-   GPU Projection: id, COALESCE(a, b, c, d), GREATEST(a, b, c, d), LEAST(a, b, c, d), COALESCE((a + b), (b + c), (c + d)), GREATEST((a + b), (b + c), (c + d)), LEAST((a + b), (b + c), (c + d))
-   GPU Scan Quals: (id > 0) [rows: 6000 -> 5999]
+   GPU Projection: regtest_data.id, COALESCE(regtest_data.a, regtest_data.b, regtest_data.c, regtest_data.d), GREATEST(regtest_data.a, regtest_data.b, regtest_data.c, regtest_data.d), LEAST(regtest_data.a, regtest_data.b, regtest_data.c, regtest_data.d), COALESCE((regtest_data.a + regtest_data.b), (regtest_data.b + regtest_data.c), (regtest_data.c + regtest_data.d)), GREATEST((regtest_data.a + regtest_data.b), (regtest_data.b + regtest_data.c), (regtest_data.c + regtest_data.d)), LEAST((regtest_data.a + regtest_data.b), (regtest_data.b + regtest_data.c), (regtest_data.c + regtest_data.d))
+   GPU Scan Quals: (regtest_data.id > 0)
 (4 rows)
 
 SELECT id, COALESCE(a, b, c, d) v1,
@@ -88,12 +88,12 @@ SELECT id, COALESCE(a::float, b::float, -1.0, d::float / 0.0) v1
   INTO test02g
   FROM regtest_data
  WHERE id > 0;
-                                              QUERY PLAN                                              
-------------------------------------------------------------------------------------------------------
+                                                                 QUERY PLAN                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dexpr_misc_temp.regtest_data
    Output: id, (COALESCE((a)::double precision, (b)::double precision, '-1'::double precision))
-   GPU Projection: id, COALESCE((a)::double precision, (b)::double precision, '-1'::double precision)
-   GPU Scan Quals: (id > 0) [rows: 6000 -> 5999]
+   GPU Projection: regtest_data.id, COALESCE((regtest_data.a)::double precision, (regtest_data.b)::double precision, '-1'::double precision)
+   GPU Scan Quals: (regtest_data.id > 0)
 (4 rows)
 
 SELECT id, COALESCE(a::float, b::float, -1.0, d::float / 0.0) v1
@@ -122,12 +122,12 @@ SELECT id, not a > b v1,
   INTO test10g
   FROM regtest_data
  WHERE id > 0;
-                                                                                 QUERY PLAN                                                                                 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                            QUERY PLAN                                                                                                                                                                                                             
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dexpr_misc_temp.regtest_data
    Output: id, ((a <= b)), (((((a + b) > (c + d)) OR ((a - b) < (c - d))) AND (memo ~~ '%abc%'::text))), (((((a + d) > (b + c)) AND (b < d)) OR (memo ~~ '%xyz%'::text)))
-   GPU Projection: id, (a <= b), ((((a + b) > (c + d)) OR ((a - b) < (c - d))) AND (memo ~~ '%abc%'::text)), ((((a + d) > (b + c)) AND (b < d)) OR (memo ~~ '%xyz%'::text))
-   GPU Scan Quals: (id > 0) [rows: 6000 -> 5999]
+   GPU Projection: regtest_data.id, (regtest_data.a <= regtest_data.b), ((((regtest_data.a + regtest_data.b) > (regtest_data.c + regtest_data.d)) OR ((regtest_data.a - regtest_data.b) < (regtest_data.c - regtest_data.d))) AND (regtest_data.memo ~~ '%abc%'::text)), ((((regtest_data.a + regtest_data.d) > (regtest_data.b + regtest_data.c)) AND (regtest_data.b < regtest_data.d)) OR (regtest_data.memo ~~ '%xyz%'::text))
+   GPU Scan Quals: (regtest_data.id > 0)
 (4 rows)
 
 SELECT id, not a > b v1,
@@ -168,12 +168,12 @@ SELECT id, a > b IS TRUE v1,
   INTO test20g
   FROM regtest_data
  WHERE id > 0;
-                                                                                          QUERY PLAN                                                                                          
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                       QUERY PLAN                                                                                                                                                                                        
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dexpr_misc_temp.regtest_data
    Output: id, (((a > b) IS TRUE)), (((c > d) IS FALSE)), (((a > c) IS NOT TRUE)), (((b > d) IS NOT FALSE)), (((a > d) IS UNKNOWN)), (((b > c) IS UNKNOWN)), ((b IS NULL)), ((c IS NOT NULL))
-   GPU Projection: id, ((a > b) IS TRUE), ((c > d) IS FALSE), ((a > c) IS NOT TRUE), ((b > d) IS NOT FALSE), ((a > d) IS UNKNOWN), ((b > c) IS UNKNOWN), (b IS NULL), (c IS NOT NULL)
-   GPU Scan Quals: (id > 0) [rows: 6000 -> 5999]
+   GPU Projection: regtest_data.id, ((regtest_data.a > regtest_data.b) IS TRUE), ((regtest_data.c > regtest_data.d) IS FALSE), ((regtest_data.a > regtest_data.c) IS NOT TRUE), ((regtest_data.b > regtest_data.d) IS NOT FALSE), ((regtest_data.a > regtest_data.d) IS UNKNOWN), ((regtest_data.b > regtest_data.c) IS UNKNOWN), (regtest_data.b IS NULL), (regtest_data.c IS NOT NULL)
+   GPU Scan Quals: (regtest_data.id > 0)
 (4 rows)
 
 SELECT id, a > b IS TRUE v1,
@@ -227,12 +227,12 @@ SELECT id, CASE id % 4
   INTO test30g
   FROM regtest_data
  WHERE id > 0;
-                                                                                                                                                         QUERY PLAN                                                                                                                                                         
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                   QUERY PLAN                                                                                                                                                                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dexpr_misc_temp.regtest_data
    Output: id, (CASE (id % 4) WHEN 0 THEN 'hoge'::text WHEN 1 THEN "substring"(memo, ((id % 32) / 4), 6) WHEN 2 THEN "substring"(memo, 1, 6) ELSE NULL::text END), (CASE (id % 5) WHEN 0 THEN 'monu'::text WHEN 2 THEN "substring"(memo, 4, 6) WHEN 4 THEN "substring"(memo, ((id % 32) / 4), 6) ELSE 'piyo'::text END)
-   GPU Projection: id, CASE (id % 4) WHEN 0 THEN 'hoge'::text WHEN 1 THEN "substring"(memo, ((id % 32) / 4), 6) WHEN 2 THEN "substring"(memo, 1, 6) ELSE NULL::text END, CASE (id % 5) WHEN 0 THEN 'monu'::text WHEN 2 THEN "substring"(memo, 4, 6) WHEN 4 THEN "substring"(memo, ((id % 32) / 4), 6) ELSE 'piyo'::text END
-   GPU Scan Quals: (id > 0) [rows: 6000 -> 5999]
+   GPU Projection: regtest_data.id, CASE (regtest_data.id % 4) WHEN 0 THEN 'hoge'::text WHEN 1 THEN "substring"(regtest_data.memo, ((regtest_data.id % 32) / 4), 6) WHEN 2 THEN "substring"(regtest_data.memo, 1, 6) ELSE NULL::text END, CASE (regtest_data.id % 5) WHEN 0 THEN 'monu'::text WHEN 2 THEN "substring"(regtest_data.memo, 4, 6) WHEN 4 THEN "substring"(regtest_data.memo, ((regtest_data.id % 32) / 4), 6) ELSE 'piyo'::text END
+   GPU Scan Quals: (regtest_data.id > 0)
 (4 rows)
 
 SELECT id, CASE id % 4
@@ -294,12 +294,12 @@ SELECT id, CASE WHEN memo like '%aa%' THEN 'aaa'
   INTO test31g
   FROM regtest_data
  WHERE id > 0;
-                                                                                                                                                                                                                       QUERY PLAN                                                                                                                                                                                                                       
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                     QUERY PLAN                                                                                                                                                                                                                                                                                                     
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dexpr_misc_temp.regtest_data
    Output: id, (CASE WHEN (memo ~~ '%aa%'::text) THEN 'aaa'::text WHEN (memo ~~ '%bb%'::text) THEN 'bbb'::text WHEN (memo ~~ '%cc%'::text) THEN 'ccc'::text WHEN (memo ~~ '%dd%'::text) THEN 'ddd'::text WHEN (memo ~~ '%ee%'::text) THEN 'eee'::text ELSE NULL::text END), (CASE WHEN ((id % 100) <> 0) THEN ((a)::real / ((id % 100))::real) ELSE '-1'::real END), (CASE (id % 71) WHEN 0 THEN '-1'::real ELSE ((b)::real / ((id % 71))::real) END)
-   GPU Projection: id, CASE WHEN (memo ~~ '%aa%'::text) THEN 'aaa'::text WHEN (memo ~~ '%bb%'::text) THEN 'bbb'::text WHEN (memo ~~ '%cc%'::text) THEN 'ccc'::text WHEN (memo ~~ '%dd%'::text) THEN 'ddd'::text WHEN (memo ~~ '%ee%'::text) THEN 'eee'::text ELSE NULL::text END, CASE WHEN ((id % 100) <> 0) THEN ((a)::real / ((id % 100))::real) ELSE '-1'::real END, CASE (id % 71) WHEN 0 THEN '-1'::real ELSE ((b)::real / ((id % 71))::real) END
-   GPU Scan Quals: (id > 0) [rows: 6000 -> 5999]
+   GPU Projection: regtest_data.id, CASE WHEN (regtest_data.memo ~~ '%aa%'::text) THEN 'aaa'::text WHEN (regtest_data.memo ~~ '%bb%'::text) THEN 'bbb'::text WHEN (regtest_data.memo ~~ '%cc%'::text) THEN 'ccc'::text WHEN (regtest_data.memo ~~ '%dd%'::text) THEN 'ddd'::text WHEN (regtest_data.memo ~~ '%ee%'::text) THEN 'eee'::text ELSE NULL::text END, CASE WHEN ((regtest_data.id % 100) <> 0) THEN ((regtest_data.a)::real / ((regtest_data.id % 100))::real) ELSE '-1'::real END, CASE (regtest_data.id % 71) WHEN 0 THEN '-1'::real ELSE ((regtest_data.b)::real / ((regtest_data.id % 71))::real) END
+   GPU Scan Quals: (regtest_data.id > 0)
 (4 rows)
 
 SELECT id, CASE WHEN memo like '%aa%' THEN 'aaa'
