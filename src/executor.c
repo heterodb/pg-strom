@@ -910,32 +910,42 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		}
 		else
 		{
-			Datum	pathname = DirectFunctionCall1(pg_relation_filepath,
-												   RelationGetRelid(drel));
+			TupleDesc	d_tdesc = RelationGetDescr(drel);
+			size_t		head_sz = estimate_kern_data_store(d_tdesc);
+			kern_data_store *kds_temp = (kern_data_store *)alloca(head_sz);
+			Datum		pathname = DirectFunctionCall1(pg_relation_filepath,
+													   RelationGetRelid(drel));
 			session->select_into_pathname =
 				__appendBinaryStringInfo(&buf, VARDATA_ANY(pathname),
 										 VARSIZE_ANY_EXHDR(pathname));
 			appendStringInfoChar(&buf, '\0');
+
+			setup_kern_data_store(kds_temp, d_tdesc, 0, KDS_FORMAT_BLOCK);
+			kds_temp->block_offset = TYPEALIGN(BLCKSZ, head_sz);
+			kds_temp->length = kds_temp->block_offset + BLCKSZ * RELSEG_SIZE;
+			session->select_into_kds_head =
+				__appendBinaryStringInfo(&buf, kds_temp, head_sz);
+
 			if (pts->select_into_proj != NIL)
 			{
-				kern_select_into_projection_desc *sip_desc;
+				kern_aggfinal_projection_desc *af_proj;
 				ListCell   *lc;
 				int			nattrs = list_length(pts->select_into_proj);
 				int			j = 0;
-				size_t		length = offsetof(kern_select_into_projection_desc,
+				size_t		length = offsetof(kern_aggfinal_projection_desc,
 											  desc[nattrs]);
-				sip_desc = alloca(length);
-				sip_desc->nattrs = nattrs;
+				af_proj = alloca(length);
+				af_proj->nattrs = nattrs;
 				foreach (lc, pts->select_into_proj)
 				{
 					int		code = lfirst_int(lc);
 
-					sip_desc->desc[j].action = (code >> 16);
-					sip_desc->desc[j].resno = (code & 0xffffU);
+					af_proj->desc[j].action = (code >> 16);
+					af_proj->desc[j].resno = (code & 0xffffU);
 					j++;
 				}
 				session->select_into_projdesc =
-					__appendBinaryStringInfo(&buf, sip_desc, length);
+					__appendBinaryStringInfo(&buf, af_proj, length);
 			}
 			pts->xpu_task_flags |= DEVTASK__SELECT_INTO_DIRECT;
 			session_curr_xid = GetCurrentTransactionId();

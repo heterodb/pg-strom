@@ -484,7 +484,6 @@ __gpusort_prep_pavg_numeric(kern_context *kcxt,
 			int16_t		weight  = (r->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
 			float8_t	fval;
 
-			printf("not_null=%p\n", dest);
 			*dest++ = true;
 			if (special == 0)
 			{
@@ -536,7 +535,6 @@ __gpusort_prep_pavg_numeric(kern_context *kcxt,
 				fval = -INFINITY;
 			else
 				fval = NAN;
-			printf("fval = %f buf_offset=%d\n", fval, sdesc->buf_offset);
 			memcpy(dest, &fval, sizeof(float8_t));
 		}
 	}
@@ -1621,4 +1619,991 @@ kern_gpusort_consolidate_buffer(kern_data_store *kds_dst,
 		}
 		__syncthreads();
 	}
+}
+
+/* ----------------------------------------------------------------
+ *
+ * kern_gpu_projection_block
+ *
+ * ----------------------------------------------------------------
+ */
+INLINE_FUNCTION(int)
+__simple_kagg_final__simple_vref(kern_context *kcxt,
+								 const kern_colmeta *cmeta,
+								 char *dest,
+								 const char *source)
+{
+	int		sz;
+
+	if (cmeta->attlen > 0)
+		sz = cmeta->attlen;
+	else
+		sz = VARSIZE_ANY(source);
+	if (dest)
+		memcpy(dest, source, sz);
+	return sz;
+}
+
+#define __SIMPLE_KAGG_FINAL__FMINMAX_INT_TEMPLATE(LABEL,CHECKER_MACRO)	\
+	INLINE_FUNCTION(int)												\
+	__simple_kagg_final__fminmax_##LABEL(kern_context *kcxt,			\
+										 const kern_colmeta *cmeta,		\
+										 char *dest,					\
+										 const char *source)			\
+	{																	\
+		kagg_state__pminmax_int64_packed *state							\
+			= (kagg_state__pminmax_int64_packed *)source;				\
+																		\
+		assert(cmeta->attlen == sizeof(LABEL##_t) && cmeta->attbyval);	\
+		if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)			\
+		{																\
+			int64_t		ival = state->value;							\
+																		\
+			if (CHECKER_MACRO)											\
+			{															\
+				STROM_ELOG(kcxt, "min/max(" #LABEL ") out of range");	\
+				return -1;												\
+			}															\
+			if (dest)													\
+				*((LABEL##_t *)dest) = (LABEL##_t)ival;					\
+			return cmeta->attlen;										\
+		}																\
+		return 0;														\
+	}
+__SIMPLE_KAGG_FINAL__FMINMAX_INT_TEMPLATE(int8, ival < SCHAR_MIN || ival > SCHAR_MAX)
+__SIMPLE_KAGG_FINAL__FMINMAX_INT_TEMPLATE(int16,ival < SHRT_MIN  || ival > SHRT_MAX)
+__SIMPLE_KAGG_FINAL__FMINMAX_INT_TEMPLATE(int32,ival < INT_MIN   || ival > INT_MAX)
+__SIMPLE_KAGG_FINAL__FMINMAX_INT_TEMPLATE(int64,false)
+#undef __SIMPLE_KAGG_FINAL__FMINMAX_INT_TEMPLATE
+
+#define __SIMPLE_KAGG_FINAL__FMINMAX_FP_TEMPLATE(LABEL,TYPE)			\
+	INLINE_FUNCTION(int)												\
+	__simple_kagg_final__fminmax_##LABEL(kern_context *kcxt,			\
+										 const kern_colmeta *cmeta,		\
+										 char *dest,					\
+										 const char *source)			\
+	{																	\
+		kagg_state__pminmax_fp64_packed *state							\
+			= (kagg_state__pminmax_fp64_packed *)source;				\
+																		\
+		assert(cmeta->attlen == sizeof(TYPE) && cmeta->attbyval);		\
+		if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)			\
+		{																\
+			if (dest)													\
+				*((TYPE *)dest) = (TYPE)state->value;					\
+			return cmeta->attlen;										\
+		}																\
+		return 0;														\
+	}
+__SIMPLE_KAGG_FINAL__FMINMAX_FP_TEMPLATE(fp16, float2_t)
+__SIMPLE_KAGG_FINAL__FMINMAX_FP_TEMPLATE(fp32, float4_t)
+__SIMPLE_KAGG_FINAL__FMINMAX_FP_TEMPLATE(fp64, float8_t)
+#undef __SIMPLE_KAGG_FINAL__FMINMAX_FP_TEMPLATE
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fminmax_numeric(kern_context *kcxt,
+									 const kern_colmeta *cmeta,
+									 char *dest,
+									 const char *source)
+{
+	kagg_state__pminmax_fp64_packed *state
+		= (kagg_state__pminmax_fp64_packed *)source;
+	assert(cmeta->attlen < 0 && !cmeta->attbyval);
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) != 0)
+	{
+		xpu_numeric_t num;
+
+		__xpu_fp64_to_numeric(&num, state->value);
+		return num.expr_ops->xpu_datum_write(kcxt, dest, cmeta,
+											 (xpu_datum_t *)&num);
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fsum_int(kern_context *kcxt,
+							  const kern_colmeta *cmeta,
+							  char *dest,
+							  const char *source)
+{
+	kagg_state__psum_int_packed *state
+		= (kagg_state__psum_int_packed *)source;
+	assert(cmeta->attlen == sizeof(int64_t));
+	if (state->nitems == 0)
+		return 0;
+	if (dest)
+		*((int64_t *)dest) = state->sum;
+	return sizeof(int64_t);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fsum_int64(kern_context *kcxt,
+								const kern_colmeta *cmeta,
+								char *dest,
+								const char *source)
+{
+	kagg_state__psum_int_packed *state
+        = (kagg_state__psum_int_packed *)source;
+	assert(cmeta->attlen < 0 && !cmeta->attbyval);
+	if (state->nitems == 0)
+		return 0;
+	return __xpu_numeric_to_varlena(dest, 0, state->sum);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fsum_fp32(kern_context *kcxt,
+							   const kern_colmeta *cmeta,
+							   char *dest,
+							   const char *source)
+{
+	kagg_state__psum_fp_packed *state
+		= (kagg_state__psum_fp_packed *)source;
+	assert(cmeta->attlen == sizeof(float4_t));
+	if (state->nitems == 0)
+		return 0;
+	if (dest)
+		*((float4_t *)dest) = state->sum;
+	return sizeof(float4_t);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fsum_fp64(kern_context *kcxt,
+							   const kern_colmeta *cmeta,
+							   char *dest,
+							   const char *source)
+{
+	kagg_state__psum_fp_packed *state
+		= (kagg_state__psum_fp_packed *)source;
+	assert(cmeta->attlen == sizeof(float4_t));
+	if (state->nitems == 0)
+		return 0;
+	if (dest)
+		*((float8_t *)dest) = state->sum;
+	return sizeof(float8_t);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fsum_numeric(kern_context *kcxt,
+								  const kern_colmeta *cmeta,
+								  char *dest,
+								  const char *source)
+{
+	kagg_state__psum_numeric_packed *state
+		= (kagg_state__psum_numeric_packed *)source;
+	xpu_numeric_t num;
+	uint32_t	special = (state->attrs & __PAGG_NUMERIC_ATTRS__MASK);
+
+	assert(cmeta->attlen < 0);
+	if (state->nitems == 0)
+		return 0;
+	num.expr_ops = &xpu_numeric_ops;
+	switch (special)
+	{
+		case 0:
+			num.kind = XPU_NUMERIC_KIND__VALID;
+			num.weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+			num.u.value = __fetch_int128_packed(&state->sum);
+			break;
+		case __PAGG_NUMERIC_ATTRS__PINF:
+			num.kind = XPU_NUMERIC_KIND__POS_INF;
+			break;
+		case __PAGG_NUMERIC_ATTRS__NINF:
+			num.kind = XPU_NUMERIC_KIND__NEG_INF;
+			break;
+		default:	/* NaN */
+			num.kind = XPU_NUMERIC_KIND__NAN;
+			break;
+	}
+	return num.expr_ops->xpu_datum_write(kcxt, dest, cmeta,
+										 (xpu_datum_t *)&num);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__favg_int(kern_context *kcxt,
+							  const kern_colmeta *cmeta,
+							  char *dest,
+							  const char *source)
+{
+	kagg_state__psum_int_packed *state
+		= (kagg_state__psum_int_packed *)source;
+	xpu_numeric_t	n, sum, avg;
+
+	if (state->nitems == 0)
+		return 0;
+	n.expr_ops = &xpu_numeric_ops;
+	n.kind = XPU_NUMERIC_KIND__VALID;
+	n.weight = 0;
+	n.u.value = state->nitems;
+
+	sum.expr_ops = &xpu_numeric_ops;
+	sum.kind = XPU_NUMERIC_KIND__VALID;
+	sum.weight = 0;
+	sum.u.value = state->sum;
+
+	if (!__xpu_numeric_div(kcxt, &avg, &sum, &n))
+		return -1;
+	return avg.expr_ops->xpu_datum_write(kcxt, dest, cmeta,
+										 (xpu_datum_t *)&avg);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__favg_fp(kern_context *kcxt,
+							 const kern_colmeta *cmeta,
+							 char *dest,
+							 const char *source)
+{
+	kagg_state__psum_fp_packed *state
+		= (kagg_state__psum_fp_packed *)source;
+	if (state->nitems == 0)
+		return 0;
+	*((float8_t *)dest) = (double)state->sum / (double)state->nitems;
+	return sizeof(float8_t);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__favg_numeric(kern_context *kcxt,
+								  const kern_colmeta *cmeta,
+								  char *dest,
+								  const char *source)
+{
+	kagg_state__psum_numeric_packed *state
+		= (kagg_state__psum_numeric_packed *)source;
+	uint32_t	special = (state->attrs & __PAGG_NUMERIC_ATTRS__MASK);
+	xpu_numeric_t	n, sum, avg;
+
+	if (state->nitems == 0)
+		return 0;
+	if (special != 0)
+	{
+		if (special == __PAGG_NUMERIC_ATTRS__PINF)
+			avg.kind = XPU_NUMERIC_KIND__POS_INF;
+		else if (special == __PAGG_NUMERIC_ATTRS__NINF)
+			avg.kind = XPU_NUMERIC_KIND__NEG_INF;
+		else
+			avg.kind = XPU_NUMERIC_KIND__NAN;
+		avg.expr_ops = &xpu_numeric_ops;
+	}
+	else
+	{
+		n.expr_ops = &xpu_numeric_ops;
+		n.kind = XPU_NUMERIC_KIND__VALID;
+		n.weight = 0;
+		n.u.value = state->nitems;
+
+		sum.expr_ops = &xpu_numeric_ops;
+		sum.kind = XPU_NUMERIC_KIND__VALID;
+		sum.weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+		sum.u.value = __fetch_int128_packed(&state->sum);
+
+		if (!__xpu_numeric_div(kcxt, &avg, &sum, &n))
+			return -1;
+	}
+	return avg.expr_ops->xpu_datum_write(kcxt, dest, cmeta,
+										 (xpu_datum_t *)&avg);
+}
+
+/*
+ * VARIANCE/STDDEV
+ */
+INLINE_FUNCTION(int)
+__simple_kagg_final__fstddev_samp(kern_context *kcxt,
+								  const kern_colmeta *cmeta,
+								  char *dest,
+								  const char *source)
+{
+	kagg_state__stddev_packed *state
+		= (kagg_state__stddev_packed *)source;
+	if (state->nitems > 1)
+	{
+		float8_t	N = (double)state->nitems;
+		float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
+		xpu_numeric_t num;
+
+		__xpu_fp64_to_numeric(&num, sqrt(fval / (N * (N - 1.0))));
+		return num.expr_ops->xpu_datum_write(kcxt, dest, cmeta,
+											 (xpu_datum_t *)&num);
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fstddev_sampf(kern_context *kcxt,
+								   const kern_colmeta *cmeta,
+								   char *dest,
+								   const char *source)
+{
+	kagg_state__stddev_packed *state
+		= (kagg_state__stddev_packed *)source;
+	if (state->nitems > 1)
+	{
+		float8_t	N = (double)state->nitems;
+		float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
+
+		if (dest)
+			*((float8_t *)dest) = sqrt(fval / (N * (N - 1.0)));
+		return sizeof(float8_t);
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fvar_samp(kern_context *kcxt,
+							   const kern_colmeta *cmeta,
+							   char *dest,
+							   const char *source)
+{
+	kagg_state__stddev_packed *state
+		= (kagg_state__stddev_packed *)source;
+	if (state->nitems > 1)
+	{
+		float8_t	N = (double)state->nitems;
+		float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
+		xpu_numeric_t num;
+
+		__xpu_fp64_to_numeric(&num, fval / (N * (N - 1.0)));
+		return num.expr_ops->xpu_datum_write(kcxt, dest, cmeta,
+											 (xpu_datum_t *)&num);
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fvar_sampf(kern_context *kcxt,
+								const kern_colmeta *cmeta,
+								char *dest,
+								const char *source)
+{
+	kagg_state__stddev_packed *state
+		= (kagg_state__stddev_packed *)source;
+	if (state->nitems > 1)
+	{
+		float8_t	N = (double)state->nitems;
+		float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
+
+		if (dest)
+			*((float8_t *)dest) = (fval / (N * (N - 1.0)));
+		return sizeof(float8_t);
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fstddev_pop(kern_context *kcxt,
+								 const kern_colmeta *cmeta,
+								 char *dest,
+								 const char *source)
+{
+	kagg_state__stddev_packed *state
+		= (kagg_state__stddev_packed *)source;
+	if (state->nitems > 0)
+	{
+		float8_t	N = (double)state->nitems;
+		float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
+		xpu_numeric_t num;
+
+		__xpu_fp64_to_numeric(&num, sqrt(fval / (N * N)));
+		return num.expr_ops->xpu_datum_write(kcxt, dest, cmeta,
+											 (xpu_datum_t *)&num);
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fstddev_popf(kern_context *kcxt,
+								  const kern_colmeta *cmeta,
+								  char *dest,
+								  const char *source)
+{
+	kagg_state__stddev_packed *state
+		= (kagg_state__stddev_packed *)source;
+	if (state->nitems > 0)
+	{
+		float8_t	N = (double)state->nitems;
+		float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
+
+		if (dest)
+			*((float8_t *)dest) = sqrt(fval / (N * N));
+		return sizeof(float8_t);
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fvar_pop(kern_context *kcxt,
+							  const kern_colmeta *cmeta,
+							  char *dest,
+							  const char *source)
+{
+	kagg_state__stddev_packed *state
+		= (kagg_state__stddev_packed *)source;
+	if (state->nitems > 0)
+	{
+		float8_t	N = (double)state->nitems;
+		float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
+		xpu_numeric_t num;
+
+		__xpu_fp64_to_numeric(&num, (fval / (N * N)));
+		return num.expr_ops->xpu_datum_write(kcxt, dest, cmeta,
+											 (xpu_datum_t *)&num);
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fvar_popf(kern_context *kcxt,
+							   const kern_colmeta *cmeta,
+							   char *dest,
+							   const char *source)
+{
+	kagg_state__stddev_packed *state
+		= (kagg_state__stddev_packed *)source;
+	if (state->nitems > 0)
+	{
+		float8_t	N = (double)state->nitems;
+		float8_t	fval = N * state->sum_x2 - state->sum_x * state->sum_x;
+
+		if (dest)
+			*((float8_t *)dest) = (fval / (N * N));
+		return sizeof(float8_t);
+	}
+	return 0;
+}
+
+/*
+ * CORELATION
+ */
+INLINE_FUNCTION(int)
+__simple_kagg_final__fcorr(kern_context *kcxt,
+						   const kern_colmeta *cmeta,
+						   char *dest,
+						   const char *source)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)source;
+	if (state->nitems < 1 ||
+		state->sum_xx == 0.0 ||
+		state->sum_yy == 0.0)
+		return 0;
+	if (dest)
+		*((float8_t *)dest) = (state->sum_xy / sqrt(state->sum_xx * state->sum_yy));
+	return sizeof(float8_t);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fcovar_samp(kern_context *kcxt,
+								 const kern_colmeta *cmeta,
+								 char *dest,
+								 const char *source)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)source;
+	if (state->nitems < 2)
+		return 0;
+	if (dest)
+		*((float8_t *)dest) = (state->sum_xy / (double)(state->nitems - 1));
+	return sizeof(float8_t);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fcovar_pop(kern_context *kcxt,
+								const kern_colmeta *cmeta,
+								char *dest,
+								const char *source)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)source;
+	if (state->nitems < 1)
+		return 0;
+	if (dest)
+		*((float8_t *)dest) = (state->sum_xy / (double)state->nitems);
+	return sizeof(float8_t);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fregr_avgx(kern_context *kcxt,
+								const kern_colmeta *cmeta,
+								char *dest,
+								const char *source)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)source;
+	if (state->nitems < 1)
+		return 0;
+	if (dest)
+		*((float8_t *)dest) = (state->sum_x / (double)state->nitems);
+	return sizeof(float8_t);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fregr_avgy(kern_context *kcxt,
+								const kern_colmeta *cmeta,
+								char *dest,
+								const char *source)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)source;
+	if (state->nitems < 1)
+		return 0;
+	if (dest)
+		*((float8_t *)dest) = (state->sum_y / (double)state->nitems);
+	return sizeof(float8_t);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fregr_count(kern_context *kcxt,
+								 const kern_colmeta *cmeta,
+								 char *dest,
+								 const char *source)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)source;
+	if (dest)
+		*((float8_t *)dest) = (double)state->nitems;
+	return sizeof(float8_t);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fregr_intercept(kern_context *kcxt,
+						   const kern_colmeta *cmeta,
+						   char *dest,
+						   const char *source)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)source;
+	if (state->nitems < 1 || state->sum_xx == 0.0)
+		return 0;
+	if (dest)
+		*((float8_t *)dest) = ((state->sum_y -
+								state->sum_x * state->sum_xy / state->sum_xx) / (double)state->nitems);
+	return sizeof(float8_t);
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fregr_r2(kern_context *kcxt,
+						   const kern_colmeta *cmeta,
+						   char *dest,
+						   const char *source)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)source;
+	if (state->nitems > 0 &&
+		state->sum_xx != 0.0 &&
+		state->sum_yy != 0.0)
+	{
+		if (dest)
+			*((float8_t *)dest) = ((state->sum_xy * state->sum_xy) /
+								   (state->sum_xx * state->sum_yy));
+		return sizeof(float8_t);
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fregr_slope(kern_context *kcxt,
+								 const kern_colmeta *cmeta,
+								 char *dest,
+								 const char *source)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)source;
+	if (state->nitems > 0 && state->sum_xx != 0.0)
+	{
+		if (dest)
+			*((float8_t *)dest) = (state->sum_xy / state->sum_xx);
+		return sizeof(float8_t);
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fregr_sxx(kern_context *kcxt,
+							   const kern_colmeta *cmeta,
+							   char *dest,
+							   const char *source)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)source;
+	if (state->nitems > 0)
+	{
+		if (dest)
+			*((float8_t *)dest) = state->sum_xx;
+		return sizeof(float8_t);
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fregr_sxy(kern_context *kcxt,
+							   const kern_colmeta *cmeta,
+							   char *dest,
+							   const char *source)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)source;
+	if (state->nitems > 0)
+	{
+		if (dest)
+			*((float8_t *)dest) = state->sum_xy;
+		return sizeof(float8_t);
+	}
+	return 0;
+}
+
+INLINE_FUNCTION(int)
+__simple_kagg_final__fregr_syy(kern_context *kcxt,
+							   const kern_colmeta *cmeta,
+							   char *dest,
+							   const char *source)
+{
+	kagg_state__covar_packed *state
+		= (kagg_state__covar_packed *)source;
+	if (state->nitems > 0)
+	{
+		if (dest)
+			*((float8_t *)dest) = state->sum_yy;
+		return sizeof(float8_t);
+	}
+	return 0;
+}
+
+STATIC_FUNCTION(int)
+simple_form_heap_tuple(kern_context *kcxt,
+					   const kern_data_store *kds_src,
+					   const kern_tupitem *titem,	/* source tuple */
+					   const kern_aggfinal_projection_desc *af_proj,
+					   kern_data_store *kds_dst,	/* destination buffer */
+					   HeapTupleHeaderData *htup,	/* destination buffer */
+					   uint16_t *p_t_infomask)
+{
+	uint8_t	   *nullmap = NULL;
+	uint32_t   *attrs;	/* offset */
+	int			ncols = (titem->t_infomask2 & HEAP_NATTS_MASK);
+	uint32_t	t_hoff = (titem->t_hoff - MINIMAL_TUPLE_OFFSET);
+	uint16_t	t_infomask = *p_t_infomask;
+	char	   *base = NULL;
+	int			head_sz;
+
+	/* deform the source tuple */
+	if ((titem->t_infomask & HEAP_HASNULL) != 0)
+		nullmap = (uint8_t *)titem->t_bits;
+	assert(t_hoff == MAXALIGN(offsetof(kern_tupitem, t_bits)
+							  + (nullmap ? BITMAPLEN(ncols) : 0)));
+	ncols = Min(ncols, kds_src->ncols);
+	attrs = (uint32_t *)alloca(sizeof(uint32_t) * ncols);
+	for (int j=0; j < ncols; j++)
+	{
+		const kern_colmeta *cmeta = &kds_src->colmeta[j];
+
+		if (nullmap && att_isnull(j, nullmap))
+			attrs[j] = 0;
+		else
+		{
+			if (cmeta->attlen > 0)
+				t_hoff = TYPEALIGN(cmeta->attalign, t_hoff);
+			else if (!VARATT_NOT_PAD_BYTE((const char *)titem + t_hoff))
+				t_hoff = TYPEALIGN(cmeta->attalign, t_hoff);
+			attrs[j] = t_hoff;
+			if (cmeta->attlen > 0)
+				t_hoff += cmeta->attlen;
+			else
+				t_hoff += VARSIZE_ANY((const char *)titem + t_hoff);
+		}
+	}
+	/* estimate and form the result tuple */
+	nullmap = NULL;
+	t_hoff = 0;
+	if (htup)
+	{
+		int		__off = offsetof(HeapTupleHeaderData, t_bits);
+
+		htup->t_infomask2 = af_proj->nattrs;
+		htup->t_infomask = t_infomask;
+		if ((t_infomask & HEAP_HASNULL) != 0)
+		{
+			nullmap = htup->t_bits;
+			memset(nullmap, 0, BITMAPLEN(af_proj->nattrs));
+			__off += BITMAPLEN(af_proj->nattrs);
+		}
+		__off = MAXALIGN(__off);
+		htup->t_hoff = __off;
+		base = (char *)htup + __off;
+	}
+
+	assert(kds_dst->ncols == af_proj->nattrs);
+	for (int j=0; j < af_proj->nattrs; j++)
+	{
+		const kern_colmeta *cmeta = &kds_dst->colmeta[j];
+		int16_t		action = af_proj->desc[j].action;
+		int16_t		resno  = af_proj->desc[j].resno;
+		uint32_t	t_next;
+		int			sz;
+		char	   *dest;
+		const char *source;
+
+		if (resno < 1 || resno > ncols || attrs[resno-1] == 0)
+		{
+			t_infomask |= HEAP_HASNULL;
+			continue;	/* NULL */
+		}
+		source = (const char *)titem + attrs[resno-1];
+		t_next = TYPEALIGN(cmeta->attalign, t_hoff);
+		dest = (base ? base + t_next : NULL);
+		switch (action)
+		{
+			case KAGG_FINAL__SIMPLE_VREF:
+				sz = __simple_kagg_final__simple_vref(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FMINMAX_INT8:
+				sz = __simple_kagg_final__fminmax_int8(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FMINMAX_INT16:
+				sz = __simple_kagg_final__fminmax_int16(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FMINMAX_INT32:
+			case KAGG_FINAL__FMINMAX_DATE:
+				sz = __simple_kagg_final__fminmax_int32(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FMINMAX_INT64:
+			case KAGG_FINAL__FMINMAX_CASH:			/* 64bit Int */
+			case KAGG_FINAL__FMINMAX_TIME:			/* 64bit Int */
+			case KAGG_FINAL__FMINMAX_TIMESTAMP:		/* 64bit Int */
+			case KAGG_FINAL__FMINMAX_TIMESTAMPTZ:	/* 64bit Int */
+				sz = __simple_kagg_final__fminmax_int64(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FMINMAX_FP16:
+				sz = __simple_kagg_final__fminmax_fp16(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FMINMAX_FP32:
+				sz = __simple_kagg_final__fminmax_fp32(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FMINMAX_FP64:
+				sz = __simple_kagg_final__fminmax_fp64(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FMINMAX_NUMERIC:
+				sz = __simple_kagg_final__fminmax_numeric(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FSUM_INT:
+			case KAGG_FINAL__FSUM_CASH:
+				sz = __simple_kagg_final__fsum_int(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FSUM_INT64:
+				sz = __simple_kagg_final__fsum_int64(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FSUM_FP32:
+				sz = __simple_kagg_final__fsum_fp32(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FSUM_FP64:
+				sz = __simple_kagg_final__fsum_fp64(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FSUM_NUMERIC:
+				sz = __simple_kagg_final__fsum_numeric(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FAVG_INT:
+			case KAGG_FINAL__FAVG_INT64:
+				sz = __simple_kagg_final__favg_int(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FAVG_FP64:
+				sz = __simple_kagg_final__favg_fp(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FAVG_NUMERIC:
+				sz = __simple_kagg_final__favg_numeric(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FSTDDEV_SAMP:
+				sz = __simple_kagg_final__fstddev_samp(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FSTDDEV_SAMPF:
+				sz = __simple_kagg_final__fstddev_sampf(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FSTDDEV_POP:
+				sz = __simple_kagg_final__fstddev_pop(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FSTDDEV_POPF:
+				sz = __simple_kagg_final__fstddev_popf(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FVAR_SAMP:
+				sz = __simple_kagg_final__fvar_samp(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FVAR_SAMPF:
+				sz = __simple_kagg_final__fvar_sampf(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FVAR_POP:
+				sz = __simple_kagg_final__fvar_pop(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FVAR_POPF:
+				sz = __simple_kagg_final__fvar_popf(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FCORR:
+				sz = __simple_kagg_final__fcorr(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FCOVAR_SAMP:
+				sz = __simple_kagg_final__fcovar_samp(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FCOVAR_POP:
+				sz = __simple_kagg_final__fcovar_pop(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FREGR_AVGX:
+				sz = __simple_kagg_final__fregr_avgx(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FREGR_AVGY:
+				sz = __simple_kagg_final__fregr_avgy(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FREGR_COUNT:
+				sz = __simple_kagg_final__fregr_count(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FREGR_INTERCEPT:
+				sz = __simple_kagg_final__fregr_intercept(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FREGR_R2:
+				sz = __simple_kagg_final__fregr_r2(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FREGR_SLOPE:
+				sz = __simple_kagg_final__fregr_slope(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FREGR_SXX:
+				sz = __simple_kagg_final__fregr_sxx(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FREGR_SXY:
+				sz = __simple_kagg_final__fregr_sxy(kcxt, cmeta, dest, source);
+				break;
+			case KAGG_FINAL__FREGR_SYY:
+				sz = __simple_kagg_final__fregr_syy(kcxt, cmeta, dest, source);
+				break;
+			default:
+				STROM_ELOG(kcxt, "unexpected kagg-final projection");
+				return -1;
+		}
+		if (sz < 0)			/* errors */
+			return -1;
+		else if (sz == 0)	/* null */
+			t_infomask |= HEAP_HASNULL;
+		else
+		{
+			if (cmeta->attlen < 0)
+				t_infomask |= HEAP_HASVARWIDTH;
+			if (base && t_next > t_hoff)
+				memset(base + t_hoff, 0, t_next - t_hoff);
+			if (nullmap)
+				nullmap[j>>3] |= (1<<(j&7));	/* not null */
+			t_hoff = t_next + sz;
+		}
+	}
+	/* ok */
+	*p_t_infomask = t_infomask;
+	head_sz = offsetof(HeapTupleHeaderData, t_bits);
+	if ((t_infomask & HEAP_HASNULL) != 0)
+		head_sz += BITMAPLEN(af_proj->nattrs);
+	return MAXALIGN(head_sz) + t_hoff;
+}
+
+#define GPUPROJ_BLOCK_CURR_POS(kgtask)			\
+	((uint32_t *)(kgtask)->stats)[get_group_id()]
+
+KERNEL_FUNCTION(void)
+kern_gpu_projection_block(kern_session_info *session,
+						  kern_gputask *kgtask,
+						  kern_data_store *kds_src,
+						  kern_data_store *kds_dst)
+{
+	const kern_aggfinal_projection_desc *af_proj = SESSION_SELECT_INTO_PROJDESC(session);
+	uint32_t		curr_pos = GPUPROJ_BLOCK_CURR_POS(kgtask);
+	uint32_t		start    = (curr_pos / get_local_size());
+	uint32_t		nwritten = (curr_pos % get_local_size());
+	uint32_t		base;
+	kern_context   *kcxt;
+
+	/* sanity checks */
+	assert(get_local_size() <= CUDA_MAXTHREADS_PER_BLOCK);
+	assert(kds_src->format == KDS_FORMAT_ROW ||
+		   kds_src->format == KDS_FORMAT_HASH);
+	assert(kds_dst->format == KDS_FORMAT_BLOCK &&
+		   kds_dst->block_offset >= KDS_HEAD_LENGTH(kds_dst));
+	/* save the GPU-Task specific read-only properties */
+	if (get_local_id() == 0)
+	{
+		stromTaskProp__cuda_dindex        = kgtask->cuda_dindex;
+		stromTaskProp__cuda_stack_limit   = kgtask->cuda_stack_limit;
+		stromTaskProp__partition_divisor  = kgtask->partition_divisor;
+		stromTaskProp__partition_reminder = kgtask->partition_reminder;
+	}
+	/* setup execution context */
+	INIT_KERNEL_CONTEXT(kcxt, session, NULL);
+	for (base = start * get_global_size() + get_global_base();
+		 base < kds_src->nitems;
+		 base += get_global_size())
+	{
+		HeapTupleHeaderData *htup;
+		kern_tupitem *titem = NULL;
+		uint32_t	index = base + get_local_id();
+		uint32_t	ntuples = Min(kds_src->nitems - base, get_local_size());
+		uint32_t	tupsz = 0;
+		uint16_t	t_infomask = 0;
+		bool		needs_suspend = false;
+
+		if (index >= nwritten && index < kds_src->nitems)
+		{
+			titem = KDS_GET_TUPITEM(kds_src, index);
+			if (!af_proj)
+				tupsz = MINIMAL_TUPLE_OFFSET + titem->t_len;
+			else
+				tupsz = simple_form_heap_tuple(kcxt,
+											   kds_src,
+											   titem,
+											   af_proj,
+											   kds_dst,
+											   NULL,
+											   &t_infomask);
+		}
+		if (!allocKdsBlockBufferOneTuple(kcxt,
+										 kds_dst,
+										 &ntuples,
+										 MAXALIGN(tupsz),
+										 &htup,
+										 &needs_suspend))
+		{
+			break;
+		}
+		if (htup)
+		{
+			const kern_session_info *session = kcxt->session;
+
+			htup->t_choice.t_heap.t_xmin = session->session_curr_xid;
+			htup->t_choice.t_heap.t_xmax = InvalidTransactionId;
+			htup->t_choice.t_heap.t_field3.t_cid = session->session_curr_cid;
+			htup->t_choice.t_datum.datum_typeid = kds_dst->tdtypeid;
+			htup->t_ctid.ip_blkid.bi_hi = 0xffff;
+			htup->t_ctid.ip_blkid.bi_lo = 0xffff;
+			htup->t_ctid.ip_posid = 0;
+			if (!af_proj)
+			{
+				memcpy(&htup->t_infomask2,
+					   &titem->t_infomask2,
+					   titem->t_len - offsetof(kern_tupitem, t_infomask2));
+			}
+			else
+			{
+				uint32_t	__sz	__attribute__((unused));
+
+				__sz = simple_form_heap_tuple(kcxt,
+											  kds_src,
+											  titem,
+											  af_proj,
+											  kds_dst,
+											  htup,
+											  &t_infomask);
+				assert(__sz == tupsz);
+			}
+		}
+
+		if (__syncthreads_count(needs_suspend) > 0)
+		{
+			curr_pos = (base / get_global_size()) * get_local_size() + ntuples;
+			goto out;
+		}
+	}
+	/* normal exit */
+	curr_pos = (base / get_global_size()) * get_local_size(); 
+out:
+	if (get_local_id() == 0)
+		GPUPROJ_BLOCK_CURR_POS(kgtask) = curr_pos;
+	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
 }

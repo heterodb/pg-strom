@@ -407,6 +407,31 @@ __numeric_typmod_weight(int32_t typmod)
 	return weight;
 }
 
+EXTERN_FUNCTION(bool)
+__xpu_numeric_add(kern_context *kcxt,
+				  xpu_numeric_t *result,
+				  xpu_numeric_t *datum_a,
+				  xpu_numeric_t *datum_b);
+EXTERN_FUNCTION(bool)
+__xpu_numeric_sub(kern_context *kcxt,
+				  xpu_numeric_t *result,
+				  xpu_numeric_t *datum_a,
+				  xpu_numeric_t *datum_b);
+EXTERN_FUNCTION(bool)
+__xpu_numeric_mul(kern_context *kcxt,
+				  xpu_numeric_t *result,
+				  xpu_numeric_t *datum_a,
+				  xpu_numeric_t *datum_b);
+EXTERN_FUNCTION(bool)
+__xpu_numeric_div(kern_context *kcxt,
+				  xpu_numeric_t *result,
+				  xpu_numeric_t *datum_a,
+				  xpu_numeric_t *datum_b);
+EXTERN_FUNCTION(bool)
+__xpu_numeric_mod(kern_context *kcxt,
+				  xpu_numeric_t *result,
+				  xpu_numeric_t *datum_a,
+				  xpu_numeric_t *datum_b);
 EXTERN_FUNCTION(int)
 pg_numeric_to_cstring(kern_context *kcxt,
 					  varlena *numeric,
@@ -421,6 +446,9 @@ EXTERN_FUNCTION(bool)
 __xpu_numeric_to_fp64(kern_context *kcxt,
 					  float8_t *p_ival,
 					  xpu_numeric_t *num);
+EXTERN_FUNCTION(void)
+__xpu_fp64_to_numeric(xpu_numeric_t *result,
+					  float8_t __fval);
 EXTERN_FUNCTION(int128_t)
 __normalize_numeric_int128(int16_t weight_d,
 						   int16_t weight_s,

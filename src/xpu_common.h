@@ -2492,7 +2492,7 @@ typedef struct
 		int16_t	action;			/* any of KAGG_FINAL__* */
 		int16_t	resno;			/* source attribute number */
 	}			desc[1];
-} kern_select_into_projection_desc;
+} kern_aggfinal_projection_desc;
 
 #define KERN_EXPRESSION_MAGIC			(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
@@ -2712,6 +2712,7 @@ typedef struct kern_session_info
 	uint32_t	projection_kds_dst;		/* header portion of kds_dst */
 	/* SELECT INTO direct */
 	uint32_t	select_into_pathname;	/* base pathname of SELECT INTO if possible */
+	uint32_t	select_into_kds_head;	/* definition of SELECT INTO destination buffer */
 	uint32_t	select_into_projdesc;	/* SELECT INTO projection descriptor, if any */
 	/* join inner buffer */
 	uint32_t	pgsql_port_number;		/* = PostPortNumber */
@@ -3089,12 +3090,12 @@ SESSION_SELECT_INTO_PATHNAME(const kern_session_info *session)
 	return (const char *)((const char *)session + session->select_into_pathname);
 }
 
-INLINE_FUNCTION(const kern_select_into_projection_desc *)
+INLINE_FUNCTION(const kern_aggfinal_projection_desc *)
 SESSION_SELECT_INTO_PROJDESC(const kern_session_info *session)
 {
 	if (session->select_into_projdesc == 0)
 		return NULL;
-	return (const kern_select_into_projection_desc *)
+	return (const kern_aggfinal_projection_desc *)
 		((const char *)session + session->select_into_projdesc);
 }
 

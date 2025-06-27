@@ -13,7 +13,7 @@
 #include <math.h>
 
 INLINE_FUNCTION(int)
-xpu_numeric_sign(xpu_numeric_t *num)
+xpu_numeric_sign(const xpu_numeric_t *num)
 {
 	assert(num->kind != XPU_NUMERIC_KIND__VARLENA);
 	if (num->kind != XPU_NUMERIC_KIND__VALID)
@@ -469,7 +469,7 @@ pgfn_money_to_numeric(XPU_PGFUNCTION_ARGS)
 	return true;
 }
 
-STATIC_FUNCTION(void)
+PUBLIC_FUNCTION(void)
 __xpu_fp64_to_numeric(xpu_numeric_t *result, float8_t __fval)
 {
 	uint64_t	fval = __double_as_longlong__(__fval);
@@ -653,6 +653,59 @@ PG_NUMERIC_COMPARE_TEMPLATE(gt, >)
 PG_NUMERIC_COMPARE_TEMPLATE(ge, >=)
 
 PUBLIC_FUNCTION(bool)
+__xpu_numeric_add(kern_context *kcxt,
+				  xpu_numeric_t *result,
+				  xpu_numeric_t *datum_a,
+				  xpu_numeric_t *datum_b)
+{
+	assert(datum_a->kind != XPU_NUMERIC_KIND__VARLENA &&
+		   datum_b->kind != XPU_NUMERIC_KIND__VARLENA);
+	if (datum_a->kind != XPU_NUMERIC_KIND__VALID ||
+		datum_b->kind != XPU_NUMERIC_KIND__VALID)
+	{
+		if (datum_a->kind == XPU_NUMERIC_KIND__NAN ||
+			datum_b->kind == XPU_NUMERIC_KIND__NAN)
+			result->kind = XPU_NUMERIC_KIND__NAN;
+		else if (datum_a->kind == XPU_NUMERIC_KIND__POS_INF)
+		{
+			if (datum_b->kind == XPU_NUMERIC_KIND__NEG_INF)
+				result->kind = XPU_NUMERIC_KIND__NAN;	/* Inf - Inf */
+			else
+				result->kind = XPU_NUMERIC_KIND__POS_INF;
+		}
+		else if (datum_a->kind == XPU_NUMERIC_KIND__NEG_INF)
+		{
+			if (datum_b->kind == XPU_NUMERIC_KIND__POS_INF)
+				result->kind = XPU_NUMERIC_KIND__NAN;	/* -Inf + Inf */
+			else
+				result->kind = XPU_NUMERIC_KIND__NEG_INF;
+		}
+		else if (datum_b->kind == XPU_NUMERIC_KIND__POS_INF)
+			result->kind = XPU_NUMERIC_KIND__POS_INF;
+		else
+			result->kind = XPU_NUMERIC_KIND__NEG_INF;
+	}
+	else
+	{
+		while (datum_a->weight > datum_b->weight)
+		{
+			datum_b->u.value *= 10;
+			datum_b->weight++;
+		}
+		while (datum_a->weight < datum_b->weight)
+		{
+			datum_a->u.value *= 10;
+			datum_a->weight++;
+		}
+		set_normalized_numeric(result,
+							   datum_a->u.value + datum_b->u.value,
+							   datum_a->weight);
+	}
+	result->expr_ops = &xpu_numeric_ops;
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
 pgfn_numeric_add(XPU_PGFUNCTION_ARGS)
 {
 	KEXP_PROCESS_ARGS2(numeric, numeric, datum_a, numeric, datum_b);
@@ -660,56 +713,64 @@ pgfn_numeric_add(XPU_PGFUNCTION_ARGS)
 	if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))
 		result->expr_ops = NULL;
 	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
-			 !xpu_numeric_validate(kcxt, &datum_b))
+			 !xpu_numeric_validate(kcxt, &datum_b) ||
+			 !__xpu_numeric_add(kcxt, result, &datum_a, &datum_b))
 	{
 		return false;
 	}
-	else
-	{
-		result->expr_ops = &xpu_numeric_ops;
+	return true;
+}
 
-		if (datum_a.kind != XPU_NUMERIC_KIND__VALID ||
-			datum_b.kind != XPU_NUMERIC_KIND__VALID)
+PUBLIC_FUNCTION(bool)
+__xpu_numeric_sub(kern_context *kcxt,
+				  xpu_numeric_t *result,
+				  xpu_numeric_t *datum_a,
+				  xpu_numeric_t *datum_b)
+{
+	assert(datum_a->kind != XPU_NUMERIC_KIND__VARLENA &&
+		   datum_b->kind != XPU_NUMERIC_KIND__VARLENA);
+	if (datum_a->kind != XPU_NUMERIC_KIND__VALID ||
+		datum_b->kind != XPU_NUMERIC_KIND__VALID)
+	{
+		if (datum_a->kind == XPU_NUMERIC_KIND__NAN ||
+			datum_b->kind == XPU_NUMERIC_KIND__NAN)
+			result->kind = XPU_NUMERIC_KIND__NAN;
+		else if (datum_a->kind == XPU_NUMERIC_KIND__POS_INF)
 		{
-			if (datum_a.kind == XPU_NUMERIC_KIND__NAN ||
-				datum_b.kind == XPU_NUMERIC_KIND__NAN)
-				result->kind = XPU_NUMERIC_KIND__NAN;
-			else if (datum_a.kind == XPU_NUMERIC_KIND__POS_INF)
-			{
-				if (datum_b.kind == XPU_NUMERIC_KIND__NEG_INF)
-					result->kind = XPU_NUMERIC_KIND__NAN;	/* Inf - Inf */
-				else
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__NEG_INF)
-			{
-				if (datum_b.kind == XPU_NUMERIC_KIND__POS_INF)
-					result->kind = XPU_NUMERIC_KIND__NAN;	/* -Inf + Inf */
-				else
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-			}
-			else if (datum_b.kind == XPU_NUMERIC_KIND__POS_INF)
+			if (datum_b->kind == XPU_NUMERIC_KIND__POS_INF)
+				result->kind = XPU_NUMERIC_KIND__NAN;	/* Inf - Inf */
+			else
 				result->kind = XPU_NUMERIC_KIND__POS_INF;
+		}
+		else if (datum_a->kind == XPU_NUMERIC_KIND__NEG_INF)
+		{
+			if (datum_b->kind == XPU_NUMERIC_KIND__NEG_INF)
+				result->kind = XPU_NUMERIC_KIND__NAN;	/* -Inf - -Inf*/
 			else
 				result->kind = XPU_NUMERIC_KIND__NEG_INF;
 		}
+		else if (datum_b->kind == XPU_NUMERIC_KIND__POS_INF)
+			result->kind = XPU_NUMERIC_KIND__NEG_INF;
 		else
-		{
-			while (datum_a.weight > datum_b.weight)
-			{
-				datum_b.u.value *= 10;
-				datum_b.weight++;
-			}
-			while (datum_a.weight < datum_b.weight)
-			{
-				datum_a.u.value *= 10;
-				datum_a.weight++;
-			}
-			set_normalized_numeric(result,
-								   datum_a.u.value + datum_b.u.value,
-								   datum_a.weight);
-		}
+			result->kind = XPU_NUMERIC_KIND__POS_INF;
 	}
+	else
+	{
+		while (datum_a->weight > datum_b->weight)
+		{
+			datum_b->u.value *= 10;
+			datum_b->weight++;
+		}
+		while (datum_a->weight < datum_b->weight)
+		{
+			datum_a->u.value *= 10;
+			datum_a->weight++;
+		}
+		set_normalized_numeric(result,
+							   datum_a->u.value - datum_b->u.value,
+							   datum_a->weight);
+	}
+	result->expr_ops = &xpu_numeric_ops;
 	return true;
 }
 
@@ -721,56 +782,82 @@ pgfn_numeric_sub(XPU_PGFUNCTION_ARGS)
 	if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))
 		result->expr_ops = NULL;
 	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
-			 !xpu_numeric_validate(kcxt, &datum_b))
+			 !xpu_numeric_validate(kcxt, &datum_b) ||
+			 !__xpu_numeric_sub(kcxt, result, &datum_a, &datum_b))
 	{
 		return false;
 	}
-	else
-	{
-		result->expr_ops = &xpu_numeric_ops;
+	return true;
+}
 
-		if (datum_a.kind != XPU_NUMERIC_KIND__VALID ||
-			datum_b.kind != XPU_NUMERIC_KIND__VALID)
+PUBLIC_FUNCTION(bool)
+__xpu_numeric_mul(kern_context *kcxt,
+				  xpu_numeric_t *result,
+				  xpu_numeric_t *datum_a,
+				  xpu_numeric_t *datum_b)
+{
+	assert(datum_a->kind != XPU_NUMERIC_KIND__VARLENA &&
+		   datum_b->kind != XPU_NUMERIC_KIND__VARLENA);
+	if (datum_a->kind != XPU_NUMERIC_KIND__VALID ||
+		datum_b->kind != XPU_NUMERIC_KIND__VALID)
+	{
+		if (datum_a->kind == XPU_NUMERIC_KIND__NAN ||
+			datum_a->kind == XPU_NUMERIC_KIND__NAN)
 		{
-			if (datum_a.kind == XPU_NUMERIC_KIND__NAN ||
-				datum_b.kind == XPU_NUMERIC_KIND__NAN)
+			result->kind = XPU_NUMERIC_KIND__NAN;
+		}
+		else if (datum_a->kind == XPU_NUMERIC_KIND__POS_INF)
+		{
+			int		__sign = xpu_numeric_sign(datum_b);
+
+			if (__sign < 0)
+				result->kind = XPU_NUMERIC_KIND__NEG_INF;
+			else if (__sign > 0)
+				result->kind = XPU_NUMERIC_KIND__POS_INF;
+			else
 				result->kind = XPU_NUMERIC_KIND__NAN;
-			else if (datum_a.kind == XPU_NUMERIC_KIND__POS_INF)
-			{
-				if (datum_b.kind == XPU_NUMERIC_KIND__POS_INF)
-					result->kind = XPU_NUMERIC_KIND__NAN;	/* Inf - Inf */
-				else
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__NEG_INF)
-			{
-				if (datum_b.kind == XPU_NUMERIC_KIND__NEG_INF)
-					result->kind = XPU_NUMERIC_KIND__NAN;	/* -Inf - -Inf*/
-				else
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-			}
-			else if (datum_b.kind == XPU_NUMERIC_KIND__POS_INF)
+		}
+		else if (datum_a->kind == XPU_NUMERIC_KIND__NEG_INF)
+		{
+			int		__sign = xpu_numeric_sign(datum_b);
+
+			if (__sign < 0)
+				result->kind = XPU_NUMERIC_KIND__POS_INF;
+			else if (__sign > 0)
 				result->kind = XPU_NUMERIC_KIND__NEG_INF;
 			else
+				result->kind = XPU_NUMERIC_KIND__NAN;
+		}
+		else if (datum_b->kind == XPU_NUMERIC_KIND__POS_INF)
+		{
+			int		__sign = xpu_numeric_sign(datum_a);
+
+			if (__sign < 0)
+				result->kind = XPU_NUMERIC_KIND__NEG_INF;
+			else if (__sign > 0)
 				result->kind = XPU_NUMERIC_KIND__POS_INF;
+			else
+				result->kind = XPU_NUMERIC_KIND__NAN;
 		}
 		else
 		{
-			while (datum_a.weight > datum_b.weight)
-			{
-				datum_b.u.value *= 10;
-				datum_b.weight++;
-			}
-			while (datum_a.weight < datum_b.weight)
-			{
-				datum_a.u.value *= 10;
-				datum_a.weight++;
-			}
-			set_normalized_numeric(result,
-								   datum_a.u.value - datum_b.u.value,
-								   datum_a.weight);
+			int		__sign = xpu_numeric_sign(datum_a);
+
+			if (__sign < 0)
+				result->kind = XPU_NUMERIC_KIND__POS_INF;
+			else if (__sign > 0)
+				result->kind = XPU_NUMERIC_KIND__NEG_INF;
+			else
+				result->kind = XPU_NUMERIC_KIND__NAN;
 		}
 	}
+	else
+	{
+		set_normalized_numeric(result,
+							   datum_a->u.value * datum_b->u.value,
+							   datum_a->weight + datum_b->weight);
+	}
+	result->expr_ops = &xpu_numeric_ops;
 	return true;
 }
 
@@ -782,74 +869,112 @@ pgfn_numeric_mul(XPU_PGFUNCTION_ARGS)
 	if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))
 		result->expr_ops = NULL;
 	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
-			 !xpu_numeric_validate(kcxt, &datum_b))
+			 !xpu_numeric_validate(kcxt, &datum_b) ||
+			 !__xpu_numeric_mul(kcxt, result, &datum_a, &datum_b))
 	{
 		return false;
 	}
-	else
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+__xpu_numeric_div(kern_context *kcxt,
+				  xpu_numeric_t *result,
+				  xpu_numeric_t *datum_a,
+				  xpu_numeric_t *datum_b)
+{
+	assert(datum_a->kind != XPU_NUMERIC_KIND__VARLENA &&
+		   datum_b->kind != XPU_NUMERIC_KIND__VARLENA);
+	if (datum_a->kind != XPU_NUMERIC_KIND__VALID ||
+		datum_b->kind != XPU_NUMERIC_KIND__VALID)
 	{
-		result->expr_ops = &xpu_numeric_ops;
-
-		if (datum_a.kind != XPU_NUMERIC_KIND__VALID ||
-			datum_b.kind != XPU_NUMERIC_KIND__VALID)
+		if (datum_a->kind == XPU_NUMERIC_KIND__NAN ||
+			datum_b->kind == XPU_NUMERIC_KIND__NAN)
 		{
-			if (datum_a.kind == XPU_NUMERIC_KIND__NAN ||
-				datum_a.kind == XPU_NUMERIC_KIND__NAN)
-			{
+			result->kind = XPU_NUMERIC_KIND__NAN;
+		}
+		else if (datum_a->kind == XPU_NUMERIC_KIND__POS_INF)
+		{
+			int		__sign = xpu_numeric_sign(datum_b);
+			if (__sign == 1)
+				result->kind = XPU_NUMERIC_KIND__NEG_INF;
+			else if (__sign == -1)
+				result->kind = XPU_NUMERIC_KIND__POS_INF;
+			else if (__sign != 0)
 				result->kind = XPU_NUMERIC_KIND__NAN;
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__POS_INF)
-			{
-				int		__sign = xpu_numeric_sign(&datum_b);
-
-				if (__sign < 0)
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-				else if (__sign > 0)
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				else
-					result->kind = XPU_NUMERIC_KIND__NAN;
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__NEG_INF)
-			{
-				int		__sign = xpu_numeric_sign(&datum_b);
-
-				if (__sign < 0)
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				else if (__sign > 0)
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-				else
-					result->kind = XPU_NUMERIC_KIND__NAN;
-			}
-			else if (datum_b.kind == XPU_NUMERIC_KIND__POS_INF)
-			{
-				int		__sign = xpu_numeric_sign(&datum_a);
-
-				if (__sign < 0)
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-				else if (__sign > 0)
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				else
-					result->kind = XPU_NUMERIC_KIND__NAN;
-			}
 			else
 			{
-				int		__sign = xpu_numeric_sign(&datum_a);
+				STROM_ELOG(kcxt, "division by zero");
+				return false;
+			}
+		}
+		else if (datum_a->kind == XPU_NUMERIC_KIND__NEG_INF)
+		{
+			int		__sign = xpu_numeric_sign(datum_b);
 
-				if (__sign < 0)
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				else if (__sign > 0)
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-				else
-					result->kind = XPU_NUMERIC_KIND__NAN;
+			if (__sign == 1)
+				result->kind = XPU_NUMERIC_KIND__NEG_INF;
+			else if (__sign == -1)
+				result->kind = XPU_NUMERIC_KIND__POS_INF;
+			else if (__sign != 0)
+				result->kind = XPU_NUMERIC_KIND__NAN;
+			else
+			{
+				STROM_ELOG(kcxt, "division by zero");
+				return false;
 			}
 		}
 		else
 		{
-			set_normalized_numeric(result,
-								   datum_a.u.value * datum_b.u.value,
-								   datum_a.weight + datum_b.weight);
+			/* by here, datum_a must be finite, so datum_b is not */
+			set_normalized_numeric(result, 0, 0);
 		}
 	}
+	else if (datum_b->u.value == 0)
+	{
+		STROM_ELOG(kcxt, "division by zero");
+		return false;
+	}
+	else
+	{
+		int128_t	rem = datum_a->u.value;
+		int128_t	div = datum_b->u.value;
+		int128_t	x, ival = 0;
+		int16_t		weight = datum_a->weight - datum_b->weight;
+		bool		negative = false;
+
+		if (rem < 0)
+		{
+			rem = -rem;
+			if (div < 0)
+				div = -div;
+			else
+				negative = true;
+		}
+		else if (div < 0)
+		{
+			negative = true;
+			div = -div;
+		}
+		assert(rem >= 0 && div >= 0);
+		for (;;)
+		{
+			x = rem / div;
+			ival = 10 * ival + x;
+			rem -= x * div;
+			/*
+			 * 999,999,999,999,999 = 0x03 8D7E A4C6 7FFF
+			 */
+			if (rem == 0 || (ival >> 50) != 0)
+				break;
+			rem *= 10;
+			weight++;
+		}
+		if (negative)
+			ival = -ival;
+		set_normalized_numeric(result, ival, weight);
+	}
+	result->expr_ops = &xpu_numeric_ops;
 	return true;
 }
 
@@ -861,104 +986,73 @@ pgfn_numeric_div(XPU_PGFUNCTION_ARGS)
 	if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))
 		result->expr_ops = NULL;
 	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
-			 !xpu_numeric_validate(kcxt, &datum_b))
+			 !xpu_numeric_validate(kcxt, &datum_b) ||
+			 !__xpu_numeric_div(kcxt, result, &datum_a, &datum_b))
 	{
+		return false;
+	}
+	return true;
+}
+
+PUBLIC_FUNCTION(bool)
+__xpu_numeric_mod(kern_context *kcxt,
+				  xpu_numeric_t *result,
+				  xpu_numeric_t *datum_a,
+				  xpu_numeric_t *datum_b)
+{
+	assert(datum_a->kind != XPU_NUMERIC_KIND__VARLENA &&
+		   datum_b->kind != XPU_NUMERIC_KIND__VARLENA);
+	if (datum_a->kind != XPU_NUMERIC_KIND__VALID ||
+		datum_b->kind != XPU_NUMERIC_KIND__VALID)
+	{
+		if (datum_a->kind == XPU_NUMERIC_KIND__NAN ||
+			datum_b->kind == XPU_NUMERIC_KIND__NAN)
+		{
+			result->kind = XPU_NUMERIC_KIND__NAN;
+		}
+		else if (datum_a->kind == XPU_NUMERIC_KIND__POS_INF ||
+				 datum_a->kind == XPU_NUMERIC_KIND__NEG_INF)
+		{
+			if (datum_b->kind == XPU_NUMERIC_KIND__VALID &&
+				datum_b->u.value == 0)
+			{
+				STROM_ELOG(kcxt, "division by zero");
+				return false;
+			}
+			else
+			{
+				result->kind = XPU_NUMERIC_KIND__NAN;
+			}
+		}
+		else
+		{
+			/* num2 must be [-]Inf; result is num1 regardless of sign of num2 */
+			result->kind = datum_b->kind;
+			result->u.value = datum_b->u.value;
+		}
+	}
+	else if (datum_b->u.value == 0)
+	{
+		STROM_ELOG(kcxt, "division by zero");
 		return false;
 	}
 	else
 	{
-		result->expr_ops = &xpu_numeric_ops;
-
-		if (datum_a.kind != XPU_NUMERIC_KIND__VALID ||
-			datum_b.kind != XPU_NUMERIC_KIND__VALID)
+		while (datum_a->weight > datum_b->weight)
 		{
-			if (datum_a.kind == XPU_NUMERIC_KIND__NAN ||
-				datum_b.kind == XPU_NUMERIC_KIND__NAN)
-			{
-				result->kind = XPU_NUMERIC_KIND__NAN;
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__POS_INF)
-			{
-				int		__sign = xpu_numeric_sign(&datum_b);
-				if (__sign == 1)
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-				else if (__sign == -1)
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				else if (__sign != 0)
-					result->kind = XPU_NUMERIC_KIND__NAN;
-				else
-				{
-					STROM_ELOG(kcxt, "division by zero");
-					return false;
-				}
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__NEG_INF)
-			{
-				int		__sign = xpu_numeric_sign(&datum_b);
-
-				if (__sign == 1)
-					result->kind = XPU_NUMERIC_KIND__NEG_INF;
-				else if (__sign == -1)
-					result->kind = XPU_NUMERIC_KIND__POS_INF;
-				else if (__sign != 0)
-					result->kind = XPU_NUMERIC_KIND__NAN;
-				else
-				{
-					STROM_ELOG(kcxt, "division by zero");
-					return false;
-				}
-			}
-			else
-			{
-				/* by here, datum_a must be finite, so datum_b is not */
-				set_normalized_numeric(result, 0, 0);
-			}
+			datum_b->u.value *= 10;
+			datum_b->weight++;
 		}
-		else if (datum_b.u.value == 0)
+		while (datum_a->weight < datum_b->weight)
 		{
-			STROM_ELOG(kcxt, "division by zero");
-			return false;
+			datum_a->u.value *= 10;
+			datum_a->weight++;
 		}
-		else
-		{
-			int128_t	rem = datum_a.u.value;
-			int128_t	div = datum_b.u.value;
-			int128_t	x, ival = 0;
-			int16_t		weight = datum_a.weight - datum_b.weight;
-			bool		negative = false;
-
-			if (rem < 0)
-			{
-				rem = -rem;
-				if (div < 0)
-					div = -div;
-				else
-					negative = true;
-			}
-			else if (div < 0)
-			{
-				negative = true;
-				div = -div;
-			}
-			assert(rem >= 0 && div >= 0);
-			for (;;)
-			{
-				x = rem / div;
-				ival = 10 * ival + x;
-				rem -= x * div;
-				/*
-				 * 999,999,999,999,999 = 0x03 8D7E A4C6 7FFF
-				 */
-				if (rem == 0 || (ival >> 50) != 0)
-					break;
-				rem *= 10;
-				weight++;
-			}
-			if (negative)
-				ival = -ival;
-			set_normalized_numeric(result, ival, weight);
-		}
+		set_normalized_numeric(result,
+							   datum_a->u.value % datum_b->u.value,
+							   datum_a->weight);
 	}
+	result->expr_ops = &xpu_numeric_ops;
 	return true;
 }
 
@@ -970,64 +1064,10 @@ pgfn_numeric_mod(XPU_PGFUNCTION_ARGS)
 	if (XPU_DATUM_ISNULL(&datum_a) || XPU_DATUM_ISNULL(&datum_b))
 		result->expr_ops = NULL;
 	else if (!xpu_numeric_validate(kcxt, &datum_a) ||
-			 !xpu_numeric_validate(kcxt, &datum_b))
+			 !xpu_numeric_validate(kcxt, &datum_b) ||
+			 !__xpu_numeric_mod(kcxt, result, &datum_a, &datum_b))
 	{
 		return false;
-	}
-	else
-	{
-		result->expr_ops = &xpu_numeric_ops;
-
-		if (datum_a.kind != XPU_NUMERIC_KIND__VALID ||
-			datum_b.kind != XPU_NUMERIC_KIND__VALID)
-		{
-			if (datum_a.kind == XPU_NUMERIC_KIND__NAN ||
-				datum_b.kind == XPU_NUMERIC_KIND__NAN)
-			{
-				result->kind = XPU_NUMERIC_KIND__NAN;
-			}
-			else if (datum_a.kind == XPU_NUMERIC_KIND__POS_INF ||
-					 datum_a.kind == XPU_NUMERIC_KIND__NEG_INF)
-			{
-				if (datum_b.kind == XPU_NUMERIC_KIND__VALID &&
-					datum_b.u.value == 0)
-				{
-					STROM_ELOG(kcxt, "division by zero");
-					return false;
-				}
-				else
-				{
-					result->kind = XPU_NUMERIC_KIND__NAN;
-				}
-			}
-			else
-			{
-				/* num2 must be [-]Inf; result is num1 regardless of sign of num2 */
-				result->kind = datum_b.kind;
-				result->u.value = datum_b.u.value;
-			}
-		}
-		else if (datum_b.u.value == 0)
-		{
-			STROM_ELOG(kcxt, "division by zero");
-			return false;
-		}
-		else
-		{
-			while (datum_a.weight > datum_b.weight)
-			{
-				datum_b.u.value *= 10;
-				datum_b.weight++;
-			}
-			while (datum_a.weight < datum_b.weight)
-			{
-				datum_a.u.value *= 10;
-				datum_a.weight++;
-			}
-			set_normalized_numeric(result,
-								   datum_a.u.value % datum_b.u.value,
-								   datum_a.weight);
-		}
 	}
 	return true;
 }
