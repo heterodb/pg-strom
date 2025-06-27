@@ -5835,100 +5835,6 @@ __gpuservHandleGpuScanJoinFinal(gpuClient *gclient,
 }
 
 static bool
-__gpuservHandleSelectIntoDirectFlush(gpuClient *gclient, XpuCommand *resp)
-{
-	gpuQueryBuffer *gq_buf = gclient->gq_buf;
-	kern_session_info *session = gclient->h_session;
-	const char *base_fname = ((char *)session + session->select_into_pathname);
-	int			heap_fdesc = -1;
-	off_t		heap_fpos = 0;
-	char	   *heap_fname = alloca(strlen(base_fname) + 20);
-
-	for (int i=0; i < gq_buf->gpumem_nitems; i++)
-	{
-		kern_data_store *__kds = (kern_data_store *)gq_buf->gpumem_devptrs[i];
-		const char *curr_pos;
-		size_t		remained;
-
-		if (!__kds)
-			continue;
-		if (gq_buf->gpumem_kinds[i] != GQBUF_KIND__FINAL_HEAP_BLOCK_BUFFER)
-			continue;
-		assert(__kds->format == KDS_FORMAT_BLOCK);
-		(void)cuMemPrefetchAsync((CUdeviceptr)__kds,
-								 __kds->block_offset +
-								 __kds->nitems * BLCKSZ,
-								 CU_DEVICE_CPU,
-								 MY_STREAM_PER_THREAD);
-		/* write chunk of the KDS */
-		curr_pos = (const char *)__kds + __kds->block_offset;
-		remained = (__kds->nitems * BLCKSZ);
-		while (remained > 0)
-		{
-			ssize_t	nbytes, sz;
-
-			if (heap_fdesc < 0)
-			{
-				if (gq_buf->select_into_segno == 0)
-					sprintf(heap_fname, "%s", base_fname);
-				else
-					sprintf(heap_fname, "%s.%u", base_fname,
-							gq_buf->select_into_segno);
-				heap_fdesc = open(heap_fname, O_WRONLY | O_CREAT, 0600);
-				if (heap_fdesc < 0)
-				{
-					gpuClientELog(gclient, "failed on open('%s'): %m",
-								  heap_fname);
-					return false;
-				}
-				heap_fpos = lseek(heap_fdesc, 0, SEEK_END);
-				if (heap_fpos < 0 || (heap_fpos & (BLCKSZ-1)) != 0)
-				{
-					close(heap_fdesc);
-					gpuClientELog(gclient, "failed on lseek('%s', 0, SEEK_END) = %ld",
-								  heap_fname, heap_fpos);
-					return false;
-				}
-			}
-			if (heap_fpos >= BLCKSZ * RELSEG_SIZE)
-			{
-				close(heap_fdesc);
-				/* switch to the next heap segment */
-				sprintf(heap_fname, "%s.%u", base_fname,
-						++gq_buf->select_into_segno);
-				heap_fdesc = open(heap_fname, O_WRONLY | O_CREAT, 0600);
-				if (heap_fdesc < 0)
-				{
-					close(heap_fdesc);
-					gpuClientELog(gclient, "failed on open('%s'): %m",
-								  heap_fname);
-					return false;
-				}
-				heap_fpos = 0;
-			}
-			sz = Min(remained, BLCKSZ * RELSEG_SIZE - heap_fpos);
-			nbytes = write(heap_fdesc, curr_pos, sz);
-			fprintf(stderr, "write '%s' %ld bytes\n", heap_fname, nbytes);
-			if (nbytes <= 0)
-			{
-				if (errno == EINTR)
-					continue;
-				close(heap_fdesc);
-				gpuClientELog(gclient, "failed on write('%s', sz=%ld): %m",
-							  heap_fname, sz);
-				return false;
-			}
-			curr_pos += nbytes;
-			heap_fpos += nbytes;
-			remained -= nbytes;
-		}
-	}
-	if (heap_fdesc >= 0)
-		close(heap_fdesc);
-	return true;
-}
-
-static bool
 __selectIntoDirectWriteKDS(gpuClient *gclient,
 						   kern_data_store *kds_heap,
 						   const char *base_fname)
@@ -5941,6 +5847,13 @@ __selectIntoDirectWriteKDS(gpuClient *gclient,
 	size_t		remained = Min(kds_heap->nitems, RELSEG_SIZE) * BLCKSZ;
 	bool		retval = false;
 
+	/* prefetch KDS onto the CPU memory */
+	assert(kds_heap->format == KDS_FORMAT_BLOCK);
+	(void)cuMemPrefetchAsync((CUdeviceptr)kds_heap,
+							 kds_heap->block_offset +
+							 Min(kds_heap->nitems, RELSEG_SIZE) * BLCKSZ,
+							 CU_DEVICE_CPU,
+							 MY_STREAM_PER_THREAD);
 	while (remained > 0)
 	{
 		ssize_t	nbytes, sz;
@@ -6002,6 +5915,27 @@ bailout:
 	if (heap_fdesc >= 0)
 		close(heap_fdesc);
 	return retval;
+}
+
+static bool
+__gpuservHandleSelectIntoDirectFlush(gpuClient *gclient, XpuCommand *resp)
+{
+	gpuQueryBuffer *gq_buf = gclient->gq_buf;
+	kern_session_info *session = gclient->h_session;
+	const char *base_fname = ((char *)session + session->select_into_pathname);
+
+	for (int i=0; i < gq_buf->gpumem_nitems; i++)
+	{
+		kern_data_store *__kds = (kern_data_store *)gq_buf->gpumem_devptrs[i];
+
+		if (!__kds)
+			continue;
+		if (gq_buf->gpumem_kinds[i] != GQBUF_KIND__FINAL_HEAP_BLOCK_BUFFER)
+			continue;
+		if (!__selectIntoDirectWriteKDS(gclient, __kds, base_fname))
+			return false;
+	}
+	return true;
 }
 
 static bool
@@ -6075,12 +6009,10 @@ __gpuservHandleSelectIntoDirectWrite(gpuClient *gclient,
 		kds_heap->nitems = 0;
 
 		/* prefetch buffer to GPU */
-		rc = cuMemPrefetchAsync((CUdeviceptr)kds_heap,
-								kds_head->length,
-								gcontext->cuda_device,
-								MY_STREAM_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-			goto bailout;
+		(void)cuMemPrefetchAsync((CUdeviceptr)kds_heap,
+								 kds_head->length,
+								 gcontext->cuda_device,
+								 MY_STREAM_PER_THREAD);
 		/* launch GPU kernel */
 		m_session = gclient->__session[MY_DINDEX_PER_THREAD]->m_devptr;
 		kern_args[0] = &m_session;
@@ -6100,13 +6032,6 @@ __gpuservHandleSelectIntoDirectWrite(gpuClient *gclient,
 						  cuStrError(rc));
 			goto bailout;
 		}
-		/* prefetch buffer GPU->CPU */
-		rc = cuMemPrefetchAsync((CUdeviceptr)kds_heap,
-								kds_head->length,
-								CU_DEVICE_CPU,
-								MY_STREAM_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-			goto bailout;
 		/* wait for completion */
 		rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
         if (rc != CUDA_SUCCESS)
