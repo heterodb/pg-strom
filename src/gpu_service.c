@@ -57,7 +57,8 @@ struct gpuContext
 	CUfunction		cufn_windowrank_exec_dense_rank;
 	CUfunction		cufn_windowrank_finalize;
 	CUfunction		cufn_global_stair_sum_u32;
-	CUfunction		cufn_gpu_projection_block;
+	CUfunction		cufn_gpu_projection_block_phase1;
+	CUfunction		cufn_gpu_projection_block_phase3;
 	int				gpumain_shmem_sz_limit;
 	xpu_encode_info *cuda_encode_catalog;
 	gpuMemoryPool	pool_raw;
@@ -2621,8 +2622,8 @@ out:
  */
 static bool
 __writeOutGpuQueryScanJoinBuffer(gpuClient *gclient,
-							   gpuQueryBuffer *gq_buf,
-							   kern_data_store *kds_dst_old)
+								 gpuQueryBuffer *gq_buf,
+								 kern_data_store *kds_dst_old)
 {
 	int		select_into_segno = -1;
 	bool	retval = false;
@@ -2719,7 +2720,6 @@ out:
 		}
 		close(heap_fdesc);
 		(void)cuMemFree((CUdeviceptr)kds_dst_old);
-		fprintf(stderr, "heap '%s' was written\n", heap_fname);
 	}
 	return retval;
 }
@@ -5939,6 +5939,70 @@ __gpuservHandleSelectIntoDirectFlush(gpuClient *gclient, XpuCommand *resp)
 }
 
 static bool
+__selectIntoDirectSetupAndWriteKDS(gpuClient *gclient,
+								   kern_gputask *kgtask,
+								   kern_data_store *kds_final,
+								   kern_data_store *kds_heap,
+								   uint32_t start, uint32_t end,
+								   const char *base_fname)
+{
+	gpuContext *gcontext = GpuWorkerCurrentContext;
+	CUdeviceptr	m_session = gclient->__session[MY_DINDEX_PER_THREAD]->m_devptr;
+	CUresult	rc;
+	int			grid_sz;
+	int			block_sz;
+	void	   *kern_args[6];
+
+	/* ensure all writes are visible to others */
+	__atomic_thread_fense();
+
+	/* -----------------------------------------------
+	 * phase-3 - setup heap block buffer, and write
+	 * ----------------------------------------------- */
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 gcontext->cufn_gpu_projection_block_phase3, 0);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s", cuStrError(rc));
+		return false;
+	}
+	kern_args[0] = &m_session;
+	kern_args[1] = &kgtask;
+	kern_args[2] = &kds_final;	/* source */
+	kern_args[3] = &kds_heap;	/* destination */
+	kern_args[4] = &start;
+	kern_args[5] = &end;
+	rc = cuLaunchKernel(gcontext->cufn_gpu_projection_block_phase3,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						MY_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+					  cuStrError(rc));
+		return false;
+	}
+	/* prefetch buffer to CPU */
+	(void)cuMemPrefetchAsync((CUdeviceptr)kds_heap,
+							 kds_heap->block_offset +
+							 kds_heap->nitems * BLCKSZ,
+							 CU_DEVICE_CPU,
+							 MY_STREAM_PER_THREAD);
+	rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+					  cuStrError(rc));
+		return false;
+	}
+	return __selectIntoDirectWriteKDS(gclient, kds_heap, base_fname);
+}
+
+static bool
 __gpuservHandleSelectIntoDirectWrite(gpuClient *gclient,
 									 XpuCommand *resp,
 									 kern_data_store *kds_final)
@@ -5946,38 +6010,35 @@ __gpuservHandleSelectIntoDirectWrite(gpuClient *gclient,
 	gpuQueryBuffer *gq_buf = gclient->gq_buf;
 	gpuContext	   *gcontext = GpuWorkerCurrentContext;
 	const kern_session_info *session = gclient->h_session;
+	kern_select_into_tuple_desc *si_tup_array;
 	const char	   *base_fname = ((char *)session + session->select_into_pathname);
+	CUdeviceptr		m_session = gclient->__session[MY_DINDEX_PER_THREAD]->m_devptr;
 	gpuMemChunk	   *tchunk = NULL;
-	size_t			tchunk_sz;
 	kern_gputask   *kgtask;
 	kern_data_store *kds_head;
 	kern_data_store *kds_heap;
-	CUdeviceptr		m_devptr;
-	CUdeviceptr		m_session;
 	CUresult		rc;
 	int				grid_sz;
 	int				block_sz;
-	void		   *kern_args[4];
+	void		   *kern_args[6];
+	BlockNumber		block_no = 0;
+	uint32_t		start = 0;
+	uint32_t		lp_usage = 0;
+	uint32_t		lp_index = 0;
 	bool			retval = false;
 
-	/* kernel parameter */
-	rc = gpuOptimalBlockSize(&grid_sz,
-							 &block_sz,
-							 gcontext->cufn_gpu_projection_block, 0);
-	if (rc != CUDA_SUCCESS)
-	{
-		gpuClientFatal(gclient, "failed on gpuOptimalBlockSize: %s",
-					   cuStrError(rc));
-		goto bailout;
-	}
-
+	/*
+	 * -----------------------------------------------
+	 * phase-1 - estimation of the tuple size for each
+	 * -----------------------------------------------
+	 */
 	/* heap block buffer allocation */
 	kds_head = (kern_data_store *)
 		((char *)session + session->select_into_kds_head);
 	assert(kds_head->length == kds_head->block_offset + BLCKSZ * RELSEG_SIZE &&
 		   kds_head->block_offset == TYPEALIGN(BLCKSZ, kds_head->block_offset));
 	rc = allocGpuQueryBuffer(gq_buf,
-							 &m_devptr,
+							 (CUdeviceptr *)&kds_heap,
 							 kds_head->length,
 							 GQBUF_KIND__FINAL_HEAP_BLOCK_BUFFER);
 	if (rc != CUDA_SUCCESS)
@@ -5986,12 +6047,19 @@ __gpuservHandleSelectIntoDirectWrite(gpuClient *gclient,
 					  kds_head->length, cuStrError(rc));
 		goto bailout;
 	}
-	kds_heap = (kern_data_store *)m_devptr;
 	memcpy(kds_heap, kds_head, KDS_HEAD_LENGTH(kds_head));
+	/* control structure allocation */
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 gcontext->cufn_gpu_projection_block_phase1, 0);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on gpuOptimalBlockSize: %s", cuStrError(rc));
+		goto bailout;
+	}
 
-	/* kern_gputask */
-	tchunk_sz = offsetof(kern_gputask, stats) + sizeof(uint32_t) * grid_sz;
-	tchunk = gpuMemAllocManaged(tchunk_sz);
+	tchunk = gpuMemAllocManaged(offsetof(kern_gputask, stats) +
+								sizeof(kern_select_into_tuple_desc) * kds_final->nitems);
 	if (!tchunk)
 	{
 		gpuClientELog(gclient, "failed on gpuMemAllocManaged: %s",
@@ -5999,59 +6067,117 @@ __gpuservHandleSelectIntoDirectWrite(gpuClient *gclient,
 		goto bailout;
 	}
 	kgtask = (kern_gputask *)tchunk->m_devptr;
-	memset(kgtask, 0, tchunk_sz);
+	memset(kgtask, 0, offsetof(kern_gputask, stats));
 	kgtask->grid_sz = grid_sz;
-    kgtask->block_sz = block_sz;
+	kgtask->block_sz = block_sz;
 	kgtask->cuda_dindex = MY_DINDEX_PER_THREAD;
-    kgtask->cuda_stack_limit = GpuWorkerCurrentContext->cuda_stack_limit;
-	do {
-		memset(&kgtask->kerror, 0, sizeof(kern_errorbuf));
-		kds_heap->nitems = 0;
+	kgtask->cuda_stack_limit = GpuWorkerCurrentContext->cuda_stack_limit;
+	si_tup_array = (kern_select_into_tuple_desc *)kgtask->stats;
 
-		/* prefetch buffer to GPU */
-		(void)cuMemPrefetchAsync((CUdeviceptr)kds_heap,
-								 kds_head->length,
-								 gcontext->cuda_device,
-								 MY_STREAM_PER_THREAD);
-		/* launch GPU kernel */
-		m_session = gclient->__session[MY_DINDEX_PER_THREAD]->m_devptr;
-		kern_args[0] = &m_session;
-		kern_args[1] = &kgtask;
-		kern_args[2] = &kds_final;	/* source */
-		kern_args[3] = &kds_heap;	/* destination */
-		rc = cuLaunchKernel(gcontext->cufn_gpu_projection_block,
-							grid_sz, 1, 1,
-							block_sz, 1, 1,
-							0,
-							MY_STREAM_PER_THREAD,
-							kern_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
+	/* launch GPU kernel (phase-1) */
+	kern_args[0] = &m_session;
+	kern_args[1] = &kgtask;
+	kern_args[2] = &kds_final;	/* source */
+	kern_args[3] = &kds_heap;	/* destination */
+	rc = cuLaunchKernel(gcontext->cufn_gpu_projection_block_phase1,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						MY_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
+					  cuStrError(rc));
+		goto bailout;
+	}
+	/* prefetch buffer to CPU */
+	(void)cuMemPrefetchAsync((CUdeviceptr)kgtask,
+							 tchunk->__length,
+							 CU_DEVICE_CPU,
+							 MY_STREAM_PER_THREAD);
+	rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
+					  cuStrError(rc));
+		goto bailout;
+	}
+
+	/*
+	 * -----------------------------------------------
+	 * phase-2 - allocation of the heap block buffer
+	 * -----------------------------------------------
+	 */
+	for (uint32_t index=0; index < kds_final->nitems; index++)
+	{
+		kern_select_into_tuple_desc si_tup = si_tup_array[index];
+		int		tupsz = MAXALIGN(si_tup.lp_len);
+
+		if (offsetof(PageHeaderData,
+					 pd_linp[lp_index+1])
+			+ tupsz
+			+ lp_usage <= BLCKSZ)
 		{
-			gpuClientELog(gclient, "failed on cuLaunchKernel: %s",
-						  cuStrError(rc));
+			/* tuple can be written to the current page */
+			lp_usage += tupsz;
+			si_tup.lp_off = BLCKSZ - lp_usage;
+			si_tup.lp_index = lp_index++;
+			si_tup.block_no = block_no;
+			si_tup.init_hpage = false;
+		}
+		else if (offsetof(PageHeaderData,
+						  pd_linp[1])
+				 + tupsz <= BLCKSZ)
+		{
+			/* mark init_hpage */
+			if (start < index)
+				si_tup_array[index-1].init_hpage = true;
+			/* tuple can be written to the new page */
+			lp_usage = tupsz;
+			lp_index = 0;
+			block_no++;
+			if (block_no == RELSEG_SIZE)
+			{
+				kds_heap->nitems = block_no;
+				if (!__selectIntoDirectSetupAndWriteKDS(gclient,
+														kgtask,
+														kds_final,
+														kds_heap,
+														start, index,
+														base_fname))
+					goto bailout;
+				block_no = 0;
+				start = index;
+			}
+			/* tuple can be written to the new page */
+			si_tup.lp_off = BLCKSZ - lp_usage;
+			si_tup.lp_index = lp_index++;
+			si_tup.block_no = block_no;
+			si_tup.init_hpage = false;
+		}
+		else
+		{
+			gpuClientELog(gclient, "tuple size too large for SELECT INTO Direct");
 			goto bailout;
 		}
-		/* wait for completion */
-		rc = cuStreamSynchronize(MY_STREAM_PER_THREAD);
-        if (rc != CUDA_SUCCESS)
-		{
-			gpuClientELog(gclient, "failed on cuStreamSynchronize: %s",
-						  cuStrError(rc));
+		si_tup_array[index] = si_tup;
+	}
+	/* flush remained buffer (phase-3) */
+	if (start < kds_final->nitems)
+	{
+		/* setup the last page */
+		si_tup_array[kds_final->nitems-1].init_hpage = true;
+		kds_heap->nitems = block_no + 1;
+		if (!__selectIntoDirectSetupAndWriteKDS(gclient,
+												kgtask,
+												kds_final,
+												kds_heap,
+												start, kds_final->nitems,
+												base_fname))
 			goto bailout;
-		}
-		if (kgtask->kerror.errcode != ERRCODE_STROM_SUCCESS &&
-			kgtask->kerror.errcode != ERRCODE_SUSPEND_NO_SPACE)
-		{
-			__gpuClientELogRaw(gclient, &kgtask->kerror);
-			goto bailout;
-		}
-		/* write out to the destination file */
-		if (!__selectIntoDirectWriteKDS(gclient,
-										kds_heap,
-										base_fname))
-			goto bailout;
-	} while (kgtask->kerror.errcode != ERRCODE_STROM_SUCCESS);
+	}
 	retval = true;
 bailout:
 	if (tchunk)
@@ -6634,8 +6760,10 @@ gpuservSetupGpuModule(gpuContext *gcontext)
 								  cufn_windowrank_finalize);
 	__GPU_KERNEL_RESOLVE_FUNCTION(kern_global_stair_sum_u32,
 								  cufn_global_stair_sum_u32);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpu_projection_block,
-								  cufn_gpu_projection_block);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpu_projection_block_phase1,
+								  cufn_gpu_projection_block_phase1);
+	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpu_projection_block_phase3,
+								  cufn_gpu_projection_block_phase3);
 #undef __GPU_KERNEL_RESOLVE_FUNCTION
 	/* setup CUDA shared memory parameters */
 	rc = cuFuncGetAttribute(&shmem_sz_static,

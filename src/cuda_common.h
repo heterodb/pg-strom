@@ -154,7 +154,7 @@ typedef struct {
 		uint32_t	nitems_roj;		/* nitems of RIGHT-OUTER-JOIN tuples */
 		uint32_t	nitems_gist;	/* nitems picked up by GiST index */
 		uint32_t	nitems_out;		/* nitems after this depth */
-	} stats[1];		/* 'n_rels' items */
+	} stats[1]		__attribute__ ((aligned(8)));		/* 'n_rels' items */
 	/*
 	 * variable length fields
 	 * +-----------------------------------+  <---  __KERN_GPUTASK_WARP_OFFSET()
@@ -362,5 +362,32 @@ typedef struct {
 	 ((nitems) > (1<<22) ? (((nitems) + ((1<<22)-1)) >> 22) : 0))
 #define GPUSORT_WINDOWRANK_RESULTS_NSTEPS(nitems)						\
 	((nitems) <= (1<<11) ? 1 : ((nitems) <= (1<<22) ? 3 : 5))
+
+/*
+ * SELECT-INTO at the finalization process
+ */
+typedef struct {
+	uint64_t	lp_len:15,			/* payload length (set by phase-1) */
+				lp_off:15,			/* offset in the page (set by phase-2) */
+				heap_hasnull:1,		/* T if NULL exists (set by phase-1) */
+				heap_hasvarwidth:1,	/* T if varlena contained (set by phase-1) */
+				lp_index:12,		/* index in the page (set by phase-2) */
+				block_no:19,		/* block number in the segment (set by phase-2) */
+				init_hpage:1;		/* T if thread must initialize the page (set by phase-2) */
+} kern_select_into_tuple_desc;
+
+INLINE_FUNCTION(void)
+__initKdsBlockHeapPage(PageHeaderData *hpage, int lp_index, int lp_offset)
+{
+	assert(offsetof(PageHeaderData,
+					pd_linp[lp_index]) + lp_offset <= BLCKSZ);
+	hpage->pd_checksum = 0;
+	hpage->pd_flags = 0;
+	hpage->pd_lower = offsetof(PageHeaderData, pd_linp[lp_index]);
+	hpage->pd_upper = lp_offset;
+	hpage->pd_special = BLCKSZ;
+	hpage->pd_pagesize_version = (BLCKSZ | PG_PAGE_LAYOUT_VERSION);
+	hpage->pd_prune_xid = 0;
+}
 
 #endif	/* CUDA_COMMON_H */

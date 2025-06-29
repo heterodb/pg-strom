@@ -2279,7 +2279,7 @@ simple_form_heap_tuple(kern_context *kcxt,
 	uint32_t   *attrs;	/* offset */
 	int			ncols = (titem->t_infomask2 & HEAP_NATTS_MASK);
 	uint32_t	t_hoff = (titem->t_hoff - MINIMAL_TUPLE_OFFSET);
-	uint16_t	t_infomask = *p_t_infomask;
+	uint16_t	t_infomask = 0;
 	char	   *base = NULL;
 	int			head_sz;
 
@@ -2316,9 +2316,7 @@ simple_form_heap_tuple(kern_context *kcxt,
 	{
 		int		__off = offsetof(HeapTupleHeaderData, t_bits);
 
-		htup->t_infomask2 = af_proj->nattrs;
-		htup->t_infomask = t_infomask;
-		if ((t_infomask & HEAP_HASNULL) != 0)
+		if ((htup->t_infomask & HEAP_HASNULL) != 0)
 		{
 			nullmap = htup->t_bits;
 			memset(nullmap, 0, BITMAPLEN(af_proj->nattrs));
@@ -2488,31 +2486,25 @@ simple_form_heap_tuple(kern_context *kcxt,
 		}
 	}
 	/* ok */
-	*p_t_infomask = t_infomask;
+	if (p_t_infomask)
+		*p_t_infomask = t_infomask;
 	head_sz = offsetof(HeapTupleHeaderData, t_bits);
 	if ((t_infomask & HEAP_HASNULL) != 0)
 		head_sz += BITMAPLEN(af_proj->nattrs);
 	return MAXALIGN(head_sz) + t_hoff;
 }
 
-#define GPUPROJ_BLOCK_CURR_POS(kgtask)			\
-	((uint32_t *)(kgtask)->stats)[get_group_id()]
-
 KERNEL_FUNCTION(void)
-kern_gpu_projection_block(kern_session_info *session,
-						  kern_gputask *kgtask,
-						  kern_data_store *kds_src,
-						  kern_data_store *kds_dst)
+kern_gpu_projection_block_phase1(kern_session_info *session,
+								 kern_gputask *kgtask,
+								 kern_data_store *kds_src,
+								 kern_data_store *kds_dst)
 {
 	const kern_aggfinal_projection_desc *af_proj = SESSION_SELECT_INTO_PROJDESC(session);
-	uint32_t		curr_pos = GPUPROJ_BLOCK_CURR_POS(kgtask);
-	uint32_t		start    = (curr_pos / get_local_size());
-	uint32_t		nwritten = (curr_pos % get_local_size());
-	uint32_t		base;
+	kern_select_into_tuple_desc *si_tuples_array = (kern_select_into_tuple_desc *)kgtask->stats;
 	kern_context   *kcxt;
 
 	/* sanity checks */
-	assert(get_local_size() <= CUDA_MAXTHREADS_PER_BLOCK);
 	assert(kds_src->format == KDS_FORMAT_ROW ||
 		   kds_src->format == KDS_FORMAT_HASH);
 	assert(kds_dst->format == KDS_FORMAT_BLOCK &&
@@ -2527,83 +2519,124 @@ kern_gpu_projection_block(kern_session_info *session,
 	}
 	/* setup execution context */
 	INIT_KERNEL_CONTEXT(kcxt, session, NULL);
-	for (base = start * get_global_size() + get_global_base();
-		 base < kds_src->nitems;
-		 base += get_global_size())
+	for (uint32_t index = get_global_id(); index < kds_src->nitems; index += get_global_size())
 	{
-		HeapTupleHeaderData *htup;
-		kern_tupitem *titem = NULL;
-		uint32_t	index = base + get_local_id();
-		uint32_t	ntuples = Min(kds_src->nitems - base, get_local_size());
-		uint32_t	tupsz = 0;
+		kern_tupitem *titem = KDS_GET_TUPITEM(kds_src, index);
+		kern_select_into_tuple_desc si_tup;
 		uint16_t	t_infomask = 0;
-		bool		needs_suspend = false;
+		int			tupsz;
 
-		if (index >= nwritten && index < kds_src->nitems)
+		if (!af_proj)
 		{
-			titem = KDS_GET_TUPITEM(kds_src, index);
-			if (!af_proj)
-				tupsz = MINIMAL_TUPLE_OFFSET + titem->t_len;
-			else
-				tupsz = simple_form_heap_tuple(kcxt,
-											   kds_src,
-											   titem,
-											   af_proj,
-											   kds_dst,
-											   NULL,
-											   &t_infomask);
+			tupsz = MINIMAL_TUPLE_OFFSET + titem->t_len;
+			t_infomask = titem->t_infomask;
 		}
-		if (!allocKdsBlockBufferOneTuple(kcxt,
-										 kds_dst,
-										 &ntuples,
-										 MAXALIGN(tupsz),
-										 &htup,
-										 &needs_suspend))
+		else
 		{
+			tupsz = simple_form_heap_tuple(kcxt,
+										   kds_src,
+										   titem,
+										   af_proj,
+										   kds_dst,
+										   NULL,
+										   &t_infomask);
+		}
+		if (tupsz < 0)
 			break;
-		}
-		if (htup)
-		{
-			const kern_session_info *session = kcxt->session;
-
-			htup->t_choice.t_heap.t_xmin = session->session_curr_xid;
-			htup->t_choice.t_heap.t_xmax = InvalidTransactionId;
-			htup->t_choice.t_heap.t_field3.t_cid = session->session_curr_cid;
-			htup->t_choice.t_datum.datum_typeid = kds_dst->tdtypeid;
-			htup->t_ctid.ip_blkid.bi_hi = 0xffff;
-			htup->t_ctid.ip_blkid.bi_lo = 0xffff;
-			htup->t_ctid.ip_posid = 0;
-			if (!af_proj)
-			{
-				memcpy(&htup->t_infomask2,
-					   &titem->t_infomask2,
-					   titem->t_len - offsetof(kern_tupitem, t_infomask2));
-			}
-			else
-			{
-				uint32_t	__sz	__attribute__((unused));
-
-				__sz = simple_form_heap_tuple(kcxt,
-											  kds_src,
-											  titem,
-											  af_proj,
-											  kds_dst,
-											  htup,
-											  &t_infomask);
-				assert(__sz == tupsz);
-			}
-		}
-
-		if (__syncthreads_count(needs_suspend) > 0)
-		{
-			curr_pos = (base / get_global_size()) * get_local_size() + ntuples;
-			goto out;
-		}
+		si_tup.lp_len = tupsz;
+		si_tup.lp_off = 0;		/* set by phase-2 */
+		si_tup.heap_hasnull = ((t_infomask & HEAP_HASNULL) != 0);
+		si_tup.heap_hasvarwidth = ((t_infomask & HEAP_HASVARWIDTH) != 0);
+		si_tup.lp_index = 0;	/* set by phase-2 */
+		si_tup.block_no = 0;	/* set by phase-2 */
+		si_tup.init_hpage = false; /* set by phase-2 */
+		si_tuples_array[index] = si_tup;
 	}
-	/* normal exit */
-	curr_pos = (base / get_global_size()) * get_local_size(); 
-out:
+	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
+}
+
+KERNEL_FUNCTION(void)
+kern_gpu_projection_block_phase3(kern_session_info *session,
+								 kern_gputask *kgtask,
+								 kern_data_store *kds_src,
+								 kern_data_store *kds_dst,
+								 uint32_t start,
+								 uint32_t end)
+{
+	const kern_aggfinal_projection_desc *af_proj = SESSION_SELECT_INTO_PROJDESC(session);
+	kern_select_into_tuple_desc *si_tuples_array = (kern_select_into_tuple_desc *)kgtask->stats;
+	kern_context   *kcxt;
+
+	/* sanity checks */
+	assert(kds_src->format == KDS_FORMAT_ROW ||
+		   kds_src->format == KDS_FORMAT_HASH);
+	assert(kds_dst->format == KDS_FORMAT_BLOCK &&
+		   kds_dst->block_offset >= KDS_HEAD_LENGTH(kds_dst));
+	/* save the GPU-Task specific read-only properties */
 	if (get_local_id() == 0)
-		GPUPROJ_BLOCK_CURR_POS(kgtask) = curr_pos;
+	{
+		stromTaskProp__cuda_dindex        = kgtask->cuda_dindex;
+		stromTaskProp__cuda_stack_limit   = kgtask->cuda_stack_limit;
+		stromTaskProp__partition_divisor  = kgtask->partition_divisor;
+		stromTaskProp__partition_reminder = kgtask->partition_reminder;
+	}
+	/* setup execution context */
+	INIT_KERNEL_CONTEXT(kcxt, session, NULL);
+	for (uint32_t index = start + get_global_id(); index < end; index += get_global_size())
+	{
+		kern_select_into_tuple_desc si_tup = si_tuples_array[index];
+		kern_tupitem   *titem = KDS_GET_TUPITEM(kds_src, index);
+		PageHeaderData *hpage;
+		ItemIdData		item;
+		HeapTupleHeaderData *htup;
+
+		assert(si_tup.block_no < kds_dst->nitems);
+		hpage = KDS_BLOCK_PGPAGE(kds_dst, si_tup.block_no);
+		if (si_tup.init_hpage)
+		{
+			__initKdsBlockHeapPage(hpage,
+								   si_tup.lp_index+1,
+								   si_tup.lp_off);
+		}
+		/* init heap-tuple */
+		htup = (HeapTupleHeaderData *)((char *)hpage + si_tup.lp_off);
+		htup->t_choice.t_heap.t_xmin = session->session_curr_xid;
+		htup->t_choice.t_heap.t_xmax = InvalidTransactionId;
+		htup->t_choice.t_heap.t_field3.t_cid = session->session_curr_cid;
+		htup->t_choice.t_datum.datum_typeid = kds_dst->tdtypeid;
+		htup->t_ctid.ip_blkid.bi_hi = 0xffff;
+		htup->t_ctid.ip_blkid.bi_lo = 0xffff;
+		htup->t_ctid.ip_posid = 0;
+		if (!af_proj)
+		{
+			assert(si_tup.lp_len == MINIMAL_TUPLE_OFFSET + titem->t_len);
+			memcpy(&htup->t_infomask2,
+				   &titem->t_infomask2,
+				   titem->t_len - offsetof(kern_tupitem, t_infomask2));
+		}
+		else
+		{
+			int			__sz			__attribute__((unused));
+			uint16_t	__t_infomask	__attribute__((unused));
+
+			htup->t_infomask = ((si_tup.heap_hasnull ? HEAP_HASNULL : 0) |
+								(si_tup.heap_hasvarwidth ? HEAP_HASVARWIDTH : 0));
+			htup->t_infomask2 = kds_dst->ncols;
+			__sz = simple_form_heap_tuple(kcxt,
+										  kds_src,
+										  titem,
+										  af_proj,
+										  kds_dst,
+										  htup,
+										  &__t_infomask);
+			assert(si_tup.lp_len == __sz);
+			assert(htup->t_infomask == __t_infomask);
+		}
+		/* put item */
+		item.lp_off = si_tup.lp_off;
+		item.lp_flags = LP_NORMAL;
+		item.lp_len = si_tup.lp_len;
+		hpage->pd_linp[si_tup.lp_index] = item;
+	}
 	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
 }

@@ -935,20 +935,6 @@ execGpuJoinProjectionNormal(kern_context *kcxt,
 	return n_rels + 1;		/* elsewhere, try again? */
 }
 
-INLINE_FUNCTION(void)
-__initKdsBlockHeapPage(PageHeaderData *hpage, int lp_index, int lp_offset)
-{
-	assert(lp_offset <= BLCKSZ &&
-		   offsetof(PageHeaderData, pd_linp[lp_index]) <= lp_offset);
-	hpage->pd_checksum = 0;
-	hpage->pd_flags = 0;
-	hpage->pd_lower = offsetof(PageHeaderData, pd_linp[lp_index]);
-	hpage->pd_upper = lp_offset;
-	hpage->pd_special = BLCKSZ;
-	hpage->pd_pagesize_version = (BLCKSZ | PG_PAGE_LAYOUT_VERSION);
-	hpage->pd_prune_xid = 0;
-}
-
 PUBLIC_FUNCTION(bool)
 allocKdsBlockBufferOneTuple(kern_context *kcxt,
 							kern_data_store *kds_dst,
