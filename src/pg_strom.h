@@ -401,6 +401,7 @@ typedef struct
 	pg_atomic_uint32	final_sorting_msec;			/* usec of GPU-sorting */
 	pg_atomic_uint32	final_reconstruction_msec;	/* usec of final buffer reconstruction */
 	pg_atomic_uint32	join_reconstruction_msec;	/* usec of inner buffer reconstruction */
+	pg_atomic_uint32	select_into_nblocks; /* # of blocks written by SELECT INTO direct */
 	pg_atomic_uint32	pinned_buffer_divisor; /* # of pinned-inner-buffer partitions */
 	/* for parallel-scan */
 	uint32_t			parallel_scan_desc_offset;

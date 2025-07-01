@@ -2760,6 +2760,7 @@ typedef struct {
 	uint32_t	final_sorting_msec;			/* usec for final buffer sorting */
 	uint32_t	final_reconstruction_msec;	/* usec for final buffer reconstruction */
 	uint32_t	join_reconstruction_msec;	/* usec for inner buffer reconstruction */
+	uint32_t	select_into_nblocks; /* number of blocks written by SELECT INTO direct */
 	/* statistics */
 	uint32_t	npages_direct_read;	/* # of pages read by GPU-Direct Storage */
 	uint32_t	npages_vfs_read;	/* # of pages read by VFS (fallback) */
