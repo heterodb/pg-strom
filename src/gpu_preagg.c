@@ -3383,7 +3383,8 @@ PlanDpuPreAggPath(PlannerInfo *root,
  * tryAddSelectIntoDirectProjection
  */
 bool
-tryAddSelectIntoDirectProjection(pgstromTaskState *pts)
+tryAddSelectIntoDirectProjection(pgstromTaskState *pts,
+								 List **p_select_into_proj)
 {
 	ProjectionInfo *projInfo = pts->css.ss.ps.ps_ProjInfo;
 	List	   *select_into_proj = NIL;
@@ -3468,7 +3469,7 @@ tryAddSelectIntoDirectProjection(pgstromTaskState *pts)
 		if (compatible)
 			select_into_proj = NIL;
 	}
-	pts->select_into_proj = select_into_proj;
+	*p_select_into_proj = select_into_proj;
 	return true;
 }
 

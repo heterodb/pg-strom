@@ -93,27 +93,4 @@ typedef Node *(*tree_mutator_callback) (Node *node, void *context);
 #define __windowAggPathGetRunCondition(wpath)	((wpath)->runCondition)
 #endif
 
-/*
- * MEMO: PostgreSQL v17 adds 'orstronger' flag for LockHeldByMe()
- * to control whether the caller accept stronger lock mode.
- */
-#if PG_VERSION_NUM < 170000
-INLINE_FUNCTION(bool)
-__LockHeldByMe(const LOCKTAG *locktag,
-			   LOCKMODE lockmode,
-			   bool orstronger)
-{
-	while (lockmode <= MaxLockMode)
-	{
-		if (LockHeldByMe(locktag, lockmode))
-			return true;
-		if (!orstronger)
-			break;
-		lockmode++;
-	}
-	return false;
-}
-#define LockHeldByMe(a,b,c)		__LockHeldByMe((a),(b),(c))
-#endif
-
 #endif	/* PG_COMPAT_H */

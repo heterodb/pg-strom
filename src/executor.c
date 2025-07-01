@@ -873,84 +873,53 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		session->fallback_desc_nitems = nitems;
 	}
 
-	/* SELECT INTO direct related */
-	if (pts->select_into_dest)
+	/* SELECT INTO Direct related */
+	if (OidIsValid(pp_info->select_into_relid))
 	{
-		/* see DR_intorel definition in commands/createas.c */
-		struct {
-			DestReceiver	pub;		/* publicly-known function pointers */
-			IntoClause	   *into;		/* target relation specification */
-			/* These fields are filled by intorel_startup: */
-			Relation		rel;		/* relation to write to */
-			ObjectAddress	reladdr;	/* address of rel, for ExecCreateTableAs */
-			CommandId		output_cid;	/* cmin to insert in output tuples */
-			int				ti_options;	/* table_tuple_insert performance options */
-			BulkInsertState	bistate;	/* bulk insert state */
-		}  *dest = (void *)pts->select_into_dest;
-		Relation			drel;
-		LOCKTAG				locktag;
+		Relation	drel    = relation_open(pp_info->select_into_relid,
+											AccessExclusiveLock);
+		TupleDesc	d_tdesc = d_tdesc = RelationGetDescr(drel);
+		size_t		head_sz = estimate_kern_data_store(d_tdesc);
+		kern_data_store *kds_temp = (kern_data_store *)alloca(head_sz);
+		Datum		pathname = DirectFunctionCall1(pg_relation_filepath,
+												   pp_info->select_into_relid);
 
-		Assert(dest->pub.mydest == DestIntoRel);
-		drel = dest->rel;
-		SET_LOCKTAG_RELATION(locktag, MyDatabaseId, RelationGetRelid(drel));
-		if (!LockHeldByMe(&locktag, AccessExclusiveLock, true))
-		{
-			elog(DEBUG2, "SELECT INTO Direct disabled, because of not sufficient table lock level");
-			pts->select_into_dest = NULL;
-		}
-		else if (RelationNeedsWAL(drel))
-		{
-			elog(DEBUG2, "SELECT INTO Direct disabled, because the table is neither temporary nor unlogged");
-			pts->select_into_dest = NULL;
-		}
-		else if (RelationGetForm(drel)->relam != HEAP_TABLE_AM_OID)
-		{
-			elog(DEBUG2, "SELECT INTO Direct disabled, because table access method is not 'heap'");
-			pts->select_into_dest = NULL;
-		}
-		else
-		{
-			TupleDesc	d_tdesc = RelationGetDescr(drel);
-			size_t		head_sz = estimate_kern_data_store(d_tdesc);
-			kern_data_store *kds_temp = (kern_data_store *)alloca(head_sz);
-			Datum		pathname = DirectFunctionCall1(pg_relation_filepath,
-													   RelationGetRelid(drel));
-			session->select_into_pathname =
-				__appendBinaryStringInfo(&buf, VARDATA_ANY(pathname),
-										 VARSIZE_ANY_EXHDR(pathname));
-			appendStringInfoChar(&buf, '\0');
+		Assert((pp_info->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0);
+		session->select_into_pathname =
+			__appendBinaryStringInfo(&buf, VARDATA_ANY(pathname),
+									 VARSIZE_ANY_EXHDR(pathname));
+		appendStringInfoChar(&buf, '\0');
 
-			setup_kern_data_store(kds_temp, d_tdesc, 0, KDS_FORMAT_BLOCK);
-			kds_temp->block_offset = TYPEALIGN(BLCKSZ, head_sz);
-			kds_temp->length = kds_temp->block_offset + BLCKSZ * RELSEG_SIZE;
-			session->select_into_kds_head =
-				__appendBinaryStringInfo(&buf, kds_temp, head_sz);
+		setup_kern_data_store(kds_temp, d_tdesc, 0, KDS_FORMAT_BLOCK);
+		kds_temp->block_offset = TYPEALIGN(BLCKSZ, head_sz);
+		kds_temp->length = kds_temp->block_offset + BLCKSZ * RELSEG_SIZE;
+		session->select_into_kds_head =
+			__appendBinaryStringInfo(&buf, kds_temp, head_sz);
 
-			if (pts->select_into_proj != NIL)
+		if (pp_info->select_into_proj != NIL)
+		{
+			kern_aggfinal_projection_desc *af_proj;
+			ListCell   *lc;
+			int			j = 0;
+			int			nattrs = list_length(pp_info->select_into_proj);
+			size_t		length = offsetof(kern_aggfinal_projection_desc,
+										  desc[nattrs]);
+			af_proj = alloca(length);
+			af_proj->nattrs = nattrs;
+			foreach (lc, pp_info->select_into_proj)
 			{
-				kern_aggfinal_projection_desc *af_proj;
-				ListCell   *lc;
-				int			nattrs = list_length(pts->select_into_proj);
-				int			j = 0;
-				size_t		length = offsetof(kern_aggfinal_projection_desc,
-											  desc[nattrs]);
-				af_proj = alloca(length);
-				af_proj->nattrs = nattrs;
-				foreach (lc, pts->select_into_proj)
-				{
-					int		code = lfirst_int(lc);
+				int		code = lfirst_int(lc);
 
-					af_proj->desc[j].action = (code >> 16);
-					af_proj->desc[j].resno = (code & 0xffffU);
-					j++;
-				}
-				session->select_into_projdesc =
-					__appendBinaryStringInfo(&buf, af_proj, length);
+				af_proj->desc[j].action = (code >> 16);
+				af_proj->desc[j].resno = (code & 0xffffU);
+				j++;
 			}
-			pts->xpu_task_flags |= DEVTASK__SELECT_INTO_DIRECT;
-			session_curr_xid = GetCurrentTransactionId();
-			session_curr_cid = GetCurrentCommandId(true);
+			session->select_into_projdesc =
+				__appendBinaryStringInfo(&buf, af_proj, length);
 		}
+		session_curr_xid = ps_state->pgsql_curr_xid;
+		session_curr_cid = ps_state->pgsql_curr_cid;
+		relation_close(drel, NoLock);
 	}
 	/* other database session information */
 	session->query_plan_id = ps_state->query_plan_id;
@@ -2349,6 +2318,8 @@ pgstromSharedStateInitDSM(CustomScanState *node,
 	}
 	ps_state->query_plan_id = ((uint64_t)MyProcPid) << 32 |
 		(uint64_t)pts->css.ss.ps.plan->plan_node_id;
+	ps_state->pgsql_curr_xid = GetCurrentTransactionIdIfAny();
+	ps_state->pgsql_curr_cid = GetCurrentCommandId(true);
 	ps_state->num_rels = num_rels;
 	ConditionVariableInit(&ps_state->preload_cond);
 	SpinLockInit(&ps_state->preload_mutex);
@@ -2494,29 +2465,29 @@ pgstromGpuDirectExplain(pgstromTaskState *pts,
 static void
 pgstromExplainSelectIntoDirect(pgstromTaskState *pts, List *dcontext, ExplainState *es)
 {
-	StringInfoData buf;
 	CustomScan *cscan = (CustomScan *)pts->css.ss.ps.plan;
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	StringInfoData buf;
 	ListCell   *lc;
 
-	if (!pts->select_into_dest)
-		return;
+	if ((pts->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) == 0)
+		return;		/* not supported */
 
 	initStringInfo(&buf);
-	if ((pts->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
-		appendStringInfoString(&buf, "enabled");
-	else
+	if (!OidIsValid(pp_info->select_into_relid))
 		appendStringInfoString(&buf, "possible");
-
-	if (pts->select_into_proj != NIL)
+	else if (pp_info->select_into_proj != NIL)
 	{
-		foreach (lc, pts->select_into_proj)
+		appendStringInfoString(&buf, "enabled");
+
+		foreach (lc, pp_info->select_into_proj)
 		{
 			int		fcode = (lfirst_int(lc) >> 16);
 			int		resno = (lfirst_int(lc) & 0x0000ffffU);
 			char   *str;
 			TargetEntry *tle;
 
-			if (lc == list_head(pts->select_into_proj))
+			if (lc == list_head(pp_info->select_into_proj))
 				appendStringInfo(&buf, "; projection=");
 			else
 				appendStringInfo(&buf, ", ");
@@ -2665,7 +2636,7 @@ pgstromExplainSelectIntoDirect(pgstromTaskState *pts, List *dcontext, ExplainSta
 	}
 	else
 	{
-		appendStringInfo(&buf, "; no projection");
+		appendStringInfo(&buf, " (no projection)");
 	}
 	ExplainPropertyText("SELECT-INTO Direct", buf.data, es);
 	pfree(buf.data);
@@ -3132,8 +3103,7 @@ pgstromExplainTaskState(CustomScanState *node,
 	/*
 	 * SELECT INTO direct mode
 	 */
-	if (pts->select_into_dest)
-		pgstromExplainSelectIntoDirect(pts, dcontext, es);
+	pgstromExplainSelectIntoDirect(pts, dcontext, es);
 
 	/*
 	 * Dump the XPU code (only if verbose)

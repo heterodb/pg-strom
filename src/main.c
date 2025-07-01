@@ -769,11 +769,61 @@ pgstrom_post_planner(Query *parse,
 }
 
 /*
+ * see DR_intorel definition in commands/createas.c
+ */
+typedef struct
+{
+	DestReceiver	pub;		/* publicly-known function pointers */
+	IntoClause	   *into;		/* target relation specification */
+	/* These fields are filled by intorel_startup: */
+	Relation		rel;		/* relation to write to */
+	ObjectAddress	reladdr;	/* address of rel, for ExecCreateTableAs */
+	CommandId		output_cid;	/* cmin to insert in output tuples */
+	int				ti_options;	/* table_tuple_insert performance options */
+	BulkInsertState	bistate;	/* bulk insert state */
+	/* --- below is PG-Strom original enhancement --- */
+	pgstromTaskState *pts;
+	List		   *select_into_proj;
+	void		  (*rStartup_orig) (DestReceiver *self,
+									int operation,
+									TupleDesc typeinfo);
+} DR_intorel_with_pgstrom;
+
+/*
+ * select_into_direct_on_startup
+ */
+static void
+select_into_direct_on_startup(DestReceiver *self,
+							  int operation,
+							  TupleDesc typeinfo)
+{
+	DR_intorel_with_pgstrom *dest = (DR_intorel_with_pgstrom *)self;
+	pgstromTaskState   *pts = dest->pts;
+
+	/* call the original dest-receiver startup */
+	dest->rStartup_orig(self, operation, typeinfo);
+
+	/* setup SELECT INTO direct related stuff */
+	if (dest->rel)
+	{
+		CustomScan		*cscan = (CustomScan *)pts->css.ss.ps.plan;
+		pgstromPlanInfo *pp_info = pts->pp_info;
+
+		pp_info->xpu_task_flags |= DEVTASK__SELECT_INTO_DIRECT;
+		pp_info->select_into_relid = RelationGetRelid(dest->rel);
+		pp_info->select_into_proj = dest->select_into_proj;
+		form_pgstrom_plan_info(cscan, pp_info);
+	}
+}
+
+/*
  * pgstrom_executor_start
  */
 static void
 pgstrom_executor_start(QueryDesc *queryDesc, int eflags)
 {
+	DR_intorel_with_pgstrom *dest = (DR_intorel_with_pgstrom *)queryDesc->dest;
+
 	if (executor_start_hook_next)
 		executor_start_hook_next(queryDesc, eflags);
 	else
@@ -782,53 +832,72 @@ pgstrom_executor_start(QueryDesc *queryDesc, int eflags)
 	 * check whether SELECT INTO direct mode is possible, or not.
 	 * also, see ExecCreateTableAs() for the related initializations.
 	 */
-	if (!pgstrom_enable_select_into_direct)
+	if (IsParallelWorker())
+		return;		/* only main process can check SELECT INTO Direct capability */
+	else if (!pgstrom_enable_select_into_direct)
 		elog(DEBUG2, "SELECT INTO Direct disabled: because of pg_strom.enable_select_into_direct parameter");
-	else if (queryDesc->dest->mydest != DestIntoRel)
-		elog(DEBUG2, "SELECT INTO Direct disabled: because dest-receiver is not DestIntoRel");
 	else if (pgstrom_cpu_fallback_elevel < ERROR)
 		elog(DEBUG2, "SELECT INTO Direct disabled: because CPU-fallback is enabled");
+	else if (dest->pub.mydest != DestIntoRel)
+		elog(DEBUG2, "SELECT INTO Direct disabled: because dest-receiver is not DestIntoRel");
+	else if (queryDesc->plannedstmt->hasReturning)
+		elog(DEBUG2, "SELECT INTO Direct disabled: because of RETURNING clause");
+	else if (dest->into->rel->relpersistence != RELPERSISTENCE_UNLOGGED &&
+			 dest->into->rel->relpersistence != RELPERSISTENCE_TEMP)
+		elog(DEBUG2, "SELECT INTO Direct disabled, because the table is neither temporary nor unlogged");
 	else
 	{
-		PlanState  *pstate = queryDesc->planstate;
-
-		if (IsA(pstate, GatherState))
-		{
-			if (pstate->ps_ProjInfo)
-			{
-				elog(DEBUG2, "SELECT INTO Direct disabled: Gather has projection");
-				return;
-			}
-			pstate = outerPlanState(pstate);
-		}
-		/* check top-level PlanState except for Gather node */
-		if (pgstrom_is_gpuscan_state(pstate) ||
-			pgstrom_is_gpujoin_state(pstate) ||
-			pgstrom_is_gpupreagg_state(pstate))
-		{
-			pgstromTaskState *pts = (pgstromTaskState *)pstate;
-
-			if ((pts->xpu_task_flags & DEVKIND__ANY) != DEVKIND__NVIDIA_GPU)
-				elog(DEBUG2, "SELECT INTO Direct disabled: because only GPU supports it");
-			else if (pts->css.ss.ps.qual)
-				elog(DEBUG2, "SELECT INTO Direct disabled: because of host qualifiers");
-			else if (tryAddSelectIntoDirectProjection(pts))
-			{
-				/*
-				 * This GPU-task can potentially run SELECT INTO direct mode.
-				 * After the DestReceiver::rStartup invocation at ExecutorRun(),
-				 * we must have the final check of ...
-				 * - whether the relation is unlogged or temporary
-				 * - whether the EXCLUSIVE lock is held
-				 * - whether the TAM (Table Access Method) is heap
-				 * at the first invocation of execution.
-				 */
-				pts->select_into_dest = queryDesc->dest;
-			}
-		}
+		/* only heap access method supports SELECT INTO Direct */
+		const char *accessMethod = (dest->into->accessMethod != NULL
+									? dest->into->accessMethod
+									: default_table_access_method);
+		if (get_table_am_oid(accessMethod, true) != HEAP_TABLE_AM_OID)
+			elog(DEBUG2, "SELECT INTO Direct disabled, because the table does not use heap AM");
 		else
 		{
-			elog(DEBUG2, "SELECT INTO Direct disabled: because top-level plan is not GPU-aware");
+			/* ok, it looks SELECT INTO allows direct mode */
+			PlanState  *pstate = queryDesc->planstate;
+
+			if (IsA(pstate, GatherState))
+			{
+				if (pstate->ps_ProjInfo)
+				{
+					elog(DEBUG2, "SELECT INTO Direct disabled: Gather has projection");
+					return;
+				}
+				pstate = outerPlanState(pstate);
+			}
+			/* check top-level PlanState except for Gather node */
+			if (pgstrom_is_gpuscan_state(pstate) ||
+				pgstrom_is_gpujoin_state(pstate) ||
+				pgstrom_is_gpupreagg_state(pstate))
+			{
+				pgstromTaskState *pts = (pgstromTaskState *)pstate;
+				List	   *select_into_proj = NIL;
+
+				if ((pts->xpu_task_flags & DEVKIND__ANY) != DEVKIND__NVIDIA_GPU)
+					elog(DEBUG2, "SELECT INTO Direct disabled: because only GPU supports it");
+				else if (pts->css.ss.ps.qual)
+					elog(DEBUG2, "SELECT INTO Direct disabled: because of host qualifiers");
+				else if (tryAddSelectIntoDirectProjection(pts, &select_into_proj))
+				{
+					/* OK, Let's run SELECT INTO Direct in GPU-Direct mode */
+					DR_intorel_with_pgstrom *copy = palloc(sizeof(*copy));
+
+					memcpy(copy, dest, offsetof(DR_intorel_with_pgstrom, pts));
+					copy->pts = pts;
+					copy->select_into_proj = select_into_proj;
+					copy->rStartup_orig = dest->pub.rStartup;
+					copy->pub.rStartup = select_into_direct_on_startup;
+					queryDesc->dest = &copy->pub;
+
+					pts->xpu_task_flags |= DEVTASK__SELECT_INTO_DIRECT;
+				}
+			}
+			else
+			{
+				elog(DEBUG2, "SELECT INTO Direct disabled: because top-level plan is not GPU-aware");
+			}
 		}
 	}
 }

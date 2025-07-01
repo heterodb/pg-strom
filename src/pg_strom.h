@@ -328,6 +328,9 @@ typedef struct
 	int			window_orderby_nkeys;	/* GPU-Sort + Rank() - # of ordering keys */
 	/* pinned inner buffer stuff */
 	List	   *projection_hashkeys;
+	/* select into direct mode */
+	Oid			select_into_relid;		/* SELECT INTO direct destination relation */
+	List	   *select_into_proj;		/* SELECT INTO direct projection if any */
 	/* inner relations */
 	int			sibling_param_id;
 	int			num_rels;
@@ -373,6 +376,9 @@ typedef struct
 	uint32_t			ss_length;			/* length of the SharedState */
 	/* pg-strom's unique plan-id */
 	uint64_t			query_plan_id;
+	/* xact */
+	TransactionId		pgsql_curr_xid;		/* xid of the query */
+	CommandId			pgsql_curr_cid;		/* cid of the query*/
 	/* scan */
 	pg_atomic_uint64	scan_block_count;	/* scan counter */
 	uint32_t			scan_block_nums;	/* = HeapScanDesc::rs_numblocks */
@@ -490,9 +496,6 @@ struct pgstromTaskState
 	/* base relation scan, if any */
 	TupleTableSlot	   *base_slot;
 	ExprState		   *base_quals;	/* equivalent to device quals */
-	/* SELECT INTO direct mode */
-	DestReceiver	   *select_into_dest;
-	List			   *select_into_proj;	/* projection on SELECT INTO (optional) */
 	/* CPU fallback support */
 	off_t			   *fallback_tuples;
 	size_t				fallback_index;
@@ -942,7 +945,8 @@ extern void		xpupreagg_add_custompath(PlannerInfo *root,
 										 void *extra,
 										 uint32_t task_kind,
 										 const CustomPathMethods *methods);
-extern bool		tryAddSelectIntoDirectProjection(pgstromTaskState *pts);
+extern bool		tryAddSelectIntoDirectProjection(pgstromTaskState *pts,
+												 List **p_select_into_proj);
 extern bool		ExecFallbackCpuPreAgg(pgstromTaskState *pts,
 									  int depth,
 									  uint64_t l_state,
