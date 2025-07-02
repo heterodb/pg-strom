@@ -935,7 +935,7 @@ execGpuJoinProjectionNormal(kern_context *kcxt,
 	return n_rels + 1;		/* elsewhere, try again? */
 }
 
-PUBLIC_FUNCTION(bool)
+STATIC_FUNCTION(bool)
 allocKdsBlockBufferOneTuple(kern_context *kcxt,
 							kern_data_store *kds_dst,
 							uint32_t *p_ntuples,

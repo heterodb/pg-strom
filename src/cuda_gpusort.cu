@@ -2632,6 +2632,9 @@ kern_gpu_projection_block_phase3(kern_session_info *session,
 			assert(si_tup.lp_len == __sz);
 			assert(htup->t_infomask == __t_infomask);
 		}
+		/* force tuple to all-visible */
+		htup->t_infomask &= ~HEAP_XACT_MASK;
+		htup->t_infomask |= (HEAP_XMIN_FROZEN | HEAP_XMAX_INVALID);
 		/* put item */
 		item.lp_off = si_tup.lp_off;
 		item.lp_flags = LP_NORMAL;

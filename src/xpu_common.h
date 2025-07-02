@@ -924,12 +924,15 @@ typedef struct HeapTupleHeaderData
 
 #define HEAP_XMIN_COMMITTED		0x0100	/* t_xmin committed */
 #define HEAP_XMIN_INVALID		0x0200	/* t_xmin invalid/aborted */
+#define HEAP_XMIN_FROZEN		(HEAP_XMIN_COMMITTED|HEAP_XMIN_INVALID)
 #define HEAP_XMAX_COMMITTED		0x0400	/* t_xmax committed */
 #define HEAP_XMAX_INVALID		0x0800	/* t_xmax invalid/aborted */
 #define HEAP_XMAX_IS_MULTI		0x1000	/* t_xmax is a MultiXactId */
 #define HEAP_UPDATED			0x2000	/* this is UPDATEd version of row */
 #define HEAP_MOVED_OFF			0x4000	/* unused in xPU */
 #define HEAP_MOVED_IN			0x8000	/* unused in xPU */
+#define HEAP_MOVED				(HEAP_MOVED_OFF|HEAP_MOVED_IN)
+#define HEAP_XACT_MASK			0xFFF0	/* visibility-related bits */
 
 /*
  * information stored in t_infomask2:

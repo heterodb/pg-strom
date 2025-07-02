@@ -2618,7 +2618,7 @@ out:
 }
 
 /*
- * __writeOutGpuQueryScanJoinBuffer
+ * __selectIntoDirectWriteKDS
  */
 static bool
 __selectIntoDirectWriteKDS(gpuClient *gclient, kern_data_store *kds_heap)
@@ -2683,6 +2683,82 @@ __selectIntoDirectWriteKDS(gpuClient *gclient, kern_data_store *kds_heap)
 	return true;
 }
 
+/*
+ * __selectIntoDirectWriteVM
+ */
+#define MAPSIZE					(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))
+#define HEAPBLOCKS_PER_BYTE		4		/* visibility map takes 2bits for each byte */
+#define HEAPBLOCKS_PER_PAGE		(MAPSIZE * HEAPBLOCKS_PER_BYTE)
+
+static bool
+__selectIntoDirectWriteVM(gpuClient *gclient, uint32_t nblocks)
+{
+	const kern_session_info *session = gclient->h_session;
+	const char *base_fname = ((const char *)session + session->select_into_pathname);
+	char	   *vm_fname = (char *)alloca(strlen(base_fname) + 20);
+	int			vm_fdesc;
+	uint8_t		vm_buf[BLCKSZ];
+
+	sprintf(vm_fname, "%s_vm", base_fname);
+	vm_fdesc = open(vm_fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (vm_fdesc < 0)
+	{
+		gpuClientELog(gclient, "failed on open('%s'): %m", vm_fname);
+		return false;
+	}
+	while (nblocks > 0)
+	{
+		PageHeaderData *hpage = (PageHeaderData *)vm_buf;
+		int		nwrites = Min(nblocks, HEAPBLOCKS_PER_PAGE);
+		int		length = nwrites / HEAPBLOCKS_PER_BYTE;
+		off_t	offset = MAXALIGN(SizeOfPageHeaderData);
+		ssize_t	nbytes;
+
+		PageInit((Page)hpage, BLCKSZ, 0);
+		if (length > 0)
+		{
+			memset(vm_buf + offset, -1, length);
+			offset += length;
+		}
+		switch (nwrites % 4)
+		{
+			case 1:
+				vm_buf[offset++] = 0x03;
+				break;
+			case 2:
+				vm_buf[offset++] = 0x0f;
+				break;
+			case 3:
+				vm_buf[offset++] = 0x3f;
+				break;
+			default:
+				break;
+		}
+		if (offset < BLCKSZ)
+			memset(vm_buf + offset, 0, BLCKSZ - offset);
+		offset = 0;
+		while (offset < BLCKSZ)
+		{
+			nbytes = write(vm_fdesc, vm_buf + offset, BLCKSZ - offset);
+			if (nbytes <= 0)
+			{
+				if (errno == EINTR)
+					continue;
+				gpuClientELog(gclient, "failed on write('%s'): %m", vm_fname);
+				close(vm_fdesc);
+				return false;
+			}
+			offset += nbytes;
+		}
+		nblocks -= nwrites;
+	}
+	close(vm_fdesc);
+	return true;
+}
+
+/*
+ * __writeOutGpuQueryScanJoinBuffer
+ */
 static bool
 __writeOutGpuQueryScanJoinBuffer(gpuClient *gclient,
 								 gpuQueryBuffer *gq_buf,
@@ -5855,6 +5931,7 @@ static bool
 __gpuservHandleSelectIntoDirectFlush(gpuClient *gclient, XpuCommand *resp)
 {
 	gpuQueryBuffer *gq_buf = gclient->gq_buf;
+	uint32_t		nblocks;
 
 	for (int i=0; i < gq_buf->gpumem_nitems; i++)
 	{
@@ -5867,8 +5944,11 @@ __gpuservHandleSelectIntoDirectFlush(gpuClient *gclient, XpuCommand *resp)
 		if (!__selectIntoDirectWriteKDS(gclient, __kds))
 			return false;
 	}
-	/* update statistics */
-	resp->u.results.select_into_nblocks = pg_atomic_read_u32(&gclient->select_into_count);
+	/* update statistics and visibility map */
+	nblocks = pg_atomic_read_u32(&gclient->select_into_count);
+	if (!__selectIntoDirectWriteVM(gclient, nblocks))
+		return false;
+	resp->u.results.select_into_nblocks = nblocks;
 	return true;
 }
 
@@ -5957,6 +6037,7 @@ __gpuservHandleSelectIntoDirectWrite(gpuClient *gclient,
 	uint32_t		start = 0;
 	uint32_t		lp_usage = 0;
 	uint32_t		lp_index = 0;
+	uint32_t		nblocks;
 	bool			retval = false;
 
 	/*
@@ -6109,7 +6190,10 @@ __gpuservHandleSelectIntoDirectWrite(gpuClient *gclient,
 			goto bailout;
 	}
 	/* update statistics */
-	resp->u.results.select_into_nblocks = pg_atomic_read_u32(&gclient->select_into_count);
+	nblocks = pg_atomic_read_u32(&gclient->select_into_count);
+	if (!__selectIntoDirectWriteVM(gclient, nblocks))
+		goto bailout;
+	resp->u.results.select_into_nblocks = nblocks;
 	retval = true;
 bailout:
 	if (tchunk)

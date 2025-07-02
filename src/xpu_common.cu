@@ -1116,15 +1116,16 @@ kern_form_heap_tuple(kern_context *kcxt,
 		sz += MINIMAL_TUPLE_OFFSET;
 		if (htup)
 		{
-			const kern_session_info *session = kcxt->session;
-
-			htup->t_choice.t_heap.t_xmin = session->session_curr_xid;
+			htup->t_choice.t_heap.t_xmin = FrozenTransactionId;
 			htup->t_choice.t_heap.t_xmax = InvalidTransactionId;
-			htup->t_choice.t_heap.t_field3.t_cid = session->session_curr_cid;
+			htup->t_choice.t_heap.t_field3.t_cid = InvalidCommandId;
 			htup->t_choice.t_datum.datum_typeid = kds_dst->tdtypeid;
 			htup->t_ctid.ip_blkid.bi_hi = 0xffff;
 			htup->t_ctid.ip_blkid.bi_lo = 0xffff;
 			htup->t_ctid.ip_posid = 0;
+			/* force tuple to all-visible */
+			htup->t_infomask &= ~HEAP_XACT_MASK;
+			htup->t_infomask |= (HEAP_XMIN_FROZEN | HEAP_XMAX_INVALID);
 		}
 	}
 	return sz;
