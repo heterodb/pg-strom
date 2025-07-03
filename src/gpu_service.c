@@ -6193,6 +6193,12 @@ __gpuservHandleSelectIntoDirectWrite(gpuClient *gclient,
 	nblocks = pg_atomic_read_u32(&gclient->select_into_count);
 	if (!__selectIntoDirectWriteVM(gclient, nblocks))
 		goto bailout;
+	resp->u.results.final_nitems = kds_final->nitems;
+	resp->u.results.final_usage  = kds_final->usage;
+	resp->u.results.final_total  = KDS_HEAD_LENGTH(kds_final)
+		+ sizeof(uint64_t) * kds_final->hash_nslots
+		+ sizeof(uint64_t) * kds_final->nitems
+		+ kds_final->usage;
 	resp->u.results.select_into_nblocks = nblocks;
 	retval = true;
 bailout:

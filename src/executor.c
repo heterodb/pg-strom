@@ -1025,7 +1025,8 @@ __updateStatsXpuCommand(pgstromTaskState *pts, const XpuCommand *xcmd)
 			pg_atomic_fetch_add_u64(&ps_state->inners[i].stats_join,
 									xcmd->u.results.stats[i].nitems_out);
 		}
-		pg_atomic_fetch_add_u64(&ps_state->result_ntuples, xcmd->u.results.nitems_out);
+		pg_atomic_fetch_add_u64(&ps_state->result_ntuples,
+								xcmd->u.results.nitems_out);
 		if (xcmd->u.results.final_nitems > 0)
 			pg_atomic_fetch_add_u64(&ps_state->final_nitems,
 									xcmd->u.results.final_nitems);
@@ -2388,6 +2389,25 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 		dst_state = MemoryContextAllocZero(estate->es_query_cxt, sz);
 		memcpy(dst_state, src_state, sz);
 		pts->ps_state = dst_state;
+	}
+	/*
+	 * SELECT-INTO Direct mode needs to update processed tuples
+	 * out of PostgreSQL.
+	 */
+	if ((pts->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
+	{
+		pgstromSharedState *ps_state = pts->ps_state;
+		pgstromPlanInfo	   *pp_info = pts->pp_info;
+		uint64_t			n_processed;
+
+		if (OidIsValid(pp_info->select_into_relid))
+		{
+			if ((pts->xpu_task_flags & DEVTASK__MERGE_FINAL_BUFFER) != 0)
+				n_processed = pg_atomic_read_u64(&ps_state->final_nitems);
+			else
+				n_processed = pg_atomic_read_u64(&ps_state->result_ntuples);
+			pts->css.ss.ps.state->es_processed += n_processed;
+		}
 	}
 }
 

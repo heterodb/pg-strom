@@ -87,6 +87,7 @@ typedef struct
 	uint32_t		smx_row_count;	/* current position of outer relation */
 	int				depth;		/* depth when last kernel is suspended */
 	int				scan_done;	/* smallest depth that may produce more tuples */
+	bool			stats_written; /* statistics are already written */
 	/* only KDS_FORMAT_BLOCK */
 	uint32_t		block_id;	/* BLOCK format needs to keep htuples on the */
 	uint32_t		lp_count;	/* lp_items array once, to pull maximum GPU */

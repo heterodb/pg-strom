@@ -951,7 +951,8 @@ allocKdsBlockBufferOneTuple(kern_context *kcxt,
 	__shared__ int16_t	lp_index[CUDA_MAXTHREADS_PER_BLOCK];
 
 	assert(get_local_id() < CUDA_MAXTHREADS_PER_BLOCK &&
-		   ntuples <= CUDA_MAXTHREADS_PER_BLOCK);
+		   ntuples <= CUDA_MAXTHREADS_PER_BLOCK &&
+		   tupsz == MAXALIGN(tupsz));
 	lp_offset[get_local_id()] = tupsz;
 	lp_index[get_local_id()] = 0;
 	/* error checks */
@@ -1088,7 +1089,7 @@ allocKdsBlockBufferOneTuple(kern_context *kcxt,
 	/* initialization of a new heap page by the responsible thread */
 	offset = lp_offset[get_local_id()];
 	lindex = lp_index[get_local_id()];
-	if ((offset & 1U) != 0)
+	if (offset > 0 && (offset & 1U) != 0)
 	{
 		PageHeaderData *hpage = (PageHeaderData *)
 			((char *)kds_dst + kds_dst->block_offset + (offset & ~(BLCKSZ-1)));
@@ -1480,51 +1481,53 @@ kern_gpujoin_main(kern_session_info *session,
 	mergeGpuPreAggGroupByBuffer(kcxt, kds_dst);
 
 	/* update the statistics */
-	if (get_local_id() == 0)
+	if (__syncthreads_count(kcxt->errcode != ERRCODE_STROM_SUCCESS) == 0 &&
+		get_local_id() == 0 &&
+		!wp->stats_written)
 	{
-		if (depth < 0 && WARP_READ_POS(wp,n_rels) >= WARP_WRITE_POS(wp,n_rels))
+		int		start = 0;
+
+		// TODO: check whether we count fallback tuples correctly, or not.
+		if (kgtask->right_outer_depth == 0)
 		{
-			int		start = 0;
-
-			if (kgtask->right_outer_depth == 0)
-			{
-				assert(kds_src != NULL);
-				/* number of raw-tuples fetched from the source KDS */
-				if (kds_src->format == KDS_FORMAT_BLOCK)
-					atomicAdd(&kgtask->nitems_raw, wp->lp_wr_pos);
-				else if (get_global_id() == 0)
-					atomicAdd(&kgtask->nitems_raw, kds_src->nitems);
-				atomicAdd(&kgtask->nitems_in, WARP_WRITE_POS(wp, 0));
-			}
-			else
-			{
-				assert(kds_src == NULL);
-				/* number of the generated RIGHT-OUTER-JOIN tuples */
-				start = kgtask->right_outer_depth;
-				atomicAdd(&kgtask->stats[start-1].nitems_roj,
-						  WARP_WRITE_POS(wp,start));
-			}
-			for (int i=start; i < n_rels; i++)
-			{
-				const kern_expression *kexp_gist
-					= SESSION_KEXP_GIST_EVALS(session, i+1);
-				if (kexp_gist)
-				{
-					int		gist_depth = kexp_gist->u.gist.gist_depth;
-
-					assert(gist_depth > n_rels &&
-						   gist_depth < kgtask->kvecs_ndims);
-					atomicAdd(&kgtask->stats[i].nitems_gist,
-							  WARP_WRITE_POS(wp, gist_depth));
-				}
-				atomicAdd(&kgtask->stats[i].nitems_out,
-						  WARP_WRITE_POS(wp,i+1));
-			}
-			atomicAdd(&kgtask->nitems_out, WARP_WRITE_POS(wp, n_rels));
+			assert(kds_src != NULL);
+			/* number of raw-tuples fetched from the source KDS */
+			if (kds_src->format == KDS_FORMAT_BLOCK)
+				atomicAdd(&kgtask->nitems_raw, wp->lp_wr_pos);
+			else if (get_global_id() == 0)
+				atomicAdd(&kgtask->nitems_raw, kds_src->nitems);
+			atomicAdd(&kgtask->nitems_in, WARP_WRITE_POS(wp, 0));
 		}
-		/* suspend the execution context */
-		memcpy(wp_saved, wp, wp_base_sz);
+		else
+		{
+			assert(kds_src == NULL);
+			/* number of the generated RIGHT-OUTER-JOIN tuples */
+			start = kgtask->right_outer_depth;
+			atomicAdd(&kgtask->stats[start-1].nitems_roj,
+					  WARP_WRITE_POS(wp,start));
+		}
+		for (int i=start; i < n_rels; i++)
+		{
+			const kern_expression *kexp_gist
+				= SESSION_KEXP_GIST_EVALS(session, i+1);
+			if (kexp_gist)
+			{
+				int		gist_depth = kexp_gist->u.gist.gist_depth;
+
+				assert(gist_depth > n_rels &&
+					   gist_depth < kgtask->kvecs_ndims);
+				atomicAdd(&kgtask->stats[i].nitems_gist,
+						  WARP_WRITE_POS(wp, gist_depth));
+			}
+			atomicAdd(&kgtask->stats[i].nitems_out,
+					  WARP_WRITE_POS(wp,i+1));
+		}
+		atomicAdd(&kgtask->nitems_out, WARP_WRITE_POS(wp, n_rels));
+		wp->stats_written = true;
 	}
+	/* suspend the execution context */
+	if (get_local_id() == 0)
+		memcpy(wp_saved, wp, wp_base_sz);
 	STROM_WRITEBACK_ERROR_STATUS(&kgtask->kerror, kcxt);
 }
 
