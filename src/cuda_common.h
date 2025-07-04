@@ -373,8 +373,8 @@ typedef struct {
 INLINE_FUNCTION(void)
 __initKdsBlockHeapPage(PageHeaderData *hpage, int lp_index, int lp_offset)
 {
-	assert(offsetof(PageHeaderData,
-					pd_linp[lp_index]) + lp_offset <= BLCKSZ);
+	assert(lp_offset <= BLCKSZ &&
+		   offsetof(PageHeaderData, pd_linp[lp_index]) <= lp_offset);
 	/*
 	 * NOTE: PG-Strom's GPU code writes heap blocks only to a newly created empty table
 	 * in SELECT INTO Direct mode.
@@ -392,5 +392,4 @@ __initKdsBlockHeapPage(PageHeaderData *hpage, int lp_index, int lp_offset)
 	hpage->pd_pagesize_version = (BLCKSZ | PG_PAGE_LAYOUT_VERSION);
 	hpage->pd_prune_xid = 0;
 }
-
 #endif	/* CUDA_COMMON_H */
