@@ -1,8 +1,9 @@
 #
 # Makefile for pcap2arrow
 #
-PG_CONFIG        ?= pg_config
-MYSQL_CONFIG     ?= mysql_config
+CXX          ?= g++
+PG_CONFIG    ?= pg_config
+MYSQL_CONFIG ?= mysql_config
 
 HAS_PG_CONFIG = $(shell which $(PG_CONFIG)>/dev/null 2>&1 && echo yes)
 HAS_MYSQL_CONFIG = $(shell which $(MYSQL_CONFIG)>/dev/null 2>&1 && echo yes)
@@ -19,6 +20,7 @@ ifeq ($(HAS_PF_RING),yes)
 ALL_PROGS += pcap2arrow
 endif
 ALL_PROGS += vcf2arrow
+ALL_PROGS += tsv2arrow
 
 PG2ARROW_OBJS    = __pgsql2arrow.o pgsql_client.o \
                    arrow_nodes.o arrow_write.o arrow_pgsql.o
@@ -27,6 +29,7 @@ MYSQL2ARROW_OBJS = __mysql2arrow.o mysql_client.o \
 PCAP2ARROW_OBJS  = pcap2arrow.o arrow_nodes.o arrow_write.o
 VCF2ARROW_OBJS = vcf2arrow.o arrow_nodes.o arrow_write.o
 ARROW2CSV_OBJS   = arrow2csv.o arrow_nodes.o
+TSV2ARROW_OBJS   = tsv2arrow.o
 CLEAN_OBJS = $(PG2ARROW_OBJS) $(MYSQL2ARROW_OBJS) \
              $(PCAP2ARROW_OBJS) $(VCF2ARROW_OBJS) $(ARROW2CSV_OBJS) \
              pcap2arrow arrow2csv pg2arrow mysql2arrow vcf2arrow
@@ -41,6 +44,7 @@ endif
 ifeq ($(DEBUG),1)
 CFLAGS += -g -O0
 endif
+CPPFLAGS = $(CFLAGS)
 
 PREFIX		?= /usr/local
 BINDIR		?= $(PREFIX)/bin
@@ -112,6 +116,15 @@ install-arrow2csv: arrow2csv
 
 arrow2csv: $(ARROW2CSV_OBJS)
 	$(CC) -o $@ $(ARROW2CSV_OBJS)
+
+#
+# TSV2Arrow
+#
+tsv2arrow: $(TSV2ARROW_OBJS)
+	$(CXX) $(CFLAGS) -o $@ $< -larrow
+
+.cc.o:
+	$(CXX) $(CFLAGS) -std=c++11 -c -o $@ $<
 
 .c.o:
 	$(CC) $(CFLAGS) -c -o $@ $<
