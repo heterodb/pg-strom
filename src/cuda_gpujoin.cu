@@ -1120,77 +1120,6 @@ allocKdsBlockBufferOneTuple(kern_context *kcxt,
 	return true;
 }
 
-PUBLIC_FUNCTION(int)
-execGpuJoinProjectionBlock(kern_context *kcxt,
-						   kern_warp_context *wp,
-						   int n_rels,	/* index of read/write-pos */
-						   kern_data_store *kds_dst,
-						   kern_expression *kexp_proj,
-						   char *src_kvecs_buffer)
-{
-	uint32_t	wr_pos = WARP_WRITE_POS(wp,n_rels);
-	uint32_t	rd_pos = WARP_READ_POS(wp,n_rels);
-	uint32_t	ntuples = Min(wr_pos - rd_pos, get_local_size());
-	int32_t		tupsz = 0;
-	HeapTupleHeaderData *htup;
-	bool		needs_suspend = false;
-
-	/*
-	 * The previous depth still may produce new tuples, and number of
-	 * the current result tuples is not sufficient to run projection.
-	 */
-	if (wp->scan_done <= n_rels && rd_pos + get_local_size() > wr_pos)
-		return n_rels;
-	rd_pos += get_local_id();
-
-	kcxt->kvecs_curr_id = (rd_pos % KVEC_UNITSZ);
-	kcxt->kvecs_curr_buffer = src_kvecs_buffer;
-	if (rd_pos < wr_pos)
-	{
-		tupsz = kern_estimate_heap_tuple(kcxt, kexp_proj, kds_dst);
-		if (tupsz < 0)
-		{
-			/* SELECT INTO Direct mode does not allow CPU fallback */
-			STROM_ELOG(kcxt, "unable to compute tuple size");
-		}
-	}
-	/*
-	 * allocation of the destination buffer
-	 */
-	if (!allocKdsBlockBufferOneTuple(kcxt,
-									 kds_dst,
-									 &ntuples,
-									 tupsz,
-									 &htup,
-									 &needs_suspend))
-		return -1;
-	if (htup)
-		kern_form_heap_tuple(kcxt, kexp_proj, kds_dst, htup);
-	/* update the read position */
-	if (get_local_id() == 0)
-	{
-		/* nr_input of thread-0 might be decreased if suspend is needed */
-		WARP_READ_POS(wp,n_rels) += ntuples;
-		assert(WARP_WRITE_POS(wp,n_rels) >= WARP_READ_POS(wp,n_rels));
-	}
-	if (__syncthreads_count(needs_suspend) > 0)
-	{
-		SUSPEND_NO_SPACE(kcxt, "heap segment is full");
-		return -1;
-	}
-	if (wp->scan_done <= n_rels)
-	{
-		if (WARP_WRITE_POS(wp,n_rels) < WARP_READ_POS(wp,n_rels) + get_local_size())
-			return n_rels;	/* back to the previous depth */
-	}
-	else
-	{
-		if (WARP_READ_POS(wp,n_rels) >= WARP_WRITE_POS(wp,n_rels))
-			return -1;		/* ok, end of GpuJoin */
-	}
-	return n_rels + 1;		/* elsewhere, try again? */
-}
-
 /*
  * Load RIGHT OUTER values
  */
@@ -1395,7 +1324,7 @@ kern_gpujoin_main(kern_session_info *session,
 											 kds_dst,
 											 __KVEC_BUFFER(n_rels));
 			}
-			else if (kds_dst->format != KDS_FORMAT_BLOCK)
+			else
 			{
 				/* PROJECTION (ROW/HASH) */
 				depth = execGpuJoinProjectionNormal(kcxt, wp,
@@ -1403,15 +1332,6 @@ kern_gpujoin_main(kern_session_info *session,
 													kds_dst,
 													SESSION_KEXP_PROJECTION(session),
 													__KVEC_BUFFER(n_rels));
-			}
-			else
-			{
-				/* PROJECTION (BLOCK) */
-				depth = execGpuJoinProjectionBlock(kcxt, wp,
-												   n_rels,
-												   kds_dst,
-												   SESSION_KEXP_PROJECTION(session),
-												   __KVEC_BUFFER(n_rels));
 			}
 		}
 		else if (depth == kgtask->right_outer_depth)

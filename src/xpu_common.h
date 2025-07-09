@@ -3094,6 +3094,15 @@ SESSION_SELECT_INTO_PATHNAME(const kern_session_info *session)
 	return (const char *)((const char *)session + session->select_into_pathname);
 }
 
+INLINE_FUNCTION(const kern_data_store *)
+SESSION_SELECT_INTO_KDS_HEAD(const kern_session_info *session)
+{
+	if (session->select_into_kds_head == 0)
+		return NULL;
+	return (const kern_data_store *)
+		((const char *)session + session->select_into_kds_head);
+}
+
 INLINE_FUNCTION(const kern_aggfinal_projection_desc *)
 SESSION_SELECT_INTO_PROJDESC(const kern_session_info *session)
 {

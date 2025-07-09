@@ -779,6 +779,21 @@ typedef struct gpuContext	gpuContext;
 typedef struct gpuClient	gpuClient;
 
 extern bool		isGpuServWorkerThread(void);
+extern void		__gpuClientELog(gpuClient *gclient,
+								int errcode,
+								const char *filename, int lineno,
+								const char *funcname,
+								const char *fmt, ...)	pg_attribute_printf(6,7);
+
+#define gpuClientELog(gclient,fmt,...)						\
+	__gpuClientELog((gclient), ERRCODE_DEVICE_ERROR,		\
+					__FILE__, __LINE__, __FUNCTION__,		\
+					(fmt), ##__VA_ARGS__)
+#define gpuClientFatal(gclient,fmt,...)						\
+	__gpuClientELog((gclient), ERRCODE_DEVICE_FATAL,		\
+					__FILE__, __LINE__, __FUNCTION__,		\
+					(fmt), ##__VA_ARGS__)
+
 extern void		gpuservLoggerReport(const char *fmt, ...)
 					pg_attribute_printf(1, 2);
 #define __gsLogLabel(LABEL,fmt,...)							\
@@ -839,6 +854,8 @@ extern void		gpuservLoggerReport(const char *fmt, ...)
 extern int		pgstrom_max_async_tasks(void);
 extern bool		gpuserv_ready_accept(void);
 extern const char *cuStrError(CUresult rc);
+extern uint32_t	gpuClientGetTaskFlags(const gpuClient *gclient);
+extern const kern_session_info *gpuClientGetSessionInfo(const gpuClient *gclient);
 extern bool		gpuServiceGoingTerminate(void);
 extern void		gpuservBgWorkerMain(Datum arg);
 extern void		pgstrom_init_gpu_service(void);
@@ -994,7 +1011,37 @@ extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 									  kern_data_store *kds,
 									  size_t index,
 									  const Bitmapset *referenced);
-extern void pgstrom_init_arrow_fdw(void);
+extern void		pgstrom_init_arrow_fdw(void);
+
+/*
+ * select_into.c
+ */
+
+/*
+ * NOTE: This field is embedded in the gpuQueryBuffer; can be accessed by
+ *       multiple CPU threads concurrently.
+ */
+typedef struct
+{
+	pthread_mutex_t		kds_heap_lock;	/* lock for kds_heap and segment_no */
+	kern_data_store	   *kds_heap;		/* per-segment buffer */
+	uint32_t			kds_heap_segno;
+	pthread_mutex_t		dpage_lock;
+	PageHeaderData	   *dpage;			/* row-by-row buffer */
+	const char		   *base_name;
+} selectIntoState;
+
+extern bool		__initSelectIntoState(selectIntoState *si_state,
+									  const kern_session_info *session);
+extern void		__cleanupSelectIntoState(selectIntoState *si_state);
+
+extern bool		selectIntoWriteOutHeapNormal(gpuClient *gclient,
+											 selectIntoState *si_state,
+											 kern_data_store *kds_dst);
+extern bool		selectIntoWriteOutHeapFinal(gpuClient *gclient,
+											selectIntoState *si_state,
+											kern_data_store *kds_dst);
+extern void		pgstrom_init_select_into(void);
 
 /*
  * fallback.c
