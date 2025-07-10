@@ -1025,7 +1025,8 @@ typedef struct
 {
 	pthread_mutex_t		kds_heap_lock;	/* lock for kds_heap and segment_no */
 	kern_data_store	   *kds_heap;		/* per-segment buffer */
-	uint32_t			kds_heap_segno;
+	uint32_t			kds_heap_segno;	/* current segment number */
+	uint64_t			nblocks_written;/* statistics */
 	pthread_mutex_t		dpage_lock;
 	PageHeaderData	   *dpage;			/* row-by-row buffer */
 	const char		   *base_name;
@@ -1038,9 +1039,12 @@ extern void		__cleanupSelectIntoState(selectIntoState *si_state);
 extern bool		selectIntoWriteOutHeapNormal(gpuClient *gclient,
 											 selectIntoState *si_state,
 											 kern_data_store *kds_dst);
-extern bool		selectIntoWriteOutHeapFinal(gpuClient *gclient,
+extern long		selectIntoWriteOutHeapFinal(gpuClient *gclient,
+											kern_session_info *session,
 											selectIntoState *si_state,
 											kern_data_store *kds_dst);
+extern long		selectIntoFinalFlushBuffer(gpuClient *gclient,
+										   selectIntoState *si_state);
 extern void		pgstrom_init_select_into(void);
 
 /*

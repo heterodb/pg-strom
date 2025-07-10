@@ -57,8 +57,6 @@ struct gpuContext
 	CUfunction		cufn_windowrank_exec_dense_rank;
 	CUfunction		cufn_windowrank_finalize;
 	CUfunction		cufn_global_stair_sum_u32;
-	CUfunction		cufn_gpu_projection_block_phase1;
-	CUfunction		cufn_gpu_projection_block_phase3;
 	int				gpumain_shmem_sz_limit;
 	xpu_encode_info *cuda_encode_catalog;
 	gpuMemoryPool	pool_raw;
@@ -150,9 +148,7 @@ static int			__pgstrom_max_async_tasks_dummy;
 static int			__pgstrom_cuda_stack_limit_kb;
 static char		   *pgstrom_cuda_toolkit_basedir = CUDA_TOOLKIT_BASEDIR; /* GUC */
 static const char  *pgstrom_fatbin_image_filename = "/dev/null";
-static bool			__gpuservHandleSelectIntoDirectWrite(gpuClient *gclient,
-														 XpuCommand *resp,
-														 kern_data_store *kds_prime);
+
 #define __gsLogCxt(gcontext,fmt,...)					\
 	__gsLogLabel(((gcontext) ? (gcontext)->gpu_label : "GPU-Serv"), fmt, ##__VA_ARGS__)
 #define __gsLog(fmt,...)								\
@@ -1628,23 +1624,6 @@ releaseGpuQueryBufferAll(gpuQueryBuffer *gq_buf)
 	gq_buf->gpumem_nitems = 0;
 }
 
-static bool
-forgetGpuQueryBufferOne(gpuQueryBuffer *gq_buf,
-						CUdeviceptr m_devptr)
-{
-	for (int i=0; i < gq_buf->gpumem_nitems; i++)
-	{
-		if (gq_buf->gpumem_devptrs[i] == m_devptr)
-		{
-			gq_buf->gpumem_devptrs[i] = 0UL;
-			gq_buf->gpumem_lengths[i] = 0UL;
-			gq_buf->gpumem_kinds[i] = 0;
-			return true;
-		}
-	}
-	return false;
-}
-
 static void
 __putGpuQueryBufferNoLock(gpuQueryBuffer *gq_buf)
 {
@@ -2563,6 +2542,7 @@ out:
 	return retval;
 }
 
+#if 0
 /*
  * __selectIntoDirectWriteKDS
  */
@@ -2628,80 +2608,10 @@ __selectIntoDirectWriteKDS(gpuClient *gclient, kern_data_store *kds_heap)
 	}
 	return true;
 }
-
-/*
- * __selectIntoDirectWriteVM
- */
-#define MAPSIZE					(BLCKSZ - MAXALIGN(SizeOfPageHeaderData))
-#define HEAPBLOCKS_PER_BYTE		4		/* visibility map takes 2bits for each byte */
-#define HEAPBLOCKS_PER_PAGE		(MAPSIZE * HEAPBLOCKS_PER_BYTE)
-
-static bool
-__selectIntoDirectWriteVM(gpuClient *gclient, uint32_t nblocks)
-{
-	const kern_session_info *session = gclient->h_session;
-	const char *base_fname = ((const char *)session + session->select_into_pathname);
-	char	   *vm_fname = (char *)alloca(strlen(base_fname) + 20);
-	int			vm_fdesc;
-	uint8_t		vm_buf[BLCKSZ];
-
-	sprintf(vm_fname, "%s_vm", base_fname);
-	vm_fdesc = open(vm_fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-	if (vm_fdesc < 0)
-	{
-		gpuClientELog(gclient, "failed on open('%s'): %m", vm_fname);
-		return false;
-	}
-	while (nblocks > 0)
-	{
-		PageHeaderData *hpage = (PageHeaderData *)vm_buf;
-		int		nwrites = Min(nblocks, HEAPBLOCKS_PER_PAGE);
-		int		length = nwrites / HEAPBLOCKS_PER_BYTE;
-		off_t	offset = MAXALIGN(SizeOfPageHeaderData);
-		ssize_t	nbytes;
-
-		PageInit((Page)hpage, BLCKSZ, 0);
-		if (length > 0)
-		{
-			memset(vm_buf + offset, -1, length);
-			offset += length;
-		}
-		switch (nwrites % 4)
-		{
-			case 1:
-				vm_buf[offset++] = 0x03;
-				break;
-			case 2:
-				vm_buf[offset++] = 0x0f;
-				break;
-			case 3:
-				vm_buf[offset++] = 0x3f;
-				break;
-			default:
-				break;
-		}
-		if (offset < BLCKSZ)
-			memset(vm_buf + offset, 0, BLCKSZ - offset);
-		offset = 0;
-		while (offset < BLCKSZ)
-		{
-			nbytes = write(vm_fdesc, vm_buf + offset, BLCKSZ - offset);
-			if (nbytes <= 0)
-			{
-				if (errno == EINTR)
-					continue;
-				gpuClientELog(gclient, "failed on write('%s'): %m", vm_fname);
-				close(vm_fdesc);
-				return false;
-			}
-			offset += nbytes;
-		}
-		nblocks -= nwrites;
-	}
-	close(vm_fdesc);
-	return true;
-}
-
+#endif
+#if 0
+#endif
+#if 0
 /*
  * __writeOutGpuQueryScanJoinBuffer
  */
@@ -2771,7 +2681,7 @@ out:
 	}
 	return retval;
 }
-
+#endif
 /*
  * __allocateGpuFallbackBuffer
  */
@@ -4124,14 +4034,10 @@ resume_kernel:
 												   kds_final_length))
 					goto bailout;
 			}
-			else if ((session->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) == 0)
-			{
-				if (!__expandGpuQueryScanJoinBuffer(gclient, gq_buf, kds_dst))
-					goto bailout;
-			}
 			else
 			{
-				if (!__writeOutGpuQueryScanJoinBuffer(gclient, gq_buf, kds_dst))
+				assert((session->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) == 0);
+				if (!__expandGpuQueryScanJoinBuffer(gclient, gq_buf, kds_dst))
 					goto bailout;
 			}
 		}
@@ -4152,7 +4058,9 @@ resume_kernel:
 			else
 			{
 				(void)gpuMemoryPrefetchKDS(kds_dst, CU_DEVICE_CPU);
-				selectIntoWriteOutHeapNormal(gclient, &gq_buf->si_state, kds_dst);
+				selectIntoWriteOutHeapNormal(gclient,
+											 &gq_buf->si_state,
+											 kds_dst);
 			}
 			assert(kds_dst->nitems == 0 && kds_dst->usage == 0);
 		}
@@ -4492,7 +4400,7 @@ gpuservHandleGpuTaskExec(gpuContext *gcontext,
 			}
 		}
 		gpuContextSwitchTo(__gcontext_saved);
-		if ((gclient->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
+		if (d_chunk && (gclient->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
 		{
 			(void)gpuMemoryPrefetchKDS(kds_dst, CU_DEVICE_CPU);
 			if (!selectIntoWriteOutHeapNormal(gclient,
@@ -5765,9 +5673,19 @@ __gpuservHandleGpuPreAggFinal(gpuClient *gclient,
 											  (tv3.tv_usec - tv2.tv_usec) / 1000);
 		if ((gclient->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
 		{
-			/* write out the merged buffer in SELECT INTO direct mode */
-			if (!__gpuservHandleSelectIntoDirectWrite(gclient, resp, kds_prime))
+			long	nblocks = selectIntoWriteOutHeapFinal(gclient,
+														  session,
+														  &gq_buf->si_state,
+														  kds_prime);
+			if (nblocks < 0)
 				goto bailout;
+			resp->u.results.final_nitems = kds_prime->nitems;
+			resp->u.results.final_usage  = kds_prime->usage;
+			resp->u.results.final_total  = KDS_HEAD_LENGTH(kds_prime)
+				+ sizeof(uint64_t) * kds_prime->hash_nslots
+				+ sizeof(uint64_t) * kds_prime->nitems
+				+ kds_prime->usage;
+			resp->u.results.select_into_nblocks = nblocks;
 		}
 		else
 		{
@@ -5898,6 +5816,7 @@ __gpuservHandleGpuScanJoinFinal(gpuClient *gclient,
 	return true;
 }
 
+#if 0
 static bool
 __gpuservHandleSelectIntoDirectFlush(gpuClient *gclient, XpuCommand *resp)
 {
@@ -5922,7 +5841,8 @@ __gpuservHandleSelectIntoDirectFlush(gpuClient *gclient, XpuCommand *resp)
 	resp->u.results.select_into_nblocks = nblocks;
 	return true;
 }
-
+#endif
+#if 0
 static bool
 __selectIntoDirectSetupAndWriteKDS(gpuClient *gclient,
 								   kern_gputask *kgtask,
@@ -6177,6 +6097,7 @@ bailout:
 		gpuMemFree(tchunk);
 	return retval;
 }
+#endif
 
 static void
 gpuservHandleGpuTaskFinal(gpuContext *gcontext,
@@ -6352,8 +6273,10 @@ gpuservHandleGpuTaskFinal(gpuContext *gcontext,
 	}
 	else if ((gclient->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) != 0)
 	{
-		/* Flush SELECT INTO Direct mode */
-		__gpuservHandleSelectIntoDirectFlush(gclient, resp);
+		/* flush results of SELECT INTO Direct buffer */
+		long	nblocks = selectIntoFinalFlushBuffer(gclient,
+													 &gq_buf->si_state);
+		resp->u.results.select_into_nblocks = nblocks;
 	}
 	resp->u.results.final_plan_task = true;
 
@@ -6753,10 +6676,6 @@ gpuservSetupGpuModule(gpuContext *gcontext)
 								  cufn_windowrank_finalize);
 	__GPU_KERNEL_RESOLVE_FUNCTION(kern_global_stair_sum_u32,
 								  cufn_global_stair_sum_u32);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpu_projection_block_phase1,
-								  cufn_gpu_projection_block_phase1);
-	__GPU_KERNEL_RESOLVE_FUNCTION(kern_gpu_projection_block_phase3,
-								  cufn_gpu_projection_block_phase3);
 #undef __GPU_KERNEL_RESOLVE_FUNCTION
 	/* setup CUDA shared memory parameters */
 	rc = cuFuncGetAttribute(&shmem_sz_static,

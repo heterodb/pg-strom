@@ -645,10 +645,10 @@ devtype_numeric_hash(bool isnull, Datum value)
 
 	if (isnull)
 		return 0;
-	emsg = __xpu_numeric_from_varlena(&kind,
-									  &weight,
-									  &num,
-									  (varlena *)value);
+	emsg = __decimal_from_varlena(&kind,
+								  &weight,
+								  &num,
+								  (varlena *)value);
 	if (emsg)
 		elog(ERROR, "%s", emsg);
 	if (kind == XPU_NUMERIC_KIND__VALID)

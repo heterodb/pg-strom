@@ -162,9 +162,9 @@ NUMERIC_WEIGHT(NumericChoice *nc, uint16_t n_head)
 	return weight;
 }
 
+// __xpu_numeric_normalize
 INLINE_FUNCTION(void)
-__xpu_numeric_normalize(int16_t *p_weight,
-						int128_t *p_value)
+NUMERIC_NORMALIZE(int16_t *p_weight, int128_t *p_value)
 {
 	int16_t		weight = *p_weight;
 	int128_t	value  = *p_value;
@@ -210,11 +210,14 @@ __xpu_numeric_normalize(int16_t *p_weight,
 	*p_value  = value;
 }
 
+/*
+ * __decimal_from_varlena
+ */
 INLINE_FUNCTION(const char *)
-__xpu_numeric_from_varlena(uint8_t  *p_kind,
-						   int16_t  *p_weight,
-						   int128_t *p_value,
-						   const varlena *addr)
+__decimal_from_varlena(uint8_t *p_kind,
+					   int16_t *p_weight,
+					   int128_t *p_value,
+					   const varlena *addr)
 {
 	uint32_t		len;
 
@@ -262,7 +265,7 @@ __xpu_numeric_from_varlena(uint8_t  *p_kind,
 			if (NUMERIC_SIGN(n_head) == NUMERIC_NEG)
 				value = -value;
 			weight = PG_DEC_DIGITS * (ndigits - weight);
-			__xpu_numeric_normalize(&weight, &value);
+			NUMERIC_NORMALIZE(&weight, &value);
 
 			*p_kind   = XPU_NUMERIC_KIND__VALID;
 			*p_weight = weight;
@@ -276,7 +279,7 @@ EXTERN_FUNCTION(const char *)
 xpu_numeric_from_varlena(xpu_numeric_t *result, const varlena *addr);
 
 INLINE_FUNCTION(int)
-__xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
+__decimal_to_varlena(char *buffer, uint8_t kind, int16_t weight, int128_t value)
 {
 	NumericData	   *numData = (NumericData *)buffer;
 	NumericLong	   *numBody = &numData->choice.n_long;
@@ -285,12 +288,30 @@ __xpu_numeric_to_varlena(char *buffer, int16_t weight, int128_t value)
 	int				len;
 	bool			is_negative = false;
 
+	if (kind != XPU_NUMERIC_KIND__VALID)
+	{
+		len = offsetof(NumericData, choice.n_header) + sizeof(uint16_t);
+		if (buffer)
+		{
+			NumericChoice *nc = (NumericChoice *)buffer;
+
+			if (kind == XPU_NUMERIC_KIND__POS_INF)
+				nc->n_header = NUMERIC_PINF;
+			else if (kind == XPU_NUMERIC_KIND__POS_INF)
+				nc->n_header = NUMERIC_NINF;
+			else
+				nc->n_header = NUMERIC_NAN;
+			SET_VARSIZE(nc, len);
+		}
+		return len;
+	}
+
 	if (value < 0)
 	{
 		is_negative = true;
 		value = -value;
 	}
-	__xpu_numeric_normalize(&weight, &value);
+	NUMERIC_NORMALIZE(&weight, &value);
 
 	/* special case handling for the least digits */
 	if (value != 0)
@@ -407,35 +428,425 @@ __numeric_typmod_weight(int32_t typmod)
 	return weight;
 }
 
-EXTERN_FUNCTION(bool)
-__xpu_numeric_add(kern_context *kcxt,
-				  xpu_numeric_t *result,
-				  xpu_numeric_t *datum_a,
-				  xpu_numeric_t *datum_b);
-EXTERN_FUNCTION(bool)
-__xpu_numeric_sub(kern_context *kcxt,
-				  xpu_numeric_t *result,
-				  xpu_numeric_t *datum_a,
-				  xpu_numeric_t *datum_b);
-EXTERN_FUNCTION(bool)
-__xpu_numeric_mul(kern_context *kcxt,
-				  xpu_numeric_t *result,
-				  xpu_numeric_t *datum_a,
-				  xpu_numeric_t *datum_b);
-EXTERN_FUNCTION(bool)
-__xpu_numeric_div(kern_context *kcxt,
-				  xpu_numeric_t *result,
-				  xpu_numeric_t *datum_a,
-				  xpu_numeric_t *datum_b);
-EXTERN_FUNCTION(bool)
-__xpu_numeric_mod(kern_context *kcxt,
-				  xpu_numeric_t *result,
-				  xpu_numeric_t *datum_a,
-				  xpu_numeric_t *datum_b);
+/*
+ * xpu_numeric_t related public functions
+ */
 EXTERN_FUNCTION(int)
 pg_numeric_to_cstring(kern_context *kcxt,
 					  varlena *numeric,
 					  char *buf, char *endp);
+EXTERN_FUNCTION(int128_t)
+__normalize_numeric_int128(int16_t weight_d,
+						   int16_t weight_s,
+						   int128_t ival);
+/*
+ * utility functions to handle decimal form (int128)
+ */
+INLINE_FUNCTION(const char *)
+__decimal_add(uint8_t *r_kind, int16_t *r_weight, int128_t *r_value,
+			  uint8_t a_kind,  int16_t a_weight,  int128_t a_value,
+			  uint8_t b_kind,  int16_t b_weight,  int128_t b_value)
+{
+	if (a_kind == XPU_NUMERIC_KIND__VALID ||
+		b_kind == XPU_NUMERIC_KIND__VALID)
+	{
+		while (a_weight > b_weight)
+		{
+			b_value *= 10;
+			b_weight++;
+		}
+		while (a_weight < b_weight)
+		{
+			a_value *= 10;
+			a_weight++;
+		}
+		a_value += b_value;
+		NUMERIC_NORMALIZE(&a_weight, &a_value);
+		*r_kind = XPU_NUMERIC_KIND__VALID;
+		*r_weight = a_weight;
+		*r_value = a_value;
+	}
+	else
+	{
+		assert(a_kind != XPU_NUMERIC_KIND__VARLENA &&
+			   b_kind != XPU_NUMERIC_KIND__VARLENA);
+		if (a_kind == XPU_NUMERIC_KIND__NAN ||
+			b_kind == XPU_NUMERIC_KIND__NAN)
+			*r_kind = XPU_NUMERIC_KIND__NAN;
+		else if (a_kind == XPU_NUMERIC_KIND__POS_INF)
+		{
+			if (b_kind == XPU_NUMERIC_KIND__NEG_INF)
+				*r_kind = XPU_NUMERIC_KIND__NAN;	/* Inf - Inf */
+			else
+				*r_kind = XPU_NUMERIC_KIND__POS_INF;
+		}
+		else if (a_kind == XPU_NUMERIC_KIND__NEG_INF)
+		{
+			if (b_kind == XPU_NUMERIC_KIND__POS_INF)
+				*r_kind = XPU_NUMERIC_KIND__NAN;	/* -Inf + Inf */
+			else
+				*r_kind = XPU_NUMERIC_KIND__NEG_INF;
+		}
+		else if (b_kind == XPU_NUMERIC_KIND__POS_INF)
+			*r_kind = XPU_NUMERIC_KIND__POS_INF;
+		else
+			*r_kind = XPU_NUMERIC_KIND__NEG_INF;
+	}
+	return NULL;
+}
+
+INLINE_FUNCTION(const char *)
+__decimal_sub(uint8_t *r_kind, int16_t *r_weight, int128_t *r_value,
+			  uint8_t a_kind,  int16_t a_weight,  int128_t a_value,
+			  uint8_t b_kind,  int16_t b_weight,  int128_t b_value)
+{
+	if (a_kind == XPU_NUMERIC_KIND__VALID ||
+		b_kind == XPU_NUMERIC_KIND__VALID)
+	{
+		while (a_weight > b_weight)
+		{
+			b_value *= 10;
+			b_weight++;
+		}
+		while (a_weight < b_weight)
+		{
+			a_value *= 10;
+			a_weight++;
+		}
+		a_value -= b_value;
+		NUMERIC_NORMALIZE(&a_weight, &a_value);
+		*r_kind = XPU_NUMERIC_KIND__VALID;
+		*r_weight = a_weight;
+		*r_value = a_value;
+	}
+	else
+	{
+		assert(a_kind != XPU_NUMERIC_KIND__VARLENA &&
+			   b_kind != XPU_NUMERIC_KIND__VARLENA);
+		if (a_kind == XPU_NUMERIC_KIND__NAN ||
+			b_kind == XPU_NUMERIC_KIND__NAN)
+			*r_kind = XPU_NUMERIC_KIND__NAN;
+		else if (a_kind == XPU_NUMERIC_KIND__POS_INF)
+		{
+			if (b_kind == XPU_NUMERIC_KIND__POS_INF)
+				*r_kind = XPU_NUMERIC_KIND__NAN;	/* Inf - Inf */
+			else
+				*r_kind = XPU_NUMERIC_KIND__POS_INF;
+		}
+		else if (a_kind == XPU_NUMERIC_KIND__NEG_INF)
+		{
+			if (b_kind == XPU_NUMERIC_KIND__NEG_INF)
+				*r_kind = XPU_NUMERIC_KIND__NAN;	/* -Inf - -Inf*/
+			else
+				*r_kind = XPU_NUMERIC_KIND__NEG_INF;
+		}
+		else if (b_kind == XPU_NUMERIC_KIND__POS_INF)
+			*r_kind = XPU_NUMERIC_KIND__NEG_INF;
+		else
+			*r_kind = XPU_NUMERIC_KIND__POS_INF;
+	}
+	return NULL;
+}
+INLINE_FUNCTION(const char *)
+__decimal_mul(uint8_t *r_kind, int16_t *r_weight, int128_t *r_value,
+			  uint8_t a_kind,  int16_t a_weight,  int128_t a_value,
+			  uint8_t b_kind,  int16_t b_weight,  int128_t b_value)
+{
+	if (a_kind == XPU_NUMERIC_KIND__VALID ||
+		b_kind == XPU_NUMERIC_KIND__VALID)
+	{
+		*r_kind   = XPU_NUMERIC_KIND__VALID;
+		*r_weight = a_weight + b_weight;
+		*r_value  = a_value * b_value;
+		NUMERIC_NORMALIZE(r_weight, r_value);
+	}
+	else
+	{
+		assert(a_kind != XPU_NUMERIC_KIND__VARLENA &&
+			   b_kind != XPU_NUMERIC_KIND__VARLENA);
+		if (a_kind == XPU_NUMERIC_KIND__POS_INF &&
+			b_kind != XPU_NUMERIC_KIND__NAN)
+		{
+			if (b_kind == XPU_NUMERIC_KIND__NEG_INF ||
+				(b_kind == XPU_NUMERIC_KIND__VALID && b_value < 0))
+				*r_kind = XPU_NUMERIC_KIND__NEG_INF;
+			else if (b_kind == XPU_NUMERIC_KIND__POS_INF ||
+					 (b_kind == XPU_NUMERIC_KIND__VALID && b_value > 0))
+				*r_kind = XPU_NUMERIC_KIND__POS_INF;
+			else
+				*r_kind = XPU_NUMERIC_KIND__NAN;
+		}
+		else if (a_kind == XPU_NUMERIC_KIND__NEG_INF &&
+				 b_kind != XPU_NUMERIC_KIND__NAN)
+		{
+			if (b_kind == XPU_NUMERIC_KIND__NEG_INF ||
+				(b_kind == XPU_NUMERIC_KIND__VALID && b_value < 0))
+				*r_kind = XPU_NUMERIC_KIND__POS_INF;
+			else if (b_kind == XPU_NUMERIC_KIND__POS_INF ||
+					 (b_kind == XPU_NUMERIC_KIND__VALID && b_value > 0))
+				*r_kind = XPU_NUMERIC_KIND__NEG_INF;
+			else
+				*r_kind = XPU_NUMERIC_KIND__NAN;
+		}
+		else if (a_kind != XPU_NUMERIC_KIND__NAN &&
+				 b_kind == XPU_NUMERIC_KIND__POS_INF)
+			
+		{
+			if (a_kind == XPU_NUMERIC_KIND__NEG_INF ||
+				(a_kind == XPU_NUMERIC_KIND__VALID && a_value < 0))
+				*r_kind = XPU_NUMERIC_KIND__NEG_INF;
+			else if (a_kind == XPU_NUMERIC_KIND__POS_INF ||
+					 (a_kind == XPU_NUMERIC_KIND__VALID && a_value > 0))
+				*r_kind = XPU_NUMERIC_KIND__POS_INF;
+			else
+				*r_kind = XPU_NUMERIC_KIND__NAN;
+		}
+		else if (a_kind != XPU_NUMERIC_KIND__NAN &&
+				 b_kind == XPU_NUMERIC_KIND__NEG_INF)
+		{
+			if (a_kind == XPU_NUMERIC_KIND__NEG_INF ||
+				(a_kind == XPU_NUMERIC_KIND__VALID && a_value < 0))
+				*r_kind = XPU_NUMERIC_KIND__POS_INF;
+			else if (a_kind == XPU_NUMERIC_KIND__POS_INF ||
+					 (a_kind == XPU_NUMERIC_KIND__VALID && a_value > 0))
+				*r_kind = XPU_NUMERIC_KIND__NEG_INF;
+			else
+				*r_kind = XPU_NUMERIC_KIND__NAN;
+		}
+		else
+		{
+			*r_kind = XPU_NUMERIC_KIND__NAN;
+		}
+	}
+	return NULL;
+}
+
+INLINE_FUNCTION(const char *)
+__decimal_div(uint8_t *r_kind, int16_t *r_weight, int128_t *r_value,
+			  uint8_t a_kind,  int16_t a_weight,  int128_t a_value,
+			  uint8_t b_kind,  int16_t b_weight,  int128_t b_value)
+{
+	if (a_kind == XPU_NUMERIC_KIND__VALID &&
+		b_kind == XPU_NUMERIC_KIND__VALID)
+	{
+		int128_t	rem = a_value;
+		int128_t	div = b_value;
+		int128_t	x, ival = 0;
+		int16_t		weight = a_weight - b_weight;
+		bool		negative = false;
+
+		if (div == 0)
+			return "division by zero";
+		if (rem < 0)
+		{
+			rem = -rem;
+			if (div < 0)
+				div = -div;
+			else
+				negative = true;
+		}
+		else if (div < 0)
+		{
+			negative = true;
+			div = -div;
+		}
+		assert(rem >= 0 && div >= 0);
+		for (;;)
+		{
+			x = rem / div;
+			ival = 10 * ival + x;
+			rem -= x * div;
+			/*
+			 * 999,999,999,999,999 = 0x03 8D7E A4C6 7FFF
+			 */
+			if (rem == 0 || (ival >> 50) != 0)
+				break;
+			rem *= 10;
+			weight++;
+		}
+		if (negative)
+			ival = -ival;
+		NUMERIC_NORMALIZE(&weight, &ival);
+		*r_kind   = XPU_NUMERIC_KIND__VALID;
+		*r_weight = weight;
+		*r_value  = ival;
+	}
+	else
+	{
+		assert(a_kind != XPU_NUMERIC_KIND__VARLENA &&
+			   b_kind != XPU_NUMERIC_KIND__VARLENA);
+		if (a_kind == XPU_NUMERIC_KIND__NAN ||
+			b_kind == XPU_NUMERIC_KIND__NAN)
+		{
+			*r_kind = XPU_NUMERIC_KIND__NAN;
+		}
+		else if (a_kind == XPU_NUMERIC_KIND__POS_INF)
+		{
+			if (b_kind == XPU_NUMERIC_KIND__POS_INF)
+				*r_kind = XPU_NUMERIC_KIND__POS_INF;
+			else if (b_kind == XPU_NUMERIC_KIND__NEG_INF)
+				*r_kind = XPU_NUMERIC_KIND__NEG_INF;
+			else if (b_kind != XPU_NUMERIC_KIND__VALID)
+				*r_kind = XPU_NUMERIC_KIND__NAN;
+			else if (b_value > 0)
+				*r_kind = XPU_NUMERIC_KIND__POS_INF;
+			else if (b_value < 0)
+				*r_kind = XPU_NUMERIC_KIND__NEG_INF;
+			else
+				return "division by zero";
+		}
+		else if (a_kind == XPU_NUMERIC_KIND__NEG_INF)
+		{
+			if (b_kind == XPU_NUMERIC_KIND__POS_INF)
+				*r_kind = XPU_NUMERIC_KIND__NEG_INF;
+			else if (b_kind == XPU_NUMERIC_KIND__NEG_INF)
+				*r_kind = XPU_NUMERIC_KIND__POS_INF;
+			else if (b_kind != XPU_NUMERIC_KIND__VALID)
+				*r_kind = XPU_NUMERIC_KIND__NAN;
+			else if (b_value > 0)
+				*r_kind = XPU_NUMERIC_KIND__NEG_INF;
+			else if (b_value < 0)
+				*r_kind = XPU_NUMERIC_KIND__POS_INF;
+			else
+				return "division by zero";
+		}
+		else
+		{
+			/* by here, datum_a must be finite, so datum_b is not */
+			*r_kind = XPU_NUMERIC_KIND__VALID;
+			*r_weight = 0;
+			*r_value  = 0;
+		}
+	}
+	return NULL;
+}
+
+INLINE_FUNCTION(const char *)
+__decimal_mod(uint8_t *r_kind, int16_t *r_weight, int128_t *r_value,
+			  uint8_t a_kind,  int16_t a_weight,  int128_t a_value,
+			  uint8_t b_kind,  int16_t b_weight,  int128_t b_value)
+{
+
+	assert(a_kind != XPU_NUMERIC_KIND__VARLENA &&
+		   b_kind != XPU_NUMERIC_KIND__VARLENA);
+	if (a_kind == XPU_NUMERIC_KIND__VALID &&
+		b_kind == XPU_NUMERIC_KIND__VALID)
+	{
+		if (b_value == 0)
+			return "division by zero";
+		while (a_weight > b_weight)
+		{
+			b_value *= 10;
+			b_weight++;
+		}
+		while (a_weight < b_weight)
+		{
+			a_value *= 10;
+			a_weight++;
+		}
+		a_value = a_value / b_value;
+		NUMERIC_NORMALIZE(&a_weight, &a_value);
+		*r_kind = XPU_NUMERIC_KIND__VALID;
+		*r_weight = a_weight;
+		*r_value  = a_value;
+	}
+	else
+	{
+		if (a_kind == XPU_NUMERIC_KIND__NAN ||
+			b_kind == XPU_NUMERIC_KIND__NAN)
+		{
+			*r_kind = XPU_NUMERIC_KIND__NAN;
+		}
+		else if (a_kind == XPU_NUMERIC_KIND__POS_INF ||
+				 a_kind == XPU_NUMERIC_KIND__NEG_INF)
+		{
+			if (b_kind == XPU_NUMERIC_KIND__VALID &&
+				b_value == 0)
+				return "division by zero";
+			*r_kind = XPU_NUMERIC_KIND__NAN;
+		}
+		else
+		{
+			/* num2 must be [-]Inf; result is num1 regardless of sign of num2 */
+			*r_kind   = a_kind;
+			*r_weight = a_weight;
+			*r_value  = a_value;
+		}
+	}
+	return NULL;
+}
+
+INLINE_FUNCTION(void)
+__decimal_from_float8(float8_t __fval,
+					  uint8_t *p_kind,
+					  int16_t *p_weight,
+					  int128_t *p_value)
+{
+	uint64_t	fval = __double_as_longlong__(__fval);
+	uint64_t	frac = (fval & ((1UL<<FP64_FRAC_BITS)-1));
+	int32_t		expo = (fval >> (FP64_FRAC_BITS)) & ((1UL<<FP64_EXPO_BITS)-1);
+	bool		sign = (fval >> (FP64_FRAC_BITS + FP64_EXPO_BITS)) != 0;
+	int			weight = 0;
+
+	/* special cases */
+	if (expo == 0x7ff)
+	{
+		if (fval != 0)
+			*p_kind = XPU_NUMERIC_KIND__NAN;
+		else if (sign)
+			*p_kind = XPU_NUMERIC_KIND__NEG_INF;
+		else
+			*p_kind = XPU_NUMERIC_KIND__POS_INF;
+		*p_weight = 0;
+		*p_value = 0;
+		return;
+	}
+	frac |= (1UL << FP64_FRAC_BITS);
+
+	/*
+	 * fraction must be adjusted by 10^prec / 2^(FP64_FRAC_BITS - expo)
+	 * with keeping accuracy (52bit).
+	 */
+	while (expo > FP64_EXPO_BIAS + FP64_FRAC_BITS)
+	{
+		if (frac <= 0x1800000000000000UL)
+		{
+			frac *= 2;
+			expo--;
+		}
+		else
+		{
+			frac /= 10;
+			weight--;
+		}
+	}
+	while (expo < FP64_EXPO_BIAS + FP64_FRAC_BITS)
+	{
+		if (frac >= 0x1800000000000000UL)
+		{
+			frac /= 2;
+			expo++;
+		}
+		else
+		{
+			frac *= 10;
+			weight++;
+		}
+	}
+	/* only 15 digits are valid */
+	while (frac >= 1000000000000000UL)
+	{
+		frac /= 10;
+		weight--;
+	}
+	*p_kind = XPU_NUMERIC_KIND__VALID;
+	*p_weight = weight;
+	if (!sign)
+		*p_value = (int128_t)frac;
+	else
+		*p_value = -(int128_t)frac;
+}
+
 EXTERN_FUNCTION(bool)
 __xpu_numeric_to_int64(kern_context *kcxt,
 					   int64_t *p_ival,
@@ -449,8 +860,5 @@ __xpu_numeric_to_fp64(kern_context *kcxt,
 EXTERN_FUNCTION(void)
 __xpu_fp64_to_numeric(xpu_numeric_t *result,
 					  float8_t __fval);
-EXTERN_FUNCTION(int128_t)
-__normalize_numeric_int128(int16_t weight_d,
-						   int16_t weight_s,
-						   int128_t ival);
+
 #endif /* XPU_NUMERIC_H */

@@ -682,12 +682,14 @@ __parseArrowFieldStatsBinary(arrowFieldStatsBinary *bstats,
 				break;
 
 			case ArrowNodeTag__Decimal:
-				__xpu_numeric_to_varlena((char *)&stat_values[index].min.numeric,
-										 field->type.Decimal.scale,
-										 __min);
-				__xpu_numeric_to_varlena((char *)&stat_values[index].max.numeric,
-                                         field->type.Decimal.scale,
-                                         __max);
+				__decimal_to_varlena((char *)&stat_values[index].min.numeric,
+									 XPU_NUMERIC_KIND__VALID,
+									 field->type.Decimal.scale,
+									 __min);
+				__decimal_to_varlena((char *)&stat_values[index].max.numeric,
+									 XPU_NUMERIC_KIND__VALID,
+									 field->type.Decimal.scale,
+									 __max);
 				break;
 
 			case ArrowNodeTag__Date:
@@ -4022,12 +4024,13 @@ pg_numeric_arrow_ref(kern_data_store *kds,
 	char	   *base = (char *)kds + cmeta->values_offset;
 	size_t		length = cmeta->values_length;
 	int			dscale = cmeta->attopts.decimal.scale;
+	uint8_t		kind = XPU_NUMERIC_KIND__VALID;
 	int128_t	ival;
 
 	if (sizeof(int128_t) * index >= length)
 		elog(ERROR, "corruption? numeric points out of range");
 	ival = ((int128_t *)base)[index];
-	__xpu_numeric_to_varlena(result, dscale, ival);
+	__decimal_to_varlena(result, kind, dscale, ival);
 
 	return PointerGetDatum(result);
 }
