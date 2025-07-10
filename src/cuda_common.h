@@ -242,20 +242,6 @@ execGpuScanLoadSource(kern_context *kcxt,
 					  const kern_expression *kexp_move_vars,
 					  char     *dst_kvecs_buffer);
 EXTERN_FUNCTION(int)
-execGpuJoinProjectionNormal(kern_context *kcxt,
-							kern_warp_context *wp,
-							int n_rels,
-							kern_data_store *kds_dst,
-							kern_expression *kexp_projection,
-							char *kvars_addr_wp);
-EXTERN_FUNCTION(int)
-execGpuJoinProjectionBlock(kern_context *kcxt,
-						   kern_warp_context *wp,
-						   int n_rels,
-						   kern_data_store *kds_dst,
-						   kern_expression *kexp_projection,
-						   char *kvars_addr_wp);
-EXTERN_FUNCTION(int)
 execGpuPreAggGroupBy(kern_context *kcxt,
 					 kern_warp_context *wp,
 					 int n_rels,
@@ -357,39 +343,4 @@ typedef struct {
 #define GPUSORT_WINDOWRANK_RESULTS_NSTEPS(nitems)						\
 	((nitems) <= (1<<11) ? 1 : ((nitems) <= (1<<22) ? 3 : 5))
 
-/*
- * SELECT-INTO at the finalization process
- */
-typedef struct {
-	uint64_t	lp_len:15,			/* payload length (set by phase-1) */
-				lp_off:15,			/* offset in the page (set by phase-2) */
-				heap_hasnull:1,		/* T if NULL exists (set by phase-1) */
-				heap_hasvarwidth:1,	/* T if varlena contained (set by phase-1) */
-				lp_index:12,		/* index in the page (set by phase-2) */
-				block_no:19,		/* block number in the segment (set by phase-2) */
-				init_hpage:1;		/* T if thread must initialize the page (set by phase-2) */
-} kern_select_into_tuple_desc;
-
-INLINE_FUNCTION(void)
-__initKdsBlockHeapPage(PageHeaderData *hpage, int lp_index, int lp_offset)
-{
-	assert(lp_offset <= BLCKSZ &&
-		   offsetof(PageHeaderData, pd_linp[lp_index]) <= lp_offset);
-	/*
-	 * NOTE: PG-Strom's GPU code writes heap blocks only to a newly created empty table
-	 * in SELECT INTO Direct mode.
-	 * This table is not visible to other transactions until the current transaction is
-	 * committed, and the table is deleted if any error occurs before the transaction is
-	 * committed.
-	 * So, when writing to an empty table with SELECT INTO, you can safely consider
-	 * the tuples to be ALL_VISIBLE and XMIN_FROZEN.
-	 */
-	hpage->pd_checksum = 0;
-	hpage->pd_flags = PD_ALL_VISIBLE;	/* see the comments above */
-	hpage->pd_lower = offsetof(PageHeaderData, pd_linp[lp_index]);
-	hpage->pd_upper = lp_offset;
-	hpage->pd_special = BLCKSZ;
-	hpage->pd_pagesize_version = (BLCKSZ | PG_PAGE_LAYOUT_VERSION);
-	hpage->pd_prune_xid = 0;
-}
 #endif	/* CUDA_COMMON_H */
