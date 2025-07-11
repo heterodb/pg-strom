@@ -890,9 +890,8 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 									 VARSIZE_ANY_EXHDR(pathname));
 		appendStringInfoChar(&buf, '\0');
 
+		/* length and block_offset must be set on allocation time */
 		setup_kern_data_store(kds_temp, d_tdesc, 0, KDS_FORMAT_BLOCK);
-		kds_temp->block_offset = TYPEALIGN(BLCKSZ, head_sz);
-		kds_temp->length = kds_temp->block_offset + BLCKSZ * RELSEG_SIZE;
 		session->select_into_kds_head =
 			__appendBinaryStringInfo(&buf, kds_temp, head_sz);
 

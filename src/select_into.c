@@ -934,6 +934,24 @@ __initPageHeaderData(PageHeaderData *hpage)
     hpage->pd_prune_xid = 0;
 }
 
+INLINE_FUNCTION(kern_data_store *)
+__allocSelectIntoKDS(const kern_data_store *kds_head)
+{
+	kern_data_store *kds_new;
+	size_t		head_sz = KDS_HEAD_LENGTH(kds_head);
+
+	kds_new = malloc(head_sz + BLCKSZ * RELSEG_SIZE + PAGE_SIZE);
+	if (!kds_new)
+		return NULL;
+	memcpy(kds_new, kds_head, head_sz);
+	kds_new->nitems = 0;
+	kds_new->block_offset = (TYPEALIGN(PAGE_SIZE, (char *)kds_new + head_sz)
+							 - (uintptr_t)kds_new);
+	kds_new->length = kds_new->block_offset + BLCKSZ * RELSEG_SIZE;
+
+	return kds_new;
+}
+
 bool
 __initSelectIntoState(selectIntoState *si_state, const kern_session_info *session)
 {
@@ -944,14 +962,10 @@ __initSelectIntoState(selectIntoState *si_state, const kern_session_info *sessio
 		!kds_head ||
 		(session->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) == 0)
 		return true;		/* nothing to do */
-	assert(kds_head->block_offset >= KDS_HEAD_LENGTH(kds_head) &&
-		   kds_head->block_offset == TYPEALIGN(BLCKSZ, kds_head->block_offset) &&
-		   kds_head->block_offset + BLCKSZ * RELSEG_SIZE == kds_head->length);
 	pthreadMutexInit(&si_state->kds_heap_lock);
-	si_state->kds_heap = malloc(kds_head->length);
+	si_state->kds_heap = __allocSelectIntoKDS(kds_head);
 	if (!si_state->kds_heap)
 		goto error;
-	memcpy(si_state->kds_heap, kds_head, KDS_HEAD_LENGTH(kds_head));
 	si_state->kds_heap_segno = 0;
 
 	pthreadMutexInit(&si_state->dpage_lock);
@@ -998,13 +1012,12 @@ __selectIntoWriteOutOneKDS(gpuClient *gclient,
 		strcpy(fname, si_state->base_name);
 	else
 		sprintf(fname, "%s.%u", si_state->base_name, segment_no);
-	fdesc = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	fdesc = open(fname, O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT, 0600);
 	if (fdesc < 0)
 	{
 		gpuClientELog(gclient, "failed on open('%s'): %m", fname);
 		return false;
 	}
-
 	while (remained > 0)
 	{
 		nbytes = write(fdesc, curr_pos, remained);
@@ -1021,6 +1034,7 @@ __selectIntoWriteOutOneKDS(gpuClient *gclient,
 		curr_pos += nbytes;
 		remained -= nbytes;
 	}
+	close(fdesc);
 	__atomic_add_uint64(&si_state->nblocks_written, nblocks);
 	return true;
 }
@@ -1045,7 +1059,7 @@ __selectIntoWriteOutOneBlock(gpuClient *gclient,
 		__atomic_add_int64((int64_t *)&kds_heap->usage, 2);
 	else
 	{
-		kern_data_store *kds_new = malloc(kds_heap->length);
+		kern_data_store *kds_new = __allocSelectIntoKDS(kds_heap);
 
 		if (!kds_new)
 		{
@@ -1053,9 +1067,6 @@ __selectIntoWriteOutOneBlock(gpuClient *gclient,
 			gpuClientELog(gclient, "out of memory");
 			return false;
 		}
-		memcpy(kds_new, kds_heap, KDS_HEAD_LENGTH(kds_heap));
-		kds_new->nitems = 0;
-		kds_new->usage = 0;
 		si_state->kds_heap = kds_new;
 		/* mark writable */
 		__atomic_add_int64((int64_t *)&kds_heap->usage, 3);
