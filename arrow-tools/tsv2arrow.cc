@@ -14,6 +14,8 @@
 #include <list>
 #include <typeinfo>
 #include <arrow/api.h>
+#include <arrow/io/api.h>
+#include <arrow/ipc/api.h>
 #include <arrow/array/builder_adaptive.h>
 #include <arrow/array/builder_binary.h>
 #include <arrow/array/builder_decimal.h>
@@ -22,6 +24,7 @@
 #include <arrow/array/builder_nested.h>
 #include <arrow/util/value_parsing.h>
 #include <ctype.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -40,9 +43,16 @@ typedef std::shared_ptr<DataType>			arrowDataType;
 typedef std::shared_ptr<KeyValueMetadata>	arrowKeyValueMetadata;
 typedef std::shared_ptr<ArrayBuilder>		arrowBufferBuilder;
 typedef std::vector<arrowBufferBuilder>		arrowBufferBuilderVec;
+typedef std::shared_ptr<Array>				arrowArray;
+typedef std::vector<arrowArray>				arrowArrayVec;
+typedef std::shared_ptr<RecordBatch>		arrowRecordBatch;
+typedef std::shared_ptr<io::FileOutputStream>	arrowFileOutputStream;
+typedef std::shared_ptr<ipc::RecordBatchWriter>	arrowRecordBatchWriter;
 
 static arrowSchema		arrow_schema = NULLPTR;
 static arrowBufferBuilderVec arrow_builders;
+static arrowFileOutputStream arrow_out_stream;
+static arrowRecordBatchWriter arrow_rb_writer;
 static arrowKeyValueMetadata arrow_schema_metadata = NULLPTR;
 static const char	   *output_filename = NULL;
 static size_t			segment_sz = (256UL << 20);		/* 256MB in default */
@@ -618,13 +628,85 @@ appendOneToken(arrowBufferBuilder build, const char *token)
 	Elog("not a supported data type: %s", dtype_name.c_str());
 }
 
-static void write_out_record_batch(void)
+static void open_output_file(void)
 {
+	Result<arrowFileOutputStream>	rv1;
+	Result<arrowRecordBatchWriter>	rv2;
+	int			fdesc;
+	const char *comment = "";
 
+	if (output_filename)
+	{
+		fdesc = open(output_filename, O_RDWR | O_CREAT | O_TRUNC);
+		if (fdesc < 0)
+			Elog("failed on open('%s'): %m", output_filename);
+	}
+	else
+	{
+		char   *namebuf = strdup("/tmp/tsv2arrow_XXXXXX.arrow");
 
+		if (!namebuf)
+			Elog("out of memory");
+		fdesc = mkstemps(namebuf, 6);
+		if (fdesc < 0)
+			Elog("failed on mkstemps('%s'): %m", namebuf);
+		output_filename = namebuf;
+		comment = ", automatically generated because of no -o FILENAME";
+	}
+	rv1 = io::FileOutputStream::Open(fdesc);
+	if (!rv1.ok())
+		Elog("failed on io::FileOutputStream::Open('%s'): %s",
+			 output_filename, rv1.status().ToString().c_str());
+	arrow_out_stream = rv1.ValueOrDie();
+
+	rv2 = ipc::MakeFileWriter(arrow_out_stream, arrow_schema);
+	if (!rv2.ok())
+		Elog("failed on ipc::MakeFileWriter for '%s': %s",
+			 output_filename,
+			 rv2.status().ToString().c_str());
+	arrow_rb_writer = rv2.ValueOrDie();
+	/* report */
+	printf("tsv2arrow: opened the output file '%s'%s\n", output_filename, comment);
+}
+
+static void close_output_file(int rbatch_count, long total_nitems)
+{
+	arrow_rb_writer->Close();
+	arrow_out_stream->Close();
+	/* report */
+	printf("tsv2arrow: wrote on '%s' total %d record-batches, %ld nitems\n",
+		   output_filename, rbatch_count, total_nitems);
+}
+
+static void write_out_record_batch(long nitems, size_t length, int rbatch_count)
+{
+	arrowArrayVec	arrow_arrays;
+	arrowArray		array;
+	arrowRecordBatch rbatch;
+	Status			rv;
+	Result<int64_t>	foffset;
+
+	/* setup record batch */
+	for (auto elem = arrow_builders.begin(); elem != arrow_builders.end(); elem++)
+	{
+		(*elem)->Finish(&array);
+		arrow_arrays.push_back(array);
+	}
+	rbatch = RecordBatch::Make(arrow_schema, nitems, arrow_arrays);
+	/* current position */
+	foffset = arrow_out_stream->Tell();
+	/* write out record batch */
+	rv = arrow_rb_writer->WriteRecordBatch(*rbatch);
+	if (!rv.ok())
+		Elog("failed on WriteRecordBatch: %s", rv.ToString().c_str());
+	/* progress */
+	if (shows_progress)
+		printf("Record Batch[%d] nitems=%ld, length=%lu at file offset=%ld\n",
+			   rbatch_count, nitems, length,
+			   foffset.ok() ? foffset.ValueOrDie() : -1);
 	/* reset buffers */
 	for (auto elem = arrow_builders.begin(); elem != arrow_builders.end(); elem++)
-		elem->reset();
+		(*elem)->Reset();
 }
 
 int main(int argc, char *argv[])
@@ -633,41 +715,61 @@ int main(int argc, char *argv[])
 	char	   *line = NULL;
 	size_t		bufsz = 0;
 	ssize_t		nbytes;
-	long		total_lineno = 0;
-	long		rbatch_lineno = 0;
+	bool		is_first = true;
+	long		total_nitems = 0;
+	long		curr_nitems = 0;
+	size_t		curr_sz = 0;
+	int			rbatch_count = 0;
 	arrowFieldVec arrow_fields;
 
 	schema_definition = parse_options(argc, argv);
 	setup_schema_buffer(schema_definition);
 	std::cout << "Schema definition:\n" << arrow_schema->ToString(true) << "\n";
-
+	/* open the output file */
+	open_output_file();
 	/* read and convert input TSV stream */
 	arrow_fields = arrow_schema->fields();
 	assert(arrow_fields.size() == arrow_builders.size());
 	while ((nbytes = getline(&line, &bufsz, stdin)) > 0)
 	{
 		char   *tok, *pos;
-		size_t	curr_sz = 0;
 
 		/* skip header line? */
-		if (total_lineno++ == 0 && skip_header)
+		if (is_first)
+		{
+			is_first = false;
+			if (skip_header)
+				continue;
+		}
+		/* skip first N lines? */
+		if (skip_offset > 0)
+		{
+			skip_offset--;
 			continue;
+		}
+		/* dump only N lines? */
+		if (skip_limit >= 0 && total_nitems >= skip_limit)
+			break;
+		/* parse one line */
+		curr_sz = 0;
 		tok = strtok_r(line, "\t", &pos);
 		for (auto elem = arrow_builders.begin(); elem != arrow_builders.end(); elem++)
 		{
 			curr_sz += appendOneToken(*elem, __trim(tok));
 			tok = strtok_r(NULL, "\t", &pos);
 		}
-		rbatch_lineno++;
+		curr_nitems++;
+		total_nitems++;
 		/* write out record batch */
 		if (curr_sz >= segment_sz)
 		{
-			write_out_record_batch();
-			rbatch_lineno = 0;
+			write_out_record_batch(curr_nitems, curr_sz, rbatch_count++);
+			curr_nitems = 0;
 		}
 	}
 	/* write out remaining record batch */
-	if (rbatch_lineno > 0)
-		write_out_record_batch();
+	if (curr_nitems > 0)
+		write_out_record_batch(curr_nitems, curr_sz, rbatch_count++);
+	close_output_file(rbatch_count, total_nitems);
 	return 0;
 }
