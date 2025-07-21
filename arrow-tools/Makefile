@@ -9,6 +9,7 @@ HAS_PG_CONFIG = $(shell which $(PG_CONFIG)>/dev/null 2>&1 && echo yes)
 HAS_MYSQL_CONFIG = $(shell which $(MYSQL_CONFIG)>/dev/null 2>&1 && echo yes)
 HAS_PF_RING = $(shell test -e /usr/include/pfring.h && echo -n yes)
 HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1 && echo -n yes)
+HAS_PARQUET = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
 
 ALL_PROGS = arrow2csv
 ifeq ($(HAS_PG_CONFIG),yes)
@@ -48,6 +49,15 @@ ifeq ($(DEBUG),1)
 CFLAGS += -g -O0
 endif
 CPPFLAGS = -std=c++11 $(CFLAGS)
+ifeq ($(HAS_LIBARROW),yes)
+CPPFLAGS += -DHAS_LIBARROW=1 $(shell pkgconf --cflags arrow)
+ifeq ($(HAS_PARQUET),yes)
+CPPFLAGS += -DHAS_PARQUET=1  $(shell pkgconf --cflags parquet)
+TSV2ARROW_LDFLAGS += $(shell pkgconf --libs parquet)
+else
+TSV2ARROW_LDFLAGS += $(shell pkgconf --libs arrow)
+endif
+endif
 
 PREFIX		?= /usr/local
 BINDIR		?= $(PREFIX)/bin
@@ -124,7 +134,7 @@ arrow2csv: $(ARROW2CSV_OBJS)
 # TSV2Arrow
 #
 tsv2arrow: $(TSV2ARROW_OBJS)
-	$(CXX) $(CFLAGS) -o $@ $< $(shell pkgconf --libs arrow)
+	$(CXX) $(CFLAGS) -o $@ $< $(TSV2ARROW_LDFLAGS)
 
 .cc.o:
 	$(CXX) $(CPPFLAGS) -c -o $@ $<

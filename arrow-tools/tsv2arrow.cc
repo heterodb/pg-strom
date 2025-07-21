@@ -34,8 +34,7 @@
 using namespace arrow;
 
 typedef std::string							cppString;
-typedef std::list<cppString>				cppStringList;
-typedef std::vector<cppString>				cppStringVector;
+typedef std::vector<cppString>				cppStringVec;
 typedef std::shared_ptr<Schema>				arrowSchema;
 typedef std::shared_ptr<Field>				arrowField;
 typedef std::vector<arrowField>				arrowFieldVec;
@@ -56,12 +55,13 @@ static arrowRecordBatchWriter arrow_rb_writer;
 static arrowKeyValueMetadata arrow_schema_metadata = NULLPTR;
 static const char	   *output_filename = NULL;
 static size_t			segment_sz = (256UL << 20);		/* 256MB in default */
+static bool				csv_mode = false;
 static bool				skip_header = false;
 static long				skip_offset = 0;
 static long				skip_limit = -1;
 static bool				shows_progress = false;
 static int				verbose = 0;
-static cppStringList	tsv_input_files;
+static cppStringVec		tsv_input_files;
 
 #define Elog(fmt,...)									\
 	do {												\
@@ -89,12 +89,15 @@ static cppStringList	tsv_input_files;
 static inline char *
 __trim(char *token)
 {
-	char   *tail = token + strlen(token) - 1;
+	if (token)
+	{
+		char   *tail = token + strlen(token) - 1;
 
-	while (isspace(*token))
-		token++;
-	while (tail >= token && isspace(*tail))
-		*tail-- = '\0';
+		while (isspace(*token))
+			token++;
+		while (tail >= token && isspace(*tail))
+			*tail-- = '\0';
+	}
 	return token;
 }
 
@@ -116,6 +119,7 @@ static void __usage(const char *fmt,...)
 		  "\n"
 		  "OPTIONS:\n"
 		  "  -o|--output=FILENAME     output filename\n"
+		  "     --csv                 use comma as separator, instead of tab\n"
 		  "  -S|--schema=SCHEMA       schema definition\n"
 		  "  -s|--segment-sz=SIZE     unit size of record batch\n"
 		  "     --skip-header         skip header line\n"
@@ -157,6 +161,7 @@ parse_options(int argc, char *argv[])
 {
 	static struct option long_options[] = {
 		{"output",      required_argument, NULL, 'o'},
+		{"csv",         no_argument,       NULL, 1004},
 		{"schema",      required_argument, NULL, 'S'},
 		{"segment-sz",  required_argument, NULL, 's'},
 		{"skip-header", no_argument,       NULL, 1000},
@@ -219,6 +224,9 @@ parse_options(int argc, char *argv[])
 				if (*end != '\0' || skip_limit < 0)
 					Elog("invalid limit number '%s'", optarg);
 				break;
+			case 1004:	/* --csv */
+				csv_mode = true;
+				break;
 			case 'm':	/* --metadata */
 				sep = strchr(optarg, '=');
 				if (!sep)
@@ -247,6 +255,9 @@ parse_options(int argc, char *argv[])
 				Elog("unknown option '%c'", c);
 		}
 	}
+	for (int k=optind; k < argc; k++)
+		tsv_input_files.push_back(argv[k]);
+
 	if (!meta_keys.empty() && !meta_values.empty())
 	{
 		assert(meta_keys.size() == meta_values.size());
@@ -272,8 +283,8 @@ setup_field_definition(const char *f_name,
 	/* parse extra attributes */
 	if (extra)
 	{
-		cppStringVector	meta_keys;
-		cppStringVector	meta_values;
+		cppStringVec	meta_keys;
+		cppStringVec	meta_values;
 		char	   *tok, *val, *pos;
 
 		for (tok = strtok_r(extra, ";", &pos);
@@ -425,10 +436,19 @@ append_bool_token(arrowBufferBuilder __build, const char *token)
 {
 	auto	build = std::dynamic_pointer_cast<arrow::BooleanBuilder>(__build);
 	bool	value;
+	Status	rv;
 
-	if (!arrow::internal::ParseValue<BooleanType>(token, strlen(token), &value))
-		Elog("unable to convert token to Boolean [%s]", token);
-	build->Append(value);
+	if (!token)
+		rv = build->AppendNull();
+	else
+	{
+		if (!arrow::internal::ParseValue<BooleanType>(token, strlen(token), &value))
+			Elog("unable to convert token to Boolean [%s]", token);
+		rv = build->Append(value);
+	}
+	if (!rv.ok())
+		Elog("unable to Append [%s] to buffer: %s",
+			 token ? token : "NULL", rv.ToString().c_str());
 	return (ARROW_ALIGN(BITMAPLEN(build->length())) +
 			ARROW_ALIGN(build->null_count() > 0 ? BITMAPLEN(build->length()) : 0));
 }
@@ -442,16 +462,22 @@ __append_simple_numeric_token(arrowBufferBuilder __build, const char *token)
 	E_TYPE	value;
 	Status	rv;
 
-	if (!arrow::internal::ParseValue<D_TYPE>(token, std::strlen(token), &value))
+	if (!token)
+		rv = build->AppendNull();
+	else
 	{
-		cppString	type_name = d_type->ToString();
-		Elog("unable to convert token to %s from [%s]",
-			 type_name.c_str(), token);
+		if (!arrow::internal::ParseValue<D_TYPE>(token, std::strlen(token), &value))
+		{
+			cppString	type_name = d_type->ToString();
+			Elog("unable to convert token to %s from [%s]",
+				 type_name.c_str(), token);
+		}
+		rv = build->Append(value);
+
 	}
-	rv = build->Append(value);
 	if (!rv.ok())
 		Elog("unable to Append [%s] to buffer: %s",
-			 token, rv.ToString().c_str());
+			 token ? token : "NULL", rv.ToString().c_str());
 	return __BUFFER_USAGE_INLINE_TYPE(build, sizeof(value));
 }
 
@@ -481,11 +507,20 @@ append_float2_token(arrowBufferBuilder __build, const char *token)
 	auto    build = std::dynamic_pointer_cast<arrow::HalfFloatBuilder>(__build);
 	float	fval;
 	half_t	value;
+	Status	rv;
 
-	if (!arrow::internal::ParseValue<FloatType>(token, strlen(token), &fval))
-		Elog("unable to convert token to HalfFloat [%s]", token);
-	value = fp32_to_fp16(fval);
-	build->Append(value);
+	if (!token)
+		rv = build->AppendNull();
+	else
+	{
+		if (!arrow::internal::ParseValue<FloatType>(token, strlen(token), &fval))
+			Elog("unable to convert token to HalfFloat [%s]", token);
+		value = fp32_to_fp16(fval);
+		rv = build->Append(value);
+	}
+	if (!rv.ok())
+		Elog("unable to Append [%s] to buffer: %s",
+			 token ? token : "NULL", rv.ToString().c_str());
 	return __BUFFER_USAGE_INLINE_TYPE(build, sizeof(uint16_t));
 }
 
@@ -500,14 +535,22 @@ __append_common_decimal_token(arrowBufferBuilder __build, const char *token)
 	E_TYPE	value;
 	Status	rv;
 
-	rv = E_TYPE::FromString(token, &value, &precision, &scale);
-	if (!rv.ok())
+	if (!token)
+		rv = build->AppendNull();
+	else
 	{
-		cppString	type_name = d_type->ToString();
-		Elog("unable to convert token to %s from [%s]",
-			 type_name.c_str(), token);
+		rv = E_TYPE::FromString(token, &value, &precision, &scale);
+		if (!rv.ok())
+		{
+			cppString	type_name = d_type->ToString();
+			Elog("unable to convert token to %s from [%s]",
+				 type_name.c_str(), token);
+		}
+		rv = build->Append(value);
 	}
-	build->Append(value);
+	if (!rv.ok())
+		Elog("unable to Append [%s] to buffer: %s",
+			 token ? token : "NULL", rv.ToString().c_str());
 	return __BUFFER_USAGE_INLINE_TYPE(build, sizeof(E_TYPE));
 }
 #define append_decimal128_token(build,token)	\
@@ -524,21 +567,26 @@ __append_common_datetime_token(arrowBufferBuilder __build, const char *token)
 	E_TYPE	value;
 	Status	rv;
 
-	if (!arrow::internal::ParseValue<D_TYPE>(*ts_type,
-											 token,
-											 std::strlen(token),
-											 &value))
+	if (!token)
+		rv = build->AppendNull();
+	else
 	{
-		cppString	type_name = ts_type->ToString();
-		Elog("unable to convert token to %s from [%s]",
-			 type_name.c_str(), token);
+		if (!arrow::internal::ParseValue<D_TYPE>(*ts_type,
+												 token,
+												 std::strlen(token),
+												 &value))
+		{
+			cppString	type_name = ts_type->ToString();
+			Elog("unable to convert token to %s from [%s]",
+				 type_name.c_str(), token);
+		}
+		rv = build->Append(value);
 	}
-	rv = build->Append(value);
 	if (!rv.ok())
 	{
 		cppString	type_name = ts_type->ToString();
 		Elog("failed on append token [%s] on %s buffer: %s",
-			 token, type_name.c_str(), rv.ToString().c_str());
+			 token ? token : "NULL", type_name.c_str(), rv.ToString().c_str());
 	}
 	return __BUFFER_USAGE_INLINE_TYPE(build, sizeof(value));
 }
@@ -557,8 +605,15 @@ static inline size_t
 append_utf8_token(arrowBufferBuilder __build, const char *token)
 {
 	auto	build = std::dynamic_pointer_cast<arrow::StringBuilder>(__build);
+	Status	rv;
 
-	build->Append(token, strlen(token));
+	if (!token)
+		rv = build->AppendNull();
+	else
+		rv = build->Append(token, strlen(token));
+	if (!rv.ok())
+		Elog("failed on append token [%s] on buffer: %s",
+			 token ? token : "NULL", rv.ToString().c_str());
 	return __BUFFER_USAGE_VARLENA_TYPE(build);
 }
 
@@ -566,8 +621,15 @@ static inline size_t
 append_large_utf8_token(arrowBufferBuilder __build, const char *token)
 {
 	auto	build = std::dynamic_pointer_cast<arrow::LargeStringBuilder>(__build);
+	Status	rv;
 
-	build->Append(token, strlen(token));
+	if (!token)
+		rv = build->AppendNull();
+	else
+		rv = build->Append(token, strlen(token));
+	if (!rv.ok())
+		Elog("failed on append token [%s] on buffer: %s",
+			 token ? token : "NULL", rv.ToString().c_str());
 	return __BUFFER_USAGE_LARGE_VARLENA_TYPE(build);
 }
 
@@ -678,13 +740,14 @@ static void close_output_file(int rbatch_count, long total_nitems)
 		   output_filename, rbatch_count, total_nitems);
 }
 
-static void write_out_record_batch(long nitems, size_t length, int rbatch_count)
+static void write_out_record_batch(long nitems, int rbatch_count)
 {
 	arrowArrayVec	arrow_arrays;
 	arrowArray		array;
 	arrowRecordBatch rbatch;
 	Status			rv;
-	Result<int64_t>	foffset;
+	Result<int64_t>	foffset_before;
+	Result<int64_t>	foffset_after;
 
 	/* setup record batch */
 	for (auto elem = arrow_builders.begin(); elem != arrow_builders.end(); elem++)
@@ -694,45 +757,42 @@ static void write_out_record_batch(long nitems, size_t length, int rbatch_count)
 	}
 	rbatch = RecordBatch::Make(arrow_schema, nitems, arrow_arrays);
 	/* current position */
-	foffset = arrow_out_stream->Tell();
+	foffset_before = arrow_out_stream->Tell();
 	/* write out record batch */
 	rv = arrow_rb_writer->WriteRecordBatch(*rbatch);
 	if (!rv.ok())
 		Elog("failed on WriteRecordBatch: %s", rv.ToString().c_str());
+	foffset_after = arrow_out_stream->Tell();
 	/* progress */
 	if (shows_progress)
-		printf("Record Batch[%d] nitems=%ld, length=%lu at file offset=%ld\n",
-			   rbatch_count, nitems, length,
-			   foffset.ok() ? foffset.ValueOrDie() : -1);
+		printf("Record Batch[%d] nitems=%ld, length=%ld at file offset=%ld\n",
+			   rbatch_count, nitems,
+			   foffset_before.ok() && foffset_after.ok() ?
+			   foffset_after.ValueOrDie() - foffset_before.ValueOrDie() : -1,
+			   foffset_before.ok() ? foffset_before.ValueOrDie() : -1);
 	/* reset buffers */
 	for (auto elem = arrow_builders.begin(); elem != arrow_builders.end(); elem++)
 		(*elem)->Reset();
 }
 
-int main(int argc, char *argv[])
+static int		rbatch_count = 0;
+static long		curr_nitems = 0;
+static long		total_nitems = 0;
+
+static bool
+process_one_input_file(FILE *filp)
 {
-	const char *schema_definition;
+	arrowFieldVec arrow_fields = arrow_schema->fields();
 	char	   *line = NULL;
 	size_t		bufsz = 0;
 	ssize_t		nbytes;
 	bool		is_first = true;
-	long		total_nitems = 0;
-	long		curr_nitems = 0;
-	size_t		curr_sz = 0;
-	int			rbatch_count = 0;
-	arrowFieldVec arrow_fields;
 
-	schema_definition = parse_options(argc, argv);
-	setup_schema_buffer(schema_definition);
-	std::cout << "Schema definition:\n" << arrow_schema->ToString(true) << "\n";
-	/* open the output file */
-	open_output_file();
-	/* read and convert input TSV stream */
-	arrow_fields = arrow_schema->fields();
 	assert(arrow_fields.size() == arrow_builders.size());
 	while ((nbytes = getline(&line, &bufsz, stdin)) > 0)
 	{
-		char   *tok, *pos;
+		size_t	curr_sz = 0;
+		char   *tok = line;
 
 		/* skip header line? */
 		if (is_first)
@@ -749,27 +809,126 @@ int main(int argc, char *argv[])
 		}
 		/* dump only N lines? */
 		if (skip_limit >= 0 && total_nitems >= skip_limit)
-			break;
+			return false;
 		/* parse one line */
-		curr_sz = 0;
-		tok = strtok_r(line, "\t", &pos);
 		for (auto elem = arrow_builders.begin(); elem != arrow_builders.end(); elem++)
 		{
-			curr_sz += appendOneToken(*elem, __trim(tok));
-			tok = strtok_r(NULL, "\t", &pos);
+			if (!tok)
+				curr_sz += appendOneToken(*elem, NULL);
+			else
+			{
+				bool	in_quote = false;
+				char   *r_pos = tok;
+				char   *w_pos = tok;
+				char   *next;
+
+				while (*r_pos != '\0')
+				{
+					if (*r_pos == '"')		/* begin/end quotation */
+					{
+						in_quote = !in_quote;
+						r_pos++;
+					}
+					else if (*r_pos == '\\')	/* escape */
+					{
+						switch (r_pos[1])
+						{
+							case '\0':
+								*w_pos++ = *r_pos++;
+								/* Now *r_pos == '\0', then it will terminate the loop */
+								break;
+							case '\\':
+								*w_pos++ = '\\';
+								r_pos += 2;
+								break;
+							case '"':
+								*w_pos++ = '"';
+								r_pos += 2;
+								break;
+							case 'n':
+								*w_pos++ = '\n';
+								r_pos += 2;
+								break;
+							case 'r':
+								*w_pos++ = '\r';
+								r_pos += 2;
+								break;
+							case 't':
+								*w_pos++ = '\t';
+								r_pos += 2;
+								break;
+							case 'f':
+								*w_pos++ = '\f';
+								r_pos += 2;
+								break;
+							case 'b':
+								*w_pos++ = '\b';
+								r_pos += 2;
+								break;
+							default:
+								Elog("unknown escape '\\%c'", r_pos[1]);
+						}
+					}
+					else if (!in_quote && *r_pos == (csv_mode ? ',' : '\t'))
+					{
+						/* delimiter */
+						break;
+					}
+					else
+					{
+						/* payload */
+						*w_pos++ = *r_pos++;
+					}
+				}
+				next = (*r_pos == '\0' ? NULL : r_pos+1);
+				*w_pos++ = '\0';
+				curr_sz += appendOneToken(*elem, __trim(tok));
+				tok = next;
+			}
 		}
 		curr_nitems++;
 		total_nitems++;
 		/* write out record batch */
 		if (curr_sz >= segment_sz)
 		{
-			write_out_record_batch(curr_nitems, curr_sz, rbatch_count++);
+			write_out_record_batch(curr_nitems, rbatch_count++);
 			curr_nitems = 0;
+		}
+	}
+	return true;
+}
+
+int main(int argc, char *argv[])
+{
+	const char *schema_definition;
+
+	schema_definition = parse_options(argc, argv);
+	setup_schema_buffer(schema_definition);
+	std::cout << "Schema definition:\n" << arrow_schema->ToString(true) << "\n";
+	/* open the output file */
+	open_output_file();
+	/* process for each input files */
+	if (tsv_input_files.empty())
+		process_one_input_file(stdin);
+	else
+	{
+		for (auto elem=tsv_input_files.begin(); elem != tsv_input_files.end(); elem++)
+		{
+			const char *filename = (*elem).c_str();
+			FILE	   *filp = fopen(filename, "rb");
+			bool		status;
+
+			if (!filp)
+				Elog("failed to open '%s': %m", filename);
+			status = process_one_input_file(filp);
+			fclose(filp);
+			if (!status)
+				break;		/* reached --limit */
 		}
 	}
 	/* write out remaining record batch */
 	if (curr_nitems > 0)
-		write_out_record_batch(curr_nitems, curr_sz, rbatch_count++);
+		write_out_record_batch(curr_nitems, rbatch_count++);
 	close_output_file(rbatch_count, total_nitems);
 	return 0;
 }
