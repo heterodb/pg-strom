@@ -11,7 +11,7 @@ HAS_PF_RING = $(shell test -e /usr/include/pfring.h && echo -n yes)
 HAS_LIBARROW = $(shell pkgconf --exists arrow>/dev/null 2>&1 && echo -n yes)
 HAS_PARQUET = $(shell pkgconf --exists parquet>/dev/null 2>&1 && echo -n yes)
 
-ALL_PROGS = arrow2csv
+ALL_PROGS = arrow2csv_legacy
 ifeq ($(HAS_PG_CONFIG),yes)
 ALL_PROGS += pg2arrow
 endif
@@ -23,7 +23,7 @@ ALL_PROGS += pcap2arrow
 endif
 ALL_PROGS += vcf2arrow
 ifeq ($(HAS_LIBARROW),yes)
-ALL_PROGS += tsv2arrow
+ALL_PROGS += tsv2arrow arrow2csv
 endif
 
 PG2ARROW_OBJS    = __pgsql2arrow.o pgsql_client.o \
@@ -31,12 +31,13 @@ PG2ARROW_OBJS    = __pgsql2arrow.o pgsql_client.o \
 MYSQL2ARROW_OBJS = __mysql2arrow.o mysql_client.o \
                    arrow_nodes.o arrow_write.o
 PCAP2ARROW_OBJS  = pcap2arrow.o arrow_nodes.o arrow_write.o
-VCF2ARROW_OBJS = vcf2arrow.o arrow_nodes.o arrow_write.o
-ARROW2CSV_OBJS   = arrow2csv.o arrow_nodes.o
+VCF2ARROW_OBJS   = vcf2arrow.o arrow_nodes.o arrow_write.o
 TSV2ARROW_OBJS   = tsv2arrow.o
+ARROW2CSV_OBJS   = arrow2csv.o
+ARROW2CSV_LEGACY_OBJS = arrow2csv_legacy.o arrow_nodes.o
 CLEAN_OBJS = $(PG2ARROW_OBJS) $(MYSQL2ARROW_OBJS) $(TSV2ARROW_OBJS) \
              $(PCAP2ARROW_OBJS) $(VCF2ARROW_OBJS) $(ARROW2CSV_OBJS) \
-             $(ALL_PROGS)
+             $(ARROW2CSV_LEGACY_OBJS) $(ALL_PROGS)
 
 CFLAGS = -O2 -fPIC -g -Wall -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64
 ifeq ($(HAS_PG_CONFIG),yes)
@@ -54,8 +55,10 @@ CPPFLAGS += -DHAS_LIBARROW=1 $(shell pkgconf --cflags arrow)
 ifeq ($(HAS_PARQUET),yes)
 CPPFLAGS += -DHAS_PARQUET=1  $(shell pkgconf --cflags parquet)
 TSV2ARROW_LDFLAGS += $(shell pkgconf --libs parquet)
+ARROW2CSV_LDFLAGS += $(shell pkgconf --libs parquet)
 else
 TSV2ARROW_LDFLAGS += $(shell pkgconf --libs arrow)
+ARROW2CSV_LDFLAGS += $(shell pkgconf --libs arrow)
 endif
 endif
 
@@ -121,6 +124,16 @@ install-vcf2arrow: vcf2arrow
 	install -m 0755 vcf2arrow $(DESTDIR)$(BINDIR)
 
 #
+# Arrow2CSV(legacy)
+#
+install-arrow2csv_legacy: arrow2csv_legacy
+	mkdir -p $(DESTDIR)$(BINDIR) && \
+	install -m 0755 arrow2csv_legacy $(DESTDIR)$(BINDIR)
+
+arrow2csv_legacy: $(ARROW2CSV_LEGACY_OBJS)
+	$(CC) -o $@ $(ARROW2CSV_LEGACY_OBJS)
+
+#
 # Arrow2CSV
 #
 install-arrow2csv: arrow2csv
@@ -128,13 +141,17 @@ install-arrow2csv: arrow2csv
 	install -m 0755 arrow2csv $(DESTDIR)$(BINDIR)
 
 arrow2csv: $(ARROW2CSV_OBJS)
-	$(CC) -o $@ $(ARROW2CSV_OBJS)
+	$(CXX) $(CPPFLAGS) -o $@ $< $(ARROW2CSV_LDFLAGS)
 
 #
 # TSV2Arrow
 #
+install-tsv2arrow: tsv2arrow
+	mkdir -p $(DESTDIR)$(BINDIR) && \
+	install -m 0755 tsv2arrow $(DESTDIR)$(BINDIR)
+
 tsv2arrow: $(TSV2ARROW_OBJS)
-	$(CXX) $(CFLAGS) -o $@ $< $(TSV2ARROW_LDFLAGS)
+	$(CXX) $(CPPFLAGS) -o $@ $< $(TSV2ARROW_LDFLAGS)
 
 .cc.o:
 	$(CXX) $(CPPFLAGS) -c -o $@ $<
